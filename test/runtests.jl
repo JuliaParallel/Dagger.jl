@@ -1,5 +1,7 @@
-using Compute
+addprocs(1)
+
+using ComputeFramework
 using Base.Test
 
-# write your own tests here
-@test 1 == 1
+x = rand(100, 100)
+@test gather(Context(), map(-, Partitioned(x))) == -x

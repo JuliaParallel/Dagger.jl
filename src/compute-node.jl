@@ -3,6 +3,8 @@ import Base: map, reduce, filter
 
 export Broadcast, Partitioned
 
+### Distributing data ###
+
 immutable Partitioned{T, P<:AbstractPartition} <: ComputeNode
     obj::T
     partition::P
@@ -12,12 +14,12 @@ Broadcast(x) = Partitioned(x, Bcast())
 
 function compute(ctx, x::Partitioned)
     targets = chunk_targets(ctx, x)
-    chunks = slice(x.arr, x.partition, devs)
+    chunks = slice(ctx, x.obj, x.partition, targets)
 
-    refs = [remotecall(targets[i], () -> chunks[i])
+    refs = Pair[(targets[i] => remotecall(targets[i], () -> chunks[i]))
                 for i in 1:length(targets)]
 
-    DistMemory(refs, x.partition)
+    DistMemory(eltype(chunks), refs, x.partition)
 end
 
 immutable MapNode{F, T<:Tuple} <: ComputeNode
@@ -34,9 +36,11 @@ end
 """
 All inputs are DistMemory with the same partitioning
 """
-function compute{F, N, T<:DistMemory}(ctx, x::MapNode{F, NTuple{N, T}})
-    futures = [doafter(fs..., (xs...) -> map(x.f, xs...)) for fs in map(chunks, x.input)]
-    DistMemory(futures, dist.partition)
+function compute{F, N, T<:DistMemory}(ctx, node::MapNode{F, NTuple{N, T}})
+    inp = node.input[1]
+    futures = Pair[dev => remotecall(dev, (x) -> map(node.f, fetch(x)), ref)
+                    for (dev, ref) in refs(inp)]
+    DistMemory(futures, inp.partition)
 end
 
 function compute{F, N}(ctx, x::MapNode{F, NTuple{N, DataNode}})
@@ -47,3 +51,4 @@ immutable GroupByNode{F, N<:AbstractNode} <: ComputeNode
     group::Function
     input::N
 end
+

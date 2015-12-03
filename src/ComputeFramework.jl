@@ -28,10 +28,10 @@ end
 Collate a DataNode to return a result
 """
 function gather(ctx, n::DataNode)
-    gather(ctx, partition(n), chunks(n))
+    error("Don't know how to gather $(typeof(n))")
 end
 function gather(ctx, n::ComputeNode)
-    gather(ctx, compute(n))
+    gather(ctx, compute(ctx, n))
 end
 
 """
