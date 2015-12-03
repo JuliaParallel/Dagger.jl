@@ -21,3 +21,4 @@ A node that does not require further computation. For example, a BlocksNode or H
 
 Nodes that represent computation. When `compute` is called on a `ComputeNode` it results in a `DataNode`.
 
+![compute-node](https://cloud.githubusercontent.com/assets/25916/11553313/8e81ed32-99b3-11e5-96fc-adc37a5c11c1.png)
