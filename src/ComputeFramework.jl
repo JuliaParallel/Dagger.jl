@@ -54,11 +54,17 @@ function convert_dnode{T<:DataNode}(ctx, to::Type{T}, from::T)
     from
 end
 
+# The partition abstract type
 
+"""
+A partition pattern. Implements `slice` and `gather` methods
+"""
+abstract AbstractPartition
+
+include("compute-nodes.jl")
 include("partition.jl")
-include("device.jl")
-include("data-node.jl")
-include("compute-node.jl")
 include("context.jl")
+
+include("data-nodes/dist-memory/compute.jl")
 
 end # module

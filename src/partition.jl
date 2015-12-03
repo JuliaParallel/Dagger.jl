@@ -1,9 +1,4 @@
 
-"""
-A partition pattern. Implements `slice` and `gather` methods
-"""
-abstract AbstractPartition
-
 immutable CutDim{d} <: AbstractPartition end
 cutdim(n) = CutDim{n}()
 
