@@ -1,7 +1,7 @@
 
 import Base: map, reduce, filter
 
-export Broadcast, Partitioned, reducebykey
+export Broadcast, Partitioned, reducebykey, mappart
 
 ### Distributing data ###
 
@@ -35,7 +35,7 @@ map(f, ns::AbstractNode...) = MapNode(f, ns)
 All inputs are DistMemory with the same partitioning
 """
 function compute(ctx, node::MapNode)
-    compute(ctx, mappart(part -> map(node.f, part), node.input))
+    compute(ctx, mappart((localparts...) -> map(node.f, localparts...), node.input))
 end
 
 ### MapParts ###
@@ -48,11 +48,18 @@ end
 mappart(f, ns::Tuple) = MapPartNode(f, ns)
 mappart(f, ns::AbstractNode...) = MapPartNode(f, ns)
 
+tuplize(t::Tuple) = t
+tuplize(t) = (t,)
+
 function compute{N, T<:DistMemory}(ctx, node::MapPartNode{NTuple{N, T}})
-    inp = node.input[1]
-    futures = Pair[dev => remotecall(dev, (x) -> node.f(fetch(x)), ref)
-                    for (dev, ref) in refs(inp)]
-    DistMemory(futures, inp.partition)
+    refsets = zip(map(x -> map(y->y[2], refs(x)), node.input)...) |> collect
+    devs = map(x->x[1], refs(node.input[1]))
+    dev_chunks = zip(devs, map(tuplize, refsets)) |> collect
+
+    futures = Pair[dev => remotecall(dev, (xs) -> node.f(map(fetch, xs)...), rs)
+                    for (dev, rs) in dev_chunks]
+
+    DistMemory(futures, node.input[1].partition)
 end
 
 function compute{N}(ctx, x::MapPartNode{NTuple{N, DataNode}})
