@@ -1,7 +1,7 @@
 
 import Base: map, reduce, filter
 
-export Broadcast, Partitioned
+export Broadcast, Partitioned, reducebykey
 
 ### Distributing data ###
 
@@ -24,7 +24,7 @@ end
 
 ### Map ###
 
-immutable MapNode{F, T<:Tuple} <: ComputeNode
+immutable MapNode{T<:Tuple, F} <: ComputeNode
     f::F
     input::T
 end
@@ -40,7 +40,7 @@ end
 
 ### MapParts ###
 
-immutable MapPartNode{F, T<:Tuple} <: ComputeNode
+immutable MapPartNode{T<:Tuple, F} <: ComputeNode
     f::F
     input::T
 end
@@ -48,14 +48,14 @@ end
 mappart(f, ns::Tuple) = MapPartNode(f, ns)
 mappart(f, ns::AbstractNode...) = MapPartNode(f, ns)
 
-function compute{F, N, T<:DistMemory}(ctx, node::MapPartNode{F, NTuple{N, T}})
+function compute{N, T<:DistMemory}(ctx, node::MapPartNode{NTuple{N, T}})
     inp = node.input[1]
     futures = Pair[dev => remotecall(dev, (x) -> node.f(fetch(x)), ref)
                     for (dev, ref) in refs(inp)]
     DistMemory(futures, inp.partition)
 end
 
-function compute{F, N}(ctx, x::MapPartNode{F, NTuple{N, DataNode}})
+function compute{N}(ctx, x::MapPartNode{NTuple{N, DataNode}})
     # promote_dnode them all
 end
 
@@ -65,7 +65,7 @@ end
 
 ### Reduce ###
 
-immutable ReduceNode{F, X, T<:AbstractNode} <: ComputeNode
+immutable ReduceNode{T<:AbstractNode, F, X} <: ComputeNode
     f::F
     v0::X
     input::T
@@ -77,10 +77,37 @@ function compute(ctx, node::ReduceNode)
    reduce(node.f, node.v0, gather(ctx, mappart(part -> reduce(node.f, node.v0, part), node.input)))
 end
 
-### GroupBy ###
+### Filter ###
 
-immutable GroupByNode{F, N<:AbstractNode} <: ComputeNode
-    group::Function
+immutable FilterNode{N<:AbstractNode, F} <: ComputeNode
+    f::F
     input::N
 end
 
+filter(f, x::AbstractNode) = FilterNode(f, x)
+
+function compute(ctx, node::FilterNode)
+    compute(ctx, mappart(part -> filter(node.f, part), node))
+end
+
+### GroupBy ###
+
+immutable ReduceByKey{N<:AbstractNode, F, T} <: ComputeNode
+    f::F
+    v0::T
+    input::N
+end
+
+reducebykey(f, v0, input) = ReduceByKey(f, v0, input)
+
+function reducebykey_seq(f, v0, itr, dict=Dict())
+    for (k, v) in itr
+        dict[k] = f(get(dict, k, v0), v)
+    end
+    dict
+end
+
+function compute(ctx, node::ReduceByKey)
+    parts = mappart((part) -> reducebykey_seq(node.f, node.v0, part), node.input)
+    reduce((acc, chunk) -> reducebykey_seq(node.f, node.v0, chunk, acc), Dict(), gather(ctx, parts))
+end
