@@ -64,6 +64,7 @@ abstract AbstractPartition
 include("compute-nodes.jl")
 include("partition.jl")
 include("context.jl")
+include("macros.jl")
 
 include("data-nodes/dist-memory/compute.jl")
 

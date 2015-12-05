@@ -8,7 +8,7 @@
 
 import Base: map, reduce, filter
 
-export Broadcast, Partitioned, reducebykey, mappart
+export Broadcast, Partitioned, reducebykey, mappart, foreach
 
 ### Distributing data ###
 
@@ -18,6 +18,48 @@ immutable Partitioned{T, P<:AbstractPartition} <: ComputeNode
 end
 Partitioned(x::AbstractArray) = Partitioned(x, CutDim{ndims(x)}())
 Broadcast(x) = Partitioned(x, Bcast())
+
+### MapParts ###
+
+immutable MapPartNode{T<:Tuple, F} <: ComputeNode
+    f::F
+    input::T
+end
+
+"""
+    mappart(f, nodes::AbstractNode...)
+
+Apply `f` on corresponding chunks of `nodes`. Other compute nodes
+fall back to mappart to `compute`.
+"""
+mappart(f, ns::Tuple) = MapPartNode(f, ns)
+mappart(f, ns::AbstractNode...) = MapPartNode(f, ns)
+
+tuplize(t::Tuple) = t
+tuplize(t) = (t,)
+
+function compute(ctx, x::MapPartNode)
+   compute(ctx, MapPartNode(x.f, map(inp -> compute(ctx, inp), x.input)))
+end
+
+### ForEach node ###
+
+immutable ForeachNode{T<:Tuple, F} <: ComputeNode
+    f::F
+    input::T
+end
+
+foreach(f, xs::AbstractNode...) = ForeachNode(f, xs)
+
+function foreach_seq(f, args...)
+    for i=1:length(args[1])
+        f([a[i] for a in args]...)
+    end
+end
+
+function compute(ctx, node::ForeachNode)
+    compute(ctx, mappart(part -> foreach_seq(node.f, part), node.input))
+end
 
 ### Map ###
 
@@ -30,27 +72,6 @@ map(f, ns::AbstractNode...) = MapNode(f, ns)
 
 function compute(ctx, node::MapNode)
     compute(ctx, mappart((localparts...) -> map(node.f, localparts...), node.input))
-end
-
-### MapParts ###
-
-immutable MapPartNode{T<:Tuple, F} <: ComputeNode
-    f::F
-    input::T
-end
-
-mappart(f, ns::Tuple) = MapPartNode(f, ns)
-mappart(f, ns::AbstractNode...) = MapPartNode(f, ns)
-
-tuplize(t::Tuple) = t
-tuplize(t) = (t,)
-
-function compute{N}(ctx, x::MapPartNode{NTuple{N, DataNode}})
-    # promote_dnode them all
-end
-
-function compute(ctx, x::MapPartNode)
-   compute(ctx, MapPartNode(x.f, map(inp -> compute(ctx, inp), x.input)))
 end
 
 ### Reduce ###
