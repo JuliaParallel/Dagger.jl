@@ -11,10 +11,39 @@ DistMemory{P<:AbstractPartition}(T::Type, chunks, partition::P) =
 
 DistMemory(chunks, partition) = DistMemory(Any, chunks, partition)
 
+immutable ResultData{T}
+    accumulators::Union{Void, Dict}
+    value::T
+end
+
+function make_result(x)
+    # Get values of accumulators
+    tls = task_local_storage()
+    ResultData(get(tls, :_cf_accumulators, nothing), x)
+end
+
 function gather(ctx, n::DistMemory)
     # Fall back to generic gather on the partition
-    # TODO: Fault tolerance
-    gather(ctx, n.partition, [take!(ref) for (pid, ref) in refs(n)])
+    results = Any[]
+    for (pid, ref) in refs(n)
+        result = remotecall_fetch(pid, (r) -> make_result(fetch(r)), ref)
+        # TODO: retry etc
+        push!(results, result.value)
+
+        result.accumulators == nothing && continue
+        # Update accumulators
+        for (id, x) in result.accumulators
+            if !haskey(_accumulators, id)
+                warn("Unknown accumulator updated")
+            else
+                acc, val = _accumulators[id]
+                _accumulators[id] = (acc, acc.operation(val, x))
+            end
+        end
+    end
+
+    # Fallback to default gather method on the partition
+    gather(ctx, n.partition, results)
 end
 
 refs(c::DistMemory) = c.refs
@@ -37,9 +66,9 @@ function compute{N, T<:DistMemory}(ctx, node::MapPartNode{NTuple{N, T}})
     pids = map(x->x[1], refs(node.input[1]))
     pid_chunks = zip(pids, map(tuplize, refsets)) |> collect
 
-    futures = Pair[pid => remotecall(pid, (xs) -> node.f(map(fetch, xs)...), rs)
-                    for (pid, rs) in pid_chunks]
-
-    DistMemory(futures, node.input[1].partition)
+    let f = node.f
+        futures = Pair[pid => remotecall(pid, (xs) -> f(map(fetch, xs)...), rs)
+                        for (pid, rs) in pid_chunks]
+        DistMemory(futures, node.input[1].partition)
+    end
 end
-
