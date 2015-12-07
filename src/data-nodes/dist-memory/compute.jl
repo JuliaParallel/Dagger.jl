@@ -12,14 +12,13 @@ DistMemory{P<:AbstractPartition}(T::Type, chunks, partition::P) =
 DistMemory(chunks, partition) = DistMemory(Any, chunks, partition)
 
 immutable ResultData{T}
-    accumulators::Union{Void, Dict}
+    accumulators::Vector
     value::T
 end
 
 function make_result(x)
     # Get values of accumulators
-    tls = task_local_storage()
-    ResultData(get(tls, :_cf_accumulators, nothing), x)
+    ResultData(Pair[acc.id => val for (acc, val) in values(ComputeFramework._proc_accumulators)], x)
 end
 
 function gather(ctx, n::DistMemory)
@@ -28,6 +27,12 @@ function gather(ctx, n::DistMemory)
     for (pid, ref) in refs(n)
         result = remotecall_fetch(pid, (r) -> make_result(fetch(r)), ref)
         # TODO: retry etc
+
+        if isa(result.value, RemoteException)
+            Base.showerror(STDERR, result.value)
+            rethrow(result.value)
+        end
+
         push!(results, result.value)
 
         result.accumulators == nothing && continue
@@ -67,7 +72,7 @@ function compute{N, T<:DistMemory}(ctx, node::MapPartNode{NTuple{N, T}})
     pid_chunks = zip(pids, map(tuplize, refsets)) |> collect
 
     let f = node.f
-        futures = Pair[pid => remotecall(pid, (xs) -> f(map(fetch, xs)...), rs)
+        futures = Pair[pid => @spawnat pid f(map(fetch, rs)...)
                         for (pid, rs) in pid_chunks]
         DistMemory(futures, node.input[1].partition)
     end

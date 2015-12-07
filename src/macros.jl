@@ -22,7 +22,9 @@ macro par(expr...)
 
     body = loop.args[2]
 
-    :(gather($(esc(ctx)), foreach($(esc(X))) do $x
-        $(esc(body))
-    end))
+    Base.localize_vars(
+        :(gather($(esc(ctx)), foreach($(esc(X))) do $x
+            $(esc(body))
+        end))
+    )
 end
