@@ -6,7 +6,7 @@
 # implemented by a data node provider (see data-nodes/dist-memory.jl for an example)
 #
 
-import Base: map, reduce, filter
+import Base: map, reduce, filter, IdFun
 
 export Broadcast, Partitioned, reducebykey, mappart, foreach
 
@@ -74,18 +74,30 @@ function compute(ctx, node::MapNode)
     compute(ctx, mappart((localparts...) -> map(node.f, localparts...), node.input))
 end
 
-### Reduce ###
+### Fused Map-reduce ###
 
-immutable ReduceNode{T<:AbstractNode, F, X} <: ComputeNode
+immutable MapReduceNode{T<:Tuple, F, O, X} <: ComputeNode
     f::F
+    op::O
     v0::X
     input::T
 end
 
-reduce(f, v0, node::AbstractNode) = ReduceNode(f, v0, node)
+mapreduce(f, op, v0, input...) = MapReduceNode(f, op, v0, input)
+reduce(op, v0, node::AbstractNode) = MapReduceNode(IdFun(), op, v0, node)
 
-function compute(ctx, node::ReduceNode)
-   reduce(node.f, node.v0, gather(ctx, mappart(part -> reduce(node.f, node.v0, part), node.input)))
+# Mapreduce on multiple arguments
+function mapreduce(f, op, v0, X...)
+    n = length(X[1])
+    acc = v0
+    for i=1:n
+        acc = op(acc, f([x[i] for x in X]...))
+    end
+end
+
+function compute(ctx, node::MapReduceNode)
+    mapped = gather(ctx, mappart((parts...) -> mapreduce(node.f, node.op, node.v0, parts...), node.input))
+    reduce(node.f, node.v0, mapped)
 end
 
 ### Filter ###
@@ -103,22 +115,27 @@ end
 
 ### GroupBy ###
 
-immutable ReduceByKey{N<:AbstractNode, F, T} <: ComputeNode
+immutable MapReduceByKey{N<:Tuple, F, O, T} <: ComputeNode
     f::F
+    op::O
     v0::T
     input::N
 end
 
-reducebykey(f, v0, input) = ReduceByKey(f, v0, input)
+reducebykey(op, v0, input) = MapReduceByKey(IdFun(), op, v0, input)
+mapreducebykey(f, op, v0, input) = MapReduceByKey(f, v0, input)
 
-function reducebykey_seq(f, v0, itr, dict=Dict())
-    for (k, v) in itr
-        dict[k] = f(get(dict, k, v0), v)
+function mapreducebykey_seq(f, op,  v0, itr, dict=Dict())
+    for x in itr
+        k, v = f(x)
+        dict[k] = op(get(dict, k, v0), v)
     end
     dict
 end
 
-function compute(ctx, node::ReduceByKey)
-    parts = mappart((part) -> reducebykey_seq(node.f, node.v0, part), node.input)
-    reduce((acc, chunk) -> reducebykey_seq(node.f, node.v0, chunk, acc), Dict(), gather(ctx, parts))
+reducebykey_seq(op, v0, itr,dict=Dict()) = mapreducebykey_seq(IdFun(), op, v0, itr, dict)
+
+function compute(ctx, node::MapReduceByKey)
+    parts = mappart((part) -> mapreducebykey_seq(node.f, node.op, node.v0, part), node.input)
+    reduce((acc, chunk) -> reducebykey_seq(node.op, node.v0, chunk, acc), Dict(), gather(ctx, parts))
 end
