@@ -60,8 +60,8 @@ Computing a MapPartNode on a SharedMemory datanode will return a DistMemory
 datanode distributed among the targets of SharedMemory.
 """
 function compute{N, T<:SharedMemory}(ctx, node::MapPartNode{NTuple{N, T}})
-    refsets = zip(map(x -> map(y->y[2], refs(x)), node.input)...) |> collect
-    pids = map(x->x[1], refs(node.input[1]))
+    refsets = zip(map(x -> map(y->y[2], x.refs), node.input)...) |> collect
+    pids = map(x->x[1], node.input[1].refs)
     pid_chunks = zip(pids, map(tuplize, refsets)) |> collect
 
     let f = node.f
@@ -92,5 +92,6 @@ end
 #Doesn't work nicely. Maybe create an mmaped file and grow it with the others?
 #Or return all the remoterefs to the mmaps rather than concatenating them?
 function gather{n}(ctx, p::BytesPartition{n}, xs::Vector)
-    warn("BytesPartition should be used with SharedMemory only.") 
+    #warn("BytesPartition should be used with SharedMemory only.") 
+    xs #Returns the mmaps
 end
