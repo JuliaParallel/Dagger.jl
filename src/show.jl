@@ -38,6 +38,15 @@ function showfn(io, f::Function)
 end
 showfn(io, f) = show(io, f)
 
+function showsplat(io::IO, xs::Tuple)
+    first = true
+    for x in xs
+        !first && write(io, ", ")
+        first = false
+        show(io, x)
+    end
+end
+
 function show(io::IO, x::Comp)
     showfn(io, x.f)
     write(io, " o ")
@@ -48,7 +57,7 @@ function show(io::IO, x::MapNode)
     write(io, "map(")
     showfn(io, x.f)
     write(io, ", ")
-    show(io, x.input)
+    showsplat(io, x.input)
     write(io, ")")
 end
 
@@ -60,7 +69,7 @@ function show_mrnode(io::IO, name, f, op, v0, input)
     write(io, ", ")
     show(io, v0)
     write(io, ", ")
-    show(io, input)
+    showsplat(io, input)
     write(io, ")")
 end
 
@@ -70,7 +79,7 @@ function show_mrnode(io::IO, name, op, v0, input)
     write(io, ", ")
     show(io, v0)
     write(io, ", ")
-    show(io, input)
+    showsplat(io, input)
     write(io, ")")
 end
 
@@ -101,7 +110,5 @@ end
 function show(io::IO, x::Partitioned)
     write(io, "Partitioned(")
     write(io, summary(x.obj))
-    write(io, ", ")
-    show(io, typeof(x.partition))
     write(io, ")")
 end
