@@ -54,6 +54,10 @@ function compute(ctx, x::FileBlocks)
         ]
     SharedMemory(sharedarray, offsets, refs, x.partition)
 end
+
+"""
+Computing a MapPartNode on a SharedMemory datanode will return a DistMemory
+datanode distributed among the targets of SharedMemory.
 """
 function compute{N, T<:SharedMemory}(ctx, node::MapPartNode{NTuple{N, T}})
     refsets = zip(map(x -> map(y->y[2], refs(x)), node.input)...) |> collect
@@ -65,14 +69,15 @@ function compute{N, T<:SharedMemory}(ctx, node::MapPartNode{NTuple{N, T}})
                         for (pid, rs) in pid_chunks]
         DistMemory(futures, node.input[1].partition)
     end
-end"""
+end
+
 ##### Partition ####
 
 immutable BytesPartition{n} <: AbstractPartition end
 bytespartition(n) = BytesPartition{n}
 
 function byte_splits(startpos, fsize, parts)
-    @show len = fsize - startpos
+    len = fsize - startpos
     starts = len >= parts ?
         round(Int, linspace(0, len, parts+1)) :
         [[0:len;], zeros(Int, parts-len);]
@@ -81,7 +86,7 @@ end
 
 function slice{n}(ctx, uri, ::BytesPartition{n}, targets)
     f = open(uri)
-    show offsets = byte_splits(position(f), filesize(f), length(targets)) 
+    offsets = byte_splits(position(f), filesize(f), length(targets)) 
 end
 
 #Doesn't work nicely. Maybe create an mmaped file and grow it with the others?
