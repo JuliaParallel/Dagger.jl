@@ -6,7 +6,7 @@
 # implemented by a data node provider (see data-nodes/dist-memory.jl for an example)
 #
 
-import Base: map, reduce, filter, IdFun
+import Base: map, reduce, mapreduce, filter, IdFun
 
 export Broadcast, Partitioned, reducebykey, mappart, foreach
 
@@ -34,9 +34,6 @@ fall back to mappart to `compute`.
 """
 mappart(f, ns::Tuple) = MapPartNode(f, ns)
 mappart(f, ns::AbstractNode...) = MapPartNode(f, ns)
-
-tuplize(t::Tuple) = t
-tuplize(t) = (t,)
 
 function compute(ctx, x::MapPartNode)
    compute(ctx, MapPartNode(x.f, map(inp -> compute(ctx, inp), x.input)))

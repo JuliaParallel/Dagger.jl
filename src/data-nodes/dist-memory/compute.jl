@@ -66,6 +66,9 @@ function compute(ctx, x::Partitioned)
     DistMemory(eltype(chunks), refs, x.partition)
 end
 
+tuplize(t::Tuple) = t
+tuplize(t) = (t,)
+
 function compute{N, T<:DistMemory}(ctx, node::MapPartNode{NTuple{N, T}})
     refsets = zip(map(x -> map(y->y[2], refs(x)), node.input)...) |> collect
     pids = map(x->x[1], refs(node.input[1]))
