@@ -9,7 +9,7 @@ immutable FileBlocks{P <: AbstractPartition} <: ComputeNode
     partition::P
 end
 
-FileBlocks(uri::AbstractString) = FileBlocks(uri, BytesPartition{nworkers()}())
+FileBlocks(uri::AbstractString) = FileBlocks(uri, BytesPartition())
 
 """
 Data Node for Shared Memory. (Dist File?)
@@ -38,9 +38,8 @@ Computing a FileBlock, will create a SharedMemory with the specified partition.
 """
 function compute(ctx, x::FileBlocks)
     targets = chunk_targets(ctx, x)
-    f = open(x.uri) #Opens a file handle to the file on the FileSystem
     #Reading them as bytes.
-    sharedarray = Mmap.mmap(f, Vector{UInt8}, filesize(f)-1, shared=true)
+    sharedarray = Mmap.mmap(x.uri, Vector{UInt8}, filesize(x.uri), shared=true)
     offsets = slice(ctx, x.uri, x.partition, targets) #Expects a vector of ranges
     refs = Pair[
         (targets[i] => remotecall(
@@ -73,8 +72,8 @@ end
 
 ##### Partition ####
 
-immutable BytesPartition{n} <: AbstractPartition end
-bytespartition(n) = BytesPartition{n}
+immutable BytesPartition <: AbstractPartition end
+bytespartition() = BytesPartition()
 
 function byte_splits(startpos, fsize, parts)
     len = fsize - startpos
@@ -84,14 +83,13 @@ function byte_splits(startpos, fsize, parts)
     map((x,y) -> x:y, starts[1:end-1], starts[2:end] .- 1)
 end
 
-function slice{n}(ctx, uri, ::BytesPartition{n}, targets)
-    f = open(uri)
-    offsets = byte_splits(position(f), filesize(f), length(targets)) 
+function slice(ctx, uri, ::BytesPartition, targets)
+    offsets = byte_splits(0, filesize(uri), length(targets))
 end
 
 #Doesn't work nicely. Maybe create an mmaped file and grow it with the others?
 #Or return all the remoterefs to the mmaps rather than concatenating them?
-function gather{n}(ctx, p::BytesPartition{n}, xs::Vector)
+function gather(ctx, p::BytesPartition, xs::Vector)
     #warn("BytesPartition should be used with SharedMemory only.") 
     xs #Returns the mmaps
 end
