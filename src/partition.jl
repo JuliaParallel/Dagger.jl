@@ -6,24 +6,29 @@ function index_splits(len, parts)
     starts = len >= parts ?
         round(Int, linspace(1, len+1, parts+1)) :
         [[1:(len+1);], zeros(Int, parts-len);]
+
     map((x,y) -> x:y, starts[1:end-1], starts[2:end] .- 1)
 end
 
-function slice{d}(ctx, arr::AbstractArray, ::CutDim{d}, targets)
+function slice_indexes{d}(ctx, dims::Tuple, ::CutDim{d}, targets)
     # Slice an array along a dimension
-    dimlen = size(arr, d) # Length of the dimension
+    dimlen = dims[d] # Length of the dimension
     parts = length(targets)
 
     ranges = index_splits(dimlen, parts)
-    idxs = Array(Any, ndims(arr))
-    fill!(idxs, :)
-    chunks = Array(Any, length(targets))
-    for i in 1:length(targets)
+    idxs = [1:len for len in dims]
+    chunks = Array(Any, parts)
+
+    [begin
         chunkidx = copy(idxs)
         chunkidx[d] = ranges[i]
-        chunks[i] = getindex(arr, chunkidx...)
-    end
-    chunks
+        chunkidx
+     end for i in 1:parts]
+end
+
+function slice{d}(ctx, arr::AbstractArray, p::CutDim{d}, targets)
+    # Slice an array along a dimension
+    [getindex(arr, idx...) for idx in slice_indexes(ctx, size(arr), p, targets)]
 end
 
 function gather{d}(ctx, partition::CutDim{d}, xs::Vector)
