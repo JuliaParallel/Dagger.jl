@@ -69,6 +69,7 @@ include("macros.jl")
 include("optimize.jl")
 
 include("dist-memory.jl")
+include("file-nodes.jl")
 
 include("show.jl")
 
