@@ -85,10 +85,9 @@ reduce(op, v0, node::AbstractNode) = MapReduceNode(IdFun(), op, v0, node)
 
 # Mapreduce on multiple arguments
 function mapreduce(f, op, v0, X...)
-    n = length(X[1])
     acc = v0
-    for i=1:n
-        acc = op(acc, f([x[i] for x in X]...))
+    for args in zip(X...)
+        acc = op(acc, f(args...))
     end
 end
 
@@ -119,20 +118,22 @@ immutable MapReduceByKey{N<:Tuple, F, O, T} <: ComputeNode
     input::N
 end
 
-reducebykey(op, v0, input) = MapReduceByKey(IdFun(), op, v0, input)
-mapreducebykey(f, op, v0, input) = MapReduceByKey(f, v0, input)
+reducebykey(op, v0, input...) = MapReduceByKey(IdFun(), op, v0, input)
+mapreducebykey(f, op, v0, input...) = MapReduceByKey(f, op, v0, input)
 
 function mapreducebykey_seq(f, op,  v0, itr, dict=Dict())
     for x in itr
-        k, v = f(x)
-        dict[k] = op(get(dict, k, v0), v)
+        y = f(x)
+        dict[y[1]] = op(get(dict, y[1], v0), y[2])
     end
     dict
 end
 
 reducebykey_seq(op, v0, itr,dict=Dict()) = mapreducebykey_seq(IdFun(), op, v0, itr, dict)
 
+dictvect(d::Dict) = Dict[d]
+dictvect(d) = d
 function compute(ctx, node::MapReduceByKey)
     parts = mappart((part) -> mapreducebykey_seq(node.f, node.op, node.v0, part), node.input)
-    reduce((acc, chunk) -> reducebykey_seq(node.op, node.v0, chunk, acc), Dict(), gather(ctx, parts))
+    reduce((acc, chunk) -> reducebykey_seq(node.op, node.v0, chunk, acc), Dict(), gather(ctx, parts) |> dictvect)
 end
