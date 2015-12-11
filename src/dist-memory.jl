@@ -6,6 +6,7 @@ immutable DistMemory{T, P <: AbstractPartition} <: DataNode
     refs::Vector
     partition::P
 end
+
 DistMemory{P<:AbstractPartition}(T::Type, chunks, partition::P) =
     DistMemory{T, P}(chunks, partition)
 
@@ -55,6 +56,18 @@ refs(c::DistMemory) = c.refs
 partition(c::DistMemory) = c.partition
 
 ##### Compute #####
+
+#typealias SharedArrays Union{SharedSparseMatrixCSC, SharedArray}
+
+# function compute{A<:SharedArrays}(ctx, x::Partitioned{A})
+#     targets = chunk_targets(ctx, x)
+#     chunk_idxs = slice_indices(ctx, size(x.obj), x.partition, targets)
+#
+#     refs = Pair[(targets[i] => remotecall(targets[i], () -> getindex(x.obj, chunk_idxs[i])))
+#                 for i in 1:length(targets)]
+#
+#     DistMemory(eltype(chunks), refs, x.partition)
+# end
 
 function compute(ctx, x::Partitioned)
     targets = chunk_targets(ctx, x)

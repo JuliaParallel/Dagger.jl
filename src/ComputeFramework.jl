@@ -68,7 +68,8 @@ include("accumulator.jl")
 include("macros.jl")
 include("optimize.jl")
 
-include("data-nodes/dist-memory/compute.jl")
+include("dist-memory.jl")
+
 include("show.jl")
 
 end # module
