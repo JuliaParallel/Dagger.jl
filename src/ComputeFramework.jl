@@ -71,6 +71,8 @@ include("optimize.jl")
 include("dist-memory.jl")
 include("file-nodes.jl")
 
+include("redistribute.jl")
+
 include("show.jl")
 
 end # module
