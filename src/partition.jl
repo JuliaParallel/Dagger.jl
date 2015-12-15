@@ -1,3 +1,4 @@
+export cutdim, BCast
 
 immutable CutDim{d} <: AbstractPartition end
 cutdim(n) = CutDim{n}()
