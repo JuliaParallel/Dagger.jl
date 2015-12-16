@@ -4,4 +4,4 @@ using ComputeFramework
 using Base.Test
 
 x = rand(100, 100)
-@test gather(Context(), map(-, Partitioned(x))) == -x
+@test gather(Context(), map(-, distribute(x))) == -x

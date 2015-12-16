@@ -107,8 +107,8 @@ function show(io::IO, x::FilterNode)
     write(io, ")")
 end
 
-function show(io::IO, x::Partitioned)
-    write(io, "Partitioned(")
+function show(io::IO, x::Distribute)
+    write(io, "distribute(")
     write(io, summary(x.obj))
     write(io, ")")
 end

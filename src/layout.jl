@@ -1,7 +1,13 @@
 export cutdim, BCast
+ 
+immutable CutDimension{d} <: AbstractLayout end
+typealias ColumnLayout CutDimension{2}
+typealias RowLayout CutDimension{1}
 
-immutable CutDim{d} <: AbstractPartition end
-cutdim(n) = CutDim{n}()
+"""
+Cut an array along a given dimension
+"""
+cutdim(n) = CutDimension{n}()
 
 function index_splits(len, parts)
     starts = len >= parts ?
@@ -11,7 +17,11 @@ function index_splits(len, parts)
     map((x,y) -> x:y, starts[1:end-1], starts[2:end] .- 1)
 end
 
-function slice_indexes{d}(ctx, dims::Tuple, ::CutDim{d}, targets)
+"""
+Given a size tuple of an array, CutDimension layout
+and targets return the index ranges for each chunk.
+"""
+function slice_indexes{d}(ctx, dims::Tuple, ::CutDimension{d}, targets)
     # Slice an array along a dimension
     dimlen = dims[d] # Length of the dimension
     parts = length(targets)
@@ -27,17 +37,17 @@ function slice_indexes{d}(ctx, dims::Tuple, ::CutDim{d}, targets)
      end for i in 1:parts]
 end
 
-function slice{d}(ctx, arr::AbstractArray, p::CutDim{d}, targets)
+function slice{d}(ctx, arr::AbstractArray, p::CutDimension{d}, targets)
     # Slice an array along a dimension
     [getindex(arr, idx...) for idx in slice_indexes(ctx, size(arr), p, targets)]
 end
 
-function gather{d}(ctx, partition::CutDim{d}, xs::Vector)
+function gather{d}(ctx, layout::CutDimension{d}, xs::Vector)
     reduce((acc, x) -> cat(d, acc, x), xs[1], xs[2:end])
 end
 
 
-immutable Bcast <: AbstractPartition end
+immutable Bcast <: AbstractLayout end
 
 function slice{T}(ctx, x::T, ::Bcast, targets)
     T[x for i in 1:length(targets)]

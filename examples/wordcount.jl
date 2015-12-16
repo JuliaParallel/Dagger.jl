@@ -4,7 +4,7 @@ using ComputeFramework
 
 words = ["one", "two", "two", "three", "three", "three", "four", "four", "four", "four"]
 
-parallel_words = Partitioned(words)
+parallel_words = distribute(words)
 count_one = map(x -> x => 1, parallel_words)
 wcount = reducebykey(+, 0, count_one)
 

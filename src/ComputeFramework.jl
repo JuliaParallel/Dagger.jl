@@ -36,7 +36,7 @@ end
 
 """
 Promote a data node from one type to another.
-Essentially, repartition / re-arrange to come to
+Essentially, relayout / re-arrange to come to
 a common ground for the next computation.
 """
 function promote_dnode(ctx, a::DataNode, b::DataNode)
@@ -54,15 +54,15 @@ function convert_dnode{T<:DataNode}(ctx, to::Type{T}, from::T)
     from
 end
 
-# The partition abstract type
+# The layout abstract type
 
 """
-A partition pattern. Implements `slice` and `gather` methods
+A layout pattern. Implements `slice` and `gather` methods
 """
-abstract AbstractPartition
+abstract AbstractLayout
 
 include("compute-nodes.jl")
-include("partition.jl")
+include("layout.jl")
 include("context.jl")
 include("accumulator.jl")
 include("macros.jl")

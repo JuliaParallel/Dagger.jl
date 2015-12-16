@@ -6,7 +6,7 @@ using ComputeFramework
 ctx = Context()
 
 input = rand(1:10, 100)
-x = Partitioned(input)
+x = distribute(input)
 
 # Keep this part computed (cached). Since we will reuse it later
 chunk_cumsums = compute(ctx, mappart(cumsum, x))  # mappart applies a function on the whole chunk

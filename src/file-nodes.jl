@@ -25,7 +25,7 @@ function compute(ctx, f::FileNode, delim::Union{Char, Void}=nothing)
     @show sz = stat(f.file).size
 
     targets = chunk_targets(ctx, f)
-    @show ranges = map(x->x[1], slice_indexes(ctx, (sz,), CutDim{1}(), targets))
+    @show ranges = map(x->x[1], slice_indexes(ctx, (sz,), CutDimension{1}(), targets))
     refs = Pair[targets[i] => @spawnat targets[i] begin
             BlockIO(open(f.file, f.mode), ranges[i], delim)
         end for i in 1:length(targets)]
@@ -39,7 +39,7 @@ immutable SplitNode <: ComputeNode
 end
 
 """
-Read lines from disjoint partitions of a file on different processes.
+Read lines from disjoint layouts of a file on different processes.
 """
 readlines(f::FileNode) = SplitNode('\n', f)
 """
@@ -57,7 +57,7 @@ function compute(ctx, node::MapPartNode{Tuple{SplitNode}})
             node.f(ChunkedSplitter(fetch(ref), delim, chunksize))
         end for (pid, ref) in data.refs]
 
-    DistMemory(refs, CutDim{1}())
+    DistMemory(refs, CutDimension{1}())
 end
 
 function compute(ctx, f::SplitNode)
@@ -67,9 +67,9 @@ end
 
 ### WIP: Read array data from a file ###
 
-immutable FileArray{T, P<:AbstractPartition} <: ComputeNode
+immutable FileArray{T, L<:AbstractLayout} <: ComputeNode
     dims::Tuple
-    partition::P
+    layout::L
     input::FileNode
     # check for isbits type
 end
@@ -84,7 +84,7 @@ function compute(ctx, fa::FileArray)
     # todo: enforce targets to be on the same machine
     targets = chunk_targets(ctx, fa)
 
-    idx_chunks = slice_indexes(ctx, fa.dims, fa.partition, targets)
+    idx_chunks = slice_indexes(ctx, fa.dims, fa.layout, targets)
     chunk_sizes = [prod(map(length, chunk)) for chunk in idx_chunks] .* sizeof(T)
 
     f = open(fa.input.file, "r+")
@@ -102,6 +102,6 @@ function compute(ctx, fa::FileArray)
             seek(f, offsets[i])
         end for i in 1:length(targets)]
 
-    DistMemory(refs, fa.partition)
+    DistMemory(refs, fa.layout)
 end
 

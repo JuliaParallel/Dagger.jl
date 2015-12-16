@@ -20,17 +20,17 @@ Nodes that represent computation. When `compute` is called on a `ComputeNode` it
 
 ![compute-node](https://cloud.githubusercontent.com/assets/25916/11553313/8e81ed32-99b3-11e5-96fc-adc37a5c11c1.png)
 
-## Partitioning and gathering
+## Distribution and gathering
 
-Partition types are defined in `partition.jl`, subtypes of `AbstractPartition` represent a certain slicing of an object. A partition must define `slice(::Context, object, p::MyPartitionType, targets)` where `targets` is a vector of processes (more generally devices) where the slices need to go to, and similarly `gather(::Context, p::Partition, pieces::Vector)` which collates a vector of pieces back into an object according to the partition. This method is the fallback for `gather(ctx::Context, node::DistMemory)` - other DataNodes can define their own methods to collate data according to different partitioning by adding `gather` methods.
+Layout types are defined in `layout.jl`, subtypes of `AbstractLayout` represent a certain slicing of an object. A layout must define `slice(::Context, object, p::MyPartitionType, targets)` where `targets` is a vector of processes (more generally devices) where the slices need to go to, and similarly `gather(::Context, p::Partition, pieces::Vector)` which collates a vector of pieces back into an object according to the layout. This method is the fallback for `gather(ctx::Context, node::DistMemory)` - other DataNodes can define their own methods to collate data according to different layouting by adding `gather` methods.
 
 ## Conversion and promotion of data nodes
 
-Two data nodes of the same type have a data layout such that `map` operation on the both of them is efficient (e.g. corresponding data chunks are on the same process). Hence `DataNode` types should be parameterized by the partition type (which itself needs to be sufficiently parameterized) for this. For example the type `DistMemory{AbstractArray{T}, CutDim{1}}` means a distribution where an Array is split along dimension 1, whereas `DistMemory{AbstractArray{T}, CutDim{2}}` is split along node 2. Or a HDFSNode and a DistMemory node should either both be made an HDFSNode or a DistMemory node.
+Two data nodes of the same type have a data layout such that `map` operation on the both of them is efficient (e.g. corresponding data chunks are on the same process). Hence `DataNode` types should be parameterized by the layout type (which itself needs to be sufficiently parameterized) for this. For example the type `DistMemory{AbstractArray{T}, CutDimension{1}}` means a distribution where an Array is split along dimension 1, whereas `DistMemory{AbstractArray{T}, CutDimension{2}}` is split along node 2. Or a HDFSNode and a DistMemory node should either both be made an HDFSNode or a DistMemory node.
 
 `promote_dnode(::Context, a::DataNode, b::DataNode)` should return `a'` and `b'` which can now work with `map` without data movement. `promote_dnode` may make use of `convert_dnode(::Type{T<:DataNode}, x)` function to do this. Similarly there can be a `promote_dnode_rule` function which decides which DataNode type wins. Since deciding which node gets promoted can be worth the time, unlike `Base.promote_rule` these convert and promote functions might look at the actual data before deciding.
 
-Since partitions can be defined however you please and on whatever object is chosen, they can serve many purposes - like splitting a matrix for stencil operations, and then joining them back by removing the extranious boundary rows and columns required during the stencil.
+Since layouts can be defined however you please and on whatever object is chosen, they can serve many purposes - like splitting a matrix for stencil operations, and then joining them back by removing the extranious boundary rows and columns required during the stencil.
 
 ## Dispatch matrices
 

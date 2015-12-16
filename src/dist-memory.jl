@@ -2,15 +2,18 @@
 """
 Most basic and default DataNode
 """
-immutable DistMemory{T, P <: AbstractPartition} <: DataNode
-    refs::Vector
-    partition::P
+immutable DistMemory{T, P<:AbstractLayout} <: DataNode
+    refs::Vector     # Array of PID => RemoteRef pairs
+    layout::P
 end
 
-DistMemory{P<:AbstractPartition}(T::Type, chunks, partition::P) =
-    DistMemory{T, P}(chunks, partition)
+function DistMemory{P<:AbstractLayout}(T::Type, chunks, layout::P)
+    DistMemory{T, P}(chunks, layout)
+end
 
-DistMemory(chunks, partition) = DistMemory(Any, chunks, partition)
+function DistMemory(chunks, layout)
+    DistMemory(Any, chunks, layout)
+end
 
 immutable ResultData{T}
     accumulators::Vector
@@ -23,7 +26,7 @@ function make_result(x)
 end
 
 function gather(ctx, n::DistMemory)
-    # Fall back to generic gather on the partition
+    # Fall back to generic gather on the layout
     results = Any[]
     for (pid, ref) in refs(n)
         result = remotecall_fetch(pid, (r) -> make_result(fetch(r)), ref)
@@ -48,35 +51,35 @@ function gather(ctx, n::DistMemory)
         end
     end
 
-    # Fallback to default gather method on the partition
-    gather(ctx, n.partition, results)
+    # Fallback to default gather method on the layout
+    gather(ctx, n.layout, results)
 end
 
 refs(c::DistMemory) = c.refs
-partition(c::DistMemory) = c.partition
+layout(c::DistMemory) = c.layout
 
 ##### Compute #####
 
 #typealias SharedArrays Union{SharedSparseMatrixCSC, SharedArray}
 
-# function compute{A<:SharedArrays}(ctx, x::Partitioned{A})
+# function compute{A<:SharedArrays}(ctx, x::Distribute{A})
 #     targets = chunk_targets(ctx, x)
-#     chunk_idxs = slice_indices(ctx, size(x.obj), x.partition, targets)
+#     chunk_idxs = slice_indices(ctx, size(x.obj), x.layout, targets)
 #
 #     refs = Pair[(targets[i] => remotecall(targets[i], () -> getindex(x.obj, chunk_idxs[i])))
 #                 for i in 1:length(targets)]
 #
-#     DistMemory(eltype(chunks), refs, x.partition)
+#     DistMemory(eltype(chunks), refs, x.layout)
 # end
 
-function compute(ctx, x::Partitioned)
+function compute(ctx, x::Distribute)
     targets = chunk_targets(ctx, x)
-    chunks = slice(ctx, x.obj, x.partition, targets)
+    chunks = slice(ctx, x.obj, x.layout, targets)
 
     refs = Pair[(targets[i] => remotecall(targets[i], () -> chunks[i]))
                 for i in 1:length(targets)]
 
-    DistMemory(eltype(chunks), refs, x.partition)
+    DistMemory(eltype(chunks), refs, x.layout)
 end
 
 tuplize(t::Tuple) = t
@@ -90,6 +93,6 @@ function compute{N, T<:DistMemory}(ctx, node::MapPartNode{NTuple{N, T}})
     let f = node.f
         futures = Pair[pid => @spawnat pid f(map(fetch, rs)...)
                         for (pid, rs) in pid_chunks]
-        DistMemory(futures, node.input[1].partition)
+        DistMemory(futures, node.input[1].layout)
     end
 end

@@ -2,22 +2,23 @@
 #
 # ComputeNodes represent a computation
 #
-# `compute` methods for MapPartNode and Partitioned need to be
+# `compute` methods for MapPartNode and Distribue need to be
 # implemented by a data node provider (see data-nodes/dist-memory.jl for an example)
 #
 
 import Base: map, reduce, mapreduce, filter, IdFun
 
-export Broadcast, Partitioned, reducebykey, mappart, foreach
+export broadcast, distribute, reducebykey, mappart, foreach
 
 ### Distributing data ###
 
-immutable Partitioned{T, P<:AbstractPartition} <: ComputeNode
+immutable Distribute{T, L<:AbstractLayout} <: ComputeNode
     obj::T
-    partition::P
+    layout::L
 end
-Partitioned(x::AbstractArray) = Partitioned(x, CutDim{ndims(x)}())
-Broadcast(x) = Partitioned(x, Bcast())
+Distribute(x::AbstractArray) = Distribute(x, CutDimension{ndims(x)}())
+distribute(args...) = Distribute(args...)
+broadcast(x) = Distribute(x, Bcast())
 
 ### MapParts ###
 
