@@ -12,51 +12,23 @@ An abstract type for a node in the computation DAG
 
 **DataNode <: AbstractNode**
 
-A node that does not require further computation. For example, a DistMemory (a distributed object), BlocksNode or HDFSNode
+A node that does not require further computation. For example, a DistMemory and a FileNode.
 
 **ComputeNodes <: AbstractNode**
 
 Nodes that represent computation. When `compute` is called on a `ComputeNode` it results in a `DataNode`.
 
-![compute-node](https://cloud.githubusercontent.com/assets/25916/11553313/8e81ed32-99b3-11e5-96fc-adc37a5c11c1.png)
+![compute-node](https://cloud.githubusercontent.com/assets/25916/11872894/cee06854-a4fd-11e5-94d8-bb22d5d7bad4.png)
 
-## Distribution and gathering
+## Distribution gathering, and redistribution
 
-Layout types are defined in `layout.jl`, subtypes of `AbstractLayout` represent a certain slicing of an object. A layout must define `slice(::Context, object, p::MyPartitionType, targets)` where `targets` is a vector of processes (more generally devices) where the slices need to go to, and similarly `gather(::Context, p::Partition, pieces::Vector)` which collates a vector of pieces back into an object according to the layout. This method is the fallback for `gather(ctx::Context, node::DistMemory)` - other DataNodes can define their own methods to collate data according to different layouting by adding `gather` methods.
+Data Layout types are defined in `layout.jl`, subtypes of `AbstractLayout` represent a certain slicing of an object.
 
-## Conversion and promotion of data nodes
+A layout is represents a way of splitting an object before its parts are scattered to worker processes, and a way of combining pieces of an object back together to form the original object. These two operations are described by means of methods to `slice` and `gather` functions. As an example `ColumnLayout` is a Layout type which divides a matrix as blocks of columns, and similarly can piece such blocks of columns together to form the original matrix. Once a layout type and the corresponding `slice` and `gather` methods are implemented, the machinary of changing an object's partition will start to work. For example, to change an object's layout from `RowLayout` to `ColumnLayout`, one can create a `Redistribute` compute node, e.g. `column_layout_data = redistribute(row_layout_data, ColumnLayout())`.
 
-Two data nodes of the same type have a data layout such that `map` operation on the both of them is efficient (e.g. corresponding data chunks are on the same process). Hence `DataNode` types should be parameterized by the layout type (which itself needs to be sufficiently parameterized) for this. For example the type `DistMemory{AbstractArray{T}, CutDimension{1}}` means a distribution where an Array is split along dimension 1, whereas `DistMemory{AbstractArray{T}, CutDimension{2}}` is split along node 2. Or a HDFSNode and a DistMemory node should either both be made an HDFSNode or a DistMemory node.
+Here is an implementation of transpose using redistribute.
 
-`promote_dnode(::Context, a::DataNode, b::DataNode)` should return `a'` and `b'` which can now work with `map` without data movement. `promote_dnode` may make use of `convert_dnode(::Type{T<:DataNode}, x)` function to do this. Similarly there can be a `promote_dnode_rule` function which decides which DataNode type wins. Since deciding which node gets promoted can be worth the time, unlike `Base.promote_rule` these convert and promote functions might look at the actual data before deciding.
-
-Since layouts can be defined however you please and on whatever object is chosen, they can serve many purposes - like splitting a matrix for stencil operations, and then joining them back by removing the extranious boundary rows and columns required during the stencil.
-
-## Dispatch matrices
-
-This design gives us two dispatch tables to define how node computation and node data movement should be done.
-
-* `compute` defines how each compute operation (such as Map, Reduce, Filter) will work when applied on each different data node. Ideally operations on a given DataNode will compute to a DataNode of the same type.
-
-A part of this table might look like.
-
-|                | Map     | Reduce | Filter |
-| :------------- |:------- |:-------|--------|
-| **DistMemory** |         |        |        |
-| **HDFSNode**   |         |        |        |
-| **MyDataNode** |         |        |        |
-
-* `promote_dnode` defines how each data node type converts to another data node type
-
-A part of this table might look like.
-
-|                    | DistMemory{P2} | HDFSNode{P2} | MyDataNode{P2} |
-| :------------------|:---------------|--------------|----------------|
-| **DistMemory{P1}** |                |              |                |
-| **HDFSNode{P1}**   |                |              |                |
-| **MyDataNode{P1}** |                |              |                |
-
-**Note about heterogeneous devices** The design does not preclude the possibility of having DataNodes that on GPUs or... mechanical turk?
+Specifically, a layout type `MyLayoutType` should come with `slice(::Context, object, p::MyLayoutType, targets)` and `gather(::Context, p::MyLayoutType, pieces::Vector)` methods. Here `targets` is a vector of processes (more generally devices) where the slices need to go to, `pieces` is the vector of parts received from processes, in the same order they were returned by `slice` in.
 
 ## Fault-tolerence and UI
 

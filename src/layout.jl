@@ -14,7 +14,7 @@ function index_splits(len, parts)
         round(Int, linspace(1, len+1, parts+1)) :
         [[1:(len+1);], zeros(Int, parts-len);]
 
-    map((x,y) -> x:y, starts[1:end-1], starts[2:end] .- 1)
+    map(UnitRange, starts[1:end-1], starts[2:end] .- 1)
 end
 
 """
@@ -56,3 +56,35 @@ end
 function gather(ctx, ::Bcast, parts)
     return parts
 end
+
+### Hash table layouts
+
+immutable HashBucket <: AbstractLayout
+    hash::Function
+end
+HashBucket() = HashBucket(hash)
+
+key(x) = x[1]
+value(x) = x[2]
+
+function slice(ctx, obj, hash::HashBucket, targets)
+    n = length(targets)
+    buckets = [Any[] for k in 1:n]
+    for x in keys
+        target = (hash.hash(key(x)) % n) + 1
+        push!(buckets[target], key(x) => value(x))
+    end
+    buckets
+end
+
+function slice(ctx, obj, b::HashBucket, targets)
+    slice_hashes(ctx, obj, b.hash, targets)
+end
+
+immutable BucketToMatch{N<:AbstractNode} <: AbstractLayout
+    reference::N
+end
+
+function slice(ctx, obj, b::BucketToMatch, targets)
+end
+
