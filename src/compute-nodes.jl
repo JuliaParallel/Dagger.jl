@@ -107,7 +107,7 @@ end
 filter(f, x::AbstractNode) = FilterNode(f, x)
 
 function compute(ctx, node::FilterNode)
-    compute(ctx, mappart(part -> filter(node.f, part), node))
+    compute(ctx, mappart(part -> filter(node.f, part), node.input))
 end
 
 ### GroupBy ###
