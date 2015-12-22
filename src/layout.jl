@@ -77,14 +77,26 @@ function slice(ctx, obj, hash::HashBucket, targets)
     buckets
 end
 
-function slice(ctx, obj, b::HashBucket, targets)
-    slice_hashes(ctx, obj, b.hash, targets)
-end
-
 immutable BucketToMatch{N<:AbstractNode} <: AbstractLayout
     reference::N
 end
 
 function slice(ctx, obj, b::BucketToMatch, targets)
+
 end
 
+
+## Sort layout
+
+immutable SortLayout <: AbstractLayout
+    options::Dict
+end
+
+function slice(ctx, obj, layout::SortLayout, targets)
+    sorted = sort(obj ;layout.options...)
+    [getindex(obj, idx...) for idx in index_splits(length(obj), length(targets))]
+end
+
+function gather(ctx, layout::SortLayout, xs::Vector)
+    reduce(vcat, [], xs)
+end
