@@ -26,9 +26,12 @@ function compute(ctx, f::FileNode, delim::Union{Char, Void}=nothing)
 
     targets = chunk_targets(ctx, f)
     @show ranges = map(x->x[1], slice_indexes(ctx, (sz,), CutDimension{1}(), targets))
+    tic()
     refs = Pair[targets[i] => @spawnat targets[i] begin
             BlockIO(open(f.file, f.mode), ranges[i], delim)
         end for i in 1:length(targets)]
+    t=toq()
+    println("fn @0 : ", t)
 
     FileDataNode(refs, f.chunksize)
 end
@@ -53,9 +56,12 @@ function compute(ctx, node::MapPartNode{Tuple{SplitNode}})
     chunksize = data.chunksize
     targets = chunk_targets(ctx, node)
 
+    tic()
     refs = Pair[pid => @spawnat pid begin
             node.f(ChunkedSplitter(fetch(ref), delim, chunksize))
         end for (pid, ref) in data.refs]
+    t=toq()
+    println("fn @1 : ", t)
 
     DistMemory(refs, CutDimension{1}())
 end
@@ -97,10 +103,13 @@ function compute(ctx, fa::FileArray)
 
     fname = fa.input.file
 
+    tic()
     refs = Pair[targets[i] => @spawnat targets[i] begin
             f = open(fname, "r+")
             seek(f, offsets[i])
         end for i in 1:length(targets)]
+    t=toq()
+    println("fn @2 : ", t)
 
     DistMemory(refs, fa.layout)
 end

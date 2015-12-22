@@ -22,22 +22,39 @@ end
 
 function make_result(x)
     # Get values of accumulators
-    ResultData(Pair[acc.id => val for (acc, val) in values(ComputeFramework._proc_accumulators)], x)
+    res=ResultData(Pair[acc.id => val for (acc, val) in values(ComputeFramework._proc_accumulators)], x)
+    io=IOBuffer()
+    tic()
+    serialize(io, res)
+    seekstart(io)
+    t=toq()
+    println("$t seconds, size : ", Base.nb_available(io))
+    res
 end
 
 function gather(ctx, n::DistMemory)
     # Fall back to generic gather on the layout
-    results = Any[]
-    for (pid, ref) in refs(n)
-        result = remotecall_fetch(pid, (r) -> make_result(fetch(r)), ref)
-        # TODO: retry etc
+    results = Array(Any, length(refs(n)))
+    t0=time()
+    println(t0)
+    @time @sync begin
+        for (idx, v) in enumerate(refs(n))
+            (pid, ref) = v
 
+            @async begin
+                results[idx] = remotecall_fetch(pid, (r, idx) -> (t0=time();println(t0); res=make_result(fetch(r));println("@ rcfetch : ", idx, ", ", time()-t0); res) , ref, idx)
+                println("$idx returned after : ", time()-t0)
+            end
+        end
+    end
+    println("@sync after : ",  time()-t0)
+
+        # TODO: retry etc
+   for result in results
         if isa(result.value, RemoteException)
             Base.showerror(STDERR, result.value)
             rethrow(result.value)
         end
-
-        push!(results, result.value)
 
         result.accumulators == nothing && continue
         # Update accumulators
@@ -52,7 +69,7 @@ function gather(ctx, n::DistMemory)
     end
 
     # Fallback to default gather method on the layout
-    gather(ctx, n.layout, results)
+    gather(ctx, n.layout, map(x -> x.value, results))
 end
 
 refs(c::DistMemory) = c.refs
@@ -91,8 +108,10 @@ function compute{N, T<:DistMemory}(ctx, node::MapPartNode{NTuple{N, T}})
     pid_chunks = zip(pids, map(tuplize, refsets)) |> collect
 
     let f = node.f
+        println("@1 : ", time())
         futures = Pair[pid => @spawnat pid f(map(fetch, rs)...)
                         for (pid, rs) in pid_chunks]
+        println("@2 : ", time())
         DistMemory(futures, node.input[1].layout)
     end
 end

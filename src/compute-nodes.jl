@@ -123,10 +123,12 @@ reducebykey(op, v0, input...) = MapReduceByKey(IdFun(), op, v0, input)
 mapreducebykey(f, op, v0, input...) = MapReduceByKey(f, op, v0, input)
 
 function mapreducebykey_seq(f, op,  v0, itr, dict=Dict())
-    for x in itr
+    println("compute start")
+    t=@elapsed for x in itr
         y = f(x)
         dict[y[1]] = op(get(dict, y[1], v0), y[2])
     end
+    println("compute time : ", t)
     dict
 end
 
@@ -135,6 +137,6 @@ reducebykey_seq(op, v0, itr,dict=Dict()) = mapreducebykey_seq(IdFun(), op, v0, i
 dictvect(d::Dict) = Dict[d]
 dictvect(d) = d
 function compute(ctx, node::MapReduceByKey)
-    parts = mappart((part) -> mapreducebykey_seq(node.f, node.op, node.v0, part), node.input)
+    @time parts = compute(ctx, mappart((part) -> mapreducebykey_seq(node.f, node.op, node.v0, part), node.input))
     reduce((acc, chunk) -> reducebykey_seq(node.op, node.v0, chunk, acc), Dict(), gather(ctx, parts) |> dictvect)
 end

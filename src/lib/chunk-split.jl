@@ -15,8 +15,12 @@ type ChunkIterState
 end
 
 function start(c::ChunkedSplitter)
+    tic()
     @show firstchunk = BlockIO(c.file, 1:c.chunksize, c.delim)
-    ChunkIterState(1, 1, split(readall(firstchunk), c.delim))
+    ret = ChunkIterState(1, 1, split(readall(firstchunk), c.delim))
+    t = toq()
+    println("spltting : ", t)
+    ret
 end
 
 done(c::ChunkedSplitter, s::ChunkIterState) = s.offset + s.idx - 1 > filesize(c.file)
