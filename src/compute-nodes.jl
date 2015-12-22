@@ -82,7 +82,7 @@ immutable MapReduceNode{T<:Tuple, F, O, X} <: ComputeNode
 end
 
 mapreduce(f, op, v0, input::AbstractNode...) = MapReduceNode(f, op, v0, input)
-reduce(op, v0, node::AbstractNode...) = mapreduce(IdFun(), op, v0, node)
+reduce(op, v0, node::AbstractNode...) = mapreduce(IdFun(), op, v0, node...)
 
 # Mapreduce on multiple arguments
 function mapreduce(f, op, v0, X...)
@@ -94,7 +94,7 @@ end
 
 function compute(ctx, node::MapReduceNode)
     mapped = gather(ctx, mappart((parts...) -> mapreduce(node.f, node.op, node.v0, parts...), node.input))
-    reduce(node.f, node.v0, mapped)
+    reduce(node.op, node.v0, mapped)
 end
 
 ### Filter ###
