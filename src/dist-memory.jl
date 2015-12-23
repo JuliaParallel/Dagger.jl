@@ -29,7 +29,7 @@ function gather(ctx, n::DistMemory)
     # Fall back to generic gather on the layout
     results = Any[]
     for (pid, ref) in refs(n)
-        result = remotecall_fetch(pid, (r) -> make_result(fetch(r)), ref)
+        result = remotecall_fetch((r) -> make_result(fetch(r)), pid, ref)
         # TODO: retry etc
 
         if isa(result.value, RemoteException)
@@ -66,7 +66,7 @@ layout(c::DistMemory) = c.layout
 #     targets = chunk_targets(ctx, x)
 #     chunk_idxs = slice_indices(ctx, size(x.obj), x.layout, targets)
 #
-#     refs = Pair[(targets[i] => remotecall(targets[i], () -> getindex(x.obj, chunk_idxs[i])))
+#     refs = Pair[(targets[i] => remotecall(() -> getindex(x.obj, targets[i], chunk_idxs[i])))
 #                 for i in 1:length(targets)]
 #
 #     DistMemory(eltype(chunks), refs, x.layout)
@@ -76,7 +76,7 @@ function compute(ctx, x::Distribute)
     targets = chunk_targets(ctx, x)
     chunks = slice(ctx, x.obj, x.layout, targets)
 
-    refs = Pair[(targets[i] => remotecall(targets[i], () -> chunks[i]))
+    refs = Pair[(targets[i] => remotecall(() -> chunks[i], targets[i]))
                 for i in 1:length(targets)]
 
     DistMemory(eltype(chunks), refs, x.layout)

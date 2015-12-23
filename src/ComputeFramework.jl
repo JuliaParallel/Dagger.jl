@@ -1,5 +1,7 @@
 module ComputeFramework
 
+using Compat
+
 export compute, gather
 
 "A node in the computation graph"
