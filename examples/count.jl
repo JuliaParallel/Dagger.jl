@@ -11,3 +11,5 @@ acc = Accumulator(+, 0.0)
 end
 
 @show get(acc)
+
+release(acc)
