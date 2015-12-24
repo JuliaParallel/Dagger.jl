@@ -7,6 +7,9 @@
 #
 
 import Base: map, reduce, mapreduce, filter, IdFun
+if VERSION >= v"0.5.0-"
+import Base: foreach
+end
 
 export broadcast, distribute, reducebykey, mappart, foreach
 
