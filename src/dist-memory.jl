@@ -2,13 +2,14 @@
 """
 Most basic and default DataNode
 """
-immutable DistMemory{T, P<:AbstractLayout} <: DataNode
+immutable DistMemory <: DataNode
+    chunk_type::Type
     refs::Vector     # Array of PID => RemoteRef pairs
-    layout::P
+    layout::AbstractLayout
 end
 
-function DistMemory{P<:AbstractLayout}(T::Type, chunks, layout::P)
-    DistMemory{T, P}(chunks, layout)
+function DistMemory(T::Type, chunks, layout)
+    DistMemory(T, chunks, layout)
 end
 
 function DistMemory(chunks, layout)
@@ -25,7 +26,7 @@ function make_result(x)
     ResultData(Pair[acc.id => val for (acc, val) in values(ComputeFramework._proc_accumulators)], x)
 end
 
-function gather(ctx, n::DistMemory)
+function gather(ctx, n::DistMemory, layout=n.layout)
     # Fall back to generic gather on the layout
     results = Any[]
     for (pid, ref) in refs(n)
@@ -52,7 +53,7 @@ function gather(ctx, n::DistMemory)
     end
 
     # Fallback to default gather method on the layout
-    gather(ctx, n.layout, results)
+    gather(ctx, layout, results)
 end
 
 refs(c::DistMemory) = c.refs

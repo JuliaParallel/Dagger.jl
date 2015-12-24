@@ -74,6 +74,7 @@ include("dist-memory.jl")
 include("file-nodes.jl")
 
 include("redistribute.jl")
+include("sort.jl")
 
 include("show.jl")
 

@@ -1,10 +1,12 @@
 export redistribute, allgather, rotate, shift
 
-immutable Redistribute{L, N<:AbstractNode} <: ComputeNode
+immutable Redistribute{L1<:Nullable, L2, N<:AbstractNode} <: ComputeNode
     input::N
-    layout::L
+    to_layout::L2
+    gather_layout::L1
 end
-redistribute(input, layout) = Redistribute(input, layout)
+redistribute(input, to_layout) = Redistribute(input, to_layout, Nullable{AbstractLayout}())
+redistribute(input, to_layout, gather_layout) = Redistribute(input, to_layout, Nullable(gather_layout))
 
 """Scatter parts to workers to realize a new layout"""
 function scatter_parts(ctx, part, from_layout, to_layout)
@@ -23,8 +25,8 @@ function compute(ctx, node::Redistribute)
     @assert isa(inp, DistMemory) # for now
 
     from_layout = inp.layout
-    to_layout = node.layout
-    from_layout == to_layout && return inp
+    to_layout = node.to_layout
+    gather_layout = isnull(node.gather_layout) ? from_layout : get(node.gather_layout)
 
     parts = gather(ctx, mappart(part -> scatter_parts(ctx, part, from_layout, to_layout), inp))
     refmatrix = reduce(hcat, map(refs, parts))
@@ -32,7 +34,7 @@ function compute(ctx, node::Redistribute)
 
     assembly = mappart(refparts) do localparts
         data = [fetch(p[2]) for p in localparts]
-        gather_parts(ctx, data, from_layout, to_layout)
+        gather_parts(ctx, data, gather_layout, to_layout)
     end
 
     compute(ctx, assembly)
@@ -43,7 +45,8 @@ end
 """
 Assemble chunks from every process into every other process
 """
-allgather(x) = Redistribute(x, Bcast())
+allgather(x) = redistribute(x, Bcast())
+allgather(x, joinlayout) = redistribute(x, Bcast(), joinlayout)
 
 immutable Transpose <: ComputeNode
     input::AbstractNode

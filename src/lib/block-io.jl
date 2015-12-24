@@ -2,7 +2,7 @@
 # give a stream view to a block from any seekable iostream
 # By @tanmaykm
 #
-import Base: close, eof, read, read!, readall, readbytes, peek, seek, write, filesize, position, seekend, seekstart, skip
+import Base: close, eof, read, read!, readall, readbytes, peek, seek, write, filesize, position, seekend, seekstart, skip, nb_available
 
 immutable BlockIO <: IO
     s::IO
