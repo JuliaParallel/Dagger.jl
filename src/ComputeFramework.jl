@@ -1,6 +1,7 @@
 module ComputeFramework
 
 using Compat
+using Elly
 
 export compute, gather
 
@@ -57,6 +58,7 @@ include("macros.jl")
 include("optimize.jl")
 
 include("file-nodes.jl")
+include("hdfs-nodes.jl")
 
 
 include("show.jl")

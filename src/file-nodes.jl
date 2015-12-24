@@ -1,6 +1,3 @@
-include("lib/block-io.jl")
-include("lib/chunk-split.jl")
-
 import Base: split, readlines, eltype
 export TextFile, FileNode
 
