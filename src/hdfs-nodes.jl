@@ -2,7 +2,7 @@ import Base: split, readlines, eltype, open
 export HDFSFileNode
 
 ### read HDFS files
-immutable HDFSFileNode <: ComputeNode
+immutable HDFSFileNode <: AbstractFileNode
     host::AbstractString
     port::Int
     path::AbstractString
@@ -58,30 +58,4 @@ function compute(ctx, node::HDFSFileNode, delim::Union{Char, Void}=nothing)
         push!(refs, pid => ref)
     end
     FileDataNode(refs, block_sz)
-end
-
-immutable HDFSSplitNode <: ComputeNode 
-    delim::Char
-    input::HDFSFileNode
-end
-split(f::HDFSFileNode, char) = HDFSSplitNode(char, f)
-
-function compute(ctx, f::HDFSSplitNode)
-    # Just use the map implementation by default
-    compute(ctx, mappart(x->x, f))
-end
-
-readlines(f::HDFSFileNode) = SplitNode('\n', f)
-
-function compute(ctx, node::MapPartNode{Tuple{HDFSSplitNode}})
-    data = compute(ctx, node.input[1].input) # Compute HDFSFileNode
-    delim = node.input[1].delim
-    chunksize = data.chunksize
-    targets = chunk_targets(ctx, node)
-
-    refs = Pair[pid => @spawnat pid begin
-            node.f(ChunkedSplitter(fetch(ref), delim, chunksize))
-        end for (pid, ref) in data.refs]
-
-    DistMemory(refs, CutDimension{1}())
 end

@@ -2,7 +2,10 @@ import Base: split, readlines, eltype
 export TextFile, FileNode
 
 ### A recipe to read a file
-immutable FileNode <: ComputeNode
+
+abstract AbstractFileNode <: ComputeNode
+
+immutable FileNode <: AbstractFileNode
     file::AbstractString
     mode::AbstractString
     chunksize::Int # At each process, bring in these many bytes at once
@@ -32,7 +35,7 @@ end
 
 immutable SplitNode <: ComputeNode
     delim::Char
-    input::FileNode
+    input::AbstractFileNode
 end
 
 """
