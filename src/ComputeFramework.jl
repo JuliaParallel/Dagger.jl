@@ -76,8 +76,6 @@ include("file-nodes.jl")
 include("redistribute.jl")
 include("sort.jl")
 
-include("graph-layouts.jl")
-
 include("show.jl")
 
 end # module
