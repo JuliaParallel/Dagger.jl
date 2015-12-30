@@ -100,3 +100,23 @@ end
 function gather(ctx, layout::SortLayout, xs::Vector)
     reduce(vcat, [], xs)
 end
+
+
+## Type Layout (Requires slice and gather to be dfined for all member layouts)
+
+immutable TypeLayout{T<:AbstractLayout} <: AbstractLayout
+    parent_type::DataType                                    
+    layouts::Vector{T}
+end
+
+function slice(ctx, obj, typeLayout::TypeLayout, targets)
+    items = [getfield(obj, field) for field in fieldnames(obj)]
+    field_chunks = [slice(ctx,item,layout,targets) for (item,layout) in zip(items,typeLayout.layouts)]
+    [typeLayout.parent_type(t...) for t in zip(field_chunks...)]
+end
+
+function gather(ctx, typeLayout::TypeLayout, xs::Vector)
+    item_chunks = [[getfield(x, field) for x in xs] for field in fieldnames(typeLayout.parent_type)]
+    field_chunks = [gather(ctx, layout, items) for (items,layout) in zip(item_chunks,typeLayout.layouts)]
+    typeLayout.parent_type(field_chunks...)
+end
