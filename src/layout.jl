@@ -1,4 +1,4 @@
-export cutdim, BCast, typelayout
+export cutdim, Bcast, typelayout
 
 immutable CutDimension{d} <: AbstractLayout end
 typealias ColumnLayout CutDimension{2}
