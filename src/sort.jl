@@ -41,6 +41,8 @@ end
 absorb_range(x, y) = (first(x)+first(y)):(last(x)+last(y))
 
 function compute(ctx, node::SortNode)
+
+    # TODO: Factor out rank computation
     inp = compute(ctx, node.input)
     options = node.options
 
@@ -111,8 +113,8 @@ function compute(ctx, node::SortNode)
                 # Store the median for the rank in the dict
                 rank_medians[unfound_ranks[i]] = ms[i]
             end
-            #@show rank_medians
         end
+        #@show rank_medians
 
         # Active ranges to be further explored
         unfound_idxs = find(map((x, y) -> ! (x in y), unfound_ranks, found_ranks))
@@ -130,6 +132,39 @@ function compute(ctx, node::SortNode)
         active_ranges = compute(ctx, active_ranges_node)
         #@show gather(ctx, active_ranges)
     end
+    #@show rank_medians
+
+    # Now calculate the splits.
+    cut_points = broadcast(rank_medians)
+
+    # All-to-all communication
+    parts = compute(ctx, mappart(cut_array, sorted_parts, cut_points))
+    rs = refs(parts)
+    DistMemory(rs, RowLayout())
+    #slices = compute(ctx, redistribute(DistMemory(rs, RowLayout()), ColumnLayout()))
+    #ms = compute(ctx, mappart(xs -> reduce(vcat, xs), slices))
+    #DistMemory(refs(ms), RowLayout())
+end
+
+function cut_array(xs, medians)
+    ranks = sort(collect(keys(medians)))
+    a = 0
+    parts = Array(Any, length(ranks)+1)
+    for i in 1:length(ranks)
+        r = ranks[i]
+        idxs = searchsorted(xs, medians[r])
+        if length(idxs) == 0
+            # the median doesn't exist
+            b = min(length(xs), first(idxs)-1)
+        else
+            # the median exists
+            b = min(length(xs), Int(floor(first(idxs) + (length(idxs) / 2)))) # TODO: divide by num workers
+        end
+        parts[i] = xs[(a+1):b]
+        a = b
+    end
+    parts[end] = xs[(a+1):length(xs)]
+    parts
 end
 
 function halve_active_ranges(active_ranges, unfound_idxs, unfound_ranks, last_overall_ranges, part_window)
@@ -150,10 +185,10 @@ function next_range(active_range, overall_range, part_range, r)
 
     if r < f
         # move search to lower indices
-        first(active_range):(first(part_range)-1)
+        first(active_range):first(part_range)
     elseif l < r
         # move search to higher indices
-        (last(part_range)+1):last(active_range)
+        last(part_range):last(active_range)
     end
 end
 
