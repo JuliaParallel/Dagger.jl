@@ -1,5 +1,5 @@
 export cutdim, BCast
- 
+
 immutable CutDimension{d} <: AbstractLayout end
 typealias ColumnLayout CutDimension{2}
 typealias RowLayout CutDimension{1}
@@ -70,7 +70,7 @@ value(x) = x[2]
 function slice(ctx, obj, hash::HashBucket, targets)
     n = length(targets)
     buckets = [Any[] for k in 1:n]
-    for x in keys
+    for x in obj
         target = (hash.hash(key(x)) % n) + 1
         push!(buckets[target], key(x) => value(x))
     end
