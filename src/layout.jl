@@ -1,4 +1,4 @@
-export cutdim, BCast
+export cutdim, Bcast, typelayout
 
 immutable CutDimension{d} <: AbstractLayout end
 typealias ColumnLayout CutDimension{2}
@@ -99,4 +99,30 @@ end
 
 function gather(ctx, layout::SortLayout, xs::Vector)
     reduce(vcat, [], xs)
+end
+
+
+## Type Layout.
+
+immutable TypeLayout{T} <: AbstractLayout
+    layouts::Vector
+end
+getlayouts(x::TypeLayout) = x.layouts
+
+"""
+Allows the slicing and gathering of a user-defined type. Requires an array describing
+the layouts of the each of the type's fields.
+"""
+typelayout{T<:DataType,L<:AbstractLayout}(x::T, xs::Vector{L}) = TypeLayout{x}(xs)
+
+function slice{T}(ctx, obj, tlayout::TypeLayout{T}, targets)
+    items = [getfield(obj, field) for field in fieldnames(T)]
+    field_chunks = [slice(ctx,item,layout,targets) for (item,layout) in zip(items,getlayouts(tlayout))]
+    [T(t...) for t in zip(field_chunks...)]
+end
+
+function gather{T}(ctx, tlayout::TypeLayout{T}, xs::Vector)
+    item_chunks = [[getfield(x, field) for x in xs] for field in fieldnames(T)]
+    field_chunks = [gather(ctx, layout, items) for (items,layout) in zip(item_chunks,getlayouts(tlayout))]
+    T(field_chunks...)
 end
