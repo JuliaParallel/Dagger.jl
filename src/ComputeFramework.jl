@@ -46,6 +46,7 @@ include("layout.jl")
 include("redistribute.jl")
 
 include("basic-nodes.jl")
+include("getindex.jl")
 include("map-reduce.jl")
 include("sort.jl")
 
