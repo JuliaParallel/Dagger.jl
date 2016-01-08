@@ -22,10 +22,10 @@ immutable FileDataNode <: DataNode
 end
 
 function compute(ctx, f::FileNode, delim::Union{Char, Void}=nothing)
-    @show sz = stat(f.file).size
+    sz = stat(f.file).size
 
     targets = chunk_targets(ctx, f)
-    @show ranges = map(x->x[1], slice_indexes(ctx, (sz,), CutDimension{1}(), targets))
+    ranges = split_range(1:sz, length(targets))
     refs = Pair[targets[i] => @spawnat targets[i] begin
             BlockIO(open(f.file, f.mode), ranges[i], delim)
         end for i in 1:length(targets)]
@@ -47,7 +47,7 @@ Split on occurance of a char and read disjoint blocks of the same file
 """
 split(f::FileNode, char) = SplitNode(char, f)
 
-function compute(ctx, node::MapPartNode{Tuple{SplitNode}})
+function compute(ctx, node::MapPart{SplitNode})
     data = compute(ctx, node.input[1].input) # Compute FileNode
     delim = node.input[1].delim
     chunksize = data.chunksize
@@ -57,7 +57,7 @@ function compute(ctx, node::MapPartNode{Tuple{SplitNode}})
             node.f(ChunkedSplitter(fetch(ref), delim, chunksize))
         end for (pid, ref) in data.refs]
 
-    DistMemory(refs, CutDimension{1}())
+    DistData(refs, SliceDimension{1}())
 end
 
 function compute(ctx, f::SplitNode)
@@ -84,7 +84,7 @@ function compute(ctx, fa::FileArray)
     # todo: enforce targets to be on the same machine
     targets = chunk_targets(ctx, fa)
 
-    idx_chunks = slice_indexes(ctx, fa.dims, fa.layout, targets)
+    idx_chunks = partition_domain(ctx, fa.dims, fa.layout, targets)
     chunk_sizes = [prod(map(length, chunk)) for chunk in idx_chunks] .* sizeof(T)
 
     f = open(fa.input.file, "r+")
@@ -102,6 +102,6 @@ function compute(ctx, fa::FileArray)
             seek(f, offsets[i])
         end for i in 1:length(targets)]
 
-    DistMemory(refs, fa.layout)
+    DistData(refs, fa.layout)
 end
 

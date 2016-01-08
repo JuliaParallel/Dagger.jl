@@ -90,11 +90,11 @@ Nodes that represent computation. When `compute` is called on a `ComputeNode` it
 
 Data Layout types are defined in `layout.jl`, subtypes of `AbstractLayout` represent a certain slicing of an object.
 
-A layout represents a way of splitting an object in preparation for its parts to be scattered to worker processes, and also a way of combining pieces of an object back together to form the original object. These two operations are described by means of methods to `slice` and `gather` generic functions. As an example `ColumnLayout` is a Layout type which divides a matrix as blocks of columns, and can piece such blocks of columns together to form the original matrix. Once a layout type and the corresponding `slice` and `gather` methods are implemented, the machinary of changing an object's layout redistribute will start to work.
+A layout represents a way of splitting an object in preparation for its parts to be scattered to worker processes, and also a way of combining pieces of an object back together to form the original object. These two operations are described by means of methods to `partition` and `gather` generic functions. As an example `ColumnLayout` is a Layout type which divides a matrix as blocks of columns, and can piece such blocks of columns together to form the original matrix. Once a layout type and the corresponding `partition` and `gather` methods are implemented, the machinary of changing an object's layout redistribute will start to work.
 
 ![layouts](https://cloud.githubusercontent.com/assets/25916/11873353/05c01520-a500-11e5-898b-0bf5b838fcb6.png)
 
-Specifically, a layout type `MyLayoutType` should define `slice(::Context, object, p::MyLayoutType, targets)` and `gather(::Context, p::MyLayoutType, pieces::Vector)` methods. Here `targets` is a vector of processes (more generally devices) where the slices need to go to, `pieces` is the vector of parts received from processes, in the same order they were returned by `slice`.
+Specifically, a layout type `MyLayoutType` should define `partition(::Context, object, p::MyLayoutType, targets)` and `gather(::Context, p::MyLayoutType, pieces::Vector)` methods. Here `targets` is a vector of processes (more generally devices) where the partitions need to go to, `pieces` is the vector of parts received from processes, in the same order they were returned by `partition`.
 
 ### Fault-tolerence and UI
 

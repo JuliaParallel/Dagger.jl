@@ -140,10 +140,10 @@ function compute(ctx, node::SortNode)
     # All-to-all communication
     parts = compute(ctx, mappart(cut_array, sorted_parts, cut_points))
     rs = refs(parts)
-    DistMemory(rs, RowLayout())
-    #slices = compute(ctx, redistribute(DistMemory(rs, RowLayout()), ColumnLayout()))
-    #ms = compute(ctx, mappart(xs -> reduce(vcat, xs), slices))
-    #DistMemory(refs(ms), RowLayout())
+    DistData(rs, RowLayout())
+    #partitions = compute(ctx, redistribute(DistData(rs, RowLayout()), ColumnLayout()))
+    #ms = compute(ctx, mappart(xs -> reduce(vcat, xs), partitions))
+    #DistData(refs(ms), RowLayout())
 end
 
 function cut_array(xs, medians)

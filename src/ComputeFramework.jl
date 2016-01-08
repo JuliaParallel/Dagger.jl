@@ -37,44 +37,25 @@ function gather(ctx, n::ComputeNode)
 end
 
 """
-Promote a data node from one type to another.
-Essentially, relayout / re-arrange to come to
-a common ground for the next computation.
-"""
-function promote_dnode(ctx, a::DataNode, b::DataNode)
-    error("Don't know how to promote $(typeof(a)) and $(typeof(a))")
-end
-function promote_dnode{T<:DataNode}(ctx, a::T, b::T)
-    (a, b)
-end
-
-function convert_dnode{T<:DataNode}(ctx, to::Type{T}, from)
-    error("Don't know how to convert $(typeof(from)) to $(T)")
-end
-
-function convert_dnode{T<:DataNode}(ctx, to::Type{T}, from::T)
-    from
-end
-
-# The layout abstract type
-
-"""
-A layout pattern. Implements `slice` and `gather` methods
+A layout pattern. Implements `partition` and `gather` methods
 """
 abstract AbstractLayout
 
-include("compute-nodes.jl")
+include("dist-data.jl")
 include("layout.jl")
+include("redistribute.jl")
+
+include("basic-nodes.jl")
+include("map-reduce.jl")
+include("sort.jl")
+
 include("context.jl")
 include("accumulator.jl")
 include("macros.jl")
 include("optimize.jl")
 
-include("dist-memory.jl")
 include("file-nodes.jl")
 
-include("redistribute.jl")
-include("sort.jl")
 
 include("show.jl")
 

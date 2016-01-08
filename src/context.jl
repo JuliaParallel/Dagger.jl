@@ -6,6 +6,6 @@ end
 
 Context() = Context(workers())
 
-function chunk_targets(ctx::Context, node)
+function chunk_targets(ctx::Context, node=nothing)
      ctx.dist_memory_procs # For now, the targets are all the available workers
 end

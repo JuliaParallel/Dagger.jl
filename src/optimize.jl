@@ -12,10 +12,10 @@ Comp(::IdFun, f) = f
 call(c::Comp, args...) = c.f(c.g(args...))
 
 # Fuse 2 maps together
-MapNode(f, input::Tuple{MapNode}) = MapNode(Comp(f, input[1].f), input[1].input)
+map(f, input::Tuple{Map}) = Map(Comp(f, input[1].f), input[1].input)
 
 # Fuse map & reduce into mapreduce
-MapReduceNode(f, op, v0, input::Tuple{MapNode}) = MapReduceNode(Comp(f, input[1].f), op, v0, input[1].input)
+MapReduce(f, op, v0, input::Tuple{Map}) = MapReduce(Comp(f, input[1].f), op, v0, input[1].input)
 
 # Fuse reduceby key and map
-MapReduceByKey(f, op, v0, input::Tuple{MapNode}) = MapReduceByKey(Comp(f, input[1].f), op, v0, input[1].input)
+MapReduceByKey(f, op, v0, input::Tuple{Map}) = MapReduceByKey(Comp(f, input[1].f), op, v0, input[1].input)

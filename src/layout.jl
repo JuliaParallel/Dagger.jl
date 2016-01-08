@@ -1,61 +1,105 @@
 export cutdim, BCast
 
-immutable CutDimension{d} <: AbstractLayout end
-typealias ColumnLayout CutDimension{2}
-typealias RowLayout CutDimension{1}
+
+"""
+The domain of an object in relation with a partitioning scheme
+"""
+function domain(obj, layout)
+    error("Cannot figure out the domain of $(typeof(obj)) for $(typeof(layout)) partition")
+end
+
+"""
+The domain of an array is the index range that spans its elements
+"""
+function domain(arr::AbstractArray, p)
+    map(x -> 1:x, size(arr))
+end
+
+
+######## Unknown layout ########
+
+immutable UnknownLayout <: AbstractLayout end
+immutable Chunks
+    xs
+end
+
+function partition(ctx, obj, ::UnknownLayout)
+    error("Cannot distribute with UnknownLayout")
+end
+
+gather(ctx, ::UnknownLayout, xs) = Chunks(xs)
+
+
+######## Array partitioning ########
+
+immutable SliceDimension{d} <: AbstractLayout end
+typealias ColumnLayout SliceDimension{2}
+typealias RowLayout SliceDimension{1}
 
 """
 Cut an array along a given dimension
 """
-cutdim(n) = CutDimension{n}()
-
-function index_splits(len, parts)
-    starts = len >= parts ?
-        round(Int, linspace(1, len+1, parts+1)) :
-        [[1:(len+1);], zeros(Int, parts-len);]
-
-    map(UnitRange, starts[1:end-1], starts[2:end] .- 1)
-end
+cutdim(n) = SliceDimension{n}()
 
 """
-Given a size tuple of an array, CutDimension layout
-and targets return the index ranges for each chunk.
+Given an n-tuple of index ranges, cut the index range along dimension `d`
 """
-function slice_indexes{d}(ctx, dims::Tuple, ::CutDimension{d}, targets)
+function partition_domain{d}(ctx, dims, ::SliceDimension{d})
     # Slice an array along a dimension
-    dimlen = dims[d] # Length of the dimension
+
+    dimrange = dims[d] # Range along sliced dimension
+    @show targets = chunk_targets(ctx)
     parts = length(targets)
 
-    ranges = index_splits(dimlen, parts)
-    idxs = [1:len for len in dims]
+    ranges = split_range(dimrange, parts)
     chunks = Array(Any, parts)
 
+    dims_array = [d for d in dims]
+
     [begin
-        chunkidx = copy(idxs)
+        chunkidx = copy(dims_array)
         chunkidx[d] = ranges[i]
         chunkidx
      end for i in 1:parts]
 end
 
-function slice{d}(ctx, arr::AbstractArray, p::CutDimension{d}, targets)
+
+function partition(ctx, obj, p=default_layout(obj))
     # Slice an array along a dimension
-    [getindex(arr, idx...) for idx in slice_indexes(ctx, size(arr), p, targets)]
+    partitions = partition_domain(ctx, domain(obj, p), p)
+    [getindex(obj, idx...) for idx in partitions], partitions
 end
 
-function gather{d}(ctx, layout::CutDimension{d}, xs::Vector)
-    reduce((acc, x) -> cat(d, acc, x), xs[1], xs[2:end])
-end
+gather{d}(ctx, layout::SliceDimension{d}, xs::Vector) = cat(d, xs...)
 
+"""
+Utility function to divide the range `range` into `n` parts
+"""
+function split_range(range, n)
+    len = length(range)
+
+    starts = len >= n ?
+        round(Int, linspace(first(range), last(range)+1, n+1)) :
+        [[first(range):(last(range)+1);], zeros(Int, n-len);]
+
+    map(UnitRange, starts[1:end-1], starts[2:end] .- 1)
+end
 
 immutable Bcast <: AbstractLayout end
 
-function slice{T}(ctx, x::T, ::Bcast, targets)
-    T[x for i in 1:length(targets)]
+function partition_domain(ctx, x, ::Bcast)
+    [domain(x) for i in 1:n]
+end
+
+function partition{T}(ctx, x::T, p::Bcast)
+    n = length(chunk_targets(ctx))
+    T[x for i in 1:n], partition_domain(ctx, x, p)
 end
 
 function gather(ctx, ::Bcast, parts)
-    return parts
+    return parts[1]
 end
+
 
 ### Hash table layouts
 
@@ -67,24 +111,24 @@ HashBucket() = HashBucket(hash)
 key(x) = x[1]
 value(x) = x[2]
 
-function slice(ctx, obj, hash::HashBucket, targets)
+function domain(obj::AbstractVector, ::HashBucket)
+    1:length(obj)
+end
+
+function domain(obj, ::HashBucket)
+    map(key, obj)
+end
+
+function partition(ctx, obj, hash::HashBucket)
+    targets = chunk_targets(ctx)
     n = length(targets)
     buckets = [Any[] for k in 1:n]
-    for x in obj
+    for x in domain(obj)
         target = (hash.hash(key(x)) % n) + 1
-        push!(buckets[target], key(x) => value(x))
+        push!(buckets[target], x => obj[x])
     end
     buckets
 end
-
-immutable BucketToMatch{N<:AbstractNode} <: AbstractLayout
-    reference::N
-end
-
-function slice(ctx, obj, b::BucketToMatch, targets)
-
-end
-
 
 ## Sort layout
 
@@ -92,11 +136,9 @@ immutable SortLayout <: AbstractLayout
     options::Dict
 end
 
-function slice(ctx, obj, layout::SortLayout, targets)
+function partition(ctx, obj, layout::SortLayout)
     sorted = sort(obj ;layout.options...)
-    [getindex(obj, idx...) for idx in index_splits(length(obj), length(targets))]
+    partition(ctx, sorted)
 end
 
-function gather(ctx, layout::SortLayout, xs::Vector)
-    reduce(vcat, [], xs)
-end
+gather(ctx, layout::SortLayout, xs::Vector) = vcat(xs...)

@@ -53,7 +53,7 @@ function show(io::IO, x::Comp)
     showfn(io, x.g)
 end
 
-function show(io::IO, x::MapNode)
+function show(io::IO, x::Map)
     write(io, "map(")
     showfn(io, x.f)
     write(io, ", ")
@@ -83,23 +83,24 @@ function show_mrnode(io::IO, name, op, v0, input)
     write(io, ")")
 end
 
-function show{T<:Tuple}(io::IO, x::MapReduceNode{T, IdFun})
-    show_mrnode(io, "reduce", x.op, x.v0, x.input)
+
+function show(io::IO, x::MapReduce)
+    if typeof(x.f, IdFun)
+        show_mrnode(io, "reduce", x.op, x.v0, x.input)
+    else
+        show_mrnode(io, "mapreduce", x.f, x.op, x.v0, x.input)
+    end
 end
 
-function show(io::IO, x::MapReduceNode)
-    show_mrnode(io, "mapreduce", x.f, x.op, x.v0, x.input)
+function show(io::IO, x::MapReduce)
+    if typeof(x.f, IdFun)
+        show_mrnode(io, "reducebykey", x.op, x.v0, x.input)
+    else
+        show_mrnode(io, "mapreducebykey", x.f, x.op, x.v0, x.input)
+    end
 end
 
-function show{T<:Tuple}(io::IO, x::MapReduceByKey{T, IdFun})
-    show_mrnode(io, "reducebykey", x.op, x.v0, x.input)
-end
-
-function show(io::IO, x::MapReduceByKey)
-    show_mrnode(io, "mapreducebykey", x.f, x.op, x.v0, x.input)
-end
-
-function show(io::IO, x::FilterNode)
+function show(io::IO, x::Filter)
     write(io, "map(")
     showfn(io, x.f)
     write(io, ", ")
