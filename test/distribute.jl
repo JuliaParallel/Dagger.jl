@@ -30,19 +30,25 @@ meta_test = Any[
             dist_1 = distribute(x, SliceDimension{1}())
             c1 = compute(ctx, dist_1)
             @test metadata(c1) == meta_test[n][1]
-            @test gather(ctx, dist_1) == x
-
             test_each_ref(c1, map(idx->x[idx...], meta_test[n][1])) do chunk, correct
                 @test chunk == correct
             end
+            @test gather(ctx, dist_1) == x
+
 
             dist_2 = distribute(x, SliceDimension{2}())
             c2 = compute(ctx, dist_2)
+            test_each_ref(c2, map(idx->x[idx...], meta_test[n][2])) do chunk, correct
+                @test chunk == correct
+            end
             @test metadata(c2) == meta_test[n][2]
             @test gather(ctx, dist_2) == x
 
             dist_3 = distribute(x, SliceDimension{3}())
             c3 = compute(ctx, dist_3)
+            test_each_ref(c3, map(idx->x[idx...], meta_test[n][3])) do chunk, correct
+                @test chunk == correct
+            end
             @test metadata(c3) == meta_test[n][3]
             @test gather(ctx, dist_3) == x
         end
