@@ -35,7 +35,9 @@ end
 map(f, ns::AbstractNode...) = Map(f, ns)
 
 function compute(ctx, node::Map)
-    compute(ctx, mappart((localparts...) -> map(node.f, localparts...), node.input))
+    inputs = [compute(ctx, x) for x in node.input]
+    iscompatible(inputs...)
+    compute(ctx, mappart((localparts...) -> map(node.f, localparts...), inputs...))
 end
 
 ### Fused Map-reduce ###

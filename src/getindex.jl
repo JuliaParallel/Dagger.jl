@@ -23,6 +23,6 @@ function compute(ctx, node::GetIndex)
     #@show new_metadata
     compute(ctx, mappart(inp, partidx) do part, idx
         getindex(part, idx[1]...)
-    end; layout=layout(inp), metadata=new_metadata)
+    end; output_layout=layout(inp), output_metadata=new_metadata)
 end
 

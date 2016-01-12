@@ -60,16 +60,26 @@ mappart(f, ns::AbstractNode...) =
     MapPart{typejoin(map(typeof, ns)...)}(f, ns)
 mappart(f, ns::Tuple) = mappart(f, ns...)
 
-function compute(ctx, node::MapPart; layout=UnknownLayout(), metadata=Dict())
-    stage1 = mappart(node.f, [compute(ctx, node) for node in node.input]...)
+function compute(ctx, node::MapPart; output_layout=nothing, output_metadata=nothing)
+    inputs = [compute(ctx, node) for node in node.input]
+    stage1 = mappart(node.f, inputs...)
+
+    if is(output_layout, nothing)
+        output_layout = layout(inputs[1])
+    end
+
+    if is(output_metadata, nothing)
+        output_metadata = metadata(inputs[1])
+    end
+
     if isa(stage1, MapPart{DistData})
-        compute(ctx, stage1; layout=layout, metadata=metadata) # defined below
+        compute(ctx, stage1; output_layout=output_layout, output_metadata=output_metadata) # defined below
     else
         error("Could not compute parents")
     end
 end
 
-function compute(ctx, node::MapPart{DistData}; layout=UnknownLayout(), metadata=Dict())
+function compute(ctx, node::MapPart{DistData}; output_layout=UnknownLayout(), output_metadata=Dict())
 
     input = node.input
     refsets = zip(map(x -> map(y->y[2], refs(x)), input)...) |> collect
@@ -79,5 +89,5 @@ function compute(ctx, node::MapPart{DistData}; layout=UnknownLayout(), metadata=
     f = node.f
     futures = Pair[pid => @spawnat pid f(map(fetch, rs)...)
         for (pid, rs) in pid_chunks]
-    DistData(futures, layout, metadata)
+    DistData(futures, output_layout, output_metadata)
 end

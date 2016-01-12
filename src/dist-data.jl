@@ -9,7 +9,7 @@ Fields:
     - `metadata`: arbitrary metadata stored internally during compute
 """
 
-immutable DistData <: DataNode
+type DistData <: DataNode
     chunk_type::Type
     refs::Vector     # Array of PID => RemoteRef pairs
     layout::AbstractLayout
@@ -21,7 +21,15 @@ DistData(chunks, layout, metadata=nothing) =
 
 refs(c::DistData) = c.refs
 layout(c::DistData) = c.layout
-metadata(c::DistData) = c.metadata 
+
+function metadata(c::DistData)
+    if c.metadata == nothing
+        m = metadata(refs(c), layout(c))
+        c.metadata = m
+    else
+        c.metadata
+    end
+end
 
 """
     gather(ctx, node, layout=layout(node))

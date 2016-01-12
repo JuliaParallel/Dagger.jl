@@ -1,4 +1,4 @@
-export cutdim, BCast
+export cutdim, BCast, metadata
 
 
 """
@@ -29,6 +29,11 @@ end
 
 gather(ctx, ::UnknownLayout, xs) = Chunks(xs)
 
+iscompatible(x) = true
+iscompatible(x, y) = layout(x) == layout(y) && metadata(x) == metadata(y)
+iscompatible(x, y, z...) =
+    iscompatible(x, y) && iscompatible(y, z...)
+
 
 ######## Array partitioning ########
 
@@ -48,7 +53,7 @@ function partition_domain{d}(ctx, dims, ::SliceDimension{d})
     # Slice an array along a dimension
 
     dimrange = dims[d] # Range along sliced dimension
-    @show targets = chunk_targets(ctx)
+    targets = chunk_targets(ctx)
     parts = length(targets)
 
     ranges = split_range(dimrange, parts)
@@ -61,6 +66,23 @@ function partition_domain{d}(ctx, dims, ::SliceDimension{d})
         chunkidx[d] = ranges[i]
         chunkidx
      end for i in 1:parts]
+end
+
+"""
+partition metadata
+"""
+function metadata{d}(refs, layout::SliceDimension{d})
+    
+    sizes = [remotecall_fetch(pid, (x) -> size(fetch(x)), r)
+            for (pid, r) in refs]
+
+    d_sizes = [x[d] for x in sizes]
+    @show d_ranges = map((x,l)->x:x+l, vcat(1, cumsum(d_sizes) + 1)[1:end-1], d_sizes)
+    size_ranges = [[x...] for x in sizes]
+    for i in 1:length(size_ranges)
+        size_ranges[i][d] = d_ranges[i]
+    end
+    @show size_ranges
 end
 
 
@@ -87,8 +109,9 @@ end
 
 immutable Bcast <: AbstractLayout end
 
+domain(n::Number) = 1
 function partition_domain(ctx, x, ::Bcast)
-    [domain(x) for i in 1:n]
+    [domain(x) for i in 1:length(chunk_targets(ctx))]
 end
 
 function partition{T}(ctx, x::T, p::Bcast)
@@ -111,7 +134,7 @@ HashBucket() = HashBucket(hash)
 key(x) = x[1]
 value(x) = x[2]
 
-function domain(obj::AbstractVector, ::HashBucket)
+function domain(obj::AbstractArray, ::HashBucket)
     1:length(obj)
 end
 
