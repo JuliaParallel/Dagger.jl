@@ -1,7 +1,9 @@
-addprocs(1)
+addprocs(4)
 
 using ComputeFramework
-using Base.Test
 
-x = rand(100, 100)
-@test gather(Context(), map(-, distribute(x))) == -x
+using BaseTestNext
+@everywhere const Test = BaseTestNext
+
+include("util.jl")
+include("distribute.jl")
