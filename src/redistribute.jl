@@ -24,7 +24,7 @@ function compute(ctx, node::Redistribute)
     inp = compute(ctx, node.input)
     @assert isa(inp, DistData) # for now
 
-    from_layout = inp.layout
+    from_layout = layout(inp)
     to_layout = node.to_layout
     gather_layout = isnull(node.gather_layout) ? from_layout : get(node.gather_layout)
 
