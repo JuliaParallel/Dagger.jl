@@ -29,7 +29,7 @@ function compute(ctx, node::Redistribute)
     gather_layout = isnull(node.gather_layout) ? from_layout : get(node.gather_layout)
 
     parts = gather(ctx, mappart(part -> scatter_parts(ctx, part, from_layout, to_layout), inp))
-    refmatrix = reduce(hcat, map(refs, parts))
+    refmatrix = reduce(hcat, map(refs, parts.xs))
     refparts = compute(ctx, Distribute(refmatrix, RowLayout()))
 
     assembly = mappart(refparts) do localparts
@@ -37,7 +37,8 @@ function compute(ctx, node::Redistribute)
         gather_parts(ctx, data, gather_layout, to_layout)
     end
 
-    compute(ctx, assembly)
+    # TODO: Compute metadata
+    compute(ctx, assembly; output_layout=to_layout)
 end
 
 ## Allgather

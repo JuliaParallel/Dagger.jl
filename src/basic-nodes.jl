@@ -79,7 +79,7 @@ function compute(ctx, node::MapPart; output_layout=nothing, output_metadata=noth
     end
 end
 
-function compute(ctx, node::MapPart{DistData}; output_layout=UnknownLayout(), output_metadata=Dict())
+function compute(ctx, node::MapPart{DistData}; output_layout=UnknownLayout(), output_metadata=nothing)
 
     input = node.input
     refsets = zip(map(x -> map(y->y[2], refs(x)), input)...) |> collect

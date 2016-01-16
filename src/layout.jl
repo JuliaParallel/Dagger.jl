@@ -77,12 +77,12 @@ function metadata{d}(refs, layout::SliceDimension{d})
             for (pid, r) in refs]
 
     d_sizes = [x[d] for x in sizes]
-    @show d_ranges = map((x,l)->x:x+l, vcat(1, cumsum(d_sizes) + 1)[1:end-1], d_sizes)
-    size_ranges = [[x...] for x in sizes]
+    d_ranges = map((x,l)->x:x+l, vcat(1, cumsum(d_sizes) + 1)[1:end-1], d_sizes-1)
+    size_ranges = [[1:l for l in x] for x in sizes]
     for i in 1:length(size_ranges)
         size_ranges[i][d] = d_ranges[i]
     end
-    @show size_ranges
+    size_ranges
 end
 
 
