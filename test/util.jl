@@ -1,35 +1,47 @@
 import ComputeFramework: DistData, refs
-
-@everywhere function test_runner(f, localpart, aux)
-    Test.@testset "" begin
-        f(localpart, aux)
+@everywhere begin
+    type RemoteTestSet <: Test.AbstractTestSet
+        description::AbstractString
+        hostref::RemoteRef
     end
-end
+    RemoteTestSet(desc; hostref=RemoteRef()) =
+        RemoteTestSet(desc, hostref)
 
-function merge_testset(host, remote)
-    if isa(remote, Test.DefaultTestSet)
-        append!(host.results, remote.results)
-    else
-        warn("Could not consolidate results from a $(typeof(remote)) test results set")
+    function Test.record(ts::RemoteTestSet, t)
+        put!(ts.hostref, (myid(), t))
     end
-    host
+
+    function Test.finish(ts::RemoteTestSet)
+    end
+
+    function test_runner(f, localpart, aux, ref)
+        Test.@testset RemoteTestSet hostref=ref "Remote test" begin
+            f(localpart, aux)
+        end
+    end
 end
 
 function test_each_ref(f::Function, node::DistData, args::Vector)
     # Ship a test to each ref
     test_results = Array(Any, length(refs(node)))
     host_testset = Test.get_testset()
-    desc = host_testset.description
+
+    result_ref = RemoteRef()
+    @async while true
+        pid, result = take!(result_ref)
+        if isa(result, Test.Fail)
+            println("Test failure on worker $pid")
+        end
+        Test.record(host_testset, result)
+    end
 
     @sync begin
         for (idx, r) in enumerate(refs(node))
             pid, ref = r
             @async begin
                 result = remotecall_fetch(pid,
-                    (x, y) -> test_runner(f, fetch(x), y), ref, args[idx])
-                test_results[idx] = merge_testset(host_testset, result)
+                    (f, x, y, r) -> test_runner(f, fetch(x), y, r), f, ref, args[idx], result_ref)
             end
         end
     end
-    reduce(merge_testset, Test.get_testset(), test_results)
 end

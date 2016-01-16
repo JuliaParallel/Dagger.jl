@@ -1,4 +1,4 @@
-import ComputeFramework: SliceDimension
+import ComputeFramework: SliceDimension, Bcast
 
 meta_test = Any[
     Any[
@@ -40,4 +40,16 @@ meta_test = Any[
             @test gather(ctx, dist_x) == x
         end
     end
+
+    @testset "Bcast" for dim=1:3
+
+        dist_1 = distribute(1, Bcast())
+        computed = compute(ctx, dist_1)
+
+        expected = ones(Int, nw)
+        test_each_ref(computed, expected) do chunk, correct
+            @test chunk == 1
+        end
+    end
+
 end
