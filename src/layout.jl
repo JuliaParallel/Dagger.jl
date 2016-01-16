@@ -1,4 +1,4 @@
-export cutdim, BCast, metadata
+export cutdim, Bcast, metadata
 
 
 """
@@ -72,7 +72,7 @@ end
 partition metadata
 """
 function metadata{d}(refs, layout::SliceDimension{d})
-    
+
     sizes = [remotecall_fetch(pid, (x) -> size(fetch(x)), r)
             for (pid, r) in refs]
 
