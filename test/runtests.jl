@@ -7,3 +7,4 @@ using BaseTestNext
 
 include("util.jl")
 include("distribute.jl")
+include("redistribute.jl")
