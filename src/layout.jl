@@ -135,6 +135,12 @@ function gather(ctx, ::Bcast, parts)
     return parts[1]
 end
 
+function metadata(refs, layout::Bcast)
+    pid, r = rand(refs)
+    sz = remotecall_fetch(pid, (x) -> size(fetch(x)), r)
+    d = [1:x for x in sz]
+    [d for i = 1:length(refs)]
+end
 
 ### Hash table layouts
 
