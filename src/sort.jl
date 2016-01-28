@@ -42,16 +42,17 @@ absorb_range(x, y) = (first(x)+first(y)):(last(x)+last(y))
 
 function compute(ctx, node::SortNode)
 
-    # TODO: Factor out rank computation
     inp = compute(ctx, node.input)
     options = node.options
 
     # Sort each local part
-    sorted_parts = compute(ctx, mappart(x -> sort(x, options...), inp))
+    sorted_parts = compute(ctx, mappart(x -> sort(x, options...), inp); output_layout=cutdim(1))
 
     # Fetch the length of the parts, make a list of p-1 ranks to search for
     # TODO: Get this from metadata when available
-    unfound_ranks = cumsum(gather(ctx, mappart(length, sorted_parts)))[1:end-1]
+    part_lengths = map(x -> sum(map(length, x)), metadata(sorted_parts))
+    #@show
+    unfound_ranks =  cumsum(part_lengths)[1:end-1]
     rank_medians = Dict()
 
     num_cuts = length(unfound_ranks)
@@ -129,7 +130,7 @@ function compute(ctx, node::SortNode)
         #@show found_ranks
 
         active_ranges_node = halve_active_ranges(active_ranges, unfound_idxs, unfound_ranks, found_ranks[unfound_idxs], insertion_points)
-        active_ranges = compute(ctx, active_ranges_node)
+        active_ranges = compute(ctx, active_ranges_node; output_layout=layout(active_ranges))
         #@show gather(ctx, active_ranges)
     end
     #@show rank_medians
@@ -138,9 +139,9 @@ function compute(ctx, node::SortNode)
     cut_points = broadcast(rank_medians)
 
     # All-to-all communication
-    parts = compute(ctx, mappart(cut_array, sorted_parts, cut_points))
-    rs = refs(parts)
-    DistData(rs, RowLayout())
+    parts = compute(ctx, mappart(cut_array, sorted_parts, cut_points); output_layout=cutdim(2))
+    redist = redistribute(parts, cutdim(1))
+    compute(ctx, mappart(xs -> merge_sorted(xs...), redist); output_layout=cutdim(1))
     #partitions = compute(ctx, redistribute(DistData(rs, RowLayout()), ColumnLayout()))
     #ms = compute(ctx, mappart(xs -> reduce(vcat, xs), partitions))
     #DistData(refs(ms), RowLayout())
@@ -192,3 +193,35 @@ function next_range(active_range, overall_range, part_range, r)
     end
 end
 
+function merge_sorted{T}(x::AbstractArray{T}, y::AbstractArray{T}; o=Base.Order.Forward)
+    target = Array(T, length(x) + length(y))
+    i = 1
+    j = 1
+    k = 1
+    while k <= length(target)
+        if i > length(x)
+            for m=j:length(y)
+                target[k] = y[m]
+                k+=1
+            end
+        elseif j > length(y)
+            for m=i:length(x)
+                target[k] = x[m]
+                k += 1
+            end
+        else
+            if Base.lt(o, x[i], y[j])
+                target[k] = x[i]
+                i += 1
+            else
+                target[k] = y[j]
+                j += 1
+            end
+            k += 1
+        end
+    end
+    target
+end
+
+merge_sorted(x;o=Base.Order.Forward) = x
+merge_sorted(xs...;o=Base.Order.Forward) = merge_sorted(merge_sorted(xs[1], xs[2]; o=o), xs[3:end]...; o=o)
