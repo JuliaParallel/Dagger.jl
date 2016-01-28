@@ -1,4 +1,5 @@
 export cutdim, Bcast, metadata
+import Base.show
 
 
 """
@@ -23,11 +24,21 @@ immutable Chunks
     xs
 end
 
+function show(io::IO, xs::Chunks)
+    write(io, "Chunks:\n")
+    for (pid, part) in enumerate(xs.xs)
+        write(io, "PID $pid: ")
+        show(io, part)
+        println(io)
+    end
+end
+
 function partition(ctx, obj, ::UnknownLayout)
     error("Cannot distribute with UnknownLayout")
 end
 
 gather(ctx, ::UnknownLayout, xs) = Chunks(xs)
+metadata(x, ::UnknownLayout) = nothing
 
 iscompatible(x) = true
 iscompatible(x, y) = layout(x) == layout(y) && metadata(x) == metadata(y)
@@ -85,7 +96,6 @@ function metadata{d}(refs, layout::SliceDimension{d})
     size_ranges
 end
 
-
 function partition(ctx, obj, p=default_layout(obj))
     # Slice an array along a dimension
     partitions = partition_domain(ctx, domain(obj, p), p)
@@ -110,6 +120,8 @@ end
 immutable Bcast <: AbstractLayout end
 
 domain(n::Number) = 1
+domain(arr::AbstractArray) = [1:x for x in size(arr)]
+domain(d::Dict) = keys(d)
 function partition_domain(ctx, x, ::Bcast)
     [domain(x) for i in 1:length(chunk_targets(ctx))]
 end

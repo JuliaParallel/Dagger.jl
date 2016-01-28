@@ -18,6 +18,7 @@ abstract ComputeNode <: AbstractNode
 Turn a AbstractNode into a DataNode by computing it
 """
 function compute(ctx, n::ComputeNode)
+    # A specific method must be implemented for a ComputeNode type
     error("Don't know how to compute $(typeof(n))")
 end
 function compute(ctx, n::DataNode)
@@ -30,6 +31,7 @@ end
 Collate a DataNode to return a result
 """
 function gather(ctx, n::DataNode)
+    # A specific method must be implemented for a DataNode type
     error("Don't know how to gather $(typeof(n))")
 end
 function gather(ctx, n::ComputeNode)
