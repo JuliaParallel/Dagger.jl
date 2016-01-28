@@ -57,6 +57,7 @@ include("macros.jl")
 include("optimize.jl")
 
 include("file-nodes.jl")
+include("matrix-ops.jl")
 
 
 include("show.jl")
