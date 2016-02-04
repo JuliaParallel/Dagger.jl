@@ -91,3 +91,30 @@ function compute(ctx, node::MapPart{DistData}; output_layout=UnknownLayout(), ou
         for (pid, rs) in pid_chunks]
     DistData(futures, output_layout, output_metadata)
 end
+
+immutable InitArray <: ComputeNode
+    f::Function
+    layout::AbstractLayout
+    typ::Type
+    domain::Any
+end
+
+for fn in [:rand, :ones, :zeros]
+    @eval begin
+        function Base.$fn(l::AbstractLayout, t::Type, sz)
+            InitArray($fn, l, t, [1:l for l in sz])
+        end
+        function Base.$fn(l::AbstractLayout, t::Type, sz...)
+            Base.$fn(l, t, sz)
+        end
+        Base.$fn(l::AbstractLayout, sz::Tuple) = $fn(l, Float64, sz)
+        Base.$fn(l::AbstractLayout, sz::Int...) = $fn(l, Float64, sz)
+    end
+end
+
+function compute(ctx, node::InitArray)
+    parts = partition_domain(ctx, node.domain, node.layout)
+    tmp = mappart(dm -> node.f(map(length, dm[1])...), distribute(parts))
+    res = compute(ctx, tmp)
+    DistData(refs(res), node.layout, parts)
+end
