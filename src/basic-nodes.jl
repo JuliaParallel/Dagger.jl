@@ -22,8 +22,10 @@ function compute(ctx, x::Distribute)
     targets =  chunk_targets(ctx)
     chunks, metadata = partition(ctx, x.obj, x.layout)
 
-    refs = Pair[(targets[i] => remotecall(() -> chunks[i], targets[i]))
-                for i in 1:length(targets)]
+    refs = Pair[let
+            chunk = chunks[i]
+            targets[i] => @spawnat targets[i] chunk
+        end for i in 1:length(targets)]
 
     DistData(eltype(chunks), refs, x.layout, metadata)
 end
