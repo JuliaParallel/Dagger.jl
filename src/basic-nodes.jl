@@ -49,6 +49,7 @@ broadcast(x) = Distribute(x, Bcast())
 
 immutable MapPart{T} <: ComputeNode
     f
+    layout::AbstractLayout
     input::Tuple
 end
 
@@ -58,30 +59,28 @@ end
 Apply `f` on corresponding chunks of `nodes`. Other compute nodes
 fall back to mappart to `compute`.
 """
-mappart(f, ns::AbstractNode...) =
-    MapPart{typejoin(map(typeof, ns)...)}(f, ns)
-mappart(f, ns::Tuple) = mappart(f, ns...)
+mappart(f, layout::AbstractLayout, ns::AbstractNode...) =
+    MapPart{typejoin(map(typeof, ns)...)}(f, layout, ns)
+mappart(f, layout, ns::Tuple) = mappart(f, layout, ns...)
+mappart(f, ns::AbstractNode...) = mappart(f, UnknownLayout(), ns...)
+mappart(f, ns::Tuple) = mappart(f, UnknownLayout(), ns...)
 
-function compute(ctx, node::MapPart; output_layout=nothing, output_metadata=nothing)
+function compute(ctx, node::MapPart; output_metadata=nothing)
     inputs = [compute(ctx, node) for node in node.input]
-    stage1 = mappart(node.f, inputs...)
-
-    if is(output_layout, nothing)
-        output_layout = layout(inputs[1])
-    end
+    stage1 = mappart(node.f, node.layout, inputs...)
 
     if is(output_metadata, nothing)
         output_metadata = metadata(inputs[1])
     end
 
     if isa(stage1, MapPart{DistData})
-        compute(ctx, stage1; output_layout=output_layout, output_metadata=output_metadata) # defined below
+        compute(ctx, stage1; output_metadata=output_metadata) # defined below
     else
         error("Could not compute parents")
     end
 end
 
-function compute(ctx, node::MapPart{DistData}; output_layout=UnknownLayout(), output_metadata=nothing)
+function compute(ctx, node::MapPart{DistData}; output_metadata=nothing)
 
     input = node.input
     refsets = zip(map(x -> map(y->y[2], refs(x)), input)...) |> collect
@@ -91,7 +90,7 @@ function compute(ctx, node::MapPart{DistData}; output_layout=UnknownLayout(), ou
     f = node.f
     futures = Pair[pid => @spawnat pid f(map(fetch, rs)...)
         for (pid, rs) in pid_chunks]
-    DistData(futures, output_layout, output_metadata)
+    DistData(futures, node.layout, output_metadata)
 end
 
 immutable InitArray <: ComputeNode

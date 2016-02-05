@@ -32,13 +32,13 @@ function compute(ctx, node::Redistribute)
     refmatrix = reduce(hcat, map(refs, parts.xs))
     refparts = compute(ctx, Distribute(refmatrix, RowLayout()))
 
-    assembly = mappart(refparts) do localparts
+    assembly = mappart(to_layout, refparts) do localparts
         data = [fetch(p[2]) for p in localparts]
         gather_parts(ctx, data, gather_layout, to_layout)
     end
 
     # TODO: Compute metadata
-    compute(ctx, assembly; output_layout=to_layout)
+    compute(ctx, assembly)
 end
 
 ## Allgather
