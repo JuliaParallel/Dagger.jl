@@ -62,7 +62,7 @@ end
 
 function compute(ctx, node::MapReduce)
     mapped = gather(ctx, mappart((parts...) -> mapreduce(node.f, node.op, node.v0, parts...), node.input))
-    reduce(node.op, node.v0, mapped)
+    reduce(node.op, node.v0, mapped.xs)
 end
 
 ### Filter ###
