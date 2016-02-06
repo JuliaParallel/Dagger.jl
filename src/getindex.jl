@@ -1,8 +1,3 @@
-import Base.intersect
-
-intersect(::Colon, ::Colon) = Colon()
-intersect(::Colon, r) = r
-intersect(r, ::Colon) = r
 
 immutable GetIndex <: ComputeNode
     input::AbstractNode

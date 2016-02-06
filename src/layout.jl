@@ -104,18 +104,6 @@ end
 
 gather{d}(ctx, layout::SliceDimension{d}, xs::Vector) = cat(d, xs...)
 
-"""
-Utility function to divide the range `range` into `n` parts
-"""
-function split_range(range, n)
-    len = length(range)
-
-    starts = len >= n ?
-        round(Int, linspace(first(range), last(range)+1, n+1)) :
-        [[first(range):(last(range)+1);], zeros(Int, n-len);]
-
-    map(UnitRange, starts[1:end-1], starts[2:end] .- 1)
-end
 
 immutable Bcast <: AbstractLayout end
 
