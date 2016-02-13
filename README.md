@@ -99,3 +99,7 @@ Specifically, a layout type `MyLayoutType` should define `partition(::Context, o
 ### Fault-tolerence and UI
 
 Since the DAG has enough information to recompute nodes or chunks from any failed point, fault-tolerance can be built into the system. `compute` and `gather` take a first argument which is the `Context` type and pass it throughout the computation. There can be a centralized way of signalling what is currently going on in the cluster which can then be visualized with more UI to read error messages, restart computation and so on.
+
+###
+
+We thank the NIH for supporting this work at MIT.
