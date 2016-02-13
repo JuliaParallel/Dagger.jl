@@ -102,4 +102,4 @@ Since the DAG has enough information to recompute nodes or chunks from any faile
 
 ### Acknowledgements
 
-We thank the NIH for supporting this work at MIT.
+We thank DARPA, Intel, and the NIH for supporting this work at MIT.
