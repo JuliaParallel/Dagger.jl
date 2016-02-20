@@ -85,7 +85,7 @@ end
 
 
 function show(io::IO, x::MapReduce)
-    if typeof(x.f, IdFun)
+    if isa(x.f, IdFun)
         show_mrnode(io, "reduce", x.op, x.v0, x.input)
     else
         show_mrnode(io, "mapreduce", x.f, x.op, x.v0, x.input)
@@ -93,7 +93,7 @@ function show(io::IO, x::MapReduce)
 end
 
 function show(io::IO, x::MapReduce)
-    if typeof(x.f, IdFun)
+    if isa(x.f, IdFun)
         show_mrnode(io, "reducebykey", x.op, x.v0, x.input)
     else
         show_mrnode(io, "mapreducebykey", x.f, x.op, x.v0, x.input)
