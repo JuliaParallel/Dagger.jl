@@ -1,3 +1,4 @@
+
 import Base: exp, expm1, log, log10, log1p, sqrt, cbrt, exponent,
              significand, sin, sinpi, cos, cospi, tan, sec, cot, csc,
              sinh, cosh, tanh, coth, sech, csch,
@@ -21,30 +22,31 @@ elementwise_binary =
 
 immutable ElementwiseOp{F, N} <: ComputeNode
     f::F
-    input::NTuple{N, AbstractNode}
-end
-
-function compute(ctx, node::ElementwiseOp)
-    inputs = [compute(ctx, n) for n in node.input]
-   #if !iscompatible(inputs...)
-   #    # TODO: try to make them compatible
-   #    error("Inputs to $(node.f) are incompatible. They must have the same layout and distribution")
-   #end
-    compute(ctx, mappart(node.f, inputs...);
-        output_layout=layout(inputs[1]),
-        output_metadata=metadata(inputs[1]))
+    input::NTuple{N, AbstractPart}
 end
 
 for fn in elementwise_unary
     @eval begin
-        $fn(x::AbstractNode) = ElementwiseOp($fn, (x,))
+        $fn(x::AbstractPart) = ElementwiseOp($fn, (x,))
     end
 end
 
 for fn in elementwise_binary
     @eval begin
-        $fn(x::AbstractNode, y::AbstractNode) = ElementwiseOp($fn, (x, y))
-        $fn(x::Number, y::AbstractNode) = ElementwiseOp($fn, (broadcast(x), y))
-        $fn(x::AbstractNode, y::Number) = ElementwiseOp($fn, (x, broadcast(y)))
+        $fn(x::AbstractPart, y::AbstractPart) = ElementwiseOp($fn, (x, y))
+        $fn(x::Number, y::AbstractPart) = ElementwiseOp($fn, (broadcast(x), y))
+        $fn(x::AbstractPart, y::Number) = ElementwiseOp($fn, (x, broadcast(y)))
     end
+end
+
+function stage(ctx, node::ElementwiseOp)
+    inputs = Any[stage(ctx, n) for n in node.input]
+    primary = inputs[1] # all others will align to this guy
+    domains = domain(primary).children
+    thunks = similar(domains, Any)
+    for i=eachindex(domains)
+        inps = map(inp->sub(inp, domains[i]), inputs)
+        thunks[i] = Thunk(node.f, inps...)
+    end
+    Cat(partition(primary), Any, domain(primary), thunks)
 end

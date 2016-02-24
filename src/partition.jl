@@ -1,28 +1,38 @@
-###### Partitioning scheme definitions ######
 
-export partition_domain,
-       SliceDimension
+import Base: cat
+export partition, SliceDimension
 
 """
 A PartitionScheme defines how data is partitioned. It is used
-by the `partition` function to slice up a sequential data
-and `cat(context, p::PartitionScheme, a, b)` to put the slices
+by the `partition` function to slice up sequential data structure
+and `cat(p::PartitionScheme, a, b)` to put the slices
 back together.
 
 see `partition` and `gather`
 """
 abstract PartitionScheme
 
-## Arrays
+"""
+    partition(p::PartitionScheme, domain::Domain, nparts::Int)
+
+Partitions the `domain` into `nparts` approximately equal parts
+according to the `dist` data distribution.
+
+returns a `DomainBranch` object.
+
+see also `distribute`. Note that by default `distribute` calls
+`partition_domain` on the domain of the input.
+"""
+@unimplemented partition(p::PartitionScheme, domain::Domain, nparts::Int)
 
 """
-Slice an AbstractArray along a given dimension.
-"""
-immutable SliceDimension{D} <: PartitionScheme end
-SliceDimension(n) = SliceDimension{n}()
+    cat(p::PartitionScheme, a...)
 
-typealias Columnwise SliceDimension{2}
-typealias Rowwise SliceDimension{1}
+Put data objects back together as if they were split using a `PartitionScheme`
+"""
+cat(p::PartitionScheme, a, b, c...) = cat(cat(p, a, b), c[1], c[2:end]...)
+
+
 
 ## General schemes
 
@@ -32,43 +42,95 @@ on each processing unit.
 """
 immutable Broadcast <: PartitionScheme end
 
-###### Domain partitioning routines ######
+partition(b::Broadcast, dom::Domain, nparts::Int) =
+    DomainBranch(dom, [dom for _ in 1:nparts])
+
+cat(p::Broadcast, dom::Domain, a, b) = a
+
 
 """
-    partition_domain(ctx::Context, domain, dist::PartitionScheme)
+    Reducer(op, indentity)
 
-Given the Context `ctx` containing list of processors
-and other configuration, partitions the `domain` to correspond
-to many processes according to the `dist` data distribution.
-
-returns a `DomainSplit` object.
-
-see also `distribute`. Note that by default `distribute` calls
-`partition_domain` on the domain of the input.
+Reducer layout denotes putting two parts together
+by using a reducer operator and an identity value.
 """
-function partition_domain end
+immutable Reducer{F} <: PartitionScheme
+    op::F
+    v0::Any
+end
+cat(p::Reducer, ::UnitDomain, a, b) = p.op(a,b)
+cat(p::Reducer, ::UnitDomain) = p.v0
 
-function partition_domain{d}(ctx, dom, ::SliceDimension{d})
+partition(b::Reducer, dom::Domain, nparts::Int) =
+    error("Cannot partition using a reducer")
+
+
+###### Array Partitioning ######
+
+"""
+Slice an AbstractArray along a given dimension.
+"""
+immutable SliceDimension{D} <: PartitionScheme end
+SliceDimension(n) = SliceDimension{n}()
+
+typealias RowBlock    SliceDimension{1}
+typealias ColumnBlock SliceDimension{2}
+
+"""
+Concatenate two arrays based on SliceDimension layout
+"""
+cat{d}(::SliceDimension{d}, a::AbstractArray, b::AbstractArray) = cat(d, a, b)
+
+function partition{d}(::SliceDimension{d}, dom::ArrayDomain, nparts::Int)
     # Slice an array along a dimension
 
-    dimrange = dom[d] # Range along sliced dimension
-    targets = chunk_targets(ctx)
-    nparts = length(targets)
+    dimrange = indexes(dom)[d] # Range along sliced dimension
 
     ranges = split_range(dimrange, nparts)
     chunks = Array(Any, nparts)
 
-    dom_array = [d for d in dom]
+    dom_array = [d for d in indexes(dom)]
 
-    DomainSplit(dom, [begin
+    DomainBranch(dom, [begin
         chunkidx = copy(dom_array)
         chunkidx[d] = ranges[i]
-        chunkidx
+        DenseDomain(chunkidx)
      end for i in 1:nparts])
 end
 
-function partition_domain(ctx, x, b::Broadcast)
-    d = domain(x)
-    [d for _ in 1:length(chunk_targets(ctx))]
+function partition{d}(p::SliceDimension{d}, dom::ArrayDomain, elsize::Bytes, chsize::Bytes)
+    # Slice an array along a dimension
+
+    dimrange = indexes(dom)[d] # Range along sliced dimension
+    unit_length = (length(dom) / length(dimrange))
+
+    nunits = length(dom) / unit_length
+
+    unit_size = unit_length * elsize
+    if unit_size > chsize
+        error("Chunk size is too small to fit a single unit of partitioned data")
+    end
+    units_per_chunk = floor(Int, chsize / unit_size)
+    partition(p, dom, ceil(Int, npieces))
 end
 
+
+#### Block partition
+# TODO: have this supersede slicedimension and other partition methods
+
+export BlockPartition
+
+immutable BlockPartition{N} <: PartitionScheme
+    blocksize::NTuple{N, Int}
+end
+
+@generated function partition{N}(p::BlockPartition{N}, dom::ArrayDomain{N})
+    sym(n) = symbol("i$n")
+
+    forspec = [:($(sym(i)) = split_range_interval(
+            idxs[$i], p.blocksize[$i])) for i=1:N]
+
+    subdmn = Expr(:call, :DenseDomain, [sym(n) for n=1:N]...)
+    body = Expr(:comprehension, subdmn, forspec...)
+    Expr(:block, :(idxs = indexes(dom)), :(DomainBranch(dom, $body)))
+end

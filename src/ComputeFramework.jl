@@ -1,36 +1,21 @@
 module ComputeFramework
 
-using Compat
+include("util.jl")
 
-include("lib/util.jl")
-
+# Data and sub-data
 include("domain.jl")
 include("partition.jl")
-include("chunk.jl")
+include("part.jl")
+
+# Task scheduling
 include("processor.jl")
+include("thunk.jl")
+include("scheduler.jl")
 
-include("chunk-reader.jl")
-include("distribute.jl")
-
-# include("dist-data.jl")
-# include("layout.jl")
-# include("redistribute.jl")
-
-# include("basic-nodes.jl")
-# include("getindex.jl")
-# include("map-reduce.jl")
-# include("operators.jl")
-# include("sort.jl")
-#
-# include("context.jl")
-# include("accumulator.jl")
-# include("macros.jl")
-# include("optimize.jl")
-#
-# include("file-nodes.jl")
-# include("matrix-ops.jl")
-
-
-# include("show.jl")
+# Extras
+include("sparse.jl")
+include("alloc.jl")
+include("operators.jl")
+#include("file-io.jl")
 
 end # module
