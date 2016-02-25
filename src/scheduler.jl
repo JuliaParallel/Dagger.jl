@@ -79,6 +79,7 @@ function start_state(d::AbstractArray, node_order)
     state[:running] = Set()
 
     nodes = sort(collect(keys(deps)), by=node_order)
+    state[:waiting_data] = copy(deps)
     for k in nodes
         if istask(k)
             waiting = Set{Any}(filter(istask, inputs(k)))
@@ -137,6 +138,14 @@ function compute(ctx, x::Cat)
         x
     end
 end
+
+function release!(cache, node)
+    if isa(cache[node], RemoteChannel)
+        finalize(cache[node])
+    end
+    pop!(cache, node)
+end
+
 function compute(ctx, d::Thunk)
     ps = procs(ctx)
     chan = RemoteChannel()
@@ -163,9 +172,9 @@ function compute(ctx, d::Thunk)
         @logmsg("W$(proc.pid) - $node ($(node.f)) input:$(node.inputs)")
         state[:cache][node] = res
         #@show state[:cache]
+        #@show ord
         # if any of this guy's dependents are waiting,
         # update them
-        #@show ord
         deps = sort([i for i in state[:dependents][node]], by=node_order)
         for dep in deps
             set = state[:waiting][dep]
@@ -175,6 +184,19 @@ function compute(ctx, d::Thunk)
                 push!(state[:ready], dep)
             end
             # todo: release data
+        end
+        for inp in inputs(node)
+            if inp in keys(state[:waiting_data])
+                s = state[:waiting_data][inp]
+                #@show s
+                if node in s
+                    pop!(s, node)
+                end
+                if isempty(s)
+                    @logmsg("releasing $inp")
+                    release!(state[:cache], inp)
+                end
+            end
         end
         state[:finished] = node
         pop!(state[:running], node)
