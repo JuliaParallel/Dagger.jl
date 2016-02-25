@@ -26,7 +26,7 @@ end
 
 
 """
-recursively find the number of taks depending on each task in the DAG.
+recursively find the number of taks dependent on each task in the DAG.
 Input: dependents dict
 """
 function noffspring(dpents::Dict)
@@ -73,6 +73,7 @@ function start_state(d::AbstractArray, node_order)
     state[:dependents] = deps
     state[:finished] = Set()
     state[:waiting] = Dict() # who is x waiting for?
+    state[:waiting_data] = Dict() # dependents still waiting
     state[:ready] = Any[]
     state[:cache] = ObjectIdDict()
     state[:running] = Set()
@@ -109,20 +110,22 @@ function do_task(ctx, proc, thunk_id, f, data, chan)
 end
 
 function async_apply(ctx, p::OSProc, thunk_id, f, data, chan)
-    remotecall(p.pid, do_task, ctx, p, thunk_id, f, data, chan)
+    remotecall(do_task, p.pid, ctx, p, thunk_id, f, data, chan)
 end
 
 function fire_task!(ctx, proc, state, chan)
-    node = pop!(state[:ready])
-    if node.administrative
+    thunk = pop!(state[:ready])
+    @logmsg("W$(proc.pid) + $thunk ($(thunk.f)) input:$(thunk.inputs)")
+    if thunk.administrative
         # Run it on the parent node
-        state[:cache][node] = node.f(map(n -> state[:cache][n], node.inputs)...)
+        # do not _move data.
+        state[:cache][thunk] = thunk.f(map(n -> state[:cache][n], thunk.inputs)...)
         return
     end
-    push!(state[:running], node)
+    push!(state[:running], thunk)
 
-    data = Any[state[:cache][n] for n in node.inputs]
-    async_apply(ctx, proc, node.id, node.f, data, chan)
+    data = Any[state[:cache][n] for n in thunk.inputs]
+    async_apply(ctx, proc, thunk.id, thunk.f, data, chan)
 end
 
 compute(ctx, x::AbstractPart) = x
@@ -155,7 +158,9 @@ function compute(ctx, d::Thunk)
 
     while !isempty(state[:waiting]) || !isempty(state[:ready]) || !isempty(state[:running])
         proc, thunk_id, res = take!(chan)
+
         node = _thunk_dict[thunk_id]
+        @logmsg("W$(proc.pid) - $node ($(node.f)) input:$(node.inputs)")
         state[:cache][node] = res
         #@show state[:cache]
         # if any of this guy's dependents are waiting,

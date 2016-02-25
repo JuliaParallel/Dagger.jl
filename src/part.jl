@@ -65,7 +65,7 @@ end
 Create a part from a sequential object.
 """
 function part(x)
-    ref = RemoteRef()
+    ref = RemoteChannel()
     put!(ref, x)
     PartSpec(typeof(x), domain(x), DistMem(ref))
 end

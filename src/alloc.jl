@@ -25,7 +25,7 @@ function stage(ctx, a::AllocateArray)
     branch = partition(a.partition, a.domain)
     dims = length(indexes(a.domain))
     alloc = let eltype = a.eltype, f = a.f
-        sz -> f(eltype, sz)
+        _alloc(sz) = f(eltype, sz)
     end
 
     subdomains = branch.children
@@ -73,4 +73,29 @@ function stage(ctx, node::Transpose)
     @assert isa(dmn, DomainBranch)
     dmnT = DomainBranch(head(dmn)', dmn.children')
     Cat(inp.partition, parttype(inp), dmnT, inp.children')
+end
+
+
+
+immutable Save <: ComputeNode
+    input::AbstractPart
+    name::AbstractString
+end
+
+function save(p::ComputeNode, name::AbstractString)
+    Save(p, name)
+end
+
+
+function stage(ctx, s::Save)
+    x = cached_stage(ctx, s.input)
+    save_part(p) = save(ctx, part(p), tempname())
+    saved_children = map(x.children) do c
+        Thunk(save_part, (c,))
+    end
+    function save_cat_meta(children...)
+        f = open(s.name, "w")
+        save(ctx, f, x, s.name, [children...])
+    end
+    Thunk(save_cat_meta, (saved_children...); meta=true)
 end
