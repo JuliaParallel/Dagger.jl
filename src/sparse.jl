@@ -41,7 +41,7 @@ function getindex(a::SparseCSCDomain, b::SparseCSCDomain)
     a.adomain[b.adomain]
 end
 
-function getindex(a::Domain, b::SparseCSCDomain)
+function getindex(a::ArrayDomain, b::SparseCSCDomain)
     a[b.adomain]
 end
 function getindex(a::SparseCSCDomain, b::Domain)

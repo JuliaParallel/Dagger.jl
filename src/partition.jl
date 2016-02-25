@@ -30,8 +30,7 @@ see also `distribute`. Note that by default `distribute` calls
 
 Put data objects back together as if they were split using a `PartitionScheme`
 """
-cat(p::PartitionScheme, a, b, c...) = cat(cat(p, a, b), c[1], c[2:end]...)
-
+@unimplemented cat(p::PartitionScheme, t::Type, dom::Domain, parts)
 
 
 ## General schemes
@@ -133,4 +132,12 @@ end
     subdmn = Expr(:call, :DenseDomain, [sym(n) for n=1:N]...)
     body = Expr(:comprehension, subdmn, forspec...)
     Expr(:block, :(idxs = indexes(dom)), :(DomainBranch(dom, $body)))
+end
+
+function data_cat{T<:Array}(p::BlockPartition, ::Type{T}, dom::DomainBranch, parts::AbstractArray)
+    arr = Array(eltype(T), size(dom))
+    for (d, part) in zip(dom.children, parts)
+        arr[indexes(d)...] = part
+    end
+    arr
 end

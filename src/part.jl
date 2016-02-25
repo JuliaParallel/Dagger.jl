@@ -65,7 +65,9 @@ end
 Create a part from a sequential object.
 """
 function part(x)
-    PartSpec(typeof(x), domain(x), Data(x))
+    ref = RemoteRef()
+    put!(ref, x)
+    PartSpec(typeof(x), domain(x), DistMem(ref))
 end
 
 """
@@ -130,24 +132,20 @@ end
 domain(c::Cat) = c.domain
 parttype(c::Cat) = c.parttype
 partition(c::Cat) = c.partition
+
 function gather(ctx, part::Cat)
 
-    # perf todo: allocate beforehand
-    c = gather(ctx, part.children[1])
-    i = 2
-    while i <= length(part.children)
-        c = cat(partition(part), c,
-                gather(ctx, part.children[i])...)
-        i += 1
-    end
-    c
+    data_cat(partition(part),
+        parttype(part),
+        part.domain,
+        map(c->gather(ctx,c), part.children))
 end
 
 """
 Concatenate parts according to some partition
 """
 cat(p::PartitionScheme, T::Type, d::Domain, parts::AbstractArray) =
-        Cat{P}(p, T, d, parts)
+        Cat(p, T, d, parts)
 
 """
 `sub` of a `Cat` part returns a `Cat` of sub parts

@@ -14,7 +14,7 @@ function compute(ctx, x::Sub)
 end
 =#
 
-immutable AllocateArray <: ComputeNode
+type AllocateArray <: ComputeNode
     eltype::Type
     f::Function
     domain::DenseDomain
@@ -31,7 +31,7 @@ function stage(ctx, a::AllocateArray)
     subdomains = branch.children
     thunks = similar(subdomains, Thunk)
     for i=eachindex(subdomains)
-        thunks[i] = Thunk(alloc, size(subdomains[i]))
+        thunks[i] = Thunk(alloc, (size(subdomains[i]),))
     end
     Cat(a.partition, Array{a.eltype, dims}, branch, thunks)
 end
@@ -46,15 +46,29 @@ immutable Transpose <: ComputeNode
     input::AbstractPart
 end
 
-transpose(x::AbstractPart) = Transpose(x)
-transpose(x::Thunk) = Thunk(transpose, x)
+global _stage_cache = WeakKeyDict()
+function cached_stage(ctx, x)
+    isimmutable(x) && return stage(ctx, x)
+    if haskey(_stage_cache, x)
+        _stage_cache[x]
+    else
+        _stage_cache[x] = stage(ctx, x)
+    end
+end
+
+transpose(x::AbstractPart) = Thunk(transpose, (x,))
+transpose(x::ComputeNode) = Transpose(x)
 function transpose(x::DenseDomain{2})
     d = indexes(x)
     DenseDomain(d[2], d[1])
 end
 
+function stage(ctx, node::Cat)
+    node
+end
+
 function stage(ctx, node::Transpose)
-    inp = stage(ctx, node.input)
+    inp = cached_stage(ctx, node.input)
     dmn = domain(inp)
     @assert isa(dmn, DomainBranch)
     dmnT = DomainBranch(head(dmn)', dmn.children')

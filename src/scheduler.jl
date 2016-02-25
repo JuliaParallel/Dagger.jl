@@ -1,150 +1,73 @@
 import Base.get
-using Base.Test
-
-let counter=0
-    global next_id
-    next_id() = "_$(counter+=1)" |> symbol
-end
-
-##### Macro sugar #####
-function async_call(expr::Expr, id=string(expr))
-    if expr.head == :call
-        f = expr.args[1]
-        args = map(async_call, expr.args[2:end])
-        :(Thunk($id, $f, ($(args...))))
-    elseif expr.head == :(=)
-        x = expr.args[1]
-        cll = async_call(expr.args[2], string(x))
-        :($x = $cll)
-    end
-end
-
-function async_call(expr, id=string(expr))
-    expr
-end
-
-macro par(expr)
-    if expr.head in [:(=), :call]
-        async_call(expr) |> esc
-    elseif expr.head == :block
-        Expr(:block, map(async_call, expr.args)...) |> esc
-    else
-        error("@par only works for function call and assignments")
-    end
-end
-
-let @par t = 1+2
-    @test t == Thunk(:t, +, 1,2)
-    @par begin
-        a = 3
-        b = a+3
-    end
-    @test b == Thunk(:b, +, 3, 3)
-end
-
-function Base.show(io::IO, p::Thunk)
-    write(io, "*")
-    write(io, p.id)
-    write(io, "*")
-end
-
-inputs(x::Thunk) = x.inputs
-inputs(x) = ()
-
-istask(x::Thunk) = true
-istask(x) = false
-
 
 ##### Scheduling logic #####
 
-" find the set of direct dependents for each task "
-function dependents(node, deps=Dict())
+"find the set of direct dependents for each task"
+function dependents(node::Thunk, deps=Dict())
     if !haskey(deps, node)
         deps[node] = Set()
     end
     for inp = inputs(node)
         deps[inp] = push!(get(deps, inp, Set()), node)
-        dependents(inp, deps)
+        if isa(inp, Thunk)
+            dependents(inp, deps)
+        end
     end
     deps
 end
 
-"""
-recursively find the number of taks depending on each task in the DAG
-takes the root (final result) node of the dag.
-"""
-function ndependents(dpents::Dict)
-    Pair[node => ndependents(node, dpents) for node in keys(dpents)] |> Dict
+function dependents(nodes::AbstractArray, deps=Dict())
+    for n in nodes
+        dependents(n, deps)
+    end
+    deps
 end
 
-function ndependents(t::Thunk)
-    ndependents(dependents(t))
+
+
+"""
+recursively find the number of taks depending on each task in the DAG.
+Input: dependents dict
+"""
+function noffspring(dpents::Dict)
+    Pair[node => noffspring(node, dpents) for node in keys(dpents)] |> Dict
 end
 
-function ndependents(n, dpents)
-    dependents = get(dpents, n, Set())
-    length(dependents) + reduce(+, 0, [ndependents(c, dpents)
-        for c in dependents])
+function noffspring(n, dpents)
+    ds = get(dpents, n, Set()) # dependents of n
+    length(dpents[n]) + reduce(+, 0, [noffspring(d, dpents)
+        for d in ds])
 end
+
 
 """
 Given a root node of the DAG, calculates a total order for tie-braking
 
   * Root node gets score 1,
   * rest of the nodes are explored in DFS fashion but children
-    of each node are explored in order of `ndependents`,
+    of each node are explored in order of `noffspring`,
     i.e. total number of tasks depending on the result of the said node.
 
+Args:
+    - ndeps: result of `noffspring`
+    - node: root node
 """
-function order(node::Thunk)
-    order(node, ndependents(node))[2]
+function order(nodes, ndeps)
+    order(nodes, ndeps, 0)[2]
 end
-function order(node, ndeps, c=0, output=Dict())
 
-    c+=1
-    output[node] = c
-    next = sort([i for i in inputs(node)], by=k->-ndeps[k])
-    for n in next
-        c, output = order(n, ndeps, c, output)
+function order(nodes::AbstractArray, ndeps, c, output=Dict())
+
+    for node in nodes
+        c+=1
+        output[node] = c
+        nxt = sort([n for n in inputs(node)], by=k->ndeps[k])
+        c, output = order(nxt, ndeps, c, output)
     end
     c, output
 end
 
-
-#### test set 2 begin
-
-function inc(x)
-    x+1
-end
-
-let _= nothing
-    @par begin
-        a = 1
-        b = inc(a)
-        c = inc(b)
-    end
-
-    deps = dependents(c)
-    @test deps == Dict(a => Set([b]), b => Set([c]), c=>Set())
-    @test ndependents(deps) == Dict(a=>2, b=>1, c=>0)
-    @test order(c) == Dict(a => 3, b => 2, c => 1)
-end
-
-let _=nothing
-
-    @par begin
-        a = 1
-        b = 2
-        c = inc(a)
-        d = b+c
-    end
-    @test ndependents(d) == Dict(a => 2, b => 1, c => 1, d => 0)
-    @test order(d) == Dict(d=>1, c=>3, b=>2, a=>4)
-end
-
-##### test set 2 ends
-
-function start_state(d::Thunk, node_order)
+function start_state(d::AbstractArray, node_order)
     state = Dict()
     deps = dependents(d)
     state[:dependents] = deps
@@ -170,44 +93,74 @@ function start_state(d::Thunk, node_order)
     state
 end
 
-function do_task(proc, node, f, data, chan)
-    res = f(data...)
-    ref = RemoteChannel()
-    put!(ref, res)
-    put!(chan, (proc, node, res)) #todo: add more metadata
+function _move(ctx, x::AbstractPart)
+    gather(ctx, x)
+end
+_move(ctx, x) = x
+
+function do_task(ctx, proc, thunk_id, f, data, chan)
+    try
+        res = f(map(x->_move(ctx, x), data)...)
+        part(res)
+        put!(chan, (proc, thunk_id, part(res))) #todo: add more metadata
+    catch e
+        put!(chan, (proc, thunk_id, e))
+    end
 end
 
-function async_apply(p::OSProc, node, f, data, chan)
-    remotecall(p.pid, do_task, p, node, f, data, chan)
+function async_apply(ctx, p::OSProc, thunk_id, f, data, chan)
+    remotecall(p.pid, do_task, ctx, p, thunk_id, f, data, chan)
 end
 
-function fire_task!(proc, state, chan)
+function fire_task!(ctx, proc, state, chan)
     node = pop!(state[:ready])
+    if node.administrative
+        # Run it on the parent node
+        state[:cache][node] = node.f(map(n -> state[:cache][n], node.inputs)...)
+        return
+    end
     push!(state[:running], node)
 
     data = Any[state[:cache][n] for n in node.inputs]
-    async_apply(proc, node, node.f, data, chan)
+    async_apply(ctx, proc, node.id, node.f, data, chan)
 end
 
-get(ctx::Context, x) = x
-function get(ctx::Context, d::Thunk)
+compute(ctx, x::AbstractPart) = x
+function compute(ctx, x::Cat)
+    thunk = thunkize(ctx, x)
+    if isa(thunk, Thunk)
+        compute(ctx, thunk)
+    else
+        x
+    end
+end
+function compute(ctx, d::Thunk)
     ps = procs(ctx)
     chan = RemoteChannel()
-    ord = order(d)
+    deps = dependents([d])
+    ndeps = noffspring(deps)
+    ord = order([d], ndeps)
+
+    sort_ord = [(k,v) for (k,v) in ord]
+    sortord = x -> istask(x[1]) ? x[1].id : 0
+    sort_ord = sort(sort_ord, by=sortord)
 
     node_order = x -> -ord[x]
-    state = start_state(d, node_order)
+    state = start_state([d], node_order)
     # start off some tasks
     for p in ps
         isempty(state[:ready]) && break
-        fire_task!(p, state, chan)
+        fire_task!(ctx, p, state, chan)
     end
 
     while !isempty(state[:waiting]) || !isempty(state[:ready]) || !isempty(state[:running])
-        proc, node, res = take!(chan)
+        proc, thunk_id, res = take!(chan)
+        node = _thunk_dict[thunk_id]
         state[:cache][node] = res
+        #@show state[:cache]
         # if any of this guy's dependents are waiting,
         # update them
+        #@show ord
         deps = sort([i for i in state[:dependents][node]], by=node_order)
         for dep in deps
             set = state[:waiting][dep]
@@ -222,22 +175,26 @@ function get(ctx::Context, d::Thunk)
         pop!(state[:running], node)
 
         while !isempty(state[:ready]) && length(state[:running]) < length(ps)
-            fire_task!(proc, state, chan)
+            fire_task!(ctx, proc, state, chan)
         end
     end
 
     state[:cache][d]
 end
 
-let _=nothing
-    @par begin
-        a = 1
-        b = 2
-        c = inc(a)
-        d = b+c
+"""
+If a Cat tree has a Thunk in it, make the whole thing a big thunk
+"""
+function thunkize(ctx, c::Cat)
+    if any(istask, c.children)
+        thunks = map(x -> thunkize(ctx, x), c.children)
+        Thunk(thunks; meta=true) do results...
+            t = promote_type(map(parttype, results)...)
+            Cat(partition(c), t, domain(c), AbstractPart[results...])
+        end
+    else
+        c
     end
-    @test ndependents(d) == Dict(a => 2, b => 1, c => 1, d => 0)
-    @test order(d) == Dict(d=>1, c=>3, b=>2, a=>4)
-
-    @test get(Context(), d) == 4
 end
+thunkize(ctx, x::AbstractPart) = x
+thunkize(ctx, x::Thunk) = x
