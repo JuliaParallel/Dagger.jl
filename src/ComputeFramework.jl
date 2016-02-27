@@ -4,13 +4,15 @@ module ComputeFramework
 using Logging
 const logger = Logging.configure(level=DEBUG)
 #const logger = Logging.configure(filename="/tmp/blobs$(getpid()).log", level=DEBUG)
+#=
 macro logmsg(s)
     quote
         debug($(esc(s)))
     end
 end
-#macro logmsg(s)
-#end
+=#
+macro logmsg(s)
+end
 
 
 include("util.jl")

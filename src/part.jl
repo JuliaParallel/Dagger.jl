@@ -69,6 +69,9 @@ function part(x)
     put!(ref, x)
     PartSpec(typeof(x), domain(x), DistMem(ref))
 end
+function part(x::AbstractPart)
+    x
+end
 
 """
 A **view** into an AbstractPart

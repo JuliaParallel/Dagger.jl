@@ -103,11 +103,11 @@ _move(ctx, x) = x
 function do_task(ctx, proc, thunk_id, f, data, chan)
     try
         res = f(map(x->_move(ctx, x), data)...)
-        part(res)
         put!(chan, (proc, thunk_id, part(res))) #todo: add more metadata
     catch e
         put!(chan, (proc, thunk_id, e))
     end
+    nothing
 end
 
 function async_apply(ctx, p::OSProc, thunk_id, f, data, chan)
@@ -140,10 +140,13 @@ function compute(ctx, x::Cat)
 end
 
 function release!(cache, node)
-    if isa(cache[node], RemoteChannel)
-        finalize(cache[node])
+    if haskey(cache, node)
+        if isa(cache[node], PartSpec{DistMem})
+            @logmsg("Finalizing remoteref")
+            finalize(cache[node].handle.ref)
+        end
+        pop!(cache, node)
     end
-    pop!(cache, node)
 end
 
 function compute(ctx, d::Thunk)

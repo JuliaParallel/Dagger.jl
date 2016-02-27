@@ -86,7 +86,6 @@ function save(p::ComputeNode, name::AbstractString)
     Save(p, name)
 end
 
-
 function stage(ctx, s::Save)
     x = cached_stage(ctx, s.input)
     save_part(p) = save(ctx, part(p), tempname())
@@ -95,7 +94,11 @@ function stage(ctx, s::Save)
     end
     function save_cat_meta(children...)
         f = open(s.name, "w")
-        save(ctx, f, x, s.name, [children...])
+        saved_children = AbstractPart[c for c in children]
+        res = save(ctx, f, x, s.name, saved_children)
+        close(f)
+        res
     end
     Thunk(save_cat_meta, (saved_children...); meta=true)
 end
+stage(ctx, x::Thunk) = Thunk
