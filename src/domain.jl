@@ -149,12 +149,14 @@ alignfirst(a::ArrayDomain) =
 size(a::ArrayDomain) = map(length, indexes(a))
 size(a::ArrayDomain, dim) = length(indexes(a)[dim])
 length(a::ArrayDomain) = prod(size(a))
+ndims(a::ArrayDomain) = length(size(a))
 isempty(a::DenseDomain) = length(a) == 0
 
 
 indexes{T<:ArrayDomain}(a::DomainBranch{T}) = indexes(a.head)
 size{T<:ArrayDomain}(a::DomainBranch{T}, dim...) = size(a.head, dim...)
 length{T<:ArrayDomain}(a::DomainBranch{T}) = prod(size(a))
+ndims{T<:ArrayDomain}(a::DomainBranch{T}) = length(size(a))
 
 "The domain of an array is a DenseDomain"
 domain(x::AbstractArray) = DenseDomain([1:l for l in size(x)])

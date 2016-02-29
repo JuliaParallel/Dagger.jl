@@ -122,6 +122,7 @@ export BlockPartition
 immutable BlockPartition{N} <: PartitionScheme
     blocksize::NTuple{N, Int}
 end
+BlockPartition(xs...) = BlockPartition(xs)
 
 @generated function partition{N}(p::BlockPartition{N}, dom::ArrayDomain{N})
     sym(n) = symbol("i$n")

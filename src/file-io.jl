@@ -221,3 +221,32 @@ function getsub{T<:AbstractArray}(ctx, c::PartSpec{FileReader{T}}, d)
     PartSpec(gather(ctx, c)[d])
 end
 
+
+#### Save computation
+
+immutable Save <: Computation
+    input::Computation
+    name::AbstractString
+end
+
+function save(p::Computation, name::AbstractString)
+    Save(p, name)
+end
+
+function stage(ctx, s::Save)
+    x = cached_stage(ctx, s.input)
+    save_part(p) = save(ctx, part(p), tempname())
+    saved_parts = map(x.parts) do p
+        Thunk(save_part, (p,))
+    end
+    function save_cat_meta(parts...)
+        f = open(s.name, "w")
+        saved_parts = AbstractPart[c for c in parts]
+        res = save(ctx, f, x, s.name, saved_parts)
+        close(f)
+        res
+    end
+
+    # The DAG has to block till saving is complete.
+    res = Thunk(save_cat_meta, (saved_parts...); meta=true)
+end

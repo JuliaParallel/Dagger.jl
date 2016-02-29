@@ -49,6 +49,20 @@ gather(ctx, x::Computation) = gather(ctx, compute(ctx, x))
 gather(x) = gather(Context(), x)
 
 """
+promote a computed value to a Computation
+"""
+immutable Computed <: Computation
+    result::AbstractPart
+    # TODO: Allow passive branching for Save?
+end
+
+convert(::Type{Computation}, p::AbstractPart) = Computed(p)
+
+function stage(ctx, c::Computed)
+    c.result
+end
+
+"""
 `PartSpec` and `Sub` objects are always in computed state,
 this method just returns them.
 """
@@ -74,7 +88,7 @@ function thunkize(ctx, c::Cat)
     if any(istask, c.parts)
         thunks = map(x -> thunkize(ctx, x), c.parts)
         Thunk(thunks; meta=true) do results...
-            t = promote_type(map(parttype, results)...)
+            t = parttype(results[1])
             Cat(partition(c), t, domain(c), AbstractPart[results...])
         end
     else
