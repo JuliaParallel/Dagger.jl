@@ -20,22 +20,22 @@ elementwise_binary =
          :(.>=), :(.\), :(.^), :(//), :(.<), :(.>>), :(.<<)]
 
 
-immutable ElementwiseOp{F, N} <: ComputeNode
+immutable ElementwiseOp{F, N} <: Computation
     f::F
-    input::NTuple{N, AbstractPart}
+    input::NTuple{N, Computation}
 end
 
 for fn in elementwise_unary
     @eval begin
-        $fn(x::AbstractPart) = ElementwiseOp($fn, (x,))
+        $fn(x::Computation) = ElementwiseOp($fn, (x,))
     end
 end
 
 for fn in elementwise_binary
     @eval begin
-        $fn(x::AbstractPart, y::AbstractPart) = ElementwiseOp($fn, (x, y))
-        $fn(x::Number, y::AbstractPart) = ElementwiseOp($fn, (broadcast(x), y))
-        $fn(x::AbstractPart, y::Number) = ElementwiseOp($fn, (x, broadcast(y)))
+        $fn(x::Computation, y::Computation) = ElementwiseOp($fn, (x, y))
+        $fn(x::Number, y::Computation) = ElementwiseOp($fn, (broadcast(x), y))
+        $fn(x::Computation, y::Number) = ElementwiseOp($fn, (x, broadcast(y)))
     end
 end
 

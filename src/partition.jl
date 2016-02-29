@@ -134,8 +134,9 @@ end
     Expr(:block, :(idxs = indexes(dom)), :(DomainBranch(dom, $body)))
 end
 
-function data_cat{T<:Array}(p::BlockPartition, ::Type{T}, dom::DomainBranch, parts::AbstractArray)
-    arr = Array(eltype(T), size(dom))
+function cat_data(p::BlockPartition, dom::DomainBranch, parts::AbstractArray)
+    T = eltype(parts[1])
+    arr = Array(T, size(dom))
     for (d, part) in zip(dom.children, parts)
         arr[indexes(d)...] = part
     end

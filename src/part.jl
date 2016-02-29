@@ -38,28 +38,14 @@ function gather(ctx, part::PartSpec)
     gather(ctx, part.handle)
 end
 
-# Actual data
-immutable Data{T} <: PartIO
-    val::T
-end
-gather(ctx, io::Data) = io.val
+
+### PartIO
+
 
 immutable DistMem <: PartIO
     ref::RemoteChannel
 end
 gather(ctx, io::DistMem) = fetch(io.ref)
-
-##
-## When communicating a PartSpec, don't send the data
-function Base.serialize{T<:Data}(io::SerializationState, x::Type{PartSpec{T}})
-    Base.serialize(io, PartSpec{DistMem})
-end
-function Base.serialize{T<:Data}(io::SerializationState, x::PartSpec{T})
-    r = RemoteChannel()
-    put!(r, x)
-    # Don't send the data
-    PartSpec(parttype(x), domain(x), DistMem(r))
-end
 
 """
 Create a part from a sequential object.
@@ -69,9 +55,8 @@ function part(x)
     put!(ref, x)
     PartSpec(typeof(x), domain(x), DistMem(ref))
 end
-function part(x::AbstractPart)
-    x
-end
+part(x::AbstractPart) = x
+
 
 """
 A **view** into an AbstractPart
@@ -129,7 +114,7 @@ type Cat{P<:PartitionScheme} <: AbstractPart
     partition::P
     parttype::Type
     domain::DomainBranch
-    children::AbstractArray
+    parts::AbstractArray
 end
 
 domain(c::Cat) = c.domain
@@ -138,10 +123,9 @@ partition(c::Cat) = c.partition
 
 function gather(ctx, part::Cat)
 
-    data_cat(partition(part),
-        parttype(part),
+    cat_data(partition(part),
         part.domain,
-        map(c->gather(ctx,c), part.children))
+        map(c->gather(ctx,c), part.parts))
 end
 
 """
@@ -161,7 +145,7 @@ function sub(c::Cat, d)
 
     for i in 1:l
         dmn = c.domain.children[i]
-        ch = c.children[i]
+        ch = c.parts[i]
 
         if dmn == d
             return ch

@@ -1,20 +1,5 @@
-export stage, compute
 
-abstract ComputeNode <: AbstractPart
-
-compute(ctx, x::ComputeNode) = compute(ctx, stage(ctx, x))
-
-#=
-function compute(ctx, x::Cat)
-    Cat(x.partition, x.parttype, x.domain, compute(ctx, x.children))
-end
-
-function compute(ctx, x::Sub)
-    Sub(parttype(x), domain(x), compute(ctx, x.chunk))
-end
-=#
-
-type AllocateArray <: ComputeNode
+type AllocateArray <: Computation
     eltype::Type
     f::Function
     domain::DenseDomain
@@ -33,7 +18,7 @@ function stage(ctx, a::AllocateArray)
     for i=eachindex(subdomains)
         thunks[i] = Thunk(alloc, (size(subdomains[i]),))
     end
-    Cat(a.partition, Array{a.eltype, dims}, branch, thunks)
+    cat(a.partition, Array{a.eltype, dims}, branch, thunks)
 end
 
 function Base.rand(p::PartitionScheme, eltype::Type, dims)
@@ -42,11 +27,12 @@ end
 
 import Base: transpose
 
-immutable Transpose <: ComputeNode
+immutable Transpose <: Computation
     input::AbstractPart
 end
 
 global _stage_cache = WeakKeyDict()
+
 function cached_stage(ctx, x)
     isimmutable(x) && return stage(ctx, x)
     if haskey(_stage_cache, x)
@@ -57,7 +43,7 @@ function cached_stage(ctx, x)
 end
 
 transpose(x::AbstractPart) = Thunk(transpose, (x,))
-transpose(x::ComputeNode) = Transpose(x)
+transpose(x::Computation) = Transpose(x)
 function transpose(x::DenseDomain{2})
     d = indexes(x)
     DenseDomain(d[2], d[1])
@@ -72,33 +58,35 @@ function stage(ctx, node::Transpose)
     dmn = domain(inp)
     @assert isa(dmn, DomainBranch)
     dmnT = DomainBranch(head(dmn)', dmn.children')
-    Cat(inp.partition, parttype(inp), dmnT, inp.children')
+    Cat(inp.partition, parttype(inp), dmnT, inp.parts')
 end
 
 
 
-immutable Save <: ComputeNode
+immutable Save <: Computation
     input::AbstractPart
     name::AbstractString
 end
 
-function save(p::ComputeNode, name::AbstractString)
+function save(p::Computation, name::AbstractString)
     Save(p, name)
 end
 
 function stage(ctx, s::Save)
     x = cached_stage(ctx, s.input)
     save_part(p) = save(ctx, part(p), tempname())
-    saved_children = map(x.children) do c
-        Thunk(save_part, (c,))
+    saved_parts = map(x.parts) do p
+        Thunk(save_part, (p,))
     end
-    function save_cat_meta(children...)
+    function save_cat_meta(parts...)
         f = open(s.name, "w")
-        saved_children = AbstractPart[c for c in children]
-        res = save(ctx, f, x, s.name, saved_children)
+        saved_parts = AbstractPart[c for c in parts]
+        res = save(ctx, f, x, s.name, saved_parts)
         close(f)
         res
     end
-    Thunk(save_cat_meta, (saved_children...); meta=true)
+
+    # The DAG has to block till saving is complete.
+    res = Thunk(save_cat_meta, (saved_parts...); meta=true)
 end
 stage(ctx, x::Thunk) = Thunk

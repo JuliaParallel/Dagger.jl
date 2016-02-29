@@ -1,6 +1,3 @@
-
-using Base.Test
-
 let counter=0
     global next_id
     next_id() = counter+=1
@@ -66,3 +63,4 @@ inputs(x) = ()
 
 istask(x::Thunk) = true
 istask(x) = false
+

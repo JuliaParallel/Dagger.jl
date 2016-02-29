@@ -25,7 +25,7 @@ include("part.jl")
 # Task scheduling
 include("processor.jl")
 include("thunk.jl")
-include("scheduler.jl")
+include("compute.jl")
 
 # Extras
 include("sparse.jl")
