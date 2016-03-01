@@ -25,4 +25,6 @@ function Base.rand(p::PartitionScheme, eltype::Type, dims)
     AllocateArray(eltype, rand, DenseDomain(map(x->1:x, dims)), p)
 end
 
-
+function Base.ones(p::PartitionScheme, eltype::Type, dims)
+    AllocateArray(eltype, ones, DenseDomain(map(x->1:x, dims)), p)
+end

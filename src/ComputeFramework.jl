@@ -36,5 +36,6 @@ include("file-io.jl")
 include("array/alloc.jl")
 include("array/operators.jl")
 include("array/matrix.jl")
+include("array/reduce.jl")
 
 end # module

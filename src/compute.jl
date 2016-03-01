@@ -27,7 +27,7 @@ will should not return in computation of A twice because
 we are staging A multiple times.
 """
 
-global _stage_cache = ObjectIdDict()
+global _stage_cache = Dict()
 function cached_stage(ctx, x)
     if haskey(_stage_cache, x)
         _stage_cache[(ctx, x)]
