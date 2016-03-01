@@ -21,7 +21,26 @@ end
 Thunk(f::Function, xs::Tuple; id::Int=next_id(), get_result::Bool=false,
     meta::Bool=false) = Thunk(f,xs,id,get_result,meta)
 Thunk(f::Function, xs::AbstractArray; id::Int=next_id(), get_result::Bool=false,
-    meta::Bool=false) = Thunk(f,(xs...),id,get_result,meta)
+    meta::Bool=false) = Thunk(f,(xs...); id=id,get_result=get_result,meta=meta)
+
+
+# cut down 30kgs in microseconds with one weird trick
+@generated function compose{N}(f, g, t::NTuple{N})
+    if N <= 4
+      ( :(()->f(g())),
+        :((a)->f(g(a))),
+        :((a,b)->f(g(a,b))),
+        :((a,b,c)->f(g(a,b,c))),
+        :((a,b,c,d)->f(g(a,b,c,d))), )[N+1]
+    else
+        :((xs...) -> f(g(xs...)))
+    end
+end
+
+function Thunk(f::Function, t::Tuple{Thunk})
+    g = compose(f, t[1].f, t[1].inputs)
+    Thunk(g, t[1].inputs)
+end
 
 # this gives a ~30x speedup in hashing
 Base.hash(x::Thunk, h::UInt) = hash(x.id, hash(h, 0x7ad3bac49089a05f))
