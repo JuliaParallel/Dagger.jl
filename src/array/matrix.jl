@@ -149,7 +149,6 @@ end
 an operand which should be distributed as per convenience
 """
 function stage_operand{T<:AbstractVector}(ctx, ::MatMul, a, b::PromotePartition{T})
-    p = part(b.data)
     scheme = partition(a)
     @assert isa(scheme, BlockPartition)
     # use scheme's column distribution here
@@ -178,6 +177,49 @@ function stage(ctx, mul::MatMul)
     db = domain(b)
 
     d = da*db
-    @show d.children
     Cat(p, Any, d, _mul(a.parts, b.parts; T=Thunk))
+end
+
+
+
+### Scale
+
+import Base.scale
+immutable Scale <: Computation
+    l::Computation
+    r::Computation
+end
+
+scale(l::Number, r::Computation) = BlockwiseOp(x->scale(l, x), (r,))
+scale(l::Vector, r::Computation) = scale(PromotePartition(l), r)
+scale(l::Computation, r::Computation) = Scale(l, r)
+
+function stage_operand(ctx, ::Scale, a, b::PromotePartition)
+    scheme = partition(a)
+    @assert isa(scheme, BlockPartition)
+    # use scheme's row distribution here
+    scheme_b = BlockPartition((scheme.blocksize[1],))
+    cached_stage(ctx, Distribute(scheme_b, b.data))
+end
+
+function stage_operand(ctx, ::Scale, a, b)
+    cached_stage(ctx, b)
+end
+
+function _scale(l, r)
+    res = similar(r, Any)
+    for i=1:length(l)
+        res[i,:] = map(x->Thunk(scale, (l[i], x)), r[i,:])
+    end
+    res
+end
+
+function stage(ctx, scal::Scale)
+    r = cached_stage(ctx, scal.r)
+    l = stage_operand(ctx, scal, r, scal.l)
+
+    @assert size(domain(r), 1) == size(domain(l), 1)
+
+    parts = _scale(l.parts, r.parts)
+    Cat(partition(r), Any, domain(r), parts)
 end
