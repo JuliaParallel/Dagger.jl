@@ -31,11 +31,11 @@ include("compute.jl")
 # Extras
 include("sparse.jl")
 include("file-io.jl")
+include("map-reduce.jl")
 
 # Array computations
 include("array/alloc.jl")
 include("array/operators.jl")
 include("array/matrix.jl")
-include("array/reduce.jl")
 
 end # module
