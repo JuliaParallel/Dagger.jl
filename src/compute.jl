@@ -107,16 +107,16 @@ nodes for tie breaking and runs the scheduler.
 function compute(ctx, d::Thunk)
     ps = procs(ctx)
     chan = RemoteChannel()
-    deps = dependents([d])
+    deps = dependents(d)
     ndeps = noffspring(deps)
-    ord = order([d], ndeps)
+    ord = order(d, ndeps)
 
     sort_ord = [(k,v) for (k,v) in ord]
     sortord = x -> istask(x[1]) ? x[1].id : 0
     sort_ord = sort(sort_ord, by=sortord)
 
     node_order = x -> -ord[x]
-    state = start_state([d], node_order)
+    state = start_state(deps, node_order)
     # start off some tasks
     for p in ps
         isempty(state[:ready]) && break
@@ -192,7 +192,7 @@ function fire_task!(ctx, proc, state, chan)
     push!(state[:running], thunk)
 
     data = Any[state[:cache][n] for n in thunk.inputs]
-    async_apply(ctx, proc, thunk.id, thunk.f, data, chan)
+    async_apply(ctx, proc, thunk.id, thunk.f, data, chan, thunk.get_result)
 end
 
 
@@ -204,17 +204,14 @@ function dependents(node::Thunk, deps=Dict())
         deps[node] = Set()
     end
     for inp = inputs(node)
-        deps[inp] = push!(get(deps, inp, Set()), node)
+        s = if !haskey(deps, inp)
+            deps[inp] = Set()
+        else deps[inp] end :: Set{Any}
+
+        push!(s, node)
         if isa(inp, Thunk)
             dependents(inp, deps)
         end
-    end
-    deps
-end
-
-function dependents(nodes::AbstractArray, deps=Dict())
-    for n in nodes
-        dependents(n, deps)
     end
     deps
 end
@@ -226,15 +223,26 @@ recursively find the number of taks dependent on each task in the DAG.
 Input: dependents dict
 """
 function noffspring(dpents::Dict)
-    Pair[node => noffspring(node, dpents) for node in keys(dpents)] |> Dict
-end
+    ndeps = Dict()
+    num_needed = Dict(Pair[k => length(v) for (k, v) in dpents])
+    current = Set()
+    for (k, v) in num_needed
+        # start with nodes that have no dependents (root)
+        v == 0 && push!(current, k)
+    end
 
-function noffspring(n, dpents)
-    ds = get(dpents, n, Set()) # dependents of n
-    length(dpents[n]) + reduce(+, 0, [noffspring(d, dpents)
-        for d in ds])
+    while !isempty(current)
+        key = pop!(current)
+        ndeps[key] = 1 + sum(Int[ndeps[dep] for dep in dpents[key]])
+        for c in inputs(key)
+            num_needed[c] -= 1
+            if num_needed[c] == 0
+                push!(current, c)
+            end
+        end
+    end
+    ndeps
 end
-
 
 """
 Given a root node of the DAG, calculates a total order for tie-braking
@@ -248,8 +256,8 @@ Args:
     - ndeps: result of `noffspring`
     - node: root node
 """
-function order(nodes, ndeps)
-    order(nodes, ndeps, 0)[2]
+function order(node::Thunk, ndeps)
+    order([node], ndeps, 0)[2]
 end
 
 function order(nodes::AbstractArray, ndeps, c, output=Dict())
@@ -257,21 +265,20 @@ function order(nodes::AbstractArray, ndeps, c, output=Dict())
     for node in nodes
         c+=1
         output[node] = c
-        nxt = sort([n for n in inputs(node)], by=k->ndeps[k])
+        nxt = sort(Any[n for n in inputs(node)], by=k->ndeps[k])
         c, output = order(nxt, ndeps, c, output)
     end
     c, output
 end
 
-function start_state(d::AbstractArray, node_order)
+function start_state(deps::Dict, node_order)
     state = Dict()
-    deps = dependents(d)
     state[:dependents] = deps
     state[:finished] = Set()
     state[:waiting] = Dict() # who is x waiting for?
     state[:waiting_data] = Dict() # dependents still waiting
     state[:ready] = Any[]
-    state[:cache] = ObjectIdDict()
+    state[:cache] = Dict()
     state[:running] = Set()
 
     nodes = sort(collect(keys(deps)), by=node_order)
@@ -294,15 +301,15 @@ end
 _move(ctx, x) = x
 _move(ctx, x::AbstractPart) = gather(ctx, x)
 
-function do_task(ctx, proc, thunk_id, f, data, chan)
+function do_task(ctx, proc, thunk_id, f, data, chan, send_result)
     try
         res = f(map(x->_move(ctx, x), data)...)
-        put!(chan, (proc, thunk_id, part(res))) #todo: add more metadata
+        put!(chan, (proc, thunk_id, send_result ? res : part(res))) #todo: add more metadata
     catch ex
         put!(chan, (proc, thunk_id, ex))
     end
     nothing
 end
-function async_apply(ctx, p::OSProc, thunk_id, f, data, chan)
-    remotecall(do_task, p.pid, ctx, p, thunk_id, f, data, chan)
+function async_apply(ctx, p::OSProc, thunk_id, f, data, chan, send_res)
+    remotecall(do_task, p.pid, ctx, p, thunk_id, f, data, chan, send_res)
 end

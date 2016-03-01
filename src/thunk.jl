@@ -7,20 +7,25 @@ global _thunk_dict = Dict()
 
 # A thing to run
 immutable Thunk <: AbstractPart
-    f::Function
-    inputs::Tuple
+    f::Function   # BlobCollection
+    inputs::Tuple # BlobID
     id::Int
+    get_result::Bool # whether the worker should send the result or only the metadata
     administrative::Bool
-    function Thunk(f, inputs, id, meta)
-        x = new(f, inputs, id, meta)
+    function Thunk(f, inputs, id, get_res, meta)
+        x = new(f, inputs, id, get_res, meta)
         _thunk_dict[id] = x
         x
     end
 end
-Thunk(f::Function, xs::Tuple; id::Int=next_id(),
-    meta::Bool=false) = Thunk(f,xs,id,meta)
-Thunk(f::Function, xs::AbstractArray; id::Int=next_id(),
-    meta::Bool=false) = Thunk(f,(xs...),id,meta)
+Thunk(f::Function, xs::Tuple; id::Int=next_id(), get_result::Bool=false,
+    meta::Bool=false) = Thunk(f,xs,id,get_result,meta)
+Thunk(f::Function, xs::AbstractArray; id::Int=next_id(), get_result::Bool=false,
+    meta::Bool=false) = Thunk(f,(xs...),id,get_result,meta)
+
+# this gives a ~30x speedup in hashing
+Base.hash(x::Thunk, h::UInt) = hash(x.id, hash(h, 0x7ad3bac49089a05f))
+Base.isequal(x::Thunk, y::Thunk) = x.id==y.id
 
 function sub(thunk::Thunk, d::Domain, T=Any)
     Thunk(data -> Sub(parttype(data), alignfirst(d), d, part(data)),

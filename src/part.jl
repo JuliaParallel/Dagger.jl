@@ -80,6 +80,14 @@ function gather(ctx, s::Sub)
     # A Sub{T<:Chunk{X}} can try to make this efficient for X
     gather(ctx, s.part)[s.subdomain]
 end
+# optimized subindexing on DistMem
+function gather(ctx, s::Sub{PartSpec{DistMem}})
+    ref = s.part.handle.ref
+    pid = ref.where
+    let d = s.subdomain
+        remotecall_fetch(x -> x[d], pid, ref)
+    end
+end
 
 """
     `sub(a::PartSpec, d::Domain)`
