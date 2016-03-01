@@ -45,8 +45,19 @@ into the calling process (e.g. a REPL)
 """
 compute(ctx, x::Computation) = compute(ctx, stage(ctx, x))
 compute(x) = compute(Context(), x)
-gather(ctx, x::Computation) = gather(ctx, compute(ctx, x))
+gather(ctx, x) = gather(ctx, compute(ctx, x))
 gather(x) = gather(Context(), x)
+
+
+immutable TupleCompute <: Computation
+    comps::Tuple
+end
+
+function stage(ctx, tc::TupleCompute)
+    t = map(c -> cached_stage(ctx, c), tc.comps)
+    Thunk(tuple, t)
+end
+gather(ctx, x::Tuple) = gather(ctx, compute(ctx, TupleCompute(x)))
 
 """
 promote a computed value to a Computation
@@ -55,8 +66,6 @@ immutable Computed <: Computation
     result::AbstractPart
     # TODO: Allow passive branching for Save?
 end
-
-convert(::Type{Computation}, p::AbstractPart) = Computed(p)
 
 function stage(ctx, c::Computed)
     c.result
