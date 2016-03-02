@@ -23,9 +23,10 @@ function release_token(tok)
     else
         remotecall_fetch(()->release_token(tok), tok.where)
     end
+    nothing
 end
 
-function Base.fetch(t)
+function Base.fetch(t::MemToken)
     if t.where == myid()
         _mymem[t]
     else

@@ -51,7 +51,7 @@ gather(ctx, io::DistMem) = fetch(io.ref)
 Create a part from a sequential object.
 """
 function part(x)
-    ref = MemToken(x)
+    ref = make_token(x)
     PartSpec(typeof(x), domain(x), DistMem(ref))
 end
 part(x::AbstractPart) = x

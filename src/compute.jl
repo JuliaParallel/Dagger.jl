@@ -187,7 +187,7 @@ function release!(cache, node)
     if haskey(cache, node)
         if isa(cache[node], PartSpec{DistMem})
             @logmsg("Finalizing remoteref")
-            finalize(cache[node].handle.ref)
+            release_token(cache[node].handle.ref)
         end
         pop!(cache, node)
     end
