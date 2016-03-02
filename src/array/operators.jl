@@ -6,7 +6,7 @@ import Base: exp, expm1, log, log10, log1p, sqrt, cbrt, exponent,
              asinh, acosh, atanh, acoth, asech, acsch, sinc, cosc,
              +, -, %, (.*), (.+), (.-), (.%), (./), (.^),
              $, &, (.!=), (.<), (.<=), (.==), (.>),
-             (.>=), (.\), (.^), (//), (.<), (.>>), (.<<)
+             (.>=), (.\), (.//), (.>>), (.<<)
 
 blockwise_unary = [:exp, :expm1, :log, :log10, :log1p, :sqrt, :cbrt, :exponent, :significand,
          :(-),
@@ -18,7 +18,7 @@ blockwise_unary = [:exp, :expm1, :log, :log10, :log1p, :sqrt, :cbrt, :exponent, 
 blockwise_binary =
         [:+, :-, :%, :(.*), :(.+), :(.-), :(.%), :(./), :(.^),
          :$, :&, :(.!=), :(.<), :(.<=), :(.==), :(.>),
-         :(.>=), :(.\), :(.^), :(//), :(.<), :(.>>), :(.<<)]
+         :(.>=), :(.\), :(.//), :(.>>), :(.<<)]
 
 
 immutable BlockwiseOp{F, N} <: Computation

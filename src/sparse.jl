@@ -123,35 +123,3 @@ end
 cat(::SliceDimension{1}, a::SparseMatrixCSC, b::SparseMatrixCSC) = vcat(a, b)
 cat(::SliceDimension{2}, a::SparseMatrixCSC, b::SparseMatrixCSC) = hcat(a, b)
 
-function partition(p::SliceDimension{2}, dom::SparseCSCDomain, nparts::Int)
-    nnz = length(dom)
-    nnz_per_chunk = nnz/nparts
-
-    nxt = nnz_per_chunk
-    colstart = 1
-    splits = UnitRange[]
-
-    colptr = dom.colptr
-    for i=1:nparts-1
-       idxs = searchsorted(colptr, nxt)
-       if length(idxs) == 0
-           # the exact index was not found. latch on to the nearest column boundary
-           idx = first(idxs)
-           if abs(colptr[idx]-nxt) < abs(colptr[idx-1]-nxt)
-               nextidx = idx
-           else
-               nextidx = idx-1
-           end
-       else
-           nextidx = last(idxs)
-       end
-       push!(splits, colstart:nextidx)
-       colstart=nextidx+1
-       nxt=nxt + nnz_per_chunk
-    end
-    push!(splits, colstart:(length(colptr)-1))
-
-    subdomains = [SparseCSCDomain(ArrayDomain((dom.adomain.indexranges[1], s)), getsubcolptr(dom.colptr, s))
-                     for s in splits]
-    DomainBranch(dom, subdomains)
-end

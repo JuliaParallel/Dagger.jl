@@ -45,8 +45,9 @@ reduce(f, x::Computation; get_result=true) = Reduce(f, f, x, get_result)
 reduce(f, g::Function, x::Computation; get_result=true) = Reduce(f, g, x, get_result)
 
 sum(x::Computation) = reduce(sum, (xs...)->sum(xs), x)
-sum(f, x::Computation) = reduce(a->sum(f, a), sum, x)
+sum(f::Function, x::Computation) = reduce(a->sum(f, a), sum, x)
 prod(x::Computation) = reduce(prod, x)
+prod(f::Function, x::Computation) = reduce(a->prod(f, a), prod, x)
 
 length(x::Computation) = reduce(length, sum, x)
 
