@@ -54,11 +54,12 @@ immutable TupleCompute <: Computation
 end
 
 function stage(ctx, tc::TupleCompute)
-    t = map(c -> cached_stage(ctx, c), tc.comps)
+    t = map(c -> thunkize(ctx, cached_stage(ctx, c)), tc.comps)
     Thunk(tuple, t)
 end
-gather(ctx, x::Tuple) = gather(ctx, compute(ctx, TupleCompute(x)))
+compute(ctx, x::Tuple) = compute(ctx, TupleCompute(x))
 
+export Computed
 """
 promote a computed value to a Computation
 """
@@ -106,7 +107,33 @@ function thunkize(ctx, c::Cat)
 end
 thunkize(ctx, x::AbstractPart) = x
 thunkize(ctx, x::Thunk) = x
-
+function finish_task!(state, node, node_order; release=true)
+    deps = sort([i for i in state[:dependents][node]], by=node_order)
+    for dep in deps
+        set = state[:waiting][dep]
+        pop!(set, node)
+        if isempty(set)
+            pop!(state[:waiting], dep)
+            push!(state[:ready], dep)
+        end
+        # todo: release data
+    end
+    for inp in inputs(node)
+        if inp in keys(state[:waiting_data])
+            s = state[:waiting_data][inp]
+            #@show s
+            if node in s
+                pop!(s, node)
+            end
+            if release && isempty(s)
+                @logmsg("releasing $inp")
+                release!(state[:cache], inp)
+            end
+        end
+    end
+    state[:finished] = node
+    pop!(state[:running], node)
+end
 
 ###### Scheduler #######
 """
@@ -129,7 +156,7 @@ function compute(ctx, d::Thunk)
     # start off some tasks
     for p in ps
         isempty(state[:ready]) && break
-        fire_task!(ctx, p, state, chan)
+        fire_task!(ctx, p, state, chan, node_order)
     end
 
     while !isempty(state[:waiting]) || !isempty(state[:ready]) || !isempty(state[:running])
@@ -145,34 +172,11 @@ function compute(ctx, d::Thunk)
         #@show ord
         # if any of this guy's dependents are waiting,
         # update them
-        deps = sort([i for i in state[:dependents][node]], by=node_order)
-        for dep in deps
-            set = state[:waiting][dep]
-            pop!(set, node)
-            if isempty(set)
-                pop!(state[:waiting], dep)
-                push!(state[:ready], dep)
-            end
-            # todo: release data
-        end
-        for inp in inputs(node)
-            if inp in keys(state[:waiting_data])
-                s = state[:waiting_data][inp]
-                #@show s
-                if node in s
-                    pop!(s, node)
-                end
-                if isempty(s)
-                    @logmsg("releasing $inp")
-                    release!(state[:cache], inp)
-                end
-            end
-        end
-        state[:finished] = node
-        pop!(state[:running], node)
+
+        finish_task!(state, node, node_order)
 
         while !isempty(state[:ready]) && length(state[:running]) < length(ps)
-            fire_task!(ctx, proc, state, chan)
+            fire_task!(ctx, proc, state, chan, node_order)
         end
     end
 
@@ -189,16 +193,20 @@ function release!(cache, node)
     end
 end
 
-function fire_task!(ctx, proc, state, chan)
+function fire_task!(ctx, proc, state, chan, node_order)
     thunk = pop!(state[:ready])
     @logmsg("W$(proc.pid) + $thunk ($(thunk.f)) input:$(thunk.inputs)")
+    push!(state[:running], thunk)
     if thunk.administrative
         # Run it on the parent node
         # do not _move data.
-        state[:cache][thunk] = thunk.f(map(n -> state[:cache][n], thunk.inputs)...)
+        res = thunk.f(map(n -> state[:cache][n], thunk.inputs)...)
+        #push!(state[:running], thunk)
+        state[:cache][thunk] = res
+        finish_task!(state, thunk, node_order; release=false)
+        !isempty(state[:ready]) && fire_task!(ctx, proc, state, chan, node_order)
         return
     end
-    push!(state[:running], thunk)
 
     data = Any[state[:cache][n] for n in thunk.inputs]
     async_apply(ctx, proc, thunk.id, thunk.f, data, chan, thunk.get_result)

@@ -3,7 +3,7 @@ let counter=0
     next_id() = counter+=1
 end
 
-global _thunk_dict = Dict()
+global _thunk_dict = Dict{Int, Any}()
 
 # A thing to run
 immutable Thunk <: AbstractPart
@@ -37,10 +37,11 @@ Thunk(f::Function, xs::AbstractArray; id::Int=next_id(), get_result::Bool=false,
     end
 end
 
-function Thunk(f::Function, t::Tuple{Thunk})
-    g = compose(f, t[1].f, t[1].inputs)
-    Thunk(g, t[1].inputs)
-end
+# function Thunk(f::Function, t::Tuple{Thunk})
+#     g = compose(f, t[1].f, t[1].inputs)
+#     @logmsg(string("FUSING ", f, "*", t[1].f))
+#     Thunk(g, t[1].inputs)
+# end
 
 # this gives a ~30x speedup in hashing
 Base.hash(x::Thunk, h::UInt) = hash(x.id, hash(h, 0x7ad3bac49089a05f))
