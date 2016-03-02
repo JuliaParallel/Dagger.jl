@@ -40,10 +40,10 @@ end
 
 
 ### PartIO
-
+include("lib/dumbref.jl")
 
 immutable DistMem <: PartIO
-    ref::RemoteChannel
+    ref::MemToken
 end
 gather(ctx, io::DistMem) = fetch(io.ref)
 
@@ -51,8 +51,7 @@ gather(ctx, io::DistMem) = fetch(io.ref)
 Create a part from a sequential object.
 """
 function part(x)
-    ref = RemoteChannel()
-    put!(ref, x)
+    ref = MemToken(x)
     PartSpec(typeof(x), domain(x), DistMem(ref))
 end
 part(x::AbstractPart) = x
