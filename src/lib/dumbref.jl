@@ -19,6 +19,7 @@ end
 function release_token(tok)
     if tok.where == myid()
         x = pop!(_mymem, tok)
+        release_blob(x)
         @logmsg("removed $tok - $(sizeof(x))B freed")
     else
         remotecall_fetch(()->release_token(tok), tok.where)
@@ -26,10 +27,14 @@ function release_token(tok)
     nothing
 end
 
+release_blob(x) = nothing
+
 function Base.fetch(t::MemToken)
     if t.where == myid()
-        _mymem[t]
+        fetch_again(_mymem[t])
     else
         remotecall_fetch(()->fetch(t), t.where)
     end
 end
+
+fetch_again(x) = x
