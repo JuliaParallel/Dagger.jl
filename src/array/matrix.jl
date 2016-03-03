@@ -5,16 +5,12 @@ immutable Transpose <: Computation
     input::Computation
 end
 
-transpose(x::AbstractPart) = Thunk(transpose, (x,))
 transpose(x::Computation) = Transpose(x)
+transpose(x::AbstractPart) = Thunk(transpose, (x,))
 transpose(x::BlockPartition) = BlockPartition((x.blocksize[2], x.blocksize[1]))
 function transpose(x::DenseDomain{2})
     d = indexes(x)
     DenseDomain(d[2], d[1])
-end
-
-function stage(ctx, node::Cat)
-    node
 end
 
 function stage(ctx, node::Transpose)
@@ -25,14 +21,6 @@ function stage(ctx, node::Transpose)
     thunks = Array(Thunk, size(dmnT.children))
     transpose!(thunks, inp.parts)
     Cat(inp.partition', parttype(inp), dmnT, thunks)
-end
-
-"""
-This is a way of suggesting that stage should call
-stage_operand with the operation and other arguments
-"""
-immutable PromotePartition{T} <: Computation
-    data::T
 end
 
 export Distribute
@@ -143,6 +131,14 @@ function _mul(a::Matrix, b::Vector; T=eltype(b))
         c[i] = reduce(+, map(*, a[i, :], b))
     end
     c
+end
+
+"""
+This is a way of suggesting that stage should call
+stage_operand with the operation and other arguments
+"""
+immutable PromotePartition{T} <: Computation
+    data::T
 end
 
 """

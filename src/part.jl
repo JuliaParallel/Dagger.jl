@@ -19,21 +19,21 @@ Get the data stored in a part
 function gather end
 
 
-###### PartSpec ######
+###### Part ######
 
 abstract PartIO
 """
 A part with some data
 """
-immutable PartSpec{I<:PartIO} <: AbstractPart
+immutable Part{I<:PartIO} <: AbstractPart
     parttype::Type
     domain::Domain
     handle::I
 end
 
-domain(c::PartSpec) = c.domain
-parttype(c::PartSpec) = c.parttype
-function gather(ctx, part::PartSpec)
+domain(c::Part) = c.domain
+parttype(c::Part) = c.parttype
+function gather(ctx, part::Part)
     # delegate fetching to handle by default.
     gather(ctx, part.handle)
 end
@@ -52,7 +52,7 @@ Create a part from a sequential object.
 """
 function part(x)
     ref = make_token(x)
-    PartSpec(typeof(x), domain(x), DistMem(ref))
+    Part(typeof(x), domain(x), DistMem(ref))
 end
 part(x::AbstractPart) = x
 
@@ -80,20 +80,20 @@ function gather(ctx, s::Sub)
     gather(ctx, s.part)[s.subdomain]
 end
 # optimized subindexing on DistMem
-function gather(ctx, s::Sub{PartSpec{DistMem}})
+function gather(ctx, s::Sub{Part{DistMem}})
     ref = s.part.handle.ref
     pid = ref.where
     let d = s.subdomain
-        remotecall_fetch(x -> x[d], pid, ref)
+        remotecall_fetch(x -> fetch(x)[d], pid, ref)
     end
 end
 
 """
-    `sub(a::PartSpec, d::Domain)`
+    `sub(a::Part, d::Domain)`
 
 Returns the `Sub` object which represents a sub part of `a`
 """
-function sub(p::PartSpec, d::Domain, T=parttype(p))
+function sub(p::Part, d::Domain, T=parttype(p))
 
     if domain(p) == d
         return p

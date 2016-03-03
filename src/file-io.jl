@@ -40,7 +40,7 @@ end
 """
 special case distmem writing - write to disk on the process with the part.
 """
-function save(ctx, part::PartSpec{DistMem}, file_path::AbstractString)
+function save(ctx, part::Part{DistMem}, file_path::AbstractString)
     pid = part.handle.ref.where
 
     remotecall_fetch(pid, file_path, part.handle.ref) do path, rref
@@ -50,7 +50,7 @@ function save(ctx, part::PartSpec{DistMem}, file_path::AbstractString)
     end
 end
 
-function save(ctx, io::IO, part::PartSpec, file_path)
+function save(ctx, io::IO, part::Part, file_path)
     meta_io = IOBuffer()
 
     serialize(meta_io, (parttype(part), domain(part)))
@@ -63,7 +63,7 @@ function save(ctx, io::IO, part::PartSpec, file_path)
 
     save(ctx, io, gather(ctx, part))
 
-    PartSpec(parttype(part), domain(part), FileReader(file_path, parttype(part), data_offset))
+    Part(parttype(part), domain(part), FileReader(file_path, parttype(part), data_offset))
 end
 
 function save(ctx, io::IO, part::Cat, file_path::AbstractString, saved_children::AbstractArray)
@@ -94,15 +94,15 @@ function save(ctx, io::IO, part::Cat, file_path)
 end
 
 function save(ctx, io::IO, part::Sub)
-    save(ctx, io, PartSpec(gather(ctx, part)))
+    save(ctx, io, Part(gather(ctx, part)))
 end
 
-function save(ctx, part::PartSpec{FileReader}, file_path::AbstractString)
+function save(ctx, part::Part{FileReader}, file_path::AbstractString)
    if abspath(file_path) == abspath(part.reader.file)
        part
    else
        cp(part.reader.file, file_path)
-       PartSpec(parttype(part), domain(part),
+       Part(parttype(part), domain(part),
           FileReader(file_path, parttype(part),
                      part.reader.data_offset))
    end
@@ -124,7 +124,7 @@ function load(ctx, file_path::AbstractString)
     f = open(file_path)
     part_typ = read(f, UInt8)
     if part_typ == PARTSPEC
-        c = load(ctx, PartSpec, file_path, f)
+        c = load(ctx, Part, file_path, f)
     elseif part_typ == CAT
         c = load(ctx, Cat, file_path, f)
     else
@@ -135,18 +135,18 @@ function load(ctx, file_path::AbstractString)
 end
 
 """
-    load(ctx, ::Type{PartSpec}, fpath, io)
+    load(ctx, ::Type{Part}, fpath, io)
 
-Load a PartSpec object from a file, the file path
+Load a Part object from a file, the file path
 is required for creating a FileReader object
 """
-function load(ctx, ::Type{PartSpec}, fname, io)
+function load(ctx, ::Type{Part}, fname, io)
     meta_len = read(io, Int)
     io = IOBuffer(readbytes(io, meta_len))
 
     (T, dmn, sz) = deserialize(io)
 
-    PartSpec(T, dmn, sz,
+    Part(T, dmn, sz,
         FileReader(fname, T, meta_len+1))
 end
 
@@ -165,7 +165,7 @@ function save(ctx, io::IO, m::Array)
     m
 end
 
-function gather{T<:Array}(ctx, c::PartSpec{FileReader{T}})
+function gather{T<:Array}(ctx, c::Part{FileReader{T}})
     h = c.handle
     io = open(h.file, "r+")
     seek(io, h.data_offset)
@@ -191,7 +191,7 @@ function save{Tv, Ti}(ctx, io::IO, m::SparseMatrixCSC{Tv,Ti})
     m
 end
 
-function gather{T<:SparseMatrixCSC}(ctx, c::PartSpec{FileReader{T}})
+function gather{T<:SparseMatrixCSC}(ctx, c::Part{FileReader{T}})
     h = c.handle
     io = open(h.file, "r+")
     seek(io, h.data_offset)
@@ -217,8 +217,8 @@ function gather{T<:SparseMatrixCSC}(ctx, c::PartSpec{FileReader{T}})
     SparseMatrixCSC(m, n, colptr, rowval, nnzval)
 end
 
-function getsub{T<:AbstractArray}(ctx, c::PartSpec{FileReader{T}}, d)
-    PartSpec(gather(ctx, c)[d])
+function getsub{T<:AbstractArray}(ctx, c::Part{FileReader{T}}, d)
+    Part(gather(ctx, c)[d])
 end
 
 

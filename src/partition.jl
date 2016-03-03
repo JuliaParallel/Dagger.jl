@@ -13,7 +13,7 @@ see `partition` and `gather`
 abstract PartitionScheme
 
 """
-    partition(p::PartitionScheme, domain::Domain, nparts::Int)
+    partition(p::PartitionScheme, domain::Domain)
 
 Partitions the `domain` into `nparts` approximately equal parts
 according to the `dist` data distribution.
@@ -23,45 +23,45 @@ returns a `DomainBranch` object.
 see also `distribute`. Note that by default `distribute` calls
 `partition_domain` on the domain of the input.
 """
-@unimplemented partition(p::PartitionScheme, domain::Domain, nparts::Int)
+@unimplemented partition(p::PartitionScheme, domain::Domain)
 
 """
-    cat(p::PartitionScheme, a...)
+    cat_data(p::PartitionScheme, a...)
 
 Put data objects back together as if they were split using a `PartitionScheme`
 """
-@unimplemented cat(p::PartitionScheme, t::Type, dom::Domain, parts)
+@unimplemented cat_data(p::PartitionScheme, t::Type, dom::Domain, parts)
 
 
 ## General schemes
 
-"""
-Broadcast layout denotes putting the whole data
-on each processing unit.
-"""
-immutable Broadcast <: PartitionScheme end
-
-partition(b::Broadcast, dom::Domain, nparts::Int) =
-    DomainBranch(dom, [dom for _ in 1:nparts])
-
-cat(p::Broadcast, dom::Domain, a, b) = a
-
-
-"""
-    Reducer(op, indentity)
-
-Reducer layout denotes putting two parts together
-by using a reducer operator and an identity value.
-"""
-immutable Reducer{F} <: PartitionScheme
-    op::F
-    v0::Any
-end
-cat(p::Reducer, ::UnitDomain, a, b) = p.op(a,b)
-cat(p::Reducer, ::UnitDomain) = p.v0
-
-partition(b::Reducer, dom::Domain, nparts::Int) =
-    error("Cannot partition using a reducer")
+# """
+# Broadcast layout denotes putting the whole data
+# on each processing unit.
+# """
+# immutable Broadcast <: PartitionScheme end
+#
+# partition(b::Broadcast, dom::Domain, nparts::Int) =
+#     DomainBranch(dom, [dom for _ in 1:nparts])
+#
+# cat(p::Broadcast, dom::Domain, a, b) = a
+#
+#
+# """
+#     Reducer(op, indentity)
+#
+# Reducer layout denotes putting two parts together
+# by using a reducer operator and an identity value.
+# """
+# immutable Reducer{F} <: PartitionScheme
+#     op::F
+#     v0::Any
+# end
+# cat(p::Reducer, ::UnitDomain, a, b) = p.op(a,b)
+# cat(p::Reducer, ::UnitDomain) = p.v0
+#
+# partition(b::Reducer, dom::Domain, nparts::Int) =
+#     error("Cannot partition using a reducer")
 
 
 ###### Array Partitioning ######

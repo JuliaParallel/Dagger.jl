@@ -42,7 +42,7 @@ Align `b` relative to `a`. For example,
 """
    getindex(a::Domain, b::Domain)
 
-Align `b` relative to `a`. For example,
+Align `a` relative to `b`. For example,
 
     getindex(DenseDomain(11:25, 21:100), DenseDomain(5:10, 10:40))
     DataParallelBase.DenseDomain{2}((15:20,30:60))

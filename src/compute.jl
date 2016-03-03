@@ -14,6 +14,10 @@ metadata about the result such as its type, domain and
 partition scheme.
 """
 @unimplemented stage(ctx, c::Computation)
+function stage(ctx, node::Cat)
+    node
+end
+
 
 """
 A memoized version of stage. It is important that the
@@ -73,10 +77,10 @@ function stage(ctx, c::Computed)
 end
 
 """
-`PartSpec` and `Sub` objects are always in computed state,
+`Part` and `Sub` objects are always in computed state,
 this method just returns them.
 """
-compute(ctx, x::Union{PartSpec, Sub}) = x
+compute(ctx, x::Union{Part, Sub}) = x
 
 """
 A Cat object may contain a thunk in it, in which case
@@ -185,7 +189,7 @@ end
 
 function release!(cache, node)
     if haskey(cache, node)
-        if isa(cache[node], PartSpec{DistMem})
+        if isa(cache[node], Part{DistMem})
             @logmsg("Finalizing remoteref")
             release_token(cache[node].handle.ref)
         end
