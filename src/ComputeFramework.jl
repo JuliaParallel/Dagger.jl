@@ -32,6 +32,7 @@ include("compute.jl")
 include("sparse.jl")
 include("file-io.jl")
 include("map-reduce.jl")
+include("read-delim.jl")
 
 # Array computations
 include("array/alloc.jl")
