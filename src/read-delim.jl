@@ -17,7 +17,7 @@ function stage(ctx, rd::ReadDelim)
         Thunk((range,)) do r
             open(rd.file, "r") do f
                 rd.cleanup(
-                    readdlm(BlockIO(f, r), rd.delim, '\n')
+                    readdlm(BlockIO(f, r, '\n'), rd.delim)
                 )
             end
         end
