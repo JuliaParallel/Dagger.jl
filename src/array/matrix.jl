@@ -6,11 +6,20 @@ immutable Transpose <: Computation
 end
 
 transpose(x::Computation) = Transpose(x)
-transpose(x::AbstractPart) = Thunk(transpose, (x,))
-transpose(x::BlockPartition) = BlockPartition((x.blocksize[2], x.blocksize[1]))
+transpose(x::AbstractPart) = Thunk(a -> transpose(a), (x,))
+transpose(x::BlockPartition{2}) = BlockPartition((x.blocksize[2], x.blocksize[1]))
+transpose(x::BlockPartition{1}) = BlockPartition((1, x.blocksize[1]))
 function transpose(x::DenseDomain{2})
     d = indexes(x)
     DenseDomain(d[2], d[1])
+end
+function transpose(x::DenseDomain{1})
+    d = indexes(x)
+    DenseDomain(1, d[1])
+end
+
+function _transpose(x::AbstractArray)
+    Any[x[j,i]' for i=1:size(x,2), j=1:size(x,1)]
 end
 
 function stage(ctx, node::Transpose)
@@ -18,8 +27,7 @@ function stage(ctx, node::Transpose)
     dmn = domain(inp)
     @assert isa(dmn, DomainBranch)
     dmnT = DomainBranch(head(dmn)', dmn.children')
-    thunks = Array(Thunk, size(dmnT.children))
-    transpose!(thunks, inp.parts)
+    thunks = _transpose(inp.parts)
     Cat(inp.partition', parttype(inp), dmnT, thunks)
 end
 
@@ -132,6 +140,12 @@ function _mul(a::Matrix, b::Vector; T=eltype(b))
     end
     c
 end
+
+function _mul(a::Vector, b::Vector; T=eltype(b))
+    @assert length(b) == 1
+    [x * b[1] for x in a]
+end
+
 
 """
 This is a way of suggesting that stage should call

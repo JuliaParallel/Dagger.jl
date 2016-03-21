@@ -87,7 +87,7 @@ function save(ctx, io::IO, part::Cat, file_path)
 
     # save the children
     saved_children = [save(ctx, c, joinpath(dir_path, lpad(i, 4, "0")))
-        for (i, c) in enumerate(part.children)]
+        for (i, c) in enumerate(part.parts)]
 
     save(ctx, io, part, file_path, saved_children)
     # write each child

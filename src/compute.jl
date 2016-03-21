@@ -244,26 +244,15 @@ recursively find the number of taks dependent on each task in the DAG.
 Input: dependents dict
 """
 function noffspring(dpents::Dict)
-    ndeps = Dict()
-    num_needed = Dict(Pair[k => length(v) for (k, v) in dpents])
-    current = Set()
-    for (k, v) in num_needed
-        # start with nodes that have no dependents (root)
-        v == 0 && push!(current, k)
-    end
-
-    while !isempty(current)
-        key = pop!(current)
-        ndeps[key] = 1 + sum(Int[ndeps[dep] for dep in dpents[key]])
-        for c in inputs(key)
-            num_needed[c] -= 1
-            if num_needed[c] == 0
-                push!(current, c)
-            end
-        end
-    end
-    ndeps
+    Pair[node => noffspring(node, dpents) for node in keys(dpents)] |> Dict
 end
+ 
+function noffspring(n, dpents)
+    ds = get(dpents, n, Set()) # dependents of n
+    length(dpents[n]) + reduce(+, 0, [noffspring(d, dpents)
+        for d in ds])
+end
+
 
 """
 Given a root node of the DAG, calculates a total order for tie-braking

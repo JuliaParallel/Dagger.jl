@@ -33,8 +33,13 @@ function stage(ctx, rd::ReadDelim)
         starts = vcat(0, rowsums[1:end-1]) .+1
         row_ranges = map(UnitRange, starts,rowsums)
 
-        p = BlockPartition((floor(Int, nrows/length(ds)), ncols))
-        dmn = DomainBranch(DenseDomain(1:nrows, 1:ncols), map(r -> DenseDomain(r, 1:ncols), row_ranges))
+        p,dmn = if ncols == 1
+            BlockPartition((floor(Int, nrows/length(ds)),)),
+            DomainBranch(DenseDomain((1:nrows,)), map(r -> DenseDomain((r,)), row_ranges))
+        else
+            BlockPartition((floor(Int, nrows/length(ds)), ncols)),
+            DomainBranch(DenseDomain(1:nrows, 1:ncols), map(r -> DenseDomain(r, 1:ncols), row_ranges))
+        end
         Cat(p, parttype(parts[1]), dmn, parts)
     end
 end

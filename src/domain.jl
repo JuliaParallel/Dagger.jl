@@ -147,7 +147,10 @@ alignfirst(a::ArrayDomain) =
 
 # Some utility functions specific to domains of arrays
 size(a::ArrayDomain) = map(length, indexes(a))
-size(a::ArrayDomain, dim) = length(indexes(a)[dim])
+function size(a::ArrayDomain, dim)
+    idxs = indexes(a)
+    length(idxs) < dim ? 1 : length(idxs[dim])
+end
 length(a::ArrayDomain) = prod(size(a))
 ndims(a::ArrayDomain) = length(size(a))
 isempty(a::DenseDomain) = length(a) == 0
