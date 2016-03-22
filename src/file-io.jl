@@ -169,7 +169,8 @@ function gather{T<:Array}(ctx, c::Part{FileReader{T}})
     h = c.handle
     io = open(h.file, "r+")
     seek(io, h.data_offset)
-    arr = Mmap.mmap(io, h.parttype, size(c.domain))
+    arr = reshape(reinterpret(eltype(T), read(io)), size(c.domain))
+    #arr = Mmap.mmap(io, h.parttype, size(c.domain))
     close(io)
     arr
 end
