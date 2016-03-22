@@ -1,109 +1,54 @@
 
-import Base: map, reduce, mapreduce, filter, IdFun
-if VERSION >= v"0.5.0-"
-import Base: foreach
+import Base: map
+
+#### Map
+immutable Map <: Computation
+    f::Function
+    inputs::Tuple
 end
 
-export reducebykey, foreach
-
-### ForEach node ###
-
-immutable Foreach{T<:Tuple} <: ComputeNode
-    f
-    input::T
-end
-
-foreach(f, xs::AbstractNode...) = Foreach(f, xs)
-
-function foreach_seq(f, args...)
-    for i=1:length(args[1])
-        f([a[i] for a in args]...)
+function stage(ctx, node::Map)
+    inputs = Any[cached_stage(ctx, n) for n in node.inputs]
+    primary = inputs[1] # all others will align to this guy
+    domains = domain(primary).children
+    thunks = similar(domains, Any)
+    f = node.f
+    for i=eachindex(domains)
+        inps = map(inp->sub(inp, domains[i]), inputs)
+        thunks[i] = Thunk((args...) -> map(f, args...), (inps...))
     end
+    Cat(partition(primary), Any, domain(primary), thunks)
 end
 
-function compute(ctx, node::Foreach)
-    compute(ctx, mappart(part -> foreach_seq(node.f, part), node.input))
+map(f, xs::Computation...) = Map(f, xs)
+map(f, x::AbstractPart) = map(f, Computed(x))
+map(f, x::Thunk) = Thunk(x->map(f,x), x)
+
+#### Reduce
+
+import Base: reduce, sum, prod, mean
+
+immutable Reduce <: Computation
+    op::Function
+    op_master::Function
+    input::Computation
+    get_result::Bool
 end
 
-### Map ###
-
-immutable Map{T<:Tuple} <: ComputeNode
-    f
-    input::T
+function stage(ctx, r::Reduce)
+    inp = stage(ctx, r.input)
+    reduced_parts = map(x -> Thunk(r.op, (x,); get_result=r.get_result), inp.parts)
+    Thunk(r.op_master, (reduced_parts...); meta=true)
 end
 
-map(f, ns::AbstractNode...) = Map(f, ns)
+reduce(f, x::Computation; get_result=true) = Reduce(f, f, x, get_result)
+reduce(f, g::Function, x::Computation; get_result=true) = Reduce(f, g, x, get_result)
 
-function compute(ctx, node::Map)
-    inputs = [compute(ctx, x) for x in node.input]
-    iscompatible(inputs...)
-    compute(ctx, mappart((localparts...) -> map(node.f, localparts...), inputs...))
-end
+sum(x::Computation) = reduce(sum, (xs...)->sum(xs), x)
+sum(f::Function, x::Computation) = reduce(a->sum(f, a), sum, x)
+prod(x::Computation) = reduce(prod, x)
+prod(f::Function, x::Computation) = reduce(a->prod(f, a), prod, x)
 
-### Fused Map-reduce ###
+length(x::Computation) = reduce(length, sum, x)
 
-immutable MapReduce{T<:Tuple} <: ComputeNode
-    f
-    op
-    v0
-    input::T
-end
-
-mapreduce(f, op, v0, input::AbstractNode...) = MapReduce(f, op, v0, input)
-reduce(op, v0, node::AbstractNode...) = mapreduce(IdFun(), op, v0, node...)
-
-# Mapreduce on multiple arguments
-function mapreduce(f, op, v0, X...)
-    acc = v0
-    for args in zip(X...)
-        acc = op(acc, f(args...))
-    end
-end
-
-function compute(ctx, node::MapReduce)
-    mapped = gather(ctx, mappart((parts...) -> mapreduce(node.f, node.op, node.v0, parts...), node.input))
-    reduce(node.op, node.v0, mapped.xs)
-end
-
-### Filter ###
-
-immutable Filter{N<:AbstractNode} <: ComputeNode
-    f
-    input::N
-end
-
-filter(f, x::AbstractNode) = Filter(f, x)
-
-function compute(ctx, node::Filter)
-    compute(ctx, mappart(part -> filter(node.f, part), node.input))
-end
-
-### GroupBy ###
-
-immutable MapReduceByKey{N<:Tuple} <: ComputeNode
-    f
-    op
-    v0
-    input::N
-end
-
-reducebykey(op, v0, input...) = MapReduceByKey(IdFun(), op, v0, input)
-mapreducebykey(f, op, v0, input...) = MapReduceByKey(f, op, v0, input)
-
-function mapreducebykey_seq(f, op,  v0, itr, dict=Dict())
-    for x in itr
-        y = f(x)
-        dict[y[1]] = op(get(dict, y[1], v0), y[2])
-    end
-    dict
-end
-
-reducebykey_seq(op, v0, itr,dict=Dict()) = mapreducebykey_seq(IdFun(), op, v0, itr, dict)
-
-object(x) = x
-object(x::Chunks) = x.xs
-
-function compute(ctx, node::MapReduceByKey)
-    parts = mappart((part) -> mapreducebykey_seq(node.f, node.op, node.v0, part), node.input)
-    reduce((acc, chunk) -> reducebykey_seq(node.op, node.v0, chunk, acc), Dict(), gather(ctx, parts) |> object)
-end
+mean(x::Computation) = sum(x) / length(x)

@@ -1,67 +1,42 @@
 module ComputeFramework
 
-using Compat
+# enable logging only during debugging
+using Logging
+const logger = Logging.configure(level=DEBUG)
+#const logger = Logging.configure(filename="/tmp/blobs$(getpid()).log", level=DEBUG)
 
-export compute, gather
-
-"A node in the computation graph"
-abstract AbstractNode
-"A node that has computed/loaded data in it"
-abstract DataNode <: AbstractNode
-"A compute node"
-abstract ComputeNode <: AbstractNode
-
-
-"""
-    compute(ctx, n::ComputeNode)
-
-Turn a AbstractNode into a DataNode by computing it
-"""
-function compute(ctx, n::ComputeNode)
-    # A specific method must be implemented for a ComputeNode type
-    error("Don't know how to compute $(typeof(n))")
+macro logmsg(s)
+    quote
+        debug($(esc(s)))
+    end
 end
-function compute(ctx, n::DataNode)
-    n
+#=
+macro logmsg(s)
 end
+=#
 
-"""
-    gather(ctx, n::DataNode)
 
-Collate a DataNode to return a result
-"""
-function gather(ctx, n::DataNode)
-    # A specific method must be implemented for a DataNode type
-    error("Don't know how to gather $(typeof(n))")
-end
-function gather(ctx, n::ComputeNode)
-    gather(ctx, compute(ctx, n))
-end
+include("util.jl")
 
-"""
-A layout pattern. Implements `partition` and `gather` methods
-"""
-abstract AbstractLayout
+# Data and sub-data
+include("domain.jl")
+include("partition.jl")
+include("part.jl")
 
-include("dist-data.jl")
-include("layout.jl")
-include("redistribute.jl")
+# Task scheduling
+include("processor.jl")
+include("thunk.jl")
+include("compute.jl")
 
-include("basic-nodes.jl")
-include("getindex.jl")
+# Extras
+include("sparse.jl")
+include("file-io.jl")
 include("map-reduce.jl")
-include("operators.jl")
-include("sort.jl")
+include("read-delim.jl")
 
-include("context.jl")
-include("accumulator.jl")
-include("macros.jl")
-include("optimize.jl")
-
-include("file-nodes.jl")
-include("matrix-ops.jl")
-
-
-include("show.jl")
+# Array computations
+include("array/alloc.jl")
+include("array/operators.jl")
+include("array/matrix.jl")
 
 end # module
