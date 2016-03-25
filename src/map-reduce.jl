@@ -1,5 +1,5 @@
 
-import Base: map
+import Base: reduce, map
 
 #### Map
 immutable Map <: Computation

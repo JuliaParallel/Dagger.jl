@@ -33,7 +33,7 @@ we are staging A multiple times.
 
 global _stage_cache = Dict()
 function cached_stage(ctx, x)
-    if haskey(_stage_cache, x)
+    if haskey(_stage_cache, (ctx, x))
         _stage_cache[(ctx, x)]
     else
         _stage_cache[(ctx, x)] = stage(ctx, x)
