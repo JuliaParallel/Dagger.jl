@@ -29,7 +29,7 @@ include("thunk.jl")
 include("compute.jl")
 
 # Extras
-include("sparse.jl")
+#include("sparse.jl")
 include("file-io.jl")
 include("map-reduce.jl")
 include("read-delim.jl")
@@ -37,6 +37,7 @@ include("read-delim.jl")
 # Array computations
 include("array/alloc.jl")
 include("array/operators.jl")
+include("array/getindex.jl")
 include("array/matrix.jl")
 
 end # module
