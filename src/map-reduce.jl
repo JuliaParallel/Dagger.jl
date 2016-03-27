@@ -1,6 +1,8 @@
 
 import Base: reduce, map
 
+export reducebykey
+
 #### Map
 immutable Map <: Computation
     f::Function
@@ -41,14 +43,33 @@ function stage(ctx, r::Reduce)
     Thunk(r.op_master, (reduced_parts...); meta=true)
 end
 
-reduce(f, x::Computation; get_result=true) = Reduce(f, f, x, get_result)
-reduce(f, g::Function, x::Computation; get_result=true) = Reduce(f, g, x, get_result)
+reduceblock(f, x::Computation; get_result=true) = Reduce(f, f, x, get_result)
+reduceblock(f, g::Function, x::Computation; get_result=true) = Reduce(f, g, x, get_result)
 
-sum(x::Computation) = reduce(sum, (xs...)->sum(xs), x)
-sum(f::Function, x::Computation) = reduce(a->sum(f, a), sum, x)
-prod(x::Computation) = reduce(prod, x)
-prod(f::Function, x::Computation) = reduce(a->prod(f, a), prod, x)
+sum(x::Computation) = reduceblock(sum, (xs...)->sum(xs), x)
+sum(f::Function, x::Computation) = reduceblock(a->sum(f, a), sum, x)
+prod(x::Computation) = reduceblock(prod, x)
+prod(f::Function, x::Computation) = reduceblock(a->prod(f, a), prod, x)
 
-length(x::Computation) = reduce(length, sum, x)
+length(x::Computation) = reduceblock(length, sum, x)
 
 mean(x::Computation) = sum(x) / length(x)
+
+
+function mapreducebykey_seq(f, op,  itr, dict=Dict())
+    for x in itr
+        y = f(x)
+        if haskey(dict, y[1])
+            dict[y[1]] = op(dict[y[1]], y[2])
+        else
+            dict[y[1]] = y[2]
+        end
+    end
+    dict
+end
+
+function merge_reducebykey(op)
+    (xs...) -> reduce((d,x) -> reducebykey_seq(op, x, d), Dict(), xs)
+end
+reducebykey_seq(op, itr,dict=Dict()) = mapreducebykey_seq(Base.IdFun(), op, itr, dict)
+reducebykey(op, input) = reduceblock(itr->reducebykey_seq(op, itr), merge_reducebykey(op), input)

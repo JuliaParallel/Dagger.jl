@@ -1,23 +1,40 @@
 # ComputeFramework
 
-**A framework for DAG-based computations**
+**A framework for out-of-core and distributed computation**.
 
-## Usage
+ComputeFramework allows you to represent huge amounts of data as smaller pieces and compute on the pieces in parallel. The API mimicks Julia's standard library so that it is easy to use. Computation with ComputeFramework uses a scheduler similar to that in [Dask](http://dask.pydata.org/en/latest/). This scheduler tries to minimize the amount of memory allocated at any given time while maximizing CPU utilization.
+
+## Example Usage
 
 ```julia
-addprocs(4)
 
+addprocs()
+# Note: you should load ComputeFramework *after* adding
+# worker processes using addprocs()
 using ComputeFramework
+```
 
-ctx = Context()
+Example 1.
 
-a = rand(100, 100)
+```julia
+# Summing a matrix of 10 billion numbers
 
-b = distribute(a) # Distribute the array column-wise. distribute(a, cutdim(1)) distributes by rows
+a = rand(BlockPartition(4000, 4000), Float64, (10^5, 10^5))
+compute(sum(a))
+```
+
+Example 2.
+
+```julia
+
+# distribute a matrix and then do some computation
+a = rand(1000, 1000)
+
+b = Distribute(BlockPartition(100, 100), a) # Create chunks of 100x100 submatrices
 c = map(x->x^2, b)
-d = reduce(+, 0.0, c)
+d = reduce(+, c)
 
-compute(Context(), d) # compute the sum of squares
+compute(d) # compute the sum of squares
 ```
 
 ## API
