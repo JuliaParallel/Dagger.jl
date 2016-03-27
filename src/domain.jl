@@ -145,6 +145,12 @@ getindex(a::ArrayDomain, b::ArrayDomain) =
 alignfirst(a::ArrayDomain) =
     DenseDomain(map(r->1:length(r), indexes(a)))
 
+function alignfirst{T<:ArrayDomain}(a::DomainBranch{T})
+    h = alignfirst(head(a))
+    children = map(alignfirst, a.children)
+    DomainBranch(h, cumulative_domains(children))
+end
+
 # Some utility functions specific to domains of arrays
 size(a::ArrayDomain) = map(length, indexes(a))
 function size(a::ArrayDomain, dim)

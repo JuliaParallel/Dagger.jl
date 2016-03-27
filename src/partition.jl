@@ -136,10 +136,20 @@ BlockPartition(xs...) = BlockPartition(xs)
 end
 
 function cat_data(p::BlockPartition, dom::DomainBranch, parts::AbstractArray)
+    if isa(parts[1], SparseMatrixCSC)
+        return sparse_cat_data(parts)
+    end
     T = eltype(parts[1])
     arr = Array(T, size(dom))
-    for (d, part) in zip(dom.children, parts)
+    fdom = alignfirst(dom)
+    for (d, part) in zip(fdom.children, parts)
         arr[indexes(d)...] = part
     end
     arr
+end
+
+function sparse_cat_data(parts)
+    hblocks = Any[hcat(parts[i, :]...) for i=1:size(parts,1)]
+
+    vcat(hblocks...)
 end

@@ -145,25 +145,42 @@ cat(p::PartitionScheme, T::Type, d::Domain, parts::AbstractArray) =
 `sub` of a `Cat` part returns a `Cat` of sub parts
 """
 function sub(c::Cat, d)
-    parts = AbstractPart[]
-    subdomains = Domain[]
-
-    l = length(c.domain.children)
-
-    for i in 1:l
-        dmn = c.domain.children[i]
-        ch = c.parts[i]
-
-        if dmn == d
-            return ch
-        end
-
-        subd = intersect(d, dmn)
-        if !isempty(subd)
-            push!(parts, sub(ch, project(dmn, subd)))
-            push!(subdomains, subd)
-        end
-    end
+    parts, subdomains = lookup_parts(c.parts, domain(c).children, d)
 
     cat(partition(c), parttype(c), DomainBranch(d, subdomains), parts)
+end
+
+function getdim(vec)
+    dim = 0
+    for el in vec
+        if el != 0 && dim != 0
+            @assert dim == el
+        elseif el != 0 && dim == 0
+            dim = el
+        end
+    end
+    dim
+end
+
+Base.(:*)(a::Range, b::Range) = ((last(a) + 1):(last(a)+length(b)))
+@generated function cumulative_domains{T,N}(arr::Array{T,N})
+    quote
+        Base.@nexprs $N dim->R_dim = cumprod(map(x->indexes(x)[dim], arr), dim)
+        Base.@ncall $N map DenseDomain R
+    end
+end
+
+function lookup_parts{T,N}(parts, part_domains::Array{T,N}, d)
+    intersects = map(pd -> intersect(d, pd), part_domains)
+    found = map(x -> !isempty(x), intersects)
+
+    sz = ntuple(dim -> getdim(sum(found, dim)), N)
+    idxs = find(found)
+    interesting_parts = reshape(parts[idxs], sz)
+    interesting_domains = reshape(part_domains[idxs], sz)
+    intersects2 = reshape(intersects[idxs], sz)
+    subparts = map(intersects2, interesting_parts, interesting_domains) do subd, part, dmn
+        sub(part, project(dmn, subd))
+    end
+    subparts, cumulative_domains(map(alignfirst, intersects2))
 end
