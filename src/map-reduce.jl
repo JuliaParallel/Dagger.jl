@@ -30,21 +30,23 @@ map(f, x::Thunk) = Thunk(x->map(f,x), x)
 
 import Base: reduce, sum, prod, mean
 
-immutable Reduce <: Computation
+immutable ReduceBlock <: Computation
     op::Function
     op_master::Function
     input::Computation
     get_result::Bool
 end
 
-function stage(ctx, r::Reduce)
+function stage(ctx, r::ReduceBlock)
     inp = stage(ctx, r.input)
     reduced_parts = map(x -> Thunk(r.op, (x,); get_result=r.get_result), inp.parts)
     Thunk(r.op_master, (reduced_parts...); meta=true)
 end
 
-reduceblock(f, x::Computation; get_result=true) = Reduce(f, f, x, get_result)
-reduceblock(f, g::Function, x::Computation; get_result=true) = Reduce(f, g, x, get_result)
+reduceblock(f, x::Computation; get_result=true) = ReduceBlock(f, f, x, get_result)
+reduceblock(f, g::Function, x::Computation; get_result=true) = ReduceBlock(f, g, x, get_result)
+
+reduce(f, x::Computation) = reduceblock(xs->reduce(f,xs), (xs...)->reduce(f,xs), x)
 
 sum(x::Computation) = reduceblock(sum, (xs...)->sum(xs), x)
 sum(f::Function, x::Computation) = reduceblock(a->sum(f, a), sum, x)
