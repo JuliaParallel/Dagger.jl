@@ -1,4 +1,4 @@
-import DataParallelBase: indexes, project
+import ComputeFramework: indexes, project
 
 @testset "UnitDomain" begin
     @test domain(1) == UnitDomain()

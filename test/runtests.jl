@@ -1,11 +1,8 @@
-addprocs(4)
+addprocs()
 
 using ComputeFramework
 
-using BaseTestNext
-@everywhere const Test = BaseTestNext
+using Base.Test
 
-include("util.jl")
-include("distribute.jl")
-include("redistribute.jl")
-include("show.jl")
+include("domain.jl")
+include("partition.jl")
