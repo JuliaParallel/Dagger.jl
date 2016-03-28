@@ -163,12 +163,23 @@ function getdim(vec)
 end
 
 Base.(:*)(a::Range, b::Range) = ((last(a) + 1):(last(a)+length(b)))
-@generated function cumulative_domains{T,N}(arr::Array{T,N})
+@generated function cumulative_domains{N}(::Val{N}, arr::Array)
     quote
         Base.@nexprs $N dim->R_dim = cumprod(map(x->indexes(x)[dim], arr), dim)
         Base.@ncall $N map DenseDomain R
     end
 end
+
+function extend_dim{T,N}(x::Array{T,N})
+    Nd = ndims(x[1])
+    if Nd > N
+        sz = tuple(size(x)..., [1 for i=1:(Nd-N)]...)
+        return Val{Nd}(), reshape(x, sz)
+    else
+        return Val{N}(), x
+    end
+end
+cumulative_domains(x::Array) = cumulative_domains(extend_dim(x)...)
 
 function lookup_parts{T,N}(parts, part_domains::Array{T,N}, d)
     intersects = map(pd -> intersect(d, pd), part_domains)
