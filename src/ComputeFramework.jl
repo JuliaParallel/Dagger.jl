@@ -40,4 +40,6 @@ include("array/operators.jl")
 include("array/getindex.jl")
 include("array/matrix.jl")
 
+include("show.jl")
+
 end # module
