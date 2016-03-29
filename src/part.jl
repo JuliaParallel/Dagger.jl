@@ -146,6 +146,9 @@ cat(p::PartitionScheme, T::Type, d::Domain, parts::AbstractArray) =
 """
 function sub(c::Cat, d)
     parts, subdomains = lookup_parts(c.parts, domain(c).children, d)
+    if length(parts) == 1
+        return parts[1]
+    end
 
     cat(partition(c), parttype(c), DomainBranch(d, subdomains), parts)
 end

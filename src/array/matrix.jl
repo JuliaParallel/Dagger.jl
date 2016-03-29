@@ -25,7 +25,6 @@ end
 function stage(ctx, node::Transpose)
     inp = cached_stage(ctx, node.input)
     dmn = domain(inp)
-    @assert isa(dmn, DomainBranch)
     dmnT = DomainBranch(head(dmn)', dmn.children')
     thunks = _transpose(inp.parts)
     Cat(inp.partition', parttype(inp), dmnT, thunks)

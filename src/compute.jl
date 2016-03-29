@@ -167,6 +167,7 @@ function compute(ctx, d::Thunk)
         proc, thunk_id, res = take!(chan)
 
         if isa(res, Exception)
+            println(STDERR, "Got an exception from $proc")
             rethrow(res)
         end
         node = _thunk_dict[thunk_id]

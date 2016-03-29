@@ -47,9 +47,10 @@ end
 Base.hash(x::Thunk, h::UInt) = hash(x.id, hash(h, 0x7ad3bac49089a05f))
 Base.isequal(x::Thunk, y::Thunk) = x.id==y.id
 
+get_sub(x::AbstractPart, d) = sub(x,d)
+get_sub(x, d) = part(x[d])
 function sub(thunk::Thunk, d::Domain, T=Any)
-    Thunk(data -> Sub(parttype(data), alignfirst(d), d, part(data)),
-        (thunk,))
+    Thunk(x->get_sub(x,d), (thunk,))
 end
 
 ##### Macro sugar #####
