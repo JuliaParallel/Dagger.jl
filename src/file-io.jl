@@ -236,7 +236,12 @@ end
 
 function stage(ctx, s::Save)
     x = cached_stage(ctx, s.input)
-    save_part(p) = save(ctx, part(p), tempname())
+    function save_part(data)
+        p = part(data)
+        saved = save(ctx, p, tempname())
+        release_token(p.handle.ref)
+        saved
+    end
     saved_parts = map(x.parts) do p
         Thunk(save_part, (p,))
     end
