@@ -20,23 +20,23 @@ worker processes for julia to load the package on all of them.
 ### Playing with random matrices
 
 A good place to start learning to work with ComputeFramework is to play with some distributed random data.
-In this example we will create a matrix of size `10^4x10^4` which is cut up into pieces of `4000x4000` elements. 
+In this example we will create a matrix of size `10000x10000` which is cut up into pieces of `4000x4000` elements. 
 
 ```julia
-a = rand(BlockPartition(4000, 4000), Float64, (10^4, 10^4))
+a = rand(BlockPartition(4000, 4000), 10^4, 10^4)
 # => ComputeFramework.AllocateArray(...)
 ```
 
-Notice the first argument `BlockPartition(4000,4000)`. This tells ComputeFramework to create the matrix with block partitioning where each partition is a 4000x4000 matrix. `4000x4000` floating point numbers takes up 128MB of RAM, this is a good chunk size to deal with - many such chunks can fit in a typical RAM, and files of size 128MB can be written to and read from disk with lesser overhead than smaller chunks. It is the onus of the user of ComputeFramework to chose a suitable partitioning for the data.
+Notice the first argument `BlockPartition(4000,4000)`. This tells ComputeFramework to create the matrix with block partitioning where each partition is a `4000x4000` matrix. `4000x4000` floating point numbers takes up 128MB of RAM, this is a good chunk size to deal with - many such chunks can fit in a typical RAM, and files of size 128MB can be written to and read from disk with lesser overhead than smaller chunks. It is the onus of the user of ComputeFramework to chose a suitable partitioning for the data.
 
-In the above example `a` *represents* the random matrix . The actual data has not been created yet. If you call `compute(a)`, the data will be created in 4000x4000 pieces.
+In the above example the object `a` *represents* the random matrix . The actual data has not been created yet. If you call `compute(a)`, the data will be created.
 
 ```julia
 b = compute(a)
-#=> Computed(Cat(...))
+#=> 10000x10000 Array{Float64,2} in 9 parts each of (max size) 4000x4000
 ```
 
-The result is an object containing the metadata about the various pieces. They may be created on different workers and will stay there until a another worker needs it. You can request to see the whole data with the `gather` function.
+The result is an object containing metadata about the various pieces. They may be created on different workers and will stay there until a another worker needs it. However, you can request get the whole data with the `gather` function.
 
 ```julia
 gather(b)
@@ -59,7 +59,7 @@ For the full array API supported by ComputeFramework, see below.
 
 ### Saving and loading data
 
-Sometimes the result of a computation might be too big to fit in memory. In such cases it is advisable to save the data to disk. You can do this by calling `save` on the computation along with the destination file name.
+Sometimes the result of a computation might be too big to fit in memory. In such cases you will need to save the data to disk. You can do this by calling `save` on the computation along with the destination file name.
 
 ```julia
 x = randn(BlockPartition(4000,4000), 10^5, 10^4)
@@ -80,7 +80,7 @@ Now you can do some computation on `X_sq` and the data will be read from disk wh
 
 ```julia
 compute(sum(X_sq))
-#=> 1.0000065091623393e8
+#=> 1.0000065091623393e9
 ```
 
 ## Distributing data
