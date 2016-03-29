@@ -236,18 +236,28 @@ end
 
 function stage(ctx, s::Save)
     x = cached_stage(ctx, s.input)
-    function save_part(data)
+    dir_path = s.name * "_data"
+    if !isdir(dir_path)
+        mkdir(dir_path)
+    end
+    function save_part(idx, data)
         p = part(data)
-        saved = save(ctx, p, tempname())
+        path = joinpath(dir_path, lpad(idx, 4, "0"))
+        saved = save(ctx, p, path)
+
+        # release reference created for the purpose of save
         release_token(p.handle.ref)
         saved
     end
-    saved_parts = map(x.parts) do p
-        Thunk(save_part, (p,))
+
+    saved_parts = similar(x.parts, Thunk)
+    for i=1:length(x.parts)
+        saved_parts[i] = Thunk(save_part, (i, x.parts[i]))
     end
+    sz = size(x.parts)
     function save_cat_meta(parts...)
         f = open(s.name, "w")
-        saved_parts = AbstractPart[c for c in parts]
+        saved_parts = reshape(AbstractPart[c for c in parts], sz)
         res = save(ctx, f, x, s.name, saved_parts)
         close(f)
         res
