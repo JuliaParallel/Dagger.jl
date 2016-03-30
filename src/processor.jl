@@ -16,7 +16,8 @@ for a papply operation.
 immutable Context
     procs::Array{Processor}
 end
-Context() = Context(map(OSProc, workers()))
+Context(xs::Array{Int}) = Context(map(OSProc, xs))
+Context() = Context(workers())
 procs(c::Context) = c.procs
 
 #gather(x::AbstractPart) = gather(Context(), x)
