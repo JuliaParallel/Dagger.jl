@@ -52,3 +52,6 @@ function stage(ctx, node::BlockwiseOp)
     end
     Cat(partition(primary), Any, domain(primary), thunks)
 end
+
+export mappart
+mappart(f, xs::Computation...) = BlockwiseOp(f, xs)
