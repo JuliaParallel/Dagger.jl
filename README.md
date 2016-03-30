@@ -33,7 +33,7 @@ In the above example the object `a` *represents* the random matrix . The actual 
 
 ```julia
 b = compute(a)
-#=> Computed(10000x10000 Array{Float64,2} in 9 parts each of (max size) 4000x4000)
+# => Computed(10000x10000 Array{Float64,2} in 9 parts each of (max size) 4000x4000)
 ```
 
 The result is an object containing metadata about the various pieces. They may be created on different workers and will stay there until a another worker needs it. However, you can request and get the whole data with the `gather` function.
@@ -51,7 +51,7 @@ In this example, we will compute the sum of square of a 10000x10000 normally dis
 ```julia
 x = randn(BlockPartition(4000,4000), 10^4, 10^4)
 compute(sum(x.^2))
-#=> 1.0000084097623596e8
+# => 1.0000084097623596e8
 ```
 the answer is close to 10^8. Note the use of `compute` on `sum`. This is because `sum` returns an object representing the computation of the sum. You need to call compute on it to actually compute it.
 
@@ -80,7 +80,7 @@ Now you can do some computation on `X_sq` and the data will be read from disk wh
 
 ```julia
 compute(sum(X_sq))
-#=> 1.0000065091623393e9
+# => 1.0000065091623393e9
 ```
 
 ## Distributing data
@@ -139,13 +139,13 @@ To create a random sparse matrix or vector use the `sprand` function.
 
 ```julia
 s1 = sprand(BlockPartition(4000,4000), 10^4, 10^4, 0.01)
-#=> AllocateArray(...)
+# => AllocateArray(...)
 
 compute(s1)
-#=> Computed(10000x10000 SparseMatrixCSC{Float64,Int64} in 3x3 parts each of (max size) 4000x4000)
+# => Computed(10000x10000 SparseMatrixCSC{Float64,Int64} in 3x3 parts each of (max size) 4000x4000)
 
 s2 = sprand(BlockPartition(4000,), 10^4, 0.01)
-#=> AllocateArray(...)
+# => AllocateArray(...)
 
 julia> compute(s2)
 Computed(10000 SparseVector{Float64,Int64} in 3 parts each of (max size) 4000)
@@ -169,13 +169,16 @@ julia> gather(x)
 
 ## API
 
-**Creating distributed arrays**
+**Creating arrays**
 
 - `Distribute(partition_scheme, data)` - distribute `data` according to `partition_scheme`.
 - `rand(partition_scheme, [type], [dimensions...])` - create a random array with the specified partition scheme
 - `randn(partition_scheme, [dimensions...])` - create a normally distributed random array with the specified partition scheme
 - `ones(partition_scheme, [type], [dimensions...])` - create an array of all ones
 - `zeros(partition_scheme, [type], [dimensions...])` - create an array of all zeros
+
+**Sparse arrays**
+- `sprand(partition_scheme, m, [n], sparsity)` - create sparse matrix or vector with the given partition scheme
 
 **Map-reduce**
 
