@@ -40,3 +40,10 @@ end
 Base.ones(p::PartitionScheme, t::Type, dims::Integer...) = ones(p, t, dims)
 Base.ones(p::PartitionScheme, dims::Integer...) = ones(p, Float64, dims)
 Base.ones(p::PartitionScheme, dims::Tuple) = ones(p, Float64, dims)
+
+function Base.zeros(p::PartitionScheme, eltype::Type, dims)
+    AllocateArray(eltype, zeros, DenseDomain(map(x->1:x, dims)), p)
+end
+Base.zeros(p::PartitionScheme, t::Type, dims::Integer...) = zeros(p, t, dims)
+Base.zeros(p::PartitionScheme, dims::Integer...) = zeros(p, Float64, dims)
+Base.zeros(p::PartitionScheme, dims::Tuple) = zeros(p, Float64, dims)
