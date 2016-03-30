@@ -7,8 +7,8 @@ global _thunk_dict = Dict{Int, Any}()
 
 # A thing to run
 immutable Thunk <: AbstractPart
-    f::Function   # BlobCollection
-    inputs::Tuple # BlobID
+    f::Function
+    inputs::Tuple
     id::Int
     get_result::Bool # whether the worker should send the result or only the metadata
     administrative::Bool
