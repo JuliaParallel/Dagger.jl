@@ -104,9 +104,10 @@ If a Cat tree has a Thunk in it, make the whole thing a big thunk
 function thunkize(ctx, c::Cat)
     if any(istask, c.parts)
         thunks = map(x -> thunkize(ctx, x), c.parts)
+        sz = size(c.parts)
         Thunk(thunks; meta=true) do results...
             t = parttype(results[1])
-            Cat(partition(c), t, domain(c), AbstractPart[results...])
+            Cat(partition(c), t, domain(c), reshape(AbstractPart[results...], sz))
         end
     else
         c

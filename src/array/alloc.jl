@@ -47,3 +47,12 @@ end
 Base.zeros(p::PartitionScheme, t::Type, dims::Integer...) = zeros(p, t, dims)
 Base.zeros(p::PartitionScheme, dims::Integer...) = zeros(p, Float64, dims)
 Base.zeros(p::PartitionScheme, dims::Tuple) = zeros(p, Float64, dims)
+
+
+function Base.sprand(p::PartitionScheme, m::Integer, n::Integer, sparsity::Real)
+    AllocateArray(Float64, (t,sz) -> sprand(sz...,sparsity), DenseDomain((1:m, 1:n)), p)
+end
+
+function Base.sprand(p::PartitionScheme, n::Integer, sparsity::Real)
+    AllocateArray(Float64, (t,sz) -> sprand(sz...,sparsity), DenseDomain((1:n,)), p)
+end
