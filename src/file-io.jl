@@ -142,7 +142,7 @@ is required for creating a FileReader object
 """
 function load(ctx, ::Type{Part}, fname, io)
     meta_len = read(io, Int)
-    io = IOBuffer(readbytes(io, meta_len))
+    io = IOBuffer(read(io, meta_len))
 
     (T, dmn, sz) = deserialize(io)
 
@@ -202,7 +202,7 @@ function gather{T<:SparseMatrixCSC}(ctx, c::Part{FileReader{T}})
     nnz = read(io, Int)
 
     typ_len = read(io, Int)
-    typ_bytes = readbytes(io, typ_len)
+    typ_bytes = read(io, typ_len)
     (Tv, Ti) = deserialize(IOBuffer(typ_bytes))
 
     pos = position(io)
