@@ -208,7 +208,7 @@ function fire_task!(ctx, proc, state, chan, node_order)
     if thunk.administrative
         # Run it on the parent node
         # do not _move data.
-        res = thunk.f(map(n -> state[:cache][n], thunk.inputs)...)
+        res = thunk.f(Any[state[:cache][i] for i in thunk.inputs]...)
         #push!(state[:running], thunk)
         state[:cache][thunk] = res
         finish_task!(state, thunk, node_order; release=false)
