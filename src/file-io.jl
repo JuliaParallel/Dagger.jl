@@ -146,15 +146,15 @@ function load(ctx, ::Type{Part}, fname, io)
 
     (T, dmn, sz) = deserialize(io)
 
-    Part(T, dmn, sz,
-        FileReader(fname, T, meta_len+1))
+    Computed(Part(T, dmn, sz,
+        FileReader(fname, T, meta_len+1)))
 end
 
 function load(ctx, ::Type{Cat}, file_path, io)
     dir_path = file_path*"_data"
 
     metadata = deserialize(io)
-    Cat(metadata...)
+    Computed(Cat(metadata...))
 end
 
 
@@ -254,6 +254,7 @@ function stage(ctx, s::Save)
     for i=1:length(x.parts)
         saved_parts[i] = Thunk(save_part, (i, x.parts[i]))
     end
+
     sz = size(x.parts)
     function save_cat_meta(parts...)
         f = open(s.name, "w")

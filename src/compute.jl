@@ -47,11 +47,13 @@ Calling `compute` on an `Computation` will make an
 You can call `gather` on the result to get the result
 into the calling process (e.g. a REPL)
 """
-compute(ctx, x::Computation) = compute(ctx, stage(ctx, x))
+compute(ctx, x::Computation) = wrap_computed(compute(ctx, cached_stage(ctx, x)))
 compute(x) = compute(Context(), x)
 gather(ctx, x) = gather(ctx, compute(ctx, x))
 gather(x) = gather(Context(), x)
 
+wrap_computed(x::AbstractPart) = Computed(x)
+wrap_computed(x) = x
 
 immutable TupleCompute <: Computation
     comps::Tuple
@@ -71,6 +73,7 @@ immutable Computed <: Computation
     result::AbstractPart
     # TODO: Allow passive branching for Save?
 end
+gather(ctx, x::Computed) = gather(ctx, x.result)
 
 function stage(ctx, c::Computed)
     c.result
