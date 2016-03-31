@@ -1,6 +1,6 @@
 # ComputeFramework
 
-**A framework for out-of-core and distributed computation**.
+**A framework for out-of-core and parallel computation**.
 
 ComputeFramework allows you to represent huge amounts of data as smaller pieces and compute on the pieces in parallel. The API mimicks Julia's standard library, with a few simple differences, so that it is easy to use. Computation with ComputeFramework uses a scheduler similar to that in [Dask](http://dask.pydata.org/en/latest/). This scheduler tries to minimize the amount of memory allocated at any given time while maximizing CPU utilization. ComputeFramework provides distributed arrays and sparse matrices and operations on them out-of-the-box. Distributed variations of various collection types such as arrays, sparse matrices, NDSparse datastructures or dictionaries can be expressed using the framework.
 
@@ -20,7 +20,7 @@ worker processes for julia to load the package on all of them.
 ### Playing with random matrices
 
 A good place to start learning to work with ComputeFramework is to play with some distributed random data.
-In this example we will create a matrix of size `10000x10000` which is cut up into pieces of `4000x4000` elements. 
+In this example we will create a matrix of size `10000x10000` which is cut up into pieces of `4000x4000` elements.
 
 ```julia
 a = rand(BlockPartition(4000, 4000), 10^4, 10^4)
@@ -116,7 +116,9 @@ Once you've loaded the data in this manner, it's a perfect time to slice and dic
 
 ### Array support
 
-We have seen simple operations like broadcast (namely `.^2`), `reduce` and `sum` on distributed arrays so far. ComputeFramework also supports other essential array operations.
+We have seen simple operations like broadcast (namely `.^2`), `reduce` and `sum` on distributed arrays so far. ComputeFramework also supports other essential array operations such as transpose, matrix-matrix multiplication and matrix-vector multiplication.
+
+See the [Array API](#array-api) below for details. Some special features are discussed below.
 
 #### Indexing
 
@@ -167,6 +169,22 @@ julia> gather(x)
     ...
 ```
 
+#### A note on keeping memory use in check
+
+ComputeFramework currently does not write results of computations to disk unless you specifically ask it to.
+
+Some operations which are computationally intensive might require you to save the input data as well as output data to disk.
+
+As an example let us take the operation `A+A'`. Here, various chunks of `A` need to be kept in memory so that they can be added to the corresponding chunk of `A'`. But the total memory taken up by these chunks might be too large for your RAM. In such cases you will need to save the array `A` to disk first and then save the result of `A+A'` to disk as well.
+
+```julia
+
+A = rand(BlockPartition(4000, 4000), 30000, 30000) # 7.2GB of data
+saved_A = compute(save(A, "A"))
+
+result = compute(save(saved_A+saved_A', "ApAt"))
+```
+
 ## API
 
 **Creating arrays**
@@ -189,6 +207,28 @@ julia> gather(x)
 
 *Note: all these operations result in a `Computation` object. You need to call `compute` or `gather` on them to actually do the computation.*
 
+**Array API**
+- Unary element-wise operations:
+
+```
+exp, expm1, log, log10, log1p, sqrt, cbrt, exponent,
+significand, (-), sin, sinpi, cos, cospi, tan, sec,
+cot, csc, sinh, cosh, tanh, coth, sech, csch, asin,
+acos, atan, acot, asec, acsc, asinh, acosh, atanh,
+acoth, asech, acsch, sinc, cosc
+```
+
+- Binary element-wise operations:
+
+```
++, -, %, (.*), (.+), (.-), (.%), (./), (.^),
+$, &, (.!=), (.<), (.<=), (.==), (.>),
+(.>=), (.\), (.//), (.>>), (.<<)
+```
+
+- `*` on Computations can either stand for matrix-matrix or matrix-vector multiplications.
+- transpose on a matrix can be done using the `x'` syntax
+
 **Compute and gather**
 
 - `compute(ctx, c)` - compute a computation `c`
@@ -197,14 +237,6 @@ julia> gather(x)
 **Context**
 
 - `Context([pids=workers()])` - context which uses the processes specified in the pids
-
-**Reading from a file**
-
-- `TextFile(f, [mode="r", chunksize=128M])` - creates a recipe for a text file to be read. The file is read in `chunksize` units in one go.
-- `split(f, char)` - split the `TextFile` node `f` wherever `char` appears to create an array of strings.
-- `readlines(f)` - same as `split(f, '\n')`
-
-The file is read at different offsets by different processes each reading it at `chunksize` bytes at a time - that's how parallelizm is achieved.
 
 **Upcoming features**
 - Sorting
