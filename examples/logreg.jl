@@ -1,4 +1,6 @@
 
+# You can download test data from https://www.dropbox.com/s/10ttvlenqjtuz44/criteo-data.zip?dl=0 (650MB zip 4.7GB expanded)
+
 @everywhere using ComputeFramework
 
 @everywhere logistic(x) = 1 / (1 + exp(-x))
