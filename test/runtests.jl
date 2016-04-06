@@ -1,4 +1,4 @@
-addprocs()
+addprocs(4)
 
 if VERSION < v"0.5.0-dev"
     using BaseTestNext
