@@ -127,7 +127,7 @@ function _mul(a::Matrix, b::Matrix; T=eltype(a))
     n = size(a, 2)
     for i=1:size(a,1)
         for j=1:size(b, 2)
-            c[i,j] = reduce(+, map(*, reshape(a[i,:], (n,)), b[:, j]))
+            c[i,j] = treereduce(+, map(*, reshape(a[i,:], (n,)), b[:, j]))
         end
     end
     c
