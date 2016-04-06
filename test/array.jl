@@ -1,5 +1,3 @@
-using ComputeFramework
-using Base.Test
 
 @testset "Arrays" begin
 
@@ -74,12 +72,5 @@ end
     test_mul(rand(40, 40))
 end
 
-
-@test "elementwise ops" begin
-    ops = [+, -, .*]
-    for op in ops
-        @test op(X, Y) == op(X,Y)
-    end
-end
 
 end
