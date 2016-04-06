@@ -2,7 +2,7 @@
 
 **A framework for out-of-core and parallel computation**.
 
-[![Build Status](https://travis-ci.org/shashi/ComputeFramework.jl.svg?branch=master)](https://travis-ci.org/shashi/ComputeFramework.jl)
+[![Build Status](https://travis-ci.org/shashi/ComputeFramework.jl.svg?branch=master)](https://travis-ci.org/shashi/ComputeFramework.jl) [![Coverage Status](https://coveralls.io/repos/github/shashi/ComputeFramework.jl/badge.svg?branch=master)](https://coveralls.io/github/shashi/ComputeFramework.jl?branch=master)
 
 ComputeFramework allows you to represent huge amounts of data as smaller pieces and compute on the pieces in parallel. The API mimicks Julia's standard library, with a few simple differences, so that it is easy to use. Computation with ComputeFramework uses a scheduler similar to that in [Dask](http://dask.pydata.org/en/latest/). This scheduler tries to minimize the amount of memory allocated at any given time while maximizing CPU utilization. ComputeFramework provides distributed arrays and sparse matrices and operations on them out-of-the-box. Distributed variations of various collection types such as arrays, sparse matrices, NDSparse datastructures or dictionaries can be expressed using the framework.
 
