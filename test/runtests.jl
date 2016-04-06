@@ -5,4 +5,4 @@ using ComputeFramework
 using Base.Test
 
 include("domain.jl")
-include("partition.jl")
+include("array.jl")
