@@ -103,6 +103,8 @@ isempty(a::DomainBranch) = isempty(head(a))
 intersect{D<:Domain}(a::DomainBranch{D}, b::D) = intersect(head(a), b)
 project{D<:Domain}(a::DomainBranch{D}, b::D) = intersect(head(a), b)
 getindex{D<:Domain}(a::DomainBranch{D}, b::D) = getindex(head(a), b)
+children(x::DomainBranch) = x.children
+
 
 
 ###### Array Domains ######
@@ -120,6 +122,7 @@ DenseDomain(xs...) = DenseDomain(xs)
 DenseDomain(xs::Array) = DenseDomain((xs...,))
 
 indexes(a::DenseDomain) = a.indexes
+children(a::DenseDomain) = a
 
 domain(x::DenseArray) = DenseDomain(map(l -> 1:l, size(x)))
 
@@ -147,8 +150,8 @@ alignfirst(a::ArrayDomain) =
 
 function alignfirst{T<:ArrayDomain}(a::DomainBranch{T})
     h = alignfirst(head(a))
-    children = map(alignfirst, a.children)
-    DomainBranch(h, cumulative_domains(children))
+    cdren = map(alignfirst, children(a))
+    DomainBranch(h, cumulative_domains(cdren))
 end
 
 # Some utility functions specific to domains of arrays

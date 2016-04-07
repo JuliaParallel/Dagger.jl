@@ -93,7 +93,7 @@ function cat_data(p::BlockPartition, dom::DomainBranch, parts::AbstractArray)
     T = eltype(parts[1])
     arr = Array(T, size(dom))
     fdom = alignfirst(dom)
-    for (d, part) in zip(fdom.children, parts)
+    for (d, part) in zip(children(fdom), parts)
         arr[indexes(d)...] = part
     end
     arr

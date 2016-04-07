@@ -11,6 +11,8 @@ memory / storage / network location.
 """
 abstract AbstractPart
 
+parts(x::AbstractPart) = x
+
 """
     gather(context, part::AbstractPart)
 
@@ -127,12 +129,13 @@ end
 domain(c::Cat) = c.domain
 parttype(c::Cat) = c.parttype
 partition(c::Cat) = c.partition
+parts(x::Cat) = x.parts
 
 function gather(ctx, part::Cat)
 
     cat_data(partition(part),
         part.domain,
-        map(c->gather(ctx,c), part.parts))
+        map(c->gather(ctx,c), parts(part)))
 end
 
 """
@@ -145,7 +148,7 @@ cat(p::PartitionScheme, T::Type, d::Domain, parts::AbstractArray) =
 `sub` of a `Cat` part returns a `Cat` of sub parts
 """
 function sub(c::Cat, d)
-    parts, subdomains = lookup_parts(c.parts, domain(c).children, d)
+    parts, subdomains = lookup_parts(parts(c), children(domain(c)), d)
     if length(parts) == 1
         return parts[1]
     end

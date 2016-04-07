@@ -102,9 +102,9 @@ end
 If a Cat tree has a Thunk in it, make the whole thing a big thunk
 """
 function thunkize(ctx, c::Cat)
-    if any(istask, c.parts)
-        thunks = map(x -> thunkize(ctx, x), c.parts)
-        sz = size(c.parts)
+    if any(istask, parts(c))
+        thunks = map(x -> thunkize(ctx, x), parts(c))
+        sz = size(parts(c))
         Thunk(thunks; meta=true) do results...
             t = parttype(results[1])
             Cat(partition(c), t, domain(c), reshape(AbstractPart[results...], sz))
@@ -251,7 +251,7 @@ Input: dependents dict
 function noffspring(dpents::Dict)
     Pair[node => noffspring(node, dpents) for node in keys(dpents)] |> Dict
 end
- 
+
 function noffspring(n, dpents)
     ds = get(dpents, n, Set()) # dependents of n
     length(dpents[n]) + reduce(+, 0, [noffspring(d, dpents)

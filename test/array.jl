@@ -1,3 +1,4 @@
+import ComputeFramework: children, parts
 
 @testset "Arrays" begin
 
@@ -10,10 +11,10 @@
         @test isa(X1, ComputeFramework.Cat)
         @test X2 |> size == (100, 100)
         @test all(X2 .>= 0.0)
-        @test size(X1.parts) == (10, 10)
+        @test size(parts(X1)) == (10, 10)
         @test domain(X1).head == DenseDomain(1:100, 1:100)
-        @test domain(X1).children |> size == (10, 10)
-        @test domain(X1).children == partition(BlockPartition(10, 10), DenseDomain(1:100, 1:100)).children
+        @test children(domain(X1)) |> size == (10, 10)
+        @test children(domain(X1)) == children(partition(BlockPartition(10, 10), DenseDomain(1:100, 1:100)))
     end
     X = rand(BlockPartition(10, 10), 100, 100)
     test_rand(X)
@@ -31,9 +32,9 @@ end
         X1 = Distribute(BlockPartition(10, 20), X)
         @test gather(X1) == X
         Xc = compute(X1).result
-        @test Xc.parts |> size == (10, 5)
-        @test domain(Xc).children |> size == (10, 5)
-        @test map(x->size(x) == (10, 20), domain(Xc).children) |> all
+        @test parts(Xc) |> size == (10, 5)
+        @test children(domain(Xc)) |> size == (10, 5)
+        @test map(x->size(x) == (10, 20), children(domain(Xc))) |> all
     end
     test_dist(rand(100, 100))
     test_dist(sprand(100, 100, 0.1))
@@ -45,9 +46,9 @@ end
         X1 = Distribute(BlockPartition(10, 20), X)
         @test gather(X1') == X'
         Xc = compute(X1').result
-        @test Xc.parts |> size == (div(y, 20), div(x,10))
-        @test domain(Xc).children |> size == (div(y, 20), div(x, 10))
-        @test map(x->size(x) == (20, 10), domain(Xc).children) |> all
+        @test parts(Xc) |> size == (div(y, 20), div(x,10))
+        @test children(domain(Xc)) |> size == (div(y, 20), div(x, 10))
+        @test map(x->size(x) == (20, 10), children(domain(Xc))) |> all
     end
     test_transpose(rand(100, 100))
     test_transpose(rand(100, 120))
@@ -64,10 +65,10 @@ end
         X3 = compute(X1*X1').result
         @test norm(gather(X2) - X'X) < tol
         @test norm(gather(X3) - X*X') < tol
-        @test X2.parts |> size == (2, 2)
-        @test X3.parts |> size == (4, 4)
-        @test map(x->size(x) == (20, 20), domain(X2).children) |> all
-        @test map(x->size(x) == (10, 10), domain(X3).children) |> all
+        @test parts(X2) |> size == (2, 2)
+        @test parts(X3) |> size == (4, 4)
+        @test map(x->size(x) == (20, 20), children(domain(X2))) |> all
+        @test map(x->size(x) == (10, 10), children(domain(X3))) |> all
     end
     test_mul(rand(40, 40))
 end

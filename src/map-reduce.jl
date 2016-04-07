@@ -12,7 +12,7 @@ end
 function stage(ctx, node::Map)
     inputs = Any[cached_stage(ctx, n) for n in node.inputs]
     primary = inputs[1] # all others will align to this guy
-    domains = domain(primary).children
+    domains = children(domain(primary))
     thunks = similar(domains, Any)
     f = node.f
     for i=eachindex(domains)
@@ -39,7 +39,7 @@ end
 
 function stage(ctx, r::ReduceBlock)
     inp = stage(ctx, r.input)
-    reduced_parts = map(x -> Thunk(r.op, (x,); get_result=r.get_result), inp.parts)
+    reduced_parts = map(x -> Thunk(r.op, (x,); get_result=r.get_result), parts(inp))
     Thunk((xs...) -> r.op_master(xs), (reduced_parts...); meta=true)
 end
 
