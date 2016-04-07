@@ -10,7 +10,7 @@ import Base: exp, expm1, log, log10, log1p, sqrt, cbrt, exponent,
 
 blockwise_unary = [:exp, :expm1, :log, :log10, :log1p, :sqrt, :cbrt, :exponent, :significand,
          :(-),
-         :sin, :sinpi, :cos, :cospi, :tan, :sec, :cot, :csc, 
+         :sin, :sinpi, :cos, :cospi, :tan, :sec, :cot, :csc,
          :sinh, :cosh, :tanh, :coth, :sech, :csch,
          :asin, :acos, :atan, :acot, :asec, :acsc,
          :asinh, :acosh, :atanh, :acoth, :asech, :acsch, :sinc, :cosc]
@@ -43,7 +43,7 @@ end
 function stage(ctx, node::BlockwiseOp)
     inputs = Any[cached_stage(ctx, n) for n in node.input]
     primary = inputs[1] # all others will align to this guy
-    domains = domain(primary).children
+    domains = children(domain(primary))
     thunks = similar(domains, Any)
     f = node.f
     for i=eachindex(domains)

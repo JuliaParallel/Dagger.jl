@@ -87,7 +87,7 @@ function save(ctx, io::IO, part::Cat, file_path)
 
     # save the children
     saved_children = [save(ctx, c, joinpath(dir_path, lpad(i, 4, "0")))
-        for (i, c) in enumerate(part.parts)]
+        for (i, c) in enumerate(parts(part))]
 
     save(ctx, io, part, file_path, saved_children)
     # write each child
@@ -250,12 +250,12 @@ function stage(ctx, s::Save)
         saved
     end
 
-    saved_parts = similar(x.parts, Thunk)
-    for i=1:length(x.parts)
-        saved_parts[i] = Thunk(save_part, (i, x.parts[i]))
+    saved_parts = similar(parts(x), Thunk)
+    for i=1:length(parts(x))
+        saved_parts[i] = Thunk(save_part, (i, parts(x)[i]))
     end
 
-    sz = size(x.parts)
+    sz = size(parts(x))
     function save_cat_meta(parts...)
         f = open(s.name, "w")
         saved_parts = reshape(AbstractPart[c for c in parts], sz)

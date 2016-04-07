@@ -9,6 +9,7 @@ end
 size(d::SparseCSCDomain, arg...) = size(d.adomain, arg...)
 length(d::SparseCSCDomain) = Int(d.colptr[end]-1)
 indexranges(d::SparseCSCDomain) = indexranges(d.adomain)
+children(d::SparseCSCDomain) = d
 
 function alignfirst(d::SparseCSCDomain)
     adomain = alignfirst(d.adomain)
@@ -122,4 +123,3 @@ end
 # Workaround because cat(n, a, b) returns a dense array
 cat(::SliceDimension{1}, a::SparseMatrixCSC, b::SparseMatrixCSC) = vcat(a, b)
 cat(::SliceDimension{2}, a::SparseMatrixCSC, b::SparseMatrixCSC) = hcat(a, b)
-

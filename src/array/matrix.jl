@@ -25,8 +25,8 @@ end
 function stage(ctx, node::Transpose)
     inp = cached_stage(ctx, node.input)
     dmn = domain(inp)
-    dmnT = DomainBranch(head(dmn)', dmn.children')
-    thunks = _transpose(inp.parts)
+    dmnT = DomainBranch(head(dmn)', children(dmn)')
+    thunks = _transpose(parts(inp))
     Cat(inp.partition', parttype(inp), dmnT, thunks)
 end
 
@@ -62,7 +62,7 @@ function stage(ctx, d::Distribute)
     p = part(d.data)
     dmn = domain(p)
     branch = partition(d.partition, dmn)
-    Cat(d.partition, typeof(d.data), branch, map(c -> sub(p, c), branch.children))
+    Cat(d.partition, typeof(d.data), branch, map(c -> sub(p, c), children(branch)))
 end
 
 
@@ -94,7 +94,7 @@ end
 
 function (*)(a::DomainBranch, b::DomainBranch)
     try
-        DomainBranch(head(a)*head(b), _mul(a.children, b.children))
+        DomainBranch(head(a)*head(b), _mul(children(a), children(b)))
     catch err
         if isa(err, DimensionMismatch)
             throw(DimensionMismatch("Objects being multiplied have incompatible block distributions"))
@@ -187,7 +187,7 @@ function stage(ctx, mul::MatMul)
     db = domain(b)
 
     d = da*db
-    Cat(p, Any, d, _mul(a.parts, b.parts; T=Thunk))
+    Cat(p, Any, d, _mul(parts(a), parts(b); T=Thunk))
 end
 
 
@@ -230,6 +230,6 @@ function stage(ctx, scal::Scale)
 
     @assert size(domain(r), 1) == size(domain(l), 1)
 
-    parts = _scale(l.parts, r.parts)
+    parts = _scale(parts(l), parts(r))
     Cat(partition(r), Any, domain(r), parts)
 end
