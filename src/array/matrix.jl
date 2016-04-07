@@ -230,6 +230,6 @@ function stage(ctx, scal::Scale)
 
     @assert size(domain(r), 1) == size(domain(l), 1)
 
-    parts = _scale(parts(l), parts(r))
-    Cat(partition(r), Any, domain(r), parts)
+    scal_parts = _scale(parts(l), parts(r))
+    Cat(partition(r), Any, domain(r), scal_parts)
 end

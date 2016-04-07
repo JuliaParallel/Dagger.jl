@@ -24,8 +24,8 @@ function stage(ctx, rd::ReadDelim)
     end
     # figure out number of columns
     Thunk((thunks...); meta=true) do ps...
-        parts = [ps...]
-        ds = map(domain, parts)
+        ps_parts = [ps...]
+        ds = map(domain, ps_parts)
         ncols = size(ds[1], 2)
         nrows_parts = map(d->size(d, 1), ds)
         nrows = sum(nrows_parts)
