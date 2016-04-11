@@ -1,7 +1,7 @@
 export stage, cached_stage, compute
 
 """
-An `Computation` represents a computation to be
+A `Computation` represents a computation to be
 performed on some distributed data
 """
 abstract Computation
@@ -18,7 +18,7 @@ function stage(ctx, node::Cat)
     node
 end
 
-
+global _stage_cache = Dict()
 """
 A memoized version of stage. It is important that the
 tasks generated for the same Computation have the same
@@ -30,8 +30,6 @@ identity, for example:
 will should not return in computation of A twice because
 we are staging A multiple times.
 """
-
-global _stage_cache = Dict()
 function cached_stage(ctx, x)
     if haskey(_stage_cache, (ctx, x))
         _stage_cache[(ctx, x)]
@@ -230,10 +228,7 @@ function dependents(node::Thunk, deps=Dict())
         deps[node] = Set()
     end
     for inp = inputs(node)
-        s = if !haskey(deps, inp)
-            deps[inp] = Set()
-        else deps[inp] end :: Set{Any}
-
+        s::Set{Any} = Base.@get!(deps, inp, Set())
         push!(s, node)
         if isa(inp, Thunk)
             dependents(inp, deps)

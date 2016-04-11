@@ -77,7 +77,7 @@ getvarname(x::Expr) = x.args[1]
 getvarname(x::Symbol) = x
 
 """
-    @interface fname(<args...>)
+    @unimplemented fname(<args...>)
 
 While it is nice to define generic function ad-hoc, it can sometimes
 get confusing to figure out which method is missing.
