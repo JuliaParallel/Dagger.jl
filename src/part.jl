@@ -148,12 +148,12 @@ cat(p::PartitionScheme, T::Type, d::Domain, parts::AbstractArray) =
 `sub` of a `Cat` part returns a `Cat` of sub parts
 """
 function sub(c::Cat, d)
-    parts, subdomains = lookup_parts(parts(c), children(domain(c)), d)
-    if length(parts) == 1
-        return parts[1]
+    c_parts, subdomains = lookup_parts(parts(c), children(domain(c)), d)
+    if length(c_parts) == 1
+        return c_parts[1]
     end
 
-    cat(partition(c), parttype(c), DomainBranch(d, subdomains), parts)
+    cat(partition(c), parttype(c), DomainBranch(d, subdomains), c_parts)
 end
 
 function getdim(vec)
