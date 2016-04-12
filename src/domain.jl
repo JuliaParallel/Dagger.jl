@@ -34,8 +34,8 @@ Find the intersection of two domains. For example,
 
 Align `b` relative to `a`. For example,
 
-    project(DenseDomain((15:20, 30:40)), DenseDomain((11:25, 21:100)))
-    # => DenseDomain{2}((5:10,10:20))
+    project(DenseDomain(15:20, 30:40), DenseDomain(11:25, 21:100)
+    # => DenseDomain{2}((-3:11,-8:71))
 """
 @unimplemented project{D<:Domain}(d::D, b::D)
 
