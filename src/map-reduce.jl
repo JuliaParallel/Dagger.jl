@@ -1,5 +1,5 @@
 
-import Base: reduce, map
+import Base: reduce, map, mapreduce
 
 export reducebykey
 
@@ -55,8 +55,9 @@ prod(f::Function, x::Computation) = reduceblock(a->prod(f, a), prod, x)
 
 length(x::Computation) = reduceblock(length, sum, x)
 
-mean(x::Computation) = sum(x) / length(x)
+mean(x::Computation) = reduceblock(mean, mean, x)
 
+mapreduce(f::Function, g::Function, x::Computation) = reduce(g, map(f, x))
 
 function mapreducebykey_seq(f, op,  itr, dict=Dict())
     for x in itr
