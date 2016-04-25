@@ -4,8 +4,8 @@ using ComputeFramework
 
 words = ["one", "two", "two", "three", "three", "three", "four", "four", "four", "four"]
 
-parallel_words = distribute(words)
+parallel_words = compute(Distribute(BlockPartition(1), words))
 count_one = map(x -> x => 1, parallel_words)
-wcount = reducebykey(+, 0, count_one)
+wcount = reducebykey(+, count_one)
 
-@show compute(Context(), wcount)
+@show compute(wcount)
