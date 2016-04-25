@@ -10,7 +10,7 @@ function stage(ctx, a::AllocateArray)
     branch = partition(a.partition, a.domain)
     dims = length(indexes(a.domain))
     alloc = let eltype = a.eltype, f = a.f
-        _alloc(sz) = f(eltype, sz)
+        _alloc(sz) = f(eltype, sz...)
     end
 
     subdomains = children(branch)
