@@ -1,4 +1,5 @@
-export OSProc, Context
+export OSProc, GPUProc, Context
+using ArrayFire
 
 abstract Processor
 
@@ -19,6 +20,11 @@ end
 Context(xs::Array{Int}) = Context(map(OSProc, xs))
 Context() = Context(workers())
 procs(c::Context) = c.procs
+
+
+immutable GPUProc <: Processor
+    pid::Int
+end
 
 #gather(x::AbstractPart) = gather(Context(), x)
 

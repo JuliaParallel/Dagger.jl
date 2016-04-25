@@ -308,18 +308,20 @@ function start_state(deps::Dict, node_order)
     state
 end
 
-_move(ctx, x) = x
-_move(ctx, x::AbstractPart) = gather(ctx, x)
+_move(ctx, to_proc, x) = x
+_move(ctx, to_proc::OSProc, x::AbstractPart) = gather(ctx, x)
+
+_move(ctx, to_proc::GPUProc, x::AbstractPart) = AFArray(gather(ctx, x))
 
 function do_task(ctx, proc, thunk_id, f, data, chan, send_result)
     try
-        res = f(map(x->_move(ctx, x), data)...)
+        res = f(map(x->_move(ctx, proc, x), data)...)
         put!(chan, (proc, thunk_id, send_result ? res : part(res))) #todo: add more metadata
     catch ex
         put!(chan, (proc, thunk_id, ex))
     end
     nothing
 end
-function async_apply(ctx, p::OSProc, thunk_id, f, data, chan, send_res)
+function async_apply(ctx, p::Union{OSProc, GPUProc}, thunk_id, f, data, chan, send_res)
     remotecall(do_task, p.pid, ctx, p, thunk_id, f, data, chan, send_res)
 end
