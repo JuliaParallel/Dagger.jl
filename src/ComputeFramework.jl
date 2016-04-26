@@ -2,6 +2,7 @@ module ComputeFramework
 
 # enable logging only during debugging
 using Logging
+using Requires
 const logger = Logging.configure(level=DEBUG)
 #const logger = Logging.configure(filename="/tmp/blobs$(getpid()).log", level=DEBUG)
 
