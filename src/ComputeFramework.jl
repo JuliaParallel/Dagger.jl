@@ -43,4 +43,6 @@ include("array/matrix.jl")
 
 include("show.jl")
 
+include("gpu.jl")
+
 end # module
