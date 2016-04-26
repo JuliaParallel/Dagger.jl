@@ -308,8 +308,8 @@ function start_state(deps::Dict, node_order)
     state
 end
 
-_move(ctx, x) = x
-_move(ctx, x::AbstractPart) = gather(ctx, x)
+_move(ctx, to_proc, x) = x
+_move(ctx, to_proc::OSProc, x::AbstractPart) = gather(ctx, x)
 
 @require ArrayFire begin 
     using ArrayFire
