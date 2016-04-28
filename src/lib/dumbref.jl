@@ -26,10 +26,11 @@ function release_token(tok)
     nothing
 end
 
-function Base.fetch(t::MemToken)
+function Base.fetch(f, t::MemToken)
     if t.where == myid()
-        _mymem[t]
+        f(_mymem[t])
     else
         remotecall_fetch(()->fetch(t), t.where)
     end
 end
+Base.fetch(t::MemToken) = fetch(x->x,t)

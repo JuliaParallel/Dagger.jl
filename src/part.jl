@@ -27,8 +27,8 @@ abstract PartIO
 """
 A part with some data
 """
-immutable Part{I<:PartIO} <: AbstractPart
-    parttype::Type
+immutable Part{I<:PartIO,T} <: AbstractPart
+    parttype::Type{T}
     domain::Domain
     handle::I
 end
