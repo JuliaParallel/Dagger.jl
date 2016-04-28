@@ -158,7 +158,7 @@ end
 size(a::ArrayDomain) = map(length, indexes(a))
 function size(a::ArrayDomain, dim)
     idxs = indexes(a)
-    length(idxs) < dim ? 1 : length(idxs[dim])
+    length(idxs) > dim ? 1 : length(idxs[dim])
 end
 length(a::ArrayDomain) = prod(size(a))
 ndims(a::ArrayDomain) = length(size(a))

@@ -92,9 +92,10 @@ function cat_data(p::BlockPartition, dom::DomainBranch, parts::AbstractArray)
     end
     T = eltype(parts[1])
     arr = Array(T, size(dom))
+    A = typeof(arr)
     fdom = alignfirst(dom)
     for (d, part) in zip(children(fdom), parts)
-        arr[indexes(d)...] = part
+        arr[indexes(d)...] = Base.convert(A, part)
     end
     arr
 end
