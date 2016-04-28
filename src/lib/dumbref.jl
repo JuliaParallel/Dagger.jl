@@ -30,7 +30,7 @@ function Base.fetch(f, t::MemToken)
     if t.where == myid()
         f(_mymem[t])
     else
-        remotecall_fetch(()->fetch(t), t.where)
+        remotecall_fetch(fetch, t.where, f, t)
     end
 end
 Base.fetch(t::MemToken) = fetch(x->x,t)
