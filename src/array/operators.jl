@@ -44,12 +44,10 @@ function stage(ctx, node::BlockwiseOp)
     inputs = Any[cached_stage(ctx, n) for n in node.input]
     primary = inputs[1] # all others will align to this guy
     domains = children(domain(primary))
-    thunks = similar(domains, Any)
-    f = node.f
-    for i=eachindex(domains)
-        inps = map(inp->sub(inp, domains[i]), inputs)
-        thunks[i] = Thunk(f, inps)
+    thunks = map(map(parts, inputs)...) do args...
+        Thunk(node.f, args)
     end
+
     Cat(partition(primary), Any, domain(primary), thunks)
 end
 
