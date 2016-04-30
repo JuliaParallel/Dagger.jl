@@ -42,4 +42,6 @@ include("array/matrix.jl")
 
 include("show.jl")
 
+# Message Passing
+include("mpass.jl")
 end # module
