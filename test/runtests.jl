@@ -5,6 +5,15 @@ if VERSION < v"0.5.0-dev"
 else
     using Base.Test
 end
+using Requires
+try
+    Pkg.installed("ArrayFire")
+    using ArrayFire
+    using ComputeFramework
+    include("gpu.jl")
+catch 
+    info("ArrayFire isn't installed. Skipping GPU tests")
+end
 using ComputeFramework
 
 include("domain.jl")
