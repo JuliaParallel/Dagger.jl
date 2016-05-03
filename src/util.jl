@@ -109,3 +109,16 @@ function treereduce(f, xs)
     m = div(l, 2)
     f(treereduce(f, xs[1:m]), treereduce(f, xs[m+1:end]))
 end
+
+function treereducedim(op, xs::Array, dim::Int)
+    l = size(xs, dim)
+    colons = Any[Colon() for i=1:length(size(xs))]
+    ys = treereduce(op, Any[begin
+        colons[dim] = i
+        sub(xs, colons...)
+    end for i=1:l])
+    reshape(ys, Base.reduced_dims(size(xs), dim))
+end
+function treereducedim(op, xs::Array, dim::Tuple)
+    reduce((prev, d) -> treereducedim(op, prev, d), xs, dim)
+end

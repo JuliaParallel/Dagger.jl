@@ -1,5 +1,5 @@
 
-import Base: reduce, map, mapreduce
+import Base: reduce, map, mapreduce, reducedim
 
 export reducebykey
 
@@ -76,3 +76,39 @@ function merge_reducebykey(op)
 end
 reducebykey_seq(op, itr,dict=Dict()) = mapreducebykey_seq(Base.IdFun(), op, itr, dict)
 reducebykey(op, input) = reduceblock(itr->reducebykey_seq(op, itr), merge_reducebykey(op), input)
+
+
+immutable Reducedim <: Computation
+    op::Function
+    input::Computation
+    dims::Tuple
+end
+
+Base.reducedim(f, x::Computation, dims::Tuple) = Reducedim(f,x,dims)
+Base.reducedim(f, x::Computation, dims::Int) = Reducedim(f,x,(dims,))
+
+function reducedim(dom, dims)
+    d = Any[indexes(dom)...]
+    for dim in dims
+        d[dim] = 1:1
+    end
+    DenseDomain(d)
+end
+
+function stage(ctx, r::Reducedim)
+    inp = cached_stage(ctx, r.input)
+    thunks = let op = r.op, dims=r.dims
+        # do reducedim on each block
+        tmp = map(p->Thunk(b->reducedim(op,b,dims), (p,)), parts(inp))
+        # combine the results in tree fashion
+        treereducedim(tmp, r.dims) do xs,ys
+            map((x,y) -> Thunk(op, (x,y,)), xs,ys)
+        end
+    end
+    c = children(domain(inp))
+    colons = Any[Colon() for x in size(c)]
+    colons[[r.dims...]] = 1
+    dmn = c[colons...]
+    d = DomainBranch(reducedim(head(domain(inp)), r.dims), map(d->reducedim(d, r.dims), dmn))
+    Cat(partition(inp), parttype(inp),d, thunks)
+end
