@@ -10,6 +10,7 @@ export CFArray, @cf
 type CFArray{T,N} <: AbstractArray{T,N}
   head::Computation
 end
+@forward CFArray.head size
 
 function CFArray(xs::Computation)
   xs = compute(xs)
@@ -20,12 +21,12 @@ macro cf(ex)
   @capture(shortdef(ex), name_(arg_) = exs__) ||
     error("invalid @cf function")
   quote
-    ex
-    $name($arg::ComputeFramework) = ComputeFramework.CFArray($name($arg.head))
+    $ex
+    $name($arg::ComputeFramework.CFArray) = ComputeFramework.CFArray($name($arg.head))
   end |> esc
 end
 
-Base.getindex(xs::CFArray, args::Integer...) = compute($f($xs.head, args...))
+Base.getindex(xs::CFArray, args::Integer...) = compute(getindex(xs.head, args...))
 
 for f in :[getindex map reduce exp log].args
   @eval $f(xs::CFArray, args...) = CFArray($f(xs.head, args...))
