@@ -1,22 +1,9 @@
 module ComputeFramework
 
-# enable logging only during debugging
-using Logging
-const logger = Logging.configure(level=DEBUG)
-#const logger = Logging.configure(filename="/tmp/blobs$(getpid()).log", level=DEBUG)
-
-macro logmsg(s)
-    quote
-        debug($(esc(s)))
-    end
-end
-#=
-macro logmsg(s)
-end
-=#
-
+using Compat
 
 include("util.jl")
+include("logging.jl")
 
 # Data and sub-data
 include("domain.jl")

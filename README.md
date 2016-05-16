@@ -243,9 +243,70 @@ $, &, (.!=), (.<), (.<=), (.==), (.>),
 **Upcoming features**
 - Sorting
 
+## Debugging performance
+
+To debug the performance of a computation you can use the `debug_compute` substitute for the `compute` function. `debug_compute` returns a vector filled with performance metadata along with the result of the computation.
+
+For example:
+
+```julia
+x = rand(BlockPartition(400, 4000), 1200, 12000)
+debug_compute(x*x); # first run to compile stuff (maybe run on a smaller problem)
+dbg, result = debug_compute(x*x')
+summarize_events(dbg)
+# => 3.132245 seconds (83.25 k allocations: 467.796 MB, 2.87% gc time)
+# (note that this time might be larger than the running time of the compute
+#  this is because time readings from many processes are added up.)
+```
+
+The `dbg` object is just an array of `Timespan`s. A `Timespan` contains the following fields:
+
+- `category`        : a symbol. One of `:comm` (communication), `:compute`, :scheduler`, `:scheduler_init` - denotes the type of work being done in the timespan
+- `id`              : An `id` for the timespan. This is also the id of the `Thunk` object being dealt with. (category, id) pair identify a timespan uniquely.
+- `timeline`        : An `OSProc` (or any `Processor`) object representing the processor where the timespan was recorded.
+- `start`           : `time_ns()` when the timespan started
+- `finish`          : `time_ns()` when the timespan finished
+- `gc_diff`         : a Base.GC_Diff object containing the GC state change in the timespan (see `?Base.GC_Diff`)
+- `profiler_samples` : if run with `profile=true`, contains profiler samples collected in the timespan.
+
+Since `dbg` is just an array, you can filter events of particular interest to you and summarize them.
+
+```julia
+# how much time and space did the computation take on process 2?
+summarize_events(filter(x->  x.timeline == OSProc(2), dbg))
+# => 1.658207 seconds (16.11 k allocations: 269.361 MB, 2.89% gc time)
+
+# how much time was spent communicating by process 3?
+
+summarize_events(filter(x->  x.timeline == OSProc(3) && x.category==:comm, d))
+  0.606891 seconds (15.69 k allocations: 149.712 MB, 6.26% gc time)
+
+# what was the scheduler overhead?
+summarize_events(filter(x->x.category==:scheduler, d))
+  0.254783 seconds (47.67 k allocations: 3.314 MB)
+```
+
+If you run `debug_compute` with profile keyword argument set to true, profile samples during each timespan are collected. `summarize_events` will also pretty print the profiler data for you.
+
+For example,
+```julia
+summarize_events(filter(x->x.category==:scheduler, dbg))
+# =>  0.146829 seconds (44.60 k allocations: 3.103 MB)
+2   ./stream.jl; process_events; line: 731
+154 REPL.jl; anonymous; line: 92
+ 126 REPL.jl; eval_user_input; line: 62
+  59 util.jl; debug_compute; line: 155
+   59 ...e/shashi/.julia/v0.4/ComputeFramework/src/compute.jl; compute; line: 203
+    16 ...e/shashi/.julia/v0.4/ComputeFramework/src/compute.jl; finish_task!; line: 144
+    43 ...e/shashi/.julia/v0.4/ComputeFramework/src/compute.jl; finish_task!; line: 152
+     43 .../shashi/.julia/v0.4/ComputeFramework/src/compute.jl; release!; line: 218
+      43 ...shi/.julia/v0.4/ComputeFramework/src/lib/dumbref.jl; release_token; line: 24
+      ...
+```
 ## Design
 
 The goal of ComputeFramework is to create sufficient scope for multiple-dispatch to be employed at various stages of a parallel computation. New capabilities, distributions, device types can be added by defining new methods on a very small set of generic functions. The DAG also allows for other optimizations (fusing maps and reduces), fault-tolerance and visualization.
+
 
 ### Acknowledgements
 

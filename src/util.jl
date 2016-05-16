@@ -109,3 +109,14 @@ function treereduce(f, xs)
     m = div(l, 2)
     f(treereduce(f, xs[1:m]), treereduce(f, xs[m+1:end]))
 end
+
+const  ENABLE_DEBUG = true # Will remove code under @dbg
+
+"""
+Run a block of code only if DEBUG is true
+"""
+macro dbg(expr)
+    if ENABLE_DEBUG
+        esc(expr)
+    end
+end

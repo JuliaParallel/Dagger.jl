@@ -201,3 +201,13 @@ function lookup_parts{T,N}(parts, part_domains::Array{T,N}, d)
     end
     subparts, cumulative_domains(map(alignfirst, intersects2))
 end
+
+
+# Dammit ref counting is probably needed
+
+release_part(x::Cat) = map(release_part, x.parts)
+## WARNING: a token may be held by many. It should never be
+release_part(s::Part{DistMem}) = begin
+    release_token(s.handle.ref)
+end
+release_part(s::AbstractPart) = nothing

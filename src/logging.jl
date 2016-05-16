@@ -1,0 +1,275 @@
+
+import Base.gc_num
+export summarize_events
+
+typealias Timestamp UInt64
+
+"""
+identifies
+
+space (category, id)
+time (timeline, start, finish)
+
+also tracks gc_num during this and profiling samples.
+"""
+immutable Timespan
+    category::Symbol
+    id::Any
+    timeline::Any
+    start::Timestamp
+    finish::Timestamp
+    gc_diff::Base.GC_Diff
+    profiler_samples::Array{UInt}
+end
+
+immutable Event{phase}
+    category::Symbol
+    id::Any
+    timeline::Any
+    timestamp::Timestamp
+    gc_num::Base.GC_Num
+    profiler_samples::Array{UInt}
+end
+
+Event(phase::Symbol, category::Symbol,
+      id, tl, time, gc_num, prof) =
+    Event{phase}(category, id, tl, time, gc_num, prof)
+
+"""
+create a timespan given the strt and finish events
+"""
+function make_timespan(start::Event, finish::Event)
+    @assert start.category == finish.category
+    @assert start.id == finish.id
+    @assert start.timeline == finish.timeline
+
+    Timespan(start.category,
+             start.id,
+             start.timeline,
+             start.timestamp,
+             finish.timestamp,
+             Base.GC_Diff(finish.gc_num,start.gc_num),
+             mix_samples(start.profiler_samples, finish.profiler_samples))
+end
+
+
+"""
+Various means of writing an event to something.
+"""
+
+immutable NoOpLog end
+
+function write_event(::NoOpLog, event::Event)
+end
+
+immutable FilterLog
+    f::Function
+    inner_chan::Any
+end
+
+function write_event(c::FilterLog, event)
+    if c.f(event)
+        write_event(c.inner_chan, event)
+    end
+end
+
+function write_event(io::IO, event::Event)
+    serialize(io, event)
+end
+
+function write_event(chan::Union{RemoteChannel, Channel}, event::Event)
+    put!(chan, event)
+end
+
+function write_event(arr::AbstractArray, event::Event)
+    push!(arr, event)
+end
+
+#function write_event(sig::Signal, event::Event)
+#    push!(sig, event)
+#end
+"""
+represents a process local events array.
+
+A context with log_sink set to LocalEventLog() will
+cause events to be recorded into the 
+"""
+immutable LocalEventLog end
+
+const _local_event_log = Any[]
+clear_local_event_log() = empty!(_local_event_log)
+function write_event(::LocalEventLog, event::Event)
+    write_event(ComputeFramework._local_event_log, event)
+end
+
+function raise_event(ctx, phase, category, id,tl, t, gc_num, prof, async)
+    ev = Event(phase, category, id, tl, t, gc_num, prof)
+    if async
+        @schedule write_event(ctx, ev)
+    else
+        write_event(ctx, ev)
+    end
+end
+
+const _empty_prof = UInt[]
+
+function timespan_start(ctx, category, id, tl, async=isasync(ctx.log_sink))
+    isa(ctx.log_sink, NoOpLog) && return # don't go till raise
+    if ctx.profile
+        Profile.start_timer()
+    end
+    raise_event(ctx, :start, category, id, tl, time_ns(), gc_num(), UInt[], async)
+    nothing
+end
+
+function timespan_end(ctx, category, id, tl, async=isasync(ctx.log_sink))
+    isa(ctx.log_sink, NoOpLog) && return
+    prof = UInt[]
+    if ctx.profile
+        Profile.stop_timer()
+        prof = Profile.fetch()
+        Profile.clear()
+    end
+    raise_event(ctx, :finish, category, id, tl,time_ns(), gc_num(), prof, async)
+    nothing
+end
+
+isasync(x) = false
+isasync(x::Union{Channel, RemoteChannel, IO}) = true
+"""
+Overall state used during visualization
+"""
+type State
+    start_events::Dict # (category, id) => Event
+    finish_events::Dict  # (category, id) => Event
+    #completed::Dict      # timeline => category => Array
+    completed::Vector
+    start_time::Timestamp
+    finish_time::Timestamp
+end
+State() = State(Dict(), Dict(), Any[], 0, 0)
+
+"""
+Add a Timespan to a given State under `tl` (timeline)
+and `category`.
+"""
+function add_span(state, tl, category, span)
+    push!(state.completed, span)
+    if state.start_time == 0
+        state.start_time = span.start
+    else
+        state.start_time = min(span.start, state.start_time)
+    end
+    if state.finish_time == 0
+        state.finish_time = span.finish
+    else
+        state.finish_time = max(span.finish, state.finish_time)
+    end
+    state
+end
+
+"""When building state for real-time visualization,
+   use next_state to progress gantt state."""
+function next_state(state::State, event::Event{:start})
+    key = (event.category, event.id)
+    if haskey(state.finish_events, key) # finish event reached before start
+        span = make_timespan(event, pop!(state.finish_events, key))
+        add_span(state, event.timeline, event.category, span)
+    else
+        state.start_events[key] = event
+    end
+    state
+end
+
+function next_state(state::State, event::Event{:finish})
+    key = (event.category, event.id)
+    if haskey(state.start_events, key)
+        span = make_timespan(pop!(state.start_events, key), event)
+        add_span(state, event.timeline, event.category, span)
+    else
+        state.finish_events[key] = event
+    end
+    state
+end
+next_state(state::State, events::AbstractArray) =
+    foldl(next_state, state, events)
+
+# util
+
+function pushkey(dict, key, thing)
+    if haskey(dict, key)
+        push!(dict[key],thing)
+    else
+        dict[key] = Any[thing]
+    end
+end
+
+function pushkey(dict, key1, args...)
+    if haskey(dict, key1)
+        pushkey(dict[key1], args...)
+    else
+        dict[key1] = Dict()
+        pushkey(dict[key1], args...)
+    end
+end
+
+function mix_samples(a,b)
+    if length(a) == 0
+        return b
+    else
+        vcat(a,b)
+    end
+end
+
+function build_timespans(events)
+    next_state(State(), events)
+end
+
+macro logmsg(ex)
+end
+
+
+"""
+Get the logs from each process, clear it too
+"""
+function get_logs!(::LocalEventLog)
+    logs = Dict()
+    @sync for p in procs()
+        @async logs[p] = remotecall_fetch(p) do
+            log = copy(ComputeFramework._local_event_log)
+            clear_local_event_log()
+            log
+        end
+    end
+    build_timespans(vcat(values(logs)...)).completed
+end
+
+function add_gc_diff(x,y)
+    Base.GC_Diff(
+        x.allocd     + y.allocd,
+        x.malloc     + y.malloc,
+        x.realloc    + y.realloc,
+        x.poolalloc  + y.poolalloc,
+        x.bigalloc   + y.bigalloc,
+        x.freecall   + y.freecall,
+        x.total_time + y.total_time,
+        x.pause      + y.pause,
+        x.full_sweep + y.full_sweep
+    )
+end
+
+function aggregate_events(xs)
+    gc_diff = reduce(add_gc_diff, map(x -> x.gc_diff, xs))
+    time_spent = sum(map(x -> x.finish - x.start, xs))
+    profiler_samples = vcat(map(x->x.profiler_samples, xs)...)
+    time_spent, gc_diff, profiler_samples
+end
+
+function summarize_events(time_spent, gc_diff, profiler_samples)
+    Base.time_print(time_spent, gc_diff.allocd, gc_diff.total_time, Base.gc_alloc_count(gc_diff))
+    if length(profiler_samples) > 0
+        Profile.print(profiler_samples)
+    end
+end
+
+summarize_events(xs) = summarize_events(aggregate_events(xs)...)

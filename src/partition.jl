@@ -76,7 +76,7 @@ end
 BlockPartition(xs...) = BlockPartition(xs)
 
 @generated function partition{N}(p::BlockPartition{N}, dom::ArrayDomain{N})
-    sym(n) = symbol("i$n")
+    sym(n) = Symbol("i$n")
 
     forspec = [:($(sym(i)) = split_range_interval(
             idxs[$i], p.blocksize[$i])) for i=1:N]

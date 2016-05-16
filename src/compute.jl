@@ -1,4 +1,5 @@
-export stage, cached_stage, compute
+export stage, cached_stage, compute, debug_compute
+using Compat
 
 """
 A `Computation` represents a computation to be
@@ -146,6 +147,8 @@ Compute a Thunk - creates the DAG, assigns ranks to
 nodes for tie breaking and runs the scheduler.
 """
 function compute(ctx, d::Thunk)
+    master = OSProc(myid())
+    @dbg timespan_start(ctx, :scheduler_init, 0, master)
     ps = procs(ctx)
     chan = RemoteChannel()
     deps = dependents(d)
@@ -163,6 +166,7 @@ function compute(ctx, d::Thunk)
         isempty(state[:ready]) && break
         fire_task!(ctx, p, state, chan, node_order)
     end
+    @dbg timespan_end(ctx, :scheduler_init, 0, master)
 
     while !isempty(state[:waiting]) || !isempty(state[:ready]) || !isempty(state[:running])
         proc, thunk_id, res = take!(chan)
@@ -178,12 +182,14 @@ function compute(ctx, d::Thunk)
         #@show ord
         # if any of this guy's dependents are waiting,
         # update them
+        @dbg timespan_start(ctx, :scheduler, thunk_id, master)
 
         finish_task!(state, node, node_order)
 
         while !isempty(state[:ready]) && length(state[:running]) < length(ps)
             fire_task!(ctx, proc, state, chan, node_order)
         end
+        @dbg timespan_end(ctx, :scheduler, thunk_id, master)
     end
 
     state[:cache][d]
@@ -192,7 +198,7 @@ end
 function release!(cache, node)
     if haskey(cache, node)
         if isa(cache[node], Part{DistMem})
-            @logmsg("Finalizing remoteref")
+            #@logmsg("Finalizing remoteref")
             release_token(cache[node].handle.ref)
         end
         pop!(cache, node)
@@ -206,7 +212,15 @@ function fire_task!(ctx, proc, state, chan, node_order)
     if thunk.administrative
         # Run it on the parent node
         # do not _move data.
-        res = thunk.f(Any[state[:cache][i] for i in thunk.inputs]...)
+        p = OSProc(myid())
+        @dbg timespan_start(ctx, :comm, thunk.id, p)
+        fetched = Any[state[:cache][i] for i in thunk.inputs]
+        @dbg timespan_end(ctx, :comm, thunk.id, p)
+
+        @dbg timespan_start(ctx, :compute, thunk.id, p)
+        res = thunk.f(fetched...)
+        @dbg timespan_end(ctx, :compute, thunk.id, p)
+
         #push!(state[:running], thunk)
         state[:cache][thunk] = res
         finish_task!(state, thunk, node_order; release=false)
@@ -215,6 +229,7 @@ function fire_task!(ctx, proc, state, chan, node_order)
     end
 
     data = Any[state[:cache][n] for n in thunk.inputs]
+
     async_apply(ctx, proc, thunk.id, thunk.f, data, chan, thunk.get_result)
 end
 
@@ -307,18 +322,36 @@ function start_state(deps::Dict, node_order)
     state
 end
 
-_move(ctx, x) = x
-_move(ctx, x::AbstractPart) = gather(ctx, x)
+_move(ctx, to_proc, x) = x
+_move(ctx, to_proc::OSProc, x::AbstractPart) = gather(ctx, x)
 
 function do_task(ctx, proc, thunk_id, f, data, chan, send_result)
+        @dbg timespan_start(ctx, :comm, thunk_id, proc)
+        fetched = map(x->_move(ctx, proc, x), data)
+        @dbg timespan_end(ctx, :comm, thunk_id, proc)
+
+        @dbg timespan_start(ctx, :compute, thunk_id, proc)
+        res = f(fetched...)
+        @dbg timespan_end(ctx, :compute, thunk_id, proc)
     try
-        res = f(map(x->_move(ctx, x), data)...)
         put!(chan, (proc, thunk_id, send_result ? res : part(res))) #todo: add more metadata
     catch ex
         put!(chan, (proc, thunk_id, ex))
     end
     nothing
 end
+
 function async_apply(ctx, p::OSProc, thunk_id, f, data, chan, send_res)
-    remotecall(do_task, p.pid, ctx, p, thunk_id, f, data, chan, send_res)
+    Base.remote_do(do_task, p.pid, ctx, p, thunk_id, f, data, chan, send_res)
+end
+
+function debug_compute(ctx::Context, args...; profile=false)
+    @time res = compute(ctx, args)
+    get_logs!(ctx.log_sink), res
+end
+
+function debug_compute(arg; profile=false)
+    ctx = Context()
+    dbgctx = Context(procs(ctx), LocalEventLog(), profile)
+    debug_compute(dbgctx, arg)
 end
