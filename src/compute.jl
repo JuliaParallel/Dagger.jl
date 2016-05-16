@@ -27,8 +27,7 @@ identity, for example:
     A = rand(BlockPartition(100,100), Float64, 1000, 1000)
     compute(A+A')
 
-will should not return in computation of A twice because
-we are staging A multiple times.
+must not result in computation of A twice.
 """
 function cached_stage(ctx, x)
     if haskey(_stage_cache, (ctx, x))

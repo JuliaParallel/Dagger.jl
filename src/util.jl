@@ -1,4 +1,4 @@
-
+import Base: convert
 
 ###### Filesize algebra ######
 
