@@ -215,8 +215,7 @@ function compute(ctx, d::Thunk)
     while !isempty(state[:waiting]) || !isempty(state[:ready]) || !isempty(state[:running])
         proc, thunk_id, res = take!(chan)
 
-        if isa(res, Exception)
-            println(STDERR, "Got an exception from $proc")
+        if isa(res, CapturedException)
             rethrow(res)
         end
         node = _thunk_dict[thunk_id]
@@ -365,13 +364,14 @@ function do_task(ctx, proc, thunk_id, f, data, chan, send_result)
         @dbg timespan_end(ctx, :comm, thunk_id, proc)
 
         @dbg timespan_start(ctx, :compute, thunk_id, proc)
-        res = f(fetched...)
+        try
+            res = f(fetched...)
+            put!(chan, (proc, thunk_id, send_result ? res : part(res))) #todo: add more metadata
+        catch ex
+            bt = catch_backtrace()
+            put!(chan, (proc, thunk_id, CapturedException(ex, bt)))
+        end
         @dbg timespan_end(ctx, :compute, thunk_id, proc)
-    try
-        put!(chan, (proc, thunk_id, send_result ? res : part(res))) #todo: add more metadata
-    catch ex
-        put!(chan, (proc, thunk_id, ex))
-    end
     nothing
 end
 
