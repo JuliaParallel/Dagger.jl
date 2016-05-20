@@ -18,6 +18,10 @@ function transpose(x::DenseDomain{1})
     DenseDomain(1, d[1])
 end
 
+function transpose(x::DomainBranch)
+    DomainBranch(head(x)', children(x)')
+end
+
 function _transpose(x::AbstractArray)
     Any[x[j,i]' for i=1:size(x,2), j=1:size(x,1)]
 end
@@ -25,7 +29,7 @@ end
 function stage(ctx, node::Transpose)
     inp = cached_stage(ctx, node.input)
     dmn = domain(inp)
-    dmnT = DomainBranch(head(dmn)', children(dmn)')
+    dmnT = dmn'
     thunks = _transpose(parts(inp))
     Cat(inp.partition', parttype(inp), dmnT, thunks)
 end
