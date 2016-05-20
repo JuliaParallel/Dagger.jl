@@ -80,14 +80,14 @@ end
 function (*)(a::ArrayDomain{2}, b::ArrayDomain{2})
 
     if size(a, 2) != size(b, 1)
-        DimensionMismatch("The domains cannot be multiplied")
+        throw(DimensionMismatch("The domains cannot be multiplied"))
     end
 
     DenseDomain((indexes(a)[1], indexes(b)[2]))
 end
 function (*)(a::ArrayDomain{2}, b::ArrayDomain{1})
     if size(a, 2) != length(b)
-        DimensionMismatch("The domains cannot be multiplied")
+        throw(DimensionMismatch("The domains cannot be multiplied"))
     end
     DenseDomain((indexes(a)[1],))
 end
