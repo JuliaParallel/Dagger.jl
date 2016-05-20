@@ -19,7 +19,7 @@ function stage(ctx, node::Cat)
     node
 end
 
-global _stage_cache = Dict()
+global _stage_cache = WeakKeyDict{Context, Dict}()
 """
 A memoized version of stage. It is important that the
 tasks generated for the same Computation have the same
@@ -31,10 +31,16 @@ identity, for example:
 must not result in computation of A twice.
 """
 function cached_stage(ctx, x)
-    if haskey(_stage_cache, (ctx, x))
-        _stage_cache[(ctx, x)]
+    cache = if !haskey(_stage_cache, ctx)
+        _stage_cache[ctx] = Dict()
     else
-        _stage_cache[(ctx, x)] = stage(ctx, x)
+        _stage_cache[ctx]
+    end
+
+    if haskey(cache, x)
+        cache[x]
+    else
+        cache[x] = stage(ctx, x)
     end
 end
 
@@ -67,10 +73,20 @@ export Computed
 """
 promote a computed value to a Computation
 """
-immutable Computed <: Computation
+type Computed <: Computation
     result::AbstractPart
     # TODO: Allow passive branching for Save?
+    function Computed(x)
+        c = new(x)
+        #finalizer(c, release_computed)
+        c
+    end
 end
+
+function release_computed(x::Computed)
+    @schedule release_part(x.result)
+end
+
 gather(ctx, x::Computed) = gather(ctx, x.result)
 
 function stage(ctx, c::Computed)
