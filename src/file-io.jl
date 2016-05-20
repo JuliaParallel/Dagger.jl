@@ -63,7 +63,7 @@ function save(ctx, io::IO, part::Part, file_path)
 
     save(ctx, io, gather(ctx, part))
 
-    Part(parttype(part), domain(part), FileReader(file_path, parttype(part), data_offset))
+    Part(parttype(part), domain(part), FileReader(file_path, parttype(part), data_offset), false)
 end
 
 function save(ctx, io::IO, part::Cat, file_path::AbstractString, saved_children::AbstractArray)
@@ -104,7 +104,7 @@ function save(ctx, part::Part{FileReader}, file_path::AbstractString)
        cp(part.reader.file, file_path)
        Part(parttype(part), domain(part),
           FileReader(file_path, parttype(part),
-                     part.reader.data_offset))
+                     part.reader.data_offset), false)
    end
 end
 
@@ -147,7 +147,7 @@ function load(ctx, ::Type{Part}, fname, io)
     (T, dmn, sz) = deserialize(io)
 
     Computed(Part(T, dmn, sz,
-        FileReader(fname, T, meta_len+1)))
+        FileReader(fname, T, meta_len+1), false))
 end
 
 function load(ctx, ::Type{Cat}, file_path, io)
