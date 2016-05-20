@@ -27,14 +27,17 @@ abstract PartIO
 """
 A part with some data
 """
-immutable Part{I<:PartIO} <: AbstractPart
+type Part{I<:PartIO} <: AbstractPart
     parttype::Type
     domain::Domain
     handle::I
+    persist::Bool
 end
 
 domain(c::Part) = c.domain
 parttype(c::Part) = c.parttype
+persist!(t::Part) = (t.persist=true; t)
+shouldpersist(p::Part) = t.persist
 function gather(ctx, part::Part)
     # delegate fetching to handle by default.
     gather(ctx, part.handle)
@@ -54,7 +57,7 @@ Create a part from a sequential object.
 """
 function part(x)
     ref = make_token(x)
-    Part(typeof(x), domain(x), DistMem(ref))
+    Part(typeof(x), domain(x), DistMem(ref), false)
 end
 part(x::AbstractPart) = x
 
@@ -76,6 +79,7 @@ end
 
 domain(c::Sub) = c.domain
 parttype(c::Sub) = c.parttype
+persist!(x::Sub) = persist!(c.part)
 
 function gather(ctx, s::Sub)
     # A Sub{T<:Chunk{X}} can try to make this efficient for X
@@ -130,6 +134,7 @@ domain(c::Cat) = c.domain
 parttype(c::Cat) = c.parttype
 partition(c::Cat) = c.partition
 parts(x::Cat) = x.parts
+persist!(x::Cat) = (for p in parts(x); persist!(p); end)
 
 function gather(ctx, part::Cat)
 
@@ -202,12 +207,17 @@ function lookup_parts{T,N}(parts, part_domains::Array{T,N}, d)
     subparts, cumulative_domains(map(alignfirst, intersects2))
 end
 
-
-# Dammit ref counting is probably needed
-
-release_part(x::Cat) = map(release_part, x.parts)
-## WARNING: a token may be held by many. It should never be
-release_part(s::Part{DistMem}) = begin
-    release_token(s.handle.ref)
+function free!(x::Cat, force=true)
+    for p in parts(x)
+        free!(p, force)
+    end
 end
-release_part(s::AbstractPart) = nothing
+# Check to see if the node is set to persist
+# if it is foce can override it
+function free!(s::Part{DistMem}, force=true)
+    if force || !s.persist
+        release_token(s.handle.ref)
+    end
+end
+free!(s::AbstractPart, force=true) = nothing
+free!(s::Sub, force=true) = free!(s.part, force)

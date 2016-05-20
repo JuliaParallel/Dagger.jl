@@ -6,23 +6,34 @@ end
 global _thunk_dict = Dict{Int, Any}()
 
 # A thing to run
-immutable Thunk <: AbstractPart
+type Thunk <: AbstractPart
     f::Function
     inputs::Tuple
     id::Int
     get_result::Bool # whether the worker should send the result or only the metadata
     administrative::Bool
-    function Thunk(f, inputs, id, get_res, meta)
-        x = new(f, inputs, id, get_res, meta)
+    persist::Bool
+    function Thunk(f, inputs, id, get_res, meta,persist)
+        x = new(f, inputs, id, get_res, meta,persist)
         _thunk_dict[id] = x
         x
     end
 end
-Thunk(f::Function, xs::Tuple; id::Int=next_id(), get_result::Bool=false,
-    meta::Bool=false) = Thunk(f,xs,id,get_result,meta)
-Thunk(f::Function, xs::AbstractArray; id::Int=next_id(), get_result::Bool=false,
-    meta::Bool=false) = Thunk(f,(xs...); id=id,get_result=get_result,meta=meta)
+Thunk(f::Function, xs::Tuple;
+      id::Int=next_id(),
+      get_result::Bool=false,
+      meta::Bool=false,
+      persist::Bool=false) =
+      Thunk(f,xs,id,get_result,meta,persist)
 
+Thunk(f::Function, xs::AbstractArray;
+      id::Int=next_id(),
+      get_result::Bool=false,
+      meta::Bool=false,
+      persist::Bool=false) =
+      Thunk(f,(xs...), id=id,get_result=get_result,meta=meta,persist=persist)
+
+persist!(t::Thunk) = (t.persist=true; t)
 
 # cut down 30kgs in microseconds with one weird trick
 @generated function compose{N}(f, g, t::NTuple{N})

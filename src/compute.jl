@@ -1,4 +1,4 @@
-export stage, cached_stage, compute, debug_compute
+export stage, cached_stage, compute, debug_compute, cached, free!
 using Compat
 
 """
@@ -78,19 +78,42 @@ type Computed <: Computation
     # TODO: Allow passive branching for Save?
     function Computed(x)
         c = new(x)
-        #finalizer(c, release_computed)
+        finalizer(c, finalize_computed!)
         c
     end
 end
 
-function release_computed(x::Computed)
-    @schedule release_part(x.result)
+"""
+Tell the CF not to remove the result of a computation
+once it's done.
+"""
+immutable Cached <: Computation
+    inp::Computation
+end
+
+cached(x::Computation) = Cached(x)
+function stage(ctx, x::Cached)
+    persist!(cached_stage(ctx, x))
+    x
+end
+
+free!(x::Computed, force=true) = free!(x.result,force)
+function finalize_computed!(x::Computed)
+
+    @schedule free!(x, true) # @schedule needed because gc can't yield
 end
 
 gather(ctx, x::Computed) = gather(ctx, x.result)
-
 function stage(ctx, c::Computed)
+    persist!(c.result)
     c.result
+end
+
+function free!(x::Cat)
+    for p in parts(x)
+        free!(p)
+    end
+    nothing
 end
 
 """
@@ -129,7 +152,7 @@ function thunkize(ctx, c::Cat)
 end
 thunkize(ctx, x::AbstractPart) = x
 thunkize(ctx, x::Thunk) = x
-function finish_task!(state, node, node_order; release=true)
+function finish_task!(state, node, node_order; free=true)
     deps = sort([i for i in state[:dependents][node]], by=node_order)
     for dep in deps
         set = state[:waiting][dep]
@@ -138,7 +161,7 @@ function finish_task!(state, node, node_order; release=true)
             pop!(state[:waiting], dep)
             push!(state[:ready], dep)
         end
-        # todo: release data
+        # todo: free data
     end
     for inp in inputs(node)
         if inp in keys(state[:waiting_data])
@@ -147,15 +170,20 @@ function finish_task!(state, node, node_order; release=true)
             if node in s
                 pop!(s, node)
             end
-            if release && isempty(s)
-                @logmsg("releasing $inp")
-                release!(state[:cache], inp)
+            if free && isempty(s)
+                if haskey(state[:cache], inp)
+                    _node = state[:cache][inp]
+                    free!(_node, false)
+                    pop!(state[:cache], inp)
+                end
             end
         end
     end
     state[:finished] = node
     pop!(state[:running], node)
 end
+
+free!(x, force=true) = x # catch-all for non-parts
 
 ###### Scheduler #######
 """
@@ -211,16 +239,6 @@ function compute(ctx, d::Thunk)
     state[:cache][d]
 end
 
-function release!(cache, node)
-    if haskey(cache, node)
-        if isa(cache[node], Part{DistMem})
-            #@logmsg("Finalizing remoteref")
-            release_token(cache[node].handle.ref)
-        end
-        pop!(cache, node)
-    end
-end
-
 function fire_task!(ctx, proc, state, chan, node_order)
     thunk = pop!(state[:ready])
     @logmsg("W$(proc.pid) + $thunk ($(thunk.f)) input:$(thunk.inputs)")
@@ -239,7 +257,7 @@ function fire_task!(ctx, proc, state, chan, node_order)
 
         #push!(state[:running], thunk)
         state[:cache][thunk] = res
-        finish_task!(state, thunk, node_order; release=false)
+        finish_task!(state, thunk, node_order; free=false)
         !isempty(state[:ready]) && fire_task!(ctx, proc, state, chan, node_order)
         return
     end
