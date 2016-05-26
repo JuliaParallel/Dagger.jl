@@ -1,14 +1,19 @@
 import ComputeFramework: children, parts
 
+children(x::Computed) = children(x.result)
+parts(x::Computed) = parts(x.result)
+ComputeFramework.domain(x::Computed) = domain(x.result)
+
 @testset "Arrays" begin
 
 @testset "rand" begin
     function test_rand(X)
-        X1 = compute(X).result
+        X1 = compute(X)
         X2 = gather(X1)
 
         @test isa(X, ComputeFramework.Computation)
-        @test isa(X1, ComputeFramework.Cat)
+        @test isa(X1, ComputeFramework.Computed)
+        @test isa(X1.result, ComputeFramework.Cat)
         @test X2 |> size == (100, 100)
         @test all(X2 .>= 0.0)
         @test size(parts(X1)) == (10, 10)
@@ -31,7 +36,7 @@ end
     function test_dist(X)
         X1 = Distribute(BlockPartition(10, 20), X)
         @test gather(X1) == X
-        Xc = compute(X1).result
+        Xc = compute(X1)
         @test parts(Xc) |> size == (10, 5)
         @test children(domain(Xc)) |> size == (10, 5)
         @test map(x->size(x) == (10, 20), children(domain(Xc))) |> all
@@ -45,7 +50,7 @@ end
         x, y = size(X)
         X1 = Distribute(BlockPartition(10, 20), X)
         @test gather(X1') == X'
-        Xc = compute(X1').result
+        Xc = compute(X1')
         @test parts(Xc) |> size == (div(y, 20), div(x,10))
         @test children(domain(Xc)) |> size == (div(y, 20), div(x, 10))
         @test map(x->size(x) == (20, 10), children(domain(Xc))) |> all
@@ -61,8 +66,8 @@ end
         tol = 1e-12
         X1 = Distribute(BlockPartition(10, 20), X)
         @test_throws DimensionMismatch compute(X1*X1)
-        X2 = compute(X1'*X1).result
-        X3 = compute(X1*X1').result
+        X2 = compute(X1'*X1)
+        X3 = compute(X1*X1')
         @test norm(gather(X2) - X'X) < tol
         @test norm(gather(X3) - X*X') < tol
         @test parts(X2) |> size == (2, 2)

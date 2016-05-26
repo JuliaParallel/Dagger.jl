@@ -99,7 +99,6 @@ end
 
 free!(x::Computed, force=true) = free!(x.result,force)
 function finalize_computed!(x::Computed)
-
     @schedule free!(x, true) # @schedule needed because gc can't yield
 end
 
