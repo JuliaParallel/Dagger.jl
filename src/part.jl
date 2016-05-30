@@ -220,4 +220,4 @@ function free!(s::Part{DistMem}, force=true)
     end
 end
 free!(s::AbstractPart, force=true) = nothing
-free!(s::Sub, force=true) = free!(s.part, force)
+free!(s::Sub, force=true) = nothing

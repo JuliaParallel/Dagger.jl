@@ -1,4 +1,4 @@
-import ComputeFramework: children, parts
+import ComputeFramework: children, parts, Computed
 
 children(x::Computed) = children(x.result)
 parts(x::Computed) = parts(x.result)
