@@ -238,3 +238,40 @@ function stage(ctx, scal::Scale)
     scal_parts = _scale(parts(l), parts(r))
     Cat(partition(r), Any, domain(r), scal_parts)
 end
+
+immutable Concat <: Computation
+    axis::Int
+    inputs::Tuple
+end
+
+function cat(idx::Int, ds::DomainBranch...)
+    h = head(ds[1])
+    out_idxs = [x for x in indexes(h)]
+    len = sum(map(x->length(indexes(x)[idx]), ds))
+    fst = first(out_idxs[idx])
+    out_idxs[idx] = fst:(fst+len-1)
+    out_head = DenseDomain(out_idxs)
+    out_children = cumulative_domains(cat(idx, map(children, ds)...))
+    DomainBranch(out_head, out_children)
+end
+
+function stage(ctx, c::Concat)
+    inp = Any[cached_stage(ctx, x) for x in c.inputs]
+
+    dmns = map(domain, inp)
+    dims = [[i == c.axis ? 0 : i for i in size(d)] for d in dmns]
+    if !all(map(x -> x == dims[1], dims[2:end]))
+        error("Inputs to cat do not have compatible dimensions.")
+    end
+
+    dmn = cat(c.axis, dmns...)
+    thunks = cat(c.axis, map(parts, inp)...)
+    T = promote_type(map(parttype, inp)...)
+    Cat(inp[1].partition, T, dmn, thunks)
+end
+
+Base.cat(idx::Int, xs::Computation...) =
+    Concat(idx, xs)
+
+Base.hcat(xs::Computation...) = cat(2, xs...)
+Base.vcat(xs::Computation...) = cat(1, xs...)
