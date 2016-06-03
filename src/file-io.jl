@@ -165,6 +165,10 @@ function save(ctx, io::IO, m::Array)
     m
 end
 
+function save(ctx, io::IO, m::BitArray)
+    save(ctx, io, convert(Array{Bool}, m))
+end
+
 function gather{T<:Array}(ctx, c::Part{FileReader{T}})
     h = c.handle
     io = open(h.file, "r+")
@@ -175,6 +179,15 @@ function gather{T<:Array}(ctx, c::Part{FileReader{T}})
     arr
 end
 
+function gather{T<:BitArray}(ctx, c::Part{FileReader{T}})
+    h = c.handle
+    io = open(h.file, "r+")
+    seek(io, h.data_offset)
+    arr = reshape(reinterpret(Bool, read(io)), size(c.domain))
+    #arr = Mmap.mmap(io, h.parttype, size(c.domain))
+    close(io)
+    arr
+end
 function save{Tv, Ti}(ctx, io::IO, m::SparseMatrixCSC{Tv,Ti})
     write(io, m.m)
     write(io, m.n)
