@@ -78,5 +78,14 @@ end
     test_mul(rand(40, 40))
 end
 
+@testset "concat" begin
+    m = rand(75,75)
+    x = Distribute(BlockPartition(10,20), m)
+    y = Distribute(BlockPartition(10,10), m)
+    @test hcat(m,m) == gather(hcat(x,x))
+    @test vcat(m,m) == gather(vcat(x,x))
+    @test hcat(m,m) == gather(hcat(x,y))
+    @test_throws DimensionMismatch compute(vcat(x,y))
+end
 
 end
