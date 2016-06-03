@@ -56,7 +56,10 @@ compute(x) = compute(Context(), x)
 gather(ctx, x) = gather(ctx, compute(ctx, x))
 gather(x) = gather(Context(), x)
 
-wrap_computed(x::AbstractPart) = Computed(x)
+function wrap_computed(x::AbstractPart)
+    persist!(x)
+    Computed(x)
+end
 wrap_computed(x) = x
 
 immutable TupleCompute <: Computation
@@ -104,7 +107,6 @@ end
 
 gather(ctx, x::Computed) = gather(ctx, x.result)
 function stage(ctx, c::Computed)
-    persist!(c.result)
     c.result
 end
 

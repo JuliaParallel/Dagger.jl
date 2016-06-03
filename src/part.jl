@@ -79,7 +79,7 @@ end
 
 domain(c::Sub) = c.domain
 parttype(c::Sub) = c.parttype
-persist!(x::Sub) = persist!(c.part)
+persist!(x::Sub) = persist!(x.part)
 
 function gather(ctx, s::Sub)
     # A Sub{T<:Chunk{X}} can try to make this efficient for X
