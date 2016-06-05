@@ -24,8 +24,8 @@ function stage(ctx, rd::ReadDelim)
     end
     # figure out number of columns
     Thunk((thunks...); meta=true) do ps...
-        ps_parts = [ps...]
-        ds = map(domain, ps_parts)
+        ps_arr = [ps...]
+        ds = map(domain, ps_arr)
         ncols = size(ds[1], 2)
         nrows_parts = map(d->size(d, 1), ds)
         nrows = sum(nrows_parts)
@@ -40,6 +40,6 @@ function stage(ctx, rd::ReadDelim)
             BlockPartition((floor(Int, nrows/length(ds)), ncols)),
             DomainBranch(DenseDomain(1:nrows, 1:ncols), map(r -> DenseDomain(r, 1:ncols), row_ranges))
         end
-        Cat(p, parttype(parts[1]), dmn, parts)
+        Cat(p, parttype(ps[1]), dmn, ps_arr)
     end
 end
