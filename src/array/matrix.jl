@@ -270,8 +270,10 @@ function stage(ctx, c::Concat)
     Cat(inp[1].partition, T, dmn, thunks)
 end
 
-Base.cat(idx::Int, xs::Computation...) =
-    Concat(idx, xs)
+Base.cat(idx::Int, x::Computation, xs::Computation...) =
+    Concat(idx, (x, xs...))
 
 Base.hcat(xs::Computation...) = cat(2, xs...)
 Base.vcat(xs::Computation...) = cat(1, xs...)
+
+
