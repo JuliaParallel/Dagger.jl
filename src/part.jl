@@ -158,7 +158,7 @@ function sub(c::Cat, d)
         return c_parts[1]
     end
 
-    cat(partition(c), parttype(c), DomainBranch(d, subdomains), c_parts)
+    cat(partition(c), parttype(c), DomainBranch(alignfirst(d), subdomains), c_parts)
 end
 
 function getdim(vec)
