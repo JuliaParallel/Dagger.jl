@@ -1,6 +1,6 @@
 export dist_readdlm
 
-include("lib/block-io.jl")
+include("../lib/block-io.jl")
 
 immutable ReadDelim <: Computation
     file::AbstractString

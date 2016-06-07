@@ -2,31 +2,32 @@ module ComputeFramework
 
 using Compat
 
-include("util.jl")
-include("logging.jl")
+include("lib/util.jl")
+include("basics/logging.jl")
 
 # Data and sub-data
-include("domain.jl")
-include("partition.jl")
-include("part.jl")
+include("basics/domain.jl")
+include("basics/partition.jl")
+include("basics/data.jl")
 
 # Task scheduling
-include("processor.jl")
-include("thunk.jl")
-include("compute.jl")
+include("basics/processor.jl")
+include("basics/thunk.jl")
+include("basics/compute.jl")
 
-# Extras
+# File IO
 #include("sparse.jl")
-include("file-io.jl")
-include("map-reduce.jl")
-include("read-delim.jl")
+include("basics/file-io.jl")
 
 # Array computations
+include("array/map-reduce.jl")
+include("array/read-delim.jl")
+
 include("array/alloc.jl")
 include("array/operators.jl")
 include("array/getindex.jl")
 include("array/matrix.jl")
 
-include("show.jl")
+include("array/show.jl")
 
 end # module

@@ -45,7 +45,7 @@ end
 
 
 ### PartIO
-include("lib/dumbref.jl")
+include("../lib/dumbref.jl")
 
 immutable DistMem <: PartIO
     ref::MemToken
