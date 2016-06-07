@@ -120,11 +120,9 @@ A collection of Parts put together to form a bigger logical part
 Fields:
  - parttype: The type of the data represented by the Cat
  - domain: The domain of the combined part and parts (`DomainSplit`)
- - partition: The partition scheme used to divide child parts into a big part
  - parts: the parts which form the parts of the Cat
 """
-type Cat{P<:PartitionScheme} <: AbstractPart
-    partition::P
+type Cat <: AbstractPart
     parttype::Type
     domain::DomainSplit
     parts::AbstractArray
@@ -132,22 +130,12 @@ end
 
 domain(c::Cat) = c.domain
 parttype(c::Cat) = c.parttype
-partition(c::Cat) = c.partition
 parts(x::Cat) = x.parts
 persist!(x::Cat) = (for p in parts(x); persist!(p); end)
 
 function gather(ctx, part::Cat)
-
-    cat_data(partition(part),
-        part.domain,
-        map(c->gather(ctx,c), parts(part)))
+    cat_data(part.domain, map(c->gather(ctx,c), parts(part)))
 end
-
-"""
-Concatenate parts according to some partition
-"""
-cat(p::PartitionScheme, T::Type, d::Domain, parts::AbstractArray) =
-        Cat(p, T, d, parts)
 
 """
 `sub` of a `Cat` part returns a `Cat` of sub parts
@@ -158,7 +146,7 @@ function sub(c::Cat, d)
         return c_parts[1]
     end
 
-    cat(partition(c), parttype(c), DomainSplit(alignfirst(d), subdomains), c_parts)
+    Cat(parttype(c), DomainSplit(alignfirst(d), subdomains), c_parts)
 end
 
 function getdim(vec)

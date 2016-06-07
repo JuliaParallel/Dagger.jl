@@ -145,7 +145,7 @@ function thunkize(ctx, c::Cat)
         sz = size(parts(c))
         Thunk(thunks; meta=true) do results...
             t = parttype(results[1])
-            Cat(partition(c), t, domain(c), reshape(AbstractPart[results...], sz))
+            Cat(t, domain(c), reshape(AbstractPart[results...], sz))
         end
     else
         c

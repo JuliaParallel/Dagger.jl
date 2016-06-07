@@ -169,3 +169,31 @@ domain(x::AbstractArray) = DenseDomain([1:l for l in size(x)])
 
 Base.@deprecate_binding DomainBranch DomainSplit
 Base.@deprecate children(x::Domain) parts(x)
+
+"""
+    cat_data(p::PartitionScheme, a...)
+
+Put data objects back together as if they were split using a `PartitionScheme`
+"""
+@unimplemented cat_data(t::Type, dom::Domain, parts)
+
+function cat_data{A<:ArrayDomain}(
+    dom::DomainSplit{A},
+    ps::AbstractArray)
+
+    if isa(ps[1], SparseMatrixCSC)
+        return sparse_cat_data(ps)
+    end
+    T = eltype(ps[1])
+    arr = Array(T, size(dom))
+    for (d, part) in zip(parts(dom), ps)
+        setindex!(arr, part, indexes(d)...)
+    end
+    arr
+end
+
+function sparse_cat_data(ps)
+    hblocks = Any[hcat(ps[i, :]...) for i=1:size(ps,1)]
+
+    vcat(hblocks...)
+end

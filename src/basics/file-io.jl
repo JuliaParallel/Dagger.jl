@@ -68,7 +68,7 @@ end
 
 function save(ctx, io::IO, part::Cat, file_path::AbstractString, saved_parts::AbstractArray)
 
-    metadata = (partition(part), parttype(part), domain(part), saved_parts)
+    metadata = (parttype(part), domain(part), saved_parts)
 
     # save yourself
     write(io, CAT)

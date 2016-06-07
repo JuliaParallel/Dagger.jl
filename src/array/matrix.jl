@@ -31,14 +31,18 @@ function stage(ctx, node::Transpose)
     dmn = domain(inp)
     dmnT = dmn'
     thunks = _transpose(parts(inp))
-    Cat(inp.partition', parttype(inp), dmnT, thunks)
+    Cat(parttype(inp), dmnT, thunks)
 end
 
 export Distribute
 
 immutable Distribute <: Computation
-    partition::PartitionScheme
-    data::Any
+    domain::DomainSplit
+    data::AbstractPart
+end
+
+function Distribute(p::PartitionScheme, data)
+    Distribute(partition(p, domain(data)), part(data))
 end
 
 #=
@@ -64,9 +68,7 @@ end
 
 function stage(ctx, d::Distribute)
     p = part(d.data)
-    dmn = domain(p)
-    branch = partition(d.partition, dmn)
-    Cat(d.partition, typeof(d.data), branch, map(c -> sub(p, c), parts(branch)))
+    Cat(typeof(d.data), d.domain, map(c -> sub(p, c), parts(d.domain)))
 end
 
 
@@ -164,10 +166,7 @@ end
 an operand which should be distributed as per convenience
 """
 function stage_operand{T<:AbstractVector}(ctx, ::MatMul, a, b::PromotePartition{T})
-    scheme = partition(a)
-    @assert isa(scheme, BlockPartition)
     # use scheme's column distribution here
-    scheme_b = BlockPartition((scheme.blocksize[2],))
     cached_stage(ctx, Distribute(scheme_b, b.data))
     #=
     d = domain(a)
@@ -184,15 +183,11 @@ function stage(ctx, mul::MatMul)
     a = cached_stage(ctx, mul.a)
     b = stage_operand(ctx, mul, a, mul.b)
 
-    pa = partition(a)::BlockPartition
-    pb = partition(b)::BlockPartition
-    p = pa*pb
-
     da = domain(a)
     db = domain(b)
 
     d = da*db
-    Cat(p, Any, d, _mul(parts(a), parts(b); T=Thunk))
+    Cat(Any, d, _mul(parts(a), parts(b); T=Thunk))
 end
 
 
@@ -210,11 +205,11 @@ scale(l::Vector, r::Computation) = scale(PromotePartition(l), r)
 scale(l::Computation, r::Computation) = Scale(l, r)
 
 function stage_operand(ctx, ::Scale, a, b::PromotePartition)
-    scheme = partition(a)
-    @assert isa(scheme, BlockPartition)
-    # use scheme's row distribution here
-    scheme_b = BlockPartition((scheme.blocksize[1],))
-    cached_stage(ctx, Distribute(scheme_b, b.data))
+    ps = parts(domain(a))
+    b_parts = map(x->DenseDomain(indexes(x)[1]), ps[:,1])
+    head = DenseDomain(1:sum(map(length, b_parts)))
+    b_dmn = DomainSplit(head, b_parts)
+    cached_stage(ctx, Distribute(b_dmn, b.data))
 end
 
 function stage_operand(ctx, ::Scale, a, b)
@@ -267,7 +262,7 @@ function stage(ctx, c::Concat)
     dmn = cat(c.axis, dmns...)
     thunks = cat(c.axis, map(parts, inp)...)
     T = promote_type(map(parttype, inp)...)
-    Cat(inp[1].partition, T, dmn, thunks)
+    Cat(T, dmn, thunks)
 end
 
 Base.cat(idx::Int, x::Computation, xs::Computation...) =

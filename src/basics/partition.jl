@@ -1,6 +1,6 @@
 
 import Base: cat
-export partition, SliceDimension
+export partition
 
 """
 A PartitionScheme defines how data is partitioned. It is used
@@ -25,14 +25,6 @@ see also `distribute`. Note that by default `distribute` calls
 """
 @unimplemented partition(p::PartitionScheme, domain::Domain)
 
-"""
-    cat_data(p::PartitionScheme, a...)
-
-Put data objects back together as if they were split using a `PartitionScheme`
-"""
-@unimplemented cat_data(p::PartitionScheme, t::Type, dom::Domain, parts)
-
-
 ## General schemes
 
 """
@@ -43,26 +35,6 @@ immutable Broadcast <: PartitionScheme end
 
 partition(b::Broadcast, dom::Domain, nparts::Int) =
     DomainSplit(dom, [dom for _ in 1:nparts])
-
-cat(p::Broadcast, dom::Domain, a, b) = a
-
-
-"""
-    Reducer(op, indentity)
-
-Reducer layout denotes putting two parts together
-by using a reducer operator and an identity value.
-"""
-immutable Reducer{F} <: PartitionScheme
-    op::F
-    v0::Any
-end
-cat(p::Reducer, ::UnitDomain, a, b) = p.op(a,b)
-cat(p::Reducer, ::UnitDomain) = p.v0
-
-partition(b::Reducer, dom::Domain, nparts::Int) =
-    error("Cannot partition using a reducer")
-
 
 ###### Array Partitioning ######
 
@@ -86,20 +58,3 @@ BlockPartition(xs...) = BlockPartition(xs)
     Expr(:block, :(idxs = indexes(dom)), :(DomainSplit(dom, $body)))
 end
 
-function cat_data(p::BlockPartition, dom::DomainSplit, ps::AbstractArray)
-    if isa(ps[1], SparseMatrixCSC)
-        return sparse_cat_data(ps)
-    end
-    T = eltype(ps[1])
-    arr = Array(T, size(dom))
-    for (d, part) in zip(parts(dom), ps)
-        setindex!(arr, part, indexes(d)...)
-    end
-    arr
-end
-
-function sparse_cat_data(ps)
-    hblocks = Any[hcat(ps[i, :]...) for i=1:size(ps,1)]
-
-    vcat(hblocks...)
-end
