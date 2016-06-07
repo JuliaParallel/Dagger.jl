@@ -35,10 +35,10 @@ function stage(ctx, rd::ReadDelim)
 
         p,dmn = if ncols == 1
             BlockPartition((floor(Int, nrows/length(ds)),)),
-            DomainBranch(DenseDomain((1:nrows,)), map(r -> DenseDomain((r,)), row_ranges))
+            DomainSplit(DenseDomain((1:nrows,)), map(r -> DenseDomain((r,)), row_ranges))
         else
             BlockPartition((floor(Int, nrows/length(ds)), ncols)),
-            DomainBranch(DenseDomain(1:nrows, 1:ncols), map(r -> DenseDomain(r, 1:ncols), row_ranges))
+            DomainSplit(DenseDomain(1:nrows, 1:ncols), map(r -> DenseDomain(r, 1:ncols), row_ranges))
         end
         Cat(p, parttype(ps[1]), dmn, ps_arr)
     end

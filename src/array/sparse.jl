@@ -9,7 +9,7 @@ end
 size(d::SparseCSCDomain, arg...) = size(d.adomain, arg...)
 length(d::SparseCSCDomain) = Int(d.colptr[end]-1)
 indexranges(d::SparseCSCDomain) = indexranges(d.adomain)
-children(d::SparseCSCDomain) = d
+parts(d::SparseCSCDomain) = d
 
 function alignfirst(d::SparseCSCDomain)
     adomain = alignfirst(d.adomain)
@@ -75,7 +75,7 @@ function partition(p::SliceDimension{2}, dom::SparseCSCDomain,
 
     subdomains = [SparseCSCDomain(ArrayDomain(UnitRange[dom.adomain.indexranges[1], s]), getsubcolptr(dom.colptr, s))
                      for s in splits]
-    DomainBranch(dom, subdomains)
+    DomainSplit(dom, subdomains)
 end
 
 function partition(p::SliceDimension{2}, dom::SparseCSCDomain, nparts::Int)
@@ -108,7 +108,7 @@ function partition(p::SliceDimension{2}, dom::SparseCSCDomain, nparts::Int)
 
     subdomains = [SparseCSCDomain(ArrayDomain((dom.adomain.indexranges[1], s)), getsubcolptr(dom.colptr, s))
                      for s in splits]
-    DomainBranch(dom, subdomains)
+    DomainSplit(dom, subdomains)
 end
 
 function partition(::SliceDimension{1}, dom::SparseCSCDomain, nparts::Int)

@@ -43,7 +43,7 @@ end
 function stage(ctx, node::BlockwiseOp)
     inputs = Any[cached_stage(ctx, n) for n in node.input]
     primary = inputs[1] # all others will align to this guy
-    domains = children(domain(primary))
+    domains = parts(domain(primary))
     thunks = map(map(parts, inputs)...) do args...
         Thunk(node.f, args)
     end

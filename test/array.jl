@@ -1,6 +1,6 @@
-import ComputeFramework: children, parts, Computed
+import ComputeFramework: parts, parts, Computed
 
-children(x::Computed) = children(x.result)
+parts(x::Computed) = parts(x.result)
 parts(x::Computed) = parts(x.result)
 ComputeFramework.domain(x::Computed) = domain(x.result)
 
@@ -18,8 +18,8 @@ ComputeFramework.domain(x::Computed) = domain(x.result)
         @test all(X2 .>= 0.0)
         @test size(parts(X1)) == (10, 10)
         @test domain(X1).head == DenseDomain(1:100, 1:100)
-        @test children(domain(X1)) |> size == (10, 10)
-        @test children(domain(X1)) == children(partition(BlockPartition(10, 10), DenseDomain(1:100, 1:100)))
+        @test parts(domain(X1)) |> size == (10, 10)
+        @test parts(domain(X1)) == parts(partition(BlockPartition(10, 10), DenseDomain(1:100, 1:100)))
     end
     X = rand(BlockPartition(10, 10), 100, 100)
     test_rand(X)
@@ -38,8 +38,8 @@ end
         @test gather(X1) == X
         Xc = compute(X1)
         @test parts(Xc) |> size == (10, 5)
-        @test children(domain(Xc)) |> size == (10, 5)
-        @test map(x->size(x) == (10, 20), children(domain(Xc))) |> all
+        @test parts(domain(Xc)) |> size == (10, 5)
+        @test map(x->size(x) == (10, 20), parts(domain(Xc))) |> all
     end
     test_dist(rand(100, 100))
     test_dist(sprand(100, 100, 0.1))
@@ -52,8 +52,8 @@ end
         @test gather(X1') == X'
         Xc = compute(X1')
         @test parts(Xc) |> size == (div(y, 20), div(x,10))
-        @test children(domain(Xc)) |> size == (div(y, 20), div(x, 10))
-        @test map(x->size(x) == (20, 10), children(domain(Xc))) |> all
+        @test parts(domain(Xc)) |> size == (div(y, 20), div(x, 10))
+        @test map(x->size(x) == (20, 10), parts(domain(Xc))) |> all
     end
     test_transpose(rand(100, 100))
     test_transpose(rand(100, 120))
@@ -72,8 +72,8 @@ end
         @test norm(gather(X3) - X*X') < tol
         @test parts(X2) |> size == (2, 2)
         @test parts(X3) |> size == (4, 4)
-        @test map(x->size(x) == (20, 20), children(domain(X2))) |> all
-        @test map(x->size(x) == (10, 10), children(domain(X3))) |> all
+        @test map(x->size(x) == (20, 20), parts(domain(X2))) |> all
+        @test map(x->size(x) == (10, 10), parts(domain(X3))) |> all
     end
     test_mul(rand(40, 40))
 end

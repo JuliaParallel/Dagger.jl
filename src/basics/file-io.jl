@@ -66,9 +66,9 @@ function save(ctx, io::IO, part::Part, file_path)
     Part(parttype(part), domain(part), FileReader(file_path, parttype(part), data_offset), false)
 end
 
-function save(ctx, io::IO, part::Cat, file_path::AbstractString, saved_children::AbstractArray)
+function save(ctx, io::IO, part::Cat, file_path::AbstractString, saved_parts::AbstractArray)
 
-    metadata = (partition(part), parttype(part), domain(part), saved_children)
+    metadata = (partition(part), parttype(part), domain(part), saved_parts)
 
     # save yourself
     write(io, CAT)
@@ -85,11 +85,11 @@ function save(ctx, io::IO, part::Cat, file_path)
         mkdir(dir_path)
     end
 
-    # save the children
-    saved_children = [save(ctx, c, joinpath(dir_path, lpad(i, 4, "0")))
+    # save the parts
+    saved_parts = [save(ctx, c, joinpath(dir_path, lpad(i, 4, "0")))
         for (i, c) in enumerate(parts(part))]
 
-    save(ctx, io, part, file_path, saved_children)
+    save(ctx, io, part, file_path, saved_parts)
     # write each child
 end
 

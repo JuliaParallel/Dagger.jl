@@ -306,7 +306,7 @@ end
 Given a root node of the DAG, calculates a total order for tie-braking
 
   * Root node gets score 1,
-  * rest of the nodes are explored in DFS fashion but children
+  * rest of the nodes are explored in DFS fashion but parts
     of each node are explored in order of `noffspring`,
     i.e. total number of tasks depending on the result of the said node.
 

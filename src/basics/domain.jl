@@ -93,17 +93,17 @@ isempty(::UnitDomain) = false
 """
 A domain split into sub-domains
 """
-immutable DomainBranch{D<:Domain} <: Domain
+immutable DomainSplit{D<:Domain} <: Domain
     head::D
-    children::AbstractArray
+    parts::AbstractArray
 end
-head(b::DomainBranch) = b.head
+head(b::DomainSplit) = b.head
 
-isempty(a::DomainBranch) = isempty(head(a))
-intersect{D<:Domain}(a::DomainBranch{D}, b::D) = intersect(head(a), b)
-project{D<:Domain}(a::DomainBranch{D}, b::D) = intersect(head(a), b)
-getindex{D<:Domain}(a::DomainBranch{D}, b::D) = getindex(head(a), b)
-children(x::DomainBranch) = x.children
+isempty(a::DomainSplit) = isempty(head(a))
+intersect{D<:Domain}(a::DomainSplit{D}, b::D) = intersect(head(a), b)
+project{D<:Domain}(a::DomainSplit{D}, b::D) = intersect(head(a), b)
+getindex{D<:Domain}(a::DomainSplit{D}, b::D) = getindex(head(a), b)
+parts(x::DomainSplit) = x.parts
 
 
 
@@ -122,7 +122,7 @@ DenseDomain(xs...) = DenseDomain(xs)
 DenseDomain(xs::Array) = DenseDomain((xs...,))
 
 indexes(a::DenseDomain) = a.indexes
-children(a::DenseDomain) = a
+parts(a::DenseDomain) = a
 
 domain(x::DenseArray) = DenseDomain(map(l -> 1:l, size(x)))
 
@@ -158,10 +158,14 @@ ndims(a::ArrayDomain) = length(size(a))
 isempty(a::DenseDomain) = length(a) == 0
 
 
-indexes{T<:ArrayDomain}(a::DomainBranch{T}) = indexes(a.head)
-size{T<:ArrayDomain}(a::DomainBranch{T}, dim...) = size(a.head, dim...)
-length{T<:ArrayDomain}(a::DomainBranch{T}) = prod(size(a))
-ndims{T<:ArrayDomain}(a::DomainBranch{T}) = length(size(a))
+indexes{T<:ArrayDomain}(a::DomainSplit{T}) = indexes(a.head)
+size{T<:ArrayDomain}(a::DomainSplit{T}, dim...) = size(a.head, dim...)
+length{T<:ArrayDomain}(a::DomainSplit{T}) = prod(size(a))
+ndims{T<:ArrayDomain}(a::DomainSplit{T}) = length(size(a))
 
 "The domain of an array is a DenseDomain"
 domain(x::AbstractArray) = DenseDomain([1:l for l in size(x)])
+
+
+Base.@deprecate_binding DomainBranch DomainSplit
+Base.@deprecate children(x::Domain) parts(x)

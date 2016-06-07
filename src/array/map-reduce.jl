@@ -12,7 +12,7 @@ end
 function stage(ctx, node::Map)
     inputs = Any[cached_stage(ctx, n) for n in node.inputs]
     primary = inputs[1] # all others will align to this guy
-    domains = children(domain(primary))
+    domains = parts(domain(primary))
     thunks = similar(domains, Any)
     f = node.f
     for i=eachindex(domains)
@@ -105,10 +105,10 @@ function stage(ctx, r::Reducedim)
             map((x,y) -> Thunk(op, (x,y,)), xs,ys)
         end
     end
-    c = children(domain(inp))
+    c = parts(domain(inp))
     colons = Any[Colon() for x in size(c)]
     colons[[r.dims...]] = 1
     dmn = c[colons...]
-    d = DomainBranch(reducedim(head(domain(inp)), r.dims), map(d->reducedim(d, r.dims), dmn))
+    d = DomainSplit(reducedim(head(domain(inp)), r.dims), map(d->reducedim(d, r.dims), dmn))
     Cat(partition(inp), parttype(inp),d, thunks)
 end

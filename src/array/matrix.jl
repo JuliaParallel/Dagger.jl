@@ -18,8 +18,8 @@ function transpose(x::DenseDomain{1})
     DenseDomain(1, d[1])
 end
 
-function transpose(x::DomainBranch)
-    DomainBranch(head(x)', children(x)')
+function transpose(x::DomainSplit)
+    DomainSplit(head(x)', parts(x)')
 end
 
 function _transpose(x::AbstractArray)
@@ -66,7 +66,7 @@ function stage(ctx, d::Distribute)
     p = part(d.data)
     dmn = domain(p)
     branch = partition(d.partition, dmn)
-    Cat(d.partition, typeof(d.data), branch, map(c -> sub(p, c), children(branch)))
+    Cat(d.partition, typeof(d.data), branch, map(c -> sub(p, c), parts(branch)))
 end
 
 
@@ -96,9 +96,9 @@ function (*)(a::ArrayDomain{2}, b::ArrayDomain{1})
     DenseDomain((indexes(a)[1],))
 end
 
-function (*)(a::DomainBranch, b::DomainBranch)
+function (*)(a::DomainSplit, b::DomainSplit)
     try
-        DomainBranch(head(a)*head(b), _mul(children(a), children(b)))
+        DomainSplit(head(a)*head(b), _mul(parts(a), parts(b)))
     catch err
         if isa(err, DimensionMismatch)
             throw(DimensionMismatch("Objects being multiplied have incompatible block distributions"))
@@ -171,8 +171,8 @@ function stage_operand{T<:AbstractVector}(ctx, ::MatMul, a, b::PromotePartition{
     cached_stage(ctx, Distribute(scheme_b, b.data))
     #=
     d = domain(a)
-    part_domains = map(x -> DenseDomain((indexes(x)[2],)), d.children[1, :]')
-    bd = DomainBranch(domain(p), part_domains)
+    part_domains = map(x -> DenseDomain((indexes(x)[2],)), d.parts[1, :]')
+    bd = DomainSplit(domain(p), part_domains)
     =#
 end
 
@@ -244,15 +244,15 @@ immutable Concat <: Computation
     inputs::Tuple
 end
 
-function cat(idx::Int, ds::DomainBranch...)
+function cat(idx::Int, ds::DomainSplit...)
     h = head(ds[1])
     out_idxs = [x for x in indexes(h)]
     len = sum(map(x->length(indexes(x)[idx]), ds))
     fst = first(out_idxs[idx])
     out_idxs[idx] = fst:(fst+len-1)
     out_head = DenseDomain(out_idxs)
-    out_children = cumulative_domains(cat(idx, map(children, ds)...))
-    DomainBranch(out_head, out_children)
+    out_parts = cumulative_domains(cat(idx, map(parts, ds)...))
+    DomainSplit(out_head, out_parts)
 end
 
 function stage(ctx, c::Concat)

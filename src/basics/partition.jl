@@ -18,7 +18,7 @@ abstract PartitionScheme
 Partitions the `domain` into `nparts` approximately equal parts
 according to the `dist` data distribution.
 
-returns a `DomainBranch` object.
+returns a `DomainSplit` object.
 
 see also `distribute`. Note that by default `distribute` calls
 `partition_domain` on the domain of the input.
@@ -42,7 +42,7 @@ on each processing unit.
 immutable Broadcast <: PartitionScheme end
 
 partition(b::Broadcast, dom::Domain, nparts::Int) =
-    DomainBranch(dom, [dom for _ in 1:nparts])
+    DomainSplit(dom, [dom for _ in 1:nparts])
 
 cat(p::Broadcast, dom::Domain, a, b) = a
 
@@ -83,23 +83,23 @@ BlockPartition(xs...) = BlockPartition(xs)
 
     subdmn = Expr(:call, :DenseDomain, [sym(n) for n=1:N]...)
     body = Expr(:comprehension, subdmn, forspec...)
-    Expr(:block, :(idxs = indexes(dom)), :(DomainBranch(dom, $body)))
+    Expr(:block, :(idxs = indexes(dom)), :(DomainSplit(dom, $body)))
 end
 
-function cat_data(p::BlockPartition, dom::DomainBranch, parts::AbstractArray)
-    if isa(parts[1], SparseMatrixCSC)
-        return sparse_cat_data(parts)
+function cat_data(p::BlockPartition, dom::DomainSplit, ps::AbstractArray)
+    if isa(ps[1], SparseMatrixCSC)
+        return sparse_cat_data(ps)
     end
-    T = eltype(parts[1])
+    T = eltype(ps[1])
     arr = Array(T, size(dom))
-    for (d, part) in zip(children(dom), parts)
+    for (d, part) in zip(parts(dom), ps)
         setindex!(arr, part, indexes(d)...)
     end
     arr
 end
 
-function sparse_cat_data(parts)
-    hblocks = Any[hcat(parts[i, :]...) for i=1:size(parts,1)]
+function sparse_cat_data(ps)
+    hblocks = Any[hcat(ps[i, :]...) for i=1:size(ps,1)]
 
     vcat(hblocks...)
 end
