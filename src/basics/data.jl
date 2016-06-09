@@ -141,12 +141,12 @@ end
 `sub` of a `Cat` part returns a `Cat` of sub parts
 """
 function sub(c::Cat, d)
-    c_parts, subdomains = lookup_parts(parts(c), parts(domain(c)), d)
-    if length(c_parts) == 1
-        return c_parts[1]
+    sub_parts, subdomains = lookup_parts(parts(c), parts(domain(c)), d)
+    if length(sub_parts) == 1
+        sub_parts[1]
+    else
+        Cat(parttype(c), alignfirst(DomainSplit(d, subdomains)), sub_parts)
     end
-
-    Cat(parttype(c), DomainSplit(alignfirst(d), subdomains), c_parts)
 end
 
 function getdim(vec)

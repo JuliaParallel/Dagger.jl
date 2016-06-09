@@ -48,7 +48,7 @@ function stage(ctx, node::BlockwiseOp)
         Thunk(node.f, args)
     end
 
-    Cat(partition(primary), Any, domain(primary), thunks)
+    Cat(Any, domain(primary), thunks)
 end
 
 export mappart

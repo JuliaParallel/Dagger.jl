@@ -2,7 +2,7 @@
 export domain, Domain, UnitDomain, project, alignfirst, DenseDomain
 
 import Base: isempty, getindex, intersect,
-             ==, size, length
+             ==, size, length, ndims
 
 ###### Domain ######
 

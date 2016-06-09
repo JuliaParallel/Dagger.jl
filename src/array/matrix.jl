@@ -99,15 +99,7 @@ function (*)(a::ArrayDomain{2}, b::ArrayDomain{1})
 end
 
 function (*)(a::DomainSplit, b::DomainSplit)
-    try
-        DomainSplit(head(a)*head(b), _mul(parts(a), parts(b)))
-    catch err
-        if isa(err, DimensionMismatch)
-            throw(DimensionMismatch("Objects being multiplied have incompatible block distributions"))
-        else
-            rethrow(err)
-        end
-    end
+    DomainSplit(head(a)*head(b), parts(a) * parts(b))
 end
 
 function (*)(a::BlockPartition{2}, b::BlockPartition{2})
