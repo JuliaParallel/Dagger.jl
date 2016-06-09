@@ -158,13 +158,15 @@ end
 an operand which should be distributed as per convenience
 """
 function stage_operand{T<:AbstractVector}(ctx, ::MatMul, a, b::PromotePartition{T})
-    # use scheme's column distribution here
-    cached_stage(ctx, Distribute(scheme_b, b.data))
-    #=
-    d = domain(a)
-    part_domains = map(x -> DenseDomain((indexes(x)[2],)), d.parts[1, :]')
-    bd = DomainSplit(domain(p), part_domains)
-    =#
+    dmn_a = domain(a)
+    dmn_b = domain(b.data)
+    if size(dmn_a, 2) != size(dmn_b, 1)
+        throw(DimensionMismatch("Cannot promote array of domain $(dmn2) to multiply with an array of size $(dmn)"))
+    end
+    ps = parts(dmn_a)
+    dmn_out = DomainSplit(dmn_b, BlockedDomains((1,),(ps.cumlength[2],)))
+
+    cached_stage(ctx, Distribute(dmn_out, part(b.data)))
 end
 
 function stage_operand(ctx, ::MatMul, a, b)
@@ -198,10 +200,10 @@ scale(l::Computation, r::Computation) = Scale(l, r)
 
 function stage_operand(ctx, ::Scale, a, b::PromotePartition)
     ps = parts(domain(a))
-    b_parts = map(x->DenseDomain(indexes(x)[1]), ps[:,1])
-    head = DenseDomain(1:sum(map(length, b_parts)))
+    b_parts = BlockedDomains((1,), (ps.cumlength[1],))
+    head = DenseDomain(1:size(domain(a), 1))
     b_dmn = DomainSplit(head, b_parts)
-    cached_stage(ctx, Distribute(b_dmn, b.data))
+    cached_stage(ctx, Distribute(b_dmn, part(b.data)))
 end
 
 function stage_operand(ctx, ::Scale, a, b)
@@ -223,7 +225,7 @@ function stage(ctx, scal::Scale)
     @assert size(domain(r), 1) == size(domain(l), 1)
 
     scal_parts = _scale(parts(l), parts(r))
-    Cat(partition(r), Any, domain(r), scal_parts)
+    Cat(Any, domain(r), scal_parts)
 end
 
 immutable Concat <: Computation

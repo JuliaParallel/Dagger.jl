@@ -76,6 +76,11 @@ end
         @test map(x->size(x) == (10, 10), parts(domain(X3))) |> all
     end
     test_mul(rand(40, 40))
+
+    x = rand(10,10)
+    X = Distribute(BlockPartition(3,3), x)
+    y = rand(10)
+    @test norm(gather(X*y) - x*y) < 1e-13
 end
 
 @testset "concat" begin
@@ -86,6 +91,14 @@ end
     @test vcat(m,m) == gather(vcat(x,x))
     @test hcat(m,m) == gather(hcat(x,y))
     @test_throws DimensionMismatch compute(vcat(x,y))
+end
+
+@testset "scale" begin
+    x = rand(10,10)
+    X = Distribute(BlockPartition(3,3), x)
+    y = rand(10)
+
+    @test Diagonal(y)*x == gather(scale(y, X))
 end
 
 end

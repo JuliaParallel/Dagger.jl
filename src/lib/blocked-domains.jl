@@ -48,12 +48,10 @@ merge_cumsums(x,y) = vcat(x, y+x[end])
 
 function Base.cat(idx::Int, x::BlockedDomains, y::BlockedDomains)
     N = max(ndims(x), ndims(y))
-    _get(x::Tuple, i, def) = length(x) <= i ? x[i] : def
-    get_i(x,y, i) = _get(x.cumlength, i, _get(y.cumlength, i, Int[]))
+    get_i(x,y, i) = length(x) <= i ? x[i] : length(y) <= i ? y[i] : Int[]
     for i=1:N
         i == idx && continue
         if get_i(x,y,i) != get_i(y,x,i)
-            @show get_i(x,y,i), get_i(y,x,i)
             throw(DimensionMismatch("Blocked domains being concatenated have different distributions along dimension $i"))
         end
     end
