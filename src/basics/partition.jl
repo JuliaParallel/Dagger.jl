@@ -47,28 +47,15 @@ immutable BlockPartition{N} <: PartitionScheme
 end
 BlockPartition(xs...) = BlockPartition(xs)
 
-# @generated function partition{N}(p::BlockPartition{N}, dom::ArrayDomain{N})
-#     sym(n) = Symbol("i$n")
-
-#     forspec = [:($(sym(i)) = split_range_interval(
-#             idxs[$i], p.blocksize[$i])) for i=1:N]
-
-#     subdmn = Expr(:call, :DenseDomain, [sym(n) for n=1:N]...)
-#     body = Expr(:comprehension, subdmn, forspec...)
-#     Expr(:block, :(idxs = indexes(dom)), :(DomainSplit(dom, $body)))
-# end
-
 function _cumlength(len, step)
     nice_pieces = div(len, step)
     extra = rem(len, step)
-    if extra > 0
-        vcat([step for i=1:nice_pieces], extra)
-    else
-        [step for i=1:nice_pieces]
-    end |> cumsum
+    ps = [step for i=1:nice_pieces]
+    cumsum(extra > 0 ? vcat(ps, extra) : ps)
 end
 
 include("../lib/blocked-domains.jl")
+
 function partition(p::BlockPartition, dom::ArrayDomain)
     ps = BlockedDomains(map(first, indexes(dom)),
         map(_cumlength, map(length, indexes(dom)), p.blocksize))

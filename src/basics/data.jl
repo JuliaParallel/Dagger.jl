@@ -145,54 +145,57 @@ function sub(c::Cat, d)
     if length(sub_parts) == 1
         sub_parts[1]
     else
-        Cat(parttype(c), alignfirst(DomainSplit(d, subdomains)), sub_parts)
+        Cat(parttype(c), DomainSplit(alignfirst(d), subdomains), sub_parts)
     end
 end
 
-function getdim(vec)
-    dim = 0
-    for el in vec
-        if el != 0 && dim != 0
-            @assert dim == el
-        elseif el != 0 && dim == 0
-            dim = el
+function group_indexes(cumlength, idxs,at=1, acc=Any[])
+    at > length(idxs) && return acc
+    f = idxs[at]
+    fidx = searchsortedfirst(cumlength, f)
+    current_block = (get(cumlength, fidx-1,0)+1):cumlength[fidx]
+    start_at = at
+    end_at = at
+    for i=(at+1):length(idxs)
+        if idxs[i] in current_block
+            end_at += 1
+            at += 1
+        else
+            break
         end
     end
-    dim
+    push!(acc, fidx=>idxs[start_at:end_at])
+    group_indexes(cumlength, idxs, at+1, acc)
 end
 
-Base.(:*)(a::Range, b::Range) = ((last(a) + 1):(last(a)+length(b)))
-@generated function cumulative_domains{N}(::Val{N}, arr::Array)
+function group_indexes(cumlength, idxs::Range)
+    f = searchsortedfirst(cumlength, first(idxs))
+    l = searchsortedfirst(cumlength, last(idxs))
+    out = cumlength[f:l]
+    out[end] = last(idxs)
+    out-=(f-1)
+    map(=>, f:l, map(UnitRange, vcat(first(idxs), out[1:end-1]+1), out))
+end
+
+import Base: @nexprs, @ntuple, @nref, @nloops
+
+@generated function lookup_parts{N}(ps::AbstractArray, subdmns::BlockedDomains{N}, d::DenseDomain{N})
     quote
-        Base.@nexprs $N dim->R_dim = cumprod(map(x->indexes(x)[dim], arr), dim)
-        Base.@ncall $N map DenseDomain R
+        @nexprs $N j->group_j = group_indexes(subdmns.cumlength[j], indexes(d)[j])
+        sz = @ntuple($N, j->length(group_j))
+        pieces = Array(AbstractPart, sz)
+        i = 1
+        @nloops $N dim j->group_j begin
+            @nexprs $N j->blockidx_j   = dim_j[1]
+            @nexprs $N j->intersects_j = dim_j[2]
+            dmn = DenseDomain(@ntuple $N j->intersects_j)
+            pieces[i] = sub(@nref($N, ps, blockidx), project(@nref($N, subdmns, blockidx), dmn))
+            i += 1
+        end
+        @nexprs $N j -> out_cumlength_j = cumsum(map(x->length(x[2]), group_j))
+        out_dmn = BlockedDomains(@ntuple($N, j->1), @ntuple($N, j->out_cumlength_j))
+        pieces, out_dmn
     end
-end
-
-function extend_dim{T,N}(x::Array{T,N})
-    Nd = ndims(x[1])
-    if Nd > N
-        sz = tuple(size(x)..., [1 for i=1:(Nd-N)]...)
-        return Val{Nd}(), reshape(x, sz)
-    else
-        return Val{N}(), x
-    end
-end
-cumulative_domains(x::Array) = cumulative_domains(extend_dim(x)...)
-
-function lookup_parts{T,N}(parts, part_domains::Array{T,N}, d)
-    intersects = map(pd -> intersect(d, pd), part_domains)
-    found = map(x -> !isempty(x), intersects)
-
-    sz = ntuple(dim -> getdim(sum(found, dim)), N)
-    idxs = find(found)
-    interesting_parts = reshape(parts[idxs], sz)
-    interesting_domains = reshape(part_domains[idxs], sz)
-    intersects2 = reshape(intersects[idxs], sz)
-    subparts = map(intersects2, interesting_parts, interesting_domains) do subd, part, dmn
-        sub(part, project(dmn, subd))
-    end
-    subparts, cumulative_domains(map(alignfirst, intersects2))
 end
 
 function free!(x::Cat, force=true)
