@@ -170,30 +170,33 @@ domain(x::AbstractArray) = DenseDomain([1:l for l in size(x)])
 Base.@deprecate_binding DomainBranch DomainSplit
 Base.@deprecate children(x::Domain) parts(x)
 
-"""
-    cat_data(p::PartitionScheme, a...)
+cat_data(::Type{Any}, dom::DomainSplit, ps) =
+    cat_data(typeof(ps[1]), dom, ps)
 
-Put data objects back together as if they were split using a `PartitionScheme`
-"""
-@unimplemented cat_data(t::Type, dom::Domain, parts)
+function cat_data{T<:AbstractArray}(::Type{T}, dom, ps)
 
-function cat_data{A<:ArrayDomain}(
-    dom::DomainSplit{A},
-    ps::AbstractArray)
+    arr = Array(eltype(T), size(dom))
 
-    if isa(ps[1], SparseMatrixCSC)
-        return sparse_cat_data(ps)
+    if isempty(ps)
+        @assert isempty(dom)
+        return arr
     end
-    T = eltype(ps[1])
-    arr = Array(T, size(dom))
+
     for (d, part) in zip(parts(dom), ps)
         setindex!(arr, part, indexes(d)...)
     end
     arr
 end
 
-function sparse_cat_data(ps)
-    hblocks = Any[hcat(ps[i, :]...) for i=1:size(ps,1)]
+function cat_data{T<:SparseMatrixCSC}(::Type{T}, dom, ps)
 
-    vcat(hblocks...)
+    if isempty(ps)
+        @assert isempty(dom)
+        return spzeros(T.parameters..., size(dom)...)
+    end
+
+    m, n = size(parts(dom))
+
+    psT = Any[ps[j,i] for i=1:size(ps,2), j=1:size(ps,1)]
+    hvcat(ntuple(x->n, m), psT...)
 end

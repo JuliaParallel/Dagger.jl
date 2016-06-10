@@ -134,7 +134,7 @@ parts(x::Cat) = x.parts
 persist!(x::Cat) = (for p in parts(x); persist!(p); end)
 
 function gather(ctx, part::Cat)
-    cat_data(part.domain, map(c->gather(ctx,c), parts(part)))
+    cat_data(parttype(part), part.domain, map(c->gather(ctx,c), parts(part)))
 end
 
 """
