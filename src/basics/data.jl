@@ -177,6 +177,7 @@ function group_indices(cumlength, idxs::Range)
     map(=>, f:l, map(UnitRange, vcat(first(idxs), out[1:end-1]+1), out))
 end
 
+_cumsum(x::AbstractArray) = length(x) == 0 ? Int[] : cumsum(x)
 function lookup_parts{N}(ps::AbstractArray, subdmns::BlockedDomains{N}, d::DenseDomain{N})
     groups = map(group_indices, subdmns.cumlength, indexes(d))
     sz = map(length, groups)
@@ -187,7 +188,7 @@ function lookup_parts{N}(ps::AbstractArray, subdmns::BlockedDomains{N}, d::Dense
         dmn = DenseDomain(map(x->x[2], idx_and_dmn))
         pieces[i] = sub(ps[idx...], project(subdmns[idx...], dmn))
     end
-    out_cumlength = map(g->cumsum(map(x->length(x[2]), g)), groups)
+    out_cumlength = map(g->_cumsum(map(x->length(x[2]), g)), groups)
     out_dmn = BlockedDomains(ntuple(x->1,Val{N}), out_cumlength)
     pieces, out_dmn
 end

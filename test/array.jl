@@ -101,4 +101,28 @@ end
     @test Diagonal(y)*x == gather(scale(y, X))
 end
 
+@testset "Getindex" begin
+    function test_getindex(x)
+        X = Distribute(BlockPartition(3,3), x)
+        @test gather(X[3:8, 2:7]) == x[3:8, 2:7]
+        ragged_idx = [1,2,9,7,6,2,4,5]
+        @test gather(X[ragged_idx, 2:7]) == x[ragged_idx, 2:7]
+        @test gather(X[ragged_idx, reverse(ragged_idx)]) == x[ragged_idx, reverse(ragged_idx)]
+        ragged_idx = [1,2,9,7,6,2,4,5]
+        @test gather(X[[2,7,10], :]) == x[[2,7,10], :]
+        @test gather(X[[], ragged_idx]) == x[[], ragged_idx]
+        @test gather(X[[], []]) == x[[], []]
+
+        @testset "dimensionality reduction" begin
+        # THESE NEED FIXING!!
+            @test vec(gather(X[ragged_idx, 5])) == vec(x[ragged_idx, 5])
+            @test vec(gather(X[5, ragged_idx])) == vec(x[5, ragged_idx])
+            @test gather(X[5, 5])[1] == x[5,5]
+        end
+    end
+
+    test_getindex(rand(10,10))
+    test_getindex(sprand(10,10,0.5))
+end
+
 end
