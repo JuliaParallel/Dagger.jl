@@ -31,14 +31,18 @@ function stage(ctx, node::Transpose)
     dmn = domain(inp)
     dmnT = dmn'
     thunks = _transpose(parts(inp))
-    Cat(inp.partition', parttype(inp), dmnT, thunks)
+    Cat(parttype(inp), dmnT, thunks)
 end
 
 export Distribute
 
 immutable Distribute <: Computation
-    partition::PartitionScheme
-    data::Any
+    domain::DomainSplit
+    data::AbstractPart
+end
+
+function Distribute(p::PartitionScheme, data)
+    Distribute(partition(p, domain(data)), part(data))
 end
 
 #=
@@ -63,10 +67,7 @@ end
 =#
 
 function stage(ctx, d::Distribute)
-    p = part(d.data)
-    dmn = domain(p)
-    branch = partition(d.partition, dmn)
-    Cat(d.partition, typeof(d.data), branch, map(c -> sub(p, c), parts(branch)))
+    Cat(parttype(d.data), d.domain, map(c -> sub(d.data, c), parts(d.domain)))
 end
 
 
@@ -97,15 +98,7 @@ function (*)(a::ArrayDomain{2}, b::ArrayDomain{1})
 end
 
 function (*)(a::DomainSplit, b::DomainSplit)
-    try
-        DomainSplit(head(a)*head(b), _mul(parts(a), parts(b)))
-    catch err
-        if isa(err, DimensionMismatch)
-            throw(DimensionMismatch("Objects being multiplied have incompatible block distributions"))
-        else
-            rethrow(err)
-        end
-    end
+    DomainSplit(head(a)*head(b), parts(a) * parts(b))
 end
 
 function (*)(a::BlockPartition{2}, b::BlockPartition{2})
@@ -164,16 +157,15 @@ end
 an operand which should be distributed as per convenience
 """
 function stage_operand{T<:AbstractVector}(ctx, ::MatMul, a, b::PromotePartition{T})
-    scheme = partition(a)
-    @assert isa(scheme, BlockPartition)
-    # use scheme's column distribution here
-    scheme_b = BlockPartition((scheme.blocksize[2],))
-    cached_stage(ctx, Distribute(scheme_b, b.data))
-    #=
-    d = domain(a)
-    part_domains = map(x -> DenseDomain((indexes(x)[2],)), d.parts[1, :]')
-    bd = DomainSplit(domain(p), part_domains)
-    =#
+    dmn_a = domain(a)
+    dmn_b = domain(b.data)
+    if size(dmn_a, 2) != size(dmn_b, 1)
+        throw(DimensionMismatch("Cannot promote array of domain $(dmn2) to multiply with an array of size $(dmn)"))
+    end
+    ps = parts(dmn_a)
+    dmn_out = DomainSplit(dmn_b, BlockedDomains((1,),(ps.cumlength[2],)))
+
+    cached_stage(ctx, Distribute(dmn_out, part(b.data)))
 end
 
 function stage_operand(ctx, ::MatMul, a, b)
@@ -184,15 +176,11 @@ function stage(ctx, mul::MatMul)
     a = cached_stage(ctx, mul.a)
     b = stage_operand(ctx, mul, a, mul.b)
 
-    pa = partition(a)::BlockPartition
-    pb = partition(b)::BlockPartition
-    p = pa*pb
-
     da = domain(a)
     db = domain(b)
 
     d = da*db
-    Cat(p, Any, d, _mul(parts(a), parts(b); T=Thunk))
+    Cat(Any, d, _mul(parts(a), parts(b); T=Thunk))
 end
 
 
@@ -210,11 +198,11 @@ scale(l::Vector, r::Computation) = scale(PromotePartition(l), r)
 scale(l::Computation, r::Computation) = Scale(l, r)
 
 function stage_operand(ctx, ::Scale, a, b::PromotePartition)
-    scheme = partition(a)
-    @assert isa(scheme, BlockPartition)
-    # use scheme's row distribution here
-    scheme_b = BlockPartition((scheme.blocksize[1],))
-    cached_stage(ctx, Distribute(scheme_b, b.data))
+    ps = parts(domain(a))
+    b_parts = BlockedDomains((1,), (ps.cumlength[1],))
+    head = DenseDomain(1:size(domain(a), 1))
+    b_dmn = DomainSplit(head, b_parts)
+    cached_stage(ctx, Distribute(b_dmn, part(b.data)))
 end
 
 function stage_operand(ctx, ::Scale, a, b)
@@ -236,7 +224,7 @@ function stage(ctx, scal::Scale)
     @assert size(domain(r), 1) == size(domain(l), 1)
 
     scal_parts = _scale(parts(l), parts(r))
-    Cat(partition(r), Any, domain(r), scal_parts)
+    Cat(Any, domain(r), scal_parts)
 end
 
 immutable Concat <: Computation
@@ -267,7 +255,7 @@ function stage(ctx, c::Concat)
     dmn = cat(c.axis, dmns...)
     thunks = cat(c.axis, map(parts, inp)...)
     T = promote_type(map(parttype, inp)...)
-    Cat(inp[1].partition, T, dmn, thunks)
+    Cat(T, dmn, thunks)
 end
 
 Base.cat(idx::Int, x::Computation, xs::Computation...) =

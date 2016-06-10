@@ -2,7 +2,7 @@
 export domain, Domain, UnitDomain, project, alignfirst, DenseDomain
 
 import Base: isempty, getindex, intersect,
-             ==, size, length
+             ==, size, length, ndims
 
 ###### Domain ######
 
@@ -34,8 +34,8 @@ Find the intersection of two domains. For example,
 
 Align `b` relative to `a`. For example,
 
-    project(DenseDomain(15:20, 30:40), DenseDomain(11:25, 21:100)
-    # => DenseDomain{2}((-3:11,-8:71))
+    julia> project(DenseDomain(11:25, 21:100), DenseDomain(15:20, 30:40))
+    ComputeFramework.DenseDomain{2}((5:10,10:20))
 """
 @unimplemented project{D<:Domain}(d::D, b::D)
 
@@ -169,3 +169,34 @@ domain(x::AbstractArray) = DenseDomain([1:l for l in size(x)])
 
 Base.@deprecate_binding DomainBranch DomainSplit
 Base.@deprecate children(x::Domain) parts(x)
+
+cat_data(::Type{Any}, dom::DomainSplit, ps) =
+    cat_data(typeof(ps[1]), dom, ps)
+
+function cat_data{T<:AbstractArray}(::Type{T}, dom, ps)
+
+    arr = Array(eltype(T), size(dom))
+
+    if isempty(ps)
+        @assert isempty(dom)
+        return arr
+    end
+
+    for (d, part) in zip(parts(dom), ps)
+        setindex!(arr, part, indexes(d)...)
+    end
+    arr
+end
+
+function cat_data{T<:SparseMatrixCSC}(::Type{T}, dom, ps)
+
+    if isempty(ps)
+        @assert isempty(dom)
+        return spzeros(T.parameters..., size(dom)...)
+    end
+
+    m, n = size(parts(dom))
+
+    psT = Any[ps[j,i] for i=1:size(ps,2), j=1:size(ps,1)]
+    hvcat(ntuple(x->n, m), psT...)
+end

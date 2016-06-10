@@ -76,6 +76,11 @@ end
         @test map(x->size(x) == (10, 10), parts(domain(X3))) |> all
     end
     test_mul(rand(40, 40))
+
+    x = rand(10,10)
+    X = Distribute(BlockPartition(3,3), x)
+    y = rand(10)
+    @test norm(gather(X*y) - x*y) < 1e-13
 end
 
 @testset "concat" begin
@@ -86,6 +91,38 @@ end
     @test vcat(m,m) == gather(vcat(x,x))
     @test hcat(m,m) == gather(hcat(x,y))
     @test_throws DimensionMismatch compute(vcat(x,y))
+end
+
+@testset "scale" begin
+    x = rand(10,10)
+    X = Distribute(BlockPartition(3,3), x)
+    y = rand(10)
+
+    @test Diagonal(y)*x == gather(scale(y, X))
+end
+
+@testset "Getindex" begin
+    function test_getindex(x)
+        X = Distribute(BlockPartition(3,3), x)
+        @test gather(X[3:8, 2:7]) == x[3:8, 2:7]
+        ragged_idx = [1,2,9,7,6,2,4,5]
+        @test gather(X[ragged_idx, 2:7]) == x[ragged_idx, 2:7]
+        @test gather(X[ragged_idx, reverse(ragged_idx)]) == x[ragged_idx, reverse(ragged_idx)]
+        ragged_idx = [1,2,9,7,6,2,4,5]
+        @test gather(X[[2,7,10], :]) == x[[2,7,10], :]
+        @test gather(X[[], ragged_idx]) == x[[], ragged_idx]
+        @test gather(X[[], []]) == x[[], []]
+
+        @testset "dimensionality reduction" begin
+        # THESE NEED FIXING!!
+            @test vec(gather(X[ragged_idx, 5])) == vec(x[ragged_idx, 5])
+            @test vec(gather(X[5, ragged_idx])) == vec(x[5, ragged_idx])
+            @test gather(X[5, 5])[1] == x[5,5]
+        end
+    end
+
+    test_getindex(rand(10,10))
+    test_getindex(sprand(10,10,0.5))
 end
 
 end

@@ -1,6 +1,6 @@
 
 import Base: cat
-export partition, SliceDimension
+export partition
 
 """
 A PartitionScheme defines how data is partitioned. It is used
@@ -25,14 +25,6 @@ see also `distribute`. Note that by default `distribute` calls
 """
 @unimplemented partition(p::PartitionScheme, domain::Domain)
 
-"""
-    cat_data(p::PartitionScheme, a...)
-
-Put data objects back together as if they were split using a `PartitionScheme`
-"""
-@unimplemented cat_data(p::PartitionScheme, t::Type, dom::Domain, parts)
-
-
 ## General schemes
 
 """
@@ -43,26 +35,6 @@ immutable Broadcast <: PartitionScheme end
 
 partition(b::Broadcast, dom::Domain, nparts::Int) =
     DomainSplit(dom, [dom for _ in 1:nparts])
-
-cat(p::Broadcast, dom::Domain, a, b) = a
-
-
-"""
-    Reducer(op, indentity)
-
-Reducer layout denotes putting two parts together
-by using a reducer operator and an identity value.
-"""
-immutable Reducer{F} <: PartitionScheme
-    op::F
-    v0::Any
-end
-cat(p::Reducer, ::UnitDomain, a, b) = p.op(a,b)
-cat(p::Reducer, ::UnitDomain) = p.v0
-
-partition(b::Reducer, dom::Domain, nparts::Int) =
-    error("Cannot partition using a reducer")
-
 
 ###### Array Partitioning ######
 
@@ -75,31 +47,17 @@ immutable BlockPartition{N} <: PartitionScheme
 end
 BlockPartition(xs...) = BlockPartition(xs)
 
-@generated function partition{N}(p::BlockPartition{N}, dom::ArrayDomain{N})
-    sym(n) = Symbol("i$n")
-
-    forspec = [:($(sym(i)) = split_range_interval(
-            idxs[$i], p.blocksize[$i])) for i=1:N]
-
-    subdmn = Expr(:call, :DenseDomain, [sym(n) for n=1:N]...)
-    body = Expr(:comprehension, subdmn, forspec...)
-    Expr(:block, :(idxs = indexes(dom)), :(DomainSplit(dom, $body)))
+function _cumlength(len, step)
+    nice_pieces = div(len, step)
+    extra = rem(len, step)
+    ps = [step for i=1:nice_pieces]
+    cumsum(extra > 0 ? vcat(ps, extra) : ps)
 end
 
-function cat_data(p::BlockPartition, dom::DomainSplit, ps::AbstractArray)
-    if isa(ps[1], SparseMatrixCSC)
-        return sparse_cat_data(ps)
-    end
-    T = eltype(ps[1])
-    arr = Array(T, size(dom))
-    for (d, part) in zip(parts(dom), ps)
-        setindex!(arr, part, indexes(d)...)
-    end
-    arr
-end
+include("../lib/blocked-domains.jl")
 
-function sparse_cat_data(ps)
-    hblocks = Any[hcat(ps[i, :]...) for i=1:size(ps,1)]
-
-    vcat(hblocks...)
+function partition(p::BlockPartition, dom::ArrayDomain)
+    ps = BlockedDomains(map(first, indexes(dom)),
+        map(_cumlength, map(length, indexes(dom)), p.blocksize))
+    DomainSplit(dom, ps)
 end

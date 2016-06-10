@@ -19,7 +19,7 @@ function stage(ctx, node::Map)
         inps = map(inp->sub(inp, domains[i]), inputs)
         thunks[i] = Thunk((args...) -> map(f, args...), (inps...))
     end
-    Cat(partition(primary), Any, domain(primary), thunks)
+    Cat(Any, domain(primary), thunks)
 end
 
 map(f, xs::Computation...) = Map(f, xs)
@@ -110,5 +110,5 @@ function stage(ctx, r::Reducedim)
     colons[[r.dims...]] = 1
     dmn = c[colons...]
     d = DomainSplit(reducedim(head(domain(inp)), r.dims), map(d->reducedim(d, r.dims), dmn))
-    Cat(partition(inp), parttype(inp),d, thunks)
+    Cat(parttype(inp),d, thunks)
 end

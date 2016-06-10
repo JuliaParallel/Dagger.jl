@@ -18,7 +18,7 @@ function stage(ctx, a::AllocateArray)
     for i=eachindex(subdomains)
         thunks[i] = Thunk(alloc, (size(subdomains[i]),))
     end
-    cat(a.partition, Array{a.eltype, dims}, branch, thunks)
+    Cat(Array{a.eltype, dims}, branch, thunks)
 end
 
 function Base.rand(p::PartitionScheme, eltype::Type, dims)

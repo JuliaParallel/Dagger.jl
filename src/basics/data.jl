@@ -120,11 +120,9 @@ A collection of Parts put together to form a bigger logical part
 Fields:
  - parttype: The type of the data represented by the Cat
  - domain: The domain of the combined part and parts (`DomainSplit`)
- - partition: The partition scheme used to divide child parts into a big part
  - parts: the parts which form the parts of the Cat
 """
-type Cat{P<:PartitionScheme} <: AbstractPart
-    partition::P
+type Cat <: AbstractPart
     parttype::Type
     domain::DomainSplit
     parts::AbstractArray
@@ -132,79 +130,67 @@ end
 
 domain(c::Cat) = c.domain
 parttype(c::Cat) = c.parttype
-partition(c::Cat) = c.partition
 parts(x::Cat) = x.parts
 persist!(x::Cat) = (for p in parts(x); persist!(p); end)
 
 function gather(ctx, part::Cat)
-
-    cat_data(partition(part),
-        part.domain,
-        map(c->gather(ctx,c), parts(part)))
+    cat_data(parttype(part), part.domain, map(c->gather(ctx,c), parts(part)))
 end
-
-"""
-Concatenate parts according to some partition
-"""
-cat(p::PartitionScheme, T::Type, d::Domain, parts::AbstractArray) =
-        Cat(p, T, d, parts)
 
 """
 `sub` of a `Cat` part returns a `Cat` of sub parts
 """
 function sub(c::Cat, d)
-    c_parts, subdomains = lookup_parts(parts(c), parts(domain(c)), d)
-    if length(c_parts) == 1
-        return c_parts[1]
+    sub_parts, subdomains = lookup_parts(parts(c), parts(domain(c)), d)
+    if length(sub_parts) == 1
+        sub_parts[1]
+    else
+        Cat(parttype(c), DomainSplit(alignfirst(d), subdomains), sub_parts)
     end
-
-    cat(partition(c), parttype(c), DomainSplit(alignfirst(d), subdomains), c_parts)
 end
 
-function getdim(vec)
-    dim = 0
-    for el in vec
-        if el != 0 && dim != 0
-            @assert dim == el
-        elseif el != 0 && dim == 0
-            dim = el
+function group_indices(cumlength, idxs,at=1, acc=Any[])
+    at > length(idxs) && return acc
+    f = idxs[at]
+    fidx = searchsortedfirst(cumlength, f)
+    current_block = (get(cumlength, fidx-1,0)+1):cumlength[fidx]
+    start_at = at
+    end_at = at
+    for i=(at+1):length(idxs)
+        if idxs[i] in current_block
+            end_at += 1
+            at += 1
+        else
+            break
         end
     end
-    dim
+    push!(acc, fidx=>idxs[start_at:end_at])
+    group_indices(cumlength, idxs, at+1, acc)
 end
 
-Base.(:*)(a::Range, b::Range) = ((last(a) + 1):(last(a)+length(b)))
-@generated function cumulative_domains{N}(::Val{N}, arr::Array)
-    quote
-        Base.@nexprs $N dim->R_dim = cumprod(map(x->indexes(x)[dim], arr), dim)
-        Base.@ncall $N map DenseDomain R
-    end
+function group_indices(cumlength, idxs::Range)
+    f = searchsortedfirst(cumlength, first(idxs))
+    l = searchsortedfirst(cumlength, last(idxs))
+    out = cumlength[f:l]
+    out[end] = last(idxs)
+    out-=(f-1)
+    map(=>, f:l, map(UnitRange, vcat(first(idxs), out[1:end-1]+1), out))
 end
 
-function extend_dim{T,N}(x::Array{T,N})
-    Nd = ndims(x[1])
-    if Nd > N
-        sz = tuple(size(x)..., [1 for i=1:(Nd-N)]...)
-        return Val{Nd}(), reshape(x, sz)
-    else
-        return Val{N}(), x
+_cumsum(x::AbstractArray) = length(x) == 0 ? Int[] : cumsum(x)
+function lookup_parts{N}(ps::AbstractArray, subdmns::BlockedDomains{N}, d::DenseDomain{N})
+    groups = map(group_indices, subdmns.cumlength, indexes(d))
+    sz = map(length, groups)
+    pieces = Array(AbstractPart, sz)
+    for i = CartesianRange(sz)
+        idx_and_dmn = map(getindex, groups, i.I)
+        idx = map(x->x[1], idx_and_dmn)
+        dmn = DenseDomain(map(x->x[2], idx_and_dmn))
+        pieces[i] = sub(ps[idx...], project(subdmns[idx...], dmn))
     end
-end
-cumulative_domains(x::Array) = cumulative_domains(extend_dim(x)...)
-
-function lookup_parts{T,N}(parts, part_domains::Array{T,N}, d)
-    intersects = map(pd -> intersect(d, pd), part_domains)
-    found = map(x -> !isempty(x), intersects)
-
-    sz = ntuple(dim -> getdim(sum(found, dim)), N)
-    idxs = find(found)
-    interesting_parts = reshape(parts[idxs], sz)
-    interesting_domains = reshape(part_domains[idxs], sz)
-    intersects2 = reshape(intersects[idxs], sz)
-    subparts = map(intersects2, interesting_parts, interesting_domains) do subd, part, dmn
-        sub(part, project(dmn, subd))
-    end
-    subparts, cumulative_domains(map(alignfirst, intersects2))
+    out_cumlength = map(g->_cumsum(map(x->length(x[2]), g)), groups)
+    out_dmn = BlockedDomains(ntuple(x->1,Val{N}), out_cumlength)
+    pieces, out_dmn
 end
 
 function free!(x::Cat, force=true)
