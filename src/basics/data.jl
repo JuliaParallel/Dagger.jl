@@ -149,7 +149,7 @@ function sub(c::Cat, d)
     end
 end
 
-function group_indexes(cumlength, idxs,at=1, acc=Any[])
+function group_indices(cumlength, idxs,at=1, acc=Any[])
     at > length(idxs) && return acc
     f = idxs[at]
     fidx = searchsortedfirst(cumlength, f)
@@ -165,10 +165,10 @@ function group_indexes(cumlength, idxs,at=1, acc=Any[])
         end
     end
     push!(acc, fidx=>idxs[start_at:end_at])
-    group_indexes(cumlength, idxs, at+1, acc)
+    group_indices(cumlength, idxs, at+1, acc)
 end
 
-function group_indexes(cumlength, idxs::Range)
+function group_indices(cumlength, idxs::Range)
     f = searchsortedfirst(cumlength, first(idxs))
     l = searchsortedfirst(cumlength, last(idxs))
     out = cumlength[f:l]
@@ -177,25 +177,19 @@ function group_indexes(cumlength, idxs::Range)
     map(=>, f:l, map(UnitRange, vcat(first(idxs), out[1:end-1]+1), out))
 end
 
-import Base: @nexprs, @ntuple, @nref, @nloops
-
-@generated function lookup_parts{N}(ps::AbstractArray, subdmns::BlockedDomains{N}, d::DenseDomain{N})
-    quote
-        @nexprs $N j->group_j = group_indexes(subdmns.cumlength[j], indexes(d)[j])
-        sz = @ntuple($N, j->length(group_j))
-        pieces = Array(AbstractPart, sz)
-        i = 1
-        @nloops $N dim j->group_j begin
-            @nexprs $N j->blockidx_j   = dim_j[1]
-            @nexprs $N j->intersects_j = dim_j[2]
-            dmn = DenseDomain(@ntuple $N j->intersects_j)
-            pieces[i] = sub(@nref($N, ps, blockidx), project(@nref($N, subdmns, blockidx), dmn))
-            i += 1
-        end
-        @nexprs $N j -> out_cumlength_j = cumsum(map(x->length(x[2]), group_j))
-        out_dmn = BlockedDomains(@ntuple($N, j->1), @ntuple($N, j->out_cumlength_j))
-        pieces, out_dmn
+function lookup_parts{N}(ps::AbstractArray, subdmns::BlockedDomains{N}, d::DenseDomain{N})
+    groups = map(group_indices, subdmns.cumlength, indexes(d))
+    sz = map(length, groups)
+    pieces = Array(AbstractPart, sz)
+    for i = CartesianRange(sz)
+        idx_and_dmn = map(getindex, groups, i.I)
+        idx = map(x->x[1], idx_and_dmn)
+        dmn = DenseDomain(map(x->x[2], idx_and_dmn))
+        pieces[i] = sub(ps[idx...], project(subdmns[idx...], dmn))
     end
+    out_cumlength = map(g->cumsum(map(x->length(x[2]), g)), groups)
+    out_dmn = BlockedDomains(ntuple(x->1,Val{N}), out_cumlength)
+    pieces, out_dmn
 end
 
 function free!(x::Cat, force=true)
