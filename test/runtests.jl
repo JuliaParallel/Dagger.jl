@@ -4,6 +4,7 @@ if VERSION < v"0.5.0-dev"
     using BaseTestNext
 else
     using Base.Test
+    Pkg.checkout("Requires")
 end
 
 af_isinstalled = try Pkg.installed("ArrayFire") >= v"0.0.0-" catch er false end
