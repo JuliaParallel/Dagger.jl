@@ -5,7 +5,7 @@ import Base: eltype, ndims
 export CFArray, @cf
 
 @forward Computed.result eltype, ndims
-@forward Cat.parttype eltype, ndims
+ndims(x::AbstractPart) = ndims(domain(x))
 
 type CFArray{T,N} <: AbstractArray{T,N}
   head::Computation
@@ -26,7 +26,9 @@ macro cf(ex)
   end |> esc
 end
 
-Base.getindex(xs::CFArray, args::Integer...) = compute(getindex(xs.head, args...))
+# x = CFArray(rand(BlockPartition(100), 10^3))
+
+Base.getindex(xs::CFArray, args::Integer...) = @> getindex(xs.head, args...) gather first
 
 for f in :[getindex map reduce exp log].args
   @eval $f(xs::CFArray, args...) = CFArray($f(xs.head, args...))
@@ -36,7 +38,7 @@ for f in :[(+) (*)].args
   @eval $f(xs::CFArray, ys::CFArray) = $f(xs, ys)
 end
 
-for f in :[(.+) (.*) ].args
+for f in :[(.+) (.*)].args
   @eval $f(xs::CFArray, ys::Number) = $f(xs, ys)
   @eval $f(xs::Number, ys::CFArray) = $f(xs, ys)
   @eval $f(xs::CFArray, ys::CFArray) = $f(xs, ys)
