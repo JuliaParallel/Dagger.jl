@@ -28,7 +28,9 @@ end
 
 # x = CFArray(rand(BlockPartition(100), 10^3))
 
-Base.getindex(xs::CFArray, args::Integer...) = @> getindex(xs.head, args...) gather first
+Base.collect(xs::CFArray) = gather(xs.head)
+
+Base.getindex(xs::CFArray, args::Integer...) = @> xs.head getindex(args...) gather first
 
 for f in :[getindex map reduce exp log].args
   @eval $f(xs::CFArray, args...) = CFArray($f(xs.head, args...))
