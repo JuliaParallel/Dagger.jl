@@ -62,6 +62,10 @@ function show_plan(c::Computation)
     show_plan(t)
 end
 
+function show_plan(t::Tuple)
+    show_plan(TupleCompute(t))
+end
+
 # function printing
 
 argname(x::Symbol) = x
