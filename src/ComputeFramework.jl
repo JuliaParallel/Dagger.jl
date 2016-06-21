@@ -30,4 +30,6 @@ include("array/matrix.jl")
 
 include("array/show.jl")
 
+include("ui/graph.jl")
+
 end # module
