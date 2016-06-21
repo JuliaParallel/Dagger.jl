@@ -16,7 +16,7 @@ function stage(ctx, node::Map)
     thunks = similar(domains, Any)
     f = node.f
     for i=eachindex(domains)
-        inps = map(inp->sub(inp, domains[i]), inputs)
+        inps = map(x->parts(x)[i], inputs)
         thunks[i] = Thunk((args...) -> map(f, args...), (inps...))
     end
     Cat(Any, domain(primary), thunks)
