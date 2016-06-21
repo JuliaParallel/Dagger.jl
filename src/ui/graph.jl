@@ -35,7 +35,7 @@ function node_id(t::Part)
 end
 
 function write_dag(io, t)
-    !istask(t) && return io
+    !istask(t) && return
     deps = dependents(t)
     c=1
     for k in keys(deps)
@@ -43,7 +43,9 @@ function write_dag(io, t)
     end
     for (k, v) in deps
         for dep in v
-            println(io, "$(node_id(k)) -> $(node_id(dep))")
+            if istask(k)
+                println(io, "$(node_id(k)) -> $(node_id(dep))")
+            end
         end
     end
 end
