@@ -28,6 +28,7 @@ include("array/operators.jl")
 include("array/getindex.jl")
 include("array/matrix.jl")
 
+include("api.jl")
 include("array/show.jl")
 
 include("ui/graph.jl")
