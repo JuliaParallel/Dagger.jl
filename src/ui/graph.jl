@@ -43,7 +43,7 @@ function write_dag(io, t)
     end
     for (k, v) in deps
         for dep in v
-            if istask(k)
+            if isa(k, AbstractPart)
                 println(io, "$(node_id(k)) -> $(node_id(dep))")
             end
         end
