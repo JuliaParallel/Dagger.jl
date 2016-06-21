@@ -30,6 +30,10 @@ function Base.ctranspose(x::BlockedDomains{2})
     BlockedDomains(reverse(x.start), reverse(x.cumlength))
 end
 
+function Base.ctranspose(x::BlockedDomains{1})
+    BlockedDomains((1, x.start[1]), ([1], x.cumlength[1]))
+end
+
 function Base.(:*)(x::BlockedDomains{2}, y::BlockedDomains{2})
     if x.cumlength[2] != y.cumlength[1]
         throw(DimensionMismatch("Block distributions being multiplied are not compatible"))
