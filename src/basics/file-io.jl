@@ -1,9 +1,10 @@
 export save, load
 
-immutable FileReader{T} <: PartIO
+type FileReader{T} <: PartIO
     file::AbstractString
     parttype::Type{T}
     data_offset::Int
+    mmap::Bool
 end
 
 """
@@ -63,7 +64,7 @@ function save(ctx, io::IO, part::Part, file_path)
 
     save(ctx, io, gather(ctx, part))
 
-    Part(parttype(part), domain(part), FileReader(file_path, parttype(part), data_offset), false)
+    Part(parttype(part), domain(part), FileReader(file_path, parttype(part), data_offset, false), false)
 end
 
 function save(ctx, io::IO, part::Cat, file_path::AbstractString, saved_parts::AbstractArray)
@@ -104,7 +105,7 @@ function save(ctx, part::Part{FileReader}, file_path::AbstractString)
        cp(part.reader.file, file_path)
        Part(parttype(part), domain(part),
           FileReader(file_path, parttype(part),
-                     part.reader.data_offset), false)
+                     part.reader.data_offset, false), false)
    end
 end
 
@@ -119,14 +120,14 @@ save(part::AbstractPart, file_path::AbstractString) = save(Context(), part, file
 
 Load an AbstractPart from a file.
 """
-function load(ctx, file_path::AbstractString)
+function load(ctx, file_path::AbstractString; mmap=false)
 
     f = open(file_path)
     part_typ = read(f, UInt8)
     if part_typ == PARTSPEC
-        c = load(ctx, Part, file_path, f)
+        c = load(ctx, Part, file_path, mmap, f)
     elseif part_typ == CAT
-        c = load(ctx, Cat, file_path, f)
+        c = load(ctx, Cat, file_path, mmap, f)
     else
         error("Could not determine part type")
     end
@@ -140,21 +141,27 @@ end
 Load a Part object from a file, the file path
 is required for creating a FileReader object
 """
-function load(ctx, ::Type{Part}, fname, io)
+function load(ctx, ::Type{Part}, fname, mmap, io)
     meta_len = read(io, Int)
     io = IOBuffer(read(io, meta_len))
 
     (T, dmn, sz) = deserialize(io)
 
     Computed(Part(T, dmn, sz,
-        FileReader(fname, T, meta_len+1), false))
+        FileReader(fname, T, meta_len+1, mmap), false))
 end
 
-function load(ctx, ::Type{Cat}, file_path, io)
+function load(ctx, ::Type{Cat}, file_path, mmap, io)
     dir_path = file_path*"_data"
 
     metadata = deserialize(io)
-    Computed(Cat(metadata...))
+    c = Cat(metadata...)
+    for p in parts(c)
+        if isa(p.handle, FileReader)
+            p.handle.mmap = mmap
+        end
+    end
+    Computed(c)
 end
 
 
@@ -173,8 +180,8 @@ function gather{T<:Array}(ctx, c::Part{FileReader{T}})
     h = c.handle
     io = open(h.file, "r+")
     seek(io, h.data_offset)
-    arr = reshape(reinterpret(eltype(T), read(io)), size(c.domain))
-    #arr = Mmap.mmap(io, h.parttype, size(c.domain))
+    arr = h.mmap ? Mmap.mmap(io, h.parttype, size(c.domain)) :
+        reshape(reinterpret(eltype(T), read(io)), size(c.domain))
     close(io)
     arr
 end
@@ -183,11 +190,13 @@ function gather{T<:BitArray}(ctx, c::Part{FileReader{T}})
     h = c.handle
     io = open(h.file, "r+")
     seek(io, h.data_offset)
-    arr = reshape(reinterpret(Bool, read(io)), size(c.domain))
-    #arr = Mmap.mmap(io, h.parttype, size(c.domain))
+
+    arr = h.mmap ? Mmap.mmap(io, Bool, size(c.domain)) :
+        reshape(reinterpret(Bool, read(io)), size(c.domain))
     close(io)
     arr
 end
+
 function save{Tv, Ti}(ctx, io::IO, m::SparseMatrixCSC{Tv,Ti})
     write(io, m.m)
     write(io, m.n)
