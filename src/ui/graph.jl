@@ -1,4 +1,4 @@
-import ComputeFramework: Thunk
+import Dagger: Thunk
 export show_plan
 
 function node_label(io, t::Thunk, c)

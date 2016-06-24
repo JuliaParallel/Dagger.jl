@@ -1,12 +1,12 @@
-using ComputeFramework
+using Dagger
 @everywhere function update(i,k, U, R, lambdaI)
     # get non-zero rows and the values for
     # column i
     @show i
-    nzidx = find(ComputeFramework.gather(R[:, i]))
-    U_subset = ComputeFramework.gather(U[nzidx])
+    nzidx = find(Dagger.gather(R[:, i]))
+    U_subset = Dagger.gather(U[nzidx])
     Ui = reinterpret(Float64, U_subset, (k, length(nzidx)))
-    vec = Ui * ComputeFramework.gather(R[nzidx, i])
+    vec = Ui * Dagger.gather(R[nzidx, i])
 
     mat = (Ui * Ui') #+ (length(watched) * lambdaI)
     try

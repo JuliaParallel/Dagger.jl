@@ -9,7 +9,7 @@ import Base: isempty, getindex, intersect,
 """
 The domain represents the set of all indexes of an object.
 
-The basic means of distribution in ComputeFramework is
+The basic means of distribution in Dagger is
 to partition the domain of an object into smaller subdomains
 which can then be stored in many memory locations or processed
 on different processing units.
@@ -35,7 +35,7 @@ Find the intersection of two domains. For example,
 Align `b` relative to `a`. For example,
 
     julia> project(DenseDomain(11:25, 21:100), DenseDomain(15:20, 30:40))
-    ComputeFramework.DenseDomain{2}((5:10,10:20))
+    Dagger.DenseDomain{2}((5:10,10:20))
 """
 @unimplemented project{D<:Domain}(d::D, b::D)
 

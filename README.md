@@ -1,35 +1,35 @@
-# ComputeFramework
+# Dagger
 
 **A framework for out-of-core and parallel computation**.
 
-[![Build Status](https://travis-ci.org/shashi/ComputeFramework.jl.svg?branch=master)](https://travis-ci.org/shashi/ComputeFramework.jl) [![Coverage Status](https://coveralls.io/repos/github/shashi/ComputeFramework.jl/badge.svg?branch=master)](https://coveralls.io/github/shashi/ComputeFramework.jl?branch=master)
+[![Build Status](https://travis-ci.org/shashi/Dagger.jl.svg?branch=master)](https://travis-ci.org/shashi/Dagger.jl) [![Coverage Status](https://coveralls.io/repos/github/shashi/Dagger.jl/badge.svg?branch=master)](https://coveralls.io/github/shashi/Dagger.jl?branch=master)
 
-ComputeFramework allows you to represent huge amounts of data as smaller pieces and compute on the pieces in parallel. The API mimicks Julia's standard library, with a few simple differences, so that it is easy to use. Computation with ComputeFramework uses a scheduler similar to that in [Dask](http://dask.pydata.org/en/latest/). This scheduler tries to minimize the amount of memory allocated at any given time while maximizing CPU utilization. ComputeFramework provides distributed arrays and sparse matrices and operations on them out-of-the-box. Distributed variations of various collection types such as arrays, sparse matrices, NDSparse datastructures or dictionaries can be expressed using the framework.
+Dagger allows you to represent huge amounts of data as smaller pieces and compute on the pieces in parallel. The API mimicks Julia's standard library, with a few simple differences, so that it is easy to use. Computation with Dagger uses a scheduler similar to that in [Dask](http://dask.pydata.org/en/latest/). This scheduler tries to minimize the amount of memory allocated at any given time while maximizing CPU utilization. Dagger provides distributed arrays and sparse matrices and operations on them out-of-the-box. Distributed variations of various collection types such as arrays, sparse matrices, NDSparse datastructures or dictionaries can be expressed using the framework.
 
 ## Tutorial introduction
 
-To begin, let us add a few worker processes and load ComputeFramework.
+To begin, let us add a few worker processes and load Dagger.
 
 ```julia
 
 addprocs() # julia will decide how many workers to add.
 
-using ComputeFramework
+using Dagger
 ```
-Note that you should run `using ComputeFramework` *after* adding
+Note that you should run `using Dagger` *after* adding
 worker processes for julia to load the package on all of them.
 
 ### Playing with random matrices
 
-A good place to start learning to work with ComputeFramework is to play with some distributed random data.
+A good place to start learning to work with Dagger is to play with some distributed random data.
 In this example we will create a matrix of size `10000x10000` which is cut up into pieces of `4000x4000` elements.
 
 ```julia
 a = rand(BlockPartition(4000, 4000), 10^4, 10^4)
-# => ComputeFramework.AllocateArray(...)
+# => Dagger.AllocateArray(...)
 ```
 
-Notice the first argument `BlockPartition(4000,4000)`. This tells ComputeFramework to create the matrix with block partitioning where each partition is a `4000x4000` matrix. `4000x4000` floating point numbers takes up 128MB of RAM, this is a good chunk size to deal with - many such chunks can fit in a typical RAM, and files of size 128MB can be written to and read from disk with lesser overhead than smaller chunks. It is the onus of the user of ComputeFramework to chose a suitable partitioning for the data.
+Notice the first argument `BlockPartition(4000,4000)`. This tells Dagger to create the matrix with block partitioning where each partition is a `4000x4000` matrix. `4000x4000` floating point numbers takes up 128MB of RAM, this is a good chunk size to deal with - many such chunks can fit in a typical RAM, and files of size 128MB can be written to and read from disk with lesser overhead than smaller chunks. It is the onus of the user of Dagger to chose a suitable partitioning for the data.
 
 In the above example the object `a` *represents* the random matrix . The actual data has not been created yet. If you call `compute(a)`, the data will be created.
 
@@ -57,7 +57,7 @@ compute(sum(x.^2))
 ```
 the answer is close to 10^8. Note the use of `compute` on `sum`. This is because `sum` returns an object representing the computation of the sum. You need to call compute on it to actually compute it.
 
-For the full array API supported by ComputeFramework, see below.
+For the full array API supported by Dagger, see below.
 
 ### Saving and loading data
 
@@ -76,7 +76,7 @@ Once you have saved some data to disk, you can load it with the `load` function.
 X_sq = load(Context(), "X_sq")
 ```
 
-Notice the first argument `Context()` this required so that this `load` method is kept special to ComputeFramework. There will be discussion about what `Context()` returns later on in the documentation.
+Notice the first argument `Context()` this required so that this `load` method is kept special to Dagger. There will be discussion about what `Context()` returns later on in the documentation.
 
 Now you can do some computation on `X_sq` and the data will be read from disk when different processes need it.
 
@@ -87,7 +87,7 @@ compute(sum(X_sq))
 
 ## Distributing data
 
-ComputeFramework also allows one to distribute an object from the master process using a certain partition type. In the following example, we are distributing an array of size 1000x1000 with a block partition of 100x100 elements per block.
+Dagger also allows one to distribute an object from the master process using a certain partition type. In the following example, we are distributing an array of size 1000x1000 with a block partition of 100x100 elements per block.
 
 ```julia
 
@@ -118,7 +118,7 @@ Once you've loaded the data in this manner, it's a perfect time to slice and dic
 
 ### Array support
 
-We have seen simple operations like broadcast (namely `.^2`), `reduce` and `sum` on distributed arrays so far. ComputeFramework also supports other essential array operations such as transpose, matrix-matrix multiplication and matrix-vector multiplication.
+We have seen simple operations like broadcast (namely `.^2`), `reduce` and `sum` on distributed arrays so far. Dagger also supports other essential array operations such as transpose, matrix-matrix multiplication and matrix-vector multiplication.
 
 See the [Array API](#array-api) below for details. Some special features are discussed below.
 
@@ -173,7 +173,7 @@ julia> gather(x)
 
 #### A note on keeping memory use in check
 
-ComputeFramework currently does not write results of computations to disk unless you specifically ask it to.
+Dagger currently does not write results of computations to disk unless you specifically ask it to.
 
 Some operations which are computationally intensive might require you to save the input data as well as output data to disk.
 
@@ -296,16 +296,16 @@ summarize_events(filter(x->x.category==:scheduler, dbg))
 154 REPL.jl; anonymous; line: 92
  126 REPL.jl; eval_user_input; line: 62
   59 util.jl; debug_compute; line: 155
-   59 ...e/shashi/.julia/v0.4/ComputeFramework/src/compute.jl; compute; line: 203
-    16 ...e/shashi/.julia/v0.4/ComputeFramework/src/compute.jl; finish_task!; line: 144
-    43 ...e/shashi/.julia/v0.4/ComputeFramework/src/compute.jl; finish_task!; line: 152
-     43 .../shashi/.julia/v0.4/ComputeFramework/src/compute.jl; release!; line: 218
-      43 ...shi/.julia/v0.4/ComputeFramework/src/lib/dumbref.jl; release_token; line: 24
+   59 ...e/shashi/.julia/v0.4/Dagger/src/compute.jl; compute; line: 203
+    16 ...e/shashi/.julia/v0.4/Dagger/src/compute.jl; finish_task!; line: 144
+    43 ...e/shashi/.julia/v0.4/Dagger/src/compute.jl; finish_task!; line: 152
+     43 .../shashi/.julia/v0.4/Dagger/src/compute.jl; release!; line: 218
+      43 ...shi/.julia/v0.4/Dagger/src/lib/dumbref.jl; release_token; line: 24
       ...
 ```
 ## Design
 
-The goal of ComputeFramework is to create sufficient scope for multiple-dispatch to be employed at various stages of a parallel computation. New capabilities, distributions, device types can be added by defining new methods on a very small set of generic functions. The DAG also allows for other optimizations (fusing maps and reduces), fault-tolerance and visualization.
+The goal of Dagger is to create sufficient scope for multiple-dispatch to be employed at various stages of a parallel computation. New capabilities, distributions, device types can be added by defining new methods on a very small set of generic functions. The DAG also allows for other optimizations (fusing maps and reduces), fault-tolerance and visualization.
 
 
 ### Acknowledgements

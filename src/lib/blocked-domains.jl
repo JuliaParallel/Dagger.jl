@@ -1,4 +1,4 @@
-using ComputeFramework
+using Dagger
 
 import Base: ndims, size, getindex
 immutable BlockedDomains{N} <: AbstractArray{DenseDomain{N}, N}

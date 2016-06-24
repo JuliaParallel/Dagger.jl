@@ -1,6 +1,6 @@
 addprocs(3)
 
-using ComputeFramework
+using Dagger
 
 words = ["one", "two", "two", "three", "three", "three", "four", "four", "four", "four"]
 

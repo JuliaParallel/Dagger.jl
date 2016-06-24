@@ -1,8 +1,8 @@
-import ComputeFramework: parts, parts, Computed
+import Dagger: parts, parts, Computed
 
 parts(x::Computed) = parts(x.result)
 parts(x::Computed) = parts(x.result)
-ComputeFramework.domain(x::Computed) = domain(x.result)
+Dagger.domain(x::Computed) = domain(x.result)
 
 @testset "Arrays" begin
 
@@ -11,9 +11,9 @@ ComputeFramework.domain(x::Computed) = domain(x.result)
         X1 = compute(X)
         X2 = gather(X1)
 
-        @test isa(X, ComputeFramework.Computation)
-        @test isa(X1, ComputeFramework.Computed)
-        @test isa(X1.result, ComputeFramework.Cat)
+        @test isa(X, Dagger.Computation)
+        @test isa(X1, Dagger.Computed)
+        @test isa(X1.result, Dagger.Cat)
         @test X2 |> size == (100, 100)
         @test all(X2 .>= 0.0)
         @test size(parts(X1)) == (10, 10)

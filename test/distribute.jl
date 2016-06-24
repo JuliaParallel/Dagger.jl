@@ -1,4 +1,4 @@
-import ComputeFramework: SliceDimension, Bcast
+import Dagger: SliceDimension, Bcast
 
 meta_test = Any[
     Any[

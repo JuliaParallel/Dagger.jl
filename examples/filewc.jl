@@ -1,6 +1,6 @@
 addprocs(3)
 
-using ComputeFramework
+using Dagger
 
 words = split(TextFile("text8"), ' ')
 

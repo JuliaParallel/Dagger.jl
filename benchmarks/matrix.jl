@@ -1,5 +1,5 @@
-using ComputeFramework
-import ComputeFramework: reduceblock
+using Dagger
+import Dagger: reduceblock
 using DistributedArrays
 
 using BenchmarkTools
@@ -61,7 +61,7 @@ end
 function matrix_suite_nworkers(NW)
     suite = BenchmarkGroup()
     suite["in-memory"] = matrix_variants(2, x->x)
-    suite["on-disk"]   = matrix_variants(2, x -> ComputeFramework.save(x, "tmp$(randstring(5))"))
+    suite["on-disk"]   = matrix_variants(2, x -> Dagger.save(x, "tmp$(randstring(5))"))
     suite
 end
 

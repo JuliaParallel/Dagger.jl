@@ -5,7 +5,7 @@ if VERSION < v"0.5.0-dev"
 else
     using Base.Test
 end
-using ComputeFramework
+using Dagger
 
 include("domain.jl")
 include("array.jl")

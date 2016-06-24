@@ -1,7 +1,7 @@
 using Base.Test
 
 addprocs(2)
-using ComputeFramework
+using Dagger
 
 ctx = Context()
 

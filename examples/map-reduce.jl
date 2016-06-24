@@ -2,7 +2,7 @@ addprocs(2)
 
 # Demonstration of map-reduce capabilities
 
-using ComputeFramework
+using Dagger
 
 arr = [i for i in 1:9]
 darr = compute(Distribute(BlockPartition(1), arr))

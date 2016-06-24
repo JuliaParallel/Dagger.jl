@@ -1,4 +1,4 @@
-import ComputeFramework: indexes, project
+import Dagger: indexes, project
 
 @testset "UnitDomain" begin
     @test domain(1) == UnitDomain()

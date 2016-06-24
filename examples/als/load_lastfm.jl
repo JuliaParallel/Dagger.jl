@@ -1,6 +1,6 @@
 # Create artist alias dict
 # Download the dataset from:  http://bit.ly/1KiJdOR
-using ComputeFramework
+using Dagger
 
 function read_artist_map(file)
     t1 = time()

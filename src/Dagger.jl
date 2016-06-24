@@ -1,4 +1,4 @@
-module ComputeFramework
+module Dagger
 
 using Compat
 

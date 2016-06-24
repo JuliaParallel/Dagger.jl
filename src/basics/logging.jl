@@ -99,7 +99,7 @@ immutable LocalEventLog end
 const _local_event_log = Any[]
 clear_local_event_log() = empty!(_local_event_log)
 function write_event(::LocalEventLog, event::Event)
-    write_event(ComputeFramework._local_event_log, event)
+    write_event(Dagger._local_event_log, event)
 end
 
 function raise_event(ctx, phase, category, id,tl, t, gc_num, prof, async)
@@ -236,7 +236,7 @@ function get_logs!(::LocalEventLog)
     logs = Dict()
     @sync for p in procs()
         @async logs[p] = remotecall_fetch(p) do
-            log = copy(ComputeFramework._local_event_log)
+            log = copy(Dagger._local_event_log)
             clear_local_event_log()
             log
         end

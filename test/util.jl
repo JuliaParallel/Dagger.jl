@@ -1,4 +1,4 @@
-import ComputeFramework: DistData, refs
+import Dagger: DistData, refs
 @everywhere begin
     type RemoteTestSet <: Test.AbstractTestSet
         description::AbstractString
