@@ -64,7 +64,7 @@ size(x::Distribute) = size(x.domain)
 
 
 function Distribute(p::PartitionScheme, data)
-    Distribute(partition(p, domain(data)), part(data))
+    Distribute(partition(p, domain(data)), persist!(part(data)))
 end
 
 #=
