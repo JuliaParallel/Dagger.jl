@@ -1,9 +1,10 @@
 import Base: ==
+using Compat
 
 abstract LazyArray{T, N} <: AbstractArray{T, N}
 Base.linearindexing(x::LazyArray) = Base.LinearSlow()
 
-function Base.show(io::IO, ::MIME"text/plain", x::LazyArray)
+@compat function Base.show(io::IO, ::MIME"text/plain", x::LazyArray)
     write(io, string(typeof(x)))
     write(io, string(size(x)))
 end
