@@ -1,13 +1,14 @@
 
-import Base: ctranspose, A_mul_Bt, At_mul_B, Ac_mul_B, At_mul_Bt, Ac_mul_Bc, A_mul_Bc
+import Base: ctranspose, transpose, A_mul_Bt, At_mul_B, Ac_mul_B, At_mul_Bt, Ac_mul_Bc, A_mul_Bc
 
 immutable Transpose{T,N} <: LazyArray{T,N}
+    f::Function
     input::LazyArray
 end
 
-function Transpose(x::LazyArray)
+function Transpose(f,x::LazyArray)
     @assert 1 <= ndims(x) && ndims(x) <= 2
-    Transpose{eltype(x), 2}(x)
+    Transpose{eltype(x), 2}(f,x)
 end
 function size(x::Transpose)
     sz = size(x.input)
@@ -18,8 +19,11 @@ function size(x::Transpose)
     end
 end
 
-ctranspose(x::LazyArray) = Transpose(x)
-ctranspose(x::AbstractPart) = Thunk(a -> ctranspose(a), (x,))
+ctranspose(x::LazyArray) = Transpose(ctranspose, x)
+ctranspose(x::AbstractPart) = Thunk(ctranspose, (x,))
+
+transpose(x::LazyArray) = Transpose(transpose, x)
+transpose(x::AbstractPart) = Thunk(transpose, (x,))
 
 function ctranspose(x::DenseDomain{2})
     d = indexes(x)
