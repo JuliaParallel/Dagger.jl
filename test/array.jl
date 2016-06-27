@@ -127,4 +127,10 @@ end
     test_getindex(sprand(10,10,0.5))
 end
 
+
+@testset "cleanup" begin
+    X = Distribute(BlockPartition(10,10), rand(10,10))
+    @test gather(sin(X)) == gather(sin(X))
+end
+
 end
