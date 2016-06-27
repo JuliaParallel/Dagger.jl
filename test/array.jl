@@ -1,9 +1,10 @@
-import Dagger: parts, parts, Computed
+import Dagger: parts, parts, Computed, ComputedArray
 
-parts(x::Computed) = parts(x.result)
 parts(x::Computed) = parts(x.result)
 Dagger.domain(x::Computed) = domain(x.result)
 
+parts(x::ComputedArray) = parts(x.result)
+Dagger.domain(x::ComputedArray) = domain(x.result)
 @testset "Arrays" begin
 
 @testset "rand" begin
@@ -11,8 +12,8 @@ Dagger.domain(x::Computed) = domain(x.result)
         X1 = compute(X)
         X2 = gather(X1)
 
-        @test isa(X, Dagger.Computation)
-        @test isa(X1, Dagger.Computed)
+        @test isa(X, Dagger.LazyArray)
+        @test isa(X1, Dagger.ComputedArray)
         @test isa(X1.result, Dagger.Cat)
         @test X2 |> size == (100, 100)
         @test all(X2 .>= 0.0)
@@ -28,7 +29,7 @@ Dagger.domain(x::Computed) = domain(x.result)
 end
 @testset "sum(ones(...))" begin
     X = ones(BlockPartition(10, 10), 100, 100)
-    @test compute(sum(X)) == 10000
+    @test sum(X) == 10000
 end
 
 
@@ -98,7 +99,7 @@ end
     X = Distribute(BlockPartition(3,3), x)
     y = rand(10)
 
-    @test Diagonal(y)*x == gather(scale(y, X))
+    @test Diagonal(y)*x == gather(Diagonal(y)*X)
 end
 
 @testset "Getindex" begin
@@ -117,7 +118,7 @@ end
         # THESE NEED FIXING!!
             @test vec(gather(X[ragged_idx, 5])) == vec(x[ragged_idx, 5])
             @test vec(gather(X[5, ragged_idx])) == vec(x[5, ragged_idx])
-            @test gather(X[5, 5])[1] == x[5,5]
+            @test X[5, 5] == x[5,5]
         end
     end
 

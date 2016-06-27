@@ -57,7 +57,7 @@ Make a subdomain a standalone domain. For example,
     alignfirst(DenseDomain(11:25, 21:100))
     # => DenseDomain((1:15), (1:80))
 """
-@unimplemented alignfirst(a::Domain)
+alignfirst(a::Domain) = a
 
 """
 Domain of a scalar value
@@ -161,7 +161,7 @@ isempty(a::DenseDomain) = length(a) == 0
 indexes{T<:ArrayDomain}(a::DomainSplit{T}) = indexes(a.head)
 size{T<:ArrayDomain}(a::DomainSplit{T}, dim...) = size(a.head, dim...)
 length{T<:ArrayDomain}(a::DomainSplit{T}) = prod(size(a))
-ndims{T<:ArrayDomain}(a::DomainSplit{T}) = length(size(a))
+ndims{T<:ArrayDomain}(a::DomainSplit{T}) = ndims(head(a))
 
 "The domain of an array is a DenseDomain"
 domain(x::AbstractArray) = DenseDomain([1:l for l in size(x)])

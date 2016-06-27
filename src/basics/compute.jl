@@ -110,13 +110,6 @@ function stage(ctx, c::Computed)
     c.result
 end
 
-function free!(x::Cat)
-    for p in parts(x)
-        free!(p)
-    end
-    nothing
-end
-
 """
 `Part` and `Sub` objects are always in computed state,
 this method just returns them.

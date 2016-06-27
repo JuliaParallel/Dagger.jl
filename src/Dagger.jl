@@ -20,10 +20,11 @@ include("basics/compute.jl")
 include("basics/file-io.jl")
 
 # Array computations
+include("array/lazy-array.jl")
+include("array/alloc.jl")
 include("array/map-reduce.jl")
 include("array/read-delim.jl")
 
-include("array/alloc.jl")
 include("array/operators.jl")
 include("array/getindex.jl")
 include("array/matrix.jl")

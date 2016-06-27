@@ -29,19 +29,18 @@ Base.linearindexing(x::BlockedDomains) = Base.LinearSlow()
 function Base.ctranspose(x::BlockedDomains{2})
     BlockedDomains(reverse(x.start), reverse(x.cumlength))
 end
-
 function Base.ctranspose(x::BlockedDomains{1})
     BlockedDomains((1, x.start[1]), ([1], x.cumlength[1]))
 end
 
-function Base.(:*)(x::BlockedDomains{2}, y::BlockedDomains{2})
+function (*)(x::BlockedDomains{2}, y::BlockedDomains{2})
     if x.cumlength[2] != y.cumlength[1]
         throw(DimensionMismatch("Block distributions being multiplied are not compatible"))
     end
     BlockedDomains((x.start[1],y.start[2]), (x.cumlength[1], y.cumlength[2]))
 end
 
-function Base.(:*)(x::BlockedDomains{2}, y::BlockedDomains{1})
+function (*)(x::BlockedDomains{2}, y::BlockedDomains{1})
     if x.cumlength[2] != y.cumlength[1]
         throw(DomainError("Block distributions being multiplied are not compatible"))
     end

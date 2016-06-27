@@ -28,18 +28,16 @@ function stage(ctx, rd::ReadDelim)
         ds = map(domain, ps_arr)
         ncols = size(ds[1], 2)
         nrows_parts = map(d->size(d, 1), ds)
-        nrows = sum(nrows_parts)
-        rowsums = cumsum(nrows_parts)
-        starts = vcat(0, rowsums[1:end-1]) .+1
-        row_ranges = map(UnitRange, starts,rowsums)
+        cumlength = cumsum(nrows_parts)
+        nrows = cumlength[end]
 
-        p,dmn = if ncols == 1
-            BlockPartition((floor(Int, nrows/length(ds)),)),
-            DomainSplit(DenseDomain((1:nrows,)), map(r -> DenseDomain((r,)), row_ranges))
+        dmn = if ncols == 1
+            pieces = BlockedDomains((1,), (cumlength,))
+            DomainSplit(DenseDomain((1:nrows,)), pieces)
         else
-            BlockPartition((floor(Int, nrows/length(ds)), ncols)),
-            DomainSplit(DenseDomain(1:nrows, 1:ncols), map(r -> DenseDomain(r, 1:ncols), row_ranges))
+            pieces = BlockedDomains((1,1), (cumlength,[ncols]))
+            DomainSplit(DenseDomain(1:nrows, 1:ncols), pieces)
         end
-        Cat(p, parttype(ps[1]), dmn, ps_arr)
+        Cat(parttype(ps[1]), dmn, ps_arr)
     end
 end

@@ -1,4 +1,4 @@
-import Base: convert
+import Base: convert, +, *, /, -
 
 ###### Filesize algebra ######
 
@@ -8,12 +8,12 @@ immutable Bytes
     val::Float64
 end
 
-Base.(:*)(n::Number, b::Bytes) = Bytes(n*b.val)
-Base.(:+)(a::Bytes, b::Bytes) = Bytes(a.val+b.val)
-Base.(:-)(a::Bytes, b::Bytes) = Bytes(a.val-b.val)
-Base.isless(a::Bytes, b::Bytes) = a.val < b.val
-Base.(:/)(a::Bytes, b::Number) = Bytes(ceil(UInt64, a.val/b))
-Base.(:/)(a::Bytes, b::Bytes) = a.val/b.val
+(*)(n::Number, b::Bytes) = Bytes(n*b.val)
+(+)(a::Bytes, b::Bytes) = Bytes(a.val+b.val)
+(-)(a::Bytes, b::Bytes) = Bytes(a.val-b.val)
+isless(a::Bytes, b::Bytes) = a.val < b.val
+(/)(a::Bytes, b::Number) = Bytes(ceil(UInt64, a.val/b))
+(/)(a::Bytes, b::Bytes) = a.val/b.val
 
 const B = Bytes(1)
 const kB = 1024B
@@ -43,14 +43,18 @@ intersect(r, ::Colon) = r
 """
 Utility function to divide the range `range` into `n` parts
 """
-function split_range(range, n)
+function split_range{T}(range::Range{T}, n)
     len = length(range)
 
     starts = len >= n ?
-        round(Int, linspace(first(range), last(range)+1, n+1)) :
-        [[first(range):(last(range)+1);], zeros(Int, n-len);]
+        round(T, linspace(first(range), last(range)+1, n+1)) :
+        [[first(range):(last(range)+1);], zeros(T, n-len);]
 
-    map(UnitRange, starts[1:end-1], starts[2:end] .- 1)
+    map((x,y)->x:y, starts[1:end-1], starts[2:end] .- 1)
+end
+
+function split_range(r::Range{Char}, n)
+    map((x) -> Char(first(x)):Char(last(x)), split_range(Int(first(r)):Int(last(r)), n))
 end
 
 """

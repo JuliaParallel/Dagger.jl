@@ -1,28 +1,40 @@
 
-import Base: transpose
+import Base: ctranspose, A_mul_Bt, At_mul_B, Ac_mul_B, At_mul_Bt, Ac_mul_Bc, A_mul_Bc
 
-immutable Transpose <: Computation
-    input::Computation
+immutable Transpose{T,N} <: LazyArray{T,N}
+    input::LazyArray
 end
 
-transpose(x::Computation) = Transpose(x)
-transpose(x::AbstractPart) = Thunk(a -> transpose(a), (x,))
-transpose(x::BlockPartition{2}) = BlockPartition((x.blocksize[2], x.blocksize[1]))
-transpose(x::BlockPartition{1}) = BlockPartition((1, x.blocksize[1]))
-function transpose(x::DenseDomain{2})
+function Transpose(x::LazyArray)
+    @assert 1 <= ndims(x) && ndims(x) <= 2
+    Transpose{eltype(x), 2}(x)
+end
+function size(x::Transpose)
+    sz = size(x.input)
+    if length(sz) == 1
+        (1, sz[1])
+    else
+        (sz[2], sz[1])
+    end
+end
+
+ctranspose(x::LazyArray) = Transpose(x)
+ctranspose(x::AbstractPart) = Thunk(a -> ctranspose(a), (x,))
+
+function ctranspose(x::DenseDomain{2})
     d = indexes(x)
     DenseDomain(d[2], d[1])
 end
-function transpose(x::DenseDomain{1})
+function ctranspose(x::DenseDomain{1})
     d = indexes(x)
     DenseDomain(1, d[1])
 end
 
-function transpose(x::DomainSplit)
+function ctranspose(x::DomainSplit)
     DomainSplit(head(x)', parts(x)')
 end
 
-function _transpose(x::AbstractArray)
+function _ctranspose(x::AbstractArray)
     Any[x[j,i]' for i=1:size(x,2), j=1:size(x,1)]
 end
 
@@ -30,16 +42,22 @@ function stage(ctx, node::Transpose)
     inp = cached_stage(ctx, node.input)
     dmn = domain(inp)
     dmnT = dmn'
-    thunks = _transpose(parts(inp))
+    thunks = _ctranspose(parts(inp))
     Cat(parttype(inp), dmnT, thunks)
 end
 
 export Distribute
 
-immutable Distribute <: Computation
+immutable Distribute{N, T} <: LazyArray{N, T}
     domain::DomainSplit
     data::AbstractPart
 end
+
+Distribute(d::DomainSplit, p::AbstractPart) =
+    Distribute{eltype(parttype(p)), ndims(d)}(d, p)
+
+size(x::Distribute) = size(x.domain)
+
 
 function Distribute(p::PartitionScheme, data)
     Distribute(partition(p, domain(data)), part(data))
@@ -73,14 +91,24 @@ end
 
 import Base: *, +
 
-immutable MatMul <: Computation
-    a::Computation
-    b::Computation
+immutable MatMul{T, N} <: LazyArray{T, N}
+    a::LazyArray
+    b::LazyArray
 end
 
-(*)(a::Computation, b::Computation) = MatMul(a,b)
+function mul_size(a,b)
+  if ndims(b) == 1
+    (size(a,1),)
+  else
+    (size(a,1), size(b,2))
+  end
+end
+size(x::MatMul) = mul_size(x.a, x.b)
+MatMul(a,b) =
+  MatMul{promote_type(eltype(a), eltype(b)), length(mul_size(a,b))}(a,b)
+(*)(a::LazyArray, b::LazyArray) = MatMul(a,b)
 # Bonus method for matrix-vector multiplication
-(*)(a::Computation, b::Vector) = MatMul(a,PromotePartition(b))
+(*)(a::LazyArray, b::Vector) = MatMul(a,PromotePartition(b))
 
 function (*)(a::ArrayDomain{2}, b::ArrayDomain{2})
 
@@ -149,14 +177,16 @@ end
 This is a way of suggesting that stage should call
 stage_operand with the operation and other arguments
 """
-immutable PromotePartition{T} <: Computation
-    data::T
+immutable PromotePartition{T,N} <: LazyArray{T,N}
+    data::AbstractArray{T,N}
 end
+
+size(p::PromotePartition) = size(domain(p.data))
 
 """
 an operand which should be distributed as per convenience
 """
-function stage_operand{T<:AbstractVector}(ctx, ::MatMul, a, b::PromotePartition{T})
+function stage_operand{T}(ctx, ::MatMul, a, b::PromotePartition{T,1})
     dmn_a = domain(a)
     dmn_b = domain(b.data)
     if size(dmn_a, 2) != size(dmn_b, 1)
@@ -188,14 +218,19 @@ end
 ### Scale
 
 import Base.scale
-immutable Scale <: Computation
-    l::Computation
-    r::Computation
+immutable Scale{T,N} <: LazyArray{T,N}
+    l::LazyArray
+    r::LazyArray
 end
+Scale{Tl, Tr, N}(l::LazyArray{Tl}, r::LazyArray{Tr,N}) =
+  Scale{promote_type(Tl, Tr), N}(l,r)
 
-scale(l::Number, r::Computation) = BlockwiseOp(x->scale(l, x), (r,))
-scale(l::Vector, r::Computation) = scale(PromotePartition(l), r)
-scale(l::Computation, r::Computation) = Scale(l, r)
+size(s::Scale) = size(s.l)
+
+scale(l::Number, r::LazyArray) = BlockwiseOp(x->scale(l, x), (r,))
+scale(l::Vector, r::LazyArray) = scale(PromotePartition(l), r)
+(*)(l::Diagonal, r::LazyArray) = Scale(PromotePartition(l.diag), r)
+scale(l::LazyArray, r::LazyArray) = Scale(l, r)
 
 function stage_operand(ctx, ::Scale, a, b::PromotePartition)
     ps = parts(domain(a))
@@ -227,9 +262,18 @@ function stage(ctx, scal::Scale)
     Cat(Any, domain(r), scal_parts)
 end
 
-immutable Concat <: Computation
+immutable Concat{T,N} <: LazyArray{T,N}
     axis::Int
     inputs::Tuple
+end
+Concat(axis::Int, inputs::Tuple) =
+  Concat{promote_type(map(eltype, inputs)...),
+         ndims(inputs[1])}(axis, inputs)
+
+function size(c::Concat)
+    sz = [size(c.inputs[1])...]
+    sz[c.axis] = sum(map(x->size(x, c.axis), c.inputs))
+    (sz...,)
 end
 
 function cat(idx::Int, ds::DomainSplit...)
@@ -258,10 +302,15 @@ function stage(ctx, c::Concat)
     Cat(T, dmn, thunks)
 end
 
-Base.cat(idx::Int, x::Computation, xs::Computation...) =
+Base.cat(idx::Int, x::LazyArray, xs::LazyArray...) =
     Concat(idx, (x, xs...))
 
-Base.hcat(xs::Computation...) = cat(2, xs...)
-Base.vcat(xs::Computation...) = cat(1, xs...)
+Base.hcat(xs::LazyArray...) = cat(2, xs...)
+Base.vcat(xs::LazyArray...) = cat(1, xs...)
 
-
+A_mul_Bt(x::LazyArray, y::LazyArray) = MatMul(x, y')
+At_mul_B(x::LazyArray, y::LazyArray) = MatMul(x', y)
+Ac_mul_B(x::LazyArray, y::LazyArray) = MatMul(x', y)
+At_mul_Bt(x::LazyArray, y::LazyArray) = MatMul(x', y')
+Ac_mul_Bc(x::LazyArray, y::LazyArray) = MatMul(x', y')
+A_mul_Bc(x::LazyArray, y::LazyArray) = MatMul(x, y')

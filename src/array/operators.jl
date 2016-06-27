@@ -16,27 +16,44 @@ blockwise_unary = [:exp, :expm1, :log, :log10, :log1p, :sqrt, :cbrt, :exponent, 
          :asinh, :acosh, :atanh, :acoth, :asech, :acsch, :sinc, :cosc]
 
 blockwise_binary =
-        [:+, :-, :%, :(.*), :(.+), :(.-), :(.%), :(./), :(.^),
-         :$, :&, :(.!=), :(.<), :(.<=), :(.==), :(.>),
-         :(.>=), :(.\), :(.//), :(.>>), :(.<<)]
+        [:+, :-, :%, :.*, :.+, :.-, :.%, :./, :.^,
+         :$, :&, :.!=, :.<, :.<=, :.==, :.>,
+         :.>=, :.\, :.//, :.>>, :.<<]
 
 
-immutable BlockwiseOp{F, N} <: Computation
+immutable BlockwiseOp{F, Ni, T, Nd} <: LazyArray{T, Nd}
     f::F
-    input::NTuple{N, Computation}
+    input::NTuple{Ni, LazyArray}
 end
+
+function BlockwiseOp{F}(f::F, input::Tuple)
+    T = promote_type(map(eltype, input)...)
+    Nd = ndims(input[1])
+    BlockwiseOp{F, length(input), T, Nd}(f, input)
+end
+
+size(x::BlockwiseOp) = size(x.input[1])
 
 for fn in blockwise_unary
     @eval begin
-        $fn(x::Computation) = BlockwiseOp($fn, (x,))
+        $fn(x::LazyArray) = BlockwiseOp($fn, (x,))
     end
 end
 
+### Appease ambiguity warnings on Julia 0.4
+for fn in [:+, :-]
+    @eval begin
+        $fn(x::Bool, y::LazyArray{Bool}) = BlockwiseOp(z -> $fn(x, z), (y,))
+        $fn(x::LazyArray{Bool}, y::Bool) = BlockwiseOp(z -> $fn(z, y), (x,))
+    end
+end
+(.^)(x::Irrational{:e}, y::LazyArray) = BlockwiseOp(z -> x.^z, (y,))
+
 for fn in blockwise_binary
     @eval begin
-        $fn(x::Computation, y::Computation) = BlockwiseOp($fn, (x, y))
-        $fn(x::Number, y::Computation) = BlockwiseOp(z -> $fn(x, z), (y,))
-        $fn(x::Computation, y::Number) = BlockwiseOp(z -> $fn(z, y), (x,))
+        $fn(x::LazyArray, y::LazyArray) = BlockwiseOp($fn, (x, y))
+        $fn(x::Number, y::LazyArray) = BlockwiseOp(z -> $fn(x, z), (y,))
+        $fn(x::LazyArray, y::Number) = BlockwiseOp(z -> $fn(z, y), (x,))
     end
 end
 
@@ -52,4 +69,4 @@ function stage(ctx, node::BlockwiseOp)
 end
 
 export mappart
-mappart(f, xs::Computation...) = BlockwiseOp(f, xs)
+mappart(f, xs::LazyArray...) = BlockwiseOp(f, xs)

@@ -52,7 +52,7 @@ In this example, we will compute the sum of square of a 10000x10000 normally dis
 
 ```julia
 x = randn(BlockPartition(4000,4000), 10^4, 10^4)
-compute(sum(x.^2))
+sum(x.^2)
 # => 1.0000084097623596e8
 ```
 the answer is close to 10^8. Note the use of `compute` on `sum`. This is because `sum` returns an object representing the computation of the sum. You need to call compute on it to actually compute it.
@@ -81,7 +81,7 @@ Notice the first argument `Context()` this required so that this `load` method i
 Now you can do some computation on `X_sq` and the data will be read from disk when different processes need it.
 
 ```julia
-compute(sum(X_sq))
+sum(X_sq)
 # => 1.0000065091623393e9
 ```
 
@@ -97,11 +97,9 @@ a = rand(1000, 1000)
 b = Distribute(BlockPartition(100, 100), a) # Create chunks of 100x100 submatrices
 c = map(x->x^2, b) # map applies a function element wise. this is equivalent to b.^2
 d = sum(c)
-
-compute(d)
 ```
 
-When `compute` runs the computation, it starts by cutting up the 1000x1000 array into 100x100 pieces and each process takes up the task of squaring and summing one of these pieces.
+Dagger starts by cutting up the 1000x1000 array into 100x100 pieces and each process takes up the task of squaring and summing one of these pieces.
 
 ### Loading CSV Data
 

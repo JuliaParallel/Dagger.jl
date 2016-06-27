@@ -134,7 +134,7 @@ parts(x::Cat) = x.parts
 persist!(x::Cat) = (for p in parts(x); persist!(p); end)
 
 function gather(ctx, part::Cat)
-    cat_data(parttype(part), part.domain, map(c->gather(ctx,c), parts(part)))
+    cat_data(parttype(part), part.domain, map(c->(gather(ctx,c)), parts(part)))
 end
 
 """
@@ -166,6 +166,10 @@ function group_indices(cumlength, idxs,at=1, acc=Any[])
     end
     push!(acc, fidx=>idxs[start_at:end_at])
     group_indices(cumlength, idxs, at+1, acc)
+end
+
+function group_indices(cumlength, idx::Int)
+    group_indices(cumlength, [idx])
 end
 
 function group_indices(cumlength, idxs::Range)

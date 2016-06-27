@@ -1,10 +1,10 @@
-
-type AllocateArray <: Computation
-    eltype::Type
+type AllocateArray{T,N} <: LazyArray{T,N}
+    eltype::Type{T}
     f::Function
-    domain::DenseDomain
+    domain::DenseDomain{N}
     partition::PartitionScheme
 end
+size(a::AllocateArray) = size(a.domain)
 
 function stage(ctx, a::AllocateArray)
     branch = partition(a.partition, a.domain)
