@@ -247,7 +247,7 @@ end
 function _scale(l, r)
     res = similar(r, Any)
     for i=1:length(l)
-        res[i,:] = map(x->Thunk(scale, (l[i], x)), r[i,:])
+        res[i,:] = map(x->Thunk((a,b) -> Diagonal(a)*b, (l[i], x)), r[i,:])
     end
     res
 end
