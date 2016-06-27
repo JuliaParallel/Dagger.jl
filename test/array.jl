@@ -21,6 +21,7 @@ Dagger.domain(x::ComputedArray) = domain(x.result)
         @test domain(X1).head == DenseDomain(1:100, 1:100)
         @test parts(domain(X1)) |> size == (10, 10)
         @test parts(domain(X1)) == parts(partition(BlockPartition(10, 10), DenseDomain(1:100, 1:100)))
+        @test gather(X1) == gather(X1)
     end
     X = rand(BlockPartition(10, 10), 100, 100)
     test_rand(X)

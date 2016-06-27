@@ -22,7 +22,11 @@ function stage(ctx, a::AllocateArray)
 end
 
 function Base.rand(p::PartitionScheme, eltype::Type, dims)
-    AllocateArray(eltype, rand, DenseDomain(map(x->1:x, dims)), p)
+    s = rand(UInt)
+    f = function (x...)
+        rand(MersenneTwister(s), x...)
+    end
+    AllocateArray(eltype, f, DenseDomain(map(x->1:x, dims)), p)
 end
 
 Base.rand(p::PartitionScheme, t::Type, dims::Integer...) = rand(p, t, dims)
@@ -30,7 +34,11 @@ Base.rand(p::PartitionScheme, dims::Integer...) = rand(p, Float64, dims)
 Base.rand(p::PartitionScheme, dims::Tuple) = rand(p, Float64, dims)
 
 function Base.randn(p::PartitionScheme, dims)
-    AllocateArray(Float64, (t,sz)->randn(sz), DenseDomain(map(x->1:x, dims)), p)
+    s = rand(UInt)
+    f = function (x...)
+        randn(MersenneTwister(s), x...)
+    end
+    AllocateArray(Float64, f, DenseDomain(map(x->1:x, dims)), p)
 end
 Base.randn(p::PartitionScheme, dims::Integer...) = randn(p, dims)
 
@@ -48,11 +56,18 @@ Base.zeros(p::PartitionScheme, t::Type, dims::Integer...) = zeros(p, t, dims)
 Base.zeros(p::PartitionScheme, dims::Integer...) = zeros(p, Float64, dims)
 Base.zeros(p::PartitionScheme, dims::Tuple) = zeros(p, Float64, dims)
 
-
 function Base.sprand(p::PartitionScheme, m::Integer, n::Integer, sparsity::Real)
-    AllocateArray(Float64, (t,sz) -> sprand(sz...,sparsity), DenseDomain((1:m, 1:n)), p)
+    s = rand(UInt)
+    f = function (t,sz)
+        sprand(MersenneTwister(s), sz...,sparsity)
+    end
+    AllocateArray(Float64, f, DenseDomain((1:m, 1:n)), p)
 end
 
 function Base.sprand(p::PartitionScheme, n::Integer, sparsity::Real)
-    AllocateArray(Float64, (t,sz) -> sprand(sz...,sparsity), DenseDomain((1:n,)), p)
+    s = rand(UInt)
+    f = function (t,sz)
+        sprand(MersenneTwister(s), sz...,sparsity)
+    end
+    AllocateArray(Float64, f, DenseDomain((1:n,)), p)
 end

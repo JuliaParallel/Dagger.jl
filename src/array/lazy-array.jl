@@ -12,9 +12,11 @@ function Base.show(io::IO, x::LazyArray)
     m = MIME"text/plain"()
     show(io, m, x)
 end
+
 immutable ComputedArray{T,N} <: LazyArray{T, N}
     result::AbstractPart
 end
+
 function ComputedArray(x::AbstractPart)
     nd = ndims(domain(x))
     ComputedArray{_eltype(parttype(x)), nd}(x)
