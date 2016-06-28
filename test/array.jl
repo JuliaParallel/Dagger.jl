@@ -27,6 +27,9 @@ Dagger.domain(x::ComputedArray) = domain(x.result)
     test_rand(X)
     Xsp = sprand(BlockPartition(10, 10), 100, 100, 0.1)
     test_rand(Xsp)
+    R = rand(BlockPartition(10), 20)
+    r = gather(R)
+    @test r[1:10] != r[11:20]
 end
 @testset "sum(ones(...))" begin
     X = ones(BlockPartition(10, 10), 100, 100)
