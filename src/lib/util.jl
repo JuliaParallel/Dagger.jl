@@ -137,3 +137,7 @@ end
 function treereducedim(op, xs::Array, dim::Tuple)
     reduce((prev, d) -> treereducedim(op, prev, d), xs, dim)
 end
+
+function setindex{N}(x::NTuple{N}, idx, v)
+    map(ifelse, ntuple(x->is(idx, x), Val{N}), ntuple(x->v, Val{N}), x)
+end

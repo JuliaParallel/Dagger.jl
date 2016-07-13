@@ -63,9 +63,11 @@ Distribute(d::DomainSplit, p::AbstractPart) =
 size(x::Distribute) = size(x.domain)
 
 
-function Distribute(p::PartitionScheme, data)
-    Distribute(partition(p, domain(data)), persist!(part(data)))
-end
+Distribute(dmn::DomainSplit, data) =
+    Distribute(dmn, persist!(part(data)))
+
+Distribute(p::PartitionScheme, data) =
+    Distribute(partition(p, domain(data)), data)
 
 #=
 todo
