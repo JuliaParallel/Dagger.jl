@@ -6,7 +6,7 @@ import Base: exp, expm1, log, log10, log1p, sqrt, cbrt, exponent,
              asinh, acosh, atanh, acoth, asech, acsch, sinc, cosc,
              +, -, %, (.*), (.+), (.-), (.%), (./), (.^),
              $, &, (.!=), (.<), (.<=), (.==), (.>),
-             (.>=), (.\), (.//), (.>>), (.<<)
+             (.>=), (.\), (.//), (.>>), (.<<), *
 
 blockwise_unary = [:exp, :expm1, :log, :log10, :log1p, :sqrt, :cbrt, :exponent, :significand,
          :(-),
@@ -56,6 +56,9 @@ for fn in blockwise_binary
         $fn(x::LazyArray, y::Number) = BlockwiseOp(z -> $fn(z, y), (x,))
     end
 end
+
+(*)(x::Number, y::LazyArray) = BlockwiseOp(z -> x*z, (y,))
+(*)(x::LazyArray, y::Number) = BlockwiseOp(z -> z*y, (x,))
 
 function stage(ctx, node::BlockwiseOp)
     inputs = Any[cached_stage(ctx, n) for n in node.input]

@@ -196,7 +196,7 @@ function stage_operand{T}(ctx, ::MatMul, a, b::PromotePartition{T,1})
     dmn_a = domain(a)
     dmn_b = domain(b.data)
     if size(dmn_a, 2) != size(dmn_b, 1)
-        throw(DimensionMismatch("Cannot promote array of domain $(dmn2) to multiply with an array of size $(dmn)"))
+        throw(DimensionMismatch("Cannot promote array of domain $(dmn_b) to multiply with an array of size $(dmn_a)"))
     end
     ps = parts(dmn_a)
     dmn_out = DomainSplit(dmn_b, BlockedDomains((1,),(ps.cumlength[2],)))
