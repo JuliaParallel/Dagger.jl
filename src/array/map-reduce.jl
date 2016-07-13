@@ -1,7 +1,6 @@
-
 import Base: reduce, map, mapreduce, reducedim
 
-export reducebykey, reduce_async, reducedim_async
+export reducebykey, reduce_async
 
 #### Map
 immutable Map{T,N} <: LazyArray{T,N}
@@ -58,6 +57,7 @@ reduce_async(f, x::LazyArray) = reduceblock_async(xs->reduce(f,xs), xs->reduce(f
 reduce(f, x::LazyArray) = compute(reduce_async(f,x))
 
 sum(x::LazyArray) = reduceblock(sum, sum, x)
+sum(x::LazyArray, dim::Int) = reducedim(+, x, dim)
 sum(f::Function, x::LazyArray) = reduceblock(a->sum(f, a), sum, x)
 prod(x::LazyArray) = reduceblock(prod, x)
 prod(f::Function, x::LazyArray) = reduceblock(a->prod(f, a), prod, x)
@@ -85,23 +85,31 @@ reducebykey_seq(op, itr,dict=Dict()) = mapreducebykey_seq(Base.IdFun(), op, itr,
 reducebykey(op, input) = reduceblock(itr->reducebykey_seq(op, itr), merge_reducebykey(op), input)
 
 
-immutable Reducedim <: Computation
+immutable Reducedim{T,N} <: LazyArray{T,N}
     op::Function
     input::LazyArray
     dims::Tuple
 end
 
-reducedim_async(f, x::LazyArray, dims::Tuple) = Reducedim(f,x,dims)
-reducedim_async(f, x::LazyArray, dims::Int) = Reducedim(f,x,(dims,))
-Base.reducedim(f, x::LazyArray, dims::Union{Int, Tuple}) = compute(reducedim_async)
-
-function reducedim(dom, dims)
-    d = Any[indexes(dom)...]
-    for dim in dims
-        d[dim] = 1:1
-    end
-    DenseDomain(d)
+function reducedim(dom::DenseDomain, dim::Int)
+    DenseDomain(setindex(indexes(dom), dim, 1:1))
 end
+
+function reducedim(dom::DenseDomain, dim::Tuple)
+    reduce(reducedim, dom, dim)
+end
+
+function size(x::Reducedim)
+    reducedim(DenseDomain(map(x->1:x, size(x.input))), x.dims)
+end
+
+function Reducedim(op, input, dims)
+    T = eltype(input)
+    Reducedim{T,ndims(input)}(op, input, dims)
+end
+
+Base.reducedim(f, x::LazyArray, dims::Tuple) = Reducedim(f,x,dims)
+Base.reducedim(f, x::LazyArray, dims::Int) = Reducedim(f,x,(dims,))
 
 function stage(ctx, r::Reducedim)
     inp = cached_stage(ctx, r.input)
@@ -117,6 +125,6 @@ function stage(ctx, r::Reducedim)
     colons = Any[Colon() for x in size(c)]
     colons[[r.dims...]] = 1
     dmn = c[colons...]
-    d = DomainSplit(reducedim(head(domain(inp)), r.dims), map(d->reducedim(d, r.dims), dmn))
+    d = DomainSplit(reducedim(head(domain(inp)), r.dims), reducedim(parts(domain(inp)), r.dims))
     Cat(parttype(inp),d, thunks)
 end

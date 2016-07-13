@@ -1,6 +1,5 @@
-using Dagger
+import Base: ndims, size, getindex, reducedim
 
-import Base: ndims, size, getindex
 immutable BlockedDomains{N} <: AbstractArray{DenseDomain{N}, N}
     start::NTuple{N, Int}
     cumlength::NTuple{N, AbstractArray{Int}}
@@ -42,7 +41,7 @@ end
 
 function (*)(x::BlockedDomains{2}, y::BlockedDomains{1})
     if x.cumlength[2] != y.cumlength[1]
-        throw(DomainError("Block distributions being multiplied are not compatible"))
+        throw(DimensionMismatch("Block distributions being multiplied are not compatible"))
     end
     BlockedDomains((x.start[1],), (x.cumlength[1],))
 end
@@ -65,5 +64,13 @@ end
 
 Base.hcat(xs::BlockedDomains...) = cat(2, xs...)
 Base.vcat(xs::BlockedDomains...) = cat(1, xs...)
+
+function reducedim(xs::BlockedDomains, dim::Int)
+    BlockedDomains(xs.start,
+        setindex(xs.cumlength,dim, [1]))
+end
+function reducedim(dom::BlockedDomains, dim::Tuple)
+    reduce(reducedim, dom, dim)
+end
 
 cumulative_domains(x::BlockedDomains) = x
