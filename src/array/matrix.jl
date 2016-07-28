@@ -115,6 +115,7 @@ MatMul(a,b) =
 (*)(a::LazyArray, b::LazyArray) = MatMul(a,b)
 # Bonus method for matrix-vector multiplication
 (*)(a::LazyArray, b::Vector) = MatMul(a,PromotePartition(b))
+(*)(a::AbstractArray, b::LazyArray) = MatMul(PromotePartition(a), b)
 
 function (*)(a::ArrayDomain{2}, b::ArrayDomain{2})
 
@@ -178,21 +179,37 @@ function _mul(a::Vector, b::Vector; T=eltype(b))
     [x * b[1] for x in a]
 end
 
+function promote_distribution(ctx, m::MatMul, a,b)
+    iscompat = try domain(a) * domain(b); true
+               catch e; false end
+    if iscompat
+        return a,b
+    end
 
-"""
-This is a way of suggesting that stage should call
-stage_operand with the operation and other arguments
-"""
-immutable PromotePartition{T,N} <: LazyArray{T,N}
-    data::AbstractArray{T,N}
+    pa = parts(domain(a))
+    pb = parts(domain(b))
+
+    d = DomainSplit(head(domain(b)),
+       BlockedDomains((1,1), (pa.cumlength[2], pb.cumlength[2])))
+    a, cached_stage(ctx, Distribute(d, b))
 end
 
-size(p::PromotePartition) = size(domain(p.data))
+function stage_operands(ctx, m::MatMul, a, b)
+    if size(a, 2) != size(b, 1)
+        error(DimensionMismatch("Inputs to * have incompatible size"))
+    end
+    # take the row distribution of a and get b onto that.
+
+    stg_a = cached_stage(ctx, a)
+    stg_b = cached_stage(ctx, b)
+    promote_distribution(ctx, m, stg_a, stg_b)
+end
 
 """
 an operand which should be distributed as per convenience
 """
-function stage_operand{T}(ctx, ::MatMul, a, b::PromotePartition{T,1})
+function stage_operands{T}(ctx, ::MatMul, a::LazyArray, b::PromotePartition{T,1})
+    stg_a = cached_stage(ctx, a)
     dmn_a = domain(a)
     dmn_b = domain(b.data)
     if size(dmn_a, 2) != size(dmn_b, 1)
@@ -201,16 +218,24 @@ function stage_operand{T}(ctx, ::MatMul, a, b::PromotePartition{T,1})
     ps = parts(dmn_a)
     dmn_out = DomainSplit(dmn_b, BlockedDomains((1,),(ps.cumlength[2],)))
 
-    cached_stage(ctx, Distribute(dmn_out, part(b.data)))
+    stg_a, cached_stage(ctx, Distribute(dmn_out, part(b.data)))
 end
 
-function stage_operand(ctx, ::MatMul, a, b)
-    cached_stage(ctx, b)
+function stage_operands(ctx, ::MatMul, a::PromotePartition, b::LazyArray)
+
+    if size(a, 2) != size(b, 1)
+        throw(DimensionMismatch("Cannot promote array of domain $(dmn_b) to multiply with an array of size $(dmn_a)"))
+    end
+    stg_b = cached_stage(ctx, b)
+
+    ps = parts(domain(stg_b))
+    dmn_out = DomainSplit(domain(a.data),
+        BlockedDomains((1,1),([size(a.data, 1)], ps.cumlength[1],)))
+    cached_stage(ctx, Distribute(dmn_out, part(a.data))), stg_b
 end
 
 function stage(ctx, mul::MatMul)
-    a = cached_stage(ctx, mul.a)
-    b = stage_operand(ctx, mul, a, mul.b)
+    a, b = stage_operands(ctx, mul, mul.a, mul.b)
 
     da = domain(a)
     db = domain(b)
