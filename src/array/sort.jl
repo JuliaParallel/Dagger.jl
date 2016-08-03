@@ -84,7 +84,13 @@ function select(A, ranks, c=10^9)
         for i=1:length(ks)
             l,e,g,k = L[i], E[i], G[i], ks[i]
             if l < k && k <= l+e
-                push!(result, (Ms[i], l, e))
+                foundat = map(active_ranges[:,i], dists[:,i]) do rng, d
+                    l,e,g=d
+                    fst = first(rng)+l
+                    lst = fst+e-1
+                    fst:lst
+                end
+                push!(result, (Ms[i], foundat))
                 push!(found, i)
             elseif k <= l
                 # discard elements less than M
