@@ -22,7 +22,7 @@ function compute(ctx, s::Sort)
     ls = map(length, parts(domain(inp)))
     splitter_ranks = cumsum(ls)[1:end-1]
 
-    splitters = select(blockwise_sorted, splitter_ranks)
+    splitters = select(ctx, blockwise_sorted, splitter_ranks)
     compute(ctx, shuffle_merge(blockwise_sorted, splitters))
 end
 
@@ -33,10 +33,9 @@ function mappart_eager(f, ctx, xs)
     gather(ctx, Thunk((xs...)->[xs...], (thunks...)))
 end
 
-function broadcast1(f, xs::Cat, m)
+function broadcast1(ctx, f, xs::Cat, m)
     ps = parts(xs)
     @assert size(m, 1) == length(ps)
-    ctx = Context()
     mappart_eager(ctx, xs) do i
         inp = vec(m[i,:])
         function (p)
@@ -45,10 +44,9 @@ function broadcast1(f, xs::Cat, m)
     end |> matrixize |> transpose
 end
 
-function broadcast2(f, xs::Cat, m,v)
+function broadcast2(ctx, f, xs::Cat, m,v)
     ps = parts(xs)
     @assert size(m, 1) == length(ps)
-    ctx = Context()
     mappart_eager(ctx, xs) do i
         inp = vec(m[i,:])
         function (p)
@@ -57,7 +55,7 @@ function broadcast2(f, xs::Cat, m,v)
     end |> matrixize |> transpose
 end
 
-function select(A, ranks, c=10^9)
+function select(ctx, A, ranks, c=10^9)
     ks = copy(ranks)
     lengths = map(length, parts(domain(A)))
     n = sum(lengths)
@@ -71,11 +69,11 @@ function select(A, ranks, c=10^9)
     while any(x->x>0, Ns)
         iter+=1
         # find medians
-        ms = broadcast1(submedian, A, active_ranges)
+        ms = broadcast1(ctx, submedian, A, active_ranges)
         ls = map(length, active_ranges)
         Ms = sum(ms .* ls, 1) ./ sum(ls, 1)
         # scatter weighted
-        dists = broadcast2(dist, A, active_ranges, Ms)
+        dists = broadcast2(ctx, dist, A, active_ranges, Ms)
         D = reducedim((xs, x) -> map(+, xs, x), dists, 1, (0,0,0))
         L,E,G = map(x->x[1], D), map(x->x[2], D), map(x->x[3], D)
         # scatter L,E,G
