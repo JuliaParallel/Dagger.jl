@@ -136,4 +136,14 @@ end
     @test gather(sin(X)) == gather(sin(X))
 end
 
+@testset "sort" begin
+    x = rand(1:10, 10)
+    X = Distribute(BlockPartition(3), x)
+    @test gather(sort(X)) == sort(x)
+    X = Distribute(BlockPartition(1), x)
+    @test gather(sort(X)) == sort(x)
+    X = Distribute(BlockPartition(10), x)
+    @test gather(sort(X)) == sort(x)
+end
+
 end
