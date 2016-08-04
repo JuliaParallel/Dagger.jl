@@ -16,15 +16,14 @@ function compute(ctx, s::Sort)
     ps = parts(inp)
 
     sorted_parts = map(p->Thunk(x->sort(x; s.kwargs...), (p,)), ps)
-    blockwise_sorted = compute(ctx,
-        Cat(Any, domain(inp),
-        sorted_parts))
+    blockwise_sorted = compute(ctx, Cat(Any, domain(inp), sorted_parts))
     persist!(blockwise_sorted)
 
     ls = map(length, parts(domain(inp)))
     splitter_ranks = cumsum(ls)[1:end-1]
 
     splitters = select(blockwise_sorted, splitter_ranks)
+    compute(ctx, shuffle_merge(blockwise_sorted, splitters))
 end
 
 function mappart_eager(f, ctx, xs)
@@ -68,7 +67,7 @@ function select(A, ranks, c=10^9)
 
     Ns = map(_->n, ks)
     iter=0
-    result = Tuple[]
+    result = Pair[]
     while any(x->x>0, Ns)
         iter+=1
         # find medians
@@ -90,7 +89,7 @@ function select(A, ranks, c=10^9)
                     lst = fst+e-1
                     fst:lst
                 end
-                push!(result, (Ms[i], foundat))
+                push!(result, Ms[i] => foundat)
                 push!(found, i)
             elseif k <= l
                 # discard elements less than M
@@ -108,7 +107,7 @@ function select(A, ranks, c=10^9)
         Ns = Ns[found_mask]
         ks = ks[found_mask]
     end
-    return result
+    return sort(result, by=x->x[1])
 end
 
 function submedian(xs, r)
@@ -145,3 +144,55 @@ function matrixize(xs)
     [xs[i][j] for j=1:l, i=1:length(xs)]
 end
 
+function merge_thunk(ps, starts, lasts)
+    ranges = map(UnitRange, starts, lasts)
+    Thunk(merge_sorted, (map((p, r) -> Dagger.sub(p, DenseDomain(r)), ps, ranges)...))
+end
+
+function shuffle_merge(A, splitter_indices)
+    ps = parts(A)
+    # splitter_indices: array of (splitter => vector of p index ranges) in sorted order
+    starts = [1 for i=1:length(ps)]
+    merges = [begin
+        lasts = map(last, idxs)
+        thnk = merge_thunk(ps, starts, lasts)
+        sz = sum(lasts-starts+1)
+        starts = lasts.+1
+        thnk,sz
+        end for (val, idxs) in splitter_indices]
+    ls = map(length, parts(domain(A)))
+    thunks = vcat(merges, (merge_thunk(ps, starts, ls), sum(ls.-starts.+1)))
+    part_lengths = map(x->x[2], thunks)
+    dmn = DomainSplit(
+        DenseDomain(1:sum(part_lengths)),
+        BlockedDomains((1,),
+        (cumsum(part_lengths),)))
+    Cat(parttype(A), dmn, map(x->x[1], thunks))
+end
+
+function merge_sorted{T, S}(x::AbstractArray{T}, y::AbstractArray{S})
+    n = length(x) + length(y)
+    z = Array(promote_type(T,S), n)
+    i = 1; j = 1; k = 1
+    while i <= length(x) && j <= length(y)
+        @inbounds if x[i] < y[j]
+            z[k] = x[i]
+            i += 1
+        else
+            z[k] = y[j]
+            j += 1
+        end
+        k += 1
+    end
+    remaining = i <= length(x) ? x[i:end] : y[j:end]
+    for x in remaining
+        @inbounds z[k] = x
+        k += 1
+    end
+    z
+end
+
+merge_sorted(x) = x
+function merge_sorted(x, y, ys...)
+    merge_sorted(merge_sorted(x,y), merge_sorted(ys...))
+end
