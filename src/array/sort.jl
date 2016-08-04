@@ -108,9 +108,20 @@ function select(ctx, A, ranks, c=10^9)
     return sort(result, by=x->x[1])
 end
 
+function sortedmedian(xs)
+   l = length(xs)
+   if l % 2 == 0
+       i = l >> 1
+       (xs[i]+xs[i+1]) / 2
+   else
+       i = (l+1) >> 1
+       xs[i]
+   end
+end
+
 function submedian(xs, r)
     xs1 = view(xs, r)
-    m = isempty(xs1) ? 0.0 : median(xs1)
+    isempty(xs1) ? 0.0 : sortedmedian(xs1)
 end
 
 function keep_lessthan(dists, active_ranges)
@@ -172,20 +183,23 @@ function merge_sorted{T, S}(x::AbstractArray{T}, y::AbstractArray{S})
     n = length(x) + length(y)
     z = Array(promote_type(T,S), n)
     i = 1; j = 1; k = 1
-    while i <= length(x) && j <= length(y)
+    len_x = length(x)
+    len_y = length(y)
+    while i <= len_x && j <= len_y
         @inbounds if x[i] < y[j]
-            z[k] = x[i]
+            @inbounds z[k] = x[i]
             i += 1
         else
-            z[k] = y[j]
+            @inbounds z[k] = y[j]
             j += 1
         end
         k += 1
     end
-    remaining = i <= length(x) ? x[i:end] : y[j:end]
-    for x in remaining
-        @inbounds z[k] = x
+    remaining, m = i <= len_x ? (x, i) : (y, j)
+    while k <= n
+        @inbounds z[k] = remaining[m]
         k += 1
+        m += 1
     end
     z
 end
