@@ -11,7 +11,7 @@ end
 
 function Base.show(io::IO, x::LazyArray)
     m = MIME"text/plain"()
-    show(io, m, x)
+    @compat show(io, m, x)
 end
 
 immutable ComputedArray{T,N} <: LazyArray{T, N}

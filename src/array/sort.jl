@@ -16,43 +16,44 @@ function compute(ctx, s::Sort)
     ps = parts(inp)
 
     sorted_parts = map(p->Thunk(x->sort(x; s.kwargs...), (p,)), ps)
-    blockwise_sorted = compute(ctx, Cat(Any, domain(inp), sorted_parts))
+    blockwise_sorted = compute(Context(), Cat(Any, domain(inp), sorted_parts))
     persist!(blockwise_sorted)
 
     ls = map(length, parts(domain(inp)))
     splitter_ranks = cumsum(ls)[1:end-1]
 
     splitters = select(ctx, blockwise_sorted, splitter_ranks)
-    compute(ctx, shuffle_merge(blockwise_sorted, splitters))
+    ComputedArray(compute(Context(), shuffle_merge(blockwise_sorted, splitters)))
 end
 
-function mappart_eager(f, ctx, xs)
-    thunks = [Thunk(f(i), (x,))
-                 for (i, x) in enumerate(parts(xs))]
+function mappart_eager(f, ctx, xs, T=Any)
+    ps = parts(xs)
+    thunks = Thunk[Thunk(f(i), (ps[i],))
+                 for i in 1:length(ps)]
 
-    gather(ctx, Thunk((xs...)->[xs...], (thunks...)))
+    gather(ctx, Thunk((xs...)->T[xs...], (thunks...)))
 end
 
-function broadcast1(ctx, f, xs::Cat, m)
+function broadcast1(ctx, f, xs::Cat, m,T)
     ps = parts(xs)
     @assert size(m, 1) == length(ps)
-    mappart_eager(ctx, xs) do i
+    mappart_eager(ctx, xs,Vector{T}) do i
         inp = vec(m[i,:])
         function (p)
-            map(x->f(p, x), inp)
+            map(x->f(p, x)::T, inp)
         end
-    end |> matrixize |> transpose
+    end |> x->matrixize(x,T) |> x->permutedims(x, [2,1])
 end
 
-function broadcast2(ctx, f, xs::Cat, m,v)
+function broadcast2(ctx, f, xs::Cat, m,v,T)
     ps = parts(xs)
     @assert size(m, 1) == length(ps)
-    mappart_eager(ctx, xs) do i
+    mappart_eager(ctx, xs,Vector{T}) do i
         inp = vec(m[i,:])
         function (p)
-            map((x,y)->f(p, x, y), inp, vec(v))
+            map((x,y)->f(p, x, y)::T, inp, vec(v))
         end
-    end |> matrixize |> transpose
+    end |> x->matrixize(x,T) |> x->permutedims(x, [2,1])
 end
 
 function select(ctx, A, ranks, c=10^9)
@@ -60,36 +61,29 @@ function select(ctx, A, ranks, c=10^9)
     lengths = map(length, parts(domain(A)))
     n = sum(lengths)
     p = length(parts(A))
-    init_ranges = map(x->1:x, lengths)
-    active_ranges = matrixize([init_ranges for i=1:length(ks)])
+    init_ranges = UnitRange[1:x for x in lengths]
+    active_ranges = matrixize(Array[init_ranges for i=1:length(ks)], UnitRange)
 
-    Ns = map(_->n, ks)
+    Ns = Int[n for _ in ks]
     iter=0
     result = Pair[]
     while any(x->x>0, Ns)
         iter+=1
         # find medians
-        ms = broadcast1(ctx, submedian, A, active_ranges)
+        ms = broadcast1(ctx, submedian, A, active_ranges, Float64)
         ls = map(length, active_ranges)
         Ms = sum(ms .* ls, 1) ./ sum(ls, 1)
         # scatter weighted
-        dists = broadcast2(ctx, dist, A, active_ranges, Ms)
+        dists = broadcast2(ctx, locate_pivot, A, active_ranges, Ms, Tuple{Int,Int,Int})
         D = reducedim((xs, x) -> map(+, xs, x), dists, 1, (0,0,0))
-        L,E,G = map(x->x[1], D), map(x->x[2], D), map(x->x[3], D)
-        # scatter L,E,G
+        L = Int[x[1] for x in D]
+        E = Int[x[2] for x in D]
+        G = Int[x[3] for x in D]
+
         found = Int[]
         for i=1:length(ks)
-            l,e,g,k = L[i], E[i], G[i], ks[i]
-            if l < k && k <= l+e
-                foundat = map(active_ranges[:,i], dists[:,i]) do rng, d
-                    l,e,g=d
-                    fst = first(rng)+l
-                    lst = fst+e-1
-                    fst:lst
-                end
-                push!(result, Ms[i] => foundat)
-                push!(found, i)
-            elseif k <= l
+            l = L[i]; e = E[i]; g = G[i]; k = ks[i]
+            if k <= l
                 # discard elements less than M
                 active_ranges[:,i] = keep_lessthan(dists[:,i], active_ranges[:,i])
                 Ns[i] = l
@@ -98,9 +92,18 @@ function select(ctx, A, ranks, c=10^9)
                 active_ranges[:,i] = keep_morethan(dists[:,i], active_ranges[:,i])
                 Ns[i] = g
                 ks[i] = k - (l + e)
+            elseif l < k && k <= l+e
+                foundat = map(active_ranges[:,i], dists[:,i]) do rng, d
+                    l,e,g=d
+                    fst = first(rng)+l
+                    lst = fst+e-1
+                    fst:lst
+                end
+                push!(result, Ms[i] => foundat)
+                push!(found, i)
             end
         end
-        found_mask = [!(x in found) for x in 1:length(ks)]
+        found_mask = isempty(found) ? ones(Bool, length(ks)) : Bool[!(x in found) for x in 1:length(ks)]
         active_ranges = active_ranges[:, found_mask]
         Ns = Ns[found_mask]
         ks = ks[found_mask]
@@ -115,7 +118,7 @@ function sortedmedian(xs)
        (xs[i]+xs[i+1]) / 2
    else
        i = (l+1) >> 1
-       xs[i]
+       convert(Float64, xs[i])
    end
 end
 
@@ -126,19 +129,19 @@ end
 
 function keep_lessthan(dists, active_ranges)
     map(dists, active_ranges) do d, r
-        l = d[1]
+        l = d[1]::Int
         first(r):(first(r)+l-1)
     end
 end
 
 function keep_morethan(dists, active_ranges)
     map(dists, active_ranges) do d, r
-        g = d[2]+d[1]
+        g = (d[2]+d[1])::Int
         (first(r)+g):last(r)
     end
 end
 
-function dist(X, r, s)
+function locate_pivot(X, r, s)
     # compute l, e, g
     X1 = view(X, r)
     rng = searchsorted(X1, s)
@@ -148,9 +151,9 @@ function dist(X, r, s)
     l,e,g
 end
 
-function matrixize(xs)
+function matrixize(xs,T)
     l = isempty(xs) ? 0 : length(xs[1])
-    [xs[i][j] for j=1:l, i=1:length(xs)]
+    T[xs[i][j] for j=1:l, i=1:length(xs)]
 end
 
 function merge_thunk(ps, starts, lasts)
@@ -161,11 +164,11 @@ end
 function shuffle_merge(A, splitter_indices)
     ps = parts(A)
     # splitter_indices: array of (splitter => vector of p index ranges) in sorted order
-    starts = [1 for i=1:length(ps)]
+    starts = ones(Int, length(ps))
     merges = [begin
         lasts = map(last, idxs)
         thnk = merge_thunk(ps, starts, lasts)
-        sz = sum(lasts-starts+1)
+        sz = sum(lasts.-starts.+1)
         starts = lasts.+1
         thnk,sz
         end for (val, idxs) in splitter_indices]
