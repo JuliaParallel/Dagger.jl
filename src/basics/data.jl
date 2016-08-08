@@ -134,7 +134,12 @@ parts(x::Cat) = x.parts
 persist!(x::Cat) = (for p in parts(x); persist!(p); end)
 
 function gather(ctx, part::Cat)
-    cat_data(parttype(part), part.domain, map(c->(gather(ctx,c)), parts(part)))
+    ps_input = parts(part)
+    ps = Array(parttype(part), size(ps_input))
+    @sync for i in 1:length(ps_input)
+        @async ps[i] = gather(ctx, ps_input[i])
+    end
+    cat_data(parttype(part), part.domain, ps)
 end
 
 """
