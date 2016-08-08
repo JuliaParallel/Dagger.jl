@@ -4,6 +4,10 @@ using Compat
 abstract LazyArray{T, N} <: AbstractArray{T, N}
 Base.linearindexing(x::LazyArray) = Base.LinearSlow()
 
+function save(p::LazyArray, name::AbstractString)
+    Save(p, name)
+end
+
 @compat function Base.show(io::IO, ::MIME"text/plain", x::LazyArray)
     write(io, string(typeof(x)))
     write(io, string(size(x)))
