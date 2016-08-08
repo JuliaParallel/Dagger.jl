@@ -10,34 +10,35 @@ Base.sort(x::LazyArray; kwargs...) =
     Sort(x, Dict(kwargs))
 
 size(x::LazyArray) = size(x.input)
-
 function compute(ctx, s::Sort)
-    inp = cached_stage(ctx, s.input)
+    inp = compute(Context(), mappart(p->sort(p; s.kwargs...), s.input)).result
     ps = parts(inp)
 
-    sorted_parts = map(p->Thunk(x->sort(x; s.kwargs...), (p,)), ps)
-    blockwise_sorted = compute(Context(), Cat(Any, domain(inp), sorted_parts))
-    persist!(blockwise_sorted)
+    persist!(inp)
 
     ls = map(length, parts(domain(inp)))
     splitter_ranks = cumsum(ls)[1:end-1]
 
-    splitters = select(ctx, blockwise_sorted, splitter_ranks)
-    ComputedArray(compute(Context(), shuffle_merge(blockwise_sorted, splitters)))
+    splitters = select(ctx, inp, splitter_ranks)
+    ComputedArray(compute(Context(), shuffle_merge(inp, splitters)))
 end
 
-function mappart_eager(f, ctx, xs, T=Any)
+function mappart_eager(f, ctx, xs, T, name)
     ps = parts(xs)
-    thunks = Thunk[Thunk(f(i), (ps[i],))
+    master=OSProc(1)
+    #@dbg timespan_start(ctx, name, 0, master)
+    thunks = Thunk[Thunk(f(i), (ps[i],), get_result=true)
                  for i in 1:length(ps)]
 
-    gather(ctx, Thunk((xs...)->T[xs...], (thunks...)))
+    res = compute(ctx, Thunk((xs...)->T[xs...], (thunks...), meta=true))
+    #@dbg timespan_end(ctx, name, 0, master)
+    res
 end
 
 function broadcast1(ctx, f, xs::Cat, m,T)
     ps = parts(xs)
     @assert size(m, 1) == length(ps)
-    mappart_eager(ctx, xs,Vector{T}) do i
+    mappart_eager(ctx, xs,Vector{T},:broadcast1) do i
         inp = vec(m[i,:])
         function (p)
             map(x->f(p, x)::T, inp)
@@ -48,7 +49,7 @@ end
 function broadcast2(ctx, f, xs::Cat, m,v,T)
     ps = parts(xs)
     @assert size(m, 1) == length(ps)
-    mappart_eager(ctx, xs,Vector{T}) do i
+    mappart_eager(ctx, xs,Vector{T},:broadcast2) do i
         inp = vec(m[i,:])
         function (p)
             map((x,y)->f(p, x, y)::T, inp, vec(v))
