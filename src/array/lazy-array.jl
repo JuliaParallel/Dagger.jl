@@ -19,6 +19,7 @@ immutable ComputedArray{T,N} <: LazyArray{T, N}
 end
 
 function ComputedArray(x::AbstractPart)
+    persist!(x)
     nd = ndims(domain(x))
     ComputedArray{_eltype(parttype(x)), nd}(x)
 end
