@@ -140,10 +140,13 @@ end
     x = rand(1:10, 10)
     X = Distribute(BlockPartition(3), x)
     @test gather(sort(X)) == sort(x)
+    @test gather(sort(X, rev=true, alg=Base.Sort.DEFAULT_STABLE)) == sort(x, rev=true, alg=Base.Sort.DEFAULT_STABLE)
     X = Distribute(BlockPartition(1), x)
     @test gather(sort(X)) == sort(x)
+    @test gather(sort(X, rev=true)) == sort(x, rev=true)
     X = Distribute(BlockPartition(10), x)
     @test gather(sort(X)) == sort(x)
+    @test gather(sort(X, rev=true)) == sort(x, rev=true)
 end
 
 end

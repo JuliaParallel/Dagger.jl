@@ -1,17 +1,30 @@
 using Compat
 import Compat: view
 
+import Base.Sort: Forward, Ordering, Algorithm, defalg, lt
+
 immutable Sort <: Computation
     input::LazyArray
-    kwargs::Dict
+    alg::Algorithm
+    order::Ordering
 end
 
-Base.sort(x::LazyArray; kwargs...) =
-    Sort(x, Dict(kwargs))
+function Base.sort(v::LazyArray;
+               alg::Algorithm=defalg(v),
+               lt=Base.isless,
+               by=identity,
+               rev::Bool=false,
+               order::Ordering=Forward)
+    Sort(v, alg, Base.Sort.ord(lt,by,rev,order))
+end
 
 size(x::LazyArray) = size(x.input)
 function compute(ctx, s::Sort)
-    inp = compute(Context(), mappart(p->sort(p; s.kwargs...), s.input)).result
+
+    inp = let alg=s.alg, ord = s.order
+        compute(ctx, mappart(p->sort(p; alg=alg, order=ord), s.input)).result
+    end
+
     ps = parts(inp)
 
     persist!(inp)
@@ -19,8 +32,8 @@ function compute(ctx, s::Sort)
     ls = map(length, parts(domain(inp)))
     splitter_ranks = cumsum(ls)[1:end-1]
 
-    splitters = select(ctx, inp, splitter_ranks)
-    ComputedArray(compute(Context(), shuffle_merge(inp, splitters)))
+    splitters = select(ctx, inp, splitter_ranks, s.order)
+    ComputedArray(compute(ctx, shuffle_merge(inp, splitters, s.order)))
 end
 
 function mappart_eager(f, ctx, xs, T, name)
@@ -57,7 +70,7 @@ function broadcast2(ctx, f, xs::Cat, m,v,T)
     end |> x->matrixize(x,T) |> x->permutedims(x, [2,1])
 end
 
-function select(ctx, A, ranks, c=10^9)
+function select(ctx, A, ranks, ord)
     ks = copy(ranks)
     lengths = map(length, parts(domain(A)))
     n = sum(lengths)
@@ -75,7 +88,7 @@ function select(ctx, A, ranks, c=10^9)
         ls = map(length, active_ranges)
         Ms = sum(ms .* ls, 1) ./ sum(ls, 1)
         # scatter weighted
-        dists = broadcast2(ctx, locate_pivot, A, active_ranges, Ms, Tuple{Int,Int,Int})
+        dists = broadcast2(ctx, (a,r,m)->locate_pivot(a,r,m,ord), A, active_ranges, Ms, Tuple{Int,Int,Int})
         D = reducedim((xs, x) -> map(+, xs, x), dists, 1, (0,0,0))
         L = Int[x[1] for x in D]
         E = Int[x[2] for x in D]
@@ -142,10 +155,10 @@ function keep_morethan(dists, active_ranges)
     end
 end
 
-function locate_pivot(X, r, s)
+function locate_pivot(X, r, s, ord)
     # compute l, e, g
     X1 = view(X, r)
-    rng = searchsorted(X1, s)
+    rng = searchsorted(X1, s, ord)
     l = first(rng) - 1
     e = length(rng)
     g = length(X1) - l - e
@@ -157,24 +170,26 @@ function matrixize(xs,T)
     T[xs[i][j] for j=1:l, i=1:length(xs)]
 end
 
-function merge_thunk(ps, starts, lasts)
+function merge_thunk(ps, starts, lasts, ord)
     ranges = map(UnitRange, starts, lasts)
-    Thunk(merge_sorted, (map((p, r) -> Dagger.sub(p, DenseDomain(r)), ps, ranges)...))
+    Thunk((map((p, r) -> Dagger.sub(p, DenseDomain(r)), ps, ranges)...)) do xs...
+        merge_sorted(ord, xs...)
+    end
 end
 
-function shuffle_merge(A, splitter_indices)
+function shuffle_merge(A, splitter_indices, ord)
     ps = parts(A)
     # splitter_indices: array of (splitter => vector of p index ranges) in sorted order
     starts = ones(Int, length(ps))
     merges = [begin
         lasts = map(last, idxs)
-        thnk = merge_thunk(ps, starts, lasts)
+        thnk = merge_thunk(ps, starts, lasts, ord)
         sz = sum(lasts.-starts.+1)
         starts = lasts.+1
         thnk,sz
         end for (val, idxs) in splitter_indices]
     ls = map(length, parts(domain(A)))
-    thunks = vcat(merges, (merge_thunk(ps, starts, ls), sum(ls.-starts.+1)))
+    thunks = vcat(merges, (merge_thunk(ps, starts, ls, ord), sum(ls.-starts.+1)))
     part_lengths = map(x->x[2], thunks)
     dmn = DomainSplit(
         DenseDomain(1:sum(part_lengths)),
@@ -183,14 +198,14 @@ function shuffle_merge(A, splitter_indices)
     Cat(parttype(A), dmn, map(x->x[1], thunks))
 end
 
-function merge_sorted{T, S}(x::AbstractArray{T}, y::AbstractArray{S})
+function merge_sorted{T, S}(ord::Ordering, x::AbstractArray{T}, y::AbstractArray{S})
     n = length(x) + length(y)
     z = Array(promote_type(T,S), n)
     i = 1; j = 1; k = 1
     len_x = length(x)
     len_y = length(y)
     while i <= len_x && j <= len_y
-        @inbounds if x[i] < y[j]
+        @inbounds if lt(ord, x[i], y[j])
             @inbounds z[k] = x[i]
             i += 1
         else
@@ -208,7 +223,7 @@ function merge_sorted{T, S}(x::AbstractArray{T}, y::AbstractArray{S})
     z
 end
 
-merge_sorted(x) = x
-function merge_sorted(x, y, ys...)
-    merge_sorted(merge_sorted(x,y), merge_sorted(ys...))
+merge_sorted(ord::Ordering, x) = x
+function merge_sorted(ord::Ordering, x, y, ys...)
+    merge_sorted(ord, merge_sorted(ord, x,y), merge_sorted(ord, ys...))
 end
