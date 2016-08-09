@@ -248,7 +248,7 @@ end
 #### Save computation
 
 immutable Save <: Computation
-    input::Computation
+    input
     name::AbstractString
 end
 
