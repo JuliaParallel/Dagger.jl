@@ -161,4 +161,13 @@ end
     @test sum(x, 2) == gather(sum(X, 2))
 end
 
+@testset "setindex" begin
+    x=rand(10,10)
+    y=copy(x)
+    y[3:8, 2:7]=1.0
+    X = Distribute(BlockPartition(3,3), x)
+    @test gather(setindex(X,1.0, 3:8, 2:7)) == y
+    @test gather(X) == x
+end
+
 end

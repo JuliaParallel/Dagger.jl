@@ -27,6 +27,7 @@ include("array/read-delim.jl")
 
 include("array/operators.jl")
 include("array/getindex.jl")
+include("array/setindex.jl")
 include("array/matrix.jl")
 include("array/sparse_partition.jl")
 include("array/sort.jl")
