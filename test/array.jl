@@ -149,4 +149,16 @@ end
     @test gather(sort(X, rev=true)) == sort(x, rev=true)
 end
 
+@testset "reducedim" begin
+    x = rand(1:10, 10, 5)
+    X = Distribute(BlockPartition(3,3), x)
+    @test reducedim(+, x, 1) == gather(reducedim(+, X, 1))
+    @test reducedim(+, x, 2) == gather(reducedim(+, X, 2))
+
+    x = rand(1:10, 10, 5)
+    X = Distribute(BlockPartition(10, 10), x)
+    @test sum(x, 1) == gather(sum(X, 1))
+    @test sum(x, 2) == gather(sum(X, 2))
+end
+
 end

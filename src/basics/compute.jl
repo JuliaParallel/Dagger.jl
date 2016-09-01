@@ -136,9 +136,10 @@ function thunkize(ctx, c::Cat)
     if any(istask, parts(c))
         thunks = map(x -> thunkize(ctx, x), parts(c))
         sz = size(parts(c))
+        dmn = domain(c)
         Thunk(thunks; meta=true) do results...
             t = parttype(results[1])
-            Cat(t, domain(c), reshape(AbstractPart[results...], sz))
+            Cat(t, dmn, reshape(AbstractPart[results...], sz))
         end
     else
         c

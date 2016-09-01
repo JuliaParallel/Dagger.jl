@@ -117,8 +117,8 @@ function stage(ctx, r::Reducedim)
         # do reducedim on each block
         tmp = map(p->Thunk(b->reducedim(op,b,dims), (p,)), parts(inp))
         # combine the results in tree fashion
-        treereducedim(tmp, r.dims) do xs,ys
-            map((x,y) -> Thunk(op, (x,y,)), xs,ys)
+        treereducedim(tmp, r.dims) do x,y
+            Thunk(op, (x,y,))
         end
     end
     c = parts(domain(inp))
