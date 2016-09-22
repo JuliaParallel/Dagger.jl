@@ -123,7 +123,8 @@ function stage(ctx, r::Reducedim)
     end
     c = parts(domain(inp))
     colons = Any[Colon() for x in size(c)]
-    colons[[r.dims...]] = 1
+    nd=ndims(domain(inp))
+    colons[[filter(d->d<=nd, r.dims)...]] = 1
     dmn = c[colons...]
     d = DomainSplit(reducedim(head(domain(inp)), r.dims), reducedim(parts(domain(inp)), r.dims))
     Cat(parttype(inp),d, thunks)

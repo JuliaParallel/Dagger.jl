@@ -128,12 +128,16 @@ end
 function treereducedim(op, xs::Array, dim::Int)
     l = size(xs, dim)
     colons = Any[Colon() for i=1:length(size(xs))]
+    if dim > length(size(xs))
+        return xs
+    end
     ys = treereduce((x,y)->map(op, x,y), Any[begin
         colons[dim] = [i]
         @compat view(xs, colons...)
     end for i=1:l])
     reshape(ys[:], Base.reduced_dims(size(xs), dim))
 end
+
 function treereducedim(op, xs::Array, dim::Tuple)
     reduce((prev, d) -> treereducedim(op, prev, d), xs, dim)
 end
