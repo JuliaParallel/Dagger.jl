@@ -122,7 +122,8 @@ DenseDomain(xs...) = DenseDomain(xs)
 DenseDomain(xs::Array) = DenseDomain((xs...,))
 
 indexes(a::DenseDomain) = a.indexes
-parts(a::DenseDomain) = a
+parts{N}(a::DenseDomain{N}) = BlockedDomains(
+    ntuple(i->first(indexes(a)[i]), Val{N}), map(x->[length(x)], indexes(a)))
 
 domain(x::DenseArray) = DenseDomain(map(l -> 1:l, size(x)))
 
