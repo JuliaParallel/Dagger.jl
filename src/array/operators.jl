@@ -20,6 +20,15 @@ blockwise_binary =
          :$, :&, :.!=, :.<, :.<=, :.==, :.>,
          :.>=, :.\, :.//, :.>>, :.<<]
 
+"""
+This is a way of suggesting that stage should call
+stage_operand with the operation and other arguments
+"""
+immutable PromotePartition{T,N} <: LazyArray{T,N}
+    data::AbstractArray{T,N}
+end
+
+size(p::PromotePartition) = size(domain(p.data))
 
 immutable BlockwiseOp{F, Ni, T, Nd} <: LazyArray{T, Nd}
     f::F
