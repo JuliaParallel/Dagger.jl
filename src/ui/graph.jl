@@ -2,7 +2,7 @@ import Dagger: Thunk
 export show_plan
 
 function node_label(io, t::Thunk, c)
-    if isgeneric(t.f)
+    if isa(t.f, Function)
         println(io, "$(t.id) [label=\"$(t.f)\"]")
     else
         println(io, "$(t.id) [label=\"fn\"]")
@@ -59,7 +59,7 @@ function show_plan(t::Thunk)
     }"""
 end
 
-function show_plan(c::Computation)
+function show_plan(c)
     t = thunkize(Context(), stage(Context(), c))
     show_plan(t)
 end
@@ -100,7 +100,7 @@ function show_ast(io, f)
 end
 
 function showfn(io, f::Function)
-    if isgeneric(f)
+    if isa(f, Function)
         show(io, f)
     else
         show_ast(io, f)

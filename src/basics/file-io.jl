@@ -147,7 +147,7 @@ function load(ctx, ::Type{Part}, fname, mmap, io)
 
     (T, dmn, sz) = deserialize(io)
 
-    Computed(Part(T, dmn, sz,
+    ComputedArray(Part(T, dmn, sz,
         FileReader(fname, T, meta_len+1, mmap), false))
 end
 
@@ -161,7 +161,7 @@ function load(ctx, ::Type{Cat}, file_path, mmap, io)
             p.handle.mmap = mmap
         end
     end
-    Computed(c)
+    ComputedArray(c)
 end
 
 
