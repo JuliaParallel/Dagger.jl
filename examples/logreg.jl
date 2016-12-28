@@ -13,7 +13,7 @@ function dist_glm(ctx, X, y, tol = 1e-12, maxIter = 10)
     XtX, Xtr = gather(ctx, (X'X, X'y))
 
     β = cholfact!(XtX) \ Xtr
-    μ = X*β
+    μ = X*vec(β)
     k = 0
     for k = 1:maxIter
         η = map(logistic, μ)
@@ -29,7 +29,7 @@ function dist_glm(ctx, X, y, tol = 1e-12, maxIter = 10)
         if (@show norm(Δβ)) < tol
             break
         end
-        μ = X*β
+        μ = X*vec(β)
     end
     if k == maxIter
         error("no convergence")
