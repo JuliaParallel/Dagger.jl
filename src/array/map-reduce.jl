@@ -41,8 +41,11 @@ end
 
 function stage(ctx, r::ReduceBlock)
     inp = stage(ctx, r.input)
-    reduced_parts = map(x -> Thunk(r.op, (x,); get_result=r.get_result), parts(inp))
-    Thunk((xs...) -> r.op_master(xs), (reduced_parts...); meta=true)
+    let op=r.op
+        reduced_parts = map(x -> Thunk(p->reduce(op,p), (x,)), parts(inp))
+    #Thunk((xs...) -> r.op_master(xs), (reduced_parts...); meta=true)
+        treereduce((x,y)->Thunk(op, (x,y)), reduced_parts)
+    end
 end
 
 reduceblock_async(f, x::LazyArray; get_result=true) = ReduceBlock(f, f, x, get_result)
@@ -52,7 +55,7 @@ reduceblock(f, x::LazyArray) = compute(reduceblock_async(f, x))
 reduceblock(f, g::Function, x::LazyArray) =
     compute(reduceblock_async(f, g, x))
 
-reduce_async(f, x::LazyArray) = reduceblock_async(xs->reduce(f,xs), xs->reduce(f,xs), x)
+reduce_async(f, x::LazyArray) = reduceblock_async(f, f, x)
 
 reduce(f, x::LazyArray) = compute(reduce_async(f,x))
 
