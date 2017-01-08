@@ -89,6 +89,7 @@ immutable Reducedim{T,N} <: LazyArray{T,N}
     op::Function
     input::LazyArray
     dims::Tuple
+    v0
 end
 
 function reducedim(dom::DenseDomain, dim::Int)
@@ -103,19 +104,19 @@ function size(x::Reducedim)
     reducedim(DenseDomain(map(x->1:x, size(x.input))), x.dims)
 end
 
-function Reducedim(op, input, dims)
+function Reducedim(op, input, dims,v0)
     T = eltype(input)
-    Reducedim{T,ndims(input)}(op, input, dims)
+    Reducedim{T,ndims(input)}(op, input, dims,v0)
 end
 
-Base.reducedim(f, x::LazyArray, dims::Tuple) = Reducedim(f,x,dims)
-Base.reducedim(f, x::LazyArray, dims::Int) = Reducedim(f,x,(dims,))
+Base.reducedim(f, x::LazyArray, dims::Tuple,v0) = Reducedim(f,x,dims,v0)
+Base.reducedim(f, x::LazyArray, dims::Int,v0) = Reducedim(f,x,(dims,),v0)
 
 function stage(ctx, r::Reducedim)
     inp = cached_stage(ctx, r.input)
-    thunks = let op = r.op, dims=r.dims
+    thunks = let op = r.op, dims=r.dims,v0=r.v0
         # do reducedim on each block
-        tmp = map(p->Thunk(b->reducedim(op,b,dims), (p,)), parts(inp))
+        tmp = map(p->Thunk(b->reducedim(op,b,dims,v0), (p,)), parts(inp))
         # combine the results in tree fashion
         treereducedim(tmp, r.dims) do x,y
             Thunk(op, (x,y,))

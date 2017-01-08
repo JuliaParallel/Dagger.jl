@@ -135,7 +135,7 @@ function treereducedim(op, xs::Array, dim::Int)
         colons[dim] = [i]
         @compat view(xs, colons...)
     end for i=1:l])
-    reshape(ys[:], Base.reduced_dims(size(xs), dim))
+    reshape(ys[:], Base.reduced_dims(xs, dim))
 end
 
 function treereducedim(op, xs::Array, dim::Tuple)
