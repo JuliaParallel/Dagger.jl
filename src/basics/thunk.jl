@@ -33,6 +33,8 @@ Thunk(f::Function, xs::AbstractArray;
       persist::Bool=false) =
       Thunk(f,(xs...), id=id,get_result=get_result,meta=meta,persist=persist)
 
+tothunk(f; kwargs...) = (args...) -> Thunk(f, args; kwargs...)
+
 persist!(t::Thunk) = (t.persist=true; t)
 
 # cut down 30kgs in microseconds with one weird trick
