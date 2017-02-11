@@ -64,7 +64,7 @@ size(x::Distribute) = size(x.domain)
 
 
 Distribute(dmn::DomainSplit, data) =
-    Distribute(dmn, persist!(chunk(data)))
+    Distribute(dmn, persist!(tochunk(data)))
 
 Distribute(p::PartitionScheme, data) =
     Distribute(partition(p, domain(data)), data)
@@ -218,7 +218,7 @@ function stage_operands{T}(ctx, ::MatMul, a::LazyArray, b::PromotePartition{T,1}
     ps = chunks(dmn_a)
     dmn_out = DomainSplit(dmn_b, BlockedDomains((1,),(ps.cumlength[2],)))
 
-    stg_a, cached_stage(ctx, Distribute(dmn_out, chunk(b.data)))
+    stg_a, cached_stage(ctx, Distribute(dmn_out, tochunk(b.data)))
 end
 
 function stage_operands(ctx, ::MatMul, a::PromotePartition, b::LazyArray)
@@ -231,7 +231,7 @@ function stage_operands(ctx, ::MatMul, a::PromotePartition, b::LazyArray)
     ps = chunks(domain(stg_b))
     dmn_out = DomainSplit(domain(a.data),
         BlockedDomains((1,1),([size(a.data, 1)], ps.cumlength[1],)))
-    cached_stage(ctx, Distribute(dmn_out, chunk(a.data))), stg_b
+    cached_stage(ctx, Distribute(dmn_out, tochunk(a.data))), stg_b
 end
 
 function stage(ctx, mul::MatMul)
@@ -267,7 +267,7 @@ function stage_operand(ctx, ::Scale, a, b::PromotePartition)
     b_parts = BlockedDomains((1,), (ps.cumlength[1],))
     head = DenseDomain(1:size(domain(a), 1))
     b_dmn = DomainSplit(head, b_parts)
-    cached_stage(ctx, Distribute(b_dmn, chunk(b.data)))
+    cached_stage(ctx, Distribute(b_dmn, tochunk(b.data)))
 end
 
 function stage_operand(ctx, ::Scale, a, b)

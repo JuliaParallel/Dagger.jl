@@ -361,7 +361,7 @@ function do_task(ctx, proc, thunk_id, f, data, chan, send_result)
         @dbg timespan_start(ctx, :compute, thunk_id, proc)
         try
             res = f(fetched...)
-            put!(chan, (proc, thunk_id, send_result ? res : chunk(res))) #todo: add more metadata
+            put!(chan, (proc, thunk_id, send_result ? res : tochunk(res))) #todo: add more metadata
         catch ex
             bt = catch_backtrace()
             put!(chan, (proc, thunk_id, CapturedException(ex, bt)))

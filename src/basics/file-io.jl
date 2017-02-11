@@ -263,7 +263,7 @@ function stage(ctx, s::Save)
         mkdir(dir_path)
     end
     function save_part(idx, data)
-        p = chunk(data)
+        p = tochunk(data)
         path = joinpath(dir_path, lpad(idx, 4, "0"))
         saved = save(ctx, p, path)
 

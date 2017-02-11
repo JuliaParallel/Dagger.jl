@@ -55,11 +55,11 @@ gather(ctx, io::DistMem) = fetch(io.ref)
 """
 Create a chunk from a sequential object.
 """
-function chunk(x)
+function tochunk(x)
     ref = make_token(x)
     Chunk(typeof(x), domain(x), DistMem(ref), false)
 end
-chunk(x::AbstractChunk) = x
+tochunk(x::AbstractChunk) = x
 
 
 """
@@ -221,3 +221,4 @@ Base.@deprecate_binding AbstractPart AbstractChunk
 Base.@deprecate_binding Part Chunk
 Base.@deprecate_binding Sub  View
 Base.@deprecate parts(args...) chunks(args...)
+Base.@deprecate part(args...) tochunk(args...)
