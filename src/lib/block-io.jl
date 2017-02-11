@@ -2,7 +2,7 @@
 # give a stream view to a block from any seekable iostream
 # By @tanmaykm
 #
-import Base: close, eof, read, read!, readall, readbytes, peek, seek, write, filesize, position, seekend, seekstart, skip, nb_available
+import Base: close, eof, read, read!, peek, seek, write, filesize, position, seekend, seekstart, skip, nb_available
 
 immutable BlockIO <: IO
     s::IO
@@ -49,8 +49,7 @@ read(bio::BlockIO, x::Type{UInt8}) = read(bio.s, x)
 read!(bio::BlockIO, a::Vector{UInt8}) = (length(a) <= nb_available(bio)) ? read!(bio.s, a) : throw(EOFError())
 read!{T}(bio::BlockIO, a::Array{T}) = (length(a)*sizeof(T) <= nb_available(bio)) ? read!(bio.s, a) : throw(EOFError())
 
-readbytes(bio::BlockIO, nb::Integer) = bytestring(read!(bio, Array(UInt8, nb)))
-readall(bio::BlockIO) = readbytes(bio, nb_available(bio))
+read(bio::BlockIO, nb::Integer) = bytestring(read!(bio, Array(UInt8, nb)))
 
 peek(bio::BlockIO) = peek(bio.s)
 write(bio::BlockIO, p::Ptr, nb::Integer) = write(bio, p, int(nb))

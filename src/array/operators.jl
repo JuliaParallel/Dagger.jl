@@ -8,6 +8,8 @@ import Base: exp, expm1, log, log10, log1p, sqrt, cbrt, exponent,
              $, &, (.!=), (.<), (.<=), (.==), (.>),
              (.>=), (.\), (.//), (.>>), (.<<), *
 
+import Base: broadcast
+
 blockwise_unary = [:exp, :expm1, :log, :log10, :log1p, :sqrt, :cbrt, :exponent, :significand,
          :(-),
          :sin, :sinpi, :cos, :cospi, :tan, :sec, :cot, :csc,
@@ -15,8 +17,9 @@ blockwise_unary = [:exp, :expm1, :log, :log10, :log1p, :sqrt, :cbrt, :exponent, 
          :asin, :acos, :atan, :acot, :asec, :acsc,
          :asinh, :acosh, :atanh, :acoth, :asech, :acsch, :sinc, :cosc]
 
-blockwise_binary =
-        [:+, :-, :%, :.*, :.+, :.-, :.%, :./, :.^,
+blockwise_binary = [:+, :-, :%,]
+
+broadcast_ops = [ :.*, :.+, :.-, :.%, :./, :.^,
          :$, :&, :.!=, :.<, :.<=, :.==, :.>,
          :.>=, :.\, :.//, :.>>, :.<<]
 
@@ -56,7 +59,6 @@ for fn in [:+, :-]
         $fn(x::LazyArray{Bool}, y::Bool) = BlockwiseOp(z -> $fn(z, y), (x,))
     end
 end
-(.^)(x::Irrational{:e}, y::LazyArray) = BlockwiseOp(z -> x.^z, (y,))
 
 function stage_operands(ctx, ::BlockwiseOp, xs::LazyArray...)
     map(x->cached_stage(ctx, x), xs)
@@ -84,6 +86,24 @@ for fn in blockwise_binary
     end
 end
 
+if VERSION < v"0.6.0-dev"
+    (.^)(x::Irrational{:e}, y::LazyArray) = BlockwiseOp(z -> x.^z, (y,))
+    for fn in broadcast_ops
+        @eval begin
+            $fn(x::LazyArray, y::LazyArray) = BlockwiseOp($fn, (x, y))
+            $fn(x::AbstractArray, y::LazyArray) = BlockwiseOp($fn, (PromotePartition(x), y))
+            $fn(x::LazyArray, y::AbstractArray) = BlockwiseOp($fn, (x, PromotePartition(y)))
+            $fn(x::Number, y::LazyArray) = BlockwiseOp(z -> $fn(x, z), (y,))
+            $fn(x::LazyArray, y::Number) = BlockwiseOp(z -> $fn(z, y), (x,))
+        end
+    end
+else
+    broadcast(fn::Function, x::LazyArray, y::LazyArray) = BlockwiseOp($fn, (x, y))
+    broadcast(fn::Function, x::AbstractArray, y::LazyArray) = BlockwiseOp($fn, (PromotePartition(x), y))
+    broadcast(fn::Function, x::LazyArray, y::AbstractArray) = BlockwiseOp($fn, (x, PromotePartition(y)))
+    broadcast(fn::Function, x::Number, y::LazyArray) = BlockwiseOp(z -> $fn(x, z), (y,))
+    broadcast(fn::Function, x::LazyArray, y::Number) = BlockwiseOp(z -> $fn(z, y), (x,))
+end
 (*)(x::Number, y::LazyArray) = BlockwiseOp(z -> x*z, (y,))
 (*)(x::LazyArray, y::Number) = BlockwiseOp(z -> z*y, (x,))
 
