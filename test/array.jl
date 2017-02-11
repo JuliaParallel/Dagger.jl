@@ -1,9 +1,9 @@
-import Dagger: parts, parts, Computed, ComputedArray
+import Dagger: chunks, chunks, Computed, ComputedArray
 
-parts(x::Computed) = parts(x.result)
+chunks(x::Computed) = chunks(x.result)
 Dagger.domain(x::Computed) = domain(x.result)
 
-parts(x::ComputedArray) = parts(x.result)
+chunks(x::ComputedArray) = chunks(x.result)
 Dagger.domain(x::ComputedArray) = domain(x.result)
 @testset "Arrays" begin
 
@@ -17,10 +17,10 @@ Dagger.domain(x::ComputedArray) = domain(x.result)
         @test isa(X1.result, Dagger.Cat)
         @test X2 |> size == (100, 100)
         @test all(X2 .>= 0.0)
-        @test size(parts(X1)) == (10, 10)
+        @test size(chunks(X1)) == (10, 10)
         @test domain(X1).head == DenseDomain(1:100, 1:100)
-        @test parts(domain(X1)) |> size == (10, 10)
-        @test parts(domain(X1)) == parts(partition(BlockPartition(10, 10), DenseDomain(1:100, 1:100)))
+        @test chunks(domain(X1)) |> size == (10, 10)
+        @test chunks(domain(X1)) == chunks(partition(BlockPartition(10, 10), DenseDomain(1:100, 1:100)))
         @test gather(X1) == gather(X1)
     end
     X = rand(BlockPartition(10, 10), 100, 100)
@@ -42,9 +42,9 @@ end
         X1 = Distribute(BlockPartition(10, 20), X)
         @test gather(X1) == X
         Xc = compute(X1)
-        @test parts(Xc) |> size == (10, 5)
-        @test parts(domain(Xc)) |> size == (10, 5)
-        @test map(x->size(x) == (10, 20), parts(domain(Xc))) |> all
+        @test chunks(Xc) |> size == (10, 5)
+        @test chunks(domain(Xc)) |> size == (10, 5)
+        @test map(x->size(x) == (10, 20), chunks(domain(Xc))) |> all
     end
     test_dist(rand(100, 100))
     test_dist(sprand(100, 100, 0.1))
@@ -56,9 +56,9 @@ end
         X1 = Distribute(BlockPartition(10, 20), X)
         @test gather(X1') == X'
         Xc = compute(X1')
-        @test parts(Xc) |> size == (div(y, 20), div(x,10))
-        @test parts(domain(Xc)) |> size == (div(y, 20), div(x, 10))
-        @test map(x->size(x) == (20, 10), parts(domain(Xc))) |> all
+        @test chunks(Xc) |> size == (div(y, 20), div(x,10))
+        @test chunks(domain(Xc)) |> size == (div(y, 20), div(x, 10))
+        @test map(x->size(x) == (20, 10), chunks(domain(Xc))) |> all
     end
     test_transpose(rand(100, 100))
     test_transpose(rand(100, 120))
@@ -75,10 +75,10 @@ end
         X3 = compute(X1*X1')
         @test norm(gather(X2) - X'X) < tol
         @test norm(gather(X3) - X*X') < tol
-        @test parts(X2) |> size == (2, 2)
-        @test parts(X3) |> size == (4, 4)
-        @test map(x->size(x) == (20, 20), parts(domain(X2))) |> all
-        @test map(x->size(x) == (10, 10), parts(domain(X3))) |> all
+        @test chunks(X2) |> size == (2, 2)
+        @test chunks(X3) |> size == (4, 4)
+        @test map(x->size(x) == (20, 20), chunks(domain(X2))) |> all
+        @test map(x->size(x) == (10, 10), chunks(domain(X3))) |> all
     end
     test_mul(rand(40, 40))
 

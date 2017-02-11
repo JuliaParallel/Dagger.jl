@@ -41,7 +41,7 @@ intersect(r, ::Colon) = r
 ##### Utility functions ######
 
 """
-Utility function to divide the range `range` into `n` parts
+Utility function to divide the range `range` into `n` chunks
 """
 function split_range{T}(range::Range{T}, n)
     len = length(range)

@@ -19,10 +19,10 @@ function Base.show(io::IO, x::LazyArray)
 end
 
 immutable ComputedArray{T,N} <: LazyArray{T, N}
-    result::AbstractPart
+    result::AbstractChunk
 end
 
-function ComputedArray(x::AbstractPart)
+function ComputedArray(x::AbstractChunk)
     persist!(x)
     nd = ndims(domain(x))
     ComputedArray{_eltype(parttype(x)), nd}(x)

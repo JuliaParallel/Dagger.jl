@@ -46,7 +46,7 @@ end
 
 """
 Calling `compute` on an `Computation` will make an
-`AbstractPart` by computing it.
+`AbstractChunk` by computing it.
 
 You can call `gather` on the result to get the result
 into the calling process (e.g. a REPL)
@@ -56,7 +56,7 @@ compute(x) = compute(Context(), x)
 gather(ctx, x) = gather(ctx, compute(ctx, x))
 gather(x) = gather(Context(), x)
 
-function wrap_computed(x::AbstractPart)
+function wrap_computed(x::AbstractChunk)
     persist!(x)
     Computed(x)
 end
@@ -77,7 +77,7 @@ export Computed
 promote a computed value to a Computation
 """
 type Computed <: Computation
-    result::AbstractPart
+    result::AbstractChunk
     # TODO: Allow passive branching for Save?
     function Computed(x)
         c = new(x)
@@ -111,10 +111,10 @@ function stage(ctx, c::Computed)
 end
 
 """
-`Part` and `View` objects are always in computed state,
+`Chunk` and `View` objects are always in computed state,
 this method just returns them.
 """
-compute(ctx, x::Union{Part, View}) = x
+compute(ctx, x::Union{Chunk, View}) = x
 
 """
 A Cat object may contain a thunk in it, in which case
@@ -133,19 +133,19 @@ end
 If a Cat tree has a Thunk in it, make the whole thing a big thunk
 """
 function thunkize(ctx, c::Cat)
-    if any(istask, parts(c))
-        thunks = map(x -> thunkize(ctx, x), parts(c))
-        sz = size(parts(c))
+    if any(istask, chunks(c))
+        thunks = map(x -> thunkize(ctx, x), chunks(c))
+        sz = size(chunks(c))
         dmn = domain(c)
         Thunk(thunks; meta=true) do results...
             t = parttype(results[1])
-            Cat(t, dmn, reshape(AbstractPart[results...], sz))
+            Cat(t, dmn, reshape(AbstractChunk[results...], sz))
         end
     else
         c
     end
 end
-thunkize(ctx, x::AbstractPart) = x
+thunkize(ctx, x::AbstractChunk) = x
 thunkize(ctx, x::Thunk) = x
 function finish_task!(state, node, node_order; free=true)
     deps = sort([i for i in state[:dependents][node]], by=node_order)
@@ -178,7 +178,7 @@ function finish_task!(state, node, node_order; free=true)
     pop!(state[:running], node)
 end
 
-free!(x, force=true) = x # catch-all for non-parts
+free!(x, force=true) = x # catch-all for non-chunks
 
 ###### Scheduler #######
 """
@@ -300,7 +300,7 @@ end
 Given a root node of the DAG, calculates a total order for tie-braking
 
   * Root node gets score 1,
-  * rest of the nodes are explored in DFS fashion but parts
+  * rest of the nodes are explored in DFS fashion but chunks
     of each node are explored in order of `noffspring`,
     i.e. total number of tasks depending on the result of the said node.
 
@@ -351,7 +351,7 @@ function start_state(deps::Dict, node_order)
 end
 
 _move(ctx, to_proc, x) = x
-_move(ctx, to_proc::OSProc, x::AbstractPart) = gather(ctx, x)
+_move(ctx, to_proc::OSProc, x::AbstractChunk) = gather(ctx, x)
 
 function do_task(ctx, proc, thunk_id, f, data, chan, send_result)
         @dbg timespan_start(ctx, :comm, thunk_id, proc)
@@ -361,7 +361,7 @@ function do_task(ctx, proc, thunk_id, f, data, chan, send_result)
         @dbg timespan_start(ctx, :compute, thunk_id, proc)
         try
             res = f(fetched...)
-            put!(chan, (proc, thunk_id, send_result ? res : part(res))) #todo: add more metadata
+            put!(chan, (proc, thunk_id, send_result ? res : chunk(res))) #todo: add more metadata
         catch ex
             bt = catch_backtrace()
             put!(chan, (proc, thunk_id, CapturedException(ex, bt)))

@@ -37,17 +37,17 @@ end
     S[nzrows, nzcols]
 end
 
-read_trainingset(file, dest, amap::AbstractString, parts) = read_trainingset(file, dest, read_artist_map(amap), parts)
-function read_trainingset(file, dest, amap, parts)
+read_trainingset(file, dest, amap::AbstractString, chunks) = read_trainingset(file, dest, read_artist_map(amap), chunks)
+function read_trainingset(file, dest, amap, chunks)
     raw = readdlm(file, ' ')
     m = maximum(raw[:, 1])
     n = maximum(raw[:, 2])
     X = make_sparse(raw, amap,m,n)
     m1,n1 = size(X)
     # Column distributed
-    save(Distribute(BlockPartition(Int(m1), ceil(Int, n1/parts)), X), "X_col") |> compute
+    save(Distribute(BlockPartition(Int(m1), ceil(Int, n1/chunks)), X), "X_col") |> compute
     # And row distributed
-    #save(Distribute(BlockPartition(ceil(Int, m1/parts), Int(n1)), X), "X_row") |> compute
+    #save(Distribute(BlockPartition(ceil(Int, m1/chunks), Int(n1)), X), "X_row") |> compute
 end
 
 read_trainingset("profiledata_06-May-2005/user_artist_data.txt", "X", "profiledata_06-May-2005/artist_alias.txt", 10)

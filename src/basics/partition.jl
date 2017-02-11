@@ -15,7 +15,7 @@ abstract PartitionScheme
 """
     partition(p::PartitionScheme, domain::Domain)
 
-Partitions the `domain` into `nparts` approximately equal parts
+Partitions the `domain` into `nparts` approximately equal chunks
 according to the `dist` data distribution.
 
 returns a `DomainSplit` object.

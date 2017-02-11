@@ -99,7 +99,7 @@ A domain split into view-domains
 """
 immutable DomainSplit{D<:Domain} <: Domain
     head::D
-    parts
+    chunks
 end
 head(b::DomainSplit) = b.head
 
@@ -107,7 +107,7 @@ isempty(a::DomainSplit) = isempty(head(a))
 intersect{D<:Domain}(a::DomainSplit{D}, b::D) = intersect(head(a), b)
 project{D<:Domain}(a::DomainSplit{D}, b::D) = intersect(head(a), b)
 getindex{D<:Domain}(a::DomainSplit{D}, b::D) = getindex(head(a), b)
-parts(x::DomainSplit) = x.parts
+chunks(x::DomainSplit) = x.chunks
 
 
 
@@ -126,7 +126,7 @@ DenseDomain(xs...) = DenseDomain(xs)
 DenseDomain(xs::Array) = DenseDomain((xs...,))
 
 indexes(a::DenseDomain) = a.indexes
-parts{N}(a::DenseDomain{N}) = BlockedDomains(
+chunks{N}(a::DenseDomain{N}) = BlockedDomains(
     ntuple(i->first(indexes(a)[i]), Val{N}), map(x->[length(x)], indexes(a)))
 
 domain(x::DenseArray) = DenseDomain(map(l -> 1:l, size(x)))
@@ -173,7 +173,7 @@ domain(x::AbstractArray) = DenseDomain([1:l for l in size(x)])
 
 
 Base.@deprecate_binding DomainBranch DomainSplit
-Base.@deprecate children(x::Domain) parts(x)
+Base.@deprecate children(x::Domain) chunks(x)
 
 cat_data(::Type{Any}, dom::DomainSplit, ps) =
     cat_data(typeof(ps[1]), dom, ps)
@@ -187,8 +187,8 @@ function cat_data{T<:AbstractArray}(::Type{T}, dom, ps)
         return arr
     end
 
-    for (d, part) in zip(parts(dom), ps)
-        setindex!(arr, part, indexes(d)...)
+    for (d, chunk) in zip(chunks(dom), ps)
+        setindex!(arr, chunk, indexes(d)...)
     end
     arr
 end
@@ -200,7 +200,7 @@ function cat_data{T<:SparseMatrixCSC}(::Type{T}, dom, ps)
         return spzeros(T.parameters..., size(dom)...)
     end
 
-    m, n = size(parts(dom))
+    m, n = size(chunks(dom))
 
     psT = Any[ps[j,i] for i=1:size(ps,2), j=1:size(ps,1)]
     hvcat(ntuple(x->n, m), psT...)

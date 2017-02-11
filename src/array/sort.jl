@@ -25,11 +25,11 @@ function compute(ctx, s::Sort)
         compute(ctx, mappart(p->sort(p; alg=alg, order=ord), s.input)).result
     end
 
-    ps = parts(inp)
+    ps = chunks(inp)
 
     persist!(inp)
 
-    ls = map(length, parts(domain(inp)))
+    ls = map(length, chunks(domain(inp)))
     splitter_ranks = cumsum(ls)[1:end-1]
 
     splitters = select(ctx, inp, splitter_ranks, s.order)
@@ -37,7 +37,7 @@ function compute(ctx, s::Sort)
 end
 
 function mappart_eager(f, ctx, xs, T, name)
-    ps = parts(xs)
+    ps = chunks(xs)
     master=OSProc(1)
     #@dbg timespan_start(ctx, name, 0, master)
     thunks = Thunk[Thunk(f(i), (ps[i],), get_result=true)
@@ -49,7 +49,7 @@ function mappart_eager(f, ctx, xs, T, name)
 end
 
 function broadcast1(ctx, f, xs::Cat, m,T)
-    ps = parts(xs)
+    ps = chunks(xs)
     @assert size(m, 1) == length(ps)
     mappart_eager(ctx, xs,Vector{T},:broadcast1) do i
         inp = vec(m[i,:])
@@ -60,7 +60,7 @@ function broadcast1(ctx, f, xs::Cat, m,T)
 end
 
 function broadcast2(ctx, f, xs::Cat, m,v,T)
-    ps = parts(xs)
+    ps = chunks(xs)
     @assert size(m, 1) == length(ps)
     mappart_eager(ctx, xs,Vector{T},:broadcast2) do i
         inp = vec(m[i,:])
@@ -72,9 +72,9 @@ end
 
 function select(ctx, A, ranks, ord)
     ks = copy(ranks)
-    lengths = map(length, parts(domain(A)))
+    lengths = map(length, chunks(domain(A)))
     n = sum(lengths)
-    p = length(parts(A))
+    p = length(chunks(A))
     init_ranges = UnitRange[1:x for x in lengths]
     active_ranges = matrixize(Array[init_ranges for i=1:length(ks)], UnitRange)
 
@@ -178,7 +178,7 @@ function merge_thunk(ps, starts, lasts, ord)
 end
 
 function shuffle_merge(A, splitter_indices, ord)
-    ps = parts(A)
+    ps = chunks(A)
     # splitter_indices: array of (splitter => vector of p index ranges) in sorted order
     starts = ones(Int, length(ps))
     merges = [begin
@@ -188,7 +188,7 @@ function shuffle_merge(A, splitter_indices, ord)
         starts = lasts.+1
         thnk,sz
         end for (val, idxs) in splitter_indices]
-    ls = map(length, parts(domain(A)))
+    ls = map(length, chunks(domain(A)))
     thunks = vcat(merges, (merge_thunk(ps, starts, ls, ord), sum(ls.-starts.+1)))
     part_lengths = map(x->x[2], thunks)
     dmn = DomainSplit(

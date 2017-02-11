@@ -6,7 +6,7 @@ end
 global _thunk_dict = Dict{Int, Any}()
 
 # A thing to run
-type Thunk <: AbstractPart
+type Thunk <: AbstractChunk
     f::Function
     inputs::Tuple
     id::Int
@@ -58,8 +58,8 @@ end
 Base.hash(x::Thunk, h::UInt) = hash(x.id, hash(h, 0x7ad3bac49089a05f))
 Base.isequal(x::Thunk, y::Thunk) = x.id==y.id
 
-get_sub(x::AbstractPart, d) = view(x,d)
-get_sub(x, d) = part(x[d])
+get_sub(x::AbstractChunk, d) = view(x,d)
+get_sub(x, d) = chunk(x[d])
 function view(thunk::Thunk, d::Domain, T=Any)
     Thunk(x->get_sub(x,d), (thunk,))
 end

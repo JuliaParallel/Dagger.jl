@@ -9,7 +9,7 @@ end
 size(d::SparseCSCDomain, arg...) = size(d.adomain, arg...)
 length(d::SparseCSCDomain) = Int(d.colptr[end]-1)
 indexranges(d::SparseCSCDomain) = indexranges(d.adomain)
-parts(d::SparseCSCDomain) = d
+chunks(d::SparseCSCDomain) = d
 
 function alignfirst(d::SparseCSCDomain)
     adomain = alignfirst(d.adomain)

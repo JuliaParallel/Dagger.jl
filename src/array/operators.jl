@@ -87,7 +87,7 @@ for fn in blockwise_binary
 end
 
 if VERSION < v"0.6.0-dev"
-    (.^)(x::Irrational{:e}, y::LazyArray) = BlockwiseOp(z -> x.^z, (y,))
+    eval(:((.^)(x::Irrational{:e}, y::LazyArray) = BlockwiseOp(z -> x.^z, (y,))))
     for fn in broadcast_ops
         @eval begin
             $fn(x::LazyArray, y::LazyArray) = BlockwiseOp($fn, (x, y))
@@ -112,22 +112,22 @@ function stage(ctx, node::BlockwiseOp)
     thunks,d = if length(inputs) == 2
         a, b = domain(inputs[1]), domain(inputs[2])
         if length(a) == 1 && length(b) != 1
-            map(parts(inputs[2])) do p
-                Thunk(node.f, (parts(inputs[1])[1], p))
+            map(chunks(inputs[2])) do p
+                Thunk(node.f, (chunks(inputs[1])[1], p))
             end, b
         elseif length(a) != 1 && length(b) == 1
-            map(parts(inputs[1])) do p
-                Thunk(node.f, (p, parts(inputs[2])[1]))
+            map(chunks(inputs[1])) do p
+                Thunk(node.f, (p, chunks(inputs[2])[1]))
             end, a
         else
             @assert domain(a) == domain(b)
-            map(map(parts, inputs)...) do x, y
+            map(map(chunks, inputs)...) do x, y
                 Thunk(node.f, (x, y))
             end, a
         end
     else
         # TODO: include broadcast semantics in this.
-        map(map(parts, inputs)...) do ps...
+        map(map(chunks, inputs)...) do ps...
             Thunk(node.f, (ps...,))
         end, domain(inputs[1])
     end
