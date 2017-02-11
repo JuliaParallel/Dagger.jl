@@ -52,7 +52,7 @@ end
 default_partition(::SparseCSCDomain) = SliceDimension(2)
 
 function getsubcolptr(colptr, colrange)
-    sub(colptr, first(colrange):(last(colrange)+1))
+    view(colptr, first(colrange):(last(colrange)+1))
 end
 
 function partition(p::SliceDimension{2}, dom::SparseCSCDomain,

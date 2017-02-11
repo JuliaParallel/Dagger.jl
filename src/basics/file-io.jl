@@ -94,7 +94,7 @@ function save(ctx, io::IO, part::Cat, file_path)
     # write each child
 end
 
-function save(ctx, io::IO, part::Sub)
+function save(ctx, io::IO, part::View)
     save(ctx, io, Part(gather(ctx, part)))
 end
 

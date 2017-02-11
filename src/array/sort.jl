@@ -172,7 +172,7 @@ end
 
 function merge_thunk(ps, starts, lasts, ord)
     ranges = map(UnitRange, starts, lasts)
-    Thunk((map((p, r) -> Dagger.sub(p, DenseDomain(r)), ps, ranges)...)) do xs...
+    Thunk((map((p, r) -> Dagger.view(p, DenseDomain(r)), ps, ranges)...)) do xs...
         merge_sorted(ord, xs...)
     end
 end

@@ -91,7 +91,7 @@ end
 =#
 
 function stage(ctx, d::Distribute)
-    Cat(parttype(d.data), d.domain, map(c -> sub(d.data, c), parts(d.domain)))
+    Cat(parttype(d.data), d.domain, map(c -> view(d.data, c), parts(d.domain)))
 end
 
 

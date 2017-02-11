@@ -16,6 +16,8 @@ on different processing units.
 """
 abstract Domain
 
+#=
+
 "Is a domain empty?"
 @unimplemented isempty(d::Domain)
 
@@ -25,7 +27,7 @@ abstract Domain
 Find the intersection of two domains. For example,
 
     intersect(DenseDomain(1:100, 50:100), DenseDomain(50:150, 1:75))
-    #=> DenseDomain((50:100, 50:75))
+    # => DenseDomain((50:100, 50:75))
 """
 @unimplemented intersect{D<:Domain}(a::D, b::D)
 
@@ -48,6 +50,8 @@ Align `a` relative to `b`. For example,
     DataParallelBase.DenseDomain{2}((15:20,30:60))
 """
 @unimplemented Base.getindex{D<:Domain}(d::D, b::D)
+
+=#
 
 """
     alignfirst(a)
@@ -87,15 +91,15 @@ domain(x::Any) = UnitDomain()
 
 isempty(::UnitDomain) = false
 # intersect, project and getindex are unsupported,
-# and effectively `sub` are unsupported for UnitDomain
+# and effectively `view` are unsupported for UnitDomain
 
 
 """
-A domain split into sub-domains
+A domain split into view-domains
 """
 immutable DomainSplit{D<:Domain} <: Domain
     head::D
-    parts::AbstractArray
+    parts
 end
 head(b::DomainSplit) = b.head
 

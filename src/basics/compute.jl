@@ -111,10 +111,10 @@ function stage(ctx, c::Computed)
 end
 
 """
-`Part` and `Sub` objects are always in computed state,
+`Part` and `View` objects are always in computed state,
 this method just returns them.
 """
-compute(ctx, x::Union{Part, Sub}) = x
+compute(ctx, x::Union{Part, View}) = x
 
 """
 A Cat object may contain a thunk in it, in which case
@@ -337,7 +337,7 @@ function start_state(deps::Dict, node_order)
     state[:waiting_data] = copy(deps)
     for k in nodes
         if istask(k)
-            waiting = Set{Any}(filter(istask, inputs(k)))
+            waiting = Set{Any}(Iterators.filter(istask, inputs(k)))
             if isempty(waiting)
                 push!(state[:ready], k)
             else

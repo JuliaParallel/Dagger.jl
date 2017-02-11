@@ -1,5 +1,5 @@
 
-import Base: sub
+import Base: view
 export part, gather
 
 """
@@ -66,27 +66,27 @@ part(x::AbstractPart) = x
 A **view** into an AbstractPart
 
 Fields:
- - domain: The domain of this part on its own
- - subdomain: The subdomain viewd in `part`
+ - domain: The domain of the viewed part on its own
+ - subdomain: The subdomain in `part`
  - part: The part being viewed
 """
-type Sub{T<:AbstractPart} <: AbstractPart
+type View{T<:AbstractPart} <: AbstractPart
     parttype::Type
     domain::Domain
     subdomain::Domain
     part::T
 end
 
-domain(c::Sub) = c.domain
-parttype(c::Sub) = c.parttype
-persist!(x::Sub) = persist!(x.part)
+domain(c::View) = c.domain
+parttype(c::View) = c.parttype
+persist!(x::View) = persist!(x.part)
 
-function gather(ctx, s::Sub)
-    # A Sub{T<:Chunk{X}} can try to make this efficient for X
+function gather(ctx, s::View)
+    # A View{T<:Chunk{X}} can try to make this efficient for X
     gather(ctx, s.part)[s.subdomain]
 end
 # optimized subindexing on DistMem
-function gather(ctx, s::Sub{Part{DistMem}})
+function gather(ctx, s::View{Part{DistMem}})
     ref = s.part.handle.ref
     pid = ref.where
     let d = s.subdomain
@@ -95,23 +95,23 @@ function gather(ctx, s::Sub{Part{DistMem}})
 end
 
 """
-    `sub(a::Part, d::Domain)`
+    `view(a::Part, d::Domain)`
 
-Returns the `Sub` object which represents a sub part of `a`
+Returns the `View` object which represents a view part of `a`
 """
-function sub(p::Part, d::Domain, T=parttype(p))
+function view(p::Part, d::Domain, T=parttype(p))
 
     if domain(p) == d
         return p
     end
 
-    Sub(T, alignfirst(d), d, p)
+    View(T, alignfirst(d), d, p)
 end
-Base.getindex(x::AbstractPart, idx::Domain) = sub(x, idx)
+Base.getindex(x::AbstractPart, idx::Domain) = view(x, idx)
 
-function sub(s::Sub, d)
+function view(s::View, d)
     dprime = s.subdomain[d] # collapse subindex
-    sub(s.part, dprime)
+    view(s.part, dprime)
 end
 
 """
@@ -143,9 +143,9 @@ function gather(ctx, part::Cat)
 end
 
 """
-`sub` of a `Cat` part returns a `Cat` of sub parts
+`view` of a `Cat` part returns a `Cat` of view parts
 """
-function sub(c::Cat, d)
+function view(c::Cat, d)
     sub_parts, subdomains = lookup_parts(parts(c), parts(domain(c)), d)
     if length(sub_parts) == 1
         sub_parts[1]
@@ -195,7 +195,7 @@ function lookup_parts{N}(ps::AbstractArray, subdmns::BlockedDomains{N}, d::Dense
         idx_and_dmn = map(getindex, groups, i.I)
         idx = map(x->x[1], idx_and_dmn)
         dmn = DenseDomain(map(x->x[2], idx_and_dmn))
-        pieces[i] = sub(ps[idx...], project(subdmns[idx...], dmn))
+        pieces[i] = view(ps[idx...], project(subdmns[idx...], dmn))
     end
     out_cumlength = map(g->_cumsum(map(x->length(x[2]), g)), groups)
     out_dmn = BlockedDomains(ntuple(x->1,Val{N}), out_cumlength)
@@ -215,4 +215,4 @@ function free!(s::Part{DistMem}, force=true)
     end
 end
 free!(s::AbstractPart, force=true) = nothing
-free!(s::Sub, force=true) = nothing
+free!(s::View, force=true) = nothing
