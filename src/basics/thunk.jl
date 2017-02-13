@@ -1,3 +1,5 @@
+export tothunk, Thunk
+
 let counter=0
     global next_id
     next_id() = counter+=1

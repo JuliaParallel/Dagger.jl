@@ -2,7 +2,7 @@ import Base: ndims, size, getindex, reducedim
 
 immutable BlockedDomains{N} <: AbstractArray{DenseDomain{N}, N}
     start::NTuple{N, Int}
-    cumlength::NTuple{N, AbstractArray{Int}}
+    cumlength::Tuple
 end
 
 ndims{N}(x::BlockedDomains{N}) = N

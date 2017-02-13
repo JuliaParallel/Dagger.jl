@@ -23,7 +23,7 @@ end
 
 function test_each_ref(f::Function, node::DistData, args::Vector)
     # Ship a test to each ref
-    test_results = Array(Any, length(refs(node)))
+    test_results = Array{Any}(length(refs(node)))
     host_testset = Test.get_testset()
 
     result_ref = RemoteRef()

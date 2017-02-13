@@ -119,9 +119,18 @@ abstract ArrayDomain{N} <: Domain
 
 ###### Domain for DenseArray ######
 
-immutable DenseDomain{N} <: ArrayDomain{N}
-    indexes::NTuple{N}
+if VERSION >= v"0.6.0-dev"
+    # TODO: Fix this better!
+    immutable DenseDomain{N} <: ArrayDomain{N}
+        indexes::NTuple{N, Any}
+    end
+else
+    immutable DenseDomain{N} <: ArrayDomain{N}
+        indexes::NTuple{N}
+    end
 end
+
+
 DenseDomain(xs...) = DenseDomain(xs)
 DenseDomain(xs::Array) = DenseDomain((xs...,))
 
@@ -180,7 +189,7 @@ cat_data(::Type{Any}, dom::DomainSplit, ps) =
 
 function cat_data{T<:AbstractArray}(::Type{T}, dom, ps)
 
-    arr = Array(eltype(T), size(dom))
+    arr = Array{eltype(T)}(size(dom))
 
     if isempty(ps)
         @assert isempty(dom)

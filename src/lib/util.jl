@@ -66,7 +66,7 @@ function split_range_interval(range, n)
     N = length(range)
     npieces = ceil(Int, N / n)
 
-    ranges = Array(UnitRange, npieces)
+    ranges = Array{UnitRange}(npieces)
     for i=1:npieces
         ranges[i] = f:min(N, f+n-1)
         f += n
@@ -144,4 +144,10 @@ end
 
 function setindex{N}(x::NTuple{N}, idx, v)
     map(ifelse, ntuple(x->is(idx, x), Val{N}), ntuple(x->v, Val{N}), x)
+end
+
+if VERSION < v"0.6.0-dev"
+    eval(:(module Iterators
+        const filter = Base.filter
+    end))
 end

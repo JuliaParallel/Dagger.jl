@@ -49,7 +49,7 @@ read(bio::BlockIO, x::Type{UInt8}) = read(bio.s, x)
 read!(bio::BlockIO, a::Vector{UInt8}) = (length(a) <= nb_available(bio)) ? read!(bio.s, a) : throw(EOFError())
 read!{T}(bio::BlockIO, a::Array{T}) = (length(a)*sizeof(T) <= nb_available(bio)) ? read!(bio.s, a) : throw(EOFError())
 
-read(bio::BlockIO, nb::Integer) = bytestring(read!(bio, Array(UInt8, nb)))
+read(bio::BlockIO, nb::Integer) = bytestring(read!(bio, Array{UInt8}(nb)))
 
 peek(bio::BlockIO) = peek(bio.s)
 write(bio::BlockIO, p::Ptr, nb::Integer) = write(bio, p, int(nb))

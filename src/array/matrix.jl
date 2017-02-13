@@ -155,7 +155,7 @@ end
 # we define our own matmat and matvec multiply
 # for computing the new domains and thunks.
 function _mul(a::Matrix, b::Matrix; T=eltype(a))
-    c = Array(T, (size(a,1), size(b,2)))
+    c = Array{T}((size(a,1), size(b,2)))
     n = size(a, 2)
     for i=1:size(a,1)
         for j=1:size(b, 2)
@@ -166,7 +166,7 @@ function _mul(a::Matrix, b::Matrix; T=eltype(a))
 end
 
 function _mul(a::Matrix, b::Vector; T=eltype(b))
-    c = Array(T, size(a,1))
+    c = Array{T}(size(a,1))
     n = size(a,2)
     for i=1:size(a,1)
         c[i] = treereduce(+, map(*, reshape(a[i, :], (n,)), b))
@@ -210,7 +210,7 @@ an operand which should be distributed as per convenience
 """
 function stage_operands{T}(ctx, ::MatMul, a::LazyArray, b::PromotePartition{T,1})
     stg_a = cached_stage(ctx, a)
-    dmn_a = domain(a)
+    dmn_a = domain(stg_a)
     dmn_b = domain(b.data)
     if size(dmn_a, 2) != size(dmn_b, 1)
         throw(DimensionMismatch("Cannot promote array of domain $(dmn_b) to multiply with an array of size $(dmn_a)"))

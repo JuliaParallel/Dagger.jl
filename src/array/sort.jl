@@ -22,7 +22,7 @@ size(x::LazyArray) = size(x.input)
 function compute(ctx, s::Sort)
 
     inp = let alg=s.alg, ord = s.order
-        compute(ctx, mappart(p->sort(p; alg=alg, order=ord), s.input)).result
+        compute(ctx, mapchunk(p->sort(p; alg=alg, order=ord), s.input)).result
     end
 
     ps = chunks(inp)
@@ -36,7 +36,7 @@ function compute(ctx, s::Sort)
     ComputedArray(compute(ctx, shuffle_merge(inp, splitters, s.order)))
 end
 
-function mappart_eager(f, ctx, xs, T, name)
+function mapchunk_eager(f, ctx, xs, T, name)
     ps = chunks(xs)
     master=OSProc(1)
     #@dbg timespan_start(ctx, name, 0, master)
@@ -51,7 +51,7 @@ end
 function broadcast1(ctx, f, xs::Cat, m,T)
     ps = chunks(xs)
     @assert size(m, 1) == length(ps)
-    mappart_eager(ctx, xs,Vector{T},:broadcast1) do i
+    mapchunk_eager(ctx, xs,Vector{T},:broadcast1) do i
         inp = vec(m[i,:])
         function (p)
             map(x->f(p, x)::T, inp)
@@ -62,7 +62,7 @@ end
 function broadcast2(ctx, f, xs::Cat, m,v,T)
     ps = chunks(xs)
     @assert size(m, 1) == length(ps)
-    mappart_eager(ctx, xs,Vector{T},:broadcast2) do i
+    mapchunk_eager(ctx, xs,Vector{T},:broadcast2) do i
         inp = vec(m[i,:])
         function (p)
             map((x,y)->f(p, x, y)::T, inp, vec(v))
@@ -200,7 +200,7 @@ end
 
 function merge_sorted{T, S}(ord::Ordering, x::AbstractArray{T}, y::AbstractArray{S})
     n = length(x) + length(y)
-    z = Array(promote_type(T,S), n)
+    z = Array{promote_type(T,S)}(n)
     i = 1; j = 1; k = 1
     len_x = length(x)
     len_y = length(y)

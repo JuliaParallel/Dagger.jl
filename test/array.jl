@@ -36,7 +36,6 @@ end
     @test sum(X) == 10000
 end
 
-
 @testset "distributing an array" begin
     function test_dist(X)
         X1 = Distribute(BlockPartition(10, 20), X)
@@ -70,7 +69,7 @@ end
     function test_mul(X)
         tol = 1e-12
         X1 = Distribute(BlockPartition(10, 20), X)
-        @test_throws DimensionMismatch compute(X1*X1)
+        @test_throws BoundsError compute(X1*X1)
         X2 = compute(X1'*X1)
         X3 = compute(X1*X1')
         @test norm(gather(X2) - X'X) < tol
@@ -133,7 +132,7 @@ end
 
 @testset "cleanup" begin
     X = Distribute(BlockPartition(10,10), rand(10,10))
-    @test gather(sin(X)) == gather(sin(X))
+    @test gather(sin.(X)) == gather(sin.(X))
 end
 
 @testset "sort" begin
@@ -141,9 +140,11 @@ end
     X = Distribute(BlockPartition(3), x)
     @test gather(sort(X)) == sort(x)
     @test gather(sort(X, rev=true, alg=Base.Sort.DEFAULT_STABLE)) == sort(x, rev=true, alg=Base.Sort.DEFAULT_STABLE)
+
     X = Distribute(BlockPartition(1), x)
     @test gather(sort(X)) == sort(x)
     @test gather(sort(X, rev=true)) == sort(x, rev=true)
+
     X = Distribute(BlockPartition(10), x)
     @test gather(sort(X)) == sort(x)
     @test gather(sort(X, rev=true)) == sort(x, rev=true)
