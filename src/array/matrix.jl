@@ -66,7 +66,7 @@ size(x::Distribute) = size(x.domain)
 Distribute(dmn::DomainSplit, data) =
     Distribute(dmn, persist!(tochunk(data)))
 
-Distribute(p::PartitionScheme, data) =
+Distribute(p::Blocks, data) =
     Distribute(partition(p, domain(data)), data)
 
 #=
@@ -78,9 +78,9 @@ function auto_partition(data::AbstractArray, chsize)
 
     dims = size(data)
     if ndims(data) == 1
-        BlockPartition((floor(Int, per_chunk),))
+        Blocks((floor(Int, per_chunk),))
     elseif ndims(data)==2
-        BlockPartition(per_chunk/dims[2], per_chunk/dims[1])
+        Blocks(per_chunk/dims[2], per_chunk/dims[1])
     end
 end
 
@@ -136,11 +136,11 @@ function (*)(a::DomainSplit, b::DomainSplit)
     DomainSplit(head(a)*head(b), chunks(a) * chunks(b))
 end
 
-function (*)(a::BlockPartition{2}, b::BlockPartition{2})
-    BlockPartition(a.blocksize[1], b.blocksize[2])
+function (*)(a::Blocks{2}, b::Blocks{2})
+    Blocks(a.blocksize[1], b.blocksize[2])
 end
-(*)(a::BlockPartition{2}, b::BlockPartition{1}) =
-    BlockPartition((a.blocksize[1],))
+(*)(a::Blocks{2}, b::Blocks{1}) =
+    Blocks((a.blocksize[1],))
 
 function (+)(a::ArrayDomain, b::ArrayDomain)
     if a == b

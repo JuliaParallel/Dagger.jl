@@ -25,11 +25,11 @@ A good place to start learning to work with Dagger is to play with some distribu
 In this example we will create a matrix of size `10000x10000` which is cut up into pieces of `4000x4000` elements.
 
 ```julia
-a = rand(BlockPartition(4000, 4000), 10^4, 10^4)
+a = rand(Blocks(4000, 4000), 10^4, 10^4)
 # => Dagger.AllocateArray(...)
 ```
 
-Notice the first argument `BlockPartition(4000,4000)`. This tells Dagger to create the matrix with block partitioning where each partition is a `4000x4000` matrix. `4000x4000` floating point numbers takes up 128MB of RAM, this is a good chunk size to deal with - many such chunks can fit in a typical RAM, and files of size 128MB can be written to and read from disk with lesser overhead than smaller chunks. It is the onus of the user of Dagger to chose a suitable partitioning for the data.
+Notice the first argument `Blocks(4000,4000)`. This tells Dagger to create the matrix with block partitioning where each partition is a `4000x4000` matrix. `4000x4000` floating point numbers takes up 128MB of RAM, this is a good chunk size to deal with - many such chunks can fit in a typical RAM, and files of size 128MB can be written to and read from disk with lesser overhead than smaller chunks. It is the onus of the user of Dagger to chose a suitable partitioning for the data.
 
 In the above example the object `a` *represents* the random matrix . The actual data has not been created yet. If you call `compute(a)`, the data will be created.
 
@@ -51,7 +51,7 @@ Okay, now that we have learned how to create a matrix of random numbers, let's d
 In this example, we will compute the sum of square of a 10000x10000 normally distributed random matrix.
 
 ```julia
-x = randn(BlockPartition(4000,4000), 10^4, 10^4)
+x = randn(Blocks(4000,4000), 10^4, 10^4)
 sum(x.^2)
 # => 1.0000084097623596e8
 ```
@@ -64,7 +64,7 @@ For the full array API supported by Dagger, see below.
 Sometimes the result of a computation might be too big to fit in memory. In such cases you will need to save the data to disk. You can do this by calling `save` on the computation along with the destination file name.
 
 ```julia
-x = randn(BlockPartition(4000,4000), 10^5, 10^4)
+x = randn(Blocks(4000,4000), 10^5, 10^4)
 compute(save(x.^2, "X_sq"))
 ```
 
@@ -94,7 +94,7 @@ Dagger also allows one to distribute an object from the master process using a c
 # distribute a matrix and then do some computation
 a = rand(1000, 1000)
 
-b = Distribute(BlockPartition(100, 100), a) # Create chunks of 100x100 submatrices
+b = Distribute(Blocks(100, 100), a) # Create chunks of 100x100 submatrices
 c = map(x->x^2, b) # map applies a function element wise. this is equivalent to b.^2
 d = sum(c)
 ```
@@ -140,13 +140,13 @@ Array support is made up of pretty generic code, hence SparseMatrixCSC work wher
 To create a random sparse matrix or vector use the `sprand` function.
 
 ```julia
-s1 = sprand(BlockPartition(4000,4000), 10^4, 10^4, 0.01)
+s1 = sprand(Blocks(4000,4000), 10^4, 10^4, 0.01)
 # => AllocateArray(...)
 
 compute(s1)
 # => Computed(10000x10000 SparseMatrixCSC{Float64,Int64} in 3x3 parts each of (max size) 4000x4000)
 
-s2 = sprand(BlockPartition(4000,), 10^4, 0.01)
+s2 = sprand(Blocks(4000,), 10^4, 0.01)
 # => AllocateArray(...)
 
 julia> compute(s2)
@@ -179,7 +179,7 @@ As an example let us take the operation `A+A'`. Here, various chunks of `A` need
 
 ```julia
 
-A = rand(BlockPartition(4000, 4000), 30000, 30000) # 7.2GB of data
+A = rand(Blocks(4000, 4000), 30000, 30000) # 7.2GB of data
 saved_A = compute(save(A, "A"))
 
 result = compute(save(saved_A+saved_A', "ApAt"))
@@ -248,7 +248,7 @@ To debug the performance of a computation you can use the `debug_compute` substi
 For example:
 
 ```julia
-x = rand(BlockPartition(400, 4000), 1200, 12000)
+x = rand(Blocks(400, 4000), 1200, 12000)
 debug_compute(x*x); # first run to compile stuff (maybe run on a smaller problem)
 dbg, result = debug_compute(x*x')
 summarize_events(dbg)

@@ -7,7 +7,8 @@ include("basics/logging.jl")
 
 # Data and slices of data
 include("basics/domain.jl")
-include("basics/partition.jl")
+include("lib/blocked-domains.jl")
+#include("basics/partition.jl")
 include("basics/data.jl")
 
 # Task scheduling

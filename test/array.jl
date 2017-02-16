@@ -20,25 +20,25 @@ Dagger.domain(x::ComputedArray) = domain(x.result)
         @test size(chunks(X1)) == (10, 10)
         @test domain(X1).head == DenseDomain(1:100, 1:100)
         @test chunks(domain(X1)) |> size == (10, 10)
-        @test chunks(domain(X1)) == chunks(partition(BlockPartition(10, 10), DenseDomain(1:100, 1:100)))
+        @test chunks(domain(X1)) == chunks(partition(Blocks(10, 10), DenseDomain(1:100, 1:100)))
         @test gather(X1) == gather(X1)
     end
-    X = rand(BlockPartition(10, 10), 100, 100)
+    X = rand(Blocks(10, 10), 100, 100)
     test_rand(X)
-    Xsp = sprand(BlockPartition(10, 10), 100, 100, 0.1)
+    Xsp = sprand(Blocks(10, 10), 100, 100, 0.1)
     test_rand(Xsp)
-    R = rand(BlockPartition(10), 20)
+    R = rand(Blocks(10), 20)
     r = gather(R)
     @test r[1:10] != r[11:20]
 end
 @testset "sum(ones(...))" begin
-    X = ones(BlockPartition(10, 10), 100, 100)
+    X = ones(Blocks(10, 10), 100, 100)
     @test sum(X) == 10000
 end
 
 @testset "distributing an array" begin
     function test_dist(X)
-        X1 = Distribute(BlockPartition(10, 20), X)
+        X1 = Distribute(Blocks(10, 20), X)
         @test gather(X1) == X
         Xc = compute(X1)
         @test chunks(Xc) |> size == (10, 5)
@@ -52,7 +52,7 @@ end
 @testset "transpose" begin
     function test_transpose(X)
         x, y = size(X)
-        X1 = Distribute(BlockPartition(10, 20), X)
+        X1 = Distribute(Blocks(10, 20), X)
         @test gather(X1') == X'
         Xc = compute(X1')
         @test chunks(Xc) |> size == (div(y, 20), div(x,10))
@@ -68,7 +68,7 @@ end
 @testset "matrix-matrix multiply" begin
     function test_mul(X)
         tol = 1e-12
-        X1 = Distribute(BlockPartition(10, 20), X)
+        X1 = Distribute(Blocks(10, 20), X)
         @test_throws BoundsError compute(X1*X1)
         X2 = compute(X1'*X1)
         X3 = compute(X1*X1')
@@ -82,15 +82,15 @@ end
     test_mul(rand(40, 40))
 
     x = rand(10,10)
-    X = Distribute(BlockPartition(3,3), x)
+    X = Distribute(Blocks(3,3), x)
     y = rand(10)
     @test norm(gather(X*y) - x*y) < 1e-13
 end
 
 @testset "concat" begin
     m = rand(75,75)
-    x = Distribute(BlockPartition(10,20), m)
-    y = Distribute(BlockPartition(10,10), m)
+    x = Distribute(Blocks(10,20), m)
+    y = Distribute(Blocks(10,10), m)
     @test hcat(m,m) == gather(hcat(x,x))
     @test vcat(m,m) == gather(vcat(x,x))
     @test hcat(m,m) == gather(hcat(x,y))
@@ -99,7 +99,7 @@ end
 
 @testset "scale" begin
     x = rand(10,10)
-    X = Distribute(BlockPartition(3,3), x)
+    X = Distribute(Blocks(3,3), x)
     y = rand(10)
 
     @test Diagonal(y)*x == gather(Diagonal(y)*X)
@@ -107,7 +107,7 @@ end
 
 @testset "Getindex" begin
     function test_getindex(x)
-        X = Distribute(BlockPartition(3,3), x)
+        X = Distribute(Blocks(3,3), x)
         @test gather(X[3:8, 2:7]) == x[3:8, 2:7]
         ragged_idx = [1,2,9,7,6,2,4,5]
         @test gather(X[ragged_idx, 2:7]) == x[ragged_idx, 2:7]
@@ -131,33 +131,33 @@ end
 
 
 @testset "cleanup" begin
-    X = Distribute(BlockPartition(10,10), rand(10,10))
+    X = Distribute(Blocks(10,10), rand(10,10))
     @test gather(sin.(X)) == gather(sin.(X))
 end
 
 @testset "sort" begin
     x = rand(1:10, 10)
-    X = Distribute(BlockPartition(3), x)
+    X = Distribute(Blocks(3), x)
     @test gather(sort(X)) == sort(x)
     @test gather(sort(X, rev=true, alg=Base.Sort.DEFAULT_STABLE)) == sort(x, rev=true, alg=Base.Sort.DEFAULT_STABLE)
 
-    X = Distribute(BlockPartition(1), x)
+    X = Distribute(Blocks(1), x)
     @test gather(sort(X)) == sort(x)
     @test gather(sort(X, rev=true)) == sort(x, rev=true)
 
-    X = Distribute(BlockPartition(10), x)
+    X = Distribute(Blocks(10), x)
     @test gather(sort(X)) == sort(x)
     @test gather(sort(X, rev=true)) == sort(x, rev=true)
 end
 
 @testset "reducedim" begin
     x = rand(1:10, 10, 5)
-    X = Distribute(BlockPartition(3,3), x)
+    X = Distribute(Blocks(3,3), x)
     @test reducedim(+, x, 1) == gather(reducedim(+, X, 1))
     @test reducedim(+, x, 2) == gather(reducedim(+, X, 2))
 
     x = rand(1:10, 10, 5)
-    X = Distribute(BlockPartition(10, 10), x)
+    X = Distribute(Blocks(10, 10), x)
     @test sum(x, 1) == gather(sum(X, 1))
     @test sum(x, 2) == gather(sum(X, 2))
 end
@@ -166,7 +166,7 @@ end
     x=rand(10,10)
     y=copy(x)
     y[3:8, 2:7]=1.0
-    X = Distribute(BlockPartition(3,3), x)
+    X = Distribute(Blocks(3,3), x)
     @test gather(setindex(X,1.0, 3:8, 2:7)) == y
     @test gather(X) == x
 end
