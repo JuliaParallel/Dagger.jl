@@ -10,7 +10,7 @@ back together.
 
 see `partition` and `gather`
 """
-abstract PartitionScheme
+@compat abstract type PartitionScheme end
 
 """
     partition(p::PartitionScheme, domain::Domain)

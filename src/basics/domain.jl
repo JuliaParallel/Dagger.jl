@@ -14,7 +14,7 @@ to partition the domain of an object into smaller subdomains
 which can then be stored in many memory locations or processed
 on different processing units.
 """
-abstract Domain
+@compat abstract type Domain end
 
 #=
 
@@ -113,7 +113,7 @@ chunks(x::DomainSplit) = x.chunks
 
 ###### Array Domains ######
 
-abstract ArrayDomain{N} <: Domain
+@compat abstract type ArrayDomain{N} <: Domain end
 
 @unimplemented indexes(a::ArrayDomain)
 

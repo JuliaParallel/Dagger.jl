@@ -5,7 +5,7 @@ using Compat
 A `Computation` represents a computation to be
 performed on some distributed data
 """
-abstract Computation
+@compat abstract type Computation end
 
 """
 `stage` on a computation creates a set of Thunk objects

@@ -9,7 +9,7 @@ memory / storage / network location.
 
 `gather(reader, handle)` will bring the data to memory on the caller
 """
-abstract AbstractChunk
+@compat abstract type AbstractChunk end
 
 chunks(x::AbstractChunk) = x
 
@@ -23,11 +23,11 @@ function gather end
 
 ###### Chunk ######
 
-abstract PartIO
+@compat abstract type ChunkIO end
 """
 A chunk with some data
 """
-type Chunk{I<:PartIO} <: AbstractChunk
+type Chunk{I<:ChunkIO} <: AbstractChunk
     parttype::Type
     domain::Domain
     handle::I
@@ -44,10 +44,10 @@ function gather(ctx, chunk::Chunk)
 end
 
 
-### PartIO
+### ChunkIO
 include("../lib/dumbref.jl")
 
-immutable DistMem <: PartIO
+immutable DistMem <: ChunkIO
     ref::MemToken
 end
 gather(ctx, io::DistMem) = fetch(io.ref)
