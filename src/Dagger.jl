@@ -3,22 +3,21 @@ module Dagger
 using Compat
 
 include("lib/util.jl")
-include("basics/logging.jl")
+include("lib/logging.jl")
 
 # Data and slices of data
-include("basics/domain.jl")
+include("domain.jl")
 include("lib/blocked-domains.jl")
-#include("basics/partition.jl")
-include("basics/data.jl")
+include("chunks.jl")
 
 # Task scheduling
-include("basics/processor.jl")
-include("basics/thunk.jl")
-include("basics/compute.jl")
+include("processor.jl")
+include("thunk.jl")
+include("compute.jl")
 
 # File IO
 #include("sparse.jl")
-include("basics/file-io.jl")
+include("file-io.jl")
 
 # Array computations
 include("array/lazy-array.jl")
