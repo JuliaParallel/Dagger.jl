@@ -23,7 +23,6 @@ include("basics/file-io.jl")
 include("array/lazy-array.jl")
 include("array/alloc.jl")
 include("array/map-reduce.jl")
-include("array/read-delim.jl")
 
 include("array/operators.jl")
 include("array/getindex.jl")
