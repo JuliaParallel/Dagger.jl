@@ -24,7 +24,7 @@ function stage(ctx, sidx::SetIndex)
     ps = Array{Any}(size(chunks(inp)))
     ps[:] = chunks(inp)
     subdmns = chunks(domain(inp))
-    d = DenseDomain(idxs)
+    d = ArrayDomain(idxs)
 
     groups = map(group_indices, subdmns.cumlength, indexes(d))
     sz = map(length, groups)
@@ -32,7 +32,7 @@ function stage(ctx, sidx::SetIndex)
     for i = CartesianRange(sz)
         idx_and_dmn = map(getindex, groups, i.I)
         idx = map(x->x[1], idx_and_dmn)
-        local_dmn = DenseDomain(map(x->x[2], idx_and_dmn))
+        local_dmn = ArrayDomain(map(x->x[2], idx_and_dmn))
         s = subdmns[idx...]
         part_to_set = sidx.val
         ps[idx...] = Thunk((ps[idx...],)) do p

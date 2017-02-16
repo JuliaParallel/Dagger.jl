@@ -1,5 +1,5 @@
 
-export domain, Domain, UnitDomain, project, alignfirst, DenseDomain
+export domain, Domain, UnitDomain, project, alignfirst, ArrayDomain
 
 import Base: isempty, getindex, intersect,
              ==, size, length, ndims
@@ -26,8 +26,8 @@ on different processing units.
 """
 Find the intersection of two domains. For example,
 
-    intersect(DenseDomain(1:100, 50:100), DenseDomain(50:150, 1:75))
-    # => DenseDomain((50:100, 50:75))
+    intersect(ArrayDomain(1:100, 50:100), ArrayDomain(50:150, 1:75))
+    # => ArrayDomain((50:100, 50:75))
 """
 @unimplemented intersect{D<:Domain}(a::D, b::D)
 
@@ -36,8 +36,8 @@ Find the intersection of two domains. For example,
 
 Align `b` relative to `a`. For example,
 
-    julia> project(DenseDomain(11:25, 21:100), DenseDomain(15:20, 30:40))
-    Dagger.DenseDomain{2}((5:10,10:20))
+    julia> project(ArrayDomain(11:25, 21:100), ArrayDomain(15:20, 30:40))
+    Dagger.ArrayDomain{2}((5:10,10:20))
 """
 @unimplemented project{D<:Domain}(d::D, b::D)
 
@@ -46,8 +46,8 @@ Align `b` relative to `a`. For example,
 
 Align `a` relative to `b`. For example,
 
-    getindex(DenseDomain(11:25, 21:100), DenseDomain(5:10, 10:40))
-    DataParallelBase.DenseDomain{2}((15:20,30:60))
+    getindex(ArrayDomain(11:25, 21:100), ArrayDomain(5:10, 10:40))
+    DataParallelBase.ArrayDomain{2}((15:20,30:60))
 """
 @unimplemented Base.getindex{D<:Domain}(d::D, b::D)
 
@@ -58,8 +58,8 @@ Align `a` relative to `b`. For example,
 
 Make a subdomain a standalone domain. For example,
 
-    alignfirst(DenseDomain(11:25, 21:100))
-    # => DenseDomain((1:15), (1:80))
+    alignfirst(ArrayDomain(11:25, 21:100))
+    # => ArrayDomain((1:15), (1:80))
 """
 alignfirst(a::Domain) = a
 
@@ -110,35 +110,27 @@ getindex{D<:Domain}(a::DomainSplit{D}, b::D) = getindex(head(a), b)
 chunks(x::DomainSplit) = x.chunks
 
 
-
 ###### Array Domains ######
-
-@compat abstract type ArrayDomain{N} <: Domain end
-
-@unimplemented indexes(a::ArrayDomain)
-
-###### Domain for DenseArray ######
 
 if VERSION >= v"0.6.0-dev"
     # TODO: Fix this better!
-    immutable DenseDomain{N} <: ArrayDomain{N}
+    immutable ArrayDomain{N} <: Domain
         indexes::NTuple{N, Any}
     end
 else
-    immutable DenseDomain{N} <: ArrayDomain{N}
+    immutable ArrayDomain{N} <: Domain
         indexes::NTuple{N}
     end
 end
 
+ArrayDomain(xs...) = ArrayDomain(xs)
+ArrayDomain(xs::Array) = ArrayDomain((xs...,))
 
-DenseDomain(xs...) = DenseDomain(xs)
-DenseDomain(xs::Array) = DenseDomain((xs...,))
-
-indexes(a::DenseDomain) = a.indexes
-chunks{N}(a::DenseDomain{N}) = BlockedDomains(
+indexes(a::ArrayDomain) = a.indexes
+chunks{N}(a::ArrayDomain{N}) = BlockedDomains(
     ntuple(i->first(indexes(a)[i]), Val{N}), map(x->[length(x)], indexes(a)))
 
-domain(x::DenseArray) = DenseDomain(map(l -> 1:l, size(x)))
+domain(x::DenseArray) = ArrayDomain(map(l -> 1:l, size(x)))
 
 (==)(a::ArrayDomain, b::ArrayDomain) = indexes(a) == indexes(b)
 Base.getindex(arr::AbstractArray, d::ArrayDomain) = arr[indexes(d)...]
@@ -147,20 +139,20 @@ function intersect(a::ArrayDomain, b::ArrayDomain)
     if a === b
         return a
     end
-    DenseDomain(map((x, y) -> intersect(x, y), indexes(a), indexes(b)))
+    ArrayDomain(map((x, y) -> intersect(x, y), indexes(a), indexes(b)))
 end
 
 function project(a::ArrayDomain, b::ArrayDomain)
     map(indexes(a), indexes(b)) do p, q
         q - (first(p) - 1)
-    end |> DenseDomain
+    end |> ArrayDomain
 end
 
 getindex(a::ArrayDomain, b::ArrayDomain) =
-    DenseDomain(map(getindex, indexes(a), indexes(b)))
+    ArrayDomain(map(getindex, indexes(a), indexes(b)))
 
 alignfirst(a::ArrayDomain) =
-    DenseDomain(map(r->1:length(r), indexes(a)))
+    ArrayDomain(map(r->1:length(r), indexes(a)))
 
 function size(a::ArrayDomain, dim)
     idxs = indexes(a)
@@ -169,7 +161,7 @@ end
 size(a::ArrayDomain) = map(length, indexes(a))
 length(a::ArrayDomain) = prod(size(a))
 ndims(a::ArrayDomain) = length(size(a))
-isempty(a::DenseDomain) = length(a) == 0
+isempty(a::ArrayDomain) = length(a) == 0
 
 
 indexes{T<:ArrayDomain}(a::DomainSplit{T}) = indexes(a.head)
@@ -177,8 +169,8 @@ size{T<:ArrayDomain}(a::DomainSplit{T}, dim...) = size(a.head, dim...)
 length{T<:ArrayDomain}(a::DomainSplit{T}) = prod(size(a))
 ndims{T<:ArrayDomain}(a::DomainSplit{T}) = ndims(head(a))
 
-"The domain of an array is a DenseDomain"
-domain(x::AbstractArray) = DenseDomain([1:l for l in size(x)])
+"The domain of an array is a ArrayDomain"
+domain(x::AbstractArray) = ArrayDomain([1:l for l in size(x)])
 
 
 Base.@deprecate_binding DomainBranch DomainSplit

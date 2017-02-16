@@ -172,7 +172,7 @@ end
 
 function merge_thunk(ps, starts, lasts, ord)
     ranges = map(UnitRange, starts, lasts)
-    Thunk((map((p, r) -> Dagger.view(p, DenseDomain(r)), ps, ranges)...)) do xs...
+    Thunk((map((p, r) -> Dagger.view(p, ArrayDomain(r)), ps, ranges)...)) do xs...
         merge_sorted(ord, xs...)
     end
 end
@@ -192,7 +192,7 @@ function shuffle_merge(A, splitter_indices, ord)
     thunks = vcat(merges, (merge_thunk(ps, starts, ls, ord), sum(ls.-starts.+1)))
     part_lengths = map(x->x[2], thunks)
     dmn = DomainSplit(
-        DenseDomain(1:sum(part_lengths)),
+        ArrayDomain(1:sum(part_lengths)),
         BlockedDomains((1,),
         (cumsum(part_lengths),)))
     Cat(parttype(A), dmn, map(x->x[1], thunks))

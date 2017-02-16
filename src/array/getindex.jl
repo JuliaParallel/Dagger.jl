@@ -20,7 +20,7 @@ function stage(ctx, gidx::GetIndex)
     end for i in 1:length(gidx.idx)]
 
     # Figure out output dimension
-    view(inp, DenseDomain(idxs))
+    view(inp, ArrayDomain(idxs))
 end
 
 size(x::GetIndex) = Base.index_shape(x.input, x.idx...)
@@ -32,7 +32,7 @@ end
 
 function stage(ctx, gidx::GetIndexScalar)
     inp = cached_stage(ctx, gidx.input)
-    s = view(inp, DenseDomain(gidx.idx))
+    s = view(inp, ArrayDomain(gidx.idx))
     Thunk(x->x[1], (s,), get_result=true)
 end
 

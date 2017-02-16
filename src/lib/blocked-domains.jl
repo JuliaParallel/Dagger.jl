@@ -1,6 +1,6 @@
 import Base: ndims, size, getindex, reducedim
 
-immutable BlockedDomains{N} <: AbstractArray{DenseDomain{N}, N}
+immutable BlockedDomains{N} <: AbstractArray{ArrayDomain{N}, N}
     start::NTuple{N, Int}
     cumlength::Tuple
 end
@@ -10,7 +10,7 @@ size(x::BlockedDomains) = map(length, x.cumlength)
 function _getindex{N}(x::BlockedDomains{N}, idx::Tuple)
     starts = map((vec, i) -> i == 0 ? 0 : getindex(vec,i), x.cumlength, map(x->x-1, idx))
     ends = map(getindex, x.cumlength, idx)
-    DenseDomain(map(UnitRange, map(+, starts, x.start), map((x,y)->x+y-1, ends, x.start)))
+    ArrayDomain(map(UnitRange, map(+, starts, x.start), map((x,y)->x+y-1, ends, x.start)))
 end
 
 function getindex{N}(x::BlockedDomains{N}, idx::Int)

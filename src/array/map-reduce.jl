@@ -91,16 +91,16 @@ immutable Reducedim{T,N} <: LazyArray{T,N}
     dims::Tuple
 end
 
-function reducedim(dom::DenseDomain, dim::Int)
-    DenseDomain(setindex(indexes(dom), dim, 1:1))
+function reducedim(dom::ArrayDomain, dim::Int)
+    ArrayDomain(setindex(indexes(dom), dim, 1:1))
 end
 
-function reducedim(dom::DenseDomain, dim::Tuple)
+function reducedim(dom::ArrayDomain, dim::Tuple)
     reduce(reducedim, dom, dim)
 end
 
 function size(x::Reducedim)
-    reducedim(DenseDomain(map(x->1:x, size(x.input))), x.dims)
+    reducedim(ArrayDomain(map(x->1:x, size(x.input))), x.dims)
 end
 
 function Reducedim(op, input, dims)

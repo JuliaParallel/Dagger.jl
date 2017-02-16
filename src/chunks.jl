@@ -186,14 +186,14 @@ function group_indices(cumlength, idxs::Range)
 end
 
 _cumsum(x::AbstractArray) = length(x) == 0 ? Int[] : cumsum(x)
-function lookup_parts{N}(ps::AbstractArray, subdmns::BlockedDomains{N}, d::DenseDomain{N})
+function lookup_parts{N}(ps::AbstractArray, subdmns::BlockedDomains{N}, d::ArrayDomain{N})
     groups = map(group_indices, subdmns.cumlength, indexes(d))
     sz = map(length, groups)
     pieces = Array{AbstractChunk}(sz)
     for i = CartesianRange(sz)
         idx_and_dmn = map(getindex, groups, i.I)
         idx = map(x->x[1], idx_and_dmn)
-        dmn = DenseDomain(map(x->x[2], idx_and_dmn))
+        dmn = ArrayDomain(map(x->x[2], idx_and_dmn))
         pieces[i] = view(ps[idx...], project(subdmns[idx...], dmn))
     end
     out_cumlength = map(g->_cumsum(map(x->length(x[2]), g)), groups)

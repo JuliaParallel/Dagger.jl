@@ -25,13 +25,13 @@ ctranspose(x::AbstractChunk) = Thunk(ctranspose, (x,))
 transpose(x::LazyArray) = Transpose(transpose, x)
 transpose(x::AbstractChunk) = Thunk(transpose, (x,))
 
-function ctranspose(x::DenseDomain{2})
+function ctranspose(x::ArrayDomain{2})
     d = indexes(x)
-    DenseDomain(d[2], d[1])
+    ArrayDomain(d[2], d[1])
 end
-function ctranspose(x::DenseDomain{1})
+function ctranspose(x::ArrayDomain{1})
     d = indexes(x)
-    DenseDomain(1, d[1])
+    ArrayDomain(1, d[1])
 end
 
 function ctranspose(x::DomainSplit)
@@ -123,13 +123,13 @@ function (*)(a::ArrayDomain{2}, b::ArrayDomain{2})
         throw(DimensionMismatch("The domains cannot be multiplied"))
     end
 
-    DenseDomain((indexes(a)[1], indexes(b)[2]))
+    ArrayDomain((indexes(a)[1], indexes(b)[2]))
 end
 function (*)(a::ArrayDomain{2}, b::ArrayDomain{1})
     if size(a, 2) != length(b)
         throw(DimensionMismatch("The domains cannot be multiplied"))
     end
-    DenseDomain((indexes(a)[1],))
+    ArrayDomain((indexes(a)[1],))
 end
 
 function (*)(a::DomainSplit, b::DomainSplit)
@@ -265,7 +265,7 @@ scale(l::LazyArray, r::LazyArray) = Scale(l, r)
 function stage_operand(ctx, ::Scale, a, b::PromotePartition)
     ps = chunks(domain(a))
     b_parts = BlockedDomains((1,), (ps.cumlength[1],))
-    head = DenseDomain(1:size(domain(a), 1))
+    head = ArrayDomain(1:size(domain(a), 1))
     b_dmn = DomainSplit(head, b_parts)
     cached_stage(ctx, Distribute(b_dmn, tochunk(b.data)))
 end
@@ -312,7 +312,7 @@ function cat(idx::Int, ds::DomainSplit...)
     len = sum(map(x->length(indexes(x)[idx]), ds))
     fst = first(out_idxs[idx])
     out_idxs[idx] = fst:(fst+len-1)
-    out_head = DenseDomain(out_idxs)
+    out_head = ArrayDomain(out_idxs)
     out_parts = cumulative_domains(cat(idx, map(chunks, ds)...))
     DomainSplit(out_head, out_parts)
 end

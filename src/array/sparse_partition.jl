@@ -2,7 +2,7 @@ export partition_sparse
 
 function partition_sparse(colptr, nnz, sz, nparts)
     nnz_per_chunk = nnz/nparts
-    dom = DenseDomain(map(x->1:x, sz))
+    dom = ArrayDomain(map(x->1:x, sz))
 
     nxt = nnz_per_chunk
     colstart = 1
