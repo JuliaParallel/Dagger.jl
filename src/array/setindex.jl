@@ -21,14 +21,14 @@ function stage(ctx, sidx::SetIndex)
         sidx.idx[i]
     end for i in 1:length(sidx.idx)]
 
-    ps = Array{Any}(size(parts(inp)))
-    ps[:] = parts(inp)
-    subdmns = parts(domain(inp))
+    ps = Array{Any}(size(chunks(inp)))
+    ps[:] = chunks(inp)
+    subdmns = chunks(domain(inp))
     d = DenseDomain(idxs)
 
     groups = map(group_indices, subdmns.cumlength, indexes(d))
     sz = map(length, groups)
-    pieces = Array(AbstractPart, sz)
+    pieces = Array(AbstractChunk, sz)
     for i = CartesianRange(sz)
         idx_and_dmn = map(getindex, groups, i.I)
         idx = map(x->x[1], idx_and_dmn)
@@ -41,6 +41,6 @@ function stage(ctx, sidx::SetIndex)
             q
         end
     end
-    inp.parts = ps
+    inp.chunks = ps
     inp
 end

@@ -1,46 +1,46 @@
 
-import Base: sub
-export part, gather
+import Base: view
+export chunk, gather
 
 """
-A Part is a recipe to read an object. The Part type holds information about the
-domain spanned by the part on its own and metadata to read the part from its
+A Chunk is a recipe to read an object. The Chunk type holds information about the
+domain spanned by the chunk on its own and metadata to read the chunk from its
 memory / storage / network location.
 
 `gather(reader, handle)` will bring the data to memory on the caller
 """
-abstract AbstractPart
+abstract AbstractChunk
 
-parts(x::AbstractPart) = x
+chunks(x::AbstractChunk) = x
 
 """
-    gather(context, part::AbstractPart)
+    gather(context, chunk::AbstractChunk)
 
-Get the data stored in a part
+Get the data stored in a chunk
 """
 function gather end
 
 
-###### Part ######
+###### Chunk ######
 
 abstract PartIO
 """
-A part with some data
+A chunk with some data
 """
-type Part{I<:PartIO} <: AbstractPart
+type Chunk{I<:PartIO} <: AbstractChunk
     parttype::Type
     domain::Domain
     handle::I
     persist::Bool
 end
 
-domain(c::Part) = c.domain
-parttype(c::Part) = c.parttype
-persist!(t::Part) = (t.persist=true; t)
-shouldpersist(p::Part) = t.persist
-function gather(ctx, part::Part)
+domain(c::Chunk) = c.domain
+parttype(c::Chunk) = c.parttype
+persist!(t::Chunk) = (t.persist=true; t)
+shouldpersist(p::Chunk) = t.persist
+function gather(ctx, chunk::Chunk)
     # delegate fetching to handle by default.
-    gather(ctx, part.handle)
+    gather(ctx, chunk.handle)
 end
 
 
@@ -53,41 +53,41 @@ end
 gather(ctx, io::DistMem) = fetch(io.ref)
 
 """
-Create a part from a sequential object.
+Create a chunk from a sequential object.
 """
-function part(x)
+function tochunk(x)
     ref = make_token(x)
-    Part(typeof(x), domain(x), DistMem(ref), false)
+    Chunk(typeof(x), domain(x), DistMem(ref), false)
 end
-part(x::AbstractPart) = x
+tochunk(x::AbstractChunk) = x
 
 
 """
-A **view** into an AbstractPart
+A **view** into an AbstractChunk
 
 Fields:
- - domain: The domain of this part on its own
- - subdomain: The subdomain viewd in `part`
- - part: The part being viewed
+ - domain: The domain of the viewed chunk on its own
+ - subdomain: The subdomain in `chunk`
+ - chunk: The chunk being viewed
 """
-type Sub{T<:AbstractPart} <: AbstractPart
+type View{T<:AbstractChunk} <: AbstractChunk
     parttype::Type
     domain::Domain
     subdomain::Domain
-    part::T
+    chunk::T
 end
 
-domain(c::Sub) = c.domain
-parttype(c::Sub) = c.parttype
-persist!(x::Sub) = persist!(x.part)
+domain(c::View) = c.domain
+parttype(c::View) = c.parttype
+persist!(x::View) = persist!(x.chunk)
 
-function gather(ctx, s::Sub)
-    # A Sub{T<:Chunk{X}} can try to make this efficient for X
-    gather(ctx, s.part)[s.subdomain]
+function gather(ctx, s::View)
+    # A View{T<:Chunk{X}} can try to make this efficient for X
+    gather(ctx, s.chunk)[s.subdomain]
 end
 # optimized subindexing on DistMem
-function gather(ctx, s::Sub{Part{DistMem}})
-    ref = s.part.handle.ref
+function gather(ctx, s::View{Chunk{DistMem}})
+    ref = s.chunk.handle.ref
     pid = ref.where
     let d = s.subdomain
         remotecall_fetch(x -> fetch(x)[d], pid, ref)
@@ -95,58 +95,58 @@ function gather(ctx, s::Sub{Part{DistMem}})
 end
 
 """
-    `sub(a::Part, d::Domain)`
+    `view(a::Chunk, d::Domain)`
 
-Returns the `Sub` object which represents a sub part of `a`
+Returns the `View` object which represents a view chunk of `a`
 """
-function sub(p::Part, d::Domain, T=parttype(p))
+function view(p::Chunk, d::Domain, T=parttype(p))
 
     if domain(p) == d
         return p
     end
 
-    Sub(T, alignfirst(d), d, p)
+    View(T, alignfirst(d), d, p)
 end
-Base.getindex(x::AbstractPart, idx::Domain) = sub(x, idx)
+Base.getindex(x::AbstractChunk, idx::Domain) = view(x, idx)
 
-function sub(s::Sub, d)
+function view(s::View, d)
     dprime = s.subdomain[d] # collapse subindex
-    sub(s.part, dprime)
+    view(s.chunk, dprime)
 end
 
 """
-A collection of Parts put together to form a bigger logical part
+A collection of Parts put together to form a bigger logical chunk
 
 Fields:
  - parttype: The type of the data represented by the Cat
- - domain: The domain of the combined part and parts (`DomainSplit`)
- - parts: the parts which form the parts of the Cat
+ - domain: The domain of the combined chunk and chunks (`DomainSplit`)
+ - chunks: the chunks which form the chunks of the Cat
 """
-type Cat <: AbstractPart
+type Cat <: AbstractChunk
     parttype::Type
     domain::DomainSplit
-    parts::AbstractArray
+    chunks::AbstractArray
 end
 
 domain(c::Cat) = c.domain
 parttype(c::Cat) = c.parttype
-parts(x::Cat) = x.parts
-persist!(x::Cat) = (for p in parts(x); persist!(p); end)
+chunks(x::Cat) = x.chunks
+persist!(x::Cat) = (for p in chunks(x); persist!(p); end)
 
-function gather(ctx, part::Cat)
-    ps_input = parts(part)
-    ps = Array(parttype(part), size(ps_input))
+function gather(ctx, chunk::Cat)
+    ps_input = chunks(chunk)
+    ps = Array{parttype(chunk)}(size(ps_input))
     @sync for i in 1:length(ps_input)
         @async ps[i] = gather(ctx, ps_input[i])
     end
-    cat_data(parttype(part), part.domain, ps)
+    cat_data(parttype(chunk), chunk.domain, ps)
 end
 
 """
-`sub` of a `Cat` part returns a `Cat` of sub parts
+`view` of a `Cat` chunk returns a `Cat` of view chunks
 """
-function sub(c::Cat, d)
-    sub_parts, subdomains = lookup_parts(parts(c), parts(domain(c)), d)
+function view(c::Cat, d)
+    sub_parts, subdomains = lookup_parts(chunks(c), chunks(domain(c)), d)
     if length(sub_parts) == 1
         sub_parts[1]
     else
@@ -190,12 +190,12 @@ _cumsum(x::AbstractArray) = length(x) == 0 ? Int[] : cumsum(x)
 function lookup_parts{N}(ps::AbstractArray, subdmns::BlockedDomains{N}, d::DenseDomain{N})
     groups = map(group_indices, subdmns.cumlength, indexes(d))
     sz = map(length, groups)
-    pieces = Array(AbstractPart, sz)
+    pieces = Array{AbstractChunk}(sz)
     for i = CartesianRange(sz)
         idx_and_dmn = map(getindex, groups, i.I)
         idx = map(x->x[1], idx_and_dmn)
         dmn = DenseDomain(map(x->x[2], idx_and_dmn))
-        pieces[i] = sub(ps[idx...], project(subdmns[idx...], dmn))
+        pieces[i] = view(ps[idx...], project(subdmns[idx...], dmn))
     end
     out_cumlength = map(g->_cumsum(map(x->length(x[2]), g)), groups)
     out_dmn = BlockedDomains(ntuple(x->1,Val{N}), out_cumlength)
@@ -203,16 +203,22 @@ function lookup_parts{N}(ps::AbstractArray, subdmns::BlockedDomains{N}, d::Dense
 end
 
 function free!(x::Cat, force=true)
-    for p in parts(x)
+    for p in chunks(x)
         free!(p, force)
     end
 end
 # Check to see if the node is set to persist
 # if it is foce can override it
-function free!(s::Part{DistMem}, force=true)
+function free!(s::Chunk{DistMem}, force=true)
     if force || !s.persist
         release_token(s.handle.ref)
     end
 end
-free!(s::AbstractPart, force=true) = nothing
-free!(s::Sub, force=true) = nothing
+free!(s::AbstractChunk, force=true) = nothing
+free!(s::View, force=true) = nothing
+
+Base.@deprecate_binding AbstractPart AbstractChunk
+Base.@deprecate_binding Part Chunk
+Base.@deprecate_binding Sub  View
+Base.@deprecate parts(args...) chunks(args...)
+Base.@deprecate part(args...) tochunk(args...)

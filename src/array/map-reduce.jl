@@ -14,18 +14,18 @@ Map(f, inputs::Tuple) = Map{Any, ndims(inputs[1])}(f, inputs)
 function stage(ctx, node::Map)
     inputs = Any[cached_stage(ctx, n) for n in node.inputs]
     primary = inputs[1] # all others will align to this guy
-    domains = parts(domain(primary))
+    domains = chunks(domain(primary))
     thunks = similar(domains, Any)
     f = node.f
     for i=eachindex(domains)
-        inps = map(x->parts(x)[i], inputs)
+        inps = map(x->chunks(x)[i], inputs)
         thunks[i] = Thunk((args...) -> map(f, args...), (inps...))
     end
     Cat(Any, domain(primary), thunks)
 end
 
 map(f, xs::LazyArray...) = Map(f, xs)
-map(f, x::AbstractPart) = map(f, Computed(x))
+map(f, x::AbstractChunk) = map(f, Computed(x))
 map(f, x::Thunk) = Thunk(x->map(f,x), x)
 
 #### Reduce
@@ -41,7 +41,7 @@ end
 
 function stage(ctx, r::ReduceBlock)
     inp = stage(ctx, r.input)
-    reduced_parts = map(x -> Thunk(r.op, (x,); get_result=r.get_result), parts(inp))
+    reduced_parts = map(x -> Thunk(r.op, (x,); get_result=r.get_result), chunks(inp))
     Thunk((xs...) -> r.op_master(xs), (reduced_parts...); meta=true)
 end
 
@@ -115,17 +115,17 @@ function stage(ctx, r::Reducedim)
     inp = cached_stage(ctx, r.input)
     thunks = let op = r.op, dims=r.dims
         # do reducedim on each block
-        tmp = map(p->Thunk(b->reducedim(op,b,dims), (p,)), parts(inp))
+        tmp = map(p->Thunk(b->reducedim(op,b,dims), (p,)), chunks(inp))
         # combine the results in tree fashion
         treereducedim(tmp, r.dims) do x,y
             Thunk(op, (x,y,))
         end
     end
-    c = parts(domain(inp))
+    c = chunks(domain(inp))
     colons = Any[Colon() for x in size(c)]
     nd=ndims(domain(inp))
-    colons[[filter(d->d<=nd, r.dims)...]] = 1
+    colons[[Iterators.filter(d->d<=nd, r.dims)...]] = 1
     dmn = c[colons...]
-    d = DomainSplit(reducedim(head(domain(inp)), r.dims), reducedim(parts(domain(inp)), r.dims))
+    d = DomainSplit(reducedim(head(domain(inp)), r.dims), reducedim(chunks(domain(inp)), r.dims))
     Cat(parttype(inp),d, thunks)
 end

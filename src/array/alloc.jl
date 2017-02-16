@@ -13,7 +13,7 @@ function stage(ctx, a::AllocateArray)
         _alloc(idx, sz) = f(idx,eltype, sz)
     end
 
-    subdomains = parts(branch)
+    subdomains = chunks(branch)
     thunks = similar(subdomains, Thunk)
     for i=1:length(subdomains)
         thunks[i] = Thunk(alloc, (i, size(subdomains[i])))

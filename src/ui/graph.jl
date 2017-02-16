@@ -17,7 +17,7 @@ end
 
 global _part_labels = Dict()
 
-function node_label(io, t::Part, c)
+function node_label(io, t::Chunk, c)
     _part_labels[t]="part_$c"
     c+1
 end
@@ -30,7 +30,7 @@ function node_id(t)
     dec(hash(t))
 end
 
-function node_id(t::Part)
+function node_id(t::Chunk)
     _part_labels[t]
 end
 
@@ -43,7 +43,7 @@ function write_dag(io, t)
     end
     for (k, v) in deps
         for dep in v
-            if isa(k, AbstractPart)
+            if isa(k, AbstractChunk)
                 println(io, "$(node_id(k)) -> $(node_id(dep))")
             end
         end

@@ -1,3 +1,5 @@
+export tothunk, Thunk
+
 let counter=0
     global next_id
     next_id() = counter+=1
@@ -6,7 +8,7 @@ end
 global _thunk_dict = Dict{Int, Any}()
 
 # A thing to run
-type Thunk <: AbstractPart
+type Thunk <: AbstractChunk
     f::Function
     inputs::Tuple
     id::Int
@@ -33,6 +35,8 @@ Thunk(f::Function, xs::AbstractArray;
       persist::Bool=false) =
       Thunk(f,(xs...), id=id,get_result=get_result,meta=meta,persist=persist)
 
+tothunk(f; kwargs...) = (args...) -> Thunk(f, args; kwargs...)
+
 persist!(t::Thunk) = (t.persist=true; t)
 
 # cut down 30kgs in microseconds with one weird trick
@@ -58,9 +62,9 @@ end
 Base.hash(x::Thunk, h::UInt) = hash(x.id, hash(h, 0x7ad3bac49089a05f))
 Base.isequal(x::Thunk, y::Thunk) = x.id==y.id
 
-get_sub(x::AbstractPart, d) = sub(x,d)
-get_sub(x, d) = part(x[d])
-function sub(thunk::Thunk, d::Domain, T=Any)
+get_sub(x::AbstractChunk, d) = view(x,d)
+get_sub(x, d) = tochunk(x[d])
+function view(thunk::Thunk, d::Domain, T=Any)
     Thunk(x->get_sub(x,d), (thunk,))
 end
 

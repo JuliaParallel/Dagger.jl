@@ -20,7 +20,7 @@ function save(ctx, io::IO, val)
 end
 
 
-###### Save parts ######
+###### Save chunks ######
 
 const PARTSPEC = 0x00
 const CAT = 0x01
@@ -28,33 +28,33 @@ const CAT = 0x01
 # subparts are saved as Parts
 
 """
-    save(ctx, part::AbstractPart, file_path::AbsractString)
+    save(ctx, chunk::AbstractChunk, file_path::AbsractString)
 
-Save a part to a file at `file_path`.
+Save a chunk to a file at `file_path`.
 """
-function save(ctx, part::AbstractPart, file_path::AbstractString)
+function save(ctx, chunk::AbstractChunk, file_path::AbstractString)
     open(file_path, "w") do io
-        save(ctx, io, part, file_path)
+        save(ctx, io, chunk, file_path)
     end
 end
 
 """
-special case distmem writing - write to disk on the process with the part.
+special case distmem writing - write to disk on the process with the chunk.
 """
-function save(ctx, part::Part{DistMem}, file_path::AbstractString)
-    pid = part.handle.ref.where
+function save(ctx, chunk::Chunk{DistMem}, file_path::AbstractString)
+    pid = chunk.handle.ref.where
 
-    remotecall_fetch(pid, file_path, part.handle.ref) do path, rref
+    remotecall_fetch(pid, file_path, chunk.handle.ref) do path, rref
         open(path, "w") do io
-            save(ctx, io, part, file_path)
+            save(ctx, io, chunk, file_path)
         end
     end
 end
 
-function save(ctx, io::IO, part::Part, file_path)
+function save(ctx, io::IO, chunk::Chunk, file_path)
     meta_io = IOBuffer()
 
-    serialize(meta_io, (parttype(part), domain(part)))
+    serialize(meta_io, (parttype(chunk), domain(chunk)))
     meta = takebuf_array(meta_io)
 
     write(io, PARTSPEC)
@@ -62,14 +62,14 @@ function save(ctx, io::IO, part::Part, file_path)
     write(io, meta)
     data_offset = position(io)
 
-    save(ctx, io, gather(ctx, part))
+    save(ctx, io, gather(ctx, chunk))
 
-    Part(parttype(part), domain(part), FileReader(file_path, parttype(part), data_offset, false), false)
+    Chunk(parttype(chunk), domain(chunk), FileReader(file_path, parttype(chunk), data_offset, false), false)
 end
 
-function save(ctx, io::IO, part::Cat, file_path::AbstractString, saved_parts::AbstractArray)
+function save(ctx, io::IO, chunk::Cat, file_path::AbstractString, saved_parts::AbstractArray)
 
-    metadata = (parttype(part), domain(part), saved_parts)
+    metadata = (parttype(chunk), domain(chunk), saved_parts)
 
     # save yourself
     write(io, CAT)
@@ -80,74 +80,74 @@ function save(ctx, io::IO, part::Cat, file_path::AbstractString, saved_parts::Ab
 end
 
 
-function save(ctx, io::IO, part::Cat, file_path)
+function save(ctx, io::IO, chunk::Cat, file_path)
     dir_path = file_path*"_data"
     if !isdir(dir_path)
         mkdir(dir_path)
     end
 
-    # save the parts
+    # save the chunks
     saved_parts = [save(ctx, c, joinpath(dir_path, lpad(i, 4, "0")))
-        for (i, c) in enumerate(parts(part))]
+        for (i, c) in enumerate(chunks(chunk))]
 
-    save(ctx, io, part, file_path, saved_parts)
+    save(ctx, io, chunk, file_path, saved_parts)
     # write each child
 end
 
-function save(ctx, io::IO, part::Sub)
-    save(ctx, io, Part(gather(ctx, part)))
+function save(ctx, io::IO, chunk::View)
+    save(ctx, io, Chunk(gather(ctx, chunk)))
 end
 
-function save(ctx, part::Part{FileReader}, file_path::AbstractString)
-   if abspath(file_path) == abspath(part.reader.file)
-       part
+function save(ctx, chunk::Chunk{FileReader}, file_path::AbstractString)
+   if abspath(file_path) == abspath(chunk.reader.file)
+       chunk
    else
-       cp(part.reader.file, file_path)
-       Part(parttype(part), domain(part),
-          FileReader(file_path, parttype(part),
-                     part.reader.data_offset, false), false)
+       cp(chunk.reader.file, file_path)
+       Chunk(parttype(chunk), domain(chunk),
+          FileReader(file_path, parttype(chunk),
+                     chunk.reader.data_offset, false), false)
    end
 end
 
-save(part::AbstractPart, file_path::AbstractString) = save(Context(), part, file_path)
+save(chunk::AbstractChunk, file_path::AbstractString) = save(Context(), chunk, file_path)
 
 
 
-###### Load parts ######
+###### Load chunks ######
 
 """
     load(ctx, file_path)
 
-Load an AbstractPart from a file.
+Load an AbstractChunk from a file.
 """
 function load(ctx, file_path::AbstractString; mmap=false)
 
     f = open(file_path)
     part_typ = read(f, UInt8)
     if part_typ == PARTSPEC
-        c = load(ctx, Part, file_path, mmap, f)
+        c = load(ctx, Chunk, file_path, mmap, f)
     elseif part_typ == CAT
         c = load(ctx, Cat, file_path, mmap, f)
     else
-        error("Could not determine part type")
+        error("Could not determine chunk type")
     end
     close(f)
     c
 end
 
 """
-    load(ctx, ::Type{Part}, fpath, io)
+    load(ctx, ::Type{Chunk}, fpath, io)
 
-Load a Part object from a file, the file path
+Load a Chunk object from a file, the file path
 is required for creating a FileReader object
 """
-function load(ctx, ::Type{Part}, fname, mmap, io)
+function load(ctx, ::Type{Chunk}, fname, mmap, io)
     meta_len = read(io, Int)
     io = IOBuffer(read(io, meta_len))
 
     (T, dmn, sz) = deserialize(io)
 
-    ComputedArray(Part(T, dmn, sz,
+    ComputedArray(Chunk(T, dmn, sz,
         FileReader(fname, T, meta_len+1, mmap), false))
 end
 
@@ -156,7 +156,7 @@ function load(ctx, ::Type{Cat}, file_path, mmap, io)
 
     metadata = deserialize(io)
     c = Cat(metadata...)
-    for p in parts(c)
+    for p in chunks(c)
         if isa(p.handle, FileReader)
             p.handle.mmap = mmap
         end
@@ -176,7 +176,7 @@ function save(ctx, io::IO, m::BitArray)
     save(ctx, io, convert(Array{Bool}, m))
 end
 
-function gather{T<:Array}(ctx, c::Part{FileReader{T}})
+function gather{T<:Array}(ctx, c::Chunk{FileReader{T}})
     h = c.handle
     io = open(h.file, "r+")
     seek(io, h.data_offset)
@@ -186,7 +186,7 @@ function gather{T<:Array}(ctx, c::Part{FileReader{T}})
     arr
 end
 
-function gather{T<:BitArray}(ctx, c::Part{FileReader{T}})
+function gather{T<:BitArray}(ctx, c::Chunk{FileReader{T}})
     h = c.handle
     io = open(h.file, "r+")
     seek(io, h.data_offset)
@@ -214,7 +214,7 @@ function save{Tv, Ti}(ctx, io::IO, m::SparseMatrixCSC{Tv,Ti})
     m
 end
 
-function gather{T<:SparseMatrixCSC}(ctx, c::Part{FileReader{T}})
+function gather{T<:SparseMatrixCSC}(ctx, c::Chunk{FileReader{T}})
     h = c.handle
     io = open(h.file, "r+")
     seek(io, h.data_offset)
@@ -240,8 +240,8 @@ function gather{T<:SparseMatrixCSC}(ctx, c::Part{FileReader{T}})
     SparseMatrixCSC(m, n, colptr, rowval, nnzval)
 end
 
-function getsub{T<:AbstractArray}(ctx, c::Part{FileReader{T}}, d)
-    Part(gather(ctx, c)[d])
+function getsub{T<:AbstractArray}(ctx, c::Chunk{FileReader{T}}, d)
+    Chunk(gather(ctx, c)[d])
 end
 
 
@@ -263,7 +263,7 @@ function stage(ctx, s::Save)
         mkdir(dir_path)
     end
     function save_part(idx, data)
-        p = part(data)
+        p = tochunk(data)
         path = joinpath(dir_path, lpad(idx, 4, "0"))
         saved = save(ctx, p, path)
 
@@ -272,15 +272,15 @@ function stage(ctx, s::Save)
         saved
     end
 
-    saved_parts = similar(parts(x), Thunk)
-    for i=1:length(parts(x))
-        saved_parts[i] = Thunk(save_part, (i, parts(x)[i]))
+    saved_parts = similar(chunks(x), Thunk)
+    for i=1:length(chunks(x))
+        saved_parts[i] = Thunk(save_part, (i, chunks(x)[i]))
     end
 
-    sz = size(parts(x))
-    function save_cat_meta(parts...)
+    sz = size(chunks(x))
+    function save_cat_meta(chunks...)
         f = open(s.name, "w")
-        saved_parts = reshape(AbstractPart[c for c in parts], sz)
+        saved_parts = reshape(AbstractChunk[c for c in chunks], sz)
         res = save(ctx, f, x, s.name, saved_parts)
         close(f)
         res

@@ -22,22 +22,22 @@ size(x::LazyArray) = size(x.input)
 function compute(ctx, s::Sort)
 
     inp = let alg=s.alg, ord = s.order
-        compute(ctx, mappart(p->sort(p; alg=alg, order=ord), s.input)).result
+        compute(ctx, mapchunk(p->sort(p; alg=alg, order=ord), s.input)).result
     end
 
-    ps = parts(inp)
+    ps = chunks(inp)
 
     persist!(inp)
 
-    ls = map(length, parts(domain(inp)))
+    ls = map(length, chunks(domain(inp)))
     splitter_ranks = cumsum(ls)[1:end-1]
 
     splitters = select(ctx, inp, splitter_ranks, s.order)
     ComputedArray(compute(ctx, shuffle_merge(inp, splitters, s.order)))
 end
 
-function mappart_eager(f, ctx, xs, T, name)
-    ps = parts(xs)
+function mapchunk_eager(f, ctx, xs, T, name)
+    ps = chunks(xs)
     master=OSProc(1)
     #@dbg timespan_start(ctx, name, 0, master)
     thunks = Thunk[Thunk(f(i), (ps[i],), get_result=true)
@@ -49,9 +49,9 @@ function mappart_eager(f, ctx, xs, T, name)
 end
 
 function broadcast1(ctx, f, xs::Cat, m,T)
-    ps = parts(xs)
+    ps = chunks(xs)
     @assert size(m, 1) == length(ps)
-    mappart_eager(ctx, xs,Vector{T},:broadcast1) do i
+    mapchunk_eager(ctx, xs,Vector{T},:broadcast1) do i
         inp = vec(m[i,:])
         function (p)
             map(x->f(p, x)::T, inp)
@@ -60,9 +60,9 @@ function broadcast1(ctx, f, xs::Cat, m,T)
 end
 
 function broadcast2(ctx, f, xs::Cat, m,v,T)
-    ps = parts(xs)
+    ps = chunks(xs)
     @assert size(m, 1) == length(ps)
-    mappart_eager(ctx, xs,Vector{T},:broadcast2) do i
+    mapchunk_eager(ctx, xs,Vector{T},:broadcast2) do i
         inp = vec(m[i,:])
         function (p)
             map((x,y)->f(p, x, y)::T, inp, vec(v))
@@ -72,9 +72,9 @@ end
 
 function select(ctx, A, ranks, ord)
     ks = copy(ranks)
-    lengths = map(length, parts(domain(A)))
+    lengths = map(length, chunks(domain(A)))
     n = sum(lengths)
-    p = length(parts(A))
+    p = length(chunks(A))
     init_ranges = UnitRange[1:x for x in lengths]
     active_ranges = matrixize(Array[init_ranges for i=1:length(ks)], UnitRange)
 
@@ -172,13 +172,13 @@ end
 
 function merge_thunk(ps, starts, lasts, ord)
     ranges = map(UnitRange, starts, lasts)
-    Thunk((map((p, r) -> Dagger.sub(p, DenseDomain(r)), ps, ranges)...)) do xs...
+    Thunk((map((p, r) -> Dagger.view(p, DenseDomain(r)), ps, ranges)...)) do xs...
         merge_sorted(ord, xs...)
     end
 end
 
 function shuffle_merge(A, splitter_indices, ord)
-    ps = parts(A)
+    ps = chunks(A)
     # splitter_indices: array of (splitter => vector of p index ranges) in sorted order
     starts = ones(Int, length(ps))
     merges = [begin
@@ -188,7 +188,7 @@ function shuffle_merge(A, splitter_indices, ord)
         starts = lasts.+1
         thnk,sz
         end for (val, idxs) in splitter_indices]
-    ls = map(length, parts(domain(A)))
+    ls = map(length, chunks(domain(A)))
     thunks = vcat(merges, (merge_thunk(ps, starts, ls, ord), sum(ls.-starts.+1)))
     part_lengths = map(x->x[2], thunks)
     dmn = DomainSplit(
@@ -200,7 +200,7 @@ end
 
 function merge_sorted{T, S}(ord::Ordering, x::AbstractArray{T}, y::AbstractArray{S})
     n = length(x) + length(y)
-    z = Array(promote_type(T,S), n)
+    z = Array{promote_type(T,S)}(n)
     i = 1; j = 1; k = 1
     len_x = length(x)
     len_y = length(y)

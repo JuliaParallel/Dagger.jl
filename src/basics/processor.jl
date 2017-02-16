@@ -33,7 +33,7 @@ Write a log event
 function write_event(ctx::Context, event::Event)
     write_event(ctx.log_sink, event)
 end
-#gather(x::AbstractPart) = gather(Context(), x)
+#gather(x::AbstractChunk) = gather(Context(), x)
 
 
 #####
@@ -41,11 +41,11 @@ end
 #=
 
 """
-Affinity maps processors to various parts of a part.
+Affinity maps processors to various chunks of a chunk.
 """
 immutable Affinity
     procs::Vector
-    parts::Domain
+    chunks::Domain
 end
 
 """
@@ -54,21 +54,21 @@ at various processors according to an `Affinity`
 
 Fields:
     - affinity: Affinity of subdomains
-    - parts: A `Cat` where data is already moved to
+    - chunks: A `Cat` where data is already moved to
              respect the affinity.
 """
-immutable AffineParts <: AbstractPart
+immutable AffineParts <: AbstractChunk
     affinity::Affinity
-    parts::AbstractPart
+    chunks::AbstractChunk
 end
 
 affinity(a::AffineParts) = a.affinity
-parts(a::AffineParts) = a.parts
+chunks(a::AffineParts) = a.chunks
 
-parttype(c::AffineParts) = parttype(parts(c))
-partsize(c::AffineParts) = partsize(parts(c))
-domain(c::AffineParts)    = affinity(c).parts
-gather(ctx, c::AffineParts) = gather(ctx, parts(c))
+parttype(c::AffineParts) = parttype(chunks(c))
+partsize(c::AffineParts) = partsize(chunks(c))
+domain(c::AffineParts)    = affinity(c).chunks
+gather(ctx, c::AffineParts) = gather(ctx, chunks(c))
 
-partition(c::AffineParts) = partition(parts(c))
+partition(c::AffineParts) = partition(chunks(c))
 =#

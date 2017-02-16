@@ -8,6 +8,8 @@ import Base: exp, expm1, log, log10, log1p, sqrt, cbrt, exponent,
              $, &, (.!=), (.<), (.<=), (.==), (.>),
              (.>=), (.\), (.//), (.>>), (.<<), *
 
+import Base: broadcast
+
 blockwise_unary = [:exp, :expm1, :log, :log10, :log1p, :sqrt, :cbrt, :exponent, :significand,
          :(-),
          :sin, :sinpi, :cos, :cospi, :tan, :sec, :cot, :csc,
@@ -15,8 +17,9 @@ blockwise_unary = [:exp, :expm1, :log, :log10, :log1p, :sqrt, :cbrt, :exponent, 
          :asin, :acos, :atan, :acot, :asec, :acsc,
          :asinh, :acosh, :atanh, :acoth, :asech, :acsch, :sinc, :cosc]
 
-blockwise_binary =
-        [:+, :-, :%, :.*, :.+, :.-, :.%, :./, :.^,
+blockwise_binary = [:+, :-, :%,]
+
+broadcast_ops = [ :.*, :.+, :.-, :.%, :./, :.^,
          :$, :&, :.!=, :.<, :.<=, :.==, :.>,
          :.>=, :.\, :.//, :.>>, :.<<]
 
@@ -30,45 +33,44 @@ end
 
 size(p::PromotePartition) = size(domain(p.data))
 
-immutable BlockwiseOp{F, Ni, T, Nd} <: LazyArray{T, Nd}
+immutable BCast{F, Ni, T, Nd} <: LazyArray{T, Nd}
     f::F
     input::NTuple{Ni, LazyArray}
 end
 
-function BlockwiseOp{F}(f::F, input::Tuple)
+function BCast{F}(f::F, input::Tuple)
     T = promote_type(map(eltype, input)...)
-    Nd = ndims(input[1])
-    BlockwiseOp{F, length(input), T, Nd}(f, input)
+    Nd = reduce(max, map(ndims, input))
+    BCast{F, length(input), T, Nd}(f, input)
 end
 
-size(x::BlockwiseOp) = size(x.input[1])
+size(x::BCast) = size(x.input[1])
 
 for fn in blockwise_unary
     @eval begin
-        $fn(x::LazyArray) = BlockwiseOp($fn, (x,))
+        $fn(x::LazyArray) = BCast($fn, (x,))
     end
 end
 
 ### Appease ambiguity warnings on Julia 0.4
 for fn in [:+, :-]
     @eval begin
-        $fn(x::Bool, y::LazyArray{Bool}) = BlockwiseOp(z -> $fn(x, z), (y,))
-        $fn(x::LazyArray{Bool}, y::Bool) = BlockwiseOp(z -> $fn(z, y), (x,))
+        $fn(x::Bool, y::LazyArray{Bool}) = BCast(z -> $fn(x, z), (y,))
+        $fn(x::LazyArray{Bool}, y::Bool) = BCast(z -> $fn(z, y), (x,))
     end
 end
-(.^)(x::Irrational{:e}, y::LazyArray) = BlockwiseOp(z -> x.^z, (y,))
 
-function stage_operands(ctx, ::BlockwiseOp, xs::LazyArray...)
+function stage_operands(ctx, ::BCast, xs::LazyArray...)
     map(x->cached_stage(ctx, x), xs)
 end
 
-function stage_operands(ctx, ::BlockwiseOp, x::LazyArray, y::PromotePartition)
+function stage_operands(ctx, ::BCast, x::LazyArray, y::PromotePartition)
     stg_x = cached_stage(ctx, x)
     y1 = Distribute(domain(stg_x), y.data)
     stg_x, cached_stage(ctx, y1)
 end
 
-function stage_operands(ctx, ::BlockwiseOp, x::PromotePartition, y::LazyArray)
+function stage_operands(ctx, ::BCast, x::PromotePartition, y::LazyArray)
     stg_y = cached_stage(ctx, y)
     x1 = Distribute(domain(stg_y), x.data)
     cached_stage(ctx, x1), stg_y
@@ -76,44 +78,82 @@ end
 
 for fn in blockwise_binary
     @eval begin
-        $fn(x::LazyArray, y::LazyArray) = BlockwiseOp($fn, (x, y))
-        $fn(x::AbstractArray, y::LazyArray) = BlockwiseOp($fn, (PromotePartition(x), y))
-        $fn(x::LazyArray, y::AbstractArray) = BlockwiseOp($fn, (x, PromotePartition(y)))
-        $fn(x::Number, y::LazyArray) = BlockwiseOp(z -> $fn(x, z), (y,))
-        $fn(x::LazyArray, y::Number) = BlockwiseOp(z -> $fn(z, y), (x,))
+        $fn(x::LazyArray, y::LazyArray) = BCast($fn, (x, y))
+        $fn(x::AbstractArray, y::LazyArray) = BCast($fn, (PromotePartition(x), y))
+        $fn(x::LazyArray, y::AbstractArray) = BCast($fn, (x, PromotePartition(y)))
+        $fn(x::Number, y::LazyArray) = BCast(z -> $fn(x, z), (y,))
+        $fn(x::LazyArray, y::Number) = BCast(z -> $fn(z, y), (x,))
     end
 end
 
-(*)(x::Number, y::LazyArray) = BlockwiseOp(z -> x*z, (y,))
-(*)(x::LazyArray, y::Number) = BlockwiseOp(z -> z*y, (x,))
+if VERSION < v"0.6.0-dev"
+    eval(:((.^)(x::Irrational{:e}, y::LazyArray) = BCast(z -> x.^z, (y,))))
+    for fn in broadcast_ops
+        @eval begin
+            $fn(x::LazyArray, y::LazyArray) = BCast($fn, (x, y))
+            $fn(x::AbstractArray, y::LazyArray) = BCast($fn, (PromotePartition(x), y))
+            $fn(x::LazyArray, y::AbstractArray) = BCast($fn, (x, PromotePartition(y)))
+            $fn(x::Number, y::LazyArray) = BCast(z -> $fn(x, z), (y,))
+            $fn(x::LazyArray, y::Number) = BCast(z -> $fn(z, y), (x,))
+        end
+    end
+end
 
-function stage(ctx, node::BlockwiseOp)
+Base.broadcast(fn::Function, x::LazyArray, xs::LazyArray...) = BCast(fn, (x, xs...))
+Base.broadcast(fn::Function, x::AbstractArray, y::LazyArray) = BCast(fn, (PromotePartition(x), y))
+Base.broadcast(fn::Function, x::LazyArray, y::AbstractArray) = BCast(fn, (x, PromotePartition(y)))
+Base.broadcast(fn::Function, x::Number, y::LazyArray) = BCast(z -> fn(x, z), (y,))
+Base.broadcast(fn::Function, x::LazyArray, y::Number) = BCast(z -> fn(z, y), (x,))
+
+(*)(x::Number, y::LazyArray) = BCast(z -> x*z, (y,))
+(*)(x::LazyArray, y::Number) = BCast(z -> z*y, (x,))
+
+function curry_broadcast(f)
+    (xs...) -> broadcast(f, xs...)
+end
+function stage(ctx, node::BCast)
     inputs = stage_operands(ctx, node, node.input...)
+    broadcast_f = curry_broadcast(node.f)
     thunks,d = if length(inputs) == 2
         a, b = domain(inputs[1]), domain(inputs[2])
         if length(a) == 1 && length(b) != 1
-            map(parts(inputs[2])) do p
-                Thunk(node.f, (parts(inputs[1])[1], p))
+            map(chunks(inputs[2])) do p
+                Thunk(broadcast_f, (chunks(inputs[1])[1], p))
             end, b
         elseif length(a) != 1 && length(b) == 1
-            map(parts(inputs[1])) do p
-                Thunk(node.f, (p, parts(inputs[2])[1]))
+            map(chunks(inputs[1])) do p
+                Thunk(broadcast_f, (p, chunks(inputs[2])[1]))
             end, a
         else
             @assert domain(a) == domain(b)
-            map(map(parts, inputs)...) do x, y
-                Thunk(node.f, (x, y))
+            map(map(chunks, inputs)...) do x, y
+                Thunk(broadcast_f, (x, y))
             end, a
         end
     else
         # TODO: include broadcast semantics in this.
-        map(map(parts, inputs)...) do ps...
-            Thunk(node.f, (ps...,))
+        map(map(chunks, inputs)...) do ps...
+            Thunk(broadcast_f, (ps...,))
         end, domain(inputs[1])
     end
 
     Cat(Any, d, thunks)
 end
 
-export mappart
-mappart(f, xs::LazyArray...) = BlockwiseOp(f, xs)
+export mappart, mapchunk
+
+immutable MapChunk{F, Ni, T, Nd} <: LazyArray{T, Nd}
+    f::F
+    input::NTuple{Ni, LazyArray{T,Nd}}
+end
+
+mapchunk(f, xs::LazyArray...) = MapChunk(f, xs)
+Base.@deprecate mappart(args...) mapchunk(args...)
+function stage(ctx, node::MapChunk)
+    inputs = map(x->cached_stage(ctx, x), node.input)
+    thunks = map(map(chunks, inputs)...) do ps...
+        Thunk(node.f, (ps...,))
+    end
+
+    Cat(Any, domain(inputs[1]), thunks)
+end

@@ -16,6 +16,8 @@ on different processing units.
 """
 abstract Domain
 
+#=
+
 "Is a domain empty?"
 @unimplemented isempty(d::Domain)
 
@@ -25,7 +27,7 @@ abstract Domain
 Find the intersection of two domains. For example,
 
     intersect(DenseDomain(1:100, 50:100), DenseDomain(50:150, 1:75))
-    #=> DenseDomain((50:100, 50:75))
+    # => DenseDomain((50:100, 50:75))
 """
 @unimplemented intersect{D<:Domain}(a::D, b::D)
 
@@ -48,6 +50,8 @@ Align `a` relative to `b`. For example,
     DataParallelBase.DenseDomain{2}((15:20,30:60))
 """
 @unimplemented Base.getindex{D<:Domain}(d::D, b::D)
+
+=#
 
 """
     alignfirst(a)
@@ -87,15 +91,15 @@ domain(x::Any) = UnitDomain()
 
 isempty(::UnitDomain) = false
 # intersect, project and getindex are unsupported,
-# and effectively `sub` are unsupported for UnitDomain
+# and effectively `view` are unsupported for UnitDomain
 
 
 """
-A domain split into sub-domains
+A domain split into view-domains
 """
 immutable DomainSplit{D<:Domain} <: Domain
     head::D
-    parts::AbstractArray
+    chunks
 end
 head(b::DomainSplit) = b.head
 
@@ -103,7 +107,7 @@ isempty(a::DomainSplit) = isempty(head(a))
 intersect{D<:Domain}(a::DomainSplit{D}, b::D) = intersect(head(a), b)
 project{D<:Domain}(a::DomainSplit{D}, b::D) = intersect(head(a), b)
 getindex{D<:Domain}(a::DomainSplit{D}, b::D) = getindex(head(a), b)
-parts(x::DomainSplit) = x.parts
+chunks(x::DomainSplit) = x.chunks
 
 
 
@@ -115,14 +119,23 @@ abstract ArrayDomain{N} <: Domain
 
 ###### Domain for DenseArray ######
 
-immutable DenseDomain{N} <: ArrayDomain{N}
-    indexes::NTuple{N}
+if VERSION >= v"0.6.0-dev"
+    # TODO: Fix this better!
+    immutable DenseDomain{N} <: ArrayDomain{N}
+        indexes::NTuple{N, Any}
+    end
+else
+    immutable DenseDomain{N} <: ArrayDomain{N}
+        indexes::NTuple{N}
+    end
 end
+
+
 DenseDomain(xs...) = DenseDomain(xs)
 DenseDomain(xs::Array) = DenseDomain((xs...,))
 
 indexes(a::DenseDomain) = a.indexes
-parts{N}(a::DenseDomain{N}) = BlockedDomains(
+chunks{N}(a::DenseDomain{N}) = BlockedDomains(
     ntuple(i->first(indexes(a)[i]), Val{N}), map(x->[length(x)], indexes(a)))
 
 domain(x::DenseArray) = DenseDomain(map(l -> 1:l, size(x)))
@@ -169,22 +182,22 @@ domain(x::AbstractArray) = DenseDomain([1:l for l in size(x)])
 
 
 Base.@deprecate_binding DomainBranch DomainSplit
-Base.@deprecate children(x::Domain) parts(x)
+Base.@deprecate children(x::Domain) chunks(x)
 
 cat_data(::Type{Any}, dom::DomainSplit, ps) =
     cat_data(typeof(ps[1]), dom, ps)
 
 function cat_data{T<:AbstractArray}(::Type{T}, dom, ps)
 
-    arr = Array(eltype(T), size(dom))
+    arr = Array{eltype(T)}(size(dom))
 
     if isempty(ps)
         @assert isempty(dom)
         return arr
     end
 
-    for (d, part) in zip(parts(dom), ps)
-        setindex!(arr, part, indexes(d)...)
+    for (d, chunk) in zip(chunks(dom), ps)
+        setindex!(arr, chunk, indexes(d)...)
     end
     arr
 end
@@ -196,7 +209,7 @@ function cat_data{T<:SparseMatrixCSC}(::Type{T}, dom, ps)
         return spzeros(T.parameters..., size(dom)...)
     end
 
-    m, n = size(parts(dom))
+    m, n = size(chunks(dom))
 
     psT = Any[ps[j,i] for i=1:size(ps,2), j=1:size(ps,1)]
     hvcat(ntuple(x->n, m), psT...)

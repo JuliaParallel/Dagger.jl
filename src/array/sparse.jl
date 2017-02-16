@@ -9,7 +9,7 @@ end
 size(d::SparseCSCDomain, arg...) = size(d.adomain, arg...)
 length(d::SparseCSCDomain) = Int(d.colptr[end]-1)
 indexranges(d::SparseCSCDomain) = indexranges(d.adomain)
-parts(d::SparseCSCDomain) = d
+chunks(d::SparseCSCDomain) = d
 
 function alignfirst(d::SparseCSCDomain)
     adomain = alignfirst(d.adomain)
@@ -52,7 +52,7 @@ end
 default_partition(::SparseCSCDomain) = SliceDimension(2)
 
 function getsubcolptr(colptr, colrange)
-    sub(colptr, first(colrange):(last(colrange)+1))
+    view(colptr, first(colrange):(last(colrange)+1))
 end
 
 function partition(p::SliceDimension{2}, dom::SparseCSCDomain,
