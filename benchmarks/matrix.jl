@@ -41,7 +41,7 @@ function matrix_variants(NW, f=x->x)
     w = workers()[1:NW]
     suite = BenchmarkGroup()
 
-    matrix(ch, sz) = zeros(BlockPartition(ch), sz)
+    matrix(ch, sz) = zeros(Chunks(ch), sz)
 
     suite["trivial_one_each"] = matrix_suite(Context(w), matrix(1, NW), f)
     suite["trivial_two_each"] = matrix_suite(Context(w), matrix(1, 2NW), f)

@@ -5,7 +5,7 @@ using Compat
 A `Computation` represents a computation to be
 performed on some distributed data
 """
-abstract Computation
+@compat abstract type Computation end
 
 """
 `stage` on a computation creates a set of Thunk objects
@@ -25,7 +25,7 @@ A memoized version of stage. It is important that the
 tasks generated for the same Computation have the same
 identity, for example:
 
-    A = rand(BlockPartition(100,100), Float64, 1000, 1000)
+    A = rand(Blocks(100,100), Float64, 1000, 1000)
     compute(A+A')
 
 must not result in computation of A twice.

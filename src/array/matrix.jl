@@ -25,13 +25,13 @@ ctranspose(x::AbstractChunk) = Thunk(ctranspose, (x,))
 transpose(x::LazyArray) = Transpose(transpose, x)
 transpose(x::AbstractChunk) = Thunk(transpose, (x,))
 
-function ctranspose(x::DenseDomain{2})
+function ctranspose(x::ArrayDomain{2})
     d = indexes(x)
-    DenseDomain(d[2], d[1])
+    ArrayDomain(d[2], d[1])
 end
-function ctranspose(x::DenseDomain{1})
+function ctranspose(x::ArrayDomain{1})
     d = indexes(x)
-    DenseDomain(1, d[1])
+    ArrayDomain(1, d[1])
 end
 
 function ctranspose(x::DomainSplit)
@@ -66,7 +66,7 @@ size(x::Distribute) = size(x.domain)
 Distribute(dmn::DomainSplit, data) =
     Distribute(dmn, persist!(tochunk(data)))
 
-Distribute(p::PartitionScheme, data) =
+Distribute(p::Blocks, data) =
     Distribute(partition(p, domain(data)), data)
 
 #=
@@ -78,9 +78,9 @@ function auto_partition(data::AbstractArray, chsize)
 
     dims = size(data)
     if ndims(data) == 1
-        BlockPartition((floor(Int, per_chunk),))
+        Blocks((floor(Int, per_chunk),))
     elseif ndims(data)==2
-        BlockPartition(per_chunk/dims[2], per_chunk/dims[1])
+        Blocks(per_chunk/dims[2], per_chunk/dims[1])
     end
 end
 
@@ -123,24 +123,24 @@ function (*)(a::ArrayDomain{2}, b::ArrayDomain{2})
         throw(DimensionMismatch("The domains cannot be multiplied"))
     end
 
-    DenseDomain((indexes(a)[1], indexes(b)[2]))
+    ArrayDomain((indexes(a)[1], indexes(b)[2]))
 end
 function (*)(a::ArrayDomain{2}, b::ArrayDomain{1})
     if size(a, 2) != length(b)
         throw(DimensionMismatch("The domains cannot be multiplied"))
     end
-    DenseDomain((indexes(a)[1],))
+    ArrayDomain((indexes(a)[1],))
 end
 
 function (*)(a::DomainSplit, b::DomainSplit)
     DomainSplit(head(a)*head(b), chunks(a) * chunks(b))
 end
 
-function (*)(a::BlockPartition{2}, b::BlockPartition{2})
-    BlockPartition(a.blocksize[1], b.blocksize[2])
+function (*)(a::Blocks{2}, b::Blocks{2})
+    Blocks(a.blocksize[1], b.blocksize[2])
 end
-(*)(a::BlockPartition{2}, b::BlockPartition{1}) =
-    BlockPartition((a.blocksize[1],))
+(*)(a::Blocks{2}, b::Blocks{1}) =
+    Blocks((a.blocksize[1],))
 
 function (+)(a::ArrayDomain, b::ArrayDomain)
     if a == b
@@ -265,7 +265,7 @@ scale(l::LazyArray, r::LazyArray) = Scale(l, r)
 function stage_operand(ctx, ::Scale, a, b::PromotePartition)
     ps = chunks(domain(a))
     b_parts = BlockedDomains((1,), (ps.cumlength[1],))
-    head = DenseDomain(1:size(domain(a), 1))
+    head = ArrayDomain(1:size(domain(a), 1))
     b_dmn = DomainSplit(head, b_parts)
     cached_stage(ctx, Distribute(b_dmn, tochunk(b.data)))
 end
@@ -312,7 +312,7 @@ function cat(idx::Int, ds::DomainSplit...)
     len = sum(map(x->length(indexes(x)[idx]), ds))
     fst = first(out_idxs[idx])
     out_idxs[idx] = fst:(fst+len-1)
-    out_head = DenseDomain(out_idxs)
+    out_head = ArrayDomain(out_idxs)
     out_parts = cumulative_domains(cat(idx, map(chunks, ds)...))
     DomainSplit(out_head, out_parts)
 end

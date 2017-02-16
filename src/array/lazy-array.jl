@@ -1,7 +1,7 @@
 import Base: ==
 using Compat
 
-abstract LazyArray{T, N} <: AbstractArray{T, N}
+@compat abstract type LazyArray{T, N} <: AbstractArray{T, N} end
 Base.linearindexing(x::LazyArray) = Base.LinearSlow()
 
 function save(p::LazyArray, name::AbstractString)

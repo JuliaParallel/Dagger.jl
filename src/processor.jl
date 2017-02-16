@@ -1,7 +1,7 @@
 import Base.procs
 export OSProc, Context
 
-abstract Processor
+@compat abstract type Processor end
 
 """
 OS process - contains pid returned by `addprocs`

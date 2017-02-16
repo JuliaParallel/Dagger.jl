@@ -2,7 +2,7 @@
 import Base.gc_num
 export summarize_events
 
-typealias Timestamp UInt64
+const Timestamp = UInt64
 
 """
 identifies

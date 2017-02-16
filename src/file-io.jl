@@ -1,6 +1,6 @@
 export save, load
 
-type FileReader{T} <: PartIO
+type FileReader{T} <: ChunkIO
     file::AbstractString
     parttype::Type{T}
     data_offset::Int
