@@ -45,7 +45,6 @@ end
 
 
 ### ChunkIO
-include("../lib/dumbref.jl")
 
 immutable DistMem <: ChunkIO
     ref::MemToken

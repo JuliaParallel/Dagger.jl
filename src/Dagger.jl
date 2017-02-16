@@ -4,6 +4,7 @@ using Compat
 
 include("lib/util.jl")
 include("lib/logging.jl")
+include("lib/dumbref.jl")
 
 # Data and slices of data
 include("domain.jl")
