@@ -193,7 +193,7 @@ function shuffle_merge(A, splitter_indices, ord)
     part_lengths = map(x->x[2], thunks)
     dmn = ArrayDomain(1:sum(part_lengths))
     dmnchunks = DomainBlocks((1,), (cumsum(part_lengths),))
-    Cat(parttype(A), dmn, dmnchunks, map(x->x[1], thunks))
+    Cat(chunktype(A), dmn, dmnchunks, map(x->x[1], thunks))
 end
 
 function merge_sorted{T, S}(ord::Ordering, x::AbstractArray{T}, y::AbstractArray{S})

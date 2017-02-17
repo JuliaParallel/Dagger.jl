@@ -41,7 +41,7 @@ end
 function stage(ctx, node::Transpose)
     inp = cached_stage(ctx, node.input)
     thunks = _ctranspose(chunks(inp))
-    Cat(parttype(inp), domain(inp)', domainchunks(inp)', thunks)
+    Cat(chunktype(inp), domain(inp)', domainchunks(inp)', thunks)
 end
 
 export Distribute
@@ -55,7 +55,7 @@ Distribute(dmn, data) =
     Distribute(dmn, persist!(tochunk(data)))
 
 Distribute(d, p::AbstractChunk) =
-    Distribute{eltype(parttype(p)), ndims(d)}(d, p)
+    Distribute{eltype(chunktype(p)), ndims(d)}(d, p)
 
 size(x::Distribute) = size(domain(x.data))
 
@@ -85,7 +85,7 @@ end
 =#
 
 function stage(ctx, d::Distribute)
-    Cat(parttype(d.data),
+    Cat(chunktype(d.data),
         domain(d.data),
         d.domainchunks,
         map(c -> view(d.data, c), d.domainchunks))
@@ -313,7 +313,7 @@ function stage(ctx, c::Concat)
     dmn = cat(c.axis, dmns...)
     dmnchunks = cumulative_domains(cat(c.axis, map(domainchunks, inp)...))
     thunks = cat(c.axis, map(chunks, inp)...)
-    T = promote_type(map(parttype, inp)...)
+    T = promote_type(map(chunktype, inp)...)
     Cat(T, dmn, dmnchunks, thunks)
 end
 

@@ -28,14 +28,14 @@ function gather end
 A chunk with some data
 """
 type Chunk{I<:ChunkIO} <: AbstractChunk
-    parttype::Type
+    chunktype::Type
     domain::Domain
     handle::I
     persist::Bool
 end
 
 domain(c::Chunk) = c.domain
-parttype(c::Chunk) = c.parttype
+chunktype(c::Chunk) = c.chunktype
 persist!(t::Chunk) = (t.persist=true; t)
 shouldpersist(p::Chunk) = t.persist
 function gather(ctx, chunk::Chunk)
@@ -70,14 +70,14 @@ Fields:
  - chunk: The chunk being viewed
 """
 type View{T<:AbstractChunk} <: AbstractChunk
-    parttype::Type
+    chunktype::Type
     domain::Domain
     subdomain::Domain
     chunk::T
 end
 
 domain(c::View) = c.domain
-parttype(c::View) = c.parttype
+chunktype(c::View) = c.chunktype
 persist!(x::View) = persist!(x.chunk)
 
 function gather(ctx, s::View)
@@ -98,7 +98,7 @@ end
 
 Returns the `View` object which represents a view chunk of `a`
 """
-function view(p::Chunk, d::Domain, T=parttype(p))
+function view(p::Chunk, d::Domain, T=chunktype(p))
 
     if domain(p) == d
         return p
@@ -117,30 +117,30 @@ end
 A collection of Parts put together to form a bigger logical chunk
 
 Fields:
- - parttype: The type of the data represented by the Cat
+ - chunktype: The type of the data represented by the Cat
  - domain: The domain of the concatenated Chunk
  - chunks: the chunks which form the chunks of the Cat
 """
 type Cat <: AbstractChunk
-    parttype::Type
+    chunktype::Type
     domain::Domain
     domainchunks
     chunks
 end
 
 domain(c::Cat) = c.domain
-parttype(c::Cat) = c.parttype
+chunktype(c::Cat) = c.chunktype
 chunks(x::Cat) = x.chunks
 domainchunks(x::Cat) = x.domainchunks
 persist!(x::Cat) = (for p in chunks(x); persist!(p); end)
 
 function gather(ctx, chunk::Cat)
     ps_input = chunks(chunk)
-    ps = Array{parttype(chunk)}(size(ps_input))
+    ps = Array{chunktype(chunk)}(size(ps_input))
     @sync for i in 1:length(ps_input)
         @async ps[i] = gather(ctx, ps_input[i])
     end
-    cat_data(parttype(chunk), domain(chunk), domainchunks(chunk), ps)
+    cat_data(chunktype(chunk), domain(chunk), domainchunks(chunk), ps)
 end
 
 """
@@ -151,7 +151,7 @@ function view(c::Cat, d)
     if length(subchunks) == 1
         subchunks[1]
     else
-        Cat(parttype(c), alignfirst(d), subdomains, subchunks)
+        Cat(chunktype(c), alignfirst(d), subdomains, subchunks)
     end
 end
 
@@ -223,3 +223,4 @@ Base.@deprecate_binding Part Chunk
 Base.@deprecate_binding Sub  View
 Base.@deprecate parts(args...) chunks(args...)
 Base.@deprecate part(args...) tochunk(args...)
+Base.@deprecate parttype(args...) chunktype(args...)

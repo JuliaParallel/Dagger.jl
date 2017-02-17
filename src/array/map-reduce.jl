@@ -128,5 +128,5 @@ function stage(ctx, r::Reducedim)
     dmn = c[colons...]
     d = reducedim(domain(inp), r.dims)
     ds = reducedim(domainchunks(inp), r.dims)
-    Cat(parttype(inp), d, ds, thunks)
+    Cat(chunktype(inp), d, ds, thunks)
 end

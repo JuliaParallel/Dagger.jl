@@ -65,7 +65,7 @@ end
 affinity(a::AffineParts) = a.affinity
 chunks(a::AffineParts) = a.chunks
 
-parttype(c::AffineParts) = parttype(chunks(c))
+chunktype(c::AffineParts) = chunktype(chunks(c))
 partsize(c::AffineParts) = partsize(chunks(c))
 domain(c::AffineParts)    = affinity(c).chunks
 gather(ctx, c::AffineParts) = gather(ctx, chunks(c))

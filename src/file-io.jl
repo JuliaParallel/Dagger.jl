@@ -2,7 +2,7 @@ export save, load
 
 type FileReader{T} <: ChunkIO
     file::AbstractString
-    parttype::Type{T}
+    chunktype::Type{T}
     data_offset::Int
     mmap::Bool
 end
@@ -54,7 +54,7 @@ end
 function save(ctx, io::IO, chunk::Chunk, file_path)
     meta_io = IOBuffer()
 
-    serialize(meta_io, (parttype(chunk), domain(chunk)))
+    serialize(meta_io, (chunktype(chunk), domain(chunk)))
     meta = takebuf_array(meta_io)
 
     write(io, PARTSPEC)
@@ -64,12 +64,12 @@ function save(ctx, io::IO, chunk::Chunk, file_path)
 
     save(ctx, io, gather(ctx, chunk))
 
-    Chunk(parttype(chunk), domain(chunk), FileReader(file_path, parttype(chunk), data_offset, false), false)
+    Chunk(chunktype(chunk), domain(chunk), FileReader(file_path, chunktype(chunk), data_offset, false), false)
 end
 
 function save(ctx, io::IO, chunk::Cat, file_path::AbstractString, saved_parts::AbstractArray)
 
-    metadata = (parttype(chunk), domain(chunk), saved_parts)
+    metadata = (chunktype(chunk), domain(chunk), saved_parts)
 
     # save yourself
     write(io, CAT)
@@ -103,8 +103,8 @@ function save(ctx, chunk::Chunk{FileReader}, file_path::AbstractString)
        chunk
    else
        cp(chunk.reader.file, file_path)
-       Chunk(parttype(chunk), domain(chunk),
-          FileReader(file_path, parttype(chunk),
+       Chunk(chunktype(chunk), domain(chunk),
+          FileReader(file_path, chunktype(chunk),
                      chunk.reader.data_offset, false), false)
    end
 end
@@ -180,7 +180,7 @@ function gather{T<:Array}(ctx, c::Chunk{FileReader{T}})
     h = c.handle
     io = open(h.file, "r+")
     seek(io, h.data_offset)
-    arr = h.mmap ? Mmap.mmap(io, h.parttype, size(c.domain)) :
+    arr = h.mmap ? Mmap.mmap(io, h.chunktype, size(c.domain)) :
         reshape(reinterpret(eltype(T), read(io)), size(c.domain))
     close(io)
     arr

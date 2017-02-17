@@ -25,7 +25,7 @@ end
 function ComputedArray(x::AbstractChunk)
     persist!(x)
     nd = ndims(domain(x))
-    ComputedArray{_eltype(parttype(x)), nd}(x)
+    ComputedArray{_eltype(chunktype(x)), nd}(x)
 end
 
 _eltype(x) = eltype(x)

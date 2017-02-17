@@ -139,7 +139,7 @@ function thunkize(ctx, c::Cat)
         dmn = domain(c)
         dmnchunks = domainchunks(c)
         Thunk(thunks; meta=true) do results...
-            t = parttype(results[1])
+            t = chunktype(results[1])
             Cat(t, dmn, dmnchunks, reshape(AbstractChunk[results...], sz))
         end
     else
