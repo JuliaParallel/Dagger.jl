@@ -188,7 +188,7 @@ function group_indices(cumlength, idxs::Range)
 end
 
 _cumsum(x::AbstractArray) = length(x) == 0 ? Int[] : cumsum(x)
-function lookup_parts{N}(ps::AbstractArray, subdmns::BlockedDomains{N}, d::ArrayDomain{N})
+function lookup_parts{N}(ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomain{N})
     groups = map(group_indices, subdmns.cumlength, indexes(d))
     sz = map(length, groups)
     pieces = Array{AbstractChunk}(sz)
@@ -199,7 +199,7 @@ function lookup_parts{N}(ps::AbstractArray, subdmns::BlockedDomains{N}, d::Array
         pieces[i] = view(ps[idx...], project(subdmns[idx...], dmn))
     end
     out_cumlength = map(g->_cumsum(map(x->length(x[2]), g)), groups)
-    out_dmn = BlockedDomains(ntuple(x->1,Val{N}), out_cumlength)
+    out_dmn = DomainBlocks(ntuple(x->1,Val{N}), out_cumlength)
     pieces, out_dmn
 end
 

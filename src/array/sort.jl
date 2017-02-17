@@ -192,7 +192,7 @@ function shuffle_merge(A, splitter_indices, ord)
     thunks = vcat(merges, (merge_thunk(ps, starts, ls, ord), sum(ls.-starts.+1)))
     part_lengths = map(x->x[2], thunks)
     dmn = ArrayDomain(1:sum(part_lengths))
-    dmnchunks = BlockedDomains((1,), (cumsum(part_lengths),))
+    dmnchunks = DomainBlocks((1,), (cumsum(part_lengths),))
     Cat(parttype(A), dmn, dmnchunks, map(x->x[1], thunks))
 end
 

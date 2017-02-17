@@ -29,7 +29,7 @@ function partition_sparse(colptr, nnz, sz, nparts)
 
 
     cumlength = cumsum(map(length, splits))
-    subdomains = BlockedDomains((1,1), ([size(dom, 1)], cumlength))
+    subdomains = DomainBlocks((1,1), ([size(dom, 1)], cumlength))
     DomainSplit(dom, subdomains)
 end
 

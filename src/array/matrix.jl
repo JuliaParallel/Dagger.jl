@@ -182,7 +182,7 @@ function promote_distribution(ctx, m::MatMul, a,b)
     pa = domainchunks(a)
     pb = domainchunks(b)
 
-    d = BlockedDomains((1,1), (pa.cumlength[2], pb.cumlength[2])) # FIXME: this is not generic
+    d = DomainBlocks((1,1), (pa.cumlength[2], pb.cumlength[2])) # FIXME: this is not generic
     a, cached_stage(ctx, Distribute(d, b))
 end
 
@@ -208,7 +208,7 @@ function stage_operands{T}(ctx, ::MatMul, a::LazyArray, b::PromotePartition{T,1}
     if size(dmn_a, 2) != size(dmn_b, 1)
         throw(DimensionMismatch("Cannot promote array of domain $(dmn_b) to multiply with an array of size $(dmn_a)"))
     end
-    dmn_out = BlockedDomains((1,),(dchunks_a.cumlength[2],))
+    dmn_out = DomainBlocks((1,),(dchunks_a.cumlength[2],))
 
     stg_a, cached_stage(ctx, Distribute(dmn_out, tochunk(b.data)))
 end
@@ -221,7 +221,7 @@ function stage_operands(ctx, ::MatMul, a::PromotePartition, b::LazyArray)
     stg_b = cached_stage(ctx, b)
 
     ps = domainchunks(stg_b)
-    dmn_out = BlockedDomains((1,1),([size(a.data, 1)], ps.cumlength[1],))
+    dmn_out = DomainBlocks((1,1),([size(a.data, 1)], ps.cumlength[1],))
     cached_stage(ctx, Distribute(dmn_out, tochunk(a.data))), stg_b
 end
 
@@ -252,7 +252,7 @@ scale(l::LazyArray, r::LazyArray) = Scale(l, r)
 
 function stage_operand(ctx, ::Scale, a, b::PromotePartition)
     ps = domainchunks(a)
-    b_parts = BlockedDomains((1,), (ps.cumlength[1],))
+    b_parts = DomainBlocks((1,), (ps.cumlength[1],))
     cached_stage(ctx, Distribute(b_parts, tochunk(b.data)))
 end
 

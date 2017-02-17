@@ -1,19 +1,20 @@
 import Base: ndims, size, getindex, reducedim
 
-immutable BlockedDomains{N} <: AbstractArray{ArrayDomain{N}, N}
+immutable DomainBlocks{N} <: AbstractArray{ArrayDomain{N}, N}
     start::NTuple{N, Int}
     cumlength::Tuple
 end
+Base.@deprecate_binding BlockedDomains DomainBlocks
 
-ndims{N}(x::BlockedDomains{N}) = N
-size(x::BlockedDomains) = map(length, x.cumlength)
-function _getindex{N}(x::BlockedDomains{N}, idx::Tuple)
+ndims{N}(x::DomainBlocks{N}) = N
+size(x::DomainBlocks) = map(length, x.cumlength)
+function _getindex{N}(x::DomainBlocks{N}, idx::Tuple)
     starts = map((vec, i) -> i == 0 ? 0 : getindex(vec,i), x.cumlength, map(x->x-1, idx))
     ends = map(getindex, x.cumlength, idx)
     ArrayDomain(map(UnitRange, map(+, starts, x.start), map((x,y)->x+y-1, ends, x.start)))
 end
 
-function getindex{N}(x::BlockedDomains{N}, idx::Int)
+function getindex{N}(x::DomainBlocks{N}, idx::Int)
     if N == 1
         _getindex(x, (idx,))
     else
@@ -21,34 +22,34 @@ function getindex{N}(x::BlockedDomains{N}, idx::Int)
     end
 end
 
-getindex(x::BlockedDomains, idx::Int...) = _getindex(x,idx)
+getindex(x::DomainBlocks, idx::Int...) = _getindex(x,idx)
 
-Base.linearindexing(x::BlockedDomains) = Base.LinearSlow()
+Base.linearindexing(x::DomainBlocks) = Base.LinearSlow()
 
-function Base.ctranspose(x::BlockedDomains{2})
-    BlockedDomains(reverse(x.start), reverse(x.cumlength))
+function Base.ctranspose(x::DomainBlocks{2})
+    DomainBlocks(reverse(x.start), reverse(x.cumlength))
 end
-function Base.ctranspose(x::BlockedDomains{1})
-    BlockedDomains((1, x.start[1]), ([1], x.cumlength[1]))
+function Base.ctranspose(x::DomainBlocks{1})
+    DomainBlocks((1, x.start[1]), ([1], x.cumlength[1]))
 end
 
-function (*)(x::BlockedDomains{2}, y::BlockedDomains{2})
+function (*)(x::DomainBlocks{2}, y::DomainBlocks{2})
     if x.cumlength[2] != y.cumlength[1]
         throw(DimensionMismatch("Block distributions being multiplied are not compatible"))
     end
-    BlockedDomains((x.start[1],y.start[2]), (x.cumlength[1], y.cumlength[2]))
+    DomainBlocks((x.start[1],y.start[2]), (x.cumlength[1], y.cumlength[2]))
 end
 
-function (*)(x::BlockedDomains{2}, y::BlockedDomains{1})
+function (*)(x::DomainBlocks{2}, y::DomainBlocks{1})
     if x.cumlength[2] != y.cumlength[1]
         throw(DimensionMismatch("Block distributions being multiplied are not compatible"))
     end
-    BlockedDomains((x.start[1],), (x.cumlength[1],))
+    DomainBlocks((x.start[1],), (x.cumlength[1],))
 end
 
 merge_cumsums(x,y) = vcat(x, y+x[end])
 
-function Base.cat(idx::Int, x::BlockedDomains, y::BlockedDomains)
+function Base.cat(idx::Int, x::DomainBlocks, y::DomainBlocks)
     N = max(ndims(x), ndims(y))
     get_i(x,y, i) = length(x) <= i ? x[i] : length(y) <= i ? y[i] : Int[]
     for i=1:N
@@ -59,18 +60,18 @@ function Base.cat(idx::Int, x::BlockedDomains, y::BlockedDomains)
     end
     output = Any[x.cumlength...]
     output[idx] = merge_cumsums(x.cumlength[idx], y.cumlength[idx])
-    BlockedDomains(x.start, (output...))
+    DomainBlocks(x.start, (output...))
 end
 
-Base.hcat(xs::BlockedDomains...) = cat(2, xs...)
-Base.vcat(xs::BlockedDomains...) = cat(1, xs...)
+Base.hcat(xs::DomainBlocks...) = cat(2, xs...)
+Base.vcat(xs::DomainBlocks...) = cat(1, xs...)
 
-function reducedim(xs::BlockedDomains, dim::Int)
-    BlockedDomains(xs.start,
+function reducedim(xs::DomainBlocks, dim::Int)
+    DomainBlocks(xs.start,
         setindex(xs.cumlength,dim, [1]))
 end
-function reducedim(dom::BlockedDomains, dim::Tuple)
+function reducedim(dom::DomainBlocks, dim::Tuple)
     reduce(reducedim, dom, dim)
 end
 
-cumulative_domains(x::BlockedDomains) = x
+cumulative_domains(x::DomainBlocks) = x

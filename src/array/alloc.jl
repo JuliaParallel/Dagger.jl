@@ -24,7 +24,7 @@ function _cumlength(len, step)
 end
 
 function partition(p::Blocks, dom::ArrayDomain)
-    BlockedDomains(map(first, indexes(dom)),
+    DomainBlocks(map(first, indexes(dom)),
         map(_cumlength, map(length, indexes(dom)), p.blocksize))
 end
 

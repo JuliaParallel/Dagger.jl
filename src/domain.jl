@@ -111,7 +111,7 @@ ArrayDomain(xs...) = ArrayDomain(xs)
 ArrayDomain(xs::Array) = ArrayDomain((xs...,))
 
 indexes(a::ArrayDomain) = a.indexes
-chunks{N}(a::ArrayDomain{N}) = BlockedDomains(
+chunks{N}(a::ArrayDomain{N}) = DomainBlocks(
     ntuple(i->first(indexes(a)[i]), Val{N}), map(x->[length(x)], indexes(a)))
 
 domain(x::DenseArray) = ArrayDomain(map(l -> 1:l, size(x)))
