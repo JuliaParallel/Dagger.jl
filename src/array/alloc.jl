@@ -4,7 +4,8 @@ export partition
 type AllocateArray{T,N} <: LazyArray{T,N}
     eltype::Type{T}
     f::Function
-    domain::DomainSplit{ArrayDomain{N}}
+    domain::ArrayDomain{N}
+    domainchunks
 end
 size(a::AllocateArray) = size(a.domain)
 
@@ -23,9 +24,8 @@ function _cumlength(len, step)
 end
 
 function partition(p::Blocks, dom::ArrayDomain)
-    ps = BlockedDomains(map(first, indexes(dom)),
+    BlockedDomains(map(first, indexes(dom)),
         map(_cumlength, map(length, indexes(dom)), p.blocksize))
-    DomainSplit(dom, ps)
 end
 
 Base.@deprecate BlockPartition Blocks
@@ -37,12 +37,12 @@ function stage(ctx, a::AllocateArray)
         _alloc(idx, sz) = f(idx,eltype, sz)
     end
 
-    subdomains = chunks(branch)
+    subdomains = a.domainchunks
     thunks = similar(subdomains, Thunk)
     for i=1:length(subdomains)
         thunks[i] = Thunk(alloc, (i, size(subdomains[i])))
     end
-    Cat(Array{a.eltype, dims}, branch, thunks)
+    Cat(Array{a.eltype, dims}, a.domain, subdomains, thunks)
 end
 
 function Base.rand(p::Blocks, eltype::Type, dims)
@@ -51,7 +51,7 @@ function Base.rand(p::Blocks, eltype::Type, dims)
         rand(MersenneTwister(s+idx), x...)
     end
     d = ArrayDomain(map(x->1:x, dims))
-    AllocateArray(eltype, f, partition(p, d))
+    AllocateArray(eltype, f, d, partition(p, d))
 end
 
 Base.rand(p::Blocks, t::Type, dims::Integer...) = rand(p, t, dims)
@@ -64,13 +64,13 @@ function Base.randn(p::Blocks, dims)
         randn(MersenneTwister(s+idx), x...)
     end
     d = ArrayDomain(map(x->1:x, dims))
-    AllocateArray(Float64, f, partition(p, d))
+    AllocateArray(Float64, f, d, partition(p, d))
 end
 Base.randn(p::Blocks, dims::Integer...) = randn(p, dims)
 
 function Base.ones(p::Blocks, eltype::Type, dims)
     d = ArrayDomain(map(x->1:x, dims))
-    AllocateArray(eltype, (_, x...) -> ones(x...), partition(p, d))
+    AllocateArray(eltype, (_, x...) -> ones(x...), d, partition(p, d))
 end
 Base.ones(p::Blocks, t::Type, dims::Integer...) = ones(p, t, dims)
 Base.ones(p::Blocks, dims::Integer...) = ones(p, Float64, dims)
@@ -88,7 +88,8 @@ function Base.sprand(p::Blocks, m::Integer, n::Integer, sparsity::Real)
     f = function (idx, t,sz)
         sprand(MersenneTwister(s+idx), sz...,sparsity)
     end
-    AllocateArray(Float64, f, partition(p, ArrayDomain((1:m, 1:n))))
+    d = ArrayDomain((1:m, 1:n))
+    AllocateArray(Float64, f, d, partition(p, d))
 end
 
 function Base.sprand(p::Blocks, n::Integer, sparsity::Real)
@@ -96,5 +97,5 @@ function Base.sprand(p::Blocks, n::Integer, sparsity::Real)
     f = function (idx,t,sz)
         sprand(MersenneTwister(s+idx), sz...,sparsity)
     end
-    AllocateArray(Float64, f, partition(p, ArrayDomain((1:n,))))
+    AllocateArray(Float64, f, d, partition(p, ArrayDomain((1:n,))))
 end

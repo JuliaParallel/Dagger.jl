@@ -29,7 +29,7 @@ function compute(ctx, s::Sort)
 
     persist!(inp)
 
-    ls = map(length, chunks(domain(inp)))
+    ls = map(length, domainchunks(inp))
     splitter_ranks = cumsum(ls)[1:end-1]
 
     splitters = select(ctx, inp, splitter_ranks, s.order)
@@ -72,7 +72,7 @@ end
 
 function select(ctx, A, ranks, ord)
     ks = copy(ranks)
-    lengths = map(length, chunks(domain(A)))
+    lengths = map(length, domainchunks(A))
     n = sum(lengths)
     p = length(chunks(A))
     init_ranges = UnitRange[1:x for x in lengths]
@@ -188,14 +188,12 @@ function shuffle_merge(A, splitter_indices, ord)
         starts = lasts.+1
         thnk,sz
         end for (val, idxs) in splitter_indices]
-    ls = map(length, chunks(domain(A)))
+    ls = map(length, domainchunks(A))
     thunks = vcat(merges, (merge_thunk(ps, starts, ls, ord), sum(ls.-starts.+1)))
     part_lengths = map(x->x[2], thunks)
-    dmn = DomainSplit(
-        ArrayDomain(1:sum(part_lengths)),
-        BlockedDomains((1,),
-        (cumsum(part_lengths),)))
-    Cat(parttype(A), dmn, map(x->x[1], thunks))
+    dmn = ArrayDomain(1:sum(part_lengths))
+    dmnchunks = BlockedDomains((1,), (cumsum(part_lengths),))
+    Cat(parttype(A), dmn, dmnchunks, map(x->x[1], thunks))
 end
 
 function merge_sorted{T, S}(ord::Ordering, x::AbstractArray{T}, y::AbstractArray{S})

@@ -94,22 +94,6 @@ isempty(::UnitDomain) = false
 # and effectively `view` are unsupported for UnitDomain
 
 
-"""
-A domain split into view-domains
-"""
-immutable DomainSplit{D<:Domain} <: Domain
-    head::D
-    chunks
-end
-head(b::DomainSplit) = b.head
-
-isempty(a::DomainSplit) = isempty(head(a))
-intersect{D<:Domain}(a::DomainSplit{D}, b::D) = intersect(head(a), b)
-project{D<:Domain}(a::DomainSplit{D}, b::D) = intersect(head(a), b)
-getindex{D<:Domain}(a::DomainSplit{D}, b::D) = getindex(head(a), b)
-chunks(x::DomainSplit) = x.chunks
-
-
 ###### Array Domains ######
 
 if VERSION >= v"0.6.0-dev"
@@ -148,8 +132,9 @@ function project(a::ArrayDomain, b::ArrayDomain)
     end |> ArrayDomain
 end
 
-getindex(a::ArrayDomain, b::ArrayDomain) =
+function getindex(a::ArrayDomain, b::ArrayDomain)
     ArrayDomain(map(getindex, indexes(a), indexes(b)))
+end
 
 alignfirst(a::ArrayDomain) =
     ArrayDomain(map(r->1:length(r), indexes(a)))
@@ -164,22 +149,14 @@ ndims(a::ArrayDomain) = length(size(a))
 isempty(a::ArrayDomain) = length(a) == 0
 
 
-indexes{T<:ArrayDomain}(a::DomainSplit{T}) = indexes(a.head)
-size{T<:ArrayDomain}(a::DomainSplit{T}, dim...) = size(a.head, dim...)
-length{T<:ArrayDomain}(a::DomainSplit{T}) = prod(size(a))
-ndims{T<:ArrayDomain}(a::DomainSplit{T}) = ndims(head(a))
-
 "The domain of an array is a ArrayDomain"
 domain(x::AbstractArray) = ArrayDomain([1:l for l in size(x)])
 
 
-Base.@deprecate_binding DomainBranch DomainSplit
-Base.@deprecate children(x::Domain) chunks(x)
+cat_data(::Type{Any}, dom::Domain, subdomains, ps) =
+    cat_data(typeof(ps[1]), dom, subdomains, ps)
 
-cat_data(::Type{Any}, dom::DomainSplit, ps) =
-    cat_data(typeof(ps[1]), dom, ps)
-
-function cat_data{T<:AbstractArray}(::Type{T}, dom, ps)
+function cat_data{T<:AbstractArray}(::Type{T}, dom, subdoms, ps)
 
     arr = Array{eltype(T)}(size(dom))
 
@@ -188,7 +165,7 @@ function cat_data{T<:AbstractArray}(::Type{T}, dom, ps)
         return arr
     end
 
-    for (d, chunk) in zip(chunks(dom), ps)
+    for (d, chunk) in zip(subdoms, ps)
         setindex!(arr, chunk, indexes(d)...)
     end
     arr

@@ -14,14 +14,14 @@ Map(f, inputs::Tuple) = Map{Any, ndims(inputs[1])}(f, inputs)
 function stage(ctx, node::Map)
     inputs = Any[cached_stage(ctx, n) for n in node.inputs]
     primary = inputs[1] # all others will align to this guy
-    domains = chunks(domain(primary))
+    domains = domainchunks(primary)
     thunks = similar(domains, Any)
     f = node.f
     for i=eachindex(domains)
         inps = map(x->chunks(x)[i], inputs)
         thunks[i] = Thunk((args...) -> map(f, args...), (inps...))
     end
-    Cat(Any, domain(primary), thunks)
+    Cat(Any, domain(primary), domainchunks(primary), thunks)
 end
 
 map(f, xs::LazyArray...) = Map(f, xs)
@@ -121,11 +121,12 @@ function stage(ctx, r::Reducedim)
             Thunk(op, (x,y,))
         end
     end
-    c = chunks(domain(inp))
+    c = domainchunks(inp)
     colons = Any[Colon() for x in size(c)]
     nd=ndims(domain(inp))
     colons[[Iterators.filter(d->d<=nd, r.dims)...]] = 1
     dmn = c[colons...]
-    d = DomainSplit(reducedim(head(domain(inp)), r.dims), reducedim(chunks(domain(inp)), r.dims))
-    Cat(parttype(inp),d, thunks)
+    d = reducedim(domain(inp), r.dims)
+    ds = reducedim(domainchunks(inp), r.dims)
+    Cat(parttype(inp), d, ds, thunks)
 end

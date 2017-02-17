@@ -23,7 +23,7 @@ function stage(ctx, sidx::SetIndex)
 
     ps = Array{Any}(size(chunks(inp)))
     ps[:] = chunks(inp)
-    subdmns = chunks(domain(inp))
+    subdmns = domainchunks(inp)
     d = ArrayDomain(idxs)
 
     groups = map(group_indices, subdmns.cumlength, indexes(d))

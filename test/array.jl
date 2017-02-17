@@ -1,4 +1,4 @@
-import Dagger: chunks, chunks, Computed, ComputedArray
+import Dagger: chunks, Computed, ComputedArray, domainchunks
 
 chunks(x::Computed) = chunks(x.result)
 Dagger.domain(x::Computed) = domain(x.result)
@@ -18,9 +18,9 @@ Dagger.domain(x::ComputedArray) = domain(x.result)
         @test X2 |> size == (100, 100)
         @test all(X2 .>= 0.0)
         @test size(chunks(X1)) == (10, 10)
-        @test domain(X1).head == ArrayDomain(1:100, 1:100)
-        @test chunks(domain(X1)) |> size == (10, 10)
-        @test chunks(domain(X1)) == chunks(partition(Blocks(10, 10), ArrayDomain(1:100, 1:100)))
+        @test domain(X1) == ArrayDomain(1:100, 1:100)
+        @test domainchunks(X1.result) |> size == (10, 10)
+        @test domainchunks(X1.result) == partition(Blocks(10, 10), ArrayDomain(1:100, 1:100))
         @test gather(X1) == gather(X1)
     end
     X = rand(Blocks(10, 10), 100, 100)
@@ -42,8 +42,8 @@ end
         @test gather(X1) == X
         Xc = compute(X1)
         @test chunks(Xc) |> size == (10, 5)
-        @test chunks(domain(Xc)) |> size == (10, 5)
-        @test map(x->size(x) == (10, 20), chunks(domain(Xc))) |> all
+        @test domainchunks(Xc.result) |> size == (10, 5)
+        @test map(x->size(x) == (10, 20), domainchunks(Xc.result)) |> all
     end
     test_dist(rand(100, 100))
     test_dist(sprand(100, 100, 0.1))
@@ -56,8 +56,8 @@ end
         @test gather(X1') == X'
         Xc = compute(X1')
         @test chunks(Xc) |> size == (div(y, 20), div(x,10))
-        @test chunks(domain(Xc)) |> size == (div(y, 20), div(x, 10))
-        @test map(x->size(x) == (20, 10), chunks(domain(Xc))) |> all
+        @test domainchunks(Xc.result) |> size == (div(y, 20), div(x, 10))
+        @test map(x->size(x) == (20, 10), domainchunks(Xc.result)) |> all
     end
     test_transpose(rand(100, 100))
     test_transpose(rand(100, 120))
@@ -69,15 +69,15 @@ end
     function test_mul(X)
         tol = 1e-12
         X1 = Distribute(Blocks(10, 20), X)
-        @test_throws BoundsError compute(X1*X1)
+        @test_throws DimensionMismatch compute(X1*X1)
         X2 = compute(X1'*X1)
         X3 = compute(X1*X1')
         @test norm(gather(X2) - X'X) < tol
         @test norm(gather(X3) - X*X') < tol
         @test chunks(X2) |> size == (2, 2)
         @test chunks(X3) |> size == (4, 4)
-        @test map(x->size(x) == (20, 20), chunks(domain(X2))) |> all
-        @test map(x->size(x) == (10, 10), chunks(domain(X3))) |> all
+        @test map(x->size(x) == (20, 20), domainchunks(X2.result)) |> all
+        @test map(x->size(x) == (10, 10), domainchunks(X3.result)) |> all
     end
     test_mul(rand(40, 40))
 

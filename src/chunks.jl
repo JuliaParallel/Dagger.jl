@@ -118,18 +118,20 @@ A collection of Parts put together to form a bigger logical chunk
 
 Fields:
  - parttype: The type of the data represented by the Cat
- - domain: The domain of the combined chunk and chunks (`DomainSplit`)
+ - domain: The domain of the concatenated Chunk
  - chunks: the chunks which form the chunks of the Cat
 """
 type Cat <: AbstractChunk
     parttype::Type
-    domain::DomainSplit
-    chunks::AbstractArray
+    domain::Domain
+    domainchunks
+    chunks
 end
 
 domain(c::Cat) = c.domain
 parttype(c::Cat) = c.parttype
 chunks(x::Cat) = x.chunks
+domainchunks(x::Cat) = x.domainchunks
 persist!(x::Cat) = (for p in chunks(x); persist!(p); end)
 
 function gather(ctx, chunk::Cat)
@@ -138,18 +140,18 @@ function gather(ctx, chunk::Cat)
     @sync for i in 1:length(ps_input)
         @async ps[i] = gather(ctx, ps_input[i])
     end
-    cat_data(parttype(chunk), chunk.domain, ps)
+    cat_data(parttype(chunk), domain(chunk), domainchunks(chunk), ps)
 end
 
 """
 `view` of a `Cat` chunk returns a `Cat` of view chunks
 """
 function view(c::Cat, d)
-    sub_parts, subdomains = lookup_parts(chunks(c), chunks(domain(c)), d)
-    if length(sub_parts) == 1
-        sub_parts[1]
+    subchunks, subdomains = lookup_parts(chunks(c), domainchunks(c), d)
+    if length(subchunks) == 1
+        subchunks[1]
     else
-        Cat(parttype(c), DomainSplit(alignfirst(d), subdomains), sub_parts)
+        Cat(parttype(c), alignfirst(d), subdomains, subchunks)
     end
 end
 
