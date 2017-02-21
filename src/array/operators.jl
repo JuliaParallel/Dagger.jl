@@ -119,22 +119,22 @@ function stage(ctx, node::BCast)
         ac, bc = domainchunks(inputs[1]), domainchunks(inputs[2])
         if length(a) == 1 && length(b) != 1
             map(chunks(inputs[2])) do p
-                Thunk(broadcast_f, (chunks(inputs[1])[1], p))
+                Thunk(broadcast_f, chunks(inputs[1])[1], p)
             end, b, bc
         elseif length(a) != 1 && length(b) == 1
             map(chunks(inputs[1])) do p
-                Thunk(broadcast_f, (p, chunks(inputs[2])[1]))
+                Thunk(broadcast_f, p, chunks(inputs[2])[1])
             end, a, ac
         else
             @assert domain(a) == domain(b)
             map(map(chunks, inputs)...) do x, y
-                Thunk(broadcast_f, (x, y))
+                Thunk(broadcast_f, x, y)
             end, a, ac
         end
     else
         # TODO: include broadcast semantics in this.
         map(map(chunks, inputs)...) do ps...
-            Thunk(broadcast_f, (ps...,))
+            Thunk(broadcast_f, ps...)
         end, domain(inputs[1]), domainchunks(inputs[1])
     end
 
@@ -153,7 +153,7 @@ Base.@deprecate mappart(args...) mapchunk(args...)
 function stage(ctx, node::MapChunk)
     inputs = map(x->cached_stage(ctx, x), node.input)
     thunks = map(map(chunks, inputs)...) do ps...
-        Thunk(node.f, (ps...,))
+        Thunk(node.f, ps...)
     end
 
     Cat(Any, domain(inputs[1]), domainchunks(inputs[1]), thunks)

@@ -20,10 +20,10 @@ function size(x::Transpose)
 end
 
 ctranspose(x::LazyArray) = Transpose(ctranspose, x)
-ctranspose(x::AbstractChunk) = Thunk(ctranspose, (x,))
+ctranspose(x::AbstractChunk) = Thunk(ctranspose, x)
 
 transpose(x::LazyArray) = Transpose(transpose, x)
-transpose(x::AbstractChunk) = Thunk(transpose, (x,))
+transpose(x::AbstractChunk) = Thunk(transpose, x)
 
 function ctranspose(x::ArrayDomain{2})
     d = indexes(x)
@@ -142,8 +142,8 @@ function (+)(a::ArrayDomain, b::ArrayDomain)
     a
 end
 
-(*)(a::AbstractChunk, b::AbstractChunk) = Thunk(*, (a,b))
-(+)(a::AbstractChunk, b::AbstractChunk) = Thunk(+, (a,b))
+(*)(a::AbstractChunk, b::AbstractChunk) = Thunk(*, a,b)
+(+)(a::AbstractChunk, b::AbstractChunk) = Thunk(+, a,b)
 
 # we define our own matmat and matvec multiply
 # for computing the new domains and thunks.
@@ -263,7 +263,7 @@ end
 function _scale(l, r)
     res = similar(r, Any)
     for i=1:length(l)
-        res[i,:] = map(x->Thunk((a,b) -> Diagonal(a)*b, (l[i], x)), r[i,:])
+        res[i,:] = map(x->Thunk((a,b) -> Diagonal(a)*b, l[i], x), r[i,:])
     end
     res
 end

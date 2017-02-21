@@ -68,7 +68,7 @@ end
 
 function stage(ctx, tc::TupleCompute)
     t = map(c -> thunkize(ctx, cached_stage(ctx, c)), tc.comps)
-    Thunk(tuple, t)
+    Thunk(tuple, t...)
 end
 compute(ctx, x::Tuple) = compute(ctx, TupleCompute(x))
 
@@ -138,7 +138,7 @@ function thunkize(ctx, c::Cat)
         sz = size(chunks(c))
         dmn = domain(c)
         dmnchunks = domainchunks(c)
-        Thunk(thunks; meta=true) do results...
+        Thunk(thunks...; meta=true) do results...
             t = chunktype(results[1])
             Cat(t, dmn, dmnchunks, reshape(AbstractChunk[results...], sz))
         end
@@ -238,7 +238,7 @@ function fire_task!(ctx, proc, state, chan, node_order)
     thunk = pop!(state[:ready])
     @logmsg("W$(proc.pid) + $thunk ($(thunk.f)) input:$(thunk.inputs)")
     push!(state[:running], thunk)
-    if thunk.administrative
+    if thunk.meta
         # Run it on the parent node
         # do not _move data.
         p = OSProc(myid())

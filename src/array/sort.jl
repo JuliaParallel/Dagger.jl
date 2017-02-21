@@ -40,10 +40,10 @@ function mapchunk_eager(f, ctx, xs, T, name)
     ps = chunks(xs)
     master=OSProc(1)
     #@dbg timespan_start(ctx, name, 0, master)
-    thunks = Thunk[Thunk(f(i), (ps[i],), get_result=true)
+    thunks = Thunk[Thunk(f(i), ps[i], get_result=true)
                  for i in 1:length(ps)]
 
-    res = compute(ctx, Thunk((xs...)->T[xs...], (thunks...), meta=true))
+    res = compute(ctx, Thunk((xs...)->T[xs...], thunks..., meta=true))
     #@dbg timespan_end(ctx, name, 0, master)
     res
 end
@@ -172,7 +172,7 @@ end
 
 function merge_thunk(ps, starts, lasts, ord)
     ranges = map(UnitRange, starts, lasts)
-    Thunk((map((p, r) -> Dagger.view(p, ArrayDomain(r)), ps, ranges)...)) do xs...
+    Thunk(map((p, r) -> Dagger.view(p, ArrayDomain(r)), ps, ranges)...) do xs...
         merge_sorted(ord, xs...)
     end
 end

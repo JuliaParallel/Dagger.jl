@@ -1,4 +1,4 @@
-export tothunk, Thunk
+export Thunk
 
 let counter=0
     global next_id
@@ -13,44 +13,32 @@ type Thunk <: AbstractChunk
     inputs::Tuple
     id::Int
     get_result::Bool # whether the worker should send the result or only the metadata
-    administrative::Bool
+    meta::Bool
     persist::Bool
-    function Thunk(f, inputs, id, get_res, meta,persist)
-        x = new(f, inputs, id, get_res, meta,persist)
-        _thunk_dict[id] = x
-        x
+    function Thunk(f, xs...;
+                   id::Int=next_id(),
+                   get_result::Bool=false,
+                   meta::Bool=false,
+                   persist::Bool=false)
+        thunk = new(f,xs,id,get_result,meta,persist)
+        _thunk_dict[id] = thunk
+        thunk
     end
 end
-Thunk(f::Function, xs::Tuple;
-      id::Int=next_id(),
-      get_result::Bool=false,
-      meta::Bool=false,
-      persist::Bool=false) =
-      Thunk(f,xs,id,get_result,meta,persist)
-
-Thunk(f::Function, xs::AbstractArray;
-      id::Int=next_id(),
-      get_result::Bool=false,
-      meta::Bool=false,
-      persist::Bool=false) =
-      Thunk(f,(xs...), id=id,get_result=get_result,meta=meta,persist=persist)
-
-tothunk(f; kwargs...) = (args...) -> Thunk(f, args; kwargs...)
 
 persist!(t::Thunk) = (t.persist=true; t)
 
-# cut down 30kgs in microseconds with one weird trick
-@generated function compose{N}(f, g, t::NTuple{N})
-    if N <= 4
-      ( :(()->f(g())),
-        :((a)->f(g(a))),
-        :((a,b)->f(g(a,b))),
-        :((a,b,c)->f(g(a,b,c))),
-        :((a,b,c,d)->f(g(a,b,c,d))), )[N+1]
-    else
-        :((xs...) -> f(g(xs...)))
-    end
-end
+# @generated function compose{N}(f, g, t::NTuple{N})
+#     if N <= 4
+#       ( :(()->f(g())),
+#         :((a)->f(g(a))),
+#         :((a,b)->f(g(a,b))),
+#         :((a,b,c)->f(g(a,b,c))),
+#         :((a,b,c,d)->f(g(a,b,c,d))), )[N+1]
+#     else
+#         :((xs...) -> f(g(xs...)))
+#     end
+# end
 
 # function Thunk(f::Function, t::Tuple{Thunk})
 #     g = compose(f, t[1].f, t[1].inputs)

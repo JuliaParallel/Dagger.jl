@@ -274,7 +274,7 @@ function stage(ctx, s::Save)
 
     saved_parts = similar(chunks(x), Thunk)
     for i=1:length(chunks(x))
-        saved_parts[i] = Thunk(save_part, (i, chunks(x)[i]))
+        saved_parts[i] = Thunk(save_part, i, chunks(x)[i])
     end
 
     sz = size(chunks(x))
@@ -287,5 +287,5 @@ function stage(ctx, s::Save)
     end
 
     # The DAG has to block till saving is complete.
-    res = Thunk(save_cat_meta, (saved_parts...); meta=true)
+    res = Thunk(save_cat_meta, saved_parts...; meta=true)
 end
