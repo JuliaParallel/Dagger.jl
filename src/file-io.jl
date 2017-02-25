@@ -41,7 +41,7 @@ end
 """
 special case distmem writing - write to disk on the process with the chunk.
 """
-function save(ctx, chunk::Chunk{DistMem}, file_path::AbstractString)
+function save{X}(ctx, chunk::Chunk{X,DistMem}, file_path::AbstractString)
     pid = chunk.handle.ref.where
 
     remotecall_fetch(pid, file_path, chunk.handle.ref) do path, rref
@@ -98,7 +98,7 @@ function save(ctx, io::IO, chunk::View)
     save(ctx, io, Chunk(gather(ctx, chunk)))
 end
 
-function save(ctx, chunk::Chunk{FileReader}, file_path::AbstractString)
+function save{X}(ctx, chunk::Chunk{X, FileReader}, file_path::AbstractString)
    if abspath(file_path) == abspath(chunk.reader.file)
        chunk
    else
@@ -176,7 +176,7 @@ function save(ctx, io::IO, m::BitArray)
     save(ctx, io, convert(Array{Bool}, m))
 end
 
-function gather{T<:Array}(ctx, c::Chunk{FileReader{T}})
+function gather{X,T<:Array}(ctx, c::Chunk{X,FileReader{T}})
     h = c.handle
     io = open(h.file, "r+")
     seek(io, h.data_offset)
@@ -186,7 +186,7 @@ function gather{T<:Array}(ctx, c::Chunk{FileReader{T}})
     arr
 end
 
-function gather{T<:BitArray}(ctx, c::Chunk{FileReader{T}})
+function gather{X,T<:BitArray}(ctx, c::Chunk{X, FileReader{T}})
     h = c.handle
     io = open(h.file, "r+")
     seek(io, h.data_offset)
@@ -214,7 +214,7 @@ function save{Tv, Ti}(ctx, io::IO, m::SparseMatrixCSC{Tv,Ti})
     m
 end
 
-function gather{T<:SparseMatrixCSC}(ctx, c::Chunk{FileReader{T}})
+function gather{X, T<:SparseMatrixCSC}(ctx, c::Chunk{X, FileReader{T}})
     h = c.handle
     io = open(h.file, "r+")
     seek(io, h.data_offset)
@@ -240,7 +240,7 @@ function gather{T<:SparseMatrixCSC}(ctx, c::Chunk{FileReader{T}})
     SparseMatrixCSC(m, n, colptr, rowval, nnzval)
 end
 
-function getsub{T<:AbstractArray}(ctx, c::Chunk{FileReader{T}}, d)
+function getsub{X,T<:AbstractArray}(ctx, c::Chunk{X,FileReader{T}}, d)
     Chunk(gather(ctx, c)[d])
 end
 

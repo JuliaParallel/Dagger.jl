@@ -27,8 +27,8 @@ function gather end
 """
 A chunk with some data
 """
-type Chunk{I<:ChunkIO} <: AbstractChunk
-    chunktype::Type
+type Chunk{T, I<:ChunkIO} <: AbstractChunk
+    chunktype::Type{T}
     domain::Domain
     handle::I
     persist::Bool
@@ -85,7 +85,7 @@ function gather(ctx, s::View)
     gather(ctx, s.chunk)[s.subdomain]
 end
 # optimized subindexing on DistMem
-function gather(ctx, s::View{Chunk{DistMem}})
+function gather{X}(ctx, s::View{Chunk{X, DistMem}})
     ref = s.chunk.handle.ref
     pid = ref.where
     let d = s.subdomain
@@ -121,8 +121,8 @@ Fields:
  - domain: The domain of the concatenated Chunk
  - chunks: the chunks which form the chunks of the Cat
 """
-type Cat <: AbstractChunk
-    chunktype::Type
+type Cat{T} <: AbstractChunk
+    chunktype::Type{T}
     domain::Domain
     domainchunks
     chunks
@@ -210,7 +210,7 @@ function free!(x::Cat, force=true)
 end
 # Check to see if the node is set to persist
 # if it is foce can override it
-function free!(s::Chunk{DistMem}, force=true)
+function free!{X}(s::Chunk{X, DistMem}, force=true)
     if force || !s.persist
         release_token(s.handle.ref)
     end
