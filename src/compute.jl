@@ -259,7 +259,7 @@ function fire_task!(ctx, proc, state, chan, node_order)
 
     data = Any[state[:cache][n] for n in thunk.inputs]
 
-    async_apply(ctx, proc, thunk.id, thunk.f, data, chan, thunk.get_result)
+    async_apply(ctx, proc, thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist)
 end
 
 
@@ -354,7 +354,7 @@ end
 _move(ctx, to_proc, x) = x
 _move(ctx, to_proc::OSProc, x::AbstractChunk) = gather(ctx, x)
 
-function do_task(ctx, proc, thunk_id, f, data, chan, send_result)
+function do_task(ctx, proc, thunk_id, f, data, chan, send_result, persist)
         @dbg timespan_start(ctx, :comm, thunk_id, proc)
         fetched = map(x->_move(ctx, proc, x), data)
         @dbg timespan_end(ctx, :comm, thunk_id, proc)
@@ -362,7 +362,7 @@ function do_task(ctx, proc, thunk_id, f, data, chan, send_result)
         @dbg timespan_start(ctx, :compute, thunk_id, proc)
         try
             res = f(fetched...)
-            put!(chan, (proc, thunk_id, send_result ? res : tochunk(res))) #todo: add more metadata
+            put!(chan, (proc, thunk_id, send_result ? res : tochunk(res, persist=persist))) #todo: add more metadata
         catch ex
             bt = catch_backtrace()
             put!(chan, (proc, thunk_id, CapturedException(ex, bt)))
@@ -371,8 +371,8 @@ function do_task(ctx, proc, thunk_id, f, data, chan, send_result)
     nothing
 end
 
-function async_apply(ctx, p::OSProc, thunk_id, f, data, chan, send_res)
-    Base.remote_do(do_task, p.pid, ctx, p, thunk_id, f, data, chan, send_res)
+function async_apply(ctx, p::OSProc, thunk_id, f, data, chan, send_res, persist)
+    Base.remote_do(do_task, p.pid, ctx, p, thunk_id, f, data, chan, send_res, persist)
 end
 
 function debug_compute(ctx::Context, args...; profile=false)

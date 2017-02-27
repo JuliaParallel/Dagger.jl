@@ -54,9 +54,9 @@ gather(ctx, io::DistMem) = fetch(io.ref)
 """
 Create a chunk from a sequential object.
 """
-function tochunk(x)
+function tochunk(x; persist=false)
     ref = make_token(x)
-    Chunk(typeof(x), domain(x), DistMem(ref), false)
+    Chunk(typeof(x), domain(x), DistMem(ref), true)
 end
 tochunk(x::AbstractChunk) = x
 
