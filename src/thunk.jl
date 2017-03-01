@@ -1,4 +1,4 @@
-export Thunk
+export Thunk, delayed
 
 let counter=0
     global next_id
@@ -24,6 +24,10 @@ type Thunk <: AbstractChunk
         _thunk_dict[id] = thunk
         thunk
     end
+end
+
+function delayed(f; kwargs...)
+    (args...) -> Thunk(f, args...; kwargs...)
 end
 
 persist!(t::Thunk) = (t.persist=true; t)
