@@ -23,14 +23,13 @@ function gather end
 
 ###### Chunk ######
 
-@compat abstract type ChunkIO end
 """
 A chunk with some data
 """
-type Chunk{T, I<:ChunkIO} <: AbstractChunk
+type Chunk{T, H} <: AbstractChunk
     chunktype::Type{T}
-    domain::Domain
-    handle::I
+    domain
+    handle::H
     persist::Bool
 end
 
@@ -45,18 +44,14 @@ end
 
 
 ### ChunkIO
-
-immutable DistMem <: ChunkIO
-    ref::MemToken
-end
-gather(ctx, io::DistMem) = fetch(io.ref)
+gather(ctx, ref::MemToken) = fetch(ref)
 
 """
 Create a chunk from a sequential object.
 """
 function tochunk(x; persist=false)
     ref = make_token(x)
-    Chunk(typeof(x), domain(x), DistMem(ref), true)
+    Chunk(typeof(x), domain(x), ref, true)
 end
 tochunk(x::AbstractChunk) = x
 
@@ -84,9 +79,8 @@ function gather(ctx, s::View)
     # A View{T<:Chunk{X}} can try to make this efficient for X
     gather(ctx, s.chunk)[s.subdomain]
 end
-# optimized subindexing on DistMem
-function gather{X}(ctx, s::View{Chunk{X, DistMem}})
-    ref = s.chunk.handle.ref
+function gather{X}(ctx, s::View{Chunk{X, MemToken}})
+    ref = s.chunk.handle
     pid = ref.where
     let d = s.subdomain
         remotecall_fetch(x -> fetch(x)[d], pid, ref)
@@ -210,9 +204,9 @@ function free!(x::Cat, force=true)
 end
 # Check to see if the node is set to persist
 # if it is foce can override it
-function free!{X}(s::Chunk{X, DistMem}, force=true)
+function free!{X}(s::Chunk{X, MemToken}, force=true)
     if force || !s.persist
-        release_token(s.handle.ref)
+        release_token(s.handle)
     end
 end
 free!(s::AbstractChunk, force=true) = nothing

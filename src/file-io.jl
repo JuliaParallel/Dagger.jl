@@ -1,6 +1,6 @@
 export save, load
 
-type FileReader{T} <: ChunkIO
+type FileReader{T}
     file::AbstractString
     chunktype::Type{T}
     data_offset::Int
@@ -41,10 +41,10 @@ end
 """
 special case distmem writing - write to disk on the process with the chunk.
 """
-function save{X}(ctx, chunk::Chunk{X,DistMem}, file_path::AbstractString)
-    pid = chunk.handle.ref.where
+function save{X}(ctx, chunk::Chunk{X,MemToken}, file_path::AbstractString)
+    pid = chunk.handle.where
 
-    remotecall_fetch(pid, file_path, chunk.handle.ref) do path, rref
+    remotecall_fetch(pid, file_path, chunk.handle) do path, rref
         open(path, "w") do io
             save(ctx, io, chunk, file_path)
         end
@@ -268,7 +268,7 @@ function stage(ctx, s::Save)
         saved = save(ctx, p, path)
 
         # release reference created for the purpose of save
-        release_token(p.handle.ref)
+        release_token(p.handle)
         saved
     end
 
