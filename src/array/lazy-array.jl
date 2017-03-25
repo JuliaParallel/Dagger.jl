@@ -2,7 +2,7 @@ import Base: ==
 using Compat
 
 @compat abstract type LazyArray{T, N} <: AbstractArray{T, N} end
-Base.linearindexing(x::LazyArray) = Base.LinearSlow()
+@compat Base.IndexStyle(::Type{<:LazyArray}) = IndexCartesian()
 
 function save(p::LazyArray, name::AbstractString)
     Save(p, name)

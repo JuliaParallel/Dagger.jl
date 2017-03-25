@@ -28,7 +28,7 @@ function stage(ctx, sidx::SetIndex)
 
     groups = map(group_indices, subdmns.cumlength, indexes(d))
     sz = map(length, groups)
-    pieces = Array(AbstractChunk, sz)
+    pieces = Array{AbstractChunk}(sz)
     for i = CartesianRange(sz)
         idx_and_dmn = map(getindex, groups, i.I)
         idx = map(x->x[1], idx_and_dmn)

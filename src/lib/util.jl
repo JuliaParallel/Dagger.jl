@@ -125,6 +125,14 @@ macro dbg(expr)
     end
 end
 
+if VERSION < v"0.6.0-dev"
+    function reduced_dims(x, dim)
+        Base.reduced_dims(size(x), dim)
+    end
+else
+    reduced_dims(x, dim) = Base.reduced_indices(indices(x), dim)
+end
+
 function treereducedim(op, xs::Array, dim::Int)
     l = size(xs, dim)
     colons = Any[Colon() for i=1:length(size(xs))]
@@ -135,7 +143,7 @@ function treereducedim(op, xs::Array, dim::Int)
         colons[dim] = [i]
         @compat view(xs, colons...)
     end for i=1:l])
-    reshape(ys[:], Base.reduced_dims(size(xs), dim))
+    reshape(ys[:], reduced_dims(xs, dim))
 end
 
 function treereducedim(op, xs::Array, dim::Tuple)
@@ -143,7 +151,7 @@ function treereducedim(op, xs::Array, dim::Tuple)
 end
 
 function setindex{N}(x::NTuple{N}, idx, v)
-    map(ifelse, ntuple(x->is(idx, x), Val{N}), ntuple(x->v, Val{N}), x)
+    map(ifelse, ntuple(x->idx === x, Val{N}), ntuple(x->v, Val{N}), x)
 end
 
 if VERSION < v"0.6.0-dev"

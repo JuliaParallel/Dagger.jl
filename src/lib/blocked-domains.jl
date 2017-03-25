@@ -24,7 +24,7 @@ end
 
 getindex(x::DomainBlocks, idx::Int...) = _getindex(x,idx)
 
-Base.linearindexing(x::DomainBlocks) = Base.LinearSlow()
+@compat Base.IndexStyle(::Type{<:DomainBlocks}) = IndexCartesian()
 
 function Base.ctranspose(x::DomainBlocks{2})
     DomainBlocks(reverse(x.start), reverse(x.cumlength))
