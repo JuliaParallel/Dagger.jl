@@ -158,7 +158,7 @@ cat_data(::Type{Any}, dom::Domain, subdomains, ps) =
 
 function cat_data{T<:AbstractArray}(::Type{T}, dom, subdoms, ps)
 
-    arr = Array{eltype(T)}(size(dom))
+    arr = similar(ps[1], size(dom)...)
 
     if isempty(ps)
         @assert isempty(dom)
