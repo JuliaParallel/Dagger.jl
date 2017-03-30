@@ -156,7 +156,23 @@ domain(x::AbstractArray) = ArrayDomain([1:l for l in size(x)])
 cat_data(::Type{Any}, dom::Domain, subdomains, ps) =
     cat_data(typeof(ps[1]), dom, subdomains, ps)
 
+function emptyarray{T<:Array}(::Type{T}, dims...)
+    T(dims...)
+end
+
+function emptyarray{Tv,Ti}(::Type{SparseMatrixCSC{Tv,Ti}}, m,n)
+    spzeros(Tv, Ti, m, n)
+end
+
+function emptyarray{Tv,Ti}(::Type{SparseVector{Tv,Ti}}, n)
+    SparseVector(n, Ti[], Tv[])
+end
+
 function cat_data{T<:AbstractArray}(::Type{T}, dom, subdoms, ps)
+
+    if isempty(ps)
+        return emptyarray(T, size(dom)...)
+    end
 
     arr = similar(ps[1], size(dom)...)
 
