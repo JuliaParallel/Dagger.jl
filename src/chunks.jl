@@ -12,6 +12,7 @@ memory / storage / network location.
 @compat abstract type AbstractChunk end
 
 chunks(x::AbstractChunk) = x
+affinity(::AbstractChunk) = []
 
 """
     gather(context, chunk::AbstractChunk)
@@ -37,6 +38,8 @@ domain(c::Chunk) = c.domain
 chunktype(c::Chunk) = c.chunktype
 persist!(t::Chunk) = (t.persist=true; t)
 shouldpersist(p::Chunk) = t.persist
+affinity(c::Chunk) = affinity(c.handle)
+
 function gather(ctx, chunk::Chunk)
     # delegate fetching to handle by default.
     gather(ctx, chunk.handle)
@@ -45,6 +48,7 @@ end
 
 ### ChunkIO
 gather(ctx, ref::MemToken) = fetch(ref)
+affinity(c::MemToken) = [OSProc(c.where)]
 
 """
 Create a chunk from a sequential object.
@@ -74,6 +78,7 @@ end
 domain(c::View) = c.domain
 chunktype(c::View) = c.chunktype
 persist!(x::View) = persist!(x.chunk)
+affinity(c::View) = affinity(c.chunk)
 
 function gather(ctx, s::View)
     # A View{T<:Chunk{X}} can try to make this efficient for X
@@ -127,6 +132,7 @@ chunktype(c::Cat) = c.chunktype
 chunks(x::Cat) = x.chunks
 domainchunks(x::Cat) = x.domainchunks
 persist!(x::Cat) = (for p in chunks(x); persist!(p); end)
+affinity(c::Cat) = [Set(reduce(vcat, map(affinity, c.chunks)))...]
 
 function gather(ctx, chunk::Cat)
     ps_input = chunks(chunk)
@@ -211,6 +217,7 @@ function free!{X}(s::Chunk{X, MemToken}, force=true)
 end
 free!(s::AbstractChunk, force=true) = nothing
 free!(s::View, force=true) = nothing
+
 
 Base.@deprecate_binding AbstractPart AbstractChunk
 Base.@deprecate_binding Part Chunk

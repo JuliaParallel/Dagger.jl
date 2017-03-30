@@ -226,6 +226,7 @@ function build_timespans(events)
 end
 
 macro logmsg(ex)
+    #:(println($(esc(ex))))
 end
 
 

@@ -150,11 +150,13 @@ thunkize(ctx, x::AbstractChunk) = x
 thunkize(ctx, x::Thunk) = x
 function finish_task!(state, node, node_order; free=true)
     deps = sort([i for i in state[:dependents][node]], by=node_order)
+    immediate_next = false
     for dep in deps
         set = state[:waiting][dep]
         pop!(set, node)
         if isempty(set)
             pop!(state[:waiting], dep)
+            immediate_next = true
             push!(state[:ready], dep)
         end
         # todo: free data
@@ -177,6 +179,7 @@ function finish_task!(state, node, node_order; free=true)
     end
     state[:finished] = node
     pop!(state[:running], node)
+    immediate_next
 end
 
 free!(x, force=true) = x # catch-all for non-chunks
@@ -204,7 +207,8 @@ function compute(ctx, d::Thunk)
     # start off some tasks
     for p in ps
         isempty(state[:ready]) && break
-        fire_task!(ctx, p, state, chan, node_order)
+        task = pop_with_affinity!(state[:ready], p)
+        fire_task!(ctx, task, p, state, chan, node_order)
     end
     @dbg timespan_end(ctx, :scheduler_init, 0, master)
 
@@ -223,10 +227,16 @@ function compute(ctx, d::Thunk)
         # update them
         @dbg timespan_start(ctx, :scheduler, thunk_id, master)
 
-        finish_task!(state, node, node_order)
+        immediate_next = finish_task!(state, node, node_order)
 
         while !isempty(state[:ready]) && length(state[:running]) < length(ps)
-            fire_task!(ctx, proc, state, chan, node_order)
+            if immediate_next
+                # fast path
+                thunk = pop!(state[:ready])
+            else
+                thunk = pop_with_affinity!(state[:ready], proc)
+            end
+            fire_task!(ctx, thunk, proc, state, chan, node_order)
         end
         @dbg timespan_end(ctx, :scheduler, thunk_id, master)
     end
@@ -234,8 +244,18 @@ function compute(ctx, d::Thunk)
     state[:cache][d]
 end
 
-function fire_task!(ctx, proc, state, chan, node_order)
-    thunk = pop!(state[:ready])
+function pop_with_affinity!(tasks, proc)
+    for i=length(tasks):-1:1
+        if proc in affinity(tasks[i])
+            t = tasks[i]
+            deleteat!(tasks, i)
+            return t
+        end
+    end
+    pop!(tasks)
+end
+
+function fire_task!(ctx, thunk, proc, state, chan, node_order)
     @logmsg("W$(proc.pid) + $thunk ($(thunk.f)) input:$(thunk.inputs)")
     push!(state[:running], thunk)
     if thunk.meta
@@ -252,8 +272,15 @@ function fire_task!(ctx, proc, state, chan, node_order)
 
         #push!(state[:running], thunk)
         state[:cache][thunk] = res
-        finish_task!(state, thunk, node_order; free=false)
-        !isempty(state[:ready]) && fire_task!(ctx, proc, state, chan, node_order)
+        immediate_next = finish_task!(state, thunk, node_order; free=false)
+        if !isempty(state[:ready])
+            if immediate_next
+                thunk = pop!(state[:ready])
+            else
+                thunk = pop_with_affinity!(state[:ready], proc)
+            end
+            fire_task!(ctx, thunk, proc, state, chan, node_order)
+        end
         return
     end
 

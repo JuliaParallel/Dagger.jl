@@ -26,6 +26,16 @@ type Thunk <: AbstractChunk
     end
 end
 
+function affinity(t::Thunk)
+    aff = []
+    for inp in inputs(t)
+        if isa(inp, AbstractChunk)
+            aff = vcat(aff, affinity(inp))
+        end
+    end
+    aff
+end
+
 function delayed(f; kwargs...)
     (args...) -> Thunk(f, args...; kwargs...)
 end
