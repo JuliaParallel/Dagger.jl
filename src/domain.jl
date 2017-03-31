@@ -176,11 +176,6 @@ function cat_data{T<:AbstractArray}(::Type{T}, dom, subdoms, ps)
 
     arr = similar(ps[1], size(dom)...)
 
-    if isempty(ps)
-        @assert isempty(dom)
-        return arr
-    end
-
     for (d, chunk) in zip(subdoms, ps)
         setindex!(arr, chunk, indexes(d)...)
     end

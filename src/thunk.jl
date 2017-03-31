@@ -66,36 +66,10 @@ Base.isequal(x::Thunk, y::Thunk) = x.id==y.id
 
 get_sub(x::AbstractChunk, d) = view(x,d)
 get_sub(x, d) = tochunk(x[d])
+
 function view(thunk::Thunk, d::Domain, T=Any)
     Thunk(x->get_sub(x,d), (thunk,))
 end
-
-##### Macro sugar #####
-function async_call(expr::Expr)
-    if expr.head == :call
-        f = expr.args[1]
-        args = map(async_call, expr.args[2:end])
-        :(Thunk($f, ($(args...),)))
-    elseif expr.head == :(=)
-        cll = async_call(expr.args[2])
-        :($x = $cll)
-    end
-end
-
-function async_call(expr)
-    expr
-end
-
-macro par(expr)
-    if expr.head in [:(=), :call]
-        async_call(expr) |> esc
-    elseif expr.head == :block
-        Expr(:block, map(async_call, expr.args)...) |> esc
-    else
-        error("@par only works for function call and assignments")
-    end
-end
-
 
 function Base.show(io::IO, p::Thunk)
     write(io, "*$(p.id)*")
