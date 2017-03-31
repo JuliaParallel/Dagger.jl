@@ -48,26 +48,26 @@ function mapchunk_eager(f, ctx, xs, T, name)
     res
 end
 
-function broadcast1(ctx, f, xs::Cat, m,T)
+function broadcast1(ctx, f, xs::Cat, m)
     ps = chunks(xs)
     @assert size(m, 1) == length(ps)
-    mapchunk_eager(ctx, xs,Vector{T},:broadcast1) do i
+    mapchunk_eager(ctx, xs,Vector,:broadcast1) do i
         inp = vec(m[i,:])
         function (p)
-            map(x->f(p, x)::T, inp)
+            map(x->f(p, x), inp)
         end
-    end |> x->matrixize(x,T) |> x->permutedims(x, [2,1])
+    end |> x->matrixize(x, Any) |> x->permutedims(x, [2,1])
 end
 
-function broadcast2(ctx, f, xs::Cat, m,v,T)
+function broadcast2(ctx, f, xs::Cat, m,v)
     ps = chunks(xs)
     @assert size(m, 1) == length(ps)
-    mapchunk_eager(ctx, xs,Vector{T},:broadcast2) do i
+    mapchunk_eager(ctx, xs,Vector,:broadcast2) do i
         inp = vec(m[i,:])
         function (p)
-            map((x,y)->f(p, x, y)::T, inp, vec(v))
+            map((x,y)->f(p, x, y), inp, vec(v))
         end
-    end |> x->matrixize(x,T) |> x->permutedims(x, [2,1])
+    end |> x->matrixize(x,Any) |> x->permutedims(x, [2,1])
 end
 
 function select(ctx, A, ranks, ord)
@@ -84,11 +84,12 @@ function select(ctx, A, ranks, ord)
     while any(x->x>0, Ns)
         iter+=1
         # find medians
-        ms = broadcast1(ctx, submedian, A, active_ranges, Float64)
+        ms = broadcast1(ctx, submedian, A, active_ranges)
         ls = map(length, active_ranges)
-        Ms = sum(ms .* ls, 1) ./ sum(ls, 1)
+
+        Ms = mapslices(x->weightedmedian(x, ls, ord), ms, 1)
         # scatter weighted
-        dists = broadcast2(ctx, (a,r,m)->locate_pivot(a,r,m,ord), A, active_ranges, Ms, Tuple{Int,Int,Int})
+        dists = broadcast2(ctx, (a,r,m)->locate_pivot(a,r,m,ord), A, active_ranges, Ms)
         D = reducedim((xs, x) -> map(+, xs, x), dists, 1, (0,0,0))
         L = Int[x[1] for x in D]
         E = Int[x[2] for x in D]
@@ -97,16 +98,19 @@ function select(ctx, A, ranks, ord)
         found = Int[]
         for i=1:length(ks)
             l = L[i]; e = E[i]; g = G[i]; k = ks[i]
-            if k <= l
-                # discard elements less than M
+            if k < l
+                # the rank we are looking for is in the lesser-than section
+                # discard elements in the more than or equal sections
                 active_ranges[:,i] = keep_lessthan(dists[:,i], active_ranges[:,i])
                 Ns[i] = l
             elseif k > l + e
-                # discard elements more than M
+                # the rank we are looking for is in the greater-than section
+                # discard elements less than or equal to M
                 active_ranges[:,i] = keep_morethan(dists[:,i], active_ranges[:,i])
                 Ns[i] = g
                 ks[i] = k - (l + e)
-            elseif l < k && k <= l+e
+            elseif l <= k && k <= l+e
+                # we have found a possible splitter!
                 foundat = map(active_ranges[:,i], dists[:,i]) do rng, d
                     l,e,g=d
                     fst = first(rng)+l
@@ -134,24 +138,36 @@ function mid(x::Tuple, y::Tuple)
     map(mid, x, y)
 end
 
-function string_on_numberline(x)
-    acc = 0.0
-    i = start(x)
-    n = 0
-    while i <= endof(x) || n <= 10
-        c, i = next(c, x)
-        acc += Float64(c) / 32^n
-        n += 1
-    end
-    acc
-end
-
 function mid(x::AbstractString, y::AbstractString)
-    mid(string_on_numberline(x), string_on_numberline(y))
+    y
 end
 
 function mid{T<:Dates.TimeType}(x::T, y::T)
     T(mid(Dates.value(x), Dates.value(y)))
+end
+
+function weightedmedian(xs, weights, ord)
+    perm = sortperm(xs)
+    weights = weights[perm]
+    xs = xs[perm]
+    cutoff = sum(weights) / 2
+
+    x = weights[1]
+    i = 1
+    while x <= cutoff
+        if x == cutoff
+            if i < length(xs)
+                return mid(xs[i], xs[i+1])
+            else
+                xs[i]
+            end
+        end
+        x += weights[i]
+        x > cutoff && break
+        x == cutoff && continue
+        i += 1
+    end
+    return mid(xs[i], xs[i])
 end
 
 function sortedmedian(xs)
@@ -168,10 +184,10 @@ end
 function submedian(xs, r)
     xs1 = view(xs, r)
     if isempty(xs1)
-        Nullable{Base.promote_op(mid, eltype(xs1), eltype(xs1))}()
-    else
-        Nullable(sortedmedian(xs1))
+        idx = min(first(r), length(xs))
+        return mid(xs[idx], xs[idx])
     end
+    sortedmedian(xs1)
 end
 
 function keep_lessthan(dists, active_ranges)
@@ -200,7 +216,7 @@ end
 
 function matrixize(xs,T)
     l = isempty(xs) ? 0 : length(xs[1])
-    T[xs[i][j] for j=1:l, i=1:length(xs)]
+    [xs[i][j] for j=1:l, i=1:length(xs)]
 end
 
 function merge_thunk(ps, starts, lasts, ord)
