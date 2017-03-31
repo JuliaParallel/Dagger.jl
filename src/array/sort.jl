@@ -21,76 +21,82 @@ end
 size(x::LazyArray) = size(x.input)
 function compute(ctx, s::Sort)
 
+    # First, we sort each chunk.
     inp = let alg=s.alg, ord = s.order
         compute(ctx, mapchunk(p->sort(p; alg=alg, order=ord), s.input)).result
     end
 
     ps = chunks(inp)
 
+    # We need to persist! the sorted chunks so that further operations
+    # will not remove it.
     persist!(inp)
 
+    # find the ranks to split at
     ls = map(length, domainchunks(inp))
     splitter_ranks = cumsum(ls)[1:end-1]
 
+    # parallel selection
     splitters = select(ctx, inp, splitter_ranks, s.order)
+
     ComputedArray(compute(ctx, shuffle_merge(inp, splitters, s.order)))
 end
 
-function mapchunk_eager(f, ctx, xs, T, name)
-    ps = chunks(xs)
-    master=OSProc(1)
-    #@dbg timespan_start(ctx, name, 0, master)
-    thunks = Thunk[Thunk(f(i), ps[i], get_result=true)
-                 for i in 1:length(ps)]
+function delayed_map_and_gather(f, ctx, Xs...)
 
-    res = compute(ctx, Thunk((xs...)->T[xs...], thunks..., meta=true))
-    #@dbg timespan_end(ctx, name, 0, master)
-    res
-end
+    result_parts = map(delayed(f, get_result=true), Xs...)
+    gather(ctx, delayed(tuple)(result_parts...))
 
-function broadcast1(ctx, f, xs::Cat, m,T)
-    ps = chunks(xs)
-    @assert size(m, 1) == length(ps)
-    mapchunk_eager(ctx, xs,Vector{T},:broadcast1) do i
-        inp = vec(m[i,:])
-        function (p)
-            map(x->f(p, x)::T, inp)
-        end
-    end |> x->matrixize(x,T) |> x->permutedims(x, [2,1])
-end
-
-function broadcast2(ctx, f, xs::Cat, m,v,T)
-    ps = chunks(xs)
-    @assert size(m, 1) == length(ps)
-    mapchunk_eager(ctx, xs,Vector{T},:broadcast2) do i
-        inp = vec(m[i,:])
-        function (p)
-            map((x,y)->f(p, x, y)::T, inp, vec(v))
-        end
-    end |> x->matrixize(x,T) |> x->permutedims(x, [2,1])
 end
 
 function select(ctx, A, ranks, ord)
+    cs = chunks(A)
+    Nc = length(cs)
+    Nr = length(ranks)
+
     ks = copy(ranks)
     lengths = map(length, domainchunks(A))
-    n = sum(lengths)
-    p = length(chunks(A))
-    init_ranges = UnitRange[1:x for x in lengths]
-    active_ranges = matrixize(Array[init_ranges for i=1:length(ks)], UnitRange)
 
-    Ns = Int[n for _ in ks]
-    iter=0
-    result = Pair[]
+    # Initialize the ranges in which we are looking for medians
+    # For eacch chunk it's 1:length of that chunk
+    init_ranges = UnitRange[1:x for x in lengths]
+
+    # there will be Nr active_ranges being searched for each chunk
+    # We create a matrix of ranges containing as many columns as ranks
+    # as many rows as chunks
+    active_ranges = reducehcat([init_ranges for _ in 1:Nr], UnitRange)
+
+    n = sum(lengths)
+    Ns = Int[n for _ in 1:Nr] # Number of elements in the active range
+    iter=0                    # Iteration count
+    result = Pair[]           # contains `rank => median value` pairs
+
     while any(x->x>0, Ns)
-        iter+=1
+        @show iter+=1
         # find medians
-        ms = broadcast1(ctx, submedian, A, active_ranges, Float64)
+        chunk_ranges = [vec(active_ranges[i,:]) for i in 1:Nc]
+
+        chunk_medians = delayed_map_and_gather(ctx, chunk_ranges, cs) do ranges, data
+            # as many ranges as ranks to find
+            map(r->submedian(data, r), ranges)
+        end
+        # medians: a vector Nr medians for each chunk
+
+        tmp = reducehcat(chunk_medians, Any) # Nr x Nc
+        median_matrix = permutedims(tmp, (2,1))
+
         ls = map(length, active_ranges)
-        Ms = sum(ms .* ls, 1) ./ sum(ls, 1)
+        Ms = vec(sum(median_matrix .* ls, 1) ./ sum(ls, 1))
+
         # scatter weighted
-        dists = broadcast2(ctx, (a,r,m)->locate_pivot(a,r,m,ord), A, active_ranges, Ms, Tuple{Int,Int,Int})
-        D = reducedim((xs, x) -> map(+, xs, x), dists, 1, (0,0,0))
-        L = Int[x[1] for x in D]
+        LEGs = delayed_map_and_gather(ctx, cs, chunk_ranges) do chunk, ranges
+            # for each median found right now, locate G,T,E vals
+            map((range, m)->locate_pivot(chunk, range, m, ord), ranges, Ms)
+        end
+
+        LEG_matrix = reducehcat(LEGs, Any)
+        D = reducedim((xs, x) -> map(+, xs, x), LEG_matrix, 2, (0,0,0))
+        L = Int[x[1] for x in D] # length = Nr
         E = Int[x[2] for x in D]
         G = Int[x[3] for x in D]
 
@@ -99,15 +105,15 @@ function select(ctx, A, ranks, ord)
             l = L[i]; e = E[i]; g = G[i]; k = ks[i]
             if k <= l
                 # discard elements less than M
-                active_ranges[:,i] = keep_lessthan(dists[:,i], active_ranges[:,i])
+                active_ranges[:,i] = keep_lessthan(LEG_matrix[i,:], active_ranges[:,i])
                 Ns[i] = l
             elseif k > l + e
                 # discard elements more than M
-                active_ranges[:,i] = keep_morethan(dists[:,i], active_ranges[:,i])
+                active_ranges[:,i] = keep_morethan(LEG_matrix[i,:], active_ranges[:,i])
                 Ns[i] = g
                 ks[i] = k - (l + e)
             elseif l < k && k <= l+e
-                foundat = map(active_ranges[:,i], dists[:,i]) do rng, d
+                foundat = map(active_ranges[:,i], LEG_matrix[i,:]) do rng, d
                     l,e,g=d
                     fst = first(rng)+l
                     lst = fst+e-1
@@ -134,24 +140,12 @@ function mid(x::Tuple, y::Tuple)
     map(mid, x, y)
 end
 
-function string_on_numberline(x)
-    acc = 0.0
-    i = start(x)
-    n = 0
-    while i <= endof(x) || n <= 10
-        c, i = next(c, x)
-        acc += Float64(c) / 32^n
-        n += 1
-    end
-    acc
-end
-
 function mid(x::AbstractString, y::AbstractString)
-    mid(string_on_numberline(x), string_on_numberline(y))
+    y
 end
 
 function mid{T<:Dates.TimeType}(x::T, y::T)
-    T(mid(Dates.value(x), Dates.value(y)))
+    T(ceil(Int, mid(Dates.value(x), Dates.value(y))))
 end
 
 function sortedmedian(xs)
@@ -168,9 +162,11 @@ end
 function submedian(xs, r)
     xs1 = view(xs, r)
     if isempty(xs1)
-        Nullable{Base.promote_op(mid, eltype(xs1), eltype(xs1))}()
+        #Nullable{Base.promote_op(mid, eltype(xs1), eltype(xs1))}()
+        zero(eltype(xs))
     else
-        Nullable(sortedmedian(xs1))
+        #Nullable(sortedmedian(xs1))
+        sortedmedian(xs1)
     end
 end
 
@@ -188,17 +184,20 @@ function keep_morethan(dists, active_ranges)
     end
 end
 
-function locate_pivot(X, r, s, ord)
+# returns number of elements less than
+# equal to and greater than `s` in X within
+# an index range
+function locate_pivot(X, range, s, ord)
     # compute l, e, g
-    X1 = view(X, r)
-    rng = searchsorted(X1, s, ord)
-    l = first(rng) - 1
-    e = length(rng)
+    X1 = view(X, range)
+    output_rng = searchsorted(X1, s, ord)
+    l = first(output_rng) - 1
+    e = length(output_rng)
     g = length(X1) - l - e
     l,e,g
 end
 
-function matrixize(xs,T)
+function reducehcat(xs,T)
     l = isempty(xs) ? 0 : length(xs[1])
     T[xs[i][j] for j=1:l, i=1:length(xs)]
 end

@@ -202,7 +202,7 @@ function compute(ctx, d::Thunk)
     sortord = x -> istask(x[1]) ? x[1].id : 0
     sort_ord = sort(sort_ord, by=sortord)
 
-    node_order = x -> -ord[x]
+    node_order = x -> -get(ord, x, 0)
     state = start_state(deps, node_order)
     # start off some tasks
     for p in ps
@@ -255,6 +255,11 @@ function pop_with_affinity!(tasks, proc)
     pop!(tasks)
 end
 
+function getcached(cache, x::AbstractChunk)
+    istask(x) ? cache[x] : x
+end
+getcached(cache, x) = x
+
 function fire_task!(ctx, thunk, proc, state, chan, node_order)
     @logmsg("W$(proc.pid) + $thunk ($(thunk.f)) input:$(thunk.inputs)")
     push!(state[:running], thunk)
@@ -263,7 +268,7 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
         # do not _move data.
         p = OSProc(myid())
         @dbg timespan_start(ctx, :comm, thunk.id, p)
-        fetched = Any[state[:cache][i] for i in thunk.inputs]
+        fetched = Any[getcached(state[:cache], i) for i in thunk.inputs]
         @dbg timespan_end(ctx, :comm, thunk.id, p)
 
         @dbg timespan_start(ctx, :compute, thunk.id, p)
@@ -284,7 +289,7 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
         return
     end
 
-    data = Any[state[:cache][n] for n in thunk.inputs]
+    data = Any[getcached(state[:cache], n) for n in thunk.inputs]
 
     async_apply(ctx, proc, thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist)
 end
@@ -345,7 +350,7 @@ function order(nodes::AbstractArray, ndeps, c, output=Dict())
     for node in nodes
         c+=1
         output[node] = c
-        nxt = sort(Any[n for n in inputs(node)], by=k->ndeps[k])
+        nxt = sort(Any[n for n in inputs(node)], by=k->get(ndeps,k,0))
         c, output = order(nxt, ndeps, c, output)
     end
     c, output
@@ -372,7 +377,9 @@ function start_state(deps::Dict, node_order)
                 state[:waiting][k] = waiting
             end
         else
-            state[:cache][k] = k
+            if isa(k, AbstractChunk)
+                state[:cache][k] = k
+            end
         end
     end
     state
