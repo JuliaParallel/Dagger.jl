@@ -125,20 +125,53 @@ function select(ctx, A, ranks, ord)
     return sort(result, by=x->x[1])
 end
 
+# mid for common element types
+function mid(x::Number, y::Number)
+    middle(x, y)
+end
+
+function mid(x::Tuple, y::Tuple)
+    map(mid, x, y)
+end
+
+function string_on_numberline(x)
+    acc = 0.0
+    i = start(x)
+    n = 0
+    while i <= endof(x) || n <= 10
+        c, i = next(c, x)
+        acc += Float64(c) / 32^n
+        n += 1
+    end
+    acc
+end
+
+function mid(x::AbstractString, y::AbstractString)
+    mid(string_on_numberline(x), string_on_numberline(y))
+end
+
+function mid{T<:Dates.TimeType}(x::T, y::T)
+    T(mid(Dates.value(x), Dates.value(y)))
+end
+
 function sortedmedian(xs)
    l = length(xs)
    if l % 2 == 0
        i = l >> 1
-       (xs[i]+xs[i+1]) / 2
+       mid(xs[i], xs[i+1])
    else
        i = (l+1) >> 1
-       convert(Float64, xs[i])
+       mid(xs[i], xs[i]) # keep type stability
    end
 end
 
 function submedian(xs, r)
     xs1 = view(xs, r)
-    isempty(xs1) ? 0.0 : sortedmedian(xs1)
+    if isempty(xs1)
+        Nullable{Base.promote_op(mid, eltype(xs1), eltype(xs1))}()
+    else
+        Nullable(sortedmedian(xs1))
+    end
 end
 
 function keep_lessthan(dists, active_ranges)
