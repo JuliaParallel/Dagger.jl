@@ -130,6 +130,10 @@ function select(ctx, A, ranks, ord)
 end
 
 # mid for common element types
+function mid(x, y)
+    y
+end
+
 function mid(x::Number, y::Number)
     middle(x, y)
 end
@@ -138,9 +142,6 @@ function mid(x::Tuple, y::Tuple)
     map(mid, x, y)
 end
 
-function mid(x::AbstractString, y::AbstractString)
-    y
-end
 
 function mid{T<:Dates.TimeType}(x::T, y::T)
     T(mid(Dates.value(x), Dates.value(y)))
