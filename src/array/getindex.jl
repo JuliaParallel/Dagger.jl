@@ -33,7 +33,7 @@ end
 function stage(ctx, gidx::GetIndexScalar)
     inp = cached_stage(ctx, gidx.input)
     s = view(inp, ArrayDomain(gidx.idx))
-    Thunk(x->x[1], s, get_result=true)
+    delayed(first, get_result=true)(s)
 end
 
 Base.getindex(c::LazyArray, idx::ArrayDomain) = GetIndex(c, indexes(idx))

@@ -35,11 +35,11 @@ function stage(ctx, sidx::SetIndex)
         local_dmn = ArrayDomain(map(x->x[2], idx_and_dmn))
         s = subdmns[idx...]
         part_to_set = sidx.val
-        ps[idx...] = Thunk(ps[idx...]) do p
-            q = copy(p)
-            q[indexes(project(s, local_dmn))...] = part_to_set
-            q
-        end
+        ps[idx...] = delayed(function (p)
+                q = copy(p)
+                q[indexes(project(s, local_dmn))...] = part_to_set
+                q
+            end)(ps[idx...])
     end
     inp.chunks = ps
     inp

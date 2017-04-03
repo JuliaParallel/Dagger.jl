@@ -10,12 +10,12 @@ global _thunk_dict = Dict{Int, Any}()
 # A thing to run
 type Thunk <: AbstractChunk
     f::Function
-    inputs::Tuple
+    inputs::AbstractArray
     id::Int
     get_result::Bool # whether the worker should send the result or only the metadata
-    meta::Bool
+    meta::Bool       # a meta task is performed on the master node with only the metadata of input chunks
     persist::Bool
-    function Thunk(f, xs...;
+    function Thunk(f, xs::AbstractVector;
                    id::Int=next_id(),
                    get_result::Bool=false,
                    meta::Bool=false,
@@ -37,7 +37,11 @@ function affinity(t::Thunk)
 end
 
 function delayed(f; kwargs...)
-    (args...) -> Thunk(f, args...; kwargs...)
+    (args...) -> Thunk(args->f(args...), [args...]; kwargs...)
+end
+
+function delayed_vec(f; kwargs...)
+    (xs::AbstractArray) -> Thunk(f, xs; kwargs...)
 end
 
 persist!(t::Thunk) = (t.persist=true; t)
@@ -76,7 +80,7 @@ function Base.show(io::IO, p::Thunk)
 end
 
 inputs(x::Thunk) = x.inputs
-inputs(x) = ()
+inputs(x) = []
 
 istask(x::Thunk) = true
 istask(x) = false

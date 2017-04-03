@@ -40,7 +40,7 @@ function stage(ctx, a::AllocateArray)
     subdomains = a.domainchunks
     thunks = similar(subdomains, Thunk)
     for i=1:length(subdomains)
-        thunks[i] = Thunk(alloc, i, size(subdomains[i]))
+        thunks[i] = delayed(alloc)(i, size(subdomains[i]))
     end
     Cat(Array{a.eltype, dims}, a.domain, subdomains, thunks)
 end
