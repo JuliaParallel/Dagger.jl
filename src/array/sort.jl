@@ -144,7 +144,7 @@ end
 
 
 function mid{T<:Dates.TimeType}(x::T, y::T)
-    T(mid(Dates.value(x), Dates.value(y)))
+    x + (y-x)÷2
 end
 
 function weightedmedian(xs, weights, ord)
