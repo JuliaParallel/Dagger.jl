@@ -148,6 +148,10 @@ end
     X = Distribute(Blocks(10), x)
     @test gather(sort(X)) == sort(x)
     @test gather(sort(X, rev=true)) == sort(x, rev=true)
+
+    x = [("A",1), ("A",2), ("B",1)]
+    y = compute(Distribute(Blocks(1), x))
+    @test gather(sort(y)) == x
 end
 
 @testset "reducedim" begin

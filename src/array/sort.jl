@@ -131,20 +131,11 @@ end
 
 # mid for common element types
 function mid(x, y)
-    y
-end
-
-function mid(x::Number, y::Number)
-    middle(x, y)
+    x
 end
 
 function mid(x::Tuple, y::Tuple)
     map(mid, x, y)
-end
-
-
-function mid{T<:Dates.TimeType}(x::T, y::T)
-    x + (y-x)÷2
 end
 
 function weightedmedian(xs, weights, ord)
