@@ -32,8 +32,8 @@ function compute(ctx, s::Sort)
     ls = map(length, domainchunks(inp))
     splitter_ranks = cumsum(ls)[1:end-1]
 
-    splitters = select(ctx, inp, splitter_ranks, s.order)
-    ComputedArray(compute(ctx, shuffle_merge(inp, splitters, s.order)))
+    splitters = pselect(ctx, inp, splitter_ranks, s.order)
+    ComputedArray(compute(ctx, shuffle_merge(inp, splitter_ranks, splitters, s.order)))
 end
 
 function mapchunk_eager(f, ctx, xs, T, name)
@@ -70,7 +70,7 @@ function broadcast2(ctx, f, xs::Cat, m,v)
     end |> x->matrixize(x,Any) |> x->permutedims(x, [2,1])
 end
 
-function select(ctx, A, ranks, ord)
+function pselect(ctx, A, ranks, ord)
     ks = copy(ranks)
     lengths = map(length, domainchunks(A))
     n = sum(lengths)
@@ -121,12 +121,15 @@ function select(ctx, A, ranks, ord)
                 push!(found, i)
             end
         end
-        found_mask = isempty(found) ? ones(Bool, length(ks)) : Bool[!(x in found) for x in 1:length(ks)]
-        active_ranges = active_ranges[:, found_mask]
-        Ns = Ns[found_mask]
-        ks = ks[found_mask]
+        notfound_mask = ones(Bool, length(ks))
+        notfound_mask[found] = false
+        active_ranges = active_ranges[:, notfound_mask]
+        Ns = Ns[notfound_mask]
+        ks = ks[notfound_mask]
     end
-    return sort(result, by=x->x[1])
+    firsts = map(first, result)
+    perm = sortperm(firsts, order=ord)
+    return result[perm]
 end
 
 # mid for common element types
@@ -218,17 +221,28 @@ function merge_thunk(ps, starts, lasts, ord)
     end
 end
 
-function shuffle_merge(A, splitter_indices, ord)
+function shuffle_merge(A, ranks, splitter_indices, ord)
     ps = chunks(A)
     # splitter_indices: array of (splitter => vector of p index ranges) in sorted order
     starts = ones(Int, length(ps))
     merges = [begin
-        lasts = map(last, idxs)
+        lasts = map(first, idxs).-1 # First, all elements less than that of the required rank
+        i = 1
+        while sum(lasts) < rank
+            reqd = rank - sum(lasts)
+            if i > length(idxs)
+                error("Median of wrong rank found")
+            end
+            available = min(reqd, length(idxs[i]))
+            lasts[i] += available
+            i += 1
+        end
+
         thnk = merge_thunk(ps, starts, lasts, ord)
         sz = sum(lasts.-starts.+1)
         starts = lasts.+1
         thnk,sz
-        end for (val, idxs) in splitter_indices]
+        end for (rank, idxs) in zip(ranks, map(last, splitter_indices))]
     ls = map(length, domainchunks(A))
     thunks = vcat(merges, (merge_thunk(ps, starts, ls, ord), sum(ls.-starts.+1)))
     part_lengths = map(x->x[2], thunks)

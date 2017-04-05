@@ -152,6 +152,10 @@ end
     x = [("A",1), ("A",2), ("B",1)]
     y = compute(Distribute(Blocks(1), x))
     @test gather(sort(y)) == x
+
+    x = ones(10)
+    y = compute(Distribute(Blocks(3), x))
+    @test map(x->length(gather(x)), compute(sort(y)).result.chunks) == [3,3,3,1]
 end
 
 @testset "reducedim" begin
