@@ -149,9 +149,3 @@ function setindex{N}(x::NTuple{N}, idx, v)
     map(ifelse, ntuple(x->idx === x, Val{N}), ntuple(x->v, Val{N}), x)
 end
 
-if VERSION < v"0.6.0-dev"
-    eval(:(module Iterators
-        const filter = Base.filter
-    end))
-end
-

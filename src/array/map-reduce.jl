@@ -123,7 +123,7 @@ function stage(ctx, r::Reducedim)
     c = domainchunks(inp)
     colons = Any[Colon() for x in size(c)]
     nd=ndims(domain(inp))
-    colons[[Iterators.filter(d->d<=nd, r.dims)...]] = 1
+    colons[[Compat.Iterators.filter(d->d<=nd, r.dims)...]] = 1
     dmn = c[colons...]
     d = reducedim(domain(inp), r.dims)
     ds = reducedim(domainchunks(inp), r.dims)

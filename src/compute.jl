@@ -365,7 +365,7 @@ function start_state(deps::Dict, node_order)
     state[:waiting_data] = copy(deps)
     for k in nodes
         if istask(k)
-            waiting = Set{Any}(Iterators.filter(istask, inputs(k)))
+            waiting = Set{Any}(Compat.Iterators.filter(istask, inputs(k)))
             if isempty(waiting)
                 push!(state[:ready], k)
             else
