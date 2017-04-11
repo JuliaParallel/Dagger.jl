@@ -292,10 +292,10 @@ function size(c::Concat)
     (sz...,)
 end
 
-function cat(idx::Int, ds::ArrayDomain...)
-    h = (ds[1])
+function cat(idx::Int, d::ArrayDomain, ds::ArrayDomain...)
+    h = (d)
     out_idxs = [x for x in indexes(h)]
-    len = sum(map(x->length(indexes(x)[idx]), ds))
+    len = sum(map(x->length(indexes(x)[idx]), (d, ds...)))
     fst = first(out_idxs[idx])
     out_idxs[idx] = fst:(fst+len-1)
     ArrayDomain(out_idxs)

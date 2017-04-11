@@ -24,7 +24,7 @@ function stage(ctx, node::Map)
     Cat(Any, domain(primary), domainchunks(primary), thunks)
 end
 
-map(f, xs::LazyArray...) = Map(f, xs)
+map(f, x::LazyArray, xs::LazyArray...) = Map(f, (x, xs...))
 map(f, x::AbstractChunk) = map(f, Computed(x))
 
 #### Reduce
