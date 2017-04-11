@@ -26,16 +26,11 @@ convert(::Type{Bytes}, n::Integer) = Bytes(n)
 
 ##### Base patches ######
 
-if VERSION < v"0.5.0-dev"
-    const RemoteChannel = RemoteRef
-end
+_intersect(x,y) = intersect(x,y)
 
-import Base.intersect
-# Add some niceties to Base.intersect
-
-intersect(::Colon, ::Colon) = Colon()
-intersect(::Colon, r) = r
-intersect(r, ::Colon) = r
+_intersect(::Colon, ::Colon) = Colon()
+_intersect(::Colon, r) = r
+_intersect(r, ::Colon) = r
 
 
 ##### Utility functions ######
@@ -125,7 +120,7 @@ macro dbg(expr)
     end
 end
 
-if VERSION < v"0.6.0-dev"
+if !isdefined(Base, :reduced_indices)
     function reduced_dims(x, dim)
         Base.reduced_dims(size(x), dim)
     end

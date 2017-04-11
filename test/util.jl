@@ -2,9 +2,9 @@ import Dagger: DistData, refs
 @everywhere begin
     type RemoteTestSet <: Test.AbstractTestSet
         description::AbstractString
-        hostref::RemoteRef
+        hostref::RemoteChannel
     end
-    RemoteTestSet(desc; hostref=RemoteRef()) =
+    RemoteTestSet(desc; hostref=RemoteChannel()) =
         RemoteTestSet(desc, hostref)
 
     function Test.record(ts::RemoteTestSet, t)
@@ -26,7 +26,7 @@ function test_each_ref(f::Function, node::DistData, args::Vector)
     test_results = Array{Any}(length(refs(node)))
     host_testset = Test.get_testset()
 
-    result_ref = RemoteRef()
+    result_ref = RemoteChannel()
     @async while true
         pid, result = take!(result_ref)
         if isa(result, Test.Fail)

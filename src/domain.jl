@@ -123,7 +123,7 @@ function intersect(a::ArrayDomain, b::ArrayDomain)
     if a === b
         return a
     end
-    ArrayDomain(map((x, y) -> intersect(x, y), indexes(a), indexes(b)))
+    ArrayDomain(map((x, y) -> _intersect(x, y), indexes(a), indexes(b)))
 end
 
 function project(a::ArrayDomain, b::ArrayDomain)
