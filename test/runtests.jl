@@ -5,3 +5,4 @@ using Dagger
 
 include("domain.jl")
 include("array.jl")
+include("cache.jl")

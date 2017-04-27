@@ -14,26 +14,38 @@ type Thunk <: AbstractChunk
     id::Int
     get_result::Bool # whether the worker should send the result or only the metadata
     meta::Bool
-    persist::Bool
+    persist::Bool # don't `free!` result after computing
+    cache::Bool   # release the result giving the worker an opportunity to
+                  # cache it
+    cache_ref::Nullable
     function Thunk(f, xs...;
                    id::Int=next_id(),
                    get_result::Bool=false,
                    meta::Bool=false,
-                   persist::Bool=false)
-        thunk = new(f,xs,id,get_result,meta,persist)
+                   persist::Bool=false,
+                   cache::Bool=false,
+                   cache_ref::Nullable{Any}=Nullable{Any}(),
+                  )
+        thunk = new(f,xs,id,get_result,meta,persist, cache, cache_ref)
         _thunk_dict[id] = thunk
         thunk
     end
 end
 
 function affinity(t::Thunk)
-    aff = []
+    if t.cache && !isnull(t.cache_ref)
+        affinity(get(t.cache_ref))
+    end
+    aff = Dict{Processor,Int}()
     for inp in inputs(t)
         if isa(inp, AbstractChunk)
-            aff = vcat(aff, affinity(inp))
+            for a in affinity(inp)
+                proc, sz = a
+                aff[proc] = get(aff, proc, 0) + sz
+            end
         end
     end
-    aff
+    sort!(collect(aff), by=last,rev=true)
 end
 
 function delayed(f; kwargs...)
@@ -41,6 +53,7 @@ function delayed(f; kwargs...)
 end
 
 persist!(t::Thunk) = (t.persist=true; t)
+cache_result!(t::Thunk) = (t.cache=true; t)
 
 # @generated function compose{N}(f, g, t::NTuple{N})
 #     if N <= 4

@@ -100,9 +100,9 @@ function stage(ctx, x::Cached)
     x
 end
 
-free!(x::Computed, force=true) = free!(x.result,force)
+free!(x::Computed; force=true, cache=false) = free!(x.result,force=force, cache=cache)
 function finalize_computed!(x::Computed)
-    @schedule free!(x, true) # @schedule needed because gc can't yield
+    @schedule free!(x; force=true) # @schedule needed because gc can't yield
 end
 
 gather(ctx, x::Computed) = gather(ctx, x.result)
@@ -151,6 +151,9 @@ thunkize(ctx, x::Thunk) = x
 function finish_task!(state, node, node_order; free=true)
     deps = sort([i for i in state[:dependents][node]], by=node_order)
     immediate_next = false
+    if istask(node) && node.cache
+        node.cache_ref = Nullable{Any}(state[:cache][node])
+    end
     for dep in deps
         set = state[:waiting][dep]
         pop!(set, node)
@@ -171,7 +174,7 @@ function finish_task!(state, node, node_order; free=true)
             if free && isempty(s)
                 if haskey(state[:cache], inp)
                     _node = state[:cache][inp]
-                    free!(_node, false)
+                    free!(_node, force=false, cache=(istask(inp) && inp.cache))
                     pop!(state[:cache], inp)
                 end
             end
@@ -181,8 +184,6 @@ function finish_task!(state, node, node_order; free=true)
     pop!(state[:running], node)
     immediate_next
 end
-
-free!(x, force=true) = x # catch-all for non-chunks
 
 ###### Scheduler #######
 """
@@ -256,8 +257,31 @@ function pop_with_affinity!(tasks, proc)
 end
 
 function fire_task!(ctx, thunk, proc, state, chan, node_order)
-    @logmsg("W$(proc.pid) + $thunk ($(thunk.f)) input:$(thunk.inputs)")
+    @logmsg("W$(proc.pid) + $thunk ($(thunk.f)) input:$(thunk.inputs) cache:$(thunk.cache) $(thunk.cache_ref)")
     push!(state[:running], thunk)
+    if thunk.cache && !isnull(thunk.cache_ref)
+        # the result might be already cached
+        data = unrelease(get(thunk.cache_ref)) # ask worker to keep the data around
+                                          # till this compute cycle frees it
+        if !isnull(data)
+            @logmsg("cache hit: $(get(thunk.cache_ref))")
+            state[:cache][thunk] = get(data)
+            immediate_next = finish_task!(state, thunk, node_order; free=false)
+            if !isempty(state[:ready])
+                if immediate_next
+                    thunk = pop!(state[:ready])
+                else
+                    thunk = pop_with_affinity!(state[:ready], proc)
+                end
+                fire_task!(ctx, thunk, proc, state, chan, node_order)
+            end
+            return
+        else
+            thunk.cache_ref = Nullable{Any}()
+            @logmsg("cache miss: $(thunk.cache_ref)")
+        end
+    end
+
     if thunk.meta
         # Run it on the parent node
         # do not _move data.
@@ -333,8 +357,8 @@ Given a root node of the DAG, calculates a total order for tie-braking
     i.e. total number of tasks depending on the result of the said node.
 
 Args:
-    - ndeps: result of `noffspring`
     - node: root node
+    - ndeps: result of `noffspring`
 """
 function order(node::Thunk, ndeps)
     order([node], ndeps, 0)[2]
@@ -383,7 +407,7 @@ _move(ctx, to_proc::OSProc, x::AbstractChunk) = gather(ctx, x)
 
 function do_task(ctx, proc, thunk_id, f, data, send_result, persist)
     @dbg timespan_start(ctx, :comm, thunk_id, proc)
-    fetched = map(x->_move(ctx, proc, x), data)
+    time_cost = @elapsed fetched = map(x->_move(ctx, proc, x), data)
     @dbg timespan_end(ctx, :comm, thunk_id, proc)
 
     @dbg timespan_start(ctx, :compute, thunk_id, proc)
