@@ -1,14 +1,15 @@
+const Size = Int
+
 # manually-released RemoteRef alternative
 immutable MemToken
     where::Int
     key::Int
-    size::Int # size in bytes
-    released::Bool # has this been released but asked to be cached
+    size::Size # size in bytes
 end
 
 const MAX_MEMORY = Ref{Float64}((Sys.total_memory() / nprocs()) / 2) # half the process's share
-const _mymem = Dict{Int,Any}()
-const _token_order = MemToken[]
+const _mymem = Dict{Int,Tuple{Size, Any}}()
+const freeable_lru = MemToken[]
 
 let token_count = 0
     global next_token_id
@@ -27,38 +28,44 @@ end
 
 function make_token(data)
     sz = data_size(data)
-    tok = MemToken(myid(), next_token_id(), sz, false)
-    total_size = sum(map(x->x.size, _token_order)) + sz
+    tok = MemToken(myid(), next_token_id(), sz)
 
-    i = 1
-    while total_size > MAX_MEMORY[] && i <= length(_token_order)
-        # we need to weed out some old data here
-        # if everything that can be has been cleaned up
-        t = _token_order[i]
-        if t.released
-            filter!(x->x.key != t.key, _token_order)
+    if !isempty(freeable_lru)
+        # take this opportunity to purge cached data if necessary
+        total_size = sum(map(first, values(_mymem))) + sz
+        deleted = Int[]
+        i = 1
+        while total_size > MAX_MEMORY[] && i <= length(freeable_lru)
+            # we need to weed out some old data here
+            # if everything that can be has been cleaned up
+            t = freeable_lru[i]
+            push!(deleted, i)
             x = pop!(_mymem, t.key)
             total_size -= t.size
             @logmsg("cached & released $t - $(t.size)B dropped")
+            i += 1
         end
-        i += 1
+        if !isempty(deleted)
+            deleteat!(freeable_lru, deleted)
+        end
     end
-    push!(_token_order, tok)
-    _mymem[tok.key] = data
+
+    _mymem[tok.key] = (sz,data)
     tok
 end
 
 function release_token(tok, keeparound=false)
     if tok.where == myid()
         if keeparound
-            # set released to true, but don't remove it yet.
-            tok_released = MemToken(tok.where, tok.key, tok.size, true)
-            idx = find(x->x.key == tok.key, _token_order)
-            _token_order[idx] = tok_released
+            # move token to the lru cache
+            # XXX: this doesn't check for duplicates
+            # duplicates are removed in unrelease_token
+            push!(freeable_lru, tok)
             @logmsg("soft-released $tok - $(tok.size)B freed")
         else
-            filter!(x->x.key != tok.key, _token_order)
-            x = pop!(_mymem, tok.key)
+            # XXX: this doesn't check to see if it needs to be removed
+            # from freeable_lru - however the data is released.
+            pop!(_mymem, tok.key)
             @logmsg("removed $tok - $(tok.size)B freed")
         end
     else
@@ -70,7 +77,7 @@ end
 function Base.fetch(t::MemToken)
     if t.where == myid()
         if haskey(_mymem, t.key)
-            return Nullable{Any}(_mymem[t.key])
+            return Nullable{Any}(last(_mymem[t.key]))
         else
             return Nullable{Any}()
         end
@@ -87,16 +94,8 @@ function unrelease_token(tok)
         if !haskey(_mymem, tok.key)
             return false
         end
-        tok_unreleased = MemToken(tok.where, tok.key, tok.size, false)
-        # keep LRU order
-        idx = find(x->x.key == tok.key, _token_order) |> first
-        # copy everything after this token one step left
-        l = length(_token_order)
-        if idx != l
-            _token_order[idx:l-1] = view(_token_order, (idx+1:l))
-            # set the last token to the unreleased token
-            _token_order[end] = tok_unreleased
-        end
+        idx = find(x->x.key == tok.key, freeable_lru)
+        deleteat!(freeable_lru, idx)
         true
     else
         remotecall_fetch(()->unrelease_token(tok), tok.where)

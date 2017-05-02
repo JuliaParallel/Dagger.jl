@@ -7,7 +7,7 @@ using Dagger
     test_extra = 8*10^6
     map(workers()) do pid
         pid=>remotecall_fetch(pid) do
-            totsz = sum(map(x->x.size, Dagger._token_order))
+            totsz = sum(map(first, values(Dagger._mymem)))
             Dagger.MAX_MEMORY[] = totsz + test_extra
         end
     end
