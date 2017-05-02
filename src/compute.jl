@@ -193,13 +193,14 @@ nodes for tie breaking and runs the scheduler.
 function compute(ctx, d::Thunk)
     master = OSProc(myid())
     @dbg timespan_start(ctx, :scheduler_init, 0, master)
+
     ps = procs(ctx)
     chan = Channel{Any}(32)
     deps = dependents(d)
     ndeps = noffspring(deps)
     ord = order(d, ndeps)
 
-    sort_ord = [(k,v) for (k,v) in ord]
+    sort_ord = collect(ord)
     sortord = x -> istask(x[1]) ? x[1].id : 0
     sort_ord = sort(sort_ord, by=sortord)
 
@@ -338,13 +339,16 @@ recursively find the number of taks dependent on each task in the DAG.
 Input: dependents dict
 """
 function noffspring(dpents::Dict)
-    Pair[node => noffspring(node, dpents) for node in keys(dpents)] |> Dict
+    Dict(node => noffspring(node, dpents) for node in keys(dpents))
 end
 
 function noffspring(n, dpents)
-    ds = get(dpents, n, Set()) # dependents of n
-    length(dpents[n]) + reduce(+, 0, [noffspring(d, dpents)
-        for d in ds])
+    if haskey(dpents, n)
+        ds = dpents[n]
+        reduce(+, length(ds), noffspring(d, dpents) for d in ds)
+    else
+        0
+    end
 end
 
 
