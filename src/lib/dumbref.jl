@@ -16,18 +16,18 @@ let token_count = 0
     next_token_id() = (token_count+=1)
 end
 
-function data_size(d)
-    Base.summarysize(d)
+function approx_size(d)
+    Base.summarysize(d) # note: this is accurate but expensive
 end
 
-function data_size(xs::AbstractArray{String})
+function approx_size(xs::AbstractArray{String})
     # doesn't check for redundant references, but
     # really super fast in comparison to summarysize
     sum(map(sizeof, xs))
 end
 
 function make_token(data)
-    sz = data_size(data)
+    sz = approx_size(data)
     tok = MemToken(myid(), next_token_id(), sz)
 
     if !isempty(freeable_lru)

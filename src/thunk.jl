@@ -45,7 +45,12 @@ function affinity(t::Thunk)
             end
         end
     end
-    sort!(collect(aff), by=last,rev=true)
+    aff_vec = collect(aff)
+    if length(aff) > 1
+        sort!(aff_vec, by=last,rev=true)
+    else
+        aff_vec
+    end
 end
 
 function delayed(f; kwargs...)
