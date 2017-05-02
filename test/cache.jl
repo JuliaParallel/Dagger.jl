@@ -1,6 +1,8 @@
 using Base.Test
 using Dagger
+
 @testset "cache" begin
+    @everywhere gc(true)
     # set available memory to 8MB on each worker
     test_extra = 8*10^6
     map(workers()) do pid
@@ -10,7 +12,7 @@ using Dagger
         end
     end
 
-    thunks1 = map(delayed(_ -> (println(myid()); rand(10^5)), cache=true), workers())
+    thunks1 = map(delayed(_ -> rand(10^5), cache=true), workers())
     sum1 = delayed((x...)->sum([x...]))(map(delayed(sum), thunks1)...)
     thunks2 = map(delayed(-), thunks1)
     sum2 = delayed((x...)->sum([x...]))(map(delayed(sum), thunks2)...)

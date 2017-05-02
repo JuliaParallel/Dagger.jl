@@ -88,8 +88,15 @@ function unrelease_token(tok)
             return false
         end
         tok_unreleased = MemToken(tok.where, tok.key, tok.size, false)
-        idx = find(x->x.key == tok.key, _token_order)
-        _token_order[idx] = tok_unreleased
+        # keep LRU order
+        idx = find(x->x.key == tok.key, _token_order) |> first
+        # copy everything after this token one step left
+        l = length(_token_order)
+        if idx != l
+            _token_order[idx:l-1] = view(_token_order, (idx+1:l))
+            # set the last token to the unreleased token
+            _token_order[end] = tok_unreleased
+        end
         true
     else
         remotecall_fetch(()->unrelease_token(tok), tok.where)
