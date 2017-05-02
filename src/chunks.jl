@@ -39,6 +39,14 @@ chunktype(c::Chunk) = c.chunktype
 persist!(t::Chunk) = (t.persist=true; t)
 shouldpersist(p::Chunk) = t.persist
 affinity(c::Chunk) = affinity(c.handle)
+function unrelease{T}(c::Chunk{T,MemToken})
+    if unrelease_token(c.handle)
+        Nullable{Any}(c)
+    else
+        Nullable{Any}()
+    end
+end
+unrelease(c::Chunk) = c
 
 function gather(ctx, chunk::Chunk)
     # delegate fetching to handle by default.
@@ -47,15 +55,22 @@ end
 
 
 ### ChunkIO
-gather(ctx, ref::MemToken) = fetch(ref)
-affinity(c::MemToken) = [OSProc(c.where)]
+function gather(ctx, ref::MemToken)
+    res = fetch(ref)
+    if isnull(res)
+        throw(KeyError(ref))
+    else
+        get(res)
+    end
+end
+affinity(c::MemToken) = [OSProc(c.where)=>c.size]
 
 """
 Create a chunk from a sequential object.
 """
 function tochunk(x; persist=false)
     ref = make_token(x)
-    Chunk(typeof(x), domain(x), ref, true)
+    Chunk(typeof(x), domain(x), ref, persist)
 end
 tochunk(x::AbstractChunk) = x
 
@@ -88,7 +103,7 @@ function gather{X}(ctx, s::View{Chunk{X, MemToken}})
     ref = s.chunk.handle
     pid = ref.where
     let d = s.subdomain
-        remotecall_fetch(x -> fetch(x)[d], pid, ref)
+        remotecall_fetch(x -> get(fetch(x))[d], pid, ref)
     end
 end
 
@@ -203,20 +218,20 @@ function lookup_parts{N}(ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDo
     pieces, out_dmn
 end
 
-function free!(x::Cat, force=true)
+function free!(x::Cat; force=true, cache=false)
     for p in chunks(x)
-        free!(p, force)
+        free!(p, force=force, cache=cache)
     end
 end
 # Check to see if the node is set to persist
 # if it is foce can override it
-function free!{X}(s::Chunk{X, MemToken}, force=true)
+function free!{X}(s::Chunk{X, MemToken}; force=true, cache=false)
     if force || !s.persist
-        release_token(s.handle)
+        release_token(s.handle, cache)
     end
 end
-free!(s::AbstractChunk, force=true) = nothing
-free!(s::View, force=true) = nothing
+free!(s::View; force=true, cache=false) = nothing
+free!(x; force=true,cache=false) = x # catch-all for non-chunks
 
 
 Base.@deprecate_binding AbstractPart AbstractChunk
