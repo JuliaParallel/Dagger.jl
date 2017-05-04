@@ -34,23 +34,26 @@ end
 
 function affinity(t::Thunk)
     if t.cache && !isnull(t.cache_ref)
-        affinity(get(t.cache_ref))
-    end
-    aff = Dict{Processor,Int}()
-    for inp in inputs(t)
-        if isa(inp, AbstractChunk)
-            for a in affinity(inp)
-                proc, sz = a
-                aff[proc] = get(aff, proc, 0) + sz
+        aff_vec = affinity(get(t.cache_ref))
+    else
+        aff = Dict{Processor,Int}()
+        for inp in inputs(t)
+            if isa(inp, AbstractChunk)
+                for a in affinity(inp)
+                    proc, sz = a
+                    aff[proc] = get(aff, proc, 0) + sz
+                end
             end
         end
+        aff_vec = collect(aff)
     end
-    aff_vec = collect(aff)
-    if length(aff) > 1
-        sort!(aff_vec, by=last,rev=true)
-    else
-        aff_vec
-    end
+    @logmsg("$t has affinity: $aff_vec")
+    aff_vec
+   #if length(aff) > 1
+   #    return sort!(aff_vec, by=last,rev=true)
+   #else
+   #    return aff_vec
+   #end
 end
 
 function delayed(f; kwargs...)

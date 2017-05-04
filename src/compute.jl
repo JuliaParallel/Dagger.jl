@@ -248,7 +248,8 @@ end
 
 function pop_with_affinity!(tasks, proc)
     for i=length(tasks):-1:1
-        if proc in affinity(tasks[i])
+        # TODO: use the size
+        if proc in first.(affinity(tasks[i]))
             t = tasks[i]
             deleteat!(tasks, i)
             return t
