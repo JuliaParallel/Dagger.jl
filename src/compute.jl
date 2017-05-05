@@ -255,7 +255,7 @@ function pop_with_affinity!(tasks, proc)
             return t
         end
     end
-    pop!(tasks)
+    return pop!(tasks)
 end
 
 function fire_task!(ctx, thunk, proc, state, chan, node_order)
@@ -289,7 +289,9 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
         # do not _move data.
         p = OSProc(myid())
         @dbg timespan_start(ctx, :comm, thunk.id, p)
-        fetched = Any[state[:cache][i] for i in thunk.inputs]
+        fetched = map(thunk.inputs) do x
+            istask(x) ? state[:cache][x] : x
+        end
         @dbg timespan_end(ctx, :comm, thunk.id, p)
 
         @dbg timespan_start(ctx, :compute, thunk.id, p)
@@ -310,7 +312,9 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
         return
     end
 
-    data = Any[state[:cache][n] for n in thunk.inputs]
+    data = map(thunk.inputs) do x
+        istask(x) ? state[:cache][x] : x
+    end
 
     async_apply(ctx, proc, thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist)
 end
@@ -400,8 +404,6 @@ function start_state(deps::Dict, node_order)
             else
                 state[:waiting][k] = waiting
             end
-        else
-            state[:cache][k] = k
         end
     end
     state
