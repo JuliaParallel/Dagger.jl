@@ -204,7 +204,7 @@ function compute(ctx, d::Thunk)
     sortord = x -> istask(x[1]) ? x[1].id : 0
     sort_ord = sort(sort_ord, by=sortord)
 
-    node_order = x -> -ord[x]
+    node_order = x -> -get(ord, x, 0)
     state = start_state(deps, node_order)
     # start off some tasks
     for p in ps
@@ -403,7 +403,7 @@ function order(nodes::AbstractArray, ndeps, c, output=Dict())
     for node in nodes
         c+=1
         output[node] = c
-        nxt = sort(Any[n for n in inputs(node)], by=k->ndeps[k])
+        nxt = sort(Any[n for n in inputs(node)], by=k->get(ndeps,k,0))
         c, output = order(nxt, ndeps, c, output)
     end
     c, output
