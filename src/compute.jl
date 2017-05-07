@@ -209,8 +209,10 @@ function compute(ctx, d::Thunk)
     # start off some tasks
     for p in ps
         isempty(state[:ready]) && break
-        task = pop_with_affinity!(state[:ready], p)
-        fire_task!(ctx, task, p, state, chan, node_order)
+        task = pop_with_affinity!(ctx, state[:ready], p)
+        if task !== nothing
+            fire_task!(ctx, task, p, state, chan, node_order)
+        end
     end
     @dbg timespan_end(ctx, :scheduler_init, 0, master)
 
@@ -236,9 +238,11 @@ function compute(ctx, d::Thunk)
                 # fast path
                 thunk = pop!(state[:ready])
             else
-                thunk = pop_with_affinity!(state[:ready], proc)
+                thunk = pop_with_affinity!(ctx, state[:ready], proc)
             end
-            fire_task!(ctx, thunk, proc, state, chan, node_order)
+            if thunk !== nothing
+                fire_task!(ctx, thunk, proc, state, chan, node_order)
+            end
         end
         @dbg timespan_end(ctx, :scheduler, thunk_id, master)
     end
@@ -246,16 +250,33 @@ function compute(ctx, d::Thunk)
     state[:cache][d]
 end
 
-function pop_with_affinity!(tasks, proc)
+function pop_with_affinity!(ctx, tasks, proc)
+    parent_affinities = affinity.(tasks)
     for i=length(tasks):-1:1
         # TODO: use the size
-        if proc in first.(affinity(tasks[i]))
+        if proc in first.(parent_affinities[i])
             t = tasks[i]
             deleteat!(tasks, i)
             return t
         end
     end
-    return pop!(tasks)
+    for i=length(tasks):-1:1
+        # use up tasks without affinitites
+        # let the procs with the respective affinities pick up
+        # other tasks
+        if isempty(parent_affinities[i])
+            t = tasks[i]
+            deleteat!(tasks, i)
+            return t
+        end
+        aff = first.(parent_affinities[i])
+        if all(!(p in aff) for p in procs(ctx)) # no proc is ever going to ask for it
+            t = tasks[i]
+            deleteat!(tasks, i)
+            return t
+        end
+    end
+    return nothing
 end
 
 function fire_task!(ctx, thunk, proc, state, chan, node_order)
@@ -273,9 +294,11 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
                 if immediate_next
                     thunk = pop!(state[:ready])
                 else
-                    thunk = pop_with_affinity!(state[:ready], proc)
+                    thunk = pop_with_affinity!(ctx, state[:ready], proc)
                 end
-                fire_task!(ctx, thunk, proc, state, chan, node_order)
+                if thunk !== nothing
+                    fire_task!(ctx, thunk, proc, state, chan, node_order)
+                end
             end
             return
         else
@@ -305,9 +328,11 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
             if immediate_next
                 thunk = pop!(state[:ready])
             else
-                thunk = pop_with_affinity!(state[:ready], proc)
+                thunk = pop_with_affinity!(ctx, state[:ready], proc)
             end
-            fire_task!(ctx, thunk, proc, state, chan, node_order)
+            if thunk !== nothing
+                fire_task!(ctx, thunk, proc, state, chan, node_order)
+            end
         end
         return
     end
