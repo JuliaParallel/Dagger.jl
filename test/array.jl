@@ -5,7 +5,6 @@ Dagger.domain(x::Computed) = domain(x.result)
 
 chunks(x::ComputedArray) = chunks(x.result)
 Dagger.domain(x::ComputedArray) = domain(x.result)
-@testset "Arrays" begin
 
 @testset "rand" begin
     function test_rand(X)
@@ -177,6 +176,4 @@ end
     X = Distribute(Blocks(3,3), x)
     @test gather(setindex(X,1.0, 3:8, 2:7)) == y
     @test gather(X) == x
-end
-
 end

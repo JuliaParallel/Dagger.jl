@@ -238,9 +238,11 @@ function compute(ctx, d::Thunk)
                 # fast path
                 thunk = pop!(state[:ready])
             else
-                thunk = pop_with_affinity!(ctx, state[:ready], proc)
+                thunk = pop_with_affinity!(Context(ps), state[:ready], proc)
             end
-            if thunk !== nothing
+            if thunk === nothing
+                deleteat!(ps, find(ps .== proc)) # this proc has nothing to do
+            else
                 fire_task!(ctx, thunk, proc, state, chan, node_order)
             end
         end
