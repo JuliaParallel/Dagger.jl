@@ -468,7 +468,7 @@ function async_apply(ctx, p::OSProc, thunk_id, f, data, chan, send_res, persist)
 end
 
 function debug_compute(ctx::Context, args...; profile=false)
-    @time res = compute(ctx, args)
+    @time res = compute(ctx, args...)
     get_logs!(ctx.log_sink), res
 end
 
