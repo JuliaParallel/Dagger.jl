@@ -55,7 +55,7 @@ function pselect(ctx, A, ranks, ord)
     lengths = map(length, domainchunks(A))
 
     # Initialize the ranges in which we are looking for medians
-    # For eacch chunk it's 1:length of that chunk
+    # For each chunk it's 1:length of that chunk
     init_ranges = UnitRange[1:x for x in lengths]
 
     # there will be Nr active_ranges being searched for each chunk
@@ -64,7 +64,7 @@ function pselect(ctx, A, ranks, ord)
     active_ranges = reducehcat([init_ranges for _ in 1:Nr], UnitRange)
 
     n = sum(lengths)
-    Ns = Int[n for _ in 1:Nr] # Number of elements in the active range
+    Ns = Int[n for _ in 1:Nr] # Number of elements in the active range set
     iter=0                    # Iteration count
     result = Pair[]           # contains `rank => median value` pairs
 
