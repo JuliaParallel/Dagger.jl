@@ -233,7 +233,7 @@ function compute(ctx, d::Thunk)
 
         immediate_next = finish_task!(state, node, node_order)
 
-        while !isempty(state[:ready]) && length(state[:running]) < length(ps)
+        if !isempty(state[:ready])
             if immediate_next
                 # fast path
                 thunk = pop!(state[:ready])
