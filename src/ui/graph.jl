@@ -55,7 +55,7 @@ function show_plan(t::Thunk)
     write_dag(io, t)
     """digraph {
         graph [layout=dot, rankdir=TB];
-        $(takebuf_string(io))
+        $(String(take!(io)))
     }"""
 end
 
