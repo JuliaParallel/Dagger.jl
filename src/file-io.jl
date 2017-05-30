@@ -55,7 +55,7 @@ function save(ctx, io::IO, chunk::Chunk, file_path)
     meta_io = IOBuffer()
 
     serialize(meta_io, (chunktype(chunk), domain(chunk)))
-    meta = takebuf_array(meta_io)
+    meta = take!(meta_io)
 
     write(io, PARTSPEC)
     write(io, length(meta))
@@ -204,7 +204,7 @@ function save{Tv, Ti}(ctx, io::IO, m::SparseMatrixCSC{Tv,Ti})
 
     typ_io = IOBuffer()
     serialize(typ_io, (Tv, Ti))
-    buf = takebuf_array(typ_io)
+    buf = take!(typ_io)
     write(io, sizeof(buf))
     write(io, buf)
 
