@@ -200,10 +200,6 @@ function compute(ctx, d::Thunk)
     ndeps = noffspring(deps)
     ord = order(d, ndeps)
 
-    sort_ord = collect(ord)
-    sortord = x -> istask(x[1]) ? x[1].id : 0
-    sort_ord = sort(sort_ord, by=sortord)
-
     node_order = x -> -get(ord, x, 0)
     state = start_state(deps, node_order)
     # start off some tasks
