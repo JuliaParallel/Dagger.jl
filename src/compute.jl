@@ -213,21 +213,16 @@ function compute(ctx, d::Thunk)
 
     while !isempty(state[:waiting]) || !isempty(state[:ready]) || !isempty(state[:running])
         proc, thunk_id, res = take!(chan)
-
         if isa(res, CapturedException) || isa(res, RemoteException)
             rethrow(res)
         end
         node = _thunk_dict[thunk_id]
         @logmsg("W$(proc.pid) - $node ($(node.f)) input:$(node.inputs)")
         state[:cache][node] = res
-        #@show state[:cache]
-        #@show ord
-        # if any of this guy's dependents are waiting,
-        # update them
+
+        # if any of this guy's dependents are waiting, update them
         @dbg timespan_start(ctx, :scheduler, thunk_id, master)
-
         immediate_next = finish_task!(state, node, node_order)
-
         if !isempty(state[:ready])
             if immediate_next
                 # fast path
@@ -243,7 +238,6 @@ function compute(ctx, d::Thunk)
         end
         @dbg timespan_end(ctx, :scheduler, thunk_id, master)
     end
-
     state[:cache][d]
 end
 
@@ -337,7 +331,6 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
     data = map(thunk.inputs) do x
         istask(x) ? state[:cache][x] : x
     end
-
     async_apply(ctx, proc, thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist)
 end
 
@@ -359,8 +352,6 @@ function dependents(node::Thunk, deps=Dict())
     deps
 end
 
-
-
 """
 recursively find the number of taks dependent on each task in the DAG.
 Input: dependents dict
@@ -377,7 +368,6 @@ function noffspring(n, dpents)
         0
     end
 end
-
 
 """
 Given a root node of the DAG, calculates a total order for tie-braking
@@ -396,7 +386,6 @@ function order(node::Thunk, ndeps)
 end
 
 function order(nodes::AbstractArray, ndeps, c, output=Dict())
-
     for node in nodes
         c+=1
         output[node] = c
