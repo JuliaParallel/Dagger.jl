@@ -381,17 +381,16 @@ Args:
     - ndeps: result of `noffspring`
 """
 function order(node::Thunk, ndeps)
-    order([node], ndeps, 0)[2]
-end
-
-function order(nodes::AbstractArray, ndeps, c, output=Dict())
-    for node in nodes
-        c+=1
-        output[node] = c
-        nxt = sort(Any[n for n in inputs(node)], by=k->get(ndeps,k,0))
-        c, output = order(nxt, ndeps, c, output)
+    function recur(nodes, s)
+        for n in nodes
+            output[n] = s += 1
+            s = recur(sort!(collect(Any, inputs(n)), by=k->get(ndeps,k,0)), s)
+        end
+        return s
     end
-    c, output
+    output = Dict{Any,Int}()
+    recur([node], 0)
+    return output
 end
 
 function start_state(deps::Dict, node_order)
