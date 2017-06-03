@@ -148,26 +148,25 @@ function thunkize(ctx, c::Cat)
 end
 thunkize(ctx, x::AbstractChunk) = x
 thunkize(ctx, x::Thunk) = x
+
 function finish_task!(state, node, node_order; free=true)
-    deps = sort([i for i in state[:dependents][node]], by=node_order)
-    immediate_next = false
     if istask(node) && node.cache
         node.cache_ref = Nullable{Any}(state[:cache][node])
     end
-    for dep in deps
+    immediate_next = false
+    for dep in sort!(collect(state[:dependents][node]), by=node_order)
         set = state[:waiting][dep]
         pop!(set, node)
         if isempty(set)
             pop!(state[:waiting], dep)
-            immediate_next = true
             push!(state[:ready], dep)
+            immediate_next = true
         end
         # todo: free data
     end
     for inp in inputs(node)
         if inp in keys(state[:waiting_data])
             s = state[:waiting_data][inp]
-            #@show s
             if node in s
                 pop!(s, node)
             end
