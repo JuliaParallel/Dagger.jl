@@ -85,13 +85,6 @@ cache_result!(t::Thunk) = (t.cache=true; t)
 Base.hash(x::Thunk, h::UInt) = hash(x.id, hash(h, 0x7ad3bac49089a05f))
 Base.isequal(x::Thunk, y::Thunk) = x.id==y.id
 
-get_sub(x::AbstractChunk, d) = view(x,d)
-get_sub(x, d) = tochunk(x[d])
-
-function view(thunk::Thunk, d::Domain, T=Any)
-    Thunk(x->get_sub(x,d), (thunk,))
-end
-
 function Base.show(io::IO, p::Thunk)
     write(io, "*$(p.id)*")
 end

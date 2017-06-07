@@ -41,7 +41,7 @@ end
 function stage(ctx, node::Transpose)
     inp = cached_stage(ctx, node.input)
     thunks = _ctranspose(chunks(inp))
-    Cat(chunktype(inp), domain(inp)', domainchunks(inp)', thunks)
+    DArray{eltype(inp),ndims(inp)}(domain(inp)', domainchunks(inp)', thunks)
 end
 
 export Distribute
@@ -63,32 +63,11 @@ size(x::Distribute) = size(domain(x.data))
 Distribute(p::Blocks, data) =
     Distribute(partition(p, domain(data)), data)
 
-#=
-todo
-function auto_partition(data::AbstractArray, chsize)
-    sz = sizeof(data) * B
-    per_chunk = chsize/(sizeof(eltype(data))*B)
-    n = floor(Int, sqrt(per_chunk))
-
-    dims = size(data)
-    if ndims(data) == 1
-        Blocks((floor(Int, per_chunk),))
-    elseif ndims(data)==2
-        Blocks(per_chunk/dims[2], per_chunk/dims[1])
-    end
-end
-
-function Distribute(data::AbstractArray; chsize=64MB)
-    p = auto_partition(data, chsize)
-    Distribute(p, data)
-end
-=#
-
 function stage(ctx, d::Distribute)
-    Cat(chunktype(d.data),
+    DArray{eltype(chunktype(d.data)), ndims(domain(d.data))}(
         domain(d.data),
         d.domainchunks,
-        map(c -> view(d.data, c), d.domainchunks))
+        map(c -> delayed(getindex)(d.data, c), d.domainchunks))
 end
 
 
@@ -227,9 +206,9 @@ end
 
 function stage(ctx, mul::MatMul)
     a, b = stage_operands(ctx, mul, mul.a, mul.b)
-
-    Cat(Any, domain(a)*domain(b),
-        domainchunks(a)*domainchunks(b), _mul(chunks(a), chunks(b); T=Thunk))
+    d = domain(a)*domain(b)
+    DArray{Any, ndims(d)}(d, domainchunks(a)*domainchunks(b),
+                          _mul(chunks(a), chunks(b); T=Thunk))
 end
 
 
@@ -275,7 +254,7 @@ function stage(ctx, scal::Scale)
     @assert size(domain(r), 1) == size(domain(l), 1)
 
     scal_parts = _scale(chunks(l), chunks(r))
-    Cat(Any, domain(r), domainchunks(r), scal_parts)
+    DArray{Any, ndims(r)}(domain(r), domainchunks(r), scal_parts)
 end
 
 immutable Concat{T,N} <: LazyArray{T,N}
@@ -313,8 +292,8 @@ function stage(ctx, c::Concat)
     dmn = cat(c.axis, dmns...)
     dmnchunks = cumulative_domains(cat(c.axis, map(domainchunks, inp)...))
     thunks = cat(c.axis, map(chunks, inp)...)
-    T = promote_type(map(chunktype, inp)...)
-    Cat(T, dmn, dmnchunks, thunks)
+    T = promote_type(map(eltype, inp)...)
+    DArray{T,ndims(dmn)}(dmn, dmnchunks, thunks)
 end
 
 Base.cat(idx::Int, x::LazyArray, xs::LazyArray...) =

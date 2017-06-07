@@ -67,7 +67,7 @@ function save(ctx, io::IO, chunk::Chunk, file_path)
     Chunk(chunktype(chunk), domain(chunk), FileReader(file_path, chunktype(chunk), data_offset, false), false)
 end
 
-function save(ctx, io::IO, chunk::Cat, file_path::AbstractString, saved_parts::AbstractArray)
+function save(ctx, io::IO, chunk::DArray, file_path::AbstractString, saved_parts::AbstractArray)
 
     metadata = (chunktype(chunk), domain(chunk), saved_parts)
 
@@ -75,12 +75,12 @@ function save(ctx, io::IO, chunk::Cat, file_path::AbstractString, saved_parts::A
     write(io, CAT)
     serialize(io, metadata)
 
-    Cat(metadata...)
+    DArray(metadata...)
     # write each child
 end
 
 
-function save(ctx, io::IO, chunk::Cat, file_path)
+function save(ctx, io::IO, chunk::DArray, file_path)
     dir_path = file_path*"_data"
     if !isdir(dir_path)
         mkdir(dir_path)
@@ -92,10 +92,6 @@ function save(ctx, io::IO, chunk::Cat, file_path)
 
     save(ctx, io, chunk, file_path, saved_parts)
     # write each child
-end
-
-function save(ctx, io::IO, chunk::View)
-    save(ctx, io, Chunk(gather(ctx, chunk)))
 end
 
 function save{X}(ctx, chunk::Chunk{X, FileReader}, file_path::AbstractString)
@@ -127,7 +123,7 @@ function load(ctx, file_path::AbstractString; mmap=false)
     if part_typ == PARTSPEC
         c = load(ctx, Chunk, file_path, mmap, f)
     elseif part_typ == CAT
-        c = load(ctx, Cat, file_path, mmap, f)
+        c = load(ctx, DArray, file_path, mmap, f)
     else
         error("Could not determine chunk type")
     end
@@ -151,11 +147,11 @@ function load(ctx, ::Type{Chunk}, fname, mmap, io)
         FileReader(fname, T, meta_len+1, mmap), false))
 end
 
-function load(ctx, ::Type{Cat}, file_path, mmap, io)
+function load(ctx, ::Type{DArray}, file_path, mmap, io)
     dir_path = file_path*"_data"
 
     metadata = deserialize(io)
-    c = Cat(metadata...)
+    c = DArray(metadata...)
     for p in chunks(c)
         if isa(p.handle, FileReader)
             p.handle.mmap = mmap

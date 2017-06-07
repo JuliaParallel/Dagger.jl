@@ -16,14 +16,13 @@ include("processor.jl")
 include("thunk.jl")
 include("compute.jl")
 
-# File IO
-#include("sparse.jl")
-include("file-io.jl")
-
 # Array computations
 include("array/lazy-array.jl")
 include("array/alloc.jl")
 include("array/map-reduce.jl")
+
+# File IO
+include("file-io.jl")
 
 include("array/operators.jl")
 include("array/getindex.jl")

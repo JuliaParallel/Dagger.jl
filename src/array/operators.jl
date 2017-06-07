@@ -138,7 +138,7 @@ function stage(ctx, node::BCast)
         end, domain(inputs[1]), domainchunks(inputs[1])
     end
 
-    Cat(Any, d, dchunks, thunks)
+    DArray{Any, ndims(d)}(d, dchunks, thunks)
 end
 
 export mappart, mapchunk
@@ -156,5 +156,5 @@ function stage(ctx, node::MapChunk)
         Thunk(node.f, ps...)
     end
 
-    Cat(Any, domain(inputs[1]), domainchunks(inputs[1]), thunks)
+    DArray{Any, ndims(inputs[1])}(domain(inputs[1]), domainchunks(inputs[1]), thunks)
 end
