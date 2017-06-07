@@ -4,6 +4,11 @@ export summarize_events
 
 const Timestamp = UInt64
 
+immutable ProfilerResult
+    samples::Vector{UInt64}
+    lineinfo::Base.Profile.LineInfoDict
+end
+
 """
 identifies
 
@@ -19,7 +24,7 @@ immutable Timespan
     start::Timestamp
     finish::Timestamp
     gc_diff::Base.GC_Diff
-    profiler_samples::Array{UInt}
+    profiler_samples::ProfilerResult
 end
 
 immutable Event{phase}
@@ -28,7 +33,7 @@ immutable Event{phase}
     timeline::Any
     timestamp::Timestamp
     gc_num::Base.GC_Num
-    profiler_samples::Array{UInt}
+    profiler_samples::ProfilerResult
 end
 
 Event(phase::Symbol, category::Symbol,
@@ -111,14 +116,14 @@ function raise_event(ctx, phase, category, id,tl, t, gc_num, prof, async)
     end
 end
 
-const _empty_prof = UInt[]
+empty_prof() = ProfilerResult(UInt[], Base.Profile.getdict(UInt[]))
 
 function timespan_start(ctx, category, id, tl, async=isasync(ctx.log_sink))
     isa(ctx.log_sink, NoOpLog) && return # don't go till raise
     if ctx.profile
         Profile.start_timer()
     end
-    raise_event(ctx, :start, category, id, tl, time_ns(), gc_num(), UInt[], async)
+    raise_event(ctx, :start, category, id, tl, time_ns(), gc_num(), empty_prof(), async)
     nothing
 end
 
@@ -130,7 +135,7 @@ function timespan_end(ctx, category, id, tl, async=isasync(ctx.log_sink))
         prof = Profile.fetch()
         Profile.clear()
     end
-    raise_event(ctx, :finish, category, id, tl,time_ns(), gc_num(), prof, async)
+    raise_event(ctx, :finish, category, id, tl,time_ns(), gc_num(), ProfilerResult(prof, Profile.getdict(prof)), async)
     nothing
 end
 
@@ -214,11 +219,8 @@ function pushkey(dict, key1, args...)
 end
 
 function mix_samples(a,b)
-    if length(a) == 0
-        return b
-    else
-        vcat(a,b)
-    end
+    ProfilerResult(vcat(a.samples, b.samples),
+                   merge(a.lineinfo, b.lineinfo))
 end
 
 function build_timespans(events)
@@ -262,14 +264,14 @@ end
 function aggregate_events(xs)
     gc_diff = reduce(add_gc_diff, map(x -> x.gc_diff, xs))
     time_spent = sum(map(x -> x.finish - x.start, xs))
-    profiler_samples = vcat(map(x->x.profiler_samples, xs)...)
+    profiler_samples = treereduce(mix_samples, map(x->x.profiler_samples, xs))
     time_spent, gc_diff, profiler_samples
 end
 
 function summarize_events(time_spent, gc_diff, profiler_samples)
     Base.time_print(time_spent, gc_diff.allocd, gc_diff.total_time, Base.gc_alloc_count(gc_diff))
-    if length(profiler_samples) > 0
-        Profile.print(profiler_samples)
+    if !isempty(profiler_samples.samples)
+        Profile.print(profiler_samples.samples, profiler_samples.lineinfo)
     end
 end
 
