@@ -1,11 +1,11 @@
 export getindex_async
 
-immutable GetIndex{T,N} <: LazyArray{T,N}
-    input::LazyArray
+immutable GetIndex{T,N} <: ArrayOp{T,N}
+    input::ArrayOp
     idx::Tuple
 end
 
-function GetIndex(input::LazyArray, idx::Tuple)
+function GetIndex(input::ArrayOp, idx::Tuple)
     GetIndex{eltype(input), ndims(input)}(input, idx)
 end
 
@@ -26,7 +26,7 @@ end
 size(x::GetIndex) = Base.index_shape(x.input, x.idx...)
 
 immutable GetIndexScalar <: Computation
-    input::LazyArray
+    input::ArrayOp
     idx::Tuple
 end
 
@@ -36,7 +36,7 @@ function stage(ctx, gidx::GetIndexScalar)
     Thunk(x->x[1], s, get_result=true)
 end
 
-Base.getindex(c::LazyArray, idx::ArrayDomain) = GetIndex(c, indexes(idx))
-Base.getindex(c::LazyArray, idx...) = GetIndex(c, idx)
-Base.getindex(c::LazyArray, idx::Integer...) =
+Base.getindex(c::ArrayOp, idx::ArrayDomain) = GetIndex(c, indexes(idx))
+Base.getindex(c::ArrayOp, idx...) = GetIndex(c, idx)
+Base.getindex(c::ArrayOp, idx::Integer...) =
    compute(GetIndexScalar(c, idx))

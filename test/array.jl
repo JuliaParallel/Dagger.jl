@@ -5,7 +5,7 @@ import Dagger: chunks, DArray, domainchunks
         X1 = compute(X)
         X2 = gather(X1)
 
-        @test isa(X, Dagger.LazyArray)
+        @test isa(X, Dagger.ArrayOp)
         @test isa(X1, Dagger.DArray)
         @test X2 |> size == (100, 100)
         @test all(X2 .>= 0.0)

@@ -4,12 +4,12 @@ import Compat: view
 import Base.Sort: Forward, Ordering, Algorithm, defalg, lt
 
 immutable Sort <: Computation
-    input::LazyArray
+    input::ArrayOp
     alg::Algorithm
     order::Ordering
 end
 
-function Base.sort(v::LazyArray;
+function Base.sort(v::ArrayOp;
                alg::Algorithm=defalg(v),
                lt=Base.isless,
                by=identity,
@@ -18,7 +18,7 @@ function Base.sort(v::LazyArray;
     Sort(v, alg, Base.Sort.ord(lt,by,rev,order))
 end
 
-size(x::LazyArray) = size(x.input)
+size(x::ArrayOp) = size(x.input)
 function compute(ctx, s::Sort)
 
     # First, we sort each chunk.

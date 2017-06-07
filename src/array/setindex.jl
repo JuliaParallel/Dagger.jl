@@ -1,13 +1,13 @@
 
 export setindex
 
-immutable SetIndex{T,N} <: LazyArray{T,N}
-    input::LazyArray{T,N}
+immutable SetIndex{T,N} <: ArrayOp{T,N}
+    input::ArrayOp{T,N}
     idx::Tuple
     val
 end
 
-function setindex(x::LazyArray, val, idxs...)
+function setindex(x::ArrayOp, val, idxs...)
     SetIndex(x, idxs, val)
 end
 

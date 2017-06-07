@@ -1,12 +1,12 @@
 
 import Base: ctranspose, transpose, A_mul_Bt, At_mul_B, Ac_mul_B, At_mul_Bt, Ac_mul_Bc, A_mul_Bc
 
-immutable Transpose{T,N} <: LazyArray{T,N}
+immutable Transpose{T,N} <: ArrayOp{T,N}
     f::Function
-    input::LazyArray
+    input::ArrayOp
 end
 
-function Transpose(f,x::LazyArray)
+function Transpose(f,x::ArrayOp)
     @assert 1 <= ndims(x) && ndims(x) <= 2
     Transpose{eltype(x), 2}(f,x)
 end
@@ -19,10 +19,10 @@ function size(x::Transpose)
     end
 end
 
-ctranspose(x::LazyArray) = Transpose(ctranspose, x)
+ctranspose(x::ArrayOp) = Transpose(ctranspose, x)
 ctranspose(x::AbstractChunk) = Thunk(ctranspose, x)
 
-transpose(x::LazyArray) = Transpose(transpose, x)
+transpose(x::ArrayOp) = Transpose(transpose, x)
 transpose(x::AbstractChunk) = Thunk(transpose, x)
 
 function ctranspose(x::ArrayDomain{2})
@@ -46,7 +46,7 @@ end
 
 export Distribute
 
-immutable Distribute{N, T} <: LazyArray{N, T}
+immutable Distribute{N, T} <: ArrayOp{N, T}
     domainchunks
     data::AbstractChunk
 end
@@ -73,9 +73,9 @@ end
 
 import Base: *, +
 
-immutable MatMul{T, N} <: LazyArray{T, N}
-    a::LazyArray
-    b::LazyArray
+immutable MatMul{T, N} <: ArrayOp{T, N}
+    a::ArrayOp
+    b::ArrayOp
 end
 
 function mul_size(a,b)
@@ -88,10 +88,10 @@ end
 size(x::MatMul) = mul_size(x.a, x.b)
 MatMul(a,b) =
   MatMul{promote_type(eltype(a), eltype(b)), length(mul_size(a,b))}(a,b)
-(*)(a::LazyArray, b::LazyArray) = MatMul(a,b)
+(*)(a::ArrayOp, b::ArrayOp) = MatMul(a,b)
 # Bonus method for matrix-vector multiplication
-(*)(a::LazyArray, b::Vector) = MatMul(a,PromotePartition(b))
-(*)(a::AbstractArray, b::LazyArray) = MatMul(PromotePartition(a), b)
+(*)(a::ArrayOp, b::Vector) = MatMul(a,PromotePartition(b))
+(*)(a::AbstractArray, b::ArrayOp) = MatMul(PromotePartition(a), b)
 
 function (*)(a::ArrayDomain{2}, b::ArrayDomain{2})
 
@@ -179,7 +179,7 @@ end
 """
 an operand which should be distributed as per convenience
 """
-function stage_operands{T}(ctx, ::MatMul, a::LazyArray, b::PromotePartition{T,1})
+function stage_operands{T}(ctx, ::MatMul, a::ArrayOp, b::PromotePartition{T,1})
     stg_a = cached_stage(ctx, a)
     dmn_a = domain(stg_a)
     dchunks_a = domainchunks(stg_a)
@@ -192,7 +192,7 @@ function stage_operands{T}(ctx, ::MatMul, a::LazyArray, b::PromotePartition{T,1}
     stg_a, cached_stage(ctx, Distribute(dmn_out, tochunk(b.data)))
 end
 
-function stage_operands(ctx, ::MatMul, a::PromotePartition, b::LazyArray)
+function stage_operands(ctx, ::MatMul, a::PromotePartition, b::ArrayOp)
 
     if size(a, 2) != size(b, 1)
         throw(DimensionMismatch("Cannot promote array of domain $(dmn_b) to multiply with an array of size $(dmn_a)"))
@@ -215,19 +215,19 @@ end
 
 ### Scale
 
-immutable Scale{T,N} <: LazyArray{T,N}
-    l::LazyArray
-    r::LazyArray
+immutable Scale{T,N} <: ArrayOp{T,N}
+    l::ArrayOp
+    r::ArrayOp
 end
-Scale{Tl, Tr, N}(l::LazyArray{Tl}, r::LazyArray{Tr,N}) =
+Scale{Tl, Tr, N}(l::ArrayOp{Tl}, r::ArrayOp{Tr,N}) =
   Scale{promote_type(Tl, Tr), N}(l,r)
 
 size(s::Scale) = size(s.l)
 
-scale(l::Number, r::LazyArray) = BlockwiseOp(x->scale(l, x), (r,))
-scale(l::Vector, r::LazyArray) = scale(PromotePartition(l), r)
-(*)(l::Diagonal, r::LazyArray) = Scale(PromotePartition(l.diag), r)
-scale(l::LazyArray, r::LazyArray) = Scale(l, r)
+scale(l::Number, r::ArrayOp) = BlockwiseOp(x->scale(l, x), (r,))
+scale(l::Vector, r::ArrayOp) = scale(PromotePartition(l), r)
+(*)(l::Diagonal, r::ArrayOp) = Scale(PromotePartition(l.diag), r)
+scale(l::ArrayOp, r::ArrayOp) = Scale(l, r)
 
 function stage_operand(ctx, ::Scale, a, b::PromotePartition)
     ps = domainchunks(a)
@@ -257,7 +257,7 @@ function stage(ctx, scal::Scale)
     DArray{Any, ndims(r)}(domain(r), domainchunks(r), scal_parts)
 end
 
-immutable Concat{T,N} <: LazyArray{T,N}
+immutable Concat{T,N} <: ArrayOp{T,N}
     axis::Int
     inputs::Tuple
 end
@@ -296,15 +296,15 @@ function stage(ctx, c::Concat)
     DArray{T,ndims(dmn)}(dmn, dmnchunks, thunks)
 end
 
-Base.cat(idx::Int, x::LazyArray, xs::LazyArray...) =
+Base.cat(idx::Int, x::ArrayOp, xs::ArrayOp...) =
     Concat(idx, (x, xs...))
 
-Base.hcat(xs::LazyArray...) = cat(2, xs...)
-Base.vcat(xs::LazyArray...) = cat(1, xs...)
+Base.hcat(xs::ArrayOp...) = cat(2, xs...)
+Base.vcat(xs::ArrayOp...) = cat(1, xs...)
 
-A_mul_Bt(x::LazyArray, y::LazyArray) = MatMul(x, y')
-At_mul_B(x::LazyArray, y::LazyArray) = MatMul(x', y)
-Ac_mul_B(x::LazyArray, y::LazyArray) = MatMul(x', y)
-At_mul_Bt(x::LazyArray, y::LazyArray) = MatMul(x', y')
-Ac_mul_Bc(x::LazyArray, y::LazyArray) = MatMul(x', y')
-A_mul_Bc(x::LazyArray, y::LazyArray) = MatMul(x, y')
+A_mul_Bt(x::ArrayOp, y::ArrayOp) = MatMul(x, y')
+At_mul_B(x::ArrayOp, y::ArrayOp) = MatMul(x', y)
+Ac_mul_B(x::ArrayOp, y::ArrayOp) = MatMul(x', y)
+At_mul_Bt(x::ArrayOp, y::ArrayOp) = MatMul(x', y')
+Ac_mul_Bc(x::ArrayOp, y::ArrayOp) = MatMul(x', y')
+A_mul_Bc(x::ArrayOp, y::ArrayOp) = MatMul(x, y')

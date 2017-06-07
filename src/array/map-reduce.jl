@@ -3,7 +3,7 @@ import Base: reduce, map, mapreduce, reducedim
 export reducebykey, reduce_async
 
 #### Map
-immutable Map{T,N} <: LazyArray{T,N}
+immutable Map{T,N} <: ArrayOp{T,N}
     f::Function
     inputs::Tuple
 end
@@ -24,7 +24,7 @@ function stage(ctx, node::Map)
     DArray{Any, ndims(primary)}(domain(primary), domainchunks(primary), thunks)
 end
 
-map(f, x::LazyArray, xs::LazyArray...) = Map(f, (x, xs...))
+map(f, x::ArrayOp, xs::ArrayOp...) = Map(f, (x, xs...))
 
 #### Reduce
 
@@ -33,7 +33,7 @@ import Base: reduce, sum, prod, mean
 immutable ReduceBlock <: Computation
     op::Function
     op_master::Function
-    input::LazyArray
+    input::ArrayOp
     get_result::Bool
 end
 
@@ -43,26 +43,26 @@ function stage(ctx, r::ReduceBlock)
     Thunk((xs...) -> r.op_master(xs), reduced_parts...; meta=true)
 end
 
-reduceblock_async(f, x::LazyArray; get_result=true) = ReduceBlock(f, f, x, get_result)
-reduceblock_async(f, g::Function, x::LazyArray; get_result=true) = ReduceBlock(f, g, x, get_result)
+reduceblock_async(f, x::ArrayOp; get_result=true) = ReduceBlock(f, f, x, get_result)
+reduceblock_async(f, g::Function, x::ArrayOp; get_result=true) = ReduceBlock(f, g, x, get_result)
 
-reduceblock(f, x::LazyArray) = compute(reduceblock_async(f, x))
-reduceblock(f, g::Function, x::LazyArray) =
+reduceblock(f, x::ArrayOp) = compute(reduceblock_async(f, x))
+reduceblock(f, g::Function, x::ArrayOp) =
     compute(reduceblock_async(f, g, x))
 
-reduce_async(f, x::LazyArray) = reduceblock_async(xs->reduce(f,xs), xs->reduce(f,xs), x)
+reduce_async(f, x::ArrayOp) = reduceblock_async(xs->reduce(f,xs), xs->reduce(f,xs), x)
 
-reduce(f, x::LazyArray) = compute(reduce_async(f,x))
+reduce(f, x::ArrayOp) = compute(reduce_async(f,x))
 
-sum(x::LazyArray) = reduceblock(sum, sum, x)
-sum(x::LazyArray, dim::Int) = reducedim(+, x, dim)
-sum(f::Function, x::LazyArray) = reduceblock(a->sum(f, a), sum, x)
-prod(x::LazyArray) = reduceblock(prod, x)
-prod(f::Function, x::LazyArray) = reduceblock(a->prod(f, a), prod, x)
+sum(x::ArrayOp) = reduceblock(sum, sum, x)
+sum(x::ArrayOp, dim::Int) = reducedim(+, x, dim)
+sum(f::Function, x::ArrayOp) = reduceblock(a->sum(f, a), sum, x)
+prod(x::ArrayOp) = reduceblock(prod, x)
+prod(f::Function, x::ArrayOp) = reduceblock(a->prod(f, a), prod, x)
 
-mean(x::LazyArray) = reduceblock(mean, mean, x)
+mean(x::ArrayOp) = reduceblock(mean, mean, x)
 
-mapreduce(f::Function, g::Function, x::LazyArray) = reduce(g, map(f, x))
+mapreduce(f::Function, g::Function, x::ArrayOp) = reduce(g, map(f, x))
 
 function mapreducebykey_seq(f, op,  itr, dict=Dict())
     for x in itr
@@ -83,9 +83,9 @@ reducebykey_seq(op, itr,dict=Dict()) = mapreducebykey_seq(Base.IdFun(), op, itr,
 reducebykey(op, input) = reduceblock(itr->reducebykey_seq(op, itr), merge_reducebykey(op), input)
 
 
-immutable Reducedim{T,N} <: LazyArray{T,N}
+immutable Reducedim{T,N} <: ArrayOp{T,N}
     op::Function
-    input::LazyArray
+    input::ArrayOp
     dims::Tuple
 end
 
@@ -106,8 +106,8 @@ function Reducedim(op, input, dims)
     Reducedim{T,ndims(input)}(op, input, dims)
 end
 
-Base.reducedim(f, x::LazyArray, dims::Tuple) = Reducedim(f,x,dims)
-Base.reducedim(f, x::LazyArray, dims::Int) = Reducedim(f,x,(dims,))
+Base.reducedim(f, x::ArrayOp, dims::Tuple) = Reducedim(f,x,dims)
+Base.reducedim(f, x::ArrayOp, dims::Int) = Reducedim(f,x,(dims,))
 
 function stage(ctx, r::Reducedim)
     inp = cached_stage(ctx, r.input)

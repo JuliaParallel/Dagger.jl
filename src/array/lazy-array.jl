@@ -1,26 +1,26 @@
 import Base: ==
 using Compat
 
-@compat abstract type LazyArray{T, N} <: AbstractArray{T, N} end
-@compat Base.IndexStyle(::Type{<:LazyArray}) = IndexCartesian()
+@compat abstract type ArrayOp{T, N} <: AbstractArray{T, N} end
+@compat Base.IndexStyle(::Type{<:ArrayOp}) = IndexCartesian()
 
-compute(ctx, x::LazyArray) =
+compute(ctx, x::ArrayOp) =
     compute(ctx, cached_stage(ctx, x)::DArray)
 
-gather(ctx, x::LazyArray) =
+gather(ctx, x::ArrayOp) =
     gather(ctx, cached_stage(ctx, x)::DArray)
 
-@compat function Base.show(io::IO, ::MIME"text/plain", x::LazyArray)
+@compat function Base.show(io::IO, ::MIME"text/plain", x::ArrayOp)
     write(io, string(typeof(x)))
     write(io, string(size(x)))
 end
 
-function Base.show(io::IO, x::LazyArray)
+function Base.show(io::IO, x::ArrayOp)
     m = MIME"text/plain"()
     @compat show(io, m, x)
 end
 
-type DArray{T,N} <: LazyArray{T, N}
+type DArray{T,N} <: ArrayOp{T, N}
     domain::Domain
     subdomains::AbstractArray
     chunks::AbstractArray
@@ -85,15 +85,15 @@ function cat_data{T<:SparseMatrixCSC}(::Type{T}, dom, ps)
     hvcat(ntuple(x->n, m), psT...)
 end
 
-function (==)(x::LazyArray, y::LazyArray)
+function (==)(x::ArrayOp, y::ArrayOp)
     x === y || reduce((a,b)->a&&b, map(==, x, y))
 end
 
-function Base.hash(x::LazyArray, i::UInt64)
+function Base.hash(x::ArrayOp, i::UInt64)
     7*object_id(x)-2
 end
 
-function Base.isequal(x::LazyArray, y::LazyArray)
+function Base.isequal(x::ArrayOp, y::ArrayOp)
     x === y
 end
 
