@@ -1,10 +1,10 @@
-import Dagger: chunks, Computed, ComputedArray, domainchunks
+import Dagger: chunks, Computed, DArray, domainchunks
 
 chunks(x::Computed) = chunks(x.result)
 Dagger.domain(x::Computed) = domain(x.result)
 
-chunks(x::ComputedArray) = chunks(x.result)
-Dagger.domain(x::ComputedArray) = domain(x.result)
+chunks(x::DArray) = chunks(x.result)
+Dagger.domain(x::DArray) = domain(x.result)
 
 @testset "rand" begin
     function test_rand(X)
@@ -12,7 +12,7 @@ Dagger.domain(x::ComputedArray) = domain(x.result)
         X2 = gather(X1)
 
         @test isa(X, Dagger.LazyArray)
-        @test isa(X1, Dagger.ComputedArray)
+        @test isa(X1, Dagger.DArray)
         @test isa(X1.result, Dagger.Cat)
         @test X2 |> size == (100, 100)
         @test all(X2 .>= 0.0)

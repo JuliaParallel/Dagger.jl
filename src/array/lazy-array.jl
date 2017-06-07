@@ -18,26 +18,26 @@ function Base.show(io::IO, x::LazyArray)
     @compat show(io, m, x)
 end
 
-immutable ComputedArray{T,N} <: LazyArray{T, N}
+immutable DArray{T,N} <: LazyArray{T, N}
     result::AbstractChunk
 end
 
-function ComputedArray(x::AbstractChunk)
+function DArray(x::AbstractChunk)
     persist!(x)
     nd = ndims(domain(x))
-    ComputedArray{_eltype(chunktype(x)), nd}(x)
+    DArray{_eltype(chunktype(x)), nd}(x)
 end
 
 _eltype(x) = eltype(x)
 _eltype(x::Type{Any}) = Any
 
-size(x::ComputedArray) = size(domain(x.result))
+size(x::DArray) = size(domain(x.result))
 
-compute(ctx, x::ComputedArray) = x
-gather(ctx, x::ComputedArray) = gather(x.result)
-stage(ctx, c::ComputedArray) = c.result
+compute(ctx, x::DArray) = x
+gather(ctx, x::DArray) = gather(x.result)
+stage(ctx, c::DArray) = c.result
 compute(ctx, x::LazyArray) =
-    ComputedArray(compute(ctx, cached_stage(ctx, x)))
+    DArray(compute(ctx, cached_stage(ctx, x)))
 
 function (==)(x::LazyArray, y::LazyArray)
     x === y

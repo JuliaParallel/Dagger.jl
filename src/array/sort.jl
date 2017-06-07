@@ -38,7 +38,7 @@ function compute(ctx, s::Sort)
 
     # parallel selection
     splitters = pselect(ctx, inp, splitter_ranks, s.order)
-    ComputedArray(compute(ctx, shuffle_merge(inp, splitter_ranks, splitters, s.order)))
+    DArray(compute(ctx, shuffle_merge(inp, splitter_ranks, splitters, s.order)))
 end
 
 function delayed_map_and_gather(f, ctx, Xs...)
