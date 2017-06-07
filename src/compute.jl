@@ -270,7 +270,7 @@ function pop_with_affinity!(ctx, tasks, proc)
 end
 
 function fire_task!(ctx, thunk, proc, state, chan, node_order)
-    @logmsg("W$(proc.pid) + $thunk ($(thunk.f)) input:$(thunk.inputs) cache:$(thunk.cache) $(thunk.cache_ref)")
+    @logmsg("W$(proc.pid) + $thunk ($(showloc(thunk.f, length(thunk.inputs)))) input:$(thunk.inputs) cache:$(thunk.cache) $(thunk.cache_ref)")
     push!(state[:running], thunk)
     if thunk.cache && !isnull(thunk.cache_ref)
         # the result might be already cached
@@ -293,7 +293,7 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
             return
         else
             thunk.cache_ref = Nullable{Any}()
-            @logmsg("cache miss: $(thunk.cache_ref)")
+            @logmsg("cache miss: $(thunk.cache_ref) recomputing $(thunk)")
         end
     end
 

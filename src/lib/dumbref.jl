@@ -48,7 +48,7 @@ function make_token(data)
             # if everything that can be has been cleaned up
             t = freeable_lru[i]
             push!(deleted, i)
-            x = pop!(_mymem, t.key)
+            pop!(_mymem, t.key)
             total_size -= t.size
             @logmsg("cached & released $t - $(t.size)B dropped")
             i += 1

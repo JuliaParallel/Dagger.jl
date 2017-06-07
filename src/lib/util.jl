@@ -149,3 +149,12 @@ function setindex{N}(x::NTuple{N}, idx, v)
     map(ifelse, ntuple(x->idx === x, Val{N}), ntuple(x->v, Val{N}), x)
 end
 
+function showloc(f, argcount)
+    args = ntuple(x->Any, argcount)
+    ms = methods(f)
+    if length(ms) == 1
+        string(first(ms))
+    else
+        string(f)
+    end
+end
