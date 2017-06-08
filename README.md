@@ -1,12 +1,53 @@
 # Dagger
 
-**A framework for out-of-core and parallel computation**.
+**A framework for out-of-core and parallel computing**.
 
 [![Build Status](https://travis-ci.org/JuliaParallel/Dagger.jl.svg?branch=master)](https://travis-ci.org/JuliaParallel/Dagger.jl) [![Coverage Status](https://coveralls.io/repos/github/JuliaParallel/Dagger.jl/badge.svg?branch=master)](https://coveralls.io/github/JuliaParallel/Dagger.jl?branch=master)
 
-Dagger allows you to represent huge amounts of data as smaller pieces and compute on the pieces in parallel. The API mimicks Julia's standard library, with a few simple differences, so that it is easy to use. Computation with Dagger uses a scheduler similar to that in [Dask](http://dask.pydata.org/en/latest/). This scheduler tries to minimize the amount of memory allocated at any given time while maximizing CPU utilization. Dagger provides distributed arrays and sparse matrices and operations on them out-of-the-box. Distributed variations of various collection types such as arrays, sparse matrices, NDSparse datastructures or dictionaries can be expressed using the framework.
+At the core of Dagger.jl is a scheduler heavily inspired by [Dask](http://dask.pydata.org/en/latest/). It can run computations represented as directed-acyclic-graphs (DAGs) efficiently on many Julia worker processes.
 
-## Tutorial introduction
+# DAG creation interface
+
+Here is an example DAG:
+
+```julia
+using Dagger
+
+p = delayed(f; options...)(42)
+q = delayed(g)(p)
+r = delayed(h)(53)
+s = delayed(combine)(p, q, r)
+```
+The connections between nodes `p`, `q`, `r` and `s` is represented by this dependency graph:
+
+![graph](https://user-images.githubusercontent.com/25916/26920104-7b9b5fa4-4c55-11e7-97fb-fe5b9e73cae6.png)
+
+`delayed(f; options...)`
+
+Returns a function which when called creates a `Thunk` object representing a call to function `f` with the given arguments. If it is called with other thunks as input, then they form a graph with input nodes directed at the output. The function `f` get the result of evaluating the input thunks.
+
+To compute and fetch the result of a thunk (say `s`), you can call `collect(s)`. `collect` will fetch the result of the computation to the master process. Alternatively, if you want to compute but not fetch the result you can call `compute` on the thunk. This will return a `Chunk` object which references the result. If you pass in a `Chunk` objects as an input to a delayed function, then the function will get executed with the value of the `Chunk` -- this evaluation will likely happen where the input chunks are, to reduce communication.
+ 
+Options to `delayed` are:
+- `get_result::Bool` -- return the actual result to the scheduler instead of `Chunk` objects. Used when `f` explicitly constructs a Chunk or when return value is small (e.g. in case of reduce)
+- `meta::Bool` -- pass the input “Chunk” objects themselves to `f` and not the value contained in them - this is always run on the master process
+- `persist::Bool` -- the result of this Thunk should not be released after it becomes unused in the DAG
+- `cache::Bool` -- cache the result of this Thunk such that if the thunk is evaluated again, one can just reuse the cached value. If it’s been removed from cache, recompute the value.
+
+## Rough high level description of scheduling
+
+- First picks the leaf Thunks and distributes them to available workers. Each worker is given at most 1 task at a time. If input to the node is a Chunk, then workers which already have the chunk are preferred.
+- When a worker finishes a thunk it will return a `Chunk` object to the scheduler.
+- Once the worker has returned a Chunk, scheduler picks the next task for the worker -- this is usually the task the worker immediately made available (if possible). In the small example above, if worker 2 finished `p` it will be given `q` since it will already have the result of `p` which is input to `q`.
+- The scheduler also issues "release" Commands to chunks that are no longer required by nodes in the DAG: for example, when s is computed all of p, q, r are released to free up memory. This can be prevented by passing `persist` or `cache` options to `delayed`.
+
+# Higher level interfaces
+
+Building on this DAG interface, this package also provides a distributed array library. Another notable user of the DAG framework to provide a high-level distributed-table-like interface is [JuliaDB](http://juliadb.org/).
+
+Below is a discussion of the Array interface provided by this package.
+
+## Array interface
 
 To begin, let us add a few worker processes and load Dagger.
 
@@ -85,7 +126,7 @@ sum(X_sq)
 # => 1.0000065091623393e9
 ```
 
-## Distributing data
+### Distributing data
 
 Dagger also allows one to distribute an object from the master process using a certain partition type. In the following example, we are distributing an array of size 1000x1000 with a block partition of 100x100 elements per block.
 
@@ -100,25 +141,6 @@ d = sum(c)
 ```
 
 Dagger starts by cutting up the 1000x1000 array into 100x100 pieces and each process takes up the task of squaring and summing one of these pieces.
-
-### Loading CSV Data
-
-You can load data from a big CSV file in parallel and write it in to disk in two simple calls.
-
-```julia
-x = dist_readdlm("bigdata.csv", ',', 100, cleanup)
-processed_x = compute(save(x, "bigbinarydata"))
-```
-
-100 approximately equal chunks from `bigdata.csv` will be read by the available processors in parallel, passed to Julia's `readdlm` function, and then to the `cleanup` function you provided. Note that `cleanup` must return a matrix. The distribution of the data will be block partitioned, the width of the block will span all columns. For example, if you have 10^6 rows in the CSV files and 20 columns, the each block will contain approximately `10^4x20` elements. We say approximately because `dist_readdlm` divides the input CSV by its size rather than number of lines, each chunk is delimited at the nearest newline.
-
-Once you've loaded the data in this manner, it's a perfect time to slice and dice it and run some statistics on it. Try `processed_x'processed_x` for example, since the number of columns is less, the result of this computation is also a small matrix. E.g. the aforementioned example dataset would yeild a 20x20 matrix as a result.
-
-### Array support
-
-We have seen simple operations like broadcast (namely `.^2`), `reduce` and `sum` on distributed arrays so far. Dagger also supports other essential array operations such as transpose, matrix-matrix multiplication and matrix-vector multiplication.
-
-See the [Array API](#array-api) below for details. Some special features are discussed below.
 
 #### Indexing
 
