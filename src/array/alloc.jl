@@ -1,7 +1,7 @@
 import Base: cat
 export partition
 
-type AllocateArray{T,N} <: LazyArray{T,N}
+type AllocateArray{T,N} <: ArrayOp{T,N}
     eltype::Type{T}
     f::Function
     domain::ArrayDomain{N}
@@ -32,7 +32,7 @@ Base.@deprecate BlockPartition Blocks
 
 function stage(ctx, a::AllocateArray)
     branch = a.domain
-    dims = length(indexes(a.domain))
+    dims = ndims(a.domain)
     alloc = let eltype = a.eltype, f = a.f
         _alloc(idx, sz) = f(idx,eltype, sz)
     end
@@ -40,9 +40,9 @@ function stage(ctx, a::AllocateArray)
     subdomains = a.domainchunks
     thunks = similar(subdomains, Thunk)
     for i=1:length(subdomains)
-        thunks[i] = Thunk(alloc, i, size(subdomains[i]))
+        thunks[i] = delayed(alloc)(i, size(subdomains[i]))
     end
-    Cat(Array{a.eltype, dims}, a.domain, subdomains, thunks)
+    DArray{a.eltype, dims}(a.domain, subdomains, thunks)
 end
 
 function Base.rand(p::Blocks, eltype::Type, dims)

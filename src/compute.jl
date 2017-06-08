@@ -1,153 +1,12 @@
 export stage, cached_stage, compute, debug_compute, cached, free!
 using Compat
 
-"""
-A `Computation` represents a computation to be
-performed on some distributed data
-"""
 @compat abstract type Computation end
 
-"""
-`stage` on a computation creates a set of Thunk objects
-each denoting a smaller work item required to realize a
-computation. The set of thunks are put in a `Cat` to annotate
-metadata about the result such as its type, domain and
-partition scheme.
-"""
-@unimplemented stage(ctx, c::Computation)
-function stage(ctx, node::Cat)
-    node
-end
-
-global _stage_cache = WeakKeyDict{Context, Dict}()
-"""
-A memoized version of stage. It is important that the
-tasks generated for the same Computation have the same
-identity, for example:
-
-    A = rand(Blocks(100,100), Float64, 1000, 1000)
-    compute(A+A')
-
-must not result in computation of A twice.
-"""
-function cached_stage(ctx, x)
-    cache = if !haskey(_stage_cache, ctx)
-        _stage_cache[ctx] = Dict()
-    else
-        _stage_cache[ctx]
-    end
-
-    if haskey(cache, x)
-        cache[x]
-    else
-        cache[x] = stage(ctx, x)
-    end
-end
-
-"""
-Calling `compute` on an `Computation` will make an
-`AbstractChunk` by computing it.
-
-You can call `gather` on the result to get the result
-into the calling process (e.g. a REPL)
-"""
-compute(ctx, x::Computation) = wrap_computed(compute(ctx, cached_stage(ctx, x)))
 compute(x) = compute(Context(), x)
-gather(ctx, x) = gather(ctx, compute(ctx, x))
-gather(x) = gather(Context(), x)
-
-function wrap_computed(x::AbstractChunk)
-    persist!(x)
-    Computed(x)
-end
-wrap_computed(x) = x
-
-immutable TupleCompute <: Computation
-    comps::Tuple
-end
-
-function stage(ctx, tc::TupleCompute)
-    t = map(c -> thunkize(ctx, cached_stage(ctx, c)), tc.comps)
-    Thunk(tuple, t...)
-end
-compute(ctx, x::Tuple) = compute(ctx, TupleCompute(x))
-
-export Computed
-"""
-promote a computed value to a Computation
-"""
-type Computed <: Computation
-    result::AbstractChunk
-    # TODO: Allow passive branching for Save?
-    function Computed(x)
-        c = new(x)
-        finalizer(c, finalize_computed!)
-        c
-    end
-end
-
-"""
-Tell the CF not to remove the result of a computation
-once it's done.
-"""
-immutable Cached <: Computation
-    inp::Computation
-end
-
-cached(x::Computation) = Cached(x)
-function stage(ctx, x::Cached)
-    persist!(cached_stage(ctx, x))
-    x
-end
-
-free!(x::Computed; force=true, cache=false) = free!(x.result,force=force, cache=cache)
-function finalize_computed!(x::Computed)
-    @schedule free!(x; force=true) # @schedule needed because gc can't yield
-end
-
-gather(ctx, x::Computed) = gather(ctx, x.result)
-function stage(ctx, c::Computed)
-    c.result
-end
-
-"""
-`Chunk` and `View` objects are always in computed state,
-this method just returns them.
-"""
-compute(ctx, x::Union{Chunk, View}) = x
-
-"""
-A Cat object may contain a thunk in it, in which case
-we first turn it into a Thunk object and then compute it.
-"""
-function compute(ctx, x::Cat)
-    thunk = thunkize(ctx, x)
-    if isa(thunk, Thunk)
-        compute(ctx, thunk)
-    else
-        x
-    end
-end
-
-"""
-If a Cat tree has a Thunk in it, make the whole thing a big thunk
-"""
-function thunkize(ctx, c::Cat)
-    if any(istask, chunks(c))
-        thunks = map(x -> thunkize(ctx, x), chunks(c))
-        sz = size(chunks(c))
-        dmn = domain(c)
-        dmnchunks = domainchunks(c)
-        Thunk(thunks...; meta=true) do results...
-            t = chunktype(results[1])
-            Cat(t, dmn, dmnchunks, reshape(AbstractChunk[results...], sz))
-        end
-    else
-        c
-    end
-end
-thunkize(ctx, x::AbstractChunk) = x
-thunkize(ctx, x::Thunk) = x
+gather(d) = gather(Context(), d)
+compute(ctx, c::Computation) = compute(ctx, stage(ctx, c))
+gather(ctx, c) = gather(compute(ctx, c))
 
 function finish_task!(state, node, node_order; free=true)
     if istask(node) && node.cache
@@ -419,7 +278,7 @@ function start_state(deps::Dict, node_order)
 end
 
 _move(ctx, to_proc, x) = x
-_move(ctx, to_proc::OSProc, x::AbstractChunk) = gather(ctx, x)
+_move(ctx, to_proc::OSProc, x::Union{Chunk, Thunk}) = gather(ctx, x)
 
 function do_task(ctx, proc, thunk_id, f, data, send_result, persist)
     @dbg timespan_start(ctx, :comm, thunk_id, proc)

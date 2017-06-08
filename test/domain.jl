@@ -2,7 +2,6 @@ import Dagger: indexes, project
 
 @testset "UnitDomain" begin
     @test domain(1) == UnitDomain()
-    @test !isempty(UnitDomain())
 end
 
 @testset "ArrayDomain" begin

@@ -4,12 +4,12 @@ import Compat: view
 import Base.Sort: Forward, Ordering, Algorithm, defalg, lt
 
 immutable Sort <: Computation
-    input::LazyArray
+    input::ArrayOp
     alg::Algorithm
     order::Ordering
 end
 
-function Base.sort(v::LazyArray;
+function Base.sort(v::ArrayOp;
                alg::Algorithm=defalg(v),
                lt=Base.isless,
                by=identity,
@@ -18,19 +18,19 @@ function Base.sort(v::LazyArray;
     Sort(v, alg, Base.Sort.ord(lt,by,rev,order))
 end
 
-size(x::LazyArray) = size(x.input)
+size(x::ArrayOp) = size(x.input)
 function compute(ctx, s::Sort)
 
     # First, we sort each chunk.
     inp = let alg=s.alg, ord = s.order
-        compute(ctx, mapchunk(p->sort(p; alg=alg, order=ord), s.input)).result
+        compute(ctx, mapchunk(p->sort(p; alg=alg, order=ord), s.input))
     end
 
     ps = chunks(inp)
 
     # We need to persist! the sorted chunks so that further operations
     # will not remove it.
-    persist!(inp)
+    foreach(persist!, chunks(inp))
 
     # find the ranks to split at
     ls = map(length, domainchunks(inp))
@@ -38,7 +38,7 @@ function compute(ctx, s::Sort)
 
     # parallel selection
     splitters = pselect(ctx, inp, splitter_ranks, s.order)
-    ComputedArray(compute(ctx, shuffle_merge(inp, splitter_ranks, splitters, s.order)))
+    DArray(compute(ctx, shuffle_merge(inp, splitter_ranks, splitters, s.order)))
 end
 
 function delayed_map_and_gather(f, ctx, Xs...)
@@ -131,15 +131,6 @@ function pselect(ctx, A, ranks, ord)
     return result[perm]
 end
 
-# mid for common element types
-function mid(x, y)
-    x
-end
-
-function mid(x::Tuple, y::Tuple)
-    map(mid, x, y)
-end
-
 function weightedmedian(xs, weights, ord)
     perm = sortperm(xs)
     weights = weights[perm]
@@ -151,7 +142,7 @@ function weightedmedian(xs, weights, ord)
     while x <= cutoff
         if x == cutoff
             if i < length(xs)
-                return mid(xs[i], xs[i+1])
+                return xs[i]
             else
                 xs[i]
             end
@@ -161,17 +152,17 @@ function weightedmedian(xs, weights, ord)
         x == cutoff && continue
         i += 1
     end
-    return mid(xs[i], xs[i])
+    return xs[i]
 end
 
 function sortedmedian(xs)
    l = length(xs)
    if l % 2 == 0
        i = l >> 1
-       mid(xs[i], xs[i+1])
+       xs[i]
    else
        i = (l+1) >> 1
-       mid(xs[i], xs[i]) # keep type stability
+       xs[i]
    end
 end
 
@@ -179,7 +170,7 @@ function submedian(xs, r)
     xs1 = view(xs, r)
     if isempty(xs1)
         idx = min(first(r), length(xs))
-        return mid(xs[idx], xs[idx])
+        return xs[idx]
     end
     sortedmedian(xs1)
 end
@@ -218,7 +209,7 @@ end
 
 function merge_thunk(ps, starts, lasts, ord)
     ranges = map(UnitRange, starts, lasts)
-    Thunk(map((p, r) -> Dagger.view(p, ArrayDomain(r)), ps, ranges)...) do xs...
+    Thunk(map((p, r) -> delayed(getindex)(p, r), ps, ranges)...) do xs...
         merge_sorted(ord, xs...)
     end
 end
@@ -250,7 +241,7 @@ function shuffle_merge(A, ranks, splitter_indices, ord)
     part_lengths = map(x->x[2], thunks)
     dmn = ArrayDomain(1:sum(part_lengths))
     dmnchunks = DomainBlocks((1,), (cumsum(part_lengths),))
-    Cat(chunktype(A), dmn, dmnchunks, map(x->x[1], thunks))
+    DArray{eltype(A),1}(dmn, dmnchunks, map(x->x[1], thunks))
 end
 
 function merge_sorted{T, S}(ord::Ordering, x::AbstractArray{T}, y::AbstractArray{S})
@@ -278,7 +269,7 @@ function merge_sorted{T, S}(ord::Ordering, x::AbstractArray{T}, y::AbstractArray
     z
 end
 
-merge_sorted(ord::Ordering, x) = x
-function merge_sorted(ord::Ordering, x, y, ys...)
+merge_sorted(ord::Ordering, x::AbstractArray) = x
+function merge_sorted(ord::Ordering, x::AbstractArray, y::AbstractArray, ys::AbstractArray...)
     merge_sorted(ord, merge_sorted(ord, x,y), merge_sorted(ord, ys...))
 end

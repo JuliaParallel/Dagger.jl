@@ -27,15 +27,15 @@ broadcast_ops = [ :.*, :.+, :.-, :.%, :./, :.^,
 This is a way of suggesting that stage should call
 stage_operand with the operation and other arguments
 """
-immutable PromotePartition{T,N} <: LazyArray{T,N}
+immutable PromotePartition{T,N} <: ArrayOp{T,N}
     data::AbstractArray{T,N}
 end
 
 size(p::PromotePartition) = size(domain(p.data))
 
-immutable BCast{F, Ni, T, Nd} <: LazyArray{T, Nd}
+immutable BCast{F, Ni, T, Nd} <: ArrayOp{T, Nd}
     f::F
-    input::NTuple{Ni, LazyArray}
+    input::NTuple{Ni, ArrayOp}
 end
 
 function BCast{F}(f::F, input::Tuple)
@@ -48,29 +48,29 @@ size(x::BCast) = size(x.input[1])
 
 for fn in blockwise_unary
     @eval begin
-        $fn(x::LazyArray) = BCast($fn, (x,))
+        $fn(x::ArrayOp) = BCast($fn, (x,))
     end
 end
 
 ### Appease ambiguity warnings on Julia 0.4
 for fn in [:+, :-]
     @eval begin
-        $fn(x::Bool, y::LazyArray{Bool}) = BCast(z -> $fn(x, z), (y,))
-        $fn(x::LazyArray{Bool}, y::Bool) = BCast(z -> $fn(z, y), (x,))
+        $fn(x::Bool, y::ArrayOp{Bool}) = BCast(z -> $fn(x, z), (y,))
+        $fn(x::ArrayOp{Bool}, y::Bool) = BCast(z -> $fn(z, y), (x,))
     end
 end
 
-function stage_operands(ctx, ::BCast, xs::LazyArray...)
+function stage_operands(ctx, ::BCast, xs::ArrayOp...)
     map(x->cached_stage(ctx, x), xs)
 end
 
-function stage_operands(ctx, ::BCast, x::LazyArray, y::PromotePartition)
+function stage_operands(ctx, ::BCast, x::ArrayOp, y::PromotePartition)
     stg_x = cached_stage(ctx, x)
     y1 = Distribute(domain(stg_x), y.data)
     stg_x, cached_stage(ctx, y1)
 end
 
-function stage_operands(ctx, ::BCast, x::PromotePartition, y::LazyArray)
+function stage_operands(ctx, ::BCast, x::PromotePartition, y::ArrayOp)
     stg_y = cached_stage(ctx, y)
     x1 = Distribute(domain(stg_y), x.data)
     cached_stage(ctx, x1), stg_y
@@ -78,35 +78,35 @@ end
 
 for fn in blockwise_binary
     @eval begin
-        $fn(x::LazyArray, y::LazyArray) = BCast($fn, (x, y))
-        $fn(x::AbstractArray, y::LazyArray) = BCast($fn, (PromotePartition(x), y))
-        $fn(x::LazyArray, y::AbstractArray) = BCast($fn, (x, PromotePartition(y)))
-        $fn(x::Number, y::LazyArray) = BCast(z -> $fn(x, z), (y,))
-        $fn(x::LazyArray, y::Number) = BCast(z -> $fn(z, y), (x,))
+        $fn(x::ArrayOp, y::ArrayOp) = BCast($fn, (x, y))
+        $fn(x::AbstractArray, y::ArrayOp) = BCast($fn, (PromotePartition(x), y))
+        $fn(x::ArrayOp, y::AbstractArray) = BCast($fn, (x, PromotePartition(y)))
+        $fn(x::Number, y::ArrayOp) = BCast(z -> $fn(x, z), (y,))
+        $fn(x::ArrayOp, y::Number) = BCast(z -> $fn(z, y), (x,))
     end
 end
 
 if VERSION < v"0.6.0-dev"
-    eval(:((.^)(x::Irrational{:e}, y::LazyArray) = BCast(z -> x.^z, (y,))))
+    eval(:((.^)(x::Irrational{:e}, y::ArrayOp) = BCast(z -> x.^z, (y,))))
     for fn in broadcast_ops
         @eval begin
-            $fn(x::LazyArray, y::LazyArray) = BCast($fn, (x, y))
-            $fn(x::AbstractArray, y::LazyArray) = BCast($fn, (PromotePartition(x), y))
-            $fn(x::LazyArray, y::AbstractArray) = BCast($fn, (x, PromotePartition(y)))
-            $fn(x::Number, y::LazyArray) = BCast(z -> $fn(x, z), (y,))
-            $fn(x::LazyArray, y::Number) = BCast(z -> $fn(z, y), (x,))
+            $fn(x::ArrayOp, y::ArrayOp) = BCast($fn, (x, y))
+            $fn(x::AbstractArray, y::ArrayOp) = BCast($fn, (PromotePartition(x), y))
+            $fn(x::ArrayOp, y::AbstractArray) = BCast($fn, (x, PromotePartition(y)))
+            $fn(x::Number, y::ArrayOp) = BCast(z -> $fn(x, z), (y,))
+            $fn(x::ArrayOp, y::Number) = BCast(z -> $fn(z, y), (x,))
         end
     end
 end
 
-Base.broadcast(fn::Function, x::LazyArray, xs::LazyArray...) = BCast(fn, (x, xs...))
-Base.broadcast(fn::Function, x::AbstractArray, y::LazyArray) = BCast(fn, (PromotePartition(x), y))
-Base.broadcast(fn::Function, x::LazyArray, y::AbstractArray) = BCast(fn, (x, PromotePartition(y)))
-Base.broadcast(fn::Function, x::Number, y::LazyArray) = BCast(z -> fn(x, z), (y,))
-Base.broadcast(fn::Function, x::LazyArray, y::Number) = BCast(z -> fn(z, y), (x,))
+Base.broadcast(fn::Function, x::ArrayOp, xs::ArrayOp...) = BCast(fn, (x, xs...))
+Base.broadcast(fn::Function, x::AbstractArray, y::ArrayOp) = BCast(fn, (PromotePartition(x), y))
+Base.broadcast(fn::Function, x::ArrayOp, y::AbstractArray) = BCast(fn, (x, PromotePartition(y)))
+Base.broadcast(fn::Function, x::Number, y::ArrayOp) = BCast(z -> fn(x, z), (y,))
+Base.broadcast(fn::Function, x::ArrayOp, y::Number) = BCast(z -> fn(z, y), (x,))
 
-(*)(x::Number, y::LazyArray) = BCast(z -> x*z, (y,))
-(*)(x::LazyArray, y::Number) = BCast(z -> z*y, (x,))
+(*)(x::Number, y::ArrayOp) = BCast(z -> x*z, (y,))
+(*)(x::ArrayOp, y::Number) = BCast(z -> z*y, (x,))
 
 function curry_broadcast(f)
     (xs...) -> broadcast(f, xs...)
@@ -138,17 +138,17 @@ function stage(ctx, node::BCast)
         end, domain(inputs[1]), domainchunks(inputs[1])
     end
 
-    Cat(Any, d, dchunks, thunks)
+    DArray{Any, ndims(d)}(d, dchunks, thunks)
 end
 
 export mappart, mapchunk
 
-immutable MapChunk{F, Ni, T, Nd} <: LazyArray{T, Nd}
+immutable MapChunk{F, Ni, T, Nd} <: ArrayOp{T, Nd}
     f::F
-    input::NTuple{Ni, LazyArray{T,Nd}}
+    input::NTuple{Ni, ArrayOp{T,Nd}}
 end
 
-mapchunk(f, xs::LazyArray...) = MapChunk(f, xs)
+mapchunk(f, xs::ArrayOp...) = MapChunk(f, xs)
 Base.@deprecate mappart(args...) mapchunk(args...)
 function stage(ctx, node::MapChunk)
     inputs = map(x->cached_stage(ctx, x), node.input)
@@ -156,5 +156,5 @@ function stage(ctx, node::MapChunk)
         Thunk(node.f, ps...)
     end
 
-    Cat(Any, domain(inputs[1]), domainchunks(inputs[1]), thunks)
+    DArray{Any, ndims(inputs[1])}(domain(inputs[1]), domainchunks(inputs[1]), thunks)
 end

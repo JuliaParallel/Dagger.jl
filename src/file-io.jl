@@ -28,11 +28,11 @@ const CAT = 0x01
 # subparts are saved as Parts
 
 """
-    save(ctx, chunk::AbstractChunk, file_path::AbsractString)
+    save(ctx, chunk::Union{Chunk, Thunk}, file_path::AbsractString)
 
 Save a chunk to a file at `file_path`.
 """
-function save(ctx, chunk::AbstractChunk, file_path::AbstractString)
+function save(ctx, chunk::Union{Chunk, Thunk}, file_path::AbstractString)
     open(file_path, "w") do io
         save(ctx, io, chunk, file_path)
     end
@@ -67,7 +67,7 @@ function save(ctx, io::IO, chunk::Chunk, file_path)
     Chunk(chunktype(chunk), domain(chunk), FileReader(file_path, chunktype(chunk), data_offset, false), false)
 end
 
-function save(ctx, io::IO, chunk::Cat, file_path::AbstractString, saved_parts::AbstractArray)
+function save(ctx, io::IO, chunk::DArray, file_path::AbstractString, saved_parts::AbstractArray)
 
     metadata = (chunktype(chunk), domain(chunk), saved_parts)
 
@@ -75,12 +75,12 @@ function save(ctx, io::IO, chunk::Cat, file_path::AbstractString, saved_parts::A
     write(io, CAT)
     serialize(io, metadata)
 
-    Cat(metadata...)
+    DArray(metadata...)
     # write each child
 end
 
 
-function save(ctx, io::IO, chunk::Cat, file_path)
+function save(ctx, io::IO, chunk::DArray, file_path)
     dir_path = file_path*"_data"
     if !isdir(dir_path)
         mkdir(dir_path)
@@ -94,10 +94,6 @@ function save(ctx, io::IO, chunk::Cat, file_path)
     # write each child
 end
 
-function save(ctx, io::IO, chunk::View)
-    save(ctx, io, Chunk(gather(ctx, chunk)))
-end
-
 function save{X}(ctx, chunk::Chunk{X, FileReader}, file_path::AbstractString)
    if abspath(file_path) == abspath(chunk.reader.file)
        chunk
@@ -109,7 +105,7 @@ function save{X}(ctx, chunk::Chunk{X, FileReader}, file_path::AbstractString)
    end
 end
 
-save(chunk::AbstractChunk, file_path::AbstractString) = save(Context(), chunk, file_path)
+save(chunk::Union{Chunk, Thunk}, file_path::AbstractString) = save(Context(), chunk, file_path)
 
 
 
@@ -118,7 +114,7 @@ save(chunk::AbstractChunk, file_path::AbstractString) = save(Context(), chunk, f
 """
     load(ctx, file_path)
 
-Load an AbstractChunk from a file.
+Load an Union{Chunk, Thunk} from a file.
 """
 function load(ctx, file_path::AbstractString; mmap=false)
 
@@ -127,7 +123,7 @@ function load(ctx, file_path::AbstractString; mmap=false)
     if part_typ == PARTSPEC
         c = load(ctx, Chunk, file_path, mmap, f)
     elseif part_typ == CAT
-        c = load(ctx, Cat, file_path, mmap, f)
+        c = load(ctx, DArray, file_path, mmap, f)
     else
         error("Could not determine chunk type")
     end
@@ -147,21 +143,21 @@ function load(ctx, ::Type{Chunk}, fname, mmap, io)
 
     (T, dmn, sz) = deserialize(io)
 
-    ComputedArray(Chunk(T, dmn, sz,
+    DArray(Chunk(T, dmn, sz,
         FileReader(fname, T, meta_len+1, mmap), false))
 end
 
-function load(ctx, ::Type{Cat}, file_path, mmap, io)
+function load(ctx, ::Type{DArray}, file_path, mmap, io)
     dir_path = file_path*"_data"
 
     metadata = deserialize(io)
-    c = Cat(metadata...)
+    c = DArray(metadata...)
     for p in chunks(c)
         if isa(p.handle, FileReader)
             p.handle.mmap = mmap
         end
     end
-    ComputedArray(c)
+    DArray(c)
 end
 
 
@@ -280,7 +276,7 @@ function stage(ctx, s::Save)
     sz = size(chunks(x))
     function save_cat_meta(chunks...)
         f = open(s.name, "w")
-        saved_parts = reshape(AbstractChunk[c for c in chunks], sz)
+        saved_parts = reshape(Union{Chunk, Thunk}[c for c in chunks], sz)
         res = save(ctx, f, x, s.name, saved_parts)
         close(f)
         res

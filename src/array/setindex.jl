@@ -1,13 +1,13 @@
 
 export setindex
 
-immutable SetIndex{T,N} <: LazyArray{T,N}
-    input::LazyArray{T,N}
+immutable SetIndex{T,N} <: ArrayOp{T,N}
+    input::ArrayOp{T,N}
     idx::Tuple
     val
 end
 
-function setindex(x::LazyArray, val, idxs...)
+function setindex(x::ArrayOp, val, idxs...)
     SetIndex(x, idxs, val)
 end
 
@@ -28,7 +28,7 @@ function stage(ctx, sidx::SetIndex)
 
     groups = map(group_indices, subdmns.cumlength, indexes(d))
     sz = map(length, groups)
-    pieces = Array{AbstractChunk}(sz)
+    pieces = Array{Union{Chunk, Thunk}}(sz)
     for i = CartesianRange(sz)
         idx_and_dmn = map(getindex, groups, i.I)
         idx = map(x->x[1], idx_and_dmn)

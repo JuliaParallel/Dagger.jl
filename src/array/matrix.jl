@@ -1,12 +1,12 @@
 
 import Base: ctranspose, transpose, A_mul_Bt, At_mul_B, Ac_mul_B, At_mul_Bt, Ac_mul_Bc, A_mul_Bc
 
-immutable Transpose{T,N} <: LazyArray{T,N}
+immutable Transpose{T,N} <: ArrayOp{T,N}
     f::Function
-    input::LazyArray
+    input::ArrayOp
 end
 
-function Transpose(f,x::LazyArray)
+function Transpose(f,x::ArrayOp)
     @assert 1 <= ndims(x) && ndims(x) <= 2
     Transpose{eltype(x), 2}(f,x)
 end
@@ -19,11 +19,11 @@ function size(x::Transpose)
     end
 end
 
-ctranspose(x::LazyArray) = Transpose(ctranspose, x)
-ctranspose(x::AbstractChunk) = Thunk(ctranspose, x)
+ctranspose(x::ArrayOp) = Transpose(ctranspose, x)
+ctranspose(x::Union{Chunk, Thunk}) = Thunk(ctranspose, x)
 
-transpose(x::LazyArray) = Transpose(transpose, x)
-transpose(x::AbstractChunk) = Thunk(transpose, x)
+transpose(x::ArrayOp) = Transpose(transpose, x)
+transpose(x::Union{Chunk, Thunk}) = Thunk(transpose, x)
 
 function ctranspose(x::ArrayDomain{2})
     d = indexes(x)
@@ -41,20 +41,20 @@ end
 function stage(ctx, node::Transpose)
     inp = cached_stage(ctx, node.input)
     thunks = _ctranspose(chunks(inp))
-    Cat(chunktype(inp), domain(inp)', domainchunks(inp)', thunks)
+    DArray{eltype(inp),ndims(inp)}(domain(inp)', domainchunks(inp)', thunks)
 end
 
 export Distribute
 
-immutable Distribute{N, T} <: LazyArray{N, T}
+immutable Distribute{N, T} <: ArrayOp{N, T}
     domainchunks
-    data::AbstractChunk
+    data::Union{Chunk, Thunk}
 end
 
 Distribute(dmn, data) =
     Distribute(dmn, persist!(tochunk(data)))
 
-Distribute(d, p::AbstractChunk) =
+Distribute(d, p::Union{Chunk, Thunk}) =
     Distribute{eltype(chunktype(p)), ndims(d)}(d, p)
 
 size(x::Distribute) = size(domain(x.data))
@@ -63,40 +63,19 @@ size(x::Distribute) = size(domain(x.data))
 Distribute(p::Blocks, data) =
     Distribute(partition(p, domain(data)), data)
 
-#=
-todo
-function auto_partition(data::AbstractArray, chsize)
-    sz = sizeof(data) * B
-    per_chunk = chsize/(sizeof(eltype(data))*B)
-    n = floor(Int, sqrt(per_chunk))
-
-    dims = size(data)
-    if ndims(data) == 1
-        Blocks((floor(Int, per_chunk),))
-    elseif ndims(data)==2
-        Blocks(per_chunk/dims[2], per_chunk/dims[1])
-    end
-end
-
-function Distribute(data::AbstractArray; chsize=64MB)
-    p = auto_partition(data, chsize)
-    Distribute(p, data)
-end
-=#
-
 function stage(ctx, d::Distribute)
-    Cat(chunktype(d.data),
+    DArray{eltype(chunktype(d.data)), ndims(domain(d.data))}(
         domain(d.data),
         d.domainchunks,
-        map(c -> view(d.data, c), d.domainchunks))
+        map(c -> delayed(getindex)(d.data, c), d.domainchunks))
 end
 
 
 import Base: *, +
 
-immutable MatMul{T, N} <: LazyArray{T, N}
-    a::LazyArray
-    b::LazyArray
+immutable MatMul{T, N} <: ArrayOp{T, N}
+    a::ArrayOp
+    b::ArrayOp
 end
 
 function mul_size(a,b)
@@ -109,10 +88,10 @@ end
 size(x::MatMul) = mul_size(x.a, x.b)
 MatMul(a,b) =
   MatMul{promote_type(eltype(a), eltype(b)), length(mul_size(a,b))}(a,b)
-(*)(a::LazyArray, b::LazyArray) = MatMul(a,b)
+(*)(a::ArrayOp, b::ArrayOp) = MatMul(a,b)
 # Bonus method for matrix-vector multiplication
-(*)(a::LazyArray, b::Vector) = MatMul(a,PromotePartition(b))
-(*)(a::AbstractArray, b::LazyArray) = MatMul(PromotePartition(a), b)
+(*)(a::ArrayOp, b::Vector) = MatMul(a,PromotePartition(b))
+(*)(a::AbstractArray, b::ArrayOp) = MatMul(PromotePartition(a), b)
 
 function (*)(a::ArrayDomain{2}, b::ArrayDomain{2})
 
@@ -142,8 +121,8 @@ function (+)(a::ArrayDomain, b::ArrayDomain)
     a
 end
 
-(*)(a::AbstractChunk, b::AbstractChunk) = Thunk(*, a,b)
-(+)(a::AbstractChunk, b::AbstractChunk) = Thunk(+, a,b)
+(*)(a::Union{Chunk, Thunk}, b::Union{Chunk, Thunk}) = Thunk(*, a,b)
+(+)(a::Union{Chunk, Thunk}, b::Union{Chunk, Thunk}) = Thunk(+, a,b)
 
 # we define our own matmat and matvec multiply
 # for computing the new domains and thunks.
@@ -200,7 +179,7 @@ end
 """
 an operand which should be distributed as per convenience
 """
-function stage_operands{T}(ctx, ::MatMul, a::LazyArray, b::PromotePartition{T,1})
+function stage_operands{T}(ctx, ::MatMul, a::ArrayOp, b::PromotePartition{T,1})
     stg_a = cached_stage(ctx, a)
     dmn_a = domain(stg_a)
     dchunks_a = domainchunks(stg_a)
@@ -213,7 +192,7 @@ function stage_operands{T}(ctx, ::MatMul, a::LazyArray, b::PromotePartition{T,1}
     stg_a, cached_stage(ctx, Distribute(dmn_out, tochunk(b.data)))
 end
 
-function stage_operands(ctx, ::MatMul, a::PromotePartition, b::LazyArray)
+function stage_operands(ctx, ::MatMul, a::PromotePartition, b::ArrayOp)
 
     if size(a, 2) != size(b, 1)
         throw(DimensionMismatch("Cannot promote array of domain $(dmn_b) to multiply with an array of size $(dmn_a)"))
@@ -227,28 +206,28 @@ end
 
 function stage(ctx, mul::MatMul)
     a, b = stage_operands(ctx, mul, mul.a, mul.b)
-
-    Cat(Any, domain(a)*domain(b),
-        domainchunks(a)*domainchunks(b), _mul(chunks(a), chunks(b); T=Thunk))
+    d = domain(a)*domain(b)
+    DArray{Any, ndims(d)}(d, domainchunks(a)*domainchunks(b),
+                          _mul(chunks(a), chunks(b); T=Thunk))
 end
 
 
 
 ### Scale
 
-immutable Scale{T,N} <: LazyArray{T,N}
-    l::LazyArray
-    r::LazyArray
+immutable Scale{T,N} <: ArrayOp{T,N}
+    l::ArrayOp
+    r::ArrayOp
 end
-Scale{Tl, Tr, N}(l::LazyArray{Tl}, r::LazyArray{Tr,N}) =
+Scale{Tl, Tr, N}(l::ArrayOp{Tl}, r::ArrayOp{Tr,N}) =
   Scale{promote_type(Tl, Tr), N}(l,r)
 
 size(s::Scale) = size(s.l)
 
-scale(l::Number, r::LazyArray) = BlockwiseOp(x->scale(l, x), (r,))
-scale(l::Vector, r::LazyArray) = scale(PromotePartition(l), r)
-(*)(l::Diagonal, r::LazyArray) = Scale(PromotePartition(l.diag), r)
-scale(l::LazyArray, r::LazyArray) = Scale(l, r)
+scale(l::Number, r::ArrayOp) = BlockwiseOp(x->scale(l, x), (r,))
+scale(l::Vector, r::ArrayOp) = scale(PromotePartition(l), r)
+(*)(l::Diagonal, r::ArrayOp) = Scale(PromotePartition(l.diag), r)
+scale(l::ArrayOp, r::ArrayOp) = Scale(l, r)
 
 function stage_operand(ctx, ::Scale, a, b::PromotePartition)
     ps = domainchunks(a)
@@ -275,10 +254,10 @@ function stage(ctx, scal::Scale)
     @assert size(domain(r), 1) == size(domain(l), 1)
 
     scal_parts = _scale(chunks(l), chunks(r))
-    Cat(Any, domain(r), domainchunks(r), scal_parts)
+    DArray{Any, ndims(r)}(domain(r), domainchunks(r), scal_parts)
 end
 
-immutable Concat{T,N} <: LazyArray{T,N}
+immutable Concat{T,N} <: ArrayOp{T,N}
     axis::Int
     inputs::Tuple
 end
@@ -313,19 +292,19 @@ function stage(ctx, c::Concat)
     dmn = cat(c.axis, dmns...)
     dmnchunks = cumulative_domains(cat(c.axis, map(domainchunks, inp)...))
     thunks = cat(c.axis, map(chunks, inp)...)
-    T = promote_type(map(chunktype, inp)...)
-    Cat(T, dmn, dmnchunks, thunks)
+    T = promote_type(map(eltype, inp)...)
+    DArray{T,ndims(dmn)}(dmn, dmnchunks, thunks)
 end
 
-Base.cat(idx::Int, x::LazyArray, xs::LazyArray...) =
+Base.cat(idx::Int, x::ArrayOp, xs::ArrayOp...) =
     Concat(idx, (x, xs...))
 
-Base.hcat(xs::LazyArray...) = cat(2, xs...)
-Base.vcat(xs::LazyArray...) = cat(1, xs...)
+Base.hcat(xs::ArrayOp...) = cat(2, xs...)
+Base.vcat(xs::ArrayOp...) = cat(1, xs...)
 
-A_mul_Bt(x::LazyArray, y::LazyArray) = MatMul(x, y')
-At_mul_B(x::LazyArray, y::LazyArray) = MatMul(x', y)
-Ac_mul_B(x::LazyArray, y::LazyArray) = MatMul(x', y)
-At_mul_Bt(x::LazyArray, y::LazyArray) = MatMul(x', y')
-Ac_mul_Bc(x::LazyArray, y::LazyArray) = MatMul(x', y')
-A_mul_Bc(x::LazyArray, y::LazyArray) = MatMul(x, y')
+A_mul_Bt(x::ArrayOp, y::ArrayOp) = MatMul(x, y')
+At_mul_B(x::ArrayOp, y::ArrayOp) = MatMul(x', y)
+Ac_mul_B(x::ArrayOp, y::ArrayOp) = MatMul(x', y)
+At_mul_Bt(x::ArrayOp, y::ArrayOp) = MatMul(x', y')
+Ac_mul_Bc(x::ArrayOp, y::ArrayOp) = MatMul(x', y')
+A_mul_Bc(x::ArrayOp, y::ArrayOp) = MatMul(x, y')

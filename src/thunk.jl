@@ -8,7 +8,7 @@ end
 global _thunk_dict = Dict{Int, Any}()
 
 # A thing to run
-type Thunk <: AbstractChunk
+type Thunk
     f::Function
     inputs::Tuple
     id::Int
@@ -38,7 +38,7 @@ function affinity(t::Thunk)
     else
         aff = Dict{Processor,Int}()
         for inp in inputs(t)
-            if isa(inp, AbstractChunk)
+            if isa(inp, Union{Chunk, Thunk})
                 for a in affinity(inp)
                     proc, sz = a
                     aff[proc] = get(aff, proc, 0) + sz
@@ -84,13 +84,6 @@ cache_result!(t::Thunk) = (t.cache=true; t)
 # this gives a ~30x speedup in hashing
 Base.hash(x::Thunk, h::UInt) = hash(x.id, hash(h, 0x7ad3bac49089a05f))
 Base.isequal(x::Thunk, y::Thunk) = x.id==y.id
-
-get_sub(x::AbstractChunk, d) = view(x,d)
-get_sub(x, d) = tochunk(x[d])
-
-function view(thunk::Thunk, d::Domain, T=Any)
-    Thunk(x->get_sub(x,d), (thunk,))
-end
 
 function Base.show(io::IO, p::Thunk)
     write(io, "*$(p.id)*")
