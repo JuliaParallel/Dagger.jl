@@ -1,32 +1,37 @@
 
 export chunk, gather
 
-"""
-A Chunk is a recipe to read an object. The Chunk type holds information about the
-domain spanned by the chunk on its own and metadata to read the chunk from its
-memory / storage / network location.
+export domain, UnitDomain, project, alignfirst, ArrayDomain
 
-`gather(reader, handle)` will bring the data to memory on the caller
-"""
-@compat abstract type AbstractChunk end
-
-chunks(x::AbstractChunk) = x
-affinity(::AbstractChunk) = []
+import Base: isempty, getindex, intersect,
+             ==, size, length, ndims
 
 """
-    gather(context, chunk::AbstractChunk)
+    domain(x::T)
 
-Get the data stored in a chunk
+Returns metadata about `x`. This metadata will be in the `domain`
+field of a Chunk object when an object of type `T` is created as
+the result of evaluating a Thunk.
 """
-function gather end
+function domain end
 
+"""
+Default domain -- has no information about the value
+"""
+immutable UnitDomain end
+
+"""
+If no `domain` method is defined on an object, then
+we use the `UnitDomain` on it. A `UnitDomain` is indivisible.
+"""
+domain(x::Any) = UnitDomain()
 
 ###### Chunk ######
 
 """
 A chunk with some data
 """
-type Chunk{T, H} <: AbstractChunk
+type Chunk{T, H}
     chunktype::Type{T}
     domain
     handle::H
@@ -71,7 +76,7 @@ function tochunk(x; persist=false)
     ref = make_token(x)
     Chunk(typeof(x), domain(x), ref, persist)
 end
-tochunk(x::AbstractChunk) = x
+tochunk(x::Union{Chunk, Thunk}) = x
 
 # Check to see if the node is set to persist
 # if it is foce can override it
@@ -83,7 +88,7 @@ end
 free!(x; force=true,cache=false) = x # catch-all for non-chunks
 
 
-Base.@deprecate_binding AbstractPart AbstractChunk
+Base.@deprecate_binding AbstractPart Union{Chunk, Thunk}
 Base.@deprecate_binding Part Chunk
 Base.@deprecate parts(args...) chunks(args...)
 Base.@deprecate part(args...) tochunk(args...)

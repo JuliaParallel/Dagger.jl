@@ -278,7 +278,7 @@ function start_state(deps::Dict, node_order)
 end
 
 _move(ctx, to_proc, x) = x
-_move(ctx, to_proc::OSProc, x::AbstractChunk) = gather(ctx, x)
+_move(ctx, to_proc::OSProc, x::Union{Chunk, Thunk}) = gather(ctx, x)
 
 function do_task(ctx, proc, thunk_id, f, data, send_result, persist)
     @dbg timespan_start(ctx, :comm, thunk_id, proc)

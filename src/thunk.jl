@@ -8,7 +8,7 @@ end
 global _thunk_dict = Dict{Int, Any}()
 
 # A thing to run
-type Thunk <: AbstractChunk
+type Thunk
     f::Function
     inputs::Tuple
     id::Int
@@ -38,7 +38,7 @@ function affinity(t::Thunk)
     else
         aff = Dict{Processor,Int}()
         for inp in inputs(t)
-            if isa(inp, AbstractChunk)
+            if isa(inp, Union{Chunk, Thunk})
                 for a in affinity(inp)
                     proc, sz = a
                     aff[proc] = get(aff, proc, 0) + sz

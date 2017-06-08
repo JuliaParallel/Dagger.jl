@@ -20,10 +20,10 @@ function size(x::Transpose)
 end
 
 ctranspose(x::ArrayOp) = Transpose(ctranspose, x)
-ctranspose(x::AbstractChunk) = Thunk(ctranspose, x)
+ctranspose(x::Union{Chunk, Thunk}) = Thunk(ctranspose, x)
 
 transpose(x::ArrayOp) = Transpose(transpose, x)
-transpose(x::AbstractChunk) = Thunk(transpose, x)
+transpose(x::Union{Chunk, Thunk}) = Thunk(transpose, x)
 
 function ctranspose(x::ArrayDomain{2})
     d = indexes(x)
@@ -48,13 +48,13 @@ export Distribute
 
 immutable Distribute{N, T} <: ArrayOp{N, T}
     domainchunks
-    data::AbstractChunk
+    data::Union{Chunk, Thunk}
 end
 
 Distribute(dmn, data) =
     Distribute(dmn, persist!(tochunk(data)))
 
-Distribute(d, p::AbstractChunk) =
+Distribute(d, p::Union{Chunk, Thunk}) =
     Distribute{eltype(chunktype(p)), ndims(d)}(d, p)
 
 size(x::Distribute) = size(domain(x.data))
@@ -121,8 +121,8 @@ function (+)(a::ArrayDomain, b::ArrayDomain)
     a
 end
 
-(*)(a::AbstractChunk, b::AbstractChunk) = Thunk(*, a,b)
-(+)(a::AbstractChunk, b::AbstractChunk) = Thunk(+, a,b)
+(*)(a::Union{Chunk, Thunk}, b::Union{Chunk, Thunk}) = Thunk(*, a,b)
+(+)(a::Union{Chunk, Thunk}, b::Union{Chunk, Thunk}) = Thunk(+, a,b)
 
 # we define our own matmat and matvec multiply
 # for computing the new domains and thunks.

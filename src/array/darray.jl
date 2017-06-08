@@ -1,6 +1,75 @@
 import Base: ==
 using Compat
 
+
+###### Array Domains ######
+
+if VERSION >= v"0.6.0-dev"
+    # TODO: Fix this better!
+    immutable ArrayDomain{N}
+        indexes::NTuple{N, Any}
+    end
+else
+    immutable ArrayDomain{N}
+        indexes::NTuple{N}
+    end
+end
+
+include("../lib/domain-blocks.jl")
+
+
+ArrayDomain(xs...) = ArrayDomain(xs)
+ArrayDomain(xs::Array) = ArrayDomain((xs...,))
+
+indexes(a::ArrayDomain) = a.indexes
+chunks{N}(a::ArrayDomain{N}) = DomainBlocks(
+    ntuple(i->first(indexes(a)[i]), Val{N}), map(x->[length(x)], indexes(a)))
+
+(==)(a::ArrayDomain, b::ArrayDomain) = indexes(a) == indexes(b)
+Base.getindex(arr::AbstractArray, d::ArrayDomain) = arr[indexes(d)...]
+
+function intersect(a::ArrayDomain, b::ArrayDomain)
+    if a === b
+        return a
+    end
+    ArrayDomain(map((x, y) -> _intersect(x, y), indexes(a), indexes(b)))
+end
+
+function project(a::ArrayDomain, b::ArrayDomain)
+    map(indexes(a), indexes(b)) do p, q
+        q - (first(p) - 1)
+    end |> ArrayDomain
+end
+
+function getindex(a::ArrayDomain, b::ArrayDomain)
+    ArrayDomain(map(getindex, indexes(a), indexes(b)))
+end
+
+"""
+    alignfirst(a)
+
+Make a subdomain a standalone domain. For example,
+
+    alignfirst(ArrayDomain(11:25, 21:100))
+    # => ArrayDomain((1:15), (1:80))
+"""
+alignfirst(a::ArrayDomain) =
+    ArrayDomain(map(r->1:length(r), indexes(a)))
+
+function size(a::ArrayDomain, dim)
+    idxs = indexes(a)
+    length(idxs) < dim ? 1 : length(idxs[dim])
+end
+size(a::ArrayDomain) = map(length, indexes(a))
+length(a::ArrayDomain) = prod(size(a))
+ndims(a::ArrayDomain) = length(size(a))
+isempty(a::ArrayDomain) = length(a) == 0
+
+
+"The domain of an array is a ArrayDomain"
+domain(x::AbstractArray) = ArrayDomain([1:l for l in size(x)])
+
+
 @compat abstract type ArrayOp{T, N} <: AbstractArray{T, N} end
 @compat Base.IndexStyle(::Type{<:ArrayOp}) = IndexCartesian()
 
@@ -22,8 +91,8 @@ end
 
 type DArray{T,N} <: ArrayOp{T, N}
     domain::ArrayDomain{N}
-    subdomains::AbstractArray
-    chunks::AbstractArray
+    subdomains::AbstractArray{ArrayDomain{N}, N}
+    chunks::AbstractArray{Union{Chunk,Thunk}, N}
 end
 
 domain(d::DArray) = d.domain
@@ -146,7 +215,7 @@ _cumsum(x::AbstractArray) = length(x) == 0 ? Int[] : cumsum(x)
 function lookup_parts{N}(ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomain{N})
     groups = map(group_indices, subdmns.cumlength, indexes(d))
     sz = map(length, groups)
-    pieces = Array{AbstractChunk}(sz)
+    pieces = Array{Union{Chunk,Thunk}}(sz)
     for i = CartesianRange(sz)
         idx_and_dmn = map(getindex, groups, i.I)
         idx = map(x->x[1], idx_and_dmn)
@@ -187,7 +256,7 @@ function thunkize(ctx, c::DArray; persist=true)
         Thunk(thunks...; meta=true) do results...
             t = eltype(results[1])
             DArray{t, ndims(dmn)}(dmn, dmnchunks,
-                                  reshape(AbstractChunk[results...], sz))
+                                  reshape(Union{Chunk,Thunk}[results...], sz))
         end
     else
         c
@@ -218,3 +287,6 @@ function cached_stage(ctx, x)
         cache[x] = stage(ctx, x)
     end
 end
+
+Base.@deprecate_binding Cat DArray
+Base.@deprecate_binding ComputedArray DArray

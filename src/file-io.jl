@@ -28,11 +28,11 @@ const CAT = 0x01
 # subparts are saved as Parts
 
 """
-    save(ctx, chunk::AbstractChunk, file_path::AbsractString)
+    save(ctx, chunk::Union{Chunk, Thunk}, file_path::AbsractString)
 
 Save a chunk to a file at `file_path`.
 """
-function save(ctx, chunk::AbstractChunk, file_path::AbstractString)
+function save(ctx, chunk::Union{Chunk, Thunk}, file_path::AbstractString)
     open(file_path, "w") do io
         save(ctx, io, chunk, file_path)
     end
@@ -105,7 +105,7 @@ function save{X}(ctx, chunk::Chunk{X, FileReader}, file_path::AbstractString)
    end
 end
 
-save(chunk::AbstractChunk, file_path::AbstractString) = save(Context(), chunk, file_path)
+save(chunk::Union{Chunk, Thunk}, file_path::AbstractString) = save(Context(), chunk, file_path)
 
 
 
@@ -114,7 +114,7 @@ save(chunk::AbstractChunk, file_path::AbstractString) = save(Context(), chunk, f
 """
     load(ctx, file_path)
 
-Load an AbstractChunk from a file.
+Load an Union{Chunk, Thunk} from a file.
 """
 function load(ctx, file_path::AbstractString; mmap=false)
 
@@ -276,7 +276,7 @@ function stage(ctx, s::Save)
     sz = size(chunks(x))
     function save_cat_meta(chunks...)
         f = open(s.name, "w")
-        saved_parts = reshape(AbstractChunk[c for c in chunks], sz)
+        saved_parts = reshape(Union{Chunk, Thunk}[c for c in chunks], sz)
         res = save(ctx, f, x, s.name, saved_parts)
         close(f)
         res
