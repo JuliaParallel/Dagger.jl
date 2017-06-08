@@ -21,7 +21,7 @@ function Base.show(io::IO, x::ArrayOp)
 end
 
 type DArray{T,N} <: ArrayOp{T, N}
-    domain::Domain
+    domain::ArrayDomain{N}
     subdomains::AbstractArray
     chunks::AbstractArray
 end

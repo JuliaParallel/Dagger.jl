@@ -1,72 +1,13 @@
 
-export domain, Domain, UnitDomain, project, alignfirst, ArrayDomain
+export domain, UnitDomain, project, alignfirst, ArrayDomain
 
 import Base: isempty, getindex, intersect,
              ==, size, length, ndims
 
-###### Domain ######
-
 """
-The domain represents the set of all indexes of an object.
-
-The basic means of distribution in Dagger is
-to partition the domain of an object into smaller subdomains
-which can then be stored in many memory locations or processed
-on different processing units.
+Default domain
 """
-@compat abstract type Domain end
-
-#=
-
-"Is a domain empty?"
-@unimplemented isempty(d::Domain)
-
-###### Indexing primitives ######
-
-"""
-Find the intersection of two domains. For example,
-
-    intersect(ArrayDomain(1:100, 50:100), ArrayDomain(50:150, 1:75))
-    # => ArrayDomain((50:100, 50:75))
-"""
-@unimplemented intersect{D<:Domain}(a::D, b::D)
-
-"""
-   project(a::Domain, b::Domain)
-
-Align `b` relative to `a`. For example,
-
-    julia> project(ArrayDomain(11:25, 21:100), ArrayDomain(15:20, 30:40))
-    Dagger.ArrayDomain{2}((5:10,10:20))
-"""
-@unimplemented project{D<:Domain}(d::D, b::D)
-
-"""
-   getindex(a::Domain, b::Domain)
-
-Align `a` relative to `b`. For example,
-
-    getindex(ArrayDomain(11:25, 21:100), ArrayDomain(5:10, 10:40))
-    DataParallelBase.ArrayDomain{2}((15:20,30:60))
-"""
-@unimplemented Base.getindex{D<:Domain}(d::D, b::D)
-
-=#
-
-"""
-    alignfirst(a)
-
-Make a subdomain a standalone domain. For example,
-
-    alignfirst(ArrayDomain(11:25, 21:100))
-    # => ArrayDomain((1:15), (1:80))
-"""
-alignfirst(a::Domain) = a
-
-"""
-Domain of a scalar value
-"""
-immutable UnitDomain <: Domain end
+immutable UnitDomain end
 
 """
     domain(x::T)
@@ -90,19 +31,17 @@ we use the `UnitDomain` on it. A `UnitDomain` is indivisible.
 domain(x::Any) = UnitDomain()
 
 isempty(::UnitDomain) = false
-# intersect, project and getindex are unsupported,
-# and effectively `view` are unsupported for UnitDomain
 
 
 ###### Array Domains ######
 
 if VERSION >= v"0.6.0-dev"
     # TODO: Fix this better!
-    immutable ArrayDomain{N} <: Domain
+    immutable ArrayDomain{N}
         indexes::NTuple{N, Any}
     end
 else
-    immutable ArrayDomain{N} <: Domain
+    immutable ArrayDomain{N}
         indexes::NTuple{N}
     end
 end
@@ -113,8 +52,6 @@ ArrayDomain(xs::Array) = ArrayDomain((xs...,))
 indexes(a::ArrayDomain) = a.indexes
 chunks{N}(a::ArrayDomain{N}) = DomainBlocks(
     ntuple(i->first(indexes(a)[i]), Val{N}), map(x->[length(x)], indexes(a)))
-
-domain(x::DenseArray) = ArrayDomain(map(l -> 1:l, size(x)))
 
 (==)(a::ArrayDomain, b::ArrayDomain) = indexes(a) == indexes(b)
 Base.getindex(arr::AbstractArray, d::ArrayDomain) = arr[indexes(d)...]
@@ -136,6 +73,14 @@ function getindex(a::ArrayDomain, b::ArrayDomain)
     ArrayDomain(map(getindex, indexes(a), indexes(b)))
 end
 
+"""
+    alignfirst(a)
+
+Make a subdomain a standalone domain. For example,
+
+    alignfirst(ArrayDomain(11:25, 21:100))
+    # => ArrayDomain((1:15), (1:80))
+"""
 alignfirst(a::ArrayDomain) =
     ArrayDomain(map(r->1:length(r), indexes(a)))
 
