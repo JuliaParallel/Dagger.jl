@@ -41,9 +41,9 @@ function compute(ctx, s::Sort)
     DArray(compute(ctx, shuffle_merge(inp, splitter_ranks, splitters, s.order)))
 end
 
-function delayed_map_and_gather(f, ctx, Xs...)
+function delayed_map_and_collect(f, ctx, Xs...)
     result_parts = map(delayed(f, get_result=true), Xs...)
-    gather(ctx, delayed(tuple)(result_parts...))
+    collect(ctx, delayed(tuple)(result_parts...))
 end
 
 function pselect(ctx, A, ranks, ord)
@@ -72,7 +72,7 @@ function pselect(ctx, A, ranks, ord)
         # find medians
         chunk_ranges = [vec(active_ranges[i,:]) for i in 1:Nc]
 
-        chunk_medians = delayed_map_and_gather(ctx, chunk_ranges, cs) do ranges, data
+        chunk_medians = delayed_map_and_collect(ctx, chunk_ranges, cs) do ranges, data
             # as many ranges as ranks to find
             map(r->submedian(data, r), ranges)
         end
@@ -85,7 +85,7 @@ function pselect(ctx, A, ranks, ord)
         Ms = vec(mapslices(x->weightedmedian(x, ls, ord), median_matrix, 1))
 
         # scatter weighted
-        LEGs = delayed_map_and_gather(ctx, cs, chunk_ranges) do chunk, ranges
+        LEGs = delayed_map_and_collect(ctx, cs, chunk_ranges) do chunk, ranges
             # for each median found right now, locate G,T,E vals
             map((range, m)->locate_pivot(chunk, range, m, ord), ranges, Ms)
         end

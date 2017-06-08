@@ -79,10 +79,10 @@ b = compute(a)
 # => Computed(10000x10000 Array{Float64,2} in 9 parts each of (max size) 4000x4000)
 ```
 
-The result is an object containing metadata about the various pieces. They may be created on different workers and will stay there until a another worker needs it. However, you can request and get the whole data with the `gather` function.
+The result is an object containing metadata about the various pieces. They may be created on different workers and will stay there until a another worker needs it. However, you can request and get the whole data with the `collect` function.
 
 ```julia
-gather(b)
+collect(b)
 # => 10000x10000 Array{Float64,2}:
 ....
 ```
@@ -153,7 +153,7 @@ X[[20,30,40], :]
 X[20:40, [30,40,60]]
 ```
 
-Note that indexing again results in a `Computation` object of the type `GetIndex`. You can use it as input to another computation or call `gather` on it to get the indexed sub array.
+Note that indexing again results in a `Computation` object of the type `GetIndex`. You can use it as input to another computation or call `collect` on it to get the indexed sub array.
 
 #### Sparse matrix support
 
@@ -186,7 +186,7 @@ julia> compute(save(s1, "s1"))
 julia> x = load(Context(), "s1")
 Computed(10000x10000 Array{Float64,2} in 3x3 parts each of (max size) 4000x4000)
 
-julia> gather(x)
+julia> collect(x)
 10000x10000 sparse matrix with 999793 Float64 entries:
     ...
 ```
@@ -227,7 +227,7 @@ result = compute(save(saved_A+saved_A', "ApAt"))
 - `reduceblock(f, c)` - reduce each block of data by applying `f` to the block. In block distributed array, the result has the same dimensionality as the input.
 - `reducebykey(f, c)` - given a collection of tuples or pairs, use the first element of the tuples as the key, and reduce the values of each key. Computes a Dict of results.
 
-*Note: all these operations result in a `Computation` object. You need to call `compute` or `gather` on them to actually do the computation.*
+*Note: all these operations result in a `Computation` object. You need to call `compute` or `collect` on them to actually do the computation.*
 
 **Array API**
 - Unary element-wise operations:
@@ -251,10 +251,10 @@ $, &, (.!=), (.<), (.<=), (.==), (.>),
 - `*` on Computations can either stand for matrix-matrix or matrix-vector multiplications.
 - transpose on a matrix can be done using the `x'` syntax
 
-**Compute and gather**
+**Compute and collect**
 
 - `compute(ctx, c)` - compute a computation `c`
-- `gather(ctx, c)` - compute the result, and collate the result on the host process (usually pid 1).
+- `collect(ctx, c)` - compute the result, and collate the result on the host process (usually pid 1).
 
 **Context**
 

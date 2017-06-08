@@ -76,8 +76,10 @@ domain(x::AbstractArray) = ArrayDomain([1:l for l in size(x)])
 compute(ctx, x::ArrayOp) =
     compute(ctx, cached_stage(ctx, x)::DArray)
 
-gather(ctx, x::ArrayOp) =
-    gather(ctx, cached_stage(ctx, x)::DArray)
+collect(ctx::Context, x::ArrayOp) =
+    collect(ctx, compute(ctx, x))
+
+collect(x::ArrayOp) = collect(Context(), x)
 
 @compat function Base.show(io::IO, ::MIME"text/plain", x::ArrayOp)
     write(io, string(typeof(x)))
@@ -101,12 +103,12 @@ domainchunks(d::DArray) = d.subdomains
 size(x::DArray) = size(domain(x))
 stage(ctx, c::DArray) = c
 
-function gather(ctx, d::DArray)
+function collect(ctx::Context, d::DArray)
     a = compute(ctx, d, persist=false)
     ps_input = chunks(a)
     ps = Array{Any}(size(ps_input))
     @sync for i in 1:length(ps_input)
-        @async ps[i] = gather(ctx, ps_input[i])
+        @async ps[i] = collect(ctx, ps_input[i])
     end
     if isempty(ps)
         emptyarray(Array{eltype(d), ndims(d)}, size(d)...)

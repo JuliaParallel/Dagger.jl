@@ -1,12 +1,17 @@
 export stage, cached_stage, compute, debug_compute, cached, free!
 using Compat
 
+compute(x) = compute(Context(), x)
+compute(ctx, c::Chunk) = c
+
+collect(ctx::Context, c) = collect(ctx, compute(ctx, c))
+collect(d::Union{Chunk,Thunk}) = collect(Context(), d)
+
 @compat abstract type Computation end
 
-compute(x) = compute(Context(), x)
-gather(d) = gather(Context(), d)
 compute(ctx, c::Computation) = compute(ctx, stage(ctx, c))
-gather(ctx, c) = gather(compute(ctx, c))
+collect(c::Computation) = collect(Context(), c)
+
 
 function finish_task!(state, node, node_order; free=true)
     if istask(node) && node.cache
@@ -278,7 +283,7 @@ function start_state(deps::Dict, node_order)
 end
 
 _move(ctx, to_proc, x) = x
-_move(ctx, to_proc::OSProc, x::Union{Chunk, Thunk}) = gather(ctx, x)
+_move(ctx, to_proc::OSProc, x::Union{Chunk, Thunk}) = collect(ctx, x)
 
 function do_task(ctx, proc, thunk_id, f, data, send_result, persist)
     @dbg timespan_start(ctx, :comm, thunk_id, proc)
@@ -319,3 +324,6 @@ function debug_compute(arg; profile=false)
     dbgctx = Context(procs(ctx), LocalEventLog(), profile)
     debug_compute(dbgctx, arg)
 end
+
+Base.@deprecate gather(ctx, x) collect(ctx, x)
+Base.@deprecate gather(x) collect(x)

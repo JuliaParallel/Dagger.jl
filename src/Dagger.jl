@@ -2,17 +2,19 @@ module Dagger
 
 using Compat
 
+import Base.collect
+
 include("lib/util.jl")
 include("lib/logging.jl")
 include("lib/dumbref.jl")
 
-# Data and slices of data
+# Distributed data
+include("processor.jl")
 include("thunk.jl")
 include("domain.jl")
 include("chunks.jl")
 
 # Task scheduling
-include("processor.jl")
 include("compute.jl")
 
 # Array computations

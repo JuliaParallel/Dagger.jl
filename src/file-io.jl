@@ -62,7 +62,7 @@ function save(ctx, io::IO, chunk::Chunk, file_path)
     write(io, meta)
     data_offset = position(io)
 
-    save(ctx, io, gather(ctx, chunk))
+    save(ctx, io, collect(ctx, chunk))
 
     Chunk(chunktype(chunk), domain(chunk), FileReader(file_path, chunktype(chunk), data_offset, false), false)
 end
@@ -172,7 +172,7 @@ function save(ctx, io::IO, m::BitArray)
     save(ctx, io, convert(Array{Bool}, m))
 end
 
-function gather{X,T<:Array}(ctx, c::Chunk{X,FileReader{T}})
+function collect{X,T<:Array}(ctx::Context, c::Chunk{X,FileReader{T}})
     h = c.handle
     io = open(h.file, "r+")
     seek(io, h.data_offset)
@@ -182,7 +182,7 @@ function gather{X,T<:Array}(ctx, c::Chunk{X,FileReader{T}})
     arr
 end
 
-function gather{X,T<:BitArray}(ctx, c::Chunk{X, FileReader{T}})
+function collect{X,T<:BitArray}(ctx::Context, c::Chunk{X, FileReader{T}})
     h = c.handle
     io = open(h.file, "r+")
     seek(io, h.data_offset)
@@ -210,7 +210,7 @@ function save{Tv, Ti}(ctx, io::IO, m::SparseMatrixCSC{Tv,Ti})
     m
 end
 
-function gather{X, T<:SparseMatrixCSC}(ctx, c::Chunk{X, FileReader{T}})
+function collect{X, T<:SparseMatrixCSC}(ctx::Context, c::Chunk{X, FileReader{T}})
     h = c.handle
     io = open(h.file, "r+")
     seek(io, h.data_offset)
@@ -237,7 +237,7 @@ function gather{X, T<:SparseMatrixCSC}(ctx, c::Chunk{X, FileReader{T}})
 end
 
 function getsub{X,T<:AbstractArray}(ctx, c::Chunk{X,FileReader{T}}, d)
-    Chunk(gather(ctx, c)[d])
+    Chunk(collect(ctx, c)[d])
 end
 
 

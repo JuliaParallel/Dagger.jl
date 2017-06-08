@@ -1,5 +1,5 @@
 
-export chunk, gather
+export chunk, collect
 
 export domain, UnitDomain, project, alignfirst, ArrayDomain
 
@@ -52,14 +52,14 @@ function unrelease{T}(c::Chunk{T,MemToken})
 end
 unrelease(c::Chunk) = c
 
-function gather(ctx, chunk::Chunk)
+function collect(ctx::Context, chunk::Chunk)
     # delegate fetching to handle by default.
-    gather(ctx, chunk.handle)
+    collect(ctx, chunk.handle)
 end
 
 
 ### ChunkIO
-function gather(ctx, ref::MemToken)
+function collect(ctx::Context, ref::MemToken)
     res = fetch(ref)
     if isnull(res)
         throw(KeyError(ref))
