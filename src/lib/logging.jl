@@ -6,7 +6,7 @@ const Timestamp = UInt64
 
 immutable ProfilerResult
     samples::Vector{UInt64}
-    lineinfo::Base.Profile.LineInfoDict
+    lineinfo::Associative
 end
 
 """
