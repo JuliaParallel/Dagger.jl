@@ -31,18 +31,9 @@ end
 Base.@deprecate BlockPartition Blocks
 
 function stage(ctx, a::AllocateArray)
-    branch = a.domain
-    dims = ndims(a.domain)
-    alloc = let eltype = a.eltype, f = a.f
-        _alloc(idx, sz) = f(idx,eltype, sz)
-    end
-
-    subdomains = a.domainchunks
-    thunks = similar(subdomains, Thunk)
-    for i=1:length(subdomains)
-        thunks[i] = delayed(alloc)(i, size(subdomains[i]))
-    end
-    DArray{a.eltype, dims}(a.domain, subdomains, thunks)
+    alloc(idx, sz) = a.f(idx, a.eltype, sz)
+    thunks = [delayed(alloc)(i, size(x)) for (i, x) in enumerate(a.domainchunks)]
+    DArray{a.eltype,ndims(a.domain)}(a.domain, a.domainchunks, thunks)
 end
 
 function Base.rand(p::Blocks, eltype::Type, dims)
