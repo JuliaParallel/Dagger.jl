@@ -9,13 +9,6 @@ type AllocateArray{T,N} <: ArrayOp{T,N}
 end
 size(a::AllocateArray) = size(a.domain)
 
-export BlockPartition, Blocks
-
-immutable Blocks{N}
-    blocksize::NTuple{N, Int}
-end
-Blocks(xs::Int...) = Blocks(xs)
-
 function _cumlength(len, step)
     nice_pieces = div(len, step)
     extra = rem(len, step)
@@ -27,8 +20,6 @@ function partition(p::Blocks, dom::ArrayDomain)
     DomainBlocks(map(first, indexes(dom)),
         map(_cumlength, map(length, indexes(dom)), p.blocksize))
 end
-
-Base.@deprecate BlockPartition Blocks
 
 function stage(ctx, a::AllocateArray)
     alloc(idx, sz) = a.f(idx, a.eltype, sz)

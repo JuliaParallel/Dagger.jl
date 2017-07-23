@@ -44,33 +44,6 @@ function stage(ctx, node::Transpose)
     DArray{eltype(inp),ndims(inp)}(domain(inp)', domainchunks(inp)', thunks)
 end
 
-export Distribute
-
-immutable Distribute{N, T} <: ArrayOp{N, T}
-    domainchunks
-    data::Union{Chunk, Thunk}
-end
-
-Distribute(dmn, data) =
-    Distribute(dmn, persist!(tochunk(data)))
-
-Distribute(d, p::Union{Chunk, Thunk}) =
-    Distribute{eltype(chunktype(p)), ndims(d)}(d, p)
-
-size(x::Distribute) = size(domain(x.data))
-
-
-Distribute(p::Blocks, data) =
-    Distribute(partition(p, domain(data)), data)
-
-function stage(ctx, d::Distribute)
-    DArray{eltype(chunktype(d.data)), ndims(domain(d.data))}(
-        domain(d.data),
-        d.domainchunks,
-        map(c -> delayed(getindex)(d.data, c), d.domainchunks))
-end
-
-
 import Base: *, +
 
 immutable MatMul{T, N} <: ArrayOp{T, N}
