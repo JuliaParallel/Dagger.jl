@@ -344,3 +344,11 @@ end
 function distribute(x::AbstractVector, n::Vector)
     distribute(x, DomainBlocks((1,), n))
 end
+
+function Base.:(==){T,S,N}(x::ArrayOp{T,N}, y::AbstractArray{S,N})
+    collect(x) == y
+end
+
+function Base.:(==){T,S,N}(x::AbstractArray{T,N}, y::ArrayOp{S,N})
+    return collect(x) == y
+end

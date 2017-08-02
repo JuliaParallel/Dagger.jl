@@ -31,14 +31,14 @@ end
 @testset "distributing an array" begin
     function test_dist(X)
         X1 = Distribute(Blocks(10, 20), X)
-        @test collect(X1) == X
+        @test X1 == X
         Xc = compute(X1)
         @test chunks(Xc) |> size == (10, 5)
         @test domainchunks(Xc) |> size == (10, 5)
         @test map(x->size(x) == (10, 20), domainchunks(Xc)) |> all
     end
     x = [1 2; 3 4]
-    @test collect(Distribute(Blocks(1,1), x)) == x
+    @test Distribute(Blocks(1,1), x) == x
     #test_dist(rand(100, 100))
     #test_dist(sprand(100, 100, 0.1))
 end
@@ -47,7 +47,7 @@ end
     function test_transpose(X)
         x, y = size(X)
         X1 = Distribute(Blocks(10, 20), X)
-        @test collect(X1') == X'
+        @test X1' == X'
         Xc = compute(X1')
         @test chunks(Xc) |> size == (div(y, 20), div(x,10))
         @test domainchunks(Xc) |> size == (div(y, 20), div(x, 10))
