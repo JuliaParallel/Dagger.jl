@@ -1,4 +1,16 @@
-import Dagger: chunks, DArray, domainchunks
+import Dagger: chunks, DArray, domainchunks, treereduce_nd
+
+@testset "treereduce_nd" begin
+    xs = rand(1:10, 8,8,8)
+    concats = [(x...)->cat(n, x...) for n in 1:3]
+    @test treereduce_nd(concats, xs) == xs
+    @test treereduce_nd(reverse(concats), xs) == permutedims(xs, [3,2,1])
+end
+
+@testset "DArray constructor" begin
+    x = compute(rand(Blocks(2,2), 3,3))
+    @test collect(x) == DArray{Float64, 2}(x.domain, x.subdomains, x.chunks) |> collect
+end
 
 @testset "rand" begin
     function test_rand(X)

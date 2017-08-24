@@ -41,7 +41,7 @@ end
 function stage(ctx, node::Transpose)
     inp = cached_stage(ctx, node.input)
     thunks = _ctranspose(chunks(inp))
-    DArray{eltype(inp),ndims(inp)}(domain(inp)', domainchunks(inp)', thunks)
+    DArray(eltype(inp), domain(inp)', domainchunks(inp)', thunks)
 end
 
 import Base: *, +
@@ -180,7 +180,7 @@ end
 function stage(ctx, mul::MatMul)
     a, b = stage_operands(ctx, mul, mul.a, mul.b)
     d = domain(a)*domain(b)
-    DArray{Any, ndims(d)}(d, domainchunks(a)*domainchunks(b),
+    DArray(Any, d, domainchunks(a)*domainchunks(b),
                           _mul(chunks(a), chunks(b); T=Thunk))
 end
 
@@ -227,7 +227,7 @@ function stage(ctx, scal::Scale)
     @assert size(domain(r), 1) == size(domain(l), 1)
 
     scal_parts = _scale(chunks(l), chunks(r))
-    DArray{Any, ndims(r)}(domain(r), domainchunks(r), scal_parts)
+    DArray(Any, domain(r), domainchunks(r), scal_parts)
 end
 
 immutable Concat{T,N} <: ArrayOp{T,N}
@@ -266,7 +266,7 @@ function stage(ctx, c::Concat)
     dmnchunks = cumulative_domains(cat(c.axis, map(domainchunks, inp)...))
     thunks = cat(c.axis, map(chunks, inp)...)
     T = promote_type(map(eltype, inp)...)
-    DArray{T,ndims(dmn)}(dmn, dmnchunks, thunks)
+    DArray(T, dmn, dmnchunks, thunks)
 end
 
 Base.cat(idx::Int, x::ArrayOp, xs::ArrayOp...) =

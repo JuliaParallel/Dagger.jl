@@ -91,10 +91,41 @@ function Base.show(io::IO, x::ArrayOp)
     @compat show(io, m, x)
 end
 
-type DArray{T,N} <: ArrayOp{T, N}
+"""
+`DArray{T,N,F}(domain, subdomains, chunks, concat)`
+
+An N-dimensional distributed array of element type T.
+
+- `domain`: the whole ArrayDomain of the array
+- `subdomains`: a `DomainBlocks` of the same dimensions as the array
+- `chunks`: an array of chunks of dimension N
+- `concat`: a function of type `F`. `concat(d, x, y)` takes two chunks `x` and `y`
+            and concatenates them along dimension `d`. `cat` is used by default.
+"""
+type DArray{T,N,F} <: ArrayOp{T, N}
     domain::ArrayDomain{N}
     subdomains::AbstractArray{ArrayDomain{N}, N}
     chunks::AbstractArray{Union{Chunk,Thunk}, N}
+    concat::F
+end
+
+# mainly for backwards-compatibility
+(::Type{DArray{T, N}}){T,N}(domain, subdomains, chunks) = DArray(T, domain, subdomains, chunks)
+
+
+"""
+`DArray(T, domain, subdomains, chunks, [concat=cat])`
+
+Creates a distributed array of element type T.
+
+- `T`: element type
+
+rest of the arguments are the same as the DArray constructor.
+"""
+function DArray{N}(T, domain::ArrayDomain{N},
+                subdomains::AbstractArray{ArrayDomain{N}, N},
+                chunks::AbstractArray{<:Any, N}, concat=cat)
+    DArray{T, N, typeof(concat)}(domain, subdomains, chunks, concat)
 end
 
 domain(d::DArray) = d.domain
@@ -103,57 +134,20 @@ domainchunks(d::DArray) = d.subdomains
 size(x::DArray) = size(domain(x))
 stage(ctx, c::DArray) = c
 
-function collect(ctx::Context, d::DArray)
+function collect(ctx::Context, d::DArray; tree=false)
     a = compute(ctx, d, persist=false)
     ps_input = chunks(a)
-    ps = Array{Any}(size(ps_input))
-    @sync for i in 1:length(ps_input)
-        @async ps[i] = collect(ctx, ps_input[i])
+
+    if isempty(d.chunks)
+        return Array{eltype(d)}(size(d)...)
     end
-    if isempty(ps)
-        emptyarray(Array{eltype(d), ndims(d)}, size(d)...)
+
+    dimcatfuncs = [(x...) -> d.concat(i, x...) for i in 1:ndims(d)]
+    if tree
+        collect(treereduce_nd(delayed.(dimcatfuncs), d.chunks))
     else
-        cat_data(typeof(ps[1]), domain(a), domainchunks(a), ps)
+        treereduce_nd(dimcatfuncs, asyncmap(collect, d.chunks))
     end
-end
-
-function emptyarray{T<:Array}(::Type{T}, dims...)
-    T(dims...)
-end
-
-function emptyarray{Tv,Ti}(::Type{SparseMatrixCSC{Tv,Ti}}, m,n)
-    spzeros(Tv, Ti, m, n)
-end
-
-function emptyarray{Tv,Ti}(::Type{SparseVector{Tv,Ti}}, n)
-    SparseVector(n, Ti[], Tv[])
-end
-
-function cat_data{T<:AbstractArray}(::Type{T}, dom, subdoms, ps)
-
-    if isempty(ps)
-        return emptyarray(T, size(dom)...)
-    end
-
-    arr = similar(ps[1], size(dom)...)
-
-    for (d, chunk) in zip(subdoms, ps)
-        setindex!(arr, chunk, indexes(d)...)
-    end
-    arr
-end
-
-function cat_data{T<:SparseMatrixCSC}(::Type{T}, dom, ps)
-
-    if isempty(ps)
-        @assert isempty(dom)
-        return spzeros(T.parameters..., size(dom)...)
-    end
-
-    m, n = size(chunks(dom))
-
-    psT = Any[ps[j,i] for i=1:size(ps,2), j=1:size(ps,1)]
-    hvcat(ntuple(x->n, m), psT...)
 end
 
 function (==)(x::ArrayOp, y::ArrayOp)
@@ -177,7 +171,7 @@ function Base.view(c::DArray, d)
         subchunks[1]
     else
         d1 = alignfirst(d)
-        DArray{eltype(c),ndims(d1)}(d1, subdomains, subchunks)
+        DArray(eltype(c), d1, subdomains, subchunks)
     end
 end
 
@@ -257,7 +251,7 @@ function thunkize(ctx, c::DArray; persist=true)
         end
         Thunk(thunks...; meta=true) do results...
             t = eltype(results[1])
-            DArray{t, ndims(dmn)}(dmn, dmnchunks,
+            DArray(t, dmn, dmnchunks,
                                   reshape(Union{Chunk,Thunk}[results...], sz))
         end
     else
@@ -322,10 +316,12 @@ Distribute(p::Blocks, data) =
     Distribute(partition(p, domain(data)), data)
 
 function stage(ctx, d::Distribute)
-    DArray{eltype(chunktype(d.data)), ndims(domain(d.data))}(
-        domain(d.data),
-        d.domainchunks,
-        map(c -> delayed(getindex)(d.data, c), d.domainchunks))
+    DArray(
+           eltype(chunktype(d.data)),
+           domain(d.data),
+           d.domainchunks,
+           map(c -> delayed(getindex)(d.data, c), d.domainchunks)
+    )
 end
 
 function distribute(x::AbstractArray, dist)

@@ -145,6 +145,23 @@ function treereducedim(op, xs::Array, dim::Tuple)
     reduce((prev, d) -> treereducedim(op, prev, d), xs, dim)
 end
 
+function allslices(xs, n)
+    idx = Any[Colon() for i in 1:ndims(xs)]
+    [ begin
+        idx[n] = j
+        view(xs, idx...)
+            end for j in 1:size(xs, n)]
+end
+
+function treereduce_nd(fs, xs)
+    n = ndims(xs)
+    if n==1
+        treereduce(fs[n], xs)
+    else
+        treereduce(fs[n], map(ys->treereduce_nd(fs, ys), allslices(xs, n)))
+    end
+end
+
 function setindex{N}(x::NTuple{N}, idx, v)
     map(ifelse, ntuple(x->idx === x, Val{N}), ntuple(x->v, Val{N}), x)
 end

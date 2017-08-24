@@ -21,7 +21,7 @@ function stage(ctx, node::Map)
         inps = map(x->chunks(x)[i], inputs)
         thunks[i] = Thunk((args...) -> map(f, args...), inps...)
     end
-    DArray{Any, ndims(primary)}(domain(primary), domainchunks(primary), thunks)
+    DArray(Any, domain(primary), domainchunks(primary), thunks)
 end
 
 map(f, x::ArrayOp, xs::ArrayOp...) = Map(f, (x, xs...))
@@ -126,5 +126,5 @@ function stage(ctx, r::Reducedim)
     dmn = c[colons...]
     d = reducedim(domain(inp), r.dims)
     ds = reducedim(domainchunks(inp), r.dims)
-    DArray{eltype(inp), ndims(inp)}(d, ds, thunks)
+    DArray(eltype(inp), d, ds, thunks)
 end
