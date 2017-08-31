@@ -163,16 +163,12 @@ function Base.isequal(x::ArrayOp, y::ArrayOp)
 end
 
 """
-`view` of a `Cat` chunk returns a `Cat` of view chunks
+`view` of a `DArray` chunk returns a `DArray` of thunks
 """
 function Base.view(c::DArray, d)
     subchunks, subdomains = lookup_parts(chunks(c), domainchunks(c), d)
-    if length(subchunks) == 1
-        subchunks[1]
-    else
-        d1 = alignfirst(d)
-        DArray(eltype(c), d1, subdomains, subchunks)
-    end
+    d1 = alignfirst(d)
+    DArray(eltype(c), d1, subdomains, subchunks)
 end
 
 function group_indices(cumlength, idxs,at=1, acc=Any[])
