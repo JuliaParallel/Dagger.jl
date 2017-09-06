@@ -2,9 +2,8 @@
 language: julia
 os:
   - linux
-  # - osx
+  - osx
 julia:
-  - 0.5
   - 0.6
   - nightly
 matrix:
