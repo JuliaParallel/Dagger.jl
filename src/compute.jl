@@ -15,36 +15,36 @@ collect(c::Computation) = collect(Context(), c)
 
 function finish_task!(state, node, node_order; free=true)
     if istask(node) && node.cache
-        node.cache_ref = Nullable{Any}(state[:cache][node])
+        node.cache_ref = Nullable{Any}(state.cache[node])
     end
     immediate_next = false
-    for dep in sort!(collect(state[:dependents][node]), by=node_order)
-        set = state[:waiting][dep]
+    for dep in sort!(collect(state.dependents[node]), by=node_order)
+        set = state.waiting[dep]
         pop!(set, node)
         if isempty(set)
-            pop!(state[:waiting], dep)
-            push!(state[:ready], dep)
+            pop!(state.waiting, dep)
+            push!(state.ready, dep)
             immediate_next = true
         end
         # todo: free data
     end
     for inp in inputs(node)
-        if inp in keys(state[:waiting_data])
-            s = state[:waiting_data][inp]
+        if inp in keys(state.waiting_data)
+            s = state.waiting_data[inp]
             if node in s
                 pop!(s, node)
             end
             if free && isempty(s)
-                if haskey(state[:cache], inp)
-                    _node = state[:cache][inp]
+                if haskey(state.cache, inp)
+                    _node = state.cache[inp]
                     free!(_node, force=false, cache=(istask(inp) && inp.cache))
-                    pop!(state[:cache], inp)
+                    pop!(state.cache, inp)
                 end
             end
         end
     end
-    state[:finished] = node
-    pop!(state[:running], node)
+    push!(state.finished, node)
+    pop!(state.running, node)
     immediate_next
 end
 
@@ -66,32 +66,32 @@ function compute(ctx, d::Thunk)
     state = start_state(deps, node_order)
     # start off some tasks
     for p in ps
-        isempty(state[:ready]) && break
-        task = pop_with_affinity!(ctx, state[:ready], p)
+        isempty(state.ready) && break
+        task = pop_with_affinity!(ctx, state.ready, p)
         if task !== nothing
             fire_task!(ctx, task, p, state, chan, node_order)
         end
     end
     @dbg timespan_end(ctx, :scheduler_init, 0, master)
 
-    while !isempty(state[:waiting]) || !isempty(state[:ready]) || !isempty(state[:running])
+    while !isempty(state.waiting) || !isempty(state.ready) || !isempty(state.running)
         proc, thunk_id, res = take!(chan)
         if isa(res, CapturedException) || isa(res, RemoteException)
             rethrow(res)
         end
         node = _thunk_dict[thunk_id]
         @logmsg("W$(proc.pid) - $node ($(node.f)) input:$(node.inputs)")
-        state[:cache][node] = res
+        state.cache[node] = res
 
         # if any of this guy's dependents are waiting, update them
         @dbg timespan_start(ctx, :scheduler, thunk_id, master)
         immediate_next = finish_task!(state, node, node_order)
-        if !isempty(state[:ready])
+        if !isempty(state.ready)
             if immediate_next
                 # fast path
-                thunk = pop!(state[:ready])
+                thunk = pop!(state.ready)
             else
-                thunk = pop_with_affinity!(Context(ps), state[:ready], proc)
+                thunk = pop_with_affinity!(Context(ps), state.ready, proc)
             end
             if thunk === nothing
                 deleteat!(ps, find(ps .== proc)) # this proc has nothing to do
@@ -101,7 +101,7 @@ function compute(ctx, d::Thunk)
         end
         @dbg timespan_end(ctx, :scheduler, thunk_id, master)
     end
-    state[:cache][d]
+    state.cache[d]
 end
 
 function pop_with_affinity!(ctx, tasks, proc)
@@ -135,20 +135,20 @@ end
 
 function fire_task!(ctx, thunk, proc, state, chan, node_order)
     @logmsg("W$(proc.pid) + $thunk ($(showloc(thunk.f, length(thunk.inputs)))) input:$(thunk.inputs) cache:$(thunk.cache) $(thunk.cache_ref)")
-    push!(state[:running], thunk)
+    push!(state.running, thunk)
     if thunk.cache && !isnull(thunk.cache_ref)
         # the result might be already cached
         data = unrelease(get(thunk.cache_ref)) # ask worker to keep the data around
                                           # till this compute cycle frees it
         if !isnull(data)
             @logmsg("cache hit: $(get(thunk.cache_ref))")
-            state[:cache][thunk] = get(data)
+            state.cache[thunk] = get(data)
             immediate_next = finish_task!(state, thunk, node_order; free=false)
-            if !isempty(state[:ready])
+            if !isempty(state.ready)
                 if immediate_next
-                    thunk = pop!(state[:ready])
+                    thunk = pop!(state.ready)
                 else
-                    thunk = pop_with_affinity!(ctx, state[:ready], proc)
+                    thunk = pop_with_affinity!(ctx, state.ready, proc)
                 end
                 if thunk !== nothing
                     fire_task!(ctx, thunk, proc, state, chan, node_order)
@@ -167,7 +167,7 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
         p = OSProc(myid())
         @dbg timespan_start(ctx, :comm, thunk.id, p)
         fetched = map(thunk.inputs) do x
-            istask(x) ? state[:cache][x] : x
+            istask(x) ? state.cache[x] : x
         end
         @dbg timespan_end(ctx, :comm, thunk.id, p)
 
@@ -175,14 +175,14 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
         res = thunk.f(fetched...)
         @dbg timespan_end(ctx, :compute, thunk.id, p)
 
-        #push!(state[:running], thunk)
-        state[:cache][thunk] = res
+        #push!(state.running, thunk)
+        state.cache[thunk] = res
         immediate_next = finish_task!(state, thunk, node_order; free=false)
-        if !isempty(state[:ready])
+        if !isempty(state.ready)
             if immediate_next
-                thunk = pop!(state[:ready])
+                thunk = pop!(state.ready)
             else
-                thunk = pop_with_affinity!(ctx, state[:ready], proc)
+                thunk = pop_with_affinity!(ctx, state.ready, proc)
             end
             if thunk !== nothing
                 fire_task!(ctx, thunk, proc, state, chan, node_order)
@@ -192,7 +192,7 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
     end
 
     data = map(thunk.inputs) do x
-        istask(x) ? state[:cache][x] : x
+        istask(x) ? state.cache[x] : x
     end
     async_apply(ctx, proc, thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist)
 end
@@ -201,14 +201,14 @@ end
 ##### Scheduling logic #####
 
 "find the set of direct dependents for each task"
-function dependents(node::Thunk, deps=Dict())
+function dependents(node::Thunk, deps=Dict{Thunk, Set{Thunk}}())
     if !haskey(deps, node)
-        deps[node] = Set()
+        deps[node] = Set{Thunk}()
     end
     for inp = inputs(node)
-        s::Set{Any} = Base.@get!(deps, inp, Set())
-        push!(s, node)
         if isa(inp, Thunk)
+            s::Set{Thunk} = Base.@get!(deps, inp, Set{Thunk}())
+            push!(s, node)
             dependents(inp, deps)
         end
     end
@@ -248,34 +248,48 @@ function order(node::Thunk, ndeps)
     function recur(nodes, s)
         for n in nodes
             output[n] = s += 1
-            s = recur(sort!(collect(Any, inputs(n)), by=k->get(ndeps,k,0)), s)
+            parents = collect(Iterators.filter(istask, inputs(n)))
+            s = recur(sort!(parents, by=k->get(ndeps,k,0)), s)
         end
         return s
     end
-    output = Dict{Any,Int}()
+    output = Dict{Thunk,Int}()
     recur([node], 0)
     return output
 end
 
+const OneToMany = Dict{Thunk, Set{Thunk}}
+struct ComputeState
+    dependents::OneToMany
+    finished::Set{Thunk}
+    waiting::OneToMany
+    waiting_data::OneToMany
+    ready::Vector{Thunk}
+    cache::Dict{Thunk, Any}
+    running::Set{Thunk}
+end
+
 function start_state(deps::Dict, node_order)
-    state = Dict()
-    state[:dependents] = deps
-    state[:finished] = Set()
-    state[:waiting] = Dict() # who is x waiting for?
-    state[:waiting_data] = Dict() # dependents still waiting
-    state[:ready] = Any[]
-    state[:cache] = Dict()
-    state[:running] = Set()
+    state = ComputeState(
+                  deps,
+                  Set{Thunk}(),
+                  OneToMany(),
+                  OneToMany(),
+                  Vector{Thunk}(0),
+                  Dict{Thunk, Any}(),
+                  Set{Thunk}()
+                 )
 
     nodes = sort(collect(keys(deps)), by=node_order)
-    state[:waiting_data] = copy(deps)
+    merge!(state.waiting_data, deps)
     for k in nodes
         if istask(k)
-            waiting = Set{Any}(Compat.Iterators.filter(istask, inputs(k)))
+            waiting = Set{Thunk}(Iterators.filter(istask,
+                                                  inputs(k)))
             if isempty(waiting)
-                push!(state[:ready], k)
+                push!(state.ready, k)
             else
-                state[:waiting][k] = waiting
+                state.waiting[k] = waiting
             end
         end
     end

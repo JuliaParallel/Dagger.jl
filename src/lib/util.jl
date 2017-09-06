@@ -42,7 +42,7 @@ function split_range{T}(range::Range{T}, n)
     len = length(range)
 
     starts = len >= n ?
-        round(T, linspace(first(range), last(range)+1, n+1)) :
+        round.(T, linspace(first(range), last(range)+1, n+1)) :
         [[first(range):(last(range)+1);], zeros(T, n-len);]
 
     map((x,y)->x:y, starts[1:end-1], starts[2:end] .- 1)
