@@ -127,7 +127,7 @@ end
         # THESE NEED FIXING!!
             @test vec(collect(X[ragged_idx, 5])) == vec(x[ragged_idx, 5])
             @test vec(collect(X[5, ragged_idx])) == vec(x[5, ragged_idx])
-            @test X[5, 5] == x[5,5]
+            @test collect(X[5, 5]) == x[5,5]
         end
     end
 
