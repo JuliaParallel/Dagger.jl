@@ -67,35 +67,38 @@ function compute(ctx, d::Thunk)
     # start off some tasks
     for p in ps
         isempty(state.ready) && break
-        task = pop_with_affinity!(ctx, state.ready, p)
+        task = pop_with_affinity!(ctx, state.ready, p, false)
         if task !== nothing
             fire_task!(ctx, task, p, state, chan, node_order)
         end
     end
     @dbg timespan_end(ctx, :scheduler_init, 0, master)
 
-    while !isempty(state.waiting) || !isempty(state.ready) || !isempty(state.running)
+    while !isempty(state.ready) ||
+        !isempty(state.running)
+
+        if isempty(state.running) && !isempty(state.ready)
+            for p in ps
+                isempty(state.ready) && break
+                task = pop_with_affinity!(ctx, state.ready, p, false)
+                if task !== nothing
+                    fire_task!(ctx, task, p, state, chan, node_order)
+                end
+            end
+        end
         proc, thunk_id, res = take!(chan)
         if isa(res, CapturedException) || isa(res, RemoteException)
             rethrow(res)
         end
         node = _thunk_dict[thunk_id]
-        @logmsg("W$(proc.pid) - $node ($(node.f)) input:$(node.inputs)")
+        @logmsg("WORKER $(proc.pid) - $node ($(node.f)) input:$(node.inputs)")
         state.cache[node] = res
 
-        # if any of this guy's dependents are waiting, update them
         @dbg timespan_start(ctx, :scheduler, thunk_id, master)
         immediate_next = finish_task!(state, node, node_order)
         if !isempty(state.ready)
-            if immediate_next
-                # fast path
-                thunk = pop!(state.ready)
-            else
-                thunk = pop_with_affinity!(Context(ps), state.ready, proc)
-            end
-            if thunk === nothing
-                deleteat!(ps, find(ps .== proc)) # this proc has nothing to do
-            else
+            thunk = pop_with_affinity!(Context(ps), state.ready, proc, immediate_next)
+            if thunk !== nothing
                 fire_task!(ctx, thunk, proc, state, chan, node_order)
             end
         end
@@ -104,7 +107,13 @@ function compute(ctx, d::Thunk)
     state.cache[d]
 end
 
-function pop_with_affinity!(ctx, tasks, proc)
+function pop_with_affinity!(ctx, tasks, proc, immediate_next)
+    if immediate_next
+        # fast path
+        if proc in first.(affinity(tasks[end]))
+            return pop!(tasks)
+        end
+    end
     parent_affinities = affinity.(tasks)
     for i=length(tasks):-1:1
         # TODO: use the size
@@ -145,11 +154,7 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
             state.cache[thunk] = get(data)
             immediate_next = finish_task!(state, thunk, node_order; free=false)
             if !isempty(state.ready)
-                if immediate_next
-                    thunk = pop!(state.ready)
-                else
-                    thunk = pop_with_affinity!(ctx, state.ready, proc)
-                end
+                thunk = pop_with_affinity!(ctx, state.ready, proc, immediate_next)
                 if thunk !== nothing
                     fire_task!(ctx, thunk, proc, state, chan, node_order)
                 end
@@ -182,7 +187,7 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
             if immediate_next
                 thunk = pop!(state.ready)
             else
-                thunk = pop_with_affinity!(ctx, state.ready, proc)
+                thunk = pop_with_affinity!(ctx, state.ready, proc, immediate_next)
             end
             if thunk !== nothing
                 fire_task!(ctx, thunk, proc, state, chan, node_order)

@@ -1,6 +1,5 @@
 using Dagger
-import Dagger: treereduce, tochunk
-
+import Dagger: treereduce, tochunk, DArray
 
 function getmedians(x, n)
     q,r = divrem(length(x), n+1)
@@ -18,26 +17,9 @@ end
 
 function sortchunk(xs, nsamples)
     sorted = sort(xs)
-    r = randperm(length(xs))[1:nsamples]
+    r = randperm(length(xs))[1:min(length(xs), nsamples)]
     (tochunk(sorted), getmedians(sorted, nsamples))
 end
-
-function dsort(cs, n, nsamples=2000)
-    n=n-1
-    cs1 = map(c->delayed(sortchunk)(c, nsamples), cs)
-    xs = collect(treereduce(delayed(vcat), cs1))
-    samples = sort!(reduce(vcat, map(x->x[2], xs)))
-    splitters = getmedians(samples, n)
-
-    # exchange and merge
-end
-
-using Distributions
-
-xs = rand(Gamma(9,0.01),10^6)
-xs = rand(10^6)
-cs = map(x->xs[x], Dagger.split_range(1:length(xs), 8))
-splits = @time dsort(cs, 4)
 
 function evaluate(x, cs, splits)
     n = length(splits)
@@ -52,12 +34,7 @@ function evaluate(x, cs, splits)
     map(s->length(find(x->x<=s, x)), splits) .- cumsum(buckets[1:end-1])
 end
 
-evaluate(xs, cs, splits)
-
-using Dagger
-import Dagger: split_range
-
-function batchedsplitmerge(chunks, splitters, batchsize)
+function batchedsplitmerge(chunks, splitters, batchsize, start_proc=1)
     if batchsize >= length(chunks)
         return splitmerge(chunks, splitters)
     end
@@ -79,6 +56,7 @@ function batchedsplitmerge(chunks, splitters, batchsize)
     range_groups = transpose_vecvec(sorted_batches)
 
     chunks = []
+    p = start_proc
     for i = 1:length(range_groups)
         s = lowersplits[i]
         group = range_groups[i]
@@ -86,10 +64,15 @@ function batchedsplitmerge(chunks, splitters, batchsize)
             cs = batchedsplitmerge(group, s, batchsize)
             append!(chunks, cs)
         else
-            push!(chunks, reduce(merge_sorted, group))
+            push!(chunks, @show collect_merge(group))
         end
     end
     return chunks
+end
+
+function collect_merge(group)
+    #delayed((xs...) -> treereduce(merge_sorted, Any[xs...]))(group...)
+    t = treereduce(delayed(merge_sorted), group)
 end
 
 # Given sorted chunks, splits each chunk according to splitters
@@ -97,19 +80,31 @@ end
 # these chunks will be in turn sorted
 function splitmerge(chunks, splitters)
     c1 = map(c->splitchunk(c, splitters), chunks)
-    map(cs->reduce(merge_sorted, cs), transpose_vecvec(c1))
+    map(collect_merge, transpose_vecvec(c1))
 end
 
 function splitchunk(c, splitters)
-    pieces = typeof(c)[]
-    i = 1
-    for s in splitters
-        j = searchsortedlast(c, s)
-        push!(pieces, c[i:j])
-        i=j+1
+    function getbetween(xs, lo, hi)
+        i = searchsortedlast(xs, lo)+1
+        j = searchsortedlast(xs, hi)
+        xs[i:j]
     end
-    push!(pieces, c[i:length(c)])
-    pieces
+
+    function getgt(xs, lo)
+        i = searchsortedlast(xs, lo)+1
+        xs[i:end]
+    end
+
+    function getlt(xs, lo)
+        j = searchsortedlast(xs, lo)
+        xs[1:j]
+    end
+
+    between = map((hi, lo) -> delayed(c->getbetween(c, hi, lo))(c),
+                  splitters[1:end-1], splitters[2:end])
+    hi = splitters[1]
+    lo = splitters[end]
+    [delayed(c->getlt(c, hi))(c); between; delayed(c->getgt(c, lo))(c)]
 end
 
 # transpose a vector of vectors
@@ -153,7 +148,7 @@ function splitter_levels(splitters, nchunks, batchsize)
 
     subsplits = []
     i = 1
-    for c = root
+    for c in root
         j = findlast(x->x<c, splitters)
         push!(subsplits, splitters[i:j])
         i = j+2
@@ -162,6 +157,49 @@ function splitter_levels(splitters, nchunks, batchsize)
     root, subsplits
 end
 
-scs = map(sort, cs)
-@show length(splits)
-@time batchedsplitmerge(scs, splits, 3)
+function dsort_chunks(cs, n=length(cs), nsamples=2000)
+    n=n-1
+    cs1 = map(c->delayed(sortchunk)(c, nsamples), cs)
+    xs = collect(treereduce(delayed(vcat), cs1))
+    samples = sort!(reduce(vcat, map(x->x[2], xs)))
+    splitters = getmedians(samples, n)
+
+    cs = batchedsplitmerge(map(first, xs), splitters, max(2, nworkers()))
+    for (w, c) in zip(Iterators.cycle(workers()), cs)
+        propagate_affinity!(c, Dagger.OSProc(w) => 1)
+    end
+    @show cs
+end
+
+function propagate_affinity!(c, aff)
+    if !isa(c, Thunk)
+        return
+    end
+    if !isnull(c.affinity)
+        push!(get(c.affinity), aff)
+    else
+        c.affinity = [aff]
+    end
+
+    for t in c.inputs
+        propagate_affinity!(t, aff)
+    end
+end
+
+function dsort(xs::DArray, n=length(xs.chunks), nsamples=2000)
+    cs = dsort_chunks(xs.chunks, n, nsamples)
+    t=delayed((xs...)->[xs...]; meta=true)(cs...)
+    chunks = compute(t)
+    dmn = ArrayDomain((1:sum(length(domain(c)) for c in chunks),))
+    DArray(eltype(xs), dmn, map(domain, chunks), chunks)
+end
+
+#=
+
+using Distributions
+
+xs = rand(Gamma(9,0.01),10^6)
+xs = rand(10^6)
+cs = map(x->xs[x], Dagger.split_range(1:length(xs), 8))
+splits = @time dsort(cs, 4)
+=#

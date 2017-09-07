@@ -18,6 +18,7 @@ type Thunk
     cache::Bool   # release the result giving the worker an opportunity to
                   # cache it
     cache_ref::Nullable
+    affinity::Nullable{Vector{Pair{Processor, Int}}}
     function Thunk(f, xs...;
                    id::Int=next_id(),
                    get_result::Bool=false,
@@ -25,25 +26,39 @@ type Thunk
                    persist::Bool=false,
                    cache::Bool=false,
                    cache_ref::Nullable{Any}=Nullable{Any}(),
+                   affinity=Nullable(),
                   )
-        thunk = new(f,xs,id,get_result,meta,persist, cache, cache_ref)
+        thunk = new(f,xs,id,get_result,meta,persist, cache, cache_ref, affinity)
         _thunk_dict[id] = thunk
         thunk
     end
 end
 
 function affinity(t::Thunk)
+    if !isnull(t.affinity)
+        @logmsg("$t has (cached) affinity: $(get(t.affinity))")
+        return get(t.affinity)
+    end
+
     if t.cache && !isnull(t.cache_ref)
         aff_vec = affinity(get(t.cache_ref))
     else
         aff = Dict{Processor,Int}()
         for inp in inputs(t)
-            if isa(inp, Union{Chunk, Thunk})
-                for a in affinity(inp)
-                    proc, sz = a
-                    aff[proc] = get(aff, proc, 0) + sz
+           #if haskey(state.cache, inp)
+           #    as = affinity(state.cache[inp])
+           #    for a in as
+           #        proc, sz = a
+           #        aff[proc] = get(aff, proc, 0) + sz
+           #    end
+           #else
+                if isa(inp, Union{Chunk, Thunk})
+                    for a in affinity(inp)
+                        proc, sz = a
+                        aff[proc] = get(aff, proc, 0) + sz
+                    end
                 end
-            end
+           #end
         end
         aff_vec = collect(aff)
     end
