@@ -1,12 +1,12 @@
 import Base.procs
 export OSProc, Context
 
-@compat abstract type Processor end
+abstract type Processor end
 
 """
 OS process - contains pid returned by `addprocs`
 """
-immutable OSProc <: Processor
+struct OSProc <: Processor
     pid::Int
 end
 
@@ -14,7 +14,7 @@ end
 A context represents a set of processors to use
 for a papply operation.
 """
-type Context
+mutable struct Context
     procs::Array{Processor}
     log_sink::Any
     profile::Bool

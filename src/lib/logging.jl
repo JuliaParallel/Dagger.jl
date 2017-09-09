@@ -4,7 +4,7 @@ export summarize_events
 
 const Timestamp = UInt64
 
-immutable ProfilerResult
+struct ProfilerResult
     samples::Vector{UInt64}
     lineinfo::Associative
 end
@@ -17,7 +17,7 @@ time (timeline, start, finish)
 
 also tracks gc_num during this and profiling samples.
 """
-immutable Timespan
+struct Timespan
     category::Symbol
     id::Any
     timeline::Any
@@ -27,7 +27,7 @@ immutable Timespan
     profiler_samples::ProfilerResult
 end
 
-immutable Event{phase}
+struct Event{phase}
     category::Symbol
     id::Any
     timeline::Any
@@ -62,12 +62,12 @@ end
 Various means of writing an event to something.
 """
 
-immutable NoOpLog end
+struct NoOpLog end
 
 function write_event(::NoOpLog, event::Event)
 end
 
-immutable FilterLog
+struct FilterLog
     f::Function
     inner_chan::Any
 end
@@ -99,7 +99,7 @@ represents a process local events array.
 A context with log_sink set to LocalEventLog() will
 cause events to be recorded into the 
 """
-immutable LocalEventLog end
+struct LocalEventLog end
 
 const _local_event_log = Any[]
 clear_local_event_log() = empty!(_local_event_log)
@@ -144,7 +144,7 @@ isasync(x::Union{Channel, RemoteChannel, IO}) = true
 """
 Overall state used during visualization
 """
-type State
+mutable struct State
     start_events::Dict # (category, id) => Event
     finish_events::Dict  # (category, id) => Event
     #completed::Dict      # timeline => category => Array

@@ -1,7 +1,7 @@
 const Size = Int
 
 # manually-released RemoteRef alternative
-immutable MemToken
+struct MemToken
     where::Int
     key::Int
     size::Size # size in bytes
@@ -20,7 +20,7 @@ function approx_size(d)
     Base.summarysize(d) # note: this is accurate but expensive
 end
 
-function approx_size{T}(d::Array{T})
+function approx_size(d::Array{T}) where T
     if isbits(eltype(T))
         sizeof(d)
     else

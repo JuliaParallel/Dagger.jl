@@ -4,7 +4,7 @@ import Base: convert, +, *, /, -
 
 export B, kB, MB, GB, TB
 
-immutable Bytes
+struct Bytes
     val::Float64
 end
 
@@ -38,7 +38,7 @@ _intersect(r, ::Colon) = r
 """
 Utility function to divide the range `range` into `n` chunks
 """
-function split_range{T}(range::Range{T}, n)
+function split_range(range::Range{T}, n) where T
     len = length(range)
 
     starts = len >= n ?
@@ -136,7 +136,7 @@ function treereducedim(op, xs::Array, dim::Int)
     end
     ys = treereduce((x,y)->map(op, x,y), Any[begin
         colons[dim] = [i]
-        @compat view(xs, colons...)
+        view(xs, colons...)
     end for i=1:l])
     reshape(ys[:], reduced_dims(xs, dim))
 end
@@ -162,7 +162,7 @@ function treereduce_nd(fs, xs)
     end
 end
 
-function setindex{N}(x::NTuple{N}, idx, v)
+function setindex(x::NTuple{N}, idx, v) where N
     map(ifelse, ntuple(x->idx === x, Val{N}), ntuple(x->v, Val{N}), x)
 end
 

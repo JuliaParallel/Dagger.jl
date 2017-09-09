@@ -4,7 +4,7 @@
 #
 import Base: close, eof, read, read!, peek, seek, write, filesize, position, seekend, seekstart, skip, nb_available
 
-immutable BlockIO <: IO
+struct BlockIO <: IO
     s::IO
     r::UnitRange
     l::Int
@@ -47,7 +47,7 @@ close(bio::BlockIO) = close(bio.s)
 eof(bio::BlockIO) = (position(bio) >= bio.l)
 read(bio::BlockIO, x::Type{UInt8}) = read(bio.s, x)
 read!(bio::BlockIO, a::Vector{UInt8}) = (length(a) <= nb_available(bio)) ? read!(bio.s, a) : throw(EOFError())
-read!{T}(bio::BlockIO, a::Array{T}) = (length(a)*sizeof(T) <= nb_available(bio)) ? read!(bio.s, a) : throw(EOFError())
+read!(bio::BlockIO, a::Array{T}) where {T} = (length(a)*sizeof(T) <= nb_available(bio)) ? read!(bio.s, a) : throw(EOFError())
 
 read(bio::BlockIO, nb::Integer) = bytestring(read!(bio, Array{UInt8}(nb)))
 
@@ -55,9 +55,9 @@ peek(bio::BlockIO) = peek(bio.s)
 write(bio::BlockIO, p::Ptr, nb::Integer) = write(bio, p, int(nb))
 write(bio::BlockIO, p::Ptr, nb::Int) = write(bio.s, p, nb)
 write(bio::BlockIO, x::UInt8) = write(bio, UInt8[x])
-write{T}(bio::BlockIO, a::Array{T}, len) = write_sub(bio, a, 1, len)
-write{T}(bio::BlockIO, a::Array{T}) = write(bio, a, length(a))
-write_sub{T}(bio::BlockIO, a::Array{T}, offs, len) = isbits(T) ? write(bio, pointer(a,offs), len*sizeof(T)) : error("$T is not bits type")
+write(bio::BlockIO, a::Array{T}, len) where {T} = write_sub(bio, a, 1, len)
+write(bio::BlockIO, a::Array{T}) where {T} = write(bio, a, length(a))
+write_sub(bio::BlockIO, a::Array{T}, offs, len) where {T} = isbits(T) ? write(bio, pointer(a,offs), len*sizeof(T)) : error("$T is not bits type")
 
 nb_available(bio::BlockIO) = (bio.l - position(bio))
 position(bio::BlockIO) = position(bio.s) - bio.r.start + 1

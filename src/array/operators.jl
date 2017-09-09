@@ -27,18 +27,18 @@ broadcast_ops = [ :.*, :.+, :.-, :.%, :./, :.^,
 This is a way of suggesting that stage should call
 stage_operand with the operation and other arguments
 """
-immutable PromotePartition{T,N} <: ArrayOp{T,N}
+struct PromotePartition{T,N} <: ArrayOp{T,N}
     data::AbstractArray{T,N}
 end
 
 size(p::PromotePartition) = size(domain(p.data))
 
-immutable BCast{F, Ni, T, Nd} <: ArrayOp{T, Nd}
+struct BCast{F, Ni, T, Nd} <: ArrayOp{T, Nd}
     f::F
     input::NTuple{Ni, ArrayOp}
 end
 
-function BCast{F}(f::F, input::Tuple)
+function BCast(f::F, input::Tuple) where F
     T = promote_type(map(eltype, input)...)
     Nd = reduce(max, map(ndims, input))
     BCast{F, length(input), T, Nd}(f, input)
@@ -86,18 +86,6 @@ for fn in blockwise_binary
     end
 end
 
-if VERSION < v"0.6.0-dev"
-    eval(:((.^)(x::Irrational{:e}, y::ArrayOp) = BCast(z -> x.^z, (y,))))
-    for fn in broadcast_ops
-        @eval begin
-            $fn(x::ArrayOp, y::ArrayOp) = BCast($fn, (x, y))
-            $fn(x::AbstractArray, y::ArrayOp) = BCast($fn, (PromotePartition(x), y))
-            $fn(x::ArrayOp, y::AbstractArray) = BCast($fn, (x, PromotePartition(y)))
-            $fn(x::Number, y::ArrayOp) = BCast(z -> $fn(x, z), (y,))
-            $fn(x::ArrayOp, y::Number) = BCast(z -> $fn(z, y), (x,))
-        end
-    end
-end
 
 Base.broadcast(fn::Function, x::ArrayOp, xs::ArrayOp...) = BCast(fn, (x, xs...))
 Base.broadcast(fn::Function, x::AbstractArray, y::ArrayOp) = BCast(fn, (PromotePartition(x), y))
@@ -143,7 +131,7 @@ end
 
 export mappart, mapchunk
 
-immutable MapChunk{F, Ni, T, Nd} <: ArrayOp{T, Nd}
+struct MapChunk{F, Ni, T, Nd} <: ArrayOp{T, Nd}
     f::F
     input::NTuple{Ni, ArrayOp{T,Nd}}
 end

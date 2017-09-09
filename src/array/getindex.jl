@@ -1,6 +1,6 @@
 export getindex_async
 
-immutable GetIndex{T,N} <: ArrayOp{T,N}
+struct GetIndex{T,N} <: ArrayOp{T,N}
     input::ArrayOp
     idx::Tuple
 end
@@ -25,7 +25,7 @@ end
 
 size(x::GetIndex) = Base.index_shape(x.input, x.idx...)
 
-immutable GetIndexScalar <: Computation
+struct GetIndexScalar <: Computation
     input::ArrayOp
     idx::Tuple
 end

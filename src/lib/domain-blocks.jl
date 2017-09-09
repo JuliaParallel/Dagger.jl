@@ -1,20 +1,20 @@
 import Base: ndims, size, getindex, reducedim
 
-immutable DomainBlocks{N} <: AbstractArray{ArrayDomain{N}, N}
+struct DomainBlocks{N} <: AbstractArray{ArrayDomain{N}, N}
     start::NTuple{N, Int}
     cumlength::Tuple
 end
 Base.@deprecate_binding BlockedDomains DomainBlocks
 
-ndims{N}(x::DomainBlocks{N}) = N
+ndims(x::DomainBlocks{N}) where {N} = N
 size(x::DomainBlocks) = map(length, x.cumlength)
-function _getindex{N}(x::DomainBlocks{N}, idx::Tuple)
+function _getindex(x::DomainBlocks{N}, idx::Tuple) where N
     starts = map((vec, i) -> i == 0 ? 0 : getindex(vec,i), x.cumlength, map(x->x-1, idx))
     ends = map(getindex, x.cumlength, idx)
     ArrayDomain(map(UnitRange, map(+, starts, x.start), map((x,y)->x+y-1, ends, x.start)))
 end
 
-function getindex{N}(x::DomainBlocks{N}, idx::Int)
+function getindex(x::DomainBlocks{N}, idx::Int) where N
     if N == 1
         _getindex(x, (idx,))
     else
@@ -24,7 +24,7 @@ end
 
 getindex(x::DomainBlocks, idx::Int...) = _getindex(x,idx)
 
-@compat Base.IndexStyle(::Type{<:DomainBlocks}) = IndexCartesian()
+Base.IndexStyle(::Type{<:DomainBlocks}) = IndexCartesian()
 
 function Base.ctranspose(x::DomainBlocks{2})
     DomainBlocks(reverse(x.start), reverse(x.cumlength))

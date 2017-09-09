@@ -18,7 +18,7 @@ function domain end
 """
 Default domain -- has no information about the value
 """
-immutable UnitDomain end
+struct UnitDomain end
 
 """
 If no `domain` method is defined on an object, then
@@ -31,7 +31,7 @@ domain(x::Any) = UnitDomain()
 """
 A chunk with some data
 """
-type Chunk{T, H}
+mutable struct Chunk{T, H}
     chunktype::Type{T}
     domain
     handle::H
@@ -43,7 +43,7 @@ chunktype(c::Chunk) = c.chunktype
 persist!(t::Chunk) = (t.persist=true; t)
 shouldpersist(p::Chunk) = t.persist
 affinity(c::Chunk) = affinity(c.handle)
-function unrelease{T}(c::Chunk{T,MemToken})
+function unrelease(c::Chunk{T,MemToken}) where T
     if unrelease_token(c.handle)
         Nullable{Any}(c)
     else
@@ -80,7 +80,7 @@ tochunk(x::Union{Chunk, Thunk}) = x
 
 # Check to see if the node is set to persist
 # if it is foce can override it
-function free!{X}(s::Chunk{X, MemToken}; force=true, cache=false)
+function free!(s::Chunk{X, MemToken}; force=true, cache=false) where X
     if force || !s.persist
         release_token(s.handle, cache)
     end

@@ -4,15 +4,8 @@ using Compat
 
 ###### Array Domains ######
 
-if VERSION >= v"0.6.0-dev"
-    # TODO: Fix this better!
-    immutable ArrayDomain{N}
-        indexes::NTuple{N, Any}
-    end
-else
-    immutable ArrayDomain{N}
-        indexes::NTuple{N}
-    end
+struct ArrayDomain{N}
+    indexes::NTuple{N, Any}
 end
 
 include("../lib/domain-blocks.jl")
@@ -22,7 +15,7 @@ ArrayDomain(xs...) = ArrayDomain(xs)
 ArrayDomain(xs::Array) = ArrayDomain((xs...,))
 
 indexes(a::ArrayDomain) = a.indexes
-chunks{N}(a::ArrayDomain{N}) = DomainBlocks(
+chunks(a::ArrayDomain{N}) where {N} = DomainBlocks(
     ntuple(i->first(indexes(a)[i]), Val{N}), map(x->[length(x)], indexes(a)))
 
 (==)(a::ArrayDomain, b::ArrayDomain) = indexes(a) == indexes(b)
@@ -70,8 +63,8 @@ isempty(a::ArrayDomain) = length(a) == 0
 domain(x::AbstractArray) = ArrayDomain([1:l for l in size(x)])
 
 
-@compat abstract type ArrayOp{T, N} <: AbstractArray{T, N} end
-@compat Base.IndexStyle(::Type{<:ArrayOp}) = IndexCartesian()
+abstract type ArrayOp{T, N} <: AbstractArray{T, N} end
+Base.IndexStyle(::Type{<:ArrayOp}) = IndexCartesian()
 
 compute(ctx, x::ArrayOp) =
     compute(ctx, cached_stage(ctx, x)::DArray)
@@ -81,14 +74,14 @@ collect(ctx::Context, x::ArrayOp) =
 
 collect(x::ArrayOp) = collect(Context(), x)
 
-@compat function Base.show(io::IO, ::MIME"text/plain", x::ArrayOp)
+function Base.show(io::IO, ::MIME"text/plain", x::ArrayOp)
     write(io, string(typeof(x)))
     write(io, string(size(x)))
 end
 
 function Base.show(io::IO, x::ArrayOp)
     m = MIME"text/plain"()
-    @compat show(io, m, x)
+    show(io, m, x)
 end
 
 """
@@ -102,7 +95,7 @@ An N-dimensional distributed array of element type T.
 - `concat`: a function of type `F`. `concat(d, x, y)` takes two chunks `x` and `y`
             and concatenates them along dimension `d`. `cat` is used by default.
 """
-type DArray{T,N,F} <: ArrayOp{T, N}
+mutable struct DArray{T,N,F} <: ArrayOp{T, N}
     domain::ArrayDomain{N}
     subdomains::AbstractArray{ArrayDomain{N}, N}
     chunks::AbstractArray{Union{Chunk,Thunk}, N}
@@ -110,7 +103,7 @@ type DArray{T,N,F} <: ArrayOp{T, N}
 end
 
 # mainly for backwards-compatibility
-(::Type{DArray{T, N}}){T,N}(domain, subdomains, chunks) = DArray(T, domain, subdomains, chunks)
+DArray{T, N}(domain, subdomains, chunks) where {T,N} = DArray(T, domain, subdomains, chunks)
 
 
 """
@@ -122,9 +115,9 @@ Creates a distributed array of element type T.
 
 rest of the arguments are the same as the DArray constructor.
 """
-function DArray{N}(T, domain::ArrayDomain{N},
-                subdomains::AbstractArray{ArrayDomain{N}, N},
-                chunks::AbstractArray{<:Any, N}, concat=cat)
+function DArray(T, domain::ArrayDomain{N},
+             subdomains::AbstractArray{ArrayDomain{N}, N},
+             chunks::AbstractArray{<:Any, N}, concat=cat) where N
     DArray{T, N, typeof(concat)}(domain, subdomains, chunks, concat)
 end
 
@@ -204,7 +197,7 @@ function group_indices(cumlength, idxs::Range)
 end
 
 _cumsum(x::AbstractArray) = length(x) == 0 ? Int[] : cumsum(x)
-function lookup_parts{N}(ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomain{N})
+function lookup_parts(ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomain{N}) where N
     groups = map(group_indices, subdmns.cumlength, indexes(d))
     sz = map(length, groups)
     pieces = Array{Union{Chunk,Thunk}}(sz)
@@ -285,7 +278,7 @@ Base.@deprecate_binding ComputedArray DArray
 
 export Distribute, distribute
 
-immutable Distribute{N, T} <: ArrayOp{N, T}
+struct Distribute{N, T} <: ArrayOp{N, T}
     domainchunks
     data::Union{Chunk, Thunk}
 end
@@ -300,7 +293,7 @@ size(x::Distribute) = size(domain(x.data))
 
 export BlockPartition, Blocks
 
-immutable Blocks{N}
+struct Blocks{N}
     blocksize::NTuple{N, Int}
 end
 Blocks(xs::Int...) = Blocks(xs)
@@ -324,7 +317,7 @@ function distribute(x::AbstractArray, dist)
     compute(Distribute(dist, x))
 end
 
-function distribute{T,N}(x::AbstractArray{T,N}, n::NTuple{N})
+function distribute(x::AbstractArray{T,N}, n::NTuple{N}) where {T,N}
     p = map((d, dn)->ceil(Int, d / dn), size(x), n)
     distribute(x, Blocks(p))
 end
@@ -337,10 +330,10 @@ function distribute(x::AbstractVector, n::Vector)
     distribute(x, DomainBlocks((1,), n))
 end
 
-function Base.:(==){T,S,N}(x::ArrayOp{T,N}, y::AbstractArray{S,N})
+function Base.:(==)(x::ArrayOp{T,N}, y::AbstractArray{S,N}) where {T,S,N}
     collect(x) == y
 end
 
-function Base.:(==){T,S,N}(x::AbstractArray{T,N}, y::ArrayOp{S,N})
+function Base.:(==)(x::AbstractArray{T,N}, y::ArrayOp{S,N}) where {T,S,N}
     return collect(x) == y
 end

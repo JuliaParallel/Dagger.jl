@@ -1,7 +1,7 @@
 import Base: cat
 export partition
 
-type AllocateArray{T,N} <: ArrayOp{T,N}
+mutable struct AllocateArray{T,N} <: ArrayOp{T,N}
     eltype::Type{T}
     f::Function
     domain::ArrayDomain{N}

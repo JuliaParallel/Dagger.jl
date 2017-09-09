@@ -8,7 +8,7 @@ end
 global _thunk_dict = Dict{Int, Any}()
 
 # A thing to run
-type Thunk
+mutable struct Thunk
     f::Function
     inputs::Tuple
     id::Int
