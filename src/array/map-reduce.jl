@@ -3,7 +3,7 @@ import Base: reduce, map, mapreduce, reducedim
 export reducebykey, reduce_async
 
 #### Map
-immutable Map{T,N} <: ArrayOp{T,N}
+struct Map{T,N} <: ArrayOp{T,N}
     f::Function
     inputs::Tuple
 end
@@ -30,7 +30,7 @@ map(f, x::ArrayOp, xs::ArrayOp...) = Map(f, (x, xs...))
 
 import Base: reduce, sum, prod, mean
 
-immutable ReduceBlock <: Computation
+struct ReduceBlock <: Computation
     op::Function
     op_master::Function
     input::ArrayOp
@@ -83,7 +83,7 @@ reducebykey_seq(op, itr,dict=Dict()) = mapreducebykey_seq(Base.IdFun(), op, itr,
 reducebykey(op, input) = reduceblock(itr->reducebykey_seq(op, itr), merge_reducebykey(op), input)
 
 
-immutable Reducedim{T,N} <: ArrayOp{T,N}
+struct Reducedim{T,N} <: ArrayOp{T,N}
     op::Function
     input::ArrayOp
     dims::Tuple

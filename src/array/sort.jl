@@ -3,7 +3,7 @@ import Compat: view
 
 import Base.Sort: Forward, Ordering, Algorithm, defalg, lt
 
-immutable Sort <: Computation
+struct Sort <: Computation
     input::ArrayOp
     alg::Algorithm
     order::Ordering
@@ -244,7 +244,7 @@ function shuffle_merge(A, ranks, splitter_indices, ord)
     DArray(eltype(A), dmn, dmnchunks, map(x->x[1], thunks))
 end
 
-function merge_sorted{T, S}(ord::Ordering, x::AbstractArray{T}, y::AbstractArray{S})
+function merge_sorted(ord::Ordering, x::AbstractArray{T}, y::AbstractArray{S}) where {T, S}
     n = length(x) + length(y)
     z = Array{promote_type(T,S)}(n)
     i = 1; j = 1; k = 1
