@@ -316,7 +316,7 @@ function stage(ctx, d::Distribute)
            eltype(chunktype(d.data)),
            domain(d.data),
            d.domainchunks,
-           map(c -> delayed(getindex)(d.data, c), d.domainchunks)
+           map(c -> delayed(identity)(d.data[c]), d.domainchunks)
     )
 end
 
