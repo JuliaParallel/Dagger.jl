@@ -16,7 +16,7 @@ ArrayDomain(xs::Array) = ArrayDomain((xs...,))
 
 indexes(a::ArrayDomain) = a.indexes
 chunks(a::ArrayDomain{N}) where {N} = DomainBlocks(
-    ntuple(i->first(indexes(a)[i]), Val{N}), map(x->[length(x)], indexes(a)))
+    ntuple(i->first(indexes(a)[i]), Val(N)), map(x->[length(x)], indexes(a)))
 
 (==)(a::ArrayDomain, b::ArrayDomain) = indexes(a) == indexes(b)
 Base.getindex(arr::AbstractArray, d::ArrayDomain) = arr[indexes(d)...]
@@ -208,7 +208,7 @@ function lookup_parts(ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomai
         pieces[i] = delayed(getindex)(ps[idx...], project(subdmns[idx...], dmn))
     end
     out_cumlength = map(g->_cumsum(map(x->length(x[2]), g)), groups)
-    out_dmn = DomainBlocks(ntuple(x->1,Val{N}), out_cumlength)
+    out_dmn = DomainBlocks(ntuple(x->1,Val(N)), out_cumlength)
     pieces, out_dmn
 end
 

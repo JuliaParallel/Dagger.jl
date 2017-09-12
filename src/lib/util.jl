@@ -163,7 +163,7 @@ function treereduce_nd(fs, xs)
 end
 
 function setindex(x::NTuple{N}, idx, v) where N
-    map(ifelse, ntuple(x->idx === x, Val{N}), ntuple(x->v, Val{N}), x)
+    map(ifelse, ntuple(x->idx === x, Val(N)), ntuple(x->v, Val(N)), x)
 end
 
 function showloc(f, argcount)
