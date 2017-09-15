@@ -162,7 +162,7 @@ function stage_operands{T}(ctx, ::MatMul, a::ArrayOp, b::PromotePartition{T,1})
     end
     dmn_out = DomainBlocks((1,),(dchunks_a.cumlength[2],))
 
-    stg_a, cached_stage(ctx, Distribute(dmn_out, tochunk(b.data)))
+    stg_a, cached_stage(ctx, Distribute(dmn_out, b.data))
 end
 
 function stage_operands(ctx, ::MatMul, a::PromotePartition, b::ArrayOp)
@@ -174,7 +174,7 @@ function stage_operands(ctx, ::MatMul, a::PromotePartition, b::ArrayOp)
 
     ps = domainchunks(stg_b)
     dmn_out = DomainBlocks((1,1),([size(a.data, 1)], ps.cumlength[1],))
-    cached_stage(ctx, Distribute(dmn_out, tochunk(a.data))), stg_b
+    cached_stage(ctx, Distribute(dmn_out, a.data)), stg_b
 end
 
 function stage(ctx, mul::MatMul)
@@ -205,7 +205,7 @@ scale(l::ArrayOp, r::ArrayOp) = Scale(l, r)
 function stage_operand(ctx, ::Scale, a, b::PromotePartition)
     ps = domainchunks(a)
     b_parts = DomainBlocks((1,), (ps.cumlength[1],))
-    cached_stage(ctx, Distribute(b_parts, tochunk(b.data)))
+    cached_stage(ctx, Distribute(b_parts, b.data))
 end
 
 function stage_operand(ctx, ::Scale, a, b)
