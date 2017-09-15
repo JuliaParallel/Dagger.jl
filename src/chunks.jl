@@ -1,4 +1,6 @@
 
+using MemPool
+
 export chunk, collect
 
 export domain, UnitDomain, project, alignfirst, ArrayDomain
@@ -43,11 +45,17 @@ chunktype(c::Chunk) = c.chunktype
 persist!(t::Chunk) = (t.persist=true; t)
 shouldpersist(p::Chunk) = t.persist
 affinity(c::Chunk) = affinity(c.handle)
-function unrelease{T}(c::Chunk{T,MemToken})
-    if unrelease_token(c.handle)
-        Nullable{Any}(c)
-    else
-        Nullable{Any}()
+function unrelease{T}(c::Chunk{T,DRef})
+    # set spilltodisk = true if data is still around
+    try
+        destroyonevict(c.handle, false)
+        return Nullable{Any}(c)
+    catch err
+        if isa(err, KeyError)
+            return Nullable{Any}()
+        else
+            rethrow(err)
+        end
     end
 end
 unrelease(c::Chunk) = c
@@ -59,30 +67,33 @@ end
 
 
 ### ChunkIO
-function collect(ctx::Context, ref::MemToken)
-    res = fetch(ref)
-    if isnull(res)
-        throw(KeyError(ref))
-    else
-        get(res)
-    end
+function collect(ctx::Context, ref::DRef)
+    poolget(ref)
 end
-affinity(c::MemToken) = [OSProc(c.where)=>c.size]
+affinity(r::DRef) = [OSProc(r.owner) => r.size]
 
 """
 Create a chunk from a sequential object.
 """
-function tochunk(x; persist=false)
-    ref = make_token(x)
+function tochunk(x; persist=false, cache=false)
+    ref = poolset(x, destroyonevict=cache)
     Chunk(typeof(x), domain(x), ref, persist)
 end
 tochunk(x::Union{Chunk, Thunk}) = x
 
 # Check to see if the node is set to persist
 # if it is foce can override it
-function free!{X}(s::Chunk{X, MemToken}; force=true, cache=false)
+function free!{X}(s::Chunk{X, DRef}; force=true, cache=false)
     if force || !s.persist
-        release_token(s.handle, cache)
+        if cache
+            try
+                destroyonevict(s.handle, true) # keep around, but remove when evicted
+            catch err
+                isa(err, KeyError) || rethrow(err)
+            end
+        else
+            pooldelete(s.handle) # remove immediately
+        end
     end
 end
 free!(x; force=true,cache=false) = x # catch-all for non-chunks

@@ -41,7 +41,7 @@ end
 """
 special case distmem writing - write to disk on the process with the chunk.
 """
-function save{X}(ctx, chunk::Chunk{X,MemToken}, file_path::AbstractString)
+function save{X}(ctx, chunk::Chunk{X,DRef}, file_path::AbstractString)
     pid = chunk.handle.where
 
     remotecall_fetch(pid, file_path, chunk.handle) do path, rref

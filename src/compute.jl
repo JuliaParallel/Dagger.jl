@@ -199,7 +199,7 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
     data = map(thunk.inputs) do x
         istask(x) ? state.cache[x] : x
     end
-    async_apply(ctx, proc, thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist)
+    async_apply(ctx, proc, thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist, thunk.cache)
 end
 
 
@@ -304,7 +304,7 @@ end
 _move(ctx, to_proc, x) = x
 _move(ctx, to_proc::OSProc, x::Union{Chunk, Thunk}) = collect(ctx, x)
 
-function do_task(ctx, proc, thunk_id, f, data, send_result, persist)
+function do_task(ctx, proc, thunk_id, f, data, send_result, persist, cache)
     @dbg timespan_start(ctx, :comm, thunk_id, proc)
     time_cost = @elapsed fetched = map(x->_move(ctx, proc, x), data)
     @dbg timespan_end(ctx, :comm, thunk_id, proc)
@@ -312,7 +312,7 @@ function do_task(ctx, proc, thunk_id, f, data, send_result, persist)
     @dbg timespan_start(ctx, :compute, thunk_id, proc)
     result_meta = try
         res = f(fetched...)
-        (proc, thunk_id, send_result ? res : tochunk(res, persist=persist)) #todo: add more metadata
+        (proc, thunk_id, send_result ? res : tochunk(res, persist=persist, cache=cache)) #todo: add more metadata
     catch ex
         bt = catch_backtrace()
         (proc, thunk_id, RemoteException(myid(), CapturedException(ex, bt)))
@@ -321,10 +321,10 @@ function do_task(ctx, proc, thunk_id, f, data, send_result, persist)
     result_meta
 end
 
-function async_apply(ctx, p::OSProc, thunk_id, f, data, chan, send_res, persist)
+function async_apply(ctx, p::OSProc, thunk_id, f, data, chan, send_res, persist, cache)
     @schedule begin
         try
-            put!(chan, Base.remotecall_fetch(do_task, p.pid, ctx, p, thunk_id, f, data, send_res, persist))
+            put!(chan, Base.remotecall_fetch(do_task, p.pid, ctx, p, thunk_id, f, data, send_res, persist, cache))
         catch ex
             bt = catch_backtrace()
             put!(chan, (p, thunk_id, CapturedException(ex, bt)))

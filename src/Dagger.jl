@@ -6,7 +6,6 @@ import Base.collect
 
 include("lib/util.jl")
 include("lib/logging.jl")
-include("lib/dumbref.jl")
 
 # Distributed data
 include("processor.jl")
