@@ -1,7 +1,7 @@
 
 export setindex
 
-immutable SetIndex{T,N} <: ArrayOp{T,N}
+struct SetIndex{T,N} <: ArrayOp{T,N}
     input::ArrayOp{T,N}
     idx::Tuple
     val

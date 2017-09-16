@@ -1,6 +1,6 @@
 export save, load
 
-type FileReader{T}
+mutable struct FileReader{T}
     file::AbstractString
     chunktype::Type{T}
     data_offset::Int
@@ -41,7 +41,7 @@ end
 """
 special case distmem writing - write to disk on the process with the chunk.
 """
-function save{X}(ctx, chunk::Chunk{X,DRef}, file_path::AbstractString)
+function save(ctx, chunk::Chunk{X,DRef}, file_path::AbstractString) where X
     pid = chunk.handle.where
 
     remotecall_fetch(pid, file_path, chunk.handle) do path, rref
@@ -94,7 +94,7 @@ function save(ctx, io::IO, chunk::DArray, file_path)
     # write each child
 end
 
-function save{X}(ctx, chunk::Chunk{X, FileReader}, file_path::AbstractString)
+function save(ctx, chunk::Chunk{X, FileReader}, file_path::AbstractString) where X
    if abspath(file_path) == abspath(chunk.reader.file)
        chunk
    else
@@ -172,7 +172,7 @@ function save(ctx, io::IO, m::BitArray)
     save(ctx, io, convert(Array{Bool}, m))
 end
 
-function collect{X,T<:Array}(ctx::Context, c::Chunk{X,FileReader{T}})
+function collect(ctx::Context, c::Chunk{X,FileReader{T}}) where {X,T<:Array}
     h = c.handle
     io = open(h.file, "r+")
     seek(io, h.data_offset)
@@ -182,7 +182,7 @@ function collect{X,T<:Array}(ctx::Context, c::Chunk{X,FileReader{T}})
     arr
 end
 
-function collect{X,T<:BitArray}(ctx::Context, c::Chunk{X, FileReader{T}})
+function collect(ctx::Context, c::Chunk{X, FileReader{T}}) where {X,T<:BitArray}
     h = c.handle
     io = open(h.file, "r+")
     seek(io, h.data_offset)
@@ -193,7 +193,7 @@ function collect{X,T<:BitArray}(ctx::Context, c::Chunk{X, FileReader{T}})
     arr
 end
 
-function save{Tv, Ti}(ctx, io::IO, m::SparseMatrixCSC{Tv,Ti})
+function save(ctx, io::IO, m::SparseMatrixCSC{Tv,Ti}) where {Tv, Ti}
     write(io, m.m)
     write(io, m.n)
     write(io, length(m.nzval))
@@ -210,7 +210,7 @@ function save{Tv, Ti}(ctx, io::IO, m::SparseMatrixCSC{Tv,Ti})
     m
 end
 
-function collect{X, T<:SparseMatrixCSC}(ctx::Context, c::Chunk{X, FileReader{T}})
+function collect(ctx::Context, c::Chunk{X, FileReader{T}}) where {X, T<:SparseMatrixCSC}
     h = c.handle
     io = open(h.file, "r+")
     seek(io, h.data_offset)
@@ -236,14 +236,14 @@ function collect{X, T<:SparseMatrixCSC}(ctx::Context, c::Chunk{X, FileReader{T}}
     SparseMatrixCSC(m, n, colptr, rowval, nnzval)
 end
 
-function getsub{X,T<:AbstractArray}(ctx, c::Chunk{X,FileReader{T}}, d)
+function getsub(ctx, c::Chunk{X,FileReader{T}}, d) where {X,T<:AbstractArray}
     Chunk(collect(ctx, c)[d])
 end
 
 
 #### Save computation
 
-immutable Save <: Computation
+struct Save <: Computation
     input
     name::AbstractString
 end

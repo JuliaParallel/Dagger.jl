@@ -7,7 +7,7 @@ compute(ctx, c::Chunk) = c
 collect(ctx::Context, c) = collect(ctx, compute(ctx, c))
 collect(d::Union{Chunk,Thunk}) = collect(Context(), d)
 
-@compat abstract type Computation end
+abstract type Computation end
 
 compute(ctx, c::Computation) = compute(ctx, stage(ctx, c))
 collect(c::Computation) = collect(Context(), c)

@@ -1,7 +1,7 @@
 
 import Base: ctranspose, transpose, A_mul_Bt, At_mul_B, Ac_mul_B, At_mul_Bt, Ac_mul_Bc, A_mul_Bc
 
-immutable Transpose{T,N} <: ArrayOp{T,N}
+struct Transpose{T,N} <: ArrayOp{T,N}
     f::Function
     input::ArrayOp
 end
@@ -46,7 +46,7 @@ end
 
 import Base: *, +
 
-immutable MatMul{T, N} <: ArrayOp{T, N}
+struct MatMul{T, N} <: ArrayOp{T, N}
     a::ArrayOp
     b::ArrayOp
 end
@@ -152,7 +152,7 @@ end
 """
 an operand which should be distributed as per convenience
 """
-function stage_operands{T}(ctx, ::MatMul, a::ArrayOp, b::PromotePartition{T,1})
+function stage_operands(ctx, ::MatMul, a::ArrayOp, b::PromotePartition{T,1}) where T
     stg_a = cached_stage(ctx, a)
     dmn_a = domain(stg_a)
     dchunks_a = domainchunks(stg_a)
@@ -188,11 +188,11 @@ end
 
 ### Scale
 
-immutable Scale{T,N} <: ArrayOp{T,N}
+struct Scale{T,N} <: ArrayOp{T,N}
     l::ArrayOp
     r::ArrayOp
 end
-Scale{Tl, Tr, N}(l::ArrayOp{Tl}, r::ArrayOp{Tr,N}) =
+Scale(l::ArrayOp{Tl}, r::ArrayOp{Tr,N}) where {Tl, Tr, N} =
   Scale{promote_type(Tl, Tr), N}(l,r)
 
 size(s::Scale) = size(s.l)
@@ -230,7 +230,7 @@ function stage(ctx, scal::Scale)
     DArray(Any, domain(r), domainchunks(r), scal_parts)
 end
 
-immutable Concat{T,N} <: ArrayOp{T,N}
+struct Concat{T,N} <: ArrayOp{T,N}
     axis::Int
     inputs::Tuple
 end
