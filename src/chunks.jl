@@ -68,10 +68,19 @@ end
 
 
 ### ChunkIO
-function collect(ctx::Context, ref::DRef)
+function collect(ctx::Context, ref::Union{DRef, FileRef})
     poolget(ref)
 end
 affinity(r::DRef) = [OSProc(r.owner) => r.size]
+function affinity(r::FileRef)
+    if haskey(MemPool.who_has_read, r.file)
+        return map(MemPool.who_has_read[r.file]) do dref
+            OSProc(dref.owner) => r.size
+        end
+    else
+        return []
+    end
+end
 
 """
 Create a chunk from a sequential object.
@@ -99,6 +108,39 @@ function free!(s::Chunk{X, DRef}; force=true, cache=false) where X
 end
 free!(x; force=true,cache=false) = x # catch-all for non-chunks
 
+
+"""
+Save a bunch of chunks in parallel.
+Return chunks containing the same metadata but FileRef
+handles with path relative to the output directory.
+"""
+function savechunks(cs, outputdir=".")
+    if !isdir(outputdir)
+        mkdir(outputdir)
+    end
+
+    # make sure previously saved files are just kept as-is
+    metadata = Any[begin
+        fn = lpad(idx, 5, "0")
+        thunk = delayed(get_result=true) do data, f, dir
+            # XXX: abstraction leak, should have used
+            # MemPool.savetodisk but can't
+            sz = open(joinpath(dir, f), "w") do io
+                serialize(io, MemPool.MMWrap(data))
+                return position(io)
+            end
+            (typeof(data), FileRef(f, sz))
+        end
+        thunk(c, fn, outputdir)
+    end for (idx, c) in enumerate(cs)]
+
+    metadata = compute(delayed((xs...)->[xs...]; meta=true)(metadata...))
+
+    map(metadata, cs) do m, c
+        ctype, h = m
+        Chunk(ctype, domain(c), h, true)
+    end
+end
 
 Base.@deprecate_binding AbstractPart Union{Chunk, Thunk}
 Base.@deprecate_binding Part Chunk
