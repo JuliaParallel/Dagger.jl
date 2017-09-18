@@ -1,4 +1,4 @@
 julia 0.6
-MemPool
+MemPool 0.0.2
 Compat 0.19
 Logging
