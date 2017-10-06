@@ -74,8 +74,7 @@ function compute(ctx, d::Thunk)
     end
     @dbg timespan_end(ctx, :scheduler_init, 0, master)
 
-    while !isempty(state.ready) ||
-        !isempty(state.running)
+    while !isempty(state.ready) || !isempty(state.running)
 
         if isempty(state.running) && !isempty(state.ready)
             for p in ps
@@ -86,6 +85,12 @@ function compute(ctx, d::Thunk)
                 end
             end
         end
+
+        if isempty(state.running)
+            # the block above fired only meta tasks
+            continue
+        end
+
         proc, thunk_id, res = take!(chan)
         if isa(res, CapturedException) || isa(res, RemoteException)
             rethrow(res)
