@@ -317,7 +317,7 @@ function do_task(ctx, proc, thunk_id, f, data, send_result, persist, cache)
     @dbg timespan_start(ctx, :compute, thunk_id, proc)
     result_meta = try
         res = f(fetched...)
-        (proc, thunk_id, send_result ? res : tochunk(res, persist=persist, cache=cache)) #todo: add more metadata
+        (proc, thunk_id, send_result ? res : tochunk(res, persist=persist, cache=persist ? true : cache)) #todo: add more metadata
     catch ex
         bt = catch_backtrace()
         (proc, thunk_id, RemoteException(myid(), CapturedException(ex, bt)))
