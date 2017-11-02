@@ -1,275 +1,220 @@
-using Compat
-import Compat: view
+import Base.Sort: Forward, Ordering, Algorithm, lt
 
-import Base.Sort: Forward, Ordering, Algorithm, defalg, lt
+using StatsBase
 
-struct Sort <: Computation
-    input::ArrayOp
-    alg::Algorithm
-    order::Ordering
-end
+function getmedians(x, n)
+    q,r = divrem(length(x), n+1)
 
-function Base.sort(v::ArrayOp;
-               alg::Algorithm=defalg(v),
-               lt=Base.isless,
-               by=identity,
-               rev::Bool=false,
-               order::Ordering=Forward)
-    Sort(v, alg, Base.Sort.ord(lt,by,rev,order))
-end
-
-size(x::ArrayOp) = size(x.input)
-function compute(ctx, s::Sort)
-
-    # First, we sort each chunk.
-    inp = let alg=s.alg, ord = s.order
-        compute(ctx, mapchunk(p->sort(p; alg=alg, order=ord), s.input))
+    if q == 0
+        return x
     end
-
-    ps = chunks(inp)
-
-    # We need to persist! the sorted chunks so that further operations
-    # will not remove it.
-    foreach(persist!, chunks(inp))
-
-    # find the ranks to split at
-    ls = map(length, domainchunks(inp))
-    splitter_ranks = cumsum(ls)[1:end-1]
-
-    # parallel selection
-    splitters = pselect(ctx, inp, splitter_ranks, s.order)
-    DArray(compute(ctx, shuffle_merge(inp, splitter_ranks, splitters, s.order)))
+    buckets = [q for _ in 1:n+1]
+    for i in 1:r
+        buckets[i] += 1
+    end
+    pop!(buckets)
+    x[cumsum(buckets)]
 end
 
-function delayed_map_and_collect(f, ctx, Xs...)
-    result_parts = map(delayed(f, get_result=true), Xs...)
-    collect(ctx, delayed(tuple)(result_parts...))
+function sortandsample_array(ord, xs, nsamples)
+    sorted = sort(xs, order=ord)
+    r = sample(1:length(xs), min(length(xs), nsamples), replace=false, ordered=true)
+    (tochunk(sorted), sorted[r])
 end
 
-function pselect(ctx, A, ranks, ord)
-    cs = chunks(A)
-    Nc = length(cs)
-    Nr = length(ranks)
-
-    ks = copy(ranks)
-    lengths = map(length, domainchunks(A))
-
-    # Initialize the ranges in which we are looking for medians
-    # For each chunk it's 1:length of that chunk
-    init_ranges = UnitRange[1:x for x in lengths]
-
-    # there will be Nr active_ranges being searched for each chunk
-    # We create a matrix of ranges containing as many columns as ranks
-    # as many rows as chunks
-    active_ranges = reducehcat([init_ranges for _ in 1:Nr], UnitRange)
-
-    n = sum(lengths)
-    Ns = Int[n for _ in 1:Nr] # Number of elements in the active range set
-    iter=0                    # Iteration count
-    result = Pair[]           # contains `rank => median value` pairs
-
-    while any(x->x>0, Ns)
-        # find medians
-        chunk_ranges = [vec(active_ranges[i,:]) for i in 1:Nc]
-
-        chunk_medians = delayed_map_and_collect(ctx, chunk_ranges, cs) do ranges, data
-            # as many ranges as ranks to find
-            map(r->submedian(data, r), ranges)
+function batchedsplitmerge(chunks, splitters, batchsize, start_proc=1; merge=merge_sorted, by=identity, sub=getindex, order=default_ord)
+    if batchsize >= length(chunks)
+        if isempty(splitters)
+            return [collect_merge(merge, chunks)]
+        else
+            return splitmerge(chunks, splitters, merge, by, sub, order)
         end
-        # medians: a vector Nr medians for each chunk
+    end
 
-        tmp = reducehcat(chunk_medians, Any) # Nr x Nc
-        median_matrix = permutedims(tmp, (2,1))
+    # group chunks into batches:
+    q, r = divrem(length(chunks), batchsize)
+    b = [batchsize for _ in 1:q]
+    r != 0 && push!(b, r)
+    batch_ranges = map(UnitRange, cumsum([1, b[1:end-1];]), cumsum(b))
+    batches = map(x->chunks[x], batch_ranges)
 
-        ls = map(length, active_ranges)
-        Ms = vec(mapslices(x->weightedmedian(x, ls, ord), median_matrix, 1))
+    # splitmerge each batch
+    topsplits, lowersplits = splitter_levels(order, splitters, length(chunks), batchsize)
 
-        # scatter weighted
-        LEGs = delayed_map_and_collect(ctx, cs, chunk_ranges) do chunk, ranges
-            # for each median found right now, locate G,T,E vals
-            map((range, m)->locate_pivot(chunk, range, m, ord), ranges, Ms)
+    sorted_batches = map(batches) do b
+        splitmerge(b, topsplits, merge, by, sub, order)
+    end
+
+    range_groups = transpose_vecvec(sorted_batches)
+
+    chunks = []
+    p = start_proc
+    for i = 1:length(range_groups)
+        s = lowersplits[i]
+        group = range_groups[i]
+        if !isempty(s)
+            cs = batchedsplitmerge(group, s, batchsize; merge = merge, by=by, sub=sub, order=order)
+            append!(chunks, cs)
+        else
+            push!(chunks, collect_merge(merge, group))
         end
-
-        LEG_matrix = reducehcat(LEGs, Any)
-        D = reducedim((xs, x) -> map(+, xs, x), LEG_matrix, 2, (0,0,0))
-        L = Int[x[1] for x in D] # length = Nr
-        E = Int[x[2] for x in D]
-        G = Int[x[3] for x in D]
-
-        found = Int[]
-        for i=1:length(ks)
-            l = L[i]; e = E[i]; g = G[i]; k = ks[i]
-            if k <= l
-                # discard elements less than M
-                active_ranges[:,i] = keep_lessthan(LEG_matrix[i,:], active_ranges[:,i])
-                Ns[i] = l
-            elseif k > l + e
-                # discard elements more than M
-                active_ranges[:,i] = keep_morethan(LEG_matrix[i,:], active_ranges[:,i])
-                Ns[i] = g
-                ks[i] = k - (l + e)
-            elseif l < k && k <= l+e
-                # we've found a possible splitter!
-                foundat = map(active_ranges[:,i], LEG_matrix[i,:]) do rng, d
-                    l,e,g=d
-                    fst = first(rng)+l
-                    lst = fst+e-1
-                    fst:lst
-                end
-                push!(result, Ms[i] => foundat)
-                push!(found, i)
-            end
-        end
-        notfound_mask = ones(Bool, length(ks))
-        notfound_mask[found] = false
-        active_ranges = active_ranges[:, notfound_mask]
-        Ns = Ns[notfound_mask]
-        ks = ks[notfound_mask]
     end
-    firsts = map(first, result)
-    perm = sortperm(firsts, order=ord)
-    return result[perm]
+    return chunks
 end
 
-function weightedmedian(xs, weights, ord)
-    perm = sortperm(xs)
-    weights = weights[perm]
-    xs = xs[perm]
-    cutoff = sum(weights) / 2
+function collect_merge(merge, group)
+    #delayed((xs...) -> treereduce(merge, Any[xs...]))(group...)
+    t = treereduce(delayed(merge), group)
+end
 
-    x = weights[1]
-    i = 1
-    while x <= cutoff
-        if x == cutoff
-            if i < length(xs)
-                return xs[i]
-            else
-                xs[i]
-            end
-        end
-        x += weights[i]
-        x > cutoff && break
-        x == cutoff && continue
-        i += 1
+# Given sorted chunks, splits each chunk according to splitters
+# then merges corresponding splits together to form length(splitters) + 1 sorted chunks
+# these chunks will be in turn sorted
+function splitmerge(chunks, splitters, merge, by, sub, ord)
+    c1 = map(c->splitchunk(c, splitters, by, sub, ord), chunks)
+    map(cs->collect_merge(merge, cs), transpose_vecvec(c1))
+end
+
+function splitchunk(c, splitters, by, sub, ord)
+    function getbetween(xs, lo, hi, ord)
+        i = searchsortedlast(xs, lo, order=ord)
+        j = searchsortedlast(xs, hi, order=ord)
+        (i+1):j
     end
-    return xs[i]
-end
 
-function sortedmedian(xs)
-   l = length(xs)
-   if l % 2 == 0
-       i = l >> 1
-       xs[i]
-   else
-       i = (l+1) >> 1
-       xs[i]
-   end
-end
-
-function submedian(xs, r)
-    xs1 = view(xs, r)
-    if isempty(xs1)
-        idx = min(first(r), length(xs))
-        return xs[idx]
+    function getgt(xs, lo, ord)
+        i = searchsortedlast(xs, lo, order=ord)
+        (i+1):length(xs)
     end
-    sortedmedian(xs1)
+
+    function getlt(xs, hi, ord)
+        j = searchsortedlast(xs, hi, order=ord)
+        1:j
+    end
+
+    between = map((hi, lo) -> delayed(c->sub(c, getbetween(by(c), hi, lo, ord)))(c),
+                  splitters[1:end-1], splitters[2:end])
+    hi = splitters[1]
+    lo = splitters[end]
+    [delayed(c->sub(c, getlt(by(c), hi, ord)))(c);
+     between; delayed(c->sub(c, getgt(by(c), lo, ord)))(c)]
 end
 
-function keep_lessthan(dists, active_ranges)
-    map(dists, active_ranges) do d, r
-        l = d[1]::Int
-        first(r):(first(r)+l-1)
+# transpose a vector of vectors
+function transpose_vecvec(xs)
+    map(1:length(xs[1])) do i
+        map(x->x[i], xs)
     end
 end
 
-function keep_morethan(dists, active_ranges)
-    map(dists, active_ranges) do d, r
-        g = (d[2]+d[1])::Int
-        (first(r)+g):last(r)
+function _promote_array{T,S}(x::AbstractArray{T}, y::AbstractArray{S})
+    Q = promote_type(T,S)
+    samehost = Distributed.check_same_host(procs())
+    ok = (isa(x, Array) || isa(x, SharedArray)) && (isa(y, Array) || isa(y, SharedArray))
+    if samehost && ok && isbits(Q)
+        return SharedArray{Q}(length(x)+length(y), pids=procs())
+    else
+        return similar(x, Q, length(x)+length(y))
     end
 end
 
-# returns number of elements less than
-# equal to and greater than `s` in X within
-# an index range
-function locate_pivot(X, range, s, ord)
-    # compute l, e, g
-    X1 = view(X, range)
-    output_rng = searchsorted(X1, s, ord)
-    l = first(output_rng) - 1
-    e = length(output_rng)
-    g = length(X1) - l - e
-    l,e,g
+function merge_sorted(ord::Ordering, x::AbstractArray, y::AbstractArray)
+    z = _promote_array(x, y)
+    _merge_sorted(ord, z, x, y)
 end
 
-function reducehcat(xs,T)
-    l = isempty(xs) ? 0 : length(xs[1])
-    [xs[i][j] for j=1:l, i=1:length(xs)]
-end
-
-function merge_thunk(ps, starts, lasts, ord)
-    ranges = map(UnitRange, starts, lasts)
-    Thunk(map((p, r) -> delayed(getindex)(p, r), ps, ranges)...) do xs...
-        merge_sorted(ord, xs...)
-    end
-end
-
-function shuffle_merge(A, ranks, splitter_indices, ord)
-    ps = chunks(A)
-    # splitter_indices: array of (splitter => vector of p index ranges) in sorted order
-    starts = ones(Int, length(ps))
-    merges = [begin
-        lasts = map(first, idxs).-1 # First, all elements less than that of the required rank
-        i = 1
-        while sum(lasts) < rank
-            reqd = rank - sum(lasts)
-            if i > length(idxs)
-                error("Median of wrong rank found")
-            end
-            available = min(reqd, length(idxs[i]))
-            lasts[i] += available
-            i += 1
-        end
-
-        thnk = merge_thunk(ps, starts, lasts, ord)
-        sz = sum(lasts.-starts.+1)
-        starts = lasts.+1
-        thnk,sz
-        end for (rank, idxs) in zip(ranks, map(last, splitter_indices))]
-    ls = map(length, domainchunks(A))
-    thunks = vcat(merges, (merge_thunk(ps, starts, ls, ord), sum(ls.-starts.+1)))
-    part_lengths = map(x->x[2], thunks)
-    dmn = ArrayDomain(1:sum(part_lengths))
-    dmnchunks = DomainBlocks((1,), (cumsum(part_lengths),))
-    DArray(eltype(A), dmn, dmnchunks, map(x->x[1], thunks))
-end
-
-function merge_sorted(ord::Ordering, x::AbstractArray{T}, y::AbstractArray{S}) where {T, S}
+function _merge_sorted{T, S}(ord::Ordering, z::AbstractArray{T}, x::AbstractArray{T}, y::AbstractArray{S})
     n = length(x) + length(y)
-    z = Array{promote_type(T,S)}(n)
     i = 1; j = 1; k = 1
     len_x = length(x)
     len_y = length(y)
-    while i <= len_x && j <= len_y
-        @inbounds if lt(ord, x[i], y[j])
-            @inbounds z[k] = x[i]
+    @inbounds while i <= len_x && j <= len_y
+        if lt(ord, x[i], y[j])
+            z[k] = x[i]
             i += 1
         else
-            @inbounds z[k] = y[j]
+            z[k] = y[j]
             j += 1
         end
         k += 1
     end
     remaining, m = i <= len_x ? (x, i) : (y, j)
-    while k <= n
-        @inbounds z[k] = remaining[m]
+    @inbounds while k <= n
+        z[k] = remaining[m]
         k += 1
         m += 1
     end
     z
 end
 
-merge_sorted(ord::Ordering, x::AbstractArray) = x
-function merge_sorted(ord::Ordering, x::AbstractArray, y::AbstractArray, ys::AbstractArray...)
-    merge_sorted(ord, merge_sorted(ord, x,y), merge_sorted(ord, ys...))
+function splitter_levels(ord, splitters, nchunks, batchsize)
+    # final number of chunks
+    noutchunks = length(splitters) + 1
+    # chunks per batch
+    perbatch = ceil(Int, nchunks / batchsize)
+    root = getmedians(splitters, perbatch-1)
+
+    subsplits = []
+    i = 1
+    for c in root
+        j = findlast(x->lt(ord, x, c), splitters)
+        push!(subsplits, splitters[i:j])
+        i = j+2
+    end
+    push!(subsplits, splitters[i:end])
+    root, subsplits
+end
+
+arrayorvcat(x::AbstractArray,y::AbstractArray) = vcat(x,y)
+arrayorvcat(x,y) = [x,y]
+
+const default_ord = Base.Sort.ord(isless, identity, false, Forward)
+
+function dsort_chunks(cs, nchunks=length(cs), nsamples=2000; merge = merge_sorted, by=identity, sub=getindex, order=default_ord,  sortandsample = (x,ns)->sortandsample_array(order, x,ns), batchsize=max(2, nworkers()))
+    cs1 = map(c->delayed(sortandsample)(c, nsamples), cs)
+    xs = collect(treereduce(delayed(vcat), cs1))
+    if length(cs1) == 1
+        xs = [xs]
+    end
+    samples = reduce((a,b)->merge_sorted(order, a, b), map(x->x[2], xs))
+    splitters = getmedians(samples, nchunks-1)
+    cs = batchedsplitmerge(map((x,c) -> first(x) === nothing ? c : first(x), xs, cs), splitters, batchsize; merge=merge, by=by, sub=sub, order=order)
+    for (w, c) in zip(Iterators.cycle(workers()), cs)
+        propagate_affinity!(c, Dagger.OSProc(w) => 1)
+    end
+    cs
+end
+
+function propagate_affinity!(c, aff)
+    if !isa(c, Thunk)
+        return
+    end
+    if !isnull(c.affinity)
+        push!(get(c.affinity), aff)
+    else
+        c.affinity = [aff]
+    end
+
+    for t in c.inputs
+        propagate_affinity!(t, aff)
+    end
+end
+
+function Base.sort(v::ArrayOp;
+               lt=Base.isless,
+               by=identity,
+               nchunks=nothing,
+               rev::Bool=false,
+               batchsize=max(2, nworkers()),
+               nsamples=2000,
+               order::Ordering=default_ord)
+    v1 = compute(v)
+    ord = Base.Sort.ord(lt,by,rev,order)
+    nchunks = nchunks === nothing ? length(v1.chunks) : nchunks
+    cs = dsort_chunks(v1.chunks, nchunks, nsamples,
+                      order=ord, merge=(x,y)->merge_sorted(ord, x,y))
+    t=delayed((xs...)->[xs...]; meta=true)(cs...)
+    chunks = compute(t)
+    dmn = ArrayDomain((1:sum(length(domain(c)) for c in chunks),))
+    DArray(eltype(v1), dmn, map(domain, chunks), chunks)
 end
