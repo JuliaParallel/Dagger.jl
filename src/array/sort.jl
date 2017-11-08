@@ -16,10 +16,10 @@ function getmedians(x, n)
     x[cumsum(buckets)]
 end
 
-function sortandsample_array(ord, xs, nsamples)
-    sorted = sort(xs, order=ord)
+function sortandsample_array(ord, xs, nsamples, presorted=false)
+    chunk = !presorted ? tochunk(sort(xs, order=ord)) : nothing
     r = sample(1:length(xs), min(length(xs), nsamples), replace=false, ordered=true)
-    (tochunk(sorted), sorted[r])
+    (chunk, sorted[r])
 end
 
 function batchedsplitmerge(chunks, splitters, batchsize, start_proc=1; merge=merge_sorted, by=identity, sub=getindex, order=default_ord)
@@ -42,7 +42,9 @@ function batchedsplitmerge(chunks, splitters, batchsize, start_proc=1; merge=mer
     topsplits, lowersplits = splitter_levels(order, splitters, length(chunks), batchsize)
 
     sorted_batches = map(batches) do b
-        splitmerge(b, topsplits, merge, by, sub, order)
+        isempty(topsplits) ?
+            [collect_merge(merge, b)] :
+            splitmerge(b, topsplits, merge, by, sub, order)
     end
 
     range_groups = transpose_vecvec(sorted_batches)
@@ -170,16 +172,34 @@ arrayorvcat(x,y) = [x,y]
 
 const default_ord = Base.Sort.ord(isless, identity, false, Forward)
 
-function dsort_chunks(cs, nchunks=length(cs), nsamples=2000; merge = merge_sorted, by=identity, sub=getindex, order=default_ord,  sortandsample = (x,ns)->sortandsample_array(order, x,ns), batchsize=max(2, nworkers()))
-    cs1 = map(c->delayed(sortandsample)(c, nsamples), cs)
+function dsort_chunks(cs, nchunks=length(cs), nsamples=2000;
+                      merge = merge_sorted,
+                      by=identity,
+                      sub=getindex,
+                      order=default_ord,
+                      batchsize=max(2, nworkers()),
+                      splitters=nothing,
+                      chunks_presorted=false,
+                      sortandsample = (x,ns, presorted)->sortandsample_array(order, x,ns, presorted),
+                      affinities=workers(),
+                     )
+    if splitters !== nothing
+        nsamples = 0 # no samples needed
+    end
+
+    cs1 = map(c->delayed(sortandsample)(c, nsamples, chunks_presorted), cs)
     xs = collect(treereduce(delayed(vcat), cs1))
     if length(cs1) == 1
         xs = [xs]
     end
-    samples = reduce((a,b)->merge_sorted(order, a, b), map(x->x[2], xs))
-    splitters = getmedians(samples, nchunks-1)
+
+    if splitters === nothing
+        samples = reduce((a,b)->merge_sorted(order, a, b), map(x->x[2], xs))
+        splitters = getmedians(samples, nchunks-1)
+    end
+
     cs = batchedsplitmerge(map((x,c) -> first(x) === nothing ? c : first(x), xs, cs), splitters, batchsize; merge=merge, by=by, sub=sub, order=order)
-    for (w, c) in zip(Iterators.cycle(workers()), cs)
+    for (w, c) in zip(Iterators.cycle(affinities), cs)
         propagate_affinity!(c, Dagger.OSProc(w) => 1)
     end
     cs
