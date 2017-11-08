@@ -299,11 +299,24 @@ Distribute(p::Blocks, data::AbstractArray) =
     Distribute(partition(p, domain(data)), data)
 
 function stage(ctx, d::Distribute)
+    if isa(d.data, ArrayOp)
+        # distributing a dsitributed array
+        x = cached_stage(ctx, d.data)
+        if d.domainchunks == domainchunks(x)
+            return x # already properly distributed
+        end
+        cs = map(d.domainchunks) do idx
+            delayed(collect)(x[idx])
+        end
+    else
+        cs = map(c -> delayed(identity)(d.data[c]), d.domainchunks)
+    end
+
     DArray(
            eltype(d.data),
            domain(d.data),
            d.domainchunks,
-           map(c -> delayed(identity)(d.data[c]), d.domainchunks)
+           cs
     )
 end
 
@@ -320,7 +333,7 @@ function distribute(x::AbstractVector, n::Int)
     distribute(x, (n,))
 end
 
-function distribute(x::AbstractVector, n::Vector)
+function distribute(x::AbstractVector, n::Vector{<:Integer})
     distribute(x, DomainBlocks((1,), n))
 end
 
