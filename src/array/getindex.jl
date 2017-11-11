@@ -40,3 +40,20 @@ Base.getindex(c::ArrayOp, idx::ArrayDomain) = GetIndex(c, indexes(idx))
 Base.getindex(c::ArrayOp, idx...) = GetIndex(c, idx)
 Base.getindex(c::ArrayOp, idx::Integer...) =
    compute(GetIndexScalar(c, idx))
+
+# Internal utility
+
+function catchunks(chs)
+  for i = 1:ndims(chs)
+    chs = mapslices(xs -> [cat(i, xs...)], chs, i)
+  end
+  return chs[1]
+end
+
+function chslice(xs::DArray, d::ArrayDomain)
+  subchunks, subdomains = lookup_parts(chunks(xs), domainchunks(xs), d)
+  chsize = size(subdomains)
+  Thunk(subchunks...) do subchunks...
+    catchunks(reshape(collect(subchunks), chsize))
+  end
+end

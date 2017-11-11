@@ -18,7 +18,7 @@ function stage(ctx, node::Map)
     thunks = similar(domains, Any)
     f = node.f
     for i=eachindex(domains)
-        inps = map(x->chunks(x)[i], inputs)
+        inps = map(x->chslice(x, domains[i]), inputs)
         thunks[i] = Thunk((args...) -> map(f, args...), inps...)
     end
     DArray(Any, domain(primary), domainchunks(primary), thunks)
