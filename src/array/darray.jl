@@ -191,8 +191,8 @@ function group_indices(cumlength, idxs::Range)
     f = searchsortedfirst(cumlength, first(idxs))
     l = searchsortedfirst(cumlength, last(idxs))
     out = cumlength[f:l]
+    isempty(out) && return []
     out[end] = last(idxs)
-    out-=(f-1)
     map(=>, f:l, map(UnitRange, vcat(first(idxs), out[1:end-1]+1), out))
 end
 
@@ -334,7 +334,7 @@ function distribute(x::AbstractVector, n::Int)
 end
 
 function distribute(x::AbstractVector, n::Vector{<:Integer})
-    distribute(x, DomainBlocks((1,), n))
+    distribute(x, DomainBlocks((1,), (cumsum(n),)))
 end
 
 function Base.:(==)(x::ArrayOp{T,N}, y::AbstractArray{S,N}) where {T,S,N}

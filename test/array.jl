@@ -133,6 +133,12 @@ end
 
     test_getindex(rand(10,10))
     test_getindex(sprand(10,10,0.5))
+
+    y = rand(10, 10)
+    xs = distribute(y, Blocks(2,2))
+    for i=1:10, j=1:10
+        @test compute(xs[i:j, j:i]) == y[i:j, j:i]
+    end
 end
 
 
