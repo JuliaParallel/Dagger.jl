@@ -17,9 +17,17 @@ function getmedians(x, n)
 end
 
 function sortandsample_array(ord, xs, nsamples, presorted=false)
-    chunk = !presorted ? tochunk(sort(xs, order=ord)) : nothing
-    r = sample(1:length(xs), min(length(xs), nsamples), replace=false, ordered=true)
-    (chunk, sorted[r])
+    r = sample(1:length(xs), min(length(xs), nsamples),
+               replace=false, ordered=true)
+    if !presorted
+        sorted = sort(xs, order=ord)
+        chunk = tochunk(sorted)
+        samples = sorted[r]
+    else
+        chunk = nothing # avoid communicating metadata if already sorted
+        samples = chunk[r]
+    end
+    (chunk, samples)
 end
 
 function batchedsplitmerge(chunks, splitters, batchsize, start_proc=1; merge=merge_sorted, by=identity, sub=getindex, order=default_ord)
