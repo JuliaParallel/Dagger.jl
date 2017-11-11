@@ -191,8 +191,8 @@ function group_indices(cumlength, idxs::Range)
     f = searchsortedfirst(cumlength, first(idxs))
     l = searchsortedfirst(cumlength, last(idxs))
     out = cumlength[f:l]
+    isempty(out) && return []
     out[end] = last(idxs)
-    out-=(f-1)
     map(=>, f:l, map(UnitRange, vcat(first(idxs), out[1:end-1]+1), out))
 end
 
@@ -299,11 +299,24 @@ Distribute(p::Blocks, data::AbstractArray) =
     Distribute(partition(p, domain(data)), data)
 
 function stage(ctx, d::Distribute)
+    if isa(d.data, ArrayOp)
+        # distributing a dsitributed array
+        x = cached_stage(ctx, d.data)
+        if d.domainchunks == domainchunks(x)
+            return x # already properly distributed
+        end
+        cs = map(d.domainchunks) do idx
+            delayed(collect)(x[idx])
+        end
+    else
+        cs = map(c -> delayed(identity)(d.data[c]), d.domainchunks)
+    end
+
     DArray(
            eltype(d.data),
            domain(d.data),
            d.domainchunks,
-           map(c -> delayed(identity)(d.data[c]), d.domainchunks)
+           cs
     )
 end
 
@@ -320,8 +333,8 @@ function distribute(x::AbstractVector, n::Int)
     distribute(x, (n,))
 end
 
-function distribute(x::AbstractVector, n::Vector)
-    distribute(x, DomainBlocks((1,), n))
+function distribute(x::AbstractVector, n::Vector{<:Integer})
+    distribute(x, DomainBlocks((1,), (cumsum(n),)))
 end
 
 function Base.:(==)(x::ArrayOp{T,N}, y::AbstractArray{S,N}) where {T,S,N}

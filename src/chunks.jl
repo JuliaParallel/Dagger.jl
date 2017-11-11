@@ -86,7 +86,7 @@ end
 Create a chunk from a sequential object.
 """
 function tochunk(x; persist=false, cache=false)
-    ref = poolset(x, destroyonevict=cache)
+    ref = poolset(x, destroyonevict=persist ? false : cache)
     Chunk(typeof(x), domain(x), ref, persist)
 end
 tochunk(x::Union{Chunk, Thunk}) = x

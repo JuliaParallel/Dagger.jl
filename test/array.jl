@@ -133,6 +133,12 @@ end
 
     test_getindex(rand(10,10))
     test_getindex(sprand(10,10,0.5))
+
+    y = rand(10, 10)
+    xs = distribute(y, Blocks(2,2))
+    for i=1:10, j=1:10
+        @test compute(xs[i:j, j:i]) == y[i:j, j:i]
+    end
 end
 
 
@@ -141,28 +147,6 @@ end
     @test collect(sin.(X)) == collect(sin.(X))
 end
 
-@testset "sort" begin
-    x = rand(1:10, 10)
-    X = Distribute(Blocks(3), x)
-    @test collect(sort(X)) == sort(x)
-    @test collect(sort(X, rev=true, alg=Base.Sort.DEFAULT_STABLE)) == sort(x, rev=true, alg=Base.Sort.DEFAULT_STABLE)
-
-    X = Distribute(Blocks(1), x)
-    @test collect(sort(X)) == sort(x)
-    @test collect(sort(X, rev=true)) == sort(x, rev=true)
-
-    X = Distribute(Blocks(10), x)
-    @test collect(sort(X)) == sort(x)
-    @test collect(sort(X, rev=true)) == sort(x, rev=true)
-
-    x = [("A",1), ("A",2), ("B",1)]
-    y = compute(Distribute(Blocks(1), x))
-    @test collect(sort(y)) == x
-
-    x = ones(10)
-    y = compute(Distribute(Blocks(3), x))
-    @test map(x->length(collect(x)), compute(sort(y)).chunks) == [3,3,3,1]
-end
 
 @testset "reducedim" begin
     x = rand(1:10, 10, 5)
@@ -183,4 +167,26 @@ end
     X = Distribute(Blocks(3,3), x)
     @test collect(setindex(X,1.0, 3:8, 2:7)) == y
     @test collect(X) == x
+end
+
+@testset "sort" begin
+    @show x = shuffle(1:10)
+    X = distribute(x, 4)
+    @test collect(sort(X)) == sort(x)
+
+    X = distribute(x, 10)
+    @test collect(sort(X)) == sort(x)
+    @test collect(sort(X, rev=true)) == sort(x, rev=true)
+
+    X = distribute(x, 1)
+    @test collect(sort(X)) == sort(x)
+    @test collect(sort(X, rev=true)) == sort(x, rev=true)
+
+    x = [("A",1), ("A",2), ("B",1)]
+    y = distribute(x, 3)
+    @test collect(sort(y)) == x
+
+    x = ones(10)
+    y = compute(Distribute(Blocks(3), x))
+    #@test map(x->length(collect(x)), compute(sort(y)).chunks) == [3,3,3,1]
 end

@@ -1,4 +1,4 @@
-import Base: convert, +, *, /, -
+import Base: convert, +, *, /, -, isless
 
 ###### Filesize algebra ######
 

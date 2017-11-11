@@ -74,8 +74,7 @@ function compute(ctx, d::Thunk)
     end
     @dbg timespan_end(ctx, :scheduler_init, 0, master)
 
-    while !isempty(state.ready) ||
-        !isempty(state.running)
+    while !isempty(state.ready) || !isempty(state.running)
 
         if isempty(state.running) && !isempty(state.ready)
             for p in ps
@@ -86,6 +85,12 @@ function compute(ctx, d::Thunk)
                 end
             end
         end
+
+        if isempty(state.running)
+            # the block above fired only meta tasks
+            continue
+        end
+
         proc, thunk_id, res = take!(chan)
         if isa(res, CapturedException) || isa(res, RemoteException)
             rethrow(res)
@@ -312,7 +317,7 @@ function do_task(ctx, proc, thunk_id, f, data, send_result, persist, cache)
     @dbg timespan_start(ctx, :compute, thunk_id, proc)
     result_meta = try
         res = f(fetched...)
-        (proc, thunk_id, send_result ? res : tochunk(res, persist=persist, cache=cache)) #todo: add more metadata
+        (proc, thunk_id, send_result ? res : tochunk(res, persist=persist, cache=persist ? true : cache)) #todo: add more metadata
     catch ex
         bt = catch_backtrace()
         (proc, thunk_id, RemoteException(myid(), CapturedException(ex, bt)))

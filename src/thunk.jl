@@ -1,4 +1,4 @@
-export Thunk, delayed
+export Thunk, delayed, delayedmap
 
 let counter=0
     global next_id
@@ -74,6 +74,8 @@ end
 function delayed(f; kwargs...)
     (args...) -> Thunk(f, args...; kwargs...)
 end
+
+delayedmap(f, xs...) = map(delayed(f), xs...)
 
 persist!(t::Thunk) = (t.persist=true; t)
 cache_result!(t::Thunk) = (t.cache=true; t)
