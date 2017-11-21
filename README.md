@@ -4,7 +4,7 @@
 
 [![Build Status](https://travis-ci.org/JuliaParallel/Dagger.jl.svg?branch=master)](https://travis-ci.org/JuliaParallel/Dagger.jl) [![Coverage Status](https://coveralls.io/repos/github/JuliaParallel/Dagger.jl/badge.svg?branch=master)](https://coveralls.io/github/JuliaParallel/Dagger.jl?branch=master)
 
-At the core of Dagger.jl is a scheduler heavily inspired by [Dask](http://dask.pydata.org/en/latest/). It can run computations represented as directed-acyclic-graphs (DAGs) efficiently on many Julia worker processes.
+At the core of Dagger.jl is a scheduler heavily inspired by [Dask](http://dask.pydata.org/en/latest/). It can run computations represented as [directed-acyclic-graphs](https://en.wikipedia.org/wiki/Directed_acyclic_graph) (DAGs) efficiently on many Julia worker processes.
 
 # DAG creation interface
 
