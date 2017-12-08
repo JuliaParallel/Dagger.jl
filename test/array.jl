@@ -1,5 +1,3 @@
-using Dagger
-using Base.Test
 import Dagger: chunks, DArray, domainchunks, treereduce_nd
 
 @testset "treereduce_nd" begin
@@ -180,7 +178,7 @@ end
     @test collect(sort(X)) == sort(x)
     @test collect(sort(X, rev=true)) == sort(x, rev=true)
 
-    X = distribute(x, 2)
+    X = distribute(x, 1)
     @test collect(sort(X)) == sort(x)
     @test collect(sort(X, rev=true)) == sort(x, rev=true)
 

@@ -19,21 +19,23 @@ end
 function sortandsample_array(ord, xs, nsamples, presorted=false)
     r = sample(1:length(xs), min(length(xs), nsamples),
                replace=false, ordered=true)
-    if presorted
-        perm = Base.OneTo(length(xs))
+    if !presorted
+        sorted = sort(xs, order=ord)
+        chunk = tochunk(sorted)
+        samples = sorted[r]
     else
-        perm = sortperm(xs, order=ord)
+        chunk = nothing # avoid communicating metadata if already sorted
+        samples = chunk[r]
     end
-    samples = xs[perm[r]]
-    (tochunk(perm), samples)
+    (chunk, samples)
 end
 
-function batchedsplitmerge(chunks, splitters, batchsize, start_proc=1; merge=merge_sorted, sub=getindex, key=identity, order=default_ord)
+function batchedsplitmerge(chunks, splitters, batchsize, start_proc=1; merge=merge_sorted, by=identity, sub=getindex, order=default_ord)
     if batchsize >= length(chunks)
         if isempty(splitters)
             return [collect_merge(merge, chunks)]
         else
-            return splitmerge(chunks, splitters, merge, sub, key, order)
+            return splitmerge(chunks, splitters, merge, by, sub, order)
         end
     end
 
@@ -50,7 +52,7 @@ function batchedsplitmerge(chunks, splitters, batchsize, start_proc=1; merge=mer
     sorted_batches = map(batches) do b
         isempty(topsplits) ?
             [collect_merge(merge, b)] :
-            splitmerge(b, topsplits, merge, sub, key, order)
+            splitmerge(b, topsplits, merge, by, sub, order)
     end
 
     range_groups = transpose_vecvec(sorted_batches)
@@ -61,7 +63,7 @@ function batchedsplitmerge(chunks, splitters, batchsize, start_proc=1; merge=mer
         s = lowersplits[i]
         group = range_groups[i]
         if !isempty(s)
-            cs = batchedsplitmerge(group, s, batchsize; merge = merge, sub=sub, key=key, order=order)
+            cs = batchedsplitmerge(group, s, batchsize; merge = merge, by=by, sub=sub, order=order)
             append!(chunks, cs)
         else
             push!(chunks, collect_merge(merge, group))
@@ -72,62 +74,40 @@ end
 
 function collect_merge(merge, group)
     #delayed((xs...) -> treereduce(merge, Any[xs...]))(group...)
-    t = treereduce(delayed((x,y)->merge(x, y)), group)
+    t = treereduce(delayed(merge), group)
 end
 
 # Given sorted chunks, splits each chunk according to splitters
 # then merges corresponding splits together to form length(splitters) + 1 sorted chunks
 # these chunks will be in turn sorted
-function splitmerge(chunks, splitters, merge, sub, key, ord)
-    c1 = map(c->splitchunk(c, splitters, sub, key, ord), chunks)
+function splitmerge(chunks, splitters, merge, by, sub, ord)
+    c1 = map(c->splitchunk(c, splitters, by, sub, ord), chunks)
     map(cs->collect_merge(merge, cs), transpose_vecvec(c1))
 end
 
-import Base: lt,Ordering
-function searchsortedlastperm(v::AbstractVector, x, perm, o::Ordering=Base.Forward, lo::Int=1, hi::Int=length(v))
-    lo = lo-1
-    hi = hi+1
-    while lo < hi-1
-        m = (lo+hi)>>>1
-        if lt(o, x, v[perm[m]])
-            hi = m
-        else
-            lo = m
-        end
-    end
-    return lo
-end
-
-function splitchunk(c, splitters, sub, key, ord)
-    function getbetween(data, lo, hi, ord)
-        xs, perm = data
-        i = searchsortedlastperm(key(xs), lo, perm, ord)
-        j = searchsortedlastperm(key(xs), hi, perm, ord)
-        perm[(i+1):j]
+function splitchunk(c, splitters, by, sub, ord)
+    function getbetween(xs, lo, hi, ord)
+        i = searchsortedlast(xs, lo, order=ord)
+        j = searchsortedlast(xs, hi, order=ord)
+        (i+1):j
     end
 
-    function getgt(data, lo, ord)
-        xs, perm = data
-        i = searchsortedlastperm(key(xs), lo, perm, ord)
-        perm[(i+1):length(xs)]
+    function getgt(xs, lo, ord)
+        i = searchsortedlast(xs, lo, order=ord)
+        (i+1):length(xs)
     end
 
-    function getlt(data, hi, ord)
-        xs, perm = data
-        j = searchsortedlastperm(key(xs), hi, perm, ord)
-        perm[1:j]
+    function getlt(xs, hi, ord)
+        j = searchsortedlast(xs, hi, order=ord)
+        1:j
     end
 
-    function getsubpair(xs, idxs)
-        sub(xs[1], idxs) => Base.OneTo(length(idxs))
-    end
-
-    between = map((hi, lo) -> delayed(c->getsubpair(c, getbetween(c, hi, lo, ord)))(c),
+    between = map((hi, lo) -> delayed(c->sub(c, getbetween(by(c), hi, lo, ord)))(c),
                   splitters[1:end-1], splitters[2:end])
     hi = splitters[1]
     lo = splitters[end]
-    [delayed(c->getsubpair(c, getlt(c, hi, ord)))(c);
-     between; delayed(c->getsubpair(c, getgt(c, lo, ord)))(c)]
+    [delayed(c->sub(c, getlt(by(c), hi, ord)))(c);
+     between; delayed(c->sub(c, getgt(by(c), lo, ord)))(c)]
 end
 
 # transpose a vector of vectors
@@ -142,65 +122,39 @@ function _promote_array{T,S}(x::AbstractArray{T}, y::AbstractArray{S})
     samehost = Distributed.check_same_host(procs())
     ok = (isa(x, Array) || isa(x, SharedArray)) && (isa(y, Array) || isa(y, SharedArray))
     if samehost && ok && isbits(Q)
-        return Array{Q}(length(x)+length(y))#, pids=procs())
+        return SharedArray{Q}(length(x)+length(y), pids=procs())
     else
         return similar(x, Q, length(x)+length(y))
     end
 end
 
-function merge_sorted(ord::Ordering, x::Pair, y::Pair)
-    xx, xp = x
-    yy, yp = y
-    zz = _promote_array(xx, yy)
-    _merge_sorted!(ord, zz, xx, yy, xp, yp)
-    zz => Base.OneTo(length(zz))
-end
-
 function merge_sorted(ord::Ordering, x::AbstractArray, y::AbstractArray)
-    merge_sorted(ord, x=>Base.OneTo(length(x)), y=>Base.OneTo(length(y)))
-end
-function merge_sorted(ord::Ordering, x::Pair, y::AbstractArray)
-    merge_sorted(ord, x, y=>Base.OneTo(length(y)))
-end
-function merge_sorted(ord::Ordering, x::AbstractArray, y::Pair)
-    merge_sorted(ord, x=>Base.OneTo(length(x)), y)
+    z = _promote_array(x, y)
+    _merge_sorted(ord, z, x, y)
 end
 
-function _merge_sorted!{T, S}(ord::Ordering, z::AbstractArray{T}, x::AbstractArray{T}, y::AbstractArray{S}, xp, yp)
+function _merge_sorted{T, S}(ord::Ordering, z::AbstractArray{T}, x::AbstractArray{T}, y::AbstractArray{S})
     n = length(x) + length(y)
     i = 1; j = 1; k = 1
     len_x = length(x)
     len_y = length(y)
-    if len_x == 0
-        copy!(z, y)
-        return
-    elseif len_y == 0
-        copy!(z, x)
-        return
-    end
-    while i <= len_x && j <= len_y
-        if lt(ord, x[xp[i]], y[yp[j]])
-            z[k] = x[xp[i]]
+    @inbounds while i <= len_x && j <= len_y
+        if lt(ord, x[i], y[j])
+            z[k] = x[i]
             i += 1
         else
-            z[k] = y[yp[j]]
+            z[k] = y[j]
             j += 1
         end
         k += 1
     end
-    if i <= len_x
-        while k <= n
-            z[k] = x[xp[i]]
-            k += 1
-            i += 1
-        end
-    elseif j <= len_y
-        while k <= n
-            z[k] = y[yp[j]]
-            k += 1
-            j += 1
-        end
+    remaining, m = i <= len_x ? (x, i) : (y, j)
+    @inbounds while k <= n
+        z[k] = remaining[m]
+        k += 1
+        m += 1
     end
+    z
 end
 
 function splitter_levels(ord, splitters, nchunks, batchsize)
@@ -227,10 +181,10 @@ arrayorvcat(x,y) = [x,y]
 const default_ord = Base.Sort.ord(isless, identity, false, Forward)
 
 function dsort_chunks(cs, nchunks=length(cs), nsamples=2000;
+                      merge = merge_sorted,
+                      by=identity,
                       sub=getindex,
-                      key=identity,
                       order=default_ord,
-                      merge = (x,y) -> merge_sorted(ord, x, y),
                       batchsize=max(2, nworkers()),
                       splitters=nothing,
                       chunks_presorted=false,
@@ -248,16 +202,11 @@ function dsort_chunks(cs, nchunks=length(cs), nsamples=2000;
     end
 
     if splitters === nothing
-        samps = last.(xs)
-        if length(samps) > 1
-            samples = treereduce((x,y) -> merge_sorted(order, x, y), samps)[1]
-        else
-            samples = samps[1]
-        end
+        samples = reduce((a,b)->merge_sorted(order, a, b), map(x->x[2], xs))
         splitters = getmedians(samples, nchunks-1)
     end
 
-    cs = batchedsplitmerge(map(delayed((x,p)->x=>p), cs, first.(xs)), splitters, batchsize; merge=merge, sub=sub, key=key, order=order)
+    cs = batchedsplitmerge(map((x,c) -> first(x) === nothing ? c : first(x), xs, cs), splitters, batchsize; merge=merge, by=by, sub=sub, order=order)
     for (w, c) in zip(Iterators.cycle(affinities), cs)
         propagate_affinity!(c, Dagger.OSProc(w) => 1)
     end
@@ -292,14 +241,7 @@ function Base.sort(v::ArrayOp;
     nchunks = nchunks === nothing ? length(v1.chunks) : nchunks
     cs = dsort_chunks(v1.chunks, nchunks, nsamples,
                       order=ord, merge=(x,y)->merge_sorted(ord, x,y))
-    f = function (x)
-        if isa(x[2], Base.OneTo)
-            x[1]
-        else
-            x[1][x[2]]
-        end
-    end
-    t=delayed((xs...)->[xs...]; meta=true)(map(delayed(f), cs)...)
+    t=delayed((xs...)->[xs...]; meta=true)(cs...)
     chunks = compute(t)
     dmn = ArrayDomain((1:sum(length(domain(c)) for c in chunks),))
     DArray(eltype(v1), dmn, map(domain, chunks), chunks)
