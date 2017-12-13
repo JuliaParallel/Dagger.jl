@@ -3,9 +3,9 @@ export show_plan
 
 function node_label(io, t::Thunk, c)
     if isa(t.f, Function)
-        println(io, "$(t.id) [label=\"$(t.f)\"]")
+        println(io, "$(t.id) [label=\"$(t.f) - $(t.id)\"]")
     else
-        println(io, "$(t.id) [label=\"fn\"]")
+        println(io, "$(t.id) [label=\"fn - $(t.id)\"]")
     end
     c
 end

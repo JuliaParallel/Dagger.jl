@@ -190,3 +190,15 @@ end
     y = compute(Distribute(Blocks(3), x))
     #@test map(x->length(collect(x)), compute(sort(y)).chunks) == [3,3,3,1]
 end
+
+@testset "affinity" begin
+    x = Dagger.tochunk([1:10;])
+    aff = Dagger.affinity(x)
+    @test length(aff) == 1
+    @test aff[1][1] == Dagger.OSProc(myid())
+    @test aff[1][2] == sizeof(Int)*10
+end
+
+@testset "show_plan" begin
+    @test !isempty(Dagger.show_plan(Dagger.Thunk(()->10)))
+end
