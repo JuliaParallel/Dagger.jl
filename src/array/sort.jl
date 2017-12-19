@@ -122,7 +122,7 @@ function _promote_array{T,S}(x::AbstractArray{T}, y::AbstractArray{S})
     samehost = Distributed.check_same_host(procs())
     ok = (isa(x, Array) || isa(x, SharedArray)) && (isa(y, Array) || isa(y, SharedArray))
     if samehost && ok && isbits(Q)
-        return SharedArray{Q}(length(x)+length(y), pids=procs())
+        return Array{Q}(length(x)+length(y)) #, pids=procs())
     else
         return similar(x, Q, length(x)+length(y))
     end

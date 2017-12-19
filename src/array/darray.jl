@@ -1,7 +1,6 @@
 import Base: ==
 using Compat
 
-
 ###### Array Domains ######
 
 struct ArrayDomain{N}
