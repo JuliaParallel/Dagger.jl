@@ -110,7 +110,6 @@ free!(x; force=true,cache=false) = x # catch-all for non-chunks
 
 function savechunk(data, dir, f)
     sz = open(joinpath(dir, f), "w") do io
-        @show "serializeing"
         serialize(io, MemPool.MMWrap(data))
         return position(io)
     end
