@@ -244,6 +244,7 @@ function Base.sort(v::ArrayOp;
     nchunks = nchunks === nothing ? length(v1.chunks) : nchunks
     cs = dsort_chunks(v1.chunks, nchunks, nsamples,
                       order=ord, merge=(x,y)->merge_sorted(ord, x,y))
+    map(persist!, cs)
     t=delayed((xs...)->[xs...]; meta=true)(cs...)
     chunks = compute(t)
     dmn = ArrayDomain((1:sum(length(domain(c)) for c in chunks),))

@@ -165,7 +165,7 @@ size(x::DArray) = size(domain(x))
 stage(ctx, c::DArray) = c
 
 function collect(ctx::Context, d::DArray; tree=false)
-    a = compute(ctx, d, persist=false)
+    a = compute(ctx, d)
     ps_input = chunks(a)
 
     if isempty(d.chunks)

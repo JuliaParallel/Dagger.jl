@@ -5,6 +5,11 @@ using Compat
 
 import Base.collect
 
+const PLUGINS = Dict{Symbol,Any}()
+const PLUGIN_CONFIGS = Dict{Symbol,String}(
+    :scheduler => "Dagger.Sch"
+)
+
 include("lib/util.jl")
 include("lib/logging.jl")
 
@@ -16,6 +21,7 @@ include("chunks.jl")
 
 # Task scheduling
 include("compute.jl")
+include("scheduler.jl")
 
 # Array computations
 include("array/darray.jl")

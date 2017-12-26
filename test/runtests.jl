@@ -5,4 +5,5 @@ using Dagger
 
 include("domain.jl")
 include("array.jl")
+Dagger.cleanup()
 #include("cache.jl")
