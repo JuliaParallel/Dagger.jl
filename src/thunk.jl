@@ -2,7 +2,8 @@ export Thunk, delayed, delayedmap
 
 let counter=0
     global next_id
-    next_id() = counter+=1
+    const MAX_ID = (1 << 30)
+    next_id() = (counter >= MAX_ID) ? (counter = 1) : (counter += 1)
 end
 
 global _thunk_dict = Dict{Int, Any}()
