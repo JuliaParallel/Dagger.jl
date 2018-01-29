@@ -107,6 +107,7 @@ function free!(s::Chunk{X, DRef}; force=true, cache=false) where X
     end
 end
 free!(x; force=true,cache=false) = x # catch-all for non-chunks
+free!(x::DRef) = pooldelete(x)
 
 function savechunk(data, dir, f)
     sz = open(joinpath(dir, f), "w") do io
@@ -114,6 +115,21 @@ function savechunk(data, dir, f)
         return position(io)
     end
     Chunk(typeof(data), domain(data), FileRef(f, sz), true)
+end
+
+
+const refcount = Dict{MemPool.DRef, Int}()
+
+function addrefcount(r::DRef, x)
+    refcount[r] = getrefcount(r)+x
+end
+
+function getrefcount(r::DRef)
+    if haskey(refcount, r)
+        return refcount[r]
+    else
+        0
+    end
 end
 
 Base.@deprecate_binding AbstractPart Union{Chunk, Thunk}
