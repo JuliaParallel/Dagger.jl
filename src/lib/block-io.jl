@@ -11,14 +11,17 @@ struct BlockIO <: IO
 
     function find_end_pos(bio::BlockIO, end_byte::Char)
         seekend(bio)
+        end_byte = UInt8(end_byte)
         try
             while(!eof(bio.s) && (end_byte != read(bio, UInt8))) continue end
         end
         position(bio.s)
     end
+
     function find_start_pos(bio::BlockIO, end_byte::Char)
         (bio.r.start == 1) && (return bio.r.start)
         seekstart(bio)
+        end_byte = UInt8(end_byte)
         !eof(bio.s) && while(end_byte != read(bio, UInt8)) continue end
         position(bio.s)+1
     end
