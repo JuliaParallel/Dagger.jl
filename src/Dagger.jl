@@ -25,6 +25,9 @@ include("array/map-reduce.jl")
 # File IO
 include("file-io.jl")
 
+# Stream IO
+include("lib/block-io.jl")
+
 include("array/operators.jl")
 include("array/getindex.jl")
 include("array/setindex.jl")
