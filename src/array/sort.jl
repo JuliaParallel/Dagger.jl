@@ -208,9 +208,11 @@ function dsort_chunks(cs, nchunks=length(cs), nsamples=2000;
     end
 
     cs = batchedsplitmerge(map((x,c) -> first(x) === nothing ? c : first(x), xs, cs), splitters, batchsize; merge=merge, by=by, sub=sub, order=order)
+    #=
     for (w, c) in zip(Iterators.cycle(affinities), cs)
         propagate_affinity!(c, Dagger.OSProc(w) => 1)
     end
+    =#
     cs
 end
 
