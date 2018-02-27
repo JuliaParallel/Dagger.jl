@@ -53,6 +53,9 @@ end
     @test Distribute(Blocks(1,1), x) == x
     #test_dist(rand(100, 100))
     #test_dist(sprand(100, 100, 0.1))
+
+    x = distribute(rand(10), 2)
+    @test collect(distribute(x, 3)) == collect(x)
 end
 
 @testset "transpose" begin

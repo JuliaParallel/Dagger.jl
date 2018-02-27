@@ -27,7 +27,7 @@ mutable struct Thunk
                    persist::Bool=false,
                    cache::Bool=false,
                    cache_ref::Nullable{Any}=Nullable{Any}(),
-                   affinity=Nullable(),
+                   affinity=Nullable()
                   )
         thunk = new(f,xs,id,get_result,meta,persist, cache, cache_ref, affinity)
         _thunk_dict[id] = thunk
