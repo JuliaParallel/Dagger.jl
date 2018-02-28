@@ -99,9 +99,9 @@ mutable struct DArray{T,N,F} <: ArrayOp{T, N}
     subdomains::AbstractArray{ArrayDomain{N}, N}
     chunks::AbstractArray{Union{Chunk,Thunk}, N}
     concat::F
-    freed::Bool
+    freed::Threads.Atomic{UInt8}
     function DArray{T,N,F}(domain, subdomains, chunks, concat) where {T, N,F}
-        A = new(domain, subdomains, chunks, concat, false)
+        A = new(domain, subdomains, chunks, concat, Threads.Atomic{UInt8}(0))
         refcount_chunks(A.chunks)
         finalizer(A, free!)
         A
@@ -132,10 +132,8 @@ function free_chunks(chunks)
 end
 
 function free!(x::DArray)
-    if !x.freed
-        @schedule Dagger.free_chunks(x.chunks)
-        x.freed = true
-    end
+    freed = Bool(Threads.atomic_cas!(x.freed, UInt8(0), UInt8(1)))
+    !freed && @schedule Dagger.free_chunks(x.chunks)
     nothing
 end
 

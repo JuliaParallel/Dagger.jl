@@ -117,19 +117,10 @@ function savechunk(data, dir, f)
     Chunk(typeof(data), domain(data), FileRef(f, sz), true)
 end
 
-
 const refcount = Dict{MemPool.DRef, Int}()
-
-function addrefcount(r::DRef, x)
-    refcount[r] = getrefcount(r)+x
-end
-
-function getrefcount(r::DRef)
-    if haskey(refcount, r)
-        return refcount[r]
-    else
-        0
-    end
+const refcountlck = ReentrantLock()
+addrefcount(r::DRef, x) = lock(refcountlck) do
+    refcount[r] = get(refcount, r, 0) + x
 end
 
 Base.@deprecate_binding AbstractPart Union{Chunk, Thunk}

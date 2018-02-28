@@ -200,6 +200,9 @@ end
     @test length(aff) == 1
     @test aff[1][1] == Dagger.OSProc(myid())
     @test aff[1][2] == sizeof(Int)*10
+    @test Dagger.tochunk(x) === x
+    f = MemPool.FileRef("/tmp/d", 1)
+    @test isempty(Dagger.affinity(f))
 end
 
 @testset "show_plan" begin
