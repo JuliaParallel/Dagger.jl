@@ -53,6 +53,9 @@ end
     @test Distribute(Blocks(1,1), x) == x
     #test_dist(rand(100, 100))
     #test_dist(sprand(100, 100, 0.1))
+
+    x = distribute(rand(10), 2)
+    @test collect(distribute(x, 3)) == collect(x)
 end
 
 @testset "transpose" begin
@@ -189,4 +192,16 @@ end
     x = ones(10)
     y = compute(Distribute(Blocks(3), x))
     #@test map(x->length(collect(x)), compute(sort(y)).chunks) == [3,3,3,1]
+end
+
+@testset "affinity" begin
+    x = Dagger.tochunk([1:10;])
+    aff = Dagger.affinity(x)
+    @test length(aff) == 1
+    @test aff[1][1] == Dagger.OSProc(myid())
+    @test aff[1][2] == sizeof(Int)*10
+end
+
+@testset "show_plan" begin
+    @test !isempty(Dagger.show_plan(Dagger.Thunk(()->10)))
 end

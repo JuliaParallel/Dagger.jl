@@ -165,7 +165,7 @@ size(x::DArray) = size(domain(x))
 stage(ctx, c::DArray) = c
 
 function collect(ctx::Context, d::DArray; tree=false)
-    a = compute(ctx, d, persist=false)
+    a = compute(ctx, d)
     ps_input = chunks(a)
 
     if isempty(d.chunks)
@@ -342,8 +342,20 @@ function stage(ctx, d::Distribute)
         if d.domainchunks == domainchunks(x)
             return x # already properly distributed
         end
+        Nd = ndims(x)
+        T = eltype(d.data)
+        concat = x.concat
         cs = map(d.domainchunks) do idx
-            delayed(collect)(x[idx])
+            chunks = cached_stage(ctx, x[idx]).chunks
+            shape = size(chunks)
+            (delayed() do shape, parts...
+                if prod(shape) == 0
+                    return Array{T}(shape)
+                end
+                dimcatfuncs = [(x...) -> concat(i, x...) for i in 1:length(shape)]
+                ps = reshape(Any[parts...], shape)
+                collect(treereduce_nd(dimcatfuncs, ps))
+            end)(shape, chunks...)
         end
     else
         cs = map(c -> delayed(identity)(d.data[c]), d.domainchunks)

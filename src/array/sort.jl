@@ -117,12 +117,13 @@ function transpose_vecvec(xs)
     end
 end
 
+const use_shared_array = Ref(true)
 function _promote_array{T,S}(x::AbstractArray{T}, y::AbstractArray{S})
     Q = promote_type(T,S)
     samehost = Distributed.check_same_host(procs())
     ok = (isa(x, Array) || isa(x, SharedArray)) && (isa(y, Array) || isa(y, SharedArray))
-    if samehost && ok && isbits(Q)
-        return Array{Q}(length(x)+length(y)) #, pids=procs())
+    if use_shared_array[] && samehost && ok && isbits(Q)
+        return SharedArray{Q}(length(x)+length(y), pids=procs())
     else
         return similar(x, Q, length(x)+length(y))
     end
@@ -207,9 +208,11 @@ function dsort_chunks(cs, nchunks=length(cs), nsamples=2000;
     end
 
     cs = batchedsplitmerge(map((x,c) -> first(x) === nothing ? c : first(x), xs, cs), splitters, batchsize; merge=merge, by=by, sub=sub, order=order)
+    #=
     for (w, c) in zip(Iterators.cycle(affinities), cs)
         propagate_affinity!(c, Dagger.OSProc(w) => 1)
     end
+    =#
     cs
 end
 
@@ -241,6 +244,7 @@ function Base.sort(v::ArrayOp;
     nchunks = nchunks === nothing ? length(v1.chunks) : nchunks
     cs = dsort_chunks(v1.chunks, nchunks, nsamples,
                       order=ord, merge=(x,y)->merge_sorted(ord, x,y))
+    map(persist!, cs)
     t=delayed((xs...)->[xs...]; meta=true)(cs...)
     chunks = compute(t)
     dmn = ArrayDomain((1:sum(length(domain(c)) for c in chunks),))

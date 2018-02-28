@@ -2,7 +2,8 @@ export Thunk, delayed, delayedmap
 
 let counter=0
     global next_id
-    next_id() = counter+=1
+    const MAX_ID = (1 << 30)
+    next_id() = (counter >= MAX_ID) ? (counter = 1) : (counter += 1)
 end
 
 global _thunk_dict = Dict{Int, Any}()
@@ -26,7 +27,7 @@ mutable struct Thunk
                    persist::Bool=false,
                    cache::Bool=false,
                    cache_ref::Nullable{Any}=Nullable{Any}(),
-                   affinity=Nullable(),
+                   affinity=Nullable()
                   )
         thunk = new(f,xs,id,get_result,meta,persist, cache, cache_ref, affinity)
         _thunk_dict[id] = thunk
