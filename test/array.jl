@@ -208,3 +208,12 @@ end
 @testset "show_plan" begin
     @test !isempty(Dagger.show_plan(Dagger.Thunk(()->10)))
 end
+
+@testset "darray distributed refcount" begin
+    D2 = remotecall_fetch(2, compute(Distribute(Blocks(10, 20), rand(40,40)))) do D
+        D2 = D
+    end
+    @test size(collect(D2)) == (40,40)
+    gc()
+    @test size(collect(D2)) == (40,40)
+end
