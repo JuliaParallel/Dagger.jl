@@ -172,9 +172,9 @@ function collect(ctx::Context, d::DArray; tree=false)
 
     dimcatfuncs = [(x...) -> d.concat(i, x...) for i in 1:ndims(d)]
     if tree
-        collect(treereduce_nd(delayed.(dimcatfuncs), d.chunks))
+        collect(treereduce_nd(delayed.(dimcatfuncs), a.chunks))
     else
-        treereduce_nd(dimcatfuncs, asyncmap(collect, d.chunks))
+        treereduce_nd(dimcatfuncs, asyncmap(collect, a.chunks))
     end
 end
 
