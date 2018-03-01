@@ -119,9 +119,12 @@ end
 
 const refcount = Dict{MemPool.DRef, Int}()
 const refcountlck = ReentrantLock()
-addrefcount(r::DRef, x) = lock(refcountlck) do
+addrefcount(r::DRef, x) = remotecall_fetch(_addrefcount, r.owner, r, x)
+_addrefcount(r::DRef, x) = lock(refcountlck) do
     refcount[r] = get(refcount, r, 0) + x
 end
+
+
 
 Base.@deprecate_binding AbstractPart Union{Chunk, Thunk}
 Base.@deprecate_binding Part Chunk

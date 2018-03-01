@@ -1,4 +1,4 @@
-import Base: ==
+import Base: ==, serialize, deserialize
 using Compat
 
 ###### Array Domains ######
@@ -108,6 +108,18 @@ mutable struct DArray{T,N,F} <: ArrayOp{T, N}
     end
 end
 
+function serialize(io::AbstractSerializer, A::DArray)
+    @async refcount_chunks(A)
+    invoke(serialize, Tuple{AbstractSerializer,Any}, io, A)
+end
+
+function deserialize{T,N,F}(io::AbstractSerializer, DT::Type{DArray{T,N,F}})
+    A = invoke(deserialize, Tuple{AbstractSerializer,DataType}, io, DT)
+    finalizer(A, free!)
+    A
+end
+
+refcount_chunks(A::DArray) = refcount_chunks(A.chunks)
 function refcount_chunks(chunks)
     for c in chunks
         if c isa Chunk{<:Any, DRef}
