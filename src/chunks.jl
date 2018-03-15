@@ -71,14 +71,12 @@ end
 function collect(ctx::Context, ref::Union{DRef, FileRef})
     poolget(ref)
 end
-affinity(r::DRef) = [OSProc(r.owner) => r.size]
+affinity(r::DRef) = Pair{OSProc, UInt64}[OSProc(r.owner) => r.size]
 function affinity(r::FileRef)
     if haskey(MemPool.who_has_read, r.file)
-        return map(MemPool.who_has_read[r.file]) do dref
-            OSProc(dref.owner) => r.size
-        end
+        Pair{OSProc, UInt64}[OSProc(dref.owner) => r.size for dref in MemPool.who_has_read[r.file]]
     else
-        return []
+        return Pair{OSProc, UInt64}[]
     end
 end
 
