@@ -59,7 +59,7 @@ function unrelease(c::Chunk{T,DRef}) where T
         end
     end
 end
-unrelease(c::Chunk) = c
+unrelease(c::Chunk) = Nullable{Any}(c)
 
 function collect(ctx::Context, chunk::Chunk)
     # delegate fetching to handle by default.
@@ -74,11 +74,9 @@ end
 affinity(r::DRef) = [OSProc(r.owner) => r.size]
 function affinity(r::FileRef)
     if haskey(MemPool.who_has_read, r.file)
-        return map(MemPool.who_has_read[r.file]) do dref
-            OSProc(dref.owner) => r.size
-        end
+        Pair{OSProc, UInt64}[OSProc(dref.owner) => r.size for dref in MemPool.who_has_read[r.file]]
     else
-        return []
+        return OSProc[]
     end
 end
 

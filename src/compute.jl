@@ -115,11 +115,11 @@ end
 function pop_with_affinity!(ctx, tasks, proc, immediate_next)
     if immediate_next
         # fast path
-        if proc in first.(affinity(tasks[end]))
+        if proc in map(first, affinity(tasks[end]))
             return pop!(tasks)
         end
     end
-    parent_affinities = affinity.(tasks)
+    parent_affinities = map(affinity, tasks)
     for i=length(tasks):-1:1
         # TODO: use the size
         if proc in first.(parent_affinities[i])

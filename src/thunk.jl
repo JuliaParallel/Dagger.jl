@@ -18,7 +18,7 @@ mutable struct Thunk
     cache::Bool   # release the result giving the worker an opportunity to
                   # cache it
     cache_ref::Nullable
-    affinity::Nullable{Vector{Pair{Processor, Int}}}
+    affinity::Nullable{Vector{Pair{OSProc, Int}}}
     function Thunk(f, xs...;
                    id::Int=next_id(),
                    get_result::Bool=false,
@@ -43,7 +43,7 @@ function affinity(t::Thunk)
     if t.cache && !isnull(t.cache_ref)
         aff_vec = affinity(get(t.cache_ref))
     else
-        aff = Dict{Processor,Int}()
+        aff = Dict{OSProc,Int}()
         for inp in inputs(t)
            #if haskey(state.cache, inp)
            #    as = affinity(state.cache[inp])

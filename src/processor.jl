@@ -15,7 +15,7 @@ A context represents a set of processors to use
 for a papply operation.
 """
 mutable struct Context
-    procs::Array{Processor}
+    procs::Array{OSProc}
     log_sink::Any
     profile::Bool
 end
