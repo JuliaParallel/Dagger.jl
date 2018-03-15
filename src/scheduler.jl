@@ -76,32 +76,41 @@ function compute_dag(ctx, d::Thunk)
 end
 
 function pop_with_affinity!(ctx, tasks, proc, immediate_next)
+    # allow JIT specialization on Pairs
+    mapfirst(c) = first.(c)
+
     if immediate_next
         # fast path
-        if proc in first.(affinity(tasks[end]))
+        if proc in mapfirst(affinity(tasks[end]))
             return pop!(tasks)
         end
     end
-    parent_affinities = affinity.(tasks)
+
+    # TODO: use the size
+    parent_affinity_procs = Vector(length(tasks))
+    # parent_affinity_sizes = Vector(length(tasks))
     for i=length(tasks):-1:1
-        # TODO: use the size
-        if proc in first.(parent_affinities[i])
-            t = tasks[i]
+        t = tasks[i]
+        aff = affinity(t)
+        aff_procs = mapfirst(aff)
+        if proc in aff_procs
             deleteat!(tasks, i)
             return t
         end
+        parent_affinity_procs[i] = aff_procs
     end
     for i=length(tasks):-1:1
-        # use up tasks without affinitites
+        # use up tasks without affinities
         # let the procs with the respective affinities pick up
         # other tasks
-        if isempty(parent_affinities[i])
+        aff_procs = parent_affinity_procs[i]
+        if isempty(aff_procs)
             t = tasks[i]
             deleteat!(tasks, i)
             return t
         end
-        aff = first.(parent_affinities[i])
-        if all(!(p in aff) for p in procs(ctx)) # no proc is ever going to ask for it
+        if all(!(p in aff_procs) for p in procs(ctx))
+            # no proc is ever going to ask for it
             t = tasks[i]
             deleteat!(tasks, i)
             return t
