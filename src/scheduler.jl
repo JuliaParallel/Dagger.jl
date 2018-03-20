@@ -1,6 +1,6 @@
 module Sch
 
-import ..Dagger: Context, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, _thunk_dict, @dbg, @logmsg, timespan_start, timespan_end
+import ..Dagger: Context, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, _thunk_dict, @dbg, @logmsg, timespan_start, timespan_end, unrelease
 
 const OneToMany = Dict{Thunk, Set{Thunk}}
 struct ComputeState
