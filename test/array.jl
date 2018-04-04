@@ -217,3 +217,11 @@ end
     gc()
     @test size(collect(D2)) == (40,40)
 end
+
+@testset "sharedarray" begin
+    A = SharedArray{Int}((1024,))
+    B = SharedArray{Int}((1024,))
+    C = Dagger.merge_sorted(Base.Order.Forward, A, B)
+    @test length(C) === length(A) + length(B)
+    @test typeof(C) === SharedArray{Int,1}
+end
