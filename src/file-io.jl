@@ -41,7 +41,7 @@ end
 """
 special case distmem writing - write to disk on the process with the chunk.
 """
-function save(ctx, chunk::Chunk{X,DRef}, file_path::AbstractString) where X
+function save(ctx, chunk::Chunk{DRef}, file_path::AbstractString)
     pid = chunk.handle.where
 
     remotecall_fetch(pid, file_path, chunk.handle) do path, rref
@@ -94,7 +94,7 @@ function save(ctx, io::IO, chunk::DArray, file_path)
     # write each child
 end
 
-function save(ctx, chunk::Chunk{X, FileReader}, file_path::AbstractString) where X
+function save(ctx, chunk::Chunk{FileReader}, file_path::AbstractString)
    if abspath(file_path) == abspath(chunk.reader.file)
        chunk
    else
@@ -172,7 +172,7 @@ function save(ctx, io::IO, m::BitArray)
     save(ctx, io, convert(Array{Bool}, m))
 end
 
-function collect(ctx::Context, c::Chunk{X,FileReader{T}}) where {X,T<:Array}
+function collect(ctx::Context, c::Chunk{FileReader{T}}) where {T<:Array}
     h = c.handle
     io = open(h.file, "r+")
     seek(io, h.data_offset)
@@ -182,7 +182,7 @@ function collect(ctx::Context, c::Chunk{X,FileReader{T}}) where {X,T<:Array}
     arr
 end
 
-function collect(ctx::Context, c::Chunk{X, FileReader{T}}) where {X,T<:BitArray}
+function collect(ctx::Context, c::Chunk{FileReader{T}}) where {T<:BitArray}
     h = c.handle
     io = open(h.file, "r+")
     seek(io, h.data_offset)
@@ -210,7 +210,7 @@ function save(ctx, io::IO, m::SparseMatrixCSC{Tv,Ti}) where {Tv, Ti}
     m
 end
 
-function collect(ctx::Context, c::Chunk{X, FileReader{T}}) where {X, T<:SparseMatrixCSC}
+function collect(ctx::Context, c::Chunk{FileReader{T}}) where {T<:SparseMatrixCSC}
     h = c.handle
     io = open(h.file, "r+")
     seek(io, h.data_offset)
@@ -236,7 +236,7 @@ function collect(ctx::Context, c::Chunk{X, FileReader{T}}) where {X, T<:SparseMa
     SparseMatrixCSC(m, n, colptr, rowval, nnzval)
 end
 
-function getsub(ctx, c::Chunk{X,FileReader{T}}, d) where {X,T<:AbstractArray}
+function getsub(ctx, c::Chunk{FileReader{T}}, d) where {T<:AbstractArray}
     Chunk(collect(ctx, c)[d])
 end
 
