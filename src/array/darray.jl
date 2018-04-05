@@ -122,7 +122,7 @@ end
 refcount_chunks(A::DArray) = refcount_chunks(A.chunks)
 function refcount_chunks(chunks)
     for c in chunks
-        if c isa Chunk{DRef}
+        if c isa Chunk{<:Any, DRef}
             # increment refcount on the master node
             addrefcount(c.handle, 1)
         elseif c isa Thunk
@@ -133,7 +133,7 @@ end
 
 function free_chunks(chunks)
     @sync for c in chunks
-        if c isa Chunk{DRef}
+        if c isa Chunk{<:Any, DRef}
             # increment refcount on the master node
             cnt = addrefcount(c.handle, -1)
             cnt <= 0 && @async free!(c.handle)

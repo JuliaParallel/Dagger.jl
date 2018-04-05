@@ -33,8 +33,8 @@ domain(x::Any) = UnitDomain()
 """
 A chunk with some data
 """
-mutable struct Chunk{H}
-    chunktype::Type
+mutable struct Chunk{T, H}
+    chunktype::Type{T}
     domain
     handle::H
     persist::Bool
@@ -46,7 +46,7 @@ persist!(t::Chunk) = (t.persist=true; t)
 shouldpersist(p::Chunk) = t.persist
 affinity(c::Chunk) = affinity(c.handle)
 
-function unrelease(c::Chunk{DRef})
+function unrelease(c::Chunk{T,DRef}) where T
     # set spilltodisk = true if data is still around
     try
         destroyonevict(c.handle, false)
@@ -91,7 +91,7 @@ tochunk(x::Union{Chunk, Thunk}) = x
 
 # Check to see if the node is set to persist
 # if it is foce can override it
-function free!(s::Chunk{DRef}; force=true, cache=false)
+function free!(s::Chunk{X, DRef}; force=true, cache=false) where X
     if force || !s.persist
         if cache
             try
