@@ -120,9 +120,8 @@ end
 const use_shared_array = Ref(true)
 function _promote_array{T,S}(x::AbstractArray{T}, y::AbstractArray{S})
     Q = promote_type(T,S)
-    samehost = Distributed.check_same_host(procs())
     ok = (isa(x, Array) || isa(x, SharedArray)) && (isa(y, Array) || isa(y, SharedArray))
-    if use_shared_array[] && samehost && ok && isbits(Q)
+    if ok && isbits(Q) && use_shared_array[] && Distributed.check_same_host([workers()..., 1])
         return SharedArray{Q}(length(x)+length(y), pids=procs())
     else
         return similar(x, Q, length(x)+length(y))
