@@ -34,7 +34,7 @@ domain(x::Any) = UnitDomain()
 A chunk with some data
 """
 mutable struct Chunk{T, H}
-    chunktype::Type{T}
+    chunktype::Type
     domain
     handle::H
     persist::Bool
@@ -85,7 +85,7 @@ Create a chunk from a sequential object.
 """
 function tochunk(x; persist=false, cache=false)
     ref = poolset(x, destroyonevict=persist ? false : cache)
-    Chunk(typeof(x), domain(x), ref, persist)
+    Chunk{Any, typeof(ref)}(typeof(x), domain(x), ref, persist)
 end
 tochunk(x::Union{Chunk, Thunk}) = x
 
@@ -112,7 +112,8 @@ function savechunk(data, dir, f)
         serialize(io, MemPool.MMWrap(data))
         return position(io)
     end
-    Chunk(typeof(data), domain(data), FileRef(f, sz), true)
+    fr = FileRef(f, sz)
+    Chunk{Any, typeof(fr)}typeof(typeof(data), domain(data), fr, true)
 end
 
 const refcount = Dict{MemPool.DRef, Int}()

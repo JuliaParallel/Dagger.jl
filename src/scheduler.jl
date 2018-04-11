@@ -244,7 +244,7 @@ end
 _move(ctx, to_proc, x) = x
 _move(ctx, to_proc::OSProc, x::Union{Chunk, Thunk}) = collect(ctx, x)
 
-function do_task(ctx, proc, thunk_id, f, data, send_result, persist, cache)
+@noinline function do_task(ctx, proc, thunk_id, f, data, send_result, persist, cache)
     @dbg timespan_start(ctx, :comm, thunk_id, proc)
     time_cost = @elapsed fetched = map(x->_move(ctx, proc, x), data)
     @dbg timespan_end(ctx, :comm, thunk_id, proc)
@@ -261,7 +261,7 @@ function do_task(ctx, proc, thunk_id, f, data, send_result, persist, cache)
     result_meta
 end
 
-function async_apply(ctx, p::OSProc, thunk_id, f, data, chan, send_res, persist, cache)
+@noinline function async_apply(ctx, p::OSProc, thunk_id, f, data, chan, send_res, persist, cache)
     @schedule begin
         try
             put!(chan, Base.remotecall_fetch(do_task, p.pid, ctx, p, thunk_id, f, data, send_res, persist, cache))
