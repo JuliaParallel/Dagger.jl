@@ -113,7 +113,7 @@ function savechunk(data, dir, f)
         return position(io)
     end
     fr = FileRef(f, sz)
-    Chunk{Any, typeof(fr)}typeof(typeof(data), domain(data), fr, true)
+    Chunk{Any, typeof(fr)}(typeof(data), domain(data), fr, true)
 end
 
 const refcount = Dict{MemPool.DRef, Int}()
