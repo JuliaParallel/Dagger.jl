@@ -76,7 +76,7 @@ function affinity(r::FileRef)
     if haskey(MemPool.who_has_read, r.file)
         Pair{OSProc, UInt64}[OSProc(dref.owner) => r.size for dref in MemPool.who_has_read[r.file]]
     else
-        return Pair{OSProc, UInt64}[]
+        Pair{OSProc, UInt64}[OSProc(MemPool.get_worker_at(r.host)) => r.size]
     end
 end
 
