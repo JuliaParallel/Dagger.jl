@@ -113,8 +113,16 @@ function serialize(io::AbstractSerializer, A::DArray)
     invoke(serialize, Tuple{AbstractSerializer,Any}, io, A)
 end
 
-function deserialize{T,N,F}(io::AbstractSerializer, DT::Type{DArray{T,N,F}})
-    A = invoke(deserialize, Tuple{AbstractSerializer,DataType}, io, DT)
+function deserialize{T,N,F}(io::AbstractSerializer, dt::Type{DArray{T,N,F}})
+    nf = nfields(dt)
+    A = ccall(:jl_new_struct_uninit, Any, (Any,), dt)
+    Base.Serializer.deserialize_cycle(io, A)
+    for i in 1:nf
+        tag = Int32(read(io.io, UInt8)::UInt8)
+        if tag != Base.Serializer.UNDEFREF_TAG
+            ccall(:jl_set_nth_field, Void, (Any, Csize_t, Any), A, i-1, Base.Serializer.handle_deserialize(io, tag))
+        end
+    end
     finalizer(A, free!)
     A
 end
@@ -176,7 +184,6 @@ stage(ctx, c::DArray) = c
 
 function collect(ctx::Context, d::DArray; tree=false)
     a = compute(ctx, d)
-    ps_input = chunks(a)
 
     if isempty(d.chunks)
         return Array{eltype(d)}(size(d)...)

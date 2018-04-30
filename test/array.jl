@@ -223,5 +223,5 @@ end
     B = SharedArray{Int}((1024,))
     C = Dagger.merge_sorted(Base.Order.Forward, A, B)
     @test length(C) === length(A) + length(B)
-    @test typeof(C) === SharedArray{Int,1}
+    @test typeof(C) === (Dagger.use_shared_array[] ? SharedArray{Int,1} : Array{Int64,1})
 end
