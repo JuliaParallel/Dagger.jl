@@ -113,7 +113,7 @@ function serialize(io::AbstractSerializer, A::DArray)
     invoke(serialize, Tuple{AbstractSerializer,Any}, io, A)
 end
 
-function deserialize{T,N,F}(io::AbstractSerializer, dt::Type{DArray{T,N,F}})
+function deserialize(io::AbstractSerializer, dt::Type{DArray{T,N,F}}) where {T,N,F}
     nf = nfields(dt)
     A = ccall(:jl_new_struct_uninit, Any, (Any,), dt)
     Base.Serializer.deserialize_cycle(io, A)

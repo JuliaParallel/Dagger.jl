@@ -118,7 +118,7 @@ function transpose_vecvec(xs)
 end
 
 const use_shared_array = Ref(true)
-function _promote_array{T,S}(x::AbstractArray{T}, y::AbstractArray{S})
+function _promote_array(x::AbstractArray{T}, y::AbstractArray{S}) where {T,S}
     Q = promote_type(T,S)
     ok = (isa(x, Array) || isa(x, SharedArray)) && (isa(y, Array) || isa(y, SharedArray))
     if ok && isbits(Q) && use_shared_array[] && Distributed.check_same_host([workers()..., 1])
@@ -133,7 +133,7 @@ function merge_sorted(ord::Ordering, x::AbstractArray, y::AbstractArray)
     _merge_sorted(ord, z, x, y)
 end
 
-function _merge_sorted{T, S}(ord::Ordering, z::AbstractArray{T}, x::AbstractArray{T}, y::AbstractArray{S})
+function _merge_sorted(ord::Ordering, z::AbstractArray{T}, x::AbstractArray{T}, y::AbstractArray{S}) where {T, S}
     n = length(x) + length(y)
     i = 1; j = 1; k = 1
     len_x = length(x)
