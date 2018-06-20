@@ -1,12 +1,9 @@
 
 using MemPool
 
-export chunk, collect
-
 export domain, UnitDomain, project, alignfirst, ArrayDomain
 
-import Base: isempty, getindex, intersect,
-             ==, size, length, ndims
+import Base: isempty, getindex, intersect, ==, size, length, ndims
 
 """
     domain(x::T)

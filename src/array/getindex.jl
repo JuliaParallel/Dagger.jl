@@ -1,13 +1,10 @@
-export getindex_async
-
 struct GetIndex{T,N} <: ArrayOp{T,N}
     input::ArrayOp
     idx::Tuple
 end
 
-function GetIndex(input::ArrayOp, idx::Tuple)
+GetIndex(input::ArrayOp, idx::Tuple) =
     GetIndex{eltype(input), ndims(input)}(input, idx)
-end
 
 function stage(ctx, gidx::GetIndex)
     inp = cached_stage(ctx, gidx.input)
@@ -37,6 +34,5 @@ function stage(ctx, gidx::GetIndexScalar)
 end
 
 Base.getindex(c::ArrayOp, idx::ArrayDomain) = GetIndex(c, indexes(idx))
-Base.getindex(c::ArrayOp, idx...) = GetIndex(c, idx)
-Base.getindex(c::ArrayOp, idx::Integer...) =
-   compute(GetIndexScalar(c, idx))
+Base.getindex(c::ArrayOp, idx...)           = GetIndex(c, idx)
+Base.getindex(c::ArrayOp, idx::Integer...)  = compute(GetIndexScalar(c, idx))

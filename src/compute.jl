@@ -1,4 +1,4 @@
-export stage, cached_stage, compute, debug_compute, cached, free!, cleanup
+export stage, cached_stage, compute, debug_compute, free!, cleanup
 using Compat
 
 ###### Scheduler #######
