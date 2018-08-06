@@ -33,6 +33,13 @@ function Base.ctranspose(x::DomainBlocks{1})
     DomainBlocks((1, x.start[1]), ([1], x.cumlength[1]))
 end
 
+function Base.adjoint(x::DomainBlocks{2})
+    DomainBlocks(reverse(x.start), reverse(x.cumlength))
+end
+function Base.adjoint(x::DomainBlocks{1})
+    DomainBlocks((1, x.start[1]), ([1], x.cumlength[1]))
+end
+
 function (*)(x::DomainBlocks{2}, y::DomainBlocks{2})
     if x.cumlength[2] != y.cumlength[1]
         throw(DimensionMismatch("Block distributions being multiplied are not compatible"))

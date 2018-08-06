@@ -2,6 +2,7 @@ __precompile__()
 module Dagger
 
 using Compat
+using Distributed
 
 import Base.collect
 

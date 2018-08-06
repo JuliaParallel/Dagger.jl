@@ -1,5 +1,5 @@
 
-import Base: ctranspose, transpose, A_mul_Bt, At_mul_B, Ac_mul_B, At_mul_Bt, Ac_mul_Bc, A_mul_Bc
+import Base: ctranspose, transpose, A_mul_Bt, At_mul_B, Ac_mul_B, At_mul_Bt, Ac_mul_Bc, A_mul_Bc, adjoint
 
 struct Transpose{T,N} <: ArrayOp{T,N}
     f::Function
@@ -22,20 +22,20 @@ end
 ctranspose(x::ArrayOp) = Transpose(ctranspose, x)
 ctranspose(x::Union{Chunk, Thunk}) = Thunk(ctranspose, x)
 
-transpose(x::ArrayOp) = Transpose(transpose, x)
-transpose(x::Union{Chunk, Thunk}) = Thunk(transpose, x)
+adjoint(x::ArrayOp) = Transpose(adjoint, x)
+adjoint(x::Union{Chunk, Thunk}) = Thunk(adjoint, x)
 
-function ctranspose(x::ArrayDomain{2})
+function adjoint(x::ArrayDomain{2})
     d = indexes(x)
     ArrayDomain(d[2], d[1])
 end
-function ctranspose(x::ArrayDomain{1})
+function adjoint(x::ArrayDomain{1})
     d = indexes(x)
     ArrayDomain(1, d[1])
 end
 
 function _ctranspose(x::AbstractArray)
-    Any[x[j,i]' for i=1:size(x,2), j=1:size(x,1)]
+    Any[delayed(adjoint)(x[j,i]) for i=1:size(x,2), j=1:size(x,1)]
 end
 
 function stage(ctx, node::Transpose)

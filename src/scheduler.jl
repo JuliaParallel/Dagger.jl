@@ -1,5 +1,7 @@
 module Sch
 
+using Distributed
+
 import ..Dagger: Context, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, _thunk_dict, @dbg, @logmsg, timespan_start, timespan_end, unrelease
 
 const OneToMany = Dict{Thunk, Set{Thunk}}
@@ -122,13 +124,13 @@ end
 function fire_task!(ctx, thunk, proc, state, chan, node_order)
     @logmsg("W$(proc.pid) + $thunk ($(showloc(thunk.f, length(thunk.inputs)))) input:$(thunk.inputs) cache:$(thunk.cache) $(thunk.cache_ref)")
     push!(state.running, thunk)
-    if thunk.cache && !isnull(thunk.cache_ref)
+    if thunk.cache && thunk.cache_ref !== nothing
         # the result might be already cached
-        data = unrelease(get(thunk.cache_ref)) # ask worker to keep the data around
+        data = unrelease(thunk.cache_ref) # ask worker to keep the data around
                                           # till this compute cycle frees it
-        if !isnull(data)
-            @logmsg("cache hit: $(get(thunk.cache_ref))")
-            state.cache[thunk] = get(data)
+        if data !== nothing
+            @logmsg("cache hit: $(thunk.cache_ref)")
+            state.cache[thunk] = data
             immediate_next = finish_task!(state, thunk, node_order; free=false)
             if !isempty(state.ready)
                 thunk = pop_with_affinity!(ctx, state.ready, proc, immediate_next)
@@ -138,7 +140,7 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
             end
             return
         else
-            thunk.cache_ref = Nullable{Any}()
+            thunk.cache_ref = nothing
             @logmsg("cache miss: $(thunk.cache_ref) recomputing $(thunk)")
         end
     end
@@ -181,7 +183,7 @@ end
 
 function finish_task!(state, node, node_order; free=true)
     if istask(node) && node.cache
-        node.cache_ref = Nullable{Any}(state.cache[node])
+        node.cache_ref = state.cache[node]
     end
     immediate_next = false
     for dep in sort!(collect(state.dependents[node]), by=node_order)

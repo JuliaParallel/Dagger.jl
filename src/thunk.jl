@@ -18,16 +18,16 @@ mutable struct Thunk
     persist::Bool # don't `free!` result after computing
     cache::Bool   # release the result giving the worker an opportunity to
                   # cache it
-    cache_ref::Nullable
-    affinity::Nullable{Vector{Pair{OSProc, Int}}}
+    cache_ref::Any
+    affinity::Union{Nothing, Vector{Pair{OSProc, Int}}}
     function Thunk(f, xs...;
                    id::Int=next_id(),
                    get_result::Bool=false,
                    meta::Bool=false,
                    persist::Bool=false,
                    cache::Bool=false,
-                   cache_ref::Nullable{Any}=Nullable{Any}(),
-                   affinity=Nullable()
+                   cache_ref=nothing,
+                   affinity=nothing
                   )
         thunk = new(f,xs,id,get_result,meta,persist, cache, cache_ref, affinity)
         _thunk_dict[id] = thunk
@@ -36,13 +36,13 @@ mutable struct Thunk
 end
 
 function affinity(t::Thunk)
-    if !isnull(t.affinity)
+    if t.affinity !== nothing
         @logmsg("$t has (cached) affinity: $(get(t.affinity))")
-        return get(t.affinity)
+        return t.affinity
     end
 
-    if t.cache && !isnull(t.cache_ref)
-        aff_vec = affinity(get(t.cache_ref))
+    if t.cache && t.cache_ref !== nothing
+        aff_vec = affinity(t.cache_ref)
     else
         aff = Dict{OSProc,Int}()
         for inp in inputs(t)

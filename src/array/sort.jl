@@ -168,6 +168,9 @@ function splitter_levels(ord, splitters, nchunks, batchsize)
     i = 1
     for c in root
         j = findlast(x->lt(ord, x, c), splitters)
+        if j===nothing
+            j = length(splitters)
+        end
         push!(subsplits, splitters[i:j])
         i = j+2
     end
@@ -219,8 +222,8 @@ function propagate_affinity!(c, aff)
     if !isa(c, Thunk)
         return
     end
-    if !isnull(c.affinity)
-        push!(get(c.affinity), aff)
+    if c.affinity !== nothing
+        push!(c.affinity, aff)
     else
         c.affinity = [aff]
     end

@@ -20,7 +20,11 @@ function stage(ctx, gidx::GetIndex)
     view(inp, ArrayDomain(idxs))
 end
 
-size(x::GetIndex) = Base.index_shape(x.input, x.idx...)
+function size(x::GetIndex)
+    map(a -> a[2] isa Colon ?
+        size(x.input, a[1]) : length(a[2]),
+        enumerate(x.idx)) |> Tuple
+end
 
 struct GetIndexScalar <: Computation
     input::ArrayOp

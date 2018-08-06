@@ -47,10 +47,10 @@ function unrelease(c::Chunk{T,DRef}) where T
     # set spilltodisk = true if data is still around
     try
         destroyonevict(c.handle, false)
-        return Nullable{Any}(c)
+        return c
     catch err
         if isa(err, KeyError)
-            return Nullable{Any}()
+            return nothing
         else
             rethrow(err)
         end
