@@ -1,4 +1,5 @@
 import Base.Sort: Forward, Ordering, Algorithm, lt
+using Distributed
 
 using StatsBase
 
@@ -43,7 +44,7 @@ function batchedsplitmerge(chunks, splitters, batchsize, start_proc=1; merge=mer
     q, r = divrem(length(chunks), batchsize)
     b = [batchsize for _ in 1:q]
     r != 0 && push!(b, r)
-    batch_ranges = map(UnitRange, cumsum([1, b[1:end-1];]), cumsum(b))
+    batch_ranges = map(UnitRange, cumsum(vcat(1, b[1:end-1])), cumsum(b))
     batches = map(x->chunks[x], batch_ranges)
 
     # splitmerge each batch

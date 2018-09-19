@@ -1,5 +1,6 @@
-
-import Base: ctranspose, transpose, A_mul_Bt, At_mul_B, Ac_mul_B, At_mul_Bt, Ac_mul_Bc, A_mul_Bc, adjoint
+using LinearAlgebra
+import LinearAlgebra: transpose
+import Base: adjoint
 
 struct Transpose{T,N} <: ArrayOp{T,N}
     f::Function
@@ -19,8 +20,8 @@ function size(x::Transpose)
     end
 end
 
-ctranspose(x::ArrayOp) = Transpose(ctranspose, x)
-ctranspose(x::Union{Chunk, Thunk}) = Thunk(ctranspose, x)
+transpose(x::ArrayOp) = Transpose(transpose, x)
+transpose(x::Union{Chunk, Thunk}) = Thunk(transpose, x)
 
 adjoint(x::ArrayOp) = Transpose(adjoint, x)
 adjoint(x::Union{Chunk, Thunk}) = Thunk(adjoint, x)
@@ -274,10 +275,3 @@ Base.cat(idx::Int, x::ArrayOp, xs::ArrayOp...) =
 
 Base.hcat(xs::ArrayOp...) = cat(2, xs...)
 Base.vcat(xs::ArrayOp...) = cat(1, xs...)
-
-A_mul_Bt(x::ArrayOp, y::ArrayOp) = MatMul(x, y')
-At_mul_B(x::ArrayOp, y::ArrayOp) = MatMul(x', y)
-Ac_mul_B(x::ArrayOp, y::ArrayOp) = MatMul(x', y)
-At_mul_Bt(x::ArrayOp, y::ArrayOp) = MatMul(x', y')
-Ac_mul_Bc(x::ArrayOp, y::ArrayOp) = MatMul(x', y')
-A_mul_Bc(x::ArrayOp, y::ArrayOp) = MatMul(x, y')

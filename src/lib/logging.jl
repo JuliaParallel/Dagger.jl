@@ -6,7 +6,7 @@ const Timestamp = UInt64
 
 struct ProfilerResult
     samples::Vector{UInt64}
-    lineinfo::Associative
+    lineinfo::AbstractDict
 end
 
 """
@@ -61,7 +61,6 @@ end
 """
 Various means of writing an event to something.
 """
-
 struct NoOpLog end
 
 function write_event(::NoOpLog, event::Event)
@@ -110,7 +109,7 @@ end
 function raise_event(ctx, phase, category, id,tl, t, gc_num, prof, async)
     ev = Event(phase, category, id, tl, t, gc_num, prof)
     if async
-        @schedule write_event(ctx, ev)
+        @async write_event(ctx, ev)
     else
         write_event(ctx, ev)
     end

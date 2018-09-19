@@ -1,6 +1,6 @@
-import Base: reduce, map, mapreduce, reducedim
+import Base: reduce, map, mapreduce
 
-export reducebykey, reduce_async
+export reducebykey, reduce_async, reducedim
 
 #### Map
 struct Map{T,N} <: ArrayOp{T,N}
@@ -28,7 +28,8 @@ map(f, x::ArrayOp, xs::ArrayOp...) = Map(f, (x, xs...))
 
 #### Reduce
 
-import Base: reduce, sum, prod, mean
+import Base.reduce
+import Statistics: sum, prod, mean
 
 struct ReduceBlock <: Computation
     op::Function
@@ -106,14 +107,14 @@ function Reducedim(op, input, dims)
     Reducedim{T,ndims(input)}(op, input, dims)
 end
 
-Base.reducedim(f, x::ArrayOp, dims::Tuple) = Reducedim(f,x,dims)
-Base.reducedim(f, x::ArrayOp, dims::Int) = Reducedim(f,x,(dims,))
+reducedim(f, x::ArrayOp, dims::Tuple) = Reducedim(f,x,dims)
+reducedim(f, x::ArrayOp, dims::Int) = Reducedim(f,x,(dims,))
 
 function stage(ctx, r::Reducedim)
     inp = cached_stage(ctx, r.input)
     thunks = let op = r.op, dims=r.dims
         # do reducedim on each block
-        tmp = map(p->Thunk(b->reducedim(op,b,dims), p), chunks(inp))
+        tmp = map(p->Thunk(b->reduce(op,b,dims=dims), p), chunks(inp))
         # combine the results in tree fashion
         treereducedim(tmp, r.dims) do x,y
             Thunk(op, x,y)

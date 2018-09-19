@@ -264,7 +264,7 @@ _move(ctx, to_proc::OSProc, x::Union{Chunk, Thunk}) = collect(ctx, x)
 end
 
 @noinline function async_apply(ctx, p::OSProc, thunk_id, f, data, chan, send_res, persist, cache)
-    @schedule begin
+    @async begin
         try
             put!(chan, Base.remotecall_fetch(do_task, p.pid, ctx, p, thunk_id, f, data, send_res, persist, cache))
         catch ex

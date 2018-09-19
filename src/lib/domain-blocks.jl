@@ -1,4 +1,4 @@
-import Base: ndims, size, getindex, reducedim
+import Base: ndims, size, getindex
 
 struct DomainBlocks{N} <: AbstractArray{ArrayDomain{N}, N}
     start::NTuple{N, Int}
@@ -26,10 +26,10 @@ getindex(x::DomainBlocks, idx::Int...) = _getindex(x,idx)
 
 Base.IndexStyle(::Type{<:DomainBlocks}) = IndexCartesian()
 
-function Base.ctranspose(x::DomainBlocks{2})
+function transpose(x::DomainBlocks{2})
     DomainBlocks(reverse(x.start), reverse(x.cumlength))
 end
-function Base.ctranspose(x::DomainBlocks{1})
+function transpose(x::DomainBlocks{1})
     DomainBlocks((1, x.start[1]), ([1], x.cumlength[1]))
 end
 
@@ -67,7 +67,7 @@ function Base.cat(idx::Int, x::DomainBlocks, y::DomainBlocks)
     end
     output = Any[x.cumlength...]
     output[idx] = merge_cumsums(x.cumlength[idx], y.cumlength[idx])
-    DomainBlocks(x.start, (output...))
+    DomainBlocks(x.start, (output...,))
 end
 
 Base.hcat(xs::DomainBlocks...) = cat(2, xs...)

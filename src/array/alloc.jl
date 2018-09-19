@@ -1,4 +1,5 @@
 import Base: cat
+using SparseArrays
 export partition
 
 mutable struct AllocateArray{T,N} <: ArrayOp{T,N}
@@ -65,7 +66,7 @@ Base.zeros(p::Blocks, t::Type, dims::Integer...) = zeros(p, t, dims)
 Base.zeros(p::Blocks, dims::Integer...) = zeros(p, Float64, dims)
 Base.zeros(p::Blocks, dims::Tuple) = zeros(p, Float64, dims)
 
-function Base.sprand(p::Blocks, m::Integer, n::Integer, sparsity::Real)
+function sprand(p::Blocks, m::Integer, n::Integer, sparsity::Real)
     s = rand(UInt)
     f = function (idx, t,sz)
         sprand(MersenneTwister(s+idx), sz...,sparsity)
@@ -74,7 +75,7 @@ function Base.sprand(p::Blocks, m::Integer, n::Integer, sparsity::Real)
     AllocateArray(Float64, f, d, partition(p, d))
 end
 
-function Base.sprand(p::Blocks, n::Integer, sparsity::Real)
+function sprand(p::Blocks, n::Integer, sparsity::Real)
     s = rand(UInt)
     f = function (idx,t,sz)
         sprand(MersenneTwister(s+idx), sz...,sparsity)

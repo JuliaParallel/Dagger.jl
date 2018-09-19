@@ -23,7 +23,7 @@ struct BlockIO <: IO
         position(bio.s)+1
     end
 
-    function BlockIO(s::IO, r::UnitRange, match_ends::Union{Char,Void}=nothing)
+    function BlockIO(s::IO, r::UnitRange, match_ends::Union{Char,Nothing}=nothing)
         # TODO: use mark when available
         seekend(s)
         ep = position(s)
@@ -41,7 +41,7 @@ struct BlockIO <: IO
     end
 end
 
-BlockIO(bio::BlockIO, match_ends::Union{Char,Void}=nothing) = BlockIO(bio.s, bio.r, match_ends)
+BlockIO(bio::BlockIO, match_ends::Union{Char,Nothing}=nothing) = BlockIO(bio.s, bio.r, match_ends)
 
 close(bio::BlockIO) = close(bio.s)
 eof(bio::BlockIO) = (position(bio) >= bio.l)

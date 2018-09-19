@@ -4,25 +4,9 @@ import Base: exp, expm1, log, log10, log1p, sqrt, cbrt, exponent,
              sinh, cosh, tanh, coth, sech, csch,
              asin, acos, atan, acot, asec, acsc,
              asinh, acosh, atanh, acoth, asech, acsch, sinc, cosc,
-             +, -, %, (.*), (.+), (.-), (.%), (./), (.^),
-             $, &, (.!=), (.<), (.<=), (.==), (.>),
-             (.>=), (.\), (.//), (.>>), (.<<), *
+             +, -, %, &, *
 
 import Base: broadcast
-
-blockwise_unary = [:exp, :expm1, :log, :log10, :log1p, :sqrt, :cbrt, :exponent, :significand,
-         :(-),
-         :sin, :sinpi, :cos, :cospi, :tan, :sec, :cot, :csc,
-         :sinh, :cosh, :tanh, :coth, :sech, :csch,
-         :asin, :acos, :atan, :acot, :asec, :acsc,
-         :asinh, :acosh, :atanh, :acoth, :asech, :acsch, :sinc, :cosc]
-
-blockwise_binary = [:+, :-, :%,]
-
-broadcast_ops = [ :.*, :.+, :.-, :.%, :./, :.^,
-         :$, :&, :.!=, :.<, :.<=, :.==, :.>,
-         :.>=, :.\, :.//, :.>>, :.<<]
-
 import Base: Broadcast
 import Base.Broadcast: Broadcasted, BroadcastStyle, combine_eltypes
 

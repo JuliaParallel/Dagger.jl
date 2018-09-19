@@ -38,17 +38,17 @@ _intersect(r, ::Colon) = r
 """
 Utility function to divide the range `range` into `n` chunks
 """
-function split_range(range::Range{T}, n) where T
+function split_range(range::AbstractRange{T}, n) where T
     len = length(range)
 
     starts = len >= n ?
         round.(T, linspace(first(range), last(range)+1, n+1)) :
-        [[first(range):(last(range)+1);], zeros(T, n-len);]
+        vcat(collect(first(range):(last(range)+1)), zeros(T, n-len))
 
     map((x,y)->x:y, starts[1:end-1], starts[2:end] .- 1)
 end
 
-function split_range(r::Range{Char}, n)
+function split_range(r::AbstractRange{Char}, n)
     map((x) -> Char(first(x)):Char(last(x)), split_range(Int(first(r)):Int(last(r)), n))
 end
 
@@ -91,11 +91,11 @@ macro unimplemented(expr)
     sig = string(expr)
 
     vars = map(x->getvarname(x), args)
-    typs = Expr(:vect, map(x -> :(typeof($x)), vars)...)
+    typs = Expr(:vect, map(x -> :(typeof($x)), vars)...,)
 
 
-    :(function $(esc(fname))($(args...))
-        error(string("a method of ", $sig, " specialized to ", ($typs...), " is missing"))
+    :(function $(esc(fname))($(args...,))
+        error(string("a method of ", $sig, " specialized to ", ($typs...,), " is missing"))
     end)
 end
 
@@ -134,10 +134,10 @@ function treereducedim(op, xs::Array, dim::Int)
     if dim > length(size(xs))
         return xs
     end
-    ys = treereduce((x,y)->map(op, x,y), Any[begin
-        colons[dim] = [i]
+    ys = treereduce((x,y)->map(op, x,y), Any[(
+        colons[dim] = [i];
         view(xs, colons...)
-    end for i=1:l])
+    ) for i=1:l])
     reshape(ys[:], reduced_dims(xs, dim))
 end
 
@@ -147,10 +147,7 @@ end
 
 function allslices(xs, n)
     idx = Any[Colon() for i in 1:ndims(xs)]
-    [ begin
-        idx[n] = j
-        view(xs, idx...)
-            end for j in 1:size(xs, n)]
+    [(idx[n] = j; view(xs, idx...)) for j in 1:size(xs, n)]
 end
 
 function treereduce_nd(fs, xs)

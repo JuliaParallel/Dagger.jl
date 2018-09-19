@@ -1,4 +1,5 @@
 export save, load
+using SparseArrays
 
 mutable struct FileReader{T}
     file::AbstractString

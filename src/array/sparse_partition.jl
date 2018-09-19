@@ -1,4 +1,5 @@
 export partition_sparse
+using SparseArrays
 
 function partition_sparse(colptr, nnz, sz, nparts)
     nnz_per_chunk = nnz/nparts

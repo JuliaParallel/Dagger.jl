@@ -1,6 +1,7 @@
+using Distributed
 addprocs(2)
 
-using Base.Test
+using Test
 using Dagger
 
 include("domain.jl")

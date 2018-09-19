@@ -1,4 +1,6 @@
-import Base: ==, serialize, deserialize
+import Base: ==
+using Serialization
+import Serialization: serialize, deserialize
 using Compat
 
 ###### Array Domains ######
@@ -29,7 +31,7 @@ end
 
 function project(a::ArrayDomain, b::ArrayDomain)
     map(indexes(a), indexes(b)) do p, q
-        q - (first(p) - 1)
+        q .- (first(p) - 1)
     end |> ArrayDomain
 end
 
@@ -116,11 +118,11 @@ end
 function deserialize(io::AbstractSerializer, dt::Type{DArray{T,N,F}}) where {T,N,F}
     nf = nfields(dt)
     A = ccall(:jl_new_struct_uninit, Any, (Any,), dt)
-    Base.Serializer.deserialize_cycle(io, A)
+    Serialization.deserialize_cycle(io, A)
     for i in 1:nf
         tag = Int32(read(io.io, UInt8)::UInt8)
-        if tag != Base.Serializer.UNDEFREF_TAG
-            ccall(:jl_set_nth_field, Void, (Any, Csize_t, Any), A, i-1, Base.Serializer.handle_deserialize(io, tag))
+        if tag != Serialization.UNDEFREF_TAG
+            ccall(:jl_set_nth_field, Nothing, (Any, Csize_t, Any), A, i-1, Serialization.handle_deserialize(io, tag))
         end
     end
     finalizer(A, free!)
@@ -153,7 +155,7 @@ end
 
 function free!(x::DArray)
     freed = Bool(Threads.atomic_cas!(x.freed, UInt8(0), UInt8(1)))
-    !freed && @schedule Dagger.free_chunks(x.chunks)
+    !freed && @async Dagger.free_chunks(x.chunks)
     nothing
 end
 
@@ -241,7 +243,7 @@ function group_indices(cumlength, idx::Int)
     group_indices(cumlength, [idx])
 end
 
-function group_indices(cumlength, idxs::Range)
+function group_indices(cumlength, idxs::AbstractRange)
     f = searchsortedfirst(cumlength, first(idxs))
     l = searchsortedfirst(cumlength, last(idxs))
     out = cumlength[f:l]
@@ -255,7 +257,7 @@ function lookup_parts(ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomai
     groups = map(group_indices, subdmns.cumlength, indexes(d))
     sz = map(length, groups)
     pieces = Array{Union{Chunk,Thunk}}(sz)
-    for i = CartesianRange(sz)
+    for i = CartesianIndices(sz)
         idx_and_dmn = map(getindex, groups, i.I)
         idx = map(x->x[1], idx_and_dmn)
         dmn = ArrayDomain(map(x->x[2], idx_and_dmn))
