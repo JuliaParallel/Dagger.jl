@@ -1,6 +1,3 @@
-
-import Base: ctranspose, transpose, A_mul_Bt, At_mul_B, Ac_mul_B, At_mul_Bt, Ac_mul_Bc, A_mul_Bc
-
 struct Transpose{T,N} <: ArrayOp{T,N}
     f::Function
     input::ArrayOp
@@ -19,23 +16,23 @@ function size(x::Transpose)
     end
 end
 
-ctranspose(x::ArrayOp) = Transpose(ctranspose, x)
-ctranspose(x::Union{Chunk, Thunk}) = Thunk(ctranspose, x)
-
 transpose(x::ArrayOp) = Transpose(transpose, x)
 transpose(x::Union{Chunk, Thunk}) = Thunk(transpose, x)
 
-function ctranspose(x::ArrayDomain{2})
+adjoint(x::ArrayOp) = Transpose(adjoint, x)
+adjoint(x::Union{Chunk, Thunk}) = Thunk(adjoint, x)
+
+function adjoint(x::ArrayDomain{2})
     d = indexes(x)
     ArrayDomain(d[2], d[1])
 end
-function ctranspose(x::ArrayDomain{1})
+function adjoint(x::ArrayDomain{1})
     d = indexes(x)
     ArrayDomain(1, d[1])
 end
 
 function _ctranspose(x::AbstractArray)
-    Any[x[j,i]' for i=1:size(x,2), j=1:size(x,1)]
+    Any[delayed(adjoint)(x[j,i]) for i=1:size(x,2), j=1:size(x,1)]
 end
 
 function stage(ctx, node::Transpose)
@@ -100,7 +97,7 @@ end
 # we define our own matmat and matvec multiply
 # for computing the new domains and thunks.
 function _mul(a::Matrix, b::Matrix; T=eltype(a))
-    c = Array{T}((size(a,1), size(b,2)))
+    c = Array{T}(undef, (size(a,1), size(b,2)))
     n = size(a, 2)
     for i=1:size(a,1)
         for j=1:size(b, 2)
@@ -111,7 +108,7 @@ function _mul(a::Matrix, b::Matrix; T=eltype(a))
 end
 
 function _mul(a::Matrix, b::Vector; T=eltype(b))
-    c = Array{T}(size(a,1))
+    c = Array{T}(undef, size(a,1))
     n = size(a,2)
     for i=1:size(a,1)
         c[i] = treereduce(+, map(*, reshape(a[i, :], (n,)), b))
@@ -244,12 +241,12 @@ function size(c::Concat)
     (sz...,)
 end
 
-function cat(idx::Int, d::ArrayDomain, ds::ArrayDomain...)
+function Base.cat(d::ArrayDomain, ds::ArrayDomain...; dims::Int)
     h = (d)
     out_idxs = [x for x in indexes(h)]
-    len = sum(map(x->length(indexes(x)[idx]), (d, ds...)))
-    fst = first(out_idxs[idx])
-    out_idxs[idx] = fst:(fst+len-1)
+    len = sum(map(x->length(indexes(x)[dims]), (d, ds...)))
+    fst = first(out_idxs[dims])
+    out_idxs[dims] = fst:(fst+len-1)
     ArrayDomain(out_idxs)
 end
 
@@ -262,22 +259,14 @@ function stage(ctx, c::Concat)
         error("Inputs to cat do not have compatible dimensions.")
     end
 
-    dmn = cat(c.axis, dmns...)
-    dmnchunks = cumulative_domains(cat(c.axis, map(domainchunks, inp)...))
-    thunks = cat(c.axis, map(chunks, inp)...)
+    dmn = cat(dmns..., dims = c.axis)
+    dmnchunks = cumulative_domains(cat(map(domainchunks, inp)..., dims = c.axis))
+    thunks = cat(map(chunks, inp)..., dims = c.axis)
     T = promote_type(map(eltype, inp)...)
     DArray(T, dmn, dmnchunks, thunks)
 end
 
-Base.cat(idx::Int, x::ArrayOp, xs::ArrayOp...) =
-    Concat(idx, (x, xs...))
+Base.cat(x::ArrayOp, xs::ArrayOp...; dims::Int) = Concat(dims, (x, xs...))
 
-Base.hcat(xs::ArrayOp...) = cat(2, xs...)
-Base.vcat(xs::ArrayOp...) = cat(1, xs...)
-
-A_mul_Bt(x::ArrayOp, y::ArrayOp) = MatMul(x, y')
-At_mul_B(x::ArrayOp, y::ArrayOp) = MatMul(x', y)
-Ac_mul_B(x::ArrayOp, y::ArrayOp) = MatMul(x', y)
-At_mul_Bt(x::ArrayOp, y::ArrayOp) = MatMul(x', y')
-Ac_mul_Bc(x::ArrayOp, y::ArrayOp) = MatMul(x', y')
-A_mul_Bc(x::ArrayOp, y::ArrayOp) = MatMul(x, y')
+Base.hcat(xs::ArrayOp...) = cat(xs..., dims=2)
+Base.vcat(xs::ArrayOp...) = cat(xs..., dims=1)

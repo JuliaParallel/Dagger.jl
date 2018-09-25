@@ -1,5 +1,4 @@
 export stage, cached_stage, compute, debug_compute, free!, cleanup
-using Compat
 
 ###### Scheduler #######
 
@@ -53,7 +52,7 @@ end
 function get_type(s::String)
     T = Main
     for t in split(s, ".")
-        T = eval(T, Symbol(t))
+        T = Core.eval(T, Symbol(t))
     end
     T
 end
@@ -86,7 +85,7 @@ end
 function noffspring(n, dpents)
     if haskey(dpents, n)
         ds = dpents[n]
-        reduce(+, length(ds), noffspring(d, dpents) for d in ds)
+        reduce(+, (noffspring(d, dpents) for d in ds), init = length(ds))
     else
         0
     end

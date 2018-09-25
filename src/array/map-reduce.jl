@@ -1,4 +1,4 @@
-import Base: reduce, map, mapreduce, reducedim
+import Base: reduce, map, mapreduce
 
 export reducebykey, reduce_async
 
@@ -28,7 +28,8 @@ map(f, x::ArrayOp, xs::ArrayOp...) = Map(f, (x, xs...))
 
 #### Reduce
 
-import Base: reduce, sum, prod, mean
+import Base.reduce
+import Statistics: sum, prod, mean
 
 struct ReduceBlock <: Computation
     op::Function
@@ -52,10 +53,9 @@ reduceblock(f, g::Function, x::ArrayOp) =
 
 reduce_async(f, x::ArrayOp) = reduceblock_async(xs->reduce(f,xs), xs->reduce(f,xs), x)
 
-reduce(f, x::ArrayOp) = compute(reduce_async(f,x))
-
-sum(x::ArrayOp) = reduceblock(sum, sum, x)
-sum(x::ArrayOp, dim::Int) = reducedim(+, x, dim)
+sum(x::ArrayOp; dims::Union{Int,Nothing} = nothing) = _sum(x, dims)
+_sum(x, dims::Nothing) = reduceblock(sum, sum, x)
+_sum(x, dims::Int) = reduce(+, x; dims=dims)
 sum(f::Function, x::ArrayOp) = reduceblock(a->sum(f, a), sum, x)
 prod(x::ArrayOp) = reduceblock(prod, x)
 prod(f::Function, x::ArrayOp) = reduceblock(a->prod(f, a), prod, x)
@@ -89,16 +89,16 @@ struct Reducedim{T,N} <: ArrayOp{T,N}
     dims::Tuple
 end
 
-function reducedim(dom::ArrayDomain, dim::Int)
-    ArrayDomain(setindex(indexes(dom), dim, 1:1))
-end
-
-function reducedim(dom::ArrayDomain, dim::Tuple)
-    reduce(reducedim, dom, dim)
+function reduce(dom::ArrayDomain; dims)
+    if dims isa Int
+        ArrayDomain(setindex(indexes(dom), dims, 1:1))
+    else
+        reduce((a,d)->reduce(a,dims=d), dims, init=dom)
+    end
 end
 
 function size(x::Reducedim)
-    reducedim(ArrayDomain(map(x->1:x, size(x.input))), x.dims)
+    reduce(ArrayDomain(map(x->1:x, size(x.input))), dims=x.dims)
 end
 
 function Reducedim(op, input, dims)
@@ -106,14 +106,20 @@ function Reducedim(op, input, dims)
     Reducedim{T,ndims(input)}(op, input, dims)
 end
 
-Base.reducedim(f, x::ArrayOp, dims::Tuple) = Reducedim(f,x,dims)
-Base.reducedim(f, x::ArrayOp, dims::Int) = Reducedim(f,x,(dims,))
+function reduce(f, x::ArrayOp; dims = nothing)
+    if dims === nothing
+        return compute(reduce_async(f,x))
+    elseif dims isa Int
+        dims = (dims,)
+    end
+    Reducedim(f, x, dims::Tuple)
+end
 
 function stage(ctx, r::Reducedim)
     inp = cached_stage(ctx, r.input)
     thunks = let op = r.op, dims=r.dims
         # do reducedim on each block
-        tmp = map(p->Thunk(b->reducedim(op,b,dims), p), chunks(inp))
+        tmp = map(p->Thunk(b->reduce(op,b,dims=dims), p), chunks(inp))
         # combine the results in tree fashion
         treereducedim(tmp, r.dims) do x,y
             Thunk(op, x,y)
@@ -122,9 +128,9 @@ function stage(ctx, r::Reducedim)
     c = domainchunks(inp)
     colons = Any[Colon() for x in size(c)]
     nd=ndims(domain(inp))
-    colons[[Compat.Iterators.filter(d->d<=nd, r.dims)...]] = 1
+    colons[[Iterators.filter(d->d<=nd, r.dims)...]] .= 1
     dmn = c[colons...]
-    d = reducedim(domain(inp), r.dims)
-    ds = reducedim(domainchunks(inp), r.dims)
+    d = reduce(domain(inp), dims=r.dims)
+    ds = reduce(domainchunks(inp), dims=r.dims)
     DArray(eltype(inp), d, ds, thunks)
 end

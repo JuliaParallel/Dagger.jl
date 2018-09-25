@@ -1,4 +1,3 @@
-import Base.procs
 export OSProc, Context
 
 abstract type Processor end

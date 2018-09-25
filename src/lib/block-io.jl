@@ -23,7 +23,7 @@ struct BlockIO <: IO
         position(bio.s)+1
     end
 
-    function BlockIO(s::IO, r::UnitRange, match_ends::Union{Char,Void}=nothing)
+    function BlockIO(s::IO, r::UnitRange, match_ends::Union{Char,Nothing}=nothing)
         # TODO: use mark when available
         seekend(s)
         ep = position(s)
@@ -41,7 +41,7 @@ struct BlockIO <: IO
     end
 end
 
-BlockIO(bio::BlockIO, match_ends::Union{Char,Void}=nothing) = BlockIO(bio.s, bio.r, match_ends)
+BlockIO(bio::BlockIO, match_ends::Union{Char,Nothing}=nothing) = BlockIO(bio.s, bio.r, match_ends)
 
 close(bio::BlockIO) = close(bio.s)
 eof(bio::BlockIO) = (position(bio) >= bio.l)
@@ -57,7 +57,7 @@ write(bio::BlockIO, p::Ptr, nb::Int) = write(bio.s, p, nb)
 write(bio::BlockIO, x::UInt8) = write(bio, UInt8[x])
 write(bio::BlockIO, a::Array{T}, len) where {T} = write_sub(bio, a, 1, len)
 write(bio::BlockIO, a::Array{T}) where {T} = write(bio, a, length(a))
-write_sub(bio::BlockIO, a::Array{T}, offs, len) where {T} = isbits(T) ? write(bio, pointer(a,offs), len*sizeof(T)) : error("$T is not bits type")
+write_sub(bio::BlockIO, a::Array{T}, offs, len) where {T} = isbitstype(T) ? write(bio, pointer(a,offs), len*sizeof(T)) : error("$T is not bits type")
 
 nb_available(bio::BlockIO) = (bio.l - position(bio))
 position(bio::BlockIO) = position(bio.s) - bio.r.start + 1

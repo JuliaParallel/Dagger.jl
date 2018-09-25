@@ -1,4 +1,5 @@
 import Base.Sort: Forward, Ordering, Algorithm, lt
+using Distributed
 
 using StatsBase
 
@@ -43,7 +44,7 @@ function batchedsplitmerge(chunks, splitters, batchsize, start_proc=1; merge=mer
     q, r = divrem(length(chunks), batchsize)
     b = [batchsize for _ in 1:q]
     r != 0 && push!(b, r)
-    batch_ranges = map(UnitRange, cumsum([1, b[1:end-1];]), cumsum(b))
+    batch_ranges = map(UnitRange, cumsum(vcat(1, b[1:end-1])), cumsum(b))
     batches = map(x->chunks[x], batch_ranges)
 
     # splitmerge each batch
@@ -121,8 +122,8 @@ const use_shared_array = Ref(true)
 function _promote_array(x::AbstractArray{T}, y::AbstractArray{S}) where {T,S}
     Q = promote_type(T,S)
     ok = (isa(x, Array) || isa(x, SharedArray)) && (isa(y, Array) || isa(y, SharedArray))
-    if ok && isbits(Q) && use_shared_array[] && Distributed.check_same_host([workers()..., 1])
-        return SharedArray{Q}(length(x)+length(y), pids=procs())
+    if ok && isbitstype(Q) && use_shared_array[] && Distributed.check_same_host([workers()..., 1])
+        return SharedArray{Q}(length(x)+length(y), pids=Distributed.procs())
     else
         return similar(x, Q, length(x)+length(y))
     end
@@ -168,6 +169,9 @@ function splitter_levels(ord, splitters, nchunks, batchsize)
     i = 1
     for c in root
         j = findlast(x->lt(ord, x, c), splitters)
+        if j===nothing
+            j = length(splitters)
+        end
         push!(subsplits, splitters[i:j])
         i = j+2
     end
@@ -219,8 +223,8 @@ function propagate_affinity!(c, aff)
     if !isa(c, Thunk)
         return
     end
-    if !isnull(c.affinity)
-        push!(get(c.affinity), aff)
+    if c.affinity !== nothing
+        push!(c.affinity, aff)
     else
         c.affinity = [aff]
     end

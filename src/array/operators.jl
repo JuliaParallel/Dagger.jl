@@ -4,24 +4,11 @@ import Base: exp, expm1, log, log10, log1p, sqrt, cbrt, exponent,
              sinh, cosh, tanh, coth, sech, csch,
              asin, acos, atan, acot, asec, acsc,
              asinh, acosh, atanh, acoth, asech, acsch, sinc, cosc,
-             +, -, %, (.*), (.+), (.-), (.%), (./), (.^),
-             $, &, (.!=), (.<), (.<=), (.==), (.>),
-             (.>=), (.\), (.//), (.>>), (.<<), *
+             +, -, %, &, *
 
 import Base: broadcast
-
-blockwise_unary = [:exp, :expm1, :log, :log10, :log1p, :sqrt, :cbrt, :exponent, :significand,
-         :(-),
-         :sin, :sinpi, :cos, :cospi, :tan, :sec, :cot, :csc,
-         :sinh, :cosh, :tanh, :coth, :sech, :csch,
-         :asin, :acos, :atan, :acot, :asec, :acsc,
-         :asinh, :acosh, :atanh, :acoth, :asech, :acsch, :sinc, :cosc]
-
-blockwise_binary = [:+, :-, :%,]
-
-broadcast_ops = [ :.*, :.+, :.-, :.%, :./, :.^,
-         :$, :&, :.!=, :.<, :.<=, :.==, :.>,
-         :.>=, :.\, :.//, :.>>, :.<<]
+import Base: Broadcast
+import Base.Broadcast: Broadcasted, BroadcastStyle, combine_eltypes
 
 """
 This is a way of suggesting that stage should call
@@ -33,32 +20,13 @@ end
 
 size(p::PromotePartition) = size(domain(p.data))
 
-struct BCast{F, Ni, T, Nd} <: ArrayOp{T, Nd}
-    f::F
-    input::NTuple{Ni, ArrayOp}
+struct BCast{B, T, Nd} <: ArrayOp{T, Nd}
+    bcasted::B
 end
 
-function BCast(f::F, input::Tuple) where F
-    T = promote_type(map(eltype, input)...)
-    Nd = reduce(max, map(ndims, input))
-    BCast{F, length(input), T, Nd}(f, input)
-end
+BCast(b::Broadcasted) = BCast{typeof(b), combine_eltypes(b.f, b.args), length(axes(b))}(b)
 
-size(x::BCast) = size(x.input[1])
-
-for fn in blockwise_unary
-    @eval begin
-        $fn(x::ArrayOp) = BCast($fn, (x,))
-    end
-end
-
-### Appease ambiguity warnings on Julia 0.4
-for fn in [:+, :-]
-    @eval begin
-        $fn(x::Bool, y::ArrayOp{Bool}) = BCast(z -> $fn(x, z), (y,))
-        $fn(x::ArrayOp{Bool}, y::Bool) = BCast(z -> $fn(z, y), (x,))
-    end
-end
+size(x::BCast) = map(length, axes(x.bcasted))
 
 function stage_operands(ctx, ::BCast, xs::ArrayOp...)
     map(x->cached_stage(ctx, x), xs)
@@ -76,57 +44,55 @@ function stage_operands(ctx, ::BCast, x::PromotePartition, y::ArrayOp)
     cached_stage(ctx, x1), stg_y
 end
 
-for fn in blockwise_binary
-    @eval begin
-        $fn(x::ArrayOp, y::ArrayOp) = BCast($fn, (x, y))
-        $fn(x::AbstractArray, y::ArrayOp) = BCast($fn, (PromotePartition(x), y))
-        $fn(x::ArrayOp, y::AbstractArray) = BCast($fn, (x, PromotePartition(y)))
-        $fn(x::Number, y::ArrayOp) = BCast(z -> $fn(x, z), (y,))
-        $fn(x::ArrayOp, y::Number) = BCast(z -> $fn(z, y), (x,))
-    end
+struct DaggerBroadcastStyle <: BroadcastStyle end
+
+BroadcastStyle(::Type{<:ArrayOp}) = DaggerBroadcastStyle()
+BroadcastStyle(::DaggerBroadcastStyle, ::BroadcastStyle) = DaggerBroadcastStyle()
+BroadcastStyle(::BroadcastStyle, ::DaggerBroadcastStyle) = DaggerBroadcastStyle()
+
+function Base.copy(b::Broadcast.Broadcasted{<:DaggerBroadcastStyle})
+    BCast(b)
 end
 
-
-Base.broadcast(fn::Function, x::ArrayOp, xs::ArrayOp...) = BCast(fn, (x, xs...))
-Base.broadcast(fn::Function, x::AbstractArray, y::ArrayOp) = BCast(fn, (PromotePartition(x), y))
-Base.broadcast(fn::Function, x::ArrayOp, y::AbstractArray) = BCast(fn, (x, PromotePartition(y)))
-Base.broadcast(fn::Function, x::Number, y::ArrayOp) = BCast(z -> fn(x, z), (y,))
-Base.broadcast(fn::Function, x::ArrayOp, y::Number) = BCast(z -> fn(z, y), (x,))
-
-(*)(x::Number, y::ArrayOp) = BCast(z -> x*z, (y,))
-(*)(x::ArrayOp, y::Number) = BCast(z -> z*y, (x,))
-
-function curry_broadcast(f)
-    (xs...) -> broadcast(f, xs...)
-end
 function stage(ctx, node::BCast)
-    inputs = stage_operands(ctx, node, node.input...)
-    broadcast_f = curry_broadcast(node.f)
-    thunks,d, dchunks = if length(inputs) == 2
-        a, b = domain(inputs[1]), domain(inputs[2])
-        ac, bc = domainchunks(inputs[1]), domainchunks(inputs[2])
-        if length(a) == 1 && length(b) != 1
-            map(chunks(inputs[2])) do p
-                Thunk(broadcast_f, chunks(inputs[1])[1], p)
-            end, b, bc
-        elseif length(a) != 1 && length(b) == 1
-            map(chunks(inputs[1])) do p
-                Thunk(broadcast_f, p, chunks(inputs[2])[1])
-            end, a, ac
-        else
-            @assert domain(a) == domain(b)
-            map(map(chunks, inputs)...) do x, y
-                Thunk(broadcast_f, x, y)
-            end, a, ac
+    bc = Broadcast.flatten(node.bcasted)
+    args = bc.args
+    args1 = map(args) do x
+        x isa ArrayOp ? cached_stage(ctx, x) : x
+    end
+    ds = map(x->x isa DArray ? domainchunks(x) : nothing, args1)
+    sz = size(node)
+    dss = filter(x->x !== nothing, collect(ds))
+    cumlengths = ntuple(ndims(node)) do i
+        idx = findfirst(d -> i <= length(d.cumlength), dss)
+        if idx === nothing
+            [sz[i]] # just one slice
         end
-    else
-        # TODO: include broadcast semantics in this.
-        map(map(chunks, inputs)...) do ps...
-            Thunk(broadcast_f, ps...)
-        end, domain(inputs[1]), domainchunks(inputs[1])
+        dss[idx].cumlength[i]
     end
 
-    DArray(Any, d, dchunks, thunks)
+    args2 = map(args1) do arg
+        if arg isa AbstractArray
+            s = size(arg)
+            splits = map(enumerate(s)) do dim
+                i, n = dim
+                if n == 1
+                    return [1]
+                else
+                    cumlengths[i]
+                end
+            end |> Tuple
+            dmn = DomainBlocks(ntuple(_->1, length(s)), splits)
+            cached_stage(ctx, Distribute(dmn, arg)).chunks
+        else
+            arg
+        end
+    end
+    blcks = DomainBlocks(map(_->1, size(node)), cumlengths)
+
+    thunks = broadcast(delayed((args...)->broadcast(bc.f, args...); ),
+                       args2...)
+    DArray(eltype(node), domain(node), blcks, thunks)
 end
 
 export mappart, mapchunk

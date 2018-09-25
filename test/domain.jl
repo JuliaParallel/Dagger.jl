@@ -7,7 +7,7 @@ end
 @testset "ArrayDomain" begin
     @test domain(rand(10, 10)) == ArrayDomain((1:10, 1:10))
 
-    d1 = domain(Array{Int}(10, 10))
+    d1 = domain(Array{Int}(undef, (10, 10)))
     @test indexes(d1) == (1:10, 1:10)
     @test size(d1) == (10, 10,)
     @test length(d1) == 100

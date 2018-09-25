@@ -1,6 +1,8 @@
 module Sch
 
-import ..Dagger: Context, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, _thunk_dict, @dbg, @logmsg, timespan_start, timespan_end, unrelease
+using Distributed
+
+import ..Dagger: Context, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, _thunk_dict, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs
 
 const OneToMany = Dict{Thunk, Set{Thunk}}
 struct ComputeState
@@ -87,8 +89,8 @@ function pop_with_affinity!(ctx, tasks, proc, immediate_next)
     end
 
     # TODO: use the size
-    parent_affinity_procs = Vector(length(tasks))
-    # parent_affinity_sizes = Vector(length(tasks))
+    parent_affinity_procs = Vector(undef, length(tasks))
+    # parent_affinity_sizes = Vector(undef, length(tasks))
     for i=length(tasks):-1:1
         t = tasks[i]
         aff = affinity(t)
@@ -122,13 +124,13 @@ end
 function fire_task!(ctx, thunk, proc, state, chan, node_order)
     @logmsg("W$(proc.pid) + $thunk ($(showloc(thunk.f, length(thunk.inputs)))) input:$(thunk.inputs) cache:$(thunk.cache) $(thunk.cache_ref)")
     push!(state.running, thunk)
-    if thunk.cache && !isnull(thunk.cache_ref)
+    if thunk.cache && thunk.cache_ref !== nothing
         # the result might be already cached
-        data = unrelease(get(thunk.cache_ref)) # ask worker to keep the data around
+        data = unrelease(thunk.cache_ref) # ask worker to keep the data around
                                           # till this compute cycle frees it
-        if !isnull(data)
-            @logmsg("cache hit: $(get(thunk.cache_ref))")
-            state.cache[thunk] = get(data)
+        if data !== nothing
+            @logmsg("cache hit: $(thunk.cache_ref)")
+            state.cache[thunk] = data
             immediate_next = finish_task!(state, thunk, node_order; free=false)
             if !isempty(state.ready)
                 thunk = pop_with_affinity!(ctx, state.ready, proc, immediate_next)
@@ -138,7 +140,7 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
             end
             return
         else
-            thunk.cache_ref = Nullable{Any}()
+            thunk.cache_ref = nothing
             @logmsg("cache miss: $(thunk.cache_ref) recomputing $(thunk)")
         end
     end
@@ -181,7 +183,7 @@ end
 
 function finish_task!(state, node, node_order; free=true)
     if istask(node) && node.cache
-        node.cache_ref = Nullable{Any}(state.cache[node])
+        node.cache_ref = state.cache[node]
     end
     immediate_next = false
     for dep in sort!(collect(state.dependents[node]), by=node_order)
@@ -220,7 +222,7 @@ function start_state(deps::Dict, node_order)
                   Set{Thunk}(),
                   OneToMany(),
                   OneToMany(),
-                  Vector{Thunk}(0),
+                  Vector{Thunk}(undef, 0),
                   Dict{Thunk, Any}(),
                   Set{Thunk}()
                  )
@@ -262,9 +264,9 @@ _move(ctx, to_proc::OSProc, x::Union{Chunk, Thunk}) = collect(ctx, x)
 end
 
 @noinline function async_apply(ctx, p::OSProc, thunk_id, f, data, chan, send_res, persist, cache)
-    @schedule begin
+    @async begin
         try
-            put!(chan, Base.remotecall_fetch(do_task, p.pid, ctx, p, thunk_id, f, data, send_res, persist, cache))
+            put!(chan, remotecall_fetch(do_task, p.pid, ctx, p, thunk_id, f, data, send_res, persist, cache))
         catch ex
             bt = catch_backtrace()
             put!(chan, (p, thunk_id, CapturedException(ex, bt)))

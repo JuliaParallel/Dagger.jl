@@ -1,5 +1,6 @@
-import Base: ==, serialize, deserialize
-using Compat
+import Base: ==
+using Serialization
+import Serialization: serialize, deserialize
 
 ###### Array Domains ######
 
@@ -15,7 +16,7 @@ ArrayDomain(xs::Array) = ArrayDomain((xs...,))
 
 indexes(a::ArrayDomain) = a.indexes
 chunks(a::ArrayDomain{N}) where {N} = DomainBlocks(
-    ntuple(i->first(indexes(a)[i]), Val{N}), map(x->[length(x)], indexes(a)))
+    ntuple(i->first(indexes(a)[i]), Val(N)), map(x->[length(x)], indexes(a)))
 
 (==)(a::ArrayDomain, b::ArrayDomain) = indexes(a) == indexes(b)
 Base.getindex(arr::AbstractArray, d::ArrayDomain) = arr[indexes(d)...]
@@ -29,7 +30,7 @@ end
 
 function project(a::ArrayDomain, b::ArrayDomain)
     map(indexes(a), indexes(b)) do p, q
-        q - (first(p) - 1)
+        q .- (first(p) - 1)
     end |> ArrayDomain
 end
 
@@ -91,7 +92,7 @@ An N-dimensional distributed array of element type T.
 - `domain`: the whole ArrayDomain of the array
 - `subdomains`: a `DomainBlocks` of the same dimensions as the array
 - `chunks`: an array of chunks of dimension N
-- `concat`: a function of type `F`. `concat(d, x, y)` takes two chunks `x` and `y`
+- `concat`: a function of type `F`. `concat(x, y; dims=d)` takes two chunks `x` and `y`
             and concatenates them along dimension `d`. `cat` is used by default.
 """
 mutable struct DArray{T,N,F} <: ArrayOp{T, N}
@@ -103,7 +104,7 @@ mutable struct DArray{T,N,F} <: ArrayOp{T, N}
     function DArray{T,N,F}(domain, subdomains, chunks, concat) where {T, N,F}
         A = new(domain, subdomains, chunks, concat, Threads.Atomic{UInt8}(0))
         refcount_chunks(A.chunks)
-        finalizer(A, free!)
+        finalizer(free!, A)
         A
     end
 end
@@ -114,16 +115,16 @@ function serialize(io::AbstractSerializer, A::DArray)
 end
 
 function deserialize(io::AbstractSerializer, dt::Type{DArray{T,N,F}}) where {T,N,F}
-    nf = nfields(dt)
+    nf = fieldcount(dt)
     A = ccall(:jl_new_struct_uninit, Any, (Any,), dt)
-    Base.Serializer.deserialize_cycle(io, A)
+    Serialization.deserialize_cycle(io, A)
     for i in 1:nf
         tag = Int32(read(io.io, UInt8)::UInt8)
-        if tag != Base.Serializer.UNDEFREF_TAG
-            ccall(:jl_set_nth_field, Void, (Any, Csize_t, Any), A, i-1, Base.Serializer.handle_deserialize(io, tag))
+        if tag != Serialization.UNDEFREF_TAG
+            ccall(:jl_set_nth_field, Cvoid, (Any, Csize_t, Any), A, i-1, Serialization.handle_deserialize(io, tag))
         end
     end
-    finalizer(A, free!)
+    finalizer(free!, A)
     A
 end
 
@@ -153,7 +154,7 @@ end
 
 function free!(x::DArray)
     freed = Bool(Threads.atomic_cas!(x.freed, UInt8(0), UInt8(1)))
-    !freed && @schedule Dagger.free_chunks(x.chunks)
+    !freed && @async Dagger.free_chunks(x.chunks)
     nothing
 end
 
@@ -186,10 +187,10 @@ function collect(ctx::Context, d::DArray; tree=false)
     a = compute(ctx, d)
 
     if isempty(d.chunks)
-        return Array{eltype(d)}(size(d)...)
+        return Array{eltype(d)}(undef, size(d)...)
     end
 
-    dimcatfuncs = [(x...) -> d.concat(i, x...) for i in 1:ndims(d)]
+    dimcatfuncs = [(x...) -> d.concat(x..., dims=i) for i in 1:ndims(d)]
     if tree
         collect(treereduce_nd(delayed.(dimcatfuncs), a.chunks))
     else
@@ -201,8 +202,8 @@ function (==)(x::ArrayOp, y::ArrayOp)
     x === y || reduce((a,b)->a&&b, map(==, x, y))
 end
 
-function Base.hash(x::ArrayOp, i::UInt64)
-    7*object_id(x)-2
+function Base.hash(x::ArrayOp, i::UInt)
+    7*objectid(x)-2
 end
 
 function Base.isequal(x::ArrayOp, y::ArrayOp)
@@ -241,28 +242,28 @@ function group_indices(cumlength, idx::Int)
     group_indices(cumlength, [idx])
 end
 
-function group_indices(cumlength, idxs::Range)
+function group_indices(cumlength, idxs::AbstractRange)
     f = searchsortedfirst(cumlength, first(idxs))
     l = searchsortedfirst(cumlength, last(idxs))
     out = cumlength[f:l]
     isempty(out) && return []
     out[end] = last(idxs)
-    map(=>, f:l, map(UnitRange, vcat(first(idxs), out[1:end-1]+1), out))
+    map(=>, f:l, map(UnitRange, vcat(first(idxs), out[1:end-1].+1), out))
 end
 
 _cumsum(x::AbstractArray) = length(x) == 0 ? Int[] : cumsum(x)
 function lookup_parts(ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomain{N}) where N
     groups = map(group_indices, subdmns.cumlength, indexes(d))
     sz = map(length, groups)
-    pieces = Array{Union{Chunk,Thunk}}(sz)
-    for i = CartesianRange(sz)
+    pieces = Array{Union{Chunk,Thunk}}(undef, sz)
+    for i = CartesianIndices(sz)
         idx_and_dmn = map(getindex, groups, i.I)
         idx = map(x->x[1], idx_and_dmn)
         dmn = ArrayDomain(map(x->x[2], idx_and_dmn))
         pieces[i] = delayed(getindex)(ps[idx...], project(subdmns[idx...], dmn))
     end
     out_cumlength = map(g->_cumsum(map(x->length(x[2]), g)), groups)
-    out_dmn = DomainBlocks(ntuple(x->1,Val{N}), out_cumlength)
+    out_dmn = DomainBlocks(ntuple(x->1,Val(N)), out_cumlength)
     pieces, out_dmn
 end
 
@@ -367,9 +368,9 @@ function stage(ctx, d::Distribute)
             shape = size(chunks)
             (delayed() do shape, parts...
                 if prod(shape) == 0
-                    return Array{T}(shape)
+                    return Array{T}(undef, shape)
                 end
-                dimcatfuncs = [(x...) -> concat(i, x...) for i in 1:length(shape)]
+                dimcatfuncs = [(x...) -> concat(x..., dims=i) for i in 1:length(shape)]
                 ps = reshape(Any[parts...], shape)
                 collect(treereduce_nd(dimcatfuncs, ps))
             end)(shape, chunks...)
