@@ -50,9 +50,14 @@ function cleanup(ctx::Context)
 end
 
 function get_type(s::String)
-    T = Main
+    local T
     for t in split(s, ".")
-        T = Core.eval(T, Symbol(t))
+        t = Symbol(t)
+        if !@isdefined(T)
+            T = Base.require(@__MODULE__, t)
+        else
+            T = Core.eval(T, t)
+        end
     end
     T
 end
