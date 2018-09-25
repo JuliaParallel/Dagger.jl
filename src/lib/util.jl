@@ -125,7 +125,7 @@ if !isdefined(Base, :reduced_indices)
         Base.reduced_dims(size(x), dim)
     end
 else
-    reduced_dims(x, dim) = Base.reduced_indices(indices(x), dim)
+    reduced_dims(x, dim) = Base.reduced_indices(axes(x), dim)
 end
 
 function treereducedim(op, xs::Array, dim::Int)
@@ -142,7 +142,7 @@ function treereducedim(op, xs::Array, dim::Int)
 end
 
 function treereducedim(op, xs::Array, dim::Tuple)
-    reduce((prev, d) -> treereducedim(op, prev, d), xs, dim)
+    reduce((prev, d) -> treereducedim(op, prev, d), dim, init=xs)
 end
 
 function allslices(xs, n)
@@ -160,7 +160,7 @@ function treereduce_nd(fs, xs)
 end
 
 function setindex(x::NTuple{N}, idx, v) where N
-    map(ifelse, ntuple(x->idx === x, Val{N}), ntuple(x->v, Val{N}), x)
+    map(ifelse, ntuple(x->idx === x, Val(N)), ntuple(x->v, Val(N)), x)
 end
 
 function showloc(f, argcount)

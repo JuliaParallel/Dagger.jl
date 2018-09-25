@@ -99,7 +99,7 @@ cache_result!(t::Thunk) = (t.cache=true; t)
 # end
 
 # this gives a ~30x speedup in hashing
-Base.hash(x::Thunk, h::UInt) = hash(x.id, hash(h, 0x7ad3bac49089a05f))
+Base.hash(x::Thunk, h::UInt) = hash(x.id, hash(h, 0x7ad3bac49089a05f % UInt))
 Base.isequal(x::Thunk, y::Thunk) = x.id==y.id
 
 function Base.show(io::IO, p::Thunk)

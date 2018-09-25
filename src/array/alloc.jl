@@ -1,5 +1,6 @@
 import Base: cat
-using SparseArrays
+using SparseArrays, Random
+import SparseArrays: sprand
 export partition
 
 mutable struct AllocateArray{T,N} <: ArrayOp{T,N}

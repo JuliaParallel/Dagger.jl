@@ -1,4 +1,4 @@
-
+using Profile
 import Base.gc_num
 export summarize_events
 
@@ -115,7 +115,7 @@ function raise_event(ctx, phase, category, id,tl, t, gc_num, prof, async)
     end
 end
 
-empty_prof() = ProfilerResult(UInt[], Base.Profile.getdict(UInt[]))
+empty_prof() = ProfilerResult(UInt[], Profile.getdict(UInt[]))
 
 function timespan_start(ctx, category, id, tl, async=isasync(ctx.log_sink))
     isa(ctx.log_sink, NoOpLog) && return # don't go till raise
