@@ -2,7 +2,7 @@ module Sch
 
 using Distributed
 
-import ..Dagger: Context, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, _thunk_dict, @dbg, @logmsg, timespan_start, timespan_end, unrelease
+import ..Dagger: Context, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, _thunk_dict, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs
 
 const OneToMany = Dict{Thunk, Set{Thunk}}
 struct ComputeState
@@ -89,8 +89,8 @@ function pop_with_affinity!(ctx, tasks, proc, immediate_next)
     end
 
     # TODO: use the size
-    parent_affinity_procs = Vector(length(tasks))
-    # parent_affinity_sizes = Vector(length(tasks))
+    parent_affinity_procs = Vector(undef, length(tasks))
+    # parent_affinity_sizes = Vector(undef, length(tasks))
     for i=length(tasks):-1:1
         t = tasks[i]
         aff = affinity(t)
@@ -222,7 +222,7 @@ function start_state(deps::Dict, node_order)
                   Set{Thunk}(),
                   OneToMany(),
                   OneToMany(),
-                  Vector{Thunk}(0),
+                  Vector{Thunk}(undef, 0),
                   Dict{Thunk, Any}(),
                   Set{Thunk}()
                  )
@@ -266,7 +266,7 @@ end
 @noinline function async_apply(ctx, p::OSProc, thunk_id, f, data, chan, send_res, persist, cache)
     @async begin
         try
-            put!(chan, Base.remotecall_fetch(do_task, p.pid, ctx, p, thunk_id, f, data, send_res, persist, cache))
+            put!(chan, remotecall_fetch(do_task, p.pid, ctx, p, thunk_id, f, data, send_res, persist, cache))
         catch ex
             bt = catch_backtrace()
             put!(chan, (p, thunk_id, CapturedException(ex, bt)))

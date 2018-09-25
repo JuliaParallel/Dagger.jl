@@ -21,14 +21,14 @@ function stage(ctx, sidx::SetIndex)
         sidx.idx[i]
     end for i in 1:length(sidx.idx)]
 
-    ps = Array{Any}(size(chunks(inp)))
+    ps = Array{Any}(undef, size(chunks(inp)))
     ps[:] = chunks(inp)
     subdmns = domainchunks(inp)
     d = ArrayDomain(idxs)
 
     groups = map(group_indices, subdmns.cumlength, indexes(d))
     sz = map(length, groups)
-    pieces = Array{Union{Chunk, Thunk}}(sz)
+    pieces = Array{Union{Chunk, Thunk}}(undef, sz)
     for i = CartesianIndices(sz)
         idx_and_dmn = map(getindex, groups, i.I)
         idx = map(x->x[1], idx_and_dmn)
@@ -37,7 +37,7 @@ function stage(ctx, sidx::SetIndex)
         part_to_set = sidx.val
         ps[idx...] = Thunk(ps[idx...]) do p
             q = copy(p)
-            q[indexes(project(s, local_dmn))...] = part_to_set
+            q[indexes(project(s, local_dmn))...] .= part_to_set
             q
         end
     end

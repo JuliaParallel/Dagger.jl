@@ -1,4 +1,4 @@
-
+using Profile
 import Base.gc_num
 export summarize_events
 

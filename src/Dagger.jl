@@ -1,9 +1,11 @@
 module Dagger
 
-using Compat
-using Distributed
+using Distributed, SharedArrays
 
-import Base.collect
+import Base: collect, adjoint, reduce
+
+using LinearAlgebra
+import LinearAlgebra: transpose
 
 const PLUGINS = Dict{Symbol,Any}()
 const PLUGIN_CONFIGS = Dict{Symbol,String}(

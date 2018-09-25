@@ -54,31 +54,32 @@ function (*)(x::DomainBlocks{2}, y::DomainBlocks{1})
     DomainBlocks((x.start[1],), (x.cumlength[1],))
 end
 
-merge_cumsums(x,y) = vcat(x, y+x[end])
+merge_cumsums(x,y) = vcat(x, y .+ x[end])
 
-function Base.cat(idx::Int, x::DomainBlocks, y::DomainBlocks)
+function Base.cat(x::DomainBlocks, y::DomainBlocks; dims::Int)
     N = max(ndims(x), ndims(y))
     get_i(x,y, i) = length(x) <= i ? x[i] : length(y) <= i ? y[i] : Int[]
     for i=1:N
-        i == idx && continue
+        i == dims && continue
         if get_i(x,y,i) != get_i(y,x,i)
             throw(DimensionMismatch("Blocked domains being concatenated have different distributions along dimension $i"))
         end
     end
     output = Any[x.cumlength...]
-    output[idx] = merge_cumsums(x.cumlength[idx], y.cumlength[idx])
+    output[dims] = merge_cumsums(x.cumlength[dims], y.cumlength[dims])
     DomainBlocks(x.start, (output...,))
 end
 
-Base.hcat(xs::DomainBlocks...) = cat(2, xs...)
-Base.vcat(xs::DomainBlocks...) = cat(1, xs...)
+Base.hcat(xs::DomainBlocks...) = cat(xs..., dims=2)
+Base.vcat(xs::DomainBlocks...) = cat(xs..., dims=1)
 
-function reducedim(xs::DomainBlocks, dim::Int)
-    DomainBlocks(xs.start,
-        setindex(xs.cumlength,dim, [1]))
-end
-function reducedim(dom::DomainBlocks, dim::Tuple)
-    reduce(reducedim, dom, dim)
+function reduce(xs::DomainBlocks; dims)
+    if dims isa Int
+        DomainBlocks(xs.start,
+                     setindex(xs.cumlength, dims, [1]))
+    else
+        reduce((a,d)->reduce(a,dims=d), dims, init=xs)
+    end
 end
 
 cumulative_domains(x::DomainBlocks) = x

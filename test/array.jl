@@ -1,3 +1,4 @@
+using LinearAlgebra, SparseArrays, Random, SharedArrays
 import Dagger: chunks, DArray, domainchunks, treereduce_nd
 
 @testset "treereduce_nd" begin
@@ -154,19 +155,19 @@ end
 @testset "reducedim" begin
     x = rand(1:10, 10, 5)
     X = Distribute(Blocks(3,3), x)
-    @test reducedim(+, x, 1) == collect(reducedim(+, X, 1))
-    @test reducedim(+, x, 2) == collect(reducedim(+, X, 2))
+    @test reduce(+, x, dims=1) == collect(reduce(+, X, dims=1))
+    @test reduce(+, x, dims=2) == collect(reduce(+, X, dims=2))
 
     x = rand(1:10, 10, 5)
     X = Distribute(Blocks(10, 10), x)
-    @test sum(x, 1) == collect(sum(X, 1))
-    @test sum(x, 2) == collect(sum(X, 2))
+    @test sum(x, dims=1) == collect(sum(X, dims=1))
+    @test sum(x, dims=2) == collect(sum(X, dims=2))
 end
 
 @testset "setindex" begin
     x=rand(10,10)
     y=copy(x)
-    y[3:8, 2:7]=1.0
+    y[3:8, 2:7] .= 1.0
     X = Distribute(Blocks(3,3), x)
     @test collect(setindex(X,1.0, 3:8, 2:7)) == y
     @test collect(X) == x
@@ -219,7 +220,7 @@ end
         D2 = D
     end
     @test size(collect(D2)) == (40,40)
-    gc()
+    GC.gc()
     @test size(collect(D2)) == (40,40)
 end
 
