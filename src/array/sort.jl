@@ -31,24 +31,37 @@ function sortandsample_array(ord, xs, nsamples, presorted=false)
     (chunk, samples)
 end
 
-function batchedsplitmerge(chunks, splitters, batchsize, start_proc=1; merge=merge_sorted, by=identity, sub=getindex, order=default_ord)
+function batchedsplitmerge(chunks, splitters, batchsize, start_proc=1;
+                           merge=merge_sorted,
+                           by=identity,
+                           sub=getindex,
+                           order=default_ord)
+
     if batchsize >= length(chunks)
         if isempty(splitters)
+            # this means we need to combine all chunks
+            # into a single chunk.
             return [collect_merge(merge, chunks)]
         else
+            # split each chunk by the splitters, then merge
+            # corresponding portions from all the chunks
             return splitmerge(chunks, splitters, merge, by, sub, order)
         end
     end
 
     # group chunks into batches:
+    # e.g. if length(chunks) = 128, and batchsize = 8
+    # then we will have q = 16, r=0 and length(b) = 16
     q, r = divrem(length(chunks), batchsize)
     b = [batchsize for _ in 1:q]
-    r != 0 && push!(b, r)
+    r != 0 && push!(b, r) # add the remaining as a batch
+    # create ranges that can extract a batch each
     batch_ranges = map(UnitRange, cumsum(vcat(1, b[1:end-1])), cumsum(b))
-    batches = map(x->chunks[x], batch_ranges)
+    # make the batches of chunks
+    batches = map(range->chunks[range], batch_ranges)
 
     # splitmerge each batch
-    topsplits, lowersplits = splitter_levels(order, splitters, length(chunks), batchsize)
+    topsplits, lowersplits = recursive_splitters(order, splitters, length(chunks), batchsize)
 
     sorted_batches = map(batches) do b
         isempty(topsplits) ?
@@ -64,6 +77,7 @@ function batchedsplitmerge(chunks, splitters, batchsize, start_proc=1; merge=mer
         s = lowersplits[i]
         group = range_groups[i]
         if !isempty(s)
+            # recursively call batchedsplitmerge with a smaller batch
             cs = batchedsplitmerge(group, s, batchsize; merge = merge, by=by, sub=sub, order=order)
             append!(chunks, cs)
         else
@@ -103,12 +117,18 @@ function splitchunk(c, splitters, by, sub, ord)
         1:j
     end
 
-    between = map((hi, lo) -> delayed(c->sub(c, getbetween(by(c), hi, lo, ord)))(c),
+    between = map((hi, lo) -> delayed(x->sub(x, getbetween(by(x), hi, lo, ord)))(c),
                   splitters[1:end-1], splitters[2:end])
     hi = splitters[1]
     lo = splitters[end]
-    [delayed(c->sub(c, getlt(by(c), hi, ord)))(c);
-     between; delayed(c->sub(c, getgt(by(c), lo, ord)))(c)]
+
+    a = delayed(x->sub(x, getlt(by(x), hi, ord)))(c)
+    b = between
+    c = delayed(x->sub(x, getgt(by(x), lo, ord)))(c)
+    return vcat(a, b, c)
+
+   #[delayed(c->sub(c, getlt(by(c), hi, ord)))(c);
+   # between; delayed(c->sub(c, getgt(by(c), lo, ord)))(c)]
 end
 
 # transpose a vector of vectors
@@ -158,7 +178,32 @@ function _merge_sorted(ord::Ordering, z::AbstractArray{T}, x::AbstractArray{T}, 
     z
 end
 
-function splitter_levels(ord, splitters, nchunks, batchsize)
+"""
+split the splitters themselves into batches.
+
+Args:
+- `ord` -- `Sorting.Ordering` object
+- `splitters` -- the `nchunks-1` splitters
+- `batchsize` -- batch size
+
+Returns:
+A Tuple{Vector, Vector{Vector}} -- the coarse splitters which
+create `batchsize` splits, finer splitters within those batches
+which create a total of `nchunks` splits.
+
+```julia
+julia> Dagger.recursive_splitters(Dagger.default_ord,
+            [10,20,30,40,50,60], 5,3)
+([30], Any[[10, 20], [40, 50, 60]])
+```
+
+The first value `[30]` represents a coarse split that cuts the dataset
+from -Inf-30, and 30-Inf. Each part is further recursively split using
+the next set of splitters
+
+"""
+function recursive_splitters(ord, splitters, nchunks, batchsize)
+
     # final number of chunks
     noutchunks = length(splitters) + 1
     # chunks per batch
@@ -184,6 +229,25 @@ arrayorvcat(x,y) = [x,y]
 
 const default_ord = Base.Sort.ord(isless, identity, false, Forward)
 
+"""
+`dsort_chunks(cs, [nchunks, nsamples]; options...)`
+
+Sort contents of chunks (`cs`) and return a new set of chunks
+such that the chunks when concatenated return a sorted collection.
+Each chunk in turn is sorted.
+
+Args:
+- `nchunks` -- the number of chunks to produce, regardless of how many chunks were given as input
+- `nsamples` -- the number of elements to sample from each chunk to guess the splitters (`nchunks-1` splitters) each chunk will be delimited by the splitter.
+- `merge` -- a function to merge two sorted collections.
+- `sub` -- a function to get a subset of the collection takes (collection, range) (defaults to `getindex`)
+- `order` -- `Base.Sort.Ordering` to be used for sorting
+- `batchsize` -- number of chunks to split and merge at a time (e.g. if there are 128 input chunks and 128 output chunks, and batchsize is 8, then we first sort among batches of 8 chunks -- giving 16 batches. Then we sort among the first chunk of the first 8 batches (all elements less than the first splitter), then go on to the first 8 chunks of the second 8 batches, and so on...
+- `chunks_presorted` -- is each chunk in the input already sorted?
+- `sortandsample` -- a function to sort a chunk, then sample N elements to infer the splitters. It takes 3 arguments: (collection, N, presorted). presorted is a boolean which is true if the chunk is already sorted.
+Returns a tuple of `(chunk, samples)` where `chunk` is the `Dagger.Chunk` object. `chunk` can be nothing if no change to the initial array was made (e.g. it was already sorted)
+- `affinities` -- a list of processes where the output chunks should go. If the length is not equal to `nchunks` then affinities array is cycled through.
+"""
 function dsort_chunks(cs, nchunks=length(cs), nsamples=2000;
                       merge = merge_sorted,
                       by=identity,
@@ -196,27 +260,43 @@ function dsort_chunks(cs, nchunks=length(cs), nsamples=2000;
                       affinities=workers(),
                      )
     if splitters !== nothing
+        # this means splitters are given beforehand
         nsamples = 0 # no samples needed
     end
 
+    # first sort each chunk and sample nsamples elements from each chunk
     cs1 = map(c->delayed(sortandsample)(c, nsamples, chunks_presorted), cs)
+
+    batchsize = max(2, batchsize)
+    # collect the samples
     xs = collect(treereduce(delayed(vcat), cs1))
     if length(cs1) == 1
         xs = [xs]
     end
 
+    # get nchunks-1 splitters that equally split the samples into nchunks pieces
     if splitters === nothing
         samples = reduce((a,b)->merge_sorted(order, a, b), map(x->x[2], xs))
         splitters = getmedians(samples, nchunks-1)
     end
 
-    cs = batchedsplitmerge(map((x,c) -> first(x) === nothing ? c : first(x), xs, cs), splitters, batchsize; merge=merge, by=by, sub=sub, order=order)
+                       # if first(x) === nothing this means that
+                       # the chunk was already sorted, so just
+                       # use the input chunk as-is
+    cs2 = map((x,c) -> x === nothing ? c : x, map(first, xs), cs)
+
+    # main sort routine. At this point:
+    # we know the splitters we want to use,
+    # and each chunk is already sorted
+    batchedsplitmerge(cs2,
+                      splitters,
+                      batchsize;
+        merge=merge, by=by, sub=sub, order=order)
     #=
     for (w, c) in zip(Iterators.cycle(affinities), cs)
         propagate_affinity!(c, Dagger.OSProc(w) => 1)
     end
     =#
-    cs
 end
 
 function propagate_affinity!(c, aff)
@@ -249,6 +329,9 @@ function Base.sort(v::ArrayOp;
                       order=ord, merge=(x,y)->merge_sorted(ord, x,y))
     map(persist!, cs)
     t=delayed((xs...)->[xs...]; meta=true)(cs...)
+    # `compute(t)` only computes references to materialized version of `cs`
+    # we don't want the scheduler to think that `cs`s' job is done
+    # so we call persist! above
     chunks = compute(t)
     dmn = ArrayDomain((1:sum(length(domain(c)) for c in chunks),))
     DArray(eltype(v1), dmn, map(domain, chunks), chunks)
