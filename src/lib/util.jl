@@ -90,7 +90,7 @@ macro unimplemented(expr)
     args = expr.args[2:end]
     sig = string(expr)
 
-    vars = map(x->getvarname(x), args)
+    vars = map(getvarname, args)
     typs = Expr(:vect, map(x -> :(typeof($x)), vars)...,)
 
 
