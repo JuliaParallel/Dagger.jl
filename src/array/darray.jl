@@ -103,8 +103,8 @@ mutable struct DArray{T,N,F} <: ArrayOp{T, N}
     freed::Threads.Atomic{UInt8}
     function DArray{T,N,F}(domain, subdomains, chunks, concat) where {T, N,F}
         A = new(domain, subdomains, chunks, concat, Threads.Atomic{UInt8}(0))
-        refcount_chunks(A.chunks)
-        finalizer(free!, A)
+        #refcount_chunks(A.chunks)
+        #finalizer(free!, A)
         A
     end
 end

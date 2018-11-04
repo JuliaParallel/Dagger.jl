@@ -35,6 +35,11 @@ mutable struct Chunk{T, H}
     domain
     handle::H
     persist::Bool
+    function (::Type{Chunk{T,H}})(chunktype, domain, handle, persist) where {T,H}
+        c = new{T,H}(chunktype, domain, handle, persist)
+        finalizer(x -> @async(myid() == 1 && nworkers() > 1 && free!(x)), c)
+        c
+    end
 end
 
 domain(c::Chunk) = c.domain
@@ -112,14 +117,6 @@ function savechunk(data, dir, f)
     fr = FileRef(f, sz)
     Chunk{Any, typeof(fr)}(typeof(data), domain(data), fr, true)
 end
-
-const refcount = Dict{MemPool.DRef, Int}()
-const refcountlck = ReentrantLock()
-addrefcount(r::DRef, x) = remotecall_fetch(_addrefcount, r.owner, r, x)
-_addrefcount(r::DRef, x) = lock(refcountlck) do
-    refcount[r] = get(refcount, r, 0) + x
-end
-
 
 
 Base.@deprecate_binding AbstractPart Union{Chunk, Thunk}
