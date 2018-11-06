@@ -1,5 +1,6 @@
 
 using MemPool
+using Serialization
 
 export domain, UnitDomain, project, alignfirst, ArrayDomain
 
@@ -80,6 +81,20 @@ function affinity(r::FileRef)
     else
         Pair{OSProc, UInt64}[OSProc(w) => r.size for w in MemPool.get_workers_at(r.host)]
     end
+end
+
+function Serialization.deserialize(io::AbstractSerializer, dt::Type{Chunk{T,H}}) where {T,H}
+    nf = fieldcount(dt)
+    c = ccall(:jl_new_struct_uninit, Any, (Any,), dt)
+    Serialization.deserialize_cycle(io, c)
+    for i in 1:nf
+        tag = Int32(read(io.io, UInt8)::UInt8)
+        if tag != Serialization.UNDEFREF_TAG
+            ccall(:jl_set_nth_field, Cvoid, (Any, Csize_t, Any), c, i-1, Serialization.handle_deserialize(io, tag))
+        end
+    end
+    myid() == 1 && nworkers() > 1 && finalizer(x->@async(free!(x)), c)
+    c
 end
 
 """
