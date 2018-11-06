@@ -37,7 +37,7 @@ mutable struct Chunk{T, H}
     persist::Bool
     function (::Type{Chunk{T,H}})(chunktype, domain, handle, persist) where {T,H}
         c = new{T,H}(chunktype, domain, handle, persist)
-        finalizer(x -> @async(myid() == 1 && nworkers() > 1 && free!(x)), c)
+        finalizer(x -> @async(myid() == 1 && free!(x)), c)
         c
     end
 end
