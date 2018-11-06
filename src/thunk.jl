@@ -5,8 +5,6 @@ let counter=0
     next_id() = (counter >= (1 << 30)) ? (counter = 1) : (counter += 1)
 end
 
-global _thunk_dict = Dict{Int, Any}()
-
 # A thing to run
 mutable struct Thunk
     f::Function
@@ -28,9 +26,7 @@ mutable struct Thunk
                    cache_ref=nothing,
                    affinity=nothing
                   )
-        thunk = new(f,xs,id,get_result,meta,persist, cache, cache_ref, affinity)
-        _thunk_dict[id] = thunk
-        thunk
+        new(f,xs,id,get_result,meta,persist, cache, cache_ref, affinity)
     end
 end
 
