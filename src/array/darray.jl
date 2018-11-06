@@ -102,41 +102,7 @@ mutable struct DArray{T,N,F} <: ArrayOp{T, N}
     concat::F
     freed::Threads.Atomic{UInt8}
     function DArray{T,N,F}(domain, subdomains, chunks, concat) where {T, N,F}
-        A = new(domain, subdomains, chunks, concat, Threads.Atomic{UInt8}(0))
-        #refcount_chunks(A.chunks)
-        #finalizer(free!, A)
-        A
-    end
-end
-
-function serialize(io::AbstractSerializer, A::DArray)
-    @async refcount_chunks(A)
-    invoke(serialize, Tuple{AbstractSerializer,Any}, io, A)
-end
-
-function deserialize(io::AbstractSerializer, dt::Type{DArray{T,N,F}}) where {T,N,F}
-    nf = fieldcount(dt)
-    A = ccall(:jl_new_struct_uninit, Any, (Any,), dt)
-    Serialization.deserialize_cycle(io, A)
-    for i in 1:nf
-        tag = Int32(read(io.io, UInt8)::UInt8)
-        if tag != Serialization.UNDEFREF_TAG
-            ccall(:jl_set_nth_field, Cvoid, (Any, Csize_t, Any), A, i-1, Serialization.handle_deserialize(io, tag))
-        end
-    end
-    finalizer(free!, A)
-    A
-end
-
-refcount_chunks(A::DArray) = refcount_chunks(A.chunks)
-function refcount_chunks(chunks)
-    for c in chunks
-        if c isa Chunk{<:Any, DRef}
-            # increment refcount on the master node
-            addrefcount(c.handle, 1)
-        elseif c isa Thunk
-            refcount_chunks(c.inputs)
-        end
+        new(domain, subdomains, chunks, concat, Threads.Atomic{UInt8}(0))
     end
 end
 
@@ -144,8 +110,7 @@ function free_chunks(chunks)
     @sync for c in chunks
         if c isa Chunk{<:Any, DRef}
             # increment refcount on the master node
-            cnt = addrefcount(c.handle, -1)
-            cnt <= 0 && @async free!(c.handle)
+            @async free!(c.handle)
         elseif c isa Thunk
             free_chunks(c.inputs)
         end
