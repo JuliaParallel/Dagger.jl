@@ -2,7 +2,7 @@ module Sch
 
 using Distributed
 
-import ..Dagger: Context, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, _thunk_dict, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs
+import ..Dagger: Context, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs
 
 const OneToMany = Dict{Thunk, Set{Thunk}}
 struct ComputeState
@@ -13,6 +13,7 @@ struct ComputeState
     ready::Vector{Thunk}
     cache::Dict{Thunk, Any}
     running::Set{Thunk}
+    thunk_dict::Dict{Int, Any}
 end
 
 function cleanup(ctx)
@@ -60,7 +61,7 @@ function compute_dag(ctx, d::Thunk)
         if isa(res, CapturedException) || isa(res, RemoteException)
             rethrow(res)
         end
-        node = _thunk_dict[thunk_id]
+        node = state.thunk_dict[thunk_id]
         @logmsg("WORKER $(proc.pid) - $node ($(node.f)) input:$(node.inputs)")
         state.cache[node] = res
 
@@ -178,6 +179,7 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
     data = map(thunk.inputs) do x
         istask(x) ? state.cache[x] : x
     end
+    state.thunk_dict[thunk.id] = thunk
     async_apply(ctx, proc, thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist, thunk.cache)
 end
 
@@ -224,7 +226,8 @@ function start_state(deps::Dict, node_order)
                   OneToMany(),
                   Vector{Thunk}(undef, 0),
                   Dict{Thunk, Any}(),
-                  Set{Thunk}()
+                  Set{Thunk}(),
+                  Dict{Int, Thunk}()
                  )
 
     nodes = sort(collect(keys(deps)), by=node_order)
