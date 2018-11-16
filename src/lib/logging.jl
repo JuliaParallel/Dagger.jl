@@ -196,7 +196,7 @@ function next_state(state::State, event::Event{:finish})
     state
 end
 next_state(state::State, events::AbstractArray) =
-    foldl(next_state, state, events)
+    foldl(next_state, events, init=state)
 
 # util
 
