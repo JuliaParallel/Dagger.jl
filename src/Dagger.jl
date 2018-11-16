@@ -3,6 +3,7 @@ module Dagger
 using Distributed, SharedArrays
 
 import Base: collect, adjoint, reduce
+import Distributed: procs
 
 using LinearAlgebra
 import LinearAlgebra: transpose
