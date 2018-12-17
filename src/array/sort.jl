@@ -327,7 +327,7 @@ function Base.sort(v::ArrayOp;
     nchunks = nchunks === nothing ? length(v1.chunks) : nchunks
     cs = dsort_chunks(v1.chunks, nchunks, nsamples,
                       order=ord, merge=(x,y)->merge_sorted(ord, x,y))
-    map(persist!, cs)
+    foreach(persist!, cs)
     t=delayed((xs...)->[xs...]; meta=true)(cs...)
     # `compute(t)` only computes references to materialized version of `cs`
     # we don't want the scheduler to think that `cs`s' job is done
