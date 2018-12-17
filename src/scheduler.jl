@@ -59,7 +59,7 @@ function compute_dag(ctx, d::Thunk)
 
         proc, thunk_id, res = take!(chan)
         if isa(res, CapturedException) || isa(res, RemoteException)
-            rethrow(res)
+            throw(res)
         end
         node = state.thunk_dict[thunk_id]
         @logmsg("WORKER $(proc.pid) - $node ($(node.f)) input:$(node.inputs)")
