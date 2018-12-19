@@ -78,6 +78,8 @@ affinity(r::DRef) = Pair{OSProc, UInt64}[OSProc(r.owner) => r.size]
 function affinity(r::FileRef)
     if haskey(MemPool.who_has_read, r.file)
         Pair{OSProc, UInt64}[OSProc(dref.owner) => r.size for dref in MemPool.who_has_read[r.file]]
+    elseif r.force_pid[] !== nothing
+        Pair{OSProc, UInt64}[OSProc(r.force_pid[]) => 1]
     else
         Pair{OSProc, UInt64}[OSProc(w) => r.size for w in MemPool.get_workers_at(r.host)]
     end
