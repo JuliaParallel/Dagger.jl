@@ -38,6 +38,11 @@ mutable struct Chunk{T, H}
     persist::Bool
     function (::Type{Chunk{T,H}})(chunktype, domain, handle, persist) where {T,H}
         c = new{T,H}(chunktype, domain, handle, persist)
+
+        if !(handle isa DRef)
+            finalizer(x -> @async(myid() == 1 && free!(x)), c)
+        end
+
         c
     end
 end
@@ -93,6 +98,9 @@ function Serialization.deserialize(io::AbstractSerializer, dt::Type{Chunk{T,H}})
         if tag != Serialization.UNDEFREF_TAG
             ccall(:jl_set_nth_field, Cvoid, (Any, Csize_t, Any), c, i-1, Serialization.handle_deserialize(io, tag))
         end
+    end
+    if !(c isa Chunk{<:Any, DRef})
+        myid() == 1 && nworkers() > 1 && finalizer(x->@async(free!(x)), c)
     end
     c
 end
