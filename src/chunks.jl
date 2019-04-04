@@ -38,11 +38,9 @@ mutable struct Chunk{T, H}
     persist::Bool
     function (::Type{Chunk{T,H}})(chunktype, domain, handle, persist) where {T,H}
         c = new{T,H}(chunktype, domain, handle, persist)
-
         if !(handle isa DRef)
             finalizer(x -> @async(myid() == 1 && free!(x)), c)
         end
-
         c
     end
 end
