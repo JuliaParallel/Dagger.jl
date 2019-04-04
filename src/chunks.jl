@@ -38,7 +38,6 @@ mutable struct Chunk{T, H}
     persist::Bool
     function (::Type{Chunk{T,H}})(chunktype, domain, handle, persist) where {T,H}
         c = new{T,H}(chunktype, domain, handle, persist)
-        finalizer(x -> @async(myid() == 1 && free!(x)), c)
         c
     end
 end
@@ -95,7 +94,6 @@ function Serialization.deserialize(io::AbstractSerializer, dt::Type{Chunk{T,H}})
             ccall(:jl_set_nth_field, Cvoid, (Any, Csize_t, Any), c, i-1, Serialization.handle_deserialize(io, tag))
         end
     end
-    myid() == 1 && nworkers() > 1 && finalizer(x->@async(free!(x)), c)
     c
 end
 
