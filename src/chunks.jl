@@ -99,10 +99,6 @@ function Serialization.deserialize(io::AbstractSerializer, dt::Type{Chunk{T,H}})
     end
     if !(c isa Chunk{<:Any, DRef})
         myid() == 1 && nworkers() > 1 && finalizer(x->@async(free!(x)), c)
-    else
-        dref = c.handle
-        println("Finalizer for $(dref.id) added in deserialize")
-        finalizer(x->MemPool.finalize_ref(dref.owner, dref.id, x), dref.rc)
     end
     c
 end
