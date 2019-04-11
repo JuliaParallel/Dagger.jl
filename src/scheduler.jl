@@ -19,7 +19,7 @@ end
 function cleanup(ctx)
 end
 
-function compute_dag(ctx, d::Thunk)
+function compute_dag(ctx, d::Thunk; kwargs...)
     master = OSProc(myid())
     @dbg timespan_start(ctx, :scheduler_init, 0, master)
 
