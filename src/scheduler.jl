@@ -19,11 +19,16 @@ end
 function cleanup(ctx)
 end
 
-function compute_dag(ctx, d::Thunk; kwargs...)
+function compute_dag(ctx, d::Thunk; single=nothing)
     master = OSProc(myid())
     @dbg timespan_start(ctx, :scheduler_init, 0, master)
 
-    ps = procs(ctx)
+    if single !== nothing
+        @assert single in vcat(1, workers()) "Sch option 'single' must specify an active worker id"
+        ps = OSProc[OSProc(single)]
+    else
+        ps = procs(ctx)
+    end
     chan = Channel{Any}(32)
     deps = dependents(d)
     ord = order(d, noffspring(deps))

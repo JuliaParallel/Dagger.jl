@@ -3,9 +3,9 @@ export stage, cached_stage, compute, debug_compute, free!, cleanup
 ###### Scheduler #######
 
 compute(x; kwargs...) = compute(Context(), x; kwargs...)
-compute(ctx, c::Chunk; kwags...) = c
+compute(ctx, c::Chunk; kwargs...) = c
 
-collect(ctx::Context, c; kwargs...) = collect(ctx, compute(ctx, c); kwargs...)
+collect(ctx::Context, t::Thunk; kwargs...) = collect(ctx, compute(ctx, t; kwargs...); kwargs...)
 collect(d::Union{Chunk,Thunk}; kwargs...) = collect(Context(), d; kwargs...)
 
 abstract type Computation end

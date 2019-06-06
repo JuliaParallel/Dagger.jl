@@ -6,6 +6,7 @@ using Dagger
 
 include("domain.jl")
 include("array.jl")
+include("scheduler.jl")
 println(stderr, "tests done. cleaning up...")
 Dagger.cleanup()
 #include("cache.jl")

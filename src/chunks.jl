@@ -64,14 +64,14 @@ function unrelease(c::Chunk{T,DRef}) where T
 end
 unrelease(c::Chunk) = c
 
-function collect(ctx::Context, chunk::Chunk)
+function collect(ctx::Context, chunk::Chunk; kwargs...)
     # delegate fetching to handle by default.
     collect(ctx, chunk.handle)
 end
 
 
 ### ChunkIO
-function collect(ctx::Context, ref::Union{DRef, FileRef})
+function collect(ctx::Context, ref::Union{DRef, FileRef}; kwargs...)
     poolget(ref)
 end
 affinity(r::DRef) = Pair{OSProc, UInt64}[OSProc(r.owner) => r.size]
