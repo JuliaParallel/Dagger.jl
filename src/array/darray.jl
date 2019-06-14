@@ -66,13 +66,13 @@ domain(x::AbstractArray) = ArrayDomain([1:l for l in size(x)])
 abstract type ArrayOp{T, N} <: AbstractArray{T, N} end
 Base.IndexStyle(::Type{<:ArrayOp}) = IndexCartesian()
 
-compute(ctx, x::ArrayOp) =
-    compute(ctx, cached_stage(ctx, x)::DArray)
+compute(ctx, x::ArrayOp; options=nothing) =
+    compute(ctx, cached_stage(ctx, x)::DArray; options=options)
 
-collect(ctx::Context, x::ArrayOp) =
-    collect(ctx, compute(ctx, x))
+collect(ctx::Context, x::ArrayOp; options=nothing) =
+    collect(ctx, compute(ctx, x); options=options)
 
-collect(x::ArrayOp) = collect(Context(), x)
+collect(x::ArrayOp; options=nothing) = collect(Context(), x; options=options)
 
 function Base.show(io::IO, ::MIME"text/plain", x::ArrayOp)
     write(io, string(typeof(x)))
@@ -148,8 +148,8 @@ domainchunks(d::DArray) = d.subdomains
 size(x::DArray) = size(domain(x))
 stage(ctx, c::DArray) = c
 
-function collect(ctx::Context, d::DArray; tree=false)
-    a = compute(ctx, d)
+function collect(ctx::Context, d::DArray; tree=false, options=nothing)
+    a = compute(ctx, d; options=options)
 
     if isempty(d.chunks)
         return Array{eltype(d)}(undef, size(d)...)
@@ -237,10 +237,10 @@ end
 A DArray object may contain a thunk in it, in which case
 we first turn it into a Thunk object and then compute it.
 """
-function compute(ctx, x::DArray; persist=true)
+function compute(ctx, x::DArray; persist=true, options=nothing)
     thunk = thunkize(ctx, x, persist=persist)
     if isa(thunk, Thunk)
-        compute(ctx, thunk)
+        compute(ctx, thunk; options=options)
     else
         x
     end

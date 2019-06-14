@@ -1,6 +1,8 @@
 
 #### test set 2 begin
 
+import Dagger.Sch: ComputeOptions
+
 function inc(x)
     x+1
 end
@@ -56,7 +58,7 @@ end
         b = delayed(checkwid)(2)
         c = delayed(checkwid)(a,b)
 
-        @test collect(Context(), c; single=2) == 1
+        @test collect(Context(), c; options=ComputeOptions(2)) == 1
     end
 end
 

@@ -2,38 +2,42 @@ export stage, cached_stage, compute, debug_compute, free!, cleanup
 
 ###### Scheduler #######
 
-compute(x; kwargs...) = compute(Context(), x; kwargs...)
-compute(ctx, c::Chunk; kwargs...) = c
+compute(x; options=nothing) = compute(Context(), x; options=options)
+compute(ctx, c::Chunk; options=nothing) = c
 
-collect(ctx::Context, t::Thunk; kwargs...) = collect(ctx, compute(ctx, t; kwargs...); kwargs...)
-collect(d::Union{Chunk,Thunk}; kwargs...) = collect(Context(), d; kwargs...)
+collect(ctx::Context, t::Thunk; options=nothing) =
+    collect(ctx, compute(ctx, t; options=options); options=options)
+collect(d::Union{Chunk,Thunk}; options=nothing) =
+    collect(Context(), d; options=options)
 
 abstract type Computation end
 
-compute(ctx, c::Computation; kwargs...) = compute(ctx, stage(ctx, c); kwargs...)
-collect(c::Computation; kwargs...) = collect(Context(), c; kwargs...)
+compute(ctx, c::Computation; options=nothing) =
+    compute(ctx, stage(ctx, c); options=options)
+collect(c::Computation; options=nothing) =
+    collect(Context(), c; options=options)
 
 """
 Compute a Thunk - creates the DAG, assigns ranks to nodes for tie breaking and
 runs the scheduler with the specified options.
 """
-function compute(ctx, d::Thunk; kwargs...)
+function compute(ctx, d::Thunk; options=nothing)
     if !(:scheduler in keys(PLUGINS))
         PLUGINS[:scheduler] = get_type(PLUGIN_CONFIGS[:scheduler])
     end
     scheduler = PLUGINS[:scheduler]
-    (scheduler).compute_dag(ctx, d; kwargs...)
+    (scheduler).compute_dag(ctx, d; options=options)
 end
 
-function debug_compute(ctx::Context, args...; profile=false, kwargs...)
-    @time res = compute(ctx, args...; kwargs...)
+function debug_compute(ctx::Context, args...; profile=false, options=nothing)
+    @time res = compute(ctx, args...; options=options)
     get_logs!(ctx.log_sink), res
 end
 
-function debug_compute(arg; profile=false, kwargs...)
+function debug_compute(arg; profile=false, options=nothing)
     ctx = Context()
     dbgctx = Context(procs(ctx), LocalEventLog(), profile)
-    debug_compute(dbgctx, arg; kwargs...)
+    debug_compute(dbgctx, arg; options=options)
 end
 
 Base.@deprecate gather(ctx, x) collect(ctx, x)
