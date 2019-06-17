@@ -1,11 +1,20 @@
 
 #### test set 2 begin
 
+import Dagger.Sch: ComputeOptions
+
 function inc(x)
     x+1
 end
+@everywhere begin
+function checkwid(x...)
+    @assert myid() == 2
+    return 1
+end
+end
 
 @testset "Scheduler" begin
+    #=
     @testset "order" begin
         @par begin
             a = 1
@@ -42,6 +51,14 @@ end
         @test order([d], noffspring(deps)) == Dict(d=>1, c=>3, b=>2, a=>4)
 
         @test compute(Context(), d) == 4
+    end
+    =#
+    @testset "single worker" begin
+        a = delayed(checkwid)(1)
+        b = delayed(checkwid)(2)
+        c = delayed(checkwid)(a,b)
+
+        @test collect(Context(), c; options=ComputeOptions(2)) == 1
     end
 end
 

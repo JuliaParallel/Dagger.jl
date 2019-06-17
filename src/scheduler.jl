@@ -16,14 +16,27 @@ struct ComputeState
     thunk_dict::Dict{Int, Any}
 end
 
+struct ComputeOptions
+    single::Int
+end
+ComputeOptions() = ComputeOptions(0)
+
 function cleanup(ctx)
 end
 
-function compute_dag(ctx, d::Thunk)
+function compute_dag(ctx, d::Thunk; options=ComputeOptions())
+    if options === nothing
+        options = ComputeOptions()
+    end
     master = OSProc(myid())
     @dbg timespan_start(ctx, :scheduler_init, 0, master)
 
-    ps = procs(ctx)
+    if options.single !== 0
+        @assert options.single in vcat(1, workers()) "Sch option 'single' must specify an active worker id"
+        ps = OSProc[OSProc(options.single)]
+    else
+        ps = procs(ctx)
+    end
     chan = Channel{Any}(32)
     deps = dependents(d)
     ord = order(d, noffspring(deps))

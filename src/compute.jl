@@ -2,38 +2,42 @@ export stage, cached_stage, compute, debug_compute, free!, cleanup
 
 ###### Scheduler #######
 
-compute(x) = compute(Context(), x)
-compute(ctx, c::Chunk) = c
+compute(x; options=nothing) = compute(Context(), x; options=options)
+compute(ctx, c::Chunk; options=nothing) = c
 
-collect(ctx::Context, c) = collect(ctx, compute(ctx, c))
-collect(d::Union{Chunk,Thunk}) = collect(Context(), d)
+collect(ctx::Context, t::Thunk; options=nothing) =
+    collect(ctx, compute(ctx, t; options=options); options=options)
+collect(d::Union{Chunk,Thunk}; options=nothing) =
+    collect(Context(), d; options=options)
 
 abstract type Computation end
 
-compute(ctx, c::Computation) = compute(ctx, stage(ctx, c))
-collect(c::Computation) = collect(Context(), c)
+compute(ctx, c::Computation; options=nothing) =
+    compute(ctx, stage(ctx, c); options=options)
+collect(c::Computation; options=nothing) =
+    collect(Context(), c; options=options)
 
 """
-Compute a Thunk - creates the DAG, assigns ranks to
-nodes for tie breaking and runs the scheduler.
+Compute a Thunk - creates the DAG, assigns ranks to nodes for tie breaking and
+runs the scheduler with the specified options.
 """
-function compute(ctx, d::Thunk)
+function compute(ctx, d::Thunk; options=nothing)
     if !(:scheduler in keys(PLUGINS))
         PLUGINS[:scheduler] = get_type(PLUGIN_CONFIGS[:scheduler])
     end
     scheduler = PLUGINS[:scheduler]
-    (scheduler).compute_dag(ctx, d)
+    (scheduler).compute_dag(ctx, d; options=options)
 end
 
-function debug_compute(ctx::Context, args...; profile=false)
-    @time res = compute(ctx, args...)
+function debug_compute(ctx::Context, args...; profile=false, options=nothing)
+    @time res = compute(ctx, args...; options=options)
     get_logs!(ctx.log_sink), res
 end
 
-function debug_compute(arg; profile=false)
+function debug_compute(arg; profile=false, options=nothing)
     ctx = Context()
     dbgctx = Context(procs(ctx), LocalEventLog(), profile)
-    debug_compute(dbgctx, arg)
+    debug_compute(dbgctx, arg; options=options)
 end
 
 Base.@deprecate gather(ctx, x) collect(ctx, x)
