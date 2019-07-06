@@ -1,8 +1,11 @@
 module Sch
 
 using Distributed
+import MemPool: DRef
 
 import ..Dagger: Context, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs
+
+include("fault-handler.jl")
 
 const OneToMany = Dict{Thunk, Set{Thunk}}
 struct ComputeState
@@ -71,7 +74,6 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     @dbg timespan_end(ctx, :scheduler_init, 0, master)
 
     while !isempty(state.ready) || !isempty(state.running)
-
         if isempty(state.running) && !isempty(state.ready)
             for p in ps
                 isempty(state.ready) && break
@@ -89,7 +91,18 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
 
         proc, thunk_id, res = take!(chan)
         if isa(res, CapturedException) || isa(res, RemoteException)
-            throw(res)
+            if check_exited_exception(res)
+                @warn "Worker $(proc.pid) died on thunk $thunk_id, rescheduling work"
+
+                # Remove dead worker from procs list
+                filter!(p->p.pid!=proc.pid, ctx.procs)
+                ps = procs(ctx)
+
+                handle_fault(ctx, state, state.thunk_dict[thunk_id], proc, chan, node_order)
+                continue
+            else
+                throw(res)
+            end
         end
         node = state.thunk_dict[thunk_id]
         @logmsg("WORKER $(proc.pid) - $node ($(node.f)) input:$(node.inputs)")
