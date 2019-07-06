@@ -16,17 +16,34 @@ struct ComputeState
     thunk_dict::Dict{Int, Any}
 end
 
-struct ComputeOptions
+"""
+    SchedulerOptions
+
+Stores DAG-global options to be passed to the Dagger.Sch scheduler. Options:
+- single::Int   # Force all work onto worker with specified id. `0` disables this option.
+"""
+struct SchedulerOptions
     single::Int
 end
-ComputeOptions() = ComputeOptions(0)
+SchedulerOptions() = SchedulerOptions(0)
+
+"""
+    ThunkOptions
+
+Stores Thunk-local options to be passed to the Dagger.Sch scheduler. Options:
+- single::Int   # Force thunk onto worker with specified id. `0` disables this option.
+"""
+struct ThunkOptions
+    single::Int
+end
+ThunkOptions() = ThunkOptions(0)
 
 function cleanup(ctx)
 end
 
-function compute_dag(ctx, d::Thunk; options=ComputeOptions())
+function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     if options === nothing
-        options = ComputeOptions()
+        options = SchedulerOptions()
     end
     master = OSProc(myid())
     @dbg timespan_start(ctx, :scheduler_init, 0, master)
@@ -193,6 +210,9 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
         istask(x) ? state.cache[x] : x
     end
     state.thunk_dict[thunk.id] = thunk
+    if thunk.options !== nothing && thunk.options.single > 0
+        proc = OSProc(thunk.options.single)
+    end
     async_apply(ctx, proc, thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist, thunk.cache)
 end
 
