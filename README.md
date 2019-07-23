@@ -51,7 +51,9 @@ The connections between nodes `p`, `q`, `r` and `s` is represented by this depen
 
 
 The final result is the obvious consequence of the operation
+
  `add1(4)` + `add2(add1(4))` + `add1(3)`
+
  `(4 + 1)` + `((4 + 1) + 2)` + `(3 + 1)` = 16
 
 To compute and fetch the result of a thunk (say `s`), you can call `collect(s)`. `collect` will fetch the result of the computation to the master process. Alternatively, if you want to compute but not fetch the result you can call `compute` on the thunk. This will return a `Chunk` object which references the result. If you pass in a `Chunk` objects as an input to a delayed function, then the function will get executed with the value of the `Chunk` -- this evaluation will likely happen where the input chunks are, to reduce communication.
@@ -67,11 +69,17 @@ Options to `delayed` are:
 - `persist::Bool` -- the result of this Thunk should not be released after it becomes unused in the DAG
 - `cache::Bool` -- cache the result of this Thunk such that if the thunk is evaluated again, one can just reuse the cached value. If it’s been removed from cache, recompute the value.
 
+
+### Polytree
+
+[Polytrees](https://en.wikipedia.org/wiki/Polytree "Polytrees") are easily supported by Dagger. To do the trick, pass all the head nodes `Thunks` in a `Thunk` that you will create as a top node for the graph end compute it.
+```
+group(x...) = [x...]
+top_node = delayed(group)(head_nodes...)
+compute(top_node)
+```
+
 # DAG creation interface
-
-
-
-
 
 ## Rough high level description of scheduling
 
