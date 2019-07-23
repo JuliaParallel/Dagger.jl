@@ -23,7 +23,7 @@ function Context(xs)
     Context(xs, NoOpLog(), false) # By default don't log events
 end
 Context(xs::Array{Int}) = Context(map(OSProc, xs))
-Context() = Context(workers())
+Context(;nthreads=Threads.nthreads()) = Context([workers() for i=1:nthreads] |> Iterators.flatten |> collect)
 procs(c::Context) = c.procs
 
 """

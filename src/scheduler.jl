@@ -302,7 +302,7 @@ _move(ctx, to_proc::OSProc, x::Union{Chunk, Thunk}) = collect(ctx, x)
 
     @dbg timespan_start(ctx, :compute, thunk_id, proc)
     result_meta = try
-        res = f(fetched...)
+        res = fetch(Threads.@spawn f(fetched...))
         (proc, thunk_id, send_result ? res : tochunk(res, persist=persist, cache=persist ? true : cache)) #todo: add more metadata
     catch ex
         bt = catch_backtrace()
