@@ -6,9 +6,27 @@ check_exited_exception(res::RemoteException) =
 check_exited_exception(res::ProcessExitedException) = true
 check_exited_exception(res) = false
 
+"""
+    handle_fault(...)
+
+An internal function to handle a worker dying or being killed by the OS.
+Attempts to determine which `Thunk`s require rescheduling based on a
+"deadlist", and then corrects the scheduler's internal `ComputeState` struct
+to recover from the fault.
+
+Note: The logic for this functionality is not currently perfectly robust to
+all failure modes, and is only really intended as a last-ditch attempt to
+repair and continue executing. While it should never cause incorrect execution
+of DAGs, it *may* cause a `KeyError` or other failures in the scheduler due to
+the complexity of getting the internal state back to a consistent and proper
+state.
+"""
 function handle_fault(ctx, state, thunk, oldproc, chan, node_order)
-    # Find thunks whose results were cached on the dead worker
+    # Find thunks whose results were cached on the dead worker and place them
+    # on what's called a "deadlist". This structure will direct the recovery
+    # of the scheduler's state.
     deadlist = Thunk[thunk]
+    # This thunk is guaranteed to not have valid cached data anymore
     thunk.cache = false
     thunk.cache_ref = nothing
     for t in keys(state.cache)

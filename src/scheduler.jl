@@ -8,6 +8,22 @@ import ..Dagger: Context, Thunk, Chunk, OSProc, order, free!, dependents, noffsp
 include("fault-handler.jl")
 
 const OneToMany = Dict{Thunk, Set{Thunk}}
+
+"""
+    ComputeState
+
+The internal state-holding struct of the scheduler.
+
+Fields
+- dependents::OneToMany - The result of calling `dependents` on the DAG
+- finished::Set{Thunk} - The set of completed `Thunk`s
+- waiting::OneToMany - Map from parent `Thunk` to child `Thunk`s that still need to execute
+- waiting_data::OneToMany - Map from child `Thunk` to all parent `Thunk`s, accumulating over time
+- ready::Vector{Thunk} - The list of `Thunk`s that are ready to execute
+- cache::Dict{Thunk, Any} - Maps from a finished `Thunk` to it's cached result, often a DRef
+- running::Set{Thunk} - The set of currently-running `Thunk`s
+- thunk_dict::Dict{Int, Any} - Maps from thunk IDs to a `Thunk`
+"""
 struct ComputeState
     dependents::OneToMany
     finished::Set{Thunk}
@@ -73,8 +89,10 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     end
     @dbg timespan_end(ctx, :scheduler_init, 0, master)
 
+    # Loop while we still have thunks to execute
     while !isempty(state.ready) || !isempty(state.running)
         if isempty(state.running) && !isempty(state.ready)
+            # Nothing running, so schedule up to N thunks, 1 per N workers
             for p in ps
                 isempty(state.ready) && break
                 task = pop_with_affinity!(ctx, state.ready, p, false)
@@ -89,7 +107,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
             continue
         end
 
-        proc, thunk_id, res = take!(chan)
+        proc, thunk_id, res = take!(chan) # get result of completed thunk
         if isa(res, CapturedException) || isa(res, RemoteException)
             if check_exited_exception(res)
                 @warn "Worker $(proc.pid) died on thunk $thunk_id, rescheduling work"
