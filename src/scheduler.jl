@@ -307,8 +307,12 @@ _move(ctx, to_proc::OSProc, x::Union{Chunk, Thunk}) = collect(ctx, x)
     result_meta = try
         use_threads = (ctx.options !== nothing && ctx.options.threads) ||
                       (options !== nothing && options.threads)
-        if @static VERSION >= v"1.3.0-DEV.573" ? use_threads : false
-            res = fetch(Threads.@spawn f(fetched...))
+        if use_threads
+            @static if VERSION >= v"1.3.0-DEV.573"
+                res = fetch(Threads.@spawn f(fetched...))
+            else
+                res = f(fetched...)
+            end
         else
             res = f(fetched...)
         end
