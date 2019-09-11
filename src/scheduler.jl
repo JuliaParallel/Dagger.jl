@@ -24,22 +24,24 @@ end
 
 Stores DAG-global options to be passed to the Dagger.Sch scheduler. Options:
 - single::Int   # Force all work onto worker with specified id. `0` disables this option.
+- threads::Bool # Use multithreading if available
 """
-struct SchedulerOptions
-    single::Int
+Base.@kwdef struct SchedulerOptions
+    single::Int = 0
+    threads::Bool = false
 end
-SchedulerOptions() = SchedulerOptions(0)
 
 """
     ThunkOptions
 
 Stores Thunk-local options to be passed to the Dagger.Sch scheduler. Options:
 - single::Int   # Force thunk onto worker with specified id. `0` disables this option.
+- threads::Bool # Use multithreading if available
 """
-struct ThunkOptions
-    single::Int
+Base.@kwdef struct ThunkOptions
+    single::Int = 0
+    threads::Bool = false
 end
-ThunkOptions() = ThunkOptions(0)
 
 function cleanup(ctx)
 end
@@ -48,6 +50,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     if options === nothing
         options = SchedulerOptions()
     end
+    ctx.options = options
     master = OSProc(myid())
     @dbg timespan_start(ctx, :scheduler_init, 0, master)
 
@@ -226,7 +229,7 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
     if thunk.options !== nothing && thunk.options.single > 0
         proc = OSProc(thunk.options.single)
     end
-    async_apply(ctx, proc, thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist, thunk.cache)
+    async_apply(ctx, proc, thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist, thunk.cache, thunk.options)
 end
 
 function finish_task!(state, node, node_order; free=true)
@@ -295,14 +298,16 @@ end
 _move(ctx, to_proc, x) = x
 _move(ctx, to_proc::OSProc, x::Union{Chunk, Thunk}) = collect(ctx, x)
 
-@noinline function do_task(ctx, proc, thunk_id, f, data, send_result, persist, cache)
+@noinline function do_task(ctx, proc, thunk_id, f, data, send_result, persist, cache, options)
     @dbg timespan_start(ctx, :comm, thunk_id, proc)
     time_cost = @elapsed fetched = map(x->_move(ctx, proc, x), data)
     @dbg timespan_end(ctx, :comm, thunk_id, proc)
 
     @dbg timespan_start(ctx, :compute, thunk_id, proc)
     result_meta = try
-        @static if VERSION >= v"1.3.0-DEV.573"
+        use_threads = (ctx.options !== nothing && ctx.options.threads) ||
+                      (options !== nothing && options.threads)
+        if @static VERSION >= v"1.3.0-DEV.573" ? use_threads : false
             res = fetch(Threads.@spawn f(fetched...))
         else
             res = f(fetched...)
@@ -316,10 +321,10 @@ _move(ctx, to_proc::OSProc, x::Union{Chunk, Thunk}) = collect(ctx, x)
     result_meta
 end
 
-@noinline function async_apply(ctx, p::OSProc, thunk_id, f, data, chan, send_res, persist, cache)
+@noinline function async_apply(ctx, p::OSProc, thunk_id, f, data, chan, send_res, persist, cache, options)
     @async begin
         try
-            put!(chan, remotecall_fetch(do_task, p.pid, ctx, p, thunk_id, f, data, send_res, persist, cache))
+            put!(chan, remotecall_fetch(do_task, p.pid, ctx, p, thunk_id, f, data, send_res, persist, cache, options))
         catch ex
             bt = catch_backtrace()
             put!(chan, (p, thunk_id, CapturedException(ex, bt)))

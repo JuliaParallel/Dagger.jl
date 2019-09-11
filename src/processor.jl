@@ -17,10 +17,11 @@ mutable struct Context
     procs::Array{OSProc}
     log_sink::Any
     profile::Bool
+    options
 end
 
 function Context(xs)
-    Context(xs, NoOpLog(), false) # By default don't log events
+    Context(xs, NoOpLog(), false, nothing) # By default don't log events
 end
 Context(xs::Array{Int}) = Context(map(OSProc, xs))
 Context(;nthreads=Threads.nthreads()) = Context([workers() for i=1:nthreads] |> Iterators.flatten |> collect)
