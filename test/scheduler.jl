@@ -9,7 +9,7 @@ function checkwid(x...)
     return 1
 end
 function checktid(x...)
-    @assert Threads.threadid() != 1
+    @assert Threads.threadid() != 1 || Threads.nthreads() == 1
     return 1
 end
 end
@@ -30,6 +30,9 @@ end
         @test collect(Context(), a) == 1
     end
     @static if VERSION >= v"1.3.0-DEV.573"
+        if Threads.nthreads() == 1
+            @warn "Threading tests running in serial"
+        end
         @testset "Scheduler options: threads" begin
             options = SchedulerOptions(;threads=true)
             a = delayed(checktid)(1)
