@@ -75,7 +75,7 @@ function dependents(node::Thunk, deps=Dict{Thunk, Set{Thunk}}())
     end
     for inp = inputs(node)
         if isa(inp, Thunk)
-            s::Set{Thunk} = Base.@get!(deps, inp, Set{Thunk}())
+            s::Set{Thunk} = get!(()->Set{Thunk}(), deps, inp)
             push!(s, node)
             dependents(inp, deps)
         end
