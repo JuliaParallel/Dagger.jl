@@ -1,17 +1,4 @@
 """
-    check_exited_exception(res::Exception) -> Bool
-
-Recursively checks if an exception was caused by a worker exiting.
-"""
-check_exited_exception(res::CapturedException) =
-    check_exited_exception(res.ex)
-check_exited_exception(res::RemoteException) =
-    check_exited_exception(res.captured)
-check_exited_exception(res::ProcessExitedException) = true
-check_exited_exception(res::Base.IOError) = true
-check_exited_exception(res) = false
-
-"""
     handle_fault(...)
 
 An internal function to handle a worker dying or being killed by the OS.
@@ -26,7 +13,7 @@ of DAGs, it *may* cause a `KeyError` or other failures in the scheduler due to
 the complexity of getting the internal state back to a consistent and proper
 state.
 """
-function handle_fault(ctx, state, thunk, oldproc, chan)
+function handle_fault(ctx, state, thunk, oldproc)
     # Find thunks whose results were cached on the dead worker and place them
     # on what's called a "deadlist". This structure will direct the recovery
     # of the scheduler's state.
@@ -134,7 +121,7 @@ function handle_fault(ctx, state, thunk, oldproc, chan)
             push!(deadlist, dt)
             continue
         end
-        fire_task!(ctx, dt, newproc, state, chan)
+        fire_task!(ctx, dt, newproc, state)
         break
     end
 end

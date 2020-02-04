@@ -179,16 +179,38 @@ iscompatible(proc::ThreadProc, opts, f, args...) = true
 iscompatible_func(proc::ThreadProc, opts, f) = true
 iscompatible_arg(proc::ThreadProc, opts, x) = true
 @static if VERSION >= v"1.3.0-DEV.573"
-    execute!(proc::ThreadProc, f, args...) = fetch(Threads.@spawn begin
-        task_local_storage(:processor, proc)
-        f(args...)
-    end)
+    function execute!(proc::ThreadProc, f, args...)
+        sch_handle = task_local_storage(:sch_handle)
+        task = Threads.@spawn begin
+            task_local_storage(:processor, proc)
+            task_local_storage(:sch_handle, sch_handle)
+            f(args...)
+        end
+        try
+            fetch(task)
+        catch TaskFailedException
+            stk = Base.catch_stack(task)
+            err, frames = stk[1]
+            rethrow(CapturedException(err, frames))
+        end
+    end
 else
     # TODO: Use Threads.@threads?
-    execute!(proc::ThreadProc, f, args...) = fetch(@async begin
-        task_local_storage(:processor, proc)
-        f(args...)
-    end)
+    function execute!(proc::ThreadProc, f, args...)
+        sch_handle = task_local_storage(:sch_handle)
+        task = @async begin
+            task_local_storage(:processor, proc)
+            task_local_storage(:sch_handle, sch_handle)
+            f(args...)
+        end
+        try
+            fetch(task)
+        catch TaskFailedException
+            stk = Base.catch_stack(task)
+            err, frames = stk[1]
+            rethrow(CapturedException(err, frames))
+        end
+    end
 end
 get_parent(proc::ThreadProc) = OSProc(proc.owner)
 default_enabled(proc::ThreadProc) = true
