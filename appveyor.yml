@@ -1,8 +1,8 @@
 environment:
   matrix:
-  - julia_version: 0.7
   - julia_version: 1.0
-  - julia_version: latest
+  - julia_version: 1
+  - julia_version: nightly
 
 platform:
   - x86 # 32-bit
@@ -27,4 +27,5 @@ build_script:
   - C:\julia\bin\julia -e "%JL_BUILD_SCRIPT%"
 
 test_script:
-  - C:\julia\bin\julia --check-bounds=yes -e "using Pkg; Pkg.test(\"Dagger\")"
+  - echo "%JL_TEST_SCRIPT%"
+  - C:\julia\bin\julia -e "%JL_TEST_SCRIPT%"
