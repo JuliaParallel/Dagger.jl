@@ -11,7 +11,7 @@ size(x::Map) = size(x.inputs[1])
 
 Map(f, inputs::Tuple) = Map{Any, ndims(inputs[1])}(f, inputs)
 
-function stage(ctx, node::Map)
+function stage(ctx::Context, node::Map)
     inputs = Any[cached_stage(ctx, n) for n in node.inputs]
     primary = inputs[1] # all others will align to this guy
     domains = domainchunks(primary)
@@ -38,7 +38,7 @@ struct ReduceBlock <: Computation
     get_result::Bool
 end
 
-function stage(ctx, r::ReduceBlock)
+function stage(ctx::Context, r::ReduceBlock)
     inp = stage(ctx, r.input)
     reduced_parts = map(x -> Thunk(r.op, x; get_result=r.get_result), chunks(inp))
     Thunk((xs...) -> r.op_master(xs), reduced_parts...; meta=true)
@@ -51,7 +51,7 @@ reduceblock(f, x::ArrayOp) = compute(reduceblock_async(f, x))
 reduceblock(f, g::Function, x::ArrayOp) =
     compute(reduceblock_async(f, g, x))
 
-reduce_async(f, x::ArrayOp) = reduceblock_async(xs->reduce(f,xs), xs->reduce(f,xs), x)
+reduce_async(f::Function, x::ArrayOp) = reduceblock_async(xs->reduce(f,xs), xs->reduce(f,xs), x)
 
 sum(x::ArrayOp; dims::Union{Int,Nothing} = nothing) = _sum(x, dims)
 _sum(x, dims::Nothing) = reduceblock(sum, sum, x)
@@ -106,7 +106,7 @@ function Reducedim(op, input, dims)
     Reducedim{T,ndims(input)}(op, input, dims)
 end
 
-function reduce(f, x::ArrayOp; dims = nothing)
+function reduce(f::Function, x::ArrayOp; dims = nothing)
     if dims === nothing
         return compute(reduce_async(f,x))
     elseif dims isa Int
@@ -115,7 +115,7 @@ function reduce(f, x::ArrayOp; dims = nothing)
     Reducedim(f, x, dims::Tuple)
 end
 
-function stage(ctx, r::Reducedim)
+function stage(ctx::Context, r::Reducedim)
     inp = cached_stage(ctx, r.input)
     thunks = let op = r.op, dims=r.dims
         # do reducedim on each block

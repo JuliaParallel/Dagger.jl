@@ -37,7 +37,7 @@ function Context(xs)
 end
 Context(xs::Array{Int}) = Context(map(OSProc, xs))
 Context(;nthreads=Threads.nthreads()) = Context([workers() for i=1:nthreads] |> Iterators.flatten |> collect)
-procs(c::Context) = c.procs
+procs(ctx::Context) = ctx.procs
 
 """
     write_event(ctx::Context, event::Event)

@@ -6,7 +6,7 @@ end
 GetIndex(input::ArrayOp, idx::Tuple) =
     GetIndex{eltype(input), ndims(input)}(input, idx)
 
-function stage(ctx, gidx::GetIndex)
+function stage(ctx::Context, gidx::GetIndex)
     inp = cached_stage(ctx, gidx.input)
 
     dmn = domain(inp)
@@ -31,7 +31,7 @@ struct GetIndexScalar <: Computation
     idx::Tuple
 end
 
-function stage(ctx, gidx::GetIndexScalar)
+function stage(ctx::Context, gidx::GetIndexScalar)
     inp = cached_stage(ctx, gidx.input)
     s = view(inp, ArrayDomain(gidx.idx))
     delayed(identity)(collect(s)[1])

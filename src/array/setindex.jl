@@ -11,7 +11,7 @@ function setindex(x::ArrayOp, val, idxs...)
     SetIndex(x, idxs, val)
 end
 
-function stage(ctx, sidx::SetIndex)
+function stage(ctx::Context, sidx::SetIndex)
     inp = cached_stage(ctx, sidx.input)
 
     dmn = domain(inp)

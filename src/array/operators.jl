@@ -28,17 +28,17 @@ BCast(b::Broadcasted) = BCast{typeof(b), combine_eltypes(b.f, b.args), length(ax
 
 size(x::BCast) = map(length, axes(x.bcasted))
 
-function stage_operands(ctx, ::BCast, xs::ArrayOp...)
+function stage_operands(ctx::Context, ::BCast, xs::ArrayOp...)
     map(x->cached_stage(ctx, x), xs)
 end
 
-function stage_operands(ctx, ::BCast, x::ArrayOp, y::PromotePartition)
+function stage_operands(ctx::Context, ::BCast, x::ArrayOp, y::PromotePartition)
     stg_x = cached_stage(ctx, x)
     y1 = Distribute(domain(stg_x), y.data)
     stg_x, cached_stage(ctx, y1)
 end
 
-function stage_operands(ctx, ::BCast, x::PromotePartition, y::ArrayOp)
+function stage_operands(ctx::Context, ::BCast, x::PromotePartition, y::ArrayOp)
     stg_y = cached_stage(ctx, y)
     x1 = Distribute(domain(stg_y), x.data)
     cached_stage(ctx, x1), stg_y
@@ -54,7 +54,7 @@ function Base.copy(b::Broadcast.Broadcasted{<:DaggerBroadcastStyle})
     BCast(b)
 end
 
-function stage(ctx, node::BCast)
+function stage(ctx::Context, node::BCast)
     bc = Broadcast.flatten(node.bcasted)
     args = bc.args
     args1 = map(args) do x
@@ -102,9 +102,9 @@ struct MapChunk{F, Ni, T, Nd} <: ArrayOp{T, Nd}
     input::NTuple{Ni, ArrayOp{T,Nd}}
 end
 
-mapchunk(f, xs::ArrayOp...) = MapChunk(f, xs)
+mapchunk(f::Function, xs::ArrayOp...) = MapChunk(f, xs)
 Base.@deprecate mappart(args...) mapchunk(args...)
-function stage(ctx, node::MapChunk)
+function stage(ctx::Context, node::MapChunk)
     inputs = map(x->cached_stage(ctx, x), node.input)
     thunks = map(map(chunks, inputs)...) do ps...
         Thunk(node.f, ps...)

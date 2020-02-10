@@ -237,7 +237,7 @@ end
 A DArray object may contain a thunk in it, in which case
 we first turn it into a Thunk object and then compute it.
 """
-function compute(ctx, x::DArray; persist=true, options=nothing)
+function compute(ctx::Context, x::DArray; persist=true, options=nothing)
     thunk = thunkize(ctx, x, persist=persist)
     if isa(thunk, Thunk)
         compute(ctx, thunk; options=options)
@@ -249,7 +249,7 @@ end
 """
 If a DArray tree has a Thunk in it, make the whole thing a big thunk
 """
-function thunkize(ctx, c::DArray; persist=true)
+function thunkize(ctx::Context, c::DArray; persist=true)
     if any(istask, chunks(c))
         thunks = chunks(c)
         sz = size(thunks)
@@ -280,7 +280,7 @@ identity, for example:
 
 must not result in computation of A twice.
 """
-function cached_stage(ctx, x)
+function cached_stage(ctx::Context, x)
     cache = if !haskey(_stage_cache, ctx)
         _stage_cache[ctx] = Dict()
     else
@@ -319,7 +319,7 @@ Base.@deprecate BlockPartition Blocks
 Distribute(p::Blocks, data::AbstractArray) =
     Distribute(partition(p, domain(data)), data)
 
-function stage(ctx, d::Distribute)
+function stage(ctx::Context, d::Distribute)
     if isa(d.data, ArrayOp)
         # distributing a dsitributed array
         x = cached_stage(ctx, d.data)
