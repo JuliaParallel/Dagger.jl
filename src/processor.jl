@@ -13,7 +13,7 @@ end
 A context represents a set of processors to use for a operation.
 """
 mutable struct Context
-    procs::Array{OSProc}
+    procs::Vector{OSProc}
     log_sink::Any
     profile::Bool
     options
@@ -35,7 +35,7 @@ as a Vector{Int}.
 function Context(xs)
     Context(xs, NoOpLog(), false, nothing) # By default don't log events
 end
-Context(xs::Array{Int}) = Context(map(OSProc, xs))
+Context(xs::Vector{Int}) = Context(map(OSProc, xs))
 Context(;nthreads=Threads.nthreads()) = Context([workers() for i=1:nthreads] |> Iterators.flatten |> collect)
 procs(ctx::Context) = ctx.procs
 
