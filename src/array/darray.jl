@@ -39,12 +39,15 @@ function getindex(a::ArrayDomain, b::ArrayDomain)
 end
 
 """
-    alignfirst(a)
+    alignfirst(a) -> ArrayDomain
 
-Make a subdomain a standalone domain. For example,
+Make a subdomain a standalone domain.
 
-    alignfirst(ArrayDomain(11:25, 21:100))
-    # => ArrayDomain((1:15), (1:80))
+# Example
+```julia-repl
+julia> alignfirst(ArrayDomain(11:25, 21:100))
+ArrayDomain((1:15), (1:80))
+```
 """
 alignfirst(a::ArrayDomain) =
     ArrayDomain(map(r->1:length(r), indexes(a)))
@@ -59,7 +62,11 @@ ndims(a::ArrayDomain) = length(size(a))
 isempty(a::ArrayDomain) = length(a) == 0
 
 
-"The domain of an array is a ArrayDomain"
+"""
+    domain(x::AbstractArray) -> ArrayDomain
+
+The domain of an array is an ArrayDomain.
+"""
 domain(x::AbstractArray) = ArrayDomain([1:l for l in size(x)])
 
 
@@ -85,14 +92,17 @@ function Base.show(io::IO, x::ArrayOp)
 end
 
 """
-`DArray{T,N,F}(domain, subdomains, chunks, concat)`
+    DArray{T,N,F}(domain, subdomains, chunks, concat)
+    DArray(T, domain, subdomains, chunks, [concat=cat])
 
-An N-dimensional distributed array of element type T.
+An N-dimensional distributed array of element type T, with a concatenation function of type F.
 
-- `domain`: the whole ArrayDomain of the array
-- `subdomains`: a `DomainBlocks` of the same dimensions as the array
-- `chunks`: an array of chunks of dimension N
-- `concat`: a function of type `F`. `concat(x, y; dims=d)` takes two chunks `x` and `y`
+# Arguments
+- `T`: element type
+- `domain::ArrayDomain{N}`: the whole ArrayDomain of the array
+- `subdomains::AbstractArray{ArrayDomain{N}, N}`: a `DomainBlocks` of the same dimensions as the array
+- `chunks::AbstractArray{Union{Chunk,Thunk}, N}`: an array of chunks of dimension N
+- `concat::F`: a function of type `F`. `concat(x, y; dims=d)` takes two chunks `x` and `y`
             and concatenates them along dimension `d`. `cat` is used by default.
 """
 mutable struct DArray{T,N,F} <: ArrayOp{T, N}
@@ -126,16 +136,6 @@ end
 # mainly for backwards-compatibility
 DArray{T, N}(domain, subdomains, chunks) where {T,N} = DArray(T, domain, subdomains, chunks)
 
-
-"""
-`DArray(T, domain, subdomains, chunks, [concat=cat])`
-
-Creates a distributed array of element type T.
-
-- `T`: element type
-
-rest of the arguments are the same as the DArray constructor.
-"""
 function DArray(T, domain::ArrayDomain{N},
              subdomains::AbstractArray{ArrayDomain{N}, N},
              chunks::AbstractArray{<:Any, N}, concat=cat) where N
@@ -269,6 +269,7 @@ function thunkize(ctx, c::DArray; persist=true)
 end
 
 global _stage_cache = WeakKeyDict{Context, Dict}()
+
 """
 A memoized version of stage. It is important that the
 tasks generated for the same DArray have the same

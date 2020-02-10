@@ -12,7 +12,7 @@ import Base.Broadcast: Broadcasted, BroadcastStyle, combine_eltypes
 
 """
 This is a way of suggesting that stage should call
-stage_operand with the operation and other arguments
+stage_operand with the operation and other arguments.
 """
 struct PromotePartition{T,N} <: ArrayOp{T,N}
     data::AbstractArray{T,N}

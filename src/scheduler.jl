@@ -38,9 +38,11 @@ end
 """
     SchedulerOptions
 
-Stores DAG-global options to be passed to the Dagger.Sch scheduler. Options:
-- single::Int   # Force all work onto worker with specified id. `0` disables this option.
-- threads::Bool # Use multithreading if available
+Stores DAG-global options to be passed to the Dagger.Sch scheduler.
+
+# Arguments
+- `single::Int=0`: Force all work onto worker with specified id. `0` disables this option.
+- `threads::Bool=false`: Use multithreading if available
 """
 Base.@kwdef struct SchedulerOptions
     single::Int = 0
@@ -50,9 +52,11 @@ end
 """
     ThunkOptions
 
-Stores Thunk-local options to be passed to the Dagger.Sch scheduler. Options:
-- single::Int   # Force thunk onto worker with specified id. `0` disables this option.
-- threads::Bool # Use multithreading if available
+Stores Thunk-local options to be passed to the Dagger.Sch scheduler.
+
+# Arguments
+- `single::Int=0`: Force thunk onto worker with specified id. `0` disables this option.
+- `threads::Bool=false`: Use multithreading if available
 """
 Base.@kwdef struct ThunkOptions
     single::Int = 0

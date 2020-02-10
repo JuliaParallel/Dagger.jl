@@ -147,7 +147,7 @@ function stage_operands(ctx, m::MatMul, a, b)
 end
 
 """
-an operand which should be distributed as per convenience
+An operand which should be distributed as per convenience.
 """
 function stage_operands(ctx, ::MatMul, a::ArrayOp, b::PromotePartition{T,1}) where T
     stg_a = cached_stage(ctx, a)

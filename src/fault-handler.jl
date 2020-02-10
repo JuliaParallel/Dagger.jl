@@ -1,4 +1,8 @@
-"Recursively checks if an exception was caused by a worker exiting."
+"""
+    check_exited_exception(res) -> Bool
+
+Recursively checks if an exception was caused by a worker exiting.
+"""
 check_exited_exception(res::CapturedException) =
     check_exited_exception(res.ex)
 check_exited_exception(res::RemoteException) =

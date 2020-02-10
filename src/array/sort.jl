@@ -179,28 +179,30 @@ function _merge_sorted(ord::Ordering, z::AbstractArray{T}, x::AbstractArray{T}, 
 end
 
 """
-split the splitters themselves into batches.
+    recursive_splitters(ord, splitters, nchunks, batchsize) -> Tuple{Vector, Vector{Vector}}
 
-Args:
-- `ord` -- `Sorting.Ordering` object
-- `splitters` -- the `nchunks-1` splitters
-- `batchsize` -- batch size
+Split the splitters themselves into batches.
 
-Returns:
-A Tuple{Vector, Vector{Vector}} -- the coarse splitters which
+# Arguments
+- `ord`: `Sorting.Ordering` object
+- `splitters`: the `nchunks-1` splitters
+- `batchsize`: batch size
+
+# Returns
+A `Tuple{Vector, Vector{Vector}}` -- the coarse splitters which
 create `batchsize` splits, finer splitters within those batches
 which create a total of `nchunks` splits.
 
-```julia
+# Example
+```julia-repl
 julia> Dagger.recursive_splitters(Dagger.default_ord,
-            [10,20,30,40,50,60], 5,3)
+    [10,20,30,40,50,60], 5,3)
 ([30], Any[[10, 20], [40, 50, 60]])
 ```
 
 The first value `[30]` represents a coarse split that cuts the dataset
 from -Inf-30, and 30-Inf. Each part is further recursively split using
 the next set of splitters
-
 """
 function recursive_splitters(ord, splitters, nchunks, batchsize)
 
@@ -230,23 +232,25 @@ arrayorvcat(x,y) = [x,y]
 const default_ord = Base.Sort.ord(isless, identity, false, Forward)
 
 """
-`dsort_chunks(cs, [nchunks, nsamples]; options...)`
+    dsort_chunks(cs, [nchunks, nsamples]; options...)
 
 Sort contents of chunks (`cs`) and return a new set of chunks
 such that the chunks when concatenated return a sorted collection.
 Each chunk in turn is sorted.
 
-Args:
-- `nchunks` -- the number of chunks to produce, regardless of how many chunks were given as input
-- `nsamples` -- the number of elements to sample from each chunk to guess the splitters (`nchunks-1` splitters) each chunk will be delimited by the splitter.
-- `merge` -- a function to merge two sorted collections.
-- `sub` -- a function to get a subset of the collection takes (collection, range) (defaults to `getindex`)
-- `order` -- `Base.Sort.Ordering` to be used for sorting
-- `batchsize` -- number of chunks to split and merge at a time (e.g. if there are 128 input chunks and 128 output chunks, and batchsize is 8, then we first sort among batches of 8 chunks -- giving 16 batches. Then we sort among the first chunk of the first 8 batches (all elements less than the first splitter), then go on to the first 8 chunks of the second 8 batches, and so on...
-- `chunks_presorted` -- is each chunk in the input already sorted?
-- `sortandsample` -- a function to sort a chunk, then sample N elements to infer the splitters. It takes 3 arguments: (collection, N, presorted). presorted is a boolean which is true if the chunk is already sorted.
-Returns a tuple of `(chunk, samples)` where `chunk` is the `Dagger.Chunk` object. `chunk` can be nothing if no change to the initial array was made (e.g. it was already sorted)
-- `affinities` -- a list of processes where the output chunks should go. If the length is not equal to `nchunks` then affinities array is cycled through.
+# Arguments
+- `nchunks`: the number of chunks to produce, regardless of how many chunks were given as input
+- `nsamples`: the number of elements to sample from each chunk to guess the splitters (`nchunks-1` splitters) each chunk will be delimited by the splitter.
+- `merge`: a function to merge two sorted collections.
+- `sub`: a function to get a subset of the collection takes (collection, range) (defaults to `getindex`)
+- `order`: `Base.Sort.Ordering` to be used for sorting
+- `batchsize`: number of chunks to split and merge at a time (e.g. if there are 128 input chunks and 128 output chunks, and batchsize is 8, then we first sort among batches of 8 chunks -- giving 16 batches. Then we sort among the first chunk of the first 8 batches (all elements less than the first splitter), then go on to the first 8 chunks of the second 8 batches, and so on...
+- `chunks_presorted`: is each chunk in the input already sorted?
+- `sortandsample`: a function to sort a chunk, then sample N elements to infer the splitters. It takes 3 arguments: (collection, N, presorted). presorted is a boolean which is true if the chunk is already sorted.
+- `affinities`: a list of processes where the output chunks should go. If the length is not equal to `nchunks` then affinities array is cycled through.
+
+# Returns
+A tuple of `(chunk, samples)` where `chunk` is the `Dagger.Chunk` object. `chunk` can be `nothing` if no change to the initial array was made (e.g. it was already sorted)
 """
 function dsort_chunks(cs, nchunks=length(cs), nsamples=2000;
                       merge = merge_sorted,
