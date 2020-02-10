@@ -119,16 +119,16 @@ Load an Union{Chunk, Thunk} from a file.
 """
 function load(ctx::Context, file_path::AbstractString; mmap=false)
 
-    f = open(file_path)
-    part_typ = read(f, UInt8)
-    if part_typ == PARTSPEC
-        c = load(ctx, Chunk, file_path, mmap, f)
-    elseif part_typ == CAT
-        c = load(ctx, DArray, file_path, mmap, f)
-    else
-        error("Could not determine chunk type")
+    open(file_path) do f
+        part_typ = read(f, UInt8)
+        if part_typ == PARTSPEC
+            c = load(ctx, Chunk, file_path, mmap, f)
+        elseif part_typ == CAT
+            c = load(ctx, DArray, file_path, mmap, f)
+        else
+            error("Could not determine chunk type")
+        end
     end
-    close(f)
     c
 end
 
