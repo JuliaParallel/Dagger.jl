@@ -103,7 +103,7 @@ An N-dimensional distributed array of element type T, with a concatenation funct
 - `subdomains::AbstractArray{ArrayDomain{N}, N}`: a `DomainBlocks` of the same dimensions as the array
 - `chunks::AbstractArray{Union{Chunk,Thunk}, N}`: an array of chunks of dimension N
 - `concat::F`: a function of type `F`. `concat(x, y; dims=d)` takes two chunks `x` and `y`
-            and concatenates them along dimension `d`. `cat` is used by default.
+  and concatenates them along dimension `d`. `cat` is used by default.
 """
 mutable struct DArray{T,N,F} <: ArrayOp{T, N}
     domain::ArrayDomain{N}
@@ -111,7 +111,7 @@ mutable struct DArray{T,N,F} <: ArrayOp{T, N}
     chunks::AbstractArray{Union{Chunk,Thunk}, N}
     concat::F
     freed::Threads.Atomic{UInt8}
-    function DArray{T,N,F}(domain, subdomains, chunks, concat) where {T, N,F}
+    function DArray{T,N,F}(domain, subdomains, chunks, concat::Function) where {T, N,F}
         new(domain, subdomains, chunks, concat, Threads.Atomic{UInt8}(0))
     end
 end
