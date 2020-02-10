@@ -13,6 +13,7 @@ struct BlockIO <: IO
         seekend(bio)
         try
             while(!eof(bio.s) && (end_byte != read(bio, UInt8))) continue end
+        finally
         end
         position(bio.s)
     end
