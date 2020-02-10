@@ -19,7 +19,6 @@ include("lib/logging.jl")
 # Distributed data
 include("processor.jl")
 include("thunk.jl")
-include("domain.jl")
 include("chunks.jl")
 
 # Task scheduling
@@ -40,8 +39,6 @@ include("array/setindex.jl")
 include("array/matrix.jl")
 include("array/sparse_partition.jl")
 include("array/sort.jl")
-
-include("array/show.jl")
 
 include("ui/graph.jl")
 
