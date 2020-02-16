@@ -10,7 +10,7 @@ struct OSProc <: Processor
 end
 
 """
-A context represents a set of processors to use for a operation.
+A context represents a set of processors to use for an operation.
 """
 mutable struct Context
     procs::Vector{OSProc}
@@ -30,7 +30,7 @@ number of threads.
 
 It is also possible to create a Context from a vector of [`OSProc`](@ref),
 or equivalently the underlying process ids can also be passed directly
-as a Vector{Int}.
+as a `Vector{Int}`.
 """
 function Context(xs)
     Context(xs, NoOpLog(), false, nothing) # By default don't log events

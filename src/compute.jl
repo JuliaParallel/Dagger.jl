@@ -93,7 +93,7 @@ end
 """
     noffspring(dpents::Dict{Thunk, Set{Thunk}}) -> Dict{Thunk, Int}
 
-Recursively find the number of taks dependent on each task in the DAG.
+Recursively find the number of tasks dependent on each task in the DAG.
 Takes a Dict as returned by [`dependents`](@ref).
 """
 function noffspring(dpents::Dict{Thunk, Set{Thunk}})

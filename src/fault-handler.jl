@@ -1,5 +1,5 @@
 """
-    check_exited_exception(res) -> Bool
+    check_exited_exception(res::Exception) -> Bool
 
 Recursively checks if an exception was caused by a worker exiting.
 """
