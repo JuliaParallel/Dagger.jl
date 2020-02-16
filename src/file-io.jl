@@ -113,32 +113,32 @@ save(chunk::Union{Chunk, Thunk}, file_path::AbstractString) = save(Context(), ch
 ###### Load chunks ######
 
 """
-    load(ctx, file_path)
+    load(ctx::Context, file_path)
 
 Load an Union{Chunk, Thunk} from a file.
 """
-function load(ctx, file_path::AbstractString; mmap=false)
+function load(ctx::Context, file_path::AbstractString; mmap=false)
 
-    f = open(file_path)
-    part_typ = read(f, UInt8)
-    if part_typ == PARTSPEC
-        c = load(ctx, Chunk, file_path, mmap, f)
-    elseif part_typ == CAT
-        c = load(ctx, DArray, file_path, mmap, f)
-    else
-        error("Could not determine chunk type")
+    open(file_path) do f
+        part_typ = read(f, UInt8)
+        if part_typ == PARTSPEC
+            c = load(ctx, Chunk, file_path, mmap, f)
+        elseif part_typ == CAT
+            c = load(ctx, DArray, file_path, mmap, f)
+        else
+            error("Could not determine chunk type")
+        end
     end
-    close(f)
     c
 end
 
 """
-    load(ctx, ::Type{Chunk}, fpath, io)
+    load(ctx::Context, ::Type{Chunk}, fpath, io)
 
 Load a Chunk object from a file, the file path
 is required for creating a FileReader object
 """
-function load(ctx, ::Type{Chunk}, fname, mmap, io)
+function load(ctx::Context, ::Type{Chunk}, fname, mmap, io)
     meta_len = read(io, Int)
     io = IOBuffer(read(io, meta_len))
 
@@ -148,7 +148,7 @@ function load(ctx, ::Type{Chunk}, fname, mmap, io)
         FileReader(fname, T, meta_len+1, mmap), false))
 end
 
-function load(ctx, ::Type{DArray}, file_path, mmap, io)
+function load(ctx::Context, ::Type{DArray}, file_path, mmap, io)
     dir_path = file_path*"_data"
 
     metadata = deserialize(io)
@@ -164,12 +164,12 @@ end
 
 ###### Save and Load for actual data #####
 
-function save(ctx, io::IO, m::Array)
+function save(ctx::Context, io::IO, m::Array)
     write(io, reinterpret(UInt8, m, (sizeof(m),)))
     m
 end
 
-function save(ctx, io::IO, m::BitArray)
+function save(ctx::Context, io::IO, m::BitArray)
     save(ctx, io, convert(Array{Bool}, m))
 end
 
@@ -194,7 +194,7 @@ function collect(ctx::Context, c::Chunk{X, FileReader{T}}) where {X,T<:BitArray}
     arr
 end
 
-function save(ctx, io::IO, m::SparseMatrixCSC{Tv,Ti}) where {Tv, Ti}
+function save(ctx::Context, io::IO, m::SparseMatrixCSC{Tv,Ti}) where {Tv, Ti}
     write(io, m.m)
     write(io, m.n)
     write(io, length(m.nzval))
@@ -237,7 +237,7 @@ function collect(ctx::Context, c::Chunk{X, FileReader{T}}) where {X, T<:SparseMa
     SparseMatrixCSC(m, n, colptr, rowval, nnzval)
 end
 
-function getsub(ctx, c::Chunk{X,FileReader{T}}, d) where {X,T<:AbstractArray}
+function getsub(ctx::Context, c::Chunk{X,FileReader{T}}, d) where {X,T<:AbstractArray}
     Chunk(collect(ctx, c)[d])
 end
 
@@ -253,7 +253,7 @@ function save(p::Computation, name::AbstractString)
     Save(p, name)
 end
 
-function stage(ctx, s::Save)
+function stage(ctx::Context, s::Save)
     x = cached_stage(ctx, s.input)
     dir_path = s.name * "_data"
     if !isdir(dir_path)

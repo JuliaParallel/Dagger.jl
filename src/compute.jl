@@ -18,10 +18,13 @@ collect(c::Computation; options=nothing) =
     collect(Context(), c; options=options)
 
 """
+    compute(ctx::Context, d::Thunk; options=nothing) -> Chunk
+
 Compute a Thunk - creates the DAG, assigns ranks to nodes for tie breaking and
-runs the scheduler with the specified options.
+runs the scheduler with the specified options. Returns a Chunk which references
+the result.
 """
-function compute(ctx, d::Thunk; options=nothing)
+function compute(ctx::Context, d::Thunk; options=nothing)
     if !(:scheduler in keys(PLUGINS))
         PLUGINS[:scheduler] = get_type(PLUGIN_CONFIGS[:scheduler])
     end
@@ -68,7 +71,11 @@ end
 
 ##### Dag utilities #####
 
-"find the set of direct dependents for each task"
+"""
+    dependents(node::Thunk, deps=Dict{Thunk, Set{Thunk}}()) -> Dict{Thunk, Set{Thunk}}
+
+Find the set of direct dependents for each task.
+"""
 function dependents(node::Thunk, deps=Dict{Thunk, Set{Thunk}}())
     if !haskey(deps, node)
         deps[node] = Set{Thunk}()
@@ -84,10 +91,12 @@ function dependents(node::Thunk, deps=Dict{Thunk, Set{Thunk}}())
 end
 
 """
-recursively find the number of taks dependent on each task in the DAG.
-Input: dependents dict
+    noffspring(dpents::Dict{Thunk, Set{Thunk}}) -> Dict{Thunk, Int}
+
+Recursively find the number of tasks dependent on each task in the DAG.
+Takes a Dict as returned by [`dependents`](@ref).
 """
-function noffspring(dpents::Dict)
+function noffspring(dpents::Dict{Thunk, Set{Thunk}})
     Dict(node => noffspring(node, dpents) for node in keys(dpents))
 end
 
@@ -101,7 +110,9 @@ function noffspring(n, dpents)
 end
 
 """
-Given a root node of the DAG, calculates a total order for tie-braking
+    order(node::Thunk, ndeps) -> Dict{Thunk,Int}
+
+Given a root node of the DAG, calculates a total order for tie-breaking.
 
   * Root node gets score 1,
   * rest of the nodes are explored in DFS fashion but chunks
@@ -109,8 +120,8 @@ Given a root node of the DAG, calculates a total order for tie-braking
     i.e. total number of tasks depending on the result of the said node.
 
 Args:
-    - node: root node
-    - ndeps: result of `noffspring`
+- node: root node
+- ndeps: result of [`noffspring`](@ref)
 """
 function order(node::Thunk, ndeps)
     function recur(nodes, s)

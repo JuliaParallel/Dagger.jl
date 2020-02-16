@@ -35,7 +35,7 @@ function _ctranspose(x::AbstractArray)
     Any[delayed(adjoint)(x[j,i]) for i=1:size(x,2), j=1:size(x,1)]
 end
 
-function stage(ctx, node::Transpose)
+function stage(ctx::Context, node::Transpose)
     inp = cached_stage(ctx, node.input)
     thunks = _ctranspose(chunks(inp))
     DArray(eltype(inp), domain(inp)', domainchunks(inp)', thunks)
@@ -121,7 +121,7 @@ function _mul(a::Vector, b::Vector; T=eltype(b))
     [x * b[1] for x in a]
 end
 
-function promote_distribution(ctx, m::MatMul, a,b)
+function promote_distribution(ctx::Context, m::MatMul, a,b)
     iscompat = try domain(a) * domain(b); true
                catch e; false end
     if iscompat
@@ -135,7 +135,7 @@ function promote_distribution(ctx, m::MatMul, a,b)
     a, cached_stage(ctx, Distribute(d, b))
 end
 
-function stage_operands(ctx, m::MatMul, a, b)
+function stage_operands(ctx::Context, m::MatMul, a, b)
     if size(a, 2) != size(b, 1)
         error(DimensionMismatch("Inputs to * have incompatible size"))
     end
@@ -146,10 +146,8 @@ function stage_operands(ctx, m::MatMul, a, b)
     promote_distribution(ctx, m, stg_a, stg_b)
 end
 
-"""
-an operand which should be distributed as per convenience
-"""
-function stage_operands(ctx, ::MatMul, a::ArrayOp, b::PromotePartition{T,1}) where T
+"An operand which should be distributed as per convenience"
+function stage_operands(ctx::Context, ::MatMul, a::ArrayOp, b::PromotePartition{T,1}) where T
     stg_a = cached_stage(ctx, a)
     dmn_a = domain(stg_a)
     dchunks_a = domainchunks(stg_a)
@@ -162,7 +160,7 @@ function stage_operands(ctx, ::MatMul, a::ArrayOp, b::PromotePartition{T,1}) whe
     stg_a, cached_stage(ctx, Distribute(dmn_out, b.data))
 end
 
-function stage_operands(ctx, ::MatMul, a::PromotePartition, b::ArrayOp)
+function stage_operands(ctx::Context, ::MatMul, a::PromotePartition, b::ArrayOp)
 
     if size(a, 2) != size(b, 1)
         throw(DimensionMismatch("Cannot promote array of domain $(dmn_b) to multiply with an array of size $(dmn_a)"))
@@ -174,7 +172,7 @@ function stage_operands(ctx, ::MatMul, a::PromotePartition, b::ArrayOp)
     cached_stage(ctx, Distribute(dmn_out, a.data)), stg_b
 end
 
-function stage(ctx, mul::MatMul)
+function stage(ctx::Context, mul::MatMul)
     a, b = stage_operands(ctx, mul, mul.a, mul.b)
     d = domain(a)*domain(b)
     DArray(Any, d, domainchunks(a)*domainchunks(b),
@@ -199,13 +197,13 @@ scale(l::Vector, r::ArrayOp) = scale(PromotePartition(l), r)
 (*)(l::Diagonal, r::ArrayOp) = Scale(PromotePartition(l.diag), r)
 scale(l::ArrayOp, r::ArrayOp) = Scale(l, r)
 
-function stage_operand(ctx, ::Scale, a, b::PromotePartition)
+function stage_operand(ctx::Context, ::Scale, a, b::PromotePartition)
     ps = domainchunks(a)
     b_parts = DomainBlocks((1,), (ps.cumlength[1],))
     cached_stage(ctx, Distribute(b_parts, b.data))
 end
 
-function stage_operand(ctx, ::Scale, a, b)
+function stage_operand(ctx::Context, ::Scale, a, b)
     cached_stage(ctx, b)
 end
 
@@ -217,7 +215,7 @@ function _scale(l, r)
     res
 end
 
-function stage(ctx, scal::Scale)
+function stage(ctx::Context, scal::Scale)
     r = cached_stage(ctx, scal.r)
     l = stage_operand(ctx, scal, r, scal.l)
 
@@ -250,7 +248,7 @@ function Base.cat(d::ArrayDomain, ds::ArrayDomain...; dims::Int)
     ArrayDomain(out_idxs)
 end
 
-function stage(ctx, c::Concat)
+function stage(ctx::Context, c::Concat)
     inp = Any[cached_stage(ctx, x) for x in c.inputs]
 
     dmns = map(domain, inp)

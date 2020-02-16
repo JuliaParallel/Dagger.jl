@@ -100,6 +100,8 @@ function Serialization.deserialize(io::AbstractSerializer, dt::Type{Chunk{T,H}})
 end
 
 """
+    tochunk(x; persist=false, cache=false) -> Chunk
+
 Create a chunk from a sequential object.
 """
 function tochunk(x; persist=false, cache=false)

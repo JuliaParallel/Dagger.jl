@@ -39,12 +39,15 @@ function getindex(a::ArrayDomain, b::ArrayDomain)
 end
 
 """
-    alignfirst(a)
+    alignfirst(a) -> ArrayDomain
 
-Make a subdomain a standalone domain. For example,
+Make a subdomain a standalone domain.
 
-    alignfirst(ArrayDomain(11:25, 21:100))
-    # => ArrayDomain((1:15), (1:80))
+# Example
+```julia-repl
+julia> alignfirst(ArrayDomain(11:25, 21:100))
+ArrayDomain((1:15), (1:80))
+```
 """
 alignfirst(a::ArrayDomain) =
     ArrayDomain(map(r->1:length(r), indexes(a)))
@@ -59,7 +62,11 @@ ndims(a::ArrayDomain) = length(size(a))
 isempty(a::ArrayDomain) = length(a) == 0
 
 
-"The domain of an array is a ArrayDomain"
+"""
+    domain(x::AbstractArray) -> ArrayDomain
+
+The domain of an array is an ArrayDomain.
+"""
 domain(x::AbstractArray) = ArrayDomain([1:l for l in size(x)])
 
 
@@ -85,15 +92,18 @@ function Base.show(io::IO, x::ArrayOp)
 end
 
 """
-`DArray{T,N,F}(domain, subdomains, chunks, concat)`
+    DArray{T,N,F}(domain, subdomains, chunks, concat)
+    DArray(T, domain, subdomains, chunks, [concat=cat])
 
-An N-dimensional distributed array of element type T.
+An N-dimensional distributed array of element type T, with a concatenation function of type F.
 
-- `domain`: the whole ArrayDomain of the array
-- `subdomains`: a `DomainBlocks` of the same dimensions as the array
-- `chunks`: an array of chunks of dimension N
-- `concat`: a function of type `F`. `concat(x, y; dims=d)` takes two chunks `x` and `y`
-            and concatenates them along dimension `d`. `cat` is used by default.
+# Arguments
+- `T`: element type
+- `domain::ArrayDomain{N}`: the whole ArrayDomain of the array
+- `subdomains::AbstractArray{ArrayDomain{N}, N}`: a `DomainBlocks` of the same dimensions as the array
+- `chunks::AbstractArray{Union{Chunk,Thunk}, N}`: an array of chunks of dimension N
+- `concat::F`: a function of type `F`. `concat(x, y; dims=d)` takes two chunks `x` and `y`
+  and concatenates them along dimension `d`. `cat` is used by default.
 """
 mutable struct DArray{T,N,F} <: ArrayOp{T, N}
     domain::ArrayDomain{N}
@@ -101,7 +111,7 @@ mutable struct DArray{T,N,F} <: ArrayOp{T, N}
     chunks::AbstractArray{Union{Chunk,Thunk}, N}
     concat::F
     freed::Threads.Atomic{UInt8}
-    function DArray{T,N,F}(domain, subdomains, chunks, concat) where {T, N,F}
+    function DArray{T,N,F}(domain, subdomains, chunks, concat::Function) where {T, N,F}
         new(domain, subdomains, chunks, concat, Threads.Atomic{UInt8}(0))
     end
 end
@@ -126,16 +136,6 @@ end
 # mainly for backwards-compatibility
 DArray{T, N}(domain, subdomains, chunks) where {T,N} = DArray(T, domain, subdomains, chunks)
 
-
-"""
-`DArray(T, domain, subdomains, chunks, [concat=cat])`
-
-Creates a distributed array of element type T.
-
-- `T`: element type
-
-rest of the arguments are the same as the DArray constructor.
-"""
 function DArray(T, domain::ArrayDomain{N},
              subdomains::AbstractArray{ArrayDomain{N}, N},
              chunks::AbstractArray{<:Any, N}, concat=cat) where N
@@ -237,7 +237,7 @@ end
 A DArray object may contain a thunk in it, in which case
 we first turn it into a Thunk object and then compute it.
 """
-function compute(ctx, x::DArray; persist=true, options=nothing)
+function compute(ctx::Context, x::DArray; persist=true, options=nothing)
     thunk = thunkize(ctx, x, persist=persist)
     if isa(thunk, Thunk)
         compute(ctx, thunk; options=options)
@@ -249,7 +249,7 @@ end
 """
 If a DArray tree has a Thunk in it, make the whole thing a big thunk
 """
-function thunkize(ctx, c::DArray; persist=true)
+function thunkize(ctx::Context, c::DArray; persist=true)
     if any(istask, chunks(c))
         thunks = chunks(c)
         sz = size(thunks)
@@ -269,6 +269,7 @@ function thunkize(ctx, c::DArray; persist=true)
 end
 
 global _stage_cache = WeakKeyDict{Context, Dict}()
+
 """
 A memoized version of stage. It is important that the
 tasks generated for the same DArray have the same
@@ -279,7 +280,7 @@ identity, for example:
 
 must not result in computation of A twice.
 """
-function cached_stage(ctx, x)
+function cached_stage(ctx::Context, x)
     cache = if !haskey(_stage_cache, ctx)
         _stage_cache[ctx] = Dict()
     else
@@ -318,7 +319,7 @@ Base.@deprecate BlockPartition Blocks
 Distribute(p::Blocks, data::AbstractArray) =
     Distribute(partition(p, domain(data)), data)
 
-function stage(ctx, d::Distribute)
+function stage(ctx::Context, d::Distribute)
     if isa(d.data, ArrayOp)
         # distributing a dsitributed array
         x = cached_stage(ctx, d.data)
