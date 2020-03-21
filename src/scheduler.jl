@@ -3,7 +3,7 @@ module Sch
 using Distributed
 import MemPool: DRef
 
-import ..Dagger: Context, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs
+import ..Dagger: Context, Processor, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, execute!, convert_arg
 
 include("fault-handler.jl")
 
@@ -61,6 +61,7 @@ Stores Thunk-local options to be passed to the Dagger.Sch scheduler.
 Base.@kwdef struct ThunkOptions
     single::Int = 0
     threads::Bool = false
+    proctypes::Vector{Type} = Type[]
 end
 
 function cleanup(ctx)
@@ -326,17 +327,31 @@ _move(ctx, to_proc::OSProc, x::Union{Chunk, Thunk}) = collect(ctx, x)
     @dbg timespan_end(ctx, :comm, thunk_id, proc)
 
     @dbg timespan_start(ctx, :compute, thunk_id, proc)
-    result_meta = try
-        use_threads = (ctx.options !== nothing && ctx.options.threads) ||
-                      (options !== nothing && options.threads)
-        if use_threads
-            @static if VERSION >= v"1.3.0-DEV.573"
-                res = fetch(Threads.@spawn f(fetched...))
-            else
-                res = f(fetched...)
+    from_proc = proc
+    to_proc = proc
+    # FIXME: Use a better selection mechanism
+    if !isempty(options.proctypes)
+        @show from_proc
+        for child in from_proc.children
+            @show child
+            if typeof(child) in options.proctypes
+                to_proc = child
+                @info "Rescheduling thunk to $(typeof(to_proc))"
             end
+        end
+    end
+    fetched = convert_arg.(Ref(from_proc), Ref(to_proc), fetched)
+    result_meta = try
+        @static if VERSION >= v"1.3.0-DEV.573"
+            use_threads = (ctx.options !== nothing && ctx.options.threads) ||
+                          (options !== nothing && options.threads)
         else
-            res = f(fetched...)
+            use_threads = false
+        end
+        if use_threads
+            res = fetch(Threads.@spawn execute!(to_proc, f, fetched...))
+        else
+            res = execute!(to_proc, f, fetched...)
         end
         (proc, thunk_id, send_result ? res : tochunk(res, persist=persist, cache=persist ? true : cache)) #todo: add more metadata
     catch ex
