@@ -15,19 +15,57 @@ abstract type Processor end
 const PROCESSOR_CALLBACKS = []
 
 """
+    execute!(proc::Processor, f, args...) -> Any
+
+Executes the function `f` with arguments `args` on processor `proc`. This
+function can be overloaded by `Processor` subtypes to allow executing function
+calls differently than normal Julia.
+"""
+execute!
+
+"""
+    iscompatible(proc::Processor, x) -> Bool
+
+Indicates whether `proc` can execute `x`. `Processor` subtypes should overload
+this function to return `true` if and only if it is essentially guaranteed
+that `x` is supported. The default is to return `false`.
+"""
+iscompatible(proc::Processor, x) = false
+
+"""
+    get_processors(proc::Processor) -> Vector{T} where T<:Processor
+
+Returns the full list of processors contained in `proc`, if any. `Processor`
+subtypes should overload this function if they can contain sub-processors. The
+default method will return a `Vector` containing `proc` itself.
+"""
+get_processors(proc::Processor) = Processor[proc]
+
+"""
+    move(from_proc::Processor, to_proc::Processor, x)
+
+Moves and/or converts `x` such that it's available and suitable for usage on
+the `to_proc` processor. This function can be overloaded by `Processor`
+subtypes to transport arguments and convert them to an appropriate form before
+being used for exection.
+"""
+move
+
+"""
     OSProc <: Processor
 
-Julia CPU (OS) process, identified by Distributed pid.
+Julia CPU (OS) process, identified by Distributed pid. Does not itself perform
+computations, but may (for example) pass execution to a `ThreadProc`.
 """
 struct OSProc <: Processor
     pid::Int
     attrs::Dict{Symbol,Any}
     children::Vector{Processor}
+    queue::Vector{Processor}
 end
-OSProc(pid::Int=myid()) = OSProc(pid, Dict{Symbol,Any}(), Processor[])
+OSProc(pid::Int=myid()) = OSProc(pid, Dict{Symbol,Any}(), Processor[], Processor[])
 function get_osproc()
     proc = OSProc()
-    proc.attrs[:threads] = Threads.nthreads()
     for cb in PROCESSOR_CALLBACKS
         try
             cb(proc)
@@ -37,28 +75,55 @@ function get_osproc()
     end
     proc
 end
-
-"""
-    execute!(proc::Processor, f, args...) -> Any
-
-Executes the function `f` with arguments `args` on processor `proc`. This
-function can be overloaded by `Processor` subtypes to allow executing function
-calls differently than normal Julia.
-"""
-execute!(proc::Processor, f, args...) = f(args...)
-
-"""
-    convert_arg(from_proc::Processor, to_proc::Processor, x)
-
-Converts `x` such that it's suitable for usage on a `to_proc` processor. This
-function can be overloaded by `Processor` subtypes to convert arguments to an
-appropriate form before being used for exection.
-"""
-function convert_arg(from_proc::Processor, to_proc::Processor, x)
-    @show typeof(from_proc)
-    @show typeof(to_proc)
-    x
+function iscompatible(proc::OSProc, x)
+    for child in proc.children
+        if iscompatible(child, x)
+            return true
+        end
+    end
+    return true
 end
+get_processors(proc::OSProc) =
+    vcat(get_processors(child) for child in proc.children)
+function choose_processor(from_proc::OSProc, options, f, args)
+    if isempty(from_proc.queue)
+        for child in from_proc.children
+            grandchildren = get_processors(child)
+            append!(from_proc.queue, grandchildren)
+        end
+    end
+    @assert !isempty(from_proc.queue)
+    while true
+        proc = popfirst!(from_proc.queue)
+        push!(from_proc.queue, proc)
+        if !all(x->iscompatible(proc,x), args)
+            continue
+        end
+        if isempty(options.proctypes)
+            return proc
+        elseif typeof(proc) in options.proctypes
+            return proc
+        end
+    end
+end
+move(ctx, from_proc::OSProc, to_proc::OSProc, x) = x
+execute!(proc::OSProc, f, args...) = error("OSProc does not execute thunks")
+
+"""
+    ThreadProc <: Processor
+
+Julia CPU (OS) thread, identified by Julia thread ID. Unlike `OSProc`,
+`ThreadProc` performs actual execution of thunks.
+"""
+struct ThreadProc <: Processor
+    tid::Int
+end
+iscompatible(proc::ThreadProc, x) = true
+move(ctx, from_proc::OSProc, to_proc::ThreadProc, x) = x
+move(ctx, from_proc::ThreadProc, to_proc::OSProc, x) = x
+execute!(proc::ThreadProc, f, args...) = f(args...)
+
+# FIXME: ThreadGroupProc
 
 "A context represents a set of processors to use for an operation."
 mutable struct Context

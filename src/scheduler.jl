@@ -3,7 +3,7 @@ module Sch
 using Distributed
 import MemPool: DRef
 
-import ..Dagger: Context, Processor, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, execute!, convert_arg
+import ..Dagger: Context, Processor, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, iscompatible, move, choose_processor, execute!
 
 include("fault-handler.jl")
 
@@ -217,7 +217,7 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
 
     if thunk.meta
         # Run it on the parent node
-        # do not _move data.
+        # do not move data.
         p = OSProc(myid())
         @dbg timespan_start(ctx, :comm, thunk.id, p)
         fetched = map(thunk.inputs) do x
@@ -249,10 +249,11 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
         istask(x) ? state.cache[x] : x
     end
     state.thunk_dict[thunk.id] = thunk
-    if thunk.options !== nothing && thunk.options.single > 0
-        proc = OSProc(thunk.options.single)
+    options = thunk.options !== nothing ? thunk.options : ThunkOptions()
+    if options.single > 0
+        proc = OSProc(options.single)
     end
-    async_apply(ctx, proc, thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist, thunk.cache, thunk.options)
+    async_apply(ctx, proc, thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist, thunk.cache, options)
 end
 
 function finish_task!(state, node, node_order; free=true)
@@ -318,30 +319,18 @@ function start_state(deps::Dict, node_order)
     state
 end
 
-_move(ctx, to_proc, x) = x
-_move(ctx, to_proc::OSProc, x::Union{Chunk, Thunk}) = collect(ctx, x)
-
 @noinline function do_task(ctx, proc, thunk_id, f, data, send_result, persist, cache, options)
     @dbg timespan_start(ctx, :comm, thunk_id, proc)
-    time_cost = @elapsed fetched = map(x->_move(ctx, proc, x), data)
+    # FIXME: Pass correct from_proc
+    time_cost = @elapsed fetched = map(x->move(ctx, proc, proc, x), data)
     @dbg timespan_end(ctx, :comm, thunk_id, proc)
 
     @dbg timespan_start(ctx, :compute, thunk_id, proc)
     from_proc = proc
-    to_proc = proc
-    # FIXME: Use a better selection mechanism
-    if !isempty(options.proctypes)
-        @show from_proc
-        for child in from_proc.children
-            @show child
-            if typeof(child) in options.proctypes
-                to_proc = child
-                @info "Rescheduling thunk to $(typeof(to_proc))"
-            end
-        end
-    end
-    fetched = convert_arg.(Ref(from_proc), Ref(to_proc), fetched)
+    to_proc = choose_processor(from_proc, options, f, fetched)
+    fetched = move.(Ref(ctx), Ref(from_proc), Ref(to_proc), fetched)
     result_meta = try
+        # FIXME: Move to OSProc's choose_processor
         @static if VERSION >= v"1.3.0-DEV.573"
             use_threads = (ctx.options !== nothing && ctx.options.threads) ||
                           (options !== nothing && options.threads)
@@ -353,6 +342,8 @@ _move(ctx, to_proc::OSProc, x::Union{Chunk, Thunk}) = collect(ctx, x)
         else
             res = execute!(to_proc, f, fetched...)
         end
+        # FIXME: Be lazy with moving back to OSProc if possible
+        res = move(ctx, to_proc, from_proc, res)
         (proc, thunk_id, send_result ? res : tochunk(res, persist=persist, cache=persist ? true : cache)) #todo: add more metadata
     catch ex
         bt = catch_backtrace()

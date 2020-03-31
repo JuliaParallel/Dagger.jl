@@ -48,6 +48,8 @@ chunktype(c::Chunk) = c.chunktype
 persist!(t::Chunk) = (t.persist=true; t)
 shouldpersist(p::Chunk) = t.persist
 affinity(c::Chunk) = affinity(c.handle)
+move(ctx, from_proc::OSProc, to_proc::OSProc, x::Union{Chunk, Thunk}) =
+    collect(ctx, x)
 
 function unrelease(c::Chunk{T,DRef}) where T
     # set spilltodisk = true if data is still around
