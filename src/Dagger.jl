@@ -43,11 +43,13 @@ include("array/sort.jl")
 include("ui/graph.jl")
 
 function __init__()
-    push!(PROCESSOR_CALLBACKS, proc -> begin
-        for tid in 1:Threads.nthreads()
-            push!(proc.children, ThreadProc(tid))
-        end
-    end)
+    @static if VERSION >= v"1.3.0-DEV.573"
+        push!(PROCESSOR_CALLBACKS, proc -> begin
+            for tid in 1:Threads.nthreads()
+                push!(proc.children, ThreadProc(tid))
+            end
+        end)
+    end
 end
 
 end # module

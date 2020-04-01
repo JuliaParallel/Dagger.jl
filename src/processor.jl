@@ -24,13 +24,14 @@ calls differently than normal Julia.
 execute!
 
 """
-    iscompatible(proc::Processor, x) -> Bool
+    iscompatible(proc::Processor, opts, x) -> Bool
 
-Indicates whether `proc` can execute `x`. `Processor` subtypes should overload
-this function to return `true` if and only if it is essentially guaranteed
-that `x` is supported. The default is to return `false`.
+Indicates whether `proc` can execute `x` given `opts`. `Processor` subtypes
+should overload this function to return `true` if and only if it is
+essentially guaranteed that `x` is supported. The default is to return
+`false`.
 """
-iscompatible(proc::Processor, x) = false
+iscompatible(proc::Processor, opts, x) = false
 
 """
     get_processors(proc::Processor) -> Vector{T} where T<:Processor
@@ -77,7 +78,7 @@ function get_osproc()
     proc
 end
 Base.:(==)(proc1::OSProc, proc2::OSProc) = proc1.pid == proc2.pid
-function iscompatible(proc::OSProc, x)
+function iscompatible(proc::OSProc, opts, x)
     for child in proc.children
         if iscompatible(child, x)
             return true
@@ -97,10 +98,11 @@ function choose_processor(from_proc::OSProc, options, f, args)
     if isempty(from_proc.queue)
         return from_proc
     end
+    push!(from_proc.queue, from_proc)
     while true
         proc = popfirst!(from_proc.queue)
         push!(from_proc.queue, proc)
-        if !all(x->iscompatible(proc,x), args)
+        if !all(x->iscompatible(proc, options, x), args)
             continue
         end
         if isempty(options.proctypes)
@@ -121,12 +123,17 @@ Julia CPU (OS) thread, identified by Julia thread ID.
 struct ThreadProc <: Processor
     tid::Int
 end
-iscompatible(proc::ThreadProc, x) = true
+iscompatible(proc::ThreadProc, opts, x) = opts.threads
 move(ctx, from_proc::OSProc, to_proc::ThreadProc, x) = x
 move(ctx, from_proc::ThreadProc, to_proc::OSProc, x) = x
-execute!(proc::ThreadProc, f, args...) = fetch(Threads.@spawn f(args...))
+@static if VERSION >= v"1.3.0-DEV.573"
+    execute!(proc::ThreadProc, f, args...) = fetch(Threads.@spawn f(args...))
+else
+    # TODO: Use Threads.@threads?
+    execute!(proc::ThreadProc, f, args...) = fetch(@async f(args...))
+end
 
-# FIXME: ThreadGroupProc
+# TODO: ThreadGroupProc?
 
 "A context represents a set of processors to use for an operation."
 mutable struct Context

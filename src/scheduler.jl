@@ -64,6 +64,14 @@ Base.@kwdef struct ThunkOptions
     proctypes::Vector{Type} = Type[]
 end
 
+"Combine `SchedulerOptions` and `ThunkOptions` into a new `ThunkOptions`."
+function merge(sopts::SchedulerOptions, topts::ThunkOptions)
+    single = topts.single != 0 ? topts.single : sopts.single
+    threads = topts.threads ? true : sopts.threads
+    proctypes = topts.proctypes
+    ThunkOptions(single, threads, proctypes)
+end
+
 function cleanup(ctx)
 end
 
@@ -249,7 +257,8 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
         istask(x) ? state.cache[x] : x
     end
     state.thunk_dict[thunk.id] = thunk
-    options = thunk.options !== nothing ? thunk.options : ThunkOptions()
+    toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
+    options = merge(ctx.options, toptions)
     if options.single > 0
         proc = OSProc(options.single)
     end
@@ -330,18 +339,7 @@ end
     to_proc = choose_processor(from_proc, options, f, fetched)
     fetched = move.(Ref(ctx), Ref(from_proc), Ref(to_proc), fetched)
     result_meta = try
-        # FIXME: Move to OSProc's choose_processor
-        @static if VERSION >= v"1.3.0-DEV.573"
-            use_threads = (ctx.options !== nothing && ctx.options.threads) ||
-                          (options !== nothing && options.threads)
-        else
-            use_threads = false
-        end
-        if use_threads
-            res = fetch(Threads.@spawn execute!(to_proc, f, fetched...))
-        else
-            res = execute!(to_proc, f, fetched...)
-        end
+        res = execute!(to_proc, f, fetched...)
         # FIXME: Be lazy with moving back to OSProc if possible
         res = move(ctx, to_proc, from_proc, res)
         (proc, thunk_id, send_result ? res : tochunk(res, persist=persist, cache=persist ? true : cache)) #todo: add more metadata
