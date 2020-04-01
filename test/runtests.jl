@@ -4,6 +4,8 @@ addprocs(2)
 using Test
 using Dagger
 
+include("fakeproc.jl")
+
 include("domain.jl")
 include("array.jl")
 include("scheduler.jl")

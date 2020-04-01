@@ -48,4 +48,17 @@ end
             @test collect(Context(), a) == 1
         end
     end
+
+    @testset "Thunk options: proctypes" begin
+        @test Dagger.iscompatible(FakeProc(), nothing, 1) == true
+        @test Dagger.iscompatible(FakeProc(), nothing, "1") == true
+        @test Dagger.iscompatible(FakeProc(), nothing, 1.0) == false
+
+        as = [delayed(identity)(i) for i in 1:10]
+        opts = Dagger.Sch.ThunkOptions(;proctypes=[FakeProc])
+        b = delayed(*; options=opts)(as...)
+
+        @test collect(b) == 4212345678910
+    end
+
 end
