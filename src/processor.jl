@@ -80,7 +80,7 @@ end
 Base.:(==)(proc1::OSProc, proc2::OSProc) = proc1.pid == proc2.pid
 function iscompatible(proc::OSProc, opts, x)
     for child in proc.children
-        if iscompatible(child, x)
+        if iscompatible(child, opts, x)
             return true
         end
     end
