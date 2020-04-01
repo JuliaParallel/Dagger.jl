@@ -54,8 +54,9 @@ move
 """
     OSProc <: Processor
 
-Julia CPU (OS) process, identified by Distributed pid. Does not itself perform
-computations, but may (for example) pass execution to a `ThreadProc`.
+Julia CPU (OS) process, identified by Distributed pid. Executes thunks when
+threads or other "children" processors are not available, and/or the user has
+not opted to use those processors.
 """
 struct OSProc <: Processor
     pid::Int
@@ -75,6 +76,7 @@ function get_osproc()
     end
     proc
 end
+Base.:(==)(proc1::OSProc, proc2::OSProc) = proc1.pid == proc2.pid
 function iscompatible(proc::OSProc, x)
     for child in proc.children
         if iscompatible(child, x)
@@ -92,7 +94,9 @@ function choose_processor(from_proc::OSProc, options, f, args)
             append!(from_proc.queue, grandchildren)
         end
     end
-    @assert !isempty(from_proc.queue)
+    if isempty(from_proc.queue)
+        return from_proc
+    end
     while true
         proc = popfirst!(from_proc.queue)
         push!(from_proc.queue, proc)
@@ -107,13 +111,12 @@ function choose_processor(from_proc::OSProc, options, f, args)
     end
 end
 move(ctx, from_proc::OSProc, to_proc::OSProc, x) = x
-execute!(proc::OSProc, f, args...) = error("OSProc does not execute thunks")
+execute!(proc::OSProc, f, args...) = f(args...)
 
 """
     ThreadProc <: Processor
 
-Julia CPU (OS) thread, identified by Julia thread ID. Unlike `OSProc`,
-`ThreadProc` performs actual execution of thunks.
+Julia CPU (OS) thread, identified by Julia thread ID.
 """
 struct ThreadProc <: Processor
     tid::Int
@@ -121,7 +124,7 @@ end
 iscompatible(proc::ThreadProc, x) = true
 move(ctx, from_proc::OSProc, to_proc::ThreadProc, x) = x
 move(ctx, from_proc::ThreadProc, to_proc::OSProc, x) = x
-execute!(proc::ThreadProc, f, args...) = f(args...)
+execute!(proc::ThreadProc, f, args...) = fetch(Threads.@spawn f(args...))
 
 # FIXME: ThreadGroupProc
 
