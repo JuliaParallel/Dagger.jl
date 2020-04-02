@@ -3,17 +3,16 @@
 using Dagger
 
 struct FakeProc <: Dagger.Processor end
+struct FakeVal
+    x
+end
+fakesum(xs...) = FakeVal(sum(map(y->y.x, xs)))
 
 Dagger.iscompatible(proc::FakeProc, opts, x::Integer) = true
-Dagger.iscompatible(proc::FakeProc, opts, x::String) = true
-Dagger.move(ctx, from_proc::OSProc, to_proc::FakeProc, x::Integer) = x
-Dagger.move(ctx, from_proc::FakeProc, to_proc::OSProc, x::Integer) = x
-Dagger.move(ctx, from_proc::FakeProc, to_proc::OSProc, x::String) = parse(Int,x)
-Dagger.execute!(proc::FakeProc, func, arg::Integer) = func(arg)
-Dagger.execute!(proc::FakeProc, func, args...) = "42" * func(string.(args)...)
-
-push!(Dagger.PROCESSOR_CALLBACKS, proc -> begin
-    push!(proc.children, FakeProc())
-end)
+Dagger.iscompatible(proc::FakeProc, opts, x::FakeVal) = true
+Dagger.move(ctx, from_proc::OSProc, to_proc::FakeProc, x::Integer) = FakeVal(x)
+Dagger.move(ctx, from_proc::FakeProc, to_proc::OSProc, x::Vector) = map(y->y.x, x)
+Dagger.move(ctx, from_proc::FakeProc, to_proc::OSProc, x::FakeVal) = x.x
+Dagger.execute!(proc::FakeProc, func, args...) = FakeVal(42+func(args...).x)
 
 end

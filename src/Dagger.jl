@@ -49,6 +49,10 @@ function __init__()
                 push!(proc.children, ThreadProc(tid))
             end
         end)
+    else
+        push!(PROCESSOR_CALLBACKS, proc -> begin
+            push!(proc.children, ThreadProc(1))
+        end)
     end
 end
 

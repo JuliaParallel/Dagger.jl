@@ -65,9 +65,9 @@ struct OSProc <: Processor
     children::Vector{Processor}
     queue::Vector{Processor}
 end
-OSProc(pid::Int=myid()) = OSProc(pid, Dict{Symbol,Any}(), Processor[], Processor[])
-function get_osproc()
-    proc = OSProc()
+OSProc(pid::Int=myid()) = remotecall_fetch(get_osproc, pid, pid)
+function get_osproc(pid::Int)
+    proc = OSProc(pid, Dict{Symbol,Any}(), Processor[], Processor[])
     for cb in PROCESSOR_CALLBACKS
         try
             cb(proc)
@@ -95,10 +95,7 @@ function choose_processor(from_proc::OSProc, options, f, args)
             append!(from_proc.queue, grandchildren)
         end
     end
-    if isempty(from_proc.queue)
-        return from_proc
-    end
-    push!(from_proc.queue, from_proc)
+    @assert !isempty(from_proc.queue)
     while true
         proc = popfirst!(from_proc.queue)
         push!(from_proc.queue, proc)
@@ -107,7 +104,7 @@ function choose_processor(from_proc::OSProc, options, f, args)
         end
         if isempty(options.proctypes)
             return proc
-        elseif typeof(proc) in options.proctypes
+        elseif any(p->proc isa p, options.proctypes)
             return proc
         end
     end
@@ -123,7 +120,7 @@ Julia CPU (OS) thread, identified by Julia thread ID.
 struct ThreadProc <: Processor
     tid::Int
 end
-iscompatible(proc::ThreadProc, opts, x) = opts.threads
+iscompatible(proc::ThreadProc, opts, x) = true
 move(ctx, from_proc::OSProc, to_proc::ThreadProc, x) = x
 move(ctx, from_proc::ThreadProc, to_proc::OSProc, x) = x
 @static if VERSION >= v"1.3.0-DEV.573"
@@ -161,7 +158,7 @@ function Context(xs)
 end
 Context(xs::Vector{Int}) = Context(map(OSProc, xs))
 function Context()
-    procs = OSProc[remotecall_fetch(get_osproc, w) for w in workers()]
+    procs = [OSProc(w) for w in workers()]
     Context(procs)
 end
 procs(ctx::Context) = ctx.procs

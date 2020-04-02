@@ -42,11 +42,10 @@ Stores DAG-global options to be passed to the Dagger.Sch scheduler.
 
 # Arguments
 - `single::Int=0`: Force all work onto worker with specified id. `0` disables this option.
-- `threads::Bool=false`: Use multithreading if available
 """
 Base.@kwdef struct SchedulerOptions
     single::Int = 0
-    threads::Bool = false
+    proctypes::Vector{Type} = Type[]
 end
 
 """
@@ -56,20 +55,20 @@ Stores Thunk-local options to be passed to the Dagger.Sch scheduler.
 
 # Arguments
 - `single::Int=0`: Force thunk onto worker with specified id. `0` disables this option.
-- `threads::Bool=false`: Use multithreading if available
+- `proctypes::Vector{Type{<:Processor}}=Type[]`: Force thunk to use one or
+more processors that are instances/subtypes of a contained type. Leave this
+vector empty to disable.
 """
 Base.@kwdef struct ThunkOptions
     single::Int = 0
-    threads::Bool = false
     proctypes::Vector{Type} = Type[]
 end
 
 "Combine `SchedulerOptions` and `ThunkOptions` into a new `ThunkOptions`."
 function merge(sopts::SchedulerOptions, topts::ThunkOptions)
     single = topts.single != 0 ? topts.single : sopts.single
-    threads = topts.threads ? true : sopts.threads
-    proctypes = topts.proctypes
-    ThunkOptions(single, threads, proctypes)
+    proctypes = vcat(sopts.proctypes, topts.proctypes)
+    ThunkOptions(single, proctypes)
 end
 
 function cleanup(ctx)
