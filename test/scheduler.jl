@@ -49,9 +49,7 @@ end
         end
     end
 
-    @everywhere push!(Dagger.PROCESSOR_CALLBACKS, proc -> begin
-        push!(proc.children, FakeProc())
-    end)
+    @everywhere push!(Dagger.PROCESSOR_CALLBACKS, proc->FakeProc())
     @testset "Thunk options: proctypes" begin
         @test Dagger.iscompatible(FakeProc(), nothing, 1) == true
         @test Dagger.iscompatible(FakeProc(), nothing, FakeVal(1)) == true
