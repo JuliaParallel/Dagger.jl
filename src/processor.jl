@@ -97,7 +97,7 @@ function choose_processor(from_proc::OSProc, options, f, args)
         end
     end
     @assert !isempty(from_proc.queue)
-    while true
+    for i in 1:length(from_proc.queue)
         proc = popfirst!(from_proc.queue)
         push!(from_proc.queue, proc)
         if !all(x->iscompatible(proc, options, x), args)
@@ -109,6 +109,7 @@ function choose_processor(from_proc::OSProc, options, f, args)
             return proc
         end
     end
+    @error "($(myid())) Exhausted all available processor types!" proctypes=options.proctypes procsavail=from_proc.queue
 end
 move(ctx, from_proc::OSProc, to_proc::OSProc, x) = x
 execute!(proc::OSProc, f, args...) = f(args...)
