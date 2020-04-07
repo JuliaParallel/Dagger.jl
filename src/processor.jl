@@ -40,6 +40,13 @@ iscompatible_func(proc::Processor, opts, f) = false
 iscompatible_arg(proc::Processor, opts, x) = false
 
 """
+    default_enabled(proc::Processor) -> Bool
+
+Returns whether processor `proc` is enabled by default (opt-out). `Processor` subtypes can override this function to make themselves opt-in (default returns `false`).
+"""
+default_enabled(proc::Processor) = false
+
+"""
     get_processors(proc::Processor) -> Vector{T} where T<:Processor
 
 Returns the full list of processors contained in `proc`, if any. `Processor`
@@ -158,10 +165,10 @@ function choose_processor(from_proc::OSProc, options, f, args)
     for i in 1:length(from_proc.queue)
         proc = popfirst!(from_proc.queue)
         push!(from_proc.queue, proc)
-        if !iscompatible(proc, options, f, args)
+        if !iscompatible(proc, options, f, args...)
             continue
         end
-        if isempty(options.proctypes)
+        if default_enabled(proc) && isempty(options.proctypes)
             return proc
         elseif any(p->proc isa p, options.proctypes)
             return proc
@@ -171,6 +178,7 @@ function choose_processor(from_proc::OSProc, options, f, args)
 end
 move(ctx, from_proc::OSProc, to_proc::OSProc, x) = x
 execute!(proc::OSProc, f, args...) = f(args...)
+default_enabled(proc::OSProc) = true
 
 """
     ThreadProc <: Processor
@@ -191,6 +199,7 @@ else
     execute!(proc::ThreadProc, f, args...) = fetch(@async f(args...))
 end
 get_parent(proc::ThreadProc) = OSProc(proc.owner)
+default_enabled(proc::ThreadProc) = true
 
 # TODO: ThreadGroupProc?
 

@@ -51,9 +51,11 @@ end
 
     @everywhere Dagger.add_callback!(proc->FakeProc())
     @testset "Thunk options: proctypes" begin
-        @test Dagger.iscompatible(FakeProc(), nothing, 1) == true
-        @test Dagger.iscompatible(FakeProc(), nothing, FakeVal(1)) == true
-        @test Dagger.iscompatible(FakeProc(), nothing, 1.0) == false
+        @test Dagger.iscompatible_arg(FakeProc(), nothing, 1) == true
+        @test Dagger.iscompatible_arg(FakeProc(), nothing, FakeVal(1)) == true
+        @test Dagger.iscompatible_arg(FakeProc(), nothing, 1.0) == false
+        @test Dagger.default_enabled(Dagger.ThreadProc(1,1)) == true
+        @test Dagger.default_enabled(FakeProc()) == false
 
         opts = Dagger.Sch.ThunkOptions(;proctypes=[Dagger.ThreadProc])
         as = [delayed(identity; options=opts)(i) for i in 1:5]
