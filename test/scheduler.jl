@@ -49,7 +49,7 @@ end
         end
     end
 
-    @everywhere push!(Dagger.PROCESSOR_CALLBACKS, proc->FakeProc())
+    @everywhere Dagger.add_callback!(proc->FakeProc())
     @testset "Thunk options: proctypes" begin
         @test Dagger.iscompatible(FakeProc(), nothing, 1) == true
         @test Dagger.iscompatible(FakeProc(), nothing, FakeVal(1)) == true
@@ -62,6 +62,6 @@ end
 
         @test collect(Context(), b) == 57
     end
-    @everywhere pop!(Dagger.PROCESSOR_CALLBACKS)
+    @everywhere (pop!(Dagger.PROCESSOR_CALLBACKS); empty!(Dagger.OSPROC_CACHE))
 
 end

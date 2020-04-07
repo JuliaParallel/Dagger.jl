@@ -43,14 +43,59 @@ default method will return a `Vector` containing `proc` itself.
 get_processors(proc::Processor) = Processor[proc]
 
 """
+    get_parent(proc::Processor) -> Processor
+
+Returns the parent processor for `proc`. The ultimate parent processor is an
+`OSProc`. `Processor` subtypes should overload this to return their most
+direct parent.
+"""
+get_parent
+
+"""
     move(from_proc::Processor, to_proc::Processor, x)
 
 Moves and/or converts `x` such that it's available and suitable for usage on
 the `to_proc` processor. This function can be overloaded by `Processor`
 subtypes to transport arguments and convert them to an appropriate form before
-being used for exection.
+being used for exection. This is additionally called on thunk results when
+moving back to `from_proc` before being serialized over the wire as needed.
+The default implementation breaks a single `move` call down into a sequence of
+`move` calls, and is not intended to be maximally efficient.
 """
-move
+function move(ctx, from_proc::Processor, to_proc::Processor, x)
+    @debug "Initiating generic move"
+    # Move to remote OSProc
+    parent_proc = from_proc
+    while !(parent_proc isa OSProc)
+        # FIXME: Initiate this chain on remote side
+        grandparent_proc = get_parent(parent_proc)
+        @debug "(Remote) moving $parent_proc to $grandparent_proc"
+        x = move(ctx, parent_proc, grandparent_proc, x)
+        parent_proc = grandparent_proc
+    end
+
+    # Move to local OSProc
+    remote_proc = parent_proc
+    local_proc = OSProc()
+    @debug "(Network) moving $remote_proc to $local_proc"
+    x = move(ctx, remote_proc, local_proc, x)
+
+    # Move to to_proc
+    parent_proc = get_parent(to_proc)
+    path = Processor[to_proc, parent_proc]
+    while parent_proc != local_proc
+        parent_proc = get_parent(parent_proc)
+        push!(path, parent_proc)
+    end
+    last_proc = local_proc
+    while !isempty(path)
+        next_proc = pop!(path)
+        @debug "(Local) moving $last_proc to $next_proc"
+        x = move(ctx, last_proc, next_proc, x)
+        last_proc = next_proc
+    end
+    return x
+end
 
 """
     OSProc <: Processor
@@ -65,7 +110,10 @@ struct OSProc <: Processor
     children::Vector{Processor}
     queue::Vector{Processor}
 end
-OSProc(pid::Int=myid()) = remotecall_fetch(get_osproc, pid, pid)
+const OSPROC_CACHE = Dict{Int,OSProc}()
+OSProc(pid::Int=myid()) = get!(OSPROC_CACHE, pid) do
+    remotecall_fetch(get_osproc, pid, pid)
+end
 function get_osproc(pid::Int)
     proc = OSProc(pid, Dict{Symbol,Any}(), Processor[], Processor[])
     for cb in PROCESSOR_CALLBACKS
@@ -77,6 +125,10 @@ function get_osproc(pid::Int)
         end
     end
     proc
+end
+function add_callback!(func)
+    push!(Dagger.PROCESSOR_CALLBACKS, func)
+    empty!(OSPROC_CACHE)
 end
 Base.:(==)(proc1::OSProc, proc2::OSProc) = proc1.pid == proc2.pid
 function iscompatible(proc::OSProc, opts, x)
@@ -109,7 +161,7 @@ function choose_processor(from_proc::OSProc, options, f, args)
             return proc
         end
     end
-    @error "($(myid())) Exhausted all available processor types!" proctypes=options.proctypes procsavail=from_proc.queue
+    @error "($(myid())) Exhausted all available processor types!" proctypes=options.proctypes procsavail=from_proc.queue args=args
 end
 move(ctx, from_proc::OSProc, to_proc::OSProc, x) = x
 execute!(proc::OSProc, f, args...) = f(args...)
@@ -120,6 +172,7 @@ execute!(proc::OSProc, f, args...) = f(args...)
 Julia CPU (OS) thread, identified by Julia thread ID.
 """
 struct ThreadProc <: Processor
+    owner::Int
     tid::Int
 end
 iscompatible(proc::ThreadProc, opts, x) = true
@@ -131,6 +184,7 @@ else
     # TODO: Use Threads.@threads?
     execute!(proc::ThreadProc, f, args...) = fetch(@async f(args...))
 end
+get_parent(proc::ThreadProc) = OSProc(proc.owner)
 
 # TODO: ThreadGroupProc?
 

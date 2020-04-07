@@ -329,8 +329,7 @@ end
 
 @noinline function do_task(ctx, proc, thunk_id, f, data, send_result, persist, cache, options)
     @dbg timespan_start(ctx, :comm, thunk_id, proc)
-    # FIXME: Pass correct from_proc
-    time_cost = @elapsed fetched = map(x->move(ctx, proc, proc, x), data)
+    fetched = map(x->x isa Union{Chunk,Thunk} ? collect(ctx, x) : x, data)
     @dbg timespan_end(ctx, :comm, thunk_id, proc)
 
     @dbg timespan_start(ctx, :compute, thunk_id, proc)
@@ -339,12 +338,10 @@ end
     fetched = move.(Ref(ctx), Ref(from_proc), Ref(to_proc), fetched)
     result_meta = try
         res = execute!(to_proc, f, fetched...)
-        # FIXME: Be lazy with moving back to OSProc if possible
-        res = move(ctx, to_proc, from_proc, res)
-        (proc, thunk_id, send_result ? res : tochunk(res, persist=persist, cache=persist ? true : cache)) #todo: add more metadata
+        (from_proc, thunk_id, send_result ? res : tochunk(res, to_proc; persist=persist, cache=persist ? true : cache)) #todo: add more metadata
     catch ex
         bt = catch_backtrace()
-        (proc, thunk_id, RemoteException(myid(), CapturedException(ex, bt)))
+        (from_proc, thunk_id, RemoteException(myid(), CapturedException(ex, bt)))
     end
     @dbg timespan_end(ctx, :compute, thunk_id, proc)
     result_meta

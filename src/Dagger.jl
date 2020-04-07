@@ -45,10 +45,10 @@ include("ui/graph.jl")
 function __init__()
     @static if VERSION >= v"1.3.0-DEV.573"
         for tid in 1:Threads.nthreads()
-            push!(PROCESSOR_CALLBACKS, proc->ThreadProc(tid))
+            push!(PROCESSOR_CALLBACKS, proc->ThreadProc(myid(), tid))
         end
     else
-        push!(PROCESSOR_CALLBACKS, proc->ThreadProc(1))
+        push!(PROCESSOR_CALLBACKS, proc->ThreadProc(myid(), 1))
     end
 end
 

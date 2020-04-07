@@ -31,13 +31,14 @@ domain(x::Any) = UnitDomain()
 """
 A chunk with some data
 """
-mutable struct Chunk{T, H}
+mutable struct Chunk{T, H, P<:Processor}
     chunktype::Type
     domain
     handle::H
+    processor::P
     persist::Bool
-    function (::Type{Chunk{T,H}})(chunktype, domain, handle, persist) where {T,H}
-        c = new{T,H}(chunktype, domain, handle, persist)
+    function (::Type{Chunk{T,H,P}})(chunktype, domain, handle, processor, persist) where {T,H,P}
+        c = new{T,H,P}(chunktype, domain, handle, processor, persist)
         finalizer(x -> @async(myid() == 1 && free!(x)), c)
         c
     end
@@ -48,10 +49,8 @@ chunktype(c::Chunk) = c.chunktype
 persist!(t::Chunk) = (t.persist=true; t)
 shouldpersist(p::Chunk) = t.persist
 affinity(c::Chunk) = affinity(c.handle)
-move(ctx, from_proc::OSProc, to_proc::OSProc, x::Union{Chunk, Thunk}) =
-    collect(ctx, x)
 
-function unrelease(c::Chunk{T,DRef}) where T
+function unrelease(c::Chunk{T,DRef,P}) where {T,P}
     # set spilltodisk = true if data is still around
     try
         destroyonevict(c.handle, false)
@@ -66,16 +65,27 @@ function unrelease(c::Chunk{T,DRef}) where T
 end
 unrelease(c::Chunk) = c
 
+collect_remote(chunk::Chunk) =
+    move(Context(), chunk.processor, OSProc(), poolget(chunk.handle))
 function collect(ctx::Context, chunk::Chunk; options=nothing)
     # delegate fetching to handle by default.
-    collect(ctx, chunk.handle)
+    if chunk.handle isa DRef && !(chunk.processor isa OSProc)
+        return remotecall_fetch(collect_remote, chunk.handle.owner, chunk)
+    elseif chunk.handle isa FileRef
+        return poolget(chunk.handle)
+    else
+        return move(ctx, chunk.processor, OSProc(), chunk.handle)
+    end
 end
+collect(ctx::Context, ref::DRef; options=nothing) =
+    move(ctx, OSProc(ref.owner), OSProc(), ref)
+collect(ctx::Context, ref::FileRef; options=nothing) =
+    poolget(ref)
+move(ctx, from_proc::OSProc, to_proc::OSProc, ref::Union{DRef, FileRef}) =
+    poolget(ref)
 
 
 ### ChunkIO
-function collect(ctx::Context, ref::Union{DRef, FileRef}; options=nothing)
-    poolget(ref)
-end
 affinity(r::DRef) = Pair{OSProc, UInt64}[OSProc(r.owner) => r.size]
 function affinity(r::FileRef)
     if haskey(MemPool.who_has_read, r.file)
@@ -87,7 +97,7 @@ function affinity(r::FileRef)
     end
 end
 
-function Serialization.deserialize(io::AbstractSerializer, dt::Type{Chunk{T,H}}) where {T,H}
+function Serialization.deserialize(io::AbstractSerializer, dt::Type{Chunk{T,H,P}}) where {T,H,P}
     nf = fieldcount(dt)
     c = ccall(:jl_new_struct_uninit, Any, (Any,), dt)
     Serialization.deserialize_cycle(io, c)
@@ -102,19 +112,19 @@ function Serialization.deserialize(io::AbstractSerializer, dt::Type{Chunk{T,H}})
 end
 
 """
-    tochunk(x; persist=false, cache=false) -> Chunk
+    tochunk(x, proc; persist=false, cache=false) -> Chunk
 
-Create a chunk from a sequential object.
+Create a chunk from sequential object `x` which resides on `proc`.
 """
-function tochunk(x; persist=false, cache=false)
+function tochunk(x, proc::P=OSProc(); persist=false, cache=false) where P
     ref = poolset(x, destroyonevict=persist ? false : cache)
-    Chunk{Any, typeof(ref)}(typeof(x), domain(x), ref, persist)
+    Chunk{Any, typeof(ref), P}(typeof(x), domain(x), ref, proc, persist)
 end
-tochunk(x::Union{Chunk, Thunk}) = x
+tochunk(x::Union{Chunk, Thunk}, proc=nothing) = x
 
 # Check to see if the node is set to persist
 # if it is foce can override it
-function free!(s::Chunk{X, DRef}; force=true, cache=false) where X
+function free!(s::Chunk{X, DRef, P}; force=true, cache=false) where {X,P}
     if force || !s.persist
         if cache
             try
@@ -136,7 +146,7 @@ function savechunk(data, dir, f)
         return position(io)
     end
     fr = FileRef(f, sz)
-    Chunk{Any, typeof(fr)}(typeof(data), domain(data), fr, true)
+    Chunk{Any, typeof(fr), P}(typeof(data), domain(data), fr, OSProc(), true)
 end
 
 
