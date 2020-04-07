@@ -24,14 +24,20 @@ calls differently than normal Julia.
 execute!
 
 """
-    iscompatible(proc::Processor, opts, x) -> Bool
+    iscompatible(proc::Processor, opts, f, args...) -> Bool
 
-Indicates whether `proc` can execute `x` given `opts`. `Processor` subtypes
-should overload this function to return `true` if and only if it is
-essentially guaranteed that `x` is supported. The default is to return
-`false`.
+Indicates whether `proc` can execute `f` over `args` given `opts`. `Processor`
+subtypes should overload this function to return `true` if and only if it is
+essentially guaranteed that `f(args...)` is supported. Additionally,
+`iscompatible_func` and `iscompatible_arg` can be overriden to determine
+compatibility of `f` and `args` individually. The default implementation
+returns `false`.
 """
-iscompatible(proc::Processor, opts, x) = false
+iscompatible(proc::Processor, opts, f, args...) =
+    iscompatible_func(proc, opts, f) &&
+    all(x->iscompatible_arg(proc, opts, x), args)
+iscompatible_func(proc::Processor, opts, f) = false
+iscompatible_arg(proc::Processor, opts, x) = false
 
 """
     get_processors(proc::Processor) -> Vector{T} where T<:Processor
@@ -131,9 +137,9 @@ function add_callback!(func)
     empty!(OSPROC_CACHE)
 end
 Base.:(==)(proc1::OSProc, proc2::OSProc) = proc1.pid == proc2.pid
-function iscompatible(proc::OSProc, opts, x)
+function iscompatible(proc::OSProc, opts, f, args...)
     for child in proc.children
-        if iscompatible(child, opts, x)
+        if iscompatible(child, opts, f, args...)
             return true
         end
     end
@@ -152,7 +158,7 @@ function choose_processor(from_proc::OSProc, options, f, args)
     for i in 1:length(from_proc.queue)
         proc = popfirst!(from_proc.queue)
         push!(from_proc.queue, proc)
-        if !all(x->iscompatible(proc, options, x), args)
+        if !iscompatible(proc, options, f, args)
             continue
         end
         if isempty(options.proctypes)
@@ -175,7 +181,7 @@ struct ThreadProc <: Processor
     owner::Int
     tid::Int
 end
-iscompatible(proc::ThreadProc, opts, x) = true
+iscompatible(proc::ThreadProc, opts, f, args...) = true
 move(ctx, from_proc::OSProc, to_proc::ThreadProc, x) = x
 move(ctx, from_proc::ThreadProc, to_proc::OSProc, x) = x
 @static if VERSION >= v"1.3.0-DEV.573"
