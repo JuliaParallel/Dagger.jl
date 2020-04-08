@@ -96,7 +96,7 @@ function move(ctx, from_proc::Processor, to_proc::Processor, x)
     # Move to to_proc
     parent_proc = get_parent(to_proc)
     path = Processor[to_proc, parent_proc]
-    while parent_proc != local_proc
+    while parent_proc != local_proc && !(parent_proc isa OSProc)
         parent_proc = get_parent(parent_proc)
         push!(path, parent_proc)
     end
@@ -144,16 +144,16 @@ function add_callback!(func)
     empty!(OSPROC_CACHE)
 end
 Base.:(==)(proc1::OSProc, proc2::OSProc) = proc1.pid == proc2.pid
-function iscompatible(proc::OSProc, opts, f, args...)
-    for child in proc.children
-        if iscompatible(child, opts, f, args...)
-            return true
-        end
-    end
-    return true
-end
+iscompatible(proc::OSProc, opts, f, args...) =
+    any(child->iscompatible(child, opts, f, args...), proc.children)
+iscompatible_func(proc::OSProc, opts, f) =
+    any(child->iscompatible_func(child, opts, f), proc.children)
+iscompatible_arg(proc::OSProc, opts, args...) =
+    any(child->
+        all(arg->iscompatible_arg(child, opts, arg), args),
+    proc.children)
 get_processors(proc::OSProc) =
-    vcat(get_processors(child) for child in proc.children)
+    vcat((get_processors(child) for child in proc.children)...,)
 function choose_processor(from_proc::OSProc, options, f, args)
     if isempty(from_proc.queue)
         for child in from_proc.children
@@ -190,6 +190,8 @@ struct ThreadProc <: Processor
     tid::Int
 end
 iscompatible(proc::ThreadProc, opts, f, args...) = true
+iscompatible_func(proc::ThreadProc, opts, f) = true
+iscompatible_arg(proc::ThreadProc, opts, x) = true
 move(ctx, from_proc::OSProc, to_proc::ThreadProc, x) = x
 move(ctx, from_proc::ThreadProc, to_proc::OSProc, x) = x
 @static if VERSION >= v"1.3.0-DEV.573"
