@@ -79,7 +79,7 @@ function move(ctx, from_proc::Processor, to_proc::Processor, x)
     @debug "Initiating generic move"
     # Move to remote OSProc
     @debug "(Remote) moving $parent_proc to $grandparent_proc"
-    root = get_osproc(from_proc)
+    root = get_parent_osproc(from_proc)
     x, parent_proc = remotecall_fetch(move_to_osproc, root.pid, from_proc, x)
 
     # Move to local OSProc
@@ -104,7 +104,7 @@ function move(ctx, from_proc::Processor, to_proc::Processor, x)
     end
     return x
 end
-function get_osproc(proc)
+function get_parent_osproc(proc)
     while !(proc isa OSProc)
         proc = get_parent(proc)
     end
