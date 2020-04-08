@@ -78,14 +78,9 @@ The default implementation breaks a single `move` call down into a sequence of
 function move(ctx, from_proc::Processor, to_proc::Processor, x)
     @debug "Initiating generic move"
     # Move to remote OSProc
-    parent_proc = from_proc
-    while !(parent_proc isa OSProc)
-        # FIXME: Initiate this chain on remote side
-        grandparent_proc = get_parent(parent_proc)
-        @debug "(Remote) moving $parent_proc to $grandparent_proc"
-        x = move(ctx, parent_proc, grandparent_proc, x)
-        parent_proc = grandparent_proc
-    end
+    @debug "(Remote) moving $parent_proc to $grandparent_proc"
+    root = get_osproc(from_proc)
+    x, parent_proc = remotecall_fetch(move_to_osproc, root.pid, from_proc, x)
 
     # Move to local OSProc
     remote_proc = parent_proc
@@ -108,6 +103,21 @@ function move(ctx, from_proc::Processor, to_proc::Processor, x)
         last_proc = next_proc
     end
     return x
+end
+function get_osproc(proc)
+    while !(proc isa OSProc)
+        proc = get_parent(proc)
+    end
+    proc
+end
+function move_to_osproc(parent_proc, x)
+    ctx = Context()
+    while !(parent_proc isa OSProc)
+        grandparent_proc = get_parent(parent_proc)
+        x = move(ctx, parent_proc, grandparent_proc, x)
+        parent_proc = grandparent_proc
+    end
+    return x, parent_proc
 end
 
 """

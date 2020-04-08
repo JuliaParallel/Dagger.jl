@@ -24,6 +24,16 @@ import Dagger.Sch: ThunkOptions
             @test Dagger.iscompatible(proc, opts, unknown_func, us, 1, us, 2.0)
         end
     end
+    @testset "Opt-in/Opt-out" begin
+        @test Dagger.default_enabled(OSProc()) == true
+        @test Dagger.default_enabled(ThreadProc(1,1)) == true
+        struct OptOutProc <: Processor end
+        @test Dagger.default_enabled(OptOutProc()) == false
+    end
+    @testset "Processor exhaustion" begin
+        opts = ThunkOptions(proctypes=[])
+        @test_throws ErrorException collect(delayed(sum)([1,2,3]; options=opts))
+    end
     @testset "Roundtrip move()" begin
         ctx = Context()
         tp = ThreadProc(1, 1)
