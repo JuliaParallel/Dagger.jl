@@ -2,6 +2,9 @@ using Distributed
 import Dagger: Context, Processor, OSProc, ThreadProc, get_parent, get_processors
 import Dagger.Sch: ThunkOptions
 
+struct UnknownStruct end
+struct OptOutProc <: Processor end
+
 @testset "Processors" begin
     @testset "Parents/Children" begin
         tp = ThreadProc(1, 1)
@@ -13,7 +16,6 @@ import Dagger.Sch: ThunkOptions
     end
     @testset "Function/argument compatability" begin
         unknown_func = () -> nothing
-        struct UnknownStruct end
         tp = ThreadProc(1, 1)
         op = get_parent(tp)
         opts = ThunkOptions()
@@ -27,12 +29,11 @@ import Dagger.Sch: ThunkOptions
     @testset "Opt-in/Opt-out" begin
         @test Dagger.default_enabled(OSProc()) == true
         @test Dagger.default_enabled(ThreadProc(1,1)) == true
-        struct OptOutProc <: Processor end
         @test Dagger.default_enabled(OptOutProc()) == false
     end
     @testset "Processor exhaustion" begin
-        opts = ThunkOptions(proctypes=[])
-        @test_throws ErrorException collect(delayed(sum)([1,2,3]; options=opts))
+        opts = ThunkOptions(proctypes=[OptOutProc])
+        @test_throws CapturedException collect(delayed(sum; options=opts)([1,2,3]))
     end
     @testset "Roundtrip move()" begin
         ctx = Context()

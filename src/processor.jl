@@ -184,8 +184,22 @@ function choose_processor(from_proc::OSProc, options, f, args)
             return proc
         end
     end
-    @error "($(myid())) Exhausted all available processor types!" proctypes=options.proctypes procsavail=from_proc.queue args=args
+    throw(ProcessorSelectionException(options.proctypes, from_proc.queue, f, args))
 end
+struct ProcessorSelectionException <: Exception
+    proctypes::Vector{Type}
+    procsavail::Vector{Processor}
+    f
+    args
+end
+function Base.show(io::IO, pex::ProcessorSelectionException)
+    println(io, "(Worker $(myid())) Exhausted all available processor types!")
+    println(io, "  Proctypes: $(pex.proctypes)")
+    println(io, "  Procs Available: $(pex.procsavail)")
+    println(io, "  Function: $(pex.f)")
+    print(io, "  Arguments: $(pex.args)")
+end
+
 move(ctx, from_proc::OSProc, to_proc::OSProc, x) = x
 execute!(proc::OSProc, f, args...) = f(args...)
 default_enabled(proc::OSProc) = true
