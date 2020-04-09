@@ -8,6 +8,7 @@ check_exited_exception(res::CapturedException) =
 check_exited_exception(res::RemoteException) =
     check_exited_exception(res.captured)
 check_exited_exception(res::ProcessExitedException) = true
+check_exited_exception(res::Base.IOError) = true
 check_exited_exception(res) = false
 
 """
