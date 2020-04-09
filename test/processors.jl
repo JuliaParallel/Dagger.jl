@@ -2,8 +2,22 @@ using Distributed
 import Dagger: Context, Processor, OSProc, ThreadProc, get_parent, get_processors
 import Dagger.Sch: ThunkOptions
 
+@everywhere begin
+
 struct UnknownStruct end
-struct OptOutProc <: Processor end
+
+struct OptOutProc <: Dagger.Processor end
+
+struct PathProc <: Dagger.Processor
+    owner::Int
+end
+Dagger.get_parent(proc::PathProc) = OSProc(proc.owner)
+Dagger.move(ctx, ::PathProc, ::OSProc, x::Float64) = x+1
+Dagger.move(ctx, ::OSProc, ::PathProc, x::Float64) = x+2
+Dagger.iscompatible(proc::PathProc, opts, f, args...) = true
+Dagger.execute!(proc::PathProc, func, args...) = func(args...)
+
+end
 
 @testset "Processors" begin
     @testset "Parents/Children" begin
@@ -44,18 +58,7 @@ struct OptOutProc <: Processor end
         @test value === moved_value
     end
     @testset "Generic path move()" begin
-        @everywhere begin
-
-        struct PathProc <: Dagger.Processor
-            owner::Int
-        end
-        Dagger.get_parent(proc::PathProc) = OSProc(proc.owner)
-        Dagger.move(ctx, ::PathProc, ::OSProc, x::Float64) = x+1
-        Dagger.move(ctx, ::OSProc, ::PathProc, x::Float64) = x+2
-        Dagger.add_callback!(proc->PathProc(myid()))
-
-        end
-
+        @everywhere Dagger.add_callback!(proc->PathProc(myid()))
         ctx = Context()
         proc1 = first(filter(x->x isa PathProc, get_processors(OSProc(1))))
         proc2 = first(filter(x->x isa PathProc, get_processors(OSProc(2))))
@@ -63,5 +66,14 @@ struct OptOutProc <: Processor end
         moved_value = Dagger.move(ctx, proc1, proc2, value)
         @test moved_value == value+3
         @everywhere pop!(Dagger.PROCESSOR_CALLBACKS)
+    end
+    @testset "Add callback in same world" begin
+        function addcb()
+            @everywhere Dagger.add_callback!(cb)
+            cb = eval(Dagger, :(proc->PathProc(myid())))
+            opts = ThunkOptions(proctypes=[PathProc])
+            collect(delayed(identity; options=opts)(1.0))
+            @everywhere pop!(Dagger.PROCESSOR_CALLBACKS)
+        end
     end
 end

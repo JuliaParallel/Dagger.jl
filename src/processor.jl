@@ -141,7 +141,7 @@ function get_osproc(pid::Int)
     proc = OSProc(pid, Dict{Symbol,Any}(), Processor[], Processor[])
     for cb in PROCESSOR_CALLBACKS
         try
-            child = cb(proc)
+            child = Base.invokelatest(cb, proc)
             child !== nothing && push!(proc.children, child)
         catch err
             @error "Error in processor callback" exception=(err,catch_backtrace())
