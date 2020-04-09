@@ -1,9 +1,9 @@
 import Dagger.Sch: SchedulerOptions, ThunkOptions
 
+@everywhere begin
 function inc(x)
     x+1
 end
-@everywhere begin
 function checkwid(x...)
     @assert myid() == 1
     return 1
@@ -34,7 +34,7 @@ end
             @warn "Threading tests running in serial"
         end
         @testset "Scheduler options: threads" begin
-            options = SchedulerOptions(;threads=true)
+            options = SchedulerOptions(;proctypes=[Dagger.ThreadProc])
             a = delayed(checktid)(1)
             b = delayed(checktid)(2)
             c = delayed(checktid)(a,b)
@@ -42,10 +42,28 @@ end
             @test collect(Context(), c; options=options) == 1
         end
         @testset "Thunk options: threads" begin
-            options = ThunkOptions(;threads=true)
+            options = ThunkOptions(;proctypes=[Dagger.ThreadProc])
             a = delayed(checktid; options=options)(1)
 
             @test collect(Context(), a) == 1
         end
     end
+
+    @everywhere Dagger.add_callback!(proc->FakeProc())
+    @testset "Thunk options: proctypes" begin
+        @test Dagger.iscompatible_arg(FakeProc(), nothing, 1) == true
+        @test Dagger.iscompatible_arg(FakeProc(), nothing, FakeVal(1)) == true
+        @test Dagger.iscompatible_arg(FakeProc(), nothing, 1.0) == false
+        @test Dagger.default_enabled(Dagger.ThreadProc(1,1)) == true
+        @test Dagger.default_enabled(FakeProc()) == false
+
+        opts = Dagger.Sch.ThunkOptions(;proctypes=[Dagger.ThreadProc])
+        as = [delayed(identity; options=opts)(i) for i in 1:5]
+        opts = Dagger.Sch.ThunkOptions(;proctypes=[FakeProc])
+        b = delayed(fakesum; options=opts)(as...)
+
+        @test collect(Context(), b) == 57
+    end
+    @everywhere (pop!(Dagger.PROCESSOR_CALLBACKS); empty!(Dagger.OSPROC_CACHE))
+
 end

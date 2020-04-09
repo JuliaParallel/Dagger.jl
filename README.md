@@ -76,6 +76,38 @@ top_node = delayed(group)(head_nodes...)
 compute(top_node)
 ```
 
+## Scheduler and Thunk options
+
+While Dagger generally "just works", sometimes one needs to exert some more
+fine-grained control over how the scheduler allocates work. There are two
+parallel mechanisms to achieve this: Scheduler options (from
+`Dagger.Sch.SchedulerOptions`) and Thunk options (from
+`Dagger.Sch.ThunkOptions`). These two options structs generally contain the
+same options, with the difference being that Scheduler options operate
+globally across an entire DAG, and Thunk options operate on a thunk-by-thunk
+basis. Scheduler options can be constructed and passed to `collect()` or
+`compute()` as the keyword argument `options`, and Thunk options can be passed
+to Dagger's `delayed` function similarly: `delayed(myfunc)(arg1, arg2, ...;
+options=opts)`. Check the docstring for the two options structs to see what
+options are available.
+
+## Processors and Resource control
+
+By default, Dagger uses the CPU to process work, typically single-threaded per
+cluster node. However, Dagger allows access to a wider range of hardware and
+software acceleration techniques, such as multithreading and GPUs. These more
+advanced (but performant) accelerators are disabled by default, but can easily
+be enabled by using Scheduler/Thunk options in the `proctypes` field. If
+non-empty, only the processor types contained in `options.proctypes` will be
+used to compute all or a given thunk.
+
+### GPU Processors
+
+The [DaggerGPU.jl](https://github.com/jpsamaroo/DaggerGPU.jl) package can be
+imported to enable GPU acceleration for NVIDIA and AMD GPUs, when available.
+The processors provided by that package are not enabled by default, but may be
+enabled via `options.proctypes` as usual.
+
 ## Rough high level description of scheduling
 
 - First picks the leaf Thunks and distributes them to available workers. Each worker is given at most 1 task at a time. If input to the node is a `Chunk`, then workers which already have the chunk are preferred.

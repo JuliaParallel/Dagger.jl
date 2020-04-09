@@ -77,7 +77,7 @@ compute(ctx, x::ArrayOp; options=nothing) =
     compute(ctx, cached_stage(ctx, x)::DArray; options=options)
 
 collect(ctx::Context, x::ArrayOp; options=nothing) =
-    collect(ctx, compute(ctx, x); options=options)
+    collect(ctx, compute(ctx, x; options=options); options=options)
 
 collect(x::ArrayOp; options=nothing) = collect(Context(), x; options=options)
 

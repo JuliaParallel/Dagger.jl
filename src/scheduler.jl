@@ -3,7 +3,7 @@ module Sch
 using Distributed
 import MemPool: DRef
 
-import ..Dagger: Context, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs
+import ..Dagger: Context, Processor, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, choose_processor, execute!
 
 include("fault-handler.jl")
 
@@ -42,11 +42,10 @@ Stores DAG-global options to be passed to the Dagger.Sch scheduler.
 
 # Arguments
 - `single::Int=0`: Force all work onto worker with specified id. `0` disables this option.
-- `threads::Bool=false`: Use multithreading if available
 """
 Base.@kwdef struct SchedulerOptions
     single::Int = 0
-    threads::Bool = false
+    proctypes::Vector{Type} = Type[]
 end
 
 """
@@ -56,11 +55,20 @@ Stores Thunk-local options to be passed to the Dagger.Sch scheduler.
 
 # Arguments
 - `single::Int=0`: Force thunk onto worker with specified id. `0` disables this option.
-- `threads::Bool=false`: Use multithreading if available
+- `proctypes::Vector{Type{<:Processor}}=Type[]`: Force thunk to use one or
+more processors that are instances/subtypes of a contained type. Leave this
+vector empty to disable.
 """
 Base.@kwdef struct ThunkOptions
     single::Int = 0
-    threads::Bool = false
+    proctypes::Vector{Type} = Type[]
+end
+
+"Combine `SchedulerOptions` and `ThunkOptions` into a new `ThunkOptions`."
+function merge(sopts::SchedulerOptions, topts::ThunkOptions)
+    single = topts.single != 0 ? topts.single : sopts.single
+    proctypes = vcat(sopts.proctypes, topts.proctypes)
+    ThunkOptions(single, proctypes)
 end
 
 function cleanup(ctx)
@@ -216,7 +224,7 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
 
     if thunk.meta
         # Run it on the parent node
-        # do not _move data.
+        # do not move data.
         p = OSProc(myid())
         @dbg timespan_start(ctx, :comm, thunk.id, p)
         fetched = map(thunk.inputs) do x
@@ -248,10 +256,12 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
         istask(x) ? state.cache[x] : x
     end
     state.thunk_dict[thunk.id] = thunk
-    if thunk.options !== nothing && thunk.options.single > 0
-        proc = OSProc(thunk.options.single)
+    toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
+    options = merge(ctx.options, toptions)
+    if options.single > 0
+        proc = OSProc(options.single)
     end
-    async_apply(ctx, proc, thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist, thunk.cache, thunk.options)
+    async_apply(ctx, proc, thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist, thunk.cache, options)
 end
 
 function finish_task!(state, node, node_order; free=true)
@@ -317,31 +327,21 @@ function start_state(deps::Dict, node_order)
     state
 end
 
-_move(ctx, to_proc, x) = x
-_move(ctx, to_proc::OSProc, x::Union{Chunk, Thunk}) = collect(ctx, x)
-
 @noinline function do_task(ctx, proc, thunk_id, f, data, send_result, persist, cache, options)
     @dbg timespan_start(ctx, :comm, thunk_id, proc)
-    time_cost = @elapsed fetched = map(x->_move(ctx, proc, x), data)
+    fetched = map(x->x isa Union{Chunk,Thunk} ? collect(ctx, x) : x, data)
     @dbg timespan_end(ctx, :comm, thunk_id, proc)
 
     @dbg timespan_start(ctx, :compute, thunk_id, proc)
+    from_proc = proc
+    to_proc = choose_processor(from_proc, options, f, fetched)
+    fetched = move.(Ref(ctx), Ref(from_proc), Ref(to_proc), fetched)
     result_meta = try
-        use_threads = (ctx.options !== nothing && ctx.options.threads) ||
-                      (options !== nothing && options.threads)
-        if use_threads
-            @static if VERSION >= v"1.3.0-DEV.573"
-                res = fetch(Threads.@spawn f(fetched...))
-            else
-                res = f(fetched...)
-            end
-        else
-            res = f(fetched...)
-        end
-        (proc, thunk_id, send_result ? res : tochunk(res, persist=persist, cache=persist ? true : cache)) #todo: add more metadata
+        res = execute!(to_proc, f, fetched...)
+        (from_proc, thunk_id, send_result ? res : tochunk(res, to_proc; persist=persist, cache=persist ? true : cache)) #todo: add more metadata
     catch ex
         bt = catch_backtrace()
-        (proc, thunk_id, RemoteException(myid(), CapturedException(ex, bt)))
+        (from_proc, thunk_id, RemoteException(myid(), CapturedException(ex, bt)))
     end
     @dbg timespan_end(ctx, :compute, thunk_id, proc)
     result_meta
