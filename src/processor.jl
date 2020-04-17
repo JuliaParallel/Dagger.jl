@@ -227,6 +227,24 @@ end
 get_parent(proc::ThreadProc) = OSProc(proc.owner)
 default_enabled(proc::ThreadProc) = true
 
+"""
+    DaggerKAProc <: Processor
+
+DaggerKAProc is Processor subtype which launches the user's function with KernelAbstractions.jl.  
+"""
+struct DaggerKA <: Processor
+    owner::Int
+end
+
+iscompatible(proc::DaggerKA, opts, f, args...) = true
+iscompatible_func(proc::DaggerKA, opts, f) = true
+iscompatible_arg(proc::DaggerKA, opts, x) = true
+move(ctx, from_proc::OSProc, to_proc::DaggerKA, x) = x
+move(ctx, from_proc::DaggerKA, to_proc::OSProc, x) = x
+execute!(proc::DaggerKA, f, args...) = fetch(@kernel f(args...))
+get_parent(proc::DaggerKA) = OSProc(proc.owner)
+default_enabled(proc::DaggerKA) = true
+
 # TODO: ThreadGroupProc?
 
 "A context represents a set of processors to use for an operation."
