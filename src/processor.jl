@@ -232,18 +232,18 @@ default_enabled(proc::ThreadProc) = true
 
 DaggerKAProc is Processor subtype which launches the user's function with KernelAbstractions.jl.  
 """
-struct DaggerKA <: Processor
+struct DaggerKAProc <: Processor
     owner::Int
 end
 
-iscompatible(proc::DaggerKA, opts, f, args...) = true
-iscompatible_func(proc::DaggerKA, opts, f) = true
-iscompatible_arg(proc::DaggerKA, opts, x) = true
-move(ctx, from_proc::OSProc, to_proc::DaggerKA, x) = x
-move(ctx, from_proc::DaggerKA, to_proc::OSProc, x) = x
-execute!(proc::DaggerKA, f, args...) = fetch(@kernel f(args...))
-get_parent(proc::DaggerKA) = OSProc(proc.owner)
-default_enabled(proc::DaggerKA) = true
+iscompatible(proc::DaggerKAProc, opts, f, args...) = true
+iscompatible_func(proc::DaggerKAProc, opts, f) = true
+iscompatible_arg(proc::DaggerKAProc, opts, x) = true
+move(ctx, from_proc::OSProc, to_proc::DaggerKAProc, x) = x
+move(ctx, from_proc::DaggerKAProc, to_proc::OSProc, x) = x
+execute!(proc::DaggerKAProc, f, args...) = fetch(@kernel f(args...))
+get_parent(proc::DaggerKAProc) = OSProc(proc.owner)
+default_enabled(proc::DaggerKAProc) = true
 
 # TODO: ThreadGroupProc?
 

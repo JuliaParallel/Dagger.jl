@@ -28,8 +28,8 @@ end
         @test op isa OSProc
         @test op.pid == 1
     end
-    @testset "Parents/Children of DaggerKA" begin
-        tp = DaggerKA(1)
+    @testset "Parents/Children of DaggerKAProc" begin
+        tp = DaggerKAProc(1)
         @test tp isa Processor
         op = get_parent(tp)
         @test op isa Processor
@@ -48,9 +48,9 @@ end
             @test Dagger.iscompatible(proc, opts, unknown_func, us, 1, us, 2.0)
         end
     end
-    @testset "Function/argument compatability of DaggerKA" begin
+    @testset "Function/argument compatability of DaggerKAProc" begin
         unknown_func = () -> nothing
-        tp = DaggerKA(1)
+        tp = DaggerKAProc(1)
         op = get_parent(tp)
         opts = ThunkOptions()
         us = UnknownStruct()
@@ -63,7 +63,7 @@ end
     @testset "Opt-in/Opt-out" begin
         @test Dagger.default_enabled(OSProc()) == true
         @test Dagger.default_enabled(ThreadProc(1,1)) == true
-        @test Dagger.default_enabled(DaggerKA(1)) == true
+        @test Dagger.default_enabled(DaggerKAProc(1)) == true
         @test Dagger.default_enabled(OptOutProc()) == false
     end
     @testset "Processor exhaustion" begin
@@ -78,9 +78,9 @@ end
         moved_value = Dagger.move(ctx, tp, op, Dagger.move(ctx, op, tp, value))
         @test value === moved_value
     end
-    @testset "Roundtrip move() test for DaggerKA" begin
+    @testset "Roundtrip move() test for DaggerKAProc" begin
         ctx = Context()
-        tp = DaggerKA(1)
+        tp = DaggerKAProc(1)
         op = get_parent(tp)
         value = rand()
         moved_value = Dagger.move(ctx, tp, op, Dagger.move(ctx, op, tp, value))
