@@ -20,7 +20,7 @@ Dagger.execute!(proc::PathProc, func, args...) = func(args...)
 end
 
 @testset "Processors" begin
-    @testset "Parents/Children" begin
+    @testset "Parents/Children of ThreadProc" begin
         tp = ThreadProc(1, 1)
         @test tp isa Processor
         op = get_parent(tp)
@@ -28,7 +28,15 @@ end
         @test op isa OSProc
         @test op.pid == 1
     end
-    @testset "Function/argument compatability" begin
+    @testset "Parents/Children of DaggerKA" begin
+        tp = DaggerKA(1)
+        @test tp isa Processor
+        op = get_parent(tp)
+        @test op isa Processor
+        @test op isa OSProc
+        @test op.pid == 1
+    end
+    @testset "Function/argument compatability of ThreadProc" begin
         unknown_func = () -> nothing
         tp = ThreadProc(1, 1)
         op = get_parent(tp)
@@ -40,16 +48,29 @@ end
             @test Dagger.iscompatible(proc, opts, unknown_func, us, 1, us, 2.0)
         end
     end
+    @testset "Function/argument compatability of DaggerKA" begin
+        unknown_func = () -> nothing
+        tp = DaggerKA(1)
+        op = get_parent(tp)
+        opts = ThunkOptions()
+        us = UnknownStruct()
+        for proc in (op, tp)
+            @test Dagger.iscompatible_func(proc, opts, unknown_func)
+            @test Dagger.iscompatible_arg(proc, opts, us)
+            @test Dagger.iscompatible(proc, opts, unknown_func, us, 1)
+        end
+    end
     @testset "Opt-in/Opt-out" begin
         @test Dagger.default_enabled(OSProc()) == true
         @test Dagger.default_enabled(ThreadProc(1,1)) == true
+        @test Dagger.default_enabled(DaggerKA(1)) == true
         @test Dagger.default_enabled(OptOutProc()) == false
     end
     @testset "Processor exhaustion" begin
         opts = ThunkOptions(proctypes=[OptOutProc])
         @test_throws CapturedException collect(delayed(sum; options=opts)([1,2,3]))
     end
-    @testset "Roundtrip move()" begin
+    @testset "Roundtrip move() test for ThreadProc" begin
         ctx = Context()
         tp = ThreadProc(1, 1)
         op = get_parent(tp)
@@ -57,6 +78,14 @@ end
         moved_value = Dagger.move(ctx, tp, op, Dagger.move(ctx, op, tp, value))
         @test value === moved_value
     end
+    @testset "Roundtrip move() test for DaggerKA" begin
+        ctx = Context()
+        tp = DaggerKA(1)
+        op = get_parent(tp)
+        value = rand()
+        moved_value = Dagger.move(ctx, tp, op, Dagger.move(ctx, op, tp, value))
+        @test value === moved_value
+    end 
     @testset "Generic path move()" begin
         @everywhere Dagger.add_callback!(proc->PathProc(myid()))
         ctx = Context()
