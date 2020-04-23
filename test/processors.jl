@@ -1,4 +1,4 @@
-using Distributed
+using Distributed, KernelAbstractions
 import Dagger: Context, Processor, OSProc, ThreadProc, get_parent, get_processors
 import Dagger.Sch: ThunkOptions
 
@@ -59,6 +59,15 @@ end
             @test Dagger.iscompatible_arg(proc, opts, us)
             @test Dagger.iscompatible(proc, opts, unknown_func, us, 1)
         end
+    @kernel function add(A, B, C)
+        I = @index(Global)
+        C[I] = A[I] + B[I]
+    end
+    A = ones(512, 512)
+    B = 3*A
+    C = zeros(512, 512)
+    wait(add(CPU(), 16)(A, B, C, ndrange=size(C)))
+    @test all(C .== 4.0)
     end
     @testset "Opt-in/Opt-out" begin
         @test Dagger.default_enabled(OSProc()) == true
