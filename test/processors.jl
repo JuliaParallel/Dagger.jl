@@ -67,7 +67,7 @@ end
     A = delayed(value)(ones(512,512))
     B = delayed(value)(3*ones(512,512))
     C = delayed(value)(zeros(512,512))
-    S = delayed(add(CPU(), 16))(A,B,C, ndrange=size(C))
+    S = delayed(add)(A,B,C)
     @test all(collect(S) .== 4.0)
     end
     @testset "Opt-in/Opt-out" begin
