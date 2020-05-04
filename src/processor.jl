@@ -76,6 +76,9 @@ The default implementation breaks a single `move` call down into a sequence of
 `move` calls, and is not intended to be maximally efficient.
 """
 function move(ctx, from_proc::Processor, to_proc::Processor, x)
+    if from_proc == to_proc
+        return x
+    end
     @debug "Initiating generic move"
     # Move to remote OSProc
     @debug "(Remote) moving $parent_proc to $grandparent_proc"
