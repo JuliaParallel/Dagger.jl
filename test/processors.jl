@@ -52,23 +52,25 @@ end
         unknown_func = () -> nothing
         tp = DaggerKAProc(1)
         op = get_parent(tp)
-        opts = ThunkOptions()
+        opts = ThunkOptions(proctypes=[DaggerKAProc])
         us = UnknownStruct()
         for proc in (op, tp)
             @test Dagger.iscompatible_func(proc, opts, unknown_func)
             @test Dagger.iscompatible_arg(proc, opts, us)
             @test Dagger.iscompatible(proc, opts, unknown_func, us, 1)
         end
-    value(a) = a
-    @kernel function add(A, B, C)
-        I = @index(Global)
-        C[I] = A[I] + B[I]
-    end
-    A = delayed(value)(ones(512,512))
-    B = delayed(value)(3*ones(512,512))
-    C = delayed(value)(zeros(512,512))
-    S = delayed(add)(A,B,C)
-    @test all(collect(S) .== 4.0)
+        value(a) = a
+        a = delayed(value; options=opts)(ones(512,512);options=opts)
+        b = delayed(value; options=opts)(3*ones(512,512);options=opts)
+        c = delayed(value; options=opts)(zeros(512,512);options=opts)
+        @kernel function add(a, b, c)
+            i = @index(Global)
+            c[i] = a[i] + b[i]
+        end
+        kernel = add(CPU(), 16)
+        event = kernel(a,b,c, ndrange=size(c))
+        collect(delayed(wait(event); options=opts)(a,b,c))
+        @test all(collect(c) .== 4.0)
     end
     @testset "Opt-in/Opt-out" begin
         @test Dagger.default_enabled(OSProc()) == true
