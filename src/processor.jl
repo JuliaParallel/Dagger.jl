@@ -241,7 +241,7 @@ iscompatible_func(proc::DaggerKAProc, opts, f) = true
 iscompatible_arg(proc::DaggerKAProc, opts, x) = true
 move(ctx, from_proc::OSProc, to_proc::DaggerKAProc, x) = x
 move(ctx, from_proc::DaggerKAProc, to_proc::OSProc, x) = x
-execute!(proc::DaggerKAProc, f, args...) = fetch(@kernel f(args...))
+execute!(proc::DaggerKAProc, f, args...) = fetch(wait f(args...))
 get_parent(proc::DaggerKAProc) = OSProc(proc.owner)
 default_enabled(proc::DaggerKAProc) = true
 
