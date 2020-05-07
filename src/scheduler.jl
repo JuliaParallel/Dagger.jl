@@ -42,10 +42,14 @@ Stores DAG-global options to be passed to the Dagger.Sch scheduler.
 
 # Arguments
 - `single::Int=0`: Force all work onto worker with specified id. `0` disables this option.
+- `proclist::Vector=[]`: Force scheduler to use one or more processors that are
+either (leave empty to disable):
+  - `x::Type`: Instances/subtypes of instances of `x`
+  - `x::Function`: `x` returns `true` when the processor is passed as argument
 """
 Base.@kwdef struct SchedulerOptions
     single::Int = 0
-    proctypes::Vector{Type} = Type[]
+    proclist::Vector = []
 end
 
 """
@@ -55,20 +59,21 @@ Stores Thunk-local options to be passed to the Dagger.Sch scheduler.
 
 # Arguments
 - `single::Int=0`: Force thunk onto worker with specified id. `0` disables this option.
-- `proctypes::Vector{Type{<:Processor}}=Type[]`: Force thunk to use one or
-more processors that are instances/subtypes of a contained type. Leave this
-vector empty to disable.
+- `proclist::Vector=[]`: Force thunk to use one or more processors that are
+either (leave empty to disable):
+  - `x::Type`: Instances/subtypes of instances of `x`
+  - `x::Function`: `x` returns `true` when the processor is passed as argument
 """
 Base.@kwdef struct ThunkOptions
     single::Int = 0
-    proctypes::Vector{Type} = Type[]
+    proclist::Vector = []
 end
 
 "Combine `SchedulerOptions` and `ThunkOptions` into a new `ThunkOptions`."
 function merge(sopts::SchedulerOptions, topts::ThunkOptions)
     single = topts.single != 0 ? topts.single : sopts.single
-    proctypes = vcat(sopts.proctypes, topts.proctypes)
-    ThunkOptions(single, proctypes)
+    proclist = vcat(sopts.proclist, topts.proclist)
+    ThunkOptions(single, proclist)
 end
 
 function cleanup(ctx)
