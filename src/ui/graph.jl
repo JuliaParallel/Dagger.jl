@@ -1,23 +1,21 @@
-import Dagger: Thunk
 export show_plan
 
-function node_label(io, t::Thunk, c)
-    if isa(t.f, Function)
-        println(io, "$(t.id) [label=\"$(t.f) - $(t.id)\"]")
-    else
-        println(io, "$(t.id) [label=\"fn - $(t.id)\"]")
-    end
+### DAG-based graphing
+
+function write_node(io, t::Thunk, c)
+    f = isa(t.f, Function) ? "$(t.f)" : "fn"
+    println(io, "$(t.id) [label=\"$f - $(t.id)\"]")
     c
 end
 
-function node_label(io, t,c)
+function write_node(io, t, c)
     l = replace(string(t), "\"", "")
     println(io, dec(hash(t)), " [label=\"$l\"]")
 end
 
 global _part_labels = Dict()
 
-function node_label(io, t::Chunk, c)
+function write_node(io, t::Chunk, c)
     _part_labels[t]="part_$c"
     c+1
 end
@@ -39,7 +37,7 @@ function write_dag(io, t)
     deps = dependents(t)
     c=1
     for k in keys(deps)
-        c = node_label(io, k, c)
+        c = write_node(io, k, c)
     end
     for (k, v) in deps
         for dep in v
@@ -50,13 +48,68 @@ function write_dag(io, t)
     end
 end
 
-function show_plan(t::Thunk)
-    io = IOBuffer()
+### Timespan-based graphing
+
+pretty_time(ts::Timespan) = pretty_time(ts.finish-ts.start)
+function pretty_time(t)
+    if t > 1000^3
+        "$(t/(1000^3)) s"
+    elseif t > 1000^2
+        "$(t/(1000^2)) ms"
+    elseif t > 1000
+        "$(t/1000) us"
+    else
+        "$t ns"
+    end
+end
+
+function write_node(io, ts::Timespan, c)
+    f = ts.timeline
+    f = isa(f, Function) ? "$f" : "fn"
+    t_comp = pretty_time(ts)
+    println(io, "$(ts.id) [label=\"$f - $(ts.id)\nCompute: $t_comp\"]")
+    c
+end
+
+function write_edge(io, ts_comm::Timespan, logs)
+    f, id = ts_comm.timeline
+    # FIXME: We should print these edges too
+    id === nothing && return
+    t_comm = pretty_time(ts_comm)
+    print(io, "$id -> $(ts_comm.id) [label=\"Comm: $t_comm")
+    ts_idx = findfirst(x->x.category==:move &&
+                                ts_comm.id==x.id &&
+                                id==x.timeline[2], logs)
+    if ts_idx !== nothing
+        ts_move = logs[ts_idx]
+        t_move = pretty_time(ts_move)
+        print(io, "\nMove: $t_move")
+    end
+    println(io, "\"]")
+end
+
+function write_dag(io, logs::Vector)
+    c = 1
+    # FIXME: For edges with nothing ids, print non-task argument node
+    for ts in filter(x->x.category==:compute, logs)
+        c = write_node(io, ts, c)
+    end
+    for ts in filter(x->x.category==:comm, logs)
+        write_edge(io, ts, logs)
+    end
+end
+
+function show_plan(io::IO, t)
+    print(io, """digraph {
+    graph [layout=dot, rankdir=TB];""")
     write_dag(io, t)
-    """digraph {
-        graph [layout=dot, rankdir=TB];
-        $(String(take!(io)))
-    }"""
+    println(io, "}")
+end
+
+function show_plan(t::Union{Thunk,Vector})
+    io = IOBuffer()
+    show_plan(io, t)
+    return String(take!(io))
 end
 
 function show_plan(c)
