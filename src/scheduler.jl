@@ -222,19 +222,22 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
         end
     end
 
+    ids = map(thunk.inputs) do x
+        istask(x) ? x.id : nothing
+    end
     if thunk.meta
-        # Run it on the parent node
-        # do not move data.
+        # Run it on the parent node, do not move data.
         p = OSProc(myid())
-        @dbg timespan_start(ctx, :comm, thunk.id, p)
-        fetched = map(thunk.inputs) do x
-            istask(x) ? state.cache[x] : x
+        fetched = map(Iterators.zip(thunk.inputs,ids)) do (x, id)
+            @dbg timespan_start(ctx, :comm, (thunk.id, id), (thunk.f, id))
+            x = istask(x) ? state.cache[x] : x
+            @dbg timespan_end(ctx, :comm, (thunk.id, id), (thunk.f, id))
+            return x
         end
-        @dbg timespan_end(ctx, :comm, thunk.id, p)
 
-        @dbg timespan_start(ctx, :compute, thunk.id, p)
+        @dbg timespan_start(ctx, :compute, thunk.id, thunk.f)
         res = thunk.f(fetched...)
-        @dbg timespan_end(ctx, :compute, thunk.id, p)
+        @dbg timespan_end(ctx, :compute, thunk.id, (thunk.f, typeof(res), sizeof(res)))
 
         #push!(state.running, thunk)
         state.cache[thunk] = res
@@ -261,7 +264,7 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
     if options.single > 0
         proc = OSProc(options.single)
     end
-    async_apply(ctx, proc, thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist, thunk.cache, options)
+    async_apply(ctx, proc, thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist, thunk.cache, options, ids)
 end
 
 function finish_task!(state, node, node_order; free=true)
@@ -327,15 +330,25 @@ function start_state(deps::Dict, node_order)
     state
 end
 
-@noinline function do_task(ctx, proc, thunk_id, f, data, send_result, persist, cache, options)
-    @dbg timespan_start(ctx, :comm, thunk_id, proc)
-    fetched = map(x->x isa Union{Chunk,Thunk} ? collect(ctx, x) : x, data)
-    @dbg timespan_end(ctx, :comm, thunk_id, proc)
+@noinline function do_task(ctx, proc, thunk_id, f, data, send_result, persist, cache, options, ids)
+    fetched = map(Iterators.zip(data,ids)) do (x, id)
+        @dbg timespan_start(ctx, :comm, (thunk_id, id), (f, id))
+        x = x isa Union{Chunk,Thunk} ? collect(ctx, x) : x
+        @dbg timespan_end(ctx, :comm, (thunk_id, id), (f, id))
+        return x
+    end
 
-    @dbg timespan_start(ctx, :compute, thunk_id, proc)
     from_proc = proc
+    # TODO: Time choose_processor?
     to_proc = choose_processor(from_proc, options, f, fetched)
-    fetched = move.(Ref(ctx), Ref(from_proc), Ref(to_proc), fetched)
+    fetched = map(Iterators.zip(fetched,ids)) do (x, id)
+        @dbg timespan_start(ctx, :move, (thunk_id, id), (f, id))
+        x = move(ctx, from_proc, to_proc, x)
+        @dbg timespan_end(ctx, :move, (thunk_id, id), (f, id))
+        return x
+    end
+    @dbg timespan_start(ctx, :compute, thunk_id, f)
+    res = nothing
     result_meta = try
         res = execute!(to_proc, f, fetched...)
         (from_proc, thunk_id, send_result ? res : tochunk(res, to_proc; persist=persist, cache=persist ? true : cache)) #todo: add more metadata
@@ -343,14 +356,14 @@ end
         bt = catch_backtrace()
         (from_proc, thunk_id, RemoteException(myid(), CapturedException(ex, bt)))
     end
-    @dbg timespan_end(ctx, :compute, thunk_id, proc)
+    @dbg timespan_end(ctx, :compute, thunk_id, (f, typeof(res), sizeof(res)))
     result_meta
 end
 
-@noinline function async_apply(ctx, p::OSProc, thunk_id, f, data, chan, send_res, persist, cache, options)
+@noinline function async_apply(ctx, p::OSProc, thunk_id, f, data, chan, send_res, persist, cache, options, ids)
     @async begin
         try
-            put!(chan, remotecall_fetch(do_task, p.pid, ctx, p, thunk_id, f, data, send_res, persist, cache, options))
+            put!(chan, remotecall_fetch(do_task, p.pid, ctx, p, thunk_id, f, data, send_res, persist, cache, options, ids))
         catch ex
             bt = catch_backtrace()
             put!(chan, (p, thunk_id, CapturedException(ex, bt)))
