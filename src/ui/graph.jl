@@ -62,12 +62,24 @@ function pretty_time(t)
         "$t ns"
     end
 end
+function pretty_size(sz)
+    if sz > 1024^3
+        "$(sz/(1024^3)) GB (gigabytes)"
+    elseif sz > 1024^2
+        "$(sz/(1024^2)) MB (megabytes)"
+    elseif sz > 1024
+        "$(sz/1024) KB (kilobytes)"
+    else
+        "$sz B (bytes)"
+    end
+end
 
 function write_node(io, ts::Timespan, c)
-    f = ts.timeline
+    f, res_type, res_sz = ts.timeline
     f = isa(f, Function) ? "$f" : "fn"
     t_comp = pretty_time(ts)
-    println(io, "$(ts.id) [label=\"$f - $(ts.id)\nCompute: $t_comp\"]")
+    sz_comp = pretty_size(res_sz)
+    println(io, "$(ts.id) [label=\"$f - $(ts.id)\nCompute: $t_comp\nResult Type: $res_type\nResult Size: $sz_comp\"]")
     c
 end
 
@@ -76,7 +88,7 @@ function write_edge(io, ts_comm::Timespan, logs)
     # FIXME: We should print these edges too
     id === nothing && return
     t_comm = pretty_time(ts_comm)
-    print(io, "$id -> $(ts_comm.id) [label=\"Comm: $t_comm")
+    print(io, "$id -> $(ts_comm.id[1]) [label=\"Comm: $t_comm")
     ts_idx = findfirst(x->x.category==:move &&
                                 ts_comm.id==x.id &&
                                 id==x.timeline[2], logs)

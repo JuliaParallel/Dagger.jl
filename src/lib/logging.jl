@@ -46,11 +46,10 @@ create a timespan given the strt and finish events
 function make_timespan(start::Event, finish::Event)
     @assert start.category == finish.category
     @assert start.id == finish.id
-    @assert start.timeline == finish.timeline
 
     Timespan(start.category,
              start.id,
-             start.timeline,
+             finish.timeline,
              start.timestamp,
              finish.timestamp,
              Base.GC_Diff(finish.gc_num,start.gc_num),

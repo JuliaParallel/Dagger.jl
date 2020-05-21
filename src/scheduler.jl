@@ -229,15 +229,15 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
         # Run it on the parent node, do not move data.
         p = OSProc(myid())
         fetched = map(Iterators.zip(thunk.inputs,ids)) do (x, id)
-            @dbg timespan_start(ctx, :comm, thunk.id, (thunk.f, id))
+            @dbg timespan_start(ctx, :comm, (thunk.id, id), (thunk.f, id))
             x = istask(x) ? state.cache[x] : x
-            @dbg timespan_end(ctx, :comm, thunk.id, (thunk.f, id))
+            @dbg timespan_end(ctx, :comm, (thunk.id, id), (thunk.f, id))
             return x
         end
 
         @dbg timespan_start(ctx, :compute, thunk.id, thunk.f)
         res = thunk.f(fetched...)
-        @dbg timespan_end(ctx, :compute, thunk.id, thunk.f)
+        @dbg timespan_end(ctx, :compute, thunk.id, (thunk.f, typeof(res), sizeof(res)))
 
         #push!(state.running, thunk)
         state.cache[thunk] = res
@@ -332,9 +332,9 @@ end
 
 @noinline function do_task(ctx, proc, thunk_id, f, data, send_result, persist, cache, options, ids)
     fetched = map(Iterators.zip(data,ids)) do (x, id)
-        @dbg timespan_start(ctx, :comm, thunk_id, (f, id))
+        @dbg timespan_start(ctx, :comm, (thunk_id, id), (f, id))
         x = x isa Union{Chunk,Thunk} ? collect(ctx, x) : x
-        @dbg timespan_end(ctx, :comm, thunk_id, (f, id))
+        @dbg timespan_end(ctx, :comm, (thunk_id, id), (f, id))
         return x
     end
 
@@ -342,12 +342,13 @@ end
     # TODO: Time choose_processor?
     to_proc = choose_processor(from_proc, options, f, fetched)
     fetched = map(Iterators.zip(fetched,ids)) do (x, id)
-        @dbg timespan_start(ctx, :move, thunk_id, (f, id))
+        @dbg timespan_start(ctx, :move, (thunk_id, id), (f, id))
         x = move(ctx, from_proc, to_proc, x)
-        @dbg timespan_end(ctx, :move, thunk_id, (f, id))
+        @dbg timespan_end(ctx, :move, (thunk_id, id), (f, id))
         return x
     end
     @dbg timespan_start(ctx, :compute, thunk_id, f)
+    res = nothing
     result_meta = try
         res = execute!(to_proc, f, fetched...)
         (from_proc, thunk_id, send_result ? res : tochunk(res, to_proc; persist=persist, cache=persist ? true : cache)) #todo: add more metadata
@@ -355,7 +356,7 @@ end
         bt = catch_backtrace()
         (from_proc, thunk_id, RemoteException(myid(), CapturedException(ex, bt)))
     end
-    @dbg timespan_end(ctx, :compute, thunk_id, f)
+    @dbg timespan_end(ctx, :compute, thunk_id, (f, typeof(res), sizeof(res)))
     result_meta
 end
 
