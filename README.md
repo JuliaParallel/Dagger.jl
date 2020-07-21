@@ -7,7 +7,7 @@
 | [![][docs-master-img]][docs-master-url] | [![Build Status](https://travis-ci.org/JuliaParallel/Dagger.jl.svg?branch=master)](https://travis-ci.org/JuliaParallel/Dagger.jl) [![Coverage Status](https://coveralls.io/repos/github/JuliaParallel/Dagger.jl/badge.svg?branch=master)](https://coveralls.io/github/JuliaParallel/Dagger.jl?branch=master) |
 
 [docs-master-img]: https://img.shields.io/badge/docs-master-blue.svg
-[docs-master-url]: https://juliagpu.github.io/Dagger.jl/master
+[docs-master-url]: https://juliaparallel.github.io/Dagger.jl/master
 
 At the core of Dagger.jl is a scheduler heavily inspired by [Dask](https://docs.dask.org/en/latest/). It can run computations represented as [directed-acyclic-graphs](https://en.wikipedia.org/wiki/Directed_acyclic_graph) (DAGs) efficiently on many Julia worker processes.
 
