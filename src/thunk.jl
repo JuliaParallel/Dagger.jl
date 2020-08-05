@@ -100,8 +100,15 @@ cache_result!(t::Thunk) = (t.cache=true; t)
 Base.hash(x::Thunk, h::UInt) = hash(x.id, hash(h, 0x7ad3bac49089a05f % UInt))
 Base.isequal(x::Thunk, y::Thunk) = x.id==y.id
 
-function Base.show(io::IO, p::Thunk)
-    write(io, "*$(p.id)*")
+function Base.show(io::IO, z::Thunk)
+    lvl = get(io, :lazy_level, 1)
+    print(io, "Thunk($(z.f), ")
+    if lvl < 2
+        show(IOContext(io, :lazy_level => lvl+1), z.inputs)
+    else
+        print(io, "...")
+    end
+    print(io, ")")
 end
 
 inputs(x::Thunk) = x.inputs
