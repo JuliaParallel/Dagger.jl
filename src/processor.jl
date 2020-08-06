@@ -262,11 +262,7 @@ as a `Vector{Int}`.
 function Context(xs)
     Context(xs, NoOpLog(), false, nothing) # By default don't log events
 end
-Context(xs::Vector{Int}) = Context(map(OSProc, xs))
-function Context()
-    procs = [OSProc(w) for w in workers()]
-    Context(procs)
-end
+Context(xs::Vector{Int}=workers()) = Context(asyncmap(OSProc, xs))
 procs(ctx::Context) = ctx.procs
 
 """
