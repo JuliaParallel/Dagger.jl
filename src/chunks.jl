@@ -50,7 +50,7 @@ persist!(t::Chunk) = (t.persist=true; t)
 shouldpersist(p::Chunk) = t.persist
 affinity(c::Chunk) = affinity(c.handle)
 
-function unrelease(c::Chunk{T,DRef,P}) where {T,P}
+function unrelease(c::Chunk{<:Any,DRef})
     # set spilltodisk = true if data is still around
     try
         destroyonevict(c.handle, false)
