@@ -111,6 +111,8 @@ function Base.show(io::IO, z::Thunk)
     print(io, ")")
 end
 
+Base.summary(z::Thunk) = repr(z)
+
 inputs(x::Thunk) = x.inputs
 inputs(x) = ()
 
