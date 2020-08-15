@@ -102,20 +102,14 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     while !isempty(state.ready) || !isempty(state.running)
         if isempty(state.running) && !isempty(state.ready)
             # Nothing running, so schedule up to N thunks, 1 per N workers
-            for p in procs_to_use(ctx)
-                isempty(state.ready) && break
-                task = pop_with_affinity!(ctx, state.ready, p, false)
-                if task !== nothing
-                    fire_task!(ctx, task, p, state, chan)
-                end
-            end
+            schedule!(ctx, state, chan)
         end
 
         # This is a bit redundant as the @async task below does basically the
         # same job Without it though, testing of process modification becomes
         # non-deterministic (due to sleep in CI environment) which is why it is
         # still here.
-        procs_state = assign_new_procs!(ctx, state, chan, node_order, procs_state)
+        procs_state = assign_new_procs!(ctx, state, chan, procs_state)
 
         if isempty(state.running)
             # the block above fired only meta tasks
@@ -134,7 +128,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
             sleep(1)
             islocked(newtasks_lock) && return
             procs_state = lock(newtasks_lock) do
-                assign_new_procs!(ctx, state, chan, node_order, procs_state)
+                assign_new_procs!(ctx, state, chan, procs_state)
             end
         end
 
@@ -161,10 +155,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         @dbg timespan_start(ctx, :scheduler, thunk_id, master)
         immediate_next = finish_task!(state, node)
         if !isempty(state.ready) && !shall_remove_proc(ctx, proc)
-            thunk = pop_with_affinity!(Context(procs_to_use(ctx)), state.ready, proc, immediate_next)
-            if thunk !== nothing
-                fire_task!(ctx, thunk, proc, state, chan)
-            end
+            pop_and_fire!(Context(procs_to_use(ctx)), state, chan, proc; immediate_next=immediate_next)
         end
         @dbg timespan_end(ctx, :scheduler, thunk_id, master)
     end
@@ -182,17 +173,28 @@ end
 
 check_integrity(ctx) = @assert !isempty(procs_to_use(ctx)) "No suitable workers available in context."
 
+function schedule!(ctx, state, chan, procs=procs_to_use(ctx))
+    progress = false
+    for proc in procs
+        isempty(state.ready) && break
+        progress |= pop_and_fire!(ctx, state, chan, proc)
+    end
+    return progress
+end
+function pop_and_fire!(ctx, state, chan, proc; immediate_next=false)
+    task = pop_with_affinity!(ctx, state.ready, proc, immediate_next)
+    if task !== nothing
+        fire_task!(ctx, task, proc, state, chan)
+        return true
+    end
+    return false
+end
+
 # Main responsibility of this function is to check if new procs have been pushed to the context
-function assign_new_procs!(ctx, state, chan, node_order, assignedprocs=[])
+function assign_new_procs!(ctx, state, chan, assignedprocs=[])
     ps = procs_to_use(ctx)
     # Must track individual procs to handle the case when procs are removed
-    for p in setdiff(ps, assignedprocs)
-        isempty(state.ready) && break
-        task = pop_with_affinity!(ctx, state.ready, p, false)
-        if task !== nothing
-            fire_task!(ctx, task, p, state, chan, node_order)
-        end
-    end
+    schedule!(ctx, state, chan, setdiff(ps, assignedprocs))
     return ps
 end
 
@@ -260,10 +262,7 @@ function fire_task!(ctx, thunk, proc, state, chan)
             state.cache[thunk] = data
             immediate_next = finish_task!(state, thunk; free=false)
             if !isempty(state.ready)
-                thunk = pop_with_affinity!(ctx, state.ready, proc, immediate_next)
-                if thunk !== nothing
-                    fire_task!(ctx, thunk, proc, state, chan)
-                end
+                pop_and_fire!(ctx, state, chan, proc; immediate_next=immediate_next)
             end
             return
         else
@@ -293,14 +292,7 @@ function fire_task!(ctx, thunk, proc, state, chan)
         state.cache[thunk] = res
         immediate_next = finish_task!(state, thunk; free=false)
         if !isempty(state.ready)
-            if immediate_next
-                thunk = pop!(state.ready)
-            else
-                thunk = pop_with_affinity!(ctx, state.ready, proc, immediate_next)
-            end
-            if thunk !== nothing
-                fire_task!(ctx, thunk, proc, state, chan)
-            end
+            pop_and_fire!(ctx, state, chan, proc; immediate_next=immediate_next)
         end
         return
     end
