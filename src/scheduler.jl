@@ -76,6 +76,22 @@ end
 function cleanup(ctx)
 end
 
+function schedule!(ctx, state, procs, chan)
+    progress = false
+    for proc in procs
+        isempty(state.ready) && break
+        progress |= pop_and_fire!(ctx, state, proc, chan)
+    end
+end
+function pop_and_fire!(ctx, state, proc, chan; immediate_next=false)
+    task = pop_with_affinity!(ctx, state.ready, proc, immediate_next)
+    if task !== nothing
+        fire_task!(ctx, task, proc, state, chan)
+        return true
+    end
+    return false
+end
+
 function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     if options === nothing
         options = SchedulerOptions()
@@ -97,26 +113,14 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     node_order = x -> -get(ord, x, 0)
     state = start_state(deps, node_order)
     # start off some tasks
-    for p in ps
-        isempty(state.ready) && break
-        task = pop_with_affinity!(ctx, state.ready, p, false)
-        if task !== nothing
-            fire_task!(ctx, task, p, state, chan)
-        end
-    end
+    schedule!(ctx, state, ps, chan)
     @dbg timespan_end(ctx, :scheduler_init, 0, master)
 
     # Loop while we still have thunks to execute
     while !isempty(state.ready) || !isempty(state.running)
         if isempty(state.running) && !isempty(state.ready)
             # Nothing running, so schedule up to N thunks, 1 per N workers
-            for p in ps
-                isempty(state.ready) && break
-                task = pop_with_affinity!(ctx, state.ready, p, false)
-                if task !== nothing
-                    fire_task!(ctx, task, p, state, chan)
-                end
-            end
+            schedule!(ctx, state, ps, chan)
         end
 
         if isempty(state.running)
@@ -146,10 +150,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         @dbg timespan_start(ctx, :scheduler, thunk_id, master)
         immediate_next = finish_task!(state, node)
         if !isempty(state.ready)
-            thunk = pop_with_affinity!(Context(ps), state.ready, proc, immediate_next)
-            if thunk !== nothing
-                fire_task!(ctx, thunk, proc, state, chan)
-            end
+            pop_and_fire!(Context(ps), state, proc, chan; immediate_next=immediate_next)
         end
         @dbg timespan_end(ctx, :scheduler, thunk_id, master)
     end
@@ -212,10 +213,7 @@ function fire_task!(ctx, thunk, proc, state, chan)
             state.cache[thunk] = data
             immediate_next = finish_task!(state, thunk; free=false)
             if !isempty(state.ready)
-                thunk = pop_with_affinity!(ctx, state.ready, proc, immediate_next)
-                if thunk !== nothing
-                    fire_task!(ctx, thunk, proc, state, chan)
-                end
+                pop_and_fire!(ctx, state, proc, chan; immediate_next=immediate_next)
             end
             return
         else
@@ -245,14 +243,7 @@ function fire_task!(ctx, thunk, proc, state, chan)
         state.cache[thunk] = res
         immediate_next = finish_task!(state, thunk; free=false)
         if !isempty(state.ready)
-            if immediate_next
-                thunk = pop!(state.ready)
-            else
-                thunk = pop_with_affinity!(ctx, state.ready, proc, immediate_next)
-            end
-            if thunk !== nothing
-                fire_task!(ctx, thunk, proc, state, chan)
-            end
+            pop_and_fire!(ctx, state, proc, chan; immediate_next=immediate_next)
         end
         return
     end
