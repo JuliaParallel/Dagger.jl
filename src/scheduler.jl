@@ -23,6 +23,7 @@ Fields
 - cache::Dict{Thunk, Any} - Maps from a finished `Thunk` to it's cached result, often a DRef
 - running::Set{Thunk} - The set of currently-running `Thunk`s
 - thunk_dict::Dict{Int, Any} - Maps from thunk IDs to a `Thunk`
+- node_order::Any - Function that returns the order of a thunk
 """
 struct ComputeState
     dependents::OneToMany
@@ -33,6 +34,7 @@ struct ComputeState
     cache::Dict{Thunk, Any}
     running::Set{Thunk}
     thunk_dict::Dict{Int, Any}
+    node_order::Any
 end
 
 """
@@ -93,7 +95,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     state = start_state(deps, node_order)
     # start off some tasks
     # Note: worker_state may be different things for different contexts. Don't touch it out here!
-    procs_state = assign_new_procs!(ctx, state, chan, node_order)
+    procs_state = assign_new_procs!(ctx, state, chan)
     @dbg timespan_end(ctx, :scheduler_init, 0, master)
 
     # Loop while we still have thunks to execute
@@ -104,7 +106,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
                 isempty(state.ready) && break
                 task = pop_with_affinity!(ctx, state.ready, p, false)
                 if task !== nothing
-                    fire_task!(ctx, task, p, state, chan, node_order)
+                    fire_task!(ctx, task, p, state, chan)
                 end
             end
         end
@@ -146,7 +148,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
                 # Remove dead worker from procs list
                 remove_dead_proc!(ctx, proc)
 
-                handle_fault(ctx, state, state.thunk_dict[thunk_id], proc, chan, node_order)
+                handle_fault(ctx, state, state.thunk_dict[thunk_id], proc, chan)
                 continue
             else
                 throw(res)
@@ -157,11 +159,11 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         state.cache[node] = res
 
         @dbg timespan_start(ctx, :scheduler, thunk_id, master)
-        immediate_next = finish_task!(state, node, node_order)
+        immediate_next = finish_task!(state, node)
         if !isempty(state.ready) && !shall_remove_proc(ctx, proc)
             thunk = pop_with_affinity!(Context(procs_to_use(ctx)), state.ready, proc, immediate_next)
             if thunk !== nothing
-                fire_task!(ctx, thunk, proc, state, chan, node_order)
+                fire_task!(ctx, thunk, proc, state, chan)
             end
         end
         @dbg timespan_end(ctx, :scheduler, thunk_id, master)
@@ -246,7 +248,7 @@ function pop_with_affinity!(ctx, tasks, proc, immediate_next)
     return nothing
 end
 
-function fire_task!(ctx, thunk, proc, state, chan, node_order)
+function fire_task!(ctx, thunk, proc, state, chan)
     @logmsg("W$(proc.pid) + $thunk ($(showloc(thunk.f, length(thunk.inputs)))) input:$(thunk.inputs) cache:$(thunk.cache) $(thunk.cache_ref)")
     push!(state.running, thunk)
     if thunk.cache && thunk.cache_ref !== nothing
@@ -256,11 +258,11 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
         if data !== nothing
             @logmsg("cache hit: $(thunk.cache_ref)")
             state.cache[thunk] = data
-            immediate_next = finish_task!(state, thunk, node_order; free=false)
+            immediate_next = finish_task!(state, thunk; free=false)
             if !isempty(state.ready)
                 thunk = pop_with_affinity!(ctx, state.ready, proc, immediate_next)
                 if thunk !== nothing
-                    fire_task!(ctx, thunk, proc, state, chan, node_order)
+                    fire_task!(ctx, thunk, proc, state, chan)
                 end
             end
             return
@@ -289,7 +291,7 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
 
         #push!(state.running, thunk)
         state.cache[thunk] = res
-        immediate_next = finish_task!(state, thunk, node_order; free=false)
+        immediate_next = finish_task!(state, thunk; free=false)
         if !isempty(state.ready)
             if immediate_next
                 thunk = pop!(state.ready)
@@ -297,7 +299,7 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
                 thunk = pop_with_affinity!(ctx, state.ready, proc, immediate_next)
             end
             if thunk !== nothing
-                fire_task!(ctx, thunk, proc, state, chan, node_order)
+                fire_task!(ctx, thunk, proc, state, chan)
             end
         end
         return
@@ -315,12 +317,12 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
     async_apply(proc, thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist, thunk.cache, options, ids, ctx.log_sink)
 end
 
-function finish_task!(state, node, node_order; free=true)
+function finish_task!(state, node; free=true)
     if istask(node) && node.cache
         node.cache_ref = state.cache[node]
     end
     immediate_next = false
-    for dep in sort!(collect(state.dependents[node]), by=node_order)
+    for dep in sort!(collect(state.dependents[node]), by=state.node_order)
         set = state.waiting[dep]
         pop!(set, node)
         if isempty(set)
@@ -359,7 +361,8 @@ function start_state(deps::Dict, node_order)
                   Vector{Thunk}(undef, 0),
                   Dict{Thunk, Any}(),
                   Set{Thunk}(),
-                  Dict{Int, Thunk}()
+                  Dict{Int, Thunk}(),
+                  node_order
                  )
 
     nodes = sort(collect(keys(deps)), by=node_order)
