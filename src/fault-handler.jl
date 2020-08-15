@@ -26,7 +26,7 @@ of DAGs, it *may* cause a `KeyError` or other failures in the scheduler due to
 the complexity of getting the internal state back to a consistent and proper
 state.
 """
-function handle_fault(ctx, state, thunk, oldproc, chan, node_order)
+function handle_fault(ctx, state, thunk, oldproc, chan)
     # Find thunks whose results were cached on the dead worker and place them
     # on what's called a "deadlist". This structure will direct the recovery
     # of the scheduler's state.
@@ -131,7 +131,7 @@ function handle_fault(ctx, state, thunk, oldproc, chan, node_order)
             push!(deadlist, dt)
             continue
         end
-        fire_task!(ctx, dt, newproc, state, chan, node_order)
+        fire_task!(ctx, dt, newproc, state, chan)
         break
     end
 end
