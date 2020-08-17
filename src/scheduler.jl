@@ -150,7 +150,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         @dbg timespan_start(ctx, :scheduler, thunk_id, master)
         immediate_next = finish_task!(state, node)
         if !isempty(state.ready)
-            pop_and_fire!(Context(ps), state, proc, chan; immediate_next=immediate_next)
+            pop_and_fire!(Context(ctx, ps), state, proc, chan; immediate_next=immediate_next)
         end
         @dbg timespan_end(ctx, :scheduler, thunk_id, master)
     end

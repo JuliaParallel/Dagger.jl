@@ -253,14 +253,10 @@ It is also possible to create a Context from a vector of [`OSProc`](@ref),
 or equivalently the underlying process ids can also be passed directly
 as a `Vector{Int}`.
 """
-function Context(xs)
-    Context(xs, NoOpLog(), false, nothing) # By default don't log events
-end
+Context(xs) = Context(xs, NoOpLog(), false, nothing) # By default don't log events
 Context(xs::Vector{Int}) = Context(map(OSProc, xs))
-function Context()
-    procs = [OSProc(w) for w in workers()]
-    Context(procs)
-end
+Context() = Context([OSProc(w) for w in workers()])
+Context(ctx, xs) = Context(xs, ctx.log_sink, ctx.profile, ctx.options)
 procs(ctx::Context) = ctx.procs
 
 """
