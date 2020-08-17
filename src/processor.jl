@@ -124,6 +124,13 @@ function move_to_osproc(parent_proc, x)
 end
 
 """
+    capacity(proc::Processor=OSProc()) -> Int
+
+Returns the total processing capacity of `proc`.
+"""
+capacity(proc=OSProc()) = length(get_processors(proc))
+
+"""
     OSProc <: Processor
 
 Julia CPU (OS) process, identified by Distributed pid. Executes thunks when

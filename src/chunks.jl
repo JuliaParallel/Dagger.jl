@@ -132,13 +132,10 @@ function free!(s::Chunk{X, DRef, P}; force=true, cache=false) where {X,P}
             catch err
                 isa(err, KeyError) || rethrow(err)
             end
-        else
-            pooldelete(s.handle) # remove immediately
         end
     end
 end
 free!(x; force=true,cache=false) = x # catch-all for non-chunks
-free!(x::DRef) = pooldelete(x)
 
 function savechunk(data, dir, f)
     sz = open(joinpath(dir, f), "w") do io

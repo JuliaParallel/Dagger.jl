@@ -3,7 +3,7 @@ module Sch
 using Distributed
 import MemPool: DRef
 
-import ..Dagger: Context, Processor, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, choose_processor, execute!, rmprocs!, addprocs!
+import ..Dagger: Context, Processor, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, capacity, choose_processor, execute!, rmprocs!, addprocs!
 
 include("fault-handler.jl")
 
@@ -24,6 +24,8 @@ Fields
 - running::Set{Thunk} - The set of currently-running `Thunk`s
 - thunk_dict::Dict{Int, Any} - Maps from thunk IDs to a `Thunk`
 - node_order::Any - Function that returns the order of a thunk
+- worker_pressure::Dict{Int,Int} - Cache of worker pressure
+- worker_capacity::Dict{Int,Int} - Maps from worker ID to capacity
 """
 struct ComputeState
     dependents::OneToMany
@@ -35,6 +37,8 @@ struct ComputeState
     running::Set{Thunk}
     thunk_dict::Dict{Int, Any}
     node_order::Any
+    worker_pressure::Dict{Int,Int}
+    worker_capacity::Dict{Int,Int}
 end
 
 """
@@ -79,6 +83,9 @@ end
 function cleanup(ctx)
 end
 
+"Process-local count of actively-executing Dagger tasks."
+const ACTIVE_TASKS = Threads.Atomic{Int}(0)
+
 function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     if options === nothing
         options = SchedulerOptions()
@@ -93,9 +100,16 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
 
     node_order = x -> -get(ord, x, 0)
     state = start_state(deps, node_order)
+
+    # Initialize pressure and capacity
+    @sync for p in procs_to_use(ctx)
+        state.worker_pressure[p.pid] = 0
+        @async state.worker_capacity[p.pid] = remotecall_fetch(capacity, p.pid)
+    end
+
     # start off some tasks
-    # Note: worker_state may be different things for different contexts. Don't touch it out here!
-    procs_state = assign_new_procs!(ctx, state, chan)
+    # Note: procs_state may be different things for different contexts. Don't touch it out here!
+    procs_state = assign_new_procs!(ctx, state, chan, procs_to_use(ctx))
     @dbg timespan_end(ctx, :scheduler_init, 0, master)
 
     # Loop while we still have thunks to execute
@@ -132,9 +146,8 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
             end
         end
 
-        proc, thunk_id, res = take!(chan) # get result of completed thunk
+        proc, thunk_id, res, metadata = take!(chan) # get result of completed thunk
         lock(newtasks_lock) # This waits for any assign_new_procs! above to complete and then shuts down the task
-
         if isa(res, CapturedException) || isa(res, RemoteException)
             if check_exited_exception(res)
                 @warn "Worker $(proc.pid) died on thunk $thunk_id, rescheduling work"
@@ -148,6 +161,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
                 throw(res)
             end
         end
+        state.worker_pressure[proc.pid] = metadata.pressure
         node = state.thunk_dict[thunk_id]
         @logmsg("WORKER $(proc.pid) - $node ($(node.f)) input:$(node.inputs)")
         state.cache[node] = res
@@ -174,10 +188,17 @@ end
 check_integrity(ctx) = @assert !isempty(procs_to_use(ctx)) "No suitable workers available in context."
 
 function schedule!(ctx, state, chan, procs=procs_to_use(ctx))
+    proc_keys = map(x->x.pid, procs)
+    proc_ratios = Dict(p=>(state.worker_pressure[p]/state.worker_capacity[p]) for p in proc_keys)
+    proc_ratios_sorted = sort(proc_keys, lt=(a,b)->proc_ratios[a]<proc_ratios[b])
     progress = false
-    for proc in procs
-        isempty(state.ready) && break
-        progress |= pop_and_fire!(ctx, state, chan, proc)
+    id = popfirst!(proc_ratios_sorted)
+    while !isempty(state.ready) && !isempty(proc_ratios_sorted)
+        if (state.worker_pressure[id] >= state.worker_capacity[id]) && !isempty(proc_ratios_sorted)
+            id = popfirst!(proc_ratios_sorted)
+            continue
+        end
+        progress |= pop_and_fire!(ctx, state, chan, OSProc(id))
     end
     return progress
 end
@@ -191,10 +212,13 @@ function pop_and_fire!(ctx, state, chan, proc; immediate_next=false)
 end
 
 # Main responsibility of this function is to check if new procs have been pushed to the context
-function assign_new_procs!(ctx, state, chan, assignedprocs=[])
+function assign_new_procs!(ctx, state, chan, assignedprocs)
     ps = procs_to_use(ctx)
     # Must track individual procs to handle the case when procs are removed
-    schedule!(ctx, state, chan, setdiff(ps, assignedprocs))
+    diffps = setdiff(ps, assignedprocs)
+    if !isempty(diffps)
+        schedule!(ctx, state, chan, diffps)
+    end
     return ps
 end
 
@@ -285,7 +309,9 @@ function fire_task!(ctx, thunk, proc, state, chan)
         end
 
         @dbg timespan_start(ctx, :compute, thunk.id, thunk.f)
+        Threads.atomic_add!(ACTIVE_TASKS, 1)
         res = thunk.f(fetched...)
+        Threads.atomic_sub!(ACTIVE_TASKS, 1)
         @dbg timespan_end(ctx, :compute, thunk.id, (thunk.f, p, typeof(res), sizeof(res)))
 
         #push!(state.running, thunk)
@@ -303,9 +329,7 @@ function fire_task!(ctx, thunk, proc, state, chan)
     state.thunk_dict[thunk.id] = thunk
     toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
     options = merge(ctx.options, toptions)
-    if options.single > 0
-        proc = OSProc(options.single)
-    end
+    state.worker_pressure[proc.pid] += 1
     async_apply(proc, thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist, thunk.cache, options, ids, ctx.log_sink)
 end
 
@@ -354,7 +378,9 @@ function start_state(deps::Dict, node_order)
                   Dict{Thunk, Any}(),
                   Set{Thunk}(),
                   Dict{Int, Thunk}(),
-                  node_order
+                  node_order,
+                  Dict{Int,Int}(),
+                  Dict{Int,Int}(),
                  )
 
     nodes = sort(collect(keys(deps)), by=node_order)
@@ -398,16 +424,19 @@ end
         task_local_storage(:processor, to_proc)
 
         # Execute
+        Threads.atomic_add!(ACTIVE_TASKS, 1)
         res = execute!(to_proc, f, fetched...)
+        Threads.atomic_sub!(ACTIVE_TASKS, 1)
 
         # Construct result
-        (from_proc, thunk_id, send_result ? res : tochunk(res, to_proc; persist=persist, cache=persist ? true : cache)) #todo: add more metadata
+        send_result ? res : tochunk(res, to_proc; persist=persist, cache=persist ? true : cache)
     catch ex
         bt = catch_backtrace()
-        (from_proc, thunk_id, RemoteException(myid(), CapturedException(ex, bt)))
+        RemoteException(myid(), CapturedException(ex, bt))
     end
     @dbg timespan_end(ctx, :compute, thunk_id, (f, to_proc, typeof(res), sizeof(res)))
-    result_meta
+    metadata = (pressure=ACTIVE_TASKS[],)
+    (from_proc, thunk_id, result_meta, metadata)
 end
 
 @noinline function async_apply(p::OSProc, thunk_id, f, data, chan, send_res, persist, cache, options, ids, log_sink)
@@ -416,7 +445,7 @@ end
             put!(chan, remotecall_fetch(do_task, p.pid, thunk_id, f, data, send_res, persist, cache, options, ids, log_sink))
         catch ex
             bt = catch_backtrace()
-            put!(chan, (p, thunk_id, CapturedException(ex, bt)))
+            put!(chan, (p, thunk_id, CapturedException(ex, bt), nothing))
         end
         nothing
     end
