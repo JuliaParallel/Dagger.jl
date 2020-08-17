@@ -3,7 +3,7 @@ module Sch
 using Distributed
 import MemPool: DRef
 
-import ..Dagger: Context, Processor, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, choose_processor, execute!
+import ..Dagger: Context, Processor, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, capacity, choose_processor, execute!
 
 include("fault-handler.jl")
 
@@ -24,6 +24,8 @@ Fields
 - running::Set{Thunk} - The set of currently-running `Thunk`s
 - thunk_dict::Dict{Int, Any} - Maps from thunk IDs to a `Thunk`
 - node_order::Any - Function that returns the order of a thunk
+- worker_pressure::Dict{Int,Int} - Cache of worker pressure
+- worker_capacity::Dict{Int,Int} - Maps from worker ID to capacity
 """
 struct ComputeState
     dependents::OneToMany
@@ -35,6 +37,8 @@ struct ComputeState
     running::Set{Thunk}
     thunk_dict::Dict{Int, Any}
     node_order::Any
+    worker_pressure::Dict{Int,Int}
+    worker_capacity::Dict{Int,Int}
 end
 
 """
@@ -77,10 +81,16 @@ function cleanup(ctx)
 end
 
 function schedule!(ctx, state, procs, chan)
+    proc_keys = collect(keys(state.worker_pressure))
+    proc_ratios = Dict(p=>(state.worker_pressure[p]/state.worker_capacity[p]) for p in proc_keys)
+    proc_ratios_sorted = sort(proc_keys, lt=(a,b)->proc_ratios[a]<proc_ratios[b])
     progress = false
-    for proc in procs
-        isempty(state.ready) && break
-        progress |= pop_and_fire!(ctx, state, proc, chan)
+    while !isempty(state.ready) && !isempty(proc_ratios_sorted)
+        id = popfirst!(proc_ratios_sorted)
+        if state.worker_pressure[id] >= state.worker_capacity[id]
+            continue
+        end
+        progress |= pop_and_fire!(ctx, state, OSProc(id), chan)
     end
 end
 function pop_and_fire!(ctx, state, proc, chan; immediate_next=false)
@@ -91,6 +101,11 @@ function pop_and_fire!(ctx, state, proc, chan; immediate_next=false)
     end
     return false
 end
+
+# TODO: Make this local per scheduler instance?
+"Process-local count of actively-executing Dagger tasks."
+const ACTIVE_TASKS = Threads.Atomic{Int}(0)
+pressure() = ACTIVE_TASKS[]
 
 function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     if options === nothing
@@ -112,6 +127,13 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
 
     node_order = x -> -get(ord, x, 0)
     state = start_state(deps, node_order)
+
+    # Initialize pressure and capacity
+    state.worker_pressure[1]=0
+    state.worker_capacity[1]=1
+    foreach(p->state.worker_pressure[p.pid]=0, procs(ctx))
+    asyncmap(p->state.worker_capacity[p.pid]=remotecall_fetch(capacity, p.pid), procs(ctx))
+
     # start off some tasks
     schedule!(ctx, state, ps, chan)
     @dbg timespan_end(ctx, :scheduler_init, 0, master)
@@ -129,6 +151,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         end
 
         proc, thunk_id, res = take!(chan) # get result of completed thunk
+        state.worker_pressure[proc.pid] -= 1
         if isa(res, CapturedException) || isa(res, RemoteException)
             if check_exited_exception(res)
                 @warn "Worker $(proc.pid) died on thunk $thunk_id, rescheduling work"
@@ -233,7 +256,9 @@ function fire_task!(ctx, thunk, proc, state, chan)
         @dbg timespan_end(ctx, :comm, thunk.id, p)
 
         @dbg timespan_start(ctx, :compute, thunk.id, p)
+        Threads.atomic_add!(ACTIVE_TASKS, 1)
         res = thunk.f(fetched...)
+        Threads.atomic_sub!(ACTIVE_TASKS, 1)
         @dbg timespan_end(ctx, :compute, thunk.id, p)
 
         #push!(state.running, thunk)
@@ -254,6 +279,7 @@ function fire_task!(ctx, thunk, proc, state, chan)
     if options.single > 0
         proc = OSProc(options.single)
     end
+    state.worker_pressure[proc.pid] += 1
     async_apply(ctx, proc, thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist, thunk.cache, options)
 end
 
@@ -302,7 +328,9 @@ function start_state(deps::Dict, node_order)
                   Dict{Thunk, Any}(),
                   Set{Thunk}(),
                   Dict{Int, Thunk}(),
-                  node_order
+                  node_order,
+                  Dict{Int,Int}(),
+                  Dict{Int,Int}(),
                  )
 
     nodes = sort(collect(keys(deps)), by=node_order)
@@ -331,7 +359,9 @@ end
     to_proc = choose_processor(from_proc, options, f, fetched)
     fetched = move.(Ref(ctx), Ref(from_proc), Ref(to_proc), fetched)
     result_meta = try
+        Threads.atomic_add!(ACTIVE_TASKS, 1)
         res = execute!(to_proc, f, fetched...)
+        Threads.atomic_sub!(ACTIVE_TASKS, 1)
         (from_proc, thunk_id, send_result ? res : tochunk(res, to_proc; persist=persist, cache=persist ? true : cache)) #todo: add more metadata
     catch ex
         bt = catch_backtrace()
