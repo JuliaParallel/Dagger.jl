@@ -61,7 +61,8 @@ Base.ones(p::Blocks, dims::Integer...) = ones(p, Float64, dims)
 Base.ones(p::Blocks, dims::Tuple) = ones(p, Float64, dims)
 
 function Base.zeros(p::Blocks, eltype::Type, dims)
-    AllocateArray(eltype, (_, x...) -> zeros(x...), ArrayDomain(map(x->1:x, dims)), p)
+    d = ArrayDomain(map(x->1:x, dims))
+    AllocateArray(eltype, (_, x...) -> zeros(x...), d, partition(p, d))
 end
 Base.zeros(p::Blocks, t::Type, dims::Integer...) = zeros(p, t, dims)
 Base.zeros(p::Blocks, dims::Integer...) = zeros(p, Float64, dims)
