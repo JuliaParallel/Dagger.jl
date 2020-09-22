@@ -82,7 +82,7 @@ collect(ctx::Context, ref::DRef; options=nothing) =
 collect(ctx::Context, ref::FileRef; options=nothing) =
     poolget(ref)
 move(from_proc::OSProc, to_proc::OSProc, ref::Union{DRef, FileRef}) =
-    poolget(ref)
+    poolget(ref) # TODO: Only do this if running on `to_proc`
 
 
 ### ChunkIO

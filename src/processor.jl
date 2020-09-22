@@ -274,3 +274,10 @@ Write a log event
 function write_event(ctx::Context, event::Event)
     write_event(ctx.log_sink, event)
 end
+
+"Wrapper around `Future`, for delaying thunk computations."
+struct DelayedRef
+    future::Future
+end
+collect(ctx::Context, ref::DelayedRef; options=nothing) =
+    collect(ctx, fetch(ref.future))

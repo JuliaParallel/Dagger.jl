@@ -48,10 +48,15 @@ Stores DAG-global options to be passed to the Dagger.Sch scheduler.
 
 # Arguments
 - `single::Int=0`: Force all work onto worker with specified id. `0` disables this option.
+- `proctypes::Vector{Type{<:Processor}}=Type[]`: Force scheduler to use one or
+more processors that are instances/subtypes of a contained type. Leave this
+vector empty to disable.
+- `sch_func::Function`: Core scheduler function. Can be used to customize scheduling.
 """
 Base.@kwdef struct SchedulerOptions
     single::Int = 0
     proctypes::Vector{Type} = Type[]
+    sch_func::Function = builtin_schedule!
 end
 
 """
@@ -80,7 +85,7 @@ end
 function cleanup(ctx)
 end
 
-function schedule!(ctx, state, procs, chan)
+function builtin_schedule!(ctx, state, procs, chan)
     proc_keys = collect(keys(state.worker_pressure))
     proc_ratios = Dict(p=>(state.worker_pressure[p]/state.worker_capacity[p]) for p in proc_keys)
     proc_ratios_sorted = sort(proc_keys, lt=(a,b)->proc_ratios[a]<proc_ratios[b])
@@ -135,14 +140,14 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     asyncmap(p->state.worker_capacity[p.pid]=remotecall_fetch(capacity, p.pid), procs(ctx))
 
     # start off some tasks
-    schedule!(ctx, state, ps, chan)
+    ctx.options.sch_func(ctx, state, procs, chan)
     @dbg timespan_end(ctx, :scheduler_init, 0, master)
 
     # Loop while we still have thunks to execute
     while !isempty(state.ready) || !isempty(state.running)
         if isempty(state.running) && !isempty(state.ready)
             # Nothing running, so schedule up to N thunks, 1 per N workers
-            schedule!(ctx, state, ps, chan)
+            ctx.options.sch_func(ctx, state, ps, chan)
         end
 
         if isempty(state.running)
@@ -395,6 +400,30 @@ end
             put!(chan, (p, thunk_id, CapturedException(ex, bt)))
         end
         nothing
+    end
+end
+
+struct ThunkRef
+    id::Int
+    children::Set{ThunkRef}
+    parents::Set{ThunkRef}
+end
+ThunkRef(id::Int) = ThunkRef(id, Int[], Int[])
+Base.convert(::Type{Int}, ref::ThunkRef) = ref.id
+function ThunkRef(t::Thunk)
+    tr = ThunkRef(t.id, Set(ThunkRef.(filter(istask, inputs(t)))), Int[])
+    for child in tr.children
+        push!(child.parents, tr)
+    end
+    tr
+end
+
+"Finds the longest chain of serial execution descending from `t`."
+function longest_serial(t::ThunkRef)
+    if length(t.children) == 1
+        return [t, longest_serial(t.children)]
+    else
+        return [t]
     end
 end
 
