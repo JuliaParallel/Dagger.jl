@@ -65,12 +65,12 @@ function unrelease(c::Chunk{<:Any,DRef})
 end
 unrelease(c::Chunk) = c
 
-collect_remote(chunk::Chunk) =
-    move(Context(), chunk.processor, OSProc(), poolget(chunk.handle))
+collect_remote(ctx, chunk::Chunk) =
+    move(ctx, chunk.processor, OSProc(), poolget(chunk.handle))
 function collect(ctx::Context, chunk::Chunk; options=nothing)
     # delegate fetching to handle by default.
     if chunk.handle isa DRef && !(chunk.processor isa OSProc)
-        return remotecall_fetch(collect_remote, chunk.handle.owner, chunk)
+        return remotecall_fetch(collect_remote, chunk.handle.owner, ctx, chunk)
     elseif chunk.handle isa FileRef
         return poolget(chunk.handle)
     else
