@@ -12,8 +12,8 @@ struct PathProc <: Dagger.Processor
     owner::Int
 end
 Dagger.get_parent(proc::PathProc) = OSProc(proc.owner)
-Dagger.move(ctx, ::PathProc, ::OSProc, x::Float64) = x+1
-Dagger.move(ctx, ::OSProc, ::PathProc, x::Float64) = x+2
+Dagger.move(::PathProc, ::OSProc, x::Float64) = x+1
+Dagger.move(::OSProc, ::PathProc, x::Float64) = x+2
 Dagger.iscompatible(proc::PathProc, opts, f, args...) = true
 Dagger.execute!(proc::PathProc, func, args...) = func(args...)
 
@@ -54,7 +54,7 @@ end
         tp = ThreadProc(1, 1)
         op = get_parent(tp)
         value = rand()
-        moved_value = Dagger.move(ctx, tp, op, Dagger.move(ctx, op, tp, value))
+        moved_value = Dagger.move(tp, op, Dagger.move(op, tp, value))
         @test value === moved_value
     end
     @testset "Generic path move()" begin
@@ -63,7 +63,7 @@ end
         proc1 = first(filter(x->x isa PathProc, get_processors(OSProc(1))))
         proc2 = first(filter(x->x isa PathProc, get_processors(OSProc(2))))
         value = rand()
-        moved_value = Dagger.move(ctx, proc1, proc2, value)
+        moved_value = Dagger.move(proc1, proc2, value)
         @test moved_value == value+3
         @everywhere pop!(Dagger.PROCESSOR_CALLBACKS)
     end

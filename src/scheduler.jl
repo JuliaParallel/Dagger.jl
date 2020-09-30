@@ -343,7 +343,7 @@ end
     to_proc = choose_processor(from_proc, options, f, fetched)
     fetched = map(Iterators.zip(fetched,ids)) do (x, id)
         @dbg timespan_start(ctx, :move, (thunk_id, id), (f, id))
-        x = move(ctx, from_proc, to_proc, x)
+        x = move(from_proc, to_proc, x)
         @dbg timespan_end(ctx, :move, (thunk_id, id), (f, id))
         return x
     end
