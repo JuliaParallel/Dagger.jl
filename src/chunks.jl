@@ -66,7 +66,7 @@ end
 unrelease(c::Chunk) = c
 
 collect_remote(chunk::Chunk) =
-    move(Context(), chunk.processor, OSProc(), poolget(chunk.handle))
+    move(chunk.processor, OSProc(), poolget(chunk.handle))
 function collect(ctx::Context, chunk::Chunk; options=nothing)
     # delegate fetching to handle by default.
     if chunk.handle isa DRef && !(chunk.processor isa OSProc)
@@ -74,14 +74,14 @@ function collect(ctx::Context, chunk::Chunk; options=nothing)
     elseif chunk.handle isa FileRef
         return poolget(chunk.handle)
     else
-        return move(ctx, chunk.processor, OSProc(), chunk.handle)
+        return move(chunk.processor, OSProc(), chunk.handle)
     end
 end
 collect(ctx::Context, ref::DRef; options=nothing) =
-    move(ctx, OSProc(ref.owner), OSProc(), ref)
+    move(OSProc(ref.owner), OSProc(), ref)
 collect(ctx::Context, ref::FileRef; options=nothing) =
     poolget(ref)
-move(ctx, from_proc::OSProc, to_proc::OSProc, ref::Union{DRef, FileRef}) =
+move(from_proc::OSProc, to_proc::OSProc, ref::Union{DRef, FileRef}) =
     poolget(ref)
 
 

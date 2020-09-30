@@ -75,7 +75,7 @@ moving back to `from_proc` before being serialized over the wire as needed.
 The default implementation breaks a single `move` call down into a sequence of
 `move` calls, and is not intended to be maximally efficient.
 """
-function move(ctx, from_proc::Processor, to_proc::Processor, x)
+function move(from_proc::Processor, to_proc::Processor, x)
     if from_proc == to_proc
         return x
     end
@@ -89,7 +89,7 @@ function move(ctx, from_proc::Processor, to_proc::Processor, x)
     remote_proc = parent_proc
     local_proc = OSProc()
     @debug "(Network) moving $remote_proc to $local_proc"
-    x = move(ctx, remote_proc, local_proc, x)
+    x = move(remote_proc, local_proc, x)
 
     # Move to to_proc
     parent_proc = get_parent(to_proc)
@@ -102,7 +102,7 @@ function move(ctx, from_proc::Processor, to_proc::Processor, x)
     while !isempty(path)
         next_proc = pop!(path)
         @debug "(Local) moving $last_proc to $next_proc"
-        x = move(ctx, last_proc, next_proc, x)
+        x = move(last_proc, next_proc, x)
         last_proc = next_proc
     end
     return x
@@ -117,7 +117,7 @@ function move_to_osproc(parent_proc, x)
     ctx = Context()
     while !(parent_proc isa OSProc)
         grandparent_proc = get_parent(parent_proc)
-        x = move(ctx, parent_proc, grandparent_proc, x)
+        x = move(parent_proc, grandparent_proc, x)
         parent_proc = grandparent_proc
     end
     return x, parent_proc
@@ -203,7 +203,7 @@ function Base.show(io::IO, pex::ProcessorSelectionException)
     print(io, "  Arguments: $(pex.args)")
 end
 
-move(ctx, from_proc::OSProc, to_proc::OSProc, x) = x
+move(from_proc::OSProc, to_proc::OSProc, x) = x
 execute!(proc::OSProc, f, args...) = f(args...)
 default_enabled(proc::OSProc) = true
 
@@ -219,8 +219,8 @@ end
 iscompatible(proc::ThreadProc, opts, f, args...) = true
 iscompatible_func(proc::ThreadProc, opts, f) = true
 iscompatible_arg(proc::ThreadProc, opts, x) = true
-move(ctx, from_proc::OSProc, to_proc::ThreadProc, x) = x
-move(ctx, from_proc::ThreadProc, to_proc::OSProc, x) = x
+move(from_proc::OSProc, to_proc::ThreadProc, x) = x
+move(from_proc::ThreadProc, to_proc::OSProc, x) = x
 @static if VERSION >= v"1.3.0-DEV.573"
     execute!(proc::ThreadProc, f, args...) = fetch(Threads.@spawn f(args...))
 else

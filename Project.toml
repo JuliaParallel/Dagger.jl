@@ -1,6 +1,6 @@
 name = "Dagger"
 uuid = "d58978e5-989f-55fb-8d15-ea34adc7bf54"
-version = "0.9.2"
+version = "0.10.0"
 
 [deps]
 Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"

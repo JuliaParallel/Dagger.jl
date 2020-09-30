@@ -66,4 +66,31 @@ end
     end
     @everywhere (pop!(Dagger.PROCESSOR_CALLBACKS); empty!(Dagger.OSPROC_CACHE))
 
+    @testset "Add new workers" begin
+        using Distributed
+        ps1 = addprocs(2, exeflags="--project");
+    
+        @everywhere begin
+           using Dagger, Distributed
+           # Condition to guarantee that processing is not completed before we add new workers
+           c = Condition()
+           function testfun(i)
+               i < 2 && return myid()
+               wait(c)
+               return myid()
+           end
+        end
+    
+        ts = delayed(vcat)((delayed(testfun)(i) for i in 1:4)...);
+        job = @async collect(Context(ps1), ts);
+    
+        ps2 = addprocs(2, exeflags="--project");
+    
+        while !istaskdone(job)
+            @everywhere ps1 notify(c)
+        end
+        @test fetch(job) |> unique |> sort == ps1
+
+        wait(rmprocs(vcat(ps1,ps2)))
+    end
 end
