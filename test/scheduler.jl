@@ -67,30 +67,55 @@ end
     @everywhere (pop!(Dagger.PROCESSOR_CALLBACKS); empty!(Dagger.OSPROC_CACHE))
 
     @testset "Add new workers" begin
+        # Test that we can add new workers to an ongoing task.
+        # As this requires asynchronity a Condition is used to stall the tasks to 
+        # ensure workers are actually added while the scheduler is working 
         using Distributed
-        ps1 = addprocs(2, exeflags="--project");
-    
-        @everywhere begin
+  
+        setup = quote
            using Dagger, Distributed
            # Condition to guarantee that processing is not completed before we add new workers
            c = Condition()
            function testfun(i)
-               i < 2 && return myid()
+               i < 4 && return myid()
                wait(c)
                return myid()
            end
         end
-    
-        ts = delayed(vcat)((delayed(testfun)(i) for i in 1:4)...);
-        job = @async collect(Context(ps1), ts);
-    
-        ps2 = addprocs(2, exeflags="--project");
-    
-        while !istaskdone(job)
-            @everywhere ps1 notify(c)
-        end
-        @test fetch(job) |> unique |> sort == ps1
 
-        wait(rmprocs(vcat(ps1,ps2)))
+        ps = []
+        try     
+            ps1 = addprocs(2, exeflags="--project");
+            push!(ps, ps1)
+
+            @everywhere $setup
+    
+            ts = delayed(vcat)((delayed(testfun)(i) for i in 1:10)...);
+
+            ctx = Context(ps1)
+            job = @async collect(ctx, ts);
+    
+            # Will not be added, so they should never appear in output
+            ps2 = addprocs(2, exeflags="--project");
+            push!(ps, ps2)
+
+            ps3 = addprocs(2, exeflags="--project")
+            push!(ps, ps3)
+            @everywhere ps3 $setup
+            Dagger.addprocs!(ctx, ps3)
+    
+            while !istaskdone(job)
+                sleep(0.01)
+                if istaskstarted(job)
+                    @everywhere ps1 notify(c)
+                    @everywhere ps3 notify(c)
+                end
+            end
+            @test fetch(job) isa Vector
+            @test fetch(job) |> unique |> sort == vcat(ps1, ps3)
+
+        finally
+            wait(rmprocs(ps))
+        end
     end
 end

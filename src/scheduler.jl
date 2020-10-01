@@ -95,13 +95,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     node_order = x -> -get(ord, x, 0)
     state = start_state(deps, node_order)
     # start off some tasks
-    for p in ps
-        isempty(state.ready) && break
-        task = pop_with_affinity!(ctx, state.ready, p, false)
-        if task !== nothing
-            fire_task!(ctx, task, p, state, chan, node_order)
-        end
-    end
+    worker_state = assign_new_workers!(ctx, procs, state, chan, node_order)
     @dbg timespan_end(ctx, :scheduler_init, 0, master)
 
     # Loop while we still have thunks to execute
@@ -116,6 +110,9 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
                 end
             end
         end
+
+        # Note: worker_state may be different things for different contexts. Don't touch it out here!
+        worker_state = assign_new_workers!(ctx ,ps, state, chan, node_order, worker_state)
 
         if isempty(state.running)
             # the block above fired only meta tasks
@@ -152,6 +149,20 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         @dbg timespan_end(ctx, :scheduler, thunk_id, master)
     end
     state.cache[d]
+end
+
+function assign_new_workers!(ctx, ps, state, chan, node_order, nadded=0)
+    ps != procs(ctx) && return nadded
+    lock(ctx) do
+        for p in ps[1+nadded:end]
+            isempty(state.ready) && break
+            task = pop_with_affinity!(ctx, state.ready, p, false)
+            if task !== nothing
+                fire_task!(ctx, task, p, state, chan, node_order)
+            end
+        end
+        return length(ps)
+    end
 end
 
 function pop_with_affinity!(ctx, tasks, proc, immediate_next)

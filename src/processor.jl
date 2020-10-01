@@ -238,6 +238,7 @@ mutable struct Context
     log_sink::Any
     profile::Bool
     options
+    proc_lock::ReentrantLock
 end
 
 """
@@ -256,6 +257,7 @@ as a `Vector{Int}`.
 function Context(xs)
     Context(xs, NoOpLog(), false, nothing) # By default don't log events
 end
+Context(xs, log_sink, profile, options) = Context(xs, log_sink, profile, options, ReentrantLock())
 Context(xs::Vector{Int}) = Context(map(OSProc, xs))
 function Context()
     procs = [OSProc(w) for w in workers()]
@@ -270,4 +272,25 @@ Write a log event
 """
 function write_event(ctx::Context, event::Event)
     write_event(ctx.log_sink, event)
+end
+
+"""
+    lock(f, ctx::Context)
+
+Acquire `ctx.proc_lock`, execute `f` with the lock held, and release the lock when `f` returns.
+"""
+Base.lock(f, ctx::Context) = lock(f, ctx.proc_lock)
+
+"""
+    addprocs!(ctx::Context, xs)
+
+Add new workers `xs` to an existing `Context ctx`. 
+
+Workers will typically be assigned new tasks in the next scheduling iteration.
+
+Workers can be either `Processors` or the underlying process ids as `Integer`s.
+"""
+addprocs!(ctx::Context, xs::AbstractVector{<:Integer}) = addprocs!(ctx, map(OSProc, xs))
+addprocs!(ctx::Context, xs::AbstractVector{<:Processor}) = lock(ctx) do 
+    append!(ctx.procs, xs)
 end
