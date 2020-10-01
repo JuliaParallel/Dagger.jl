@@ -264,7 +264,7 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
     if options.single > 0
         proc = OSProc(options.single)
     end
-    async_apply(ctx, proc, thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist, thunk.cache, options, ids)
+    async_apply(proc, thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist, thunk.cache, options, ids, ctx.log_sink)
 end
 
 function finish_task!(state, node, node_order; free=true)
@@ -330,7 +330,9 @@ function start_state(deps::Dict, node_order)
     state
 end
 
-@noinline function do_task(ctx, proc, thunk_id, f, data, send_result, persist, cache, options, ids)
+@noinline function do_task(thunk_id, f, data, send_result, persist, cache, options, ids, logsink)
+    ctx = Context(Processor[], logsink, false, nothing)
+    proc = OSProc()
     fetched = map(Iterators.zip(data,ids)) do (x, id)
         @dbg timespan_start(ctx, :comm, (thunk_id, id), (f, id))
         x = x isa Union{Chunk,Thunk} ? collect(ctx, x) : x
@@ -360,10 +362,10 @@ end
     result_meta
 end
 
-@noinline function async_apply(ctx, p::OSProc, thunk_id, f, data, chan, send_res, persist, cache, options, ids)
+@noinline function async_apply(p::OSProc, thunk_id, f, data, chan, send_res, persist, cache, options, ids, logsink)
     @async begin
         try
-            put!(chan, remotecall_fetch(do_task, p.pid, ctx, p, thunk_id, f, data, send_res, persist, cache, options, ids))
+            put!(chan, remotecall_fetch(do_task, p.pid, thunk_id, f, data, send_res, persist, cache, options, ids, logsink))
         catch ex
             bt = catch_backtrace()
             put!(chan, (p, thunk_id, CapturedException(ex, bt)))
