@@ -3,7 +3,7 @@ module Sch
 using Distributed
 import MemPool: DRef
 
-import ..Dagger: Context, Processor, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, choose_processor, execute!
+import ..Dagger: Context, Processor, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, choose_processor, execute!, rmprocs!
 
 include("fault-handler.jl")
 
@@ -125,7 +125,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
                 @warn "Worker $(proc.pid) died on thunk $thunk_id, rescheduling work"
 
                 # Remove dead worker from procs list
-                filter!(p->p.pid!=proc.pid, ctx.procs)
+                rmprocs!(ctx, [proc])
                 ps = procs(ctx)
 
                 handle_fault(ctx, state, state.thunk_dict[thunk_id], proc, chan, node_order)
@@ -140,7 +140,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
 
         @dbg timespan_start(ctx, :scheduler, thunk_id, master)
         immediate_next = finish_task!(state, node, node_order)
-        if !isempty(state.ready)
+        if !isempty(state.ready) && !shall_remove_worker(ctx, proc, ps, immediate_next) 
             thunk = pop_with_affinity!(Context(ps), state.ready, proc, immediate_next)
             if thunk !== nothing
                 fire_task!(ctx, thunk, proc, state, chan, node_order)
@@ -151,17 +151,25 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     state.cache[d]
 end
 
-function assign_new_workers!(ctx, ps, state, chan, node_order, nadded=0)
-    ps != procs(ctx) && return nadded
+function assign_new_workers!(ctx, ps, state, chan, node_order, assignedprocs=[])
+    ps !== procs(ctx) && return assignedprocs
     lock(ctx) do
-        for p in ps[1+nadded:end]
+        # Must track individual procs to handle the case when procs are removed
+        for p in setdiff(ps, assignedprocs)
             isempty(state.ready) && break
             task = pop_with_affinity!(ctx, state.ready, p, false)
             if task !== nothing
                 fire_task!(ctx, task, p, state, chan, node_order)
             end
         end
-        return length(ps)
+        return copy(ps)
+    end
+end
+
+function shall_remove_worker(ctx, proc, ps, immediate_next) 
+    ps !== procs(ctx) && return false
+    return lock(ctx) do 
+        proc ∉ procs(ctx)
     end
 end
 
