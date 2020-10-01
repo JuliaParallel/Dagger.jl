@@ -3,7 +3,7 @@ module Sch
 using Distributed
 import MemPool: DRef
 
-import ..Dagger: Context, Processor, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, choose_processor, execute!, rmprocs!
+import ..Dagger: Context, Processor, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, choose_processor, execute!, rmprocs!, addprocs!
 
 include("fault-handler.jl")
 
@@ -112,7 +112,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         end
 
         # Note: worker_state may be different things for different contexts. Don't touch it out here!
-        worker_state = assign_new_workers!(ctx ,ps, state, chan, node_order, worker_state)
+        worker_state = assign_new_workers!(ctx, ps, state, chan, node_order, worker_state)
 
         if isempty(state.running)
             # the block above fired only meta tasks
