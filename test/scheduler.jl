@@ -110,7 +110,7 @@ end
                 ps3 = addprocs(2, exeflags="--project")
                 append!(ps, ps3)
                 @everywhere ps3 $setup
-                Dagger.addprocs!(ctx, ps3)
+                addprocs!(ctx, ps3)
                 @test length(procs(ctx)) == 4
         
                 @everywhere vcat(ps1, ps3) blocked=false
@@ -140,7 +140,7 @@ end
                     sleep(0.001)
                 end
 
-                Dagger.rmprocs!(ctx, ps1[3:end])
+                rmprocs!(ctx, ps1[3:end])
                 @test length(procs(ctx)) == 2
 
                 @everywhere ps1 blocked=false
@@ -151,7 +151,7 @@ end
                 # Then all four will be waiting for the Condition
                 # While they are waiting ps1[3:end] are removed, but when the Condition is notified they will finish their tasks before being removed
                 @test res[1:8] |> unique |> sort == ps1
-                @test res[9:end] |> unique |> sort == ps1[1:2]
+                @test all(pid -> pid in ps1[1:2], res[9:end])
 
             finally
                 wait(rmprocs(ps))

@@ -1,4 +1,4 @@
-export OSProc, Context
+export OSProc, Context, addprocs!, rmprocs!
 
 """
     Processor
