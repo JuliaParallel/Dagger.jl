@@ -68,18 +68,21 @@ end
 
     @testset "Modify workers in running job" begin
         # Test that we can add/remove workers while scheduler is running.
-        # As this requires asynchronity a Condition is used to stall the tasks to 
+        # As this requires asynchronity a flag is used to stall the tasks to 
         # ensure workers are actually modified while the scheduler is working 
 
         setup = quote
            using Dagger, Distributed
-           # Condition to guarantee that processing is not completed before we add new workers
-           # Note: c is used in expressions below
-           c = Condition()
+           # blocked is to guarantee that processing is not completed before we add new workers
+           # Note: blocked is used in expressions below
+           blocked = true
            function testfun(i)
-               i < 4 && return myid()
-               wait(c)
-               return myid()
+                i < 4 && return myid()
+                # Wait for test to do its thing before we proceed
+                while blocked
+                    sleep(0.001)
+                end
+                return myid()
            end
         end
 
@@ -90,7 +93,7 @@ end
                 append!(ps, ps1)
 
                 @everywhere vcat(ps1, myid()) $setup
-        
+   
                 ts = delayed(vcat)((delayed(testfun)(i) for i in 1:10)...)
 
                 ctx = Context(ps1)
@@ -110,10 +113,8 @@ end
                 Dagger.addprocs!(ctx, ps3)
                 @test length(procs(ctx)) == 4
         
-                while !istaskdone(job)
-                    @everywhere ps1 notify(c)
-                    @everywhere ps3 notify(c)
-                end
+                @everywhere vcat(ps1, ps3) blocked=false
+           
                 @test fetch(job) isa Vector
                 @test fetch(job) |> unique |> sort == vcat(ps1, ps3)
 
@@ -142,9 +143,8 @@ end
                 Dagger.rmprocs!(ctx, ps1[3:end])
                 @test length(procs(ctx)) == 2
 
-                while !istaskdone(job)
-                    @everywhere ps1 notify(c)
-                end
+                @everywhere ps1 blocked=false
+                
                 res = fetch(job)
                 @test res isa Vector
                 # First all four workers will report their IDs without hassle
