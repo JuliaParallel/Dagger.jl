@@ -89,8 +89,19 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     node_order = x -> -get(ord, x, 0)
     state = start_state(deps, node_order)
     # start off some tasks
+    # Note: worker_state may be different things for different contexts. Don't touch it out here!
     procs_state = assign_new_procs!(ctx, state, chan, node_order)
     @dbg timespan_end(ctx, :scheduler_init, 0, master)
+
+    # Check periodically for new workers in a parallel task so that we don't accidentally end up
+    # having to wait for 'take!(chan)' on some large task before new workers are put to work
+    newprocs_lock = ReentrantLock()
+    @async while !isempty(state.ready) || !isempty(state.running)
+        sleep(1)
+        procs_state = lock(newprocs_lock) do
+            assign_new_procs!(ctx, state, chan, node_order, procs_state)
+        end
+    end
 
     # Loop while we still have thunks to execute
     while !isempty(state.ready) || !isempty(state.running)
@@ -105,8 +116,9 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
             end
         end
 
-        # Note: worker_state may be different things for different contexts. Don't touch it out here!
-        procs_state = assign_new_procs!(ctx, state, chan, node_order, procs_state)
+        procs_state = lock(newprocs_lock) do
+            assign_new_procs!(ctx, state, chan, node_order, procs_state)
+        end
 
         if isempty(state.running)
             # the block above fired only meta tasks
