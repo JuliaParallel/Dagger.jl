@@ -150,6 +150,7 @@ end
                 # First all four workers will report their IDs without hassle
                 # Then all four will be waiting for the Condition
                 # While they are waiting ps1[3:end] are removed, but when the Condition is notified they will finish their tasks before being removed
+                # Will probably break if workers are assigned more than one Thunk 
                 @test res[1:8] |> unique |> sort == ps1
                 @test all(pid -> pid in ps1[1:2], res[9:end])
 

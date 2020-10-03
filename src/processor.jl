@@ -263,7 +263,9 @@ function Context()
     procs = [OSProc(w) for w in workers()]
     Context(procs)
 end
-procs(ctx::Context) = ctx.procs
+procs(ctx::Context) = lock(ctx) do
+    copy(ctx.procs)
+end
 
 """
     write_event(ctx::Context, event::Event)

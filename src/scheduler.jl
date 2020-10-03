@@ -82,12 +82,6 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     master = OSProc(myid())
     @dbg timespan_start(ctx, :scheduler_init, 0, master)
 
-    if options.single !== 0
-        @assert options.single in vcat(1, workers()) "Sch option 'single' must specify an active worker id"
-        ps = OSProc[OSProc(options.single)]
-    else
-        ps = procs(ctx)
-    end
     chan = Channel{Any}(32)
     deps = dependents(d)
     ord = order(d, noffspring(deps))
@@ -95,14 +89,14 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     node_order = x -> -get(ord, x, 0)
     state = start_state(deps, node_order)
     # start off some tasks
-    worker_state = assign_new_workers!(ctx, procs, state, chan, node_order)
+    procs_state = assign_new_procs!(ctx, state, chan, node_order)
     @dbg timespan_end(ctx, :scheduler_init, 0, master)
 
     # Loop while we still have thunks to execute
     while !isempty(state.ready) || !isempty(state.running)
         if isempty(state.running) && !isempty(state.ready)
             # Nothing running, so schedule up to N thunks, 1 per N workers
-            for p in ps
+            for p in procs_to_use(ctx)
                 isempty(state.ready) && break
                 task = pop_with_affinity!(ctx, state.ready, p, false)
                 if task !== nothing
@@ -112,7 +106,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         end
 
         # Note: worker_state may be different things for different contexts. Don't touch it out here!
-        worker_state = assign_new_workers!(ctx, ps, state, chan, node_order, worker_state)
+        procs_state = assign_new_procs!(ctx, state, chan, node_order, procs_state)
 
         if isempty(state.running)
             # the block above fired only meta tasks
@@ -125,8 +119,8 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
                 @warn "Worker $(proc.pid) died on thunk $thunk_id, rescheduling work"
 
                 # Remove dead worker from procs list
+                # Not sure what is desired behaviour if option.singleworker is set...
                 rmprocs!(ctx, [proc])
-                ps = procs(ctx)
 
                 handle_fault(ctx, state, state.thunk_dict[thunk_id], proc, chan, node_order)
                 continue
@@ -140,8 +134,8 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
 
         @dbg timespan_start(ctx, :scheduler, thunk_id, master)
         immediate_next = finish_task!(state, node, node_order)
-        if !isempty(state.ready) && !shall_remove_worker(ctx, proc, ps, immediate_next) 
-            thunk = pop_with_affinity!(Context(ps), state.ready, proc, immediate_next)
+        if !isempty(state.ready) && !shall_remove_proc(ctx, proc, immediate_next) 
+            thunk = pop_with_affinity!(Context(procs_to_use(ctx)), state.ready, proc, immediate_next)
             if thunk !== nothing
                 fire_task!(ctx, thunk, proc, state, chan, node_order)
             end
@@ -151,27 +145,32 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     state.cache[d]
 end
 
-function assign_new_workers!(ctx, ps, state, chan, node_order, assignedprocs=[])
-    ps !== procs(ctx) && return assignedprocs
-    lock(ctx) do
-        # Must track individual procs to handle the case when procs are removed
-        for p in setdiff(ps, assignedprocs)
-            isempty(state.ready) && break
-            task = pop_with_affinity!(ctx, state.ready, p, false)
-            if task !== nothing
-                fire_task!(ctx, task, p, state, chan, node_order)
-            end
-        end
-        return copy(ps)
+procs_to_use(ctx) = procs_to_use(ctx, ctx.options)
+function procs_to_use(ctx, options)
+    return if options.single !== 0
+        @assert options.single in vcat(1, workers()) "Sch option 'single' must specify an active worker id"
+        OSProc[OSProc(options.single)]
+    else
+        procs(ctx)
     end
 end
 
-function shall_remove_worker(ctx, proc, ps, immediate_next) 
-    ps !== procs(ctx) && return false
-    return lock(ctx) do 
-        proc ∉ procs(ctx)
+# Main responsibility of this function is to check if new procs have been pushed to the context
+function assign_new_procs!(ctx, state, chan, node_order, assignedprocs=[])
+    ps = procs_to_use(ctx)
+    # Must track individual procs to handle the case when procs are removed
+    for p in setdiff(ps, assignedprocs)
+        isempty(state.ready) && break
+        task = pop_with_affinity!(ctx, state.ready, p, false)
+        if task !== nothing
+            fire_task!(ctx, task, p, state, chan, node_order)
+        end
     end
+    return ps
 end
+
+# Might be a good policy to not remove the proc if immediate_next
+shall_remove_proc(ctx, proc, immediate_next) = proc ∉ procs_to_use(ctx)
 
 function pop_with_affinity!(ctx, tasks, proc, immediate_next)
     # allow JIT specialization on Pairs
