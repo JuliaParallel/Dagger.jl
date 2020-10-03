@@ -87,7 +87,7 @@ end
             ps = []
             try     
                 ps1 = addprocs(2, exeflags="--project")
-                push!(ps, ps1)
+                append!(ps, ps1)
 
                 @everywhere vcat(ps1, myid()) $setup
         
@@ -102,10 +102,10 @@ end
                 
                 # Will not be added, so they should never appear in output
                 ps2 = addprocs(2, exeflags="--project")
-                push!(ps, ps2)
+                append!(ps, ps2)
 
                 ps3 = addprocs(2, exeflags="--project")
-                push!(ps, ps3)
+                append!(ps, ps3)
                 @everywhere ps3 $setup
                 Dagger.addprocs!(ctx, ps3)
                 @test length(procs(ctx)) == 4
@@ -126,7 +126,7 @@ end
             ps = []
             try     
                 ps1 = addprocs(4, exeflags="--project")
-                push!(ps, ps1)
+                append!(ps, ps1)
 
                 @everywhere vcat(ps1, myid()) $setup
         
