@@ -84,24 +84,24 @@ end
         end
 
         @testset "Add new workers" begin
-        ps = []
-        try     
-                ps1 = addprocs(2, exeflags="--project");
+            ps = []
+            try     
+                ps1 = addprocs(2, exeflags="--project")
                 push!(ps, ps1)
 
                 @everywhere vcat(ps1, myid()) $setup
         
-                ts = delayed(vcat)((delayed(testfun)(i) for i in 1:10)...);
+                ts = delayed(vcat)((delayed(testfun)(i) for i in 1:10)...)
 
                 ctx = Context(ps1)
-                job = @async collect(ctx, ts);
+                job = @async collect(ctx, ts)
 
                 while !istaskstarted(job) 
                     sleep(0.001)
                 end
                 
                 # Will not be added, so they should never appear in output
-                ps2 = addprocs(2, exeflags="--project");
+                ps2 = addprocs(2, exeflags="--project")
                 push!(ps, ps2)
 
                 ps3 = addprocs(2, exeflags="--project")
@@ -123,17 +123,17 @@ end
         end
 
         @testset "Remove workers" begin
-        ps = []
-        try     
-                ps1 = addprocs(4, exeflags="--project");
+            ps = []
+            try     
+                ps1 = addprocs(4, exeflags="--project")
                 push!(ps, ps1)
 
                 @everywhere vcat(ps1, myid()) $setup
         
-                ts = delayed(vcat)((delayed(testfun)(i) for i in 1:16)...);
+                ts = delayed(vcat)((delayed(testfun)(i) for i in 1:16)...)
 
                 ctx = Context(ps1)
-                job = @async collect(ctx, ts);
+                job = @async collect(ctx, ts)
 
                 while !istaskstarted(job) 
                     sleep(0.001)
