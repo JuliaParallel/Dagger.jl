@@ -105,7 +105,7 @@ job = @async collect(ctx, ts);
 
 # Lets fire up some new workers
 ps2 = addprocs(2, exeflags="--project");
-@everywhere using Distributed, Dagger
+@everywhere ps2 using Distributed, Dagger
 # New workers are not available until we do this
 addprocs!(ctx, ps2)
 
