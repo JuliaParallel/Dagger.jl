@@ -123,10 +123,10 @@ function handle_fault(ctx, state, thunk, oldproc, chan, node_order)
     end
 
     # Reschedule inputs from deadlist
-    newproc = OSProc(rand(workers()))
-    if newproc ∉ procs(ctx)
-        addprocs!(ctx, [newproc])
-    end
+    ps = procs(ctx)
+    @assert !isempty(ps) "No processes left!"
+    newproc = rand(ps)
+
     while length(deadlist) > 0
         dt = popfirst!(deadlist)
         if any((input in deadlist) for input in dt.inputs)

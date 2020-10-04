@@ -1,5 +1,5 @@
 using Distributed
-addprocs(2)
+addprocs(3)
 
 using Test
 using Dagger

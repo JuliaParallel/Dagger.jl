@@ -133,8 +133,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
                 @warn "Worker $(proc.pid) died on thunk $thunk_id, rescheduling work"
 
                 # Remove dead worker from procs list
-                # Not sure what is desired behaviour if option.singleworker is set...
-                rmprocs!(ctx, [proc])
+                remove_dead_proc!(ctx, proc)
 
                 handle_fault(ctx, state, state.thunk_dict[thunk_id], proc, chan, node_order)
                 continue
@@ -187,6 +186,12 @@ end
 
 # Might be a good policy to not remove the proc if immediate_next
 shall_remove_proc(ctx, proc, immediate_next) = proc ∉ procs_to_use(ctx)
+
+remove_dead_proc!(ctx, proc) = remove_dead_proc!(ctx, ctx.options, proc)
+function remove_dead_proc!(ctx, options, proc)
+    @assert options.single !== proc.pid "Single worker failed!" 
+    rmprocs!(ctx, [proc])
+end
 
 function pop_with_affinity!(ctx, tasks, proc, immediate_next)
     # allow JIT specialization on Pairs
