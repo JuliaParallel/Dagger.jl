@@ -93,35 +93,24 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     procs_state = assign_new_procs!(ctx, state, chan, node_order)
     @dbg timespan_end(ctx, :scheduler_init, 0, master)
 
-    # Check periodically for new workers in a parallel task so that we don't accidentally end up
-    # having to wait for 'take!(chan)' on some large task before new workers are put to work
-    newtasks_lock = ReentrantLock()
-    @async while !isempty(state.ready) || !isempty(state.running)
-        sleep(1)
-        procs_state = lock(newtasks_lock) do
-            assign_new_procs!(ctx, state, chan, node_order, procs_state)
-        end
-    end
-
     # Loop while we still have thunks to execute
     while !isempty(state.ready) || !isempty(state.running)
         if isempty(state.running) && !isempty(state.ready)
             # Nothing running, so schedule up to N thunks, 1 per N workers
-            lock(newtasks_lock) do
-                for p in procs_to_use(ctx)
-                    isempty(state.ready) && break
-                    task = pop_with_affinity!(ctx, state.ready, p, false)
-                    if task !== nothing
-                        fire_task!(ctx, task, p, state, chan, node_order)
-                    end
+            for p in procs_to_use(ctx)
+                isempty(state.ready) && break
+                task = pop_with_affinity!(ctx, state.ready, p, false)
+                if task !== nothing
+                    fire_task!(ctx, task, p, state, chan, node_order)
                 end
             end
         end
 
-        procs_state = lock(newtasks_lock) do
-            assign_new_procs!(ctx, state, chan, node_order, procs_state)
-        end
-
+        # This is a bit redundant as the @async task below does basically the same job
+        # Without it though, testing of process modification becomes non-deterministic
+        # (due to sleep in CI environment) which is why it is still here.
+        procs_state = assign_new_procs!(ctx, state, chan, node_order, procs_state)
+        
         if isempty(state.running)
             # the block above fired only meta tasks
             continue
@@ -129,7 +118,22 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
 
         @assert !isempty(procs_to_use(ctx)) "No workers available available!!"
 
+        # Check periodically for new workers in a parallel task so that we don't accidentally end up
+        # having to wait for 'take!(chan)' on some large task before new workers are put to work
+        # Lock is used to stop this task as soon as something pops out from the channel to minimize
+        # risk that the task schedules thunks simultaneously as the main task (after future refactoring).
+        newtasks_lock = ReentrantLock()
+        @async while !isempty(state.ready) || !isempty(state.running)
+            sleep(1)
+            islocked(newtasks_lock) && return
+            procs_state = lock(newtasks_lock) do
+                assign_new_procs!(ctx, state, chan, node_order, procs_state)
+            end
+        end
+
         proc, thunk_id, res = take!(chan) # get result of completed thunk
+        lock(newtasks_lock) # This waits for any assign_new_procs! above to complete and then shuts down the task
+
         if isa(res, CapturedException) || isa(res, RemoteException)
             if check_exited_exception(res)
                 @warn "Worker $(proc.pid) died on thunk $thunk_id, rescheduling work"
@@ -150,11 +154,9 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         @dbg timespan_start(ctx, :scheduler, thunk_id, master)
         immediate_next = finish_task!(state, node, node_order)
         if !isempty(state.ready) && !shall_remove_proc(ctx, proc, immediate_next) 
-            lock(newtasks_lock) do
-                thunk = pop_with_affinity!(Context(procs_to_use(ctx)), state.ready, proc, immediate_next)
-                if thunk !== nothing
-                    fire_task!(ctx, thunk, proc, state, chan, node_order)
-                end
+            thunk = pop_with_affinity!(Context(procs_to_use(ctx)), state.ready, proc, immediate_next)
+            if thunk !== nothing
+                fire_task!(ctx, thunk, proc, state, chan, node_order)
             end
         end
         @dbg timespan_end(ctx, :scheduler, thunk_id, master)
