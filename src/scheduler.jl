@@ -116,8 +116,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
             continue
         end
 
-        @assert !isempty(procs_to_use(ctx)) "No workers available available!!"
-
+        check_integrity(ctx)
         # Check periodically for new workers in a parallel task so that we don't accidentally end up
         # having to wait for 'take!(chan)' on some large task before new workers are put to work
         # Lock is used to stop this task as soon as something pops out from the channel to minimize
@@ -173,6 +172,9 @@ function procs_to_use(ctx, options)
         procs(ctx)
     end
 end
+
+check_integrity(ctx) = check_integrity(ctx, ctx.options)
+check_integrity(ctx, ::Any) = @assert !isempty(procs_to_use(ctx)) "No workers available!!"
 
 # Main responsibility of this function is to check if new procs have been pushed to the context
 function assign_new_procs!(ctx, state, chan, node_order, assignedprocs=[])
