@@ -86,7 +86,8 @@ be available at the same time.
 New workers will typically be assigned new tasks as soon as the scheduler
 sees them. Removed workers will finish all their assigned tasks but will not
 be assigned any new tasks. Note that this makes it difficult to determine when 
-a worker is no longer in use by Dagger.
+a worker is no longer in use by Dagger. Contributions to alleviate this 
+uncertainty are welcome!
 
 Example:
 
