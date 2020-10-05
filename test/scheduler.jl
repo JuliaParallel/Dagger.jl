@@ -158,5 +158,32 @@ end
                 wait(rmprocs(ps))
             end
         end
+
+        @testset "Remove all workers throws" begin
+            ps = []
+            try 
+                ps1 = addprocs(2, exeflags="--project")
+                append!(ps, ps1)
+
+                @everywhere vcat(ps1, myid()) $setup
+        
+                ts = delayed(vcat)((delayed(testfun)(i) for i in 1:16)...)
+
+                ctx = Context(ps1)
+                job = @async collect(ctx, ts)
+
+                while !istaskstarted(job) 
+                    sleep(0.001)
+                end
+
+                rmprocs!(ctx, ps1)
+                @test length(procs(ctx)) == 0
+
+                @everywhere ps1 blocked=false
+                @test_throws TaskFailedException fetch(job)
+            finally
+                wait(rmprocs(ps))
+            end
+        end
     end
 end

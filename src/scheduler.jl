@@ -127,6 +127,8 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
             continue
         end
 
+        @assert !isempty(procs_to_use(ctx)) "No workers available available!!"
+
         proc, thunk_id, res = take!(chan) # get result of completed thunk
         if isa(res, CapturedException) || isa(res, RemoteException)
             if check_exited_exception(res)
