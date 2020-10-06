@@ -179,7 +179,11 @@ end
                 @test length(procs(ctx)) == 0
 
                 @everywhere ps1 blocked=false
-                @test_throws TaskFailedException fetch(job)
+                if VERSION >= v"1.3.0-alpha.110"
+                    @test_throws TaskFailedException fetch(job)
+                else
+                    @test_throws Exception fetch(job)
+                end
             finally
                 wait(rmprocs(ps))
             end
