@@ -106,21 +106,24 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
             end
         end
 
-        # This is a bit redundant as the @async task below does basically the same job
-        # Without it though, testing of process modification becomes non-deterministic
-        # (due to sleep in CI environment) which is why it is still here.
+        # This is a bit redundant as the @async task below does basically the
+        # same job Without it though, testing of process modification becomes
+        # non-deterministic (due to sleep in CI environment) which is why it is
+        # still here.
         procs_state = assign_new_procs!(ctx, state, chan, node_order, procs_state)
-        
+
         if isempty(state.running)
             # the block above fired only meta tasks
             continue
         end
-
         check_integrity(ctx)
-        # Check periodically for new workers in a parallel task so that we don't accidentally end up
-        # having to wait for 'take!(chan)' on some large task before new workers are put to work
-        # Lock is used to stop this task as soon as something pops out from the channel to minimize
-        # risk that the task schedules thunks simultaneously as the main task (after future refactoring).
+
+        # Check periodically for new workers in a parallel task so that we
+        # don't accidentally end up having to wait for `take!(chan)` on some
+        # large task before new workers are put to work. Locking is used to
+        # stop this task as soon as something pops out from the channel to
+        # minimize risk that the task schedules thunks simultaneously as the
+        # main task (after future refactoring).
         newtasks_lock = ReentrantLock()
         @async while !isempty(state.ready) || !isempty(state.running)
             sleep(1)
@@ -152,7 +155,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
 
         @dbg timespan_start(ctx, :scheduler, thunk_id, master)
         immediate_next = finish_task!(state, node, node_order)
-        if !isempty(state.ready) && !shall_remove_proc(ctx, proc, immediate_next) 
+        if !isempty(state.ready) && !shall_remove_proc(ctx, proc)
             thunk = pop_with_affinity!(Context(procs_to_use(ctx)), state.ready, proc, immediate_next)
             if thunk !== nothing
                 fire_task!(ctx, thunk, proc, state, chan, node_order)
@@ -163,18 +166,16 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     state.cache[d]
 end
 
-procs_to_use(ctx) = procs_to_use(ctx, ctx.options)
-function procs_to_use(ctx, options)
+function procs_to_use(ctx, options=ctx.options)
     return if options.single !== 0
-        @assert options.single in vcat(1, workers()) "Sch option 'single' must specify an active worker id"
+        @assert options.single in vcat(1, workers()) "Sch option `single` must specify an active worker ID."
         OSProc[OSProc(options.single)]
     else
         procs(ctx)
     end
 end
 
-check_integrity(ctx) = check_integrity(ctx, ctx.options)
-check_integrity(ctx, ::Any) = @assert !isempty(procs_to_use(ctx)) "No workers available!!"
+check_integrity(ctx) = @assert !isempty(procs_to_use(ctx)) "No suitable workers available in context."
 
 # Main responsibility of this function is to check if new procs have been pushed to the context
 function assign_new_procs!(ctx, state, chan, node_order, assignedprocs=[])
@@ -191,11 +192,10 @@ function assign_new_procs!(ctx, state, chan, node_order, assignedprocs=[])
 end
 
 # Might be a good policy to not remove the proc if immediate_next
-shall_remove_proc(ctx, proc, immediate_next) = proc ∉ procs_to_use(ctx)
+shall_remove_proc(ctx, proc) = proc ∉ procs_to_use(ctx)
 
-remove_dead_proc!(ctx, proc) = remove_dead_proc!(ctx, ctx.options, proc)
-function remove_dead_proc!(ctx, options, proc)
-    @assert options.single !== proc.pid "Single worker failed!" 
+function remove_dead_proc!(ctx, proc, options=ctx.options)
+    @assert options.single !== proc.pid "Single worker failed, cannot continue."
     rmprocs!(ctx, [proc])
 end
 

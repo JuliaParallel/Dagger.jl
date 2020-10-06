@@ -286,16 +286,17 @@ Base.lock(f, ctx::Context) = lock(f, ctx.proc_lock)
 """
     addprocs!(ctx::Context, xs)
 
-Add new workers `xs` to `ctx`. 
+Add new workers `xs` to `ctx`.
 
 Workers will typically be assigned new tasks in the next scheduling iteration if scheduling is ongoing.
 
-Workers can be either `Processor`s or the underlying process ids as `Integer`s.
+Workers can be either `Processor`s or the underlying process IDs as `Integer`s.
 """
 addprocs!(ctx::Context, xs::AbstractVector{<:Integer}) = addprocs!(ctx, map(OSProc, xs))
-addprocs!(ctx::Context, xs::AbstractVector{<:Processor}) = lock(ctx) do 
+addprocs!(ctx::Context, xs::AbstractVector{<:Processor}) = lock(ctx) do
     append!(ctx.procs, xs)
 end
+
 """
     rmprocs!(ctx::Context, xs)
 
@@ -303,10 +304,9 @@ Remove the specified workers `xs` from `ctx`.
 
 Workers will typically finish all their assigned tasks if scheduling is ongoing but will not be assigned new tasks after removal.
 
-Workers can be either `Processors` or the underlying process ids as `Integer`s.
+Workers can be either `Processor`s or the underlying process IDs as `Integer`s.
 """
 rmprocs!(ctx::Context, xs::AbstractVector{<:Integer}) = rmprocs!(ctx, map(OSProc, xs))
-rmprocs!(ctx::Context, xs::AbstractVector{<:Processor}) = lock(ctx) do 
+rmprocs!(ctx::Context, xs::AbstractVector{<:Processor}) = lock(ctx) do
     filter!(p -> p ∉ xs, ctx.procs)
 end
-

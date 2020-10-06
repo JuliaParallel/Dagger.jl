@@ -124,7 +124,7 @@ function handle_fault(ctx, state, thunk, oldproc, chan, node_order)
 
     # Reschedule inputs from deadlist
     ps = procs(ctx)
-    @assert !isempty(ps) "No processes left!"
+    @assert !isempty(ps) "No workers left for fault handling!"
     newproc = rand(ps)
 
     while length(deadlist) > 0

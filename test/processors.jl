@@ -80,7 +80,7 @@ end
     @testset "Modify workers in Context" begin
         ps = addprocs(4, exeflags="--project")
         @everywhere ps using Dagger
-        
+
         ctx = Context(ps[1:2])
 
         Dagger.addprocs!(ctx, ps[3:end])
