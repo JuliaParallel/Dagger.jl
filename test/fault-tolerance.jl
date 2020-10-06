@@ -1,12 +1,12 @@
 @testset "Fault tolerance" begin
-    function setup_funcs()
+    function setup_funcs(nofail)
         @everywhere begin
             $(Expr(:using, Expr(Symbol("."), :Dagger)))
             function kill_eager(x)
                 _x = x+1
                 sleep(1)
 
-                _x == 2 && myid() != 1 && exit(1)
+                _x == 2 && myid() != $nofail && exit(1)
 
                 return _x
             end
@@ -17,15 +17,18 @@
                 _x = sum(x)
                 sleep(1)
 
-                _x == 6 && myid() != 1 && exit(1)
+                _x == 6 && myid() != $nofail && exit(1)
 
                 return _x
             end
         end
     end
 
-    setup_funcs()
+    ## 2 workers will fail and exit while one (the last one) will complete the tasks
+    setup_funcs(workers() |> last)
     for kill_func in (kill_eager, kill_lazy)
+        @test workers() |> length == 3
+
         a = delayed(kill_func)(1)
         b = delayed(kill_func)(a)
         c = delayed(kill_func)(a)
@@ -34,7 +37,7 @@
 
         addprocs(2)
         using Dagger
-        setup_funcs()
+        setup_funcs(workers() |> last)
 
         a = delayed(kill_func)(1)
         b = delayed(kill_func)(delayed(kill_func)(a))
@@ -43,7 +46,7 @@
 
         addprocs(2)
         using Dagger
-        setup_funcs()
+        setup_funcs(workers() |> last)
 
         a1 = delayed(kill_func)(1)
         a2 = delayed(kill_func)(1)
@@ -55,6 +58,16 @@
 
         addprocs(2)
         using Dagger
-        setup_funcs()
+        setup_funcs(workers() |> last)
+
+        a = delayed(kill_func)(1)
+        b = delayed(kill_func)(a)
+        c = delayed(kill_func)(a)
+        d = delayed(kill_func)(b, c)
+        @test_throws AssertionError collect(d; options=Dagger.Sch.SchedulerOptions(single=first(workers())))
+
+        addprocs(1)
+        using Dagger
+        setup_funcs(workers() |> last)
     end
 end

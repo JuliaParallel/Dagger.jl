@@ -1,4 +1,4 @@
-export OSProc, Context
+export OSProc, Context, addprocs!, rmprocs!
 
 """
     Processor
@@ -238,6 +238,7 @@ mutable struct Context
     log_sink::Any
     profile::Bool
     options
+    proc_lock::ReentrantLock
 end
 
 """
@@ -256,12 +257,15 @@ as a `Vector{Int}`.
 function Context(xs)
     Context(xs, NoOpLog(), false, nothing) # By default don't log events
 end
+Context(xs, log_sink, profile, options) = Context(xs, log_sink, profile, options, ReentrantLock())
 Context(xs::Vector{Int}) = Context(map(OSProc, xs))
 function Context()
     procs = [OSProc(w) for w in workers()]
     Context(procs)
 end
-procs(ctx::Context) = ctx.procs
+procs(ctx::Context) = lock(ctx) do
+    copy(ctx.procs)
+end
 
 """
     write_event(ctx::Context, event::Event)
@@ -270,4 +274,39 @@ Write a log event
 """
 function write_event(ctx::Context, event::Event)
     write_event(ctx.log_sink, event)
+end
+
+"""
+    lock(f, ctx::Context)
+
+Acquire `ctx.proc_lock`, execute `f` with the lock held, and release the lock when `f` returns.
+"""
+Base.lock(f, ctx::Context) = lock(f, ctx.proc_lock)
+
+"""
+    addprocs!(ctx::Context, xs)
+
+Add new workers `xs` to `ctx`.
+
+Workers will typically be assigned new tasks in the next scheduling iteration if scheduling is ongoing.
+
+Workers can be either `Processor`s or the underlying process IDs as `Integer`s.
+"""
+addprocs!(ctx::Context, xs::AbstractVector{<:Integer}) = addprocs!(ctx, map(OSProc, xs))
+addprocs!(ctx::Context, xs::AbstractVector{<:Processor}) = lock(ctx) do
+    append!(ctx.procs, xs)
+end
+
+"""
+    rmprocs!(ctx::Context, xs)
+
+Remove the specified workers `xs` from `ctx`.
+
+Workers will typically finish all their assigned tasks if scheduling is ongoing but will not be assigned new tasks after removal.
+
+Workers can be either `Processor`s or the underlying process IDs as `Integer`s.
+"""
+rmprocs!(ctx::Context, xs::AbstractVector{<:Integer}) = rmprocs!(ctx, map(OSProc, xs))
+rmprocs!(ctx::Context, xs::AbstractVector{<:Processor}) = lock(ctx) do
+    filter!(p -> p ∉ xs, ctx.procs)
 end

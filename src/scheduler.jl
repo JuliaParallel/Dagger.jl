@@ -3,7 +3,7 @@ module Sch
 using Distributed
 import MemPool: DRef
 
-import ..Dagger: Context, Processor, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, choose_processor, execute!
+import ..Dagger: Context, Processor, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, choose_processor, execute!, rmprocs!, addprocs!
 
 include("fault-handler.jl")
 
@@ -82,12 +82,6 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     master = OSProc(myid())
     @dbg timespan_start(ctx, :scheduler_init, 0, master)
 
-    if options.single !== 0
-        @assert options.single in vcat(1, workers()) "Sch option 'single' must specify an active worker id"
-        ps = OSProc[OSProc(options.single)]
-    else
-        ps = procs(ctx)
-    end
     chan = Channel{Any}(32)
     deps = dependents(d)
     ord = order(d, noffspring(deps))
@@ -95,20 +89,15 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     node_order = x -> -get(ord, x, 0)
     state = start_state(deps, node_order)
     # start off some tasks
-    for p in ps
-        isempty(state.ready) && break
-        task = pop_with_affinity!(ctx, state.ready, p, false)
-        if task !== nothing
-            fire_task!(ctx, task, p, state, chan, node_order)
-        end
-    end
+    # Note: worker_state may be different things for different contexts. Don't touch it out here!
+    procs_state = assign_new_procs!(ctx, state, chan, node_order)
     @dbg timespan_end(ctx, :scheduler_init, 0, master)
 
     # Loop while we still have thunks to execute
     while !isempty(state.ready) || !isempty(state.running)
         if isempty(state.running) && !isempty(state.ready)
             # Nothing running, so schedule up to N thunks, 1 per N workers
-            for p in ps
+            for p in procs_to_use(ctx)
                 isempty(state.ready) && break
                 task = pop_with_affinity!(ctx, state.ready, p, false)
                 if task !== nothing
@@ -117,19 +106,42 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
             end
         end
 
+        # This is a bit redundant as the @async task below does basically the
+        # same job Without it though, testing of process modification becomes
+        # non-deterministic (due to sleep in CI environment) which is why it is
+        # still here.
+        procs_state = assign_new_procs!(ctx, state, chan, node_order, procs_state)
+
         if isempty(state.running)
             # the block above fired only meta tasks
             continue
         end
+        check_integrity(ctx)
+
+        # Check periodically for new workers in a parallel task so that we
+        # don't accidentally end up having to wait for `take!(chan)` on some
+        # large task before new workers are put to work. Locking is used to
+        # stop this task as soon as something pops out from the channel to
+        # minimize risk that the task schedules thunks simultaneously as the
+        # main task (after future refactoring).
+        newtasks_lock = ReentrantLock()
+        @async while !isempty(state.ready) || !isempty(state.running)
+            sleep(1)
+            islocked(newtasks_lock) && return
+            procs_state = lock(newtasks_lock) do
+                assign_new_procs!(ctx, state, chan, node_order, procs_state)
+            end
+        end
 
         proc, thunk_id, res = take!(chan) # get result of completed thunk
+        lock(newtasks_lock) # This waits for any assign_new_procs! above to complete and then shuts down the task
+
         if isa(res, CapturedException) || isa(res, RemoteException)
             if check_exited_exception(res)
                 @warn "Worker $(proc.pid) died on thunk $thunk_id, rescheduling work"
 
                 # Remove dead worker from procs list
-                filter!(p->p.pid!=proc.pid, ctx.procs)
-                ps = procs(ctx)
+                remove_dead_proc!(ctx, proc)
 
                 handle_fault(ctx, state, state.thunk_dict[thunk_id], proc, chan, node_order)
                 continue
@@ -143,8 +155,8 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
 
         @dbg timespan_start(ctx, :scheduler, thunk_id, master)
         immediate_next = finish_task!(state, node, node_order)
-        if !isempty(state.ready)
-            thunk = pop_with_affinity!(Context(ps), state.ready, proc, immediate_next)
+        if !isempty(state.ready) && !shall_remove_proc(ctx, proc)
+            thunk = pop_with_affinity!(Context(procs_to_use(ctx)), state.ready, proc, immediate_next)
             if thunk !== nothing
                 fire_task!(ctx, thunk, proc, state, chan, node_order)
             end
@@ -152,6 +164,39 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         @dbg timespan_end(ctx, :scheduler, thunk_id, master)
     end
     state.cache[d]
+end
+
+function procs_to_use(ctx, options=ctx.options)
+    return if options.single !== 0
+        @assert options.single in vcat(1, workers()) "Sch option `single` must specify an active worker ID."
+        OSProc[OSProc(options.single)]
+    else
+        procs(ctx)
+    end
+end
+
+check_integrity(ctx) = @assert !isempty(procs_to_use(ctx)) "No suitable workers available in context."
+
+# Main responsibility of this function is to check if new procs have been pushed to the context
+function assign_new_procs!(ctx, state, chan, node_order, assignedprocs=[])
+    ps = procs_to_use(ctx)
+    # Must track individual procs to handle the case when procs are removed
+    for p in setdiff(ps, assignedprocs)
+        isempty(state.ready) && break
+        task = pop_with_affinity!(ctx, state.ready, p, false)
+        if task !== nothing
+            fire_task!(ctx, task, p, state, chan, node_order)
+        end
+    end
+    return ps
+end
+
+# Might be a good policy to not remove the proc if immediate_next
+shall_remove_proc(ctx, proc) = proc ∉ procs_to_use(ctx)
+
+function remove_dead_proc!(ctx, proc, options=ctx.options)
+    @assert options.single !== proc.pid "Single worker failed, cannot continue."
+    rmprocs!(ctx, [proc])
 end
 
 function pop_with_affinity!(ctx, tasks, proc, immediate_next)

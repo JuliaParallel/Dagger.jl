@@ -70,3 +70,48 @@ complicated detection and recovery process, including multiple master
 processes, a distributed and replicated database such as etcd, and
 checkpointing of the scheduler to ensure an efficient recovery. Such a system
 does not yet exist, but contributions for such a change are desired.
+
+## Dynamic worker pools
+
+Dagger's default scheduler supports modifying the worker pool while the
+scheduler is running. This is done by modifying the `Processor`s of the
+`Context` supplied to the scheduler at initialization using `addprocs!(ctx, ps)`
+and `rmprocs(ctx, ps)` where `ps` can be `Processor`s or just process ids.
+
+An example of when this is useful is in HPC environments where individual jobs
+to start up workers are queued so that not all workers are guaranteed to be
+available at the same time.
+
+New workers will typically be assigned new tasks as soon as the scheduler sees
+them. Removed workers will finish all their assigned tasks but will not be
+assigned any new tasks. Note that this makes it difficult to determine when a
+worker is no longer in use by Dagger. Contributions to alleviate this
+uncertainty are welcome!
+
+Example:
+
+```julia
+using Distributed
+
+ps1 = addprocs(2, exeflags="--project")
+@everywhere using Distributed, Dagger
+
+# Dummy task to wait for 0.5 seconds and then return the id of the worker
+ts = delayed(vcat)((delayed(i -> (sleep(0.5); myid()))(i) for i in 1:20)...)
+
+ctx = Context()
+# Scheduler is blocking, so we need a new task to add workers while it runs
+job = @async collect(ctx, ts)
+
+# Lets fire up some new workers
+ps2 = addprocs(2, exeflags="--project")
+@everywhere ps2 using Distributed, Dagger
+# New workers are not available until we do this
+addprocs!(ctx, ps2)
+
+# Lets hope the job didn't complete before workers were added :)
+@show fetch(job) |> unique
+
+# and cleanup after ourselves...
+workers() |> rmprocs
+```
