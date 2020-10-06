@@ -73,20 +73,19 @@ does not yet exist, but contributions for such a change are desired.
 
 ## Dynamic worker pools
 
-Daggers default scheduler supports modifying the worker pool while the 
-scheduler is running. This is done by modifying the `Processor`s of the 
-`Context` supplied to the scheduler at initialization using 
-`addprocs!(ctx, ps)` and `rmprocs(ctx, ps)` where `ps` can be `Processors` or
- just process ids. 
+Dagger's default scheduler supports modifying the worker pool while the
+scheduler is running. This is done by modifying the `Processor`s of the
+`Context` supplied to the scheduler at initialization using `addprocs!(ctx, ps)`
+and `rmprocs(ctx, ps)` where `ps` can be `Processor`s or just process ids.
 
-An example of when this is useful is in HPC environments where individual 
-jobs to start up workers are queued so that not all workers are guaranteed to 
-be available at the same time.
+An example of when this is useful is in HPC environments where individual jobs
+to start up workers are queued so that not all workers are guaranteed to be
+available at the same time.
 
-New workers will typically be assigned new tasks as soon as the scheduler
-sees them. Removed workers will finish all their assigned tasks but will not
-be assigned any new tasks. Note that this makes it difficult to determine when 
-a worker is no longer in use by Dagger. Contributions to alleviate this 
+New workers will typically be assigned new tasks as soon as the scheduler sees
+them. Removed workers will finish all their assigned tasks but will not be
+assigned any new tasks. Note that this makes it difficult to determine when a
+worker is no longer in use by Dagger. Contributions to alleviate this
 uncertainty are welcome!
 
 Example:
@@ -94,24 +93,24 @@ Example:
 ```julia
 using Distributed
 
-ps1 = addprocs(2, exeflags="--project");
+ps1 = addprocs(2, exeflags="--project")
 @everywhere using Distributed, Dagger
 
 # Dummy task to wait for 0.5 seconds and then return the id of the worker
-ts = delayed(vcat)((delayed(i -> (sleep(0.5); myid()))(i) for i in 1:20)...);
+ts = delayed(vcat)((delayed(i -> (sleep(0.5); myid()))(i) for i in 1:20)...)
 
-ctx = Context();
+ctx = Context()
 # Scheduler is blocking, so we need a new task to add workers while it runs
-job = @async collect(ctx, ts); 
+job = @async collect(ctx, ts)
 
 # Lets fire up some new workers
-ps2 = addprocs(2, exeflags="--project");
+ps2 = addprocs(2, exeflags="--project")
 @everywhere ps2 using Distributed, Dagger
 # New workers are not available until we do this
 addprocs!(ctx, ps2)
 
 # Lets hope the job didn't complete before workers were added :)
-fetch(job) |> unique
+@show fetch(job) |> unique
 
 # and cleanup after ourselves...
 workers() |> rmprocs
