@@ -93,8 +93,10 @@ end
     end
 
     @testset "Callable as Thunk function" begin
-        struct ABC end
-        (::ABC)(x) = x+1
+        @everywhere begin
+            struct ABC end
+            (::ABC)(x) = x+1
+        end
 
         abc = ABC()
         a = delayed(abc)(1)
