@@ -7,7 +7,7 @@ end
 
 # A thing to run
 mutable struct Thunk
-    f::Function
+    f::Any # usually a Function, but could be any callable
     inputs::Tuple
     id::Int
     get_result::Bool # whether the worker should send the result or only the metadata

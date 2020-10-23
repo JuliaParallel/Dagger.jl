@@ -91,4 +91,13 @@ end
 
         wait(rmprocs(ps))
     end
+
+    @testset "Callable as Thunk function" begin
+        struct ABC end
+        (::ABC)(x) = x+1
+
+        abc = ABC()
+        a = delayed(abc)(1)
+        @test collect(a) == 2
+    end
 end
