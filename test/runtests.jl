@@ -6,6 +6,7 @@ using Dagger
 
 include("fakeproc.jl")
 
+include("thunk.jl")
 include("domain.jl")
 include("array.jl")
 include("scheduler.jl")
