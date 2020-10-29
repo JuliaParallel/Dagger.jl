@@ -318,4 +318,4 @@ rmprocs!(ctx::Context, xs::AbstractVector{<:Processor}) = lock(ctx) do
 end
 
 "Gets the current processor executing the current thunk."
-thunk_processor() = task_local_storage(:processor)
+thunk_processor() = task_local_storage(:processor)::Processor
