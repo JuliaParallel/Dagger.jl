@@ -146,6 +146,7 @@ function write_dag(io, logs::Vector, t=nothing)
                 c = write_node(io, arg, c, name)
                 push!(nodes, name)
             end
+            arg_c += 1
         end
         argnodemap[id] = nodes
     end

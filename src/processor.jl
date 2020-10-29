@@ -235,10 +235,11 @@ default_enabled(proc::ThreadProc) = true
 "A context represents a set of processors to use for an operation."
 mutable struct Context
     procs::Vector{Processor}
+    proc_lock::ReentrantLock
     log_sink::Any
+    log_file::Union{String,Nothing}
     profile::Bool
     options
-    proc_lock::ReentrantLock
 end
 
 """
@@ -253,16 +254,19 @@ number of threads.
 It is also possible to create a Context from a vector of [`OSProc`](@ref),
 or equivalently the underlying process ids can also be passed directly
 as a `Vector{Int}`.
+
+Special fields include:
+- 'log_sink': A log sink object to use, if any.
+- `log_file::Union{String,Nothing}`: Path to logfile. If specified, at
+scheduler termination logs will be collected, combined with input thunks, and
+written out in DOT format to this location.
+- `profile::Bool`: Whether or not to perform profiling with Profile stdlib.
 """
-function Context(xs)
-    Context(xs, NoOpLog(), false, nothing) # By default don't log events
-end
-Context(xs, log_sink, profile, options) = Context(xs, log_sink, profile, options, ReentrantLock())
+Context(procs::Vector{P}=Processor[OSProc(w) for w in workers()];
+        proc_lock=ReentrantLock(), log_sink=NoOpLog(), log_file=nothing,
+        profile=false, options=nothing) where {P<:Processor} =
+    Context(procs, proc_lock, log_sink, log_file, profile, options)
 Context(xs::Vector{Int}) = Context(map(OSProc, xs))
-function Context()
-    procs = [OSProc(w) for w in workers()]
-    Context(procs)
-end
 procs(ctx::Context) = lock(ctx) do
     copy(ctx.procs)
 end

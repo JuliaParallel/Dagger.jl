@@ -29,7 +29,18 @@ function compute(ctx::Context, d::Thunk; options=nothing)
         PLUGINS[:scheduler] = get_type(PLUGIN_CONFIGS[:scheduler])
     end
     scheduler = PLUGINS[:scheduler]
-    (scheduler).compute_dag(ctx, d; options=options)
+    res = (scheduler).compute_dag(ctx, d; options=options)
+    if ctx.log_file !== nothing
+        if ctx.log_sink !== LocalEventLog
+            logs = get_logs!(ctx.log_sink)
+            open(ctx.log_file, "w") do io
+                Dagger.show_plan(io, logs, d)
+            end
+        else
+            @warn "Context log_sink not set to LocalEventLog, skipping"
+        end
+    end
+    res
 end
 
 function debug_compute(ctx::Context, args...; profile=false, options=nothing)

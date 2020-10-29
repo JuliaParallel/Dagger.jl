@@ -44,4 +44,18 @@ end
     logs = Dagger.get_logs!(log)
     plan = Dagger.show_plan(logs, j)
 end
+
+@testset "Automatic Plan Rendering" begin
+    x = compute(rand(Blocks(2,2),4,4))
+    mktemp() do path, io
+        ctx = Context(;log_sink=Dagger.LocalEventLog(),log_file=path)
+        compute(ctx, x * x)
+        plan = String(read(io))
+        @test occursin("digraph {", plan)
+        @test occursin("Comm:", plan)
+        @test occursin("Move:", plan)
+        @test occursin("Compute:", plan)
+        @test endswith(plan, "}\n")
+    end
+end
 end
