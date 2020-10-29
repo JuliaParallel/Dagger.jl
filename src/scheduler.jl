@@ -397,7 +397,13 @@ end
     @dbg timespan_start(ctx, :compute, thunk_id, f)
     res = nothing
     result_meta = try
+        # Set TLS variables
+        task_local_storage(:processor, to_proc)
+
+        # Execute
         res = execute!(to_proc, f, fetched...)
+
+        # Construct result
         (from_proc, thunk_id, send_result ? res : tochunk(res, to_proc; persist=persist, cache=persist ? true : cache)) #todo: add more metadata
     catch ex
         bt = catch_backtrace()

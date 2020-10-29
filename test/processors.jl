@@ -91,4 +91,10 @@ end
 
         wait(rmprocs(ps))
     end
+    @testset "Processor TLS accessor" begin
+        @everywhere function mythunk(x)
+            typeof(Dagger.thunk_processor())
+        end
+        @test collect(delayed(mythunk)(1)) === ThreadProc
+    end
 end

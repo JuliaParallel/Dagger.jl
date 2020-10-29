@@ -222,10 +222,16 @@ iscompatible_arg(proc::ThreadProc, opts, x) = true
 move(from_proc::OSProc, to_proc::ThreadProc, x) = x
 move(from_proc::ThreadProc, to_proc::OSProc, x) = x
 @static if VERSION >= v"1.3.0-DEV.573"
-    execute!(proc::ThreadProc, f, args...) = fetch(Threads.@spawn f(args...))
+    execute!(proc::ThreadProc, f, args...) = fetch(Threads.@spawn begin
+        task_local_storage(:processor, proc)
+        f(args...)
+    end)
 else
     # TODO: Use Threads.@threads?
-    execute!(proc::ThreadProc, f, args...) = fetch(@async f(args...))
+    execute!(proc::ThreadProc, f, args...) = fetch(@async begin
+        task_local_storage(:processor, proc)
+        f(args...)
+    end)
 end
 get_parent(proc::ThreadProc) = OSProc(proc.owner)
 default_enabled(proc::ThreadProc) = true
@@ -310,3 +316,6 @@ rmprocs!(ctx::Context, xs::AbstractVector{<:Integer}) = rmprocs!(ctx, map(OSProc
 rmprocs!(ctx::Context, xs::AbstractVector{<:Processor}) = lock(ctx) do
     filter!(p -> p ∉ xs, ctx.procs)
 end
+
+"Gets the current processor executing the current thunk."
+thunk_processor() = task_local_storage(:processor)
