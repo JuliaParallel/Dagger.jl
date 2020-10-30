@@ -73,7 +73,7 @@ If the argument is *not* a `Thunk` (just some regular Julia object), it'll be pa
 
 ### Polytree
 
-[Polytrees](https://en.wikipedia.org/wiki/Polytree "Polytrees") are easily supported by Dagger. To make this work, pass all the head nodes `Thunk`s into a call to `delayed` as arguments, which will act as the top node for the graph.
+[Polytrees](https://en.wikipedia.org/wiki/Polytree) are easily supported by Dagger. To make this work, pass all the head nodes `Thunk`s into a call to `delayed` as arguments, which will act as the top node for the graph.
 ```julia
 group(x...) = [x...]
 top_node = delayed(group)(head_nodes...)
