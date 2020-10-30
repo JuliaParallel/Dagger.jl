@@ -30,6 +30,31 @@ s = delayed(combine)(p, q, r)
 
 @assert collect(s) == 16
 ```
+
+The above computation can also be written in a more Julia-idiomatic syntax with `@par`:
+
+```julia
+p = @par add1(4)
+q = @par add2(p)
+r = @par add1(3)
+s = @par combine(p, q, r)
+
+@assert collect(s) == 16
+```
+
+or similarly:
+
+```julia
+s = @par begin
+    p = add1(4)
+    q = add2(p)
+    r = add1(3)
+    combine(p, q, r)
+end
+
+@assert collect(s) == 16
+```
+
 The connections between nodes `p`, `q`, `r` and `s` is represented by this dependency graph:
 
 ![graph](https://user-images.githubusercontent.com/25916/26920104-7b9b5fa4-4c55-11e7-97fb-fe5b9e73cae6.png)

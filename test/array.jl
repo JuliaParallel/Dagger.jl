@@ -97,6 +97,13 @@ end
     @test norm(collect(X*y) - x*y) < 1e-13
 end
 
+@testset "matrix powers" begin
+    x = compute(rand(Blocks(4,4), 16, 16))
+    @test collect(x^1) == collect(x)
+    @test collect(x^2) == collect(x*x)
+    @test collect(x^3) == collect(x*x*x)
+end
+
 @testset "concat" begin
     m = rand(75,75)
     x = Distribute(Blocks(10,20), m)

@@ -179,6 +179,7 @@ function stage(ctx::Context, mul::MatMul)
                           _mul(chunks(a), chunks(b); T=Thunk))
 end
 
+Base.power_by_squaring(x::DArray, i::Int) = foldl(*, ntuple(idx->x, i))
 
 
 ### Scale
