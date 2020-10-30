@@ -91,6 +91,18 @@ end
 
         wait(rmprocs(ps))
     end
+
+    @testset "Callable as Thunk function" begin
+        @everywhere begin
+            struct ABC end
+            (::ABC)(x) = x+1
+        end
+
+        abc = ABC()
+        a = delayed(abc)(1)
+        @test collect(a) == 2
+    end
+  
     @testset "Processor TLS accessor" begin
         @everywhere function mythunk(x)
             typeof(Dagger.thunk_processor())
