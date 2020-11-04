@@ -38,4 +38,13 @@ you can call `Dagger.show_plan(logs, thunk)`, where `thunk` is the output
 
 !!! note
     `Dagger.get_logs!` clears out the event logs, so that old events don't mix
-with new ones from future DAGs.
+    with new ones from future DAGs.
+
+As a convenience, it's possible to set `ctx.log_file` to the path to an output
+file, and then calls to `compute(ctx, ...)`/`collect(ctx, ...)` will
+automatically write the graph in DOT format to that path. There is also a
+benefit to this approach over manual calls to `get_logs!` and `show_plan`: DAGs
+which aren't `Thunk`s (such as operations on the `Dagger.DArray`) will be
+properly rendered with input arguments (which normally aren't rendered because
+a `Thunk` is dynamically generated from such operations by Dagger before
+scheduling).
