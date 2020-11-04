@@ -19,7 +19,6 @@
     @test occursin("digraph {", plan)
     @test occursin("Comm:", plan)
     @test occursin("Move:", plan)
-    @test occursin("Compute:", plan)
     @test endswith(plan, "}\n")
 end
 
@@ -54,7 +53,6 @@ end
         @test occursin("digraph {", plan)
         @test occursin("Comm:", plan)
         @test occursin("Move:", plan)
-        @test occursin("Compute:", plan)
         @test endswith(plan, "}\n")
     end
 end

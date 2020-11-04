@@ -270,8 +270,8 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
         end
     end
 
-    ids = map(thunk.inputs) do x
-        istask(x) ? x.id : nothing
+    ids = map(enumerate(thunk.inputs)) do (idx,x)
+        istask(x) ? x.id : -idx
     end
     if thunk.meta
         # Run it on the parent node, do not move data.
@@ -285,7 +285,7 @@ function fire_task!(ctx, thunk, proc, state, chan, node_order)
 
         @dbg timespan_start(ctx, :compute, thunk.id, thunk.f)
         res = thunk.f(fetched...)
-        @dbg timespan_end(ctx, :compute, thunk.id, (thunk.f, typeof(res), sizeof(res)))
+        @dbg timespan_end(ctx, :compute, thunk.id, (thunk.f, p, typeof(res), sizeof(res)))
 
         #push!(state.running, thunk)
         state.cache[thunk] = res
@@ -380,7 +380,7 @@ end
 
 @noinline function do_task(thunk_id, f, data, send_result, persist, cache, options, ids, log_sink)
     ctx = Context(Processor[]; log_sink=log_sink)
-    proc = OSProc()
+    from_proc = OSProc()
     fetched = map(Iterators.zip(data,ids)) do (x, id)
         @dbg timespan_start(ctx, :comm, (thunk_id, id), (f, id))
         x = x isa Union{Chunk,Thunk} ? collect(ctx, x) : x
@@ -388,7 +388,6 @@ end
         return x
     end
 
-    from_proc = proc
     # TODO: Time choose_processor?
     to_proc = choose_processor(from_proc, options, f, fetched)
     fetched = map(Iterators.zip(fetched,ids)) do (x, id)
@@ -406,7 +405,7 @@ end
         bt = catch_backtrace()
         (from_proc, thunk_id, RemoteException(myid(), CapturedException(ex, bt)))
     end
-    @dbg timespan_end(ctx, :compute, thunk_id, (f, typeof(res), sizeof(res)))
+    @dbg timespan_end(ctx, :compute, thunk_id, (f, to_proc, typeof(res), sizeof(res)))
     result_meta
 end
 
