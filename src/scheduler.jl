@@ -116,7 +116,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     while !isempty(state.ready) || !isempty(state.running)
         if isempty(state.running) && !isempty(state.ready)
             # Nothing running, so schedule up to N thunks, 1 per N workers
-            schedule!(ctx, state, chan)
+            schedule!(ctx, state, chan, procs_state)
         end
 
         # This is a bit redundant as the @async task below does basically the
@@ -188,18 +188,37 @@ end
 check_integrity(ctx) = @assert !isempty(procs_to_use(ctx)) "No suitable workers available in context."
 
 function schedule!(ctx, state, chan, procs=procs_to_use(ctx))
+    @assert length(procs) > 0
     proc_keys = map(x->x.pid, procs)
     proc_ratios = Dict(p=>(state.worker_pressure[p]/state.worker_capacity[p]) for p in proc_keys)
     proc_ratios_sorted = sort(proc_keys, lt=(a,b)->proc_ratios[a]<proc_ratios[b])
     progress = false
     id = popfirst!(proc_ratios_sorted)
-    while !isempty(state.ready) && !isempty(proc_ratios_sorted)
-        if (state.worker_pressure[id] >= state.worker_capacity[id]) && !isempty(proc_ratios_sorted)
+    was_empty = isempty(state.ready)
+    while !isempty(state.ready)
+        if (state.worker_pressure[id] >= state.worker_capacity[id])
+            # TODO: provide forward progress guarantees at user's request
+            if isempty(proc_ratios_sorted)
+                break
+            end
             id = popfirst!(proc_ratios_sorted)
-            continue
         end
-        progress |= pop_and_fire!(ctx, state, chan, OSProc(id))
+        if !pop_and_fire!(ctx, state, chan, OSProc(id))
+            # Internal scheduler gave up, so we force scheduling
+            task = pop!(state.ready)
+            fire_task!(ctx, task, OSProc(id), state, chan)
+        end
+        progress = true
     end
+    if !isempty(state.ready)
+        # we still have work we can schedule, so oversubscribe with round-robin
+        # TODO: if we're going to oversubcribe, do it intelligently
+        for p in procs
+            isempty(state.ready) && break
+            progress |= pop_and_fire!(ctx, state, chan, p)
+        end
+    end
+    @assert was_empty || progress
     return progress
 end
 function pop_and_fire!(ctx, state, chan, proc; immediate_next=false)
