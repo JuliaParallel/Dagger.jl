@@ -21,19 +21,19 @@ end
         b = delayed(checkwid)(2)
         c = delayed(checkwid)(a,b)
 
-        @test collect(Context(), c; options=options) == 1
+        @test collect(Context([1,workers()...]), c; options=options) == 1
     end
     @testset "Thunk options: single worker" begin
         options = ThunkOptions(;single=1)
         a = delayed(checkwid; options=options)(1)
 
-        @test collect(Context(), a) == 1
+        @test collect(Context([1,workers()...]), a) == 1
     end
     @static if VERSION >= v"1.3.0-DEV.573"
         if Threads.nthreads() == 1
             @warn "Threading tests running in serial"
         end
-        @testset "Scheduler options: threads" begin
+        @testset "Scheduler options: proctypes" begin
             options = SchedulerOptions(;proctypes=[Dagger.ThreadProc])
             a = delayed(checktid)(1)
             b = delayed(checktid)(2)
@@ -41,7 +41,7 @@ end
 
             @test collect(Context(), c; options=options) == 1
         end
-        @testset "Thunk options: threads" begin
+        @testset "Thunk options: proctypes" begin
             options = ThunkOptions(;proctypes=[Dagger.ThreadProc])
             a = delayed(checktid; options=options)(1)
 

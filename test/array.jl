@@ -36,9 +36,11 @@ end
     r = collect(R)
     @test r[1:10] != r[11:20]
 end
-@testset "sum(ones(...))" begin
+@testset "sum" begin
     X = ones(Blocks(10, 10), 100, 100)
     @test sum(X) == 10000
+    Y = zeros(Blocks(10, 10), 100, 100)
+    @test sum(Y) == 0
 end
 
 @testset "distributing an array" begin

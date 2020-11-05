@@ -97,20 +97,6 @@ function affinity(r::FileRef)
     end
 end
 
-function Serialization.deserialize(io::AbstractSerializer, dt::Type{Chunk{T,H,P}}) where {T,H,P}
-    nf = fieldcount(dt)
-    c = ccall(:jl_new_struct_uninit, Any, (Any,), dt)
-    Serialization.deserialize_cycle(io, c)
-    for i in 1:nf
-        tag = Int32(read(io.io, UInt8)::UInt8)
-        if tag != Serialization.UNDEFREF_TAG
-            ccall(:jl_set_nth_field, Cvoid, (Any, Csize_t, Any), c, i-1, Serialization.handle_deserialize(io, tag))
-        end
-    end
-    myid() == 1 && nworkers() > 1 && finalizer(x->@async(free!(x)), c)
-    c
-end
-
 """
     tochunk(x, proc; persist=false, cache=false) -> Chunk
 
@@ -132,13 +118,10 @@ function free!(s::Chunk{X, DRef, P}; force=true, cache=false) where {X,P}
             catch err
                 isa(err, KeyError) || rethrow(err)
             end
-        else
-            pooldelete(s.handle) # remove immediately
         end
     end
 end
 free!(x; force=true,cache=false) = x # catch-all for non-chunks
-free!(x::DRef) = pooldelete(x)
 
 function savechunk(data, dir, f)
     sz = open(joinpath(dir, f), "w") do io
