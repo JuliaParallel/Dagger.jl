@@ -320,12 +320,14 @@ function fire_task!(ctx, thunk, proc, state, chan)
     if thunk.meta
         # Run it on the parent node, do not move data.
         p = OSProc(myid())
-        fetched = map(Iterators.zip(thunk.inputs,ids)) do (x, id)
-            @dbg timespan_start(ctx, :comm, (thunk.id, id), (thunk.f, id))
-            x = istask(x) ? state.cache[x] : x
-            @dbg timespan_end(ctx, :comm, (thunk.id, id), (thunk.f, id))
-            return x
-        end
+        fetched = fetch.(map(Iterators.zip(thunk.inputs,ids)) do (x, id)
+            @async begin
+                @dbg timespan_start(ctx, :comm, (thunk.id, id), (thunk.f, id))
+                x = istask(x) ? state.cache[x] : x
+                @dbg timespan_end(ctx, :comm, (thunk.id, id), (thunk.f, id))
+                return x
+            end
+        end)
 
         @dbg timespan_start(ctx, :compute, thunk.id, thunk.f)
         Threads.atomic_add!(ACTIVE_TASKS, 1)
@@ -421,21 +423,25 @@ end
 @noinline function do_task(thunk_id, f, data, send_result, persist, cache, options, ids, log_sink)
     ctx = Context(Processor[]; log_sink=log_sink)
     from_proc = OSProc()
-    fetched = map(Iterators.zip(data,ids)) do (x, id)
-        @dbg timespan_start(ctx, :comm, (thunk_id, id), (f, id))
-        x = x isa Union{Chunk,Thunk} ? collect(ctx, x) : x
-        @dbg timespan_end(ctx, :comm, (thunk_id, id), (f, id))
-        return x
-    end
+    fetched = fetch.(map(Iterators.zip(data,ids)) do (x, id)
+        @async begin
+            @dbg timespan_start(ctx, :comm, (thunk_id, id), (f, id))
+            x = x isa Union{Chunk,Thunk} ? collect(ctx, x) : x
+            @dbg timespan_end(ctx, :comm, (thunk_id, id), (f, id))
+            return x
+        end
+    end)
 
     # TODO: Time choose_processor?
     to_proc = choose_processor(from_proc, options, f, fetched)
-    fetched = map(Iterators.zip(fetched,ids)) do (x, id)
-        @dbg timespan_start(ctx, :move, (thunk_id, id), (f, id))
-        x = move(from_proc, to_proc, x)
-        @dbg timespan_end(ctx, :move, (thunk_id, id), (f, id))
-        return x
-    end
+    fetched = fetch.(map(Iterators.zip(fetched,ids)) do (x, id)
+        @async begin
+            @dbg timespan_start(ctx, :move, (thunk_id, id), (f, id))
+            x = move(from_proc, to_proc, x)
+            @dbg timespan_end(ctx, :move, (thunk_id, id), (f, id))
+            return x
+        end
+    end)
     @dbg timespan_start(ctx, :compute, thunk_id, f)
     res = nothing
     result_meta = try
