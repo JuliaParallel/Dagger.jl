@@ -3,7 +3,7 @@ module Sch
 using Distributed
 import MemPool: DRef
 
-import ..Dagger: Context, Processor, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, capacity, choose_processor, execute!, rmprocs!, addprocs!
+import ..Dagger: Context, Processor, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, capacity, chunktype, choose_processor, execute!, rmprocs!, addprocs!
 
 include("fault-handler.jl")
 
@@ -146,14 +146,15 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
             end
         end
 
-        proc, thunk_id, res, metadata = take!(chan) # get result of completed thunk
+        pid, thunk_id, (res, metadata) = take!(chan) # get result of completed thunk
+        proc = OSProc(pid)
         lock(newtasks_lock) # This waits for any assign_new_procs! above to complete and then shuts down the task
         if isa(res, CapturedException) || isa(res, RemoteException)
             if check_exited_exception(res)
                 @warn "Worker $(proc.pid) died on thunk $thunk_id, rescheduling work"
 
                 # Remove dead worker from procs list
-                remove_dead_proc!(ctx, proc)
+                remove_dead_proc!(ctx, state, proc)
 
                 handle_fault(ctx, state, state.thunk_dict[thunk_id], proc, chan)
                 continue
@@ -163,7 +164,6 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         end
         state.worker_pressure[proc.pid] = metadata.pressure
         node = state.thunk_dict[thunk_id]
-        @logmsg("WORKER $(proc.pid) - $node ($(node.f)) input:$(node.inputs)")
         state.cache[node] = res
 
         @dbg timespan_start(ctx, :scheduler, thunk_id, master)
@@ -173,7 +173,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         end
         @dbg timespan_end(ctx, :scheduler, thunk_id, master)
     end
-    state.cache[d]
+    state.cache[d] # TODO: move(OSProc(), state.cache[d])
 end
 
 function procs_to_use(ctx, options=ctx.options)
@@ -236,6 +236,13 @@ function assign_new_procs!(ctx, state, chan, assignedprocs)
     # Must track individual procs to handle the case when procs are removed
     diffps = setdiff(ps, assignedprocs)
     if !isempty(diffps)
+        for p in diffps
+            state.worker_pressure[p.pid] = 0
+            state.worker_capacity[p.pid] = 1
+            @async begin
+                state.worker_capacity[p.pid] = remotecall_fetch(capacity, p.pid)
+            end
+        end
         schedule!(ctx, state, chan, diffps)
     end
     return ps
@@ -244,9 +251,11 @@ end
 # Might be a good policy to not remove the proc if immediate_next
 shall_remove_proc(ctx, proc) = proc ∉ procs_to_use(ctx)
 
-function remove_dead_proc!(ctx, proc, options=ctx.options)
+function remove_dead_proc!(ctx, state, proc, options=ctx.options)
     @assert options.single !== proc.pid "Single worker failed, cannot continue."
     rmprocs!(ctx, [proc])
+    delete!(state.worker_pressure, proc.pid)
+    delete!(state.worker_capacity, proc.pid)
 end
 
 function pop_with_affinity!(ctx, tasks, proc, immediate_next)
@@ -301,7 +310,7 @@ function fire_task!(ctx, thunk, proc, state, chan)
         data = unrelease(thunk.cache_ref) # ask worker to keep the data around
                                           # till this compute cycle frees it
         if data !== nothing
-            @logmsg("cache hit: $(thunk.cache_ref)")
+            # cache hit
             state.cache[thunk] = data
             immediate_next = finish_task!(state, thunk; free=false)
             if !isempty(state.ready)
@@ -309,8 +318,8 @@ function fire_task!(ctx, thunk, proc, state, chan)
             end
             return
         else
+            # cache miss
             thunk.cache_ref = nothing
-            @logmsg("cache miss: $(thunk.cache_ref) recomputing $(thunk)")
         end
     end
 
@@ -335,7 +344,7 @@ function fire_task!(ctx, thunk, proc, state, chan)
         Threads.atomic_sub!(ACTIVE_TASKS, 1)
         @dbg timespan_end(ctx, :compute, thunk.id, (thunk.f, p, typeof(res), sizeof(res)))
 
-        #push!(state.running, thunk)
+        # TODO: push!(state.running, thunk) (when the scheduler becomes multithreaded)
         state.cache[thunk] = res
         immediate_next = finish_task!(state, thunk; free=false)
         if !isempty(state.ready)
@@ -422,22 +431,13 @@ end
 
 @noinline function do_task(thunk_id, f, data, send_result, persist, cache, options, ids, log_sink)
     ctx = Context(Processor[]; log_sink=log_sink)
-    from_proc = OSProc()
+    # TODO: Time choose_processor
+    Tdata = map(x->x isa Chunk ? chunktype(x) : x, data)
+    to_proc = choose_processor(options, f, Tdata)
     fetched = fetch.(map(Iterators.zip(data,ids)) do (x, id)
         @async begin
-            @dbg timespan_start(ctx, :comm, (thunk_id, id), (f, id))
-            x = x isa Union{Chunk,Thunk} ? collect(ctx, x) : x
-            @dbg timespan_end(ctx, :comm, (thunk_id, id), (f, id))
-            return x
-        end
-    end)
-
-    # TODO: Time choose_processor?
-    to_proc = choose_processor(from_proc, options, f, fetched)
-    fetched = fetch.(map(Iterators.zip(fetched,ids)) do (x, id)
-        @async begin
             @dbg timespan_start(ctx, :move, (thunk_id, id), (f, id))
-            x = move(from_proc, to_proc, x)
+            x = move(to_proc, x)
             @dbg timespan_end(ctx, :move, (thunk_id, id), (f, id))
             return x
         end
@@ -461,16 +461,16 @@ end
     end
     @dbg timespan_end(ctx, :compute, thunk_id, (f, to_proc, typeof(res), sizeof(res)))
     metadata = (pressure=ACTIVE_TASKS[],)
-    (from_proc, thunk_id, result_meta, metadata)
+    (result_meta, metadata)
 end
 
 @noinline function async_apply(p::OSProc, thunk_id, f, data, chan, send_res, persist, cache, options, ids, log_sink)
     @async begin
         try
-            put!(chan, remotecall_fetch(do_task, p.pid, thunk_id, f, data, send_res, persist, cache, options, ids, log_sink))
+            put!(chan, (p.pid, thunk_id, remotecall_fetch(do_task, p.pid, thunk_id, f, data, send_res, persist, cache, options, ids, log_sink)))
         catch ex
             bt = catch_backtrace()
-            put!(chan, (p, thunk_id, CapturedException(ex, bt), nothing))
+            put!(chan, (p.pid, thunk_id, (CapturedException(ex, bt), nothing)))
         end
         nothing
     end
