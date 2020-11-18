@@ -37,8 +37,12 @@ end
         @test Dagger.default_enabled(OptOutProc()) == false
     end
     @testset "Processor exhaustion" begin
-        opts = ThunkOptions(proctypes=[OptOutProc])
-        @test_throws CapturedException collect(delayed(sum; options=opts)([1,2,3]))
+        opts = ThunkOptions(proclist=[OptOutProc])
+        @test_throws_unwrap AssertionError collect(delayed(sum; options=opts)([1,2,3]))
+        opts = ThunkOptions(proclist=(proc)->false)
+        @test_throws_unwrap AssertionError collect(delayed(sum; options=opts)([1,2,3]))
+        opts = ThunkOptions(proclist=nothing)
+        @test collect(delayed(sum; options=opts)([1,2,3])) == 6
     end
     @testset "Roundtrip move()" begin
         ctx = Context()
@@ -52,7 +56,7 @@ end
         function addcb()
             @everywhere Dagger.add_callback!(cb)
             cb = eval(Dagger, :(proc->PathProc(myid())))
-            opts = ThunkOptions(proctypes=[PathProc])
+            opts = ThunkOptions(proclist=[PathProc])
             collect(delayed(identity; options=opts)(1.0))
             @everywhere pop!(Dagger.PROCESSOR_CALLBACKS)
         end

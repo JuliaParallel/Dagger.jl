@@ -81,6 +81,8 @@ move(from_proc::Processor, to_proc::Processor, x) = x
 Returns the total processing capacity of `proc`.
 """
 capacity(proc=OSProc()) = length(get_processors(proc))
+capacity(proc, ::Type{T}) where T =
+    length(filter(x->x isa T, get_processors(proc)))
 
 """
     OSProc <: Processor
@@ -141,23 +143,25 @@ function choose_processor(options, f, Targs)
         if !iscompatible(proc, options, f, Targs...)
             continue
         end
-        if default_enabled(proc) && isempty(options.proctypes)
-            return proc
-        elseif any(p->proc isa p, options.proctypes)
+        if options.proclist === nothing
+            default_enabled(proc) && return proc
+        elseif options.proclist isa Function
+            options.proclist(proc) && return proc
+        elseif any(p->proc isa p, options.proclist)
             return proc
         end
     end
-    throw(ProcessorSelectionException(options.proctypes, osproc.queue, f, Targs))
+    throw(ProcessorSelectionException(options.proclist, osproc.queue, f, Targs))
 end
 struct ProcessorSelectionException <: Exception
-    proctypes::Vector{Type}
+    proclist
     procsavail::Vector{Processor}
     f
     args
 end
 function Base.show(io::IO, pex::ProcessorSelectionException)
     println(io, "(Worker $(myid())) Exhausted all available processor types!")
-    println(io, "  Proctypes: $(pex.proctypes)")
+    println(io, "  Proclist: $(pex.proclist)")
     println(io, "  Procs Available: $(pex.procsavail)")
     println(io, "  Function: $(pex.f)")
     print(io, "  Arguments: $(pex.args)")

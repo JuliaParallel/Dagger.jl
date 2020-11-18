@@ -30,16 +30,18 @@ function init_eager()
 end
 
 "Sets the scheduler's cached pressure indicator for the specified worker."
-set_pressure!(h::SchedulerHandle, pid::Int, pressure::Int) =
-    exec!(_set_pressure!, h, pid, pressure)
-function _set_pressure!(ctx, state, task, tid, (pid, pressure))
-    state.worker_pressure[pid] = pressure
+set_pressure!(h::SchedulerHandle, pid::Int, proctype::Type, pressure::Int) =
+    exec!(_set_pressure!, h, pid, proctype, pressure)
+function _set_pressure!(ctx, state, task, tid, (pid, proctype, pressure))
+    state.worker_pressure[pid][proctype] = pressure
+    ACTIVE_TASKS[proctype] = pressure # HACK-ish
+    @show state.worker_pressure[pid]
 end
 
 function eager_thunk()
     h = sch_handle()
+    set_pressure!(h, 1, Dagger.ThreadProc, 0) # HACK: Don't apply pressure from this thunk
     while isopen(EAGER_THUNK_CHAN)
-        set_pressure!(h, 1, 0) # HACK: Don't apply pressure from this thunk
         try
             future, uid, f, args, opts = take!(EAGER_THUNK_CHAN)
             args = map(x->x isa Dagger.EagerThunk ? ThunkID(EAGER_THUNK_MAP[x.uid]) : x, args)
