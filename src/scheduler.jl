@@ -48,13 +48,13 @@ Stores DAG-global options to be passed to the Dagger.Sch scheduler.
 
 # Arguments
 - `single::Int=0`: Force all work onto worker with specified id. `0` disables this option.
-- `proctypes::Vector{Type{<:Processor}}=Type[]`: Force scheduler to use one or
+- `proclist::Vector{Type{<:Processor}}=Type[]`: Force scheduler to use one or
 more processors that are instances/subtypes of a contained type. Leave this
 vector empty to disable.
 """
 Base.@kwdef struct SchedulerOptions
     single::Int = 0
-    proctypes::Vector{Type} = Type[]
+    proclist = nothing
 end
 
 """
@@ -64,27 +64,40 @@ Stores Thunk-local options to be passed to the Dagger.Sch scheduler.
 
 # Arguments
 - `single::Int=0`: Force thunk onto worker with specified id. `0` disables this option.
-- `proctypes::Vector{Type{<:Processor}}=Type[]`: Force thunk to use one or
-more processors that are instances/subtypes of a contained type. Leave this
-vector empty to disable.
+- `proclist=nothing`: Force thunk to use one or more processors that are
+instances/subtypes of a contained type. Alternatively, a function can be
+supplied, and the function will be called with a processor as the sole
+argument and should return a `Bool` result to indicate whether or not to use
+the given processor. `nothing` enables all default processors.
+- `procutil::Dict{Type,Any}=Dict{Type,Any}()`: Indicates the maximum expected
+processor utilization for this thunk. Each keypair maps a processor type to
+the utilization, where the value can be an integer (the number of processors
+of this type utilized), or `MaxUtilization()` (utilizes all processors of this
+type) By default, the scheduler assumes that this thunk only uses one processor.
 """
 Base.@kwdef struct ThunkOptions
     single::Int = 0
-    proctypes::Vector{Type} = Type[]
+    proclist = nothing
+    procutil::Dict{Type,Any} = Dict{Type,Any}()
 end
 
 "Combine `SchedulerOptions` and `ThunkOptions` into a new `ThunkOptions`."
 function merge(sopts::SchedulerOptions, topts::ThunkOptions)
     single = topts.single != 0 ? topts.single : sopts.single
-    proctypes = vcat(sopts.proctypes, topts.proctypes)
-    ThunkOptions(single, proctypes)
+    ThunkOptions(single, topts.proclist, topts.procutil)
 end
 
 function cleanup(ctx)
 end
 
-"Process-local count of actively-executing Dagger tasks."
-const ACTIVE_TASKS = Threads.Atomic{Int}(0)
+"Process-local count of actively-executing Dagger tasks per processor type."
+const ACTIVE_TASKS = Dict{Type,Threads.Atomic{Int}}()
+
+"Process-local condition variable indicating task completion."
+const TASK_SYNC = Condition()
+
+"Indicates that a thunk uses all processors of a given type."
+struct MaxUtilization end
 
 function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     if options === nothing
@@ -436,6 +449,29 @@ end
         @dbg timespan_end(ctx, :move, (thunk_id, id), (f, id))
         return x
     end
+
+    # Check if we'll go over capacity from running this thunk
+    extra_util = get(options.procutil, typeof(to_proc), 1)
+    real_util = get!(()->Threads.Atomic{Int}(0), ACTIVE_TASKS, typeof(to_proc))
+    while true
+        if ((extra_util isa MaxUtilization) && (real_util[] > 0)) ||
+           ((extra_util isa Integer) && (extra_util + real_util[] > capacity()))
+            # Fully subscribed, wait and re-check
+            @info "($(myid())) Waiting for free $(typeof(to_proc)): $extra_util | $(real_util[])/$(capacity())"
+            wait(TASK_SYNC)
+        else
+            # Under-subscribed, calculate extra utilization and execute thunk
+            @info "($(myid())) Using available $to_proc: $extra_util | $(real_util[])/$(capacity())"
+            extra_util = if extra_util isa MaxUtilization
+                count(c->typeof(c)===typeof(to_proc), from_proc.children)
+            else
+                extra_util
+            end
+            Threads.atomic_add!(real_util, extra_util)
+            break
+        end
+    end
+
     @dbg timespan_start(ctx, :compute, thunk_id, (f, to_proc))
     res = nothing
     result_meta = try
@@ -443,9 +479,7 @@ end
         task_local_storage(:processor, to_proc)
 
         # Execute
-        Threads.atomic_add!(ACTIVE_TASKS, 1)
         res = execute!(to_proc, f, fetched...)
-        Threads.atomic_sub!(ACTIVE_TASKS, 1)
 
         # Construct result
         send_result ? res : tochunk(res, to_proc; persist=persist, cache=persist ? true : cache)
@@ -454,7 +488,9 @@ end
         RemoteException(myid(), CapturedException(ex, bt))
     end
     @dbg timespan_end(ctx, :compute, thunk_id, (f, to_proc))
-    metadata = (pressure=ACTIVE_TASKS[],)
+    Threads.atomic_sub!(real_util, extra_util)
+    notify(TASK_SYNC)
+    metadata = (pressure=real_util[],)
     (from_proc, thunk_id, result_meta, metadata)
 end
 

@@ -188,23 +188,25 @@ function choose_processor(from_proc::OSProc, options, f, args)
         if !iscompatible(proc, options, f, args...)
             continue
         end
-        if default_enabled(proc) && isempty(options.proctypes)
+        if (options.proclist === nothing && default_enabled(proc))
             return proc
-        elseif any(p->proc isa p, options.proctypes)
+        elseif options.proclist isa Function
+            options.proclist(proc) && return proc
+        elseif any(p->proc isa p, options.proclist)
             return proc
         end
     end
-    throw(ProcessorSelectionException(options.proctypes, from_proc.queue, f, args))
+    throw(ProcessorSelectionException(options.proclist, from_proc.queue, f, args))
 end
 struct ProcessorSelectionException <: Exception
-    proctypes::Vector{Type}
+    proclist
     procsavail::Vector{Processor}
     f
     args
 end
 function Base.show(io::IO, pex::ProcessorSelectionException)
     println(io, "(Worker $(myid())) Exhausted all available processor types!")
-    println(io, "  Proctypes: $(pex.proctypes)")
+    println(io, "  Proctypes: $(pex.proclist)")
     println(io, "  Procs Available: $(pex.procsavail)")
     println(io, "  Function: $(pex.f)")
     print(io, "  Arguments: $(pex.args)")
