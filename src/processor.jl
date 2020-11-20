@@ -129,6 +129,8 @@ end
 Returns the total processing capacity of `proc`.
 """
 capacity(proc=OSProc()) = length(get_processors(proc))
+capacity(proc, ::Type{T}) where T =
+    length(filter(x->x isa T, get_processors(proc)))
 
 """
     OSProc <: Processor
@@ -188,8 +190,8 @@ function choose_processor(from_proc::OSProc, options, f, args)
         if !iscompatible(proc, options, f, args...)
             continue
         end
-        if (options.proclist === nothing && default_enabled(proc))
-            return proc
+        if options.proclist === nothing
+            default_enabled(proc) && return proc
         elseif options.proclist isa Function
             options.proclist(proc) && return proc
         elseif any(p->proc isa p, options.proclist)

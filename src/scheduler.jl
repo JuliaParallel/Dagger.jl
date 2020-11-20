@@ -3,7 +3,7 @@ module Sch
 using Distributed
 import MemPool: DRef
 
-import ..Dagger: Context, Processor, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, capacity, choose_processor, execute!, rmprocs!, addprocs!
+import ..Dagger: Context, Processor, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, capacity, default_enabled, get_processors, choose_processor, execute!, rmprocs!, addprocs!
 
 include("fault-handler.jl")
 
@@ -24,6 +24,7 @@ Fields
 - running::Set{Thunk} - The set of currently-running `Thunk`s
 - thunk_dict::Dict{Int, Any} - Maps from thunk IDs to a `Thunk`
 - node_order::Any - Function that returns the order of a thunk
+- worker_procs::Dict{Int,OSProc} - Maps from worker ID to root processor
 - worker_pressure::Dict{Int,Int} - Cache of worker pressure
 - worker_capacity::Dict{Int,Int} - Maps from worker ID to capacity
 """
@@ -37,8 +38,9 @@ struct ComputeState
     running::Set{Thunk}
     thunk_dict::Dict{Int, Any}
     node_order::Any
-    worker_pressure::Dict{Int,Int}
-    worker_capacity::Dict{Int,Int}
+    worker_procs::Dict{Int,OSProc}
+    worker_pressure::Dict{Int,Dict{Type,Float64}}
+    worker_capacity::Dict{Int,Dict{Type,Float64}}
 end
 
 """
@@ -71,7 +73,7 @@ argument and should return a `Bool` result to indicate whether or not to use
 the given processor. `nothing` enables all default processors.
 - `procutil::Dict{Type,Any}=Dict{Type,Any}()`: Indicates the maximum expected
 processor utilization for this thunk. Each keypair maps a processor type to
-the utilization, where the value can be an integer (the number of processors
+the utilization, where the value can be a real (approx. the number of processors
 of this type utilized), or `MaxUtilization()` (utilizes all processors of this
 type) By default, the scheduler assumes that this thunk only uses one processor.
 """
@@ -86,12 +88,14 @@ function merge(sopts::SchedulerOptions, topts::ThunkOptions)
     single = topts.single != 0 ? topts.single : sopts.single
     ThunkOptions(single, topts.proclist, topts.procutil)
 end
+merge(sopts::SchedulerOptions, ::Nothing) =
+    ThunkOptions(sopts.single, sopts.proclist, Dict{Type,Any}())
 
 function cleanup(ctx)
 end
 
 "Process-local count of actively-executing Dagger tasks per processor type."
-const ACTIVE_TASKS = Dict{Type,Threads.Atomic{Int}}()
+const ACTIVE_TASKS = Dict{Type,Threads.Atomic{Float64}}()
 
 "Process-local condition variable indicating task completion."
 const TASK_SYNC = Condition()
@@ -114,10 +118,20 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     node_order = x -> -get(ord, x, 0)
     state = start_state(deps, node_order)
 
-    # Initialize pressure and capacity
+    # Initialize procs, pressure, and capacity
     @sync for p in procs_to_use(ctx)
-        state.worker_pressure[p.pid] = 0
-        @async state.worker_capacity[p.pid] = remotecall_fetch(capacity, p.pid)
+        @async begin
+            proc = OSProc(p.pid)
+            state.worker_procs[p.pid] = proc
+            state.worker_pressure[p.pid] = Dict{Type,Float64}()
+            state.worker_capacity[p.pid] = Dict{Type,Float64}()
+            for T in unique(typeof.(get_processors(proc)))
+                state.worker_pressure[p.pid][T] = 0
+                state.worker_capacity[p.pid][T] = capacity(proc, T)
+            end
+            state.worker_pressure[p.pid][OSProc] = 0
+            state.worker_capacity[p.pid][OSProc] = 0
+        end
     end
 
     # start off some tasks
@@ -174,7 +188,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
                 throw(res)
             end
         end
-        state.worker_pressure[proc.pid] = metadata.pressure
+        state.worker_pressure[proc.pid][metadata.pressure_type] = metadata.pressure
         node = state.thunk_dict[thunk_id]
         @logmsg("WORKER $(proc.pid) - $node ($(node.f)) input:$(node.inputs)")
         state.cache[node] = res
@@ -203,35 +217,50 @@ check_integrity(ctx) = @assert !isempty(procs_to_use(ctx)) "No suitable workers 
 function schedule!(ctx, state, chan, procs=procs_to_use(ctx))
     @assert length(procs) > 0
     proc_keys = map(x->x.pid, procs)
-    proc_ratios = Dict(p=>(state.worker_pressure[p]/state.worker_capacity[p]) for p in proc_keys)
-    proc_ratios_sorted = sort(proc_keys, lt=(a,b)->proc_ratios[a]<proc_ratios[b])
+    proc_set = Set{Any}()
+    for p in proc_keys
+        for proc in get_processors(OSProc(p))
+            push!(proc_set, p=>proc)
+        end
+    end
     progress = false
-    id = popfirst!(proc_ratios_sorted)
     was_empty = isempty(state.ready)
+    failed_scheduling = Thunk[]
     while !isempty(state.ready)
-        if (state.worker_pressure[id] >= state.worker_capacity[id])
-            # TODO: provide forward progress guarantees at user's request
-            if isempty(proc_ratios_sorted)
-                break
+        task = pop!(state.ready)
+        opts = merge(ctx.options, task.options)
+        proclist = opts.proclist
+        proc_set_useable = if proclist === nothing
+            filter(x->default_enabled(x[2]), proc_set)
+        elseif proclist isa Function
+            filter(x->proclist(x[2], x[1]), proc_set)
+        else
+            filter(x->x[2] in proclist, proc_set)
+        end
+        @assert !isempty(proc_set_useable) "No processors available, try making proclist more liberal"
+        procutil = opts.procutil
+        proc = nothing
+        for (gp,p) in proc_set_useable
+            T = typeof(p)
+            extra_util = get(procutil, T, 1)
+            real_util = state.worker_pressure[gp][T]
+            cap = capacity(OSProc(gp), T)
+            if ((extra_util isa MaxUtilization) && (real_util > 0)) ||
+               ((extra_util isa Real) && (extra_util + real_util > cap))
+                continue
             end
-            id = popfirst!(proc_ratios_sorted)
+            proc = OSProc(gp), p
         end
-        if !pop_and_fire!(ctx, state, chan, OSProc(id))
-            # Internal scheduler gave up, so we force scheduling
-            task = pop!(state.ready)
-            fire_task!(ctx, task, OSProc(id), state, chan)
-        end
-        progress = true
-    end
-    if !isempty(state.ready)
-        # we still have work we can schedule, so oversubscribe with round-robin
-        # TODO: if we're going to oversubcribe, do it intelligently
-        for p in procs
-            isempty(state.ready) && break
-            progress |= pop_and_fire!(ctx, state, chan, p)
+        if proc !== nothing
+            fire_task!(ctx, task, proc, state, chan)
+            progress = true
+            continue
+        else
+            push!(failed_scheduling, task)
         end
     end
-    @assert was_empty || progress
+    append!(state.ready, failed_scheduling)
+    @assert was_empty || progress || !isempty(state.running) "Failed to make forward progress"
     return progress
 end
 function pop_and_fire!(ctx, state, chan, proc; immediate_next=false)
@@ -306,8 +335,9 @@ function pop_with_affinity!(ctx, tasks, proc, immediate_next)
     return nothing
 end
 
-function fire_task!(ctx, thunk, proc, state, chan)
-    @logmsg("W$(proc.pid) + $thunk ($(showloc(thunk.f, length(thunk.inputs)))) input:$(thunk.inputs) cache:$(thunk.cache) $(thunk.cache_ref)")
+fire_task!(ctx, thunk, proc::OSProc, state, chan) =
+    fire_task!(ctx, thunk, (proc, proc), state, chan)
+function fire_task!(ctx, thunk, (gproc, proc), state, chan)
     push!(state.running, thunk)
     if thunk.cache && thunk.cache_ref !== nothing
         # the result might be already cached
@@ -318,7 +348,7 @@ function fire_task!(ctx, thunk, proc, state, chan)
             state.cache[thunk] = data
             immediate_next = finish_task!(state, thunk; free=false)
             if !isempty(state.ready)
-                pop_and_fire!(ctx, state, chan, proc; immediate_next=immediate_next)
+                pop_and_fire!(ctx, state, chan, gproc; immediate_next=immediate_next)
             end
             return
         else
@@ -350,7 +380,7 @@ function fire_task!(ctx, thunk, proc, state, chan)
         state.cache[thunk] = res
         immediate_next = finish_task!(state, thunk; free=false)
         if !isempty(state.ready)
-            pop_and_fire!(ctx, state, chan, proc; immediate_next=immediate_next)
+            pop_and_fire!(ctx, state, chan, gproc; immediate_next=immediate_next)
         end
         return
     end
@@ -361,8 +391,8 @@ function fire_task!(ctx, thunk, proc, state, chan)
     state.thunk_dict[thunk.id] = thunk
     toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
     options = merge(ctx.options, toptions)
-    state.worker_pressure[proc.pid] += 1
-    async_apply(proc, thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist, thunk.cache, options, ids, ctx.log_sink)
+    state.worker_pressure[gproc.pid][typeof(proc)] += 1
+    async_apply((gproc, proc), thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist, thunk.cache, options, ids, ctx.log_sink)
 end
 
 function finish_task!(state, node; free=true)
@@ -411,8 +441,9 @@ function start_state(deps::Dict, node_order)
                   Set{Thunk}(),
                   Dict{Int, Thunk}(),
                   node_order,
-                  Dict{Int,Int}(),
-                  Dict{Int,Int}(),
+                  Dict{Int,OSProc}(),
+                  Dict{Int,Dict{Type,Float64}}(),
+                  Dict{Int,Dict{Type,Float64}}(),
                  )
 
     nodes = sort(collect(keys(deps)), by=node_order)
@@ -431,7 +462,7 @@ function start_state(deps::Dict, node_order)
     state
 end
 
-@noinline function do_task(thunk_id, f, data, send_result, persist, cache, options, ids, log_sink)
+@noinline function do_task(to_proc, thunk_id, f, data, send_result, persist, cache, options, ids, log_sink)
     ctx = Context(Processor[]; log_sink=log_sink)
     from_proc = OSProc()
     fetched = map(Iterators.zip(data,ids)) do (x, id)
@@ -442,7 +473,9 @@ end
     end
 
     # TODO: Time choose_processor?
-    to_proc = choose_processor(from_proc, options, f, fetched)
+    if to_proc isa Integer
+        to_proc = choose_processor(from_proc, options, f, fetched)
+    end
     fetched = map(Iterators.zip(fetched,ids)) do (x, id)
         @dbg timespan_start(ctx, :move, (thunk_id, id), (f, id))
         x = move(from_proc, to_proc, x)
@@ -452,22 +485,23 @@ end
 
     # Check if we'll go over capacity from running this thunk
     extra_util = get(options.procutil, typeof(to_proc), 1)
-    real_util = get!(()->Threads.Atomic{Int}(0), ACTIVE_TASKS, typeof(to_proc))
+    real_util = get!(()->Threads.Atomic{Float64}(0), ACTIVE_TASKS, typeof(to_proc))
+    cap = capacity(OSProc(), typeof(to_proc))
     while true
         if ((extra_util isa MaxUtilization) && (real_util[] > 0)) ||
-           ((extra_util isa Integer) && (extra_util + real_util[] > capacity()))
+           ((extra_util isa Integer) && (extra_util + real_util[] > cap))
             # Fully subscribed, wait and re-check
-            @info "($(myid())) Waiting for free $(typeof(to_proc)): $extra_util | $(real_util[])/$(capacity())"
+            @info "($(myid())) Waiting for free $(typeof(to_proc)): $extra_util | $(real_util[])/$cap"
             wait(TASK_SYNC)
         else
             # Under-subscribed, calculate extra utilization and execute thunk
-            @info "($(myid())) Using available $to_proc: $extra_util | $(real_util[])/$(capacity())"
+            @info "($(myid())) Using available $to_proc: $extra_util | $(real_util[])/$cap"
             extra_util = if extra_util isa MaxUtilization
                 count(c->typeof(c)===typeof(to_proc), from_proc.children)
             else
                 extra_util
             end
-            Threads.atomic_add!(real_util, extra_util)
+            Threads.atomic_add!(real_util, Float64(extra_util))
             break
         end
     end
@@ -488,16 +522,17 @@ end
         RemoteException(myid(), CapturedException(ex, bt))
     end
     @dbg timespan_end(ctx, :compute, thunk_id, (f, to_proc))
-    Threads.atomic_sub!(real_util, extra_util)
+    Threads.atomic_sub!(real_util, Float64(extra_util))
     notify(TASK_SYNC)
-    metadata = (pressure=real_util[],)
+    metadata = (pressure=real_util[], pressure_type=typeof(to_proc))
     (from_proc, thunk_id, result_meta, metadata)
 end
 
-@noinline function async_apply(p::OSProc, thunk_id, f, data, chan, send_res, persist, cache, options, ids, log_sink)
+@noinline function async_apply((gp,p), thunk_id, f, data, chan, send_res, persist, cache, options, ids, log_sink)
     @async begin
+        p = p isa OSProc ? p.pid : p
         try
-            put!(chan, remotecall_fetch(do_task, p.pid, thunk_id, f, data, send_res, persist, cache, options, ids, log_sink))
+            put!(chan, remotecall_fetch(do_task, gp.pid, p, thunk_id, f, data, send_res, persist, cache, options, ids, log_sink))
         catch ex
             bt = catch_backtrace()
             put!(chan, (p, thunk_id, CapturedException(ex, bt), nothing))
