@@ -535,7 +535,7 @@ end
             put!(chan, remotecall_fetch(do_task, gp.pid, p, thunk_id, f, data, send_res, persist, cache, options, ids, log_sink))
         catch ex
             bt = catch_backtrace()
-            put!(chan, (p, thunk_id, CapturedException(ex, bt), nothing))
+            put!(chan, (gp, thunk_id, CapturedException(ex, bt), nothing))
         end
         nothing
     end
