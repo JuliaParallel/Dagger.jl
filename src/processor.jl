@@ -280,7 +280,6 @@ Context(procs::Vector{P}=Processor[OSProc(w) for w in workers()];
         profile=false, options=nothing) where {P<:Processor} =
     Context(procs, proc_lock, log_sink, log_file, profile, options)
 Context(xs::Vector{Int}) = Context(map(OSProc, xs))
-Context() = Context([OSProc(w) for w in workers()])
 procs(ctx::Context) = lock(ctx) do
     copy(ctx.procs)
 end
