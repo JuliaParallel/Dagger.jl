@@ -190,6 +190,16 @@ function choose_processor(from_proc::OSProc, options, f, args)
         if !iscompatible(proc, options, f, args...)
             continue
         end
+        T = typeof(proc)
+        extra_util = get(options.procutil, T, 1)
+        real_util = lock(Sch.ACTIVE_TASKS_LOCK) do
+            get!(()->Ref{Float64}(0.0), Sch.ACTIVE_TASKS, T)[]
+        end
+        cap = capacity(from_proc, T)
+        if ((extra_util isa Sch.MaxUtilization) && (real_util > 0)) ||
+           ((extra_util isa Real) && (extra_util + real_util > cap))
+           continue
+        end
         if options.proclist === nothing
             default_enabled(proc) && return proc
         elseif options.proclist isa Function
@@ -198,7 +208,9 @@ function choose_processor(from_proc::OSProc, options, f, args)
             return proc
         end
     end
-    throw(ProcessorSelectionException(options.proclist, from_proc.queue, f, args))
+    @warn "All processors busy; selecting one randomly!"
+    return rand(get_processors(from_proc))
+    #throw(ProcessorSelectionException(options.proclist, from_proc.queue, f, args))
 end
 struct ProcessorSelectionException <: Exception
     proclist

@@ -241,6 +241,8 @@ function schedule!(ctx, state, chan, procs=procs_to_use(ctx))
         @assert !isempty(proc_set_useable) "No processors available, try making proclist more liberal"
         procutil = opts.procutil
         proc = nothing
+        extra_util = nothing
+        cap = nothing
         for (gp,p) in proc_set_useable
             T = typeof(p)
             extra_util = get(procutil, T, 1)
@@ -249,11 +251,14 @@ function schedule!(ctx, state, chan, procs=procs_to_use(ctx))
             if ((extra_util isa MaxUtilization) && (real_util > 0)) ||
                ((extra_util isa Real) && (extra_util + real_util > cap))
                 continue
+            else
+                proc = OSProc(gp), p
+                break
             end
-            proc = OSProc(gp), p
         end
         if proc !== nothing
-            fire_task!(ctx, task, proc, state, chan)
+            extra_util = extra_util isa MaxUtilization ? cap : extra_util
+            fire_task!(ctx, task, proc, state, chan; util=extra_util)
             progress = true
             continue
         else
@@ -336,9 +341,9 @@ function pop_with_affinity!(ctx, tasks, proc, immediate_next)
     return nothing
 end
 
-fire_task!(ctx, thunk, proc::OSProc, state, chan) =
-    fire_task!(ctx, thunk, (proc, proc), state, chan)
-function fire_task!(ctx, thunk, (gproc, proc), state, chan)
+fire_task!(ctx, thunk, proc::OSProc, state, chan; util=1.0) =
+    fire_task!(ctx, thunk, (proc, proc), state, chan; util=util)
+function fire_task!(ctx, thunk, (gproc, proc), state, chan; util=1.0)
     push!(state.running, thunk)
     if thunk.cache && thunk.cache_ref !== nothing
         # the result might be already cached
@@ -392,7 +397,7 @@ function fire_task!(ctx, thunk, (gproc, proc), state, chan)
     state.thunk_dict[thunk.id] = thunk
     toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
     options = merge(ctx.options, toptions)
-    state.worker_pressure[gproc.pid][typeof(proc)] += 1
+    state.worker_pressure[gproc.pid][typeof(proc)] += util
     async_apply((gproc, proc), thunk.id, thunk.f, data, chan, thunk.get_result, thunk.persist, thunk.cache, options, ids, ctx.log_sink)
 end
 
