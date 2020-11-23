@@ -95,7 +95,8 @@ function cleanup(ctx)
 end
 
 "Process-local count of actively-executing Dagger tasks per processor type."
-const ACTIVE_TASKS = Dict{Type,Threads.Atomic{Float64}}()
+const ACTIVE_TASKS = Dict{Type,Ref{Float64}}()
+const ACTIVE_TASKS_LOCK = ReentrantLock()
 
 "Process-local condition variable indicating task completion."
 const TASK_SYNC = Condition()
@@ -485,7 +486,9 @@ end
 
     # Check if we'll go over capacity from running this thunk
     extra_util = get(options.procutil, typeof(to_proc), 1)
-    real_util = get!(()->Threads.Atomic{Float64}(0), ACTIVE_TASKS, typeof(to_proc))
+    real_util = lock(ACTIVE_TASKS_LOCK) do
+        get!(()->Ref{Float64}(0.0), ACTIVE_TASKS, typeof(to_proc))
+    end
     cap = capacity(OSProc(), typeof(to_proc))
     while true
         if ((extra_util isa MaxUtilization) && (real_util[] > 0)) ||
@@ -501,7 +504,9 @@ end
             else
                 extra_util
             end
-            Threads.atomic_add!(real_util, Float64(extra_util))
+            lock(ACTIVE_TASKS_LOCK) do
+                real_util[] += Float64(extra_util)
+            end
             break
         end
     end
@@ -522,7 +527,9 @@ end
         RemoteException(myid(), CapturedException(ex, bt))
     end
     @dbg timespan_end(ctx, :compute, thunk_id, (f, to_proc))
-    Threads.atomic_sub!(real_util, Float64(extra_util))
+    lock(ACTIVE_TASKS_LOCK) do
+        real_util[] -= Float64(extra_util)
+    end
     notify(TASK_SYNC)
     metadata = (pressure=real_util[], pressure_type=typeof(to_proc))
     (from_proc, thunk_id, result_meta, metadata)
