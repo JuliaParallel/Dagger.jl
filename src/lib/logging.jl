@@ -235,7 +235,7 @@ end
 """
 Get the logs from each process, clear it too
 """
-function get_logs!(::LocalEventLog)
+function get_logs!(::LocalEventLog, raw=false)
     logs = Dict()
     @sync for p in procs()
         @async logs[p] = remotecall_fetch(p) do
@@ -247,8 +247,12 @@ function get_logs!(::LocalEventLog)
             log
         end
     end
-    spans = build_timespans(vcat(values(logs)...)).completed
-    convert(Vector{Timespan}, spans)
+    if raw
+        return logs
+    else
+        spans = build_timespans(vcat(values(logs)...)).completed
+        return convert(Vector{Timespan}, spans)
+    end
 end
 
 function add_gc_diff(x,y)

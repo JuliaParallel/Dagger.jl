@@ -327,11 +327,11 @@ function fire_task!(ctx, thunk, proc, state, chan)
             return x
         end
 
-        @dbg timespan_start(ctx, :compute, thunk.id, thunk.f)
+        @dbg timespan_start(ctx, :compute, thunk.id, (thunk.f, p))
         Threads.atomic_add!(ACTIVE_TASKS, 1)
         res = thunk.f(fetched...)
         Threads.atomic_sub!(ACTIVE_TASKS, 1)
-        @dbg timespan_end(ctx, :compute, thunk.id, (thunk.f, p, typeof(res), sizeof(res)))
+        @dbg timespan_end(ctx, :compute, thunk.id, (thunk.f, p))
 
         #push!(state.running, thunk)
         state.cache[thunk] = res
@@ -436,7 +436,7 @@ end
         @dbg timespan_end(ctx, :move, (thunk_id, id), (f, id))
         return x
     end
-    @dbg timespan_start(ctx, :compute, thunk_id, f)
+    @dbg timespan_start(ctx, :compute, thunk_id, (f, to_proc))
     res = nothing
     result_meta = try
         # Set TLS variables
@@ -453,7 +453,7 @@ end
         bt = catch_backtrace()
         RemoteException(myid(), CapturedException(ex, bt))
     end
-    @dbg timespan_end(ctx, :compute, thunk_id, (f, to_proc, typeof(res), sizeof(res)))
+    @dbg timespan_end(ctx, :compute, thunk_id, (f, to_proc))
     metadata = (pressure=ACTIVE_TASKS[],)
     (from_proc, thunk_id, result_meta, metadata)
 end

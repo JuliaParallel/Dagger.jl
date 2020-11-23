@@ -8,6 +8,8 @@ import Distributed: procs
 using LinearAlgebra
 import LinearAlgebra: transpose
 
+using Requires
+
 const PLUGINS = Dict{Symbol,Any}()
 const PLUGIN_CONFIGS = Dict{Symbol,String}(
     :scheduler => "Dagger.Sch"
@@ -43,6 +45,12 @@ include("array/sort.jl")
 include("ui/graph.jl")
 
 function __init__()
+    @require Luxor="ae8d54c2-7ccd-5906-9d76-62fc9837b5bc" begin
+        @require Mux="a975b10e-0019-58db-a62f-e48ff68538c9" begin
+            # Gantt chart server
+            include("ui/gantt.jl")
+        end
+    end
     @static if VERSION >= v"1.3.0-DEV.573"
         for tid in 1:Threads.nthreads()
             push!(PROCESSOR_CALLBACKS, proc->ThreadProc(myid(), tid))
