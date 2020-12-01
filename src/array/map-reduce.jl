@@ -89,16 +89,23 @@ struct Reducedim{T,N} <: ArrayOp{T,N}
     dims::Tuple
 end
 
+function Base.size(r::Reducedim)
+    sz = size(r.input)
+    ntuple(length(sz)) do i
+        if i in r.dims
+            1
+        else
+            sz[i]
+        end
+    end
+end
+
 function reduce(dom::ArrayDomain; dims)
     if dims isa Int
         ArrayDomain(setindex(indexes(dom), dims, 1:1))
     else
         reduce((a,d)->reduce(a,dims=d), dims, init=dom)
     end
-end
-
-function size(x::Reducedim)
-    reduce(ArrayDomain(map(x->1:x, size(x.input))), dims=x.dims)
 end
 
 function Reducedim(op, input, dims)
