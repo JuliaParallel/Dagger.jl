@@ -32,13 +32,13 @@ domain(x::Any) = UnitDomain()
 A chunk with some data
 """
 mutable struct Chunk{T, H, P<:Processor}
-    chunktype::Type
+    chunktype::Type{T}
     domain
     handle::H
     processor::P
     persist::Bool
-    function (::Type{Chunk{T,H,P}})(chunktype, domain, handle, processor, persist) where {T,H,P}
-        c = new{T,H,P}(chunktype, domain, handle, processor, persist)
+    function (::Type{Chunk{T,H,P}})(::Type{T}, domain, handle, processor, persist) where {T,H,P}
+        c = new{T,H,P}(T, domain, handle, processor, persist)
         finalizer(x -> @async(myid() == 1 && free!(x)), c)
         c
     end
@@ -80,10 +80,21 @@ end
 collect(ctx::Context, ref::DRef; options=nothing) =
     move(OSProc(ref.owner), OSProc(), ref)
 collect(ctx::Context, ref::FileRef; options=nothing) =
-    poolget(ref)
-move(from_proc::OSProc, to_proc::OSProc, ref::Union{DRef, FileRef}) =
-    poolget(ref)
+    poolget(ref) # FIXME: Do move call
 
+# Unwrap Chunk, DRef, and FileRef by default
+move(from_proc::Processor, to_proc::Processor, x::Chunk) =
+    move(from_proc, to_proc, x.handle)
+move(from_proc::Processor, to_proc::Processor, x::Union{DRef,FileRef}) =
+    move(from_proc, to_proc, poolget(x))
+
+# Determine from_proc when unspecified
+move(to_proc::Processor, chunk::Chunk) =
+    move(chunk.processor, to_proc, chunk)
+move(to_proc::Processor, d::DRef) =
+    move(OSProc(d.owner), to_proc, d)
+move(to_proc::Processor, x) =
+    move(OSProc(), to_proc, x)
 
 ### ChunkIO
 affinity(r::DRef) = Pair{OSProc, UInt64}[OSProc(r.owner) => r.size]
@@ -102,9 +113,9 @@ end
 
 Create a chunk from sequential object `x` which resides on `proc`.
 """
-function tochunk(x, proc::P=OSProc(); persist=false, cache=false) where P
+function tochunk(x::X, proc::P=OSProc(); persist=false, cache=false) where {X,P}
     ref = poolset(x, destroyonevict=persist ? false : cache)
-    Chunk{Any, typeof(ref), P}(typeof(x), domain(x), ref, proc, persist)
+    Chunk{X, typeof(ref), P}(X, domain(x), ref, proc, persist)
 end
 tochunk(x::Union{Chunk, Thunk}, proc=nothing) = x
 
@@ -129,7 +140,7 @@ function savechunk(data, dir, f)
         return position(io)
     end
     fr = FileRef(f, sz)
-    Chunk{Any, typeof(fr), P}(typeof(data), domain(data), fr, OSProc(), true)
+    Chunk{typeof(data), typeof(fr), P}(typeof(data), domain(data), fr, OSProc(), true)
 end
 
 

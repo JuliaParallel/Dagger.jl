@@ -24,18 +24,18 @@ calls differently than normal Julia.
 execute!
 
 """
-    iscompatible(proc::Processor, opts, f, args...) -> Bool
+    iscompatible(proc::Processor, opts, f, Targs...) -> Bool
 
-Indicates whether `proc` can execute `f` over `args` given `opts`. `Processor`
+Indicates whether `proc` can execute `f` over `Targs` given `opts`. `Processor`
 subtypes should overload this function to return `true` if and only if it is
-essentially guaranteed that `f(args...)` is supported. Additionally,
+essentially guaranteed that `f(::Targs...)` is supported. Additionally,
 `iscompatible_func` and `iscompatible_arg` can be overriden to determine
-compatibility of `f` and `args` individually. The default implementation
+compatibility of `f` and `Targs` individually. The default implementation
 returns `false`.
 """
-iscompatible(proc::Processor, opts, f, args...) =
+iscompatible(proc::Processor, opts, f, Targs...) =
     iscompatible_func(proc, opts, f) &&
-    all(x->iscompatible_arg(proc, opts, x), args)
+    all(x->iscompatible_arg(proc, opts, x), Targs)
 iscompatible_func(proc::Processor, opts, f) = false
 iscompatible_arg(proc::Processor, opts, x) = false
 
@@ -70,58 +70,10 @@ get_parent
 Moves and/or converts `x` such that it's available and suitable for usage on
 the `to_proc` processor. This function can be overloaded by `Processor`
 subtypes to transport arguments and convert them to an appropriate form before
-being used for exection. This is additionally called on thunk results when
-moving back to `from_proc` before being serialized over the wire as needed.
-The default implementation breaks a single `move` call down into a sequence of
-`move` calls, and is not intended to be maximally efficient.
+being used for exection. Subtypes of `Processor` wishing to implement efficient
+data movement should provide implementations where `x::Chunk`.
 """
-function move(from_proc::Processor, to_proc::Processor, x)
-    if from_proc == to_proc
-        return x
-    end
-    @debug "Initiating generic move"
-    # Move to remote OSProc
-    @debug "(Remote) moving $parent_proc to $grandparent_proc"
-    root = get_parent_osproc(from_proc)
-    x, parent_proc = remotecall_fetch(move_to_osproc, root.pid, from_proc, x)
-
-    # Move to local OSProc
-    remote_proc = parent_proc
-    local_proc = OSProc()
-    @debug "(Network) moving $remote_proc to $local_proc"
-    x = move(remote_proc, local_proc, x)
-
-    # Move to to_proc
-    parent_proc = get_parent(to_proc)
-    path = Processor[to_proc, parent_proc]
-    while parent_proc != local_proc && !(parent_proc isa OSProc)
-        parent_proc = get_parent(parent_proc)
-        push!(path, parent_proc)
-    end
-    last_proc = local_proc
-    while !isempty(path)
-        next_proc = pop!(path)
-        @debug "(Local) moving $last_proc to $next_proc"
-        x = move(last_proc, next_proc, x)
-        last_proc = next_proc
-    end
-    return x
-end
-function get_parent_osproc(proc)
-    while !(proc isa OSProc)
-        proc = get_parent(proc)
-    end
-    proc
-end
-function move_to_osproc(parent_proc, x)
-    ctx = Context()
-    while !(parent_proc isa OSProc)
-        grandparent_proc = get_parent(parent_proc)
-        x = move(parent_proc, grandparent_proc, x)
-        parent_proc = grandparent_proc
-    end
-    return x, parent_proc
-end
+move(from_proc::Processor, to_proc::Processor, x) = x
 
 """
     capacity(proc::Processor=OSProc()) -> Int
@@ -174,18 +126,19 @@ iscompatible_arg(proc::OSProc, opts, args...) =
     proc.children)
 get_processors(proc::OSProc) =
     vcat((get_processors(child) for child in proc.children)...,)
-function choose_processor(from_proc::OSProc, options, f, args)
-    if isempty(from_proc.queue)
-        for child in from_proc.children
+function choose_processor(options, f, Targs)
+    osproc = OSProc()
+    if isempty(osproc.queue)
+        for child in osproc.children
             grandchildren = get_processors(child)
-            append!(from_proc.queue, grandchildren)
+            append!(osproc.queue, grandchildren)
         end
     end
-    @assert !isempty(from_proc.queue)
-    for i in 1:length(from_proc.queue)
-        proc = popfirst!(from_proc.queue)
-        push!(from_proc.queue, proc)
-        if !iscompatible(proc, options, f, args...)
+    @assert !isempty(osproc.queue)
+    for i in 1:length(osproc.queue)
+        proc = popfirst!(osproc.queue)
+        push!(osproc.queue, proc)
+        if !iscompatible(proc, options, f, Targs...)
             continue
         end
         if default_enabled(proc) && isempty(options.proctypes)
@@ -194,7 +147,7 @@ function choose_processor(from_proc::OSProc, options, f, args)
             return proc
         end
     end
-    throw(ProcessorSelectionException(options.proctypes, from_proc.queue, f, args))
+    throw(ProcessorSelectionException(options.proctypes, osproc.queue, f, Targs))
 end
 struct ProcessorSelectionException <: Exception
     proctypes::Vector{Type}
@@ -210,7 +163,6 @@ function Base.show(io::IO, pex::ProcessorSelectionException)
     print(io, "  Arguments: $(pex.args)")
 end
 
-move(from_proc::OSProc, to_proc::OSProc, x) = x
 execute!(proc::OSProc, f, args...) = f(args...)
 default_enabled(proc::OSProc) = true
 
@@ -226,8 +178,6 @@ end
 iscompatible(proc::ThreadProc, opts, f, args...) = true
 iscompatible_func(proc::ThreadProc, opts, f) = true
 iscompatible_arg(proc::ThreadProc, opts, x) = true
-move(from_proc::OSProc, to_proc::ThreadProc, x) = x
-move(from_proc::ThreadProc, to_proc::OSProc, x) = x
 @static if VERSION >= v"1.3.0-DEV.573"
     execute!(proc::ThreadProc, f, args...) = fetch(Threads.@spawn begin
         task_local_storage(:processor, proc)

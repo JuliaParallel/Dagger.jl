@@ -8,15 +8,6 @@ struct UnknownStruct end
 
 struct OptOutProc <: Dagger.Processor end
 
-struct PathProc <: Dagger.Processor
-    owner::Int
-end
-Dagger.get_parent(proc::PathProc) = OSProc(proc.owner)
-Dagger.move(::PathProc, ::OSProc, x::Float64) = x+1
-Dagger.move(::OSProc, ::PathProc, x::Float64) = x+2
-Dagger.iscompatible(proc::PathProc, opts, f, args...) = true
-Dagger.execute!(proc::PathProc, func, args...) = func(args...)
-
 end
 
 @testset "Processors" begin
@@ -36,8 +27,8 @@ end
         us = UnknownStruct()
         for proc in (op, tp)
             @test Dagger.iscompatible_func(proc, opts, unknown_func)
-            @test Dagger.iscompatible_arg(proc, opts, us)
-            @test Dagger.iscompatible(proc, opts, unknown_func, us, 1, us, 2.0)
+            @test Dagger.iscompatible_arg(proc, opts, typeof(us))
+            @test Dagger.iscompatible(proc, opts, unknown_func, typeof(us), Int, typeof(us), Float64)
         end
     end
     @testset "Opt-in/Opt-out" begin
@@ -56,16 +47,6 @@ end
         value = rand()
         moved_value = Dagger.move(tp, op, Dagger.move(op, tp, value))
         @test value === moved_value
-    end
-    @testset "Generic path move()" begin
-        @everywhere Dagger.add_callback!(proc->PathProc(myid()))
-        ctx = Context()
-        proc1 = first(filter(x->x isa PathProc, get_processors(OSProc(1))))
-        proc2 = first(filter(x->x isa PathProc, get_processors(OSProc(2))))
-        value = rand()
-        moved_value = Dagger.move(proc1, proc2, value)
-        @test moved_value == value+3
-        @everywhere pop!(Dagger.PROCESSOR_CALLBACKS)
     end
     @testset "Add callback in same world" begin
         function addcb()

@@ -17,7 +17,6 @@
     plan = Dagger.show_plan(logs)
     @test plan isa String
     @test occursin("digraph {", plan)
-    @test occursin("Comm:", plan)
     @test occursin("Move:", plan)
     @test endswith(plan, "}\n")
 end
@@ -51,7 +50,6 @@ end
         compute(ctx, x * x)
         plan = String(read(io))
         @test occursin("digraph {", plan)
-        @test occursin("Comm:", plan)
         @test occursin("Move:", plan)
         @test endswith(plan, "}\n")
     end
