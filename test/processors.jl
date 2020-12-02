@@ -83,7 +83,7 @@ end
         a = delayed(abc)(1)
         @test collect(a) == 2
     end
-  
+
     @testset "Processor TLS accessor" begin
         @everywhere function mythunk(x)
             typeof(Dagger.thunk_processor())

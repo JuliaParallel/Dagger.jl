@@ -1,6 +1,8 @@
-import Dagger.Sch: SchedulerOptions, ThunkOptions
+import Dagger.Sch: SchedulerOptions, ThunkOptions, SchedulerHaltedException, ComputeState, sch_handle
 
 @everywhere begin
+using Dagger
+import Dagger: sch_handle, exec!, halt!, get_dag_ids, add_thunk!
 function inc(x)
     x+1
 end
@@ -11,6 +13,75 @@ end
 function checktid(x...)
     @assert Threads.threadid() != 1 || Threads.nthreads() == 1
     return 1
+end
+function dynamic_exec(x)
+    h = sch_handle()
+    Dagger.Sch.exec!(h) do ctx, state, task, tid, _
+        if state isa ComputeState
+            return 1
+        else
+            return 0
+        end
+    end
+end
+function dynamic_exec_err(x)
+    h = sch_handle()
+    Dagger.Sch.exec!(h) do ctx, state, _, _, _
+        error("An error")
+    end
+end
+function dynamic_halt(x)
+    h = sch_handle()
+    Dagger.Sch.halt!(h)
+    return x
+end
+function dynamic_get_dag(x...)
+    h = sch_handle()
+    ids = Dagger.Sch.get_dag_ids(h)
+    return (h.thunk_id, ids)
+end
+function dynamic_add_thunk(x)
+    h = sch_handle()
+    id = Dagger.Sch.add_thunk!(h, x) do y
+        y+1
+    end
+    wait(h, id)
+    return fetch(h, id)
+end
+function dynamic_add_thunk_self_dominated(x)
+    h = sch_handle()
+    id = Dagger.Sch.add_thunk!(h, h.thunk_id, x) do y
+        y+1
+    end
+    return fetch(h, id)
+end
+function dynamic_wait_fetch_multiple(x)
+    h = sch_handle()
+    ids = Dagger.Sch.get_dag_ids(h)
+    id = nothing
+    for key in keys(ids)
+        while !isempty(ids[key])
+            val = pop!(ids[key])
+            if val == h.thunk_id
+                id = key
+            end
+        end
+    end
+    wait(h, id)
+    wait(h, id)
+    fetch(h, id)
+    fetch(h, id)
+    x
+end
+function dynamic_fetch_self(x)
+    h = sch_handle()
+    return fetch(h, h.thunk_id)
+end
+function dynamic_fetch_dominated(x)
+    h = sch_handle()
+    ids = Dagger.Sch.get_dag_ids(h)
+    did = pop!(ids[h.thunk_id])
+    wait(h, did)
 end
 end
 
@@ -186,6 +257,88 @@ end
                 end
             finally
                 wait(rmprocs(ps))
+            end
+        end
+    end
+end
+
+@testset "Dynamic Thunks" begin
+    @testset "Exec" begin
+        a = delayed(dynamic_exec)(2)
+        @test collect(Context(), a) == 1
+    end
+    @testset "Exec Error" begin
+        a = delayed(dynamic_exec_err)(1)
+        try
+            collect(Context(), a)
+            @test false
+        catch err
+            @test err isa RemoteException
+        end
+    end
+    @testset "Halt" begin
+        a = delayed(dynamic_halt)(1)
+        try
+            collect(Context(), a)
+            @test false
+        catch err
+            @test err isa SchedulerHaltedException
+        end
+    end
+    @testset "DAG querying" begin
+        a = delayed(identity)(1)
+        b = delayed(x->x+2)(a)
+        c = delayed(x->x-1)(a)
+        d = delayed(dynamic_get_dag)(b, c)
+        (d_id, ids) = collect(Context(), d)
+        @test ids isa Dict
+        @test length(keys(ids)) == 4
+        @test haskey(ids, d_id)
+        d_deps = ids[d_id]
+        @test length(d_deps) == 0
+        a_id = Dagger.Sch.ThunkID(d_id.id - 3) # relies on thunk ID monotonicity
+        a_deps = ids[a_id]
+        @test length(a_deps) == 2
+        i1, i2 =  pop!(a_deps), pop!(a_deps)
+        @test haskey(ids, i1)
+        @test haskey(ids, i2)
+        @test ids[pop!(ids[i1])] == ids[pop!(ids[i2])]
+    end
+    @testset "Add Thunk" begin
+        a = delayed(dynamic_add_thunk)(1)
+        res = collect(Context(), a)
+        @test res == 2
+        @testset "self as input" begin
+            a = delayed(dynamic_add_thunk_self_dominated)(1)
+            try
+                collect(Context(), a)
+                @test false
+            catch err
+                @test Dagger.Sch.unwrap_nested_exception(err) isa AssertionError
+            end
+        end
+    end
+    @testset "Fetch/Wait" begin
+        @testset "multiple" begin
+            a = delayed(dynamic_wait_fetch_multiple)(delayed(+)(1,2))
+            @test collect(Context(), a) == 3
+        end
+        @testset "self" begin
+            a = delayed(dynamic_fetch_self)(1)
+            try
+                collect(Context(), a)
+                @test false
+            catch err
+                @test Dagger.Sch.unwrap_nested_exception(err) isa AssertionError
+            end
+        end
+        @testset "dominated" begin
+            a = delayed(identity)(delayed(dynamic_fetch_dominated)(1))
+            try
+                collect(Context(), a)
+                @test false
+            catch err
+                @test Dagger.Sch.unwrap_nested_exception(err) isa AssertionError
             end
         end
     end

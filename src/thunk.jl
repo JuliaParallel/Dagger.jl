@@ -28,7 +28,8 @@ mutable struct Thunk
                    affinity=nothing,
                    options=nothing
                   )
-        new(f,xs,id,get_result,meta,persist, cache, cache_ref, affinity, options)
+        new(f, xs, id, get_result, meta, persist, cache, cache_ref, affinity,
+            options)
     end
 end
 
@@ -152,4 +153,3 @@ inputs(x) = ()
 
 istask(x::Thunk) = true
 istask(x) = false
-

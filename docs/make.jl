@@ -16,6 +16,7 @@ makedocs(;
         "Processors" => "processors.md",
         "Scheduler Internals" => "scheduler-internals.md",
         "Logging and Graphing" => "logging.md",
+        "Dynamic Scheduler Control" => "dynamic.md",
     ]
 )
 
