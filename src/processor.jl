@@ -188,10 +188,14 @@ iscompatible_arg(proc::ThreadProc, opts, x) = true
         end
         try
             fetch(task)
-        catch TaskFailedException
-            stk = Base.catch_stack(task)
-            err, frames = stk[1]
-            rethrow(CapturedException(err, frames))
+        catch err
+            @static if VERSION >= v"1.1"
+                stk = Base.catch_stack(task)
+                err, frames = stk[1]
+                rethrow(CapturedException(err, frames))
+            else
+                rethrow(task.result)
+            end
         end
     end
 else
@@ -205,10 +209,14 @@ else
         end
         try
             fetch(task)
-        catch TaskFailedException
-            stk = Base.catch_stack(task)
-            err, frames = stk[1]
-            rethrow(CapturedException(err, frames))
+        catch err
+            @static if VERSION >= v"1.1"
+                stk = Base.catch_stack(task)
+                err, frames = stk[1]
+                rethrow(CapturedException(err, frames))
+            else
+                rethrow(task.result)
+            end
         end
     end
 end
