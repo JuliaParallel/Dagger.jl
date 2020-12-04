@@ -1,0 +1,20 @@
+steps:
+  - command: julia --project -e 'using Pkg; Pkg.build(); Pkg.test()'
+    if: build.env("DAGGER_BENCHMARK") != "true"
+    agents:
+      os: linux
+      arch: x86_64
+    plugins:
+      - docker#v3.7.0:
+          image: julia:1
+  - command: echo TODO
+    if: build.env("DAGGER_BENCHMARK") == "true"
+    agents:
+      os: linux
+      arch: x86_64
+      serial: true
+    plugins:
+      - docker#v3.7.0:
+          image: julia:1.5.3
+    artifacts:
+      - benchmarks/TODO
