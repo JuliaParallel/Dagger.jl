@@ -2,12 +2,14 @@
 
 *A framework for out-of-core and parallel computing*
 
-| **Documentation**                                                       | **Build Status**                                              |
-|:---------------------------------------:|:-------------------------------------------------------------:|
-| [![][docs-master-img]][docs-master-url] | [![Build Status](https://travis-ci.org/JuliaParallel/Dagger.jl.svg?branch=master)](https://travis-ci.org/JuliaParallel/Dagger.jl) [![Coverage Status](https://coveralls.io/repos/github/JuliaParallel/Dagger.jl/badge.svg?branch=master)](https://coveralls.io/github/JuliaParallel/Dagger.jl?branch=master) |
+| **Documentation**                       | **Build Status**                        |
+|:---------------------------------------:|:---------------------------------------:|
+| [![][docs-master-img]][docs-master-url] | [![Build Status][build-img]][build-url] |
 
 [docs-master-img]: https://img.shields.io/badge/docs-master-blue.svg
 [docs-master-url]: https://juliaparallel.github.io/Dagger.jl/dev
+[build-img]: https://badge.buildkite.com/d8f020afb67a5920709c2b0a29111cf596f3f052099b5b656f.svg?branch=master
+[build-url]: https://buildkite.com/julialang/dagger-dot-jl
 
 At the core of Dagger.jl is a scheduler heavily inspired by [Dask](https://docs.dask.org/en/latest/). It can run computations represented as [directed-acyclic-graphs](https://en.wikipedia.org/wiki/Directed_acyclic_graph) (DAGs) efficiently on many Julia worker processes.
 
