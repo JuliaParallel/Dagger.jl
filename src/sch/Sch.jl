@@ -157,7 +157,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
 
     # Loop while we still have thunks to execute
     while !isempty(state.ready) || !isempty(state.running)
-        if isempty(state.running) && !isempty(state.ready)
+        if !isempty(state.ready)
             # Nothing running, so schedule up to N thunks, 1 per N workers
             schedule!(ctx, state, procs_state)
         end
@@ -168,10 +168,6 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         # still here.
         procs_state = assign_new_procs!(ctx, state, procs_state)
 
-        if isempty(state.running)
-            # the block above fired only meta tasks
-            continue
-        end
         check_integrity(ctx)
 
         # Check periodically for new workers in a parallel task so that we
@@ -189,6 +185,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
             end
         end
 
+        isempty(state.running) && continue
         pid, thunk_id, (res, metadata) = take!(chan) # get result of completed thunk
         proc = OSProc(pid)
         lock(newtasks_lock) # This waits for any assign_new_procs! above to complete and then shuts down the task
@@ -212,14 +209,11 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         node = state.thunk_dict[thunk_id]
         state.cache[node] = res
 
-        @dbg timespan_start(ctx, :scheduler, thunk_id, master)
+        @dbg timespan_start(ctx, :finish, thunk_id, master)
         lock(state.lock) do
-            immediate_next = finish_task!(state, node)
-            if !isempty(state.ready) && !shall_remove_proc(ctx, proc)
-                pop_and_fire!(ctx, state, proc; immediate_next=immediate_next)
-            end
+            finish_task!(state, node)
         end
-        @dbg timespan_end(ctx, :scheduler, thunk_id, master)
+        @dbg timespan_end(ctx, :finish, thunk_id, master)
 
         safepoint(state)
     end
@@ -274,8 +268,8 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
     end
     return progress
 end
-function pop_and_fire!(ctx, state, proc; immediate_next=false)
-    task = pop_with_affinity!(ctx, state.ready, proc, immediate_next)
+function pop_and_fire!(ctx, state, proc)
+    task = pop_with_affinity!(ctx, state.ready, proc)
     if task !== nothing
         fire_task!(ctx, task, proc, state)
         return true
@@ -297,7 +291,6 @@ function assign_new_procs!(ctx, state, assignedprocs)
     return ps
 end
 
-# Might be a good policy to not remove the proc if immediate_next
 shall_remove_proc(ctx, proc) = proc ∉ procs_to_use(ctx)
 
 function remove_dead_proc!(ctx, state, proc, options=ctx.options)
@@ -307,24 +300,14 @@ function remove_dead_proc!(ctx, state, proc, options=ctx.options)
     delete!(state.worker_capacity, proc.pid)
 end
 
-function pop_with_affinity!(ctx, tasks, proc, immediate_next)
-    # allow JIT specialization on Pairs
-    mapfirst(c) = first.(c)
-
-    if immediate_next
-        # fast path
-        if proc in mapfirst(affinity(tasks[end]))
-            return pop!(tasks)
-        end
-    end
-
+function pop_with_affinity!(ctx, tasks, proc)
     # TODO: use the size
     parent_affinity_procs = Vector(undef, length(tasks))
     # parent_affinity_sizes = Vector(undef, length(tasks))
     for i=length(tasks):-1:1
         t = tasks[i]
         aff = affinity(t)
-        aff_procs = mapfirst(aff)
+        aff_procs = first.(aff)
         if proc in aff_procs
             deleteat!(tasks, i)
             return t
@@ -361,9 +344,9 @@ function fire_task!(ctx, thunk, proc, state)
         if data !== nothing
             # cache hit
             state.cache[thunk] = data
-            immediate_next = finish_task!(state, thunk; free=false)
+            finish_task!(state, thunk; free=false)
             if !isempty(state.ready)
-                pop_and_fire!(ctx, state, proc; immediate_next=immediate_next)
+                pop_and_fire!(ctx, state, proc)
             end
             return
         else
@@ -395,10 +378,7 @@ function fire_task!(ctx, thunk, proc, state)
 
         # TODO: push!(state.running, thunk) (when the scheduler becomes multithreaded)
         state.cache[thunk] = res
-        immediate_next = finish_task!(state, thunk; free=false)
-        if !isempty(state.ready)
-            pop_and_fire!(ctx, state, proc; immediate_next=immediate_next)
-        end
+        finish_task!(state, thunk; free=false)
         return
     end
 
@@ -418,14 +398,12 @@ function finish_task!(state, node; free=true)
     if istask(node) && node.cache
         node.cache_ref = state.cache[node]
     end
-    immediate_next = false
     for dep in sort!(collect(state.dependents[node]), by=state.node_order)
         set = state.waiting[dep]
         pop!(set, node)
         if isempty(set)
             pop!(state.waiting, dep)
             push!(state.ready, dep)
-            immediate_next = true
         end
         # todo: free data
     end
@@ -457,7 +435,6 @@ function finish_task!(state, node; free=true)
     end
     push!(state.finished, node)
     pop!(state.running, node)
-    immediate_next
 end
 
 function start_state(deps::Dict, node_order, chan)

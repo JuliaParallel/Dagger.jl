@@ -4,3 +4,4 @@
 .*~
 .*sw?
 Manifest.toml
+*.jld
