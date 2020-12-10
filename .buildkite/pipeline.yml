@@ -1,13 +1,24 @@
+.test: &test
+  command: julia --project -e 'using Pkg; Pkg.build(); Pkg.test()'
+  if: build.env("DAGGER_BENCHMARK") != "true"
+  agents:
+    os: linux
+    arch: x86_64
+  plugins:
+    - docker#v3.7.0:
+        image: julia:1
 steps:
-  - command: julia --project -e 'using Pkg; Pkg.build(); Pkg.test()'
-    if: build.env("DAGGER_BENCHMARK") != "true"
-    agents:
-      os: linux
-      arch: x86_64
-    plugins:
-      - docker#v3.7.0:
-          image: julia:1
-  - command: echo TODO
+  - label: Julia 1.x
+    <<: *test
+  - label: Julia nightly
+    command: |
+      mkdir /tmp/julia
+      url="https://julialangnightlies-s3.julialang.org/bin/linux/x64/julia-latest-linux64.tar.gz"
+      curl "$url" | tar -C /tmp/julia --strip-components=1 -zxf -
+      /tmp/julia/bin/julia --project -e 'using Pkg; Pkg.build(); Pkg.test()'
+    <<: *test
+  - label: Benchmarks
+    command: echo TODO
     if: build.env("DAGGER_BENCHMARK") == "true"
     agents:
       os: linux
