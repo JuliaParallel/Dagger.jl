@@ -1,5 +1,4 @@
 .test: &test
-  command: julia --project -e 'using Pkg; Pkg.build(); Pkg.test()'
   if: build.env("DAGGER_BENCHMARK") != "true"
   agents:
     os: linux
@@ -9,12 +8,12 @@
         image: julia:1
 steps:
   - label: Julia 1.x
+    command: julia --project -e 'using Pkg; Pkg.build(); Pkg.test()'
     <<: *test
   - label: Julia nightly
     command: |
       mkdir /tmp/julia
-      url="https://julialangnightlies-s3.julialang.org/bin/linux/x64/julia-latest-linux64.tar.gz"
-      curl "$url" | tar -C /tmp/julia --strip-components=1 -zxf -
+      curl https://julialangnightlies-s3.julialang.org/bin/linux/x64/julia-latest-linux64.tar.gz | tar -C /tmp/julia --strip-components=1 -zxf -
       /tmp/julia/bin/julia --project -e 'using InteractiveUtils; versioninfo()'
       /tmp/julia/bin/julia --project -e 'using Pkg; Pkg.build(); Pkg.test()'
     <<: *test
