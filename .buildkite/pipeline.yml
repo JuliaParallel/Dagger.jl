@@ -1,5 +1,4 @@
 .test: &test
-  command: julia --project -e 'using Pkg; Pkg.build(); Pkg.test()'
   if: build.env("DAGGER_BENCHMARK") != "true"
   agents:
     os: linux
@@ -9,6 +8,7 @@
         image: julia:1
 steps:
   - label: Julia 1.x
+    command: julia --project -e 'using Pkg; Pkg.build(); Pkg.test()'
     <<: *test
   - label: Julia nightly
     command: |
