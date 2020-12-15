@@ -13,8 +13,7 @@ steps:
   - label: Julia nightly
     command: |
       mkdir /tmp/julia
-      url="https://julialangnightlies-s3.julialang.org/bin/linux/x64/julia-latest-linux64.tar.gz"
-      curl "$url" | tar -C /tmp/julia --strip-components=1 -zxf -
+      curl https://julialangnightlies-s3.julialang.org/bin/linux/x64/julia-latest-linux64.tar.gz | tar -C /tmp/julia --strip-components=1 -zxf -
       /tmp/julia/bin/julia --project -e 'using InteractiveUtils; versioninfo()'
       /tmp/julia/bin/julia --project -e 'using Pkg; Pkg.build(); Pkg.test()'
     <<: *test
