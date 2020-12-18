@@ -86,16 +86,25 @@ end
 
 Find the set of direct dependents for each task.
 """
-function dependents(node::Thunk, deps=Dict{Thunk, Set{Thunk}}())
-    if !haskey(deps, node)
-        deps[node] = Set{Thunk}()
-    end
-    for inp = inputs(node)
-        if isa(inp, Thunk)
-            s::Set{Thunk} = get!(()->Set{Thunk}(), deps, inp)
-            push!(s, node)
-            dependents(inp, deps)
+function dependents(node::Thunk)
+    deps = Dict{Thunk, Set{Thunk}}()
+    visited = Set{Thunk}()
+    to_visit = Set{Thunk}()
+    push!(to_visit, node)
+    while !isempty(to_visit)
+        next = pop!(to_visit)
+        (next in visited) && continue
+        if !haskey(deps, next)
+            deps[next] = Set{Thunk}()
         end
+        for inp in inputs(next)
+            if inp isa Thunk
+                s::Set{Thunk} = get!(()->Set{Thunk}(), deps, inp)
+                push!(s, next)
+                !(inp in visited) && push!(to_visit, inp)
+            end
+        end
+        push!(visited, next)
     end
     deps
 end
@@ -107,16 +116,27 @@ Recursively find the number of tasks dependent on each task in the DAG.
 Takes a Dict as returned by [`dependents`](@ref).
 """
 function noffspring(dpents::Dict{Thunk, Set{Thunk}})
-    Dict(node => noffspring(node, dpents) for node in keys(dpents))
-end
-
-function noffspring(n, dpents)
-    if haskey(dpents, n)
-        ds = dpents[n]
-        reduce(+, (noffspring(d, dpents) for d in ds), init = length(ds))
-    else
-        0
+    noff = Dict{Thunk,Int}()
+    to_visit = collect(keys(dpents))
+    while !isempty(to_visit)
+        next = popfirst!(to_visit)
+        haskey(noff, next) && continue
+        off = 0
+        has_all = true
+        for dep in dpents[next]
+            if haskey(noff, dep)
+                off += noff[dep] + 1
+            else
+                pushfirst!(to_visit, next)
+                pushfirst!(to_visit, dep)
+                has_all = false
+                break
+            end
+        end
+        has_all || continue
+        noff[next] = off
     end
+    noff
 end
 
 """
@@ -134,15 +154,18 @@ Args:
 - ndeps: result of [`noffspring`](@ref)
 """
 function order(node::Thunk, ndeps)
-    function recur(nodes, s)
-        for n in nodes
-            output[n] = s += 1
-            parents = collect(Iterators.filter(istask, inputs(n)))
-            s = recur(sort!(parents, by=k->get(ndeps,k,0)), s)
-        end
-        return s
-    end
     output = Dict{Thunk,Int}()
-    recur([node], 0)
-    return output
+    to_visit = Thunk[]
+    push!(to_visit, node)
+    s = 0
+    while !isempty(to_visit)
+        next = popfirst!(to_visit)
+        haskey(output, next) && continue
+        s += 1
+        output[next] = s
+        parents = collect(Iterators.filter(istask, inputs(next)))
+        sort!(parents, by=k->get(ndeps,k,0))
+        append!(to_visit, parents)
+    end
+    output
 end
