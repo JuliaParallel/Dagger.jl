@@ -4,6 +4,7 @@ addprocs(3)
 using Test
 using Dagger
 
+include("util.jl")
 include("fakeproc.jl")
 
 include("thunk.jl")

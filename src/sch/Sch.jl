@@ -3,7 +3,8 @@ module Sch
 using Distributed
 import MemPool: DRef
 
-import ..Dagger: Context, Processor, Thunk, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, capacity, chunktype, choose_processor, execute!, rmprocs!, addprocs!, thunk_processor
+import ..Dagger
+import ..Dagger: Context, Processor, Thunk, ThunkFuture, ThunkFailedException, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, capacity, chunktype, choose_processor, execute!, rmprocs!, addprocs!, thunk_processor
 
 const OneToMany = Dict{Thunk, Set{Thunk}}
 
@@ -19,8 +20,8 @@ The internal state-holding struct of the scheduler.
 Fields
 - dependents::OneToMany - The result of calling `dependents` on the DAG
 - finished::Set{Thunk} - The set of completed `Thunk`s
-- waiting::OneToMany - Map from parent `Thunk` to child `Thunk`s that still need to execute
-- waiting_data::OneToMany - Map from child `Thunk` to all parent `Thunk`s, accumulating over time
+- waiting::OneToMany - Map from downstream `Thunk` to upstream `Thunk`s that still need to execute
+- waiting_data::OneToMany - Map from upstream `Thunk` to all downstream `Thunk`s, accumulating over time
 - ready::Vector{Thunk} - The list of `Thunk`s that are ready to execute
 - cache::Dict{Thunk, Any} - Maps from a finished `Thunk` to it's cached result, often a DRef
 - running::Set{Thunk} - The set of currently-running `Thunk`s
@@ -31,7 +32,8 @@ Fields
 - worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}} - Communication channels between the scheduler and each worker
 - halt::Ref{Bool} - Flag indicating, when set, that the scheduler should halt immediately
 - lock::ReentrantLock() - Lock around operations which modify the state
-- futures::Dict{Thunk, Vector{Future}} - Futures registered for waiting on the result of a thunk.
+- futures::Dict{Thunk, Vector{ThunkFuture}} - Futures registered for waiting on the result of a thunk.
+- errored::Set{Thunk} - Thunks that threw an error
 - chan::Channel - Channel for receiving completed thunks
 """
 struct ComputeState
@@ -49,7 +51,8 @@ struct ComputeState
     worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}
     halt::Ref{Bool}
     lock::ReentrantLock
-    futures::Dict{Thunk, Vector{Future}}
+    futures::Dict{Thunk, Vector{ThunkFuture}}
+    errored::Set{Thunk}
     chan::Channel{Any}
 end
 
@@ -63,10 +66,13 @@ Stores DAG-global options to be passed to the Dagger.Sch scheduler.
 - `proctypes::Vector{Type{<:Processor}}=Type[]`: Force scheduler to use one or
 more processors that are instances/subtypes of a contained type. Leave this
 vector empty to disable.
+- `allow_errors::Bool=true`: Allow thunks to error without affecting
+non-dependent thunks.
 """
 Base.@kwdef struct SchedulerOptions
     single::Int = 0
     proctypes::Vector{Type} = Type[]
+    allow_errors::Bool = false
 end
 
 """
@@ -79,17 +85,32 @@ Stores Thunk-local options to be passed to the Dagger.Sch scheduler.
 - `proctypes::Vector{Type{<:Processor}}=Type[]`: Force thunk to use one or
 more processors that are instances/subtypes of a contained type. Leave this
 vector empty to disable.
+- `allow_errors::Bool=true`: Allow this thunk to error without affecting
+non-dependent thunks.
 """
 Base.@kwdef struct ThunkOptions
     single::Int = 0
     proctypes::Vector{Type} = Type[]
+    allow_errors::Bool = false
 end
+
+# Eager scheduling
+include("eager.jl")
 
 "Combine `SchedulerOptions` and `ThunkOptions` into a new `ThunkOptions`."
 function merge(sopts::SchedulerOptions, topts::ThunkOptions)
     single = topts.single != 0 ? topts.single : sopts.single
     proctypes = vcat(sopts.proctypes, topts.proctypes)
-    ThunkOptions(single, proctypes)
+    allow_errors = sopts.allow_errors || topts.allow_errors
+    ThunkOptions(single, proctypes, allow_errors)
+end
+
+function isrestricted(task::Thunk, proc::OSProc)
+    if (task.options !== nothing) && (task.options.single != 0) &&
+       (task.options.single != proc.pid)
+        return true
+    end
+    return false
 end
 
 function cleanup(ctx)
@@ -190,7 +211,8 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         proc = OSProc(pid)
         lock(newtasks_lock) # This waits for any assign_new_procs! above to complete and then shuts down the task
         safepoint(state)
-        if isa(res, CapturedException) || isa(res, RemoteException)
+        thunk_failed = false
+        if res isa Exception
             if unwrap_nested_exception(res) isa Union{ProcessExitedException, Base.IOError}
                 @warn "Worker $(proc.pid) died on thunk $thunk_id, rescheduling work"
 
@@ -202,22 +224,31 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
                 end
                 continue
             else
-                throw(res)
+                if ctx.options.allow_errors || state.thunk_dict[thunk_id].options.allow_errors
+                    thunk_failed = true
+                else
+                    throw(res)
+                end
             end
         end
         state.worker_pressure[proc.pid] = metadata.pressure
         node = state.thunk_dict[thunk_id]
         state.cache[node] = res
 
+        # FIXME: Move log start and lock to before error check
         @dbg timespan_start(ctx, :finish, thunk_id, master)
         lock(state.lock) do
-            finish_task!(state, node)
+            finish_task!(state, node, thunk_failed)
         end
         @dbg timespan_end(ctx, :finish, thunk_id, master)
 
         safepoint(state)
     end
-    state.cache[d] # TODO: move(OSProc(), state.cache[d])
+    value = state.cache[d] # TODO: move(OSProc(), state.cache[d])
+    if d in state.errored
+        throw(value)
+    end
+    value
 end
 
 function procs_to_use(ctx, options=ctx.options)
@@ -232,7 +263,6 @@ end
 check_integrity(ctx) = @assert !isempty(procs_to_use(ctx)) "No suitable workers available in context."
 
 function schedule!(ctx, state, procs=procs_to_use(ctx))
-    progress = false
     lock(state.lock) do
         safepoint(state)
         @assert length(procs) > 0
@@ -241,6 +271,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         proc_ratios_sorted = sort(proc_keys, lt=(a,b)->proc_ratios[a]<proc_ratios[b])
         id = popfirst!(proc_ratios_sorted)
         was_empty = isempty(state.ready)
+        todo = Thunk[]
         while !isempty(state.ready)
             if (state.worker_pressure[id] >= state.worker_capacity[id])
                 # TODO: provide forward progress guarantees at user's request
@@ -249,24 +280,32 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
                 end
                 id = popfirst!(proc_ratios_sorted)
             end
-            if !pop_and_fire!(ctx, state, OSProc(id))
+            proc = OSProc(id)
+            if !pop_and_fire!(ctx, state, proc)
                 # Internal scheduler gave up, so we force scheduling
                 task = pop!(state.ready)
+                if isrestricted(task, proc)
+                   push!(todo, task)
+                   continue
+                end
+                fire_task!(ctx, task, proc, state)
+            end
+        end
+        for task in todo
+            id = task.options.single
+            if state.worker_pressure[id] < state.worker_capacity[id]
                 fire_task!(ctx, task, OSProc(id), state)
             end
-            progress = true
         end
         if !isempty(state.ready)
             # we still have work we can schedule, so oversubscribe with round-robin
             # TODO: if we're going to oversubcribe, do it intelligently
             for p in procs
                 isempty(state.ready) && break
-                progress |= pop_and_fire!(ctx, state, p)
+                pop_and_fire!(ctx, state, p)
             end
         end
-        @assert was_empty || progress
     end
-    return progress
 end
 function pop_and_fire!(ctx, state, proc)
     task = pop_with_affinity!(ctx, state.ready, proc)
@@ -309,8 +348,10 @@ function pop_with_affinity!(ctx, tasks, proc)
         aff = affinity(t)
         aff_procs = first.(aff)
         if proc in aff_procs
-            deleteat!(tasks, i)
-            return t
+            if !isrestricted(t,proc)
+                deleteat!(tasks, i)
+                return t
+            end
         end
         parent_affinity_procs[i] = aff_procs
     end
@@ -321,21 +362,24 @@ function pop_with_affinity!(ctx, tasks, proc)
         aff_procs = parent_affinity_procs[i]
         if isempty(aff_procs)
             t = tasks[i]
-            deleteat!(tasks, i)
-            return t
+            if !isrestricted(t,proc)
+                deleteat!(tasks, i)
+                return t
+            end
         end
         if all(!(p in aff_procs) for p in procs(ctx))
             # no proc is ever going to ask for it
             t = tasks[i]
-            deleteat!(tasks, i)
-            return t
+            if !isrestricted(t,proc)
+                deleteat!(tasks, i)
+                return t
+            end
         end
     end
     return nothing
 end
 
 function fire_task!(ctx, thunk, proc, state)
-    @logmsg("W$(proc.pid) + $thunk ($(showloc(thunk.f, length(thunk.inputs)))) input:$(thunk.inputs) cache:$(thunk.cache) $(thunk.cache_ref)")
     push!(state.running, thunk)
     if thunk.cache && thunk.cache_ref !== nothing
         # the result might be already cached
@@ -344,7 +388,8 @@ function fire_task!(ctx, thunk, proc, state)
         if data !== nothing
             # cache hit
             state.cache[thunk] = data
-            finish_task!(state, thunk; free=false)
+            thunk_failed = thunk in state.errored
+            finish_task!(state, thunk, thunk_failed; free=false)
             if !isempty(state.ready)
                 pop_and_fire!(ctx, state, proc)
             end
@@ -372,13 +417,18 @@ function fire_task!(ctx, thunk, proc, state)
 
         @dbg timespan_start(ctx, :compute, thunk.id, thunk.f)
         Threads.atomic_add!(ACTIVE_TASKS, 1)
-        res = thunk.f(fetched...)
+        thunk_failed = false
+        res = try
+            Base.invokelatest(thunk.f, fetched...)
+        catch err
+            thunk_failed = true
+            err
+        end
         Threads.atomic_sub!(ACTIVE_TASKS, 1)
         @dbg timespan_end(ctx, :compute, thunk.id, (thunk.f, p, typeof(res), sizeof(res)))
 
-        # TODO: push!(state.running, thunk) (when the scheduler becomes multithreaded)
         state.cache[thunk] = res
-        finish_task!(state, thunk; free=false)
+        finish_task!(state, thunk, thunk_failed; free=false)
         return
     end
 
@@ -387,6 +437,7 @@ function fire_task!(ctx, thunk, proc, state)
     end
     toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
     options = merge(ctx.options, toptions)
+    @assert (options.single == 0) || (proc.pid == options.single)
     sch_handle = SchedulerHandle(ThunkID(thunk.id), state.worker_chans[proc.pid]...)
     state.worker_pressure[proc.pid] += 1
     async_apply(proc, thunk.id, thunk.f, data, state.chan, thunk.get_result,
@@ -394,30 +445,39 @@ function fire_task!(ctx, thunk, proc, state)
                 sch_handle)
 end
 
-function finish_task!(state, node; free=true)
+function finish_task!(state, node, thunk_failed; free=true)
+    pop!(state.running, node)
+    if !thunk_failed
+        push!(state.finished, node)
+    else
+        set_failed!(state, node)
+    end
     if istask(node) && node.cache
         node.cache_ref = state.cache[node]
     end
-    for dep in sort!(collect(state.dependents[node]), by=state.node_order)
-        set = state.waiting[dep]
-        pop!(set, node)
-        if isempty(set)
-            pop!(state.waiting, dep)
-            push!(state.ready, dep)
-        end
-        # todo: free data
-    end
-    if haskey(state.futures, node)
-        # Notify any listening thunks
-        for future in state.futures[node]
-            if istask(node) && haskey(state.cache, node)
-                put!(future, state.cache[node])
-            else
-                put!(future, nothing)
+    if !thunk_failed
+        for dep in sort!(collect(state.dependents[node]), by=state.node_order)
+            set = state.waiting[dep]
+            node in set && pop!(set, node)
+            if isempty(set)
+                pop!(state.waiting, dep)
+                push!(state.ready, dep)
             end
+            # todo: free data
         end
-        delete!(state.futures, node)
+        if haskey(state.futures, node)
+            # Notify any listening thunks
+            for future in state.futures[node]
+                if istask(node) && haskey(state.cache, node)
+                    put!(future, state.cache[node])
+                else
+                    put!(future, nothing)
+                end
+            end
+            delete!(state.futures, node)
+        end
     end
+    # Internal clean-up
     for inp in inputs(node)
         if inp in keys(state.waiting_data)
             s = state.waiting_data[inp]
@@ -433,8 +493,6 @@ function finish_task!(state, node; free=true)
             end
         end
     end
-    push!(state.finished, node)
-    pop!(state.running, node)
 end
 
 function start_state(deps::Dict, node_order, chan)
@@ -453,7 +511,8 @@ function start_state(deps::Dict, node_order, chan)
                   Dict{Int, Tuple{RemoteChannel,RemoteChannel}}(),
                   Ref{Bool}(false),
                   ReentrantLock(),
-                  Dict{Thunk, Vector{Future}}(),
+                  Dict{Thunk, Vector{ThunkFuture}}(),
+                  Set{Thunk}(),
                   chan,
                  )
 
