@@ -9,6 +9,7 @@
 steps:
   - label: Julia 1.x
     command: julia --project -e 'using Pkg; Pkg.build(); Pkg.test()'
+    timeout_in_minutes: 60
     <<: *test
   - label: Julia nightly
     command: |
@@ -16,6 +17,7 @@ steps:
       curl https://julialangnightlies-s3.julialang.org/bin/linux/x64/julia-latest-linux64.tar.gz | tar -C /tmp/julia --strip-components=1 -zxf -
       /tmp/julia/bin/julia --project -e 'using InteractiveUtils; versioninfo()'
       /tmp/julia/bin/julia --project -e 'using Pkg; Pkg.build(); Pkg.test()'
+    timeout_in_minutes: 60
     <<: *test
   - label: Benchmarks
     command: echo TODO
