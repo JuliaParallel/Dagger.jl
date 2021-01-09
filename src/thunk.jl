@@ -169,7 +169,7 @@ function _par(ex::Expr; lazy=true, recur=true, opts=())
         args = ex.args[2:end]
         opts = esc.(opts)
         if lazy
-            return :(Dagger.delayed($(esc(f)); $opts...)($(_par.(args; lazy=lazy, recur=false)...)))
+            return :(Dagger.delayed($(esc(f)); $(opts...))($(_par.(args; lazy=lazy, recur=false)...)))
         else
             return quote
                 Dagger.Sch.init_eager()

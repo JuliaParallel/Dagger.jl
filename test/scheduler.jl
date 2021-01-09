@@ -120,6 +120,14 @@ end
         end
     end
     @testset "Thunk options" begin
+        @testset "meta" begin
+            a = Dagger.@par rand(4)
+            b = Dagger.@par meta=true (a->begin
+                @assert a isa Dagger.Chunk
+                Dagger.tochunk(myid())
+            end)(a)
+            @test collect(b) in workers()
+        end
         @testset "single worker" begin
             options = ThunkOptions(;single=1)
             a = delayed(checkwid; options=options)(1)

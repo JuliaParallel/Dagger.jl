@@ -403,34 +403,6 @@ function fire_task!(ctx, thunk, proc, state)
     ids = map(enumerate(thunk.inputs)) do (idx,x)
         istask(x) ? x.id : -idx
     end
-    if thunk.meta
-        # Run it on the parent node, do not move data.
-        p = OSProc(myid())
-        fetched = fetch.(map(Iterators.zip(thunk.inputs,ids)) do (x, id)
-            @async begin
-                @dbg timespan_start(ctx, :comm, (thunk.id, id), (thunk.f, id))
-                x = istask(x) ? state.cache[x] : x
-                @dbg timespan_end(ctx, :comm, (thunk.id, id), (thunk.f, id))
-                return x
-            end
-        end)
-
-        @dbg timespan_start(ctx, :compute, thunk.id, thunk.f)
-        Threads.atomic_add!(ACTIVE_TASKS, 1)
-        thunk_failed = false
-        res = try
-            Base.invokelatest(thunk.f, fetched...)
-        catch err
-            thunk_failed = true
-            err
-        end
-        Threads.atomic_sub!(ACTIVE_TASKS, 1)
-        @dbg timespan_end(ctx, :compute, thunk.id, (thunk.f, p, typeof(res), sizeof(res)))
-
-        state.cache[thunk] = res
-        finish_task!(state, thunk, thunk_failed; free=false)
-        return
-    end
 
     data = map(thunk.inputs) do x
         istask(x) ? state.cache[x] : x
@@ -442,7 +414,7 @@ function fire_task!(ctx, thunk, proc, state)
     state.worker_pressure[proc.pid] += 1
     async_apply(proc, thunk.id, thunk.f, data, state.chan, thunk.get_result,
                 thunk.persist, thunk.cache, options, ids, ctx.log_sink,
-                sch_handle)
+                sch_handle, thunk.meta)
 end
 
 function finish_task!(state, node, thunk_failed; free=true)
@@ -535,19 +507,23 @@ function start_state(deps::Dict, node_order, chan)
     state
 end
 
-@noinline function do_task(thunk_id, f, data, send_result, persist, cache, options, ids, log_sink, sch_handle)
+@noinline function do_task(thunk_id, f, data, send_result, persist, cache, options, ids, log_sink, sch_handle, meta)
     ctx = Context(Processor[]; log_sink=log_sink)
     # TODO: Time choose_processor
     Tdata = map(x->x isa Chunk ? chunktype(x) : x, data)
     to_proc = choose_processor(options, f, Tdata)
-    fetched = fetch.(map(Iterators.zip(data,ids)) do (x, id)
-        @async begin
-            @dbg timespan_start(ctx, :move, (thunk_id, id), (f, id))
-            x = move(to_proc, x)
-            @dbg timespan_end(ctx, :move, (thunk_id, id), (f, id))
-            return x
-        end
-    end)
+    fetched = if meta
+        data
+    else
+        fetch.(map(Iterators.zip(data,ids)) do (x, id)
+            @async begin
+                @dbg timespan_start(ctx, :move, (thunk_id, id), (f, id))
+                x = move(to_proc, x)
+                @dbg timespan_end(ctx, :move, (thunk_id, id), (f, id))
+                return x
+            end
+        end)
+    end
     @dbg timespan_start(ctx, :compute, thunk_id, f)
     res = nothing
     result_meta = try
@@ -561,7 +537,7 @@ end
         Threads.atomic_sub!(ACTIVE_TASKS, 1)
 
         # Construct result
-        send_result ? res : tochunk(res, to_proc; persist=persist, cache=persist ? true : cache)
+        send_result || meta ? res : tochunk(res, to_proc; persist=persist, cache=persist ? true : cache)
     catch ex
         bt = catch_backtrace()
         RemoteException(myid(), CapturedException(ex, bt))
@@ -571,12 +547,12 @@ end
     (result_meta, metadata)
 end
 
-@noinline function async_apply(p::OSProc, thunk_id, f, data, chan, send_res, persist, cache, options, ids, log_sink, sch_handle)
+@noinline function async_apply(p::OSProc, thunk_id, f, data, chan, send_res, persist, cache, options, ids, log_sink, sch_handle, meta)
     @async begin
         try
             put!(chan, (p.pid, thunk_id, remotecall_fetch(do_task, p.pid, thunk_id, f, data,
                                                           send_res, persist, cache, options, ids,
-                                                          log_sink, sch_handle)))
+                                                          log_sink, sch_handle, meta)))
         catch ex
             bt = catch_backtrace()
             put!(chan, (p.pid, thunk_id, (CapturedException(ex, bt), nothing)))
