@@ -1,5 +1,6 @@
 export Thunk, delayed, delayedmap
 
+# TODO: Make this thread-safe
 let counter=0
     global next_id
     next_id() = (counter >= (1 << 30)) ? (counter = 1) : (counter += 1)
@@ -26,10 +27,17 @@ mutable struct Thunk
                    cache::Bool=false,
                    cache_ref=nothing,
                    affinity=nothing,
-                   options=nothing
+                   options=nothing,
+                   kwargs...
                   )
-        new(f, xs, id, get_result, meta, persist, cache, cache_ref, affinity,
-            options)
+        if options !== nothing
+            @assert isempty(kwargs)
+            new(f, xs, id, get_result, meta, persist, cache, cache_ref,
+                affinity, options)
+        else
+            new(f, xs, id, get_result, meta, persist, cache, cache_ref,
+                affinity, Sch.ThunkOptions(;kwargs...))
+        end
     end
 end
 
@@ -76,8 +84,47 @@ end
 
 delayedmap(f, xs...) = map(delayed(f), xs...)
 
+struct ThunkFuture
+    future::Future
+end
+ThunkFuture(x::Integer) = ThunkFuture(Future(x))
+ThunkFuture() = ThunkFuture(Future())
+Base.isready(t::ThunkFuture) = isready(t.future)
+Base.wait(t::ThunkFuture) = wait(t.future)
+function Base.fetch(t::ThunkFuture; proc=OSProc())
+    error, value = move(proc, fetch(t.future))
+    if error
+        throw(value)
+    end
+    value
+end
+Base.put!(t::ThunkFuture, x; error=false) = put!(t.future, (error, x))
+
+struct ThunkFailedException{E<:Exception} <: Exception
+    thunk::Thunk
+    origin::Thunk
+    ex::E
+end
+function Base.showerror(io::IO, ex::ThunkFailedException)
+    println(io, "$(ex.thunk) (id $(ex.thunk.id)) failure",
+                ex.thunk !== ex.origin ? " due to a failure in $(ex.origin)" : "",
+                ":")
+    Base.showerror(io, ex.ex)
+end
+
+struct EagerThunk
+    future::ThunkFuture
+    uid::Int
+end
+Base.isready(t::EagerThunk) = isready(t.future)
+Base.wait(t::EagerThunk) = wait(t.future)
+Base.fetch(t::EagerThunk) = move(OSProc(), fetch(t.future))
+function Base.show(io::IO, t::EagerThunk)
+    print(io, "EagerThunk ($(isready(t) ? "finished" : "running"))")
+end
+
 """
-    @par f(args...) -> Thunk
+    @par [opts] f(args...) -> Thunk
 
 Convenience macro to call `Dagger.delayed` on `f` with arguments `args`.
 May also be called with a series of assignments like so:
@@ -93,22 +140,51 @@ end
 `x` will hold the Thunk representing `h(a,b)`; additionally, `a` and `b`
 will be defined in the same local scope and will be equally accessible
 for later calls.
+
+Options to the `Thunk` can be set as `opts` with namedtuple syntax, e.g.
+`single=1`. Multiple options may be provided, and will be applied to all
+generated thunks.
 """
-macro par(ex)
-    _par(ex)
+macro par(exs...)
+    opts = exs[1:end-1]
+    ex = exs[end]
+    _par(ex; lazy=true, opts=opts)
 end
-function _par(ex::Expr)
-    if ex.head == :call
+
+"""
+    @spawn [opts] f(args...) -> Thunk
+
+Convenience macro like `Dagger.@par`, but eagerly executed from the moment it's
+called. Uses a scheduler running in the background to execute code.
+"""
+macro spawn(exs...)
+    opts = exs[1:end-1]
+    ex = exs[end]
+    _par(ex; lazy=false, opts=opts)
+end
+
+function _par(ex::Expr; lazy=true, recur=true, opts=())
+    if ex.head == :call && recur
         f = ex.args[1]
         args = ex.args[2:end]
-        # TODO: Support kwargs
-        return :(Dagger.delayed($(esc(f)))($(_par.(args)...)))
+        opts = esc.(opts)
+        if lazy
+            return :(Dagger.delayed($(esc(f)); $opts...)($(_par.(args; lazy=lazy, recur=false)...)))
+        else
+            return quote
+                Dagger.Sch.init_eager()
+                future = $ThunkFuture()
+                uid = $next_id()
+                put!(Dagger.Sch.EAGER_THUNK_CHAN, (future, uid, $(esc(f)), ($(_par.(args; lazy=lazy, recur=false)...),), ($(opts...),)))
+                EagerThunk(future, uid)
+            end
+        end
     else
-        return Expr(ex.head, _par.(ex.args)...)
+        return Expr(ex.head, _par.(ex.args, lazy=lazy, recur=recur, opts=opts)...)
     end
 end
-_par(ex::Symbol) = esc(ex)
-_par(ex) = ex
+_par(ex::Symbol; kwargs...) = esc(ex)
+_par(ex; kwargs...) = ex
 
 persist!(t::Thunk) = (t.persist=true; t)
 cache_result!(t::Thunk) = (t.cache=true; t)

@@ -80,6 +80,49 @@ top_node = delayed(group)(head_nodes...)
 compute(top_node)
 ```
 
+## Eager Execution
+
+Similar to `@par`, Dagger has an `@spawn` macro which works similarly to
+`@async` and `Threads.@spawn`: when called, it wraps the function call
+specified by the user in an `EagerThunk` object, and immediately places it onto
+a running scheduler, to be executed once its dependencies are fulfilled. This
+contrasts with `@par` in that `@par` does not begin executing its thunks until
+`collect` or `compute` are called on a given thunk or one of its downstream
+dependencies. Additionally, one fetches the result of an `@spawn` call with
+`fetch`. As a concrete example:
+
+```julia
+x = rand(400,400)
+y = rand(400,400)
+zt = Dagger.@spawn x * y
+z = fetch(zt)
+```
+
+One can also `wait` on the result of `@spawn` and check completion status with
+`isready`:
+
+```julia
+x = Dagger.@spawn sleep(10)
+@assert !isready(x)
+wait(x)
+@assert isready(x)
+@info "Done!"
+```
+
+If a thunk errors while running under the eager scheduler, it will be marked as
+having failed, all dependent (downstream) thunks will be marked as failed, and
+any future thunks that use a failed thunk as input will fail. Failure can be
+determined with `fetch`, which will re-throw the error that the
+originally-failing thunk threw. `wait` and `isready` will *not* check whether a
+thunk or its upstream failed; they only check if the thunk has completed, error
+or not.
+
+This failure behavior is not the default for lazy scheduling, but can be
+enabled by setting the scheduler/thunk option (see below) `allow_error` to
+`true`.  However, this option isn't terribly useful for non-dynamic usecases,
+since any thunk failure will propagate down to the output thunk regardless of
+where it occurs.
+
 ## Scheduler and Thunk options
 
 While Dagger generally "just works", sometimes one needs to exert some more

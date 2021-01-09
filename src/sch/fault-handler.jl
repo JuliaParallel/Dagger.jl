@@ -45,10 +45,8 @@ function handle_fault(ctx, state, thunk, oldproc)
         end
     end
 
-    function fix_waitdicts!(state, deadlist, t::Thunk; isleaf=false, offset=0)
+    function fix_waitdicts!(state, deadlist, t::Thunk; isleaf=false)
         waiting, waiting_data = state.waiting, state.waiting_data
-        off = repeat(" ", offset)
-        offi = repeat(" ", offset+1)
         if !(t in keys(waiting))
             waiting[t] = Set{Thunk}()
         end
@@ -61,7 +59,7 @@ function handle_fault(ctx, state, thunk, oldproc)
                 push!(waiting[t], input)
                 push!(waiting_data[input], t)
                 isleaf = !(input in deadlist)
-                fix_waitdicts!(state, deadlist, input; isleaf=isleaf, offset=offset+1)
+                fix_waitdicts!(state, deadlist, input; isleaf=isleaf)
             end
         end
         if isempty(waiting[t])

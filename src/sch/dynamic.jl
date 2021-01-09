@@ -88,24 +88,29 @@ end
 
 "Waits on a thunk to complete, and fetches its result."
 function Base.fetch(h::SchedulerHandle, id::ThunkID)
-    future = Future(1)
-    exec!(_fetch, h, future, id.id)
-    move(thunk_processor(), fetch(future))
+    future = ThunkFuture(Future(1))
+    exec!(_register_future, h, future, id.id)
+    fetch(future; proc=thunk_processor())
 end
-function _fetch(ctx, state, task, tid, (future, id))
+"Waits on a thunk to complete, and fetches its result."
+function register_future!(h::SchedulerHandle, id::ThunkID, future::ThunkFuture)
+    exec!(_register_future, h, future, id.id)
+end
+function _register_future(ctx, state, task, tid, (future, id))
     @assert tid != id "Cannot fetch own result"
     thunk = state.thunk_dict[id]
     ownthunk = state.thunk_dict[tid]
     dominates(target, t) = (t == target) || any(_t->dominates(target, _t), filter(istask, t.inputs))
     @assert !dominates(ownthunk, thunk) "Cannot fetch result of dominated thunk"
-    if thunk in state.finished
+    if thunk in state.finished || thunk in state.errored
+        error = thunk in state.errored
         if haskey(state.cache, thunk)
-            put!(future, state.cache[thunk])
+            put!(future, state.cache[thunk]; error=error)
         else
             put!(future, nothing)
         end
     else
-        futures = get!(()->Future[], state.futures, thunk)
+        futures = get!(()->ThunkFuture[], state.futures, thunk)
         push!(futures, future)
         schedule!(ctx, state)
     end
@@ -114,9 +119,8 @@ end
 
 # TODO: Optimize wait() to not serialize a Chunk
 "Waits on a thunk to complete."
-function Base.wait(h::SchedulerHandle, id::ThunkID)
-    future = Future(1)
-    exec!(_fetch, h, future, id.id)
+function Base.wait(h::SchedulerHandle, id::ThunkID; future=ThunkFuture(1))
+    register_future!(h, id, future)
     wait(future)
 end
 
@@ -137,14 +141,9 @@ add_thunk!(f, h::SchedulerHandle, args...; kwargs...) =
 function _add_thunk!(ctx, state, task, tid, (f, args, kwargs))
     _args = map(arg->arg isa ThunkID ? state.thunk_dict[arg.id] : arg, args)
     thunk = Thunk(f, _args...; kwargs...)
-    lock(state.lock) do
-        state.thunk_dict[thunk.id] = thunk
-        state.dependents[thunk] = Set{Thunk}()
-        reschedule_inputs!(state, thunk)
-        if isempty(state.waiting[thunk])
-            push!(state.ready, thunk)
-        end
-        schedule!(ctx, state)
-    end
+    state.thunk_dict[thunk.id] = thunk
+    state.dependents[thunk] = Set{Thunk}()
+    @assert reschedule_inputs!(state, thunk) || (thunk in state.errored)
+    schedule!(ctx, state)
     return thunk.id
 end

@@ -86,56 +86,76 @@ end
 end
 
 @testset "Scheduler" begin
-    @testset "Scheduler options: single worker" begin
-        options = SchedulerOptions(;single=1)
-        a = delayed(checkwid)(1)
-        b = delayed(checkwid)(2)
-        c = delayed(checkwid)(a,b)
+    @testset "Scheduler options" begin
+        @testset "single worker" begin
+            options = SchedulerOptions(;single=1)
+            a = delayed(checkwid)(1)
+            b = delayed(checkwid)(2)
+            c = delayed(checkwid)(a,b)
 
-        @test collect(Context([1,workers()...]), c; options=options) == 1
-    end
-    @testset "Thunk options: single worker" begin
-        options = ThunkOptions(;single=1)
-        a = delayed(checkwid; options=options)(1)
-
-        @test collect(Context([1,workers()...]), a) == 1
-    end
-    @static if VERSION >= v"1.3.0-DEV.573"
-        if Threads.nthreads() == 1
-            @warn "Threading tests running in serial"
+            @test collect(Context([1,workers()...]), c; options=options) == 1
         end
-        @testset "Scheduler options: proctypes" begin
-            options = SchedulerOptions(;proctypes=[Dagger.ThreadProc])
-            a = delayed(checktid)(1)
-            b = delayed(checktid)(2)
-            c = delayed(checktid)(a,b)
+        @static if VERSION >= v"1.3.0-DEV.573"
+            if Threads.nthreads() == 1
+                @warn "Threading tests running in serial"
+            end
+            @testset "proctypes" begin
+                options = SchedulerOptions(;proctypes=[Dagger.ThreadProc])
+                a = delayed(checktid)(1)
+                b = delayed(checktid)(2)
+                c = delayed(checktid)(a,b)
 
-            @test collect(Context(), c; options=options) == 1
+                @test collect(Context(), c; options=options) == 1
+            end
         end
-        @testset "Thunk options: proctypes" begin
-            options = ThunkOptions(;proctypes=[Dagger.ThreadProc])
-            a = delayed(checktid; options=options)(1)
-
-            @test collect(Context(), a) == 1
+        @testset "allow errors" begin
+            options = SchedulerOptions(;allow_errors=true)
+            a = delayed(error)("Test")
+            ex = try
+                collect(a)
+            catch err
+                err
+            end
+            @test Dagger.Sch.unwrap_nested_exception(ex) isa ErrorException
         end
     end
+    @testset "Thunk options" begin
+        @testset "single worker" begin
+            options = ThunkOptions(;single=1)
+            a = delayed(checkwid; options=options)(1)
 
-    @everywhere Dagger.add_callback!(proc->FakeProc())
-    @testset "Thunk options: proctypes" begin
-        @test Dagger.iscompatible_arg(FakeProc(), nothing, Int) == true
-        @test Dagger.iscompatible_arg(FakeProc(), nothing, FakeVal) == true
-        @test Dagger.iscompatible_arg(FakeProc(), nothing, Float64) == false
-        @test Dagger.default_enabled(Dagger.ThreadProc(1,1)) == true
-        @test Dagger.default_enabled(FakeProc()) == false
+            @test collect(Context([1,workers()...]), a) == 1
+        end
+        @static if VERSION >= v"1.3.0-DEV.573"
+            @testset "proctypes" begin
+                options = ThunkOptions(;proctypes=[Dagger.ThreadProc])
+                a = delayed(checktid; options=options)(1)
 
-        opts = Dagger.Sch.ThunkOptions(;proctypes=[Dagger.ThreadProc])
-        as = [delayed(identity; options=opts)(i) for i in 1:5]
-        opts = Dagger.Sch.ThunkOptions(;proctypes=[FakeProc])
-        b = delayed(fakesum; options=opts)(as...)
+                @test collect(Context(), a) == 1
+            end
+        end
+        @everywhere Dagger.add_callback!(proc->FakeProc())
+        @testset "proctypes FakeProc" begin
+            @test Dagger.iscompatible_arg(FakeProc(), nothing, Int) == true
+            @test Dagger.iscompatible_arg(FakeProc(), nothing, FakeVal) == true
+            @test Dagger.iscompatible_arg(FakeProc(), nothing, Float64) == false
+            @test Dagger.default_enabled(Dagger.ThreadProc(1,1)) == true
+            @test Dagger.default_enabled(FakeProc()) == false
 
-        @test collect(Context(), b) == FakeVal(57)
+            opts = Dagger.Sch.ThunkOptions(;proctypes=[Dagger.ThreadProc])
+            as = [delayed(identity; options=opts)(i) for i in 1:5]
+            opts = Dagger.Sch.ThunkOptions(;proctypes=[FakeProc])
+            b = delayed(fakesum; options=opts)(as...)
+
+            @test collect(Context(), b) == FakeVal(57)
+        end
+        @everywhere (pop!(Dagger.PROCESSOR_CALLBACKS); empty!(Dagger.OSPROC_CACHE))
+        @testset "allow errors" begin
+            options = ThunkOptions(;allow_errors=true)
+            a = delayed(error; options=options)("Test")
+            @test_throws_unwrap Dagger.ThunkFailedException collect(a)
+        end
     end
-    @everywhere (pop!(Dagger.PROCESSOR_CALLBACKS); empty!(Dagger.OSPROC_CACHE))
 
     @testset "Modify workers in running job" begin
         # Test that we can add/remove workers while scheduler is running.
