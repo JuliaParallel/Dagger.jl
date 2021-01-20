@@ -1,2 +1,6 @@
 [deps]
+Dagger = "d58978e5-989f-55fb-8d15-ea34adc7bf54"
+Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+Literate = "98b081ad-f1c9-55d3-8b20-4c87d4299306"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
