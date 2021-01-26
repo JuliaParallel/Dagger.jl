@@ -184,10 +184,9 @@ iscompatible_func(proc::ThreadProc, opts, f) = true
 iscompatible_arg(proc::ThreadProc, opts, x) = true
 @static if VERSION >= v"1.3.0-DEV.573"
     function execute!(proc::ThreadProc, f, args...)
-        sch_handle = task_local_storage(:sch_handle)
+        tls = get_tls()
         task = Threads.@spawn begin
-            task_local_storage(:processor, proc)
-            task_local_storage(:sch_handle, sch_handle)
+            set_tls!(tls)
             f(args...)
         end
         try
@@ -206,9 +205,9 @@ else
     # TODO: Use Threads.@threads?
     function execute!(proc::ThreadProc, f, args...)
         sch_handle = task_local_storage(:sch_handle)
+        tls = get_tls()
         task = @async begin
-            task_local_storage(:processor, proc)
-            task_local_storage(:sch_handle, sch_handle)
+            set_tls!(tls)
             f(args...)
         end
         try
@@ -314,3 +313,15 @@ end
 
 "Gets the current processor executing the current thunk."
 thunk_processor() = task_local_storage(:processor)::Processor
+
+"Gets all Dagger TLS variables as a NamedTuple."
+get_tls() = (
+    processor=thunk_processor(),
+    sch_handle=task_local_storage(:sch_handle)
+)
+
+"Sets all Dagger TLS variables from a NamedTuple."
+function set_tls!(tls)
+    task_local_storage(:processor, tls.processor)
+    task_local_storage(:sch_handle, tls.sch_handle)
+end
