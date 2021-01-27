@@ -1,8 +1,7 @@
 .test: &test
   if: build.env("DAGGER_BENCHMARK") != "true"
   agents:
-    os: linux
-    arch: x86_64
+    queue: "juliacpu"
   plugins:
     - docker#v3.7.0:
         image: julia:1
