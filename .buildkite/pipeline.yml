@@ -2,14 +2,17 @@
   if: build.env("DAGGER_BENCHMARK") != "true"
   agents:
     queue: "juliacpu"
-  plugins:
-    - docker#v3.7.0:
-        image: julia:1
 steps:
   - label: Julia 1.x
     command: julia --project -e 'using Pkg; Pkg.build(); Pkg.test()'
     timeout_in_minutes: 60
     <<: *test
+    plugins:
+      - JuliaCI/julia#v0.6:
+          version: "1.5"
+      - JuliaCI/julia-test#v0.3:
+      # - JuliaCI/julia-coverage#v0.3:
+      #     codecov: true
   - label: Julia nightly
     command: |
       mkdir /tmp/julia
@@ -18,6 +21,12 @@ steps:
       /tmp/julia/bin/julia --project -e 'using Pkg; Pkg.build(); Pkg.test()'
     timeout_in_minutes: 60
     <<: *test
+    plugins:
+      - JuliaCI/julia#v0.6:
+          version: "1.6-nightly"
+      - JuliaCI/julia-test#v0.3:
+      # - JuliaCI/julia-coverage#v0.3:
+      #     codecov: true
   - label: Benchmarks
     command: echo TODO
     if: build.env("DAGGER_BENCHMARK") == "true"
