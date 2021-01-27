@@ -14,9 +14,10 @@ makedocs(;
     pages = [
         "Home" => "index.md",
         "Processors" => "processors.md",
-        "Scheduler Internals" => "scheduler-internals.md",
-        "Logging and Graphing" => "logging.md",
+        "Checkpointing" => "checkpointing.md",
         "Dynamic Scheduler Control" => "dynamic.md",
+        "Logging and Graphing" => "logging.md",
+        "Scheduler Internals" => "scheduler-internals.md",
     ]
 )
 

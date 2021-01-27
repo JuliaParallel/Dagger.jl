@@ -62,17 +62,27 @@ end
 Stores DAG-global options to be passed to the Dagger.Sch scheduler.
 
 # Arguments
-- `single::Int=0`: Force all work onto worker with specified id. `0` disables this option.
+- `single::Int=0`: Force all work onto worker with specified id. `0` disables
+this option.
 - `proctypes::Vector{Type{<:Processor}}=Type[]`: Force scheduler to use one or
 more processors that are instances/subtypes of a contained type. Leave this
 vector empty to disable.
 - `allow_errors::Bool=true`: Allow thunks to error without affecting
 non-dependent thunks.
+- `checkpoint=nothing`: If not `nothing`, Saves the final result of
+the current scheduler invocation to persistent storage, for later retrieval by
+`restore`.
+- `restore=nothing`: If not `nothing`, returns the (cached) final result of
+the current scheduler invocation, were it to execute. If this returns a
+result, all thunks will be skipped. If this throws an error, restoring will be
+skipped, the error will be displayed, and the scheduler will execute as usual.
 """
 Base.@kwdef struct SchedulerOptions
     single::Int = 0
     proctypes::Vector{Type} = Type[]
     allow_errors::Bool = false
+    checkpoint = nothing
+    restore = nothing
 end
 
 """
@@ -81,17 +91,26 @@ end
 Stores Thunk-local options to be passed to the Dagger.Sch scheduler.
 
 # Arguments
-- `single::Int=0`: Force thunk onto worker with specified id. `0` disables this option.
+- `single::Int=0`: Force thunk onto worker with specified id. `0` disables this
+option.
 - `proctypes::Vector{Type{<:Processor}}=Type[]`: Force thunk to use one or
 more processors that are instances/subtypes of a contained type. Leave this
 vector empty to disable.
 - `allow_errors::Bool=true`: Allow this thunk to error without affecting
 non-dependent thunks.
+- `checkpoint=nothing`: If not `nothing`, saves the final result of the thunk
+to persistent storage, for later retrieval by `restore`.
+- `restore=nothing`: If not `nothing`, returns the (cached) result of this
+thunk, were it to execute. If this returns a result, this thunk will be
+skipped. If this throws an error, restoring will be skipped, the error will be
+displayed, and the scheduler will execute this thunk as usual.
 """
 Base.@kwdef struct ThunkOptions
     single::Int = 0
     proctypes::Vector{Type} = Type[]
     allow_errors::Bool = false
+    checkpoint = nothing
+    restore = nothing
 end
 
 # Eager scheduling
@@ -102,7 +121,7 @@ function merge(sopts::SchedulerOptions, topts::ThunkOptions)
     single = topts.single != 0 ? topts.single : sopts.single
     proctypes = vcat(sopts.proctypes, topts.proctypes)
     allow_errors = sopts.allow_errors || topts.allow_errors
-    ThunkOptions(single, proctypes, allow_errors)
+    ThunkOptions(single, proctypes, allow_errors, topts.checkpoint, topts.restore)
 end
 
 function isrestricted(task::Thunk, proc::OSProc)
@@ -143,6 +162,13 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         options = SchedulerOptions()
     end
     ctx.options = options
+    if options.restore !== nothing
+        try
+            return options.restore()
+        catch err
+            @error "Scheduler restore failed" exception=(err,catch_backtrace())
+        end
+    end
     master = OSProc(myid())
     @dbg timespan_start(ctx, :scheduler_init, 0, master)
 
@@ -234,6 +260,13 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         state.worker_pressure[proc.pid] = metadata.pressure
         node = state.thunk_dict[thunk_id]
         state.cache[node] = res
+        if node.options !== nothing && node.options.checkpoint !== nothing
+            try
+                node.options.checkpoint(node, res)
+            catch err
+                @error "Thunk checkpoint failed" exception=(err,catch_backtrace())
+            end
+        end
 
         # FIXME: Move log start and lock to before error check
         @dbg timespan_start(ctx, :finish, thunk_id, master)
@@ -247,6 +280,13 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     value = state.cache[d] # TODO: move(OSProc(), state.cache[d])
     if d in state.errored
         throw(value)
+    end
+    if options.checkpoint !== nothing
+        try
+            options.checkpoint(value)
+        catch err
+            @error "Scheduler checkpoint failed" exception=(err,catch_backtrace())
+        end
     end
     value
 end
@@ -397,6 +437,16 @@ function fire_task!(ctx, thunk, proc, state)
         else
             # cache miss
             thunk.cache_ref = nothing
+        end
+    end
+    if thunk.options !== nothing && thunk.options.restore !== nothing
+        try
+            result = thunk.options.restore(thunk)
+            state.cache[thunk] = result
+            finish_task!(state, thunk, false; free=false)
+            return
+        catch err
+            @error "Thunk restore failed" exception=(err,catch_backtrace())
         end
     end
 
