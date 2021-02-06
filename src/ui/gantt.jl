@@ -148,7 +148,12 @@ function draw_gantt(ctx, svg_path, prof_path; delay=2, width=1000, height=640, w
         image_idx += 1
     end
     if isdir(svg_path)
-        final_paths = combine_gantt_images(svg_path, prof_path, delay)
+        final_paths = try
+            combine_gantt_images(svg_path, prof_path, delay)
+        catch err
+            @error "Image-to-video failed" exception=err
+            ("", "")
+        end
         continue_rendering[] = true
         put!(render_results, final_paths)
     end

@@ -138,8 +138,11 @@ function array_suite(f=x->x; kwargs...)
             end teardown=begin
                 Dagger.continue_rendering[] = false
                 video_paths = take!(Dagger.render_results)
+                try
                 video_data = Dict(key=>read(video_paths[key]) for key in keys(video_paths))
                 push!(get!(()->[], RENDERS[$scale], $nw), video_data)
+                catch
+                end
             end
             nw ÷= 2
         end
