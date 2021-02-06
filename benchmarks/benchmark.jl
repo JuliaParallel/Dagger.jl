@@ -35,6 +35,11 @@ else
 end
 const RENDERS = Dict{Int,Dict}()
 
+cuda = parse(Bool, get(ENV, "BENCHMARK_CUDA", "0"))
+if cuda
+    @everywhere using DaggerGPU, CUDA
+end
+
 using BenchmarkTools
 
 AmulB_compatible(x,y) =
@@ -111,6 +116,14 @@ function array_suite(f=x->x; kwargs...)
         nw = length(workers())
         nsuite = BenchmarkGroup()
         while nw > 0
+            opts = if cuda
+                Dagger.Sch.SchedulerOptions(;proctypes=[
+                    #Dagger.ThreadProc,
+                    DaggerGPU.CuArrayDeviceProc
+                ])
+            else
+                Dagger.Sch.SchedulerOptions()
+            end
             ctx = Context(collect((1:nw) .+ 1); kwargs...)
             p = sum([length(Dagger.get_processors(OSProc(id))) for id in 2:(nw+1)])
             X = compute(rand(Blocks(nrow, ncol÷p), nrow, ncol))
