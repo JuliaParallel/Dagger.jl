@@ -19,6 +19,27 @@ other directly, in the common case. The processor hierarchy's topology is
 automatically detected and elaborated by callbacks in Dagger, which users may
 manipulate to add detection of extra processors.
 
+A move between a given pair of processors is implemented as a Julia function
+dispatching on the types of each processor, as well as the type of the data
+being moved. Users are permitted to define custom move functions to improve
+data movement efficiency, perform automatic value conversions, or even make
+use of special IPC facilities. Custom processors may also be defined by the
+user to represent a processor type which is not automatically detected by
+Dagger, such as novel GPUs, special OS process abstractions, FPGAs, etc.
+
+Movement of data between any two processors A and B (from A to B), if not
+defined by the user, is decomposed into 3 moves: processor A to OSProc parent
+of A, OSProc parent of A to OSProc parent of B, and OSProc parent of B to
+processor B. This mechanism uses Julia's Serialization library to serialize and
+deserialize data, so data must be serializable for this mechanism to work
+properly.
+
+### Future: Hierarchy Generic Path Move
+
+NOTE: This used to be the default move behavior, but was removed because it
+wasn't considered helpful, and there were not any processor implementations
+that made use of it.
+
 Movement of data between any two processors is decomposable into a sequence of
 "moves" between a child and its parent, termed a "generic path move". Movement
 of data may also take "shortcuts" between nodes in the tree which are not
@@ -28,13 +49,53 @@ Infiniband, GPU RDMA, NVLINK, etc.). All data is considered local to some
 processor, and may only be operated on by another processor by first doing an
 explicit move operation to that processor.
 
-A move between a given pair of processors is implemented as a Julia function
-dispatching on the types of each processor, as well as the type of the data
-being moved. Users are permitted to define custom move functions to improve
-data movement efficiency, perform automatic value conversions, or even make
-use of special IPC facilities. Custom processors may also be defined by the
-user to represent a processor type which is not automatically detected by
-Dagger, such as novel GPUs, special OS process abstractions, FPGAs, etc.
+## Processor Selection
+
+By default, Dagger uses the CPU to process work, typically single-threaded per
+cluster node. However, Dagger allows access to a wider range of hardware and
+software acceleration techniques, such as multithreading and GPUs. These more
+advanced (but performant) accelerators are disabled by default, but can easily
+be enabled by using Scheduler/Thunk options in the `proclist` field. If
+`nothing`, all default processors will be used. If a vector of types, only the
+processor types contained in `options.proclist` will be used to compute all or
+a given thunk. If a function, it will be called for each processor (with the
+processor as the argument) until it returns `true`.
+
+```julia
+opts = Dagger.Sch.ThunkOptions(;proclist=nothing) # default behavior
+# OR
+opts = Dagger.Sch.ThunkOptions(;proclist=[DaggerGPU.CuArrayProc]) # only execute on CuArrayProc
+# OR
+opts = Dagger.Sch.ThunkOptions(;proclist=(proc)->(proc isa Dagger.ThreadProc && proc.tid == 3)) # only run on ThreadProc with thread ID 3
+
+t = Dagger.@par options=opts sum(X) # do sum(X) on the specified processor
+```
+
+## Resource Control
+
+Dagger assumes that a thunk executing on a processor, fully utilizes that
+processor at 100%. When this is not the case, you can tell Dagger as much with
+`options.procutil`:
+
+```julia
+procutil = Dict(
+    Dagger.ThreadProc => 4.0, # utilizes 4 CPU threads fully
+    DaggerGPU.CuArrayProc => 0.1 # utilizes 10% of a single CUDA GPU
+)
+```
+
+Dagger will use this information to execute only as many thunks on a given
+processor (or set of similar processors) as add up to less than or equal to
+`1.0` total utilization. If a thunk is scheduled onto a processor which the
+local worker deems as "oversubscribed", it will not execute the thunk until
+sufficient resources become available by thunks completing execution.
+
+### GPU Processors
+
+The [DaggerGPU.jl](https://github.com/JuliaGPU/DaggerGPU.jl) package can be
+imported to enable GPU acceleration for NVIDIA and AMD GPUs, when available.
+The processors provided by that package are not enabled by default, but may be
+enabled via `options.proclist` as usual.
 
 ### Future: Network Devices and Topology
 

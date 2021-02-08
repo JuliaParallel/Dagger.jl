@@ -108,18 +108,14 @@ function handle_fault(ctx, state, thunk, oldproc)
     end
 
     # Reschedule inputs from deadlist
-    ps = procs(ctx)
-    @assert !isempty(ps) "No workers left for fault handling!"
-    newproc = rand(ps)
-
+    @assert !isempty(procs(ctx)) "No workers left for fault handling!"
     while length(deadlist) > 0
         dt = popfirst!(deadlist)
         if any((input in deadlist) for input in dt.inputs)
             # We need to schedule our input thunks first
-            push!(deadlist, dt)
             continue
         end
-        fire_task!(ctx, dt, newproc, state)
-        break
+        push!(state.ready, dt)
     end
+    schedule!(ctx, state)
 end

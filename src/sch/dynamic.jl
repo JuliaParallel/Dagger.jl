@@ -83,6 +83,7 @@ end
 halt!(h::SchedulerHandle) = exec!(_halt, h, nothing)
 function _halt(ctx, state, task, tid, _)
     state.halt[] = true
+    put!(state.chan, (1, nothing, SchedulerHaltedException(), nothing))
     Base.throwto(task, SchedulerHaltedException())
 end
 

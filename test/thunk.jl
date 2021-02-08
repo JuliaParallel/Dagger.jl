@@ -39,7 +39,7 @@ end
     end
     @test Dagger.Sch.eager_context() isa Context
     @testset "waiting" begin
-        a = @spawn sleep(5)
+        a = @spawn sleep(1)
         @test !isready(a)
         wait(a)
         @test isready(a)
