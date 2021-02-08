@@ -294,7 +294,7 @@ Workers will typically be assigned new tasks in the next scheduling iteration if
 Workers can be either `Processor`s or the underlying process IDs as `Integer`s.
 """
 addprocs!(ctx::Context, xs::AbstractVector{<:Integer}) = addprocs!(ctx, map(OSProc, xs))
-addprocs!(ctx::Context, xs::AbstractVector{<:Processor}) = lock(ctx) do
+addprocs!(ctx::Context, xs::AbstractVector{<:OSProc}) = lock(ctx) do
     append!(ctx.procs, xs)
 end
 
@@ -308,8 +308,8 @@ Workers will typically finish all their assigned tasks if scheduling is ongoing 
 Workers can be either `Processor`s or the underlying process IDs as `Integer`s.
 """
 rmprocs!(ctx::Context, xs::AbstractVector{<:Integer}) = rmprocs!(ctx, map(OSProc, xs))
-rmprocs!(ctx::Context, xs::AbstractVector{<:Processor}) = lock(ctx) do
-    filter!(p -> p ∉ xs, ctx.procs)
+rmprocs!(ctx::Context, xs::AbstractVector{<:OSProc}) = lock(ctx) do
+    filter!(p -> (p ∉ xs), ctx.procs)
 end
 
 "Gets the current processor executing the current thunk."

@@ -412,8 +412,10 @@ shall_remove_proc(ctx, proc) = proc ∉ procs_to_use(ctx)
 function remove_dead_proc!(ctx, state, proc, options=ctx.options)
     @assert options.single !== proc.pid "Single worker failed, cannot continue."
     rmprocs!(ctx, [proc])
+    delete!(state.worker_procs, proc.pid)
     delete!(state.worker_pressure, proc.pid)
     delete!(state.worker_capacity, proc.pid)
+    delete!(state.worker_chans, proc.pid)
 end
 
 function pop_with_affinity!(ctx, tasks, proc)
