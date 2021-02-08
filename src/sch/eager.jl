@@ -34,7 +34,7 @@ set_pressure!(h::SchedulerHandle, pid::Int, proctype::Type, pressure::Int) =
     exec!(_set_pressure!, h, pid, proctype, pressure)
 function _set_pressure!(ctx, state, task, tid, (pid, proctype, pressure))
     state.worker_pressure[pid][proctype] = pressure
-    ACTIVE_TASKS[proctype] = pressure # HACK-ish
+    ACTIVE_TASKS[state.uid][proctype] = pressure # HACK-ish
     @show state.worker_pressure[pid]
 end
 

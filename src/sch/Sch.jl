@@ -362,6 +362,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
             end
             @assert !isempty(proc_set_useable) "No processors available, try making proclist more liberal"
             procutil = opts.procutil
+            gproc = nothing
             proc = nothing
             extra_util = nothing
             cap = nothing
@@ -375,13 +376,14 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
                    ((extra_util isa Real) && (extra_util + real_util > cap))
                     continue
                 else
-                    proc = OSProc(gp), p
+                    gproc = OSProc(gp)
+                    proc = p
                     break
                 end
             end
             if proc !== nothing
                 extra_util = extra_util isa MaxUtilization ? cap : extra_util
-                fire_task!(ctx, task, proc, state; util=extra_util)
+                fire_task!(ctx, task, (gproc, proc), state; util=extra_util)
                 continue
             else
                 push!(failed_scheduling, task)
@@ -389,14 +391,6 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         end
         append!(state.ready, failed_scheduling)
     end
-end
-function pop_and_fire!(ctx, state, proc)
-    task = pop_with_affinity!(ctx, state.ready, proc)
-    if task !== nothing
-        fire_task!(ctx, task, proc, state)
-        return true
-    end
-    return false
 end
 
 # Main responsibility of this function is to check if new procs have been pushed to the context
@@ -462,8 +456,6 @@ function pop_with_affinity!(ctx, tasks, proc)
     return nothing
 end
 
-fire_task!(ctx, thunk, proc::OSProc, state; util=1.0) =
-    fire_task!(ctx, thunk, (proc, proc), state; util=util)
 function fire_task!(ctx, thunk, (gproc, proc), state; util=1.0)
     push!(state.running, thunk)
     if thunk.cache && thunk.cache_ref !== nothing
@@ -604,13 +596,6 @@ end
     from_proc = OSProc()
     # TODO: Time choose_processor
     Tdata = map(x->x isa Chunk ? chunktype(x) : x, data)
-    to_proc = choose_processor(options, f, Tdata)
-    if to_proc isa Integer
-        # Scheduler didn't choose processor, choose one ourselves
-        # FIXME: This should really never happen
-        @warn "Falling back to worker-side scheduling"
-        to_proc = choose_processor(from_proc, options, f, fetched)
-    end
 
     # Fetch inputs
     fetched = if meta
@@ -683,9 +668,8 @@ end
 
 @noinline function async_apply((gp,p), thunk_id, f, data, chan, send_res, persist, cache, meta, options, ids, log_sink, sch_handle, uid)
     @async begin
-        _p = p isa OSProc ? p.pid : p
         try
-            put!(chan, (gp.pid, p, thunk_id, remotecall_fetch(do_task, gp.pid, _p, thunk_id, f, data,
+            put!(chan, (gp.pid, p, thunk_id, remotecall_fetch(do_task, gp.pid, p, thunk_id, f, data,
                                                           send_res, persist, cache, meta, options, ids,
                                                           log_sink, sch_handle, uid)))
         catch ex
