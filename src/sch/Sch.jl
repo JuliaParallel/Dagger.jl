@@ -135,7 +135,8 @@ include("eager.jl")
 function merge(sopts::SchedulerOptions, topts::ThunkOptions)
     single = topts.single != 0 ? topts.single : sopts.single
     allow_errors = sopts.allow_errors || topts.allow_errors
-    ThunkOptions(single, topts.proclist, topts.procutil, allow_errors, topts.checkpoint, topts.restore)
+    proclist = topts.proclist !== nothing ? topts.proclist : sopts.proclist
+    ThunkOptions(single, proclist, topts.procutil, allow_errors, topts.checkpoint, topts.restore)
 end
 
 function isrestricted(task::Thunk, proc::OSProc)
@@ -536,7 +537,7 @@ function finish_task!(state, node, thunk_failed; free=true)
         end
     end
     # Internal clean-up
-    for inp in inputs(node)
+    for inp in filter(istask, inputs(node))
         if inp in keys(state.waiting_data)
             s = state.waiting_data[inp]
             if node in s
