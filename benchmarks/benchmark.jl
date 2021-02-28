@@ -25,7 +25,7 @@ end
 @everywhere using Dagger
 import Dagger: Computation, reduceblock
 using Dates, Random, Statistics, LinearAlgebra, InteractiveUtils
-using JLD, Luxor, ProfileSVG
+using JLD, Luxor, ProfileSVG, Serialization
 
 live = parse(Bool, get(ENV, "BENCHMARK_LIVE", "0"))
 if live
@@ -35,8 +35,22 @@ else
 end
 const RENDERS = Dict{Int,Dict}()
 
-cuda = parse(Bool, get(ENV, "BENCHMARK_CUDA", "0"))
-if cuda
+_benches = get(ENV, "BENCHMARK", "cpu,cpu+dagger")
+benches = []
+for bench in split(_benches, ',')
+    if endswith(bench, "+dagger")
+        accel = split(bench, '+')[1]
+        dagger = true
+    else
+        accel = bench
+        dagger = false
+    end
+    push!(benches, (name=bench, accel=accel, dagger=dagger))
+end
+
+if any(x->x.accel == :cuda, benches)
+    @everywhere using DaggerGPU, CUDA
+elseif any(x->x.accel == :amdgpu, benches)
     @everywhere using DaggerGPU, CUDA
 end
 
@@ -84,7 +98,7 @@ end
 
 theory_flops(nrow, ncol, nfeatures) = 11 * ncol * nrow * nfeatures + 2 * (ncol + nrow) * nfeatures
 
-function array_suite(f=x->x; kwargs...)
+function nmf_suite(scales=1:10:50; dagger, accel=:none, kwargs...)
     suite = BenchmarkGroup()
 
     #= TODO: Re-enable
@@ -108,60 +122,84 @@ function array_suite(f=x->x; kwargs...)
     end
     =#
 
-    for scale in (2 .^ (3:1:6))
+    X = Ref{Any}()
+    W = Ref{Any}()
+    H = Ref{Any}()
+
+    for scale in scales
         ncol = 2001 * scale
-        nrow = 10002
+        nrow = 1002
         nfeatures = 12
-        RENDERS[scale] = Dict{Int,Vector}()
-        nw = length(workers())
-        nsuite = BenchmarkGroup()
-        while nw > 0
-            opts = if cuda
-                Dagger.Sch.SchedulerOptions(;proctypes=[
-                    #Dagger.ThreadProc,
-                    DaggerGPU.CuArrayDeviceProc
-                ])
-            else
-                Dagger.Sch.SchedulerOptions()
-            end
-            ctx = Context(collect((1:nw) .+ 1); kwargs...)
-            p = sum([length(Dagger.get_processors(OSProc(id))) for id in 2:(nw+1)])
-            X = compute(rand(Blocks(nrow, ncol÷p), nrow, ncol))
-            W = compute(rand(Blocks(nrow, ncol÷p), nrow, nfeatures))
-            H = compute(rand(Blocks(nrow, ncol÷p), nfeatures, ncol))
-            nsuite["Workers: $nw"] = @benchmarkable begin
-                compute($ctx, $(nnmf(X, W, H)))
+
+        if !dagger
+            suite["NNMF scaled by: $scale"] = @benchmarkable begin
+                nnmf($X[], $W[], $H[])
             end setup=begin
-                _nw, _scale = $nw, $scale
-                @info "Starting $_nw worker NNMF (scale by $_scale)"
-                Dagger.show_gantt($ctx; width=1800, window_length=20, delay=2, port=4040, live=live)
+                $X[] = rand(Float32, $nrow, $ncol)
+                $W[] = rand(Float32, $nrow, $nfeatures)
+                $H[] = rand(Float32, $nfeatures, $ncol)
             end teardown=begin
-                Dagger.continue_rendering[] = false
-                video_paths = take!(Dagger.render_results)
-                try
-                video_data = Dict(key=>read(video_paths[key]) for key in keys(video_paths))
-                push!(get!(()->[], RENDERS[$scale], $nw), video_data)
-                catch
-                end
+                $X[] = nothing
+                $W[] = nothing
+                $H[] = nothing
             end
-            nw ÷= 2
+        else
+            RENDERS[scale] = Dict{Int,Vector}()
+            nw = length(workers())
+            nsuite = BenchmarkGroup()
+            while nw > 0
+                opts = if accel == :cuda
+                    Dagger.Sch.SchedulerOptions(;proctypes=[
+                        DaggerGPU.CuArrayDeviceProc
+                    ])
+                elseif accel == :amdgpu
+                    Dagger.Sch.SchedulerOptions(;proctypes=[
+                        DaggerGPU.ROCArrayProc
+                    ])
+                else
+                    Dagger.Sch.SchedulerOptions()
+                end
+                ctx = Context(collect((1:nw) .+ 1); kwargs...)
+                p = sum([length(Dagger.get_processors(OSProc(id))) for id in 2:(nw+1)])
+                nsuite["Workers: $nw"] = @benchmarkable begin
+                    compute($ctx, nnmf($X[], $W[], $H[]))
+                end setup=begin
+                    _nw, _scale = $nw, $scale
+                    @info "Starting $_nw worker NNMF (scale by $_scale)"
+                    # FIXME: Dagger.show_gantt($ctx; width=1800, window_length=20, delay=2, port=4040, live=live)
+                    if $accel == :cuda
+                        # FIXME: Allocate with CUDA.rand if possible
+                        $X[] = Dagger.mapchunks(CUDA.cu, compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nrow, $ncol)))
+                        $W[] = Dagger.mapchunks(CUDA.cu, compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nrow, $nfeatures)))
+                        $H[] = Dagger.mapchunks(CUDA.cu, compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nfeatures, $ncol)))
+                    elseif $accel == :amdgpu
+                        $X[] = Dagger.mapchunks(ROCArray, compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nrow, $ncol)))
+                        $W[] = Dagger.mapchunks(ROCArray, compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nrow, $nfeatures)))
+                        $H[] = Dagger.mapchunks(ROCArray, compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nfeatures, $ncol)))
+                    else
+                        $X[] = compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nrow, $ncol))
+                        $W[] = compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nrow, $nfeatures))
+                        $H[] = compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nfeatures, $ncol))
+                    end
+                end teardown=begin
+                    #= FIXME
+                    Dagger.continue_rendering[] = false
+                    video_paths = take!(Dagger.render_results)
+                    try
+                        video_data = Dict(key=>read(video_paths[key]) for key in keys(video_paths))
+                        push!(get!(()->[], RENDERS[$scale], $nw), video_data)
+                    catch
+                    end
+                    =#
+                    $X[] = nothing
+                    $W[] = nothing
+                    $H[] = nothing
+                end
+                break
+                nw ÷= 2
+            end
+            suite["NNMF scaled by: $scale"] = nsuite
         end
-        suite["NNMF scaled by: $scale"] = nsuite
-    end
-
-    suite
-end
-function serial_suite()
-    suite = BenchmarkGroup()
-
-    for scale in (2 .^ (3:1:6))
-        ncol = 2001 * scale
-        nrow = 10002
-        nfeatures = 12
-        X = rand(nrow, ncol)
-        W = rand(nrow, nfeatures)
-        H = rand(nfeatures, ncol)
-        suite["NNMF scaled by: $scale"] = @benchmarkable nnmf($X, $W, $H)
     end
 
     suite
@@ -169,40 +207,40 @@ end
 
 function main()
     nw = length(workers())
+    output_prefix = "result-$(np)workers-$(nt)threads-$(Dates.now())"
 
-    println("creating benchmarks")
-    dagger_benchmarks = array_suite(; log_sink=Dagger.LocalEventLog(), profile=true)
-    serial_benchmarks = serial_suite()
-
-    println("running Dagger benchmarks")
-    dagger_res = run(dagger_benchmarks; samples=5, seconds=10*60, gcsample=true)
-
-    println("running Serial benchmarks")
-    serial_res = run(serial_benchmarks; samples=5, seconds=10*60, gcsample=true)
-
-    res = Dict("Dagger"=>dagger_res, "Serial"=>serial_res)
-
-    #= TODO: Analyze SoL vs. Dagger
-    @info "Dagger"
-    res = run(suite)
-    for key in keys(res)
-        dagger_elapsed = mean(res[key].times) / (10^9)
-        expected_seconds = (theory_flops(nrow, ncol, nfeatures) / pf)
-        @show key dagger_elapsed (dagger_elaped/expected_seconds)
+    suites = Dict()
+    for bench in benches
+        name = bench.name
+        println("creating $name benchmarks")
+        suites[name] = if bench.dagger
+            nmf_suite(; dagger=true, accel=bench.accel, log_sink=Dagger.LocalEventLog(), log_file=output_prefix*".dot", profile=false)
+        else
+            nmf_suite(; dagger=false, accel=bench.accel)
+        end
     end
-    expected_seconds = (theory_flops(nrow, ncol, nfeatures) / pf)
+    res = Dict()
+    for bench in benches
+        name = bench.name
+        println("running $name benchmarks")
+        res[name] = try
+            run(suites[name]; samples=5, seconds=10*60, gcsample=true)
+        catch err
+            @error "Error running $name benchmarks" exception=(err,catch_backtrace())
+            nothing
+        end
+    end
 
-    #@info "Dagger (scaled by $scale)"
-    #dagger_elapsed = @elapsed compute(ctx, T)
-    #@show dagger_elapsed (dagger_elapsed/expected_seconds)
-
-    =#
-
-    output = "result-$(np)workers-$(nt)threads-$(Dates.now()).jld"
-    println("saving results in $output")
-    JLD.save(output, "results", res, "peakflops", peakflops(), "renders", RENDERS)
+    #println("saving results in $output_prefix.jld")
+    #JLD.save(output, "results", res, "peakflops", peakflops(), "renders", RENDERS)
+    println("saving results in $output_prefix.jls")
+    outdict = Dict("results"=>res, "peakflops"=>peakflops(), "renders"=>RENDERS)
+    open(output_prefix*".jls", "w") do io
+        serialize(io, outdict)
+    end
     println("Done.")
 
+    # TODO: Compare with multiple results
     if length(ARGS) == 1
         compare_file = ARGS[1]
         println("Comparing with results in $compare_file")

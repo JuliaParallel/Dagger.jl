@@ -107,10 +107,9 @@ function write_node(ctx, io, t, c, id=dec(hash(t)))
 end
 
 function write_node(ctx, io, ts::Timespan, c)
-    f, proc, res_type, res_sz = ts.timeline
+    f, proc = ts.timeline
     f = isa(f, Function) ? "$f" : "fn"
     t_comp = pretty_time(ts)
-    sz_comp = pretty_size(res_sz)
     color = _proc_color(ctx, proc)
     shape = _proc_shape(ctx, proc)
     # TODO: t_log = log(ts.finish - ts.start) / 5

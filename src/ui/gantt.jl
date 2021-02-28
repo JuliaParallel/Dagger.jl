@@ -31,7 +31,7 @@ proclt(p1, p2::Dagger.OSProc) = p1.owner < p2.pid
 
 prof_to_svg(::Any, ::Any, ::Any; kwargs...) = nothing
 
-combine_gantt_images(::Any, ::Any, ::Any) = NamedTuple()
+combine_gantt_images(::Any, ::Any, ::Any, ::Any) = ("", "")
 
 continue_rendering = Ref{Bool}(true)
 render_results = Channel()
@@ -92,13 +92,15 @@ function draw_gantt(ctx, svg_path, prof_path; delay=2, width=1000, height=640, w
         isempty(window_logs) && continue
 
         # Concatenate and render profile data
-        prof_data = UInt64[]
-        prof_dict = Dict{UInt64, Vector{Base.StackTraces.StackFrame}}()
-        for log in filter(x->length(x)==2, window_logs)
-            append!(prof_data, log[2].profiler_samples.samples)
-            merge!(prof_dict, log[2].profiler_samples.lineinfo)
+        if ctx.profile
+            prof_data = UInt64[]
+            prof_dict = Dict{UInt64, Vector{Base.StackTraces.StackFrame}}()
+            for log in filter(x->length(x)==2, window_logs)
+                append!(prof_data, log[2].profiler_samples.samples)
+                merge!(prof_dict, log[2].profiler_samples.lineinfo)
+            end
+            prof_to_svg(prof_path, prof_data, prof_dict, image_idx; width=width)
         end
-        prof_to_svg(prof_path, prof_data, prof_dict, image_idx; width=width)
 
         for proc in unique(map(x->x[1].timeline[2], window_logs))
             push!(procs, proc)
@@ -149,7 +151,7 @@ function draw_gantt(ctx, svg_path, prof_path; delay=2, width=1000, height=640, w
     end
     if isdir(svg_path)
         final_paths = try
-            combine_gantt_images(svg_path, prof_path, delay)
+            combine_gantt_images(ctx, svg_path, prof_path, delay)
         catch err
             @error "Image-to-video failed" exception=err
             ("", "")
