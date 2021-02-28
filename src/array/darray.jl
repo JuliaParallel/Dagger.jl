@@ -377,3 +377,13 @@ end
 function Base.:(==)(x::AbstractArray{T,N}, y::ArrayOp{S,N}) where {T,S,N}
     return collect(x) == y
 end
+
+# TODO: Allow `f` to return proc
+mapchunk(f, chunk) = tochunk(f(poolget(chunk.handle)))
+function mapchunks(f, d::DArray{T,N,F}) where {T,N,F}
+    chunks = map(d.chunks) do chunk
+        owner = get_parent(chunk.processor).pid
+        remotecall_fetch(mapchunk, owner, f, chunk)
+    end
+    DArray{T,N,F}(d.domain, d.subdomains, chunks, d.concat)
+end
