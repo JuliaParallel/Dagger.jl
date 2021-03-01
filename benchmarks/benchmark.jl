@@ -1,15 +1,15 @@
 using Distributed
 if haskey(ENV, "BENCHMARK_PROCS")
-    np, nt = parse.(Ref(Int), split(ENV["BENCHMARK_PROCS"], ":"))
+    const np, nt = parse.(Ref(Int), split(ENV["BENCHMARK_PROCS"], ":"))
     for i in workers()
         addprocs(np; exeflags="-t $nt")
     end
 else
-    np = length(workers())
-    nt = 1
+    const np = length(workers())
+    const nt = 1
 end
 if haskey(ENV, "BENCHMARK_REMOTES")
-    remotes = split(ENV["BENCHMARK_REMOTES"], ":")
+    const remotes = split(ENV["BENCHMARK_REMOTES"], ":")
     if !isempty(remotes)
         for i in 1:np
             addprocs(remotes; exeflags="-t $nt")
@@ -25,18 +25,30 @@ end
 @everywhere using Dagger
 import Dagger: Computation, reduceblock
 using Dates, Random, Statistics, LinearAlgebra, InteractiveUtils
-using JLD, Luxor, ProfileSVG, Serialization
 
-live = parse(Bool, get(ENV, "BENCHMARK_LIVE", "0"))
-if live
-    using Mux
+const output_format = get(ENV, "BENCHMARK_OUTPUT_FORMAT", "jls")
+if output_format == "jld"
+    using JLD
+elseif output_format == "jls"
+    using Serialization
 else
+    error("Unknown output format: $output_format")
+end
+
+const render = get(ENV, "BENCHMARK_RENDER", "")
+if render == "live"
+    const live = true
+    using Luxor, ProfileSVG
+    using Mux
+elseif render == "offline"
+    const live = false
+    using Luxor, ProfileSVG
     using FFMPEG, FileIO, ImageMagick
 end
 const RENDERS = Dict{Int,Dict}()
 
 _benches = get(ENV, "BENCHMARK", "cpu,cpu+dagger")
-benches = []
+const benches = []
 for bench in split(_benches, ',')
     if endswith(bench, "+dagger")
         accel = split(bench, '+')[1]
@@ -48,11 +60,13 @@ for bench in split(_benches, ',')
     push!(benches, (name=bench, accel=accel, dagger=dagger))
 end
 
-if any(x->x.accel == :cuda, benches)
+if any(x->x.accel == "cuda", benches)
     @everywhere using DaggerGPU, CUDA
-elseif any(x->x.accel == :amdgpu, benches)
-    @everywhere using DaggerGPU, CUDA
+elseif any(x->x.accel == "amdgpu", benches)
+    @everywhere using DaggerGPU, AMDGPU
 end
+
+const scales = eval(Meta.parse(get(ENV, "BENCHMARK_SCALE", "1:5:50")))
 
 using BenchmarkTools
 
@@ -98,7 +112,7 @@ end
 
 theory_flops(nrow, ncol, nfeatures) = 11 * ncol * nrow * nfeatures + 2 * (ncol + nrow) * nfeatures
 
-function nmf_suite(scales=1:10:50; dagger, accel=:none, kwargs...)
+function nmf_suite(; dagger, accel, kwargs...)
     suite = BenchmarkGroup()
 
     #= TODO: Re-enable
@@ -135,65 +149,79 @@ function nmf_suite(scales=1:10:50; dagger, accel=:none, kwargs...)
             suite["NNMF scaled by: $scale"] = @benchmarkable begin
                 nnmf($X[], $W[], $H[])
             end setup=begin
-                $X[] = rand(Float32, $nrow, $ncol)
-                $W[] = rand(Float32, $nrow, $nfeatures)
-                $H[] = rand(Float32, $nfeatures, $ncol)
+                if $accel == "cuda"
+                    $X[] = CUDA.rand((Float32, $nrow, $ncol))
+                    $W[] = CUDA.rand((Float32, $nrow, $nfeatures))
+                    $H[] = CUDA.rand((Float32, $nfeatures, $ncol))
+                elseif $accel == "amdgpu"
+                    $X[] = ROCArray(rand(Float32, $nrow, $ncol))
+                    $W[] = ROCArray(rand(Float32, $nrow, $nfeatures))
+                    $H[] = ROCArray(rand(Float32, $nfeatures, $ncol))
+                elseif $accel == "cpu"
+                    $X[] = rand(Float32, $nrow, $ncol)
+                    $W[] = rand(Float32, $nrow, $nfeatures)
+                    $H[] = rand(Float32, $nfeatures, $ncol)
+                end
             end teardown=begin
                 $X[] = nothing
                 $W[] = nothing
                 $H[] = nothing
+                @everywhere GC.gc()
             end
         else
             RENDERS[scale] = Dict{Int,Vector}()
             nw = length(workers())
             nsuite = BenchmarkGroup()
             while nw > 0
-                opts = if accel == :cuda
+                opts = if accel == "cuda"
                     Dagger.Sch.SchedulerOptions(;proctypes=[
                         DaggerGPU.CuArrayDeviceProc
                     ])
-                elseif accel == :amdgpu
+                elseif accel == "amdgpu"
                     Dagger.Sch.SchedulerOptions(;proctypes=[
                         DaggerGPU.ROCArrayProc
                     ])
-                else
+                elseif accel == "cpu"
                     Dagger.Sch.SchedulerOptions()
                 end
                 ctx = Context(collect((1:nw) .+ 1); kwargs...)
                 p = sum([length(Dagger.get_processors(OSProc(id))) for id in 2:(nw+1)])
                 nsuite["Workers: $nw"] = @benchmarkable begin
-                    compute($ctx, nnmf($X[], $W[], $H[]))
+                    compute($ctx, nnmf($X[], $W[], $H[]); options=$opts)
                 end setup=begin
                     _nw, _scale = $nw, $scale
                     @info "Starting $_nw worker NNMF (scale by $_scale)"
-                    # FIXME: Dagger.show_gantt($ctx; width=1800, window_length=20, delay=2, port=4040, live=live)
-                    if $accel == :cuda
+                    if render != ""
+                        Dagger.show_gantt($ctx; width=1800, window_length=20, delay=2, port=4040, live=live)
+                    end
+                    if $accel == "cuda"
                         # FIXME: Allocate with CUDA.rand if possible
-                        $X[] = Dagger.mapchunks(CUDA.cu, compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nrow, $ncol)))
-                        $W[] = Dagger.mapchunks(CUDA.cu, compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nrow, $nfeatures)))
-                        $H[] = Dagger.mapchunks(CUDA.cu, compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nfeatures, $ncol)))
-                    elseif $accel == :amdgpu
-                        $X[] = Dagger.mapchunks(ROCArray, compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nrow, $ncol)))
-                        $W[] = Dagger.mapchunks(ROCArray, compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nrow, $nfeatures)))
-                        $H[] = Dagger.mapchunks(ROCArray, compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nfeatures, $ncol)))
-                    else
-                        $X[] = compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nrow, $ncol))
-                        $W[] = compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nrow, $nfeatures))
-                        $H[] = compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nfeatures, $ncol))
+                        $X[] = Dagger.mapchunks(CUDA.cu, compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nrow, $ncol); options=$opts))
+                        $W[] = Dagger.mapchunks(CUDA.cu, compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nrow, $nfeatures); options=$opts))
+                        $H[] = Dagger.mapchunks(CUDA.cu, compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nfeatures, $ncol); options=$opts))
+                    elseif $accel == "amdgpu"
+                        $X[] = Dagger.mapchunks(ROCArray, compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nrow, $ncol); options=$opts))
+                        $W[] = Dagger.mapchunks(ROCArray, compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nrow, $nfeatures); options=$opts))
+                        $H[] = Dagger.mapchunks(ROCArray, compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nfeatures, $ncol); options=$opts))
+                    elseif $accel == "cpu"
+                        $X[] = compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nrow, $ncol); options=$opts)
+                        $W[] = compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nrow, $nfeatures); options=$opts)
+                        $H[] = compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nfeatures, $ncol); options=$opts)
                     end
                 end teardown=begin
-                    #= FIXME
-                    Dagger.continue_rendering[] = false
-                    video_paths = take!(Dagger.render_results)
-                    try
-                        video_data = Dict(key=>read(video_paths[key]) for key in keys(video_paths))
-                        push!(get!(()->[], RENDERS[$scale], $nw), video_data)
-                    catch
+                    if render != ""
+                        Dagger.continue_rendering[] = false
+                        video_paths = take!(Dagger.render_results)
+                        try
+                            video_data = Dict(key=>read(video_paths[key]) for key in keys(video_paths))
+                            push!(get!(()->[], RENDERS[$scale], $nw), video_data)
+                        catch
+                        end
                     end
-                    =#
                     $X[] = nothing
                     $W[] = nothing
                     $H[] = nothing
+                    @everywhere GC.gc()
                 end
                 break
                 nw ÷= 2
@@ -231,12 +259,14 @@ function main()
         end
     end
 
-    #println("saving results in $output_prefix.jld")
-    #JLD.save(output, "results", res, "peakflops", peakflops(), "renders", RENDERS)
-    println("saving results in $output_prefix.jls")
-    outdict = Dict("results"=>res, "peakflops"=>peakflops(), "renders"=>RENDERS)
-    open(output_prefix*".jls", "w") do io
-        serialize(io, outdict)
+    println("saving results in $output_prefix.$output_format")
+    if output_format == "jld"
+        JLD.save(output, "results", res, "peakflops", peakflops(), "renders", RENDERS)
+    elseif output_format == "jls"
+        outdict = Dict("results"=>res, "peakflops"=>peakflops(), "renders"=>RENDERS)
+        open(output_prefix*".jls", "w") do io
+            serialize(io, outdict)
+        end
     end
     println("Done.")
 
