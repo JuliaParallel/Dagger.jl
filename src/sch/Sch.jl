@@ -593,6 +593,20 @@ function start_state(deps::Dict, node_order, chan)
     state
 end
 
+function fetch_report(task)
+    try
+        fetch(task)
+    catch err
+        @static if VERSION >= v"1.1"
+            stk = Base.catch_stack(task)
+            err, frames = stk[1]
+            rethrow(CapturedException(err, frames))
+        else
+            rethrow(task.result)
+        end
+    end
+end
+
 @noinline function do_task(to_proc, thunk_id, f, data, send_result, persist, cache, meta, options, ids, ctx_vars, sch_handle, uid)
     ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
 
@@ -604,7 +618,7 @@ end
     fetched = if meta
         data
     else
-        fetch.(map(Iterators.zip(data,ids)) do (x, id)
+        fetch_report.(map(Iterators.zip(data,ids)) do (x, id)
             @async begin
                 @dbg timespan_start(ctx, :move, (thunk_id, id), (f, id))
                 x = move(to_proc, x)
