@@ -140,7 +140,8 @@ function savechunk(data, dir, f)
         return position(io)
     end
     fr = FileRef(f, sz)
-    Chunk{typeof(data), typeof(fr), P}(typeof(data), domain(data), fr, OSProc(), true)
+    proc = OSProc()
+    Chunk{typeof(data), typeof(fr), typeof(proc)}(typeof(data), domain(data), fr, proc, true)
 end
 
 
