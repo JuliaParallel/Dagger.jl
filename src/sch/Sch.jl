@@ -374,7 +374,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
                 T = typeof(p)
                 extra_util = get(procutil, T, 1)
                 real_util = state.worker_pressure[gp][T]
-                cap = capacity(OSProc(gp), T)
+                cap = state.worker_capacity[gp][T]
                 if ((extra_util isa MaxUtilization) && (real_util > 0)) ||
                    ((extra_util isa Real) && (extra_util + real_util > cap))
                     continue
