@@ -12,6 +12,23 @@ include("util.jl")
 include("fault-handler.jl")
 include("dynamic.jl")
 
+mutable struct ProcessorCacheEntry
+    gproc::OSProc
+    proc::Processor
+    next::ProcessorCacheEntry
+
+    ProcessorCacheEntry(gproc::OSProc, proc::Processor) = new(gproc, proc)
+end
+function Base.show(io::IO, entry::ProcessorCacheEntry)
+    entries = 1
+    next = entry.next
+    while next !== entry
+        entries += 1
+        next = next.next
+    end
+    print(io, "ProcessorCacheEntry(pid $(entry.gproc.pid), $(entry.proc), $entries entries)")
+end
+
 """
     ComputeState
 
@@ -32,7 +49,8 @@ Fields:
 - worker_pressure::Dict{Int,Dict{Type,Float64}} - Cache of worker pressure
 - worker_capacity::Dict{Int,Dict{Type,Float64}} - Maps from worker ID to capacity
 - worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}} - Communication channels between the scheduler and each worker
-- halt::Ref{Bool} - Flag indicating, when set, that the scheduler should halt immediately
+- procs_cache_list::Base.RefValue{Union{ProcessorCacheEntry,Nothing}} - Cached linked list of processors ready to be used
+- halt::Base.RefValue{Bool} - Flag indicating, when set, that the scheduler should halt immediately
 - lock::ReentrantLock() - Lock around operations which modify the state
 - futures::Dict{Thunk, Vector{ThunkFuture}} - Futures registered for waiting on the result of a thunk.
 - errored::Set{Thunk} - Thunks that threw an error
@@ -53,11 +71,52 @@ struct ComputeState
     worker_pressure::Dict{Int,Dict{Type,Float64}}
     worker_capacity::Dict{Int,Dict{Type,Float64}}
     worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}
-    halt::Ref{Bool}
+    procs_cache_list::Base.RefValue{Union{ProcessorCacheEntry,Nothing}}
+    halt::Base.RefValue{Bool}
     lock::ReentrantLock
     futures::Dict{Thunk, Vector{ThunkFuture}}
     errored::Set{Thunk}
     chan::Channel{Any}
+end
+
+function start_state(deps::Dict, node_order, chan)
+    state = ComputeState(rand(UInt64),
+                         deps,
+                         Set{Thunk}(),
+                         OneToMany(),
+                         OneToMany(),
+                         Vector{Thunk}(undef, 0),
+                         Dict{Thunk, Any}(),
+                         Set{Thunk}(),
+                         Dict{Int, Thunk}(),
+                         node_order,
+                         Dict{Int,OSProc}(),
+                         Dict{Int,Dict{Type,Float64}}(),
+                         Dict{Int,Dict{Type,Float64}}(),
+                         Dict{Int, Tuple{RemoteChannel,RemoteChannel}}(),
+                         Ref{Union{ProcessorCacheEntry,Nothing}}(nothing),
+                         Ref{Bool}(false),
+                         ReentrantLock(),
+                         Dict{Thunk, Vector{ThunkFuture}}(),
+                         Set{Thunk}(),
+                         chan)
+
+    nodes = sort(collect(keys(deps)), by=node_order)
+    # N.B. Using merge! here instead would modify deps
+    for (key,val) in deps
+        state.waiting_data[key] = copy(val)
+    end
+    for k in nodes
+        if istask(k)
+            waiting = Set{Thunk}(Iterators.filter(istask, inputs(k)))
+            if isempty(waiting)
+                push!(state.ready, k)
+            else
+                state.waiting[k] = waiting
+            end
+        end
+    end
+    state
 end
 
 """
@@ -82,6 +141,8 @@ the current scheduler invocation to persistent storage, for later retrieval by
 the current scheduler invocation, were it to execute. If this returns a
 result, all thunks will be skipped. If this throws an error, restoring will be
 skipped, the error will be displayed, and the scheduler will execute as usual.
+- `round_robin::Bool=false`: Whether to schedule in round-robin mode, which
+spreads load instead of the default behavior of filling processors to capacity.
 """
 Base.@kwdef struct SchedulerOptions
     single::Int = 0
@@ -89,6 +150,7 @@ Base.@kwdef struct SchedulerOptions
     allow_errors::Bool = false
     checkpoint = nothing
     restore = nothing
+    round_robin::Bool = false
 end
 
 """
@@ -341,55 +403,132 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
     lock(state.lock) do
         safepoint(state)
         @assert length(procs) > 0
-        proc_keys = map(x->x.pid, procs)
-        proc_set = Set{Any}()
-        for p in proc_keys
-            for proc in get_processors(OSProc(p))
-                push!(proc_set, p=>proc)
-            end
-        end
-        failed_scheduling = Thunk[]
-        while !isempty(state.ready)
-            task = pop!(state.ready)
-            opts = merge(ctx.options, task.options)
-            proclist = opts.proclist
-            proc_set_useable = if proclist === nothing
-                filter(x->default_enabled(x[2]), proc_set)
-            elseif proclist isa Function
-                filter(x->proclist(x[2]), proc_set)
-            else
-                filter(x->typeof(x[2]) in proclist, proc_set)
-            end
-            if opts.single != 0
-                proc_set_useable = filter(x->x[1]==opts.single, proc_set_useable)
-            end
-            @assert !isempty(proc_set_useable) "No processors available, try making proclist more liberal"
-            procutil = opts.procutil
-            gproc = nothing
-            proc = nothing
-            extra_util = nothing
-            cap = nothing
-            # FIXME: Sort by lowest utilization
-            for (gp,p) in proc_set_useable
-                T = typeof(p)
-                extra_util = get(procutil, T, 1)
-                real_util = state.worker_pressure[gp][T]
-                cap = state.worker_capacity[gp][T]
-                if ((extra_util isa MaxUtilization) && (real_util > 0)) ||
-                   ((extra_util isa Real) && (extra_util + real_util > cap))
-                    continue
-                else
-                    gproc = OSProc(gp)
-                    proc = p
-                    break
+
+        # Populate the cache if empty
+        if state.procs_cache_list[] === nothing
+            current = nothing
+            for p in map(x->x.pid, procs[2:end])
+                for proc in get_processors(OSProc(p))
+                    next = ProcessorCacheEntry(OSProc(p), proc)
+                    if current === nothing
+                        current = next
+                        current.next = current
+                        state.procs_cache_list[] = current
+                    else
+                        current.next = next
+                        current = next
+                        current.next = state.procs_cache_list[]
+                    end
                 end
             end
-            if proc !== nothing
-                extra_util = extra_util isa MaxUtilization ? cap : extra_util
-                fire_task!(ctx, task, (gproc, proc), state; util=extra_util)
-                continue
+            # FIXME: Sort by lowest absolute utilization
+        end
+
+        function can_use_proc(task, proc, opts)
+            # Check against proclist
+            if opts.proclist === nothing
+                if !default_enabled(proc)
+                    return false
+                end
+            elseif opts.proclist isa Function
+                if !opts.proclist(proc)
+                    return false
+                end
+            elseif opts.proclist isa Vector
+                if !(proc in opts.proclist)
+                    return false
+                end
             else
-                push!(failed_scheduling, task)
+                error("proclist must be a Function, Vector, or nothing")
+            end
+
+            # Check against single
+            if opts.single != 0
+                if gp.pid != opts.single
+                    return false
+                end
+            end
+
+            return true
+        end
+        function has_capacity(p, gp, procutil)
+            T = typeof(p)
+            extra_util = get(procutil, T, 1)
+            real_util = state.worker_pressure[gp][T]
+            cap = state.worker_capacity[gp][T]
+            if ((extra_util isa MaxUtilization) && (real_util > 0)) ||
+               ((extra_util isa Real) && (extra_util + real_util > cap))
+                return false, cap, extra_util
+            end
+            return true, cap, extra_util
+        end
+
+        # Schedule tasks
+        failed_scheduling = Thunk[]
+        while !isempty(state.ready)
+            # Select a new task and get its options
+            task = pop!(state.ready)
+            opts = merge(ctx.options, task.options)
+
+            # Try to select a processor
+            selected_entry = nothing
+            entry = state.procs_cache_list[]
+            cap, extra_util = nothing, nothing
+            procs_found = false
+            # N.B. if we only have one processor, we need to select it now
+            if can_use_proc(task, entry.proc, opts)
+                has_cap, cap, extra_util = has_capacity(entry.proc, entry.gproc.pid, opts.procutil)
+                if has_cap
+                    selected_entry = entry
+                else
+                    procs_found = true
+                    entry = entry.next
+                end
+            else
+                entry = entry.next
+            end
+            while selected_entry === nothing
+                if entry === state.procs_cache_list[]
+                    if procs_found
+                        push!(failed_scheduling, task)
+                        break
+                    else
+                        error("No processors available, try making proclist more liberal")
+                    end
+                end
+
+                if can_use_proc(task, entry.proc, opts)
+                    has_cap, cap, extra_util = has_capacity(entry.proc, entry.gproc.pid, opts.procutil)
+                    if has_cap
+                        # Select this processor
+                        selected_entry = entry
+                    else
+                        # We could have selected it otherwise
+                        procs_found = true
+                        entry = entry.next
+                    end
+                else
+                    # Try next processor
+                    entry = entry.next
+                end
+            end
+            selected_entry === nothing && continue
+
+            # Schedule task onto proc
+            gproc, proc = entry.gproc, entry.proc
+            extra_util = extra_util isa MaxUtilization ? cap : extra_util
+            fire_task!(ctx, task, (gproc, proc), state; util=extra_util)
+
+            # Progress through list
+            if ctx.options.round_robin
+                # Proceed to next entry to spread work
+                state.procs_cache_list[] = state.procs_cache_list[].next
+                continue
+            end
+            util = state.worker_pressure[gproc.pid][typeof(proc)]
+            if util >= cap
+                # Proceed to next entry due to over-pressure
+                state.procs_cache_list[] = state.procs_cache_list[].next
             end
         end
         append!(state.ready, failed_scheduling)
@@ -554,45 +693,6 @@ function finish_task!(state, node, thunk_failed; free=true)
             end
         end
     end
-end
-
-function start_state(deps::Dict, node_order, chan)
-    state = ComputeState(rand(UInt64),
-                         deps,
-                         Set{Thunk}(),
-                         OneToMany(),
-                         OneToMany(),
-                         Vector{Thunk}(undef, 0),
-                         Dict{Thunk, Any}(),
-                         Set{Thunk}(),
-                         Dict{Int, Thunk}(),
-                         node_order,
-                         Dict{Int,OSProc}(),
-                         Dict{Int,Dict{Type,Float64}}(),
-                         Dict{Int,Dict{Type,Float64}}(),
-                         Dict{Int, Tuple{RemoteChannel,RemoteChannel}}(),
-                         Ref{Bool}(false),
-                         ReentrantLock(),
-                         Dict{Thunk, Vector{ThunkFuture}}(),
-                         Set{Thunk}(),
-                         chan)
-
-    nodes = sort(collect(keys(deps)), by=node_order)
-    # N.B. Using merge! here instead would modify deps
-    for (key,val) in deps
-        state.waiting_data[key] = copy(val)
-    end
-    for k in nodes
-        if istask(k)
-            waiting = Set{Thunk}(Iterators.filter(istask, inputs(k)))
-            if isempty(waiting)
-                push!(state.ready, k)
-            else
-                state.waiting[k] = waiting
-            end
-        end
-    end
-    state
 end
 
 function fetch_report(task)
