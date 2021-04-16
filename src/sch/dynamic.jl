@@ -19,6 +19,11 @@ sch_handle() = task_local_storage(:_dagger_sch_handle)::SchedulerHandle
 "Thrown when the scheduler halts before finishing processing the DAG."
 struct SchedulerHaltedException <: Exception end
 
+"Thrown when a dynamic thunk encounters an exception in Dagger's utilities."
+struct DynamicThunkException <: Exception
+    reason::String
+end
+
 function safepoint(state)
     if state.halt[]
         # Force dynamic thunks and listeners to terminate
@@ -102,11 +107,11 @@ function register_future!(h::SchedulerHandle, id::ThunkID, future::ThunkFuture)
     exec!(_register_future, h, future, id.id)
 end
 function _register_future(ctx, state, task, tid, (future, id))
-    @assert tid != id "Cannot fetch own result"
+    tid != id || throw(DynamicThunkException("Cannot fetch own result"))
     thunk = state.thunk_dict[id]
     ownthunk = state.thunk_dict[tid]
     dominates(target, t) = (t == target) || any(_t->dominates(target, _t), filter(istask, t.inputs))
-    @assert !dominates(ownthunk, thunk) "Cannot fetch result of dominated thunk"
+    !dominates(ownthunk, thunk) || throw(DynamicThunkException("Cannot fetch result of dominated thunk"))
     if thunk in state.finished || thunk in state.errored
         error = thunk in state.errored
         if haskey(state.cache, thunk)

@@ -107,3 +107,17 @@ function print_sch_status(io::IO, state, thunk; offset=0, limit=5)
         end
     end
 end
+
+function fetch_report(task)
+    try
+        fetch(task)
+    catch err
+        @static if VERSION >= v"1.1"
+            stk = Base.catch_stack(task)
+            err, frames = stk[1]
+            rethrow(CapturedException(err, frames))
+        else
+            rethrow(task.result)
+        end
+    end
+end

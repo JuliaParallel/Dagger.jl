@@ -353,12 +353,7 @@ end
         @test res == 2
         @testset "self as input" begin
             a = delayed(dynamic_add_thunk_self_dominated)(1)
-            try
-                collect(Context(), a)
-                @test false
-            catch err
-                @test Dagger.Sch.unwrap_nested_exception(err) isa AssertionError
-            end
+            @test_throws_unwrap Dagger.Sch.DynamicThunkException reason="Cannot fetch result of dominated thunk" collect(Context(), a)
         end
     end
     @testset "Fetch/Wait" begin
@@ -368,21 +363,11 @@ end
         end
         @testset "self" begin
             a = delayed(dynamic_fetch_self)(1)
-            try
-                collect(Context(), a)
-                @test false
-            catch err
-                @test Dagger.Sch.unwrap_nested_exception(err) isa AssertionError
-            end
+            @test_throws_unwrap Dagger.Sch.DynamicThunkException reason="Cannot fetch own result" collect(Context(), a)
         end
         @testset "dominated" begin
             a = delayed(identity)(delayed(dynamic_fetch_dominated)(1))
-            try
-                collect(Context(), a)
-                @test false
-            catch err
-                @test Dagger.Sch.unwrap_nested_exception(err) isa AssertionError
-            end
+            @test_throws_unwrap Dagger.Sch.DynamicThunkException reason="Cannot fetch result of dominated thunk" collect(Context(), a)
         end
     end
 end
