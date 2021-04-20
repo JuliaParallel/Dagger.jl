@@ -245,8 +245,11 @@ function init_proc(state, p)
         state.worker_capacity[p.pid][OSProc] = 0
     end
     cap = remotecall(capacity, p.pid)
-    @async lock(state.lock) do
-        state.worker_capacity[p.pid] = fetch(cap)
+    @async begin
+        cap = fetch(cap)
+        lock(state.lock) do
+            state.worker_capacity[p.pid] = cap
+        end
     end
     # TODO: remotecall_fetch(_init_proc, p.pid, state.uid)
 
