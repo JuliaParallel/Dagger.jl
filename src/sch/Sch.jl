@@ -58,7 +58,7 @@ Fields:
 - worker_loadavg::Dict{Int,NTuple{3,Float64}} - Worker load average
 - worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}} - Communication channels between the scheduler and each worker
 - procs_cache_list::Base.RefValue{Union{ProcessorCacheEntry,Nothing}} - Cached linked list of processors ready to be used
-- function_cost_cache::Dict{Function,Float64} - Cache of estimated CPU time required to compute the function
+- function_cost_cache::Dict{Type{<:Tuple},Float64} - Cache of estimated CPU time required to compute the given signature
 - halt::Base.RefValue{Bool} - Flag indicating, when set, that the scheduler should halt immediately
 - lock::ReentrantLock() - Lock around operations which modify the state
 - futures::Dict{Thunk, Vector{ThunkFuture}} - Futures registered for waiting on the result of a thunk.
@@ -81,7 +81,7 @@ struct ComputeState
     worker_loadavg::Dict{Int,NTuple{3,Float64}}
     worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}
     procs_cache_list::Base.RefValue{Union{ProcessorCacheEntry,Nothing}}
-    function_cost_cache::Dict{Function,Float64}
+    function_cost_cache::Dict{Type{<:Tuple},Float64}
     halt::Base.RefValue{Bool}
     lock::ReentrantLock
     futures::Dict{Thunk, Vector{ThunkFuture}}
@@ -105,7 +105,7 @@ function start_state(deps::Dict, node_order, chan)
                          Dict{Int,NTuple{3,Float64}}(),
                          Dict{Int, Tuple{RemoteChannel,RemoteChannel}}(),
                          Ref{Union{ProcessorCacheEntry,Nothing}}(nothing),
-                         Dict{Function,Float64}(),
+                         Dict{Type{<:Tuple},Float64}(),
                          Ref{Bool}(false),
                          ReentrantLock(),
                          Dict{Thunk, Vector{ThunkFuture}}(),
@@ -373,7 +373,8 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         if metadata !== nothing
             state.worker_pressure[pid][typeof(proc)] = metadata.pressure
             state.worker_loadavg[pid] = metadata.loadavg
-            state.function_cost_cache[node.f] = (metadata.threadtime + get(state.function_cost_cache, node.f, 0.0)) / 2
+            sig = signature(node, state)
+            state.function_cost_cache[sig] = (metadata.threadtime + get(state.function_cost_cache, sig, 0.0)) / 2
         end
         state.cache[node] = res
         if node.options !== nothing && node.options.checkpoint !== nothing
@@ -477,14 +478,14 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
 
             return true
         end
-        function has_capacity(p, gp, procutil, f)
+        function has_capacity(p, gp, procutil, sig)
             T = typeof(p)
             extra_util = get(procutil, T, 1.0)
             real_util = state.worker_pressure[gp][T]
-            if (T === Dagger.ThreadProc) && haskey(state.function_cost_cache, f)
+            if (T === Dagger.ThreadProc) && haskey(state.function_cost_cache, sig)
                 # Assume that the extra pressure is between estimated and measured
                 # TODO: Generalize this to arbitrary processor types
-                extra_util = min(extra_util, state.function_cost_cache[f])
+                extra_util = min(extra_util, state.function_cost_cache[sig])
             end
             # TODO: update real_util based on loadavg
             cap = state.worker_capacity[gp][T]
@@ -502,6 +503,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
             # Select a new task and get its options
             task = pop!(state.ready)
             opts = merge(ctx.options, task.options)
+            sig = signature(task, state)
 
             # Try to select a processor
             selected_entry = nothing
@@ -509,8 +511,8 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
             cap, extra_util = nothing, nothing
             procs_found = false
             # N.B. if we only have one processor, we need to select it now
-            if can_use_proc(task, entry.proc, opts)
-                has_cap, cap, extra_util = has_capacity(entry.proc, entry.gproc.pid, opts.procutil, task.f)
+            if can_use_proc(task, entry.gproc, entry.proc, opts)
+                has_cap, cap, extra_util = has_capacity(entry.proc, entry.gproc.pid, opts.procutil, sig)
                 if has_cap
                     selected_entry = entry
                 else
@@ -530,8 +532,8 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
                     end
                 end
 
-                if can_use_proc(task, entry.proc, opts)
-                    has_cap, cap, extra_util = has_capacity(entry.proc, entry.gproc.pid, opts.procutil, task.f)
+                if can_use_proc(task, entry.gproc, entry.proc, opts)
+                    has_cap, cap, extra_util = has_capacity(entry.proc, entry.gproc.pid, opts.procutil, sig)
                     if has_cap
                         # Select this processor
                         selected_entry = entry

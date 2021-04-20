@@ -121,3 +121,8 @@ function fetch_report(task)
         end
     end
 end
+
+function signature(task::Thunk, state)
+    inputs = map(x->istask(x) ? state.cache[x] : x, task.inputs)
+    Tuple{typeof(task.f), map(x->x isa Chunk ? x.chunktype : typeof(x), inputs)...}
+end
