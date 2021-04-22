@@ -429,6 +429,8 @@ function Base.show(io::IO, se::SchedulingException)
     print(io, "SchedulingException ($(se.reason))")
 end
 
+const CHUNK_CACHE = Dict{Chunk,Any}()
+
 function schedule!(ctx, state, procs=procs_to_use(ctx))
     lock(state.lock) do
         safepoint(state)
@@ -774,7 +776,17 @@ function do_task(to_proc, extra_util, thunk_id, f, data, send_result, persist, c
         fetch_report.(map(Iterators.zip(data,ids)) do (x, id)
             @async begin
                 @dbg timespan_start(ctx, :move, (thunk_id, id), (f, id))
-                x = move(to_proc, x)
+                x = if x isa Chunk
+                    if haskey(CHUNK_CACHE, x)
+                        CHUNK_CACHE[x]
+                    else
+                        _x = move(to_proc, x)
+                        CHUNK_CACHE[x] = _x
+                        _x
+                    end
+                else
+                    move(to_proc, x)
+                end
                 @dbg timespan_end(ctx, :move, (thunk_id, id), (f, id))
                 return x
             end
