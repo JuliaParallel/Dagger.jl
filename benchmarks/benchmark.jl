@@ -150,9 +150,9 @@ function nmf_suite(; dagger, accel, kwargs...)
                 nnmf($X[], $W[], $H[])
             end setup=begin
                 if $accel == "cuda"
-                    $X[] = CUDA.rand((Float32, $nrow, $ncol))
-                    $W[] = CUDA.rand((Float32, $nrow, $nfeatures))
-                    $H[] = CUDA.rand((Float32, $nfeatures, $ncol))
+                    $X[] = CUDA.rand(Float32, $nrow, $ncol)
+                    $W[] = CUDA.rand(Float32, $nrow, $nfeatures)
+                    $H[] = CUDA.rand(Float32, $nfeatures, $ncol)
                 elseif $accel == "amdgpu"
                     $X[] = ROCArray(rand(Float32, $nrow, $ncol))
                     $W[] = ROCArray(rand(Float32, $nrow, $nfeatures))

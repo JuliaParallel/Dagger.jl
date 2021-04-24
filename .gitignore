@@ -5,3 +5,5 @@
 .*sw?
 Manifest.toml
 *.jld
+*.jls
+*.dot
