@@ -149,6 +149,8 @@ function nmf_suite(; dagger, accel, kwargs...)
             suite["NNMF scaled by: $scale"] = @benchmarkable begin
                 nnmf($X[], $W[], $H[])
             end setup=begin
+                _scale = $scale
+                @info "Starting non-Dagger NNMF (scale by $_scale)"
                 if $accel == "cuda"
                     $X[] = CUDA.rand(Float32, $nrow, $ncol)
                     $W[] = CUDA.rand(Float32, $nrow, $nfeatures)
@@ -190,7 +192,7 @@ function nmf_suite(; dagger, accel, kwargs...)
                     compute($ctx, nnmf($X[], $W[], $H[]); options=$opts)
                 end setup=begin
                     _nw, _scale = $nw, $scale
-                    @info "Starting $_nw worker NNMF (scale by $_scale)"
+                    @info "Starting $_nw worker Dagger NNMF (scale by $_scale)"
                     if render != ""
                         Dagger.show_gantt($ctx; width=1800, window_length=20, delay=2, port=4040, live=live)
                     end
@@ -257,6 +259,9 @@ function main()
             @error "Error running $name benchmarks" exception=(err,catch_backtrace())
             nothing
         end
+    end
+    for bench in benches
+        println("benchmark results for $(bench.name): $(res[bench.name])")
     end
 
     println("saving results in $output_prefix.$output_format")
