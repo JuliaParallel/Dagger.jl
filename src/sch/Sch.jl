@@ -260,6 +260,12 @@ function init_proc(state, p)
         state.worker_chans[p.pid] = (inp_chan, out_chan)
     end
 end
+function _cleanup_proc(uid)
+    empty!(CHUNK_CACHE)
+end
+function cleanup_proc(state, p)
+    remote_do(_cleanup_proc, p.pid, state.uid)
+end
 
 "Process-local count of actively-executing Dagger tasks per processor type."
 const ACTIVE_TASKS = Dict{UInt64,Dict{Type,Ref{Float64}}}()
@@ -396,6 +402,9 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         @dbg timespan_end(ctx, :finish, thunk_id, master)
 
         safepoint(state)
+    end
+    @sync for p in procs_to_use(ctx)
+        @async cleanup_proc(state, p)
     end
     value = state.cache[d] # TODO: move(OSProc(), state.cache[d])
     if d in state.errored
