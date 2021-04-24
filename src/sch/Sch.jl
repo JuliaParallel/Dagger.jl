@@ -501,7 +501,7 @@ function fire_task!(ctx, thunk, (gproc, proc), state; util=1.0)
     state.worker_pressure[gproc.pid][typeof(proc)] += util
     async_apply((gproc, proc), thunk.id, thunk.f, data, state.chan,
                 thunk.get_result, thunk.persist, thunk.cache, thunk.meta,
-                options, ids, ctx.log_sink, sch_handle, state.uid)
+                options, ids, ctx, sch_handle, state.uid)
 end
 
 function finish_task!(state, node, thunk_failed; free=true)
@@ -593,8 +593,22 @@ function start_state(deps::Dict, node_order, chan)
     state
 end
 
-@noinline function do_task(to_proc, thunk_id, f, data, send_result, persist, cache, meta, options, ids, log_sink, sch_handle, uid)
-    ctx = Context(Processor[]; log_sink=log_sink)
+function fetch_report(task)
+    try
+        fetch(task)
+    catch err
+        @static if VERSION >= v"1.1"
+            stk = Base.catch_stack(task)
+            err, frames = stk[1]
+            rethrow(CapturedException(err, frames))
+        else
+            rethrow(task.result)
+        end
+    end
+end
+
+@noinline function do_task(to_proc, thunk_id, f, data, send_result, persist, cache, meta, options, ids, ctx_vars, sch_handle, uid)
+    ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
 
     from_proc = OSProc()
     # TODO: Time choose_processor
@@ -604,7 +618,7 @@ end
     fetched = if meta
         data
     else
-        fetch.(map(Iterators.zip(data,ids)) do (x, id)
+        fetch_report.(map(Iterators.zip(data,ids)) do (x, id)
             @async begin
                 @dbg timespan_start(ctx, :move, (thunk_id, id), (f, id))
                 x = move(to_proc, x)
@@ -643,7 +657,7 @@ end
         end
     end
 
-    @dbg timespan_start(ctx, :compute, thunk_id, f)
+    @dbg timespan_start(ctx, :compute, thunk_id, (f, to_proc))
     res = nothing
     result_meta = try
         # Set TLS variables
@@ -659,7 +673,7 @@ end
         bt = catch_backtrace()
         RemoteException(myid(), CapturedException(ex, bt))
     end
-    @dbg timespan_end(ctx, :compute, thunk_id, (f, to_proc, typeof(res), sizeof(res)))
+    @dbg timespan_end(ctx, :compute, thunk_id, (f, to_proc))
     lock(ACTIVE_TASKS_LOCK) do
         real_util[] -= Float64(extra_util)
     end
@@ -669,12 +683,12 @@ end
     (result_meta, metadata)
 end
 
-@noinline function async_apply((gp,p), thunk_id, f, data, chan, send_res, persist, cache, meta, options, ids, log_sink, sch_handle, uid)
+@noinline function async_apply((gp,p), thunk_id, f, data, chan, send_res, persist, cache, meta, options, ids, ctx, sch_handle, uid)
     @async begin
         try
             put!(chan, (gp.pid, p, thunk_id, remotecall_fetch(do_task, gp.pid, p, thunk_id, f, data,
                                                           send_res, persist, cache, meta, options, ids,
-                                                          log_sink, sch_handle, uid)))
+                                                          (log_sink=ctx.log_sink, profile=ctx.profile), sch_handle, uid)))
         catch ex
             bt = catch_backtrace()
             put!(chan, (gp.pid, p, thunk_id, (CapturedException(ex, bt), nothing)))

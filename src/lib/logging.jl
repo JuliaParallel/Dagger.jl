@@ -95,14 +95,16 @@ end
 represents a process local events array.
 
 A context with log_sink set to LocalEventLog() will
-cause events to be recorded into the 
+cause events to be recorded into the local event log.
 """
 struct LocalEventLog end
 
 const _local_event_log = Any[]
-clear_local_event_log() = empty!(_local_event_log)
+const _local_event_log_lock = ReentrantLock()
 function write_event(::LocalEventLog, event::Event)
-    write_event(Dagger._local_event_log, event)
+    lock(_local_event_log_lock) do
+        write_event(Dagger._local_event_log, event)
+    end
 end
 
 function raise_event(ctx, phase, category, id,tl, t, gc_num, prof, async)
@@ -118,7 +120,7 @@ empty_prof() = ProfilerResult(UInt[], Profile.getdict(UInt[]))
 
 function timespan_start(ctx, category, id, tl, async=isasync(ctx.log_sink))
     isa(ctx.log_sink, NoOpLog) && return # don't go till raise
-    if ctx.profile
+    if ctx.profile && category == :compute
         Profile.start_timer()
     end
     raise_event(ctx, :start, category, id, tl, time_ns(), gc_num(), empty_prof(), async)
@@ -128,7 +130,7 @@ end
 function timespan_end(ctx, category, id, tl, async=isasync(ctx.log_sink))
     isa(ctx.log_sink, NoOpLog) && return
     prof = UInt[]
-    if ctx.profile
+    if ctx.profile && category == :compute
         Profile.stop_timer()
         prof = Profile.fetch()
         Profile.clear()
@@ -233,17 +235,24 @@ end
 """
 Get the logs from each process, clear it too
 """
-function get_logs!(::LocalEventLog)
+function get_logs!(::LocalEventLog, raw=false)
     logs = Dict()
-    @sync for p in procs()
+    @sync for p in workers()
         @async logs[p] = remotecall_fetch(p) do
-            log = copy(Dagger._local_event_log)
-            clear_local_event_log()
+            log = lock(_local_event_log_lock) do
+                log = copy(Dagger._local_event_log)
+                empty!(_local_event_log)
+                log
+            end
             log
         end
     end
-    spans = build_timespans(vcat(values(logs)...)).completed
-    convert(Vector{Timespan}, spans)
+    if raw
+        return logs
+    else
+        spans = build_timespans(vcat(values(logs)...)).completed
+        return convert(Vector{Timespan}, spans)
+    end
 end
 
 function add_gc_diff(x,y)
