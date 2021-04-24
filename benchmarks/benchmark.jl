@@ -5,7 +5,7 @@ if haskey(ENV, "BENCHMARK_PROCS")
         addprocs(np; exeflags="-t $nt")
     end
 else
-    const np = length(workers())
+    const np = 2
     const nt = 1
 end
 if haskey(ENV, "BENCHMARK_REMOTES")
@@ -14,12 +14,6 @@ if haskey(ENV, "BENCHMARK_REMOTES")
         for i in 1:np
             addprocs(remotes; exeflags="-t $nt")
         end
-    end
-end
-if haskey(ENV, "BENCHMARK_PROJECT")
-    using Pkg
-    for i in workers()
-        remotecall_fetch(Pkg.activate, i, ENV["BENCHMARK_PROJECT"])
     end
 end
 @everywhere using Dagger

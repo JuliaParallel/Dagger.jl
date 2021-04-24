@@ -17,6 +17,7 @@ makedocs(;
         "Checkpointing" => "checkpointing.md",
         "Dynamic Scheduler Control" => "dynamic.md",
         "Logging and Graphing" => "logging.md",
+        "Benchmarking" => "benchmarking.md",
         "Scheduler Internals" => "scheduler-internals.md",
     ]
 )
