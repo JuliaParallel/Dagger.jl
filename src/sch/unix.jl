@@ -13,7 +13,7 @@ struct TimeSpec
     tv_nsec :: UInt64
 end
 
-maketime(ts) = ts.tv_sec * 1e9 + ts.tv_nsec
+maketime(ts) = ts.tv_sec * UInt(1e9) + ts.tv_nsec
 
 # From bits/times.h on a Linux system
 # Check if those are the same on BSD
