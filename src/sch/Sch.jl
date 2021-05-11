@@ -438,7 +438,7 @@ function Base.show(io::IO, se::SchedulingException)
     print(io, "SchedulingException ($(se.reason))")
 end
 
-const CHUNK_CACHE = Dict{Chunk,Any}()
+const CHUNK_CACHE = Dict{Chunk,Dict{Processor,Any}}()
 
 function schedule!(ctx, state, procs=procs_to_use(ctx))
     lock(state.lock) do
@@ -788,10 +788,16 @@ function do_task(to_proc, extra_util, thunk_id, f, data, send_result, persist, c
                 @dbg timespan_start(ctx, :move, (thunk_id, id), (f, id))
                 x = if x isa Chunk
                     if haskey(CHUNK_CACHE, x)
-                        CHUNK_CACHE[x]
+                        get!(CHUNK_CACHE[x], to_proc) do
+                            # TODO: Choose "closest" processor of same type first
+                            some_proc = first(keys(CHUNK_CACHE[x]))
+                            some_x = CHUNK_CACHE[x][some_proc]
+                            move(some_proc, to_proc, some_x)
+                        end
                     else
                         _x = move(to_proc, x)
-                        CHUNK_CACHE[x] = _x
+                        CHUNK_CACHE[x] = Dict{Processor,Any}()
+                        CHUNK_CACHE[x][to_proc] = _x
                         _x
                     end
                 else
