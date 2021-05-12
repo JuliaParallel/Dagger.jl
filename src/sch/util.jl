@@ -14,9 +14,11 @@ function reschedule_inputs!(state, thunk)
     w = get!(()->Set{Thunk}(), state.waiting, thunk)
     scheduled = false
     for input in thunk.inputs
+        if istask(input) || (input isa Chunk)
+            push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
+            push!(get!(()->Set{Thunk}(), state.dependents, input), thunk)
+        end
         istask(input) || continue
-        push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
-        push!(get!(()->Set{Thunk}(), state.dependents, input), thunk)
         if input in state.errored
             set_failed!(state, input, thunk)
             break # TODO: Allow collecting all error'd inputs

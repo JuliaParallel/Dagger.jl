@@ -44,10 +44,10 @@ The internal state-holding struct of the scheduler.
 
 Fields:
 - uid::UInt64 - Unique identifier for this scheduler instance
-- dependents::OneToMany - The result of calling `dependents` on the DAG
+- dependents::Dict{Union{Thunk,Chunk},Set{Thunk}} - The result of calling `dependents` on the DAG
 - finished::Set{Thunk} - The set of completed `Thunk`s
 - waiting::OneToMany - Map from downstream `Thunk` to upstream `Thunk`s that still need to execute
-- waiting_data::OneToMany - Map from upstream `Thunk` to all downstream `Thunk`s, accumulating over time
+- waiting_data::Dict{Union{Thunk,Chunk},Set{Thunk}} - Map from input `Chunk`/upstream `Thunk` to all unfinished downstream `Thunk`s, to retain caches
 - ready::Vector{Thunk} - The list of `Thunk`s that are ready to execute
 - cache::Dict{Thunk, Any} - Maps from a finished `Thunk` to it's cached result, often a DRef
 - running::Set{Thunk} - The set of currently-running `Thunk`s
@@ -67,10 +67,10 @@ Fields:
 """
 struct ComputeState
     uid::UInt64
-    dependents::OneToMany
+    dependents::Dict{Union{Thunk,Chunk},Set{Thunk}}
     finished::Set{Thunk}
     waiting::OneToMany
-    waiting_data::OneToMany
+    waiting_data::Dict{Union{Thunk,Chunk},Set{Thunk}}
     ready::Vector{Thunk}
     cache::Dict{Thunk, Any}
     running::Set{Thunk}
@@ -94,7 +94,7 @@ function start_state(deps::Dict, node_order, chan)
                          deps,
                          Set{Thunk}(),
                          OneToMany(),
-                         OneToMany(),
+                         Dict{Union{Thunk,Chunk},Set{Thunk}}(),
                          Vector{Thunk}(undef, 0),
                          Dict{Thunk, Any}(),
                          Set{Thunk}(),
@@ -300,7 +300,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     state = start_state(deps, node_order, chan)
 
     # setup thunk_dict mappings
-    for node in keys(deps)
+    for node in filter(istask, keys(deps))
         state.thunk_dict[node.id] = node
         for dep in deps[node]
             state.thunk_dict[dep.id] = dep
@@ -397,7 +397,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         # FIXME: Move log start and lock to before error check
         @dbg timespan_start(ctx, :finish, thunk_id, master)
         lock(state.lock) do
-            finish_task!(state, node, thunk_failed)
+            finish_task!(ctx, state, node, thunk_failed)
         end
         @dbg timespan_end(ctx, :finish, thunk_id, master)
 
@@ -653,7 +653,7 @@ function pop_with_affinity!(ctx, tasks, proc)
     return nothing
 end
 
-function finish_task!(state, node, thunk_failed; free=true)
+function finish_task!(ctx, state, node, thunk_failed; free=true)
     pop!(state.running, node)
     if !thunk_failed
         push!(state.finished, node)
@@ -685,22 +685,41 @@ function finish_task!(state, node, thunk_failed; free=true)
             delete!(state.futures, node)
         end
     end
-    # Internal clean-up
-    for inp in filter(istask, inputs(node))
+
+    # Chunk clean-up
+    to_evict = Set{Chunk}()
+    for inp in filter(t->istask(t) || (t isa Chunk), inputs(node))
         if inp in keys(state.waiting_data)
             s = state.waiting_data[inp]
             if node in s
                 pop!(s, node)
             end
             if free && isempty(s)
-                if haskey(state.cache, inp)
+                if istask(inp) && haskey(state.cache, inp)
                     _node = state.cache[inp]
+                    if _node isa Chunk
+                        push!(to_evict, _node)
+                    end
                     free!(_node, force=false, cache=(istask(inp) && inp.cache))
                     pop!(state.cache, inp)
+                elseif inp isa Chunk
+                    push!(to_evict, inp)
                 end
             end
         end
     end
+    if !isempty(to_evict)
+        @sync for w in map(p->p.pid, procs_to_use(ctx))
+            @async remote_do(evict_chunks!, w, to_evict)
+        end
+    end
+end
+
+function evict_chunks!(chunks::Set{Chunk})
+    for chunk in chunks
+        haskey(CHUNK_CACHE, chunk) && delete!(CHUNK_CACHE, chunk)
+    end
+    nothing
 end
 
 fire_task!(ctx, thunk::Thunk, p, state; util=10^9) =
@@ -719,7 +738,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
                 # cache hit
                 state.cache[thunk] = data
                 thunk_failed = thunk in state.errored
-                finish_task!(state, thunk, thunk_failed; free=false)
+                finish_task!(ctx, state, thunk, thunk_failed; free=false)
                 continue
             else
                 # cache miss
@@ -730,7 +749,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
             try
                 result = thunk.options.restore(thunk)
                 state.cache[thunk] = result
-                finish_task!(state, thunk, false; free=false)
+                finish_task!(ctx, state, thunk, false; free=false)
                 continue
             catch err
                 @error "Thunk restore failed" exception=(err,catch_backtrace())
