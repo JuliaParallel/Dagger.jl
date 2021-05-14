@@ -371,3 +371,22 @@ end
         end
     end
 end
+
+c1 = Dagger.tochunk(1)
+c2 = Dagger.tochunk(2)
+@everywhere begin
+function testpresent(x,y)
+    @assert haskey(Dagger.Sch.CHUNK_CACHE, $c1)
+    @assert haskey(Dagger.Sch.CHUNK_CACHE, $c2)
+    x+y
+end
+function testevicted(x)
+    sleep(1)
+    @assert !haskey(Dagger.Sch.CHUNK_CACHE, $c1)
+    @assert !haskey(Dagger.Sch.CHUNK_CACHE, $c2)
+    x
+end
+end
+@testset "Caching" begin
+    compute(delayed(testevicted)(delayed(testpresent)(c1,c2)))
+end
