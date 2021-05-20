@@ -82,14 +82,14 @@ compute(top_node)
 
 ## Eager Execution
 
-Similar to `@par`, Dagger has an `@spawn` macro which works similarly to
-`@async` and `Threads.@spawn`: when called, it wraps the function call
-specified by the user in an `EagerThunk` object, and immediately places it onto
-a running scheduler, to be executed once its dependencies are fulfilled. This
-contrasts with `@par` in that `@par` does not begin executing its thunks until
-`collect` or `compute` are called on a given thunk or one of its downstream
-dependencies. Additionally, one fetches the result of an `@spawn` call with
-`fetch`. As a concrete example:
+Similar to `@par`, Dagger has an `@spawn` macro (and matching `Dagger.spawn`)
+which works similarly to `@async` and `Threads.@spawn`: when called, it wraps
+the function call specified by the user in an `EagerThunk` object, and
+immediately places it onto a running scheduler, to be executed once its
+dependencies are fulfilled. This contrasts with `@par` in that `@par` does not
+begin executing its thunks until `collect` or `compute` are called on a given
+thunk or one of its downstream dependencies. Additionally, one fetches the
+result of any `@spawn` call with `fetch`. As a concrete example:
 
 ```julia
 x = rand(400,400)
@@ -108,6 +108,17 @@ wait(x)
 @assert isready(x)
 @info "Done!"
 ```
+
+One can also safely call `@spawn` from another worker (not id 1), and it will
+be sent to worker 1 to schedule:
+
+```
+x = fetch(Distributed.@spawnat 2 Dagger.@spawn 1+2) # actually scheduled on worker 1
+x::EagerThunk
+@assert fetch(x) == 3
+```
+
+This is useful for nested execution, where an `@spawn`'d thunk calls `@spawn`.
 
 If a thunk errors while running under the eager scheduler, it will be marked as
 having failed, all dependent (downstream) thunks will be marked as failed, and
