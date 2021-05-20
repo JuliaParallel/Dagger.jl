@@ -1,4 +1,4 @@
-import Dagger: @par, @spawn
+import Dagger: @par, @spawn, spawn
 
 @everywhere checkwid() = myid()==1
 
@@ -32,7 +32,8 @@ end
         a = @spawn x + x
         @test a isa Dagger.EagerThunk
         b = @spawn sum([x,1,2])
-        c = @spawn a * b
+        c = spawn(*, a, b)
+        @test c isa Dagger.EagerThunk
         @test fetch(a) == 4
         @test fetch(b) == 5
         @test fetch(c) == 20
@@ -130,5 +131,12 @@ end
             @test fetch(c) == 4
             @test_throws_unwrap Dagger.ThunkFailedException fetch(d)
         end
+    end
+    @testset "remote spawn" begin
+        a = fetch(Distributed.@spawnat 2 Dagger.spawn(+, 1, 2))
+        @test Dagger.Sch.EAGER_INIT[]
+        @test fetch(Distributed.@spawnat 2 !(Dagger.Sch.EAGER_INIT[]))
+        @test a isa Dagger.EagerThunk
+        @test fetch(a) == 3
     end
 end
