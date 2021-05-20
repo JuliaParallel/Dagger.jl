@@ -90,9 +90,13 @@ end
 ThunkFuture(x::Integer) = ThunkFuture(Future(x))
 ThunkFuture() = ThunkFuture(Future())
 Base.isready(t::ThunkFuture) = isready(t.future)
-Base.wait(t::ThunkFuture) = wait(t.future)
+Base.wait(t::ThunkFuture) = Dagger.Sch.thunk_yield() do
+    wait(t.future)
+end
 function Base.fetch(t::ThunkFuture; proc=OSProc())
-    error, value = move(proc, fetch(t.future))
+    error, value = Dagger.Sch.thunk_yield() do
+        move(proc, fetch(t.future))
+    end
     if error
         throw(value)
     end
@@ -121,6 +125,18 @@ Base.wait(t::EagerThunk) = wait(t.future)
 Base.fetch(t::EagerThunk) = move(OSProc(), fetch(t.future))
 function Base.show(io::IO, t::EagerThunk)
     print(io, "EagerThunk ($(isready(t) ? "finished" : "running"))")
+end
+
+function spawn(f, args...; kwargs...)
+    if myid() == 1
+        Dagger.Sch.init_eager()
+        future = ThunkFuture()
+        uid = next_id()
+        put!(Dagger.Sch.EAGER_THUNK_CHAN, (future, uid, f, (args...,), (kwargs...,)))
+        EagerThunk(future, uid)
+    else
+        remotecall_fetch(spawn, 1, f, args...; kwargs...)
+    end
 end
 
 """
@@ -172,11 +188,8 @@ function _par(ex::Expr; lazy=true, recur=true, opts=())
             return :(Dagger.delayed($(esc(f)); $(opts...))($(_par.(args; lazy=lazy, recur=false)...)))
         else
             return quote
-                Dagger.Sch.init_eager()
-                future = $ThunkFuture()
-                uid = $next_id()
-                put!(Dagger.Sch.EAGER_THUNK_CHAN, (future, uid, $(esc(f)), ($(_par.(args; lazy=lazy, recur=false)...),), ($(opts...),)))
-                EagerThunk(future, uid)
+                args = ($(_par.(args; lazy=lazy, recur=false)...),)
+                $spawn($(esc(f)), args...; $(opts...))
             end
         end
     else

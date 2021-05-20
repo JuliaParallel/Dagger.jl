@@ -29,18 +29,44 @@ function init_eager()
     end
 end
 
-"Sets the scheduler's cached pressure indicator for the specified worker."
-set_pressure!(h::SchedulerHandle, pid::Int, proctype::Type, pressure::Int) =
-    exec!(_set_pressure!, h, pid, proctype, pressure)
-function _set_pressure!(ctx, state, task, tid, (pid, proctype, pressure))
-    state.worker_pressure[pid][proctype] = pressure
-    ACTIVE_TASKS[state.uid][proctype] = pressure # HACK-ish
-    @show state.worker_pressure[pid]
+"Adjusts the scheduler's cached pressure indicator for the specified worker by
+the specified amount."
+function adjust_pressure!(h::SchedulerHandle, proctype::Type, pressure)
+    uid = Dagger.get_tls().sch_uid
+    lock(ACTIVE_TASKS_LOCK) do
+        ACTIVE_TASKS[uid][proctype][] += pressure
+    end
+    exec!(_adjust_pressure!, h, myid(), proctype, pressure)
+end
+function _adjust_pressure!(ctx, state, task, tid, (pid, proctype, pressure))
+    state.worker_pressure[pid][proctype] += pressure
+    nothing
+end
+
+"Allows a thunk to safely wait on another thunk, by temporarily reducing its
+effective pressure to 0."
+function thunk_yield(f)
+    if Dagger.in_thunk()
+        h = sch_handle()
+        tls = Dagger.get_tls()
+        proctype = typeof(tls.processor)
+        util = tls.utilization
+        adjust_pressure!(h, proctype, -util)
+        try
+            f()
+        finally
+            adjust_pressure!(h, proctype, util)
+        end
+    else
+        f()
+    end
 end
 
 function eager_thunk()
     h = sch_handle()
-    set_pressure!(h, 1, Dagger.ThreadProc, 0) # HACK: Don't apply pressure from this thunk
+    util = Dagger.get_tls().utilization
+    # Don't apply pressure from this thunk
+    adjust_pressure!(h, Dagger.ThreadProc, -util)
     while isopen(EAGER_THUNK_CHAN)
         try
             future, uid, f, args, opts = take!(EAGER_THUNK_CHAN)

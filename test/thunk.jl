@@ -1,6 +1,13 @@
-import Dagger: @par, @spawn
+import Dagger: @par, @spawn, spawn
 
-@everywhere checkwid() = myid()==1
+@everywhere begin
+    checkwid() = myid()==1
+    function dynamic_fib(n)
+        n <= 1 && return n
+        t = Dagger.spawn(dynamic_fib, n-1)
+        return (fetch(t)::Int) + dynamic_fib(n-2)
+    end
+end
 
 @testset "@par" begin
     @testset "per-call" begin
@@ -32,7 +39,8 @@ end
         a = @spawn x + x
         @test a isa Dagger.EagerThunk
         b = @spawn sum([x,1,2])
-        c = @spawn a * b
+        c = spawn(*, a, b)
+        @test c isa Dagger.EagerThunk
         @test fetch(a) == 4
         @test fetch(b) == 5
         @test fetch(c) == 20
@@ -130,5 +138,15 @@ end
             @test fetch(c) == 4
             @test_throws_unwrap Dagger.ThunkFailedException fetch(d)
         end
+    end
+    @testset "remote spawn" begin
+        a = fetch(Distributed.@spawnat 2 Dagger.spawn(+, 1, 2))
+        @test Dagger.Sch.EAGER_INIT[]
+        @test fetch(Distributed.@spawnat 2 !(Dagger.Sch.EAGER_INIT[]))
+        @test a isa Dagger.EagerThunk
+        @test fetch(a) == 3
+
+        # Mild stress-test
+        @test fetch(dynamic_fib(10)) == 55
     end
 end

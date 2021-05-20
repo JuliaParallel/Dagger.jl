@@ -290,7 +290,9 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
                 end
             end
         end
-        state.worker_pressure[pid][typeof(proc)] = metadata.pressure
+        if metadata !== nothing
+            state.worker_pressure[pid][typeof(proc)] = metadata.pressure
+        end
         node = state.thunk_dict[thunk_id]
         state.cache[node] = res
         if node.options !== nothing && node.options.checkpoint !== nothing
@@ -661,8 +663,12 @@ end
     res = nothing
     result_meta = try
         # Set TLS variables
-        task_local_storage(:processor, to_proc)
-        task_local_storage(:sch_handle, sch_handle)
+        Dagger.set_tls!((
+            sch_uid=uid,
+            sch_handle=sch_handle,
+            processor=to_proc,
+            utilization=extra_util,
+        ))
 
         # Execute
         res = execute!(to_proc, f, fetched...)
