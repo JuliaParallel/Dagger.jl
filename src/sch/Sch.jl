@@ -290,7 +290,9 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
                 end
             end
         end
-        state.worker_pressure[pid][typeof(proc)] = metadata.pressure
+        if metadata !== nothing
+            state.worker_pressure[pid][typeof(proc)] = metadata.pressure
+        end
         node = state.thunk_dict[thunk_id]
         state.cache[node] = res
         if node.options !== nothing && node.options.checkpoint !== nothing

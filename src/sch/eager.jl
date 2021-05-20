@@ -35,7 +35,7 @@ set_pressure!(h::SchedulerHandle, pid::Int, proctype::Type, pressure::Int) =
 function _set_pressure!(ctx, state, task, tid, (pid, proctype, pressure))
     state.worker_pressure[pid][proctype] = pressure
     ACTIVE_TASKS[state.uid][proctype] = pressure # HACK-ish
-    @show state.worker_pressure[pid]
+    nothing
 end
 
 function eager_thunk()
