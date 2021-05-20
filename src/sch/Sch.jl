@@ -663,8 +663,12 @@ end
     res = nothing
     result_meta = try
         # Set TLS variables
-        task_local_storage(:processor, to_proc)
-        task_local_storage(:sch_handle, sch_handle)
+        Dagger.set_tls!((
+            sch_uid=uid,
+            sch_handle=sch_handle,
+            processor=to_proc,
+            utilization=extra_util,
+        ))
 
         # Execute
         res = execute!(to_proc, f, fetched...)

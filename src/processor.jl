@@ -312,16 +312,23 @@ rmprocs!(ctx::Context, xs::AbstractVector{<:OSProc}) = lock(ctx) do
 end
 
 "Gets the current processor executing the current thunk."
-thunk_processor() = task_local_storage(:processor)::Processor
+thunk_processor() = task_local_storage(:_dagger_processor)::Processor
+
+"Determines if we're currently in a thunk context."
+in_thunk() = haskey(task_local_storage(), :_dagger_sch_uid)
 
 "Gets all Dagger TLS variables as a NamedTuple."
 get_tls() = (
+    sch_uid=task_local_storage(:_dagger_sch_uid),
+    sch_handle=task_local_storage(:_dagger_sch_handle),
     processor=thunk_processor(),
-    sch_handle=task_local_storage(:sch_handle)
+    utilization=task_local_storage(:_dagger_utilization),
 )
 
 "Sets all Dagger TLS variables from a NamedTuple."
 function set_tls!(tls)
-    task_local_storage(:processor, tls.processor)
-    task_local_storage(:sch_handle, tls.sch_handle)
+    task_local_storage(:_dagger_sch_uid, tls.sch_uid)
+    task_local_storage(:_dagger_sch_handle, tls.sch_handle)
+    task_local_storage(:_dagger_processor, tls.processor)
+    task_local_storage(:_dagger_utilization, tls.utilization)
 end
