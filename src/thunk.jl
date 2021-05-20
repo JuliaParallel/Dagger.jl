@@ -90,9 +90,13 @@ end
 ThunkFuture(x::Integer) = ThunkFuture(Future(x))
 ThunkFuture() = ThunkFuture(Future())
 Base.isready(t::ThunkFuture) = isready(t.future)
-Base.wait(t::ThunkFuture) = wait(t.future)
+Base.wait(t::ThunkFuture) = Dagger.Sch.thunk_yield() do
+    wait(t.future)
+end
 function Base.fetch(t::ThunkFuture; proc=OSProc())
-    error, value = move(proc, fetch(t.future))
+    error, value = Dagger.Sch.thunk_yield() do
+        move(proc, fetch(t.future))
+    end
     if error
         throw(value)
     end

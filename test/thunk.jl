@@ -1,6 +1,13 @@
 import Dagger: @par, @spawn, spawn
 
-@everywhere checkwid() = myid()==1
+@everywhere begin
+    checkwid() = myid()==1
+    function dynamic_fib(n)
+        n <= 1 && return n
+        t = Dagger.spawn(dynamic_fib, n-1)
+        return (fetch(t)::Int) + dynamic_fib(n-2)
+    end
+end
 
 @testset "@par" begin
     @testset "per-call" begin
@@ -138,5 +145,8 @@ end
         @test fetch(Distributed.@spawnat 2 !(Dagger.Sch.EAGER_INIT[]))
         @test a isa Dagger.EagerThunk
         @test fetch(a) == 3
+
+        # Mild stress-test
+        @test fetch(dynamic_fib(10)) == 55
     end
 end
