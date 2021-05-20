@@ -33,7 +33,7 @@ end
 
 "Processes dynamic messages from worker-executing thunks."
 function dynamic_listener!(ctx, state)
-    task = current_task()
+    task = current_task() # The scheduler's main task
     for tid in keys(state.worker_chans)
         inp_chan, out_chan = state.worker_chans[tid]
         @async begin
@@ -71,10 +71,14 @@ end
 
 ## Worker-side methods for dynamic communication
 
+const DYNAMIC_EXEC_LOCK = Threads.ReentrantLock()
+
 "Executes an arbitrary function within the scheduler, returning the result."
 function exec!(f, h::SchedulerHandle, args...)
-    put!(h.out_chan, (h.thunk_id.id, f, args))
-    failed, res = take!(h.inp_chan)
+    failed, res = lock(DYNAMIC_EXEC_LOCK) do
+        put!(h.out_chan, (h.thunk_id.id, f, args))
+        take!(h.inp_chan)
+    end
     failed && throw(res)
     res
 end
