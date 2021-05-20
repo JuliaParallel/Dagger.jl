@@ -8,12 +8,12 @@ include("util.jl")
 include("fakeproc.jl")
 
 include("thunk.jl")
-include("domain.jl")
-include("array.jl")
 include("scheduler.jl")
 include("processors.jl")
 include("ui.jl")
 include("checkpoint.jl")
+include("domain.jl")
+include("array.jl")
 try # TODO: Fault tolerance is sometimes unreliable
 include("fault-tolerance.jl")
 catch
