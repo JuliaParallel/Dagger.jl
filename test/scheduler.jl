@@ -150,7 +150,7 @@ end
                 @test collect(Context(), a) == 1
             end
         end
-        @everywhere Dagger.add_callback!(proc->FakeProc())
+        @everywhere Dagger.add_callback!(()->FakeProc())
         @testset "proclist FakeProc" begin
             @test Dagger.iscompatible_arg(FakeProc(), nothing, Int) == true
             @test Dagger.iscompatible_arg(FakeProc(), nothing, FakeVal) == true

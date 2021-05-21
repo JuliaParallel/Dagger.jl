@@ -87,31 +87,36 @@ capacity(proc, ::Type{T}) where T =
 """
     OSProc <: Processor
 
-Julia CPU (OS) process, identified by Distributed pid. Executes thunks when
-threads or other "children" processors are not available, and/or the user has
-not opted to use those processors.
+Julia CPU (OS) process, identified by Distributed pid. The logical parent of
+all processors on a given node, but otherwise does not participate in
+computations.
 """
 struct OSProc <: Processor
     pid::Int
-    attrs::Dict{Symbol,Any}
-    children::Vector{Processor}
-    queue::Vector{Processor}
+    function OSProc(pid::Int=myid())
+        get!(OSPROC_CACHE, pid) do
+            remotecall_fetch(get_proc_hierarchy, pid)
+        end
+        new(pid)
+    end
 end
-const OSPROC_CACHE = Dict{Int,OSProc}()
-OSProc(pid::Int=myid()) = get!(OSPROC_CACHE, pid) do
-    remotecall_fetch(get_osproc, pid, pid)
-end
-function get_osproc(pid::Int)
-    proc = OSProc(pid, Dict{Symbol,Any}(), Processor[], Processor[])
+const OSPROC_CACHE = Dict{Int,Vector{Processor}}()
+children(proc::OSProc) = OSPROC_CACHE[proc.pid]
+function get_proc_hierarchy()
+    children = Processor[]
     for cb in PROCESSOR_CALLBACKS
         try
-            child = Base.invokelatest(cb, proc)
-            child !== nothing && push!(proc.children, child)
+            child = Base.invokelatest(cb)
+            if (child isa Tuple) || (child isa Vector)
+                append!(children, child)
+            elseif child !== nothing
+                push!(children, child)
+            end
         catch err
             @error "Error in processor callback" exception=(err,catch_backtrace())
         end
     end
-    proc
+    children
 end
 function add_callback!(func)
     push!(Dagger.PROCESSOR_CALLBACKS, func)
@@ -119,56 +124,15 @@ function add_callback!(func)
 end
 Base.:(==)(proc1::OSProc, proc2::OSProc) = proc1.pid == proc2.pid
 iscompatible(proc::OSProc, opts, f, args...) =
-    any(child->iscompatible(child, opts, f, args...), proc.children)
+    any(child->iscompatible(child, opts, f, args...), children(proc))
 iscompatible_func(proc::OSProc, opts, f) =
-    any(child->iscompatible_func(child, opts, f), proc.children)
+    any(child->iscompatible_func(child, opts, f), children(proc))
 iscompatible_arg(proc::OSProc, opts, args...) =
     any(child->
         all(arg->iscompatible_arg(child, opts, arg), args),
-    proc.children)
+    children(proc))
 get_processors(proc::OSProc) =
-    vcat((get_processors(child) for child in proc.children)...,)
-function choose_processor(options, f, Targs)
-    osproc = OSProc()
-    if isempty(osproc.queue)
-        for child in osproc.children
-            grandchildren = get_processors(child)
-            append!(osproc.queue, grandchildren)
-        end
-    end
-    @assert !isempty(osproc.queue)
-    for i in 1:length(osproc.queue)
-        proc = popfirst!(osproc.queue)
-        push!(osproc.queue, proc)
-        if !iscompatible(proc, options, f, Targs...)
-            continue
-        end
-        if options.proclist === nothing
-            default_enabled(proc) && return proc
-        elseif options.proclist isa Function
-            options.proclist(proc) && return proc
-        elseif any(p->proc isa p, options.proclist)
-            return proc
-        end
-    end
-    throw(ProcessorSelectionException(options.proclist, osproc.queue, f, Targs))
-end
-struct ProcessorSelectionException <: Exception
-    proclist
-    procsavail::Vector{Processor}
-    f
-    args
-end
-function Base.show(io::IO, pex::ProcessorSelectionException)
-    println(io, "(Worker $(myid())) Exhausted all available processor types!")
-    println(io, "  Proclist: $(pex.proclist)")
-    println(io, "  Procs Available: $(pex.procsavail)")
-    println(io, "  Function: $(pex.f)")
-    print(io, "  Arguments: $(pex.args)")
-end
-
-execute!(proc::OSProc, f, args...) = f(args...)
-default_enabled(proc::OSProc) = true
+    vcat((get_processors(child) for child in children(proc))...)
 
 """
     ThreadProc <: Processor

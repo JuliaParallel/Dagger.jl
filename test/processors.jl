@@ -32,7 +32,6 @@ end
         end
     end
     @testset "Opt-in/Opt-out" begin
-        @test Dagger.default_enabled(OSProc()) == true
         @test Dagger.default_enabled(ThreadProc(1,1)) == true
         @test Dagger.default_enabled(OptOutProc()) == false
     end
@@ -54,12 +53,12 @@ end
     end
     @testset "Add callback in same world" begin
         function addcb()
-            @everywhere Dagger.add_callback!(cb)
-            cb = eval(Dagger, :(proc->PathProc(myid())))
-            opts = ThunkOptions(proclist=[PathProc])
-            collect(delayed(identity; options=opts)(1.0))
-            @everywhere pop!(Dagger.PROCESSOR_CALLBACKS)
+            cb = @eval ()->FakeProc(myid())
+            @everywhere Dagger.add_callback!($cb)
+            @test any(x->x isa FakeProc, Dagger.children(OSProc()))
+            @everywhere pop!(Dagger.PROCESSOR_CALLBACKS); empty!(Dagger.OSPROC_CACHE)
         end
+        addcb()
     end
 
     @testset "Modify workers in Context" begin
