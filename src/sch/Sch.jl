@@ -649,7 +649,7 @@ end
             # Under-subscribed, calculate extra utilization and execute thunk
             @debug "($(myid())) Using available $to_proc: $extra_util | $(real_util[])/$cap"
             extra_util = if extra_util isa MaxUtilization
-                count(c->typeof(c)===typeof(to_proc), from_proc.children)
+                count(c->typeof(c)===typeof(to_proc), children(from_proc))
             else
                 extra_util
             end
