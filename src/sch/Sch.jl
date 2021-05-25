@@ -225,11 +225,9 @@ end
 function cleanup(ctx)
 end
 
-function _init_proc(uid)
-    lock(ACTIVE_TASKS_LOCK) do
-        @assert !haskey(ACTIVE_TASKS, uid)
-    end
-end
+const WORKER_MONITOR_LOCK = Threads.ReentrantLock()
+const WORKER_MONITOR_TASKS = Dict{Int,Task}()
+const WORKER_MONITOR_CHANS = Dict{Int,Dict{UInt64,RemoteChannel}}()
 function init_proc(state, p)
     # Initialize pressure and capacity
     proc = OSProc(p.pid)
@@ -251,7 +249,31 @@ function init_proc(state, p)
             state.worker_capacity[p.pid] = cap
         end
     end
-    # TODO: remotecall_fetch(_init_proc, p.pid, state.uid)
+    lock(WORKER_MONITOR_LOCK) do
+        wid = p.pid
+        if !haskey(WORKER_MONITOR_TASKS, wid)
+            t = @async begin
+                try
+                    # Wait until this connection is terminated
+                    remotecall_fetch(sleep, wid, typemax(UInt64))
+                catch err
+                    if err isa ProcessExitedException
+                        lock(WORKER_MONITOR_LOCK) do
+                            d = WORKER_MONITOR_CHANS[wid]
+                            for uid in keys(d)
+                                put!(d[uid], (wid, OSProc(wid), nothing, (ProcessExitedException(wid), nothing)))
+                            end
+                            empty!(d)
+                            delete!(WORKER_MONITOR_CHANS, wid)
+                        end
+                    end
+                end
+            end
+            WORKER_MONITOR_TASKS[wid] = t
+            WORKER_MONITOR_CHANS[wid] = Dict{UInt64,RemoteChannel}()
+        end
+        WORKER_MONITOR_CHANS[wid][state.uid] = state.chan
+    end
 
     # Setup worker-to-scheduler channels
     inp_chan = RemoteChannel(p.pid)
@@ -261,10 +283,16 @@ function init_proc(state, p)
     end
 end
 function _cleanup_proc(uid)
-    empty!(CHUNK_CACHE)
+    empty!(CHUNK_CACHE) # FIXME: Should be keyed on uid!
 end
 function cleanup_proc(state, p)
-    remote_do(_cleanup_proc, p.pid, state.uid)
+    lock(WORKER_MONITOR_LOCK) do
+        wid = p.pid
+        if haskey(WORKER_MONITOR_CHANS, wid)
+            delete!(WORKER_MONITOR_CHANS[wid], state.uid)
+            remote_do(_cleanup_proc, wid, state.uid)
+        end
+    end
 end
 
 "Process-local count of actively-executing Dagger tasks per processor type."
@@ -367,7 +395,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
                 remove_dead_proc!(ctx, state, gproc)
 
                 lock(state.lock) do
-                    handle_fault(ctx, state, state.thunk_dict[thunk_id], gproc)
+                    handle_fault(ctx, state, gproc)
                 end
                 continue
             else
@@ -403,6 +431,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
 
         safepoint(state)
     end
+    state.halt[] = true
     @sync for p in procs_to_use(ctx)
         @async cleanup_proc(state, p)
     end

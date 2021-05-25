@@ -13,14 +13,11 @@ of DAGs, it *may* cause a `KeyError` or other failures in the scheduler due to
 the complexity of getting the internal state back to a consistent and proper
 state.
 """
-function handle_fault(ctx, state, thunk, oldproc)
+function handle_fault(ctx, state, oldproc)
     # Find thunks whose results were cached on the dead worker and place them
     # on what's called a "deadlist". This structure will direct the recovery
     # of the scheduler's state.
-    deadlist = Thunk[thunk]
-    # This thunk is guaranteed to not have valid cached data anymore
-    thunk.cache = false
-    thunk.cache_ref = nothing
+    deadlist = Thunk[]
     for t in keys(state.cache)
         v = state.cache[t]
         if v isa Chunk && v.handle isa DRef && v.handle.owner == oldproc.pid
@@ -37,6 +34,7 @@ function handle_fault(ctx, state, thunk, oldproc)
         end
     end
     # TODO: Find *all* thunks who were actively running on the dead worker
+    # TODO: Set thunk.cache to nothing
 
     # Empty cache of dead thunks
     for ct in keys(state.cache)
@@ -72,7 +70,7 @@ function handle_fault(ctx, state, thunk, oldproc)
         fix_waitdicts!(state, deadlist, ot)
     end
 
-    fix_waitdicts!(state, deadlist, thunk)
+    #fix_waitdicts!(state, deadlist, thunk)
 
     # Remove thunks from state.ready that have inputs on the deadlist
     for idx in length(state.ready):-1:1
