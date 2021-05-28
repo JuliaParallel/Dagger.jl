@@ -168,7 +168,6 @@ iscompatible_arg(proc::ThreadProc, opts, x) = true
 else
     # TODO: Use Threads.@threads?
     function execute!(proc::ThreadProc, f, args...)
-        sch_handle = task_local_storage(:sch_handle)
         tls = get_tls()
         task = @async begin
             set_tls!(tls)
