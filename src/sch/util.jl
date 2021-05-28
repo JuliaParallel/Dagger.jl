@@ -61,13 +61,13 @@ function set_failed!(state, origin, thunk=origin)
 end
 
 "Internal utility, useful for debugging scheduler state."
-function print_sch_status(state, thunk)
+function print_sch_status(state, thunk; kwargs...)
     iob = IOBuffer()
-    print_sch_status(iob, state, thunk)
+    print_sch_status(iob, state, thunk; kwargs...)
     seek(iob, 0)
     write(stderr, iob)
 end
-function print_sch_status(io::IO, state, thunk; offset=0, limit=5)
+function print_sch_status(io::IO, state, thunk; offset=0, limit=5, max_inputs=3)
     function status_string(node)
         status = ""
         if node in state.errored
@@ -79,15 +79,25 @@ function print_sch_status(io::IO, state, thunk; offset=0, limit=5)
             status *= "R"
         elseif haskey(state.cache, node)
             status *= "C"
+        elseif node in state.finished
+            status *= "F"
         else
             status *= "?"
         end
         status
     end
-    offset == 0 && print(io, "($(status_string(thunk))) ")
+    if offset == 0
+        println(io, "Ready ($(length(state.ready))): $(join(map(t->t.id, state.ready), ','))")
+        println(io, "Running: ($(length(state.running))): $(join(map(t->t.id, collect(state.running)), ','))")
+        print(io, "($(status_string(thunk))) ")
+    end
     println(io, "$(thunk.id): $(thunk.f)")
-    for input in thunk.inputs
+    for (idx,input) in enumerate(thunk.inputs)
         input isa Thunk || continue
+        if idx > max_inputs
+            println(io, repeat(' ', offset+2), "…")
+            break
+        end
         status = status_string(input)
         if haskey(state.waiting, thunk) && input in state.waiting[thunk]
             status *= "W"
@@ -99,7 +109,7 @@ function print_sch_status(io::IO, state, thunk; offset=0, limit=5)
             status *= "d"
         end
         if haskey(state.futures, input)
-            status *= "f$(length(state.futures[input]))"
+            status *= "f($(length(state.futures[input])))"
         end
         print(io, repeat(' ', offset+2), "($status) ")
         if limit > 0

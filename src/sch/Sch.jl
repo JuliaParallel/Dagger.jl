@@ -868,12 +868,12 @@ function do_task(to_proc, extra_util, thunk_id, f, data, send_result, persist, c
         if ((extra_util isa MaxUtilization) && (real_util[] > 0)) ||
            ((extra_util isa Real) && (extra_util + real_util[] > cap))
             # Fully subscribed, wait and re-check
-            @debug "($(myid())) $f Waiting for free $(typeof(to_proc)): $extra_util | $(real_util[])/$cap"
+            @debug "($(myid())) $f ($thunk_id) Waiting for free $(typeof(to_proc)): $extra_util | $(real_util[])/$cap"
             unlock(ACTIVE_TASKS_LOCK)
             wait(TASK_SYNC)
         else
             # Under-subscribed, calculate extra utilization and execute thunk
-            @debug "($(myid())) Using available $to_proc: $extra_util | $(real_util[])/$cap"
+            @debug "($(myid())) ($thunk_id) Using available $to_proc: $extra_util | $(real_util[])/$cap"
             extra_util = if extra_util isa MaxUtilization
                 count(c->typeof(c)===typeof(to_proc), children(from_proc))
             else
@@ -911,7 +911,7 @@ function do_task(to_proc, extra_util, thunk_id, f, data, send_result, persist, c
     lock(ACTIVE_TASKS_LOCK) do
         real_util[] -= extra_util
     end
-    @debug "($(myid())) Releasing $(typeof(to_proc)): $extra_util | $(real_util[])/$cap"
+    @debug "($(myid())) ($thunk_id) Releasing $(typeof(to_proc)): $extra_util | $(real_util[])/$cap"
     notify(TASK_SYNC)
     metadata = (
         pressure=real_util[],
