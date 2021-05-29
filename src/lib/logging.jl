@@ -116,11 +116,13 @@ function raise_event(ctx, phase, category, id,tl, t, gc_num, prof, async)
     end
 end
 
-empty_prof() = ProfilerResult(UInt[], Profile.getdict(UInt[]))
+empty_prof() = ProfilerResult(UInt[], Dict{UInt64, Vector{Base.StackTraces.StackFrame}}())
+
+const prof_refcount = Ref{Threads.Atomic{Int}}(Threads.Atomic{Int}(0))
 
 function timespan_start(ctx, category, id, tl, async=isasync(ctx.log_sink))
     isa(ctx.log_sink, NoOpLog) && return # don't go till raise
-    if ctx.profile && category == :compute
+    if ctx.profile && category == :compute && Threads.atomic_add!(prof_refcount[], 1) == 0
         Profile.start_timer()
     end
     raise_event(ctx, :start, category, id, tl, time_ns(), gc_num(), empty_prof(), async)
@@ -129,13 +131,18 @@ end
 
 function timespan_end(ctx, category, id, tl, async=isasync(ctx.log_sink))
     isa(ctx.log_sink, NoOpLog) && return
+    time = time_ns()
+    gcn = gc_num()
     prof = UInt[]
+    lidict = Dict{UInt64, Vector{Base.StackTraces.StackFrame}}()
     if ctx.profile && category == :compute
-        Profile.stop_timer()
-        prof = Profile.fetch()
+        if Threads.atomic_sub!(prof_refcount[], 1) == 1
+            Profile.stop_timer()
+        end
+        prof, lidict = Profile.retrieve()
         Profile.clear()
     end
-    raise_event(ctx, :finish, category, id, tl,time_ns(), gc_num(), ProfilerResult(prof, Profile.getdict(prof)), async)
+    raise_event(ctx, :finish, category, id, tl, time, gcn, ProfilerResult(prof, lidict), async)
     nothing
 end
 

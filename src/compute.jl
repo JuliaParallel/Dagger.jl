@@ -82,12 +82,12 @@ end
 ##### Dag utilities #####
 
 """
-    dependents(node::Thunk, deps=Dict{Thunk, Set{Thunk}}()) -> Dict{Thunk, Set{Thunk}}
+    dependents(node::Thunk) -> Dict{Union{Thunk,Chunk}, Set{Thunk}}
 
 Find the set of direct dependents for each task.
 """
 function dependents(node::Thunk)
-    deps = Dict{Thunk, Set{Thunk}}()
+    deps = Dict{Union{Thunk,Chunk}, Set{Thunk}}()
     visited = Set{Thunk}()
     to_visit = Set{Thunk}()
     push!(to_visit, node)
@@ -98,10 +98,12 @@ function dependents(node::Thunk)
             deps[next] = Set{Thunk}()
         end
         for inp in inputs(next)
-            if inp isa Thunk
-                s::Set{Thunk} = get!(()->Set{Thunk}(), deps, inp)
+            if istask(inp) || (inp isa Chunk)
+                s = get!(()->Set{Thunk}(), deps, inp)
                 push!(s, next)
-                !(inp in visited) && push!(to_visit, inp)
+                if istask(inp) && !(inp in visited)
+                    push!(to_visit, inp)
+                end
             end
         end
         push!(visited, next)
@@ -110,14 +112,14 @@ function dependents(node::Thunk)
 end
 
 """
-    noffspring(dpents::Dict{Thunk, Set{Thunk}}) -> Dict{Thunk, Int}
+    noffspring(dpents::Dict{Union{Thunk,Chunk}, Set{Thunk}}) -> Dict{Thunk, Int}
 
 Recursively find the number of tasks dependent on each task in the DAG.
 Takes a Dict as returned by [`dependents`](@ref).
 """
-function noffspring(dpents::Dict{Thunk, Set{Thunk}})
+function noffspring(dpents::Dict{Union{Thunk,Chunk}, Set{Thunk}})
     noff = Dict{Thunk,Int}()
-    to_visit = collect(keys(dpents))
+    to_visit = collect(filter(istask, keys(dpents)))
     while !isempty(to_visit)
         next = popfirst!(to_visit)
         haskey(noff, next) && continue

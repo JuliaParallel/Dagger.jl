@@ -65,8 +65,12 @@ function unrelease(c::Chunk{<:Any,DRef})
 end
 unrelease(c::Chunk) = c
 
+Base.:(==)(c1::Chunk, c2::Chunk) = c1.handle == c2.handle
+Base.hash(c::Chunk, x::UInt64) = hash(c.handle, x)
+
 collect_remote(chunk::Chunk) =
     move(chunk.processor, OSProc(), poolget(chunk.handle))
+
 function collect(ctx::Context, chunk::Chunk; options=nothing)
     # delegate fetching to handle by default.
     if chunk.handle isa DRef && !(chunk.processor isa OSProc)

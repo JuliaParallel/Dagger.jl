@@ -40,6 +40,10 @@ elseif render == "offline"
     using FFMPEG, FileIO, ImageMagick
 end
 const RENDERS = Dict{Int,Dict}()
+const live_port = parse(Int, get(ENV, "BENCHMARK_LIVE_PORT", "8000"))
+
+const graph = parse(Bool, get(ENV, "BENCHMARK_GRAPH", "0"))
+const profile = parse(Bool, get(ENV, "BENCHMARK_PROFILE", "0"))
 
 _benches = get(ENV, "BENCHMARK", "cpu,cpu+dagger")
 const benches = []
@@ -106,7 +110,7 @@ end
 
 theory_flops(nrow, ncol, nfeatures) = 11 * ncol * nrow * nfeatures + 2 * (ncol + nrow) * nfeatures
 
-function nmf_suite(; dagger, accel, kwargs...)
+function nmf_suite(ctx; dagger, accel)
     suite = BenchmarkGroup()
 
     #= TODO: Re-enable
@@ -179,39 +183,49 @@ function nmf_suite(; dagger, accel, kwargs...)
                     ])
                 elseif accel == "cpu"
                     Dagger.Sch.SchedulerOptions()
+                else
+                    error("Unknown accelerator $accel")
                 end
-                ctx = Context(collect((1:nw) .+ 1); kwargs...)
                 p = sum([length(Dagger.get_processors(OSProc(id))) for id in 2:(nw+1)])
+                #bsz = ncol ÷ length(workers())
+                bsz = ncol ÷ 64
                 nsuite["Workers: $nw"] = @benchmarkable begin
-                    compute($ctx, nnmf($X[], $W[], $H[]); options=$opts)
+                    _ctx = Context($ctx, workers()[1:$nw])
+                    compute(_ctx, nnmf($X[], $W[], $H[]); options=$opts)
                 end setup=begin
                     _nw, _scale = $nw, $scale
                     @info "Starting $_nw worker Dagger NNMF (scale by $_scale)"
-                    if render != ""
-                        Dagger.show_gantt($ctx; width=1800, window_length=20, delay=2, port=4040, live=live)
-                    end
                     if $accel == "cuda"
                         # FIXME: Allocate with CUDA.rand if possible
-                        $X[] = Dagger.mapchunks(CUDA.cu, compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nrow, $ncol); options=$opts))
-                        $W[] = Dagger.mapchunks(CUDA.cu, compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nrow, $nfeatures); options=$opts))
-                        $H[] = Dagger.mapchunks(CUDA.cu, compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nfeatures, $ncol); options=$opts))
+                        $X[] = Dagger.mapchunks(CUDA.cu, compute(rand(Blocks($nrow, $bsz), Float32, $nrow, $ncol); options=$opts))
+                        $W[] = Dagger.mapchunks(CUDA.cu, compute(rand(Blocks($nrow, $bsz), Float32, $nrow, $nfeatures); options=$opts))
+                        $H[] = Dagger.mapchunks(CUDA.cu, compute(rand(Blocks($nrow, $bsz), Float32, $nfeatures, $ncol); options=$opts))
                     elseif $accel == "amdgpu"
                         $X[] = Dagger.mapchunks(ROCArray, compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nrow, $ncol); options=$opts))
                         $W[] = Dagger.mapchunks(ROCArray, compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nrow, $nfeatures); options=$opts))
                         $H[] = Dagger.mapchunks(ROCArray, compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nfeatures, $ncol); options=$opts))
                     elseif $accel == "cpu"
-                        $X[] = compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nrow, $ncol); options=$opts)
-                        $W[] = compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nrow, $nfeatures); options=$opts)
-                        $H[] = compute(rand(Blocks($nrow, $ncol÷$p), Float32, $nfeatures, $ncol); options=$opts)
+                        $X[] = compute(rand(Blocks($nrow, $bsz), Float32, $nrow, $ncol); options=$opts)
+                        $W[] = compute(rand(Blocks($nrow, $bsz), Float32, $nrow, $nfeatures); options=$opts)
+                        $H[] = compute(rand(Blocks($nrow, $bsz), Float32, $nfeatures, $ncol); options=$opts)
                     end
                 end teardown=begin
-                    if render != ""
+                    if render != "" && !live
                         Dagger.continue_rendering[] = false
-                        video_paths = take!(Dagger.render_results)
-                        try
-                            video_data = Dict(key=>read(video_paths[key]) for key in keys(video_paths))
-                            push!(get!(()->[], RENDERS[$scale], $nw), video_data)
-                        catch
+                        for i in 1:5
+                            isready(Dagger.render_results) && break
+                            sleep(1)
+                        end
+                        if isready(Dagger.render_results)
+                            video_paths = take!(Dagger.render_results)
+                            try
+                                video_data = Dict(key=>read(video_paths[key]) for key in keys(video_paths))
+                                push!(get!(()->[], RENDERS[$scale], $nw), video_data)
+                            catch err
+                                @error "Failed to process render results" exception=(err,catch_backtrace())
+                            end
+                        else
+                            @warn "Failed to fetch render results"
                         end
                     end
                     $X[] = nothing
@@ -219,7 +233,6 @@ function nmf_suite(; dagger, accel, kwargs...)
                     $H[] = nothing
                     @everywhere GC.gc()
                 end
-                break
                 nw ÷= 2
             end
             suite["NNMF scaled by: $scale"] = nsuite
@@ -234,13 +247,27 @@ function main()
     output_prefix = "result-$(np)workers-$(nt)threads-$(Dates.now())"
 
     suites = Dict()
+    graph_opts = if graph && render != ""
+        (log_sink=Dagger.LocalEventLog(), log_file=output_prefix*".dot")
+    elseif render != ""
+        (log_sink=Dagger.LocalEventLog(),)
+    else
+        NamedTuple()
+    end
+    ctx = Context(collect((1:nw) .+ 1); profile=profile, graph_opts...)
     for bench in benches
         name = bench.name
         println("creating $name benchmarks")
-        suites[name] = if bench.dagger
-            nmf_suite(; dagger=true, accel=bench.accel, log_sink=Dagger.LocalEventLog(), log_file=output_prefix*".dot", profile=false)
-        else
-            nmf_suite(; dagger=false, accel=bench.accel)
+        suites[name] = nmf_suite(ctx; dagger=bench.dagger, accel=bench.accel)
+    end
+    if render != ""
+        Dagger.show_gantt(ctx; width=1800, window_length=5, delay=2, port=live_port, live=live)
+        if live
+            # Make sure server code is compiled
+            sleep(1)
+            run(pipeline(`curl -s localhost:$live_port/`; stdout=devnull))
+            run(pipeline(`curl -s localhost:$live_port/profile`; stdout=devnull))
+            @info "Rendering started on port $live_port"
         end
     end
     res = Dict()
@@ -248,14 +275,14 @@ function main()
         name = bench.name
         println("running $name benchmarks")
         res[name] = try
-            run(suites[name]; samples=5, seconds=10*60, gcsample=true)
+            run(suites[name]; samples=3, seconds=10*60, gcsample=true)
         catch err
             @error "Error running $name benchmarks" exception=(err,catch_backtrace())
             nothing
         end
     end
     for bench in benches
-        println("benchmark results for $(bench.name): $(res[bench.name])")
+        println("benchmark results for $(bench.name): $(minimum(res[bench.name]))")
     end
 
     println("saving results in $output_prefix.$output_format")
@@ -267,6 +294,11 @@ function main()
             serialize(io, outdict)
         end
     end
+
+    if parse(Bool, get(ENV, "BENCHMARK_VISUALIZE", "0"))
+        run(`$(Base.julia_cmd()) $(joinpath(pwd(), "visualize.jl")) -- $(output_prefix*"."*output_format)`)
+    end
+
     println("Done.")
 
     # TODO: Compare with multiple results

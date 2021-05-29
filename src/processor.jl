@@ -168,7 +168,6 @@ iscompatible_arg(proc::ThreadProc, opts, x) = true
 else
     # TODO: Use Threads.@threads?
     function execute!(proc::ThreadProc, f, args...)
-        sch_handle = task_local_storage(:sch_handle)
         tls = get_tls()
         task = @async begin
             set_tls!(tls)
@@ -227,6 +226,9 @@ Context(procs::Vector{P}=Processor[OSProc(w) for w in workers()];
         profile=false, options=nothing) where {P<:Processor} =
     Context(procs, proc_lock, log_sink, log_file, profile, options)
 Context(xs::Vector{Int}; kwargs...) = Context(map(OSProc, xs); kwargs...)
+Context(ctx::Context, xs::Vector) = # make a copy
+    Context(xs; log_sink=ctx.log_sink, log_file=ctx.log_file,
+    profile=ctx.profile, options=ctx.options)
 procs(ctx::Context) = lock(ctx) do
     copy(ctx.procs)
 end

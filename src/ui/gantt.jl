@@ -188,13 +188,11 @@ function show_gantt(ctx; delay=2, port=8000, width=1000, height=640, window_leng
             draw_gantt(ctx, svg_path, prof_path; delay=delay, width=width,
                        height=height, window_length=window_length)
         catch err
-            Base.showerror(stderr, err)
-            Base.show_backtrace(stderr, catch_backtrace())
-            println(stderr)
+            @error exception=(err,catch_backtrace())
         end
     end
 
     if live
-        serve_gantt(svg_path, prof_path; port=port)
+        serve_gantt(svg_path, prof_path; port=port, delay=delay)
     end
 end

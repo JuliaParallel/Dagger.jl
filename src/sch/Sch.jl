@@ -4,13 +4,38 @@ using Distributed
 import MemPool: DRef
 
 import ..Dagger
-import ..Dagger: Context, Processor, Thunk, ThunkFuture, ThunkFailedException, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, capacity, chunktype, choose_processor, default_enabled, get_processors, execute!, rmprocs!, addprocs!, thunk_processor
+import ..Dagger: Context, Processor, Thunk, ThunkFuture, ThunkFailedException, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, capacity, chunktype, default_enabled, get_processors, execute!, rmprocs!, addprocs!, thunk_processor
 
 const OneToMany = Dict{Thunk, Set{Thunk}}
 
 include("util.jl")
+if Sys.isunix()
+    include("unix.jl")
+else
+    # FIXME
+    cputhreadtime() = time_ns()
+end
 include("fault-handler.jl")
 include("dynamic.jl")
+
+mutable struct ProcessorCacheEntry
+    gproc::OSProc
+    proc::Processor
+    next::ProcessorCacheEntry
+
+    ProcessorCacheEntry(gproc::OSProc, proc::Processor) = new(gproc, proc)
+end
+Base.isequal(p1::ProcessorCacheEntry, p2::ProcessorCacheEntry) =
+    p1.proc === p2.proc
+function Base.show(io::IO, entry::ProcessorCacheEntry)
+    entries = 1
+    next = entry.next
+    while next !== entry
+        entries += 1
+        next = next.next
+    end
+    print(io, "ProcessorCacheEntry(pid $(entry.gproc.pid), $(entry.proc), $entries entries)")
+end
 
 """
     ComputeState
@@ -19,45 +44,93 @@ The internal state-holding struct of the scheduler.
 
 Fields:
 - uid::UInt64 - Unique identifier for this scheduler instance
-- dependents::OneToMany - The result of calling `dependents` on the DAG
+- dependents::Dict{Union{Thunk,Chunk},Set{Thunk}} - The result of calling `dependents` on the DAG
 - finished::Set{Thunk} - The set of completed `Thunk`s
 - waiting::OneToMany - Map from downstream `Thunk` to upstream `Thunk`s that still need to execute
-- waiting_data::OneToMany - Map from upstream `Thunk` to all downstream `Thunk`s, accumulating over time
+- waiting_data::Dict{Union{Thunk,Chunk},Set{Thunk}} - Map from input `Chunk`/upstream `Thunk` to all unfinished downstream `Thunk`s, to retain caches
 - ready::Vector{Thunk} - The list of `Thunk`s that are ready to execute
 - cache::Dict{Thunk, Any} - Maps from a finished `Thunk` to it's cached result, often a DRef
 - running::Set{Thunk} - The set of currently-running `Thunk`s
+- running_on::Dict{Thunk,OSProc} - Map from `Thunk` to the OS process executing it
 - thunk_dict::Dict{Int, Any} - Maps from thunk IDs to a `Thunk`
 - node_order::Any - Function that returns the order of a thunk
-- worker_procs::Dict{Int,OSProc} - Maps from worker ID to root processor
-- worker_pressure::Dict{Int,Dict{Type,Float64}} - Cache of worker pressure
-- worker_capacity::Dict{Int,Dict{Type,Float64}} - Maps from worker ID to capacity
+- worker_pressure::Dict{Int,Dict{Type,UInt}} - Cache of worker pressure
+- worker_capacity::Dict{Int,Dict{Type,UInt}} - Maps from worker ID to capacity
+- worker_loadavg::Dict{Int,NTuple{3,Float64}} - Worker load average
 - worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}} - Communication channels between the scheduler and each worker
-- halt::Ref{Bool} - Flag indicating, when set, that the scheduler should halt immediately
+- procs_cache_list::Base.RefValue{Union{ProcessorCacheEntry,Nothing}} - Cached linked list of processors ready to be used
+- function_cost_cache::Dict{Type{<:Tuple},UInt} - Cache of estimated CPU time required to compute the given signature
+- halt::Base.RefValue{Bool} - Flag indicating, when set, that the scheduler should halt immediately
 - lock::ReentrantLock() - Lock around operations which modify the state
 - futures::Dict{Thunk, Vector{ThunkFuture}} - Futures registered for waiting on the result of a thunk.
 - errored::Set{Thunk} - Thunks that threw an error
-- chan::Channel - Channel for receiving completed thunks
+- chan::RemoteChannel{Channel{Any}} - Channel for receiving completed thunks
 """
 struct ComputeState
     uid::UInt64
-    dependents::OneToMany
+    dependents::Dict{Union{Thunk,Chunk},Set{Thunk}}
     finished::Set{Thunk}
     waiting::OneToMany
-    waiting_data::OneToMany
+    waiting_data::Dict{Union{Thunk,Chunk},Set{Thunk}}
     ready::Vector{Thunk}
     cache::Dict{Thunk, Any}
     running::Set{Thunk}
+    running_on::Dict{Thunk,OSProc}
     thunk_dict::Dict{Int, Any}
     node_order::Any
-    worker_procs::Dict{Int,OSProc}
-    worker_pressure::Dict{Int,Dict{Type,Float64}}
-    worker_capacity::Dict{Int,Dict{Type,Float64}}
+    worker_pressure::Dict{Int,Dict{Type,UInt}}
+    worker_capacity::Dict{Int,Dict{Type,UInt}}
+    worker_loadavg::Dict{Int,NTuple{3,Float64}}
     worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}
-    halt::Ref{Bool}
+    procs_cache_list::Base.RefValue{Union{ProcessorCacheEntry,Nothing}}
+    function_cost_cache::Dict{Type{<:Tuple},UInt}
+    halt::Base.RefValue{Bool}
     lock::ReentrantLock
     futures::Dict{Thunk, Vector{ThunkFuture}}
     errored::Set{Thunk}
-    chan::Channel{Any}
+    chan::RemoteChannel{Channel{Any}}
+end
+
+function start_state(deps::Dict, node_order, chan)
+    state = ComputeState(rand(UInt64),
+                         deps,
+                         Set{Thunk}(),
+                         OneToMany(),
+                         Dict{Union{Thunk,Chunk},Set{Thunk}}(),
+                         Vector{Thunk}(undef, 0),
+                         Dict{Thunk, Any}(),
+                         Set{Thunk}(),
+                         Dict{Thunk,OSProc}(),
+                         Dict{Int, Thunk}(),
+                         node_order,
+                         Dict{Int,Dict{Type,UInt}}(),
+                         Dict{Int,Dict{Type,UInt}}(),
+                         Dict{Int,NTuple{3,Float64}}(),
+                         Dict{Int, Tuple{RemoteChannel,RemoteChannel}}(),
+                         Ref{Union{ProcessorCacheEntry,Nothing}}(nothing),
+                         Dict{Type{<:Tuple},UInt}(),
+                         Ref{Bool}(false),
+                         ReentrantLock(),
+                         Dict{Thunk, Vector{ThunkFuture}}(),
+                         Set{Thunk}(),
+                         chan)
+
+    nodes = sort(collect(keys(deps)), by=node_order)
+    # N.B. Using merge! here instead would modify deps
+    for (key,val) in deps
+        state.waiting_data[key] = copy(val)
+    end
+    for k in nodes
+        if istask(k)
+            waiting = Set{Thunk}(Iterators.filter(istask, inputs(k)))
+            if isempty(waiting)
+                push!(state.ready, k)
+            else
+                state.waiting[k] = waiting
+            end
+        end
+    end
+    state
 end
 
 """
@@ -82,6 +155,8 @@ the current scheduler invocation to persistent storage, for later retrieval by
 the current scheduler invocation, were it to execute. If this returns a
 result, all thunks will be skipped. If this throws an error, restoring will be
 skipped, the error will be displayed, and the scheduler will execute as usual.
+- `round_robin::Bool=false`: Whether to schedule in round-robin mode, which
+spreads load instead of the default behavior of filling processors to capacity.
 """
 Base.@kwdef struct SchedulerOptions
     single::Int = 0
@@ -89,6 +164,7 @@ Base.@kwdef struct SchedulerOptions
     allow_errors::Bool = false
     checkpoint = nothing
     restore = nothing
+    round_robin::Bool = false
 end
 
 """
@@ -138,6 +214,8 @@ function merge(sopts::SchedulerOptions, topts::ThunkOptions)
     proclist = topts.proclist !== nothing ? topts.proclist : sopts.proclist
     ThunkOptions(single, proclist, topts.procutil, allow_errors, topts.checkpoint, topts.restore)
 end
+merge(sopts::SchedulerOptions, ::Nothing) =
+    ThunkOptions(sopts.single, sopts.proclist, Dict{Type,Any}())
 
 function isrestricted(task::Thunk, proc::OSProc)
     if (task.options !== nothing) && (task.options.single != 0) &&
@@ -146,29 +224,58 @@ function isrestricted(task::Thunk, proc::OSProc)
     end
     return false
 end
-merge(sopts::SchedulerOptions, ::Nothing) =
-    ThunkOptions(sopts.single, sopts.proclist, Dict{Type,Any}())
 
 function cleanup(ctx)
 end
 
+const WORKER_MONITOR_LOCK = Threads.ReentrantLock()
+const WORKER_MONITOR_TASKS = Dict{Int,Task}()
+const WORKER_MONITOR_CHANS = Dict{Int,Dict{UInt64,RemoteChannel}}()
 function init_proc(state, p)
     # Initialize pressure and capacity
     proc = OSProc(p.pid)
     lock(state.lock) do
-        state.worker_procs[p.pid] = proc
-        state.worker_pressure[p.pid] = Dict{Type,Float64}()
-        state.worker_capacity[p.pid] = Dict{Type,Float64}()
+        state.worker_pressure[p.pid] = Dict{Type,UInt}()
+        state.worker_capacity[p.pid] = Dict{Type,UInt}()
+        state.worker_loadavg[p.pid] = (0.0, 0.0, 0.0)
         for T in unique(typeof.(get_processors(proc)))
             state.worker_pressure[p.pid][T] = 0
-            state.worker_capacity[p.pid][T] = capacity(proc, T)
+            state.worker_capacity[p.pid][T] = capacity(proc, T) * UInt(1e9)
         end
         state.worker_pressure[p.pid][OSProc] = 0
         state.worker_capacity[p.pid][OSProc] = 0
     end
-    cap = remotecall_fetch(capacity, p.pid)
-    @async lock(state.lock) do
-        state.worker_capacity[p.pid] = cap
+    cap = remotecall(capacity, p.pid)
+    @async begin
+        cap = fetch(cap) * UInt(1e9)
+        lock(state.lock) do
+            state.worker_capacity[p.pid] = cap
+        end
+    end
+    lock(WORKER_MONITOR_LOCK) do
+        wid = p.pid
+        if !haskey(WORKER_MONITOR_TASKS, wid)
+            t = @async begin
+                try
+                    # Wait until this connection is terminated
+                    remotecall_fetch(sleep, wid, typemax(UInt64))
+                catch err
+                    if err isa ProcessExitedException
+                        lock(WORKER_MONITOR_LOCK) do
+                            d = WORKER_MONITOR_CHANS[wid]
+                            for uid in keys(d)
+                                put!(d[uid], (wid, OSProc(wid), nothing, (ProcessExitedException(wid), nothing)))
+                            end
+                            empty!(d)
+                            delete!(WORKER_MONITOR_CHANS, wid)
+                        end
+                    end
+                end
+            end
+            WORKER_MONITOR_TASKS[wid] = t
+            WORKER_MONITOR_CHANS[wid] = Dict{UInt64,RemoteChannel}()
+        end
+        WORKER_MONITOR_CHANS[wid][state.uid] = state.chan
     end
 
     # Setup worker-to-scheduler channels
@@ -178,9 +285,21 @@ function init_proc(state, p)
         state.worker_chans[p.pid] = (inp_chan, out_chan)
     end
 end
+function _cleanup_proc(uid)
+    empty!(CHUNK_CACHE) # FIXME: Should be keyed on uid!
+end
+function cleanup_proc(state, p)
+    lock(WORKER_MONITOR_LOCK) do
+        wid = p.pid
+        if haskey(WORKER_MONITOR_CHANS, wid)
+            delete!(WORKER_MONITOR_CHANS[wid], state.uid)
+            remote_do(_cleanup_proc, wid, state.uid)
+        end
+    end
+end
 
 "Process-local count of actively-executing Dagger tasks per processor type."
-const ACTIVE_TASKS = Dict{UInt64,Dict{Type,Ref{Float64}}}()
+const ACTIVE_TASKS = Dict{UInt64,Dict{Type,Ref{UInt}}}()
 const ACTIVE_TASKS_LOCK = ReentrantLock()
 
 "Process-local condition variable indicating task completion."
@@ -204,7 +323,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     master = OSProc(myid())
     @dbg timespan_start(ctx, :scheduler_init, 0, master)
 
-    chan = Channel{Any}(32)
+    chan = RemoteChannel(()->Channel(1024))
     deps = dependents(d)
     ord = order(d, noffspring(deps))
 
@@ -212,7 +331,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     state = start_state(deps, node_order, chan)
 
     # setup thunk_dict mappings
-    for node in keys(deps)
+    for node in filter(istask, keys(deps))
         state.thunk_dict[node.id] = node
         for dep in deps[node]
             state.thunk_dict[dep.id] = dep
@@ -273,13 +392,13 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         thunk_failed = false
         if res isa Exception
             if unwrap_nested_exception(res) isa Union{ProcessExitedException, Base.IOError}
-                @warn "Worker $(pid) died on thunk $thunk_id, rescheduling work"
+                @warn "Worker $(pid) died, rescheduling work"
 
                 # Remove dead worker from procs list
                 remove_dead_proc!(ctx, state, gproc)
 
                 lock(state.lock) do
-                    handle_fault(ctx, state, state.thunk_dict[thunk_id], gproc)
+                    handle_fault(ctx, state, gproc)
                 end
                 continue
             else
@@ -290,10 +409,13 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
                 end
             end
         end
+        node = state.thunk_dict[thunk_id]
         if metadata !== nothing
             state.worker_pressure[pid][typeof(proc)] = metadata.pressure
+            state.worker_loadavg[pid] = metadata.loadavg
+            sig = signature(node, state)
+            state.function_cost_cache[sig] = (metadata.threadtime + get(state.function_cost_cache, sig, 0)) ÷ 2
         end
-        node = state.thunk_dict[thunk_id]
         state.cache[node] = res
         if node.options !== nothing && node.options.checkpoint !== nothing
             try
@@ -306,11 +428,15 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         # FIXME: Move log start and lock to before error check
         @dbg timespan_start(ctx, :finish, thunk_id, master)
         lock(state.lock) do
-            finish_task!(state, node, thunk_failed)
+            finish_task!(ctx, state, node, thunk_failed)
         end
         @dbg timespan_end(ctx, :finish, thunk_id, master)
 
         safepoint(state)
+    end
+    state.halt[] = true
+    @sync for p in procs_to_use(ctx)
+        @async cleanup_proc(state, p)
     end
     value = state.cache[d] # TODO: move(OSProc(), state.cache[d])
     if d in state.errored
@@ -337,60 +463,158 @@ end
 
 check_integrity(ctx) = @assert !isempty(procs_to_use(ctx)) "No suitable workers available in context."
 
+struct SchedulingException <: Exception
+    reason::String
+end
+function Base.show(io::IO, se::SchedulingException)
+    print(io, "SchedulingException ($(se.reason))")
+end
+
+const CHUNK_CACHE = Dict{Chunk,Dict{Processor,Any}}()
+
 function schedule!(ctx, state, procs=procs_to_use(ctx))
     lock(state.lock) do
         safepoint(state)
         @assert length(procs) > 0
-        proc_keys = map(x->x.pid, procs)
-        proc_set = Set{Any}()
-        for p in proc_keys
-            for proc in get_processors(OSProc(p))
-                push!(proc_set, p=>proc)
-            end
-        end
-        failed_scheduling = Thunk[]
-        while !isempty(state.ready)
-            task = pop!(state.ready)
-            opts = merge(ctx.options, task.options)
-            proclist = opts.proclist
-            proc_set_useable = if proclist === nothing
-                filter(x->default_enabled(x[2]), proc_set)
-            elseif proclist isa Function
-                filter(x->proclist(x[2]), proc_set)
-            else
-                filter(x->typeof(x[2]) in proclist, proc_set)
-            end
-            if opts.single != 0
-                proc_set_useable = filter(x->x[1]==opts.single, proc_set_useable)
-            end
-            @assert !isempty(proc_set_useable) "No processors available, try making proclist more liberal"
-            procutil = opts.procutil
-            gproc = nothing
-            proc = nothing
-            extra_util = nothing
-            cap = nothing
-            # FIXME: Sort by lowest utilization
-            for (gp,p) in proc_set_useable
-                T = typeof(p)
-                extra_util = get(procutil, T, 1)
-                real_util = state.worker_pressure[gp][T]
-                cap = capacity(OSProc(gp), T)
-                if ((extra_util isa MaxUtilization) && (real_util > 0)) ||
-                   ((extra_util isa Real) && (extra_util + real_util > cap))
-                    continue
-                else
-                    gproc = OSProc(gp)
-                    proc = p
-                    break
+
+        # Populate the cache if empty
+        if state.procs_cache_list[] === nothing
+            current = nothing
+            for p in map(x->x.pid, procs)
+                for proc in get_processors(OSProc(p))
+                    next = ProcessorCacheEntry(OSProc(p), proc)
+                    if current === nothing
+                        current = next
+                        current.next = current
+                        state.procs_cache_list[] = current
+                    else
+                        current.next = next
+                        current = next
+                        current.next = state.procs_cache_list[]
+                    end
                 end
             end
-            if proc !== nothing
-                extra_util = extra_util isa MaxUtilization ? cap : extra_util
-                fire_task!(ctx, task, (gproc, proc), state; util=extra_util)
-                continue
+            # FIXME: Sort by lowest absolute utilization
+        end
+
+        function can_use_proc(task, gproc, proc, opts)
+            # Check against proclist
+            if opts.proclist === nothing
+                if !default_enabled(proc)
+                    return false
+                end
+            elseif opts.proclist isa Function
+                if !opts.proclist(proc)
+                    return false
+                end
+            elseif opts.proclist isa Vector
+                if !(typeof(proc) in opts.proclist)
+                    return false
+                end
             else
-                push!(failed_scheduling, task)
+                throw(SchedulingException("proclist must be a Function, Vector, or nothing"))
             end
+
+            # Check against single
+            if opts.single != 0
+                if gproc.pid != opts.single
+                    return false
+                end
+            end
+
+            return true
+        end
+        function has_capacity(p, gp, procutil, sig)
+            T = typeof(p)
+            # FIXME: MaxUtilization
+            extra_util = round(UInt, get(procutil, T, 1) * 1e9)
+            real_util = state.worker_pressure[gp][T]
+            if (T === Dagger.ThreadProc) && haskey(state.function_cost_cache, sig)
+                # Assume that the extra pressure is between estimated and measured
+                # TODO: Generalize this to arbitrary processor types
+                extra_util = min(extra_util, state.function_cost_cache[sig])
+            end
+            # TODO: update real_util based on loadavg
+            cap = state.worker_capacity[gp][T]
+            if ((extra_util isa MaxUtilization) && (real_util > 0)) ||
+               ((extra_util isa Real) && (extra_util + real_util > cap))
+                return false, cap, extra_util
+            end
+            return true, cap, extra_util
+        end
+
+        # Schedule tasks
+        to_fire = Dict{Tuple{OSProc,<:Processor},Vector{Tuple{Thunk,<:Any}}}()
+        failed_scheduling = Thunk[]
+        while !isempty(state.ready)
+            # Select a new task and get its options
+            task = pop!(state.ready)
+            opts = merge(ctx.options, task.options)
+            sig = signature(task, state)
+
+            # Try to select a processor
+            selected_entry = nothing
+            entry = state.procs_cache_list[]
+            cap, extra_util = nothing, nothing
+            procs_found = false
+            # N.B. if we only have one processor, we need to select it now
+            if can_use_proc(task, entry.gproc, entry.proc, opts)
+                has_cap, cap, extra_util = has_capacity(entry.proc, entry.gproc.pid, opts.procutil, sig)
+                if has_cap
+                    selected_entry = entry
+                else
+                    procs_found = true
+                    entry = entry.next
+                end
+            else
+                entry = entry.next
+            end
+            while selected_entry === nothing
+                if entry === state.procs_cache_list[]
+                    if procs_found
+                        push!(failed_scheduling, task)
+                        break
+                    else
+                        throw(SchedulingException("No processors available, try making proclist more liberal"))
+                    end
+                end
+
+                if can_use_proc(task, entry.gproc, entry.proc, opts)
+                    has_cap, cap, extra_util = has_capacity(entry.proc, entry.gproc.pid, opts.procutil, sig)
+                    if has_cap
+                        # Select this processor
+                        selected_entry = entry
+                    else
+                        # We could have selected it otherwise
+                        procs_found = true
+                        entry = entry.next
+                    end
+                else
+                    # Try next processor
+                    entry = entry.next
+                end
+            end
+            selected_entry === nothing && continue
+
+            # Schedule task onto proc
+            gproc, proc = entry.gproc, entry.proc
+            extra_util = extra_util isa MaxUtilization ? cap : extra_util
+            push!(get!(()->Vector{Tuple{Thunk,<:Any}}(), to_fire, (gproc, proc)), (task, extra_util))
+
+            # Progress through list
+            if ctx.options.round_robin
+                # Proceed to next entry to spread work
+                state.procs_cache_list[] = state.procs_cache_list[].next
+                continue
+            end
+            util = state.worker_pressure[gproc.pid][typeof(proc)]
+            if util >= cap
+                # Proceed to next entry due to over-pressure
+                state.procs_cache_list[] = state.procs_cache_list[].next
+            end
+        end
+        @sync for gpp in keys(to_fire)
+            @async fire_tasks!(ctx, to_fire[gpp], gpp, state)
         end
         append!(state.ready, failed_scheduling)
     end
@@ -415,10 +639,11 @@ shall_remove_proc(ctx, proc) = proc ∉ procs_to_use(ctx)
 function remove_dead_proc!(ctx, state, proc, options=ctx.options)
     @assert options.single !== proc.pid "Single worker failed, cannot continue."
     rmprocs!(ctx, [proc])
-    delete!(state.worker_procs, proc.pid)
     delete!(state.worker_pressure, proc.pid)
     delete!(state.worker_capacity, proc.pid)
+    delete!(state.worker_loadavg, proc.pid)
     delete!(state.worker_chans, proc.pid)
+    state.procs_cache_list[] = nothing
 end
 
 function pop_with_affinity!(ctx, tasks, proc)
@@ -461,53 +686,9 @@ function pop_with_affinity!(ctx, tasks, proc)
     return nothing
 end
 
-function fire_task!(ctx, thunk, (gproc, proc), state; util=1.0)
-    push!(state.running, thunk)
-    if thunk.cache && thunk.cache_ref !== nothing
-        # the result might be already cached
-        data = unrelease(thunk.cache_ref) # ask worker to keep the data around
-                                          # till this compute cycle frees it
-        if data !== nothing
-            # cache hit
-            state.cache[thunk] = data
-            thunk_failed = thunk in state.errored
-            finish_task!(state, thunk, thunk_failed; free=false)
-            return
-        else
-            # cache miss
-            thunk.cache_ref = nothing
-        end
-    end
-    if thunk.options !== nothing && thunk.options.restore !== nothing
-        try
-            result = thunk.options.restore(thunk)
-            state.cache[thunk] = result
-            finish_task!(state, thunk, false; free=false)
-            return
-        catch err
-            @error "Thunk restore failed" exception=(err,catch_backtrace())
-        end
-    end
-
-    ids = map(enumerate(thunk.inputs)) do (idx,x)
-        istask(x) ? x.id : -idx
-    end
-
-    data = map(thunk.inputs) do x
-        istask(x) ? state.cache[x] : x
-    end
-    toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
-    options = merge(ctx.options, toptions)
-    @assert (options.single == 0) || (gproc.pid == options.single)
-    sch_handle = SchedulerHandle(ThunkID(thunk.id), state.worker_chans[gproc.pid]...)
-    state.worker_pressure[gproc.pid][typeof(proc)] += util
-    async_apply((gproc, proc), thunk.id, thunk.f, data, state.chan,
-                thunk.get_result, thunk.persist, thunk.cache, thunk.meta,
-                options, ids, ctx, sch_handle, state.uid)
-end
-
-function finish_task!(state, node, thunk_failed; free=true)
+function finish_task!(ctx, state, node, thunk_failed; free=true)
     pop!(state.running, node)
+    delete!(state.running_on, node)
     if !thunk_failed
         push!(state.finished, node)
     else
@@ -538,82 +719,118 @@ function finish_task!(state, node, thunk_failed; free=true)
             delete!(state.futures, node)
         end
     end
-    # Internal clean-up
-    for inp in filter(istask, inputs(node))
+
+    # Chunk clean-up
+    to_evict = Set{Chunk}()
+    for inp in filter(t->istask(t) || (t isa Chunk), inputs(node))
         if inp in keys(state.waiting_data)
             s = state.waiting_data[inp]
             if node in s
                 pop!(s, node)
             end
             if free && isempty(s)
-                if haskey(state.cache, inp)
+                if istask(inp) && haskey(state.cache, inp)
                     _node = state.cache[inp]
+                    if _node isa Chunk
+                        push!(to_evict, _node)
+                    end
                     free!(_node, force=false, cache=(istask(inp) && inp.cache))
                     pop!(state.cache, inp)
+                elseif inp isa Chunk
+                    push!(to_evict, inp)
                 end
             end
         end
     end
+    if !isempty(to_evict)
+        @sync for w in map(p->p.pid, procs_to_use(ctx))
+            @async remote_do(evict_chunks!, w, to_evict)
+        end
+    end
 end
 
-function start_state(deps::Dict, node_order, chan)
-    state = ComputeState(rand(UInt64),
-                         deps,
-                         Set{Thunk}(),
-                         OneToMany(),
-                         OneToMany(),
-                         Vector{Thunk}(undef, 0),
-                         Dict{Thunk, Any}(),
-                         Set{Thunk}(),
-                         Dict{Int, Thunk}(),
-                         node_order,
-                         Dict{Int,OSProc}(),
-                         Dict{Int,Dict{Type,Float64}}(),
-                         Dict{Int,Dict{Type,Float64}}(),
-                         Dict{Int, Tuple{RemoteChannel,RemoteChannel}}(),
-                         Ref{Bool}(false),
-                         ReentrantLock(),
-                         Dict{Thunk, Vector{ThunkFuture}}(),
-                         Set{Thunk}(),
-                         chan)
-
-    nodes = sort(collect(keys(deps)), by=node_order)
-    # N.B. Using merge! here instead would modify deps
-    for (key,val) in deps
-        state.waiting_data[key] = copy(val)
+function evict_chunks!(chunks::Set{Chunk})
+    for chunk in chunks
+        haskey(CHUNK_CACHE, chunk) && delete!(CHUNK_CACHE, chunk)
     end
-    for k in nodes
-        if istask(k)
-            waiting = Set{Thunk}(Iterators.filter(istask, inputs(k)))
-            if isempty(waiting)
-                push!(state.ready, k)
+    nothing
+end
+
+fire_task!(ctx, thunk::Thunk, p, state; util=10^9) =
+    fire_task!(ctx, (thunk, util), p, state)
+fire_task!(ctx, (thunk, util)::Tuple{Thunk,<:Any}, p, state) =
+    fire_tasks!(ctx, [(thunk, util)], p, state)
+function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
+    to_send = []
+    for (thunk, util) in thunks
+        push!(state.running, thunk)
+        state.running_on[thunk] = gproc
+        if thunk.cache && thunk.cache_ref !== nothing
+            # the result might be already cached
+            data = unrelease(thunk.cache_ref) # ask worker to keep the data around
+                                              # till this compute cycle frees it
+            if data !== nothing
+                # cache hit
+                state.cache[thunk] = data
+                thunk_failed = thunk in state.errored
+                finish_task!(ctx, state, thunk, thunk_failed; free=false)
+                continue
             else
-                state.waiting[k] = waiting
+                # cache miss
+                thunk.cache_ref = nothing
+            end
+        end
+        if thunk.options !== nothing && thunk.options.restore !== nothing
+            try
+                result = thunk.options.restore(thunk)
+                state.cache[thunk] = result
+                finish_task!(ctx, state, thunk, false; free=false)
+                continue
+            catch err
+                @error "Thunk restore failed" exception=(err,catch_backtrace())
+            end
+        end
+
+        ids = map(enumerate(thunk.inputs)) do (idx,x)
+            istask(x) ? x.id : -idx
+        end
+
+        data = map(thunk.inputs) do x
+            istask(x) ? state.cache[x] : x
+        end
+        toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
+        options = merge(ctx.options, toptions)
+        @assert (options.single == 0) || (gproc.pid == options.single)
+        sch_handle = SchedulerHandle(ThunkID(thunk.id), state.worker_chans[gproc.pid]...)
+        state.worker_pressure[gproc.pid][typeof(proc)] += util
+
+        # FIXME: De-dup common fields (log_sink, uid, etc.)
+        push!(to_send, (util, thunk.id, thunk.f, data, thunk.get_result,
+                        thunk.persist, thunk.cache, thunk.meta, options, ids,
+                        (log_sink=ctx.log_sink, profile=ctx.profile),
+                        sch_handle, state.uid))
+    end
+    remote_do(do_tasks, gproc.pid, proc, state.chan, to_send)
+end
+
+"Executes a batch of tasks on `to_proc`."
+function do_tasks(to_proc, chan, tasks)
+    for task in tasks
+        @async begin
+            try
+                put!(chan, (myid(), to_proc, task[2], do_task(to_proc, task...)))
+            catch ex
+                bt = catch_backtrace()
+                put!(chan, (myid(), to_proc, task[2], (CapturedException(ex, bt), nothing)))
             end
         end
     end
-    state
 end
-
-function fetch_report(task)
-    try
-        fetch(task)
-    catch err
-        @static if VERSION >= v"1.1"
-            stk = Base.catch_stack(task)
-            err, frames = stk[1]
-            rethrow(CapturedException(err, frames))
-        else
-            rethrow(task.result)
-        end
-    end
-end
-
-@noinline function do_task(to_proc, thunk_id, f, data, send_result, persist, cache, meta, options, ids, ctx_vars, sch_handle, uid)
+"Executes a single task on `to_proc`."
+function do_task(to_proc, extra_util, thunk_id, f, data, send_result, persist, cache, meta, options, ids, ctx_vars, sch_handle, uid)
     ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
 
     from_proc = OSProc()
-    # TODO: Time choose_processor
     Tdata = map(x->x isa Chunk ? chunktype(x) : x, data)
 
     # Fetch inputs
@@ -623,7 +840,23 @@ end
         fetch_report.(map(Iterators.zip(data,ids)) do (x, id)
             @async begin
                 @dbg timespan_start(ctx, :move, (thunk_id, id), (f, id))
-                x = move(to_proc, x)
+                x = if x isa Chunk
+                    if haskey(CHUNK_CACHE, x)
+                        get!(CHUNK_CACHE[x], to_proc) do
+                            # TODO: Choose "closest" processor of same type first
+                            some_proc = first(keys(CHUNK_CACHE[x]))
+                            some_x = CHUNK_CACHE[x][some_proc]
+                            move(some_proc, to_proc, some_x)
+                        end
+                    else
+                        _x = move(to_proc, x)
+                        CHUNK_CACHE[x] = Dict{Processor,Any}()
+                        CHUNK_CACHE[x][to_proc] = _x
+                        _x
+                    end
+                else
+                    move(to_proc, x)
+                end
                 @dbg timespan_end(ctx, :move, (thunk_id, id), (f, id))
                 return x
             end
@@ -631,29 +864,28 @@ end
     end
 
     # Check if we'll go over capacity from running this thunk
-    extra_util = get(options.procutil, typeof(to_proc), 1)
     real_util = lock(ACTIVE_TASKS_LOCK) do
-        AT = get!(()->Dict{Type,Ref{Float64}}(), ACTIVE_TASKS, uid)
-        get!(()->Ref{Float64}(0.0), AT, typeof(to_proc))
+        AT = get!(()->Dict{Type,Ref{UInt}}(), ACTIVE_TASKS, uid)
+        get!(()->Ref{UInt}(UInt(0)), AT, typeof(to_proc))
     end
-    cap = Float64(capacity(OSProc(), typeof(to_proc)))
+    cap = UInt(capacity(OSProc(), typeof(to_proc))) * UInt(1e9)
     while true
         lock(ACTIVE_TASKS_LOCK)
         if ((extra_util isa MaxUtilization) && (real_util[] > 0)) ||
            ((extra_util isa Real) && (extra_util + real_util[] > cap))
             # Fully subscribed, wait and re-check
-            @debug "($(myid())) $f Waiting for free $(typeof(to_proc)): $extra_util | $(real_util[])/$cap"
+            @debug "($(myid())) $f ($thunk_id) Waiting for free $(typeof(to_proc)): $extra_util | $(real_util[])/$cap"
             unlock(ACTIVE_TASKS_LOCK)
             wait(TASK_SYNC)
         else
             # Under-subscribed, calculate extra utilization and execute thunk
-            @debug "($(myid())) Using available $to_proc: $extra_util | $(real_util[])/$cap"
+            @debug "($(myid())) ($thunk_id) Using available $to_proc: $extra_util | $(real_util[])/$cap"
             extra_util = if extra_util isa MaxUtilization
                 count(c->typeof(c)===typeof(to_proc), children(from_proc))
             else
                 extra_util
             end
-            real_util[] += Float64(extra_util)
+            real_util[] += extra_util
             unlock(ACTIVE_TASKS_LOCK)
             break
         end
@@ -661,6 +893,7 @@ end
 
     @dbg timespan_start(ctx, :compute, thunk_id, (f, to_proc))
     res = nothing
+    threadtime_start = cputhreadtime()
     result_meta = try
         # Set TLS variables
         Dagger.set_tls!((
@@ -679,28 +912,19 @@ end
         bt = catch_backtrace()
         RemoteException(myid(), CapturedException(ex, bt))
     end
+    threadtime = cputhreadtime() - threadtime_start
     @dbg timespan_end(ctx, :compute, thunk_id, (f, to_proc))
     lock(ACTIVE_TASKS_LOCK) do
-        real_util[] -= Float64(extra_util)
+        real_util[] -= extra_util
     end
-    @debug "($(myid())) Releasing $(typeof(to_proc)): $extra_util | $(real_util[])/$cap"
+    @debug "($(myid())) ($thunk_id) Releasing $(typeof(to_proc)): $extra_util | $(real_util[])/$cap"
     notify(TASK_SYNC)
-    metadata = (pressure=real_util[],)
+    metadata = (
+        pressure=real_util[],
+        loadavg=((Sys.loadavg()...,) ./ Sys.CPU_THREADS),
+        threadtime=threadtime,
+    )
     (result_meta, metadata)
-end
-
-@noinline function async_apply((gp,p), thunk_id, f, data, chan, send_res, persist, cache, meta, options, ids, ctx, sch_handle, uid)
-    @async begin
-        try
-            put!(chan, (gp.pid, p, thunk_id, remotecall_fetch(do_task, gp.pid, p, thunk_id, f, data,
-                                                          send_res, persist, cache, meta, options, ids,
-                                                          (log_sink=ctx.log_sink, profile=ctx.profile), sch_handle, uid)))
-        catch ex
-            bt = catch_backtrace()
-            put!(chan, (gp.pid, p, thunk_id, (CapturedException(ex, bt), nothing)))
-        end
-        nothing
-    end
 end
 
 end # module Sch
