@@ -10,7 +10,8 @@ unwrap_nested_exception(err::RemoteException) =
 unwrap_nested_exception(err) = err
 
 "Prepares the scheduler to schedule `thunk`."
-function reschedule_inputs!(state, thunk)
+function reschedule_inputs!(state, thunk, seen=Dict{Thunk,Bool}())
+    haskey(seen, thunk) && return seen[thunk]
     w = get!(()->Set{Thunk}(), state.waiting, thunk)
     scheduled = false
     for input in thunk.inputs
@@ -26,14 +27,17 @@ function reschedule_inputs!(state, thunk)
         haskey(state.cache, input) && continue
         if (input in state.running) ||
            (input in state.ready) ||
-           reschedule_inputs!(state, input)
+           reschedule_inputs!(state, input, seen)
             push!(w, input)
             scheduled = true
+        else
+            error("Failed to reschedule $(input.id) for $(thunk.id)")
         end
     end
     if isempty(w) && !(thunk in state.errored)
         # Inputs are ready
         push!(state.ready, thunk)
+        delete!(state.waiting, thunk)
         return true
     else
         return scheduled

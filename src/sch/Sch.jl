@@ -51,6 +51,7 @@ Fields:
 - ready::Vector{Thunk} - The list of `Thunk`s that are ready to execute
 - cache::Dict{Thunk, Any} - Maps from a finished `Thunk` to it's cached result, often a DRef
 - running::Set{Thunk} - The set of currently-running `Thunk`s
+- running_on::Dict{Thunk,OSProc} - Map from `Thunk` to the OS process executing it
 - thunk_dict::Dict{Int, Any} - Maps from thunk IDs to a `Thunk`
 - node_order::Any - Function that returns the order of a thunk
 - worker_pressure::Dict{Int,Dict{Type,UInt}} - Cache of worker pressure
@@ -74,6 +75,7 @@ struct ComputeState
     ready::Vector{Thunk}
     cache::Dict{Thunk, Any}
     running::Set{Thunk}
+    running_on::Dict{Thunk,OSProc}
     thunk_dict::Dict{Int, Any}
     node_order::Any
     worker_pressure::Dict{Int,Dict{Type,UInt}}
@@ -98,6 +100,7 @@ function start_state(deps::Dict, node_order, chan)
                          Vector{Thunk}(undef, 0),
                          Dict{Thunk, Any}(),
                          Set{Thunk}(),
+                         Dict{Thunk,OSProc}(),
                          Dict{Int, Thunk}(),
                          node_order,
                          Dict{Int,Dict{Type,UInt}}(),
@@ -389,7 +392,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         thunk_failed = false
         if res isa Exception
             if unwrap_nested_exception(res) isa Union{ProcessExitedException, Base.IOError}
-                @warn "Worker $(pid) died on thunk $thunk_id, rescheduling work"
+                @warn "Worker $(pid) died, rescheduling work"
 
                 # Remove dead worker from procs list
                 remove_dead_proc!(ctx, state, gproc)
@@ -640,6 +643,7 @@ function remove_dead_proc!(ctx, state, proc, options=ctx.options)
     delete!(state.worker_capacity, proc.pid)
     delete!(state.worker_loadavg, proc.pid)
     delete!(state.worker_chans, proc.pid)
+    state.procs_cache_list[] = nothing
 end
 
 function pop_with_affinity!(ctx, tasks, proc)
@@ -684,6 +688,7 @@ end
 
 function finish_task!(ctx, state, node, thunk_failed; free=true)
     pop!(state.running, node)
+    delete!(state.running_on, node)
     if !thunk_failed
         push!(state.finished, node)
     else
@@ -759,6 +764,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
     to_send = []
     for (thunk, util) in thunks
         push!(state.running, thunk)
+        state.running_on[thunk] = gproc
         if thunk.cache && thunk.cache_ref !== nothing
             # the result might be already cached
             data = unrelease(thunk.cache_ref) # ask worker to keep the data around
