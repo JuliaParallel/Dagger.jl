@@ -101,6 +101,7 @@ struct OSProc <: Processor
     end
 end
 const OSPROC_CACHE = Dict{Int,Vector{Processor}}()
+get_parent(proc::OSProc) = proc
 children(proc::OSProc) = OSPROC_CACHE[proc.pid]
 function get_proc_hierarchy()
     children = Processor[]
