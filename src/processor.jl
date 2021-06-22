@@ -158,11 +158,17 @@ iscompatible_arg(proc::ThreadProc, opts, x) = true
 @static if VERSION >= v"1.3.0-DEV.573"
     function execute!(proc::ThreadProc, f, args...)
         tls = get_tls()
-        task = Threads.@spawn begin
+        task = Task() do
             set_tls!(tls)
             prof_task_put!(tls.sch_handle.thunk_id.id)
             f(args...)
         end
+        ret = ccall(:jl_set_task_tid, Cint, (Any, Cint), task, proc.tid-1)
+        if ret == 0
+            error("jl_set_task_tid == 0")
+        end
+        @assert Threads.threadid(task) == proc.tid
+        schedule(task)
         try
             fetch(task)
         catch err
