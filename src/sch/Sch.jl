@@ -60,8 +60,8 @@ Fields:
 - `worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}` - Communication channels between the scheduler and each worker
 - `procs_cache_list::Base.RefValue{Union{ProcessorCacheEntry,Nothing}}` - Cached linked list of processors ready to be used
 - `function_cost_cache::Dict{Type{<:Tuple},UInt}` - Cache of estimated CPU time required to compute the given signature
-- `halt::Base.RefValue{Bool}` - Flag indicating, when set, that the scheduler should halt immediately
-- `lock::ReentrantLock()` - Lock around operations which modify the state
+- `halt::Base.Event` - Event indicating that the scheduler is halting
+- `lock::ReentrantLock` - Lock around operations which modify the state
 - `futures::Dict{Thunk, Vector{ThunkFuture}}` - Futures registered for waiting on the result of a thunk.
 - `errored::Set{Thunk}` - Thunks that threw an error
 - `chan::RemoteChannel{Channel{Any}}` - Channel for receiving completed thunks
@@ -84,7 +84,7 @@ struct ComputeState
     worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}
     procs_cache_list::Base.RefValue{Union{ProcessorCacheEntry,Nothing}}
     function_cost_cache::Dict{Type{<:Tuple},UInt}
-    halt::Base.RefValue{Bool}
+    halt::Base.Event
     lock::ReentrantLock
     futures::Dict{Thunk, Vector{ThunkFuture}}
     errored::Set{Thunk}
@@ -109,7 +109,7 @@ function start_state(deps::Dict, node_order, chan)
                          Dict{Int, Tuple{RemoteChannel,RemoteChannel}}(),
                          Ref{Union{ProcessorCacheEntry,Nothing}}(nothing),
                          Dict{Type{<:Tuple},UInt}(),
-                         Ref{Bool}(false),
+                         Base.Event(),
                          ReentrantLock(),
                          Dict{Thunk, Vector{ThunkFuture}}(),
                          Set{Thunk}(),
@@ -441,7 +441,9 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
 
         safepoint(state)
     end
-    state.halt[] = true
+    @assert !isready(state.chan)
+    close(state.chan)
+    notify(state.halt)
     @sync for p in procs_to_use(ctx)
         @async cleanup_proc(state, p)
     end

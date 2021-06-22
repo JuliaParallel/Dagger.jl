@@ -25,7 +25,7 @@ struct DynamicThunkException <: Exception
 end
 
 function safepoint(state)
-    if state.halt[]
+    if state.halt.set
         # Force dynamic thunks and listeners to terminate
         for (inp_chan,out_chan) in values(state.worker_chans)
             close(inp_chan)
@@ -39,10 +39,11 @@ end
 "Processes dynamic messages from worker-executing thunks."
 function dynamic_listener!(ctx, state)
     task = current_task() # The scheduler's main task
+    listener_tasks = Task[]
     for tid in keys(state.worker_chans)
         inp_chan, out_chan = state.worker_chans[tid]
-        @async begin
-            while isopen(inp_chan)
+        push!(listener_tasks, @async begin
+            while isopen(inp_chan) && !state.halt.set
                 tid, f, data = try
                     take!(inp_chan)
                 catch err
@@ -70,6 +71,14 @@ function dynamic_listener!(ctx, state)
                     end
                 end
             end
+        end)
+    end
+    @async begin
+        wait(state.halt)
+        for ltask in listener_tasks
+            # TODO: Not sure why we need the @async here, but otherwise we
+            # don't stop all the listener tasks
+            @async Base.throwto(ltask, SchedulerHaltedException())
         end
     end
 end
@@ -91,7 +100,7 @@ end
 "Commands the scheduler to halt execution immediately."
 halt!(h::SchedulerHandle) = exec!(_halt, h, nothing)
 function _halt(ctx, state, task, tid, _)
-    state.halt[] = true
+    notify(state.halt)
     put!(state.chan, (1, nothing, SchedulerHaltedException(), nothing))
     Base.throwto(task, SchedulerHaltedException())
 end
