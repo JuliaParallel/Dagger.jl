@@ -5,7 +5,8 @@ import Dagger: @par, @spawn, spawn
     function dynamic_fib(n)
         n <= 1 && return n
         t = Dagger.spawn(dynamic_fib, n-1)
-        return (fetch(t)::Int) + dynamic_fib(n-2)
+        y = dynamic_fib(n-2)
+        return (fetch(t)::Int) + y
     end
 end
 
@@ -147,6 +148,6 @@ end
         @test fetch(a) == 3
 
         # Mild stress-test
-        @test fetch(dynamic_fib(10)) == 55
+        @test dynamic_fib(10) == 55
     end
 end
