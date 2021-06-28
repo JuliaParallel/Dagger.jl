@@ -4,7 +4,7 @@ using Distributed
 import MemPool: DRef
 
 import ..Dagger
-import ..Dagger: Context, Processor, Thunk, ThunkFuture, ThunkFailedException, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, capacity, chunktype, default_enabled, get_processors, execute!, rmprocs!, addprocs!, thunk_processor
+import ..Dagger: Context, Processor, Thunk, ThunkFuture, ThunkFailedException, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, unwrap_weak, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, capacity, chunktype, default_enabled, get_processors, execute!, rmprocs!, addprocs!, thunk_processor
 
 const OneToMany = Dict{Thunk, Set{Thunk}}
 
@@ -61,8 +61,8 @@ Fields:
 - `halt::Base.Event` - Event indicating that the scheduler is halting
 - `lock::ReentrantLock` - Lock around operations which modify the state
 - `futures::Dict{Thunk, Vector{ThunkFuture}}` - Futures registered for waiting on the result of a thunk.
-- `errored::Set{Thunk}` - Thunks that threw an error
-- `chan::RemoteChannel{Channel{Any}}` - Channel for receiving completed thunks
+- `errored::WeakKeyDict{Thunk,Bool}` - Indicates if a thunk's result is due to an error.
+- `chan::RemoteChannel{Channel{Any}}` - Channel for receiving completed thunks.
 """
 struct ComputeState
     uid::UInt64
@@ -83,7 +83,7 @@ struct ComputeState
     halt::Base.Event
     lock::ReentrantLock
     futures::Dict{Thunk, Vector{ThunkFuture}}
-    errored::Set{Thunk}
+    errored::WeakKeyDict{Thunk,Bool}
     chan::RemoteChannel{Channel{Any}}
 end
 
@@ -106,7 +106,7 @@ function start_state(deps::Dict, node_order, chan)
                          Base.Event(),
                          ReentrantLock(),
                          Dict{Thunk, Vector{ThunkFuture}}(),
-                         Set{Thunk}(),
+                         WeakKeyDict{Thunk,Bool}(),
                          chan)
 
     for k in sort(collect(keys(deps)), by=node_order)
@@ -417,6 +417,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
             state.function_cost_cache[sig] = (metadata.threadtime + get(state.function_cost_cache, sig, 0)) ÷ 2
         end
         state.cache[node] = res
+        state.errored[node] = thunk_failed
         if node.options !== nothing && node.options.checkpoint !== nothing
             try
                 node.options.checkpoint(node, res)
@@ -441,7 +442,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         @async cleanup_proc(state, p)
     end
     value = state.cache[d] # TODO: move(OSProc(), state.cache[d])
-    if d in state.errored
+    if state.errored[d]
         throw(value)
     end
     if options.checkpoint !== nothing
@@ -551,6 +552,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         while !isempty(state.ready)
             # Select a new task and get its options
             task = pop!(state.ready)
+            @assert !haskey(state.cache, task)
             opts = merge(ctx.options, task.options)
             sig = signature(task, state)
 
@@ -688,39 +690,39 @@ function pop_with_affinity!(ctx, tasks, proc)
     return nothing
 end
 
-function finish_task!(ctx, state, node, thunk_failed; free=true)
+function finish_task!(ctx, state, node, thunk_failed)
     pop!(state.running, node)
     delete!(state.running_on, node)
     if thunk_failed
         set_failed!(state, node)
     end
-    if istask(node) && node.cache
+    if node.cache
         node.cache_ref = state.cache[node]
     end
-    if !thunk_failed
-        for dep in sort!(collect(state.waiting_data[node]), by=state.node_order)
-            dep_isready = if haskey(state.waiting, dep)
-                set = state.waiting[dep]
-                node in set && pop!(set, node)
-                isempty(set)
-            else
-                true
-            end
+    for dep in sort!(collect(get(()->Set{Thunk}(), state.waiting_data, node)), by=state.node_order)
+        dep_isready = false
+        if haskey(state.waiting, dep)
+            set = state.waiting[dep]
+            node in set && pop!(set, node)
+            dep_isready = isempty(set)
             if dep_isready
-                haskey(state.waiting, dep) && pop!(state.waiting, dep)
+                delete!(state.waiting, dep)
+            end
+        else
+            dep_isready = true
+        end
+        if dep_isready
+            if !thunk_failed
                 push!(state.ready, dep)
             end
         end
-        if isempty(state.waiting_data[node])
-            delete!(state.waiting_data, node)
+    end
+    if haskey(state.futures, node)
+        # Notify any listening thunks
+        for future in state.futures[node]
+            put!(future, state.cache[node]; error=thunk_failed)
         end
-        if haskey(state.futures, node)
-            # Notify any listening thunks
-            for future in state.futures[node]
-                put!(future, state.cache[node])
-            end
-            delete!(state.futures, node)
-        end
+        delete!(state.futures, node)
     end
 
     # Chunk clean-up
@@ -731,20 +733,25 @@ function finish_task!(ctx, state, node, thunk_failed; free=true)
             if node in w
                 pop!(w, node)
             end
-            if #=free &&=# isempty(w)
+            if isempty(w)
                 delete!(state.waiting_data, inp)
                 if istask(inp) && haskey(state.cache, inp)
                     _node = state.cache[inp]
                     if _node isa Chunk
                         push!(to_evict, _node)
                     end
-                    #free!(_node, force=false, cache=(istask(inp) && inp.cache))
-                    pop!(state.cache, inp)
+                    GC.@preserve inp begin
+                        pop!(state.cache, inp)
+                        pop!(state.errored, inp)
+                    end
                 elseif inp isa Chunk
                     push!(to_evict, inp)
                 end
             end
         end
+    end
+    if haskey(state.waiting_data, node) && isempty(state.waiting_data[node])
+        delete!(state.waiting_data, node)
     end
     if !isempty(to_evict)
         @sync for w in map(p->p.pid, procs_to_use(ctx))
@@ -776,8 +783,8 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
             if data !== nothing
                 # cache hit
                 state.cache[thunk] = data
-                thunk_failed = thunk in state.errored
-                finish_task!(ctx, state, thunk, thunk_failed; free=false)
+                thunk_failed = state.errored[thunk]
+                finish_task!(ctx, state, thunk, thunk_failed)
                 continue
             else
                 # cache miss
@@ -788,7 +795,8 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
             try
                 result = thunk.options.restore(thunk)
                 state.cache[thunk] = result
-                finish_task!(ctx, state, thunk, false; free=false)
+                state.errored[thunk] = false
+                finish_task!(ctx, state, thunk, false)
                 continue
             catch err
                 @error "Thunk restore failed" exception=(err,catch_backtrace())

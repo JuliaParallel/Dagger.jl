@@ -124,9 +124,8 @@ function _register_future!(ctx, state, task, tid, (future, id))
     dominates(target, t) = (t == target) || any(_t->dominates(target, _t), filter(istask, unwrap_weak.(t.inputs)))
     !dominates(ownthunk, thunk) || throw(DynamicThunkException("Cannot fetch result of dominated thunk"))
     # TODO: Assert that future will be fulfilled
-    if haskey(state.cache, thunk) || thunk in state.errored
-        error = thunk in state.errored
-        put!(future, state.cache[thunk]; error=error)
+    if haskey(state.cache, thunk)
+        put!(future, state.cache[thunk]; error=state.errored[thunk])
     else
         futures = get!(()->ThunkFuture[], state.futures, thunk)
         push!(futures, future)
@@ -156,14 +155,6 @@ function _get_dag_ids(ctx, state, task, tid, _)
     deps
 end
 
-struct WeakThunk
-    x::WeakRef
-    WeakThunk(t::Thunk) = new(WeakRef(t))
-end
-Dagger.istask(::WeakThunk) = true
-unwrap_weak(t::WeakThunk) = t.x.value
-unwrap_weak(t) = t
-
 "Adds a new Thunk to the DAG."
 add_thunk!(f, h::SchedulerHandle, args...; future=nothing, kwargs...) =
     ThunkID(exec!(_add_thunk!, h, f, args, kwargs, future))
@@ -171,7 +162,7 @@ function _add_thunk!(ctx, state, task, tid, (f, args, kwargs, future))
     _args = map(arg->arg isa ThunkID ? Dagger.WeakThunk(state.thunk_dict[arg.id]) : arg, args)
     thunk = Thunk(f, _args...; kwargs...)
     state.thunk_dict[thunk.id] = thunk
-    reschedule_inputs!(state, thunk)
+    @assert reschedule_inputs!(state, thunk)
     if future !== nothing
         # Ensure we attach a future before the thunk is scheduled
         _register_future!(ctx, state, task, tid, (future, thunk.id))
