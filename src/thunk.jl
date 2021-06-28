@@ -157,9 +157,10 @@ Returned from `spawn`/`@spawn` calls. Represents a task that is in the
 scheduler, potentially ready to execute, executing, or finished executing. May
 be `fetch`'d or `wait`'d on at any time.
 """
-struct EagerThunk
-    future::ThunkFuture
+mutable struct EagerThunk
     uid::Int
+    future::ThunkFuture
+    ref::DRef
 end
 Base.isready(t::EagerThunk) = isready(t.future)
 Base.wait(t::EagerThunk) = wait(t.future)
@@ -168,6 +169,26 @@ function Base.show(io::IO, t::EagerThunk)
     print(io, "EagerThunk ($(isready(t) ? "finished" : "running"))")
 end
 
+"When finalized, cleans-up the associated `EagerThunk`."
+mutable struct EagerThunkFinalizer
+    uid::Int
+    function EagerThunkFinalizer(uid)
+        x = new(uid)
+        finalizer(Sch.eager_cleanup, x)
+        x
+    end
+end
+
+function _spawn(f, args...; kwargs...)
+    Dagger.Sch.init_eager()
+    uid = rand(UInt)
+    future = ThunkFuture()
+    ref = poolset(EagerThunkFinalizer(uid))
+    ev = Base.Event()
+    put!(Dagger.Sch.EAGER_THUNK_CHAN, (ev, future, uid, f, (args...,), (kwargs...,)))
+    wait(ev)
+    return (uid, future, ref)
+end
 """
     spawn(f, args...; kwargs...) -> EagerThunk
 
@@ -175,15 +196,12 @@ Spawns a task with `f` as the function and `args` as the arguments, returning
 an `EagerThunk`. Uses a scheduler running in the background to execute code.
 """
 function spawn(f, args...; kwargs...)
-    if myid() == 1
-        Dagger.Sch.init_eager()
-        future = ThunkFuture()
-        uid = next_id()
-        put!(Dagger.Sch.EAGER_THUNK_CHAN, (future, uid, f, (args...,), (kwargs...,)))
-        EagerThunk(future, uid)
+    uid, future, ref = if myid() == 1
+        _spawn(f, args...; kwargs...)
     else
-        remotecall_fetch(spawn, 1, f, args...; kwargs...)
+        remotecall_fetch(_spawn, 1, f, args...; kwargs...)
     end
+    return EagerThunk(uid, future, ref)
 end
 
 """

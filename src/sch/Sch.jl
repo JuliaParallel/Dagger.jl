@@ -44,8 +44,6 @@ The internal state-holding struct of the scheduler.
 
 Fields:
 - `uid::UInt64` - Unique identifier for this scheduler instance
-- `dependents::Dict{Union{Thunk,Chunk},Set{Thunk}}` - The result of calling `dependents` on the DAG
-- `finished::Set{Thunk}` - The set of completed `Thunk`s
 - `waiting::OneToMany` - Map from downstream `Thunk` to upstream `Thunk`s that still need to execute
 - `waiting_data::Dict{Union{Thunk,Chunk},Set{Thunk}}` - Map from input `Chunk`/upstream `Thunk` to all unfinished downstream `Thunk`s, to retain caches
 - `ready::Vector{Thunk}` - The list of `Thunk`s that are ready to execute
@@ -68,12 +66,10 @@ Fields:
 """
 struct ComputeState
     uid::UInt64
-    dependents::Dict{Union{Thunk,Chunk},Set{Thunk}}
-    finished::Set{Thunk}
     waiting::OneToMany
     waiting_data::Dict{Union{Thunk,Chunk},Set{Thunk}}
     ready::Vector{Thunk}
-    cache::Dict{Thunk, Any}
+    cache::WeakKeyDict{Thunk, Any}
     running::Set{Thunk}
     running_on::Dict{Thunk,OSProc}
     thunk_dict::Dict{Int, Any}
@@ -93,10 +89,8 @@ end
 
 function start_state(deps::Dict, node_order, chan)
     state = ComputeState(rand(UInt64),
-                         deps,
-                         Set{Thunk}(),
                          OneToMany(),
-                         Dict{Union{Thunk,Chunk},Set{Thunk}}(),
+                         deps,
                          Vector{Thunk}(undef, 0),
                          Dict{Thunk, Any}(),
                          Set{Thunk}(),
@@ -115,12 +109,7 @@ function start_state(deps::Dict, node_order, chan)
                          Set{Thunk}(),
                          chan)
 
-    nodes = sort(collect(keys(deps)), by=node_order)
-    # N.B. Using merge! here instead would modify deps
-    for (key,val) in deps
-        state.waiting_data[key] = copy(val)
-    end
-    for k in nodes
+    for k in sort(collect(keys(deps)), by=node_order)
         if istask(k)
             waiting = Set{Thunk}(Iterators.filter(istask, inputs(k)))
             if isempty(waiting)
@@ -392,7 +381,11 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         end
 
         isempty(state.running) && continue
-        pid, proc, thunk_id, (res, metadata) = take!(chan) # get result of completed thunk
+        chan_value = take!(chan) # get result of completed thunk
+        if chan_value isa RescheduleSignal
+            continue
+        end
+        pid, proc, thunk_id, (res, metadata) = chan_value
         gproc = OSProc(pid)
         lock(newtasks_lock) # This waits for any assign_new_procs! above to complete and then shuts down the task
         safepoint(state)
@@ -698,32 +691,33 @@ end
 function finish_task!(ctx, state, node, thunk_failed; free=true)
     pop!(state.running, node)
     delete!(state.running_on, node)
-    if !thunk_failed
-        push!(state.finished, node)
-    else
+    if thunk_failed
         set_failed!(state, node)
     end
     if istask(node) && node.cache
         node.cache_ref = state.cache[node]
     end
     if !thunk_failed
-        for dep in sort!(collect(state.dependents[node]), by=state.node_order)
-            set = state.waiting[dep]
-            node in set && pop!(set, node)
-            if isempty(set)
-                pop!(state.waiting, dep)
+        for dep in sort!(collect(state.waiting_data[node]), by=state.node_order)
+            dep_isready = if haskey(state.waiting, dep)
+                set = state.waiting[dep]
+                node in set && pop!(set, node)
+                isempty(set)
+            else
+                true
+            end
+            if dep_isready
+                haskey(state.waiting, dep) && pop!(state.waiting, dep)
                 push!(state.ready, dep)
             end
-            # todo: free data
+        end
+        if isempty(state.waiting_data[node])
+            delete!(state.waiting_data, node)
         end
         if haskey(state.futures, node)
             # Notify any listening thunks
             for future in state.futures[node]
-                if istask(node) && haskey(state.cache, node)
-                    put!(future, state.cache[node])
-                else
-                    put!(future, nothing)
-                end
+                put!(future, state.cache[node])
             end
             delete!(state.futures, node)
         end
@@ -731,19 +725,20 @@ function finish_task!(ctx, state, node, thunk_failed; free=true)
 
     # Chunk clean-up
     to_evict = Set{Chunk}()
-    for inp in filter(t->istask(t) || (t isa Chunk), inputs(node))
+    for inp in filter(t->istask(t) || (t isa Chunk), unwrap_weak.(node.inputs))
         if inp in keys(state.waiting_data)
-            s = state.waiting_data[inp]
-            if node in s
-                pop!(s, node)
+            w = state.waiting_data[inp]
+            if node in w
+                pop!(w, node)
             end
-            if free && isempty(s)
+            if #=free &&=# isempty(w)
+                delete!(state.waiting_data, inp)
                 if istask(inp) && haskey(state.cache, inp)
                     _node = state.cache[inp]
                     if _node isa Chunk
                         push!(to_evict, _node)
                     end
-                    free!(_node, force=false, cache=(istask(inp) && inp.cache))
+                    #free!(_node, force=false, cache=(istask(inp) && inp.cache))
                     pop!(state.cache, inp)
                 elseif inp isa Chunk
                     push!(to_evict, inp)
@@ -801,11 +796,11 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
         end
 
         ids = map(enumerate(thunk.inputs)) do (idx,x)
-            istask(x) ? x.id : -idx
+            istask(x) ? unwrap_weak(x).id : -idx
         end
 
         data = map(thunk.inputs) do x
-            istask(x) ? state.cache[x] : x
+            istask(x) ? state.cache[unwrap_weak(x)] : x
         end
         toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
         options = merge(ctx.options, toptions)
@@ -831,7 +826,8 @@ function do_tasks(to_proc, chan, tasks)
     for task in tasks
         @async begin
             try
-                put!(chan, (myid(), to_proc, task[2], do_task(to_proc, task...)))
+                result = do_task(to_proc, task...)
+                put!(chan, (myid(), to_proc, task[2], result))
             catch ex
                 bt = catch_backtrace()
                 put!(chan, (myid(), to_proc, task[2], (CapturedException(ex, bt), nothing)))

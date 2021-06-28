@@ -1,7 +1,8 @@
 const EAGER_INIT = Ref{Bool}(false)
 const EAGER_THUNK_CHAN = Channel(typemax(Int))
-const EAGER_THUNK_MAP = Dict{Int,Int}()
+const EAGER_ID_MAP = Dict{UInt,Int}()
 const EAGER_CONTEXT = Ref{Context}()
+const EAGER_STATE = Ref{ComputeState}()
 
 eager_context() = isassigned(EAGER_CONTEXT) ? EAGER_CONTEXT[] : nothing
 
@@ -66,15 +67,21 @@ end
 function eager_thunk()
     h = sch_handle()
     util = Dagger.get_tls().utilization
+    exec!(h) do ctx, state, task, tid, _
+        EAGER_STATE[] = state
+    end
     # Don't apply pressure from this thunk
     adjust_pressure!(h, Dagger.ThreadProc, -util)
     while isopen(EAGER_THUNK_CHAN)
         try
-            future, uid, f, args, opts = take!(EAGER_THUNK_CHAN)
-            args = map(x->x isa Dagger.EagerThunk ? ThunkID(EAGER_THUNK_MAP[x.uid]) : x, args)
-            tid = add_thunk!(f, h, args...; opts...)
-            register_future!(h, tid, future)
-            EAGER_THUNK_MAP[uid] = tid.id
+            ev, future, uid, f, args, opts = take!(EAGER_THUNK_CHAN)
+            # preserve inputs until they enter the scheduler
+            tid = GC.@preserve args begin
+                args = map(x->x isa Dagger.EagerThunk ? ThunkID(EAGER_ID_MAP[x.uid]) : x, args)
+                add_thunk!(f, h, args...; future=future, opts...)
+            end
+            EAGER_ID_MAP[uid] = tid.id
+            notify(ev)
         catch err
             iob = IOContext(IOBuffer(), :color=>true)
             println(iob, "Error in eager listener:")
@@ -84,5 +91,20 @@ function eager_thunk()
             seek(iob.io, 0)
             write(stderr, iob)
         end
+    end
+end
+
+eager_cleanup(t::Dagger.EagerThunkFinalizer) =
+    @async eager_cleanup(EAGER_STATE[], t.uid)
+function eager_cleanup(state, uid)
+    lock(state.lock) do
+        if !haskey(EAGER_ID_MAP, uid)
+            return
+        end
+        tid = EAGER_ID_MAP[uid]
+        delete!(EAGER_ID_MAP, uid)
+
+        # N.B. cache and errored expire automatically
+        delete!(state.thunk_dict, tid)
     end
 end
