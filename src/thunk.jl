@@ -1,10 +1,7 @@
 export Thunk, delayed, delayedmap
 
-# TODO: Make this thread-safe
-let counter=0
-    global next_id
-    next_id() = (counter >= (1 << 30)) ? (counter = 1) : (counter += 1)
-end
+const ID_COUNTER = Threads.Atomic{Int}(1)
+next_id() = Threads.atomic_add!(ID_COUNTER, 1)
 
 # A thing to run
 mutable struct Thunk
@@ -84,6 +81,7 @@ end
 
 delayedmap(f, xs...) = map(delayed(f), xs...)
 
+"A future holding the result of a `Thunk`."
 struct ThunkFuture
     future::Future
 end
@@ -104,21 +102,41 @@ function Base.fetch(t::ThunkFuture; proc=OSProc())
 end
 Base.put!(t::ThunkFuture, x; error=false) = put!(t.future, (error, x))
 
+"A weak reference to a `Thunk`."
+struct WeakThunk
+    x::WeakRef
+    WeakThunk(t::Thunk) = new(WeakRef(t))
+end
+istask(::WeakThunk) = true
+unwrap_weak(t::WeakThunk) = t.x.value
+unwrap_weak(t) = t
+Base.show(io::IO, t::WeakThunk) = (print(io, "~"); Base.show(io, t.x.value))
+Base.convert(::Type{WeakThunk}, t::Thunk) = WeakThunk(t)
+
 struct ThunkFailedException{E<:Exception} <: Exception
-    thunk::Thunk
-    origin::Thunk
+    thunk::WeakThunk
+    origin::WeakThunk
     ex::E
 end
+ThunkFailedException(thunk, origin, ex::E) where E =
+    ThunkFailedException{E}(convert(WeakThunk, thunk), convert(WeakThunk, origin), ex)
 function Base.showerror(io::IO, ex::ThunkFailedException)
-    println(io, "$(ex.thunk) (id $(ex.thunk.id)) failure",
-                ex.thunk !== ex.origin ? " due to a failure in $(ex.origin)" : "",
+    t = unwrap_weak(ex.thunk)
+    o = unwrap_weak(ex.origin)
+    t_str = t !== nothing ? "$t" : "?"
+    o_str = o !== nothing ? "$o" : "?"
+    t_id = t !== nothing ? t.id : '?'
+    o_id = o !== nothing ? o.id : '?'
+    println(io, "ThunkFailedException ($t failure",
+                (o !== nothing && t != o) ? " due to a failure in $o)" : ")",
                 ":")
     Base.showerror(io, ex.ex)
 end
 
-struct EagerThunk
+mutable struct EagerThunk
+    uid::UInt
     future::ThunkFuture
-    uid::Int
+    ref::DRef
 end
 Base.isready(t::EagerThunk) = isready(t.future)
 Base.wait(t::EagerThunk) = wait(t.future)
@@ -127,13 +145,26 @@ function Base.show(io::IO, t::EagerThunk)
     print(io, "EagerThunk ($(isready(t) ? "finished" : "running"))")
 end
 
+"When finalized, cleans-up the associated `EagerThunk`."
+mutable struct EagerThunkFinalizer
+    uid::UInt
+    function EagerThunkFinalizer(uid)
+        x = new(uid)
+        finalizer(Sch.eager_cleanup, x)
+        x
+    end
+end
+
 function spawn(f, args...; kwargs...)
     if myid() == 1
         Dagger.Sch.init_eager()
+        uid = rand(UInt)
         future = ThunkFuture()
-        uid = next_id()
-        put!(Dagger.Sch.EAGER_THUNK_CHAN, (future, uid, f, (args...,), (kwargs...,)))
-        EagerThunk(future, uid)
+        ref = poolset(EagerThunkFinalizer(uid))
+        ev = Base.Event()
+        put!(Dagger.Sch.EAGER_THUNK_CHAN, (ev, future, uid, f, (args...,), (kwargs...,)))
+        wait(ev)
+        EagerThunk(uid, future, ref)
     else
         remotecall_fetch(spawn, 1, f, args...; kwargs...)
     end
@@ -226,7 +257,7 @@ Base.isequal(x::Thunk, y::Thunk) = x.id==y.id
 
 function Base.show(io::IO, z::Thunk)
     lvl = get(io, :lazy_level, 1)
-    print(io, "Thunk($(z.f), ")
+    print(io, "Thunk[$(z.id)]($(z.f), ")
     if lvl < 2
         show(IOContext(io, :lazy_level => lvl+1), z.inputs)
     else

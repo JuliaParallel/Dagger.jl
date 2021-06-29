@@ -81,7 +81,7 @@ end
             end
             ex = Dagger.Sch.unwrap_nested_exception(ex)
             ex_str = sprint(io->Base.showerror(io,ex))
-            @test occursin(r"^Thunk.*failure:", ex_str)
+            @test occursin(r"^ThunkFailedException \(Thunk.*failure\):", ex_str)
             @test occursin("Test", ex_str)
             @test !occursin("due to a failure in", ex_str)
 
@@ -92,7 +92,7 @@ end
             end
             ex = Dagger.Sch.unwrap_nested_exception(ex)
             ex_str = sprint(io->Base.showerror(io,ex))
-            @test occursin(r"^Thunk.*failure due to a failure in", ex_str)
+            @test occursin(r"Thunk.*failure due to a failure in", ex_str)
             @test occursin("Test", ex_str)
         end
         @testset "single dependent" begin

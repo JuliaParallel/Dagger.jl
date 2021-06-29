@@ -1,4 +1,4 @@
-import Dagger.Sch: SchedulerOptions, ThunkOptions, SchedulerHaltedException, ComputeState, sch_handle
+import Dagger.Sch: SchedulerOptions, ThunkOptions, SchedulerHaltedException, ComputeState, ThunkID, sch_handle
 
 @everywhere begin
 using Dagger
@@ -46,7 +46,7 @@ end
 function dynamic_get_dag(x...)
     h = sch_handle()
     ids = Dagger.Sch.get_dag_ids(h)
-    return (h.thunk_id, ids)
+    return ids
 end
 function dynamic_add_thunk(x)
     h = sch_handle()
@@ -333,19 +333,22 @@ end
         b = delayed(x->x+2)(a)
         c = delayed(x->x-1)(a)
         d = delayed(dynamic_get_dag)(b, c)
-        (d_id, ids) = collect(Context(), d)
+        ids = collect(Context(), d)
         @test ids isa Dict
         @test length(keys(ids)) == 4
+
+        a_id = ThunkID(a.id)
+        b_id = ThunkID(b.id)
+        c_id = ThunkID(c.id)
+        d_id = ThunkID(d.id)
+
         @test haskey(ids, d_id)
-        d_deps = ids[d_id]
-        @test length(d_deps) == 0
-        a_id = Dagger.Sch.ThunkID(d_id.id - 3) # relies on thunk ID monotonicity
-        a_deps = ids[a_id]
-        @test length(a_deps) == 2
-        i1, i2 =  pop!(a_deps), pop!(a_deps)
-        @test haskey(ids, i1)
-        @test haskey(ids, i2)
-        @test ids[pop!(ids[i1])] == ids[pop!(ids[i2])]
+        @test length(ids[d_id]) == 0 # no one waiting on our result
+        @test length(ids[a_id]) == 0 # b and c finished, our result is unneeded
+        @test length(ids[b_id]) == 1 # d is still executing
+        @test length(ids[c_id]) == 1 # d is still executing
+        @test pop!(ids[b_id]) == d_id
+        @test pop!(ids[c_id]) == d_id
     end
     @testset "Add Thunk" begin
         a = delayed(dynamic_add_thunk)(1)
@@ -387,6 +390,17 @@ function testevicted(x)
     x
 end
 end
-@testset "Caching" begin
-    compute(delayed(testevicted)(delayed(testpresent)(c1,c2)))
+@testset "Memory Retention" begin
+    @testset "Chunk Caching" begin
+        compute(delayed(testevicted)(delayed(testpresent)(c1,c2)))
+    end
+    @testset "Eager Thunk Expiration" begin
+        # FIXME: Unreliable, and some thunks still get stuck
+        # N.B. We need a few of these probably because of incremental WeakRef GC
+        @everywhere GC.gc()
+        GC.gc()
+        GC.gc()
+        # Ensure that all cache entries have expired
+        @test_broken isempty(Dagger.Sch.EAGER_STATE[].cache)
+    end
 end

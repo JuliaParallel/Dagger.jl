@@ -24,8 +24,10 @@ struct DynamicThunkException <: Exception
     reason::String
 end
 
+struct RescheduleSignal end
+
 function safepoint(state)
-    if state.halt[]
+    if state.halt.set
         # Force dynamic thunks and listeners to terminate
         for (inp_chan,out_chan) in values(state.worker_chans)
             close(inp_chan)
@@ -39,10 +41,11 @@ end
 "Processes dynamic messages from worker-executing thunks."
 function dynamic_listener!(ctx, state)
     task = current_task() # The scheduler's main task
+    listener_tasks = Task[]
     for tid in keys(state.worker_chans)
         inp_chan, out_chan = state.worker_chans[tid]
-        @async begin
-            while isopen(inp_chan)
+        push!(listener_tasks, @async begin
+            while isopen(inp_chan) && !state.halt.set
                 tid, f, data = try
                     take!(inp_chan)
                 catch err
@@ -70,6 +73,14 @@ function dynamic_listener!(ctx, state)
                     end
                 end
             end
+        end)
+    end
+    @async begin
+        wait(state.halt)
+        for ltask in listener_tasks
+            # TODO: Not sure why we need the @async here, but otherwise we
+            # don't stop all the listener tasks
+            @async Base.throwto(ltask, SchedulerHaltedException())
         end
     end
 end
@@ -91,7 +102,7 @@ end
 "Commands the scheduler to halt execution immediately."
 halt!(h::SchedulerHandle) = exec!(_halt, h, nothing)
 function _halt(ctx, state, task, tid, _)
-    state.halt[] = true
+    notify(state.halt)
     put!(state.chan, (1, nothing, SchedulerHaltedException(), nothing))
     Base.throwto(task, SchedulerHaltedException())
 end
@@ -99,30 +110,25 @@ end
 "Waits on a thunk to complete, and fetches its result."
 function Base.fetch(h::SchedulerHandle, id::ThunkID)
     future = ThunkFuture(Future(1))
-    exec!(_register_future, h, future, id.id)
+    exec!(_register_future!, h, future, id.id)
     fetch(future; proc=thunk_processor())
 end
 "Waits on a thunk to complete, and fetches its result."
 function register_future!(h::SchedulerHandle, id::ThunkID, future::ThunkFuture)
-    exec!(_register_future, h, future, id.id)
+    exec!(_register_future!, h, future, id.id)
 end
-function _register_future(ctx, state, task, tid, (future, id))
+function _register_future!(ctx, state, task, tid, (future, id))
     tid != id || throw(DynamicThunkException("Cannot fetch own result"))
     thunk = state.thunk_dict[id]
     ownthunk = state.thunk_dict[tid]
-    dominates(target, t) = (t == target) || any(_t->dominates(target, _t), filter(istask, t.inputs))
+    dominates(target, t) = (t == target) || any(_t->dominates(target, _t), filter(istask, unwrap_weak.(t.inputs)))
     !dominates(ownthunk, thunk) || throw(DynamicThunkException("Cannot fetch result of dominated thunk"))
-    if thunk in state.finished || thunk in state.errored
-        error = thunk in state.errored
-        if haskey(state.cache, thunk)
-            put!(future, state.cache[thunk]; error=error)
-        else
-            put!(future, nothing)
-        end
+    # TODO: Assert that future will be fulfilled
+    if haskey(state.cache, thunk)
+        put!(future, state.cache[thunk]; error=state.errored[thunk])
     else
         futures = get!(()->ThunkFuture[], state.futures, thunk)
         push!(futures, future)
-        schedule!(ctx, state)
     end
     nothing
 end
@@ -139,21 +145,31 @@ get_dag_ids(h::SchedulerHandle) =
     exec!(_get_dag_ids, h, nothing)::Dict{ThunkID,Set{ThunkID}}
 function _get_dag_ids(ctx, state, task, tid, _)
     deps = Dict{ThunkID,Set{ThunkID}}()
-    for (key,val) in state.dependents
-        deps[ThunkID(key.id)] = Set(map(t->ThunkID(t.id), collect(val)))
+    for (id,thunk) in state.thunk_dict
+        if haskey(state.waiting_data, thunk)
+            deps[ThunkID(id)] = Set(map(t->ThunkID(t.id), collect(state.waiting_data[thunk])))
+        else
+            deps[ThunkID(id)] = Set{ThunkID}()
+        end
     end
     deps
 end
 
 "Adds a new Thunk to the DAG."
-add_thunk!(f, h::SchedulerHandle, args...; kwargs...) =
-    ThunkID(exec!(_add_thunk!, h, f, args, kwargs))
-function _add_thunk!(ctx, state, task, tid, (f, args, kwargs))
-    _args = map(arg->arg isa ThunkID ? state.thunk_dict[arg.id] : arg, args)
+add_thunk!(f, h::SchedulerHandle, args...; future=nothing, eager=false, kwargs...) =
+    ThunkID(exec!(_add_thunk!, h, f, args, kwargs, future, eager))
+function _add_thunk!(ctx, state, task, tid, (f, args, kwargs, future, eager))
+    _args = map(arg->arg isa ThunkID ? Dagger.WeakThunk(state.thunk_dict[arg.id]) : arg, args)
     thunk = Thunk(f, _args...; kwargs...)
     state.thunk_dict[thunk.id] = thunk
-    state.dependents[thunk] = Set{Thunk}()
-    @assert reschedule_inputs!(state, thunk) || (thunk in state.errored)
-    schedule!(ctx, state)
+    @assert reschedule_inputs!(state, thunk)
+    if future !== nothing
+        # Ensure we attach a future before the thunk is scheduled
+        _register_future!(ctx, state, task, tid, (future, thunk.id))
+    end
+    put!(state.chan, RescheduleSignal())
+    if eager
+        EAGER_THUNK_MAP[thunk.id] = thunk
+    end
     return thunk.id::Int
 end
