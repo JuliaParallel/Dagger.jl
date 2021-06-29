@@ -1,10 +1,7 @@
 export Thunk, delayed, delayedmap
 
-# TODO: Make this thread-safe
-let counter=0
-    global next_id
-    next_id() = (counter >= (1 << 30)) ? (counter = 1) : (counter += 1)
-end
+const ID_COUNTER = Threads.Atomic{Int}(1)
+next_id() = Threads.atomic_add!(ID_COUNTER, 1)
 
 """
     Thunk
