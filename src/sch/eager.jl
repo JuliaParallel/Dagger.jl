@@ -35,6 +35,7 @@ function adjust_pressure!(h::SchedulerHandle, proctype::Type, pressure)
     uid = Dagger.get_tls().sch_uid
     lock(ACTIVE_TASKS_LOCK) do
         ACTIVE_TASKS[uid][proctype][] += pressure
+        notify(TASK_SYNC)
     end
     exec!(_adjust_pressure!, h, myid(), proctype, pressure)
 end
