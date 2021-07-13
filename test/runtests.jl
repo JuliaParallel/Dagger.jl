@@ -31,6 +31,7 @@ include("checkpoint.jl")
 include("domain.jl")
 include("array.jl")
 include("cache.jl")
+include("table.jl")
 try # TODO: Fault tolerance is sometimes unreliable
 include("fault-tolerance.jl")
 catch
