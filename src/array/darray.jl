@@ -4,6 +4,11 @@ import Serialization: serialize, deserialize
 
 ###### Array Domains ######
 
+"""
+    ArrayDomain{N}
+
+An `N`-dimensional domain over an array.
+"""
 struct ArrayDomain{N}
     indexes::NTuple{N, Any}
 end
@@ -176,7 +181,9 @@ function Base.isequal(x::ArrayOp, y::ArrayOp)
 end
 
 """
-`view` of a `DArray` chunk returns a `DArray` of thunks
+    view(c::DArray, d)
+
+A `view` of a `DArray` chunk returns a `DArray` of `Thunk`s.
 """
 function Base.view(c::DArray, d)
     subchunks, subdomains = lookup_parts(chunks(c), domainchunks(c), d)
@@ -234,8 +241,10 @@ end
 
 
 """
-A DArray object may contain a thunk in it, in which case
-we first turn it into a Thunk object and then compute it.
+    compute(ctx::Context, x::DArray; persist=true, options=nothing)
+
+A `DArray` object may contain a thunk in it, in which case
+we first turn it into a `Thunk` and then compute it.
 """
 function compute(ctx::Context, x::DArray; persist=true, options=nothing)
     thunk = thunkize(ctx, x, persist=persist)
@@ -247,7 +256,9 @@ function compute(ctx::Context, x::DArray; persist=true, options=nothing)
 end
 
 """
-If a DArray tree has a Thunk in it, make the whole thing a big thunk
+    thunkize(ctx::Context, c::DArray; persist=true)
+
+If a `DArray` tree has a `Thunk` in it, make the whole thing a big thunk.
 """
 function thunkize(ctx::Context, c::DArray; persist=true)
     if any(istask, chunks(c))
@@ -271,14 +282,18 @@ end
 global _stage_cache = WeakKeyDict{Context, Dict}()
 
 """
+    cached_stage(ctx::Context, x)
+
 A memoized version of stage. It is important that the
-tasks generated for the same DArray have the same
+tasks generated for the same `DArray` have the same
 identity, for example:
 
-    A = rand(Blocks(100,100), Float64, 1000, 1000)
-    compute(A+A')
+```julia
+A = rand(Blocks(100,100), Float64, 1000, 1000)
+compute(A+A')
+```
 
-must not result in computation of A twice.
+must not result in computation of `A` twice.
 """
 function cached_stage(ctx::Context, x)
     cache = if !haskey(_stage_cache, ctx)
@@ -308,6 +323,12 @@ size(x::Distribute) = size(domain(x.data))
 
 export BlockPartition, Blocks
 
+"""
+    Blocks(xs...)
+
+Indicates the size of an array operation, specified as `xs`, whose length
+indicates the number of dimensions in the resulting array.
+"""
 struct Blocks{N}
     blocksize::NTuple{N, Int}
 end

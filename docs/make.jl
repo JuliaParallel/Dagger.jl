@@ -19,6 +19,10 @@ makedocs(;
         "Logging and Graphing" => "logging.md",
         "Benchmarking" => "benchmarking.md",
         "Scheduler Internals" => "scheduler-internals.md",
+        "API" => [
+            "Types" => "api/types.md",
+            "Functions and Macros" => "api/functions.md",
+        ]
     ]
 )
 

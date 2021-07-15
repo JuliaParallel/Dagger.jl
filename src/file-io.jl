@@ -1,6 +1,11 @@
 export save, load
 using SparseArrays
 
+"""
+    FileReader
+
+Used as a `Chunk` handle for reading a file, starting at a given offset.
+"""
 mutable struct FileReader{T}
     file::AbstractString
     chunktype::Type{T}
@@ -40,7 +45,9 @@ function save(ctx, chunk::Union{Chunk, Thunk}, file_path::AbstractString)
 end
 
 """
-special case distmem writing - write to disk on the process with the chunk.
+    save(ctx, chunk, file_path)
+
+Special case distmem writing - write to disk on the process with the chunk.
 """
 function save(ctx, chunk::Chunk{X,DRef}, file_path::AbstractString) where X
     pid = chunk.handle.where

@@ -21,7 +21,7 @@ Executes the function `f` with arguments `args` on processor `proc`. This
 function can be overloaded by `Processor` subtypes to allow executing function
 calls differently than normal Julia.
 """
-execute!
+function execute! end
 
 """
     iscompatible(proc::Processor, opts, f, Targs...) -> Bool
@@ -191,16 +191,6 @@ default_enabled(proc::ThreadProc) = true
 
 # TODO: ThreadGroupProc?
 
-"A context represents a set of processors to use for an operation."
-mutable struct Context
-    procs::Vector{Processor}
-    proc_lock::ReentrantLock
-    log_sink::Any
-    log_file::Union{String,Nothing}
-    profile::Bool
-    options
-end
-
 """
     Context(;nthreads=Threads.nthreads()) -> Context
     Context(xs::Vector{OSProc}) -> Context
@@ -221,6 +211,15 @@ scheduler termination logs will be collected, combined with input thunks, and
 written out in DOT format to this location.
 - `profile::Bool`: Whether or not to perform profiling with Profile stdlib.
 """
+mutable struct Context
+    procs::Vector{Processor}
+    proc_lock::ReentrantLock
+    log_sink::Any
+    log_file::Union{String,Nothing}
+    profile::Bool
+    options
+end
+
 Context(procs::Vector{P}=Processor[OSProc(w) for w in workers()];
         proc_lock=ReentrantLock(), log_sink=NoOpLog(), log_file=nothing,
         profile=false, options=nothing) where {P<:Processor} =
@@ -277,13 +276,25 @@ rmprocs!(ctx::Context, xs::AbstractVector{<:OSProc}) = lock(ctx) do
     filter!(p -> (p ∉ xs), ctx.procs)
 end
 
-"Gets the current processor executing the current thunk."
+"""
+    thunk_processor()
+
+Get the current processor executing the current thunk.
+"""
 thunk_processor() = task_local_storage(:_dagger_processor)::Processor
 
-"Determines if we're currently in a thunk context."
+"""
+    in_thunk()
+
+Returns `true` if currently in a [`Thunk`](@ref) process, else `false`.
+"""
 in_thunk() = haskey(task_local_storage(), :_dagger_sch_uid)
 
-"Gets all Dagger TLS variables as a NamedTuple."
+"""
+    get_tls()
+
+Gets all Dagger TLS variable as a `NamedTuple`.
+"""
 get_tls() = (
     sch_uid=task_local_storage(:_dagger_sch_uid),
     sch_handle=task_local_storage(:_dagger_sch_handle),
@@ -291,7 +302,11 @@ get_tls() = (
     utilization=task_local_storage(:_dagger_utilization),
 )
 
-"Sets all Dagger TLS variables from a NamedTuple."
+"""
+    set_tls!(tls)
+
+Sets all Dagger TLS variables from the `NamedTuple` `tls`.
+"""
 function set_tls!(tls)
     task_local_storage(:_dagger_sch_uid, tls.sch_uid)
     task_local_storage(:_dagger_sch_handle, tls.sch_handle)

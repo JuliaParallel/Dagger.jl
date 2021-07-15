@@ -6,7 +6,34 @@ let counter=0
     next_id() = (counter >= (1 << 30)) ? (counter = 1) : (counter += 1)
 end
 
-# A thing to run
+"""
+    Thunk
+
+Wraps a callable object to be run with Dagger. A `Thunk` is typically
+created through a call to `delayed` or its macro equivalent `@par`.
+
+## Constructors
+```julia
+delayed(f; options=nothing)(args...)
+@par [option=value]... f(args...)
+```
+
+## Arguments
+- `f`: The function to be called upon execution of the `Thunk`.
+- `args`: The arguments to be passed to the `Thunk`.
+- `options`: A `Sch.ThunkOptions` struct providing the options for the `Thunk`,
+or `nothing`.
+- `option=value`: The same options available in `Sch.ThunkOptions`.
+
+## Examples
+```julia
+julia> t = delayed(sin)(π)  # creates a Thunk to be computed later
+Thunk(sin, (π,))
+
+julia> collect(t)  # computes the result and returns it to the current process
+1.2246467991473532e-16
+```
+"""
 mutable struct Thunk
     f::Any # usually a Function, but could be any callable
     inputs::Tuple
@@ -78,6 +105,13 @@ function affinity(t::Thunk)
    #end
 end
 
+"""
+    delayed(f; options)(args...)
+
+Creates a [`Thunk`](@ref) object which can be executed later, which will call
+`f` with `args`. Options are typically either `nothing` or of type
+`Sch.ThunkOptions`.
+"""
 function delayed(f; kwargs...)
     (args...) -> Thunk(f, args...; kwargs...)
 end
@@ -116,6 +150,13 @@ function Base.showerror(io::IO, ex::ThunkFailedException)
     Base.showerror(io, ex.ex)
 end
 
+"""
+    EagerThunk
+
+Returned from `spawn`/`@spawn` calls. Represents a task that is in the
+scheduler, potentially ready to execute, executing, or finished executing. May
+be `fetch`'d or `wait`'d on at any time.
+"""
 struct EagerThunk
     future::ThunkFuture
     uid::Int
@@ -127,6 +168,12 @@ function Base.show(io::IO, t::EagerThunk)
     print(io, "EagerThunk ($(isready(t) ? "finished" : "running"))")
 end
 
+"""
+    spawn(f, args...; kwargs...) -> EagerThunk
+
+Spawns a task with `f` as the function and `args` as the arguments, returning
+an `EagerThunk`. Uses a scheduler running in the background to execute code.
+"""
 function spawn(f, args...; kwargs...)
     if myid() == 1
         Dagger.Sch.init_eager()
@@ -171,7 +218,9 @@ end
     @spawn [opts] f(args...) -> Thunk
 
 Convenience macro like `Dagger.@par`, but eagerly executed from the moment it's
-called. Uses a scheduler running in the background to execute code.
+called (equivalent to `spawn`).
+
+See the docs for `@par` for more information and usage examples.
 """
 macro spawn(exs...)
     opts = exs[1:end-1]
