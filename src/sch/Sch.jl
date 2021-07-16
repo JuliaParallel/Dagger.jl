@@ -43,28 +43,28 @@ end
 The internal state-holding struct of the scheduler.
 
 Fields:
-- uid::UInt64 - Unique identifier for this scheduler instance
-- dependents::Dict{Union{Thunk,Chunk},Set{Thunk}} - The result of calling `dependents` on the DAG
-- finished::Set{Thunk} - The set of completed `Thunk`s
-- waiting::OneToMany - Map from downstream `Thunk` to upstream `Thunk`s that still need to execute
-- waiting_data::Dict{Union{Thunk,Chunk},Set{Thunk}} - Map from input `Chunk`/upstream `Thunk` to all unfinished downstream `Thunk`s, to retain caches
-- ready::Vector{Thunk} - The list of `Thunk`s that are ready to execute
-- cache::Dict{Thunk, Any} - Maps from a finished `Thunk` to it's cached result, often a DRef
-- running::Set{Thunk} - The set of currently-running `Thunk`s
-- running_on::Dict{Thunk,OSProc} - Map from `Thunk` to the OS process executing it
-- thunk_dict::Dict{Int, Any} - Maps from thunk IDs to a `Thunk`
-- node_order::Any - Function that returns the order of a thunk
-- worker_pressure::Dict{Int,Dict{Type,UInt}} - Cache of worker pressure
-- worker_capacity::Dict{Int,Dict{Type,UInt}} - Maps from worker ID to capacity
-- worker_loadavg::Dict{Int,NTuple{3,Float64}} - Worker load average
-- worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}} - Communication channels between the scheduler and each worker
-- procs_cache_list::Base.RefValue{Union{ProcessorCacheEntry,Nothing}} - Cached linked list of processors ready to be used
-- function_cost_cache::Dict{Type{<:Tuple},UInt} - Cache of estimated CPU time required to compute the given signature
-- halt::Base.RefValue{Bool} - Flag indicating, when set, that the scheduler should halt immediately
-- lock::ReentrantLock() - Lock around operations which modify the state
-- futures::Dict{Thunk, Vector{ThunkFuture}} - Futures registered for waiting on the result of a thunk.
-- errored::Set{Thunk} - Thunks that threw an error
-- chan::RemoteChannel{Channel{Any}} - Channel for receiving completed thunks
+- `uid::UInt64` - Unique identifier for this scheduler instance
+- `dependents::Dict{Union{Thunk,Chunk},Set{Thunk}}` - The result of calling `dependents` on the DAG
+- `finished::Set{Thunk}` - The set of completed `Thunk`s
+- `waiting::OneToMany` - Map from downstream `Thunk` to upstream `Thunk`s that still need to execute
+- `waiting_data::Dict{Union{Thunk,Chunk},Set{Thunk}}` - Map from input `Chunk`/upstream `Thunk` to all unfinished downstream `Thunk`s, to retain caches
+- `ready::Vector{Thunk}` - The list of `Thunk`s that are ready to execute
+- `cache::Dict{Thunk, Any}` - Maps from a finished `Thunk` to it's cached result, often a DRef
+- `running::Set{Thunk}` - The set of currently-running `Thunk`s
+- `running_on::Dict{Thunk,OSProc}` - Map from `Thunk` to the OS process executing it
+- `thunk_dict::Dict{Int, Any}` - Maps from thunk IDs to a `Thunk`
+- `node_order::Any` - Function that returns the order of a thunk
+- `worker_pressure::Dict{Int,Dict{Type,UInt}}` - Cache of worker pressure
+- `worker_capacity::Dict{Int,Dict{Type,UInt}}` - Maps from worker ID to capacity
+- `worker_loadavg::Dict{Int,NTuple{3,Float64}}` - Worker load average
+- `worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}` - Communication channels between the scheduler and each worker
+- `procs_cache_list::Base.RefValue{Union{ProcessorCacheEntry,Nothing}}` - Cached linked list of processors ready to be used
+- `function_cost_cache::Dict{Type{<:Tuple},UInt}` - Cache of estimated CPU time required to compute the given signature
+- `halt::Base.RefValue{Bool}` - Flag indicating, when set, that the scheduler should halt immediately
+- `lock::ReentrantLock()` - Lock around operations which modify the state
+- `futures::Dict{Thunk, Vector{ThunkFuture}}` - Futures registered for waiting on the result of a thunk.
+- `errored::Set{Thunk}` - Thunks that threw an error
+- `chan::RemoteChannel{Channel{Any}}` - Channel for receiving completed thunks
 """
 struct ComputeState
     uid::UInt64
@@ -207,7 +207,11 @@ end
 # Eager scheduling
 include("eager.jl")
 
-"Combine `SchedulerOptions` and `ThunkOptions` into a new `ThunkOptions`."
+"""
+    merge(sopts, topts)
+
+Combine `SchedulerOptions` and `ThunkOptions` into a new `ThunkOptions`.
+"""
 function merge(sopts::SchedulerOptions, topts::ThunkOptions)
     single = topts.single != 0 ? topts.single : sopts.single
     allow_errors = sopts.allow_errors || topts.allow_errors
@@ -305,7 +309,11 @@ const ACTIVE_TASKS_LOCK = ReentrantLock()
 "Process-local condition variable indicating task completion."
 const TASK_SYNC = Condition()
 
-"Indicates that a thunk uses all processors of a given type."
+"""
+    MaxUtilization
+
+Indicates a thunk that uses all processors of a given type.
+"""
 struct MaxUtilization end
 
 function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
@@ -813,7 +821,11 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
     remote_do(do_tasks, gproc.pid, proc, state.chan, to_send)
 end
 
-"Executes a batch of tasks on `to_proc`."
+"""
+    do_tasks(to_proc, chan, tasks)
+
+Executes a batch of tasks on `to_proc`.
+"""
 function do_tasks(to_proc, chan, tasks)
     for task in tasks
         @async begin

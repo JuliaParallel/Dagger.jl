@@ -7,3 +7,4 @@ Manifest.toml
 *.jld
 *.jls
 *.dot
+docs/build
