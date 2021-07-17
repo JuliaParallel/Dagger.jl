@@ -302,12 +302,11 @@ function cleanup_proc(state, p)
     end
 end
 
-"Process-local count of actively-executing Dagger tasks per processor type."
-const ACTIVE_TASKS = Dict{UInt64,Dict{Type,Ref{UInt}}}()
-const ACTIVE_TASKS_LOCK = ReentrantLock()
+"Process-local condition variable (and lock) indicating task completion."
+const TASK_SYNC = Threads.Condition()
 
-"Process-local condition variable indicating task completion."
-const TASK_SYNC = Condition()
+"Process-local dictionary tracking per-processor total utilization."
+const PROC_UTILIZATION = Dict{UInt64,Dict{Type,Ref{UInt}}}()
 
 """
     MaxUtilization
@@ -876,19 +875,19 @@ function do_task(to_proc, extra_util, thunk_id, f, data, send_result, persist, c
     end
 
     # Check if we'll go over capacity from running this thunk
-    real_util = lock(ACTIVE_TASKS_LOCK) do
-        AT = get!(()->Dict{Type,Ref{UInt}}(), ACTIVE_TASKS, uid)
+    real_util = lock(TASK_SYNC) do
+        AT = get!(()->Dict{Type,Ref{UInt}}(), PROC_UTILIZATION, uid)
         get!(()->Ref{UInt}(UInt(0)), AT, typeof(to_proc))
     end
     cap = UInt(capacity(OSProc(), typeof(to_proc))) * UInt(1e9)
     while true
-        lock(ACTIVE_TASKS_LOCK)
+        lock(TASK_SYNC)
         if ((extra_util isa MaxUtilization) && (real_util[] > 0)) ||
            ((extra_util isa Real) && (extra_util + real_util[] > cap))
             # Fully subscribed, wait and re-check
             @debug "($(myid())) $f ($thunk_id) Waiting for free $(typeof(to_proc)): $extra_util | $(real_util[])/$cap"
-            unlock(ACTIVE_TASKS_LOCK)
             wait(TASK_SYNC)
+            unlock(TASK_SYNC)
         else
             # Under-subscribed, calculate extra utilization and execute thunk
             @debug "($(myid())) ($thunk_id) Using available $to_proc: $extra_util | $(real_util[])/$cap"
@@ -898,7 +897,7 @@ function do_task(to_proc, extra_util, thunk_id, f, data, send_result, persist, c
                 extra_util
             end
             real_util[] += extra_util
-            unlock(ACTIVE_TASKS_LOCK)
+            unlock(TASK_SYNC)
             break
         end
     end
@@ -926,11 +925,13 @@ function do_task(to_proc, extra_util, thunk_id, f, data, send_result, persist, c
     end
     threadtime = cputhreadtime() - threadtime_start
     @dbg timespan_end(ctx, :compute, thunk_id, (f, to_proc))
-    lock(ACTIVE_TASKS_LOCK) do
+    lock(TASK_SYNC) do
         real_util[] -= extra_util
     end
     @debug "($(myid())) ($thunk_id) Releasing $(typeof(to_proc)): $extra_util | $(real_util[])/$cap"
-    notify(TASK_SYNC)
+    lock(TASK_SYNC) do
+        notify(TASK_SYNC)
+    end
     metadata = (
         pressure=real_util[],
         loadavg=((Sys.loadavg()...,) ./ Sys.CPU_THREADS),
