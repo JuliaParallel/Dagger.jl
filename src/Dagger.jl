@@ -1,4 +1,4 @@
-module Dagger
+module Dagger # foo
 
 using Distributed, SharedArrays
 
