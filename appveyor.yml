@@ -8,6 +8,12 @@ platform:
   - x86 # 32-bit
   - x64 # 64-bit
 
+matrix:
+  allow_failures:
+  # Windows is too unreliable right now
+  - platform: x86
+  - platform: x64
+
 branches:
   only:
     - master
