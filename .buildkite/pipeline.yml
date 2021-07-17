@@ -1,9 +1,9 @@
-.test: &test
-  if: build.env("DAGGER_BENCHMARK") != "true"
-  agents:
-    queue: "juliacpu"
-  env:
-    JULIA_NUM_THREADS: 1
+# .test: &test
+#   if: build.env("DAGGER_BENCHMARK") != "true"
+#   agents:
+#     queue: "juliacpu"
+#   env:
+#     JULIA_NUM_THREADS: 1
 steps:
   - label: Julia 1.x
     command: julia --project -e 'using Pkg; Pkg.build(); Pkg.test()'
