@@ -145,3 +145,15 @@ function signature(task::Thunk, state)
     inputs = map(x->istask(x) ? state.cache[x] : x, unwrap_weak.(task.inputs))
     Tuple{typeof(task.f), map(x->x isa Chunk ? x.chunktype : typeof(x), inputs)...}
 end
+
+function report_catch_error(err, desc=nothing)
+    iob = IOContext(IOBuffer(), :color=>true)
+    if desc !== nothing
+        println(iob, desc)
+    end
+    Base.showerror(iob, err)
+    Base.show_backtrace(iob, catch_backtrace())
+    println(iob)
+    seek(iob.io, 0)
+    write(stderr, iob)
+end

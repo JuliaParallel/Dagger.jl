@@ -76,7 +76,7 @@ unique index to identify each `chunk`; second, we specify a `ThunkOptions` to
 write or read the given chunk to or from a file on disk, respectively. Notice
 the usage of `collect` in the `checkpoint` function, and the use of
 `Dagger.tochunk` in the restore function; Dagger represents intermediate
-results as `Dagger.Chunk` objects, so we need to convert to-and-from `Chunk`s
+results as `Dagger.Chunk` objects, so we need to convert between `Chunk`s
 and the actual data to keep Dagger happy. Performance-sensitive users might
 consider modifying these methods to store the checkpoint files on the
 filesystem of the server that currently owns the `Chunk`, to minimize data
@@ -96,7 +96,9 @@ errors about "No such file or directory", or some similar error; this occurs
 because Dagger *always* calls the restore function when it exists. In the first
 run, the checkpoint files don't yet exist, so there's nothing to restore;
 Dagger reports the thrown error, but keeps moving along, merrily computing the
-sums of `Y`.
+sums of `Y`. You're welcome to explicitly check if the file exists, and if not,
+return `nothing`; then Dagger won't report an annoying error, and will skip the
+restoration quietly.
 
 Of course, you might have a lot of code that looks like this, and may want to
 also checkpoint the final result of the `z = collect(...)` call as well. This
