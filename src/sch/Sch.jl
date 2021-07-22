@@ -137,13 +137,15 @@ argument and should return a `Bool` result to indicate whether or not to use
 the given processor. `nothing` enables all default processors.
 - `allow_errors::Bool=true`: Allow thunks to error without affecting
 non-dependent thunks.
-- `checkpoint=nothing`: If not `nothing`, Saves the final result of
-the current scheduler invocation to persistent storage, for later retrieval by
-`restore`.
-- `restore=nothing`: If not `nothing`, returns the (cached) final result of
-the current scheduler invocation, were it to execute. If this returns a
-result, all thunks will be skipped. If this throws an error, restoring will be
-skipped, the error will be displayed, and the scheduler will execute as usual.
+- `checkpoint=nothing`: If not `nothing`, uses the provided function to save
+the final result of the current scheduler invocation to persistent storage, for
+later retrieval by `restore`.
+- `restore=nothing`: If not `nothing`, uses the provided function to return the
+(cached) final result of the current scheduler invocation, were it to execute.
+If this returns a `Chunk`, all thunks will be skipped, and the `Chunk` will be
+returned.  If `nothing` is returned, restoring is skipped, and the scheduler
+will execute as usual. If this function throws an error, restoring will be
+skipped, and the error will be displayed.
 - `round_robin::Bool=false`: Whether to schedule in round-robin mode, which
 spreads load instead of the default behavior of filling processors to capacity.
 """
@@ -177,12 +179,15 @@ type). By default, the scheduler assumes that this thunk only uses one
 processor.
 - `allow_errors::Bool=true`: Allow this thunk to error without affecting
 non-dependent thunks.
-- `checkpoint=nothing`: If not `nothing`, saves the final result of the thunk
-to persistent storage, for later retrieval by `restore`.
-- `restore=nothing`: If not `nothing`, returns the (cached) result of this
-thunk, were it to execute. If this returns a result, this thunk will be
-skipped. If this throws an error, restoring will be skipped, the error will be
-displayed, and the scheduler will execute this thunk as usual.
+- `checkpoint=nothing`: If not `nothing`, uses the provided function to save
+the result of the thunk to persistent storage, for later retrieval by
+`restore`.
+- `restore=nothing`: If not `nothing`, uses the provided function to return the
+(cached) result of this thunk, were it to execute.  If this returns a `Chunk`,
+this thunk will be skipped, and its result will be set to the `Chunk`.  If
+`nothing` is returned, restoring is skipped, and the thunk will execute as
+usual. If this function throws an error, restoring will be skipped, and the
+error will be displayed.
 """
 Base.@kwdef struct ThunkOptions
     single::Int = 0
@@ -311,9 +316,14 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     ctx.options = options
     if options.restore !== nothing
         try
-            return options.restore()
+            result = options.restore()
+            if result isa Chunk
+                return result
+            elseif result !== nothing
+                throw(ArgumentError("Invalid restore return type: $(typeof(result))"))
+            end
         catch err
-            @error "Scheduler restore failed" exception=(err,catch_backtrace())
+            report_catch_error(err, "Scheduler restore failed")
         end
     end
     master = OSProc(myid())
@@ -422,7 +432,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
             try
                 node.options.checkpoint(node, res)
             catch err
-                @error "Thunk checkpoint failed" exception=(err,catch_backtrace())
+                report_catch_error(err, "Thunk checkpoint failed")
             end
         end
 
@@ -449,7 +459,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         try
             options.checkpoint(value)
         catch err
-            @error "Scheduler checkpoint failed" exception=(err,catch_backtrace())
+            report_catch_error(err, "Scheduler checkpoint failed")
         end
     end
     value
@@ -794,12 +804,16 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
         if thunk.options !== nothing && thunk.options.restore !== nothing
             try
                 result = thunk.options.restore(thunk)
-                state.cache[thunk] = result
-                state.errored[thunk] = false
-                finish_task!(ctx, state, thunk, false)
-                continue
+                if result isa Chunk
+                    state.cache[thunk] = result
+                    state.errored[thunk] = false
+                    finish_task!(ctx, state, thunk, false)
+                    continue
+                elseif result !== nothing
+                    throw(ArgumentError("Invalid restore return type: $(typeof(result))"))
+                end
             catch err
-                @error "Thunk restore failed" exception=(err,catch_backtrace())
+                report_catch_error(err, "Thunk restore failed")
             end
         end
 

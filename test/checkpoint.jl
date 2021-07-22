@@ -39,7 +39,10 @@
             e[] = true
             error("Test")
         end)
-        @test collect(ctx, a; options=opts) == 1
+        _, err = @grab_output begin
+            @test collect(ctx, a; options=opts) == 1
+        end
+        @test occursin("Scheduler checkpoint failed", err)
         @test d[] # thunks executed
         @test e[] # checkpoint executed
     end
@@ -56,9 +59,27 @@
             e[] = true
             error("Test")
         end)
-        @test collect(ctx, a; options=opts) == 1
+        _, err = @grab_output begin
+            @test collect(ctx, a; options=opts) == 1
+        end
+        @test occursin("Scheduler restore failed", err)
+        @test occursin("Test", err)
         @test d[] # thunks executed
         @test e[] # restore executed
+    end
+    @testset "Restore Failure (quiet)" begin
+        a = delayed(()->begin
+            1
+        end)()
+        opts = Dagger.Sch.SchedulerOptions(;
+        single=1,
+        restore=()->begin
+            nothing
+        end)
+        _, err = @grab_output begin
+            @test collect(ctx, a; options=opts) == 1
+        end
+        @test !occursin("Scheduler restore failed", err)
     end
 end
 
@@ -111,7 +132,10 @@ end
             d[] = true
             1
         end; options=opts)()
-        @test collect(ctx, a) == 1
+        _, err = @grab_output begin
+            @test collect(ctx, a) == 1
+        end
+        @test occursin("Thunk checkpoint failed", err)
         @test d[] # thunk executed
         @test e[] # checkpoint executed
     end
@@ -128,8 +152,26 @@ end
             d[] = true
             1
         end; options=opts)()
-        @test collect(ctx, a) == 1
+        _, err = @grab_output begin
+            @test collect(ctx, a) == 1
+        end
+        @test occursin("Thunk restore failed", err)
+        @test occursin("Test", err)
         @test d[] # thunk executed
         @test e[] # restore executed
+    end
+    @testset "Restore Failure (quiet)" begin
+        opts = Dagger.Sch.ThunkOptions(;
+        single=1,
+        restore=(thunk)->begin
+            nothing
+        end)
+        a = delayed(()->begin
+            1
+        end; options=opts)()
+        _, err = @grab_output begin
+            @test collect(ctx, a) == 1
+        end
+        @test !occursin("Thunk restore failed", err)
     end
 end

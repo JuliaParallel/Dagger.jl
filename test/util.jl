@@ -23,3 +23,19 @@ function _test_throws_unwrap(terr, args...)
     to_match = args[1:end-1]
     _test_throws_unwrap(terr, ex; to_match=to_match)
 end
+
+# NOTE: based on test/pkg.jl::capture_stdout, but doesn't discard exceptions
+macro grab_output(ex)
+    quote
+        mktemp() do fname, fout
+            ret = nothing
+            open(fname, "w") do fout
+                redirect_stderr(fout) do
+                    ret = $(esc(ex))
+                end
+                flush(fout)
+            end
+            ret, read(fname, String)
+        end
+    end
+end
