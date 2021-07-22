@@ -2,6 +2,8 @@ module Dagger
 
 using Distributed, SharedArrays
 
+using MemPool
+
 import Base: collect, adjoint, reduce
 import Distributed: procs
 

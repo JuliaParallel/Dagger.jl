@@ -1,5 +1,3 @@
-
-using MemPool
 using Serialization
 
 export domain, UnitDomain, project, alignfirst, ArrayDomain
