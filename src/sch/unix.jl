@@ -21,10 +21,10 @@ if Sys.islinux()
     const CLOCK_MONOTONIC          = Cint(1)
     const CLOCK_PROCESS_CPUTIME_ID = Cint(2)
     const CLOCK_THREAD_CPUTIME_ID  = Cint(3)
-elseif Sys.KERNEL == :FreeBSD # atleast on FreeBSD 11.1
+elseif Sys.isfreebsd() # atleast on FreeBSD 11.1
     const CLOCK_MONOTONIC          = Cint(4)
     const CLOCK_PROCESS_CPUTIME_ID = Cint(14)
-elseif Compat.Sys.isapple() # Version 10.12 required
+elseif Sys.isapple() # Version 10.12 required
     const CLOCK_MONOTONIC          = Cint(6)
     const CLOCK_PROCESS_CPUTIME_ID = Cint(12)
 else
