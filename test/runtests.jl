@@ -3,6 +3,7 @@ addprocs(3)
 
 using Test
 using Dagger
+using UUIDs
 
 include("util.jl")
 include("fakeproc.jl")
@@ -28,6 +29,7 @@ include("scheduler.jl")
 include("processors.jl")
 include("ui.jl")
 include("checkpoint.jl")
+include("scopes.jl")
 include("domain.jl")
 include("array.jl")
 include("cache.jl")

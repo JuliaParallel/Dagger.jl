@@ -4,7 +4,8 @@ using Distributed
 import MemPool: DRef
 
 import ..Dagger
-import ..Dagger: Context, Processor, Thunk, ThunkFuture, ThunkFailedException, Chunk, OSProc, order, free!, dependents, noffspring, istask, inputs, unwrap_weak, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, capacity, chunktype, default_enabled, get_processors, execute!, rmprocs!, addprocs!, thunk_processor
+import ..Dagger: Context, Processor, Thunk, ThunkFuture, ThunkFailedException, Chunk, OSProc, AnyScope
+import ..Dagger: order, free!, dependents, noffspring, istask, inputs, unwrap_weak, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, capacity, chunktype, default_enabled, get_processors, execute!, rmprocs!, addprocs!, thunk_processor, constrain, cputhreadtime
 
 const OneToMany = Dict{Thunk, Set{Thunk}}
 
@@ -504,7 +505,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
             # FIXME: Sort by lowest absolute utilization
         end
 
-        function can_use_proc(task, gproc, proc, opts)
+        function can_use_proc(task, gproc, proc, opts, scope)
             # Check against proclist
             if opts.proclist === nothing
                 if !default_enabled(proc)
@@ -527,6 +528,11 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
                 if gproc.pid != opts.single
                     return false
                 end
+            end
+
+            # Check scope
+            if constrain(scope, Dagger.ExactScope(proc)) isa Dagger.InvalidScope
+                return false
             end
 
             return true
@@ -553,74 +559,105 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         # Schedule tasks
         to_fire = Dict{Tuple{OSProc,<:Processor},Vector{Tuple{Thunk,<:Any}}}()
         failed_scheduling = Thunk[]
-        while !isempty(state.ready)
-            # Select a new task and get its options
-            task = pop!(state.ready)
-            @assert !haskey(state.cache, task)
-            opts = merge(ctx.options, task.options)
-            sig = signature(task, state)
 
-            # Try to select a processor
-            selected_entry = nothing
-            entry = state.procs_cache_list[]
-            cap, extra_util = nothing, nothing
-            procs_found = false
-            # N.B. if we only have one processor, we need to select it now
-            if can_use_proc(task, entry.gproc, entry.proc, opts)
+        # Select a new task and get its options
+        @label pop_task
+        if isempty(state.ready)
+            @goto fire_tasks
+        end
+        task = pop!(state.ready)
+        @assert !haskey(state.cache, task)
+        opts = merge(ctx.options, task.options)
+        sig = signature(task, state)
+
+        # Calculate scope
+        scope = AnyScope()
+        for input in unwrap_weak.(task.inputs)
+            chunk = if istask(input)
+                state.cache[input]
+            elseif input isa Chunk
+                input
+            else
+                nothing
+            end
+            chunk isa Chunk || continue
+            scope = constrain(scope, chunk.scope)
+            if scope isa Dagger.InvalidScope
+                ex = SchedulingException("Scopes are not compatible: $(scope.x), $(scope.y)")
+                state.cache[task] = ex
+                state.errored[task] = true
+                set_failed!(state, task)
+                @goto pop_task
+            end
+        end
+
+        # Try to select a processor
+        selected_entry = nothing
+        entry = state.procs_cache_list[]
+        cap, extra_util = nothing, nothing
+        procs_found = false
+        # N.B. if we only have one processor, we need to select it now
+        if can_use_proc(task, entry.gproc, entry.proc, opts, scope)
+            has_cap, cap, extra_util = has_capacity(entry.proc, entry.gproc.pid, opts.procutil, sig)
+            if has_cap
+                selected_entry = entry
+            else
+                procs_found = true
+                entry = entry.next
+            end
+        else
+            entry = entry.next
+        end
+        while selected_entry === nothing
+            if entry === state.procs_cache_list[]
+                # Exhausted all procs
+                if procs_found
+                    push!(failed_scheduling, task)
+                else
+                    state.cache[task] = SchedulingException("No processors available, try making proclist more liberal")
+                    state.errored[task] = true
+                    set_failed!(state, task)
+                end
+                @goto pop_task
+            end
+
+            if can_use_proc(task, entry.gproc, entry.proc, opts, scope)
                 has_cap, cap, extra_util = has_capacity(entry.proc, entry.gproc.pid, opts.procutil, sig)
                 if has_cap
+                    # Select this processor
                     selected_entry = entry
                 else
+                    # We could have selected it otherwise
                     procs_found = true
                     entry = entry.next
                 end
             else
+                # Try next processor
                 entry = entry.next
             end
-            while selected_entry === nothing
-                if entry === state.procs_cache_list[]
-                    if procs_found
-                        push!(failed_scheduling, task)
-                        break
-                    else
-                        throw(SchedulingException("No processors available, try making proclist more liberal"))
-                    end
-                end
-
-                if can_use_proc(task, entry.gproc, entry.proc, opts)
-                    has_cap, cap, extra_util = has_capacity(entry.proc, entry.gproc.pid, opts.procutil, sig)
-                    if has_cap
-                        # Select this processor
-                        selected_entry = entry
-                    else
-                        # We could have selected it otherwise
-                        procs_found = true
-                        entry = entry.next
-                    end
-                else
-                    # Try next processor
-                    entry = entry.next
-                end
-            end
-            selected_entry === nothing && continue
-
-            # Schedule task onto proc
-            gproc, proc = entry.gproc, entry.proc
-            extra_util = extra_util isa MaxUtilization ? cap : extra_util
-            push!(get!(()->Vector{Tuple{Thunk,<:Any}}(), to_fire, (gproc, proc)), (task, extra_util))
-
-            # Progress through list
-            if ctx.options.round_robin
-                # Proceed to next entry to spread work
-                state.procs_cache_list[] = state.procs_cache_list[].next
-                continue
-            end
-            util = state.worker_pressure[gproc.pid][typeof(proc)]
-            if util >= cap
-                # Proceed to next entry due to over-pressure
-                state.procs_cache_list[] = state.procs_cache_list[].next
-            end
         end
+        @assert selected_entry !== nothing
+
+        # Schedule task onto proc
+        gproc, proc = entry.gproc, entry.proc
+        extra_util = extra_util isa MaxUtilization ? cap : extra_util
+        push!(get!(()->Vector{Tuple{Thunk,<:Any}}(), to_fire, (gproc, proc)), (task, extra_util))
+
+        # Progress through list
+        if ctx.options.round_robin
+            # Proceed to next entry to spread work
+            state.procs_cache_list[] = state.procs_cache_list[].next
+            @goto pop_task
+        end
+        util = state.worker_pressure[gproc.pid][typeof(proc)]
+        if util >= cap
+            # Proceed to next entry due to over-pressure
+            state.procs_cache_list[] = state.procs_cache_list[].next
+        end
+        @goto pop_task
+
+        # Fire all newly-scheduled tasks
+        @label fire_tasks
         @sync for gpp in keys(to_fire)
             @async fire_tasks!(ctx, to_fire[gpp], gpp, state)
         end
@@ -637,6 +674,7 @@ function assign_new_procs!(ctx, state, assignedprocs)
         for p in diffps
             init_proc(state, p)
         end
+        state.procs_cache_list[] = nothing
         schedule!(ctx, state, diffps)
     end
     return ps
