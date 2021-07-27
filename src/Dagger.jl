@@ -10,6 +10,8 @@ import Distributed: procs
 using LinearAlgebra
 import LinearAlgebra: transpose
 
+using UUIDs
+
 using Requires
 
 const PLUGINS = Dict{Symbol,Any}()
@@ -28,6 +30,7 @@ include("chunks.jl")
 # Task scheduling
 include("compute.jl")
 include("utils/clock.jl")
+include("utils/system_uuid.jl")
 include("sch/Sch.jl"); using .Sch
 
 # Array computations
@@ -48,6 +51,9 @@ include("array/sort.jl")
 include("ui/graph.jl")
 include("table/dtable.jl")
 function __init__()
+    # Initialize system UUID
+    system_uuid()
+
     @require Luxor="ae8d54c2-7ccd-5906-9d76-62fc9837b5bc" begin
         # Gantt chart renderer
         include("ui/gantt.jl")
