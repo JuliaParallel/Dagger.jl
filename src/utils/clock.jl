@@ -53,27 +53,3 @@ end
 else
 @inline cputhreadtime() = time_ns()
 end
-
-struct Measurement
-    realtime::TimeSpec
-    cputime::TimeSpec
-    function Measurement()
-        rtime = clock_gettime(CLOCK_MONOTONIC)
-        ctime = clock_gettime(CLOCK_PROCESS_CPUTIME_ID)
-        return new(rtime, ctime)
-    end
-end
-
-struct MeasurementDelta
-    realtime::Float64
-    cpuratio::Float64
-    function MeasurementDelta(t1::Measurement, t0::Measurement)
-        rt0 = maketime(t0.realtime)
-        ct0 = maketime(t0.cputime)
-        rt1 = maketime(t1.realtime)
-        ct1 = maketime(t1.cputime)
-        realtime = rt1 - rt0
-        cputime = ct1 - ct0
-        return new(realtime, cputime/realtime)
-    end
-end

@@ -27,6 +27,7 @@ include("chunks.jl")
 
 # Task scheduling
 include("compute.jl")
+include("utils/clock.jl")
 include("sch/Sch.jl"); using .Sch
 
 # Array computations
