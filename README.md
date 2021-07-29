@@ -33,7 +33,7 @@ using Dagger
 # do some stuff in parallel!
 a = Dagger.@spawn 1+3
 b = Dagger.@spawn rand(a, 4)
-c = Dagger.@spawn sum(b)+a
+c = Dagger.@spawn sum(b)
 fetch(c) # some number!
 ```
 
