@@ -9,12 +9,7 @@ import ..Dagger: Context, Processor, Thunk, ThunkFuture, ThunkFailedException, C
 const OneToMany = Dict{Thunk, Set{Thunk}}
 
 include("util.jl")
-if Sys.isunix()
-    include("unix.jl")
-else
-    # FIXME
-    cputhreadtime() = time_ns()
-end
+include("clocks.jl")
 include("fault-handler.jl")
 include("dynamic.jl")
 
