@@ -28,10 +28,8 @@ elseif Sys.isapple() # Version 10.12 required
     const CLOCK_MONOTONIC          = Cint(6)
     const CLOCK_PROCESS_CPUTIME_ID = Cint(12)
 else
-    error("""
-          BenchmarkTools doesn't currently support your operating system.
-          Please file an issue, your kernel is $(Sys.KERNEL)
-          """)
+    @inline cputhreadtime() = time_ns()
+    return
 end
 
 @inline function clock_gettime(cid)
@@ -48,8 +46,12 @@ end
     maketime(clock_gettime(CLOCK_PROCESS_CPUTIME_ID))
 end
 
+@static if Sys.islinux()
 @inline function cputhreadtime()
     maketime(clock_gettime(CLOCK_THREAD_CPUTIME_ID))
+end
+else
+@inline cputhreadtime() = time_ns()
 end
 
 struct Measurement
