@@ -396,7 +396,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         safepoint(state)
         thunk_failed = false
         if res isa Exception
-            if unwrap_nested_exception(res) isa Union{ProcessExitedException, Base.IOError}
+            if unwrap_nested_exception(res) isa ProcessExitedException
                 @warn "Worker $(pid) died, rescheduling work"
 
                 # Remove dead worker from procs list
