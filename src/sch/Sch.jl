@@ -447,7 +447,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         @async cleanup_proc(state, p)
     end
     value = state.cache[d] # TODO: move(OSProc(), state.cache[d])
-    if state.errored[d]
+    if get(state.errored, d, false)
         throw(value)
     end
     if options.checkpoint !== nothing
@@ -747,7 +747,9 @@ function finish_task!(ctx, state, node, thunk_failed)
                     end
                     GC.@preserve inp begin
                         pop!(state.cache, inp)
-                        pop!(state.errored, inp)
+                        if haskey(state.errored, inp)
+                            pop!(state.errored, inp)
+                        end
                     end
                 elseif inp isa Chunk
                     push!(to_evict, inp)
@@ -788,7 +790,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
             if data !== nothing
                 # cache hit
                 state.cache[thunk] = data
-                thunk_failed = state.errored[thunk]
+                thunk_failed = get(state.errored, thunk, false)
                 finish_task!(ctx, state, thunk, thunk_failed)
                 continue
             else
