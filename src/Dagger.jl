@@ -45,7 +45,7 @@ include("array/sparse_partition.jl")
 include("array/sort.jl")
 
 include("ui/graph.jl")
-
+include("table/dtable.jl")
 function __init__()
     @require Luxor="ae8d54c2-7ccd-5906-9d76-62fc9837b5bc" begin
         # Gantt chart renderer
