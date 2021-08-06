@@ -46,14 +46,15 @@ processor to safely serialize the data to the calling worker.
 ## Constructors
 See [`tochunk`](@ref).
 """
-mutable struct Chunk{T, H, P<:Processor}
+mutable struct Chunk{T, H, P<:Processor, S<:AbstractScope}
     chunktype::Type{T}
     domain
     handle::H
     processor::P
+    scope::S
     persist::Bool
-    function (::Type{Chunk{T,H,P}})(::Type{T}, domain, handle, processor, persist) where {T,H,P}
-        c = new{T,H,P}(T, domain, handle, processor, persist)
+    function (::Type{Chunk{T,H,P,S}})(::Type{T}, domain, handle, processor, scope, persist) where {T,H,P,S}
+        c = new{T,H,P,S}(T, domain, handle, processor, scope, persist)
         finalizer(x -> @async(myid() == 1 && free!(x)), c)
         c
     end
@@ -132,15 +133,15 @@ end
 
 Create a chunk from sequential object `x` which resides on `proc`.
 """
-function tochunk(x::X, proc::P=OSProc(); persist=false, cache=false) where {X,P}
+function tochunk(x::X, proc::P=OSProc(), scope::S=AnyScope(); persist=false, cache=false) where {X,P,S}
     ref = poolset(x, destroyonevict=persist ? false : cache)
-    Chunk{X, typeof(ref), P}(X, domain(x), ref, proc, persist)
+    Chunk{X,typeof(ref),P,S}(X, domain(x), ref, proc, scope, persist)
 end
-tochunk(x::Union{Chunk, Thunk}, proc=nothing) = x
+tochunk(x::Union{Chunk, Thunk}, proc=nothing, scope=nothing) = x
 
 # Check to see if the node is set to persist
 # if it is foce can override it
-function free!(s::Chunk{X, DRef, P}; force=true, cache=false) where {X,P}
+function free!(s::Chunk{X,DRef,P,S}; force=true, cache=false) where {X,P,S}
     if force || !s.persist
         if cache
             try
@@ -160,7 +161,8 @@ function savechunk(data, dir, f)
     end
     fr = FileRef(f, sz)
     proc = OSProc()
-    Chunk{typeof(data), typeof(fr), typeof(proc)}(typeof(data), domain(data), fr, proc, true)
+    scope = AnyScope() # FIXME: Scoped to this node
+    Chunk{typeof(data),typeof(fr),typeof(proc),typeof(scope)}(typeof(data), domain(data), fr, proc, scope, true)
 end
 
 

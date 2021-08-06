@@ -15,6 +15,7 @@ makedocs(;
         "Home" => "index.md",
         "Processors" => "processors.md",
         "Checkpointing" => "checkpointing.md",
+        "Scopes" => "scopes.md",
         "Dynamic Scheduler Control" => "dynamic.md",
         "Logging and Graphing" => "logging.md",
         "Benchmarking" => "benchmarking.md",
