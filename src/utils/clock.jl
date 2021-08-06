@@ -27,11 +27,9 @@ elseif Sys.isfreebsd() # atleast on FreeBSD 11.1
 elseif Sys.isapple() # Version 10.12 required
     const CLOCK_MONOTONIC          = Cint(6)
     const CLOCK_PROCESS_CPUTIME_ID = Cint(12)
-else
-    @inline cputhreadtime() = time_ns()
-    return
 end
 
+@static if Sys.isunix()
 @inline function clock_gettime(cid)
     ts = Ref{TimeSpec}()
     ccall(:clock_gettime, Cint, (Cint, Ref{TimeSpec}), cid, ts)
@@ -46,10 +44,9 @@ end
     maketime(clock_gettime(CLOCK_PROCESS_CPUTIME_ID))
 end
 
-@static if Sys.islinux()
 @inline function cputhreadtime()
     maketime(clock_gettime(CLOCK_THREAD_CPUTIME_ID))
 end
-else
-@inline cputhreadtime() = time_ns()
+else # Windows
+@inline cputhreadtime() = time_ns() # HACK
 end

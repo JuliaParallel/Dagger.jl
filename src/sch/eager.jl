@@ -1,6 +1,6 @@
 const EAGER_INIT = Ref{Bool}(false)
 const EAGER_THUNK_CHAN = Channel(typemax(Int))
-const EAGER_ID_MAP = Dict{UInt,Int}()
+const EAGER_ID_MAP = Dict{UInt64,Int}()
 const EAGER_CONTEXT = Ref{Context}()
 const EAGER_STATE = Ref{ComputeState}()
 
