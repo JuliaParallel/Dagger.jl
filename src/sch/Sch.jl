@@ -47,12 +47,12 @@ Fields:
 - `running_on::Dict{Thunk,OSProc}` - Map from `Thunk` to the OS process executing it
 - `thunk_dict::Dict{Int, Any}` - Maps from thunk IDs to a `Thunk`
 - `node_order::Any` - Function that returns the order of a thunk
-- `worker_pressure::Dict{Int,Dict{Type,UInt}}` - Cache of worker pressure
-- `worker_capacity::Dict{Int,Dict{Type,UInt}}` - Maps from worker ID to capacity
+- `worker_pressure::Dict{Int,Dict{Type,UInt64}}` - Cache of worker pressure
+- `worker_capacity::Dict{Int,Dict{Type,UInt64}}` - Maps from worker ID to capacity
 - `worker_loadavg::Dict{Int,NTuple{3,Float64}}` - Worker load average
 - `worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}` - Communication channels between the scheduler and each worker
 - `procs_cache_list::Base.RefValue{Union{ProcessorCacheEntry,Nothing}}` - Cached linked list of processors ready to be used
-- `function_cost_cache::Dict{Type{<:Tuple},UInt}` - Cache of estimated CPU time required to compute the given signature
+- `function_cost_cache::Dict{Type{<:Tuple},UInt64}` - Cache of estimated CPU time required to compute the given signature
 - `halt::Base.Event` - Event indicating that the scheduler is halting
 - `lock::ReentrantLock` - Lock around operations which modify the state
 - `futures::Dict{Thunk, Vector{ThunkFuture}}` - Futures registered for waiting on the result of a thunk.
@@ -69,12 +69,12 @@ struct ComputeState
     running_on::Dict{Thunk,OSProc}
     thunk_dict::Dict{Int, Any}
     node_order::Any
-    worker_pressure::Dict{Int,Dict{Type,UInt}}
-    worker_capacity::Dict{Int,Dict{Type,UInt}}
+    worker_pressure::Dict{Int,Dict{Type,UInt64}}
+    worker_capacity::Dict{Int,Dict{Type,UInt64}}
     worker_loadavg::Dict{Int,NTuple{3,Float64}}
     worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}
     procs_cache_list::Base.RefValue{Union{ProcessorCacheEntry,Nothing}}
-    function_cost_cache::Dict{Type{<:Tuple},UInt}
+    function_cost_cache::Dict{Type{<:Tuple},UInt64}
     halt::Base.Event
     lock::ReentrantLock
     futures::Dict{Thunk, Vector{ThunkFuture}}
@@ -92,12 +92,12 @@ function start_state(deps::Dict, node_order, chan)
                          Dict{Thunk,OSProc}(),
                          Dict{Int, Thunk}(),
                          node_order,
-                         Dict{Int,Dict{Type,UInt}}(),
-                         Dict{Int,Dict{Type,UInt}}(),
+                         Dict{Int,Dict{Type,UInt64}}(),
+                         Dict{Int,Dict{Type,UInt64}}(),
                          Dict{Int,NTuple{3,Float64}}(),
                          Dict{Int, Tuple{RemoteChannel,RemoteChannel}}(),
                          Ref{Union{ProcessorCacheEntry,Nothing}}(nothing),
-                         Dict{Type{<:Tuple},UInt}(),
+                         Dict{Type{<:Tuple},UInt64}(),
                          Base.Event(),
                          ReentrantLock(),
                          Dict{Thunk, Vector{ThunkFuture}}(),
@@ -228,19 +228,19 @@ function init_proc(state, p)
     # Initialize pressure and capacity
     proc = OSProc(p.pid)
     lock(state.lock) do
-        state.worker_pressure[p.pid] = Dict{Type,UInt}()
-        state.worker_capacity[p.pid] = Dict{Type,UInt}()
+        state.worker_pressure[p.pid] = Dict{Type,UInt64}()
+        state.worker_capacity[p.pid] = Dict{Type,UInt64}()
         state.worker_loadavg[p.pid] = (0.0, 0.0, 0.0)
         for T in unique(typeof.(get_processors(proc)))
             state.worker_pressure[p.pid][T] = 0
-            state.worker_capacity[p.pid][T] = capacity(proc, T) * UInt(1e9)
+            state.worker_capacity[p.pid][T] = capacity(proc, T) * UInt64(1e9)
         end
         state.worker_pressure[p.pid][OSProc] = 0
         state.worker_capacity[p.pid][OSProc] = 0
     end
     cap = remotecall(capacity, p.pid)
     @async begin
-        cap = fetch(cap) * UInt(1e9)
+        cap = fetch(cap) * UInt64(1e9)
         lock(state.lock) do
             state.worker_capacity[p.pid] = cap
         end
@@ -295,7 +295,7 @@ end
 const TASK_SYNC = Threads.Condition()
 
 "Process-local dictionary tracking per-processor total utilization."
-const PROC_UTILIZATION = Dict{UInt64,Dict{Type,Ref{UInt}}}()
+const PROC_UTILIZATION = Dict{UInt64,Dict{Type,Ref{UInt64}}}()
 
 """
     MaxUtilization
@@ -540,7 +540,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         function has_capacity(p, gp, procutil, sig)
             T = typeof(p)
             # FIXME: MaxUtilization
-            extra_util = round(UInt, get(procutil, T, 1) * 1e9)
+            extra_util = round(UInt64, get(procutil, T, 1) * 1e9)
             real_util = state.worker_pressure[gp][T]
             if (T === Dagger.ThreadProc) && haskey(state.function_cost_cache, sig)
                 # Assume that the extra pressure is between estimated and measured
@@ -930,10 +930,10 @@ function do_task(to_proc, extra_util, thunk_id, f, data, send_result, persist, c
 
     # Check if we'll go over capacity from running this thunk
     real_util = lock(TASK_SYNC) do
-        AT = get!(()->Dict{Type,Ref{UInt}}(), PROC_UTILIZATION, uid)
-        get!(()->Ref{UInt}(UInt(0)), AT, typeof(to_proc))
+        AT = get!(()->Dict{Type,Ref{UInt64}}(), PROC_UTILIZATION, uid)
+        get!(()->Ref{UInt64}(UInt64(0)), AT, typeof(to_proc))
     end
-    cap = UInt(capacity(OSProc(), typeof(to_proc))) * UInt(1e9)
+    cap = UInt64(capacity(OSProc(), typeof(to_proc))) * UInt64(1e9)
     while true
         lock(TASK_SYNC)
         if ((extra_util isa MaxUtilization) && (real_util[] > 0)) ||
