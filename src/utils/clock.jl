@@ -43,10 +43,12 @@ end
 @inline function cputime()
     maketime(clock_gettime(CLOCK_PROCESS_CPUTIME_ID))
 end
+end
 
+@static if Sys.islinux()
 @inline function cputhreadtime()
     maketime(clock_gettime(CLOCK_THREAD_CPUTIME_ID))
 end
-else # Windows
+else
 @inline cputhreadtime() = time_ns() # HACK
 end
