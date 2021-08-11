@@ -1,7 +1,7 @@
 import Tables
 import TableOperations
 
-import Base: fetch
+import Base: fetch, print, show
 
 export DTable, tabletype
 
@@ -121,4 +121,15 @@ function tabletype(d::DTable)
         d.tabletype = fetch(Dagger.@spawn f(d.chunks[1]))
     end
     return d.tabletype
+end
+
+function print(io::IO, d::DTable)
+    tabletype = isnothing(d.tabletype) ? "unknown (use `tabletype(::DTable)`)" : d.tabletype
+    println(io, "DTable with $(length(d.chunks)) partitions")
+    println(io, "Tabletype: $tabletype")
+    nothing
+end
+
+function show(io::IO, ::MIME"text/plain", d::DTable)
+    print(io, d)
 end
