@@ -49,7 +49,7 @@ function handle_fault(ctx, state, deadproc)
     end
 
     # Reschedule inputs from deadlist
-    seen = Dict{Thunk,Bool}()
+    seen = Set{Thunk}()
     for t in deadlist
         reschedule_inputs!(state, t, seen)
     end
