@@ -13,52 +13,138 @@ and will try to apply functions per-partition first and then merge the result if
 
 There are currently two ways of constructing a distributed table:
 
-1. By providing a `Tables.jl` compatible source and the `chunksize`, 
-which is the size of the partition measured in row count.
-2. By providing a `loader_function` and a list of filenames, which are parts of the full table.
+### Tables.jl source
 
-The underlying type of the partition is by default of type constructed by `Tables.materializer(source)`.
-To override the underlying type you can provide a kwarg `tabletype` to the constructor.
+By providing a `Tables.jl` compatible source and the `chunksize`, which is the size of the partition measured in row count.
 
 ```julia
-table = (a=[1, 2, 3, 4, 5], b=[6, 7, 8, 9, 10])
-d = DTable(table, 2)
+julia> using Dagger
+
+julia> table = (a=[1, 2, 3, 4, 5], b=[6, 7, 8, 9, 10]);
+
+julia> d = DTable(table, 2)
+DTable with 3 partitions
+Tabletype: NamedTuple
+
+
+julia> fetch(d)
+(a = [1, 2, 3, 4, 5], b = [6, 7, 8, 9, 10])
 ```
 
+### Loader function and file list
+
+By providing a `loader_function` and a list of filenames, which are parts of the full table.
+
 ```julia
-using CSV
-files = ["1.csv", "2.csv", "3.csv"]
-d = DTable(CSV.File, files)
-tabletype(d)
+julia> using Dagger, CSV
+
+julia> files = ["1.csv", "2.csv", "3.csv"];
+
+julia> d = DTable(CSV.File, files)
+DTable with 3 partitions
+Tabletype: unknown (use `tabletype(::DTable)`)
 
 
-using DataFrames
-table = (a=[1, 2, 3, 4, 5], b=[6, 7, 8, 9, 10])
-d = DTable(table, 2; tabletype=DataFrame)
-fetch(d)
-fetch(d, NamedTuple)
+julia> tabletype(d)
+NamedTuple
 
+julia> fetch(d)
+(a = [1, 2, 1, 2, 1, 2], b = [6, 7, 6, 7, 6, 7])
+```
+
+## Underlying table type
+
+The underlying type of the partition is by default of type constructed by `Tables.materializer(source)`.
+
+```julia
+julia> table = (a=[1, 2, 3, 4, 5], b=[6, 7, 8, 9, 10]);
+
+julia> d = DTable(table, 2)
+DTable with 3 partitions
+Tabletype: NamedTuple
+
+
+julia> fetch(d)
+(a = [1, 2, 3, 4, 5], b = [6, 7, 8, 9, 10])
+```
+
+To override the underlying type you can provide a kwarg `tabletype` to the constructor.
+You can also choose which tabletype should the `DTable` be fetched into.
+
+```julia
+julia> using DataFrames
+
+julia> table = (a=[1, 2, 3, 4, 5], b=[6, 7, 8, 9, 10]);
+
+julia> d = DTable(table, 2; tabletype=DataFrame)
+DTable with 3 partitions
+Tabletype: DataFrame
+
+julia> fetch(d)
+5×2 DataFrame
+ Row │ a      b     
+     │ Int64  Int64 
+─────┼──────────────
+   1 │     1      6
+   2 │     2      7
+   3 │     3      8
+   4 │     4      9
+   5 │     5     10
+
+julia> fetch(d, NamedTuple)
+(a = [1, 2, 3, 4, 5], b = [6, 7, 8, 9, 10])
 ```
 
 ## Available operations
 
-** Warning: the interface is experimental and may change from version to version **
+**Warning: the interface is experimental and may change at any time**
+
 The current set of operations available consist of three simple functions `map`, `filter` and `reduce`.
 
-Below an example of their usage.
+Below is an example of their usage.
 
 ```julia
-table = (a=[1, 2, 3, 4, 5], b=[6, 7, 8, 9, 10])
-d = DTable(table, 2)
+julia> using Dagger
 
-f = filter(row -> row.a > 2)
+julia> table = (a=[1, 2, 3, 4, 5], b=[6, 7, 8, 9, 10]);
 
-m = map(row -> row.a + row.b, f)
+julia> d = DTable(table, 2)
+DTable with 3 partitions
+Tabletype: NamedTuple
 
-r = reduce(+, row-> row.a, f)
 
-fetch(f)
-fetch(m)
-fetch(r)
+julia> f = filter(row -> row.a > 2, d)
+DTable with 3 partitions
+Tabletype: NamedTuple
 
+
+julia> fetch(f)
+(a = [3, 4, 5], b = [8, 9, 10])
+
+julia> m = map(row -> row.a + row.b, eachrow(d))
+EagerThunk (running)
+
+julia> fetch(m)
+5-element Vector{Int64}:
+  7
+  9
+ 11
+ 13
+ 15
+
+julia> r = reduce(+, row-> row.a, eachrow(d); init=0)
+EagerThunk (running)
+
+julia> fetch(r)
+15
+```
+
+# API
+
+```@docs
+DTable
+tabletype
+filter
+map
+reduce
 ```
