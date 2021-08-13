@@ -14,11 +14,15 @@ Applies `f` to each row of `d`.
 """
 function map(f, d::DTableRows)
     chunk_wrap = (chunk, f) -> begin
-        res = chunk |> TableOperations.map(x-> (result=f(x),)) |> Tables.materializer(chunk)
-        Tables.getcolumn(res, :result)
+        if length(Tables.rows(chunk)) > 0
+            m = TableOperations.map(x -> (__map_result = f(x),), chunk)
+            res = Tables.materializer(chunk)(m)
+        else # chunk empty
+            res = Tables.materializer(chunk)((__map_result = [],))
+        end
     end
-    result_vector = map(c -> Dagger.spawn(chunk_wrap, c, f), d.dtable.chunks)
-    Dagger.@spawn vcat(result_vector...)
+    chunks = map(c -> Dagger.spawn(chunk_wrap, c, f), d.dtable.chunks)
+    DTable(chunks, d.dtable.tabletype)
 end
 
 """
@@ -33,16 +37,27 @@ Reduces `d` using function `f_reduce` on values obtained from applying `f_row` o
     fetch(r)
 ```
 """
-function reduce(f_reduce::Function, f_row::Function, d::DTableRows; init)
-    chunk_results = map(c -> Dagger.spawn(_chunk_reduce, f_reduce, f_row, c, init), d.dtable.chunks)
-    reduce_chunks = (f, _init, c_res...) -> reduce(f, c_res; init=_init)
-    Dagger.@spawn reduce_chunks(f_reduce, init, chunk_results...)
+function reduce(f, d::DTable; cols=nothing::Union{Nothing, Vector{Symbol}}, init=Base._InitialValue())
+    columns = isnothing(cols) ? Tables.columnnames(Tables.columns(fetch(d.chunks[1]))) : cols
+    # todo replace this tables.columns with some schema query
+
+    chunk_reduce = (_f, _chunk, _cols, _init) -> begin
+        values = [reduce(_f, Tables.getcolumn(_chunk, c); init=_init) for c in _cols]
+        (; zip(_cols, values)...)
+    end
+    chunk_reduce_results = [Dagger.@spawn chunk_reduce(f, c, columns, init)  for c in d.chunks]
+
+    construct_single_column = (_col, _chunk_results...) -> getindex.(_chunk_results, _col)
+    result_columns = [Dagger.@spawn construct_single_column(c, chunk_reduce_results...) for c in columns]
+
+    reduce_result_column = (_f, _c, _init) -> reduce(_f, _c; init=_init)
+    reduce_chunks = [Dagger.@spawn reduce_result_column(f, c, init) for c in result_columns]
+
+    construct_result = (_cols, _vals...) -> (; zip(_cols, _vals)...)
+    Dagger.@spawn construct_result(columns, reduce_chunks...)
 end
 
-function _chunk_reduce(f_reduce, f_row, chunk, init)
-    mapped = chunk |> TableOperations.map(x -> (result = f_row(x)))
-    reduce(f_reduce, mapped; init=init)
-end
+
 
 """
     filter(f, d::DTable)
