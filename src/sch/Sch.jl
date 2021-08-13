@@ -1,11 +1,11 @@
 module Sch
 
 using Distributed
-import MemPool: DRef
+import MemPool: DRef, poolset
 
 import ..Dagger
-import ..Dagger: Context, Processor, Thunk, ThunkFuture, ThunkFailedException, Chunk, OSProc, AnyScope
-import ..Dagger: order, free!, dependents, noffspring, istask, inputs, unwrap_weak, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, capacity, chunktype, default_enabled, get_processors, execute!, rmprocs!, addprocs!, thunk_processor, constrain, cputhreadtime
+import ..Dagger: Context, Processor, Thunk, WeakThunk, ThunkFuture, ThunkFailedException, Chunk, OSProc, AnyScope
+import ..Dagger: order, free!, dependents, noffspring, istask, inputs, unwrap_weak_checked, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, capacity, chunktype, default_enabled, get_processors, execute!, rmprocs!, addprocs!, thunk_processor, constrain, cputhreadtime
 
 const OneToMany = Dict{Thunk, Set{Thunk}}
 
@@ -45,7 +45,7 @@ Fields:
 - `cache::Dict{Thunk, Any}` - Maps from a finished `Thunk` to it's cached result, often a DRef
 - `running::Set{Thunk}` - The set of currently-running `Thunk`s
 - `running_on::Dict{Thunk,OSProc}` - Map from `Thunk` to the OS process executing it
-- `thunk_dict::Dict{Int, Any}` - Maps from thunk IDs to a `Thunk`
+- `thunk_dict::Dict{Int, WeakThunk}` - Maps from thunk IDs to a `Thunk`
 - `node_order::Any` - Function that returns the order of a thunk
 - `worker_pressure::Dict{Int,Dict{Type,UInt64}}` - Cache of worker pressure
 - `worker_capacity::Dict{Int,Dict{Type,UInt64}}` - Maps from worker ID to capacity
@@ -67,7 +67,7 @@ struct ComputeState
     cache::WeakKeyDict{Thunk, Any}
     running::Set{Thunk}
     running_on::Dict{Thunk,OSProc}
-    thunk_dict::Dict{Int, Any}
+    thunk_dict::Dict{Int, WeakThunk}
     node_order::Any
     worker_pressure::Dict{Int,Dict{Type,UInt64}}
     worker_capacity::Dict{Int,Dict{Type,UInt64}}
@@ -90,7 +90,7 @@ function start_state(deps::Dict, node_order, chan)
                          Dict{Thunk, Any}(),
                          Set{Thunk}(),
                          Dict{Thunk,OSProc}(),
-                         Dict{Int, Thunk}(),
+                         Dict{Int, WeakThunk}(),
                          node_order,
                          Dict{Int,Dict{Type,UInt64}}(),
                          Dict{Int,Dict{Type,UInt64}}(),
@@ -333,15 +333,22 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
 
     # setup thunk_dict mappings
     for node in filter(istask, keys(deps))
-        state.thunk_dict[node.id] = node
+        state.thunk_dict[node.id] = WeakThunk(node)
         for dep in deps[node]
-            state.thunk_dict[dep.id] = dep
+            state.thunk_dict[dep.id] = WeakThunk(dep)
         end
     end
 
     # Initialize procs, pressure, and capacity
     @sync for p in procs_to_use(ctx)
-        @async init_proc(state, p)
+        @async begin
+            try
+                init_proc(state, p)
+            catch err
+                @error "Error initializing worker $p" exception=(err,catch_backtrace())
+                remove_dead_proc!(ctx, state, p)
+            end
+        end
     end
 
     # setup dynamic listeners
@@ -357,6 +364,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
 
     # Loop while we still have thunks to execute
     while !isempty(state.ready) || !isempty(state.running)
+        procs_state = assign_new_procs!(ctx, state, procs_state)
         if !isempty(state.ready)
             # Nothing running, so schedule up to N thunks, 1 per N workers
             schedule!(ctx, state, procs_state)
@@ -407,14 +415,14 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
                 end
                 continue
             else
-                if ctx.options.allow_errors || state.thunk_dict[thunk_id].options.allow_errors
+                if ctx.options.allow_errors || unwrap_weak_checked(state.thunk_dict[thunk_id]).options.allow_errors
                     thunk_failed = true
                 else
                     throw(res)
                 end
             end
         end
-        node = state.thunk_dict[thunk_id]
+        node = unwrap_weak_checked(state.thunk_dict[thunk_id])
         if metadata !== nothing
             state.worker_pressure[pid][typeof(proc)] = metadata.pressure
             state.worker_loadavg[pid] = metadata.loadavg
@@ -572,7 +580,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
 
         # Calculate scope
         scope = AnyScope()
-        for input in unwrap_weak.(task.inputs)
+        for input in unwrap_weak_checked.(task.inputs)
             chunk = if istask(input)
                 state.cache[input]
             elseif input isa Chunk
@@ -741,69 +749,23 @@ function finish_task!(ctx, state, node, thunk_failed)
     if node.cache
         node.cache_ref = state.cache[node]
     end
-    for dep in sort!(collect(get(()->Set{Thunk}(), state.waiting_data, node)), by=state.node_order)
-        dep_isready = false
-        if haskey(state.waiting, dep)
-            set = state.waiting[dep]
-            node in set && pop!(set, node)
-            dep_isready = isempty(set)
-            if dep_isready
-                delete!(state.waiting, dep)
-            end
-        else
-            dep_isready = true
-        end
-        if dep_isready
-            if !thunk_failed
-                push!(state.ready, dep)
-            end
-        end
-    end
-    if haskey(state.futures, node)
-        # Notify any listening thunks
-        for future in state.futures[node]
-            put!(future, state.cache[node]; error=thunk_failed)
-        end
-        delete!(state.futures, node)
-    end
+    schedule_dependents!(state, node, thunk_failed)
+    fill_registered_futures!(state, node, thunk_failed)
 
-    # Chunk clean-up
-    to_evict = Set{Chunk}()
-    for inp in filter(t->istask(t) || (t isa Chunk), unwrap_weak.(node.inputs))
-        if inp in keys(state.waiting_data)
-            w = state.waiting_data[inp]
-            if node in w
-                pop!(w, node)
-            end
-            if isempty(w)
-                delete!(state.waiting_data, inp)
-                if istask(inp) && haskey(state.cache, inp)
-                    _node = state.cache[inp]
-                    if _node isa Chunk
-                        push!(to_evict, _node)
-                    end
-                    GC.@preserve inp begin
-                        pop!(state.cache, inp)
-                        if haskey(state.errored, inp)
-                            pop!(state.errored, inp)
-                        end
-                    end
-                elseif inp isa Chunk
-                    push!(to_evict, inp)
-                end
-            end
-        end
-    end
+    to_evict = cleanup_inputs!(state, node)
     if haskey(state.waiting_data, node) && isempty(state.waiting_data[node])
         delete!(state.waiting_data, node)
     end
+    evict_all_chunks!(ctx, to_evict)
+end
+
+function evict_all_chunks!(ctx, to_evict)
     if !isempty(to_evict)
         @sync for w in map(p->p.pid, procs_to_use(ctx))
             @async remote_do(evict_chunks!, w, to_evict)
         end
     end
 end
-
 function evict_chunks!(chunks::Set{Chunk})
     for chunk in chunks
         haskey(CHUNK_CACHE, chunk) && delete!(CHUNK_CACHE, chunk)
@@ -852,19 +814,20 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
         end
 
         ids = map(enumerate(thunk.inputs)) do (idx,x)
-            istask(x) ? unwrap_weak(x).id : -idx
+            istask(x) ? unwrap_weak_checked(x).id : -idx
         end
 
         data = map(thunk.inputs) do x
-            istask(x) ? state.cache[unwrap_weak(x)] : x
+            istask(x) ? state.cache[unwrap_weak_checked(x)] : x
         end
         toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
         options = merge(ctx.options, toptions)
         @assert (options.single == 0) || (gproc.pid == options.single)
-        sch_handle = SchedulerHandle(ThunkID(thunk.id), state.worker_chans[gproc.pid]...)
+        # TODO: Set `sch_handle.tid.ref` to the right `DRef`
+        sch_handle = SchedulerHandle(ThunkID(thunk.id, nothing), state.worker_chans[gproc.pid]...)
         state.worker_pressure[gproc.pid][typeof(proc)] += util
 
-        # FIXME: De-dup common fields (log_sink, uid, etc.)
+        # TODO: De-dup common fields (log_sink, uid, etc.)
         push!(to_send, (util, thunk.id, thunk.f, data, thunk.get_result,
                         thunk.persist, thunk.cache, thunk.meta, options, ids,
                         (log_sink=ctx.log_sink, profile=ctx.profile),
@@ -944,7 +907,7 @@ function do_task(to_proc, extra_util, thunk_id, f, data, send_result, persist, c
             unlock(TASK_SYNC)
         else
             # Under-subscribed, calculate extra utilization and execute thunk
-            @debug "($(myid())) ($thunk_id) Using available $to_proc: $extra_util | $(real_util[])/$cap"
+            @debug "($(myid())) $f ($thunk_id) Using available $to_proc: $extra_util | $(real_util[])/$cap"
             extra_util = if extra_util isa MaxUtilization
                 count(c->typeof(c)===typeof(to_proc), children(from_proc))
             else
@@ -982,7 +945,7 @@ function do_task(to_proc, extra_util, thunk_id, f, data, send_result, persist, c
     lock(TASK_SYNC) do
         real_util[] -= extra_util
     end
-    @debug "($(myid())) ($thunk_id) Releasing $(typeof(to_proc)): $extra_util | $(real_util[])/$cap"
+    @debug "($(myid())) $f ($thunk_id) Releasing $(typeof(to_proc)): $extra_util | $(real_util[])/$cap"
     lock(TASK_SYNC) do
         notify(TASK_SYNC)
     end

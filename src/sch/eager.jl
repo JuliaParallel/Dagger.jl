@@ -74,14 +74,14 @@ function eager_thunk()
     adjust_pressure!(h, Dagger.ThreadProc, -util)
     while isopen(EAGER_THUNK_CHAN)
         try
-            ev, future, uid, f, args, opts = take!(EAGER_THUNK_CHAN)
+            added_future, future, uid, ref, f, args, opts = take!(EAGER_THUNK_CHAN)
             # preserve inputs until they enter the scheduler
             tid = GC.@preserve args begin
-                args = map(x->x isa Dagger.EagerThunk ? ThunkID(EAGER_ID_MAP[x.uid]) : x, args)
-                add_thunk!(f, h, args...; future=future, opts...)
+                _args = map(x->x isa Dagger.EagerThunk ? ThunkID(EAGER_ID_MAP[x.uid], x.thunk_ref) : x, args)
+                add_thunk!(f, h, _args...; future=future, ref=ref, opts...)
             end
             EAGER_ID_MAP[uid] = tid.id
-            notify(ev)
+            put!(added_future, tid.ref)
         catch err
             iob = IOContext(IOBuffer(), :color=>true)
             println(iob, "Error in eager listener:")

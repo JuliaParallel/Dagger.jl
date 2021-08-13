@@ -42,6 +42,7 @@ mutable struct Thunk
                   # cache it
     cache_ref::Any
     affinity::Union{Nothing, Vector{Pair{OSProc, Int}}}
+    eager_ref::Union{DRef,Nothing}
     options::Any # stores scheduler-specific options
     function Thunk(f, xs...;
                    id::Int=next_id(),
@@ -51,16 +52,17 @@ mutable struct Thunk
                    cache::Bool=false,
                    cache_ref=nothing,
                    affinity=nothing,
+                   eager_ref=nothing,
                    options=nothing,
                    kwargs...
                   )
         if options !== nothing
             @assert isempty(kwargs)
             new(f, xs, id, get_result, meta, persist, cache, cache_ref,
-                affinity, options)
+                affinity, eager_ref, options)
         else
             new(f, xs, id, get_result, meta, persist, cache, cache_ref,
-                affinity, Sch.ThunkOptions(;kwargs...))
+                affinity, eager_ref, Sch.ThunkOptions(;kwargs...))
         end
     end
 end
@@ -144,6 +146,12 @@ end
 istask(::WeakThunk) = true
 unwrap_weak(t::WeakThunk) = t.x.value
 unwrap_weak(t) = t
+function unwrap_weak_checked(t::WeakThunk)
+    t = unwrap_weak(t)
+    @assert t !== nothing
+    t
+end
+unwrap_weak_checked(t) = t
 Base.show(io::IO, t::WeakThunk) = (print(io, "~"); Base.show(io, t.x.value))
 Base.convert(::Type{WeakThunk}, t::Thunk) = WeakThunk(t)
 
@@ -177,7 +185,8 @@ be `fetch`'d or `wait`'d on at any time.
 mutable struct EagerThunk
     uid::UInt
     future::ThunkFuture
-    ref::DRef
+    finalizer_ref::DRef
+    thunk_ref::DRef
 end
 Base.isready(t::EagerThunk) = isready(t.future)
 Base.wait(t::EagerThunk) = wait(t.future)
@@ -200,11 +209,11 @@ function _spawn(f, args...; kwargs...)
     Dagger.Sch.init_eager()
     uid = rand(UInt)
     future = ThunkFuture()
-    ref = poolset(EagerThunkFinalizer(uid))
-    ev = Base.Event()
-    put!(Dagger.Sch.EAGER_THUNK_CHAN, (ev, future, uid, f, (args...,), (kwargs...,)))
-    wait(ev)
-    return (uid, future, ref)
+    finalizer_ref = poolset(EagerThunkFinalizer(uid))
+    added_future = Future()
+    put!(Dagger.Sch.EAGER_THUNK_CHAN, (added_future, future, uid, finalizer_ref, f, (args...,), (kwargs...,)))
+    thunk_ref = fetch(added_future)
+    return (uid, future, finalizer_ref, thunk_ref)
 end
 """
     spawn(f, args...; kwargs...) -> EagerThunk
@@ -213,12 +222,12 @@ Spawns a task with `f` as the function and `args` as the arguments, returning
 an `EagerThunk`. Uses a scheduler running in the background to execute code.
 """
 function spawn(f, args...; kwargs...)
-    uid, future, ref = if myid() == 1
+    uid, future, finalizer_ref, thunk_ref = if myid() == 1
         _spawn(f, args...; kwargs...)
     else
         remotecall_fetch(_spawn, 1, f, args...; kwargs...)
     end
-    return EagerThunk(uid, future, ref)
+    return EagerThunk(uid, future, finalizer_ref, thunk_ref)
 end
 
 """
@@ -309,10 +318,10 @@ Base.hash(x::Thunk, h::UInt) = hash(x.id, hash(h, 0x7ad3bac49089a05f % UInt))
 Base.isequal(x::Thunk, y::Thunk) = x.id==y.id
 
 function Base.show(io::IO, z::Thunk)
-    lvl = get(io, :lazy_level, 1)
+    lvl = get(io, :lazy_level, 2)
     print(io, "Thunk[$(z.id)]($(z.f), ")
-    if lvl < 2
-        show(IOContext(io, :lazy_level => lvl+1), z.inputs)
+    if lvl > 0
+        show(IOContext(io, :lazy_level => lvl-1), z.inputs)
     else
         print(io, "...")
     end
