@@ -33,6 +33,7 @@ function handle_fault(ctx, state, deadproc)
         if pid == deadproc.pid
             push!(deadlist, t)
             delete!(state.running_on, t)
+            pop!(state.running, t)
         end
     end
     # Clear thunk.cache_ref
@@ -53,5 +54,4 @@ function handle_fault(ctx, state, deadproc)
     for t in deadlist
         reschedule_inputs!(state, t, seen)
     end
-    schedule!(ctx, state)
 end
