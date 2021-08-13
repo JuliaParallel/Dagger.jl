@@ -341,7 +341,14 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
 
     # Initialize procs, pressure, and capacity
     @sync for p in procs_to_use(ctx)
-        @async init_proc(state, p)
+        @async begin
+            try
+                init_proc(state, p)
+            catch err
+                @error "Error initializing worker $p" exception=(err,catch_backtrace())
+                remove_dead_proc!(ctx, state, p)
+            end
+        end
     end
 
     # setup dynamic listeners
@@ -357,6 +364,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
 
     # Loop while we still have thunks to execute
     while !isempty(state.ready) || !isempty(state.running)
+        procs_state = assign_new_procs!(ctx, state, procs_state)
         if !isempty(state.ready)
             # Nothing running, so schedule up to N thunks, 1 per N workers
             schedule!(ctx, state, procs_state)
