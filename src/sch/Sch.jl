@@ -294,6 +294,9 @@ end
 "Process-local condition variable (and lock) indicating task completion."
 const TASK_SYNC = Threads.Condition()
 
+"Process-local set of running task IDs."
+const TASKS_RUNNING = Set{Int}()
+
 "Process-local dictionary tracking per-processor total utilization."
 const PROC_UTILIZATION = Dict{UInt64,Dict{Type,Ref{UInt64}}}()
 
@@ -833,7 +836,21 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
                         (log_sink=ctx.log_sink, profile=ctx.profile),
                         sch_handle, state.uid))
     end
-    remote_do(do_tasks, gproc.pid, proc, state.chan, to_send)
+    try
+        remotecall_wait(do_tasks, gproc.pid, proc, state.chan, to_send)
+    catch
+        # We might get a deserialization error due to something not being
+        # defined on the worker; in this case, we re-fire one task at a time to
+        # determine which task failed
+        for ts in to_send
+            try
+                remotecall_wait(do_tasks, gproc.pid, proc, state.chan, [ts])
+            catch err
+                bt = catch_backtrace()
+                put!(state.chan, (gproc.pid, proc, ts[2], (CapturedException(err, bt), nothing)))
+            end
+        end
+    end
 end
 
 """
@@ -843,6 +860,16 @@ Executes a batch of tasks on `to_proc`.
 """
 function do_tasks(to_proc, chan, tasks)
     for task in tasks
+        should_launch = lock(TASK_SYNC) do
+            # Already running; don't try to re-launch
+            if !(task[2] in TASKS_RUNNING)
+                push!(TASKS_RUNNING, task[2])
+                true
+            else
+                false
+            end
+        end
+        should_launch || continue
         @async begin
             try
                 result = do_task(to_proc, task...)
@@ -944,11 +971,10 @@ function do_task(to_proc, extra_util, thunk_id, f, data, send_result, persist, c
     @dbg timespan_end(ctx, :compute, thunk_id, (f, to_proc))
     lock(TASK_SYNC) do
         real_util[] -= extra_util
-    end
-    @debug "($(myid())) $f ($thunk_id) Releasing $(typeof(to_proc)): $extra_util | $(real_util[])/$cap"
-    lock(TASK_SYNC) do
+        pop!(TASKS_RUNNING, thunk_id)
         notify(TASK_SYNC)
     end
+    @debug "($(myid())) $f ($thunk_id) Releasing $(typeof(to_proc)): $extra_util | $(real_util[])/$cap"
     metadata = (
         pressure=real_util[],
         loadavg=((Sys.loadavg()...,) ./ Sys.CPU_THREADS),
