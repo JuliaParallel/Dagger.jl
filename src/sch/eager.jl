@@ -3,8 +3,42 @@ const EAGER_THUNK_CHAN = Channel(typemax(Int))
 const EAGER_ID_MAP = Dict{UInt64,Int}()
 const EAGER_CONTEXT = Ref{Context}()
 const EAGER_STATE = Ref{ComputeState}()
+const EAGER_SCH_OPTS = Ref{SchedulerOptions}(SchedulerOptions(;allow_errors=true))
 
 eager_context() = isassigned(EAGER_CONTEXT) ? EAGER_CONTEXT[] : nothing
+
+"""
+    global_eager_scheduler_options(; kwargs...)
+
+Set / retrieve the global eager scheduler options.
+If no `kwargs` are passed, the current `SchedulerOptions` is returned,
+otherwise the global eager scheduler options are set to
+`SchedulerOptions(;kwargs...)` and returned.
+# Keywords
+- `kwargs...`: SchedulerOptions keywords to be set
+# Returns
+- `SchedulerOptions`: The global options used for eager scheduling.
+"""
+function global_eager_scheduler_options(; kwargs...)
+    if !isassigned(EAGER_SCH_OPTS) || !isempty(kwargs)
+        EAGER_SCH_OPTS[] = SchedulerOptions(; kwargs...)
+        @show EAGER_SCH_OPTS[]
+    end
+    return EAGER_SCH_OPTS[]
+end
+
+"""
+    global_eager_scheduler_options(options::SchedulerOptions)
+
+Set the global `SchedulerOptions` used for eager scheduling.
+# Arguments
+- `options::SchedulerOptions`: the new `SchedulerOptions`
+# Returns
+- `SchedulerOptions`
+"""
+function global_eager_scheduler_options(options::SchedulerOptions)
+    return EAGER_SCH_OPTS[] = options
+end
 
 function init_eager()
     EAGER_INIT[] && return
@@ -14,7 +48,7 @@ function init_eager()
     end
     ctx = EAGER_CONTEXT[]
     @async try
-        sopts = SchedulerOptions(;allow_errors=true)
+        sopts = global_eager_scheduler_options()
         topts = ThunkOptions(;single=1)
         Dagger.compute(ctx, Dagger.delayed(eager_thunk;options=topts)(); options=sopts)
     catch err
