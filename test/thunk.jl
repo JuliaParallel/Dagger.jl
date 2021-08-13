@@ -150,4 +150,24 @@ end
         # Mild stress-test
         @test dynamic_fib(10) == 55
     end
+    @testset "undefined function" begin
+        # Issues #254, #255
+
+        # only defined on head node
+        @eval evil_f(x) = x
+
+        eager_thunks = map(1:10) do i
+            single = isodd(i) ? 1 : first(workers())
+            Dagger.@spawn single=single evil_f(i)
+        end
+
+        errored(t) = try
+            fetch(t)
+            false
+        catch
+            true
+        end
+        @test any(t->errored(t), eager_thunks)
+        @test any(t->!errored(t), eager_thunks)
+    end
 end
