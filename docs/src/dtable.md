@@ -103,6 +103,8 @@ The current set of operations available consist of three simple functions `map`,
 
 Below is an example of their usage.
 
+For better examples on how to use it please refer to the API documentation and test cases.
+
 ```julia
 julia> using Dagger
 
@@ -121,22 +123,18 @@ Tabletype: NamedTuple
 julia> fetch(f)
 (a = [3, 4, 5], b = [8, 9, 10])
 
-julia> m = map(row -> row.a + row.b, eachrow(d))
-EagerThunk (running)
+julia> m = map(row -> (r = row.a + row.b,), d)
+DTable with 3 partitions
+Tabletype: NamedTuple
 
 julia> fetch(m)
-5-element Vector{Int64}:
-  7
-  9
- 11
- 13
- 15
+(r = [7, 9, 11, 13, 15],)
 
-julia> r = reduce(+, row-> row.a, eachrow(d); init=0)
+julia> r = reduce(+, m)
 EagerThunk (running)
 
 julia> fetch(r)
-15
+(r = 55,)
 ```
 
 # API
