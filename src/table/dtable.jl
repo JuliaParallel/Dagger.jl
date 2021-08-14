@@ -1,7 +1,7 @@
 import Tables
 import TableOperations
 
-import Base: fetch
+import Base: fetch, print, show
 
 export DTable, tabletype
 
@@ -144,4 +144,15 @@ function trim!(d::DTable)
     check_result = [Dagger.@spawn isvalid(c) for c in d.chunks]
     d.chunks = getindex.(filter(x -> fetch(check_result[x[1]]), collect(enumerate(d.chunks))), 2)
     d
+end
+
+function print(io::IO, d::DTable)
+    tabletype = isnothing(d.tabletype) ? "unknown (use `tabletype(::DTable)`)" : d.tabletype
+    println(io, "DTable with $(length(d.chunks)) partitions")
+    println(io, "Tabletype: $tabletype")
+    nothing
+end
+
+function show(io::IO, ::MIME"text/plain", d::DTable)
+    print(io, d)
 end
