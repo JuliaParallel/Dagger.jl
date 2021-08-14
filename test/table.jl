@@ -11,6 +11,11 @@ using CSV
         @test fetch(dt) == nt
         @test fetch(dt, NamedTuple) == nt
         @test tabletype(dt) == NamedTuple
+
+        # empty dtable case
+        dt = DTable((a = [], b = []), 10)
+        @test fetch(dt) == NamedTuple()
+        @test tabletype(dt) == NamedTuple # fallback in case it can't be found
     end
 
     @testset "constructors - Tables.jl compatibility (DataFrames)" begin
@@ -79,56 +84,96 @@ using CSV
     @testset "map" begin
         size = 1_000
         nt = (a = rand(size), b = rand(size))
-        s = DataFrame(nt)
-        d = DTable(s, 100)
-        sm = map(x -> x.a + x.b, eachrow(s))
-        dm = map(x -> x.a + x.b, eachrow(d))
-        @test fetch(dm) == sm 
-        d = DTable(nt, 100)
-        dm = map(x -> x.a + x.b, eachrow(d))
-        @test fetch(dm) == sm
+
+        df = DataFrame(nt)
+        
+        for src in [nt, df]
+            dt = DTable(src, 100)
+
+            # Single result 
+            mt = map(x -> (r = x.a + x.b, ), dt)
+            mf = map(x -> x.a + x.b, eachrow(df))
+            @test fetch(mt).r == mf
+
+            # Two results
+            mt = map(x -> (r1 = x.a + x.b, r2 = x.a - x.b), dt)
+            mf = combine(df, [:a, :b] => ((a, b) -> a .+ b) => :r1, [:a, :b] => ((a, b) -> a .- b) => :r2)
+            @test fetch(mt).r1 == mf.r1
+            @test fetch(mt).r2 == mf.r2
+        end
+
+        # Map an empty dtable
+        dt = DTable((a = [], b = []), 10)
+        m = map(x -> (r = x.a + x.b), dt)
+        @test fetch(m) == NamedTuple() 
     end
 
     @testset "filter" begin
         size = 1_000
         nt = (a = rand(size), b = rand(size))
+
         df = DataFrame(nt)
-        dt = DTable(df, 100)
-        dfr = filter(x -> x.a > 0.5, df)
-        dtr = filter(x -> x.a > 0.5, dt)
-        @test fetch(dtr) == dfr
-        dt = DTable(nt, 100)
-        dtr = filter(x -> x.a > 0.5, dt)
-        @test fetch(dtr, DataFrame) == dfr
+
+        for src in [nt, df]
+            dt = DTable(src, 100)
+
+            dfr = filter(x -> (x.a .> 0.5) .& (x.b .< 0.5), df)
+            dtr = filter(x -> (x.a .> 0.5) .& (x.b .< 0.5), dt)
+            @test fetch(dtr, DataFrame) == dfr
+        end
+
+        # Filter an empty DTable
+        dt = DTable((a = [], b = []), 10)
+        f = filter(x -> x.a .> 0.5, dt)
+        @test fetch(f) == NamedTuple() 
     end
 
     @testset "reduce" begin
         size = 1_000
-        nt = (a=rand(Int, size) .% 1000, b=rand(Int, size) .% 1000)
+        nt = (a=rand(Int, size) .% 100, b=rand(Int, size) .% 100)
 
-        s = DataFrame(nt)
-        d = DTable(s, 100)
-        dn = DTable(nt, 100)
+        df = DataFrame(nt)
+        dtdf = DTable(df, 100)
+        dtnt = DTable(nt, 100)
 
-        dr1 = reduce(+, y -> y.a, eachrow(d);init=0)
-        dn1 = reduce(+, y -> y.a, eachrow(dn);init=0)
-        sr1 = reduce((x, y) -> x + y.a, eachrow(s);init=0)
+        dtdf1 = reduce(+, dtdf, cols=[:a])
+        dtnt1 = reduce(+, dtnt, cols=[:a])
+        df1 = reduce((x, y) -> x + y.a, eachrow(df); init=0)
 
-        dr2 = reduce(+, y -> y.a * y.b, eachrow(d);init=0)
-        dn2 = reduce(+, y -> y.a * y.b, eachrow(dn);init=0)
-        sr2 = reduce((x, y) -> x + y.a * y.b, eachrow(s);init=0)
+        dtdf2 = reduce(+, map(x -> (r = x.a * x.b,), dtdf), cols=[:r])
+        dtnt2 = reduce(+, map(x -> (r = x.a * x.b,), dtnt), cols=[:r])
+        df2 = reduce((x, y) -> x + y.a * y.b, eachrow(df);init=0)
 
-        dr3 = reduce(+, y -> y.a + y.b, eachrow(d);init=0)
-        dn3 = reduce(+, y -> y.a + y.b, eachrow(dn);init=0)
-        sr3 = reduce((x, y) -> x + y.a + y.b, eachrow(s);init=0)
+        dtdf3 = reduce(+, map(x -> (r = x.a + x.b,), dtdf), cols=[:r])
+        dtnt3 = reduce(+, map(x -> (r = x.a + x.b,), dtnt), cols=[:r])
+        df3 = reduce((x, y) -> x + y.a + y.b, eachrow(df);init=0)
 
-        dr4 = reduce(*, y -> y.a, eachrow(d);init=0)
-        dn4 = reduce(*, y -> y.a, eachrow(dn);init=0)
-        sr4 = reduce((x, y) -> x * y.a, eachrow(s);init=0)
+        dtdf4 = reduce(*, dtdf, cols=[:a])
+        dtnt4 = reduce(*, dtnt, cols=[:a])
+        df4 = reduce((x, y) -> x * y.a, eachrow(df); init=1)
 
-        @test fetch(dr1) == fetch(dn1) == sr1
-        @test fetch(dr2) == fetch(dn2) == sr2
-        @test fetch(dr3) == fetch(dn3) == sr3
-        @test fetch(dr4) == fetch(dn4) == sr4
+        @test fetch(dtdf1).a == fetch(dtnt1).a == df1
+        @test fetch(dtdf2).r == fetch(dtnt2).r == df2
+        @test fetch(dtdf3).r == fetch(dtnt3).r == df3
+        @test fetch(dtdf4).a == fetch(dtnt4).a == df4
+
+        all_reduce = reduce(+, dtdf)
+        df5 = reduce((x, y) -> x + y.b, eachrow(df); init=0)
+
+        @test fetch(all_reduce).a == df1
+        @test fetch(all_reduce).b == df5
+    end
+
+    @testset "chaining ops" begin
+        nt = (a=1:100, b=(1:100))
+
+        d = DTable(nt, 2)
+        f1 = filter(x -> iseven.(x.a), d)
+        m1 = map(x -> (r = x.a + x.b,), f1)
+        f2 = filter(x -> x.r > 50, m1)
+        r = reduce(+, f2)
+        @test fetch(r).r == 4788
+        r = reduce(*, f2, init=BigInt(1))
+        @test fetch(r).r == reduce(*, fetch(f2).r, init=BigInt(1))
     end
 end

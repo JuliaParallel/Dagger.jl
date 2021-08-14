@@ -25,8 +25,6 @@ end
 DTable(chunks::Vector{Dagger.EagerThunk}, args...) = DTable(VTYPE(chunks), args...)
 DTable(chunks::Vector{Dagger.Chunk}, args...) = DTable(VTYPE(chunks), args...)
 
-include("iterators.jl")
-include("operations.jl")
 
 """
     DTable(table, chunksize; tabletype=nothing) -> DTable
@@ -105,7 +103,11 @@ instance of table type created using the provided `sink` function.
 """
 fetch(d::DTable, sink) = sink(_retrieve_partitions(d))
 
-_retrieve_partitions(d::DTable) = TableOperations.joinpartitions(Tables.partitioner(_retrieve, d.chunks))
+function _retrieve_partitions(d::DTable) 
+    trim!(d)
+    return length(d.chunks) > 0 ?
+        TableOperations.joinpartitions(Tables.partitioner(_retrieve, d.chunks)) : NamedTuple()
+end
 
 _retrieve(x::Dagger.EagerThunk) = fetch(x)
 _retrieve(x::Dagger.Chunk) = collect(x)
@@ -118,7 +120,28 @@ Provides the type of the underlying table partition.
 function tabletype(d::DTable)
     if d.tabletype === nothing
         f = c -> typeof(c).name.wrapper
-        d.tabletype = fetch(Dagger.@spawn f(d.chunks[1]))
+        if length(d.chunks) > 0
+            d.tabletype = fetch(Dagger.@spawn f(d.chunks[begin]))
+        else # fallback
+            d.tabletype = NamedTuple
+        end
     end
     return d.tabletype
+end
+
+
+function isvalid(chunk)
+    length(Tables.rows(chunk)) > 0 && length(Tables.columnnames(chunk)) > 0
+end
+
+"""
+    trim!(d::DTable)
+
+Validates chunks of the DTable and removes the unvalid ones.
+A valid chunk is a non-empty chunk.
+"""
+function trim!(d::DTable)
+    check_result = [Dagger.@spawn isvalid(c) for c in d.chunks]
+    d.chunks = getindex.(filter(x -> fetch(check_result[x[1]]), collect(enumerate(d.chunks))), 2)
+    d
 end

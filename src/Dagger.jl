@@ -50,7 +50,10 @@ include("array/sparse_partition.jl")
 include("array/sort.jl")
 
 include("ui/graph.jl")
+
 include("table/dtable.jl")
+include("table/operations.jl")
+
 function __init__()
     # Initialize system UUID
     system_uuid()
