@@ -4,22 +4,34 @@ import Base: filter, map, reduce
     map(f, d::DTable) -> DTable
 
 Applies `f` to each row of `d`.
-The applied function needs to return a `Tables.Row` compatible object.
+The applied function needs to return a `Tables.Row` compatible object (e.g. `NamedTuple`).
 
 # Examples
 ```
-    d = DTable((a=rand(1000), b=rand(1000)), chunksize=100)
-    m = map(x -> (r = x.a + x.b,), d)
-    fetch(m)
+julia> d = DTable((a = [1, 2, 3], b = [1, 1, 1]), 2);
+
+julia> m = map(x -> (r = x.a + x.b,), d)
+DTable with 2 partitions
+Tabletype: NamedTuple
+
+julia> fetch(m)
+(r = [2, 3, 4],)
+
+julia> m = map(x -> (r1 = x.a + x.b, r2 = x.a - x.b), d)
+DTable with 2 partitions
+Tabletype: NamedTuple
+
+julia> fetch(m)
+(r1 = [2, 3, 4], r2 = [0, 1, 2])
 ```
 """
 function map(f, d::DTable)
-    chunk_wrap = (chunk, f) -> begin
-        if isvalid(chunk)
-            m = TableOperations.map(f, chunk)
-            Tables.materializer(chunk)(m)
+    chunk_wrap = (_chunk, _f) -> begin
+        if isvalid(_chunk)
+            m = TableOperations.map(_f, _chunk)
+            Tables.materializer(_chunk)(m)
         else
-            chunk
+            _chunk
         end
     end
     chunks = map(c -> Dagger.spawn(chunk_wrap, c, f), d.chunks)
@@ -30,22 +42,35 @@ end
     reduce(f, d::DTable; cols=nothing, [init]) -> NamedTuple
 
 Reduces `d` using function `f` applied on all columns of the DTable.
+
 By providing the kwarg `cols` as a `Vector{Symbol}` object it's possible 
 to restrict the reduction to the specified columns.
 The reduced values are provided in a NamedTuple under names of reduced columns.
 
+For the `init` kwarg please refer to `Base.reduce` documentation,
+as it follows the same principles. 
+
 # Examples
 ```
-    d = DTable((a=rand(1000), b=rand(1000)), chunksize=100)
-    r1 = reduce(+, d)
-    r2 = reduce(+, d, cols=[:a])
-    fetch(r1); fetch(r2)
+julia> d = DTable((a = [1, 2, 3], b = [1, 1, 1]), 2);
+
+julia> r1 = reduce(+, d)
+EagerThunk (running)
+
+julia> fetch(r1)
+(a = 6, b = 3)
+
+julia> r2 = reduce(*, d, cols=[:a])
+EagerThunk (running)
+
+julia> fetch(r2)
+(a = 6,)
 ```
 """
 function reduce(f, d::DTable; cols=nothing::Union{Nothing, Vector{Symbol}}, init=Base._InitialValue())
     # TODO replace this with checking the colnames in schema, once schema handling gets introduced
     if length(d.chunks) > 0
-        columns = isnothing(cols) ? Tables.columnnames(Tables.columns(_retrieve(d.chunks[begin]))) : cols
+        columns = isnothing(cols) ? Tables.columnnames(Tables.columns(_retrieve(d.chunks[1]))) : cols
     else
         return Dagger.@spawn NamedTuple()
     end
@@ -76,12 +101,27 @@ Returns a filtered `DTable` that can be processed further.
 
 # Examples
 ```
-    d = DTable((a=rand(1000), b=rand(1000)), chunksize=100)
-    f = filter(x -> x.a > 0.5, d)
-    fetch(f)
+julia> d = DTable((a = [1, 2, 3], b = [1, 1, 1]), 2);
+
+julia> f = filter(x -> x.a < 3, d)
+DTable with 2 partitions
+Tabletype: NamedTuple
+
+julia> fetch(f)
+(a = [1, 2], b = [1, 1])
+
+julia> f = filter(x -> (x.a < 3) .& (x.b > 0), d)
+DTable with 2 partitions
+Tabletype: NamedTuple
+
+julia> fetch(f)
+(a = [1, 2], b = [1, 1])
 ```
 """
 function filter(f, d::DTable)
-    chunk_wrap = (chunk, f) -> TableOperations.filter(f, chunk) |> Tables.materializer(chunk)
+    chunk_wrap = (_chunk, _f) -> begin 
+        m = TableOperations.filter(_f, _chunk)
+        Tables.materializer(_chunk)(m)
+    end
     DTable(map(c -> Dagger.spawn(chunk_wrap, c, f), d.chunks), d.tabletype)
 end

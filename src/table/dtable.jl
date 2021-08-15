@@ -121,7 +121,7 @@ function tabletype(d::DTable)
     if d.tabletype === nothing
         f = c -> typeof(c).name.wrapper
         if length(d.chunks) > 0
-            d.tabletype = fetch(Dagger.@spawn f(d.chunks[begin]))
+            d.tabletype = fetch(Dagger.@spawn f(d.chunks[1]))
         else # fallback
             d.tabletype = NamedTuple
         end
