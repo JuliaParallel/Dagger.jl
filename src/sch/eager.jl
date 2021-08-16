@@ -22,7 +22,6 @@ otherwise the global eager scheduler options are set to
 function global_eager_scheduler_options(; kwargs...)
     if !isassigned(EAGER_SCH_OPTS) || !isempty(kwargs)
         EAGER_SCH_OPTS[] = SchedulerOptions(; kwargs...)
-        @show EAGER_SCH_OPTS[]
     end
     return EAGER_SCH_OPTS[]
 end
