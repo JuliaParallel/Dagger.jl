@@ -19,7 +19,7 @@ otherwise the global eager scheduler options are set to
 # Returns
 - `SchedulerOptions`: The global options used for eager scheduling.
 """
-function global_eager_scheduler_options(; kwargs...)
+function eager_options(; kwargs...)
     if !isassigned(EAGER_SCH_OPTS) || !isempty(kwargs)
         EAGER_SCH_OPTS[] = SchedulerOptions(; kwargs...)
     end
