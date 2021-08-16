@@ -76,11 +76,11 @@ function reduce(f, d::DTable; cols=nothing::Union{Nothing, Vector{Symbol}}, init
     end
 
     chunk_reduce = (_f, _chunk, _cols, _init) -> begin
-        values = [reduce(_f, Tables.getcolumn(_chunk, c); init=_init) for c in _cols]
+        values = [reduce(_f, Tables.getcolumn(_chunk, c); init=deepcopy(_init)) for c in _cols]
         (; zip(_cols, values)...)
     end
     chunk_reduce_results = [Dagger.@spawn chunk_reduce(f, c, columns, deepcopy(init))  for c in d.chunks]
-    
+
     construct_single_column = (_col, _chunk_results...) -> getindex.(_chunk_results, _col)
     result_columns = [Dagger.@spawn construct_single_column(c, chunk_reduce_results...) for c in columns]
 
