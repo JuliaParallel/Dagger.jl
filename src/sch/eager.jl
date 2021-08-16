@@ -8,7 +8,7 @@ const EAGER_SCH_OPTS = Ref{SchedulerOptions}(SchedulerOptions(;allow_errors=true
 eager_context() = isassigned(EAGER_CONTEXT) ? EAGER_CONTEXT[] : nothing
 
 """
-    global_eager_scheduler_options(; kwargs...)
+    eager_options(; kwargs...)
 
 Set / retrieve the global eager scheduler options.
 If no `kwargs` are passed, the current `SchedulerOptions` is returned,
@@ -20,14 +20,14 @@ otherwise the global eager scheduler options are set to
 - `SchedulerOptions`: The global options used for eager scheduling.
 """
 function eager_options(; kwargs...)
-    if !isassigned(EAGER_SCH_OPTS) || !isempty(kwargs)
+    if !isempty(kwargs)
         EAGER_SCH_OPTS[] = SchedulerOptions(; kwargs...)
     end
     return EAGER_SCH_OPTS[]
 end
 
 """
-    global_eager_scheduler_options(options::SchedulerOptions)
+    eager_options(options::SchedulerOptions)
 
 Set the global `SchedulerOptions` used for eager scheduling.
 # Arguments
@@ -35,7 +35,7 @@ Set the global `SchedulerOptions` used for eager scheduling.
 # Returns
 - `SchedulerOptions`
 """
-function global_eager_scheduler_options(options::SchedulerOptions)
+function eager_options(options::SchedulerOptions)
     return EAGER_SCH_OPTS[] = options
 end
 
@@ -47,7 +47,7 @@ function init_eager()
     end
     ctx = EAGER_CONTEXT[]
     @async try
-        sopts = global_eager_scheduler_options()
+        sopts = eager_options()
         topts = ThunkOptions(;single=1)
         Dagger.compute(ctx, Dagger.delayed(eager_thunk;options=topts)(); options=sopts)
     catch err
