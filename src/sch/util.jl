@@ -9,29 +9,92 @@ unwrap_nested_exception(err::RemoteException) =
     unwrap_nested_exception(err.captured)
 unwrap_nested_exception(err) = err
 
-"Prepares the scheduler to schedule `thunk`."
-function reschedule_inputs!(state, thunk, seen=Dict{Thunk,Bool}())
-    haskey(seen, thunk) && return seen[thunk]
-    haskey(state.cache, thunk) && return false
+"Fills the result for all registered futures of `node`."
+function fill_registered_futures!(state, node, failed)
+    if haskey(state.futures, node)
+        # Notify any listening thunks
+        for future in state.futures[node]
+            put!(future, state.cache[node]; error=failed)
+        end
+        delete!(state.futures, node)
+    end
+end
+
+"Cleans up any inputs that aren't needed any longer, and returns a `Set{Chunk}`
+of all chunks that can now be evicted from workers."
+function cleanup_inputs!(state, node)
+    to_evict = Set{Chunk}()
+    for inp in unwrap_weak_checked.(node.inputs)
+        if !istask(inp) && !(inp isa Chunk)
+            continue
+        end
+        if inp in keys(state.waiting_data)
+            w = state.waiting_data[inp]
+            if node in w
+                pop!(w, node)
+            end
+            if isempty(w)
+                if istask(inp) && haskey(state.cache, inp)
+                    _node = state.cache[inp]
+                    if _node isa Chunk
+                        push!(to_evict, _node)
+                    end
+                elseif inp isa Chunk
+                    push!(to_evict, inp)
+                end
+                delete!(state.waiting_data, inp)
+            end
+        end
+    end
+    to_evict
+end
+
+"Schedules any dependents that may be ready to execute."
+function schedule_dependents!(state, node, failed)
+    for dep in sort!(collect(get(()->Set{Thunk}(), state.waiting_data, node)), by=state.node_order)
+        dep_isready = false
+        if haskey(state.waiting, dep)
+            set = state.waiting[dep]
+            node in set && pop!(set, node)
+            dep_isready = isempty(set)
+            if dep_isready
+                delete!(state.waiting, dep)
+            end
+        else
+            dep_isready = true
+        end
+        if dep_isready
+            if !failed
+                push!(state.ready, dep)
+            end
+        end
+    end
+end
+
+"""
+Prepares the scheduler to schedule `thunk`, including scheduling `thunk` if
+its inputs are satisfied.
+"""
+function reschedule_inputs!(state, thunk, seen=Set{Thunk}())
+    thunk in seen && return
+    push!(seen, thunk)
+    if haskey(state.cache, thunk) || (thunk in state.ready) || (thunk in state.running)
+        return
+    end
     w = get!(()->Set{Thunk}(), state.waiting, thunk)
-    scheduled = false
-    for input in unwrap_weak.(thunk.inputs)
+    for input in thunk.inputs
+        input = unwrap_weak_checked(input)
         if istask(input) || (input isa Chunk)
             push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
         end
         istask(input) || continue
         if get(state.errored, input, false)
             set_failed!(state, input, thunk)
-            scheduled = true
         end
         haskey(state.cache, input) && continue
-        if (input in state.running) ||
-           (input in state.ready) ||
-           reschedule_inputs!(state, input, seen)
-            push!(w, input)
-            scheduled = true
-        else
-            error("Failed to reschedule $(input.id) for $(thunk.id)")
+        push!(w, input)
+        if !((input in state.running) || (input in state.ready))
+            reschedule_inputs!(state, input, seen)
         end
     end
     if isempty(w)
@@ -40,9 +103,6 @@ function reschedule_inputs!(state, thunk, seen=Dict{Thunk,Bool}())
         if !get(state.errored, thunk, false)
             push!(state.ready, thunk)
         end
-        return true
-    else
-        return scheduled
     end
 end
 
@@ -51,12 +111,7 @@ function set_failed!(state, origin, thunk=origin)
     filter!(x->x!==thunk, state.ready)
     state.cache[thunk] = ThunkFailedException(thunk, origin, state.cache[origin])
     state.errored[thunk] = true
-    if haskey(state.futures, thunk)
-        for future in state.futures[thunk]
-            put!(future, state.cache[thunk]; error=true)
-        end
-        delete!(state.futures, thunk)
-    end
+    fill_registered_futures!(state, thunk, true)
     if haskey(state.waiting_data, thunk)
         for dep in state.waiting_data[thunk]
             haskey(state.waiting, dep) &&
@@ -103,6 +158,13 @@ function print_sch_status(io::IO, state, thunk; offset=0, limit=5, max_inputs=3)
     end
     println(io, "$(thunk.id): $(thunk.f)")
     for (idx,input) in enumerate(thunk.inputs)
+        if input isa WeakThunk
+            input = unwrap_weak(input)
+            if input === nothing
+                println(io, repeat(' ', offset+2), "(???)")
+                continue
+            end
+        end
         input isa Thunk || continue
         if idx > max_inputs
             println(io, repeat(' ', offset+2), "…")
@@ -142,7 +204,7 @@ function fetch_report(task)
 end
 
 function signature(task::Thunk, state)
-    inputs = map(x->istask(x) ? state.cache[x] : x, unwrap_weak.(task.inputs))
+    inputs = map(x->istask(x) ? state.cache[x] : x, unwrap_weak_checked.(task.inputs))
     Tuple{typeof(task.f), map(x->x isa Chunk ? x.chunktype : typeof(x), inputs)...}
 end
 
