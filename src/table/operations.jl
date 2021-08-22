@@ -74,10 +74,24 @@ function reduce(f, d::DTable; cols=nothing::Union{Nothing, Vector{Symbol}}, init
     else
         return Dagger.@spawn NamedTuple()
     end
+    col_in_chunk_reduce = (_f, _c, _init, _chunk) -> reduce(_f, Tables.getcolumn(_chunk, _c); init=deepcopy(_init))
 
     chunk_reduce = (_f, _chunk, _cols, _init) -> begin
-        values = [reduce(_f, Tables.getcolumn(_chunk, c); init=deepcopy(_init)) for c in _cols]
-        (; zip(_cols, values)...)
+        # TODO: potential speedup enabled by commented code below by reducing the columns in parallel
+        v = [col_in_chunk_reduce(_f, c, _init, _chunk) for c in _cols]
+        (; zip(_cols, v)...)
+
+        # TODO: uncomment and define a good threshold for parallelization when this get's resolved
+        # https://github.com/JuliaParallel/Dagger.jl/issues/267
+        # also this piece of code below for at least two columns is causing the issue above
+        # when reduce repeatedly is repeatedly executed or @btime is used
+        # if length(_cols) <= 1 
+        #     v = [col_in_chunk_reduce(_f, c, _init, _chunk) for c in _cols]
+        # else
+        #     values = [Dagger.spawn(col_in_chunk_reduce, _f, c, _init, _chunk) for c in _cols]
+        #     v = fetch.(values)
+        # end
+        # (; zip(_cols, v)...)
     end
     chunk_reduce_results = [Dagger.@spawn chunk_reduce(f, c, columns, deepcopy(init))  for c in d.chunks]
 
