@@ -15,7 +15,6 @@ using CSV
         # empty dtable case
         dt = DTable((a = [], b = []), 10)
         @test fetch(dt) == NamedTuple()
-        @test tabletype(dt) == NamedTuple # fallback in case it can't be found
     end
 
     @testset "constructors - Tables.jl compatibility (DataFrames)" begin
@@ -79,6 +78,10 @@ using CSV
         da = DTable(x -> Arrow.Table(take!(ios[tryparse(Int64, x)])), [string(i) for i in 1:n])
         db = vcat([DataFrame(d) for d in data]...)
         @test fetch(da, DataFrame) == db
+        @test Dagger.cached_tabletype(da) == NamedTuple
+        @test da.tabletype === nothing
+        tabletype!(da)
+        @test da.tabletype === NamedTuple
     end
 
     @testset "map" begin
@@ -175,5 +178,37 @@ using CSV
         @test fetch(r).r == 4788
         r = reduce(*, f2, init=BigInt(1))
         @test fetch(r).r == reduce(*, fetch(f2).r, init=BigInt(1))
+    end
+
+    @testset "trim" begin
+        nt = (a=1:100, b=(1:100))
+
+        d = DTable(nt, 2)
+        fd = filter(x -> x.a > 49, d)
+
+        @test length(d.chunks) == length(fd.chunks)
+        @test length(trim(fd).chunks) == 26
+        trim!(fd)
+        @test length(fd.chunks) == 26
+
+        fd2 = filter(x -> x.a > 100, d)
+        @test length(d.chunks) == length(fd2.chunks)
+        @test length(trim(fd2).chunks) == 0
+        trim!(fd2)
+        @test length(fd2.chunks) == 0
+    end
+
+    @testset "tabletype" begin
+        nt = (a=1:100, b=(1:100))
+        d = DTable(nt, 2)
+        @test tabletype(d) == NamedTuple
+        d.tabletype = nothing
+        @test Dagger.cached_tabletype(d) == NamedTuple
+        tabletype!(d)
+        @test d.tabletype == NamedTuple
+
+        # empty dtable case
+        dt = DTable((a = [], b = []), 10)
+        @test tabletype(dt) == NamedTuple # fallback in case it can't be found
     end
 end

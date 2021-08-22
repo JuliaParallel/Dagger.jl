@@ -93,7 +93,7 @@ instance of the underlying table type.
 Fetching an empty DTable results in returning an empty `NamedTuple` regardless of the underlying `tabletype`.
 """
 function fetch(d::DTable)
-    sink = Tables.materializer(_tabletype(d)())
+    sink = Tables.materializer(cached_tabletype(d)())
     sink(_retrieve_partitions(d))
 end
 
@@ -144,13 +144,13 @@ function tabletype(d::DTable)
 end
 
 """
-    _tabletype(d::DTable)
+    cached_tabletype(d::DTable)
 
 Returns the underlying table type using the cached information if available.
 
 In case the tabletype cannot be obtained the default return value is `NamedTuple`.
 """
-function _tabletype(d::DTable)
+function cached_tabletype(d::DTable)
     d.tabletype === nothing ? tabletype(d) : d.tabletype
 end
 
