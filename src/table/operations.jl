@@ -7,7 +7,7 @@ Applies `f` to each row of `d`.
 The applied function needs to return a `Tables.Row` compatible object (e.g. `NamedTuple`).
 
 # Examples
-```
+```julia
 julia> d = DTable((a = [1, 2, 3], b = [1, 1, 1]), 2);
 
 julia> m = map(x -> (r = x.a + x.b,), d)
@@ -27,7 +27,7 @@ julia> fetch(m)
 """
 function map(f, d::DTable)
     chunk_wrap = (_chunk, _f) -> begin
-        if isvalid(_chunk)
+        if isnonempty(_chunk)
             m = TableOperations.map(_f, _chunk)
             Tables.materializer(_chunk)(m)
         else
@@ -43,7 +43,7 @@ end
 
 Reduces `d` using function `f` applied on all columns of the DTable.
 
-By providing the kwarg `cols` as a `Vector{Symbol}` object it's possible 
+By providing the kwarg `cols` as a `Vector{Symbol}` object it's possible
 to restrict the reduction to the specified columns.
 The reduced values are provided in a NamedTuple under names of reduced columns.
 
@@ -51,7 +51,7 @@ For the `init` kwarg please refer to `Base.reduce` documentation,
 as it follows the same principles. 
 
 # Examples
-```
+```julia
 julia> d = DTable((a = [1, 2, 3], b = [1, 1, 1]), 2);
 
 julia> r1 = reduce(+, d)
@@ -83,9 +83,9 @@ function reduce(f, d::DTable; cols=nothing::Union{Nothing, Vector{Symbol}}, init
 
         # TODO: uncomment and define a good threshold for parallelization when this get's resolved
         # https://github.com/JuliaParallel/Dagger.jl/issues/267
-        # also this piece of code below for at least two columns is causing the issue above
-        # when reduce repeatedly is repeatedly executed or @btime is used
-        # if length(_cols) <= 1 
+        # This piece of code (else option) below is causing the issue above
+        # when reduce is repeatedly executed or @btime is used.
+        # if length(_cols) <= 1
         #     v = [col_in_chunk_reduce(_f, c, _init, _chunk) for c in _cols]
         # else
         #     values = [Dagger.spawn(col_in_chunk_reduce, _f, c, _init, _chunk) for c in _cols]
@@ -93,7 +93,7 @@ function reduce(f, d::DTable; cols=nothing::Union{Nothing, Vector{Symbol}}, init
         # end
         # (; zip(_cols, v)...)
     end
-    chunk_reduce_results = [Dagger.@spawn chunk_reduce(f, c, columns, deepcopy(init))  for c in d.chunks]
+    chunk_reduce_results = [Dagger.@spawn chunk_reduce(f, c, columns, deepcopy(init)) for c in d.chunks]
 
     construct_single_column = (_col, _chunk_results...) -> getindex.(_chunk_results, _col)
     result_columns = [Dagger.@spawn construct_single_column(c, chunk_reduce_results...) for c in columns]
@@ -114,7 +114,7 @@ Filter `d` using `f`.
 Returns a filtered `DTable` that can be processed further.
 
 # Examples
-```
+```julia
 julia> d = DTable((a = [1, 2, 3], b = [1, 1, 1]), 2);
 
 julia> f = filter(x -> x.a < 3, d)
@@ -133,7 +133,7 @@ julia> fetch(f)
 ```
 """
 function filter(f, d::DTable)
-    chunk_wrap = (_chunk, _f) -> begin 
+    chunk_wrap = (_chunk, _f) -> begin
         m = TableOperations.filter(_f, _chunk)
         Tables.materializer(_chunk)(m)
     end

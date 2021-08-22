@@ -1,9 +1,9 @@
 import Tables
 import TableOperations
 
-import Base: fetch, print, show
+import Base: fetch, show
 
-export DTable, tabletype
+export DTable, tabletype, tabletype!, trim, trim!
 
 const VTYPE = Vector{Union{Dagger.Chunk,Dagger.EagerThunk}}
 
@@ -89,9 +89,11 @@ end
 
 Collects all the chunks in the `DTable` into a single, non-distributed
 instance of the underlying table type.
+
+Fetching an empty DTable results in returning an empty `NamedTuple` regardless of the underlying `tabletype`.
 """
 function fetch(d::DTable)
-    sink = Tables.materializer(tabletype(d)())
+    sink = Tables.materializer(_tabletype(d)())
     sink(_retrieve_partitions(d))
 end
 
@@ -103,56 +105,82 @@ instance of table type created using the provided `sink` function.
 """
 fetch(d::DTable, sink) = sink(_retrieve_partitions(d))
 
-function _retrieve_partitions(d::DTable) 
-    trim!(d)
-    return length(d.chunks) > 0 ?
-        TableOperations.joinpartitions(Tables.partitioner(_retrieve, d.chunks)) : NamedTuple()
+function _retrieve_partitions(d::DTable)
+    d2 = trim(d)
+    return length(d2.chunks) > 0 ?
+        TableOperations.joinpartitions(Tables.partitioner(_retrieve, d2.chunks)) : NamedTuple()
 end
 
 _retrieve(x::Dagger.EagerThunk) = fetch(x)
 _retrieve(x::Dagger.Chunk) = collect(x)
 
 """
+    tabletype!(d::DTable)
+
+Provides the type of the underlying table partition and caches it in `d`.
+
+In case the tabletype cannot be obtained the default return value is `NamedTuple`.
+"""
+tabletype!(d::DTable) = d.tabletype = tabletype(d)
+
+"""
     tabletype(d::DTable)
 
 Provides the type of the underlying table partition.
+
+In case the tabletype cannot be obtained the default return value is `NamedTuple`.
 """
 function tabletype(d::DTable)
-    if d.tabletype === nothing
-        f = c -> typeof(c).name.wrapper
-        if length(d.chunks) > 0
-            d.tabletype = fetch(Dagger.@spawn f(d.chunks[1]))
-        else # fallback
-            d.tabletype = NamedTuple
+    _type = c -> isnonempty(c) ? typeof(c).name.wrapper : nothing
+    t = nothing
+
+    if length(d.chunks) > 0
+        for chunk in d.chunks
+            t = fetch(Dagger.@spawn _type(chunk))
+            t !== nothing && break
         end
     end
-    return d.tabletype
+    t !== nothing ? t : NamedTuple
 end
 
+"""
+    _tabletype(d::DTable)
 
-function isvalid(chunk)
+Returns the underlying table type using the cached information if available.
+
+In case the tabletype cannot be obtained the default return value is `NamedTuple`.
+"""
+function _tabletype(d::DTable)
+    d.tabletype === nothing ? tabletype(d) : d.tabletype
+end
+
+function isnonempty(chunk)
     length(Tables.rows(chunk)) > 0 && length(Tables.columnnames(chunk)) > 0
 end
 
 """
     trim!(d::DTable)
 
-Validates chunks of the DTable and removes the unvalid ones.
-A valid chunk is a non-empty chunk.
+Removes empty chunks from `d`.
 """
 function trim!(d::DTable)
-    check_result = [Dagger.@spawn isvalid(c) for c in d.chunks]
+    check_result = [Dagger.@spawn isnonempty(c) for c in d.chunks]
     d.chunks = getindex.(filter(x -> fetch(check_result[x[1]]), collect(enumerate(d.chunks))), 2)
     d
 end
 
-function print(io::IO, d::DTable)
-    tabletype = isnothing(d.tabletype) ? "unknown (use `tabletype(::DTable)`)" : d.tabletype
-    println(io, "DTable with $(length(d.chunks)) partitions")
-    println(io, "Tabletype: $tabletype")
-    nothing
-end
+"""
+    trim(d::DTable)
+
+Returns a `DTable` based on `d`, but without empty chunks.
+"""
+trim(d::DTable) = trim!(DTable(d.chunks, d.tabletype))
+
+show(io::IO, d::DTable) = show(io, MIME"text/plain"(), d)
 
 function show(io::IO, ::MIME"text/plain", d::DTable)
-    print(io, d)
+    tabletype = isnothing(d.tabletype) ? "unknown (use `tabletype!(::DTable)`)" : d.tabletype
+    println(io, "DTable with $(length(d.chunks)) partitions")
+    print(io, "Tabletype: $tabletype")
+    nothing
 end
