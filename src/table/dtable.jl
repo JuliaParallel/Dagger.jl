@@ -93,7 +93,7 @@ instance of the underlying table type.
 Fetching an empty DTable results in returning an empty `NamedTuple` regardless of the underlying `tabletype`.
 """
 function fetch(d::DTable)
-    sink = Tables.materializer(cached_tabletype(d)())
+    sink = Tables.materializer(tabletype(d)())
     sink(_retrieve_partitions(d))
 end
 
@@ -121,16 +121,19 @@ Provides the type of the underlying table partition and caches it in `d`.
 
 In case the tabletype cannot be obtained the default return value is `NamedTuple`.
 """
-tabletype!(d::DTable) = d.tabletype = tabletype(d)
+tabletype!(d::DTable) = d.tabletype = resolve_tabletype(d)
 
 """
     tabletype(d::DTable)
 
 Provides the type of the underlying table partition.
+Uses the cached tabletype if available.
 
 In case the tabletype cannot be obtained the default return value is `NamedTuple`.
 """
-function tabletype(d::DTable)
+tabletype(d::DTable) = d.tabletype === nothing ? resolve_tabletype(d) : d.tabletype
+
+function resolve_tabletype(d::DTable)
     _type = c -> isnonempty(c) ? typeof(c).name.wrapper : nothing
     t = nothing
 
@@ -141,17 +144,6 @@ function tabletype(d::DTable)
         end
     end
     t !== nothing ? t : NamedTuple
-end
-
-"""
-    cached_tabletype(d::DTable)
-
-Returns the underlying table type using the cached information if available.
-
-In case the tabletype cannot be obtained the default return value is `NamedTuple`.
-"""
-function cached_tabletype(d::DTable)
-    d.tabletype === nothing ? tabletype(d) : d.tabletype
 end
 
 function isnonempty(chunk)

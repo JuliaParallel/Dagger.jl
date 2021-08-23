@@ -78,7 +78,7 @@ using CSV
         da = DTable(x -> Arrow.Table(take!(ios[tryparse(Int64, x)])), [string(i) for i in 1:n])
         db = vcat([DataFrame(d) for d in data]...)
         @test fetch(da, DataFrame) == db
-        @test Dagger.cached_tabletype(da) == NamedTuple
+        @test Dagger.resolve_tabletype(da) == NamedTuple
         @test da.tabletype === nothing
         tabletype!(da)
         @test da.tabletype === NamedTuple
@@ -202,7 +202,7 @@ using CSV
         d = DTable(nt, 2)
         @test tabletype(d) == NamedTuple
         d.tabletype = nothing
-        @test Dagger.cached_tabletype(d) == NamedTuple
+        @test Dagger.resolve_tabletype(d) == NamedTuple
         tabletype!(d)
         @test d.tabletype == NamedTuple
 
