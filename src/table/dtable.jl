@@ -159,7 +159,7 @@ function isnonempty(chunk)
 end
 
 """
-    trim!(d::DTable)
+    trim!(d::DTable) -> DTable
 
 Removes empty chunks from `d`.
 """
@@ -170,9 +170,9 @@ function trim!(d::DTable)
 end
 
 """
-    trim(d::DTable)
+    trim(d::DTable) -> DTable
 
-Returns a `DTable` based on `d`, but without empty chunks.
+Returns `d` with empty chunks removed.
 """
 trim(d::DTable) = trim!(DTable(d.chunks, d.tabletype))
 

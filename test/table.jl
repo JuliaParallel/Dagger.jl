@@ -89,7 +89,6 @@ using CSV
         nt = (a = rand(size), b = rand(size))
 
         df = DataFrame(nt)
-        
         for src in [nt, df]
             dt = DTable(src, 100)
 
@@ -108,7 +107,7 @@ using CSV
         # Map an empty dtable
         dt = DTable((a = [], b = []), 10)
         m = map(x -> (r = x.a + x.b), dt)
-        @test fetch(m) == NamedTuple() 
+        @test fetch(m) == NamedTuple()
     end
 
     @testset "filter" begin
@@ -128,7 +127,7 @@ using CSV
         # Filter an empty DTable
         dt = DTable((a = [], b = []), 10)
         f = filter(x -> x.a .> 0.5, dt)
-        @test fetch(f) == NamedTuple() 
+        @test fetch(f) == NamedTuple()
     end
 
     @testset "reduce" begin
