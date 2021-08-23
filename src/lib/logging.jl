@@ -244,7 +244,7 @@ Get the logs from each process, clear it too
 """
 function get_logs!(::LocalEventLog, raw=false)
     logs = Dict()
-    @sync for p in workers()
+    @sync for p in vact(1,workers())
         @async logs[p] = remotecall_fetch(p) do
             log = lock(_local_event_log_lock) do
                 log = copy(Dagger._local_event_log)
