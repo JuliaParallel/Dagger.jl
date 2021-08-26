@@ -589,7 +589,11 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         sig = signature(task, state)
 
         # Calculate scope
-        scope = AnyScope()
+        scope = if task.f isa Chunk
+            task.f.scope
+        else
+            AnyScope()
+        end
         for input in unwrap_weak_checked.(task.inputs)
             chunk = if istask(input)
                 state.cache[input]
@@ -826,13 +830,15 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
             end
         end
 
-        ids = map(enumerate(thunk.inputs)) do (idx,x)
+        ids = convert(Vector{Int}, map(enumerate(thunk.inputs)) do (idx,x)
             istask(x) ? unwrap_weak_checked(x).id : -idx
-        end
+        end)
+        pushfirst!(ids, 0)
 
-        data = map(thunk.inputs) do x
+        data = convert(Vector{Any}, map(Any[thunk.inputs...]) do x
             istask(x) ? state.cache[unwrap_weak_checked(x)] : x
-        end
+        end)
+        pushfirst!(data, thunk.f)
         toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
         options = merge(ctx.options, toptions)
         @assert (options.single == 0) || (gproc.pid == options.single)
@@ -841,7 +847,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
         state.worker_pressure[gproc.pid][typeof(proc)] += util
 
         # TODO: De-dup common fields (log_sink, uid, etc.)
-        push!(to_send, (util, thunk.id, thunk.f, data, thunk.get_result,
+        push!(to_send, (util, thunk.id, fn_type(thunk.f), data, thunk.get_result,
                         thunk.persist, thunk.cache, thunk.meta, options, ids,
                         (log_sink=ctx.log_sink, profile=ctx.profile),
                         sch_handle, state.uid))
@@ -894,11 +900,12 @@ function do_tasks(to_proc, chan, tasks)
     end
 end
 "Executes a single task on `to_proc`."
-function do_task(to_proc, extra_util, thunk_id, f, data, send_result, persist, cache, meta, options, ids, ctx_vars, sch_handle, uid)
+function do_task(to_proc, extra_util, thunk_id, Tf, data, send_result, persist, cache, meta, options, ids, ctx_vars, sch_handle, uid)
     ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
 
     from_proc = OSProc()
     Tdata = map(x->x isa Chunk ? chunktype(x) : x, data)
+    f = isdefined(Tf, :instance) ? Tf.instance : nothing
 
     # Fetch inputs
     fetched = if meta
@@ -929,6 +936,7 @@ function do_task(to_proc, extra_util, thunk_id, f, data, send_result, persist, c
             end
         end)
     end
+    f = popfirst!(fetched)
 
     # Check if we'll go over capacity from running this thunk
     real_util = lock(TASK_SYNC) do

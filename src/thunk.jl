@@ -11,16 +11,9 @@ created through a call to `delayed` or its macro equivalent `@par`.
 
 ## Constructors
 ```julia
-delayed(f; options=nothing)(args...)
+delayed(f; kwargs...)(args...)
 @par [option=value]... f(args...)
 ```
-
-## Arguments
-- `f`: The function to be called upon execution of the `Thunk`.
-- `args`: The arguments to be passed to the `Thunk`.
-- `options`: A `Sch.ThunkOptions` struct providing the options for the `Thunk`,
-or `nothing`.
-- `option=value`: The same options available in `Sch.ThunkOptions`.
 
 ## Examples
 ```julia
@@ -30,6 +23,30 @@ Thunk(sin, (π,))
 julia> collect(t)  # computes the result and returns it to the current process
 1.2246467991473532e-16
 ```
+
+## Arguments
+- `f`: The function to be called upon execution of the `Thunk`.
+- `args`: The arguments to be passed to the `Thunk`.
+- `kwargs`: The properties describing unique behavior of this `Thunk`. Details
+for each property are described in the next section.
+- `option=value`: The same as passing `kwargs` to `delayed`.
+
+## Public Properties
+- `meta::Bool=false`: If `true`, instead of fetching cached arguments from
+`Chunk`s and passing the raw arguments to `f`, instead pass the `Chunk`. Useful
+for doing manual fetching or manipulation of `Chunk` references. Non-`Chunk`
+arguments are still passed as-is.
+- `processor::Processor=OSProc()` - The processor associated with `f`. Useful if
+`f` is a callable struct that exists on a given processor and should be
+transferred appropriately.
+- `scope::Dagger.AbstractScope=AnyScope()` - The scope associated with `f`.
+Useful if `f` is a function or callable struct that may only be transferred to,
+and executed within, the specified scope.
+
+## Options
+- `options`: A `Sch.ThunkOptions` struct providing the options for the `Thunk`.
+If omitted, options can also be specified by passing key-value pairs as
+`kwargs`.
 """
 mutable struct Thunk
     f::Any # usually a Function, but could be any callable
@@ -53,9 +70,16 @@ mutable struct Thunk
                    cache_ref=nothing,
                    affinity=nothing,
                    eager_ref=nothing,
+                   processor=nothing,
+                   scope=nothing,
                    options=nothing,
                    kwargs...
                   )
+        if !isnothing(processor) || !isnothing(scope)
+            f = tochunk(f,
+                        something(processor, OSProc()),
+                        something(scope, AnyScope()))
+        end
         if options !== nothing
             @assert isempty(kwargs)
             new(f, xs, id, get_result, meta, persist, cache, cache_ref,
@@ -103,11 +127,10 @@ function affinity(t::Thunk)
 end
 
 """
-    delayed(f; options)(args...)
+    delayed(f; kwargs...)(args...)
 
 Creates a [`Thunk`](@ref) object which can be executed later, which will call
-`f` with `args`. Options are typically either `nothing` or of type
-`Sch.ThunkOptions`.
+`f` with `args`. `kwargs` controls various properties of the resulting `Thunk`.
 """
 function delayed(f; kwargs...)
     (args...) -> Thunk(f, args...; kwargs...)
@@ -218,8 +241,16 @@ end
 
 Spawns a task with `f` as the function and `args` as the arguments, returning
 an `EagerThunk`. Uses a scheduler running in the background to execute code.
+
+Note that `kwargs` are passed to the `Thunk` constructor, and are documented in
+its docstring.
 """
-function spawn(f, args...; kwargs...)
+function spawn(f, args...; processor=nothing, scope=nothing, kwargs...)
+    if !isnothing(processor) || !isnothing(scope)
+        f = tochunk(f,
+                    something(processor, OSProc()),
+                    something(scope, AnyScope()))
+    end
     uid, future, finalizer_ref, thunk_ref = if myid() == 1
         _spawn(f, args...; kwargs...)
     else
@@ -316,7 +347,17 @@ Base.isequal(x::Thunk, y::Thunk) = x.id==y.id
 
 function Base.show(io::IO, z::Thunk)
     lvl = get(io, :lazy_level, 2)
-    print(io, "Thunk[$(z.id)]($(z.f), ")
+    f = if z.f isa Chunk
+        Tf = z.f.chunktype
+        if isdefined(Tf, :instance)
+            Tf.instance
+        else
+            "instance of $Tf"
+        end
+    else
+        z.f
+    end
+    print(io, "Thunk[$(z.id)]($f, ")
     if lvl > 0
         show(IOContext(io, :lazy_level => lvl-1), z.inputs)
     else
