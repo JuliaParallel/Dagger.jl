@@ -190,7 +190,7 @@ function _temp(d::DTable, col; npartitions=-1)
 end
 
 
-function groupby(d::DTable, col)
+function groupby(col, d::DTable; merge=true, chunksize=0)
     distinct_values = (_chunk, _col) -> unique(Tables.getcolumn(_chunk, _col))
 
     filter_wrap = (_chunk, _f) -> begin
@@ -209,17 +209,37 @@ function groupby(d::DTable, col)
 
     v = [Dagger.@spawn chunk_wrap(c, col) for c in d.chunks]
 
-    build_index = (col, vs...) -> begin
+    build_index = (merge, chunksize, vs...) -> begin
         v = vcat(vs...)
-        keys = unique(map(x-> x[1], v))
-        idx = Dict([k => Vector{Int}() for k in keys])
-        for (i, e) in enumerate(map(x-> x[1], v))
-            push!(idx[e], i) 
+        ks = unique(map(x-> x[1], v))
+        chunks = map(x-> x[2], v)
+        
+        idx = Dict([k => Vector{Int}() for k in ks])
+        for (i, k) in enumerate(map(x-> x[1], v))
+            push!(idx[k], i) 
         end
-        idx, map(x-> x[2], v)
+        
+        if merge && chunksize <= 0 # merge all partitions into one
+            sink = Tables.materializer(tabletype(d)())
+            v2 = Vector{EagerThunk}()
+            sizehint!(v2, length(keys(idx)))
+            for (i, k) in enumerate(keys(idx))
+                c = getindex.(Ref(chunks), idx[k])
+                push!(v2, Dagger.@spawn merge_chunks(sink, c...))
+                idx[k] = [i]
+            end
+            idx, v2
+        elseif merge && chunksize > 0 # merge all but keep the chunking approximately at chunksize with minimal merges
+            idx, chunks
+        else
+            idx, chunks
+        end
     end
 
-    res = Dagger.@spawn build_index(v...)
+    res = Dagger.@spawn build_index(merge, chunksize, v...)
     r = fetch(res)
     DTable(r[2], d.tabletype, Dict(col => r[1])) 
 end
+
+merge_chunks(sink, chunks...) = sink(TableOperations.joinpartitions(Tables.partitioner(x -> x, chunks)))
+
