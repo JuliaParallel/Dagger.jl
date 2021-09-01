@@ -140,7 +140,7 @@ function filter(f, d::DTable)
     DTable(map(c -> Dagger.spawn(chunk_wrap, c, f), d.chunks), d.tabletype)
 end
 
-
+# temp for continous groupby
 function _temp(d::DTable, col; npartitions=-1)
     partition_heuristic = 2 * length(d.chunks)
     if npartitions < 0 
@@ -212,7 +212,7 @@ function groupby(col, d::DTable; merge=true, chunksize=0)
     build_index = (merge, chunksize, vs...) -> begin
         v = vcat(vs...)
         ks = unique(map(x-> x[1], v))
-        chunks = map(x-> x[2], v)
+        chunks = Vector{Union{EagerThunk, Nothing}}(map(x-> x[2], v))
         
         idx = Dict([k => Vector{Int}() for k in ks])
         for (i, k) in enumerate(map(x-> x[1], v))
@@ -230,7 +230,39 @@ function groupby(col, d::DTable; merge=true, chunksize=0)
             end
             idx, v2
         elseif merge && chunksize > 0 # merge all but keep the chunking approximately at chunksize with minimal merges
-            idx, chunks
+            sink = Tables.materializer(tabletype(d)())
+            for (i, k) in enumerate(keys(idx))
+                _indices = idx[k]
+                _chunks = getindex.(Ref(chunks), _indices)
+                _lengths = fetch.(Dagger.spawn.(rowcount, _chunks))
+                c = collect.(collect(zip(_indices, _chunks, _lengths)))
+                sort!(c, by=(x->x[3]), rev=true)
+
+                l = 1
+                r = length(c)
+
+                while l < r
+                    if c[l][3] >= chunksize
+                        l += 1
+                    elseif c[l][3] + c[r][3] > chunksize
+                        l += 1
+                    elseif c[l][3] + c[r][3] <= chunksize # merge
+                        c[l][2] = Dagger.@spawn merge_chunks(sink, c[l][2], c[r][2])
+                        c[l][3] = c[l][3] + c[r][3]
+                        r -= 1
+                    end
+                end
+                @assert l == r
+                for i in 1:length(c)
+                    if i <= l
+                        chunks[c[i][1]] = c[i][2]
+                    else
+                        chunks[c[i][1]] = nothing
+                    end
+                end
+                idx[k] = map(x-> x[1], c[1:l])
+            end
+            idx, filter(x-> !isnothing(x), chunks)
         else
             idx, chunks
         end
@@ -238,8 +270,10 @@ function groupby(col, d::DTable; merge=true, chunksize=0)
 
     res = Dagger.@spawn build_index(merge, chunksize, v...)
     r = fetch(res)
-    DTable(r[2], d.tabletype, Dict(col => r[1])) 
+    DTable(Vector{EagerThunk}(r[2]), d.tabletype, Dict(col => r[1])) 
 end
 
 merge_chunks(sink, chunks...) = sink(TableOperations.joinpartitions(Tables.partitioner(x -> x, chunks)))
+
+rowcount(chunk) = length(Tables.rows(chunk))
 
