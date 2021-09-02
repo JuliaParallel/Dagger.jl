@@ -49,14 +49,22 @@ function groupby(d::DTable, col; merge=true, chunksize=0)
 
                 l = 1
                 r = length(c)
-
+                prev_r = r
                 while l < r
                     if c[l][3] >= chunksize
+                        if r < prev_r
+                            c[l][2] = Dagger.@spawn merge_chunks(sink, c[l][2], getindex.(c[r+1:prev_r], 2)...)
+                            prev_r = r
+                        end
                         l += 1
                     elseif c[l][3] + c[r][3] > chunksize
+                        if r < prev_r
+                            c[l][2] = Dagger.@spawn merge_chunks(sink, c[l][2], getindex.(c[r+1:prev_r], 2)...)
+                            prev_r = r
+                        end
                         l += 1
+                        
                     elseif c[l][3] + c[r][3] <= chunksize # merge
-                        c[l][2] = Dagger.@spawn merge_chunks(sink, c[l][2], c[r][2])
                         c[l][3] = c[l][3] + c[r][3]
                         r -= 1
                     end
@@ -79,7 +87,7 @@ function groupby(d::DTable, col; merge=true, chunksize=0)
 
     res = Dagger.@spawn build_index(merge, chunksize, v...)
     r = fetch(res)
-    DTable(Vector{EagerThunk}(r[2]), d.tabletype, Dict(col => r[1])) 
+    DTable(VTYPE(r[2]), d.tabletype, Dict(col => r[1])) 
 end
 
 merge_chunks(sink, chunks...) = sink(TableOperations.joinpartitions(Tables.partitioner(x -> x, chunks)))
