@@ -210,4 +210,20 @@ using CSV
         dt = DTable((a = [], b = []), 10)
         @test tabletype(dt) == NamedTuple # fallback in case it can't be found
     end
+
+    @testset "groupby" begin
+        d = DTable((a=repeat(['a','b','c','d'], 6),), 4)
+        g = Dagger.groupby(d, :a) # merge=true, chunksize=0
+        @test length(g.chunks) == 4
+        g = Dagger.groupby(d, :a, chunksize=1)
+        @test length(g.chunks) == 24
+        g = Dagger.groupby(d, :a, merge=false)
+        @test length(g.chunks) == 24
+        g = Dagger.groupby(d, :a, chunksize=2)
+        @test length(g.chunks) == 12
+        g = Dagger.groupby(d, :a, chunksize=3)
+        @test length(g.chunks) == 8
+        g = Dagger.groupby(d, :a, chunksize=6)
+        @test length(g.chunks) == 4
+    end
 end

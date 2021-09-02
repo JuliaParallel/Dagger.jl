@@ -56,6 +56,7 @@ include("ui/gantt-text.jl")
 
 include("table/dtable.jl")
 include("table/operations.jl")
+include("table/groupby.jl")
 
 include("lib/logging-extras.jl")
 
