@@ -12,6 +12,7 @@ function groupby(d::DTable, col::Symbol; merge=true, chunksize=0)
 
     distinct_partitions = (_chunk, _col) -> begin
         vals = distinct_values(_chunk, _col)
+        sort!(vals)
         if length(vals) > 1
             [v => Dagger.@spawn filter_wrap(_chunk, x -> Tables.getcolumn(x, _col) .== v) for v in vals]
         else
@@ -45,6 +46,7 @@ function groupby(d::DTable, cols::Vector{Symbol}; merge=true, chunksize=0)
         else
             [first(vals) => Dagger.spawn(identity, _chunk)]
         end
+        idx, filter(x-> x !== nothing, chunks)
     end
 
     v = [Dagger.@spawn distinct_partitions(c, cols) for c in d.chunks]
