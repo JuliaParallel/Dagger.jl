@@ -34,7 +34,7 @@ end
 end
 
 @testset "@spawn" begin
-    @test Dagger.Sch.eager_context() === nothing
+    @test !isassigned(Dagger.Sch.EAGER_CONTEXT)
     @testset "per-call" begin
         x = 2
         a = @spawn x + x
@@ -46,7 +46,7 @@ end
         @test fetch(b) == 5
         @test fetch(c) == 20
     end
-    @test Dagger.Sch.eager_context() isa Context
+    @test Dagger.Sch.EAGER_CONTEXT[] isa Context
     @testset "waiting" begin
         a = @spawn sleep(1)
         @test !isready(a)

@@ -5,17 +5,20 @@ export summarize_events
 const Timestamp = UInt64
 
 struct ProfilerResult
-    samples::Vector{UInt64}
+    samples::Vector{UInt}
     lineinfo::AbstractDict
+    tasks::Vector{UInt}
 end
+ProfilerResult(samples, lineinfo, tasks::Vector{Task}) =
+    ProfilerResult(samples, lineinfo, map(Base.pointer_from_objref, tasks))
+ProfilerResult(samples, lineinfo, tasks::Nothing) =
+    ProfilerResult(samples, lineinfo, map(Base.pointer_from_objref, UInt[]))
 
 """
-identifies
+    Timespan
 
-space (category, id)
-time (timeline, start, finish)
-
-also tracks gc_num during this and profiling samples.
+Identifies space (category, id) and time (timeline, start, finish). It also
+tracks GC allocations and profiling samples.
 """
 struct Timespan
     category::Symbol
@@ -41,7 +44,9 @@ Event(phase::Symbol, category::Symbol,
     Event{phase}(category, id, tl, time, gc_num, prof)
 
 """
-create a timespan given the strt and finish events
+    make_timespan(start::Event, finish::Event) -> Timespan
+
+Creates a `Timespan` given the start and finish `Event`s.
 """
 function make_timespan(start::Event, finish::Event)
     @assert start.category == finish.category
@@ -58,7 +63,9 @@ end
 
 
 """
-Various means of writing an event to something.
+    NoOpLog
+
+Disables event logging entirely.
 """
 struct NoOpLog end
 
@@ -88,66 +95,252 @@ function write_event(arr::AbstractArray, event::Event)
     push!(arr, event)
 end
 
-#function write_event(sig::Signal, event::Event)
-#    push!(sig, event)
-#end
-"""
-represents a process local events array.
+const event_log_lock = ReentrantLock()
 
-A context with log_sink set to LocalEventLog() will
-cause events to be recorded into the local event log.
+"""
+    LocalEventLog
+
+Stores events in a process-local array. Accessing the logs is all-or-nothing;
+if multiple consumers call `get_logs!`, they will get different sets of logs.
 """
 struct LocalEventLog end
 
 const _local_event_log = Any[]
-const _local_event_log_lock = ReentrantLock()
+
 function write_event(::LocalEventLog, event::Event)
-    lock(_local_event_log_lock) do
+    lock(event_log_lock) do
         write_event(Dagger._local_event_log, event)
     end
 end
 
-function raise_event(ctx, phase, category, id,tl, t, gc_num, prof, async)
-    ev = Event(phase, category, id, tl, t, gc_num, prof)
-    if async
-        @async write_event(ctx, ev)
+"""
+    get_logs!(::LocalEventLog, raw=false; only_local=false) -> Union{Vector{Timespan},Vector{Event}}
+
+Get the logs from each process' local event log, clearing it in the process.
+Set `raw` to `true` to get potentially unmatched `Event`s; the default is to
+return only matched events as `Timespan`s. If `only_local` is set `true`, only
+process-local logs will be fetched; the default is to fetch logs from all
+processes.
+"""
+function get_logs!(::LocalEventLog; raw=false, only_local=false)
+    logs = Dict()
+    wkrs = only_local ? myid() : vcat(1, workers())
+    # FIXME: Log this logic
+    @sync for p in wkrs
+        @async logs[p] = remotecall_fetch(p) do
+            log = lock(event_log_lock) do
+                log = copy(_local_event_log)
+                empty!(_local_event_log)
+                log
+            end
+            log
+        end
+    end
+    if raw
+        return logs
     else
-        write_event(ctx, ev)
+        spans = build_timespans(vcat(values(logs)...)).completed
+        return convert(Vector{Timespan}, spans)
+    end
+end
+get_logs!(l::LocalEventLog, raw::Bool; kwargs...) = get_logs!(l; raw=raw, kwargs...)
+
+mutable struct MultiEventLogState
+    consumers::Dict{Symbol,Any}
+    consumer_logs::Dict{Symbol,Vector}
+    aggregators::Dict{Symbol,Any}
+end
+MultiEventLogState() = MultiEventLogState(Dict{Symbol,Any}(),
+                                          Dict{Symbol,Vector}(),
+                                          Dict{Symbol,Any}())
+
+const MultiEventLogState_PLS = Dict{UInt64,MultiEventLogState}()
+
+"""
+    MultiEventLog
+
+Processes events immediately, generating multiple log streams. Multiple
+consumers may register themselves in the `MultiEventLog`, and when accessed,
+log events will be provided to all consumers. A consumer is simply a function
+or callable struct which will be called with an event when it's generated. The
+return value of the consumer will be pushed into a log stream dedicated to that
+consumer. Errors thrown by consumers will be caught and rendered, but will not
+otherwise interrupt consumption by other consumers, or future consumption
+cycles. An error will result in `nothing` being appended to that consumer's
+log.
+"""
+struct MultiEventLog
+    uid::UInt64
+    consumers::Dict{Symbol,Any}
+    aggregators::Dict{Symbol,Any}
+end
+MultiEventLog() = MultiEventLog(rand(UInt64), Dict{Symbol,Any}(), Dict{Symbol,Any}())
+
+function Base.setindex!(ml::MultiEventLog, c, name::Symbol)
+    ml.consumers[name] = c
+end
+
+function get_state(ml::MultiEventLog)
+    lock(event_log_lock) do
+        mls = get!(()->MultiEventLogState(), MultiEventLogState_PLS, ml.uid)
+        max_length = reduce(max, map(length, values(mls.consumer_logs)); init=0)
+        for name in keys(ml.consumers)
+            if !haskey(mls.consumers, name)
+                mls.consumers[name] = init_similar(ml.consumers[name])
+                mls.consumer_logs[name] = Vector{Any}(fill(nothing, max_length))
+            end
+        end
+        for name in keys(ml.aggregators)
+            if !haskey(mls.aggregators, name)
+                mls.aggregators[name] = init_similar(ml.aggregators[name])
+            end
+        end
+        # FIXME: Remove deleted consumers and aggregators
+        mls
     end
 end
 
-empty_prof() = ProfilerResult(UInt[], Dict{UInt64, Vector{Base.StackTraces.StackFrame}}())
+"Creates a copy of `x` with the same configuration, but fresh/empty data."
+init_similar(x) = x
+
+function write_event(ml::MultiEventLog, event::Event)
+    mls = get_state(ml)
+    lock(event_log_lock) do
+        for name in keys(mls.consumers)
+            cevent = try
+                mls.consumers[name](event)
+            catch err
+                @error "Error during event consumption:" exception=(err,catch_backtrace())
+                nothing
+            end
+            push!(mls.consumer_logs[name], cevent)
+        end
+        for name in keys(mls.aggregators)
+            try
+                mls.aggregators[name](mls.consumer_logs)
+            catch err
+                @error "Error during log aggregation:" exception=(err,catch_backtrace())
+                nothing
+            end
+        end
+    end
+end
+
+function get_logs!(ml::MultiEventLog; only_local=false)
+    logs = Dict{Int,Dict{Symbol,Vector}}()
+    wkrs = only_local ? myid() : vcat(1, workers())
+    # FIXME: Log this logic
+    @sync for p in wkrs
+        @async begin
+            logs[p] = remotecall_fetch(p, ml) do ml
+                mls = get_state(ml)
+                lock(event_log_lock) do
+                    sublogs = Dict{Symbol,Vector}()
+                    for name in keys(mls.consumers)
+                        sublogs[name] = mls.consumer_logs[name]
+                        mls.consumer_logs[name] = []
+                    end
+                    sublogs
+                end
+            end
+        end
+    end
+    return logs
+end
+
+# Core logging operations
+
+empty_prof() = ProfilerResult(UInt[], Dict{UInt64, Vector{Base.StackTraces.StackFrame}}(), UInt[])
 
 const prof_refcount = Ref{Threads.Atomic{Int}}(Threads.Atomic{Int}(0))
+const prof_lock = Threads.ReentrantLock()
+const prof_tasks = Dict{Int64, Vector{Task}}()
 
-function timespan_start(ctx, category, id, tl, async=isasync(ctx.log_sink))
+function prof_task_put!(tid, task::Task=Base.current_task())
+    lock(prof_lock) do
+        push!(get!(()->Task[], prof_tasks, tid), task)
+    end
+end
+function prof_tasks_take!(tid)
+    lock(prof_lock) do
+        if haskey(prof_tasks, tid)
+            pop!(prof_tasks, tid)
+        else
+            Task[]
+        end
+    end
+end
+
+function timespan_start(ctx, category, id, tl; tasks=nothing)
     isa(ctx.log_sink, NoOpLog) && return # don't go till raise
     if ctx.profile && category == :compute && Threads.atomic_add!(prof_refcount[], 1) == 0
-        Profile.start_timer()
+        lock(prof_lock) do
+            Profile.start_timer()
+        end
     end
-    raise_event(ctx, :start, category, id, tl, time_ns(), gc_num(), empty_prof(), async)
+    ev = Event(:start, category, id, tl, time_ns(), gc_num(), empty_prof())
+    write_event(ctx, ev)
     nothing
 end
 
-function timespan_end(ctx, category, id, tl, async=isasync(ctx.log_sink))
+function timespan_finish(ctx, category, id, tl; tasks=nothing)
     isa(ctx.log_sink, NoOpLog) && return
     time = time_ns()
     gcn = gc_num()
     prof = UInt[]
     lidict = Dict{UInt64, Vector{Base.StackTraces.StackFrame}}()
-    if ctx.profile && category == :compute
-        if Threads.atomic_sub!(prof_refcount[], 1) == 1
-            Profile.stop_timer()
+    GC.@preserve tasks begin
+        if ctx.profile && category == :compute
+            lock(prof_lock) do
+                prof_done = Threads.atomic_sub!(prof_refcount[], 1) == 1
+                if prof_done
+                    Profile.stop_timer()
+                end
+                prof = @static if VERSION >= v"1.8-"
+                    Profile.fetch(;include_meta=true)
+                else
+                    Profile.fetch()
+                end
+                prof = tasks !== nothing ? filter_profile_data(prof, tasks) : prof
+                lidict = Profile.getdict(prof)
+                if prof_done
+                    Profile.clear()
+                end
+            end
         end
-        prof, lidict = Profile.retrieve()
-        Profile.clear()
+        ev = Event(:finish, category, id, tl, time, gcn, ProfilerResult(prof, lidict, tasks))
+        write_event(ctx, ev)
     end
-    raise_event(ctx, :finish, category, id, tl, time, gcn, ProfilerResult(prof, lidict), async)
     nothing
 end
 
-isasync(x) = false
-isasync(x::Union{Channel, RemoteChannel, IO}) = true
+@static if VERSION >= v"1.8-"
+    function filter_profile_data(prof, tasks::Vector{UInt})
+        newprof = UInt[]
+        startidx = 1
+        for i in 1:length(prof)
+            if prof[i] == 0
+                if (i > 2 && prof[i-2] == 0) ||
+                   (i > 3 && prof[i-3] == 0) ||
+                   (i > 4 && prof[i-4] == 0)
+                    # XXX: Somehow we can get truncated frames?
+                    continue
+                end
+                task = prof[i - 3]
+                if task in tasks
+                    append!(newprof, prof[startidx:i])
+                end
+                startidx = i+1
+            end
+        end
+        newprof
+    end
+    filter_profile_data(prof, tasks::Vector{Task}) =
+        filter_profile_data(prof, map(x->UInt(Base.pointer_from_objref(x)), tasks))
+else
+    filter_profile_data(prof, tasks) = prof
+end
+
 """
 Overall state used during visualization
 """
@@ -227,39 +420,12 @@ end
 
 function mix_samples(a,b)
     ProfilerResult(vcat(a.samples, b.samples),
-                   merge(a.lineinfo, b.lineinfo))
+                   merge(a.lineinfo, b.lineinfo),
+                   unique(vcat(a.tasks, b.tasks)))
 end
 
 function build_timespans(events)
     next_state(State(), events)
-end
-
-macro logmsg(ex)
-    #:(println($(esc(ex))))
-end
-
-
-"""
-Get the logs from each process, clear it too
-"""
-function get_logs!(::LocalEventLog, raw=false)
-    logs = Dict()
-    @sync for p in vcat(1,workers())
-        @async logs[p] = remotecall_fetch(p) do
-            log = lock(_local_event_log_lock) do
-                log = copy(Dagger._local_event_log)
-                empty!(_local_event_log)
-                log
-            end
-            log
-        end
-    end
-    if raw
-        return logs
-    else
-        spans = build_timespans(vcat(values(logs)...)).completed
-        return convert(Vector{Timespan}, spans)
-    end
 end
 
 function add_gc_diff(x,y)

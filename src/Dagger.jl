@@ -49,10 +49,13 @@ include("array/matrix.jl")
 include("array/sparse_partition.jl")
 include("array/sort.jl")
 
+# Other
 include("ui/graph.jl")
 
 include("table/dtable.jl")
 include("table/operations.jl")
+
+include("lib/logging-extras.jl")
 
 function __init__()
     # Initialize system UUID

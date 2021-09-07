@@ -151,6 +151,7 @@ iscompatible_arg(proc::ThreadProc, opts, x) = true
         tls = get_tls()
         task = Threads.@spawn begin
             set_tls!(tls)
+            prof_task_put!(tls.sch_handle.thunk_id.id)
             f(args...)
         end
         try
@@ -171,6 +172,7 @@ else
         tls = get_tls()
         task = @async begin
             set_tls!(tls)
+            prof_task_put!(tls.sch_handle.thunk_id.id)
             f(args...)
         end
         try
