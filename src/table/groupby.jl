@@ -12,7 +12,6 @@ function groupby(d::DTable, col::Symbol; merge=true, chunksize=0)
 
     distinct_partitions = (_chunk, _col) -> begin
         vals = distinct_values(_chunk, _col)
-        sort!(vals)
         if length(vals) > 1
             [v => Dagger.@spawn filter_wrap(_chunk, x -> Tables.getcolumn(x, _col) .== v) for v in vals]
         else
@@ -121,6 +120,8 @@ function build_groupby_index(merge::Bool, chunksize::Int, tabletype, vs...)
                     if r < prev_r # only condition for merging
                         _chunk = Dagger.@spawn merge_chunks(sink, _chunk, getindex.(Ref(chunks), _indices[r+1:prev_r])...)
                         prev_r = r
+                    else
+                        push!(v2, chunks[c[l][index]])
                     end
                     push!(merged_chunks, _chunk)
                     _indices[l] = length(merged_chunks)
