@@ -8,7 +8,6 @@ function groupby(d::DTable, col::Symbol; merge=true, chunksize=0)
 
     create_distinct_partitions = (_chunk, _col) -> begin
         vals = distinct_values(_chunk, _col)
-        sort!(vals)
         if length(vals) > 1
             [v => Dagger.@spawn filter_wrap(_chunk, x -> Tables.getcolumn(x, _col) .== v) for v in vals]
         else
@@ -16,7 +15,8 @@ function groupby(d::DTable, col::Symbol; merge=true, chunksize=0)
         end
     end
 
-    v = [Dagger.@spawn create_distinct_partitions(c, col) for c in d.chunks]
+    v = [create_distinct_partitions(Dagger._retrieve(c), col) for c in d.chunks]
+    #v = [Dagger.@spawn create_distinct_partitions(c, col) for c in d.chunks]
 
     ret = _build_groupby_index(merge, chunksize, tabletype(d), fetch.(v)...)
     # Commented spawn version due to instability
@@ -33,36 +33,39 @@ function groupby(d::DTable, f::Function; merge=true, chunksize=0)
     end
 
     chunk_wrap = (_chunk, _f, _sink) -> begin
-        # it = iterate(Tables.rows(_chunk))
+
+        # this is faster
+        distinct = unique(Tables.getcolumn(Tables.columntable(TableOperations.map(x->(r=_f(x),), _chunk)), :r))
+        r = [k => Dagger.spawn(filter_wrap, _chunk, (x)->_f(x) == k) for k in distinct]
+
+ 
+        # rows = Tables.rows(_chunk)
+        # it = iterate(rows)
         # vals = nothing
         # if it !== nothing
-        #     vals = Dict{typeof(_f(it[1])), Vector{typeof(it[1])}}()
+        #     vals = Dict{typeof(_f(it[1])), Vector{eltype(rows)}}()
         # else
         #     return []
         # end
 
-        distinct = unique(Tables.getcolumn(Tables.columntable(TableOperations.map(x->(r=_f(x),), _chunk)), :r))
-
-
-        r = [k => Dagger.spawn(filter_wrap, _chunk, (x)->_f(x) == k) for k in distinct]
-
-
-        # unstable for whatever reason
-        # for row in Tables.rows(_chunk)
-        #     v = _f(row)
-        #     if haskey(vals, v) 
-        #         push!(vals[v], row)
-        #     else
-        #         vals[v] = [row]
+        # for row in rows
+        #     k = _f(row)
+        #     if !haskey(vals, k) 
+        #        vals[k] = Vector{eltype(rows)}()
         #     end
+        #     push!(vals[k], row)
         # end
 
         # collect_chunk = (rows) -> _sink(Tables.columntable(rows))
-        # map(k -> k => Dagger.spawn(collect_chunk, vals[k]), collect(keys(vals)))
+        # m = map(k -> k => Dagger.spawn(collect_chunk, vals[k]), collect(keys(vals)))
+        # # @assert length(m) == length(r)
+        # m
     end
 
     sink = Tables.materializer(tabletype(d)())
-    v = [Dagger.@spawn chunk_wrap(c, f, sink) for c in d.chunks]
+    v = [chunk_wrap(Dagger._retrieve(c), f, sink) for c in d.chunks]
+    # v = [Dagger.@spawn chunk_wrap(c, f, sink) for c in d.chunks]
+
 
     ret = _build_groupby_index(merge, chunksize, tabletype(d), fetch.(v)...)
     # Commented out spawn version due to instability
@@ -93,12 +96,13 @@ function _build_groupby_index(merge::Bool, chunksize::Int, tabletype, vs...)
         idx, v2
     elseif merge && chunksize > 0 # merge all but try to merge all the small chunks into chunks of chunksize
         sink = Tables.materializer(tabletype())
+        v2 = Vector{EagerThunk}()
         for k in keys(idx)
             _indices = idx[k]
             _chunks = getindex.(Ref(chunks), _indices)
             _lengths = fetch.(Dagger.spawn.(rowcount, _chunks))
             
-            c = collect.(collect(zip(_indices, _lengths, _chunks)))
+            c = collect.(collect(zip(_indices, _lengths))) # todo cleanup this vector of vectors
             index = 1; len = 2; chunk = 3
 
             sort!(c, by=(x->x[len]), rev=true)
@@ -108,23 +112,25 @@ function _build_groupby_index(merge::Bool, chunksize::Int, tabletype, vs...)
             prev_r = r
 
             while l <= r
-                if c[l][len] >= chunksize || c[l][len] + c[r][len] > chunksize || l == r
-                    if r < prev_r
-                        c[l][chunk] = Dagger.@spawn merge_chunks(sink, c[l][chunk], getindex.(c[r+1:prev_r], chunk)...)
+                if c[l][len] >= chunksize || c[l][len] + c[r][len] > chunksize || l == r # conditions to move l forward
+                    if r < prev_r # only condition for merging
+                        chnk = Dagger.@spawn merge_chunks(sink, chunks[c[l][index]], getindex.(Ref(chunks), getindex.(c[r+1:prev_r], index))...)
+                        push!(v2, chnk)
                         prev_r = r
+                    else
+                        push!(v2, chunks[c[l][index]])
                     end
+                    c[l][index] = length(v2)
                     l += 1
                 elseif c[l][len] + c[r][len] <= chunksize # merge
                     c[l][len] += c[r][len]
+                    # chunks[c[r][index]] = nothing
                     r -= 1
                 end
             end
-            for i in 1:length(c)
-                chunks[c[i][index]] = i <= r ? c[i][chunk] : nothing
-            end
             idx[k] = map(x-> x[index], c[1:r])
         end
-        idx, filter(x-> x !== nothing, chunks)
+        idx, v2
     else
         idx, chunks
     end

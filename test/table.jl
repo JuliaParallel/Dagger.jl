@@ -1,6 +1,7 @@
 using DataFrames
 using Arrow
 using CSV
+using Random
 
 @testset "dtable" begin
     @testset "constructors - Tables.jl compatibility (NamedTuple)" begin
@@ -212,42 +213,66 @@ using CSV
     end
 
     @testset "Dagger.groupby" begin
-        d = DTable((a=repeat(['a','b','c','d'], 6),), 4)
+        rng = MersenneTwister(2137)
 
-        @test length(Dagger.groupby(d, :a).chunks) == 4
-        @test length(Dagger.groupby(d, :a, chunksize=1).chunks) == 24
-        @test length(Dagger.groupby(d, :a, merge=false).chunks) == 24
-        @test length(Dagger.groupby(d, :a, chunksize=2).chunks) == 12
-        @test length(Dagger.groupby(d, :a, chunksize=3).chunks) == 8
-        @test length(Dagger.groupby(d, :a, chunksize=6).chunks) == 4
+        charset = collect('a':'h')
+        d = DTable((a=shuffle(rng, repeat(charset, 6)),), 4)
+        @test length(Dagger.groupby(d, :a).chunks) == 8
 
-        @test sort(collect(fetch(d).a)) == sort(collect(fetch(Dagger.groupby(d, :a)).a))
-        @test sort(collect(fetch(d).a)) == sort(collect(fetch(Dagger.groupby(d, :a, chunksize=3)).a))
-        @test sort(collect(fetch(d).a)) == sort(collect(fetch(Dagger.groupby(d, :a, chunksize=1)).a))
+        for kwargs in [
+            (;)
+            (chunksize=1,)
+            (merge=false,)
+            (chunksize=2,)
+            (chunksize=3,)
+            (chunksize=6,)
+        ]
+            g = Dagger.groupby(d, :a; kwargs...)
+            c = Dagger._retrieve.(g.chunks)
+            @test all([all(t.a[1] .== t.a) for t in c])
+            @test all(getindex.(getproperty.(c, :a), 1) .∈ Ref(charset))
+            @test sort(collect(fetch(d).a)) == sort(collect(fetch(g).a))
+        end
 
-        d = DTable((a=repeat(['a','a', 'b', 'b'], 6),), 2)
-        @test length(Dagger.groupby(d, :a).chunks) == 2
-        @test length(Dagger.groupby(d, :a, chunksize=1).chunks) == 12
-        @test length(Dagger.groupby(d, :a, merge=false).chunks) == 12
-        @test length(Dagger.groupby(d, :a, chunksize=2).chunks) == 12
-        @test length(Dagger.groupby(d, :a, chunksize=3).chunks) == 12 # grouping doesn't split chunks, so two 2-long chunks won't merge on chunksize 3
-        @test length(Dagger.groupby(d, :a, chunksize=4).chunks) == 6
-        @test length(Dagger.groupby(d, :a, chunksize=6).chunks) == 4
-        @test length(Dagger.groupby(d, :a, chunksize=12).chunks) == 2
-        @test length(Dagger.groupby(d, :a, chunksize=24).chunks) == 2
+        charset = ['a','a', 'b', 'b', 'c', 'c']
+        d = DTable((a=shuffle(rng, repeat(charset, 6)),), 2)
+        @test length(Dagger.groupby(d, :a).chunks) == 3
+        for kwargs in [
+            (;)
+            (chunksize=1,)
+            (merge=false,)
+            (chunksize=24,)
+            (chunksize=3,)
+            (chunksize=6,)
+        ]
+            g = Dagger.groupby(d, :a; kwargs...)
+            c = Dagger._retrieve.(g.chunks)
+            @test all([all(t.a[1] .== t.a) for t in c])
+            @test all(getindex.(getproperty.(c, :a), 1) .∈ Ref(charset))
+            @test sort(collect(fetch(d).a)) == sort(collect(fetch(g).a))
+        end
 
-        @test sort(collect(fetch(d).a)) == sort(collect(fetch(Dagger.groupby(d, :a)).a))
-        @test sort(collect(fetch(d).a)) == sort(collect(fetch(Dagger.groupby(d, :a, chunksize=5)).a))
 
-        d = DTable((a=repeat(collect(10:29), 6),), 4)
+        intset = collect(10:29)
+        d = DTable((a=shuffle(rng, repeat(intset, 6)),), 4)
         @test length(Dagger.groupby(d, x -> x.a % 10).chunks) == 10
-        @test length(Dagger.groupby(d, x -> x.a % 10, chunksize=1).chunks) == 120
-        @test length(Dagger.groupby(d, x -> x.a % 10, merge=false).chunks) == 120
-        @test length(Dagger.groupby(d, x -> x.a % 10, chunksize=2).chunks) == 60
-        @test length(Dagger.groupby(d, x -> x.a % 10, chunksize=3).chunks) == 40
-        @test length(Dagger.groupby(d, x -> x.a % 10, chunksize=6).chunks) == 20
 
-        @test sort(collect(fetch(d).a)) == sort(collect(fetch(Dagger.groupby(d, x -> x.a % 10)).a))
-        @test sort(collect(fetch(d).a)) == sort(collect(fetch(Dagger.groupby(d, x -> x.a % 10, chunksize=5)).a))
+        for kwargs in [
+            (;)
+            (chunksize=1,)
+            (merge=false,)
+            (chunksize=20,)
+            (chunksize=3,)
+            (chunksize=6,)
+        ]
+            f =  x -> x.a % 10
+            f2 = x-> x %10
+            g = Dagger.groupby(d, f)
+            c = Dagger._retrieve.(g.chunks)
+
+            @test all([all( f2(t.a[1]) .== f2.(t.a)) for t in c])
+            @test all(getindex.(getproperty.(c, :a), 1) .∈ Ref(intset)) 
+            @test sort(collect(fetch(d).a)) == sort(collect(fetch(g).a))
+        end
     end
 end
