@@ -523,7 +523,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
                     return false
                 end
             elseif opts.proclist isa Function
-                if !opts.proclist(proc)
+                if !Base.invokelatest(opts.proclist, proc)
                     return false
                 end
             elseif opts.proclist isa Vector
