@@ -27,7 +27,7 @@ state = Dagger.Sch.EAGER_STATE[]
 
 include("scheduler.jl")
 include("processors.jl")
-include("ui.jl")
+include("logging.jl")
 include("checkpoint.jl")
 include("scopes.jl")
 include("domain.jl")
