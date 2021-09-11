@@ -18,6 +18,7 @@ makedocs(;
         "Scopes" => "scopes.md",
         "Dynamic Scheduler Control" => "dynamic.md",
         "Logging and Graphing" => "logging.md",
+        "Scheduler Visualization" => "scheduler-visualization.md",
         "Benchmarking" => "benchmarking.md",
         "Scheduler Internals" => "scheduler-internals.md",
         "Distributed Table" => "dtable.md",
