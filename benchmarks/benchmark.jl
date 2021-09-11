@@ -34,6 +34,10 @@ if render == "live"
     const live = true
     using Luxor, ProfileSVG
     using Mux
+elseif render == "webdash"
+    const live = true
+    using DaggerWebDash
+    import DaggerWebDash: LinePlot, GanttPlot, GraphPlot, ProfileViewer
 elseif render == "offline"
     const live = false
     using Luxor, ProfileSVG
@@ -43,6 +47,9 @@ const RENDERS = Dict{Int,Dict}()
 const live_port = parse(Int, get(ENV, "BENCHMARK_LIVE_PORT", "8000"))
 
 const graph = parse(Bool, get(ENV, "BENCHMARK_GRAPH", "0"))
+if render == "webdash"
+    @warn "BENCHMARK_GRAPH=1 is not compatible with BENCHMARK_RENDER=webdash; disabling graphing"
+end
 const profile = parse(Bool, get(ENV, "BENCHMARK_PROFILE", "0"))
 
 _benches = get(ENV, "BENCHMARK", "cpu,cpu+dagger")
@@ -247,20 +254,46 @@ function main()
     output_prefix = "result-$(np)workers-$(nt)threads-$(Dates.now())"
 
     suites = Dict()
-    graph_opts = if graph && render != ""
-        (log_sink=Dagger.LocalEventLog(), log_file=output_prefix*".dot")
-    elseif render != ""
-        (log_sink=Dagger.LocalEventLog(),)
-    else
-        NamedTuple()
+    opts = (;profile=profile)
+    if render == "live"
+        opts = merge(opts, (;log_sink=Dagger.LocalEventLog()))
+        if graph
+            opts = merge(opts, (;log_file=output_prefix*".dot"))
+        end
+    elseif render == "webdash"
+        ml = Dagger.MultiEventLog()
+        ml[:core] = Dagger.Events.CoreMetrics()
+        ml[:id] = Dagger.Events.IDMetrics()
+        ml[:timeline] = Dagger.Events.TimelineMetrics()
+        profile && (ml[:profile] = DaggerWebDash.ProfileMetrics())
+        ml[:wsat] = Dagger.Events.WorkerSaturation()
+        ml[:loadavg] = Dagger.Events.CPULoadAverages()
+        ml[:bytes] = Dagger.Events.BytesAllocd()
+        ml[:mem] = Dagger.Events.MemoryFree()
+        ml[:esat] = Dagger.Events.EventSaturation()
+        ml[:psat] = Dagger.Events.ProcessorSaturation()
+        lw = Dagger.Events.LogWindow(20*10^9, :core)
+        d3r = DaggerWebDash.D3Renderer(live_port)
+        push!(d3r, GanttPlot(:core, :id, :timeline, :esat, :psat, "Overview"))
+        # TODO: push!(d3r, ProfileViewer(:core, :profile, "Profile Viewer"))
+        push!(d3r, LinePlot(:core, :wsat, "Worker Saturation", "Running Tasks"))
+        push!(d3r, LinePlot(:core, :loadavg, "CPU Load Average", "Average Running Threads"))
+        push!(d3r, LinePlot(:core, :bytes, "Allocated Bytes", "Bytes"))
+        push!(d3r, LinePlot(:core, :mem, "Available Memory", "% Free"))
+        push!(d3r, GraphPlot(:core, :id, :timeline, :profile, "DAG"))
+        push!(lw.creation_handlers, d3r)
+        push!(lw.deletion_handlers, d3r)
+        ml.aggregators[:logwindow] = lw
+        ml.aggregators[:d3r] = d3r
+        opts = merge(opts, (;log_sink=ml))
     end
-    ctx = Context(collect((1:nw) .+ 1); profile=profile, graph_opts...)
+    ctx = Context(collect((1:nw) .+ 1); opts...)
     for bench in benches
         name = bench.name
         println("creating $name benchmarks")
         suites[name] = nmf_suite(ctx; dagger=bench.dagger, accel=bench.accel)
     end
-    if render != ""
+    if render == "live" || render == "offline"
         Dagger.show_gantt(ctx; width=1800, window_length=5, delay=2, port=live_port, live=live)
         if live
             # Make sure server code is compiled
@@ -269,6 +302,11 @@ function main()
             run(pipeline(`curl -s localhost:$live_port/profile`; stdout=devnull))
             @info "Rendering started on port $live_port"
         end
+    elseif render == "webdash"
+        # Kick the webserver into gear
+        collect(ctx, delayed(identity)(1))
+        run(pipeline(`curl -s localhost:$live_port/index.html`; stdout=devnull))
+        @info "Rendering started on port $live_port"
     end
     res = Dict()
     for bench in benches
