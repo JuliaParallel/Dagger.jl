@@ -69,7 +69,6 @@ end
 
 function affinity(t::Thunk)
     if t.affinity !== nothing
-        @logmsg("$t has (cached) affinity: $(get(t.affinity))")
         return t.affinity
     end
 
@@ -95,7 +94,6 @@ function affinity(t::Thunk)
         end
         aff_vec = collect(aff)
     end
-    @logmsg("$t has affinity: $aff_vec")
     aff_vec
    #if length(aff) > 1
    #    return sort!(aff_vec, by=last,rev=true)
@@ -309,7 +307,6 @@ cache_result!(t::Thunk) = (t.cache=true; t)
 
 # function Thunk(f::Function, t::Tuple{Thunk})
 #     g = compose(f, t[1].f, t[1].inputs)
-#     @logmsg(string("FUSING ", f, "*", t[1].f))
 #     Thunk(g, t[1].inputs)
 # end
 

@@ -5,7 +5,7 @@ import MemPool: DRef, poolset
 
 import ..Dagger
 import ..Dagger: Context, Processor, Thunk, WeakThunk, ThunkFuture, ThunkFailedException, Chunk, OSProc, AnyScope
-import ..Dagger: order, free!, dependents, noffspring, istask, inputs, unwrap_weak_checked, affinity, tochunk, @dbg, @logmsg, timespan_start, timespan_end, unrelease, procs, move, capacity, chunktype, default_enabled, get_processors, execute!, rmprocs!, addprocs!, thunk_processor, constrain, cputhreadtime
+import ..Dagger: order, free!, dependents, noffspring, istask, inputs, unwrap_weak_checked, affinity, tochunk, timespan_start, timespan_finish, unrelease, procs, move, capacity, chunktype, default_enabled, get_processors, execute!, rmprocs!, addprocs!, thunk_processor, constrain, cputhreadtime
 
 const OneToMany = Dict{Thunk, Set{Thunk}}
 
@@ -224,7 +224,7 @@ end
 const WORKER_MONITOR_LOCK = Threads.ReentrantLock()
 const WORKER_MONITOR_TASKS = Dict{Int,Task}()
 const WORKER_MONITOR_CHANS = Dict{Int,Dict{UInt64,RemoteChannel}}()
-function init_proc(state, p)
+function init_proc(state, p, log_sink)
     # Initialize pressure and capacity
     proc = OSProc(p.pid)
     lock(state.lock) do
@@ -278,15 +278,15 @@ function init_proc(state, p)
         state.worker_chans[p.pid] = (inp_chan, out_chan)
     end
 end
-function _cleanup_proc(uid)
+function _cleanup_proc(uid, log_sink)
     empty!(CHUNK_CACHE) # FIXME: Should be keyed on uid!
 end
-function cleanup_proc(state, p)
+function cleanup_proc(state, p, log_sink)
     lock(WORKER_MONITOR_LOCK) do
         wid = p.pid
         if haskey(WORKER_MONITOR_CHANS, wid)
             delete!(WORKER_MONITOR_CHANS[wid], state.uid)
-            remote_do(_cleanup_proc, wid, state.uid)
+            remote_do(_cleanup_proc, wid, state.uid, log_sink)
         end
     end
 end
@@ -325,7 +325,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         end
     end
     master = OSProc(myid())
-    @dbg timespan_start(ctx, :scheduler_init, 0, master)
+    timespan_start(ctx, :scheduler_init, 0, master)
 
     chan = RemoteChannel(()->Channel(1024))
     deps = dependents(d)
@@ -342,11 +342,11 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         end
     end
 
-    # Initialize procs, pressure, and capacity
+    # Initialize workers
     @sync for p in procs_to_use(ctx)
         @async begin
             try
-                init_proc(state, p)
+                init_proc(state, p, ctx.log_sink)
             catch err
                 @error "Error initializing worker $p" exception=(err,catch_backtrace())
                 remove_dead_proc!(ctx, state, p)
@@ -357,7 +357,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     # setup dynamic listeners
     dynamic_listener!(ctx, state)
 
-    @dbg timespan_end(ctx, :scheduler_init, 0, master)
+    timespan_finish(ctx, :scheduler_init, 0, master)
 
     # start off some tasks
     # Note: procs_state may be different things for different contexts. Don't touch it out here!
@@ -397,7 +397,9 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         end
 
         isempty(state.running) && continue
+        timespan_start(ctx, :take, 0, 0)
         chan_value = take!(chan) # get result of completed thunk
+        timespan_finish(ctx, :take, 0, 0)
         if chan_value isa RescheduleSignal
             continue
         end
@@ -443,11 +445,11 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         end
 
         # FIXME: Move log start and lock to before error check
-        @dbg timespan_start(ctx, :finish, thunk_id, master)
+        timespan_start(ctx, :finish, thunk_id, (;thunk_id))
         lock(state.lock) do
             finish_task!(ctx, state, node, thunk_failed)
         end
-        @dbg timespan_end(ctx, :finish, thunk_id, master)
+        timespan_finish(ctx, :finish, thunk_id, (;thunk_id))
 
         safepoint(state)
     end
@@ -455,7 +457,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     close(state.chan)
     notify(state.halt)
     @sync for p in procs_to_use(ctx)
-        @async cleanup_proc(state, p)
+        @async cleanup_proc(state, p, ctx.log_sink)
     end
     value = state.cache[d] # TODO: move(OSProc(), state.cache[d])
     if get(state.errored, d, false)
@@ -523,7 +525,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
                     return false
                 end
             elseif opts.proclist isa Function
-                if !opts.proclist(proc)
+                if !Base.invokelatest(opts.proclist, proc)
                     return false
                 end
             elseif opts.proclist isa Vector
@@ -572,11 +574,16 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         failed_scheduling = Thunk[]
 
         # Select a new task and get its options
+        task = nothing
         @label pop_task
+        if task !== nothing
+            timespan_finish(ctx, :schedule, task.id, (;thunk_id=task.id))
+        end
         if isempty(state.ready)
             @goto fire_tasks
         end
         task = pop!(state.ready)
+        timespan_start(ctx, :schedule, task.id, (;thunk_id=task.id))
         @assert !haskey(state.cache, task)
         opts = merge(ctx.options, task.options)
         sig = signature(task, state)
@@ -683,7 +690,7 @@ function assign_new_procs!(ctx, state, assignedprocs)
     diffps = setdiff(ps, assignedprocs)
     if !isempty(diffps)
         for p in diffps
-            init_proc(state, p)
+            init_proc(state, p, ctx.log_sink)
         end
         state.procs_cache_list[] = nothing
         schedule!(ctx, state, diffps)
@@ -765,13 +772,16 @@ end
 function evict_all_chunks!(ctx, to_evict)
     if !isempty(to_evict)
         @sync for w in map(p->p.pid, procs_to_use(ctx))
-            @async remote_do(evict_chunks!, w, to_evict)
+            @async remote_do(evict_chunks!, w, ctx.log_sink, to_evict)
         end
     end
 end
-function evict_chunks!(chunks::Set{Chunk})
+function evict_chunks!(log_sink, chunks::Set{Chunk})
+    ctx = Context(;log_sink)
     for chunk in chunks
+        timespan_start(ctx, :evict, myid(), (;data=chunk))
         haskey(CHUNK_CACHE, chunk) && delete!(CHUNK_CACHE, chunk)
+        timespan_finish(ctx, :evict, myid(), (;data=chunk))
     end
     nothing
 end
@@ -836,6 +846,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
                         (log_sink=ctx.log_sink, profile=ctx.profile),
                         sch_handle, state.uid))
     end
+    timespan_start(ctx, :fire_multi, 0, 0)
     try
         remotecall_wait(do_tasks, gproc.pid, proc, state.chan, to_send)
     catch
@@ -851,6 +862,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
             end
         end
     end
+    timespan_finish(ctx, :fire_multi, 0, 0)
 end
 
 """
@@ -894,7 +906,7 @@ function do_task(to_proc, extra_util, thunk_id, f, data, send_result, persist, c
     else
         fetch_report.(map(Iterators.zip(data,ids)) do (x, id)
             @async begin
-                @dbg timespan_start(ctx, :move, (thunk_id, id), (f, id))
+                timespan_start(ctx, :move, (;thunk_id, id), (;f, id, data=x))
                 x = if x isa Chunk
                     if haskey(CHUNK_CACHE, x)
                         get!(CHUNK_CACHE[x], to_proc) do
@@ -912,7 +924,7 @@ function do_task(to_proc, extra_util, thunk_id, f, data, send_result, persist, c
                 else
                     move(to_proc, x)
                 end
-                @dbg timespan_end(ctx, :move, (thunk_id, id), (f, id))
+                timespan_finish(ctx, :move, (;thunk_id, id), (;f, id, data=x); tasks=[Base.current_task()])
                 return x
             end
         end)
@@ -946,7 +958,7 @@ function do_task(to_proc, extra_util, thunk_id, f, data, send_result, persist, c
         end
     end
 
-    @dbg timespan_start(ctx, :compute, thunk_id, (f, to_proc))
+    timespan_start(ctx, :compute, thunk_id, (;f, to_proc))
     res = nothing
     threadtime_start = cputhreadtime()
     result_meta = try
@@ -968,7 +980,7 @@ function do_task(to_proc, extra_util, thunk_id, f, data, send_result, persist, c
         RemoteException(myid(), CapturedException(ex, bt))
     end
     threadtime = cputhreadtime() - threadtime_start
-    @dbg timespan_end(ctx, :compute, thunk_id, (f, to_proc))
+    timespan_finish(ctx, :compute, thunk_id, (;f, to_proc); tasks=Dagger.prof_tasks_take!(thunk_id))
     lock(TASK_SYNC) do
         real_util[] -= extra_util
         pop!(TASKS_RUNNING, thunk_id)

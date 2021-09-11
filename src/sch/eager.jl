@@ -4,15 +4,17 @@ const EAGER_ID_MAP = Dict{UInt64,Int}()
 const EAGER_CONTEXT = Ref{Context}()
 const EAGER_STATE = Ref{ComputeState}()
 
-eager_context() = isassigned(EAGER_CONTEXT) ? EAGER_CONTEXT[] : nothing
+function eager_context()
+    if !isassigned(EAGER_CONTEXT)
+        EAGER_CONTEXT[] = Context([myid(),workers()...])
+    end
+    return EAGER_CONTEXT[]
+end
 
 function init_eager()
     EAGER_INIT[] && return
     EAGER_INIT[] = true
-    if eager_context() === nothing
-        EAGER_CONTEXT[] = Context([myid(),workers()...])
-    end
-    ctx = EAGER_CONTEXT[]
+    ctx = eager_context()
     @async try
         sopts = SchedulerOptions(;allow_errors=true)
         topts = ThunkOptions(;single=1)

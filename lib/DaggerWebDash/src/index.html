@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Dagger Dashboard</title>
+<script type="text/javascript" src="https://d3js.org/d3.v7.min.js"></script>
+</head>
+<body>
+<div style="border: 2px solid black">
+<div>Status: <em class="connection-status" style="color: red">Disconnected</em></div>
+<div><label>Update? </label><input type="checkbox" id="connect-enable" checked="true"></div>
+<div><label>Draw Interval: </label><input type="text" id="draw-interval" value="1"></div>
+<div><label>Worker: </label><select id="worker-select"></select></div>
+</select></div>
+</div>
+<div class="svg-container" style="border: 2px solid black"></div>
+<script type="text/javascript">
+var status_em = d3.select("em");
+var updating = true;
+var update_input = d3.select("input#connect-enable");
+var draw_interval = d3.select("input#draw-interval");
+var worker_select = d3.select("select#worker-select");
+
+function linePlot(container, core_key, data_key, title, ylabel) {
+    var dsvg = container.append("svg")
+                        .attr("style", "border: 1px solid black");
+    dsvg.attr("width", 900).attr("height", 400);
+    var margin = 250,
+        width = dsvg.attr("width") - margin,
+        height = dsvg.attr("height") - margin;
+
+    var xScale = d3.scaleLinear().range([0, width]);
+    var yScale = d3.scaleLinear().range([height, 0]);
+    var g = dsvg.append("g")
+                .attr("transform", "translate(" + (margin/2) + "," + (margin/2) + ")");
+    var xg = g.append("g");
+    var yg = g.append("g");
+
+    // Draw title
+    dsvg.append("text")
+        .attr("x", width/2)
+        .attr("y", 50)
+        .attr("font-size", "24px")
+        .style("fill", "blue")
+        .text(title);
+
+    // Draw x-axis label
+    xg.append("text")
+      .attr("x", width / 2)
+      .attr("y", height + 50)
+      .attr("text-anchor", "end")
+      .attr("font-size", "16px")
+      .attr("fill", "blue")
+      .text("Time");
+
+    // Draw y-axis label
+    yg.append("text")
+      .attr("transform", "rotate(-90)")
+      .attr("dy", "-5.1em")
+      .attr("text-anchor", "end")
+      .attr("font-size", "16px")
+      .attr("fill", "blue")
+      .text(ylabel);
+
+    return function(values) {
+        var core = values[core_key],
+            data = values[data_key];
+
+        // Set axis domains
+        var time_min = d3.min(core, function(d){return d.timestamp;});
+        var time_max = d3.max(core, function(d){return d.timestamp;});
+        xScale.domain([time_min, time_max]);
+        yScale.domain([0, d3.max(data)]);
+
+        // Draw x-axis
+        xg.attr("transform", "translate(0," + height + ")")
+          .call(d3.axisBottom(xScale).tickFormat(function(d) {
+              return "T-" + ((time_max - d) / (10 ** 9)).toPrecision(2) + " s";
+          }).ticks(10));
+
+        // Draw y-axis
+        yg.call(d3.axisLeft(yScale).tickFormat(function(d){
+              return d + "";
+          }).ticks(2));
+
+        // Draw line
+        g.selectAll("path").remove();
+        g.append("path")
+         .datum(d3.zip(core, data))
+         .attr("fill", "none")
+         .attr("stroke", "steelblue")
+         .attr("stroke-width", 1.5)
+         .attr("d", d3.line()
+           .x(function(d) { return xScale(d[0].timestamp); })
+           .y(function(d) { return yScale(d[1]); })
+           );
+    };
+};
+function ganttPlot(container, core_key, id_key, timeline_key, esat_key, psat_key, title) {
+    var dsvg = container.append("svg")
+                        .attr("style", "border: 1px solid black");
+    dsvg.attr("width", screen.width-50).attr("height", 600);
+    var width_margin = 300,
+        height_margin = 250,
+        width = dsvg.attr("width") - width_margin,
+        height = dsvg.attr("height") - height_margin;
+
+    var xScale = d3.scaleLinear().range([0, width]);
+    var yScale = d3.scaleOrdinal();
+    var g = dsvg.append("g")
+                .attr("transform", "translate(" + (width_margin/2) + "," + (height_margin/2) + ")");
+    var xg = g.append("g");
+    var yg = g.append("g");
+    var fo = g.append("foreignObject")
+              .attr("width", width)
+              .attr("height", height);
+    var foBody = fo.append("xhtml:body")
+                   .style("margin", "0px")
+                   .style("padding", "0px")
+                   .style("background-color", "none")
+                   .style("width", width + "px")
+                   .style("height", height + "px")
+                   .style("border", "1px solid lightgray");
+    var canvas = foBody.append("canvas")
+                       .attr("x", 0)
+                       .attr("y", 0)
+                       .attr("width", width)
+                       .attr("height", height)
+                       .style("cursor", "crosshair");
+    var ctx = canvas.node().getContext("2d");
+    ctx.clearRect(0, 0, width, height);
+    /* TODO: Vertical line on mouse hover
+    canvas.on("mousemove", function(evt) {
+        var rect = canvas.node().getBoundingClientRect();
+        var x = Math.round(evt.clientX - rect.left);
+        ctx.beginPath();
+        ctx.globalAlpha = 1.0;
+        ctx.strokeStyle = "black";
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, canvas.attr("height"));
+        ctx.stroke();
+    });
+    */
+
+    // Draw title
+    dsvg.append("text")
+        .attr("x", width/2)
+        .attr("y", 50)
+        .attr("font-size", "24px")
+        .style("fill", "blue")
+        .text(title);
+
+    // Draw x-axis label
+    xg.append("text")
+      .attr("x", width / 2)
+      .attr("y", height + 50)
+      .attr("text-anchor", "end")
+      .attr("font-size", "16px")
+      .attr("fill", "blue")
+      .text("Time");
+
+    return function(values) {
+        var core = values[core_key],
+            ids = values[id_key],
+            timelines = values[timeline_key],
+            esat = values[esat_key],
+            psat = values[psat_key];
+
+        // Set axis domains
+        var time_min = d3.min(core, function(d){return d.timestamp;});
+        var time_max = d3.max(core, function(d){return d.timestamp;});
+        xScale.domain([time_min, time_max]);
+        var allkeys = new Set();
+        var ekeys = new Set();
+        for (i = 0; i < core.length; i++) {
+            for (key in esat[i]) {
+                ekeys.add(key);
+                allkeys.add(key);
+            }
+        }
+        var pkeys = new Set();
+        for (i = 0; i < core.length; i++) {
+            for (key in psat[i]) {
+                pkeys.add(key);
+                allkeys.add(key);
+            }
+        }
+        var stepsize = height / allkeys.size;
+        yScale.domain(Array.from(allkeys))
+              .range(d3.range(height, 0, -stepsize));
+
+        // Draw x-axis
+        xg.attr("transform", "translate(0," + height + ")")
+          .call(d3.axisBottom(xScale).tickFormat(function(d) {
+              return "T-" + ((time_max - d) / (10 ** 9)).toPrecision(2) + " s";
+          }).ticks(10));
+
+        // Draw y-axis
+        yg.call(d3.axisLeft(yScale))
+          .call(function(d) {
+              d.selectAll("line")
+               .attr("transform", "translate(0," + -(stepsize/2) + ")");
+              d.selectAll("text")
+               .attr("transform", "translate(0," + -(stepsize/2) + ")");
+          });
+
+        // Draw data
+        ctx.clearRect(0, 0, width, height);
+        //g.selectAll("rect").remove();
+        //g.selectAll("path").remove();
+        for (let key of allkeys.values()) {
+            // Generate regular and entering blocks
+            var blocks = new Array();
+            var id_map = new Map();
+            var y = yScale(key)-stepsize;
+            var y_bot = y+stepsize;
+            for (i = 0; i < core.length; i++) {
+                // Skip irrelevant events
+                var category = core[i].category;
+                var color = "lightgrey";
+                var opacity = 0.4;
+                if (ekeys.has(key)) {
+                    if (category != key) {continue;}
+                } else {
+                    if (category == "compute") {
+                        color = "green";
+                        opacity = 0.1;
+                    } else if (category != "move") {
+                        color = "red";
+                        opacity = 0.1;
+                    } else {
+                        continue;
+                    }
+                }
+
+                // Event matched, create the block
+                var id = ids[i];
+                if (core[i].kind == "start") {
+                    id_map.set(id, i);
+                } else {
+                    var start_ts = time_min;
+                    if (id_map.has(id)) {
+                        var start_i = id_map.get(id);
+                        start_ts = core[start_i].timestamp;
+                        id_map.delete(id);
+                    }
+                    var finish_ts = core[i].timestamp;
+                    blocks.push({
+                        x: xScale(start_ts),
+                        y: y,
+                        width: xScale(finish_ts) - xScale(start_ts),
+                        color: color,
+                        opacity: opacity,
+                    });
+                }
+            }
+
+            // Generate exiting blocks
+            for (id in id_map.keys()) {
+                var i = id_map.get(id);
+                var x = xScale(core[i].timestamp);
+                var color = "lightgrey";
+                var category = core[i].category;
+                var opacity = 0.4;
+                if (category == "compute") {
+                    color = "green";
+                    opacity = 0.1;
+                } else if (category == "move") {
+                    color = "red";
+                    opacity = 0.1;
+                }
+                blocks.push({
+                    x: x,
+                    y: y,
+                    width: width - x,
+                    color: color,
+                    opacity: opacity,
+                });
+            }
+
+            // Calculate max esat
+            var subsat = d3.map(ekeys.has(key) ? esat : psat, function(d) {
+                var value = d[key];
+                return value == undefined ? 0 : value;
+            });
+            var sat_min = d3.min(subsat);
+            var sat_max = d3.max(subsat);
+            var satScale = d3.scaleLinear()
+                              .domain([sat_min, sat_max])
+                              .range([y_bot-5, y+5]);
+            for (i = 0; i < blocks.length; i++) {
+                var block = blocks[i];
+
+                // Draw block
+                ctx.globalAlpha = block.opacity; // FIXME
+                ctx.fillStyle = block.color;
+                ctx.fillRect(block.x,
+                             block.y,
+                             block.width,
+                             stepsize);
+                //ctx.globalAlpha = 1.0;
+                ctx.strokeStyle = "grey";
+                ctx.strokeRect(block.x,
+                               block.y,
+                               block.width,
+                               stepsize);
+
+                // Draw block
+                /* TODO: Remove me
+                g.append("rect")
+                 .attr("fill", block.color)
+                 .attr("stroke", "black")
+                 .attr("opacity", block.opacity)
+                 .attr("x", block.x)
+                 .attr("y", block.y)
+                 .attr("width", block.width)
+                 .attr("height", stepsize);
+                */
+            }
+
+            // Draw saturation line over block
+            ctx.beginPath();
+            ctx.globalAlpha = 1.0;
+            ctx.strokeStyle = "steelblue";
+            ctx.moveTo(0, y_bot);
+            var last_y = 0;
+            for (i = 0; i < core.length; i++) {
+                var sat_x = xScale(core[i].timestamp),
+                    sat_y = satScale(subsat[i]);
+                ctx.lineTo(sat_x,
+                           last_y);
+                ctx.lineTo(sat_x,
+                           sat_y);
+                last_y = sat_y;
+            }
+            ctx.stroke();
+
+            // Draw saturation line over blocks
+            /* TODO: Remove me
+            g.append("path")
+             .datum(d3.zip(core, subsat))
+             .attr("fill", "none")
+             .attr("stroke", "steelblue")
+             .attr("stroke-width", 1.0)
+             .attr("d", d3.line()
+                 .x(function(d) { return xScale(d[0].timestamp); })
+                 .y(function(d) { return satScale(d[1]); })
+             );
+            */
+        }
+    };
+};
+function graphPlot(container, core_key, id_key, timeline_key, profile_key, title) {
+    var svg = container.append("svg")
+                       .attr("class", "graph-plot");
+    svg.attr("width", screen.width-50).attr("height", screen.height);
+    var width = svg.attr("width"),
+        height = svg.attr("height");
+    var sim = d3.forceSimulation([])
+                .force("charge", d3.forceManyBody().strength(-10))
+                .force("center", d3.forceCenter(width/2, height/2).strength(1))
+                .force("links", d3.forceLink().links([]))
+                .on("tick", function() {
+                    sim.force("links").distance(100);
+
+                    var as = svg.selectAll("line")
+                                .data(sim.force("links").links());
+                    as.enter().append("line");
+                    as.exit().remove();
+                    as.attr("x1", function(d) { return d.source.x; })
+                      .attr("y1", function(d) { return d.source.y; })
+                      .attr("x2", function(d) { return d.target.x; })
+                      .attr("y2", function(d) { return d.target.y; })
+                      .attr("stroke", "blue")
+                      .attr("stroke-width", 5);
+
+                    var nodes = sim.nodes();
+                    var cs = svg.selectAll("circle")
+                                .data(nodes);
+                    cs.enter().append("circle");
+                    cs.exit().remove();
+                    cs.attr("r", 40)
+                      .attr("cx", function(d) { return d.x; })
+                      .attr("cy", function(d) { return d.y; })
+                      .attr("fill", function(d) { return d.color; })
+                      .attr("stroke", "black")
+                      .attr("stroke-width", 5);
+                    cs.filter(function(d) {
+                          var url = d.profile_url;
+                          return url != "" && url != "undefined";
+                      })
+                      .on("click", function(d) {
+                          var url = d3.select(d.target).datum().profile_url;
+                          window.open("/fs/" + url);
+                      })
+                      .attr("cursor", "pointer")
+                      .attr("stroke", "red");
+
+                    var ts = svg.selectAll("text")
+                                .data(nodes);
+                    ts.enter().append("text");
+                    ts.exit().remove();
+                    ts.attr("x", function(d) { return d.x; })
+                      .attr("y", function(d) { return d.y; })
+                      .attr("text-anchor", "middle")
+                      .attr("fill", "white")
+                      .text(function(d) { return d.f; });
+                });
+    return function(values) {
+        var core = values[core_key];
+        var id_data = values[id_key];
+        var timeline_data = values[timeline_key];
+        var old_nodes = sim.nodes();
+        var new_nodes = [];
+        var old_tid_map = new Map();
+        var new_tid_map = new Map();
+        var links = [];
+        for (var i = 0; i < old_nodes.length; i++) {
+            old_tid_map.set(old_nodes[i].tid, i);
+        }
+        for (var i = 0; i < core.length; i++) {
+            var c = core[i];
+            if (c.category == "compute") {
+                var tid = id_data[i];
+                var timeline = timeline_data[i];
+                if (c.kind == "start") {
+                    if (old_tid_map.has(tid)) {
+                        new_nodes.push(old_nodes[old_tid_map.get(tid)]);
+                    } else {
+                        new_nodes.push({
+                            tid: tid,
+                            x: screen.width/2,
+                            y: screen.height/2,
+                            color: "red",
+                            f: timeline.f,
+                            profile_url: "",
+                        });
+                    }
+                    new_tid_map.set(tid, new_nodes.length-1);
+                } else if (c.kind == "finish") {
+                    if (new_tid_map.has(tid)) {
+                        var node = new_nodes[new_tid_map.get(tid)];
+                        node.color = "blue";
+                        if (profile_key != "" && profile_key != undefined) {
+                            var profile_data = values[profile_key];
+                            if (profile_data != undefined) {
+                                node.profile_url = profile_data[i];
+                            }
+                        }
+                    }
+                }
+            } else if (c.category == "move") {
+                var id = id_data[i];
+                var timeline = timeline_data[i];
+                var src_tid = id.id;
+                var dest_tid = id.thunk_id;
+                if (id.id > 0) {
+                    links.push({
+                        source: src_tid,
+                        target: dest_tid,
+                    });
+                }
+            }
+        }
+        sim.nodes(new_nodes)
+           .force("links", d3.forceLink(links).id(function(d) { return d.tid; }))
+           .alpha(1)
+           .restart();
+    };
+};
+function rawSVG(container, core_key, data_key) {
+    return function(values) {
+        var data = values[data_key];
+        for (var i = 0; i < data.length; i++) {
+            var prof_svg_path = data[i];
+            if (prof_svg_path != "") {
+                d3.html("/fs/" + prof_svg_path).then(function(prof_svg) {
+                    container.selectAll(".raw-svg").remove()
+                    var div = container.append("div")
+                                       .attr("class", "raw-svg");
+                    div.node().appendChild(prof_svg.activeElement);
+                    div.select("svg")
+                       .attr("width", screen.width);
+                });
+                break;
+            }
+        }
+    };
+};
+function profileViewer(container, core_key, profile_key, title) {
+    var profile_container = container.append("div");
+    profile_container.attr("width", 900)
+                     .attr("height", 400)
+                     .attr("style", "border: 1px solid black");
+    profile_container.append("label")
+                     .text("Profiler: ");
+    var profile_toggle = profile_container.append("button")
+                                          .attr("type", "button")
+                                          .text("Start");
+    var profiling = false;
+    var profile_urls = new Set();
+    profile_toggle.on("click", function(input) {
+        if (profiling) {
+            profile_toggle.text("Start");
+            profiling = false;
+        } else {
+            profile_urls = new Set();
+            profile_container.selectAll("iframe").remove();
+            profile_toggle.text("Stop");
+            profiling = true;
+        }
+    });
+    return function(values) {
+        var core = values[core_key],
+            profiles = values[profile_key];
+        if (profiling) {
+            for (i = 0; i < core.length; i++) {
+                profile_urls.add(profiles[i]);
+            }
+        }
+    };
+}
+
+var values = 0;
+var ctxs = new Array();
+
+function drawCtxs() {
+    // Draw contexts
+    if (values != 0) {
+        ctxs.forEach((ctx) => {
+            try {
+                ctx(values);
+            } catch (ex) {
+                console.error(ex);
+            }
+        });
+    }
+
+    // Ask for more data
+    var interval = Number(draw_interval.node().value)*1000;
+    if (!(interval > 0)) {
+        interval = 1000;
+    }
+    setTimeout(function() {
+        drawCtxs();
+    }, interval);
+}
+
+var waiting = false;
+var myid = 0;
+var worker_id = 1;
+
+function wsStart() {
+    var loc = window.location;
+    var port = loc.port ? ":"+loc.port : ""
+    if (worker_id == myid || myid == 0) {
+        var feed_path = "ws://" + loc.hostname + port + "/data_feed";
+    } else {
+        var feed_path = "ws://" + loc.hostname + port + "/worker/" + worker_id + "/data_feed";
+    }
+    var ws = new WebSocket(feed_path);
+    status_em.attr("style", "color: yellow")
+             .text("Connecting...");
+    update_input.on("change", function(input) {
+        updating = input.target.checked;
+        if (updating) {
+            wsStart();
+        } else {
+            ws.close();
+        }
+    });
+    worker_select.on("change", function(input) {
+        worker_id = Number(input.target.value);
+        console.log("Selecting worker " + worker_id);
+        values = 0;
+        ws.close();
+    });
+    ws.onopen = function(evt) {
+        status_em.attr("style", "color: green")
+                 .text("Connected");
+        console.info("Connected to " + feed_path);
+        waiting = true;
+        ws.send("start");
+    };
+    ws.onclose = function(evt) {
+        status_em.attr("style", "color: red")
+                 .text("Disconnected");
+
+        if (updating) {
+            console.error("Lost connection to server, reconnect in 5 seconds...");
+            setTimeout(function(){
+                console.warn("Reconnecting to " + feed_path + "...");
+                wsStart();
+            }, 5000);
+        }
+    }
+    ws.onmessage = function(evt) {
+        waiting = false;
+        var raw_data = JSON.parse(evt.data);
+        var cmd = raw_data.cmd;
+        var payload = raw_data.payload;
+
+        if (values == 0 && cmd != "data") { return; }
+        if (cmd == "data") {
+            // Full dataset, ensure it's sorted
+            // FIXME: Ensure that "core" exists
+            var sorted = false
+            while (!sorted) {
+                var core = payload.core;
+                sorted = true;
+                for (i = 0; i < core.length-1; i++) {
+                    if (core[i].timestamp > core[i+1].timestamp) {
+                        sorted = false;
+                        for (key in payload) {
+                            var tmp = payload[key][i+1];
+                            payload[key][i+1] = payload[key][i];
+                            payload[key][i] = tmp;
+                        }
+                    }
+                }
+            }
+            values = payload;
+        } else if (cmd == "add") {
+            // New item
+            // TODO: Account for added/deleted keys
+            var core = values.core;
+            var idx = 0;
+            for (i = core.length-1; i >= 0; i--) {
+                if (core[i].timestamp < payload.core.timestamp) {
+                    idx = i+1;
+                    break;
+                }
+            }
+            for (key in values) {
+                values[key].splice(idx, 0, payload[key]);
+            }
+        } else if (cmd == "delete") {
+            // Deleted items
+            for (key in values) {
+                values[key] = values[key].slice(payload);
+            }
+        } else if (cmd == "config") {
+            // Set our local ID
+            // FIXME: Don't set this ID unless from real server
+            if (myid == 0) {
+                myid = payload.myid;
+                worker_id = myid;
+
+                // Set ctxs
+                // TODO: Delete unused ctxs
+                for (i = 0; i < payload.ctxs.length; i++) {
+                    ctx = payload.ctxs[i];
+                    ctxfn = eval(ctx)
+                    ctxs.push(ctxfn);
+                }
+                setTimeout(function(){drawCtxs()}, 1000);
+            }
+
+            // Add/remove workers
+            var wso = worker_select.selectAll("option")
+                                   .data(payload.workers);
+            wso.enter().append("option")
+                       .attr("value", function(d){return d;})
+                       .text(function(d){return d;});
+            wso.exit().remove();
+            worker_select.node().value = worker_id;
+        } else {
+            console.error("Unknown command: " + cmd);
+        }
+    };
+};
+
+// Run dashboard!
+var svg_container = d3.select(".svg-container");
+wsStart();
+</script>
+</body>
+</html>
