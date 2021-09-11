@@ -205,9 +205,12 @@ mutable struct EagerThunkFinalizer
     end
 end
 
+const EAGER_ID_COUNTER = Threads.Atomic{UInt64}(1)
+eager_next_id() = Threads.atomic_add!(EAGER_ID_COUNTER, one(UInt64))
+
 function _spawn(f, args...; kwargs...)
     Dagger.Sch.init_eager()
-    uid = rand(UInt)
+    uid = eager_next_id()
     future = ThunkFuture()
     finalizer_ref = poolset(EagerThunkFinalizer(uid))
     added_future = Future()
