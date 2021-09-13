@@ -266,7 +266,7 @@ using Random
             (chunksize=6,)
         ]
             f =  x -> x.a % 10
-            f2 = x-> x %10
+            f2 = x -> x % 10
             g = Dagger.groupby(d, f)
             c = Dagger._retrieve.(g.chunks)
 
