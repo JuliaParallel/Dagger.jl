@@ -1,3 +1,7 @@
+merge_chunks(sink, chunks...) = sink(TableOperations.joinpartitions(Tables.partitioner(identity, chunks)))
+
+rowcount(chunk) = length(Tables.rows(chunk))
+
 function groupby(d::DTable, col::Symbol; merge=true, chunksize=0)
     distinct_values = (_chunk, _col) -> unique(Tables.getcolumn(_chunk, _col))
 
@@ -6,7 +10,7 @@ function groupby(d::DTable, col::Symbol; merge=true, chunksize=0)
         Tables.materializer(_chunk)(m)
     end
 
-    create_distinct_partitions = (_chunk, _col) -> begin
+    distinct_partitions = (_chunk, _col) -> begin
         vals = distinct_values(_chunk, _col)
         if length(vals) > 1
             [v => Dagger.@spawn filter_wrap(_chunk, x -> Tables.getcolumn(x, _col) .== v) for v in vals]
@@ -15,64 +19,62 @@ function groupby(d::DTable, col::Symbol; merge=true, chunksize=0)
         end
     end
 
-    #v = [create_distinct_partitions(Dagger._retrieve(c), col) for c in d.chunks]
-    v = [Dagger.@spawn create_distinct_partitions(c, col) for c in d.chunks]
+    v = [Dagger.@spawn distinct_partitions(c, col) for c in d.chunks]
 
-    #ret = build_groupby_index(merge, chunksize, tabletype(d), fetch.(v)...)
-    # Commented spawn version due to instability
     ret = fetch(Dagger.@spawn build_groupby_index(merge, chunksize, tabletype(d), v...))
-    DTable(VTYPE(ret[2]), d.tabletype, Dict(col => ret[1])) 
+    DTable(VTYPE(ret[2]), d.tabletype, Dict([col] => ret[1])) 
 end
 
+function groupby(d::DTable, cols::Vector{Symbol}; merge=true, chunksize=0)
+    rowmap = (row, cols) -> (;[c=>Tables.getcolumn(row, c) for c in cols]...) 
+    distinct_values = (_chunk, _cols) -> begin 
+        t = Tables.columntable(TableOperations.map(x->(r = rowmap(x, _cols),), _chunk))
+        unique(Tables.getcolumn(t, :r))
+    end
+
+    filter_fun = (row, cols, key) -> all([Tables.getcolumn(row, x) .== key[x] for x in cols])
+    filter_wrap = (_chunk, _f) -> begin
+        m = TableOperations.filter(_f, _chunk)
+        Tables.materializer(_chunk)(m)
+    end
+
+    distinct_partitions = (_chunk, _cols) -> begin
+        vals = distinct_values(_chunk, _cols)
+        if length(vals) > 1
+            [v => Dagger.@spawn filter_wrap(_chunk, x -> filter_fun(x, _cols, v)) for v in vals]
+        else
+            [first(vals) => Dagger.spawn(identity, _chunk)]
+        end
+    end
+
+    v = [Dagger.@spawn distinct_partitions(c, cols) for c in d.chunks]
+
+    ret = fetch(Dagger.@spawn build_groupby_index(merge, chunksize, tabletype(d), v...))
+    DTable(VTYPE(ret[2]), d.tabletype, Dict(cols => ret[1])) 
+end
 
 function groupby(d::DTable, f::Function; merge=true, chunksize=0)
-
     filter_wrap = (_chunk, _f) -> begin
         m = TableOperations.filter(_f, _chunk)
         Tables.materializer(_chunk)(m)
     end
 
     chunk_wrap = (_chunk, _f) -> begin
-
-        # this is faster
+        # this is faster than a nice loop
         distinct = unique(Tables.getcolumn(Tables.columntable(TableOperations.map(x->(r = _f(x),), _chunk)), :r))
         r = [k => Dagger.spawn(filter_wrap, _chunk, (x) -> _f(x) == k) for k in distinct]
-
-        # rows = Tables.rows(_chunk)
-        # it = iterate(rows)
-        # vals = nothing
-        # if it !== nothing
-        #     vals = Dict{typeof(_f(it[1])), Vector{eltype(rows)}}()
-        # else
-        #     return []
-        # end
-
-        # for row in rows
-        #     k = _f(row)
-        #     if !haskey(vals, k) 
-        #        vals[k] = Vector{eltype(rows)}()
-        #     end
-        #     push!(vals[k], row)
-        # end
-
-        # collect_chunk = (rows) -> _sink(Tables.columntable(rows))
-        # m = map(k -> k => Dagger.spawn(collect_chunk, vals[k]), collect(keys(vals)))
-        # # @assert length(m) == length(r)
-        # m
     end
 
-    #v = [chunk_wrap(Dagger._retrieve(c), f, sink) for c in d.chunks]
     v = [Dagger.@spawn chunk_wrap(c, f) for c in d.chunks]
 
-
-    #ret = build_groupby_index(merge, chunksize, tabletype(d), fetch.(v)...)
-    # Commented out spawn version due to instability
     ret = fetch(Dagger.@spawn build_groupby_index(merge, chunksize, tabletype(d), v...))
-    DTable(VTYPE(ret[2]), d.tabletype, Dict(:f => ret[1])) 
+    DTable(VTYPE(ret[2]), d.tabletype, Dict([:f] => ret[1])) 
 end
 
 function build_groupby_index(merge::Bool, chunksize::Int, tabletype, vs...)
     v = vcat(vs...)
+    @assert typeof(v) <: Vector
+    @assert eltype(v) <: Pair
 
     ks = unique(map(x-> x[1], v))
     chunks = Vector{EagerThunk}(map(x-> x[2], v))
@@ -92,6 +94,7 @@ function build_groupby_index(merge::Bool, chunksize::Int, tabletype, vs...)
             push!(merged_chunks, Dagger.@spawn merge_chunks(sink, c...))
             idx[k] = [i]
         end
+
         return idx, merged_chunks
     elseif merge && chunksize > 0 # merge all but try to merge all the small chunks into chunks of chunksize
         sink = Tables.materializer(tabletype())
@@ -132,8 +135,3 @@ function build_groupby_index(merge::Bool, chunksize::Int, tabletype, vs...)
         return idx, chunks
     end
 end
-
-merge_chunks(sink, chunks...) = sink(TableOperations.joinpartitions(Tables.partitioner(identity, chunks)))
-
-rowcount(chunk) = length(Tables.rows(chunk))
-

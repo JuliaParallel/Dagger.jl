@@ -215,17 +215,16 @@ using Random
     @testset "Dagger.groupby" begin
         rng = MersenneTwister(2137)
 
-        charset = collect('a':'h')
-        d = DTable((a=shuffle(rng, repeat(charset, 6)),), 4)
-        @test length(Dagger.groupby(d, :a).chunks) == 8
+        charset = collect('a':'z')
+        d = DTable((a=shuffle(rng, repeat(charset, inner=4, outer=4)),), 11)
 
         for kwargs in [
             (;)
             (chunksize=1,)
             (merge=false,)
-            (chunksize=2,)
-            (chunksize=3,)
-            (chunksize=6,)
+            (chunksize=5,)
+            (chunksize=10,)
+            (chunksize=20,)
         ]
             g = Dagger.groupby(d, :a; kwargs...)
             c = Dagger._retrieve.(g.chunks)
@@ -234,22 +233,28 @@ using Random
             @test sort(collect(fetch(d).a)) == sort(collect(fetch(g).a))
         end
 
-        charset = ['a','a', 'b', 'b', 'c', 'c']
-        d = DTable((a=shuffle(rng, repeat(charset, 6)),), 2)
-        @test length(Dagger.groupby(d, :a).chunks) == 3
+        charset = collect('a':'z')
+        r = repeat(charset, inner=4, outer=4)
+        d = DTable((a=shuffle(rng, r), b=shuffle(rng, r)),11)
+
         for kwargs in [
             (;)
             (chunksize=1,)
             (merge=false,)
-            (chunksize=24,)
-            (chunksize=3,)
-            (chunksize=6,)
+            (chunksize=5,)
+            (chunksize=10,)
+            (chunksize=20,)
         ]
-            g = Dagger.groupby(d, :a; kwargs...)
+            g = Dagger.groupby(d, [:a, :b]; kwargs...)
             c = Dagger._retrieve.(g.chunks)
             @test all([all(t.a[1] .== t.a) for t in c])
+            @test all([all(t.b[1] .== t.b) for t in c])
             @test all(getindex.(getproperty.(c, :a), 1) .∈ Ref(charset))
-            @test sort(collect(fetch(d).a)) == sort(collect(fetch(g).a))
+            @test all(getindex.(getproperty.(c, :a), 1) .∈ Ref(charset))
+            fd = fetch(d)
+            fg = fetch(g)
+            @test sort(collect(fd.a)) == sort(collect(fg.a))
+            @test sort(collect(fd.b)) == sort(collect(fg.b))
         end
 
 
@@ -265,13 +270,13 @@ using Random
             (chunksize=3,)
             (chunksize=6,)
         ]
-            f =  x -> x.a % 10
+            f = x -> x.a % 10
             f2 = x -> x % 10
             g = Dagger.groupby(d, f)
             c = Dagger._retrieve.(g.chunks)
 
-            @test all([all( f2(t.a[1]) .== f2.(t.a)) for t in c])
-            @test all(getindex.(getproperty.(c, :a), 1) .∈ Ref(intset)) 
+            @test all([all(f2(t.a[1]) .== f2.(t.a)) for t in c])
+            @test all(getindex.(getproperty.(c, :a), 1) .∈ Ref(intset))
             @test sort(collect(fetch(d).a)) == sort(collect(fetch(g).a))
         end
     end
