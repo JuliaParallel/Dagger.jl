@@ -3,7 +3,7 @@ import TableOperations
 
 import Base: fetch, show
 
-export DTable, tabletype, tabletype!, trim, trim!, groupby
+export DTable, tabletype, tabletype!, trim, trim!
 
 const VTYPE = Vector{Union{Dagger.Chunk,Dagger.EagerThunk}}
 
