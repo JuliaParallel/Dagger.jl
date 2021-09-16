@@ -227,7 +227,7 @@ using Random
             (chunksize=20,)
         ]
             g = Dagger.groupby(d, :a; kwargs...)
-            c = Dagger._retrieve.(g.chunks)
+            c = Dagger._retrieve.(g.dtable.chunks)
             @test all([all(t.a[1] .== t.a) for t in c])
             @test all(getindex.(getproperty.(c, :a), 1) .∈ Ref(charset))
             @test sort(collect(fetch(d).a)) == sort(collect(fetch(g).a))
@@ -246,7 +246,7 @@ using Random
             (chunksize=20,)
         ]
             g = Dagger.groupby(d, [:a, :b]; kwargs...)
-            c = Dagger._retrieve.(g.chunks)
+            c = Dagger._retrieve.(g.dtable.chunks)
             @test all([all(t.a[1] .== t.a) for t in c])
             @test all([all(t.b[1] .== t.b) for t in c])
             @test all(getindex.(getproperty.(c, :a), 1) .∈ Ref(charset))
@@ -260,7 +260,7 @@ using Random
 
         intset = collect(10:29)
         d = DTable((a=shuffle(rng, repeat(intset, 6)),), 4)
-        @test length(Dagger.groupby(d, x -> x.a % 10).chunks) == 10
+        @test length(Dagger.groupby(d, x -> x.a % 10).dtable.chunks) == 10
 
         for kwargs in [
             (;)
@@ -273,7 +273,7 @@ using Random
             f = x -> x.a % 10
             f2 = x -> x % 10
             g = Dagger.groupby(d, f)
-            c = Dagger._retrieve.(g.chunks)
+            c = Dagger._retrieve.(g.dtable.chunks)
 
             @test all([all(f2(t.a[1]) .== f2.(t.a)) for t in c])
             @test all(getindex.(getproperty.(c, :a), 1) .∈ Ref(intset))

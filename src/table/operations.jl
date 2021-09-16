@@ -106,6 +106,9 @@ function reduce(f, d::DTable; cols=nothing::Union{Nothing, Vector{Symbol}}, init
 end
 
 
+function reduce(f, gd::GDTable; cols=nothing::Union{Nothing, Vector{Symbol}}, init=Base._InitialValue())
+    Dict([d[1] => reduce(f, d[2]; cols=cols, init=init) for d in gd])
+end
 
 """
     filter(f, d::DTable) -> DTable

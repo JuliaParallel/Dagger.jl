@@ -55,6 +55,7 @@ include("ui/gantt-common.jl")
 include("ui/gantt-text.jl")
 
 include("table/dtable.jl")
+include("table/gdtable.jl")
 include("table/operations.jl")
 include("table/groupby.jl")
 
