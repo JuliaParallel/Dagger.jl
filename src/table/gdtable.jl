@@ -6,6 +6,8 @@ mutable struct GDTable
     index::Dict
 end
 
+grouped_cols(gd::GDTable) = gd.cols === nothing ? [:keys] : gd.cols
+
 keys(gd::GDTable) = keys(gd.index)
 
 fetch(gd::GDTable) = fetch(gd.dtable)
