@@ -19,9 +19,7 @@ the underlying partitions was applied to it (currently only `filter`).
 mutable struct DTable
     chunks::VTYPE
     tabletype
-    groupby_index
-    DTable(chunks::VTYPE, tabletype) = new(chunks, tabletype, nothing)
-    DTable(chunks::VTYPE, tabletype, groupby_index) = new(chunks, tabletype, groupby_index)
+    DTable(chunks::VTYPE, tabletype) = new(chunks, tabletype)
 end
 
 DTable(chunks::Vector{Dagger.EagerThunk}, args...) = DTable(VTYPE(chunks), args...)

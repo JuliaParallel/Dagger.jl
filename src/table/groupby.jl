@@ -95,8 +95,8 @@ function build_groupby_index(merge::Bool, chunksize::Int, tabletype, vs...)
             push!(merged_chunks, Dagger.@spawn merge_chunks(sink, c...))
             idx[k] = [i]
         end
-
         return idx, merged_chunks
+
     elseif merge && chunksize > 0 # merge all but try to merge all the small chunks into chunks of chunksize
         sink = Tables.materializer(tabletype())
         merged_chunks = Vector{EagerThunk}()
@@ -132,6 +132,7 @@ function build_groupby_index(merge::Bool, chunksize::Int, tabletype, vs...)
             idx[k] = _indices[1:r]
         end
         return idx, merged_chunks
+
     else # no merge
         return idx, chunks
     end
