@@ -211,32 +211,43 @@ using CSV
         @test tabletype(dt) == NamedTuple # fallback in case it can't be found
     end
 
-    @testset "groupby" begin
+    @testset "Dagger.groupby" begin
         d = DTable((a=repeat(['a','b','c','d'], 6),), 4)
-      
-        @test length(groupby(d, :a).chunks) == 4
-        @test length(groupby(d, :a, chunksize=1).chunks) == 24
-        @test length(groupby(d, :a, merge=false).chunks) == 24
-        @test length(groupby(d, :a, chunksize=2).chunks) == 12
-        @test length(groupby(d, :a, chunksize=3).chunks) == 8
-        @test length(groupby(d, :a, chunksize=6).chunks) == 4
 
-        @test sort(collect(fetch(d).a)) == sort(collect(fetch(groupby(d, :a)).a))
-        @test sort(collect(fetch(d).a)) == sort(collect(fetch(groupby(d, :a, chunksize=3)).a))
-        @test sort(collect(fetch(d).a)) == sort(collect(fetch(groupby(d, :a, chunksize=1)).a))
+        @test length(Dagger.groupby(d, :a).chunks) == 4
+        @test length(Dagger.groupby(d, :a, chunksize=1).chunks) == 24
+        @test length(Dagger.groupby(d, :a, merge=false).chunks) == 24
+        @test length(Dagger.groupby(d, :a, chunksize=2).chunks) == 12
+        @test length(Dagger.groupby(d, :a, chunksize=3).chunks) == 8
+        @test length(Dagger.groupby(d, :a, chunksize=6).chunks) == 4
+
+        @test sort(collect(fetch(d).a)) == sort(collect(fetch(Dagger.groupby(d, :a)).a))
+        @test sort(collect(fetch(d).a)) == sort(collect(fetch(Dagger.groupby(d, :a, chunksize=3)).a))
+        @test sort(collect(fetch(d).a)) == sort(collect(fetch(Dagger.groupby(d, :a, chunksize=1)).a))
 
         d = DTable((a=repeat(['a','a', 'b', 'b'], 6),), 2)
-        @test length(groupby(d, :a).chunks) == 2
-        @test length(groupby(d, :a, chunksize=1).chunks) == 12
-        @test length(groupby(d, :a, merge=false).chunks) == 12
-        @test length(groupby(d, :a, chunksize=2).chunks) == 12
-        @test length(groupby(d, :a, chunksize=3).chunks) == 12 # grouping doesn't split chunks, so two 2-long chunks won't merge on chunksize 3
-        @test length(groupby(d, :a, chunksize=4).chunks) == 6
-        @test length(groupby(d, :a, chunksize=6).chunks) == 4
-        @test length(groupby(d, :a, chunksize=12).chunks) == 2
-        @test length(groupby(d, :a, chunksize=24).chunks) == 2
+        @test length(Dagger.groupby(d, :a).chunks) == 2
+        @test length(Dagger.groupby(d, :a, chunksize=1).chunks) == 12
+        @test length(Dagger.groupby(d, :a, merge=false).chunks) == 12
+        @test length(Dagger.groupby(d, :a, chunksize=2).chunks) == 12
+        @test length(Dagger.groupby(d, :a, chunksize=3).chunks) == 12 # grouping doesn't split chunks, so two 2-long chunks won't merge on chunksize 3
+        @test length(Dagger.groupby(d, :a, chunksize=4).chunks) == 6
+        @test length(Dagger.groupby(d, :a, chunksize=6).chunks) == 4
+        @test length(Dagger.groupby(d, :a, chunksize=12).chunks) == 2
+        @test length(Dagger.groupby(d, :a, chunksize=24).chunks) == 2
 
-        @test sort(collect(fetch(d).a)) == sort(collect(fetch(groupby(d, :a)).a))
-        @test sort(collect(fetch(d).a)) == sort(collect(fetch(groupby(d, :a, chunksize=5)).a))
+        @test sort(collect(fetch(d).a)) == sort(collect(fetch(Dagger.groupby(d, :a)).a))
+        @test sort(collect(fetch(d).a)) == sort(collect(fetch(Dagger.groupby(d, :a, chunksize=5)).a))
+
+        d = DTable((a=repeat(collect(10:29), 6),), 4)
+        @test length(Dagger.groupby(d, x -> x.a % 10).chunks) == 10
+        @test length(Dagger.groupby(d, x -> x.a % 10, chunksize=1).chunks) == 120
+        @test length(Dagger.groupby(d, x -> x.a % 10, merge=false).chunks) == 120
+        @test length(Dagger.groupby(d, x -> x.a % 10, chunksize=2).chunks) == 60
+        @test length(Dagger.groupby(d, x -> x.a % 10, chunksize=3).chunks) == 40
+        @test length(Dagger.groupby(d, x -> x.a % 10, chunksize=6).chunks) == 20
+
+        @test sort(collect(fetch(d).a)) == sort(collect(fetch(Dagger.groupby(d, x -> x.a % 10)).a))
+        @test sort(collect(fetch(d).a)) == sort(collect(fetch(Dagger.groupby(d, x -> x.a % 10, chunksize=5)).a))
     end
 end

@@ -5,10 +5,10 @@ using Test
 using Dagger
 using UUIDs
 
-include("util.jl")
-include("fakeproc.jl")
+# include("util.jl")
+# include("fakeproc.jl")
 
-include("thunk.jl")
+# include("thunk.jl")
 
 #= FIXME: Unreliable, and some thunks still get retained
 # N.B. We need a few of these probably because of incremental WeakRef GC
@@ -34,10 +34,10 @@ include("domain.jl")
 include("array.jl")
 include("cache.jl")
 include("table.jl")
-try # TODO: Fault tolerance is sometimes unreliable
-include("fault-tolerance.jl")
-catch
-end
+# try # TODO: Fault tolerance is sometimes unreliable
+# include("fault-tolerance.jl")
+# catch
+# end
 println(stderr, "tests done. cleaning up...")
 Dagger.cleanup()
 println(stderr, "all done.")
