@@ -212,20 +212,26 @@ using Random
         @test tabletype(dt) == NamedTuple # fallback in case it can't be found
     end
 
-    @testset "Dagger.groupby" begin
+    @testset "dtable groupby basic" begin
         rng = MersenneTwister(2137)
+        charset = collect('a':'d')
+        cs1 = shuffle(rng, repeat(charset, inner=4, outer=4))
+        cs2 = shuffle(rng, repeat(charset, inner=4, outer=4))
 
-        charset = collect('a':'z')
-        d = DTable((a=shuffle(rng, repeat(charset, inner=4, outer=4)),), 11)
-
-        for kwargs in [
+        kwargs_set = [
             (;)
             (chunksize=1,)
             (merge=false,)
-            (chunksize=5,)
-            (chunksize=10,)
+            (chunksize=8,)
+            (chunksize=16,)
             (chunksize=20,)
         ]
+
+        ######################################################
+        # single col groupby
+        d = DTable((a=cs1,), 4) 
+
+        for kwargs in kwargs_set
             g = Dagger.groupby(d, :a; kwargs...)
             c = Dagger._retrieve.(g.dtable.chunks)
             @test all([all(t.a[1] .== t.a) for t in c])
@@ -233,18 +239,11 @@ using Random
             @test sort(collect(fetch(d).a)) == sort(collect(fetch(g).a))
         end
 
-        charset = collect('a':'z')
-        r = repeat(charset, inner=4, outer=4)
-        d = DTable((a=shuffle(rng, r), b=shuffle(rng, r)),11)
+        ######################################################
+        # multi col groupby
+        d = DTable((a=cs1, b=cs2),4) 
 
-        for kwargs in [
-            (;)
-            (chunksize=1,)
-            (merge=false,)
-            (chunksize=5,)
-            (chunksize=10,)
-            (chunksize=20,)
-        ]
+        for kwargs in kwargs_set
             g = Dagger.groupby(d, [:a, :b]; kwargs...)
             c = Dagger._retrieve.(g.dtable.chunks)
             @test all([all(t.a[1] .== t.a) for t in c])
@@ -257,27 +256,66 @@ using Random
             @test sort(collect(fd.b)) == sort(collect(fg.b))
         end
 
-
+        ######################################################
+        # function groupby
         intset = collect(10:29)
-        d = DTable((a=shuffle(rng, repeat(intset, 6)),), 4)
-        @test length(Dagger.groupby(d, x -> x.a % 10).dtable.chunks) == 10
+        is1 = shuffle(rng, repeat(intset, 4))
+        d = DTable((a=is1,), 4)
 
-        for kwargs in [
-            (;)
-            (chunksize=1,)
-            (merge=false,)
-            (chunksize=20,)
-            (chunksize=3,)
-            (chunksize=6,)
-        ]
-            f = x -> x.a % 10
-            f2 = x -> x % 10
-            g = Dagger.groupby(d, f)
+        f1 = x -> x.a % 10
+        f2 = x -> x % 10
+        for kwargs in kwargs_set
+            g = Dagger.groupby(d, f1)
             c = Dagger._retrieve.(g.dtable.chunks)
-
             @test all([all(f2(t.a[1]) .== f2.(t.a)) for t in c])
             @test all(getindex.(getproperty.(c, :a), 1) .∈ Ref(intset))
             @test sort(collect(fetch(d).a)) == sort(collect(fetch(g).a))
+        end
+    end
+
+    @testset "dtable groupby index check" begin
+        rng = MersenneTwister(2137)
+        charset = collect('a':'d')
+        cs1 = shuffle(rng, repeat(charset, inner=4, outer=4))
+
+        d = DTable((a=cs1,), 4)
+        g = Dagger.groupby(d, :a)
+
+        for key in keys(g.index)
+            chunk_indices = g.index[key]
+            chunks = getindex.(Ref(g.dtable.chunks), chunk_indices)
+            parts = Dagger._retrieve.(chunks)
+
+            @test all([all(key .== p.a) for p in parts])
+        end
+    end
+
+    @testset "dtable groupby ops" begin
+        rng = MersenneTwister(2137)
+        charset = collect('a':'d')
+        cs1 = shuffle(rng, repeat(charset, inner=4, outer=4))
+        is1 = [7 for _ in 1:length(cs1)]
+
+        d = DTable((a=cs1, b=is1), 4)
+        g = Dagger.groupby(d, :a, chunksize=4)
+
+        m = map(x -> (a = x.a, result = x.a + x.b), g)
+
+        for key in keys(m.index)
+            chunk_indices = m.index[key]
+            chunks = getindex.(Ref(m.dtable.chunks), chunk_indices)
+            parts = Dagger._retrieve.(chunks)
+            @test all([all((key + 7) .== p.result) for p in parts])
+        end
+
+        r = reduce((x,_) -> x + 1, g, init=0)
+        fr = fetch(r)
+
+        for key in keys(m.index)
+            chunk_indices = m.index[key]
+            chunks = getindex.(Ref(m.dtable.chunks), chunk_indices)
+            parts = Dagger._retrieve.(chunks)
+            @test all([all((key + 7) .== p.result) for p in parts])
         end
     end
 end
