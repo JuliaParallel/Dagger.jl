@@ -4,6 +4,8 @@ mutable struct GDTable
     dtable::DTable
     cols::Union{Vector{Symbol}, Nothing}
     index::Dict
+
+    GDTable(dtable, cols, index) = new(dtable, cols, deepcopy(index))
 end
 
 grouped_cols(gd::GDTable) = gd.cols === nothing ? [:keys] : gd.cols
@@ -34,3 +36,28 @@ function iterate(gd::GDTable, state)
     end
     nothing
 end
+
+"""
+    trim!(gd::GDTable) -> GDTable
+
+Removes empty chunks from `gd`.
+"""
+function trim!(gd::GDTable)
+    d = gd.dtable
+    check_result = [Dagger.@spawn isnonempty(c) for c in d.chunks]
+    results = fetch.(check_result)
+    ok_indices = Set(getindex.(filter(x->x[2], collect(enumerate(results))),1))
+    d.chunks = getindex.(Ref(d.chunks), ok_indices)
+
+    for key in keys(gd.index)
+        gd.index[key] = filter(x -> x ∈ ok_indices, gd.index[key])
+    end
+    gd
+end
+
+"""
+    trim(gd::GDTable) -> GDTable
+
+Returns `gd` with empty chunks removed.
+"""
+trim(gd::GDTable) = trim!(GDTable(DTable(gd.dtable.chunks, gd.dtable.tabletype), gd.cols, gd.index))

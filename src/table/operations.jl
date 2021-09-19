@@ -38,6 +38,11 @@ function map(f, d::DTable)
     DTable(chunks, d.tabletype)
 end
 
+function map(f, gd::GDTable)
+    d = map(f, gd.dtable)
+    GDTable(d, gd.cols, gd.index)
+end
+
 """
     reduce(f, d::DTable; cols=nothing, [init]) -> NamedTuple
 
@@ -147,4 +152,9 @@ function filter(f, d::DTable)
         Tables.materializer(_chunk)(m)
     end
     DTable(map(c -> Dagger.spawn(chunk_wrap, c, f), d.chunks), d.tabletype)
+end
+
+function filter(f, gd::GDTable)
+    d = filter(f, gd.dtable)
+    GDTable(d, gd.cols, gd.index)
 end
