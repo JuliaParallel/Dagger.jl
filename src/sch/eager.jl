@@ -44,6 +44,7 @@ function adjust_pressure!(h::SchedulerHandle, proc::Processor, pressure)
 end
 function _adjust_pressure!(ctx, state, task, tid, (pid, proc, pressure))
     state.worker_pressure[pid][proc] += pressure
+    put!(state.chan, RescheduleSignal())
     nothing
 end
 

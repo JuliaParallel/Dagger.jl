@@ -240,4 +240,12 @@ end
             @test a.f.scope isa NodeScope
         end
     end
+    @testset "parent fetch child, one thread" begin
+        # Issue #282
+
+        s = p -> p == Dagger.ThreadProc(1, 1)
+        f = (x) -> 10 + x
+        g = (x) -> fetch(Dagger.spawn(f, x; proclist=s))
+        fetch(Dagger.spawn(g, 10; proclist=s))
+    end
 end
