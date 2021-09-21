@@ -767,6 +767,10 @@ function finish_task!(ctx, state, node, thunk_failed)
     fill_registered_futures!(state, node, thunk_failed)
 
     to_evict = cleanup_inputs!(state, node)
+    if node.f isa Chunk
+        # FIXME: Check the graph for matching chunks
+        push!(to_evict, node.f)
+    end
     if haskey(state.waiting_data, node) && isempty(state.waiting_data[node])
         delete!(state.waiting_data, node)
     end
