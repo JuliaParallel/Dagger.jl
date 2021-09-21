@@ -1,4 +1,5 @@
 import Dagger: @par, @spawn, spawn
+import Dagger: Chunk
 
 @everywhere begin
     checkwid() = myid()==1
@@ -169,5 +170,45 @@ end
         end
         @test any(t->errored(t), eager_thunks)
         @test any(t->!errored(t), eager_thunks)
+    end
+    @testset "function chunks" begin
+        @testset "lazy API" begin
+            a = delayed(+)(1,2)
+            @test !(a.f isa Chunk)
+
+            a = delayed(+; scope=NodeScope())(1,2)
+            @test a.f isa Chunk
+            @test a.f.processor isa OSProc
+            @test a.f.scope isa NodeScope
+
+            a = delayed(+; processor=Dagger.ThreadProc(1,1))(1,2)
+            @test a.f isa Chunk
+            @test a.f.processor isa Dagger.ThreadProc
+            @test a.f.scope isa AnyScope
+
+            a = delayed(+; processor=Dagger.ThreadProc(1,1), scope=NodeScope())(1,2)
+            @test a.f isa Chunk
+            @test a.f.processor isa Dagger.ThreadProc
+            @test a.f.scope isa NodeScope
+        end
+        @testset "eager API" begin
+            _a = Dagger.spawn(+, 1, 2; scope=NodeScope())
+            a = Dagger.Sch._find_thunk(_a)
+            @test a.f isa Chunk
+            @test a.f.processor isa OSProc
+            @test a.f.scope isa NodeScope
+
+            _a = Dagger.spawn(+, 1, 2; processor=Dagger.ThreadProc(1,1))
+            a = Dagger.Sch._find_thunk(_a)
+            @test a.f isa Chunk
+            @test a.f.processor isa Dagger.ThreadProc
+            @test a.f.scope isa AnyScope
+
+            _a = Dagger.spawn(+, 1, 2; processor=Dagger.ThreadProc(1,1), scope=NodeScope())
+            a = Dagger.Sch._find_thunk(_a)
+            @test a.f isa Chunk
+            @test a.f.processor isa Dagger.ThreadProc
+            @test a.f.scope isa NodeScope
+        end
     end
 end
