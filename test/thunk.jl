@@ -1,13 +1,27 @@
 import Dagger: @par, @spawn, spawn
+import Dagger: Chunk
 
 @everywhere begin
     checkwid() = myid()==1
+
     function dynamic_fib(n)
         n <= 1 && return n
         t = Dagger.spawn(dynamic_fib, n-1)
         y = dynamic_fib(n-2)
         return (fetch(t)::Int) + y
     end
+
+    struct ProcessLockedStruct
+        x::Ptr{Int} # Zero'd during serialization
+    end
+    (pls::ProcessLockedStruct)(x) = x+UInt(pls.x)
+
+    struct MulProc <: Dagger.Processor
+        owner::Int
+    end
+    MulProc() = MulProc(myid())
+    Dagger.get_parent(mp::MulProc) = OSProc(mp.owner)
+    Dagger.move(src::MulProc, dest::Dagger.ThreadProc, x::Function) = Base.:*
 end
 
 @testset "@par" begin
@@ -169,5 +183,61 @@ end
         end
         @test any(t->errored(t), eager_thunks)
         @test any(t->!errored(t), eager_thunks)
+    end
+    @testset "function chunks" begin
+        @testset "lazy API" begin
+            a = delayed(+)(1,2)
+            @test !(a.f isa Chunk)
+
+            a = delayed(+; scope=NodeScope())(1,2)
+            @test a.f isa Chunk
+            @test a.f.processor isa OSProc
+            @test a.f.scope isa NodeScope
+
+            a = delayed(+; processor=Dagger.ThreadProc(1,1))(1,2)
+            @test a.f isa Chunk
+            @test a.f.processor isa Dagger.ThreadProc
+            @test a.f.scope isa AnyScope
+
+            a = delayed(+; processor=Dagger.ThreadProc(1,1), scope=NodeScope())(1,2)
+            @test a.f isa Chunk
+            @test a.f.processor isa Dagger.ThreadProc
+            @test a.f.scope isa NodeScope
+
+            @testset "Scope Restrictions" begin
+                pls = ProcessLockedStruct(Ptr{Int}(42))
+                ctx = Context([1, workers()...])
+
+                # Negative test
+                @test_skip !all(x->x==43, collect(ctx, delayed(vcat)([delayed(pls)(1) for i in 1:10]...)))
+                # Positive tests (no serialization)
+                @test all(x->x==43, collect(ctx, delayed(vcat)([delayed(pls; scope=ProcessScope())(1) for i in 1:10]...)))
+                @test all(x->x==1, collect(ctx, delayed(vcat)([delayed(pls; scope=ProcessScope(first(workers())))(1) for i in 1:10]...)))
+            end
+            @testset "Processor Data Movement" begin
+                @everywhere Dagger.add_processor_callback!(()->MulProc(), :mulproc)
+                @test collect(delayed(+; processor=MulProc())(3,4)) == 12
+                @everywhere Dagger.delete_processor_callback!(:mulproc)
+            end
+        end
+        @testset "eager API" begin
+            _a = Dagger.spawn(+, 1, 2; scope=NodeScope())
+            a = Dagger.Sch._find_thunk(_a)
+            @test a.f isa Chunk
+            @test a.f.processor isa OSProc
+            @test a.f.scope isa NodeScope
+
+            _a = Dagger.spawn(+, 1, 2; processor=Dagger.ThreadProc(1,1))
+            a = Dagger.Sch._find_thunk(_a)
+            @test a.f isa Chunk
+            @test a.f.processor isa Dagger.ThreadProc
+            @test a.f.scope isa AnyScope
+
+            _a = Dagger.spawn(+, 1, 2; processor=Dagger.ThreadProc(1,1), scope=NodeScope())
+            a = Dagger.Sch._find_thunk(_a)
+            @test a.f isa Chunk
+            @test a.f.processor isa Dagger.ThreadProc
+            @test a.f.scope isa NodeScope
+        end
     end
 end

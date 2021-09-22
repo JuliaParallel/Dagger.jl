@@ -150,7 +150,7 @@ end
                 @test collect(Context(), a) == 1
             end
         end
-        @everywhere Dagger.add_callback!(()->FakeProc())
+        @everywhere Dagger.add_processor_callback!(()->FakeProc(), :fakeproc)
         @testset "proclist FakeProc" begin
             @test Dagger.iscompatible_arg(FakeProc(), nothing, Int) == true
             @test Dagger.iscompatible_arg(FakeProc(), nothing, FakeVal) == true
@@ -165,7 +165,7 @@ end
 
             @test collect(Context(), b) == FakeVal(57)
         end
-        @everywhere (pop!(Dagger.PROCESSOR_CALLBACKS); empty!(Dagger.OSPROC_CACHE))
+        @everywhere Dagger.delete_processor_callback!(:fakeproc)
         @testset "procutil" begin
             opts = ThunkOptions(;procutil=Dict(Dagger.ThreadProc=>0.25))
             as = [delayed(checkpressure; options=opts)(i) for i in 1:30]

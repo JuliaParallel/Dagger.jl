@@ -110,3 +110,6 @@ function eager_cleanup(state, uid)
         delete!(state.thunk_dict, tid)
     end
 end
+
+_find_thunk(e::Dagger.EagerThunk) =
+    unwrap_weak_checked(EAGER_STATE[].thunk_dict[EAGER_ID_MAP[e.uid]])

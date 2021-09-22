@@ -1,13 +1,55 @@
 # Processors
 
 Dagger contains a flexible mechanism to represent CPUs, GPUs, and other
-devices that the scheduler can place user work on. The indiviual devices that
+devices that the scheduler can place user work on. The individual devices that
 are capable of computing a user operation are called "processors", and are
 subtypes of `Dagger.Processor`. Processors are automatically detected by
 Dagger at scheduler initialization, and placed in a hierarchy reflecting the
 physical (network-, link-, or memory-based) boundaries between processors in
 the hierarchy. The scheduler uses the information in this hierarchy to
 efficiently schedule and partition user operations.
+
+Dagger's `Chunk` objects can have a processor associated with them that defines
+where the contained data "resides". Each processor has a set of functions that
+define the mechanisms and rules by which the data can be transferred between
+similar or different kinds of processors, and will be called by Dagger's
+scheduler automatically when fetching function arguments (or the function
+itself) for computation on a given processor.
+
+Setting the processor on a function argument is done by wrapping it in a
+`Chunk` with `Dagger.tochunk`:
+
+```julia
+a = 1
+b = 2
+# Let's say `b` "resides" on the second thread of the first worker:
+b_chunk = Dagger.tochunk(b, Dagger.ThreadProc(1, 2))::Dagger.Chunk
+c = Dagger.@spawn a + b_chunk
+fetch(c) == 3
+```
+
+It's also simple to set the processor of the function being passed; it will be
+automatically wrapped in a `Chunk` if necessary:
+
+```julia
+# `+` is treated as existing on the second thread of the first worker:
+Dagger.@spawn processor=Dagger.ThreadProc(1, 2) a + b
+```
+
+You can also tell Dagger about the processor type for the returned value of a
+task by making it a `Chunk`:
+
+```julia
+Dagger.spawn(a) do a
+    c = a + 1
+    return Dagger.tochunk(c, Dagger.ThreadProc(1, 2))
+end
+```
+
+Note that unless you know that your function, arguments, or return value are
+associated with a specific processor, you don't need to assign one to them.
+Dagger will treat them as being simple values with no processor association,
+and will serialize them to wherever they're used.
 
 ## Hardware capabilities, topology, and data locality
 

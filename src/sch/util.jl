@@ -203,9 +203,11 @@ function fetch_report(task)
     end
 end
 
+fn_type(x::Chunk) = x.chunktype
+fn_type(x) = typeof(x)
 function signature(task::Thunk, state)
     inputs = map(x->istask(x) ? state.cache[x] : x, unwrap_weak_checked.(task.inputs))
-    Tuple{typeof(task.f), map(x->x isa Chunk ? x.chunktype : typeof(x), inputs)...}
+    Tuple{fn_type(task.f), map(x->x isa Chunk ? x.chunktype : typeof(x), inputs)...}
 end
 
 function report_catch_error(err, desc=nothing)

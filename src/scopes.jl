@@ -32,7 +32,7 @@ function ProcessScope(wid)
         ProcessScope(NodeScope(system_uuid(wid)), wid)
     end
 end
-ProcessScope() = ProcessScope(myid)
+ProcessScope() = ProcessScope(myid())
 
 "Scoped to a specific processor."
 struct ExactScope <: AbstractScope

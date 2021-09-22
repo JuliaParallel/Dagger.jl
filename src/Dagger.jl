@@ -79,12 +79,10 @@ function __init__()
             include("ui/video.jl")
         end
     end
-    @static if VERSION >= v"1.3.0-DEV.573"
-        for tid in 1:Threads.nthreads()
-            push!(PROCESSOR_CALLBACKS, ()->ThreadProc(myid(), tid))
+    for tid in 1:Threads.nthreads()
+        add_processor_callback!("__cpu_thread_$(tid)__") do
+            ThreadProc(myid(), tid)
         end
-    else
-        push!(PROCESSOR_CALLBACKS, ()->ThreadProc(myid(), 1))
     end
 end
 
