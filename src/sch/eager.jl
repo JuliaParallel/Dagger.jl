@@ -32,8 +32,9 @@ function init_eager()
     end
 end
 
-"Adjusts the scheduler's cached pressure indicator for the specified worker by
-the specified amount."
+"Adjusts the scheduler's cached pressure indicators for the specified worker by
+the specified amount, and signals the scheduler to try scheduling again if
+pressure decreased."
 function adjust_pressure!(h::SchedulerHandle, proc::Processor, pressure)
     uid = Dagger.get_tls().sch_uid
     lock(TASK_SYNC) do
@@ -44,7 +45,9 @@ function adjust_pressure!(h::SchedulerHandle, proc::Processor, pressure)
 end
 function _adjust_pressure!(ctx, state, task, tid, (pid, proc, pressure))
     state.worker_pressure[pid][proc] += pressure
-    put!(state.chan, RescheduleSignal())
+    if pressure < 0
+        put!(state.chan, RescheduleSignal())
+    end
     nothing
 end
 
