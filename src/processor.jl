@@ -12,7 +12,7 @@ make it easy to transfer data to/from other types of `Processor` at runtime.
 """
 abstract type Processor end
 
-const PROCESSOR_CALLBACKS = []
+const PROCESSOR_CALLBACKS = Dict{Symbol,Any}()
 
 """
     execute!(proc::Processor, f, args...) -> Any
@@ -104,7 +104,8 @@ const OSPROC_CACHE = Dict{Int,Vector{Processor}}()
 children(proc::OSProc) = OSPROC_CACHE[proc.pid]
 function get_proc_hierarchy()
     children = Processor[]
-    for cb in PROCESSOR_CALLBACKS
+    for name in keys(PROCESSOR_CALLBACKS)
+        cb = PROCESSOR_CALLBACKS[name]
         try
             child = Base.invokelatest(cb)
             if (child isa Tuple) || (child isa Vector)
@@ -113,13 +114,21 @@ function get_proc_hierarchy()
                 push!(children, child)
             end
         catch err
-            @error "Error in processor callback" exception=(err,catch_backtrace())
+            @error "Error in processor callback: $name" exception=(err,catch_backtrace())
         end
     end
     children
 end
-function add_callback!(func)
-    push!(Dagger.PROCESSOR_CALLBACKS, func)
+add_processor_callback!(func, name::String) =
+    add_processor_callback!(func, Symbol(name))
+function add_processor_callback!(func, name::Symbol)
+    Dagger.PROCESSOR_CALLBACKS[name] = func
+    empty!(OSPROC_CACHE)
+end
+delete_processor_callback!(name::String) =
+    delete_processor_callback!(Symbol(name))
+function delete_processor_callback!(name::Symbol)
+    delete!(Dagger.PROCESSOR_CALLBACKS, name)
     empty!(OSPROC_CACHE)
 end
 Base.:(==)(proc1::OSProc, proc2::OSProc) = proc1.pid == proc2.pid

@@ -54,9 +54,9 @@ end
     @testset "Add callback in same world" begin
         function addcb()
             cb = @eval ()->FakeProc(myid())
-            @everywhere Dagger.add_callback!($cb)
+            @everywhere Dagger.add_processor_callback!($cb, :fakeproc)
             @test any(x->x isa FakeProc, Dagger.children(OSProc()))
-            @everywhere pop!(Dagger.PROCESSOR_CALLBACKS); empty!(Dagger.OSPROC_CACHE)
+            @everywhere Dagger.delete_processor_callback!(:fakeproc)
         end
         addcb()
     end
