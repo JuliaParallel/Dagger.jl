@@ -79,11 +79,11 @@ function reduce(f, d::DTable; cols=nothing::Union{Nothing, Vector{Symbol}}, init
     else
         return Dagger.@spawn NamedTuple()
     end
-    col_in_chunk_reduce = (_f, _c, _init, _chunk) -> reduce(_f, Tables.getcolumn(_chunk, _c); init=deepcopy(_init))
+    col_in_chunk_reduce = (_f, _c, _init, _chunk) -> reduce(_f, Tables.getcolumn(_chunk, _c); init=_init)
 
     chunk_reduce = (_f, _chunk, _cols, _init) -> begin
         # TODO: potential speedup enabled by commented code below by reducing the columns in parallel
-        v = [col_in_chunk_reduce(_f, c, _init, _chunk) for c in _cols]
+        v = [col_in_chunk_reduce(_f, c, deepcopy(_init), _chunk) for c in _cols]
         (; zip(_cols, v)...)
 
         # TODO: uncomment and define a good threshold for parallelization when this get's resolved
@@ -103,8 +103,8 @@ function reduce(f, d::DTable; cols=nothing::Union{Nothing, Vector{Symbol}}, init
     construct_single_column = (_col, _chunk_results...) -> getindex.(_chunk_results, _col)
     result_columns = [Dagger.@spawn construct_single_column(c, chunk_reduce_results...) for c in columns]
 
-    reduce_result_column = (_f, _c) -> reduce(_f, _c) # removed init from here as it's not needed (couldn't do (x,y)->x+1 for example)
-    reduce_chunks = [Dagger.@spawn reduce_result_column(f, c) for c in result_columns]
+    reduce_result_column = (_f, _c, _init) -> reduce(_f, _c; init=_init)
+    reduce_chunks = [Dagger.@spawn reduce_result_column(f, c, deepcopy(init)) for c in result_columns]
 
     construct_result = (_cols, _vals...) -> (; zip(_cols, _vals)...)
     Dagger.@spawn construct_result(columns, reduce_chunks...)
