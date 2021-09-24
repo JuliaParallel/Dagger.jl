@@ -39,6 +39,7 @@ function distinct_partitions(chunk, f::Function)
     [x => Dagger.spawn(identity, Tables.columntable(acc[x])) for x in collect(keys(acc))]
 end
 
+
 merge_chunks(sink, chunks...) = sink(TableOperations.joinpartitions(Tables.partitioner(identity, chunks)))
 
 rowcount(chunk) = length(Tables.rows(chunk))
