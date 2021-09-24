@@ -17,19 +17,20 @@ mutable struct GDTable
 end
 
 fetch(gd::GDTable) = fetch(gd.dtable)
+fetch(gd::GDTable, sink) = fetch(gd.dtable, sink)
 
 """
     grouped_cols(gd::GDTable) -> Vector{Symbol}
 
 Returns the symbols of columns used in the grouping.
-In case grouping on a function was performed a 
+In case grouping on a function was performed a `:KEYS` symbol will be returned.
 """
 grouped_cols(gd::GDTable) = gd.cols === nothing ? [:KEYS] : gd.cols
 
 keys(gd::GDTable) = keys(gd.index)
 
 partition(gd::GDTable, key) = partition(gd, gd.index[key])
-partition(gd::GDTable, indices::Vector{Int}) = DTable(getindex.(Ref(gd.dtable.chunks), indices), gd.dtable.tabletype) 
+partition(gd::GDTable, indices::Vector{Int}) = DTable(getindex.(Ref(gd.dtable.chunks), indices), gd.dtable.tabletype)
 
 length(gd::GDTable) = length(keys(gd.index))
 
@@ -57,7 +58,7 @@ end
 """
     trim!(gd::GDTable) -> GDTable
 
-Removes empty chunks from `gd`.
+Removes empty chunks from `gd` and empty keys from its index.
 """
 function trim!(gd::GDTable)
     d = gd.dtable
@@ -68,6 +69,9 @@ function trim!(gd::GDTable)
 
     for key in keys(gd.index)
         gd.index[key] = filter(x -> x ∈ ok_indices, gd.index[key])
+        if isempty(gd.index[key])
+            delete!(gd.index, key)
+        end
     end
     gd
 end
@@ -76,7 +80,7 @@ end
 """
     trim(gd::GDTable) -> GDTable
 
-Returns `gd` with empty chunks removed.
+Returns `gd` with empty chunks and keys removed.
 """
 trim(gd::GDTable) = trim!(GDTable(DTable(gd.dtable.chunks, gd.dtable.tabletype), gd.cols, gd.index))
 

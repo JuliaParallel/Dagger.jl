@@ -241,7 +241,7 @@ using Random
 
         ######################################################
         # multi col groupby
-        d = DTable((a=cs1, b=cs2),4) 
+        d = DTable((a=cs1, b=cs2), 4) 
 
         for kwargs in kwargs_set
             g = Dagger.groupby(d, [:a, :b]; kwargs...)
@@ -294,7 +294,7 @@ using Random
         rng = MersenneTwister(2137)
         charset = collect('a':'d')
         cs1 = shuffle(rng, repeat(charset, inner=4, outer=4))
-        is1 = [7 for _ in 1:length(cs1)]
+        is1 = [3 for _ in 1:length(cs1)]
 
         d = DTable((a=cs1, b=is1), 4)
         g = Dagger.groupby(d, :a, chunksize=4)
@@ -305,17 +305,24 @@ using Random
             chunk_indices = m.index[key]
             chunks = getindex.(Ref(m.dtable.chunks), chunk_indices)
             parts = Dagger._retrieve.(chunks)
-            @test all([all((key + 7) .== p.result) for p in parts])
+            @test all([all((key + 3) .== p.result) for p in parts])
         end
 
-        r = reduce((x,_) -> x + 1, g, init=0)
+        r = reduce(*, g)
         fr = fetch(r)
 
-        for key in keys(m.index)
-            chunk_indices = m.index[key]
-            chunks = getindex.(Ref(m.dtable.chunks), chunk_indices)
-            parts = Dagger._retrieve.(chunks)
-            @test all([all((key + 7) .== p.result) for p in parts])
+        for (i, key) in enumerate(fr.a)
+            @test fr.result_a[i] == repeat(key, length(cs1) ÷ 4)
+            @test fr.result_b[i] == 3 ^ (length(cs1) ÷ 4)
         end
+
+        f = filter(x -> x.a ∈ ['a', 'b'], g)
+        @test ['c', 'd'] ∉ fetch(f).a
+
+        t = trim(f)
+        @test ['c', 'd'] ∉ collect(keys(t.index))
+
+        trim!(f)
+        @test ['c', 'd'] ∉ collect(keys(f.index))
     end
 end
