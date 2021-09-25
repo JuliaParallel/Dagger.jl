@@ -9,6 +9,28 @@ Providing a positive value in `chunksize` will attempt to merge the smaller part
 into partitions not bigger than `chunksize`. Please note that partitions bigger than `chunksize`
 will not be split into partitions of `chunksize`.
 Merging can be disabled completely by providing `merge=false`.
+
+# Examples
+```julia
+julia> d = DTable((a=shuffle(repeat('a':'d', inner=4, outer=4)),), 4)
+DTable with 16 partitions
+Tabletype: NamedTuple
+
+julia> Dagger.groupby(d, :a)
+GDTable with 4 partitions and 4 keys
+Tabletype: NamedTuple
+Grouped by: [:a]
+
+julia> Dagger.groupby(d, :a, chunksize=3)
+GDTable with 24 partitions and 4 keys
+Tabletype: NamedTuple
+Grouped by: [:a]
+
+julia> Dagger.groupby(d, :a, merge=false)
+GDTable with 42 partitions and 4 keys
+Tabletype: NamedTuple
+Grouped by: [:a]
+```
 """
 function groupby(d::DTable, col::Symbol; merge=true, chunksize=0)
     rowmap = (_row, _col) -> Tables.getcolumn(_row, _col)
@@ -28,6 +50,28 @@ Providing a positive value in `chunksize` will attempt to merge the smaller part
 into partitions not bigger than `chunksize`. Please note that partitions bigger than `chunksize`
 will not be split into partitions of `chunksize`.
 Merging can be disabled completely by providing `merge=false`.
+
+# Examples
+```julia
+julia> d = DTable((a=shuffle(repeat('a':'d', inner=4, outer=4)),b=repeat(1:4, 16)), 4)
+DTable with 16 partitions
+Tabletype: NamedTuple
+
+julia> Dagger.groupby(d, [:a,:b])
+GDTable with 16 partitions and 16 keys
+Tabletype: NamedTuple
+Grouped by: [:a, :b]
+
+julia> Dagger.groupby(d, [:a,:b], chunksize=3)
+GDTable with 27 partitions and 16 keys
+Tabletype: NamedTuple
+Grouped by: [:a, :b]
+
+julia> Dagger.groupby(d, [:a,:b], merge=false)
+GDTable with 64 partitions and 16 keys
+Tabletype: NamedTuple
+Grouped by: [:a, :b]
+```
 """
 function groupby(d::DTable, cols::Vector{Symbol}; merge=true, chunksize=0)
     rowmap = (_row, _cols) -> (;[c => Tables.getcolumn(_row, c) for c in _cols]...)
@@ -46,6 +90,27 @@ Providing a positive value in `chunksize` will attempt to merge the smaller part
 into partitions not bigger than `chunksize`. Please note that partitions bigger than `chunksize`
 will not be split into partitions of `chunksize`.
 Merging can be disabled completely by providing `merge=false`.
+
+```julia
+julia> d = DTable((a=shuffle(repeat('a':'d', inner=4, outer=4)),b=repeat(1:4, 16)), 4)
+DTable with 16 partitions
+Tabletype: NamedTuple
+
+julia> Dagger.groupby(d, row -> row.a + row.b)
+GDTable with 7 partitions and 7 keys
+Tabletype: NamedTuple
+Grouped by: custom function
+
+julia> Dagger.groupby(d, row -> row.a + row.b, chunksize=3)
+GDTable with 25 partitions and 7 keys
+Tabletype: NamedTuple
+Grouped by: custom function
+
+julia> Dagger.groupby(d, row -> row.a + row.b, merge=false)
+GDTable with 52 partitions and 7 keys
+Tabletype: NamedTuple
+Grouped by: custom function
+```
 """
 groupby(d::DTable, f::Function; merge=true, chunksize=0) = _groupby(d, f, nothing, merge, chunksize)
 

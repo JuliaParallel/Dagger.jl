@@ -229,7 +229,7 @@ using Random
 
         ######################################################
         # single col groupby
-        d = DTable((a=cs1,), 4) 
+        d = DTable((a=cs1,), 4)
 
         for kwargs in kwargs_set
             g = Dagger.groupby(d, :a; kwargs...)
