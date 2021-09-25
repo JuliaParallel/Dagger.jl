@@ -51,8 +51,7 @@ julia> files = ["1.csv", "2.csv", "3.csv"];
 
 julia> d = DTable(CSV.File, files)
 DTable with 3 partitions
-Tabletype: unknown (use `tabletype(::DTable)`)
-
+Tabletype: unknown (use `tabletype!(::DTable)`)
 
 julia> tabletype(d)
 NamedTuple
@@ -72,7 +71,6 @@ julia> table = (a=[1, 2, 3, 4, 5], b=[6, 7, 8, 9, 10]);
 julia> d = DTable(table, 2)
 DTable with 3 partitions
 Tabletype: NamedTuple
-
 
 julia> fetch(d)
 (a = [1, 2, 3, 4, 5], b = [6, 7, 8, 9, 10])
@@ -165,12 +163,125 @@ julia> fetch(r)
 (v = 5500,)
 ```
 
+# Dagger.groupby interface
+
+A `DTable` can be grouped which will result in creation of a `GDTable`.
+It can be grouped using a distinct set of values contained in a single or multiple columns.
+A user provided function can be used for grouping in case a row needs
+to be transformed in order to obtain a grouping key.
+
+```julia
+julia> d = DTable((a=shuffle(repeat('a':'d', inner=4, outer=4)),b=repeat(1:4, 16)), 4)
+DTable with 16 partitions
+Tabletype: NamedTuple
+
+julia> Dagger.groupby(d, :a)
+GDTable with 4 partitions and 4 keys
+Tabletype: NamedTuple
+Grouped by: [:a]
+
+julia> Dagger.groupby(d, [:a, :b])
+GDTable with 16 partitions and 16 keys
+Tabletype: NamedTuple
+Grouped by: [:a, :b]
+
+julia> Dagger.groupby(d, row -> row.a + row.b)
+GDTable with 7 partitions and 7 keys
+Tabletype: NamedTuple
+Grouped by: custom function
+```
+
+## GDTable operations
+
+Operations such as `map`, `filter`, `reduce` can be performed on a `GDTable`
+
+```julia
+julia> g = Dagger.groupby(d, [:a, :b])
+GDTable with 16 partitions and 16 keys
+Tabletype: NamedTuple
+Grouped by: [:a, :b]
+
+julia> f = filter(x -> x.a != 'd', g)
+GDTable with 16 partitions and 16 keys
+Tabletype: NamedTuple
+Grouped by: [:a, :b]
+
+julia> trim!(f)
+GDTable with 12 partitions and 12 keys
+Tabletype: NamedTuple
+Grouped by: [:a, :b]
+
+julia> m = map(r -> (a = r.a, b = r.b, c = r.b .- 3), f)
+GDTable with 12 partitions and 12 keys
+Tabletype: NamedTuple
+Grouped by: [:a, :b]
+
+julia> r = reduce(*, m)
+EagerThunk (running)
+
+julia> DataFrame(fetch(r))
+12×5 DataFrame
+ Row │ a     b      result_a  result_b  result_c 
+     │ Char  Int64  String    Int64     Int64    
+─────┼───────────────────────────────────────────
+   1 │ a         1  aaaa             1        16
+   2 │ c         3  ccc             27         0
+   3 │ a         3  aa               9         0
+   4 │ b         4  bbbb           256         1
+   5 │ c         4  cccc           256         1
+   6 │ b         2  bbbb            16         1
+   7 │ b         1  bbbb             1        16
+   8 │ a         2  aaa              8        -1
+   9 │ a         4  aaaaaaa      16384         1
+  10 │ b         3  bbbb            81         0
+  11 │ c         2  ccccc           32        -1
+  12 │ c         1  cccc             1        16
+```
+
+## Iterating over a GDTable
+
+`GDTable` can be iterated over and each element will be a pair of key and `DTable` with all rows associated with that key.
+
+```julia
+julia> d = DTable((a=repeat('a':'b', inner=2),b=1:4), 2)
+DTable with 2 partitions
+Tabletype: NamedTuple
+
+julia> g = Dagger.groupby(d, :a)
+GDTable with 2 partitions and 2 keys
+Tabletype: NamedTuple
+Grouped by: [:a]
+
+julia> for (key, dt) in g
+           println("Key: $key")
+           println(fetch(dt, DataFrame))
+       end
+Key: a
+2×2 DataFrame
+ Row │ a     b     
+     │ Char  Int64 
+─────┼─────────────
+   1 │ a         1
+   2 │ a         2
+Key: b
+2×2 DataFrame
+ Row │ a     b     
+     │ Char  Int64 
+─────┼─────────────
+   1 │ b         3
+   2 │ b         4
+```
+
 # API
 
 ```@docs
 DTable
 tabletype
+tabletype!
+trim
+trim!
 map
 filter
 reduce
+groupby
 ```

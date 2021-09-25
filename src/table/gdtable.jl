@@ -64,13 +64,26 @@ function trim!(gd::GDTable)
     d = gd.dtable
     check_result = [Dagger.@spawn isnonempty(c) for c in d.chunks]
     results = fetch.(check_result)
-    ok_indices = Set(getindex.(filter(x -> x[2], collect(enumerate(results))),1))
-    d.chunks = getindex.(Ref(d.chunks), ok_indices)
+
+    ok_indices = filter(x -> results[x], 1:length(results))
+    d.chunks = getindex.(Ref(d.chunks), sort(ok_indices))
+
+    offsets = zeros(UInt, length(results))
+
+    counter = zero(UInt)
+    for (i, r) in enumerate(results)
+        counter = r ? counter : counter + 1
+        offsets[i] = counter
+    end
 
     for key in keys(gd.index)
-        gd.index[key] = filter(x -> x ∈ ok_indices, gd.index[key])
-        if isempty(gd.index[key])
+        ind = gd.index[key]
+        filter!(x -> results[x], ind)
+
+        if isempty(ind)
             delete!(gd.index, key)
+        else
+            gd.index[key] = ind .- getindex.(Ref(offsets), ind)
         end
     end
     gd

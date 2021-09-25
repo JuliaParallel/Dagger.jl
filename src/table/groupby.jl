@@ -138,6 +138,7 @@ end
 Takes a partition and groups its rows according based on the key value returned by `f`.
 """
 function distinct_partitions(chunk, f::Function)
+    @assert Tables.istable(chunk)
     rows = Tables.rows(chunk)
     keyval = f(iterate(rows)[1])
     acc = Dict{typeof(keyval), Vector{eltype(rows)}}()
