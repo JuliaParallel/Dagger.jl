@@ -27,6 +27,11 @@ In case grouping on a function was performed a `:KEYS` symbol will be returned.
 """
 grouped_cols(gd::GDTable) = gd.cols === nothing ? [:KEYS] : gd.cols
 
+"""
+    keys(gd::GDTable)
+
+Returns the keys by which the `gd` is grouped by.
+"""
 keys(gd::GDTable) = keys(gd.index)
 
 partition(gd::GDTable, key) = partition(gd, gd.index[key])

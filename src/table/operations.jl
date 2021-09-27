@@ -194,6 +194,7 @@ function filter(f, d::DTable)
     DTable(map(c -> Dagger.spawn(chunk_wrap, c, f), d.chunks), d.tabletype)
 end
 
+
 """
     filter(f, gd::GDTable) -> GDTable
 
