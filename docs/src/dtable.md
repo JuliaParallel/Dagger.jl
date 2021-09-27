@@ -1,3 +1,7 @@
+```@meta
+CurrentModule = Dagger
+```
+
 # Distributed table
 
 The `DTable`, or "distributed table", is an abstraction layer on top of Dagger
@@ -33,7 +37,6 @@ julia> table = (a=[1, 2, 3, 4, 5], b=[6, 7, 8, 9, 10]);
 julia> d = DTable(table, 2)
 DTable with 3 partitions
 Tabletype: NamedTuple
-
 
 julia> fetch(d)
 (a = [1, 2, 3, 4, 5], b = [6, 7, 8, 9, 10])
@@ -166,9 +169,13 @@ julia> fetch(r)
 # Dagger.groupby interface
 
 A `DTable` can be grouped which will result in creation of a `GDTable`.
-It can be grouped using a distinct set of values contained in a single or multiple columns.
-A user provided function can be used for grouping in case a row needs
-to be transformed in order to obtain a grouping key.
+A distinct set of values contained in a single or multiple columns can be used as grouping keys.
+If a transformation of a row needs to be performed in order to obtain the grouping key there's
+also an option to provide a custom function returning a key, which is applied per row.
+
+The set of keys the `GDTable` is grouped by can be obtained using
+the `keys(gd::GDTable)` function. To get a fragment of the `GDTable` containing
+records belonging under a single keythe `getindex(gd::GDTable, key)` function can be used.
 
 ```julia
 julia> d = DTable((a=shuffle(repeat('a':'d', inner=4, outer=4)),b=repeat(1:4, 16)), 4)
@@ -189,6 +196,17 @@ julia> Dagger.groupby(d, row -> row.a + row.b)
 GDTable with 7 partitions and 7 keys
 Tabletype: NamedTuple
 Grouped by: custom function
+
+julia> g = Dagger.groupby(d, :a); keys(g)
+KeySet for a Dict{Char, Vector{UInt64}} with 4 entries. Keys:
+  'c'
+  'd'
+  'a'
+  'b'
+
+julia> g['c']
+DTable with 1 partitions
+Tabletype: NamedTuple
 ```
 
 ## GDTable operations
@@ -240,7 +258,8 @@ julia> DataFrame(fetch(r))
 
 ## Iterating over a GDTable
 
-`GDTable` can be iterated over and each element will be a pair of key and `DTable` with all rows associated with that key.
+`GDTable` can be iterated over and each element returned will be a pair of key
+and a `DTable` containing all rows associated with that grouping key.
 
 ```julia
 julia> d = DTable((a=repeat('a':'b', inner=2),b=1:4), 2)
@@ -284,4 +303,6 @@ map
 filter
 reduce
 groupby
+keys
+getindex
 ```

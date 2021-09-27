@@ -176,9 +176,9 @@ function build_groupby_index(merge::Bool, chunksize::Int, tabletype, vs...)
 
     chunks = Vector{EagerThunk}(map(x -> x[2], v))
 
-    idx = Dict{keytype, Vector{Int}}()
+    idx = Dict{keytype, Vector{UInt}}()
     for (i, k) in enumerate(map(x -> x[1], v))
-        get!(idx, k, Vector{Int}())
+        get!(idx, k, Vector{UInt}())
         push!(idx[k], i)
     end
 

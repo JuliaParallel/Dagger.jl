@@ -1,4 +1,4 @@
-import Base: keys, iterate, length
+import Base: keys, iterate, length, getindex
 
 """
     GDTable
@@ -30,7 +30,7 @@ grouped_cols(gd::GDTable) = gd.cols === nothing ? [:KEYS] : gd.cols
 keys(gd::GDTable) = keys(gd.index)
 
 partition(gd::GDTable, key) = partition(gd, gd.index[key])
-partition(gd::GDTable, indices::Vector{Int}) = DTable(getindex.(Ref(gd.dtable.chunks), indices), gd.dtable.tabletype)
+partition(gd::GDTable, indices::Vector{UInt}) = DTable(getindex.(Ref(gd.dtable.chunks), indices), gd.dtable.tabletype)
 
 length(gd::GDTable) = length(keys(gd.index))
 
@@ -38,20 +38,20 @@ length(gd::GDTable) = length(keys(gd.index))
 function iterate(gd::GDTable)
     it = iterate(gd.index)
     if it !== nothing
-        (i, state) = it
-        return i[1] => partition(gd, i[2]), state
+        ((key, partition_indices), state) = it
+        return key => partition(gd, partition_indices), state
     end
-    nothing
+    return nothing
 end
 
 
 function iterate(gd::GDTable, state)
     it = iterate(gd.index, state)
     if it !== nothing
-        (i, state) = it
-        return i[1] => partition(gd, i[2]), state
+        ((key, partition_indices), state) = it
+        return key => partition(gd, partition_indices), state
     end
-    nothing
+    return nothing
 end
 
 
@@ -129,4 +129,15 @@ function show(io::IO, ::MIME"text/plain", gd::GDTable)
     println(io, "Tabletype: $tabletype")
     print(io, "Grouped by: $grouped_by_cols")
     nothing
+end
+
+"""
+    getindex(gdt::GDTable, key) -> DTable
+
+Retrieves a `DTable` from `gdt` with rows belonging to the provided grouping key.
+"""
+function getindex(gdt::GDTable, key)
+    key ∉ keys(gdt) && throw(KeyError("Key $key not present in the GDTable"))
+    # TODO: try to resolve more forms of key even if it doesn't exactly match the key in the dict
+    partition(gdt, key)
 end
