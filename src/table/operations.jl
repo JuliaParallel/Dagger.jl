@@ -141,7 +141,7 @@ Returns results per group in columns with prefix `result_*`.
 For more information on kwargs see `reduce(f, d::DTable)`
 
 # Examples
-'''julia
+```julia
 julia> g = Dagger.groupby(DTable((a=repeat('a':'d', inner=2),b=1:8), 2), :a)
 GDTable with 4 partitions and 4 keys
 Tabletype: NamedTuple
@@ -149,7 +149,7 @@ Grouped by: [:a]
 
 julia> fetch(reduce(*, g))
 (a = ['a', 'c', 'd', 'b'], result_a = ["aa", "cc", "dd", "bb"], result_b = [2, 30, 56, 12])
-'''
+```
 """
 function reduce(f, gd::GDTable; cols=nothing::Union{Nothing, Vector{Symbol}}, init=Base._InitialValue())
     construct_result = (_keys, _results...) -> begin
@@ -202,7 +202,7 @@ Returns a filtered `GDTable` that can be processed further.
 Calling `trim!` on a filtered `GDTable` will clean up the empty keys and partitions.
 
 # Examples
-'''julia
+```julia
 julia> g = Dagger.groupby(DTable((a=repeat('a':'d', inner=2),b=1:8), 2), :a)
 GDTable with 4 partitions and 4 keys
 Tabletype: NamedTuple
@@ -220,7 +220,7 @@ julia> trim!(f)
 GDTable with 2 partitions and 2 keys
 Tabletype: NamedTuple
 Grouped by: [:a]
-'''
+```
 """
 function filter(f, gd::GDTable)
     d = filter(f, gd.dtable)
