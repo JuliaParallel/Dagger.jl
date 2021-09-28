@@ -44,12 +44,7 @@ end
 Groups the `d` by distinct values of columns `cols`.
 The key is constructed by creating a NamedTuple from each row based on `cols` provided.
 
-The process of grouping can be affected by providing kwargs `merge` and `chunksize`.
-By default all the chunks belonging to a single key will be merged into a single partition.
-Providing a positive value in `chunksize` will attempt to merge the smaller partitions
-into partitions not bigger than `chunksize`. Please note that partitions bigger than `chunksize`
-will not be split into partitions of `chunksize`.
-Merging can be disabled completely by providing `merge=false`.
+For kwargs usage details see `groupby(d::DTable, col::Symbol)`
 
 # Examples
 ```julia
@@ -84,12 +79,7 @@ end
 
 Groups the `d` by distinct values of keys created by applying `f` to a row.
 
-The process of grouping can be affected by providing kwargs `merge` and `chunksize`.
-By default all the chunks belonging to a single key will be merged into a single partition.
-Providing a positive value in `chunksize` will attempt to merge the smaller partitions
-into partitions not bigger than `chunksize`. Please note that partitions bigger than `chunksize`
-will not be split into partitions of `chunksize`.
-Merging can be disabled completely by providing `merge=false`.
+For kwargs usage details see `groupby(d::DTable, col::Symbol)`
 
 ```julia
 julia> d = DTable((a=shuffle(repeat('a':'d', inner=4, outer=4)),b=repeat(1:4, 16)), 4)

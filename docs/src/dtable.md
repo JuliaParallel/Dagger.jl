@@ -1,7 +1,3 @@
-```@meta
-CurrentModule = Dagger
-```
-
 # Distributed table
 
 The `DTable`, or "distributed table", is an abstraction layer on top of Dagger
