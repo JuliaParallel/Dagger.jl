@@ -19,11 +19,37 @@ the underlying partitions was applied to it (currently only `filter`).
 mutable struct DTable
     chunks::VTYPE
     tabletype
-    DTable(chunks::VTYPE, tabletype) = new(chunks, tabletype)
+    schema::Union{Nothing, Tables.Schema}
+    DTable(chunks::VTYPE, tabletype) = new(chunks, tabletype, nothing)
+    DTable(chunks::VTYPE, tabletype, schema) = new(chunks, tabletype, schema)
 end
 
 DTable(chunks::Vector{Dagger.EagerThunk}, args...) = DTable(VTYPE(chunks), args...)
 DTable(chunks::Vector{Dagger.Chunk}, args...) = DTable(VTYPE(chunks), args...)
+
+"""
+    DTable(table) -> DTable
+
+Constructs a `DTable` using a `Tables.jl` compatible `table` input.
+Calls `Tables.partitions` on the `table` and assumes the provided partitioning.
+"""
+function DTable(table)
+    # Constructor with Tables partitions usage - bases the partitioning on it
+    Tables.istable(table) || throw(ArgumentError("Provided input is not Tables.jl compatible."))
+
+    chunks = Vector{Dagger.EagerThunk}()
+
+    iter = Tables.partitions(table)
+    i = iterate(iter)
+    while !isnothing(i)
+        p, state = i
+        c = Dagger.spawn(Tables.materializer(p), p)
+        push!(chunks, c)
+        i = iterate(iter, state)
+    end
+
+    return DTable(chunks, nothing)
+end
 
 
 """
