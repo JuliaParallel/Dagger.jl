@@ -68,7 +68,7 @@ Tables.getcolumn(table::DTable, idx::Int) = _getcolumn(table, idx)
 # DTableRowIterator functions
 
 Tables.schema(table::DTableRowIterator) = Tables.schema(table.d)
-
+length(table::DTableRowIterator) = length(table.d)
 
 function Base.iterate(iter::DTableRowIterator; c_idx=0)
     r = nothing
@@ -99,6 +99,7 @@ Tables.schema(table::DTableColumnIterator) = Tables.schema(table.d)
 Tables.columnnames(table::DTableColumnIterator) = Tables.columnnames(table.d)
 Tables.getcolumn(table::DTableColumnIterator, col::Symbol) = Tables.getcolumn(table.d, col)
 Tables.getcolumn(table::DTableColumnIterator, idx::Int) = Tables.getcolumn(table.d, idx)
+length(table::DTableColumnIterator) = length(Tables.columnnames(table))
 
 
 function Base.iterate(table::DTableColumnIterator; idx=1)
@@ -116,7 +117,7 @@ Base.iterate(table::DTableColumnIterator, state) = iterate(table; idx=state)
 # DTablePartitionIterator functions
 
 Tables.partitions(table::DTable) = DTablePartitionIterator(table)
-
+length(table::DTablePartitionIterator) = length(table.d.chunks)
 
 function Base.iterate(table::DTablePartitionIterator; idx=1)
     length(table.d.chunks) < idx && return nothing

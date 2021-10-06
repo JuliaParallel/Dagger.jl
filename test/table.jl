@@ -2,6 +2,8 @@ using DataFrames
 using Arrow
 using CSV
 using Random
+using Tables
+using TableOperations
 
 @testset "dtable" begin
     @testset "constructors - Tables.jl compatibility (NamedTuple)" begin
@@ -325,5 +327,38 @@ using Random
 
         trim!(f)
         @test ['c', 'd'] ∉ collect(keys(f.index))
+    end
+
+    @testset "tables.jl source" begin
+        nt = (a=1:100, b=1:100)
+        
+        d1 = DTable(nt, 10) # standard row based constructor
+
+        # partition constructor, check with DTable as input
+        d2 = DTable(d1)
+        d3 = DTable(Tables.partitioner(identity, [nt for _ in 1:10]))
+
+        @test length(d1.chunks) == length(d2.chunks) == length(d3.chunks)
+
+        @test Tables.getcolumn(d1, 1) == 1:100
+        @test Tables.getcolumn(d1, 2) == 1:100
+        @test Tables.getcolumn(d1, :a) == 1:100
+        @test Tables.getcolumn(d1, :b) == 1:100
+        @test Tables.columnnames(d1) == (:a, :b)
+
+        @test Tables.schema(d1).names == (:a, :b)
+        @test Tables.schema(d1).types == (Int, Int)
+
+        for c in Tables.columns(d1)
+            @test c == 1:100
+        end
+
+        @test all([ r.a == r.b == v for (r,v) in zip(collect(Tables.rows(d1)),1:100)])
+
+        # length tests for collect on iterators
+        @test length(d1) == 100
+        @test length(Tables.rows(d1)) == 100
+        @test length(Tables.columns(d1)) == 2
+        @test length(Tables.partitions(d1)) == 10
     end
 end

@@ -1,7 +1,7 @@
 import Tables
 import TableOperations
 
-import Base: fetch, show
+import Base: fetch, show, length
 
 export DTable, tabletype, tabletype!, trim, trim!
 
@@ -35,7 +35,6 @@ Calls `Tables.partitions` on the `table` and assumes the provided partitioning.
 """
 function DTable(table)
     # Constructor with Tables partitions usage - bases the partitioning on it
-    Tables.istable(table) || throw(ArgumentError("Provided input is not Tables.jl compatible."))
 
     chunks = Vector{Dagger.EagerThunk}()
 
@@ -201,4 +200,9 @@ function show(io::IO, ::MIME"text/plain", d::DTable)
     println(io, "DTable with $(length(d.chunks)) partitions")
     print(io, "Tabletype: $tabletype")
     nothing
+end
+
+function length(table::DTable)
+    f = x -> length(Tables.rows(x))
+    sum(fetch.([Dagger.@spawn f(c) for c in table.chunks]))
 end
