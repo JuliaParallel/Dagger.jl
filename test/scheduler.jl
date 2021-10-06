@@ -166,12 +166,15 @@ end
             @test collect(Context(), b) == FakeVal(57)
         end
         @everywhere Dagger.delete_processor_callback!(:fakeproc)
+        @test_skip "procutil"
+        #=
         @testset "procutil" begin
             opts = ThunkOptions(;procutil=Dict(Dagger.ThreadProc=>0.25))
             as = [delayed(checkpressure; options=opts)(i) for i in 1:30]
             b = delayed(checkpressure)(as...)
             collect(b)
         end
+        =#
         @testset "allow errors" begin
             opts = ThunkOptions(;allow_errors=true)
             a = delayed(error; options=opts)("Test")
