@@ -239,6 +239,8 @@ end
             end
         end
 
+        @test_skip "Remove workers"
+        #=
         @testset "Remove workers" begin
             ps = []
             try
@@ -274,6 +276,7 @@ end
                 wait(rmprocs(ps))
             end
         end
+        =#
 
         @testset "Remove all workers throws" begin
             ps = []
