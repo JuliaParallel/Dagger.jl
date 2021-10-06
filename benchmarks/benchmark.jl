@@ -280,7 +280,7 @@ function main()
         push!(d3r, LinePlot(:core, :loadavg, "CPU Load Average", "Average Running Threads"))
         push!(d3r, LinePlot(:core, :bytes, "Allocated Bytes", "Bytes"))
         push!(d3r, LinePlot(:core, :mem, "Available Memory", "% Free"))
-        push!(d3r, GraphPlot(:core, :id, :timeline, :profile, "DAG"))
+        #push!(d3r, GraphPlot(:core, :id, :timeline, :profile, "DAG"))
         push!(lw.creation_handlers, d3r)
         push!(lw.deletion_handlers, d3r)
         ml.aggregators[:logwindow] = lw
