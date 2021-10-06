@@ -209,11 +209,10 @@ using MemPool
 @testset "affinity" begin
     x = Dagger.tochunk([1:10;])
     aff = Dagger.affinity(x)
-    @test length(aff) == 1
-    @test aff[1][1] == Dagger.OSProc(myid())
-    @test aff[1][2] == sizeof(Int)*10
+    @test aff[1] == Dagger.OSProc(myid())
+    @test aff[2] == sizeof(Int)*10
     @test Dagger.tochunk(x) === x
-    f = MemPool.FileRef("/tmp/d", aff[1][2])
+    f = MemPool.FileRef("/tmp/d", aff[2])
     aff = Dagger.affinity(f)
     #@test length(aff) == 3
     @test (aff[1][1]).pid in procs()

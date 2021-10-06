@@ -1,40 +1,8 @@
 import .Luxor: Drawing, finish, Point, background, sethue, fontsize, rect, text
 
-getname(p::Dagger.OSProc) = "OS Process on worker $(p.pid)"
-getname(p::Dagger.ThreadProc) = "Thread $(p.tid) on worker $(p.owner)"
-getname(p) = sprint(Base.show, p)
-
-function proclt(p1::T, p2::R) where {T,R}
-    if p1.owner != p2.owner
-        return p1.owner < p2.owner
-    else
-        return repr(T) < repr(R)
-    end
-end
-function proclt(p1::T, p2::T) where {T}
-    if p1.owner != p2.owner
-        return p1.owner < p2.owner
-    else
-        for field in fieldnames(T)
-            f1 = getfield(p1, field)
-            f2 = getfield(p2, field)
-            if f1 != f2
-                return f1 < f2
-            end
-        end
-    end
-    false
-end
-proclt(p1::Dagger.OSProc, p2::Dagger.OSProc) = p1.pid < p2.pid
-proclt(p1::Dagger.OSProc, p2) = p1.pid < p2.owner
-proclt(p1, p2::Dagger.OSProc) = p1.owner < p2.pid
-
 prof_to_svg(::Any, ::Any, ::Any; kwargs...) = nothing
 
 combine_gantt_images(::Any, ::Any, ::Any, ::Any) = ("", "")
-
-continue_rendering = Ref{Bool}(true)
-render_results = Channel()
 
 function draw_gantt(ctx, svg_path, prof_path; delay=2, width=1000, height=640, window_length=20)
     root_time = time_ns()
@@ -60,49 +28,16 @@ function draw_gantt(ctx, svg_path, prof_path; delay=2, width=1000, height=640, w
     while continue_rendering[]
         sleep(delay)
         logs = Dagger.get_logs!(ctx.log_sink, true) # get raw events
-        if !isempty(logs)
-            for id in keys(logs)
-                append!(window_logs, map(x->(x,), filter(x->x.category==:compute, logs[id])))
-            end
-        end
-        for idx in length(window_logs):-1:1
-            log = window_logs[idx]
-            if length(log) == 2
-                # Clear out finished events older than window start
-                log_finish_s = (log[2].timestamp-root_time)/(1000^3)
-                if log_finish_s < window_start
-                    @debug "Gantt: Deleted event"
-                    deleteat!(window_logs, idx)
-                end
-            elseif log[1] isa Dagger.Event{:finish}
-                # Pair finish events with start events
-                sidx = findfirst(x->length(x) == 1 &&
-                                    x[1] isa Dagger.Event{:start} &&
-                                    x[1].id==log[1].id, window_logs)
-                if sidx === nothing
-                    @debug "Gantt: Removed unpaired finish"
-                    deleteat!(window_logs, idx)
-                    continue
-                end
-                window_logs[sidx] = (window_logs[sidx][1], log[1])
-                @debug "Gantt: Paired event"
-                deleteat!(window_logs, idx)
-            end
-        end
+        update_window_logs!(window_logs, logs; root_time=root_time, window_start=window_start)
         isempty(window_logs) && continue
 
         # Concatenate and render profile data
         if ctx.profile
-            prof_data = UInt64[]
-            prof_dict = Dict{UInt64, Vector{Base.StackTraces.StackFrame}}()
-            for log in filter(x->length(x)==2, window_logs)
-                append!(prof_data, log[2].profiler_samples.samples)
-                merge!(prof_dict, log[2].profiler_samples.lineinfo)
-            end
-            prof_to_svg(prof_path, prof_data, prof_dict, image_idx; width=width)
+            prof_data, prof_lidict = logs_to_stackframes(window_logs)
+            prof_to_svg(prof_path, prof_data, prof_lidict, image_idx; width=width)
         end
 
-        for proc in unique(map(x->x[1].timeline[2], window_logs))
+        for proc in unique(map(x->x[1].timeline[2], filter(x->x[1].category==:compute, window_logs)))
             push!(procs, proc)
         end
         colors = Colors.distinguishable_colors(length(procs))
@@ -125,7 +60,7 @@ function draw_gantt(ctx, svg_path, prof_path; delay=2, width=1000, height=640, w
             text("$(window_start) s", Point(0,ypos); halign=:left)
             text("$(window_finish) s", Point(width-8,ypos); halign=:right)
             proc_color = colors[proc_idx]
-            for log in filter(x->x[1].timeline[2]==proc, window_logs)
+            for log in filter(x->x[1].timeline[2]==proc, filter(x->x[1].category==:compute, window_logs))
                 length(log) == 1 && log[1] isa Dagger.Event{:finish} && error("Unpaired finish!")
                 log_start_s = (log[1].timestamp-root_time)/(1000^3)
                 log_finish_s = if length(log) == 2
@@ -139,6 +74,18 @@ function draw_gantt(ctx, svg_path, prof_path; delay=2, width=1000, height=640, w
                 rect(Point(xstart,ypos+(proc_height/3)+1),xfinish-xstart,proc_height-2,:fill)
                 sethue("black")
                 rect(Point(xstart,ypos+(proc_height/3)+1),xfinish-xstart,proc_height-2,:stroke)
+            end
+            for log in filter(x->x[1].category==:scheduler_init, window_logs)
+                log_start_s = (log[1].timestamp-root_time)/(1000^3)
+                log_finish_s = if length(log) == 2
+                    log_finish_s = (log[2].timestamp-root_time)/(1000^3)
+                else
+                    window_finish+1
+                end
+                xstart = ((log_start_s-window_start)/(window_finish-window_start))*width
+                xfinish = ((log_finish_s-window_start)/(window_finish-window_start))*width
+                sethue("red")
+                rect(Point(xstart,0),#=xfinish-xstart=#1,height)
             end
         end
         finish()
