@@ -59,6 +59,7 @@ include("table/gdtable.jl")
 include("table/tables.jl")
 include("table/operations.jl")
 include("table/groupby.jl")
+include("table/join.jl")
 
 include("lib/logging-extras.jl")
 
