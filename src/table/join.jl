@@ -46,9 +46,9 @@ function _leftjoin(l, r, l_ind::NTuple{N1,Int}, r_ind::NTuple{N1,Int}, r_new_ind
     end
 
     @inbounds for o in Tables.rows(l)
-        test = false
+        cmp = false
         for i in Tables.rows(r)
-            test = compare_rows(o, i, l_ind, r_ind)
+            cmp = compare_rows(o, i, l_ind, r_ind)
             if test
                 for j in 1:N2
                     push!(collectors[j], Tables.getcolumn(i, r_new_ind[j]))
@@ -56,7 +56,7 @@ function _leftjoin(l, r, l_ind::NTuple{N1,Int}, r_ind::NTuple{N1,Int}, r_new_ind
                 break
             end
         end
-        if !test
+        if !cmp
             @inbounds for j in 1:N2
                 push!(collectors[j], missing)
             end
