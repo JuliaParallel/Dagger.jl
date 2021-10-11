@@ -131,23 +131,14 @@ function distinct_partitions(chunk, f::Function)
     rows = Tables.rows(chunk)
     keyval = f(iterate(rows)[1])
 
-
     _distinct_partitions_iterate(chunk, f, keyval)
-    # # consider putting this loop in another function
-    # for row in rows
-    #     key = f(row)
-    #     v = get!(acc, key, Vector{eltype(rows)}())
-    #     push!(v, row)
-    # end
-    
-    # Vector{Pair{typeof(keyval), Chunk}}([x => Dagger.tochunk(Tables.columntable(acc[x])) for x in collect(keys(acc))])
 end
 
 function _distinct_partitions_iterate(chunk, f, keyval::T) where T
     rows = Tables.rows(chunk)
     acc = Dict{T, Vector{eltype(rows)}}()
 
-    @inline for row in rows
+    for row in rows
         key = convert(T, f(row))
         v = get!(acc, key, Vector{eltype(rows)}())
         push!(v, row)
