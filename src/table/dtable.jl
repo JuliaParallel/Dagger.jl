@@ -28,26 +28,21 @@ DTable(chunks::Vector{Dagger.EagerThunk}, args...) = DTable(VTYPE(chunks), args.
 DTable(chunks::Vector{Dagger.Chunk}, args...) = DTable(VTYPE(chunks), args...)
 
 """
-    DTable(table) -> DTable
+    DTable(table; tabletype=nothing) -> DTable
 
 Constructs a `DTable` using a `Tables.jl` compatible `table` input.
 Calls `Tables.partitions` on the `table` and assumes the provided partitioning.
 """
-function DTable(table)
-    # Constructor with Tables partitions usage - bases the partitioning on it
-
-    chunks = Vector{Dagger.EagerThunk}()
-
-    iter = Tables.partitions(table)
-    i = iterate(iter)
-    while !isnothing(i)
-        p, state = i
-        c = Dagger.spawn(Tables.materializer(p), p)
-        push!(chunks, c)
-        i = iterate(iter, state)
+function DTable(table; tabletype=nothing)
+    chunks = Vector{Dagger.Chunk}()
+    type = nothing
+    sink = Tables.materializer(tabletype !== nothing ? tabletype() : partition)
+    for partition in Tables.partitions(table)
+        tpart = sink(partition)
+        push!(chunks, Dagger.tochunk(tpart))
+        isnothing(type) && (type = typeof(tpart).name.wrapper;)
     end
-
-    return DTable(chunks, nothing)
+    return DTable(chunks, type)
 end
 
 
@@ -61,26 +56,16 @@ argument to partition the table (based on row count).
 Providing `tabletype` kwarg overrides the internal table partition type.
 """
 function DTable(table, chunksize::Integer; tabletype=nothing)
-    if !Tables.istable(table)
-        throw(ArgumentError("Provided input is not Tables.jl compatible."))
-    end
-
-    parts = Tables.partitions(TableOperations.makepartitions(table, chunksize))
-    sink = Tables.materializer(tabletype !== nothing ? tabletype() : table)
-
     chunks = Vector{Dagger.Chunk}()
-    sizehint!(chunks, length(parts))
-
     type = nothing
-
-    for p in parts
-        tpart = sink(p)
-        push!(chunks, Dagger.tochunk(tpart))
-        if type === nothing
-            type = typeof(tpart).name.wrapper
+    sink = Tables.materializer(tabletype !== nothing ? tabletype() : table)
+    for outer_partition in Tables.partitions(table)
+        for inner_partition in Tables.partitions(TableOperations.makepartitions(outer_partition, chunksize))
+            tpart = sink(inner_partition)
+            push!(chunks, Dagger.tochunk(tpart))
+            isnothing(type) && (type = typeof(tpart).name.wrapper;)
         end
     end
-
     return DTable(chunks, type)
 end
 
