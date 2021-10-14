@@ -86,20 +86,25 @@ julia> d = DTable((a=shuffle(repeat('a':'d', inner=4, outer=4)),b=repeat(1:4, 16
 DTable with 16 partitions
 Tabletype: NamedTuple
 
-julia> Dagger.groupby(d, row -> row.a + row.b)
+julia> function group_fun(row)
+           row.a + row.b
+       end
+group_fun (generic function with 1 method)
+
+julia> Dagger.groupby(d, group_fun)
 GDTable with 7 partitions and 7 keys
 Tabletype: NamedTuple
-Grouped by: custom function
+Grouped by: group_fun
 
 julia> Dagger.groupby(d, row -> row.a + row.b, chunksize=3)
 GDTable with 25 partitions and 7 keys
 Tabletype: NamedTuple
-Grouped by: custom function
+Grouped by: group_fun
 
 julia> Dagger.groupby(d, row -> row.a + row.b, merge=false)
 GDTable with 52 partitions and 7 keys
 Tabletype: NamedTuple
-Grouped by: custom function
+Grouped by: group_fun
 ```
 """
 groupby(d::DTable, f::Function; merge=true, chunksize=0) = _groupby(d, f, nothing, merge, chunksize)
@@ -116,7 +121,7 @@ function _groupby(
     merge::Bool,
     chunksize::Int)
 
-    grouping_function = isnothing(cols) ? nothing : row_function
+    grouping_function = isnothing(cols) ? row_function : nothing 
 
     v = [Dagger.@spawn distinct_partitions(c, row_function) for c in d.chunks]
 

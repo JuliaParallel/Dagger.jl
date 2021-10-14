@@ -191,7 +191,7 @@ Grouped by: [:a, :b]
 julia> Dagger.groupby(d, row -> row.a + row.b)
 GDTable with 7 partitions and 7 keys
 Tabletype: NamedTuple
-Grouped by: custom function
+Grouped by: #5
 
 julia> g = Dagger.groupby(d, :a); keys(g)
 KeySet for a Dict{Char, Vector{UInt64}} with 4 entries. Keys:
