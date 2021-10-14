@@ -1,7 +1,7 @@
 """
-    groupby(d::DTable, col::Symbol; merge=true, chunksize=0)
+    groupby(d::DTable, col::Symbol; merge=true, chunksize=0) -> GDTable
 
-Groups the `d` by distinct values of column `col`.
+Groups `d` by distinct values of column `col`.
 
 The process of grouping can be affected by providing kwargs `merge` and `chunksize`.
 By default all the chunks belonging to a single key will be merged into a single partition.
@@ -77,7 +77,7 @@ end
 """
     groupby(d::DTable, f::Function; merge=true, chunksize=0)
 
-Groups the `d` by distinct values of keys created by applying `f` to a row.
+Groups `d` by the distinct set of keys created by applying `f` to each row in `d`.
 
 For kwargs usage details see `groupby(d::DTable, col::Symbol)`
 

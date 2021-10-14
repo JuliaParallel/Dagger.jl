@@ -4,7 +4,7 @@ import Base: keys, iterate, length, getindex
     GDTable
 
 Structure representing a grouped `DTable`.
-It wraps over a DTable object and provides additional information on how the `GDTable` is grouped.
+It wraps over a `DTable` object and provides additional information on how the table is grouped.
 To represent the grouping a `cols` field is used, which contains the column symbols used for
 grouping and an `index`, which allows to effectively lookup the partitions grouped under a single key.
 """
@@ -28,9 +28,9 @@ In case grouping on a function was performed a `:KEYS` symbol will be returned.
 grouped_cols(gd::GDTable) = gd.cols === nothing ? [:KEYS] : gd.cols
 
 """
-    keys(gd::GDTable)
+    keys(gd::GDTable) -> KeySet
 
-Returns the keys by which the `gd` is grouped by.
+Returns the keys that `gd` is grouped by.
 """
 keys(gd::GDTable) = keys(gd.index)
 
@@ -63,7 +63,7 @@ end
 """
     trim!(gd::GDTable) -> GDTable
 
-Removes empty chunks from `gd` and empty keys from its index.
+Removes empty chunks from `gd` and unused keys from its index.
 """
 function trim!(gd::GDTable)
     d = gd.dtable
@@ -142,7 +142,7 @@ end
 Retrieves a `DTable` from `gdt` with rows belonging to the provided grouping key.
 """
 function getindex(gdt::GDTable, key)
-    key ∉ keys(gdt) && throw(KeyError("Key $key not present in the GDTable"))
+    key ∉ keys(gdt) && throw(KeyError(key))
     # TODO: try to resolve more forms of key even if it doesn't exactly match the key in the dict
     partition(gdt, key)
 end

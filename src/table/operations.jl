@@ -42,7 +42,7 @@ end
 """
     map(f, gd::GDTable) -> GDTable
 
-Applies `f` to each row of `d`.
+Applies `f` to each row of `gd`.
 The applied function needs to return a `Tables.Row` compatible object (e.g. `NamedTuple`).
 
 # Examples
@@ -134,7 +134,7 @@ function reduce(f, d::DTable; cols=nothing::Union{Nothing, Vector{Symbol}}, init
 end
 
 """
-    reduce(f, gd::GDTable; cols=nothing, [init]) -> NamedTuple
+    reduce(f, gd::GDTable; cols=nothing, [init]) -> EagerThunk -> NamedTuple
 
 Reduces `gd` using function `f` applied on all columns of the DTable.
 Returns results per group in columns with prefix `result_*`.
@@ -198,8 +198,7 @@ end
 """
     filter(f, gd::GDTable) -> GDTable
 
-Filter 'gd' using 'f'.
-Returns a filtered `GDTable` that can be processed further.
+Filter 'gd' using 'f', returning a filtered `GDTable`.
 Calling `trim!` on a filtered `GDTable` will clean up the empty keys and partitions.
 
 # Examples

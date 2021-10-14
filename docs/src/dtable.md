@@ -171,7 +171,7 @@ also an option to provide a custom function returning a key, which is applied pe
 
 The set of keys the `GDTable` is grouped by can be obtained using
 the `keys(gd::GDTable)` function. To get a fragment of the `GDTable` containing
-records belonging under a single keythe `getindex(gd::GDTable, key)` function can be used.
+records belonging under a single key the `getindex(gd::GDTable, key)` function can be used.
 
 ```julia
 julia> d = DTable((a=shuffle(repeat('a':'d', inner=4, outer=4)),b=repeat(1:4, 16)), 4)
