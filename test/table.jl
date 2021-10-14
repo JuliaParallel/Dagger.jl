@@ -306,6 +306,7 @@ using Random
             chunks = getindex.(Ref(m.dtable.chunks), chunk_indices)
             parts = Dagger._retrieve.(chunks)
             @test all([all((key + 3) .== p.result) for p in parts])
+            @test all(fetch(m[key]).a .== key)
         end
 
         r = reduce(*, g)

@@ -12,9 +12,14 @@ mutable struct GDTable
     dtable::DTable
     cols::Union{Vector{Symbol}, Nothing}
     index::Dict
+    grouping_function::Union{Function, Nothing}
 
-    GDTable(dtable, cols, index) = new(dtable, cols, deepcopy(index))
+    GDTable(dtable, cols, index) = GDTable(dtable, cols, index, nothing)
+    GDTable(dtable, cols, index, grouping_function) =
+        new(dtable, cols, deepcopy(index), grouping_function)
 end
+
+DTable(gd::GDTable) = DTable(gd.dtable.chunks, gd.dtable.tabletype)
 
 fetch(gd::GDTable) = fetch(gd.dtable)
 fetch(gd::GDTable, sink) = fetch(gd.dtable, sink)
@@ -40,18 +45,10 @@ partition(gd::GDTable, indices::Vector{UInt}) = DTable(getindex.(Ref(gd.dtable.c
 length(gd::GDTable) = length(keys(gd.index))
 
 
-function iterate(gd::GDTable)
-    it = iterate(gd.index)
-    if it !== nothing
-        ((key, partition_indices), state) = it
-        return key => partition(gd, partition_indices), state
-    end
-    return nothing
-end
+iterate(gd::GDTable) = _iterate(gd, iterate(gd.index))
+iterate(gd::GDTable, state) = _iterate(gd, iterate(gd.index, state))
 
-
-function iterate(gd::GDTable, state)
-    it = iterate(gd.index, state)
+function _iterate(gd::GDTable, it)
     if it !== nothing
         ((key, partition_indices), state) = it
         return key => partition(gd, partition_indices), state
@@ -100,7 +97,7 @@ end
 
 Returns `gd` with empty chunks and keys removed.
 """
-trim(gd::GDTable) = trim!(GDTable(DTable(gd.dtable.chunks, gd.dtable.tabletype), gd.cols, gd.index))
+trim(gd::GDTable) = trim!(GDTable(DTable(gd), gd.cols, gd.index))
 
 
 """
@@ -129,7 +126,7 @@ show(io::IO, gd::GDTable) = show(io, MIME"text/plain"(), gd)
 
 function show(io::IO, ::MIME"text/plain", gd::GDTable)
     tabletype = isnothing(gd.dtable.tabletype) ? "unknown (use `tabletype!(::GDTable)`)" : gd.dtable.tabletype
-    grouped_by_cols = isnothing(gd.cols) ? "custom function" : grouped_cols(gd)
+    grouped_by_cols = isnothing(gd.cols) ? string(gd.grouping_function) : grouped_cols(gd)
     println(io, "GDTable with $(length(gd.dtable.chunks)) partitions and $(length(keys(gd.index))) keys")
     println(io, "Tabletype: $tabletype")
     print(io, "Grouped by: $grouped_by_cols")
@@ -142,7 +139,7 @@ end
 Retrieves a `DTable` from `gdt` with rows belonging to the provided grouping key.
 """
 function getindex(gdt::GDTable, key)
-    key ∉ keys(gdt) && throw(KeyError(key))
-    # TODO: try to resolve more forms of key even if it doesn't exactly match the key in the dict
-    partition(gdt, key)
+    ck = convert(keytype(gdt.index), key)
+    ck ∉ keys(gdt) && throw(KeyError(ck))
+    partition(gdt, ck)
 end

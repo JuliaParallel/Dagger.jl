@@ -116,10 +116,12 @@ function _groupby(
     merge::Bool,
     chunksize::Int)
 
+    grouping_function = isnothing(cols) ? nothing : row_function
+
     v = [Dagger.@spawn distinct_partitions(c, row_function) for c in d.chunks]
 
     index, chunks = fetch(Dagger.@spawn build_groupby_index(merge, chunksize, tabletype(d), v...))
-    GDTable(DTable(VTYPE(chunks), d.tabletype), cols, index)
+    GDTable(DTable(VTYPE(chunks), d.tabletype), cols, index, grouping_function)
 end
 
 """
