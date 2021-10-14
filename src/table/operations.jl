@@ -134,10 +134,10 @@ function reduce(f, d::DTable; cols=nothing::Union{Nothing, Vector{Symbol}}, init
 end
 
 """
-    reduce(f, gd::GDTable; cols=nothing, [init]) -> EagerThunk -> NamedTuple
+    reduce(f, gd::GDTable; cols=nothing, prefix="result_" [init]) -> EagerThunk -> NamedTuple
 
 Reduces `gd` using function `f` applied on all columns of the DTable.
-Returns results per group in columns with prefix `result_*`.
+Returns results per group in columns with names prefixed with the `prefix` kwarg.
 For more information on kwargs see `reduce(f, d::DTable)`
 
 # Examples
@@ -151,11 +151,17 @@ julia> fetch(reduce(*, g))
 (a = ['a', 'c', 'd', 'b'], result_a = ["aa", "cc", "dd", "bb"], result_b = [2, 30, 56, 12])
 ```
 """
-function reduce(f, gd::GDTable; cols=nothing::Union{Nothing, Vector{Symbol}}, init=Base._InitialValue())
+function reduce(
+    f,
+    gd::GDTable;
+    cols=nothing::Union{Nothing, Vector{Symbol}},
+    prefix::String="result_",
+    init=Base._InitialValue())
+
     construct_result = (_keys, _results...) -> begin
         result_cols = keys(first(_results))
         k = [col => getindex.(_keys, i) for (i, col) in enumerate(grouped_cols(gd))]
-        r = [Symbol("result_" * string(r)) => collect(getindex.(_results, r)) for r in result_cols]
+        r = [Symbol(prefix * string(r)) => collect(getindex.(_results, r)) for r in result_cols]
         (;k...,r...)
     end
     Dagger.@spawn construct_result(keys(gd), [reduce(f, d[2]; cols=cols, init=deepcopy(init)) for d in gd]...)
