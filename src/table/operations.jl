@@ -38,6 +38,34 @@ function map(f, d::DTable)
     DTable(chunks, d.tabletype)
 end
 
+
+"""
+    map(f, gd::GDTable) -> GDTable
+
+Applies `f` to each row of `gd`.
+The applied function needs to return a `Tables.Row` compatible object (e.g. `NamedTuple`).
+
+# Examples
+```julia
+julia> g = Dagger.groupby(DTable((a=repeat('a':'c', inner=2),b=1:6), 2), :a)
+GDTable with 3 partitions and 3 keys
+Tabletype: NamedTuple
+Grouped by: [:a]
+
+julia> m = map(r -> (a = r.a, b = r.b, c = r.a + r.b), g)
+GDTable with 3 partitions and 3 keys
+Tabletype: NamedTuple
+Grouped by: [:a]
+
+julia> fetch(m)
+(a = ['a', 'a', 'c', 'c', 'b', 'b'], b = [1, 2, 5, 6, 3, 4], c = ['b', 'c', 'h', 'i', 'e', 'f'])
+```
+"""
+function map(f, gd::GDTable)
+    d = map(f, gd.dtable)
+    GDTable(d, gd.cols, gd.index)
+end
+
 """
     reduce(f, d::DTable; cols=nothing, [init]) -> NamedTuple
 
@@ -74,11 +102,11 @@ function reduce(f, d::DTable; cols=nothing::Union{Nothing, Vector{Symbol}}, init
     else
         return Dagger.@spawn NamedTuple()
     end
-    col_in_chunk_reduce = (_f, _c, _init, _chunk) -> reduce(_f, Tables.getcolumn(_chunk, _c); init=deepcopy(_init))
+    col_in_chunk_reduce = (_f, _c, _init, _chunk) -> reduce(_f, Tables.getcolumn(_chunk, _c); init=_init)
 
     chunk_reduce = (_f, _chunk, _cols, _init) -> begin
         # TODO: potential speedup enabled by commented code below by reducing the columns in parallel
-        v = [col_in_chunk_reduce(_f, c, _init, _chunk) for c in _cols]
+        v = [col_in_chunk_reduce(_f, c, deepcopy(_init), _chunk) for c in _cols]
         (; zip(_cols, v)...)
 
         # TODO: uncomment and define a good threshold for parallelization when this get's resolved
@@ -105,7 +133,39 @@ function reduce(f, d::DTable; cols=nothing::Union{Nothing, Vector{Symbol}}, init
     Dagger.@spawn construct_result(columns, reduce_chunks...)
 end
 
+"""
+    reduce(f, gd::GDTable; cols=nothing, prefix="result_" [init]) -> EagerThunk -> NamedTuple
 
+Reduces `gd` using function `f` applied on all columns of the DTable.
+Returns results per group in columns with names prefixed with the `prefix` kwarg.
+For more information on kwargs see `reduce(f, d::DTable)`
+
+# Examples
+```julia
+julia> g = Dagger.groupby(DTable((a=repeat('a':'d', inner=2),b=1:8), 2), :a)
+GDTable with 4 partitions and 4 keys
+Tabletype: NamedTuple
+Grouped by: [:a]
+
+julia> fetch(reduce(*, g))
+(a = ['a', 'c', 'd', 'b'], result_a = ["aa", "cc", "dd", "bb"], result_b = [2, 30, 56, 12])
+```
+"""
+function reduce(
+    f,
+    gd::GDTable;
+    cols=nothing::Union{Nothing, Vector{Symbol}},
+    prefix::String="result_",
+    init=Base._InitialValue())
+
+    construct_result = (_keys, _results...) -> begin
+        result_cols = keys(first(_results))
+        k = [col => getindex.(_keys, i) for (i, col) in enumerate(grouped_cols(gd))]
+        r = [Symbol(prefix * string(r)) => collect(getindex.(_results, r)) for r in result_cols]
+        (;k...,r...)
+    end
+    Dagger.@spawn construct_result(keys(gd), [reduce(f, d[2]; cols=cols, init=deepcopy(init)) for d in gd]...)
+end
 
 """
     filter(f, d::DTable) -> DTable
@@ -138,4 +198,37 @@ function filter(f, d::DTable)
         Tables.materializer(_chunk)(m)
     end
     DTable(map(c -> Dagger.spawn(chunk_wrap, c, f), d.chunks), d.tabletype)
+end
+
+
+"""
+    filter(f, gd::GDTable) -> GDTable
+
+Filter 'gd' using 'f', returning a filtered `GDTable`.
+Calling `trim!` on a filtered `GDTable` will clean up the empty keys and partitions.
+
+# Examples
+```julia
+julia> g = Dagger.groupby(DTable((a=repeat('a':'d', inner=2),b=1:8), 2), :a)
+GDTable with 4 partitions and 4 keys
+Tabletype: NamedTuple
+Grouped by: [:a]
+
+julia> f = filter(x -> x.a ∈ ['a', 'b'], g)
+GDTable with 4 partitions and 4 keys
+Tabletype: NamedTuple
+Grouped by: [:a]
+
+julia> fetch(f)
+(a = ['a', 'a', 'b', 'b'], b = [1, 2, 3, 4])
+
+julia> trim!(f)
+GDTable with 2 partitions and 2 keys
+Tabletype: NamedTuple
+Grouped by: [:a]
+```
+"""
+function filter(f, gd::GDTable)
+    d = filter(f, gd.dtable)
+    GDTable(d, gd.cols, gd.index)
 end

@@ -1,6 +1,7 @@
 using DataFrames
 using Arrow
 using CSV
+using Random
 
 @testset "dtable" begin
     @testset "constructors - Tables.jl compatibility (NamedTuple)" begin
@@ -209,5 +210,120 @@ using CSV
         # empty dtable case
         dt = DTable((a = [], b = []), 10)
         @test tabletype(dt) == NamedTuple # fallback in case it can't be found
+    end
+
+    @testset "dtable groupby basic" begin
+        rng = MersenneTwister(2137)
+        charset = collect('a':'d')
+        cs1 = shuffle(rng, repeat(charset, inner=4, outer=4))
+        cs2 = shuffle(rng, repeat(charset, inner=4, outer=4))
+
+        kwargs_set = [
+            (;)
+            (chunksize=1,)
+            (merge=false,)
+            (chunksize=8,)
+            (chunksize=16,)
+            (chunksize=20,)
+        ]
+
+        ######################################################
+        # single col groupby
+        d = DTable((a=cs1,), 4)
+
+        for kwargs in kwargs_set
+            g = Dagger.groupby(d, :a; kwargs...)
+            c = Dagger._retrieve.(g.dtable.chunks)
+            @test all([all(t.a[1] .== t.a) for t in c])
+            @test all(getindex.(getproperty.(c, :a), 1) .∈ Ref(charset))
+            @test sort(collect(fetch(d).a)) == sort(collect(fetch(g).a))
+        end
+
+        ######################################################
+        # multi col groupby
+        d = DTable((a=cs1, b=cs2), 4) 
+
+        for kwargs in kwargs_set
+            g = Dagger.groupby(d, [:a, :b]; kwargs...)
+            c = Dagger._retrieve.(g.dtable.chunks)
+            @test all([all(t.a[1] .== t.a) for t in c])
+            @test all([all(t.b[1] .== t.b) for t in c])
+            @test all(getindex.(getproperty.(c, :a), 1) .∈ Ref(charset))
+            @test all(getindex.(getproperty.(c, :a), 1) .∈ Ref(charset))
+            fd = fetch(d)
+            fg = fetch(g)
+            @test sort(collect(fd.a)) == sort(collect(fg.a))
+            @test sort(collect(fd.b)) == sort(collect(fg.b))
+        end
+
+        ######################################################
+        # function groupby
+        intset = collect(10:29)
+        is1 = shuffle(rng, repeat(intset, 4))
+        d = DTable((a=is1,), 4)
+
+        f1 = x -> x.a % 10
+        f2 = x -> x % 10
+        for kwargs in kwargs_set
+            g = Dagger.groupby(d, f1)
+            c = Dagger._retrieve.(g.dtable.chunks)
+            @test all([all(f2(t.a[1]) .== f2.(t.a)) for t in c])
+            @test all(getindex.(getproperty.(c, :a), 1) .∈ Ref(intset))
+            @test sort(collect(fetch(d).a)) == sort(collect(fetch(g).a))
+        end
+    end
+
+    @testset "dtable groupby index check" begin
+        rng = MersenneTwister(2137)
+        charset = collect('a':'d')
+        cs1 = shuffle(rng, repeat(charset, inner=4, outer=4))
+
+        d = DTable((a=cs1,), 4)
+        g = Dagger.groupby(d, :a)
+
+        for key in keys(g.index)
+            chunk_indices = g.index[key]
+            chunks = getindex.(Ref(g.dtable.chunks), chunk_indices)
+            parts = Dagger._retrieve.(chunks)
+
+            @test all([all(key .== p.a) for p in parts])
+        end
+    end
+
+    @testset "dtable groupby ops" begin
+        rng = MersenneTwister(2137)
+        charset = collect('a':'d')
+        cs1 = shuffle(rng, repeat(charset, inner=4, outer=4))
+        is1 = [3 for _ in 1:length(cs1)]
+
+        d = DTable((a=cs1, b=is1), 4)
+        g = Dagger.groupby(d, :a, chunksize=4)
+
+        m = map(x -> (a = x.a, result = x.a + x.b), g)
+
+        for key in keys(m.index)
+            chunk_indices = m.index[key]
+            chunks = getindex.(Ref(m.dtable.chunks), chunk_indices)
+            parts = Dagger._retrieve.(chunks)
+            @test all([all((key + 3) .== p.result) for p in parts])
+            @test all(fetch(m[key]).a .== key)
+        end
+
+        r = reduce(*, g)
+        fr = fetch(r)
+
+        for (i, key) in enumerate(fr.a)
+            @test fr.result_a[i] == repeat(key, length(cs1) ÷ 4)
+            @test fr.result_b[i] == 3 ^ (length(cs1) ÷ 4)
+        end
+
+        f = filter(x -> x.a ∈ ['a', 'b'], g)
+        @test ['c', 'd'] ∉ fetch(f).a
+
+        t = trim(f)
+        @test ['c', 'd'] ∉ collect(keys(t.index))
+
+        trim!(f)
+        @test ['c', 'd'] ∉ collect(keys(f.index))
     end
 end
