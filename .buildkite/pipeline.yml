@@ -5,7 +5,6 @@
     sandbox.jl: "true"
 steps:
   - label: Julia 1.6
-    command: julia --project -e 'using Pkg; Pkg.build(); Pkg.test()'
     timeout_in_minutes: 60
     <<: *test
     plugins:
@@ -16,11 +15,6 @@ steps:
       # - JuliaCI/julia-coverage#v1:
       #     codecov: true
   - label: Julia nightly
-    command: |
-      mkdir /tmp/julia
-      curl https://julialangnightlies-s3.julialang.org/bin/linux/x64/julia-latest-linux64.tar.gz | tar -C /tmp/julia --strip-components=1 -zxf -
-      /tmp/julia/bin/julia --project -e 'using InteractiveUtils; versioninfo()'
-      /tmp/julia/bin/julia --project -e 'using Pkg; Pkg.build(); Pkg.test()'
     timeout_in_minutes: 60
     <<: *test
     plugins:
