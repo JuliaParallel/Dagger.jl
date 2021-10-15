@@ -3,8 +3,6 @@
   agents:
     queue: "julia"
     sandbox.jl: "true"
-  env:
-    JULIA_NUM_THREADS: 1
 steps:
   - label: Julia 1.6
     command: julia --project -e 'using Pkg; Pkg.build(); Pkg.test()'
@@ -14,6 +12,7 @@ steps:
       - JuliaCI/julia#v1:
           version: "1.6"
       - JuliaCI/julia-test#v1:
+          julia_args: "--threads=1"
       # - JuliaCI/julia-coverage#v1:
       #     codecov: true
   - label: Julia nightly
@@ -28,6 +27,7 @@ steps:
       - JuliaCI/julia#v1:
           version: "1.6-nightly"
       - JuliaCI/julia-test#v1:
+          julia_args: "--threads=1"
       # - JuliaCI/julia-coverage#v1:
       #     codecov: true
   - label: Benchmarks
