@@ -1,32 +1,27 @@
 .test: &test
   if: build.env("DAGGER_BENCHMARK") != "true"
   agents:
-    queue: "juliacpu"
-  env:
-    JULIA_NUM_THREADS: 1
+    queue: "julia"
+    sandbox.jl: "true"
 steps:
   - label: Julia 1.6
-    command: julia --project -e 'using Pkg; Pkg.build(); Pkg.test()'
     timeout_in_minutes: 60
     <<: *test
     plugins:
       - JuliaCI/julia#v1:
           version: "1.6"
       - JuliaCI/julia-test#v1:
+          julia_args: "--threads=1"
       # - JuliaCI/julia-coverage#v1:
       #     codecov: true
   - label: Julia nightly
-    command: |
-      mkdir /tmp/julia
-      curl https://julialangnightlies-s3.julialang.org/bin/linux/x64/julia-latest-linux64.tar.gz | tar -C /tmp/julia --strip-components=1 -zxf -
-      /tmp/julia/bin/julia --project -e 'using InteractiveUtils; versioninfo()'
-      /tmp/julia/bin/julia --project -e 'using Pkg; Pkg.build(); Pkg.test()'
     timeout_in_minutes: 60
     <<: *test
     plugins:
       - JuliaCI/julia#v1:
           version: "1.6-nightly"
       - JuliaCI/julia-test#v1:
+          julia_args: "--threads=1"
       # - JuliaCI/julia-coverage#v1:
       #     codecov: true
   - label: Benchmarks
