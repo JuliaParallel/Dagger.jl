@@ -1,7 +1,8 @@
 .test: &test
   if: build.env("DAGGER_BENCHMARK") != "true"
   agents:
-    queue: "juliacpu"
+    queue: "julia"
+    sandbox.jl: "true"
   env:
     JULIA_NUM_THREADS: 1
 steps:
