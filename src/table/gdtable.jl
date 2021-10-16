@@ -40,7 +40,7 @@ Returns the keys that `gd` is grouped by.
 keys(gd::GDTable) = keys(gd.index)
 
 partition(gd::GDTable, key) = partition(gd, gd.index[key])
-partition(gd::GDTable, indices::Vector{UInt}) = DTable(getindex.(Ref(gd.dtable.chunks), indices), gd.dtable.tabletype)
+partition(gd::GDTable, indices::Vector{UInt}) = DTable(VTYPE(getindex.(Ref(gd.dtable.chunks), indices)), gd.dtable.tabletype)
 
 length(gd::GDTable) = length(keys(gd.index))
 
