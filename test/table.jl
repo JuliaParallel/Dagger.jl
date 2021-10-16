@@ -232,7 +232,6 @@ using Random
         d = DTable((a=cs1,), 4)
 
         for kwargs in kwargs_set
-            println("iter")
             g = Dagger.groupby(d, :a; kwargs...)
             c = Dagger._retrieve.(g.dtable.chunks)
             @test all([all(t.a[1] .== t.a) for t in c])
