@@ -360,5 +360,19 @@ using TableOperations
         @test length(Tables.rows(d1)) == 100
         @test length(Tables.columns(d1)) == 2
         @test length(Tables.partitions(d1)) == 10
+
+        # GDTable things
+
+        g = Dagger.groupby(d1, r -> r.a % 10, chunksize=3)
+        t1 = Tables.columntable(Tables.rows(g))
+        @test 1:100 == sort(t1.a) == sort(t1.b)
+        t2 = collect(Tables.columns(g))
+        @test 1:100 == sort(t2[1]) == sort(t2.b)
+
+        for partition in Tables.partitions(g)
+            @test partition isa DTable
+            v = Tables.getcolumn(partition, :a)[1]
+            @test all([el%10 == v%10 for el in Tables.getcolumn(partition, :a)])
+        end
     end
 end

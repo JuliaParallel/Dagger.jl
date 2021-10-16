@@ -154,12 +154,6 @@ end
 
 Tables.partitions(table::GDTable) = GDTablePartitionIterator(table)
 
-function iterate(table::GDTablePartitionIterator)
-    it = iterate(table.d.dtable)
-    it === nothing ? nothing : (it[1][2], it[2])
-end
-
-function iterate(table::GDTablePartitionIterator, state)
-    it = iterate(table.d.dtable, state)
-    it === nothing ? nothing : (it[1][2], it[2])
-end
+iterate(table::GDTablePartitionIterator) = _iterate(table, iterate(table.d))
+iterate(table::GDTablePartitionIterator, state) = _iterate(table, iterate(table.d, state))
+_iterate(table::GDTablePartitionIterator, it) = it === nothing ? nothing : (it[1][2], it[2])
