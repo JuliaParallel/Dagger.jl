@@ -125,8 +125,8 @@ show(io::IO, gd::GDTable) = show(io, MIME"text/plain"(), gd)
 
 
 function show(io::IO, ::MIME"text/plain", gd::GDTable)
-    tabletype = isnothing(gd.dtable.tabletype) ? "unknown (use `tabletype!(::GDTable)`)" : gd.dtable.tabletype
-    grouped_by_cols = isnothing(gd.cols) ? string(gd.grouping_function) : grouped_cols(gd)
+    tabletype = gd.dtable.tabletype === nothing ? "unknown (use `tabletype!(::GDTable)`)" : gd.dtable.tabletype
+    grouped_by_cols = gd.cols === nothing ? string(gd.grouping_function) : grouped_cols(gd)
     println(io, "GDTable with $(length(gd.dtable.chunks)) partitions and $(length(keys(gd.index))) keys")
     println(io, "Tabletype: $tabletype")
     print(io, "Grouped by: $grouped_by_cols")

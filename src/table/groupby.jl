@@ -121,7 +121,7 @@ function _groupby(
     merge::Bool,
     chunksize::Int)
 
-    grouping_function = isnothing(cols) ? row_function : nothing 
+    grouping_function = cols === nothing ? row_function : nothing 
 
     spawner = (_dchunks, _row_function) -> Vector{EagerThunk}([Dagger.@spawn distinct_partitions(c, _row_function) for c in _dchunks])
 
