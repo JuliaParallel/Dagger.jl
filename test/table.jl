@@ -367,7 +367,7 @@ using TableOperations
         t1 = Tables.columntable(Tables.rows(g))
         @test 1:100 == sort(t1.a) == sort(t1.b)
         t2 = collect(Tables.columns(g))
-        @test 1:100 == sort(t2[1]) == sort(t2.b)
+        @test 1:100 == sort(t2[1]) == sort(t2[2])
 
         for partition in Tables.partitions(g)
             @test partition isa DTable
