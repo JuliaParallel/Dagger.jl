@@ -21,7 +21,7 @@ end
 Tables.istable(table::DTable) = true
 Tables.rowaccess(table::DTable) = true
 Tables.rows(table::DTable) = DTableRowIterator(table)
-Tables.columnaccess(table::DTable) = false
+Tables.columnaccess(table::DTable) = true
 Tables.columns(table::DTable) = DTableColumnIterator(table)
 
 
@@ -126,3 +126,40 @@ end
 
 
 Base.iterate(table::DTablePartitionIterator, state) = iterate(table; idx=state)
+
+
+
+#######################################
+# GDTable
+# For normal rows/columns access it should act the same as a DTable
+
+Tables.istable(table::GDTable) = true
+Tables.rowaccess(table::GDTable) = true
+Tables.rows(table::GDTable) = DTableRowIterator(table.dtable)
+Tables.columnaccess(table::GDTable) = true
+Tables.columns(table::GDTable) = DTableColumnIterator(table.dtable)
+Tables.schema(table::GDTable) = Tables.schema(table.dtable)
+Tables.getcolumn(table::GDTable, col::Symbol) = Tables.getcolumn(table.dtable, col)
+Tables.getcolumn(table::GDTable, idx::Int) = Tables.getcolumn(table.dtable, idx)
+Tables.columnnames(table::GDTable) = Tables.columnnames(table.dtable) 
+
+#######################################
+# GDTable partitions
+# Here it makes sense to provide partitions as full key groups
+# Same as normal iteration over GDTable, but returns partitions only without keys
+
+struct GDTablePartitionIterator
+    d::GDTable
+end
+
+Tables.partitions(table::GDTable) = GDTablePartitionIterator(table)
+
+function iterate(table::GDTablePartitionIterator)
+    it = iterate(table.d.dtable)
+    it === nothing ? nothing : (it[1][2], it[2])
+end
+
+function iterate(table::GDTablePartitionIterator, state)
+    it = iterate(table.d.dtable, state)
+    it === nothing ? nothing : (it[1][2], it[2])
+end
