@@ -40,7 +40,7 @@ Returns the keys that `gd` is grouped by.
 keys(gd::GDTable) = keys(gd.index)
 
 partition(gd::GDTable, key) = partition(gd, gd.index[key])
-partition(gd::GDTable, indices::Vector{UInt}) = DTable(getindex.(Ref(gd.dtable.chunks), indices), gd.dtable.tabletype)
+partition(gd::GDTable, indices::Vector{UInt}) = DTable(VTYPE(getindex.(Ref(gd.dtable.chunks), indices)), gd.dtable.tabletype)
 
 length(gd::GDTable) = length(keys(gd.index))
 
@@ -125,8 +125,8 @@ show(io::IO, gd::GDTable) = show(io, MIME"text/plain"(), gd)
 
 
 function show(io::IO, ::MIME"text/plain", gd::GDTable)
-    tabletype = isnothing(gd.dtable.tabletype) ? "unknown (use `tabletype!(::GDTable)`)" : gd.dtable.tabletype
-    grouped_by_cols = isnothing(gd.cols) ? string(gd.grouping_function) : grouped_cols(gd)
+    tabletype = gd.dtable.tabletype === nothing ? "unknown (use `tabletype!(::GDTable)`)" : gd.dtable.tabletype
+    grouped_by_cols = gd.cols === nothing ? string(gd.grouping_function) : grouped_cols(gd)
     println(io, "GDTable with $(length(gd.dtable.chunks)) partitions and $(length(keys(gd.index))) keys")
     println(io, "Tabletype: $tabletype")
     print(io, "Grouped by: $grouped_by_cols")

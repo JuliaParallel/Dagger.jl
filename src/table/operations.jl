@@ -98,7 +98,7 @@ julia> fetch(r2)
 function reduce(f, d::DTable; cols=nothing::Union{Nothing, Vector{Symbol}}, init=Base._InitialValue())
     # TODO replace this with checking the colnames in schema, once schema handling gets introduced
     if length(d.chunks) > 0
-        columns = isnothing(cols) ? Tables.columnnames(Tables.columns(_retrieve(d.chunks[1]))) : cols
+        columns = cols === nothing ? Tables.columnnames(Tables.columns(_retrieve(d.chunks[1]))) : cols
     else
         return Dagger.@spawn NamedTuple()
     end
@@ -121,20 +121,21 @@ function reduce(f, d::DTable; cols=nothing::Union{Nothing, Vector{Symbol}}, init
         # end
         # (; zip(_cols, v)...)
     end
-    chunk_reduce_results = [Dagger.@spawn chunk_reduce(f, c, columns, deepcopy(init)) for c in d.chunks]
+    chunk_reduce_spawner = (_d, _f, _columns, _init) -> [Dagger.@spawn chunk_reduce(_f, c, _columns, _init) for c in _d.chunks]
+    chunk_reduce_results = Dagger.@spawn chunk_reduce_spawner(d, f, columns, init)
 
-    construct_single_column = (_col, _chunk_results...) -> getindex.(_chunk_results, _col)
-    result_columns = [Dagger.@spawn construct_single_column(c, chunk_reduce_results...) for c in columns]
+    construct_single_column = (_col, _chunk_results) -> getindex.(fetch.(_chunk_results), _col)
+    result_columns = [Dagger.@spawn construct_single_column(c, chunk_reduce_results) for c in columns]
 
     reduce_result_column = (_f, _c, _init) -> reduce(_f, _c; init=_init)
     reduce_chunks = [Dagger.@spawn reduce_result_column(f, c, deepcopy(init)) for c in result_columns]
 
-    construct_result = (_cols, _vals...) -> (; zip(_cols, _vals)...)
-    Dagger.@spawn construct_result(columns, reduce_chunks...)
+    construct_result = (_cols, _vals) -> (; zip(_cols, fetch.(_vals))...)
+    Dagger.@spawn construct_result(columns, reduce_chunks)
 end
 
 """
-    reduce(f, gd::GDTable; cols=nothing, prefix="result_" [init]) -> EagerThunk -> NamedTuple
+    reduce(f, gd::GDTable; cols=nothing, prefix="result_", [init]) -> EagerThunk -> NamedTuple
 
 Reduces `gd` using function `f` applied on all columns of the DTable.
 Returns results per group in columns with names prefixed with the `prefix` kwarg.
@@ -158,13 +159,18 @@ function reduce(
     prefix::String="result_",
     init=Base._InitialValue())
 
-    construct_result = (_keys, _results...) -> begin
+    construct_result = (_keys, _results) -> begin
+        _results = fetch.(_results)
         result_cols = keys(first(_results))
         k = [col => getindex.(_keys, i) for (i, col) in enumerate(grouped_cols(gd))]
         r = [Symbol(prefix * string(r)) => collect(getindex.(_results, r)) for r in result_cols]
         (;k...,r...)
     end
-    Dagger.@spawn construct_result(keys(gd), [reduce(f, d[2]; cols=cols, init=deepcopy(init)) for d in gd]...)
+
+    spawner = (_f, _cols, _init, _gd) -> Vector{EagerThunk}([reduce(_f, d[2]; cols=_cols, init=deepcopy(_init)) for d in _gd])
+
+    v = Dagger.@spawn spawner(f, cols, init, gd)
+    Dagger.@spawn construct_result(keys(gd), v)
 end
 
 """

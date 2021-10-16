@@ -171,7 +171,7 @@ trim(d::DTable) = trim!(DTable(d.chunks, d.tabletype))
 show(io::IO, d::DTable) = show(io, MIME"text/plain"(), d)
 
 function show(io::IO, ::MIME"text/plain", d::DTable)
-    tabletype = isnothing(d.tabletype) ? "unknown (use `tabletype!(::DTable)`)" : d.tabletype
+    tabletype = d.tabletype === nothing ? "unknown (use `tabletype!(::DTable)`)" : d.tabletype
     println(io, "DTable with $(length(d.chunks)) partitions")
     print(io, "Tabletype: $tabletype")
     nothing
