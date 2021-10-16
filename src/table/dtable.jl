@@ -40,7 +40,7 @@ function DTable(table; tabletype=nothing)
     for partition in Tables.partitions(table)
         tpart = sink(partition)
         push!(chunks, Dagger.tochunk(tpart))
-        isnothing(type) && (type = typeof(tpart).name.wrapper;)
+        type === nothing && (type = typeof(tpart).name.wrapper;)
     end
     return DTable(chunks, type)
 end
@@ -63,7 +63,7 @@ function DTable(table, chunksize::Integer; tabletype=nothing)
         for inner_partition in Tables.partitions(TableOperations.makepartitions(outer_partition, chunksize))
             tpart = sink(inner_partition)
             push!(chunks, Dagger.tochunk(tpart))
-            isnothing(type) && (type = typeof(tpart).name.wrapper;)
+            type === nothing && (type = typeof(tpart).name.wrapper;)
         end
     end
     return DTable(chunks, type)

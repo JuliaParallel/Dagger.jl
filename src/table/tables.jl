@@ -26,7 +26,7 @@ Tables.columns(table::DTable) = DTableColumnIterator(table)
 
 
 function Tables.schema(table::DTable)
-    if !isnothing(table.schema)
+    if table.schema !== nothing
         return table.schema
     end
     # Figure out schema
@@ -47,7 +47,7 @@ end
 
 function Tables.columnnames(table::DTable)
     s = Tables.schema(table)
-    isnothing(s) ? nothing : s.names
+    s === nothing ? nothing : s.names
 end
 
 
@@ -73,20 +73,20 @@ length(table::DTableRowIterator) = length(table.d)
 function Base.iterate(iter::DTableRowIterator; c_idx=0)
     r = nothing
     i = nothing
-    while isnothing(r) && c_idx < length(iter.d.chunks)
+    while r === nothing && c_idx < length(iter.d.chunks)
         c_idx += 1 
         p = _retrieve(iter.d.chunks[c_idx])
         i = Tables.rows(p)
         r = iterate(i)
     end
-    isnothing(r) ? nothing : (r[1], (i, r[2], c_idx))
+    r === nothing ? nothing : (r[1], (i, r[2], c_idx))
 end
 
 
 function Base.iterate(iter::DTableRowIterator, state)
     (i, i_state, c_idx) = state
     r = iterate(i, i_state)
-    !isnothing(r) && return (r[1], (i, r[2], c_idx))
+    r !== nothing && return (r[1], (i, r[2], c_idx))
     iterate(iter, c_idx=c_idx)
 end
 
@@ -104,7 +104,7 @@ length(table::DTableColumnIterator) = length(Tables.columnnames(table))
 
 function Base.iterate(table::DTableColumnIterator; idx=1)
     columns = Tables.columnnames(table)
-    (isnothing(columns) || length(columns) < idx) && return nothing
+    (columns === nothing || length(columns) < idx) && return nothing
     (Tables.getcolumn(table, idx), idx + 1)
 end
 
