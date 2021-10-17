@@ -30,8 +30,8 @@ DTable(chunks::Vector{Dagger.Chunk}, args...) = DTable(VTYPE(chunks), args...)
 """
     DTable(table; tabletype=nothing) -> DTable
 
-Constructs a `DTable` using a `Tables.jl` compatible `table` input.
-Calls `Tables.partitions` on the `table` and assumes the provided partitioning.
+Constructs a `DTable` using a `Tables.jl`-compatible input `table`.
+Calls `Tables.partitions` on `table` and assumes the provided partitioning.
 """
 function DTable(table; tabletype=nothing)
     chunks = Vector{Dagger.Chunk}()
@@ -40,7 +40,9 @@ function DTable(table; tabletype=nothing)
     for partition in Tables.partitions(table)
         tpart = sink(partition)
         push!(chunks, Dagger.tochunk(tpart))
-        type === nothing && (type = typeof(tpart).name.wrapper;)
+        if type === nothing
+            type = typeof(tpart).name.wrapper
+        end
     end
     return DTable(chunks, type)
 end
@@ -63,7 +65,9 @@ function DTable(table, chunksize::Integer; tabletype=nothing)
         for inner_partition in Tables.partitions(TableOperations.makepartitions(outer_partition, chunksize))
             tpart = sink(inner_partition)
             push!(chunks, Dagger.tochunk(tpart))
-            type === nothing && (type = typeof(tpart).name.wrapper;)
+            if type === nothing
+                type = typeof(tpart).name.wrapper
+            end
         end
     end
     return DTable(chunks, type)
