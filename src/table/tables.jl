@@ -70,24 +70,35 @@ Tables.getcolumn(table::DTable, idx::Int) = _getcolumn(table, idx)
 Tables.schema(table::DTableRowIterator) = Tables.schema(table.d)
 length(table::DTableRowIterator) = length(table.d)
 
-function Base.iterate(iter::DTableRowIterator; c_idx=0)
-    r = nothing
+function _iterate(iter::DTableRowIterator, chunk_index)
     i = nothing
-    while r === nothing && c_idx < length(iter.d.chunks)
-        c_idx += 1 
-        p = _retrieve(iter.d.chunks[c_idx])
-        i = Tables.rows(p)
-        r = iterate(i)
+    row_iterator = nothing
+    while i === nothing && chunk_index <= length(iter.d.chunks)
+        partition = _retrieve(iter.d.chunks[chunk_index])
+        row_iterator = Tables.rows(partition)
+        i = iterate(row_iterator)
+        chunk_index += 1
     end
-    r === nothing ? nothing : (r[1], (i, r[2], c_idx))
+    if i === nothing 
+        return nothing
+    else
+        row, row_state = i
+        next_chunk_index = chunk_index
+        return (row, (row_iterator, row_state, next_chunk_index))
+    end
 end
 
+Base.iterate(iter::DTableRowIterator) = _iterate(iter, 1)
 
 function Base.iterate(iter::DTableRowIterator, state)
-    (i, i_state, c_idx) = state
-    r = iterate(i, i_state)
-    r !== nothing && return (r[1], (i, r[2], c_idx))
-    iterate(iter, c_idx=c_idx)
+    (row_iterator, row_state, next_chunk_index) = state
+    i = iterate(row_iterator, row_state)
+    if i === nothing 
+        _iterate(iter, next_chunk_index)
+    else
+        row, row_state = i
+        return (row, (row_iterator, row_state, next_chunk_index))
+    end
 end
 
 
@@ -101,15 +112,17 @@ Tables.getcolumn(table::DTableColumnIterator, col::Symbol) = Tables.getcolumn(ta
 Tables.getcolumn(table::DTableColumnIterator, idx::Int) = Tables.getcolumn(table.d, idx)
 length(table::DTableColumnIterator) = length(Tables.columnnames(table))
 
-
-function Base.iterate(table::DTableColumnIterator; idx=1)
+function _iterate(table::DTableColumnIterator, column_index)
     columns = Tables.columnnames(table)
-    (columns === nothing || length(columns) < idx) && return nothing
-    (Tables.getcolumn(table, idx), idx + 1)
+    if (columns === nothing || length(columns) < column_index)
+        return nothing
+    else
+        return (Tables.getcolumn(table, column_index), column_index + 1)
+    end
 end
 
-
-Base.iterate(table::DTableColumnIterator, state) = iterate(table; idx=state)
+Base.iterate(table::DTableColumnIterator) = _iterate(table, 1)
+Base.iterate(table::DTableColumnIterator, state) = _iterate(table, state)
 
 
 
@@ -119,13 +132,13 @@ Base.iterate(table::DTableColumnIterator, state) = iterate(table; idx=state)
 Tables.partitions(table::DTable) = DTablePartitionIterator(table)
 length(table::DTablePartitionIterator) = length(table.d.chunks)
 
-function Base.iterate(table::DTablePartitionIterator; idx=1)
-    length(table.d.chunks) < idx && return nothing
-    (_retrieve(table.d.chunks[idx]), idx + 1)
+function _iterate(table::DTablePartitionIterator, chunk_index)
+    length(table.d.chunks) < chunk_index && return nothing
+    (_retrieve(table.d.chunks[chunk_index]), chunk_index + 1)
 end
 
-
-Base.iterate(table::DTablePartitionIterator, state) = iterate(table; idx=state)
+Base.iterate(table::DTablePartitionIterator) = _iterate(table, 1)
+Base.iterate(table::DTablePartitionIterator, state) = _iterate(table, state)
 
 
 
@@ -154,6 +167,14 @@ end
 
 Tables.partitions(table::GDTable) = GDTablePartitionIterator(table)
 
+function _iterate(table::GDTablePartitionIterator, it)
+    if it === nothing
+        return nothing
+    else
+        ((_, partition), index_iter_state) = it
+        return (partition, index_iter_state)
+    end
+end
+
 iterate(table::GDTablePartitionIterator) = _iterate(table, iterate(table.d))
-iterate(table::GDTablePartitionIterator, state) = _iterate(table, iterate(table.d, state))
-_iterate(table::GDTablePartitionIterator, it) = it === nothing ? nothing : (it[1][2], it[2])
+iterate(table::GDTablePartitionIterator, index_iter_state) = _iterate(table, iterate(table.d, index_iter_state))

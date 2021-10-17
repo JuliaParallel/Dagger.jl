@@ -46,12 +46,12 @@ length(gd::GDTable) = length(keys(gd.index))
 
 
 iterate(gd::GDTable) = _iterate(gd, iterate(gd.index))
-iterate(gd::GDTable, state) = _iterate(gd, iterate(gd.index, state))
+iterate(gd::GDTable, index_iter_state) = _iterate(gd, iterate(gd.index, index_iter_state))
 
 function _iterate(gd::GDTable, it)
     if it !== nothing
-        ((key, partition_indices), state) = it
-        return key => partition(gd, partition_indices), state
+        ((key, partition_indices), index_iter_state) = it
+        return key => partition(gd, partition_indices), index_iter_state
     end
     return nothing
 end
