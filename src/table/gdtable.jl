@@ -127,7 +127,7 @@ show(io::IO, gd::GDTable) = show(io, MIME"text/plain"(), gd)
 function show(io::IO, ::MIME"text/plain", gd::GDTable)
     tabletype = gd.dtable.tabletype === nothing ? "unknown (use `tabletype!(::GDTable)`)" : gd.dtable.tabletype
     grouped_by_cols = gd.cols === nothing ? string(gd.grouping_function) : grouped_cols(gd)
-    println(io, "GDTable with $(length(gd.dtable.chunks)) partitions and $(length(keys(gd.index))) keys")
+    println(io, "GDTable with $(nchunks(gd)) partitions and $(length(gd)) keys")
     println(io, "Tabletype: $tabletype")
     print(io, "Grouped by: $grouped_by_cols")
     nothing
@@ -143,3 +143,7 @@ function getindex(gdt::GDTable, key)
     ck ∉ keys(gdt) && throw(KeyError(ck))
     partition(gdt, ck)
 end
+
+_columnnames_svector(gd::GDTable) = _columnnames_svector(gd.dtable)
+
+@inline nchunks(gd::GDTable) = length(gd.dtable.chunks)

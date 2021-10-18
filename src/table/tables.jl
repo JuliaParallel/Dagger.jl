@@ -73,7 +73,7 @@ length(table::DTableRowIterator) = length(table.d)
 function _iterate(iter::DTableRowIterator, chunk_index)
     i = nothing
     row_iterator = nothing
-    while i === nothing && chunk_index <= length(iter.d.chunks)
+    while i === nothing && chunk_index <= nchunks(iter.d)
         partition = _retrieve(iter.d.chunks[chunk_index])
         row_iterator = Tables.rows(partition)
         i = iterate(row_iterator)
@@ -130,10 +130,10 @@ Base.iterate(table::DTableColumnIterator, state) = _iterate(table, state)
 # DTablePartitionIterator functions
 
 Tables.partitions(table::DTable) = DTablePartitionIterator(table)
-length(table::DTablePartitionIterator) = length(table.d.chunks)
+length(table::DTablePartitionIterator) = nchunks(table.d)
 
 function _iterate(table::DTablePartitionIterator, chunk_index)
-    length(table.d.chunks) < chunk_index && return nothing
+    nchunks(table.d) < chunk_index && return nothing
     (_retrieve(table.d.chunks[chunk_index]), chunk_index + 1)
 end
 

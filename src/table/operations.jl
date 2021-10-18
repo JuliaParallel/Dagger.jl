@@ -96,11 +96,10 @@ julia> fetch(r2)
 ```
 """
 function reduce(f, d::DTable; cols=nothing::Union{Nothing, Vector{Symbol}}, init=Base._InitialValue())
-    if length(d.chunks) > 0
-        columns = cols === nothing ? [c for c in Tables.columnnames(d)] : cols
-    else
-        return Dagger.@spawn NamedTuple()
-    end
+    # handle empty dtables
+    nchunks(d) == 0 && return Dagger.@spawn NamedTuple()
+
+    columns = cols === nothing ? _columnnames_svector(d) : cols
 
     chunk_reduce_results = _reduce_chunks(f, d.chunks, columns, init=init)
 
@@ -136,7 +135,7 @@ function _reduce_chunks(f, chunks::Vector{Union{EagerThunk, Chunk}}, columns::Ve
         # (; zip(_cols, v)...)
     end
     chunk_reduce_spawner = (_d, _f, _columns, _init) -> [Dagger.@spawn chunk_reduce(_f, c, _columns, _init) for c in _d]
-    chunk_reduce_results = Dagger.@spawn chunk_reduce_spawner(chunks, f, columns, init)
+    Dagger.@spawn chunk_reduce_spawner(chunks, f, columns, init)
 end
 
 """
@@ -164,11 +163,10 @@ function reduce(
     prefix::String="result_",
     init=Base._InitialValue())
 
-    if length(gd.dtable.chunks) > 0
-        columns = cols === nothing ? [c for c in Tables.columnnames(d)] : cols
-    else
-        return Dagger.@spawn NamedTuple()
-    end
+    # handle empty dtables
+    nchunks(gd) == 0 && return Dagger.@spawn NamedTuple()
+
+    columns = cols === nothing ? _columnnames_svector(gd) : cols
 
     chunk_reduce_results = _reduce_chunks(f, gd.dtable.chunks, columns, init=init)
 
@@ -179,12 +177,13 @@ function reduce(
     end
     result_columns = [Dagger.@spawn construct_single_column(c, chunk_reduce_results, gd.index, f, init) for c in columns]
 
-    construct_result = (_keys, _columns, _results, _prefix) -> begin
-        (;[col => getindex.(_keys, i) for (i, col) in enumerate(grouped_cols(gd))]...,
-        [Symbol(_prefix * string(r)) => fetch(_results[i]) for (i, r) in enumerate(_columns)]...)
+    construct_result = (_keys, _gcols, _columns, _results, _prefix) -> begin
+        ks = [col => getindex.(_keys, i) for (i, col) in enumerate(_gcols)]
+        rs = [Symbol(_prefix * string(r)) => fetch(_results[i]) for (i, r) in enumerate(_columns)]
+        (;ks...,rs...)
     end
 
-    Dagger.@spawn construct_result(keys(gd), columns, result_columns, prefix)
+    Dagger.@spawn construct_result(keys(gd), grouped_cols(gd), columns, result_columns, prefix)
 end
 
 """

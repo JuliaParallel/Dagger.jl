@@ -121,7 +121,7 @@ fetch(d::DTable, sink) = sink(_retrieve_partitions(d))
 
 function _retrieve_partitions(d::DTable)
     d2 = trim(d)
-    return length(d2.chunks) > 0 ?
+    return nchunks(d2) > 0 ?
         TableOperations.joinpartitions(Tables.partitioner(_retrieve, d2.chunks)) : NamedTuple()
 end
 
@@ -151,7 +151,7 @@ function resolve_tabletype(d::DTable)
     _type = c -> isnonempty(c) ? typeof(c).name.wrapper : nothing
     t = nothing
 
-    if length(d.chunks) > 0
+    if nchunks(d) > 0
         for chunk in d.chunks
             t = fetch(Dagger.@spawn _type(chunk))
             t !== nothing && break
@@ -186,7 +186,7 @@ show(io::IO, d::DTable) = show(io, MIME"text/plain"(), d)
 
 function show(io::IO, ::MIME"text/plain", d::DTable)
     tabletype = d.tabletype === nothing ? "unknown (use `tabletype!(::DTable)`)" : d.tabletype
-    println(io, "DTable with $(length(d.chunks)) partitions")
+    println(io, "DTable with $(nchunks(d)) partitions")
     print(io, "Tabletype: $tabletype")
     nothing
 end
@@ -195,3 +195,10 @@ function length(table::DTable)
     f = x -> length(Tables.rows(x))
     sum(fetch.([Dagger.@spawn f(c) for c in table.chunks]))
 end
+
+function _columnnames_svector(d::DTable)
+    colnames_tuple = Tables.columnnames(d)
+    colnames_tuple !== nothing ? [sym for sym in colnames_tuple] : nothing
+end
+
+@inline nchunks(d::DTable) = length(d.chunks)
