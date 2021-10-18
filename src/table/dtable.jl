@@ -1,7 +1,7 @@
 import Tables
 import TableOperations
 
-import Base: fetch, show
+import Base: fetch, show, length
 
 export DTable, tabletype, tabletype!, trim, trim!
 
@@ -19,11 +19,33 @@ the underlying partitions was applied to it (currently only `filter`).
 mutable struct DTable
     chunks::VTYPE
     tabletype
-    DTable(chunks::VTYPE, tabletype) = new(chunks, tabletype)
+    schema::Union{Nothing, Tables.Schema}
+    DTable(chunks::VTYPE, tabletype) = new(chunks, tabletype, nothing)
+    DTable(chunks::VTYPE, tabletype, schema) = new(chunks, tabletype, schema)
 end
 
 DTable(chunks::Vector{Dagger.EagerThunk}, args...) = DTable(VTYPE(chunks), args...)
 DTable(chunks::Vector{Dagger.Chunk}, args...) = DTable(VTYPE(chunks), args...)
+
+"""
+    DTable(table; tabletype=nothing) -> DTable
+
+Constructs a `DTable` using a `Tables.jl`-compatible input `table`.
+Calls `Tables.partitions` on `table` and assumes the provided partitioning.
+"""
+function DTable(table; tabletype=nothing)
+    chunks = Vector{Dagger.Chunk}()
+    type = nothing
+    sink = Tables.materializer(tabletype !== nothing ? tabletype() : partition)
+    for partition in Tables.partitions(table)
+        tpart = sink(partition)
+        push!(chunks, Dagger.tochunk(tpart))
+        if type === nothing
+            type = typeof(tpart).name.wrapper
+        end
+    end
+    return DTable(chunks, type)
+end
 
 
 """
@@ -36,26 +58,18 @@ argument to partition the table (based on row count).
 Providing `tabletype` kwarg overrides the internal table partition type.
 """
 function DTable(table, chunksize::Integer; tabletype=nothing)
-    if !Tables.istable(table)
-        throw(ArgumentError("Provided input is not Tables.jl compatible."))
-    end
-
-    parts = Tables.partitions(TableOperations.makepartitions(table, chunksize))
-    sink = Tables.materializer(tabletype !== nothing ? tabletype() : table)
-
     chunks = Vector{Dagger.Chunk}()
-    sizehint!(chunks, length(parts))
-
     type = nothing
-
-    for p in parts
-        tpart = sink(p)
-        push!(chunks, Dagger.tochunk(tpart))
-        if type === nothing
-            type = typeof(tpart).name.wrapper
+    sink = Tables.materializer(tabletype !== nothing ? tabletype() : table)
+    for outer_partition in Tables.partitions(table)
+        for inner_partition in Tables.partitions(TableOperations.makepartitions(outer_partition, chunksize))
+            tpart = sink(inner_partition)
+            push!(chunks, Dagger.tochunk(tpart))
+            if type === nothing
+                type = typeof(tpart).name.wrapper
+            end
         end
     end
-
     return DTable(chunks, type)
 end
 
@@ -175,4 +189,9 @@ function show(io::IO, ::MIME"text/plain", d::DTable)
     println(io, "DTable with $(length(d.chunks)) partitions")
     print(io, "Tabletype: $tabletype")
     nothing
+end
+
+function length(table::DTable)
+    f = x -> length(Tables.rows(x))
+    sum(fetch.([Dagger.@spawn f(c) for c in table.chunks]))
 end

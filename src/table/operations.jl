@@ -96,9 +96,8 @@ julia> fetch(r2)
 ```
 """
 function reduce(f, d::DTable; cols=nothing::Union{Nothing, Vector{Symbol}}, init=Base._InitialValue())
-    # TODO replace this with checking the colnames in schema, once schema handling gets introduced
     if length(d.chunks) > 0
-        columns = cols === nothing ? Tables.columnnames(Tables.columns(_retrieve(d.chunks[1]))) : cols
+        columns = cols === nothing ? Tables.columnnames(d) : cols
     else
         return Dagger.@spawn NamedTuple()
     end
