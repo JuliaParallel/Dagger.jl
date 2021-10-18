@@ -36,3 +36,5 @@ steps:
           image: julia:1.5.3
     artifacts:
       - benchmarks/TODO
+env:
+  SECRET_CODECOV_TOKEN: "Qf3rLPuAoxqx+3Qn57tqLuZHofhEdfNUFmziL5T1HoCHOH7k4ahTcs79+Lq/RjpTkkP5Y7uwzkh36CjWz2OwVkUJMW3tDmm72Sd+O/x2nakdgk/taXmZOGrqzpIvTPiVXFqBe7jR88efTifoJjJlLZlmwhkOaqvpOn315ySr1TFqogiLIm7y1e6O5RpwYa/go6TW9xu8f2fC/eZ7kCQ3P5boHMURdEScEdNDMsfLRadMYnJx3FqOQNhvWa2w7AzyAMFOPWcECFGoMy4M2mHsVZPzDBLmTn/dpwe7azVpONIUb0io97eiYayPEwtaDIdkzo0fZ6tC7EkYT/KZF1Bv4A==;U2FsdGVkX19+NCuIbapMw2c/W7xo4E7DBxBX0nNOdEn/PsIg/+8t61mTwfzgvjUAamtcfYYiFin/wGawEPEp7g=="
