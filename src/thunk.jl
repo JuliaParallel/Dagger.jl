@@ -58,7 +58,7 @@ mutable struct Thunk
     cache::Bool   # release the result giving the worker an opportunity to
                   # cache it
     cache_ref::Any
-    affinity::Union{Nothing, Vector{Pair{OSProc, Int}}}
+    affinity::Union{Nothing, Pair{OSProc, Int}}
     eager_ref::Union{DRef,Nothing}
     options::Any # stores scheduler-specific options
     function Thunk(f, xs...;
@@ -109,10 +109,9 @@ function affinity(t::Thunk)
            #    end
            #else
                 if isa(inp, Union{Chunk, Thunk})
-                    for a in affinity(inp)
-                        proc, sz = a
-                        aff[proc] = get(aff, proc, 0) + sz
-                    end
+                    # TODO if inp is a FileRef, affinity[1] will always be OSProc(1)
+                    proc, sz = affinity(inp)
+                    aff[proc] = get(aff, proc, 0) + sz
                 end
            #end
         end
