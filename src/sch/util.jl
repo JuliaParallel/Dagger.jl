@@ -194,7 +194,6 @@ function fetch_report(task)
         fetch(task)
     catch err
         @static if VERSION >= v"1.1"
-            # catch_stack renamed current_exceptions in 1.7: https://github.com/JuliaLang/julia/pull/29901
             @static if VERSION < v"1.7-rc1"
                 stk = Base.catch_stack(task)
             else
