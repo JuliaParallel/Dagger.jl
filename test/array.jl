@@ -215,8 +215,8 @@ using MemPool
     f = MemPool.FileRef("/tmp/d", aff[2])
     aff = Dagger.affinity(f)
     #@test length(aff) == 3
-    @test (aff[1][1]).pid in procs()
-    @test aff[1][2] == sizeof(Int)*10
+    @test (aff[1]).pid in procs()
+    @test aff[2] == sizeof(Int)*10
 end
 
 @testset "show_plan" begin
