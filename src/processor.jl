@@ -174,7 +174,11 @@ iscompatible_arg(proc::ThreadProc, opts, x) = true
             fetch(task)
         catch err
             @static if VERSION >= v"1.1"
-                stk = Base.catch_stack(task)
+                @static if VERSION < v"1.7-rc1"
+                    stk = Base.catch_stack(task)
+                else
+                    stk = Base.current_exceptions(task)
+                end
                 err, frames = stk[1]
                 rethrow(CapturedException(err, frames))
             else
@@ -195,7 +199,11 @@ else
             fetch(task)
         catch err
             @static if VERSION >= v"1.1"
-                stk = Base.catch_stack(task)
+                @static if VERSION < v"1.7-rc1"
+                    stk = Base.catch_stack(task)
+                else
+                    stk = Base.current_exceptions(task)
+                end
                 err, frames = stk[1]
                 rethrow(CapturedException(err, frames))
             else
