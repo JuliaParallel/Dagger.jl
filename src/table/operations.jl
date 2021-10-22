@@ -96,11 +96,25 @@ julia> fetch(r2)
 ```
 """
 function reduce(f, d::DTable; cols=nothing::Union{Nothing, Vector{Symbol}}, init=Base._InitialValue())
-    if length(d.chunks) > 0
-        columns = cols === nothing ? Tables.columnnames(d) : cols
-    else
-        return Dagger.@spawn NamedTuple()
-    end
+    # handle empty dtables
+    nchunks(d) == 0 && return Dagger.@spawn NamedTuple()
+
+    columns = cols === nothing ? _columnnames_svector(d) : cols
+
+    chunk_reduce_results = _reduce_chunks(f, d.chunks, columns, init=init)
+
+    construct_single_column = (_col, _chunk_results) -> getindex.(fetch.(_chunk_results), _col)
+    result_columns = [Dagger.@spawn construct_single_column(c, chunk_reduce_results) for c in columns]
+
+    reduce_result_column = (_f, _c, _init) -> reduce(_f, _c; init=_init)
+    reduce_chunks = [Dagger.@spawn reduce_result_column(f, c, deepcopy(init)) for c in result_columns]
+
+    construct_result = (_cols, _vals) -> (; zip(_cols, fetch.(_vals))...)
+    Dagger.@spawn construct_result(columns, reduce_chunks)
+end
+
+
+function _reduce_chunks(f, chunks::Vector{Union{EagerThunk, Chunk}}, columns::Vector{Symbol}; init=Base._InitialValue())
     col_in_chunk_reduce = (_f, _c, _init, _chunk) -> reduce(_f, Tables.getcolumn(_chunk, _c); init=_init)
 
     chunk_reduce = (_f, _chunk, _cols, _init) -> begin
@@ -120,17 +134,8 @@ function reduce(f, d::DTable; cols=nothing::Union{Nothing, Vector{Symbol}}, init
         # end
         # (; zip(_cols, v)...)
     end
-    chunk_reduce_spawner = (_d, _f, _columns, _init) -> [Dagger.@spawn chunk_reduce(_f, c, _columns, _init) for c in _d.chunks]
-    chunk_reduce_results = Dagger.@spawn chunk_reduce_spawner(d, f, columns, init)
-
-    construct_single_column = (_col, _chunk_results) -> getindex.(fetch.(_chunk_results), _col)
-    result_columns = [Dagger.@spawn construct_single_column(c, chunk_reduce_results) for c in columns]
-
-    reduce_result_column = (_f, _c, _init) -> reduce(_f, _c; init=_init)
-    reduce_chunks = [Dagger.@spawn reduce_result_column(f, c, deepcopy(init)) for c in result_columns]
-
-    construct_result = (_cols, _vals) -> (; zip(_cols, fetch.(_vals))...)
-    Dagger.@spawn construct_result(columns, reduce_chunks)
+    chunk_reduce_spawner = (_d, _f, _columns, _init) -> [Dagger.@spawn chunk_reduce(_f, c, _columns, _init) for c in _d]
+    Dagger.@spawn chunk_reduce_spawner(chunks, f, columns, init)
 end
 
 """
@@ -158,18 +163,27 @@ function reduce(
     prefix::String="result_",
     init=Base._InitialValue())
 
-    construct_result = (_keys, _results) -> begin
-        _results = fetch.(_results)
-        result_cols = keys(first(_results))
-        k = [col => getindex.(_keys, i) for (i, col) in enumerate(grouped_cols(gd))]
-        r = [Symbol(prefix * string(r)) => collect(getindex.(_results, r)) for r in result_cols]
-        (;k...,r...)
+    # handle empty dtables
+    nchunks(gd) == 0 && return Dagger.@spawn NamedTuple()
+
+    columns = cols === nothing ? _columnnames_svector(gd) : cols
+
+    chunk_reduce_results = _reduce_chunks(f, gd.dtable.chunks, columns, init=init)
+
+    reduce_result_column = (_f, _c, _init) -> reduce(_f, _c; init=deepcopy(_init))
+    construct_single_column = (_col, _chunk_results, _index, _f, _init) -> begin
+        r = getindex.(fetch.(_chunk_results), _col)
+        [reduce_result_column(_f, getindex.(Ref(r), chunk_indices), _init) for (_, chunk_indices) in _index]
+    end
+    result_columns = [Dagger.@spawn construct_single_column(c, chunk_reduce_results, gd.index, f, init) for c in columns]
+
+    construct_result = (_keys, _gcols, _columns, _results, _prefix) -> begin
+        ks = [col => getindex.(_keys, i) for (i, col) in enumerate(_gcols)]
+        rs = [Symbol(_prefix * string(r)) => fetch(_results[i]) for (i, r) in enumerate(_columns)]
+        (;ks...,rs...)
     end
 
-    spawner = (_f, _cols, _init, _gd) -> Vector{EagerThunk}([reduce(_f, d[2]; cols=_cols, init=deepcopy(_init)) for d in _gd])
-
-    v = Dagger.@spawn spawner(f, cols, init, gd)
-    Dagger.@spawn construct_result(keys(gd), v)
+    Dagger.@spawn construct_result(keys(gd), grouped_cols(gd), columns, result_columns, prefix)
 end
 
 """
