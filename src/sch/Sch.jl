@@ -229,6 +229,8 @@ const WORKER_MONITOR_LOCK = Threads.ReentrantLock()
 const WORKER_MONITOR_TASKS = Dict{Int,Task}()
 const WORKER_MONITOR_CHANS = Dict{Int,Dict{UInt64,RemoteChannel}}()
 function init_proc(state, p, log_sink)
+    ctx = Context(Int[]; log_sink)
+    timespan_start(ctx, :init_proc, p.pid, 0)
     # Initialize pressure and capacity
     gproc = OSProc(p.pid)
     lock(state.lock) do
@@ -283,11 +285,14 @@ function init_proc(state, p, log_sink)
     lock(state.lock) do
         state.worker_chans[p.pid] = (inp_chan, out_chan)
     end
+    timespan_finish(ctx, :init_proc, p.pid, 0)
 end
 function _cleanup_proc(uid, log_sink)
     empty!(CHUNK_CACHE) # FIXME: Should be keyed on uid!
 end
 function cleanup_proc(state, p, log_sink)
+    ctx = Context(Int[]; log_sink)
+    timespan_start(ctx, :cleanup_proc, p.pid, 0)
     lock(WORKER_MONITOR_LOCK) do
         wid = p.pid
         if haskey(WORKER_MONITOR_CHANS, wid)
@@ -295,6 +300,7 @@ function cleanup_proc(state, p, log_sink)
             remote_do(_cleanup_proc, wid, state.uid, log_sink)
         end
     end
+    timespan_finish(ctx, :cleanup_proc, p.pid, 0)
 end
 
 "Process-local condition variable (and lock) indicating task completion."
@@ -399,9 +405,11 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         @async while !isempty(state.ready) || !isempty(state.running)
             sleep(1)
             islocked(newtasks_lock) && return
+            timespan_start(ctx, :assign_procs, 0, 0)
             procs_state = lock(newtasks_lock) do
                 assign_new_procs!(ctx, state, procs_state)
             end
+            timespan_finish(ctx, :assign_procs, 0, 0)
         end
 
         isempty(state.running) && continue
@@ -422,9 +430,13 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
                     @warn "Worker $(pid) died, rescheduling work"
 
                     # Remove dead worker from procs list
+                    timespan_start(ctx, :remove_procs, 0, 0)
                     remove_dead_proc!(ctx, state, gproc)
+                    timespan_finish(ctx, :remove_procs, 0, 0)
 
+                    timespan_start(ctx, :handle_fault, 0, 0)
                     handle_fault(ctx, state, gproc)
+                    timespan_finish(ctx, :handle_fault, 0, 0)
                     return # effectively `continue`
                 else
                     if ctx.options.allow_errors || unwrap_weak_checked(state.thunk_dict[thunk_id]).options.allow_errors
@@ -461,6 +473,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
 
         safepoint(state)
     end
+    timespan_start(ctx, :scheduler_exit, 0, master)
     @assert !isready(state.chan)
     close(state.chan)
     notify(state.halt)
@@ -478,6 +491,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
             report_catch_error(err, "Scheduler checkpoint failed")
         end
     end
+    timespan_finish(ctx, :scheduler_exit, 0, master)
     value
 end
 

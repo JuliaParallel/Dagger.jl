@@ -4,6 +4,8 @@ import ..Dagger
 import ..Dagger: Event, Chunk
 import ..Dagger: init_similar
 
+import ..Tables
+
 """
     CoreMetrics
 
@@ -208,7 +210,33 @@ function (lw::LogWindow)(logs::Dict)
     end
 end
 
-creation_hook() = nothing
-deletion_hook() = nothing
+creation_hook(x, log) = nothing
+deletion_hook(x, idx) = nothing
+
+"""
+    TableStorage
+
+LogWindow-compatible aggregator which stores logs in a Tables.jl-compatible sink.
+"""
+struct TableStorage{T}
+    sink::T
+    function TableStorage(sink::T) where T
+        @assert Tables.istable(sink)
+        new{T}(sink)
+    end
+end
+init_similar(ts::TableStorage) = TableStorage(similar(ts.sink, 0))
+function creation_hook(ts::TableStorage, log)
+    try
+        push!(ts.sink, NamedTuple(log))
+    catch err
+        rethrow(err)
+    end
+end
+function Base.getindex(ts::TableStorage, ts_range::UnitRange)
+    ts_low, ts_high = ts_range.start, ts_range.stop
+    return filter(row->ts_low <= row.core.timestamp <= ts_high,
+                  Tables.rows(ts.sink)) |> Tables.materializer(ts.sink)
+end
 
 end # module Events
