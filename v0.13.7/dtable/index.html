@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Distributed Table · Dagger.jl</title><script data-outdated-warner src="../assets/warner.js"></script><link rel="canonical" href="https://JuliaParallel.github.io/Dagger.jl/dtable/"/><link href="https://cdnjs.cloudflare.com/ajax/libs/lato-font/3.0.0/css/lato-font.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/juliamono/0.039/juliamono-regular.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/fontawesome.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/solid.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/brands.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.13.11/katex.min.css" rel="stylesheet" type="text/css"/><script>documenterBaseURL=".."</script><script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js" data-main="../assets/documenter.js"></script><script src="../siteinfo.js"></script><script src="../../versions.js"></script><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/documenter-dark.css" data-theme-name="documenter-dark" data-theme-primary-dark/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/documenter-light.css" data-theme-name="documenter-light" data-theme-primary/><script src="../assets/themeswap.js"></script></head><body><div id="documenter"><nav class="docs-sidebar"><div class="docs-package-name"><span class="docs-autofit"><a href="../">Dagger.jl</a></span></div><form class="docs-search" action="../search/"><input class="docs-search-query" id="documenter-search-query" name="q" type="text" placeholder="Search docs"/></form><ul class="docs-menu"><li><a class="tocitem" href="../">Home</a></li><li><a class="tocitem" href="../processors/">Processors</a></li><li><a class="tocitem" href="../checkpointing/">Checkpointing</a></li><li><a class="tocitem" href="../scopes/">Scopes</a></li><li><a class="tocitem" href="../dynamic/">Dynamic Scheduler Control</a></li><li><a class="tocitem" href="../logging/">Logging and Graphing</a></li><li><a class="tocitem" href="../scheduler-visualization/">Scheduler Visualization</a></li><li><a class="tocitem" href="../benchmarking/">Benchmarking</a></li><li><a class="tocitem" href="../scheduler-internals/">Scheduler Internals</a></li><li class="is-active"><a class="tocitem" href>Distributed Table</a><ul class="internal"><li><a class="tocitem" href="#Creating-a-DTable"><span>Creating a <code>DTable</code></span></a></li><li><a class="tocitem" href="#Underlying-table-type"><span>Underlying table type</span></a></li><li class="toplevel"><a class="tocitem" href="#Table-operations"><span>Table operations</span></a></li><li class="toplevel"><a class="tocitem" href="#Dagger.groupby-interface"><span>Dagger.groupby interface</span></a></li><li><a class="tocitem" href="#GDTable-operations"><span>GDTable operations</span></a></li><li><a class="tocitem" href="#Iterating-over-a-GDTable"><span>Iterating over a GDTable</span></a></li><li class="toplevel"><a class="tocitem" href="#API"><span>API</span></a></li></ul></li><li><span class="tocitem">API</span><ul><li><a class="tocitem" href="../api/types/">Types</a></li><li><a class="tocitem" href="../api/functions/">Functions and Macros</a></li></ul></li></ul><div class="docs-version-selector field has-addons"><div class="control"><span class="docs-label button is-static is-size-7">Version</span></div><div class="docs-selector control is-expanded"><div class="select is-fullwidth is-size-7"><select id="documenter-version-selector"></select></div></div></div></nav><div class="docs-main"><header class="docs-navbar"><nav class="breadcrumb"><ul class="is-hidden-mobile"><li class="is-active"><a href>Distributed Table</a></li></ul><ul class="is-hidden-tablet"><li class="is-active"><a href>Distributed Table</a></li></ul></nav><div class="docs-right"><a class="docs-edit-link" href="https://github.com/JuliaParallel/Dagger.jl/blob/master/docs/src/dtable.md#L" title="Edit on GitHub"><span class="docs-icon fab"></span><span class="docs-label is-hidden-touch">Edit on GitHub</span></a><a class="docs-settings-button fas fa-cog" id="documenter-settings-button" href="#" title="Settings"></a><a class="docs-sidebar-button fa fa-bars is-hidden-desktop" id="documenter-sidebar-button" href="#"></a></div></header><article class="content" id="documenter-page"><h1 id="Distributed-table"><a class="docs-heading-anchor" href="#Distributed-table">Distributed table</a><a id="Distributed-table-1"></a><a class="docs-heading-anchor-permalink" href="#Distributed-table" title="Permalink"></a></h1><p>The <code>DTable</code>, or &quot;distributed table&quot;, is an abstraction layer on top of Dagger that allows loading table-like structures into a distributed environment.  The main idea is that a Tables.jl-compatible source provided by the user gets partitioned into several parts and stored as <code>Chunk</code>s.  These can then be distributed across worker processes by the scheduler as operations are performed on the containing <code>DTable</code>.</p><p>Operations performed on a <code>DTable</code> leverage the fact that the table is partitioned, and will try to apply functions per-partition first, afterwards merging the results if needed.</p><p>The distributed table is backed by Dagger&#39;s Eager API (<code>Dagger.@spawn</code> and <code>Dagger.spawn</code>).  To provide a familiar usage pattern you can call <code>fetch</code> on a <code>DTable</code> instance, which returns an in-memory instance of the underlying table type (such as a <code>DataFrame</code>, <code>TypedTable</code>, etc).</p><h2 id="Creating-a-DTable"><a class="docs-heading-anchor" href="#Creating-a-DTable">Creating a <code>DTable</code></a><a id="Creating-a-DTable-1"></a><a class="docs-heading-anchor-permalink" href="#Creating-a-DTable" title="Permalink"></a></h2><p>There are currently two ways of constructing a distributed table:</p><h3 id="Tables.jl-source"><a class="docs-heading-anchor" href="#Tables.jl-source">Tables.jl source</a><a id="Tables.jl-source-1"></a><a class="docs-heading-anchor-permalink" href="#Tables.jl-source" title="Permalink"></a></h3><p>Provide a <code>Tables.jl</code> compatible source, as well as a <code>chunksize</code>, which is the maximum number of rows of each partition:</p><pre><code class="language-julia hljs">julia&gt; using Dagger
+
+julia&gt; table = (a=[1, 2, 3, 4, 5], b=[6, 7, 8, 9, 10]);
+
+julia&gt; d = DTable(table, 2)
+DTable with 3 partitions
+Tabletype: NamedTuple
+
+julia&gt; fetch(d)
+(a = [1, 2, 3, 4, 5], b = [6, 7, 8, 9, 10])</code></pre><h3 id="Loader-function-and-file-list"><a class="docs-heading-anchor" href="#Loader-function-and-file-list">Loader function and file list</a><a id="Loader-function-and-file-list-1"></a><a class="docs-heading-anchor-permalink" href="#Loader-function-and-file-list" title="Permalink"></a></h3><p>Provide a <code>loader_function</code> and a list of filenames, which are parts of the full table:</p><pre><code class="language-julia hljs">julia&gt; using Dagger, CSV
+
+julia&gt; files = [&quot;1.csv&quot;, &quot;2.csv&quot;, &quot;3.csv&quot;];
+
+julia&gt; d = DTable(CSV.File, files)
+DTable with 3 partitions
+Tabletype: unknown (use `tabletype!(::DTable)`)
+
+julia&gt; tabletype(d)
+NamedTuple
+
+julia&gt; fetch(d)
+(a = [1, 2, 1, 2, 1, 2], b = [6, 7, 6, 7, 6, 7])</code></pre><h2 id="Underlying-table-type"><a class="docs-heading-anchor" href="#Underlying-table-type">Underlying table type</a><a id="Underlying-table-type-1"></a><a class="docs-heading-anchor-permalink" href="#Underlying-table-type" title="Permalink"></a></h2><p>The underlying type of the partition is, by default, of the type constructed by <code>Tables.materializer(source)</code>:</p><pre><code class="language-julia hljs">julia&gt; table = (a=[1, 2, 3, 4, 5], b=[6, 7, 8, 9, 10]);
+
+julia&gt; d = DTable(table, 2)
+DTable with 3 partitions
+Tabletype: NamedTuple
+
+julia&gt; fetch(d)
+(a = [1, 2, 3, 4, 5], b = [6, 7, 8, 9, 10])</code></pre><p>To override the underlying type you can provide a kwarg <code>tabletype</code> to the <code>DTable</code> constructor.  You can also choose which tabletype the <code>DTable</code> should be fetched into:</p><pre><code class="language-julia hljs">julia&gt; using DataFrames
+
+julia&gt; table = (a=[1, 2, 3, 4, 5], b=[6, 7, 8, 9, 10]);
+
+julia&gt; d = DTable(table, 2; tabletype=DataFrame)
+DTable with 3 partitions
+Tabletype: DataFrame
+
+julia&gt; fetch(d)
+5×2 DataFrame
+ Row │ a      b
+     │ Int64  Int64
+─────┼──────────────
+   1 │     1      6
+   2 │     2      7
+   3 │     3      8
+   4 │     4      9
+   5 │     5     10
+
+julia&gt; fetch(d, NamedTuple)
+(a = [1, 2, 3, 4, 5], b = [6, 7, 8, 9, 10])</code></pre><h1 id="Table-operations"><a class="docs-heading-anchor" href="#Table-operations">Table operations</a><a id="Table-operations-1"></a><a class="docs-heading-anchor-permalink" href="#Table-operations" title="Permalink"></a></h1><p><strong>Warning: this interface is experimental and may change at any time</strong></p><p>The current set of operations available consist of three simple functions: <code>map</code>, <code>filter</code> and <code>reduce</code>.</p><p>Below is an example of their usage.</p><p>For more information please refer to the API documentation and unit tests.</p><pre><code class="language-julia hljs">julia&gt; using Dagger
+
+julia&gt; d = DTable((k = repeat([&#39;a&#39;, &#39;b&#39;], 500), v = repeat(1:10, 100)), 100)
+DTable with 10 partitions
+Tabletype: NamedTuple
+
+julia&gt; using DataFrames
+
+julia&gt; m = map(x -&gt; (t = x.k + x.v, v = x.v), d)
+DTable with 10 partitions
+Tabletype: NamedTuple
+
+julia&gt; fetch(m, DataFrame)
+1000×2 DataFrame
+  Row │ t     v
+      │ Char  Int64
+──────┼─────────────
+    1 │ b         1
+    2 │ d         2
+    3 │ d         3
+  ⋮   │  ⋮      ⋮
+  999 │ j         9
+ 1000 │ l        10
+    995 rows omitted
+
+julia&gt; f = filter(x -&gt; x.t == &#39;d&#39;, m)
+DTable with 10 partitions
+Tabletype: NamedTuple
+
+julia&gt; fetch(f, DataFrame)
+200×2 DataFrame
+ Row │ t     v
+     │ Char  Int64
+─────┼─────────────
+   1 │ d         2
+   2 │ d         3
+  ⋮  │  ⋮      ⋮
+ 200 │ d         3
+   197 rows omitted
+
+julia&gt; r = reduce(+, m, cols=[:v])
+EagerThunk (running)
+
+julia&gt; fetch(r)
+(v = 5500,)</code></pre><h1 id="Dagger.groupby-interface"><a class="docs-heading-anchor" href="#Dagger.groupby-interface">Dagger.groupby interface</a><a id="Dagger.groupby-interface-1"></a><a class="docs-heading-anchor-permalink" href="#Dagger.groupby-interface" title="Permalink"></a></h1><p>A <code>DTable</code> can be grouped which will result in creation of a <code>GDTable</code>. A distinct set of values contained in a single or multiple columns can be used as grouping keys. If a transformation of a row needs to be performed in order to obtain the grouping key there&#39;s also an option to provide a custom function returning a key, which is applied per row.</p><p>The set of keys the <code>GDTable</code> is grouped by can be obtained using the <code>keys(gd::GDTable)</code> function. To get a fragment of the <code>GDTable</code> containing records belonging under a single key the <code>getindex(gd::GDTable, key)</code> function can be used.</p><pre><code class="language-julia hljs">julia&gt; d = DTable((a=shuffle(repeat(&#39;a&#39;:&#39;d&#39;, inner=4, outer=4)),b=repeat(1:4, 16)), 4)
+DTable with 16 partitions
+Tabletype: NamedTuple
+
+julia&gt; Dagger.groupby(d, :a)
+GDTable with 4 partitions and 4 keys
+Tabletype: NamedTuple
+Grouped by: [:a]
+
+julia&gt; Dagger.groupby(d, [:a, :b])
+GDTable with 16 partitions and 16 keys
+Tabletype: NamedTuple
+Grouped by: [:a, :b]
+
+julia&gt; Dagger.groupby(d, row -&gt; row.a + row.b)
+GDTable with 7 partitions and 7 keys
+Tabletype: NamedTuple
+Grouped by: #5
+
+julia&gt; g = Dagger.groupby(d, :a); keys(g)
+KeySet for a Dict{Char, Vector{UInt64}} with 4 entries. Keys:
+  &#39;c&#39;
+  &#39;d&#39;
+  &#39;a&#39;
+  &#39;b&#39;
+
+julia&gt; g[&#39;c&#39;]
+DTable with 1 partitions
+Tabletype: NamedTuple</code></pre><h2 id="GDTable-operations"><a class="docs-heading-anchor" href="#GDTable-operations">GDTable operations</a><a id="GDTable-operations-1"></a><a class="docs-heading-anchor-permalink" href="#GDTable-operations" title="Permalink"></a></h2><p>Operations such as <code>map</code>, <code>filter</code>, <code>reduce</code> can be performed on a <code>GDTable</code></p><pre><code class="language-julia hljs">julia&gt; g = Dagger.groupby(d, [:a, :b])
+GDTable with 16 partitions and 16 keys
+Tabletype: NamedTuple
+Grouped by: [:a, :b]
+
+julia&gt; f = filter(x -&gt; x.a != &#39;d&#39;, g)
+GDTable with 16 partitions and 16 keys
+Tabletype: NamedTuple
+Grouped by: [:a, :b]
+
+julia&gt; trim!(f)
+GDTable with 12 partitions and 12 keys
+Tabletype: NamedTuple
+Grouped by: [:a, :b]
+
+julia&gt; m = map(r -&gt; (a = r.a, b = r.b, c = r.b .- 3), f)
+GDTable with 12 partitions and 12 keys
+Tabletype: NamedTuple
+Grouped by: [:a, :b]
+
+julia&gt; r = reduce(*, m)
+EagerThunk (running)
+
+julia&gt; DataFrame(fetch(r))
+12×5 DataFrame
+ Row │ a     b      result_a  result_b  result_c 
+     │ Char  Int64  String    Int64     Int64    
+─────┼───────────────────────────────────────────
+   1 │ a         1  aaaa             1        16
+   2 │ c         3  ccc             27         0
+   3 │ a         3  aa               9         0
+   4 │ b         4  bbbb           256         1
+   5 │ c         4  cccc           256         1
+   6 │ b         2  bbbb            16         1
+   7 │ b         1  bbbb             1        16
+   8 │ a         2  aaa              8        -1
+   9 │ a         4  aaaaaaa      16384         1
+  10 │ b         3  bbbb            81         0
+  11 │ c         2  ccccc           32        -1
+  12 │ c         1  cccc             1        16</code></pre><h2 id="Iterating-over-a-GDTable"><a class="docs-heading-anchor" href="#Iterating-over-a-GDTable">Iterating over a GDTable</a><a id="Iterating-over-a-GDTable-1"></a><a class="docs-heading-anchor-permalink" href="#Iterating-over-a-GDTable" title="Permalink"></a></h2><p><code>GDTable</code> can be iterated over and each element returned will be a pair of key and a <code>DTable</code> containing all rows associated with that grouping key.</p><pre><code class="language-julia hljs">julia&gt; d = DTable((a=repeat(&#39;a&#39;:&#39;b&#39;, inner=2),b=1:4), 2)
+DTable with 2 partitions
+Tabletype: NamedTuple
+
+julia&gt; g = Dagger.groupby(d, :a)
+GDTable with 2 partitions and 2 keys
+Tabletype: NamedTuple
+Grouped by: [:a]
+
+julia&gt; for (key, dt) in g
+           println(&quot;Key: $key&quot;)
+           println(fetch(dt, DataFrame))
+       end
+Key: a
+2×2 DataFrame
+ Row │ a     b     
+     │ Char  Int64 
+─────┼─────────────
+   1 │ a         1
+   2 │ a         2
+Key: b
+2×2 DataFrame
+ Row │ a     b     
+     │ Char  Int64 
+─────┼─────────────
+   1 │ b         3
+   2 │ b         4</code></pre><h1 id="API"><a class="docs-heading-anchor" href="#API">API</a><a id="API-1"></a><a class="docs-heading-anchor-permalink" href="#API" title="Permalink"></a></h1><article class="docstring"><header><a class="docstring-binding" id="Dagger.DTable" href="#Dagger.DTable"><code>Dagger.DTable</code></a> — <span class="docstring-category">Type</span></header><section><div><pre><code class="language-julia hljs">DTable</code></pre><p>Structure representing the distributed table based on Dagger.</p><p>The table is stored as a vector of <code>Chunk</code> structures which hold partitions of the table. That vector can also store <code>EagerThunk</code> structures when an operation that modifies the underlying partitions was applied to it (currently only <code>filter</code>).</p></div><a class="docs-sourcelink" target="_blank" href="https://github.com/JuliaParallel/Dagger.jl/blob/d5510e6cf0fc0ab30d409e03c9376542c0391d22/src/table/dtable.jl#LL10-L18">source</a></section></article><article class="docstring"><header><a class="docstring-binding" id="Dagger.tabletype" href="#Dagger.tabletype"><code>Dagger.tabletype</code></a> — <span class="docstring-category">Function</span></header><section><div><pre><code class="language-julia hljs">tabletype(d::DTable)</code></pre><p>Provides the type of the underlying table partition. Uses the cached tabletype if available.</p><p>In case the tabletype cannot be obtained the default return value is <code>NamedTuple</code>.</p></div><a class="docs-sourcelink" target="_blank" href="https://github.com/JuliaParallel/Dagger.jl/blob/d5510e6cf0fc0ab30d409e03c9376542c0391d22/src/table/dtable.jl#LL140-L147">source</a></section><section><div><pre><code class="nohighlight hljs">tabletype(gd::GDTable)</code></pre><p>Provides the type of the underlying table partition. Uses the cached tabletype if available.</p><p>In case the tabletype cannot be obtained the default return value is <code>NamedTuple</code>.</p></div><a class="docs-sourcelink" target="_blank" href="https://github.com/JuliaParallel/Dagger.jl/blob/d5510e6cf0fc0ab30d409e03c9376542c0391d22/src/table/gdtable.jl#LL113-L120">source</a></section></article><article class="docstring"><header><a class="docstring-binding" id="Dagger.tabletype!" href="#Dagger.tabletype!"><code>Dagger.tabletype!</code></a> — <span class="docstring-category">Function</span></header><section><div><pre><code class="language-julia hljs">tabletype!(d::DTable)</code></pre><p>Provides the type of the underlying table partition and caches it in <code>d</code>.</p><p>In case the tabletype cannot be obtained the default return value is <code>NamedTuple</code>.</p></div><a class="docs-sourcelink" target="_blank" href="https://github.com/JuliaParallel/Dagger.jl/blob/d5510e6cf0fc0ab30d409e03c9376542c0391d22/src/table/dtable.jl#LL131-L137">source</a></section><section><div><pre><code class="nohighlight hljs">tabletype!(gd::GDTable)</code></pre><p>Provides the type of the underlying table partition and caches it in <code>gd</code>.</p><p>In case the tabletype cannot be obtained the default return value is <code>NamedTuple</code>.</p></div><a class="docs-sourcelink" target="_blank" href="https://github.com/JuliaParallel/Dagger.jl/blob/d5510e6cf0fc0ab30d409e03c9376542c0391d22/src/table/gdtable.jl#LL103-L109">source</a></section></article><article class="docstring"><header><a class="docstring-binding" id="Dagger.trim" href="#Dagger.trim"><code>Dagger.trim</code></a> — <span class="docstring-category">Function</span></header><section><div><pre><code class="language-julia hljs">trim(d::DTable) -&gt; DTable</code></pre><p>Returns <code>d</code> with empty chunks removed.</p></div><a class="docs-sourcelink" target="_blank" href="https://github.com/JuliaParallel/Dagger.jl/blob/d5510e6cf0fc0ab30d409e03c9376542c0391d22/src/table/dtable.jl#LL178-L182">source</a></section><section><div><pre><code class="nohighlight hljs">trim(gd::GDTable) -&gt; GDTable</code></pre><p>Returns <code>gd</code> with empty chunks and keys removed.</p></div><a class="docs-sourcelink" target="_blank" href="https://github.com/JuliaParallel/Dagger.jl/blob/d5510e6cf0fc0ab30d409e03c9376542c0391d22/src/table/gdtable.jl#LL95-L99">source</a></section></article><article class="docstring"><header><a class="docstring-binding" id="Dagger.trim!" href="#Dagger.trim!"><code>Dagger.trim!</code></a> — <span class="docstring-category">Function</span></header><section><div><pre><code class="language-julia hljs">trim!(d::DTable) -&gt; DTable</code></pre><p>Removes empty chunks from <code>d</code>.</p></div><a class="docs-sourcelink" target="_blank" href="https://github.com/JuliaParallel/Dagger.jl/blob/d5510e6cf0fc0ab30d409e03c9376542c0391d22/src/table/dtable.jl#LL167-L171">source</a></section><section><div><pre><code class="nohighlight hljs">trim!(gd::GDTable) -&gt; GDTable</code></pre><p>Removes empty chunks from <code>gd</code> and unused keys from its index.</p></div><a class="docs-sourcelink" target="_blank" href="https://github.com/JuliaParallel/Dagger.jl/blob/d5510e6cf0fc0ab30d409e03c9376542c0391d22/src/table/gdtable.jl#LL60-L64">source</a></section></article><article class="docstring"><header><a class="docstring-binding" id="Base.map" href="#Base.map"><code>Base.map</code></a> — <span class="docstring-category">Function</span></header><section><div><pre><code class="language-julia hljs">map(f, d::DTable) -&gt; DTable</code></pre><p>Applies <code>f</code> to each row of <code>d</code>. The applied function needs to return a <code>Tables.Row</code> compatible object (e.g. <code>NamedTuple</code>).</p><p><strong>Examples</strong></p><pre><code class="language-julia hljs">julia&gt; d = DTable((a = [1, 2, 3], b = [1, 1, 1]), 2);
+
+julia&gt; m = map(x -&gt; (r = x.a + x.b,), d)
+DTable with 2 partitions
+Tabletype: NamedTuple
+
+julia&gt; fetch(m)
+(r = [2, 3, 4],)
+
+julia&gt; m = map(x -&gt; (r1 = x.a + x.b, r2 = x.a - x.b), d)
+DTable with 2 partitions
+Tabletype: NamedTuple
+
+julia&gt; fetch(m)
+(r1 = [2, 3, 4], r2 = [0, 1, 2])</code></pre></div><a class="docs-sourcelink" target="_blank" href="https://github.com/JuliaParallel/Dagger.jl/blob/d5510e6cf0fc0ab30d409e03c9376542c0391d22/src/table/operations.jl#LL3-L27">source</a></section><section><div><pre><code class="nohighlight hljs">map(f, gd::GDTable) -&gt; GDTable</code></pre><p>Applies <code>f</code> to each row of <code>gd</code>. The applied function needs to return a <code>Tables.Row</code> compatible object (e.g. <code>NamedTuple</code>).</p><p><strong>Examples</strong></p><pre><code class="language-julia hljs">julia&gt; g = Dagger.groupby(DTable((a=repeat(&#39;a&#39;:&#39;c&#39;, inner=2),b=1:6), 2), :a)
+GDTable with 3 partitions and 3 keys
+Tabletype: NamedTuple
+Grouped by: [:a]
+
+julia&gt; m = map(r -&gt; (a = r.a, b = r.b, c = r.a + r.b), g)
+GDTable with 3 partitions and 3 keys
+Tabletype: NamedTuple
+Grouped by: [:a]
+
+julia&gt; fetch(m)
+(a = [&#39;a&#39;, &#39;a&#39;, &#39;c&#39;, &#39;c&#39;, &#39;b&#39;, &#39;b&#39;], b = [1, 2, 5, 6, 3, 4], c = [&#39;b&#39;, &#39;c&#39;, &#39;h&#39;, &#39;i&#39;, &#39;e&#39;, &#39;f&#39;])</code></pre></div><a class="docs-sourcelink" target="_blank" href="https://github.com/JuliaParallel/Dagger.jl/blob/d5510e6cf0fc0ab30d409e03c9376542c0391d22/src/table/operations.jl#LL42-L63">source</a></section></article><article class="docstring"><header><a class="docstring-binding" id="Base.filter" href="#Base.filter"><code>Base.filter</code></a> — <span class="docstring-category">Function</span></header><section><div><pre><code class="language-julia hljs">filter(f, d::DTable) -&gt; DTable</code></pre><p>Filter <code>d</code> using <code>f</code>. Returns a filtered <code>DTable</code> that can be processed further.</p><p><strong>Examples</strong></p><pre><code class="language-julia hljs">julia&gt; d = DTable((a = [1, 2, 3], b = [1, 1, 1]), 2);
+
+julia&gt; f = filter(x -&gt; x.a &lt; 3, d)
+DTable with 2 partitions
+Tabletype: NamedTuple
+
+julia&gt; fetch(f)
+(a = [1, 2], b = [1, 1])
+
+julia&gt; f = filter(x -&gt; (x.a &lt; 3) .&amp; (x.b &gt; 0), d)
+DTable with 2 partitions
+Tabletype: NamedTuple
+
+julia&gt; fetch(f)
+(a = [1, 2], b = [1, 1])</code></pre></div><a class="docs-sourcelink" target="_blank" href="https://github.com/JuliaParallel/Dagger.jl/blob/d5510e6cf0fc0ab30d409e03c9376542c0391d22/src/table/operations.jl#LL189-L213">source</a></section><section><div><pre><code class="nohighlight hljs">filter(f, gd::GDTable) -&gt; GDTable</code></pre><p>Filter &#39;gd&#39; using &#39;f&#39;, returning a filtered <code>GDTable</code>. Calling <code>trim!</code> on a filtered <code>GDTable</code> will clean up the empty keys and partitions.</p><p><strong>Examples</strong></p><pre><code class="language-julia hljs">julia&gt; g = Dagger.groupby(DTable((a=repeat(&#39;a&#39;:&#39;d&#39;, inner=2),b=1:8), 2), :a)
+GDTable with 4 partitions and 4 keys
+Tabletype: NamedTuple
+Grouped by: [:a]
+
+julia&gt; f = filter(x -&gt; x.a ∈ [&#39;a&#39;, &#39;b&#39;], g)
+GDTable with 4 partitions and 4 keys
+Tabletype: NamedTuple
+Grouped by: [:a]
+
+julia&gt; fetch(f)
+(a = [&#39;a&#39;, &#39;a&#39;, &#39;b&#39;, &#39;b&#39;], b = [1, 2, 3, 4])
+
+julia&gt; trim!(f)
+GDTable with 2 partitions and 2 keys
+Tabletype: NamedTuple
+Grouped by: [:a]</code></pre></div><a class="docs-sourcelink" target="_blank" href="https://github.com/JuliaParallel/Dagger.jl/blob/d5510e6cf0fc0ab30d409e03c9376542c0391d22/src/table/operations.jl#LL223-L249">source</a></section></article><article class="docstring"><header><a class="docstring-binding" id="Base.reduce" href="#Base.reduce"><code>Base.reduce</code></a> — <span class="docstring-category">Function</span></header><section><div><pre><code class="language-julia hljs">reduce(f, d::DTable; cols=nothing, [init]) -&gt; NamedTuple</code></pre><p>Reduces <code>d</code> using function <code>f</code> applied on all columns of the DTable.</p><p>By providing the kwarg <code>cols</code> as a <code>Vector{Symbol}</code> object it&#39;s possible to restrict the reduction to the specified columns. The reduced values are provided in a NamedTuple under names of reduced columns.</p><p>For the <code>init</code> kwarg please refer to <code>Base.reduce</code> documentation, as it follows the same principles. </p><p><strong>Examples</strong></p><pre><code class="language-julia hljs">julia&gt; d = DTable((a = [1, 2, 3], b = [1, 1, 1]), 2);
+
+julia&gt; r1 = reduce(+, d)
+EagerThunk (running)
+
+julia&gt; fetch(r1)
+(a = 6, b = 3)
+
+julia&gt; r2 = reduce(*, d, cols=[:a])
+EagerThunk (running)
+
+julia&gt; fetch(r2)
+(a = 6,)</code></pre></div><a class="docs-sourcelink" target="_blank" href="https://github.com/JuliaParallel/Dagger.jl/blob/d5510e6cf0fc0ab30d409e03c9376542c0391d22/src/table/operations.jl#LL69-L97">source</a></section><section><div><pre><code class="nohighlight hljs">reduce(f, gd::GDTable; cols=nothing, prefix=&quot;result_&quot;, [init]) -&gt; EagerThunk -&gt; NamedTuple</code></pre><p>Reduces <code>gd</code> using function <code>f</code> applied on all columns of the DTable. Returns results per group in columns with names prefixed with the <code>prefix</code> kwarg. For more information on kwargs see <code>reduce(f, d::DTable)</code></p><p><strong>Examples</strong></p><pre><code class="language-julia hljs">julia&gt; g = Dagger.groupby(DTable((a=repeat(&#39;a&#39;:&#39;d&#39;, inner=2),b=1:8), 2), :a)
+GDTable with 4 partitions and 4 keys
+Tabletype: NamedTuple
+Grouped by: [:a]
+
+julia&gt; fetch(reduce(*, g))
+(a = [&#39;a&#39;, &#39;c&#39;, &#39;d&#39;, &#39;b&#39;], result_a = [&quot;aa&quot;, &quot;cc&quot;, &quot;dd&quot;, &quot;bb&quot;], result_b = [2, 30, 56, 12])</code></pre></div><a class="docs-sourcelink" target="_blank" href="https://github.com/JuliaParallel/Dagger.jl/blob/d5510e6cf0fc0ab30d409e03c9376542c0391d22/src/table/operations.jl#LL141-L158">source</a></section></article><div class="admonition is-warning"><header class="admonition-header">Missing docstring.</header><div class="admonition-body"><p>Missing docstring for <code>groupby</code>. Check Documenter&#39;s build log for details.</p></div></div><article class="docstring"><header><a class="docstring-binding" id="Base.keys" href="#Base.keys"><code>Base.keys</code></a> — <span class="docstring-category">Function</span></header><section><div><pre><code class="language-julia hljs">keys(gd::GDTable) -&gt; KeySet</code></pre><p>Returns the keys that <code>gd</code> is grouped by.</p></div><a class="docs-sourcelink" target="_blank" href="https://github.com/JuliaParallel/Dagger.jl/blob/d5510e6cf0fc0ab30d409e03c9376542c0391d22/src/table/gdtable.jl#LL35-L39">source</a></section></article><article class="docstring"><header><a class="docstring-binding" id="Base.getindex" href="#Base.getindex"><code>Base.getindex</code></a> — <span class="docstring-category">Function</span></header><section><div><pre><code class="language-julia hljs">getindex(gdt::GDTable, key) -&gt; DTable</code></pre><p>Retrieves a <code>DTable</code> from <code>gdt</code> with rows belonging to the provided grouping key.</p></div><a class="docs-sourcelink" target="_blank" href="https://github.com/JuliaParallel/Dagger.jl/blob/d5510e6cf0fc0ab30d409e03c9376542c0391d22/src/table/gdtable.jl#LL136-L140">source</a></section></article></article><nav class="docs-footer"><a class="docs-footer-prevpage" href="../scheduler-internals/">« Scheduler Internals</a><a class="docs-footer-nextpage" href="../api/types/">Types »</a><div class="flexbox-break"></div><p class="footer-message">Powered by <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> and the <a href="https://julialang.org/">Julia Programming Language</a>.</p></nav></div><div class="modal" id="documenter-settings"><div class="modal-background"></div><div class="modal-card"><header class="modal-card-head"><p class="modal-card-title">Settings</p><button class="delete"></button></header><section class="modal-card-body"><p><label class="label">Theme</label><div class="select"><select id="documenter-themepicker"><option value="documenter-light">documenter-light</option><option value="documenter-dark">documenter-dark</option></select></div></p><hr/><p>This document was generated with <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> version 0.27.10 on <span class="colophon-date" title="Friday 22 October 2021 20:11">Friday 22 October 2021</span>. Using Julia version 1.6.3.</p></section><footer class="modal-card-foot"></footer></div></div></div></body></html>
