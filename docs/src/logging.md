@@ -88,6 +88,7 @@ shipped with Dagger directly is the `LogWindow`:
 
 ```@docs
 Dagger.Events.LogWindow
+Dagger.Events.TableStorage
 ```
 
 ## LocalEventLog

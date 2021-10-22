@@ -8,18 +8,31 @@
 <body>
 <div style="border: 2px solid black">
 <div>Status: <em class="connection-status" style="color: red">Disconnected</em></div>
-<div><label>Update? </label><input type="checkbox" id="connect-enable" checked="true"></div>
+<div><label>Online? </label><input type="checkbox" id="online-enable" checked="true"></div>
+<div><label>Update? </label><input type="checkbox" id="update-enable" checked="true"></div>
 <div><label>Draw Interval: </label><input type="text" id="draw-interval" value="1"></div>
 <div><label>Worker: </label><select id="worker-select"></select></div>
+<div><label>Zoom: </label><button type="button" id="zoom-in">Zoom In</button><button type="button" id="zoom-out">Zoom Out</button></div>
+<div><label>Seek: </label><button type="button" id="seek-prev">Prev</button><button type="button" id="seek-next">Next</button><button type="button" id="seek-full">Full</button></div>
+<div><label>Seek Window: </label><input type="text" id="seek-length" value="20"></div>
 </select></div>
 </div>
 <div class="svg-container" style="border: 2px solid black"></div>
 <script type="text/javascript">
 var status_em = d3.select("em");
+var online = true;
+var online_input = d3.select("input#online-enable");
 var updating = true;
-var update_input = d3.select("input#connect-enable");
+var update_input = d3.select("input#update-enable");
 var draw_interval = d3.select("input#draw-interval");
 var worker_select = d3.select("select#worker-select");
+var zoom_in = d3.select("button#zoom-in");
+var zoom_out = d3.select("button#zoom-out");
+var seek_prev = d3.select("button#seek-prev");
+var seek_next = d3.select("button#seek-next");
+var seek_full = d3.select("button#seek-full");
+var seek_length = 20*(10**9);
+var seek_length_input = d3.select("input#seek-length");
 
 function linePlot(container, core_key, data_key, title, ylabel) {
     var dsvg = container.append("svg")
@@ -185,8 +198,13 @@ function ganttPlot(container, core_key, id_key, timeline_key, esat_key, psat_key
                 allkeys.add(key);
             }
         }
+        var allkeys_array = new Array();
+        for (value of allkeys.values()) {
+            allkeys_array.push(value);
+        }
+        allkeys_array = allkeys_array.sort();
         var stepsize = height / allkeys.size;
-        yScale.domain(Array.from(allkeys))
+        yScale.domain(allkeys_array)
               .range(d3.range(height, 0, -stepsize));
 
         // Draw x-axis
@@ -208,7 +226,7 @@ function ganttPlot(container, core_key, id_key, timeline_key, esat_key, psat_key
         ctx.clearRect(0, 0, width, height);
         //g.selectAll("rect").remove();
         //g.selectAll("path").remove();
-        for (let key of allkeys.values()) {
+        for (let key of allkeys_array) {
             // Generate regular and entering blocks
             var blocks = new Array();
             var id_map = new Map();
@@ -527,9 +545,21 @@ var ctxs = new Array();
 function drawCtxs() {
     // Draw contexts
     if (values != 0) {
+        var filtered_values = new Object();
+        for (key in values) {
+            filtered_values[key] = new Array();
+        }
+        for (i = 0; i < values.core.length; i++) {
+            var value = values.core[i].timestamp;
+            if ((seek_ts_start <= value) && (value <= seek_ts_stop)) {
+                for (key in values) {
+                    filtered_values[key].push(values[key][i]);
+                }
+            }
+        }
         ctxs.forEach((ctx) => {
             try {
-                ctx(values);
+                ctx(filtered_values);
             } catch (ex) {
                 console.error(ex);
             }
@@ -550,6 +580,9 @@ var waiting = false;
 var myid = 0;
 var worker_id = 1;
 
+var seek_ts_start = 10**100,
+    seek_ts_stop  = 0;
+
 function wsStart() {
     var loc = window.location;
     var port = loc.port ? ":"+loc.port : ""
@@ -561,13 +594,68 @@ function wsStart() {
     var ws = new WebSocket(feed_path);
     status_em.attr("style", "color: yellow")
              .text("Connecting...");
-    update_input.on("change", function(input) {
-        updating = input.target.checked;
-        if (updating) {
+    online_input.on("change", function(input) {
+        online = input.target.checked;
+        if (online) {
             wsStart();
         } else {
             ws.close();
         }
+    });
+    update_input.on("change", function(input) {
+        updating = input.target.checked;
+        if (updating) {
+            // We're probably out of sync with server, grab new data
+            values = 0;
+            ws.send("data");
+        }
+    });
+    zoom_in.on("click", function(input) {
+        seek_ts_middle = seek_ts_start + (seek_length / 2);
+        seek_length *= 0.5;
+        seek_ts_start = seek_ts_middle - (seek_length / 2);
+        seek_ts_stop  = seek_ts_middle + (seek_length / 2);
+        console.log("Zooming in to (" + seek_ts_start + ", " + seek_ts_stop + ")");
+        values = 0;
+        ws.send("seek(" + seek_ts_start + "," + seek_ts_stop + ")");
+    });
+    zoom_out.on("click", function(input) {
+        seek_ts_middle = seek_ts_start + (seek_length / 2);
+        seek_length *= 2;
+        seek_ts_start = seek_ts_middle - (seek_length / 2);
+        seek_ts_stop  = seek_ts_middle + (seek_length / 2);
+        console.log("Zooming out to (" + seek_ts_start + ", " + seek_ts_stop + ")");
+        values = 0;
+        ws.send("seek(" + seek_ts_start + "," + seek_ts_stop + ")");
+    });
+    seek_prev.on("click", function(input) {
+        seek_ts_start = seek_ts_start - seek_length;
+        seek_ts_stop  = seek_ts_stop  - seek_length;
+        console.log("Seeking prev to (" + seek_ts_start + ", " + seek_ts_stop + ")");
+        values = 0;
+        ws.send("seek(" + seek_ts_start + "," + seek_ts_stop + ")");
+    });
+    seek_next.on("click", function(input) {
+        seek_ts_start = seek_ts_start + seek_length;
+        seek_ts_stop  = seek_ts_stop  + seek_length;
+        console.log("Seeking next to (" + seek_ts_start + ", " + seek_ts_stop + ")");
+        values = 0;
+        ws.send("seek(" + seek_ts_start + "," + seek_ts_stop + ")");
+    });
+    seek_full.on("click", function(input) {
+        values = 0;
+        ws.send("fulldata");
+    });
+    seek_length_input.on("change", function(input) {
+        seek_length = Number(input.target.value) * (10**9);
+        if (!(seek_length > 0)) {
+            seek_length = 10**9;
+        }
+        seek_ts_start = seek_ts_stop - seek_length;
+        console.log("Seek to (" + seek_ts_start + ", " + seek_ts_stop + ")");
+        values = 0;
+        ws.send("seek(" + seek_ts_start + "," + seek_ts_stop + ")");
+        // TODO: Initiate purge if necessary
     });
     worker_select.on("change", function(input) {
         worker_id = Number(input.target.value);
@@ -586,7 +674,7 @@ function wsStart() {
         status_em.attr("style", "color: red")
                  .text("Disconnected");
 
-        if (updating) {
+        if (online) {
             console.error("Lost connection to server, reconnect in 5 seconds...");
             setTimeout(function(){
                 console.warn("Reconnecting to " + feed_path + "...");
@@ -604,9 +692,9 @@ function wsStart() {
         if (cmd == "data") {
             // Full dataset, ensure it's sorted
             // FIXME: Ensure that "core" exists
-            var sorted = false
+            var sorted = false;
+            var core = payload.core;
             while (!sorted) {
-                var core = payload.core;
                 sorted = true;
                 for (i = 0; i < core.length-1; i++) {
                     if (core[i].timestamp > core[i+1].timestamp) {
@@ -620,11 +708,17 @@ function wsStart() {
                 }
             }
             values = payload;
+
+            // Reset seek to end
+            seek_ts_stop = core[core.length-1].timestamp;
+            seek_ts_start = seek_ts_stop - seek_length;
         } else if (cmd == "add") {
+            if (!updating) { return; }
             // New item
             // TODO: Account for added/deleted keys
             var core = values.core;
             var idx = 0;
+
             for (i = core.length-1; i >= 0; i--) {
                 if (core[i].timestamp < payload.core.timestamp) {
                     idx = i+1;
@@ -634,7 +728,12 @@ function wsStart() {
             for (key in values) {
                 values[key].splice(idx, 0, payload[key]);
             }
+
+            // Include new events
+            seek_ts_stop = payload.core.timestamp;
+            seek_ts_start = seek_ts_stop - seek_length;
         } else if (cmd == "delete") {
+            if (!updating) { return; }
             // Deleted items
             for (key in values) {
                 values[key] = values[key].slice(payload);

@@ -1,4 +1,5 @@
 using Mux, MemPool, Distributed, Sockets
+import Dagger.Tables
 
 struct LinePlot
     core_key::Symbol
@@ -52,24 +53,26 @@ const D3R_WORKER_HOST_MAP = Dict{Int,IPAddr}()
 const D3R_WORKER_PORT_MAP = Dict{Int,Int}()
 
 struct D3Renderer
+    port::Int
+    port_range::UnitRange{Int}
     config::Vector{Any}
     config_updated::Ref{Bool}
     update_cond::Condition
-    port::Int
-    port_range::UnitRange{Int}
+    seek_store
 end
-D3Renderer(port::Int, port_range=50000:59999) =
-    D3Renderer(Vector{Any}(), Ref{Bool}(false), Condition(), port, port_range)
+D3Renderer(port::Int, port_range=50000:59999; seek_store=nothing) =
+    D3Renderer(port, port_range, Vector{Any}(), Ref{Bool}(false), Condition(), seek_store)
 Dagger.init_similar(d3r::D3Renderer) =
-    D3Renderer(d3r.config,
+    D3Renderer(d3r.port,
+               d3r.port_range,
+               d3r.config,
                Ref{Bool}(false),
                Condition(),
-               d3r.port,
-               d3r.port_range)
+               d3r.seek_store)
 
 function (d3r::D3Renderer)(logs)
     D3R_LOGS[d3r.port] = logs
-    d3r_init(d3r.port, d3r.port_range, d3r.config_updated, d3r.config)
+    d3r_init(d3r.port, d3r.port_range, d3r.config_updated, d3r.config, d3r.seek_store)
     notify(d3r.update_cond)
 end
 
@@ -78,7 +81,7 @@ function Base.push!(d3r::D3Renderer, x)
     d3r.config_updated[] = true
 end
 
-function d3r_init(port::Int, port_range::UnitRange, config_updated::Ref{Bool}, config)
+function d3r_init(port::Int, port_range::UnitRange, config_updated::Ref{Bool}, config, seek_store)
     get(D3R_RUNNING, port, false) && return
 
     # Ensure some variables are setup
@@ -131,12 +134,12 @@ function d3r_init(port::Int, port_range::UnitRange, config_updated::Ref{Bool}, c
         Mux.wdefaults,
         route("/data_feed", req->begin
             sock = req[:socket]
-            client_handler(sock, myid(), port, port_range, config_updated, config)
+            client_handler(sock, myid(), port, port_range, config_updated, config, seek_store)
         end),
         route("/worker/:id/data_feed", req->begin
             sock = req[:socket]
             id = parse(Int, req[:params][:id])
-            client_handler(sock, id, port, port_range, config_updated, config)
+            client_handler(sock, id, port, port_range, config_updated, config, seek_store)
         end),
         Mux.wclose,
         Mux.notfound()
@@ -152,7 +155,7 @@ function d3r_init(port::Int, port_range::UnitRange, config_updated::Ref{Bool}, c
     D3R_ACTUAL_PORT[port] = actual_port
     D3R_RUNNING[port] = true
 end
-function client_handler(sock, id, port, port_range, config_updated, config)
+function client_handler(sock, id, port, port_range, config_updated, config, seek_store)
     fsock = nothing
     if id != myid()
         fsock_ready = Base.Event()
@@ -209,6 +212,31 @@ function client_handler(sock, id, port, port_range, config_updated, config)
                     write(sock, JSON3.write((;cmd="config", payload=sanitize(config))))
                 end
                 =#
+                if seek_store !== nothing
+                    if data == "fulldata"
+                        raw_logs = seek_store[0:typemax(UInt64)]
+                        logs = Dict{Symbol,Vector{Any}}()
+                        for (idx,key) in enumerate(Tables.columnnames(raw_logs))
+                            logs[key] = Tables.columns(raw_logs)[idx]
+                        end
+                        write(sock, JSON3.write((;cmd="data", payload=sanitize(logs))))
+                        continue
+                    end
+                    m = match(r"seek\(([0-9]*),([0-9]*)\)", data)
+                    if m !== nothing
+                        ts_start, ts_stop = parse.(Ref(UInt64), m.captures)
+                        raw_logs = seek_store[ts_start:ts_stop]
+                        logs = Dict{Symbol,Vector{Any}}()
+                        for (idx,key) in enumerate(Tables.columnnames(raw_logs))
+                            logs[key] = Tables.columns(raw_logs)[idx]
+                        end
+                        write(sock, JSON3.write((;cmd="data", payload=sanitize(logs))))
+                        continue
+                    end
+                end
+                if data == "data"
+                    write(sock, JSON3.write((;cmd="data", payload=sanitize(D3R_LOGS[port]))))
+                end
             else
                 @debug "D3R client sending to forwarder: $data"
                 write(fsock, data)

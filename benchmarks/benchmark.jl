@@ -38,6 +38,7 @@ elseif render == "webdash"
     const live = true
     using DaggerWebDash
     import DaggerWebDash: LinePlot, GanttPlot, GraphPlot, ProfileViewer
+    using DataFrames
 elseif render == "offline"
     const live = false
     using Luxor, ProfileSVG
@@ -47,7 +48,7 @@ const RENDERS = Dict{Int,Dict}()
 const live_port = parse(Int, get(ENV, "BENCHMARK_LIVE_PORT", "8000"))
 
 const graph = parse(Bool, get(ENV, "BENCHMARK_GRAPH", "0"))
-if render == "webdash"
+if graph && render == "webdash"
     @warn "BENCHMARK_GRAPH=1 is not compatible with BENCHMARK_RENDER=webdash; disabling graphing"
 end
 const profile = parse(Bool, get(ENV, "BENCHMARK_PROFILE", "0"))
@@ -272,8 +273,13 @@ function main()
         ml[:mem] = Dagger.Events.MemoryFree()
         ml[:esat] = Dagger.Events.EventSaturation()
         ml[:psat] = Dagger.Events.ProcessorSaturation()
-        lw = Dagger.Events.LogWindow(20*10^9, :core)
-        d3r = DaggerWebDash.D3Renderer(live_port)
+        lw = Dagger.Events.LogWindow(5*10^9, :core)
+        df = DataFrame([key=>[] for key in keys(ml.consumers)]...)
+        ts = Dagger.Events.TableStorage(df)
+        push!(lw.creation_handlers, ts)
+        d3r = DaggerWebDash.D3Renderer(live_port; seek_store=ts)
+        push!(lw.creation_handlers, d3r)
+        push!(lw.deletion_handlers, d3r)
         push!(d3r, GanttPlot(:core, :id, :timeline, :esat, :psat, "Overview"))
         # TODO: push!(d3r, ProfileViewer(:core, :profile, "Profile Viewer"))
         push!(d3r, LinePlot(:core, :wsat, "Worker Saturation", "Running Tasks"))
@@ -281,8 +287,6 @@ function main()
         push!(d3r, LinePlot(:core, :bytes, "Allocated Bytes", "Bytes"))
         push!(d3r, LinePlot(:core, :mem, "Available Memory", "% Free"))
         #push!(d3r, GraphPlot(:core, :id, :timeline, :profile, "DAG"))
-        push!(lw.creation_handlers, d3r)
-        push!(lw.deletion_handlers, d3r)
         ml.aggregators[:logwindow] = lw
         ml.aggregators[:d3r] = d3r
         opts = merge(opts, (;log_sink=ml))
