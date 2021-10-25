@@ -312,8 +312,9 @@ function _par(ex::Expr; lazy=true, recur=true, opts=())
             return :(Dagger.delayed($(esc(f)); $(opts...))($(_par.(args; lazy=lazy, recur=false)...)))
         else
             return quote
-                args = ($(_par.(args; lazy=lazy, recur=false)...),)
-                $spawn($(esc(f)), args...; $(opts...))
+                let args = ($(_par.(args; lazy=lazy, recur=false)...),)
+                    $spawn($(esc(f)), args...; $(opts...))
+                end
             end
         end
     else
