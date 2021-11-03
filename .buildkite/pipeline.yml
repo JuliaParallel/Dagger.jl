@@ -1,7 +1,7 @@
 .test: &test
   if: build.env("DAGGER_BENCHMARK") != "true"
   agents:
-    queue: "julia"
+    queue: "juliaecosystem"
     sandbox.jl: "true"
 steps:
   - label: Julia 1.6
