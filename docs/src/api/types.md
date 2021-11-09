@@ -15,6 +15,19 @@ Chunk
 UnitDomain
 ```
 
+## Tables
+```@docs
+DTable
+GDTable
+```
+
+## Arrays
+```@docs
+DArray
+Blocks
+ArrayDomain
+```
+
 ## Processors
 ```@docs
 Processor
@@ -39,13 +52,6 @@ Sch.SchedulerOptions
 Sch.ThunkOptions
 Sch.MaxUtilization
 Sch.DynamicThunkException
-```
-
-## Arrays
-```@docs
-DArray
-Blocks
-ArrayDomain
 ```
 
 ## File IO
