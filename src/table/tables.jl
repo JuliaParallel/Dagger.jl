@@ -25,14 +25,14 @@ Tables.columnaccess(table::DTable) = true
 Tables.columns(table::DTable) = DTableColumnIterator(table)
 
 
-function Tables.schema(table::DTable)
+function determine_schema(table::DTable)
     if table.schema !== nothing
         return table.schema
     end
     # Figure out schema
     chunk_f = chunk -> begin
         r = isnonempty(chunk)
-        (r, r ? Tables.schema(chunk) : nothing)
+        (r, r ? Tables.schema(Tables.rows(chunk)) : nothing)
     end
     c_idx = 1
     r = (false, nothing)
@@ -45,8 +45,8 @@ function Tables.schema(table::DTable)
 end
 
 
-function Tables.columnnames(table::DTable)
-    s = Tables.schema(table)
+function determine_columnnames(table::DTable)
+    s = determine_schema(table)
     s === nothing ? nothing : s.names
 end
 
@@ -54,8 +54,7 @@ end
 function _getcolumn(table::DTable, col::Union{Symbol, Int})
     chunk_col = (_chunk, _col) -> Tables.getcolumn(_chunk, _col)
     v = [Dagger.spawn(chunk_col, chunk, col) for chunk in table.chunks]
-    p = (_chunk) -> (; :_ => fetch(_chunk))
-    Tables.getcolumn(TableOperations.joinpartitions(Tables.partitioner(p, v)), :_)
+    SentinelArrays.ChainedVector(fetch.(v))
 end
 
 
@@ -67,7 +66,7 @@ Tables.getcolumn(table::DTable, idx::Int) = _getcolumn(table, idx)
 #######################################
 # DTableRowIterator functions
 
-Tables.schema(table::DTableRowIterator) = Tables.schema(table.d)
+Tables.schema(table::DTableRowIterator) = determine_schema(table.d)
 length(table::DTableRowIterator) = length(table.d)
 
 function _iterate(iter::DTableRowIterator, chunk_index)
@@ -106,8 +105,8 @@ end
 #######################################
 # DTableColumnIterator functions
 
-Tables.schema(table::DTableColumnIterator) = Tables.schema(table.d)
-Tables.columnnames(table::DTableColumnIterator) = Tables.columnnames(table.d)
+Tables.schema(table::DTableColumnIterator) = determine_schema(table.d)
+Tables.columnnames(table::DTableColumnIterator) = determine_columnnames(table.d)
 Tables.getcolumn(table::DTableColumnIterator, col::Symbol) = Tables.getcolumn(table.d, col)
 Tables.getcolumn(table::DTableColumnIterator, idx::Int) = Tables.getcolumn(table.d, idx)
 length(table::DTableColumnIterator) = length(Tables.columnnames(table))
@@ -151,10 +150,10 @@ Tables.rowaccess(table::GDTable) = true
 Tables.rows(table::GDTable) = DTableRowIterator(table.dtable)
 Tables.columnaccess(table::GDTable) = true
 Tables.columns(table::GDTable) = DTableColumnIterator(table.dtable)
-Tables.schema(table::GDTable) = Tables.schema(table.dtable)
+Tables.schema(table::GDTable) = determine_schema(table.dtable)
 Tables.getcolumn(table::GDTable, col::Symbol) = Tables.getcolumn(table.dtable, col)
 Tables.getcolumn(table::GDTable, idx::Int) = Tables.getcolumn(table.dtable, idx)
-Tables.columnnames(table::GDTable) = Tables.columnnames(table.dtable) 
+Tables.columnnames(table::GDTable) = determine_columnnames(table.dtable) 
 
 #######################################
 # GDTable partitions

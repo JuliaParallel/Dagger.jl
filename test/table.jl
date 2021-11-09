@@ -344,10 +344,10 @@ using TableOperations
         @test Tables.getcolumn(d1, 2) == 1:100
         @test Tables.getcolumn(d1, :a) == 1:100
         @test Tables.getcolumn(d1, :b) == 1:100
-        @test Tables.columnnames(d1) == (:a, :b)
+        @test Dagger.determine_columnnames(d1) == (:a, :b)
 
-        @test Tables.schema(d1).names == (:a, :b)
-        @test Tables.schema(d1).types == (Int, Int)
+        @test Dagger.determine_schema(d1).names == (:a, :b)
+        @test Dagger.determine_schema(d1).types == (Int, Int)
 
         for c in Tables.columns(d1)
             @test c == 1:100

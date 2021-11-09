@@ -1,5 +1,6 @@
 import Tables
 import TableOperations
+import SentinelArrays
 
 import Base: fetch, show, length
 
@@ -21,7 +22,6 @@ mutable struct DTable
     tabletype
     schema::Union{Nothing, Tables.Schema}
     DTable(chunks::VTYPE, tabletype) = new(chunks, tabletype, nothing)
-    DTable(chunks::VTYPE, tabletype, schema) = new(chunks, tabletype, schema)
 end
 
 DTable(chunks::Vector{Dagger.EagerThunk}, args...) = DTable(VTYPE(chunks), args...)
@@ -36,8 +36,12 @@ Calls `Tables.partitions` on `table` and assumes the provided partitioning.
 function DTable(table; tabletype=nothing)
     chunks = Vector{Dagger.Chunk}()
     type = nothing
-    sink = Tables.materializer(tabletype !== nothing ? tabletype() : partition)
+    sink = nothing
     for partition in Tables.partitions(table)
+        if sink === nothing
+            sink = Tables.materializer(tabletype !== nothing ? tabletype() : partition)
+        end
+
         tpart = sink(partition)
         push!(chunks, Dagger.tochunk(tpart))
         if type === nothing
@@ -197,7 +201,7 @@ function length(table::DTable)
 end
 
 function _columnnames_svector(d::DTable)
-    colnames_tuple = Tables.columnnames(d)
+    colnames_tuple = determine_columnnames(d)
     colnames_tuple !== nothing ? [sym for sym in colnames_tuple] : nothing
 end
 
