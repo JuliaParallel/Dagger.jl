@@ -20,6 +20,22 @@ order
 treereduce
 ```
 
+## Tables
+```@docs
+tabletype
+tabletype!
+map
+reduce
+filter
+groupby
+```
+
+## Arrays
+```@docs
+alignfirst
+view
+```
+
 ## Processors
 ```@docs
 execute!
@@ -65,12 +81,6 @@ Base.wait
 Sch.exec!
 Sch.halt!
 Sch.get_dag_ids
-```
-
-## Arrays
-```@docs
-alignfirst
-view
 ```
 
 ## File IO
