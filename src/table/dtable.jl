@@ -44,6 +44,7 @@ function DTable(table; tabletype=nothing)
 
         tpart = sink(partition)
         push!(chunks, Dagger.tochunk(tpart))
+
         if type === nothing
             type = typeof(tpart).name.wrapper
         end
