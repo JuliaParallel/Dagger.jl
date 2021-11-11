@@ -1,5 +1,6 @@
 import DataAPI: leftjoin, innerjoin
 
+
 function leftjoin(d1::DTable, d2; on=nothing)
     f = (_d1, _d2, _on) -> leftjoin(_d1, _d2, on=_on)
     v = [Dagger.@spawn f(c, d2, on) for c in d1.chunks]
@@ -14,56 +15,64 @@ function innerjoin(d1::DTable, d2; on=nothing)
 end
 
 
-function _resolve_indices(d1, d2, on)
+function _resolve_indices(l, r, on)
     isnothing(on) && error("yeet")
     if on isa Symbol
-        l_cols = [on]
-        r_cols = [on]
+        l_cmp_symbols = [on]
+        r_cmp_symbols = [on]
     elseif on isa Vector{Symbol}
-        l_cols = on
-        r_cols = on
+        l_cmp_symbols = on
+        r_cmp_symbols = on
     elseif on isa Vector{Pair{Symbol,Symbol}}
-        l_cols = getindex.(on, 1)
-        r_cols = getindex.(on, 2)
+        l_cmp_symbols = getindex.(on, 1)
+        r_cmp_symbols = getindex.(on, 2)
     end
-    d1_names = collect(Tables.schema(Tables.columns(d1)).names)
-    d2_names = collect(Tables.schema(Tables.columns(d2)).names)
-    _l = length(l_cols)
-    l_cols_indices = NTuple{_l,Int}(indexin(l_cols, d1_names))
-    r_cols_indices = NTuple{_l,Int}(indexin(r_cols, d2_names))
-    l_cols_indices, r_cols_indices
+
+    l_cols = Tables.columns(l)
+    l_schema = Tables.schema(l_cols)
+    cmp_l_indices = Tables.columnindex.(Ref(l_schema), l_cmp_symbols)
+    other_l_indices = setdiff(1:length(l_cols), cmp_l_indices)
+    cmp_l = NTuple{length(cmp_l_indices), Int}(cmp_l_indices)
+    other_l = NTuple{length(other_l_indices), Int}(other_l_indices)
+
+    r_cols = Tables.columns(r)
+    r_schema = Tables.schema(r_cols)
+    cmp_r_indices = Tables.columnindex.(Ref(r_schema), r_cmp_symbols)
+    other_r_indices = setdiff(1:length(r_cols), cmp_r_indices)
+    cmp_r = NTuple{length(cmp_r_indices), Int}(cmp_r_indices)
+    other_r = NTuple{length(other_r_indices), Int}(other_r_indices)
+
+    rnames = (name in l_schema.names ? Symbol(string(name) * "_2") : name for name in getindex.(Ref(r_schema.names), other_r_indices))
+    final_nameset = (l_schema.names..., rnames...)
+
+    final_nameset, other_l, other_r, cmp_l, cmp_r
 end
 
 
 function leftjoin(l, r; on=nothing)
-    l_ind, r_ind = _resolve_indices(l, r, on)
-    _a = setdiff(1:length(Tables.columnnames(r)), r_ind)
-    r_new_ind = NTuple{length(_a),Int}(_a)
-    vl, vr = inner_indices(l, r, l_ind, r_ind, r_new_ind)
-    vl2 = left_unmatched(l, vl)
-    build_result_table_based_on_indices(l, r, vl, vr, vl2, l_ind, r_ind, r_new_ind)
+    names, other_l, other_r, cmp_l, cmp_r = _resolve_indices(l, r, on)
+    inner_l, inner_r = match_inner_indices(l, r, cmp_l, cmp_r)
+    outer_l = match_outer_left_indices(l, inner_l)
+    build_result_table_based_on_indices(l, r, inner_l, inner_r, outer_l, other_l,  other_r, names)
 end
 
 
 function innerjoin(l, r; on=nothing)
-    l_ind, r_ind = _resolve_indices(l, r, on)
-    _a = setdiff(1:length(Tables.columnnames(r)), r_ind)
-    r_new_ind = NTuple{length(_a),Int}(_a)
-    vl, vr = inner_indices(l, r, l_ind, r_ind, r_new_ind)
-    vl2 = [] 
-    build_result_table_based_on_indices(l, r, vl, vr, vl2, l_ind, r_ind, r_new_ind)
+    names, other_l, other_r, cmp_l, cmp_r = _resolve_indices(l, r, on)
+    inner_l, inner_r = match_inner_indices(l, r, cmp_l, cmp_r)
+    outer_l = Vector{Int}()
+    build_result_table_based_on_indices(l, r, inner_l, inner_r, outer_l,other_l, other_r, names)
 end
 
-function inner_indices(l, r, l_ind::NTuple{N1,Int}, r_ind::NTuple{N1,Int}, r_new_ind::NTuple{N2,Int}) where {N1,N2}
-    llength = length(Tables.rows(l))
-    vl = Vector{Int}()
-    sizehint!(vl, llength)
-    vr = Vector{Int}()
-    sizehint!(vr, llength)
+function match_inner_indices(l, r, l_ind::NTuple{N, Int}, r_ind::NTuple{N, Int}) where {N}
+    l_length = length(Tables.rows(l))
+    vl = Vector{UInt}()
+    vr = Vector{UInt}()
+    sizehint!(vl, l_length) # these vectors will be at least this long
+    sizehint!(vr, l_length)
     for (oind, oel) in enumerate(Tables.rows(l))
         for (iind, iel) in enumerate(Tables.rows(r))
-            cmp = compare_rows(oel, iel, l_ind, r_ind)
-            if cmp
+            if compare_rows(oel, iel, l_ind, r_ind)
                 push!(vl, oind)
                 push!(vr, iind)
             end
@@ -72,21 +81,18 @@ function inner_indices(l, r, l_ind::NTuple{N1,Int}, r_ind::NTuple{N1,Int}, r_new
     vl, vr
 end
 
-function left_unmatched(l, vl)
+function match_outer_left_indices(l, vl)
     s = Set(vl)
     llenght = length(Tables.rows(l))
     filter(x -> x ∉ s, 1:llenght)
 end
 
-function build_result_table_based_on_indices(l, r, vl, vr, vl2, l_ind::NTuple{N1,Int}, r_ind::NTuple{N1,Int}, r_new_ind::NTuple{N2,Int}) where {N1,N2}
+
+function build_result_table_based_on_indices(l, r, vl, vr, vl2, other_l, r_new_ind, names)
     fulllength = length(vl) + length(vl2)
-    rcolnames = Tables.columnnames(Tables.columns(r))
-    lcolnames = Tables.columnnames(Tables.columns(l))
-    rrcolnames = getindex.(Ref(rcolnames), (2,))
-    allcolnames = vcat(lcolnames..., rrcolnames...)
+    allcolnames = names
 
-
-    cols = Vector{AbstractVector}(undef, N1 + N2)
+    cols = Vector{AbstractVector}(undef, length(names))
 
     colcounter = 1
     for c in Tables.columns(l)
@@ -96,13 +102,16 @@ function build_result_table_based_on_indices(l, r, vl, vr, vl2, l_ind::NTuple{N1
         cols[colcounter] = newc
         colcounter += 1
     end
-    for (i, c) in enumerate(Tables.columns(r))
-        i ∉ r_new_ind && continue
-        newc = Vector{Union{eltype(c),Missing}}(missing, fulllength)
+
+    rcols = Tables.columns(r)
+    for i in r_new_ind
+        c = rcols[i]
+        newc = Vector{Union{eltype(c), Missing}}(missing, fulllength)
         copyto!(newc, view(c, vr))
         cols[colcounter] = newc
         colcounter += 1
     end
+
     sink = Tables.materializer(l)
     sink((;zip(allcolnames, cols)...))
 end
