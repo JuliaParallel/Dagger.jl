@@ -375,4 +375,27 @@ using TableOperations
             @test all([el%10 == v%10 for el in Tables.getcolumn(partition, :a)])
         end
     end
+    @testset "join" begin
+        d1 = DataFrame(a=collect(-2:10))
+        d2_keys = [1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9]
+        d2 = DataFrame(a=d2_keys, b=collect(1:length(d2_keys)))
+
+        lj1 = leftjoin(d1, d2, on=:a)
+        lj2 = fetch(leftjoin(DTable(d1, 2), d2, on=:a))
+        lj3 = fetch(leftjoin(DTable(d1, 2, tabletype=NamedTuple), d2, on=:a), DataFrame)
+
+        sort!(lj1, :a)
+        sort!(lj2, :a)
+        sort!(lj3, :a)
+
+        @test isequal(lj1, lj2)
+        @test isequal(lj1, lj3)
+
+        ij1 = innerjoin(d1, d2, on=:a)
+        ij2 = fetch(innerjoin(DTable(d1, 2), d2, on=:a))
+        ij3 = fetch(innerjoin(DTable(d1, 2, tabletype=NamedTuple), d2, on=:a), DataFrame)
+
+        @test isequal(ij1, ij3)
+        @test isequal(ij1, ij3)
+    end
 end
