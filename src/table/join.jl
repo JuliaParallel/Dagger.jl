@@ -15,7 +15,7 @@ function innerjoin(d1::DTable, d2; on=nothing)
 end
 
 
-function _resolve_indices(l, r, on)
+function resolve_colnames(l, r, on)
     isnothing(on) && error("yeet")
     if on isa Symbol
         l_cmp_symbols = [on]
@@ -50,7 +50,7 @@ end
 
 
 function leftjoin(l, r; on=nothing)
-    names, other_l, other_r, cmp_l, cmp_r = _resolve_indices(l, r, on)
+    names, other_l, other_r, cmp_l, cmp_r = resolve_colnames(l, r, on)
     inner_l, inner_r = match_inner_indices(l, r, cmp_l, cmp_r)
     outer_l = match_outer_left_indices(l, inner_l)
     build_result_table_based_on_indices(l, r, inner_l, inner_r, outer_l, other_l,  other_r, names)
@@ -58,9 +58,9 @@ end
 
 
 function innerjoin(l, r; on=nothing)
-    names, other_l, other_r, cmp_l, cmp_r = _resolve_indices(l, r, on)
+    names, other_l, other_r, cmp_l, cmp_r = resolve_colnames(l, r, on)
     inner_l, inner_r = match_inner_indices(l, r, cmp_l, cmp_r)
-    outer_l = Vector{Int}()
+    outer_l = Set{UInt}()
     build_result_table_based_on_indices(l, r, inner_l, inner_r, outer_l,other_l, other_r, names)
 end
 
@@ -81,30 +81,30 @@ function match_inner_indices(l, r, l_ind::NTuple{N, Int}, r_ind::NTuple{N, Int})
     vl, vr
 end
 
-function match_outer_left_indices(l, vl)
-    s = Set(vl)
-    llenght = length(Tables.rows(l))
-    filter(x -> x ∉ s, 1:llenght)
+function match_outer_left_indices(l, inner_l)
+    s1 = Set(one(UInt):length(Tables.rows(l)))
+    setdiff!(s1, inner_l)
 end
 
 
-function build_result_table_based_on_indices(l, r, vl, vr, vl2, other_l, r_new_ind, names)
+function build_result_table_based_on_indices(l, r, vl, vr::Vector{UInt}, vl2::Set{UInt}, other_l, other_r, names)
     fulllength = length(vl) + length(vl2)
     allcolnames = names
 
     cols = Vector{AbstractVector}(undef, length(names))
 
-    colcounter = 1
+    colcounter = one(Int)
+
     for c in Tables.columns(l)
         newc = Vector{eltype(c)}(undef, fulllength)
         copyto!(newc, view(c, vl))
-        copyto!(newc, length(vl) + 1, view(c, vl2))
+        copyto!(newc, length(vl) + 1, view(c, collect(vl2)))
         cols[colcounter] = newc
         colcounter += 1
     end
 
     rcols = Tables.columns(r)
-    for i in r_new_ind
+    for i in other_r
         c = rcols[i]
         newc = Vector{Union{eltype(c), Missing}}(missing, fulllength)
         copyto!(newc, view(c, vr))
