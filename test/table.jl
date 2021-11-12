@@ -376,9 +376,9 @@ using TableOperations
         end
     end
     @testset "join" begin
-        d1 = DataFrame(a=collect(-2:10))
-        d2_keys = [1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9]
-        d2 = DataFrame(a=d2_keys, b=collect(1:length(d2_keys)))
+        d1 = DataFrame(a=collect(-2:10),b=a=collect(-2:10))
+        d2_keys = [1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12]
+        d2 = DataFrame(a=d2_keys, c=collect(1:length(d2_keys)))
 
         lj1 = leftjoin(d1, d2, on=:a)
         lj2 = fetch(leftjoin(DTable(d1, 2), d2, on=:a))
@@ -397,5 +397,6 @@ using TableOperations
 
         @test isequal(ij1, ij3)
         @test isequal(ij1, ij3)
+
     end
 end
