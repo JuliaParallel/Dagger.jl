@@ -380,16 +380,33 @@ using TableOperations
         d2_keys = [1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12]
         d2 = DataFrame(a=d2_keys, c=collect(1:length(d2_keys)))
 
+        n1 = (a=collect(-2:1000),b=a=collect(-2:1000))
+        n2 = (a=d2_keys, c=collect(1:length(d2_keys)))
+
         lj1 = leftjoin(d1, d2, on=:a)
+        lj1u = leftjoin(d1, unique(d2, :a), on=:a)
         lj2 = fetch(leftjoin(DTable(d1, 2), d2, on=:a))
         lj3 = fetch(leftjoin(DTable(d1, 2, tabletype=NamedTuple), d2, on=:a), DataFrame)
+        lj4 = fetch(leftjoin(DTable(d1, 2, tabletype=NamedTuple), sort(d2, :a), on=:a, r_sorted=true), DataFrame)
+        lj5 = fetch(leftjoin(DTable(d1, 2, tabletype=NamedTuple), unique(d2, :a), on=:a, r_unique=true), DataFrame)
+        lj6 = fetch(leftjoin(DTable(d1, 2, tabletype=NamedTuple), sort(d2, :a), on=:a, r_sorted=true, l_sorted=true), DataFrame)
+        lj7 = fetch(leftjoin(DTable(d1, 2, tabletype=NamedTuple), sort(unique(d2, :a), :a), on=:a, r_sorted=true, l_sorted=true, r_unique=true), DataFrame)
 
         sort!(lj1, :a)
+        sort!(lj1u, :a)
         sort!(lj2, :a)
         sort!(lj3, :a)
+        sort!(lj4, :a)
+        sort!(lj5, :a)
+        sort!(lj6, :a)
+        sort!(lj7, :a)
 
         @test isequal(lj1, lj2)
         @test isequal(lj1, lj3)
+        @test isequal(lj1, lj4)
+        @test isequal(lj1u, lj5)
+        @test isequal(lj1, lj6)
+        @test isequal(lj1u, lj7)
 
         ij1 = innerjoin(d1, d2, on=:a)
         ij2 = fetch(innerjoin(DTable(d1, 2), d2, on=:a))
@@ -397,6 +414,5 @@ using TableOperations
 
         @test isequal(ij1, ij3)
         @test isequal(ij1, ij3)
-
     end
 end

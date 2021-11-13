@@ -40,7 +40,7 @@ function match_inner_indices(l, r, l_ind::NTuple{N,Int}, r_ind::NTuple{N,Int}) w
     sizehint!(vr, l_length)
     for (oind, oel) in enumerate(Tables.rows(l))
         for (iind, iel) in enumerate(Tables.rows(r))
-            if compare_rows(oel, iel, l_ind, r_ind)
+            if compare_rows_eq(oel, iel, l_ind, r_ind)
                 push!(vl, oind)
                 push!(vr, iind)
             end
@@ -49,6 +49,115 @@ function match_inner_indices(l, r, l_ind::NTuple{N,Int}, r_ind::NTuple{N,Int}) w
     vl, vr
 end
 
+
+
+
+function match_inner_indices_lsorted_rsorted(l, r, cmp_l::NTuple{N,Int}, cmp_r::NTuple{N,Int}, runique::Bool) where {N}
+    l_length = length(Tables.rows(l))
+    vl = Vector{UInt}()
+    vr = Vector{UInt}()
+    sizehint!(vl, l_length) # these vectors will be at least this long
+    sizehint!(vr, l_length)
+
+
+    ri = enumerate(Tables.rows(r))
+    li = enumerate(Tables.rows(l))
+
+    riter = iterate(ri)
+    liter = iterate(li)
+    while true
+        if riter !== nothing
+            ((iind, iel), rstate) = riter
+        else
+            break
+        end
+
+        if liter !== nothing
+            ((oind, oel), lstate) = liter
+        else
+            break
+        end
+
+        cmp = compare_rows_lt(iel, oel, cmp_r, cmp_l)
+        if cmp
+            riter = iterate(ri, rstate)
+            continue
+        end
+
+        cmp = compare_rows_lt(oel, iel, cmp_l, cmp_r)
+        if cmp
+            liter = iterate(li, lstate)
+            continue
+        end
+
+        cmp = compare_rows_eq(oel, iel, cmp_l, cmp_r)
+        if cmp
+            push!(vl, oind)
+            push!(vr, iind)
+            if runique
+                liter = iterate(li, lstate)
+                continue
+            else
+                inner_riter = iterate(ri, rstate)
+                while inner_riter !== nothing
+                    ((i_iind, i_iel), i_rstate) = inner_riter
+                    if compare_rows_eq(oel, i_iel, cmp_l, cmp_r)
+                        push!(vl, oind)
+                        push!(vr, i_iind)
+                        inner_riter = iterate(ri, i_rstate)
+                    else
+                        break
+                    end
+                end
+                liter = iterate(li, lstate)
+            end
+        end
+    end
+    vl, vr
+end
+
+function match_inner_indices_runique(l, r, cmp_l::NTuple{N,Int}, cmp_r::NTuple{N,Int}) where {N}
+    l_length = length(Tables.rows(l))
+    vl = Vector{UInt}()
+    vr = Vector{UInt}()
+    sizehint!(vl, l_length) # these vectors will be at least this long
+    sizehint!(vr, l_length)
+
+    for (oind, oel) in enumerate(Tables.rows(l))
+        for (iind, iel) in enumerate(Tables.rows(r))
+            if compare_rows_eq(oel, iel, cmp_l, cmp_r)
+                push!(vl, oind)
+                push!(vr, iind)
+                break
+            end
+        end
+    end
+    vl, vr
+end
+
+function match_inner_indices_rsorted(l, r, cmp_l::NTuple{N,Int}, cmp_r::NTuple{N,Int}) where {N}
+    l_length = length(Tables.rows(l))
+    vl = Vector{UInt}()
+    vr = Vector{UInt}()
+    sizehint!(vl, l_length) # these vectors will be at least this long
+    sizehint!(vr, l_length)
+
+    for (oind, oel) in enumerate(Tables.rows(l))
+        prev_cmp = false
+        for (iind, iel) in enumerate(Tables.rows(r))
+            cmp = compare_rows_eq(oel, iel, cmp_l, cmp_r)
+            if cmp
+                push!(vl, oind)
+                push!(vr, iind)
+            end
+            prev_cmp && !cmp && break
+            prev_cmp = cmp
+        end
+    end
+    vl, vr
+end
+
+
 function find_outer_indices(d, inner_indices)
     s = Set(one(UInt):length(Tables.rows(d)))
     setdiff!(s, inner_indices)
@@ -56,17 +165,17 @@ end
 
 
 function build_joined_table(
-    jointype::Symbol,
-    names::Tuple,
-    l,
-    r,
-    inner_l::Vector{UInt},
-    inner_r::Vector{UInt},
-    outer_l::Set{UInt},
-    other_r::NTuple,
-)
+        jointype::Symbol,
+        names::Tuple,
+        l,
+        r,
+        inner_l::Vector{UInt},
+        inner_r::Vector{UInt},
+        outer_l::Set{UInt},
+        other_r::NTuple,
+    )
+
     fulllength = length(inner_l) + length(outer_l)
-    allcolnames = names
 
     cols = Vector{AbstractVector}(undef, length(names))
 
@@ -83,7 +192,7 @@ function build_joined_table(
     rcols = Tables.columns(r)
     for i in other_r
         c = rcols[i]
-        vectype = jointype == :innerjoin ? eltype(c) : Union{eltype(c), Missing}
+        vectype = jointype == :innerjoin ? eltype(c) : Union{eltype(c),Missing}
         newc = Vector{vectype}(undef, fulllength)
         copyto!(newc, view(c, inner_r))
         cols[colcounter] = newc
@@ -91,15 +200,24 @@ function build_joined_table(
     end
 
     sink = Tables.materializer(l)
-    sink((; zip(allcolnames, cols)...))
+    sink((; zip(names, cols)...))
 end
 
-@inline function compare_rows(o, i, l_ind::NTuple{N,Int}, r_ind::NTuple{N,Int}) where {N}
+@inline function compare_rows_eq(o, i, cmp_l::NTuple{N,Int}, cmp_r::NTuple{N,Int}) where {N}
     test = true
     @inbounds for x = 1:N
-        test &= Tables.getcolumn(o, l_ind[x]) == Tables.getcolumn(i, r_ind[x])
+        test &= Tables.getcolumn(o, cmp_l[x]) == Tables.getcolumn(i, cmp_r[x])
         test || break
     end
     test
 end
 
+
+@inline function compare_rows_lt(o, i, cmp_l::NTuple{N,Int}, cmp_r::NTuple{N,Int}) where {N}
+    test = false
+    @inbounds for x = 1:N
+        test |= Tables.getcolumn(o, cmp_l[x]) < Tables.getcolumn(i, cmp_r[x])
+        test && break
+    end
+    test
+end
