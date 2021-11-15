@@ -376,16 +376,22 @@ using TableOperations
         end
     end
     @testset "join" begin
-        rng = MersenneTwister(2137)
+        rng = MersenneTwister(69420)
 
         a_len = 1000
         b_len = 100
 
         genkeys = (n) -> rand(rng, Int32, n).%100
-        genrand = (n) -> collect(1:n)
+        geninds = (n) -> collect(1:n)
 
-        d1 = DataFrame(a=genkeys(a_len), b=genrand(a_len))
-        d2 = DataFrame(a=genkeys(b_len), c=genrand(b_len))
+        d1 = DataFrame(a=genkeys(a_len), b=geninds(a_len))
+        d2 = DataFrame(a=genkeys(b_len), c=geninds(b_len))
+
+        d2_lookup = Dict{Tuple{Int32}, Vector{UInt}}()
+        for (i, r) in enumerate(Tables.rows(d2))
+            v = get!(d2_lookup, (r.a,), Vector{UInt}())
+            push!(v, i)
+        end
 
         lj1 = leftjoin(d1, d2, on=:a)
         lj1u = leftjoin(d1, unique(d2, :a), on=:a)
@@ -395,6 +401,7 @@ using TableOperations
         lj5 = fetch(leftjoin(DTable(d1, 7, tabletype=NamedTuple), unique(d2, :a), on=:a, r_unique=true), DataFrame)
         lj6 = fetch(leftjoin(DTable(sort(d1, :a), 7, tabletype=NamedTuple), sort(d2, :a), on=:a, r_sorted=true, l_sorted=true), DataFrame)
         lj7 = fetch(leftjoin(DTable(sort(d1, :a), 7, tabletype=NamedTuple), sort(unique(d2, :a), :a), on=:a, r_sorted=true, l_sorted=true, r_unique=true), DataFrame)
+        lj8 = fetch(leftjoin(DTable(d1, 7, tabletype=NamedTuple), d2, on=:a, lookup=d2_lookup), DataFrame)
 
         sort!(lj1, [:a, :b])
         sort!(lj1u, [:a, :b])
@@ -404,6 +411,7 @@ using TableOperations
         sort!(lj5, [:a, :b])
         sort!(lj6, [:a, :b])
         sort!(lj7, [:a, :b])
+        sort!(lj8, [:a, :b])
 
         @test isequal(lj1, lj2)
         @test isequal(lj1, lj3)
@@ -411,6 +419,7 @@ using TableOperations
         @test isequal(lj1u, lj5)
         @test isequal(lj1, lj6)
         @test isequal(lj1u, lj7)
+        @test isequal(lj1, lj8)
 
         ij1 = innerjoin(d1, d2, on=:a)
         ij1u = innerjoin(d1, unique(d2, :a), on=:a)
@@ -420,6 +429,7 @@ using TableOperations
         ij5 = fetch(innerjoin(DTable(d1, 7, tabletype=NamedTuple), unique(d2, :a), on=:a, r_unique=true), DataFrame)
         ij6 = fetch(innerjoin(DTable(sort(d1, :a), 7, tabletype=NamedTuple), sort(d2, :a), on=:a, r_sorted=true, l_sorted=true), DataFrame)
         ij7 = fetch(innerjoin(DTable(sort(d1, :a), 7, tabletype=NamedTuple), sort(unique(d2, :a), :a), on=:a, r_sorted=true, l_sorted=true, r_unique=true), DataFrame)
+        ij8 = fetch(innerjoin(DTable(d1, 7, tabletype=NamedTuple), d2, on=:a, lookup=d2_lookup), DataFrame)
 
         sort!(ij1, [:a, :b])
         sort!(ij1u, [:a, :b])
@@ -429,7 +439,7 @@ using TableOperations
         sort!(ij5, [:a, :b])
         sort!(ij6, [:a, :b])
         sort!(ij7, [:a, :b])
-
+        sort!(ij8, [:a, :b])
 
         @test isequal(ij1, ij2)
         @test isequal(ij1, ij3)
@@ -437,5 +447,6 @@ using TableOperations
         @test isequal(ij1u, ij5)
         @test isequal(ij1, ij6)
         @test isequal(ij1u, ij7)
+        @test isequal(ij1, ij8)
     end
 end

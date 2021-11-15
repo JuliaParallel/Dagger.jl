@@ -1,8 +1,11 @@
 function resolve_colnames(l, r, on)
-    isnothing(on) && error("yeet")
+    isnothing(on) && ArgumentError("Missing join argument 'on'")
     if on isa Symbol
         l_cmp_symbols = [on]
         r_cmp_symbols = [on]
+    elseif on isa Pair{Symbol,Symbol}
+        l_cmp_symbols = getindex(on, 1)
+        r_cmp_symbols = getindex(on, 2)
     elseif on isa Vector{Symbol}
         l_cmp_symbols = on
         r_cmp_symbols = on
@@ -36,7 +39,7 @@ function match_inner_indices(l, r, l_ind::NTuple{N,Int}, r_ind::NTuple{N,Int}) w
     l_length = length(Tables.rows(l))
     vl = Vector{UInt}()
     vr = Vector{UInt}()
-    sizehint!(vl, l_length) # these vectors will be at least this long
+    sizehint!(vl, l_length)
     sizehint!(vr, l_length)
     for (oind, oel) in enumerate(Tables.rows(l))
         for (iind, iel) in enumerate(Tables.rows(r))
@@ -50,11 +53,31 @@ function match_inner_indices(l, r, l_ind::NTuple{N,Int}, r_ind::NTuple{N,Int}) w
 end
 
 
+function match_inner_indices_lookup(l, lookup, l_ind::NTuple{N,Int}) where {N}
+    l_length = length(Tables.rows(l))
+    vl = Vector{UInt}()
+    vr = Vector{UInt}()
+    sizehint!(vl, l_length)
+    sizehint!(vr, l_length)
+
+    row_tuple = (row, cols) -> ([Tables.getcolumn(row, x) for x in cols]...,)
+    _evec = Vector{UInt}()
+    for (oind, oel) in enumerate(Tables.rows(l))
+        indices = get(lookup, row_tuple(oel, l_ind), _evec)
+        for iind in indices
+            push!(vl, oind)
+            push!(vr, iind)
+        end
+    end
+    vl, vr
+end
+
+
 function match_inner_indices_lsorted_rsorted(l, r, cmp_l::NTuple{N,Int}, cmp_r::NTuple{N,Int}, runique::Bool) where {N}
     l_length = length(Tables.rows(l))
     vl = Vector{UInt}()
     vr = Vector{UInt}()
-    sizehint!(vl, l_length) # these vectors will be at least this long
+    sizehint!(vl, l_length)
     sizehint!(vr, l_length)
 
     ri = enumerate(Tables.rows(r))
@@ -63,32 +86,24 @@ function match_inner_indices_lsorted_rsorted(l, r, cmp_l::NTuple{N,Int}, cmp_r::
     riter = iterate(ri)
     liter = iterate(li)
     while true
-        if riter !== nothing
-            ((iind, iel), rstate) = riter
-        else
+        if riter === nothing || liter === nothing
             break
         end
 
-        if liter !== nothing
-            ((oind, oel), lstate) = liter
-        else
-            break
-        end
+        (iind, iel), rstate = riter
+        (oind, oel), lstate = liter
 
-        cmp = compare_rows_lt(iel, oel, cmp_r, cmp_l)
-        if cmp
+        if compare_rows_lt(iel, oel, cmp_r, cmp_l)
             riter = iterate(ri, rstate)
             continue
         end
 
-        cmp = compare_rows_lt(oel, iel, cmp_l, cmp_r)
-        if cmp
+        if compare_rows_lt(oel, iel, cmp_l, cmp_r)
             liter = iterate(li, lstate)
             continue
         end
 
-        cmp = compare_rows_eq(oel, iel, cmp_l, cmp_r)
-        if cmp
+        if compare_rows_eq(oel, iel, cmp_l, cmp_r)
             push!(vl, oind)
             push!(vr, iind)
             if runique
@@ -113,11 +128,12 @@ function match_inner_indices_lsorted_rsorted(l, r, cmp_l::NTuple{N,Int}, cmp_r::
     vl, vr
 end
 
+
 function match_inner_indices_runique(l, r, cmp_l::NTuple{N,Int}, cmp_r::NTuple{N,Int}) where {N}
     l_length = length(Tables.rows(l))
     vl = Vector{UInt}()
     vr = Vector{UInt}()
-    sizehint!(vl, l_length) # these vectors will be at least this long
+    sizehint!(vl, l_length)
     sizehint!(vr, l_length)
 
     for (oind, oel) in enumerate(Tables.rows(l))
@@ -132,11 +148,12 @@ function match_inner_indices_runique(l, r, cmp_l::NTuple{N,Int}, cmp_r::NTuple{N
     vl, vr
 end
 
+
 function match_inner_indices_rsorted(l, r, cmp_l::NTuple{N,Int}, cmp_r::NTuple{N,Int}) where {N}
     l_length = length(Tables.rows(l))
     vl = Vector{UInt}()
     vr = Vector{UInt}()
-    sizehint!(vl, l_length) # these vectors will be at least this long
+    sizehint!(vl, l_length)
     sizehint!(vr, l_length)
 
     for (oind, oel) in enumerate(Tables.rows(l))
@@ -200,6 +217,7 @@ function build_joined_table(
     sink((; zip(names, cols)...))
 end
 
+
 @inline function compare_rows_eq(o, i, cmp_l::NTuple{N,Int}, cmp_r::NTuple{N,Int}) where {N}
     test = true
     @inbounds for x = 1:N
@@ -218,3 +236,4 @@ end
     end
     test
 end
+
