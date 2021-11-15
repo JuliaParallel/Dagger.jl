@@ -119,6 +119,122 @@ affinity(r::DRef) = OSProc(r.owner)=>r.size
 # see #295
 affinity(r::FileRef) = OSProc(1)=>r.size
 
+### Mutation
+
+"Wraps `x` in a `Chunk` on `proc`, scoped to `scope`, which allows `x` to be mutated by tasks that use it."
+macro mutable(proc, scope, x)
+    :(Dagger.tochunk($(esc(x)), $(esc(proc)), $(esc(scope))))
+end
+"Creates a mutable `Chunk` on `proc`, scoped to exactly `proc`."
+macro mutable(proc, x)
+    quote
+        let proc = $(esc(proc))
+            let scope = proc isa OSProc ? Dagger.ProcessScope(proc.pid) : Dagger.ExactScope(proc)
+                Dagger.@mutable proc scope $(esc(x))
+            end
+        end
+    end
+end
+"Creates a mutable `Chunk` on the current worker."
+macro mutable(x)
+    :(Dagger.@mutable OSProc() Dagger.ProcessScope() $(esc(x)))
+end
+
+"""
+Maps a value to one of multiple distributed "mirror" values automatically when
+used as a thunk argument. Construct using `@shard` or `shard`.
+"""
+struct Shard
+    chunks::Dict{Processor,Chunk}
+end
+
+"""
+    shard(f; kwargs...) -> Chunk{Shard}
+
+Executes `f` on all workers in `workers`, wrapping the result in a
+process-scoped `Chunk`, and constructs a `Chunk{Shard}` containing all of these
+`Chunk`s on the current worker.
+
+Keyword arguments:
+- `procs` -- The list of processors to create pieces on. May be any iterable container of `Processor`s.
+- `workers` -- The list of workers to create pieces on. May be any iterable container of `Integer`s.
+- `per_thread::Bool=false` -- If `true`, creates a piece per each thread, rather than a piece per each worker.
+"""
+function shard(f; procs=nothing, workers=nothing, per_thread=false)
+    if procs === nothing
+        if workers !== nothing
+            procs = [OSProc(w) for w in workers]
+        else
+            procs = lock(Sch.eager_context()) do
+                copy(Sch.eager_context().procs)
+            end
+        end
+        if per_thread
+            _procs = ThreadProc[]
+            for p in procs
+                append!(_procs, filter(p->p isa ThreadProc, get_processors(p)))
+            end
+            procs = _procs
+        end
+    else
+        if workers !== nothing
+            throw(ArgumentError("Cannot combine `procs` and `workers`"))
+        elseif per_thread
+            throw(ArgumentError("Cannot combine `procs` and `per_thread=true`"))
+        end
+    end
+    isempty(procs) && throw(ArgumentError("Cannot create empty Shard"))
+    scopes = [p isa OSProc ? ProcessScope(p) : ExactScope(p) for p in procs]
+    thunks = [proc=>Dagger.@spawn single=Dagger.get_parent(proc).pid _shard_inner(f, proc, scope) for (proc,scope) in zip(procs,scopes)]
+    shard = Shard(Dict{Processor,Chunk}(thunk[1]=>fetch(thunk[2])[] for thunk in thunks))
+    scope = UnionScope(scopes)
+    Dagger.tochunk(shard, OSProc(), scope)
+end
+function _shard_inner(f, proc, scope)
+    Ref(Dagger.@mutable proc scope f())
+end
+
+"Creates a `Shard`. See [`Dagger.shard`](@ref) for details."
+macro shard(exs...)
+    opts = esc.(exs[1:end-1])
+    ex = exs[end]
+    quote
+        let f = ()->$(esc(ex))
+            $shard(f; $(opts...))
+        end
+    end
+end
+
+function move(from_proc::Processor, to_proc::Processor, shard::Shard)
+    # Match either this proc or some ancestor
+    # N.B. This behavior may bypass the piece's scope restriction
+    proc = to_proc
+    if haskey(shard.chunks, proc)
+        return shard.chunks[proc]
+    end
+    parent = Dagger.get_parent(proc)
+    while parent != proc
+        proc = parent
+        parent = Dagger.get_parent(proc)
+        if haskey(shard.chunks, proc)
+            return shard.chunks[proc]
+        end
+    end
+
+    throw(KeyError(to_proc))
+end
+function move(from_proc::Processor, to_proc::Processor, x::Chunk{Shard})
+    piece = remotecall_fetch(x.handle.owner, x.handle, from_proc, to_proc) do ref, from_proc, to_proc
+        shard = MemPool.poolget(ref)
+        move(from_proc, to_proc, shard)
+    end::Chunk
+    move(from_proc, to_proc, piece)
+end
+Base.map(f, cs::Chunk{Shard}) = map(f, collect(cs))
+Base.map(f, s::Shard) = [Dagger.spawn(f, c) for c in values(s.chunks)]
+
+### Core Stuff
+
 """
     tochunk(x, proc; persist=false, cache=false) -> Chunk
 
