@@ -376,30 +376,34 @@ using TableOperations
         end
     end
     @testset "join" begin
-        d1 = DataFrame(a=collect(-2:10),b=a=collect(-2:10))
-        d2_keys = [1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12]
-        d2 = DataFrame(a=d2_keys, c=collect(1:length(d2_keys)))
+        rng = MersenneTwister(2137)
 
-        n1 = (a=collect(-2:1000),b=a=collect(-2:1000))
-        n2 = (a=d2_keys, c=collect(1:length(d2_keys)))
+        a_len = 1000
+        b_len = 100
+
+        genkeys = (n) -> rand(rng, Int32, n).%100
+        genrand = (n) -> collect(1:n)
+
+        d1 = DataFrame(a=genkeys(a_len), b=genrand(a_len))
+        d2 = DataFrame(a=genkeys(b_len), c=genrand(b_len))
 
         lj1 = leftjoin(d1, d2, on=:a)
         lj1u = leftjoin(d1, unique(d2, :a), on=:a)
-        lj2 = fetch(leftjoin(DTable(d1, 2), d2, on=:a))
-        lj3 = fetch(leftjoin(DTable(d1, 2, tabletype=NamedTuple), d2, on=:a), DataFrame)
-        lj4 = fetch(leftjoin(DTable(d1, 2, tabletype=NamedTuple), sort(d2, :a), on=:a, r_sorted=true), DataFrame)
-        lj5 = fetch(leftjoin(DTable(d1, 2, tabletype=NamedTuple), unique(d2, :a), on=:a, r_unique=true), DataFrame)
-        lj6 = fetch(leftjoin(DTable(d1, 2, tabletype=NamedTuple), sort(d2, :a), on=:a, r_sorted=true, l_sorted=true), DataFrame)
-        lj7 = fetch(leftjoin(DTable(d1, 2, tabletype=NamedTuple), sort(unique(d2, :a), :a), on=:a, r_sorted=true, l_sorted=true, r_unique=true), DataFrame)
+        lj2 = fetch(leftjoin(DTable(d1, 7), d2, on=:a))
+        lj3 = fetch(leftjoin(DTable(d1, 7, tabletype=NamedTuple), d2, on=:a), DataFrame)
+        lj4 = fetch(leftjoin(DTable(d1, 7, tabletype=NamedTuple), sort(d2, :a), on=:a, r_sorted=true), DataFrame)
+        lj5 = fetch(leftjoin(DTable(d1, 7, tabletype=NamedTuple), unique(d2, :a), on=:a, r_unique=true), DataFrame)
+        lj6 = fetch(leftjoin(DTable(sort(d1, :a), 7, tabletype=NamedTuple), sort(d2, :a), on=:a, r_sorted=true, l_sorted=true), DataFrame)
+        lj7 = fetch(leftjoin(DTable(sort(d1, :a), 7, tabletype=NamedTuple), sort(unique(d2, :a), :a), on=:a, r_sorted=true, l_sorted=true, r_unique=true), DataFrame)
 
-        sort!(lj1, :a)
-        sort!(lj1u, :a)
-        sort!(lj2, :a)
-        sort!(lj3, :a)
-        sort!(lj4, :a)
-        sort!(lj5, :a)
-        sort!(lj6, :a)
-        sort!(lj7, :a)
+        sort!(lj1, [:a, :b])
+        sort!(lj1u, [:a, :b])
+        sort!(lj2, [:a, :b])
+        sort!(lj3, [:a, :b])
+        sort!(lj4, [:a, :b])
+        sort!(lj5, [:a, :b])
+        sort!(lj6, [:a, :b])
+        sort!(lj7, [:a, :b])
 
         @test isequal(lj1, lj2)
         @test isequal(lj1, lj3)
@@ -409,10 +413,29 @@ using TableOperations
         @test isequal(lj1u, lj7)
 
         ij1 = innerjoin(d1, d2, on=:a)
-        ij2 = fetch(innerjoin(DTable(d1, 2), d2, on=:a))
-        ij3 = fetch(innerjoin(DTable(d1, 2, tabletype=NamedTuple), d2, on=:a), DataFrame)
+        ij1u = innerjoin(d1, unique(d2, :a), on=:a)
+        ij2 = fetch(innerjoin(DTable(d1, 7), d2, on=:a))
+        ij3 = fetch(innerjoin(DTable(d1, 7, tabletype=NamedTuple), d2, on=:a), DataFrame)
+        ij4 = fetch(innerjoin(DTable(d1, 7, tabletype=NamedTuple), sort(d2, :a), on=:a, r_sorted=true), DataFrame)
+        ij5 = fetch(innerjoin(DTable(d1, 7, tabletype=NamedTuple), unique(d2, :a), on=:a, r_unique=true), DataFrame)
+        ij6 = fetch(innerjoin(DTable(sort(d1, :a), 7, tabletype=NamedTuple), sort(d2, :a), on=:a, r_sorted=true, l_sorted=true), DataFrame)
+        ij7 = fetch(innerjoin(DTable(sort(d1, :a), 7, tabletype=NamedTuple), sort(unique(d2, :a), :a), on=:a, r_sorted=true, l_sorted=true, r_unique=true), DataFrame)
 
+        sort!(ij1, [:a, :b])
+        sort!(ij1u, [:a, :b])
+        sort!(ij2, [:a, :b])
+        sort!(ij3, [:a, :b])
+        sort!(ij4, [:a, :b])
+        sort!(ij5, [:a, :b])
+        sort!(ij6, [:a, :b])
+        sort!(ij7, [:a, :b])
+
+
+        @test isequal(ij1, ij2)
         @test isequal(ij1, ij3)
-        @test isequal(ij1, ij3)
+        @test isequal(ij1, ij4)
+        @test isequal(ij1u, ij5)
+        @test isequal(ij1, ij6)
+        @test isequal(ij1u, ij7)
     end
 end

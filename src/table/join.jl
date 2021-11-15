@@ -50,15 +50,12 @@ function match_inner_indices(l, r, l_ind::NTuple{N,Int}, r_ind::NTuple{N,Int}) w
 end
 
 
-
-
 function match_inner_indices_lsorted_rsorted(l, r, cmp_l::NTuple{N,Int}, cmp_r::NTuple{N,Int}, runique::Bool) where {N}
     l_length = length(Tables.rows(l))
     vl = Vector{UInt}()
     vr = Vector{UInt}()
     sizehint!(vl, l_length) # these vectors will be at least this long
     sizehint!(vr, l_length)
-
 
     ri = enumerate(Tables.rows(r))
     li = enumerate(Tables.rows(l))
@@ -191,7 +188,7 @@ function build_joined_table(
 
     rcols = Tables.columns(r)
     for i in other_r
-        c = rcols[i]
+        c = Tables.getcolumn(rcols, i)
         vectype = jointype == :innerjoin ? eltype(c) : Union{eltype(c),Missing}
         newc = Vector{vectype}(undef, fulllength)
         copyto!(newc, view(c, inner_r))
