@@ -7,7 +7,7 @@ CurrentModule = Dagger
 Pages = ["types.md"]
 ```
 
-## General
+## General Types
 ```@docs
 Thunk
 EagerThunk
@@ -15,38 +15,38 @@ Chunk
 UnitDomain
 ```
 
-## Tables
+## Table Types
 ```@docs
 DTable
 GDTable
 ```
 
-## Arrays
+## Array Types
 ```@docs
 DArray
 Blocks
 ArrayDomain
 ```
 
-## Processors
+## Processor Types
 ```@docs
 Processor
 OSProc
 ThreadProc
 ```
 
-## Context
+## Context Types
 ```@docs
 Context
 ```
 
-## Logging
+## Logging Types
 ```@docs
 NoOpLog
 LocalEventLog
 ```
 
-## Scheduling
+## Scheduling Types
 ```@docs
 Sch.SchedulerOptions
 Sch.ThunkOptions
@@ -54,7 +54,7 @@ Sch.MaxUtilization
 Sch.DynamicThunkException
 ```
 
-## File IO
+## File IO Types
 
 !!! warning
     These APIs are currently untested and may be removed or modified.

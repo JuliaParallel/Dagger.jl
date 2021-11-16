@@ -7,7 +7,7 @@ CurrentModule = Dagger
 Pages = ["functions.md"]
 ```
 
-## General
+## General Functions
 ```@docs
 delayed
 spawn
@@ -20,7 +20,7 @@ order
 treereduce
 ```
 
-## Tables
+## Table Functions
 ```@docs
 tabletype
 tabletype!
@@ -30,13 +30,13 @@ filter
 groupby
 ```
 
-## Arrays
+## Array Functions
 ```@docs
 alignfirst
 view
 ```
 
-## Processors
+## Processor Functions
 ```@docs
 execute!
 iscompatible
@@ -49,18 +49,18 @@ get_tls
 set_tls!
 ```
 
-## Context
+## Context Functions
 ```@docs
 addprocs!
 rmprocs!
 ```
 
-## Logging
+## Logging Functions
 ```@docs
 get_logs!
 ```
 
-## Thunk Execution Environment
+## Thunk Execution Environment Functions
 
 These functions are used within the function called by a `Thunk`.
 
@@ -69,7 +69,7 @@ in_thunk
 thunk_processor
 ```
 
-### Dynamic Scheduler Control
+### Dynamic Scheduler Control Functions
 
 These functions query and control the scheduler remotely.
 
@@ -83,7 +83,7 @@ Sch.halt!
 Sch.get_dag_ids
 ```
 
-## File IO
+## File IO Functions
 
 !!! warning
     These APIs are currently untested and may be removed or modified.
@@ -93,7 +93,7 @@ save
 load
 ```
 
-# Macros
+# Macros API
 ```@docs
 @par
 @spawn
