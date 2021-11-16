@@ -25,6 +25,9 @@ steps:
       # - JuliaCI/julia-coverage#v1:
       #     codecov: true
   - label: DaggerFlux Reverse CI
+    agents:
+      queue: "juliagpu"
+      rocm: "*"
     timeout_in_minutes: 60
     plugins:
       - JuliaCI/julia#v1:
