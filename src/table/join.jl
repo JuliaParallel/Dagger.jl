@@ -34,7 +34,12 @@ function resolve_colnames(l, r, on)
     final_nameset, other_l, other_r, cmp_l, cmp_r
 end
 
+"""
+    match_inner_indices(l, r, l_ind::NTuple{N,Int}, r_ind::NTuple{N,Int})
 
+Returns two vectors containing indices of matched rows.
+Standard non-optimized use case.
+"""
 function match_inner_indices(l, r, l_ind::NTuple{N,Int}, r_ind::NTuple{N,Int}) where {N}
     l_length = length(Tables.rows(l))
     vl = Vector{UInt}()
@@ -52,7 +57,16 @@ function match_inner_indices(l, r, l_ind::NTuple{N,Int}, r_ind::NTuple{N,Int}) w
     vl, vr
 end
 
+"""
+    match_inner_indices_lookup(l, lookup, l_ind::NTuple{N,Int})
 
+Returns two vectors containing indices of matched rows.
+Uses `lookup` to find the matching indices.
+
+`lookup` needs to be a dict-like structure that contains keys in
+form of a `Tuple` of all matching columns and values in form
+of type `Vector{UInt}` containing the related row indices.
+"""
 function match_inner_indices_lookup(l, lookup, l_ind::NTuple{N,Int}) where {N}
     l_length = length(Tables.rows(l))
     vl = Vector{UInt}()
@@ -72,7 +86,12 @@ function match_inner_indices_lookup(l, lookup, l_ind::NTuple{N,Int}) where {N}
     vl, vr
 end
 
+"""
+    match_inner_indices_lsorted_rsorted(l, r, cmp_l::NTuple{N,Int}, cmp_r::NTuple{N,Int}, runique::Bool)
 
+Returns two vectors containing indices of matched rows.
+Optimized pass for the left table sorted, right table sorted and optionally right table only containing unique keys.
+"""
 function match_inner_indices_lsorted_rsorted(l, r, cmp_l::NTuple{N,Int}, cmp_r::NTuple{N,Int}, runique::Bool) where {N}
     l_length = length(Tables.rows(l))
     vl = Vector{UInt}()
@@ -128,7 +147,12 @@ function match_inner_indices_lsorted_rsorted(l, r, cmp_l::NTuple{N,Int}, cmp_r::
     vl, vr
 end
 
+"""
+    match_inner_indices_runique(l, r, cmp_l::NTuple{N,Int}, cmp_r::NTuple{N,Int})
 
+Returns two vectors containing indices of matched rows.
+Optimized pass for joins with the right table containing unique keys only.
+"""
 function match_inner_indices_runique(l, r, cmp_l::NTuple{N,Int}, cmp_r::NTuple{N,Int}) where {N}
     l_length = length(Tables.rows(l))
     vl = Vector{UInt}()
@@ -148,7 +172,12 @@ function match_inner_indices_runique(l, r, cmp_l::NTuple{N,Int}, cmp_r::NTuple{N
     vl, vr
 end
 
+"""
+    match_inner_indices_rsorted(l, r, cmp_l::NTuple{N,Int}, cmp_r::NTuple{N,Int})
 
+Returns two vectors containing indices of matched rows.
+Optimized pass for joins with a sorted right table.
+"""
 function match_inner_indices_rsorted(l, r, cmp_l::NTuple{N,Int}, cmp_r::NTuple{N,Int}) where {N}
     l_length = length(Tables.rows(l))
     vl = Vector{UInt}()
@@ -171,13 +200,24 @@ function match_inner_indices_rsorted(l, r, cmp_l::NTuple{N,Int}, cmp_r::NTuple{N
     vl, vr
 end
 
+"""
+    find_outer_indices(d, inner_indices)
 
+Finds the unmatched indices from the table.
+"""
 function find_outer_indices(d, inner_indices)
     s = Set(one(UInt):length(Tables.rows(d)))
     setdiff!(s, inner_indices)
 end
 
+"""
+    build_joined_table(jointype, names, l, r, inner_l, inner_r, outer_l, other_r)
 
+Takes the indices of matching rows (`inner*`) and the ones that weren't matched (`outer_l`) from the `l` table
+and builds the result based on that.
+
+Uses all the columns from the left column and the `other_r` columns from the right table.
+"""
 function build_joined_table(
         jointype::Symbol,
         names::Tuple,

@@ -375,8 +375,9 @@ using TableOperations
             @test all([el%10 == v%10 for el in Tables.getcolumn(partition, :a)])
         end
     end
+
     @testset "join" begin
-        rng = MersenneTwister(69420)
+        rng = MersenneTwister(2137)
 
         a_len = 1000
         b_len = 100
@@ -395,13 +396,13 @@ using TableOperations
 
         lj1 = leftjoin(d1, d2, on=:a)
         lj1u = leftjoin(d1, unique(d2, :a), on=:a)
-        lj2 = fetch(leftjoin(DTable(d1, 7), d2, on=:a))
-        lj3 = fetch(leftjoin(DTable(d1, 7, tabletype=NamedTuple), d2, on=:a), DataFrame)
-        lj4 = fetch(leftjoin(DTable(d1, 7, tabletype=NamedTuple), sort(d2, :a), on=:a, r_sorted=true), DataFrame)
-        lj5 = fetch(leftjoin(DTable(d1, 7, tabletype=NamedTuple), unique(d2, :a), on=:a, r_unique=true), DataFrame)
-        lj6 = fetch(leftjoin(DTable(sort(d1, :a), 7, tabletype=NamedTuple), sort(d2, :a), on=:a, r_sorted=true, l_sorted=true), DataFrame)
-        lj7 = fetch(leftjoin(DTable(sort(d1, :a), 7, tabletype=NamedTuple), sort(unique(d2, :a), :a), on=:a, r_sorted=true, l_sorted=true, r_unique=true), DataFrame)
-        lj8 = fetch(leftjoin(DTable(d1, 7, tabletype=NamedTuple), d2, on=:a, lookup=d2_lookup), DataFrame)
+        lj2 = fetch(leftjoin(DTable(d1, 111), d2, on=:a))
+        lj3 = fetch(leftjoin(DTable(d1, 111, tabletype=NamedTuple), d2, on=:a), DataFrame)
+        lj4 = fetch(leftjoin(DTable(d1, 111, tabletype=NamedTuple), sort(d2, :a), on=:a, r_sorted=true), DataFrame)
+        lj5 = fetch(leftjoin(DTable(d1, 111, tabletype=NamedTuple), unique(d2, :a), on=:a, r_unique=true), DataFrame)
+        lj6 = fetch(leftjoin(DTable(sort(d1, :a), 111, tabletype=NamedTuple), sort(d2, :a), on=:a, r_sorted=true, l_sorted=true), DataFrame)
+        lj7 = fetch(leftjoin(DTable(sort(d1, :a), 111, tabletype=NamedTuple), sort(unique(d2, :a), :a), on=:a, r_sorted=true, l_sorted=true, r_unique=true), DataFrame)
+        lj8 = fetch(leftjoin(DTable(d1, 111, tabletype=NamedTuple), d2, on=:a, lookup=d2_lookup), DataFrame)
 
         sort!(lj1, [:a, :b])
         sort!(lj1u, [:a, :b])
@@ -423,13 +424,13 @@ using TableOperations
 
         ij1 = innerjoin(d1, d2, on=:a)
         ij1u = innerjoin(d1, unique(d2, :a), on=:a)
-        ij2 = fetch(innerjoin(DTable(d1, 7), d2, on=:a))
-        ij3 = fetch(innerjoin(DTable(d1, 7, tabletype=NamedTuple), d2, on=:a), DataFrame)
-        ij4 = fetch(innerjoin(DTable(d1, 7, tabletype=NamedTuple), sort(d2, :a), on=:a, r_sorted=true), DataFrame)
-        ij5 = fetch(innerjoin(DTable(d1, 7, tabletype=NamedTuple), unique(d2, :a), on=:a, r_unique=true), DataFrame)
-        ij6 = fetch(innerjoin(DTable(sort(d1, :a), 7, tabletype=NamedTuple), sort(d2, :a), on=:a, r_sorted=true, l_sorted=true), DataFrame)
-        ij7 = fetch(innerjoin(DTable(sort(d1, :a), 7, tabletype=NamedTuple), sort(unique(d2, :a), :a), on=:a, r_sorted=true, l_sorted=true, r_unique=true), DataFrame)
-        ij8 = fetch(innerjoin(DTable(d1, 7, tabletype=NamedTuple), d2, on=:a, lookup=d2_lookup), DataFrame)
+        ij2 = fetch(innerjoin(DTable(d1, 111), d2, on=:a))
+        ij3 = fetch(innerjoin(DTable(d1, 111, tabletype=NamedTuple), d2, on=:a), DataFrame)
+        ij4 = fetch(innerjoin(DTable(d1, 111, tabletype=NamedTuple), sort(d2, :a), on=:a, r_sorted=true), DataFrame)
+        ij5 = fetch(innerjoin(DTable(d1, 111, tabletype=NamedTuple), unique(d2, :a), on=:a, r_unique=true), DataFrame)
+        ij6 = fetch(innerjoin(DTable(sort(d1, :a), 111, tabletype=NamedTuple), sort(d2, :a), on=:a, r_sorted=true, l_sorted=true), DataFrame)
+        ij7 = fetch(innerjoin(DTable(sort(d1, :a), 111, tabletype=NamedTuple), sort(unique(d2, :a), :a), on=:a, r_sorted=true, l_sorted=true, r_unique=true), DataFrame)
+        ij8 = fetch(innerjoin(DTable(d1, 111, tabletype=NamedTuple), d2, on=:a, lookup=d2_lookup), DataFrame)
 
         sort!(ij1, [:a, :b])
         sort!(ij1u, [:a, :b])

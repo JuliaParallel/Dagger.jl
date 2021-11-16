@@ -87,7 +87,7 @@ function _join(
     names, _, other_r, cmp_l, cmp_r = resolve_colnames(l, r, on)
 
     inner_l, inner_r = if lookup !== nothing
-        match_inner_indices_lookup(l, lookup, cmp_l)
+        match_inner_indices_lookup(l, lookup, cmp_l) # uses the `lookup` to find indices
     elseif r_sorted && l_sorted
         match_inner_indices_lsorted_rsorted(l, r, cmp_l, cmp_r, r_unique) # loop through r once
     elseif r_unique
