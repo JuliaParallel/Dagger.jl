@@ -13,19 +13,19 @@ makedocs(;
     ),
     pages = [
         "Home" => "index.md",
+        "Distributed Table" => "dtable.md",
         "Processors" => "processors.md",
-        "Checkpointing" => "checkpointing.md",
         "Scopes" => "scopes.md",
         "Dynamic Scheduler Control" => "dynamic.md",
         "Logging and Graphing" => "logging.md",
         "Scheduler Visualization" => "scheduler-visualization.md",
         "Benchmarking" => "benchmarking.md",
-        "Scheduler Internals" => "scheduler-internals.md",
-        "Distributed Table" => "dtable.md",
+        "Checkpointing" => "checkpointing.md",
         "API" => [
             "Types" => "api/types.md",
             "Functions and Macros" => "api/functions.md",
-        ]
+        ],
+        "Scheduler Internals" => "scheduler-internals.md",
     ]
 )
 
