@@ -1,5 +1,10 @@
 # Scheduler Internals
 
+!!! warn
+    This information is outdated, and until Dagger's internal scheduling APIs
+    stabilize, it may become less and less accurate. Always read the source to
+    understand what actually happens in Sch!
+
 The scheduler is called `Dagger.Sch`. It contains a single internal instance
 of type `ComputeState`, which maintains all necessary state to represent the
 set of waiting, ready, and completed (or "finished") graph nodes, cached
