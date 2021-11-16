@@ -24,6 +24,14 @@ steps:
           julia_args: "--threads=1"
       # - JuliaCI/julia-coverage#v1:
       #     codecov: true
+  - label: DaggerFlux Reverse CI
+    timeout_in_minutes: 60
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.6"
+      # - JuliaCI/julia-coverage#v1:
+      #     codecov: true
+    command: echo Testing 123
   - label: Benchmarks
     command: echo TODO
     if: build.env("DAGGER_BENCHMARK") == "true"
