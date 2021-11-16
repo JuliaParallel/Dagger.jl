@@ -286,19 +286,3 @@ Key: b
    1 │ b         3
    2 │ b         4
 ```
-
-# API
-
-```@docs
-DTable
-tabletype
-tabletype!
-trim
-trim!
-map
-filter
-reduce
-groupby
-keys
-getindex
-```
