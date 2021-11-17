@@ -97,6 +97,13 @@ collect(ctx::Context, ref::DRef; options=nothing) =
     move(OSProc(ref.owner), OSProc(), ref)
 collect(ctx::Context, ref::FileRef; options=nothing) =
     poolget(ref) # FIXME: Do move call
+function Base.fetch(chunk::Chunk; raw=false)
+    if raw
+        poolget(chunk.handle)
+    else
+        collect(chunk)
+    end
+end
 
 # Unwrap Chunk, DRef, and FileRef by default
 move(from_proc::Processor, to_proc::Processor, x::Chunk) =
@@ -230,7 +237,7 @@ function move(from_proc::Processor, to_proc::Processor, x::Chunk{Shard})
     end::Chunk
     move(from_proc, to_proc, piece)
 end
-Base.map(f, cs::Chunk{Shard}) = map(f, collect(cs))
+Base.map(f, cs::Chunk{Shard}) = map(f, fetch(cs; raw=true))
 Base.map(f, s::Shard) = [Dagger.spawn(f, c) for c in values(s.chunks)]
 
 ### Core Stuff
