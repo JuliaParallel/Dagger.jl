@@ -131,7 +131,7 @@ function match_inner_indices_lsorted_rsorted(l, r, cmp_l::NTuple{N,Int}, cmp_r::
             else
                 inner_riter = iterate(ri, rstate)
                 while inner_riter !== nothing
-                    ((i_iind, i_iel), i_rstate) = inner_riter
+                    (i_iind, i_iel), i_rstate = inner_riter
                     if compare_rows_eq(oel, i_iel, cmp_l, cmp_r)
                         push!(vl, oind)
                         push!(vr, i_iind)
@@ -269,11 +269,15 @@ end
 
 
 @inline function compare_rows_lt(o, i, cmp_l::NTuple{N,Int}, cmp_r::NTuple{N,Int}) where {N}
-    test = false
     @inbounds for x = 1:N
-        test |= Tables.getcolumn(o, cmp_l[x]) < Tables.getcolumn(i, cmp_r[x])
-        test && break
+        l = Tables.getcolumn(o, cmp_l[x])
+        r = Tables.getcolumn(i, cmp_r[x])
+        if l > r
+            return false
+        elseif l < r
+            return true
+        end
     end
-    test
+    false
 end
 

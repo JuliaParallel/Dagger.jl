@@ -37,6 +37,11 @@ function leftjoin(d1::DTable, d2; kwargs...)
     DTable(v, d1.tabletype)
 end
 
+function leftjoin(d1::GDTable, d2; kwargs...)
+    d = leftjoin(d1.dtable, d2; kwargs...)
+    GDTable(d, d1.cols, d1.index)
+end
+
 leftjoin(l, r; on=nothing) = _leftjoin(l, r; on=on)
 _leftjoin(l, r; kwargs...) = _join(:leftjoin, l, r; kwargs...)
 
@@ -68,6 +73,11 @@ function innerjoin(d1::DTable, d2; kwargs...)
     end
     v = [Dagger.@spawn f(c, d2, kwargs) for c in d1.chunks]
     DTable(v, d1.tabletype)
+end
+
+function innerjoin(d1::GDTable, d2; kwargs...)
+    d = innerjoin(d1.dtable, d2; kwargs...)
+    GDTable(d, d1.cols, d1.index)
 end
 
 innerjoin(l, r; on=nothing) = _innerjoin(l, r; on=on)
