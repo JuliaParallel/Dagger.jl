@@ -35,6 +35,15 @@ OSProc
 ThreadProc
 ```
 
+## Scope Types
+```@docs
+AnyScope
+NodeScope
+ProcessScope
+UnionScope
+ExactScope
+```
+
 ## Context Types
 ```@docs
 Context

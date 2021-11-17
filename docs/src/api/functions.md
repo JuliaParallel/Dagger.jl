@@ -49,6 +49,10 @@ get_tls
 set_tls!
 ```
 
+## Shard Functions
+[`Dagger.@shard`](@ref)
+[`Dagger.shard`](@ref)
+
 ## Context Functions
 ```@docs
 addprocs!

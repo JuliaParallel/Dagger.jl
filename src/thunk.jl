@@ -147,9 +147,13 @@ Base.isready(t::ThunkFuture) = isready(t.future)
 Base.wait(t::ThunkFuture) = Dagger.Sch.thunk_yield() do
     wait(t.future)
 end
-function Base.fetch(t::ThunkFuture; proc=OSProc())
+function Base.fetch(t::ThunkFuture; proc=OSProc(), raw=false)
     error, value = Dagger.Sch.thunk_yield() do
-        move(proc, fetch(t.future))
+        if raw
+            fetch(t.future)
+        else
+            move(proc, fetch(t.future))
+        end
     end
     if error
         throw(value)
@@ -210,7 +214,13 @@ mutable struct EagerThunk
 end
 Base.isready(t::EagerThunk) = isready(t.future)
 Base.wait(t::EagerThunk) = wait(t.future)
-Base.fetch(t::EagerThunk) = move(OSProc(), fetch(t.future))
+function Base.fetch(t::EagerThunk; raw=false)
+    if raw
+        fetch(t.future; raw=true)
+    else
+        move(OSProc(), fetch(t.future))
+    end
+end
 function Base.show(io::IO, t::EagerThunk)
     print(io, "EagerThunk ($(isready(t) ? "finished" : "running"))")
 end

@@ -25,13 +25,14 @@ struct ProcessScope <: AbstractScope
     parent::NodeScope
     wid::Int
 end
-function ProcessScope(wid)
+function ProcessScope(wid::Integer)
     if wid == myid()
         ProcessScope(NodeScope(), wid)
     else
         ProcessScope(NodeScope(system_uuid(wid)), wid)
     end
 end
+ProcessScope(p::OSProc) = ProcessScope(p.pid)
 ProcessScope() = ProcessScope(myid())
 
 "Scoped to a specific processor."
