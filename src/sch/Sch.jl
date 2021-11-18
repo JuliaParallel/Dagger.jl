@@ -3,6 +3,7 @@ module Sch
 using Distributed
 import MemPool: DRef, poolset
 import Statistics: mean
+import Random: randperm
 
 import ..Dagger
 import ..Dagger: Context, Processor, Thunk, WeakThunk, ThunkFuture, ThunkFailedException, Chunk, OSProc, AnyScope
@@ -657,15 +658,31 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         inputs = filter(t->istask(t)||isa(t,Chunk), unwrap_weak_checked.(task.inputs))
         chunks = [istask(input) ? state.cache[input] : input for input in inputs]
         #local_procs = unique(map(c->c isa Chunk ? processor(c) : OSProc(), chunks))
-        local_procs = vcat([Dagger.get_processors(gp) for gp in procs]...)
+        local_procs = unique(vcat([Dagger.get_processors(gp) for gp in procs]...))
         if length(local_procs) > fallback_threshold
             @goto fallback
         end
         affinities = Dict(proc=>impute_sum([affinity(chunk)[2] for chunk in filter(c->isa(c,Chunk)&&get_parent(processor(c))==get_parent(proc), chunks)]) for proc in local_procs)
         # Estimate cost to move data and get scheduled
         costs = Dict(proc=>state.worker_pressure[get_parent(proc).pid][proc]+(aff/tx_rate) for (proc,aff) in affinities)
+
+        # shuffle procs around
+        P = randperm(length(local_procs))
+        local_procs = getindex.(Ref(local_procs), P)
+
         sort!(local_procs, by=p->costs[p])
         scheduled = false
+
+        # Move our corresponding ThreadProc to be the last considered
+        if length(local_procs) > 1
+            sch_threadproc = Dagger.ThreadProc(myid(), Threads.threadid())
+            sch_thread_idx = findfirst(proc->proc==sch_threadproc, local_procs)
+            if sch_thread_idx !== nothing
+                deleteat!(local_procs, sch_thread_idx)
+                push!(local_procs, sch_threadproc)
+            end
+        end
+
         for proc in local_procs
             gproc = get_parent(proc)
             if can_use_proc(task, gproc, proc, opts, scope)
