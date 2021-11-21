@@ -286,3 +286,27 @@ Key: b
    1 │ b         3
    2 │ b         4
 ```
+
+# Joins
+
+There are two join methods available currently: `leftjoin` and `innerjoin`.
+The interface is aiming to be compatible with the `DataFrames.jl` join interface, but for now it only supports
+the `on` keyword argument with symbol input. More keyword arguments known from `DataFrames` may be introduced in the future.
+
+It's possible to perform it on a `DTable` and any `Tables.jl` compatible table type.
+Joining two `DTable`s is possible as well, but it's not yet an optimized operation (treats the second `DTable` as any other table).
+
+There are several options to make your joins faster by providing additional information about the tables.
+It can be done by using the following keyword arguments:
+
+- `l_sorted`: To indicate the left table is sorted - only useful if the `r_sorted` is set to `true` as well.
+- `r_sorted`: To indicate the right table is sorted.
+- `r_unique`: To indicate the right table only contains unique keys.
+- `lookup`: You can pass a dict-like structure here that will allow for quicker matching of inner rows. The structure needs to contain keys in form of a `Tuple` and values in form of type `Vector{UInt}` containing the related row indices.
+
+The join operations are designed in a way that allows calling specialized join methods for table types that define them.
+A good example is joining a `DTable` (with underlying table type `DataFrame`) with a `DataFrame`.
+This join will use the specialized join methods defined within the `DataFrames.jl` package.
+Please note that the usage of any of the keyword arguments described above will result in the usage of join methods
+defined in `Dagger` regardless of the availability of specialized methods.
+
