@@ -125,8 +125,6 @@ function _groupby(
 
     spawner = (_dchunks, _row_function) -> Vector{EagerThunk}([Dagger.@spawn distinct_partitions(c, _row_function) for c in _dchunks])
 
-
-    # v = [Dagger.@spawn spawner(part, row_function) for part in Iterators.partition(d.chunks, 250)]
     v = Dagger.@spawn spawner(d.chunks, row_function)
     index, chunks = fetch(Dagger.@spawn build_groupby_index(merge, chunksize, tabletype(d), v))
     GDTable(DTable(chunks, d.tabletype), cols, index, grouping_function)
@@ -153,12 +151,12 @@ function _distinct_partitions_iterate(chunk, f, keyval::T) where T
         v = get!(acc, key, Vector{eltype(rows)}())
         push!(v, row)
     end
-    
+
     Vector{Pair{T, Chunk}}([x => Dagger.tochunk(Tables.columntable(acc[x])) for x in collect(keys(acc))])
 end
 
 
-merge_chunks(sink, chunks) = sink(TableOperations.joinpartitions(Tables.partitioner(identity, _retrieve.(chunks))))
+merge_chunks(sink, chunks) = sink(TableOperations.joinpartitions(Tables.partitioner(_retrieve, chunks)))
 
 rowcount(chunk) = length(Tables.rows(chunk))
 
