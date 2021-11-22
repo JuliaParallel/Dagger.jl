@@ -293,7 +293,7 @@ There are two join methods available currently: `leftjoin` and `innerjoin`.
 The interface is aiming to be compatible with the `DataFrames.jl` join interface, but for now it only supports
 the `on` keyword argument with symbol input. More keyword arguments known from `DataFrames` may be introduced in the future.
 
-It's possible to perform it on a `DTable` and any `Tables.jl` compatible table type.
+It's possible to perform a join on a `DTable` and any `Tables.jl` compatible table type.
 Joining two `DTable`s is possible as well, but it's not yet an optimized operation (treats the second `DTable` as any other table).
 
 There are several options to make your joins faster by providing additional information about the tables.
@@ -302,7 +302,7 @@ It can be done by using the following keyword arguments:
 - `l_sorted`: To indicate the left table is sorted - only useful if the `r_sorted` is set to `true` as well.
 - `r_sorted`: To indicate the right table is sorted.
 - `r_unique`: To indicate the right table only contains unique keys.
-- `lookup`: You can pass a dict-like structure here that will allow for quicker matching of inner rows. The structure needs to contain keys in form of a `Tuple` and values in form of type `Vector{UInt}` containing the related row indices.
+- `lookup`: To provide a dict-like structure that will allow for quicker matching of inner rows. The structure needs to contain keys in form of a `Tuple` of the matched columns and values in form of type `Vector{UInt}` containing the related row indices.
 
 The join operations are designed in a way that allows calling specialized join methods for table types that define them.
 A good example is joining a `DTable` (with underlying table type `DataFrame`) with a `DataFrame`.
@@ -310,3 +310,32 @@ This join will use the specialized join methods defined within the `DataFrames.j
 Please note that the usage of any of the keyword arguments described above will result in the usage of join methods
 defined in `Dagger` regardless of the availability of specialized methods.
 
+```julia
+julia> pp = (d) -> for x in Tables.rows(d) println("$(x.a), $(x.b), $(x.c)") end;
+
+julia> d1 = (a=collect(1:6), b=collect(1:6));
+
+julia> d2 = (a=collect(2:5), c=collect(-2:-1:-5));
+
+julia> dt = DTable(d1, 2)
+DTable with 5 partitions
+Tabletype: NamedTuple
+
+julia> pp(leftjoin(dt, d2, on=:a))
+2, 2, -2
+1, 1, missing
+3, 3, -3
+4, 4, -4
+5, 5, -5
+6, 6, -6
+7, 7, -7
+8, 8, -8
+9, 9, -9
+10, 10, missing
+
+julia> pp(innerjoin(dt, d2, on=:a))
+2, 2, -2
+3, 3, -3
+4, 4, -4
+5, 5, -5
+```

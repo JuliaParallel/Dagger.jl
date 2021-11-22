@@ -25,7 +25,7 @@ and a `d2` of `DataFrame` type.
 - `l_sorted`: To indicate the left table is sorted - only useful if the `r_sorted` is set to `true` as well.
 - `r_sorted`: To indicate the right table is sorted.
 - `r_unique`: To indicate the right table only contains unique keys.
-- `lookup`: You can pass a dict-like structure here that will allow for quicker matching of inner rows. The structure needs to contain keys in form of a `Tuple` and values in form of type `Vector{UInt}` containing the related row indices.
+- `lookup`: To provide a dict-like structure that will allow for quicker matching of inner rows. The structure needs to contain keys in form of a `Tuple` and values in form of type `Vector{UInt}` containing the related row indices.
 """
 function leftjoin(d1::DTable, d2; kwargs...)
     f = if any(k in JOINKWARGS for k in keys(kwargs))
