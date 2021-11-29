@@ -134,15 +134,29 @@ function _join(
 
     process_one_chunk = (type, l, r, cmp_l, cmp_r, other_r, lookup, r_sorted, l_sorted, r_unique) -> begin
         inner_l, inner_r = pick_match_inner_indices(l, r, cmp_l, cmp_r, lookup, r_sorted, l_sorted, r_unique)
-        outer_l = type == :innerjoin ? Set{UInt}() : find_outer_indices(l, inner_l)
-        outer_l, Dagger.tochunk(build_joined_table(type, names, l, r, inner_l, inner_r, Set{UInt}(), other_r))
+        if type == :innerjoin
+            return (Dagger.tochunk(build_joined_table(type, names, l, r, inner_l, inner_r, Set{UInt}(), other_r)),)
+        elseif type == :leftjoin
+            outer_l = type == :innerjoin ? Set{UInt}() : find_outer_indices(l, inner_l)
+            return outer_l, Dagger.tochunk(build_joined_table(type, names, l, r, inner_l, inner_r, Set{UInt}(), other_r))
+        end
     end
 
     vs = [Dagger.@spawn process_one_chunk(type, l, chunk, cmp_l, cmp_r, other_r, lookup, r_sorted, l_sorted, r_unique) for chunk in r.chunks]
 
+    to_merge = Vector{Chunk}()
     v = fetch.(vs)
-    outer_l = intersect(getindex.(v, 1)...)
-    inner_l = inner_r = Vector{UInt}() # to create a chunk with the unmatched rows on the left
-    outer = Dagger.tochunk(build_joined_table(type, names, l, r, inner_l, inner_r, outer_l, other_r))
-    merge_chunks(Tables.materializer(l), [outer, getindex.(v, 2)...])
+
+    if type == :innerjoin
+        outer_l = Set{UInt}()
+        append!(to_merge, getindex.(v, 1))
+    elseif type == :leftjoin
+        outer_l = intersect(getindex.(v, 1)...)
+        append!(to_merge, getindex.(v, 2))
+        inner_l = inner_r = Vector{UInt}() # to create a chunk with the unmatched rows on the left
+        outer = Dagger.tochunk(build_joined_table(type, names, l, r, inner_l, inner_r, outer_l, other_r))
+        push!(to_merge, outer)
+    end
+
+    merge_chunks(Tables.materializer(l), to_merge)
 end
