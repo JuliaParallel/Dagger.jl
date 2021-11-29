@@ -84,19 +84,8 @@ innerjoin(l, r; on=nothing) = _innerjoin(l, r; on=on)
 _innerjoin(l, r; kwargs...) = _join(:innerjoin, l, r; kwargs...)
 
 
-function _join(
-        type::Symbol,
-        l, r;
-        on=nothing,
-        l_sorted=false,
-        r_sorted=false,
-        r_unique=false,
-        lookup=nothing
-    )
-
-    names, _, other_r, cmp_l, cmp_r = resolve_colnames(l, r, on)
-
-    inner_l, inner_r = if lookup !== nothing
+function pick_match_inner_indices(l, r, cmp_l, cmp_r, lookup, r_sorted, l_sorted, r_unique)
+    if lookup !== nothing
         match_inner_indices_lookup(l, lookup, cmp_l) # uses the `lookup` to find indices
     elseif r_sorted && l_sorted
         match_inner_indices_lsorted_rsorted(l, r, cmp_l, cmp_r, r_unique) # loop through r once
@@ -107,7 +96,53 @@ function _join(
     else
         match_inner_indices(l, r, cmp_l, cmp_r)
     end
+end
+
+# this one is for DTable with Any joins
+function _join(
+        type::Symbol,
+        l,
+        r;
+        on=nothing,
+        l_sorted=false,
+        r_sorted=false,
+        r_unique=false,
+        lookup=nothing
+    )
+
+    names, _, other_r, cmp_l, cmp_r = resolve_colnames(l, r, on)
+
+    inner_l, inner_r = pick_match_inner_indices(l, r, cmp_l, cmp_r, lookup, r_sorted, l_sorted, r_unique)
 
     outer_l = type == :innerjoin ? Set{UInt}() : find_outer_indices(l, inner_l)
     build_joined_table(type, names, l, r, inner_l, inner_r, outer_l, other_r)
+end
+
+# this one is for DTable with DTable joins
+function _join(
+        type::Symbol,
+        l,
+        r::DTable;
+        on=nothing,
+        l_sorted=false,
+        r_sorted=false,
+        r_unique=false,
+        lookup=nothing
+    )
+
+    names, _, other_r, cmp_l, cmp_r = resolve_colnames(l, r, on)
+
+    process_one_chunk = (type, l, r, cmp_l, cmp_r, other_r, lookup, r_sorted, l_sorted, r_unique) -> begin
+        inner_l, inner_r = pick_match_inner_indices(l, r, cmp_l, cmp_r, lookup, r_sorted, l_sorted, r_unique)
+        outer_l = type == :innerjoin ? Set{UInt}() : find_outer_indices(l, inner_l)
+        outer_l, Dagger.tochunk(build_joined_table(type, names, l, r, inner_l, inner_r, Set{UInt}(), other_r))
+    end
+
+    vs = [Dagger.@spawn process_one_chunk(type, l, chunk, cmp_l, cmp_r, other_r, lookup, r_sorted, l_sorted, r_unique) for chunk in r.chunks]
+
+    v = fetch.(vs)
+    outer_l = intersect(getindex.(v, 1)...)
+    inner_l = inner_r = Vector{UInt}() # to create a chunk with the unmatched rows on the left
+    outer = Dagger.tochunk(build_joined_table(type, names, l, r, inner_l, inner_r, outer_l, other_r))
+    merge_chunks(Tables.materializer(l), [outer, getindex.(v, 2)...])
 end

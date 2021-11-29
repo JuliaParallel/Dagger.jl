@@ -294,7 +294,7 @@ The interface is aiming to be compatible with the `DataFrames.jl` join interface
 the `on` keyword argument with symbol input. More keyword arguments known from `DataFrames` may be introduced in the future.
 
 It's possible to perform a join on a `DTable` and any `Tables.jl` compatible table type.
-Joining two `DTable`s is possible as well, but it's not yet an optimized operation (treats the second `DTable` as any other table).
+Joining two `DTable`s is also supported and it will leverage the fact that the second `DTable` is partitioned during the joining process.
 
 There are several options to make your joins faster by providing additional information about the tables.
 It can be done by using the following keyword arguments:
@@ -309,6 +309,7 @@ A good example is joining a `DTable` (with underlying table type `DataFrame`) wi
 This join will use the specialized join methods defined within the `DataFrames.jl` package.
 Please note that the usage of any of the keyword arguments described above will result in the usage of join methods
 defined in `Dagger` regardless of the availability of specialized methods.
+Joining two `DTable`s will fall back to those implementations as well.
 
 ```julia
 julia> pp = (d) -> for x in Tables.rows(d) println("$(x.a), $(x.b), $(x.c)") end;

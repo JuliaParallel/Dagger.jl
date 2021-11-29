@@ -245,10 +245,13 @@ function build_joined_table(
 
     rcols = Tables.columns(r)
     for i in other_r
-        c = Tables.getcolumn(rcols, i)
-        vectype = jointype == :innerjoin ? eltype(c) : Union{eltype(c),Missing}
+        t = Tables.schema(rcols).types[i]
+        vectype = jointype == :innerjoin ? t : Union{t,Missing}
         newc = Vector{vectype}(undef, fulllength)
-        copyto!(newc, view(c, inner_r))
+        if length(inner_r) > 0 # skip fetching and copying if there's no records matched
+            c = Tables.getcolumn(rcols, i)
+            copyto!(newc, view(c, inner_r))
+        end
         cols[colcounter] = newc
         colcounter += 1
     end

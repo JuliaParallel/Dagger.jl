@@ -423,8 +423,9 @@ using TableOperations
             lj7 = fetch(leftjoin(DTable(sort(d1, r_colsymbols), 111, tabletype=NamedTuple), sort(unique(d2, r_colsymbols), r_colsymbols), on=on, r_sorted=true, l_sorted=true, r_unique=true), DataFrame)
             lj8 = fetch(leftjoin(DTable(d1, 111, tabletype=NamedTuple), d2, on=on, lookup=d2_lookup), DataFrame)
             lj9 = fetch(leftjoin(Dagger.groupby(DTable(d1, 111, tabletype=NamedTuple), r_colsymbols), d2, on=on), DataFrame)
+            lj10 = fetch(leftjoin(DTable(d1, a_len ÷ 10), DTable(d2, b_len ÷ 10), on=on), DataFrame)
 
-            sort!.([lj1, lj1u, lj2, lj3, lj4, lj5, lj6, lj7, lj8, lj9], Ref(propertynames(lj1)))
+            sort!.([lj1, lj1u, lj2, lj3, lj4, lj5, lj6, lj7, lj8, lj9, lj10], Ref(propertynames(lj1)))
 
             @test isequal(lj1, lj2)
             @test isequal(lj1, lj3)
@@ -434,6 +435,7 @@ using TableOperations
             @test isequal(lj1u, lj7)
             @test isequal(lj1, lj8)
             @test isequal(lj1, lj9)
+            @test isequal(lj1, lj10)
 
             ij1 = innerjoin(d1, d2, on=on)
             ij1u = innerjoin(d1, unique(d2, r_colsymbols), on=on)
@@ -445,8 +447,9 @@ using TableOperations
             ij7 = fetch(innerjoin(DTable(sort(d1, r_colsymbols), 111, tabletype=NamedTuple), sort(unique(d2, r_colsymbols), r_colsymbols), on=on, r_sorted=true, l_sorted=true, r_unique=true), DataFrame)
             ij8 = fetch(innerjoin(DTable(d1, 111, tabletype=NamedTuple), d2, on=on, lookup=d2_lookup), DataFrame)
             ij9 = fetch(innerjoin(Dagger.groupby(DTable(d1, 111, tabletype=NamedTuple), r_colsymbols), d2, on=on), DataFrame)
+            ij10 = fetch(innerjoin(DTable(d1, a_len ÷ 10), DTable(d2, b_len ÷ 10), on=on), DataFrame)
 
-            sort!.([ij1, ij1u, ij2, ij3, ij4, ij5, ij6, ij7, ij8, ij9], Ref(propertynames(ij1)))
+            sort!.([ij1, ij1u, ij2, ij3, ij4, ij5, ij6, ij7, ij8, ij9, ij10], Ref(propertynames(ij1)))
 
             @test isequal(ij1, ij2)
             @test isequal(ij1, ij3)
@@ -456,6 +459,7 @@ using TableOperations
             @test isequal(ij1u, ij7)
             @test isequal(ij1, ij8)
             @test isequal(ij1, ij9)
+            @test isequal(ij1, ij10)
         end
     end
 end
