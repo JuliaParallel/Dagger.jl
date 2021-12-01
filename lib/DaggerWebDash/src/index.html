@@ -80,8 +80,10 @@ function linePlot(container, core_key, data_key, title, ylabel) {
             data = values[data_key];
 
         // Set axis domains
-        var time_min = d3.min(core, function(d){return d.timestamp;});
-        var time_max = d3.max(core, function(d){return d.timestamp;});
+        //var time_min = d3.min(core, function(d){return d.timestamp;});
+        //var time_max = d3.max(core, function(d){return d.timestamp;});
+        var time_min = seek_ts_start;
+        var time_max = seek_ts_stop;
         xScale.domain([time_min, time_max]);
         yScale.domain([0, d3.max(data)]);
 
@@ -180,8 +182,10 @@ function ganttPlot(container, core_key, id_key, timeline_key, esat_key, psat_key
             psat = values[psat_key];
 
         // Set axis domains
-        var time_min = d3.min(core, function(d){return d.timestamp;});
-        var time_max = d3.max(core, function(d){return d.timestamp;});
+        //var time_min = d3.min(core, function(d){return d.timestamp;});
+        //var time_max = d3.max(core, function(d){return d.timestamp;});
+        var time_min = seek_ts_start;
+        var time_max = seek_ts_stop;
         xScale.domain([time_min, time_max]);
         var allkeys = new Set();
         var ekeys = new Set();
