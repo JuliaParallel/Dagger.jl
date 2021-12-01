@@ -344,8 +344,8 @@ function ganttPlot(container, core_key, id_key, timeline_key, esat_key, psat_key
             ctx.beginPath();
             ctx.globalAlpha = 1.0;
             ctx.strokeStyle = "steelblue";
-            ctx.moveTo(0, y_bot);
-            var last_y = 0;
+            var last_y = satScale(subsat[0]);
+            ctx.moveTo(0, last_y);
             for (i = 0; i < core.length; i++) {
                 var sat_x = xScale(core[i].timestamp),
                     sat_y = satScale(subsat[i]);
