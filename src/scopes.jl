@@ -7,7 +7,7 @@ struct AnyScope <: AbstractScope end
 
 "Union of two or more scopes."
 struct UnionScope <: AbstractScope
-    scopes::NTuple{N,<:AbstractScope} where N
+    scopes::Tuple
 end
 UnionScope(scopes...) = UnionScope((scopes...,))
 UnionScope(scopes::Vector{<:AbstractScope}) = UnionScope((scopes...,))
