@@ -95,7 +95,7 @@ using TableOperations
         for src in [nt, df]
             dt = DTable(src, 100)
 
-            # Single result 
+            # Single result
             mt = map(x -> (r = x.a + x.b, ), dt)
             mf = map(x -> x.a + x.b, eachrow(df))
             @test fetch(mt).r == mf
@@ -243,7 +243,7 @@ using TableOperations
 
         ######################################################
         # multi col groupby
-        d = DTable((a=cs1, b=cs2), 4) 
+        d = DTable((a=cs1, b=cs2), 4)
 
         for kwargs in kwargs_set
             g = Dagger.groupby(d, [:a, :b]; kwargs...)
@@ -331,7 +331,7 @@ using TableOperations
 
     @testset "tables.jl source" begin
         nt = (a=1:100, b=1:100)
-        
+
         d1 = DTable(nt, 10) # standard row based constructor
 
         # partition constructor, check with DTable as input
@@ -377,12 +377,10 @@ using TableOperations
     end
 
     @testset "join" begin
-        rng = MersenneTwister(2137)
-
         a_len = 1000
         b_len = 100
 
-        genkeys = (n, m) -> rand(rng, Int32, n).%m
+        genkeys = (n, m) -> rand(Int32, n).%m
         geninds = (n) -> collect(1:n)
 
         d1_single = DataFrame(a=genkeys(a_len, 100), b=geninds(a_len))

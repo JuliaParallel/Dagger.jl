@@ -207,3 +207,5 @@ function _columnnames_svector(d::DTable)
 end
 
 @inline nchunks(d::DTable) = length(d.chunks)
+
+merge_chunks(sink, chunks) = sink(TableOperations.joinpartitions(Tables.partitioner(_retrieve, chunks)))

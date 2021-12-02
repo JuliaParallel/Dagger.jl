@@ -121,7 +121,7 @@ function _groupby(
     merge::Bool,
     chunksize::Int)
 
-    grouping_function = cols === nothing ? row_function : nothing 
+    grouping_function = cols === nothing ? row_function : nothing
 
     spawner = (_dchunks, _row_function) -> Vector{EagerThunk}([Dagger.@spawn distinct_partitions(c, _row_function) for c in _dchunks])
 
@@ -154,9 +154,6 @@ function _distinct_partitions_iterate(chunk, f, keyval::T) where T
 
     Vector{Pair{T, Chunk}}([x => Dagger.tochunk(Tables.columntable(acc[x])) for x in collect(keys(acc))])
 end
-
-
-merge_chunks(sink, chunks) = sink(TableOperations.joinpartitions(Tables.partitioner(_retrieve, chunks)))
 
 rowcount(chunk) = length(Tables.rows(chunk))
 

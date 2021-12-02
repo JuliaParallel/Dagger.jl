@@ -1,5 +1,8 @@
 import DataAPI: leftjoin, innerjoin
 
+# A set of kwargs that can be provided by the user.
+# Used for deciding whether to use the `DTables` join implementation directly
+# or to attempt using an external join function.
 const JOINKWARGS = Set([
     :l_sorted,
     :r_sorted,
@@ -25,7 +28,7 @@ and a `d2` of `DataFrame` type.
 - `l_sorted`: To indicate the left table is sorted - only useful if the `r_sorted` is set to `true` as well.
 - `r_sorted`: To indicate the right table is sorted.
 - `r_unique`: To indicate the right table only contains unique keys.
-- `lookup`: To provide a dict-like structure that will allow for quicker matching of inner rows. The structure needs to contain keys in form of a `Tuple` and values in form of type `Vector{UInt}` containing the related row indices.
+- `lookup`: To provide a dict-like structure that will allow for direct matching of inner rows. The structure needs to contain keys in form of a `Tuple` and values in form of type `Vector{UInt}` containing the related row indices.
 """
 function leftjoin(d1::DTable, d2; kwargs...)
     f = if any(k in JOINKWARGS for k in keys(kwargs))
@@ -63,7 +66,7 @@ and a `d2` of `DataFrame` type.
 - `l_sorted`: To indicate the left table is sorted - only useful if the `r_sorted` is set to `true` as well.
 - `r_sorted`: To indicate the right table is sorted.
 - `r_unique`: To indicate the right table only contains unique keys.
-- `lookup`: You can pass a dict-like structure here that will allow for quicker matching of inner rows. The structure needs to contain keys in form of a `Tuple` and values in form of type `Vector{UInt}` containing the related row indices.
+- `lookup`: To provide a dict-like structure that will allow for direct matching of inner rows. The structure needs to contain keys in form of a `Tuple` and values in form of type `Vector{UInt}` containing the related row indices.
 """
 function innerjoin(d1::DTable, d2; kwargs...)
     f = if any(k in JOINKWARGS for k in keys(kwargs))
@@ -84,7 +87,13 @@ innerjoin(l, r; on=nothing) = _innerjoin(l, r; on=on)
 _innerjoin(l, r; kwargs...) = _join(:innerjoin, l, r; kwargs...)
 
 
-function pick_match_inner_indices(l, r, cmp_l, cmp_r, lookup, r_sorted, l_sorted, r_unique)
+"""
+    match_inner_indices(l, r, cmp_l, cmp_r, lookup, r_sorted, l_sorted, r_unique)
+
+Function responsible for picking the optimal method of joining inner indices depending on the
+additional information about the tables provided by the user.
+"""
+function match_inner_indices(l, r, cmp_l, cmp_r, lookup, r_sorted, l_sorted, r_unique)
     if lookup !== nothing
         match_inner_indices_lookup(l, lookup, cmp_l) # uses the `lookup` to find indices
     elseif r_sorted && l_sorted
@@ -93,15 +102,20 @@ function pick_match_inner_indices(l, r, cmp_l, cmp_r, lookup, r_sorted, l_sorted
         match_inner_indices_runique(l, r, cmp_l, cmp_r) # break on first match
     elseif r_sorted
         match_inner_indices_rsorted(l, r, cmp_l, cmp_r) # break on last match
-    else
+    else # generic fallback, no optimization
         match_inner_indices(l, r, cmp_l, cmp_r)
     end
 end
 
-# this one is for DTable with Any joins
+"""
+    _join(type::Symbol, l_chunk, r; kwargs...)
+
+Low level join method for `DTable` joins using the generic implementation.
+It joins an `l_chunk` with `r` assuming `r` is a continuous table.
+"""
 function _join(
         type::Symbol,
-        l,
+        l_chunk,
         r;
         on=nothing,
         l_sorted=false,
@@ -110,18 +124,25 @@ function _join(
         lookup=nothing
     )
 
-    names, _, other_r, cmp_l, cmp_r = resolve_colnames(l, r, on)
+    names, _, other_r, cmp_l, cmp_r = resolve_colnames(l_chunk, r, on)
 
-    inner_l, inner_r = pick_match_inner_indices(l, r, cmp_l, cmp_r, lookup, r_sorted, l_sorted, r_unique)
+    inner_l, inner_r = match_inner_indices(l_chunk, r, cmp_l, cmp_r, lookup, r_sorted, l_sorted, r_unique)
 
-    outer_l = type == :innerjoin ? Set{UInt}() : find_outer_indices(l, inner_l)
-    build_joined_table(type, names, l, r, inner_l, inner_r, outer_l, other_r)
+    outer_l = type == :innerjoin ? Set{UInt}() : find_outer_indices(l_chunk, inner_l)
+    build_joined_table(type, names, l_chunk, r, inner_l, inner_r, outer_l, other_r)
 end
 
-# this one is for DTable with DTable joins
+
+"""
+    _join(type::Symbol, l_chunk, r::DTable; kwargs...)
+
+Low level join method for `DTable` joins using the generic implementation.
+It joins an `l_chunk` with `r` assuming `r` is a `DTable`.
+In this case the join is split into multiple joins of `l_chunk` with each chunk of `r` and a final merge operation.
+"""
 function _join(
         type::Symbol,
-        l,
+        l_chunk,
         r::DTable;
         on=nothing,
         l_sorted=false,
@@ -130,33 +151,29 @@ function _join(
         lookup=nothing
     )
 
-    names, _, other_r, cmp_l, cmp_r = resolve_colnames(l, r, on)
+    names, _, other_r, cmp_l, cmp_r = resolve_colnames(l_chunk, r, on)
 
     process_one_chunk = (type, l, r, cmp_l, cmp_r, other_r, lookup, r_sorted, l_sorted, r_unique) -> begin
-        inner_l, inner_r = pick_match_inner_indices(l, r, cmp_l, cmp_r, lookup, r_sorted, l_sorted, r_unique)
-        if type == :innerjoin
-            return (Dagger.tochunk(build_joined_table(type, names, l, r, inner_l, inner_r, Set{UInt}(), other_r)),)
-        elseif type == :leftjoin
-            outer_l = type == :innerjoin ? Set{UInt}() : find_outer_indices(l, inner_l)
-            return outer_l, Dagger.tochunk(build_joined_table(type, names, l, r, inner_l, inner_r, Set{UInt}(), other_r))
-        end
+        inner_l, inner_r = match_inner_indices(l, r, cmp_l, cmp_r, lookup, r_sorted, l_sorted, r_unique)
+        inner_chunk = Dagger.tochunk(build_joined_table(type, names, l, r, inner_l, inner_r, Set{UInt}(), other_r))
+        outer_l = type == :innerjoin ? Set{UInt}() : find_outer_indices(l, inner_l)
+        return inner_chunk, outer_l
     end
 
-    vs = [Dagger.@spawn process_one_chunk(type, l, chunk, cmp_l, cmp_r, other_r, lookup, r_sorted, l_sorted, r_unique) for chunk in r.chunks]
+    vs = [Dagger.@spawn process_one_chunk(type, l_chunk, chunk, cmp_l, cmp_r, other_r, lookup, r_sorted, l_sorted, r_unique) for chunk in r.chunks]
 
     to_merge = Vector{Chunk}()
-    v = fetch.(vs)
+    sizehint!(to_merge, length(r.chunks))
 
-    if type == :innerjoin
-        outer_l = Set{UInt}()
-        append!(to_merge, getindex.(v, 1))
-    elseif type == :leftjoin
-        outer_l = intersect(getindex.(v, 1)...)
-        append!(to_merge, getindex.(v, 2))
-        inner_l = inner_r = Vector{UInt}() # to create a chunk with the unmatched rows on the left
-        outer = Dagger.tochunk(build_joined_table(type, names, l, r, inner_l, inner_r, outer_l, other_r))
+    v = fetch.(vs)
+    append!(to_merge, getindex.(v, 1))
+
+    if type == :leftjoin
+        outer_l = intersect(getindex.(v, 2)...)
+        inner_l = inner_r = Vector{UInt}()
+        outer = Dagger.tochunk(build_joined_table(type, names, l_chunk, r, inner_l, inner_r, outer_l, other_r))
         push!(to_merge, outer)
     end
 
-    merge_chunks(Tables.materializer(l), to_merge)
+    merge_chunks(Tables.materializer(l_chunk), to_merge)
 end
