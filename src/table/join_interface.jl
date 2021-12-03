@@ -196,7 +196,7 @@ end
 """
     use_dataframe_join(d1type, d2type)
 
-Determines whether to use the DataAPI join function, which leads to usage of DataFrames join function.
+Determines whether to use the DataAPI join function, which leads to usage of DataFrames join function if both types are `DataFrame`.
 Remove this function and it's usage once a generic Tables.jl compatible join function becomes available.
 Porting the Dagger join functions to TableOperations is an option to achieve that.
 """

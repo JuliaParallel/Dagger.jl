@@ -304,22 +304,22 @@ It can be done by using the following keyword arguments:
 - `r_unique`: To indicate the right table only contains unique keys.
 - `lookup`: To provide a dict-like structure that will allow for quicker matching of inner rows. The structure needs to contain keys in form of a `Tuple` of the matched columns and values in form of type `Vector{UInt}` containing the related row indices.
 
-The join operations are designed in a way that allows calling specialized join methods for table types that define them.
-A good example is joining a `DTable` (with underlying table type `DataFrame`) with a `DataFrame`.
-This join will use the specialized join methods defined within the `DataFrames.jl` package.
-Please note that the usage of any of the keyword arguments described above will result in the usage of join methods
+Currently there is a special case available where joining a `DTable` (with `DataFrame` as the underlying table type) with a `DataFrame` will use
+the join functions coming from the `DataFrames.jl` package for the per chunk joins.
+In the future this behavior will be expanded to any type that implements its own join methods, but for now is limited to `DataFrame` only.
+
+Please note that the usage of any of the keyword arguments described above will always result in the usage of generic join methods
 defined in `Dagger` regardless of the availability of specialized methods.
-Joining two `DTable`s will fall back to those implementations as well.
 
 ```julia
-julia> pp = (d) -> for x in Tables.rows(d) println("$(x.a), $(x.b), $(x.c)") end;
+julia> using Tables; pp = d -> for x in Tables.rows(d) println("$(x.a), $(x.b), $(x.c)") end;
 
 julia> d1 = (a=collect(1:6), b=collect(1:6));
 
 julia> d2 = (a=collect(2:5), c=collect(-2:-1:-5));
 
 julia> dt = DTable(d1, 2)
-DTable with 5 partitions
+DTable with 3 partitions
 Tabletype: NamedTuple
 
 julia> pp(leftjoin(dt, d2, on=:a))
@@ -328,11 +328,7 @@ julia> pp(leftjoin(dt, d2, on=:a))
 3, 3, -3
 4, 4, -4
 5, 5, -5
-6, 6, -6
-7, 7, -7
-8, 8, -8
-9, 9, -9
-10, 10, missing
+6, 6, missing
 
 julia> pp(innerjoin(dt, d2, on=:a))
 2, 2, -2

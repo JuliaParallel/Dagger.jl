@@ -377,17 +377,19 @@ using TableOperations
     end
 
     @testset "join" begin
+        rng = MersenneTwister(2137)
+
         a_len = 1000
         b_len = 100
 
-        genkeys = (n, m) -> rand(Int32, n).%m
+        genkeys = (r, n, m) -> rand(r, Int32, n).%m
         geninds = (n) -> collect(1:n)
 
-        d1_single = DataFrame(a=genkeys(a_len, 100), b=geninds(a_len))
-        d2_single = DataFrame(a=genkeys(b_len, 100), c=geninds(b_len))
+        d1_single = DataFrame(a=genkeys(rng, a_len, 100), b=geninds(a_len))
+        d2_single = DataFrame(a=genkeys(rng, b_len, 100), c=geninds(b_len))
 
-        d1_mul = DataFrame(a=genkeys(a_len, 10), b=genkeys(a_len, 10), c=geninds(a_len))
-        d2_mul = DataFrame(a=genkeys(b_len, 10), b=genkeys(b_len, 10), d=geninds(b_len))
+        d1_mul = DataFrame(a=genkeys(rng, a_len, 10), b=genkeys(rng, a_len, 10), c=geninds(a_len))
+        d2_mul = DataFrame(a=genkeys(rng, b_len, 10), b=genkeys(rng, b_len, 10), d=geninds(b_len))
 
 
         configs = [
