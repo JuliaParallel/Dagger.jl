@@ -31,11 +31,13 @@ and a `d2` of `DataFrame` type.
 - `lookup`: To provide a dict-like structure that will allow for direct matching of inner rows. The structure needs to contain keys in form of a `Tuple` and values in form of type `Vector{UInt}` containing the related row indices.
 """
 function leftjoin(d1::DTable, d2; kwargs...)
-    f = if any(k in JOINKWARGS for k in keys(kwargs))
-        (l, r, ks) -> _leftjoin(l, r; ks...)
-    else
-        (l, r, ks) -> leftjoin(l, r; ks...)
-    end
+    f = (l, r, ks) -> _leftjoinwrapper(l, r; ks...)
+    v = [Dagger.@spawn f(c, d2, kwargs) for c in d1.chunks]
+    DTable(v, d1.tabletype)
+end
+
+function leftjoin(d1::DTable, d2::DTable; kwargs...)
+    f = (l, r, ks) -> _join(:leftjoin, l, r; ks...)
     v = [Dagger.@spawn f(c, d2, kwargs) for c in d1.chunks]
     DTable(v, d1.tabletype)
 end
@@ -45,8 +47,14 @@ function leftjoin(d1::GDTable, d2; kwargs...)
     GDTable(d, d1.cols, d1.index)
 end
 
-leftjoin(l, r; on=nothing) = _leftjoin(l, r; on=on)
-_leftjoin(l, r; kwargs...) = _join(:leftjoin, l, r; kwargs...)
+
+function _leftjoinwrapper(l, r; kwargs...)
+    if !any(k in JOINKWARGS for k in keys(kwargs)) && use_dataframe_join(typeof(l), typeof(r))
+        leftjoin(l, r; kwargs...)
+    else
+        _join(:leftjoin, l, r; kwargs...)
+    end
+end
 
 
 """
@@ -69,11 +77,13 @@ and a `d2` of `DataFrame` type.
 - `lookup`: To provide a dict-like structure that will allow for direct matching of inner rows. The structure needs to contain keys in form of a `Tuple` and values in form of type `Vector{UInt}` containing the related row indices.
 """
 function innerjoin(d1::DTable, d2; kwargs...)
-    f = if any(k in JOINKWARGS for k in keys(kwargs))
-        (l, r, ks) -> _innerjoin(l, r; ks...)
-    else
-        (l, r, ks) -> innerjoin(l, r; ks...)
-    end
+    f = (l, r, ks) -> _innerjoinwrapper(l, r; ks...)
+    v = [Dagger.@spawn f(c, d2, kwargs) for c in d1.chunks]
+    DTable(v, d1.tabletype)
+end
+
+function innerjoin(d1::DTable, d2::DTable; kwargs...)
+    f = (l, r, ks) -> _join(:innerjoin, l, r; ks...)
     v = [Dagger.@spawn f(c, d2, kwargs) for c in d1.chunks]
     DTable(v, d1.tabletype)
 end
@@ -83,8 +93,13 @@ function innerjoin(d1::GDTable, d2; kwargs...)
     GDTable(d, d1.cols, d1.index)
 end
 
-innerjoin(l, r; on=nothing) = _innerjoin(l, r; on=on)
-_innerjoin(l, r; kwargs...) = _join(:innerjoin, l, r; kwargs...)
+function _innerjoinwrapper(l, r; kwargs...)
+    if !any(k in JOINKWARGS for k in keys(kwargs)) && use_dataframe_join(typeof(l), typeof(r))
+        innerjoin(l, r; kwargs...)
+    else
+        _join(:innerjoin, l, r; kwargs...)
+    end
+end
 
 
 """
@@ -176,4 +191,15 @@ function _join(
     end
 
     merge_chunks(Tables.materializer(l_chunk), to_merge)
+end
+
+"""
+    use_dataframe_join(d1type, d2type)
+
+Determines whether to use the DataAPI join function, which leads to usage of DataFrames join function.
+Remove this function and it's usage once a generic Tables.jl compatible join function becomes available.
+Porting the Dagger join functions to TableOperations is an option to achieve that.
+"""
+function use_dataframe_join(d1type, d2type)
+    :DataFrame == d1type.name.name == d2type.name.name
 end

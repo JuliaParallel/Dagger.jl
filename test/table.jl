@@ -387,7 +387,7 @@ using TableOperations
         d2_single = DataFrame(a=genkeys(b_len, 100), c=geninds(b_len))
 
         d1_mul = DataFrame(a=genkeys(a_len, 10), b=genkeys(a_len, 10), c=geninds(a_len))
-        d2_mul = DataFrame(a=genkeys(a_len, 10), b=genkeys(a_len, 10), d=geninds(a_len))
+        d2_mul = DataFrame(a=genkeys(b_len, 10), b=genkeys(b_len, 10), d=geninds(b_len))
 
 
         configs = [
