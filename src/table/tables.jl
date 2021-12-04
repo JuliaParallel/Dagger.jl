@@ -78,7 +78,7 @@ function _iterate(iter::DTableRowIterator, chunk_index)
         i = iterate(row_iterator)
         chunk_index += 1
     end
-    if i === nothing 
+    if i === nothing
         return nothing
     else
         row, row_state = i
@@ -92,7 +92,7 @@ Base.iterate(iter::DTableRowIterator) = _iterate(iter, 1)
 function Base.iterate(iter::DTableRowIterator, state)
     (row_iterator, row_state, next_chunk_index) = state
     i = iterate(row_iterator, row_state)
-    if i === nothing 
+    if i === nothing
         _iterate(iter, next_chunk_index)
     else
         row, row_state = i
@@ -153,7 +153,7 @@ Tables.columns(table::GDTable) = DTableColumnIterator(table.dtable)
 Tables.schema(table::GDTable) = determine_schema(table.dtable)
 Tables.getcolumn(table::GDTable, col::Symbol) = Tables.getcolumn(table.dtable, col)
 Tables.getcolumn(table::GDTable, idx::Int) = Tables.getcolumn(table.dtable, idx)
-Tables.columnnames(table::GDTable) = determine_columnnames(table.dtable) 
+Tables.columnnames(table::GDTable) = determine_columnnames(table.dtable)
 
 #######################################
 # GDTable partitions

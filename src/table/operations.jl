@@ -76,7 +76,7 @@ to restrict the reduction to the specified columns.
 The reduced values are provided in a NamedTuple under names of reduced columns.
 
 For the `init` kwarg please refer to `Base.reduce` documentation,
-as it follows the same principles. 
+as it follows the same principles.
 
 # Examples
 ```julia

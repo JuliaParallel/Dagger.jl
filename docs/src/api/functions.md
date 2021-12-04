@@ -24,10 +24,16 @@ treereduce
 ```@docs
 tabletype
 tabletype!
+trim
+trim!
 map
-reduce
 filter
+reduce
 groupby
+leftjoin
+innerjoin
+keys
+getindex
 ```
 
 ## Array Functions

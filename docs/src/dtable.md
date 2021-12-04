@@ -286,3 +286,53 @@ Key: b
    1 │ b         3
    2 │ b         4
 ```
+
+# Joins
+
+There are two join methods available currently: `leftjoin` and `innerjoin`.
+The interface is aiming to be compatible with the `DataFrames.jl` join interface, but for now it only supports
+the `on` keyword argument with symbol input. More keyword arguments known from `DataFrames` may be introduced in the future.
+
+It's possible to perform a join on a `DTable` and any `Tables.jl` compatible table type.
+Joining two `DTable`s is also supported and it will leverage the fact that the second `DTable` is partitioned during the joining process.
+
+There are several options to make your joins faster by providing additional information about the tables.
+It can be done by using the following keyword arguments:
+
+- `l_sorted`: To indicate the left table is sorted - only useful if the `r_sorted` is set to `true` as well.
+- `r_sorted`: To indicate the right table is sorted.
+- `r_unique`: To indicate the right table only contains unique keys.
+- `lookup`: To provide a dict-like structure that will allow for quicker matching of inner rows. The structure needs to contain keys in form of a `Tuple` of the matched columns and values in form of type `Vector{UInt}` containing the related row indices.
+
+Currently there is a special case available where joining a `DTable` (with `DataFrame` as the underlying table type) with a `DataFrame` will use
+the join functions coming from the `DataFrames.jl` package for the per chunk joins.
+In the future this behavior will be expanded to any type that implements its own join methods, but for now is limited to `DataFrame` only.
+
+Please note that the usage of any of the keyword arguments described above will always result in the usage of generic join methods
+defined in `Dagger` regardless of the availability of specialized methods.
+
+```julia
+julia> using Tables; pp = d -> for x in Tables.rows(d) println("$(x.a), $(x.b), $(x.c)") end;
+
+julia> d1 = (a=collect(1:6), b=collect(1:6));
+
+julia> d2 = (a=collect(2:5), c=collect(-2:-1:-5));
+
+julia> dt = DTable(d1, 2)
+DTable with 3 partitions
+Tabletype: NamedTuple
+
+julia> pp(leftjoin(dt, d2, on=:a))
+2, 2, -2
+1, 1, missing
+3, 3, -3
+4, 4, -4
+5, 5, -5
+6, 6, missing
+
+julia> pp(innerjoin(dt, d2, on=:a))
+2, 2, -2
+3, 3, -3
+4, 4, -4
+5, 5, -5
+```

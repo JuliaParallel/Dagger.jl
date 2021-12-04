@@ -4,7 +4,7 @@ import SentinelArrays
 
 import Base: fetch, show, length
 
-export DTable, tabletype, tabletype!, trim, trim!
+export DTable, tabletype, tabletype!, trim, trim!, leftjoin, innerjoin
 
 const VTYPE = Vector{Union{Dagger.Chunk,Dagger.EagerThunk}}
 
@@ -20,7 +20,7 @@ the underlying partitions was applied to it (currently only `filter`).
 mutable struct DTable
     chunks::VTYPE
     tabletype
-    schema::Union{Nothing, Tables.Schema}
+    schema::Union{Nothing,Tables.Schema}
     DTable(chunks::VTYPE, tabletype) = new(chunks, tabletype, nothing)
 end
 
@@ -207,3 +207,5 @@ function _columnnames_svector(d::DTable)
 end
 
 @inline nchunks(d::DTable) = length(d.chunks)
+
+merge_chunks(sink, chunks) = sink(TableOperations.joinpartitions(Tables.partitioner(_retrieve, chunks)))
