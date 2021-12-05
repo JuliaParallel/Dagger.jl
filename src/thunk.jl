@@ -1,7 +1,7 @@
 export Thunk, delayed, delayedmap
 
 const ID_COUNTER = Threads.Atomic{Int}(1)
-next_id() = Threads.atomic_add!(ID_COUNTER, 1)
+next_id() = ThunkID(myid(), Threads.atomic_add!(ID_COUNTER, 1))
 
 """
     Thunk
@@ -51,7 +51,7 @@ If omitted, options can also be specified by passing key-value pairs as
 mutable struct Thunk
     f::Any # usually a Function, but could be any callable
     inputs::Tuple
-    id::Int
+    id::ThunkID
     get_result::Bool # whether the worker should send the result or only the metadata
     meta::Bool
     persist::Bool # don't `free!` result after computing
@@ -62,7 +62,7 @@ mutable struct Thunk
     eager_ref::Union{DRef,Nothing}
     options::Any # stores scheduler-specific options
     function Thunk(f, xs...;
-                   id::Int=next_id(),
+                   id::ThunkID=next_id(),
                    get_result::Bool=false,
                    meta::Bool=false,
                    persist::Bool=false,

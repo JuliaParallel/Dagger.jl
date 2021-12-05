@@ -254,7 +254,7 @@ empty_prof() = ProfilerResult(UInt[], Dict{UInt64, Vector{Base.StackTraces.Stack
 
 const prof_refcount = Ref{Threads.Atomic{Int}}(Threads.Atomic{Int}(0))
 const prof_lock = Threads.ReentrantLock()
-const prof_tasks = Dict{Int64, Vector{Task}}()
+const prof_tasks = Dict{ThunkID, Vector{Task}}()
 
 function prof_task_put!(tid, task::Task=Base.current_task())
     lock(prof_lock) do

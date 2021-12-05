@@ -1,6 +1,6 @@
 const EAGER_INIT = Ref{Bool}(false)
 const EAGER_THUNK_CHAN = Channel(typemax(Int))
-const EAGER_ID_MAP = Dict{UInt64,Int}()
+const EAGER_ID_MAP = Dict{UInt64,ThunkID}()
 const EAGER_CONTEXT = Ref{Context}()
 const EAGER_STATE = Ref{ComputeState}()
 
@@ -83,7 +83,7 @@ function eager_thunk()
             added_future, future, uid, ref, f, args, opts = take!(EAGER_THUNK_CHAN)
             # preserve inputs until they enter the scheduler
             tid = GC.@preserve args begin
-                _args = map(x->x isa Dagger.EagerThunk ? ThunkID(EAGER_ID_MAP[x.uid], x.thunk_ref) : x, args)
+                _args = map(x->x isa Dagger.EagerThunk ? ThunkRef(EAGER_ID_MAP[x.uid], x.thunk_ref) : x, args)
                 add_thunk!(f, h, _args...; future=future, ref=ref, opts...)
             end
             EAGER_ID_MAP[uid] = tid.id

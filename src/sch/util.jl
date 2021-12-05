@@ -193,17 +193,13 @@ function fetch_report(task)
     try
         fetch(task)
     catch err
-        @static if VERSION >= v"1.1"
-            @static if VERSION < v"1.7-rc1"
-                stk = Base.catch_stack(task)
-            else
-                stk = Base.current_exceptions(task)
-            end
-            err, frames = stk[1]
-            rethrow(CapturedException(err, frames))
+        @static if VERSION < v"1.7-rc1"
+            stk = Base.catch_stack(task)
         else
-            rethrow(task.result)
+            stk = Base.current_exceptions(task)
         end
+        err, frames = stk[1]
+        rethrow(CapturedException(err, frames))
     end
 end
 

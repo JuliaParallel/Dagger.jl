@@ -25,9 +25,9 @@ various uses:
 [`Dagger.add_thunk!`](@ref)
 
 When working with thunks acquired from `get_dag_ids` or `add_thunk!`,
-you will have `ThunkID` objects which refer to a thunk by ID. Scheduler
-control functions which work with thunks accept or return `ThunkID`s. For
-example, one can create a new thunkt and get its result with `Base.fetch`:
+you will have `ThunkRef` objects which reference a thunk. Scheduler
+control functions which work with thunks accept or return `ThunkRef`s. For
+example, one can create a new thunk and get its result with `Base.fetch`:
 
 ```julia
 function mythunk(x)

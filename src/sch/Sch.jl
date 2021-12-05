@@ -6,7 +6,7 @@ import Statistics: mean
 import Random: randperm
 
 import ..Dagger
-import ..Dagger: Context, Processor, Thunk, WeakThunk, ThunkFuture, ThunkFailedException, Chunk, OSProc, AnyScope
+import ..Dagger: Context, Processor, Thunk, ThunkID, WeakThunk, ThunkFuture, ThunkFailedException, Chunk, OSProc, AnyScope
 import ..Dagger: order, free!, dependents, noffspring, istask, inputs, unwrap_weak_checked, affinity, tochunk, timespan_start, timespan_finish, unrelease, procs, move, capacity, chunktype, processor, default_enabled, get_processors, get_parent, execute!, rmprocs!, addprocs!, thunk_processor, constrain, cputhreadtime
 
 const OneToMany = Dict{Thunk, Set{Thunk}}
@@ -47,7 +47,7 @@ Fields:
 - `cache::WeakKeyDict{Thunk, Any}` - Maps from a finished `Thunk` to it's cached result, often a DRef
 - `running::Set{Thunk}` - The set of currently-running `Thunk`s
 - `running_on::Dict{Thunk,OSProc}` - Map from `Thunk` to the OS process executing it
-- `thunk_dict::Dict{Int, WeakThunk}` - Maps from thunk IDs to a `Thunk`
+- `thunk_dict::Dict{ThunkID, WeakThunk}` - Maps from `ThunkID`s to a `Thunk`
 - `node_order::Any` - Function that returns the order of a thunk
 - `worker_pressure::Dict{Int,Dict{Processor,UInt64}}` - Cache of worker pressure
 - `worker_capacity::Dict{Int,Dict{Processor,UInt64}}` - Maps from worker ID to capacity
@@ -70,7 +70,7 @@ struct ComputeState
     cache::WeakKeyDict{Thunk, Any}
     running::Set{Thunk}
     running_on::Dict{Thunk,OSProc}
-    thunk_dict::Dict{Int, WeakThunk}
+    thunk_dict::Dict{ThunkID, WeakThunk}
     node_order::Any
     worker_pressure::Dict{Int,Dict{Processor,UInt64}}
     worker_capacity::Dict{Int,Dict{Processor,UInt64}}
@@ -94,7 +94,7 @@ function start_state(deps::Dict, node_order, chan)
                          Dict{Thunk, Any}(),
                          Set{Thunk}(),
                          Dict{Thunk,OSProc}(),
-                         Dict{Int, WeakThunk}(),
+                         Dict{ThunkID, WeakThunk}(),
                          node_order,
                          Dict{Int,Dict{Type,UInt64}}(),
                          Dict{Int,Dict{Type,UInt64}}(),
@@ -308,7 +308,7 @@ end
 const TASK_SYNC = Threads.Condition()
 
 "Process-local set of running task IDs."
-const TASKS_RUNNING = Set{Int}()
+const TASKS_RUNNING = Set{ThunkID}()
 
 "Process-local dictionary tracking per-processor total utilization."
 const PROC_UTILIZATION = Dict{UInt64,Dict{Processor,Ref{UInt64}}}()
@@ -835,7 +835,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
             end
         end
 
-        ids = convert(Vector{Int}, map(enumerate(thunk.inputs)) do (idx,x)
+        ids = convert(Vector{Union{ThunkID,Int}}, map(enumerate(thunk.inputs)) do (idx,x)
             istask(x) ? unwrap_weak_checked(x).id : -idx
         end)
         pushfirst!(ids, 0)
@@ -847,8 +847,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
         toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
         options = merge(ctx.options, toptions)
         @assert (options.single == 0) || (gproc.pid == options.single)
-        # TODO: Set `sch_handle.tid.ref` to the right `DRef`
-        sch_handle = SchedulerHandle(ThunkID(thunk.id, nothing), state.worker_chans[gproc.pid]...)
+        sch_handle = SchedulerHandle(ThunkRef(thunk), state.worker_chans[gproc.pid]...)
 
         # TODO: De-dup common fields (log_sink, uid, etc.)
         push!(to_send, (util, thunk.id, fn_type(thunk.f), data, thunk.get_result,

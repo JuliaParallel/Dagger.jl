@@ -1,16 +1,17 @@
 export SchedulerHaltedException
 export sch_handle, halt!, exec!, get_dag_ids, add_thunk!
 
-"Identifies a thunk by its ID, and preserves the thunk in the scheduler."
-struct ThunkID
-    id::Int
+"References a thunk by its ID, and optionally preserves the thunk in the scheduler."
+struct ThunkRef
+    id::ThunkID
     ref::Union{DRef,Nothing}
 end
-ThunkID(id::Int) = ThunkID(id, nothing)
+ThunkRef(id::ThunkID) = ThunkRef(id, nothing)
+ThunkRef(thunk::Thunk) = ThunkRef(thunk.id, thunk.eager_ref)
 
 "A handle to the scheduler, used by dynamic thunks."
 struct SchedulerHandle
-    thunk_id::ThunkID
+    thunk_ref::ThunkRef
     out_chan::RemoteChannel
     inp_chan::RemoteChannel
 end
@@ -106,7 +107,7 @@ const DYNAMIC_EXEC_LOCK = Threads.ReentrantLock()
 "Executes an arbitrary function within the scheduler, returning the result."
 function exec!(f, h::SchedulerHandle, args...)
     failed, res = lock(DYNAMIC_EXEC_LOCK) do
-        put!(h.out_chan, (h.thunk_id.id, f, args))
+        put!(h.out_chan, (h.thunk_ref.id, f, args))
         take!(h.inp_chan)
     end
     failed && throw(res)
@@ -122,15 +123,15 @@ function _halt(ctx, state, task, tid, _)
 end
 
 "Waits on a thunk to complete, and fetches its result."
-function Base.fetch(h::SchedulerHandle, id::ThunkID)
+function Base.fetch(h::SchedulerHandle, id::ThunkRef)
     future = ThunkFuture(Future(1))
     exec!(_register_future!, h, future, id)
     fetch(future; proc=thunk_processor())
 end
 "Waits on a thunk to complete, and fetches its result."
-register_future!(h::SchedulerHandle, id::ThunkID, future::ThunkFuture) =
+register_future!(h::SchedulerHandle, id::ThunkRef, future::ThunkFuture) =
         exec!(_register_future!, h, future, id)
-function _register_future!(ctx, state, task, tid, (future, id)::Tuple{ThunkFuture,ThunkID})
+function _register_future!(ctx, state, task, tid, (future, id)::Tuple{ThunkFuture,ThunkRef})
     tid != id.id || throw(DynamicThunkException("Cannot fetch own result"))
     GC.@preserve id begin
         thunk = unwrap_weak_checked(state.thunk_dict[id.id])
@@ -158,24 +159,23 @@ end
 
 # TODO: Optimize wait() to not serialize a Chunk
 "Waits on a thunk to complete."
-function Base.wait(h::SchedulerHandle, id::ThunkID; future=ThunkFuture(1))
+function Base.wait(h::SchedulerHandle, id::ThunkRef; future=ThunkFuture(1))
     register_future!(h, id, future)
     wait(future)
 end
 
 "Returns all Thunks IDs as a Dict, mapping a Thunk to its downstream dependents."
 get_dag_ids(h::SchedulerHandle) =
-    exec!(_get_dag_ids, h, nothing)::Dict{ThunkID,Set{ThunkID}}
+    exec!(_get_dag_ids, h, nothing)::Dict{ThunkRef,Set{ThunkRef}}
 function _get_dag_ids(ctx, state, task, tid, _)
-    deps = Dict{ThunkID,Set{ThunkID}}()
-    for (id,thunk) in state.thunk_dict
+    deps = Dict{ThunkRef,Set{ThunkRef}}()
+    for (id, thunk) in state.thunk_dict
         thunk = unwrap_weak_checked(thunk)
-        # TODO: Get at `thunk_ref` for `thunk_id.ref`
-        thunk_id = ThunkID(id, nothing)
+        thunk_ref = ThunkRef(thunk)
         if haskey(state.waiting_data, thunk)
-            deps[thunk_id] = Set(map(t->ThunkID(t.id, nothing), collect(state.waiting_data[thunk])))
+            deps[thunk_ref] = Set(map(t->ThunkRef(t), collect(state.waiting_data[thunk])))
         else
-            deps[thunk_id] = Set{ThunkID}()
+            deps[thunk_ref] = Set{ThunkRef}()
         end
     end
     deps
@@ -186,12 +186,12 @@ add_thunk!(f, h::SchedulerHandle, args...; future=nothing, ref=nothing, kwargs..
     exec!(_add_thunk!, h, f, args, kwargs, future, ref)
 function _add_thunk!(ctx, state, task, tid, (f, args, kwargs, future, ref))
     timespan_start(ctx, :add_thunk, tid, 0)
-    _args = map(arg->arg isa ThunkID ? state.thunk_dict[arg.id] : arg, args)
+    _args = map(arg->arg isa ThunkRef ? state.thunk_dict[arg.id] : arg, args)
     GC.@preserve _args begin
         thunk = Thunk(f, _args...; kwargs...)
         # Create a `DRef` to `thunk` so that the caller can preserve it
         thunk_ref = poolset(thunk)
-        thunk_id = ThunkID(thunk.id, thunk_ref)
+        thunk_id = ThunkRef(thunk.id, thunk_ref)
         state.thunk_dict[thunk.id] = WeakThunk(thunk)
         reschedule_inputs!(state, thunk)
         if future !== nothing
