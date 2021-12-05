@@ -1,6 +1,5 @@
 const EAGER_INIT = Ref{Bool}(false)
 const EAGER_THUNK_CHAN = Channel(typemax(Int))
-const EAGER_ID_MAP = Dict{UInt64,ThunkID}()
 const EAGER_CONTEXT = Ref{Context}()
 const EAGER_STATE = Ref{ComputeState}()
 
@@ -17,7 +16,7 @@ function init_eager()
     ctx = eager_context()
     @async try
         sopts = SchedulerOptions(;allow_errors=true)
-        topts = ThunkOptions(;single=1)
+        topts = ThunkOptions(;single=myid())
         Dagger.compute(ctx, Dagger.delayed(eager_thunk;options=topts)(); options=sopts)
     catch err
         iob = IOContext(IOBuffer(), :color=>true)
@@ -80,13 +79,12 @@ function eager_thunk()
     adjust_pressure!(h, tls.processor, -tls.utilization)
     while isopen(EAGER_THUNK_CHAN)
         try
-            added_future, future, uid, ref, f, args, opts = take!(EAGER_THUNK_CHAN)
+            added_future, future, id, ref, f, args, opts = take!(EAGER_THUNK_CHAN)
             # preserve inputs until they enter the scheduler
             tid = GC.@preserve args begin
-                _args = map(x->x isa Dagger.EagerThunk ? ThunkRef(EAGER_ID_MAP[x.uid], x.thunk_ref) : x, args)
-                add_thunk!(f, h, _args...; future=future, ref=ref, opts...)
+                _args = map(x->x isa Dagger.EagerThunk ? ThunkRef(x.id, x.thunk_ref) : x, args)
+                add_thunk!(f, h, _args...; future=future, ref=ref, id=id, opts...)
             end
-            EAGER_ID_MAP[uid] = tid.id
             put!(added_future, tid.ref)
         catch err
             iob = IOContext(IOBuffer(), :color=>true)
@@ -101,19 +99,15 @@ function eager_thunk()
 end
 
 eager_cleanup(t::Dagger.EagerThunkFinalizer) =
-    @async eager_cleanup(EAGER_STATE[], t.uid)
-function eager_cleanup(state, uid)
+    errormonitor(@async eager_cleanup(EAGER_STATE[], t.id))
+function eager_cleanup(state, tid)
     lock(state.lock) do
-        if !haskey(EAGER_ID_MAP, uid)
-            return
+        if haskey(state.thunk_dict, tid)
+            delete!(state.thunk_dict, tid)
         end
-        tid = EAGER_ID_MAP[uid]
-        delete!(EAGER_ID_MAP, uid)
-
         # N.B. cache and errored expire automatically
-        delete!(state.thunk_dict, tid)
     end
 end
 
 _find_thunk(e::Dagger.EagerThunk) =
-    unwrap_weak_checked(EAGER_STATE[].thunk_dict[EAGER_ID_MAP[e.uid]])
+    unwrap_weak_checked(EAGER_STATE[].thunk_dict[e.id])

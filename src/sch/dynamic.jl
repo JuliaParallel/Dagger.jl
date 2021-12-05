@@ -1,14 +1,6 @@
 export SchedulerHaltedException
 export sch_handle, halt!, exec!, get_dag_ids, add_thunk!
 
-"References a thunk by its ID, and optionally preserves the thunk in the scheduler."
-struct ThunkRef
-    id::ThunkID
-    ref::Union{DRef,Nothing}
-end
-ThunkRef(id::ThunkID) = ThunkRef(id, nothing)
-ThunkRef(thunk::Thunk) = ThunkRef(thunk.id, thunk.eager_ref)
-
 "A handle to the scheduler, used by dynamic thunks."
 struct SchedulerHandle
     thunk_ref::ThunkRef
@@ -118,14 +110,14 @@ end
 halt!(h::SchedulerHandle) = exec!(_halt, h, nothing)
 function _halt(ctx, state, task, tid, _)
     notify(state.halt)
-    put!(state.chan, (1, nothing, SchedulerHaltedException(), nothing))
+    put!(state.chan, (tid.id.wid, nothing, SchedulerHaltedException(), nothing))
     Base.throwto(task, SchedulerHaltedException())
 end
 
 "Waits on a thunk to complete, and fetches its result."
 function Base.fetch(h::SchedulerHandle, id::ThunkRef)
-    future = ThunkFuture(Future(1))
-    exec!(_register_future!, h, future, id)
+    future = ThunkFuture(Future(id.id.wid))
+    register_future!(h, id, future)
     fetch(future; proc=thunk_processor())
 end
 "Waits on a thunk to complete, and fetches its result."
@@ -138,6 +130,7 @@ function _register_future!(ctx, state, task, tid, (future, id)::Tuple{ThunkFutur
         ownthunk = unwrap_weak_checked(state.thunk_dict[tid])
         function dominates(target, t)
             t == target && return true
+            t isa ThunkRef && return false # FIXME: Can we figure this out efficiently?
             # N.B. Skips expired tasks
             task_inputs = filter(istask, Dagger.unwrap_weak.(t.inputs))
             if any(_t->dominates(target, _t), task_inputs)
@@ -182,13 +175,16 @@ function _get_dag_ids(ctx, state, task, tid, _)
 end
 
 "Adds a new Thunk to the DAG."
-add_thunk!(f, h::SchedulerHandle, args...; future=nothing, ref=nothing, kwargs...) =
-    exec!(_add_thunk!, h, f, args, kwargs, future, ref)
-function _add_thunk!(ctx, state, task, tid, (f, args, kwargs, future, ref))
+add_thunk!(f, h::SchedulerHandle, args...; future=nothing, ref=nothing, id=nothing, kwargs...) =
+    exec!(_add_thunk!, h, f, args, kwargs, future, ref, id)
+function _add_thunk!(ctx, state, task, tid, (f, args, kwargs, future, ref, id))
     timespan_start(ctx, :add_thunk, tid, 0)
-    _args = map(arg->arg isa ThunkRef ? state.thunk_dict[arg.id] : arg, args)
+    if id === nothing
+        id = Dagger.next_id()
+    end
+    _args = map(arg->(arg isa ThunkRef && arg.id.wid == myid()) ? state.thunk_dict[arg.id] : arg, args)
     GC.@preserve _args begin
-        thunk = Thunk(f, _args...; kwargs...)
+        thunk = Thunk(f, _args...; id=id, kwargs...)
         # Create a `DRef` to `thunk` so that the caller can preserve it
         thunk_ref = poolset(thunk)
         thunk_id = ThunkRef(thunk.id, thunk_ref)

@@ -137,6 +137,17 @@ end
 
 delayedmap(f, xs...) = map(delayed(f), xs...)
 
+"References a thunk by its ID, and optionally preserves the thunk."
+struct ThunkRef
+    id::ThunkID
+    ref::Union{DRef,Nothing}
+end
+ThunkRef(id::ThunkID) = ThunkRef(id, nothing)
+ThunkRef(thunk::Thunk) = ThunkRef(thunk.id, thunk.eager_ref)
+Base.isequal(ref1::ThunkRef, ref2::ThunkRef) = ref1.id == ref2.id
+Base.hash(ref::ThunkRef, h::UInt) = hash(typeof(ref), hash(ref.id, h))
+istask(::ThunkRef) = true
+
 "A future holding the result of a `Thunk`."
 struct ThunkFuture
     future::Future
@@ -207,7 +218,7 @@ scheduler, potentially ready to execute, executing, or finished executing. May
 be `fetch`'d or `wait`'d on at any time.
 """
 mutable struct EagerThunk
-    uid::UInt
+    id::ThunkID
     future::ThunkFuture
     finalizer_ref::DRef
     thunk_ref::DRef
@@ -222,31 +233,28 @@ function Base.fetch(t::EagerThunk; raw=false)
     end
 end
 function Base.show(io::IO, t::EagerThunk)
-    print(io, "EagerThunk ($(isready(t) ? "finished" : "running"))")
+    print(io, "EagerThunk[$(t.id)] ($(isready(t) ? "finished" : "running"))")
 end
 
 "When finalized, cleans-up the associated `EagerThunk`."
 mutable struct EagerThunkFinalizer
-    uid::UInt
-    function EagerThunkFinalizer(uid)
-        x = new(uid)
+    id::ThunkID
+    function EagerThunkFinalizer(id::ThunkID)
+        x = new(id)
         finalizer(Sch.eager_cleanup, x)
         x
     end
 end
 
-const EAGER_ID_COUNTER = Threads.Atomic{UInt64}(1)
-eager_next_id() = Threads.atomic_add!(EAGER_ID_COUNTER, one(UInt64))
-
 function _spawn(f, args...; kwargs...)
     Dagger.Sch.init_eager()
-    uid = eager_next_id()
+    id = next_id()
     future = ThunkFuture()
-    finalizer_ref = poolset(EagerThunkFinalizer(uid))
+    finalizer_ref = poolset(EagerThunkFinalizer(id))
     added_future = Future()
-    put!(Dagger.Sch.EAGER_THUNK_CHAN, (added_future, future, uid, finalizer_ref, f, (args...,), (kwargs...,)))
+    put!(Dagger.Sch.EAGER_THUNK_CHAN, (added_future, future, id, finalizer_ref, f, (args...,), (kwargs...,)))
     thunk_ref = fetch(added_future)
-    return (uid, future, finalizer_ref, thunk_ref)
+    return (id, future, finalizer_ref, thunk_ref)
 end
 """
     spawn(f, args...; kwargs...) -> EagerThunk
@@ -263,12 +271,8 @@ function spawn(f, args...; processor=nothing, scope=nothing, kwargs...)
                     something(processor, OSProc()),
                     something(scope, AnyScope()))
     end
-    uid, future, finalizer_ref, thunk_ref = if myid() == 1
-        _spawn(f, args...; kwargs...)
-    else
-        remotecall_fetch(_spawn, 1, f, args...; kwargs...)
-    end
-    return EagerThunk(uid, future, finalizer_ref, thunk_ref)
+    id, future, finalizer_ref, thunk_ref = _spawn(f, args...; kwargs...)
+    return EagerThunk(id, future, finalizer_ref, thunk_ref)
 end
 
 """

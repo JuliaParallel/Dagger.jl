@@ -6,10 +6,14 @@ import Statistics: mean
 import Random: randperm
 
 import ..Dagger
-import ..Dagger: Context, Processor, Thunk, ThunkID, WeakThunk, ThunkFuture, ThunkFailedException, Chunk, OSProc, AnyScope
+import ..Dagger: Context, Processor, Thunk, ThunkID, ThunkRef, WeakThunk, ThunkFuture, ThunkFailedException, Chunk, OSProc, AnyScope
 import ..Dagger: order, free!, dependents, noffspring, istask, inputs, unwrap_weak_checked, affinity, tochunk, timespan_start, timespan_finish, unrelease, procs, move, capacity, chunktype, processor, default_enabled, get_processors, get_parent, execute!, rmprocs!, addprocs!, thunk_processor, constrain, cputhreadtime
 
-const OneToMany = Dict{Thunk, Set{Thunk}}
+# Any referencable thunk
+const AnyThunk = Union{Thunk, ThunkRef}
+
+# Any referencable data
+const AnyRef = Union{Thunk, ThunkRef, Chunk}
 
 include("util.jl")
 include("fault-handler.jl")
@@ -41,10 +45,14 @@ The internal state-holding struct of the scheduler.
 
 Fields:
 - `uid::UInt64` - Unique identifier for this scheduler instance
-- `waiting::OneToMany` - Map from downstream `Thunk` to upstream `Thunk`s that still need to execute
-- `waiting_data::Dict{Union{Thunk,Chunk},Set{Thunk}}` - Map from input `Chunk`/upstream `Thunk` to all unfinished downstream `Thunk`s, to retain caches
+- `waiting::Dict{Thunk, Set{AnyThunk}}` - Map from downstream `Thunk` to upstream `Thunk`s that still need to execute
+- `waiting_data::Dict{AnyRef, Set{AnyThunk}}` - Map from input `Chunk`/upstream `Thunk` to all unfinished downstream `Thunk`s, to retain caches
 - `ready::Vector{Thunk}` - The list of `Thunk`s that are ready to execute
-- `cache::WeakKeyDict{Thunk, Any}` - Maps from a finished `Thunk` to it's cached result, often a DRef
+- `cache::WeakKeyDict{Thunk, Any}` - Maps from a finished `Thunk` to it's cached result, often a `Chunk`
+- `errored::WeakKeyDict{Thunk, Bool}` - Indicates if a thunk's result is an error.
+- `cache_remote::Dict{ThunkRef, Any}` - Maps from a remote finished `ThunkRef` to it's cached result, often a `Chunk`
+- `errored_remote::Dict{ThunkRef, Bool}` - Indicates if a remote thunk's result is an error.
+- `waiting_remote::Dict{ThunkRef, Set{Thunk}}` - All local thunks utilizing the key (a remote thunk)
 - `running::Set{Thunk}` - The set of currently-running `Thunk`s
 - `running_on::Dict{Thunk,OSProc}` - Map from `Thunk` to the OS process executing it
 - `thunk_dict::Dict{ThunkID, WeakThunk}` - Maps from `ThunkID`s to a `Thunk`
@@ -59,15 +67,18 @@ Fields:
 - `halt::Base.Event` - Event indicating that the scheduler is halting
 - `lock::ReentrantLock` - Lock around operations which modify the state
 - `futures::Dict{Thunk, Vector{ThunkFuture}}` - Futures registered for waiting on the result of a thunk.
-- `errored::WeakKeyDict{Thunk,Bool}` - Indicates if a thunk's result is an error.
 - `chan::RemoteChannel{Channel{Any}}` - Channel for receiving completed thunks.
 """
 struct ComputeState
     uid::UInt64
-    waiting::OneToMany
-    waiting_data::Dict{Union{Thunk,Chunk},Set{Thunk}}
+    waiting::Dict{Thunk, Set{AnyThunk}}
+    waiting_data::Dict{AnyRef, Set{AnyThunk}}
     ready::Vector{Thunk}
     cache::WeakKeyDict{Thunk, Any}
+    errored::WeakKeyDict{Thunk, Bool}
+    cache_remote::Dict{ThunkRef, Any}
+    errored_remote::Dict{ThunkRef, Bool}
+    waiting_remote::Dict{ThunkRef, Set{Thunk}}
     running::Set{Thunk}
     running_on::Dict{Thunk,OSProc}
     thunk_dict::Dict{ThunkID, WeakThunk}
@@ -82,16 +93,19 @@ struct ComputeState
     halt::Base.Event
     lock::ReentrantLock
     futures::Dict{Thunk, Vector{ThunkFuture}}
-    errored::WeakKeyDict{Thunk,Bool}
     chan::RemoteChannel{Channel{Any}}
 end
 
 function start_state(deps::Dict, node_order, chan)
     state = ComputeState(rand(UInt64),
-                         OneToMany(),
+                         Dict{Thunk, Set{AnyThunk}}(),
                          deps,
                          Vector{Thunk}(undef, 0),
-                         Dict{Thunk, Any}(),
+                         WeakKeyDict{Thunk, Any}(),
+                         WeakKeyDict{Thunk, Bool}(),
+                         Dict{ThunkRef, Any}(),
+                         Dict{ThunkRef, Bool}(),
+                         Dict{ThunkRef, Set{Thunk}}(),
                          Set{Thunk}(),
                          Dict{Thunk,OSProc}(),
                          Dict{ThunkID, WeakThunk}(),
@@ -106,7 +120,6 @@ function start_state(deps::Dict, node_order, chan)
                          Base.Event(),
                          ReentrantLock(),
                          Dict{Thunk, Vector{ThunkFuture}}(),
-                         WeakKeyDict{Thunk,Bool}(),
                          chan)
 
     for k in sort(collect(keys(deps)), by=node_order)
@@ -516,7 +529,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         if isempty(state.ready)
             @goto fire_tasks
         end
-        task = pop!(state.ready)
+        task = pop!(state.ready)::Thunk
         timespan_start(ctx, :schedule, task.id, (;thunk_id=task.id))
         @assert !haskey(state.cache, task)
         opts = merge(ctx.options, task.options)
@@ -530,7 +543,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         end
         for input in unwrap_weak_checked.(task.inputs)
             chunk = if istask(input)
-                state.cache[input]
+                cache_lookup_checked(state, input)[1]
             elseif input isa Chunk
                 input
             else
@@ -540,8 +553,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
             scope = constrain(scope, chunk.scope)
             if scope isa Dagger.InvalidScope
                 ex = SchedulingException("Scopes are not compatible: $(scope.x), $(scope.y)")
-                state.cache[task] = ex
-                state.errored[task] = true
+                cache_store!(state, task, ex, true)
                 set_failed!(state, task)
                 @goto pop_task
             end
@@ -582,8 +594,8 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
                 end
             end
         end
-        state.cache[task] = SchedulingException("No processors available, try making proclist more liberal")
-        state.errored[task] = true
+        ex = SchedulingException("No processors available, try making proclist more liberal")
+        cache_store!(state, task, ex, true)
         set_failed!(state, task)
         @goto pop_task
 
@@ -841,7 +853,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
         pushfirst!(ids, 0)
 
         data = convert(Vector{Any}, map(Any[thunk.inputs...]) do x
-            istask(x) ? state.cache[unwrap_weak_checked(x)] : x
+            istask(x) ? cache_lookup_checked(state, unwrap_weak_checked(x))[1] : x
         end)
         pushfirst!(data, thunk.f)
         toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
