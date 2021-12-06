@@ -1,4 +1,4 @@
-The Compute.jl package is licensed under the MIT "Expat" License:
+Dagger.jl is licensed under the MIT "Expat" License:
 
 > Copyright (c) 2015-21: Julia Computing, Shashi Gowda, Julian Samaroo
 >
