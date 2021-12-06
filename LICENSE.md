@@ -1,6 +1,6 @@
 The Compute.jl package is licensed under the MIT "Expat" License:
 
-> Copyright (c) 2015: Shashi Gowda.
+> Copyright (c) 2015-21: Julia Computing, Shashi Gowda, Julian Samaroo
 >
 > Permission is hereby granted, free of charge, to any person obtaining
 > a copy of this software and associated documentation files (the
