@@ -166,7 +166,17 @@ function order(node::Thunk, ndeps)
         s += 1
         output[next] = s
         parents = collect(Iterators.filter(istask, inputs(next)))
-        sort!(parents, by=k->get(ndeps,k,0))
+        if !isempty(parents)
+            # If parents is empty, sort! should be a no-op, but raises an ambiguity error
+            # when InlineStrings.jl is loaded (at least, version 1.1.0), because InlineStrings
+            # defines a method defalg(::AbstractArray{<:Union{Missing, String1, String15, String3, String7}})
+            # while Base defines a method defalg(v::AbstractArray{<:Union{Missing, Number}}). When parents is
+            # empty it is a Vector{Union{}}. Since Union{} is a subtype of all Union{...}s, any package
+            # that defines a function defalg(::AbstractArray{<:Union{...anything can go here...}}) will cause
+            # ambiguity. By not calling sort! when parents is empty, we avoid calling sort! with a Vector{Union{}}
+            # and always call with a more specific type that is not a subtype of other packages' types.
+            sort!(parents, by=k->get(ndeps,k,0))
+        end
         append!(to_visit, parents)
     end
     output
