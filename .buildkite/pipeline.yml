@@ -4,12 +4,12 @@
     queue: "juliaecosystem"
     sandbox.jl: "true"
 steps:
-  - label: Julia 1.6
+  - label: Julia 1.7
     timeout_in_minutes: 60
     <<: *test
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.6"
+          version: "1.7"
       - JuliaCI/julia-test#v1:
           julia_args: "--threads=1"
       # - JuliaCI/julia-coverage#v1:
@@ -19,7 +19,7 @@ steps:
     <<: *test
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.6-nightly"
+          version: "1.7-nightly"
       - JuliaCI/julia-test#v1:
           julia_args: "--threads=1"
       # - JuliaCI/julia-coverage#v1:
@@ -33,6 +33,6 @@ steps:
       serial: true
     plugins:
       - docker#v3.7.0:
-          image: julia:1.5.3
+          image: julia:1.7.0
     artifacts:
       - benchmarks/TODO

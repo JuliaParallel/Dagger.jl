@@ -30,7 +30,7 @@ SentinelArrays = "1"
 StatsBase = "0.28, 0.29, 0.30, 0.31, 0.32, 0.33"
 TableOperations = "1"
 Tables = "1.1"
-julia = "1.6"
+julia = "1.7"
 
 [extras]
 Arrow = "69666777-d1a9-59fb-9406-91d4454c9d45"
