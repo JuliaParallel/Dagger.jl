@@ -595,13 +595,21 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         end
         "Like `sum`, but replaces `nothing` entries with the average of non-`nothing` entries."
         function impute_sum(xs)
-            all(x->!isa(x, Chunk), xs) && return 0
-            avg = round(UInt64, mean(filter(x->x isa Chunk, xs)))
-            total = 0
+            length(xs) == 0 && return 0
+
+            total = zero(eltype(xs))
+            nothing_count = 0
+            something_count = 0
             for x in xs
-                total += x !== nothing ? x : avg
+                if isnothing(x)
+                    nothing_count += 1
+                else
+                    something_count += 1
+                    total += x
+                end
             end
-            total
+
+            total + nothing_count * total / something_count
         end
 
         # Schedule tasks
