@@ -521,101 +521,11 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         safepoint(state)
         @assert length(procs) > 0
 
-        # Populate the cache if empty
-        if state.procs_cache_list[] === nothing
-            current = nothing
-            for p in map(x->x.pid, procs)
-                for proc in get_processors(OSProc(p))
-                    next = ProcessorCacheEntry(OSProc(p), proc)
-                    if current === nothing
-                        current = next
-                        current.next = current
-                        state.procs_cache_list[] = current
-                    else
-                        current.next = next
-                        current = next
-                        current.next = state.procs_cache_list[]
-                    end
-                end
-            end
-        end
-
-        function can_use_proc(task, gproc, proc, opts, scope)
-            # Check against proclist
-            if opts.proclist === nothing
-                if !default_enabled(proc)
-                    return false
-                end
-            elseif opts.proclist isa Function
-                if !Base.invokelatest(opts.proclist, proc)
-                    return false
-                end
-            elseif opts.proclist isa Vector
-                if !(typeof(proc) in opts.proclist)
-                    return false
-                end
-            else
-                throw(SchedulingException("proclist must be a Function, Vector, or nothing"))
-            end
-
-            # Check against single
-            if opts.single != 0
-                if gproc.pid != opts.single
-                    return false
-                end
-            end
-
-            # Check scope
-            if constrain(scope, Dagger.ExactScope(proc)) isa Dagger.InvalidScope
-                return false
-            end
-
-            return true
-        end
-        function has_capacity(p, gp, procutil, sig)
-            T = typeof(p)
-            # FIXME: MaxUtilization
-            extra_util = round(UInt64, get(procutil, T, 1) * 1e9)
-            real_util = state.worker_pressure[gp][p]
-            if (T === Dagger.ThreadProc) && haskey(state.function_cost_cache, sig)
-                # Assume that the extra pressure is between estimated and measured
-                # TODO: Generalize this to arbitrary processor types
-                extra_util = min(extra_util, state.function_cost_cache[sig])
-            end
-            # TODO: update real_util based on loadavg
-            cap = typemax(UInt64)
-            #= TODO
-            cap = state.worker_capacity[gp][T]
-            if ((extra_util isa MaxUtilization) && (real_util > 0)) ||
-               ((extra_util isa Real) && (extra_util + real_util > cap))
-                return false, cap, extra_util
-            end
-            =#
-            return true, cap, extra_util
-        end
-        "Like `sum`, but replaces `nothing` entries with the average of non-`nothing` entries."
-        function impute_sum(xs)
-            length(xs) == 0 && return 0
-
-            total = zero(eltype(xs))
-            nothing_count = 0
-            something_count = 0
-            for x in xs
-                if isnothing(x)
-                    nothing_count += 1
-                else
-                    something_count += 1
-                    total += x
-                end
-            end
-
-            total + nothing_count * total / something_count
-        end
+        populate_processor_cache_list!(state, procs)
 
         # Schedule tasks
         to_fire = Dict{Tuple{OSProc,<:Processor},Vector{Tuple{Thunk,<:Any}}}()
         failed_scheduling = Thunk[]
-        tx_rate = state.transfer_rate[]
 
         # Select a new task and get its options
         task = nothing
@@ -666,27 +576,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
             @goto fallback
         end
 
-        # Find all Chunks
-        inputs = map(input->istask(input) ? state.cache[input] : input, unwrap_weak_checked.(task.inputs))
-        chunks = convert(Vector{Chunk}, filter(t->isa(t, Chunk), [inputs...]))
-        @assert isempty(chunks) || chunks isa Vector{<:Chunk} "chunks isa $(typeof(chunks))"
-
-        # Estimate network transfer costs based on data size
-        # N.B. `affinity(x)` really means "data size of `x`"
-        # N.B. We treat same-worker transfers as having zero transfer cost
-        # TODO: For non-Chunk, model cost from scheduler to worker
-        # TODO: Measure and model processor move overhead
-        transfer_costs = Dict(proc=>impute_sum([affinity(chunk)[2] for chunk in filter(c->get_parent(processor(c))!=get_parent(proc), chunks)]) for proc in local_procs)
-
-        # Estimate total cost to move data and get task running after currently-scheduled tasks
-        costs = Dict(proc=>state.worker_pressure[get_parent(proc).pid][proc]+(tx_cost/tx_rate) for (proc, tx_cost) in transfer_costs)
-
-        # Shuffle procs around, so equally-costly procs are equally considered
-        P = randperm(length(local_procs))
-        local_procs = getindex.(Ref(local_procs), P)
-
-        # Sort by lowest cost first
-        sort!(local_procs, by=p->costs[p])
+        local_procs, costs = estimate_task_costs(state, local_procs, task)
         scheduled = false
 
         # Move our corresponding ThreadProc to be the last considered
@@ -702,7 +592,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         for proc in local_procs
             gproc = get_parent(proc)
             if can_use_proc(task, gproc, proc, opts, scope)
-                has_cap, cap, extra_util = has_capacity(proc, gproc.pid, opts.procutil, sig)
+                has_cap, cap, extra_util = has_capacity(state, proc, gproc.pid, opts.procutil, sig)
                 if has_cap
                     # Schedule task onto proc
                     extra_util = extra_util isa MaxUtilization ? cap : extra_util
@@ -726,7 +616,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         procs_found = false
         # N.B. if we only have one processor, we need to select it now
         if can_use_proc(task, entry.gproc, entry.proc, opts, scope)
-            has_cap, cap, extra_util = has_capacity(entry.proc, entry.gproc.pid, opts.procutil, sig)
+            has_cap, cap, extra_util = has_capacity(state, entry.proc, entry.gproc.pid, opts.procutil, sig)
             if has_cap
                 selected_entry = entry
             else
@@ -750,7 +640,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
             end
 
             if can_use_proc(task, entry.gproc, entry.proc, opts, scope)
-                has_cap, cap, extra_util = has_capacity(entry.proc, entry.gproc.pid, opts.procutil, sig)
+                has_cap, cap, extra_util = has_capacity(state, entry.proc, entry.gproc.pid, opts.procutil, sig)
                 if has_cap
                     # Select this processor
                     selected_entry = entry
