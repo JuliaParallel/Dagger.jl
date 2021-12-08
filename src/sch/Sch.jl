@@ -661,23 +661,31 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         if length(procs) > fallback_threshold
             @goto fallback
         end
-        # Select processor with highest data locality, if possible
-        # TODO: Account for process-local data movement
-        inputs = filter(t->istask(t)||isa(t,Chunk), unwrap_weak_checked.(task.inputs))
-        chunks = [istask(input) ? state.cache[input] : input for input in inputs]
-        #local_procs = unique(map(c->c isa Chunk ? processor(c) : OSProc(), chunks))
         local_procs = unique(vcat([Dagger.get_processors(gp) for gp in procs]...))
         if length(local_procs) > fallback_threshold
             @goto fallback
         end
-        affinities = Dict(proc=>impute_sum([affinity(chunk)[2] for chunk in filter(c->isa(c,Chunk)&&get_parent(processor(c))==get_parent(proc), chunks)]) for proc in local_procs)
-        # Estimate cost to move data and get scheduled
-        costs = Dict(proc=>state.worker_pressure[get_parent(proc).pid][proc]+(aff/tx_rate) for (proc,aff) in affinities)
 
-        # shuffle procs around
+        # Find all Chunks
+        inputs = map(input->istask(input) ? state.cache[input] : input, unwrap_weak_checked.(task.inputs))
+        chunks = convert(Vector{Chunk}, filter(t->isa(t, Chunk), [inputs...]))
+        @assert isempty(chunks) || chunks isa Vector{<:Chunk} "chunks isa $(typeof(chunks))"
+
+        # Estimate network transfer costs based on data size
+        # N.B. `affinity(x)` really means "data size of `x`"
+        # N.B. We treat same-worker transfers as having zero transfer cost
+        # TODO: For non-Chunk, model cost from scheduler to worker
+        # TODO: Measure and model processor move overhead
+        transfer_costs = Dict(proc=>impute_sum([affinity(chunk)[2] for chunk in filter(c->get_parent(processor(c))!=get_parent(proc), chunks)]) for proc in local_procs)
+
+        # Estimate total cost to move data and get task running after currently-scheduled tasks
+        costs = Dict(proc=>state.worker_pressure[get_parent(proc).pid][proc]+(tx_cost/tx_rate) for (proc, tx_cost) in transfer_costs)
+
+        # Shuffle procs around, so equally-costly procs are equally considered
         P = randperm(length(local_procs))
         local_procs = getindex.(Ref(local_procs), P)
 
+        # Sort by lowest cost first
         sort!(local_procs, by=p->costs[p])
         scheduled = false
 
