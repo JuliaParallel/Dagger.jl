@@ -185,6 +185,7 @@ end
 add_thunk!(f, h::SchedulerHandle, args...; future=nothing, ref=nothing, kwargs...) =
     exec!(_add_thunk!, h, f, args, kwargs, future, ref)
 function _add_thunk!(ctx, state, task, tid, (f, args, kwargs, future, ref))
+    timespan_start(ctx, :add_thunk, tid, 0)
     _args = map(arg->arg isa ThunkID ? state.thunk_dict[arg.id] : arg, args)
     GC.@preserve _args begin
         thunk = Thunk(f, _args...; kwargs...)
@@ -202,6 +203,7 @@ function _add_thunk!(ctx, state, task, tid, (f, args, kwargs, future, ref))
             thunk.eager_ref = ref
         end
         put!(state.chan, RescheduleSignal())
+        timespan_finish(ctx, :add_thunk, tid, 0)
         return thunk_id
     end
 end
