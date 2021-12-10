@@ -670,9 +670,10 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
 
         # Fire all newly-scheduled tasks
         @label fire_tasks
-        @sync for gpp in keys(to_fire)
-            @async fire_tasks!(ctx, to_fire[gpp], gpp, state)
+        for gpp in keys(to_fire)
+            fire_tasks!(ctx, to_fire[gpp], gpp, state)
         end
+
         append!(state.ready, failed_scheduling)
     end
 end
@@ -845,23 +846,24 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
                         (log_sink=ctx.log_sink, profile=ctx.profile),
                         sch_handle, state.uid))
     end
-    timespan_start(ctx, :fire_multi, 0, 0)
-    try
-        remotecall_wait(do_tasks, gproc.pid, proc, state.chan, to_send)
-    catch
-        # We might get a deserialization error due to something not being
-        # defined on the worker; in this case, we re-fire one task at a time to
-        # determine which task failed
-        for ts in to_send
+    # N.B. We don't batch these because we might get a deserialization
+    # error due to something not being defined on the worker, and then we don't
+    # know which task failed.
+    tasks = Task[]
+    for ts in to_send
+        # TODO: errormonitor
+        @async begin
+            timespan_start(ctx, :fire, gproc.pid, 0)
             try
                 remotecall_wait(do_tasks, gproc.pid, proc, state.chan, [ts])
             catch err
                 bt = catch_backtrace()
                 put!(state.chan, (gproc.pid, proc, ts[2], (CapturedException(err, bt), nothing)))
+            finally
+                timespan_finish(ctx, :fire, gproc.pid, 0)
             end
         end
     end
-    timespan_finish(ctx, :fire_multi, 0, 0)
 end
 
 """
