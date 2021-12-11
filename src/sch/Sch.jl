@@ -369,49 +369,30 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         end
     end
 
+    # Listen for new workers
+    @async begin
+        try
+            monitor_procs_changed!(ctx, state)
+        catch err
+            @error "Error assigning workers" exception=(err,catch_backtrace())
+        end
+    end
+
     # setup dynamic listeners
     dynamic_listener!(ctx, state)
 
     timespan_finish(ctx, :scheduler_init, 0, master)
 
-    # start off some tasks
-    # Note: procs_state may be different things for different contexts. Don't touch it out here!
-    procs_state = assign_new_procs!(ctx, state, procs_to_use(ctx))
-
     safepoint(state)
 
     # Loop while we still have thunks to execute
     while !isempty(state.ready) || !isempty(state.running)
-        procs_state = assign_new_procs!(ctx, state, procs_state)
         if !isempty(state.ready)
             # Nothing running, so schedule up to N thunks, 1 per N workers
-            schedule!(ctx, state, procs_state)
+            schedule!(ctx, state)
         end
-
-        # This is a bit redundant as the @async task below does basically the
-        # same job Without it though, testing of process modification becomes
-        # non-deterministic (due to sleep in CI environment) which is why it is
-        # still here.
-        procs_state = assign_new_procs!(ctx, state, procs_state)
 
         check_integrity(ctx)
-
-        # Check periodically for new workers in a parallel task so that we
-        # don't accidentally end up having to wait for `take!(chan)` on some
-        # large task before new workers are put to work. Locking is used to
-        # stop this task as soon as something pops out from the channel to
-        # minimize risk that the task schedules thunks simultaneously as the
-        # main task (after future refactoring).
-        newtasks_lock = ReentrantLock()
-        @async while !isempty(state.ready) || !isempty(state.running)
-            sleep(1)
-            islocked(newtasks_lock) && return
-            timespan_start(ctx, :assign_procs, 0, 0)
-            procs_state = lock(newtasks_lock) do
-                assign_new_procs!(ctx, state, procs_state)
-            end
-            timespan_finish(ctx, :assign_procs, 0, 0)
-        end
 
         isempty(state.running) && continue
         timespan_start(ctx, :take, 0, 0)
@@ -422,7 +403,6 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         end
         pid, proc, thunk_id, (res, metadata) = chan_value
         gproc = OSProc(pid)
-        lock(newtasks_lock) # This waits for any assign_new_procs! above to complete and then shuts down the task
         safepoint(state)
         lock(state.lock) do
             thunk_failed = false
@@ -678,22 +658,52 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
     end
 end
 
-# Main responsibility of this function is to check if new procs have been pushed to the context
-function assign_new_procs!(ctx, state, assignedprocs)
-    ps = procs_to_use(ctx)
-    # Must track individual procs to handle the case when procs are removed
-    diffps = setdiff(ps, assignedprocs)
-    if !isempty(diffps)
+"""
+Monitors for workers being added/removed to/from `ctx`, sets up or tears down
+per-worker state, and notifies the scheduler so that work can be reassigned.
+"""
+function monitor_procs_changed!(ctx, state)
+    # Load current set of procs
+    old_ps = procs_to_use(ctx)
+
+    while !state.halt.set
+        # Wait for the notification that procs have changed
+        lock(ctx.proc_notify) do
+            wait(ctx.proc_notify)
+        end
+
+        timespan_start(ctx, :assign_procs, 0, 0)
+
+        # Load new set of procs
+        new_ps = procs_to_use(ctx)
+
+        # Initialize new procs
+        diffps = setdiff(new_ps, old_ps)
         for p in diffps
             init_proc(state, p, ctx.log_sink)
-        end
-        state.procs_cache_list[] = nothing
-        schedule!(ctx, state, diffps)
-    end
-    return ps
-end
 
-shall_remove_proc(ctx, proc) = proc ∉ procs_to_use(ctx)
+            # Empty the processor cache list and force reschedule
+            lock(state.lock) do
+                state.procs_cache_list[] = nothing
+            end
+            put!(state.chan, RescheduleSignal())
+        end
+
+        # Cleanup removed procs
+        diffps = setdiff(old_ps, new_ps)
+        for p in diffps
+            cleanup_proc(state, p, ctx.log_sink)
+
+            # Empty the processor cache list
+            lock(state.lock) do
+                state.procs_cache_list[] = nothing
+            end
+        end
+
+        timespan_finish(ctx, :assign_procs, 0, 0)
+        old_ps = new_ps
+    end
+end
 
 function remove_dead_proc!(ctx, state, proc, options=ctx.options)
     @assert options.single !== proc.pid "Single worker failed, cannot continue."
