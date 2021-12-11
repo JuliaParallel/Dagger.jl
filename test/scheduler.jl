@@ -399,3 +399,20 @@ end
 @testset "Chunk Caching" begin
     compute(delayed(testevicted)(delayed(testpresent)(c1,c2)))
 end
+
+@testset "MemPool.approx_size" begin
+    for (obj, size) in [
+        (rand(100), 100*sizeof(Float64)),
+        (rand(Float32, 100), 100*sizeof(Float32)),
+        (rand(1:10, 100), 100*sizeof(Int)),
+        (fill(:a, 10), missing),
+        (fill("a", 10), missing),
+        (fill('a', 10), missing),
+    ]
+        if size !== missing
+            @test MemPool.approx_size(obj) == size
+        else
+            @test MemPool.approx_size(obj) !== nothing
+        end
+    end
+end
