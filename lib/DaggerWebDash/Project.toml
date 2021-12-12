@@ -14,7 +14,7 @@ Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 StructTypes = "856f2bd8-1eba-4b0a-8007-ebc267875bd4"
 
 [compat]
-Dagger = "0.13.2"
+Dagger = "0.13.2, 0.14"
 JSON3 = "1"
 MemPool = "0.3"
 Mux = "0.7"
