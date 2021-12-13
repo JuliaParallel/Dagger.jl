@@ -976,7 +976,7 @@ function do_task(to_proc, extra_util, thunk_id, Tf, data, send_result, persist, 
         if ((extra_util isa MaxUtilization) && (real_util[] > 0)) ||
            ((extra_util isa Real) && (extra_util + real_util[] > cap))
             # Fully subscribed, wait and re-check
-            @debug "($(myid())) $f ($thunk_id) Waiting for free $(typeof(to_proc)): $extra_util | $(real_util[])/$cap"
+            @debug "($(myid())) $f ($thunk_id) Waiting for free $to_proc: $extra_util | $(real_util[])/$cap"
             wait(TASK_SYNC)
             unlock(TASK_SYNC)
         else
@@ -1021,7 +1021,7 @@ function do_task(to_proc, extra_util, thunk_id, Tf, data, send_result, persist, 
         pop!(TASKS_RUNNING, thunk_id)
         notify(TASK_SYNC)
     end
-    @debug "($(myid())) $f ($thunk_id) Releasing $(typeof(to_proc)): $extra_util | $(real_util[])/$cap"
+    @debug "($(myid())) $f ($thunk_id) Releasing $to_proc: $extra_util | $(real_util[])/$cap"
     metadata = (
         pressure=real_util[],
         loadavg=((Sys.loadavg()...,) ./ Sys.CPU_THREADS),
