@@ -178,28 +178,31 @@ end
 add_thunk!(f, h::SchedulerHandle, args...; future=nothing, ref=nothing, id=nothing, kwargs...) =
     exec!(_add_thunk!, h, f, args, kwargs, future, ref, id)
 function _add_thunk!(ctx, state, task, tid, (f, args, kwargs, future, ref, id))
-    timespan_start(ctx, :add_thunk, tid, 0)
     if id === nothing
         id = Dagger.next_id()
     end
-    _args = map(arg->(arg isa ThunkRef && arg.id.wid == myid()) ? state.thunk_dict[arg.id] : arg, args)
-    GC.@preserve _args begin
-        thunk = Thunk(f, _args...; id=id, kwargs...)
-        # Create a `DRef` to `thunk` so that the caller can preserve it
-        thunk_ref = poolset(thunk)
-        thunk_id = ThunkRef(thunk.id, thunk_ref)
-        state.thunk_dict[thunk.id] = WeakThunk(thunk)
-        reschedule_inputs!(state, thunk)
-        if future !== nothing
-            # Ensure we attach a future before the thunk is scheduled
-            _register_future!(ctx, state, task, tid, (future, thunk_id))
+    timespan_start(ctx, :add_thunk, id, 0)
+    try
+        _args = map(arg->(arg isa ThunkRef && arg.id.wid == myid()) ? state.thunk_dict[arg.id] : arg, args)
+        GC.@preserve _args begin
+            thunk = Thunk(f, _args...; id=id, kwargs...)
+            # Create a `DRef` to `thunk` so that the caller can preserve it
+            thunk_ref = poolset(thunk)
+            thunk_id = ThunkRef(thunk.id, thunk_ref)
+            state.thunk_dict[thunk.id] = WeakThunk(thunk)
+            reschedule_inputs!(state, thunk)
+            if future !== nothing
+                # Ensure we attach a future before the thunk is scheduled
+                _register_future!(ctx, state, task, tid, (future, thunk_id))
+            end
+            if ref !== nothing
+                # Preserve the `EagerThunkFinalizer` through `thunk`
+                thunk.eager_ref = ref
+            end
+            put!(state.chan, RescheduleSignal())
+            return thunk_id
         end
-        if ref !== nothing
-            # Preserve the `EagerThunkFinalizer` through `thunk`
-            thunk.eager_ref = ref
-        end
-        put!(state.chan, RescheduleSignal())
-        timespan_finish(ctx, :add_thunk, tid, 0)
-        return thunk_id
+    finally
+        timespan_finish(ctx, :add_thunk, id, 0)
     end
 end
