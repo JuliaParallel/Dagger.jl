@@ -518,7 +518,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         populate_processor_cache_list!(state, procs)
 
         # Schedule tasks
-        to_fire = Dict{Tuple{OSProc,<:Processor},Vector{Tuple{Thunk,<:Any}}}()
+        to_fire = Dict{Tuple{OSProc,<:Processor},Vector{Tuple{Thunk,<:Any,<:Any}}}()
         failed_scheduling = Thunk[]
 
         # Select a new task and get its options
@@ -589,7 +589,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
                 if has_cap
                     # Schedule task onto proc
                     extra_util = extra_util isa MaxUtilization ? cap : extra_util
-                    push!(get!(()->Vector{Tuple{Thunk,<:Any}}(), to_fire, (gproc, proc)), (task, extra_util))
+                    push!(get!(()->Vector{Tuple{Thunk,<:Any}}(), to_fire, (gproc, proc)), (task, extra_util, scope))
                     state.worker_pressure[gproc.pid][proc] += extra_util
                     @goto pop_task
                 end
@@ -652,7 +652,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         # Schedule task onto proc
         gproc, proc = entry.gproc, entry.proc
         extra_util = extra_util isa MaxUtilization ? cap : extra_util
-        push!(get!(()->Vector{Tuple{Thunk,<:Any}}(), to_fire, (gproc, proc)), (task, extra_util))
+        push!(get!(()->Vector{Tuple{Thunk,<:Any,<:Any}}(), to_fire, (gproc, proc)), (task, extra_util, scope))
 
         # Proceed to next entry to spread work
         if !ctx.options.round_robin
@@ -808,13 +808,13 @@ function evict_chunks!(log_sink, chunks::Set{Chunk})
     nothing
 end
 
-fire_task!(ctx, thunk::Thunk, p, state; util=10^9) =
-    fire_task!(ctx, (thunk, util), p, state)
-fire_task!(ctx, (thunk, util)::Tuple{Thunk,<:Any}, p, state) =
-    fire_tasks!(ctx, [(thunk, util)], p, state)
+fire_task!(ctx, thunk::Thunk, p, state; util=10^9, scope=AnyScope()) =
+    fire_task!(ctx, (thunk, util, scope), p, state)
+fire_task!(ctx, (thunk, util, scope)::Tuple{Thunk,<:Any,<:Any}, p, state) =
+    fire_tasks!(ctx, [(thunk, util, scope)], p, state)
 function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
     to_send = []
-    for (thunk, util) in thunks
+    for (thunk, util, scope) in thunks
         push!(state.running, thunk)
         state.running_on[thunk] = gproc
         if thunk.cache && thunk.cache_ref !== nothing
@@ -863,9 +863,9 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
         sch_handle = SchedulerHandle(ThunkRef(thunk), state.worker_chans[gproc.pid]...)
 
         # TODO: De-dup common fields (log_sink, uid, etc.)
-        push!(to_send, TaskComm(util, thunk.id, fn_type(thunk.f), data,
-                                thunk.get_result, thunk.persist, thunk.cache,
-                                thunk.meta, options, ids,
+        push!(to_send, TaskComm(util, thunk.id, proc, scope, fn_type(thunk.f),
+                                data, thunk.get_result, thunk.persist,
+                                thunk.cache, thunk.meta, options, ids,
                                 (log_sink=ctx.log_sink, profile=ctx.profile),
                                 sch_handle, state.uid, state.chan))
     end
@@ -874,18 +874,17 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
     # know which task failed.
     tasks = Task[]
     for ts in to_send
-        # TODO: errormonitor
-        @async begin
+        errormonitor(@async begin
             timespan_start(ctx, :fire, gproc.pid, 0)
             try
-                remotecall_wait(do_tasks, gproc.pid, proc, [ts])
+                remotecall_wait(do_tasks, gproc.pid, [ts])
             catch err
                 bt = catch_backtrace()
-                put!(state.chan, (gproc.pid, proc, ts[2], (CapturedException(err, bt), nothing)))
+                put!(state.chan, (gproc.pid, proc, ts.thunk_id, (CapturedException(err, bt), nothing)))
             finally
                 timespan_finish(ctx, :fire, gproc.pid, 0)
             end
-        end
+        end)
     end
 end
 
@@ -896,6 +895,8 @@ object implies the exclusive right to execute the task it references.
 struct TaskComm
     extra_util::Union{UInt64, MaxUtilization}
     thunk_id::ThunkID
+    to_proc::Processor
+    scope::Dagger.AbstractScope
     Tf::Type
     data
     send_result::Bool
@@ -910,9 +911,17 @@ struct TaskComm
     sch_chan::RemoteChannel
 end
 
+macro unpack_taskcomm(task)
+    ex = Expr(:block)
+    for field in fieldnames(TaskComm)
+        push!(ex.args, :($(esc(field)) = getfield($(esc(task)), $(QuoteNode(field)))))
+    end
+    ex
+end
+
 const WORK_SUBMIT_CHAN = Channel{TaskComm}()
 const WORK_SUBMIT_TASK = Ref{Task}()
-const WORK_SUBMIT_EVENT = Base.Event()
+const WORK_SUBMIT_EVENT = Ref{Base.Event}(Base.Event())
 const WORK_QUEUES = ConcurrentDict{Processor, WorkStealingDeque{TaskComm}}()
 
 """
@@ -924,14 +933,16 @@ function work_submit_chan()
         if !isassigned(WORK_SUBMIT_TASK)
             WORK_SUBMIT_TASK[] = errormonitor(@async begin
                 while true
+                    @debug "Waiting for submissions"
                     task = take!(WORK_SUBMIT_CHAN)
+                    @debug "Got submission!"
                     queue = work_queue(task.to_proc)
                     push!(queue, task)
                 end
             end)
         end
-        WORK_SUBMIT_TASK[]
     end
+    WORK_SUBMIT_CHAN
 end
 
 "Returns the work queue for `to_proc`, creating it if it doesn't exist."
@@ -939,7 +950,7 @@ function work_queue(to_proc)
     _value = modify!(WORK_QUEUES, to_proc) do queue
         if queue === nothing
             queue = WorkStealingDeque{TaskComm}()
-            errormonitor(Threads.@spawn processor_queue_monitor(to_proc))
+            errormonitor(@async processor_queue_monitor(to_proc))
             return Some(queue)
         else
             return Keep(queue[])
@@ -949,13 +960,12 @@ function work_queue(to_proc)
 end
 
 """
-    do_tasks(to_proc, chan, tasks)
+    do_tasks(tasks)
 
-Executes a batch of tasks on `to_proc`.
+Executes a batch of tasks.
 """
-function do_tasks(to_proc, tasks)
+function do_tasks(tasks)
     submit_chan = work_submit_chan()
-    queue = work_queue(to_proc)
     for task in tasks
         should_launch = lock(TASK_SYNC) do
             # Already running; don't try to re-launch
@@ -968,7 +978,9 @@ function do_tasks(to_proc, tasks)
         end
         should_launch || continue
         push!(submit_chan, task)
-        notify(WORK_SUBMIT_EVENT)
+        @debug "Notifying listeners about work"
+        notify(WORK_SUBMIT_EVENT[])
+        WORK_SUBMIT_EVENT[] = Base.Event()
     end
 end
 
@@ -976,34 +988,41 @@ end
 Services a dedicated work queue for `to_proc`, launching work as it becomes
 available.
 """
-function processor_queue_monitor(to_proc)
-    queue = work_queue(to_proc)
+function processor_queue_monitor(proc)
+    queue = WORK_QUEUES[proc]
     while true
+        ev = WORK_SUBMIT_EVENT[]
+        @debug "Trying to get work for $proc"
         # Try to get our own task
         task = maybepopfirst!(queue)
         if task === nothing
+            @debug "Trying to steal work for $proc"
             # Try to steal a task from other compatible processors
-            task = maybe_steal!(to_proc)
+            task = maybe_steal!(proc)
         end
         if task === nothing
-            wait(WORK_SUBMIT_EVENT)
+            @debug "Waiting for work"
+            wait(ev)
             yield() # FIXME: Remove me
             continue
         end
 
         task = task.value
         chan = task.sch_chan
-        try
-            result = do_task(to_proc, task)
-            put!(chan, (myid(), to_proc, task.thunk_id, result))
-        catch ex
-            bt = catch_backtrace()
-            put!(chan, (myid(), to_proc, task.thunk_id, (CapturedException(ex, bt), nothing)))
+        @async begin
+            try
+                result = do_task(task)
+                put!(chan, (myid(), proc, task.thunk_id, result))
+            catch ex
+                bt = catch_backtrace()
+                put!(chan, (myid(), proc, task.thunk_id, (CapturedException(ex, bt), nothing)))
+            end
         end
     end
 end
 
-function maybe_steal!(to_proc::T) where T
+function maybe_steal!(our_proc::T) where T
+    our_scope = Dagger.ExactScope(our_proc)
     all_procs = collect(keys(WORK_QUEUES))
 
     # First try to steal from processors with the same type
@@ -1012,8 +1031,14 @@ function maybe_steal!(to_proc::T) where T
         queue = work_queue(proc)
         task = maybepopfirst!(queue)
         if task !== nothing
-            # FIXME: Check scope
-            return task
+            task = task.value
+            scope = constrain(task.scope, our_scope)
+            if !(scope isa Dagger.InvalidScope)
+                @debug "$our_proc stole from $proc"
+                return Some(task)
+            end
+            @debug "$proc failed to steal task with scope $(task.scope)"
+            push!(WORK_SUBMIT_CHAN, task)
         end
     end
 
@@ -1023,7 +1048,14 @@ function maybe_steal!(to_proc::T) where T
         queue = work_queue(proc)
         task = maybepopfirst!(queue)
         if task !== nothing
-            return task
+            task = task.value
+            scope = constrain(task.scope, our_scope)
+            if !(scope isa Dagger.InvalidScope)
+                @debug "$our_proc stole from $proc"
+                return Some(task)
+            end
+            @debug "$proc failed to steal task with scope $(task.scope)"
+            push!(WORK_SUBMIT_CHAN, task)
         end
     end
 
@@ -1032,20 +1064,22 @@ function maybe_steal!(to_proc::T) where T
 end
 
 "Executes a task, specified by `comm`, on `to_proc`."
-function do_task(to_proc, task::TaskComm)
-    ctx = Context(Processor[]; log_sink=task.ctx_vars.log_sink, profile=task.ctx_vars.profile)
+function do_task(task::TaskComm)
+    @unpack_taskcomm(task)
+    ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
+
 
     from_proc = OSProc()
-    Tdata = map(x->x isa Chunk ? chunktype(x) : x, task.data)
-    f = isdefined(Tf, :instance) ? task.Tf.instance : nothing
+    Tdata = map(x->x isa Chunk ? chunktype(x) : x, data)
+    f = isdefined(Tf, :instance) ? Tf.instance : nothing
 
     # Fetch inputs
     transfer_time = Threads.Atomic{UInt64}(0)
     transfer_size = Threads.Atomic{UInt64}(0)
     fetched = if meta
-        task.data
+        data
     else
-        fetch_report.(map(Iterators.zip(task.data,task.ids)) do (x, id)
+        fetch_report.(map(Iterators.zip(data,ids)) do (x, id)
             @async begin
                 timespan_start(ctx, :move, (;thunk_id, id), (;f, id, data=x))
                 x = if x isa Chunk
@@ -1080,7 +1114,7 @@ function do_task(to_proc, task::TaskComm)
 
     # Check if we'll go over capacity from running this thunk
     real_util = lock(TASK_SYNC) do
-        AT = get!(()->Dict{Processor,Ref{UInt64}}(), PROC_UTILIZATION, uid)
+        AT = get!(()->Dict{Processor,Ref{UInt64}}(), PROC_UTILIZATION, sch_uid)
         get!(()->Ref{UInt64}(UInt64(0)), AT, to_proc)
     end
     #cap = UInt64(capacity(OSProc(), typeof(to_proc))) * UInt64(1e9)
@@ -1115,7 +1149,7 @@ function do_task(to_proc, task::TaskComm)
     result_meta = try
         # Set TLS variables
         Dagger.set_tls!((
-            sch_uid=uid,
+            sch_uid=sch_uid,
             sch_handle=sch_handle,
             processor=to_proc,
             utilization=extra_util,
