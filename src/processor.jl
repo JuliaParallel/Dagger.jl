@@ -161,7 +161,7 @@ function execute!(proc::ThreadProc, f, args...)
     task = Task() do
         set_tls!(tls)
         prof_task_put!(tls.sch_handle.thunk_ref.id)
-        f(args...)
+        Base.invokelatest(f, args...)
     end
     ret = ccall(:jl_set_task_tid, Cint, (Any, Cint), task, proc.tid-1)
     if ret == 0
