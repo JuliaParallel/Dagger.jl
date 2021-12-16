@@ -156,60 +156,29 @@ end
 iscompatible(proc::ThreadProc, opts, f, args...) = true
 iscompatible_func(proc::ThreadProc, opts, f) = true
 iscompatible_arg(proc::ThreadProc, opts, x) = true
-@static if VERSION >= v"1.3.0-DEV.573"
-    function execute!(proc::ThreadProc, f, args...)
-        tls = get_tls()
-        task = Task() do
-            set_tls!(tls)
-            prof_task_put!(tls.sch_handle.thunk_id.id)
-            f(args...)
-        end
-        ret = ccall(:jl_set_task_tid, Cint, (Any, Cint), task, proc.tid-1)
-        if ret == 0
-            error("jl_set_task_tid == 0")
-        end
-        @assert Threads.threadid(task) == proc.tid
-        schedule(task)
-        try
-            fetch(task)
-        catch err
-            @static if VERSION >= v"1.1"
-                @static if VERSION < v"1.7-rc1"
-                    stk = Base.catch_stack(task)
-                else
-                    stk = Base.current_exceptions(task)
-                end
-                err, frames = stk[1]
-                rethrow(CapturedException(err, frames))
-            else
-                rethrow(task.result)
-            end
-        end
+function execute!(proc::ThreadProc, f, args...)
+    tls = get_tls()
+    task = Task() do
+        set_tls!(tls)
+        prof_task_put!(tls.sch_handle.thunk_ref.id)
+        Base.invokelatest(f, args...)
     end
-else
-    # TODO: Use Threads.@threads?
-    function execute!(proc::ThreadProc, f, args...)
-        tls = get_tls()
-        task = @async begin
-            set_tls!(tls)
-            prof_task_put!(tls.sch_handle.thunk_id.id)
-            f(args...)
+    ret = ccall(:jl_set_task_tid, Cint, (Any, Cint), task, proc.tid-1)
+    if ret == 0
+        error("jl_set_task_tid == 0")
+    end
+    @assert Threads.threadid(task) == proc.tid
+    schedule(task)
+    try
+        fetch(task)
+    catch err
+        @static if VERSION < v"1.7-rc1"
+            stk = Base.catch_stack(task)
+        else
+            stk = Base.current_exceptions(task)
         end
-        try
-            fetch(task)
-        catch err
-            @static if VERSION >= v"1.1"
-                @static if VERSION < v"1.7-rc1"
-                    stk = Base.catch_stack(task)
-                else
-                    stk = Base.current_exceptions(task)
-                end
-                err, frames = stk[1]
-                rethrow(CapturedException(err, frames))
-            else
-                rethrow(task.result)
-            end
-        end
+        err, frames = stk[1]
+        rethrow(CapturedException(err, frames))
     end
 end
 get_parent(proc::ThreadProc) = OSProc(proc.owner)
@@ -218,13 +187,10 @@ default_enabled(proc::ThreadProc) = true
 # TODO: ThreadGroupProc?
 
 """
-    Context(;nthreads=Threads.nthreads()) -> Context
     Context(xs::Vector{OSProc}) -> Context
     Context(xs::Vector{Int}) -> Context
 
-Create a Context, by default adding each available worker once from
-every available thread. Use the `nthreads` keyword to use a different
-number of threads.
+Create a Context, by default adding each available worker.
 
 It is also possible to create a Context from a vector of [`OSProc`](@ref),
 or equivalently the underlying process ids can also be passed directly
@@ -233,13 +199,14 @@ as a `Vector{Int}`.
 Special fields include:
 - 'log_sink': A log sink object to use, if any.
 - `log_file::Union{String,Nothing}`: Path to logfile. If specified, at
-scheduler termination logs will be collected, combined with input thunks, and
+scheduler termination, logs will be collected, combined with input thunks, and
 written out in DOT format to this location.
 - `profile::Bool`: Whether or not to perform profiling with Profile stdlib.
 """
 mutable struct Context
     procs::Vector{Processor}
     proc_lock::ReentrantLock
+    proc_notify::Threads.Condition
     log_sink::Any
     log_file::Union{String,Nothing}
     profile::Bool
@@ -247,16 +214,15 @@ mutable struct Context
 end
 
 Context(procs::Vector{P}=Processor[OSProc(w) for w in workers()];
-        proc_lock=ReentrantLock(), log_sink=NoOpLog(), log_file=nothing,
-        profile=false, options=nothing) where {P<:Processor} =
-    Context(procs, proc_lock, log_sink, log_file, profile, options)
+        proc_lock=ReentrantLock(), proc_notify=Threads.Condition(),
+        log_sink=NoOpLog(), log_file=nothing, profile=false,
+        options=nothing) where {P<:Processor} =
+    Context(procs, proc_lock, proc_notify, log_sink, log_file,
+            profile, options)
 Context(xs::Vector{Int}; kwargs...) = Context(map(OSProc, xs); kwargs...)
 Context(ctx::Context, xs::Vector) = # make a copy
     Context(xs; log_sink=ctx.log_sink, log_file=ctx.log_file,
-    profile=ctx.profile, options=ctx.options)
-procs(ctx::Context) = lock(ctx) do
-    copy(ctx.procs)
-end
+                profile=ctx.profile, options=ctx.options)
 
 """
     write_event(ctx::Context, event::Event)
@@ -270,22 +236,38 @@ end
 """
     lock(f, ctx::Context)
 
-Acquire `ctx.proc_lock`, execute `f` with the lock held, and release the lock when `f` returns.
+Acquire `ctx.proc_lock`, execute `f` with the lock held, and release the lock
+when `f` returns.
 """
 Base.lock(f, ctx::Context) = lock(f, ctx.proc_lock)
+
+"""
+    procs(ctx::Context)
+
+Fetch the list of procs currently known to `ctx`.
+"""
+procs(ctx::Context) = lock(ctx) do
+    copy(ctx.procs)
+end
 
 """
     addprocs!(ctx::Context, xs)
 
 Add new workers `xs` to `ctx`.
 
-Workers will typically be assigned new tasks in the next scheduling iteration if scheduling is ongoing.
+Workers will typically be assigned new tasks in the next scheduling iteration
+if scheduling is ongoing.
 
 Workers can be either `Processor`s or the underlying process IDs as `Integer`s.
 """
 addprocs!(ctx::Context, xs::AbstractVector{<:Integer}) = addprocs!(ctx, map(OSProc, xs))
-addprocs!(ctx::Context, xs::AbstractVector{<:OSProc}) = lock(ctx) do
-    append!(ctx.procs, xs)
+function addprocs!(ctx::Context, xs::AbstractVector{<:OSProc})
+    lock(ctx) do
+        append!(ctx.procs, xs)
+    end
+    lock(ctx.proc_notify) do
+        notify(ctx.proc_notify)
+    end
 end
 
 """
@@ -293,14 +275,22 @@ end
 
 Remove the specified workers `xs` from `ctx`.
 
-Workers will typically finish all their assigned tasks if scheduling is ongoing but will not be assigned new tasks after removal.
+Workers will typically finish all their assigned tasks if scheduling is ongoing
+but will not be assigned new tasks after removal.
 
 Workers can be either `Processor`s or the underlying process IDs as `Integer`s.
 """
 rmprocs!(ctx::Context, xs::AbstractVector{<:Integer}) = rmprocs!(ctx, map(OSProc, xs))
-rmprocs!(ctx::Context, xs::AbstractVector{<:OSProc}) = lock(ctx) do
-    filter!(p -> (p ∉ xs), ctx.procs)
+function rmprocs!(ctx::Context, xs::AbstractVector{<:OSProc})
+    lock(ctx) do
+        filter!(p -> (p ∉ xs), ctx.procs)
+    end
+    lock(ctx.proc_notify) do
+        notify(ctx.proc_notify)
+    end
 end
+
+# In-Thunk Helpers
 
 """
     thunk_processor()

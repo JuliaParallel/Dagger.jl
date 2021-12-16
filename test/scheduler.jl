@@ -50,17 +50,13 @@ function dynamic_get_dag(x...)
 end
 function dynamic_add_thunk(x)
     h = sch_handle()
-    id = Dagger.Sch.add_thunk!(h, x) do y
-        y+1
-    end
+    id = Dagger.Sch.add_thunk!(inc, h, x)
     wait(h, id)
     return fetch(h, id)
 end
 function dynamic_add_thunk_self_dominated(x)
     h = sch_handle()
-    id = Dagger.Sch.add_thunk!(h, h.thunk_id, x) do y
-        y+1
-    end
+    id = Dagger.Sch.add_thunk!(inc, h, h.thunk_ref, x)
     return fetch(h, id)
 end
 function dynamic_wait_fetch_multiple(x)
@@ -70,7 +66,7 @@ function dynamic_wait_fetch_multiple(x)
     for key in keys(ids)
         while !isempty(ids[key])
             val = pop!(ids[key])
-            if val == h.thunk_id
+            if val == h.thunk_ref
                 id = key
             end
         end
@@ -83,12 +79,12 @@ function dynamic_wait_fetch_multiple(x)
 end
 function dynamic_fetch_self(x)
     h = sch_handle()
-    return fetch(h, h.thunk_id)
+    return fetch(h, h.thunk_ref)
 end
 function dynamic_fetch_dominated(x)
     h = sch_handle()
     ids = Dagger.Sch.get_dag_ids(h)
-    did = pop!(ids[h.thunk_id])
+    did = pop!(ids[h.thunk_ref])
     wait(h, did)
 end
 end
@@ -311,6 +307,60 @@ end
     end
 end
 
+@testset "Scheduler algorithms" begin
+    # New function to hide from scheduler's function cost cache
+    mynothing(args...) = nothing
+
+    # New non-singleton struct to hide from `approx_size`
+    struct MyStruct
+        x::Int
+    end
+
+    state = Dagger.Sch.EAGER_STATE[]
+    tproc1 = Dagger.ThreadProc(1, 1)
+    tproc2 = Dagger.ThreadProc(first(workers()), 1)
+    procs = [tproc1, tproc2]
+
+    pres1 = state.worker_pressure[1][tproc1]
+    pres2 = state.worker_pressure[first(workers())][tproc2]
+    tx_rate = state.transfer_rate[]
+
+    for (args, tx_size) in [
+        ([1, 2], 0),
+        ([Dagger.tochunk(1), 2], sizeof(Int)),
+        ([1, Dagger.tochunk(2)], sizeof(Int)),
+        ([Dagger.tochunk(1), Dagger.tochunk(2)], 2*sizeof(Int)),
+        # TODO: Why does this work? Seems slow
+        ([Dagger.tochunk(MyStruct(1))], sizeof(MyStruct)),
+        ([Dagger.tochunk(MyStruct(1)), Dagger.tochunk(1)], sizeof(MyStruct)+sizeof(Int)),
+    ]
+        for arg in args
+            if arg isa Chunk
+                aff = Dagger.affinity(arg)
+                @test aff[1] == OSProc(1)
+                @test aff[2] == MemPool.approx_size(MemPool.poolget(arg.handle))
+            end
+        end
+
+        cargs = map(arg->MemPool.poolget(arg.handle), filter(arg->isa(arg, Chunk), args))
+        est_tx_size = Dagger.Sch.impute_sum(map(MemPool.approx_size, cargs))
+        @test est_tx_size == tx_size
+
+        t = delayed(mynothing)(args...)
+        sorted_procs, costs = Dagger.Sch.estimate_task_costs(state, procs, t)
+
+        @test tproc1 in sorted_procs
+        @test tproc2 in sorted_procs
+        @test sorted_procs[1] == tproc1
+        @test sorted_procs[2] == tproc2
+
+        @test haskey(costs, tproc1)
+        @test haskey(costs, tproc2)
+        @test costs[tproc1] ≈ pres1 # All chunks are local
+        @test costs[tproc2] ≈ (tx_size/tx_rate) + pres2 # All chunks are remote
+    end
+end
+
 @testset "Dynamic Thunks" begin
     @testset "Exec" begin
         a = delayed(dynamic_exec)(2)
@@ -343,18 +393,18 @@ end
         @test ids isa Dict
         @test length(keys(ids)) == 4
 
-        a_id = ThunkID(a.id)
-        b_id = ThunkID(b.id)
-        c_id = ThunkID(c.id)
-        d_id = ThunkID(d.id)
+        a_ref = Dagger.Sch.ThunkRef(a)
+        b_ref = Dagger.Sch.ThunkRef(b)
+        c_ref = Dagger.Sch.ThunkRef(c)
+        d_ref = Dagger.Sch.ThunkRef(d)
 
-        @test haskey(ids, d_id)
-        @test length(ids[d_id]) == 0 # no one waiting on our result
-        @test length(ids[a_id]) == 0 # b and c finished, our result is unneeded
-        @test length(ids[b_id]) == 1 # d is still executing
-        @test length(ids[c_id]) == 1 # d is still executing
-        @test pop!(ids[b_id]) == d_id
-        @test pop!(ids[c_id]) == d_id
+        @test haskey(ids, d_ref)
+        @test length(ids[d_ref]) == 0 # no one waiting on our result
+        @test length(ids[a_ref]) == 0 # b and c finished, our result is unneeded
+        @test length(ids[b_ref]) == 1 # d is still executing
+        @test length(ids[c_ref]) == 1 # d is still executing
+        @test pop!(ids[b_ref]) == d_ref
+        @test pop!(ids[c_ref]) == d_ref
     end
     @testset "Add Thunk" begin
         a = delayed(dynamic_add_thunk)(1)
@@ -398,4 +448,21 @@ end
 end
 @testset "Chunk Caching" begin
     compute(delayed(testevicted)(delayed(testpresent)(c1,c2)))
+end
+
+@testset "MemPool.approx_size" begin
+    for (obj, size) in [
+        (rand(100), 100*sizeof(Float64)),
+        (rand(Float32, 100), 100*sizeof(Float32)),
+        (rand(1:10, 100), 100*sizeof(Int)),
+        (fill(:a, 10), missing),
+        (fill("a", 10), missing),
+        (fill('a', 10), missing),
+    ]
+        if size !== missing
+            @test MemPool.approx_size(obj) == size
+        else
+            @test MemPool.approx_size(obj) !== nothing
+        end
+    end
 end

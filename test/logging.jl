@@ -92,7 +92,7 @@
         esat = l1[:esat]
         @test any(e->haskey(e, :scheduler_init), esat)
         @test any(e->haskey(e, :schedule), esat)
-        @test any(e->haskey(e, :fire_multi), esat)
+        @test any(e->haskey(e, :fire), esat)
         @test any(e->haskey(e, :take), esat)
         @test any(e->haskey(e, :finish), esat)
         # Note: May one day be true as scheduler evolves
@@ -108,7 +108,7 @@
             esat = lo[:esat]
             @test !any(e->haskey(e, :scheduler_init), esat)
             @test !any(e->haskey(e, :schedule), esat)
-            @test !any(e->haskey(e, :fire_multi), esat)
+            @test !any(e->haskey(e, :fire), esat)
             @test !any(e->haskey(e, :take), esat)
             @test !any(e->haskey(e, :finish), esat)
             psat = lo[:psat]

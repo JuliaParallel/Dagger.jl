@@ -4,6 +4,7 @@ addprocs(3)
 using Test
 using Dagger
 using UUIDs
+import MemPool
 
 include("util.jl")
 include("fakeproc.jl")

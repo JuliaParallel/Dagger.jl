@@ -19,6 +19,13 @@ const PLUGIN_CONFIGS = Dict{Symbol,String}(
     :scheduler => "Dagger.Sch"
 )
 
+"An identifier to uniquely identify a `Thunk`."
+struct ThunkID
+    wid::Int
+    id::Int
+end
+Base.hash(id::ThunkID, h::UInt) = hash(typeof(id), hash((id.wid, id.id), h))
+
 include("lib/util.jl")
 include("lib/logging.jl")
 
