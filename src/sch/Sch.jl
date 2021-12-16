@@ -339,8 +339,6 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
             report_catch_error(err, "Scheduler restore failed")
         end
     end
-    master = OSProc(myid())
-    timespan_start(ctx, :scheduler_init, 0, master)
 
     chan = RemoteChannel(()->Channel(1024))
     deps = dependents(d)
@@ -349,6 +347,36 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     node_order = x -> -get(ord, x, 0)
     state = start_state(deps, node_order, chan)
 
+    master = OSProc(myid())
+
+    timespan_start(ctx, :scheduler_init, 0, master)
+    try
+        scheduler_init(ctx, state, d, options, deps)
+    finally
+        timespan_finish(ctx, :scheduler_init, 0, master)
+    end
+
+    value, errored = try
+        scheduler_run(ctx, state, d, options)
+    finally
+        # Always try to tear down the scheduler
+        timespan_start(ctx, :scheduler_exit, 0, master)
+        try
+            scheduler_exit(ctx, state, options)
+        catch err
+            @error "Error when tearing down scheduler" exception=(err,catch_backtrace())
+        finally
+            timespan_finish(ctx, :scheduler_exit, 0, master)
+        end
+    end
+
+    if errored
+        throw(value)
+    end
+    return value
+end
+
+function scheduler_init(ctx, state::ComputeState, d::Thunk, options, deps)
     # setup thunk_dict mappings
     for node in filter(istask, keys(deps))
         state.thunk_dict[node.id] = WeakThunk(node)
@@ -380,9 +408,9 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
 
     # setup dynamic listeners
     dynamic_listener!(ctx, state)
+end
 
-    timespan_finish(ctx, :scheduler_init, 0, master)
-
+function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
     safepoint(state)
 
     # Loop while we still have thunks to execute
@@ -396,7 +424,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
 
         isempty(state.running) && continue
         timespan_start(ctx, :take, 0, 0)
-        chan_value = take!(chan) # get result of completed thunk
+        chan_value = take!(state.chan) # get result of completed thunk
         timespan_finish(ctx, :take, 0, 0)
         if chan_value isa RescheduleSignal
             continue
@@ -454,26 +482,32 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
 
         safepoint(state)
     end
-    timespan_start(ctx, :scheduler_exit, 0, master)
-    @assert !isready(state.chan)
+
+    # Final value is ready
+    value = state.cache[d]
+    errored = get(state.errored, d, false)
+    if !errored
+        if options.checkpoint !== nothing
+            try
+                options.checkpoint(value)
+            catch err
+                report_catch_error(err, "Scheduler checkpoint failed")
+            end
+        end
+    end
+    return value, errored
+end
+function scheduler_exit(ctx, state::ComputeState, options)
     close(state.chan)
     notify(state.halt)
     @sync for p in procs_to_use(ctx)
         @async cleanup_proc(state, p, ctx.log_sink)
     end
-    value = state.cache[d] # TODO: move(OSProc(), state.cache[d])
-    if get(state.errored, d, false)
-        throw(value)
+
+    # Let the context procs handler clean itself up
+    lock(ctx.proc_notify) do
+        notify(ctx.proc_notify)
     end
-    if options.checkpoint !== nothing
-        try
-            options.checkpoint(value)
-        catch err
-            report_catch_error(err, "Scheduler checkpoint failed")
-        end
-    end
-    timespan_finish(ctx, :scheduler_exit, 0, master)
-    value
 end
 
 function procs_to_use(ctx, options=ctx.options)
