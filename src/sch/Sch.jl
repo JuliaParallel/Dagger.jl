@@ -4,6 +4,7 @@ using Distributed
 import MemPool: DRef, poolset
 import Statistics: mean
 import Random: randperm
+import ConcurrentCollections: ConcurrentDict, WorkStealingDeque, Keep, maybepopfirst!, modify!
 
 import ..Dagger
 import ..Dagger: Context, Processor, Thunk, ThunkID, ThunkRef, WeakThunk, ThunkFuture, ThunkFailedException, Chunk, OSProc, AnyScope
@@ -862,10 +863,11 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
         sch_handle = SchedulerHandle(ThunkRef(thunk), state.worker_chans[gproc.pid]...)
 
         # TODO: De-dup common fields (log_sink, uid, etc.)
-        push!(to_send, (util, thunk.id, fn_type(thunk.f), data, thunk.get_result,
-                        thunk.persist, thunk.cache, thunk.meta, options, ids,
-                        (log_sink=ctx.log_sink, profile=ctx.profile),
-                        sch_handle, state.uid))
+        push!(to_send, TaskComm(util, thunk.id, fn_type(thunk.f), data,
+                                thunk.get_result, thunk.persist, thunk.cache,
+                                thunk.meta, options, ids,
+                                (log_sink=ctx.log_sink, profile=ctx.profile),
+                                sch_handle, state.uid, state.chan))
     end
     # N.B. We don't batch these because we might get a deserialization
     # error due to something not being defined on the worker, and then we don't
@@ -876,7 +878,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
         @async begin
             timespan_start(ctx, :fire, gproc.pid, 0)
             try
-                remotecall_wait(do_tasks, gproc.pid, proc, state.chan, [ts])
+                remotecall_wait(do_tasks, gproc.pid, proc, [ts])
             catch err
                 bt = catch_backtrace()
                 put!(state.chan, (gproc.pid, proc, ts[2], (CapturedException(err, bt), nothing)))
@@ -888,48 +890,162 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
 end
 
 """
+A unit of work to be communicated to a processor. Holding an instance of this
+object implies the exclusive right to execute the task it references.
+"""
+struct TaskComm
+    extra_util::Union{UInt64, MaxUtilization}
+    thunk_id::ThunkID
+    Tf::Type
+    data
+    send_result::Bool
+    persist::Bool
+    cache::Bool
+    meta::Bool
+    options::ThunkOptions
+    ids
+    ctx_vars::@NamedTuple{log_sink, profile::Bool}
+    sch_handle::SchedulerHandle
+    sch_uid::UInt64
+    sch_chan::RemoteChannel
+end
+
+const WORK_SUBMIT_CHAN = Channel{TaskComm}()
+const WORK_SUBMIT_TASK = Ref{Task}()
+const WORK_SUBMIT_EVENT = Base.Event()
+const WORK_QUEUES = ConcurrentDict{Processor, WorkStealingDeque{TaskComm}}()
+
+"""
+Returns the work submission channel for this worker, creating its maintenance
+task if it doesn't have one.
+"""
+function work_submit_chan()
+    lock(TASK_SYNC) do
+        if !isassigned(WORK_SUBMIT_TASK)
+            WORK_SUBMIT_TASK[] = errormonitor(@async begin
+                while true
+                    task = take!(WORK_SUBMIT_CHAN)
+                    queue = work_queue(task.to_proc)
+                    push!(queue, task)
+                end
+            end)
+        end
+        WORK_SUBMIT_TASK[]
+    end
+end
+
+"Returns the work queue for `to_proc`, creating it if it doesn't exist."
+function work_queue(to_proc)
+    _value = modify!(WORK_QUEUES, to_proc) do queue
+        if queue === nothing
+            queue = WorkStealingDeque{TaskComm}()
+            errormonitor(Threads.@spawn processor_queue_monitor(to_proc))
+            return Some(queue)
+        else
+            return Keep(queue[])
+        end
+    end
+    return _value.value
+end
+
+"""
     do_tasks(to_proc, chan, tasks)
 
 Executes a batch of tasks on `to_proc`.
 """
-function do_tasks(to_proc, chan, tasks)
+function do_tasks(to_proc, tasks)
+    submit_chan = work_submit_chan()
+    queue = work_queue(to_proc)
     for task in tasks
         should_launch = lock(TASK_SYNC) do
             # Already running; don't try to re-launch
-            if !(task[2] in TASKS_RUNNING)
-                push!(TASKS_RUNNING, task[2])
+            if !(task.thunk_id in TASKS_RUNNING)
+                push!(TASKS_RUNNING, task.thunk_id)
                 true
             else
                 false
             end
         end
         should_launch || continue
-        @async begin
-            try
-                result = do_task(to_proc, task...)
-                put!(chan, (myid(), to_proc, task[2], result))
-            catch ex
-                bt = catch_backtrace()
-                put!(chan, (myid(), to_proc, task[2], (CapturedException(ex, bt), nothing)))
-            end
+        push!(submit_chan, task)
+        notify(WORK_SUBMIT_EVENT)
+    end
+end
+
+""""
+Services a dedicated work queue for `to_proc`, launching work as it becomes
+available.
+"""
+function processor_queue_monitor(to_proc)
+    queue = work_queue(to_proc)
+    while true
+        # Try to get our own task
+        task = maybepopfirst!(queue)
+        if task === nothing
+            # Try to steal a task from other compatible processors
+            task = maybe_steal!(to_proc)
+        end
+        if task === nothing
+            wait(WORK_SUBMIT_EVENT)
+            yield() # FIXME: Remove me
+            continue
+        end
+
+        task = task.value
+        chan = task.sch_chan
+        try
+            result = do_task(to_proc, task)
+            put!(chan, (myid(), to_proc, task.thunk_id, result))
+        catch ex
+            bt = catch_backtrace()
+            put!(chan, (myid(), to_proc, task.thunk_id, (CapturedException(ex, bt), nothing)))
         end
     end
 end
-"Executes a single task on `to_proc`."
-function do_task(to_proc, extra_util, thunk_id, Tf, data, send_result, persist, cache, meta, options, ids, ctx_vars, sch_handle, uid)
-    ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
+
+function maybe_steal!(to_proc::T) where T
+    all_procs = collect(keys(WORK_QUEUES))
+
+    # First try to steal from processors with the same type
+    similar_procs = filter(p->p isa T, all_procs)
+    for proc in similar_procs
+        queue = work_queue(proc)
+        task = maybepopfirst!(queue)
+        if task !== nothing
+            # FIXME: Check scope
+            return task
+        end
+    end
+
+    # Then try to steal from all other processors
+    other_procs = filter(p->!(p in similar_procs), all_procs)
+    for proc in other_procs
+        queue = work_queue(proc)
+        task = maybepopfirst!(queue)
+        if task !== nothing
+            return task
+        end
+    end
+
+    # Failed to steal a task!
+    return nothing
+end
+
+"Executes a task, specified by `comm`, on `to_proc`."
+function do_task(to_proc, task::TaskComm)
+    ctx = Context(Processor[]; log_sink=task.ctx_vars.log_sink, profile=task.ctx_vars.profile)
 
     from_proc = OSProc()
-    Tdata = map(x->x isa Chunk ? chunktype(x) : x, data)
-    f = isdefined(Tf, :instance) ? Tf.instance : nothing
+    Tdata = map(x->x isa Chunk ? chunktype(x) : x, task.data)
+    f = isdefined(Tf, :instance) ? task.Tf.instance : nothing
 
     # Fetch inputs
     transfer_time = Threads.Atomic{UInt64}(0)
     transfer_size = Threads.Atomic{UInt64}(0)
     fetched = if meta
-        data
+        task.data
     else
-        fetch_report.(map(Iterators.zip(data,ids)) do (x, id)
+        fetch_report.(map(Iterators.zip(task.data,task.ids)) do (x, id)
             @async begin
                 timespan_start(ctx, :move, (;thunk_id, id), (;f, id, data=x))
                 x = if x isa Chunk
