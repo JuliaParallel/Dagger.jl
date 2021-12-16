@@ -189,14 +189,28 @@ end
 
         setup = quote
             using Dagger, Distributed
+            function _list_workers(ctx, state, task, tid, _)
+                return procs(ctx)
+            end
             # blocked is to guarantee that processing is not completed before we add new workers
             # Note: blocked is used in expressions below
             blocked = true
             function testfun(i)
                 i < 4 && return myid()
                 # Wait for test to do its thing before we proceed
-                while blocked
-                    sleep(0.001)
+                if blocked
+                    sleep(0.1) # just so we don't end up overflowing or something while waiting for workers to be added
+                    # Here we would like to just wait to be rescheduled on another worker (which is not blocked)
+                    # but this functionality does not exist, so instead we do this weird thing where we reschedule
+                    # until we end up on a non-blocked worker
+                    h = Dagger.Sch.sch_handle()
+                    wkrs = Dagger.Sch.exec!(_list_workers, h)
+                    id = if length(wkrs) > 2
+                        Dagger.Sch.add_thunk!(testfun, h, i; single=last(wkrs).pid)
+                    else
+                        Dagger.Sch.add_thunk!(testfun, h, i)
+                    end
+                    return fetch(h, id)
                 end
                 return myid()
             end
@@ -229,11 +243,14 @@ end
                 addprocs!(ctx, ps3)
                 @test length(procs(ctx)) == 4
 
-                @everywhere vcat(ps1, ps3) blocked=false
+                @everywhere ps3 blocked=false
 
-                @test fetch(job) isa Vector
-                # TODO: Fix this unreliable test
-                @test_skip fetch(job) |> unique |> sort == vcat(ps1, ps3)
+                ps_used = fetch(job)
+                @test ps_used isa Vector
+
+                @test any(p -> p in ps_used, ps1)
+                @test any(p -> p in ps_used, ps3)
+                @test !any(p -> p in ps2, ps_used)
             finally
                 wait(rmprocs(ps))
             end
