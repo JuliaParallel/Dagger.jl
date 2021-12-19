@@ -251,3 +251,45 @@ function filter(f, gd::GDTable)
     d = filter(f, gd.dtable)
     GDTable(d, gd.cols, gd.index)
 end
+
+# using Dagger, OnlineStats
+# nt = (a=1:100, b=1:100)
+# d1 = DTable(nt, 25)
+# g = Group(Mean(), Variance())
+# fetch(Dagger.reduce_rows(fit!, d1, init=g))
+
+
+function reduce_rows(f, d::DTable; init=Base._InitialValue())
+    nchunks(d) == 0 && return Dagger.@spawn NamedTuple()
+    chunk_reduce_results = _reduce_rows_chunks(f, d.chunks, init=init)
+    reduce_result_column = (_f, _c, _init) -> reduce(_f, fetch.(_c); init=_init)
+    Dagger.@spawn reduce_result_column(f, chunk_reduce_results, deepcopy(init))
+end
+
+
+function _reduce_rows_chunks(f, chunks::Vector{Union{EagerThunk, Chunk}}; init=Base._InitialValue())
+    col_in_chunk_reduce = (_f, _init, _chunk) -> reduce(_f, Tables.namedtupleiterator(_chunk); init=deepcopy(_init))
+    chunk_reduce_spawner = (_d, _f, _init) -> [Dagger.@spawn col_in_chunk_reduce(_f, _init,c) for c in _d]
+    Dagger.@spawn chunk_reduce_spawner(chunks, f, init)
+end
+
+
+# using Dagger, OnlineStats
+# nt = (a=1:100, b=1:100)
+# d1 = DTable(nt, 25)
+# gg = GroupBy(Int, Mean())
+# fetch(Dagger.mapreduce(x-> (x.a, x.b),  fit!, d1, init=gg))
+
+function mapreduce(fmap, freduce, d::DTable; init=Base._InitialValue())
+    nchunks(d) == 0 && return Dagger.@spawn NamedTuple()
+    chunk_reduce_results = _mapreduce_rows_chunks(fmap, freduce, d.chunks, init=init)
+    reduce_result_column = (_f, _c, _init) -> reduce(_f, fetch.(_c); init=_init)
+    Dagger.@spawn reduce_result_column(freduce, chunk_reduce_results, deepcopy(init))
+end
+
+
+function _mapreduce_rows_chunks(fmap, f, chunks::Vector{Union{EagerThunk, Chunk}}; init=Base._InitialValue())
+    col_in_chunk_reduce = (_f, _init, _chunk) -> reduce(_f, TableOperations.map(fmap, _chunk); init=deepcopy(_init))
+    chunk_reduce_spawner = (_d, _f, _init) -> [Dagger.@spawn col_in_chunk_reduce(_f, _init,c) for c in _d]
+    Dagger.@spawn chunk_reduce_spawner(chunks, f, init)
+end
