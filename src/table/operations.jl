@@ -275,10 +275,10 @@ end
 
 
 # using Dagger, OnlineStats
-# nt = (a=1:100, b=1:100)
+# nt = (a=collect(1:100).%10, b=rand(100))
 # d1 = DTable(nt, 25)
 # gg = GroupBy(Int, Mean())
-# fetch(Dagger.mapreduce(x-> (x.a, x.b),  fit!, d1, init=gg))
+# fetch(Dagger.mapreduce(x-> (x.a, x.b), fit!, d1, init=gg))
 
 function mapreduce(fmap, freduce, d::DTable; init=Base._InitialValue())
     nchunks(d) == 0 && return Dagger.@spawn NamedTuple()
