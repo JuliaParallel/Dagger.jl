@@ -62,16 +62,21 @@ argument to partition the table (based on row count).
 
 Providing `tabletype` kwarg overrides the internal table partition type.
 """
-function DTable(table, chunksize::Integer; tabletype=nothing)
-    chunks = Vector{Dagger.Chunk}()
+function DTable(table, chunksize::Integer; tabletype=nothing, use_spawn=false)
+    chunks = VTYPE()
     type = nothing
     sink = Tables.materializer(tabletype !== nothing ? tabletype() : table)
     for outer_partition in Tables.partitions(table)
         for inner_partition in Tables.partitions(TableOperations.makepartitions(outer_partition, chunksize))
-            tpart = sink(inner_partition)
-            push!(chunks, Dagger.tochunk(tpart))
-            if type === nothing
-                type = typeof(tpart).name.wrapper
+            if use_spawn
+                tpart = Dagger.@spawn sink(inner_partition)
+                push!(chunks, tpart)
+            else
+                tpart = sink(inner_partition)
+                push!(chunks, Dagger.tochunk(tpart))
+                if type === nothing
+                    type = typeof(tpart).name.wrapper
+                end
             end
         end
     end
