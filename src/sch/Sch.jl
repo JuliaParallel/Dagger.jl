@@ -3,6 +3,7 @@ module Sch
 using Distributed
 import MemPool: DRef, poolset
 import Statistics: mean
+import Random: randperm
 
 import ..Dagger
 import ..Dagger: Context, Processor, Thunk, WeakThunk, ThunkFuture, ThunkFailedException, Chunk, OSProc, AnyScope
@@ -368,49 +369,30 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         end
     end
 
+    # Listen for new workers
+    @async begin
+        try
+            monitor_procs_changed!(ctx, state)
+        catch err
+            @error "Error assigning workers" exception=(err,catch_backtrace())
+        end
+    end
+
     # setup dynamic listeners
     dynamic_listener!(ctx, state)
 
     timespan_finish(ctx, :scheduler_init, 0, master)
 
-    # start off some tasks
-    # Note: procs_state may be different things for different contexts. Don't touch it out here!
-    procs_state = assign_new_procs!(ctx, state, procs_to_use(ctx))
-
     safepoint(state)
 
     # Loop while we still have thunks to execute
     while !isempty(state.ready) || !isempty(state.running)
-        procs_state = assign_new_procs!(ctx, state, procs_state)
         if !isempty(state.ready)
             # Nothing running, so schedule up to N thunks, 1 per N workers
-            schedule!(ctx, state, procs_state)
+            schedule!(ctx, state)
         end
-
-        # This is a bit redundant as the @async task below does basically the
-        # same job Without it though, testing of process modification becomes
-        # non-deterministic (due to sleep in CI environment) which is why it is
-        # still here.
-        procs_state = assign_new_procs!(ctx, state, procs_state)
 
         check_integrity(ctx)
-
-        # Check periodically for new workers in a parallel task so that we
-        # don't accidentally end up having to wait for `take!(chan)` on some
-        # large task before new workers are put to work. Locking is used to
-        # stop this task as soon as something pops out from the channel to
-        # minimize risk that the task schedules thunks simultaneously as the
-        # main task (after future refactoring).
-        newtasks_lock = ReentrantLock()
-        @async while !isempty(state.ready) || !isempty(state.running)
-            sleep(1)
-            islocked(newtasks_lock) && return
-            timespan_start(ctx, :assign_procs, 0, 0)
-            procs_state = lock(newtasks_lock) do
-                assign_new_procs!(ctx, state, procs_state)
-            end
-            timespan_finish(ctx, :assign_procs, 0, 0)
-        end
 
         isempty(state.running) && continue
         timespan_start(ctx, :take, 0, 0)
@@ -421,7 +403,6 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         end
         pid, proc, thunk_id, (res, metadata) = chan_value
         gproc = OSProc(pid)
-        lock(newtasks_lock) # This waits for any assign_new_procs! above to complete and then shuts down the task
         safepoint(state)
         lock(state.lock) do
             thunk_failed = false
@@ -520,93 +501,11 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         safepoint(state)
         @assert length(procs) > 0
 
-        # Populate the cache if empty
-        if state.procs_cache_list[] === nothing
-            current = nothing
-            for p in map(x->x.pid, procs)
-                for proc in get_processors(OSProc(p))
-                    next = ProcessorCacheEntry(OSProc(p), proc)
-                    if current === nothing
-                        current = next
-                        current.next = current
-                        state.procs_cache_list[] = current
-                    else
-                        current.next = next
-                        current = next
-                        current.next = state.procs_cache_list[]
-                    end
-                end
-            end
-        end
-
-        function can_use_proc(task, gproc, proc, opts, scope)
-            # Check against proclist
-            if opts.proclist === nothing
-                if !default_enabled(proc)
-                    return false
-                end
-            elseif opts.proclist isa Function
-                if !Base.invokelatest(opts.proclist, proc)
-                    return false
-                end
-            elseif opts.proclist isa Vector
-                if !(typeof(proc) in opts.proclist)
-                    return false
-                end
-            else
-                throw(SchedulingException("proclist must be a Function, Vector, or nothing"))
-            end
-
-            # Check against single
-            if opts.single != 0
-                if gproc.pid != opts.single
-                    return false
-                end
-            end
-
-            # Check scope
-            if constrain(scope, Dagger.ExactScope(proc)) isa Dagger.InvalidScope
-                return false
-            end
-
-            return true
-        end
-        function has_capacity(p, gp, procutil, sig)
-            T = typeof(p)
-            # FIXME: MaxUtilization
-            extra_util = round(UInt64, get(procutil, T, 1) * 1e9)
-            real_util = state.worker_pressure[gp][p]
-            if (T === Dagger.ThreadProc) && haskey(state.function_cost_cache, sig)
-                # Assume that the extra pressure is between estimated and measured
-                # TODO: Generalize this to arbitrary processor types
-                extra_util = min(extra_util, state.function_cost_cache[sig])
-            end
-            # TODO: update real_util based on loadavg
-            cap = typemax(UInt64)
-            #= TODO
-            cap = state.worker_capacity[gp][T]
-            if ((extra_util isa MaxUtilization) && (real_util > 0)) ||
-               ((extra_util isa Real) && (extra_util + real_util > cap))
-                return false, cap, extra_util
-            end
-            =#
-            return true, cap, extra_util
-        end
-        "Like `sum`, but replaces `nothing` entries with the average of non-`nothing` entries."
-        function impute_sum(xs)
-            all(x->!isa(x, Chunk), xs) && return 0
-            avg = round(UInt64, mean(filter(x->x isa Chunk, xs)))
-            total = 0
-            for x in xs
-                total += x !== nothing ? x : avg
-            end
-            total
-        end
+        populate_processor_cache_list!(state, procs)
 
         # Schedule tasks
         to_fire = Dict{Tuple{OSProc,<:Processor},Vector{Tuple{Thunk,<:Any}}}()
         failed_scheduling = Thunk[]
-        tx_rate = state.transfer_rate[]
 
         # Select a new task and get its options
         task = nothing
@@ -652,24 +551,28 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         if length(procs) > fallback_threshold
             @goto fallback
         end
-        # Select processor with highest data locality, if possible
-        # TODO: Account for process-local data movement
-        inputs = filter(t->istask(t)||isa(t,Chunk), unwrap_weak_checked.(task.inputs))
-        chunks = [istask(input) ? state.cache[input] : input for input in inputs]
-        #local_procs = unique(map(c->c isa Chunk ? processor(c) : OSProc(), chunks))
-        local_procs = vcat([Dagger.get_processors(gp) for gp in procs]...)
+        local_procs = unique(vcat([Dagger.get_processors(gp) for gp in procs]...))
         if length(local_procs) > fallback_threshold
             @goto fallback
         end
-        affinities = Dict(proc=>impute_sum([affinity(chunk)[2] for chunk in filter(c->isa(c,Chunk)&&get_parent(processor(c))==get_parent(proc), chunks)]) for proc in local_procs)
-        # Estimate cost to move data and get scheduled
-        costs = Dict(proc=>state.worker_pressure[get_parent(proc).pid][proc]+(aff/tx_rate) for (proc,aff) in affinities)
-        sort!(local_procs, by=p->costs[p])
+
+        local_procs, costs = estimate_task_costs(state, local_procs, task)
         scheduled = false
+
+        # Move our corresponding ThreadProc to be the last considered
+        if length(local_procs) > 1
+            sch_threadproc = Dagger.ThreadProc(myid(), Threads.threadid())
+            sch_thread_idx = findfirst(proc->proc==sch_threadproc, local_procs)
+            if sch_thread_idx !== nothing
+                deleteat!(local_procs, sch_thread_idx)
+                push!(local_procs, sch_threadproc)
+            end
+        end
+
         for proc in local_procs
             gproc = get_parent(proc)
             if can_use_proc(task, gproc, proc, opts, scope)
-                has_cap, cap, extra_util = has_capacity(proc, gproc.pid, opts.procutil, sig)
+                has_cap, cap, extra_util = has_capacity(state, proc, gproc.pid, opts.procutil, sig)
                 if has_cap
                     # Schedule task onto proc
                     extra_util = extra_util isa MaxUtilization ? cap : extra_util
@@ -693,7 +596,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         procs_found = false
         # N.B. if we only have one processor, we need to select it now
         if can_use_proc(task, entry.gproc, entry.proc, opts, scope)
-            has_cap, cap, extra_util = has_capacity(entry.proc, entry.gproc.pid, opts.procutil, sig)
+            has_cap, cap, extra_util = has_capacity(state, entry.proc, entry.gproc.pid, opts.procutil, sig)
             if has_cap
                 selected_entry = entry
             else
@@ -717,7 +620,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
             end
 
             if can_use_proc(task, entry.gproc, entry.proc, opts, scope)
-                has_cap, cap, extra_util = has_capacity(entry.proc, entry.gproc.pid, opts.procutil, sig)
+                has_cap, cap, extra_util = has_capacity(state, entry.proc, entry.gproc.pid, opts.procutil, sig)
                 if has_cap
                     # Select this processor
                     selected_entry = entry
@@ -747,29 +650,60 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
 
         # Fire all newly-scheduled tasks
         @label fire_tasks
-        @sync for gpp in keys(to_fire)
-            @async fire_tasks!(ctx, to_fire[gpp], gpp, state)
+        for gpp in keys(to_fire)
+            fire_tasks!(ctx, to_fire[gpp], gpp, state)
         end
+
         append!(state.ready, failed_scheduling)
     end
 end
 
-# Main responsibility of this function is to check if new procs have been pushed to the context
-function assign_new_procs!(ctx, state, assignedprocs)
-    ps = procs_to_use(ctx)
-    # Must track individual procs to handle the case when procs are removed
-    diffps = setdiff(ps, assignedprocs)
-    if !isempty(diffps)
+"""
+Monitors for workers being added/removed to/from `ctx`, sets up or tears down
+per-worker state, and notifies the scheduler so that work can be reassigned.
+"""
+function monitor_procs_changed!(ctx, state)
+    # Load current set of procs
+    old_ps = procs_to_use(ctx)
+
+    while !state.halt.set
+        # Wait for the notification that procs have changed
+        lock(ctx.proc_notify) do
+            wait(ctx.proc_notify)
+        end
+
+        timespan_start(ctx, :assign_procs, 0, 0)
+
+        # Load new set of procs
+        new_ps = procs_to_use(ctx)
+
+        # Initialize new procs
+        diffps = setdiff(new_ps, old_ps)
         for p in diffps
             init_proc(state, p, ctx.log_sink)
-        end
-        state.procs_cache_list[] = nothing
-        schedule!(ctx, state, diffps)
-    end
-    return ps
-end
 
-shall_remove_proc(ctx, proc) = proc ∉ procs_to_use(ctx)
+            # Empty the processor cache list and force reschedule
+            lock(state.lock) do
+                state.procs_cache_list[] = nothing
+            end
+            put!(state.chan, RescheduleSignal())
+        end
+
+        # Cleanup removed procs
+        diffps = setdiff(old_ps, new_ps)
+        for p in diffps
+            cleanup_proc(state, p, ctx.log_sink)
+
+            # Empty the processor cache list
+            lock(state.lock) do
+                state.procs_cache_list[] = nothing
+            end
+        end
+
+        timespan_finish(ctx, :assign_procs, 0, 0)
+        old_ps = new_ps
+    end
+end
 
 function remove_dead_proc!(ctx, state, proc, options=ctx.options)
     @assert options.single !== proc.pid "Single worker failed, cannot continue."
@@ -922,23 +856,24 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
                         (log_sink=ctx.log_sink, profile=ctx.profile),
                         sch_handle, state.uid))
     end
-    timespan_start(ctx, :fire_multi, 0, 0)
-    try
-        remotecall_wait(do_tasks, gproc.pid, proc, state.chan, to_send)
-    catch
-        # We might get a deserialization error due to something not being
-        # defined on the worker; in this case, we re-fire one task at a time to
-        # determine which task failed
-        for ts in to_send
+    # N.B. We don't batch these because we might get a deserialization
+    # error due to something not being defined on the worker, and then we don't
+    # know which task failed.
+    tasks = Task[]
+    for ts in to_send
+        # TODO: errormonitor
+        @async begin
+            timespan_start(ctx, :fire, gproc.pid, 0)
             try
                 remotecall_wait(do_tasks, gproc.pid, proc, state.chan, [ts])
             catch err
                 bt = catch_backtrace()
                 put!(state.chan, (gproc.pid, proc, ts[2], (CapturedException(err, bt), nothing)))
+            finally
+                timespan_finish(ctx, :fire, gproc.pid, 0)
             end
         end
     end
-    timespan_finish(ctx, :fire_multi, 0, 0)
 end
 
 """
