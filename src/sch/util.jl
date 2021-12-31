@@ -207,13 +207,6 @@ function fetch_report(task)
     end
 end
 
-fn_type(x::Chunk) = x.chunktype
-fn_type(x) = typeof(x)
-function signature(task::Thunk, state)
-    inputs = map(x->istask(x) ? state.cache[x] : x, unwrap_weak_checked.(task.inputs))
-    Tuple{fn_type(task.f), map(x->x isa Chunk ? x.chunktype : typeof(x), inputs)...}
-end
-
 function report_catch_error(err, desc=nothing)
     iob = IOContext(IOBuffer(), :color=>true)
     if desc !== nothing
@@ -224,4 +217,139 @@ function report_catch_error(err, desc=nothing)
     println(iob)
     seek(iob.io, 0)
     write(stderr, iob)
+end
+
+fn_type(x::Chunk) = x.chunktype
+fn_type(x) = typeof(x)
+function signature(task::Thunk, state)
+    inputs = map(x->istask(x) ? state.cache[x] : x, unwrap_weak_checked.(task.inputs))
+    Tuple{fn_type(task.f), map(x->x isa Chunk ? x.chunktype : typeof(x), inputs)...}
+end
+
+function can_use_proc(task, gproc, proc, opts, scope)
+    # Check against proclist
+    if opts.proclist === nothing
+        if !default_enabled(proc)
+            return false
+        end
+    elseif opts.proclist isa Function
+        if !Base.invokelatest(opts.proclist, proc)
+            return false
+        end
+    elseif opts.proclist isa Vector
+        if !(typeof(proc) in opts.proclist)
+            return false
+        end
+    else
+        throw(SchedulingException("proclist must be a Function, Vector, or nothing"))
+    end
+
+    # Check against single
+    if opts.single != 0
+        if gproc.pid != opts.single
+            return false
+        end
+    end
+
+    # Check scope
+    if constrain(scope, Dagger.ExactScope(proc)) isa Dagger.InvalidScope
+        return false
+    end
+
+    return true
+end
+
+function has_capacity(state, p, gp, procutil, sig)
+    T = typeof(p)
+    # FIXME: MaxUtilization
+    extra_util = round(UInt64, get(procutil, T, 1) * 1e9)
+    real_util = state.worker_pressure[gp][p]
+    if (T === Dagger.ThreadProc) && haskey(state.function_cost_cache, sig)
+        # Assume that the extra pressure is between estimated and measured
+        # TODO: Generalize this to arbitrary processor types
+        extra_util = min(extra_util, state.function_cost_cache[sig])
+    end
+    # TODO: update real_util based on loadavg
+    cap = typemax(UInt64)
+    #= TODO
+    cap = state.worker_capacity[gp][T]
+    if ((extra_util isa MaxUtilization) && (real_util > 0)) ||
+       ((extra_util isa Real) && (extra_util + real_util > cap))
+        return false, cap, extra_util
+    end
+    =#
+    return true, cap, extra_util
+end
+
+function populate_processor_cache_list!(state, procs)
+    # Populate the cache if empty
+    if state.procs_cache_list[] === nothing
+        current = nothing
+        for p in map(x->x.pid, procs)
+            for proc in get_processors(OSProc(p))
+                next = ProcessorCacheEntry(OSProc(p), proc)
+                if current === nothing
+                    current = next
+                    current.next = current
+                    state.procs_cache_list[] = current
+                else
+                    current.next = next
+                    current = next
+                    current.next = state.procs_cache_list[]
+                end
+            end
+        end
+    end
+end
+
+"Like `sum`, but replaces `nothing` entries with the average of non-`nothing` entries."
+function impute_sum(xs)
+    length(xs) == 0 && return 0
+
+    total = zero(eltype(xs))
+    nothing_count = 0
+    something_count = 0
+    for x in xs
+        if isnothing(x)
+            nothing_count += 1
+        else
+            something_count += 1
+            total += x
+        end
+    end
+
+    total + nothing_count * total / something_count
+end
+
+"""
+Estimates the cost of scheduling `task` on each processor in `procs`. Considers
+current estimated per-processor compute pressure, and transfer costs for each
+`Chunk` argument to `task`. Returns `(procs, costs)`, with `procs` sorted in
+order of ascending cost.
+"""
+function estimate_task_costs(state, procs, task)
+    tx_rate = state.transfer_rate[]
+
+    # Find all Chunks
+    inputs = map(input->istask(input) ? state.cache[input] : input, unwrap_weak_checked.(task.inputs))
+    chunks = convert(Vector{Chunk}, filter(t->isa(t, Chunk), [inputs...]))
+
+    # Estimate network transfer costs based on data size
+    # N.B. `affinity(x)` really means "data size of `x`"
+    # N.B. We treat same-worker transfers as having zero transfer cost
+    # TODO: For non-Chunk, model cost from scheduler to worker
+    # TODO: Measure and model processor move overhead
+    transfer_costs = Dict(proc=>impute_sum([affinity(chunk)[2] for chunk in filter(c->get_parent(processor(c))!=get_parent(proc), chunks)]) for proc in procs)
+
+    # Estimate total cost to move data and get task running after currently-scheduled tasks
+    costs = Dict(proc=>state.worker_pressure[get_parent(proc).pid][proc]+(tx_cost/tx_rate) for (proc, tx_cost) in transfer_costs)
+
+    # Shuffle procs around, so equally-costly procs are equally considered
+    P = randperm(length(procs))
+    procs = getindex.(Ref(procs), P)
+
+    # Sort by lowest cost first
+    sort!(procs, by=p->costs[p])
+
+    return procs, costs
 end

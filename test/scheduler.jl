@@ -189,14 +189,28 @@ end
 
         setup = quote
             using Dagger, Distributed
+            function _list_workers(ctx, state, task, tid, _)
+                return procs(ctx)
+            end
             # blocked is to guarantee that processing is not completed before we add new workers
             # Note: blocked is used in expressions below
             blocked = true
             function testfun(i)
                 i < 4 && return myid()
                 # Wait for test to do its thing before we proceed
-                while blocked
-                    sleep(0.001)
+                if blocked
+                    sleep(0.1) # just so we don't end up overflowing or something while waiting for workers to be added
+                    # Here we would like to just wait to be rescheduled on another worker (which is not blocked)
+                    # but this functionality does not exist, so instead we do this weird thing where we reschedule
+                    # until we end up on a non-blocked worker
+                    h = Dagger.Sch.sch_handle()
+                    wkrs = Dagger.Sch.exec!(_list_workers, h)
+                    id = if length(wkrs) > 2
+                        Dagger.Sch.add_thunk!(testfun, h, i; single=last(wkrs).pid)
+                    else
+                        Dagger.Sch.add_thunk!(testfun, h, i)
+                    end
+                    return fetch(h, id)
                 end
                 return myid()
             end
@@ -229,11 +243,14 @@ end
                 addprocs!(ctx, ps3)
                 @test length(procs(ctx)) == 4
 
-                @everywhere vcat(ps1, ps3) blocked=false
+                @everywhere ps3 blocked=false
 
-                @test fetch(job) isa Vector
-                # TODO: Fix this unreliable test
-                @test_skip fetch(job) |> unique |> sort == vcat(ps1, ps3)
+                ps_used = fetch(job)
+                @test ps_used isa Vector
+
+                @test any(p -> p in ps_used, ps1)
+                @test any(p -> p in ps_used, ps3)
+                @test !any(p -> p in ps2, ps_used)
             finally
                 wait(rmprocs(ps))
             end
@@ -308,6 +325,60 @@ end
                 wait(rmprocs(ps))
             end
         end
+    end
+end
+
+@testset "Scheduler algorithms" begin
+    # New function to hide from scheduler's function cost cache
+    mynothing(args...) = nothing
+
+    # New non-singleton struct to hide from `approx_size`
+    struct MyStruct
+        x::Int
+    end
+
+    state = Dagger.Sch.EAGER_STATE[]
+    tproc1 = Dagger.ThreadProc(1, 1)
+    tproc2 = Dagger.ThreadProc(first(workers()), 1)
+    procs = [tproc1, tproc2]
+
+    pres1 = state.worker_pressure[1][tproc1]
+    pres2 = state.worker_pressure[first(workers())][tproc2]
+    tx_rate = state.transfer_rate[]
+
+    for (args, tx_size) in [
+        ([1, 2], 0),
+        ([Dagger.tochunk(1), 2], sizeof(Int)),
+        ([1, Dagger.tochunk(2)], sizeof(Int)),
+        ([Dagger.tochunk(1), Dagger.tochunk(2)], 2*sizeof(Int)),
+        # TODO: Why does this work? Seems slow
+        ([Dagger.tochunk(MyStruct(1))], sizeof(MyStruct)),
+        ([Dagger.tochunk(MyStruct(1)), Dagger.tochunk(1)], sizeof(MyStruct)+sizeof(Int)),
+    ]
+        for arg in args
+            if arg isa Chunk
+                aff = Dagger.affinity(arg)
+                @test aff[1] == OSProc(1)
+                @test aff[2] == MemPool.approx_size(MemPool.poolget(arg.handle))
+            end
+        end
+
+        cargs = map(arg->MemPool.poolget(arg.handle), filter(arg->isa(arg, Chunk), args))
+        est_tx_size = Dagger.Sch.impute_sum(map(MemPool.approx_size, cargs))
+        @test est_tx_size == tx_size
+
+        t = delayed(mynothing)(args...)
+        sorted_procs, costs = Dagger.Sch.estimate_task_costs(state, procs, t)
+
+        @test tproc1 in sorted_procs
+        @test tproc2 in sorted_procs
+        @test sorted_procs[1] == tproc1
+        @test sorted_procs[2] == tproc2
+
+        @test haskey(costs, tproc1)
+        @test haskey(costs, tproc2)
+        @test costs[tproc1] ≈ pres1 # All chunks are local
+        @test costs[tproc2] ≈ (tx_size/tx_rate) + pres2 # All chunks are remote
     end
 end
 
@@ -398,4 +469,21 @@ end
 end
 @testset "Chunk Caching" begin
     compute(delayed(testevicted)(delayed(testpresent)(c1,c2)))
+end
+
+@testset "MemPool.approx_size" begin
+    for (obj, size) in [
+        (rand(100), 100*sizeof(Float64)),
+        (rand(Float32, 100), 100*sizeof(Float32)),
+        (rand(1:10, 100), 100*sizeof(Int)),
+        (fill(:a, 10), missing),
+        (fill("a", 10), missing),
+        (fill('a', 10), missing),
+    ]
+        if size !== missing
+            @test MemPool.approx_size(obj) == size
+        else
+            @test MemPool.approx_size(obj) !== nothing
+        end
+    end
 end
