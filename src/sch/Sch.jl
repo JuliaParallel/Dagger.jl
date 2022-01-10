@@ -880,13 +880,15 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
         pushfirst!(data, thunk.f)
         toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
         options = merge(ctx.options, toptions)
+        propagated = get_propagated_options(thunk)
         @assert (options.single == 0) || (gproc.pid == options.single)
         # TODO: Set `sch_handle.tid.ref` to the right `DRef`
         sch_handle = SchedulerHandle(ThunkID(thunk.id, nothing), state.worker_chans[gproc.pid]...)
 
         # TODO: De-dup common fields (log_sink, uid, etc.)
         push!(to_send, (util, thunk.id, fn_type(thunk.f), data, thunk.get_result,
-                        thunk.persist, thunk.cache, thunk.meta, options, ids,
+                        thunk.persist, thunk.cache, thunk.meta, options,
+                        propagated, ids,
                         (log_sink=ctx.log_sink, profile=ctx.profile),
                         sch_handle, state.uid))
     end
@@ -939,12 +941,14 @@ function do_tasks(to_proc, chan, tasks)
     end
 end
 "Executes a single task on `to_proc`."
-function do_task(to_proc, extra_util, thunk_id, Tf, data, send_result, persist, cache, meta, options, ids, ctx_vars, sch_handle, uid)
+function do_task(to_proc, extra_util, thunk_id, Tf, data, send_result, persist, cache, meta, options, propagated, ids, ctx_vars, sch_handle, uid)
     ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
 
     from_proc = OSProc()
     Tdata = map(x->x isa Chunk ? chunktype(x) : x, data)
     f = isdefined(Tf, :instance) ? Tf.instance : nothing
+    f_chunk = first(data)
+    scope = f_chunk isa Chunk ? f_chunk.scope : AnyScope()
 
     # Fetch inputs
     transfer_time = Threads.Atomic{UInt64}(0)
@@ -1028,8 +1032,10 @@ function do_task(to_proc, extra_util, thunk_id, Tf, data, send_result, persist, 
             utilization=extra_util,
         ))
 
-        # Execute
-        res = execute!(to_proc, f, fetched...)
+        res = Dagger.with_options(propagated) do
+            # Execute
+            execute!(to_proc, f, fetched...)
+        end
 
         # Construct result
         send_result || meta ? res : tochunk(res, to_proc; persist=persist, cache=persist ? true : cache)

@@ -12,6 +12,8 @@ import LinearAlgebra: transpose
 
 using UUIDs
 
+import ContextVariablesX
+
 using Requires
 
 const PLUGINS = Dict{Symbol,Any}()
@@ -23,6 +25,7 @@ include("lib/util.jl")
 include("lib/logging.jl")
 
 # Distributed data
+include("options.jl")
 include("processor.jl")
 include("scopes.jl")
 include("thunk.jl")
