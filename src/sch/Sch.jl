@@ -953,41 +953,46 @@ function do_task(to_proc, extra_util, thunk_id, Tf, data, send_result, persist, 
     # Fetch inputs
     transfer_time = Threads.Atomic{UInt64}(0)
     transfer_size = Threads.Atomic{UInt64}(0)
-    fetched = if meta
-        data
+    _data, _ids = if meta
+        (Any[first(data)], Int[first(ids)]) # always fetch function
     else
-        fetch_report.(map(Iterators.zip(data,ids)) do (x, id)
-            @async begin
-                timespan_start(ctx, :move, (;thunk_id, id), (;f, id, data=x))
-                x = if x isa Chunk
-                    if haskey(CHUNK_CACHE, x)
-                        get!(CHUNK_CACHE[x], to_proc) do
-                            # TODO: Choose "closest" processor of same type first
-                            some_proc = first(keys(CHUNK_CACHE[x]))
-                            some_x = CHUNK_CACHE[x][some_proc]
-                            move(some_proc, to_proc, some_x)
-                        end
-                    else
-                        time_start = time_ns()
-                        _x = move(to_proc, x)
-                        time_finish = time_ns()
-                        if x.handle.size !== nothing
-                            Threads.atomic_add!(transfer_time, time_finish - time_start)
-                            Threads.atomic_add!(transfer_size, x.handle.size)
-                        end
-                        CHUNK_CACHE[x] = Dict{Processor,Any}()
-                        CHUNK_CACHE[x][to_proc] = _x
-                        _x
+        (data, ids)
+    end
+    fetched = convert(Vector{Any}, fetch_report.(map(Iterators.zip(_data,_ids)) do (x, id)
+        @async begin
+            timespan_start(ctx, :move, (;thunk_id, id), (;f, id, data=x))
+            x = if x isa Chunk
+                if haskey(CHUNK_CACHE, x)
+                    get!(CHUNK_CACHE[x], to_proc) do
+                        # TODO: Choose "closest" processor of same type first
+                        some_proc = first(keys(CHUNK_CACHE[x]))
+                        some_x = CHUNK_CACHE[x][some_proc]
+                        move(some_proc, to_proc, some_x)
                     end
                 else
-                    move(to_proc, x)
+                    time_start = time_ns()
+                    _x = move(to_proc, x)
+                    time_finish = time_ns()
+                    if x.handle.size !== nothing
+                        Threads.atomic_add!(transfer_time, time_finish - time_start)
+                        Threads.atomic_add!(transfer_size, x.handle.size)
+                    end
+                    CHUNK_CACHE[x] = Dict{Processor,Any}()
+                    CHUNK_CACHE[x][to_proc] = _x
+                    _x
                 end
-                timespan_finish(ctx, :move, (;thunk_id, id), (;f, id, data=x); tasks=[Base.current_task()])
-                return x
+            else
+                move(to_proc, x)
             end
-        end)
+            timespan_finish(ctx, :move, (;thunk_id, id), (;f, id, data=x); tasks=[Base.current_task()])
+            return x
+        end
+    end))
+    if meta
+        append!(fetched, data[2:end])
     end
     f = popfirst!(fetched)
+    @assert !(f isa Chunk) "Failed to unwrap thunk function"
 
     # Check if we'll go over capacity from running this thunk
     real_util = lock(TASK_SYNC) do
