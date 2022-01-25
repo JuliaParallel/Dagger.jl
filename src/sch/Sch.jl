@@ -1060,7 +1060,7 @@ function do_task(to_proc, extra_util, thunk_id, Tf, data, send_result, persist, 
         pressure=real_util[],
         loadavg=((Sys.loadavg()...,) ./ Sys.CPU_THREADS),
         threadtime=threadtime,
-        transfer_rate=transfer_time[] > 0 ? round(UInt64, transfer_size[] / (transfer_time[] / 10^9)) : nothing,
+        transfer_rate=(transfer_size[] > 0 && transfer_time[] > 0) ? round(UInt64, transfer_size[] / (transfer_time[] / 10^9)) : nothing,
     )
     (result_meta, metadata)
 end
