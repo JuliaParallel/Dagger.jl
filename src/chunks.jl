@@ -228,15 +228,15 @@ Base.map(f, s::Shard) = [Dagger.spawn(f, c) for c in values(s.chunks)]
 ### Core Stuff
 
 """
-    tochunk(x, proc; persist=false, cache=false) -> Chunk
+    tochunk(x, proc; kwargs...) -> Chunk
 
 Create a chunk from sequential object `x` which resides on `proc`.
 """
-function tochunk(x::X, proc::P=OSProc(), scope::S=AnyScope(); persist=false, cache=false) where {X,P,S}
-    ref = poolset(x)
+function tochunk(x::X, proc::P=OSProc(), scope::S=AnyScope(); persist=false, cache=false, kwargs...) where {X,P,S}
+    ref = poolset(x; kwargs...)
     Chunk{X,typeof(ref),P,S}(X, domain(x), ref, proc, scope, persist)
 end
-tochunk(x::Union{Chunk, Thunk}, proc=nothing, scope=nothing) = x
+tochunk(x::Union{Chunk, Thunk}, proc=nothing, scope=nothing; kwargs...) = x
 
 function savechunk(data, dir, f)
     sz = open(joinpath(dir, f), "w") do io
