@@ -1,7 +1,9 @@
 module Sch
 
 using Distributed
-import MemPool: DRef, poolset
+import MemPool
+import MemPool: DRef, StorageResource
+import MemPool: poolset, storage_available, storage_capacity, storage_utilized, externally_varying
 import Statistics: mean
 import Random: randperm
 
@@ -52,12 +54,14 @@ Fields:
 - `running_on::Dict{Thunk,OSProc}` - Map from `Thunk` to the OS process executing it
 - `thunk_dict::Dict{Int, WeakThunk}` - Maps from thunk IDs to a `Thunk`
 - `node_order::Any` - Function that returns the order of a thunk
-- `worker_pressure::Dict{Int,Dict{Processor,UInt64}}` - Cache of worker pressure
-- `worker_capacity::Dict{Int,Dict{Processor,UInt64}}` - Maps from worker ID to capacity
+- `worker_time_pressure::Dict{Int,Dict{Processor,UInt64}}` - Maps from worker ID to processor pressure
+- `worker_storage_pressure::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}` - Maps from worker ID to storage resource pressure
+- `worker_storage_capacity::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}` - Maps from worker ID to storage resource capacity
 - `worker_loadavg::Dict{Int,NTuple{3,Float64}}` - Worker load average
 - `worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}` - Communication channels between the scheduler and each worker
 - `procs_cache_list::Base.RefValue{Union{ProcessorCacheEntry,Nothing}}` - Cached linked list of processors ready to be used
-- `function_cost_cache::Dict{Signature,UInt64}` - Cache of estimated CPU time required to compute the given signature
+- `signature_time_cost::Dict{Signature,UInt64}` - Cache of estimated CPU time (in nanoseconds) required to compute calls with the given signature
+- `signature_alloc_cost::Dict{Signature,UInt64}` - Cache of estimated CPU RAM (in bytes) required to compute calls with the given signature
 - `transfer_rate::Ref{UInt64}` - Estimate of the network transfer rate in bytes per second
 - `halt::Base.Event` - Event indicating that the scheduler is halting
 - `lock::ReentrantLock` - Lock around operations which modify the state
@@ -76,12 +80,14 @@ struct ComputeState
     running_on::Dict{Thunk,OSProc}
     thunk_dict::Dict{Int, WeakThunk}
     node_order::Any
-    worker_pressure::Dict{Int,Dict{Processor,UInt64}}
-    worker_capacity::Dict{Int,Dict{Processor,UInt64}}
+    worker_time_pressure::Dict{Int,Dict{Processor,UInt64}}
+    worker_storage_pressure::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}
+    worker_storage_capacity::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}
     worker_loadavg::Dict{Int,NTuple{3,Float64}}
     worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}
     procs_cache_list::Base.RefValue{Union{ProcessorCacheEntry,Nothing}}
-    function_cost_cache::Dict{Signature,UInt64}
+    signature_time_cost::Dict{Signature,UInt64}
+    signature_alloc_cost::Dict{Signature,UInt64}
     transfer_rate::Ref{UInt64}
     halt::Base.Event
     lock::ReentrantLock
@@ -101,11 +107,13 @@ function start_state(deps::Dict, node_order, chan)
                          Dict{Thunk,OSProc}(),
                          Dict{Int, WeakThunk}(),
                          node_order,
-                         Dict{Int,Dict{Type,UInt64}}(),
-                         Dict{Int,Dict{Type,UInt64}}(),
+                         Dict{Int,Dict{Processor,UInt64}}(),
+                         Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}(),
+                         Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}(),
                          Dict{Int,NTuple{3,Float64}}(),
                          Dict{Int, Tuple{RemoteChannel,RemoteChannel}}(),
                          Ref{Union{ProcessorCacheEntry,Nothing}}(nothing),
+                         Dict{Signature,UInt64}(),
                          Dict{Signature,UInt64}(),
                          Ref{UInt64}(1_000_000),
                          Base.Event(),
@@ -177,12 +185,16 @@ instances/subtypes of a contained type. Alternatively, a function can be
 supplied, and the function will be called with a processor as the sole
 argument and should return a `Bool` result to indicate whether or not to use
 the given processor. `nothing` enables all default processors.
-- `procutil::Dict{Type,Any}=Dict{Type,Any}()`: Indicates the maximum expected
-processor utilization for this thunk. Each keypair maps a processor type to
-the utilization, where the value can be a real (approx. the number of processors
-of this type utilized), or `MaxUtilization()` (utilizes all processors of this
+- `time_util::Dict{Type,Any}=Dict{Type,Any}()`: Indicates the maximum expected
+time utilization for this thunk. Each keypair maps a processor type to the
+utilization, where the value can be a real (approximately the number of
+nanoseconds taken), or `MaxUtilization()` (utilizes all processors of this
 type). By default, the scheduler assumes that this thunk only uses one
 processor.
+- `alloc_util::Dict{Type,UInt64}=Dict{Type,UInt64}()`: Indicates the maximum
+expected memory utilization for this thunk. Each keypair maps a processor type
+to the utilization, where the value is an integer representing approximately
+the maximum number of bytes allocated at any one time.
 - `allow_errors::Bool=true`: Allow this thunk to error without affecting
 non-dependent thunks.
 - `checkpoint=nothing`: If not `nothing`, uses the provided function to save
@@ -194,14 +206,21 @@ this thunk will be skipped, and its result will be set to the `Chunk`.  If
 `nothing` is returned, restoring is skipped, and the thunk will execute as
 usual. If this function throws an error, restoring will be skipped, and the
 error will be displayed.
+- `storage::Union{Chunk,Nothing}=nothing`: If not `nothing`, references a
+`MemPool.StorageDevice` which will be passed to `MemPool.poolset` internally
+when constructing `Chunk`s (such as when constructing the return value). The
+device must support `MemPool.CPURAMResource`. When `nothing`, uses
+`MemPool.GLOBAL_DEVICE[]`.
 """
 Base.@kwdef struct ThunkOptions
     single::Int = 0
     proclist = nothing
-    procutil::Dict{Type,Any} = Dict{Type,Any}()
+    time_util::Dict{Type,Any} = Dict{Type,Any}()
+    alloc_util::Dict{Type,UInt64} = Dict{Type,UInt64}()
     allow_errors::Bool = false
     checkpoint = nothing
     restore = nothing
+    storage::Union{Chunk,Nothing} = nothing
 end
 
 # Eager scheduling
@@ -216,10 +235,10 @@ function Base.merge(sopts::SchedulerOptions, topts::ThunkOptions)
     single = topts.single != 0 ? topts.single : sopts.single
     allow_errors = sopts.allow_errors || topts.allow_errors
     proclist = topts.proclist !== nothing ? topts.proclist : sopts.proclist
-    ThunkOptions(single, proclist, topts.procutil, allow_errors, topts.checkpoint, topts.restore)
+    ThunkOptions(single, proclist, topts.time_util, topts.alloc_util, allow_errors, topts.checkpoint, topts.restore, topts.storage)
 end
 Base.merge(sopts::SchedulerOptions, ::Nothing) =
-    ThunkOptions(sopts.single, sopts.proclist, Dict{Type,Any}())
+    ThunkOptions(sopts.single, sopts.proclist, Dict{Type,Any}(), sopts.allow_errors)
 
 function isrestricted(task::Thunk, proc::OSProc)
     if (task.options !== nothing) && (task.options.single != 0) &&
@@ -241,25 +260,25 @@ function init_proc(state, p, log_sink)
     # Initialize pressure and capacity
     gproc = OSProc(p.pid)
     lock(state.lock) do
-        state.worker_pressure[p.pid] = Dict{Processor,UInt64}()
-        #state.worker_capacity[p.pid] = Dict{Processor,UInt64}()
-        state.worker_loadavg[p.pid] = (0.0, 0.0, 0.0)
+        state.worker_time_pressure[p.pid] = Dict{Processor,UInt64}()
         for proc in get_processors(gproc)
-            state.worker_pressure[p.pid][proc] = 0
-            #state.worker_capacity[p.pid][proc] = capacity(gproc, proc) * UInt64(1e9)
+            state.worker_time_pressure[p.pid][proc] = 0
         end
-        state.worker_pressure[p.pid][gproc] = 0
-        #state.worker_capacity[p.pid][OSProc] = 0
-    end
-    #=
-    cap = remotecall(capacity, p.pid)
-    @async begin
-        cap = fetch(cap) * UInt64(1e9)
-        lock(state.lock) do
-            state.worker_capacity[p.pid] = cap
+
+        state.worker_storage_pressure[p.pid] = Dict{Union{StorageResource,Nothing},UInt64}()
+        state.worker_storage_capacity[p.pid] = Dict{Union{StorageResource,Nothing},UInt64}()
+        #= FIXME
+        for storage in get_storage_resources(gproc)
+            pressure, capacity = remotecall_fetch(gproc.pid, storage) do storage
+                storage_pressure(storage), storage_capacity(storage)
+            end
+            state.worker_storage_pressure[p.pid][storage] = pressure
+            state.worker_storage_capacity[p.pid][storage] = capacity
         end
+        =#
+
+        state.worker_loadavg[p.pid] = (0.0, 0.0, 0.0)
     end
-    =#
     lock(WORKER_MONITOR_LOCK) do
         wid = p.pid
         if !haskey(WORKER_MONITOR_TASKS, wid)
@@ -320,8 +339,8 @@ const TASK_SYNC = Threads.Condition()
 "Process-local set of running task IDs."
 const TASKS_RUNNING = Set{Int}()
 
-"Process-local dictionary tracking per-processor total utilization."
-const PROC_UTILIZATION = Dict{UInt64,Dict{Processor,Ref{UInt64}}}()
+"Process-local dictionary tracking per-processor total time utilization."
+const PROCESSOR_TIME_UTILIZATION = Dict{UInt64,Dict{Processor,Ref{UInt64}}}()
 
 # TODO: "Process-local count of actively-executing Dagger tasks per processor type."
 
@@ -464,10 +483,14 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
             end
             node = unwrap_weak_checked(state.thunk_dict[thunk_id])
             if metadata !== nothing
-                state.worker_pressure[pid][proc] = metadata.pressure
+                state.worker_time_pressure[pid][proc] = metadata.time_pressure
+                to_storage = node.options.storage
+                state.worker_storage_pressure[pid][to_storage] = metadata.storage_pressure
+                state.worker_storage_capacity[pid][to_storage] = metadata.storage_capacity
                 state.worker_loadavg[pid] = metadata.loadavg
                 sig = signature(node, state)
-                state.function_cost_cache[sig] = (metadata.threadtime + get(state.function_cost_cache, sig, 0)) ÷ 2
+                state.signature_time_cost[sig] = (metadata.threadtime + get(state.signature_time_cost, sig, 0)) ÷ 2
+                state.signature_alloc_cost[sig] = (metadata.gc_allocd + get(state.signature_alloc_cost, sig, 0)) ÷ 2
                 if metadata.transfer_rate !== nothing
                     state.transfer_rate[] = (state.transfer_rate[] + metadata.transfer_rate) ÷ 2
                 end
@@ -545,7 +568,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         populate_processor_cache_list!(state, procs)
 
         # Schedule tasks
-        to_fire = Dict{Tuple{OSProc,<:Processor},Vector{Tuple{Thunk,<:Any}}}()
+        to_fire = Dict{Tuple{OSProc,<:Processor},Vector{Tuple{Thunk,<:Any,<:Any}}}()
         failed_scheduling = Thunk[]
 
         # Select a new task and get its options
@@ -614,12 +637,12 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         for proc in local_procs
             gproc = get_parent(proc)
             if can_use_proc(task, gproc, proc, opts, scope)
-                has_cap, cap, extra_util = has_capacity(state, proc, gproc.pid, opts.procutil, sig)
+                has_cap, est_time_util, est_alloc_util = has_capacity(state, proc, gproc.pid, opts.time_util, opts.alloc_util, sig)
                 if has_cap
                     # Schedule task onto proc
-                    extra_util = extra_util isa MaxUtilization ? cap : extra_util
-                    push!(get!(()->Vector{Tuple{Thunk,<:Any}}(), to_fire, (gproc, proc)), (task, extra_util))
-                    state.worker_pressure[gproc.pid][proc] += extra_util
+                    # FIXME: est_time_util = est_time_util isa MaxUtilization ? cap : est_time_util
+                    push!(get!(()->Vector{Tuple{Thunk,<:Any,<:Any}}(), to_fire, (gproc, proc)), (task, est_time_util, est_alloc_util))
+                    state.worker_time_pressure[gproc.pid][proc] += est_time_util
                     @goto pop_task
                 end
             end
@@ -638,7 +661,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         procs_found = false
         # N.B. if we only have one processor, we need to select it now
         if can_use_proc(task, entry.gproc, entry.proc, opts, scope)
-            has_cap, cap, extra_util = has_capacity(state, entry.proc, entry.gproc.pid, opts.procutil, sig)
+            has_cap, est_time_util, est_alloc_util = has_capacity(state, entry.proc, entry.gproc.pid, opts.time_util, opts.alloc_util, sig)
             if has_cap
                 selected_entry = entry
             else
@@ -662,7 +685,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
             end
 
             if can_use_proc(task, entry.gproc, entry.proc, opts, scope)
-                has_cap, cap, extra_util = has_capacity(state, entry.proc, entry.gproc.pid, opts.procutil, sig)
+                has_cap, est_time_util, est_alloc_util = has_capacity(state, entry.proc, entry.gproc.pid, opts.time_util, opts.alloc_util, sig)
                 if has_cap
                     # Select this processor
                     selected_entry = entry
@@ -680,8 +703,8 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
 
         # Schedule task onto proc
         gproc, proc = entry.gproc, entry.proc
-        extra_util = extra_util isa MaxUtilization ? cap : extra_util
-        push!(get!(()->Vector{Tuple{Thunk,<:Any}}(), to_fire, (gproc, proc)), (task, extra_util))
+        est_time_util = est_time_util isa MaxUtilization ? cap : est_time_util
+        push!(get!(()->Vector{Tuple{Thunk,<:Any,<:Any}}(), to_fire, (gproc, proc)), (task, est_time_util, est_alloc_util))
 
         # Proceed to next entry to spread work
         if !ctx.options.round_robin
@@ -750,8 +773,9 @@ end
 function remove_dead_proc!(ctx, state, proc, options=ctx.options)
     @assert options.single !== proc.pid "Single worker failed, cannot continue."
     rmprocs!(ctx, [proc])
-    delete!(state.worker_pressure, proc.pid)
-    #delete!(state.worker_capacity, proc.pid)
+    delete!(state.worker_time_pressure, proc.pid)
+    delete!(state.worker_storage_pressure, proc.pid)
+    delete!(state.worker_storage_capacity, proc.pid)
     delete!(state.worker_loadavg, proc.pid)
     delete!(state.worker_chans, proc.pid)
     state.procs_cache_list[] = nothing
@@ -832,20 +856,22 @@ function evict_chunks!(log_sink, chunks::Set{Chunk})
     # In particular workers which have not yet run using Dagger will cause the call below to throw an exception
     ctx = Context([myid()];log_sink) 
     for chunk in chunks
-        timespan_start(ctx, :evict, myid(), (;data=chunk))
-        haskey(CHUNK_CACHE, chunk) && delete!(CHUNK_CACHE, chunk)
-        timespan_finish(ctx, :evict, myid(), (;data=chunk))
+        lock(TASK_SYNC) do
+            timespan_start(ctx, :evict, myid(), (;data=chunk))
+            haskey(CHUNK_CACHE, chunk) && delete!(CHUNK_CACHE, chunk)
+            timespan_finish(ctx, :evict, myid(), (;data=chunk))
+        end
     end
     nothing
 end
 
-fire_task!(ctx, thunk::Thunk, p, state; util=10^9) =
-    fire_task!(ctx, (thunk, util), p, state)
-fire_task!(ctx, (thunk, util)::Tuple{Thunk,<:Any}, p, state) =
-    fire_tasks!(ctx, [(thunk, util)], p, state)
+fire_task!(ctx, thunk::Thunk, p, state; time_util=10^9, alloc_util=10^6) =
+    fire_task!(ctx, (thunk, time_util, alloc_util), p, state)
+fire_task!(ctx, (thunk, time_util, alloc_util)::Tuple{Thunk,<:Any}, p, state) =
+    fire_tasks!(ctx, [(thunk, time_util, alloc_util)], p, state)
 function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
     to_send = []
-    for (thunk, util) in thunks
+    for (thunk, time_util, alloc_util) in thunks
         push!(state.running, thunk)
         state.running_on[thunk] = gproc
         if thunk.cache && thunk.cache_ref !== nothing
@@ -893,7 +919,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
         sch_handle = SchedulerHandle(ThunkID(thunk.id, nothing), state.worker_chans[gproc.pid]...)
 
         # TODO: De-dup common fields (log_sink, uid, etc.)
-        push!(to_send, Any[util, thunk.id, fn_type(thunk.f), data, thunk.get_result,
+        push!(to_send, Any[thunk.id, time_util, alloc_util, fn_type(thunk.f), data, thunk.get_result,
                            thunk.persist, thunk.cache, thunk.meta, options,
                            propagated, ids,
                            (log_sink=ctx.log_sink, profile=ctx.profile),
@@ -911,7 +937,8 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
                 remotecall_wait(do_tasks, gproc.pid, proc, state.chan, [ts])
             catch err
                 bt = catch_backtrace()
-                put!(state.chan, (gproc.pid, proc, ts[2], (CapturedException(err, bt), nothing)))
+                thunk_id = ts[1]
+                put!(state.chan, (gproc.pid, proc, thunk_id, (CapturedException(err, bt), nothing)))
             finally
                 timespan_finish(ctx, :fire, gproc.pid, 0)
             end
@@ -926,10 +953,11 @@ Executes a batch of tasks on `to_proc`.
 """
 function do_tasks(to_proc, chan, tasks)
     for task in tasks
+        thunk_id = task[1]
         should_launch = lock(TASK_SYNC) do
             # Already running; don't try to re-launch
-            if !(task[2] in TASKS_RUNNING)
-                push!(TASKS_RUNNING, task[2])
+            if !(thunk_id in TASKS_RUNNING)
+                push!(TASKS_RUNNING, thunk_id)
                 true
             else
                 false
@@ -939,29 +967,93 @@ function do_tasks(to_proc, chan, tasks)
         @async begin
             try
                 result = do_task(to_proc, task)
-                put!(chan, (myid(), to_proc, task[2], result))
+                put!(chan, (myid(), to_proc, thunk_id, result))
             catch ex
                 bt = catch_backtrace()
-                put!(chan, (myid(), to_proc, task[2], (CapturedException(ex, bt), nothing)))
+                put!(chan, (myid(), to_proc, thunk_id, (CapturedException(ex, bt), nothing)))
             end
         end
     end
 end
 "Executes a single task on `to_proc`."
 function do_task(to_proc, comm)
-    extra_util, thunk_id, Tf, data, send_result, persist, cache, meta, options, propagated, ids, ctx_vars, sch_handle, uid = comm
+    thunk_id, est_time_util, est_alloc_util, Tf, data, send_result, persist, cache, meta, options, propagated, ids, ctx_vars, sch_handle, uid = comm
     ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
 
     from_proc = OSProc()
     Tdata = Any[]
     for x in data
-        push!(Tdata, x isa Chunk ? chunktype(x) : x)
+        push!(Tdata, chunktype(x))
     end
     f = isdefined(Tf, :instance) ? Tf.instance : nothing
-    f_chunk = first(data)
-    scope = f_chunk isa Chunk ? f_chunk.scope : AnyScope()
 
-    # Fetch inputs
+    # Wait for required resources to become available
+    to_storage = options.storage !== nothing ? fetch(options.storage) : MemPool.GLOBAL_DEVICE[]
+    to_storage_name = nameof(typeof(to_storage))
+    storage_cap = storage_capacity(to_storage)
+
+    timespan_start(ctx, :storage_wait, thunk_id, (;f, to_proc, to_storage))
+    real_time_util = Ref{UInt64}(0)
+    real_alloc_util = UInt64(0)
+    if !meta
+        # Factor in the memory costs for our lazy arguments
+        for arg in data[2:end]
+            if arg isa Chunk
+                est_alloc_util += arg.handle.size
+            end
+        end
+    end
+
+    debug_storage(msg::String) = @debug begin
+        let est_alloc_util=Base.format_bytes(est_alloc_util),
+            real_alloc_util=Base.format_bytes(real_alloc_util),
+            storage_cap=Base.format_bytes(storage_cap)
+            "[$(myid()), $thunk_id] $f($Tdata) $msg: $est_alloc_util | $real_alloc_util/$storage_cap"
+        end
+    end
+
+    lock(TASK_SYNC) do
+        while true
+            # Get current time utilization for the selected processor
+            time_dict = get!(()->Dict{Processor,Ref{UInt64}}(), PROCESSOR_TIME_UTILIZATION, uid)
+            real_time_util = get!(()->Ref{UInt64}(UInt64(0)), time_dict, to_proc)
+
+            # Get current allocation utilization and capacity
+            real_alloc_util = storage_utilized(to_storage)
+            storage_cap = storage_capacity(to_storage)
+
+            # Check if we'll go over memory capacity from running this thunk
+            # Waits for free storage, if necessary
+            #= TODO: Implement a priority queue, ordered by est_alloc_util
+            if est_alloc_util > storage_cap
+                debug_storage("WARN: Estimated utilization above storage capacity on $to_storage_name, proceeding anyway")
+                break
+            end
+            if est_alloc_util + real_alloc_util > storage_cap
+                if externally_varying(to_storage)
+                    debug_storage("WARN: Insufficient space and allocation behavior is externally varying on $to_storage_name, proceeding anyway")
+                    break
+                end
+                if length(TASKS_RUNNING) <= 2 # This task + eager submission task
+                    debug_storage("WARN: Insufficient space and no other running tasks on $to_storage_name, proceeding anyway")
+                    break
+                end
+                # Fully utilized, wait and re-check
+                debug_storage("Waiting for free $to_storage_name")
+                wait(TASK_SYNC)
+            else
+                # Sufficient free storage is available, prepare for execution
+                debug_storage("Using available $to_storage_name")
+                break
+            end
+            =#
+            # FIXME
+            break
+        end
+    end
+    timespan_finish(ctx, :storage_wait, thunk_id, (;f, to_proc, to_storage))
+
+    # Initiate data transfers for function and arguments
     transfer_time = Threads.Atomic{UInt64}(0)
     transfer_size = Threads.Atomic{UInt64}(0)
     _data, _ids = if meta
@@ -973,14 +1065,24 @@ function do_task(to_proc, comm)
         @async begin
             timespan_start(ctx, :move, (;thunk_id, id), (;f, id, data=x))
             x = if x isa Chunk
-                if haskey(CHUNK_CACHE, x)
-                    get!(CHUNK_CACHE[x], to_proc) do
-                        # TODO: Choose "closest" processor of same type first
-                        some_proc = first(keys(CHUNK_CACHE[x]))
-                        some_x = CHUNK_CACHE[x][some_proc]
-                        move(some_proc, to_proc, some_x)
+                value = lock(TASK_SYNC) do
+                    if haskey(CHUNK_CACHE, x)
+                        get!(CHUNK_CACHE[x], to_proc) do
+                            # Convert from cached value
+                            # TODO: Choose "closest" processor of same type first
+                            some_proc = first(keys(CHUNK_CACHE[x]))
+                            some_x = CHUNK_CACHE[x][some_proc]
+                            Some{Any}(move(some_proc, to_proc, some_x))
+                        end
+                    else
+                        nothing
                     end
+                end
+
+                if value !== nothing
+                    something(value)
                 else
+                    # Fetch it
                     time_start = time_ns()
                     _x = move(to_proc, x)
                     time_finish = time_ns()
@@ -988,8 +1090,13 @@ function do_task(to_proc, comm)
                         Threads.atomic_add!(transfer_time, time_finish - time_start)
                         Threads.atomic_add!(transfer_size, x.handle.size)
                     end
-                    CHUNK_CACHE[x] = Dict{Processor,Any}()
-                    CHUNK_CACHE[x][to_proc] = _x
+
+                    # Update cache
+                    lock(TASK_SYNC) do
+                        CHUNK_CACHE[x] = Dict{Processor,Any}()
+                        CHUNK_CACHE[x][to_proc] = _x
+                    end
+
                     _x
                 end
             else
@@ -1009,47 +1116,31 @@ function do_task(to_proc, comm)
     f = popfirst!(fetched)
     @assert !(f isa Chunk) "Failed to unwrap thunk function"
 
-    # Check if we'll go over capacity from running this thunk
-    real_util = lock(TASK_SYNC) do
-        AT = get!(()->Dict{Processor,Ref{UInt64}}(), PROC_UTILIZATION, uid)
-        get!(()->Ref{UInt64}(UInt64(0)), AT, to_proc)
+    #= FIXME: If MaxUtilization, stop processors and wait
+    if (est_time_util isa MaxUtilization) && (real_time_util > 0)
+        # FIXME: Stop processors
+        # FIXME: Wait on processors to stop
+        est_time_util = count(c->typeof(c)===typeof(to_proc), children(from_proc))
     end
-    #cap = UInt64(capacity(OSProc(), typeof(to_proc))) * UInt64(1e9)
-    cap = typemax(UInt64)
+    =#
 
-    # Wait for a free processor if necessary
-    while true
-        lock(TASK_SYNC)
-        if ((extra_util isa MaxUtilization) && (real_util[] > 0)) ||
-           ((extra_util isa Real) && (extra_util + real_util[] > cap))
-            # Fully subscribed, wait and re-check
-            @debug "($(myid())) $f ($thunk_id) Waiting for free $(typeof(to_proc)): $extra_util | $(real_util[])/$cap"
-            wait(TASK_SYNC)
-            unlock(TASK_SYNC)
-        else
-            # Under-subscribed, calculate extra utilization and execute thunk
-            @debug "($(myid())) $f ($thunk_id) Using available $to_proc: $extra_util | $(real_util[])/$cap"
-            extra_util = if extra_util isa MaxUtilization
-                count(c->typeof(c)===typeof(to_proc), children(from_proc))
-            else
-                extra_util
-            end
-            real_util[] += extra_util
-            unlock(TASK_SYNC)
-            break
-        end
-    end
-
+    real_time_util[] += est_time_util
     timespan_start(ctx, :compute, thunk_id, (;f, to_proc))
     res = nothing
+
+    # Start counting time and GC allocations
     threadtime_start = cputhreadtime()
+    # FIXME
+    #gcnum_start = Base.gc_num()
+
     result_meta = try
         # Set TLS variables
         Dagger.set_tls!((
             sch_uid=uid,
             sch_handle=sch_handle,
             processor=to_proc,
-            utilization=extra_util,
+            time_utilization=est_time_util,
+            alloc_utilization=est_alloc_util,
         ))
 
         res = Dagger.with_options(propagated) do
@@ -1057,24 +1148,43 @@ function do_task(to_proc, comm)
             execute!(to_proc, f, fetched...)
         end
 
+        # Check if result is safe to store
+        device = nothing
+        if !(res isa Chunk)
+            timespan_start(ctx, :storage_safe_scan, thunk_id, (;T=typeof(res)))
+            device = if walk_storage_safe(res)
+                to_storage
+            else
+                MemPool.CPURAMDevice()
+            end
+            timespan_finish(ctx, :storage_safe_scan, thunk_id, (;T=typeof(res)))
+        end
+
         # Construct result
-        send_result || meta ? res : tochunk(res, to_proc; persist=persist, cache=persist ? true : cache)
+        # TODO: We should cache this locally
+        send_result || meta ? res : tochunk(res, to_proc; device, persist, cache=persist ? true : cache)
     catch ex
         bt = catch_backtrace()
         RemoteException(myid(), CapturedException(ex, bt))
     end
     threadtime = cputhreadtime() - threadtime_start
+    # FIXME: This is not a realistic measure of max. required memory
+    #gc_allocd = min(max(UInt64(Base.gc_num().allocd) - UInt64(gcnum_start.allocd), UInt64(0)), UInt64(1024^4))
     timespan_finish(ctx, :compute, thunk_id, (;f, to_proc); tasks=Dagger.prof_tasks_take!(thunk_id))
     lock(TASK_SYNC) do
-        real_util[] -= extra_util
+        real_time_util[] -= est_time_util
         pop!(TASKS_RUNNING, thunk_id)
         notify(TASK_SYNC)
     end
-    @debug "($(myid())) $f ($thunk_id) Releasing $(typeof(to_proc)): $extra_util | $(real_util[])/$cap"
+    # TODO: debug_storage("Releasing $to_storage_name")
     metadata = (
-        pressure=real_util[],
+        time_pressure=real_time_util[],
+        storage_pressure=real_alloc_util,
+        storage_capacity=storage_cap,
         loadavg=((Sys.loadavg()...,) ./ Sys.CPU_THREADS),
         threadtime=threadtime,
+        # FIXME: Add runtime allocation tracking
+        gc_allocd=(isa(result_meta, Chunk) ? result_meta.handle.size : 0),
         transfer_rate=(transfer_size[] > 0 && transfer_time[] > 0) ? round(UInt64, transfer_size[] / (transfer_time[] / 10^9)) : nothing,
     )
     (result_meta, metadata)

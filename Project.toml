@@ -21,10 +21,10 @@ UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
 [compat]
 Colors = "0.10, 0.11, 0.12"
 ContextVariablesX = "0.1"
-MemPool = "0.3.5, 0.4"
+MemPool = "0.4"
 Requires = "1"
 StatsBase = "0.28, 0.29, 0.30, 0.31, 0.32, 0.33"
-julia = "1.6"
+julia = "1.7"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"

@@ -43,13 +43,13 @@ pressure decreased."
 function adjust_pressure!(h::SchedulerHandle, proc::Processor, pressure)
     uid = Dagger.get_tls().sch_uid
     lock(TASK_SYNC) do
-        PROC_UTILIZATION[uid][proc][] += pressure
+        PROCESSOR_TIME_UTILIZATION[uid][proc][] += pressure
         notify(TASK_SYNC)
     end
     exec!(_adjust_pressure!, h, myid(), proc, pressure)
 end
 function _adjust_pressure!(ctx, state, task, tid, (pid, proc, pressure))
-    state.worker_pressure[pid][proc] += pressure
+    state.worker_time_pressure[pid][proc] += pressure
     if pressure < 0
         put!(state.chan, RescheduleSignal())
     end
@@ -63,7 +63,7 @@ function thunk_yield(f)
         h = sch_handle()
         tls = Dagger.get_tls()
         proc = tls.processor
-        util = tls.utilization
+        util = tls.time_utilization
         adjust_pressure!(h, proc, -util)
         try
             f()
@@ -84,7 +84,7 @@ function eager_thunk()
     end
     tls = Dagger.get_tls()
     # Don't apply pressure from this thunk
-    adjust_pressure!(h, tls.processor, -tls.utilization)
+    adjust_pressure!(h, tls.processor, -tls.time_utilization)
     while isopen(EAGER_THUNK_CHAN)
         try
             added_future, future, uid, ref, f, args, opts = take!(EAGER_THUNK_CHAN)
