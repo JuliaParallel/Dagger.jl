@@ -13,7 +13,7 @@ transfer data to/from other types of `Processor` at runtime.
 abstract type Processor end
 
 const PROCESSOR_CALLBACKS = Dict{Symbol,Any}()
-const OSPROC_PROCESSOR_CACHE = Dict{Int,Vector{Processor}}()
+const OSPROC_PROCESSOR_CACHE = Dict{Int,Set{Processor}}()
 
 add_processor_callback!(func, name::String) =
     add_processor_callback!(func, Symbol(name))
@@ -56,18 +56,21 @@ iscompatible_arg(proc::Processor, opts, x) = false
 """
     default_enabled(proc::Processor) -> Bool
 
-Returns whether processor `proc` is enabled by default (opt-out). `Processor` subtypes can override this function to make themselves opt-in (default returns `false`).
+Returns whether processor `proc` is enabled by default. The default value is
+`false`, which is an opt-out of the processor from execution when not
+specifically requested by the user, and `true` implies opt-in, which causes the
+processor to always participate in execution when possible.
 """
 default_enabled(proc::Processor) = false
 
 """
-    get_processors(proc::Processor) -> Vector{T} where T<:Processor
+    get_processors(proc::Processor) -> Set{<:Processor}
 
-Returns the full list of processors contained in `proc`, if any. `Processor`
-subtypes should overload this function if they can contain sub-processors. The
-default method will return a `Vector` containing `proc` itself.
+Returns the set of processors contained in `proc`, if any. `Processor` subtypes
+should overload this function if they can contain sub-processors. The default
+method will return a `Set` containing `proc` itself.
 """
-get_processors(proc::Processor) = Processor[proc]
+get_processors(proc::Processor) = Set{Processor}([proc])
 
 """
     get_parent(proc::Processor) -> Processor
@@ -92,15 +95,6 @@ data movement should provide implementations where `x::Chunk`.
 move(from_proc::Processor, to_proc::Processor, x) = x
 
 """
-    capacity(proc::Processor=OSProc()) -> Int
-
-Returns the total processing capacity of `proc`.
-"""
-capacity(proc=OSProc()) = length(get_processors(proc))
-capacity(proc, ::Type{T}) where T =
-    length(filter(x->x isa T, get_processors(proc)))
-
-"""
     OSProc <: Processor
 
 Julia CPU (OS) process, identified by Distributed pid. The logical parent of
@@ -117,9 +111,10 @@ struct OSProc <: Processor
     end
 end
 get_parent(proc::OSProc) = proc
-children(proc::OSProc) = get(OSPROC_PROCESSOR_CACHE, proc.pid, Processor[])
+get_processors(proc::OSProc) = get(OSPROC_PROCESSOR_CACHE, proc.pid, Set{Processor}())
+children(proc::OSProc) = get_processors(proc)
 function get_processor_hierarchy()
-    children = Processor[]
+    children = Set{Processor}()
     for name in keys(PROCESSOR_CALLBACKS)
         cb = PROCESSOR_CALLBACKS[name]
         try
@@ -144,13 +139,6 @@ iscompatible_arg(proc::OSProc, opts, args...) =
     any(child->
         all(arg->iscompatible_arg(child, opts, arg), args),
     children(proc))
-function get_processors(proc::OSProc)
-    procs = Processor[]
-    for child in children(proc)
-        append!(procs, get_processors(child))
-    end
-    procs
-end
 
 """
     ThreadProc <: Processor
