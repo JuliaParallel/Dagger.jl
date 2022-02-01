@@ -372,8 +372,10 @@ end
 
         @test tproc1 in sorted_procs
         @test tproc2 in sorted_procs
-        @test sorted_procs[1] == tproc1
-        @test sorted_procs[2] == tproc2
+        if length(cargs) > 0
+            @test sorted_procs[1] == tproc1
+            @test sorted_procs[2] == tproc2
+        end
 
         @test haskey(costs, tproc1)
         @test haskey(costs, tproc2)

@@ -202,17 +202,17 @@ end
 include("eager.jl")
 
 """
-    merge(sopts, topts)
+    Base.merge(sopts::SchedulerOptions, topts::ThunkOptions) -> ThunkOptions
 
 Combine `SchedulerOptions` and `ThunkOptions` into a new `ThunkOptions`.
 """
-function merge(sopts::SchedulerOptions, topts::ThunkOptions)
+function Base.merge(sopts::SchedulerOptions, topts::ThunkOptions)
     single = topts.single != 0 ? topts.single : sopts.single
     allow_errors = sopts.allow_errors || topts.allow_errors
     proclist = topts.proclist !== nothing ? topts.proclist : sopts.proclist
     ThunkOptions(single, proclist, topts.procutil, allow_errors, topts.checkpoint, topts.restore)
 end
-merge(sopts::SchedulerOptions, ::Nothing) =
+Base.merge(sopts::SchedulerOptions, ::Nothing) =
     ThunkOptions(sopts.single, sopts.proclist, Dict{Type,Any}())
 
 function isrestricted(task::Thunk, proc::OSProc)
@@ -880,13 +880,15 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
         pushfirst!(data, thunk.f)
         toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
         options = merge(ctx.options, toptions)
+        propagated = get_propagated_options(thunk)
         @assert (options.single == 0) || (gproc.pid == options.single)
         # TODO: Set `sch_handle.tid.ref` to the right `DRef`
         sch_handle = SchedulerHandle(ThunkID(thunk.id, nothing), state.worker_chans[gproc.pid]...)
 
         # TODO: De-dup common fields (log_sink, uid, etc.)
         push!(to_send, (util, thunk.id, fn_type(thunk.f), data, thunk.get_result,
-                        thunk.persist, thunk.cache, thunk.meta, options, ids,
+                        thunk.persist, thunk.cache, thunk.meta, options,
+                        propagated, ids,
                         (log_sink=ctx.log_sink, profile=ctx.profile),
                         sch_handle, state.uid))
     end
@@ -939,51 +941,58 @@ function do_tasks(to_proc, chan, tasks)
     end
 end
 "Executes a single task on `to_proc`."
-function do_task(to_proc, extra_util, thunk_id, Tf, data, send_result, persist, cache, meta, options, ids, ctx_vars, sch_handle, uid)
+function do_task(to_proc, extra_util, thunk_id, Tf, data, send_result, persist, cache, meta, options, propagated, ids, ctx_vars, sch_handle, uid)
     ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
 
     from_proc = OSProc()
     Tdata = map(x->x isa Chunk ? chunktype(x) : x, data)
     f = isdefined(Tf, :instance) ? Tf.instance : nothing
+    f_chunk = first(data)
+    scope = f_chunk isa Chunk ? f_chunk.scope : AnyScope()
 
     # Fetch inputs
     transfer_time = Threads.Atomic{UInt64}(0)
     transfer_size = Threads.Atomic{UInt64}(0)
-    fetched = if meta
-        data
+    _data, _ids = if meta
+        (Any[first(data)], Int[first(ids)]) # always fetch function
     else
-        fetch_report.(map(Iterators.zip(data,ids)) do (x, id)
-            @async begin
-                timespan_start(ctx, :move, (;thunk_id, id), (;f, id, data=x))
-                x = if x isa Chunk
-                    if haskey(CHUNK_CACHE, x)
-                        get!(CHUNK_CACHE[x], to_proc) do
-                            # TODO: Choose "closest" processor of same type first
-                            some_proc = first(keys(CHUNK_CACHE[x]))
-                            some_x = CHUNK_CACHE[x][some_proc]
-                            move(some_proc, to_proc, some_x)
-                        end
-                    else
-                        time_start = time_ns()
-                        _x = move(to_proc, x)
-                        time_finish = time_ns()
-                        if x.handle.size !== nothing
-                            Threads.atomic_add!(transfer_time, time_finish - time_start)
-                            Threads.atomic_add!(transfer_size, x.handle.size)
-                        end
-                        CHUNK_CACHE[x] = Dict{Processor,Any}()
-                        CHUNK_CACHE[x][to_proc] = _x
-                        _x
+        (data, ids)
+    end
+    fetched = convert(Vector{Any}, fetch_report.(map(Iterators.zip(_data,_ids)) do (x, id)
+        @async begin
+            timespan_start(ctx, :move, (;thunk_id, id), (;f, id, data=x))
+            x = if x isa Chunk
+                if haskey(CHUNK_CACHE, x)
+                    get!(CHUNK_CACHE[x], to_proc) do
+                        # TODO: Choose "closest" processor of same type first
+                        some_proc = first(keys(CHUNK_CACHE[x]))
+                        some_x = CHUNK_CACHE[x][some_proc]
+                        move(some_proc, to_proc, some_x)
                     end
                 else
-                    move(to_proc, x)
+                    time_start = time_ns()
+                    _x = move(to_proc, x)
+                    time_finish = time_ns()
+                    if x.handle.size !== nothing
+                        Threads.atomic_add!(transfer_time, time_finish - time_start)
+                        Threads.atomic_add!(transfer_size, x.handle.size)
+                    end
+                    CHUNK_CACHE[x] = Dict{Processor,Any}()
+                    CHUNK_CACHE[x][to_proc] = _x
+                    _x
                 end
-                timespan_finish(ctx, :move, (;thunk_id, id), (;f, id, data=x); tasks=[Base.current_task()])
-                return x
+            else
+                move(to_proc, x)
             end
-        end)
+            timespan_finish(ctx, :move, (;thunk_id, id), (;f, id, data=x); tasks=[Base.current_task()])
+            return x
+        end
+    end))
+    if meta
+        append!(fetched, data[2:end])
     end
     f = popfirst!(fetched)
+    @assert !(f isa Chunk) "Failed to unwrap thunk function"
 
     # Check if we'll go over capacity from running this thunk
     real_util = lock(TASK_SYNC) do
@@ -1028,8 +1037,10 @@ function do_task(to_proc, extra_util, thunk_id, Tf, data, send_result, persist, 
             utilization=extra_util,
         ))
 
-        # Execute
-        res = execute!(to_proc, f, fetched...)
+        res = Dagger.with_options(propagated) do
+            # Execute
+            execute!(to_proc, f, fetched...)
+        end
 
         # Construct result
         send_result || meta ? res : tochunk(res, to_proc; persist=persist, cache=persist ? true : cache)
@@ -1049,7 +1060,7 @@ function do_task(to_proc, extra_util, thunk_id, Tf, data, send_result, persist, 
         pressure=real_util[],
         loadavg=((Sys.loadavg()...,) ./ Sys.CPU_THREADS),
         threadtime=threadtime,
-        transfer_rate=transfer_time[] > 0 ? round(UInt64, transfer_size[] / (transfer_time[] / 10^9)) : nothing,
+        transfer_rate=(transfer_size[] > 0 && transfer_time[] > 0) ? round(UInt64, transfer_size[] / (transfer_time[] / 10^9)) : nothing,
     )
     (result_meta, metadata)
 end

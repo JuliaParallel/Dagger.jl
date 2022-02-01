@@ -78,7 +78,7 @@ function dynamic_listener!(ctx, state)
                                                                 ProcessExitedException,
                                                                 InvalidStateException})
                         iob = IOContext(IOBuffer(), :color=>true)
-                        println(iob, "Error in sending dynamic result:")
+                        println(iob, "Error in sending dynamic result from $f:")
                         Base.showerror(iob, err)
                         Base.show_backtrace(iob, catch_backtrace())
                         println(iob)

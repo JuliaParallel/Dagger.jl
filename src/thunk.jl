@@ -61,6 +61,7 @@ mutable struct Thunk
     affinity::Union{Nothing, Pair{OSProc, Int}}
     eager_ref::Union{DRef,Nothing}
     options::Any # stores scheduler-specific options
+    propagates::Tuple # which options we'll propagate
     function Thunk(f, xs...;
                    id::Int=next_id(),
                    get_result::Bool=false,
@@ -73,9 +74,10 @@ mutable struct Thunk
                    processor=nothing,
                    scope=nothing,
                    options=nothing,
+                   propagates=(),
                    kwargs...
                   )
-        if !isnothing(processor) || !isnothing(scope)
+        if !isa(f, Chunk) && (!isnothing(processor) || !isnothing(scope))
             f = tochunk(f,
                         something(processor, OSProc()),
                         something(scope, AnyScope()))
@@ -83,10 +85,10 @@ mutable struct Thunk
         if options !== nothing
             @assert isempty(kwargs)
             new(f, xs, id, get_result, meta, persist, cache, cache_ref,
-                affinity, eager_ref, options)
+                affinity, eager_ref, options, propagates)
         else
             new(f, xs, id, get_result, meta, persist, cache, cache_ref,
-                affinity, eager_ref, Sch.ThunkOptions(;kwargs...))
+                affinity, eager_ref, Sch.ThunkOptions(;kwargs...), propagates)
         end
     end
 end
@@ -238,13 +240,14 @@ end
 const EAGER_ID_COUNTER = Threads.Atomic{UInt64}(1)
 eager_next_id() = Threads.atomic_add!(EAGER_ID_COUNTER, one(UInt64))
 
-function _spawn(f, args...; kwargs...)
+function _spawn(f, args...; options, kwargs...)
     Dagger.Sch.init_eager()
     uid = eager_next_id()
     future = ThunkFuture()
     finalizer_ref = poolset(EagerThunkFinalizer(uid))
     added_future = Future()
-    put!(Dagger.Sch.EAGER_THUNK_CHAN, (added_future, future, uid, finalizer_ref, f, (args...,), (kwargs...,)))
+    propagates = keys(options)
+    put!(Dagger.Sch.EAGER_THUNK_CHAN, (added_future, future, uid, finalizer_ref, f, (args...,), (;propagates, options..., kwargs...,)))
     thunk_ref = fetch(added_future)
     return (uid, future, finalizer_ref, thunk_ref)
 end
@@ -258,15 +261,16 @@ Note that `kwargs` are passed to the `Thunk` constructor, and are documented in
 its docstring.
 """
 function spawn(f, args...; processor=nothing, scope=nothing, kwargs...)
+    options = get_options()
     if !isnothing(processor) || !isnothing(scope)
         f = tochunk(f,
-                    something(processor, OSProc()),
-                    something(scope, AnyScope()))
+                    something(processor, get_options(:processor, OSProc())),
+                    something(scope, get_options(:scope, AnyScope())))
     end
     uid, future, finalizer_ref, thunk_ref = if myid() == 1
-        _spawn(f, args...; kwargs...)
+        _spawn(f, args...; options, kwargs...)
     else
-        remotecall_fetch(_spawn, 1, f, args...; kwargs...)
+        remotecall_fetch(_spawn, 1, f, args...; options, kwargs...)
     end
     return EagerThunk(uid, future, finalizer_ref, thunk_ref)
 end

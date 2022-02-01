@@ -18,7 +18,7 @@ function init_eager()
     @async try
         sopts = SchedulerOptions(;allow_errors=true)
         topts = ThunkOptions(;single=1)
-        Dagger.compute(ctx, Dagger.delayed(eager_thunk;options=topts)(); options=sopts)
+        Dagger.compute(ctx, Dagger.delayed(eager_thunk; options=topts)(); options=sopts)
     catch err
         iob = IOContext(IOBuffer(), :color=>true)
         println(iob, "Error in eager scheduler:")
@@ -71,9 +71,11 @@ function thunk_yield(f)
 end
 
 function eager_thunk()
+    @assert myid() == 1
     h = sch_handle()
     exec!(h) do ctx, state, task, tid, _
         EAGER_STATE[] = state
+        nothing
     end
     tls = Dagger.get_tls()
     # Don't apply pressure from this thunk

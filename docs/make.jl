@@ -18,6 +18,7 @@ makedocs(;
         "Scopes" => "scopes.md",
         "Mutation and Shards" => "mutation.md",
         "Dynamic Scheduler Control" => "dynamic.md",
+        "Option Propagation" => "propagation.md",
         "Logging and Graphing" => "logging.md",
         "Scheduler Visualization" => "scheduler-visualization.md",
         "Benchmarking" => "benchmarking.md",

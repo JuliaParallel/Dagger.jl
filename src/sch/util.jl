@@ -9,6 +9,26 @@ unwrap_nested_exception(err::RemoteException) =
     unwrap_nested_exception(err.captured)
 unwrap_nested_exception(err) = err
 
+"Gets a `NamedTuple` of options propagated by `thunk`."
+function get_propagated_options(thunk)
+    nt = NamedTuple()
+    for key in thunk.propagates
+        value = if key == :scope
+            isa(thunk.f, Chunk) ? thunk.f.scope : AnyScope()
+        elseif key == :processor
+            isa(thunk.f, Chunk) ? thunk.f.processor : OSProc()
+        elseif key in fieldnames(Thunk)
+            getproperty(thunk, key)
+        elseif key in fieldnames(ThunkOptions)
+            getproperty(thunk.options, key)
+        else
+            throw(ArgumentError("Can't propagate unknown key: $key"))
+        end
+        nt = merge(nt, (key=>value,))
+    end
+    nt
+end
+
 "Fills the result for all registered futures of `node`."
 function fill_registered_futures!(state, node, failed)
     if haskey(state.futures, node)
