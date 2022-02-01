@@ -162,6 +162,19 @@ function (ps::ProcessorSaturation)(ev::Event{:finish})
     filter(x->x[2]>0, ps.saturation)
 end
 
+"Debugging metric, used to log event start/finish via `@debug`."
+struct DebugMetrics
+    sat::EventSaturation
+end
+DebugMetrics() = DebugMetrics(EventSaturation())
+function (dm::DebugMetrics)(ev::Event{T}) where T
+    dm.sat(ev)
+    sat_string = "$(join(["$cat => $(dm.sat.saturation[cat])" for cat in keys(dm.sat.saturation) if dm.sat.saturation[cat] > 0 ], ", "))"
+    @debug "Event: $(ev.category) $T ($sat_string)" _line=nothing _file=nothing _module=nothing
+    nothing
+end
+init_similar(dm::DebugMetrics) = DebugMetrics()
+
 """
     LogWindow
 
