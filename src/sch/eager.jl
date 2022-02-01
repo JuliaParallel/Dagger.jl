@@ -71,9 +71,11 @@ function thunk_yield(f)
 end
 
 function eager_thunk()
+    @assert myid() == 1
     h = sch_handle()
     exec!(h) do ctx, state, task, tid, _
         EAGER_STATE[] = state
+        nothing
     end
     tls = Dagger.get_tls()
     # Don't apply pressure from this thunk
