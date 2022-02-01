@@ -202,17 +202,17 @@ end
 include("eager.jl")
 
 """
-    merge(sopts, topts)
+    Base.merge(sopts::SchedulerOptions, topts::ThunkOptions) -> ThunkOptions
 
 Combine `SchedulerOptions` and `ThunkOptions` into a new `ThunkOptions`.
 """
-function merge(sopts::SchedulerOptions, topts::ThunkOptions)
+function Base.merge(sopts::SchedulerOptions, topts::ThunkOptions)
     single = topts.single != 0 ? topts.single : sopts.single
     allow_errors = sopts.allow_errors || topts.allow_errors
     proclist = topts.proclist !== nothing ? topts.proclist : sopts.proclist
     ThunkOptions(single, proclist, topts.procutil, allow_errors, topts.checkpoint, topts.restore)
 end
-merge(sopts::SchedulerOptions, ::Nothing) =
+Base.merge(sopts::SchedulerOptions, ::Nothing) =
     ThunkOptions(sopts.single, sopts.proclist, Dict{Type,Any}())
 
 function isrestricted(task::Thunk, proc::OSProc)
