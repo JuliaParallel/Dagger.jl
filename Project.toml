@@ -24,6 +24,7 @@ UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
 
 [compat]
 Colors = "0.10, 0.11, 0.12"
+ContextVariablesX = "0.1"
 DataAPI = "1"
 MemPool = "0.3.5"
 Requires = "1"
