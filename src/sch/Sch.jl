@@ -286,6 +286,10 @@ function init_proc(state, p, log_sink)
     lock(state.lock) do
         state.worker_chans[p.pid] = (inp_chan, out_chan)
     end
+
+    # Setup dynamic listener
+    dynamic_listener!(ctx, state, p.pid)
+
     timespan_finish(ctx, :init_proc, p.pid, 0)
 end
 function _cleanup_proc(uid, log_sink)
@@ -405,9 +409,6 @@ function scheduler_init(ctx, state::ComputeState, d::Thunk, options, deps)
             @error "Error assigning workers" exception=(err,catch_backtrace())
         end
     end
-
-    # setup dynamic listeners
-    dynamic_listener!(ctx, state)
 end
 
 function scheduler_run(ctx, state::ComputeState, d::Thunk, options)

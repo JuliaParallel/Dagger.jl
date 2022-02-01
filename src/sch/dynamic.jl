@@ -41,61 +41,56 @@ function safepoint(state)
 end
 
 "Processes dynamic messages from worker-executing thunks."
-function dynamic_listener!(ctx, state)
+function dynamic_listener!(ctx, state, wid)
     task = current_task() # The scheduler's main task
-    listener_tasks = Task[]
-    for tid in keys(state.worker_chans)
-        inp_chan, out_chan = state.worker_chans[tid]
-        push!(listener_tasks, @async begin
-            while isopen(inp_chan) && !state.halt.set
-                tid, f, data = try
-                    take!(inp_chan)
-                catch err
-                    if !(unwrap_nested_exception(err) isa Union{SchedulerHaltedException,
-                                                                ProcessExitedException,
-                                                                InvalidStateException})
-                        iob = IOContext(IOBuffer(), :color=>true)
-                        println(iob, "Error in sending dynamic request:")
-                        Base.showerror(iob, err)
-                        Base.show_backtrace(iob, catch_backtrace())
-                        println(iob)
-                        seek(iob.io, 0)
-                        write(stderr, iob)
-                    end
-                    break
+    inp_chan, out_chan = state.worker_chans[wid]
+    listener_task = @async begin
+        while isopen(inp_chan) && !state.halt.set
+            tid, f, data = try
+                take!(inp_chan)
+            catch err
+                if !(unwrap_nested_exception(err) isa Union{SchedulerHaltedException,
+                                                            ProcessExitedException,
+                                                            InvalidStateException})
+                    iob = IOContext(IOBuffer(), :color=>true)
+                    println(iob, "Error in sending dynamic request:")
+                    Base.showerror(iob, err)
+                    Base.show_backtrace(iob, catch_backtrace())
+                    println(iob)
+                    seek(iob.io, 0)
+                    write(stderr, iob)
                 end
-                res = try
-                    (false, lock(state.lock) do
-                        Base.invokelatest(f, ctx, state, task, tid, data)
-                    end)
-                catch err
-                    (true, RemoteException(CapturedException(err,catch_backtrace())))
-                end
-                try
-                    put!(out_chan, res)
-                catch err
-                    if !(unwrap_nested_exception(err) isa Union{SchedulerHaltedException,
-                                                                ProcessExitedException,
-                                                                InvalidStateException})
-                        iob = IOContext(IOBuffer(), :color=>true)
-                        println(iob, "Error in sending dynamic result from $f:")
-                        Base.showerror(iob, err)
-                        Base.show_backtrace(iob, catch_backtrace())
-                        println(iob)
-                        seek(iob.io, 0)
-                        write(stderr, iob)
-                    end
+                break
+            end
+            res = try
+                (false, lock(state.lock) do
+                    Base.invokelatest(f, ctx, state, task, tid, data)
+                end)
+            catch err
+                (true, RemoteException(CapturedException(err,catch_backtrace())))
+            end
+            try
+                put!(out_chan, res)
+            catch err
+                if !(unwrap_nested_exception(err) isa Union{SchedulerHaltedException,
+                                                            ProcessExitedException,
+                                                            InvalidStateException})
+                    iob = IOContext(IOBuffer(), :color=>true)
+                    println(iob, "Error in sending dynamic result from $f:")
+                    Base.showerror(iob, err)
+                    Base.show_backtrace(iob, catch_backtrace())
+                    println(iob)
+                    seek(iob.io, 0)
+                    write(stderr, iob)
                 end
             end
-        end)
+        end
     end
     @async begin
         wait(state.halt)
-        for ltask in listener_tasks
-            # TODO: Not sure why we need the @async here, but otherwise we
-            # don't stop all the listener tasks
-            @async Base.throwto(ltask, SchedulerHaltedException())
-        end
+        # TODO: Not sure why we need the @async here, but otherwise we
+        # don't stop all the listener tasks
+        @async Base.throwto(listener_task, SchedulerHaltedException())
     end
 end
 
