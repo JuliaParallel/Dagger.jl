@@ -265,14 +265,17 @@ function can_use_proc(task, gproc, proc, opts, scope)
     # Check against proclist
     if opts.proclist === nothing
         if !default_enabled(proc)
+            @debug "Rejected $proc: !default_enabled(proc)"
             return false
         end
     elseif opts.proclist isa Function
         if !Base.invokelatest(opts.proclist, proc)
+            @debug "Rejected $proc: proclist(proc) == false"
             return false
         end
     elseif opts.proclist isa Vector
         if !(typeof(proc) in opts.proclist)
+            @debug "Rejected $proc: !(typeof(proc) in proclist)"
             return false
         end
     else
@@ -282,12 +285,15 @@ function can_use_proc(task, gproc, proc, opts, scope)
     # Check against single
     if opts.single != 0
         if gproc.pid != opts.single
+            @debug "Rejected $proc: gproc.pid != single"
             return false
         end
     end
 
     # Check scope
-    if constrain(scope, Dagger.ExactScope(proc)) isa Dagger.InvalidScope
+    proc_scope = Dagger.ExactScope(proc)
+    if constrain(scope, proc_scope) isa Dagger.InvalidScope
+        @debug "Rejected $proc: Task scope ($scope) vs. processor scope ($proc_scope)"
         return false
     end
 
