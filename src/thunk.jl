@@ -300,7 +300,7 @@ generated thunks.
 macro par(exs...)
     opts = exs[1:end-1]
     ex = exs[end]
-    _par(ex; lazy=true, opts=opts)
+    _par(ex, true, true, opts)
 end
 
 """
@@ -314,29 +314,29 @@ See the docs for `@par` for more information and usage examples.
 macro spawn(exs...)
     opts = exs[1:end-1]
     ex = exs[end]
-    _par(ex; lazy=false, opts=opts)
+    _par(ex, false, true, opts)
 end
 
-function _par(ex::Expr; lazy=true, recur=true, opts=())
+function _par(ex::Expr, lazy, recur, opts)
     if ex.head == :call && recur
         f = ex.args[1]
         args = ex.args[2:end]
         opts = esc.(opts)
         if lazy
-            return :(Dagger.delayed($(esc(f)); $(opts...))($(_par.(args; lazy=lazy, recur=false)...)))
+            return :(Dagger.delayed($(esc(f)); $(opts...))($(map(arg->_par(arg, lazy, false, opts), args)...)))
         else
             return quote
-                let args = ($(_par.(args; lazy=lazy, recur=false)...),)
+                let args = ($(map(arg->_par(arg, lazy, false, opts), args)...),)
                     $spawn($(esc(f)), args...; $(opts...))
                 end
             end
         end
     else
-        return Expr(ex.head, _par.(ex.args, lazy=lazy, recur=recur, opts=opts)...)
+        return Expr(ex.head, map(arg->_par(arg, lazy, recur, opts), ex.args)...)
     end
 end
-_par(ex::Symbol; kwargs...) = esc(ex)
-_par(ex; kwargs...) = ex
+_par(ex::Symbol, lazy, recur, opts) = esc(ex)
+_par(ex, lazy, recur, opts) = ex
 
 persist!(t::Thunk) = (t.persist=true; t)
 cache_result!(t::Thunk) = (t.cache=true; t)
