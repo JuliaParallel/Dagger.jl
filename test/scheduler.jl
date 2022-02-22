@@ -196,20 +196,16 @@ end
             # Note: blocked is used in expressions below
             blocked = true
             function testfun(i)
-                i < 4 && return myid()
+                i <= 4 && return myid()
                 # Wait for test to do its thing before we proceed
-                if blocked
+                while blocked
                     sleep(0.1) # just so we don't end up overflowing or something while waiting for workers to be added
                     # Here we would like to just wait to be rescheduled on another worker (which is not blocked)
                     # but this functionality does not exist, so instead we do this weird thing where we reschedule
                     # until we end up on a non-blocked worker
                     h = Dagger.Sch.sch_handle()
                     wkrs = Dagger.Sch.exec!(_list_workers, h)
-                    id = if length(wkrs) > 2
-                        Dagger.Sch.add_thunk!(testfun, h, i; single=last(wkrs).pid)
-                    else
-                        Dagger.Sch.add_thunk!(testfun, h, i)
-                    end
+                    id = Dagger.Sch.add_thunk!(testfun, h, i)
                     return fetch(h, id)
                 end
                 return myid()
@@ -224,9 +220,9 @@ end
 
                 @everywhere vcat(ps1, myid()) $setup
 
+                ctx = Context(ps1)
                 ts = delayed(vcat)((delayed(testfun)(i) for i in 1:10)...)
 
-                ctx = Context(ps1)
                 job = @async collect(ctx, ts)
 
                 while !istaskstarted(job)
@@ -256,8 +252,6 @@ end
             end
         end
 
-        @test_skip "Remove workers"
-        #=
         @testset "Remove workers" begin
             ps = []
             try
@@ -266,34 +260,57 @@ end
 
                 @everywhere vcat(ps1, myid()) $setup
 
-                ts = delayed(vcat)((delayed(testfun)(i) for i in 1:16)...)
+                # Use single to force scheduler to make use of all workers since we assert it below 
+                ts = delayed(vcat)((delayed(testfun; single=ps1[mod1(i, end)])(i) for i in 1:10)...)
 
-                ctx = Context(ps1)
+                # Use FilterLog as a callback function.
+                nprocs_removed = Ref(0)
+                first_rescheduled_thunk=Ref(false)
+                rmproctrigger = Dagger.FilterLog(Dagger.NoOpLog()) do event
+                    if typeof(event) == Dagger.Event{:finish} && event.category === :cleanup_proc
+                        nprocs_removed[] += 1
+                    end
+                    if typeof(event) == Dagger.Event{:start} && event.category === :add_thunk
+                        first_rescheduled_thunk[] = true
+                    end
+                    return false
+                end
+       
+                ctx = Context(ps1; log_sink=rmproctrigger)
                 job = @async collect(ctx, ts)
 
-                while !istaskstarted(job)
-                    sleep(0.001)
+                # Must wait for this or else we won't get callback for rmprocs!
+                # Timeout so we don't stall forever if something breaks
+                starttime = time()
+                while !first_rescheduled_thunk[] && (time() - starttime < 10.0)
+                    sleep(0.1)
                 end
+                @test first_rescheduled_thunk[]              
 
                 rmprocs!(ctx, ps1[3:end])
                 @test length(procs(ctx)) == 2
 
-                @everywhere ps1 blocked=false
+                # Timeout so we don't stall forever if something breaks
+                starttime = time()
+                while (nprocs_removed[] < 2) && (time() - starttime < 10.0)
+                    sleep(0.01)
+                end
+                # this will fail if we timeout. Verify that we get the logevent for :cleanup_proc
+                @test nprocs_removed[] >= 2
 
+                @everywhere ps1 blocked=false
+                
                 res = fetch(job)
                 @test res isa Vector
-                # First all four workers will report their IDs without hassle
-                # Then all four will be waiting for the Condition While they
-                # are waiting ps1[3:end] are removed, but when the Condition is
-                # notified they will finish their tasks before being removed
-                # Will probably break if workers are assigned more than one Thunk
-                @test_skip res[1:8] |> unique |> sort == ps1
-                @test all(pid -> pid in ps1[1:2], res[9:end])
+      
+                @test res[1:4] |> unique |> sort == ps1
+                @test all(pid -> pid in ps1[1:2], res[5:end])
             finally
+                # Prints "From worker X:    IOError:" :/
                 wait(rmprocs(ps))
             end
         end
-        =#
+       
 
         @testset "Remove all workers throws" begin
             ps = []
