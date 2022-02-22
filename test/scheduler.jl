@@ -198,7 +198,7 @@ end
             function testfun(i)
                 i <= 4 && return myid()
                 # Wait for test to do its thing before we proceed
-                while blocked
+                if blocked
                     sleep(0.1) # just so we don't end up overflowing or something while waiting for workers to be added
                     # Here we would like to just wait to be rescheduled on another worker (which is not blocked)
                     # but this functionality does not exist, so instead we do this weird thing where we reschedule
