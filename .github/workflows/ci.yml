@@ -1,4 +1,4 @@
-name: CI (Julia 1.6-nightly)
+name: GHA CI
 on:
   push:
     branches:
@@ -9,16 +9,16 @@ defaults:
   run:
     shell: bash
 jobs:
-  CI-julia-1-6-nightly:
-    name: CI-julia-1-6-nightly
+  CI:
+    name: GHA CI
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         version:
-          - '1.6-nightly'
+          - '1.6'
+          - '1.7'
         os:
-          - ubuntu-latest
           - macOS-latest
           #- windows-latest
         arch:
