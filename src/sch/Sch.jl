@@ -34,6 +34,8 @@ function Base.show(io::IO, entry::ProcessorCacheEntry)
     print(io, "ProcessorCacheEntry(pid $(entry.gproc.pid), $(entry.proc), $entries entries)")
 end
 
+const Signature = Vector{Any}
+
 """
     ComputeState
 
@@ -54,7 +56,7 @@ Fields:
 - `worker_loadavg::Dict{Int,NTuple{3,Float64}}` - Worker load average
 - `worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}` - Communication channels between the scheduler and each worker
 - `procs_cache_list::Base.RefValue{Union{ProcessorCacheEntry,Nothing}}` - Cached linked list of processors ready to be used
-- `function_cost_cache::Dict{Type{<:Tuple},UInt64}` - Cache of estimated CPU time required to compute the given signature
+- `function_cost_cache::Dict{Signature,UInt64}` - Cache of estimated CPU time required to compute the given signature
 - `transfer_rate::Ref{UInt64}` - Estimate of the network transfer rate in bytes per second
 - `halt::Base.Event` - Event indicating that the scheduler is halting
 - `lock::ReentrantLock` - Lock around operations which modify the state
@@ -77,7 +79,7 @@ struct ComputeState
     worker_loadavg::Dict{Int,NTuple{3,Float64}}
     worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}
     procs_cache_list::Base.RefValue{Union{ProcessorCacheEntry,Nothing}}
-    function_cost_cache::Dict{Type{<:Tuple},UInt64}
+    function_cost_cache::Dict{Signature,UInt64}
     transfer_rate::Ref{UInt64}
     halt::Base.Event
     lock::ReentrantLock
@@ -101,7 +103,7 @@ function start_state(deps::Dict, node_order, chan)
                          Dict{Int,NTuple{3,Float64}}(),
                          Dict{Int, Tuple{RemoteChannel,RemoteChannel}}(),
                          Ref{Union{ProcessorCacheEntry,Nothing}}(nothing),
-                         Dict{Type{<:Tuple},UInt64}(),
+                         Dict{Signature,UInt64}(),
                          Ref{UInt64}(1_000_000),
                          Base.Event(),
                          ReentrantLock(),
@@ -563,7 +565,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         else
             AnyScope()
         end
-        for input in unwrap_weak_checked.(task.inputs)
+        for input in map(unwrap_weak_checked, task.inputs)
             chunk = if istask(input)
                 state.cache[input]
             elseif input isa Chunk
@@ -875,7 +877,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
         end)
         pushfirst!(ids, 0)
 
-        data = convert(Vector{Any}, map(Any[thunk.inputs...]) do x
+        data = convert(Vector{Any}, map(thunk.inputs) do x
             istask(x) ? state.cache[unwrap_weak_checked(x)] : x
         end)
         pushfirst!(data, thunk.f)
