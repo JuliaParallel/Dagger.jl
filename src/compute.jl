@@ -165,7 +165,7 @@ function order(node::Thunk, ndeps)
         haskey(output, next) && continue
         s += 1
         output[next] = s
-        parents = collect(Iterators.filter(istask, inputs(next)))
+        parents = filter(istask, inputs(next))
         if !isempty(parents)
             # If parents is empty, sort! should be a no-op, but raises an ambiguity error
             # when InlineStrings.jl is loaded (at least, version 1.1.0), because InlineStrings

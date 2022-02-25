@@ -44,7 +44,7 @@ end
 of all chunks that can now be evicted from workers."
 function cleanup_inputs!(state, node)
     to_evict = Set{Chunk}()
-    for inp in unwrap_weak_checked.(node.inputs)
+    for inp in map(unwrap_weak_checked, node.inputs)
         if !istask(inp) && !(inp isa Chunk)
             continue
         end
@@ -242,8 +242,8 @@ end
 fn_type(x::Chunk) = x.chunktype
 fn_type(x) = typeof(x)
 function signature(task::Thunk, state)
-    inputs = map(x->istask(x) ? state.cache[x] : x, unwrap_weak_checked.(task.inputs))
-    Tuple{fn_type(task.f), map(x->x isa Chunk ? x.chunktype : typeof(x), inputs)...}
+    inputs = map(x->istask(x) ? state.cache[x] : x, map(unwrap_weak_checked, task.inputs))
+    Any[fn_type(task.f), map(x->x isa Chunk ? x.chunktype : typeof(x), inputs)...]
 end
 
 function can_use_proc(task, gproc, proc, opts, scope)
@@ -351,7 +351,7 @@ function estimate_task_costs(state, procs, task)
     tx_rate = state.transfer_rate[]
 
     # Find all Chunks
-    inputs = map(input->istask(input) ? state.cache[input] : input, unwrap_weak_checked.(task.inputs))
+    inputs = map(input->istask(input) ? state.cache[input] : input, map(unwrap_weak_checked, task.inputs))
     chunks = convert(Vector{Chunk}, filter(t->isa(t, Chunk), [inputs...]))
 
     # Estimate network transfer costs based on data size

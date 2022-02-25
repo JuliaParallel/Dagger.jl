@@ -50,7 +50,7 @@ If omitted, options can also be specified by passing key-value pairs as
 """
 mutable struct Thunk
     f::Any # usually a Function, but could be any callable
-    inputs::Tuple
+    inputs::Vector{Any} # TODO: Use `ImmutableArray` in 1.8
     id::Int
     get_result::Bool # whether the worker should send the result or only the metadata
     meta::Bool
@@ -82,6 +82,7 @@ mutable struct Thunk
                         something(processor, OSProc()),
                         something(scope, AnyScope()))
         end
+        xs = Any[xs...]
         if options !== nothing
             @assert isempty(kwargs)
             new(f, xs, id, get_result, meta, persist, cache, cache_ref,

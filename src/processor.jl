@@ -156,60 +156,29 @@ end
 iscompatible(proc::ThreadProc, opts, f, args...) = true
 iscompatible_func(proc::ThreadProc, opts, f) = true
 iscompatible_arg(proc::ThreadProc, opts, x) = true
-@static if VERSION >= v"1.3.0-DEV.573"
-    function execute!(proc::ThreadProc, f, args...)
-        tls = get_tls()
-        task = Task() do
-            set_tls!(tls)
-            prof_task_put!(tls.sch_handle.thunk_id.id)
-            f(args...)
-        end
-        ret = ccall(:jl_set_task_tid, Cint, (Any, Cint), task, proc.tid-1)
-        if ret == 0
-            error("jl_set_task_tid == 0")
-        end
-        @assert Threads.threadid(task) == proc.tid
-        schedule(task)
-        try
-            fetch(task)
-        catch err
-            @static if VERSION >= v"1.1"
-                @static if VERSION < v"1.7-rc1"
-                    stk = Base.catch_stack(task)
-                else
-                    stk = Base.current_exceptions(task)
-                end
-                err, frames = stk[1]
-                rethrow(CapturedException(err, frames))
-            else
-                rethrow(task.result)
-            end
-        end
+function execute!(proc::ThreadProc, @nospecialize(f), @nospecialize(args...))
+    tls = get_tls()
+    task = Task() do
+        set_tls!(tls)
+        prof_task_put!(tls.sch_handle.thunk_id.id)
+        f(args...)
     end
-else
-    # TODO: Use Threads.@threads?
-    function execute!(proc::ThreadProc, f, args...)
-        tls = get_tls()
-        task = @async begin
-            set_tls!(tls)
-            prof_task_put!(tls.sch_handle.thunk_id.id)
-            f(args...)
+    ret = ccall(:jl_set_task_tid, Cint, (Any, Cint), task, proc.tid-1)
+    if ret == 0
+        error("jl_set_task_tid == 0")
+    end
+    @assert Threads.threadid(task) == proc.tid
+    schedule(task)
+    try
+        fetch(task)
+    catch err
+        @static if VERSION < v"1.7-rc1"
+            stk = Base.catch_stack(task)
+        else
+            stk = Base.current_exceptions(task)
         end
-        try
-            fetch(task)
-        catch err
-            @static if VERSION >= v"1.1"
-                @static if VERSION < v"1.7-rc1"
-                    stk = Base.catch_stack(task)
-                else
-                    stk = Base.current_exceptions(task)
-                end
-                err, frames = stk[1]
-                rethrow(CapturedException(err, frames))
-            else
-                rethrow(task.result)
-            end
-        end
+        err, frames = stk[1]
+        rethrow(CapturedException(err, frames))
     end
 end
 get_parent(proc::ThreadProc) = OSProc(proc.owner)
