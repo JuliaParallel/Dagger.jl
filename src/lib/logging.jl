@@ -39,8 +39,9 @@ struct Event{phase}
     profiler_samples::ProfilerResult
 end
 
-Event(phase::Symbol, category::Symbol,
-      id, tl, time, gc_num, prof) =
+@inline Event(phase::Symbol, category::Symbol,
+              @nospecialize(id), @nospecialize(tl),
+              time, gc_num, prof) =
     Event{phase}(category, id, tl, time, gc_num, prof)
 
 """
@@ -271,7 +272,7 @@ function prof_tasks_take!(tid)
     end
 end
 
-function timespan_start(ctx, category, id, tl; tasks=nothing)
+function timespan_start(ctx, category, @nospecialize(id), @nospecialize(tl); tasks=nothing)
     isa(ctx.log_sink, NoOpLog) && return # don't go till raise
     if ctx.profile && category == :compute && Threads.atomic_add!(prof_refcount[], 1) == 0
         lock(prof_lock) do
@@ -283,7 +284,7 @@ function timespan_start(ctx, category, id, tl; tasks=nothing)
     nothing
 end
 
-function timespan_finish(ctx, category, id, tl; tasks=nothing)
+function timespan_finish(ctx, category, @nospecialize(id), @nospecialize(tl); tasks=nothing)
     isa(ctx.log_sink, NoOpLog) && return
     time = time_ns()
     gcn = gc_num()

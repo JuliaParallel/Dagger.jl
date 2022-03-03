@@ -141,8 +141,13 @@ iscompatible_arg(proc::OSProc, opts, args...) =
     any(child->
         all(arg->iscompatible_arg(child, opts, arg), args),
     children(proc))
-get_processors(proc::OSProc) =
-    vcat((get_processors(child) for child in children(proc))...)
+function get_processors(proc::OSProc)
+    procs = Processor[]
+    for child in children(proc)
+        append!(procs, get_processors(child))
+    end
+    procs
+end
 
 """
     ThreadProc <: Processor

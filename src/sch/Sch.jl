@@ -565,7 +565,8 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         else
             AnyScope()
         end
-        for input in map(unwrap_weak_checked, task.inputs)
+        for input in task.inputs
+            input = unwrap_weak_checked(input)
             chunk = if istask(input)
                 state.cache[input]
             elseif input isa Chunk
@@ -872,15 +873,13 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
             end
         end
 
-        ids = convert(Vector{Int}, map(enumerate(thunk.inputs)) do (idx,x)
-            istask(x) ? unwrap_weak_checked(x).id : -idx
-        end)
-        pushfirst!(ids, 0)
-
-        data = convert(Vector{Any}, map(thunk.inputs) do x
-            istask(x) ? state.cache[unwrap_weak_checked(x)] : x
-        end)
-        pushfirst!(data, thunk.f)
+        ids = Int[0]
+        data = Any[thunk.f]
+        for (idx, x) in enumerate(thunk.inputs)
+            x = unwrap_weak_checked(x)
+            push!(ids, istask(x) ? x.id : -idx)
+            push!(data, istask(x) ? state.cache[x] : x)
+        end
         toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
         options = merge(ctx.options, toptions)
         propagated = get_propagated_options(thunk)
@@ -889,11 +888,11 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
         sch_handle = SchedulerHandle(ThunkID(thunk.id, nothing), state.worker_chans[gproc.pid]...)
 
         # TODO: De-dup common fields (log_sink, uid, etc.)
-        push!(to_send, (util, thunk.id, fn_type(thunk.f), data, thunk.get_result,
-                        thunk.persist, thunk.cache, thunk.meta, options,
-                        propagated, ids,
-                        (log_sink=ctx.log_sink, profile=ctx.profile),
-                        sch_handle, state.uid))
+        push!(to_send, Any[util, thunk.id, fn_type(thunk.f), data, thunk.get_result,
+                           thunk.persist, thunk.cache, thunk.meta, options,
+                           propagated, ids,
+                           (log_sink=ctx.log_sink, profile=ctx.profile),
+                           sch_handle, state.uid])
     end
     # N.B. We don't batch these because we might get a deserialization
     # error due to something not being defined on the worker, and then we don't
@@ -934,7 +933,7 @@ function do_tasks(to_proc, chan, tasks)
         should_launch || continue
         @async begin
             try
-                result = do_task(to_proc, task...)
+                result = do_task(to_proc, task)
                 put!(chan, (myid(), to_proc, task[2], result))
             catch ex
                 bt = catch_backtrace()
@@ -944,11 +943,15 @@ function do_tasks(to_proc, chan, tasks)
     end
 end
 "Executes a single task on `to_proc`."
-function do_task(to_proc, extra_util, thunk_id, Tf, data, send_result, persist, cache, meta, options, propagated, ids, ctx_vars, sch_handle, uid)
+function do_task(to_proc, comm)
+    extra_util, thunk_id, Tf, data, send_result, persist, cache, meta, options, propagated, ids, ctx_vars, sch_handle, uid = comm
     ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
 
     from_proc = OSProc()
-    Tdata = map(x->x isa Chunk ? chunktype(x) : x, data)
+    Tdata = Any[]
+    for x in data
+        push!(Tdata, x isa Chunk ? chunktype(x) : x)
+    end
     f = isdefined(Tf, :instance) ? Tf.instance : nothing
     f_chunk = first(data)
     scope = f_chunk isa Chunk ? f_chunk.scope : AnyScope()
@@ -961,7 +964,7 @@ function do_task(to_proc, extra_util, thunk_id, Tf, data, send_result, persist, 
     else
         (data, ids)
     end
-    fetched = convert(Vector{Any}, fetch_report.(map(Iterators.zip(_data,_ids)) do (x, id)
+    fetch_tasks = map(Iterators.zip(_data,_ids)) do (x, id)
         @async begin
             timespan_start(ctx, :move, (;thunk_id, id), (;f, id, data=x))
             x = if x isa Chunk
@@ -990,7 +993,11 @@ function do_task(to_proc, extra_util, thunk_id, Tf, data, send_result, persist, 
             timespan_finish(ctx, :move, (;thunk_id, id), (;f, id, data=x); tasks=[Base.current_task()])
             return x
         end
-    end))
+    end
+    fetched = Any[]
+    for task in fetch_tasks
+        push!(fetched, fetch_report(task))
+    end
     if meta
         append!(fetched, data[2:end])
     end
