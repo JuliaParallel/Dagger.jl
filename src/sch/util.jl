@@ -44,7 +44,8 @@ end
 of all chunks that can now be evicted from workers."
 function cleanup_inputs!(state, node)
     to_evict = Set{Chunk}()
-    for inp in map(unwrap_weak_checked, node.inputs)
+    for inp in node.inputs
+        inp = unwrap_weak_checked(inp)
         if !istask(inp) && !(inp isa Chunk)
             continue
         end
@@ -213,17 +214,13 @@ function fetch_report(task)
     try
         fetch(task)
     catch err
-        @static if VERSION >= v"1.1"
-            @static if VERSION < v"1.7-rc1"
-                stk = Base.catch_stack(task)
-            else
-                stk = Base.current_exceptions(task)
-            end
-            err, frames = stk[1]
-            rethrow(CapturedException(err, frames))
+        @static if VERSION < v"1.7-rc1"
+            stk = Base.catch_stack(task)
         else
-            rethrow(task.result)
+            stk = Base.current_exceptions(task)
         end
+        err, frames = stk[1]
+        rethrow(CapturedException(err, frames))
     end
 end
 
@@ -242,8 +239,13 @@ end
 fn_type(x::Chunk) = x.chunktype
 fn_type(x) = typeof(x)
 function signature(task::Thunk, state)
-    inputs = map(x->istask(x) ? state.cache[x] : x, map(unwrap_weak_checked, task.inputs))
-    Any[fn_type(task.f), map(x->x isa Chunk ? x.chunktype : typeof(x), inputs)...]
+    sig = Any[fn_type(task.f)]
+    for input in task.inputs
+        input = unwrap_weak_checked(input)
+        input = istask(input) ? state.cache[input] : input
+        push!(sig, fn_type(input))
+    end
+    sig
 end
 
 function can_use_proc(task, gproc, proc, opts, scope)
@@ -351,8 +353,19 @@ function estimate_task_costs(state, procs, task)
     tx_rate = state.transfer_rate[]
 
     # Find all Chunks
-    inputs = map(input->istask(input) ? state.cache[input] : input, map(unwrap_weak_checked, task.inputs))
-    chunks = convert(Vector{Chunk}, filter(t->isa(t, Chunk), [inputs...]))
+    chunks = Chunk[]
+    for input in task.inputs
+        input = unwrap_weak_checked(input)
+        input_raw = istask(input) ? state.cache[input] : input
+        if input_raw isa Chunk
+            push!(chunks, input_raw)
+        end
+    end
+    #=
+    inputs = map(@nospecialize(input)->istask(input) ? state.cache[input] : input,
+                 map(@nospecialize(x)->unwrap_weak_checked(x), task.inputs))
+    chunks = filter(@nospecialize(t)->isa(t, Chunk), inputs)
+    =#
 
     # Estimate network transfer costs based on data size
     # N.B. `affinity(x)` really means "data size of `x`"
