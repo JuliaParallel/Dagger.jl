@@ -160,16 +160,13 @@ If this returns a `Chunk`, all thunks will be skipped, and the `Chunk` will be
 returned.  If `nothing` is returned, restoring is skipped, and the scheduler
 will execute as usual. If this function throws an error, restoring will be
 skipped, and the error will be displayed.
-- `round_robin::Bool=false`: Whether to schedule in round-robin mode, which
-spreads load instead of the default behavior of filling processors to capacity.
 """
 Base.@kwdef struct SchedulerOptions
-    single::Int = 0
+    single::Union{Int,Nothing} = nothing
     proclist = nothing
-    allow_errors::Bool = false
+    allow_errors::Union{Bool,Nothing} = false
     checkpoint = nothing
     restore = nothing
-    round_robin::Bool = false
 end
 
 """
@@ -213,11 +210,11 @@ device must support `MemPool.CPURAMResource`. When `nothing`, uses
 `MemPool.GLOBAL_DEVICE[]`.
 """
 Base.@kwdef struct ThunkOptions
-    single::Int = 0
+    single::Union{Int,Nothing} = nothing
     proclist = nothing
-    time_util::Dict{Type,Any} = Dict{Type,Any}()
-    alloc_util::Dict{Type,UInt64} = Dict{Type,UInt64}()
-    allow_errors::Bool = false
+    time_util::Union{Dict{Type,Any},Nothing} = nothing
+    alloc_util::Union{Dict{Type,UInt64},Nothing} = nothing
+    allow_errors::Union{Bool,Nothing} = nothing
     checkpoint = nothing
     restore = nothing
     storage::Union{Chunk,Nothing} = nothing
@@ -232,20 +229,50 @@ include("eager.jl")
 Combine `SchedulerOptions` and `ThunkOptions` into a new `ThunkOptions`.
 """
 function Base.merge(sopts::SchedulerOptions, topts::ThunkOptions)
-    single = topts.single != 0 ? topts.single : sopts.single
-    allow_errors = sopts.allow_errors || topts.allow_errors
+    single = topts.single !== nothing ? topts.single : sopts.single
+    allow_errors = topts.allow_errors !== nothing ? topts.allow_errors : sopts.allow_errors
     proclist = topts.proclist !== nothing ? topts.proclist : sopts.proclist
-    ThunkOptions(single, proclist, topts.time_util, topts.alloc_util, allow_errors, topts.checkpoint, topts.restore, topts.storage)
+    ThunkOptions(single,
+                 proclist,
+                 topts.time_util,
+                 topts.alloc_util,
+                 allow_errors,
+                 topts.checkpoint,
+                 topts.restore,
+                 topts.storage)
 end
 Base.merge(sopts::SchedulerOptions, ::Nothing) =
-    ThunkOptions(sopts.single, sopts.proclist, Dict{Type,Any}(), sopts.allow_errors)
+    ThunkOptions(sopts.single,
+                 sopts.proclist,
+                 nothing,
+                 nothing,
+                 sopts.allow_errors)
+"""
+    populate_defaults(opts::ThunkOptions, Tf, Targs) -> ThunkOptions
 
-function isrestricted(task::Thunk, proc::OSProc)
-    if (task.options !== nothing) && (task.options.single != 0) &&
-       (task.options.single != proc.pid)
-        return true
+Returns a `ThunkOptions` with default values filled in for a function of type
+`Tf` with argument types `Targs`, if the option was previously unspecified in
+`opts`.
+"""
+function populate_defaults(opts::ThunkOptions, Tf, Targs)
+    function maybe_default(opt::Symbol)
+        old_opt = getproperty(opts, opt)
+        if old_opt !== nothing
+            return old_opt
+        else
+            return Dagger.default_option(Val(opt), Tf, Targs...)
+        end
     end
-    return false
+    ThunkOptions(
+        maybe_default(:single),
+        maybe_default(:proclist),
+        maybe_default(:time_util),
+        maybe_default(:alloc_util),
+        maybe_default(:allow_errors),
+        maybe_default(:checkpoint),
+        maybe_default(:restore),
+        maybe_default(:storage),
+    )
 end
 
 function cleanup(ctx)
@@ -474,7 +501,8 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
                     timespan_finish(ctx, :handle_fault, 0, 0)
                     return # effectively `continue`
                 else
-                    if ctx.options.allow_errors || unwrap_weak_checked(state.thunk_dict[thunk_id]).options.allow_errors
+                    if something(ctx.options.allow_errors, false) ||
+                       something(unwrap_weak_checked(state.thunk_dict[thunk_id]).options.allow_errors, false)
                         thunk_failed = true
                     else
                         throw(res)
@@ -541,7 +569,7 @@ function scheduler_exit(ctx, state::ComputeState, options)
 end
 
 function procs_to_use(ctx, options=ctx.options)
-    return if options.single !== 0
+    return if options.single !== nothing
         @assert options.single in vcat(1, workers()) "Sch option `single` must specify an active worker ID."
         OSProc[OSProc(options.single)]
     else
@@ -621,7 +649,9 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
             @goto fallback
         end
 
-        local_procs, costs = estimate_task_costs(state, local_procs, task)
+        inputs = collect_task_inputs(state, task)
+        opts = populate_defaults(opts, chunktype(task.f), map(chunktype, inputs))
+        local_procs, costs = estimate_task_costs(state, local_procs, task, inputs)
         scheduled = false
 
         # Move our corresponding ThreadProc to be the last considered
@@ -707,9 +737,6 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         push!(get!(()->Vector{Tuple{Thunk,<:Any,<:Any}}(), to_fire, (gproc, proc)), (task, est_time_util, est_alloc_util))
 
         # Proceed to next entry to spread work
-        if !ctx.options.round_robin
-            @warn "Round-robin mode is always on"
-        end
         state.procs_cache_list[] = state.procs_cache_list[].next
         @goto pop_task
 
@@ -779,46 +806,6 @@ function remove_dead_proc!(ctx, state, proc, options=ctx.options)
     delete!(state.worker_loadavg, proc.pid)
     delete!(state.worker_chans, proc.pid)
     state.procs_cache_list[] = nothing
-end
-
-function pop_with_affinity!(ctx, tasks, proc)
-    # TODO: use the size
-    parent_affinity_procs = Vector(undef, length(tasks))
-    # parent_affinity_sizes = Vector(undef, length(tasks))
-    for i=length(tasks):-1:1
-        t = tasks[i]
-        aff = affinity(t)
-        aff_procs = first.(aff)
-        if proc in aff_procs
-            if !isrestricted(t,proc)
-                deleteat!(tasks, i)
-                return t
-            end
-        end
-        parent_affinity_procs[i] = aff_procs
-    end
-    for i=length(tasks):-1:1
-        # use up tasks without affinities
-        # let the procs with the respective affinities pick up
-        # other tasks
-        aff_procs = parent_affinity_procs[i]
-        if isempty(aff_procs)
-            t = tasks[i]
-            if !isrestricted(t,proc)
-                deleteat!(tasks, i)
-                return t
-            end
-        end
-        if all(!(p in aff_procs) for p in procs(ctx))
-            # no proc is ever going to ask for it
-            t = tasks[i]
-            if !isrestricted(t,proc)
-                deleteat!(tasks, i)
-                return t
-            end
-        end
-    end
-    return nothing
 end
 
 function finish_task!(ctx, state, node, thunk_failed)
@@ -914,12 +901,12 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
         toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
         options = merge(ctx.options, toptions)
         propagated = get_propagated_options(thunk)
-        @assert (options.single == 0) || (gproc.pid == options.single)
+        @assert (options.single === nothing) || (gproc.pid == options.single)
         # TODO: Set `sch_handle.tid.ref` to the right `DRef`
         sch_handle = SchedulerHandle(ThunkID(thunk.id, nothing), state.worker_chans[gproc.pid]...)
 
         # TODO: De-dup common fields (log_sink, uid, etc.)
-        push!(to_send, Any[thunk.id, time_util, alloc_util, fn_type(thunk.f), data, thunk.get_result,
+        push!(to_send, Any[thunk.id, time_util, alloc_util, chunktype(thunk.f), data, thunk.get_result,
                            thunk.persist, thunk.cache, thunk.meta, options,
                            propagated, ids,
                            (log_sink=ctx.log_sink, profile=ctx.profile),

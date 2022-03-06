@@ -15,6 +15,7 @@ using UUIDs
 import ContextVariablesX
 
 using Requires
+using MacroTools
 
 const PLUGINS = Dict{Symbol,Any}()
 const PLUGIN_CONFIGS = Dict{Symbol,String}(
