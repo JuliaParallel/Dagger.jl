@@ -824,7 +824,9 @@ function evict_all_chunks!(ctx, to_evict)
     end
 end
 function evict_chunks!(log_sink, chunks::Set{Chunk})
-    ctx = Context(;log_sink)
+    # Need worker id or else Context might use Processors which user does not want us to use.
+    # In particular workers which have not yet run using Dagger will cause the call below to throw an exception
+    ctx = Context([myid()];log_sink) 
     for chunk in chunks
         timespan_start(ctx, :evict, myid(), (;data=chunk))
         haskey(CHUNK_CACHE, chunk) && delete!(CHUNK_CACHE, chunk)
