@@ -93,6 +93,8 @@ mutable struct Thunk
         end
     end
 end
+Serialization.serialize(io::AbstractSerializer, t::Thunk) =
+    throw(ArgumentError("Cannot serialize a Thunk"))
 
 function affinity(t::Thunk)
     if t.affinity !== nothing

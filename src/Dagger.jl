@@ -1,6 +1,6 @@
 module Dagger
 
-using Distributed, SharedArrays
+using Distributed, SharedArrays, Serialization
 
 using MemPool
 
