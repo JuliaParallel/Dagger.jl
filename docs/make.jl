@@ -15,6 +15,7 @@ makedocs(;
         "Home" => "index.md",
         "Task Spawning" => "task-spawning.md",
         "Data Management" => "data-management.md",
+        "Distributed Arrays" => "darray.md",
         "Scopes" => "scopes.md",
         "Processors" => "processors.md",
         "Task Queues" => "task-queues.md",
