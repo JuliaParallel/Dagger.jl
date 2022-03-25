@@ -448,8 +448,9 @@ using TableOperations
             ij8 = fetch(innerjoin(DTable(d1, 111, tabletype=NamedTuple), d2, on=on, lookup=d2_lookup), DataFrame)
             ij9 = fetch(innerjoin(Dagger.groupby(DTable(d1, 111, tabletype=NamedTuple), r_colsymbols), d2, on=on), DataFrame)
             ij10 = fetch(innerjoin(DTable(d1, a_len ÷ 10), DTable(d2, b_len ÷ 10), on=on), DataFrame)
+            ij11 = fetch(innerjoin(DTable(d1, a_len ÷ 10), DTable(d2, b_len), on=on), DataFrame)
 
-            sort!.([ij1, ij1u, ij2, ij3, ij4, ij5, ij6, ij7, ij8, ij9, ij10], Ref(propertynames(ij1)))
+            sort!.([ij1, ij1u, ij2, ij3, ij4, ij5, ij6, ij7, ij8, ij9, ij10, ij11], Ref(propertynames(ij1)))
 
             @test isequal(ij1, ij2)
             @test isequal(ij1, ij3)
@@ -460,6 +461,7 @@ using TableOperations
             @test isequal(ij1, ij8)
             @test isequal(ij1, ij9)
             @test isequal(ij1, ij10)
+            @test isequal(ij1, ij11)
         end
     end
 end
