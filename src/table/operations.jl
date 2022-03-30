@@ -180,7 +180,7 @@ function reduce(
     construct_result = (_keys, _gcols, _columns, _results, _prefix) -> begin
         ks = [col => getindex.(_keys, i) for (i, col) in enumerate(_gcols)]
         rs = [Symbol(_prefix * string(r)) => fetch(_results[i]) for (i, r) in enumerate(_columns)]
-        (;ks...,rs...)
+        (; ks..., rs...)
     end
 
     Dagger.@spawn construct_result(keys(gd), grouped_cols(gd), columns, result_columns, prefix)
@@ -252,44 +252,81 @@ function filter(f, gd::GDTable)
     GDTable(d, gd.cols, gd.index)
 end
 
-# using Dagger, OnlineStats
-# nt = (a=1:100, b=1:100)
-# d1 = DTable(nt, 25)
-# g = Group(Mean(), Variance())
-# fetch(Dagger.reduce_rows(fit!, d1, init=g))
 
+"""
+    mapreduce(f, op, d::DTable; init=Base._InitialValue())
 
-# function reduce_rows(f, d::DTable; init=Base._InitialValue())
-#     nchunks(d) == 0 && return Dagger.@spawn NamedTuple()
-#     chunk_reduce_results = _reduce_rows_chunks(f, d.chunks, init=init)
-#     reduce_result_column = (_f, _c, _init) -> reduce(_f, fetch.(_c); init=_init)
-#     Dagger.@spawn reduce_result_column(f, chunk_reduce_results, deepcopy(init))
-# end
+Perform a mapreduce operation where `f` is the mapping function applied to the table row
+and `op` is the reduce function applied to the results of the mapping operation.
 
+# Examples
 
-# function _reduce_rows_chunks(f, chunks::Vector{Union{EagerThunk, Chunk}}; init=Base._InitialValue())
-#     col_in_chunk_reduce = (_f, _init, _chunk) -> reduce(_f, Tables.namedtupleiterator(_chunk); init=deepcopy(_init))
-#     chunk_reduce_spawner = (_d, _f, _init) -> [Dagger.@spawn col_in_chunk_reduce(_f, _init,c) for c in _d]
-#     Dagger.@spawn chunk_reduce_spawner(chunks, f, init)
-# end
+julia> using Dagger, OnlineStats
 
+julia> d1 = DTable((a=collect(1:100).%3, b=rand(100)), 25);
 
-# using Dagger, OnlineStats
-# nt = (a=collect(1:100).%10, b=rand(100))
-# d1 = DTable(nt, 25)
-# gg = GroupBy(Int, Mean())
-# fetch(Dagger.mapreduce(x-> (x.a, x.b), fit!, d1, init=gg))
+julia> gg = GroupBy(Int, Mean());
+
+julia> fetch(Dagger.mapreduce(x-> (x.a, x.b), fit!, d1, init=gg))
+GroupBy: Int64 => Mean
+├─ 1
+│  └─ Mean: n=34 | value=0.491379
+├─ 2
+│  └─ Mean: n=33 | value=0.555258
+└─ 0
+    └─ Mean: n=33 | value=0.470984
+
+julia> fetch(Dagger.mapreduce(sum, fit!, d1, init = Mean()))
+Mean: n=100 | value=1.50573
+
+julia> d2 = DTable((;a1=abs.(rand(Int, 100).%2), [Symbol("a\$(i)") => rand(100) for i in 2:3]...), 25);
+
+julia> gb = GroupBy(Int, Group([Series(Mean(), Variance(), Extrema()) for _ in 1:3]...));
+
+julia> fetch(Dagger.mapreduce(r -> (r.a1, tuple(r...)), fit!, d2, init = gb))
+GroupBy: Int64 => Group
+├─ 1
+│  └─ Group
+│     ├─ Series
+│     │  ├─ Mean: n=57 | value=1.0
+│     │  ├─ Variance: n=57 | value=0.0
+│     │  └─ Extrema: n=57 | value=(min = 1.0, max = 1.0, nmin = 57, nmax = 57)
+│     ├─ Series
+│     │  ├─ Mean: n=57 | value=0.540256
+│     │  ├─ Variance: n=57 | value=0.0767802
+│     │  └─ Extrema: n=57 | value=(min = 0.0132545, max = 0.996059, nmin = 1, nmax = 1)
+│     └─ Series
+│        ├─ Mean: n=57 | value=0.536187
+│        ├─ Variance: n=57 | value=0.0981499
+│        └─ Extrema: n=57 | value=(min = 0.0112471, max = 0.991461, nmin = 1, nmax = 1)
+└─ 0
+   └─ Group
+      ├─ Series
+      │  ├─ Mean: n=43 | value=0.0
+      │  ├─ Variance: n=43 | value=0.0
+      │  └─ Extrema: n=43 | value=(min = 0.0, max = 0.0, nmin = 43, nmax = 43)
+      ├─ Series
+      │  ├─ Mean: n=43 | value=0.459732
+      │  ├─ Variance: n=43 | value=0.0911548
+      │  └─ Extrema: n=43 | value=(min = 0.000925526, max = 0.962072, nmin = 1, nmax = 1)
+      └─ Series
+         ├─ Mean: n=43 | value=0.490613
+         ├─ Variance: n=43 | value=0.0850503
+         └─ Extrema: n=43 | value=(min = 0.0450505, max = 0.981091, nmin = 1, nmax = 1)
+"""
+
 
 function mapreduce(f, op, d::DTable; init=Base._InitialValue())
     nchunks(d) == 0 && return Dagger.@spawn NamedTuple()
-    chunk_reduce_results = _mapreduce_rows_chunks(f, op, d.chunks, init=init)
-    reduce_result_column = (_f, _c, _init) -> reduce(_f, fetch.(_c); init=_init)
+    chunk_reduce_results = _mapreduce_rows_in_chunks(f, op, d.chunks, init=init)
+
+    reduce_result_column = (_f, _c, _init) -> reduce(_f, fetch.(_c); init=deepcopy(_init))
     Dagger.@spawn reduce_result_column(op, chunk_reduce_results, deepcopy(init))
 end
 
 
-function _mapreduce_rows_chunks(fmap, f, chunks::Vector{Union{EagerThunk, Chunk}}; init=Base._InitialValue())
+function _mapreduce_rows_in_chunks(fmap, f, chunks::Vector{Union{EagerThunk,Chunk}}; init=Base._InitialValue())
     col_in_chunk_reduce = (_f, _init, _chunk) -> reduce(_f, TableOperations.map(fmap, _chunk); init=deepcopy(_init))
-    chunk_reduce_spawner = (_d, _f, _init) -> [Dagger.@spawn col_in_chunk_reduce(_f, _init,c) for c in _d]
+    chunk_reduce_spawner = (_d, _f, _init) -> [Dagger.@spawn col_in_chunk_reduce(_f, _init, c) for c in _d]
     Dagger.@spawn chunk_reduce_spawner(chunks, f, init)
 end
