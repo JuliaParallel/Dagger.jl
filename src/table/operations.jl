@@ -263,56 +263,8 @@ and `op` is the reduce function applied to the results of the mapping operation.
 
 julia> using Dagger, OnlineStats
 
-julia> d1 = DTable((a=collect(1:100).%3, b=rand(100)), 25);
-
-julia> gg = GroupBy(Int, Mean());
-
-julia> fetch(Dagger.mapreduce(x-> (x.a, x.b), fit!, d1, init=gg))
-GroupBy: Int64 => Mean
-├─ 1
-│  └─ Mean: n=34 | value=0.491379
-├─ 2
-│  └─ Mean: n=33 | value=0.555258
-└─ 0
-    └─ Mean: n=33 | value=0.470984
-
 julia> fetch(Dagger.mapreduce(sum, fit!, d1, init = Mean()))
 Mean: n=100 | value=1.50573
-
-julia> d2 = DTable((;a1=abs.(rand(Int, 100).%2), [Symbol("a\$(i)") => rand(100) for i in 2:3]...), 25);
-
-julia> gb = GroupBy(Int, Group([Series(Mean(), Variance(), Extrema()) for _ in 1:3]...));
-
-julia> fetch(Dagger.mapreduce(r -> (r.a1, tuple(r...)), fit!, d2, init = gb))
-GroupBy: Int64 => Group
-├─ 1
-│  └─ Group
-│     ├─ Series
-│     │  ├─ Mean: n=57 | value=1.0
-│     │  ├─ Variance: n=57 | value=0.0
-│     │  └─ Extrema: n=57 | value=(min = 1.0, max = 1.0, nmin = 57, nmax = 57)
-│     ├─ Series
-│     │  ├─ Mean: n=57 | value=0.540256
-│     │  ├─ Variance: n=57 | value=0.0767802
-│     │  └─ Extrema: n=57 | value=(min = 0.0132545, max = 0.996059, nmin = 1, nmax = 1)
-│     └─ Series
-│        ├─ Mean: n=57 | value=0.536187
-│        ├─ Variance: n=57 | value=0.0981499
-│        └─ Extrema: n=57 | value=(min = 0.0112471, max = 0.991461, nmin = 1, nmax = 1)
-└─ 0
-   └─ Group
-      ├─ Series
-      │  ├─ Mean: n=43 | value=0.0
-      │  ├─ Variance: n=43 | value=0.0
-      │  └─ Extrema: n=43 | value=(min = 0.0, max = 0.0, nmin = 43, nmax = 43)
-      ├─ Series
-      │  ├─ Mean: n=43 | value=0.459732
-      │  ├─ Variance: n=43 | value=0.0911548
-      │  └─ Extrema: n=43 | value=(min = 0.000925526, max = 0.962072, nmin = 1, nmax = 1)
-      └─ Series
-         ├─ Mean: n=43 | value=0.490613
-         ├─ Variance: n=43 | value=0.0850503
-         └─ Extrema: n=43 | value=(min = 0.0450505, max = 0.981091, nmin = 1, nmax = 1)
 """
 
 
