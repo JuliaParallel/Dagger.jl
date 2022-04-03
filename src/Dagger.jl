@@ -64,6 +64,7 @@ include("table/operations.jl")
 include("table/groupby.jl")
 include("table/join_interface.jl")
 include("table/join.jl")
+include("table/z_dfinterface.jl")
 
 include("lib/logging-extras.jl")
 
