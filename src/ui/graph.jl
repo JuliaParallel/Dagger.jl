@@ -237,7 +237,8 @@ function show_plan(logs::Vector{Timespan}, t::Thunk)
 end
 
 function show_plan(c)
-    t = thunkize(Context(), stage(Context(), c))
+    ctx = Context(global_context())
+    t = thunkize(ctx, stage(ctx, c))
     show_plan(t)
 end
 

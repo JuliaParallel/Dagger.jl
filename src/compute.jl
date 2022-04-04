@@ -2,20 +2,20 @@ export stage, cached_stage, compute, debug_compute, free!, cleanup
 
 ###### Scheduler #######
 
-compute(x; options=nothing) = compute(Context(), x; options=options)
+compute(x; options=nothing) = compute(Context(global_context()), x; options=options)
 compute(ctx, c::Chunk; options=nothing) = c
 
 collect(ctx::Context, t::Thunk; options=nothing) =
     collect(ctx, compute(ctx, t; options=options); options=options)
 collect(d::Union{Chunk,Thunk}; options=nothing) =
-    collect(Context(), d; options=options)
+    collect(Context(global_context()), d; options=options)
 
 abstract type Computation end
 
 compute(ctx, c::Computation; options=nothing) =
     compute(ctx, stage(ctx, c); options=options)
 collect(c::Computation; options=nothing) =
-    collect(Context(), c; options=options)
+    collect(Context(global_context()), c; options=options)
 
 """
     compute(ctx::Context, d::Thunk; options=nothing) -> Chunk
@@ -48,7 +48,7 @@ function debug_compute(ctx::Context, args...; profile=false, options=nothing)
 end
 
 function debug_compute(arg; profile=false, options=nothing)
-    ctx = Context()
+    ctx = Context(global_context())
     dbgctx = Context(procs(ctx), LocalEventLog(), profile)
     debug_compute(dbgctx, arg; options=options)
 end
@@ -56,7 +56,7 @@ end
 Base.@deprecate gather(ctx, x) collect(ctx, x)
 Base.@deprecate gather(x) collect(x)
 
-cleanup() = cleanup(Context())
+cleanup() = cleanup(Context(global_context()))
 function cleanup(ctx::Context)
     if :scheduler in keys(PLUGINS)
         scheduler = PLUGINS[:scheduler]
