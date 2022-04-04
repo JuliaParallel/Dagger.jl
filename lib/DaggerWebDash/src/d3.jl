@@ -57,23 +57,30 @@ struct D3Renderer
     port_range::UnitRange{Int}
     config::Vector{Any}
     config_updated::Ref{Bool}
-    update_cond::Condition
+    update_cond::Threads.Condition
     seek_store
 end
 D3Renderer(port::Int, port_range=50000:59999; seek_store=nothing) =
-    D3Renderer(port, port_range, Vector{Any}(), Ref{Bool}(false), Condition(), seek_store)
+    D3Renderer(port,
+               port_range,
+               Vector{Any}(),
+               Ref{Bool}(false),
+               Threads.Condition(),
+               seek_store)
 Dagger.init_similar(d3r::D3Renderer) =
     D3Renderer(d3r.port,
                d3r.port_range,
                d3r.config,
                Ref{Bool}(false),
-               Condition(),
+               Threads.Condition(),
                d3r.seek_store)
 
 function (d3r::D3Renderer)(logs)
     D3R_LOGS[d3r.port] = logs
     d3r_init(d3r.port, d3r.port_range, d3r.config_updated, d3r.config, d3r.seek_store)
-    notify(d3r.update_cond)
+    lock(d3r.update_cond) do
+        notify(d3r.update_cond)
+    end
 end
 
 function Base.push!(d3r::D3Renderer, x)
