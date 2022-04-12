@@ -225,10 +225,12 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
                 end
             end
         else
-            println(Ref{Any}(nc), df, newdf, transformed_cols, copycols,
-            allow_resizing_newdf, column_to_copy)
-            select_transform!(Ref{Any}(nc), df, newdf, transformed_cols, copycols,
-                              allow_resizing_newdf, column_to_copy)
+            println("parsed")
+            println.([Ref{Any}(nc), df, newdf, transformed_cols, copycols,
+            allow_resizing_newdf, column_to_copy])
+            # END OF THE PARSING
+            # select_transform!(Ref{Any}(nc), df, newdf, transformed_cols, copycols,
+            #                   allow_resizing_newdf, column_to_copy)
         end
     end
     return newdf
@@ -278,6 +280,7 @@ end
 
 manipulate(df::DTable, args::AbstractVector{Int}; copycols::Bool, keeprows::Bool,
            renamecols::Bool) = println("$args")
+           # end of parsing
     # DataFrame(_columns(df)[args], Index(_names(df)[args]), copycols=copycols)
 
 function manipulate(df::DTable, c::MultiColumnIndex; copycols::Bool, keeprows::Bool,
@@ -314,3 +317,6 @@ manipulate(df::DTable, c::ColumnIndex; copycols::Bool, keeprows::Bool,
 select(df::DTable, @nospecialize(args...); copycols::Bool=true, renamecols::Bool=true) =
 manipulate(df, map(x -> broadcast_pair(df, x), args)...,
            copycols=copycols, keeprows=true, renamecols=renamecols)
+
+
+# Dagger.select(d, AsTable([:a,:b]) => DataFrames.ByRow(sum), :a => mean => :adwa)
