@@ -132,10 +132,21 @@ function _register_future!(ctx, state, task, tid, (future, id)::Tuple{ThunkFutur
         ownthunk = unwrap_weak_checked(state.thunk_dict[tid])
         function dominates(target, t)
             t == target && return true
-            # N.B. Skips expired tasks
-            task_inputs = filter(istask, Dagger.unwrap_weak.(t.inputs))
-            if any(_t->dominates(target, _t), task_inputs)
-                return true
+            seen = Set{Thunk}()
+            to_visit = Thunk[t]
+            while !isempty(to_visit)
+                t = pop!(to_visit)
+                if t == target
+                    return true
+                end
+                for input in t.inputs
+                    # N.B. Skips expired tasks
+                    input = Dagger.unwrap_weak(input)
+                    istask(input) || continue
+                    input in seen && continue
+                    push!(seen, input)
+                    push!(to_visit, input)
+                end
             end
             return false
         end
