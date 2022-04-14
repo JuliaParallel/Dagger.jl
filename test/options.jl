@@ -34,7 +34,6 @@ end
         # Thunk field
         (:meta, false, true, false)
     ]
-        @show first_wid last_wid option default value value2
         # Test local and remote default values
         @test Dagger.get_options(option, default) == default
         @test fetch(Dagger.@spawn check_option(option, default, default))
