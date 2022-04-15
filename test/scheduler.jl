@@ -252,7 +252,8 @@ end
             end
         end
 
-        @testset "Remove workers" begin
+        @test_skip "Remove workers"
+        #=@testset "Remove workers" begin
             ps = []
             try
                 ps1 = addprocs(4, exeflags="--project")
@@ -260,7 +261,7 @@ end
 
                 @everywhere vcat(ps1, myid()) $setup
 
-                # Use single to force scheduler to make use of all workers since we assert it below 
+                # Use single to force scheduler to make use of all workers since we assert it below
                 ts = delayed(vcat)((delayed(testfun; single=ps1[mod1(i, end)])(i) for i in 1:10)...)
 
                 # Use FilterLog as a callback function.
@@ -275,7 +276,7 @@ end
                     end
                     return false
                 end
-       
+
                 ctx = Context(ps1; log_sink=rmproctrigger)
                 job = @async collect(ctx, ts)
 
@@ -285,7 +286,7 @@ end
                 while !first_rescheduled_thunk[] && (time() - starttime < 10.0)
                     sleep(0.1)
                 end
-                @test first_rescheduled_thunk[]              
+                @test first_rescheduled_thunk[]
 
                 rmprocs!(ctx, ps1[3:end])
                 @test length(procs(ctx)) == 2
@@ -299,18 +300,17 @@ end
                 @test nprocs_removed[] >= 2
 
                 @everywhere ps1 blocked=false
-                
+
                 res = fetch(job)
                 @test res isa Vector
-      
+
                 @test res[1:4] |> unique |> sort == ps1
                 @test all(pid -> pid in ps1[1:2], res[5:end])
             finally
                 # Prints "From worker X:    IOError:" :/
                 wait(rmprocs(ps))
             end
-        end
-       
+        end=#
 
         @testset "Remove all workers throws" begin
             ps = []
