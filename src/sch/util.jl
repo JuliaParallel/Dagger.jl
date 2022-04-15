@@ -93,36 +93,46 @@ function schedule_dependents!(state, node, failed)
 end
 
 """
-Prepares the scheduler to schedule `thunk`, including scheduling `thunk` if
+Prepares the scheduler to schedule `thunk`. Will mark `thunk` as ready if
 its inputs are satisfied.
 """
 function reschedule_inputs!(state, thunk, seen=Set{Thunk}())
-    thunk in seen && return
-    push!(seen, thunk)
-    if haskey(state.cache, thunk) || (thunk in state.ready) || (thunk in state.running)
-        return
-    end
-    w = get!(()->Set{Thunk}(), state.waiting, thunk)
-    for input in thunk.inputs
-        input = unwrap_weak_checked(input)
-        if istask(input) || (input isa Chunk)
-            push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
+    to_visit = Thunk[thunk]
+    while !isempty(to_visit)
+        thunk = pop!(to_visit)
+        push!(seen, thunk)
+        if haskey(state.cache, thunk) || (thunk in state.ready) || (thunk in state.running)
+            continue
         end
-        istask(input) || continue
-        if get(state.errored, input, false)
-            set_failed!(state, input, thunk)
+        w = get!(()->Set{Thunk}(), state.waiting, thunk)
+        for input in thunk.inputs
+            input = unwrap_weak_checked(input)
+            input in seen && continue
+
+            # Unseen
+            if istask(input) || (input isa Chunk)
+                push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
+            end
+            istask(input) || continue
+
+            # Unseen task
+            if get(state.errored, input, false)
+                set_failed!(state, input, thunk)
+            end
+            haskey(state.cache, input) && continue
+
+            # Unseen and unfinished task
+            push!(w, input)
+            if !((input in state.running) || (input in state.ready))
+                push!(to_visit, input)
+            end
         end
-        haskey(state.cache, input) && continue
-        push!(w, input)
-        if !((input in state.running) || (input in state.ready))
-            reschedule_inputs!(state, input, seen)
-        end
-    end
-    if isempty(w)
-        # Inputs are ready
-        delete!(state.waiting, thunk)
-        if !get(state.errored, thunk, false)
-            push!(state.ready, thunk)
+        if isempty(w)
+            # Inputs are ready
+            delete!(state.waiting, thunk)
+            if !get(state.errored, thunk, false)
+                push!(state.ready, thunk)
+            end
         end
     end
 end
