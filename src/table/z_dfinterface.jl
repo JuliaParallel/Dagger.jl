@@ -1,31 +1,14 @@
 using InvertedIndices
 import DataAPI: Between, All, Cols
 using DataAPI
-const SymbolOrString = Union{Symbol, AbstractString}
-const ColumnIndex = Union{Signed, Unsigned, SymbolOrString}
-const MultiColumnIndex = Union{AbstractVector, Regex, Not, Between, All, Cols, Colon}
-const MULTICOLUMNINDEX_TUPLE = (:AbstractVector, :Regex, :Not, :Between, :All, :Cols, :Colon)
+using DataFrames
+
+import DataFrames: SymbolOrString, ColumnIndex, MultiColumnIndex, MULTICOLUMNINDEX_TUPLE, ByRow, funname, make_pair_concrete
+
 
 ncol(d::DTable) = length(Tables.columns(d))
+names(d::DTable) = [String.(Tables.columnnames(Tables.columns(d)))...]
 
-struct ByRow{T} <: Function
-    fun::T
-end
-
-# invoke the generic AbstractVector function to ensure function is called
-# exactly once for each element
-(f::ByRow)(cols::AbstractVector...) =
-    invoke(map,
-           Tuple{typeof(f.fun), ntuple(i -> AbstractVector, length(cols))...},
-           f.fun, cols...)
-(f::ByRow)(table::NamedTuple) = [f.fun(nt) for nt in Tables.namedtupleiterator(table)]
-
-# add a method to funname defined in other/utils.jl
-funname(row::ByRow) = funname(row.fun)
-
-make_pair_concrete(@nospecialize(x::Pair)) =
-    make_pair_concrete(x.first) => make_pair_concrete(x.second)
-make_pair_concrete(@nospecialize(x)) = x
 
 broadcast_pair(df::DTable, @nospecialize(p::Any)) = p
 
@@ -61,8 +44,7 @@ end
 
 # this is needed in broadcasting when one of dimensions has length 0
 # as then broadcasting produces Matrix{Any} rather than Matrix{<:Pair}
-broadcast_pair(df::DTable, @nospecialize(p::AbstractMatrix)) =
-    isempty(p) ? [] : p
+broadcast_pair(df::DTable, @nospecialize(p::AbstractMatrix)) = isempty(p) ? [] : p
 
 function broadcast_pair(df::DTable, @nospecialize(p::AbstractVecOrMat{<:Pair}))
     isempty(p) && return []
@@ -149,7 +131,26 @@ function manipulate(df::DTable, @nospecialize(cs...); copycols::Bool, keeprows::
                     copycols, keeprows)
 end
 
+macro gen_rowfunction(normalized_cs)
+    return :(()-> 10)
+end
+
 function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, keeprows::Bool)
+
+    ############ DTABLE SPECIFIC
+    println.(normalized_cs)
+
+    rowfunction = (row) -> begin
+        (;[
+            result_colname => f(Tables.getcolumn.(Ref(row), colidx))
+            for (colidx, (f, result_colname)) in normalized_cs
+        ]...)
+    end
+    return map(rowfunction, df)
+
+    ########### DTABLE SPECIFIC
+
+
     @assert !(df isa SubDataFrame && copycols==false)
     newdf = DataFrame()
     # the role of transformed_cols is the following
@@ -225,12 +226,11 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
                 end
             end
         else
-            println("parsed")
-            println.([Ref{Any}(nc), df, newdf, transformed_cols, copycols,
-            allow_resizing_newdf, column_to_copy])
+            # println("parsed")
+            # println.([Ref{Any}(nc), df, newdf, transformed_cols, copycols, allow_resizing_newdf, column_to_copy])
             # END OF THE PARSING
-            # select_transform!(Ref{Any}(nc), df, newdf, transformed_cols, copycols,
-            #                   allow_resizing_newdf, column_to_copy)
+            select_transform!(Ref{Any}(nc), df, newdf, transformed_cols, copycols,
+                              allow_resizing_newdf, column_to_copy)
         end
     end
     return newdf
@@ -278,11 +278,16 @@ end
 #     end
 # end
 
-manipulate(df::DTable, args::AbstractVector{Int}; copycols::Bool, keeprows::Bool,
-           renamecols::Bool) = println("$args")
-           # end of parsing
+function manipulate(dt::DTable, args::AbstractVector{Int}; copycols::Bool, keeprows::Bool, renamecols::Bool) 
+    # this is for single arg Int e.g. Dagger.select(dt, 2)
     # DataFrame(_columns(df)[args], Index(_names(df)[args]), copycols=copycols)
 
+    ################## DTABLE SPECIFIC
+    colidx = first(args)
+    colname = Tables.columnnames(Tables.columns(dt))[colidx]
+    map(r -> (;colname => Tables.getcolumn(r, colidx),), dt)
+    ################## DTABLE SPECIFIC
+end
 function manipulate(df::DTable, c::MultiColumnIndex; copycols::Bool, keeprows::Bool,
                     renamecols::Bool)
     if c isa AbstractVector{<:Pair}
@@ -303,15 +308,8 @@ end
 #         return copycols ? dfv[:, args] : view(dfv, :, args)
 #     end
 # end
-using DataFrames
 index(df::DTable) = DataFrames.Index(_columnnames_svector(df))
-manipulate(df::DTable, c::ColumnIndex; copycols::Bool, keeprows::Bool,
-           renamecols::Bool) =
-    manipulate(df, Int[index(df)[c]], copycols=copycols, keeprows=keeprows, renamecols=renamecols)
-
-# manipulate(dfv::SubDataFrame, c::ColumnIndex; copycols::Bool, keeprows::Bool,
-#            renamecols::Bool) =
-#     manipulate(dfv, Int[index(dfv)[c]], copycols=copycols, keeprows=keeprows, renamecols=renamecols)
+manipulate(df::DTable, c::ColumnIndex; copycols::Bool, keeprows::Bool, renamecols::Bool) = manipulate(df, Int[index(df)[c]], copycols=copycols, keeprows=keeprows, renamecols=renamecols)
 
 
 select(df::DTable, @nospecialize(args...); copycols::Bool=true, renamecols::Bool=true) =
