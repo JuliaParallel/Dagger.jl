@@ -131,9 +131,6 @@ function manipulate(df::DTable, @nospecialize(cs...); copycols::Bool, keeprows::
                     copycols, keeprows)
 end
 
-macro gen_rowfunction(normalized_cs)
-    return :(()-> 10)
-end
 
 function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, keeprows::Bool)
 
@@ -142,7 +139,13 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
 
     rowfunction = (row) -> begin
         (;[
-            result_colname => f(Tables.getcolumn.(Ref(row), colidx))
+            result_colname => begin
+                if f isa ByRow
+                    f.fun(Tables.getcolumn.(Ref(row), colidx))
+                elseif f == identity
+                    Tables.getcolumn.(Ref(row), colidx)
+                end
+            end
             for (colidx, (f, result_colname)) in normalized_cs
         ]...)
     end
