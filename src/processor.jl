@@ -225,9 +225,17 @@ Context(procs::Vector{P}=Processor[OSProc(w) for w in workers()];
     Context(procs, proc_lock, proc_notify, log_sink, log_file,
             profile, options)
 Context(xs::Vector{Int}; kwargs...) = Context(map(OSProc, xs); kwargs...)
-Context(ctx::Context, xs::Vector) = # make a copy
+Context(ctx::Context, xs::Vector=copy(procs(ctx))) = # make a copy
     Context(xs; log_sink=ctx.log_sink, log_file=ctx.log_file,
                 profile=ctx.profile, options=ctx.options)
+
+const GLOBAL_CONTEXT = Ref{Context}()
+function global_context()
+    if !isassigned(GLOBAL_CONTEXT)
+        GLOBAL_CONTEXT[] = Context()
+    end
+    return GLOBAL_CONTEXT[]
+end
 
 """
     write_event(ctx::Context, event::Event)

@@ -113,7 +113,7 @@ function save(ctx, chunk::Chunk{X, FileReader}, file_path::AbstractString) where
    end
 end
 
-save(chunk::Union{Chunk, Thunk}, file_path::AbstractString) = save(Context(), chunk, file_path)
+save(chunk::Union{Chunk, Thunk}, file_path::AbstractString) = save(Context(global_context()), chunk, file_path)
 
 
 

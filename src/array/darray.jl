@@ -84,7 +84,7 @@ compute(ctx, x::ArrayOp; options=nothing) =
 collect(ctx::Context, x::ArrayOp; options=nothing) =
     collect(ctx, compute(ctx, x; options=options); options=options)
 
-collect(x::ArrayOp; options=nothing) = collect(Context(), x; options=options)
+collect(x::ArrayOp; options=nothing) = collect(Context(global_context()), x; options=options)
 
 function Base.show(io::IO, ::MIME"text/plain", x::ArrayOp)
     write(io, string(typeof(x)))
