@@ -3,7 +3,7 @@ import DataAPI: Between, All, Cols
 using DataAPI
 using DataFrames
 
-import DataFrames: SymbolOrString, ColumnIndex, MultiColumnIndex, MULTICOLUMNINDEX_TUPLE, ByRow, funname, make_pair_concrete
+import DataFrames: SymbolOrString, ColumnIndex, MultiColumnIndex, MULTICOLUMNINDEX_TUPLE, ByRow, funname, make_pair_concrete, AsTable
 
 
 ncol(d::DTable) = length(Tables.columns(d))
@@ -15,13 +15,13 @@ broadcast_pair(df::DTable, @nospecialize(p::Any)) = p
 function broadcast_pair(df::DTable, @nospecialize(p::Pair))
     src, second = p
     src_broadcast = src isa Union{InvertedIndices.BroadcastedInvertedIndex,
-                                  DataAPI.BroadcastedSelector}
+        DataAPI.BroadcastedSelector}
     second_broadcast = second isa Union{InvertedIndices.BroadcastedInvertedIndex,
-                                        DataAPI.BroadcastedSelector}
+        DataAPI.BroadcastedSelector}
     if second isa Pair
         fun, dst = second
         dst_broadcast = dst isa Union{InvertedIndices.BroadcastedInvertedIndex,
-                                      DataAPI.BroadcastedSelector}
+            DataAPI.BroadcastedSelector}
         if src_broadcast || dst_broadcast
             new_src = src_broadcast ? names(df, src.sel) : src
             new_dst = dst_broadcast ? names(df, dst.sel) : dst
@@ -53,7 +53,7 @@ function broadcast_pair(df::DTable, @nospecialize(p::AbstractVecOrMat{<:Pair}))
     src = first.(p)
     first_src = first(src)
     if first_src isa Union{InvertedIndices.BroadcastedInvertedIndex,
-                           DataAPI.BroadcastedSelector}
+        DataAPI.BroadcastedSelector}
         if any(!=(first_src), src)
             throw(ArgumentError("when broadcasting column selector it must " *
                                 "have a constant value"))
@@ -72,7 +72,7 @@ function broadcast_pair(df::DTable, @nospecialize(p::AbstractVecOrMat{<:Pair}))
     second = last.(p)
     first_second = first(second)
     if first_second isa Union{InvertedIndices.BroadcastedInvertedIndex,
-                              DataAPI.BroadcastedSelector}
+        DataAPI.BroadcastedSelector}
         if any(!=(first_second), second)
             throw(ArgumentError("when using broadcasted column selector it " *
                                 "must have a constant value"))
@@ -88,7 +88,7 @@ function broadcast_pair(df::DTable, @nospecialize(p::AbstractVecOrMat{<:Pair}))
         if first_second isa Pair
             fun, dst = first_second
             if dst isa Union{InvertedIndices.BroadcastedInvertedIndex,
-                             DataAPI.BroadcastedSelector}
+                DataAPI.BroadcastedSelector}
                 if !all(x -> x isa Pair && last(x) == dst, second)
                     throw(ArgumentError("when using broadcasted column selector " *
                                         "it must have a constant value"))
@@ -128,7 +128,7 @@ function manipulate(df::DTable, @nospecialize(cs...); copycols::Bool, keeprows::
     end
     println(cs_vec)
     return _manipulate(df, Any[DataFrames.normalize_selection(index(df), make_pair_concrete(c), renamecols) for c in cs_vec],
-                    copycols, keeprows)
+        copycols, keeprows)
 end
 
 
@@ -138,12 +138,15 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
     println.(normalized_cs)
 
     rowfunction = (row) -> begin
-        (;[
+        (; [
             result_colname => begin
+                args = colidx isa AsTable ?
+                       (; [k => Tables.getcolumn(row, k) for k in getindex.(Ref(Tables.columnnames(row)), colidx.cols)]...) :
+                       Tables.getcolumn.(Ref(row), colidx)
                 if f isa ByRow
-                    f.fun(Tables.getcolumn.(Ref(row), colidx))
+                    f.fun(args)
                 elseif f == identity
-                    Tables.getcolumn.(Ref(row), colidx)
+                    args
                 end
             end
             for (colidx, (f, result_colname)) in normalized_cs
@@ -154,7 +157,7 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
     ########### DTABLE SPECIFIC
 
 
-    @assert !(df isa SubDataFrame && copycols==false)
+    @assert !(df isa SubDataFrame && copycols == false)
     newdf = DataFrame()
     # the role of transformed_cols is the following
     # * make sure that we do not use the same target column name twice in transformations;
@@ -233,7 +236,7 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
             # println.([Ref{Any}(nc), df, newdf, transformed_cols, copycols, allow_resizing_newdf, column_to_copy])
             # END OF THE PARSING
             select_transform!(Ref{Any}(nc), df, newdf, transformed_cols, copycols,
-                              allow_resizing_newdf, column_to_copy)
+                allow_resizing_newdf, column_to_copy)
         end
     end
     return newdf
@@ -281,24 +284,24 @@ end
 #     end
 # end
 
-function manipulate(dt::DTable, args::AbstractVector{Int}; copycols::Bool, keeprows::Bool, renamecols::Bool) 
+function manipulate(dt::DTable, args::AbstractVector{Int}; copycols::Bool, keeprows::Bool, renamecols::Bool)
     # this is for single arg Int e.g. Dagger.select(dt, 2)
     # DataFrame(_columns(df)[args], Index(_names(df)[args]), copycols=copycols)
 
     ################## DTABLE SPECIFIC
     colidx = first(args)
     colname = Tables.columnnames(Tables.columns(dt))[colidx]
-    map(r -> (;colname => Tables.getcolumn(r, colidx),), dt)
+    map(r -> (; colname => Tables.getcolumn(r, colidx)), dt)
     ################## DTABLE SPECIFIC
 end
 function manipulate(df::DTable, c::MultiColumnIndex; copycols::Bool, keeprows::Bool,
-                    renamecols::Bool)
+    renamecols::Bool)
     if c isa AbstractVector{<:Pair}
         return manipulate(df, c..., copycols=copycols, keeprows=keeprows,
-                          renamecols=renamecols)
+            renamecols=renamecols)
     else
         return manipulate(df, index(df)[c], copycols=copycols, keeprows=keeprows,
-                          renamecols=renamecols)
+            renamecols=renamecols)
     end
 end
 
@@ -316,8 +319,8 @@ manipulate(df::DTable, c::ColumnIndex; copycols::Bool, keeprows::Bool, renamecol
 
 
 select(df::DTable, @nospecialize(args...); copycols::Bool=true, renamecols::Bool=true) =
-manipulate(df, map(x -> broadcast_pair(df, x), args)...,
-           copycols=copycols, keeprows=true, renamecols=renamecols)
+    manipulate(df, map(x -> broadcast_pair(df, x), args)...,
+        copycols=copycols, keeprows=true, renamecols=renamecols)
 
 
 # Dagger.select(d, AsTable([:a,:b]) => DataFrames.ByRow(sum), :a => mean => :adwa)

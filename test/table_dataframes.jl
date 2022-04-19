@@ -7,12 +7,16 @@ using Statistics
         dt = DTable(nt, 10)
         df = fetch(dt, DataFrame)
 
-        dt_01 = Dagger.select(dt, :a)
-        df_01 = DataFrames.select(df, :a)
-        @test df_01 == fetch(dt_01, DataFrame)
+        t = (args...) -> begin
+            dt_01 = Dagger.select(dt, args...)
+            df_01 = DataFrames.select(df, args...)
+            @test df_01 == fetch(dt_01, DataFrame)
+        end
 
-        dt_02 = Dagger.select(dt, :b, :a)
-        df_02 = DataFrames.select(df, :b, :a)
-        @test df_02 == fetch(dt_02, DataFrame)
+        t(:a); t(1)
+        t(:b); t(2)
+        t(:a, :b); t(1, 2)
+        t(:b, :a); t(2, 1)
+        t(:b, :a, AsTable([:a,:b]) => ByRow(sum))
     end
 end
