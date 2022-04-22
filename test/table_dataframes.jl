@@ -18,5 +18,6 @@ using Statistics
         t(:a, :b); t(1, 2)
         t(:b, :a); t(2, 1)
         t(:b, :a, AsTable([:a,:b]) => ByRow(sum))
+        t(:b, :a, AsTable(:) => ByRow(sum))
     end
 end

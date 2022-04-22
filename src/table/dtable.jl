@@ -4,7 +4,7 @@ import SentinelArrays
 
 import Base: fetch, show, length
 
-export DTable, tabletype, tabletype!, trim, trim!, leftjoin, innerjoin
+export DTable, tabletype, tabletype!, trim, trim!, leftjoin, innerjoin, DTableColumn
 
 const VTYPE = Vector{Union{Dagger.Chunk,Dagger.EagerThunk}}
 
@@ -196,9 +196,13 @@ function show(io::IO, ::MIME"text/plain", d::DTable)
     nothing
 end
 
-function length(table::DTable)
+function chunk_lengths(table::DTable)
     f = x -> length(Tables.rows(x))
-    sum(fetch.([Dagger.@spawn f(c) for c in table.chunks]))
+    fetch.([Dagger.@spawn f(c) for c in table.chunks])
+end
+
+function length(table::DTable)
+    sum(chunk_lengths(table))
 end
 
 function _columnnames_svector(d::DTable)
@@ -209,3 +213,55 @@ end
 @inline nchunks(d::DTable) = length(d.chunks)
 
 merge_chunks(sink, chunks) = sink(TableOperations.joinpartitions(Tables.partitioner(_retrieve, chunks)))
+
+
+
+mutable struct DTableColumn
+    dtable::DTable
+    current_chunk::Int
+    col::Int
+    colname::Symbol
+    chunk_lengths::Vector
+end
+
+function DTableColumn(dtable::DTable, col::Int)
+    DTableColumn(
+        dtable,
+        0,
+        col,
+        _columnnames_svector(dtable)[col],
+        chunk_lengths(dtable)
+    )
+end
+
+
+function getindex(dtablecolumn::DTableColumn, idx::Int)
+    chunk_idx = 0
+    s = 1
+    for (i, e) in enumerate(dtablecolumn.chunk_lengths)
+        if s <= idx < s + e
+            chunk_idx = i
+            break
+        end
+        s=s+e
+    end
+    chunk_idx == 0 && throw(BoundsError())
+    offset = idx - s + 1
+    chunk = fetch(dtablecolumn.dtable.chunks[chunk_idx])
+    row, _ = iterate(Tables.rows(chunk), offset)
+    Tables.getcolumn(row, dtablecolumn.col)
+end
+
+function length(dtablecolumn::DTableColumn)
+    sum(dtablecolumn.chunk_lengths)    
+end
+
+function iterate(dtablecolumn::DTableColumn)
+    length(dtablecolumn) == 0 && return nothing
+    getindex(dtablecolumn, 1), 2
+end
+
+function iterate(dtablecolumn::DTableColumn, i)
+    length(dtablecolumn) < i && return nothing
+    getindex(dtablecolumn, i), i+1
+end
