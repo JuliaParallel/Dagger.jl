@@ -2,7 +2,7 @@ import Tables
 import TableOperations
 import SentinelArrays
 
-import Base: fetch, show, length
+import Base: fetch, show, length, iterate
 
 export DTable, tabletype, tabletype!, trim, trim!, leftjoin, innerjoin, DTableColumn
 
@@ -253,7 +253,7 @@ function getindex(dtablecolumn::DTableColumn, idx::Int)
 end
 
 function length(dtablecolumn::DTableColumn)
-    sum(dtablecolumn.chunk_lengths)    
+    sum(dtablecolumn.chunk_lengths)
 end
 
 function iterate(dtablecolumn::DTableColumn)

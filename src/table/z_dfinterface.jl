@@ -6,6 +6,25 @@ using DataFrames
 import DataFrames: SymbolOrString, ColumnIndex, MultiColumnIndex, MULTICOLUMNINDEX_TUPLE, ByRow, funname, make_pair_concrete, AsTable
 
 
+function fillcolumn(dt::DTable, index::Int, column)
+    csymbol = _columnnames_svector(dt)[index]
+    f = (ch, colfragment) -> begin
+        Tables.materializer(ch)(
+            merge(Tables.columntable(ch), (; [csymbol => colfragment]...))
+        )
+    end
+    colfragment = (column, s, e) -> Dagger.@spawn getindex(column, s:e)
+    clenghts = chunk_lengths(dt)
+    chunks = [
+        begin
+            cfrag = colfragment(column, 1 + sum(clenghts[1:(i-1)]), sum(clenghts[1:i]))
+            Dagger.@spawn f(ch, cfrag)
+        end
+        for (i, ch) in enumerate(dt.chunks)
+    ]
+    DTable(chunks, dt.tabletype)
+end
+
 ncol(d::DTable) = length(Tables.columns(d))
 names(d::DTable) = [String.(Tables.columnnames(Tables.columns(d)))...]
 
@@ -137,6 +156,16 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
     ############ DTABLE SPECIFIC
     println.(normalized_cs)
 
+    colresults = Dict{Int,Any}()
+    for (i, (colidx, (f, result_colname))) in enumerate(normalized_cs)
+        if !(colidx isa AsTable) && !(f isa ByRow) && f != identity
+            cs = DTableColumn.(Ref(df), [colidx...])
+            colresults[i] = Dagger.@spawn f(cs...)
+        end
+    end
+    colresults = Dict(k => fetch(Dagger.spawn(length, v)) == 1 ? fetch(v) : v for (k, v) in colresults)
+    # checck the length of the column ones and fail here already
+    dtlen = length(df)
     rowfunction = (row) -> begin
         (; [
             result_colname => begin
@@ -147,12 +176,27 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
                     f.fun(args)
                 elseif f == identity
                     args
+                elseif !(colresults[i] isa Dagger.EagerThunk) && length(colresults[i]) == 1
+                    colresults[i]
+                elseif colresults[i] isa Dagger.EagerThunk
+                    nothing # will be filled later
                 end
             end
-            for (colidx, (f, result_colname)) in normalized_cs
+            for (i, (colidx, (f, result_colname))) in enumerate(normalized_cs)
         ]...)
     end
-    return map(rowfunction, df)
+    rd = map(rowfunction, df)
+
+    for (k, v) in colresults
+        if v isa Dagger.EagerThunk
+            if fetch(Dagger.spawn(length, v)) == dtlen
+                rd = fillcolumn(rd, k, v)
+            else
+                throw("result column is not the size of the table")
+            end
+        end
+    end
+    return rd
 
     ########### DTABLE SPECIFIC
 
