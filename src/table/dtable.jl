@@ -235,6 +235,7 @@ function DTableColumn(dtable::DTable, col::Int)
 end
 
 
+
 function getindex(dtablecolumn::DTableColumn, idx::Int)
     chunk_idx = 0
     s = 1
@@ -248,7 +249,11 @@ function getindex(dtablecolumn::DTableColumn, idx::Int)
     chunk_idx == 0 && throw(BoundsError())
     offset = idx - s + 1
     chunk = fetch(dtablecolumn.dtable.chunks[chunk_idx])
-    row, _ = iterate(Tables.rows(chunk), offset)
+
+    row, iter = iterate(Tables.rows(chunk))
+    for _ in 1:(offset - 1)
+        row, iter = iterate(Tables.rows(chunk), iter)
+    end
     Tables.getcolumn(row, dtablecolumn.col)
 end
 
@@ -258,10 +263,37 @@ end
 
 function iterate(dtablecolumn::DTableColumn)
     length(dtablecolumn) == 0 && return nothing
-    getindex(dtablecolumn, 1), 2
+    iter = nothing
+    chunkidx = 1
+    chunk = nothing
+    while iter === nothing
+        if chunkidx <= length(dtablecolumn.dtable.chunks)
+            chunk = fetch(dtablecolumn.dtable.chunks[chunkidx])
+        else
+            return nothing
+        end
+
+        iter = iterate(Tables.rows(chunk))
+    end
+    iter === nothing && return nothing
+    row, i = iter
+
+    return (Tables.getcolumn(row, dtablecolumn.col), (chunkidx, chunk, i))
 end
 
-function iterate(dtablecolumn::DTableColumn, i)
-    length(dtablecolumn) < i && return nothing
-    getindex(dtablecolumn, i), i+1
+function iterate(dtablecolumn::DTableColumn, iter)
+    (chunkidx, chunk, i) = iter
+    rrr = iterate(Tables.rows(chunk), i)
+    while rrr === nothing
+        chunkidx += 1
+        if chunkidx <= length(dtablecolumn.dtable.chunks)
+            chunk = fetch(dtablecolumn.dtable.chunks[chunkidx])
+        else
+            return nothing
+        end
+        rrr = iterate(Tables.rows(chunk))
+    end
+    rrr === nothing && return nothing
+    row, i = rrr
+    return (Tables.getcolumn(row, dtablecolumn.col), (chunkidx, chunk, i))
 end
