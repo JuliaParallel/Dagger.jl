@@ -248,4 +248,8 @@ end
         g = (x) -> fetch(Dagger.spawn(f, x; proclist=s))
         fetch(Dagger.spawn(g, 10; proclist=s))
     end
+    @testset "no cross-scheduler Thunk usage" begin
+        a = delayed(+)(1,2)
+        @test_throws Exception Dagger.spawn(identity, a)
+    end
 end
