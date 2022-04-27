@@ -243,6 +243,9 @@ eager_next_id() = Threads.atomic_add!(EAGER_ID_COUNTER, one(UInt64))
 
 function _spawn(f, args...; options, kwargs...)
     Dagger.Sch.init_eager()
+    for arg in args
+        @assert !isa(arg, Thunk) "Cannot use Thunks in spawn"
+    end
     uid = eager_next_id()
     future = ThunkFuture()
     finalizer_ref = poolset(EagerThunkFinalizer(uid))
