@@ -2,7 +2,7 @@ import Tables
 import TableOperations
 import SentinelArrays
 
-import Base: fetch, show, length, iterate, names, propertynames
+import Base: fetch, show, length, iterate, names, propertynames, wait, isready
 
 export DTable, tabletype, tabletype!, trim, trim!, leftjoin, innerjoin, DTableColumn
 
@@ -216,3 +216,12 @@ merge_chunks(sink, chunks) = sink(TableOperations.joinpartitions(Tables.partitio
 
 Base.names(dt::DTable) = string.(_columnnames_svector(dt))
 Base.propertynames(dt::DTable) = _columnnames_svector(dt)
+
+function Base.wait(dt::DTable)
+    for ch in dt.chunks
+        !(ch isa Dagger.Chunk) && wait(ch)
+    end
+    return nothing
+end
+
+Base.isready(dt::DTable) = all([ch isa Dagger.Chunk ? true : (isready(ch); true) for ch in dt.chunks])
