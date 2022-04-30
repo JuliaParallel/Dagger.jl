@@ -37,6 +37,7 @@ include("domain.jl")
 include("array.jl")
 include("cache.jl")
 include("table.jl")
+include("table_dataframes.jl")
 try # TODO: Fault tolerance is sometimes unreliable
 include("fault-tolerance.jl")
 catch

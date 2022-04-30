@@ -5,6 +5,109 @@ using DataFrames
 
 import DataFrames: SymbolOrString, ColumnIndex, MultiColumnIndex, MULTICOLUMNINDEX_TUPLE, ByRow, funname, make_pair_concrete, AsTable
 
+#################
+
+
+mutable struct DTableColumn{T,TT}
+    dtable::DTable
+    current_chunk::Int
+    col::Int
+    colname::Symbol
+    chunk_lengths::Vector{Int}
+    current_iterator::Union{Nothing, TT}
+    chunkstore::Union{Nothing,Vector{T}}
+end
+
+__ff = (ch,col) -> Tables.getcolumn(Tables.columns(ch), col)
+
+function DTableColumn(dtable::DTable, col::Int)
+    # d = DTable(
+    #     [Dagger.spawn((ch,col)-> Tables.getcolumn(Tables.columns(ch), col), ch, col) for ch in dtable.chunks],
+    #     dtable.tabletype
+    # )
+    t = Tables.schema(Tables.columns(dtable)).types[col]
+    tt = fetch(Dagger.spawn((ch,_col) -> typeof(iterate(__ff(ch,_col))), dtable.chunks[1], col))
+
+    DTableColumn{t, tt}(
+        dtable,
+        0,
+        col,
+        _columnnames_svector(dtable)[col],
+        chunk_lengths(dtable),
+        nothing,
+        nothing,
+    )
+end
+
+
+
+function getindex(dtablecolumn::DTableColumn, idx::Int)
+    chunk_idx = 0
+    s = 1
+    for (i, e) in enumerate(dtablecolumn.chunk_lengths)
+        if s <= idx < s + e
+            chunk_idx = i
+            break
+        end
+        s=s+e
+    end
+    chunk_idx == 0 && throw(BoundsError())
+    offset = idx - s + 1
+    chunk = fetch(Dagger.spawn(__ff, dtablecolumn.dtable.chunks[chunk_idx], dtablecolumn.col))
+
+    row, iter = iterate(Tables.rows(chunk))
+    for _ in 1:(offset - 1)
+        row, iter = iterate(Tables.rows(chunk), iter)
+    end
+    Tables.getcolumn(row, dtablecolumn.col)
+end
+
+function length(dtablecolumn::DTableColumn)
+    sum(dtablecolumn.chunk_lengths)
+end
+
+function iterate(dtablecolumn::DTableColumn)
+    if length(dtablecolumn) == 0
+        return nothing
+    end
+
+    chunkidx = 1
+    dtablecolumn.chunkstore = nothing
+    dtablecolumn.current_iterator = nothing
+    while dtablecolumn.current_iterator === nothing
+        if chunkidx <= length(dtablecolumn.dtable.chunks)
+            dtablecolumn.chunkstore = fetch(Dagger.spawn(__ff, dtablecolumn.dtable.chunks[chunkidx], dtablecolumn.col))
+        else
+            return nothing
+        end
+
+        dtablecolumn.current_iterator = iterate(dtablecolumn.chunkstore)
+    end
+    dtablecolumn.current_iterator === nothing && return nothing
+
+    return (dtablecolumn.current_iterator[1], (chunkidx, dtablecolumn.current_iterator[2]))
+end
+
+function iterate(dtablecolumn::DTableColumn, iter)
+    (chunkidx, i) = iter
+    dtablecolumn.current_iterator = iterate(dtablecolumn.chunkstore, i)
+    while dtablecolumn.current_iterator === nothing
+        chunkidx += 1
+        if chunkidx <= length(dtablecolumn.dtable.chunks)
+            dtablecolumn.chunkstore = fetch(Dagger.spawn(__ff, dtablecolumn.dtable.chunks[chunkidx], dtablecolumn.col))
+        else
+            return nothing
+        end
+        dtablecolumn.current_iterator = iterate(dtablecolumn.chunkstore)
+    end
+    dtablecolumn.current_iterator === nothing && return nothing
+    return (dtablecolumn.current_iterator[1], (chunkidx, dtablecolumn.current_iterator[2]))
+end
+
+################################
+
+
+
 
 function fillcolumn(dt::DTable, index::Int, column)
     csymbol = _columnnames_svector(dt)[index]

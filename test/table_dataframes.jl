@@ -3,8 +3,9 @@ using Statistics
 
 @testset "dtable-dataframes" begin
     @testset "select" begin
-        nt = (a=collect(1:100) .% 3, b=rand(100))
-        dt = DTable(nt, 10)
+        s = 100_000
+        nt = (a=collect(1:s) .% 3, b=rand(s))
+        dt = DTable(nt, s ÷ 10)
         df = fetch(dt, DataFrame)
 
         t = (args...) -> begin
