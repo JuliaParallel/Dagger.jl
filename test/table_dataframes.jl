@@ -1,4 +1,4 @@
-using DataFrames
+import DataFrames
 using Statistics
 
 @testset "dtable-dataframes" begin
@@ -28,5 +28,6 @@ using Statistics
         t([:a, :b] => ((x, y) -> x .+ y), :b, :a)
         t(:a => sum, :b, :a)
         t(:b => sum, :a => sum, :b, :a)
+        t(names(dt) .=> sum, names(dt) .=> mean .=> "test" .* names(dt))
     end
 end

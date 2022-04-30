@@ -2,7 +2,7 @@ import Tables
 import TableOperations
 import SentinelArrays
 
-import Base: fetch, show, length, iterate
+import Base: fetch, show, length, iterate, names, propertynames
 
 export DTable, tabletype, tabletype!, trim, trim!, leftjoin, innerjoin, DTableColumn
 
@@ -213,3 +213,6 @@ end
 @inline nchunks(d::DTable) = length(d.chunks)
 
 merge_chunks(sink, chunks) = sink(TableOperations.joinpartitions(Tables.partitioner(_retrieve, chunks)))
+
+Base.names(dt::DTable) = string.(_columnnames_svector(dt))
+Base.propertynames(dt::DTable) = _columnnames_svector(dt)

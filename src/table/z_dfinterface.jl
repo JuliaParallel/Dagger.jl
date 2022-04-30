@@ -3,7 +3,7 @@ import DataAPI: Between, All, Cols
 using DataAPI
 using DataFrames
 
-import DataFrames: SymbolOrString, ColumnIndex, MultiColumnIndex, MULTICOLUMNINDEX_TUPLE, ByRow, funname, make_pair_concrete, AsTable
+import DataFrames: SymbolOrString, ColumnIndex, MultiColumnIndex, MULTICOLUMNINDEX_TUPLE, ByRow, funname, make_pair_concrete, AsTable, ncol
 
 #################
 
@@ -128,9 +128,7 @@ function fillcolumn(dt::DTable, index::Int, column)
     DTable(chunks, dt.tabletype)
 end
 
-ncol(d::DTable) = length(Tables.columns(d))
-names(d::DTable) = [String.(Tables.columnnames(Tables.columns(d)))...]
-
+DataFrames.ncol(d::DTable) = length(Tables.columns(d))
 
 broadcast_pair(df::DTable, @nospecialize(p::Any)) = p
 
