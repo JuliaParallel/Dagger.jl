@@ -6,7 +6,7 @@ using Statistics
         s = 100_000
         nt = (a=collect(1:s) .% 3, b=rand(s))
         dt = DTable(nt, s ÷ 10)
-        df = fetch(dt, DataFrame)
+        df = fetch(dt, DataFrames.DataFrame)
 
         t = (args...) -> begin
             dt_01 = Dagger.select(dt, args...)

@@ -21,10 +21,6 @@ end
 __ff = (ch,col) -> Tables.getcolumn(Tables.columns(ch), col)
 
 function DTableColumn(dtable::DTable, col::Int)
-    # d = DTable(
-    #     [Dagger.spawn((ch,col)-> Tables.getcolumn(Tables.columns(ch), col), ch, col) for ch in dtable.chunks],
-    #     dtable.tabletype
-    # )
     t = Tables.schema(Tables.columns(dtable)).types[col]
     tt = fetch(Dagger.spawn((ch,_col) -> typeof(iterate(__ff(ch,_col))), dtable.chunks[1], col))
 
@@ -66,42 +62,52 @@ function length(dtablecolumn::DTableColumn)
     sum(dtablecolumn.chunk_lengths)
 end
 
-function iterate(dtablecolumn::DTableColumn)
-    if length(dtablecolumn) == 0
-        return nothing
-    end
-
-    chunkidx = 1
-    dtablecolumn.chunkstore = nothing
-    dtablecolumn.current_iterator = nothing
-    while dtablecolumn.current_iterator === nothing
-        if chunkidx <= length(dtablecolumn.dtable.chunks)
-            dtablecolumn.chunkstore = fetch(Dagger.spawn(__ff, dtablecolumn.dtable.chunks[chunkidx], dtablecolumn.col))
-        else
-            return nothing
-        end
-
-        dtablecolumn.current_iterator = iterate(dtablecolumn.chunkstore)
-    end
-    dtablecolumn.current_iterator === nothing && return nothing
-
-    return (dtablecolumn.current_iterator[1], (chunkidx, dtablecolumn.current_iterator[2]))
-end
-
-function iterate(dtablecolumn::DTableColumn, iter)
-    (chunkidx, i) = iter
-    dtablecolumn.current_iterator = iterate(dtablecolumn.chunkstore, i)
+function pull_next_chunk(dtablecolumn::DTableColumn, chunkidx::Int)
     while dtablecolumn.current_iterator === nothing
         chunkidx += 1
         if chunkidx <= length(dtablecolumn.dtable.chunks)
             dtablecolumn.chunkstore = fetch(Dagger.spawn(__ff, dtablecolumn.dtable.chunks[chunkidx], dtablecolumn.col))
         else
-            return nothing
+            return chunkidx
         end
         dtablecolumn.current_iterator = iterate(dtablecolumn.chunkstore)
     end
-    dtablecolumn.current_iterator === nothing && return nothing
-    return (dtablecolumn.current_iterator[1], (chunkidx, dtablecolumn.current_iterator[2]))
+    return chunkidx
+end
+
+
+function iterate(dtablecolumn::DTableColumn)
+    if length(dtablecolumn) == 0
+        return nothing
+    end
+    dtablecolumn.chunkstore = nothing
+    dtablecolumn.current_iterator = nothing
+    chunkidx = pull_next_chunk(dtablecolumn, 0)
+    ci = dtablecolumn.current_iterator
+    if ci === nothing
+        return nothing
+    else
+        return (ci[1], (chunkidx, ci[2]))
+    end
+end
+
+function iterate(dtablecolumn::DTableColumn, iter)
+    (chunkidx, i) = iter
+    cs = dtablecolumn.chunkstore
+    ci = nothing
+    if cs !== nothing
+        ci = iterate(cs, i)
+    else
+        return nothing
+    end
+    dtablecolumn.current_iterator = ci
+    chunkidx = pull_next_chunk(dtablecolumn, chunkidx)
+    ci = dtablecolumn.current_iterator
+    if ci === nothing
+        return nothing
+    else
+        return (ci[1], (chunkidx, ci[2]))
+    end
 end
 
 ################################
@@ -246,7 +252,7 @@ function manipulate(df::DTable, @nospecialize(cs...); copycols::Bool, keeprows::
             push!(cs_vec, v)
         end
     end
-    println(cs_vec)
+    # println(cs_vec)
     return _manipulate(df, Any[DataFrames.normalize_selection(index(df), make_pair_concrete(c), renamecols) for c in cs_vec],
         copycols, keeprows)
 end
@@ -255,7 +261,7 @@ end
 function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, keeprows::Bool)
 
     ############ DTABLE SPECIFIC
-    println.(normalized_cs)
+    # println.(normalized_cs)
 
     colresults = Dict{Int,Any}()
     for (i, (colidx, (f, result_colname))) in enumerate(normalized_cs)
