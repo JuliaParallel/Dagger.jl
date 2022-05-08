@@ -26,6 +26,7 @@ using Statistics
         t(:b, :a, AsTable([:a, :b]) => ByRow(sum))
         t(:b, :a, AsTable(:) => ByRow(sum))
         t([:a, :b] => ((x, y) -> x .+ y), :b, :a)
+        t([:a, :b] => ((x, y) -> x .+ y), :b, :a, [:a, :b] => ((x, y) -> x .+ y) => :abfun2)
         t(:a => sum, :b, :a)
         t(:b => sum, :a => sum, :b, :a)
         t(names(dt) .=> sum, names(dt) .=> mean .=> "test" .* names(dt))
