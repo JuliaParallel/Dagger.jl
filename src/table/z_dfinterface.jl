@@ -140,12 +140,46 @@ function fillcolumns(dt::DTable, ics, normalized_cs)
 
     f = (ch, csymbols, colfragments) -> begin
         cf = fetch.(colfragments)
-        Tables.materializer(ch)(
-            begin
-                x = [sym => sym in csymbols ? cf[something(indexin(csymbols, [sym])...)] : Tables.getcolumn(ch, sym) for (_,(_, sym)) in normalized_cs]
-                merge(NamedTuple(), ( ; x...))
+
+        colnames = []
+        cols = []
+        last_astable = 0
+        for (idx, (_,(_, sym))) in enumerate(normalized_cs)
+            if sym !== AsTable
+                push!(colnames, sym)
+                col = sym in csymbols ?
+                    cf[something(indexin(csymbols, [sym])...)] :
+                    Tables.getcolumn(ch, sym)
+                push!(cols, col)
+            elseif sym === AsTable
+                i = findfirst(x->x===AsTable, csymbols[last_astable+1:end])
+
+                if i === nothing
+                    c = Tables.getcolumn(ch, Symbol("AsTable$(idx)"))
+                else
+                    last_astable=i
+                    c = cf[i]
+                end
+                push!.(Ref(colnames),Tables.columnnames(Tables.columns(c)))
+                push!.(Ref(cols), Tables.getcolumn.(Ref(Tables.columns(c)), Tables.columnnames(Tables.columns(c))))
             end
+        end
+
+        Tables.materializer(ch)(
+            merge(NamedTuple(), (; [e[1] => e[2] for e in zip(colnames,cols)]...))
         )
+
+        # Tables.materializer(ch)(
+        #     begin
+        #         x = [
+        #                 sym => sym in csymbols ?
+        #                     cf[something(indexin(csymbols, [sym])...)] :
+        #                     Tables.getcolumn(ch, sym)
+        #                 for (_,(_, sym)) in normalized_cs
+        #             ]
+        #         merge(NamedTuple(), ( ; x...))
+        #     end
+        # )
     end
     colfragment = (column, s, e) -> Dagger.@spawn getindex(column, s:e)
     clenghts = chunk_lengths(dt)
@@ -306,7 +340,9 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
     # return eeee = collect(enumerate(normalized_cs))
     rowfunction = (row) -> begin
         (; [
-            result_colname => begin
+            (result_colname === AsTable ?
+                Symbol("AsTable$(i)") :
+                result_colname ) => begin
                 args = colidx isa AsTable ?
                        (; [k => Tables.getcolumn(row, k) for k in getindex.(Ref(Tables.columnnames(row)), colidx.cols)]...) :
                        Tables.getcolumn.(Ref(row), colidx)

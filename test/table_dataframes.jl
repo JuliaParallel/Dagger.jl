@@ -12,7 +12,12 @@ using Statistics
             dt_01 = Dagger.select(dt, args...)
             df_01 = DataFrames.select(df, args...)
 
-            @test all(isapprox.(Tables.columns(df_01), Tables.columns(fetch(dt_01, DataFrame))))
+            result = try
+                all(isapprox.(Tables.columns(df_01), Tables.columns(fetch(dt_01, DataFrame))))
+            catch
+                all(isequal.(Tables.columns(df_01), Tables.columns(fetch(dt_01, DataFrame))))
+            end
+            @test result
         end
 
         t(:a)
@@ -30,5 +35,9 @@ using Statistics
         t(:a => sum, :b, :a)
         t(:b => sum, :a => sum, :b, :a)
         t(names(dt) .=> sum, names(dt) .=> mean .=> "test" .* names(dt))
+        t(AsTable([:a, :b]) => ByRow(identity))
+        t(AsTable([:a, :b]) => ByRow(identity) => AsTable)
+        # t(AsTable([:a, :b]) => identity) # this fails on dataframes, but not on dtable
+        t(AsTable([:a, :b]) => identity => AsTable) # but this is fine on DataFrames
     end
 end
