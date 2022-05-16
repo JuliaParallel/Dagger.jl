@@ -82,6 +82,7 @@ function dynamic_listener!(ctx, state, wid)
                     println(iob)
                     seek(iob.io, 0)
                     write(stderr, iob)
+                    println(stderr, res)
                 end
             end
         end
@@ -119,13 +120,17 @@ end
 "Waits on a thunk to complete, and fetches its result."
 function Base.fetch(h::SchedulerHandle, id::ThunkID)
     future = ThunkFuture(Future(1))
-    exec!(_register_future!, h, future, id)
+    exec!(_register_future!, h, future, id, true)
     fetch(future; proc=thunk_processor())
 end
-"Waits on a thunk to complete, and fetches its result."
-register_future!(h::SchedulerHandle, id::ThunkID, future::ThunkFuture) =
-        exec!(_register_future!, h, future, id)
-function _register_future!(ctx, state, task, tid, (future, id)::Tuple{ThunkFuture,ThunkID})
+"""
+Waits on a thunk to complete, and fetches its result. If `check` is set to
+`true` (the default), then a domination check will occur to ensure that the
+future isn't being registered on a thunk dominated by the calling thunk.
+"""
+register_future!(h::SchedulerHandle, id::ThunkID, future::ThunkFuture, check::Bool=true) =
+        exec!(_register_future!, h, future, id, check)
+function _register_future!(ctx, state, task, tid, (future, id, check)::Tuple{ThunkFuture,ThunkID,Bool})
     tid != id.id || throw(DynamicThunkException("Cannot fetch own result"))
     GC.@preserve id begin
         thunk = unwrap_weak_checked(state.thunk_dict[id.id])
@@ -150,7 +155,9 @@ function _register_future!(ctx, state, task, tid, (future, id)::Tuple{ThunkFutur
             end
             return false
         end
-        !dominates(ownthunk, thunk) || throw(DynamicThunkException("Cannot fetch result of dominated thunk"))
+        if check && dominates(ownthunk, thunk)
+            throw(DynamicThunkException("Cannot fetch result of dominated thunk"))
+        end
         # TODO: Assert that future will be fulfilled
         if haskey(state.cache, thunk)
             put!(future, state.cache[thunk]; error=state.errored[thunk])
@@ -202,7 +209,7 @@ function _add_thunk!(ctx, state, task, tid, (f, args, kwargs, future, ref))
         reschedule_inputs!(state, thunk)
         if future !== nothing
             # Ensure we attach a future before the thunk is scheduled
-            _register_future!(ctx, state, task, tid, (future, thunk_id))
+            _register_future!(ctx, state, task, tid, (future, thunk_id, false))
         end
         if ref !== nothing
             # Preserve the `EagerThunkFinalizer` through `thunk`
