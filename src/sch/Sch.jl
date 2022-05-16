@@ -47,6 +47,7 @@ Fields:
 - `waiting_data::Dict{Union{Thunk,Chunk},Set{Thunk}}` - Map from input `Chunk`/upstream `Thunk` to all unfinished downstream `Thunk`s, to retain caches
 - `ready::Vector{Thunk}` - The list of `Thunk`s that are ready to execute
 - `cache::WeakKeyDict{Thunk, Any}` - Maps from a finished `Thunk` to it's cached result, often a DRef
+- `valid::WeakKeyDict{Thunk, Nothing}` - Tracks all `Thunk`s that are in a valid scheduling state
 - `running::Set{Thunk}` - The set of currently-running `Thunk`s
 - `running_on::Dict{Thunk,OSProc}` - Map from `Thunk` to the OS process executing it
 - `thunk_dict::Dict{Int, WeakThunk}` - Maps from thunk IDs to a `Thunk`
@@ -70,6 +71,7 @@ struct ComputeState
     waiting_data::Dict{Union{Thunk,Chunk},Set{Thunk}}
     ready::Vector{Thunk}
     cache::WeakKeyDict{Thunk, Any}
+    valid::WeakKeyDict{Thunk, Nothing}
     running::Set{Thunk}
     running_on::Dict{Thunk,OSProc}
     thunk_dict::Dict{Int, WeakThunk}
@@ -93,7 +95,8 @@ function start_state(deps::Dict, node_order, chan)
                          OneToMany(),
                          deps,
                          Vector{Thunk}(undef, 0),
-                         Dict{Thunk, Any}(),
+                         WeakKeyDict{Thunk, Any}(),
+                         WeakKeyDict{Thunk, Nothing}(),
                          Set{Thunk}(),
                          Dict{Thunk,OSProc}(),
                          Dict{Int, WeakThunk}(),
@@ -119,6 +122,7 @@ function start_state(deps::Dict, node_order, chan)
             else
                 state.waiting[k] = waiting
             end
+            state.valid[k] = nothing
         end
     end
     state

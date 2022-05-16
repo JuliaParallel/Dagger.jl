@@ -208,6 +208,7 @@ function _add_thunk!(ctx, state, task, tid, (f, args, kwargs, future, ref))
             # Preserve the `EagerThunkFinalizer` through `thunk`
             thunk.eager_ref = ref
         end
+        state.valid[thunk] = nothing
         put!(state.chan, RescheduleSignal())
         timespan_finish(ctx, :add_thunk, tid, 0)
         return thunk_id

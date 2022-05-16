@@ -101,6 +101,9 @@ function reschedule_inputs!(state, thunk, seen=Set{Thunk}())
     while !isempty(to_visit)
         thunk = pop!(to_visit)
         push!(seen, thunk)
+        if haskey(state.valid, thunk)
+            continue
+        end
         if haskey(state.cache, thunk) || (thunk in state.ready) || (thunk in state.running)
             continue
         end
