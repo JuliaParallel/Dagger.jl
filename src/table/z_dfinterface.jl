@@ -21,10 +21,10 @@ end
 __ff = (ch,col) -> Tables.getcolumn(Tables.columns(ch), col)
 
 function DTableColumn(dtable::DTable, col::Int)
-    t = Tables.schema(Tables.columns(dtable)).types[col]
-    tt = fetch(Dagger.spawn((ch,_col) -> typeof(iterate(__ff(ch,_col))), dtable.chunks[1], col))
+    column_eltype = Tables.schema(Tables.columns(dtable)).types[col]
+    iterator_type = fetch(Dagger.spawn((ch,_col) -> typeof(iterate(__ff(ch,_col))), dtable.chunks[1], col))
 
-    DTableColumn{t, tt}(
+    DTableColumn{column_eltype, iterator_type}(
         dtable,
         0,
         col,
@@ -34,7 +34,6 @@ function DTableColumn(dtable::DTable, col::Int)
         nothing,
     )
 end
-
 
 
 function getindex(dtablecolumn::DTableColumn, idx::Int)
@@ -58,15 +57,15 @@ function getindex(dtablecolumn::DTableColumn, idx::Int)
     Tables.getcolumn(row, dtablecolumn.col)
 end
 
-function length(dtablecolumn::DTableColumn)
-    sum(dtablecolumn.chunk_lengths)
-end
+length(dtablecolumn::DTableColumn) = sum(dtablecolumn.chunk_lengths)
+
 
 function pull_next_chunk(dtablecolumn::DTableColumn, chunkidx::Int)
     while dtablecolumn.current_iterator === nothing
         chunkidx += 1
         if chunkidx <= length(dtablecolumn.dtable.chunks)
-            dtablecolumn.chunkstore = fetch(Dagger.spawn(__ff, dtablecolumn.dtable.chunks[chunkidx], dtablecolumn.col))
+            dtablecolumn.chunkstore =
+                fetch(Dagger.spawn(__ff, dtablecolumn.dtable.chunks[chunkidx], dtablecolumn.col))
         else
             return chunkidx
         end
@@ -112,14 +111,14 @@ end
 
 ################################
 
-
-
-
 function fillcolumn(dt::DTable, index::Int, column)
     csymbol = _columnnames_svector(dt)[index]
     f = (ch, colfragment) -> begin
         Tables.materializer(ch)(
-            merge(Tables.columntable(ch), (; [csymbol => colfragment]...))
+            merge(
+                Tables.columntable(ch),
+                (; [csymbol => colfragment]...)
+            )
         )
     end
     colfragment = (column, s, e) -> Dagger.@spawn getindex(column, s:e)
@@ -140,7 +139,6 @@ function fillcolumns(dt::DTable, ics, normalized_cs)
 
     f = (ch, csymbols, colfragments) -> begin
         cf = fetch.(colfragments)
-
         colnames = []
         cols = []
         last_astable = 0
@@ -153,7 +151,6 @@ function fillcolumns(dt::DTable, ics, normalized_cs)
                 push!(cols, col)
             elseif sym === AsTable
                 i = findfirst(x->x===AsTable, csymbols[last_astable+1:end])
-
                 if i === nothing
                     c = Tables.getcolumn(ch, Symbol("AsTable$(idx)"))
                 else
@@ -166,9 +163,11 @@ function fillcolumns(dt::DTable, ics, normalized_cs)
         end
 
         Tables.materializer(ch)(
-            merge(NamedTuple(), (; [e[1] => e[2] for e in zip(colnames,cols)]...))
+            merge(
+                NamedTuple(),
+                (; [e[1] => e[2] for e in zip(colnames,cols)]...)
+            )
         )
-
     end
     colfragment = (column, s, e) -> Dagger.@spawn getindex(column, s:e)
     clenghts = chunk_lengths(dt)
@@ -181,7 +180,6 @@ function fillcolumns(dt::DTable, ics, normalized_cs)
         end
         for (i, ch) in enumerate(dt.chunks)
     ]
-
 
     DTable(chunks, dt.tabletype)
 end
@@ -311,7 +309,6 @@ end
 
 
 function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, keeprows::Bool)
-
     ############ DTABLE SPECIFIC
     # println.(normalized_cs)
 
@@ -361,16 +358,20 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
                 elseif colresults[i] isa Dagger.EagerThunk #this is skipped actually
                     nothing
                 end
+                kk => vv
             end
             for (i, (colidx, (f, result_colname))) in filter(x-> !mapmask[x[1]], collect(enumerate(normalized_cs)))
-        ]...)
+        ])
+        return (; _cs...)
     end
+
     rd = map(rowfunction, df)
 
     #########
     # STAGE 4: Preping for last stage - getting all the full column thunks with not 1 lengths
     #########
     cpcolresults = Dict()
+
     for (k,v) in colresults
         if v isa Dagger.EagerThunk
             cpcolresults[k] = v
@@ -380,8 +381,7 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
     # LENGTH CHECK!!!
     for (k, v) in colresults
         if v isa Dagger.EagerThunk
-            if fetch(Dagger.spawn(length, v)) == dtlen
-            else
+            if fetch(Dagger.spawn(length, v)) != length(df)
                 throw("result column is not the size of the table")
             end
         end
@@ -397,8 +397,6 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
     ########### end DTABLE SPECIFIC
 
 
-    @assert !(df isa SubDataFrame && copycols == false)
-    newdf = DataFrame()
     # the role of transformed_cols is the following
     # * make sure that we do not use the same target column name twice in transformations;
     #   note though that it can appear in no-transformation selection like
@@ -434,95 +432,19 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
     # transformed_cols keeps a set of columns that were generated via a transformation
     # up till the point. Note that single column selection and column renaming is
     # considered to be a transformation
-    transformed_cols = Set{Symbol}()
+    # transformed_cols = Set{Symbol}()
     # we allow resizing newdf only if up to some point only scalars were put
     # in it. The moment we put any vector into newdf its number of rows becomes fixed
     # Also if keeprows is true then we make sure to produce nrow(df) rows so resizing
     # is not allowed
-    allow_resizing_newdf = Ref(!keeprows)
+    # allow_resizing_newdf = Ref(!keeprows)
     # keep track of the fact if single column transformation like
     # :x or :x => :y or :x => identity
     # should make a copy
     # this ensures that we store a column from a source data frame in a
     # destination data frame without copying at most once
-    column_to_copy = copycols ? trues(ncol(df)) : falses(ncol(df))
-
-    for nc in normalized_cs
-        if nc isa AbstractVector{Int} # only this case is NOT considered to be a transformation
-            allunique(nc) || throw(ArgumentError("duplicate column names selected"))
-            for i in nc
-                newname = _names(df)[i]
-                # as nc is a multiple column selection without transformations
-                # we allow duplicate column names with selections applied earlier
-                # and ignore them for convinience, to allow for e.g. select(df, :x1, :)
-                if !hasproperty(newdf, newname)
-                    # allow shortening to 0 rows
-                    if allow_resizing_newdf[] && nrow(newdf) == 1
-                        newdfcols = _columns(newdf)
-                        for (i, col) in enumerate(newdfcols)
-                            newcol = fill!(similar(col, nrow(df)), first(col))
-                            firstindex(newcol) != 1 && _onebased_check_error()
-                            newdfcols[i] = newcol
-                        end
-                    end
-                    # here even if keeprows is true all is OK
-                    newdf[!, newname] = column_to_copy[i] ? df[:, i] : df[!, i]
-                    column_to_copy[i] = true
-                    allow_resizing_newdf[] = false
-                end
-            end
-        else
-            # println("parsed")
-            # println.([Ref{Any}(nc), df, newdf, transformed_cols, copycols, allow_resizing_newdf, column_to_copy])
-            # END OF THE PARSING
-            select_transform!(Ref{Any}(nc), df, newdf, transformed_cols, copycols,
-                allow_resizing_newdf, column_to_copy)
-        end
-    end
-    return newdf
+    # column_to_copy = copycols ? trues(ncol(df)) : falses(ncol(df))
 end
-
-# function manipulate(dfv::SubDataFrame, @nospecialize(args...); copycols::Bool, keeprows::Bool,
-#                     renamecols::Bool)
-#     if copycols
-#         cs_vec = []
-#         for v in args
-#             if v isa AbstractVecOrMat{<:Pair}
-#                 append!(cs_vec, v)
-#             else
-#                 push!(cs_vec, v)
-#             end
-#         end
-#         return _manipulate(dfv, Any[normalize_selection(index(dfv),
-#                                     make_pair_concrete(c), renamecols) for c in cs_vec],
-#                            true, keeprows)
-#     else
-#         # we do not support transformations here
-#         # newinds contains only indexing; making it Vector{Any} avoids some compilation
-#         newinds = []
-#         seen_single_column = Set{Int}()
-#         for ind in args
-#             if ind isa ColumnIndex
-#                 ind_idx = index(dfv)[ind]
-#                 if ind_idx in seen_single_column
-#                     throw(ArgumentError("selecting the same column multiple times " *
-#                                         "using Symbol, string or integer is not allowed " *
-#                                         "($ind was passed more than once"))
-#                 else
-#                     push!(seen_single_column, ind_idx)
-#                 end
-#             else
-#                 newind = normalize_selection(index(dfv), make_pair_concrete(ind), renamecols)
-#                 if newind isa Pair
-#                     throw(ArgumentError("transforming and renaming columns of a " *
-#                                         "SubDataFrame is not allowed when `copycols=false`"))
-#                 end
-#                 push!(newinds, newind)
-#             end
-#         end
-#         return view(dfv, :, Cols(newinds...))
-#     end
-# end
 
 function manipulate(dt::DTable, args::AbstractVector{Int}; copycols::Bool, keeprows::Bool, renamecols::Bool)
     # this is for single arg Int e.g. Dagger.select(dt, 2)
@@ -534,6 +456,7 @@ function manipulate(dt::DTable, args::AbstractVector{Int}; copycols::Bool, keepr
     map(r -> (; colname => Tables.getcolumn(r, colidx)), dt)
     ################## DTABLE SPECIFIC
 end
+
 function manipulate(df::DTable, c::MultiColumnIndex; copycols::Bool, keeprows::Bool,
     renamecols::Bool)
     if c isa AbstractVector{<:Pair}
@@ -545,22 +468,11 @@ function manipulate(df::DTable, c::MultiColumnIndex; copycols::Bool, keeprows::B
     end
 end
 
-# function manipulate(dfv::SubDataFrame, args::MultiColumnIndex;
-#                     copycols::Bool, keeprows::Bool, renamecols::Bool)
-#     if args isa AbstractVector{<:Pair}
-#         return manipulate(dfv, args..., copycols=copycols, keeprows=keeprows,
-#                           renamecols=renamecols)
-#     else
-#         return copycols ? dfv[:, args] : view(dfv, :, args)
-#     end
-# end
 index(df::DTable) = DataFrames.Index(_columnnames_svector(df))
-manipulate(df::DTable, c::ColumnIndex; copycols::Bool, keeprows::Bool, renamecols::Bool) = manipulate(df, Int[index(df)[c]], copycols=copycols, keeprows=keeprows, renamecols=renamecols)
 
+manipulate(df::DTable, c::ColumnIndex; copycols::Bool, keeprows::Bool, renamecols::Bool) =
+    manipulate(df, Int[index(df)[c]], copycols=copycols, keeprows=keeprows, renamecols=renamecols)
 
 select(df::DTable, @nospecialize(args...); copycols::Bool=true, renamecols::Bool=true) =
     manipulate(df, map(x -> broadcast_pair(df, x), args)...,
         copycols=copycols, keeprows=true, renamecols=renamecols)
-
-
-# Dagger.select(d, AsTable([:a,:b]) => DataFrames.ByRow(sum), :a => mean => :adwa)
