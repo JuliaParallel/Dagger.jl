@@ -138,27 +138,43 @@ function fillcolumns(dt::DTable, ics, normalized_cs)
     vs = map(x -> ics[x], ks)
 
     f = (ch, csymbols, colfragments) -> begin
-        cf = fetch.(colfragments)
-        colnames = []
-        cols = []
+        col_vecs_fetched = fetch.(colfragments)
+        colnames = Vector{Symbol}()
+        cols = Vector{Any}()
         last_astable = 0
+
         for (idx, (_,(_, sym))) in enumerate(normalized_cs)
             if sym !== AsTable
-                push!(colnames, sym)
-                col = sym in csymbols ?
-                    cf[something(indexin(csymbols, [sym])...)] :
+                col = if sym in csymbols
+                    index = something(indexin(csymbols, [sym])...)
+                    col_vecs_fetched[index]
+                else
                     Tables.getcolumn(ch, sym)
+                end
+                push!(colnames, sym)
                 push!(cols, col)
             elseif sym === AsTable
-                i = findfirst(x->x===AsTable, csymbols[last_astable+1:end])
+                i = findfirst(x -> x === AsTable, csymbols[(last_astable + 1):end])
                 if i === nothing
                     c = Tables.getcolumn(ch, Symbol("AsTable$(idx)"))
                 else
-                    last_astable=i
-                    c = cf[i]
+                    last_astable = i
+                    c = col_vecs_fetched[i]
                 end
-                push!.(Ref(colnames),Tables.columnnames(Tables.columns(c)))
-                push!.(Ref(cols), Tables.getcolumn.(Ref(Tables.columns(c)), Tables.columnnames(Tables.columns(c))))
+
+                push!.(
+                    Ref(colnames),
+                    Tables.columnnames(Tables.columns(c))
+                )
+                push!.(
+                    Ref(cols),
+                    Tables.getcolumn.(
+                        Ref(Tables.columns(c)),
+                        Tables.columnnames(Tables.columns(c))
+                    )
+                )
+            else
+                throw(ErrorException("something is off"))
             end
         end
 
@@ -169,14 +185,18 @@ function fillcolumns(dt::DTable, ics, normalized_cs)
             )
         )
     end
+
     colfragment = (column, s, e) -> Dagger.@spawn getindex(column, s:e)
     clenghts = chunk_lengths(dt)
+    result_column_symbols = getindex.(Ref(map(x -> x[2][2], normalized_cs)), col_keys_indices)
 
-    _csymbols = getindex.(Ref(map(x->x[2][2],normalized_cs)), ks)
     chunks = [
         begin
-            cfrags = [colfragment(column, 1 + sum(clenghts[1:(i-1)]), sum(clenghts[1:i])) for column in vs]
-            Dagger.@spawn f(ch, _csymbols, cfrags)
+            cfrags = [
+                colfragment(column, 1 + sum(clenghts[1:(i - 1)]), sum(clenghts[1:i]))
+                for column in col_vecs
+            ]
+            Dagger.@spawn f(ch, result_column_symbols, cfrags)
         end
         for (i, ch) in enumerate(dt.chunks)
     ]
@@ -306,7 +326,6 @@ function manipulate(df::DTable, @nospecialize(cs...); copycols::Bool, keeprows::
     return _manipulate(df, Any[DataFrames.normalize_selection(index(df), make_pair_concrete(c), renamecols) for c in cs_vec],
         copycols, keeprows)
 end
-
 
 function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, keeprows::Bool)
     ############ DTABLE SPECIFIC
