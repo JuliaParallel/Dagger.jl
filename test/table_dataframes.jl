@@ -1,4 +1,7 @@
-import DataFrames
+using Dagger
+using Test
+using Tables
+using DataFrames
 using Statistics
 
 @testset "dtable-dataframes" begin

@@ -136,7 +136,7 @@ end
 
 function fillcolumns(dt::DTable, ics, normalized_cs)
     ks = [k for k in keys(ics)]
-    vs = map(x->ics[x], ks)
+    vs = map(x -> ics[x], ks)
 
     f = (ch, csymbols, colfragments) -> begin
         cf = fetch.(colfragments)
@@ -169,17 +169,6 @@ function fillcolumns(dt::DTable, ics, normalized_cs)
             merge(NamedTuple(), (; [e[1] => e[2] for e in zip(colnames,cols)]...))
         )
 
-        # Tables.materializer(ch)(
-        #     begin
-        #         x = [
-        #                 sym => sym in csymbols ?
-        #                     cf[something(indexin(csymbols, [sym])...)] :
-        #                     Tables.getcolumn(ch, sym)
-        #                 for (_,(_, sym)) in normalized_cs
-        #             ]
-        #         merge(NamedTuple(), ( ; x...))
-        #     end
-        # )
     end
     colfragment = (column, s, e) -> Dagger.@spawn getindex(column, s:e)
     clenghts = chunk_lengths(dt)
@@ -326,6 +315,10 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
     ############ DTABLE SPECIFIC
     # println.(normalized_cs)
 
+    #########
+    # STAGE 1: Spawning full column thunks - also multicolumn when needed (except identity)
+    # These get saved later and used in last stages.
+    #########
     colresults = Dict{Int,Any}()
     for (i, (colidx, (f, result_colname))) in enumerate(normalized_cs)
         if !(colidx isa AsTable) && !(f isa ByRow) && f != identity
@@ -333,19 +326,32 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
             colresults[i] = Dagger.@spawn f(cs...)
         end
     end
+    
+    #########
+    # STAGE 2: Fetching full column thunks with result of length 1
+    # These will be just injected as values in the mapping, because it's a vector full of these values
+    #########
     colresults = Dict(k => fetch(Dagger.spawn(length, v)) == 1 ? fetch(v) : v for (k, v) in colresults)
-    # checck the length of the column ones and fail here already
+
     dtlen = length(df)
     mapmask = [haskey(colresults,x) && colresults[x] isa Dagger.EagerThunk for (x,_) in enumerate(normalized_cs)]
-    # return eeee = collect(enumerate(normalized_cs))
+
+
+    #########
+    # STAGE 3: Mapping function (need to ensure this is compiled only once)
+    # It's awful right now, but it covers all cases
+    # Essentially we skip all the non-mappable stuff here
+    #########
     rowfunction = (row) -> begin
         (; [
-            (result_colname === AsTable ?
-                Symbol("AsTable$(i)") :
-                result_colname ) => begin
-                args = colidx isa AsTable ?
-                       (; [k => Tables.getcolumn(row, k) for k in getindex.(Ref(Tables.columnnames(row)), colidx.cols)]...) :
-                       Tables.getcolumn.(Ref(row), colidx)
+            (result_colname === AsTable ? Symbol("AsTable$(i)") : result_colname ) => begin
+
+                args = if colidx isa AsTable
+                    (; [k => Tables.getcolumn(row, k) for k in getindex.(Ref(Tables.columnnames(row)), colidx.cols)]...)
+                else
+                    Tables.getcolumn.(Ref(row), colidx)
+                end
+
                 if f isa ByRow
                     f.fun(args)
                 elseif f == identity
@@ -353,19 +359,25 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
                 elseif !(colresults[i] isa Dagger.EagerThunk) && length(colresults[i]) == 1
                     colresults[i]
                 elseif colresults[i] isa Dagger.EagerThunk #this is skipped actually
-                    nothing # will be filled later
+                    nothing
                 end
             end
             for (i, (colidx, (f, result_colname))) in filter(x-> !mapmask[x[1]], collect(enumerate(normalized_cs)))
         ]...)
     end
     rd = map(rowfunction, df)
+
+    #########
+    # STAGE 4: Preping for last stage - getting all the full column thunks with not 1 lengths
+    #########
     cpcolresults = Dict()
     for (k,v) in colresults
         if v isa Dagger.EagerThunk
             cpcolresults[k] = v
         end
     end
+
+    # LENGTH CHECK!!!
     for (k, v) in colresults
         if v isa Dagger.EagerThunk
             if fetch(Dagger.spawn(length, v)) == dtlen
@@ -374,19 +386,15 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
             end
         end
     end
+
+    #########
+    # STAGE 5: Fill columns - meaning the previously omitted full column tasks
+    # will be now merged into the final DTable
+    #########
     rd = fillcolumns(rd, cpcolresults,normalized_cs)
-    # for (k, v) in colresults
-    #     if v isa Dagger.EagerThunk
-    #         if fetch(Dagger.spawn(length, v)) == dtlen
-    #             rd = fillcolumn(rd, k, v)
-    #         else
-    #             throw("result column is not the size of the table")
-    #         end
-    #     end
-    # end
     return rd
 
-    ########### DTABLE SPECIFIC
+    ########### end DTABLE SPECIFIC
 
 
     @assert !(df isa SubDataFrame && copycols == false)
