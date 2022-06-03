@@ -342,7 +342,7 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
             colresults[i] = Dagger.@spawn f(cs...)
         end
     end
-    
+
     #########
     # STAGE 2: Fetching full column thunks with result of length 1
     # These will be just injected as values in the mapping, because it's a vector full of these values
@@ -359,7 +359,7 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
     # Essentially we skip all the non-mappable stuff here
     #########
     rowfunction = (row) -> begin
-        (; [
+        _cs = [
             (result_colname === AsTable ? Symbol("AsTable$(i)") : result_colname ) => begin
 
                 args = if colidx isa AsTable
@@ -380,7 +380,7 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
                 kk => vv
             end
             for (i, (colidx, (f, result_colname))) in filter(x-> !mapmask[x[1]], collect(enumerate(normalized_cs)))
-        ])
+        ]
         return (; _cs...)
     end
 
