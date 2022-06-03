@@ -133,9 +133,9 @@ function fillcolumn(dt::DTable, index::Int, column)
     DTable(chunks, dt.tabletype)
 end
 
-function fillcolumns(dt::DTable, ics, normalized_cs)
-    ks = [k for k in keys(ics)]
-    vs = map(x -> ics[x], ks)
+function fillcolumns(dt::DTable, ics::Dict{Int,Any}, normalized_cs)
+    col_keys_indices = collect(keys(ics))::Vector{Int}
+    col_vecs = map(x -> ics[x], col_keys_indices)::Union{Vector{Any},Vector{Dagger.EagerThunk}}
 
     f = (ch, csymbols, colfragments) -> begin
         col_vecs_fetched = fetch.(colfragments)
@@ -181,7 +181,7 @@ function fillcolumns(dt::DTable, ics, normalized_cs)
         Tables.materializer(ch)(
             merge(
                 NamedTuple(),
-                (; [e[1] => e[2] for e in zip(colnames,cols)]...)
+                (; [e[1] => e[2] for e in zip(colnames, cols)]...)
             )
         )
     end
@@ -347,49 +347,65 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
     # STAGE 2: Fetching full column thunks with result of length 1
     # These will be just injected as values in the mapping, because it's a vector full of these values
     #########
-    colresults = Dict(k => fetch(Dagger.spawn(length, v)) == 1 ? fetch(v) : v for (k, v) in colresults)
 
-    dtlen = length(df)
-    mapmask = [haskey(colresults,x) && colresults[x] isa Dagger.EagerThunk for (x,_) in enumerate(normalized_cs)]
+    colresults = Dict{Int,Any}(
+        k => fetch(Dagger.spawn(length, v)) == 1 ? fetch(v) : v
+        for (k, v) in colresults
+    )
 
+    mapmask = [
+        haskey(colresults, x) && colresults[x] isa Dagger.EagerThunk
+        for (x,_) in enumerate(normalized_cs)
+    ]
+
+    mappable_part_of_normalized_cs = filter(x-> !mapmask[x[1]], collect(enumerate(normalized_cs)))
 
     #########
     # STAGE 3: Mapping function (need to ensure this is compiled only once)
     # It's awful right now, but it covers all cases
     # Essentially we skip all the non-mappable stuff here
     #########
-    rowfunction = (row) -> begin
+
+    rowfunction = row -> begin
         _cs = [
-            (result_colname === AsTable ? Symbol("AsTable$(i)") : result_colname ) => begin
+            begin
+                kk = result_colname === AsTable ? Symbol("AsTable$(i)") : result_colname
+                vv = begin
+                    args = if colidx isa AsTable
+                        (;[
+                            k => Tables.getcolumn(row, k)
+                            for k in getindex.(Ref(Tables.columnnames(row)), colidx.cols)
+                        ]...)
+                    else
+                        Tables.getcolumn.(Ref(row), colidx)
+                    end
 
-                args = if colidx isa AsTable
-                    (; [k => Tables.getcolumn(row, k) for k in getindex.(Ref(Tables.columnnames(row)), colidx.cols)]...)
-                else
-                    Tables.getcolumn.(Ref(row), colidx)
-                end
-
-                if f isa ByRow
-                    f.fun(args)
-                elseif f == identity
-                    args
-                elseif !(colresults[i] isa Dagger.EagerThunk) && length(colresults[i]) == 1
-                    colresults[i]
-                elseif colresults[i] isa Dagger.EagerThunk #this is skipped actually
-                    nothing
+                    if f isa ByRow
+                        f.fun(args)
+                    elseif f == identity
+                        args
+                    elseif length(colresults[i]) == 1 # && !(colresults[i] isa Dagger.EagerThunk)
+                        colresults[i]
+                    # elseif colresults[i] isa Dagger.EagerThunk #this is skipped actually -> remove this
+                    #     nothing # will be filled later
+                    else
+                        throw(ErrorException("Weird unhandled stuff"))
+                    end
                 end
                 kk => vv
             end
-            for (i, (colidx, (f, result_colname))) in filter(x-> !mapmask[x[1]], collect(enumerate(normalized_cs)))
+            for (i, (colidx, (f, result_colname))) in mappable_part_of_normalized_cs
         ]
         return (; _cs...)
     end
 
     rd = map(rowfunction, df)
 
+
     #########
     # STAGE 4: Preping for last stage - getting all the full column thunks with not 1 lengths
     #########
-    cpcolresults = Dict()
+    cpcolresults = Dict{Int,Any}()
 
     for (k,v) in colresults
         if v isa Dagger.EagerThunk
@@ -397,20 +413,19 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
         end
     end
 
-    # LENGTH CHECK!!!
-    for (k, v) in colresults
+    for (_, v) in colresults
         if v isa Dagger.EagerThunk
             if fetch(Dagger.spawn(length, v)) != length(df)
                 throw("result column is not the size of the table")
             end
         end
     end
-
     #########
     # STAGE 5: Fill columns - meaning the previously omitted full column tasks
     # will be now merged into the final DTable
     #########
-    rd = fillcolumns(rd, cpcolresults,normalized_cs)
+    rd = fillcolumns(rd, cpcolresults, normalized_cs)
+
     return rd
 
     ########### end DTABLE SPECIFIC
