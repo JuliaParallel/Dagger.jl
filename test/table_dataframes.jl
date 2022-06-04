@@ -3,6 +3,7 @@ using Test
 using Tables
 using DataFrames
 using Statistics
+import SentinelArrays
 
 @testset "dtable-dataframes" begin
     @testset "select" begin
@@ -20,27 +21,35 @@ using Statistics
             catch
                 all(isequal.(Tables.columns(df_01), Tables.columns(fetch(dt_01, DataFrame))))
             end
-            @test result
+            result
         end
 
-        t(:a)
-        t(1)
-        t(:b)
-        t(2)
-        t(:a, :b)
-        t(1, 2)
-        t(:b, :a)
-        t(2, 1)
-        t(:b, :a, AsTable([:a, :b]) => ByRow(sum))
-        t(:b, :a, AsTable(:) => ByRow(sum))
-        t([:a, :b] => ((x, y) -> x .+ y), :b, :a)
-        t([:a, :b] => ((x, y) -> x .+ y), :b, :a, [:a, :b] => ((x, y) -> x .+ y) => :abfun2)
-        t(:a => sum, :b, :a)
-        t(:b => sum, :a => sum, :b, :a)
-        t(names(dt) .=> sum, names(dt) .=> mean .=> "test" .* names(dt))
-        t(AsTable([:a, :b]) => ByRow(identity))
-        t(AsTable([:a, :b]) => ByRow(identity) => AsTable)
-        # t(AsTable([:a, :b]) => identity) # this fails on dataframes, but not on dtable
-        t(AsTable([:a, :b]) => identity => AsTable) # but this is fine on DataFrames
+        @test t(:a)
+        @test t(1)
+        @test t(:b)
+        @test t(2)
+        @test t(:a, :b)
+        @test t(1, 2)
+        @test t(:b, :a)
+        @test t(2, 1)
+        @test t(:b, :a, AsTable([:a, :b]) => ByRow(sum))
+        @test t(:b, :a, AsTable(:) => ByRow(sum))
+        @test t(AsTable([:a, :b]) => ByRow(sum))
+        @test t(AsTable(:) => ByRow(sum))
+        @test t([:a, :b] => ((x, y) -> x .+ y), :b, :a)
+        @test t([:a, :b] => ((x, y) -> x .+ y), :b, :a, [:a, :b] => ((x, y) -> x .+ y) => :abfun2)
+        @test t([:a, :a] => ((x, y) -> x .+ y))
+        @test t(:a => sum)
+        @test t(:a => sum, :a => mean)
+        @test t(:a => sum, :b, :a)
+        @test t(:b => sum, :a => sum, :b, :a)
+        @test t(names(dt) .=> sum, names(dt) .=> mean .=> "test" .* names(dt))
+        @test t(AsTable([:a, :b]) => ByRow(identity))
+        @test t(AsTable([:a, :b]) => ByRow(identity) => AsTable)
+        # @test # t(AsTable([:a, :b]) => identity) # this fails on dataframes, but not on dtable
+        @test t(AsTable([:a, :b]) => identity => AsTable) # but this is fine on DataFrames
+        @test t([] => ByRow(() -> 1) => :x)
+        @test fetch(Dagger.select(dt, [] => ByRow(rand) => :x)).x isa SentinelArrays.ChainedVector{Float64, Vector{Float64}}
+        @test fetch(Dagger.select(dt, [] => (() -> rand(s)) => :x)).x isa SentinelArrays.ChainedVector{Float64, Vector{Float64}}
     end
 end

@@ -133,7 +133,7 @@ function fillcolumn(dt::DTable, index::Int, column)
     DTable(chunks, dt.tabletype)
 end
 
-function fillcolumns(dt::DTable, ics::Dict{Int,Any}, normalized_cs)
+function fillcolumns(dt::DTable, ics::Dict{Int,Any}, normalized_cs, chunk_lengths_of_original_dt::Vector{Int})
     col_keys_indices = collect(keys(ics))::Vector{Int}
     col_vecs = map(x -> ics[x], col_keys_indices)::Union{Vector{Any},Vector{Dagger.EagerThunk}}
 
@@ -177,7 +177,6 @@ function fillcolumns(dt::DTable, ics::Dict{Int,Any}, normalized_cs)
                 throw(ErrorException("something is off"))
             end
         end
-
         Tables.materializer(ch)(
             merge(
                 NamedTuple(),
@@ -187,7 +186,7 @@ function fillcolumns(dt::DTable, ics::Dict{Int,Any}, normalized_cs)
     end
 
     colfragment = (column, s, e) -> Dagger.@spawn getindex(column, s:e)
-    clenghts = chunk_lengths(dt)
+    clenghts = chunk_lengths_of_original_dt
     result_column_symbols = getindex.(Ref(map(x -> x[2][2], normalized_cs)), col_keys_indices)
 
     chunks = [
@@ -338,8 +337,12 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
     colresults = Dict{Int,Any}()
     for (i, (colidx, (f, result_colname))) in enumerate(normalized_cs)
         if !(colidx isa AsTable) && !(f isa ByRow) && f != identity
-            cs = DTableColumn.(Ref(df), [colidx...])
-            colresults[i] = Dagger.@spawn f(cs...)
+            if length(colidx) > 0
+                cs = DTableColumn.(Ref(df), [colidx...])
+                colresults[i] = Dagger.@spawn f(cs...)
+            else
+                colresults[i] = Dagger.@spawn f() # case of select(d, [] => fun)
+            end
         end
     end
 
@@ -380,7 +383,9 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
                         Tables.getcolumn.(Ref(row), colidx)
                     end
 
-                    if f isa ByRow
+                    if f isa ByRow && !(colidx isa AsTable) && length(colidx) == 0
+                        f.fun()
+                    elseif f isa ByRow
                         f.fun(args)
                     elseif f == identity
                         args
@@ -424,7 +429,8 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
     # STAGE 5: Fill columns - meaning the previously omitted full column tasks
     # will be now merged into the final DTable
     #########
-    rd = fillcolumns(rd, cpcolresults, normalized_cs)
+
+    rd = fillcolumns(rd, cpcolresults, normalized_cs, chunk_lengths(df))
 
     return rd
 
