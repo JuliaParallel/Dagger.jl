@@ -252,4 +252,12 @@ end
         a = delayed(+)(1,2)
         @test_throws Exception Dagger.spawn(identity, a)
     end
+    @testset "@sync support" begin
+        result = Dagger.@spawn sleep(1)
+        @test !isready(result)
+        @sync begin
+            result = Dagger.@spawn sleep(1)
+        end
+        @test isready(result)
+    end
 end
