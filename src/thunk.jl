@@ -329,9 +329,15 @@ function _par(ex::Expr; lazy=true, recur=true, opts=())
         if lazy
             return :(Dagger.delayed($(esc(f)); $(opts...))($(_par.(args; lazy=lazy, recur=false)...)))
         else
+            sync_var = esc(Base.sync_varname)
+            @gensym result
             return quote
                 let args = ($(_par.(args; lazy=lazy, recur=false)...),)
-                    $spawn($(esc(f)), args...; $(opts...))
+                    $result = $spawn($(esc(f)), args...; $(opts...))
+                    if $(Expr(:islocal, sync_var))
+                        put!($sync_var, schedule(Task(()->wait($result))))
+                    end
+                    $result
                 end
             end
         end
