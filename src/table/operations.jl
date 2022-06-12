@@ -256,7 +256,7 @@ end
 """
     mapreduce(f, op, d::DTable; init=Base._InitialValue())
 
-Perform a mapreduce operation where `f` is the mapping function applied to the table row
+Perform a `mapreduce` operation where `f` is the mapping function applied to the table row
 and `op` is the reduce function applied to the results of the mapping operation.
 
 # Examples

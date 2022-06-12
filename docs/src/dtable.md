@@ -164,9 +164,9 @@ julia> fetch(r)
 
 ## `mapreduce` usage
 
-The operation `mapreduce` is especially helpful when using `OnlineStats`.
-It lets you transform a row to the format you need right before applying the reduce function.
-In consequence a lot of memory usage is saved due to the lack of an intermediate `map` step that allocates a full column.
+The operation `mapreduce` is helpful in fully utilizing `OnlineStats`.
+It lets you transform a row to the required format before applying the reduce function.
+In consequence a lot of memory usage should be saved due to the lack of an intermediate `map` step that allocates a full column.
 
 ```julia
 julia> using Dagger, OnlineStats
@@ -185,7 +185,7 @@ GroupBy: Int64 => Mean
 ├─ 2
 │  └─ Mean: n=33 | value=0.555258
 └─ 0
-    └─ Mean: n=33 | value=0.470984
+   └─ Mean: n=33 | value=0.470984
 
 julia> d2 = DTable((;a1=abs.(rand(Int, 100).%2), [Symbol("a\$(i)") => rand(100) for i in 2:3]...), 25);
 
