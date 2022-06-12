@@ -1,7 +1,5 @@
 import InvertedIndices: BroadcastedInvertedIndex
-import InvertedIndices
 import DataAPI: Between, All, Cols, BroadcastedSelector
-import DataAPI
 import DataFrames: SymbolOrString, ColumnIndex, MultiColumnIndex, MULTICOLUMNINDEX_TUPLE,
     ByRow, funname, make_pair_concrete, AsTable, ncol, normalize_selection
 
@@ -11,14 +9,14 @@ broadcast_pair(df::DTable, @nospecialize(p::Any)) = p
 # Copied as is from DataFrames.jl
 function broadcast_pair(df::DTable, @nospecialize(p::Pair))
     src, second = p
-    src_broadcast = src isa Union{InvertedIndices.BroadcastedInvertedIndex,
-        DataAPI.BroadcastedSelector}
-    second_broadcast = second isa Union{InvertedIndices.BroadcastedInvertedIndex,
-        DataAPI.BroadcastedSelector}
+    src_broadcast = src isa Union{BroadcastedInvertedIndex,
+        BroadcastedSelector}
+    second_broadcast = second isa Union{BroadcastedInvertedIndex,
+        BroadcastedSelector}
     if second isa Pair
         fun, dst = second
-        dst_broadcast = dst isa Union{InvertedIndices.BroadcastedInvertedIndex,
-            DataAPI.BroadcastedSelector}
+        dst_broadcast = dst isa Union{BroadcastedInvertedIndex,
+            BroadcastedSelector}
         if src_broadcast || dst_broadcast
             new_src = src_broadcast ? names(df, src.sel) : src
             new_dst = dst_broadcast ? names(df, dst.sel) : dst
@@ -51,8 +49,8 @@ function broadcast_pair(df::DTable, @nospecialize(p::AbstractVecOrMat{<:Pair}))
 
     src = first.(p)
     first_src = first(src)
-    if first_src isa Union{InvertedIndices.BroadcastedInvertedIndex,
-        DataAPI.BroadcastedSelector}
+    if first_src isa Union{BroadcastedInvertedIndex,
+        BroadcastedSelector}
         if any(!=(first_src), src)
             throw(ArgumentError("when broadcasting column selector it must " *
                                 "have a constant value"))
@@ -70,8 +68,8 @@ function broadcast_pair(df::DTable, @nospecialize(p::AbstractVecOrMat{<:Pair}))
 
     second = last.(p)
     first_second = first(second)
-    if first_second isa Union{InvertedIndices.BroadcastedInvertedIndex,
-        DataAPI.BroadcastedSelector}
+    if first_second isa Union{BroadcastedInvertedIndex,
+        BroadcastedSelector}
         if any(!=(first_second), second)
             throw(ArgumentError("when using broadcasted column selector it " *
                                 "must have a constant value"))
@@ -86,8 +84,8 @@ function broadcast_pair(df::DTable, @nospecialize(p::AbstractVecOrMat{<:Pair}))
     else
         if first_second isa Pair
             fun, dst = first_second
-            if dst isa Union{InvertedIndices.BroadcastedInvertedIndex,
-                DataAPI.BroadcastedSelector}
+            if dst isa Union{BroadcastedInvertedIndex,
+                BroadcastedSelector}
                 if !all(x -> x isa Pair && last(x) == dst, second)
                     throw(ArgumentError("when using broadcasted column selector " *
                                         "it must have a constant value"))
