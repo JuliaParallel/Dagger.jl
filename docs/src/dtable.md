@@ -336,3 +336,17 @@ julia> pp(innerjoin(dt, d2, on=:a))
 4, 4, -4
 5, 5, -5
 ```
+
+# DataFrames.jl minilanguage and operations support (experimental)
+
+Support for `DataFrames.jl` minilanguage and operations is planned for the `DTable`
+to enable a seemless transition between in-memory and distributed data processing.
+
+As of today `select` is available with more operations to come in the future.
+
+The goal is to provide exactly the same output as for DataFrames using the same `args`.
+Even though the output should be the same the DTable may require modification of user input in order to provide optimal distributed performance.
+
+One already known tactic is to avoid functions that require access to the full column at once.
+The user should prefer to use `ByRow` equivalents or `reduce` instead.
+A complete performance guide will surely be a part of the documentation at some point.
