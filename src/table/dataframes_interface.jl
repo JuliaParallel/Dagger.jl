@@ -2,11 +2,13 @@ import InvertedIndices: BroadcastedInvertedIndex
 import InvertedIndices
 import DataAPI: Between, All, Cols, BroadcastedSelector
 import DataAPI
-import DataFrames: SymbolOrString, ColumnIndex, MultiColumnIndex, MULTICOLUMNINDEX_TUPLE, ByRow, funname, make_pair_concrete, AsTable, ncol, normalize_selection
+import DataFrames: SymbolOrString, ColumnIndex, MultiColumnIndex, MULTICOLUMNINDEX_TUPLE,
+    ByRow, funname, make_pair_concrete, AsTable, ncol, normalize_selection
 
 
 broadcast_pair(df::DTable, @nospecialize(p::Any)) = p
 
+# Copied as is from DataFrames.jl
 function broadcast_pair(df::DTable, @nospecialize(p::Pair))
     src, second = p
     src_broadcast = src isa Union{InvertedIndices.BroadcastedInvertedIndex,
@@ -41,6 +43,8 @@ end
 # as then broadcasting produces Matrix{Any} rather than Matrix{<:Pair}
 broadcast_pair(df::DTable, @nospecialize(p::AbstractMatrix)) = isempty(p) ? [] : p
 
+
+# Copied as is from DataFrames.jl
 function broadcast_pair(df::DTable, @nospecialize(p::AbstractVecOrMat{<:Pair}))
     isempty(p) && return []
     need_broadcast = false
@@ -112,6 +116,7 @@ function broadcast_pair(df::DTable, @nospecialize(p::AbstractVecOrMat{<:Pair}))
     end
 end
 
+# Copied as is from DataFrames.jl
 function manipulate(df::DTable, @nospecialize(cs...); copycols::Bool, keeprows::Bool, renamecols::Bool)
     cs_vec = []
     for v in cs
@@ -125,10 +130,8 @@ function manipulate(df::DTable, @nospecialize(cs...); copycols::Bool, keeprows::
         copycols, keeprows)
 end
 
+# Not copied - full custom implementation
 function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, keeprows::Bool)
-    ############ DTABLE SPECIFIC
-    # println.(normalized_cs)
-
     #########
     # STAGE 1: Spawning full column thunks - also multicolumn when needed (except identity)
     # These get saved later and used in last stages.
@@ -232,12 +235,14 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
     return rd
 end
 
+# Not copied - full custom implementation
 function manipulate(dt::DTable, args::AbstractVector{Int}; copycols::Bool, keeprows::Bool, renamecols::Bool)
     colidx = first(args)
     colname = Tables.columnnames(Tables.columns(dt))[colidx]
     map(r -> (; colname => Tables.getcolumn(r, colidx)), dt)
 end
 
+# Copied as is from DataFrames.jl
 function manipulate(df::DTable, c::MultiColumnIndex; copycols::Bool, keeprows::Bool,
     renamecols::Bool)
     if c isa AbstractVector{<:Pair}
@@ -249,9 +254,11 @@ function manipulate(df::DTable, c::MultiColumnIndex; copycols::Bool, keeprows::B
     end
 end
 
+# Copied as is from DataFrames.jl
 manipulate(df::DTable, c::ColumnIndex; copycols::Bool, keeprows::Bool, renamecols::Bool) =
     manipulate(df, Int[index(df)[c]], copycols=copycols, keeprows=keeprows, renamecols=renamecols)
 
+# Copied as is from DataFrames.jl
 select(df::DTable, @nospecialize(args...); copycols::Bool=true, renamecols::Bool=true) =
     manipulate(df, map(x -> broadcast_pair(df, x), args)...,
         copycols=copycols, keeprows=true, renamecols=renamecols)

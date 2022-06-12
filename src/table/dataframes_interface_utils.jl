@@ -1,4 +1,5 @@
-import DataFrames
+import DataAPI: ncol
+import DataFrames: Index
 
 function fillcolumns(dt::DTable, ics::Dict{Int,Any}, normalized_cs, chunk_lengths_of_original_dt::Vector{Int})
     col_keys_indices = collect(keys(ics))::Vector{Int}
@@ -70,5 +71,5 @@ function fillcolumns(dt::DTable, ics::Dict{Int,Any}, normalized_cs, chunk_length
     DTable(chunks, dt.tabletype)
 end
 
-DataFrames.ncol(d::DTable) = length(Tables.columns(d))
-index(df::DTable) = DataFrames.Index(_columnnames_svector(df))
+ncol(d::DTable) = length(Tables.columns(d))
+index(df::DTable) = Index(_columnnames_svector(df))
