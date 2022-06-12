@@ -1,8 +1,11 @@
 import InvertedIndices: BroadcastedInvertedIndex
 import DataAPI: Between, All, Cols, BroadcastedSelector
-import DataFrames: SymbolOrString, ColumnIndex, MultiColumnIndex, MULTICOLUMNINDEX_TUPLE,
-    ByRow, funname, make_pair_concrete, AsTable, ncol, normalize_selection
+import DataFrames: ColumnIndex, MultiColumnIndex,
+    ByRow, AsTable, normalize_selection
 
+make_pair_concrete(@nospecialize(x::Pair)) =
+    make_pair_concrete(x.first) => make_pair_concrete(x.second)
+make_pair_concrete(@nospecialize(x)) = x
 
 broadcast_pair(df::DTable, @nospecialize(p::Any)) = p
 
@@ -169,41 +172,7 @@ function _manipulate(df::DTable, normalized_cs::Vector{Any}, copycols::Bool, kee
     # Essentially we skip all the non-mappable stuff here
     #########
 
-    rowfunction = row -> begin
-        _cs = [
-            begin
-                kk = result_colname === AsTable ? Symbol("AsTable$(i)") : result_colname
-                vv = begin
-                    args = if colidx isa AsTable
-                        (; [
-                            k => Tables.getcolumn(row, k)
-                            for k in getindex.(Ref(Tables.columnnames(row)), colidx.cols)
-                        ]...)
-                    else
-                        Tables.getcolumn.(Ref(row), colidx)
-                    end
-
-                    if f isa ByRow && !(colidx isa AsTable) && length(colidx) == 0
-                        f.fun()
-                    elseif f isa ByRow
-                        f.fun(args)
-                    elseif f == identity
-                        args
-                    elseif length(colresults[i]) == 1
-                        colresults[i]
-                    else
-                        throw(ErrorException("Weird unhandled stuff"))
-                    end
-                end
-                kk => vv
-            end
-            for (i, (colidx, (f, result_colname))) in mappable_part_of_normalized_cs
-        ]
-        return (; _cs...)
-    end
-
-    rd = map(rowfunction, df)
-
+    rd = map(x -> select_rowfunction(x, mappable_part_of_normalized_cs, colresults), df)
 
     #########
     # STAGE 4: Preping for last stage - getting all the full column thunks with not 1 lengths

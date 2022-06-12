@@ -1,5 +1,38 @@
 import DataAPI: ncol
-import DataFrames: Index
+import DataFrames: Index, ByRow, AsTable
+
+function select_rowfunction(row, mappable_part_of_normalized_cs, colresults)
+    _cs = [
+        begin
+            kk = result_colname === AsTable ? Symbol("AsTable$(i)") : result_colname
+            vv = begin
+                args = if colidx isa AsTable
+                    (; [
+                        k => Tables.getcolumn(row, k)
+                        for k in getindex.(Ref(Tables.columnnames(row)), colidx.cols)
+                    ]...)
+                else
+                    Tables.getcolumn.(Ref(row), colidx)
+                end
+
+                if f isa ByRow && !(colidx isa AsTable) && length(colidx) == 0
+                    f.fun()
+                elseif f isa ByRow
+                    f.fun(args)
+                elseif f == identity
+                    args
+                elseif length(colresults[i]) == 1
+                    colresults[i]
+                else
+                    throw(ErrorException("Weird unhandled stuff"))
+                end
+            end
+            kk => vv
+        end
+        for (i, (colidx, (f, result_colname))) in mappable_part_of_normalized_cs
+    ]
+    return (; _cs...)
+end
 
 function fillcolumns(dt::DTable, ics::Dict{Int,Any}, normalized_cs, chunk_lengths_of_original_dt::Vector{Int})
     col_keys_indices = collect(keys(ics))::Vector{Int}
