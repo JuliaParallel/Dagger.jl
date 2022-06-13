@@ -86,6 +86,20 @@ wait(x)
 @assert isready(x)
 ```
 
+Like `@async` and `Threads.@spawn`, `Dagger.@spawn` synchronizes with
+locally-scoped `@sync` blocks:
+
+```julia
+function sleep_and_print(delay, str)
+    sleep(delay)
+    println(str)
+end
+@sync begin
+    Dagger.@spawn sleep_and_print(3, "I print first")
+end
+wait(Dagger.@spawn sleep_and_print(1, "I print second"))
+```
+
 One can also safely call `@spawn` from another worker (not ID 1), and it will be executed correctly:
 
 ```
