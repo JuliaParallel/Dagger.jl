@@ -36,7 +36,7 @@ function determine_schema(table::DTable)
     end
     c_idx = 1
     r = (false, nothing)
-    while !r[1]
+    while !r[1] && c_idx <= length(table.chunks)
         r = fetch(Dagger.spawn(chunk_f, table.chunks[c_idx]))
         c_idx += 1
     end

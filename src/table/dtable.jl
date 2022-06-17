@@ -2,9 +2,9 @@ import Tables
 import TableOperations
 import SentinelArrays
 
-import Base: fetch, show, length
+import Base: fetch, show, length, iterate, names, propertynames, wait, isready
 
-export DTable, tabletype, tabletype!, trim, trim!, leftjoin, innerjoin
+export DTable, tabletype, tabletype!, trim, trim!, leftjoin, innerjoin, DTableColumn
 
 const VTYPE = Vector{Union{Dagger.Chunk,Dagger.EagerThunk}}
 
@@ -196,9 +196,13 @@ function show(io::IO, ::MIME"text/plain", d::DTable)
     nothing
 end
 
-function length(table::DTable)
+function chunk_lengths(table::DTable)
     f = x -> length(Tables.rows(x))
-    sum(fetch.([Dagger.@spawn f(c) for c in table.chunks]))
+    fetch.([Dagger.@spawn f(c) for c in table.chunks])
+end
+
+function length(table::DTable)
+    sum(chunk_lengths(table))
 end
 
 function _columnnames_svector(d::DTable)
@@ -209,3 +213,15 @@ end
 @inline nchunks(d::DTable) = length(d.chunks)
 
 merge_chunks(sink, chunks) = sink(TableOperations.joinpartitions(Tables.partitioner(_retrieve, chunks)))
+
+Base.names(dt::DTable) = string.(_columnnames_svector(dt))
+Base.propertynames(dt::DTable) = _columnnames_svector(dt)
+
+function Base.wait(dt::DTable)
+    for ch in dt.chunks
+        !(ch isa Dagger.Chunk) && wait(ch)
+    end
+    return nothing
+end
+
+Base.isready(dt::DTable) = all([ch isa Dagger.Chunk ? true : (isready(ch); true) for ch in dt.chunks])
