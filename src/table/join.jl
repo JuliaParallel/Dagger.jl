@@ -186,15 +186,13 @@ function match_inner_indices_rsorted(l, r, cmp_l::NTuple{N,Int}, cmp_r::NTuple{N
     sizehint!(vr, l_length)
 
     for (oind, oel) in enumerate(Tables.rows(l))
-        prev_cmp = false
         for (iind, iel) in enumerate(Tables.rows(r))
-            cmp = compare_rows_eq(oel, iel, cmp_l, cmp_r)
-            if cmp
+            if compare_rows_lt(oel, iel, cmp_l, cmp_r)
+                break
+            elseif compare_rows_eq(oel, iel, cmp_l, cmp_r)
                 push!(vl, oind)
                 push!(vr, iind)
             end
-            prev_cmp && !cmp && break
-            prev_cmp = cmp
         end
     end
     vl, vr

@@ -4,6 +4,7 @@ using CSV
 using Random
 using Tables
 using TableOperations
+using OnlineStats
 
 @testset "dtable" begin
     @testset "constructors - Tables.jl compatibility (NamedTuple)" begin
@@ -167,6 +168,23 @@ using TableOperations
 
         @test fetch(all_reduce).a == df1
         @test fetch(all_reduce).b == df5
+    end
+
+    @testset "mapreduce" begin
+        nt = (a=collect(1:100).%10, b=rand(100))
+        d1 = DTable(nt, 25)
+        d2 = DataFrame(nt)
+        gg = GroupBy(Int, Mean())
+        r1 = fetch(mapreduce(x -> (x.a, x.b), fit!, d1, init=gg))
+        r2 = combine(groupby(d2, :a), :b => mean)
+        r1t = DataFrame(((r) -> (a=r[1], b_mean=r[2].μ)).(collect(r1.value)))
+        sort!(r1t)
+        sort!(r2)
+        @test isapprox(r1t.b_mean, r2.b_mean)
+
+        r3 = fetch(mapreduce(sum, fit!, d1, init = Mean()))
+        r4 = combine(select(d2, AsTable(:) => ByRow(sum) => :sum), :sum => mean)
+        @test isapprox(r3.μ, r4.sum_mean[1])
     end
 
     @testset "chaining ops" begin
@@ -448,8 +466,9 @@ using TableOperations
             ij8 = fetch(innerjoin(DTable(d1, 111, tabletype=NamedTuple), d2, on=on, lookup=d2_lookup), DataFrame)
             ij9 = fetch(innerjoin(Dagger.groupby(DTable(d1, 111, tabletype=NamedTuple), r_colsymbols), d2, on=on), DataFrame)
             ij10 = fetch(innerjoin(DTable(d1, a_len ÷ 10), DTable(d2, b_len ÷ 10), on=on), DataFrame)
+            ij11 = fetch(innerjoin(DTable(d1, a_len ÷ 10), DTable(d2, b_len), on=on), DataFrame)
 
-            sort!.([ij1, ij1u, ij2, ij3, ij4, ij5, ij6, ij7, ij8, ij9, ij10], Ref(propertynames(ij1)))
+            sort!.([ij1, ij1u, ij2, ij3, ij4, ij5, ij6, ij7, ij8, ij9, ij10, ij11], Ref(propertynames(ij1)))
 
             @test isequal(ij1, ij2)
             @test isequal(ij1, ij3)
@@ -460,6 +479,7 @@ using TableOperations
             @test isequal(ij1, ij8)
             @test isequal(ij1, ij9)
             @test isequal(ij1, ij10)
+            @test isequal(ij1, ij11)
         end
     end
 end

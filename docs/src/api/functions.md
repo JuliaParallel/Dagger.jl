@@ -29,6 +29,7 @@ trim!
 map
 filter
 reduce
+mapreduce
 groupby
 leftjoin
 innerjoin
