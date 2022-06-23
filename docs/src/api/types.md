@@ -15,12 +15,6 @@ Chunk
 UnitDomain
 ```
 
-## Table Types
-```@docs
-DTable
-GDTable
-```
-
 ## Array Types
 ```@docs
 DArray

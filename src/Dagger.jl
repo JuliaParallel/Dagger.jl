@@ -57,14 +57,6 @@ include("ui/graph.jl")
 include("ui/gantt-common.jl")
 include("ui/gantt-text.jl")
 
-include("table/dtable.jl")
-include("table/gdtable.jl")
-include("table/tables.jl")
-include("table/operations.jl")
-include("table/groupby.jl")
-include("table/join_interface.jl")
-include("table/join.jl")
-
 include("lib/logging-extras.jl")
 
 function __init__()

@@ -13,7 +13,6 @@ makedocs(;
     ),
     pages = [
         "Home" => "index.md",
-        "Distributed Table" => "dtable.md",
         "Processors" => "processors.md",
         "Scopes" => "scopes.md",
         "Mutation and Shards" => "mutation.md",
@@ -34,4 +33,3 @@ makedocs(;
 deploydocs(;
     repo="github.com/JuliaParallel/Dagger.jl",
 )
-
