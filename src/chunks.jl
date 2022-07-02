@@ -248,7 +248,7 @@ Base.map(f, s::Shard) = [Dagger.spawn(f, c) for c in values(s.chunks)]
 Create a chunk from sequential object `x` which resides on `proc`.
 """
 function tochunk(x::X, proc::P=OSProc(), scope::S=AnyScope(); persist=false, cache=false) where {X,P,S}
-    ref = poolset(x, destroyonevict=persist ? false : cache)
+    ref = poolset(x)
     Chunk{X,typeof(ref),P,S}(X, domain(x), ref, proc, scope, persist)
 end
 tochunk(x::Union{Chunk, Thunk}, proc=nothing, scope=nothing) = x
