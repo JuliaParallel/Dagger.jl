@@ -62,21 +62,6 @@ shouldpersist(p::Chunk) = t.persist
 processor(c::Chunk) = c.processor
 affinity(c::Chunk) = affinity(c.handle)
 
-function unrelease(c::Chunk{<:Any,DRef})
-    # set spilltodisk = true if data is still around
-    try
-        destroyonevict(c.handle, false)
-        return c
-    catch err
-        if isa(err, KeyError)
-            return nothing
-        else
-            rethrow(err)
-        end
-    end
-end
-unrelease(c::Chunk) = c
-
 Base.:(==)(c1::Chunk, c2::Chunk) = c1.handle == c2.handle
 Base.hash(c::Chunk, x::UInt64) = hash(c.handle, x)
 
@@ -248,25 +233,10 @@ Base.map(f, s::Shard) = [Dagger.spawn(f, c) for c in values(s.chunks)]
 Create a chunk from sequential object `x` which resides on `proc`.
 """
 function tochunk(x::X, proc::P=OSProc(), scope::S=AnyScope(); persist=false, cache=false) where {X,P,S}
-    ref = poolset(x, destroyonevict=persist ? false : cache)
+    ref = poolset(x)
     Chunk{X,typeof(ref),P,S}(X, domain(x), ref, proc, scope, persist)
 end
 tochunk(x::Union{Chunk, Thunk}, proc=nothing, scope=nothing) = x
-
-# Check to see if the node is set to persist
-# if it is foce can override it
-function free!(s::Chunk{X,DRef,P,S}; force=true, cache=false) where {X,P,S}
-    if force || !s.persist
-        if cache
-            try
-                destroyonevict(s.handle, true) # keep around, but remove when evicted
-            catch err
-                isa(err, KeyError) || rethrow(err)
-            end
-        end
-    end
-end
-free!(x; force=true,cache=false) = x # catch-all for non-chunks
 
 function savechunk(data, dir, f)
     sz = open(joinpath(dir, f), "w") do io

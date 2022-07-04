@@ -115,27 +115,9 @@ mutable struct DArray{T,N,F} <: ArrayOp{T, N}
     subdomains::AbstractArray{ArrayDomain{N}, N}
     chunks::AbstractArray{Union{Chunk,Thunk}, N}
     concat::F
-    freed::Threads.Atomic{UInt8}
     function DArray{T,N,F}(domain, subdomains, chunks, concat::Function) where {T, N,F}
-        new(domain, subdomains, chunks, concat, Threads.Atomic{UInt8}(0))
+        new(domain, subdomains, chunks, concat)
     end
-end
-
-function free_chunks(chunks)
-    @sync for c in chunks
-        if c isa Chunk{<:Any, DRef}
-            # increment refcount on the master node
-            @async free!(c.handle)
-        elseif c isa Thunk
-            free_chunks(c.inputs)
-        end
-    end
-end
-
-function free!(x::DArray)
-    freed = Bool(Threads.atomic_cas!(x.freed, UInt8(0), UInt8(1)))
-    !freed && @async Dagger.free_chunks(x.chunks)
-    nothing
 end
 
 # mainly for backwards-compatibility

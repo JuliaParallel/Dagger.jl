@@ -7,7 +7,7 @@ import Random: randperm
 
 import ..Dagger
 import ..Dagger: Context, Processor, Thunk, WeakThunk, ThunkFuture, ThunkFailedException, Chunk, OSProc, AnyScope
-import ..Dagger: order, free!, dependents, noffspring, istask, inputs, unwrap_weak_checked, affinity, tochunk, timespan_start, timespan_finish, unrelease, procs, move, capacity, chunktype, processor, default_enabled, get_processors, get_parent, execute!, rmprocs!, addprocs!, thunk_processor, constrain, cputhreadtime
+import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak_checked, affinity, tochunk, timespan_start, timespan_finish, procs, move, capacity, chunktype, processor, default_enabled, get_processors, get_parent, execute!, rmprocs!, addprocs!, thunk_processor, constrain, cputhreadtime
 
 const OneToMany = Dict{Thunk, Set{Thunk}}
 
@@ -850,8 +850,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
         state.running_on[thunk] = gproc
         if thunk.cache && thunk.cache_ref !== nothing
             # the result might be already cached
-            data = unrelease(thunk.cache_ref) # ask worker to keep the data around
-                                              # till this compute cycle frees it
+            data = thunk.cache_ref
             if data !== nothing
                 # cache hit
                 state.cache[thunk] = data
