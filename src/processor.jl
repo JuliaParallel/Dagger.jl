@@ -209,7 +209,7 @@ mutable struct Context
     options
 end
 
-Context(procs::Vector{P}=Processor[OSProc(w) for w in workers()];
+Context(procs::Vector{P}=Processor[OSProc(w) for w in procs()];
         proc_lock=ReentrantLock(), proc_notify=Threads.Condition(),
         log_sink=NoOpLog(), log_file=nothing, profile=false,
         options=nothing) where {P<:Processor} =
