@@ -1,11 +1,12 @@
 const EAGER_INIT = Ref{Bool}(false)
 const EAGER_THUNK_CHAN = Channel(typemax(Int))
+const EAGER_FORCE_KILL = Ref{Bool}(false)
 const EAGER_ID_MAP = Dict{UInt64,Int}()
-const EAGER_CONTEXT = Ref{Context}()
-const EAGER_STATE = Ref{ComputeState}()
+const EAGER_CONTEXT = Ref{Union{Context,Nothing}}(nothing)
+const EAGER_STATE = Ref{Union{ComputeState,Nothing}}(nothing)
 
 function eager_context()
-    if !isassigned(EAGER_CONTEXT)
+    if EAGER_CONTEXT[] === nothing
         EAGER_CONTEXT[] = Context([myid(),workers()...])
     end
     return EAGER_CONTEXT[]
@@ -18,6 +19,10 @@ function init_eager()
     @async try
         sopts = SchedulerOptions(;allow_errors=true)
         topts = ThunkOptions(;single=1)
+        atexit() do
+            EAGER_FORCE_KILL[] = true
+            close(EAGER_THUNK_CHAN)
+        end
         Dagger.compute(ctx, Dagger.delayed(eager_thunk; options=topts)(); options=sopts)
     catch err
         iob = IOContext(IOBuffer(), :color=>true)
@@ -91,6 +96,7 @@ function eager_thunk()
             EAGER_ID_MAP[uid] = tid.id
             put!(added_future, tid.ref)
         catch err
+            EAGER_FORCE_KILL[] && break
             iob = IOContext(IOBuffer(), :color=>true)
             println(iob, "Error in eager listener:")
             Base.showerror(iob, err)
@@ -100,6 +106,7 @@ function eager_thunk()
             write(stderr, iob)
         end
     end
+    EAGER_STATE[] = nothing
 end
 
 eager_cleanup(t::Dagger.EagerThunkFinalizer) =
