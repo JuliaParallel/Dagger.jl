@@ -48,7 +48,7 @@ end
 end
 
 @testset "@spawn" begin
-    @test !isassigned(Dagger.Sch.EAGER_CONTEXT)
+    @test Dagger.Sch.EAGER_CONTEXT[] === nothing
     @testset "per-call" begin
         x = 2
         a = @spawn x + x
