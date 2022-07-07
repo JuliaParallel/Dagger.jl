@@ -1,8 +1,18 @@
 .test: &test
-  if: build.env("DAGGER_BENCHMARK") != "true"
+  if: build.message !~ /\[skip tests\]/
   agents:
     queue: "juliaecosystem"
     sandbox.jl: "true"
+    os: linux
+    arch: x86_64
+.bench: &bench
+  if: build.message =~ /\[run benchmarks\]/
+  agents:
+    queue: "juliaecosystem"
+    sandbox.jl: "true"
+    os: linux
+    arch: x86_64
+    num_cpus: 16
 steps:
   - label: Julia 1.6
     timeout_in_minutes: 60
@@ -34,15 +44,33 @@ steps:
           julia_args: "--threads=1"
       # - JuliaCI/julia-coverage#v1:
       #     codecov: true
-  - label: Benchmarks
-    command: echo TODO
-    if: build.env("DAGGER_BENCHMARK") == "true"
+  - label: Julia 1.6 (macOS)
+    timeout_in_minutes: 60
+    <<: *test
     agents:
-      os: linux
+      queue: "juliaecosystem"
+      os: macos
       arch: x86_64
-      serial: true
     plugins:
-      - docker#v3.7.0:
-          image: julia:1.7.2
+      - JuliaCI/julia#v1:
+          version: "1.6"
+      - JuliaCI/julia-test#v1:
+          julia_args: "--threads=1"
+      # - JuliaCI/julia-coverage#v1:
+      #     codecov: true
+  - label: Benchmarks
+    timeout_in_minutes: 120
+    <<: *bench
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.7"
+      - JuliaCI/julia-test#v1:
+          run_tests: false
+    command: "julia -e 'using Pkg; Pkg.add(\"BenchmarkTools\"); Pkg.develop(;path=pwd())'; JULIA_PROJECT=\"$PWD\" julia --project benchmarks/benchmark.jl"
+    env:
+      JULIA_NUM_THREADS: "4"
+      BENCHMARK: "cpu,cpu+dagger"
+      BENCHMARK_PROCS: "4:4"
+      BENCHMARK_SCALE: "5:5:50"
     artifacts:
-      - benchmarks/TODO
+      - benchmarks/result*
