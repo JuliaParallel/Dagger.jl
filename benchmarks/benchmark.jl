@@ -16,6 +16,10 @@ if haskey(ENV, "BENCHMARK_REMOTES")
         end
     end
 end
+@everywhere begin
+    using Pkg
+    Pkg.instantiate()
+end
 @everywhere using Dagger
 import Dagger: Computation, reduceblock
 using Dates, Random, Statistics, LinearAlgebra, InteractiveUtils

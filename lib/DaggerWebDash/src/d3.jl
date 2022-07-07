@@ -1,5 +1,4 @@
 using Mux, MemPool, Distributed, Sockets
-import Dagger.Tables
 
 struct LinePlot
     core_key::Symbol
