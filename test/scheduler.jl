@@ -359,8 +359,8 @@ end
     tproc2 = Dagger.ThreadProc(first(workers()), 1)
     procs = [tproc1, tproc2]
 
-    pres1 = state.worker_pressure[1][tproc1]
-    pres2 = state.worker_pressure[first(workers())][tproc2]
+    pres1 = state.worker_time_pressure[1][tproc1]
+    pres2 = state.worker_time_pressure[first(workers())][tproc2]
     tx_rate = state.transfer_rate[]
 
     for (args, tx_size) in [
@@ -385,7 +385,8 @@ end
         @test est_tx_size == tx_size
 
         t = delayed(mynothing)(args...)
-        sorted_procs, costs = Dagger.Sch.estimate_task_costs(state, procs, t)
+        inputs = Dagger.Sch.collect_task_inputs(state, t)
+        sorted_procs, costs = Dagger.Sch.estimate_task_costs(state, procs, t, inputs)
 
         @test tproc1 in sorted_procs
         @test tproc2 in sorted_procs

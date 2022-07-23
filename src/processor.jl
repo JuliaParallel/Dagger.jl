@@ -7,12 +7,26 @@ An abstract type representing a processing device and associated memory, where
 data can be stored and operated on. Subtypes should be immutable, and
 instances should compare equal if they represent the same logical processing
 device/memory. Subtype instances should be serializable between different
-nodes. Subtype instances may contain a pointer to a "parent" `Processor` to
-make it easy to transfer data to/from other types of `Processor` at runtime.
+nodes. Subtype instances may contain a "parent" `Processor` to make it easy to
+transfer data to/from other types of `Processor` at runtime.
 """
 abstract type Processor end
 
 const PROCESSOR_CALLBACKS = Dict{Symbol,Any}()
+const OSPROC_PROCESSOR_CACHE = Dict{Int,Set{Processor}}()
+
+add_processor_callback!(func, name::String) =
+    add_processor_callback!(func, Symbol(name))
+function add_processor_callback!(func, name::Symbol)
+    Dagger.PROCESSOR_CALLBACKS[name] = func
+    delete!(OSPROC_PROCESSOR_CACHE, myid())
+end
+delete_processor_callback!(name::String) =
+    delete_processor_callback!(Symbol(name))
+function delete_processor_callback!(name::Symbol)
+    delete!(Dagger.PROCESSOR_CALLBACKS, name)
+    delete!(OSPROC_PROCESSOR_CACHE, myid())
+end
 
 """
     execute!(proc::Processor, f, args...) -> Any
@@ -42,18 +56,21 @@ iscompatible_arg(proc::Processor, opts, x) = false
 """
     default_enabled(proc::Processor) -> Bool
 
-Returns whether processor `proc` is enabled by default (opt-out). `Processor` subtypes can override this function to make themselves opt-in (default returns `false`).
+Returns whether processor `proc` is enabled by default. The default value is
+`false`, which is an opt-out of the processor from execution when not
+specifically requested by the user, and `true` implies opt-in, which causes the
+processor to always participate in execution when possible.
 """
 default_enabled(proc::Processor) = false
 
 """
-    get_processors(proc::Processor) -> Vector{T} where T<:Processor
+    get_processors(proc::Processor) -> Set{<:Processor}
 
-Returns the full list of processors contained in `proc`, if any. `Processor`
-subtypes should overload this function if they can contain sub-processors. The
-default method will return a `Vector` containing `proc` itself.
+Returns the set of processors contained in `proc`, if any. `Processor` subtypes
+should overload this function if they can contain sub-processors. The default
+method will return a `Set` containing `proc` itself.
 """
-get_processors(proc::Processor) = Processor[proc]
+get_processors(proc::Processor) = Set{Processor}([proc])
 
 """
     get_parent(proc::Processor) -> Processor
@@ -63,6 +80,8 @@ Returns the parent processor for `proc`. The ultimate parent processor is an
 direct parent.
 """
 get_parent
+
+root_worker_id(proc::Processor) = get_parent(proc).pid
 
 """
     move(from_proc::Processor, to_proc::Processor, x)
@@ -76,15 +95,6 @@ data movement should provide implementations where `x::Chunk`.
 move(from_proc::Processor, to_proc::Processor, x) = x
 
 """
-    capacity(proc::Processor=OSProc()) -> Int
-
-Returns the total processing capacity of `proc`.
-"""
-capacity(proc=OSProc()) = length(get_processors(proc))
-capacity(proc, ::Type{T}) where T =
-    length(filter(x->x isa T, get_processors(proc)))
-
-"""
     OSProc <: Processor
 
 Julia CPU (OS) process, identified by Distributed pid. The logical parent of
@@ -94,17 +104,17 @@ computations.
 struct OSProc <: Processor
     pid::Int
     function OSProc(pid::Int=myid())
-        get!(OSPROC_CACHE, pid) do
-            remotecall_fetch(get_proc_hierarchy, pid)
+        get!(OSPROC_PROCESSOR_CACHE, pid) do
+            remotecall_fetch(get_processor_hierarchy, pid)
         end
         new(pid)
     end
 end
-const OSPROC_CACHE = Dict{Int,Vector{Processor}}()
 get_parent(proc::OSProc) = proc
-children(proc::OSProc) = get(OSPROC_CACHE, proc.pid, Processor[])
-function get_proc_hierarchy()
-    children = Processor[]
+get_processors(proc::OSProc) = get(OSPROC_PROCESSOR_CACHE, proc.pid, Set{Processor}())
+children(proc::OSProc) = get_processors(proc)
+function get_processor_hierarchy()
+    children = Set{Processor}()
     for name in keys(PROCESSOR_CALLBACKS)
         cb = PROCESSOR_CALLBACKS[name]
         try
@@ -120,18 +130,6 @@ function get_proc_hierarchy()
     end
     children
 end
-add_processor_callback!(func, name::String) =
-    add_processor_callback!(func, Symbol(name))
-function add_processor_callback!(func, name::Symbol)
-    Dagger.PROCESSOR_CALLBACKS[name] = func
-    empty!(OSPROC_CACHE)
-end
-delete_processor_callback!(name::String) =
-    delete_processor_callback!(Symbol(name))
-function delete_processor_callback!(name::Symbol)
-    delete!(Dagger.PROCESSOR_CALLBACKS, name)
-    empty!(OSPROC_CACHE)
-end
 Base.:(==)(proc1::OSProc, proc2::OSProc) = proc1.pid == proc2.pid
 iscompatible(proc::OSProc, opts, f, args...) =
     any(child->iscompatible(child, opts, f, args...), children(proc))
@@ -141,13 +139,6 @@ iscompatible_arg(proc::OSProc, opts, args...) =
     any(child->
         all(arg->iscompatible_arg(child, opts, arg), args),
     children(proc))
-function get_processors(proc::OSProc)
-    procs = Processor[]
-    for child in children(proc)
-        append!(procs, get_processors(child))
-    end
-    procs
-end
 
 """
     ThreadProc <: Processor
@@ -218,7 +209,7 @@ mutable struct Context
     options
 end
 
-Context(procs::Vector{P}=Processor[OSProc(w) for w in workers()];
+Context(procs::Vector{P}=Processor[OSProc(w) for w in procs()];
         proc_lock=ReentrantLock(), proc_notify=Threads.Condition(),
         log_sink=NoOpLog(), log_file=nothing, profile=false,
         options=nothing) where {P<:Processor} =
@@ -328,7 +319,8 @@ get_tls() = (
     sch_uid=task_local_storage(:_dagger_sch_uid),
     sch_handle=task_local_storage(:_dagger_sch_handle),
     processor=thunk_processor(),
-    utilization=task_local_storage(:_dagger_utilization),
+    time_utilization=task_local_storage(:_dagger_time_utilization),
+    alloc_utilization=task_local_storage(:_dagger_alloc_utilization),
 )
 
 """
@@ -340,5 +332,6 @@ function set_tls!(tls)
     task_local_storage(:_dagger_sch_uid, tls.sch_uid)
     task_local_storage(:_dagger_sch_handle, tls.sch_handle)
     task_local_storage(:_dagger_processor, tls.processor)
-    task_local_storage(:_dagger_utilization, tls.utilization)
+    task_local_storage(:_dagger_time_utilization, tls.time_utilization)
+    task_local_storage(:_dagger_alloc_utilization, tls.alloc_utilization)
 end

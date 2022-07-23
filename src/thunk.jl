@@ -93,6 +93,8 @@ mutable struct Thunk
         end
     end
 end
+Serialization.serialize(io::AbstractSerializer, t::Thunk) =
+    throw(ArgumentError("Cannot serialize a Thunk"))
 
 function affinity(t::Thunk)
     if t.affinity !== nothing
@@ -248,7 +250,7 @@ function _spawn(f, args...; options, kwargs...)
     end
     uid = eager_next_id()
     future = ThunkFuture()
-    finalizer_ref = poolset(EagerThunkFinalizer(uid))
+    finalizer_ref = poolset(EagerThunkFinalizer(uid); device=MemPool.CPURAMDevice())
     added_future = Future()
     propagates = keys(options)
     put!(Dagger.Sch.EAGER_THUNK_CHAN, (added_future, future, uid, finalizer_ref, f, (args...,), (;propagates, options..., kwargs...,)))
