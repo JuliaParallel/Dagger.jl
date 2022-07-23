@@ -37,7 +37,7 @@ include("domain.jl")
 include("array.jl")
 include("cache.jl")
 try # TODO: Fault tolerance is sometimes unreliable
-include("fault-tolerance.jl")
+#include("fault-tolerance.jl")
 catch
 end
 println(stderr, "tests done. cleaning up...")
