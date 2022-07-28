@@ -1054,13 +1054,13 @@ function do_task(to_proc, comm)
             x = if x isa Chunk
                 value = lock(TASK_SYNC) do
                     if haskey(CHUNK_CACHE, x)
-                        get!(CHUNK_CACHE[x], to_proc) do
+                        Some{Any}(get!(CHUNK_CACHE[x], to_proc) do
                             # Convert from cached value
                             # TODO: Choose "closest" processor of same type first
                             some_proc = first(keys(CHUNK_CACHE[x]))
                             some_x = CHUNK_CACHE[x][some_proc]
-                            Some{Any}(move(some_proc, to_proc, some_x))
-                        end
+                            move(some_proc, to_proc, some_x)
+                        end)
                     else
                         nothing
                     end
