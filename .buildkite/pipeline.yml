@@ -58,6 +58,15 @@ steps:
           julia_args: "--threads=1"
       # - JuliaCI/julia-coverage#v1:
       #     codecov: true
+  - label: Julia 1.7 - TimespanLogging
+    timeout_in_minutes: 60
+    <<: *test
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.7"
+      # - JuliaCI/julia-coverage#v1:
+      #     codecov: true
+    command: "julia --project -e 'using Pkg; Pkg.develop(;path=\"lib/TimespanLogging\"); Pkg.test(\"TimespanLogging\")'"
   - label: Benchmarks
     timeout_in_minutes: 120
     <<: *bench
