@@ -1,4 +1,5 @@
 import Colors
+import TimespanLogging: Timespan
 
 export show_plan
 

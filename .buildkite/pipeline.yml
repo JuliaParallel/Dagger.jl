@@ -69,7 +69,7 @@ steps:
     command: "julia -e 'using Pkg; Pkg.add(\"BenchmarkTools\"); Pkg.develop(;path=pwd())'; JULIA_PROJECT=\"$PWD\" julia --project benchmarks/benchmark.jl"
     env:
       JULIA_NUM_THREADS: "4"
-      BENCHMARK: "cpu,cpu+dagger"
+      BENCHMARK: "nmf:raw,dagger"
       BENCHMARK_PROCS: "4:4"
       BENCHMARK_SCALE: "5:5:50"
     artifacts:

@@ -1,6 +1,7 @@
 module DaggerWebDash
 
 using Dagger
+import TimespanLogging
 import Tables
 
 include("core.jl")

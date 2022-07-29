@@ -1157,7 +1157,7 @@ function do_task(to_proc, comm)
     threadtime = cputhreadtime() - threadtime_start
     # FIXME: This is not a realistic measure of max. required memory
     #gc_allocd = min(max(UInt64(Base.gc_num().allocd) - UInt64(gcnum_start.allocd), UInt64(0)), UInt64(1024^4))
-    timespan_finish(ctx, :compute, thunk_id, (;f, to_proc); tasks=Dagger.prof_tasks_take!(thunk_id))
+    timespan_finish(ctx, :compute, thunk_id, (;f, to_proc))
     lock(TASK_SYNC) do
         real_time_util[] -= est_time_util
         pop!(TASKS_RUNNING, thunk_id)

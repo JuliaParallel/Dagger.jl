@@ -1,8 +1,11 @@
+import TimespanLogging
+import TimespanLogging: Timespan, Event, Events, LocalEventLog, MultiEventLog
+
 @testset "Logging" begin
     @testset "LocalEventLog" begin
         @testset "ArrayOp" begin
             ctx = Context()
-            log = Dagger.LocalEventLog()
+            log = LocalEventLog()
             ctx.log_sink = log
 
             sz = 2^4
@@ -12,8 +15,8 @@
 
             dag = XD*XD
             collect(ctx, dag)
-            logs = Dagger.get_logs!(log)
-            @test logs isa Vector{Dagger.Timespan}
+            logs = TimespanLogging.get_logs!(log)
+            @test logs isa Vector{Timespan}
             @test length(logs) > 0
             plan = Dagger.show_plan(logs)
             @test plan isa String
@@ -24,7 +27,7 @@
 
         @testset "Argument Merging" begin
             ctx = Context()
-            log = Dagger.LocalEventLog()
+            log = LocalEventLog()
             ctx.log_sink = log
 
             X = rand(Float32, 4, 3)
@@ -40,14 +43,14 @@
 
             j = delayed(+)(c,h)
             collect(ctx, j)
-            logs = Dagger.get_logs!(log)
+            logs = TimespanLogging.get_logs!(log)
             plan = Dagger.show_plan(logs, j)
         end
 
         @testset "Automatic Plan Rendering" begin
             x = compute(rand(Blocks(2,2),4,4))
             mktemp() do path, io
-                ctx = Context(;log_sink=Dagger.LocalEventLog(),log_file=path)
+                ctx = Context(;log_sink=LocalEventLog(),log_file=path)
                 compute(ctx, x * x)
                 plan = String(read(io))
                 @test occursin("digraph {", plan)
@@ -58,22 +61,22 @@
     end
     @testset "MultiEventLog" begin
         ctx = Context()
-        ml = Dagger.MultiEventLog()
-        ml[:core] = Dagger.Events.CoreMetrics()
-        ml[:id] = Dagger.Events.IDMetrics()
-        ml[:timeline] = Dagger.Events.TimelineMetrics()
-        ml[:wsat] = Dagger.Events.WorkerSaturation()
-        ml[:loadavg] = Dagger.Events.CPULoadAverages()
+        ml = MultiEventLog()
+        ml[:core] = Events.CoreMetrics()
+        ml[:id] = Events.IDMetrics()
+        ml[:timeline] = Events.TimelineMetrics()
+        ml[:wsat] = Events.WorkerSaturation()
+        ml[:loadavg] = Events.CPULoadAverages()
         ml[:bytes] = Dagger.Events.BytesAllocd()
-        ml[:mem] = Dagger.Events.MemoryFree()
-        ml[:esat] = Dagger.Events.EventSaturation()
+        ml[:mem] = Events.MemoryFree()
+        ml[:esat] = Events.EventSaturation()
         ml[:psat] = Dagger.Events.ProcessorSaturation()
         ctx.log_sink = ml
 
         A = rand(Blocks(4, 4), 16, 16)
         collect(ctx, A*A)
 
-        logs = Dagger.get_logs!(ml)
+        logs = TimespanLogging.get_logs!(ml)
         for w in keys(logs)
             len = length(logs[w][:core])
             if w == 1
@@ -120,7 +123,7 @@
         end
         @test had_psat_proc > 0
 
-        logs = Dagger.get_logs!(ml)
+        logs = TimespanLogging.get_logs!(ml)
         for w in keys(logs)
             for c in keys(logs[w])
                 @test isempty(logs[w][c])

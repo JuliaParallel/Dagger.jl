@@ -66,7 +66,7 @@ D3Renderer(port::Int, port_range=50000:59999; seek_store=nothing) =
                Ref{Bool}(false),
                Threads.Condition(),
                seek_store)
-Dagger.init_similar(d3r::D3Renderer) =
+TimespanLogging.init_similar(d3r::D3Renderer) =
     D3Renderer(d3r.port,
                d3r.port_range,
                d3r.config,
@@ -264,7 +264,7 @@ function client_handler(sock, id, port, port_range, config_updated, config, seek
     end
     @debug "D3R client for $id closed"
 end
-function Dagger.Events.creation_hook(d3r::D3Renderer, log)
+function TimespanLogging.Events.creation_hook(d3r::D3Renderer, log)
     for sock in get!(()->[], get!(()->Dict{Int,Vector{Any}}(), D3R_CLIENT_SOCKETS, d3r.port), myid())
         try
             if isopen(sock)
@@ -278,7 +278,7 @@ function Dagger.Events.creation_hook(d3r::D3Renderer, log)
         end
     end
 end
-function Dagger.Events.deletion_hook(d3r::D3Renderer, idx)
+function TimespanLogging.Events.deletion_hook(d3r::D3Renderer, idx)
     for sock in get!(()->[], get!(()->Dict{Int,Vector{Any}}(), D3R_CLIENT_SOCKETS, d3r.port), myid())
         try
             if isopen(sock)

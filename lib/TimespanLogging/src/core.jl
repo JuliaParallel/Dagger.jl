@@ -1,6 +1,8 @@
-using Profile
+using Distributed
+import Profile
 import Base.gc_num
-export summarize_events
+
+export timespan_start, timespan_finish
 
 const Timestamp = UInt64
 
@@ -62,6 +64,7 @@ function make_timespan(start::Event, finish::Event)
              mix_samples(start.profiler_samples, finish.profiler_samples))
 end
 
+get_logs!(ctx; kwargs...) = get_logs!(log_sink(ctx); kwargs...)
 
 """
     NoOpLog
@@ -73,6 +76,8 @@ struct NoOpLog end
 function write_event(::NoOpLog, event::Event)
 end
 
+get_logs!(::NoOpLog) = nothing
+
 struct FilterLog
     f::Function
     inner_chan::Any
@@ -83,6 +88,8 @@ function write_event(c::FilterLog, event)
         write_event(c.inner_chan, event)
     end
 end
+
+get_logs!(f::FilterLog; kwargs...) = get_logs!(f.inner_chan; kwargs...)
 
 function write_event(io::IO, event::Event)
     serialize(io, event)
@@ -96,7 +103,7 @@ function write_event(arr::AbstractArray, event::Event)
     push!(arr, event)
 end
 
-const event_log_lock = ReentrantLock()
+const event_log_lock = Threads.ReentrantLock()
 
 """
     LocalEventLog
@@ -110,7 +117,7 @@ const _local_event_log = Any[]
 
 function write_event(::LocalEventLog, event::Event)
     lock(event_log_lock) do
-        write_event(Dagger._local_event_log, event)
+        write_event(_local_event_log, event)
     end
 end
 
@@ -125,16 +132,15 @@ processes.
 """
 function get_logs!(::LocalEventLog; raw=false, only_local=false)
     logs = Dict()
-    wkrs = only_local ? myid() : vcat(1, workers())
+    wkrs = only_local ? myid() : procs()
     # FIXME: Log this logic
     @sync for p in wkrs
         @async logs[p] = remotecall_fetch(p) do
-            log = lock(event_log_lock) do
+            lock(event_log_lock) do
                 log = copy(_local_event_log)
                 empty!(_local_event_log)
                 log
             end
-            log
         end
     end
     if raw
@@ -229,7 +235,7 @@ end
 
 function get_logs!(ml::MultiEventLog; only_local=false)
     logs = Dict{Int,Dict{Symbol,Vector}}()
-    wkrs = only_local ? myid() : vcat(1, workers())
+    wkrs = only_local ? myid() : procs()
     # FIXME: Log this logic
     @sync for p in wkrs
         @async begin
@@ -255,43 +261,50 @@ empty_prof() = ProfilerResult(UInt[], Dict{UInt64, Vector{Base.StackTraces.Stack
 
 const prof_refcount = Ref{Threads.Atomic{Int}}(Threads.Atomic{Int}(0))
 const prof_lock = Threads.ReentrantLock()
-const prof_tasks = Dict{Int64, Vector{Task}}()
+const prof_tasks = IdDict{Any, Vector{Task}}()
 
-function prof_task_put!(tid, task::Task=Base.current_task())
+function prof_task_put!(id, task::Task=Base.current_task())
     lock(prof_lock) do
-        push!(get!(()->Task[], prof_tasks, tid), task)
+        push!(get!(()->Task[], prof_tasks, id), task)
     end
 end
-function prof_tasks_take!(tid)
+function prof_tasks_take!(id)
     lock(prof_lock) do
-        if haskey(prof_tasks, tid)
-            pop!(prof_tasks, tid)
+        if haskey(prof_tasks, id)
+            pop!(prof_tasks, id)
         else
             Task[]
         end
     end
 end
 
-function timespan_start(ctx, category, @nospecialize(id), @nospecialize(tl); tasks=nothing)
-    isa(ctx.log_sink, NoOpLog) && return # don't go till raise
-    if ctx.profile && category == :compute && Threads.atomic_add!(prof_refcount[], 1) == 0
+log_sink(ctx) = NoOpLog()
+profile(ctx, category, id, tl) = false
+
+function timespan_start(ctx, category, @nospecialize(id), @nospecialize(tl))
+    sink = log_sink(ctx)
+    isa(sink, NoOpLog) && return
+    do_profile = profile(ctx, category, id, tl)
+    if do_profile && Threads.atomic_add!(prof_refcount[], 1) == 0
         lock(prof_lock) do
             Profile.start_timer()
         end
     end
     ev = Event(:start, category, id, tl, time_ns(), gc_num(), empty_prof())
-    write_event(ctx, ev)
+    write_event(sink, ev)
     nothing
 end
 
-function timespan_finish(ctx, category, @nospecialize(id), @nospecialize(tl); tasks=nothing)
-    isa(ctx.log_sink, NoOpLog) && return
+function timespan_finish(ctx, category, @nospecialize(id), @nospecialize(tl); tasks=prof_tasks_take!(id))
+    sink = log_sink(ctx)
+    isa(sink, NoOpLog) && return
+    do_profile = profile(ctx, category, id, tl)
     time = time_ns()
     gcn = gc_num()
     prof = UInt[]
     lidict = Dict{UInt64, Vector{Base.StackTraces.StackFrame}}()
     GC.@preserve tasks begin
-        if ctx.profile && category == :compute
+        if do_profile
             lock(prof_lock) do
                 prof_done = Threads.atomic_sub!(prof_refcount[], 1) == 1
                 if prof_done
@@ -310,7 +323,7 @@ function timespan_finish(ctx, category, @nospecialize(id), @nospecialize(tl); ta
             end
         end
         ev = Event(:finish, category, id, tl, time, gcn, ProfilerResult(prof, lidict, tasks))
-        write_event(ctx, ev)
+        write_event(sink, ev)
     end
     nothing
 end

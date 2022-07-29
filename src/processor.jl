@@ -156,7 +156,7 @@ function execute!(proc::ThreadProc, @nospecialize(f), @nospecialize(args...))
     tls = get_tls()
     task = Task() do
         set_tls!(tls)
-        prof_task_put!(tls.sch_handle.thunk_id.id)
+        TimespanLogging.prof_task_put!(tls.sch_handle.thunk_id.id)
         f(args...)
     end
     ret = ccall(:jl_set_task_tid, Cint, (Any, Cint), task, proc.tid-1)
@@ -211,7 +211,7 @@ end
 
 Context(procs::Vector{P}=Processor[OSProc(w) for w in procs()];
         proc_lock=ReentrantLock(), proc_notify=Threads.Condition(),
-        log_sink=NoOpLog(), log_file=nothing, profile=false,
+        log_sink=TimespanLogging.NoOpLog(), log_file=nothing, profile=false,
         options=nothing) where {P<:Processor} =
     Context(procs, proc_lock, proc_notify, log_sink, log_file,
             profile, options)
@@ -226,15 +226,6 @@ function global_context()
         GLOBAL_CONTEXT[] = Context()
     end
     return GLOBAL_CONTEXT[]
-end
-
-"""
-    write_event(ctx::Context, event::Event)
-
-Write a log event
-"""
-function write_event(ctx::Context, event::Event)
-    write_event(ctx.log_sink, event)
 end
 
 """
