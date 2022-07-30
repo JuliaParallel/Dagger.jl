@@ -16,6 +16,7 @@ import ContextVariablesX
 
 using Requires
 using MacroTools
+using TimespanLogging
 
 const PLUGINS = Dict{Symbol,Any}()
 const PLUGIN_CONFIGS = Dict{Symbol,String}(
@@ -23,7 +24,6 @@ const PLUGIN_CONFIGS = Dict{Symbol,String}(
 )
 
 include("lib/util.jl")
-include("lib/logging.jl")
 
 # Distributed data
 include("options.jl")
@@ -58,7 +58,8 @@ include("ui/graph.jl")
 include("ui/gantt-common.jl")
 include("ui/gantt-text.jl")
 
-include("lib/logging-extras.jl")
+# Logging
+include("lib/logging-events.jl")
 
 function __init__()
     # Initialize system UUID

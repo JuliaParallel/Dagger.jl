@@ -30,8 +30,8 @@ function compute(ctx::Context, d::Thunk; options=nothing)
     end
     res = scheduler.compute_dag(ctx, d; options=options)
     if ctx.log_file !== nothing
-        if ctx.log_sink !== LocalEventLog
-            logs = get_logs!(ctx.log_sink)
+        if ctx.log_sink isa TimespanLogging.LocalEventLog
+            logs = TimespanLogging.get_logs!(ctx.log_sink)
             open(ctx.log_file, "w") do io
                 Dagger.show_plan(io, logs, d)
             end

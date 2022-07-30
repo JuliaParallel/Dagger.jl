@@ -80,6 +80,7 @@ end
 end
 @everywhere using Dagger
 import Dagger: Computation, reduceblock
+import TimespanLogging
 using Dates, Random, Statistics, LinearAlgebra, InteractiveUtils
 
 for accel in accelerations
@@ -99,6 +100,7 @@ if output_format == "jld"
     using JLD
 elseif output_format == "jls"
     using Serialization
+elseif output_format == "none"
 else
     error("Unknown output format: $output_format")
 end
@@ -152,25 +154,25 @@ function main()
     suite_trees = Dict()
     opts = (;profile=profile)
     if render == "live"
-        opts = merge(opts, (;log_sink=Dagger.LocalEventLog()))
+        opts = merge(opts, (;log_sink=LocalEventLog()))
         if graph
             opts = merge(opts, (;log_file=output_prefix*".dot"))
         end
     elseif render == "webdash" || savelogs
-        ml = Dagger.MultiEventLog()
-        ml[:core] = Dagger.Events.CoreMetrics()
-        ml[:id] = Dagger.Events.IDMetrics()
-        # FIXME: ml[:timeline] = Dagger.Events.TimelineMetrics()
-        profile && (ml[:profile] = DaggerWebDash.ProfileMetrics())
-        ml[:wsat] = Dagger.Events.WorkerSaturation()
-        ml[:loadavg] = Dagger.Events.CPULoadAverages()
+        ml = TimespanLogging.MultiEventLog()
+        ml[:core] = TimespanLogging.CoreMetrics()
+        ml[:id] = TimespanLogging.IDMetrics()
+        # FIXME: ml[:timeline] = TimespanLogging.TimelineMetrics()
+        profile && (ml[:profile] = TimespanLoggingWebDash.ProfileMetrics())
+        ml[:wsat] = TimespanLogging.WorkerSaturation()
+        ml[:loadavg] = TimespanLogging.CPULoadAverages()
         ml[:bytes] = Dagger.Events.BytesAllocd()
-        ml[:mem] = Dagger.Events.MemoryFree()
-        ml[:esat] = Dagger.Events.EventSaturation()
+        ml[:mem] = TimespanLogging.MemoryFree()
+        ml[:esat] = TimespanLogging.EventSaturation()
         ml[:psat] = Dagger.Events.ProcessorSaturation()
-        lw = Dagger.Events.LogWindow(5*10^9, :core)
+        lw = TimespanLogging.Events.LogWindow(5*10^9, :core)
         logs_df = DataFrame([key=>[] for key in keys(ml.consumers)]...)
-        ts = Dagger.Events.TableStorage(logs_df)
+        ts = DaggerWebDash.TableStorage(logs_df)
         push!(lw.creation_handlers, ts)
         if render == "webdash"
             d3r = DaggerWebDash.D3Renderer(live_port; seek_store=ts)

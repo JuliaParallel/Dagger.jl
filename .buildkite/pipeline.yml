@@ -5,6 +5,7 @@
     sandbox.jl: "true"
     os: linux
     arch: x86_64
+  command: "julia --project -e 'using Pkg; Pkg.develop(;path=\"lib/TimespanLogging\")'"
 .bench: &bench
   if: build.message =~ /\[run benchmarks\]/
   agents:
@@ -22,8 +23,8 @@ steps:
           version: "1.7"
       - JuliaCI/julia-test#v1:
           julia_args: "--threads=1"
-      # - JuliaCI/julia-coverage#v1:
-      #     codecov: true
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
   - label: Julia 1.8
     timeout_in_minutes: 60
     <<: *test
@@ -32,8 +33,8 @@ steps:
           version: "1.8"
       - JuliaCI/julia-test#v1:
           julia_args: "--threads=1"
-      # - JuliaCI/julia-coverage#v1:
-      #     codecov: true
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
   - label: Julia nightly
     timeout_in_minutes: 60
     <<: *test
@@ -42,8 +43,8 @@ steps:
           version: "1.9-nightly"
       - JuliaCI/julia-test#v1:
           julia_args: "--threads=1"
-      # - JuliaCI/julia-coverage#v1:
-      #     codecov: true
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
   - label: Julia 1.7 (macOS)
     timeout_in_minutes: 60
     <<: *test
@@ -56,8 +57,26 @@ steps:
           version: "1.7"
       - JuliaCI/julia-test#v1:
           julia_args: "--threads=1"
-      # - JuliaCI/julia-coverage#v1:
-      #     codecov: true
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
+  - label: Julia 1.7 - TimespanLogging
+    timeout_in_minutes: 60
+    <<: *test
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.7"
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
+    command: "julia --project -e 'using Pkg; Pkg.develop(;path=\"lib/TimespanLogging\"); Pkg.test(\"TimespanLogging\")'"
+  - label: Julia 1.7 - DaggerWebDash
+    timeout_in_minutes: 60
+    <<: *test
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.7"
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
+    command: "julia -e 'using Pkg; Pkg.develop(;path=pwd()); Pkg.develop(;path=\"lib/TimespanLogging\"); Pkg.develop(;path=\"lib/DaggerWebDash\"); include(\"lib/DaggerWebDash/test/runtests.jl\")'"
   - label: Benchmarks
     timeout_in_minutes: 120
     <<: *bench
@@ -69,7 +88,7 @@ steps:
     command: "julia -e 'using Pkg; Pkg.add(\"BenchmarkTools\"); Pkg.develop(;path=pwd())'; JULIA_PROJECT=\"$PWD\" julia --project benchmarks/benchmark.jl"
     env:
       JULIA_NUM_THREADS: "4"
-      BENCHMARK: "cpu,cpu+dagger"
+      BENCHMARK: "nmf:raw,dagger"
       BENCHMARK_PROCS: "4:4"
       BENCHMARK_SCALE: "5:5:50"
     artifacts:

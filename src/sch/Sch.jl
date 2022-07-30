@@ -979,7 +979,7 @@ function do_task(to_proc, comm)
     to_storage_name = nameof(typeof(to_storage))
     storage_cap = storage_capacity(to_storage)
 
-    timespan_start(ctx, :storage_wait, thunk_id, (;f, to_proc, to_storage))
+    timespan_start(ctx, :storage_wait, thunk_id, (;f, to_proc, device=typeof(to_storage)))
     real_time_util = Ref{UInt64}(0)
     real_alloc_util = UInt64(0)
     if !meta
@@ -1038,7 +1038,7 @@ function do_task(to_proc, comm)
             break
         end
     end
-    timespan_finish(ctx, :storage_wait, thunk_id, (;f, to_proc, to_storage))
+    timespan_finish(ctx, :storage_wait, thunk_id, (;f, to_proc, device=typeof(to_storage)))
 
     # Initiate data transfers for function and arguments
     transfer_time = Threads.Atomic{UInt64}(0)
@@ -1157,7 +1157,7 @@ function do_task(to_proc, comm)
     threadtime = cputhreadtime() - threadtime_start
     # FIXME: This is not a realistic measure of max. required memory
     #gc_allocd = min(max(UInt64(Base.gc_num().allocd) - UInt64(gcnum_start.allocd), UInt64(0)), UInt64(1024^4))
-    timespan_finish(ctx, :compute, thunk_id, (;f, to_proc); tasks=Dagger.prof_tasks_take!(thunk_id))
+    timespan_finish(ctx, :compute, thunk_id, (;f, to_proc))
     lock(TASK_SYNC) do
         real_time_util[] -= est_time_util
         pop!(TASKS_RUNNING, thunk_id)

@@ -1,4 +1,4 @@
-@everywhere using CSV, Arrow, Random, OnlineStats, Dates, MemPool
+@everywhere using DTables, CSV, Arrow, Random, OnlineStats, Dates, MemPool
 
 # n = tryparse(Int, ARGS[1])
 # max_chunksize = tryparse(Int, ARGS[2])

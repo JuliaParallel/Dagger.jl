@@ -7,17 +7,17 @@ sink.
 Using a `TableStorage` is reasonably simple:
 
 ```julia
-ml = Dagger.MultiEventLog()
+ml = TimespanLogging.MultiEventLog()
 
 ... # Add some events
 
-lw = Dagger.Events.LogWindow(5*10^9, :core)
+lw = TimespanLogging.LogWindow(5*10^9, :core)
 
 # Create a DataFrame with one Any[] for each event
 df = DataFrame([key=>[] for key in keys(ml.consumers)]...)
 
 # Create the TableStorage and register its creation handler
-ts = Dagger.Events.TableStorage(df)
+ts = DaggerWebDash.TableStorage(df)
 push!(lw.creation_handlers, ts)
 
 ml.aggregators[:lw] = lw
@@ -33,8 +33,8 @@ struct TableStorage{T}
         new{T}(sink)
     end
 end
-Dagger.Events.init_similar(ts::TableStorage) = TableStorage(similar(ts.sink, 0))
-function Dagger.Events.creation_hook(ts::TableStorage, log)
+TimespanLogging.init_similar(ts::TableStorage) = TableStorage(similar(ts.sink, 0))
+function TimespanLogging.Events.creation_hook(ts::TableStorage, log)
     try
         push!(ts.sink, NamedTuple(log))
     catch err

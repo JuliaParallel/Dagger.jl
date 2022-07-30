@@ -1,0 +1,11 @@
+name = "TimespanLogging"
+uuid = "a526e669-04d3-4846-9525-c66122c55f63"
+authors = ["Julian P Samaroo <jpsamaroo@jpsamaroo.me>"]
+version = "0.1.0"
+
+[deps]
+Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
+Profile = "9abbd945-dff8-562f-b5e8-e1ebf5ef1b79"
+
+[compat]
+julia = "1"
