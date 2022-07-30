@@ -979,7 +979,7 @@ function do_task(to_proc, comm)
     to_storage_name = nameof(typeof(to_storage))
     storage_cap = storage_capacity(to_storage)
 
-    timespan_start(ctx, :storage_wait, thunk_id, (;f, to_proc, to_storage))
+    timespan_start(ctx, :storage_wait, thunk_id, (;f, to_proc, device=typeof(to_storage)))
     real_time_util = Ref{UInt64}(0)
     real_alloc_util = UInt64(0)
     if !meta
@@ -1038,7 +1038,7 @@ function do_task(to_proc, comm)
             break
         end
     end
-    timespan_finish(ctx, :storage_wait, thunk_id, (;f, to_proc, to_storage))
+    timespan_finish(ctx, :storage_wait, thunk_id, (;f, to_proc, device=typeof(to_storage)))
 
     # Initiate data transfers for function and arguments
     transfer_time = Threads.Atomic{UInt64}(0)
