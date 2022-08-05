@@ -8,7 +8,8 @@ import .TimespanLogging: Event, init_similar
 import .TimespanLogging.Events: EventSaturation
 
 TimespanLogging.log_sink(ctx::Context) = ctx.log_sink
-TimespanLogging.profile(ctx::Context, category, id, tl) = category == :compute
+TimespanLogging.profile(ctx::Context, category, id, tl) =
+    ctx.profile && category == :compute
 
 """
     BytesAllocd
