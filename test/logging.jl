@@ -65,7 +65,7 @@ import TimespanLogging: Timespan, Event, Events, LocalEventLog, MultiEventLog
         ml[:core] = Events.CoreMetrics()
         ml[:id] = Events.IDMetrics()
         ml[:timeline] = Events.TimelineMetrics()
-        ml[:wsat] = Events.WorkerSaturation()
+        ml[:wsat] = Dagger.Events.WorkerSaturation()
         ml[:loadavg] = Events.CPULoadAverages()
         ml[:bytes] = Dagger.Events.BytesAllocd()
         ml[:mem] = Events.MemoryFree()

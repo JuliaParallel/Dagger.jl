@@ -3,8 +3,9 @@ using StructTypes, JSON3
 sanitize(t::Tuple) = map(sanitize, t)
 sanitize(t::NamedTuple) = map(sanitize, t)
 sanitize(x::Function) = repr(x)
-sanitize(d::Dict) = Dict([sanitize(k)=>sanitize(d[k]) for k in keys(d)])
+sanitize(d::Dict) = Dict(sanitize(k)=>sanitize(d[k]) for k in keys(d))
 sanitize(a::Array) = sanitize.(a)
+sanitize(s::Set) = Set(sanitize.(s))
 sanitize(x) = x
 
 StructTypes.StructType(::Type{<:Dagger.Processor}) = StructTypes.CustomStruct()
