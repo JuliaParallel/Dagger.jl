@@ -111,7 +111,10 @@ function linePlot(container, core_key, data_key, title, ylabel) {
            );
     };
 };
-function ganttPlot(container, core_key, id_key, timeline_key, esat_key, psat_key, title) {
+function ganttPlot(container, core_key, id_key, esat_key, psat_key,
+                   title, x_label,
+                   x_key,
+                   to_color) {
     var dsvg = container.append("svg")
                         .attr("style", "border: 1px solid black");
     dsvg.attr("width", screen.width-50).attr("height", 600);
@@ -122,8 +125,9 @@ function ganttPlot(container, core_key, id_key, timeline_key, esat_key, psat_key
 
     var xScale = d3.scaleLinear().range([0, width]);
     var yScale = d3.scaleOrdinal();
+    var yScaleInverted = d3.scaleLinear();
     var g = dsvg.append("g")
-                .attr("transform", "translate(" + (width_margin/2) + "," + (height_margin/2) + ")");
+                .attr("transform", "translate(" + (width_margin-50) + "," + (height_margin-50) + ")");
     var xg = g.append("g");
     var yg = g.append("g");
     var fo = g.append("foreignObject")
@@ -156,6 +160,18 @@ function ganttPlot(container, core_key, id_key, timeline_key, esat_key, psat_key
         ctx.stroke();
     });
     */
+    var tooltip = container.append("div")
+                           .attr("class", "tooltip")
+                           .style("visibility", "hidden")
+                           .style("position", "absolute")
+                           .style("z-index", 1)
+                           .text("My tooltip");
+    canvas.on("mouseover", function(evt) {
+        tooltip.style("visibility", "visible");
+    });
+    canvas.on("mouseout", function(evt) {
+        tooltip.style("visibility", "hidden");
+    });
 
     // Draw title
     dsvg.append("text")
@@ -172,44 +188,74 @@ function ganttPlot(container, core_key, id_key, timeline_key, esat_key, psat_key
       .attr("text-anchor", "end")
       .attr("font-size", "16px")
       .attr("fill", "blue")
-      .text("Time");
+      .text(x_label);
 
     return function(values) {
         var core = values[core_key],
             ids = values[id_key],
-            timelines = values[timeline_key],
             esat = values[esat_key],
             psat = values[psat_key];
 
         // Set axis domains
-        //var time_min = d3.min(core, function(d){return d.timestamp;});
-        //var time_max = d3.max(core, function(d){return d.timestamp;});
         var time_min = seek_ts_start;
         var time_max = seek_ts_stop;
         xScale.domain([time_min, time_max]);
-        var allkeys = new Set();
+        var key_is_event = new Map();
+
+        // Collect esat keys
         var ekeys = new Set();
         for (i = 0; i < core.length; i++) {
             for (key in esat[i]) {
                 ekeys.add(key);
-                allkeys.add(key);
+                key_is_event.set(key, true);
             }
         }
+        var ekeys_array = new Array();
+        for (value of ekeys.values()) {
+            ekeys_array.push(value);
+        }
+        ekeys_array = ekeys_array.sort().reverse();
+
+        // Collect psat keys
         var pkeys = new Set();
-        for (i = 0; i < core.length; i++) {
-            for (key in psat[i]) {
-                pkeys.add(key);
-                allkeys.add(key);
+        if (psat !== undefined) {
+            for (i = 0; i < core.length; i++) {
+                // FIXME: for (key of Object.keys(psat[i])) {
+                for (key of psat[i]) {
+                    key = key[0].toString()
+                    pkeys.add(key);
+                    key_is_event.set(key, false);
+                }
             }
         }
-        var allkeys_array = new Array();
-        for (value of allkeys.values()) {
-            allkeys_array.push(value);
+        var pkeys_array = new Array();
+        for (value of pkeys.values()) {
+            pkeys_array.push(value);
         }
-        allkeys_array = allkeys_array.sort();
-        var stepsize = height / allkeys.size;
+        pkeys_array = pkeys_array.sort();
+
+        var allkeys_array = new Array();
+        for (key of pkeys_array) {
+            allkeys_array.push(key);
+        }
+        for (key of ekeys_array) {
+            allkeys_array.push(key);
+        }
+
+        var stepsize = height / allkeys_array.length;
         yScale.domain(allkeys_array)
               .range(d3.range(height, 0, -stepsize));
+        yScaleInverted.domain([height, 0])
+                      .range([0, allkeys_array.length-1]);
+
+        // Register tooltip handler
+        canvas.on("mousemove", function(evt) {
+            var key_idx = yScaleInverted(event.layerY);
+            var key = allkeys_array[Math.ceil(key_idx)];
+            tooltip.style("top", event.pageY+"px")
+                   .style("left", event.pageX+20+"px")
+                   .text(key);
+        });
 
         // Draw x-axis
         xg.attr("transform", "translate(0," + height + ")")
@@ -236,35 +282,37 @@ function ganttPlot(container, core_key, id_key, timeline_key, esat_key, psat_key
             var id_map = new Map();
             var y = yScale(key)-stepsize;
             var y_bot = y+stepsize;
-            for (i = 0; i < core.length; i++) {
-                // Skip irrelevant events
-                var category = core[i].category;
-                var color = "lightgrey";
-                var opacity = 0.4;
-                if (ekeys.has(key)) {
-                    if (category != key) {continue;}
-                } else {
-                    if (category == "compute") {
-                        color = "green";
-                        opacity = 0.1;
-                    } else if (category != "move") {
-                        color = "red";
-                        opacity = 0.1;
-                    } else {
-                        continue;
-                    }
+            var is_event = key_is_event.get(key);
+
+            // Configure color and opacity
+            var color = "lightgrey";
+            var opacity = 0.4;
+            var draw_line = true;
+            for (c = 0; c < to_color.length; c++) {
+                if ((to_color[c][0] == key) || (!is_event && (to_color[c][0] === null))) {
+                    color = to_color[c][1];
+                    opacity = to_color[c][2];
+                    draw_line = to_color[c][3];
                 }
+            }
+            for (i = 0; i < core.length; i++) {
+                var category = core[i].category;
+                var id = ids[i].toString();
+
+                // Skip irrelevant events
+                if ((is_event == true) && (key != category)) {continue;}
+                if ((is_event == false) && (key != id)) {continue;}
 
                 // Event matched, create the block
-                var id = ids[i];
                 if (core[i].kind == "start") {
                     id_map.set(id, i);
                 } else {
-                    var start_ts = time_min;
                     if (id_map.has(id)) {
                         var start_i = id_map.get(id);
-                        start_ts = core[start_i].timestamp;
+                        var start_ts = core[start_i].timestamp;
                         id_map.delete(id);
+                    } else {
+                        var start_ts = time_min;
                     }
                     var finish_ts = core[i].timestamp;
                     blocks.push({
@@ -281,16 +329,7 @@ function ganttPlot(container, core_key, id_key, timeline_key, esat_key, psat_key
             for (id in id_map.keys()) {
                 var i = id_map.get(id);
                 var x = xScale(core[i].timestamp);
-                var color = "lightgrey";
                 var category = core[i].category;
-                var opacity = 0.4;
-                if (category == "compute") {
-                    color = "green";
-                    opacity = 0.1;
-                } else if (category == "move") {
-                    color = "red";
-                    opacity = 0.1;
-                }
                 blocks.push({
                     x: x,
                     y: y,
@@ -300,16 +339,25 @@ function ganttPlot(container, core_key, id_key, timeline_key, esat_key, psat_key
                 });
             }
 
-            // Calculate max esat
-            var subsat = d3.map(ekeys.has(key) ? esat : psat, function(d) {
-                var value = d[key];
-                return value == undefined ? 0 : value;
+            // Calculate value min and max
+            var subsat = d3.map(is_event ? esat : psat, function(d) {
+                var value = 0;
+                if (is_event) {
+                    value = d[key];
+                } else {
+                    for (pkey of d) {
+                        if (pkey[0].toString() == key) {
+                            value = pkey[1];
+                        }
+                    }
+                }
+                return value === undefined ? 0 : value;
             });
             var sat_min = d3.min(subsat);
             var sat_max = d3.max(subsat);
             var satScale = d3.scaleLinear()
-                              .domain([sat_min, sat_max])
-                              .range([y_bot-5, y+5]);
+                             .domain([sat_min, sat_max])
+                             .range([y_bot-5, y+5]);
             for (i = 0; i < blocks.length; i++) {
                 var block = blocks[i];
 
@@ -326,49 +374,26 @@ function ganttPlot(container, core_key, id_key, timeline_key, esat_key, psat_key
                                block.y,
                                block.width,
                                stepsize);
-
-                // Draw block
-                /* TODO: Remove me
-                g.append("rect")
-                 .attr("fill", block.color)
-                 .attr("stroke", "black")
-                 .attr("opacity", block.opacity)
-                 .attr("x", block.x)
-                 .attr("y", block.y)
-                 .attr("width", block.width)
-                 .attr("height", stepsize);
-                */
             }
 
-            // Draw saturation line over block
-            ctx.beginPath();
-            ctx.globalAlpha = 1.0;
-            ctx.strokeStyle = "steelblue";
-            var last_y = satScale(subsat[0]);
-            ctx.moveTo(0, last_y);
-            for (i = 0; i < core.length; i++) {
-                var sat_x = xScale(core[i].timestamp),
-                    sat_y = satScale(subsat[i]);
-                ctx.lineTo(sat_x,
-                           last_y);
-                ctx.lineTo(sat_x,
-                           sat_y);
-                last_y = sat_y;
+            if (draw_line) {
+                // Draw saturation line over block
+                ctx.beginPath();
+                ctx.globalAlpha = 1.0;
+                ctx.strokeStyle = "steelblue";
+                var last_y = satScale(subsat[0]);
+                ctx.moveTo(0, last_y);
+                for (i = 0; i < core.length; i++) {
+                    var sat_x = xScale(core[i].timestamp),
+                        sat_y = satScale(subsat[i]);
+                    ctx.lineTo(sat_x,
+                               last_y);
+                    ctx.lineTo(sat_x,
+                               sat_y);
+                    last_y = sat_y;
+                }
+                ctx.stroke();
             }
-            ctx.stroke();
-
-            // Draw saturation line over blocks
-            /* TODO: Remove me
-            g.append("path")
-             .datum(d3.zip(core, subsat))
-             .attr("fill", "none")
-             .attr("stroke", "steelblue")
-             .attr("stroke-width", 1.0)
-             .attr("d", d3.line()
-                 .x(function(d) { return xScale(d[0].timestamp); })
-                 .y(function(d) { return satScale(d[1]); })
-             );
-            */
         }
     };
 };
@@ -753,7 +778,7 @@ function wsStart() {
                 // TODO: Delete unused ctxs
                 for (i = 0; i < payload.ctxs.length; i++) {
                     ctx = payload.ctxs[i];
-                    ctxfn = eval(ctx)
+                    ctxfn = eval(ctx);
                     ctxs.push(ctxfn);
                 }
                 setTimeout(function(){drawCtxs()}, 1000);

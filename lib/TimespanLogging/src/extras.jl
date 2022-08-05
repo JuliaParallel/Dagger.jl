@@ -82,30 +82,6 @@ function (es::EventSaturation)(ev::Event{:finish})
     NamedTuple(filter(x->x[2]>0, es.saturation))
 end
 
-"""
-    WorkerSaturation
-
-Tracks the compute saturation (running tasks).
-"""
-mutable struct WorkerSaturation
-    saturation::Int
-end
-WorkerSaturation() = WorkerSaturation(0)
-init_similar(::WorkerSaturation) = WorkerSaturation()
-
-function (ws::WorkerSaturation)(ev::Event{:start})
-    if ev.category == :compute
-        ws.saturation += 1
-    end
-    ws.saturation
-end
-function (ws::WorkerSaturation)(ev::Event{:finish})
-    if ev.category == :compute
-        ws.saturation -= 1
-    end
-    ws.saturation
-end
-
 "Debugging metric, used to log event start/finish via `@debug`."
 struct DebugMetrics
     sat::EventSaturation

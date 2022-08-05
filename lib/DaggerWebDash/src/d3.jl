@@ -9,16 +9,22 @@ end
 StructTypes.StructType(::Type{LinePlot}) = StructTypes.CustomStruct()
 StructTypes.lower(lp::LinePlot) = "linePlot(svg_container, \"$(lp.core_key)\", \"$(lp.data_key)\", \"$(lp.xlabel)\", \"$(lp.ylabel)\")"
 
+const GanttPlotFieldSpec = Tuple{Union{Symbol,Nothing},Symbol,Float64,Bool}
 struct GanttPlot
     core_key::Symbol
     id_key::Symbol
-    timeline_key::Symbol
     esat_key::Symbol
     psat_key::Symbol
     title::String
+    x_label::String
+    x_key::Union{Symbol,Nothing}
+    to_color::Vector{GanttPlotFieldSpec}
 end
+GanttPlot(core_key, id_key, esat_key, psat_key; title="Overview", x_label="Time", x_key=nothing, to_color=GanttPlotFieldSpec[]) =
+    GanttPlot(core_key, id_key, esat_key, psat_key,
+              title, x_label, x_key, to_color)
 StructTypes.StructType(::Type{GanttPlot}) = StructTypes.CustomStruct()
-StructTypes.lower(lp::GanttPlot) = "ganttPlot(svg_container, \"$(lp.core_key)\", \"$(lp.id_key)\", \"$(lp.timeline_key)\", \"$(lp.esat_key)\", \"$(lp.psat_key)\", \"$(lp.title)\")"
+StructTypes.lower(lp::GanttPlot) = "ganttPlot(svg_container, \"$(lp.core_key)\", \"$(lp.id_key)\", \"$(lp.esat_key)\", \"$(lp.psat_key)\", \"$(lp.title)\", \"$(lp.x_label)\", \"$(lp.x_key)\", $(JSON3.write(sanitize(lp.to_color))))"
 
 struct GraphPlot
     core_key::Symbol

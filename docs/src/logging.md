@@ -77,9 +77,9 @@ TimespanLogging.Events.FullMetrics
 TimespanLogging.Events.CPULoadAverages
 TimespanLogging.Events.MemoryFree
 TimespanLogging.Events.EventSaturation
-TimespanLogging.Events.WorkerSaturation
 Dagger.Events.BytesAllocd
 Dagger.Events.ProcessorSaturation
+Dagger.Events.WorkerSaturation
 ```
 
 The `MultiEventLog` also has a mechanism to call a set of functions, called

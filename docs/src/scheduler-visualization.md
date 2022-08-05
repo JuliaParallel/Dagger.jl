@@ -40,7 +40,7 @@ d3r = DaggerWebDash.D3Renderer(8080)
 ## Add some plots! Rendered top-down in order
 
 # Show an overview of all generated events as a Gantt chart
-push!(d3r, GanttPlot(:core, :id, :timeline, :esat, :psat, "Overview"))
+push!(d3r, GanttPlot(:core, :id, :esat, :psat; title="Overview"))
 
 # Show various numerical events as line plots over time
 push!(d3r, LinePlot(:core, :wsat, "Worker Saturation", "Running Tasks"))

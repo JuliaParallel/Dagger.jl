@@ -52,15 +52,45 @@ function (ps::ProcessorSaturation)(ev::Event{:start})
         old = get(ps.saturation, proc, 0)
         ps.saturation[proc] = old + 1
     end
-    filter(x->x[2]>0, ps.saturation)
+    # FIXME: JSON doesn't support complex arguments as object keys, so use a vector of tuples instead
+    #filter(x->x[2]>0, ps.saturation)
+    return map(x->(x[1], x[2]), filter(x->x[2]>0, collect(ps.saturation)))
 end
 function (ps::ProcessorSaturation)(ev::Event{:finish})
     if ev.category == :compute
         proc = ev.timeline.to_proc
         old = get(ps.saturation, proc, 0)
         ps.saturation[proc] = old - 1
+        if old == 1
+            delete!(ps.saturation, proc)
+        end
     end
-    filter(x->x[2]>0, ps.saturation)
+    #filter(x->x[2]>0, ps.saturation)
+    return map(x->(x[1], x[2]), filter(x->x[2]>0, collect(ps.saturation)))
+end
+
+"""
+    WorkerSaturation
+
+Tracks the compute saturation (running tasks).
+"""
+mutable struct WorkerSaturation
+    saturation::Int
+end
+WorkerSaturation() = WorkerSaturation(0)
+init_similar(::WorkerSaturation) = WorkerSaturation()
+
+function (ws::WorkerSaturation)(ev::Event{:start})
+    if ev.category == :compute
+        ws.saturation += 1
+    end
+    ws.saturation
+end
+function (ws::WorkerSaturation)(ev::Event{:finish})
+    if ev.category == :compute
+        ws.saturation -= 1
+    end
+    ws.saturation
 end
 
 end # module Events
