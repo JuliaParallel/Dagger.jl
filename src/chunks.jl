@@ -53,6 +53,7 @@ mutable struct Chunk{T, H, P<:Processor, S<:AbstractScope}
     processor::P
     scope::S
     persist::Bool
+    hash::UInt
 end
 
 domain(c::Chunk) = c.domain
@@ -242,7 +243,7 @@ be used.
 
 All other kwargs are passed directly to `MemPool.poolset`.
 """
-function tochunk(x::X, proc::P=OSProc(), scope::S=AnyScope(); persist=false, cache=false, device=nothing, kwargs...) where {X,P,S}
+function tochunk(x::X, proc::P=OSProc(), scope::S=AnyScope(); persist=false, cache=false, device=nothing, hash=UInt(0), kwargs...) where {X,P,S}
     if device === nothing
         device = if Sch.walk_storage_safe(x)
             MemPool.GLOBAL_DEVICE[]
@@ -250,8 +251,8 @@ function tochunk(x::X, proc::P=OSProc(), scope::S=AnyScope(); persist=false, cac
             MemPool.CPURAMDevice()
         end
     end
-    ref = poolset(x; device, kwargs...)
-    Chunk{X,typeof(ref),P,S}(X, domain(x), ref, proc, scope, persist)
+    ref = poolset(move(OSProc(), proc, x); device, kwargs...)
+    Chunk{X,typeof(ref),P,S}(X, domain(x), ref, proc, scope, persist, hash)
 end
 tochunk(x::Union{Chunk, Thunk}, proc=nothing, scope=nothing; kwargs...) = x
 

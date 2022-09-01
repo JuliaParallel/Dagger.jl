@@ -9,7 +9,7 @@ import Random: randperm
 
 import ..Dagger
 import ..Dagger: Context, Processor, Thunk, WeakThunk, ThunkFuture, ThunkFailedException, Chunk, OSProc, AnyScope
-import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak_checked, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, processor, default_enabled, get_processors, get_parent, execute!, rmprocs!, addprocs!, thunk_processor, constrain, cputhreadtime
+import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak_checked, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, processor, default_enabled, get_processors, get_parent, execute!, rmprocs!, addprocs!, thunk_processor, constrain, cputhreadtime, uhash
 
 const OneToMany = Dict{Thunk, Set{Thunk}}
 
@@ -613,6 +613,10 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         @assert !haskey(state.cache, task)
         opts = merge(ctx.options, task.options)
         sig = signature(task, state)
+        if task.hash == UInt(0)
+            # Compute the hash and cache it in the task
+            uhash(task, UInt(0); sig)
+        end
 
         # Calculate scope
         scope = if task.f isa Chunk
@@ -672,7 +676,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
                     # Schedule task onto proc
                     # FIXME: est_time_util = est_time_util isa MaxUtilization ? cap : est_time_util
                     push!(get!(()->Vector{Tuple{Thunk,<:Any,<:Any}}(), to_fire, (gproc, proc)), (task, est_time_util, est_alloc_util))
-                    state.worker_time_pressure[gproc.pid][proc] += est_time_util
+                    state.worker_time_pressure[gproc.pid][proc] = get(state.worker_time_pressure[gproc.pid], proc, UInt64(0)) + est_time_util
                     @goto pop_task
                 end
             end
@@ -893,10 +897,12 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
 
         ids = Int[0]
         data = Any[thunk.f]
+        hashes = Union{UInt,Nothing}[uhash(thunk.f, UInt(0))]
         for (idx, x) in enumerate(thunk.inputs)
             x = unwrap_weak_checked(x)
             push!(ids, istask(x) ? x.id : -idx)
             push!(data, istask(x) ? state.cache[x] : x)
+            push!(hashes, uhash(x, UInt(0)))
         end
         toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
         options = merge(ctx.options, toptions)
@@ -906,9 +912,10 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
         sch_handle = SchedulerHandle(ThunkID(thunk.id, nothing), state.worker_chans[gproc.pid]...)
 
         # TODO: De-dup common fields (log_sink, uid, etc.)
-        push!(to_send, Any[thunk.id, time_util, alloc_util, chunktype(thunk.f), data, thunk.get_result,
+        push!(to_send, Any[thunk.id, thunk.hash,
+                           time_util, alloc_util, chunktype(thunk.f), data, thunk.get_result,
                            thunk.persist, thunk.cache, thunk.meta, options,
-                           propagated, ids,
+                           propagated, ids, hashes,
                            (log_sink=ctx.log_sink, profile=ctx.profile),
                            sch_handle, state.uid])
     end
@@ -964,7 +971,7 @@ function do_tasks(to_proc, chan, tasks)
 end
 "Executes a single task on `to_proc`."
 function do_task(to_proc, comm)
-    thunk_id, est_time_util, est_alloc_util, Tf, data, send_result, persist, cache, meta, options, propagated, ids, ctx_vars, sch_handle, uid = comm
+    thunk_id, task_hash, est_time_util, est_alloc_util, Tf, data, send_result, persist, cache, meta, options, propagated, ids, hashes, ctx_vars, sch_handle, sch_uid = comm
     ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
 
     from_proc = OSProc()
@@ -1002,7 +1009,7 @@ function do_task(to_proc, comm)
     lock(TASK_SYNC) do
         while true
             # Get current time utilization for the selected processor
-            time_dict = get!(()->Dict{Processor,Ref{UInt64}}(), PROCESSOR_TIME_UTILIZATION, uid)
+            time_dict = get!(()->Dict{Processor,Ref{UInt64}}(), PROCESSOR_TIME_UTILIZATION, sch_uid)
             real_time_util = get!(()->Ref{UInt64}(UInt64(0)), time_dict, to_proc)
 
             # Get current allocation utilization and capacity
@@ -1043,14 +1050,19 @@ function do_task(to_proc, comm)
     # Initiate data transfers for function and arguments
     transfer_time = Threads.Atomic{UInt64}(0)
     transfer_size = Threads.Atomic{UInt64}(0)
-    _data, _ids = if meta
-        (Any[first(data)], Int[first(ids)]) # always fetch function
+    _data, _ids, _hashes = if meta
+        (Any[first(data)], Int[first(ids)], Union{UInt,Nothing}[first(hashes)]) # always fetch function
     else
-        (data, ids)
+        (data, ids, hashes)
     end
-    fetch_tasks = map(Iterators.zip(_data,_ids)) do (x, id)
+    fetch_tasks = map(Iterators.zip(_data, _ids, _hashes)) do (x, id, hash)
         @async begin
             timespan_start(ctx, :move, (;thunk_id, id), (;f, id, data=x))
+            Dagger.set_tls!((
+                sch_uid=sch_uid,
+                input_hash=hash,
+                task_hash,
+            ))
             x = if x isa Chunk
                 value = lock(TASK_SYNC) do
                     if haskey(CHUNK_CACHE, x)
@@ -1123,8 +1135,9 @@ function do_task(to_proc, comm)
     result_meta = try
         # Set TLS variables
         Dagger.set_tls!((
-            sch_uid=uid,
+            sch_uid,
             sch_handle=sch_handle,
+            task_hash,
             processor=to_proc,
             time_utilization=est_time_util,
             alloc_utilization=est_alloc_util,
@@ -1149,7 +1162,7 @@ function do_task(to_proc, comm)
 
         # Construct result
         # TODO: We should cache this locally
-        send_result || meta ? res : tochunk(res, to_proc; device, persist, cache=persist ? true : cache)
+        send_result || meta ? res : tochunk(res, to_proc; device, persist, cache=persist ? true : cache, hash=task_hash)
     catch ex
         bt = catch_backtrace()
         RemoteException(myid(), CapturedException(ex, bt))

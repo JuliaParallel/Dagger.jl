@@ -52,6 +52,7 @@ mutable struct Thunk
     f::Any # usually a Function, but could be any callable
     inputs::Vector{Any} # TODO: Use `ImmutableArray` in 1.8
     id::Int
+    hash::UInt
     get_result::Bool # whether the worker should send the result or only the metadata
     meta::Bool
     persist::Bool # don't `free!` result after computing
@@ -64,6 +65,7 @@ mutable struct Thunk
     propagates::Tuple # which options we'll propagate
     function Thunk(f, xs...;
                    id::Int=next_id(),
+                   hash=UInt(0),
                    get_result::Bool=false,
                    meta::Bool=false,
                    persist::Bool=false,
@@ -85,16 +87,18 @@ mutable struct Thunk
         xs = Any[xs...]
         if options !== nothing
             @assert isempty(kwargs)
-            new(f, xs, id, get_result, meta, persist, cache, cache_ref,
+            new(f, xs, id, hash, get_result, meta, persist, cache, cache_ref,
                 affinity, eager_ref, options, propagates)
         else
-            new(f, xs, id, get_result, meta, persist, cache, cache_ref,
+            new(f, xs, id, hash, get_result, meta, persist, cache, cache_ref,
                 affinity, eager_ref, Sch.ThunkOptions(;kwargs...), propagates)
         end
     end
 end
 Serialization.serialize(io::AbstractSerializer, t::Thunk) =
     throw(ArgumentError("Cannot serialize a Thunk"))
+
+get_task_hash(t::Thunk) = t.hash
 
 function affinity(t::Thunk)
     if t.affinity !== nothing
@@ -183,6 +187,7 @@ end
 unwrap_weak_checked(t) = t
 Base.show(io::IO, t::WeakThunk) = (print(io, "~"); Base.show(io, t.x.value))
 Base.convert(::Type{WeakThunk}, t::Thunk) = WeakThunk(t)
+get_task_hash(t::WeakThunk) = unwrap_weak_checked(t).hash
 
 struct ThunkFailedException{E<:Exception} <: Exception
     thunk::WeakThunk
@@ -223,12 +228,23 @@ function Base.fetch(t::EagerThunk; raw=false)
     if raw
         fetch(t.future; raw=true)
     else
-        move(OSProc(), fetch(t.future))
+        value = fetch(t.future)
+        if value isa Chunk
+            return fetch(@async begin
+                Dagger.set_tls!((input_hash=value.hash,
+                                 task_hash=value.hash))
+                return move(OSProc(), value)
+            end)
+        else
+            return move(OSProc(), value)
+        end
     end
 end
 function Base.show(io::IO, t::EagerThunk)
     print(io, "EagerThunk ($(isready(t) ? "finished" : "running"))")
 end
+get_task_hash(t::EagerThunk) =
+    remotecall_fetch(d->get_task_hash(poolget(d)), t.thunk_ref.owner, t.thunk_ref)
 
 "When finalized, cleans-up the associated `EagerThunk`."
 mutable struct EagerThunkFinalizer
