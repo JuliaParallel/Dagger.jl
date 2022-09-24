@@ -445,6 +445,9 @@ function walk_data_inner(f, x, seen, to_visit)
     return true
 end
 function walk_data_inner(f, x::Union{Array,Tuple}, seen, to_visit)
+    if x isa AbstractVecOrMat && !isstructtype(eltype(x)) && eltype(x) !== Any
+        return true
+    end
     for idx in firstindex(x):lastindex(x)
         if x isa Array
             isassigned(x, idx) || continue
