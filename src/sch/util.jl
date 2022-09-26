@@ -413,6 +413,11 @@ Walks the data contained in `x` in DFS fashion, and executes `f` at each object
 that hasn't yet been seen.
 """
 function walk_data(f, @nospecialize(x))
+    action = f(x)
+    if action !== missing
+        return action
+    end
+
     seen = IdDict{Any,Nothing}()
     to_visit = Any[x]
 
