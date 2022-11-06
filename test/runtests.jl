@@ -37,6 +37,8 @@ include("task-queues.jl")
 include("domain.jl")
 include("array.jl")
 include("cache.jl")
+include("diskcaching.jl")
+
 try # TODO: Fault tolerance is sometimes unreliable
 #include("fault-tolerance.jl")
 catch
