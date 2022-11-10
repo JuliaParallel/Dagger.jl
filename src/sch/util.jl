@@ -113,7 +113,7 @@ function reschedule_inputs!(state, thunk, seen=Set{Thunk}())
             input in seen && continue
 
             # Unseen
-            if istask(input) || (input isa Chunk)
+            if istask(input) || isa(input, Chunk)
                 push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
             end
             istask(input) || continue
