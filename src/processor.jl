@@ -288,18 +288,39 @@ end
 # In-Thunk Helpers
 
 """
-    thunk_processor()
+    thunk_processor() -> Dagger.Processor
 
 Get the current processor executing the current thunk.
 """
 thunk_processor() = task_local_storage(:_dagger_processor)::Processor
 
 """
-    in_thunk()
+    in_thunk() -> Bool
 
 Returns `true` if currently in a [`Thunk`](@ref) process, else `false`.
 """
 in_thunk() = haskey(task_local_storage(), :_dagger_sch_uid)
+
+"""
+    get_task_hash(kind::Symbol=:self) -> UInt
+
+Returns the unified hash of the current task or of an input to the current
+task.  If `kind == :self`, then the hash is for the current task; if `kind ==
+:input`, then the hash is for the current input to the task that is being
+processed. The `:self` hash is available during `Dagger.execute!` and
+`Dagger.move`, whereas the `:input` hash is only available during
+`Dagger.move`.  This hash is consistent across Julia processes (if all
+processes are running the same Julia version on the same architecture).
+"""
+function get_task_hash(kind::Symbol=:self)::UInt
+    if kind == :self
+        return task_local_storage(:_dagger_task_hash)::UInt
+    elseif kind == :input
+        return task_local_storage(:_dagger_input_hash)::UInt
+    else
+        throw(ArgumentError("Invalid task hash kind: $kind"))
+    end
+end
 
 """
     get_tls()
@@ -309,6 +330,8 @@ Gets all Dagger TLS variable as a `NamedTuple`.
 get_tls() = (
     sch_uid=task_local_storage(:_dagger_sch_uid),
     sch_handle=task_local_storage(:_dagger_sch_handle),
+    task_hash=task_local_storage(:_dagger_task_hash),
+    input_hash=get(task_local_storage(), :_dagger_input_hash, nothing),
     processor=thunk_processor(),
     time_utilization=task_local_storage(:_dagger_time_utilization),
     alloc_utilization=task_local_storage(:_dagger_alloc_utilization),
@@ -320,9 +343,13 @@ get_tls() = (
 Sets all Dagger TLS variables from the `NamedTuple` `tls`.
 """
 function set_tls!(tls)
-    task_local_storage(:_dagger_sch_uid, tls.sch_uid)
-    task_local_storage(:_dagger_sch_handle, tls.sch_handle)
-    task_local_storage(:_dagger_processor, tls.processor)
-    task_local_storage(:_dagger_time_utilization, tls.time_utilization)
-    task_local_storage(:_dagger_alloc_utilization, tls.alloc_utilization)
+    task_local_storage(:_dagger_sch_uid, get(tls, :sch_uid, nothing))
+    task_local_storage(:_dagger_sch_handle, get(tls, :sch_handle, nothing))
+    task_local_storage(:_dagger_task_hash, get(tls, :task_hash, nothing))
+    if haskey(tls, :input_hash) && tls.input_hash !== nothing
+        task_local_storage(:_dagger_input_hash, tls.input_hash)
+    end
+    task_local_storage(:_dagger_processor, get(tls, :processor, nothing))
+    task_local_storage(:_dagger_time_utilization, get(tls, :time_utilization, nothing))
+    task_local_storage(:_dagger_alloc_utilization, get(tls, :alloc_utilization, nothing))
 end

@@ -396,7 +396,7 @@ function estimate_task_costs(state, procs, task, inputs)
     transfer_costs = Dict(proc=>impute_sum([affinity(chunk)[2] for chunk in filter(c->get_parent(processor(c))!=get_parent(proc), chunks)]) for proc in procs)
 
     # Estimate total cost to move data and get task running after currently-scheduled tasks
-    costs = Dict(proc=>state.worker_time_pressure[get_parent(proc).pid][proc]+(tx_cost/tx_rate) for (proc, tx_cost) in transfer_costs)
+    costs = Dict(proc=>get(state.worker_time_pressure[get_parent(proc).pid], proc, UInt64(0))+(tx_cost/tx_rate) for (proc, tx_cost) in transfer_costs)
 
     # Shuffle procs around, so equally-costly procs are equally considered
     P = randperm(length(procs))
