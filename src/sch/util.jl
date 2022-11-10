@@ -252,7 +252,9 @@ end
 chunktype(x) = typeof(x)
 function signature(task::Thunk, state)
     sig = Any[chunktype(task.f)]
-    append!(sig, collect_task_inputs(state, task))
+    for input in collect_task_inputs(state, task)
+        push!(sig, chunktype(input))
+    end
     sig
 end
 
