@@ -107,5 +107,4 @@ steps:
       sandbox.jl: "true"
       os: linux
       arch: x86_64
-      num_cpus: 4
     command: "git clone https://github.com/JuliaParallel/DTables.jl.git ; julia -t4 -e 'using Pkg; Pkg.activate(\"DTables.jl\"); Pkg.develop(;path=\".\"); Pkg.instantiate(); Pkg.test()'"
