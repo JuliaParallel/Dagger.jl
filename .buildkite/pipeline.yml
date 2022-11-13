@@ -98,8 +98,6 @@ steps:
     plugins:
       - JuliaCI/julia#v1:
           version: "1.8"
-      - JuliaCI/julia-test#v1:
-          julia_args: "--threads=4"
     env:
       JULIA_NUM_THREADS: "4"
     agents:
