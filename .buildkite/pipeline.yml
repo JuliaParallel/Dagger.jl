@@ -93,3 +93,16 @@ steps:
       BENCHMARK_SCALE: "5:5:50"
     artifacts:
       - benchmarks/result*
+  - label: DTables.jl stability test
+    timeout_in_minutes: 20
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.8"
+    env:
+      JULIA_NUM_THREADS: "4"
+    agents:
+      queue: "juliaecosystem"
+      sandbox.jl: "true"
+      os: linux
+      arch: x86_64
+    command: "git clone https://github.com/JuliaParallel/DTables.jl.git ; julia -t4 -e 'using Pkg; Pkg.activate(\"DTables.jl\"); Pkg.develop(;path=\".\"); Pkg.instantiate(); Pkg.test()'"
