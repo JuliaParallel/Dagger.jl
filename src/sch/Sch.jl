@@ -1114,7 +1114,7 @@ function do_task(to_proc, comm)
     real_time_util[] += est_time_util
     timespan_start(ctx, :compute, thunk_id, (;f, to_proc))
     res = nothing
-
+    @debug "Executing $f on $to_proc"
     # Start counting time and GC allocations
     threadtime_start = cputhreadtime()
     # FIXME
@@ -1158,6 +1158,7 @@ function do_task(to_proc, comm)
     # FIXME: This is not a realistic measure of max. required memory
     #gc_allocd = min(max(UInt64(Base.gc_num().allocd) - UInt64(gcnum_start.allocd), UInt64(0)), UInt64(1024^4))
     timespan_finish(ctx, :compute, thunk_id, (;f, to_proc))
+    @debug "Finished executing $f on $to_proc"
     lock(TASK_SYNC) do
         real_time_util[] -= est_time_util
         pop!(TASKS_RUNNING, thunk_id)
