@@ -193,15 +193,59 @@ ThunkFailedException(thunk, origin, ex::E) where E =
     ThunkFailedException{E}(convert(WeakThunk, thunk), convert(WeakThunk, origin), ex)
 function Base.showerror(io::IO, ex::ThunkFailedException)
     t = unwrap_weak(ex.thunk)
-    o = unwrap_weak(ex.origin)
-    t_str = t !== nothing ? "$t" : "?"
-    o_str = o !== nothing ? "$o" : "?"
+
+    # Find root-cause thunk
+    last_tfex = ex
+    failed_tasks = Union{Thunk,Nothing}[]
+    while last_tfex.ex isa ThunkFailedException && unwrap_weak(last_tfex.ex.origin) !== nothing
+        push!(failed_tasks, unwrap_weak(last_tfex.thunk))
+        last_tfex = last_tfex.ex
+    end
+    o = unwrap_weak(last_tfex.origin)
+    root_ex = last_tfex.ex
+
+    function thunk_string(t)
+        if t === nothing
+            return "Thunk(?)"
+        end
+        Tinputs = Any[]
+        for input in t.inputs
+            input = unwrap_weak(input)
+            if istask(input)
+                push!(Tinputs, "Thunk(id=$(input.id))")
+            else
+                push!(Tinputs, input)
+            end
+        end
+        t_sig = if length(Tinputs) <= 4
+            "$(t.f)($(join(Tinputs, ", "))))"
+        else
+            "$(t.f)($(length(Tinputs)) inputs...)"
+        end
+        return "Thunk(id=$(t.id), $t_sig"
+    end
+    t_str = thunk_string(t)
+    o_str = thunk_string(o)
     t_id = t !== nothing ? t.id : '?'
     o_id = o !== nothing ? o.id : '?'
-    println(io, "ThunkFailedException ($t failure",
-                (o !== nothing && t != o) ? " due to a failure in $o)" : ")",
-                ":")
-    Base.showerror(io, ex.ex)
+    println(io, "ThunkFailedException:")
+    println(io, "  Root Exception Type: $(typeof(root_ex))")
+    println(io, "  Root Exception:")
+    Base.showerror(io, root_ex); println(io)
+    if t !== o
+        println(io, "  Root Thunk:  $o_str")
+        if length(failed_tasks) <= 4
+            for i in failed_tasks
+                i_str = thunk_string(i)
+                println(io, "  Inner Thunk: $i_str")
+            end
+        else
+            println(io, " ...")
+            println(io, "  $(length(failed_tasks)) Inner Thunks...")
+            println(io, " ...")
+        end
+    end
+    print(io, "  This Thunk:  $t_str")
 end
 
 """
