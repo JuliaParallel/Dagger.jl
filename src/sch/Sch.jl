@@ -610,7 +610,22 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         end
         task = pop!(state.ready)
         timespan_start(ctx, :schedule, task.id, (;thunk_id=task.id))
-        @assert !haskey(state.cache, task)
+        if haskey(state.cache, task)
+            if haskey(state.errored, task)
+                # An error was eagerly propagated to this task
+                finish_failed!(state, task)
+            else
+                # This shouldn't have happened
+                iob = IOBuffer()
+                println(iob, "Scheduling inconsistency: Task being scheduled is already cached!")
+                println(iob, "  Task: $(task.id)")
+                println(iob, "  Cache Entry: $(typeof(state.cache[task]))")
+                ex = SchedulingException(String(take!(iob)))
+                state.cache[task] = ex
+                state.errored[task] = true
+            end
+            @goto pop_task
+        end
         opts = merge(ctx.options, task.options)
         sig = signature(task, state)
 

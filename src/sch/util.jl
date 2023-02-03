@@ -145,6 +145,9 @@ function set_failed!(state, origin, thunk=origin)
     filter!(x->x!==thunk, state.ready)
     state.cache[thunk] = ThunkFailedException(thunk, origin, state.cache[origin])
     state.errored[thunk] = true
+    finish_failed!(state, thunk, origin)
+end
+function finish_failed!(state, thunk, origin=nothing)
     fill_registered_futures!(state, thunk, true)
     if haskey(state.waiting_data, thunk)
         for dep in state.waiting_data[thunk]
@@ -152,7 +155,7 @@ function set_failed!(state, origin, thunk=origin)
                 delete!(state.waiting, dep)
             haskey(state.errored, dep) &&
                 continue
-            set_failed!(state, origin, dep)
+            origin !== nothing && set_failed!(state, origin, dep)
         end
         delete!(state.waiting_data, thunk)
     end
