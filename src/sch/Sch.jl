@@ -6,6 +6,7 @@ import MemPool: DRef, StorageResource
 import MemPool: poolset, storage_available, storage_capacity, storage_utilized, externally_varying
 import Statistics: mean
 import Random: randperm
+import Base: @invokelatest
 
 import ..Dagger
 import ..Dagger: Context, Processor, Thunk, WeakThunk, ThunkFuture, ThunkFailedException, Chunk, WeakChunk, OSProc, AnyScope
@@ -527,7 +528,7 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
             state.errored[node] = thunk_failed
             if node.options !== nothing && node.options.checkpoint !== nothing
                 try
-                    node.options.checkpoint(node, res)
+                    @invokelatest node.options.checkpoint(node, res)
                 catch err
                     report_catch_error(err, "Thunk checkpoint failed")
                 end
@@ -892,7 +893,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
         end
         if thunk.options !== nothing && thunk.options.restore !== nothing
             try
-                result = thunk.options.restore(thunk)
+                result = @invokelatest thunk.options.restore(thunk)
                 if result isa Chunk
                     state.cache[thunk] = result
                     state.errored[thunk] = false
