@@ -367,9 +367,20 @@ macro spawn(exs...)
     _par(ex; lazy=false, opts=opts)
 end
 
+struct ExpandedBroadcast{F} end
+(eb::ExpandedBroadcast{F})(args...) where F =
+    Base.materialize(Base.broadcasted(F, args...))
+replace_broadcast(ex) = ex
+function replace_broadcast(fn::Symbol)
+    if startswith(string(fn), '.')
+        return :($ExpandedBroadcast{$(Symbol(string(fn)[2:end]))}())
+    end
+    return fn
+end
+
 function _par(ex::Expr; lazy=true, recur=true, opts=())
     if ex.head == :call && recur
-        f = ex.args[1]
+        f = replace_broadcast(ex.args[1])
         args = ex.args[2:end]
         opts = esc.(opts)
         if lazy

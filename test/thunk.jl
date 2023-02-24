@@ -61,6 +61,11 @@ end
         @test fetch(c) == 20
     end
     @test Dagger.Sch.EAGER_CONTEXT[] isa Context
+    @testset "broadcast" begin
+        A, B = rand(4), rand(4)
+        @test fetch(@spawn A .+ B) ≈ A .+ B
+        @test fetch(@spawn A .* B) ≈ A .* B
+    end
     @testset "waiting" begin
         a = @spawn sleep(1)
         @test !isready(a)
