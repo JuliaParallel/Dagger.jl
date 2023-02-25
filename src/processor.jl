@@ -159,6 +159,7 @@ function execute!(proc::ThreadProc, @nospecialize(f), @nospecialize(args...))
         TimespanLogging.prof_task_put!(tls.sch_handle.thunk_id.id)
         f(args...)
     end
+    task.sticky = true
     ret = ccall(:jl_set_task_tid, Cint, (Any, Cint), task, proc.tid-1)
     if ret == 0
         error("jl_set_task_tid == 0")
