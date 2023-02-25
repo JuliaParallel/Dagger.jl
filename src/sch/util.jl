@@ -348,7 +348,7 @@ function can_use_proc(task, gproc, proc, opts, scope)
     return true, scope
 end
 
-function has_capacity(state, p, gp, time_util, alloc_util, sig)
+function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
     T = typeof(p)
     # FIXME: MaxUtilization
     est_time_util = round(UInt64, if time_util !== nothing && haskey(time_util, T)
@@ -359,8 +359,14 @@ function has_capacity(state, p, gp, time_util, alloc_util, sig)
     est_alloc_util = if alloc_util !== nothing && haskey(alloc_util, T)
         alloc_util[T]
     else
-        get(state.signature_alloc_cost, sig, 0)
-    end
+        get(state.signature_alloc_cost, sig, UInt64(0))
+    end::UInt64
+    est_occupancy = if occupancy !== nothing && haskey(occupancy, T)
+        # Clamp to 0-1, and scale between 0 and `typemax(UInt32)`
+        Base.unsafe_trunc(UInt32, clamp(occupancy[T], 0, 1) * typemax(UInt32))
+    else
+        typemax(UInt32)
+    end::UInt32
     #= FIXME: Estimate if cached data can be swapped to storage
     storage = storage_resource(p)
     real_alloc_util = state.worker_storage_pressure[gp][storage]
@@ -369,7 +375,7 @@ function has_capacity(state, p, gp, time_util, alloc_util, sig)
         return false, est_time_util, est_alloc_util
     end
     =#
-    return true, est_time_util, est_alloc_util
+    return true, est_time_util, est_alloc_util, est_occupancy
 end
 
 function populate_processor_cache_list!(state, procs)
