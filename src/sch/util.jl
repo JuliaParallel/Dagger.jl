@@ -14,7 +14,7 @@ function get_propagated_options(thunk)
     nt = NamedTuple()
     for key in thunk.propagates
         value = if key == :scope
-            isa(thunk.f, Chunk) ? thunk.f.scope : AnyScope()
+            isa(thunk.f, Chunk) ? thunk.f.scope : DefaultScope()
         elseif key == :processor
             isa(thunk.f, Chunk) ? thunk.f.processor : OSProc()
         elseif key in fieldnames(Thunk)
@@ -285,7 +285,7 @@ function can_use_proc(task, gproc, proc, opts, scope)
     # Check against single
     if opts.single !== nothing
         if gproc.pid != opts.single
-            @debug "Rejected $proc: gproc.pid != single"
+            @debug "[$(task.id)] Rejected $proc: gproc.pid ($(gproc.pid)) != single ($(opts.single))"
             return false
         end
     end
@@ -293,9 +293,11 @@ function can_use_proc(task, gproc, proc, opts, scope)
     # Check scope
     proc_scope = Dagger.ExactScope(proc)
     if constrain(scope, proc_scope) isa Dagger.InvalidScope
-        @debug "Rejected $proc: Task scope ($scope) vs. processor scope ($proc_scope)"
+        @debug "[$(task.id)] Rejected $proc: Not contained in task scope ($scope)"
         return false
     end
+
+    @debug "[$(task.id)] Accepted $proc"
 
     return true
 end

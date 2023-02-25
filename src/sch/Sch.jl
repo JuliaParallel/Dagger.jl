@@ -9,7 +9,7 @@ import Random: randperm
 import Base: @invokelatest
 
 import ..Dagger
-import ..Dagger: Context, Processor, Thunk, WeakThunk, ThunkFuture, ThunkFailedException, Chunk, WeakChunk, OSProc, AnyScope
+import ..Dagger: Context, Processor, Thunk, WeakThunk, ThunkFuture, ThunkFailedException, Chunk, WeakChunk, OSProc, DefaultScope
 import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak_checked, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, processor, default_enabled, get_processors, get_parent, execute!, rmprocs!, addprocs!, thunk_processor, constrain, cputhreadtime
 
 const OneToMany = Dict{Thunk, Set{Thunk}}
@@ -634,7 +634,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         scope = if task.f isa Chunk
             task.f.scope
         else
-            AnyScope()
+            DefaultScope()
         end
         for input in task.inputs
             input = unwrap_weak_checked(input)
@@ -693,7 +693,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
                 end
             end
         end
-        state.cache[task] = SchedulingException("No processors available, try making proclist more liberal")
+        state.cache[task] = SchedulingException("No processors available, try widening scope")
         state.errored[task] = true
         set_failed!(state, task)
         @goto pop_task
@@ -723,7 +723,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
                 if procs_found
                     push!(failed_scheduling, task)
                 else
-                    state.cache[task] = SchedulingException("No processors available, try making proclist more liberal")
+                    state.cache[task] = SchedulingException("No processors available, try widening scope")
                     state.errored[task] = true
                     set_failed!(state, task)
                 end

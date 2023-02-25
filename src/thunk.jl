@@ -39,7 +39,7 @@ arguments are still passed as-is.
 - `processor::Processor=OSProc()` - The processor associated with `f`. Useful if
 `f` is a callable struct that exists on a given processor and should be
 transferred appropriately.
-- `scope::Dagger.AbstractScope=AnyScope()` - The scope associated with `f`.
+- `scope::Dagger.AbstractScope=DefaultScope()` - The scope associated with `f`.
 Useful if `f` is a function or callable struct that may only be transferred to,
 and executed within, the specified scope.
 
@@ -80,7 +80,7 @@ mutable struct Thunk
         if !isa(f, Chunk) && (!isnothing(processor) || !isnothing(scope))
             f = tochunk(f,
                         something(processor, OSProc()),
-                        something(scope, AnyScope()))
+                        something(scope, DefaultScope()))
         end
         xs = Any[xs...]
         if options !== nothing
@@ -315,7 +315,7 @@ function spawn(f, args...; processor=nothing, scope=nothing, kwargs...)
     if !isnothing(processor) || !isnothing(scope)
         f = tochunk(f,
                     something(processor, get_options(:processor, OSProc())),
-                    something(scope, get_options(:scope, AnyScope())))
+                    something(scope, get_options(:scope, DefaultScope())))
     end
     uid, future, finalizer_ref, thunk_ref = if myid() == 1
         _spawn(f, args...; options, kwargs...)

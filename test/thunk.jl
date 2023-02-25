@@ -21,6 +21,7 @@ import Dagger: Chunk
     end
     MulProc() = MulProc(myid())
     Dagger.get_parent(mp::MulProc) = OSProc(mp.owner)
+    Dagger.move(src::MulProc, dest::Dagger.OSProc, x::Function) = Base.:*
     Dagger.move(src::MulProc, dest::Dagger.ThreadProc, x::Function) = Base.:*
 end
 
@@ -202,7 +203,7 @@ end
             a = delayed(+; processor=Dagger.ThreadProc(1,1))(1,2)
             @test a.f isa Chunk
             @test a.f.processor isa Dagger.ThreadProc
-            @test a.f.scope isa AnyScope
+            @test a.f.scope == DefaultScope()
 
             a = delayed(+; processor=Dagger.ThreadProc(1,1), scope=NodeScope())(1,2)
             @test a.f isa Chunk
@@ -236,7 +237,7 @@ end
             a = Dagger.Sch._find_thunk(_a)
             @test a.f isa Chunk
             @test a.f.processor isa Dagger.ThreadProc
-            @test a.f.scope isa AnyScope
+            @test a.f.scope == DefaultScope()
 
             _a = Dagger.spawn(+, 1, 2; processor=Dagger.ThreadProc(1,1), scope=NodeScope())
             a = Dagger.Sch._find_thunk(_a)

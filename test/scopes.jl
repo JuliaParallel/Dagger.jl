@@ -31,6 +31,17 @@
     es1_ch = Dagger.tochunk(nothing, OSProc(), es1)
     es2_ch = Dagger.tochunk(nothing, OSProc(), es2)
 
+    os1 = ExactScope(OSProc(1))
+
+    @testset "Default Scope" begin
+        ds = DefaultScope()
+        for (s1, s2) in ((ds, es1), (es1, ds))
+            @test Dagger.constrain(s1, s2) == es1
+        end
+        for (s1, s2) in ((ds, os1), (os1, ds))
+            @test Dagger.constrain(s1, s2) isa Dagger.InvalidScope
+        end
+    end
     @testset "Node Scope" begin
         @everywhere node_scope_test(ch...) = Dagger.system_uuid()
 
@@ -127,6 +138,26 @@
         @test us_res isa UnionScope
         @test es1 in us_res.scopes
         @test !(es2 in us_res.scopes)
+    end
+    @testset "Processor Type Scope" begin
+        pts_th = ProcessorTypeScope(Dagger.ThreadProc)
+        pts_os = ProcessorTypeScope(Dagger.OSProc)
+
+        @test Dagger.constrain(pts_th, es1) == es1
+        @test Dagger.constrain(pts_th, os1) isa Dagger.InvalidScope
+
+        @test Dagger.constrain(pts_os, es1) isa Dagger.InvalidScope
+        @test Dagger.constrain(pts_os, os1) == os1
+
+        # Duplicate
+        pts_th_dup = Dagger.constrain(pts_th, pts_th)
+        @test Dagger.constrain(pts_th_dup, es1) == es1
+        @test Dagger.constrain(pts_th_dup, os1) isa Dagger.InvalidScope
+
+        # Empty intersection
+        pts_all = Dagger.constrain(pts_th, pts_os)
+        @test Dagger.constrain(pts_all, es1) isa Dagger.InvalidScope
+        @test Dagger.constrain(pts_all, os1) isa Dagger.InvalidScope
     end
     # TODO: Test scope propagation
 
