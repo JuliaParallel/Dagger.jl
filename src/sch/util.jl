@@ -263,43 +263,55 @@ end
 
 function can_use_proc(task, gproc, proc, opts, scope)
     # Check against proclist
-    if opts.proclist === nothing
-        if !default_enabled(proc)
-            @debug "Rejected $proc: !default_enabled(proc)"
-            return false
+    if opts.proclist !== nothing
+        @warn "The `proclist` option is deprecated, please use scopes instead\nSee https://juliaparallel.org/Dagger.jl/stable/scopes/ for details" maxlog=1
+        if opts.proclist isa Function
+            if !Base.invokelatest(opts.proclist, proc)
+                @debug "[$(task.id)] Rejected $proc: proclist(proc) == false"
+                return false, scope
+            end
+            scope = constrain(scope, Dagger.ExactScope(proc))
+        elseif opts.proclist isa Vector
+            if !(typeof(proc) in opts.proclist)
+                @debug "[$(task.id)] Rejected $proc: !(typeof(proc) in proclist)"
+                return false, scope
+            end
+            scope = constrain(scope,
+                              Dagger.UnionScope(map(Dagger.ProcessorTypeScope, opts.proclist)))
+        else
+            throw(SchedulingException("proclist must be a Function, Vector, or nothing"))
         end
-    elseif opts.proclist isa Function
-        if !Base.invokelatest(opts.proclist, proc)
-            @debug "Rejected $proc: proclist(proc) == false"
-            return false
+        if scope isa Dagger.InvalidScope
+            @debug "[$(task.id)] Rejected $proc: Not contained in task scope ($scope)"
+            return false, scope
         end
-    elseif opts.proclist isa Vector
-        if !(typeof(proc) in opts.proclist)
-            @debug "Rejected $proc: !(typeof(proc) in proclist)"
-            return false
-        end
-    else
-        throw(SchedulingException("proclist must be a Function, Vector, or nothing"))
     end
 
     # Check against single
     if opts.single !== nothing
+        @warn "The `single` option is deprecated, please use scopes instead\nSee https://juliaparallel.org/Dagger.jl/stable/scopes/ for details" maxlog=1
         if gproc.pid != opts.single
             @debug "[$(task.id)] Rejected $proc: gproc.pid ($(gproc.pid)) != single ($(opts.single))"
-            return false
+            return false, scope
+        end
+        scope = constrain(scope, Dagger.ProcessScope(opts.single))
+        if scope isa Dagger.InvalidScope
+            @debug "[$(task.id)] Rejected $proc: Not contained in task scope ($scope)"
+            return false, scope
         end
     end
 
-    # Check scope
+    # Check against scope
     proc_scope = Dagger.ExactScope(proc)
     if constrain(scope, proc_scope) isa Dagger.InvalidScope
         @debug "[$(task.id)] Rejected $proc: Not contained in task scope ($scope)"
-        return false
+        return false, scope
     end
 
-    @debug "[$(task.id)] Accepted $proc"
+    @label accept
 
-    return true
+    @debug "[$(task.id)] Accepted $proc"
+    return true, scope
 end
 
 function has_capacity(state, p, gp, time_util, alloc_util, sig)
