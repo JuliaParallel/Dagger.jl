@@ -1,5 +1,7 @@
 export OSProc, Context, addprocs!, rmprocs!
 
+import Base: @invokelatest
+
 """
     Processor
 
@@ -157,7 +159,7 @@ function execute!(proc::ThreadProc, @nospecialize(f), @nospecialize(args...))
     task = Task() do
         set_tls!(tls)
         TimespanLogging.prof_task_put!(tls.sch_handle.thunk_id.id)
-        f(args...)
+        @invokelatest f(args...)
     end
     task.sticky = true
     ret = ccall(:jl_set_task_tid, Cint, (Any, Cint), task, proc.tid-1)
