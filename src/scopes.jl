@@ -73,6 +73,47 @@ struct InvalidScope <: AbstractScope
     y::AbstractScope
 end
 
+# Show methods
+
+function Base.show(io::IO, scope::UnionScope)
+    indent = io isa IOContext ? get(io, :indent, 0) : 0
+    println(io, "UnionScope:")
+    indent += 2
+    inner_io = IOContext(io, :indent => indent)
+    if length(scope.scopes) == 0
+        print(io, " "^indent, "empty")
+        return
+    end
+    for (idx, inner_scope) in enumerate(scope.scopes)
+        print(io, " "^indent); print(inner_io, inner_scope)
+        idx < length(scope.scopes) && println(io)
+    end
+end
+function Base.show(io::IO, scope::TaintScope)
+    indent = io isa IOContext ? get(io, :indent, 0) : 0
+    println(io, "TaintScope:")
+    indent += 2
+    inner_io = IOContext(io, :indent => indent)
+    print(io, " "^indent, "scope: "); println(inner_io, scope.scope)
+    if length(scope.taints) == 0
+        print(io, " "^indent, "no taints")
+        return
+    end
+    println(io, " "^indent, "taints: ")
+    indent += 4
+    inner_io = IOContext(io, :indent => indent)
+    for (idx, taint) in enumerate(scope.taints)
+        print(io, " "^indent); print(inner_io, taint)
+        idx < length(scope.taints) && println(io)
+    end
+end
+Base.show(io::IO, scope::NodeScope) =
+    print(io, "NodeScope: node == $(scope.uuid)")
+Base.show(io::IO, scope::ProcessScope) =
+    print(io, "ProcessScope: worker == $(scope.wid)")
+Base.show(io::IO, scope::ExactScope) =
+    print(io, "ExactScope: processor == $(scope.processor)")
+
 # Comparisons and constraint checking
 
 constrain(x, y) = x < y ? constrain(y, x) : throw(MethodError(constrain, x, y))
