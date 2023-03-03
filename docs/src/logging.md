@@ -32,7 +32,7 @@ called. Let's construct one:
 
 ```julia
 ctx = Context()
-ml = TimspanLogging.MultiEventLog()
+ml = TimespanLogging.MultiEventLog()
 
 # Add the BytesAllocd consumer to the log as `:bytes`
 ml[:bytes] = Dagger.Events.BytesAllocd()

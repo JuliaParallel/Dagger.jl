@@ -1,4 +1,7 @@
-using Mux, MemPool, Distributed, Sockets
+using Mux, Sockets
+import HTTP
+import HTTP: WebSockets
+using MemPool, Distributed
 
 struct LinePlot
     core_key::Symbol
@@ -172,22 +175,22 @@ function client_handler(sock, id, port, port_range, config_updated, config, seek
     if id != myid()
         fsock_ready = Base.Event()
         worker_host, worker_port = worker_host_port(id, port, port_range)
-        Mux.HTTP.WebSockets.open("ws://$worker_host:$worker_port/data_feed") do _fsock
+        WebSockets.open("ws://$worker_host:$worker_port/data_feed") do _fsock
             fsock = _fsock
             @debug "D3R forwarder for $id ready"
             notify(fsock_ready)
-            while !eof(fsock) && isopen(fsock)
+            while true
                 try
-                    bytes = readavailable(fsock)
+                    bytes = WebSockets.receive(fsock)
                     if length(bytes) == 0
                         sleep(0.1)
                         continue
                     end
                     data = String(bytes)
                     #@info "D3R forwarder for $id received data"
-                    write(sock, data)
+                    WebSockets.send(sock, data)
                 catch err
-                    if err isa Mux.WebSockets.WebSocketClosedError || err isa Base.IOError
+                    if err isa WebSockets.WebSocketError && err.message isa WebSockets.CloseFrameBody
                         # Force-close client and forwarder
                         @async close(sock)
                         @async close(fsock)
@@ -203,25 +206,25 @@ function client_handler(sock, id, port, port_range, config_updated, config, seek
     end
     if id == myid()
         @debug "D3R client for $id sending initial config"
-        write(sock, JSON3.write((;cmd="data", payload=sanitize(D3R_LOGS[port]))))
+        WebSockets.send(sock, JSON3.write((;cmd="data", payload=sanitize(D3R_LOGS[port]))))
         _workers = workers()
         if !(myid() in _workers)
             # FIXME: Get this from the Context
             _workers = vcat(myid(), _workers)
         end
-        write(sock, JSON3.write((;cmd="config", payload=sanitize((;myid=myid(),workers=_workers,ctxs=config)))))
+        WebSockets.send(sock, JSON3.write((;cmd="config", payload=sanitize((;myid=myid(),workers=_workers,ctxs=config)))))
     end
     push!(get!(()->[], D3R_CLIENT_SOCKETS[port], id), sock)
     @debug "D3R client for $id ready"
-    while !eof(sock) && isopen(sock)
+    while true
         try
-            data = String(read(sock))
+            data = String(WebSockets.receive(sock))
             @debug "D3R client for $id received: $data"
             if id == myid()
                 #= FIXME
                 if config_updated[]
                     config_updated[] = false
-                    write(sock, JSON3.write((;cmd="config", payload=sanitize(config))))
+                    WebSockets.send(sock, JSON3.write((;cmd="config", payload=sanitize(config))))
                 end
                 =#
                 if seek_store !== nothing
@@ -231,7 +234,7 @@ function client_handler(sock, id, port, port_range, config_updated, config, seek
                         for (idx,key) in enumerate(Tables.columnnames(raw_logs))
                             logs[key] = Tables.columns(raw_logs)[idx]
                         end
-                        write(sock, JSON3.write((;cmd="data", payload=sanitize(logs))))
+                        WebSockets.send(sock, JSON3.write((;cmd="data", payload=sanitize(logs))))
                         continue
                     end
                     m = match(r"seek\(([0-9]*),([0-9]*)\)", data)
@@ -242,19 +245,19 @@ function client_handler(sock, id, port, port_range, config_updated, config, seek
                         for (idx,key) in enumerate(Tables.columnnames(raw_logs))
                             logs[key] = Tables.columns(raw_logs)[idx]
                         end
-                        write(sock, JSON3.write((;cmd="data", payload=sanitize(logs))))
+                        WebSockets.send(sock, JSON3.write((;cmd="data", payload=sanitize(logs))))
                         continue
                     end
                 end
                 if data == "data"
-                    write(sock, JSON3.write((;cmd="data", payload=sanitize(D3R_LOGS[port]))))
+                    WebSockets.send(sock, JSON3.write((;cmd="data", payload=sanitize(D3R_LOGS[port]))))
                 end
             else
                 @debug "D3R client sending to forwarder: $data"
-                write(fsock, data)
+                WebSockets.send(fsock, data)
             end
         catch err
-            if err isa Mux.WebSockets.WebSocketClosedError || err isa Base.IOError
+            if err isa WebSockets.WebSocketError && err.message isa WebSockets.CloseFrameBody
                 idx = findfirst(x->x==sock, D3R_CLIENT_SOCKETS[port][id])
                 if idx !== nothing
                     deleteat!(D3R_CLIENT_SOCKETS[port][id], idx)
@@ -273,11 +276,9 @@ end
 function TimespanLogging.Events.creation_hook(d3r::D3Renderer, log)
     for sock in get!(()->[], get!(()->Dict{Int,Vector{Any}}(), D3R_CLIENT_SOCKETS, d3r.port), myid())
         try
-            if isopen(sock)
-                write(sock, JSON3.write((;cmd="add", payload=sanitize(log))))
-            end
+            WebSockets.send(sock, JSON3.write((;cmd="add", payload=sanitize(log))))
         catch err
-            if err isa Mux.WebSockets.WebSocketClosedError
+            if err isa WebSockets.WebSocketError && err.message isa WebSockets.CloseFrameBody
                 continue
             end
             rethrow(err)
@@ -287,11 +288,9 @@ end
 function TimespanLogging.Events.deletion_hook(d3r::D3Renderer, idx)
     for sock in get!(()->[], get!(()->Dict{Int,Vector{Any}}(), D3R_CLIENT_SOCKETS, d3r.port), myid())
         try
-            if isopen(sock)
-                write(sock, JSON3.write((;cmd="delete", payload=idx)))
-            end
+            WebSockets.send(sock, JSON3.write((;cmd="delete", payload=idx)))
         catch err
-            if err isa Mux.WebSockets.WebSocketClosedError
+            if err isa WebSockets.WebSocketError && err.message isa WebSockets.CloseFrameBody
                 continue
             end
             rethrow(err)
