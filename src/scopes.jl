@@ -26,11 +26,37 @@ DefaultScope() = TaintScope(AnyScope(),
 "Union of two or more scopes."
 struct UnionScope <: AbstractScope
     scopes::Tuple
+    function UnionScope(scopes::Tuple)
+        scope_set = Set{AbstractScope}()
+        for scope in scopes
+            if scope isa UnionScope
+                for subscope in scope.scopes
+                    push!(scope_set, subscope)
+                end
+            else
+                push!(scope_set, scope)
+            end
+        end
+        return new((collect(scope_set)...,))
+    end
 end
 UnionScope(scopes...) = UnionScope((scopes...,))
 UnionScope(scopes::Vector{<:AbstractScope}) = UnionScope((scopes...,))
 UnionScope(s::AbstractScope) = UnionScope((s,))
-UnionScope() = throw(ArgumentError("Cannot construct empty UnionScope"))
+UnionScope() = UnionScope(())
+
+function Base.:(==)(us1::UnionScope, us2::UnionScope)
+    if length(us1.scopes) != length(us2.scopes)
+        return false
+    end
+    scopes = Set{AbstractScope}()
+    for scope in us2.scopes
+        if !(scope in us2.scopes)
+            return false
+        end
+    end
+    return true
+end
 
 "Scoped to the same physical node."
 struct NodeScope <: AbstractScope
