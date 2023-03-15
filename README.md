@@ -17,10 +17,14 @@ At the core of Dagger.jl is a scheduler heavily inspired by [Dask](https://docs.
 
 ## Installation
 
-You can install Dagger by typing
+The Dagger package can be installed using the Julia package manager. Enter the Pkg REPL mode by typing "]" in the Julia REPL and then run:-
 
 ```julia
 julia> ] add Dagger
+```
+Or, equivalently, via the Pkg API:
+```julia
+julia> import Pkg; Pkg.add("Dagger")
 ```
 
 ## Usage
@@ -37,6 +41,31 @@ b = Dagger.@spawn rand(a, 4)
 c = Dagger.@spawn sum(b)
 fetch(c) # some number!
 ```
+## Contributing Guide
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](http://makeapullrequest.com)
+![GitHub issues](https://img.shields.io/github/issues/JuliaParallel/Dagger.jl)
+![GitHub contributors](https://img.shields.io/github/contributors/JuliaParallel/Dagger.jl)
+[![GitHub](https://badgen.net/badge/icon/github?icon=github&label)](https://github.com)
+
+Contributions are encouraged. 
+
+There are several ways to contribute to our project:
+
+**Reporting Bugs**: If you find a bug, please open an issue and describe the problem. Make sure to include steps to reproduce the issue and any error messages you receive regarding that issue.
+
+**Fixing Bugs**: If you'd like to fix a bug, please create a pull request with your changes. Make sure to include a description of the problem and how your changes will address it.
+
+Additional examples and documentation improvements are also very welcome.
+
+## Documentation
+List of recommended Dagger resources:
+- https://docs.juliahub.com/Dagger/0a2f8/0.13.3/
+- https://juliaparallel.org/Dagger.jl/dev/
+
+## Help and Discussion
+For help and discussion, we suggest asking on the following:
+
+[Julia Discourse](https://discourse.julialang.org/t/dagger-use-cases/72012) and on the [Julia Slack](https://julialang.org/slack/)
 
 ## Acknowledgements
 
