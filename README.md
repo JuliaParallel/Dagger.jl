@@ -63,7 +63,7 @@ List of recommended Dagger resources:
 - https://juliaparallel.org/Dagger.jl/dev/
 
 ## Help and Discussion
-For help and discussion, we suggest asking on the following:
+For help and discussion, we suggest asking in the following places:
 
 [Julia Discourse](https://discourse.julialang.org/t/dagger-use-cases/72012) and on the [Julia Slack](https://julialang.org/slack/)
 
