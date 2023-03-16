@@ -44,7 +44,7 @@ fetch(c) # some number!
 ## Contributing Guide
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](http://makeapullrequest.com)
 ![GitHub issues](https://img.shields.io/github/issues/JuliaParallel/Dagger.jl)
-![GitHub contributors](https://img.shields.io/github/contributors/JuliaParallel/Dagger.jl)
+[![GitHub contributors](https://img.shields.io/github/contributors/JuliaParallel/Dagger.jl)](https://github.com/JuliaParallel/Dagger.jl/graphs/contributors)
 [![GitHub](https://badgen.net/badge/icon/github?icon=github&label)](https://github.com)
 
 Contributions are encouraged. 
