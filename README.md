@@ -43,7 +43,7 @@ fetch(c) # some number!
 ```
 ## Contributing Guide
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](http://makeapullrequest.com)
-![GitHub issues](https://img.shields.io/github/issues/JuliaParallel/Dagger.jl)
+[![GitHub issues](https://img.shields.io/github/issues/JuliaParallel/Dagger.jl)](https://github.com/JuliaParallel/Dagger.jl/issues)
 [![GitHub contributors](https://img.shields.io/github/contributors/JuliaParallel/Dagger.jl)](https://github.com/JuliaParallel/Dagger.jl/graphs/contributors)
 
 Contributions are encouraged. 
