@@ -20,7 +20,7 @@ At the core of Dagger.jl is a scheduler heavily inspired by [Dask](https://docs.
 Dagger.jl can be installed using the Julia package manager. Enter the Pkg REPL mode by typing "]" in the Julia REPL and then run:
 
 ```julia
-julia> ] add Dagger
+pkg> add Dagger
 ```
 Or, equivalently, via the Pkg API:
 ```julia
