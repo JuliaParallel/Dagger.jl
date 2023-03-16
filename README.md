@@ -56,10 +56,14 @@ There are several ways to contribute to our project:
 
 Additional examples and documentation improvements are also very welcome.
 
-## Documentation
-List of recommended Dagger resources:
-- https://docs.juliahub.com/Dagger/0a2f8/0.13.3/
-- https://juliaparallel.org/Dagger.jl/dev/
+## Resources
+List of recommended Dagger.jl resources:
+- Docs [![][docs-master-img]][docs-master-url]
+- Videos
+  - [Distributed Computing with Dagger.jl](https://youtu.be/capjmjVHfMU)
+  - [Easy, Featureful Parallelism with Dagger.jl](https://youtu.be/t3S8W6A4Ago)
+  - [Easier parallel Julia workflow with Dagger.jl](https://youtu.be/VrqzOsav61w)
+  - [Dagger.jl Development and Roadmap](https://youtu.be/G0Y62ysFbDk)
 
 ## Help and Discussion
 For help and discussion, we suggest asking in the following places:
