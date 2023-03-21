@@ -258,7 +258,7 @@ function get_logs!(ml::MultiEventLog; only_local=true)
             end
         end
         return logs
-    end       
+    end
 end
 
 
