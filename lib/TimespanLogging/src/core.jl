@@ -235,21 +235,33 @@ end
 
 function get_logs!(ml::MultiEventLog; only_local=true)
     if only_local
-        # Only return logs from current process
-        mls = get_state(ml)
-        return mls.consumer_logs
+        # Only return logs from the current process
+        logs = Dict{Int, Dict{Symbol,Vector}}()
+        pid = myid()
+        logs[pid] = remotecall_fetch(pid, ml) do ml 
+            mls = get_state(ml)
+            lock(event_log_lock) do
+                sublogs = Dict{Symbol,Vector}()
+                for name in keys(mls.consumers)
+                    sublogs[name] = copy(mls.consumer_logs[name])
+                    mls.consumer_logs[name] = []
+                end
+                sublogs
+            end
+        end
+        return logs
     else
         # Return logs from all processes
-        logs = Dict{Int,Dict{Symbol,Vector}}()
+        logs = Dict{Int, Dict{Symbol,Vector}}()
         wkrs = procs()
-        @sync for p in wkrs 
+        @sync for p in wkrs
             @async begin
-                logs[p] = remotecall_fetch(p, ml) do ml
+                logs[p] = remotecall_fetch(p, ml) do ml 
                     mls = get_state(ml)
                     lock(event_log_lock) do
                         sublogs = Dict{Symbol,Vector}()
                         for name in keys(mls.consumers)
-                            sublogs[name] = mls.consumer_logs[name]
+                            sublogs[name] = copy(mls.consumer_logs[name])
                             mls.consumer_logs[name] = []
                         end
                         sublogs
@@ -478,4 +490,3 @@ function summarize_events(time_spent, gc_diff, profiler_samples)
 end
 
 summarize_events(xs) = summarize_events(aggregate_events(xs)...)
-
