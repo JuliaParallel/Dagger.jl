@@ -1,4 +1,5 @@
 import TimespanLogging
+using TimespanLogging: get_logs!
 import TimespanLogging: Timespan, Event, Events, LocalEventLog, MultiEventLog
 
 @testset "Logging" begin
@@ -60,74 +61,85 @@ import TimespanLogging: Timespan, Event, Events, LocalEventLog, MultiEventLog
         end
     end
     @testset "MultiEventLog" begin
-        ctx = Context()
-        ml = MultiEventLog()
-        ml[:core] = Events.CoreMetrics()
-        ml[:id] = Events.IDMetrics()
-        ml[:timeline] = Events.TimelineMetrics()
-        ml[:wsat] = Dagger.Events.WorkerSaturation()
-        ml[:loadavg] = Events.CPULoadAverages()
-        ml[:bytes] = Dagger.Events.BytesAllocd()
-        ml[:mem] = Events.MemoryFree()
-        ml[:esat] = Events.EventSaturation()
-        ml[:psat] = Dagger.Events.ProcessorSaturation()
-        ctx.log_sink = ml
-
-        A = rand(Blocks(4, 4), 16, 16)
-        collect(ctx, A*A)
-
-        logs = TimespanLogging.get_logs!(ml)
-        for w in keys(logs)
-            len = length(logs[w][:core])
-            if w == 1
-                @test len > 1
-            end
-            for c in (:core, :id, :timeline, :wsat, :loadavg, :bytes, :mem, :esat, :psat)
-                @test haskey(logs[w], c)
-                @test length(logs[w][c]) == len
-            end
-        end
-        @test length(keys(logs)) > 1
-
-        l1 = logs[1]
-        core = l1[:core]
-        @test !any(isnothing, core)
-        esat = l1[:esat]
-        @test any(e->haskey(e, :scheduler_init), esat)
-        @test any(e->haskey(e, :schedule), esat)
-        @test any(e->haskey(e, :fire), esat)
-        @test any(e->haskey(e, :take), esat)
-        @test any(e->haskey(e, :finish), esat)
-        # Note: May one day be true as scheduler evolves
-        @test !any(e->haskey(e, :compute), esat)
-        @test !any(e->haskey(e, :move), esat)
-        psat = l1[:psat]
-        # Note: May become false
-        @test all(e->length(e) == 0, psat)
-
-        had_psat_proc = 0
-        for wo in filter(w->w != 1, keys(logs))
-            lo = logs[wo]
-            esat = lo[:esat]
-            @test !any(e->haskey(e, :scheduler_init), esat)
-            @test !any(e->haskey(e, :schedule), esat)
-            @test !any(e->haskey(e, :fire), esat)
-            @test !any(e->haskey(e, :take), esat)
-            @test !any(e->haskey(e, :finish), esat)
-            psat = lo[:psat]
-            if any(e->length(e) > 0, psat)
-                had_psat_proc += 1
-                @test any(e->haskey(e, :compute), esat)
-                @test any(e->haskey(e, :move), esat)
-            end
-        end
-        @test had_psat_proc > 0
-
-        logs = TimespanLogging.get_logs!(ml)
-        for w in keys(logs)
-            for c in keys(logs[w])
-                @test isempty(logs[w][c])
-            end
+        @testset "Get logs for only_local = true and only_local = false" begin
+            ctx = Context()
+            ml = MultiEventLog()
+            ml[:core] = Events.CoreMetrics()
+            ml[:id] = Events.IDMetrics()
+            ml[:timeline] = Events.TimelineMetrics()
+            ml[:wsat] = Dagger.Events.WorkerSaturation()
+            ml[:loadavg] = Events.CPULoadAverages()
+            ml[:bytes] = Dagger.Events.BytesAllocd()
+            ml[:mem] = Events.MemoryFree()
+            ml[:esat] = Events.EventSaturation()
+            ml[:psat] = Dagger.Events.ProcessorSaturation()
+            ctx.log_sink = ml
+    
+            A = rand(Blocks(4, 4), 16, 16)
+            collect(ctx, A*A)
+            for only_local in (true, false)
+                logs = TimespanLogging.get_logs!(ml) 
+                if only_local
+                    logs = TimespanLogging.get_logs!(ml, only_local=true)
+                    @test logs isa Dict{Symbol, Vector}
+                    len = length(logs)
+                    @test len > 1 
+                    @test !isempty(logs)   
+                else
+                    logs = TimespanLogging.get_logs!(ml, only_local=false)
+                    @test logs isa Dict{Int, Dict{Symbol, Vector}}
+                    for w in keys(logs)
+                        len = length(logs[w][:core])
+                        if w == 1
+                            @test len > 1
+                        end
+                        for c in (:core, :id, :timeline, :wsat, :loadavg, :bytes, :mem, :esat, :psat)
+                            @test haskey(logs[w], c)
+                            @test length(logs[w][c]) == len                
+                        end
+                    end
+                    @test length(keys(logs)) > 1
+                    logs = TimespanLogging.get_logs!(ml, only_local=false)
+                    for w in keys(logs)
+                        for c in keys(logs[w])
+                            @test isempty(logs[w][c])
+                        end
+                    end
+                end
+                l1 = logs[1]
+                core = l1[:core]
+                @test !any(isnothing, core)
+                esat = l1[:esat]
+                @test any(e->haskey(e, :scheduler_init), esat)
+                @test any(e->haskey(e, :schedule), esat)
+                @test any(e->haskey(e, :fire), esat)
+                @test any(e->haskey(e, :take), esat)
+                @test any(e->haskey(e, :finish), esat)
+                # Note: May one day be true as scheduler evolves
+                @test !any(e->haskey(e, :compute), esat)
+                @test !any(e->haskey(e, :move), esat)
+                psat = l1[:psat]
+                # Note: May become false
+                @test all(e->length(e) == 0, psat)
+                had_psat_proc = 0
+                    
+                for wo in filter(w->w != 1, keys(logs))
+                    lo = logs[wo]
+                    esat = lo[:esat]
+                    @test !any(e->haskey(e, :scheduler_init), esat)
+                    @test !any(e->haskey(e, :schedule), esat)
+                    @test !any(e->haskey(e, :fire), esat)
+                    @test !any(e->haskey(e, :take), esat)
+                    @test !any(e->haskey(e, :finish), esat)
+                    psat = lo[:psat]
+                    if any(e->length(e) > 0, psat)
+                        had_psat_proc += 1
+                        @test any(e->haskey(e, :compute), esat)
+                        @test any(e->haskey(e, :move), esat)
+                    end
+                end
+                @test had_psat_proc > 0 
+            end            
         end
     end
 end
