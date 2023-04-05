@@ -52,6 +52,4 @@ try # TODO: Fault tolerance is sometimes unreliable
 #include("fault-tolerance.jl")
 catch
 end
-println(stderr, "tests done. cleaning up...")
-Dagger.cleanup()
-println(stderr, "all done.")
+println(stderr, "tests done")
