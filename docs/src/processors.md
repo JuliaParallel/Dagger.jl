@@ -76,42 +76,13 @@ processor B. This mechanism uses Julia's Serialization library to serialize and
 deserialize data, so data must be serializable for this mechanism to work
 properly.
 
-### Future: Hierarchy Generic Path Move
-
-NOTE: This used to be the default move behavior, but was removed because it
-wasn't considered helpful, and there were not any processor implementations
-that made use of it.
-
-Movement of data between any two processors is decomposable into a sequence of
-"moves" between a child and its parent, termed a "generic path move". Movement
-of data may also take "shortcuts" between nodes in the tree which are not
-directly connected if enabled by libraries or the user, which may make use of
-IPC mechanisms to transfer data more directly and efficiently (such as
-Infiniband, GPU RDMA, NVLINK, etc.). All data is considered local to some
-processor, and may only be operated on by another processor by first doing an
-explicit move operation to that processor.
-
 ## Processor Selection
 
 By default, Dagger uses the CPU to process work, typically single-threaded per
 cluster node. However, Dagger allows access to a wider range of hardware and
 software acceleration techniques, such as multithreading and GPUs. These more
 advanced (but performant) accelerators are disabled by default, but can easily
-be enabled by using Scheduler/Thunk options in the `proclist` field. If
-`nothing`, all default processors will be used. If a vector of types, only the
-processor types contained in `options.proclist` will be used to compute all or
-a given thunk. If a function, it will be called for each processor (with the
-processor as the argument) until it returns `true`.
-
-```julia
-opts = Dagger.Sch.ThunkOptions(;proclist=nothing) # default behavior
-# OR
-opts = Dagger.Sch.ThunkOptions(;proclist=[DaggerGPU.CuArrayProc]) # only execute on CuArrayProc
-# OR
-opts = Dagger.Sch.ThunkOptions(;proclist=(proc)->(proc isa Dagger.ThreadProc && proc.tid == 3)) # only run on ThreadProc with thread ID 3
-
-t = Dagger.@par options=opts sum(X) # do sum(X) on the specified processor
-```
+be enabled by using scopes (see [Scopes](@ref) for details).
 
 ## Resource Control
 
@@ -137,7 +108,7 @@ sufficient resources become available by thunks completing execution.
 The [DaggerGPU.jl](https://github.com/JuliaGPU/DaggerGPU.jl) package can be
 imported to enable GPU acceleration for NVIDIA and AMD GPUs, when available.
 The processors provided by that package are not enabled by default, but may be
-enabled via `options.proclist` as usual.
+enabled via custom scopes ([Scopes](@ref)).
 
 ### Future: Network Devices and Topology
 

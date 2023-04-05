@@ -198,15 +198,17 @@ While Dagger generally "just works", sometimes one needs to exert some more
 fine-grained control over how the scheduler allocates work. There are two
 parallel mechanisms to achieve this: Scheduler options (from
 `Dagger.Sch.SchedulerOptions`) and Thunk options (from
-`Dagger.Sch.ThunkOptions`). These two options structs generally contain the
-same options, with the difference being that Scheduler options operate
+`Dagger.Sch.ThunkOptions`). These two options structs contain many shared
+options, with the difference being that Scheduler options operate
 globally across an entire DAG, and Thunk options operate on a thunk-by-thunk
-basis. Scheduler options can be constructed and passed to `collect()` or
-`compute()` as the keyword argument `options` for lazy API usage:
+basis.
+
+Scheduler options can be constructed and passed to `collect()` or `compute()`
+as the keyword argument `options` for lazy API usage:
 
 ```julia
 t = @par 1+2
-opts = Dagger.Sch.ThunkOptions(;single=1) # Execute on worker 1
+opts = Dagger.Sch.SchedulerOptions(;single=1) # Execute on worker 1
 
 compute(t; options=opts)
 
@@ -219,7 +221,6 @@ Thunk options can be passed to `@spawn/spawn`, `@par`, and `delayed` similarly:
 # Execute on worker 1
 
 Dagger.@spawn single=1 1+2
-
 Dagger.spawn(+, 1, 2; single=1)
 
 opts = Dagger.Sch.ThunkOptions(;single=1)

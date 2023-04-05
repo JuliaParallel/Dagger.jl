@@ -41,11 +41,12 @@ end
 
 @testset "@mutable" begin
     w = first(workers())
+    @assert w != 1 "Not enough workers to test mutability"
     x = remotecall_fetch(w) do
         Dagger.@mutable Ref{Int}()
     end
     @test fetch(Dagger.@spawn (x->x[] = myid())(x)) == w
-    @test_throws_unwrap Dagger.ThunkFailedException fetch(Dagger.@spawn single=last(workers()) (x->x[] = myid())(x))
+    @test_throws_unwrap Dagger.ThunkFailedException fetch(Dagger.@spawn single=1 (x->x[] = myid())(x))
 end # @testset "@mutable"
 
 @testset "Shard" begin
