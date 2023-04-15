@@ -1,5 +1,5 @@
 const EAGER_INIT = Ref{Bool}(false)
-const EAGER_THUNK_CHAN = Channel(typemax(Int))
+const EAGER_THUNK_CHAN = Ref{Channel{Any}}()
 const EAGER_FORCE_KILL = Ref{Bool}(false)
 const EAGER_ID_MAP = Dict{UInt64,Int}()
 const EAGER_CONTEXT = Ref{Union{Context,Nothing}}(nothing)
@@ -15,15 +15,11 @@ end
 function init_eager()
     EAGER_INIT[] && return
     EAGER_INIT[] = true
+    EAGER_THUNK_CHAN[] = Channel(typemax(Int))
     ctx = eager_context()
     @async try
         sopts = SchedulerOptions(;allow_errors=true)
-        scope = Dagger.ExactScope(Dagger.ThreadProc(1, 1))
-        atexit() do
-            EAGER_FORCE_KILL[] = true
-            close(EAGER_THUNK_CHAN)
-        end
-        opts = Dagger.Options((;scope,
+        opts = Dagger.Options((;scope=Dagger.ExactScope(Dagger.ThreadProc(1, 1)),
                                 occupancy=Dict(Dagger.ThreadProc=>0)))
         Dagger.compute(ctx, Dagger.delayed(eager_thunk, opts)();
                        options=sopts)
@@ -37,6 +33,8 @@ function init_eager()
         write(stderr, iob)
     finally
         EAGER_INIT[] = false
+        EAGER_FORCE_KILL[] = true
+        close(EAGER_THUNK_CHAN[])
     end
 end
 
@@ -92,9 +90,10 @@ function eager_thunk()
         nothing
     end
     tls = Dagger.get_tls()
-    while isopen(EAGER_THUNK_CHAN)
+    chan = EAGER_THUNK_CHAN[]
+    while isopen(chan)
         try
-            added_future, future, uid, ref, f, args, opts = take!(EAGER_THUNK_CHAN)
+            added_future, future, uid, ref, f, args, opts = take!(chan)
             # preserve inputs until they enter the scheduler
             tid = GC.@preserve args begin
                 _args = map(args) do pos_x

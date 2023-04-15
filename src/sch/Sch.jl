@@ -575,10 +575,21 @@ end
 function scheduler_exit(ctx, state::ComputeState, options)
     @dagdebug nothing :global "Tearing down scheduler" uid=state.uid
 
-    close(state.chan)
-    notify(state.halt)
     @sync for p in procs_to_use(ctx)
         @async cleanup_proc(state, p, ctx.log_sink)
+    end
+
+    lock(state.lock) do
+        close(state.chan)
+        notify(state.halt)
+
+        # Notify any waiting tasks
+        for (_, futures) in state.futures
+            for future in futures
+                put!(future, SchedulingException("Scheduler exited"); error=true)
+            end
+        end
+        empty!(state.futures)
     end
 
     # Let the context procs handler clean itself up

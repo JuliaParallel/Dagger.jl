@@ -313,7 +313,7 @@ function _spawn(f, options::Options, args...)
     finalizer_ref = poolset(EagerThunkFinalizer(uid); device=MemPool.CPURAMDevice())
     added_future = Future()
     propagates = keys(options.options)
-    put!(Dagger.Sch.EAGER_THUNK_CHAN, (added_future, future, uid, finalizer_ref, f, (args...,), (;propagates, options.options...,)))
+    put!(Dagger.Sch.EAGER_THUNK_CHAN[], (added_future, future, uid, finalizer_ref, f, (args...,), (;propagates, options.options...,)))
     thunk_ref = fetch(added_future)
     return (uid, future, finalizer_ref, thunk_ref)
 end
