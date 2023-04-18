@@ -18,6 +18,8 @@ const MPI_PROCESSORS = Ref{Int}(-1)
 
 const PREVIOUS_PROCESSORS = Set()
 
+
+
 function initialize(comm::MPI.Comm=MPI.COMM_WORLD; color_algo=SimpleColoring())
     @assert MPI_PROCESSORS[] == -1 "DaggerMPI already initialized"
 
@@ -51,7 +53,7 @@ function finalize()
     empty!(Dagger.PROCESSOR_CALLBACKS)
     empty!(Dagger.OSPROC_PROCESSOR_CACHE)
     i = 1
-    for proc in PREVIOUS_PROCESSORS
+   for proc in PREVIOUS_PROCESSORS
         Dagger.add_processor_callback!("old_processor_$i") do
             return proc
         end
@@ -72,12 +74,24 @@ end
 Dagger.get_parent(proc::MPIProcessor) = Dagger.OSProc()
 Dagger.default_enabled(proc::MPIProcessor) = true
 
+
 "Busy-loop Irecv that yields to other tasks."
 function recv_yield(src, tag, comm)
-    while true
-        got, value, _ = MPI.irecv(src, tag, comm)
+    while true 
+        (got, msg, stat) = MPI.Improbe(src, tag, comm, MPI.Status)
         if got
-            return value
+            count = MPI.Get_count(stat, UInt8)
+            buf = Array{UInt8}(undef, count)
+            req = MPI.Imrecv!(MPI.Buffer(buf), msg)
+            while true
+                finish = MPI.Test(req)
+                if finish
+                    value = MPI.deserialize(buf)
+                    return value
+                end
+                Core.print("[$(MPI.Comm_rank(comm))] message is not ready on $tag\n")
+                yield()
+            end
         end
         # TODO: Sigmoidal backoff
         yield()
