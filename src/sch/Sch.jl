@@ -97,8 +97,10 @@ struct ComputeState
     chan::RemoteChannel{Channel{Any}}
 end
 
+const UID_COUNTER = Threads.Atomic{UInt64}(1)
+
 function start_state(deps::Dict, node_order, chan)
-    state = ComputeState(rand(UInt64),
+    state = ComputeState(Threads.atomic_add!(UID_COUNTER, UInt64(1)),
                          OneToMany(),
                          deps,
                          Vector{Thunk}(undef, 0),
