@@ -467,6 +467,8 @@ function scheduler_init(ctx, state::ComputeState, d::Thunk, options, deps)
 end
 
 function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
+    @dagdebug nothing :global "Initializing scheduler" uid=state.uid
+
     safepoint(state)
 
     # Loop while we still have thunks to execute
@@ -480,12 +482,14 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
 
         isempty(state.running) && continue
         timespan_start(ctx, :take, 0, 0)
+        @dagdebug nothing :take "Waiting for results"
         chan_value = take!(state.chan) # get result of completed thunk
         timespan_finish(ctx, :take, 0, 0)
         if chan_value isa RescheduleSignal
             continue
         end
         pid, proc, thunk_id, (res, metadata) = chan_value
+        @dagdebug thunk_id :take "Got finished task"
         gproc = OSProc(pid)
         safepoint(state)
         lock(state.lock) do
@@ -559,6 +563,8 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
     return value, errored
 end
 function scheduler_exit(ctx, state::ComputeState, options)
+    @dagdebug nothing :global "Tearing down scheduler" uid=state.uid
+
     close(state.chan)
     notify(state.halt)
     @sync for p in procs_to_use(ctx)
@@ -697,6 +703,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
                     # FIXME: est_time_util = est_time_util isa MaxUtilization ? cap : est_time_util
                     push!(get!(()->Vector{Tuple{Thunk,<:Any,<:Any}}(), to_fire, (gproc, proc)), (task, est_time_util, est_alloc_util))
                     state.worker_time_pressure[gproc.pid][proc] += est_time_util
+                    @dagdebug task :schedule "Scheduling to $gproc -> $proc"
                     @goto pop_task
                 end
             end
@@ -1066,6 +1073,8 @@ function do_task(to_proc, comm)
     end
     timespan_finish(ctx, :storage_wait, thunk_id, (;f, to_proc, device=typeof(to_storage)))
 
+    @dagdebug thunk_id :execute "Moving data"
+
     # Initiate data transfers for function and arguments
     transfer_time = Threads.Atomic{UInt64}(0)
     transfer_size = Threads.Atomic{UInt64}(0)
@@ -1146,6 +1155,8 @@ function do_task(to_proc, comm)
     # FIXME
     #gcnum_start = Base.gc_num()
 
+    @dagdebug thunk_id :execute "Executing"
+
     result_meta = try
         # Set TLS variables
         Dagger.set_tls!((
@@ -1180,6 +1191,7 @@ function do_task(to_proc, comm)
         bt = catch_backtrace()
         RemoteException(myid(), CapturedException(ex, bt))
     end
+
     threadtime = cputhreadtime() - threadtime_start
     # FIXME: This is not a realistic measure of max. required memory
     #gc_allocd = min(max(UInt64(Base.gc_num().allocd) - UInt64(gcnum_start.allocd), UInt64(0)), UInt64(1024^4))
@@ -1189,6 +1201,9 @@ function do_task(to_proc, comm)
         pop!(TASKS_RUNNING, thunk_id)
         notify(TASK_SYNC)
     end
+
+    @dagdebug thunk_id :execute "Returning"
+
     # TODO: debug_storage("Releasing $to_storage_name")
     metadata = (
         time_pressure=real_time_util[],
