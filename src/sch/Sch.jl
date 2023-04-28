@@ -1394,7 +1394,8 @@ function do_task(to_proc, task_desc)
                             # TODO: Choose "closest" processor of same type first
                             some_proc = first(keys(CHUNK_CACHE[x]))
                             some_x = CHUNK_CACHE[x][some_proc]
-                            move(some_proc, to_proc, some_x)
+                            @dagdebug thunk_id :move "Cache hit for argument $id at $some_proc: $some_x"
+                            @invokelatest move(some_proc, to_proc, some_x)
                         end)
                     else
                         nothing
@@ -1406,12 +1407,15 @@ function do_task(to_proc, task_desc)
                 else
                     # Fetch it
                     time_start = time_ns()
-                    _x = move(to_proc, x)
+                    from_proc = processor(x)
+                    _x = @invokelatest move(from_proc, to_proc, x)
                     time_finish = time_ns()
                     if x.handle.size !== nothing
                         Threads.atomic_add!(transfer_time, time_finish - time_start)
                         Threads.atomic_add!(transfer_size, x.handle.size)
                     end
+
+                    @dagdebug thunk_id :move "Cache miss for argument $id at $from_proc"
 
                     # Update cache
                     lock(TASK_SYNC) do
@@ -1422,8 +1426,9 @@ function do_task(to_proc, task_desc)
                     _x
                 end
             else
-                move(to_proc, x)
+                @invokelatest move(to_proc, x)
             end
+            @dagdebug thunk_id :move "Moved argument $id to $to_proc: $x"
             timespan_finish(ctx, :move, (;thunk_id, id), (;f, id, data=x); tasks=[Base.current_task()])
             return x
         end
