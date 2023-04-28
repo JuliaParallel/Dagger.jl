@@ -1,5 +1,7 @@
 export OSProc, Context, addprocs!, rmprocs!
 
+import Base: @invokelatest
+
 """
     Processor
 
@@ -157,8 +159,9 @@ function execute!(proc::ThreadProc, @nospecialize(f), @nospecialize(args...))
     task = Task() do
         set_tls!(tls)
         TimespanLogging.prof_task_put!(tls.sch_handle.thunk_id.id)
-        f(args...)
+        @invokelatest f(args...)
     end
+    task.sticky = true
     ret = ccall(:jl_set_task_tid, Cint, (Any, Cint), task, proc.tid-1)
     if ret == 0
         error("jl_set_task_tid == 0")
@@ -310,8 +313,7 @@ get_tls() = (
     sch_uid=task_local_storage(:_dagger_sch_uid),
     sch_handle=task_local_storage(:_dagger_sch_handle),
     processor=thunk_processor(),
-    time_utilization=task_local_storage(:_dagger_time_utilization),
-    alloc_utilization=task_local_storage(:_dagger_alloc_utilization),
+    task_spec=task_local_storage(:_dagger_task_spec),
 )
 
 """
@@ -323,6 +325,5 @@ function set_tls!(tls)
     task_local_storage(:_dagger_sch_uid, tls.sch_uid)
     task_local_storage(:_dagger_sch_handle, tls.sch_handle)
     task_local_storage(:_dagger_processor, tls.processor)
-    task_local_storage(:_dagger_time_utilization, tls.time_utilization)
-    task_local_storage(:_dagger_alloc_utilization, tls.alloc_utilization)
+    task_local_storage(:_dagger_task_spec, tls.task_spec)
 end

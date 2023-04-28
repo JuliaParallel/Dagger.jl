@@ -227,5 +227,41 @@ opts = Dagger.Sch.ThunkOptions(;single=1)
 delayed(+)(1, 2; options=opts)
 ```
 
+### Core vs. Worker Schedulers
+
+Dagger's scheduler is really two kinds of entities: the "core" scheduler, and
+"worker" schedulers:
+
+The core scheduler runs on worker 1, thread 1, and is the entrypoint to tasks
+which have been submitted. The core scheduler manages all task dependencies,
+notifies calls to `wait` and `fetch` of task completion, and generally performs
+initial task placement. The core scheduler has cached information about each
+worker and their processors, and uses that information (together with metrics
+about previous tasks and other aspects of the Dagger runtime) to generate a
+near-optimal just-in-time task schedule.
+
+The worker schedulers each run as a set of tasks across all workers and all
+processors, and handles data movement and task execution. Once the core
+scheduler has scheduled and launched a task, it arrives at the worker scheduler
+for handling. The worker scheduler will pass the task to a queue for the
+assigned processor, where it will wait until the processor has a sufficient
+amount of "occupancy" for the task. Once the processor is ready for the task,
+it will first fetch all arguments to the task from other workers, and then it
+will execute the task, package the result into a `Chunk`, and pass that back to
+the core scheduler.
+
+### Workload Balancing
+
+In general, Dagger's core scheduler tries to balance workloads as much as
+possible across all the available processors, but it can fail to do so
+effectively when either the cached per-processor information is outdated, or
+when the estimates about the task's behavior are inaccurate. To minimize the
+impact of this potential workload imbalance, the worker schedulers' processors
+will attempt to steal tasks from each other when they are under-occupied. Tasks
+will only be stolen if their [scope](`Scopes`) matches the processor attempting
+the steal, so tasks with wider scopes have better balancing potential.
+
+### Scheduler/Thunk Options
+
 [`Dagger.Sch.SchedulerOptions`](@ref)
 [`Dagger.Sch.ThunkOptions`](@ref)

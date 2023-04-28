@@ -1,3 +1,37 @@
+const DAGDEBUG_CATEGORIES = Symbol[:global, :submit, :schedule, :scope,
+                                   :take, :execute]
+macro dagdebug(thunk, category, msg, args...)
+    cat_sym = category.value
+    @gensym id
+    debug_ex_id = :(@debug "[$($id)] ($($(repr(cat_sym)))) $($msg)" _module=Dagger _file=$(string(__source__.file)) _line=$(__source__.line))
+    append!(debug_ex_id.args, args)
+    debug_ex_noid = :(@debug "($($(repr(cat_sym)))) $($msg)" _module=Dagger _file=$(string(__source__.file)) _line=$(__source__.line))
+    append!(debug_ex_noid.args, args)
+    esc(quote
+        let $id = -1
+            if $thunk isa Integer
+                $id = Int($thunk)
+            elseif $thunk isa Thunk
+                $id = $thunk.id
+            elseif $thunk === nothing
+                $id = 0
+            else
+                @warn "Unsupported thunk argument to @dagdebug: $(typeof($thunk))"
+                $id = -1
+            end
+            if $id > 0
+                if $(QuoteNode(cat_sym)) in $DAGDEBUG_CATEGORIES
+                    $debug_ex_id
+                end
+            elseif $id == 0
+                if $(QuoteNode(cat_sym)) in $DAGDEBUG_CATEGORIES
+                    $debug_ex_noid
+                end
+            end
+        end
+    end)
+end
+
 """
     unwrap_nested_exception(err::Exception) -> Bool
 
@@ -267,13 +301,13 @@ function can_use_proc(task, gproc, proc, opts, scope)
         @warn "The `proclist` option is deprecated, please use scopes instead\nSee https://juliaparallel.org/Dagger.jl/stable/scopes/ for details" maxlog=1
         if opts.proclist isa Function
             if !Base.invokelatest(opts.proclist, proc)
-                @debug "[$(task.id)] Rejected $proc: proclist(proc) == false"
+                @dagdebug task :scope "Rejected $proc: proclist(proc) == false"
                 return false, scope
             end
             scope = constrain(scope, Dagger.ExactScope(proc))
         elseif opts.proclist isa Vector
             if !(typeof(proc) in opts.proclist)
-                @debug "[$(task.id)] Rejected $proc: !(typeof(proc) in proclist)"
+                @dagdebug task :scope "Rejected $proc: !(typeof(proc) in proclist)"
                 return false, scope
             end
             scope = constrain(scope,
@@ -282,7 +316,7 @@ function can_use_proc(task, gproc, proc, opts, scope)
             throw(SchedulingException("proclist must be a Function, Vector, or nothing"))
         end
         if scope isa Dagger.InvalidScope
-            @debug "[$(task.id)] Rejected $proc: Not contained in task scope ($scope)"
+            @dagdebug task :scope "Rejected $proc: Not contained in task scope ($scope)"
             return false, scope
         end
     end
@@ -291,12 +325,12 @@ function can_use_proc(task, gproc, proc, opts, scope)
     if opts.single !== nothing
         @warn "The `single` option is deprecated, please use scopes instead\nSee https://juliaparallel.org/Dagger.jl/stable/scopes/ for details" maxlog=1
         if gproc.pid != opts.single
-            @debug "[$(task.id)] Rejected $proc: gproc.pid ($(gproc.pid)) != single ($(opts.single))"
+            @dagdebug task :scope "Rejected $proc: gproc.pid ($(gproc.pid)) != single ($(opts.single))"
             return false, scope
         end
         scope = constrain(scope, Dagger.ProcessScope(opts.single))
         if scope isa Dagger.InvalidScope
-            @debug "[$(task.id)] Rejected $proc: Not contained in task scope ($scope)"
+            @dagdebug task :scope "Rejected $proc: Not contained in task scope ($scope)"
             return false, scope
         end
     end
@@ -304,17 +338,17 @@ function can_use_proc(task, gproc, proc, opts, scope)
     # Check against scope
     proc_scope = Dagger.ExactScope(proc)
     if constrain(scope, proc_scope) isa Dagger.InvalidScope
-        @debug "[$(task.id)] Rejected $proc: Not contained in task scope ($scope)"
+        @dagdebug task :scope "Rejected $proc: Not contained in task scope ($scope)"
         return false, scope
     end
 
     @label accept
 
-    @debug "[$(task.id)] Accepted $proc"
+    @dagdebug task :scope "Accepted $proc"
     return true, scope
 end
 
-function has_capacity(state, p, gp, time_util, alloc_util, sig)
+function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
     T = typeof(p)
     # FIXME: MaxUtilization
     est_time_util = round(UInt64, if time_util !== nothing && haskey(time_util, T)
@@ -325,8 +359,14 @@ function has_capacity(state, p, gp, time_util, alloc_util, sig)
     est_alloc_util = if alloc_util !== nothing && haskey(alloc_util, T)
         alloc_util[T]
     else
-        get(state.signature_alloc_cost, sig, 0)
-    end
+        get(state.signature_alloc_cost, sig, UInt64(0))
+    end::UInt64
+    est_occupancy = if occupancy !== nothing && haskey(occupancy, T)
+        # Clamp to 0-1, and scale between 0 and `typemax(UInt32)`
+        Base.unsafe_trunc(UInt32, clamp(occupancy[T], 0, 1) * typemax(UInt32))
+    else
+        typemax(UInt32)
+    end::UInt32
     #= FIXME: Estimate if cached data can be swapped to storage
     storage = storage_resource(p)
     real_alloc_util = state.worker_storage_pressure[gp][storage]
@@ -335,7 +375,7 @@ function has_capacity(state, p, gp, time_util, alloc_util, sig)
         return false, est_time_util, est_alloc_util
     end
     =#
-    return true, est_time_util, est_alloc_util
+    return true, est_time_util, est_alloc_util, est_occupancy
 end
 
 function populate_processor_cache_list!(state, procs)

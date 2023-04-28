@@ -19,11 +19,13 @@ function init_eager()
     @async try
         sopts = SchedulerOptions(;allow_errors=true)
         scope = Dagger.ExactScope(Dagger.ThreadProc(1, 1))
+        topts = ThunkOptions(;occupancy=Dict(Dagger.ThreadProc=>0))
         atexit() do
             EAGER_FORCE_KILL[] = true
             close(EAGER_THUNK_CHAN)
         end
-        Dagger.compute(ctx, Dagger.delayed(eager_thunk; scope)(); options=sopts)
+        Dagger.compute(ctx, Dagger.delayed(eager_thunk; scope, options=topts)();
+                       options=sopts)
     catch err
         iob = IOContext(IOBuffer(), :color=>true)
         println(iob, "Error in eager scheduler:")
@@ -37,41 +39,47 @@ function init_eager()
     end
 end
 
-"Adjusts the scheduler's cached pressure indicators for the specified worker by
-the specified amount, and signals the scheduler to try scheduling again if
-pressure decreased."
-function adjust_pressure!(h::SchedulerHandle, proc::Processor, pressure)
-    uid = Dagger.get_tls().sch_uid
-    lock(TASK_SYNC) do
-        PROCESSOR_TIME_UTILIZATION[uid][proc][] += pressure
-        notify(TASK_SYNC)
-    end
-    exec!(_adjust_pressure!, h, myid(), proc, pressure)
-end
-function _adjust_pressure!(ctx, state, task, tid, (pid, proc, pressure))
-    state.worker_time_pressure[pid][proc] += pressure
-    if pressure < 0
-        put!(state.chan, RescheduleSignal())
-    end
-    nothing
-end
-
-"Allows a thunk to safely wait on another thunk, by temporarily reducing its
-effective pressure to 0."
+"""
+Allows a thunk to safely wait on another thunk by temporarily reducing its
+effective occupancy to 0, which allows a newly-spawned task to run.
+"""
 function thunk_yield(f)
     if Dagger.in_thunk()
         h = sch_handle()
         tls = Dagger.get_tls()
-        proc = tls.processor
-        util = tls.time_utilization
-        adjust_pressure!(h, proc, -util)
+        proc = Dagger.thunk_processor()
+        proc_istate = proc_states(tls.sch_uid) do states
+            states[proc].state
+        end
+        task_occupancy = tls.task_spec[4]
+
+        # Decrease our occupancy and inform the processor to reschedule
+        lock(proc_istate.queue) do _
+            proc_istate.proc_occupancy[] -= task_occupancy
+            @assert 0 <= proc_istate.proc_occupancy[] <= typemax(UInt32)
+        end
+        notify(proc_istate.reschedule)
         try
-            f()
+            # Run the yielding code
+            return f()
         finally
-            adjust_pressure!(h, proc, util)
+            # Wait for processor to have occupancy to run this task
+            while true
+                ready = lock(proc_istate.queue) do _
+                    @assert 0 <= proc_istate.proc_occupancy[] <= typemax(UInt32)
+                    if proc_has_occupancy(proc_istate.proc_occupancy[], task_occupancy)
+                        proc_istate.proc_occupancy[] += task_occupancy
+                        @assert 0 <= proc_istate.proc_occupancy[] <= typemax(UInt32)
+                        return true
+                    end
+                    return false
+                end
+                ready && break
+                yield()
+            end
         end
     else
-        f()
+        return f()
     end
 end
 
@@ -83,8 +91,6 @@ function eager_thunk()
         nothing
     end
     tls = Dagger.get_tls()
-    # Don't apply pressure from this thunk
-    adjust_pressure!(h, tls.processor, -tls.time_utilization)
     while isopen(EAGER_THUNK_CHAN)
         try
             added_future, future, uid, ref, f, args, opts = take!(EAGER_THUNK_CHAN)

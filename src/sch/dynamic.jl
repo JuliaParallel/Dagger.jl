@@ -207,9 +207,11 @@ function _add_thunk!(ctx, state, task, tid, (f, args, kwargs, future, ref))
         thunk_id = ThunkID(thunk.id, thunk_ref)
         state.thunk_dict[thunk.id] = WeakThunk(thunk)
         reschedule_inputs!(state, thunk)
+        @dagdebug thunk :submit "Added to scheduler"
         if future !== nothing
             # Ensure we attach a future before the thunk is scheduled
             _register_future!(ctx, state, task, tid, (future, thunk_id, false))
+            @dagdebug thunk :submit "Registered future"
         end
         if ref !== nothing
             # Preserve the `EagerThunkFinalizer` through `thunk`
