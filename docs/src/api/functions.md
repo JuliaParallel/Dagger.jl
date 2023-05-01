@@ -20,22 +20,6 @@ order
 treereduce
 ```
 
-## Table Functions
-```@docs
-tabletype
-tabletype!
-trim
-trim!
-map
-filter
-reduce
-groupby
-leftjoin
-innerjoin
-keys
-getindex
-```
-
 ## Array Functions
 ```@docs
 alignfirst
@@ -56,8 +40,10 @@ set_tls!
 ```
 
 ## Shard Functions
-[`Dagger.@shard`](@ref)
-[`Dagger.shard`](@ref)
+```@docs
+@shard
+shard
+```
 
 ## Context Functions
 ```@docs

@@ -258,7 +258,7 @@ effectively when either the cached per-processor information is outdated, or
 when the estimates about the task's behavior are inaccurate. To minimize the
 impact of this potential workload imbalance, the worker schedulers' processors
 will attempt to steal tasks from each other when they are under-occupied. Tasks
-will only be stolen if their [scope](`Scopes`) matches the processor attempting
+will only be stolen if their [scope](scopes.md) matches the processor attempting
 the steal, so tasks with wider scopes have better balancing potential.
 
 ### Scheduler/Thunk Options

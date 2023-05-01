@@ -60,8 +60,6 @@ Setting a scope on the function treats it as a regular piece of data (like the
 arguments to the function), so it participates in the scoping rules described
 in the following sections all the same.
 
-[`Dagger.scope`](@ref)
-
 Now, let's try out some other kinds of scopes, starting with `NodeScope`. This
 scope encompasses the server that one or more Julia processes may be running
 on. Say we want to use memory mapping (mmap) to more efficiently send arrays
