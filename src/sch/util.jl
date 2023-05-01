@@ -1,5 +1,5 @@
 const DAGDEBUG_CATEGORIES = Symbol[:global, :submit, :schedule, :scope,
-                                   :take, :execute, :processor]
+                                   :take, :execute, :move, :processor]
 macro dagdebug(thunk, category, msg, args...)
     cat_sym = category.value
     @gensym id
