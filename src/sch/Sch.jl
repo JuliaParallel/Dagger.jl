@@ -465,6 +465,14 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         timespan_finish(ctx, :scheduler_init, 0, master)
     end
 
+    # Register interrupt handler
+    if isdefined(Base, :register_interrupt_handler)
+        interrupt_task = errormonitor_tracked("interrupt handler", Threads.@spawn sch_interrupt_handler(state))
+        yield()
+        @assert Base.interrupt_handlers() isa Vector{Task}
+        Base.register_interrupt_handler(interrupt_task)
+    end
+
     value, errored = try
         scheduler_run(ctx, state, d, options)
     finally
@@ -479,10 +487,36 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         end
     end
 
+    # Unregister interrupt handler
+    if isdefined(Base, :register_interrupt_handler)
+        Base.unregister_interrupt_handler(interrupt_task)
+    end
+
     if errored
         throw(value)
     end
     return value
+end
+
+function sch_interrupt_handler(state::ComputeState)
+    while true
+        try
+            wait()
+        catch err
+            errormonitor_tracked("interrupt handler inner", Threads.@spawn begin
+                println("Scheduler:")
+                lock(state.lock) do
+                    print_sch_status(state)
+                end
+                println()
+                proc_states(state.uid) do states
+                    for proc in keys(states)
+                        print_worker_status(states[proc], proc)
+                    end
+                end
+            end)
+        end
+    end
 end
 
 function scheduler_init(ctx, state::ComputeState, d::Thunk, options, deps)
@@ -1156,6 +1190,17 @@ end
 struct ProcessorState
     state::ProcessorInternalState
     runner::Task
+end
+
+function print_worker_status(state, proc)
+    println("Processor: $proc")
+    istate = state.state
+    lock(istate.queue) do queue
+        println("- Queued: $(length(queue))")
+        println("- Running: $(length(istate.tasks))")
+        println("- Occupancy: $(istate.proc_occupancy[]/typemax(UInt32))")
+        println("- Pressure: $(istate.time_pressure[]/typemax(UInt64))")
+    end
 end
 
 const PROCESSOR_TASK_STATE = LockedObject(Dict{UInt64,Dict{Processor,ProcessorState}}())

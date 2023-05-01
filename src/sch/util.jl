@@ -197,6 +197,11 @@ function finish_failed!(state, thunk, origin=nothing)
 end
 
 "Internal utility, useful for debugging scheduler state."
+function print_sch_status(state; kwargs...)
+    for thunk in unique(map(unwrap_weak_checked, values(state.thunk_dict)))
+        print_sch_status(state, thunk; kwargs...)
+    end
+end
 function print_sch_status(state, thunk; kwargs...)
     iob = IOBuffer()
     print_sch_status(iob, state, thunk; kwargs...)
