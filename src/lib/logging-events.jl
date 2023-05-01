@@ -52,6 +52,10 @@ function (ps::ProcessorSaturation)(ev::Event{:start})
         old = get(ps.saturation, proc, 0)
         ps.saturation[proc] = old + 1
     end
+    @debug begin
+        sat_string = "$(join(["$cat => $(ps.saturation[cat])" for cat in keys(ps.saturation) if ps.saturation[cat] > 0 ], ", "))"
+        "Event: $(ev.category) start, procs: ($sat_string)"
+    end _line=nothing _file=nothing _module=TimespanLogging
     # FIXME: JSON doesn't support complex arguments as object keys, so use a vector of tuples instead
     #filter(x->x[2]>0, ps.saturation)
     return map(x->(x[1], x[2]), filter(x->x[2]>0, collect(ps.saturation)))
@@ -65,6 +69,10 @@ function (ps::ProcessorSaturation)(ev::Event{:finish})
             delete!(ps.saturation, proc)
         end
     end
+    @debug begin
+        sat_string = "$(join(["$cat => $(ps.saturation[cat])" for cat in keys(ps.saturation) if ps.saturation[cat] > 0 ], ", "))"
+        "Event: $(ev.category) finish, procs: ($sat_string)"
+    end _line=nothing _file=nothing _module=TimespanLogging
     #filter(x->x[2]>0, ps.saturation)
     return map(x->(x[1], x[2]), filter(x->x[2]>0, collect(ps.saturation)))
 end
