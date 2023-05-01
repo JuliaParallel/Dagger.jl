@@ -1,6 +1,7 @@
 module Events
 
-import ..TimespanLogging: Event, init_similar
+import ..TimespanLogging
+import .TimespanLogging: Event, init_similar
 
 """
     CoreMetrics
@@ -74,26 +75,45 @@ init_similar(::EventSaturation) = EventSaturation()
 function (es::EventSaturation)(ev::Event{:start})
     old = get(es.saturation, ev.category, 0)
     es.saturation[ev.category] = old + 1
+    @debug begin
+        sat_string = "$(join(["$cat => $(es.saturation[cat])" for cat in keys(es.saturation) if es.saturation[cat] > 0 ], ", "))"
+        "Event: $(ev.category) start, events: ($sat_string)"
+    end _line=nothing _file=nothing _module=TimespanLogging
     NamedTuple(filter(x->x[2]>0, es.saturation))
 end
 function (es::EventSaturation)(ev::Event{:finish})
     old = get(es.saturation, ev.category, 0)
     es.saturation[ev.category] = old - 1
+    @debug begin
+        sat_string = "$(join(["$cat => $(es.saturation[cat])" for cat in keys(es.saturation) if es.saturation[cat] > 0 ], ", "))"
+        "Event: $(ev.category) finish, events: ($sat_string)"
+    end _line=nothing _file=nothing _module=TimespanLogging
     NamedTuple(filter(x->x[2]>0, es.saturation))
 end
 
-"Debugging metric, used to log event start/finish via `@debug`."
-struct DebugMetrics
-    sat::EventSaturation
+@deprecate DebugMetrics EventSaturation
+
+struct LineInfoMetrics end
+function (li::LineInfoMetrics)(ev::Event{T}) where T
+    bt = backtrace()
+    bt_processed = Base.process_backtrace(bt)
+    bt_filtered = filter(bt_processed) do frame_C
+        if frame_C isa Tuple
+            frame = frame_C[1]
+        else
+            frame = frame_C
+        end
+        from_C = frame.from_c
+        if occursin("TimespanLogging", string(frame.func)) ||
+           occursin("TimespanLogging", string(frame.file))
+            return false
+        end
+        return true
+    end
+    frame_str = sprint(Base.show_backtrace, bt_filtered)
+    @debug "Event: $(ev.category) $T, linfo:\n$frame_str" _module=TimespanLogging
+    return map(first, bt_filtered)
 end
-DebugMetrics() = DebugMetrics(EventSaturation())
-function (dm::DebugMetrics)(ev::Event{T}) where T
-    dm.sat(ev)
-    sat_string = "$(join(["$cat => $(dm.sat.saturation[cat])" for cat in keys(dm.sat.saturation) if dm.sat.saturation[cat] > 0 ], ", "))"
-    @debug "Event: $(ev.category) $T ($sat_string)" _line=nothing _file=nothing _module=nothing
-    nothing
-end
-init_similar(dm::DebugMetrics) = DebugMetrics()
 
 """
     LogWindow
