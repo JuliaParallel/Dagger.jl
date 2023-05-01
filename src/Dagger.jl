@@ -74,6 +74,7 @@ include("ui/gantt-common.jl")
 include("ui/gantt-text.jl")
 
 # Logging
+include("utils/logging.jl")
 include("lib/logging-events.jl")
 
 # Precompilation

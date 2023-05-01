@@ -9,6 +9,11 @@ import MemPool
 include("util.jl")
 include("fakeproc.jl")
 
+if parse(Bool, get(ENV, "JULIA_DAGGER_TESTS_LOGGING", "false"))
+    Dagger.enable_logging!(;linfo=true)
+    @info "Enabled logging"
+end
+
 include("thunk.jl")
 
 #= FIXME: Unreliable, and some thunks still get retained
