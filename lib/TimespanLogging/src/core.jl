@@ -65,7 +65,8 @@ function make_timespan(start::Event, finish::Event)
              mix_samples(start.profiler_samples, finish.profiler_samples))
 end
 
-get_logs!(ctx; kwargs...) = get_logs!(log_sink(ctx); kwargs...)
+fetch_logs!(ctx; kwargs...) = fetch_logs!(log_sink(ctx); kwargs...)
+@deprecate get_logs!(x; kwargs...) fetch_logs!(x; kwargs...)
 
 """
     NoOpLog
@@ -77,7 +78,7 @@ struct NoOpLog end
 function write_event(::NoOpLog, event::Event)
 end
 
-get_logs!(::NoOpLog) = nothing
+fetch_logs!(::NoOpLog) = nothing
 
 struct FilterLog
     f::Function
@@ -90,7 +91,7 @@ function write_event(c::FilterLog, event)
     end
 end
 
-get_logs!(f::FilterLog; kwargs...) = get_logs!(f.inner_chan; kwargs...)
+fetch_logs!(f::FilterLog; kwargs...) = fetch_logs!(f.inner_chan; kwargs...)
 
 function write_event(io::IO, event::Event)
     serialize(io, event)
@@ -110,7 +111,7 @@ const event_log_lock = Threads.ReentrantLock()
     LocalEventLog
 
 Stores events in a process-local array. Accessing the logs is all-or-nothing;
-if multiple consumers call `get_logs!`, they will get different sets of logs.
+if multiple consumers call `fetch_logs!`, they will get different sets of logs.
 """
 struct LocalEventLog end
 
@@ -123,7 +124,7 @@ function write_event(::LocalEventLog, event::Event)
 end
 
 """
-    get_logs!(::LocalEventLog, raw=false; only_local=false) -> Union{Vector{Timespan},Vector{Event}}
+    fetch_logs!(::LocalEventLog, raw=false; only_local=false) -> Union{Vector{Timespan},Vector{Event}}
 
 Get the logs from each process' local event log, clearing it in the process.
 Set `raw` to `true` to get potentially unmatched `Event`s; the default is to
@@ -131,7 +132,7 @@ return only matched events as `Timespan`s. If `only_local` is set `true`, only
 process-local logs will be fetched; the default is to fetch logs from all
 processes.
 """
-function get_logs!(::LocalEventLog; raw=false, only_local=false)
+function fetch_logs!(::LocalEventLog; raw=false, only_local=false)
     logs = Dict()
     wkrs = only_local ? myid() : procs()
     # FIXME: Log this logic
@@ -151,7 +152,7 @@ function get_logs!(::LocalEventLog; raw=false, only_local=false)
         return convert(Vector{Timespan}, spans)
     end
 end
-get_logs!(l::LocalEventLog, raw::Bool; kwargs...) = get_logs!(l; raw=raw, kwargs...)
+fetch_logs!(l::LocalEventLog, raw::Bool; kwargs...) = fetch_logs!(l; raw=raw, kwargs...)
 
 mutable struct MultiEventLogState
     consumers::Dict{Symbol,Any}
@@ -234,7 +235,7 @@ function write_event(ml::MultiEventLog, event::Event)
     end
 end
 
-function get_logs!(ml::MultiEventLog; only_local=false)
+function fetch_logs!(ml::MultiEventLog; only_local=false)
     logs = Dict{Int,Dict{Symbol,Vector}}()
     wkrs = only_local ? myid() : procs()
     # FIXME: Log this logic
