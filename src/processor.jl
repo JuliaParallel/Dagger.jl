@@ -21,13 +21,13 @@ add_processor_callback!(func, name::String) =
     add_processor_callback!(func, Symbol(name))
 function add_processor_callback!(func, name::Symbol)
     Dagger.PROCESSOR_CALLBACKS[name] = func
-    @safe_lock1 OSPROC_PROCESSOR_CACHE cache delete!(cache, myid())
+    @lock1 OSPROC_PROCESSOR_CACHE cache delete!(cache, myid())
 end
 delete_processor_callback!(name::String) =
     delete_processor_callback!(Symbol(name))
 function delete_processor_callback!(name::Symbol)
     delete!(Dagger.PROCESSOR_CALLBACKS, name)
-    @safe_lock1 OSPROC_PROCESSOR_CACHE cache delete!(cache, myid())
+    @lock1 OSPROC_PROCESSOR_CACHE cache delete!(cache, myid())
 end
 
 """
@@ -106,9 +106,9 @@ computations.
 struct OSProc <: Processor
     pid::Int
     function OSProc(pid::Int=myid())
-        if !(@safe_lock1 OSPROC_PROCESSOR_CACHE cache haskey(cache, pid))
+        if !(@lock1 OSPROC_PROCESSOR_CACHE cache haskey(cache, pid))
             procs = remotecall_fetch(get_processor_hierarchy, pid)
-            @safe_lock1 OSPROC_PROCESSOR_CACHE cache begin
+            @lock1 OSPROC_PROCESSOR_CACHE cache begin
                 cache[pid] = procs
             end
         end
@@ -116,7 +116,7 @@ struct OSProc <: Processor
     end
 end
 get_parent(proc::OSProc) = proc
-get_processors(proc::OSProc) = @safe_lock1 OSPROC_PROCESSOR_CACHE cache begin
+get_processors(proc::OSProc) = @lock1 OSPROC_PROCESSOR_CACHE cache begin
     get(cache, proc.pid, Set{Processor}())
 end
 children(proc::OSProc) = get_processors(proc)

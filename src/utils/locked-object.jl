@@ -20,7 +20,7 @@ Base.unlock(x::LockedObject) = unlock(x.lock)
 payload(x::LockedObject) = x.payload
 
 # TODO: Move these back to MemPool
-macro safe_lock1(l, o, ex)
+macro lock1(l, o, ex)
     quote
         temp = $(esc(l))
         lock(temp)

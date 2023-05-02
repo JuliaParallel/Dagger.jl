@@ -68,12 +68,11 @@ function thunk_yield(f)
         proc_istate = proc_states(tls.sch_uid) do states
             states[proc].state
         end
-        task_occupancy = tls.task_spec[4]
+        task_occupancy = tls.task_spec.est_occupancy
 
         # Decrease our occupancy and inform the processor to reschedule
         lock(proc_istate.queue) do _
             proc_istate.proc_occupancy[] -= task_occupancy
-            @assert 0 <= proc_istate.proc_occupancy[] <= typemax(UInt32)
         end
         notify(proc_istate.reschedule)
         try
@@ -83,10 +82,8 @@ function thunk_yield(f)
             # Wait for processor to have occupancy to run this task
             while true
                 ready = lock(proc_istate.queue) do _
-                    @assert 0 <= proc_istate.proc_occupancy[] <= typemax(UInt32)
                     if proc_has_occupancy(proc_istate.proc_occupancy[], task_occupancy)
                         proc_istate.proc_occupancy[] += task_occupancy
-                        @assert 0 <= proc_istate.proc_occupancy[] <= typemax(UInt32)
                         return true
                     end
                     return false
