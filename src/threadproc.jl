@@ -26,6 +26,7 @@ function execute!(proc::ThreadProc, f, args...; kwargs...)
     schedule(task)
     try
         fetch(task)
+        set_tls!(tls[])
         return result[]
     catch err
         err, frames = Base.current_exceptions(task)[1]

@@ -21,7 +21,7 @@
 
     # Halt scheduler
     notify(state.halt)
-    put!(state.chan, (1, nothing, nothing, (Sch.SchedulerHaltedException(), nothing)))
+    put!(state.chan, (1, nothing, nothing, true, Sch.SchedulerHaltedException(), nothing))
     state = nothing
 
     # Wait for halt
