@@ -1,5 +1,5 @@
 const DAGDEBUG_CATEGORIES = Symbol[:global, :submit, :schedule, :scope,
-                                   :take, :execute]
+                                   :take, :execute, :processor]
 macro dagdebug(thunk, category, msg, args...)
     cat_sym = category.value
     @gensym id
@@ -78,7 +78,7 @@ end
 of all chunks that can now be evicted from workers."
 function cleanup_inputs!(state, node)
     to_evict = Set{Chunk}()
-    for inp in node.inputs
+    for (_, inp) in node.inputs
         inp = unwrap_weak_checked(inp)
         if !istask(inp) && !(inp isa Chunk)
             continue
@@ -142,7 +142,7 @@ function reschedule_inputs!(state, thunk, seen=Set{Thunk}())
             continue
         end
         w = get!(()->Set{Thunk}(), state.waiting, thunk)
-        for input in thunk.inputs
+        for (_, input) in thunk.inputs
             input = unwrap_weak_checked(input)
             input in seen && continue
 
@@ -228,7 +228,7 @@ function print_sch_status(io::IO, state, thunk; offset=0, limit=5, max_inputs=3)
         print(io, "($(status_string(thunk))) ")
     end
     println(io, "$(thunk.id): $(thunk.f)")
-    for (idx,input) in enumerate(thunk.inputs)
+    for (idx, (_, input)) in enumerate(thunk.inputs)
         if input isa WeakThunk
             input = unwrap_weak(input)
             if input === nothing
@@ -289,10 +289,13 @@ end
 chunktype(x) = typeof(x)
 function signature(task::Thunk, state)
     sig = Any[chunktype(task.f)]
-    for input in collect_task_inputs(state, task)
-        push!(sig, chunktype(input))
+    for (pos, input) in collect_task_inputs(state, task)
+        # N.B. Skips kwargs
+        if pos === nothing
+            push!(sig, chunktype(input))
+        end
     end
-    sig
+    return sig
 end
 
 function can_use_proc(task, gproc, proc, opts, scope)
@@ -420,12 +423,12 @@ end
 
 "Collects all arguments for `task`, converting Thunk inputs to Chunks."
 function collect_task_inputs(state, task)
-    inputs = Any[]
-    for input in task.inputs
+    inputs = Pair{Union{Symbol,Nothing},Any}[]
+    for (pos, input) in task.inputs
         input = unwrap_weak_checked(input)
-        push!(inputs, istask(input) ? state.cache[input] : input)
+        push!(inputs, pos => (istask(input) ? state.cache[input] : input))
     end
-    inputs
+    return inputs
 end
 
 """

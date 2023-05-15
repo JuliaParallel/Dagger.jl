@@ -107,7 +107,7 @@ Base.@deprecate mappart(args...) mapchunk(args...)
 function stage(ctx::Context, node::MapChunk)
     inputs = map(x->cached_stage(ctx, x), node.input)
     thunks = map(map(chunks, inputs)...) do ps...
-        Thunk(node.f, ps...)
+        Thunk(node.f, map(p->nothing=>p, ps)...)
     end
 
     DArray(Any, domain(inputs[1]), domainchunks(inputs[1]), thunks)

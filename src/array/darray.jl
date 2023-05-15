@@ -251,7 +251,7 @@ function thunkize(ctx::Context, c::DArray; persist=true)
         if persist
             foreach(persist!, thunks)
         end
-        Thunk(thunks...; meta=true) do results...
+        Thunk(map(thunk->nothing=>thunk, thunks)...; meta=true) do results...
             t = eltype(results[1])
             DArray(t, dmn, dmnchunks,
                                   reshape(Union{Chunk,Thunk}[results...], sz))
