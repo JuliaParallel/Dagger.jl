@@ -2,32 +2,34 @@
 
 ## Usage
 
-The main function for using Dagger is `spawn`:
+The main entrypoint to Dagger is `@spawn`:
 
-`Dagger.spawn(f, args...; options...)`
+`Dagger.@spawn [option=value]... f(args...; kwargs...)`
 
-or `@spawn` for the more convenient macro form:
+or `spawn` if it's more convenient:
 
-`Dagger.@spawn [option=value]... f(args...)`
+`Dagger.spawn(f, Dagger.Options(options), args...; kwargs...)`
 
 When called, it creates an `EagerThunk` (also known as a "thunk" or "task")
-object representing a call to function `f` with the arguments `args`. If it is
-called with other thunks as inputs, such as in `Dagger.@spawn f(Dagger.@spawn
-g())`, then the function `f` gets passed the results of those input thunks. If
-those thunks aren't yet finished executing, then the execution of `f` waits on
-all of its input thunks to complete before executing.
+object representing a call to function `f` with the arguments `args` and
+keyword arguments `kwargs`. If it is called with other thunks as args/kwargs,
+such as in `Dagger.@spawn f(Dagger.@spawn g())`, then the function `f` gets
+passed the results of those input thunks, once they're available. If those
+thunks aren't yet finished executing, then the execution of `f` waits on all of
+its input thunks to complete before executing.
 
 The key point is that, for each argument to a thunk, if the argument is an
 `EagerThunk`, it'll be executed before this node and its result will be passed
 into the function `f`. If the argument is *not* an `EagerThunk` (instead, some
 other type of Julia object), it'll be passed as-is to the function `f`.
 
-Thunks don't accept regular keyword arguments for the function `f`. Instead,
-the `options` kwargs are passed to the scheduler to control its behavior:
+The `Options` struct in the second argument position is optional; if provided,
+it is passed to the scheduler to control its behavior. `Options` contains a
+`NamedTuple` of option key-value pairs, which can be any of:
 - Any field in `Dagger.Sch.ThunkOptions` (see [Scheduler and Thunk options](@ref))
 - `meta::Bool` -- Pass the input `Chunk` objects themselves to `f` and not the value contained in them
 
-There are also some extra kwargs that can be passed, although they're considered advanced options to be used only by developers or library authors:
+There are also some extra optionss that can be passed, although they're considered advanced options to be used only by developers or library authors:
 - `get_result::Bool` -- return the actual result to the scheduler instead of `Chunk` objects. Used when `f` explicitly constructs a Chunk or when return value is small (e.g. in case of reduce)
 - `persist::Bool` -- the result of this Thunk should not be released after it becomes unused in the DAG
 - `cache::Bool` -- cache the result of this Thunk such that if the thunk is evaluated again, one can just reuse the cached value. If it’s been removed from cache, recompute the value.
@@ -133,10 +135,10 @@ via `@par` or `delayed`. The above computation can be executed with the lazy
 API by substituting `@spawn` with `@par` and `fetch` with `collect`:
 
 ```julia
-p = @par add1(4)
-q = @par add2(p)
-r = @par add1(3)
-s = @par combine(p, q, r)
+p = Dagger.@par add1(4)
+q = Dagger.@par add2(p)
+r = Dagger.@par add1(3)
+s = Dagger.@par combine(p, q, r)
 
 @assert collect(s) == 16
 ```
@@ -144,7 +146,7 @@ s = @par combine(p, q, r)
 or similarly, in block form:
 
 ```julia
-s = @par begin
+s = Dagger.@par begin
     p = add1(4)
     q = add2(p)
     r = add1(3)
@@ -159,7 +161,7 @@ operation, you can call `compute` on the thunk. This will return a `Chunk`
 object which references the result (see [Chunks](@ref) for more details):
 
 ```julia
-x = @par 1+2
+x = Dagger.@par 1+2
 cx = compute(x)
 cx::Chunk
 @assert collect(cx) == 3
@@ -207,7 +209,7 @@ Scheduler options can be constructed and passed to `collect()` or `compute()`
 as the keyword argument `options` for lazy API usage:
 
 ```julia
-t = @par 1+2
+t = Dagger.@par 1+2
 opts = Dagger.Sch.SchedulerOptions(;single=1) # Execute on worker 1
 
 compute(t; options=opts)
@@ -221,10 +223,9 @@ Thunk options can be passed to `@spawn/spawn`, `@par`, and `delayed` similarly:
 # Execute on worker 1
 
 Dagger.@spawn single=1 1+2
-Dagger.spawn(+, 1, 2; single=1)
+Dagger.spawn(+, Dagger.Options(;single=1), 1, 2)
 
-opts = Dagger.Sch.ThunkOptions(;single=1)
-delayed(+)(1, 2; options=opts)
+delayed(+; single=1)(1, 2)
 ```
 
 ### Core vs. Worker Schedulers

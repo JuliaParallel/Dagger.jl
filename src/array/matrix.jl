@@ -17,10 +17,10 @@ function size(x::Transpose)
 end
 
 transpose(x::ArrayOp) = Transpose(transpose, x)
-transpose(x::Union{Chunk, Thunk}) = Thunk(transpose, x)
+transpose(x::Union{Chunk, Thunk}) = Thunk(transpose, nothing=>x)
 
 adjoint(x::ArrayOp) = Transpose(adjoint, x)
-adjoint(x::Union{Chunk, Thunk}) = Thunk(adjoint, x)
+adjoint(x::Union{Chunk, Thunk}) = Thunk(adjoint, nothing=>x)
 
 function adjoint(x::ArrayDomain{2})
     d = indexes(x)
@@ -91,8 +91,8 @@ function (+)(a::ArrayDomain, b::ArrayDomain)
     a
 end
 
-(*)(a::Union{Chunk, Thunk}, b::Union{Chunk, Thunk}) = Thunk(*, a,b)
-(+)(a::Union{Chunk, Thunk}, b::Union{Chunk, Thunk}) = Thunk(+, a,b)
+(*)(a::Union{Chunk, Thunk}, b::Union{Chunk, Thunk}) = Thunk(*, nothing=>a, nothing=>b)
+(+)(a::Union{Chunk, Thunk}, b::Union{Chunk, Thunk}) = Thunk(+, nothing=>a, nothing=>b)
 
 # we define our own matmat and matvec multiply
 # for computing the new domains and thunks.
@@ -211,7 +211,7 @@ end
 function _scale(l, r)
     res = similar(r, Any)
     for i=1:length(l)
-        res[i,:] = map(x->Thunk((a,b) -> Diagonal(a)*b, l[i], x), r[i,:])
+        res[i,:] = map(x->Thunk((a,b) -> Diagonal(a)*b, nothing=>l[i], nothing=>x), r[i,:])
     end
     res
 end

@@ -6,7 +6,7 @@ import Dagger: Chunk
 
     function dynamic_fib(n)
         n <= 1 && return n
-        t = Dagger.spawn(dynamic_fib, n-1)
+        t = Dagger.@spawn dynamic_fib(n-1)
         y = dynamic_fib(n-2)
         return (fetch(t)::Int) + y
     end
@@ -55,13 +55,22 @@ end
         a = @spawn x + x
         @test a isa Dagger.EagerThunk
         b = @spawn sum([x,1,2])
-        c = spawn(*, a, b)
+        c = @spawn a * b
         @test c isa Dagger.EagerThunk
         @test fetch(a) == 4
         @test fetch(b) == 5
         @test fetch(c) == 20
     end
     @test Dagger.Sch.EAGER_CONTEXT[] isa Context
+    @testset "keyword arguments" begin
+        A = rand(4, 4)
+        @test fetch(@spawn sum(A; dims=1)) ≈ sum(A; dims=1)
+
+        @test_throws_unwrap Dagger.ThunkFailedException fetch(@spawn sum(A; fakearg=2))
+
+        @test fetch(@spawn reduce(+, A; dims=1, init=2.0)) ≈
+              reduce(+, A; dims=1, init=2.0)
+    end
     @testset "broadcast" begin
         A, B = rand(4), rand(4)
         @test fetch(@spawn A .+ B) ≈ A .+ B
@@ -161,7 +170,7 @@ end
         end
     end
     @testset "remote spawn" begin
-        a = fetch(Distributed.@spawnat 2 Dagger.spawn(+, 1, 2))
+        a = fetch(Distributed.@spawnat 2 Dagger.@spawn 1+2)
         @test Dagger.Sch.EAGER_INIT[]
         @test fetch(Distributed.@spawnat 2 !(Dagger.Sch.EAGER_INIT[]))
         @test a isa Dagger.EagerThunk
@@ -227,19 +236,19 @@ end
             end
         end
         @testset "eager API" begin
-            _a = Dagger.spawn(+, 1, 2; scope=NodeScope())
+            _a = Dagger.@spawn scope=NodeScope() 1+2
             a = Dagger.Sch._find_thunk(_a)
             @test a.f isa Chunk
             @test a.f.processor isa OSProc
             @test a.f.scope isa NodeScope
 
-            _a = Dagger.spawn(+, 1, 2; processor=Dagger.ThreadProc(1,1))
+            _a = Dagger.@spawn processor=Dagger.ThreadProc(1,1) 1+2
             a = Dagger.Sch._find_thunk(_a)
             @test a.f isa Chunk
             @test a.f.processor isa Dagger.ThreadProc
             @test a.f.scope == DefaultScope()
 
-            _a = Dagger.spawn(+, 1, 2; processor=Dagger.ThreadProc(1,1), scope=NodeScope())
+            _a = Dagger.@spawn processor=Dagger.ThreadProc(1,1) scope=NodeScope() 1+2
             a = Dagger.Sch._find_thunk(_a)
             @test a.f isa Chunk
             @test a.f.processor isa Dagger.ThreadProc
@@ -251,12 +260,12 @@ end
 
         s = p -> p == Dagger.ThreadProc(1, 1)
         f = (x) -> 10 + x
-        g = (x) -> fetch(Dagger.spawn(f, x; proclist=s))
-        fetch(Dagger.spawn(g, 10; proclist=s))
+        g = (x) -> fetch(Dagger.@spawn proclist=s f(x))
+        fetch(Dagger.@spawn proclist=s g(10))
     end
     @testset "no cross-scheduler Thunk usage" begin
         a = delayed(+)(1,2)
-        @test_throws Exception Dagger.spawn(identity, a)
+        @test_throws Exception Dagger.@spawn identity(a)
     end
     @testset "@sync support" begin
         result = Dagger.@spawn sleep(1)

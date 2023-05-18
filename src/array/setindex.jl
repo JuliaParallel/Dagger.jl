@@ -35,7 +35,7 @@ function stage(ctx::Context, sidx::SetIndex)
         local_dmn = ArrayDomain(map(x->x[2], idx_and_dmn))
         s = subdmns[idx...]
         part_to_set = sidx.val
-        ps[idx...] = Thunk(ps[idx...]) do p
+        ps[idx...] = Thunk(nothing=>ps[idx...]) do p
             q = copy(p)
             q[indexes(project(s, local_dmn))...] .= part_to_set
             q

@@ -130,7 +130,7 @@ function start_state(deps::Dict, node_order, chan)
 
     for k in sort(collect(keys(deps)), by=node_order)
         if istask(k)
-            waiting = Set{Thunk}(Iterators.filter(istask, inputs(k)))
+            waiting = Set{Thunk}(Iterators.filter(istask, map(last, inputs(k))))
             if isempty(waiting)
                 push!(state.ready, k)
             else
@@ -659,7 +659,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
                 DefaultScope()
             end
         end
-        for input in task.inputs
+        for (_,input) in task.inputs
             input = unwrap_weak_checked(input)
             chunk = if istask(input)
                 state.cache[input]
@@ -688,7 +688,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
             @goto fallback
         end
 
-        inputs = collect_task_inputs(state, task)
+        inputs = map(last, collect_task_inputs(state, task))
         opts = populate_defaults(opts, chunktype(task.f), map(chunktype, inputs))
         local_procs, costs = estimate_task_costs(state, local_procs, task, inputs)
         scheduled = false
@@ -945,10 +945,13 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
 
         ids = Int[0]
         data = Any[thunk.f]
-        for (idx, x) in enumerate(thunk.inputs)
+        positions = Union{Symbol,Nothing}[]
+        for (idx, pos_x) in enumerate(thunk.inputs)
+            pos, x = pos_x
             x = unwrap_weak_checked(x)
             push!(ids, istask(x) ? x.id : -idx)
             push!(data, istask(x) ? state.cache[x] : x)
+            push!(positions, pos)
         end
         toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
         options = merge(ctx.options, toptions)
@@ -961,7 +964,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
         push!(to_send, Any[thunk.id, time_util, alloc_util, occupancy,
                            scope, chunktype(thunk.f), data,
                            thunk.get_result, thunk.persist, thunk.cache, thunk.meta, options,
-                           propagated, ids,
+                           propagated, ids, positions,
                            (log_sink=ctx.log_sink, profile=ctx.profile),
                            sch_handle, state.uid])
     end
@@ -1093,6 +1096,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
 
         while isopen(return_queue)
             # Wait for new tasks
+            @dagdebug nothing :processor "Waiting for tasks"
             timespan_start(ctx, :proc_run_wait, to_proc, nothing)
             wait(istate.reschedule)
             @static if VERSION >= v"1.9"
@@ -1101,21 +1105,26 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
             timespan_finish(ctx, :proc_run_wait, to_proc, nothing)
 
             # Fetch a new task to execute
+            @dagdebug nothing :processor "Trying to dequeue"
             timespan_start(ctx, :proc_run_fetch, to_proc, nothing)
             task_and_occupancy = lock(istate.queue) do queue
                 # Only steal if there are multiple queued tasks, to prevent
                 # ping-pong of tasks between empty queues
                 if length(queue) == 0
+                    @dagdebug nothing :processor "Nothing to dequeue"
                     return nothing
                 end
                 _, occupancy = peek(queue)
-                if proc_has_occupancy(proc_occupancy[], occupancy)
-                    return dequeue_pair!(queue)
+                if !proc_has_occupancy(proc_occupancy[], occupancy)
+                    @dagdebug nothing :processor "Insufficient occupancy" proc_occupancy=proc_occupancy[] task_occupancy=occupancy
+                    return nothing
                 end
-                return nothing
+                return dequeue_pair!(queue)
             end
             if task_and_occupancy === nothing
                 timespan_finish(ctx, :proc_run_fetch, to_proc, nothing)
+
+                @dagdebug nothing :processor "Failed to dequeue"
 
                 if !stealing_permitted(to_proc)
                     continue
@@ -1124,6 +1133,8 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                 if proc_occupancy[] == typemax(UInt32)
                     continue
                 end
+
+                @dagdebug nothing :processor "Trying to steal"
 
                 # Try to steal a task
                 timespan_start(ctx, :steal_local, to_proc, nothing)
@@ -1159,7 +1170,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                     if task_and_occupancy !== nothing
                         from_proc = other_istate.proc
                         thunk_id = task[1]
-                        @dagdebug thunk_id :execute "Stolen from $from_proc by $to_proc"
+                        @dagdebug thunk_id :processor "Stolen from $from_proc by $to_proc"
                         timespan_finish(ctx, :steal_local, to_proc, (;from_proc, thunk_id))
                         # TODO: Keep stealing until we hit full occupancy?
                         @goto execute
@@ -1177,6 +1188,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
             thunk_id = task[1]
             time_util = task[2]
             timespan_finish(ctx, :proc_run_fetch, to_proc, (;thunk_id, proc_occupancy=proc_occupancy[], task_occupancy))
+            @dagdebug thunk_id :processor "Dequeued task"
 
             # Execute the task and return its result
             t = @task begin
@@ -1234,10 +1246,12 @@ Executes a batch of tasks on `to_proc`, returning their results through
 `return_queue`.
 """
 function do_tasks(to_proc, return_queue, tasks)
+    @dagdebug nothing :processor "Enqueuing task batch" batch_size=length(tasks)
+
     # FIXME: This is terrible
-    ctx_vars = first(tasks)[15]
+    ctx_vars = first(tasks)[16]
     ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
-    uid = first(tasks)[17]
+    uid = first(tasks)[18]
     state = proc_states(uid) do states
         get!(states, to_proc) do
             queue = PriorityQueue{Vector{Any}, UInt32}()
@@ -1272,6 +1286,7 @@ function do_tasks(to_proc, return_queue, tasks)
             should_launch || continue
             enqueue!(queue, task, occupancy)
             timespan_finish(ctx, :enqueue, (;to_proc, thunk_id), nothing)
+            @dagdebug thunk_id :processor "Enqueued task"
         end
     end
     notify(istate.reschedule)
@@ -1287,6 +1302,7 @@ function do_tasks(to_proc, return_queue, tasks)
         end
         notify(other_istate.reschedule)
     end
+    @dagdebug nothing :processor "Kicked processors"
 end
 
 """
@@ -1298,7 +1314,7 @@ function do_task(to_proc, task_desc)
     thunk_id, est_time_util, est_alloc_util, est_occupancy,
         scope, Tf, data,
         send_result, persist, cache, meta,
-        options, propagated, ids, ctx_vars, sch_handle, uid = task_desc
+        options, propagated, ids, positions, ctx_vars, sch_handle, uid = task_desc
     ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
 
     from_proc = OSProc()
@@ -1442,6 +1458,16 @@ function do_task(to_proc, task_desc)
     end
     f = popfirst!(fetched)
     @assert !(f isa Chunk) "Failed to unwrap thunk function"
+    fetched_args = Any[]
+    fetched_kwargs = Pair{Symbol,Any}[]
+    for (idx, x) in enumerate(fetched)
+        pos = positions[idx]
+        if pos === nothing
+            push!(fetched_args, x)
+        else
+            push!(fetched_kwargs, pos => x)
+        end
+    end
 
     #= FIXME: If MaxUtilization, stop processors and wait
     if (est_time_util isa MaxUtilization) && (real_time_util > 0)
@@ -1473,7 +1499,7 @@ function do_task(to_proc, task_desc)
 
         res = Dagger.with_options(propagated) do
             # Execute
-            execute!(to_proc, f, fetched...)
+            execute!(to_proc, f, fetched_args...; fetched_kwargs...)
         end
 
         # Check if result is safe to store

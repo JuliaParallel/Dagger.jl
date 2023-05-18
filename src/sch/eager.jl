@@ -19,12 +19,13 @@ function init_eager()
     @async try
         sopts = SchedulerOptions(;allow_errors=true)
         scope = Dagger.ExactScope(Dagger.ThreadProc(1, 1))
-        topts = ThunkOptions(;occupancy=Dict(Dagger.ThreadProc=>0))
         atexit() do
             EAGER_FORCE_KILL[] = true
             close(EAGER_THUNK_CHAN)
         end
-        Dagger.compute(ctx, Dagger.delayed(eager_thunk; scope, options=topts)();
+        opts = Dagger.Options((;scope,
+                                occupancy=Dict(Dagger.ThreadProc=>0)))
+        Dagger.compute(ctx, Dagger.delayed(eager_thunk, opts)();
                        options=sopts)
     catch err
         iob = IOContext(IOBuffer(), :color=>true)
@@ -96,10 +97,16 @@ function eager_thunk()
             added_future, future, uid, ref, f, args, opts = take!(EAGER_THUNK_CHAN)
             # preserve inputs until they enter the scheduler
             tid = GC.@preserve args begin
-                _args = map(x->x isa Dagger.EagerThunk ? ThunkID(EAGER_ID_MAP[x.uid], x.thunk_ref) :
-                               x isa Dagger.Chunk ? WeakChunk(x) :
-                               x,
-                            args)
+                _args = map(args) do pos_x
+                    pos, x = pos_x
+                    if x isa Dagger.EagerThunk
+                        return pos => ThunkID(EAGER_ID_MAP[x.uid], x.thunk_ref)
+                    elseif x isa Dagger.Chunk
+                        return pos => WeakChunk(x)
+                    else
+                        return pos => x
+                    end
+                end
                 add_thunk!(f, h, _args...; future=future, ref=ref, opts...)
             end
             EAGER_ID_MAP[uid] = tid.id

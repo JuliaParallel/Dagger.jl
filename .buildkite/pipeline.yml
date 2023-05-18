@@ -35,12 +35,22 @@ steps:
           julia_args: "--threads=1"
       - JuliaCI/julia-coverage#v1:
           codecov: true
+  - label: Julia 1.9
+    timeout_in_minutes: 60
+    <<: *test
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.9"
+      - JuliaCI/julia-test#v1:
+          julia_args: "--threads=1"
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
   - label: Julia nightly
     timeout_in_minutes: 60
     <<: *test
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.9-nightly"
+          version: "1.10-nightly"
       - JuliaCI/julia-test#v1:
           julia_args: "--threads=1"
       - JuliaCI/julia-coverage#v1:

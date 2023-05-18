@@ -142,8 +142,9 @@ write_edge(ctx, io, from::String, to::String) = println(io, "n_$from -> n_$to;")
 
 getargs!(d, t) = nothing
 function getargs!(d, t::Thunk)
-    d[t.id] = [filter(x->!istask(x[2]), collect(enumerate(t.inputs)))...,]
-    foreach(i->getargs!(d, i), t.inputs)
+    raw_inputs = map(last, t.inputs)
+    d[t.id] = [filter(x->!istask(x[2]), collect(enumerate(raw_inputs)))...,]
+    foreach(i->getargs!(d, i), raw_inputs)
 end
 function write_dag(io, logs::Vector, t=nothing)
     ctx = (proc_to_color = Dict{Processor,String}(),

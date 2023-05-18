@@ -19,7 +19,7 @@ function stage(ctx::Context, node::Map)
     f = node.f
     for i=eachindex(domains)
         inps = map(x->chunks(x)[i], inputs)
-        thunks[i] = Thunk((args...) -> map(f, args...), inps...)
+        thunks[i] = Thunk((args...) -> map(f, args...), map(inp->nothing=>inp, inps)...)
     end
     DArray(Any, domain(primary), domainchunks(primary), thunks)
 end
@@ -40,8 +40,8 @@ end
 
 function stage(ctx::Context, r::ReduceBlock)
     inp = stage(ctx, r.input)
-    reduced_parts = map(x -> Thunk(r.op, x; get_result=r.get_result), chunks(inp))
-    Thunk((xs...) -> r.op_master(xs), reduced_parts...; meta=true)
+    reduced_parts = map(x -> Thunk(r.op, nothing=>x; get_result=r.get_result), chunks(inp))
+    Thunk((xs...) -> r.op_master(xs), map(part->nothing=>part, reduced_parts)...; meta=true)
 end
 
 reduceblock_async(f, x::ArrayOp; get_result=true) = ReduceBlock(f, f, x, get_result)
@@ -126,10 +126,10 @@ function stage(ctx::Context, r::Reducedim)
     inp = cached_stage(ctx, r.input)
     thunks = let op = r.op, dims=r.dims
         # do reducedim on each block
-        tmp = map(p->Thunk(b->reduce(op,b,dims=dims), p), chunks(inp))
+        tmp = map(p->Thunk(b->reduce(op,b,dims=dims), nothing=>p), chunks(inp))
         # combine the results in tree fashion
         treereducedim(tmp, r.dims) do x,y
-            Thunk(op, x,y)
+            Thunk(op, nothing=>x, nothing=>y)
         end
     end
     c = domainchunks(inp)
