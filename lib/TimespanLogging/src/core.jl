@@ -233,27 +233,46 @@ function write_event(ml::MultiEventLog, event::Event)
     end
 end
 
-function get_logs!(ml::MultiEventLog; only_local=false)
-    logs = Dict{Int,Dict{Symbol,Vector}}()
-    wkrs = only_local ? myid() : procs()
-    # FIXME: Log this logic
-    @sync for p in wkrs
-        @async begin
-            logs[p] = remotecall_fetch(p, ml) do ml
-                mls = get_state(ml)
-                lock(event_log_lock) do
-                    sublogs = Dict{Symbol,Vector}()
-                    for name in keys(mls.consumers)
-                        sublogs[name] = mls.consumer_logs[name]
-                        mls.consumer_logs[name] = []
+function get_logs!(ml::MultiEventLog; only_local=true)
+    if only_local
+        # Only return logs from the current process
+        logs = Dict{Int, Dict{Symbol,Vector}}()
+        pid = myid()
+        logs[pid] = remotecall_fetch(pid, ml) do ml 
+            mls = get_state(ml)
+            lock(event_log_lock) do
+                sublogs = Dict{Symbol,Vector}()
+                for name in keys(mls.consumers)
+                    sublogs[name] = copy(mls.consumer_logs[name])
+                    mls.consumer_logs[name] = []
+                end
+                sublogs
+            end
+        end
+        return logs
+    else
+        # Return logs from all processes
+        logs = Dict{Int, Dict{Symbol,Vector}}()
+        wkrs = procs()
+        @sync for p in wkrs
+            @async begin
+                logs[p] = remotecall_fetch(p, ml) do ml 
+                    mls = get_state(ml)
+                    lock(event_log_lock) do
+                        sublogs = Dict{Symbol,Vector}()
+                        for name in keys(mls.consumers)
+                            sublogs[name] = copy(mls.consumer_logs[name])
+                            mls.consumer_logs[name] = []
+                        end
+                        sublogs
                     end
-                    sublogs
                 end
             end
         end
+        return logs
     end
-    return logs
 end
+
 
 # Core logging operations
 
