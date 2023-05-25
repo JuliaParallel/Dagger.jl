@@ -1,7 +1,9 @@
 module DaggerMPI
-
 using Dagger
 using MPI
+
+bcastDict = Base.Dict{Int32, MPI.Buffer}()
+
 
 struct MPIProcessor{P,C} <: Dagger.Processor
     proc::P
@@ -17,8 +19,6 @@ end
 const MPI_PROCESSORS = Ref{Int}(-1)
 
 const PREVIOUS_PROCESSORS = Set()
-
-
 
 function initialize(comm::MPI.Comm=MPI.COMM_WORLD; color_algo=SimpleColoring())
     @assert MPI_PROCESSORS[] == -1 "DaggerMPI already initialized"
@@ -89,7 +89,6 @@ function recv_yield(src, tag, comm)
                     value = MPI.deserialize(buf)
                     return value
                 end
-                Core.print("[$(MPI.Comm_rank(comm))] message is not ready on $tag\n")
                 yield()
             end
         end
@@ -144,7 +143,7 @@ function Dagger.move(from_proc::MPIProcessor, to_proc::Dagger.Processor, x::Dagg
     @assert Dagger.chunktype(x) <: MPIColoredValue
     x_value = fetch(x)
     rank = MPI.Comm_rank(from_proc.comm)
-    tag = abs(Base.unsafe_trunc(Int32, Dagger.get_task_hash(:input) >> 32))
+    tag = abs(Base.unsafe_trunc(Int32, Dagger.get_task_hash(:input) >> 32)) 
     if rank == x_value.color
         # FIXME: Broadcast send
         @sync for other in 0:(MPI.Comm_size(from_proc.comm)-1)
