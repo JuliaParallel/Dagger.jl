@@ -12,11 +12,6 @@ collect(d::Union{Chunk,Thunk}; options=nothing) =
 
 abstract type Computation end
 
-compute(ctx, c::Computation; options=nothing) =
-    compute(ctx, stage(ctx, c); options=options)
-collect(c::Computation; options=nothing) =
-    collect(Context(global_context()), c; options=options)
-
 """
     compute(ctx::Context, d::Thunk; options=nothing) -> Chunk
 

@@ -283,6 +283,9 @@ end
 Base.isready(t::EagerThunk) = isready(t.future)
 Base.wait(t::EagerThunk) = wait(t.future)
 Base.fetch(t::EagerThunk; raw=false) = fetch(t.future; raw)
+
+istask(t::EagerThunk) = true
+
 function Base.show(io::IO, t::EagerThunk)
     print(io, "EagerThunk ($(isready(t) ? "finished" : "running"))")
 end
