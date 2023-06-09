@@ -2,9 +2,6 @@ module DaggerMPI
 using Dagger
 using MPI
 
-bcastDict = Base.Dict{Int32, MPI.Buffer}()
-
-
 struct MPIProcessor{P,C} <: Dagger.Processor
     proc::P
     comm::MPI.Comm
@@ -17,6 +14,8 @@ function (sc::SimpleColoring)(comm, key)
 end
 
 const MPI_PROCESSORS = Ref{Int}(-1)
+
+const BCAST_VALUES = Dict{Any, Any}()
 
 const PREVIOUS_PROCESSORS = Set()
 
@@ -74,9 +73,64 @@ end
 Dagger.get_parent(proc::MPIProcessor) = Dagger.OSProc()
 Dagger.default_enabled(proc::MPIProcessor) = true
 
+function IbcastAPI(data, root::Integer, comm::MPI.Comm, req::MPI.AbstractRequest=MPI.Request())
+    @assert MPI.isnull(req)
+    buf = MPI.Buffer(data)
+    @debug "[$(MPI.Comm_rank(comm))] Entered API call with root $root"
+    MPI.API.MPI_Ibcast(buf.data, buf.count, buf.datatype, Cint(root), comm, req)
+    MPI.setbuffer!(req, buf)
+    @debug "[$(MPI.Comm_rank(comm))] Ended API call with root $root"
+    return req
+end
+
+function IbcastSend(obj, root, tag, comm, req::MPI.AbstractRequest=MPI.Request())
+    @debug "[$(MPI.Comm_rank(comm))] Started IbcastSend on tag [$tag]"
+    count = Ref{Cint}()
+    sendTag = Ref{Cint}()
+    buf = MPI.serialize(obj)
+    count[] = length(buf)
+    sendTag[] = tag
+    IbcastAPI(count, root, comm)
+    IbcastAPI(sendTag, root, comm)
+    IbcastAPI(buf, root, comm)
+end
+
+function IbcastRecv(root, tag, comm, req::MPI.AbstractRequest=MPI.Request())
+    count = Ref{Cint}()
+    tagRec = Ref{Cint}()
+    req = IbcastAPI(count, root, comm, req)
+    while true
+        finish = MPI.test(req)
+        if finish
+            break
+        end
+    end
+    req = IbcastAPI(tagRec, root, comm, req)
+    while true
+        finish = MPI.Test(req)
+        if finish
+            break
+        end
+    end
+    buf = Array{UInt8}(undef, count[])
+    req = IbcastAPI(buf, root, comm, req)
+    while true
+        finish = MPI.test(req)
+        if finish
+            break
+        end
+    end
+    BCAST_VALUES[tagRec[]] = MPI.deserialize(buf)
+    @debug "[$(MPI.Comm_rank(comm))] Received [$tag] on IbcastRecv"
+end     
+
+function Ibcast_yield()
+end
+
+
 
 "Busy-loop Irecv that yields to other tasks."
-function recv_yield(src, tag, comm)
+function recv_yield(src, tag, comm)     
     while true 
         (got, msg, stat) = MPI.Improbe(src, tag, comm, MPI.Status)
         if got
@@ -145,19 +199,16 @@ function Dagger.move(from_proc::MPIProcessor, to_proc::Dagger.Processor, x::Dagg
     rank = MPI.Comm_rank(from_proc.comm)
     tag = abs(Base.unsafe_trunc(Int32, Dagger.get_task_hash(:input) >> 32)) 
     if rank == x_value.color
-        # FIXME: Broadcast send
-        @sync for other in 0:(MPI.Comm_size(from_proc.comm)-1)
-            other == rank && continue
-            @async begin
-                @debug "[$rank] Starting bcast send to [$other] on $tag"
-                MPI.isend(x_value.value, other, tag, from_proc.comm)
-                @debug "[$rank] Finished bcast send to [$other] on $tag"
-            end
-        end
+        @debug "[$rank] Starting bcast send on $tag"
+        IbcastSend(x_value.value, x_value.color, tag, from_proc.comm)
+        @debug "[$rank] Finished bcast send on $tag"
         return Dagger.move(from_proc.proc, to_proc, x_value.value)
     else
         @debug "[$rank] Starting bcast recv on $tag"
-        value = recv_yield(x_value.color, tag, from_proc.comm)
+        while !haskey(BCAST_VALUES, tag)
+            IbcastRecv(x_value.color, tag, from_proc.comm)
+        end
+        value = BCAST_VALUES[tag]
         @debug "[$rank] Finished bcast recv on $tag"
         return Dagger.move(from_proc.proc, to_proc, value)
     end
