@@ -17,10 +17,10 @@ function size(x::Transpose)
 end
 
 transpose(x::ArrayOp) = Transpose(transpose, x)
-transpose(x::Union{Chunk, Thunk}) = Thunk(transpose, x)
+#transpose(x::Union{Chunk, Thunk}) = Thunk(transpose, x)
 
 adjoint(x::ArrayOp) = Transpose(adjoint, x)
-adjoint(x::Union{Chunk, Thunk}) = Thunk(adjoint, x)
+#adjoint(x::Union{Chunk, Thunk}) = Thunk(adjoint, x)
 
 function adjoint(x::ArrayDomain{2})
     d = indexes(x)
@@ -32,7 +32,7 @@ function adjoint(x::ArrayDomain{1})
 end
 
 function _ctranspose(x::AbstractArray)
-    Any[delayed(adjoint)(x[j,i]) for i=1:size(x,2), j=1:size(x,1)]
+    Any[Dagger.@spawn adjoint(x[j,i]) for i=1:size(x,2), j=1:size(x,1)]
 end
 
 function stage(ctx::Context, node::Transpose)
@@ -91,8 +91,9 @@ function (+)(a::ArrayDomain, b::ArrayDomain)
     a
 end
 
-(*)(a::Union{Chunk, Thunk}, b::Union{Chunk, Thunk}) = Thunk(*, a,b)
-(+)(a::Union{Chunk, Thunk}, b::Union{Chunk, Thunk}) = Thunk(+, a,b)
+#(*)(a::Union{Chunk, EagerThunk}, b::Union{Chunk, EagerThunk}) = Thunk(*, a,b)
+
+#(+)(a::Union{Chunk, Thunk}, b::Union{Chunk, Thunk}) = Thunk(+, a,b)
 
 # we define our own matmat and matvec multiply
 # for computing the new domains and thunks.
@@ -176,7 +177,7 @@ function stage(ctx::Context, mul::MatMul)
     a, b = stage_operands(ctx, mul, mul.a, mul.b)
     d = domain(a)*domain(b)
     DArray(Any, d, domainchunks(a)*domainchunks(b),
-                          _mul(chunks(a), chunks(b); T=Thunk))
+                          _mul(chunks(a), chunks(b); T=Any))
 end
 
 Base.power_by_squaring(x::DArray, i::Int) = foldl(*, ntuple(idx->x, i))
@@ -211,7 +212,7 @@ end
 function _scale(l, r)
     res = similar(r, Any)
     for i=1:length(l)
-        res[i,:] = map(x->Thunk((a,b) -> Diagonal(a)*b, l[i], x), r[i,:])
+        res[i,:] = map(x->Dagger.spawn((a,b) -> Diagonal(a)*b, l[i], x), r[i,:])
     end
     res
 end

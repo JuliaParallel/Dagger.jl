@@ -240,6 +240,9 @@ function Base.fetch(t::EagerThunk; raw=false)
         end
     end
 end
+
+istask(t::EagerThunk) = true
+
 function Base.show(io::IO, t::EagerThunk)
     print(io, "EagerThunk ($(isready(t) ? "finished" : "running"))")
 end

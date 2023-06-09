@@ -19,7 +19,7 @@ function stage(ctx::Context, node::Map)
     f = node.f
     for i=eachindex(domains)
         inps = map(x->chunks(x)[i], inputs)
-        thunks[i] = Thunk((args...) -> map(f, args...), inps...)
+        thunks[i] = Dagger.@spawn map(f, inps...) 
     end
     DArray(Any, domain(primary), domainchunks(primary), thunks)
 end
@@ -40,16 +40,16 @@ end
 
 function stage(ctx::Context, r::ReduceBlock)
     inp = stage(ctx, r.input)
-    reduced_parts = map(x -> Thunk(r.op, x; get_result=r.get_result), chunks(inp))
-    Thunk((xs...) -> r.op_master(xs), reduced_parts...; meta=true)
+    reduced_parts = map(x -> (Dagger.@spawn get_result=r.get_result r.op(x)), chunks(inp))
+    r_op_master(args...,) = r.op_master(args)
+    Dagger.@spawn meta=true r_op_master(reduced_parts...) 
 end
 
 reduceblock_async(f, x::ArrayOp; get_result=true) = ReduceBlock(f, f, x, get_result)
 reduceblock_async(f, g::Function, x::ArrayOp; get_result=true) = ReduceBlock(f, g, x, get_result)
 
-reduceblock(f, x::ArrayOp) = compute(reduceblock_async(f, x))
-reduceblock(f, g::Function, x::ArrayOp) =
-    compute(reduceblock_async(f, g, x))
+reduceblock(f, x::ArrayOp) = reduceblock_async(f, x)
+reduceblock(f, g::Function, x::ArrayOp) = reduceblock_async(f, g, x)
 
 reduce_async(f::Function, x::ArrayOp) = reduceblock_async(xs->reduce(f,xs), xs->reduce(f,xs), x)
 
@@ -115,7 +115,7 @@ end
 
 function reduce(f::Function, x::ArrayOp; dims = nothing)
     if dims === nothing
-        return compute(reduce_async(f,x))
+        return fetch(reduce_async(f,x))
     elseif dims isa Int
         dims = (dims,)
     end
@@ -126,10 +126,10 @@ function stage(ctx::Context, r::Reducedim)
     inp = cached_stage(ctx, r.input)
     thunks = let op = r.op, dims=r.dims
         # do reducedim on each block
-        tmp = map(p->Thunk(b->reduce(op,b,dims=dims), p), chunks(inp))
+        tmp = map(p->Dagger.spawn(b->reduce(op,b,dims=dims), p), chunks(inp))
         # combine the results in tree fashion
         treereducedim(tmp, r.dims) do x,y
-            Thunk(op, x,y)
+            Dagger.@spawn op(x,y)
         end
     end
     c = domainchunks(inp)

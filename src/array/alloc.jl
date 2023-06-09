@@ -25,7 +25,7 @@ end
 
 function stage(ctx, a::AllocateArray)
     alloc(idx, sz) = a.f(idx, a.eltype, sz)
-    thunks = [delayed(alloc)(i, size(x)) for (i, x) in enumerate(a.domainchunks)]
+    thunks = [Dagger.@spawn alloc(i, size(x)) for (i, x) in enumerate(a.domainchunks)]
     DArray(a.eltype,a.domain, a.domainchunks, thunks)
 end
 
