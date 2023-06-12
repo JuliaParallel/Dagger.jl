@@ -18,11 +18,6 @@ using Requires
 using MacroTools
 using TimespanLogging
 
-const PLUGINS = Dict{Symbol,Any}()
-const PLUGIN_CONFIGS = Dict{Symbol,String}(
-    :scheduler => "Dagger.Sch"
-)
-
 include("lib/util.jl")
 
 # Distributed data
