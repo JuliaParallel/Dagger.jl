@@ -25,6 +25,7 @@ include("options.jl")
 include("processor.jl")
 include("scopes.jl")
 include("thunk.jl")
+include("utils/dagdebug.jl")
 include("chunks.jl")
 
 # Task scheduling
