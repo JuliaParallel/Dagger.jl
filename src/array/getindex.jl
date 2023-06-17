@@ -16,6 +16,7 @@ function stage(ctx::Context, gidx::GetIndex)
         gidx.idx[i]
     end for i in 1:length(gidx.idx)]
 
+    @debug "$(idxs)"
     # Figure out output dimension
     view(inp, ArrayDomain(idxs))
 end
@@ -39,4 +40,4 @@ end
 
 Base.getindex(c::ArrayOp, idx::ArrayDomain) = GetIndex(c, indexes(idx))
 Base.getindex(c::ArrayOp, idx...)           = GetIndex(c, idx)
-Base.getindex(c::ArrayOp, idx::Integer...)  = fetch(GetIndexScalar(c, idx))
+Base.getindex(c::ArrayOp, idx::Integer...)  = collect(GetIndexScalar(c, idx))

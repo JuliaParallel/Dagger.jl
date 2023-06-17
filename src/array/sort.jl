@@ -3,6 +3,7 @@ using Distributed
 
 using StatsBase
 
+
 function getmedians(x, n)
     q,r = divrem(length(x), n+1)
 
@@ -18,8 +19,10 @@ function getmedians(x, n)
 end
 
 function sortandsample_array(ord, xs, nsamples, presorted=false)
+
     r = sample(1:length(xs), min(length(xs), nsamples),
                replace=false, ordered=true)
+
     if !presorted
         sorted = sort(xs, order=ord)
         chunk = tochunk(sorted)
@@ -28,6 +31,7 @@ function sortandsample_array(ord, xs, nsamples, presorted=false)
         chunk = nothing # avoid communicating metadata if already sorted
         samples = chunk[r]
     end
+
     (chunk, samples)
 end
 
@@ -89,14 +93,14 @@ end
 
 function collect_merge(merge, group)
     #delayed((xs...) -> treereduce(merge, Any[xs...]))(group...)
-    t = treereduce(delayed(merge), group)
+    t = treereduce(merge, group)
 end
 
 # Given sorted chunks, splits each chunk according to splitters
 # then merges corresponding splits together to form length(splitters) + 1 sorted chunks
 # these chunks will be in turn sorted
 function splitmerge(chunks, splitters, merge, by, sub, ord)
-    c1 = map(c->splitchunk(c, splitters, by, sub, ord), chunks)
+    c1 = map(c->splitchunk(c, splitters, by, sub, ord), chunks) 
     map(cs->collect_merge(merge, cs), transpose_vecvec(c1))
 end
 
@@ -117,15 +121,15 @@ function splitchunk(c, splitters, by, sub, ord)
         1:j
     end
 
-    between = map((hi, lo) -> delayed(x->sub(x, getbetween(by(x), hi, lo, ord)))(c),
+    between = map((hi, lo) -> Dagger.spawn(x->sub(x, getbetween(by(x), hi, lo, ord)), c),
                   splitters[1:end-1], splitters[2:end])
     hi = splitters[1]
     lo = splitters[end]
 
-    a = delayed(x->sub(x, getlt(by(x), hi, ord)))(c)
+    a = Dagger.spawn(x->sub(x, getlt(by(x), hi, ord)), c)
     b = between
-    c = delayed(x->sub(x, getgt(by(x), lo, ord)))(c)
-    return vcat(a, b, c)
+    c = Dagger.spawn(x->sub(x, getgt(by(x), lo, ord)), c)
+    return map(fetch, vcat(a, b, c))
 
    #[delayed(c->sub(c, getlt(by(c), hi, ord)))(c);
    # between; delayed(c->sub(c, getgt(by(c), lo, ord)))(c)]
@@ -252,6 +256,8 @@ Each chunk in turn is sorted.
 # Returns
 A tuple of `(chunk, samples)` where `chunk` is the `Dagger.Chunk` object. `chunk` can be `nothing` if no change to the initial array was made (e.g. it was already sorted)
 """
+
+
 function dsort_chunks(cs, nchunks=length(cs), nsamples=2000;
                       merge = merge_sorted,
                       by=identity,
@@ -263,17 +269,17 @@ function dsort_chunks(cs, nchunks=length(cs), nsamples=2000;
                       sortandsample = (x,ns, presorted)->sortandsample_array(order, x,ns, presorted),
                       affinities=workers(),
                      )
-    if splitters !== nothing
+    if splitters != nothing
         # this means splitters are given beforehand
         nsamples = 0 # no samples needed
     end
 
     # first sort each chunk and sample nsamples elements from each chunk
-    cs1 = map(c->delayed(sortandsample)(c, nsamples, chunks_presorted), cs)
-
+    cs1 = map(c->Dagger.spawn(sortandsample, c, nsamples, chunks_presorted), cs)
     batchsize = max(2, batchsize)
-    # collect the samples
-    xs = collect(treereduce(delayed(vcat), cs1))
+
+    xs = treereduce((cs...)->Dagger.spawn(vcat, cs...), cs1)
+    xs = map(fetch, fetch(xs))
     if length(cs1) == 1
         xs = [xs]
     end
@@ -283,11 +289,10 @@ function dsort_chunks(cs, nchunks=length(cs), nsamples=2000;
         samples = reduce((a,b)->merge_sorted(order, a, b), map(x->x[2], xs))
         splitters = getmedians(samples, nchunks-1)
     end
-
                        # if first(x) === nothing this means that
                        # the chunk was already sorted, so just
                        # use the input chunk as-is
-    cs2 = map((x,c) -> x === nothing ? c : x, map(first, xs), cs)
+                       cs2 = map((x,c) -> x === nothing ? c : x, map(first, xs), cs)
 
     # main sort routine. At this point:
     # we know the splitters we want to use,
@@ -304,7 +309,7 @@ function dsort_chunks(cs, nchunks=length(cs), nsamples=2000;
 end
 
 function propagate_affinity!(c, aff)
-    if !isa(c, Thunk)
+    if !isa(c, EagerThunk)
         return
     end
     if c.affinity !== nothing
@@ -326,17 +331,13 @@ function Base.sort(v::ArrayOp;
                batchsize=max(2, nworkers()),
                nsamples=2000,
                order::Ordering=default_ord)
-    v1 = compute(v)
+    v1 = fetch(v)
     ord = Base.Sort.ord(lt,by,rev,order)
     nchunks = nchunks === nothing ? length(v1.chunks) : nchunks
     cs = dsort_chunks(v1.chunks, nchunks, nsamples,
                       order=ord, merge=(x,y)->merge_sorted(ord, x,y))
-    foreach(persist!, cs)
-    t=delayed((xs...)->[xs...]; meta=true)(cs...)
-    # `compute(t)` only computes references to materialized version of `cs`
-    # we don't want the scheduler to think that `cs`s' job is done
-    # so we call persist! above
-    chunks = compute(t)
+    t=Dagger.spawn((xs...)->[xs...], cs...)
+    chunks = fetch(t)
     dmn = ArrayDomain((1:sum(length(domain(c)) for c in chunks),))
     DArray(eltype(v1), dmn, map(domain, chunks), chunks)
 end

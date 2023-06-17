@@ -90,8 +90,7 @@ function stage(ctx::Context, node::BCast)
     end
     blcks = DomainBlocks(map(_->1, size(node)), cumlengths)
 
-    thunks = broadcast(delayed((args...)->broadcast(bc.f, args...); ),
-                       args2...)
+    thunks = broadcast((args3...)->Dagger.spawn((args...)->broadcast(bc.f, args...), args3...), args2...)
     DArray(eltype(node), domain(node), blcks, thunks)
 end
 
@@ -107,7 +106,7 @@ Base.@deprecate mappart(args...) mapchunk(args...)
 function stage(ctx::Context, node::MapChunk)
     inputs = map(x->cached_stage(ctx, x), node.input)
     thunks = map(map(chunks, inputs)...) do ps...
-        Thunk(node.f, map(p->nothing=>p, ps)...)
+        Dagger.spawn(node.f, map(p->nothing=>p, ps)...)
     end
 
     DArray(Any, domain(inputs[1]), domainchunks(inputs[1]), thunks)
