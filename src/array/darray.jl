@@ -1,4 +1,4 @@
-import Base: ==
+import Base: ==, fetch
 using Serialization
 import Serialization: serialize, deserialize
 
@@ -78,13 +78,14 @@ domain(x::AbstractArray) = ArrayDomain([1:l for l in size(x)])
 abstract type ArrayOp{T, N} <: AbstractArray{T, N} end
 Base.IndexStyle(::Type{<:ArrayOp}) = IndexCartesian()
 
-compute(ctx, x::ArrayOp; options=nothing) =
-    compute(ctx, cached_stage(ctx, x)::DArray; options=options)
 
-collect(ctx::Context, x::ArrayOp; options=nothing) =
-    collect(ctx, compute(ctx, x; options=options); options=options)
+collect(x::ArrayOp) = collect(fetch(x))
 
-collect(x::ArrayOp; options=nothing) = collect(Context(global_context()), x; options=options)
+Base.fetch(x::ArrayOp) = fetch(cached_stage(Context(global_context()), x)::DArray)
+
+collect(x::Computation) = collect(fetch(x))
+
+Base.fetch(x::Computation) = fetch(cached_stage(Context(global_context()), x))
 
 function Base.show(io::IO, ::MIME"text/plain", x::ArrayOp)
     write(io, string(typeof(x)))
@@ -113,7 +114,7 @@ An N-dimensional distributed array of element type T, with a concatenation funct
 mutable struct DArray{T,N,F} <: ArrayOp{T, N}
     domain::ArrayDomain{N}
     subdomains::AbstractArray{ArrayDomain{N}, N}
-    chunks::AbstractArray{Union{Chunk,Thunk}, N}
+    chunks::AbstractArray{Any, N}
     concat::F
     function DArray{T,N,F}(domain, subdomains, chunks, concat::Function) where {T, N,F}
         new(domain, subdomains, chunks, concat)
@@ -135,8 +136,8 @@ domainchunks(d::DArray) = d.subdomains
 size(x::DArray) = size(domain(x))
 stage(ctx, c::DArray) = c
 
-function collect(ctx::Context, d::DArray; tree=false, options=nothing)
-    a = compute(ctx, d; options=options)
+function collect(d::DArray; tree=false)
+    a = fetch(d)
 
     if isempty(d.chunks)
         return Array{eltype(d)}(undef, size(d)...)
@@ -144,9 +145,9 @@ function collect(ctx::Context, d::DArray; tree=false, options=nothing)
 
     dimcatfuncs = [(x...) -> d.concat(x..., dims=i) for i in 1:ndims(d)]
     if tree
-        collect(treereduce_nd(delayed.(dimcatfuncs), a.chunks))
+        collect(fetch(treereduce_nd(map(x -> ((args...,) -> Dagger.@spawn x(args...)) , dimcatfuncs), a.chunks)))
     else
-        treereduce_nd(dimcatfuncs, asyncmap(collect, a.chunks))
+        treereduce_nd(dimcatfuncs, asyncmap(fetch, a.chunks))
     end
 end
 
@@ -209,53 +210,33 @@ _cumsum(x::AbstractArray) = length(x) == 0 ? Int[] : cumsum(x)
 function lookup_parts(ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomain{N}) where N
     groups = map(group_indices, subdmns.cumlength, indexes(d))
     sz = map(length, groups)
-    pieces = Array{Union{Chunk,Thunk}}(undef, sz)
+    pieces = Array{Any}(undef, sz)
     for i = CartesianIndices(sz)
         idx_and_dmn = map(getindex, groups, i.I)
         idx = map(x->x[1], idx_and_dmn)
         dmn = ArrayDomain(map(x->x[2], idx_and_dmn))
-        pieces[i] = delayed(getindex)(ps[idx...], project(subdmns[idx...], dmn))
+        pieces[i] = Dagger.@spawn getindex(ps[idx...], project(subdmns[idx...], dmn))
     end
     out_cumlength = map(g->_cumsum(map(x->length(x[2]), g)), groups)
     out_dmn = DomainBlocks(ntuple(x->1,Val(N)), out_cumlength)
     pieces, out_dmn
 end
 
-
 """
-    compute(ctx::Context, x::DArray; persist=true, options=nothing)
-
-A `DArray` object may contain a thunk in it, in which case
-we first turn it into a `Thunk` and then compute it.
-"""
-function compute(ctx::Context, x::DArray; persist=true, options=nothing)
-    thunk = thunkize(ctx, x, persist=persist)
-    if isa(thunk, Thunk)
-        compute(ctx, thunk; options=options)
-    else
-        x
-    end
-end
-
-"""
-    thunkize(ctx::Context, c::DArray; persist=true)
+    Base.fetch(c::DArray)
 
 If a `DArray` tree has a `Thunk` in it, make the whole thing a big thunk.
 """
-function thunkize(ctx::Context, c::DArray; persist=true)
+function Base.fetch(c::DArray)
     if any(istask, chunks(c))
         thunks = chunks(c)
         sz = size(thunks)
         dmn = domain(c)
         dmnchunks = domainchunks(c)
-        if persist
-            foreach(persist!, thunks)
-        end
-        Thunk(map(thunk->nothing=>thunk, thunks)...; meta=true) do results...
+        fetch(Dagger.spawn(Options(meta=true), thunks...) do results...
             t = eltype(results[1])
-            DArray(t, dmn, dmnchunks,
-                                  reshape(Union{Chunk,Thunk}[results...], sz))
-        end
+            DArray(t, dmn, dmnchunks, reshape(Any[results...], sz))
+        end)
     else
         c
     end
@@ -335,19 +316,18 @@ function stage(ctx::Context, d::Distribute)
         cs = map(d.domainchunks) do idx
             chunks = cached_stage(ctx, x[idx]).chunks
             shape = size(chunks)
-            (delayed() do shape, parts...
+            Dagger.spawn(shape, chunks...) do shape, parts...
                 if prod(shape) == 0
                     return Array{T}(undef, shape)
                 end
                 dimcatfuncs = [(x...) -> concat(x..., dims=i) for i in 1:length(shape)]
                 ps = reshape(Any[parts...], shape)
                 collect(treereduce_nd(dimcatfuncs, ps))
-            end)(shape, chunks...)
+            end
         end
     else
-        cs = map(c -> delayed(identity)(d.data[c]), d.domainchunks)
+        cs = map(c -> (Dagger.@spawn identity(d.data[c])), d.domainchunks)
     end
-
     DArray(
            eltype(d.data),
            domain(d.data),
@@ -357,7 +337,7 @@ function stage(ctx::Context, d::Distribute)
 end
 
 function distribute(x::AbstractArray, dist)
-    compute(Distribute(dist, x))
+    fetch(Distribute(dist, x))
 end
 
 function distribute(x::AbstractArray{T,N}, n::NTuple{N}) where {T,N}

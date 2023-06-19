@@ -3,18 +3,17 @@ import TimespanLogging: Timespan, Event, Events, LocalEventLog, MultiEventLog
 
 @testset "Logging" begin
     @testset "LocalEventLog" begin
-        @testset "ArrayOp" begin
+        @testset "Basics" begin
             ctx = Context()
             log = LocalEventLog()
             ctx.log_sink = log
 
-            sz = 2^4
-            bsz = 2^2
-            X = rand(Float32, sz, sz)
-            XD = Distribute(Blocks(bsz, bsz), X)
+            X = rand(Float32, 4, 3)
+            a = delayed(sum)(X)
+            b = delayed(sum)(X)
+            c = delayed(+)(a,b)
 
-            dag = XD*XD
-            collect(ctx, dag)
+            compute(ctx, c)
             logs = TimespanLogging.get_logs!(log)
             @test logs isa Vector{Timespan}
             @test length(logs) > 0
@@ -48,10 +47,13 @@ import TimespanLogging: Timespan, Event, Events, LocalEventLog, MultiEventLog
         end
 
         @testset "Automatic Plan Rendering" begin
-            x = compute(rand(Blocks(2,2),4,4))
+            X = rand(Float32, 4, 3)
+            a = delayed(sum)(X)
+            b = delayed(sum)(X)
+            c = delayed(+)(a,b)
             mktemp() do path, io
                 ctx = Context(;log_sink=LocalEventLog(),log_file=path)
-                compute(ctx, x * x)
+                compute(ctx, c)
                 plan = String(read(io))
                 @test occursin("digraph {", plan)
                 @test occursin("Move:", plan)
@@ -73,8 +75,11 @@ import TimespanLogging: Timespan, Event, Events, LocalEventLog, MultiEventLog
         ml[:psat] = Dagger.Events.ProcessorSaturation()
         ctx.log_sink = ml
 
-        A = rand(Blocks(4, 4), 16, 16)
-        collect(ctx, A*A)
+        X = rand(Float32, 4, 3)
+        a = delayed(sum)(X)
+        b = delayed(sum)(X)
+        c = delayed(+)(a,b)
+        compute(ctx, c)
 
         logs = TimespanLogging.get_logs!(ml)
         for w in keys(logs)

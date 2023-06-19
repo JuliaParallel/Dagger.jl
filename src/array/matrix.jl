@@ -17,10 +17,10 @@ function size(x::Transpose)
 end
 
 transpose(x::ArrayOp) = Transpose(transpose, x)
-transpose(x::Union{Chunk, Thunk}) = Thunk(transpose, nothing=>x)
+transpose(x::Union{Chunk, EagerThunk}) = @spawn transpose(x)
 
 adjoint(x::ArrayOp) = Transpose(adjoint, x)
-adjoint(x::Union{Chunk, Thunk}) = Thunk(adjoint, nothing=>x)
+adjoint(x::Union{Chunk, EagerThunk}) = @spawn adjoint(x)
 
 function adjoint(x::ArrayDomain{2})
     d = indexes(x)
@@ -32,7 +32,7 @@ function adjoint(x::ArrayDomain{1})
 end
 
 function _ctranspose(x::AbstractArray)
-    Any[delayed(adjoint)(x[j,i]) for i=1:size(x,2), j=1:size(x,1)]
+    Any[Dagger.@spawn adjoint(x[j,i]) for i=1:size(x,2), j=1:size(x,1)]
 end
 
 function stage(ctx::Context, node::Transpose)
@@ -91,8 +91,12 @@ function (+)(a::ArrayDomain, b::ArrayDomain)
     a
 end
 
-(*)(a::Union{Chunk, Thunk}, b::Union{Chunk, Thunk}) = Thunk(*, nothing=>a, nothing=>b)
-(+)(a::Union{Chunk, Thunk}, b::Union{Chunk, Thunk}) = Thunk(+, nothing=>a, nothing=>b)
+struct BinaryComputeOp{F} end
+BinaryComputeOp{F}(x::Union{Chunk,EagerThunk}, y::Union{Chunk,EagerThunk}) where F = @spawn F(x, y)
+BinaryComputeOp{F}(x, y) where F = F(x, y)
+
+const AddComputeOp = BinaryComputeOp{+}
+const MulComputeOp = BinaryComputeOp{*}
 
 # we define our own matmat and matvec multiply
 # for computing the new domains and thunks.
@@ -101,7 +105,7 @@ function _mul(a::Matrix, b::Matrix; T=eltype(a))
     n = size(a, 2)
     for i=1:size(a,1)
         for j=1:size(b, 2)
-            c[i,j] = treereduce(+, map(*, reshape(a[i,:], (n,)), b[:, j]))
+            c[i,j] = treereduce(AddComputeOp, map(MulComputeOp, reshape(a[i,:], (n,)), b[:, j]))
         end
     end
     c
@@ -111,14 +115,14 @@ function _mul(a::Matrix, b::Vector; T=eltype(b))
     c = Array{T}(undef, size(a,1))
     n = size(a,2)
     for i=1:size(a,1)
-        c[i] = treereduce(+, map(*, reshape(a[i, :], (n,)), b))
+        c[i] = treereduce(AddComputeOp, map(MulComputeOp, reshape(a[i, :], (n,)), b))
     end
     c
 end
 
 function _mul(a::Vector, b::Vector; T=eltype(b))
     @assert length(b) == 1
-    [x * b[1] for x in a]
+    [MulComputeOp(x, b[1]) for x in a]
 end
 
 function promote_distribution(ctx::Context, m::MatMul, a,b)
@@ -176,7 +180,7 @@ function stage(ctx::Context, mul::MatMul)
     a, b = stage_operands(ctx, mul, mul.a, mul.b)
     d = domain(a)*domain(b)
     DArray(Any, d, domainchunks(a)*domainchunks(b),
-                          _mul(chunks(a), chunks(b); T=Thunk))
+                          _mul(chunks(a), chunks(b); T=Any))
 end
 
 Base.power_by_squaring(x::DArray, i::Int) = foldl(*, ntuple(idx->x, i))
@@ -211,7 +215,7 @@ end
 function _scale(l, r)
     res = similar(r, Any)
     for i=1:length(l)
-        res[i,:] = map(x->Thunk((a,b) -> Diagonal(a)*b, nothing=>l[i], nothing=>x), r[i,:])
+        res[i,:] = map(x->Dagger.spawn((a,b) -> Diagonal(a)*b, l[i], x), r[i,:])
     end
     res
 end
