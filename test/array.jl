@@ -1,6 +1,7 @@
 using LinearAlgebra, SparseArrays, Random, SharedArrays
 import Dagger: chunks, DArray, domainchunks, treereduce_nd
 import Distributed: myid, procs
+import Statistics: mean
 
 @testset "treereduce_nd" begin
     xs = rand(1:10, 8,8,8)
@@ -43,6 +44,22 @@ end
     @test sum(X) == 10000
     Y = zeros(Blocks(10, 10), 100, 100)
     @test sum(Y) == 0
+end
+
+@testset "prod" begin
+    x = randn(100, 100)
+    X = distribute(x, Blocks(10, 10))
+    @test prod(X) == prod(x)
+    Y = zeros(Blocks(10, 10), 100, 100)
+    @test prod(Y) == 0
+end
+
+@testset "mean" begin
+    x = randn(100, 100)
+    X = distribute(x, Blocks(10, 10))
+    @test mean(X) ≈ mean(x)
+    Y = zeros(Blocks(10, 10), 100, 100)
+    @test mean(Y) == 0
 end
 
 @testset "distributing an array" begin

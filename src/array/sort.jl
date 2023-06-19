@@ -285,10 +285,10 @@ function dsort_chunks(cs, nchunks=length(cs), nsamples=2000;
         samples = reduce((a,b)->merge_sorted(order, a, b), map(x->x[2], xs))
         splitters = getmedians(samples, nchunks-1)
     end
-                       # if first(x) === nothing this means that
-                       # the chunk was already sorted, so just
-                       # use the input chunk as-is
-                       cs2 = map((x,c) -> x === nothing ? c : x, map(first, xs), cs)
+    # if first(x) === nothing this means that
+    # the chunk was already sorted, so just
+    # use the input chunk as-is
+    cs2 = map((x,c) -> x === nothing ? c : x, map(first, xs), cs)
 
     # main sort routine. At this point:
     # we know the splitters we want to use,

@@ -222,23 +222,6 @@ function lookup_parts(ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomai
     pieces, out_dmn
 end
 
-
-#="""
-    compute(ctx::Context, x::DArray; persist=true, options=nothing)
-
-A `DArray` object may contain a thunk in it, in which case
-we first turn it into a `Thunk` and then compute it.
-"""
-function fetch(x::DArray; persist=true, options=nothing)
-    thunk = thunkize(ctx, x, persist=persist)
-    if isa(thunk, EagerThunk)
-        fetch(thunk; options=options)
-    else
-        x
-    end
-end
-=#
-
 """
     Base.fetch(c::DArray)
 
