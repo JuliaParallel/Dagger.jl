@@ -19,10 +19,8 @@ function getmedians(x, n)
 end
 
 function sortandsample_array(ord, xs, nsamples, presorted=false)
-
     r = sample(1:length(xs), min(length(xs), nsamples),
                replace=false, ordered=true)
-
     if !presorted
         sorted = sort(xs, order=ord)
         chunk = tochunk(sorted)
@@ -100,7 +98,7 @@ end
 # then merges corresponding splits together to form length(splitters) + 1 sorted chunks
 # these chunks will be in turn sorted
 function splitmerge(chunks, splitters, merge, by, sub, ord)
-    c1 = map(c->splitchunk(c, splitters, by, sub, ord), chunks) 
+    c1 = map(c->splitchunk(c, splitters, by, sub, ord), chunks)
     map(cs->collect_merge(merge, cs), transpose_vecvec(c1))
 end
 
@@ -256,8 +254,6 @@ Each chunk in turn is sorted.
 # Returns
 A tuple of `(chunk, samples)` where `chunk` is the `Dagger.Chunk` object. `chunk` can be `nothing` if no change to the initial array was made (e.g. it was already sorted)
 """
-
-
 function dsort_chunks(cs, nchunks=length(cs), nsamples=2000;
                       merge = merge_sorted,
                       by=identity,

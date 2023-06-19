@@ -40,7 +40,7 @@ end
 
 @testset "sum" begin
     X = ones(Blocks(10, 10), 100, 100)
-    @test sum(X) == 10000 
+    @test sum(X) == 10000
     Y = zeros(Blocks(10, 10), 100, 100)
     @test sum(Y) == 0
 end

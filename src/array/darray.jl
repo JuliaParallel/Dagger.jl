@@ -240,7 +240,7 @@ end
 =#
 
 """
-    thunkize(ctx::Context, c::DArray; persist=true)
+    Base.fetch(c::DArray)
 
 If a `DArray` tree has a `Thunk` in it, make the whole thing a big thunk.
 """
@@ -340,7 +340,7 @@ function stage(ctx::Context, d::Distribute)
                 dimcatfuncs = [(x...) -> concat(x..., dims=i) for i in 1:length(shape)]
                 ps = reshape(Any[parts...], shape)
                 collect(treereduce_nd(dimcatfuncs, ps))
-            end        
+            end
         end
     else
         cs = map(c -> (Dagger.@spawn identity(d.data[c])), d.domainchunks)
@@ -350,7 +350,7 @@ function stage(ctx::Context, d::Distribute)
            domain(d.data),
            d.domainchunks,
            cs
-          )
+    )
 end
 
 function distribute(x::AbstractArray, dist)
