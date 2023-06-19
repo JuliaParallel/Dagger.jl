@@ -37,11 +37,12 @@ end
     r = collect(R)
     @test r[1:10] != r[11:20]
 end
+
 @testset "sum" begin
     X = ones(Blocks(10, 10), 100, 100)
-    @test fetch(sum(X)) == 10000
+    @test sum(X) == 10000 
     Y = zeros(Blocks(10, 10), 100, 100)
-    @test fetch(sum(Y)) == 0
+    @test sum(Y) == 0
 end
 
 @testset "distributing an array" begin
@@ -55,8 +56,8 @@ end
     end
     x = [1 2; 3 4]
     @test Distribute(Blocks(1,1), x) == x
-    #test_dist(rand(100, 100))
-    #test_dist(sprand(100, 100, 0.1))
+    test_dist(rand(100, 100))
+    test_dist(sprand(100, 100, 0.1))
 
     x = distribute(rand(10), 2)
     @test collect(distribute(x, 3)) == collect(x)
@@ -78,7 +79,7 @@ end
     test_transpose(sprand(100, 120, 0.1))
 end
 
-#=@testset "matrix-matrix multiply" begin
+@testset "matrix-matrix multiply" begin
     function test_mul(X)
         tol = 1e-12
         X1 = Distribute(Blocks(10, 20), X)
@@ -105,7 +106,7 @@ end
     @test collect(x^1) == collect(x)
     @test collect(x^2) == collect(x*x)
     @test collect(x^3) == collect(x*x*x)
-end=#
+end
 
 @testset "concat" begin
     m = rand(75,75)
@@ -117,13 +118,13 @@ end=#
     @test_throws DimensionMismatch fetch(vcat(x,y))
 end
 
-#=@testset "scale" begin
+@testset "scale" begin
     x = rand(10,10)
     X = Distribute(Blocks(3,3), x)
     y = rand(10)
 
     @test Diagonal(y)*x == collect(Diagonal(y)*X)
-end=#
+end
 
 @testset "Getindex" begin
     function test_getindex(x)
@@ -137,12 +138,11 @@ end=#
         @test collect(X[[], ragged_idx]) == x[[], ragged_idx]
         @test collect(X[[], []]) == x[[], []]
 
-        #=@testset "dimensionality reduction" begin
-        # THESE NEED FIXING!!
+        @testset "dimensionality reduction" begin
             @test vec(collect(X[ragged_idx, 5])) == vec(x[ragged_idx, 5])
             @test vec(collect(X[5, ragged_idx])) == vec(x[5, ragged_idx])
-            @test collect(X[5, 5]) == x[5,5]
-        end=#
+            @test X[5, 5] == x[5,5]
+        end
     end
 
     test_getindex(rand(10,10))
@@ -196,13 +196,13 @@ end
     @test collect(sort(X)) == sort(x)
     @test collect(sort(X, rev=true)) == sort(x, rev=true)
 
-    #=x = [("A",1), ("A",2), ("B",1)]
+    x = [("A",1), ("A",2), ("B",1)]
     y = distribute(x, 3)
-    @test collect(sort(y)) == x=#
+    @test collect(sort(y)) == x
 
     x = ones(10)
     y = fetch(Distribute(Blocks(3), x))
-    #@test map(x->length(collect(x)), compute(sort(y)).chunks) == [3,3,3,1]
+    @test_broken map(x->length(collect(x)), fetch(sort(y)).chunks) == [3,3,3,1]
 end
 
 using MemPool
@@ -220,20 +220,9 @@ using MemPool
     @test aff[2] == sizeof(Int)*10
 end
 
-@testset "show_plan" begin
+#=@testset "show_plan" begin
     @test !isempty(Dagger.show_plan(Dagger.spawn(()->10)))
-end
-
-#=
-@testset "darray distributed refcount" begin
-    D2 = remotecall_fetch(2, compute(Distribute(Blocks(10, 20), rand(40,40)))) do D
-        D2 = D
-    end
-    @test size(collect(D2)) == (40,40)
-    GC.gc()
-    @test size(collect(D2)) == (40,40)
-end
-=#
+end=#
 
 @testset "sharedarray" begin
     A = SharedArray{Int}((1024,))

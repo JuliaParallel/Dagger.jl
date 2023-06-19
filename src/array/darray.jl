@@ -250,7 +250,7 @@ function Base.fetch(c::DArray)
         sz = size(thunks)
         dmn = domain(c)
         dmnchunks = domainchunks(c)
-        fetch(Dagger.spawn(thunks...) do results...
+        fetch(Dagger.spawn(Options(meta=true), thunks...) do results...
             t = eltype(results[1])
             DArray(t, dmn, dmnchunks, reshape(Any[results...], sz))
         end)
@@ -350,7 +350,7 @@ function stage(ctx::Context, d::Distribute)
            domain(d.data),
            d.domainchunks,
            cs
-    )
+          )
 end
 
 function distribute(x::AbstractArray, dist)

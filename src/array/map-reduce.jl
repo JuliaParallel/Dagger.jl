@@ -53,16 +53,16 @@ reduceblock(f, g::Function, x::ArrayOp) = reduceblock_async(f, g, x)
 
 reduce_async(f::Function, x::ArrayOp) = reduceblock_async(xs->reduce(f,xs), xs->reduce(f,xs), x)
 
-sum(x::ArrayOp; dims::Union{Int,Nothing} = nothing) = _sum(x, dims)
+sum(x::ArrayOp; dims::Union{Int,Nothing} = nothing) = fetch(_sum(x, dims))
 _sum(x, dims::Nothing) = reduceblock(sum, sum, x)
 _sum(x, dims::Int) = reduce(+, x; dims=dims)
-sum(f::Function, x::ArrayOp) = reduceblock(a->sum(f, a), sum, x)
-prod(x::ArrayOp) = reduceblock(prod, x)
-prod(f::Function, x::ArrayOp) = reduceblock(a->prod(f, a), prod, x)
+sum(f::Function, x::ArrayOp) = fetch(reduceblock(a->sum(f, a), sum, x))
+prod(x::ArrayOp) = fetch(reduceblock(prod, x))
+prod(f::Function, x::ArrayOp) = fetch(reduceblock(a->prod(f, a), prod, x))
 
-mean(x::ArrayOp) = reduceblock(mean, mean, x)
+mean(x::ArrayOp) = fetch(reduceblock(mean, mean, x))
 
-mapreduce(f::Function, g::Function, x::ArrayOp) = reduce(g, map(f, x))
+mapreduce(f::Function, g::Function, x::ArrayOp) = reduce(g, map(f, x)) #think about fetching
 
 function mapreducebykey_seq(f, op,  itr, dict=Dict())
     for x in itr

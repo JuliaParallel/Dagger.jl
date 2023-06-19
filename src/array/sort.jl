@@ -93,7 +93,7 @@ end
 
 function collect_merge(merge, group)
     #delayed((xs...) -> treereduce(merge, Any[xs...]))(group...)
-    t = treereduce(merge, group)
+    t = treereduce((args...) -> (Dagger.@spawn merge(args...)), group)
 end
 
 # Given sorted chunks, splits each chunk according to splitters
@@ -279,7 +279,7 @@ function dsort_chunks(cs, nchunks=length(cs), nsamples=2000;
     batchsize = max(2, batchsize)
 
     xs = treereduce((cs...)->Dagger.spawn(vcat, cs...), cs1)
-    xs = map(fetch, fetch(xs))
+    xs = collect(fetch(xs))
     if length(cs1) == 1
         xs = [xs]
     end
