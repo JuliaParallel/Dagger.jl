@@ -157,6 +157,7 @@ iscompatible_arg(proc::ThreadProc, opts, x) = true
 function execute!(proc::ThreadProc, @nospecialize(f), @nospecialize(args...); @nospecialize(kwargs...))
     tls = get_tls()
     task = Task() do
+        @nospecialize f args kwargs
         set_tls!(tls)
         TimespanLogging.prof_task_put!(tls.sch_handle.thunk_id.id)
         @invokelatest f(args...; kwargs...)

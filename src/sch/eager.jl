@@ -97,7 +97,7 @@ function eager_thunk()
             added_future, future, uid, ref, f, args, opts = take!(EAGER_THUNK_CHAN)
             # preserve inputs until they enter the scheduler
             tid = GC.@preserve args begin
-                _args = map(args) do pos_x
+                _args = Base.mapany(args) do pos_x
                     pos, x = pos_x
                     if x isa Dagger.EagerThunk
                         return pos => ThunkID(EAGER_ID_MAP[x.uid], x.thunk_ref)
