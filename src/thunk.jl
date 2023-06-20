@@ -77,6 +77,7 @@ mutable struct Thunk
                    propagates=(),
                    kwargs...
                   )
+        @nospecialize f xs
         if !isa(f, Chunk) && (!isnothing(processor) || !isnothing(scope))
             f = tochunk(f,
                         something(processor, OSProc()),
@@ -138,6 +139,7 @@ Options(;options...) = Options((;options...))
 Options(options...) = Options((;options...))
 
 function args_kwargs_to_pairs(args, kwargs)
+    @nospecialize args kwargs
     args_kwargs = Pair{Union{Symbol,Nothing},Any}[]
     for arg in args
         push!(args_kwargs, nothing => arg)

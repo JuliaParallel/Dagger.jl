@@ -64,6 +64,7 @@ function dynamic_listener!(ctx, state, wid)
             end
             res = try
                 (false, lock(state.lock) do
+                    @nospecialize f data
                     Base.invokelatest(f, ctx, state, task, tid, data)
                 end)
             catch err
@@ -101,6 +102,7 @@ const DYNAMIC_EXEC_LOCK = Threads.ReentrantLock()
 
 "Executes an arbitrary function within the scheduler, returning the result."
 function exec!(f, h::SchedulerHandle, args...)
+    @nospecialize f args
     failed, res = lock(DYNAMIC_EXEC_LOCK) do
         put!(h.out_chan, (h.thunk_id.id, f, args))
         take!(h.inp_chan)
@@ -195,11 +197,18 @@ function _get_dag_ids(ctx, state, task, tid, _)
 end
 
 "Adds a new Thunk to the DAG."
-add_thunk!(f, h::SchedulerHandle, args...; future=nothing, ref=nothing, options...) =
+function add_thunk!(f, h::SchedulerHandle, args...; future=nothing, ref=nothing, options...)
+    @nospecialize f args
     exec!(_add_thunk!, h, f, args, options, future, ref)
-function _add_thunk!(ctx, state, task, tid, (f, args, options, future, ref))
+end
+function _add_thunk!(ctx, state, task, tid, payload)
+    @nospecialize payload
+    f, args, options, future, ref = payload
     timespan_start(ctx, :add_thunk, tid, 0)
-    _args = map(pos_arg->pos_arg[1] => (pos_arg[2] isa ThunkID ? state.thunk_dict[pos_arg[2].id] : pos_arg[2]), args)
+    _args = Pair{Union{Symbol,Nothing},Any}[]
+    for (pos, arg) in args
+        push!(_args, pos => (arg isa ThunkID ? state.thunk_dict[arg.id] : arg))
+    end
     GC.@preserve _args begin
         thunk = Thunk(f, _args...; options...)
         # Create a `DRef` to `thunk` so that the caller can preserve it
