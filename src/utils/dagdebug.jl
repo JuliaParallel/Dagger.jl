@@ -1,3 +1,6 @@
+function istask end
+function task_id end
+
 const DAGDEBUG_CATEGORIES = Symbol[:global, :submit, :schedule, :scope,
                                    :take, :execute, :move, :processor]
 macro dagdebug(thunk, category, msg, args...)
@@ -11,8 +14,8 @@ macro dagdebug(thunk, category, msg, args...)
         let $id = -1
             if $thunk isa Integer
                 $id = Int($thunk)
-            elseif $thunk isa Thunk
-                $id = $thunk.id
+            elseif $istask($thunk)
+                $id = $task_id($thunk)
             elseif $thunk === nothing
                 $id = 0
             else

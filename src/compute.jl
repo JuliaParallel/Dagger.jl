@@ -85,7 +85,7 @@ function dependents(node::Thunk)
         if !haskey(deps, next)
             deps[next] = Set{Thunk}()
         end
-        for (_, inp) in next.inputs
+        for inp in next.syncdeps
             if istask(inp) || (inp isa Chunk)
                 s = get!(()->Set{Thunk}(), deps, inp)
                 push!(s, next)
@@ -96,7 +96,7 @@ function dependents(node::Thunk)
         end
         push!(visited, next)
     end
-    deps
+    return deps
 end
 
 """
@@ -126,7 +126,7 @@ function noffspring(dpents::Dict{Union{Thunk,Chunk}, Set{Thunk}})
         has_all || continue
         noff[next] = off
     end
-    noff
+    return noff
 end
 
 """
@@ -153,7 +153,7 @@ function order(node::Thunk, ndeps)
         haskey(output, next) && continue
         s += 1
         output[next] = s
-        parents = filter(istask, map(last, next.inputs))
+        parents = collect(filter(istask, next.syncdeps))
         if !isempty(parents)
             # If parents is empty, sort! should be a no-op, but raises an ambiguity error
             # when InlineStrings.jl is loaded (at least, version 1.1.0), because InlineStrings

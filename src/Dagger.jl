@@ -19,13 +19,16 @@ using MacroTools
 using TimespanLogging
 
 include("lib/util.jl")
+include("utils/dagdebug.jl")
 
 # Distributed data
 include("options.jl")
 include("processor.jl")
 include("scopes.jl")
+include("eager_thunk.jl")
+include("queue.jl")
 include("thunk.jl")
-include("utils/dagdebug.jl")
+include("submission.jl")
 include("chunks.jl")
 
 # Task scheduling

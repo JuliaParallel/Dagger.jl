@@ -11,6 +11,7 @@ import Base: @invokelatest
 import ..Dagger
 import ..Dagger: Context, Processor, Thunk, WeakThunk, ThunkFuture, ThunkFailedException, Chunk, WeakChunk, OSProc, AnyScope, DefaultScope, LockedObject
 import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak_checked, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, processor, default_enabled, get_processors, get_parent, execute!, rmprocs!, addprocs!, thunk_processor, constrain, cputhreadtime
+import ..Dagger: @dagdebug
 import DataStructures: PriorityQueue, enqueue!, dequeue_pair!, peek
 
 import ..Dagger
@@ -130,7 +131,7 @@ function start_state(deps::Dict, node_order, chan)
 
     for k in sort(collect(keys(deps)), by=node_order)
         if istask(k)
-            waiting = Set{Thunk}(Iterators.filter(istask, map(last, inputs(k))))
+            waiting = Set{Thunk}(Iterators.filter(istask, k.syncdeps))
             if isempty(waiting)
                 push!(state.ready, k)
             else
@@ -883,7 +884,7 @@ function finish_task!(ctx, state, node, thunk_failed)
     schedule_dependents!(state, node, thunk_failed)
     fill_registered_futures!(state, node, thunk_failed)
 
-    to_evict = cleanup_inputs!(state, node)
+    to_evict = cleanup_syncdeps!(state, node)
     if node.f isa Chunk
         # FIXME: Check the graph for matching chunks
         push!(to_evict, node.f)

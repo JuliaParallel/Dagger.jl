@@ -133,8 +133,6 @@ register_future!(h::SchedulerHandle, id::ThunkID, future::ThunkFuture, check::Bo
 function _register_future!(ctx, state, task, tid, (future, id, check)::Tuple{ThunkFuture,ThunkID,Bool})
     tid != id.id || throw(DynamicThunkException("Cannot fetch own result"))
     GC.@preserve id begin
-        thunk = unwrap_weak_checked(state.thunk_dict[id.id])
-        ownthunk = unwrap_weak_checked(state.thunk_dict[tid])
         function dominates(target, t)
             t == target && return true
             seen = Set{Thunk}()
@@ -155,8 +153,12 @@ function _register_future!(ctx, state, task, tid, (future, id, check)::Tuple{Thu
             end
             return false
         end
-        if check && dominates(ownthunk, thunk)
-            throw(DynamicThunkException("Cannot fetch result of dominated thunk"))
+        thunk = unwrap_weak_checked(state.thunk_dict[id.id])
+        if check
+            ownthunk = unwrap_weak_checked(state.thunk_dict[tid])
+            if dominates(ownthunk, thunk)
+                throw(DynamicThunkException("Cannot fetch result of dominated thunk"))
+            end
         end
         # TODO: Assert that future will be fulfilled
         if haskey(state.cache, thunk)
@@ -166,7 +168,7 @@ function _register_future!(ctx, state, task, tid, (future, id, check)::Tuple{Thu
             push!(futures, future)
         end
     end
-    nothing
+    return
 end
 
 # TODO: Optimize wait() to not serialize a Chunk
@@ -199,14 +201,20 @@ add_thunk!(f, h::SchedulerHandle, args...; future=nothing, ref=nothing, options.
     exec!(_add_thunk!, h, f, args, options, future, ref)
 function _add_thunk!(ctx, state, task, tid, (f, args, options, future, ref))
     timespan_start(ctx, :add_thunk, tid, 0)
-    _args = map(pos_arg->pos_arg[1] => (pos_arg[2] isa ThunkID ? state.thunk_dict[pos_arg[2].id] : pos_arg[2]), args)
+    _args = map(args) do pos_arg
+        if pos_arg[2] isa ThunkID
+            return pos_arg[1] => state.thunk_dict[pos_arg[2].id]
+        else
+            return pos_arg[1] => pos_arg[2]
+        end
+    end
     GC.@preserve _args begin
         thunk = Thunk(f, _args...; options...)
         # Create a `DRef` to `thunk` so that the caller can preserve it
         thunk_ref = poolset(thunk; size=64, device=MemPool.CPURAMDevice())
         thunk_id = ThunkID(thunk.id, thunk_ref)
         state.thunk_dict[thunk.id] = WeakThunk(thunk)
-        reschedule_inputs!(state, thunk)
+        reschedule_syncdeps!(state, thunk)
         @dagdebug thunk :submit "Added to scheduler"
         if future !== nothing
             # Ensure we attach a future before the thunk is scheduled

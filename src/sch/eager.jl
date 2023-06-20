@@ -1,7 +1,7 @@
-const EAGER_INIT = Ref{Bool}(false)
-const EAGER_THUNK_CHAN = Ref{Channel{Any}}()
+const EAGER_INIT = Threads.Atomic{Bool}(false)
+const EAGER_READY = Base.Event()
 const EAGER_FORCE_KILL = Ref{Bool}(false)
-const EAGER_ID_MAP = Dict{UInt64,Int}()
+const EAGER_ID_MAP = LockedObject(Dict{UInt64,Int}())
 const EAGER_CONTEXT = Ref{Union{Context,Nothing}}(nothing)
 const EAGER_STATE = Ref{Union{ComputeState,Nothing}}(nothing)
 
@@ -13,11 +13,15 @@ function eager_context()
 end
 
 function init_eager()
-    EAGER_INIT[] && return
-    EAGER_INIT[] = true
-    EAGER_THUNK_CHAN[] = Channel(typemax(Int))
+    if myid() != 1
+        return
+    end
+    if Threads.atomic_xchg!(EAGER_INIT, true)
+        wait(EAGER_READY)
+        return
+    end
     ctx = eager_context()
-    @async try
+    Threads.@spawn try
         sopts = SchedulerOptions(;allow_errors=true)
         opts = Dagger.Options((;scope=Dagger.ExactScope(Dagger.ThreadProc(1, 1)),
                                 occupancy=Dict(Dagger.ThreadProc=>0)))
@@ -32,10 +36,20 @@ function init_eager()
         seek(iob.io, 0)
         write(stderr, iob)
     finally
-        EAGER_INIT[] = false
+        reset(EAGER_READY)
+        Threads.atomic_xchg!(EAGER_INIT, false)
         EAGER_FORCE_KILL[] = true
-        close(EAGER_THUNK_CHAN[])
     end
+    wait(EAGER_READY)
+end
+function eager_thunk()
+    exec!(Dagger.sch_handle()) do ctx, state, task, tid, _
+        EAGER_STATE[] = state
+        return
+    end
+    notify(EAGER_READY)
+    sleep(typemax(UInt))
+    error("eager_thunk exited")
 end
 
 """
@@ -82,62 +96,29 @@ function thunk_yield(f)
     end
 end
 
-function eager_thunk()
-    @assert myid() == 1
-    h = sch_handle()
-    exec!(h) do ctx, state, task, tid, _
-        EAGER_STATE[] = state
-        nothing
-    end
-    tls = Dagger.get_tls()
-    chan = EAGER_THUNK_CHAN[]
-    while isopen(chan)
-        try
-            added_future, future, uid, ref, f, args, opts = take!(chan)
-            # preserve inputs until they enter the scheduler
-            tid = GC.@preserve args begin
-                _args = map(args) do pos_x
-                    pos, x = pos_x
-                    if x isa Dagger.EagerThunk
-                        return pos => ThunkID(EAGER_ID_MAP[x.uid], x.thunk_ref)
-                    elseif x isa Dagger.Chunk
-                        return pos => WeakChunk(x)
-                    else
-                        return pos => x
-                    end
-                end
-                add_thunk!(f, h, _args...; future=future, ref=ref, opts...)
-            end
-            EAGER_ID_MAP[uid] = tid.id
-            put!(added_future, tid.ref)
-        catch err
-            EAGER_FORCE_KILL[] && break
-            iob = IOContext(IOBuffer(), :color=>true)
-            println(iob, "Error in eager listener:")
-            Base.showerror(iob, err)
-            Base.show_backtrace(iob, catch_backtrace())
-            println(iob)
-            seek(iob.io, 0)
-            write(stderr, iob)
-        end
-    end
-    EAGER_STATE[] = nothing
-end
-
 eager_cleanup(t::Dagger.EagerThunkFinalizer) =
-    @async eager_cleanup(EAGER_STATE[], t.uid)
+    Threads.@spawn eager_cleanup(EAGER_STATE[], t.uid)
 function eager_cleanup(state, uid)
-    lock(state.lock) do
-        if !haskey(EAGER_ID_MAP, uid)
+    tid = nothing
+    lock(EAGER_ID_MAP) do id_map
+        if !haskey(id_map, uid)
             return
         end
-        tid = EAGER_ID_MAP[uid]
-        delete!(EAGER_ID_MAP, uid)
-
+        tid = id_map[uid]
+        delete!(id_map, uid)
+    end
+    tid === nothing && return
+    lock(state.lock) do
         # N.B. cache and errored expire automatically
         delete!(state.thunk_dict, tid)
     end
 end
 
-_find_thunk(e::Dagger.EagerThunk) =
-    unwrap_weak_checked(EAGER_STATE[].thunk_dict[EAGER_ID_MAP[e.uid]])
+function _find_thunk(e::Dagger.EagerThunk)
+    tid = lock(EAGER_ID_MAP) do id_map
+        id_map[e.uid]
+    end
+    lock(EAGER_STATE[].lock) do
+        unwrap_weak_checked(EAGER_STATE[].thunk_dict[tid])
+    end
+end

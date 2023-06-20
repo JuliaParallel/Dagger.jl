@@ -40,11 +40,11 @@ function fill_registered_futures!(state, node, failed)
     end
 end
 
-"Cleans up any inputs that aren't needed any longer, and returns a `Set{Chunk}`
-of all chunks that can now be evicted from workers."
-function cleanup_inputs!(state, node)
+"Cleans up any syncdeps that aren't needed any longer, and returns a
+`Set{Chunk}` of all chunks that can now be evicted from workers."
+function cleanup_syncdeps!(state, node)
     to_evict = Set{Chunk}()
-    for (_, inp) in node.inputs
+    for inp in node.syncdeps
         inp = unwrap_weak_checked(inp)
         if !istask(inp) && !(inp isa Chunk)
             continue
@@ -67,7 +67,7 @@ function cleanup_inputs!(state, node)
             end
         end
     end
-    to_evict
+    return to_evict
 end
 
 "Schedules any dependents that may be ready to execute."
@@ -96,7 +96,7 @@ end
 Prepares the scheduler to schedule `thunk`. Will mark `thunk` as ready if
 its inputs are satisfied.
 """
-function reschedule_inputs!(state, thunk, seen=Set{Thunk}())
+function reschedule_syncdeps!(state, thunk, seen=Set{Thunk}())
     to_visit = Thunk[thunk]
     while !isempty(to_visit)
         thunk = pop!(to_visit)
@@ -108,14 +108,12 @@ function reschedule_inputs!(state, thunk, seen=Set{Thunk}())
             continue
         end
         w = get!(()->Set{Thunk}(), state.waiting, thunk)
-        for (_, input) in thunk.inputs
+        for input in thunk.syncdeps
             input = unwrap_weak_checked(input)
             input in seen && continue
 
             # Unseen
-            if istask(input) || isa(input, Chunk)
-                push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
-            end
+            push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
             istask(input) || continue
 
             # Unseen task
@@ -194,7 +192,7 @@ function print_sch_status(io::IO, state, thunk; offset=0, limit=5, max_inputs=3)
         print(io, "($(status_string(thunk))) ")
     end
     println(io, "$(thunk.id): $(thunk.f)")
-    for (idx, (_, input)) in enumerate(thunk.inputs)
+    for (idx, input) in enumerate(thunk.syncdeps)
         if input isa WeakThunk
             input = unwrap_weak(input)
             if input === nothing
