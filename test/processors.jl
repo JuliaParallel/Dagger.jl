@@ -37,9 +37,9 @@ end
     end
     @testset "Processor exhaustion" begin
         opts = ThunkOptions(proclist=[OptOutProc])
-        @test_throws_unwrap Dagger.ThunkFailedException ex isa Dagger.Sch.SchedulingException ex.reason="No processors available, try making proclist more liberal" collect(delayed(sum; options=opts)([1,2,3]))
+        @test_throws_unwrap Dagger.ThunkFailedException ex isa Dagger.Sch.SchedulingException ex.reason="No processors available, try widening scope" collect(delayed(sum; options=opts)([1,2,3]))
         opts = ThunkOptions(proclist=(proc)->false)
-        @test_throws_unwrap Dagger.ThunkFailedException ex isa Dagger.Sch.SchedulingException ex.reason="No processors available, try making proclist more liberal" collect(delayed(sum; options=opts)([1,2,3]))
+        @test_throws_unwrap Dagger.ThunkFailedException ex isa Dagger.Sch.SchedulingException ex.reason="No processors available, try widening scope" collect(delayed(sum; options=opts)([1,2,3]))
         opts = ThunkOptions(proclist=nothing)
         @test collect(delayed(sum; options=opts)([1,2,3])) == 6
     end

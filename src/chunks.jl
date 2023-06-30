@@ -267,6 +267,16 @@ function savechunk(data, dir, f)
     Chunk{typeof(data),typeof(fr),typeof(proc),typeof(scope)}(typeof(data), domain(data), fr, proc, scope, true)
 end
 
+struct WeakChunk
+    x::WeakRef
+end
+WeakChunk(c::Chunk) = WeakChunk(WeakRef(c))
+unwrap_weak(c::WeakChunk) = c.x.value
+function unwrap_weak_checked(c::WeakChunk)
+    c = unwrap_weak(c)
+    @assert c !== nothing
+    return c
+end
 
 Base.@deprecate_binding AbstractPart Union{Chunk, Thunk}
 Base.@deprecate_binding Part Chunk

@@ -222,25 +222,8 @@ function lookup_parts(ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomai
     pieces, out_dmn
 end
 
-
-#="""
-    compute(ctx::Context, x::DArray; persist=true, options=nothing)
-
-A `DArray` object may contain a thunk in it, in which case
-we first turn it into a `Thunk` and then compute it.
 """
-function fetch(x::DArray; persist=true, options=nothing)
-    thunk = thunkize(ctx, x, persist=persist)
-    if isa(thunk, EagerThunk)
-        fetch(thunk; options=options)
-    else
-        x
-    end
-end
-=#
-
-"""
-    thunkize(ctx::Context, c::DArray; persist=true)
+    Base.fetch(c::DArray)
 
 If a `DArray` tree has a `Thunk` in it, make the whole thing a big thunk.
 """
@@ -250,7 +233,7 @@ function Base.fetch(c::DArray)
         sz = size(thunks)
         dmn = domain(c)
         dmnchunks = domainchunks(c)
-        fetch(Dagger.spawn(thunks...; meta=true) do results...
+        fetch(Dagger.spawn(Options(meta=true), thunks...) do results...
             t = eltype(results[1])
             DArray(t, dmn, dmnchunks, reshape(Any[results...], sz))
         end)
@@ -340,10 +323,11 @@ function stage(ctx::Context, d::Distribute)
                 dimcatfuncs = [(x...) -> concat(x..., dims=i) for i in 1:length(shape)]
                 ps = reshape(Any[parts...], shape)
                 collect(treereduce_nd(dimcatfuncs, ps))
-            end        
+            end
         end
     else
-        cs = map(c -> Dagger.@spawn identity(d.data[c]), d.domainchunks)
+        cs = map(c -> (Dagger.@spawn identity(d.data[c])), d.domainchunks)
+
     end
     DArray(
            eltype(d.data),

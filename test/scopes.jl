@@ -31,6 +31,17 @@
     es1_ch = Dagger.tochunk(nothing, OSProc(), es1)
     es2_ch = Dagger.tochunk(nothing, OSProc(), es2)
 
+    os1 = ExactScope(OSProc(1))
+
+    @testset "Default Scope" begin
+        ds = DefaultScope()
+        for (s1, s2) in ((ds, es1), (es1, ds))
+            @test Dagger.constrain(s1, s2) == es1
+        end
+        for (s1, s2) in ((ds, os1), (os1, ds))
+            @test Dagger.constrain(s1, s2) isa Dagger.InvalidScope
+        end
+    end
     @testset "Node Scope" begin
         @everywhere node_scope_test(ch...) = Dagger.system_uuid()
 
@@ -113,7 +124,7 @@
         @test fetch(Dagger.@spawn exact_scope_test(us_es1_multi_ch)) == es1.processor
 
         # No inner scopes
-        @test_throws ArgumentError UnionScope()
+        @test UnionScope() isa UnionScope
 
         # Same inner scope
         @test fetch(Dagger.@spawn exact_scope_test(us_es1_ch, us_es1_ch)) == es1.processor
@@ -128,7 +139,104 @@
         @test es1 in us_res.scopes
         @test !(es2 in us_res.scopes)
     end
+    @testset "Processor Type Scope" begin
+        pts_th = ProcessorTypeScope(Dagger.ThreadProc)
+        pts_os = ProcessorTypeScope(Dagger.OSProc)
+
+        @test Dagger.constrain(pts_th, es1) == es1
+        @test Dagger.constrain(pts_th, os1) isa Dagger.InvalidScope
+
+        @test Dagger.constrain(pts_os, es1) isa Dagger.InvalidScope
+        @test Dagger.constrain(pts_os, os1) == os1
+
+        # Duplicate
+        pts_th_dup = Dagger.constrain(pts_th, pts_th)
+        @test Dagger.constrain(pts_th_dup, es1) == es1
+        @test Dagger.constrain(pts_th_dup, os1) isa Dagger.InvalidScope
+
+        # Empty intersection
+        pts_all = Dagger.constrain(pts_th, pts_os)
+        @test Dagger.constrain(pts_all, es1) isa Dagger.InvalidScope
+        @test Dagger.constrain(pts_all, os1) isa Dagger.InvalidScope
+    end
     # TODO: Test scope propagation
+
+    @testset "scope helper" begin
+        @test Dagger.scope(:any) isa AnyScope
+        @test Dagger.scope(:default) == DefaultScope()
+        @test_throws ArgumentError Dagger.scope(:blah)
+        @test Dagger.scope(()) == UnionScope()
+
+        @test Dagger.scope(worker=wid1) ==
+              Dagger.scope(workers=[wid1]) ==
+              ProcessScope(wid1)
+        @test Dagger.scope(workers=[wid1,wid2]) == UnionScope([ProcessScope(wid1),
+                                                               ProcessScope(wid2)])
+        @test Dagger.scope(workers=[]) == UnionScope()
+
+        @test Dagger.scope(thread=1) ==
+              Dagger.scope(threads=[1]) ==
+              UnionScope([ExactScope(Dagger.ThreadProc(w,1)) for w in procs()])
+        @test Dagger.scope(threads=[1,2]) == UnionScope([ExactScope(Dagger.ThreadProc(w,t)) for t in [1,2] for w in procs()])
+        @test Dagger.scope(threads=[]) == UnionScope()
+
+        @test Dagger.scope(worker=wid1,thread=1) ==
+              Dagger.scope(thread=1,worker=wid1) ==
+              Dagger.scope(workers=[wid1],thread=1) ==
+              Dagger.scope(worker=wid1,threads=[1]) ==
+              Dagger.scope(workers=[wid1],threads=[1]) ==
+              ExactScope(Dagger.ThreadProc(wid1,1))
+
+        @test_throws ArgumentError Dagger.scope(blah=1)
+        @test_throws ArgumentError Dagger.scope(thread=1, blah=1)
+
+        @test Dagger.scope(worker=1,thread=1) ==
+              Dagger.scope((worker=1,thread=1)) ==
+              Dagger.scope(((worker=1,thread=1),))
+        @test Dagger.scope((worker=1,thread=1),(worker=wid1,thread=2)) ==
+              Dagger.scope(((worker=1,thread=1),(worker=wid1,thread=2),)) ==
+              Dagger.scope(((worker=1,thread=1),), ((worker=wid1,thread=2),)) ==
+              UnionScope([ExactScope(Dagger.ThreadProc(1, 1)),
+                          ExactScope(Dagger.ThreadProc(wid1, 2))])
+        @test_throws ArgumentError Dagger.scope((;blah=1))
+        @test_throws ArgumentError Dagger.scope((thread=1, blah=1))
+
+        @testset "custom handler" begin
+            @eval begin
+                Dagger.scope_key_precedence(::Val{:gpu}) = 1
+                Dagger.scope_key_precedence(::Val{:rocm}) = 2
+                Dagger.scope_key_precedence(::Val{:cuda}) = 2
+
+                # Some fake scopes to use as sentinels
+                Dagger.to_scope(::Val{:gpu}, sc::NamedTuple) = ExactScope(Dagger.ThreadProc(1, sc.device))
+                Dagger.to_scope(::Val{:rocm}, sc::NamedTuple) = ExactScope(Dagger.ThreadProc($wid1, sc.gpu))
+                Dagger.to_scope(::Val{:cuda}, sc::NamedTuple) = ExactScope(Dagger.ThreadProc($wid2, sc.gpu))
+            end
+
+            @test Dagger.scope(gpu=1,device=2) ==
+                  Dagger.scope(device=2,gpu=1) ==
+                  Dagger.scope(gpu=1,device=2,blah=3) ==
+                  Dagger.scope((gpu=1,device=2,blah=3)) ==
+                  ExactScope(Dagger.ThreadProc(1, 2))
+            @test Dagger.scope((gpu=1,device=2),(worker=1,thread=1)) ==
+                  Dagger.scope((worker=1,thread=1),(device=2,gpu=1)) ==
+                  UnionScope([ExactScope(Dagger.ThreadProc(1, 2)),
+                              ExactScope(Dagger.ThreadProc(1, 1))])
+            @test Dagger.scope((gpu=1,device=2),(device=3,gpu=1)) ==
+                  UnionScope([ExactScope(Dagger.ThreadProc(1, 2)),
+                              ExactScope(Dagger.ThreadProc(1, 3))])
+
+            @test Dagger.scope(rocm=1,gpu=2) ==
+                  Dagger.scope(gpu=2,rocm=1) ==
+                  ExactScope(Dagger.ThreadProc(wid1, 2))
+            @test Dagger.scope(cuda=1,gpu=2) ==
+                  Dagger.scope(gpu=2,cuda=1) ==
+                  ExactScope(Dagger.ThreadProc(wid2, 2))
+            @test_throws ArgumentError Dagger.scope(rocm=1,cuda=1,gpu=2)
+            @test_throws ArgumentError Dagger.scope(gpu=2,rocm=1,cuda=1)
+            @test_throws ArgumentError Dagger.scope((rocm=1,cuda=1,gpu=2))
+        end
+    end
 
     rmprocs([wid1, wid2])
 end

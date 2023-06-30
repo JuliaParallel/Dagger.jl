@@ -1,3 +1,37 @@
+const DAGDEBUG_CATEGORIES = Symbol[:global, :submit, :schedule, :scope,
+                                   :take, :execute, :processor]
+macro dagdebug(thunk, category, msg, args...)
+    cat_sym = category.value
+    @gensym id
+    debug_ex_id = :(@debug "[$($id)] ($($(repr(cat_sym)))) $($msg)" _module=Dagger _file=$(string(__source__.file)) _line=$(__source__.line))
+    append!(debug_ex_id.args, args)
+    debug_ex_noid = :(@debug "($($(repr(cat_sym)))) $($msg)" _module=Dagger _file=$(string(__source__.file)) _line=$(__source__.line))
+    append!(debug_ex_noid.args, args)
+    esc(quote
+        let $id = -1
+            if $thunk isa Integer
+                $id = Int($thunk)
+            elseif $thunk isa Thunk
+                $id = $thunk.id
+            elseif $thunk === nothing
+                $id = 0
+            else
+                @warn "Unsupported thunk argument to @dagdebug: $(typeof($thunk))"
+                $id = -1
+            end
+            if $id > 0
+                if $(QuoteNode(cat_sym)) in $DAGDEBUG_CATEGORIES
+                    $debug_ex_id
+                end
+            elseif $id == 0
+                if $(QuoteNode(cat_sym)) in $DAGDEBUG_CATEGORIES
+                    $debug_ex_noid
+                end
+            end
+        end
+    end)
+end
+
 """
     unwrap_nested_exception(err::Exception) -> Bool
 
@@ -14,7 +48,7 @@ function get_propagated_options(thunk)
     nt = NamedTuple()
     for key in thunk.propagates
         value = if key == :scope
-            isa(thunk.f, Chunk) ? thunk.f.scope : AnyScope()
+            isa(thunk.f, Chunk) ? thunk.f.scope : DefaultScope()
         elseif key == :processor
             isa(thunk.f, Chunk) ? thunk.f.processor : OSProc()
         elseif key in fieldnames(Thunk)
@@ -44,7 +78,7 @@ end
 of all chunks that can now be evicted from workers."
 function cleanup_inputs!(state, node)
     to_evict = Set{Chunk}()
-    for inp in node.inputs
+    for (_, inp) in node.inputs
         inp = unwrap_weak_checked(inp)
         if !istask(inp) && !(inp isa Chunk)
             continue
@@ -108,12 +142,12 @@ function reschedule_inputs!(state, thunk, seen=Set{Thunk}())
             continue
         end
         w = get!(()->Set{Thunk}(), state.waiting, thunk)
-        for input in thunk.inputs
+        for (_, input) in thunk.inputs
             input = unwrap_weak_checked(input)
             input in seen && continue
 
             # Unseen
-            if istask(input) || (input isa Chunk)
+            if istask(input) || isa(input, Chunk)
                 push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
             end
             istask(input) || continue
@@ -145,6 +179,9 @@ function set_failed!(state, origin, thunk=origin)
     filter!(x->x!==thunk, state.ready)
     state.cache[thunk] = ThunkFailedException(thunk, origin, state.cache[origin])
     state.errored[thunk] = true
+    finish_failed!(state, thunk, origin)
+end
+function finish_failed!(state, thunk, origin=nothing)
     fill_registered_futures!(state, thunk, true)
     if haskey(state.waiting_data, thunk)
         for dep in state.waiting_data[thunk]
@@ -152,7 +189,7 @@ function set_failed!(state, origin, thunk=origin)
                 delete!(state.waiting, dep)
             haskey(state.errored, dep) &&
                 continue
-            set_failed!(state, origin, dep)
+            origin !== nothing && set_failed!(state, origin, dep)
         end
         delete!(state.waiting_data, thunk)
     end
@@ -191,7 +228,7 @@ function print_sch_status(io::IO, state, thunk; offset=0, limit=5, max_inputs=3)
         print(io, "($(status_string(thunk))) ")
     end
     println(io, "$(thunk.id): $(thunk.f)")
-    for (idx,input) in enumerate(thunk.inputs)
+    for (idx, (_, input)) in enumerate(thunk.inputs)
         if input isa WeakThunk
             input = unwrap_weak(input)
             if input === nothing
@@ -252,50 +289,69 @@ end
 chunktype(x) = typeof(x)
 function signature(task::Thunk, state)
     sig = Any[chunktype(task.f)]
-    append!(sig, collect_task_inputs(state, task))
-    sig
+    for (pos, input) in collect_task_inputs(state, task)
+        # N.B. Skips kwargs
+        if pos === nothing
+            push!(sig, chunktype(input))
+        end
+    end
+    return sig
 end
 
 function can_use_proc(task, gproc, proc, opts, scope)
     # Check against proclist
-    if opts.proclist === nothing
-        if !default_enabled(proc)
-            @debug "Rejected $proc: !default_enabled(proc)"
-            return false
+    if opts.proclist !== nothing
+        @warn "The `proclist` option is deprecated, please use scopes instead\nSee https://juliaparallel.org/Dagger.jl/stable/scopes/ for details" maxlog=1
+        if opts.proclist isa Function
+            if !Base.invokelatest(opts.proclist, proc)
+                @dagdebug task :scope "Rejected $proc: proclist(proc) == false"
+                return false, scope
+            end
+            scope = constrain(scope, Dagger.ExactScope(proc))
+        elseif opts.proclist isa Vector
+            if !(typeof(proc) in opts.proclist)
+                @dagdebug task :scope "Rejected $proc: !(typeof(proc) in proclist)"
+                return false, scope
+            end
+            scope = constrain(scope,
+                              Dagger.UnionScope(map(Dagger.ProcessorTypeScope, opts.proclist)))
+        else
+            throw(SchedulingException("proclist must be a Function, Vector, or nothing"))
         end
-    elseif opts.proclist isa Function
-        if !Base.invokelatest(opts.proclist, proc)
-            @debug "Rejected $proc: proclist(proc) == false"
-            return false
+        if scope isa Dagger.InvalidScope
+            @dagdebug task :scope "Rejected $proc: Not contained in task scope ($scope)"
+            return false, scope
         end
-    elseif opts.proclist isa Vector
-        if !(typeof(proc) in opts.proclist)
-            @debug "Rejected $proc: !(typeof(proc) in proclist)"
-            return false
-        end
-    else
-        throw(SchedulingException("proclist must be a Function, Vector, or nothing"))
     end
 
     # Check against single
     if opts.single !== nothing
+        @warn "The `single` option is deprecated, please use scopes instead\nSee https://juliaparallel.org/Dagger.jl/stable/scopes/ for details" maxlog=1
         if gproc.pid != opts.single
-            @debug "Rejected $proc: gproc.pid != single"
-            return false
+            @dagdebug task :scope "Rejected $proc: gproc.pid ($(gproc.pid)) != single ($(opts.single))"
+            return false, scope
+        end
+        scope = constrain(scope, Dagger.ProcessScope(opts.single))
+        if scope isa Dagger.InvalidScope
+            @dagdebug task :scope "Rejected $proc: Not contained in task scope ($scope)"
+            return false, scope
         end
     end
 
-    # Check scope
+    # Check against scope
     proc_scope = Dagger.ExactScope(proc)
     if constrain(scope, proc_scope) isa Dagger.InvalidScope
-        @debug "Rejected $proc: Task scope ($scope) vs. processor scope ($proc_scope)"
-        return false
+        @dagdebug task :scope "Rejected $proc: Not contained in task scope ($scope)"
+        return false, scope
     end
 
-    return true
+    @label accept
+
+    @dagdebug task :scope "Accepted $proc"
+    return true, scope
 end
 
-function has_capacity(state, p, gp, time_util, alloc_util, sig)
+function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
     T = typeof(p)
     # FIXME: MaxUtilization
     est_time_util = round(UInt64, if time_util !== nothing && haskey(time_util, T)
@@ -306,8 +362,14 @@ function has_capacity(state, p, gp, time_util, alloc_util, sig)
     est_alloc_util = if alloc_util !== nothing && haskey(alloc_util, T)
         alloc_util[T]
     else
-        get(state.signature_alloc_cost, sig, 0)
-    end
+        get(state.signature_alloc_cost, sig, UInt64(0))
+    end::UInt64
+    est_occupancy = if occupancy !== nothing && haskey(occupancy, T)
+        # Clamp to 0-1, and scale between 0 and `typemax(UInt32)`
+        Base.unsafe_trunc(UInt32, clamp(occupancy[T], 0, 1) * typemax(UInt32))
+    else
+        typemax(UInt32)
+    end::UInt32
     #= FIXME: Estimate if cached data can be swapped to storage
     storage = storage_resource(p)
     real_alloc_util = state.worker_storage_pressure[gp][storage]
@@ -316,7 +378,7 @@ function has_capacity(state, p, gp, time_util, alloc_util, sig)
         return false, est_time_util, est_alloc_util
     end
     =#
-    return true, est_time_util, est_alloc_util
+    return true, est_time_util, est_alloc_util, est_occupancy
 end
 
 function populate_processor_cache_list!(state, procs)
@@ -361,12 +423,12 @@ end
 
 "Collects all arguments for `task`, converting Thunk inputs to Chunks."
 function collect_task_inputs(state, task)
-    inputs = Any[]
-    for input in task.inputs
+    inputs = Pair{Union{Symbol,Nothing},Any}[]
+    for (pos, input) in task.inputs
         input = unwrap_weak_checked(input)
-        push!(inputs, istask(input) ? state.cache[input] : input)
+        push!(inputs, pos => (istask(input) ? state.cache[input] : input))
     end
-    inputs
+    return inputs
 end
 
 """
@@ -413,6 +475,11 @@ Walks the data contained in `x` in DFS fashion, and executes `f` at each object
 that hasn't yet been seen.
 """
 function walk_data(f, @nospecialize(x))
+    action = f(x)
+    if action !== missing
+        return action
+    end
+
     seen = IdDict{Any,Nothing}()
     to_visit = Any[x]
 

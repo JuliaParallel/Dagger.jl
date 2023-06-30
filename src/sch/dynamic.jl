@@ -144,7 +144,7 @@ function _register_future!(ctx, state, task, tid, (future, id, check)::Tuple{Thu
                 if t == target
                     return true
                 end
-                for input in t.inputs
+                for (_, input) in t.inputs
                     # N.B. Skips expired tasks
                     input = Dagger.unwrap_weak(input)
                     istask(input) || continue
@@ -195,21 +195,23 @@ function _get_dag_ids(ctx, state, task, tid, _)
 end
 
 "Adds a new Thunk to the DAG."
-add_thunk!(f, h::SchedulerHandle, args...; future=nothing, ref=nothing, kwargs...) =
-    exec!(_add_thunk!, h, f, args, kwargs, future, ref)
-function _add_thunk!(ctx, state, task, tid, (f, args, kwargs, future, ref))
+add_thunk!(f, h::SchedulerHandle, args...; future=nothing, ref=nothing, options...) =
+    exec!(_add_thunk!, h, f, args, options, future, ref)
+function _add_thunk!(ctx, state, task, tid, (f, args, options, future, ref))
     timespan_start(ctx, :add_thunk, tid, 0)
-    _args = map(arg->arg isa ThunkID ? state.thunk_dict[arg.id] : arg, args)
+    _args = map(pos_arg->pos_arg[1] => (pos_arg[2] isa ThunkID ? state.thunk_dict[pos_arg[2].id] : pos_arg[2]), args)
     GC.@preserve _args begin
-        thunk = Thunk(f, _args...; kwargs...)
+        thunk = Thunk(f, _args...; options...)
         # Create a `DRef` to `thunk` so that the caller can preserve it
         thunk_ref = poolset(thunk; size=64, device=MemPool.CPURAMDevice())
         thunk_id = ThunkID(thunk.id, thunk_ref)
         state.thunk_dict[thunk.id] = WeakThunk(thunk)
         reschedule_inputs!(state, thunk)
+        @dagdebug thunk :submit "Added to scheduler"
         if future !== nothing
             # Ensure we attach a future before the thunk is scheduled
             _register_future!(ctx, state, task, tid, (future, thunk_id, false))
+            @dagdebug thunk :submit "Registered future"
         end
         if ref !== nothing
             # Preserve the `EagerThunkFinalizer` through `thunk`

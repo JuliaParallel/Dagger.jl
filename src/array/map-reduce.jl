@@ -48,8 +48,8 @@ end
 reduceblock_async(f, x::ArrayOp; get_result=true) = ReduceBlock(f, f, x, get_result)
 reduceblock_async(f, g::Function, x::ArrayOp; get_result=true) = ReduceBlock(f, g, x, get_result)
 
-reduceblock(f, x::ArrayOp) = reduceblock_async(f, x)
-reduceblock(f, g::Function, x::ArrayOp) = reduceblock_async(f, g, x)
+reduceblock(f, x::ArrayOp) = fetch(reduceblock_async(f, x))
+reduceblock(f, g::Function, x::ArrayOp) = fetch(reduceblock_async(f, g, x))
 
 reduce_async(f::Function, x::ArrayOp) = reduceblock_async(xs->reduce(f,xs), xs->reduce(f,xs), x)
 
@@ -62,7 +62,7 @@ prod(f::Function, x::ArrayOp) = reduceblock(a->prod(f, a), prod, x)
 
 mean(x::ArrayOp) = reduceblock(mean, mean, x)
 
-mapreduce(f::Function, g::Function, x::ArrayOp) = reduce(g, map(f, x))
+mapreduce(f::Function, g::Function, x::ArrayOp) = reduce(g, map(f, x)) #think about fetching
 
 function mapreducebykey_seq(f, op,  itr, dict=Dict())
     for x in itr

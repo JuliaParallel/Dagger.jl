@@ -54,9 +54,9 @@ Let's see how we'd modify the above example to use checkpointing:
 
 ```julia
 using Serialization
+
 X = compute(randn(Blocks(128,128), 1024, 1024))
-Y = [delayed(sum; options=Dagger.Sch.ThunkOptions(;
-checkpoint=(thunk,result)->begin
+Y = [delayed(sum; checkpoint=(thunk,result)->begin
     open("checkpoint-$idx.bin", "w") do io
         serialize(io, collect(result))
     end
@@ -64,7 +64,7 @@ end, restore=(thunk)->begin
     open("checkpoint-$idx.bin", "r") do io
         Dagger.tochunk(deserialize(io))
     end
-end))(chunk) for (idx,chunk) in enumerate(X.chunks)]
+end)(chunk) for (idx,chunk) in enumerate(X.chunks)]
 inner(x...) = sqrt(sum(x))
 Z = delayed(inner)(Y...)
 z = collect(Z)
