@@ -1318,10 +1318,11 @@ end
 Executes a single task specified by `task_desc` on `to_proc`.
 """
 function do_task(to_proc, task_desc)
-    thunk_id, task_ hash, est_time_util, est_alloc_util, est_occupancy,
-        scope, Tf, data,
-        send_result, persist, cache, meta,
-        options, propagated, ids, hashes, positions, ctx_vars, sch_handle, sch_uid = task_desc
+    thunk_id, task_hash, est_time_util, est_alloc_util, est_occupancy,
+    scope, Tf, data,
+    send_result, persist, cache, meta,
+    options, propagated, ids, hashes, positions, 
+    ctx_vars, sch_handle, sch_uid = task_desc
     ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
 
     from_proc = OSProc()

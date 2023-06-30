@@ -12,7 +12,6 @@ An `N`-dimensional domain over an array.
 struct ArrayDomain{N}
     indexes::NTuple{N, Any}
 end
-
 include("../lib/domain-blocks.jl")
 
 
@@ -305,7 +304,7 @@ Distribute(p::Blocks, data::AbstractArray) =
 
 function stage(ctx::Context, d::Distribute)
     if isa(d.data, ArrayOp)
-        # distributing a dsitributed array
+        # distributing a distributed array
         x = cached_stage(ctx, d.data)
         if d.domainchunks == domainchunks(x)
             return x # already properly distributed
@@ -316,6 +315,7 @@ function stage(ctx::Context, d::Distribute)
         cs = map(d.domainchunks) do idx
             chunks = cached_stage(ctx, x[idx]).chunks
             shape = size(chunks)
+            hash = Base.hash(idx, Base.hash(stage, Base.hash(d.data)))
             Dagger.spawn(shape, chunks...) do shape, parts...
                 if prod(shape) == 0
                     return Array{T}(undef, shape)
@@ -326,8 +326,10 @@ function stage(ctx::Context, d::Distribute)
             end
         end
     else
-        cs = map(c -> (Dagger.@spawn identity(d.data[c])), d.domainchunks)
-
+        cs = map(d.domainchunks) do c
+            hash = Base.hash(c, Base.hash(stage, Base.hash(d.data)))
+            Dagger.@spawn hash=hash identity(d.data[c])
+        end
     end
     DArray(
            eltype(d.data),

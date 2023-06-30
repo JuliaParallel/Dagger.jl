@@ -15,7 +15,7 @@ end
 
 const MPI_PROCESSORS = Ref{Int}(-1)
 
-const BCAST_VALUES = Dict{Any, Any}()
+#const BCAST_VALUES = Dict{Any, Any}()
 
 const PREVIOUS_PROCESSORS = Set()
 
@@ -73,7 +73,26 @@ end
 Dagger.get_parent(proc::MPIProcessor) = Dagger.OSProc()
 Dagger.default_enabled(proc::MPIProcessor) = true
 
-function IbcastAPI(data, root::Integer, comm::MPI.Comm, req::MPI.AbstractRequest=MPI.Request())
+struct MPI_Blocks{N} <: Blocks{N} end
+
+struct MPI_ArrayDomain{N} <: ArrayDomain{N} end
+
+
+function distribute(x::AbstractArray, dist::MPI_Blocks, comm::MPI.comm=MPI.COMM_WORLD, root::Integer=0)
+    isroot = MPI.Comm_rank(comm) == root
+    #TODO: Make better load balancing
+    if isroot
+        
+
+
+
+
+
+
+
+
+
+#=function IbcastAPI(data, root::Integer, comm::MPI.Comm, req::MPI.AbstractRequest=MPI.Request())
     @assert MPI.isnull(req)
     buf = MPI.Buffer(data)
     @debug "[$(MPI.Comm_rank(comm))] Entered API call with root $root"
@@ -125,7 +144,7 @@ function IbcastRecv(root, tag, comm, req::MPI.AbstractRequest=MPI.Request())
 end     
 
 function Ibcast_yield()
-end
+end=#
 
 
 
