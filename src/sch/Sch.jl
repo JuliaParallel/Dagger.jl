@@ -1105,19 +1105,23 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
         proc_occupancy = istate.proc_occupancy
         time_pressure = istate.time_pressure
 
+        work_to_do = false
         while isopen(return_queue)
             # Wait for new tasks
-            @dagdebug nothing :processor "Waiting for tasks"
-            timespan_start(ctx, :proc_run_wait, to_proc, nothing)
-            wait(istate.reschedule)
-            @static if VERSION >= v"1.9"
-                reset(istate.reschedule)
+            if !work_to_do
+                @dagdebug nothing :processor "Waiting for tasks"
+                timespan_start(ctx, :proc_run_wait, to_proc, nothing)
+                wait(istate.reschedule)
+                @static if VERSION >= v"1.9"
+                    reset(istate.reschedule)
+                end
+                timespan_finish(ctx, :proc_run_wait, to_proc, nothing)
             end
-            timespan_finish(ctx, :proc_run_wait, to_proc, nothing)
 
             # Fetch a new task to execute
             @dagdebug nothing :processor "Trying to dequeue"
             timespan_start(ctx, :proc_run_fetch, to_proc, nothing)
+            work_to_do = false
             task_and_occupancy = lock(istate.queue) do queue
                 # Only steal if there are multiple queued tasks, to prevent
                 # ping-pong of tasks between empty queues
@@ -1130,7 +1134,9 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                     @dagdebug nothing :processor "Insufficient occupancy" proc_occupancy=proc_occupancy[] task_occupancy=occupancy
                     return nothing
                 end
-                return dequeue_pair!(queue)
+                queue_result = dequeue_pair!(queue)
+                work_to_do = length(queue) > 0
+                return queue_result
             end
             if task_and_occupancy === nothing
                 timespan_finish(ctx, :proc_run_fetch, to_proc, nothing)
