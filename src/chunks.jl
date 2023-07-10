@@ -152,7 +152,7 @@ Keyword arguments:
 - `workers` -- The list of workers to create pieces on. May be any iterable container of `Integer`s.
 - `per_thread::Bool=false` -- If `true`, creates a piece per each thread, rather than a piece per each worker.
 """
-function shard(f; procs=nothing, workers=nothing, per_thread=false)
+function shard(@nospecialize(f); procs=nothing, workers=nothing, per_thread=false)
     if procs === nothing
         if workers !== nothing
             procs = [OSProc(w) for w in workers]
@@ -176,13 +176,15 @@ function shard(f; procs=nothing, workers=nothing, per_thread=false)
         end
     end
     isempty(procs) && throw(ArgumentError("Cannot create empty Shard"))
-    scopes = [p isa OSProc ? ProcessScope(p) : ExactScope(p) for p in procs]
-    thunks = [proc=>Dagger.@spawn single=Dagger.get_parent(proc).pid _shard_inner(f, proc, scope) for (proc,scope) in zip(procs,scopes)]
-    shard = Shard(Dict{Processor,Chunk}(thunk[1]=>fetch(thunk[2])[] for thunk in thunks))
-    scope = UnionScope(scopes)
-    Dagger.tochunk(shard, OSProc(), scope)
+    shard_dict = Dict{Processor,Chunk}()
+    for proc in procs
+        scope = proc isa OSProc ? ProcessScope(proc) : ExactScope(proc)
+        thunk = Dagger.@spawn scope=scope _shard_inner(f, proc, scope)
+        shard_dict[proc] = fetch(thunk)[]
+    end
+    return Shard(shard_dict)
 end
-function _shard_inner(f, proc, scope)
+function _shard_inner(@nospecialize(f), proc, scope)
     Ref(Dagger.@mutable proc scope f())
 end
 
@@ -191,7 +193,7 @@ macro shard(exs...)
     opts = esc.(exs[1:end-1])
     ex = exs[end]
     quote
-        let f = ()->$(esc(ex))
+        let f = @noinline ()->$(esc(ex))
             $shard(f; $(opts...))
         end
     end
@@ -202,28 +204,22 @@ function move(from_proc::Processor, to_proc::Processor, shard::Shard)
     # N.B. This behavior may bypass the piece's scope restriction
     proc = to_proc
     if haskey(shard.chunks, proc)
-        return shard.chunks[proc]
+        return move(from_proc, to_proc, shard.chunks[proc])
     end
     parent = Dagger.get_parent(proc)
     while parent != proc
         proc = parent
         parent = Dagger.get_parent(proc)
         if haskey(shard.chunks, proc)
-            return shard.chunks[proc]
+            return move(from_proc, to_proc, shard.chunks[proc])
         end
     end
 
     throw(KeyError(to_proc))
 end
-function move(from_proc::Processor, to_proc::Processor, x::Chunk{Shard})
-    piece = remotecall_fetch(x.handle.owner, x.handle, from_proc, to_proc) do ref, from_proc, to_proc
-        shard = MemPool.poolget(ref)
-        move(from_proc, to_proc, shard)
-    end::Chunk
-    move(from_proc, to_proc, piece)
-end
-Base.map(f, cs::Chunk{Shard}) = map(f, fetch(cs; raw=true))
-Base.map(f, s::Shard) = [Dagger.spawn(f, c) for c in values(s.chunks)]
+Base.iterate(s::Shard) = iterate(values(s.chunks))
+Base.iterate(s::Shard, state) = iterate(values(s.chunks), state)
+Base.length(s::Shard) = length(s.chunks)
 
 ### Core Stuff
 
