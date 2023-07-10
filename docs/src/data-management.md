@@ -1,4 +1,32 @@
-# Mutation Support
+# Data Management
+
+Dagger is not just a computing platform - it also has awareness of where each
+piece of data resides, and will move data between workers and perform
+conversions as necessary to satisfy the needs of your tasks.
+
+## Chunks
+
+Dagger often needs to move data between workers to allow a task to execute. To
+make this efficient when communicating potentially large units of data, Dagger
+uses a remote reference, called a `Chunk`, to refer to objects which may
+exist on another worker. `Chunk`s are backed by a distributed refcounting
+mechanism provided by MemPool.jl, which ensures that the referenced data is not
+garbage collected until all `Chunk`s referencing that object are GC'd from all
+workers.
+
+Conveniently, if you pass in a `Chunk` object as an input to a Dagger task,
+then the task's payload function will get executed with the value contained in
+the `Chunk`. The scheduler also understands `Chunk`s, and will try to schedule
+tasks close to where their `Chunk` inputs reside, to reduce communication
+overhead.
+
+`Chunk`s also have a cached type, a "processor", and a "scope", which are
+important for identifying the type of the object, where in memory (CPU RAM, GPU
+VRAM, etc.) the value resides, and where the value is allowed to be transferred
+and dereferenced. See [Processors](@ref) and [Scopes](@ref) for more details on
+how these properties can be used to control scheduling behavior around `Chunk`s.
+
+## Mutation
 
 Normally, Dagger tasks should be functional and "pure": never mutating their
 inputs, always producing identical outputs for a given set of inputs, and never
@@ -74,4 +102,4 @@ per shard "piece", and each result is considered immutable. `map` is an easy
 way to make a copy of each piece of the shard, to be later reduced, scanned,
 etc.
 
-Further details about what arguments can be passed to `@shard`/`shard` can be found in [Shard Functions](@ref).
+Further details about what arguments can be passed to `@shard`/`shard` can be found in [Data Management Functions](@ref).

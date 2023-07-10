@@ -67,31 +67,15 @@ Dagger.@spawn 1+a
 ```
 
 There are a variety of other consumers built-in to TimespanLogging and Dagger,
-under the `TimespanLogging.Events` and `Dagger.Events` modules, respectively:
-
-```@docs
-TimespanLogging.Events.CoreMetrics
-TimespanLogging.Events.IDMetrics
-TimespanLogging.Events.TimelineMetrics
-TimespanLogging.Events.FullMetrics
-TimespanLogging.Events.CPULoadAverages
-TimespanLogging.Events.MemoryFree
-TimespanLogging.Events.EventSaturation
-Dagger.Events.BytesAllocd
-Dagger.Events.ProcessorSaturation
-Dagger.Events.WorkerSaturation
-```
+under the `TimespanLogging.Events` and `Dagger.Events` modules, respectively;
+see [Dagger Types](@ref) and [TimespanLogging Types](@ref) for details.
 
 The `MultiEventLog` also has a mechanism to call a set of functions, called
 "aggregators", after all consumers have been executed, and are passed the full
 set of log streams as a `Dict{Symbol,Vector{Any}}`. The only one currently
 shipped with TimespanLogging directly is the `LogWindow`, and DaggerWebDash.jl
-has the `TableStorage` which integrates with it:
-
-```@docs
-Timespan.Events.LogWindow
-DaggerWebDash.TableStorage
-```
+has the `TableStorage` which integrates with it; see
+[DaggerWebDash Types](@ref) for details.
 
 ## LocalEventLog
 
