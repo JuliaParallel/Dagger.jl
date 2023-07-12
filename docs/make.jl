@@ -1,8 +1,8 @@
-using Dagger
+using Dagger, TimespanLogging, DaggerWebDash
 using Documenter
 
 makedocs(;
-    modules = [Dagger],
+    modules = [Dagger, TimespanLogging, DaggerWebDash],
     authors = "JuliaParallel and contributors",
     repo = "https://github.com/JuliaParallel/Dagger.jl/blob/{commit}{path}#L{line}",
     sitename = "Dagger.jl",
@@ -13,20 +13,29 @@ makedocs(;
     ),
     pages = [
         "Home" => "index.md",
-        "Processors" => "processors.md",
+        "Task Spawning" => "task-spawning.md",
+        "Data Management" => "data-management.md",
         "Scopes" => "scopes.md",
-        "Mutation and Shards" => "mutation.md",
+        "Processors" => "processors.md",
         "Dynamic Scheduler Control" => "dynamic.md",
         "Option Propagation" => "propagation.md",
         "Logging and Graphing" => "logging.md",
+        "Checkpointing" => "checkpointing.md",
         "Scheduler Visualization" => "scheduler-visualization.md",
         "Benchmarking" => "benchmarking.md",
-        "Checkpointing" => "checkpointing.md",
-        "API" => [
-            "Types" => "api/types.md",
-            "Functions and Macros" => "api/functions.md",
-        ],
         "Scheduler Internals" => "scheduler-internals.md",
+        "Dagger API" => [
+            "Types" => "api-dagger/types.md",
+            "Functions and Macros" => "api-dagger/functions.md",
+        ],
+        "TimespanLogging API" => [
+            "Types" => "api-timespanlogging/types.md",
+            "Functions and Macros" => "api-timespanlogging/functions.md",
+        ],
+        "DaggerWebDash API" => [
+            "Types" => "api-daggerwebdash/types.md",
+            "Functions and Macros" => "api-daggerwebdash/functions.md",
+        ],
     ]
 )
 

@@ -50,8 +50,7 @@ end
 end # @testset "@mutable"
 
 @testset "Shard" begin
-    cs = Dagger.@shard Threads.Atomic{Int}(0)
-    s = fetch(cs; raw=true)
+    s = Dagger.@shard Threads.Atomic{Int}(0)
     ctxprocs = Dagger.Sch.eager_context().procs
     for p in keys(s.chunks)
         @test p isa OSProc
@@ -67,8 +66,7 @@ end # @testset "@mutable"
 
     @testset "procs kwarg" begin
         procs = [OSProc(first(workers()))]
-        cs = Dagger.@shard procs=procs Threads.Atomic{Int}(0)
-        s = fetch(cs; raw=true)
+        s = Dagger.@shard procs=procs Threads.Atomic{Int}(0)
         @test length(keys(s.chunks)) == 1
         p = first(keys(s.chunks))
         @test p isa Dagger.OSProc
@@ -81,8 +79,7 @@ end # @testset "@mutable"
     end
 
     @testset "workers kwarg" begin
-        cs = Dagger.@shard workers=[first(workers())] Threads.Atomic{Int}(0)
-        s = fetch(cs; raw=true)
+        s = Dagger.@shard workers=[first(workers())] Threads.Atomic{Int}(0)
         @test length(keys(s.chunks)) == 1
         p = first(keys(s.chunks))
         @test p isa Dagger.OSProc
@@ -95,8 +92,7 @@ end # @testset "@mutable"
     end
 
     @testset "per_thread kwarg" begin
-        cs = Dagger.@shard per_thread=true Threads.Atomic{Int}(0)
-        s = fetch(cs; raw=true)
+        s = Dagger.@shard per_thread=true Threads.Atomic{Int}(0)
         for p in keys(s.chunks)
             @test p isa Dagger.ThreadProc
             gp = Dagger.get_parent(p)

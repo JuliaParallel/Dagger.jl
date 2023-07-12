@@ -68,6 +68,17 @@ struct D3Renderer
     update_cond::Threads.Condition
     seek_store
 end
+"""
+    D3Renderer(port::Int, port_range::UnitRange; seek_store=nothing) -> D3Renderer
+
+Constructs a `D3Renderer`, which is a TimespanLogging aggregator which renders
+the logs over HTTP using the d3.js library. `port` is the port that will be
+serving the HTTP website. `port_range` specifies a range of ports that will be
+used to listen for connections from other Dagger workers. `seek_store`, if
+specified, is a Tables.jl-compatible object that logs will be written to and
+read from. This table can be written to disk and then re-read later for offline
+log analysis.
+"""
 D3Renderer(port::Int, port_range=50000:59999; seek_store=nothing) =
     D3Renderer(port,
                port_range,
