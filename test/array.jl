@@ -47,6 +47,30 @@ end
     @test collect(X1) .+ 1 == collect(X2)
 end
 
+@testset "copy/similar" begin
+    X1 = fetch(ones(Blocks(10, 10), 100, 100))
+    X2 = copy(X1)
+    X3 = similar(X1)
+    @test typeof(X1) === typeof(X2) === typeof(X3)
+    @test collect(X1) == collect(X2)
+    @test collect(X1) != collect(X3)
+end
+
+@testset "DiffEq support" begin
+    X = fetch(ones(Blocks(10), 100))
+    X0 = zero(X)
+    @test typeof(X) === typeof(X0)
+    @test all(collect(X0) .== 0)
+    @testset for T in (Int8, Int, Float32, Float64)
+        DT = DArray{Base.promote_op(/, Float64, T), 1, typeof(cat)}
+        @test Base.promote_op(/, typeof(X), T) === DT
+        y = T(2)
+        Xd = X / y
+        @test typeof(Xd) === DT
+        @test collect(Xd) == collect(X) ./ y
+    end
+end
+
 @testset "sum" begin
     X = ones(Blocks(10, 10), 100, 100)
     @test sum(X) == 10000
@@ -68,6 +92,16 @@ end
     @test mean(X) ≈ mean(x)
     Y = zeros(Blocks(10, 10), 100, 100)
     @test mean(Y) == 0
+end
+
+@testset "broadcast" begin
+    X1 = fetch(rand(Blocks(10), 100))
+    X2 = X1 .* 3.4
+    @test typeof(X1) === typeof(X2)
+    @test collect(X1) .* 3.4 == collect(X2)
+    X3 = X1 .+ X1
+    @test typeof(X1) === typeof(X3)
+    @test collect(X1) .* 2 == collect(X3)
 end
 
 @testset "distributing an array" begin

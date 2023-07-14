@@ -1,4 +1,3 @@
-
 import Base: exp, expm1, log, log10, log1p, sqrt, cbrt, exponent,
              significand, sin, sinpi, cos, cospi, tan, sec, cot, csc,
              sinh, cosh, tanh, coth, sech, csch,
@@ -51,7 +50,7 @@ BroadcastStyle(::DaggerBroadcastStyle, ::BroadcastStyle) = DaggerBroadcastStyle(
 BroadcastStyle(::BroadcastStyle, ::DaggerBroadcastStyle) = DaggerBroadcastStyle()
 
 function Base.copy(b::Broadcast.Broadcasted{<:DaggerBroadcastStyle})
-    BCast(b)
+    cached_stage(Context(global_context()), BCast(b))::DArray
 end
 
 function stage(ctx::Context, node::BCast)
