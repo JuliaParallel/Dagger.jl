@@ -1061,10 +1061,18 @@ function Base.notify(db::Doorbell)
 end
 end
 
+struct TaskSpecKey
+    task_id::Int
+    task_spec::Vector{Any}
+    TaskSpecKey(task_spec::Vector{Any}) = new(task_spec[1], task_spec)
+end
+Base.getindex(key::TaskSpecKey) = key.task_spec
+Base.hash(key::TaskSpecKey, h::UInt) = hash(key.task_id, hash(TaskSpecKey, h))
+
 struct ProcessorInternalState
     ctx::Context
     proc::Processor
-    queue::LockedObject{PriorityQueue{Vector{Any}, UInt32, Base.Order.ForwardOrdering}}
+    queue::LockedObject{PriorityQueue{TaskSpecKey, UInt32, Base.Order.ForwardOrdering}}
     reschedule::Doorbell
     tasks::Dict{Int,Task}
     proc_occupancy::Base.RefValue{UInt32}
@@ -1175,7 +1183,8 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                         if length(queue) == 0
                             return nothing
                         end
-                        task, occupancy = peek(queue)
+                        task_spec, occupancy = peek(queue)
+                        task = task_spec[]
                         scope = task[5]
                         if !isa(constrain(scope, Dagger.ExactScope(to_proc)),
                                 Dagger.InvalidScope) &&
@@ -1202,7 +1211,8 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
             end
 
             @label execute
-            task, task_occupancy = task_and_occupancy
+            task_spec, task_occupancy = task_and_occupancy
+            task = task_spec[]
             thunk_id = task[1]
             time_util = task[2]
             timespan_finish(ctx, :proc_run_fetch, to_proc, (;thunk_id, proc_occupancy=proc_occupancy[], task_occupancy))
@@ -1272,7 +1282,7 @@ function do_tasks(to_proc, return_queue, tasks)
     uid = first(tasks)[18]
     state = proc_states(uid) do states
         get!(states, to_proc) do
-            queue = PriorityQueue{Vector{Any}, UInt32}()
+            queue = PriorityQueue{TaskSpecKey, UInt32}()
             queue_locked = LockedObject(queue)
             reschedule = Doorbell()
             istate = ProcessorInternalState(ctx, to_proc,
@@ -1302,7 +1312,7 @@ function do_tasks(to_proc, return_queue, tasks)
                 end
             end
             should_launch || continue
-            enqueue!(queue, task, occupancy)
+            enqueue!(queue, TaskSpecKey(task), occupancy)
             timespan_finish(ctx, :enqueue, (;to_proc, thunk_id), nothing)
             @dagdebug thunk_id :processor "Enqueued task"
         end
