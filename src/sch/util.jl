@@ -368,9 +368,7 @@ end
 
 "Like `sum`, but replaces `nothing` entries with the average of non-`nothing` entries."
 function impute_sum(xs)
-    length(xs) == 0 && return 0
-
-    total = zero(eltype(xs))
+    total = 0
     nothing_count = 0
     something_count = 0
     for x in xs
@@ -382,7 +380,8 @@ function impute_sum(xs)
         end
     end
 
-    total + nothing_count * total / something_count
+    something_count == 0 && return 0
+    return total + nothing_count * total / something_count
 end
 
 "Collects all arguments for `task`, converting Thunk inputs to Chunks."
@@ -412,15 +411,20 @@ function estimate_task_costs(state, procs, task, inputs)
         end
     end
 
-    # Estimate network transfer costs based on data size
-    # N.B. `affinity(x)` really means "data size of `x`"
-    # N.B. We treat same-worker transfers as having zero transfer cost
-    # TODO: For non-Chunk, model cost from scheduler to worker
-    # TODO: Measure and model processor move overhead
-    transfer_costs = Dict(proc=>impute_sum([affinity(chunk)[2] for chunk in filter(c->get_parent(processor(c))!=get_parent(proc), chunks)]) for proc in procs)
+    costs = Dict{Processor,Float64}()
+    for proc in procs
+        chunks_filt = Iterators.filter(c->get_parent(processor(c))!=get_parent(proc), chunks)
 
-    # Estimate total cost to move data and get task running after currently-scheduled tasks
-    costs = Dict(proc=>state.worker_time_pressure[get_parent(proc).pid][proc]+(tx_cost/tx_rate) for (proc, tx_cost) in transfer_costs)
+        # Estimate network transfer costs based on data size
+        # N.B. `affinity(x)` really means "data size of `x`"
+        # N.B. We treat same-worker transfers as having zero transfer cost
+        # TODO: For non-Chunk, model cost from scheduler to worker
+        # TODO: Measure and model processor move overhead
+        tx_cost = impute_sum(affinity(chunk)[2] for chunk in chunks_filt)
+
+        # Estimate total cost to move data and get task running after currently-scheduled tasks
+        costs[proc] = state.worker_time_pressure[get_parent(proc).pid][proc] + (tx_cost/tx_rate)
+    end
 
     # Shuffle procs around, so equally-costly procs are equally considered
     P = randperm(length(procs))
