@@ -410,7 +410,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         end
     end
 
-    chan = RemoteChannel(()->Channel(1024))
+    chan = RemoteChannel(()->Channel(typemax(Int)))
     deps = dependents(d)
     ord = order(d, noffspring(deps))
 
