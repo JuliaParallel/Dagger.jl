@@ -116,8 +116,8 @@ mutable struct DArray{T,N,F} <: ArrayOp{T, N}
     subdomains::AbstractArray{ArrayDomain{N}, N}
     chunks::AbstractArray{Any, N}
     concat::F
-    function DArray{T,N,F}(domain, subdomains, chunks, concat::Function) where {T, N,F}
-        new(domain, subdomains, chunks, concat)
+    function DArray{T,N,F}(domain, subdomains, chunks, concat::Function) where {T,N,F}
+        new{T,N,F}(domain, subdomains, chunks, concat)
     end
 end
 
@@ -227,14 +227,14 @@ end
 
 If a `DArray` tree has a `Thunk` in it, make the whole thing a big thunk.
 """
-function Base.fetch(c::DArray)
+function Base.fetch(c::DArray{T}) where T
     if any(istask, chunks(c))
         thunks = chunks(c)
         sz = size(thunks)
         dmn = domain(c)
         dmnchunks = domainchunks(c)
         fetch(Dagger.spawn(Options(meta=true), thunks...) do results...
-            t = eltype(results[1])
+            t = eltype(fetch(results[1]))
             DArray(t, dmn, dmnchunks, reshape(Any[results...], sz))
         end)
     else
