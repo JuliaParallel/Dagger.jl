@@ -68,6 +68,14 @@ Base.zeros(p::Blocks, t::Type, dims::Integer...) = zeros(p, t, dims)
 Base.zeros(p::Blocks, dims::Integer...) = zeros(p, Float64, dims)
 Base.zeros(p::Blocks, dims::Tuple) = zeros(p, Float64, dims)
 
+function Base.zero(x::DArray{T,N}) where {T,N}
+    dims = ntuple(i->x.domain.indexes[i].stop, N)
+    sd = first(x.subdomains)
+    part_size = ntuple(i->sd.indexes[i].stop, N)
+    a = zeros(Blocks(part_size...), T, dims)
+    return cached_stage(Context(global_context()), a)
+end
+
 function sprand(p::Blocks, m::Integer, n::Integer, sparsity::Real)
     s = rand(UInt)
     f = function (idx, t,sz)

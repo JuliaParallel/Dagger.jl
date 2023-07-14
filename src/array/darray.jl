@@ -163,6 +163,19 @@ function Base.isequal(x::ArrayOp, y::ArrayOp)
     x === y
 end
 
+function Base.similar(x::DArray{T,N,F}) where {T,N,F}
+    alloc(idx, sz) = Array{T,N}(undef, sz)
+    thunks = [Dagger.@spawn alloc(i, size(x)) for (i, x) in enumerate(x.subdomains)]
+    return DArray{T,N,F}(x.domain, x.subdomains, thunks, x.concat)
+end
+
+Base.copy(x::DArray{T,N,F}) where {T,N,F} =
+    cached_stage(Context(global_context()), map(identity, x))::DArray{T,N,F}
+
+# Because OrdinaryDiffEq uses `Base.promote_op(/, ::DArray, ::Real)`
+Base.:(/)(x::DArray{T,N,F}, y::U) where {T<:Real,U<:Real,N,F} =
+    (x ./ y)::DArray{Base.promote_op(/, T, U),N,F}
+
 """
     view(c::DArray, d)
 
