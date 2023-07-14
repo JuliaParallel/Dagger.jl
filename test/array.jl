@@ -13,6 +13,7 @@ end
 @testset "DArray constructor" begin
     x = fetch(rand(Blocks(2,2), 3,3))
     @test collect(x) == DArray{Float64, 2}(x.domain, x.subdomains, x.chunks) |> collect
+    @test x isa DArray{Float64, 2}
 end
 
 @testset "rand" begin
@@ -37,6 +38,13 @@ end
     R = rand(Blocks(10), 20)
     r = collect(R)
     @test r[1:10] != r[11:20]
+end
+
+@testset "map" begin
+    X1 = fetch(ones(Blocks(10, 10), 100, 100))
+    X2 = fetch(map(x->x+1, X1))
+    @test typeof(X1) === typeof(X2)
+    @test collect(X1) .+ 1 == collect(X2)
 end
 
 @testset "sum" begin

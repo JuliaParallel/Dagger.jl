@@ -19,9 +19,10 @@ function stage(ctx::Context, node::Map)
     f = node.f
     for i=eachindex(domains)
         inps = map(x->chunks(x)[i], inputs)
-        thunks[i] = Dagger.@spawn map(f, inps...) 
+        thunks[i] = Dagger.@spawn map(f, inps...)
     end
-    DArray(Any, domain(primary), domainchunks(primary), thunks)
+    RT = Base.promote_op(node.f, map(eltype, node.inputs)...)
+    return DArray(RT, domain(primary), domainchunks(primary), thunks)
 end
 
 map(f, x::ArrayOp, xs::ArrayOp...) = Map(f, (x, xs...))
