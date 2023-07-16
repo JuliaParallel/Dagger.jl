@@ -1,37 +1,3 @@
-const DAGDEBUG_CATEGORIES = Symbol[:global, :submit, :schedule, :scope,
-                                   :take, :execute, :processor]
-macro dagdebug(thunk, category, msg, args...)
-    cat_sym = category.value
-    @gensym id
-    debug_ex_id = :(@debug "[$($id)] ($($(repr(cat_sym)))) $($msg)" _module=Dagger _file=$(string(__source__.file)) _line=$(__source__.line))
-    append!(debug_ex_id.args, args)
-    debug_ex_noid = :(@debug "($($(repr(cat_sym)))) $($msg)" _module=Dagger _file=$(string(__source__.file)) _line=$(__source__.line))
-    append!(debug_ex_noid.args, args)
-    esc(quote
-        let $id = -1
-            if $thunk isa Integer
-                $id = Int($thunk)
-            elseif $thunk isa Thunk
-                $id = $thunk.id
-            elseif $thunk === nothing
-                $id = 0
-            else
-                @warn "Unsupported thunk argument to @dagdebug: $(typeof($thunk))"
-                $id = -1
-            end
-            if $id > 0
-                if $(QuoteNode(cat_sym)) in $DAGDEBUG_CATEGORIES
-                    $debug_ex_id
-                end
-            elseif $id == 0
-                if $(QuoteNode(cat_sym)) in $DAGDEBUG_CATEGORIES
-                    $debug_ex_noid
-                end
-            end
-        end
-    end)
-end
-
 """
     unwrap_nested_exception(err::Exception) -> Bool
 
@@ -74,11 +40,11 @@ function fill_registered_futures!(state, node, failed)
     end
 end
 
-"Cleans up any inputs that aren't needed any longer, and returns a `Set{Chunk}`
-of all chunks that can now be evicted from workers."
-function cleanup_inputs!(state, node)
+"Cleans up any syncdeps that aren't needed any longer, and returns a
+`Set{Chunk}` of all chunks that can now be evicted from workers."
+function cleanup_syncdeps!(state, node)
     to_evict = Set{Chunk}()
-    for (_, inp) in node.inputs
+    for inp in node.syncdeps
         inp = unwrap_weak_checked(inp)
         if !istask(inp) && !(inp isa Chunk)
             continue
@@ -101,7 +67,7 @@ function cleanup_inputs!(state, node)
             end
         end
     end
-    to_evict
+    return to_evict
 end
 
 "Schedules any dependents that may be ready to execute."
@@ -130,7 +96,7 @@ end
 Prepares the scheduler to schedule `thunk`. Will mark `thunk` as ready if
 its inputs are satisfied.
 """
-function reschedule_inputs!(state, thunk, seen=Set{Thunk}())
+function reschedule_syncdeps!(state, thunk, seen=Set{Thunk}())
     to_visit = Thunk[thunk]
     while !isempty(to_visit)
         thunk = pop!(to_visit)
@@ -142,14 +108,12 @@ function reschedule_inputs!(state, thunk, seen=Set{Thunk}())
             continue
         end
         w = get!(()->Set{Thunk}(), state.waiting, thunk)
-        for (_, input) in thunk.inputs
+        for input in thunk.syncdeps
             input = unwrap_weak_checked(input)
             input in seen && continue
 
             # Unseen
-            if istask(input) || isa(input, Chunk)
-                push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
-            end
+            push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
             istask(input) || continue
 
             # Unseen task
@@ -228,7 +192,7 @@ function print_sch_status(io::IO, state, thunk; offset=0, limit=5, max_inputs=3)
         print(io, "($(status_string(thunk))) ")
     end
     println(io, "$(thunk.id): $(thunk.f)")
-    for (idx, (_, input)) in enumerate(thunk.inputs)
+    for (idx, input) in enumerate(thunk.syncdeps)
         if input isa WeakThunk
             input = unwrap_weak(input)
             if input === nothing
@@ -404,9 +368,7 @@ end
 
 "Like `sum`, but replaces `nothing` entries with the average of non-`nothing` entries."
 function impute_sum(xs)
-    length(xs) == 0 && return 0
-
-    total = zero(eltype(xs))
+    total = 0
     nothing_count = 0
     something_count = 0
     for x in xs
@@ -418,7 +380,8 @@ function impute_sum(xs)
         end
     end
 
-    total + nothing_count * total / something_count
+    something_count == 0 && return 0
+    return total + nothing_count * total / something_count
 end
 
 "Collects all arguments for `task`, converting Thunk inputs to Chunks."
@@ -448,15 +411,20 @@ function estimate_task_costs(state, procs, task, inputs)
         end
     end
 
-    # Estimate network transfer costs based on data size
-    # N.B. `affinity(x)` really means "data size of `x`"
-    # N.B. We treat same-worker transfers as having zero transfer cost
-    # TODO: For non-Chunk, model cost from scheduler to worker
-    # TODO: Measure and model processor move overhead
-    transfer_costs = Dict(proc=>impute_sum([affinity(chunk)[2] for chunk in filter(c->get_parent(processor(c))!=get_parent(proc), chunks)]) for proc in procs)
+    costs = Dict{Processor,Float64}()
+    for proc in procs
+        chunks_filt = Iterators.filter(c->get_parent(processor(c))!=get_parent(proc), chunks)
 
-    # Estimate total cost to move data and get task running after currently-scheduled tasks
-    costs = Dict(proc=>state.worker_time_pressure[get_parent(proc).pid][proc]+(tx_cost/tx_rate) for (proc, tx_cost) in transfer_costs)
+        # Estimate network transfer costs based on data size
+        # N.B. `affinity(x)` really means "data size of `x`"
+        # N.B. We treat same-worker transfers as having zero transfer cost
+        # TODO: For non-Chunk, model cost from scheduler to worker
+        # TODO: Measure and model processor move overhead
+        tx_cost = impute_sum(affinity(chunk)[2] for chunk in chunks_filt)
+
+        # Estimate total cost to move data and get task running after currently-scheduled tasks
+        costs[proc] = state.worker_time_pressure[get_parent(proc).pid][proc] + (tx_cost/tx_rate)
+    end
 
     # Shuffle procs around, so equally-costly procs are equally considered
     P = randperm(length(procs))

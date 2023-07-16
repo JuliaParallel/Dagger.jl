@@ -11,6 +11,7 @@ import Base: @invokelatest
 import ..Dagger
 import ..Dagger: Context, Processor, Thunk, WeakThunk, ThunkFuture, ThunkFailedException, Chunk, WeakChunk, OSProc, AnyScope, DefaultScope, LockedObject
 import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak_checked, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, processor, default_enabled, get_processors, get_parent, execute!, rmprocs!, addprocs!, thunk_processor, constrain, cputhreadtime
+import ..Dagger: @dagdebug
 import DataStructures: PriorityQueue, enqueue!, dequeue_pair!, peek
 
 import ..Dagger
@@ -130,7 +131,7 @@ function start_state(deps::Dict, node_order, chan)
 
     for k in sort(collect(keys(deps)), by=node_order)
         if istask(k)
-            waiting = Set{Thunk}(Iterators.filter(istask, map(last, inputs(k))))
+            waiting = Set{Thunk}(Iterators.filter(istask, k.syncdeps))
             if isempty(waiting)
                 push!(state.ready, k)
             else
@@ -409,7 +410,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         end
     end
 
-    chan = RemoteChannel(()->Channel(1024))
+    chan = RemoteChannel(()->Channel(typemax(Int)))
     deps = dependents(d)
     ord = order(d, noffspring(deps))
 
@@ -575,10 +576,21 @@ end
 function scheduler_exit(ctx, state::ComputeState, options)
     @dagdebug nothing :global "Tearing down scheduler" uid=state.uid
 
-    close(state.chan)
-    notify(state.halt)
     @sync for p in procs_to_use(ctx)
         @async cleanup_proc(state, p, ctx.log_sink)
+    end
+
+    lock(state.lock) do
+        close(state.chan)
+        notify(state.halt)
+
+        # Notify any waiting tasks
+        for (_, futures) in state.futures
+            for future in futures
+                put!(future, SchedulingException("Scheduler exited"); error=true)
+            end
+        end
+        empty!(state.futures)
     end
 
     # Let the context procs handler clean itself up
@@ -872,7 +884,7 @@ function finish_task!(ctx, state, node, thunk_failed)
     schedule_dependents!(state, node, thunk_failed)
     fill_registered_futures!(state, node, thunk_failed)
 
-    to_evict = cleanup_inputs!(state, node)
+    to_evict = cleanup_syncdeps!(state, node)
     if node.f isa Chunk
         # FIXME: Check the graph for matching chunks
         push!(to_evict, node.f)
@@ -1049,10 +1061,18 @@ function Base.notify(db::Doorbell)
 end
 end
 
+struct TaskSpecKey
+    task_id::Int
+    task_spec::Vector{Any}
+    TaskSpecKey(task_spec::Vector{Any}) = new(task_spec[1], task_spec)
+end
+Base.getindex(key::TaskSpecKey) = key.task_spec
+Base.hash(key::TaskSpecKey, h::UInt) = hash(key.task_id, hash(TaskSpecKey, h))
+
 struct ProcessorInternalState
     ctx::Context
     proc::Processor
-    queue::LockedObject{PriorityQueue{Vector{Any}, UInt32, Base.Order.ForwardOrdering}}
+    queue::LockedObject{PriorityQueue{TaskSpecKey, UInt32, Base.Order.ForwardOrdering}}
     reschedule::Doorbell
     tasks::Dict{Int,Task}
     proc_occupancy::Base.RefValue{UInt32}
@@ -1094,19 +1114,23 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
         proc_occupancy = istate.proc_occupancy
         time_pressure = istate.time_pressure
 
+        work_to_do = false
         while isopen(return_queue)
             # Wait for new tasks
-            @dagdebug nothing :processor "Waiting for tasks"
-            timespan_start(ctx, :proc_run_wait, to_proc, nothing)
-            wait(istate.reschedule)
-            @static if VERSION >= v"1.9"
-                reset(istate.reschedule)
+            if !work_to_do
+                @dagdebug nothing :processor "Waiting for tasks"
+                timespan_start(ctx, :proc_run_wait, to_proc, nothing)
+                wait(istate.reschedule)
+                @static if VERSION >= v"1.9"
+                    reset(istate.reschedule)
+                end
+                timespan_finish(ctx, :proc_run_wait, to_proc, nothing)
             end
-            timespan_finish(ctx, :proc_run_wait, to_proc, nothing)
 
             # Fetch a new task to execute
             @dagdebug nothing :processor "Trying to dequeue"
             timespan_start(ctx, :proc_run_fetch, to_proc, nothing)
+            work_to_do = false
             task_and_occupancy = lock(istate.queue) do queue
                 # Only steal if there are multiple queued tasks, to prevent
                 # ping-pong of tasks between empty queues
@@ -1119,7 +1143,9 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                     @dagdebug nothing :processor "Insufficient occupancy" proc_occupancy=proc_occupancy[] task_occupancy=occupancy
                     return nothing
                 end
-                return dequeue_pair!(queue)
+                queue_result = dequeue_pair!(queue)
+                work_to_do = length(queue) > 0
+                return queue_result
             end
             if task_and_occupancy === nothing
                 timespan_finish(ctx, :proc_run_fetch, to_proc, nothing)
@@ -1157,7 +1183,8 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                         if length(queue) == 0
                             return nothing
                         end
-                        task, occupancy = peek(queue)
+                        task_spec, occupancy = peek(queue)
+                        task = task_spec[]
                         scope = task[5]
                         if !isa(constrain(scope, Dagger.ExactScope(to_proc)),
                                 Dagger.InvalidScope) &&
@@ -1184,7 +1211,8 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
             end
 
             @label execute
-            task, task_occupancy = task_and_occupancy
+            task_spec, task_occupancy = task_and_occupancy
+            task = task_spec[]
             thunk_id = task[1]
             time_util = task[2]
             timespan_finish(ctx, :proc_run_fetch, to_proc, (;thunk_id, proc_occupancy=proc_occupancy[], task_occupancy))
@@ -1254,7 +1282,7 @@ function do_tasks(to_proc, return_queue, tasks)
     uid = first(tasks)[18]
     state = proc_states(uid) do states
         get!(states, to_proc) do
-            queue = PriorityQueue{Vector{Any}, UInt32}()
+            queue = PriorityQueue{TaskSpecKey, UInt32}()
             queue_locked = LockedObject(queue)
             reschedule = Doorbell()
             istate = ProcessorInternalState(ctx, to_proc,
@@ -1284,7 +1312,7 @@ function do_tasks(to_proc, return_queue, tasks)
                 end
             end
             should_launch || continue
-            enqueue!(queue, task, occupancy)
+            enqueue!(queue, TaskSpecKey(task), occupancy)
             timespan_finish(ctx, :enqueue, (;to_proc, thunk_id), nothing)
             @dagdebug thunk_id :processor "Enqueued task"
         end

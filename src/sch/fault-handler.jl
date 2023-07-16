@@ -52,6 +52,6 @@ function handle_fault(ctx, state, deadproc)
     # Reschedule inputs from deadlist
     seen = Set{Thunk}()
     for t in deadlist
-        reschedule_inputs!(state, t, seen)
+        reschedule_syncdeps!(state, t, seen)
     end
 end

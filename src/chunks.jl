@@ -62,6 +62,8 @@ shouldpersist(p::Chunk) = t.persist
 processor(c::Chunk) = c.processor
 affinity(c::Chunk) = affinity(c.handle)
 
+is_task_or_chunk(c::Chunk) = true
+
 Base.:(==)(c1::Chunk, c2::Chunk) = c1.handle == c2.handle
 Base.hash(c::Chunk, x::UInt64) = hash(c.handle, x)
 
@@ -272,6 +274,7 @@ function unwrap_weak_checked(c::WeakChunk)
     @assert c !== nothing
     return c
 end
+is_task_or_chunk(c::WeakChunk) = true
 
 Base.@deprecate_binding AbstractPart Union{Chunk, Thunk}
 Base.@deprecate_binding Part Chunk

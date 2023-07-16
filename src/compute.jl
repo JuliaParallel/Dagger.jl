@@ -20,10 +20,7 @@ runs the scheduler with the specified options. Returns a Chunk which references
 the result.
 """
 function compute(ctx::Context, d::Thunk; options=nothing)
-    scheduler = get!(PLUGINS, :scheduler) do
-        get_type(PLUGIN_CONFIGS[:scheduler])
-    end
-    res = scheduler.compute_dag(ctx, d; options=options)
+    result = Sch.compute_dag(ctx, d; options=options)
     if ctx.log_file !== nothing
         if ctx.log_sink isa TimespanLogging.LocalEventLog
             logs = TimespanLogging.get_logs!(ctx.log_sink)
@@ -34,12 +31,12 @@ function compute(ctx::Context, d::Thunk; options=nothing)
             @warn "Context log_sink not set to LocalEventLog, skipping"
         end
     end
-    res
+    result
 end
 
 function debug_compute(ctx::Context, args...; profile=false, options=nothing)
-    @time res = compute(ctx, args...; options=options)
-    get_logs!(ctx.log_sink), res
+    @time result = compute(ctx, args...; options=options)
+    get_logs!(ctx.log_sink), result
 end
 
 function debug_compute(arg; profile=false, options=nothing)
@@ -53,11 +50,7 @@ Base.@deprecate gather(x) collect(x)
 
 cleanup() = cleanup(Context(global_context()))
 function cleanup(ctx::Context)
-    if :scheduler in keys(PLUGINS)
-        scheduler = PLUGINS[:scheduler]
-        (scheduler).cleanup(ctx)
-        delete!(PLUGINS, :scheduler)
-    end
+    Sch.cleanup(ctx)
     nothing
 end
 
@@ -92,7 +85,7 @@ function dependents(node::Thunk)
         if !haskey(deps, next)
             deps[next] = Set{Thunk}()
         end
-        for (_, inp) in next.inputs
+        for inp in next.syncdeps
             if istask(inp) || (inp isa Chunk)
                 s = get!(()->Set{Thunk}(), deps, inp)
                 push!(s, next)
@@ -103,7 +96,7 @@ function dependents(node::Thunk)
         end
         push!(visited, next)
     end
-    deps
+    return deps
 end
 
 """
@@ -133,7 +126,7 @@ function noffspring(dpents::Dict{Union{Thunk,Chunk}, Set{Thunk}})
         has_all || continue
         noff[next] = off
     end
-    noff
+    return noff
 end
 
 """
@@ -160,7 +153,7 @@ function order(node::Thunk, ndeps)
         haskey(output, next) && continue
         s += 1
         output[next] = s
-        parents = filter(istask, map(last, next.inputs))
+        parents = collect(filter(istask, next.syncdeps))
         if !isempty(parents)
             # If parents is empty, sort! should be a no-op, but raises an ambiguity error
             # when InlineStrings.jl is loaded (at least, version 1.1.0), because InlineStrings
