@@ -96,6 +96,28 @@ function Base.show(io::IO, x::ArrayOp)
     show(io, m, x)
 end
 
+export BlockPartition, Blocks
+
+abstract type AbstractBlocks{N} end 
+
+abstract type AbstractMultiBlocks{N}<:AbstractBlocks{N} end
+
+abstract type AbstractSingleBlocks{N}<:AbstractBlocks{N} end
+
+"""
+    Blocks(xs...)
+
+Indicates the size of an array operation, specified as `xs`, whose length
+indicates the number of dimensions in the resulting array.
+"""
+
+struct Blocks{N} <: AbstractMultiBlocks{N}
+    blocksize::NTuple{N, Int}
+end
+Blocks(xs::Int...) = Blocks(xs)
+
+
+
 """
     DArray{T,N,F}(domain, subdomains, chunks, concat)
     DArray(T, domain, subdomains, chunks, [concat=cat])
@@ -110,13 +132,14 @@ An N-dimensional distributed array of element type T, with a concatenation funct
 - `concat::F`: a function of type `F`. `concat(x, y; dims=d)` takes two chunks `x` and `y`
   and concatenates them along dimension `d`. `cat` is used by default.
 """
-mutable struct DArray{T,N,F} <: ArrayOp{T, N}
+mutable struct DArray{T,N,B<:AbstractBlocks{N},F} <: ArrayOp{T, N}
     domain::ArrayDomain{N}
     subdomains::AbstractArray{ArrayDomain{N}, N}
     chunks::AbstractArray{Any, N}
+    partitioning::B
     concat::F
-    function DArray{T,N,F}(domain, subdomains, chunks, concat::Function) where {T, N,F}
-        new(domain, subdomains, chunks, concat)
+       function DArray{T,N,B,F}(domain, subdomains, chunks, partitioning::B, concat::Function) where {T,N,B,F}
+        new(domain, subdomains, chunks, partitioning, concat)
     end
 end
 
@@ -125,9 +148,20 @@ DArray{T, N}(domain, subdomains, chunks) where {T,N} = DArray(T, domain, subdoma
 
 function DArray(T, domain::ArrayDomain{N},
              subdomains::AbstractArray{ArrayDomain{N}, N},
-             chunks::AbstractArray{<:Any, N}, concat=cat) where N
-    DArray{T, N, typeof(concat)}(domain, subdomains, chunks, concat)
+             chunks::AbstractArray{<:Any, N}, partitioning::B, concat=cat) where {N,B<:AbstractMultiBlocks{N}}
+    DArray{T,N,B,typeof(concat)}(domain, subdomains, chunks, partitioning, concat)
 end
+
+function DArray(T, domain::ArrayDomain{N},
+             subdomains::ArrayDomain{N},
+             chunks::Any, partitioning::B, concat=cat) where {N,B<:AbstractSingleBlocks{N}}
+    _subdomains = Array{ArrayDomain{N}, N}(undef, ntuple(i->1, N)...)
+    _subdomains[1] = subdomains
+    _chunks = Array{Any, N}(undef, ntuple(i->1, N)...)
+    _chunks[1] = chunks
+    DArray{T,N,B,typeof(concat)}(domain, _subdomains, _chunks, partitioning, concat)
+end
+
 
 domain(d::DArray) = d.domain
 chunks(d::DArray) = d.chunks
@@ -135,9 +169,8 @@ domainchunks(d::DArray) = d.subdomains
 size(x::DArray) = size(domain(x))
 stage(ctx, c::DArray) = c
 
-function collect(d::DArray; tree=false)
+function Base.collect(d::DArray; tree=false)
     a = fetch(d)
-
     if isempty(d.chunks)
         return Array{eltype(d)}(undef, size(d)...)
     end
@@ -226,20 +259,31 @@ end
 
 If a `DArray` tree has a `Thunk` in it, make the whole thing a big thunk.
 """
-function Base.fetch(c::DArray)
+
+function Base.fetch(c::DArray{T}) where {T}
+    if c.partitioning isa AbstractSingleBlocks
+        return c
+    end
+
     if any(istask, chunks(c))
         thunks = chunks(c)
         sz = size(thunks)
-        dmn = domain(c)
+        dmn = domain(c) 
         dmnchunks = domainchunks(c)
-        fetch(Dagger.spawn(Options(meta=true), thunks...) do results...
-            t = eltype(results[1])
-            DArray(t, dmn, dmnchunks, reshape(Any[results...], sz))
+        return fetch(Dagger.spawn(Options(meta=true), thunks...) do results...
+              t = eltype(fetch(results[1]))
+              DArray(t,
+                     dmn,
+                     dmnchunks,
+                     reshape(Any[results...], sz), 
+                     c.partitioning)
         end)
     else
-        c
+        return c
     end
 end
+
+export fetch, collect
 
 global _stage_cache = WeakKeyDict{Context, Dict}()
 
@@ -276,31 +320,19 @@ Base.@deprecate_binding ComputedArray DArray
 
 export Distribute, distribute
 
-struct Distribute{T, N} <: ArrayOp{T, N}
+struct Distribute{T,N,B<:AbstractBlocks} <: ArrayOp{T, N}
     domainchunks
+    partitioning::B
     data::AbstractArray{T,N}
 end
 
 size(x::Distribute) = size(domain(x.data))
 
-export BlockPartition, Blocks
-
-"""
-    Blocks(xs...)
-
-Indicates the size of an array operation, specified as `xs`, whose length
-indicates the number of dimensions in the resulting array.
-"""
-struct Blocks{N}
-    blocksize::NTuple{N, Int}
-end
-Blocks(xs::Int...) = Blocks(xs)
-
 Base.@deprecate BlockPartition Blocks
 
 
 Distribute(p::Blocks, data::AbstractArray) =
-    Distribute(partition(p, domain(data)), data)
+    Distribute(partition(p, domain(data)), p, data)
 
 function stage(ctx::Context, d::Distribute)
     if isa(d.data, ArrayOp)
@@ -315,7 +347,8 @@ function stage(ctx::Context, d::Distribute)
         cs = map(d.domainchunks) do idx
             chunks = cached_stage(ctx, x[idx]).chunks
             shape = size(chunks)
-            hash = Base.hash(idx, Base.hash(stage, Base.hash(d.data)))
+            #TODO: fix hashing
+            hash = uhash(idx, Base.hash(Distribute, Base.hash(d.data)))
             Dagger.spawn(shape, chunks...) do shape, parts...
                 if prod(shape) == 0
                     return Array{T}(undef, shape)
@@ -327,19 +360,21 @@ function stage(ctx::Context, d::Distribute)
         end
     else
         cs = map(d.domainchunks) do c
-            hash = Base.hash(c, Base.hash(stage, Base.hash(d.data)))
-            Dagger.@spawn hash=hash identity(d.data[c])
+            #TODO: fix hashing
+            hash = uhash(c, Base.hash(Distribute, Base.hash(d.data)))
+            Dagger.@spawn identity(d.data[c])
         end
     end
     DArray(
            eltype(d.data),
            domain(d.data),
            d.domainchunks,
-           cs
-    )
+           cs,
+           d.partitioning
+          )
 end
 
-function distribute(x::AbstractArray, dist)
+function distribute(x::AbstractArray, dist::Blocks)
     fetch(Distribute(dist, x))
 end
 
