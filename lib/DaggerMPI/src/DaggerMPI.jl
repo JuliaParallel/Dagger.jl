@@ -20,6 +20,7 @@ const MPI_PROCESSORS = Ref{Int}(-1)
 
 const PREVIOUS_PROCESSORS = Set()
 
+
 function initialize(comm::MPI.Comm=MPI.COMM_WORLD; color_algo=SimpleColoring())
     @assert MPI_PROCESSORS[] == -1 "DaggerMPI already initialized"
 
@@ -182,67 +183,8 @@ function Base.reduce(f::Function, x::Dagger.DArray{T,N,MPIBlocks{N},F}; comm=MPI
     end
 end
 
-
-
-
-#=function IbcastAPI(data, root::Integer, comm::MPI.Comm, req::MPI.AbstractRequest=MPI.Request())
-    @assert MPI.isnull(req)
-    buf = MPI.Buffer(data)
-    @debug "[$(MPI.Comm_rank(comm))] Entered API call with root $root"
-    MPI.API.MPI_Ibcast(buf.data, buf.count, buf.datatype, Cint(root), comm, req)
-    MPI.setbuffer!(req, buf)
-    @debug "[$(MPI.Comm_rank(comm))] Ended API call with root $root"
-    return req
-end
-
-function IbcastSend(obj, root, tag, comm, req::MPI.AbstractRequest=MPI.Request())
-    @debug "[$(MPI.Comm_rank(comm))] Started IbcastSend on tag [$tag]"
-    count = Ref{Cint}()
-    sendTag = Ref{Cint}()
-    buf = MPI.serialize(obj)
-    count[] = length(buf)
-    sendTag[] = tag
-    IbcastAPI(count, root, comm)
-    IbcastAPI(sendTag, root, comm)
-    IbcastAPI(buf, root, comm)
-end
-
-function IbcastRecv(root, tag, comm, req::MPI.AbstractRequest=MPI.Request())
-    count = Ref{Cint}()
-    tagRec = Ref{Cint}()
-    req = IbcastAPI(count, root, comm, req)
-    while true
-        finish = MPI.test(req)
-        if finish
-            break
-        end
-    end
-    req = IbcastAPI(tagRec, root, comm, req)
-    while true
-        finish = MPI.Test(req)
-        if finish
-            break
-        end
-    end
-    buf = Array{UInt8}(undef, count[])
-    req = IbcastAPI(buf, root, comm, req)
-    while true
-        finish = MPI.test(req)
-        if finish
-            break
-        end
-    end
-    BCAST_VALUES[tagRec[]] = MPI.deserialize(buf)
-    @debug "[$(MPI.Comm_rank(comm))] Received [$tag] on IbcastRecv"
-end     
-
-function Ibcast_yield()
-end=#
-
-
-
 "Busy-loop Irecv that yields to other tasks."
-function recv_yield(src, tag, comm)     
+function recv_yield(src, tag, comm)
     while true 
         (got, msg, stat) = MPI.Improbe(src, tag, comm, MPI.Status)
         if got
