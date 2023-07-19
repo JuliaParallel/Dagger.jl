@@ -24,7 +24,7 @@ function stage(ctx::Context, node::Map)
     DArray(Any, domain(primary), domainchunks(primary), thunks)
 end
 
-map(f, x::ArrayOp, xs::ArrayOp...) = Map(f, (x, xs...))
+map(f, x::ArrayOp, xs::ArrayOp...) = fetch(Map(f, (x, xs...)))
 
 #### Reduce
 
@@ -62,7 +62,7 @@ prod(f::Function, x::ArrayOp) = reduceblock(a->prod(f, a), prod, x)
 
 mean(x::ArrayOp) = reduceblock(mean, mean, x)
 
-mapreduce(f::Function, g::Function, x::ArrayOp) = reduce(g, map(f, x)) #think about fetching
+mapreduce(f::Function, g::Function, x::ArrayOp) = reduce(g, map(f, x))
 
 function mapreducebykey_seq(f, op,  itr, dict=Dict())
     for x in itr
@@ -100,7 +100,7 @@ function Base.size(r::Reducedim)
     end
 end
 
-function reduce(dom::ArrayDomain; dims)
+function Base.reduce(dom::ArrayDomain; dims)
     if dims isa Int
         ArrayDomain(setindex(indexes(dom), dims, 1:1))
     else
@@ -113,14 +113,16 @@ function Reducedim(op, input, dims)
     Reducedim{T,ndims(input)}(op, input, dims)
 end
 
-function reduce(f::Function, x::ArrayOp; dims = nothing)
+function Base.reduce(f::Function, x::ArrayOp; dims = nothing)
     if dims === nothing
         return fetch(reduce_async(f,x))
     elseif dims isa Int
         dims = (dims,)
     end
-    Reducedim(f, x, dims::Tuple)
+    fetch(Reducedim(f, x, dims::Tuple))
 end
+
+export reduce
 
 function stage(ctx::Context, r::Reducedim)
     inp = cached_stage(ctx, r.input)
@@ -134,7 +136,7 @@ function stage(ctx::Context, r::Reducedim)
     end
     c = domainchunks(inp)
     colons = Any[Colon() for x in size(c)]
-    nd=ndims(domain(inp))
+    nd = ndims(domain(inp))
     colons[[Iterators.filter(d->d<=nd, r.dims)...]] .= 1
     dmn = c[colons...]
     d = reduce(domain(inp), dims=r.dims)

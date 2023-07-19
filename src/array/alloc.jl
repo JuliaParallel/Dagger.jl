@@ -8,6 +8,7 @@ mutable struct AllocateArray{T,N} <: ArrayOp{T,N}
     f::Function
     domain::ArrayDomain{N}
     domainchunks
+    partitioning::AbstractBlocks
 end
 size(a::AllocateArray) = size(a.domain)
 
@@ -18,7 +19,7 @@ function _cumlength(len, step)
     cumsum(extra > 0 ? vcat(ps, extra) : ps)
 end
 
-function partition(p::Blocks, dom::ArrayDomain)
+function partition(p::AbstractBlocks, dom::ArrayDomain)
     DomainBlocks(map(first, indexes(dom)),
         map(_cumlength, map(length, indexes(dom)), p.blocksize))
 end
@@ -26,7 +27,7 @@ end
 function stage(ctx, a::AllocateArray)
     alloc(idx, sz) = a.f(idx, a.eltype, sz)
     thunks = [Dagger.@spawn alloc(i, size(x)) for (i, x) in enumerate(a.domainchunks)]
-    DArray(a.eltype,a.domain, a.domainchunks, thunks)
+    fetch(DArray(a.eltype, a.domain, a.domainchunks, thunks, a.partitioning))
 end
 
 function Base.rand(p::Blocks, eltype::Type, dims)
@@ -35,7 +36,7 @@ function Base.rand(p::Blocks, eltype::Type, dims)
         rand(MersenneTwister(s+idx), x...)
     end
     d = ArrayDomain(map(x->1:x, dims))
-    AllocateArray(eltype, f, d, partition(p, d))
+    fetch(AllocateArray(eltype, f, d, partition(p, d), p))
 end
 
 Base.rand(p::Blocks, t::Type, dims::Integer...) = rand(p, t, dims)
@@ -48,13 +49,13 @@ function Base.randn(p::Blocks, dims)
         randn(MersenneTwister(s+idx), x...)
     end
     d = ArrayDomain(map(x->1:x, dims))
-    AllocateArray(Float64, f, d, partition(p, d))
+    fetch(AllocateArray(Float64, f, d, partition(p, d), p))
 end
 Base.randn(p::Blocks, dims::Integer...) = randn(p, dims)
 
 function Base.ones(p::Blocks, eltype::Type, dims)
     d = ArrayDomain(map(x->1:x, dims))
-    AllocateArray(eltype, (_, x...) -> ones(x...), d, partition(p, d))
+    fetch(AllocateArray(eltype, (_, x...) -> ones(x...), d, partition(p, d), p))
 end
 Base.ones(p::Blocks, t::Type, dims::Integer...) = ones(p, t, dims)
 Base.ones(p::Blocks, dims::Integer...) = ones(p, Float64, dims)
@@ -62,7 +63,7 @@ Base.ones(p::Blocks, dims::Tuple) = ones(p, Float64, dims)
 
 function Base.zeros(p::Blocks, eltype::Type, dims)
     d = ArrayDomain(map(x->1:x, dims))
-    AllocateArray(eltype, (_, x...) -> zeros(x...), d, partition(p, d))
+    fetch(AllocateArray(eltype, (_, x...) -> zeros(x...), d, partition(p, d), p))
 end
 Base.zeros(p::Blocks, t::Type, dims::Integer...) = zeros(p, t, dims)
 Base.zeros(p::Blocks, dims::Integer...) = zeros(p, Float64, dims)
@@ -74,7 +75,7 @@ function sprand(p::Blocks, m::Integer, n::Integer, sparsity::Real)
         sprand(MersenneTwister(s+idx), sz...,sparsity)
     end
     d = ArrayDomain((1:m, 1:n))
-    AllocateArray(Float64, f, d, partition(p, d))
+    AllocateArray(Float64, f, d, partition(p, d), p)
 end
 
 function sprand(p::Blocks, n::Integer, sparsity::Real)
@@ -82,5 +83,5 @@ function sprand(p::Blocks, n::Integer, sparsity::Real)
     f = function (idx,t,sz)
         sprand(MersenneTwister(s+idx), sz...,sparsity)
     end
-    AllocateArray(Float64, f, d, partition(p, ArrayDomain((1:n,))))
+    AllocateArray(Float64, f, d, partition(p, ArrayDomain((1:n,))), p)
 end
