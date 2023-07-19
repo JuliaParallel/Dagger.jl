@@ -152,6 +152,8 @@ function setindex(x::NTuple{N}, idx, v) where N
     map(ifelse, ntuple(x->idx === x, Val(N)), ntuple(x->v, Val(N)), x)
 end
 
+export treereducedim
+
 function showloc(f, argcount)
     args = ntuple(x->Any, argcount)
     ms = methods(f)

@@ -1318,10 +1318,10 @@ end
 Executes a single task specified by `task_desc` on `to_proc`.
 """
 function do_task(to_proc, task_desc)
-    thunk_id, task_hash, est_time_util, est_alloc_util, est_occupancy,
-    scope, Tf, data,
+    thunk_id, task_hash, est_time_util, est_alloc_util, 
+    Tf, data,
     send_result, persist, cache, meta,
-    options, propagated, ids, hashes, positions, 
+    options, propagated, ids, positions, hashes, 
     ctx_vars, sch_handle, sch_uid = task_desc
     ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
 
@@ -1463,12 +1463,14 @@ function do_task(to_proc, task_desc)
         end
     end
     fetched = Any[]
+    @debug fetch_tasks
     for task in fetch_tasks
         push!(fetched, fetch_report(task))
     end
     if meta
         append!(fetched, data[2:end])
     end
+
     f = popfirst!(fetched)
     @assert !(f isa Chunk) "Failed to unwrap thunk function"
     fetched_args = Any[]

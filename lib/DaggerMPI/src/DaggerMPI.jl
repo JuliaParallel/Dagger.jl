@@ -1,5 +1,6 @@
 module DaggerMPI
 using Dagger
+import Base: reduce, fetch, cat
 using MPI
 
 struct MPIProcessor{P,C} <: Dagger.Processor
@@ -28,14 +29,14 @@ function initialize(comm::MPI.Comm=MPI.COMM_WORLD; color_algo=SimpleColoring())
     MPI.Init(; finalize_atexit=false)
     procs = Dagger.get_processors(OSProc())
     i = 0
-    empty!(Dagger.PROCESSOR_CALLBACKS)
+    #=empty!(Dagger.PROCESSOR_CALLBACKS)
     empty!(Dagger.OSPROC_PROCESSOR_CACHE)
     for proc in procs
         Dagger.add_processor_callback!("mpiprocessor_$i") do
             return MPIProcessor(proc, comm, color_algo)
         end
         i += 1
-    end
+    end=#
     MPI_PROCESSORS[] = i
 
     # FIXME: Hack to populate new processors
@@ -73,21 +74,113 @@ end
 Dagger.get_parent(proc::MPIProcessor) = Dagger.OSProc()
 Dagger.default_enabled(proc::MPIProcessor) = true
 
-struct MPI_Blocks{N} <: Blocks{N} end
+export MPIBlocks
 
-struct MPI_ArrayDomain{N} <: ArrayDomain{N} end
+struct MPIBlocks{N} <: Dagger.AbstractSingleBlocks{N}
+    blocksize::NTuple{N, Int}
+end
+MPIBlocks(xs::Int...) = MPIBlocks(xs)
 
-
-function distribute(x::AbstractArray, dist::MPI_Blocks, comm::MPI.comm=MPI.COMM_WORLD, root::Integer=0)
+function Dagger.distribute(::Type{A}, 
+                           x::Union{AbstractArray, Nothing}, 
+                           dist::MPIBlocks, 
+                           comm::MPI.Comm=MPI.COMM_WORLD, 
+                           root::Integer=0) where {A<:AbstractArray{T, N}} where {T, N}
     isroot = MPI.Comm_rank(comm) == root
+
     #TODO: Make better load balancing
+
+    data = Array{T, N}(undef, dist.blocksize)
     if isroot
-        
+        cs = Array{T, N}(undef, size(x))
+        parts =  partition(dist, domain(x))
+        idx = 1
+        for part in parts
+            cs[idx:(idx - 1 + prod(dist.blocksize))] = x[part]
+            idx += prod(dist.blocksize)
+        end
+        MPI.Scatter!(MPI.UBuffer(cs, div(length(cs), MPI.Comm_size(comm))), data, comm, root=root)
+    else
+        MPI.Scatter!(nothing, data, comm, root=root)
+    end
 
+    data = Dagger.tochunk(data)
 
+    Dagger.DArray(
+        T,
+        domain(data),
+        domain(data),
+        data,
+        dist
+       )
+end
 
+function Dagger.distribute(::Type{A}, 
+                    dist::MPIBlocks, 
+                    comm::MPI.Comm=MPI.COMM_WORLD, 
+                    root::Integer=0) where {A<:AbstractArray{T, N}} where {T, N}
+    distribute(A, nothing, dist, comm, root)
+end
 
+function Dagger.distribute(x::AbstractArray, 
+                    dist::MPIBlocks, 
+                    comm::MPI.Comm=MPI.COMM_WORLD, 
+                    root::Integer=0)
+    distribute(typeof(x), x, dist, comm, root)
+end      
 
+export MPIBlocks, distribute
+
+function Base.reduce(f::Function, x::Dagger.DArray{T,N,MPIBlocks{N},F}; comm=MPI.COMM_WORLD, root=nothing, dims=nothing, acrossranks::Bool=true) where {T,N,F} 
+    if dims === nothing
+        if !acrossranks
+            return fetch(reduce_async(f,x))
+        elseif root === nothing
+            return MPI.Allreduce(fetch(reduce_async(f,x)), f, comm)
+        else 
+            return MPI.Reduce(fetch(reduce_async(f,x)), f, comm; root)
+        end 
+    else
+        if dims isa Int 
+            dims = (dims,)
+        end
+        d = reduce(x.domain, dims=dims)
+        ds = reduce(x.subdomains[1], dims=dims)
+        if !acrossranks   
+            thunks = Dagger.spawn(b->reduce(f, b, dims=dims), x.chunks[1])
+            return Dagger.DArray(T, 
+                                 d, 
+                                 ds, 
+                                 thunks,
+                                 x.partitioning)
+        else
+            tmp = collect(reduce(f, x, comm=comm, root=root, dims=dims, acrossranks=false))
+            if root === nothing
+                h = UInt(0)
+                for dim in 1:N
+                    if dim in dims
+                        continue
+                    end
+                    h = hash(x.subdomains[1].indexes[dim], h)
+                end
+                h = abs(Base.unsafe_trunc(Int32, h))
+                newc = MPI.Comm_split(comm, h, MPI.Comm_rank(comm))
+                chunks = Dagger.tochunk(reshape(MPI.Allreduce(tmp, f, newc), size(tmp)))
+            else
+                rcvbuf = MPI.Reduce(tmp, f, comm; root)
+                if root === MPI.Comm_rank(comm)
+                    chunks = Dagger.tochunk(reshape(rcvbuf, size(tmp)))
+                    return Dagger.DArray(T,
+                                         d,
+                                         ds,
+                                         chunks,
+                                         x.partitioning)
+                end
+                return nothing
+            end
+        end
+    end
+end
 
 
 
@@ -219,15 +312,18 @@ function Dagger.move(from_proc::MPIProcessor, to_proc::Dagger.Processor, x::Dagg
     tag = abs(Base.unsafe_trunc(Int32, Dagger.get_task_hash(:input) >> 32)) 
     if rank == x_value.color
         @debug "[$rank] Starting bcast send on $tag"
-        IbcastSend(x_value.value, x_value.color, tag, from_proc.comm)
-        @debug "[$rank] Finished bcast send on $tag"
+        @sync for other in 0:(MPI_Comm_size(from_proc.comm)-1)
+            other == rank && continue
+            @async begin
+                @debug "[$rank] Starting bcast send on $tag"
+                MPI.isend(x_value.value, other, tag, from_proc.comm)
+                @debug "[$rank] Finished bcast send on $tag"
+            end
+        end
         return Dagger.move(from_proc.proc, to_proc, x_value.value)
     else
         @debug "[$rank] Starting bcast recv on $tag"
-        while !haskey(BCAST_VALUES, tag)
-            IbcastRecv(x_value.color, tag, from_proc.comm)
-        end
-        value = BCAST_VALUES[tag]
+        value = recv_yield(x_value.color, tag, from_proc.comm)
         @debug "[$rank] Finished bcast recv on $tag"
         return Dagger.move(from_proc.proc, to_proc, value)
     end

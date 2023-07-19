@@ -352,6 +352,7 @@ function set_tls!(tls)
         task_local_storage(:_dagger_input_hash, tls.input_hash)
     end
     task_local_storage(:_dagger_processor, get(tls, :processor, nothing))
+    task_local_storage(:_dagger_task_spec, get(tls, :task_spec, nothing))
     task_local_storage(:_dagger_time_utilization, get(tls, :time_utilization, nothing))
     task_local_storage(:_dagger_alloc_utilization, get(tls, :alloc_utilization, nothing))
 end
