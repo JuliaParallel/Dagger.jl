@@ -130,3 +130,44 @@ calls to `hist!` may run in parallel
 By using `map` on `temp_bins`, we then make a copy of each worker's bins that
 we can safely return back to our current worker, and sum them together to get
 our total histogram.
+
+-----
+
+## Quickstart: Distributed Arrays
+
+Dagger's `DArray` type represents a distributed array, where a single large
+array is implemented as a set of smaller array partitions, which may be
+distributed across a Julia cluster.
+
+For more details: [Distributed Arrays](@ref)
+
+### Distribute an existing array
+
+Distributing any kind of array into a `DArray` is easy, just use `distribute`,
+and specify the partitioning you desire with `Blocks`. For example, to
+distribute a 16 x 16 matrix in 4 x 4 partitions:
+
+```julia
+A = rand(16, 16)
+DA = distribute(A, Blocks(4, 4))
+```
+
+### Allocate a distributed array directly
+
+To allocate a `DArray`, just pass your `Blocks` partitioning object into the
+appropriate allocation function, such as `rand`, `ones`, or `zeros`:
+
+```julia
+rand(Blocks(20, 20), 100, 100)
+ones(Blocks(20, 100), 100, 2000)
+zeros(Blocks(50, 20), 300, 200)
+```
+
+### Convert a `DArray` back into an `Array`
+
+To get back an `Array` from a `DArray`, just call `collect`:
+
+```julia
+DA = rand(Blocks(32, 32), 256, 128)
+collect(DA) # returns a `Matrix{Float64}`
+```

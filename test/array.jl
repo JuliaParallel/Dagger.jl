@@ -11,17 +11,15 @@ import Statistics: mean
 end
 
 @testset "DArray constructor" begin
-    x = fetch(rand(Blocks(2,2), 3,3))
-    @test collect(x) == DArray{Float64, 2}(x.domain, x.subdomains, x.chunks) |> collect
+    x = rand(Blocks(2,2), 3,3)
     @test x isa DArray{Float64, 2}
+    @test collect(x) == DArray{Float64, 2}(x.domain, x.subdomains, x.chunks, x.partitioning, x.concat) |> collect
 end
 
 @testset "rand" begin
-    function test_rand(X)
-        X1 = fetch(X)
+    function test_rand(X1)
         X2 = collect(X1)
 
-        @test isa(X, Dagger.ArrayOp)
         @test isa(X1, Dagger.DArray)
         @test X2 |> size == (100, 100)
         @test all(X2 .>= 0.0)
@@ -41,14 +39,14 @@ end
 end
 
 @testset "map" begin
-    X1 = fetch(ones(Blocks(10, 10), 100, 100))
-    X2 = fetch(map(x->x+1, X1))
+    X1 = ones(Blocks(10, 10), 100, 100)
+    X2 = map(x->x+1, X1)
     @test typeof(X1) === typeof(X2)
     @test collect(X1) .+ 1 == collect(X2)
 end
 
 @testset "copy/similar" begin
-    X1 = fetch(ones(Blocks(10, 10), 100, 100))
+    X1 = ones(Blocks(10, 10), 100, 100)
     X2 = copy(X1)
     X3 = similar(X1)
     @test typeof(X1) === typeof(X2) === typeof(X3)
@@ -57,12 +55,12 @@ end
 end
 
 @testset "DiffEq support" begin
-    X = fetch(ones(Blocks(10), 100))
+    X = ones(Blocks(10), 100)
     X0 = zero(X)
     @test typeof(X) === typeof(X0)
     @test all(collect(X0) .== 0)
     @testset for T in (Int8, Int, Float32, Float64)
-        DT = DArray{Base.promote_op(/, Float64, T), 1, typeof(cat)}
+        DT = DArray{Base.promote_op(/, Float64, T), 1, Blocks{1}, typeof(cat)}
         @test Base.promote_op(/, typeof(X), T) === DT
         y = T(2)
         Xd = X / y
@@ -95,7 +93,7 @@ end
 end
 
 @testset "broadcast" begin
-    X1 = fetch(rand(Blocks(10), 100))
+    X1 = rand(Blocks(10), 100)
     X2 = X1 .* 3.4
     @test typeof(X1) === typeof(X2)
     @test collect(X1) .* 3.4 == collect(X2)
@@ -107,8 +105,9 @@ end
 @testset "distributing an array" begin
     function test_dist(X)
         X1 = Distribute(Blocks(10, 20), X)
-        @test X1 == X
         Xc = fetch(X1)
+        @test Xc isa DArray{eltype(X),ndims(X)}
+        @test Xc == X
         @test chunks(Xc) |> size == (10, 5)
         @test domainchunks(Xc) |> size == (10, 5)
         @test map(x->size(x) == (10, 20), domainchunks(Xc)) |> all
@@ -142,9 +141,9 @@ end
     function test_mul(X)
         tol = 1e-12
         X1 = Distribute(Blocks(10, 20), X)
-        @test_throws DimensionMismatch fetch(X1*X1)
-        X2 = fetch(X1'*X1)
-        X3 = fetch(X1*X1')
+        @test_throws DimensionMismatch X1*X1
+        X2 = X1'*X1
+        X3 = X1*X1'
         @test norm(collect(X2) - X'X) < tol
         @test norm(collect(X3) - X*X') < tol
         @test chunks(X2) |> size == (2, 2)
@@ -161,7 +160,7 @@ end
 end
 
 @testset "matrix powers" begin
-    x = fetch(rand(Blocks(4,4), 16, 16))
+    x = rand(Blocks(4,4), 16, 16)
     @test collect(x^1) == collect(x)
     @test collect(x^2) == collect(x*x)
     @test collect(x^3) == collect(x*x*x)
@@ -171,10 +170,9 @@ end
     m = rand(75,75)
     x = Distribute(Blocks(10,20), m)
     y = Distribute(Blocks(10,10), m)
-    @test hcat(m,m) == collect(hcat(x,x))
+    @test hcat(m,m) == collect(hcat(x,x)) == collect(hcat(x,y))
     @test vcat(m,m) == collect(vcat(x,x))
-    @test hcat(m,m) == collect(hcat(x,y))
-    @test_throws DimensionMismatch fetch(vcat(x,y))
+    @test_throws DimensionMismatch vcat(x,y)
 end
 
 @testset "scale" begin
@@ -210,7 +208,7 @@ end
     y = rand(10, 10)
     xs = distribute(y, Blocks(2,2))
     for i=1:10, j=1:10
-        @test fetch(xs[i:j, j:i]) == y[i:j, j:i]
+        @test xs[i:j, j:i] == y[i:j, j:i]
     end
 end
 
@@ -260,8 +258,8 @@ end
     @test collect(sort(y)) == x
 
     x = ones(10)
-    y = fetch(Distribute(Blocks(3), x))
-    @test_broken map(x->length(collect(x)), fetch(sort(y)).chunks) == [3,3,3,1]
+    y = Distribute(Blocks(3), x)
+    @test_broken map(x->length(collect(x)), sort(y).chunks) == [3,3,3,1]
 end
 
 using MemPool
