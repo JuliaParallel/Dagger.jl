@@ -110,7 +110,30 @@ or by specifying the `worker` argument to `@mutable`:
 A = Dagger.@mutable worker=2 rand(1000, 1000)
 ```
 
-### Parallel reduction
+### Operate on distributed data
+
+Often we want to work with more than one piece of data; the common case of
+wanting one piece of data per worker is easy to do by using `@shard`:
+
+```julia
+X = Dagger.@shard myid()
+```
+
+This will execute `myid()` independently on every worker in your Julia
+cluster, and place references to each within a `Shard` object called `X`. We
+can then use `X` in task spawning, but we'll only get the result of
+`myid()` that corresponds to the worker that the task is running on:
+
+```julia
+for w in workers()
+    @show fetch(Dagger.@spawn scope=Dagger.scope(worker=w) identity(X))
+end
+```
+
+The above should print the result of `myid()` for each worker in `worker()`, as
+`identity(X)` receives only the value of `X` specific to that worker.
+
+### Reducing over distributed data
 
 Reductions are often parallelized by reducing a set of partitions on each
 worker, and then reducing those intermediate reductions on a single worker.
@@ -131,11 +154,71 @@ points to a set of histogram bins on each worker. When we `@spawn hist!`,
 Dagger passes in the random array and bins for only the specific worker that
 the task is run on; i.e. a call to `hist!` that runs on worker 2 will get a
 different `A` and `temp_bins` from a call to `hist!` on worker 3. All of the
-calls to `hist!` may run in parallel
+calls to `hist!` may run in parallel.
 
 By using `map` on `temp_bins`, we then make a copy of each worker's bins that
 we can safely return back to our current worker, and sum them together to get
 our total histogram.
+
+-----
+
+## Quickstart: File IO
+
+Dagger has support for loading and saving files that integrates seamlessly with
+its task system, in the form of `Dagger.File` and `Dagger.tofile`.
+
+!!! warn
+    These functions are not yet fully tested, so please make sure to take backups of any files that you load with them.
+
+### Loading files from disk
+
+In order to load one or more files from disk, Dagger provides the `File`
+function, which creates a lazy reference to a file:
+
+```julia
+f = Dagger.File("myfile.jls")
+```
+
+`f` is now a lazy reference to `"myfile.jls"`, and its contents can be loaded
+automatically by just passing the object to a task:
+
+```julia
+wait(Dagger.@spawn println(f))
+# Prints the loaded contents of the file
+```
+
+By default, `File` assumes that the file uses Julia's Serialization format;
+this can be easily changed to assume Arrow format, for example:
+
+```julia
+using Arrow
+f = Dagger.File("myfile.arrow"; serialize=Arrow.write, deserialize=Arrow.Table)
+```
+
+### Writing data to disk
+
+Saving data to disk is as easy as loading it; `tofile` provides this capability
+in a similar manner to `File`:
+
+```julia
+A = rand(1000)
+f = Dagger.tofile(A, "mydata.jls")
+```
+
+Like `File`, `f` can still be used to reference the file's data in tasks. It is
+likely most useful to use `tofile` at the end of a task to save results:
+
+```julia
+function make_data()
+    A = rand(1000)
+    return Dagger.tofile(A, "mydata.jls")
+end
+fetch(Dagger.@spawn make_data())
+# Data was also written to "mydata.jls"
+```
+
+`tofile` takes the same keyword arguments as `File`, allowing the format of
+data on disk to be specified as desired.
 
 -----
 
