@@ -1,7 +1,5 @@
 import Base: reduce, map, mapreduce
 
-export reducebykey, reduce_async
-
 #### Map
 struct Map{T,N} <: ArrayOp{T,N}
     f::Function
@@ -16,16 +14,18 @@ function stage(ctx::Context, node::Map)
     primary = inputs[1] # all others will align to this guy
     domains = domainchunks(primary)
     thunks = similar(domains, Any)
+    partitioning = primary.partitioning
+    concat = primary.concat
     f = node.f
     for i=eachindex(domains)
         inps = map(x->chunks(x)[i], inputs)
         thunks[i] = Dagger.@spawn map(f, inps...)
     end
     RT = Base.promote_op(node.f, map(eltype, node.inputs)...)
-    return DArray(RT, domain(primary), domainchunks(primary), thunks)
+    return DArray(RT, domain(primary), domainchunks(primary), thunks, partitioning, concat)
 end
 
-map(f, x::ArrayOp, xs::ArrayOp...) = Map(f, (x, xs...))
+map(f, x::ArrayOp, xs::ArrayOp...) = _to_darray(Map(f, (x, xs...)))
 
 #### Reduce
 
@@ -43,7 +43,7 @@ function stage(ctx::Context, r::ReduceBlock)
     inp = stage(ctx, r.input)
     reduced_parts = map(x -> (Dagger.@spawn get_result=r.get_result r.op(x)), chunks(inp))
     r_op_master(args...,) = r.op_master(args)
-    Dagger.@spawn meta=true r_op_master(reduced_parts...) 
+    Dagger.@spawn meta=true r_op_master(reduced_parts...)
 end
 
 reduceblock_async(f, x::ArrayOp; get_result=true) = ReduceBlock(f, f, x, get_result)
@@ -54,18 +54,24 @@ reduceblock(f, g::Function, x::ArrayOp) = fetch(reduceblock_async(f, g, x))
 
 reduce_async(f::Function, x::ArrayOp) = reduceblock_async(xs->reduce(f,xs), xs->reduce(f,xs), x)
 
-sum(x::ArrayOp; dims::Union{Int,Nothing} = nothing) = _sum(x, dims)
-_sum(x, dims::Nothing) = reduceblock(sum, sum, x)
-_sum(x, dims::Int) = reduce(+, x; dims=dims)
+_reduce_maybeblock(f::Function, _::Function, x, dims::Nothing) = reduceblock(f, f, x)
+_reduce_maybeblock(_::Function, f::Function, x, dims::Int) = reduce(f, x; dims)
+
+sum(x::ArrayOp; dims::Union{Int,Nothing} = nothing) =
+    _reduce_maybeblock(sum, Base.add_sum, x, dims)
 sum(f::Function, x::ArrayOp) = reduceblock(a->sum(f, a), sum, x)
-prod(x::ArrayOp) = reduceblock(prod, x)
+
+prod(x::ArrayOp; dims::Union{Int,Nothing} = nothing) =
+    _reduce_maybeblock(prod, Base.mul_prod, x, dims)
 prod(f::Function, x::ArrayOp) = reduceblock(a->prod(f, a), prod, x)
 
-mean(x::ArrayOp) = reduceblock(mean, mean, x)
+mean(x::ArrayOp; dims::Union{Int,Nothing} = nothing) =
+    _reduce_maybeblock(mean, mean, x, dims)
+mean(f::Function, x::ArrayOp) = reduceblock(a->mean(f, a), mean, x)
 
-mapreduce(f::Function, g::Function, x::ArrayOp) = reduce(g, map(f, x)) #think about fetching
+mapreduce(f::Function, g::Function, x::ArrayOp) = reduce(g, map(f, x))
 
-function mapreducebykey_seq(f, op,  itr, dict=Dict())
+function mapreducebykey_seq(f, op, itr, dict=Dict())
     for x in itr
         y = f(x)
         if haskey(dict, y[1])
@@ -101,7 +107,7 @@ function Base.size(r::Reducedim)
     end
 end
 
-function reduce(dom::ArrayDomain; dims)
+function Base.reduce(dom::ArrayDomain; dims)
     if dims isa Int
         ArrayDomain(setindex(indexes(dom), dims, 1:1))
     else
@@ -114,13 +120,13 @@ function Reducedim(op, input, dims)
     Reducedim{T,ndims(input)}(op, input, dims)
 end
 
-function reduce(f::Function, x::ArrayOp; dims = nothing)
+function Base.reduce(f::Function, x::ArrayOp; dims = nothing)
     if dims === nothing
         return fetch(reduce_async(f,x))
     elseif dims isa Int
         dims = (dims,)
     end
-    Reducedim(f, x, dims::Tuple)
+    return _to_darray(Reducedim(f, x, dims::Tuple))
 end
 
 function stage(ctx::Context, r::Reducedim)
@@ -135,10 +141,10 @@ function stage(ctx::Context, r::Reducedim)
     end
     c = domainchunks(inp)
     colons = Any[Colon() for x in size(c)]
-    nd=ndims(domain(inp))
+    nd = ndims(domain(inp))
     colons[[Iterators.filter(d->d<=nd, r.dims)...]] .= 1
     dmn = c[colons...]
     d = reduce(domain(inp), dims=r.dims)
     ds = reduce(domainchunks(inp), dims=r.dims)
-    DArray(eltype(inp), d, ds, thunks)
+    return DArray(eltype(inp), d, ds, thunks, inp.partitioning, inp.concat)
 end

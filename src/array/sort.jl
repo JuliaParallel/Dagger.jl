@@ -332,8 +332,9 @@ function Base.sort(v::ArrayOp;
     nchunks = nchunks === nothing ? length(v1.chunks) : nchunks
     cs = dsort_chunks(v1.chunks, nchunks, nsamples,
                       order=ord, merge=(x,y)->merge_sorted(ord, x,y))
-    t=Dagger.spawn((xs...)->[xs...], cs...)
+    t = Dagger.spawn((xs...)->[xs...], cs...)
     chunks = fetch(t)
     dmn = ArrayDomain((1:sum(length(domain(c)) for c in chunks),))
-    DArray(eltype(v1), dmn, map(domain, chunks), chunks)
+    DArray(eltype(v1), dmn, map(domain, chunks), chunks,
+           v.partitioning, v.concat)
 end

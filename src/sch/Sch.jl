@@ -1342,7 +1342,8 @@ function do_task(to_proc, task_desc)
     thunk_id, est_time_util, est_alloc_util, est_occupancy,
         scope, Tf, data,
         send_result, persist, cache, meta,
-        options, propagated, ids, positions, ctx_vars, sch_handle, uid = task_desc
+        options, propagated, ids, positions,
+        ctx_vars, sch_handle, sch_uid = task_desc
     ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
 
     from_proc = OSProc()
@@ -1379,7 +1380,7 @@ function do_task(to_proc, task_desc)
     lock(TASK_SYNC) do
         while true
             # Get current time utilization for the selected processor
-            time_dict = get!(()->Dict{Processor,Ref{UInt64}}(), PROCESSOR_TIME_UTILIZATION, uid)
+            time_dict = get!(()->Dict{Processor,Ref{UInt64}}(), PROCESSOR_TIME_UTILIZATION, sch_uid)
             real_time_util = get!(()->Ref{UInt64}(UInt64(0)), time_dict, to_proc)
 
             # Get current allocation utilization and capacity
@@ -1484,6 +1485,7 @@ function do_task(to_proc, task_desc)
     if meta
         append!(fetched, data[2:end])
     end
+
     f = popfirst!(fetched)
     @assert !(f isa Chunk) "Failed to unwrap thunk function"
     fetched_args = Any[]
@@ -1519,8 +1521,8 @@ function do_task(to_proc, task_desc)
     result_meta = try
         # Set TLS variables
         Dagger.set_tls!((
-            sch_uid=uid,
-            sch_handle=sch_handle,
+            sch_uid,
+            sch_handle,
             processor=to_proc,
             task_spec=task_desc,
         ))

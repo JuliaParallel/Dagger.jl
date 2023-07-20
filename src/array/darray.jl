@@ -12,7 +12,6 @@ An `N`-dimensional domain over an array.
 struct ArrayDomain{N}
     indexes::NTuple{N, Any}
 end
-
 include("../lib/domain-blocks.jl")
 
 
@@ -81,7 +80,8 @@ Base.IndexStyle(::Type{<:ArrayOp}) = IndexCartesian()
 
 collect(x::ArrayOp) = collect(fetch(x))
 
-Base.fetch(x::ArrayOp) = fetch(cached_stage(Context(global_context()), x)::DArray)
+_to_darray(x::ArrayOp) = cached_stage(Context(global_context()), x)::DArray
+Base.fetch(x::ArrayOp) = fetch(_to_darray(x))
 
 collect(x::Computation) = collect(fetch(x))
 
@@ -97,6 +97,27 @@ function Base.show(io::IO, x::ArrayOp)
     show(io, m, x)
 end
 
+export BlockPartition, Blocks
+
+abstract type AbstractBlocks{N} end
+
+abstract type AbstractMultiBlocks{N}<:AbstractBlocks{N} end
+
+abstract type AbstractSingleBlocks{N}<:AbstractBlocks{N} end
+
+struct Blocks{N} <: AbstractMultiBlocks{N}
+    blocksize::NTuple{N, Int}
+end
+
+"""
+    Blocks(xs...)
+
+Indicates the size of an array operation, specified as `xs`, whose length
+indicates the number of dimensions in the resulting array.
+"""
+Blocks(xs::Int...) = Blocks(xs)
+
+
 """
     DArray{T,N,F}(domain, subdomains, chunks, concat)
     DArray(T, domain, subdomains, chunks, [concat=cat])
@@ -111,23 +132,35 @@ An N-dimensional distributed array of element type T, with a concatenation funct
 - `concat::F`: a function of type `F`. `concat(x, y; dims=d)` takes two chunks `x` and `y`
   and concatenates them along dimension `d`. `cat` is used by default.
 """
-mutable struct DArray{T,N,F} <: ArrayOp{T, N}
+mutable struct DArray{T,N,B<:AbstractBlocks{N},F} <: ArrayOp{T, N}
     domain::ArrayDomain{N}
     subdomains::AbstractArray{ArrayDomain{N}, N}
     chunks::AbstractArray{Any, N}
+    partitioning::B
     concat::F
-    function DArray{T,N,F}(domain, subdomains, chunks, concat::Function) where {T,N,F}
-        new{T,N,F}(domain, subdomains, chunks, concat)
+    function DArray{T,N,B,F}(domain, subdomains, chunks, partitioning::B, concat::Function) where {T,N,B,F}
+        new{T,N,B,F}(domain, subdomains, chunks, partitioning, concat)
     end
 end
 
 # mainly for backwards-compatibility
-DArray{T, N}(domain, subdomains, chunks) where {T,N} = DArray(T, domain, subdomains, chunks)
+DArray{T, N}(domain, subdomains, chunks, partitioning, concat=cat) where {T,N} =
+    DArray(T, domain, subdomains, chunks, partitioning, concat)
 
 function DArray(T, domain::ArrayDomain{N},
-             subdomains::AbstractArray{ArrayDomain{N}, N},
-             chunks::AbstractArray{<:Any, N}, concat=cat) where N
-    DArray{T, N, typeof(concat)}(domain, subdomains, chunks, concat)
+                subdomains::AbstractArray{ArrayDomain{N}, N},
+                chunks::AbstractArray{<:Any, N}, partitioning::B, concat=cat) where {N,B<:AbstractMultiBlocks{N}}
+    DArray{T,N,B,typeof(concat)}(domain, subdomains, chunks, partitioning, concat)
+end
+
+function DArray(T, domain::ArrayDomain{N},
+                subdomains::ArrayDomain{N},
+                chunks::Any, partitioning::B, concat=cat) where {N,B<:AbstractSingleBlocks{N}}
+    _subdomains = Array{ArrayDomain{N}, N}(undef, ntuple(i->1, N)...)
+    _subdomains[1] = subdomains
+    _chunks = Array{Any, N}(undef, ntuple(i->1, N)...)
+    _chunks[1] = chunks
+    DArray{T,N,B,typeof(concat)}(domain, _subdomains, _chunks, partitioning, concat)
 end
 
 domain(d::DArray) = d.domain
@@ -136,9 +169,8 @@ domainchunks(d::DArray) = d.subdomains
 size(x::DArray) = size(domain(x))
 stage(ctx, c::DArray) = c
 
-function collect(d::DArray; tree=false)
+function Base.collect(d::DArray; tree=false)
     a = fetch(d)
-
     if isempty(d.chunks)
         return Array{eltype(d)}(undef, size(d)...)
     end
@@ -163,18 +195,18 @@ function Base.isequal(x::ArrayOp, y::ArrayOp)
     x === y
 end
 
-function Base.similar(x::DArray{T,N,F}) where {T,N,F}
+function Base.similar(x::DArray{T,N}) where {T,N}
     alloc(idx, sz) = Array{T,N}(undef, sz)
     thunks = [Dagger.@spawn alloc(i, size(x)) for (i, x) in enumerate(x.subdomains)]
-    return DArray{T,N,F}(x.domain, x.subdomains, thunks, x.concat)
+    return DArray(T, x.domain, x.subdomains, thunks, x.partitioning, x.concat)
 end
 
-Base.copy(x::DArray{T,N,F}) where {T,N,F} =
-    cached_stage(Context(global_context()), map(identity, x))::DArray{T,N,F}
+Base.copy(x::DArray{T,N,B,F}) where {T,N,B,F} =
+    map(identity, x)::DArray{T,N,B,F}
 
 # Because OrdinaryDiffEq uses `Base.promote_op(/, ::DArray, ::Real)`
-Base.:(/)(x::DArray{T,N,F}, y::U) where {T<:Real,U<:Real,N,F} =
-    (x ./ y)::DArray{Base.promote_op(/, T, U),N,F}
+Base.:(/)(x::DArray{T,N,B,F}, y::U) where {T<:Real,U<:Real,N,B,F} =
+    (x ./ y)::DArray{Base.promote_op(/, T, U),N,B,F}
 
 """
     view(c::DArray, d)
@@ -184,7 +216,7 @@ A `view` of a `DArray` chunk returns a `DArray` of `Thunk`s.
 function Base.view(c::DArray, d)
     subchunks, subdomains = lookup_parts(chunks(c), domainchunks(c), d)
     d1 = alignfirst(d)
-    DArray(eltype(c), d1, subdomains, subchunks)
+    DArray(eltype(c), d1, subdomains, subchunks, c.partitioning, c.concat)
 end
 
 function group_indices(cumlength, idxs,at=1, acc=Any[])
@@ -246,12 +278,13 @@ function Base.fetch(c::DArray{T}) where T
         sz = size(thunks)
         dmn = domain(c)
         dmnchunks = domainchunks(c)
-        fetch(Dagger.spawn(Options(meta=true), thunks...) do results...
+        return fetch(Dagger.spawn(Options(meta=true), thunks...) do results...
             t = eltype(fetch(results[1]))
-            DArray(t, dmn, dmnchunks, reshape(Any[results...], sz))
+            DArray(t, dmn, dmnchunks, reshape(Any[results...], sz),
+                   c.partitioning, c.concat)
         end)
     else
-        c
+        return c
     end
 end
 
@@ -290,35 +323,35 @@ Base.@deprecate_binding ComputedArray DArray
 
 export Distribute, distribute
 
-struct Distribute{T, N} <: ArrayOp{T, N}
+struct Distribute{T,N,B<:AbstractBlocks} <: ArrayOp{T, N}
     domainchunks
+    partitioning::B
     data::AbstractArray{T,N}
 end
 
 size(x::Distribute) = size(domain(x.data))
 
-export BlockPartition, Blocks
-
-"""
-    Blocks(xs...)
-
-Indicates the size of an array operation, specified as `xs`, whose length
-indicates the number of dimensions in the resulting array.
-"""
-struct Blocks{N}
-    blocksize::NTuple{N, Int}
-end
-Blocks(xs::Int...) = Blocks(xs)
-
 Base.@deprecate BlockPartition Blocks
 
 
 Distribute(p::Blocks, data::AbstractArray) =
-    Distribute(partition(p, domain(data)), data)
+    Distribute(partition(p, domain(data)), p, data)
+
+function Distribute(domainchunks::DomainBlocks{N}, data::AbstractArray{T,N}) where {T,N}
+    p = Blocks(ntuple(i->first(domainchunks.cumlength[i]), N))
+    Distribute(domainchunks, p, data)
+end
+
+function Distribute(data::AbstractArray{T,N}) where {T,N}
+    nprocs = sum(w->length(Dagger.get_processors(OSProc(w))),
+                 Distributed.procs())
+    p = Blocks(ntuple(i->max(cld(size(data, i), nprocs), 1), N))
+    return Distribute(partition(p, domain(data)), p, data)
+end
 
 function stage(ctx::Context, d::Distribute)
     if isa(d.data, ArrayOp)
-        # distributing a dsitributed array
+        # distributing a distributed array
         x = cached_stage(ctx, d.data)
         if d.domainchunks == domainchunks(x)
             return x # already properly distributed
@@ -329,6 +362,8 @@ function stage(ctx::Context, d::Distribute)
         cs = map(d.domainchunks) do idx
             chunks = cached_stage(ctx, x[idx]).chunks
             shape = size(chunks)
+            # TODO: fix hashing
+            #hash = uhash(idx, Base.hash(Distribute, Base.hash(d.data)))
             Dagger.spawn(shape, chunks...) do shape, parts...
                 if prod(shape) == 0
                     return Array{T}(undef, shape)
@@ -339,18 +374,21 @@ function stage(ctx::Context, d::Distribute)
             end
         end
     else
-        cs = map(c -> (Dagger.@spawn identity(d.data[c])), d.domainchunks)
+        cs = map(d.domainchunks) do c
+            # TODO: fix hashing
+            #hash = uhash(c, Base.hash(Distribute, Base.hash(d.data)))
+            Dagger.@spawn identity(d.data[c])
+        end
     end
-    DArray(
-           eltype(d.data),
-           domain(d.data),
-           d.domainchunks,
-           cs
-    )
+    return DArray(eltype(d.data),
+                  domain(d.data),
+                  d.domainchunks,
+                  cs,
+                  d.partitioning)
 end
 
-function distribute(x::AbstractArray, dist)
-    fetch(Distribute(dist, x))
+function distribute(x::AbstractArray, dist::Blocks)
+    _to_darray(Distribute(dist, x))
 end
 
 function distribute(x::AbstractArray{T,N}, n::NTuple{N}) where {T,N}
