@@ -12,7 +12,6 @@ An `N`-dimensional domain over an array.
 struct ArrayDomain{N}
     indexes::NTuple{N, Any}
 end
-
 include("../lib/domain-blocks.jl")
 
 
@@ -352,7 +351,7 @@ end
 
 function stage(ctx::Context, d::Distribute)
     if isa(d.data, ArrayOp)
-        # distributing a dsitributed array
+        # distributing a distributed array
         x = cached_stage(ctx, d.data)
         if d.domainchunks == domainchunks(x)
             return x # already properly distributed
