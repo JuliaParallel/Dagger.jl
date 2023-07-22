@@ -76,7 +76,7 @@ steps:
           version: "1.7"
       - JuliaCI/julia-coverage#v1:
           codecov: true
-    command: "julia --project -e 'using Pkg; Pkg.develop(;path=\"lib/TimespanLogging\"); Pkg.test(\"TimespanLogging\")'"
+    command: "julia --project -e 'using Pkg; Pkg.instantiate(); Pkg.develop(;path=\"lib/TimespanLogging\"); Pkg.test(\"TimespanLogging\")'"
   - label: Julia 1.7 - DaggerWebDash
     timeout_in_minutes: 60
     <<: *test
