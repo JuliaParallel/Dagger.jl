@@ -104,6 +104,12 @@ A = Dagger.spawn() do
 end
 ```
 
+or by specifying the `worker` argument to `@mutable`:
+
+```julia
+A = Dagger.@mutable worker=2 rand(1000, 1000)
+```
+
 ### Parallel reduction
 
 Reductions are often parallelized by reducing a set of partitions on each

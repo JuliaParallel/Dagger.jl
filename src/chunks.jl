@@ -115,23 +115,42 @@ affinity(r::FileRef) = OSProc(1)=>r.size
 
 ### Mutation
 
-"Wraps `x` in a `Chunk` on `proc`, scoped to `scope`, which allows `x` to be mutated by tasks that use it."
-macro mutable(proc, scope, x)
-    :(Dagger.tochunk($(esc(x)), $(esc(proc)), $(esc(scope))))
+function _mutable_inner(@nospecialize(f), proc, scope)
+    result = f()
+    return Ref(Dagger.tochunk(result, proc, scope))
 end
-"Creates a mutable `Chunk` on `proc`, scoped to exactly `proc`."
-macro mutable(proc, x)
+
+"""
+    mutable(f::Base.Callable; worker, processor, scope) -> Chunk
+    @mutable [worker=1] [processor=OSProc()] [scope=ProcessorScope()] f()
+
+Calls `f()` on the specified worker or processor, returning a `Chunk`
+referencing the result with the specified scope `scope`.
+"""
+function mutable(@nospecialize(f); worker=nothing, processor=nothing, scope=nothing)
+    if processor === nothing
+        if worker === nothing
+            processor = OSProc()
+        else
+            processor = OSProc(worker)
+        end
+    else
+        @assert worker === nothing "mutable: Can't mix worker and processor"
+    end
+    if scope === nothing
+        scope = processor isa OSProc ? ProcessScope(processor) : ExactScope(processor)
+    end
+    return fetch(Dagger.@spawn scope=scope _mutable_inner(f, processor, scope))[]
+end
+
+macro mutable(exs...)
+    opts = esc.(exs[1:end-1])
+    ex = exs[end]
     quote
-        let proc = $(esc(proc))
-            let scope = proc isa OSProc ? Dagger.ProcessScope(proc.pid) : Dagger.ExactScope(proc)
-                Dagger.@mutable proc scope $(esc(x))
-            end
+        let f = @noinline ()->$(esc(ex))
+            $mutable(f; $(opts...))
         end
     end
-end
-"Creates a mutable `Chunk` on the current worker."
-macro mutable(x)
-    :(Dagger.@mutable OSProc() Dagger.ProcessScope() $(esc(x)))
 end
 
 """
@@ -181,13 +200,10 @@ function shard(@nospecialize(f); procs=nothing, workers=nothing, per_thread=fals
     shard_dict = Dict{Processor,Chunk}()
     for proc in procs
         scope = proc isa OSProc ? ProcessScope(proc) : ExactScope(proc)
-        thunk = Dagger.@spawn scope=scope _shard_inner(f, proc, scope)
+        thunk = Dagger.@spawn scope=scope _mutable_inner(f, proc, scope)
         shard_dict[proc] = fetch(thunk)[]
     end
     return Shard(shard_dict)
-end
-function _shard_inner(@nospecialize(f), proc, scope)
-    Ref(Dagger.@mutable proc scope f())
 end
 
 "Creates a `Shard`. See [`Dagger.shard`](@ref) for details."
