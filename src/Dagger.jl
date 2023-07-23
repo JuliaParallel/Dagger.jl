@@ -36,6 +36,7 @@ include("compute.jl")
 include("utils/clock.jl")
 include("utils/system_uuid.jl")
 include("utils/locked-object.jl")
+include("utils/caching.jl")
 include("sch/Sch.jl"); using .Sch
 
 # Array computations
