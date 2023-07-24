@@ -128,11 +128,9 @@ uuid = "d6f4376e-aef5-505a-96c1-9c027394607a"
 
 [[deps.MemPool]]
 deps = ["DataStructures", "Distributed", "Mmap", "Random", "Serialization", "Sockets"]
-git-tree-sha1 = "8862fe03a7edf2faa9cf4d0584d453a05377bf9c"
-repo-rev = "master"
-repo-url = "https://github.com/JuliaData/MemPool.jl.git"
+git-tree-sha1 = "096f99e66b8cdf44fa95ee9e2d7971e0264e4ec3"
 uuid = "f9f48841-c794-520a-933b-121f7ba6ed94"
-version = "0.4.2"
+version = "0.4.3"
 
 [[deps.Missings]]
 deps = ["DataAPI"]
