@@ -1,0 +1,47 @@
+name: Custom Commands
+
+on:
+  pull_request:
+
+jobs:
+  custom_actions:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for commands
+        id: read_commands
+        run: |
+          while true; do
+            ci_commands=$(curl -sH "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -X GET "${{ github.event.pull_request.comments_url }}" | jq -r ".[] | select(.body | startswith(\"/run-actions\")) | .body")
+            if [ ! -z "$ci_commands" ]; then
+              echo "Read commands $ci_commands"
+              echo "ci_commands=$ci_commands" >> $GITHUB_OUTPUT
+              break
+            fi
+            sleep 30
+          done
+
+      - uses: actions/checkout@v2
+      - uses: julia-actions/setup-julia@v1
+        with:
+          version: '1.9'
+          arch: 'x64'
+
+      - name: Run provided commands
+        run: |
+          echo "Got custom commands:"
+          ci_commands="${{ steps.read_commands.outputs.ci_commands }}"
+          echo $ci_commands
+          if echo "$ci_commands" | grep -q benchmark; then
+            echo "Running benchmarks..."
+            julia -e 'using Pkg; Pkg.add("BenchmarkTools"); Pkg.develop(;path=pwd())'
+            JULIA_PROJECT=$PWD julia --project benchmarks/benchmark.jl
+          fi
+          if echo "$ci_commands" | grep -q format; then
+            echo "Running formatter..."
+          fi
+          if echo "$ci_commands" | grep -q premerge; then
+            echo "Running pre-merge checks..."
+          fi
+        env:
+          BENCHMARK: "nmf:raw,dagger"
+          BENCHMARK_SCALE: "5:5:10"
