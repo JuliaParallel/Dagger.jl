@@ -36,9 +36,9 @@ version = "0.12.10"
 
 [[deps.Compat]]
 deps = ["Dates", "LinearAlgebra", "UUIDs"]
-git-tree-sha1 = "4e88377ae7ebeaf29a047aa1ee40826e0b708a5d"
+git-tree-sha1 = "5ce999a19f4ca23ea484e92a1774a61b8ca4cf8e"
 uuid = "34da2185-b29b-5c13-b0c7-acf172513d20"
-version = "4.7.0"
+version = "4.8.0"
 
 [[deps.CompilerSupportLibraries_jll]]
 deps = ["Artifacts", "Libdl"]
@@ -211,9 +211,9 @@ version = "1.6.0"
 
 [[deps.StatsBase]]
 deps = ["DataAPI", "DataStructures", "LinearAlgebra", "LogExpFunctions", "Missings", "Printf", "Random", "SortingAlgorithms", "SparseArrays", "Statistics", "StatsAPI"]
-git-tree-sha1 = "d1bf48bfcc554a3761a133fe3a9bb01488e06916"
+git-tree-sha1 = "75ebe04c5bed70b91614d684259b661c9e6274a4"
 uuid = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
-version = "0.33.21"
+version = "0.34.0"
 
 [[deps.Test]]
 deps = ["InteractiveUtils", "Logging", "Random", "Serialization"]
