@@ -6,9 +6,9 @@ using MPI
 export MPIBlocks
 
 struct MPIBlocks{N} <: Dagger.AbstractSingleBlocks{N}
-    blocksize::NTuple{N, Int}
+    blocksize::NTuple{N, Union{Int, Nothing}}
 end
-MPIBlocks(xs::Int...) = MPIBlocks(xs)
+MPIBlocks(xs::Union{Int,Nothing}...) = MPIBlocks(xs)
 
 function Dagger.distribute(::Type{A},
                            x::Union{AbstractArray, Nothing},
@@ -16,17 +16,38 @@ function Dagger.distribute(::Type{A},
                            comm::MPI.Comm=MPI.COMM_WORLD,
                            root::Integer=0) where {A<:AbstractArray{T, N}} where {T, N}
     isroot = MPI.Comm_rank(comm) == root
-
+    csz = MPI.Comm_size(comm)
+    if any(isnothing, dist.blocksize)
+        newdims = map(collect(dist.blocksize)) do d
+            something(d, 1)
+        end
+        if isroot
+            for i in 1:N
+                if dist.blocksize[i] !== nothing
+                    continue
+                end
+                if csz * prod(newdims) >= length(x)
+                    break
+                end
+                newdims[i] = min(size(x, i),  cld(length(x), csz * prod(newdims)))
+             end
+        end
+        newdims = MPI.bcast(newdims, comm, root=root)
+        dist = MPIBlocks(newdims...)
+    end
+    d = MPI.bcast(domain(x), comm, root=root)
     # TODO: Make better load balancing
-
-    data = Array{T, N}(undef, dist.blocksize)
+    data = Array{T,N}(undef, dist.blocksize)
     if isroot
         cs = Array{T, N}(undef, size(x))
+        #TODO: deal with uneven partitions(scatterv possibly)
+        @assert prod(dist.blocksize) * csz == length(x) "Cannot match length of array and number of ranks"
         parts = partition(dist, domain(x))
         idx = 1
         for part in parts
-            cs[idx:(idx - 1 + prod(dist.blocksize))] = x[part]
-            idx += prod(dist.blocksize)
+            step = prod(map(length, part.indexes))
+            cs[idx:(idx - 1 + step)] = x[part]
+            idx += step
         end
         MPI.Scatter!(MPI.UBuffer(cs, div(length(cs), MPI.Comm_size(comm))), data, comm, root=root)
     else
@@ -35,7 +56,7 @@ function Dagger.distribute(::Type{A},
 
     data = Dagger.tochunk(data)
 
-    return Dagger.DArray(T, domain(data), domain(data), data, dist)
+    return Dagger.DArray(T, d, domain(data), data, dist)
 end
 
 function Dagger.distribute(::Type{A},
@@ -96,5 +117,31 @@ function Base.reduce(f::Function, x::Dagger.DArray{T,N,MPIBlocks{N}};
         end
     end
 end
+
+function Base.collect(x::Dagger.DArray{T,N,MPIBlocks{N}};
+                     comm=MPI.COMM_WORLD, root=nothing, acrossranks::Bool=true) where {T,N}
+    if !acrossranks
+        a = fetch(x)
+        if isempty(x.chunks)
+            return Array{eltype(d)}(undef, size(x)...)
+        end
+
+        dimcatfuncs = [(d...) -> d.concat(d..., dims=i) for i in 1:ndims(x)]
+        Dagger.treereduce_nd(dimcatfuncs, asyncmap(fetch, a.chunks))
+    else
+        datasnd = collect(x, acrossranks=false)
+        if root === nothing
+            tmp = MPI.Allgather(datasnd, comm)
+        else
+            tmp = MPI.Gather(datasnd, comm, root=root)
+            if tmp === nothing
+                return
+            end
+        end
+        return(reshape(tmp, size(x.domain)))
+    end
+end
+
+
 
 end # module
