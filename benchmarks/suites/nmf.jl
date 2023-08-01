@@ -55,40 +55,43 @@ function nmf_suite(ctx; method, accels)
             nw = length(workers())
             nsuite = BenchmarkGroup()
             while nw > 0
-                opts = if accel == "cuda"
+                scope = if accel == "cuda"
+                    error("Not implemented")
                     Dagger.Sch.SchedulerOptions(;proctypes=[
                         DaggerGPU.CuArrayDeviceProc
                     ])
                 elseif accel == "amdgpu"
+                    error("Not implemented")
                     Dagger.Sch.SchedulerOptions(;proctypes=[
                         DaggerGPU.ROCArrayProc
                     ])
                 elseif accel == "cpu"
-                    Dagger.Sch.SchedulerOptions()
+                    scope = Dagger.scope(;workers=workers()[1:nw])
                 else
                     error("Unknown accelerator $accel")
                 end
                 #bsz = ncol ÷ length(workers())
                 bsz = ncol ÷ 64
                 nsuite["Workers: $nw"] = @benchmarkable begin
-                    _ctx = Context($ctx, workers()[1:$nw])
-                    compute(_ctx, nnmf($X[], $W[], $H[]); options=$opts)
+                    Dagger.with_options(;scope=$scope) do
+                        fetch(nnmf($X[], $W[], $H[]))
+                    end
                 end setup=begin
                     _nw, _scale = $nw, $scale
                     @info "Starting $_nw worker Dagger NNMF (scale by $_scale)"
                     if $accel == "cuda"
                         # FIXME: Allocate with CUDA.rand if possible
-                        $X[] = Dagger.mapchunks(CUDA.cu, compute(rand(Blocks($bsz, $bsz), Float32, $nrow, $ncol); options=$opts))
-                        $W[] = Dagger.mapchunks(CUDA.cu, compute(rand(Blocks($bsz, $bsz), Float32, $nrow, $nfeatures); options=$opts))
-                        $H[] = Dagger.mapchunks(CUDA.cu, compute(rand(Blocks($bsz, $bsz), Float32, $nfeatures, $ncol); options=$opts))
+                        $X[] = Dagger.mapchunks(CuArray, rand(Blocks($bsz, $bsz), Float32, $nrow, $ncol))
+                        $W[] = Dagger.mapchunks(CuArray, rand(Blocks($bsz, $bsz), Float32, $nrow, $nfeatures))
+                        $H[] = Dagger.mapchunks(CuArray, rand(Blocks($bsz, $bsz), Float32, $nfeatures, $ncol))
                     elseif $accel == "amdgpu"
-                        $X[] = Dagger.mapchunks(ROCArray, compute(rand(Blocks($bsz, $bsz), Float32, $nrow, $ncol); options=$opts))
-                        $W[] = Dagger.mapchunks(ROCArray, compute(rand(Blocks($bsz, $bsz), Float32, $nrow, $nfeatures); options=$opts))
-                        $H[] = Dagger.mapchunks(ROCArray, compute(rand(Blocks($bsz, $bsz), Float32, $nfeatures, $ncol); options=$opts))
+                        $X[] = Dagger.mapchunks(ROCArray, rand(Blocks($bsz, $bsz), Float32, $nrow, $ncol))
+                        $W[] = Dagger.mapchunks(ROCArray, rand(Blocks($bsz, $bsz), Float32, $nrow, $nfeatures))
+                        $H[] = Dagger.mapchunks(ROCArray, rand(Blocks($bsz, $bsz), Float32, $nfeatures, $ncol))
                     elseif $accel == "cpu"
-                        $X[] = compute(rand(Blocks($bsz, $bsz), Float32, $nrow, $ncol); options=$opts)
-                        $W[] = compute(rand(Blocks($bsz, $bsz), Float32, $nrow, $nfeatures); options=$opts)
-                        $H[] = compute(rand(Blocks($bsz, $bsz), Float32, $nfeatures, $ncol); options=$opts)
+                        $X[] = rand(Blocks($bsz, $bsz), Float32, $nrow, $ncol)
+                        $W[] = rand(Blocks($bsz, $bsz), Float32, $nrow, $nfeatures)
+                        $H[] = rand(Blocks($bsz, $bsz), Float32, $nfeatures, $ncol)
                     end
                 end teardown=begin
                     if render != "" && !live
