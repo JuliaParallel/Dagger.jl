@@ -36,11 +36,10 @@ jobs:
             julia -e 'using Pkg; Pkg.add("BenchmarkTools"); Pkg.develop(;path=pwd())'
             JULIA_PROJECT=$PWD julia --project benchmarks/benchmark.jl
           fi
-          if echo "$ci_commands" | grep -q format; then
-            echo "Running formatter..."
-          fi
           if echo "$ci_commands" | grep -q premerge; then
             echo "Running pre-merge checks..."
+            julia -e 'using Pkg; Pkg.add("Aqua"); Pkg.develop(;path=pwd())'
+            JULIA_PROJECT=$PWD julia --project -e 'using Aqua, Dagger; Aqua.test_all(Dagger)'
           fi
         env:
           BENCHMARK: "nmf:raw,dagger"
