@@ -16,11 +16,11 @@ function size(x::Transpose)
     end
 end
 
-transpose(x::ArrayOp) = Transpose(transpose, x)
-transpose(x::Union{Chunk, Thunk}) = Thunk(transpose, x)
+transpose(x::ArrayOp) = _to_darray(Transpose(transpose, x))
+transpose(x::Union{Chunk, EagerThunk}) = @spawn transpose(x)
 
-adjoint(x::ArrayOp) = Transpose(adjoint, x)
-adjoint(x::Union{Chunk, Thunk}) = Thunk(adjoint, x)
+adjoint(x::ArrayOp) = _to_darray(Transpose(adjoint, x))
+adjoint(x::Union{Chunk, EagerThunk}) = @spawn adjoint(x)
 
 function adjoint(x::ArrayDomain{2})
     d = indexes(x)
@@ -28,17 +28,26 @@ function adjoint(x::ArrayDomain{2})
 end
 function adjoint(x::ArrayDomain{1})
     d = indexes(x)
-    ArrayDomain(1, d[1])
+    ArrayDomain(1:1, d[1])
+end
+
+function adjoint(x::Blocks{2})
+    d = x.blocksize
+    Blocks(d[2], d[1])
+end
+function adjoint(x::Blocks{1})
+    d = x.blocksize
+    Blocks(1, d[1])
 end
 
 function _ctranspose(x::AbstractArray)
-    Any[delayed(adjoint)(x[j,i]) for i=1:size(x,2), j=1:size(x,1)]
+    Any[Dagger.@spawn(adjoint(x[j,i])) for i=1:size(x,2), j=1:size(x,1)]
 end
 
 function stage(ctx::Context, node::Transpose)
     inp = cached_stage(ctx, node.input)
     thunks = _ctranspose(chunks(inp))
-    DArray(eltype(inp), domain(inp)', domainchunks(inp)', thunks)
+    return DArray(eltype(inp), domain(inp)', domainchunks(inp)', thunks, inp.partitioning', inp.concat)
 end
 
 import Base: *, +
@@ -49,33 +58,31 @@ struct MatMul{T, N} <: ArrayOp{T, N}
 end
 
 function mul_size(a,b)
-  if ndims(b) == 1
-    (size(a,1),)
-  else
-    (size(a,1), size(b,2))
-  end
+    if ndims(b) == 1
+        (size(a,1),)
+    else
+        (size(a,1), size(b,2))
+    end
 end
 size(x::MatMul) = mul_size(x.a, x.b)
 MatMul(a,b) =
-  MatMul{promote_type(eltype(a), eltype(b)), length(mul_size(a,b))}(a,b)
-(*)(a::ArrayOp, b::ArrayOp) = MatMul(a,b)
+    MatMul{promote_type(eltype(a), eltype(b)), length(mul_size(a,b))}(a,b)
+(*)(a::ArrayOp, b::ArrayOp) = _to_darray(MatMul(a,b))
 # Bonus method for matrix-vector multiplication
-(*)(a::ArrayOp, b::Vector) = MatMul(a,PromotePartition(b))
-(*)(a::AbstractArray, b::ArrayOp) = MatMul(PromotePartition(a), b)
+(*)(a::ArrayOp, b::Vector) = _to_darray(MatMul(a,PromotePartition(b)))
+(*)(a::AbstractArray, b::ArrayOp) = _to_darray(MatMul(PromotePartition(a), b))
 
 function (*)(a::ArrayDomain{2}, b::ArrayDomain{2})
-
     if size(a, 2) != size(b, 1)
         throw(DimensionMismatch("The domains cannot be multiplied"))
     end
-
-    ArrayDomain((indexes(a)[1], indexes(b)[2]))
+    return ArrayDomain((indexes(a)[1], indexes(b)[2]))
 end
 function (*)(a::ArrayDomain{2}, b::ArrayDomain{1})
     if size(a, 2) != length(b)
         throw(DimensionMismatch("The domains cannot be multiplied"))
     end
-    ArrayDomain((indexes(a)[1],))
+    return ArrayDomain((indexes(a)[1],))
 end
 
 function (*)(a::Blocks{2}, b::Blocks{2})
@@ -88,11 +95,15 @@ function (+)(a::ArrayDomain, b::ArrayDomain)
     if a == b
         DimensionMismatch("The domains cannot be added")
     end
-    a
+    return a
 end
 
-(*)(a::Union{Chunk, Thunk}, b::Union{Chunk, Thunk}) = Thunk(*, a,b)
-(+)(a::Union{Chunk, Thunk}, b::Union{Chunk, Thunk}) = Thunk(+, a,b)
+struct BinaryComputeOp{F} end
+BinaryComputeOp{F}(x::Union{Chunk,EagerThunk}, y::Union{Chunk,EagerThunk}) where F = @spawn F(x, y)
+BinaryComputeOp{F}(x, y) where F = F(x, y)
+
+const AddComputeOp = BinaryComputeOp{+}
+const MulComputeOp = BinaryComputeOp{*}
 
 # we define our own matmat and matvec multiply
 # for computing the new domains and thunks.
@@ -101,7 +112,7 @@ function _mul(a::Matrix, b::Matrix; T=eltype(a))
     n = size(a, 2)
     for i=1:size(a,1)
         for j=1:size(b, 2)
-            c[i,j] = treereduce(+, map(*, reshape(a[i,:], (n,)), b[:, j]))
+            c[i,j] = treereduce(AddComputeOp, map(MulComputeOp, reshape(a[i,:], (n,)), b[:, j]))
         end
     end
     c
@@ -111,14 +122,14 @@ function _mul(a::Matrix, b::Vector; T=eltype(b))
     c = Array{T}(undef, size(a,1))
     n = size(a,2)
     for i=1:size(a,1)
-        c[i] = treereduce(+, map(*, reshape(a[i, :], (n,)), b))
+        c[i] = treereduce(AddComputeOp, map(MulComputeOp, reshape(a[i, :], (n,)), b))
     end
     c
 end
 
 function _mul(a::Vector, b::Vector; T=eltype(b))
     @assert length(b) == 1
-    [x * b[1] for x in a]
+    [MulComputeOp(x, b[1]) for x in a]
 end
 
 function promote_distribution(ctx::Context, m::MatMul, a,b)
@@ -172,11 +183,14 @@ function stage_operands(ctx::Context, ::MatMul, a::PromotePartition, b::ArrayOp)
     cached_stage(ctx, Distribute(dmn_out, a.data)), stg_b
 end
 
-function stage(ctx::Context, mul::MatMul)
+function stage(ctx::Context, mul::MatMul{T,N}) where {T,N}
     a, b = stage_operands(ctx, mul, mul.a, mul.b)
     d = domain(a)*domain(b)
-    DArray(Any, d, domainchunks(a)*domainchunks(b),
-                          _mul(chunks(a), chunks(b); T=Thunk))
+    ET = Base.promote_type(eltype(a), eltype(b))
+    # TODO: Pick a better partitioning
+    p = ndims(a) == N ? a.partitioning : b.partitioning
+    DArray(ET, d, domainchunks(a)*domainchunks(b),
+           _mul(chunks(a), chunks(b); T=Any), p)
 end
 
 Base.power_by_squaring(x::DArray, i::Int) = foldl(*, ntuple(idx->x, i))
@@ -195,8 +209,8 @@ size(s::Scale) = size(s.l)
 
 scale(l::Number, r::ArrayOp) = BlockwiseOp(x->scale(l, x), (r,))
 scale(l::Vector, r::ArrayOp) = scale(PromotePartition(l), r)
-(*)(l::Diagonal, r::ArrayOp) = Scale(PromotePartition(l.diag), r)
-scale(l::ArrayOp, r::ArrayOp) = Scale(l, r)
+(*)(l::Diagonal, r::ArrayOp) = _to_darray(Scale(PromotePartition(l.diag), r))
+scale(l::ArrayOp, r::ArrayOp) = _to_darray(Scale(l, r))
 
 function stage_operand(ctx::Context, ::Scale, a, b::PromotePartition)
     ps = domainchunks(a)
@@ -211,7 +225,7 @@ end
 function _scale(l, r)
     res = similar(r, Any)
     for i=1:length(l)
-        res[i,:] = map(x->Thunk((a,b) -> Diagonal(a)*b, l[i], x), r[i,:])
+        res[i,:] = map(x->Dagger.spawn((a,b) -> Diagonal(a)*b, l[i], x), r[i,:])
     end
     res
 end
@@ -223,7 +237,8 @@ function stage(ctx::Context, scal::Scale)
     @assert size(domain(r), 1) == size(domain(l), 1)
 
     scal_parts = _scale(chunks(l), chunks(r))
-    DArray(Any, domain(r), domainchunks(r), scal_parts)
+    # TODO: Concrete eltype
+    DArray(Any, domain(r), domainchunks(r), scal_parts, r.partitioning)
 end
 
 struct Concat{T,N} <: ArrayOp{T,N}
@@ -231,8 +246,8 @@ struct Concat{T,N} <: ArrayOp{T,N}
     inputs::Tuple
 end
 Concat(axis::Int, inputs::Tuple) =
-  Concat{promote_type(map(eltype, inputs)...),
-         ndims(inputs[1])}(axis, inputs)
+    Concat{promote_type(map(eltype, inputs)...),
+           ndims(inputs[1])}(axis, inputs)
 
 function size(c::Concat)
     sz = [size(c.inputs[1])...]
@@ -262,10 +277,13 @@ function stage(ctx::Context, c::Concat)
     dmnchunks = cumulative_domains(cat(map(domainchunks, inp)..., dims = c.axis))
     thunks = cat(map(chunks, inp)..., dims = c.axis)
     T = promote_type(map(eltype, inp)...)
-    DArray(T, dmn, dmnchunks, thunks)
+    # TODO: Select partitioning better
+    DArray(T, dmn, dmnchunks, thunks,
+           inp[1].partitioning, inp[1].concat)
 end
 
-Base.cat(x::ArrayOp, xs::ArrayOp...; dims::Int) = Concat(dims, (x, xs...))
+Base.cat(x::ArrayOp, xs::ArrayOp...; dims::Int) =
+    _to_darray(Concat(dims, (x, xs...)))
 
 Base.hcat(xs::ArrayOp...) = cat(xs..., dims=2)
 Base.vcat(xs::ArrayOp...) = cat(xs..., dims=1)

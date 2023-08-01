@@ -1,7 +1,17 @@
-export Thunk, delayed, delayedmap
+export Thunk, delayed
 
 const ID_COUNTER = Threads.Atomic{Int}(1)
 next_id() = Threads.atomic_add!(ID_COUNTER, 1)
+
+function filterany(f::Base.Callable, xs)
+    xs_filt = Any[]
+    for x in xs
+        if f(x)
+            push!(xs_filt, x)
+        end
+    end
+    return xs_filt
+end
 
 """
     Thunk
@@ -50,7 +60,8 @@ If omitted, options can also be specified by passing key-value pairs as
 """
 mutable struct Thunk
     f::Any # usually a Function, but could be any callable
-    inputs::Vector{Any} # TODO: Use `ImmutableArray` in 1.8
+    inputs::Vector{Pair{Union{Symbol,Nothing},Any}} # TODO: Use `ImmutableArray` in 1.8
+    syncdeps::Set{Any}
     id::Int
     get_result::Bool # whether the worker should send the result or only the metadata
     meta::Bool
@@ -63,6 +74,7 @@ mutable struct Thunk
     options::Any # stores scheduler-specific options
     propagates::Tuple # which options we'll propagate
     function Thunk(f, xs...;
+                   syncdeps=nothing,
                    id::Int=next_id(),
                    get_result::Bool=false,
                    meta::Bool=false,
@@ -82,14 +94,22 @@ mutable struct Thunk
                         something(processor, OSProc()),
                         something(scope, DefaultScope()))
         end
-        xs = Any[xs...]
+        xs = Base.mapany(identity, xs)
+        syncdeps_set = Set{Any}(filterany(is_task_or_chunk, Base.mapany(last, xs)))
+        if syncdeps !== nothing
+            for dep in syncdeps
+                push!(syncdeps_set, dep)
+            end
+        end
+        @assert all(x->x isa Pair, xs)
         if options !== nothing
             @assert isempty(kwargs)
-            new(f, xs, id, get_result, meta, persist, cache, cache_ref,
-                affinity, eager_ref, options, propagates)
+            new(f, xs, syncdeps_set, id, get_result, meta, persist, cache,
+                cache_ref, affinity, eager_ref, options, propagates)
         else
-            new(f, xs, id, get_result, meta, persist, cache, cache_ref,
-                affinity, eager_ref, Sch.ThunkOptions(;kwargs...), propagates)
+            new(f, xs, syncdeps_set, id, get_result, meta, persist, cache,
+                cache_ref, affinity, eager_ref, Sch.ThunkOptions(;kwargs...),
+                propagates)
         end
     end
 end
@@ -105,7 +125,7 @@ function affinity(t::Thunk)
         aff_vec = affinity(t.cache_ref)
     else
         aff = Dict{OSProc,Int}()
-        for inp in inputs(t)
+        for (_, inp) in t.inputs
            #if haskey(state.cache, inp)
            #    as = affinity(state.cache[inp])
            #    for a in as
@@ -130,42 +150,31 @@ function affinity(t::Thunk)
    #end
 end
 
+is_task_or_chunk(x) = istask(x)
+
+function args_kwargs_to_pairs(args, kwargs)
+    args_kwargs = Pair{Union{Symbol,Nothing},Any}[]
+    for arg in args
+        push!(args_kwargs, nothing => arg)
+    end
+    for kwarg in kwargs
+        push!(args_kwargs, kwarg[1] => kwarg[2])
+    end
+    return args_kwargs
+end
+
 """
-    delayed(f; kwargs...)(args...)
+    delayed(f, options=Options())(args...; kwargs...) -> Thunk
+    delayed(f; options...)(args...; kwargs...) -> Thunk
 
 Creates a [`Thunk`](@ref) object which can be executed later, which will call
-`f` with `args`. `kwargs` controls various properties of the resulting `Thunk`.
+`f` with `args` and `kwargs`. `options` controls various properties of the
+resulting `Thunk`.
 """
-function delayed(f; kwargs...)
-    (args...) -> Thunk(f, args...; kwargs...)
+function delayed(f, options::Options)
+    (args...; kwargs...) -> Thunk(f, args_kwargs_to_pairs(args, kwargs)...; options.options...)
 end
-
-delayedmap(f, xs...) = map(delayed(f), xs...)
-
-"A future holding the result of a `Thunk`."
-struct ThunkFuture
-    future::Future
-end
-ThunkFuture(x::Integer) = ThunkFuture(Future(x))
-ThunkFuture() = ThunkFuture(Future())
-Base.isready(t::ThunkFuture) = isready(t.future)
-Base.wait(t::ThunkFuture) = Dagger.Sch.thunk_yield() do
-    wait(t.future)
-end
-function Base.fetch(t::ThunkFuture; proc=OSProc(), raw=false)
-    error, value = Dagger.Sch.thunk_yield() do
-        if raw
-            fetch(t.future)
-        else
-            move(proc, fetch(t.future))
-        end
-    end
-    if error
-        throw(value)
-    end
-    value
-end
-Base.put!(t::ThunkFuture, x; error=false) = put!(t.future, (error, x))
+delayed(f; kwargs...) = delayed(f, Options(;kwargs...))
 
 "A weak reference to a `Thunk`."
 struct WeakThunk
@@ -173,6 +182,7 @@ struct WeakThunk
     WeakThunk(t::Thunk) = new(WeakRef(t))
 end
 istask(::WeakThunk) = true
+task_id(t::WeakThunk) = task_id(unwrap_weak_checked(t))
 unwrap_weak(t::WeakThunk) = t.x.value
 unwrap_weak(t) = t
 function unwrap_weak_checked(t::WeakThunk)
@@ -209,7 +219,7 @@ function Base.showerror(io::IO, ex::ThunkFailedException)
             return "Thunk(?)"
         end
         Tinputs = Any[]
-        for input in t.inputs
+        for (_, input) in t.inputs
             input = unwrap_weak(input)
             if istask(input)
                 push!(Tinputs, "Thunk(id=$(input.id))")
@@ -218,11 +228,11 @@ function Base.showerror(io::IO, ex::ThunkFailedException)
             end
         end
         t_sig = if length(Tinputs) <= 4
-            "$(t.f)($(join(Tinputs, ", "))))"
+            "$(t.f)($(join(Tinputs, ", ")))"
         else
             "$(t.f)($(length(Tinputs)) inputs...)"
         end
-        return "Thunk(id=$(t.id), $t_sig"
+        return "Thunk(id=$(t.id), $t_sig)"
     end
     t_str = thunk_string(t)
     o_str = thunk_string(o)
@@ -249,87 +259,59 @@ function Base.showerror(io::IO, ex::ThunkFailedException)
 end
 
 """
-    EagerThunk
-
-Returned from `spawn`/`@spawn` calls. Represents a task that is in the
-scheduler, potentially ready to execute, executing, or finished executing. May
-be `fetch`'d or `wait`'d on at any time.
-"""
-mutable struct EagerThunk
-    uid::UInt
-    future::ThunkFuture
-    finalizer_ref::DRef
-    thunk_ref::DRef
-end
-Base.isready(t::EagerThunk) = isready(t.future)
-Base.wait(t::EagerThunk) = wait(t.future)
-function Base.fetch(t::EagerThunk; raw=false)
-    if raw
-        fetch(t.future; raw=true)
-    else
-        move(OSProc(), fetch(t.future))
-    end
-end
-function Base.show(io::IO, t::EagerThunk)
-    print(io, "EagerThunk ($(isready(t) ? "finished" : "running"))")
-end
-
-"When finalized, cleans-up the associated `EagerThunk`."
-mutable struct EagerThunkFinalizer
-    uid::UInt
-    function EagerThunkFinalizer(uid)
-        x = new(uid)
-        finalizer(Sch.eager_cleanup, x)
-        x
-    end
-end
-
-const EAGER_ID_COUNTER = Threads.Atomic{UInt64}(1)
-eager_next_id() = Threads.atomic_add!(EAGER_ID_COUNTER, one(UInt64))
-
-function _spawn(f, args...; options, kwargs...)
-    Dagger.Sch.init_eager()
-    for arg in args
-        @assert !isa(arg, Thunk) "Cannot use Thunks in spawn"
-    end
-    uid = eager_next_id()
-    future = ThunkFuture()
-    finalizer_ref = poolset(EagerThunkFinalizer(uid); device=MemPool.CPURAMDevice())
-    added_future = Future()
-    propagates = keys(options)
-    put!(Dagger.Sch.EAGER_THUNK_CHAN, (added_future, future, uid, finalizer_ref, f, (args...,), (;propagates, options..., kwargs...,)))
-    thunk_ref = fetch(added_future)
-    return (uid, future, finalizer_ref, thunk_ref)
-end
-"""
     spawn(f, args...; kwargs...) -> EagerThunk
 
-Spawns a task with `f` as the function and `args` as the arguments, returning
-an `EagerThunk`. Uses a scheduler running in the background to execute code.
-
-Note that `kwargs` are passed to the `Thunk` constructor, and are documented in
-its docstring.
+Spawns a task with `f` as the function, `args` as the arguments, and `kwargs`
+as the keyword arguments, returning an `EagerThunk`. Uses a scheduler running
+in the background to execute code.
 """
-function spawn(f, args...; processor=nothing, scope=nothing, kwargs...)
+function spawn(f, args...; kwargs...)
+    @nospecialize f args kwargs
+
+    # Get all options and determine which propagate beyond this task
     options = get_options()
+    propagates = get(options, :propagates, ())
+    propagates = Tuple(unique(Symbol[propagates..., keys(options)...]))
+    if length(args) >= 1 && first(args) isa Options
+        spawn_options = first(args).options
+        options = merge(options, spawn_options)
+        args = args[2:end]
+    end
+
+    # Wrap f in a Chunk if necessary
+    processor = haskey(options, :processor) ? options.processor : nothing
+    scope = haskey(options, :scope) ? options.scope : nothing
     if !isnothing(processor) || !isnothing(scope)
         f = tochunk(f,
                     something(processor, get_options(:processor, OSProc())),
                     something(scope, get_options(:scope, DefaultScope())))
     end
-    uid, future, finalizer_ref, thunk_ref = if myid() == 1
-        _spawn(f, args...; options, kwargs...)
-    else
-        remotecall_fetch(_spawn, 1, f, args...; options, kwargs...)
-    end
-    return EagerThunk(uid, future, finalizer_ref, thunk_ref)
+
+    # Process the args and kwargs into Pair form
+    args_kwargs = args_kwargs_to_pairs(args, kwargs)
+
+    # Get task queue, and don't let it propagate
+    task_queue = get_options(:task_queue, EagerTaskQueue())
+    options = NamedTuple(filter(opt->opt[1] != :task_queue, Base.pairs(options)))
+    propagates = filter(prop->prop != :task_queue, propagates)
+    options = merge(options, (;propagates))
+
+    # Construct task spec and handle
+    spec = EagerTaskSpec(f, args_kwargs, options)
+    task = eager_spawn(spec)
+
+    # Enqueue the task into the task queue
+    enqueue!(task_queue, spec=>task)
+
+    return task
 end
 
 """
-    @par [opts] f(args...) -> Thunk
+    @par [opts] f(args...; kwargs...) -> Thunk
 
-Convenience macro to call `Dagger.delayed` on `f` with arguments `args`.
-May also be called with a series of assignments like so:
+Convenience macro to call `Dagger.delayed` on `f` with arguments `args` and
+keyword arguments `kwargs`. May also be called with a series of assignments
+like so:
 
 ```julia
 x = @par begin
@@ -381,16 +363,24 @@ end
 function _par(ex::Expr; lazy=true, recur=true, opts=())
     if ex.head == :call && recur
         f = replace_broadcast(ex.args[1])
-        args = ex.args[2:end]
+        if length(ex.args) >= 2 && Meta.isexpr(ex.args[2], :parameters)
+            args = ex.args[3:end]
+            kwargs = ex.args[2]
+        else
+            args = ex.args[2:end]
+            kwargs = Expr(:parameters)
+        end
         opts = esc.(opts)
+        args_ex = _par.(args; lazy=lazy, recur=false)
+        kwargs_ex = _par.(kwargs.args; lazy=lazy, recur=false)
         if lazy
-            return :(Dagger.delayed($(esc(f)); $(opts...))($(_par.(args; lazy=lazy, recur=false)...)))
+            return :(Dagger.delayed($(esc(f)), $Options(;$(opts...)))($(args_ex...); $(kwargs_ex...)))
         else
             sync_var = esc(Base.sync_varname)
             @gensym result
             return quote
-                let args = ($(_par.(args; lazy=lazy, recur=false)...),)
-                    $result = $spawn($(esc(f)), args...; $(opts...))
+                let args = ($(args_ex...),)
+                    $result = $spawn($(esc(f)), $Options(;$(opts...)), args...; $(kwargs_ex...))
                     if $(Expr(:islocal, sync_var))
                         put!($sync_var, schedule(Task(()->wait($result))))
                     end
@@ -443,7 +433,15 @@ function Base.show(io::IO, z::Thunk)
     end
     print(io, "Thunk[$(z.id)]($f, ")
     if lvl > 0
-        show(IOContext(io, :lazy_level => lvl-1), z.inputs)
+        inputs = Any[]
+        for (pos, input) in z.inputs
+            if pos === nothing
+                push!(inputs, input)
+            else
+                push!(inputs, pos => input)
+            end
+        end
+        show(IOContext(io, :lazy_level => lvl-1), inputs)
     else
         print(io, "...")
     end
@@ -456,4 +454,5 @@ inputs(x::Thunk) = x.inputs
 inputs(x) = ()
 
 istask(x::Thunk) = true
+task_id(x::Thunk) = x.id
 istask(x) = false

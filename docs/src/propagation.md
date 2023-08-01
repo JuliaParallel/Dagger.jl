@@ -1,6 +1,6 @@
 # Option Propagation
 
-Most options passed to Dagger are passed via `delayed` or `Dagger.@spawn`
+Most options passed to Dagger are passed via `@spawn/spawn` or `delayed`
 directly. This works well when an option only needs to be set for a single
 thunk, but is cumbersome when the same option needs to be set on multiple
 thunks, or set recursively on thunks spawned within other thunks. Thankfully,

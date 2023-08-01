@@ -2,15 +2,14 @@
   if: build.message !~ /\[skip tests\]/
   agents:
     queue: "juliaecosystem"
-    sandbox.jl: "true"
+    sandbox_capable: "true"
     os: linux
-    arch: x86_64
   command: "julia --project -e 'using Pkg; Pkg.develop(;path=\"lib/TimespanLogging\")'"
 .bench: &bench
   if: build.message =~ /\[run benchmarks\]/
   agents:
     queue: "juliaecosystem"
-    sandbox.jl: "true"
+    sandbox_capable: "true"
     os: linux
     arch: x86_64
     num_cpus: 16
@@ -35,12 +34,22 @@ steps:
           julia_args: "--threads=1"
       - JuliaCI/julia-coverage#v1:
           codecov: true
+  - label: Julia 1.9
+    timeout_in_minutes: 60
+    <<: *test
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.9"
+      - JuliaCI/julia-test#v1:
+          julia_args: "--threads=1"
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
   - label: Julia nightly
     timeout_in_minutes: 60
     <<: *test
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.9-nightly"
+          version: "1.10-nightly"
       - JuliaCI/julia-test#v1:
           julia_args: "--threads=1"
       - JuliaCI/julia-coverage#v1:
@@ -102,7 +111,7 @@ steps:
       JULIA_NUM_THREADS: "4"
     agents:
       queue: "juliaecosystem"
-      sandbox.jl: "true"
+      sandbox_capable: "true"
       os: linux
       arch: x86_64
     command: "git clone https://github.com/JuliaParallel/DTables.jl.git ; julia -t4 -e 'using Pkg; Pkg.activate(\"DTables.jl\"); Pkg.develop(;path=\".\"); Pkg.instantiate(); Pkg.test()'"

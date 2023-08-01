@@ -1,4 +1,3 @@
-
 import Base: exp, expm1, log, log10, log1p, sqrt, cbrt, exponent,
              significand, sin, sinpi, cos, cospi, tan, sec, cot, csc,
              sinh, cosh, tanh, coth, sech, csch,
@@ -51,10 +50,10 @@ BroadcastStyle(::DaggerBroadcastStyle, ::BroadcastStyle) = DaggerBroadcastStyle(
 BroadcastStyle(::BroadcastStyle, ::DaggerBroadcastStyle) = DaggerBroadcastStyle()
 
 function Base.copy(b::Broadcast.Broadcasted{<:DaggerBroadcastStyle})
-    BCast(b)
+    return _to_darray(BCast(b))
 end
 
-function stage(ctx::Context, node::BCast)
+function stage(ctx::Context, node::BCast{B,T,N}) where {B,T,N}
     bc = Broadcast.flatten(node.bcasted)
     args = bc.args
     args1 = map(args) do x
@@ -63,6 +62,8 @@ function stage(ctx::Context, node::BCast)
     ds = map(x->x isa DArray ? domainchunks(x) : nothing, args1)
     sz = size(node)
     dss = filter(x->x !== nothing, collect(ds))
+    # TODO: Use a more intelligent scheme
+    part = args1[findfirst(arg->arg isa DArray && ndims(arg) == N, args1)].partitioning
     cumlengths = ntuple(ndims(node)) do i
         idx = findfirst(d -> i <= length(d.cumlength), dss)
         if idx === nothing
@@ -83,16 +84,15 @@ function stage(ctx::Context, node::BCast)
                 end
             end |> Tuple
             dmn = DomainBlocks(ntuple(_->1, length(s)), splits)
-            cached_stage(ctx, Distribute(dmn, arg)).chunks
+            cached_stage(ctx, Distribute(dmn, part, arg)).chunks
         else
             arg
         end
     end
     blcks = DomainBlocks(map(_->1, size(node)), cumlengths)
 
-    thunks = broadcast(delayed((args...)->broadcast(bc.f, args...); ),
-                       args2...)
-    DArray(eltype(node), domain(node), blcks, thunks)
+    thunks = broadcast((args3...)->Dagger.spawn((args...)->broadcast(bc.f, args...), args3...), args2...)
+    DArray(eltype(node), domain(node), blcks, thunks, part)
 end
 
 export mappart, mapchunk
@@ -107,8 +107,9 @@ Base.@deprecate mappart(args...) mapchunk(args...)
 function stage(ctx::Context, node::MapChunk)
     inputs = map(x->cached_stage(ctx, x), node.input)
     thunks = map(map(chunks, inputs)...) do ps...
-        Thunk(node.f, ps...)
+        Dagger.spawn(node.f, map(p->nothing=>p, ps)...)
     end
 
+    # TODO: Concrete type
     DArray(Any, domain(inputs[1]), domainchunks(inputs[1]), thunks)
 end

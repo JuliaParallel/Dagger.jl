@@ -44,7 +44,7 @@ function handle_fault(ctx, state, deadproc)
     # Remove thunks from state.ready that have inputs on the deadlist
     for idx in length(state.ready):-1:1
         rt = state.ready[idx]
-        if any((input in deadlist) for input in rt.inputs)
+        if any((input in deadlist) for input in map(last, rt.inputs))
             deleteat!(state.ready, idx)
         end
     end
@@ -52,6 +52,6 @@ function handle_fault(ctx, state, deadproc)
     # Reschedule inputs from deadlist
     seen = Set{Thunk}()
     for t in deadlist
-        reschedule_inputs!(state, t, seen)
+        reschedule_syncdeps!(state, t, seen)
     end
 end

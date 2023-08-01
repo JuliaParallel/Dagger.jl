@@ -50,7 +50,7 @@ function dynamic_get_dag(x...)
 end
 function dynamic_add_thunk(x)
     h = sch_handle()
-    id = Dagger.Sch.add_thunk!(h, x) do y
+    id = Dagger.Sch.add_thunk!(h, nothing=>x) do y
         y+1
     end
     wait(h, id)
@@ -58,7 +58,7 @@ function dynamic_add_thunk(x)
 end
 function dynamic_add_thunk_self_dominated(x)
     h = sch_handle()
-    id = Dagger.Sch.add_thunk!(h, h.thunk_id, x) do y
+    id = Dagger.Sch.add_thunk!(h, nothing=>h.thunk_id, nothing=>x) do y
         y+1
     end
     return fetch(h, id)
@@ -205,7 +205,7 @@ end
                     # until we end up on a non-blocked worker
                     h = Dagger.Sch.sch_handle()
                     wkrs = Dagger.Sch.exec!(_list_workers, h)
-                    id = Dagger.Sch.add_thunk!(testfun, h, i)
+                    id = Dagger.Sch.add_thunk!(testfun, h, nothing=>i)
                     return fetch(h, id)
                 end
                 return myid()

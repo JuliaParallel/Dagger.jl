@@ -79,9 +79,9 @@ end
 ProcessScope(p::OSProc) = ProcessScope(p.pid)
 ProcessScope() = ProcessScope(myid())
 
-"Scoped to any processor with a given supertype."
 struct ProcessorTypeTaint{T} <: AbstractScopeTaint end
 
+"Scoped to any processor with a given supertype."
 ProcessorTypeScope(T) =
     TaintScope(AnyScope(),
                Set{AbstractScopeTaint}([ProcessorTypeTaint{T}()]))
@@ -142,6 +142,11 @@ Base.show(io::IO, scope::ExactScope) =
 
 # Comparisons and constraint checking
 
+"""
+    constraint(x::AbstractScope, y::AbstractScope) -> ::AbstractScope
+
+Constructs a scope that is the intersection of scopes `x` and `y`.
+"""
 constrain(x, y) = x < y ? constrain(y, x) : throw(MethodError(constrain, x, y))
 
 Base.isless(::AnyScope, ::AnyScope) = false

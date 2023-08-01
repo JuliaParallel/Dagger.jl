@@ -1,7 +1,7 @@
-const EAGER_INIT = Ref{Bool}(false)
-const EAGER_THUNK_CHAN = Channel(typemax(Int))
+const EAGER_INIT = Threads.Atomic{Bool}(false)
+const EAGER_READY = Base.Event()
 const EAGER_FORCE_KILL = Ref{Bool}(false)
-const EAGER_ID_MAP = Dict{UInt64,Int}()
+const EAGER_ID_MAP = LockedObject(Dict{UInt64,Int}())
 const EAGER_CONTEXT = Ref{Union{Context,Nothing}}(nothing)
 const EAGER_STATE = Ref{Union{ComputeState,Nothing}}(nothing)
 
@@ -13,17 +13,20 @@ function eager_context()
 end
 
 function init_eager()
-    EAGER_INIT[] && return
-    EAGER_INIT[] = true
+    if myid() != 1
+        return
+    end
+    if Threads.atomic_xchg!(EAGER_INIT, true)
+        wait(EAGER_READY)
+        return
+    end
     ctx = eager_context()
-    @async try
+    Threads.@spawn try
         sopts = SchedulerOptions(;allow_errors=true)
-        scope = Dagger.ExactScope(Dagger.ThreadProc(1, 1))
-        atexit() do
-            EAGER_FORCE_KILL[] = true
-            close(EAGER_THUNK_CHAN)
-        end
-        Dagger.compute(ctx, Dagger.delayed(eager_thunk; scope)(); options=sopts)
+        opts = Dagger.Options((;scope=Dagger.ExactScope(Dagger.ThreadProc(1, 1)),
+                                occupancy=Dict(Dagger.ThreadProc=>0)))
+        Dagger.compute(ctx, Dagger.delayed(eager_thunk, opts)();
+                       options=sopts)
     catch err
         iob = IOContext(IOBuffer(), :color=>true)
         println(iob, "Error in eager scheduler:")
@@ -33,99 +36,89 @@ function init_eager()
         seek(iob.io, 0)
         write(stderr, iob)
     finally
-        EAGER_INIT[] = false
+        reset(EAGER_READY)
+        Threads.atomic_xchg!(EAGER_INIT, false)
+        EAGER_FORCE_KILL[] = true
     end
+    wait(EAGER_READY)
+end
+function eager_thunk()
+    exec!(Dagger.sch_handle()) do ctx, state, task, tid, _
+        EAGER_STATE[] = state
+        return
+    end
+    notify(EAGER_READY)
+    sleep(typemax(UInt))
+    error("eager_thunk exited")
 end
 
-"Adjusts the scheduler's cached pressure indicators for the specified worker by
-the specified amount, and signals the scheduler to try scheduling again if
-pressure decreased."
-function adjust_pressure!(h::SchedulerHandle, proc::Processor, pressure)
-    uid = Dagger.get_tls().sch_uid
-    lock(TASK_SYNC) do
-        PROCESSOR_TIME_UTILIZATION[uid][proc][] += pressure
-        notify(TASK_SYNC)
-    end
-    exec!(_adjust_pressure!, h, myid(), proc, pressure)
-end
-function _adjust_pressure!(ctx, state, task, tid, (pid, proc, pressure))
-    state.worker_time_pressure[pid][proc] += pressure
-    if pressure < 0
-        put!(state.chan, RescheduleSignal())
-    end
-    nothing
-end
-
-"Allows a thunk to safely wait on another thunk, by temporarily reducing its
-effective pressure to 0."
+"""
+Allows a thunk to safely wait on another thunk by temporarily reducing its
+effective occupancy to 0, which allows a newly-spawned task to run.
+"""
 function thunk_yield(f)
     if Dagger.in_thunk()
         h = sch_handle()
         tls = Dagger.get_tls()
-        proc = tls.processor
-        util = tls.time_utilization
-        adjust_pressure!(h, proc, -util)
+        proc = Dagger.thunk_processor()
+        proc_istate = proc_states(tls.sch_uid) do states
+            states[proc].state
+        end
+        task_occupancy = tls.task_spec[4]
+
+        # Decrease our occupancy and inform the processor to reschedule
+        lock(proc_istate.queue) do _
+            proc_istate.proc_occupancy[] -= task_occupancy
+            @assert 0 <= proc_istate.proc_occupancy[] <= typemax(UInt32)
+        end
+        notify(proc_istate.reschedule)
         try
-            f()
+            # Run the yielding code
+            return f()
         finally
-            adjust_pressure!(h, proc, util)
+            # Wait for processor to have occupancy to run this task
+            while true
+                ready = lock(proc_istate.queue) do _
+                    @assert 0 <= proc_istate.proc_occupancy[] <= typemax(UInt32)
+                    if proc_has_occupancy(proc_istate.proc_occupancy[], task_occupancy)
+                        proc_istate.proc_occupancy[] += task_occupancy
+                        @assert 0 <= proc_istate.proc_occupancy[] <= typemax(UInt32)
+                        return true
+                    end
+                    return false
+                end
+                ready && break
+                yield()
+            end
         end
     else
-        f()
+        return f()
     end
-end
-
-function eager_thunk()
-    @assert myid() == 1
-    h = sch_handle()
-    exec!(h) do ctx, state, task, tid, _
-        EAGER_STATE[] = state
-        nothing
-    end
-    tls = Dagger.get_tls()
-    # Don't apply pressure from this thunk
-    adjust_pressure!(h, tls.processor, -tls.time_utilization)
-    while isopen(EAGER_THUNK_CHAN)
-        try
-            added_future, future, uid, ref, f, args, opts = take!(EAGER_THUNK_CHAN)
-            # preserve inputs until they enter the scheduler
-            tid = GC.@preserve args begin
-                _args = map(x->x isa Dagger.EagerThunk ? ThunkID(EAGER_ID_MAP[x.uid], x.thunk_ref) :
-                               x isa Dagger.Chunk ? WeakChunk(x) :
-                               x,
-                            args)
-                add_thunk!(f, h, _args...; future=future, ref=ref, opts...)
-            end
-            EAGER_ID_MAP[uid] = tid.id
-            put!(added_future, tid.ref)
-        catch err
-            EAGER_FORCE_KILL[] && break
-            iob = IOContext(IOBuffer(), :color=>true)
-            println(iob, "Error in eager listener:")
-            Base.showerror(iob, err)
-            Base.show_backtrace(iob, catch_backtrace())
-            println(iob)
-            seek(iob.io, 0)
-            write(stderr, iob)
-        end
-    end
-    EAGER_STATE[] = nothing
 end
 
 eager_cleanup(t::Dagger.EagerThunkFinalizer) =
-    @async eager_cleanup(EAGER_STATE[], t.uid)
+    Threads.@spawn eager_cleanup(EAGER_STATE[], t.uid)
 function eager_cleanup(state, uid)
-    lock(state.lock) do
-        if !haskey(EAGER_ID_MAP, uid)
+    tid = nothing
+    lock(EAGER_ID_MAP) do id_map
+        if !haskey(id_map, uid)
             return
         end
-        tid = EAGER_ID_MAP[uid]
-        delete!(EAGER_ID_MAP, uid)
-
+        tid = id_map[uid]
+        delete!(id_map, uid)
+    end
+    tid === nothing && return
+    lock(state.lock) do
         # N.B. cache and errored expire automatically
         delete!(state.thunk_dict, tid)
     end
 end
 
-_find_thunk(e::Dagger.EagerThunk) =
-    unwrap_weak_checked(EAGER_STATE[].thunk_dict[EAGER_ID_MAP[e.uid]])
+function _find_thunk(e::Dagger.EagerThunk)
+    tid = lock(EAGER_ID_MAP) do id_map
+        id_map[e.uid]
+    end
+    lock(EAGER_STATE[].lock) do
+        unwrap_weak_checked(EAGER_STATE[].thunk_dict[tid])
+    end
+end

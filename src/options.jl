@@ -2,6 +2,16 @@
 
 ContextVariablesX.@contextvar options_context::NamedTuple = NamedTuple()
 
+"""
+    with_options(f, options::NamedTuple) -> Any
+    with_options(f; options...) -> Any
+
+Sets one or more options to the given values, executes `f()`, resets the
+options to their previous values, and returns the result of `f()`. This is the
+recommended way to set options, as it only affects tasks spawned within its
+scope. Note that setting an option here will propagate its value across Julia
+or Dagger tasks spawned by `f()` or its callees (i.e. the options propagate).
+"""
 function with_options(f, options::NamedTuple)
     ContextVariablesX.with_context(options_context => options) do
         f()
@@ -9,6 +19,16 @@ function with_options(f, options::NamedTuple)
 end
 with_options(f; options...) = with_options(f, NamedTuple(options))
 
+"""
+    get_options(key::Symbol, default) -> Any
+    get_options(key::Symbol) -> Any
+
+Returns the value of the option named `key`. If `option` does not have a value set, then an error will be thrown, unless `default` is set, in which case it will be returned instead of erroring.
+
+    get_options() -> NamedTuple
+
+Returns a `NamedTuple` of all option key-value pairs.
+"""
 get_options() = options_context[]
 get_options(key::Symbol) = getproperty(get_options(), key)
 function get_options(key::Symbol, default)

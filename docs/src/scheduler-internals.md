@@ -1,84 +1,136 @@
 # Scheduler Internals
 
-!!! warn
-    This information is outdated, and until Dagger's internal scheduling APIs
-    stabilize, it may become less and less accurate. Always read the source to
-    understand what actually happens in Sch!
+Dagger's scheduler can be found primarily in the `Dagger.Sch` module. It
+performs a variety of functions to support tasks and data, and as such is a
+complex system. This documentation attempts to shed light on how the scheduler
+works internally (from a somewhat high level), with the hope that it will help
+users and contributors understand how to improve the scheduler or fix any bugs
+that may arise from it.
 
-The scheduler is called `Dagger.Sch`. It contains a single internal instance
-of type `ComputeState`, which maintains all necessary state to represent the
-set of waiting, ready, and completed (or "finished") graph nodes, cached
-`Chunk`s, and maps of interdependencies between nodes. It uses Julia's task
-infrastructure to asynchronously send work requests to remote compute
-processes, and uses a Julia `Channel` as an inbound queue for completed work.
+!!! warn
+    Dagger's scheduler is evolving at a rapid pace, and is a complex mix of interacting parts. As such, this documentation may become out of date very quickly, and may not reflect the current state of the scheduler. Please feel free to file PRs to correct or improve this document, but also beware that the true functionality is defined in Dagger's source!
+
+## Core vs. Worker Schedulers
+
+Dagger's scheduler is really two kinds of entities: the "core" scheduler, and
+"worker" schedulers:
+
+The core scheduler runs on worker 1, thread 1, and is the entrypoint to tasks
+which have been submitted. The core scheduler manages all task dependencies,
+notifies calls to `wait` and `fetch` of task completion, and generally performs
+initial task placement. The core scheduler has cached information about each
+worker and their processors, and uses that information (together with metrics
+about previous tasks and other aspects of the Dagger runtime) to generate a
+near-optimal just-in-time task schedule.
+
+The worker schedulers each run as a set of tasks across all workers and all
+processors, and handles data movement and task execution. Once the core
+scheduler has scheduled and launched a task, it arrives at the worker scheduler
+for handling. The worker scheduler will pass the task to a queue for the
+assigned processor, where it will wait until the processor has a sufficient
+amount of "occupancy" for the task. Once the processor is ready for the task,
+it will first fetch all of the task's arguments from other workers, and then it
+will execute the task, package the task's result into a `Chunk`, and pass that
+back to the core scheduler.
+
+## Core: Basics
+
+The core scheduler contains a single internal instance of type `ComputeState`,
+which maintains (among many other things) all necessary state to represent the
+set of waiting, ready, and running tasks, cached task results, and maps of
+interdependencies between tasks. It uses Julia's task infrastructure to
+asynchronously send work requests to remote Julia processes, and uses a
+`RemoteChannel` as an inbound queue for completed work.
+
 There is an outer loop which drives the scheduler, which continues executing
-until all nodes in the graph have completed executing and the final result of
-the graph is ready to be returned to the user. This outer loop continuously
+either eternally (excepting any internal scheduler errors or Julia exiting), or
+until all tasks in the graph have completed executing and the final task in the
+graph is ready to be returned to the user. This outer loop continuously
 performs two main operations: the first is to launch the execution of nodes
 which have become "ready" to execute; the second is to "finish" nodes which
 have been completed.
 
-## Scheduler Initialization
+## Core: Initialization
 
-At the very beginning of a scheduler's lifecycle, the `ComputeState` is
-elaborated based on the computed sets of dependencies between nodes, and all
-nodes are placed in a "waiting" state. If any of the nodes are found to only
-have inputs which are not `Thunk`s, then they are moved from "waiting" to
-"ready". The set of available "workers" (the set of available compute
-processes located throughout the cluster) is recorded, of size `Nworkers`.
+At the very beginning of a scheduler's lifecycle, a `ComputeState` object is
+allocated, workers are asynchronously initialized, and the outer loop is
+started. Additionally, the scheduler is passed one or more tasks to start
+scheduling, and so it will also fill out the `ComputeState` with the computed
+sets of dependencies between tasks, initially placing all tasks are placed in
+the "waiting" state. If any of the tasks are found to only have non-task input
+arguments, then they are considered ready to execute and moved from the
+"waiting" state to "ready".
 
-## Scheduler Outer Loop
+## Core: Outer Loop
 
-At each outer loop iteration, up to `Nworkers` processes that are currently in
-the "ready" state will be moved into the "running" state, and asynchronously
-sent (along with input arguments) to one of the `Nworkers` processes for
-execution. Subsequently, if any nodes exist in the inbound queue (i.e. the
-nodes have completed execution and their result is stored on the process that
-executed the node), then the most recently-queued node is removed from the
-queue, "finished", and placed in the "finished" state.
+At each outer loop iteration, all tasks in the "ready" state will be scheduled,
+moved into the "running" state, and asynchronously sent to the workers for
+execution (called "firing"). Once all tasks are either waiting or running, the
+scheduler may sleep until actions need to be performed
 
-## Node Execution
+When fired tasks have completed executing, an entry will exist in the inbound
+queue signaling the task's result and other metadata. At this point, the most
+recently-queued task is removed from the queue, "finished", and placed in the
+"finished" state. Finishing usually unlocks downstream tasks from the waiting
+state and allows them to transition to the ready state.
 
-Executing a node (here called `Ne`) in the "ready" state comprises two tasks.
-The first task is to identify which node in the set of "ready" nodes will be
-`Ne` (the node to execute). This choice is based on a concept known as
-"affinity", which is a cost-based metric used to evaluate the suitability of
-executing a given node on a given process. The metric is based primarily on
-the location of the input arguments to the node, as well as the arguments
-computed size in bytes. A fixed amount of affinity is added for each argument
-when the process in question houses that argument. Affinity is then added
-based on some base affinity value multiplied by the argument's size in bytes.
-The total affinities for each node are then used to pick the most optimal node
-to execute (typically, the one with the highest affinity).
+## Core: Task Scheduling
 
-The second task is to prepare and send the node to a process for execution. If
-the node has been executed in the past (due to it being an argument to
-multiple other nodes), then the node is finished, and its result is pulled
-from the cache. If the node has not yet been executed, it is first checked if
-it is a "meta" node. A "meta" node is explicitly designated as such by the
-user or library, and will execute directly on its inputs as chunks (the data
-contained in the chunks are not immediately retrieved from the processors they
-reside on). Such a node will be executed directly within the scheduler, under
-the assumption that such a node is not expensive to execute. If the node is
-not a "meta" node, the executing worker process chooses (in round-robin
-fashion) a suitable processor to execute to execute the node on, based on the
-node's function, the input argument types, and user-defined rules for
-processor selection. The input arguments are then asynchronously transferred
-(via processor move operation) to the selected processor, and the appropriate
-call to the processor is made with the function and input arguments. Once
-execution completes and a result is obtained, it is wrapped as a `Chunk`, and
-the `Chunk`'s handle is returned to the scheduler's inbound queue for node
-finishing.
+Once one or more tasks are ready to be scheduled, the scheduler will begin assigning them to the processors within each available worker. This is a sequential operation consisting of:
 
-## Node Finishing
+- Selecting candidate processors based on the task's combined scope
+- Calculating the cost to move needed data to each candidate processor
+- Adding a "wait time" cost proportional to the estimated run time for all the tasks currently executing on each candidate processor
+- Selecting the least costly candidate processor as the executor for this task
 
-"Finishing" a node (here called `Nf`) performs three main tasks. The first
-task is to find all of the downstream "children" nodes of `Nf` (the set of
-nodes which use `Nf`'s result as one of their input arguments) that have had
-all of their input arguments computed and are in the "waiting" state, and move
-them into the "ready" state. The second task is to check all of the inputs to
-`Nf` to determine if any of them no longer have children nodes which have not
-been finished; if such inputs match this pattern, their cached result may be
-freed by the scheduler to minimize data usage. The third task is to mark `Nf`
-as "finished", and also to indicate to the scheduler whether another node has
-become "ready" to execute.
+After these operations have been performed for each task, the tasks will be
+fired off to their appropriate worker for handling.
+
+## Worker: Task Execution
+
+Once a worker receives one or more tasks to be executed, the tasks are
+immediately enqueued into the appropriate processor's queue, and the processors
+are notified that work is available to be executed. The processors will
+asynchronously look at their queues and pick the task with the lowest occupancy
+first; a task with zero occupancy will always be executed immediately, but most
+tasks have non-zero occupancy, and so will be executed in order of increasing
+occupancy (effectively prioritizing asynchronous tasks like I/O).
+
+Before a task begins executions, the processor will collect the task's
+arguments from other workers as needed, and convert them as needed to execute
+correctly according to the processor's semantics. This operation is called a
+"move".
+
+Once a task's arguments have been moved, the task's function will be called
+with the arguments, and assuming the task doesn't throw an error, the result
+will be wrapped in a `Chunk` object. This `Chunk` will then be sent back to the
+core scheduler along with information about which task generated it. If the
+task does throw an error, then the error is instead propagated to the core
+scheduler, along with a flag indicating that the task failed.
+
+## Worker: Workload Balancing
+
+In general, Dagger's core scheduler tries to balance workloads as much as
+possible across all the available processors, but it can fail to do so
+effectively when either its cached knowledge of each worker's status is
+outdated, or when its estimates about the task's behavior are inaccurate. To
+minimize the possibility of workload imbalance, the worker schedulers'
+processors will attempt to steal tasks from each other when they are
+under-occupied. Tasks will only be stolen if the task's [scope](scopes.md) is
+compatibl with the processor attempting the steal, so tasks with wider scopes
+have better balancing potential.
+
+## Core: Finishing
+
+Finishing a task which has completed executing is generally a simple set of operations:
+
+- The task's result is registered in the `ComputeState` for any tasks or user code which will need it
+- Any unneeded data is cleared from the scheduler (such as preserved `Chunk` arguments)
+- Downstream dependencies will be moved from "waiting" to "ready" if this task was the last upstream dependency to them
+
+## Core: Shutdown
+
+If the core scheduler needs to shutdown due to an error or Julia exiting, then
+all workers will be shutdown, and the scheduler will close any open channels.
+If shutdown was due to an error, then an error will be printed or thrown back
+to the caller.

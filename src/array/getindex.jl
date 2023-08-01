@@ -34,9 +34,9 @@ end
 function stage(ctx::Context, gidx::GetIndexScalar)
     inp = cached_stage(ctx, gidx.input)
     s = view(inp, ArrayDomain(gidx.idx))
-    delayed(identity)(collect(s)[1])
+    Dagger.@spawn identity(collect(s)[1])
 end
 
-Base.getindex(c::ArrayOp, idx::ArrayDomain) = GetIndex(c, indexes(idx))
-Base.getindex(c::ArrayOp, idx...)           = GetIndex(c, idx)
-Base.getindex(c::ArrayOp, idx::Integer...)  = compute(GetIndexScalar(c, idx))
+Base.getindex(c::ArrayOp, idx::ArrayDomain) = _to_darray(GetIndex(c, indexes(idx)))
+Base.getindex(c::ArrayOp, idx...)           = _to_darray(GetIndex(c, idx))
+Base.getindex(c::ArrayOp, idx::Integer...)  = fetch(GetIndexScalar(c, idx))

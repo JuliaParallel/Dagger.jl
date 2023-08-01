@@ -40,11 +40,11 @@ function fill_registered_futures!(state, node, failed)
     end
 end
 
-"Cleans up any inputs that aren't needed any longer, and returns a `Set{Chunk}`
-of all chunks that can now be evicted from workers."
-function cleanup_inputs!(state, node)
+"Cleans up any syncdeps that aren't needed any longer, and returns a
+`Set{Chunk}` of all chunks that can now be evicted from workers."
+function cleanup_syncdeps!(state, node)
     to_evict = Set{Chunk}()
-    for inp in node.inputs
+    for inp in node.syncdeps
         inp = unwrap_weak_checked(inp)
         if !istask(inp) && !(inp isa Chunk)
             continue
@@ -67,7 +67,7 @@ function cleanup_inputs!(state, node)
             end
         end
     end
-    to_evict
+    return to_evict
 end
 
 "Schedules any dependents that may be ready to execute."
@@ -96,7 +96,7 @@ end
 Prepares the scheduler to schedule `thunk`. Will mark `thunk` as ready if
 its inputs are satisfied.
 """
-function reschedule_inputs!(state, thunk, seen=Set{Thunk}())
+function reschedule_syncdeps!(state, thunk, seen=Set{Thunk}())
     to_visit = Thunk[thunk]
     while !isempty(to_visit)
         thunk = pop!(to_visit)
@@ -108,14 +108,12 @@ function reschedule_inputs!(state, thunk, seen=Set{Thunk}())
             continue
         end
         w = get!(()->Set{Thunk}(), state.waiting, thunk)
-        for input in thunk.inputs
+        for input in thunk.syncdeps
             input = unwrap_weak_checked(input)
             input in seen && continue
 
             # Unseen
-            if istask(input) || isa(input, Chunk)
-                push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
-            end
+            push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
             istask(input) || continue
 
             # Unseen task
@@ -194,7 +192,7 @@ function print_sch_status(io::IO, state, thunk; offset=0, limit=5, max_inputs=3)
         print(io, "($(status_string(thunk))) ")
     end
     println(io, "$(thunk.id): $(thunk.f)")
-    for (idx,input) in enumerate(thunk.inputs)
+    for (idx, input) in enumerate(thunk.syncdeps)
         if input isa WeakThunk
             input = unwrap_weak(input)
             if input === nothing
@@ -255,10 +253,13 @@ end
 chunktype(x) = typeof(x)
 function signature(task::Thunk, state)
     sig = Any[chunktype(task.f)]
-    for input in collect_task_inputs(state, task)
-        push!(sig, chunktype(input))
+    for (pos, input) in collect_task_inputs(state, task)
+        # N.B. Skips kwargs
+        if pos === nothing
+            push!(sig, chunktype(input))
+        end
     end
-    sig
+    return sig
 end
 
 function can_use_proc(task, gproc, proc, opts, scope)
@@ -267,13 +268,13 @@ function can_use_proc(task, gproc, proc, opts, scope)
         @warn "The `proclist` option is deprecated, please use scopes instead\nSee https://juliaparallel.org/Dagger.jl/stable/scopes/ for details" maxlog=1
         if opts.proclist isa Function
             if !Base.invokelatest(opts.proclist, proc)
-                @debug "[$(task.id)] Rejected $proc: proclist(proc) == false"
+                @dagdebug task :scope "Rejected $proc: proclist(proc) == false"
                 return false, scope
             end
             scope = constrain(scope, Dagger.ExactScope(proc))
         elseif opts.proclist isa Vector
             if !(typeof(proc) in opts.proclist)
-                @debug "[$(task.id)] Rejected $proc: !(typeof(proc) in proclist)"
+                @dagdebug task :scope "Rejected $proc: !(typeof(proc) in proclist)"
                 return false, scope
             end
             scope = constrain(scope,
@@ -282,7 +283,7 @@ function can_use_proc(task, gproc, proc, opts, scope)
             throw(SchedulingException("proclist must be a Function, Vector, or nothing"))
         end
         if scope isa Dagger.InvalidScope
-            @debug "[$(task.id)] Rejected $proc: Not contained in task scope ($scope)"
+            @dagdebug task :scope "Rejected $proc: Not contained in task scope ($scope)"
             return false, scope
         end
     end
@@ -291,12 +292,12 @@ function can_use_proc(task, gproc, proc, opts, scope)
     if opts.single !== nothing
         @warn "The `single` option is deprecated, please use scopes instead\nSee https://juliaparallel.org/Dagger.jl/stable/scopes/ for details" maxlog=1
         if gproc.pid != opts.single
-            @debug "[$(task.id)] Rejected $proc: gproc.pid ($(gproc.pid)) != single ($(opts.single))"
+            @dagdebug task :scope "Rejected $proc: gproc.pid ($(gproc.pid)) != single ($(opts.single))"
             return false, scope
         end
         scope = constrain(scope, Dagger.ProcessScope(opts.single))
         if scope isa Dagger.InvalidScope
-            @debug "[$(task.id)] Rejected $proc: Not contained in task scope ($scope)"
+            @dagdebug task :scope "Rejected $proc: Not contained in task scope ($scope)"
             return false, scope
         end
     end
@@ -304,17 +305,17 @@ function can_use_proc(task, gproc, proc, opts, scope)
     # Check against scope
     proc_scope = Dagger.ExactScope(proc)
     if constrain(scope, proc_scope) isa Dagger.InvalidScope
-        @debug "[$(task.id)] Rejected $proc: Not contained in task scope ($scope)"
+        @dagdebug task :scope "Rejected $proc: Not contained in task scope ($scope)"
         return false, scope
     end
 
     @label accept
 
-    @debug "[$(task.id)] Accepted $proc"
+    @dagdebug task :scope "Accepted $proc"
     return true, scope
 end
 
-function has_capacity(state, p, gp, time_util, alloc_util, sig)
+function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
     T = typeof(p)
     # FIXME: MaxUtilization
     est_time_util = round(UInt64, if time_util !== nothing && haskey(time_util, T)
@@ -325,8 +326,14 @@ function has_capacity(state, p, gp, time_util, alloc_util, sig)
     est_alloc_util = if alloc_util !== nothing && haskey(alloc_util, T)
         alloc_util[T]
     else
-        get(state.signature_alloc_cost, sig, 0)
-    end
+        get(state.signature_alloc_cost, sig, UInt64(0))
+    end::UInt64
+    est_occupancy = if occupancy !== nothing && haskey(occupancy, T)
+        # Clamp to 0-1, and scale between 0 and `typemax(UInt32)`
+        Base.unsafe_trunc(UInt32, clamp(occupancy[T], 0, 1) * typemax(UInt32))
+    else
+        typemax(UInt32)
+    end::UInt32
     #= FIXME: Estimate if cached data can be swapped to storage
     storage = storage_resource(p)
     real_alloc_util = state.worker_storage_pressure[gp][storage]
@@ -335,7 +342,7 @@ function has_capacity(state, p, gp, time_util, alloc_util, sig)
         return false, est_time_util, est_alloc_util
     end
     =#
-    return true, est_time_util, est_alloc_util
+    return true, est_time_util, est_alloc_util, est_occupancy
 end
 
 function populate_processor_cache_list!(state, procs)
@@ -361,9 +368,7 @@ end
 
 "Like `sum`, but replaces `nothing` entries with the average of non-`nothing` entries."
 function impute_sum(xs)
-    length(xs) == 0 && return 0
-
-    total = zero(eltype(xs))
+    total = 0
     nothing_count = 0
     something_count = 0
     for x in xs
@@ -375,17 +380,18 @@ function impute_sum(xs)
         end
     end
 
-    total + nothing_count * total / something_count
+    something_count == 0 && return 0
+    return total + nothing_count * total / something_count
 end
 
 "Collects all arguments for `task`, converting Thunk inputs to Chunks."
 function collect_task_inputs(state, task)
-    inputs = Any[]
-    for input in task.inputs
+    inputs = Pair{Union{Symbol,Nothing},Any}[]
+    for (pos, input) in task.inputs
         input = unwrap_weak_checked(input)
-        push!(inputs, istask(input) ? state.cache[input] : input)
+        push!(inputs, pos => (istask(input) ? state.cache[input] : input))
     end
-    inputs
+    return inputs
 end
 
 """
@@ -405,15 +411,20 @@ function estimate_task_costs(state, procs, task, inputs)
         end
     end
 
-    # Estimate network transfer costs based on data size
-    # N.B. `affinity(x)` really means "data size of `x`"
-    # N.B. We treat same-worker transfers as having zero transfer cost
-    # TODO: For non-Chunk, model cost from scheduler to worker
-    # TODO: Measure and model processor move overhead
-    transfer_costs = Dict(proc=>impute_sum([affinity(chunk)[2] for chunk in filter(c->get_parent(processor(c))!=get_parent(proc), chunks)]) for proc in procs)
+    costs = Dict{Processor,Float64}()
+    for proc in procs
+        chunks_filt = Iterators.filter(c->get_parent(processor(c))!=get_parent(proc), chunks)
 
-    # Estimate total cost to move data and get task running after currently-scheduled tasks
-    costs = Dict(proc=>state.worker_time_pressure[get_parent(proc).pid][proc]+(tx_cost/tx_rate) for (proc, tx_cost) in transfer_costs)
+        # Estimate network transfer costs based on data size
+        # N.B. `affinity(x)` really means "data size of `x`"
+        # N.B. We treat same-worker transfers as having zero transfer cost
+        # TODO: For non-Chunk, model cost from scheduler to worker
+        # TODO: Measure and model processor move overhead
+        tx_cost = impute_sum(affinity(chunk)[2] for chunk in chunks_filt)
+
+        # Estimate total cost to move data and get task running after currently-scheduled tasks
+        costs[proc] = state.worker_time_pressure[get_parent(proc).pid][proc] + (tx_cost/tx_rate)
+    end
 
     # Shuffle procs around, so equally-costly procs are equally considered
     P = randperm(length(procs))

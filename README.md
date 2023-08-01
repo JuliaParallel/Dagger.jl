@@ -1,6 +1,8 @@
-# Dagger.jl
+<img src="docs/logo.jpg" alt="Dagger.jl">
 
-*A framework for out-of-core and parallel computing*
+-----
+
+<h2 align="center">A framework for out-of-core and parallel computing</h2>
 
 | **Documentation**                       | **Build Status**                        |
 |:---------------------------------------:|:---------------------------------------:|
@@ -13,7 +15,7 @@
 
 At the core of Dagger.jl is a scheduler heavily inspired by [Dask](https://docs.dask.org/en/latest/). It can run computations represented as [directed-acyclic-graphs](https://en.wikipedia.org/wiki/Directed_acyclic_graph) (DAGs) efficiently on many Julia worker processes and threads, as well as GPUs via [DaggerGPU.jl](https://github.com/JuliaGPU/DaggerGPU.jl).
 
-***DTable** has been moved out of this repository. You can find it in a standalone package format [here](https://github.com/JuliaParallel/DTables.jl).*
+*The **DTable** has been moved out of this repository. You can now find it [here](https://github.com/JuliaParallel/DTables.jl).*
 
 ## Installation
 

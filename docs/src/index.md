@@ -1,231 +1,173 @@
-# A framework for out-of-core and parallel execution
+# Dagger: A framework for out-of-core and parallel execution
 
-## Usage
+Dagger.jl is a framework for parallel computing across all kinds of resources,
+like CPUs and GPUs, and across multiple threads and multiple servers.
 
-The main function for using Dagger is `spawn`:
+-----
 
-`Dagger.spawn(f, args...; options...)`
+## Quickstart: Task Spawning
 
-or `@spawn` for the more convenient macro form:
+For more details: [Task Spawning](@ref)
 
-`Dagger.@spawn [option=value]... f(args...)`
+### Launch a task
 
-When called, it creates an `EagerThunk` (also known as a "thunk" or "task")
-object representing a call to function `f` with the arguments `args`. If it is
-called with other thunks as inputs, such as in `Dagger.@spawn f(Dagger.@spawn
-g())`, then the function `f` gets passed the results of those input thunks. If
-those thunks aren't yet finished executing, then the execution of `f` waits on
-all of its input thunks to complete before executing.
-
-The key point is that, for each argument to a thunk, if the argument is an
-`EagerThunk`, it'll be executed before this node and its result will be passed
-into the function `f`. If the argument is *not* an `EagerThunk` (instead, some
-other type of Julia object), it'll be passed as-is to the function `f`.
-
-Thunks don't accept regular keyword arguments for the function `f`. Instead,
-the `options` kwargs are passed to the scheduler to control its behavior:
-- Any field in `Dagger.Sch.ThunkOptions` (see [Scheduler and Thunk options](@ref))
-- `meta::Bool` -- Pass the input `Chunk` objects themselves to `f` and not the value contained in them
-
-There are also some extra kwargs that can be passed, although they're considered advanced options to be used only by developers or library authors:
-- `get_result::Bool` -- return the actual result to the scheduler instead of `Chunk` objects. Used when `f` explicitly constructs a Chunk or when return value is small (e.g. in case of reduce)
-- `persist::Bool` -- the result of this Thunk should not be released after it becomes unused in the DAG
-- `cache::Bool` -- cache the result of this Thunk such that if the thunk is evaluated again, one can just reuse the cached value. If it’s been removed from cache, recompute the value.
-
-### Simple example
-
-Let's see a very simple directed acyclic graph (or DAG) constructed with Dagger:
+If you want to call a function `myfunc` with arguments `arg1`, `arg2`, `arg3`,
+and keyword argument `color=:red`:
 
 ```julia
-using Dagger
-
-add1(value) = value + 1
-add2(value) = value + 2
-combine(a...) = sum(a)
-
-p = Dagger.@spawn add1(4)
-q = Dagger.@spawn add2(p)
-r = Dagger.@spawn add1(3)
-s = Dagger.@spawn combine(p, q, r)
-
-@assert fetch(s) == 16
-```
-
-The thunks `p`, `q`, `r`, and `s` have the following structure:
-
-![graph](https://user-images.githubusercontent.com/25916/26920104-7b9b5fa4-4c55-11e7-97fb-fe5b9e73cae6.png)
-
-The final result (from `fetch(s)`) is the obvious consequence of the operation:
-
- `add1(4) + add2(add1(4)) + add1(3)`
-
- `(4 + 1) + ((4 + 1) + 2) + (3 + 1) == 16`
-
-### Eager Execution
-
-Dagger's `@spawn` macro works similarly to `@async` and `Threads.@spawn`: when
-called, it wraps the function call specified by the user in an `EagerThunk`
-object, and immediately places it onto a running scheduler, to be executed once
-its dependencies are fulfilled.
-
-```julia
-x = rand(400,400)
-y = rand(400,400)
-zt = Dagger.@spawn x * y
-z = fetch(zt)
-@assert isapprox(z, x * y)
-```
-
-One can also `wait` on the result of `@spawn` and check completion status with
-`isready`:
-
-```julia
-x = Dagger.@spawn sleep(10)
-@assert !isready(x)
-wait(x)
-@assert isready(x)
-```
-
-Like `@async` and `Threads.@spawn`, `Dagger.@spawn` synchronizes with
-locally-scoped `@sync` blocks:
-
-```julia
-function sleep_and_print(delay, str)
-    sleep(delay)
-    println(str)
+function myfunc(arg1, arg2, arg3; color=:blue)
+    arg_total = arg1 + arg2 * arg3
+    printstyled(arg_total; color)
+    return arg_total
 end
-@sync begin
-    Dagger.@spawn sleep_and_print(3, "I print first")
+t = Dagger.@spawn myfunc(arg1, arg2, arg3; color=:red)
+```
+
+This will run the function asynchronously; you can fetch its result with
+`fetch(t)`, or just wait on it to complete with `wait(t)`. If the call to
+`myfunc` throws an error, `fetch(t)` will rethrow it.
+
+If running Dagger with multiple workers, make sure to define `myfunc` with
+`@everywhere` from the `Distributed` stdlib.
+
+### Launch a task with an anonymous function
+
+It's more convenient to use `Dagger.spawn` for anonymous functions. Taking the
+previous example, but using an anonymous function instead of `myfunc`:
+
+```julia
+Dagger.spawn((arg1, arg2, arg3; color=:blue) -> begin
+    arg_total = arg1 + arg2 * arg3
+    printstyled(arg_total; color)
+    return arg_total
+end, arg1, arg2, arg3; color=:red)
+```
+
+`spawn` is functionally identical to `@spawn`, but can be more or less
+convenient to use, depending on what you're trying to do.
+
+### Launch many tasks and wait on them all to complete
+
+`@spawn` participates in `@sync` blocks, just like `@async` and
+`Threads.@spawn`, and will cause `@sync` to wait until all the tasks have
+completed:
+
+```julia
+@sync for result in simulation_results
+    Dagger.@spawn send_result_to_database(result)
 end
-wait(Dagger.@spawn sleep_and_print(1, "I print second"))
+nresults = length(simulation_results)
+wait(Dagger.@spawn update_database_result_count(nresults))
 ```
 
-One can also safely call `@spawn` from another worker (not ID 1), and it will be executed correctly:
+Above, `update_database_result_count` will only run once all
+`send_result_to_database` calls have completed.
 
-```
-x = fetch(Distributed.@spawnat 2 Dagger.@spawn 1+2) # fetches the result of `@spawnat`
-x::EagerThunk
-@assert fetch(x) == 3 # fetch the result of `@spawn`
-```
+Note that other APIs (including `spawn`) do not participate in `@sync` blocks.
 
-This is useful for nested execution, where an `@spawn`'d thunk calls `@spawn`. This is detailed further in [Dynamic Scheduler Control](@ref).
+### Run a task on a specific Distributed worker
 
-### Errors
-
-If a thunk errors while running under the eager scheduler, it will be marked as
-having failed, all dependent (downstream) thunks will be marked as failed, and
-any future thunks that use a failed thunk as input will fail. Failure can be
-determined with `fetch`, which will re-throw the error that the
-originally-failing thunk threw. `wait` and `isready` will *not* check whether a
-thunk or its upstream failed; they only check if the thunk has completed, error
-or not.
-
-This failure behavior is not the default for lazy scheduling ([Lazy API](@ref)),
-but can be enabled by setting the scheduler/thunk option ([Scheduler and Thunk options](@ref))
-`allow_error` to `true`.  However, this option isn't terribly useful for
-non-dynamic usecases, since any thunk failure will propagate down to the output
-thunk regardless of where it occurs.
-
-### Lazy API
-
-Alongside the modern eager API, Dagger also has a legacy lazy API, accessible
-via `@par` or `delayed`. The above computation can be executed with the lazy
-API by substituting `@spawn` with `@par` and `fetch` with `collect`:
+Dagger uses [Scopes](@ref) to control where tasks can execute. There's a handy
+constructor, `Dagger.scope`, that makes defining scopes easy:
 
 ```julia
-p = @par add1(4)
-q = @par add2(p)
-r = @par add1(3)
-s = @par combine(p, q, r)
-
-@assert collect(s) == 16
+w2_only = Dagger.scope(worker=2)
+Dagger.@spawn scope=w2_only myfunc(arg1, arg2, arg3; color=:red)
 ```
 
-or similarly, in block form:
+Now the launched task will *definitely* execute on worker 2 (or if it's not
+possible to run on worker 2, Dagger will throw an error when you try to `fetch`
+the result).
+
+-----
+
+## Quickstart: Data Management
+
+For more details: [Data Management](@ref)
+
+### Operate on mutable data in-place
+
+Dagger usually assumes that you won't be modifying the arguments passed to your
+functions, but you can tell Dagger you plan to mutate them with `@mutable`:
 
 ```julia
-s = @par begin
-    p = add1(4)
-    q = add2(p)
-    r = add1(3)
-    combine(p, q, r)
+A = Dagger.@mutable rand(1000, 1000)
+Dagger.@spawn accumulate!(+, A, A)
+```
+
+This will lock `A` (and any tasks that use it) to the current worker. You can
+also lock it to a different worker by creating the data within a task:
+
+```julia
+A = Dagger.spawn() do
+    Dagger.@mutable rand(1000, 1000)
 end
-
-@assert collect(s) == 16
 ```
 
-Alternatively, if you want to compute but not fetch the result of a lazy
-operation, you can call `compute` on the thunk. This will return a `Chunk`
-object which references the result (see [Chunks](@ref) for more details):
+### Parallel reduction
+
+Reductions are often parallelized by reducing a set of partitions on each
+worker, and then reducing those intermediate reductions on a single worker.
+Dagger supports this easily with `@shard`:
 
 ```julia
-x = @par 1+2
-cx = compute(x)
-cx::Chunk
-@assert collect(cx) == 3
+A = Dagger.@shard rand(1:20, 10000)
+temp_bins = Dagger.@shard zeros(20)
+hist! = (bins, arr) -> for elem in arr
+    bins[elem] += 1
+end
+wait.([Dagger.@spawn scope=Dagger.scope(;worker) hist!(temp_bins, A) for worker in procs()])
+final_bins = sum(map(b->fetch(Dagger.@spawn copy(b)), temp_bins); dims=1)[1]
 ```
 
-Note that, as a legacy API, usage of the lazy API is generally discouraged for modern usage of Dagger. The reasons for this are numerous:
-- Nothing useful is happening while the DAG is being constructed, adding extra latency
-- Dynamically expanding the DAG can't be done with `@par` and `delayed`, making recursive nesting annoying to write
-- Each call to `compute`/`collect` starts a new scheduler, and destroys it at the end of the computation, wasting valuable time on setup and teardown
-- Distinct schedulers don't share runtime metrics or learned parameters, thus causing the scheduler to act less intelligently
-- Distinct schedulers can't share work or data directly
+Here, `A` points to unique random arrays, one on each worker, and `temp_bins`
+points to a set of histogram bins on each worker. When we `@spawn hist!`,
+Dagger passes in the random array and bins for only the specific worker that
+the task is run on; i.e. a call to `hist!` that runs on worker 2 will get a
+different `A` and `temp_bins` from a call to `hist!` on worker 3. All of the
+calls to `hist!` may run in parallel
 
-## Chunks
+By using `map` on `temp_bins`, we then make a copy of each worker's bins that
+we can safely return back to our current worker, and sum them together to get
+our total histogram.
 
-Dagger relies heavily on communication between workers to operate. To make this
-efficient when communicating potentially large units of data, Dagger uses a
-remote reference, called a `Dagger.Chunk`, to refer to objects which exist on
-another worker. `Chunk`s are backed by a distributed refcounting mechanism
-provided by MemPool.jl, which ensures that the referenced data is not GC'd
-until all `Chunk`s referencing that object are GC'd from all workers containing
-them. Conveniently, if you pass in a `Chunk` object as an input to a function
-using either API, then the thunk's payload function will get executed with the
-value contained in the `Chunk`. The scheduler also understands `Chunk`s, and
-will try to schedule work close to where their `Chunk` inputs reside, to reduce
-communication overhead.
+-----
 
-`Chunk`s also have a cached type, a "processor", and a "scope", which are
-important for identifying the type of the object, where in memory (CPU RAM, GPU
-VRAM, etc.) the value resides, and where the value is allowed to be transferred
-and dereferenced. See [Processors](@ref) and [Scopes](@ref) for more details on
-how these properties can be used to control scheduling behavior around `Chunk`s.
+## Quickstart: Distributed Arrays
 
-### Scheduler and Thunk options
+Dagger's `DArray` type represents a distributed array, where a single large
+array is implemented as a set of smaller array partitions, which may be
+distributed across a Julia cluster.
 
-While Dagger generally "just works", sometimes one needs to exert some more
-fine-grained control over how the scheduler allocates work. There are two
-parallel mechanisms to achieve this: Scheduler options (from
-`Dagger.Sch.SchedulerOptions`) and Thunk options (from
-`Dagger.Sch.ThunkOptions`). These two options structs contain many shared
-options, with the difference being that Scheduler options operate
-globally across an entire DAG, and Thunk options operate on a thunk-by-thunk
-basis.
+For more details: [Distributed Arrays](@ref)
 
-Scheduler options can be constructed and passed to `collect()` or `compute()`
-as the keyword argument `options` for lazy API usage:
+### Distribute an existing array
+
+Distributing any kind of array into a `DArray` is easy, just use `distribute`,
+and specify the partitioning you desire with `Blocks`. For example, to
+distribute a 16 x 16 matrix in 4 x 4 partitions:
 
 ```julia
-t = @par 1+2
-opts = Dagger.Sch.SchedulerOptions(;single=1) # Execute on worker 1
-
-compute(t; options=opts)
-
-collect(t; options=opts)
+A = rand(16, 16)
+DA = distribute(A, Blocks(4, 4))
 ```
 
-Thunk options can be passed to `@spawn/spawn`, `@par`, and `delayed` similarly:
+### Allocate a distributed array directly
+
+To allocate a `DArray`, just pass your `Blocks` partitioning object into the
+appropriate allocation function, such as `rand`, `ones`, or `zeros`:
 
 ```julia
-# Execute on worker 1
-
-Dagger.@spawn single=1 1+2
-Dagger.spawn(+, 1, 2; single=1)
-
-opts = Dagger.Sch.ThunkOptions(;single=1)
-delayed(+)(1, 2; options=opts)
+rand(Blocks(20, 20), 100, 100)
+ones(Blocks(20, 100), 100, 2000)
+zeros(Blocks(50, 20), 300, 200)
 ```
 
-[`Dagger.Sch.SchedulerOptions`](@ref)
-[`Dagger.Sch.ThunkOptions`](@ref)
+### Convert a `DArray` back into an `Array`
+
+To get back an `Array` from a `DArray`, just call `collect`:
+
+```julia
+DA = rand(Blocks(32, 32), 256, 128)
+collect(DA) # returns a `Matrix{Float64}`
+```

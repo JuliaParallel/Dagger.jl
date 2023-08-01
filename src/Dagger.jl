@@ -18,24 +18,24 @@ using Requires
 using MacroTools
 using TimespanLogging
 
-const PLUGINS = Dict{Symbol,Any}()
-const PLUGIN_CONFIGS = Dict{Symbol,String}(
-    :scheduler => "Dagger.Sch"
-)
-
 include("lib/util.jl")
+include("utils/dagdebug.jl")
 
 # Distributed data
 include("options.jl")
 include("processor.jl")
 include("scopes.jl")
+include("eager_thunk.jl")
+include("queue.jl")
 include("thunk.jl")
+include("submission.jl")
 include("chunks.jl")
 
 # Task scheduling
 include("compute.jl")
 include("utils/clock.jl")
 include("utils/system_uuid.jl")
+include("utils/locked-object.jl")
 include("sch/Sch.jl"); using .Sch
 
 # Array computations

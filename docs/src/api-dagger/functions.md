@@ -2,44 +2,49 @@
 CurrentModule = Dagger
 ```
 
-# Functions
+# Dagger Functions
 ```@index
 Pages = ["functions.md"]
 ```
 
-## General Functions
+## Task Functions/Macros
 ```@docs
-delayed
+@spawn
 spawn
+delayed
+@par
+```
+
+## Task Options Functions/Macros
+```@docs
+with_options
+get_options
+@option
+default_option
+```
+
+## Data Management Functions
+```@docs
 tochunk
+@mutable
+@shard
+shard
+```
+
+## Scope Functions
+```@docs
+scope
+constrain
+```
+
+## Lazy Task Functions
+```@docs
 domain
 compute
 dependents
 noffspring
 order
 treereduce
-```
-
-## Table Functions
-```@docs
-tabletype
-tabletype!
-trim
-trim!
-map
-filter
-reduce
-groupby
-leftjoin
-innerjoin
-keys
-getindex
-```
-
-## Array Functions
-```@docs
-alignfirst
-view
 ```
 
 ## Processor Functions
@@ -50,24 +55,14 @@ default_enabled
 get_processors
 get_parent
 move
-capacity
 get_tls
 set_tls!
 ```
-
-## Shard Functions
-[`Dagger.@shard`](@ref)
-[`Dagger.shard`](@ref)
 
 ## Context Functions
 ```@docs
 addprocs!
 rmprocs!
-```
-
-## Logging Functions
-```@docs
-get_logs!
 ```
 
 ## Thunk Execution Environment Functions
@@ -91,20 +86,4 @@ Base.wait
 Sch.exec!
 Sch.halt!
 Sch.get_dag_ids
-```
-
-## File IO Functions
-
-!!! warning
-    These APIs are currently untested and may be removed or modified.
-
-```@docs
-save
-load
-```
-
-# Macros API
-```@docs
-@par
-@spawn
 ```
