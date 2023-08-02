@@ -41,28 +41,24 @@ argument to a task, the task will be forced to execute on the same worker that
 `@mutable` was called on. For example:
 
 ```julia
-x = remotecall_fetch(2) do
-    Dagger.@mutable Threads.Atomic{Int}(0)
-end
+Dagger.@mutable worker=2 Threads.Atomic{Int}(0)
 x::Dagger.Chunk # The result is always a `Chunk`
 
 # x is now considered mutable, and may only be accessed on worker 2:
-fetch(Dagger.@spawn Threads.atomic_add!(x, 3)) # Always executed on worker 2
-fetch(Dagger.@spawn single=1 Threads.atomic_add!(x, 3)) # SchedulingException
+wait(Dagger.@spawn Threads.atomic_add!(x, 1)) # Always executed on worker 2
+wait(Dagger.@spawn scope=Dagger.scope(worker=1) Threads.atomic_add!(x, 1)) # SchedulingException
 ```
 
-`@mutable`, when called as above, gain a scope of `ProcessorScope(myid())`,
-which means that any processor on that worker is allowed to execute tasks that
-use the object (subject to the usual scheduling rules).
+`@mutable`, when called as above, is constructed on worker 2, and the data
+gains a scope of `ProcessScope(myid())`, which means that any processor on that
+worker is allowed to execute tasks that use the object (subject to the usual
+scheduling rules).
 
-`@mutable` also has two other forms, allowing the processor and scope to be
-manually supplied:
+`@mutable` also allows the scope to be manually supplied, if more specific
+restrictions are desirable:
 
 ```julia
-proc1 = Dagger.ThreadProc(myid(), 3)
-proc2 = Dagger.ThreadProc(myid(), 4)
-scope = Dagger.UnionScope(ExactScope.([proc1, proc2]))
-x = @mutable OSProc() scope rand(100)
+x = @mutable scope=Dagger.scope(worker=1, threads=[3,4]) rand(100)
 # x is now scoped to threads 3 and 4 on worker `myid()`
 ```
 

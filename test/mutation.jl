@@ -37,16 +37,19 @@
     end
 end
 
+@everywhere mutable_update!(x) = x[] = myid()
+
 @testset "Mutation" begin
 
 @testset "@mutable" begin
-    w = first(workers())
-    @assert w != 1 "Not enough workers to test mutability"
-    x = remotecall_fetch(w) do
-        Dagger.@mutable Ref{Int}()
+    w1 = first(workers())
+    @assert w1 != 1 "Not enough workers to test mutability"
+    for (w, wo) in [(1, w1), (w1, 1)]
+        x = Dagger.@mutable worker=w Ref{Int}()
+        @test fetch(Dagger.@spawn mutable_update!(x)) == w
+        wo_scope = Dagger.ProcessScope(wo)
+        @test_throws_unwrap Dagger.ThunkFailedException fetch(Dagger.@spawn scope=wo_scope mutable_update!(x))
     end
-    @test fetch(Dagger.@spawn (x->x[] = myid())(x)) == w
-    @test_throws_unwrap Dagger.ThunkFailedException fetch(Dagger.@spawn single=1 (x->x[] = myid())(x))
 end # @testset "@mutable"
 
 @testset "Shard" begin
