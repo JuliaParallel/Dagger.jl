@@ -3,7 +3,6 @@ uuid = "d58978e5-989f-55fb-8d15-ea34adc7bf54"
 version = "0.18.1"
 
 [deps]
-Colors = "5ae59095-9a9b-59fe-a467-6f913c188581"
 ContextVariablesX = "6add18c4-b38d-439d-96f6-d6bc489c04c5"
 DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
 Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
@@ -22,7 +21,6 @@ TimespanLogging = "a526e669-04d3-4846-9525-c66122c55f63"
 UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
 
 [compat]
-Colors = "0.10, 0.11, 0.12"
 ContextVariablesX = "0.1"
 DataStructures = "0.18"
 MacroTools = "0.5"
@@ -33,8 +31,9 @@ TimespanLogging = "0.1"
 julia = "1.7"
 
 [extras]
-Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+Colors = "5ae59095-9a9b-59fe-a467-6f913c188581"
 Pkg = "44cfe95a-1eb2-52ea-b672-e2afdf69b78f"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Test", "Pkg"]
+test = ["Colors", "Test", "Pkg"]
