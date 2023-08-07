@@ -55,7 +55,7 @@ include("array/sparse_partition.jl")
 include("array/sort.jl")
 
 # Other
-include("ui/graph.jl")
+include("ui/graph-core.jl")
 include("ui/gantt-common.jl")
 include("ui/gantt-text.jl")
 
@@ -66,13 +66,16 @@ function __init__()
     # Initialize system UUID
     system_uuid()
 
-    @require Luxor="ae8d54c2-7ccd-5906-9d76-62fc9837b5bc" begin
-        # Gantt chart renderer
-        include("ui/gantt-luxor.jl")
-    end
-    @require Mux="a975b10e-0019-58db-a62f-e48ff68538c9" begin
-        # Gantt chart HTTP server
-        include("ui/gantt-mux.jl")
+    @require Colors="5ae59095-9a9b-59fe-a467-6f913c188581" begin
+        include("ui/graph.jl")
+        @require Luxor="ae8d54c2-7ccd-5906-9d76-62fc9837b5bc" begin
+            # Gantt chart renderer
+            include("ui/gantt-luxor.jl")
+        end
+        @require Mux="a975b10e-0019-58db-a62f-e48ff68538c9" begin
+            # Gantt chart HTTP server
+            include("ui/gantt-mux.jl")
+        end
     end
     @require ProfileSVG="132c30aa-f267-4189-9183-c8a63c7e05e6" begin
         # Profile renderer

@@ -1,5 +1,6 @@
 import TimespanLogging
 import TimespanLogging: Timespan, Event, Events, LocalEventLog, MultiEventLog
+import Colors
 
 @testset "Logging" begin
     @testset "LocalEventLog" begin
