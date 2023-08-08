@@ -13,6 +13,9 @@ makedocs(;
     ),
     pages = [
         "Home" => "index.md",
+        "Use Cases" => [
+            "Parallel Nested Loops" => "use-cases/parallel-nested-loops.md",
+        ],
         "Task Spawning" => "task-spawning.md",
         "Data Management" => "data-management.md",
         "Distributed Arrays" => "darray.md",
