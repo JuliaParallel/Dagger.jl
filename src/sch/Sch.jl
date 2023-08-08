@@ -219,6 +219,16 @@ error will be displayed.
 when constructing `Chunk`s (such as when constructing the return value). The
 device must support `MemPool.CPURAMResource`. When `nothing`, uses
 `MemPool.GLOBAL_DEVICE[]`.
+- `storage_root_tag::Any=nothing`: If not `nothing`,
+specifies the MemPool storage leaf tag to associate with the thunk's result.
+This tag can be used by MemPool's storage devices to manipulate their behavior,
+such as the file name used to store data on disk."
+- `storage_leaf_tag::MemPool.Tag,Nothing}=nothing`: If not `nothing`,
+specifies the MemPool storage leaf tag to associate with the thunk's result.
+This tag can be used by MemPool's storage devices to manipulate their behavior,
+such as the file name used to store data on disk."
+- `storage_retain::Bool=false`: The value of `retain` to pass to
+`MemPool.poolset` when constructing the result `Chunk`.
 """
 Base.@kwdef struct ThunkOptions
     single::Union{Int,Nothing} = nothing
@@ -230,6 +240,9 @@ Base.@kwdef struct ThunkOptions
     checkpoint = nothing
     restore = nothing
     storage::Union{Chunk,Nothing} = nothing
+    storage_root_tag = nothing
+    storage_leaf_tag::Union{MemPool.Tag,Nothing} = nothing
+    storage_retain::Bool = false
 end
 
 """
@@ -249,7 +262,10 @@ function Base.merge(sopts::SchedulerOptions, topts::ThunkOptions)
                  allow_errors,
                  topts.checkpoint,
                  topts.restore,
-                 topts.storage)
+                 topts.storage,
+                 topts.storage_root_tag,
+                 topts.storage_leaf_tag,
+                 topts.storage_retain)
 end
 Base.merge(sopts::SchedulerOptions, ::Nothing) =
     ThunkOptions(sopts.single,
@@ -283,6 +299,9 @@ function populate_defaults(opts::ThunkOptions, Tf, Targs)
         maybe_default(:checkpoint),
         maybe_default(:restore),
         maybe_default(:storage),
+        maybe_default(:storage_root_tag),
+        maybe_default(:storage_leaf_tag),
+        maybe_default(:storage_retain),
     )
 end
 
@@ -530,9 +549,9 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
             node = unwrap_weak_checked(state.thunk_dict[thunk_id])
             if metadata !== nothing
                 state.worker_time_pressure[pid][proc] = metadata.time_pressure
-                to_storage = node.options.storage
-                state.worker_storage_pressure[pid][to_storage] = metadata.storage_pressure
-                state.worker_storage_capacity[pid][to_storage] = metadata.storage_capacity
+                #to_storage = fetch(node.options.storage)
+                #state.worker_storage_pressure[pid][to_storage] = metadata.storage_pressure
+                #state.worker_storage_capacity[pid][to_storage] = metadata.storage_capacity
                 state.worker_loadavg[pid] = metadata.loadavg
                 sig = signature(node, state)
                 state.signature_time_cost[sig] = (metadata.threadtime + get(state.signature_time_cost, sig, 0)) ÷ 2
@@ -1546,7 +1565,10 @@ function do_task(to_proc, task_desc)
 
         # Construct result
         # TODO: We should cache this locally
-        send_result || meta ? res : tochunk(res, to_proc; device, persist, cache=persist ? true : cache)
+        send_result || meta ? res : tochunk(res, to_proc; device, persist, cache=persist ? true : cache,
+                                            tag=options.storage_root_tag,
+                                            leaf_tag=something(options.storage_leaf_tag, MemPool.Tag()),
+                                            retain=options.storage_retain)
     catch ex
         bt = catch_backtrace()
         RemoteException(myid(), CapturedException(ex, bt))
