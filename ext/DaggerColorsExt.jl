@@ -1,8 +1,17 @@
-import .Colors
+module DaggerColorsExt
 
-import .Dagger
-import .Dagger: show_plan
-import .Dagger.TimespanLogging: Timespan
+@static if isdefined(Base, :get_extension)
+    import Colors
+else
+    import .Colors
+end
+
+import Dagger
+import Dagger: show_plan
+
+using Dagger.TimespanLogging: Timespan
+using Dagger: Chunk, Thunk, Processor
+
 
 ### DAG-based graphing
 
@@ -288,3 +297,5 @@ function showfn(io, f::Function)
     end
 end
 showfn(io, f) = show(io, f)
+
+end # module DaggerColorsExt

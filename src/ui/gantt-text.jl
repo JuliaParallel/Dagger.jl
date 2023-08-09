@@ -22,7 +22,7 @@ function draw_gantt_text(ctx; delay=2, width=40, height=20, window_length=20)
         #= TODO: Concatenate and render profile data
         if ctx.profile
             prof_data, prof_lidict = logs_to_stackframes(window_logs)
-            prof_to_svg(prof_path, prof_data, prof_lidict, image_idx; width=width)
+            _prof_to_svg(prof_path, prof_data, prof_lidict, image_idx; width=width)
         end
         =#
 

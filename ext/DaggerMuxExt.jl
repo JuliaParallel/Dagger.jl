@@ -1,4 +1,12 @@
-using .Mux
+module DaggerMuxExt
+
+@static if isdefined(Base, :get_extension)
+    using Mux
+else
+    using .Mux
+end
+
+using Dagger
 
 function serve_gantt(svg_path, prof_path; port=8000, delay=5)
     # Setup Mux app
@@ -65,3 +73,5 @@ function serve_gantt(svg_path, prof_path; port=8000, delay=5)
         end
     end
 end
+
+end # module DaggerMuxExt
