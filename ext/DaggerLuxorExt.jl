@@ -1,8 +1,14 @@
-import .Luxor: Drawing, finish, Point, background, sethue, fontsize, rect, text
+module DaggerLuxorExt
 
-prof_to_svg(::Any, ::Any, ::Any; kwargs...) = nothing
+@static if isdefined(Base, :get_extension)
+    import Colors
+    import Luxor: Drawing, finish, Point, background, sethue, fontsize, rect, text
+else
+    import .Colors
+    import .Luxor: Drawing, finish, Point, background, sethue, fontsize, rect, text
+end
 
-combine_gantt_images(::Any, ::Any, ::Any, ::Any) = ("", "")
+import Dagger
 
 function draw_gantt(ctx, svg_path, prof_path; delay=2, width=1000, height=640, window_length=20)
     root_time = time_ns()
@@ -33,8 +39,8 @@ function draw_gantt(ctx, svg_path, prof_path; delay=2, width=1000, height=640, w
 
         # Concatenate and render profile data
         if ctx.profile
-            prof_data, prof_lidict = logs_to_stackframes(window_logs)
-            prof_to_svg(prof_path, prof_data, prof_lidict, image_idx; width=width)
+            prof_data, prof_lidict = Dagger.logs_to_stackframes(window_logs)
+            Dagger._prof_to_svg(prof_path, prof_data, prof_lidict, image_idx; width=width)
         end
 
         for proc in unique(map(x->x[1].timeline[2], filter(x->x[1].category==:compute, window_logs)))
@@ -98,7 +104,7 @@ function draw_gantt(ctx, svg_path, prof_path; delay=2, width=1000, height=640, w
     end
     if isdir(svg_path)
         final_paths = try
-            combine_gantt_images(ctx, svg_path, prof_path, delay)
+            Dagger._combine_gantt_images(ctx, svg_path, prof_path, delay)
         catch err
             @error "Image-to-video failed" exception=err
             ("", "")
@@ -143,3 +149,5 @@ function show_gantt(ctx; delay=2, port=8000, width=1000, height=640, window_leng
         serve_gantt(svg_path, prof_path; port=port, delay=delay)
     end
 end
+
+end # module DaggerLuxorExt

@@ -1,4 +1,12 @@
-import .FFMPEG, .FileIO
+module DaggerFFMPEGExt
+
+@static if isdefined(Base, :get_extension)
+    import FFMPEG
+else
+    import .FFMPEG
+end
+
+import Dagger
 
 function combine_images(path, delay)
     fr = 1 / delay
@@ -16,9 +24,11 @@ function combine_images(path, delay)
                "$path/final.mp4")
 end
 
-function combine_gantt_images(ctx, svg_path::String, prof_path::String, delay)
+function Dagger._combine_gantt_images(ctx, svg_path::String, prof_path::String, delay)
     combine_images(svg_path, delay)
     ctx.profile && combine_images(prof_path, delay)
     return (gantt="$svg_path/final.mp4",
             profile="$prof_path/final.mp4")
 end
+
+end # module DaggerFFMPEGExt

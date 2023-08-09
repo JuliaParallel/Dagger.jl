@@ -62,31 +62,43 @@ include("ui/gantt-text.jl")
 # Logging
 include("lib/logging-events.jl")
 
+# For interoperation of gantt-luxor and video:
+_combine_gantt_images(::Any, ::Any, ::Any, ::Any) = ("", "")
+
+# For interoperation of gantt-luxor and profilesvg:
+_prof_to_svg(::Any, ::Any, ::Any; kwargs...) = nothing
+
+@static if !isdefined(Base, :get_extension)
+    using Requires
+end
+
 function __init__()
     # Initialize system UUID
     system_uuid()
 
-    @require Colors="5ae59095-9a9b-59fe-a467-6f913c188581" begin
-        include("ui/graph.jl")
-        @require Luxor="ae8d54c2-7ccd-5906-9d76-62fc9837b5bc" begin
-            # Gantt chart renderer
-            include("ui/gantt-luxor.jl")
+    @static if !isdefined(Base, :get_extension)
+        @require Colors="5ae59095-9a9b-59fe-a467-6f913c188581" begin
+            include("../ext/DaggerColorsExt.jl")
+            @require Luxor="ae8d54c2-7ccd-5906-9d76-62fc9837b5bc" begin
+                # Gantt chart renderer
+                include("../ext/DaggerLuxorExt.jl")
+            end
         end
         @require Mux="a975b10e-0019-58db-a62f-e48ff68538c9" begin
             # Gantt chart HTTP server
-            include("ui/gantt-mux.jl")
+            include("../ext/DaggerMuxExt.jl")
         end
-    end
-    @require ProfileSVG="132c30aa-f267-4189-9183-c8a63c7e05e6" begin
-        # Profile renderer
-        include("ui/profile-profilesvg.jl")
-    end
-    @require FFMPEG="c87230d0-a227-11e9-1b43-d7ebe4e7570a" begin
-        @require FileIO="5789e2e9-d7fb-5bc7-8068-2c6fae9b9549" begin
+
+        @require ProfileSVG="132c30aa-f267-4189-9183-c8a63c7e05e6" begin
+            # Profile renderer
+            include("../ext/DaggerProfileSVGExt.jl")
+        end
+        @require FFMPEG="c87230d0-a227-11e9-1b43-d7ebe4e7570a" begin
             # Video generator
-            include("ui/video.jl")
+            include("../ext/DaggerFFMPEGExt.jl")
         end
     end
+
     for tid in 1:Threads.nthreads()
         add_processor_callback!("__cpu_thread_$(tid)__") do
             ThreadProc(myid(), tid)
