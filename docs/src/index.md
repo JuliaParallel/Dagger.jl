@@ -79,6 +79,61 @@ Now the launched task will *definitely* execute on worker 2 (or if it's not
 possible to run on worker 2, Dagger will throw an error when you try to `fetch`
 the result).
 
+### Parallelize nested loops
+
+Nested loops are a very common pattern in Julia, yet it's often difficult to
+parallelize them efficiently with `@threads` or `@distributed`/`pmap`.
+Thankfully, this kind of problem is quite easy for Dagger to handle; here is an
+example of parallelizing a two-level nested loop, where the inner loop
+computations (`g`) depend on an outer loop computation (`f`):
+
+```julia
+@everywhere begin
+    using Random
+    Random.seed!(0)
+
+    # Some "expensive" functions that complete at different speeds
+    const crn = abs.(randn(20, 7))
+    f(i) = sleep(crn[i, 7])
+    g(i, j, y) = sleep(crn[i, j])
+end
+function nested_dagger()
+    @sync for i in 1:20
+        y = Dagger.@spawn f(i)
+        for j in 1:6
+            z = Dagger.@spawn g(i, j, y)
+        end
+    end
+end
+```
+
+And the equivalent (and less performant) example with `Threads.@threads`,
+either parallelizing the inner or outer loop:
+
+```julia
+function nested_threads_outer()
+    Threads.@threads for i in 1:20
+        y = f(i)
+        for j in 1:6
+            z = g(i, j, y)
+        end
+    end
+end
+function nested_threads_inner()
+    for i in 1:20
+        y = f(i)
+        Threads.@threads for j in 1:6
+            z = g(i, j, y)
+        end
+    end
+end
+```
+
+Unlike `Threads.@threads` (which is really only intended to be used for a
+single loop, unnested), `Dagger.@spawn` is capable of parallelizing across both
+loop levels seamlessly, using the dependencies between `f` and `g` to determine
+the correct order to execute tasks.
+
 -----
 
 ## Quickstart: Data Management
