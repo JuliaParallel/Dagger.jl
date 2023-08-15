@@ -14,12 +14,14 @@ using UUIDs
 
 import ContextVariablesX
 
+import Adapt
 using Requires
 using MacroTools
 using TimespanLogging
 
 include("lib/util.jl")
 include("utils/dagdebug.jl")
+include("utils/find-thunk.jl")
 
 # Distributed data
 include("options.jl")

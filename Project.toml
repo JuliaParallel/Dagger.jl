@@ -3,6 +3,7 @@ uuid = "d58978e5-989f-55fb-8d15-ea34adc7bf54"
 version = "0.18.1"
 
 [deps]
+Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
 ContextVariablesX = "6add18c4-b38d-439d-96f6-d6bc489c04c5"
 DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
 Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
@@ -21,6 +22,7 @@ TimespanLogging = "a526e669-04d3-4846-9525-c66122c55f63"
 UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
 
 [compat]
+Adapt = "1, 2, 3"
 ContextVariablesX = "0.1"
 DataStructures = "0.18"
 MacroTools = "0.5"
