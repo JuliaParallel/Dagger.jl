@@ -215,6 +215,7 @@ function Base.collect(x::Dagger.DArray{T,N,MPIBlocks{N}};
             domtmp = MPI.Allgather(domsnd, comm)
         else
             datatmp = MPI.Gather(datasnd, comm, root=root)
+            domtmp = MPI.Gather(domsnd, comm, root=root)
             if datatmp === nothing
                 return
             end
