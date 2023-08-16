@@ -10,17 +10,14 @@ jobs:
       - name: Wait for commands
         id: read_commands
         run: |
-          while true; do
-            ci_commands=$(curl -sH "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -X GET "${{ github.event.pull_request.comments_url }}" | jq -r ".[] | select(.body | startswith(\"/run-actions\")) | .body")
-            if [ ! -z "$ci_commands" ]; then
-              echo "Read commands $ci_commands"
-              echo "ci_commands=$ci_commands" >> $GITHUB_OUTPUT
-              break
-            fi
-            sleep 30
-          done
+          ci_commands=$(curl -sH "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -X GET "${{ github.event.pull_request.comments_url }}" | jq -r ".[] | select(.body | startswith(\"/run-actions\")) | .body")
+          if [ ! -z "$ci_commands" ]; then
+            echo "Read commands $ci_commands"
+            echo "ci_commands=$ci_commands" >> $GITHUB_OUTPUT
+            break
+          fi
 
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - uses: julia-actions/setup-julia@v1
         with:
           version: '1.9'

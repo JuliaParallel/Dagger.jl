@@ -66,10 +66,10 @@ function enable_disk_caching!(
     processes::Vector{Int}=procs(),
 )
     results = [
-        remotecall(id) do
-            !isdefined(Main, :Dagger) && Main.eval(:(using Dagger))
-            Dagger.MemPool.setup_global_device!(
-                Dagger.MemPool.DiskCacheConfig(;
+        # N.B. We pass the Dagger module to help serialization find it remotely
+        remotecall(id, Dagger) do _Dagger
+            _Dagger.MemPool.setup_global_device!(
+                _Dagger.MemPool.DiskCacheConfig(;
                     toggle=true, membound=mem_limits[id], diskbound=disk_limit_mb * 2^20
                 ),
             )

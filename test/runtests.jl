@@ -38,6 +38,7 @@ include("domain.jl")
 include("array.jl")
 include("cache.jl")
 include("diskcaching.jl")
+include("file-io.jl")
 
 try # TODO: Fault tolerance is sometimes unreliable
 #include("fault-tolerance.jl")

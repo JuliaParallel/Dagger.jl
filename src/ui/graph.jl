@@ -1,7 +1,8 @@
-import Colors
-import TimespanLogging: Timespan
+import .Colors
 
-export show_plan
+import .Dagger
+import .Dagger: show_plan
+import .Dagger.TimespanLogging: Timespan
 
 ### DAG-based graphing
 

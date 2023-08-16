@@ -19,30 +19,54 @@ At the core of Dagger.jl is a scheduler heavily inspired by [Dask](https://docs.
 
 ## Installation
 
-Dagger.jl can be installed using the Julia package manager. Enter the Pkg REPL mode by typing "]" in the Julia REPL and then run:
+Dagger.jl can be installed using the Julia package manager. Enter the Pkg REPL
+mode by typing "]" in the Julia REPL and then run:
 
 ```julia
 pkg> add Dagger
 ```
-Or, equivalently, via the Pkg API:
+
+Or, equivalently, install Dagger via the Pkg API:
+
 ```julia
 julia> import Pkg; Pkg.add("Dagger")
 ```
 
 ## Usage
 
-Once installed, the `Dagger` package can by used like so
+Once installed, the `Dagger` package can be loaded with `using Dagger`, or if
+you want to use Dagger for distributed computing, it can be loaded as:
 
 ```julia
-using Distributed; addprocs() # get us some workers
+using Distributed; addprocs() # Add one Julia worker per CPU core
 using Dagger
-
-# do some stuff in parallel!
-a = Dagger.@spawn 1+3
-b = Dagger.@spawn rand(a, 4)
-c = Dagger.@spawn sum(b)
-fetch(c) # some number!
 ```
+
+You can run the following example to see how Dagger exposes easy parallelism:
+
+```julia
+# This runs first:
+a = Dagger.@spawn rand(100, 100)
+
+# These run in parallel:
+b = Dagger.@spawn sum(a)
+c = Dagger.@spawn prod(a)
+
+# Finally, this runs:
+wait(Dagger.@spawn println("b: ", b, ", c: ", c))
+```
+
+## Use Cases
+
+Dagger can support a variety of use cases that benefit from easy, automatic
+parallelism, such as:
+
+- [Parallelizing Nested Loops](https://juliaparallel.github.io/Dagger.jl/dev/use-cases/#Parallel-Nested-Loops)
+
+This isn't an exhaustive list of the use cases that Dagger supports. There are
+more examples in the docs, and more use cases examples are welcome (just file
+an issue or PR).
+
 ## Contributing Guide
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](http://makeapullrequest.com)
 [![GitHub issues](https://img.shields.io/github/issues/JuliaParallel/Dagger.jl)](https://github.com/JuliaParallel/Dagger.jl/issues)
