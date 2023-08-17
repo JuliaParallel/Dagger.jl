@@ -25,6 +25,15 @@ Base.rand(dist::MPIParallelBlocks, t::Type, dims::Integer...; comm::MPI.Comm=MPI
 Base.rand(dist::MPIParallelBlocks, dims::Integer...; comm::MPI.Comm=MPI.COMM_WORLD, root::Integer=0) = rand(dist, Float64, dims, comm, root)
 Base.rand(dist::MPIParallelBlocks, dims::Tuple, comm::MPI.Comm=MPI.COMM_WORLD, root::Integer=0) = rand(dist, Float64, dims, comm, root)
 
+function Dagger.distribute(data::AbstractArray{T,N}, dist::MPIParallelBlocks{N}) where {T,N}
+    dims = size(data)
+    d = ArrayDomain(map(x->1:x, dims))
+    s = Dagger.DomainBlocks(ntuple(_->1, N),
+                            ntuple(i->[dims[i]], N))
+    chunk = Dagger.tochunk(data)
+    return Dagger.DArray(T, d, s, wrap_chunk(chunk, N), dist)
+end
+
 function Base.collect(x::DArray{T,N,<:MPIParallelBlocks} where {T,N})
     return fetch(only(x.chunks))
 end
