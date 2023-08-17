@@ -143,25 +143,21 @@ mutable struct DArray{T,N,B<:AbstractBlocks{N},F} <: ArrayOp{T, N}
     end
 end
 
-# mainly for backwards-compatibility
-DArray{T, N}(domain, subdomains, chunks, partitioning, concat=cat) where {T,N} =
-    DArray(T, domain, subdomains, chunks, partitioning, concat)
-
 function DArray(T, domain::ArrayDomain{N},
-                subdomains::AbstractArray{ArrayDomain{N}, N},
+                subdomains::DomainBlocks{N},
                 chunks::AbstractArray{<:Any, N}, partitioning::B, concat=cat) where {N,B<:AbstractMultiBlocks{N}}
     DArray{T,N,B,typeof(concat)}(domain, subdomains, chunks, partitioning, concat)
 end
 
 function DArray(T, domain::ArrayDomain{N},
-                subdomains::ArrayDomain{N},
-                chunks::Any, partitioning::B, concat=cat) where {N,B<:AbstractSingleBlocks{N}}
-    _subdomains = Array{ArrayDomain{N}, N}(undef, ntuple(i->1, N)...)
-    _subdomains[1] = subdomains
-    _chunks = Array{Any, N}(undef, ntuple(i->1, N)...)
-    _chunks[1] = chunks
-    DArray{T,N,B,typeof(concat)}(domain, _subdomains, _chunks, partitioning, concat)
+                subdomains::DomainBlocks{N},
+                chunks::AbstractArray{<:Any, N}, partitioning::B, concat=cat) where {N,B<:AbstractSingleBlocks{N}}
+    DArray{T,N,B,typeof(concat)}(domain, subdomains, chunks, partitioning, concat)
 end
+
+# mainly for backwards-compatibility
+DArray{T, N}(domain, subdomains, chunks, partitioning, concat=cat) where {T,N} =
+    DArray(T, domain, subdomains, chunks, partitioning, concat)
 
 domain(d::DArray) = d.domain
 chunks(d::DArray) = d.chunks
