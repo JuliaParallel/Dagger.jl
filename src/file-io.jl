@@ -30,11 +30,9 @@ function File(path::AbstractString;
         # FIXME: Once MemPool better propagates errors, this check won't be necessary
         throw(ArgumentError("`Dagger.File` expected file to exist at \"$path\""))
     end
-    if isabspath(path)
-        dir, file = dirname(path), basename(path)
-    else
-        dir, file = pwd(), basename(path)
-    end
+    dir, file = dirname(path), basename(path)
+    # if dir is empty, use the current working directory
+    dir = isempty(dir) ? pwd() : dir
     Tdevice = GenericFileDevice{serialize, deserialize, use_io, mmap}
     device = Tdevice(dir)
     leaf_tag = MemPool.Tag(Tdevice=>file)
@@ -61,11 +59,9 @@ function tofile(@nospecialize(data), path::AbstractString;
                 deserialize::Base.Callable=deserialize,
                 use_io::Bool=true,
                 mmap::Bool=false)
-    if isabspath(path)
-        dir, file = dirname(path), basename(path)
-    else
-        dir, file = pwd(), basename(path)
-    end
+    dir, file = dirname(path), basename(path)
+    # if dir is empty, use the current working directory
+    dir = isempty(dir) ? pwd() : dir
     Tdevice = GenericFileDevice{serialize, deserialize, use_io, mmap}
     device = Tdevice(dir)
     chunk = Dagger.tochunk(data, OSProc(), ProcessScope();
