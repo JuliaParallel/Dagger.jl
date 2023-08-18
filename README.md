@@ -61,7 +61,7 @@ wait(Dagger.@spawn println("b: ", b, ", c: ", c))
 Dagger can support a variety of use cases that benefit from easy, automatic
 parallelism, such as:
 
-- [Parallelizing Nested Loops](https://juliaparallel.github.io/Dagger.jl/dev/use-cases/#Parallel-Nested-Loops)
+- [Parallelizing Nested Loops](https://juliaparallel.org/Dagger.jl/dev/use-cases/parallel-nested-loops/#Use-Case:-Parallel-Nested-Loops)
 
 This isn't an exhaustive list of the use cases that Dagger supports. There are
 more examples in the docs, and more use cases examples are welcome (just file
