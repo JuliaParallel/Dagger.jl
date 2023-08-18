@@ -38,6 +38,14 @@ function Base.collect(x::DArray{T,N,<:MPIParallelBlocks} where {T,N})
     return fetch(only(x.chunks))
 end
 
+function Base.map!(f::Function,
+                   x::Dagger.DArray{T1,N1,MPIParallelBlocks{N1}} where {T1,N1},
+                   y::Dagger.DArray{T2,N2,MPIParallelBlocks{N2}} where {T2,N2})
+    x_local = fetch(x.chunks[1])
+    y_local = fetch(x.chunks[1])
+    map!(f, x_local, y_local)
+end
+
 function Base.reduce(f::Function, x::Dagger.DArray{T,N,MPIParallelBlocks{N}};
                      dims=:,
                      comm=MPI.COMM_WORLD, root=nothing, acrossranks::Bool=false) where {T,N}
