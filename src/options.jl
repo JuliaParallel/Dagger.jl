@@ -1,6 +1,6 @@
 # Scoped Options
 
-ContextVariablesX.@contextvar options_context::NamedTuple = NamedTuple()
+const options_context = ScopedValue{NamedTuple}(NamedTuple())
 
 """
     with_options(f, options::NamedTuple) -> Any
@@ -13,7 +13,7 @@ scope. Note that setting an option here will propagate its value across Julia
 or Dagger tasks spawned by `f()` or its callees (i.e. the options propagate).
 """
 function with_options(f, options::NamedTuple)
-    ContextVariablesX.with_context(options_context => options) do
+    scoped(options_context => options) do
         f()
     end
 end

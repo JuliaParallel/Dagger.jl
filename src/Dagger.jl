@@ -12,7 +12,9 @@ import LinearAlgebra: transpose
 
 using UUIDs
 
-import ContextVariablesX
+if !isdefined(Base, :scoped)
+using ScopedValues
+end
 
 using Requires
 using MacroTools
