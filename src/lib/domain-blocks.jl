@@ -15,10 +15,11 @@ function _getindex(x::DomainBlocks{N}, idx::Tuple) where N
 end
 
 function getindex(x::DomainBlocks{N}, idx::Int) where N
-    if N == 1
+    if N ==1
         _getindex(x, (idx,))
     else
-        _getindex(x, ind2sub(x, idx))
+        idces = CartesianIndices(x)
+        _getindex(x, Tuple(idces[idx]))
     end
 end
 
