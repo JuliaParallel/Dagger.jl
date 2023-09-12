@@ -22,6 +22,7 @@ makedocs(;
         "Task Spawning" => "task-spawning.md",
         "Data Management" => "data-management.md",
         "Distributed Arrays" => "darray.md",
+        "Streaming Tasks" => "streaming.md",
         "Scopes" => "scopes.md",
         "Processors" => "processors.md",
         "Task Queues" => "task-queues.md",
