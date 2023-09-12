@@ -67,7 +67,17 @@ function Base.fetch(t::EagerThunk; raw=false)
     if !isdefined(t, :thunk_ref)
         throw(ConcurrencyViolationError("Cannot `fetch` an unlaunched `EagerThunk`"))
     end
-    return fetch(t.future; raw)
+    stream = task_to_stream(t.uid)
+    if stream !== nothing
+        add_waiters!(stream, [0])
+    end
+    try
+        return fetch(t.future; raw)
+    finally
+        if stream !== nothing
+            remove_waiters!(stream, [0])
+        end
+    end
 end
 function Base.show(io::IO, t::EagerThunk)
     status = if isdefined(t, :thunk_ref)
