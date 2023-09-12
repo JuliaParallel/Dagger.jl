@@ -259,9 +259,11 @@ end
 Combine `SchedulerOptions` and `ThunkOptions` into a new `ThunkOptions`.
 """
 function Base.merge(sopts::SchedulerOptions, topts::ThunkOptions)
-    single = topts.single !== nothing ? topts.single : sopts.single
-    allow_errors = topts.allow_errors !== nothing ? topts.allow_errors : sopts.allow_errors
-    proclist = topts.proclist !== nothing ? topts.proclist : sopts.proclist
+    select_option = (sopt, topt) -> isnothing(topt) ? sopt : topt
+
+    single = select_option(sopts.single, topts.single)
+    allow_errors = select_option(sopts.allow_errors, topts.allow_errors)
+    proclist = select_option(sopts.proclist, topts.proclist)
     ThunkOptions(single,
                  proclist,
                  topts.time_util,
@@ -1376,7 +1378,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                     if unwrap_nested_exception(err) isa InvalidStateException || !isopen(return_queue)
                         @dagdebug thunk_id :execute "Return queue is closed, failing to put result" chan=return_queue exception=(err, catch_backtrace())
                     else
-                        rethrow(err)
+                        rethrow()
                     end
                 finally
                     # Ensure that any spawned tasks get cleaned up
