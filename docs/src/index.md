@@ -394,3 +394,37 @@ Dagger.@spawn copyto!(C, X)
 
 In contrast to the previous example, here, the tasks are executed without argument annotations. As a result, there is a possibility of the `copyto!` task being executed before the `sort!` task, leading to unexpected results in the output array `C`.
 
+## Quickstart: Streaming
+
+Dagger.jl provides a streaming API that allows you to process data in a streaming fashion, where data is processed as it becomes available, rather than waiting for the entire dataset to be loaded into memory.
+
+For more details: [Streaming](@ref)
+
+### Syntax
+
+The `Dagger.spawn_streaming()` function is used to create a streaming region,
+where tasks are executed continuously, processing data as it becomes available:
+
+```julia
+# Open a file to write to on this worker
+f = Dagger.@mutable open("output.txt", "w")
+t = Dagger.spawn_streaming() do
+    # Generate random numbers continuously
+    val = Dagger.@spawn rand()
+    # Write each random number to a file
+    Dagger.@spawn (f, val) -> begin
+        if val < 0.01
+            # Finish streaming when the random number is less than 0.01
+            Dagger.finish_stream()
+        end
+        println(f, val)
+    end
+end
+# Wait for all values to be generated and written
+wait(t)
+```
+
+The above example demonstrates a streaming region that generates random numbers
+continuously and writes each random number to a file. The streaming region is
+terminated when a random number less than 0.01 is generated, which is done by
+calling `Dagger.finish_stream()` (this exits the current streaming task).

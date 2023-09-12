@@ -23,7 +23,6 @@ if !isdefined(Base, :ScopedValues)
 else
     import Base.ScopedValues: ScopedValue, with
 end
-
 import TaskLocalValues: TaskLocalValue
 
 if !isdefined(Base, :get_extension)
@@ -68,6 +67,11 @@ include("sch/Sch.jl"); using .Sch
 
 # Data dependency task queue
 include("datadeps.jl")
+
+# Streaming
+include("stream.jl")
+include("stream-buffers.jl")
+include("stream-transfer.jl")
 
 # Array computations
 include("array/darray.jl")
