@@ -124,6 +124,13 @@ function eager_cleanup(state, uid)
         # N.B. cache and errored expire automatically
         delete!(state.thunk_dict, tid)
     end
+    remotecall_wait(1, uid) do uid
+        lock(EAGER_THUNK_STREAMS) do global_streams
+            if haskey(global_streams, uid)
+                delete!(global_streams, uid)
+            end
+        end
+    end
 end
 
 function _find_thunk(e::Dagger.DTask)

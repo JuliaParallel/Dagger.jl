@@ -67,6 +67,11 @@ include("sch/Sch.jl"); using .Sch
 # Data dependency task queue
 include("datadeps.jl")
 
+# Streaming
+include("stream-buffers.jl")
+include("stream-fetchers.jl")
+include("stream.jl")
+
 # Array computations
 include("array/darray.jl")
 include("array/alloc.jl")
