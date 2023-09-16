@@ -49,6 +49,9 @@ end
 end
 
 @testset "@spawn" begin
+    @test_throws_unwrap ConcurrencyViolationError remotecall_fetch(last(workers())) do
+        Dagger.Sch.init_eager()
+    end
     @test Dagger.Sch.EAGER_CONTEXT[] === nothing
     @testset "per-call" begin
         x = 2
