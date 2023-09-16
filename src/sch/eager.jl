@@ -14,7 +14,7 @@ end
 
 function init_eager()
     if myid() != 1
-        return
+        throw(ConcurrencyViolationError("init_eager can only be called on worker 1"))
     end
     if Threads.atomic_xchg!(EAGER_INIT, true)
         wait(EAGER_READY)
