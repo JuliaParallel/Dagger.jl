@@ -1,5 +1,7 @@
 # Remote
 function eager_submit_internal!(@nospecialize(payload))
+    Sch.init_eager()
+
     ctx = Dagger.Sch.eager_context()
     state = Dagger.Sch.EAGER_STATE[]
     task = current_task()
@@ -9,6 +11,8 @@ end
 function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{UInt64,Int}())
     @nospecialize payload
     ntasks, uid, future, ref, f, args, options, reschedule = payload
+
+    Sch.init_eager()
 
     if uid isa Vector
         thunk_ids = Sch.ThunkID[]
@@ -123,6 +127,7 @@ function eager_submit!(ntasks, uid, future, finalizer_ref, f, args, options)
     elseif myid() != 1
         return remotecall_fetch(eager_submit_internal!, 1, (ntasks, uid, future, finalizer_ref, f, args, options, true))
     else
+        Sch.init_eager()
         state = Dagger.Sch.EAGER_STATE[]
         return lock(state.lock) do
             eager_submit_internal!((ntasks, uid, future, finalizer_ref,
@@ -170,8 +175,6 @@ function eager_process_options_submission_to_local(id_map, options::NamedTuple)
     end
 end
 function eager_spawn(spec::EagerTaskSpec)
-    Dagger.Sch.init_eager()
-
     # Generate new EagerThunk
     uid = eager_next_id()
     future = ThunkFuture()
