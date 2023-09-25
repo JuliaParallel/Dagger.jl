@@ -181,6 +181,13 @@ end
 
         # Mild stress-test
         @test dynamic_fib(10) == 55
+
+        # Errors on remote are correctly scrubbed (#430)
+        t2 = remotecall_fetch(2) do
+            t1 = Dagger.@spawn 1+"fail"
+            Dagger.@spawn t1+1
+        end
+        @test_throws_unwrap Dagger.ThunkFailedException fetch(t2)
     end
     @testset "undefined function" begin
         # Issues #254, #255

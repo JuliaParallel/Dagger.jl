@@ -194,33 +194,53 @@ unwrap_weak_checked(t) = t
 Base.show(io::IO, t::WeakThunk) = (print(io, "~"); Base.show(io, t.x.value))
 Base.convert(::Type{WeakThunk}, t::Thunk) = WeakThunk(t)
 
+"A summary of the data contained in a Thunk, which can be safely serialized."
+struct ThunkSummary
+    id::Int
+    f
+    inputs::Vector{Pair{Union{Symbol,Nothing},Any}}
+end
+inputs(t::ThunkSummary) = t.inputs
+Base.show(io::IO, t::ThunkSummary) = show_thunk(io, t)
+function Base.convert(::Type{ThunkSummary}, t::Thunk)
+    return ThunkSummary(t.id,
+                        t.f,
+                        map(pos_inp->istask(pos_inp[2]) ? pos_inp[1]=>convert(ThunkSummary, pos_inp[2]) : pos_inp,
+                            t.inputs))
+end
+function Base.convert(::Type{ThunkSummary}, t::WeakThunk)
+    t = unwrap_weak(t)
+    if t !== nothing
+        t = convert(ThunkSummary, t)
+    end
+    return t
+end
+
 struct ThunkFailedException{E<:Exception} <: Exception
-    thunk::WeakThunk
-    origin::WeakThunk
+    thunk::ThunkSummary
+    origin::ThunkSummary
     ex::E
 end
 ThunkFailedException(thunk, origin, ex::E) where E =
-    ThunkFailedException{E}(convert(WeakThunk, thunk), convert(WeakThunk, origin), ex)
+    ThunkFailedException{E}(convert(ThunkSummary, thunk),
+                            convert(ThunkSummary, origin),
+                            ex)
 function Base.showerror(io::IO, ex::ThunkFailedException)
-    t = unwrap_weak(ex.thunk)
+    t = ex.thunk
 
     # Find root-cause thunk
     last_tfex = ex
-    failed_tasks = Union{Thunk,Nothing}[]
-    while last_tfex.ex isa ThunkFailedException && unwrap_weak(last_tfex.ex.origin) !== nothing
-        push!(failed_tasks, unwrap_weak(last_tfex.thunk))
+    failed_tasks = Union{ThunkSummary,Nothing}[]
+    while last_tfex.ex isa ThunkFailedException
+        push!(failed_tasks, last_tfex.thunk)
         last_tfex = last_tfex.ex
     end
-    o = unwrap_weak(last_tfex.origin)
+    o = last_tfex.origin
     root_ex = last_tfex.ex
 
     function thunk_string(t)
-        if t === nothing
-            return "Thunk(?)"
-        end
         Tinputs = Any[]
         for (_, input) in t.inputs
-            input = unwrap_weak(input)
             if istask(input)
                 push!(Tinputs, "Thunk(id=$(input.id))")
             else
@@ -236,13 +256,11 @@ function Base.showerror(io::IO, ex::ThunkFailedException)
     end
     t_str = thunk_string(t)
     o_str = thunk_string(o)
-    t_id = t !== nothing ? t.id : '?'
-    o_id = o !== nothing ? o.id : '?'
     println(io, "ThunkFailedException:")
     println(io, "  Root Exception Type: $(typeof(root_ex))")
     println(io, "  Root Exception:")
     Base.showerror(io, root_ex); println(io)
-    if t !== o
+    if t.id !== o.id
         println(io, "  Root Thunk:  $o_str")
         if length(failed_tasks) <= 4
             for i in failed_tasks
@@ -419,36 +437,36 @@ cache_result!(t::Thunk) = (t.cache=true; t)
 Base.hash(x::Thunk, h::UInt) = hash(x.id, hash(h, 0x7ad3bac49089a05f % UInt))
 Base.isequal(x::Thunk, y::Thunk) = x.id==y.id
 
-function Base.show(io::IO, z::Thunk)
+function show_thunk(io::IO, t)
     lvl = get(io, :lazy_level, 2)
-    f = if z.f isa Chunk
-        Tf = z.f.chunktype
+    f = if t.f isa Chunk
+        Tf = t.f.chunktype
         if isdefined(Tf, :instance)
             Tf.instance
         else
             "instance of $Tf"
         end
     else
-        z.f
+        t.f
     end
-    print(io, "Thunk[$(z.id)]($f, ")
+    print(io, "Thunk[$(t.id)]($f, ")
     if lvl > 0
-        inputs = Any[]
-        for (pos, input) in z.inputs
+        t_inputs = Any[]
+        for (pos, input) in inputs(t)
             if pos === nothing
-                push!(inputs, input)
+                push!(t_inputs, input)
             else
-                push!(inputs, pos => input)
+                push!(t_inputs, pos => input)
             end
         end
-        show(IOContext(io, :lazy_level => lvl-1), inputs)
+        show(IOContext(io, :lazy_level => lvl-1), t_inputs)
     else
         print(io, "...")
     end
     print(io, ")")
 end
-
-Base.summary(z::Thunk) = repr(z)
+Base.show(io::IO, t::Thunk) = show_thunk(io, t)
+Base.summary(t::Thunk) = repr(t)
 
 inputs(x::Thunk) = x.inputs
 inputs(x) = ()
