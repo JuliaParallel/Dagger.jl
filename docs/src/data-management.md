@@ -90,7 +90,7 @@ cs = Dagger.@shard Threads.Atomic{Int}(0)
 wait.([Dagger.@spawn Threads.atomic_add!(cs, 1) for i in 1:1000])
 
 # And let's fetch the total sum of all counters:
-@assert sum(fetch.(map(ctr->ctr[], cs))) == 1000
+@assert sum(map(ctr->fetch(ctr)[], cs)) == 1000
 ```
 
 Note that `map`, when used on a shard, will execute the provided function once
