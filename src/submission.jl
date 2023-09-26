@@ -41,16 +41,16 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
         for (idx, (pos, arg)) in enumerate(args)
             pos::Union{Symbol,Nothing}
             newarg = if arg isa EagerThunk
-                uid = arg.uid
-                tid = if haskey(id_map, uid)
-                    id_map[uid]
+                arg_uid = arg.uid
+                arg_tid = if haskey(id_map, arg_uid)
+                    id_map[arg_uid]
                 else
-                    uid_to_tid[uid]
+                    uid_to_tid[arg_uid]
                 end
-                state.thunk_dict[tid]
+                state.thunk_dict[arg_tid]
             elseif arg isa Sch.ThunkID
-                tid = arg.id
-                state.thunk_dict[tid]
+                arg_tid = arg.id
+                state.thunk_dict[arg_tid]
             else
                 arg
             end
