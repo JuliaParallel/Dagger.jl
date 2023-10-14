@@ -12,7 +12,7 @@ import LinearAlgebra: transpose
 
 using UUIDs
 
-if !isdefined(Base, :scoped)
+if !isdefined(Base, :with)
 using ScopedValues
 end
 
