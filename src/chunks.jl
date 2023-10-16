@@ -65,7 +65,7 @@ affinity(c::Chunk) = affinity(c.handle)
 is_task_or_chunk(c::Chunk) = true
 
 Base.:(==)(c1::Chunk, c2::Chunk) = c1.handle == c2.handle
-Base.hash(c::Chunk, x::UInt64) = hash(c.handle, x)
+Base.hash(c::Chunk, x::UInt64) = hash(c.handle, hash(Chunk, x))
 
 collect_remote(chunk::Chunk) =
     move(chunk.processor, OSProc(), poolget(chunk.handle))
@@ -281,16 +281,22 @@ function savechunk(data, dir, f)
 end
 
 struct WeakChunk
+    wid::Int
+    id::Int
     x::WeakRef
+    function WeakChunk(c::Chunk)
+        return new(c.handle.owner, c.handle.id, WeakRef(c))
+    end
 end
-WeakChunk(c::Chunk) = WeakChunk(WeakRef(c))
 unwrap_weak(c::WeakChunk) = c.x.value
 function unwrap_weak_checked(c::WeakChunk)
-    c = unwrap_weak(c)
-    @assert c !== nothing
-    return c
+    cw = unwrap_weak(c)
+    @assert cw !== nothing "WeakChunk expired: ($(c.wid), $(c.id))"
+    return cw
 end
 is_task_or_chunk(c::WeakChunk) = true
+Serialization.serialize(io::AbstractSerializer, wc::WeakChunk) =
+    error("Cannot serialize a WeakChunk")
 
 Base.@deprecate_binding AbstractPart Union{Chunk, Thunk}
 Base.@deprecate_binding Part Chunk

@@ -107,6 +107,18 @@ function reschedule_syncdeps!(state, thunk, seen=Set{Thunk}())
         if haskey(state.cache, thunk) || (thunk in state.ready) || (thunk in state.running)
             continue
         end
+        for (_,input) in thunk.inputs
+            if input isa WeakChunk
+                input = unwrap_weak_checked(input)
+            end
+            if input isa Chunk
+                # N.B. Different Chunks with the same DRef handle will hash to the same slot,
+                # so we just pick an equivalent Chunk as our upstream
+                if !haskey(state.waiting_data, input)
+                    push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
+                end
+            end
+        end
         w = get!(()->Set{Thunk}(), state.waiting, thunk)
         for input in thunk.syncdeps
             input = unwrap_weak_checked(input)

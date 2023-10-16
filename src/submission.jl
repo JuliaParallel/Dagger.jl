@@ -1,7 +1,5 @@
 # Remote
 function eager_submit_internal!(@nospecialize(payload))
-    Sch.init_eager()
-
     ctx = Dagger.Sch.eager_context()
     state = Dagger.Sch.EAGER_STATE[]
     task = current_task()
@@ -11,8 +9,6 @@ end
 function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{UInt64,Int}())
     @nospecialize payload
     ntasks, uid, future, ref, f, args, options, reschedule = payload
-
-    Sch.init_eager()
 
     if uid isa Vector
         thunk_ids = Sch.ThunkID[]
@@ -31,6 +27,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
     timespan_start(ctx, :add_thunk, tid, 0)
 
     # Lookup EagerThunk/ThunkID -> Thunk
+    old_args = copy(args)
     args::Vector{Any}
     syncdeps = if haskey(options, :syncdeps)
         collect(options.syncdeps)
@@ -51,6 +48,13 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
             elseif arg isa Sch.ThunkID
                 arg_tid = arg.id
                 state.thunk_dict[arg_tid]
+            elseif arg isa Chunk
+                # N.B. Different Chunks with the same DRef handle will hash to the same slot,
+                # so we just pick an equivalent Chunk as our upstream
+                if haskey(state.waiting_data, arg)
+                    arg = only(filter(o->o isa Chunk && o.handle == arg.handle, keys(state.waiting_data)))::Chunk
+                end
+                WeakChunk(arg)
             else
                 arg
             end
@@ -80,7 +84,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
         options = merge(options, (;syncdeps))
     end
 
-    GC.@preserve args begin
+    GC.@preserve old_args args begin
         # Create the `Thunk`
         thunk = Thunk(f, args...; options...)
 
@@ -125,7 +129,14 @@ function eager_submit!(ntasks, uid, future, finalizer_ref, f, args, options)
         h = Dagger.sch_handle()
         return exec!(eager_submit_internal!, h, ntasks, uid, future, finalizer_ref, f, args, options, true)
     elseif myid() != 1
-        return remotecall_fetch(eager_submit_internal!, 1, (ntasks, uid, future, finalizer_ref, f, args, options, true))
+        return remotecall_fetch(1, (ntasks, uid, future, finalizer_ref, f, args, options, true)) do payload
+            @nospecialize payload
+            Sch.init_eager()
+            state = Dagger.Sch.EAGER_STATE[]
+            lock(state.lock) do
+                eager_submit_internal!(payload)
+            end
+        end
     else
         Sch.init_eager()
         state = Dagger.Sch.EAGER_STATE[]
@@ -143,8 +154,6 @@ function eager_process_elem_submission_to_local(id_map, x)
     @assert !isa(x, Thunk) "Cannot use `Thunk`s in `@spawn`/`spawn`"
     if x isa Dagger.EagerThunk && haskey(id_map, x.uid)
         return Sch.ThunkID(id_map[x.uid], x.thunk_ref)
-    elseif x isa Dagger.Chunk
-        return WeakChunk(x)
     else
         return x
     end
