@@ -339,30 +339,39 @@ function init_proc(state, p, log_sink)
 
         state.worker_loadavg[p.pid] = (0.0, 0.0, 0.0)
     end
-    lock(WORKER_MONITOR_LOCK) do
-        wid = p.pid
-        if !haskey(WORKER_MONITOR_TASKS, wid)
-            t = @async begin
-                try
-                    # Wait until this connection is terminated
-                    remotecall_fetch(sleep, wid, typemax(UInt64))
-                catch err
-                    if err isa ProcessExitedException
+    if p.pid != 1
+        lock(WORKER_MONITOR_LOCK) do
+            wid = p.pid
+            if !haskey(WORKER_MONITOR_TASKS, wid)
+                t = @async begin
+                    try
+                        # Wait until this connection is terminated
+                        remotecall_fetch(sleep, wid, typemax(UInt64))
+                    catch err
+                        # TODO: Report other kinds of errors? IOError, etc.
+                        #if !(err isa ProcessExitedException)
+                        #end
+                    finally
                         lock(WORKER_MONITOR_LOCK) do
                             d = WORKER_MONITOR_CHANS[wid]
                             for uid in keys(d)
-                                put!(d[uid], (wid, OSProc(wid), nothing, (ProcessExitedException(wid), nothing)))
+                                try
+                                    put!(d[uid], (wid, OSProc(wid), nothing, (ProcessExitedException(wid), nothing)))
+                                catch
+                                end
                             end
                             empty!(d)
                             delete!(WORKER_MONITOR_CHANS, wid)
+                            delete!(WORKER_MONITOR_TASKS, wid)
                         end
                     end
                 end
+                errormonitor_tracked(t)
+                WORKER_MONITOR_TASKS[wid] = t
+                WORKER_MONITOR_CHANS[wid] = Dict{UInt64,RemoteChannel}()
             end
-            WORKER_MONITOR_TASKS[wid] = t
-            WORKER_MONITOR_CHANS[wid] = Dict{UInt64,RemoteChannel}()
+            WORKER_MONITOR_CHANS[wid][state.uid] = state.chan
         end
-        WORKER_MONITOR_CHANS[wid][state.uid] = state.chan
     end
 
     # Setup worker-to-scheduler channels
@@ -379,18 +388,26 @@ function init_proc(state, p, log_sink)
 end
 function _cleanup_proc(uid, log_sink)
     empty!(CHUNK_CACHE) # FIXME: Should be keyed on uid!
+    proc_states(uid) do states
+        for (proc, state) in states
+            istate = state.state
+            istate.done[] = true
+            notify(istate.reschedule)
+        end
+        empty!(states)
+    end
 end
 function cleanup_proc(state, p, log_sink)
     ctx = Context(Int[]; log_sink)
-    timespan_start(ctx, :cleanup_proc, p.pid, 0)
+    wid = p.pid
+    timespan_start(ctx, :cleanup_proc, wid, 0)
     lock(WORKER_MONITOR_LOCK) do
-        wid = p.pid
         if haskey(WORKER_MONITOR_CHANS, wid)
             delete!(WORKER_MONITOR_CHANS[wid], state.uid)
-            remote_do(_cleanup_proc, wid, state.uid, log_sink)
         end
     end
-    timespan_finish(ctx, :cleanup_proc, p.pid, 0)
+    remote_do(_cleanup_proc, wid, state.uid, log_sink)
+    timespan_finish(ctx, :cleanup_proc, wid, 0)
 end
 
 "Process-local condition variable (and lock) indicating task completion."
@@ -1096,6 +1113,7 @@ struct ProcessorInternalState
     tasks::Dict{Int,Task}
     proc_occupancy::Base.RefValue{UInt32}
     time_pressure::Base.RefValue{UInt64}
+    done::Base.RefValue{Bool}
 end
 struct ProcessorState
     state::ProcessorInternalState
@@ -1144,6 +1162,9 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                     reset(istate.reschedule)
                 end
                 timespan_finish(ctx, :proc_run_wait, to_proc, nothing)
+                if istate.done[]
+                    return
+                end
             end
 
             # Fetch a new task to execute
@@ -1270,7 +1291,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                 else
                     t.sticky = false
                 end
-                tasks[thunk_id] = errormonitor(schedule(t))
+                tasks[thunk_id] = errormonitor_tracked(schedule(t))
                 proc_occupancy[] += task_occupancy
                 time_pressure[] += time_util
             end
@@ -1283,7 +1304,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
     else
         proc_run_task.sticky = false
     end
-    return errormonitor(schedule(proc_run_task))
+    return errormonitor_tracked(schedule(proc_run_task))
 end
 
 """
@@ -1307,7 +1328,8 @@ function do_tasks(to_proc, return_queue, tasks)
             istate = ProcessorInternalState(ctx, to_proc,
                                             queue_locked, reschedule,
                                             Dict{Int,Task}(),
-                                            Ref(UInt32(0)), Ref(UInt64(0)))
+                                            Ref(UInt32(0)), Ref(UInt64(0)),
+                                            Ref(false))
             runner = start_processor_runner!(istate, uid, return_queue)
             @static if VERSION < v"1.9"
                 reschedule.waiter = runner
