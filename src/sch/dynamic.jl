@@ -45,7 +45,7 @@ function dynamic_listener!(ctx, state, wid)
     task = current_task() # The scheduler's main task
     inp_chan, out_chan = state.worker_chans[wid]
     listener_task = @async begin
-        while isopen(inp_chan) && !state.halt.set
+        while !state.halt.set
             tid, f, data = try
                 take!(inp_chan)
             catch err
@@ -53,7 +53,7 @@ function dynamic_listener!(ctx, state, wid)
                                                             ProcessExitedException,
                                                             InvalidStateException})
                     iob = IOContext(IOBuffer(), :color=>true)
-                    println(iob, "Error in sending dynamic request:")
+                    println(iob, "Error in receiving dynamic request:")
                     Base.showerror(iob, err)
                     Base.show_backtrace(iob, catch_backtrace())
                     println(iob)
@@ -87,12 +87,13 @@ function dynamic_listener!(ctx, state, wid)
             end
         end
     end
-    @async begin
+    errormonitor_tracked(listener_task)
+    errormonitor_tracked(@async begin
         wait(state.halt)
         # TODO: Not sure why we need the @async here, but otherwise we
         # don't stop all the listener tasks
         @async Base.throwto(listener_task, SchedulerHaltedException())
-    end
+    end)
 end
 
 ## Worker-side methods for dynamic communication
@@ -113,7 +114,7 @@ end
 halt!(h::SchedulerHandle) = exec!(_halt, h, nothing)
 function _halt(ctx, state, task, tid, _)
     notify(state.halt)
-    put!(state.chan, (1, nothing, SchedulerHaltedException(), nothing))
+    put!(state.chan, (1, nothing, nothing, (SchedulerHaltedException(), nothing)))
     Base.throwto(task, SchedulerHaltedException())
 end
 

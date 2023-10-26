@@ -1,3 +1,25 @@
+"Like `errormonitor`, but tracks how many outstanding tasks are running."
+function errormonitor_tracked(t::Task)
+    errormonitor(t)
+    lock(ERRORMONITOR_TRACKED) do tracked
+        push!(tracked, t)
+    end
+    errormonitor(Threads.@spawn begin
+        try
+            wait(t)
+        finally
+            lock(ERRORMONITOR_TRACKED) do tracked
+                idx = findfirst(o->o===t, tracked)
+                # N.B. This may be nothing if precompile emptied these
+                if idx !== nothing
+                    deleteat!(tracked, idx)
+                end
+            end
+        end
+    end)
+end
+const ERRORMONITOR_TRACKED = LockedObject(Task[])
+
 """
     unwrap_nested_exception(err::Exception) -> Bool
 
