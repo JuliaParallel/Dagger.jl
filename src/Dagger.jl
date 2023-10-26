@@ -64,6 +64,10 @@ include("ui/gantt-text.jl")
 # Logging
 include("lib/logging-events.jl")
 
+# Precompilation
+using PrecompileTools
+include("precompile.jl")
+
 function __init__()
     # Initialize system UUID
     system_uuid()

@@ -1,6 +1,5 @@
 const EAGER_INIT = Threads.Atomic{Bool}(false)
 const EAGER_READY = Base.Event()
-const EAGER_FORCE_KILL = Ref{Bool}(false)
 const EAGER_ID_MAP = LockedObject(Dict{UInt64,Int}())
 const EAGER_CONTEXT = Ref{Union{Context,Nothing}}(nothing)
 const EAGER_STATE = Ref{Union{ComputeState,Nothing}}(nothing)
@@ -21,13 +20,16 @@ function init_eager()
         return
     end
     ctx = eager_context()
-    Threads.@spawn try
+    errormonitor_tracked(Threads.@spawn try
         sopts = SchedulerOptions(;allow_errors=true)
         opts = Dagger.Options((;scope=Dagger.ExactScope(Dagger.ThreadProc(1, 1)),
                                 occupancy=Dict(Dagger.ThreadProc=>0)))
         Dagger.compute(ctx, Dagger.delayed(eager_thunk, opts)();
                        options=sopts)
     catch err
+        # Scheduler halting is considered normal
+        err isa SchedulerHaltedException && return
+
         iob = IOContext(IOBuffer(), :color=>true)
         println(iob, "Error in eager scheduler:")
         Base.showerror(iob, err)
@@ -37,9 +39,12 @@ function init_eager()
         write(stderr, iob)
     finally
         reset(EAGER_READY)
+        EAGER_STATE[] = nothing
+        lock(EAGER_ID_MAP) do id_map
+            empty!(id_map)
+        end
         Threads.atomic_xchg!(EAGER_INIT, false)
-        EAGER_FORCE_KILL[] = true
-    end
+    end)
     wait(EAGER_READY)
 end
 function eager_thunk()
@@ -48,8 +53,7 @@ function eager_thunk()
         return
     end
     notify(EAGER_READY)
-    sleep(typemax(UInt))
-    error("eager_thunk exited")
+    wait(Dagger.Sch.EAGER_STATE[].halt)
 end
 
 """
@@ -97,7 +101,7 @@ function thunk_yield(f)
 end
 
 eager_cleanup(t::Dagger.EagerThunkFinalizer) =
-    Threads.@spawn eager_cleanup(EAGER_STATE[], t.uid)
+    errormonitor_tracked(Threads.@spawn eager_cleanup(EAGER_STATE[], t.uid))
 function eager_cleanup(state, uid)
     tid = nothing
     lock(EAGER_ID_MAP) do id_map
