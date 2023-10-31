@@ -1,0 +1,5 @@
+[deps]
+Graphs = "86223c79-3864-5bf0-83f7-82e725a168b6"
+GraphsInterfaceChecker = "3bef136c-15ff-4091-acbb-1a4aafe67608"
+Interfaces = "85a1e053-f937-4924-92a5-1367d23b7b87"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
