@@ -1,6 +1,9 @@
 const ELTYPE = Union{Dagger.EagerThunk, Chunk}
 
 struct DGraphState{T,D}
+    # Whether the graph is "frozen" (immutable) or mutable
+    frozen::Ref{Bool}
+
     # A set of locally-connected SimpleDiGraphs
     parts::Vector{ELTYPE}
     # The range of vertices within each of `parts`
@@ -19,28 +22,35 @@ struct DGraphState{T,D}
     # The number of edges in each of `ext_adjs` where the source is this partition
     ext_adjs_ne_src::Vector{T}
 end
-struct DGraph{T,D,F} <: Graphs.AbstractGraph{T}
+struct DGraph{T,D} <: Graphs.AbstractGraph{T}
+    # The internal graph state
     state::Dagger.Chunk{DGraphState{T,D}}
-    function DGraph{T}(; chunksize::Integer=8, directed::Bool=false) where {T}
+    # Whether the graph is known to be frozen
+    frozen::Ref{Bool}
+
+    function DGraph{T}(;chunksize::Integer=8,
+                        directed::Bool=false) where {T}
         D = directed
-        state = DGraphState{T,D}(ELTYPE[],
+        state = DGraphState{T,D}(Ref(false),
+                                 ELTYPE[],
                                  UnitRange{T}[],
                                  T[],
                                  chunksize,
                                  ELTYPE[],
                                  T[],
                                  T[])
-        return new{T,D}(Dagger.tochunk(state))
+        return new{T,D}(Dagger.tochunk(state), Ref(false))
     end
 end
 DGraph(; kwargs...) = DGraph{Int}(; kwargs...)
-function DGraph{T}(n::Integer; kwargs...) where T
+function DGraph{T}(n::Integer; freeze::Bool=false, kwargs...) where T
     g = DGraph{T}(; kwargs...)
     add_vertices!(g, n)
+    freeze && freeze!(g)
     return g
 end
 DGraph(n::Integer; kwargs...) = DGraph{Int}(n; kwargs...)
-function DGraph(sg::AbstractGraph{T}; directed::Bool=is_directed(sg), kwargs...) where T
+function DGraph(sg::AbstractGraph{T}; directed::Bool=is_directed(sg), freeze::Bool=false, kwargs...) where T
     g = DGraph{T}(nv(sg); directed, kwargs...)
     foreach(edges(sg)) do edge
         add_edge!(g, edge)
@@ -48,15 +58,16 @@ function DGraph(sg::AbstractGraph{T}; directed::Bool=is_directed(sg), kwargs...)
             add_edge!(g, dst(edge), src(edge))
         end
     end
+    freeze && freeze!(g)
     return g
 end
-function DGraph(dg::DGraph{T,D,F}; directed::Bool=D, freeze::Bool=false, chunksize::Integer=0) where {T,D}
+function DGraph(dg::DGraph{T,D}; chunksize::Integer=0, directed::Bool=D, freeze::Bool=false) where {T,D}
     state = fetch(dg.state)
     # FIXME: Create g.state on same node as dg.state
     if chunksize == 0
         chunksize = state.parts_v_max
     end
-    g = DGraph{T}(; directed, chunksize)
+    g = DGraph{T}(; chunksize, directed)
     @assert g.state.handle.owner == dg.state.handle.owner
     new_state = fetch(g.state)
     # TODO: Use streaming
@@ -72,18 +83,35 @@ function DGraph(dg::DGraph{T,D,F}; directed::Bool=D, freeze::Bool=false, chunksi
         push!(new_state.ext_adjs_ne, state.ext_adjs_ne[part])
         push!(new_state.ext_adjs_ne_src, state.ext_adjs_ne_src[part])
     end
-    #=
-    foreach(edges(dg)) do edge
-        add_edge!(g, edge)
-        if !is_directed(dg) && directed
-            add_edge!(g, dst(edge), src(edge))
-        end
-    end
-    =#
+    freeze && freeze!(g)
     return g
 end
 
-freeze(g::DGraph{T,D,false}) where {T,D} = DGraph(g; freeze=true)
+isfrozen(g::DGraph) = g.frozen[] || fetch(Dagger.@spawn isfrozen(g.state))
+isfrozen(g::DGraphState) = g.frozen[]
+function freeze!(g::DGraph)
+    if g.frozen[] || !fetch(Dagger.@spawn freeze!(g.state))
+        throw(ArgumentError("DGraph is already frozen"))
+    end
+    g.frozen[] = true
+    return
+end
+function freeze!(g::DGraphState)
+    if isfrozen(g)
+        return false
+    end
+    g.frozen[] = true
+    return true
+end
+struct FrozenGraphException <: Exception end
+Base.showerror(io::IO, ex::FrozenGraphException) =
+    print(io, "Graph is frozen (immutable)")
+
+function check_not_frozen(g)
+    if g.frozen[]
+        throw(FrozenGraphException())
+    end
+end
 
 function Base.show(io::IO, g::DGraph{T,D}) where {T,D}
     print(io, "{$(nv(g)), $(ne(g))} $(D ? "" : "un")directed Dagger $T graph")
@@ -125,12 +153,16 @@ Graphs.vertices(g::DGraph) = Base.OneTo(nv(g))
 Graphs.edges(g::DGraph) = DGraphEdgeIter(g)
 Graphs.zero(::Type{<:DGraph}) = DGraph()
 function Graphs.add_vertex!(g::DGraph)
+    check_not_frozen(g)
     fetch(Dagger.@spawn add_vertices!(g.state, 1))
     return
 end
-Graphs.add_vertices!(g::DGraph, n::Integer) =
+function Graphs.add_vertices!(g::DGraph, n::Integer)
+    check_not_frozen(g)
     fetch(Dagger.@spawn add_vertices!(g.state, n))
+end
 function Graphs.add_vertices!(g::DGraphState, n::Integer)
+    check_not_frozen(g)
     for _ in 1:n
         if fld(nv(g), g.parts_v_max) == length(g.parts)
             # We need to create a new partition for this vertex
@@ -145,9 +177,12 @@ function Graphs.add_vertices!(g::DGraphState, n::Integer)
     end
     return n
 end
-add_partition!(g::DGraph, n::Integer) =
+function add_partition!(g::DGraph, n::Integer)
+    check_not_frozen(g)
     fetch(Dagger.@spawn add_partition!(g.state, n))
+end
 function add_partition!(g::DGraphState{T,D}, n::Integer) where {T,D}
+    check_not_frozen(g)
     if n < 1
         throw(ArgumentError("n must be >= 1"))
     end
@@ -164,11 +199,17 @@ function add_partition!(g::DGraphState{T,D}, n::Integer) where {T,D}
     push!(g.ext_adjs_ne_src, 0)
     return length(g.parts)
 end
-Graphs.add_edge!(g::DGraph, src::Integer, dst::Integer) =
+function Graphs.add_edge!(g::DGraph, src::Integer, dst::Integer)
+    check_not_frozen(g)
     fetch(Dagger.@spawn add_edge!(g.state, src, dst))
-Graphs.add_edge!(g::DGraph, edge::Edge) =
+end
+function Graphs.add_edge!(g::DGraph, edge::Edge)
+    check_not_frozen(g)
     add_edge!(g, src(edge), dst(edge))
+end
 function Graphs.add_edge!(g::DGraphState{T,D}, src::Integer, dst::Integer) where {T,D}
+    check_not_frozen(g)
+
     src_part_idx = findfirst(span->src in span, g.parts_nv)
     @assert src_part_idx !== nothing "Source vertex $src does not exist"
 
