@@ -168,7 +168,7 @@ function Graphs.add_vertex!(g::DGraph)
 end
 function Graphs.add_vertices!(g::DGraph, n::Integer)
     check_not_frozen(g)
-    with_state(g, add_vertices!, n)
+    return with_state(g, add_vertices!, n)
 end
 function Graphs.add_vertices!(g::DGraphState, n::Integer)
     check_not_frozen(g)
