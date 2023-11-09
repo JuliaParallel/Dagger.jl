@@ -22,9 +22,10 @@ struct DGraphState{T,D}
     # The number of edges in each of `ext_adjs` where the source is this partition
     ext_adjs_ne_src::Vector{T}
 end
-struct DGraph{T,D} <: Graphs.AbstractGraph{T}
+mutable struct DGraph{T,D} <: Graphs.AbstractGraph{T}
     # The internal graph state
-    state::Dagger.Chunk{DGraphState{T,D}}
+    state::Union{Dagger.Chunk{DGraphState{T,D}},
+                 DGraphState{T,D}}
     # Whether the graph is known to be frozen
     frozen::Ref{Bool}
 
@@ -68,7 +69,7 @@ function DGraph(dg::DGraph{T,D}; chunksize::Integer=0, directed::Bool=D, freeze:
         chunksize = state.parts_v_max
     end
     g = DGraph{T}(; chunksize, directed)
-    @assert g.state.handle.owner == dg.state.handle.owner
+    @assert isfrozen(dg) || g.state.handle.owner == dg.state.handle.owner
     new_state = fetch(g.state)
     # TODO: Use streaming
     # FIXME: Support directed != D
@@ -86,6 +87,13 @@ function DGraph(dg::DGraph{T,D}; chunksize::Integer=0, directed::Bool=D, freeze:
     freeze && freeze!(g)
     return g
 end
+function with_state(g::DGraph, f, args...; kwargs...)
+    if g.frozen[]
+        return f(g.state, args...; kwargs...)
+    else
+        return fetch(Dagger.@spawn f(g.state, args...; kwargs...))
+    end
+end
 
 isfrozen(g::DGraph) = g.frozen[] || fetch(Dagger.@spawn isfrozen(g.state))
 isfrozen(g::DGraphState) = g.frozen[]
@@ -93,6 +101,8 @@ function freeze!(g::DGraph)
     if g.frozen[] || !fetch(Dagger.@spawn freeze!(g.state))
         throw(ArgumentError("DGraph is already frozen"))
     end
+    state = fetch(g.state)
+    g.state = state
     g.frozen[] = true
     return
 end
@@ -106,7 +116,6 @@ end
 struct FrozenGraphException <: Exception end
 Base.showerror(io::IO, ex::FrozenGraphException) =
     print(io, "Graph is frozen (immutable)")
-
 function check_not_frozen(g)
     if g.frozen[]
         throw(FrozenGraphException())
@@ -114,12 +123,12 @@ function check_not_frozen(g)
 end
 
 function Base.show(io::IO, g::DGraph{T,D}) where {T,D}
-    print(io, "{$(nv(g)), $(ne(g))} $(D ? "" : "un")directed Dagger $T graph")
+    print(io, "{$(nv(g)), $(ne(g))} $(D ? "" : "un")directed Dagger $T graph$(isfrozen(g) ? " (frozen)" : "")")
 end
 
 Base.eltype(::DGraph{T}) where T = T
 Graphs.edgetype(::DGraph{T}) where T = Tuple{T,T}
-Graphs.nv(g::DGraph) = fetch(Dagger.@spawn nv(g.state))::Int
+Graphs.nv(g::DGraph) = with_state(g, nv)::Int
 function Graphs.nv(g::DGraphState)
     if !isempty(g.parts_nv)
         return last(g.parts_nv).stop
@@ -127,11 +136,11 @@ function Graphs.nv(g::DGraphState)
         return 0
     end
 end
-Graphs.ne(g::DGraph) = fetch(Dagger.@spawn ne(g.state))::Int
+Graphs.ne(g::DGraph) = with_state(g, ne)::Int
 Graphs.ne(g::DGraphState) = sum(g.parts_ne; init=0) + sum(g.ext_adjs_ne_src; init=0)
 Graphs.has_vertex(g::DGraph, v::Integer) = 1 <= v <= nv(g)
 Graphs.has_edge(g::DGraph, src::Integer, dst::Integer) =
-    fetch(Dagger.@spawn has_edge(g.state, src, dst))::Bool
+    with_state(g, src, dst)::Bool
 function Graphs.has_edge(g::DGraphState{T,D}, src::Integer, dst::Integer) where {T,D}
     src_part_idx = findfirst(span->src in span, g.parts_nv)
     src_part_idx !== nothing || return false
@@ -154,12 +163,12 @@ Graphs.edges(g::DGraph) = DGraphEdgeIter(g)
 Graphs.zero(::Type{<:DGraph}) = DGraph()
 function Graphs.add_vertex!(g::DGraph)
     check_not_frozen(g)
-    fetch(Dagger.@spawn add_vertices!(g.state, 1))
+    with_state(g, add_vertices!, 1)
     return
 end
 function Graphs.add_vertices!(g::DGraph, n::Integer)
     check_not_frozen(g)
-    fetch(Dagger.@spawn add_vertices!(g.state, n))
+    with_state(g, add_vertices!, n)
 end
 function Graphs.add_vertices!(g::DGraphState, n::Integer)
     check_not_frozen(g)
@@ -179,7 +188,7 @@ function Graphs.add_vertices!(g::DGraphState, n::Integer)
 end
 function add_partition!(g::DGraph, n::Integer)
     check_not_frozen(g)
-    fetch(Dagger.@spawn add_partition!(g.state, n))
+    with_state(g, add_partition!, n)
 end
 function add_partition!(g::DGraphState{T,D}, n::Integer) where {T,D}
     check_not_frozen(g)
@@ -201,11 +210,11 @@ function add_partition!(g::DGraphState{T,D}, n::Integer) where {T,D}
 end
 function Graphs.add_edge!(g::DGraph, src::Integer, dst::Integer)
     check_not_frozen(g)
-    fetch(Dagger.@spawn add_edge!(g.state, src, dst))
+    return with_state(g, add_edge!, src, dst)
 end
 function Graphs.add_edge!(g::DGraph, edge::Edge)
     check_not_frozen(g)
-    add_edge!(g, src(edge), dst(edge))
+    return add_edge!(g, src(edge), dst(edge))
 end
 function Graphs.add_edge!(g::DGraphState{T,D}, src::Integer, dst::Integer) where {T,D}
     check_not_frozen(g)
@@ -250,8 +259,7 @@ function Graphs.add_edge!(g::DGraphState{T,D}, src::Integer, dst::Integer) where
 end
 edge_owner(src::Int, dst::Int, src_part_idx::Int, dst_part_idx::Int) =
     iseven(hash(Base.unsafe_trunc(UInt, src+dst))) ? src_part_idx : dst_part_idx
-Graphs.inneighbors(g::DGraph, v::Integer) =
-    fetch(Dagger.@spawn inneighbors(g.state, v))
+Graphs.inneighbors(g::DGraph, v::Integer) = with_state(g, inneighbors, v)
 function Graphs.inneighbors(g::DGraphState, v::Integer)
     part_idx = findfirst(span->v in span, g.parts_nv)
     if part_idx === nothing
@@ -274,8 +282,7 @@ function Graphs.inneighbors(g::DGraphState, v::Integer)
 
     return neighbors
 end
-Graphs.outneighbors(g::DGraph, v::Integer) =
-    fetch(Dagger.@spawn outneighbors(g.state, v))
+Graphs.outneighbors(g::DGraph, v::Integer) = with_state(g, outneighbors, v)
 function Graphs.outneighbors(g::DGraphState, v::Integer)
     part_idx = findfirst(span->v in span, g.parts_nv)
     if part_idx === nothing
