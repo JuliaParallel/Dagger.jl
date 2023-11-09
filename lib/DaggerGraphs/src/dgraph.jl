@@ -172,18 +172,25 @@ function Graphs.add_vertices!(g::DGraph, n::Integer)
 end
 function Graphs.add_vertices!(g::DGraphState, n::Integer)
     check_not_frozen(g)
-    for _ in 1:n
-        if fld(nv(g), g.parts_v_max) == length(g.parts)
+
+    n_rem = n
+    chunksize = g.parts_v_max
+    while n_rem > 0
+        max_add = chunksize - rem(nv(g), chunksize)
+        to_add = min(max_add, n_rem)
+        if rem(nv(g), chunksize) == 0
             # We need to create a new partition for this vertex
-            add_partition!(g, 1)
+            add_partition!(g, to_add)
         else
             # We will add this vertex to the last partition
             part = last(g.parts)
-            fetch(Dagger.@spawn add_vertex!(part))
+            fetch(Dagger.@spawn add_vertices!(part, to_add))
             span = g.parts_nv[end]
             g.parts_nv[end] = UnitRange{Int}(span.start, span.stop+1)
         end
+        n_rem -= to_add
     end
+
     return n
 end
 function add_partition!(g::DGraph, n::Integer)
