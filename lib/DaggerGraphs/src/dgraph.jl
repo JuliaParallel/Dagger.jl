@@ -15,12 +15,12 @@ struct DGraphState{T,D}
 
     # A set of `AdjList` for each of `parts`
     # An edge is present here if either src or dst (but not both) is in
-    # the respective `parts` graph
-    ext_adjs::Vector{ELTYPE}
-    # The number of edges in each of `ext_adjs`
-    ext_adjs_ne::Vector{T}
-    # The number of edges in each of `ext_adjs` where the source is this partition
-    ext_adjs_ne_src::Vector{T}
+    # the respective `parts` graph (the so-called "background graph")
+    bg_adjs::Vector{ELTYPE}
+    # The number of edges in each of `bg_adjs`
+    bg_adjs_ne::Vector{T}
+    # The number of edges in each of `bg_adjs` where the source is this partition
+    bg_adjs_ne_src::Vector{T}
 end
 mutable struct DGraph{T,D} <: Graphs.AbstractGraph{T}
     # The internal graph state
@@ -80,9 +80,9 @@ function DGraph(dg::DGraph{T,D}; chunksize::Integer=0, directed::Bool=D, freeze:
         push!(new_state.parts_nv, state.parts_nv[part])
         push!(new_state.parts_ne, state.parts_ne[part])
 
-        push!(new_state.ext_adjs, Dagger.@spawn copy(state.ext_adjs[part]))
-        push!(new_state.ext_adjs_ne, state.ext_adjs_ne[part])
-        push!(new_state.ext_adjs_ne_src, state.ext_adjs_ne_src[part])
+        push!(new_state.bg_adjs, Dagger.@spawn copy(state.bg_adjs[part]))
+        push!(new_state.bg_adjs_ne, state.bg_adjs_ne[part])
+        push!(new_state.bg_adjs_ne_src, state.bg_adjs_ne_src[part])
     end
     freeze && freeze!(g)
     return g
@@ -152,7 +152,7 @@ function Graphs.nv(g::DGraphState)
     end
 end
 Graphs.ne(g::DGraph) = with_state(g, ne)::Int
-Graphs.ne(g::DGraphState) = sum(g.parts_ne; init=0) + sum(g.ext_adjs_ne_src; init=0)
+Graphs.ne(g::DGraphState) = sum(g.parts_ne; init=0) + sum(g.bg_adjs_ne_src; init=0)
 Graphs.has_vertex(g::DGraph, v::Integer) = 1 <= v <= nv(g)
 Graphs.has_edge(g::DGraph, src::Integer, dst::Integer) =
     with_state(g, src, dst)::Bool
@@ -168,8 +168,8 @@ function Graphs.has_edge(g::DGraphState{T,D}, src::Integer, dst::Integer) where 
         return exec_fast(has_edge, part, src, dst)
     else
         # The edge will be in an AdjList
-        adj = g.ext_adjs[src_part_idx]
-        return exec_fast(has_ext_adj, adj, src, dst, D)
+        adj = g.bg_adjs[src_part_idx]
+        return exec_fast(has_bg_adj, adj, src, dst, D)
     end
 end
 Graphs.is_directed(::DGraph{T,D}) where {T,D} = D
@@ -225,9 +225,9 @@ function add_partition!(g::DGraphState{T,D}, n::Integer) where {T,D}
     num_v = nv(g)
     push!(g.parts_nv, (num_v+1):(num_v+n))
     push!(g.parts_ne, 0)
-    push!(g.ext_adjs, Dagger.@spawn AdjList())
-    push!(g.ext_adjs_ne, 0)
-    push!(g.ext_adjs_ne_src, 0)
+    push!(g.bg_adjs, Dagger.@spawn AdjList())
+    push!(g.bg_adjs_ne, 0)
+    push!(g.bg_adjs_ne_src, 0)
     return length(g.parts)
 end
 function Graphs.add_edge!(g::DGraph, src::Integer, dst::Integer)
@@ -259,22 +259,22 @@ function Graphs.add_edge!(g::DGraphState{T,D}, src::Integer, dst::Integer) where
         end
     else
         # Edge spans two partitions
-        src_ext_adj = g.ext_adjs[src_part_idx]
-        dst_ext_adj = g.ext_adjs[dst_part_idx]
-        src_t = exec_fast(add_ext_adj!, src_ext_adj, src, dst, D; fetch=false)
-        dst_t = exec_fast(add_ext_adj!, dst_ext_adj, src, dst, D; fetch=false)
+        src_bg_adj = g.bg_adjs[src_part_idx]
+        dst_bg_adj = g.bg_adjs[dst_part_idx]
+        src_t = exec_fast(add_bg_adj!, src_bg_adj, src, dst, D; fetch=false)
+        dst_t = exec_fast(add_bg_adj!, dst_bg_adj, src, dst, D; fetch=false)
         if !fetch(src_t) || !fetch(dst_t)
             return false
         end
         if D
             # TODO: This will cause imbalance for many outgoing edges from a few vertices
-            g.ext_adjs_ne_src[src_part_idx] += 1
+            g.bg_adjs_ne_src[src_part_idx] += 1
         else
             owner_part_idx = edge_owner(src, dst, src_part_idx, dst_part_idx)
-            g.ext_adjs_ne_src[owner_part_idx] += 1
+            g.bg_adjs_ne_src[owner_part_idx] += 1
         end
-        g.ext_adjs_ne[src_part_idx] += 1
-        g.ext_adjs_ne[dst_part_idx] += 1
+        g.bg_adjs_ne[src_part_idx] += 1
+        g.bg_adjs_ne[dst_part_idx] += 1
     end
 
     return true
@@ -296,8 +296,8 @@ function Graphs.inneighbors(g::DGraphState, v::Integer)
     local_neighs = exec_fast(inneighbors, g.parts[part_idx], v_shift)
     append!(neighbors, Iterators.map(neigh->neigh + shift, local_neighs))
 
-    # Check against external edges
-    append!(neighbors, exec_fast(inneighbors, g.ext_adjs[part_idx], v))
+    # Check against background edges
+    append!(neighbors, exec_fast(inneighbors, g.bg_adjs[part_idx], v))
 
     return neighbors
 end
@@ -316,8 +316,8 @@ function Graphs.outneighbors(g::DGraphState, v::Integer)
     local_neighs = exec_fast(outneighbors, g.parts[part_idx], v_shift)
     append!(neighbors, Iterators.map(neigh->neigh + shift, local_neighs))
 
-    # Check against external edges
-    append!(neighbors, exec_fast(outneighbors, g.ext_adjs[part_idx], v))
+    # Check against background edges
+    append!(neighbors, exec_fast(outneighbors, g.bg_adjs[part_idx], v))
 
     return neighbors
 end

@@ -17,8 +17,8 @@ function Base.iterate(iter::DGraphEdgeIter)
     elseif sum(g.parts_ne; init=0) > 0
         # Start with partitions
         return iterate(iter, DGraphEdgeIterState(false, 1, 1, nothing))
-    elseif sum(g.ext_adjs_ne_src; init=0) > 0
-        # Start with external AdjLists
+    elseif sum(g.bg_adjs_ne_src; init=0) > 0
+        # Start with background AdjLists
         return iterate(iter, DGraphEdgeIterState(true, 1, 1, nothing))
     else
         return nothing
@@ -34,7 +34,7 @@ function Base.iterate(iter::DGraphEdgeIter{T}, state::DGraphEdgeIterState) where
     @label start
     if !adj
         if part > length(g.parts)
-            # Restart with external AdjLists
+            # Restart with background AdjLists
             return iterate(iter, DGraphEdgeIterState(true, 1, 1, nothing))
         end
         if cache === nothing
@@ -50,12 +50,12 @@ function Base.iterate(iter::DGraphEdgeIter{T}, state::DGraphEdgeIterState) where
             end
         end
     else
-        if part > length(g.ext_adjs)
+        if part > length(g.bg_adjs)
             # All done!
             return nothing
         end
         if cache === nothing
-            cache = fetch(Dagger.@spawn edges(g.ext_adjs[part]))
+            cache = fetch(Dagger.@spawn edges(g.bg_adjs[part]))
         end
     end
     cache::Vector{<:Tuple}
