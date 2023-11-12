@@ -154,8 +154,9 @@ end
 Graphs.ne(g::DGraph) = with_state(g, ne)::Int
 Graphs.ne(g::DGraphState) = sum(g.parts_ne; init=0) + sum(g.bg_adjs_ne_src; init=0)
 Graphs.has_vertex(g::DGraph, v::Integer) = 1 <= v <= nv(g)
+Graphs.has_edge(g::DGraph, edge::Tuple) = has_edge(g, edge[1], edge[2])
 Graphs.has_edge(g::DGraph, src::Integer, dst::Integer) =
-    with_state(g, src, dst)::Bool
+    with_state(g, has_edge, src, dst)::Bool
 function Graphs.has_edge(g::DGraphState{T,D}, src::Integer, dst::Integer) where {T,D}
     src_part_idx = findfirst(span->src in span, g.parts_nv)
     src_part_idx !== nothing || return false
@@ -169,7 +170,7 @@ function Graphs.has_edge(g::DGraphState{T,D}, src::Integer, dst::Integer) where 
     else
         # The edge will be in an AdjList
         adj = g.bg_adjs[src_part_idx]
-        return exec_fast(has_bg_adj, adj, src, dst, D)
+        return exec_fast(Base.in, adj, (src, dst))
     end
 end
 Graphs.is_directed(::DGraph{T,D}) where {T,D} = D
@@ -225,7 +226,7 @@ function add_partition!(g::DGraphState{T,D}, n::Integer) where {T,D}
     num_v = nv(g)
     push!(g.parts_nv, (num_v+1):(num_v+n))
     push!(g.parts_ne, 0)
-    push!(g.bg_adjs, Dagger.@spawn AdjList())
+    push!(g.bg_adjs, Dagger.@spawn AdjList{T,D}())
     push!(g.bg_adjs_ne, 0)
     push!(g.bg_adjs_ne_src, 0)
     return length(g.parts)
@@ -261,8 +262,8 @@ function Graphs.add_edge!(g::DGraphState{T,D}, src::Integer, dst::Integer) where
         # Edge spans two partitions
         src_bg_adj = g.bg_adjs[src_part_idx]
         dst_bg_adj = g.bg_adjs[dst_part_idx]
-        src_t = exec_fast(add_bg_adj!, src_bg_adj, src, dst, D; fetch=false)
-        dst_t = exec_fast(add_bg_adj!, dst_bg_adj, src, dst, D; fetch=false)
+        src_t = exec_fast(add_edge!, src_bg_adj, (src, dst); fetch=false)
+        dst_t = exec_fast(add_edge!, dst_bg_adj, (src, dst); fetch=false)
         if !fetch(src_t) || !fetch(dst_t)
             return false
         end

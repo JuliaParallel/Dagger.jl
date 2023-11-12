@@ -55,7 +55,7 @@ function Base.iterate(iter::DGraphEdgeIter{T}, state::DGraphEdgeIterState) where
             return nothing
         end
         if cache === nothing
-            cache = fetch(Dagger.@spawn edges(g.bg_adjs[part]))
+            cache = map(Tuple, fetch(Dagger.@spawn edges(g.bg_adjs[part])))
         end
     end
     cache::Vector{<:Tuple}
