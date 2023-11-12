@@ -30,7 +30,7 @@ mutable struct DGraph{T,D} <: Graphs.AbstractGraph{T}
     frozen::Ref{Bool}
 
     function DGraph{T}(;chunksize::Integer=8,
-                        directed::Bool=false) where {T}
+                        directed::Bool=true) where {T}
         D = directed
         state = DGraphState{T,D}(Ref(false),
                                  ELTYPE[],
