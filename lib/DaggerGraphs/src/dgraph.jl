@@ -87,11 +87,26 @@ function DGraph(dg::DGraph{T,D}; chunksize::Integer=0, directed::Bool=D, freeze:
     freeze && freeze!(g)
     return g
 end
-function with_state(g::DGraph, f, args...; kwargs...)
+function with_state(g::DGraph, f, args...)
     if g.frozen[]
-        return f(g.state, args...; kwargs...)
+        @assert !any(x->x isa ELTYPE, args)
+        return f(g.state, args...)
     else
-        return fetch(Dagger.@spawn f(g.state, args...; kwargs...))
+        return fetch(Dagger.@spawn f(g.state, args...))
+    end
+end
+function exec_fast(f, args...; fetch::Bool=true)
+    # FIXME: Ensure that `EagerThunk` result is also local
+    if any(x->(x isa Dagger.EagerThunk && !isready(x)) ||
+              (x isa Dagger.Chunk && x.handle.owner != myid()), args)
+        if fetch
+            return Base.fetch(Dagger.@spawn f(args...))
+        else
+            return Dagger.@spawn f(args...)
+        end
+    else
+        fetched_args = ntuple(i->args[i] isa ELTYPE ? Base.fetch(args[i]) : args[i], length(args))
+        return f(fetched_args...)
     end
 end
 
@@ -150,11 +165,11 @@ function Graphs.has_edge(g::DGraphState{T,D}, src::Integer, dst::Integer) where 
     if src_part_idx == dst_part_idx
         # The edge will be within a graph partition
         part = g.parts[src_part_idx]
-        return fetch(Dagger.@spawn has_edge(part, src, dst))
+        return exec_fast(has_edge, part, src, dst)
     else
         # The edge will be in an AdjList
         adj = g.ext_adjs[src_part_idx]
-        return fetch(Dagger.@spawn has_ext_adj(adj, src, dst, D))
+        return exec_fast(has_ext_adj, adj, src, dst, D)
     end
 end
 Graphs.is_directed(::DGraph{T,D}) where {T,D} = D
@@ -184,7 +199,7 @@ function Graphs.add_vertices!(g::DGraphState, n::Integer)
         else
             # We will add this vertex to the last partition
             part = last(g.parts)
-            fetch(Dagger.@spawn add_vertices!(part, to_add))
+            exec_fast(add_vertices!, part, to_add)
             span = g.parts_nv[end]
             g.parts_nv[end] = UnitRange{Int}(span.start, span.stop+1)
         end
@@ -237,7 +252,7 @@ function Graphs.add_edge!(g::DGraphState{T,D}, src::Integer, dst::Integer) where
         part = g.parts[src_part_idx]
         src_shift = src - (g.parts_nv[src_part_idx].start - 1)
         dst_shift = dst - (g.parts_nv[dst_part_idx].start - 1)
-        if fetch(Dagger.@spawn add_edge!(part, src_shift, dst_shift))
+        if exec_fast(add_edge!, part, src_shift, dst_shift)
             g.parts_ne[src_part_idx] += 1
         else
             return false
@@ -246,8 +261,8 @@ function Graphs.add_edge!(g::DGraphState{T,D}, src::Integer, dst::Integer) where
         # Edge spans two partitions
         src_ext_adj = g.ext_adjs[src_part_idx]
         dst_ext_adj = g.ext_adjs[dst_part_idx]
-        src_t = Dagger.@spawn add_ext_adj!(src_ext_adj, src, dst, D)
-        dst_t = Dagger.@spawn add_ext_adj!(dst_ext_adj, src, dst, D)
+        src_t = exec_fast(add_ext_adj!, src_ext_adj, src, dst, D; fetch=false)
+        dst_t = exec_fast(add_ext_adj!, dst_ext_adj, src, dst, D; fetch=false)
         if !fetch(src_t) || !fetch(dst_t)
             return false
         end
@@ -278,14 +293,11 @@ function Graphs.inneighbors(g::DGraphState, v::Integer)
 
     # Check against local edges
     v_shift = v - shift
-    for local_neigh in fetch(Dagger.@spawn inneighbors(g.parts[part_idx], v_shift))
-        push!(neighbors, local_neigh + shift)
-    end
+    local_neighs = exec_fast(inneighbors, g.parts[part_idx], v_shift)
+    append!(neighbors, Iterators.map(neigh->neigh + shift, local_neighs))
 
     # Check against external edges
-    for ext_neigh in fetch(Dagger.@spawn inneighbors(g.ext_adjs[part_idx], v))
-        push!(neighbors, ext_neigh)
-    end
+    append!(neighbors, exec_fast(inneighbors, g.ext_adjs[part_idx], v))
 
     return neighbors
 end
@@ -301,14 +313,12 @@ function Graphs.outneighbors(g::DGraphState, v::Integer)
 
     # Check against local edges
     v_shift = v - shift
-    for local_neigh in fetch(Dagger.@spawn outneighbors(g.parts[part_idx], v_shift))
-        push!(neighbors, local_neigh + shift)
-    end
+    local_neighs = exec_fast(outneighbors, g.parts[part_idx], v_shift)
+    append!(neighbors, Iterators.map(neigh->neigh + shift, local_neighs))
 
     # Check against external edges
-    for ext_neigh in fetch(Dagger.@spawn outneighbors(g.ext_adjs[part_idx], v))
-        push!(neighbors, ext_neigh)
-    end
+    append!(neighbors, exec_fast(outneighbors, g.ext_adjs[part_idx], v))
 
     return neighbors
 end
+Graphs.weights(g::DGraph) = Graphs.DefaultDistance(nv(g))

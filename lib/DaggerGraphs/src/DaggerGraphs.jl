@@ -2,6 +2,7 @@ module DaggerGraphs
 
 using Dagger
 import Dagger: Chunk
+using Distributed
 using Graphs
 import Tables
 
