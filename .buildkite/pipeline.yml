@@ -87,6 +87,15 @@ steps:
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: "julia -e 'using Pkg; Pkg.develop(;path=pwd()); Pkg.develop(;path=\"lib/TimespanLogging\"); Pkg.develop(;path=\"lib/DaggerWebDash\"); include(\"lib/DaggerWebDash/test/runtests.jl\")'"
+  - label: Julia 1.8 - DaggerGraphs
+    timeout_in_minutes: 60
+    <<: *test
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.8"
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
+    command: "julia -e 'using Pkg; Pkg.develop(;path=pwd()); Pkg.develop(;path=\"lib/DaggerGraphs\"); Pkg.test(\"DaggerGraphs\")'"
   - label: Benchmarks
     timeout_in_minutes: 120
     <<: *bench
