@@ -124,11 +124,20 @@ AdjList{T,D}() where {T,D} = AdjList{T,D}(SimpleAdjListStorage{T,D}())
 AdjList() = AdjList{Int,true}()
 Base.copy(adj::AdjList{T,D,A}) where {T,D,A} = AdjList{T,D,A}(copy(adj.data))
 Base.in(adj::AdjList{T,D}, edge) where {T,D} = edge in adj.data
-function Graphs.add_edge!(adj::AdjList{T,D}, edge) where {T,D}
+Graphs.add_edge!(adj::AdjList{T}, src::Integer, dst::Integer) where T =
+    add_edge!(adj, Edge{T}(src, dst))
+function Graphs.add_edge!(adj::AdjList, edge)
     if edge in adj.data
         return false
     end
     push!(adj.data, edge)
+    return true
+end
+function add_edges!(g::AdjList, edges)
+    for edge in edges
+        src, dst = Tuple(edge)
+        add_edge!(g, src, dst) || return false
+    end
     return true
 end
 Graphs.edges(adj::AdjList) = copy(adj.data)

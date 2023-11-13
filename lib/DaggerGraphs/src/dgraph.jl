@@ -141,6 +141,8 @@ function Base.show(io::IO, g::DGraph{T,D}) where {T,D}
     print(io, "{$(nv(g)), $(ne(g))} $(D ? "" : "un")directed Dagger $T graph$(isfrozen(g) ? " (frozen)" : "")")
 end
 
+nparts(g::DGraph) = with_state(g, nparts)
+nparts(g::DGraphState) = length(g.parts)
 Base.eltype(::DGraph{T}) where T = T
 Graphs.edgetype(::DGraph{T}) where T = Tuple{T,T}
 Graphs.nv(g::DGraph) = with_state(g, nv)::Int
@@ -278,6 +280,63 @@ function Graphs.add_edge!(g::DGraphState{T,D}, src::Integer, dst::Integer) where
         g.bg_adjs_ne[dst_part_idx] += 1
     end
 
+    return true
+end
+function add_edges!(g::DGraph, iter)
+    check_not_frozen(g)
+    return with_state(g, add_edges!, iter)
+end
+function add_edges!(g::DGraphState{T,D}, iter) where {T,D}
+    check_not_frozen(g)
+
+    # Determine edge partition/background
+    part_edges = Dict{Int,Vector{Tuple{T,T}}}(part=>Tuple{T,T}[] for part in 1:nparts(g))
+    back_edges = Dict{Int,Vector{Tuple{T,T}}}(part=>Tuple{T,T}[] for part in 1:nparts(g))
+    for edge in iter
+        src, dst = Tuple(edge)
+
+        src_part_idx = findfirst(span->src in span, g.parts_nv)
+        @assert src_part_idx !== nothing "Source vertex $src does not exist"
+
+        dst_part_idx = findfirst(span->dst in span, g.parts_nv)
+        @assert dst_part_idx !== nothing "Destination vertex $dst does not exist"
+
+        if src_part_idx == dst_part_idx
+            push!(part_edges[src_part_idx], (src, dst))
+        else
+            owner_part_idx = D ? src_part_idx : edge_owner(src, dst, src_part_idx, dst_part_idx)
+            push!(back_edges[owner_part_idx], (src, dst))
+        end
+    end
+
+    # Add edges concurrently
+    part_tasks = [exec_fast(add_edges!, g.parts[part], g.parts_nv[part].start-1, edges; fetch=false) for (part, edges) in part_edges]
+    back_tasks = [exec_fast(add_edges!, g.bg_adjs[part], edges; fetch=false) for (part, edges) in back_edges]
+
+    # Validate that all edges were successfully added
+    if !all(fetch, part_tasks) || !all(fetch, back_tasks)
+        return false
+    end
+
+    # Update edge counters
+    for (part, edges) in part_edges
+        g.parts_ne[part] += length(edges)
+    end
+    for (part, edges) in back_edges
+        g.bg_adjs_ne_src[part] += length(edges)
+        #= FIXME
+        g.bg_adjs_ne[src_part_idx] += 1
+        g.bg_adjs_ne[dst_part_idx] += 1
+        =#
+    end
+
+    return true
+end
+function add_edges!(g::Graphs.AbstractSimpleGraph, shift, edges)
+    for edge in edges
+        src, dst = Tuple(edge)
+        add_edge!(g, src-shift, dst-shift) || return false
+    end
     return true
 end
 edge_owner(src::Int, dst::Int, src_part_idx::Int, dst_part_idx::Int) =
