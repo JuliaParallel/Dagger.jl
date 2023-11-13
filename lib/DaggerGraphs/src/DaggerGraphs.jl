@@ -11,6 +11,7 @@ export DGraph
 include("dgraph.jl")
 include("adjlist.jl")
 include("edgeiter.jl")
+include("io.jl")
 include("tables.jl")
 
 function DGraph{T}(x; kwargs...) where T
