@@ -87,26 +87,32 @@ function DGraph(dg::DGraph{T,D}; chunksize::Integer=0, directed::Bool=D, freeze:
     freeze && freeze!(g)
     return g
 end
-function with_state(g::DGraph, f, args...)
+function with_state(g::DGraph, f, args...; kwargs...)
     if g.frozen[]
         @assert !any(x->x isa ELTYPE, args)
-        return f(g.state, args...)
+        return f(g.state, args...; kwargs...)
     else
-        return fetch(Dagger.@spawn f(g.state, args...))
+        return fetch(Dagger.@spawn f(g.state, args...; kwargs...))
     end
 end
-function exec_fast(f, args...; fetch::Bool=true)
+function exec_fast(f, args...; kwargs...)
     # FIXME: Ensure that `EagerThunk` result is also local
     if any(x->(x isa Dagger.EagerThunk && !isready(x)) ||
               (x isa Dagger.Chunk && x.handle.owner != myid()), args)
-        if fetch
-            return Base.fetch(Dagger.@spawn f(args...))
-        else
-            return Dagger.@spawn f(args...)
-        end
+        return Base.fetch(Dagger.@spawn f(args...; kwargs...))
     else
         fetched_args = ntuple(i->args[i] isa ELTYPE ? Base.fetch(args[i]) : args[i], length(args))
-        return f(fetched_args...)
+        return f(fetched_args...; kwargs...)
+    end
+end
+function exec_fast_nofetch(f, args...; kwargs...)
+    # FIXME: Ensure that `EagerThunk` result is also local
+    if any(x->(x isa Dagger.EagerThunk && !isready(x)) ||
+              (x isa Dagger.Chunk && x.handle.owner != myid()), args)
+        return Dagger.@spawn f(args...; kwargs...)
+    else
+        fetched_args = ntuple(i->args[i] isa ELTYPE ? Base.fetch(args[i]) : args[i], length(args))
+        return f(fetched_args...; kwargs...)
     end
 end
 
@@ -172,7 +178,7 @@ function Graphs.has_edge(g::DGraphState{T,D}, src::Integer, dst::Integer) where 
     else
         # The edge will be in an AdjList
         adj = g.bg_adjs[src_part_idx]
-        return exec_fast(Base.in, adj, (src, dst))
+        return exec_fast(has_edge, adj, src, dst)
     end
 end
 Graphs.is_directed(::DGraph{T,D}) where {T,D} = D
@@ -235,12 +241,13 @@ function add_partition!(g::DGraph, sg::AbstractGraph)
     check_not_frozen(g)
     return with_state(g, add_partition!, sg)
 end
-function add_partition!(g::DGraphState{T,D}, sg::AbstractGraph) where {T,D}
+function add_partition!(g::DGraphState{T,D}, sg::AbstractGraph; all::Bool=true) where {T,D}
     check_not_frozen(g)
     shift = nv(g)
     part = add_partition!(g, nv(sg))
     part_edges = map(edge->(src(edge)+shift, dst(edge)+shift), collect(edges(sg)))
-    @assert add_edges!(g, part_edges)
+    count = add_edges!(g, part_edges; all)
+    @assert !all || count == length(part_edges)
     return part
 end
 function Graphs.add_edge!(g::DGraph, src::Integer, dst::Integer)
@@ -292,17 +299,19 @@ function Graphs.add_edge!(g::DGraphState{T,D}, src::Integer, dst::Integer) where
 
     return true
 end
-function add_edges!(g::DGraph, iter)
+function add_edges!(g::DGraph, iter; all::Bool=true)
     check_not_frozen(g)
-    return with_state(g, add_edges!, iter)
+    return with_state(g, add_edges!, iter; all)
 end
-function add_edges!(g::DGraphState{T,D}, iter) where {T,D}
+function add_edges!(g::DGraphState{T,D}, iter; all::Bool=true) where {T,D}
     check_not_frozen(g)
 
     # Determine edge partition/background
     part_edges = Dict{Int,Vector{Tuple{T,T}}}(part=>Tuple{T,T}[] for part in 1:nparts(g))
     back_edges = Dict{Int,Vector{Tuple{T,T}}}(part=>Tuple{T,T}[] for part in 1:nparts(g))
+    nedges = 0
     for edge in iter
+        nedges += 1
         src, dst = Tuple(edge)
 
         src_part_idx = findfirst(span->src in span, g.parts_nv)
@@ -320,34 +329,32 @@ function add_edges!(g::DGraphState{T,D}, iter) where {T,D}
     end
 
     # Add edges concurrently
-    part_tasks = [exec_fast(add_edges!, g.parts[part], g.parts_nv[part].start-1, edges; fetch=false) for (part, edges) in part_edges]
-    back_tasks = [exec_fast(add_edges!, g.bg_adjs[part], edges; fetch=false) for (part, edges) in back_edges]
-
-    # Validate that all edges were successfully added
-    if !all(fetch, part_tasks) || !all(fetch, back_tasks)
-        return false
-    end
+    part_tasks = Dict(part=>exec_fast_nofetch(add_edges!, g.parts[part], g.parts_nv[part].start-1, edges; all) for (part, edges) in part_edges)
+    back_tasks = Dict(part=>exec_fast_nofetch(add_edges!, g.bg_adjs[part], edges; all) for (part, edges) in back_edges)
 
     # Update edge counters
-    for (part, edges) in part_edges
-        g.parts_ne[part] += length(edges)
+    for (part, edge_count) in part_tasks
+        g.parts_ne[part] += fetch(edge_count)
     end
-    for (part, edges) in back_edges
-        g.bg_adjs_ne_src[part] += length(edges)
-        #= FIXME
-        g.bg_adjs_ne[src_part_idx] += 1
-        g.bg_adjs_ne[dst_part_idx] += 1
-        =#
+    for (part, edge_count) in back_tasks
+        g.bg_adjs_ne_src[part] += fetch(edge_count)
+        g.bg_adjs_ne[part] = exec_fast(ne, g.bg_adjs[part])
     end
 
-    return true
+    # Validate that all edges were successfully added
+    return sum(fetch, values(part_tasks)) + sum(fetch, values(back_tasks))
 end
-function add_edges!(g::Graphs.AbstractSimpleGraph, shift, edges)
+function add_edges!(g::Graphs.AbstractSimpleGraph, shift, edges; all::Bool=true)
+    count = 0
     for edge in edges
         src, dst = Tuple(edge)
-        add_edge!(g, src-shift, dst-shift) || return false
+        if add_edge!(g, src-shift, dst-shift)
+            count += 1
+        elseif all
+            return count
+        end
     end
-    return true
+    return count
 end
 edge_owner(src::Int, dst::Int, src_part_idx::Int, dst_part_idx::Int) =
     iseven(hash(Base.unsafe_trunc(UInt, src+dst))) ? src_part_idx : dst_part_idx

@@ -14,7 +14,7 @@ function load_dir(dir::String; freeze::Bool=false)
         edges = readdlm(file)
         srcs = edges[:,1]
         dsts = edges[:,2]
-        add_edges!(dg, zip(srcs, dsts))
+        @assert add_edges!(dg, zip(srcs, dsts)) == size(edges, 1)
     end
     freeze && freeze!(dg)
     return dg

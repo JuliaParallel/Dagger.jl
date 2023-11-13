@@ -4,6 +4,17 @@ abstract type AbstractAdjListStorage{T,D} end
 Base.IteratorSize(::Type{<:AbstractAdjListStorage}) = Base.HasLength()
 Base.IteratorEltype(::Type{<:AbstractAdjListStorage}) = Base.HasEltype()
 Base.eltype(::Type{<:AbstractAdjListStorage{T}}) where T = Edge{T}
+function add_edges!(adjlist::AbstractAdjListStorage, edges; all::Bool=true)
+    count = 0
+    for edge in edges
+        if add_edge!(adjlist, edge)
+            count += 1
+        elseif all
+            return count
+        end
+    end
+    return count
+end
 
 # Storage matching Graphs.SimpleGraph for high edge counts
 struct SimpleAdjListStorage{T,D} <: AbstractAdjListStorage{T,D}
@@ -46,11 +57,13 @@ function Base.iterate(adjlist::SimpleAdjListStorage{T}, state::Tuple{T,T}) where
     dst += 1
     return (Edge(value), (src, dst))
 end
-function Base.push!(adjlist::SimpleAdjListStorage{T,D}, edge) where {T,D}
+function Graphs.add_edge!(adjlist::SimpleAdjListStorage{T,D}, edge) where {T,D}
     src, dst = Tuple(edge)
     if !D
         src, dst = (min(src, dst), max(src, dst))
     end
+
+    has_edge(adjlist, edge) && return false
 
     # If necessary, allocate more inner vectors
     nv = max(src, dst)
@@ -72,9 +85,9 @@ function Base.push!(adjlist::SimpleAdjListStorage{T,D}, edge) where {T,D}
         push!(adjlist.fadjlist[src], dst)
     end
 
-    return adjlist
+    return true
 end
-function Base.in(edge, adjlist::SimpleAdjListStorage{T,D}) where {T,D}
+function Graphs.has_edge(adjlist::SimpleAdjListStorage{T,D}, edge) where {T,D}
     src, dst = Tuple(edge)
     if !D
         src, dst = (min(src, dst), max(src, dst))
@@ -101,11 +114,29 @@ function Base.iterate(adjlist::SparseAdjListStorage{T}, state=one(T)) where T
     value = adjlist.adjlist[state]
     return (Edge(value), state+one(T))
 end
-function Base.push!(adjlist::SparseAdjListStorage, edge)
+function Graphs.add_edge!(adjlist::SparseAdjListStorage, edge)
+    if findfirst(==(Tuple(edge)), adjlist.adjlist) !== nothing
+        return false
+    end
     push!(adjlist.adjlist, Tuple(edge))
-    return adjlist
+    return true
 end
-function Base.in(edge, adjlist::SparseAdjListStorage{T,D}) where {T,D}
+function add_edges!(adjlist::SparseAdjListStorage, edges; all::Bool=true)
+    # FIXME: Account for non-directedness
+    edge_set = Set(map(Tuple, edges))
+    for edge in adjlist.adjlist
+        if edge in edge_set
+            if all
+                return 0
+            else
+                pop!(edge_set, edge)
+            end
+        end
+    end
+    append!(adjlist.adjlist, collect(edge_set))
+    return length(edge_set)
+end
+function Graphs.has_edge(adjlist::SparseAdjListStorage{T,D}, edge) where {T,D}
     src, dst = Tuple(edge)
     if !D
         src, dst = (min(src, dst), max(src, dst))
@@ -120,26 +151,18 @@ struct AdjList{T,D,A<:AbstractAdjListStorage{T,D}}
 end
 AdjList{T,D}(adjlist::AbstractAdjListStorage{T,D}) where {T,D} =
     AdjList{T,D,typeof(adjlist)}(adjlist)
-AdjList{T,D}() where {T,D} = AdjList{T,D}(SimpleAdjListStorage{T,D}())
+# TODO: AdjList{T,D}() where {T,D} = AdjList{T,D}(SimpleAdjListStorage{T,D}())
+AdjList{T,D}() where {T,D} = AdjList{T,D}(SparseAdjListStorage{T,D}())
 AdjList() = AdjList{Int,true}()
 Base.copy(adj::AdjList{T,D,A}) where {T,D,A} = AdjList{T,D,A}(copy(adj.data))
-Base.in(adj::AdjList{T,D}, edge) where {T,D} = edge in adj.data
+Graphs.ne(adj::AdjList) = length(adj.data) # TODO: Use ne()
+Graphs.has_edge(adj::AdjList{T}, src::Integer, dst::Integer) where T =
+    has_edge(adj.data, Edge{T}(src, dst))
+Graphs.has_edge(adj::AdjList{T,D}, edge) where {T,D} = has_edge(adj.data, edge)
 Graphs.add_edge!(adj::AdjList{T}, src::Integer, dst::Integer) where T =
     add_edge!(adj, Edge{T}(src, dst))
-function Graphs.add_edge!(adj::AdjList, edge)
-    if edge in adj.data
-        return false
-    end
-    push!(adj.data, edge)
-    return true
-end
-function add_edges!(g::AdjList, edges)
-    for edge in edges
-        src, dst = Tuple(edge)
-        add_edge!(g, src, dst) || return false
-    end
-    return true
-end
+Graphs.add_edge!(adj::AdjList, edge) = add_edge!(adj.data, edge)
+add_edges!(adj::AdjList, edges; all::Bool=true) = add_edges!(adj.data, edges; all)
 Graphs.edges(adj::AdjList) = copy(adj.data)
 function Graphs.inneighbors(adj::AdjList, v::Integer)
     neighbors = Int[]
