@@ -213,7 +213,7 @@ function Graphs.add_vertices!(g::DGraphState, n::Integer)
 end
 function add_partition!(g::DGraph, n::Integer)
     check_not_frozen(g)
-    with_state(g, add_partition!, n)
+    return with_state(g, add_partition!, n)
 end
 function add_partition!(g::DGraphState{T,D}, n::Integer) where {T,D}
     check_not_frozen(g)
@@ -221,9 +221,7 @@ function add_partition!(g::DGraphState{T,D}, n::Integer) where {T,D}
         throw(ArgumentError("n must be >= 1"))
     end
     push!(g.parts, Dagger.spawn(n) do n
-        g = D ? SimpleDiGraph() : SimpleGraph()
-        add_vertices!(g, n)
-        g
+        D ? SimpleDiGraph(n) : SimpleGraph(n)
     end)
     num_v = nv(g)
     push!(g.parts_nv, (num_v+1):(num_v+n))
@@ -232,6 +230,18 @@ function add_partition!(g::DGraphState{T,D}, n::Integer) where {T,D}
     push!(g.bg_adjs_ne, 0)
     push!(g.bg_adjs_ne_src, 0)
     return length(g.parts)
+end
+function add_partition!(g::DGraph, sg::AbstractGraph)
+    check_not_frozen(g)
+    return with_state(g, add_partition!, sg)
+end
+function add_partition!(g::DGraphState{T,D}, sg::AbstractGraph) where {T,D}
+    check_not_frozen(g)
+    shift = nv(g)
+    part = add_partition!(g, nv(sg))
+    part_edges = map(edge->(src(edge)+shift, dst(edge)+shift), collect(edges(sg)))
+    @assert add_edges!(g, part_edges)
+    return part
 end
 function Graphs.add_edge!(g::DGraph, src::Integer, dst::Integer)
     check_not_frozen(g)
@@ -382,3 +392,10 @@ function Graphs.outneighbors(g::DGraphState, v::Integer)
     return neighbors
 end
 Graphs.weights(g::DGraph) = Graphs.DefaultDistance(nv(g))
+
+get_partition(g::DGraph, part::Integer) =
+    with_state(g, get_partition, part)
+get_partition(g::DGraphState, part::Integer) = fetch(g.parts[part])
+get_background(g::DGraph, part::Integer) =
+    with_state(g, get_background, part)
+get_background(g::DGraphState, part::Integer) = fetch(g.bg_adjs[part])
