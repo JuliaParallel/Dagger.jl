@@ -1207,7 +1207,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
 
                 # Try to steal from local queues randomly
                 # TODO: Prioritize stealing from busiest processors
-                states = collect(proc_states(values, uid))
+                states = proc_states(all_states->collect(values(all_states)), uid)
                 # TODO: Try to pre-allocate this
                 P = randperm(length(states))
                 for state in getindex.(Ref(states), P)
