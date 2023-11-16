@@ -14,11 +14,26 @@ function Base.lock(f, x::LockedObject)
         unlock(x.lock)
     end
 end
+Base.lock(x::LockedObject) = lock(x.lock)
 Base.trylock(x::LockedObject) = trylock(x.lock)
 Base.unlock(x::LockedObject) = unlock(x.lock)
 payload(x::LockedObject) = x.payload
 
-# TODO: Move this back to MemPool
+# TODO: Move these back to MemPool
+macro safe_lock1(l, o, ex)
+    quote
+        temp = $(esc(l))
+        lock(temp)
+        MemPool.enable_finalizers(false)
+        try
+            $(esc(o)) = $payload(temp)
+            $(esc(ex))
+        finally
+            unlock(temp)
+            MemPool.enable_finalizers(true)
+        end
+    end
+end
 # If we actually want to acquire a lock from a finalizer, we can't cause a task
 # switch. As a NonReentrantLock can only be taken by another thread that should
 # be running, and not a concurrent task we'd need to switch to, we can safely

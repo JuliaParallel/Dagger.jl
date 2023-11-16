@@ -15,19 +15,19 @@ transfer data to/from other types of `Processor` at runtime.
 abstract type Processor end
 
 const PROCESSOR_CALLBACKS = Dict{Symbol,Any}()
-const OSPROC_PROCESSOR_CACHE = Dict{Int,Set{Processor}}()
+const OSPROC_PROCESSOR_CACHE = LockedObject(Dict{Int,Set{Processor}}())
 
 add_processor_callback!(func, name::String) =
     add_processor_callback!(func, Symbol(name))
 function add_processor_callback!(func, name::Symbol)
     Dagger.PROCESSOR_CALLBACKS[name] = func
-    delete!(OSPROC_PROCESSOR_CACHE, myid())
+    @safe_lock1 OSPROC_PROCESSOR_CACHE cache delete!(cache, myid())
 end
 delete_processor_callback!(name::String) =
     delete_processor_callback!(Symbol(name))
 function delete_processor_callback!(name::Symbol)
     delete!(Dagger.PROCESSOR_CALLBACKS, name)
-    delete!(OSPROC_PROCESSOR_CACHE, myid())
+    @safe_lock1 OSPROC_PROCESSOR_CACHE cache delete!(cache, myid())
 end
 
 """
@@ -106,14 +106,19 @@ computations.
 struct OSProc <: Processor
     pid::Int
     function OSProc(pid::Int=myid())
-        get!(OSPROC_PROCESSOR_CACHE, pid) do
-            remotecall_fetch(get_processor_hierarchy, pid)
+        if !(@safe_lock1 OSPROC_PROCESSOR_CACHE cache haskey(cache, pid))
+            procs = remotecall_fetch(get_processor_hierarchy, pid)
+            @safe_lock1 OSPROC_PROCESSOR_CACHE cache begin
+                cache[pid] = procs
+            end
         end
-        new(pid)
+        return new(pid)
     end
 end
 get_parent(proc::OSProc) = proc
-get_processors(proc::OSProc) = get(OSPROC_PROCESSOR_CACHE, proc.pid, Set{Processor}())
+get_processors(proc::OSProc) = @safe_lock1 OSPROC_PROCESSOR_CACHE cache begin
+    get(cache, proc.pid, Set{Processor}())
+end
 children(proc::OSProc) = get_processors(proc)
 function get_processor_hierarchy()
     children = Set{Processor}()
