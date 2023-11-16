@@ -4,6 +4,7 @@ using Dagger
 import Dagger: Chunk
 using Distributed
 using Graphs
+import OffsetArrays: OffsetArray
 import Tables
 
 export DGraph

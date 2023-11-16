@@ -1,4 +1,5 @@
 const ELTYPE = Union{Dagger.EagerThunk, Chunk}
+const META_ELTYPE = Union{ELTYPE,Nothing}
 
 struct DGraphState{T,D}
     # Whether the graph is "frozen" (immutable) or mutable
@@ -12,6 +13,10 @@ struct DGraphState{T,D}
     parts_ne::Vector{T}
     # The maximum number of nodes for each of `parts`
     parts_v_max::Int
+    # The vertex metadata for each of `parts`
+    parts_v_meta::Vector{META_ELTYPE}
+    # The edge metadata for each of `parts`
+    parts_e_meta::Vector{META_ELTYPE}
 
     # A set of `AdjList` for each of `parts`
     # An edge is present here if either src or dst (but not both) is in
@@ -21,6 +26,22 @@ struct DGraphState{T,D}
     bg_adjs_ne::Vector{T}
     # The number of edges in each of `bg_adjs` where the source is this partition
     bg_adjs_ne_src::Vector{T}
+    # The edge metadata for each of `bg_adjs`
+    bg_adjs_e_meta::Vector{META_ELTYPE}
+end
+function DGraphState{T,D}(chunksize::Integer) where {T,D}
+    return DGraphState{T,D}(
+        Ref(false),     # frozen
+        ELTYPE[],       # parts
+        UnitRange{T}[], # parts_nv
+        T[],            # parts_ne
+        chunksize,      # parts_v_max
+        META_ELTYPE[],  # parts_v_meta
+        META_ELTYPE[],  # parts_e_meta
+        ELTYPE[],       # bg_adjs
+        T[],            # bg_adjs_ne
+        T[],            # bg_adjs_ne_src
+        META_ELTYPE[])  # bg_adjs_e_meta
 end
 mutable struct DGraph{T,D} <: Graphs.AbstractGraph{T}
     # The internal graph state
@@ -32,14 +53,7 @@ mutable struct DGraph{T,D} <: Graphs.AbstractGraph{T}
     function DGraph{T}(;chunksize::Integer=8,
                         directed::Bool=true) where {T}
         D = directed
-        state = DGraphState{T,D}(Ref(false),
-                                 ELTYPE[],
-                                 UnitRange{T}[],
-                                 T[],
-                                 chunksize,
-                                 ELTYPE[],
-                                 T[],
-                                 T[])
+        state = DGraphState{T,D}(chunksize)
         return new{T,D}(Dagger.tochunk(state), Ref(false))
     end
 end
@@ -79,10 +93,13 @@ function DGraph(dg::DGraph{T,D}; chunksize::Integer=0, directed::Bool=D, freeze:
         push!(new_state.parts, Dagger.@spawn copy(state.parts[part]))
         push!(new_state.parts_nv, state.parts_nv[part])
         push!(new_state.parts_ne, state.parts_ne[part])
+        push!(new_state.parts_v_meta, Dagger.@spawn copymeta(state.parts_v_meta[part]))
+        push!(new_state.parts_e_meta, Dagger.@spawn copymeta(state.parts_e_meta[part]))
 
         push!(new_state.bg_adjs, Dagger.@spawn copy(state.bg_adjs[part]))
         push!(new_state.bg_adjs_ne, state.bg_adjs_ne[part])
         push!(new_state.bg_adjs_ne_src, state.bg_adjs_ne_src[part])
+        push!(new_state.bg_adjs_e_meta, Dagger.@spawn copymeta(state.bg_adj_e_meta[part]))
     end
     freeze && freeze!(g)
     return g
@@ -132,6 +149,23 @@ function freeze!(g::DGraphState)
         return false
     end
     g.frozen[] = true
+    for part in nparts(g)
+        if Dagger.istask(g.parts[part])
+            g.parts[part] = fetch(g.parts[part]; raw=true)
+        end
+        if Dagger.istask(g.bg_adjs[part])
+            g.bg_adjs[part] = fetch(g.bg_adjs[part]; raw=true)
+        end
+        if Dagger.istask(g.parts_v_meta[part])
+            g.parts_v_meta[part] = fetch(g.parts_v_meta[part]; raw=true)
+        end
+        if Dagger.istask(g.parts_e_meta[part])
+            g.parts_e_meta[part] = fetch(g.parts_e_meta[part]; raw=true)
+        end
+        if Dagger.istask(g.bg_adjs_e_meta[part])
+            g.bg_adjs_e_meta[part] = fetch(g.bg_adjs_e_meta[part]; raw=true)
+        end
+    end
     return true
 end
 struct FrozenGraphException <: Exception end
@@ -143,8 +177,103 @@ function check_not_frozen(g)
     end
 end
 
+has_metadata(g::DGraph) = with_state(g, has_metadata)
+has_vertex_metadata(g::DGraph) = with_state(g, has_vertex_metadata)
+has_edge_metadata(g::DGraph) = with_state(g, has_edge_metadata)
+has_metadata(g::DGraphState) =
+    has_vertex_metadata(g) ||
+    has_edge_metadata(g)
+has_vertex_metadata(g::DGraphState) =
+    any(!isnothing, g.parts_v_meta)
+has_edge_metadata(g::DGraphState) =
+    any(!isnothing, g.parts_e_meta) ||
+    any(!isnothing, g.bg_adjs_e_meta)
+function set_vertex_metadata!(g::DGraph, meta)
+    check_not_frozen(g)
+    # Create vertex metadata for each partition, being careful not to transfer
+    # `meta` itself, which may be large
+    for part in 1:nparts(g)
+        part_vs = partition_vertices(g, part)
+        submeta = partition_vertex_metadata(meta, part_vs)
+        with_state(g, set_vertex_metadata!, part, submeta)
+    end
+end
+function set_vertex_metadata!(g::DGraphState, part::Integer, submeta)
+    check_not_frozen(g)
+    g.parts_v_meta[part] = Dagger.tochunk(submeta)
+    return
+end
+function set_edge_metadata!(g::DGraph, meta)
+    check_not_frozen(g)
+    # Create edge metadata for each partition and background,
+    # being careful not to transfer `meta` itself, which may be large
+    for part in 1:nparts(g)
+        part_edges, back_edges = partition_edges(g, part)
+        part_submeta = partition_edge_metadata(meta, part_edges)
+        back_submeta = partition_edge_metadata(meta, back_edges)
+        with_state(g, set_edge_metadata!, part, part_submeta, back_submeta)
+    end
+end
+function set_edge_metadata!(g::DGraphState, part::Integer, part_submeta, back_submeta)
+    check_not_frozen(g)
+    g.parts_e_meta[part] = Dagger.tochunk(part_submeta)
+    g.bg_adjs_e_meta[part] = Dagger.tochunk(back_submeta)
+    return
+end
+partition_vertex_metadata(meta, part_nv) = error("Must define `partition_vertex_metadata` for `$(typeof(meta))`")
+partition_edge_metadata(meta, edges) = error("Must define `partition_edge_metadata` for `$(typeof(meta))`")
+partition_vertex_metadata(meta::Vector, part_vs) =
+    OffsetArray(meta[part_vs], part_vs)
+function partition_edge_metadata(meta::Matrix{T}, edges) where T
+    if isempty(edges)
+        return fill(one(T), 0, 0)
+    end
+    vs_min = minimum(x->min(src(x), dst(x)), edges; init=1)
+    vs_max = maximum(x->max(src(x), dst(x)), edges; init=1)
+    vs_span = vs_min:vs_max
+    return OffsetArray(meta[vs_span,vs_span], vs_span, vs_span)
+end
+get_partition_vertex_metadata(g::DGraph, part::Integer) =
+    fetch(with_state(g, get_partition_vertex_metadata, part))
+function get_partition_vertex_metadata(g::DGraphState, part::Integer)
+    check_not_frozen(g)
+    return g.parts_v_meta[part]
+end
+get_partition_edge_metadata(g::DGraph, part::Integer) =
+    fetch(with_state(g, get_partition_edge_metadata, part))
+function get_partition_edge_metadata(g::DGraphState, part::Integer)
+    check_not_frozen(g)
+    return g.parts_e_meta[part]
+end
+get_background_edge_metadata(g::DGraph, part::Integer) =
+    fetch(with_state(g, get_background_edge_metadata, part))
+function get_background_edge_metadata(g::DGraphState, part::Integer)
+    check_not_frozen(g)
+    return g.bg_adjs_e_meta[part]
+end
+copymeta(x) = x
+copymeta(x::AbstractArray) = copy(x)
+
+function Graphs.weights(g::DGraph)
+    if has_edge_metadata(g)
+        return LazyWeights(g)
+    end
+    return Graphs.DefaultDistance(nv(g))
+end
+struct LazyWeights{D<:DGraph}
+    g::D
+end
+function Base.collect(w::LazyWeights)
+    W = ones(Float64, nv(w.g), nv(w.g))
+    for (edge, w) in edges_with_weights(w.g)
+        src, dst = Tuple(edge)
+        W[src,dst] = w
+    end
+    return W
+end
+
 function Base.show(io::IO, g::DGraph{T,D}) where {T,D}
-    print(io, "{$(nv(g)), $(ne(g))} $(D ? "" : "un")directed Dagger $T graph$(isfrozen(g) ? " (frozen)" : "")")
+    print(io, "{$(nv(g)), $(ne(g))} $(D ? "" : "un")directed Dagger $T $(has_metadata(g) ? "meta-" : "")graph$(isfrozen(g) ? " (frozen)" : "")")
 end
 
 nparts(g::DGraph) = with_state(g, nparts)
@@ -184,6 +313,8 @@ end
 Graphs.is_directed(::DGraph{T,D}) where {T,D} = D
 Graphs.vertices(g::DGraph) = Base.OneTo(nv(g))
 Graphs.edges(g::DGraph) = DGraphEdgeIter(g)
+edges_with_metadata(f, g::DGraph) = DGraphEdgeIter(g; metadata=true, meta_f=f)
+edges_with_weights(g::DGraph) = edges_with_metadata(weights, g)
 Graphs.zero(::Type{<:DGraph}) = DGraph()
 function Graphs.add_vertex!(g::DGraph)
     check_not_frozen(g)
@@ -232,9 +363,12 @@ function add_partition!(g::DGraphState{T,D}, n::Integer) where {T,D}
     num_v = nv(g)
     push!(g.parts_nv, (num_v+1):(num_v+n))
     push!(g.parts_ne, 0)
+    push!(g.parts_v_meta, nothing)
+    push!(g.parts_e_meta, nothing)
     push!(g.bg_adjs, Dagger.@spawn AdjList{T,D}())
     push!(g.bg_adjs_ne, 0)
     push!(g.bg_adjs_ne_src, 0)
+    push!(g.bg_adjs_e_meta, nothing)
     return length(g.parts)
 end
 function add_partition!(g::DGraph, sg::AbstractGraph)
@@ -249,6 +383,42 @@ function add_partition!(g::DGraphState{T,D}, sg::AbstractGraph; all::Bool=true) 
     count = add_edges!(g, part_edges; all)
     @assert !all || count == length(part_edges)
     return part
+end
+function add_partition!(g::DGraph, part_data::ELTYPE, back_data::ELTYPE,
+                        part_vert_meta_data::META_ELTYPE,
+                        part_edge_meta_data::META_ELTYPE,
+                        back_edge_meta_data::META_ELTYPE,
+                        n_verts::Integer, n_part_edges::Integer,
+                        n_back_edges::Integer, n_back_own_edges::Integer)
+    check_not_frozen(g)
+    return with_state(g, add_partition!, Ref(part_data), Ref(back_data),
+                      Ref(part_vert_meta_data),
+                      Ref(part_edge_meta_data),
+                      Ref(back_edge_meta_data),
+                      n_verts, n_part_edges,
+                      n_back_edges, n_back_own_edges)
+end
+function add_partition!(g::DGraphState{T,D}, part_data::Ref, back_data::Ref,
+                        part_vert_meta_data::Ref,
+                        part_edge_meta_data::Ref,
+                        back_edge_meta_data::Ref,
+                        n_verts::Integer, n_part_edges::Integer,
+                        n_back_edges::Integer, n_back_own_edges::Integer) where {T,D}
+    check_not_frozen(g)
+    if n_verts < 1
+        throw(ArgumentError("n_verts must be >= 1"))
+    end
+    num_v = nv(g)
+    push!(g.parts, part_data[])
+    push!(g.parts_nv, (num_v+1):(num_v+n_verts))
+    push!(g.parts_ne, n_part_edges)
+    push!(g.parts_v_meta, part_vert_meta_data[])
+    push!(g.parts_e_meta, part_edge_meta_data[])
+    push!(g.bg_adjs, back_data[])
+    push!(g.bg_adjs_ne, n_back_edges)
+    push!(g.bg_adjs_ne_src, n_back_own_edges)
+    push!(g.bg_adjs_e_meta, back_edge_meta_data[])
+    return length(g.parts)
 end
 function Graphs.add_edge!(g::DGraph, src::Integer, dst::Integer)
     check_not_frozen(g)
@@ -398,7 +568,6 @@ function Graphs.outneighbors(g::DGraphState, v::Integer)
 
     return neighbors
 end
-Graphs.weights(g::DGraph) = Graphs.DefaultDistance(nv(g))
 
 get_partition(g::DGraph, part::Integer) =
     with_state(g, get_partition, part)
@@ -406,3 +575,34 @@ get_partition(g::DGraphState, part::Integer) = fetch(g.parts[part])
 get_background(g::DGraph, part::Integer) =
     with_state(g, get_background, part)
 get_background(g::DGraphState, part::Integer) = fetch(g.bg_adjs[part])
+
+partition_vertices(g::DGraph, part::Integer) =
+    with_state(g, partition_vertices, part)
+partition_vertices(g::DGraphState, part::Integer) = g.parts_nv[part]
+
+partition_edges(g::DGraph, part::Integer) =
+    with_state(g, partition_edges, part)
+function partition_edges(g::DGraphState, part::Integer)
+    shift = g.parts_nv[part].start - 1
+    part_edges = map(edge->Edge(src(edge)+shift, dst(edge)+shift), exec_fast(edges, g.parts[part]))
+    back_edges = exec_fast(edges, g.bg_adjs[part])
+    return part_edges, back_edges
+end
+
+partition_nv(g::DGraph, part::Integer) = length(partition_vertices(g, part))
+partition_ne(g::DGraph, part::Integer) = with_state(g, partition_ne, part)
+function partition_ne(g::DGraphState, part::Integer)
+    return (g.parts_ne[part],
+            g.bg_adjs_ne[part],
+            g.bg_adjs_ne_src[part])
+end
+
+partitioning(g::DGraph) = with_state(g, partitioning)
+function partitioning(g::DGraphState)
+    c = fill(0, nv(g))
+    for part in 1:nparts(g)
+        span = g.parts_nv[part]
+        c[span] .= part
+    end
+    return c
+end
