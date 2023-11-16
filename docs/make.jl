@@ -22,6 +22,7 @@ makedocs(;
         "Scopes" => "scopes.md",
         "Processors" => "processors.md",
         "Task Queues" => "task-queues.md",
+        "Datadeps" => "datadeps.md",
         "Option Propagation" => "propagation.md",
         "Logging and Graphing" => "logging.md",
         "Checkpointing" => "checkpointing.md",
