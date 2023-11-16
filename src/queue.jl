@@ -77,3 +77,30 @@ function spawn_sequential(f::Base.Callable)
     queue = InOrderTaskQueue(get_options(:task_queue, EagerTaskQueue()))
     return with_options(f; task_queue=queue)
 end
+
+struct WaitAllQueue <: AbstractTaskQueue
+    upper_queue::AbstractTaskQueue
+    tasks::Vector{EagerThunk}
+end
+function enqueue!(queue::WaitAllQueue, spec::Pair{EagerTaskSpec,EagerThunk})
+    push!(queue.tasks, spec[2])
+    enqueue!(queue.upper_queue, spec)
+end
+function enqueue!(queue::WaitAllQueue, specs::Vector{Pair{EagerTaskSpec,EagerThunk}})
+    for (_, task) in specs
+        push!(queue.tasks, task)
+    end
+    enqueue!(queue.upper_queue, specs)
+end
+function wait_all(f; check_errors::Bool=false)
+    queue = WaitAllQueue(get_options(:task_queue, EagerTaskQueue()), EagerThunk[])
+    result = with_options(f; task_queue=queue)
+    for task in queue.tasks
+        if check_errors
+            fetch(task; raw=true)
+        else
+            wait(task)
+        end
+    end
+    return result
+end
