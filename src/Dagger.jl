@@ -24,6 +24,7 @@ include("lib/util.jl")
 include("utils/dagdebug.jl")
 
 # Distributed data
+include("utils/locked-object.jl")
 include("options.jl")
 include("processor.jl")
 include("scopes.jl")
@@ -37,7 +38,6 @@ include("chunks.jl")
 include("compute.jl")
 include("utils/clock.jl")
 include("utils/system_uuid.jl")
-include("utils/locked-object.jl")
 include("utils/caching.jl")
 include("sch/Sch.jl"); using .Sch
 
