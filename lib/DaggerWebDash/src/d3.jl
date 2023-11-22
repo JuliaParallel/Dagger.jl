@@ -143,6 +143,17 @@ function d3r_init(port::Int, port_range::UnitRange, config_updated::Ref{Bool}, c
                 Dict(:status=>404)
             end
         end),
+        page("/assets/:path", req->begin
+            path = req[:params][:path]
+            occursin("..", path) && return Dict(:status=>404)
+            assets_path = normpath(joinpath(@__DIR__, "..", "assets"))
+            path = normpath(joinpath(assets_path, path))
+            if ispath(path) && normpath(dirname(path)) == assets_path
+                Dict(:body=>String(read(path)))
+            else
+                Dict(:status=>404)
+            end
+        end),
         page("/worker_id", respond("$(myid())")),
         page("/worker/:id/:location", req->begin
             id = parse(Int, req[:params][:id])
