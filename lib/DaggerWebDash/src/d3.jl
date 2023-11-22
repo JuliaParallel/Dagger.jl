@@ -57,7 +57,7 @@ const D3R_ACTUAL_PORT = Dict{Int,Int}()
 # TODO: Concrete socket types
 const D3R_CLIENT_SOCKETS = Dict{Int,Dict{Int,Vector{Any}}}()
 
-const D3R_WORKER_HOST_MAP = Dict{Int,IPAddr}()
+const D3R_WORKER_HOST_MAP = Dict{Int,Union{IPAddr,String}}()
 const D3R_WORKER_PORT_MAP = Dict{Int,Int}()
 
 struct D3Renderer
@@ -138,6 +138,17 @@ function d3r_init(port::Int, port_range::UnitRange, config_updated::Ref{Bool}, c
             path = req[:params][:path]
             path = "/tmp/" * path
             if ispath(path)
+                Dict(:body=>String(read(path)))
+            else
+                Dict(:status=>404)
+            end
+        end),
+        page("/assets/:path", req->begin
+            path = req[:params][:path]
+            occursin("..", path) && return Dict(:status=>404)
+            assets_path = normpath(joinpath(@__DIR__, "..", "assets"))
+            path = normpath(joinpath(assets_path, path))
+            if ispath(path) && normpath(dirname(path)) == assets_path
                 Dict(:body=>String(read(path)))
             else
                 Dict(:status=>404)
@@ -311,7 +322,11 @@ end
 function worker_host_port(id::Int, port::Int, port_range::UnitRange)
     worker_host = get!(D3R_WORKER_HOST_MAP, port) do
         worker_host, worker_port = remotecall_fetch(id, port) do port
-            (MemPool.host, get_actual_port(port, port_range))
+            host = gethostname()
+            if isempty(host)
+                host = getipaddr()
+            end
+            (host, get_actual_port(port, port_range))
         end
         D3R_WORKER_PORT_MAP[port] = worker_port
         worker_host
