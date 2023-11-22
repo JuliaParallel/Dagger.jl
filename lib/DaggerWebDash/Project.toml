@@ -1,7 +1,7 @@
 name = "DaggerWebDash"
 uuid = "cfc5aa84-1a2a-41ab-b391-ede92ecae40c"
 authors = ["Julian P Samaroo <jpsamaroo@jpsamaroo.me>"]
-version = "0.1.2"
+version = "0.1.3"
 
 [deps]
 Dagger = "d58978e5-989f-55fb-8d15-ea34adc7bf54"
