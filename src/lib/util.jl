@@ -2,8 +2,6 @@ import Base: convert, +, *, /, -, isless
 
 ###### Filesize algebra ######
 
-export B, kB, MB, GB, TB
-
 struct Bytes
     val::Float64
 end
