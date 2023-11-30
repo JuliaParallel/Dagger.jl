@@ -144,7 +144,7 @@ function reschedule_syncdeps!(state, thunk, seen=Set{Thunk}())
         w = get!(()->Set{Thunk}(), state.waiting, thunk)
         for input in thunk.syncdeps
             input = unwrap_weak_checked(input)
-            input in seen && continue
+            istask(input) && input in seen && continue
 
             # Unseen
             push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
