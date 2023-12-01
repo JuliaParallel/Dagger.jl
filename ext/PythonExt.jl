@@ -32,7 +32,8 @@ Dagger.move(::CPUProc, ::PythonProcessor, x::Py) = x
 Dagger.move(::CPUProc, ::PythonProcessor, x::PyArray) = x
 # FIXME: Conversion from Python to Julia
 
-function Dagger.execute!(::PythonProcessor, f, args...; kwargs...)
+# N.B. We ignore world here because Python doesn't have world ages
+function Dagger.execute!(::PythonProcessor, world::UInt64, f, args...; kwargs...)
     @assert f isa Py "Function must be a Python object"
     return f(args...; kwargs...)
 end
