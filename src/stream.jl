@@ -1,9 +1,11 @@
-mutable struct StreamStore
+mutable struct StreamStore{T}
     waiters::Vector{Int}
     buffers::Dict{Int,Vector{Any}}
     open::Bool
     lock::Threads.Condition
-    StreamStore() = new(zeros(Int, 0), Dict{Int,Vector{Any}}(), true, Threads.Condition())
+    StreamStore{T}() where T =
+        new{T}(zeros(Int, 0), Dict{Int,Vector{T}}(),
+               true, Threads.Condition())
 end
 tid() = Dagger.Sch.sch_handle().thunk_id.id
 function uid()
@@ -16,7 +18,7 @@ function uid()
         end
     end
 end
-function Base.put!(store::StreamStore, @nospecialize(value))
+function Base.put!(store::StreamStore{T}, @nospecialize(value::T)) where T
     @lock store.lock begin
         while length(store.waiters) == 0 && isopen(store)
             @dagdebug nothing :stream_put "[$(uid())] no waiters, not putting"
@@ -89,7 +91,7 @@ end
 mutable struct Stream{T} <: AbstractChannel{T}
     ref::Chunk
     function Stream{T}() where T
-        store = tochunk(StreamStore())
+        store = tochunk(StreamStore{T}())
         return new{T}(store)
     end
 end
@@ -157,13 +159,16 @@ end
 function initialize_streaming!(self_streams, spec, task)
     if !isa(spec.f, StreamingFunction)
         # Adapt called function for streaming and generate output Streams
-        # FIXME: Infer type
-        stream = Stream()
+        T_old = Base.uniontypes(task.metadata.return_type)
+        T_old = map(t->(t !== Union{} && t <: FinishedStreaming) ? only(t.parameters) : t, T_old)
+        # We treat non-dominating error paths as unreachable
+        T_old = filter(t->t !== Union{}, T_old)
+        T = task.metadata.return_type = !isempty(T_old) ? Union{T_old...} : Any
+        stream = Stream{T}()
         self_streams[task.uid] = stream
 
         spec.f = StreamingFunction(spec.f, stream)
-        # FIXME: Generalize to other processors
-        spec.options = merge(spec.options, (;occupancy=Dict(ThreadProc=>0)))
+        spec.options = merge(spec.options, (;occupancy=Dict(Any=>0)))
 
         # Register Stream globally
         remotecall_wait(1, task.uid, stream) do uid, stream
