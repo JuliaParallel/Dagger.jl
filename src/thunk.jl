@@ -7,6 +7,7 @@ const EMPTY_ARGS = Argument[]
 const EMPTY_SYNCDEPS = Set{Any}()
 Base.@kwdef mutable struct ThunkSpec
     fargs::Vector{Argument} = EMPTY_ARGS
+    world::UInt64 = UInt64(0)
     id::Int = 0
     cache_ref::Any = nothing
     affinity::Union{Pair{OSProc,Int}, Nothing} = nothing
@@ -14,6 +15,7 @@ Base.@kwdef mutable struct ThunkSpec
 end
 function unset!(spec::ThunkSpec, _)
     spec.fargs = EMPTY_ARGS
+    spec.world = UInt64(0)
     spec.id = 0
     spec.cache_ref = nothing
     spec.affinity = nothing
@@ -54,6 +56,7 @@ If omitted, options can also be specified by passing key-value pairs as
 """
 mutable struct Thunk
     inputs::Vector{Argument} # TODO: Use `ImmutableArray` in 1.8
+    world::UInt64
     id::Int
     cache_ref::Any
     affinity::Union{Pair{OSProc,Int}, Nothing}
@@ -62,7 +65,7 @@ mutable struct Thunk
     sch_accessible::Bool
     finished::Bool
     function Thunk(spec::ThunkSpec)
-        return new(spec.fargs, spec.id,
+        return new(spec.fargs, spec.world, spec.id,
                    spec.cache_ref, spec.affinity,
                    spec.options,
                    true, true, false)
@@ -70,6 +73,7 @@ mutable struct Thunk
 end
 @warn "Don't force unwrap with fetch" maxlog=1
 function Thunk(f, xs...;
+               world::UInt64=Base.get_world_counter(),
                syncdeps=nothing,
                id::Int=next_id(),
                cache_ref=nothing,
@@ -129,6 +133,7 @@ function Thunk(f, xs...;
             spec.fargs[idx+1] = Argument(something(x.first, idx), x.second)
         end
     end
+    spec.world = world
     if options === nothing
         options = Options()
     end
@@ -624,7 +629,7 @@ function spawn(f, args...; kwargs...)
     end
 
     # Construct task spec and handle
-    spec = DTaskSpec(args_kwargs, task_options)
+    spec = DTaskSpec(args_kwargs, Base.get_world_counter(), task_options)
     task = eager_spawn(spec)
 
     # Enqueue the task into the task queue

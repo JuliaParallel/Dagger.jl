@@ -807,6 +807,7 @@ struct TaskSpec
     scope::Dagger.AbstractScope
     Tf::Type
     data::Vector{Argument}
+    world::UInt64
     options::Options
     sig::Dagger.Signature
     ctx_vars::NamedTuple
@@ -864,7 +865,7 @@ function fire_tasks!(ctx, task_loc::ScheduleTaskLocation, task_specs::Vector{Sch
         push!(to_send, TaskSpec(
             thunk.id,
             task_spec.est_time_util, task_spec.est_alloc_util, task_spec.est_occupancy,
-            task_spec.scope, Tf, args, options, sig,
+            task_spec.scope, Tf, args, thunk.world, options, sig,
             (log_sink=ctx.log_sink, profile=ctx.profile),
             sch_handle, state.uid))
     end
@@ -1524,7 +1525,7 @@ function do_task(to_proc, task::TaskSpec)
             # Execute
             @with Dagger.TASK_SIGNATURE=>task.sig Dagger.TASK_PROCESSOR=>to_proc begin
                 MT.@with_metrics mspec Dagger :execute! thunk_id MT.SyncInto(local_cache) begin
-                    execute!(to_proc, f, fetched_args...; fetched_kwargs...)
+                    execute!(to_proc, task.world, f, fetched_args...; fetched_kwargs...)
                 end
             end
         end
