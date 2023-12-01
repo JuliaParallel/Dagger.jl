@@ -39,6 +39,7 @@ If omitted, options can also be specified by passing key-value pairs as
 mutable struct Thunk
     f::Any # usually a Function, but could be any callable
     inputs::Vector{Pair{Union{Symbol,Nothing},Any}} # TODO: Use `ImmutableArray` in 1.8
+    world::UInt64
     syncdeps::Set{Any}
     id::ThunkID
     get_result::Bool # whether the worker should send the result or only the metadata
@@ -52,6 +53,7 @@ mutable struct Thunk
     options::Any # stores scheduler-specific options
     propagates::Tuple # which options we'll propagate
     function Thunk(f, xs...;
+                   world::UInt64=Base.get_world_counter(),
                    syncdeps=nothing,
                    id::ThunkID=next_id(),
                    get_result::Bool=false,
@@ -82,10 +84,10 @@ mutable struct Thunk
         @assert all(x->x isa Pair, xs)
         if options !== nothing
             @assert isempty(kwargs)
-            new(f, xs, syncdeps_set, id, get_result, meta, persist, cache,
+            new(f, xs, world, syncdeps_set, id, get_result, meta, persist, cache,
                 cache_ref, affinity, eager_ref, options, propagates)
         else
-            new(f, xs, syncdeps_set, id, get_result, meta, persist, cache,
+            new(f, xs, world, syncdeps_set, id, get_result, meta, persist, cache,
                 cache_ref, affinity, eager_ref, Sch.ThunkOptions(;kwargs...),
                 propagates)
         end
@@ -304,7 +306,7 @@ function spawn(f, args...; kwargs...)
     options = merge(options, (;propagates))
 
     # Construct task spec and handle
-    spec = EagerTaskSpec(f, args_kwargs, options)
+    spec = EagerTaskSpec(f, args_kwargs, options, Base.get_world_counter())
     task = eager_spawn(spec)
 
     # Enqueue the task into the task queue

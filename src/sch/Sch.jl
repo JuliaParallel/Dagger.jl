@@ -979,7 +979,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
 
         # TODO: De-dup common fields (log_sink, uid, etc.)
         task_spec = TaskSpec(thunk.id, time_util, alloc_util, occupancy,
-                             scope, chunktype(thunk.f), data, ids, positions,
+                             scope, thunk.world, chunktype(thunk.f), data, ids, positions,
                              thunk.get_result, thunk.persist, thunk.cache, thunk.meta,
                              options, propagated,
                              (log_sink=ctx.log_sink, profile=ctx.profile),
@@ -1072,6 +1072,7 @@ struct TaskSpec
     est_alloc_util::UInt64
     est_occupancy::UInt32
     scope::Dagger.AbstractScope
+    world::UInt64
     Tf::Type
     data::Vector{Any}
     ids::Vector{Union{ThunkID,Int}}
@@ -1630,7 +1631,7 @@ function do_task(to_proc::Processor, task::TaskSpec)
         Dagger.with_options(task.propagated) do
             with_metrics(signature_execute_metrics, :signature, :execute, signature) do
                 # Execute the task
-                result = execute!(to_proc, f, fetched_args...; fetched_kwargs...)
+                result = execute!(to_proc, task.world, f, fetched_args...; fetched_kwargs...)
             end
         end
 
