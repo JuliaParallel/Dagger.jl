@@ -289,13 +289,27 @@ function report_catch_error(err, desc=nothing)
 end
 
 chunktype(x) = typeof(x)
-function signature(task::Thunk, state)
-    sig = Any[chunktype(task.f)]
-    for (pos, input) in collect_task_inputs(state, task)
-        # N.B. Skips kwargs
-        if pos === nothing
-            push!(sig, chunktype(input))
+signature(task::Thunk, state) =
+    signature(task.f, collect_task_inputs(state, task))
+function signature(f, args)
+    sig = DataType[chunktype(f)]
+    sig_kwarg_names = Symbol[]
+    sig_kwarg_types = []
+    for (pos, arg) in args
+        if arg isa Dagger.EagerThunk
+            @warn "Lookup result_type in metadata for EagerThunk" maxlog=1
         end
+        if pos === nothing
+            push!(sig, chunktype(arg))
+        else
+            push!(sig_kwarg_names, pos)
+            push!(sig_kwarg_types, chunktype(arg))
+        end
+    end
+    if !isempty(sig_kwarg_names)
+        NT = NamedTuple{(sig_kwarg_names...,), Base.to_tuple_type(sig_kwarg_types)}
+        pushfirst!(sig, NT)
+        pushfirst!(sig, typeof(Core.kwcall))
     end
     return sig
 end
