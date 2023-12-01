@@ -797,10 +797,10 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
             gproc = get_parent(proc)
             can_use, scope = can_use_proc(task, gproc, proc, opts, scope)
             if can_use
-                has_cap, est_time_util, est_alloc_util, est_occupancy =
-                    has_capacity(state, proc, gproc.pid, opts.time_util, opts.alloc_util, opts.occupancy, sig)
-                if has_cap
-                    # This processor is valid, schedule task onto it
+                #=has_cap,=# est_time_util, est_alloc_util, est_occupancy =
+                    task_utilization(state, proc, opts, sig)
+                if true#has_cap
+                    # Schedule task onto proc
                     proc_tasks = get!(to_fire, (gproc, proc)) do
                         Vector{Tuple{Thunk,<:Any,<:Any,UInt64,UInt32}}()
                     end
@@ -955,61 +955,10 @@ fire_task!(ctx, (thunk, scope, time_util, alloc_util, occupancy)::Tuple{Thunk,<:
 function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
     to_send = []
     for (thunk, scope, time_util, alloc_util, occupancy) in thunks
-        push!(state.running, thunk)
-        state.running_on[thunk] = gproc
-        if thunk.cache && thunk.cache_ref !== nothing
-            # the result might be already cached
-            data = thunk.cache_ref
-            if data !== nothing
-                # cache hit
-                cache_store!(state, thunk, data)
-                thunk_failed = get(state.errored, thunk, false)
-                finish_task!(ctx, state, thunk, thunk_failed)
-                continue
-            else
-                # cache miss
-                thunk.cache_ref = nothing
-            end
-        end
-        if thunk.options !== nothing && thunk.options.restore !== nothing
-            try
-                result = @invokelatest thunk.options.restore(thunk)
-                if result isa Chunk
-                    cache_store!(state, thunk, result)
-                    finish_task!(ctx, state, thunk, false)
-                    continue
-                elseif result !== nothing
-                    throw(ArgumentError("Invalid restore return type: $(typeof(result))"))
-                end
-            catch err
-                report_catch_error(err, "Thunk restore failed")
-            end
-        end
-
-        ids = Union{ThunkID,Int}[0]
-        data = Any[thunk.f]
-        positions = Union{Symbol,Nothing}[]
-        for (idx, pos_x) in enumerate(thunk.inputs)
-            pos, x = pos_x
-            x = unwrap_weak_checked(x)
-            push!(ids, istask(x) ? x.id : -idx)
-            push!(data, istask(x) ? cache_lookup_checked(state, x)[1] : x)
-            push!(positions, pos)
-        end
-        toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
-        options = merge(ctx.options, toptions)
-        propagated = get_propagated_options(toptions, thunk)
-        @assert (options.single === nothing) || (gproc.pid == options.single)
-        # TODO: Set `sch_handle.tid.ref` to the right `DRef`
-        sch_handle = SchedulerHandle(ThunkRef(thunk), state.worker_chans[gproc.pid]...)
+        task_spec = prepare_fire_task!(ctx, state, thunk, proc, scope, time_util, alloc_util, occupancy)
+        task_spec === nothing && continue
 
         # TODO: De-dup common fields (log_sink, uid, etc.)
-        task_spec = TaskSpec(thunk.id, time_util, alloc_util, occupancy,
-                             scope, thunk.world, chunktype(thunk.f), data, ids, positions,
-                             thunk.get_result, thunk.persist, thunk.cache, thunk.meta,
-                             options, propagated,
-                             (log_sink=ctx.log_sink, profile=ctx.profile),
-                             sch_handle, state.uid, state.schedule_model)
         push!(to_send, task_spec)
     end
     # N.B. We don't batch these because we might get a deserialization
@@ -1029,6 +978,69 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
             end
         end)
     end
+end
+function prepare_fire_task!(ctx, state, thunk, proc, scope, time_util, alloc_util, occupancy)
+    @assert islocked(state.lock)
+
+    gproc = get_parent(proc)
+
+    push!(state.running, thunk)
+    state.running_on[thunk] = gproc
+
+    if thunk.cache && thunk.cache_ref !== nothing
+        # the result might be already cached
+        data = thunk.cache_ref
+        if data !== nothing
+            # cache hit
+            cache_store!(state, thunk, data)
+            thunk_failed = get(state.errored, thunk, false)
+            finish_task!(ctx, state, thunk, thunk_failed)
+            return
+        else
+            # cache miss
+            thunk.cache_ref = nothing
+        end
+    end
+
+    if thunk.options !== nothing && thunk.options.restore !== nothing
+        try
+            result = @invokelatest thunk.options.restore(thunk)
+            if result isa Chunk
+                cache_store!(state, thunk, result)
+                finish_task!(ctx, state, thunk, false)
+                return
+            elseif result !== nothing
+                throw(ArgumentError("Invalid restore return type: $(typeof(result))"))
+            end
+        catch err
+            report_catch_error(err, "Thunk restore failed")
+        end
+    end
+
+    ids = Union{ThunkID,Int}[0]
+    data = Any[thunk.f]
+    positions = Union{Symbol,Nothing}[]
+    for (idx, pos_x) in enumerate(thunk.inputs)
+        pos, x = pos_x
+        x = unwrap_weak_checked(x)
+        push!(ids, istask(x) ? x.id : -idx)
+        push!(data, istask(x) ? cache_lookup_checked(state, x)[1] : x)
+        push!(positions, pos)
+    end
+
+    toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
+    options = merge(ctx.options, toptions)
+    propagated = get_propagated_options(toptions, thunk)
+    @assert (options.single === nothing) || (gproc.pid == options.single)
+    # TODO: Set `sch_handle.tid.ref` to the right `DRef`
+    sch_handle = SchedulerHandle(ThunkRef(thunk), state.worker_chans[gproc.pid]...)
+
+    return TaskSpec(thunk.id, time_util, alloc_util, occupancy,
+                    scope, thunk.world, chunktype(thunk.f), data, ids, positions,
+                    thunk.get_result, thunk.persist, thunk.cache, thunk.meta,
+                    options, propagated,
+                    (log_sink=ctx.log_sink, profile=ctx.profile),
+                    sch_handle, state.uid, state.schedule_model)
 end
 
 @static if VERSION >= v"1.9"
@@ -1118,8 +1130,8 @@ Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
 
 struct ProcessorInternalState
     ctx::Context
-    sch_model::AbstractDecision
     proc::Processor
+    sch_model::AbstractDecision
     queue::LockedObject{PriorityQueue{TaskSpec, UInt32, Base.Order.ForwardOrdering}}
     reschedule::Doorbell
     tasks::Dict{ThunkID,Task}
@@ -1378,26 +1390,13 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
     end
     return errormonitor_tracked("processor $to_proc", schedule(proc_run_task))
 end
-
-"""
-    do_tasks(to_proc, return_queue, tasks)
-
-Executes a batch of tasks on `to_proc`, returning their results through
-`return_queue`.
-"""
-function do_tasks(to_proc, return_queue, tasks)
-    @dagdebug nothing :processor "Enqueuing task batch" batch_size=length(tasks)
-
-    ctx_vars = first(tasks).ctx_vars
-    ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
-    sch_model = first(tasks).sch_model
-    uid = first(tasks).sch_uid
-    state = proc_states(uid) do states
-        get!(states, to_proc) do
+function processor_queue(ctx, uid, proc, sch_model, return_queue)
+    proc_states(uid) do states
+        get!(states, proc) do
             queue = PriorityQueue{TaskSpec, UInt32}()
             queue_locked = LockedObject(queue)
             reschedule = Doorbell()
-            istate = ProcessorInternalState(ctx, sch_model, to_proc,
+            istate = ProcessorInternalState(ctx, proc, sch_model,
                                             queue_locked, reschedule,
                                             Dict{Int,Task}(),
                                             Ref(UInt32(0)), Ref(UInt64(0)),
@@ -1409,6 +1408,8 @@ function do_tasks(to_proc, return_queue, tasks)
             return ProcessorState(istate, runner)
         end
     end
+end
+function processor_enqueue!(ctx, state::ProcessorState, uid, to_proc::Processor, tasks::Vector{Vector{Any}})
     istate = state.state
     lock(istate.queue) do queue
         for task in tasks
@@ -1443,6 +1444,24 @@ function do_tasks(to_proc, return_queue, tasks)
         notify(other_istate.reschedule)
     end
     @dagdebug nothing :processor "Kicked processors"
+end
+
+"""
+    do_tasks(to_proc, return_queue, tasks::Vector{TaskSpec})
+
+Executes a batch of tasks on `to_proc`, returning their results through
+`return_queue`.
+"""
+function do_tasks(to_proc, return_queue, tasks::Vector{TaskSpec})
+    @dagdebug nothing :processor "Enqueuing task batch" batch_size=length(tasks)
+
+    # FIXME: Use global context
+    ctx_vars = first(tasks).ctx_vars
+    ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
+    uid = first(tasks).sch_uid
+    sch_model = first(tasks).sch_model
+    state = processor_queue(ctx, uid, to_proc, sch_model, return_queue)
+    processor_enqueue!(ctx, state, uid, to_proc, tasks)
 end
 
 """

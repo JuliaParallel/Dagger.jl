@@ -129,8 +129,112 @@ function (unref::UnrefThunkByUser)()
 end
 
 
+# Local Scheduler
+function eager_submit_local!(ntasks, id, future, finalizer_ref, f, args, options, world, scopes)
+    if id isa Vector
+        thunk_refs = Sch.ThunkRef[]
+        for i in 1:ntasks
+            tref = eager_submit_local!(ctx, state, task, tid,
+                                       (1, id[i], future[i], ref[i],
+                                        f[i], args[i], options[i], world[i],
+                                        scopes[i]))
+            push!(thunk_refs, tref)
+        end
+        return (true, thunk_refs)
+    end
+
+    # Create the `Thunk`
+    thunk = Thunk(f, args...; world, options...)
+
+    # Create a `DRef` to `thunk` so that the caller can preserve it
+    thunk_ref = poolset(thunk; size=64, device=MemPool.CPURAMDevice())
+    thunk_id = Sch.ThunkID(thunk.id, thunk_ref)
+
+    # FIXME: exec_inline (globally_terminates)
+    exec_inline = false
+    # FIXME: needs_tls
+    needs_tls = true
+
+    if exec_inline
+        # Execute the function directly
+        if needs_tls
+            @warn "Perform TLS setup" maxlog=1
+            set_tls!()
+        end
+
+        _args, kwargs = process_positional_args(args)
+        error = false
+        result = try
+            Base.invoke_in_world(world, f, _args...; kwargs...)
+        catch err
+            error = true
+            ThunkFailedException(thunk, thunk, err)
+        end
+        put!(future, result; error)
+    else
+        # Schedule the task to a processor run queue
+        ctx = Sch.eager_context()
+        state = Sch.EAGER_STATE[]
+        # FIXME: Select a processor more intelligently
+        to_proc = ThreadProc(myid(), Threads.threadid())
+        local spec
+        @lock state.lock begin
+            sig = Sch.signature(thunk, state)
+            topts = Sch.ThunkOptions(;options...)
+            time_util, alloc_util, occupancy = Sch.task_utilization(state, to_proc, topts, sig)
+            task_spec = Sch.prepare_fire_task!(ctx, state, thunk, to_proc, scopes, time_util, alloc_util, occupancy)
+            @assert task_spec !== nothing
+            state.thunk_dict[thunk.id] = WeakThunk(thunk)
+            Sch.reschedule_syncdeps!(state, thunk)
+            if future !== nothing
+                # Ensure we attach a future before the thunk is scheduled
+                Sch._register_future!(ctx, state, thunk, 0#=tid=#, (future, thunk_id, false))
+                @dagdebug thunk :submit "Registered future"
+            end
+            if finalizer_ref !== nothing
+                # Preserve the `EagerThunkFinalizer` through `thunk`
+                thunk.eager_ref = finalizer_ref
+            end
+            state.valid[thunk] = nothing
+        end
+        uid = state.uid
+        state = Sch.processor_queue(ctx, uid, to_proc, state.chan)
+        Sch.processor_enqueue!(ctx, state, uid, to_proc, [task_spec])
+    end
+
+    return (true, thunk_ref)
+end
+function process_positional_args(all_args)
+    args = Any[]
+    kwargs = Pair{Symbol,Any}[]
+    for (pos, arg) in all_args
+        if arg isa Chunk || istask(arg)
+            arg = fetch(arg)
+        end
+        if pos === nothing
+            push!(args, arg)
+        else
+            push!(kwargs, pos=>arg)
+        end
+    end
+    return (args, kwargs)
+end
+
 # Local -> Remote
-function eager_submit!(ntasks, id, future, finalizer_ref, f, args, options, world)
+function eager_submit!(ntasks, id, future, finalizer_ref, f, args, options, world, metadata)
+    @warn "Split all_can_execute_locally by task" maxlog=1
+    if all_can_execute_locally(f, args, options, world, metadata)
+        # Send to the local scheduler
+        Sch.init_eager()
+        success, trefs = eager_submit_local!(ntasks, id, future, finalizer_ref, f, args, options, world)
+        if !success
+            @goto to_core
+        end
+        return trefs
+    end
+
+    # Send to the core scheduler
+    @label to_core
     if in_thunk()
         h = Dagger.sch_handle()
         return exec!(eager_submit_core!, h, ntasks, id, future, finalizer_ref, f, args, options, world, true)
@@ -152,6 +256,76 @@ function eager_submit!(ntasks, id, future, finalizer_ref, f, args, options, worl
                                 true))
         end
     end
+end
+function all_can_execute_locally(f, args, options, world, metadata)
+    if myid() != 1
+        # TODO: Remove this once core is distributed
+        return false
+    end
+    if !(options isa Vector)
+        topts = Sch.ThunkOptions(;options...)
+        return can_execute_locally(f, args, topts, world, metadata)
+    end
+    for idx in 1:length(options)
+        topts = Sch.ThunkOptions(;options[idx]...)
+        if !can_execute_locally(f[idx], args[idx], topts, world[idx], metadata[idx])
+            return false
+        end
+    end
+    return true
+end
+function can_execute_locally(f, args, options, world, metadata)
+    # All arguments are constant or locally fulfilled
+    for (_, arg) in args
+        if arg isa Chunk
+            if arg.handle.owner != myid()
+                return false
+            end
+        elseif istask(arg)
+            if arg isa EagerThunk
+                if !isready(arg)
+                    @warn "Allow if dependency is executing locally" maxlog=1
+                    return false
+                end
+            else
+                @warn "Handle ThunkID" maxlog=1
+                return false
+            end
+        end
+    end
+
+    # At least one compatible processor exists locally
+    @warn "OR the cost to move to core exceeds scheduling wait time" maxlog=1
+    procs = get_processors(OSProc())
+    sig = Sch.signature(f, args)
+
+    any_proc_supported = false
+    for proc in procs
+        success, _ = Sch.can_use_proc(nothing, get_parent(proc), proc,
+                                      options, metadata.scope)
+        if success
+            any_proc_supported = true
+            break
+        end
+    end
+    any_proc_supported || return false
+
+    @warn "Don't disallow TLS" maxlog=1
+    @warn "Don't disallow non-termination" maxlog=1
+    Tf = sig[1]
+    real_f = isdefined(Tf, :instance) ? Tf.instance : nothing
+    effects = get_effects(sig, world)
+    if !effects.notaskstate || !effects.terminates
+        return false
+    end
+
+    return true
+end
+function get_effects(sig, world)
+    h = hash(sig, world)
+    @memoize h::UInt64 begin
+        Base.infer_effects(sig[1].instance, (sig[2:end]...,); world)
+    end::Core.Compiler.Effects
 end
 
 # Submission -> Local
@@ -192,7 +366,9 @@ end
 function EagerThunkMetadata(spec::EagerTaskSpec)
     arg_types = ntuple(i->chunktype(spec.args[i][2]), length(spec.args))
     return_type = Base._return_type(spec.f, Base.to_tuple_type(arg_types), spec.world)
-    return EagerThunkMetadata(return_type)
+    toptions = Sch.ThunkOptions(;spec.options...)
+    scope = Sch.calculate_scope(spec.f, spec.args, toptions)
+    return EagerThunkMetadata(return_type, scope)
 end
 chunktype(t::EagerThunk) = t.metadata.return_type
 function eager_spawn(spec::EagerTaskSpec)
@@ -213,7 +389,8 @@ function eager_launch!((spec, task)::Pair{EagerTaskSpec,EagerThunk})
     # Submit the task
     thunk_ref = eager_submit!(1,
                               task.id, task.future, task.finalizer_ref,
-                              spec.f, args, options, spec.world)
+                              spec.f, args, options, spec.world,
+                              task.metadata)
     task.thunk_ref = thunk_ref.ref::DRef
 end
 function eager_launch!(specs::Vector{Pair{EagerTaskSpec,EagerThunk}})
@@ -229,9 +406,10 @@ function eager_launch!(specs::Vector{Pair{EagerTaskSpec,EagerThunk}})
     all_args = eager_process_args_submission_to_local(specs)
     all_options = Any[spec.options for (spec, _) in specs]
     all_worlds = UInt64[spec.world for (spec, _) in specs]
+    all_metadata = EagerThunkMetadata[task.metadata for (_, task) in specs]
 
     # Submit the tasks
-    thunk_refs = eager_submit!(ntasks, ids, futures, finalizer_refs, all_fs, all_args, all_options, all_worlds)
+    thunk_refs = eager_submit!(ntasks, ids, futures, finalizer_refs, all_fs, all_args, all_options, all_worlds, all_metadata)
     for i in 1:ntasks
         task = specs[i][2]
         task.thunk_ref = thunk_refs[i].ref::DRef
