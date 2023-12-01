@@ -43,9 +43,9 @@ function get_propagated_options(options, thunk=nothing)
             isa(thunk.f, Chunk) ? thunk.f.scope : DefaultScope()
         elseif key == :processor
             isa(thunk.f, Chunk) ? thunk.f.processor : OSProc()
-        elseif key in fieldnames(Thunk)
+        elseif thunk !== nothing && key in fieldnames(Thunk)
             getproperty(thunk, key)
-        elseif key in fieldnames(ThunkOptions)
+        elseif thunk !== nothing && key in fieldnames(ThunkOptions)
             getproperty(thunk.options, key)
         else
             throw(ArgumentError("Can't propagate unknown key: $key"))
@@ -312,6 +312,43 @@ function signature(f, args)
         pushfirst!(sig, typeof(Core.kwcall))
     end
     return sig
+end
+
+function calculate_scope(f, inputs, options; state=nothing)
+    scope = if f isa Chunk
+        f.scope
+    else
+        if options.proclist !== nothing
+            # proclist overrides scope selection
+            AnyScope()
+        else
+            DefaultScope()
+        end
+    end
+    for (_, input) in inputs
+        input = unwrap_weak_checked(input)
+        chunk = if istask(input)
+            if input isa Thunk
+                state::ComputeState
+                state.cache[input]
+            else
+                input::Dagger.EagerThunk
+                @warn "Add metadata support" maxlog=1
+                #input.metadata.scope
+                DefaultScope()
+            end
+        elseif input isa Chunk
+            input
+        else
+            nothing
+        end
+        chunk isa Chunk || continue
+        scope = constrain(scope, chunk.scope)
+        if scope isa Dagger.InvalidScope
+            return scope
+        end
+    end
+    return scope
 end
 
 function can_use_proc(task, gproc, proc, opts, scope)

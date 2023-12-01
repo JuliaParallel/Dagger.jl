@@ -123,8 +123,70 @@ function eager_submit_core!(ctx, state, task, tid, payload; uid_to_tid=Dict{UInt
     end
 end
 
+# Local Scheduler
+function eager_submit_local!(ntasks, uid, future, finalizer_ref, f, args, options, world, scopes; uid_to_tid=Dict{UInt64,Int}())
+    if uid isa Vector
+        thunk_ids = Sch.ThunkID[]
+        for i in 1:ntasks
+            tid = eager_submit_local!(ctx, state, task, tid,
+                                      (1, uid[i], future[i], ref[i],
+                                       f[i], args[i], options[i], world[i],
+                                       scopes[i], false); uid_to_tid)
+            push!(thunk_ids, tid)
+            uid_to_tid[uid[i]] = tid.id
+        end
+        return (true, thunk_ids)
+    end
+
+    @warn "Perform TLS setup" maxlog=1
+
+    @warn "Schedule to processor run queues" maxlog=1
+
+    # Create the `Thunk`
+    thunk = Thunk(f, args...; world, options...)
+
+    # Create a `DRef` to `thunk` so that the caller can preserve it
+    thunk_ref = poolset(thunk; size=64, device=MemPool.CPURAMDevice())
+    thunk_id = Sch.ThunkID(thunk.id, thunk_ref)
+
+    _args, kwargs = process_positional_args(args)
+    @warn "Handle errors" maxlog=1
+    result = Base.invoke_in_world(world, f, _args...; kwargs...)
+    put!(future, result)
+
+    return (true, thunk_id)
+end
+function process_positional_args(all_args)
+    args = Any[]
+    kwargs = Pair{Symbol,Any}[]
+    for (pos, arg) in all_args
+        if arg isa Chunk || istask(arg)
+            arg = fetch(arg)
+        end
+        if pos === nothing
+            push!(args, arg)
+        else
+            push!(kwargs, pos=>arg)
+        end
+    end
+    return (args, kwargs)
+end
+
 # Local -> Remote
 function eager_submit!(ntasks, uid, future, finalizer_ref, f, args, options, world)
+    @warn "Split all_can_execute_locally by task" maxlog=1
+    success, scopes = all_can_execute_locally(f, args, options, world)
+    if success
+        # Send to the local scheduler
+        success, tids = eager_submit_local!(ntasks, uid, future, finalizer_ref, f, args, options, world, scopes)
+        if !success
+            @goto to_core
+        end
+        return tids
+    end
+
+    # Send to the core scheduler
+    @label to_core
     if in_thunk()
         h = Dagger.sch_handle()
         return exec!(eager_submit_core!, h, ntasks, uid, future, finalizer_ref, f, args, options, world, true)
@@ -146,6 +208,80 @@ function eager_submit!(ntasks, uid, future, finalizer_ref, f, args, options, wor
                                     true))
         end
     end
+end
+function all_can_execute_locally(f, args, options, world)
+    if !(options isa Vector)
+        topts = Sch.ThunkOptions(;options...)
+        success, scope = can_execute_locally(f, args, topts, world)
+        if success
+            return (success, AbstractScope[scope])
+        else
+            return (false, nothing)
+        end
+    end
+    scopes = AbstractScope[]
+    for idx in 1:length(options)
+        topts = Sch.ThunkOptions(;options[idx]...)
+        success, scope = can_execute_locally(f[idx], args[idx], topts, world[idx])
+        if !success
+            return (false, nothing)
+        end
+        push!(scopes, scope)
+    end
+    return (true, scopes)
+end
+function can_execute_locally(f, args, options, world)
+    # All arguments are constant or locally fulfilled
+    for (_, arg) in args
+        if arg isa Chunk
+            if arg.handle.owner != myid()
+                return (false, nothing)
+            end
+        elseif istask(arg)
+            if arg isa EagerThunk
+                if !isready(arg)
+                    @warn "Allow if dependency is executing locally" maxlog=1
+                    return (false, nothing)
+                end
+            else
+                @warn "Handle ThunkID" maxlog=1
+                return (false, nothing)
+            end
+        end
+    end
+
+    # At least one compatible processor exists locally
+    @warn "OR the cost to move to core exceeds scheduling wait time" maxlog=1
+    procs = get_processors(OSProc())
+    sig = Sch.signature(f, args)
+
+    scope = Sch.calculate_scope(f, args, options)
+    any_proc_supported = false
+    for proc in procs
+        success, _ = Sch.can_use_proc(nothing, get_parent(proc), proc, options, scope)
+        if success
+            any_proc_supported = true
+            break
+        end
+    end
+    any_proc_supported || return (false, nothing)
+
+    @warn "Don't disallow TLS" maxlog=1
+    Tf = sig[1]
+    real_f = isdefined(Tf, :instance) ? Tf.instance : nothing
+    effects = get_effects(sig, world)
+
+    if !effects.notaskstate
+        return (false, nothing)
+    end
+
+    return (true, scope)
+end
+function get_effects(sig, world)
+    h = hash(sig, world)
+    @memoize h::UInt64 begin
+        Base.infer_effects(sig[1].instance, (sig[2:end]...,); world)
+    end::Core.Compiler.Effects
 end
 
 # Submission -> Local
