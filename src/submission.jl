@@ -189,14 +189,21 @@ function eager_process_options_submission_to_local(options::NamedTuple)
         return options
     end
 end
+function EagerThunkMetadata(spec::EagerTaskSpec)
+    arg_types = ntuple(i->chunktype(spec.args[i][2]), length(spec.args))
+    return_type = Base._return_type(spec.f, Base.to_tuple_type(arg_types), spec.world)
+    return EagerThunkMetadata(return_type)
+end
+chunktype(t::EagerThunk) = t.metadata.return_type
 function eager_spawn(spec::EagerTaskSpec)
     # Generate new EagerThunk
     id = next_id()
     future = ThunkFuture()
+    metadata = EagerThunkMetadata(spec)
     finalizer_ref = poolset(EagerThunkFinalizer(id); size=64, device=MemPool.CPURAMDevice())
 
     # Return unlaunched EagerThunk
-    return EagerThunk(id, future, finalizer_ref)
+    return EagerThunk(id, future, metadata, finalizer_ref)
 end
 function eager_launch!((spec, task)::Pair{EagerTaskSpec,EagerThunk})
     # Lookup EagerThunk -> ThunkRef
