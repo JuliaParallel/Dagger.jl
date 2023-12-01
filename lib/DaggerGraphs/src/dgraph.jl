@@ -209,15 +209,27 @@ function set_edge_metadata!(g::DGraph, meta)
     # being careful not to transfer `meta` itself, which may be large
     for part in 1:nparts(g)
         part_edges, back_edges = partition_edges(g, part)
-        part_submeta = partition_edge_metadata(meta, part_edges)
-        back_submeta = partition_edge_metadata(meta, back_edges)
+        if length(part_edges) > 0
+            part_submeta = partition_edge_metadata(meta, part_edges)
+        else
+            part_submeta = nothing
+        end
+        if length(back_edges) > 0
+            back_submeta = partition_edge_metadata(meta, back_edges)
+        else
+            back_submeta = nothing
+        end
         with_state(g, set_edge_metadata!, part, part_submeta, back_submeta)
     end
 end
 function set_edge_metadata!(g::DGraphState, part::Integer, part_submeta, back_submeta)
     check_not_frozen(g)
-    g.parts_e_meta[part] = Dagger.tochunk(part_submeta)
-    g.bg_adjs_e_meta[part] = Dagger.tochunk(back_submeta)
+    if part_submeta !== nothing
+        g.parts_e_meta[part] = Dagger.tochunk(part_submeta)
+    end
+    if back_submeta !== nothing
+        g.bg_adjs_e_meta[part] = Dagger.tochunk(back_submeta)
+    end
     return
 end
 partition_vertex_metadata(meta, part_nv) = error("Must define `partition_vertex_metadata` for `$(typeof(meta))`")
@@ -236,19 +248,16 @@ end
 get_partition_vertex_metadata(g::DGraph, part::Integer) =
     fetch(with_state(g, get_partition_vertex_metadata, part))
 function get_partition_vertex_metadata(g::DGraphState, part::Integer)
-    check_not_frozen(g)
     return g.parts_v_meta[part]
 end
 get_partition_edge_metadata(g::DGraph, part::Integer) =
     fetch(with_state(g, get_partition_edge_metadata, part))
 function get_partition_edge_metadata(g::DGraphState, part::Integer)
-    check_not_frozen(g)
     return g.parts_e_meta[part]
 end
 get_background_edge_metadata(g::DGraph, part::Integer) =
     fetch(with_state(g, get_background_edge_metadata, part))
 function get_background_edge_metadata(g::DGraphState, part::Integer)
-    check_not_frozen(g)
     return g.bg_adjs_e_meta[part]
 end
 copymeta(x) = x
