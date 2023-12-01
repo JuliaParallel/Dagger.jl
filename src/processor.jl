@@ -31,11 +31,12 @@ function delete_processor_callback!(name::Symbol)
 end
 
 """
-    execute!(proc::Processor, f, args...; kwargs...) -> Any
+    execute!(proc::Processor, world::UInt64, f, args...; kwargs...) -> Any
 
 Executes the function `f` with arguments `args` and keyword arguments `kwargs`
-on processor `proc`. This function can be overloaded by `Processor` subtypes to
-allow executing function calls differently than normal Julia.
+in inference world `world` on processor `proc`. This function can be overloaded
+by `Processor` subtypes to allow executing function calls differently than
+normal Julia.
 """
 function execute! end
 
