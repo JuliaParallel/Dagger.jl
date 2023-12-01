@@ -15,6 +15,7 @@ import ..Dagger: Context, Processor, ThunkID, Thunk, ThunkRef, WeakThunk, ThunkF
 import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak_checked, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, processor, default_enabled, get_processors, get_parent, execute!, rmprocs!, addprocs!, thunk_processor, constrain, cputhreadtime
 import ..Dagger: @dagdebug, @lock1, @safe_lock_spin1
 import DataStructures: PriorityQueue, enqueue!, dequeue_pair!, peek
+using MultiThreadedCaches
 
 import ..Dagger
 
@@ -143,8 +144,8 @@ processors that are instances/subtypes of a contained type. Alternatively, a
 function can be supplied, and the function will be called with a processor as
 the sole argument and should return a `Bool` result to indicate whether or not
 to use the given processor. `nothing` enables all default processors.
-- `allow_errors::Bool=true`: Allow thunks to error without affecting
-non-dependent thunks.
+- `allow_errors::Union{Bool,Nothing}=nothing`: Allow thunks to error without
+affecting non-dependent thunks. Defaults to `true`.
 - `checkpoint=nothing`: If not `nothing`, uses the provided function to save
 the final result of the current scheduler invocation to persistent storage, for
 later retrieval by `restore`.
@@ -160,7 +161,7 @@ use for scheduling each thunk.
 Base.@kwdef struct SchedulerOptions
     single::Union{Int,Nothing} = nothing
     proclist = nothing
-    allow_errors::Union{Bool,Nothing} = false
+    allow_errors::Union{Bool,Nothing} = nothing
     checkpoint = nothing
     restore = nothing
     schedule_model::AbstractDecision = SchDefaultModel()
@@ -172,6 +173,8 @@ end
 Stores Thunk-local options to be passed to the Dagger.Sch scheduler.
 
 # Arguments
+- `propagates::NTuple{N,Symbol} where N`: The set of options that will be propagated by this
+task to tasks that it spawns.
 - `single::Int=0`: (Deprecated) Force thunk onto worker with specified id. `0`
 disables this option.
 - `proclist=nothing`: (Deprecated) Force thunk to use one or more processors
@@ -193,8 +196,6 @@ occupancy for this thunk. Each keypair maps a processor type to the
 utilization, where the value can be a real between 0 and 1 (the occupancy
 ratio, where 1 is full occupancy). By default, the scheduler assumes that this
 thunk has full occupancy.
-- `allow_errors::Bool=true`: Allow this thunk to error without affecting
-non-dependent thunks.
 - `checkpoint=nothing`: If not `nothing`, uses the provided function to save
 the result of the thunk to persistent storage, for later retrieval by
 `restore`.
@@ -213,26 +214,27 @@ device must support `MemPool.CPURAMResource`. When `nothing`, uses
 specifies the MemPool storage leaf tag to associate with the thunk's result.
 This tag can be used by MemPool's storage devices to manipulate their behavior,
 such as the file name used to store data on disk."
-- `storage_leaf_tag::MemPool.Tag,Nothing}=nothing`: If not `nothing`,
+- `storage_leaf_tag::Union{MemPool.Tag,Nothing}=nothing`: If not `nothing`,
 specifies the MemPool storage leaf tag to associate with the thunk's result.
 This tag can be used by MemPool's storage devices to manipulate their behavior,
 such as the file name used to store data on disk."
-- `storage_retain::Bool=false`: The value of `retain` to pass to
-`MemPool.poolset` when constructing the result `Chunk`.
+- `storage_retain::Union{Bool,Nothing}=nothing`: The value of `retain` to pass to
+`MemPool.poolset` when constructing the result `Chunk`. `nothing` defaults to
+`false`.
 """
 Base.@kwdef struct ThunkOptions
+    propagates::Union{NTuple{N,Symbol} where N,Nothing} = nothing
     single::Union{Int,Nothing} = nothing
     proclist = nothing
     time_util::Union{Dict{Type,Any},Nothing} = nothing
     alloc_util::Union{Dict{Type,UInt64},Nothing} = nothing
     occupancy::Union{Dict{Type,Real},Nothing} = nothing
-    allow_errors::Union{Bool,Nothing} = nothing
     checkpoint = nothing
     restore = nothing
     storage::Union{Chunk,Nothing} = nothing
     storage_root_tag = nothing
     storage_leaf_tag::Union{MemPool.Tag,Nothing} = nothing
-    storage_retain::Bool = false
+    storage_retain::Union{Bool,Nothing} = nothing
 end
 
 """
@@ -242,14 +244,13 @@ Combine `SchedulerOptions` and `ThunkOptions` into a new `ThunkOptions`.
 """
 function Base.merge(sopts::SchedulerOptions, topts::ThunkOptions)
     single = topts.single !== nothing ? topts.single : sopts.single
-    allow_errors = topts.allow_errors !== nothing ? topts.allow_errors : sopts.allow_errors
     proclist = topts.proclist !== nothing ? topts.proclist : sopts.proclist
-    ThunkOptions(single,
+    ThunkOptions(topts.propagates,
+                 single,
                  proclist,
                  topts.time_util,
                  topts.alloc_util,
                  topts.occupancy,
-                 allow_errors,
                  topts.checkpoint,
                  topts.restore,
                  topts.storage,
@@ -259,35 +260,64 @@ function Base.merge(sopts::SchedulerOptions, topts::ThunkOptions)
 end
 
 """
-    populate_defaults(opts::ThunkOptions, Tf, Targs) -> ThunkOptions
+    populate_defaults(opts::ThunkOptions, sig::Vector{DataType}) -> ThunkOptions
 
-Returns a `ThunkOptions` with default values filled in for a function of type
-`Tf` with argument types `Targs`, if the option was previously unspecified in
-`opts`.
+Returns a `ThunkOptions` with default values filled in for a function call with
+signature `sig`, if the option was previously unspecified in `opts`.
 """
-function populate_defaults(opts::ThunkOptions, Tf, Targs)
-    function maybe_default(opt::Symbol)
-        old_opt = getproperty(opts, opt)
-        if old_opt !== nothing
+function populate_defaults(opts::ThunkOptions, sig)
+    function maybe_default(opts, opt::Symbol)
+        if opts !== nothing && (old_opt = getproperty(opts, opt)) !== nothing
             return old_opt
         else
-            return Dagger.default_option(Val(opt), Tf, Targs...)
+            return Dagger.default_option(Val(opt), sig...)
+        end
+    end
+    if all_fields_nothing(opts)
+        return get!(DEFAULT_OPTIONS_FOR_SIGNATURE, sig) do
+            ThunkOptions(
+                maybe_default(nothing, :propagates),
+                maybe_default(nothing, :single),
+                maybe_default(nothing, :proclist),
+                maybe_default(nothing, :time_util),
+                maybe_default(nothing, :alloc_util),
+                maybe_default(nothing, :occupancy),
+                maybe_default(nothing, :checkpoint),
+                maybe_default(nothing, :restore),
+                maybe_default(nothing, :storage),
+                maybe_default(nothing, :storage_root_tag),
+                maybe_default(nothing, :storage_leaf_tag),
+                maybe_default(nothing, :storage_retain),
+            )
         end
     end
     ThunkOptions(
-        maybe_default(:single),
-        maybe_default(:proclist),
-        maybe_default(:time_util),
-        maybe_default(:alloc_util),
-        maybe_default(:occupancy),
-        maybe_default(:allow_errors),
-        maybe_default(:checkpoint),
-        maybe_default(:restore),
-        maybe_default(:storage),
-        maybe_default(:storage_root_tag),
-        maybe_default(:storage_leaf_tag),
-        maybe_default(:storage_retain),
+        maybe_default(opts, :propagates),
+        maybe_default(opts, :single),
+        maybe_default(opts, :proclist),
+        maybe_default(opts, :time_util),
+        maybe_default(opts, :alloc_util),
+        maybe_default(opts, :occupancy),
+        maybe_default(opts, :checkpoint),
+        maybe_default(opts, :restore),
+        maybe_default(opts, :storage),
+        maybe_default(opts, :storage_root_tag),
+        maybe_default(opts, :storage_leaf_tag),
+        maybe_default(opts, :storage_retain),
     )
+end
+const DEFAULT_OPTIONS_FOR_SIGNATURE = MultiThreadedCache{Vector{DataType},ThunkOptions}()
+@generated function all_fields_nothing(x)
+    ex = nothing
+    for field in fieldnames(x)
+        field_check = :(isnothing(getfield(x, $(QuoteNode(field)))))
+        if ex !== nothing
+            ex = Expr(:(&&), ex, field_check)
+        else
+            ex = field_check
+        end
+    end
+    return ex
 end
 
 # Eager scheduling
@@ -583,8 +613,7 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
                     @dagdebug nothing :take "Got halt request, exiting"
                     throw(true_ex)
                 else
-                    if something(ctx.options.allow_errors, false) ||
-                       (thunk_id !== nothing && something(unwrap_weak_checked(state.thunk_dict[thunk_id]).options.allow_errors, false))
+                    if something(ctx.options.allow_errors, false)
                         thunk_failed = true
                     else
                         throw(result)
@@ -719,13 +748,11 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
 
         # Fetch all inputs from cache
         inputs = collect_task_inputs(state, task)
-        inputs_data = map(last, inputs)
+        sig = signature(task, state)
 
         # Generate concrete options
         thunk_opts = merge(ctx.options, task.options)
-        opts = populate_defaults(thunk_opts,
-                                 chunktype(task.f),
-                                 map(chunktype, inputs_data))
+        opts = populate_defaults(thunk_opts, sig)
 
         # Calculate initial task scope
         scope = if task.f isa Chunk
@@ -741,7 +768,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
 
         # Filter out Chunks
         chunks = Chunk[]
-        for input in inputs_data
+        for input in Iterators.map(last, inputs)
             if input isa Chunk
                 push!(chunks, input)
             end
@@ -762,7 +789,6 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         all_procs = unique(vcat([collect(Dagger.get_processors(gp)) for gp in procs]...))
 
         # Decide on an ordered set of candidate processors to schedule on
-        sig = signature(task, state)
         local_procs = make_decision(state.schedule_model, :signature, :schedule, sig, inputs, all_procs)
 
         # Select the first valid processor
@@ -972,7 +998,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
         end
         toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
         options = merge(ctx.options, toptions)
-        propagated = get_propagated_options(thunk)
+        propagated = get_propagated_options(toptions, thunk)
         @assert (options.single === nothing) || (gproc.pid == options.single)
         # TODO: Set `sch_handle.tid.ref` to the right `DRef`
         sch_handle = SchedulerHandle(ThunkRef(thunk), state.worker_chans[gproc.pid]...)
@@ -1657,7 +1683,7 @@ function do_task(to_proc::Processor, task::TaskSpec)
                     device, persist, cache=persist ? true : cache,
                     tag=options.storage_root_tag,
                     leaf_tag=something(options.storage_leaf_tag, MemPool.Tag()),
-                    retain=options.storage_retain)
+                    retain=something(options.storage_retain, false))
         end
     catch ex
         bt = catch_backtrace()
@@ -1679,6 +1705,8 @@ function do_task(to_proc::Processor, task::TaskSpec)
 end
 
 function __init__()
+    init_cache!(DEFAULT_OPTIONS_FOR_SIGNATURE)
+
     if ccall(:jl_generating_output, Cint, ()) == 0
         # Register interrupt handler
         if isdefined(Base, :register_interrupt_handler)
