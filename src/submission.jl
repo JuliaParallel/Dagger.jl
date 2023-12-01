@@ -218,15 +218,27 @@ function eager_process_options_submission_to_local(id_map, options::NamedTuple)
         return options
     end
 end
+
+function DTaskMetadata(spec::DTaskSpec)
+    f = chunktype(spec.f).instance
+    arg_types = ntuple(i->chunktype(spec.args[i][2]), length(spec.args))
+    return_type = Base.promote_op(f, arg_types...)
+    return DTaskMetadata(return_type)
+end
+
 function eager_spawn(spec::DTaskSpec)
     # Generate new DTask
     uid = eager_next_id()
     future = ThunkFuture()
+    metadata = DTaskMetadata(spec)
     finalizer_ref = poolset(DTaskFinalizer(uid); device=MemPool.CPURAMDevice())
 
     # Create unlaunched DTask
-    return DTask(uid, future, finalizer_ref)
+    return DTask(uid, future, metadata, finalizer_ref)
 end
+
+chunktype(t::DTask) = t.metadata.return_type
+
 function eager_launch!((spec, task)::Pair{DTaskSpec,DTask})
     # Assign a name, if specified
     eager_assign_name!(spec, task)
