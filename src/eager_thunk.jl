@@ -34,9 +34,11 @@ Options(options...) = Options((;options...))
 
 Represents some useful metadata pertaining to an `EagerThunk`:
 - `return_type::Type` - The inferred return type of the task
+- `scope::AbstractScope` - The scope for the task
 """
 mutable struct EagerThunkMetadata
     return_type::Type
+    scope::AbstractScope
 end
 
 """

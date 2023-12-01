@@ -43,9 +43,9 @@ function get_propagated_options(options, thunk=nothing)
             isa(thunk.f, Chunk) ? thunk.f.scope : DefaultScope()
         elseif key == :processor
             isa(thunk.f, Chunk) ? thunk.f.processor : OSProc()
-        elseif key in fieldnames(Thunk)
+        elseif thunk !== nothing && key in fieldnames(Thunk)
             getproperty(thunk, key)
-        elseif key in fieldnames(ThunkOptions)
+        elseif thunk !== nothing && key in fieldnames(ThunkOptions)
             getproperty(thunk.options, key)
         else
             throw(ArgumentError("Can't propagate unknown key: $key"))
@@ -453,6 +453,41 @@ function signature(f, args)
     return sig
 end
 
+function calculate_scope(f, inputs, options; state=nothing)
+    scope = if f isa Chunk
+        f.scope
+    else
+        if options.proclist !== nothing
+            # proclist overrides scope selection
+            AnyScope()
+        else
+            DefaultScope()
+        end
+    end
+    for (_, input) in inputs
+        input = unwrap_weak_checked(input)
+        if input isa Dagger.EagerThunk
+            scope = constrain(scope, input.metadata.scope)
+        else
+            if istask(input)
+                input::Thunk
+                state::ComputeState
+                chunk = state.cache[input]
+            elseif input isa Chunk
+                chunk = input
+            else
+                continue
+            end
+            chunk isa Chunk || continue
+            scope = constrain(scope, chunk.scope)
+        end
+        if scope isa Dagger.InvalidScope
+            return scope
+        end
+    end
+    return scope
+end
+
 function can_use_proc(task, gproc, proc, opts, scope)
     # Check against proclist
     if opts.proclist !== nothing
@@ -506,22 +541,22 @@ function can_use_proc(task, gproc, proc, opts, scope)
     return true, scope
 end
 
-function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
-    T = typeof(p)
-    est_time_util = round(UInt64, if time_util !== nothing && haskey(time_util, T)
-        time_util[T] * 1000^3
+function task_utilization(state, proc, opts, sig)
+    T = typeof(proc)
+    est_time_util = round(UInt64, if opts.time_util !== nothing && haskey(opts.time_util, T)
+        opts.time_util[T] * 1000^3
     else
         something(fetch_metric(SimpleAverageAggregator(ThreadTimeMetric()), :signature, :execute, sig), 1000^3)
     end)
     # TODO: Factor in runtime allocations as well
-    est_alloc_util = if alloc_util !== nothing && haskey(alloc_util, T)
-        alloc_util[T]
+    est_alloc_util = if opts.alloc_util !== nothing && haskey(opts.alloc_util, T)
+        opts.alloc_util[T]
     else
         something(fetch_metric(SimpleAverageAggregator(ResultSizeMetric()), :signature, :execute, sig), UInt64(0))
     end::UInt64
-    est_occupancy = if occupancy !== nothing && haskey(occupancy, T)
+    est_occupancy = if opts.occupancy !== nothing && haskey(opts.occupancy, T)
         # Clamp to 0-1, and scale between 0 and `typemax(UInt32)`
-        Base.unsafe_trunc(UInt32, clamp(occupancy[T], 0, 1) * typemax(UInt32))
+        Base.unsafe_trunc(UInt32, clamp(opts.occupancy[T], 0, 1) * typemax(UInt32))
     else
         typemax(UInt32)
     end::UInt32
@@ -530,10 +565,10 @@ function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
     real_alloc_util = state.worker_storage_pressure[gp][storage]
     real_alloc_cap = state.worker_storage_capacity[gp][storage]
     if est_alloc_util + real_alloc_util > real_alloc_cap
-        return false, est_time_util, est_alloc_util
+        return false, est_time_util, est_alloc_util, est_occupancy
     end
     =#
-    return true, est_time_util, est_alloc_util, est_occupancy
+    return est_time_util, est_alloc_util, est_occupancy
 end
 
 "Like `sum`, but replaces `nothing` entries with the average of non-`nothing` entries."
