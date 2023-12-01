@@ -21,11 +21,9 @@ function init_eager()
     end
     ctx = eager_context()
     errormonitor_tracked(Threads.@spawn try
-        sopts = SchedulerOptions(;allow_errors=true)
         opts = Dagger.Options((;scope=Dagger.ExactScope(Dagger.ThreadProc(1, 1)),
                                 occupancy=Dict(Dagger.ThreadProc=>0)))
-        Dagger.compute(ctx, Dagger.delayed(eager_thunk, opts)();
-                       options=sopts)
+        Dagger.compute(ctx, Dagger.delayed(eager_thunk, opts)())
     catch err
         # Scheduler halting is considered normal
         err isa SchedulerHaltedException && return

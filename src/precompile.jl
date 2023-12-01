@@ -3,6 +3,7 @@
     add_processor_callback!("__cpu_thread_1__") do
         ThreadProc(1, 1)
     end
+    Sch.__init__()
     t1 = @spawn 1+1
     t2 = spawn(+, 1, t1)
     fetch(t2)

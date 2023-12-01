@@ -73,7 +73,6 @@ mutable struct Thunk
     affinity::Union{Nothing, Pair{OSProc, Int}}
     eager_ref::Union{DRef,Nothing}
     options::Any # stores scheduler-specific options
-    propagates::Tuple # which options we'll propagate
     function Thunk(f, xs...;
                    world::UInt64=Base.get_world_counter(),
                    syncdeps=nothing,
@@ -88,7 +87,6 @@ mutable struct Thunk
                    processor=nothing,
                    scope=nothing,
                    options=nothing,
-                   propagates=(),
                    kwargs...
                   )
         if !isa(f, Chunk) && (!isnothing(processor) || !isnothing(scope))
@@ -106,12 +104,14 @@ mutable struct Thunk
         @assert all(x->x isa Pair, xs)
         if options !== nothing
             @assert isempty(kwargs)
-            new(f, xs, world, syncdeps_set, id, get_result, meta, persist, cache,
-                cache_ref, affinity, eager_ref, options, propagates)
+            new(f, xs, world, syncdeps_set, id,
+                get_result, meta, persist, cache,
+                cache_ref, affinity, eager_ref, options)
         else
-            new(f, xs, world, syncdeps_set, id, get_result, meta, persist, cache,
-                cache_ref, affinity, eager_ref, Sch.ThunkOptions(;kwargs...),
-                propagates)
+            new(f, xs, world, syncdeps_set, id,
+                get_result, meta, persist, cache,
+                cache_ref, affinity, eager_ref,
+                Sch.ThunkOptions(;kwargs...))
         end
     end
 end

@@ -187,7 +187,7 @@ function eager_spawn(spec::EagerTaskSpec)
     # Generate new EagerThunk
     uid = eager_next_id()
     future = ThunkFuture()
-    finalizer_ref = poolset(EagerThunkFinalizer(uid); device=MemPool.CPURAMDevice())
+    finalizer_ref = poolset(EagerThunkFinalizer(uid); size=64, device=MemPool.CPURAMDevice())
 
     # Return unlaunched EagerThunk
     return EagerThunk(uid, future, finalizer_ref)
