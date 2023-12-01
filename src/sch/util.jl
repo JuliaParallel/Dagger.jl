@@ -32,9 +32,13 @@ unwrap_nested_exception(err::RemoteException) =
 unwrap_nested_exception(err) = err
 
 "Gets a `NamedTuple` of options propagated by `thunk`."
-function get_propagated_options(thunk)
+function get_propagated_options(options, thunk=nothing)
+    options::ThunkOptions
     nt = NamedTuple()
-    for key in thunk.propagates
+    if options.propagates === nothing
+        return nt
+    end
+    for key in options.propagates
         value = if key == :scope
             isa(thunk.f, Chunk) ? thunk.f.scope : DefaultScope()
         elseif key == :processor
