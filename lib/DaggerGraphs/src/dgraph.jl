@@ -279,17 +279,17 @@ end
 nparts(g::DGraph) = with_state(g, nparts)
 nparts(g::DGraphState) = length(g.parts)
 Base.eltype(::DGraph{T}) where T = T
-Graphs.edgetype(::DGraph{T}) where T = Tuple{T,T}
+Graphs.edgetype(::DGraph{T}) where T = Edge{T}
 Graphs.nv(g::DGraph) = with_state(g, nv)::Int
 function Graphs.nv(g::DGraphState)
     if !isempty(g.parts_nv)
-        return last(g.parts_nv).stop
+        return Int(last(g.parts_nv).stop)
     else
         return 0
     end
 end
 Graphs.ne(g::DGraph) = with_state(g, ne)::Int
-Graphs.ne(g::DGraphState) = sum(g.parts_ne; init=0) + sum(g.bg_adjs_ne_src; init=0)
+Graphs.ne(g::DGraphState) = Int(sum(g.parts_ne; init=0) + sum(g.bg_adjs_ne_src; init=0))
 Graphs.has_vertex(g::DGraph, v::Integer) = 1 <= v <= nv(g)
 Graphs.has_edge(g::DGraph, edge::Tuple) = has_edge(g, edge[1], edge[2])
 Graphs.has_edge(g::DGraph, src::Integer, dst::Integer) =
@@ -303,7 +303,9 @@ function Graphs.has_edge(g::DGraphState{T,D}, src::Integer, dst::Integer) where 
     if src_part_idx == dst_part_idx
         # The edge will be within a graph partition
         part = g.parts[src_part_idx]
-        return exec_fast(has_edge, part, src, dst)
+        src_shift = src - (g.parts_nv[src_part_idx].start - 1)
+        dst_shift = dst - (g.parts_nv[dst_part_idx].start - 1)
+        return exec_fast(has_edge, part, src_shift, dst_shift)
     else
         # The edge will be in an AdjList
         adj = g.bg_adjs[src_part_idx]
@@ -311,7 +313,7 @@ function Graphs.has_edge(g::DGraphState{T,D}, src::Integer, dst::Integer) where 
     end
 end
 Graphs.is_directed(::DGraph{T,D}) where {T,D} = D
-Graphs.vertices(g::DGraph) = Base.OneTo(nv(g))
+Graphs.vertices(g::DGraph{T}) where T = Base.OneTo{T}(nv(g))
 Graphs.edges(g::DGraph) = DGraphEdgeIter(g)
 edges_with_metadata(f, g::DGraph) = DGraphEdgeIter(g; metadata=true, meta_f=f)
 edges_with_weights(g::DGraph) = edges_with_metadata(weights, g)
@@ -357,8 +359,8 @@ function add_partition!(g::DGraphState{T,D}, n::Integer) where {T,D}
     if n < 1
         throw(ArgumentError("n must be >= 1"))
     end
-    push!(g.parts, Dagger.spawn(n) do n
-        D ? SimpleDiGraph(n) : SimpleGraph(n)
+    push!(g.parts, Dagger.spawn(T, n) do T, n
+        D ? SimpleDiGraph{T}(n) : SimpleGraph{T}(n)
     end)
     num_v = nv(g)
     push!(g.parts_nv, (num_v+1):(num_v+n))
@@ -451,8 +453,8 @@ function Graphs.add_edge!(g::DGraphState{T,D}, src::Integer, dst::Integer) where
         # Edge spans two partitions
         src_bg_adj = g.bg_adjs[src_part_idx]
         dst_bg_adj = g.bg_adjs[dst_part_idx]
-        src_t = exec_fast(add_edge!, src_bg_adj, (src, dst); fetch=false)
-        dst_t = exec_fast(add_edge!, dst_bg_adj, (src, dst); fetch=false)
+        src_t = exec_fast_nofetch(add_edge!, src_bg_adj, (src, dst))
+        dst_t = exec_fast_nofetch(add_edge!, dst_bg_adj, (src, dst))
         if !fetch(src_t) || !fetch(dst_t)
             return false
         end
@@ -529,13 +531,13 @@ end
 edge_owner(src::Int, dst::Int, src_part_idx::Int, dst_part_idx::Int) =
     iseven(hash(Base.unsafe_trunc(UInt, src+dst))) ? src_part_idx : dst_part_idx
 Graphs.inneighbors(g::DGraph, v::Integer) = with_state(g, inneighbors, v)
-function Graphs.inneighbors(g::DGraphState, v::Integer)
+function Graphs.inneighbors(g::DGraphState{T}, v::Integer) where T
     part_idx = findfirst(span->v in span, g.parts_nv)
     if part_idx === nothing
         throw(BoundsError(g, v))
     end
 
-    neighbors = Int[]
+    neighbors = T[]
     shift = g.parts_nv[part_idx].start - 1
 
     # Check against local edges
@@ -549,13 +551,13 @@ function Graphs.inneighbors(g::DGraphState, v::Integer)
     return neighbors
 end
 Graphs.outneighbors(g::DGraph, v::Integer) = with_state(g, outneighbors, v)
-function Graphs.outneighbors(g::DGraphState, v::Integer)
+function Graphs.outneighbors(g::DGraphState{T}, v::Integer) where T
     part_idx = findfirst(span->v in span, g.parts_nv)
     if part_idx === nothing
         throw(BoundsError(g, v))
     end
 
-    neighbors = Int[]
+    neighbors = T[]
     shift = g.parts_nv[part_idx].start - 1
 
     # Check against local edges
