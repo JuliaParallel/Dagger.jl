@@ -37,6 +37,16 @@ Options(;options...) = Options((;options...))
 Options(options...) = Options((;options...))
 
 """
+    EagerThunkMetadata
+
+Represents some useful metadata pertaining to an `EagerThunk`:
+- `return_type::Type` - The inferred return type of the task
+"""
+mutable struct EagerThunkMetadata
+    return_type::Type
+end
+
+"""
     EagerThunk
 
 Returned from `spawn`/`@spawn` calls. Represents a task that is in the
@@ -46,9 +56,11 @@ be `fetch`'d or `wait`'d on at any time.
 mutable struct EagerThunk
     uid::UInt
     future::ThunkFuture
+    metadata::EagerThunkMetadata
     finalizer_ref::DRef
     thunk_ref::DRef
-    EagerThunk(uid, future, finalizer_ref) = new(uid, future, finalizer_ref)
+    EagerThunk(uid, future, metadata, finalizer_ref) =
+        new(uid, future, metadata, finalizer_ref)
 end
 
 Base.isready(t::EagerThunk) = isready(t.future)
