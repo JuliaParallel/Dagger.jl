@@ -1010,7 +1010,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
 
         # TODO: De-dup common fields (log_sink, uid, etc.)
         push!(to_send, Any[thunk.id, time_util, alloc_util, occupancy,
-                           scope, chunktype(thunk.f), data,
+                           scope, thunk.world, chunktype(thunk.f), data,
                            thunk.get_result, thunk.persist, thunk.cache, thunk.meta, options,
                            propagated, ids, positions,
                            (log_sink=ctx.log_sink, profile=ctx.profile),
@@ -1317,9 +1317,9 @@ function do_tasks(to_proc, return_queue, tasks)
     @dagdebug nothing :processor "Enqueuing task batch" batch_size=length(tasks)
 
     # FIXME: This is terrible
-    ctx_vars = first(tasks)[16]
+    ctx_vars = first(tasks)[17]
     ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
-    uid = first(tasks)[18]
+    uid = first(tasks)[19]
     state = proc_states(uid) do states
         get!(states, to_proc) do
             queue = PriorityQueue{TaskSpecKey, UInt32}()
@@ -1381,7 +1381,7 @@ Executes a single task specified by `task_desc` on `to_proc`.
 """
 function do_task(to_proc, task_desc)
     thunk_id, est_time_util, est_alloc_util, est_occupancy,
-        scope, Tf, data,
+        scope, world, Tf, data,
         send_result, persist, cache, meta,
         options, propagated, ids, positions,
         ctx_vars, sch_handle, sch_uid = task_desc
@@ -1570,7 +1570,7 @@ function do_task(to_proc, task_desc)
 
         res = Dagger.with_options(propagated) do
             # Execute
-            execute!(to_proc, f, fetched_args...; fetched_kwargs...)
+            execute!(to_proc, world, f, fetched_args...; fetched_kwargs...)
         end
 
         # Check if result is safe to store

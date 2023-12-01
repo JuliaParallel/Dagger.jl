@@ -31,11 +31,12 @@ function delete_processor_callback!(name::Symbol)
 end
 
 """
-    execute!(proc::Processor, f, args...; kwargs...) -> Any
+    execute!(proc::Processor, world::UInt64, f, args...; kwargs...) -> Any
 
 Executes the function `f` with arguments `args` and keyword arguments `kwargs`
-on processor `proc`. This function can be overloaded by `Processor` subtypes to
-allow executing function calls differently than normal Julia.
+in inference world `world` on processor `proc`. This function can be overloaded
+by `Processor` subtypes to allow executing function calls differently than
+normal Julia.
 """
 function execute! end
 
@@ -159,12 +160,12 @@ end
 iscompatible(proc::ThreadProc, opts, f, args...) = true
 iscompatible_func(proc::ThreadProc, opts, f) = true
 iscompatible_arg(proc::ThreadProc, opts, x) = true
-function execute!(proc::ThreadProc, @nospecialize(f), @nospecialize(args...); @nospecialize(kwargs...))
+function execute!(proc::ThreadProc, world::UInt64, @nospecialize(f), @nospecialize(args...); @nospecialize(kwargs...))
     tls = get_tls()
     task = Task() do
         set_tls!(tls)
         TimespanLogging.prof_task_put!(tls.sch_handle.thunk_id.id)
-        @invokelatest f(args...; kwargs...)
+        Base.invoke_in_world(world, f, args...; kwargs...)
     end
     task.sticky = true
     ret = ccall(:jl_set_task_tid, Cint, (Any, Cint), task, proc.tid-1)

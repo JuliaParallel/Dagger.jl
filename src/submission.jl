@@ -1,21 +1,21 @@
-# Remote
-function eager_submit_internal!(@nospecialize(payload))
+# Core Scheduler (Remote)
+function eager_submit_core!(@nospecialize(payload))
     ctx = Dagger.Sch.eager_context()
     state = Dagger.Sch.EAGER_STATE[]
     task = current_task()
     tid = 0
-    return eager_submit_internal!(ctx, state, task, tid, payload)
+    return eager_submit_core!(ctx, state, task, tid, payload)
 end
-function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{UInt64,Int}())
+function eager_submit_core!(ctx, state, task, tid, payload; uid_to_tid=Dict{UInt64,Int}())
     @nospecialize payload
-    ntasks, uid, future, ref, f, args, options, reschedule = payload
+    ntasks, uid, future, ref, f, args, options, world, reschedule = payload
 
     if uid isa Vector
         thunk_ids = Sch.ThunkID[]
         for i in 1:ntasks
-            tid = eager_submit_internal!(ctx, state, task, tid,
+            tid = eager_submit_core!(ctx, state, task, tid,
                                          (1, uid[i], future[i], ref[i],
-                                          f[i], args[i], options[i],
+                                          f[i], args[i], options[i], world[i],
                                           false); uid_to_tid)
             push!(thunk_ids, tid)
             uid_to_tid[uid[i]] = tid.id
@@ -86,7 +86,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
 
     GC.@preserve old_args args begin
         # Create the `Thunk`
-        thunk = Thunk(f, args...; options...)
+        thunk = Thunk(f, args...; world, options...)
 
         # Create a `DRef` to `thunk` so that the caller can preserve it
         thunk_ref = poolset(thunk; size=64, device=MemPool.CPURAMDevice())
@@ -124,25 +124,25 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
 end
 
 # Local -> Remote
-function eager_submit!(ntasks, uid, future, finalizer_ref, f, args, options)
-    if Dagger.in_thunk()
+function eager_submit!(ntasks, uid, future, finalizer_ref, f, args, options, world)
+    if in_thunk()
         h = Dagger.sch_handle()
-        return exec!(eager_submit_internal!, h, ntasks, uid, future, finalizer_ref, f, args, options, true)
+        return exec!(eager_submit_core!, h, ntasks, uid, future, finalizer_ref, f, args, options, world, true)
     elseif myid() != 1
-        return remotecall_fetch(1, (ntasks, uid, future, finalizer_ref, f, args, options, true)) do payload
+        return remotecall_fetch(1, (ntasks, uid, future, finalizer_ref, f, args, options, world, true)) do payload
             @nospecialize payload
             Sch.init_eager()
             state = Dagger.Sch.EAGER_STATE[]
             lock(state.lock) do
-                eager_submit_internal!(payload)
+                eager_submit_core!(payload)
             end
         end
     else
         Sch.init_eager()
         state = Dagger.Sch.EAGER_STATE[]
         return lock(state.lock) do
-            eager_submit_internal!((ntasks, uid, future, finalizer_ref,
-                                    f, args, options,
+            eager_submit_core!((ntasks, uid, future, finalizer_ref,
+                                    f, args, options, world,
                                     true))
         end
     end
@@ -203,7 +203,7 @@ function eager_launch!((spec, task)::Pair{EagerTaskSpec,EagerThunk})
     # Submit the task
     thunk_id = eager_submit!(1,
                              task.uid, task.future, task.finalizer_ref,
-                             spec.f, args, options)
+                             spec.f, args, options, spec.world)
     task.thunk_ref = thunk_id.ref
 end
 function eager_launch!(specs::Vector{Pair{EagerTaskSpec,EagerThunk}})
@@ -220,9 +220,10 @@ function eager_launch!(specs::Vector{Pair{EagerTaskSpec,EagerThunk}})
         eager_process_args_submission_to_local(id_map, specs)
     end
     all_options = Any[spec.options for (spec, _) in specs]
+    all_worlds = UInt64[spec.world for (spec, _) in specs]
 
     # Submit the tasks
-    thunk_ids = eager_submit!(ntasks, uids, futures, finalizer_refs, all_fs, all_args, all_options)
+    thunk_ids = eager_submit!(ntasks, uids, futures, finalizer_refs, all_fs, all_args, all_options, all_worlds)
     for i in 1:ntasks
         task = specs[i][2]
         task.thunk_ref = thunk_ids[i].ref
