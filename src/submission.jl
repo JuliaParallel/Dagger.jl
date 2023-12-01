@@ -2,27 +2,31 @@ mutable struct PayloadOne
     uid::UInt
     future::ThunkFuture
     fargs::Vector{Argument}
+    world::UInt64
     options::Options
     reschedule::Bool
 
     PayloadOne() = new()
     PayloadOne(uid::UInt, future::ThunkFuture,
-               fargs::Vector{Argument}, options::Options, reschedule::Bool) =
-        new(uid, future, fargs, options, reschedule)
+               fargs::Vector{Argument}, world::UInt64, options::Options,
+               reschedule::Bool) =
+        new(uid, future, fargs, world, options, reschedule)
 end
 function unset!(p::PayloadOne, _)
     p.uid = 0
     p.future = EMPTY_PAYLOAD_ONE.future
     p.fargs = EMPTY_PAYLOAD_ONE.fargs
+    p.world = EMPTY_PAYLOAD_ONE.world
     p.options = EMPTY_PAYLOAD_ONE.options
     p.reschedule = false
 end
-const EMPTY_PAYLOAD_ONE = PayloadOne(UInt(0), ThunkFuture(), Argument[], Options(), false)
+const EMPTY_PAYLOAD_ONE = PayloadOne(UInt(0), ThunkFuture(), Argument[], UInt64(0), Options(), false)
 mutable struct PayloadMulti
     ntasks::Int
     uid::Vector{UInt}
     future::Vector{ThunkFuture}
     fargs::Vector{Vector{Argument}}
+    world::Vector{UInt64}
     options::Vector{Options}
     reschedule::Bool
 end
@@ -32,6 +36,7 @@ function payload_extract(f, payload::PayloadMulti, i::Integer)
         p1.uid = payload.uid[i]
         p1.future = payload.future[i]
         p1.fargs = payload.fargs[i]
+        p1.world = payload.world[i]
         p1.options = payload.options[i]
         p1.reschedule = true
         return f(p1)
@@ -72,7 +77,7 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
         payload::PayloadOne
 
         uid, future = payload.uid, payload.future
-        fargs, options, reschedule = payload.fargs, payload.options, payload.reschedule
+        fargs, world, options, reschedule = payload.fargs, payload.world, payload.options, payload.reschedule
 
         id = next_id()
 
@@ -173,6 +178,7 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
             thunk = take_or_alloc!(THUNK_SPEC_CACHE[]) do thunk_spec
                 thunk_spec.fargs = fargs
                 thunk_spec.id = id
+                thunk_spec.world = world
                 thunk_spec.options = options
                 return Thunk(thunk_spec)
             end
@@ -336,7 +342,8 @@ function eager_launch!((spec, task)::Pair{DTaskSpec,DTask})
     # Submit the task
     #=FIXME:REALLOC=#
     thunk_id = eager_submit!(PayloadOne(task.uid, task.future,
-                                        spec.fargs, spec.options, true))
+                                        spec.fargs, spec.world,
+                                        spec.options, true))
     task.thunk_ref = thunk_id.ref
 end
 function eager_launch!(specs::Vector{Pair{DTaskSpec,DTask}})
@@ -358,12 +365,14 @@ function eager_launch!(specs::Vector{Pair{DTaskSpec,DTask}})
         eager_process_args_submission_to_local!(id_map, specs)
         [spec.fargs for (spec, _) in specs]
     end
+    all_worlds = UInt64[spec.world for (spec, _) in specs]
     all_options = Options[spec.options for (spec, _) in specs]
 
     # Submit the tasks
     #=FIXME:REALLOC=#
     thunk_ids = eager_submit!(PayloadMulti(ntasks, uids, futures,
-                                           all_fargs, all_options, true))
+                                           all_fargs, all_worlds,
+                                           all_options, true))
     for i in 1:ntasks
         task = specs[i][2]
         task.thunk_ref = thunk_ids[i].ref
