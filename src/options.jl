@@ -13,7 +13,8 @@ scope. Note that setting an option here will propagate its value across Julia
 or Dagger tasks spawned by `f()` or its callees (i.e. the options propagate).
 """
 function with_options(f, options::NamedTuple)
-    with(options_context => options) do
+    prev_options = options_context[]
+    with(options_context => merge(prev_options, options)) do
         f()
     end
 end
