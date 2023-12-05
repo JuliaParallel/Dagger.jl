@@ -50,6 +50,16 @@ end
         end
     end
 
+    # Test previous option preservation
+    Dagger.with_options(scope=Dagger.scope(worker=last_wid)) do
+        Dagger.with_options(meta=true) do
+            @test haskey(Dagger.get_options(), :meta)
+            @test Dagger.get_options(:meta) == true
+            @test haskey(Dagger.get_options(), :scope)
+            @test Dagger.get_options(:scope) == Dagger.scope(worker=last_wid)
+        end
+    end
+
     # Test scope/single is applied
     for wid in workers()
         for (option, value) in [
