@@ -1286,8 +1286,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
             lock(istate.queue) do _
                 tid = task_tid_for_processor(to_proc)
                 if tid !== nothing
-                    t.sticky = true
-                    ret = ccall(:jl_set_task_tid, Cint, (Any, Cint), t, tid-1)
+                    Dagger.set_task_tid!(t, tid)
                 else
                     t.sticky = false
                 end
@@ -1299,8 +1298,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
     end
     tid = task_tid_for_processor(to_proc)
     if tid !== nothing
-        proc_run_task.sticky = true
-        ret = ccall(:jl_set_task_tid, Cint, (Any, Cint), proc_run_task, tid-1)
+        Dagger.set_task_tid!(proc_run_task, tid)
     else
         proc_run_task.sticky = false
     end
