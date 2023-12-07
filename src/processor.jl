@@ -166,12 +166,7 @@ function execute!(proc::ThreadProc, @nospecialize(f), @nospecialize(args...); @n
         TimespanLogging.prof_task_put!(tls.sch_handle.thunk_id.id)
         @invokelatest f(args...; kwargs...)
     end
-    task.sticky = true
-    ret = ccall(:jl_set_task_tid, Cint, (Any, Cint), task, proc.tid-1)
-    if ret == 0
-        error("jl_set_task_tid == 0")
-    end
-    @assert Threads.threadid(task) == proc.tid
+    set_task_tid!(task, proc.tid)
     schedule(task)
     try
         fetch(task)

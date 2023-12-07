@@ -25,6 +25,7 @@ include("utils/dagdebug.jl")
 
 # Distributed data
 include("utils/locked-object.jl")
+include("utils/tasks.jl")
 include("options.jl")
 include("processor.jl")
 include("scopes.jl")
