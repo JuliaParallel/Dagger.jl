@@ -1508,6 +1508,7 @@ function do_task(to_proc, task_desc)
     fetch_tasks = map(Iterators.zip(_data,_ids)) do (x, id)
         @async begin
             timespan_start(ctx, :move, (;thunk_id, id), (;f, id, data=x))
+            #= FIXME: This isn't valid if x is written to
             x = if x isa Chunk
                 value = lock(TASK_SYNC) do
                     if haskey(CHUNK_CACHE, x)
@@ -1548,8 +1549,9 @@ function do_task(to_proc, task_desc)
                     _x
                 end
             else
-                @invokelatest move(to_proc, x)
-            end
+            =#
+            x = @invokelatest move(to_proc, x)
+            #end
             @dagdebug thunk_id :move "Moved argument $id to $to_proc: $x"
             timespan_finish(ctx, :move, (;thunk_id, id), (;f, id, data=x); tasks=[Base.current_task()])
             return x
