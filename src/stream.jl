@@ -30,7 +30,6 @@ function Base.put!(store::StreamStore{T}, @nospecialize(value::T)) where T
         end
         @dagdebug nothing :stream_put "[$(uid())] adding $value"
         for buffer in values(store.buffers)
-            #elem = StreamElement(value)
             push!(buffer, value)
         end
         notify(store.lock)
@@ -139,11 +138,31 @@ end
 remove_waiters!(stream::Stream, waiter::Integer) =
     remove_waiters!(stream::Stream, Int[waiter])
 
+struct NullStream end
+Base.put!(ns::NullStream, x) = nothing
+Base.take!(ns::NullStream) = throw(ConcurrencyViolationError("Cannot `take!` from a `NullStream`"))
+
+mutable struct StreamWrapper{S}
+    stream::S
+    open::Bool
+    StreamWrapper(stream::S) where S = new{S}(stream, true)
+end
+Base.isopen(sw::StreamWrapper) = sw.open
+Base.close(sw::StreamWrapper) = (sw.open = false;)
+function Base.put!(sw::StreamWrapper, x)
+    isopen(sw) || throw(InvalidStateException("Stream is closed.", :closed))
+    put!(sw.stream, x)
+end
+function Base.take!(sw::StreamWrapper)
+    isopen(sw) || throw(InvalidStateException("Stream is closed.", :closed))
+    take!(sw.stream)
+end
+
 struct StreamingTaskQueue <: AbstractTaskQueue
     tasks::Vector{Pair{EagerTaskSpec,EagerThunk}}
-    self_streams::Dict{UInt,Stream}
+    self_streams::Dict{UInt,Any}
     StreamingTaskQueue() = new(Pair{EagerTaskSpec,EagerThunk}[],
-                               Dict{UInt,Stream}())
+                               Dict{UInt,Any}())
 end
 
 function enqueue!(queue::StreamingTaskQueue, spec::Pair{EagerTaskSpec,EagerThunk})
@@ -164,7 +183,20 @@ function initialize_streaming!(self_streams, spec, task)
         # We treat non-dominating error paths as unreachable
         T_old = filter(t->t !== Union{}, T_old)
         T = task.metadata.return_type = !isempty(T_old) ? Union{T_old...} : Any
-        stream = Stream{T}()
+        if haskey(spec.options, :stream)
+            if spec.options.stream !== nothing
+                # Use the user-provided stream
+                @warn "Replace StreamWrapper with Stream" maxlog=1
+                stream = StreamWrapper(spec.options.stream)
+            else
+                # Use a non-readable, non-writing stream
+                stream = StreamWrapper(NullStream())
+            end
+            spec.options = NamedTuple(filter(opt -> opt[1] != :stream, Base.pairs(spec.options)))
+        else
+            # Create a built-in Stream object
+            stream = Stream{T}()
+        end
         self_streams[task.uid] = stream
 
         spec.f = StreamingFunction(spec.f, stream)
@@ -190,56 +222,33 @@ function spawn_streaming(f::Base.Callable)
 end
 
 struct FinishedStreaming{T}
-    value::T
+    value::Union{Some{T},Nothing}
 end
-finish_streaming(value=nothing) = FinishedStreaming(value)
+finish_streaming(value) = FinishedStreaming{Any}(Some{T}(value))
+finish_streaming() = FinishedStreaming{Union{}}(nothing)
 
-struct StreamingFunction{F, T}
+struct StreamingFunction{F, S}
     f::F
-    stream::Stream{T}
+    stream::S
 end
 function (sf::StreamingFunction)(args...; kwargs...)
     @nospecialize sf args kwargs
     result = nothing
-    stream_args = Base.mapany(identity, args)
-    stream_kwargs = Base.mapany(identity, kwargs)
     thunk_id = tid()
-    # FIXME: Fetch from worker 1
-    uid = lock(Sch.EAGER_ID_MAP) do id_map
-        for (uid, otid) in id_map
-            if thunk_id == otid
-                return uid
+    @warn "Fetch from worker 1 more efficiently" maxlog=1
+    uid = remotecall_fetch(1, thunk_id) do thunk_id
+        lock(Sch.EAGER_ID_MAP) do id_map
+            for (uid, otid) in id_map
+                if thunk_id == otid
+                    return uid
+                end
             end
         end
     end
     try
-        while true
-            # Get values from Stream args/kwargs
-            for (idx, arg) in enumerate(args)
-                if arg isa Stream
-                    stream_args[idx] = take!(arg, uid)
-                end
-            end
-            for (idx, (pos, arg)) in enumerate(kwargs)
-                if arg isa Stream
-                    stream_kwargs[idx] = pos => take!(arg, uid)
-                end
-            end
-
-            # Run a single cycle of f
-            stream_result = sf.f(stream_args...; stream_kwargs...)
-
-            # Exit streaming on graceful request
-            if stream_result isa FinishedStreaming
-                return stream_result.value
-            end
-
-            # Put the result into the output stream
-            put!(sf.stream, stream_result)
-
-            # Allow other tasks to run
-            yield()
-        end
+        kwarg_names = map(name->Val{name}(), map(first, (kwargs...,)))
+        kwarg_values = map(last, (kwargs...,))
+        return stream!(sf, uid, (args...,), kwarg_names, kwarg_values)
     finally
         # Remove ourself as a waiter for upstream Streams
         streams = Set{Stream}()
@@ -263,9 +272,55 @@ function (sf::StreamingFunction)(args...; kwargs...)
         close(sf.stream)
     end
 end
+# N.B We specialize to minimize/eliminate allocations
+function stream!(sf::StreamingFunction, uid,
+                 args::Tuple, kwarg_names::Tuple, kwarg_values::Tuple)
+    while true
+    #@time begin
+        # Get values from Stream args/kwargs
+        stream_args = _stream_take_values!(args)
+        stream_kwarg_values = _stream_take_values!(kwarg_values)
+        stream_kwargs = _stream_namedtuple(kwarg_names, stream_kwarg_values)
 
-# FIXME: Ensure this gets cleaned up
-const EAGER_THUNK_STREAMS = LockedObject(Dict{UInt,Stream}())
+        # Run a single cycle of f
+        stream_result = sf.f(stream_args...; stream_kwargs...)
+
+        # Exit streaming on graceful request
+        if stream_result isa FinishedStreaming
+            @info "Terminating!"
+            if stream_result.value !== nothing
+                value = something(stream_result.value)
+                put!(sf.stream, value)
+                return value
+            end
+            return nothing
+        end
+
+        # Put the result into the output stream
+        put!(sf.stream, stream_result)
+    #end
+    end
+end
+function _stream_take_values!(args)
+    return ntuple(length(args)) do idx
+        arg = args[idx]
+        if arg isa Stream
+            take!(arg, uid)
+        elseif arg isa Union{AbstractChannel,RemoteChannel,StreamWrapper} # FIXME: Use trait query
+            take!(arg)
+        else
+            arg
+        end
+    end
+end
+@inline @generated function _stream_namedtuple(kwarg_names::Tuple,
+                                               stream_kwarg_values::Tuple)
+    name_ex = Expr(:tuple, map(name->QuoteNode(name.parameters[1]), kwarg_names.parameters)...)
+    NT = :(NamedTuple{$name_ex,$stream_kwarg_values})
+    return :($NT(stream_kwarg_values))
+end
+
+const EAGER_THUNK_STREAMS = LockedObject(Dict{UInt,Any}())
 function task_to_stream(uid::UInt)
     if myid() != 1
         return remotecall_fetch(task_to_stream, 1, uid)
@@ -310,7 +365,9 @@ function finalize_streaming!(tasks::Vector{Pair{EagerTaskSpec,EagerThunk}}, self
     # Adjust waiter count of Streams with dependencies
     for (uid, waiters) in stream_waiter_changes
         stream = task_to_stream(uid)
-        add_waiters!(stream, waiters)
+        if stream isa Stream # FIXME: Use trait query
+            add_waiters!(stream, waiters)
+        end
     end
 end
 

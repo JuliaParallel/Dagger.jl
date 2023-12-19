@@ -68,13 +68,13 @@ function Base.fetch(t::EagerThunk; raw=false)
         throw(ConcurrencyViolationError("Cannot `fetch` an unlaunched `EagerThunk`"))
     end
     stream = task_to_stream(t.uid)
-    if stream !== nothing
+    if stream isa Stream
         add_waiters!(stream, [0])
     end
     try
         return fetch(t.future; raw)
     finally
-        if stream !== nothing
+        if stream isa Stream
             remove_waiters!(stream, [0])
         end
     end
