@@ -138,6 +138,20 @@ end
 remove_waiters!(stream::Stream, waiter::Integer) =
     remove_waiters!(stream::Stream, Int[waiter])
 
+function migrate_stream!(stream::Stream, w::Integer=myid())
+    # Take lock to prevent any further modifications
+    # N.B. Serialization automatically unlocks
+    remotecall_wait(stream.ref.handle.owner, stream.ref.handle) do ref
+        lock((MemPool.poolget(ref)::StreamStore).lock)
+    end
+
+    # Perform migration of the StreamStore
+    # MemPool will block access to the new ref until the migration completes
+    if stream.ref.handle.owner != w
+        MemPool.migrate!(stream.ref.handle, w)
+    end
+end
+
 struct NullStream end
 Base.put!(ns::NullStream, x) = nothing
 Base.take!(ns::NullStream) = throw(ConcurrencyViolationError("Cannot `take!` from a `NullStream`"))
@@ -244,6 +258,9 @@ function (sf::StreamingFunction)(args...; kwargs...)
                 end
             end
         end
+    end
+    if sf.stream isa Stream
+        migrate_stream!(sf.stream)
     end
     try
         kwarg_names = map(name->Val{name}(), map(first, (kwargs...,)))
