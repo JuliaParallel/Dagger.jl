@@ -981,10 +981,8 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
     # N.B. We don't batch these because we might get a deserialization
     # error due to something not being defined on the worker, and then we don't
     # know which task failed.
-    tasks = Task[]
     for ts in to_send
-        # TODO: errormonitor
-        @async begin
+        errormonitor_tracked("fire tasks", @async begin
             timespan_start(ctx, :fire, (;worker=gproc.pid), nothing)
             try
                 remotecall_wait(do_tasks, gproc.pid, proc, state.chan, [ts]);
@@ -995,7 +993,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
             finally
                 timespan_finish(ctx, :fire, (;worker=gproc.pid), nothing)
             end
-        end
+        end)
     end
 end
 

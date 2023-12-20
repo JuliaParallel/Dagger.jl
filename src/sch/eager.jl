@@ -98,15 +98,12 @@ function thunk_yield(f)
 end
 
 eager_cleanup(t::Dagger.EagerThunkFinalizer) =
-    errormonitor_tracked("eager_cleanup $(t.uid)", Threads.@spawn eager_cleanup(EAGER_STATE[], t.uid))
-function eager_cleanup(state, uid)
-    tid = nothing
-    lock(EAGER_ID_MAP) do id_map
-        if !haskey(id_map, uid)
-            return
-        end
-        tid = id_map[uid]
-        delete!(id_map, uid)
+    errormonitor_tracked("eager_cleanup $(t.id)", Threads.@spawn eager_cleanup(t.id))
+function eager_cleanup(id)
+    state = EAGER_STATE[]
+    if state === nothing
+        # We might be exiting, this is fine
+        return
     end
     tid === nothing && return
     lock(state.lock) do
