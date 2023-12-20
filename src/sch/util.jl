@@ -172,6 +172,50 @@ function reschedule_syncdeps!(state, thunk, seen=Set{Thunk}())
     end
 end
 
+"""
+Registers a future on the scheduler owning `thunk` that notifies our scheduler
+once the thunk has completed execution, and registers the thunk value and error
+state. Executes asynchronously to prevent cross-scheduler deadlock.
+"""
+function register_remote_future!(state, thunk::ThunkRef)
+    future = ThunkFuture()
+    remotecall_wait(thunk.id.wid, thunk, future, myid()) do thunk, future, our_id
+        # Do this lazily to prevent deadlock (this other scheduler might also be holding our lock)
+        errormonitor_tracked("register remote future $(thunk.id)", @async begin
+            _state = EAGER_STATE[]
+            h = lock(_state.lock) do
+                t = unwrap_weak_checked(_state.thunk_dict[thunk.id])
+                if haskey(_state.cache, t)
+                    # Value is already available, set future and return
+                    put!(future, _state.cache[t]; error=_state.errored[t])
+                    return nothing
+                end
+                # Create a valid handle to access the remote scheduler
+                SchedulerHandle(thunk, _state.worker_chans[our_id]...)
+            end
+            h === nothing && return
+            register_future!(h, thunk, future)
+        end)
+    end
+
+    # Get notified later
+    errormonitor_tracked("listen remote future $(thunk.id)", @async begin
+        # Wait for the future
+        value, error = try
+            (fetch(future), false)
+        catch err
+            (err, true)
+        end
+        # Save the result and schedule dependents
+        lock(state.lock) do
+            cache_store!(state, thunk, value, error)
+            preserve_local_dependents!(state, thunk)
+            schedule_dependents!(state, thunk, error)
+            put!(state.chan, RescheduleSignal())
+        end
+    end)
+end
+
 "Marks `thunk` and all dependent thunks as failed."
 function set_failed!(state, origin, thunk=origin)
     filter!(x->x!==thunk, state.ready)
