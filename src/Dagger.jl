@@ -20,6 +20,7 @@ using Requires
 using MacroTools
 using TimespanLogging
 
+include("thunkid.jl")
 include("lib/util.jl")
 include("utils/dagdebug.jl")
 
