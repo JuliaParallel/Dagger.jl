@@ -1,6 +1,6 @@
 const EAGER_INIT = Threads.Atomic{Bool}(false)
 const EAGER_READY = Base.Event()
-const EAGER_ID_MAP = LockedObject(Dict{UInt64,Int}())
+const EAGER_ID_MAP = LockedObject(Dict{UInt64,ThunkID}())
 const EAGER_CONTEXT = Ref{Union{Context,Nothing}}(nothing)
 const EAGER_STATE = Ref{Union{ComputeState,Nothing}}(nothing)
 

@@ -6,6 +6,7 @@ sanitize(x::Function) = repr(x)
 sanitize(d::Dict) = Dict(sanitize(k)=>sanitize(d[k]) for k in keys(d))
 sanitize(a::Array) = sanitize.(a)
 sanitize(s::Set) = Set(sanitize.(s))
+sanitize(tid::Dagger.ThunkID) = (;wid=tid.wid, id=tid.id)
 sanitize(x) = x
 
 StructTypes.StructType(::Type{<:Dagger.Processor}) = StructTypes.CustomStruct()

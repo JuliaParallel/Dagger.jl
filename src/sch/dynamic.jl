@@ -1,16 +1,9 @@
 export SchedulerHaltedException
 export sch_handle, halt!, exec!, get_dag_ids, add_thunk!
 
-"Identifies a thunk by its ID, and preserves the thunk in the scheduler."
-struct ThunkID
-    id::Int
-    ref::Union{DRef,Nothing}
-end
-ThunkID(id::Int) = ThunkID(id, nothing)
-
 "A handle to the scheduler, used by dynamic thunks."
 struct SchedulerHandle
-    thunk_id::ThunkID
+    thunk_ref::ThunkRef
     out_chan::RemoteChannel
     inp_chan::RemoteChannel
 end
@@ -103,7 +96,7 @@ const DYNAMIC_EXEC_LOCK = Threads.ReentrantLock()
 "Executes an arbitrary function within the scheduler, returning the result."
 function exec!(f, h::SchedulerHandle, args...)
     failed, res = lock(DYNAMIC_EXEC_LOCK) do
-        put!(h.out_chan, (h.thunk_id.id, f, args))
+        put!(h.out_chan, (h.thunk_ref.id, f, args))
         take!(h.inp_chan)
     end
     failed && throw(res)
@@ -114,14 +107,14 @@ end
 halt!(h::SchedulerHandle) = exec!(_halt, h, nothing)
 function _halt(ctx, state, task, tid, _)
     notify(state.halt)
-    put!(state.chan, (1, nothing, nothing, (SchedulerHaltedException(), nothing)))
+    put!(state.chan, (1, nothing, nothing, (SchedulerHaltedException(), nothing), nothing))
     Base.throwto(task, SchedulerHaltedException())
 end
 
 "Waits on a thunk to complete, and fetches its result."
-function Base.fetch(h::SchedulerHandle, id::ThunkID)
+function Base.fetch(h::SchedulerHandle, ref::ThunkRef)
     future = ThunkFuture(Future(1))
-    exec!(_register_future!, h, future, id, true)
+    exec!(_register_future!, h, future, ref, true)
     fetch(future; proc=thunk_processor())
 end
 """
@@ -129,11 +122,11 @@ Waits on a thunk to complete, and fetches its result. If `check` is set to
 `true` (the default), then a domination check will occur to ensure that the
 future isn't being registered on a thunk dominated by the calling thunk.
 """
-register_future!(h::SchedulerHandle, id::ThunkID, future::ThunkFuture, check::Bool=true) =
-        exec!(_register_future!, h, future, id, check)
-function _register_future!(ctx, state, task, tid, (future, id, check)::Tuple{ThunkFuture,ThunkID,Bool})
-    tid != id.id || throw(DynamicThunkException("Cannot fetch own result"))
-    GC.@preserve id begin
+register_future!(h::SchedulerHandle, ref::ThunkRef, future::ThunkFuture, check::Bool=true) =
+        exec!(_register_future!, h, future, ref, check)
+function _register_future!(ctx, state, task, tid, (future, ref, check)::Tuple{ThunkFuture,ThunkRef,Bool})
+    tid != ref.id || throw(DynamicThunkException("Cannot fetch own result"))
+    GC.@preserve ref begin
         function dominates(target, t)
             t == target && return true
             seen = Set{Thunk}()
@@ -154,7 +147,7 @@ function _register_future!(ctx, state, task, tid, (future, id, check)::Tuple{Thu
             end
             return false
         end
-        thunk = unwrap_weak_checked(state.thunk_dict[id.id])
+        thunk = unwrap_weak_checked(state.thunk_dict[ref.id])
         if check
             ownthunk = unwrap_weak_checked(state.thunk_dict[tid])
             if dominates(ownthunk, thunk)
@@ -174,27 +167,27 @@ end
 
 # TODO: Optimize wait() to not serialize a Chunk
 "Waits on a thunk to complete."
-function Base.wait(h::SchedulerHandle, id::ThunkID; future=ThunkFuture(1))
-    register_future!(h, id, future)
+function Base.wait(h::SchedulerHandle, ref::ThunkRef; future=ThunkFuture(1))
+    register_future!(h, ref, future)
     wait(future)
 end
 
 "Returns all Thunks IDs as a Dict, mapping a Thunk to its downstream dependents."
 get_dag_ids(h::SchedulerHandle) =
-    exec!(_get_dag_ids, h, nothing)::Dict{ThunkID,Set{ThunkID}}
+    exec!(_get_dag_ids, h, nothing)::Dict{ThunkRef,Set{ThunkRef}}
 function _get_dag_ids(ctx, state, task, tid, _)
-    deps = Dict{ThunkID,Set{ThunkID}}()
-    for (id,thunk) in state.thunk_dict
+    deps = Dict{ThunkRef,Set{ThunkRef}}()
+    for (id, thunk) in state.thunk_dict
         thunk = unwrap_weak_checked(thunk)
         # TODO: Get at `thunk_ref` for `thunk_id.ref`
-        thunk_id = ThunkID(id, nothing)
+        thunk_ref = ThunkID(thunk)
         if haskey(state.waiting_data, thunk)
-            deps[thunk_id] = Set(map(t->ThunkID(t.id, nothing), collect(state.waiting_data[thunk])))
+            deps[thunk_ref] = Set(map(ThunkRef, collect(state.waiting_data[thunk])))
         else
-            deps[thunk_id] = Set{ThunkID}()
+            deps[thunk_ref] = Set{ThunkRef}()
         end
     end
-    deps
+    return deps
 end
 
 "Adds a new Thunk to the DAG."
@@ -203,7 +196,7 @@ add_thunk!(f, h::SchedulerHandle, args...; future=nothing, ref=nothing, options.
 function _add_thunk!(ctx, state, task, tid, (f, args, options, future, ref))
     timespan_start(ctx, :add_thunk, (;thunk_id=tid), (;f, args, options))
     _args = map(args) do pos_arg
-        if pos_arg[2] isa ThunkID
+        if pos_arg[2] isa ThunkRef
             return pos_arg[1] => state.thunk_dict[pos_arg[2].id]
         else
             return pos_arg[1] => pos_arg[2]
@@ -212,14 +205,14 @@ function _add_thunk!(ctx, state, task, tid, (f, args, options, future, ref))
     GC.@preserve _args begin
         thunk = Thunk(f, _args...; options...)
         # Create a `DRef` to `thunk` so that the caller can preserve it
-        thunk_ref = poolset(thunk; size=64, device=MemPool.CPURAMDevice())
-        thunk_id = ThunkID(thunk.id, thunk_ref)
+        thunk_dref = poolset(thunk; size=64, device=MemPool.CPURAMDevice())
+        thunk_ref = ThunkRef(thunk.id, thunk_dref)
         state.thunk_dict[thunk.id] = WeakThunk(thunk)
         reschedule_syncdeps!(state, thunk)
         @dagdebug thunk :submit "Added to scheduler"
         if future !== nothing
             # Ensure we attach a future before the thunk is scheduled
-            _register_future!(ctx, state, task, tid, (future, thunk_id, false))
+            _register_future!(ctx, state, task, tid, (future, thunk_ref, false))
             @dagdebug thunk :submit "Registered future"
         end
         if ref !== nothing

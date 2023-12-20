@@ -6,29 +6,29 @@ function eager_submit_internal!(@nospecialize(payload))
     tid = 0
     return eager_submit_internal!(ctx, state, task, tid, payload)
 end
-function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{UInt64,Int}())
+function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{UInt64,ThunkID}())
     @nospecialize payload
     ntasks, uid, future, ref, f, args, options, reschedule = payload
 
     if uid isa Vector
-        thunk_ids = Sch.ThunkID[]
+        thunk_refs = ThunkRef[]
         for i in 1:ntasks
-            tid = eager_submit_internal!(ctx, state, task, tid,
-                                         (1, uid[i], future[i], ref[i],
-                                          f[i], args[i], options[i],
-                                          false); uid_to_tid)
-            push!(thunk_ids, tid)
-            uid_to_tid[uid[i]] = tid.id
+            tref = eager_submit_internal!(ctx, state, task, tid,
+                                          (1, uid[i], future[i], ref[i],
+                                           f[i], args[i], options[i],
+                                           false); uid_to_tid)
+            push!(thunk_refs, tref)
+            uid_to_tid[uid[i]] = tref.id
         end
         put!(state.chan, Sch.RescheduleSignal())
-        return thunk_ids
+        return thunk_refs
     end
 
     id = next_id()
 
     timespan_start(ctx, :add_thunk, (;thunk_id=id), (;f, args, options))
 
-    # Lookup EagerThunk/ThunkID -> Thunk
+    # Lookup EagerThunk/ThunkRef -> Thunk
     old_args = copy(args)
     args::Vector{Any}
     syncdeps = if haskey(options, :syncdeps)
@@ -47,7 +47,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
                     uid_to_tid[arg_uid]
                 end
                 state.thunk_dict[arg_tid]
-            elseif arg isa Sch.ThunkID
+            elseif arg isa ThunkRef
                 arg_tid = arg.id
                 state.thunk_dict[arg_tid]
             elseif arg isa Chunk
@@ -73,7 +73,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
                     uid_to_tid[dep.uid]
                 end
                 state.thunk_dict[tid]
-            elseif dep isa Sch.ThunkID
+            elseif dep isa ThunkRef
                 tid = dep.id
                 state.thunk_dict[tid]
             else
@@ -91,9 +91,9 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
         thunk = Thunk(f, args...; id, options...)
 
         # Create a `DRef` to `thunk` so that the caller can preserve it
-        thunk_ref = poolset(thunk; size=64, device=MemPool.CPURAMDevice(),
+        thunk_dref = poolset(thunk; size=64, device=MemPool.CPURAMDevice(),
                             destructor=UnrefThunkByUser(thunk))
-        thunk_id = Sch.ThunkID(thunk.id, thunk_ref)
+        thunk_ref = ThunkRef(thunk.id, thunk_dref)
 
         # Attach `thunk` within the scheduler
         state.thunk_dict[thunk.id] = WeakThunk(thunk)
@@ -101,7 +101,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
         @dagdebug thunk :submit "Added to scheduler"
         if future !== nothing
             # Ensure we attach a future before the thunk is scheduled
-            Sch._register_future!(ctx, state, task, tid, (future, thunk_id, false))
+            Sch._register_future!(ctx, state, task, tid, (future, thunk_ref, false))
             @dagdebug thunk :submit "Registered future"
         end
         if ref !== nothing
@@ -122,7 +122,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
 
         timespan_finish(ctx, :add_thunk, (;thunk_id=id), (;f, args, options))
 
-        return thunk_id
+        return thunk_ref
     end
 end
 struct UnrefThunkByUser
@@ -179,7 +179,7 @@ function eager_process_elem_submission_to_local(id_map, x)
     @nospecialize x
     @assert !isa(x, Thunk) "Cannot use `Thunk`s in `@spawn`/`spawn`"
     if x isa Dagger.EagerThunk && haskey(id_map, x.uid)
-        return Sch.ThunkID(id_map[x.uid], x.thunk_ref)
+        return ThunkRef(id_map[x.uid], x.thunk_ref)
     else
         return x
     end
@@ -219,7 +219,7 @@ function eager_spawn(spec::EagerTaskSpec)
     return EagerThunk(uid, future, finalizer_ref)
 end
 function eager_launch!((spec, task)::Pair{EagerTaskSpec,EagerThunk})
-    # Lookup EagerThunk -> ThunkID
+    # Lookup EagerThunk -> ThunkRef
     local args, options
     lock(Sch.EAGER_ID_MAP) do id_map
         args = eager_process_args_submission_to_local(id_map, spec=>task)
@@ -227,10 +227,10 @@ function eager_launch!((spec, task)::Pair{EagerTaskSpec,EagerThunk})
     end
 
     # Submit the task
-    thunk_id = eager_submit!(1,
-                             task.uid, task.future, task.finalizer_ref,
-                             spec.f, args, options)
-    task.thunk_ref = thunk_id.ref
+    thunk_ref = eager_submit!(1,
+                              task.uid, task.future, task.finalizer_ref,
+                              spec.f, args, options)
+    task.thunk_ref = thunk_ref.ref::DRef
 end
 function eager_launch!(specs::Vector{Pair{EagerTaskSpec,EagerThunk}})
     ntasks = length(specs)
@@ -242,15 +242,15 @@ function eager_launch!(specs::Vector{Pair{EagerTaskSpec,EagerThunk}})
     # Get all functions, args/kwargs, and options
     all_fs = Any[spec.f for (spec, _) in specs]
     all_args = lock(Sch.EAGER_ID_MAP) do id_map
-        # Lookup EagerThunk -> ThunkID
+        # Lookup EagerThunk -> ThunkRef
         eager_process_args_submission_to_local(id_map, specs)
     end
     all_options = Any[spec.options for (spec, _) in specs]
 
     # Submit the tasks
-    thunk_ids = eager_submit!(ntasks, uids, futures, finalizer_refs, all_fs, all_args, all_options)
+    thunk_refs = eager_submit!(ntasks, uids, futures, finalizer_refs, all_fs, all_args, all_options)
     for i in 1:ntasks
         task = specs[i][2]
-        task.thunk_ref = thunk_ids[i].ref
+        task.thunk_ref = thunk_refs[i].ref::DRef
     end
 end

@@ -1,7 +1,7 @@
 export Thunk, delayed
 
 const ID_COUNTER = Threads.Atomic{Int}(1)
-next_id() = Threads.atomic_add!(ID_COUNTER, 1)
+next_id() = ThunkID(myid(), Threads.atomic_add!(ID_COUNTER, 1))
 
 function filterany(f::Base.Callable, xs)
     xs_filt = Any[]
@@ -16,32 +16,10 @@ end
 """
     Thunk
 
-Wraps a callable object to be run with Dagger. A `Thunk` is typically
-created through a call to `delayed` or its macro equivalent `@par`.
+Wraps a callable object to be run with Dagger. This is scheduler-internal
+object; instead, you should be using `EagerThunk` (from `@spawn`/`spawn`).
 
-## Constructors
-```julia
-delayed(f; kwargs...)(args...)
-@par [option=value]... f(args...)
-```
-
-## Examples
-```julia
-julia> t = delayed(sin)(π)  # creates a Thunk to be computed later
-Thunk(sin, (π,))
-
-julia> collect(t)  # computes the result and returns it to the current process
-1.2246467991473532e-16
-```
-
-## Arguments
-- `f`: The function to be called upon execution of the `Thunk`.
-- `args`: The arguments to be passed to the `Thunk`.
-- `kwargs`: The properties describing unique behavior of this `Thunk`. Details
-for each property are described in the next section.
-- `option=value`: The same as passing `kwargs` to `delayed`.
-
-## Public Properties
+## Properties
 - `meta::Bool=false`: If `true`, instead of fetching cached arguments from
 `Chunk`s and passing the raw arguments to `f`, instead pass the `Chunk`. Useful
 for doing manual fetching or manipulation of `Chunk` references. Non-`Chunk`
@@ -62,7 +40,7 @@ mutable struct Thunk
     f::Any # usually a Function, but could be any callable
     inputs::Vector{Pair{Union{Symbol,Nothing},Any}} # TODO: Use `ImmutableArray` in 1.8
     syncdeps::Set{Any}
-    id::Int
+    id::ThunkID
     get_result::Bool # whether the worker should send the result or only the metadata
     meta::Bool
     persist::Bool # don't `free!` result after computing
@@ -75,7 +53,7 @@ mutable struct Thunk
     propagates::Tuple # which options we'll propagate
     function Thunk(f, xs...;
                    syncdeps=nothing,
-                   id::Int=next_id(),
+                   id::ThunkID=next_id(),
                    get_result::Bool=false,
                    meta::Bool=false,
                    persist::Bool=false,
@@ -196,7 +174,7 @@ Base.convert(::Type{WeakThunk}, t::Thunk) = WeakThunk(t)
 
 "A summary of the data contained in a Thunk, which can be safely serialized."
 struct ThunkSummary
-    id::Int
+    id::ThunkID
     f
     inputs::Vector{Pair{Union{Symbol,Nothing},Any}}
 end

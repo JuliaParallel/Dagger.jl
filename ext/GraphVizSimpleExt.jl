@@ -90,7 +90,7 @@ _proc_color(ctx, proc::Processor) = get!(ctx.proc_to_color, proc) do
     ctx.proc_color_idx[] = clamp(ctx.proc_color_idx[]+1, 0, 128)
     "#$(Colors.hex(_color))"
 end
-_proc_color(ctx, id::Int) = _proc_color(ctx, ctx.id_to_proc[id])
+_proc_color(ctx, id::ThunkID) = _proc_color(ctx, ctx.id_to_proc[id])
 _proc_color(ctx, ::Nothing) = "black"
 _proc_shape(ctx, proc::Processor) = get!(ctx.proc_to_shape, typeof(proc)) do
     _shape = ctx.proc_shapes[ctx.proc_shape_idx[]]
@@ -133,7 +133,7 @@ function write_edge(ctx, io, ts_move::Timespan, logs, inputname=nothing, inputar
     (;thunk_id, id) = ts_move.id
     (;f,) = ts_move.timeline
     t_move = pretty_time(ts_move)
-    if id > 0
+    if id isa ThunkID
         print(io, "n_$id -> n_$thunk_id [label=\"Move: $t_move")
         color_src = _proc_color(ctx, id)
     else
@@ -163,8 +163,8 @@ function write_dag(io, t, logs::Vector)
            proc_to_shape = Dict{Type,String}(),
            proc_shapes = ("ellipse","box","triangle"),
            proc_shape_idx = Ref{Int}(1),
-           id_to_proc = Dict{Int,Processor}())
-    argmap = Dict{Int,Vector}()
+           id_to_proc = Dict{ThunkID,Processor}())
+    argmap = Dict{ThunkID,Vector}()
     getargs!(argmap, t)
     c = 1
     # Compute nodes
@@ -172,7 +172,7 @@ function write_dag(io, t, logs::Vector)
         c = write_node(ctx, io, ts, c)
     end
     # Argument nodes
-    argnodemap = Dict{Int,Vector{String}}()
+    argnodemap = Dict{ThunkID,Vector{String}}()
     argids = IdDict{Any,String}()
     for id in keys(argmap)
         nodes = String[]
@@ -202,7 +202,7 @@ function write_dag(io, t, logs::Vector)
         argnodemap[id] = nodes
     end
     # Move edges
-    for ts in filter(x->x.category==:move && x.id.id>0, logs)
+    for ts in filter(x->x.category==:move && x.id.id isa ThunkID, logs)
         write_edge(ctx, io, ts, logs)
     end
     #= FIXME: Legend (currently it's laid out horizontally)

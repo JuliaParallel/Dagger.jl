@@ -11,7 +11,7 @@ using ScopedValues
 using TaskLocalValues
 
 import ..Dagger
-import ..Dagger: Context, Processor, Thunk, WeakThunk, ThunkFuture, ThunkFailedException, Chunk, WeakChunk, OSProc, AnyScope, DefaultScope, LockedObject
+import ..Dagger: Context, Processor, ThunkID, Thunk, ThunkRef, WeakThunk, ThunkFuture, ThunkFailedException, Chunk, WeakChunk, OSProc, AnyScope, DefaultScope, LockedObject
 import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak_checked, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, processor, default_enabled, get_processors, get_parent, execute!, rmprocs!, addprocs!, thunk_processor, constrain, cputhreadtime
 import ..Dagger: @dagdebug, @lock1, @safe_lock_spin1
 import DataStructures: PriorityQueue, enqueue!, dequeue_pair!, peek
@@ -45,7 +45,7 @@ Fields:
 - `valid::WeakKeyDict{Thunk, Nothing}` - Tracks all `Thunk`s that are in a valid scheduling state
 - `running::Set{Thunk}` - The set of currently-running `Thunk`s
 - `running_on::Dict{Thunk,OSProc}` - Map from `Thunk` to the OS process executing it
-- `thunk_dict::Dict{Int, WeakThunk}` - Maps from thunk IDs to a `Thunk`
+- `thunk_dict::Dict{ThunkID, WeakThunk}` - Maps from thunk IDs to a `Thunk`
 - `node_order::Any` - Function that returns the order of a thunk
 - `worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}` - Communication channels between the scheduler and each worker
 - `metrics::MetricsCacheLocked` - For a given (context, operation) pair, for a given object (:global, worker, processor, task signature), the values of the metric
@@ -66,7 +66,7 @@ struct ComputeState
     valid::WeakKeyDict{Thunk, Nothing}
     running::Set{Thunk}
     running_on::Dict{Thunk,OSProc}
-    thunk_dict::Dict{Int, WeakThunk}
+    thunk_dict::Dict{ThunkID, WeakThunk}
     node_order::Any
     worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}
     metrics::MetricsCacheLocked
@@ -90,7 +90,7 @@ function start_state(deps::Dict, node_order, chan, options)
                          WeakKeyDict{Thunk, Nothing}(),
                          Set{Thunk}(),
                          Dict{Thunk,OSProc}(),
-                         Dict{Int, WeakThunk}(),
+                         Dict{ThunkID, WeakThunk}(),
                          node_order,
                          Dict{Int, Tuple{RemoteChannel,RemoteChannel}}(),
                          create_global_metrics_cache(),
@@ -362,7 +362,7 @@ end
 const TASK_SYNC = Threads.Condition()
 
 "Process-local set of running task IDs."
-const TASKS_RUNNING = Set{Int}()
+const TASKS_RUNNING = Set{ThunkID}()
 
 # TODO: "Process-local count of actively-executing Dagger tasks per processor type."
 
@@ -952,7 +952,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
             end
         end
 
-        ids = Int[0]
+        ids = Union{ThunkID,Int}[0]
         data = Any[thunk.f]
         positions = Union{Symbol,Nothing}[]
         for (idx, pos_x) in enumerate(thunk.inputs)
@@ -967,7 +967,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
         propagated = get_propagated_options(thunk)
         @assert (options.single === nothing) || (gproc.pid == options.single)
         # TODO: Set `sch_handle.tid.ref` to the right `DRef`
-        sch_handle = SchedulerHandle(ThunkID(thunk.id, nothing), state.worker_chans[gproc.pid]...)
+        sch_handle = SchedulerHandle(ThunkRef(thunk), state.worker_chans[gproc.pid]...)
 
         # TODO: De-dup common fields (log_sink, uid, etc.)
         task_spec = TaskSpec(thunk.id, time_util, alloc_util, occupancy,
@@ -1059,14 +1059,14 @@ end
 
 "A serializable description of a `Thunk` to be executed."
 struct TaskSpec
-    thunk_id::Int
+    thunk_id::ThunkID
     est_time_util::UInt64
     est_alloc_util::UInt64
     est_occupancy::UInt32
     scope::Dagger.AbstractScope
     Tf::Type
     data::Vector{Any}
-    ids::Vector{Int}
+    ids::Vector{Union{ThunkID,Int}}
     positions::Vector{Union{Symbol,Nothing}}
     send_result::Bool
     persist::Bool
@@ -1087,7 +1087,7 @@ struct ProcessorInternalState
     proc::Processor
     queue::LockedObject{PriorityQueue{TaskSpec, UInt32, Base.Order.ForwardOrdering}}
     reschedule::Doorbell
-    tasks::Dict{Int,Task}
+    tasks::Dict{ThunkID,Task}
     proc_occupancy::Base.RefValue{UInt32}
     time_pressure::Base.RefValue{UInt64}
     done::Base.RefValue{Bool}
@@ -1493,7 +1493,7 @@ function do_task(to_proc::Processor, task::TaskSpec)
     # Initiate data transfers for function and arguments
     ids = task.ids
     _data, _ids = if task.meta
-        (Any[first(data)], Int[first(ids)]) # always fetch function
+        (Any[first(data)], Union{ThunkID,Int}[first(ids)]) # always fetch function
     else
         (data, ids)
     end
