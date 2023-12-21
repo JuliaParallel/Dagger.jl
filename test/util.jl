@@ -14,7 +14,7 @@ end
 replace_obj!(ex::Symbol, obj) = Expr(:(.), obj, QuoteNode(ex))
 replace_obj!(ex, obj) = ex
 function _test_throws_unwrap(terr, ex; to_match=[])
-    @gensym rerr
+    @gensym rerr rbt
     match_expr = Expr(:block)
     for m in to_match
         if m.head == :(=)
@@ -35,12 +35,20 @@ function _test_throws_unwrap(terr, ex; to_match=[])
         end
     end
     quote
+        $rbt = nothing
         $rerr = try
             $(esc(ex))
         catch err
+            $rbt = catch_backtrace()
             Dagger.Sch.unwrap_nested_exception(err)
         end
         @test $rerr isa $terr
+        if !($rerr isa $terr)
+            printstyled(stderr, "Actual error:\n"; color=:yellow, bold=true)
+            Base.showerror(stderr, $rerr)
+            Base.show_backtrace(stderr, $rbt)
+            println(stderr)
+        end
         $match_expr
     end
 end

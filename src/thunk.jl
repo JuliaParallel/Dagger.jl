@@ -130,6 +130,17 @@ end
 
 is_task_or_chunk(x) = istask(x)
 
+"Identifies a thunk by its ID, and optionally preserves the thunk in the scheduler."
+struct ThunkRef
+    id::ThunkID
+    ref::Union{DRef,Nothing}
+end
+ThunkRef(id::ThunkID) = ThunkRef(id, nothing)
+ThunkRef(thunk::Thunk) = ThunkRef(thunk.id, thunk.eager_ref)
+Base.hash(ref::ThunkRef, h::UInt) = hash(ref.id, hash(ThunkRef, h))
+Base.isequal(ref1::ThunkRef, ref2::ThunkRef) = ref1.id == ref2.id
+istask(::ThunkRef) = true
+
 function args_kwargs_to_pairs(args, kwargs)
     args_kwargs = Pair{Union{Symbol,Nothing},Any}[]
     for arg in args

@@ -104,7 +104,7 @@ end
 wait(Dagger.@spawn sleep_and_print(1, "I print second"))
 ```
 
-One can also safely call `@spawn` from another worker (not ID 1), and it will be executed correctly:
+One can also safely call `@spawn` from any worker, and it will be executed correctly:
 
 ```
 x = fetch(Distributed.@spawnat 2 Dagger.@spawn 1+2) # fetches the result of `@spawnat`
