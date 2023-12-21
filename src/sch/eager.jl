@@ -1,20 +1,16 @@
 const EAGER_INIT = Threads.Atomic{Bool}(false)
 const EAGER_READY = Base.Event()
-const EAGER_ID_MAP = LockedObject(Dict{UInt64,ThunkID}())
 const EAGER_CONTEXT = Ref{Union{Context,Nothing}}(nothing)
 const EAGER_STATE = Ref{Union{ComputeState,Nothing}}(nothing)
 
 function eager_context()
     if EAGER_CONTEXT[] === nothing
-        EAGER_CONTEXT[] = Context([myid(),workers()...])
+        EAGER_CONTEXT[] = Context([procs()...])
     end
     return EAGER_CONTEXT[]
 end
 
 function init_eager()
-    if myid() != 1
-        throw(ConcurrencyViolationError("init_eager can only be called on worker 1"))
-    end
     if Threads.atomic_xchg!(EAGER_INIT, true)
         wait(EAGER_READY)
         return
@@ -22,7 +18,7 @@ function init_eager()
     ctx = eager_context()
     errormonitor_tracked("eager compute()", Threads.@spawn try
         sopts = SchedulerOptions(;allow_errors=true)
-        opts = Dagger.Options((;scope=Dagger.ExactScope(Dagger.ThreadProc(1, 1)),
+        opts = Dagger.Options((;scope=Dagger.ExactScope(Dagger.ThreadProc(myid(), 1)),
                                 occupancy=Dict(Dagger.ThreadProc=>0)))
         Dagger.compute(ctx, Dagger.delayed(eager_thunk, opts)();
                        options=sopts)
@@ -40,9 +36,6 @@ function init_eager()
     finally
         reset(EAGER_READY)
         EAGER_STATE[] = nothing
-        lock(EAGER_ID_MAP) do id_map
-            empty!(id_map)
-        end
         Threads.atomic_xchg!(EAGER_INIT, false)
     end)
     wait(EAGER_READY)
@@ -105,18 +98,14 @@ function eager_cleanup(id)
         # We might be exiting, this is fine
         return
     end
-    tid === nothing && return
     lock(state.lock) do
         # N.B. cache and errored expire automatically
-        delete!(state.thunk_dict, tid)
+        delete!(state.thunk_dict, id)
     end
 end
 
-function _find_thunk(e::Dagger.EagerThunk)
-    tid = lock(EAGER_ID_MAP) do id_map
-        id_map[e.uid]
-    end
+function _find_thunk(t::Dagger.EagerThunk)
     lock(EAGER_STATE[].lock) do
-        unwrap_weak_checked(EAGER_STATE[].thunk_dict[tid])
+        unwrap_weak_checked(EAGER_STATE[].thunk_dict[t.id])
     end
 end

@@ -37,11 +37,11 @@ scheduler, potentially ready to execute, executing, or finished executing. May
 be `fetch`'d or `wait`'d on at any time.
 """
 mutable struct EagerThunk
-    uid::UInt
+    id::ThunkID
     future::ThunkFuture
     finalizer_ref::DRef
     thunk_ref::DRef
-    EagerThunk(uid, future, finalizer_ref) = new(uid, future, finalizer_ref)
+    EagerThunk(id, future, finalizer_ref) = new(id, future, finalizer_ref)
 end
 
 Base.isready(t::EagerThunk) = isready(t.future)
@@ -63,25 +63,16 @@ function Base.show(io::IO, t::EagerThunk)
     else
         "not launched"
     end
-    print(io, "EagerThunk ($status)")
+    print(io, "EagerThunk[$(t.id)] ($status)")
 end
 istask(t::EagerThunk) = true
 
 "When finalized, cleans-up the associated `EagerThunk`."
 mutable struct EagerThunkFinalizer
-    uid::UInt
-    function EagerThunkFinalizer(uid)
-        x = new(uid)
+    id::ThunkID
+    function EagerThunkFinalizer(id::ThunkID)
+        x = new(id)
         finalizer(Sch.eager_cleanup, x)
-        x
-    end
-end
-
-const EAGER_ID_COUNTER = Threads.Atomic{UInt64}(1)
-function eager_next_id()
-    if myid() == 1
-        Threads.atomic_add!(EAGER_ID_COUNTER, one(UInt64))
-    else
-        remotecall_fetch(eager_next_id, 1)
+        return x
     end
 end

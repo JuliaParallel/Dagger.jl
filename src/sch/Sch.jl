@@ -18,8 +18,13 @@ import DataStructures: PriorityQueue, enqueue!, dequeue_pair!, peek
 
 import ..Dagger
 
-const OneToMany = Dict{Thunk, Set{Thunk}}
+# Any referencable thunk
+const AnyThunk = Union{Thunk, ThunkRef}
 
+# Any referencable data
+const AnyDataRef = Union{AnyThunk, Chunk}
+
+# A function signature
 const Signature = Vector{Any}
 
 include("util.jl")
@@ -38,43 +43,49 @@ The internal state-holding struct of the scheduler.
 
 Fields:
 - `uid::UInt64` - Unique identifier for this scheduler instance
-- `waiting::OneToMany` - Map from downstream `Thunk` to upstream `Thunk`s that still need to execute
-- `waiting_data::Dict{Union{Thunk,Chunk},Set{Thunk}}` - Map from input `Chunk`/upstream `Thunk` to all unfinished downstream `Thunk`s, to retain caches
-- `ready::Vector{Thunk}` - The list of `Thunk`s that are ready to execute
-- `cache::WeakKeyDict{Thunk, Any}` - Maps from a finished `Thunk` to it's cached result, often a DRef
+- `waiting::Dict{Thunk, Set{AnyThunk}}` - Map from downstream `Thunk` to upstream `Thunk`s that still need to execute
+- `waiting_data::Dict{AnyDataRef, Set{AnyThunk}}` - Map from input `Chunk`/upstream `Thunk` to all unfinished downstream `Thunk`s, to retain caches
+- `cache::WeakKeyDict{Thunk, Any}` - Maps from a finished `Thunk` to it's cached result, often a `Chunk`.
+- `errored::WeakKeyDict{Thunk,Bool}` - Indicates if a thunk's result is an error.
 - `valid::WeakKeyDict{Thunk, Nothing}` - Tracks all `Thunk`s that are in a valid scheduling state
+- `waiting_remote::Dict{ThunkRef, Set{Thunk}}` - The set of all local thunks utilizing the key (a remote thunk).
+- `cache_remote::Dict{ThunkRef, Any}` - Maps from a remote finished `Thunk` to it's cached result, often a `Chunk`.
+- `errored_remote::Dict{ThunkRef, Bool}` - Indicates if a remote thunk's result is an error.
+- `ready::Vector{Thunk}` - The list of `Thunk`s that are ready to execute
 - `running::Set{Thunk}` - The set of currently-running `Thunk`s
 - `running_on::Dict{Thunk,OSProc}` - Map from `Thunk` to the OS process executing it
 - `thunk_dict::Dict{ThunkID, WeakThunk}` - Maps from thunk IDs to a `Thunk`
+- `thunks_to_delete::Set{Thunk}` - The list of `Thunk`s ready to be deleted upon completion.
 - `node_order::Any` - Function that returns the order of a thunk
 - `worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}` - Communication channels between the scheduler and each worker
 - `metrics::MetricsCacheLocked` - For a given (context, operation) pair, for a given object (:global, worker, processor, task signature), the values of the metric
 - `halt::Base.Event` - Event indicating that the scheduler is halting
 - `lock::ReentrantLock` - Lock around operations which modify the state
 - `futures::Dict{Thunk, Vector{ThunkFuture}}` - Futures registered for waiting on the result of a thunk.
-- `errored::WeakKeyDict{Thunk,Bool}` - Indicates if a thunk's result is an error.
-- `thunks_to_delete::Set{Thunk}` - The list of `Thunk`s ready to be deleted upon completion.
 - `chan::RemoteChannel{Channel{Any}}` - Channel for receiving completed thunks.
 - `schedule_model::AbstractDecision` - The model to use for all configurable decisions.
 """
 struct ComputeState
     uid::UInt64
-    waiting::OneToMany
-    waiting_data::Dict{Union{Thunk,Chunk},Set{Thunk}}
-    ready::Vector{Thunk}
+    waiting::Dict{Thunk, Set{AnyThunk}}
+    waiting_data::Dict{AnyDataRef, Set{AnyThunk}}
     cache::WeakKeyDict{Thunk, Any}
+    errored::WeakKeyDict{Thunk, Bool}
     valid::WeakKeyDict{Thunk, Nothing}
+    waiting_remote::Dict{ThunkRef, Set{Thunk}}
+    cache_remote::Dict{ThunkRef, Any}
+    errored_remote::Dict{ThunkRef, Bool}
+    ready::Vector{Thunk}
     running::Set{Thunk}
     running_on::Dict{Thunk,OSProc}
     thunk_dict::Dict{ThunkID, WeakThunk}
+    thunks_to_delete::Set{Thunk}
     node_order::Any
     worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}
     metrics::MetricsCacheLocked
     halt::Base.Event
     lock::ReentrantLock
     futures::Dict{Thunk, Vector{ThunkFuture}}
-    errored::WeakKeyDict{Thunk,Bool}
-    thunks_to_delete::Set{Thunk}
     chan::RemoteChannel{Channel{Any}}
     schedule_model::AbstractDecision
 end
@@ -83,22 +94,25 @@ const UID_COUNTER = Threads.Atomic{UInt64}(1)
 
 function start_state(deps::Dict, node_order, chan, options)
     state = ComputeState(Threads.atomic_add!(UID_COUNTER, UInt64(1)),
-                         OneToMany(),
+                         Dict{Thunk, Set{AnyThunk}}(),
                          deps,
-                         Vector{Thunk}(undef, 0),
                          WeakKeyDict{Thunk, Any}(),
+                         WeakKeyDict{Thunk,Bool}(),
                          WeakKeyDict{Thunk, Nothing}(),
+                         Dict{ThunkRef, Set{Thunk}}(),
+                         Dict{ThunkRef, Any}(),
+                         Dict{ThunkRef, Bool}(),
+                         Vector{Thunk}(undef, 0),
                          Set{Thunk}(),
                          Dict{Thunk,OSProc}(),
                          Dict{ThunkID, WeakThunk}(),
+                         Set{Thunk}(),
                          node_order,
                          Dict{Int, Tuple{RemoteChannel,RemoteChannel}}(),
                          create_global_metrics_cache(),
                          Base.Event(),
                          ReentrantLock(),
                          Dict{Thunk, Vector{ThunkFuture}}(),
-                         WeakKeyDict{Thunk,Bool}(),
-                         Set{Thunk}(),
                          chan,
                          options.schedule_model)
 
@@ -287,7 +301,7 @@ function init_proc(state, p, log_sink)
     timespan_start(ctx, :init_proc, (;worker=p.pid), nothing)
     # Initialize pressure and capacity
     gproc = OSProc(p.pid)
-    if p.pid != 1
+    if p.pid != myid()
         lock(WORKER_MONITOR_LOCK) do
             wid = p.pid
             if !haskey(WORKER_MONITOR_TASKS, wid)
@@ -304,7 +318,7 @@ function init_proc(state, p, log_sink)
                             d = WORKER_MONITOR_CHANS[wid]
                             for uid in keys(d)
                                 try
-                                    put!(d[uid], (wid, OSProc(wid), nothing, (ProcessExitedException(wid), nothing), nothing))
+                                    put!(d[uid], (wid, nothing, nothing, true, ProcessExitedException(wid), nothing))
                                 catch
                                 end
                             end
@@ -354,7 +368,11 @@ function cleanup_proc(state, p, log_sink)
             delete!(WORKER_MONITOR_CHANS[wid], state.uid)
         end
     end
-    remote_do(_cleanup_proc, wid, state.uid, log_sink)
+    try
+        remote_do(_cleanup_proc, wid, state.uid, log_sink)
+    catch err
+        @debug "Failed to clean-up worker $wid" exception=(err,catch_backtrace())
+    end
     timespan_finish(ctx, :cleanup_proc, (;worker=wid), nothing)
 end
 
@@ -536,14 +554,14 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
         if chan_value isa RescheduleSignal
             continue
         end
-        pid, proc, thunk_id, result, new_metrics = chan_value
-        @dagdebug thunk_id :take "Got finished task"
+        pid, proc, thunk_id, errored, result, new_metrics = chan_value
         gproc = OSProc(pid)
         safepoint(state)
         @lock state.lock begin
             thunk_failed = false
-            if result isa Exception
-                if unwrap_nested_exception(result) isa ProcessExitedException
+            if errored
+                true_ex = unwrap_nested_exception(result)
+                if true_ex isa ProcessExitedException
                     @warn "Worker $(pid) died, rescheduling work"
 
                     # Remove dead worker from procs list
@@ -555,16 +573,18 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
                     handle_fault(ctx, state, gproc)
                     timespan_finish(ctx, :handle_fault, (;worker=pid), nothing)
                     return # effectively `continue`
+                elseif true_ex isa SchedulerHaltedException
+                    @dagdebug nothing :take "Got halt request, exiting"
+                    throw(true_ex)
                 else
                     if something(ctx.options.allow_errors, false) ||
-                       something(unwrap_weak_checked(state.thunk_dict[thunk_id]).options.allow_errors, false)
+                       (thunk_id !== nothing && something(unwrap_weak_checked(state.thunk_dict[thunk_id]).options.allow_errors, false))
                         thunk_failed = true
                     else
                         throw(result)
                     end
                 end
             end
-            node = unwrap_weak_checked(state.thunk_dict[thunk_id])
 
             if thunk_id !== nothing
                 @dagdebug thunk_id :take "Got finished task"
@@ -582,34 +602,19 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
                     end
                 end
 
-                timespan_start(ctx, :finish, thunk_id, (;thunk_id))
+                timespan_start(ctx, :finish, (;thunk_id), (;thunk_id))
                 finish_task!(ctx, state, thunk, thunk_failed)
-                timespan_finish(ctx, :finish, thunk_id, (;thunk_id))
+                timespan_finish(ctx, :finish, (;thunk_id), (;thunk_id))
 
                 delete_unused_tasks!(state)
             end
-            state.cache[node] = result
-            state.errored[node] = thunk_failed
-            if node.options !== nothing && node.options.checkpoint !== nothing
-                try
-                    @invokelatest node.options.checkpoint(node, result)
-                catch err
-                    report_catch_error(err, "Thunk checkpoint failed")
-                end
-            end
-
-            timespan_start(ctx, :finish, (;thunk_id), (;thunk_id))
-            finish_task!(ctx, state, node, thunk_failed)
-            timespan_finish(ctx, :finish, (;thunk_id), (;thunk_id))
-
-            delete_unused_tasks!(state)
         end
 
         safepoint(state)
     end
 
     # Final value is ready
-    value = state.cache[d]
+    value = cache_lookup_checked(state, d)[1]
     errored = get(state.errored, d, false)
     if !errored
         if options.checkpoint !== nothing
@@ -690,7 +695,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         timespan_start(ctx, :schedule, (;thunk_id=task.id), (;thunk_id=task.id))
 
         # Check if this task already has a result
-        if haskey(state.cache, task)
+        if (result = cache_lookup(state, task)) !== nothing
             if haskey(state.errored, task)
                 # An error was eagerly propagated to this task
                 finish_failed!(state, task)
@@ -699,10 +704,9 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
                 iob = IOBuffer()
                 println(iob, "Scheduling inconsistency: Task being scheduled is already cached!")
                 println(iob, "  Task: $(task.id)")
-                println(iob, "  Cache Entry: $(typeof(state.cache[task]))")
+                println(iob, "  Cache Entry: $(typeof(result))")
                 ex = SchedulingException(String(take!(iob)))
-                state.cache[task] = ex
-                state.errored[task] = true
+                cache_store!(state, task, ex, true)
             end
             @goto pop_task
         end
@@ -742,8 +746,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
             scope = constrain(scope, chunk.scope)
             if scope isa Dagger.InvalidScope
                 ex = SchedulingException("Scopes are not compatible: $(scope.x), $(scope.y)")
-                state.cache[task] = ex
-                state.errored[task] = true
+                cache_store!(state, task, ex, true)
                 set_failed!(state, task)
                 @goto pop_task
             end
@@ -777,8 +780,8 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         end
 
         # Report that no processors were valid
-        state.cache[task] = SchedulingException("No processors available, try widening scope")
-        state.errored[task] = true
+        ex = SchedulingException("No processors available, try widening scope")
+        cache_store!(state, task, ex, true)
         set_failed!(state, task)
         @goto pop_task
 
@@ -843,7 +846,7 @@ function finish_task!(ctx, state, node, thunk_failed)
         set_failed!(state, node)
     end
     if node.cache
-        node.cache_ref = state.cache[node]
+        node.cache_ref = cache_lookup_checked(state, node)[1]
     end
     schedule_dependents!(state, node, thunk_failed)
     fill_registered_futures!(state, node, thunk_failed)
@@ -927,7 +930,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
             data = thunk.cache_ref
             if data !== nothing
                 # cache hit
-                state.cache[thunk] = data
+                cache_store!(state, thunk, data)
                 thunk_failed = get(state.errored, thunk, false)
                 finish_task!(ctx, state, thunk, thunk_failed)
                 continue
@@ -940,8 +943,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
             try
                 result = @invokelatest thunk.options.restore(thunk)
                 if result isa Chunk
-                    state.cache[thunk] = result
-                    state.errored[thunk] = false
+                    cache_store!(state, thunk, result)
                     finish_task!(ctx, state, thunk, false)
                     continue
                 elseif result !== nothing
@@ -959,7 +961,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
             pos, x = pos_x
             x = unwrap_weak_checked(x)
             push!(ids, istask(x) ? x.id : -idx)
-            push!(data, istask(x) ? state.cache[x] : x)
+            push!(data, istask(x) ? cache_lookup_checked(state, x)[1] : x)
             push!(positions, pos)
         end
         toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
@@ -989,7 +991,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
             catch err
                 bt = catch_backtrace()
                 thunk_id = ts.thunk_id
-                put!(state.chan, (gproc.pid, proc, thunk_id, CapturedException(err, bt), nothing))
+                put!(state.chan, (gproc.pid, proc, thunk_id, true, CapturedException(err, bt), nothing))
             finally
                 timespan_finish(ctx, :fire, (;worker=gproc.pid), nothing)
             end
@@ -1255,6 +1257,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
             # Execute the task and return its result
             t = @task begin
                 processor_run_metrics = required_metrics_to_collect(sch_model, :processor, :run)
+                errored = false
                 result = nothing
                 metrics = nothing
                 try
@@ -1265,6 +1268,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                     end
                 catch err
                     bt = catch_backtrace()
+                    errored = true
                     result = CapturedException(err, bt)
                 end
 
@@ -1311,7 +1315,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
 
                 # Send the result and metrics to the core
                 try
-                    put!(return_queue, (myid(), to_proc, thunk_id, result, metrics))
+                    put!(return_queue, (myid(), to_proc, thunk_id, errored, result, metrics))
                 catch err
                     if unwrap_nested_exception(err) isa InvalidStateException || !isopen(return_queue)
                         @dagdebug thunk_id :execute "Return queue is closed, failing to put result" chan=return_queue exception=(err, catch_backtrace())

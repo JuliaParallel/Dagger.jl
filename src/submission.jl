@@ -6,19 +6,18 @@ function eager_submit_internal!(@nospecialize(payload))
     tid = 0
     return eager_submit_internal!(ctx, state, task, tid, payload)
 end
-function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{UInt64,ThunkID}())
+function eager_submit_internal!(ctx, state, task, tid, payload)
     @nospecialize payload
-    ntasks, uid, future, ref, f, args, options, reschedule = payload
+    ntasks, id, future, ref, f, args, options, reschedule = payload
 
-    if uid isa Vector
+    if id isa Vector
         thunk_refs = ThunkRef[]
         for i in 1:ntasks
             tref = eager_submit_internal!(ctx, state, task, tid,
-                                          (1, uid[i], future[i], ref[i],
+                                          (1, id[i], future[i], ref[i],
                                            f[i], args[i], options[i],
-                                           false); uid_to_tid)
+                                           false))
             push!(thunk_refs, tref)
-            uid_to_tid[uid[i]] = tref.id
         end
         put!(state.chan, Sch.RescheduleSignal())
         return thunk_refs
@@ -31,47 +30,35 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
     # Lookup EagerThunk/ThunkRef -> Thunk
     old_args = copy(args)
     args::Vector{Any}
+    for (idx, (pos, arg)) in enumerate(args)
+        pos::Union{Symbol,Nothing}
+        newarg = if arg isa EagerThunk
+            arg_tid = arg.id
+            state.thunk_dict[arg_tid]
+        elseif arg isa ThunkRef
+            arg_tid = arg.id
+            state.thunk_dict[arg_tid]
+        elseif arg isa Chunk
+            # N.B. Different Chunks with the same DRef handle will hash to the same slot,
+            # so we just pick an equivalent Chunk as our upstream
+            if haskey(state.waiting_data, arg)
+                arg = only(filter(o->o isa Chunk && o.handle == arg.handle, keys(state.waiting_data)))::Chunk
+            end
+            WeakChunk(arg)
+        else
+            arg
+        end
+        @inbounds args[idx] = pos => newarg
+    end
     syncdeps = if haskey(options, :syncdeps)
         collect(options.syncdeps)
     else
         nothing
     end::Union{Vector{Any},Nothing}
-    lock(Sch.EAGER_ID_MAP) do id_map
-        for (idx, (pos, arg)) in enumerate(args)
-            pos::Union{Symbol,Nothing}
-            newarg = if arg isa EagerThunk
-                arg_uid = arg.uid
-                arg_tid = if haskey(id_map, arg_uid)
-                    id_map[arg_uid]
-                else
-                    uid_to_tid[arg_uid]
-                end
-                state.thunk_dict[arg_tid]
-            elseif arg isa ThunkRef
-                arg_tid = arg.id
-                state.thunk_dict[arg_tid]
-            elseif arg isa Chunk
-                # N.B. Different Chunks with the same DRef handle will hash to the same slot,
-                # so we just pick an equivalent Chunk as our upstream
-                if haskey(state.waiting_data, arg)
-                    arg = only(filter(o->o isa Chunk && o.handle == arg.handle, keys(state.waiting_data)))::Chunk
-                end
-                WeakChunk(arg)
-            else
-                arg
-            end
-            @inbounds args[idx] = pos => newarg
-        end
-        if syncdeps === nothing
-            return
-        end
+    if syncdeps !== nothing
         for (idx, dep) in enumerate(syncdeps)
             newdep = if dep isa EagerThunk
-                tid = if haskey(id_map, dep.uid)
-                    id_map[dep.uid]
-                else
-                    uid_to_tid[dep.uid]
-                end
+                tid = dep.id
                 state.thunk_dict[tid]
             elseif dep isa ThunkRef
                 tid = dep.id
@@ -81,8 +68,6 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
             end
             @inbounds syncdeps[idx] = newdep
         end
-    end
-    if syncdeps !== nothing
         options = merge(options, (;syncdeps))
     end
 
@@ -109,11 +94,6 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
             thunk.eager_ref = ref
         end
         state.valid[thunk] = nothing
-
-        # Register Eager UID -> Sch TID
-        lock(Sch.EAGER_ID_MAP) do id_map
-            id_map[uid] = thunk.id
-        end
 
         # Tell the scheduler that it has new tasks to schedule
         if reschedule
@@ -150,24 +130,15 @@ end
 
 
 # Local -> Remote
-function eager_submit!(ntasks, uid, future, finalizer_ref, f, args, options)
+function eager_submit!(ntasks, id, future, finalizer_ref, f, args, options)
     if Dagger.in_thunk()
         h = Dagger.sch_handle()
-        return exec!(eager_submit_internal!, h, ntasks, uid, future, finalizer_ref, f, args, options, true)
-    elseif myid() != 1
-        return remotecall_fetch(1, (ntasks, uid, future, finalizer_ref, f, args, options, true)) do payload
-            @nospecialize payload
-            Sch.init_eager()
-            state = Dagger.Sch.EAGER_STATE[]
-            lock(state.lock) do
-                eager_submit_internal!(payload)
-            end
-        end
+        return exec!(eager_submit_internal!, h, ntasks, id, future, finalizer_ref, f, args, options, true)
     else
         Sch.init_eager()
         state = Dagger.Sch.EAGER_STATE[]
         return lock(state.lock) do
-            eager_submit_internal!((ntasks, uid, future, finalizer_ref,
+            eager_submit_internal!((ntasks, id, future, finalizer_ref,
                                     f, args, options,
                                     true))
         end
@@ -175,34 +146,34 @@ function eager_submit!(ntasks, uid, future, finalizer_ref, f, args, options)
 end
 
 # Submission -> Local
-function eager_process_elem_submission_to_local(id_map, x)
+function eager_process_elem_submission_to_local(x)
     @nospecialize x
     @assert !isa(x, Thunk) "Cannot use `Thunk`s in `@spawn`/`spawn`"
-    if x isa Dagger.EagerThunk && haskey(id_map, x.uid)
-        return ThunkRef(id_map[x.uid], x.thunk_ref)
+    if x isa Dagger.EagerThunk
+        return ThunkRef(x.id, x.thunk_ref)
     else
         return x
     end
 end
 # TODO: This can probably operate in-place
-function eager_process_args_submission_to_local(id_map, spec::Pair{EagerTaskSpec,EagerThunk})
+function eager_process_args_submission_to_local(spec::Pair{EagerTaskSpec,EagerThunk})
     return Base.mapany(first(spec).args) do pos_x
         pos, x = pos_x
-        return pos => eager_process_elem_submission_to_local(id_map, x)
+        return pos => eager_process_elem_submission_to_local(x)
     end
 end
-function eager_process_args_submission_to_local(id_map, specs::Vector{Pair{EagerTaskSpec,EagerThunk}})
+function eager_process_args_submission_to_local(specs::Vector{Pair{EagerTaskSpec,EagerThunk}})
     return Base.mapany(specs) do spec
-        eager_process_args_submission_to_local(id_map, spec)
+        eager_process_args_submission_to_local(spec)
     end
 end
-function eager_process_options_submission_to_local(id_map, options::NamedTuple)
+function eager_process_options_submission_to_local(options::NamedTuple)
     @nospecialize options
     if haskey(options, :syncdeps)
         raw_syncdeps = options.syncdeps
         syncdeps = Set{Any}()
         for raw_dep in raw_syncdeps
-            push!(syncdeps, eager_process_elem_submission_to_local(id_map, raw_dep))
+            push!(syncdeps, eager_process_elem_submission_to_local(raw_dep))
         end
         return merge(options, (;syncdeps))
     else
@@ -211,44 +182,39 @@ function eager_process_options_submission_to_local(id_map, options::NamedTuple)
 end
 function eager_spawn(spec::EagerTaskSpec)
     # Generate new EagerThunk
-    uid = eager_next_id()
+    id = next_id()
     future = ThunkFuture()
-    finalizer_ref = poolset(EagerThunkFinalizer(uid); device=MemPool.CPURAMDevice())
+    finalizer_ref = poolset(EagerThunkFinalizer(id); device=MemPool.CPURAMDevice())
 
     # Return unlaunched EagerThunk
-    return EagerThunk(uid, future, finalizer_ref)
+    return EagerThunk(id, future, finalizer_ref)
 end
 function eager_launch!((spec, task)::Pair{EagerTaskSpec,EagerThunk})
     # Lookup EagerThunk -> ThunkRef
-    local args, options
-    lock(Sch.EAGER_ID_MAP) do id_map
-        args = eager_process_args_submission_to_local(id_map, spec=>task)
-        options = eager_process_options_submission_to_local(id_map, spec.options)
-    end
+    args = eager_process_args_submission_to_local(spec=>task)
+    options = eager_process_options_submission_to_local(spec.options)
 
     # Submit the task
     thunk_ref = eager_submit!(1,
-                              task.uid, task.future, task.finalizer_ref,
+                              task.id, task.future, task.finalizer_ref,
                               spec.f, args, options)
     task.thunk_ref = thunk_ref.ref::DRef
 end
 function eager_launch!(specs::Vector{Pair{EagerTaskSpec,EagerThunk}})
     ntasks = length(specs)
 
-    uids = [task.uid for (_, task) in specs]
+    ids = [task.id for (_, task) in specs]
     futures = [task.future for (_, task) in specs]
     finalizer_refs = [task.finalizer_ref for (_, task) in specs]
 
     # Get all functions, args/kwargs, and options
     all_fs = Any[spec.f for (spec, _) in specs]
-    all_args = lock(Sch.EAGER_ID_MAP) do id_map
-        # Lookup EagerThunk -> ThunkRef
-        eager_process_args_submission_to_local(id_map, specs)
-    end
+    # Lookup EagerThunk -> ThunkRef
+    all_args = eager_process_args_submission_to_local(specs)
     all_options = Any[spec.options for (spec, _) in specs]
 
     # Submit the tasks
-    thunk_refs = eager_submit!(ntasks, uids, futures, finalizer_refs, all_fs, all_args, all_options)
+    thunk_refs = eager_submit!(ntasks, ids, futures, finalizer_refs, all_fs, all_args, all_options)
     for i in 1:ntasks
         task = specs[i][2]
         task.thunk_ref = thunk_refs[i].ref::DRef

@@ -107,14 +107,13 @@ end
 halt!(h::SchedulerHandle) = exec!(_halt, h, nothing)
 function _halt(ctx, state, task, tid, _)
     notify(state.halt)
-    put!(state.chan, (1, nothing, nothing, (SchedulerHaltedException(), nothing), nothing))
-    Base.throwto(task, SchedulerHaltedException())
+    put!(state.chan, (tid.wid, nothing, nothing, true, SchedulerHaltedException(), nothing))
 end
 
 "Waits on a thunk to complete, and fetches its result."
 function Base.fetch(h::SchedulerHandle, ref::ThunkRef)
-    future = ThunkFuture(Future(1))
-    exec!(_register_future!, h, future, ref, true)
+    future = ThunkFuture(Future(ref.id.wid))
+    register_future!(h, ref, future)
     fetch(future; proc=thunk_processor())
 end
 """
@@ -129,6 +128,8 @@ function _register_future!(ctx, state, task, tid, (future, ref, check)::Tuple{Th
     GC.@preserve ref begin
         function dominates(target, t)
             t == target && return true
+            @warn "Check for ThunkRef domination" maxlog=1
+            t isa ThunkRef && return false
             seen = Set{Thunk}()
             to_visit = Thunk[t]
             while !isempty(to_visit)
@@ -195,6 +196,7 @@ add_thunk!(f, h::SchedulerHandle, args...; future=nothing, ref=nothing, options.
     exec!(_add_thunk!, h, f, args, options, future, ref)
 function _add_thunk!(ctx, state, task, tid, (f, args, options, future, ref))
     timespan_start(ctx, :add_thunk, (;thunk_id=tid), (;f, args, options))
+    id = ref.id
     _args = map(args) do pos_arg
         if pos_arg[2] isa ThunkRef
             return pos_arg[1] => state.thunk_dict[pos_arg[2].id]
@@ -203,7 +205,7 @@ function _add_thunk!(ctx, state, task, tid, (f, args, options, future, ref))
         end
     end
     GC.@preserve _args begin
-        thunk = Thunk(f, _args...; options...)
+        thunk = Thunk(f, _args...; id, options...)
         # Create a `DRef` to `thunk` so that the caller can preserve it
         thunk_dref = poolset(thunk; size=64, device=MemPool.CPURAMDevice())
         thunk_ref = ThunkRef(thunk.id, thunk_dref)

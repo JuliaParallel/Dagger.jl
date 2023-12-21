@@ -51,6 +51,55 @@ function get_propagated_options(thunk)
     return nt
 end
 
+""""
+Returns the result and error status of `thunk` if it's cached in the scheduler,
+as a `Some{Tuple{<:Any,Bool}}`. If it's not present, `nothing` is returned.
+"""
+function cache_lookup(state, thunk::Thunk)
+    if haskey(state.cache, thunk)
+        return Some((state.cache[thunk], get(state.errored, thunk, false)))
+    end
+    return nothing
+end
+function cache_lookup(state, thunk::ThunkRef)
+    if haskey(state.cache_remote, thunk)
+        return Some((state.cache_remote[thunk], get(state.errored_remote, thunk, false)))
+    end
+    return nothing
+end
+function cache_lookup_checked(state, thunk)
+    value = cache_lookup(state, thunk)
+    if value === nothing
+        throw(KeyError(thunk))
+    end
+    return value.value
+end
+
+"Stores `value` and `error` as the cached value and error status of `thunk`."
+function cache_store!(state, thunk::Thunk, value, error=false)
+    state.cache[thunk] = value
+    state.errored[thunk] = error
+end
+function cache_store!(state, thunk::ThunkRef, value, error=false)
+    state.cache_remote[thunk] = value
+    state.errored_remote[thunk] = error
+end
+
+"""
+Removes `thunk` from the preservation set of `thunk_ref`; if
+`thunk_ref`'s preservation set becomes empty, removes the cached result of
+`thunk_ref`.
+"""
+function cache_evict_remote!(state, thunk_ref::ThunkRef, thunk::Thunk)
+    pres_set = state.waiting_remote[thunk_ref]
+    pop!(pres_set, thunk)
+    if length(pres_set) == 0
+        delete!(state.waiting_remote, thunk_ref)
+        delete!(state.cache_remote, thunk_ref)
+        delete!(state.errored_remote, thunk_ref)
+    end
+end
+
 "Fills the result for all registered futures of `node`."
 function fill_registered_futures!(state, node, failed)
     if haskey(state.futures, node)
@@ -62,8 +111,10 @@ function fill_registered_futures!(state, node, failed)
     end
 end
 
-"Cleans up any syncdeps that aren't needed any longer, and returns a
-`Set{Chunk}` of all chunks that can now be evicted from workers."
+"""
+Cleans up any syncdeps that aren't needed any longer, and returns a
+`Set{Chunk}` of all chunks that can now be evicted from workers.
+"""
 function cleanup_syncdeps!(state, node)
     to_evict = Set{Chunk}()
     for inp in node.syncdeps
@@ -77,10 +128,17 @@ function cleanup_syncdeps!(state, node)
                 pop!(w, node)
             end
             if isempty(w)
-                if istask(inp) && haskey(state.cache, inp)
-                    _node = state.cache[inp]
-                    if _node isa Chunk
-                        push!(to_evict, _node)
+                if istask(inp)
+                    value = cache_lookup(state, inp)
+                    if value !== nothing
+                        value, _ = value.value
+                        if value isa Chunk
+                            push!(to_evict, value)
+                        end
+                        if inp isa ThunkRef
+                            # We're done executing, remove us from the preservation set
+                            cache_evict_remote!(state, inp, node)
+                        end
                     end
                 elseif inp isa Chunk
                     push!(to_evict, inp)
@@ -94,7 +152,11 @@ end
 
 "Schedules any dependents that may be ready to execute."
 function schedule_dependents!(state, node, failed)
-    for dep in sort!(collect(get(()->Set{Thunk}(), state.waiting_data, node)), by=state.node_order)
+    for dep in sort!(collect(get(()->Set{AnyThunk}(), state.waiting_data, node)), by=state.node_order)
+        # If remote dep, we will notify the owning scheduler in `fill_registered_futures!`
+        dep isa ThunkRef && continue
+
+        # Is this dependent ready to execute?
         dep_isready = false
         if haskey(state.waiting, dep)
             set = state.waiting[dep]
@@ -114,12 +176,20 @@ function schedule_dependents!(state, node, failed)
     end
 end
 
+"Preserves local thunk dependents of the remote `thunk`."
+function preserve_local_dependents!(state, thunk::ThunkRef)
+    pres_set = get!(()->Set{Thunk}(), state.waiting_remote, thunk)
+    for dep in get(()->Set{AnyThunk}(), state.waiting_data, thunk)
+        push!(pres_set, dep)
+    end
+end
+
 """
 Prepares the scheduler to schedule `thunk`. Will mark `thunk` as ready if
 its inputs are satisfied.
 """
-function reschedule_syncdeps!(state, thunk, seen=Set{Thunk}())
-    to_visit = Thunk[thunk]
+function reschedule_syncdeps!(state, thunk, seen=Set{AnyThunk}())
+    to_visit = AnyThunk[thunk]
     while !isempty(to_visit)
         thunk = pop!(to_visit)
         push!(seen, thunk)
@@ -129,7 +199,12 @@ function reschedule_syncdeps!(state, thunk, seen=Set{Thunk}())
         if haskey(state.cache, thunk) || (thunk in state.ready) || (thunk in state.running)
             continue
         end
-        for (_,input) in thunk.inputs
+        if thunk isa ThunkRef
+            # We don't own these, so stop here
+            continue
+        end
+
+        for (_, input) in thunk.inputs
             if input isa WeakChunk
                 input = unwrap_weak_checked(input)
             end
@@ -137,33 +212,44 @@ function reschedule_syncdeps!(state, thunk, seen=Set{Thunk}())
                 # N.B. Different Chunks with the same DRef handle will hash to the same slot,
                 # so we just pick an equivalent Chunk as our upstream
                 if !haskey(state.waiting_data, input)
-                    push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
+                    push!(get!(()->Set{AnyThunk}(), state.waiting_data, input), thunk)
                 end
             end
         end
-        w = get!(()->Set{Thunk}(), state.waiting, thunk)
+        w = get!(()->Set{AnyThunk}(), state.waiting, thunk)
         for input in thunk.syncdeps
             input = unwrap_weak_checked(input)
             istask(input) && input in seen && continue
 
             # Unseen
-            push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
+            push!(get!(()->Set{AnyThunk}(), state.waiting_data, input), thunk)
             istask(input) || continue
 
             # Unseen task
-            if get(state.errored, input, false)
-                set_failed!(state, input, thunk)
+            result_err = cache_lookup(state, input)
+            if result_err !== nothing
+                if something(result_err)[2]
+                    set_failed!(state, input, thunk)
+                else
+                    continue
+                end
             end
-            haskey(state.cache, input) && continue
 
             # Unseen and unfinished task
             push!(w, input)
-            if !((input in state.running) || (input in state.ready))
-                push!(to_visit, input)
+            if input isa Thunk
+                if !((input in state.running) || (input in state.ready))
+                    push!(to_visit, input)
+                end
+            elseif input isa ThunkRef
+                # Remote thunk, ask to be notified when it's completed
+                # Register a future with the owning scheduler
+                register_remote_future!(state, input)
             end
         end
         if isempty(w)
-            # Inputs are ready
+            # Inputs are satisfied, so we're either ready, or entered an error
+            # state due to an input (from `set_failed!`)
             delete!(state.waiting, thunk)
             if !get(state.errored, thunk, false)
                 push!(state.ready, thunk)
@@ -270,8 +356,8 @@ function print_sch_status(io::IO, state, thunk; offset=0, limit=5, max_inputs=3)
         status
     end
     if offset == 0
-        println(io, "Ready ($(length(state.ready))): $(join(map(t->t.id, state.ready), ','))")
-        println(io, "Running: ($(length(state.running))): $(join(map(t->t.id, collect(state.running)), ','))")
+        println(io, "Ready ($(length(state.ready))): $(join(map(t->t.id, state.ready), ", "))")
+        println(io, "Running: ($(length(state.running))): $(join(map(t->t.id, collect(state.running)), ", "))")
         print(io, "($(status_string(thunk))) ")
     end
     println(io, "$(thunk.id): $(thunk.f)")
@@ -279,9 +365,13 @@ function print_sch_status(io::IO, state, thunk; offset=0, limit=5, max_inputs=3)
         if input isa WeakThunk
             input = Dagger.unwrap_weak(input)
             if input === nothing
-                println(io, repeat(' ', offset+2), "(???)")
+                println(io, repeat(' ', offset+2), "[???]")
                 continue
             end
+        end
+        if input isa ThunkRef
+            println(io, repeat(' ', offset+2), "($(status_string(input))) [@$(input.id)]")
+            continue
         end
         input isa Thunk || continue
         if idx > max_inputs
@@ -451,7 +541,7 @@ function collect_task_inputs(state, task)
     inputs = Pair{Union{Symbol,Nothing},Any}[]
     for (pos, input) in task.inputs
         input = unwrap_weak_checked(input)
-        push!(inputs, pos => (istask(input) ? state.cache[input] : input))
+        push!(inputs, pos => (istask(input) ? cache_lookup_checked(state, input)[1] : input))
     end
     return inputs
 end

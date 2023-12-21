@@ -50,17 +50,13 @@ function dynamic_get_dag(x...)
 end
 function dynamic_add_thunk(x)
     h = sch_handle()
-    id = Dagger.Sch.add_thunk!(h, nothing=>x) do y
-        y+1
-    end
+    id = Dagger.Sch.add_thunk!(inc, h, nothing=>x)
     wait(h, id)
     return fetch(h, id)
 end
 function dynamic_add_thunk_self_dominated(x)
     h = sch_handle()
-    id = Dagger.Sch.add_thunk!(h, nothing=>h.thunk_id, nothing=>x) do y
-        y+1
-    end
+    id = Dagger.Sch.add_thunk!(inc, h, nothing=>h.thunk_id, nothing=>x)
     return fetch(h, id)
 end
 function dynamic_wait_fetch_multiple(x)
@@ -70,7 +66,7 @@ function dynamic_wait_fetch_multiple(x)
     for key in keys(ids)
         while !isempty(ids[key])
             val = pop!(ids[key])
-            if val == h.thunk_id
+            if val == h.thunk_ref
                 id = key
             end
         end
@@ -83,12 +79,12 @@ function dynamic_wait_fetch_multiple(x)
 end
 function dynamic_fetch_self(x)
     h = sch_handle()
-    return fetch(h, h.thunk_id)
+    return fetch(h, h.thunk_ref)
 end
 function dynamic_fetch_dominated(x)
     h = sch_handle()
     ids = Dagger.Sch.get_dag_ids(h)
-    did = pop!(ids[h.thunk_id])
+    did = pop!(ids[h.thunk_ref])
     wait(h, did)
 end
 end
@@ -434,18 +430,18 @@ end
         @test ids isa Dict
         @test length(keys(ids)) == 4
 
-        a_id = ThunkID(a.id)
-        b_id = ThunkID(b.id)
-        c_id = ThunkID(c.id)
-        d_id = ThunkID(d.id)
+        a_ref = Dagger.Sch.ThunkRef(a)
+        b_ref = Dagger.Sch.ThunkRef(b)
+        c_ref = Dagger.Sch.ThunkRef(c)
+        d_ref = Dagger.Sch.ThunkRef(d)
 
-        @test haskey(ids, d_id)
-        @test length(ids[d_id]) == 0 # no one waiting on our result
-        @test length(ids[a_id]) == 0 # b and c finished, our result is unneeded
-        @test length(ids[b_id]) == 1 # d is still executing
-        @test length(ids[c_id]) == 1 # d is still executing
-        @test pop!(ids[b_id]) == d_id
-        @test pop!(ids[c_id]) == d_id
+        @test haskey(ids, d_ref)
+        @test length(ids[d_ref]) == 0 # no one waiting on our result
+        @test length(ids[a_ref]) == 0 # b and c finished, our result is unneeded
+        @test length(ids[b_ref]) == 1 # d is still executing
+        @test length(ids[c_ref]) == 1 # d is still executing
+        @test pop!(ids[b_ref]) == d_ref
+        @test pop!(ids[c_ref]) == d_ref
     end
     @testset "Add Thunk" begin
         a = delayed(dynamic_add_thunk)(1)

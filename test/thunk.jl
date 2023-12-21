@@ -175,7 +175,6 @@ end
     @testset "remote spawn" begin
         a = fetch(Distributed.@spawnat 2 Dagger.@spawn 1+2)
         @test Dagger.Sch.EAGER_INIT[]
-        @test fetch(Distributed.@spawnat 2 !(Dagger.Sch.EAGER_INIT[]))
         @test a isa Dagger.EagerThunk
         @test fetch(a) == 3
 
