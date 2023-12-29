@@ -60,7 +60,7 @@ end
 function Graphs.add_edge!(adjlist::SimpleAdjListStorage{T,D}, edge) where {T,D}
     src, dst = Tuple(edge)
     if !D
-        src, dst = (min(src, dst), max(src, dst))
+        src, dst = minmax(src, dst)
     end
 
     has_edge(adjlist, edge) && return false
@@ -79,10 +79,12 @@ function Graphs.add_edge!(adjlist::SimpleAdjListStorage{T,D}, edge) where {T,D}
 
     # Add edges
     if D
+        # Directed graphs have only forward edges
+        push!(adjlist.fadjlist[src], dst)
+    else
+        # Undirected graphs have both forward and backward edges
         push!(adjlist.fadjlist[src], dst)
         push!(adjlist.badjlist[dst], src)
-    else
-        push!(adjlist.fadjlist[src], dst)
     end
 
     return true

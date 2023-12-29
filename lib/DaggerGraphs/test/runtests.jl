@@ -31,6 +31,21 @@ end
     @test vertices(g) == Base.OneTo(nv(g))
     @test length(edges(g)) == ne(g)
     e = collect(edges(g))
-    @test e isa Vector{Tuple{Int,Int}}
-    @test all(edge->has_edge(g, edge[1], edge[2]), e)
+    @test e isa Vector{<: AbstractEdge{Int}}
+    @test all(edge->has_edge(g, src(edge), dst(edge)), e)
+end
+
+using Interfaces
+using GraphsInterfaceChecker
+test_graphs = [
+    DGraph(),
+    DGraph(smallgraph(:house), chunksize=3),
+    DGraph(smallgraph(:karate), chunksize=12),
+    generate_random_dgraph(500),
+]
+
+Interfaces.@implements AbstractGraphInterface DGraph test_graphs
+
+@testset "Interface" begin
+    @test Interfaces.test(AbstractGraphInterface, DGraph)
 end
