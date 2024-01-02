@@ -81,10 +81,19 @@ function Graphs.add_edge!(adjlist::SimpleAdjListStorage{T,D}, edge) where {T,D}
     if D
         # Directed graphs have only forward edges
         push!(adjlist.fadjlist[src], dst)
+        push!(adjlist.badjlist[dst], src)
+        # Consider this behavior of using Graphs.jl
+        # g = SimpleDiGraph(3,0); add_edge!(g,1,2)
+        # println( "$(g.fadjlist) | $(g.badjlist)")
+        # [[2], Int64[], Int64[]] | [Int64[], [1], Int64[]]
     else
         # Undirected graphs have both forward and backward edges
         push!(adjlist.fadjlist[src], dst)
-        push!(adjlist.badjlist[dst], src)
+        push!(adjlist.fadjlist[dst], src)
+        # Consider this behavior of using Graphs.jl
+        # g = SimpleGraph(3,0); add_edge!(g,1,2)
+        # println(g.fadjlist)
+        #   [[2], [1], Int64[]]
     end
 
     return true
