@@ -366,7 +366,7 @@ function init_proc(state, p, log_sink)
                         end
                     end
                 end
-                errormonitor_tracked(t)
+                errormonitor_tracked("worker monitor $wid", t)
                 WORKER_MONITOR_TASKS[wid] = t
                 WORKER_MONITOR_CHANS[wid] = Dict{UInt64,RemoteChannel}()
             end
@@ -1290,7 +1290,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                 else
                     t.sticky = false
                 end
-                tasks[thunk_id] = errormonitor_tracked(schedule(t))
+                tasks[thunk_id] = errormonitor_tracked("thunk $thunk_id", schedule(t))
                 proc_occupancy[] += task_occupancy
                 time_pressure[] += time_util
             end
@@ -1302,7 +1302,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
     else
         proc_run_task.sticky = false
     end
-    return errormonitor_tracked(schedule(proc_run_task))
+    return errormonitor_tracked("processor $to_proc", schedule(proc_run_task))
 end
 
 """
