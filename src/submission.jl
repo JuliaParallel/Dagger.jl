@@ -89,7 +89,8 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
         thunk = Thunk(f, args...; options...)
 
         # Create a `DRef` to `thunk` so that the caller can preserve it
-        thunk_ref = poolset(thunk; size=64, device=MemPool.CPURAMDevice())
+        thunk_ref = poolset(thunk; size=64, device=MemPool.CPURAMDevice(),
+                            destructor=UnrefThunkByUser(thunk))
         thunk_id = Sch.ThunkID(thunk.id, thunk_ref)
 
         # Attach `thunk` within the scheduler
@@ -122,6 +123,29 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
         return thunk_id
     end
 end
+struct UnrefThunkByUser
+    thunk::Thunk
+end
+function (unref::UnrefThunkByUser)()
+    Sch.errormonitor_tracked("unref thunk $(unref.thunk.id)", Threads.@spawn begin
+        # This thunk is no longer referenced by the user, mark it as ready to be
+        # cleaned up as eagerly as possible (or do so now)
+        thunk = unref.thunk
+        state = Sch.EAGER_STATE[]
+        if state === nothing
+            return
+        end
+
+        @lock state.lock begin
+            if !Sch.delete_unused_task!(state, thunk)
+                # Register for deletion upon thunk completion
+                push!(state.thunks_to_delete, thunk)
+            end
+            # TODO: On success, walk down to children, as a fast-path
+        end
+    end)
+end
+
 
 # Local -> Remote
 function eager_submit!(ntasks, uid, future, finalizer_ref, f, args, options)
