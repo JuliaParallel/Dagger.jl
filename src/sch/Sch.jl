@@ -72,6 +72,7 @@ Fields:
 - `lock::ReentrantLock` - Lock around operations which modify the state
 - `futures::Dict{Thunk, Vector{ThunkFuture}}` - Futures registered for waiting on the result of a thunk.
 - `errored::WeakKeyDict{Thunk,Bool}` - Indicates if a thunk's result is an error.
+- `thunks_to_delete::Set{Thunk}` - The list of `Thunk`s ready to be deleted upon completion.
 - `chan::RemoteChannel{Channel{Any}}` - Channel for receiving completed thunks.
 """
 struct ComputeState
@@ -98,6 +99,7 @@ struct ComputeState
     lock::ReentrantLock
     futures::Dict{Thunk, Vector{ThunkFuture}}
     errored::WeakKeyDict{Thunk,Bool}
+    thunks_to_delete::Set{Thunk}
     chan::RemoteChannel{Channel{Any}}
 end
 
@@ -127,6 +129,7 @@ function start_state(deps::Dict, node_order, chan)
                          ReentrantLock(),
                          Dict{Thunk, Vector{ThunkFuture}}(),
                          WeakKeyDict{Thunk,Bool}(),
+                         Set{Thunk}(),
                          chan)
 
     for k in sort(collect(keys(deps)), by=node_order)
@@ -590,6 +593,8 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
             timespan_start(ctx, :finish, thunk_id, (;thunk_id))
             finish_task!(ctx, state, node, thunk_failed)
             timespan_finish(ctx, :finish, thunk_id, (;thunk_id))
+
+            delete_unused_tasks!(state)
         end
 
         safepoint(state)
@@ -929,6 +934,39 @@ function finish_task!(ctx, state, node, thunk_failed)
         delete!(state.waiting_data, node)
     end
     evict_all_chunks!(ctx, to_evict)
+end
+
+function delete_unused_tasks!(state)
+    to_delete = Thunk[]
+    for thunk in state.thunks_to_delete
+        if task_unused(state, thunk)
+            # Finished and nobody waiting on us, we can be deleted
+            push!(to_delete, thunk)
+        end
+    end
+    for thunk in to_delete
+        # Delete all cached data
+        task_delete!(state, thunk)
+
+        pop!(state.thunks_to_delete, thunk)
+    end
+end
+function delete_unused_task!(state, thunk)
+    if task_unused(state, thunk)
+        # Will not be accessed further, delete all cached data
+        task_delete!(state, thunk)
+        return true
+    else
+        return false
+    end
+end
+task_unused(state, thunk) =
+    haskey(state.cache, thunk) && !haskey(state.waiting_data, thunk)
+function task_delete!(state, thunk)
+    delete!(state.cache, thunk)
+    delete!(state.errored, thunk)
+    delete!(state.valid, thunk)
+    delete!(state.thunk_dict, thunk.id)
 end
 
 function evict_all_chunks!(ctx, to_evict)
