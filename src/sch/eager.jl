@@ -20,7 +20,7 @@ function init_eager()
         return
     end
     ctx = eager_context()
-    errormonitor_tracked(Threads.@spawn try
+    errormonitor_tracked("eager compute()", Threads.@spawn try
         sopts = SchedulerOptions(;allow_errors=true)
         opts = Dagger.Options((;scope=Dagger.ExactScope(Dagger.ThreadProc(1, 1)),
                                 occupancy=Dict(Dagger.ThreadProc=>0)))
@@ -101,7 +101,7 @@ function thunk_yield(f)
 end
 
 eager_cleanup(t::Dagger.EagerThunkFinalizer) =
-    errormonitor_tracked(Threads.@spawn eager_cleanup(EAGER_STATE[], t.uid))
+    errormonitor_tracked("eager_cleanup $(t.uid)", Threads.@spawn eager_cleanup(EAGER_STATE[], t.uid))
 function eager_cleanup(state, uid)
     tid = nothing
     lock(EAGER_ID_MAP) do id_map
