@@ -117,6 +117,33 @@ function tile2lap!(tilemat::TileWorkSpace, dense::Matrix{Float64})
     end
 end
 
+function lap2tile!(tilemat::TileMat, dense::Matrix{Float64})
+    Am = size(dense, 1)
+    An = size(dense, 2)
+    nb = tilemat.nb
+    m = tilemat.m
+    n = tilemat.n
+    @assert Am == m
+    @assert An == n
+    mm = nb
+    nn = nb
+    mt = tilemat.mt
+    nt = tilemat.nt
+    println("Hello")
+    for j in range(1, nt)
+        for i in range(1, mt)
+            if i == mt
+                mm = min(mm, m - nb * (mt - 1))
+            end
+            if j == nt
+                nn = min(nn, n - nb *(nt - 1))
+            end
+            starti = 1 + (i - 1) * nb
+            startj = 1 + (j - 1) * nb
+            tilemat.mat[i, j] = dense[starti:starti+mm-1, startj:startj+nn-1]
+        end
+    end
+end
 function diagposv!(::Type{T}, tilemat::TileMat, val) where {T<: Number}
     mt = tilemat.mt
     nt = tilemat.nt
