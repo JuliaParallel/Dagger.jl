@@ -162,8 +162,8 @@ struct AdjList{T,D,A<:AbstractAdjListStorage{T,D}}
 end
 AdjList{T,D}(adjlist::AbstractAdjListStorage{T,D}) where {T,D} =
     AdjList{T,D,typeof(adjlist)}(adjlist)
-# TODO: AdjList{T,D}() where {T,D} = AdjList{T,D}(SimpleAdjListStorage{T,D}())
-AdjList{T,D}() where {T,D} = AdjList{T,D}(SparseAdjListStorage{T,D}())
+AdjList{T,D}() where {T,D} = AdjList{T,D}(SimpleAdjListStorage{T,D}())
+#AdjList{T,D}() where {T,D} = AdjList{T,D}(SparseAdjListStorage{T,D}())
 AdjList() = AdjList{Int,true}()
 Base.copy(adj::AdjList{T,D,A}) where {T,D,A} = AdjList{T,D,A}(copy(adj.data))
 Graphs.ne(adj::AdjList) = length(adj.data) # TODO: Use ne()
