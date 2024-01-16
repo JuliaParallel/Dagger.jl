@@ -86,16 +86,20 @@ mutable struct DGraph{T<:Integer, D} <: Graphs.AbstractGraph{T}
         return new{T,D}(Dagger.tochunk(state), Ref(false))
     end
 end
+DGraph(x; kwargs...) = DGraph{Int}(x; kwargs...)
 DGraph(; kwargs...) = DGraph{Int}(; kwargs...)
-function DGraph(n::T; freeze::Bool=false, kwargs...) where {T<:Integer}
+DGraph{T}(n::S; kwargs...) where {T<:Integer,S<:Integer} =
+    DGraph{T}(T(n); kwargs...)
+function DGraph{T}(n::T; freeze::Bool=false, kwargs...) where {T<:Integer}
     g = DGraph{T}(; kwargs...)
     add_vertices!(g, n)
     freeze && freeze!(g)
     return g
 end
-function DGraph(sg::AbstractGraph{T}; directed::Bool=is_directed(sg), freeze::Bool=false, kwargs...) where {T<:Integer}
-    g = DGraph(nv(sg); directed, kwargs...)
+function DGraph{T}(sg::AbstractGraph{T}; directed::Bool=is_directed(sg), freeze::Bool=false, kwargs...) where {T<:Integer}
+    g = DGraph{T}(nv(sg); directed, kwargs...)
     foreach(edges(sg)) do edge
+
         add_edge!(g, edge)
         if !is_directed(sg) && directed
             add_edge!(g, dst(edge), src(edge))
@@ -104,7 +108,7 @@ function DGraph(sg::AbstractGraph{T}; directed::Bool=is_directed(sg), freeze::Bo
     freeze && freeze!(g)
     return g
 end
-function DGraph(dg::DGraph{T,D}; chunksize::T=0, directed::Bool=D, freeze::Bool=false) where {T<:Integer, D}
+function DGraph{T}(dg::DGraph{T,D}; chunksize::T=0, directed::Bool=D, freeze::Bool=false) where {T<:Integer, D}
     state = fetch(dg.state)
     # FIXME: Create g.state on same node as dg.state
     if chunksize == 0
@@ -480,11 +484,11 @@ nparts(g::DGraphState) = length(g.parts)
 Base.eltype(::DGraph{T}) where T = T
 Graphs.edgetype(::DGraph{T}) where T = Edge{T}
 Graphs.nv(g::DGraph{T}) where T <: Integer = with_state(g, nv)::T
-function Graphs.nv(g::DGraphState)
+function Graphs.nv(g::DGraphState{T}) where T
     if !isempty(g.parts_nv)
-        return Int(last(g.parts_nv).stop)
+        return T(last(g.parts_nv).stop)
     else
-        return 0
+        return zero(T)
     end
 end
 Graphs.ne(g::DGraph) = with_state(g, ne)::Int
@@ -577,7 +581,7 @@ end
 
 Add a partition of `n` vertices to the graph state `g`.
 """
-function add_partition!(g::DGraphState{T,D}, n::T) where {T <: Integer, D}
+function add_partition!(g::DGraphState{T,D}, n::Integer) where {T <: Integer, D}
     check_not_frozen(g)
     if n < 1
         throw(ArgumentError("n must be >= 1"))
