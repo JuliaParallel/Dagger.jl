@@ -3,25 +3,47 @@
     add_processor_callback!("__cpu_thread_1__") do
         ThreadProc(1, 1)
     end
-    t1 = @spawn 1+1
+    # FIXME: t1 = @spawn 1+1
+    t1 = spawn(+, 1, 1)
+    fetch(t1)
     t2 = spawn(+, 1, t1)
     fetch(t2)
-    spawn() do
-        Sch.halt!(sch_handle())
+
+    # Clean up refs
+    t1 = nothing; t2 = nothing
+    state = Sch.EAGER_STATE[]
+    for i in 1:5
+        length(state.thunk_dict) == 1 && break
+        GC.gc()
+        yield()
     end
+    @assert length(state.thunk_dict) == 1
+
+    # Halt scheduler
+    notify(state.halt)
+    put!(state.chan, (1, nothing, nothing, (Sch.SchedulerHaltedException(), nothing)))
+    state = nothing
+
+    # Wait for halt
     while Sch.EAGER_INIT[]
         sleep(0.1)
     end
+
+    # Final clean-up
     Sch.EAGER_CONTEXT[] = nothing
-    GC.gc()
-    yield()
+    GC.gc(); yield()
     lock(Sch.ERRORMONITOR_TRACKED) do tracked
-        if all(t->istaskdone(t) || istaskfailed(t), tracked)
+        if all(t->istaskdone(t) || istaskfailed(t), map(last, tracked))
             empty!(tracked)
             return
         end
-        for t in tracked
-            Base.throwto(t, InterruptException())
+        for (name, t) in tracked
+            @warn "Waiting on $name"
+            if t.state == :runnable
+                Base.throwto(t, InterruptException())
+            else
+                wait(t)
+            end
         end
     end
     MemPool.exit_hook()
