@@ -4,37 +4,41 @@ struct DGraphEdgeIter{T,M} <: Graphs.AbstractEdgeIter
 end
 DGraphEdgeIter(g::DGraph{T}; metadata::Bool=false, meta_f=nothing) where T =
     DGraphEdgeIter{T,metadata}(fetch(g.state), meta_f)
-struct DGraphEdgeIterState
+struct DGraphEdgeIterState{T}
     adj::Bool
     part::Int
     idx::Int
     cache
     cache_meta
+    seen::Union{Set{Edge{T}},Nothing}
 end
 Base.length(iter::DGraphEdgeIter) = ne(iter.graph)
 Base.eltype(iter::DGraphEdgeIter{T,false}) where T = Edge{T}
 Base.eltype(iter::DGraphEdgeIter{T,true}) where T = Tuple{Edge{T},Any}
-function Base.iterate(iter::DGraphEdgeIter)
+function Base.iterate(iter::DGraphEdgeIter{T}) where T
     g = iter.graph
     if nv(g) == 0
         return nothing
     elseif sum(g.parts_ne; init=0) > 0
         # Start with partitions
-        return iterate(iter, DGraphEdgeIterState(false, 1, 1, nothing, nothing))
+        seen = is_directed(g) ? nothing : Set{Edge{T}}()
+        return iterate(iter, DGraphEdgeIterState{T}(false, 1, 1, nothing, nothing, seen))
     elseif sum(g.bg_adjs_ne_src; init=0) > 0
         # Start with background AdjLists
-        return iterate(iter, DGraphEdgeIterState(true, 1, 1, nothing, nothing))
+        seen = is_directed(g) ? nothing : Set{Edge{T}}()
+        return iterate(iter, DGraphEdgeIterState{T}(true, 1, 1, nothing, nothing, seen))
     else
         return nothing
     end
 end
-function Base.iterate(iter::DGraphEdgeIter{T,M}, state::DGraphEdgeIterState) where {T,M}
+function Base.iterate(iter::DGraphEdgeIter{T,M}, state::DGraphEdgeIterState{T}) where {T,M}
     g = iter.graph
     adj = state.adj
     part = state.part
     idx = state.idx
     cache = state.cache
     cache_meta = state.cache_meta
+    seen = state.seen
 
     edge_metadata_for(meta, edges) = map(edge->meta[edge[1],edge[2]], edges)
 
@@ -42,7 +46,7 @@ function Base.iterate(iter::DGraphEdgeIter{T,M}, state::DGraphEdgeIterState) whe
     if !adj
         if part > length(g.parts)
             # Restart with background AdjLists
-            return iterate(iter, DGraphEdgeIterState(true, 1, 1, nothing, nothing))
+            return iterate(iter, DGraphEdgeIterState{T}(true, 1, 1, nothing, nothing, seen))
         end
         if cache === nothing
             cache = map(Tuple, fetch(Dagger.@spawn edges(g.parts[part])))
@@ -105,6 +109,18 @@ function Base.iterate(iter::DGraphEdgeIter{T,M}, state::DGraphEdgeIterState) whe
         @goto start
     end
 
+    # Restart if this edge has already been seen (undirected case)
+    if seen !== nothing
+        if value in seen
+            @goto start
+        end
+        value_rev = Edge(dst(value), src(value))
+        if value_rev in seen
+            @goto start
+        end
+        push!(seen, value)
+    end
+
     return (M ? (value, value_meta) : value,
-            DGraphEdgeIterState(adj, part, idx, cache, cache_meta))
+            DGraphEdgeIterState{T}(adj, part, idx, cache, cache_meta, seen))
 end

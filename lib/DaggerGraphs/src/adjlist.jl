@@ -35,7 +35,7 @@ function Base.iterate(adjlist::SimpleAdjListStorage{T}) where T
         return nothing
     end
     edge_idx = something(findfirst(x->!isempty(x), adjlist.fadjlist[idx]))
-    state = (idx, edge_idx)
+    state = (T(idx), T(edge_idx))
     return Base.iterate(adjlist, state)
 end
 function Base.iterate(adjlist::SimpleAdjListStorage{T}, state::Tuple{T,T}) where T
@@ -43,18 +43,19 @@ function Base.iterate(adjlist::SimpleAdjListStorage{T}, state::Tuple{T,T}) where
     if src > length(adjlist.fadjlist)
         return nothing
     elseif dst > length(adjlist.fadjlist[src])
-        src += 1
-        dst = 1
+        src += one(T)
+        dst = one(T)
         head = src
         src = findfirst(x->!isempty(x), @view(adjlist.fadjlist[head:end]))
         if src === nothing
             return nothing
         end
+        src = T(src)
         # Shift by offset from @view
-        src += head - 1
+        src += head - one(T)
     end
     value = (src, adjlist.fadjlist[src][dst])
-    dst += 1
+    dst += one(T)
     return (Edge(value), (src, dst))
 end
 function Graphs.add_edge!(adjlist::SimpleAdjListStorage{T,D}, edge) where {T,D}
@@ -82,18 +83,10 @@ function Graphs.add_edge!(adjlist::SimpleAdjListStorage{T,D}, edge) where {T,D}
         # Directed graphs have only forward edges
         push!(adjlist.fadjlist[src], dst)
         push!(adjlist.badjlist[dst], src)
-        # Consider this behavior of using Graphs.jl
-        # g = SimpleDiGraph(3,0); add_edge!(g,1,2)
-        # println( "$(g.fadjlist) | $(g.badjlist)")
-        # [[2], Int64[], Int64[]] | [Int64[], [1], Int64[]]
     else
         # Undirected graphs have both forward and backward edges
         push!(adjlist.fadjlist[src], dst)
         push!(adjlist.fadjlist[dst], src)
-        # Consider this behavior of using Graphs.jl
-        # g = SimpleGraph(3,0); add_edge!(g,1,2)
-        # println(g.fadjlist)
-        #   [[2], [1], Int64[]]
     end
 
     return true
@@ -175,37 +168,59 @@ Graphs.add_edge!(adj::AdjList{T}, src::Integer, dst::Integer) where T =
 Graphs.add_edge!(adj::AdjList, edge) = add_edge!(adj.data, edge)
 add_edges!(adj::AdjList, edges; all::Bool=true) = add_edges!(adj.data, edges; all)
 Graphs.edges(adj::AdjList) = copy(adj.data)
-function Graphs.inneighbors(adj::AdjList, v::Integer)
+function Graphs.inneighbors(adj::AdjList{T,D}, v::Integer) where {T,D}
     neighbors = Int[]
     for edge in adj.data
         src, dst = Tuple(edge)
         if dst == v
             push!(neighbors, src)
+        elseif !D && src == v
+            push!(neighbors, dst)
         end
     end
+    sort!(neighbors)
+    unique!(neighbors)
     return neighbors
 end
-function Graphs.inneighbors(adj::AdjList{T,D,SimpleAdjListStorage{T}}, v::Integer) where {T,D}
+function Graphs.inneighbors(adj::AdjList{T,D,SimpleAdjListStorage{T,D}}, v::Integer) where {T,D}
     if D
-        return copy(adj.data.badjlist[v])
+        return length(adj.data.badjlist) >= v ? copy(adj.data.badjlist[v]) : T[]
     else
-        return invoke(inneighbors, Tuple{AdjList, Integer}, adj, v)
+        if length(adj.data.fadjlist) >= v
+            neighbors = copy(adj.data.fadjlist[v])
+            sort!(neighbors)
+            unique!(neighbors)
+            return neighbors
+        else
+            return T[]
+        end
     end
 end
-function Graphs.outneighbors(adj::AdjList, v::Integer)
+function Graphs.outneighbors(adj::AdjList{T,D}, v::Integer) where {T,D}
     neighbors = Int[]
     for edge in adj.data
         src, dst = Tuple(edge)
         if src == v
             push!(neighbors, dst)
+        elseif !D && dst == v
+            push!(neighbors, src)
         end
     end
+    sort!(neighbors)
+    unique!(neighbors)
     return neighbors
 end
 function Graphs.outneighbors(adj::AdjList{T,SimpleAdjListStorage{T,D}}, v::Integer) where {T,D}
     if D
-        return copy(adj.data.fadjlist[v])
+        return length(adj.data.fadjlist) >= v ? copy(adj.data.fadjlist[v]) : T[]
     else
-        return invoke(outneighbors, Tuple{AdjList, Integer}, adj, v)
+        if length(adj.data.fadjlist) >= v
+            neighbors = copy(adj.data.fadjlist[v])
+            sort!(neighbors)
+            unique!(neighbors)
+            return neighbors
+        else
+            return T[]
+        end
     end
 end

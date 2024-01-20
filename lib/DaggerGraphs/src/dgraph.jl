@@ -86,8 +86,9 @@ mutable struct DGraph{T<:Integer, D} <: Graphs.AbstractGraph{T}
         return new{T,D}(Dagger.tochunk(state), Ref(false))
     end
 end
-DGraph(x; kwargs...) = DGraph{Int}(x; kwargs...)
 DGraph(; kwargs...) = DGraph{Int}(; kwargs...)
+DGraph(x::T; kwargs...) where {T<:Integer} = DGraph{T}(x; kwargs...)
+DGraph(x::AbstractGraph{T}; kwargs...) where {T<:Integer} = DGraph{T}(x; kwargs...)
 DGraph{T}(n::S; kwargs...) where {T<:Integer,S<:Integer} =
     DGraph{T}(T(n); kwargs...)
 function DGraph{T}(n::T; freeze::Bool=false, kwargs...) where {T<:Integer}
@@ -96,13 +97,13 @@ function DGraph{T}(n::T; freeze::Bool=false, kwargs...) where {T<:Integer}
     freeze && freeze!(g)
     return g
 end
-function DGraph{T}(sg::AbstractGraph{T}; directed::Bool=is_directed(sg), freeze::Bool=false, kwargs...) where {T<:Integer}
-    g = DGraph{T}(nv(sg); directed, kwargs...)
+function DGraph{T}(sg::AbstractGraph{U}; directed::Bool=is_directed(sg), freeze::Bool=false, kwargs...) where {T<:Integer, U<:Integer}
+    g = DGraph{T}(T(nv(sg)); directed, kwargs...)
     foreach(edges(sg)) do edge
-
-        add_edge!(g, edge)
+        edge_conv = Edge(T(src(edge)), T(dst(edge)))
+        add_edge!(g, edge_conv)
         if !is_directed(sg) && directed
-            add_edge!(g, dst(edge), src(edge))
+            add_edge!(g, dst(edge_conv), src(edge_conv))
         end
     end
     freeze && freeze!(g)
@@ -221,7 +222,7 @@ function freeze!(g::DGraphState)
         return false
     end
     g.frozen[] = true
-    for part in nparts(g)
+    for part in 1:nparts(g)
         if Dagger.istask(g.parts[part])
             g.parts[part] = fetch(g.parts[part]; raw=true)
         end
@@ -516,6 +517,9 @@ function Graphs.has_edge(g::DGraphState{T,D}, src::Integer, dst::Integer) where 
     end
 end
 Graphs.is_directed(::DGraph{T,D}) where {T,D} = D
+Graphs.is_directed(::Type{<:DGraph{T,D}}) where {T,D} = D
+Graphs.is_directed(::DGraphState{T,D}) where {T,D} = D
+Graphs.is_directed(::Type{<:DGraphState{T,D}}) where {T,D} = D
 Graphs.vertices(g::DGraph{T}) where T = Base.OneTo{T}(nv(g))
 Graphs.edges(g::DGraph) = DGraphEdgeIter(g)
 
@@ -663,30 +667,30 @@ function add_partition!(g::DGraphState{T,D}, part_data::Ref, back_data::Ref,
     push!(g.bg_adjs_e_meta, back_edge_meta_data[])
     return length(g.parts)
 end
-function Graphs.add_edge!(g::DGraph, src::Integer, dst::Integer)
+function Graphs.add_edge!(g::DGraph{T}, src::Integer, dst::Integer) where T
     check_not_frozen(g)
-    return with_state(g, add_edge!, src, dst)
+    return with_state(g, add_edge!, T(src), T(dst))
 end
-function Graphs.add_edge!(g::DGraph, edge::Edge)
+function Graphs.add_edge!(g::DGraph{T}, edge::Edge) where T
     check_not_frozen(g)
-    return add_edge!(g, src(edge), dst(edge))
+    return add_edge!(g, T(src(edge)), T(dst(edge)))
 end
 function Graphs.add_edge!(g::DGraphState{T,D}, src::Integer, dst::Integer) where {T,D}
     check_not_frozen(g)
 
-    src_part_idx = findfirst(span->src in span, g.parts_nv)
+    src_part_idx = T(findfirst(span->src in span, g.parts_nv))
     @assert src_part_idx !== nothing "Source vertex $src does not exist"
 
-    dst_part_idx = findfirst(span->dst in span, g.parts_nv)
+    dst_part_idx = T(findfirst(span->dst in span, g.parts_nv))
     @assert dst_part_idx !== nothing "Destination vertex $dst does not exist"
 
     if src_part_idx == dst_part_idx
         # Edge exists within a single partition
         part = g.parts[src_part_idx]
-        src_shift = src - (g.parts_nv[src_part_idx].start - 1)
-        dst_shift = dst - (g.parts_nv[dst_part_idx].start - 1)
+        src_shift = src - (g.parts_nv[src_part_idx].start - one(T))
+        dst_shift = dst - (g.parts_nv[dst_part_idx].start - one(T))
         if exec_fast(add_edge!, part, src_shift, dst_shift)
-            g.parts_ne[src_part_idx] += 1
+            g.parts_ne[src_part_idx] += one(T)
         else
             return false
         end
@@ -701,13 +705,13 @@ function Graphs.add_edge!(g::DGraphState{T,D}, src::Integer, dst::Integer) where
         end
         if D
             # TODO: This will cause imbalance for many outgoing edges from a few vertices
-            g.bg_adjs_ne_src[src_part_idx] += 1
+            g.bg_adjs_ne_src[src_part_idx] += one(T)
         else
             owner_part_idx = edge_owner(src, dst, src_part_idx, dst_part_idx)
-            g.bg_adjs_ne_src[owner_part_idx] += 1
+            g.bg_adjs_ne_src[owner_part_idx] += one(T)
         end
-        g.bg_adjs_ne[src_part_idx] += 1
-        g.bg_adjs_ne[dst_part_idx] += 1
+        g.bg_adjs_ne[src_part_idx] += one(T)
+        g.bg_adjs_ne[dst_part_idx] += one(T)
     end
 
     return true
@@ -771,23 +775,24 @@ function add_edges!(g::Graphs.AbstractSimpleGraph, shift, edges; all::Bool=true)
 end
 
 """
-    edge_owner(src::Integer, dst::Integer, src_part_idx::Integer, dst_part_idx::Integer)
+    edge_owner(src::T, dst::T, src_part_idx::T, dst_part_idx::T) where {T<:Integer}
 
 Determine which partition owns the edge `(src, dst)`.
-FIXME: I do not like it. Both partitions should own the edge. (i.e. there should be data redundancy for the backgorund graph)
+FIXME: I do not like it. Both partitions should own the edge. (i.e. there should be data redundancy for the background graph)
 """
-edge_owner(src::Int, dst::Int, src_part_idx::Int, dst_part_idx::Int) =
+edge_owner(src::T, dst::T, src_part_idx::T, dst_part_idx::T) where {T<:Integer} =
     iseven(hash(Base.unsafe_trunc(UInt, src+dst))) ? src_part_idx : dst_part_idx
 
-Graphs.inneighbors(g::DGraph, v::Integer) = with_state(g, inneighbors, v)
-function Graphs.inneighbors(g::DGraphState{T}, v::Integer) where T
+Graphs.inneighbors(g::DGraph{T}, v::Integer) where T =
+    with_state(g, inneighbors, T(v))
+function Graphs.inneighbors(g::DGraphState{T}, v::T) where T
     part_idx = findfirst(span->v in span, g.parts_nv)
     if part_idx === nothing
         throw(BoundsError(g, v))
     end
 
     neighbors = T[]
-    shift = g.parts_nv[part_idx].start - 1
+    shift = g.parts_nv[part_idx].start - one(T)
 
     # Check against local edges
     v_shift = v - shift
@@ -797,17 +802,18 @@ function Graphs.inneighbors(g::DGraphState{T}, v::Integer) where T
     # Check against background edges
     append!(neighbors, exec_fast(inneighbors, g.bg_adjs[part_idx], v))
 
-    return neighbors
+    return sort!(neighbors)
 end
-Graphs.outneighbors(g::DGraph, v::Integer) = with_state(g, outneighbors, v)
-function Graphs.outneighbors(g::DGraphState{T}, v::Integer) where T
+Graphs.outneighbors(g::DGraph{T}, v::Integer) where T =
+    with_state(g, outneighbors, T(v))
+function Graphs.outneighbors(g::DGraphState{T}, v::T) where T
     part_idx = findfirst(span->v in span, g.parts_nv)
     if part_idx === nothing
         throw(BoundsError(g, v))
     end
 
     neighbors = T[]
-    shift = g.parts_nv[part_idx].start - 1
+    shift = g.parts_nv[part_idx].start - one(T)
 
     # Check against local edges
     v_shift = v - shift
@@ -817,7 +823,7 @@ function Graphs.outneighbors(g::DGraphState{T}, v::Integer) where T
     # Check against background edges
     append!(neighbors, exec_fast(outneighbors, g.bg_adjs[part_idx], v))
 
-    return neighbors
+    return sort!(neighbors)
 end
 
 """
@@ -878,8 +884,8 @@ partition_edges(g::DGraph, part::Integer) =
 
 Get the edges of the partition `part` of the graph state `g`.
 """
-function partition_edges(g::DGraphState, part::Integer)
-    shift = g.parts_nv[part].start - 1
+function partition_edges(g::DGraphState{T}, part::Integer) where T
+    shift = g.parts_nv[part].start - one(T)
     part_edges = map(edge->Edge(src(edge)+shift, dst(edge)+shift), exec_fast(edges, g.parts[part]))
     back_edges = exec_fast(edges, g.bg_adjs[part])
     return part_edges, back_edges
