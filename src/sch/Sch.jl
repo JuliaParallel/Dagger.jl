@@ -543,16 +543,22 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
             if errored
                 true_ex = unwrap_nested_exception(result)
                 if true_ex isa ProcessExitedException
-                    @warn "Worker $(pid) died, rescheduling work"
+                    @dagdebug nothing :take "Worker $pid died"
+                    if thunk_id !== nothing
+                        @warn "Worker $pid died, rescheduling work"
+                    end
 
-                    # Remove dead worker from procs list
+                    # Tear down dead worker
                     timespan_start(ctx, :remove_procs, 0, 0)
                     remove_dead_proc!(ctx, state, gproc)
                     timespan_finish(ctx, :remove_procs, 0, 0)
 
-                    timespan_start(ctx, :handle_fault, 0, 0)
-                    handle_fault(ctx, state, gproc)
-                    timespan_finish(ctx, :handle_fault, 0, 0)
+                    if thunk_id !== nothing
+                        # Recreate any lost tasks/data
+                        timespan_start(ctx, :handle_fault, 0, 0)
+                        handle_fault(ctx, state, gproc)
+                        timespan_finish(ctx, :handle_fault, 0, 0)
+                    end
                     return # effectively `continue`
                 elseif true_ex isa SchedulerHaltedException
                     @dagdebug nothing :take "Got halt request, exiting"
