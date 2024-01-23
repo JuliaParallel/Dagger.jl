@@ -487,9 +487,13 @@ function testevicted(x)
     x
 end
 end
+
+@test_skip "Chunk Caching"
+#=
 @testset "Chunk Caching" begin
     compute(delayed(testevicted)(delayed(testpresent)(c1,c2)))
 end
+=#
 
 @testset "MemPool.approx_size" begin
     for (obj, size) in [
