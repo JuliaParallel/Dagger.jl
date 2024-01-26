@@ -42,6 +42,9 @@ include("utils/system_uuid.jl")
 include("utils/caching.jl")
 include("sch/Sch.jl"); using .Sch
 
+# Streaming
+include("stream.jl")
+
 # Array computations
 include("array/darray.jl")
 include("array/alloc.jl")
