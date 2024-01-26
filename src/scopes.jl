@@ -211,6 +211,7 @@ end
 constrain(x::UnionScope, y) = constrain(x, UnionScope((y,)))
 
 Base.isless(::NodeScope, ::NodeScope) = false
+Base.isless(::NodeScope, ::UnionScope) = true
 Base.isless(::NodeScope, ::TaintScope) = true
 Base.isless(::NodeScope, ::AnyScope) = true
 constrain(x::NodeScope, y::NodeScope) =
@@ -218,6 +219,7 @@ constrain(x::NodeScope, y::NodeScope) =
 
 Base.isless(::ProcessScope, ::ProcessScope) = false
 Base.isless(::ProcessScope, ::NodeScope) = true
+Base.isless(::ProcessScope, ::UnionScope) = true
 Base.isless(::ProcessScope, ::TaintScope) = true
 Base.isless(::ProcessScope, ::AnyScope) = true
 constrain(x::ProcessScope, y::ProcessScope) =
@@ -228,6 +230,7 @@ constrain(x::NodeScope, y::ProcessScope) =
 Base.isless(::ExactScope, ::ExactScope) = false
 Base.isless(::ExactScope, ::ProcessScope) = true
 Base.isless(::ExactScope, ::NodeScope) = true
+Base.isless(::ExactScope, ::UnionScope) = true
 Base.isless(::ExactScope, ::TaintScope) = true
 Base.isless(::ExactScope, ::AnyScope) = true
 constrain(x::ExactScope, y::ExactScope) =
