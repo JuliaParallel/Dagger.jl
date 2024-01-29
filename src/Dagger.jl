@@ -34,6 +34,7 @@ include("queue.jl")
 include("thunk.jl")
 include("submission.jl")
 include("chunks.jl")
+include("memory-spaces.jl")
 
 # Task scheduling
 include("compute.jl")
@@ -41,6 +42,9 @@ include("utils/clock.jl")
 include("utils/system_uuid.jl")
 include("utils/caching.jl")
 include("sch/Sch.jl"); using .Sch
+
+# Data dependency task queue
+include("datadeps.jl")
 
 # Array computations
 include("array/darray.jl")
