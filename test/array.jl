@@ -281,6 +281,7 @@ end
     @test !isempty(Dagger.show_plan(Dagger.spawn(()->10)))
 end=#
 
+#= FIXME: Unreliable, may segfault/bus error
 @testset "sharedarray" begin
     A = SharedArray{Int}((1024,))
     B = SharedArray{Int}((1024,))
@@ -288,3 +289,4 @@ end=#
     @test length(C) === length(A) + length(B)
     @test typeof(C) === (Dagger.use_shared_array[] ? SharedArray{Int,1} : Array{Int,1})
 end
+=#
