@@ -933,7 +933,7 @@ function finish_task!(ctx, state, node, thunk_failed)
     if haskey(state.waiting_data, node) && isempty(state.waiting_data[node])
         delete!(state.waiting_data, node)
     end
-    evict_all_chunks!(ctx, to_evict)
+    #evict_all_chunks!(ctx, to_evict)
 end
 
 function delete_unused_tasks!(state)
