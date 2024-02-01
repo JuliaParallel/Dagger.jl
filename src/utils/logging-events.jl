@@ -48,7 +48,7 @@ init_similar(::ProcessorSaturation) = ProcessorSaturation()
 
 function (ps::ProcessorSaturation)(ev::Event{:start})
     if ev.category == :compute
-        proc = ev.timeline.to_proc
+        proc = ev.id.processor
         old = get(ps.saturation, proc, 0)
         ps.saturation[proc] = old + 1
     end
@@ -58,7 +58,7 @@ function (ps::ProcessorSaturation)(ev::Event{:start})
 end
 function (ps::ProcessorSaturation)(ev::Event{:finish})
     if ev.category == :compute
-        proc = ev.timeline.to_proc
+        proc = ev.id.processor
         old = get(ps.saturation, proc, 0)
         ps.saturation[proc] = old - 1
         if old == 1
@@ -92,5 +92,75 @@ function (ws::WorkerSaturation)(ev::Event{:finish})
     end
     ws.saturation
 end
+
+"""
+    TaskNames
+
+Creates a unique name for each task.
+"""
+struct TaskNames end
+function (::TaskNames)(ev::Event{:start})
+    if ev.category == :add_thunk
+        id = ev.id.thunk_id
+        f = Dagger.chunktype(ev.timeline.f).instance
+        return "$(nameof(f)) [$id]"
+    end
+    return
+end
+(td::TaskNames)(ev::Event{:finish}) = nothing
+
+"""
+    TaskArguments{MA}
+
+Records the arguments of each submitted task. If `MA` is `true`, then
+mutable arguments are also recorded.
+"""
+struct TaskArguments{MA} end
+function (::TaskArguments{MA})(ev::Event{:start}) where MA
+    if ev.category == :add_thunk
+        deps = Pair{Union{Symbol,Int},Union{UInt,Int}}[]
+        for (idx, (pos, arg)) in enumerate(ev.timeline.args)
+            pos_idx = pos === nothing ? idx : pos
+            arg = Dagger.unwrap_weak_checked(arg)
+            if arg isa Dagger.Thunk || arg isa Dagger.Sch.ThunkID
+                push!(deps, pos_idx => Int(arg.id))
+            elseif arg isa Dagger.EagerThunk
+                # FIXME: Get TID
+                #push!(deps, pos_idx => arg.uid)
+            elseif MA && ismutable(arg)
+                push!(deps, pos_idx => objectid(arg))
+            end
+        end
+        return ev.id.thunk_id => deps
+    end
+    return
+end
+(td::TaskArguments)(ev::Event{:finish}) = nothing
+
+"""
+    TaskDependencies
+
+Records the dependencies of each submitted task.
+"""
+struct TaskDependencies end
+function (::TaskDependencies)(ev::Event{:start})
+    if ev.category == :add_thunk
+        deps = Int[]
+        for dep in get(Set, ev.timeline.options, :syncdeps)
+            dep = Dagger.unwrap_weak_checked(dep)
+            if dep isa Dagger.Thunk || dep isa Dagger.Sch.ThunkID
+                push!(deps, dep.id)
+            elseif dep isa Dagger.EagerThunk
+                # FIXME: Get TID
+                #push!(deps, dep.uid)
+            else
+                @warn "Unexpected dependency type: $dep"
+            end
+        end
+        return ev.id.thunk_id => deps
+    end
+    return
+end
+(td::TaskDependencies)(ev::Event{:finish}) = nothing
 
 end # module Events

@@ -1,0 +1,100 @@
+# Logging utilities
+
+function enable_logging!(;metrics::Bool=true,
+                          timeline::Bool=false,
+                          tasknames::Bool=true,
+                          taskdeps::Bool=true,
+                          taskargs::Bool=false,
+                          taskargs_mutable::Bool=true,
+                          profile::Bool=false)
+    ml = TimespanLogging.MultiEventLog()
+    ml[:core] = TimespanLogging.Events.CoreMetrics()
+    ml[:id] = TimespanLogging.Events.IDMetrics()
+    if timeline
+        ml[:timeline] = TimespanLogging.Events.TimelineMetrics()
+    end
+    if tasknames
+        ml[:tasknames] = Dagger.Events.TaskNames()
+    end
+    if taskdeps
+        ml[:taskdeps] = Dagger.Events.TaskDependencies()
+    end
+    if taskargs
+        ml[:taskargs] = Dagger.Events.TaskArguments{taskargs_mutable}()
+    end
+    if profile
+        ml[:profile] = DaggerWebDash.ProfileMetrics()
+    end
+    if metrics
+        ml[:wsat] = Dagger.Events.WorkerSaturation()
+        ml[:loadavg] = TimespanLogging.Events.CPULoadAverages()
+        ml[:bytes] = Dagger.Events.BytesAllocd()
+        ml[:mem] = TimespanLogging.Events.MemoryFree()
+        ml[:esat] = TimespanLogging.Events.EventSaturation()
+        ml[:psat] = Dagger.Events.ProcessorSaturation()
+    end
+    Dagger.Sch.eager_context().log_sink = ml
+end
+function disable_logging!()
+    Dagger.Sch.eager_context().log_sink = TimespanLogging.NoOpLog()
+end
+function fetch_logs!()
+    return TimespanLogging.get_logs!(Dagger.Sch.eager_context())
+end
+
+function logs_event_pairs(f, logs::Dict)
+    running_events = Dict{Tuple,Int}()
+    for w in keys(logs)
+        for idx in 1:length(logs[w][:core])
+            kind = logs[w][:core][idx].kind
+            category = logs[w][:core][idx].category
+            id = logs[w][:id][idx]
+            if id === nothing
+                continue
+            end
+            id::NamedTuple
+            if haskey(id, :thunk_id)
+                event_key = (category, id)
+                if kind == :start
+                    running_events[event_key] = idx
+                else
+                    event_start_idx = running_events[event_key]
+                    f(w, event_start_idx, idx)
+                end
+            end
+        end
+    end
+end
+function logs_task_dependencies(logs::Dict)
+    g = SimpleDiGraph()
+    tid_to_vertex = Dict{Int,Int}()
+    task_names = String[]
+    tid_to_proc = Dict{Int,Processor}()
+    for w in keys(logs)
+        for idx in 1:length(logs[w][:core])
+            category = logs[w][:core][idx].category
+            kind = logs[w][:core][idx].kind
+            id = logs[w][:id][idx]
+            if category == :add_thunk && kind == :start
+                id::NamedTuple
+                taskdeps = logs[w][:taskdeps][idx]::Pair{Int,Vector{Int}}
+                taskname = logs[w][:tasknames][idx]::String
+                tid, deps = taskdeps
+                add_vertex!(g)
+                tid_to_vertex[tid] = nv(g)
+                push!(task_names, taskname)
+                for dep in deps
+                    add_edge!(g, tid_to_vertex[dep], nv(g))
+                end
+            elseif category == :compute && kind == :start
+                id::NamedTuple
+                tid = id.thunk_id
+                proc = id.processor
+                tid_to_proc[tid] = proc
+            end
+        end
+    end
+    tids_sorted = map(first, sort(collect(tid_to_vertex); by=last))
+    task_procs = Processor[tid_to_proc[tid] for tid in tids_sorted]
+    return (g, tid_to_vertex, task_names, task_procs)
+end

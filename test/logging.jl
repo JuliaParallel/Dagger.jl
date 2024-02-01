@@ -63,76 +63,116 @@ import Colors
         end
     end
     @testset "MultiEventLog" begin
-        ctx = Context()
-        ml = MultiEventLog()
-        ml[:core] = Events.CoreMetrics()
-        ml[:id] = Events.IDMetrics()
-        ml[:timeline] = Events.TimelineMetrics()
-        ml[:wsat] = Dagger.Events.WorkerSaturation()
-        ml[:loadavg] = Events.CPULoadAverages()
-        ml[:bytes] = Dagger.Events.BytesAllocd()
-        ml[:mem] = Events.MemoryFree()
-        ml[:esat] = Events.EventSaturation()
-        ml[:psat] = Dagger.Events.ProcessorSaturation()
-        ctx.log_sink = ml
+        @testset "enable_logging!" begin
+            Dagger.enable_logging!()
 
-        X = rand(Float32, 4, 3)
-        a = delayed(sum)(X)
-        b = delayed(sum)(X)
-        c = delayed(+)(a,b)
-        compute(ctx, c)
+            t = Dagger.@spawn 1+2
+            fetch(Dagger.@spawn t*3)
 
-        logs = TimespanLogging.get_logs!(ml)
-        for w in keys(logs)
-            len = length(logs[w][:core])
-            if w == 1
-                @test len > 1
+            logs = Dagger.fetch_logs!()
+            @test haskey(logs, 1)
+            for consumer in (:core, :id, :timeline, :wsat, :loadavg, :bytes, :mem, :esat, :psat, :tasknames, :taskdeps)
+                @test length(logs[1][consumer]) > 0
+                @test !all(log -> log !== nothing, logs[1][consumer])
             end
-            for c in (:core, :id, :timeline, :wsat, :loadavg, :bytes, :mem, :esat, :psat)
-                @test haskey(logs[w], c)
-                @test length(logs[w][c]) == len
-            end
+
+            Dagger.disable_logging!()
         end
-        @test length(keys(logs)) > 1
 
-        l1 = logs[1]
-        core = l1[:core]
-        @test !any(isnothing, core)
-        esat = l1[:esat]
-        @test any(e->haskey(e, :scheduler_init), esat)
-        @test any(e->haskey(e, :schedule), esat)
-        @test any(e->haskey(e, :fire), esat)
-        @test any(e->haskey(e, :take), esat)
-        @test any(e->haskey(e, :finish), esat)
-        # Note: May one day be true as scheduler evolves
-        @test !any(e->haskey(e, :compute), esat)
-        @test !any(e->haskey(e, :move), esat)
-        psat = l1[:psat]
-        # Note: May become false
-        @test all(e->length(e) == 0, psat)
+        @testset "Manual" begin
+            ctx = Context()
+            ml = MultiEventLog()
+            ml[:core] = Events.CoreMetrics()
+            ml[:id] = Events.IDMetrics()
+            ml[:timeline] = Events.TimelineMetrics()
+            ml[:wsat] = Dagger.Events.WorkerSaturation()
+            ml[:loadavg] = Events.CPULoadAverages()
+            ml[:bytes] = Dagger.Events.BytesAllocd()
+            ml[:mem] = Events.MemoryFree()
+            ml[:esat] = Events.EventSaturation()
+            ml[:psat] = Dagger.Events.ProcessorSaturation()
+            ctx.log_sink = ml
 
-        had_psat_proc = 0
-        for wo in filter(w->w != 1, keys(logs))
-            lo = logs[wo]
-            esat = lo[:esat]
-            @test !any(e->haskey(e, :scheduler_init), esat)
-            @test !any(e->haskey(e, :schedule), esat)
-            @test !any(e->haskey(e, :fire), esat)
-            @test !any(e->haskey(e, :take), esat)
-            @test !any(e->haskey(e, :finish), esat)
-            psat = lo[:psat]
-            if any(e->length(e) > 0, psat)
-                had_psat_proc += 1
-                @test any(e->haskey(e, :compute), esat)
-                @test any(e->haskey(e, :move), esat)
+            X = rand(Float32, 4, 3)
+            a = delayed(sum)(X)
+            b = delayed(sum)(X)
+            c = delayed(+)(a,b)
+            compute(ctx, c)
+
+            logs = TimespanLogging.get_logs!(ml)
+            for w in keys(logs)
+                len = length(logs[w][:core])
+                if w == 1
+                    @test len > 1
+                end
+                for c in (:core, :id, :timeline, :wsat, :loadavg, :bytes, :mem, :esat, :psat)
+                    @test haskey(logs[w], c)
+                    @test length(logs[w][c]) == len
+                end
+
+                for idx in 1:length(logs[w][:core])
+                    category = logs[w][:core][idx].category
+                    if category in (:scheduler_init, :scheduler_exit, :take, :assign_procs)
+                        @test logs[w][:id][idx] === nothing
+                    end
+                    if category in (:add_thunk, :schedule, :finish, :move, :compute, :storage_wait, :storage_safe_scan, :enqueue)
+                        @test logs[w][:id][idx] isa NamedTuple
+                        @test haskey(logs[w][:id][idx], :thunk_id)
+                        @test logs[w][:id][idx].thunk_id isa Int
+                    end
+                    if category in (:init_proc, :cleanup_proc, :fire, :proc_run_wait, :proc_run_fetch, :steal_local, :remove_procs, :handle_fault, :evict)
+                        @test logs[w][:id][idx] isa NamedTuple
+                        @test haskey(logs[w][:id][idx], :worker)
+                        @test logs[w][:id][idx].worker isa Int
+                    end
+                    if category in (:proc_run_wait, :proc_run_fetch, :steal_local, :enqueue, :storage_wait, :move, :compute, :storage_safe_scan)
+                        @test logs[w][:id][idx] isa NamedTuple
+                        @test haskey(logs[w][:id][idx], :processor)
+                        @test logs[w][:id][idx].processor isa Dagger.Processor
+                    end
+                end
             end
-        end
-        @test had_psat_proc > 0
+            @test length(keys(logs)) > 1
 
-        logs = TimespanLogging.get_logs!(ml)
-        for w in keys(logs)
-            for c in keys(logs[w])
-                @test isempty(logs[w][c])
+            l1 = logs[1]
+            core = l1[:core]
+            @test !any(isnothing, core)
+            esat = l1[:esat]
+            @test any(e->haskey(e, :scheduler_init), esat)
+            @test any(e->haskey(e, :schedule), esat)
+            @test any(e->haskey(e, :fire), esat)
+            @test any(e->haskey(e, :take), esat)
+            @test any(e->haskey(e, :finish), esat)
+            # Note: May one day be true as scheduler evolves
+            @test !any(e->haskey(e, :compute), esat)
+            @test !any(e->haskey(e, :move), esat)
+            psat = l1[:psat]
+            # Note: May become false
+            @test all(e->length(e) == 0, psat)
+
+            had_psat_proc = 0
+            for wo in filter(w->w != 1, keys(logs))
+                lo = logs[wo]
+                esat = lo[:esat]
+                @test !any(e->haskey(e, :scheduler_init), esat)
+                @test !any(e->haskey(e, :schedule), esat)
+                @test !any(e->haskey(e, :fire), esat)
+                @test !any(e->haskey(e, :take), esat)
+                @test !any(e->haskey(e, :finish), esat)
+                psat = lo[:psat]
+                if any(e->length(e) > 0, psat)
+                    had_psat_proc += 1
+                    @test any(e->haskey(e, :compute), esat)
+                    @test any(e->haskey(e, :move), esat)
+                end
+            end
+            @test had_psat_proc > 0
+
+            logs = TimespanLogging.get_logs!(ml)
+            for w in keys(logs)
+                for c in keys(logs[w])
+                    @test isempty(logs[w][c])
+                end
             end
         end
     end
