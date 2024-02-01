@@ -42,10 +42,6 @@ function ormqr!(::Type{T}, side::Char, trans::Char, A::AbstractMatrix{T},
 
     #tau2= vec(Tau) 
     for i in 1:2  # first call returns lwork as work[1]
-        display(A)
-        display(Tau)
-        display(C)
-        display(work)
         ccall((@blasfunc(dormqr_), libblastrampoline), Cvoid,
             (Ref{UInt8}, Ref{UInt8}, Ref{BlasInt}, Ref{BlasInt}, 
             Ref{BlasInt}, 
@@ -53,11 +49,6 @@ function ormqr!(::Type{T}, side::Char, trans::Char, A::AbstractMatrix{T},
             Ptr{T}, Ref{BlasInt}, Ptr{T}, Ref{BlasInt}, Ptr{BlasInt}),
             side, trans, m, n, k, A, lda, Tau, 
             C, ldc, work, lwork, info)
-            println(info[])
-            display(A)
-            display(Tau)
-            display(C)
-            display(work)
             if i == 1
                 lwork = BlasInt(real(work[1]))
                 resize!(work, lwork)
