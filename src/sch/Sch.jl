@@ -319,7 +319,7 @@ const WORKER_MONITOR_TASKS = Dict{Int,Task}()
 const WORKER_MONITOR_CHANS = Dict{Int,Dict{UInt64,RemoteChannel}}()
 function init_proc(state, p, log_sink)
     ctx = Context(Int[]; log_sink)
-    timespan_start(ctx, :init_proc, p.pid, 0)
+    timespan_start(ctx, :init_proc, (;worker=p.pid), nothing)
     # Initialize pressure and capacity
     gproc = OSProc(p.pid)
     lock(state.lock) do
@@ -387,7 +387,7 @@ function init_proc(state, p, log_sink)
     # Setup dynamic listener
     dynamic_listener!(ctx, state, p.pid)
 
-    timespan_finish(ctx, :init_proc, p.pid, 0)
+    timespan_finish(ctx, :init_proc, (;worker=p.pid), nothing)
 end
 function _cleanup_proc(uid, log_sink)
     empty!(CHUNK_CACHE) # FIXME: Should be keyed on uid!
@@ -403,14 +403,14 @@ end
 function cleanup_proc(state, p, log_sink)
     ctx = Context(Int[]; log_sink)
     wid = p.pid
-    timespan_start(ctx, :cleanup_proc, wid, 0)
+    timespan_start(ctx, :cleanup_proc, (;worker=wid), nothing)
     lock(WORKER_MONITOR_LOCK) do
         if haskey(WORKER_MONITOR_CHANS, wid)
             delete!(WORKER_MONITOR_CHANS[wid], state.uid)
         end
     end
     remote_do(_cleanup_proc, wid, state.uid, log_sink)
-    timespan_finish(ctx, :cleanup_proc, wid, 0)
+    timespan_finish(ctx, :cleanup_proc, (;worker=wid), nothing)
 end
 
 "Process-local condition variable (and lock) indicating task completion."
@@ -458,24 +458,24 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
 
     master = OSProc(myid())
 
-    timespan_start(ctx, :scheduler_init, 0, master)
+    timespan_start(ctx, :scheduler_init, nothing, master)
     try
         scheduler_init(ctx, state, d, options, deps)
     finally
-        timespan_finish(ctx, :scheduler_init, 0, master)
+        timespan_finish(ctx, :scheduler_init, nothing, master)
     end
 
     value, errored = try
         scheduler_run(ctx, state, d, options)
     finally
         # Always try to tear down the scheduler
-        timespan_start(ctx, :scheduler_exit, 0, master)
+        timespan_start(ctx, :scheduler_exit, nothing, master)
         try
             scheduler_exit(ctx, state, options)
         catch err
             @error "Error when tearing down scheduler" exception=(err,catch_backtrace())
         finally
-            timespan_finish(ctx, :scheduler_exit, 0, master)
+            timespan_finish(ctx, :scheduler_exit, nothing, master)
         end
     end
 
@@ -531,10 +531,10 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
         check_integrity(ctx)
 
         isempty(state.running) && continue
-        timespan_start(ctx, :take, 0, 0)
+        timespan_start(ctx, :take, nothing, nothing)
         @dagdebug nothing :take "Waiting for results"
         chan_value = take!(state.chan) # get result of completed thunk
-        timespan_finish(ctx, :take, 0, 0)
+        timespan_finish(ctx, :take, nothing, nothing)
         if chan_value isa RescheduleSignal
             continue
         end
@@ -549,13 +549,13 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
                     @warn "Worker $(pid) died, rescheduling work"
 
                     # Remove dead worker from procs list
-                    timespan_start(ctx, :remove_procs, 0, 0)
+                    timespan_start(ctx, :remove_procs, (;worker=pid), nothing)
                     remove_dead_proc!(ctx, state, gproc)
-                    timespan_finish(ctx, :remove_procs, 0, 0)
+                    timespan_finish(ctx, :remove_procs, (;worker=pid), nothing)
 
-                    timespan_start(ctx, :handle_fault, 0, 0)
+                    timespan_start(ctx, :handle_fault, (;worker=pid), nothing)
                     handle_fault(ctx, state, gproc)
-                    timespan_finish(ctx, :handle_fault, 0, 0)
+                    timespan_finish(ctx, :handle_fault, (;worker=pid), nothing)
                     return # effectively `continue`
                 else
                     if something(ctx.options.allow_errors, false) ||
@@ -590,9 +590,9 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
                 end
             end
 
-            timespan_start(ctx, :finish, thunk_id, (;thunk_id))
+            timespan_start(ctx, :finish, (;thunk_id), (;thunk_id))
             finish_task!(ctx, state, node, thunk_failed)
-            timespan_finish(ctx, :finish, thunk_id, (;thunk_id))
+            timespan_finish(ctx, :finish, (;thunk_id), (;thunk_id))
 
             delete_unused_tasks!(state)
         end
@@ -675,13 +675,13 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         task = nothing
         @label pop_task
         if task !== nothing
-            timespan_finish(ctx, :schedule, task.id, (;thunk_id=task.id))
+            timespan_finish(ctx, :schedule, (;thunk_id=task.id), (;thunk_id=task.id))
         end
         if isempty(state.ready)
             @goto fire_tasks
         end
         task = pop!(state.ready)
-        timespan_start(ctx, :schedule, task.id, (;thunk_id=task.id))
+        timespan_start(ctx, :schedule, (;thunk_id=task.id), (;thunk_id=task.id))
         if haskey(state.cache, task)
             if haskey(state.errored, task)
                 # An error was eagerly propagated to this task
@@ -869,7 +869,7 @@ function monitor_procs_changed!(ctx, state)
             wait(ctx.proc_notify)
         end
 
-        timespan_start(ctx, :assign_procs, 0, 0)
+        timespan_start(ctx, :assign_procs, nothing, nothing)
 
         # Load new set of procs
         new_ps = procs_to_use(ctx)
@@ -897,7 +897,7 @@ function monitor_procs_changed!(ctx, state)
             end
         end
 
-        timespan_finish(ctx, :assign_procs, 0, 0)
+        timespan_finish(ctx, :assign_procs, nothing, nothing)
         old_ps = new_ps
     end
 end
@@ -982,9 +982,9 @@ function evict_chunks!(log_sink, chunks::Set{Chunk})
     ctx = Context([myid()];log_sink) 
     for chunk in chunks
         lock(TASK_SYNC) do
-            timespan_start(ctx, :evict, myid(), (;data=chunk))
+            timespan_start(ctx, :evict, (;worker=myid()), (;data=chunk))
             haskey(CHUNK_CACHE, chunk) && delete!(CHUNK_CACHE, chunk)
-            timespan_finish(ctx, :evict, myid(), (;data=chunk))
+            timespan_finish(ctx, :evict, (;worker=myid()), (;data=chunk))
         end
     end
     nothing
@@ -1061,7 +1061,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
     for ts in to_send
         # TODO: errormonitor
         @async begin
-            timespan_start(ctx, :fire, gproc.pid, 0)
+            timespan_start(ctx, :fire, (;worker=gproc.pid), nothing)
             try
                 remotecall_wait(do_tasks, gproc.pid, proc, state.chan, [ts]);
             catch err
@@ -1069,7 +1069,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
                 thunk_id = ts[1]
                 put!(state.chan, (gproc.pid, proc, thunk_id, (CapturedException(err, bt), nothing)))
             finally
-                timespan_finish(ctx, :fire, gproc.pid, 0)
+                timespan_finish(ctx, :fire, (;worker=gproc.pid), nothing)
             end
         end
     end
@@ -1189,17 +1189,18 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
         proc_occupancy = istate.proc_occupancy
         time_pressure = istate.time_pressure
 
+        wid = get_parent(to_proc).pid
         work_to_do = false
         while isopen(return_queue)
             # Wait for new tasks
             if !work_to_do
                 @dagdebug nothing :processor "Waiting for tasks"
-                timespan_start(ctx, :proc_run_wait, to_proc, nothing)
+                timespan_start(ctx, :proc_run_wait, (;worker=wid, processor=to_proc), nothing)
                 wait(istate.reschedule)
                 @static if VERSION >= v"1.9"
                     reset(istate.reschedule)
                 end
-                timespan_finish(ctx, :proc_run_wait, to_proc, nothing)
+                timespan_finish(ctx, :proc_run_wait, (;worker=wid, processor=to_proc), nothing)
                 if istate.done[]
                     return
                 end
@@ -1207,7 +1208,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
 
             # Fetch a new task to execute
             @dagdebug nothing :processor "Trying to dequeue"
-            timespan_start(ctx, :proc_run_fetch, to_proc, nothing)
+            timespan_start(ctx, :proc_run_fetch, (;worker=wid, processor=to_proc), nothing)
             work_to_do = false
             task_and_occupancy = lock(istate.queue) do queue
                 # Only steal if there are multiple queued tasks, to prevent
@@ -1226,7 +1227,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                 return queue_result
             end
             if task_and_occupancy === nothing
-                timespan_finish(ctx, :proc_run_fetch, to_proc, nothing)
+                timespan_finish(ctx, :proc_run_fetch, (;worker=wid, processor=to_proc), nothing)
 
                 @dagdebug nothing :processor "Failed to dequeue"
 
@@ -1241,7 +1242,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                 @dagdebug nothing :processor "Trying to steal"
 
                 # Try to steal a task
-                timespan_start(ctx, :steal_local, to_proc, nothing)
+                timespan_start(ctx, :steal_local, (;worker=wid, processor=to_proc), nothing)
 
                 # Try to steal from local queues randomly
                 # TODO: Prioritize stealing from busiest processors
@@ -1276,12 +1277,12 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                         from_proc = other_istate.proc
                         thunk_id = task[1]
                         @dagdebug thunk_id :processor "Stolen from $from_proc by $to_proc"
-                        timespan_finish(ctx, :steal_local, to_proc, (;from_proc, thunk_id))
+                        timespan_finish(ctx, :steal_local, (;worker=wid, processor=to_proc), (;from_proc, thunk_id))
                         # TODO: Keep stealing until we hit full occupancy?
                         @goto execute
                     end
                 end
-                timespan_finish(ctx, :steal_local, to_proc, nothing)
+                timespan_finish(ctx, :steal_local, (;worker=wid, processor=to_proc), nothing)
 
                 # TODO: Try to steal from remote queues
 
@@ -1293,7 +1294,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
             task = task_spec[]
             thunk_id = task[1]
             time_util = task[2]
-            timespan_finish(ctx, :proc_run_fetch, to_proc, (;thunk_id, proc_occupancy=proc_occupancy[], task_occupancy))
+            timespan_finish(ctx, :proc_run_fetch, (;worker=wid, processor=to_proc), (;thunk_id, proc_occupancy=proc_occupancy[], task_occupancy))
             @dagdebug thunk_id :processor "Dequeued task"
 
             # Execute the task and return its result
@@ -1378,7 +1379,7 @@ function do_tasks(to_proc, return_queue, tasks)
         for task in tasks
             thunk_id = task[1]
             occupancy = task[4]
-            timespan_start(ctx, :enqueue, (;to_proc, thunk_id), nothing)
+            timespan_start(ctx, :enqueue, (;processor=to_proc, thunk_id), nothing)
             should_launch = lock(TASK_SYNC) do
                 # Already running; don't try to re-launch
                 if !(thunk_id in TASKS_RUNNING)
@@ -1390,7 +1391,7 @@ function do_tasks(to_proc, return_queue, tasks)
             end
             should_launch || continue
             enqueue!(queue, TaskSpecKey(task), occupancy)
-            timespan_finish(ctx, :enqueue, (;to_proc, thunk_id), nothing)
+            timespan_finish(ctx, :enqueue, (;processor=to_proc, thunk_id), nothing)
             @dagdebug thunk_id :processor "Enqueued task"
         end
     end
@@ -1435,7 +1436,7 @@ function do_task(to_proc, task_desc)
     to_storage_name = nameof(typeof(to_storage))
     storage_cap = storage_capacity(to_storage)
 
-    timespan_start(ctx, :storage_wait, thunk_id, (;f, to_proc, device=typeof(to_storage)))
+    timespan_start(ctx, :storage_wait, (;thunk_id, processor=to_proc), (;f, device=typeof(to_storage)))
     real_time_util = Ref{UInt64}(0)
     real_alloc_util = UInt64(0)
     if !meta
@@ -1493,7 +1494,7 @@ function do_task(to_proc, task_desc)
             break
         end
     end
-    timespan_finish(ctx, :storage_wait, thunk_id, (;f, to_proc, device=typeof(to_storage)))
+    timespan_finish(ctx, :storage_wait, (;thunk_id, processor=to_proc), (;f, device=typeof(to_storage)))
 
     @dagdebug thunk_id :execute "Moving data"
 
@@ -1507,7 +1508,7 @@ function do_task(to_proc, task_desc)
     end
     fetch_tasks = map(Iterators.zip(_data,_ids)) do (x, id)
         @async begin
-            timespan_start(ctx, :move, (;thunk_id, id), (;f, id, data=x))
+            timespan_start(ctx, :move, (;thunk_id, id, processor=to_proc), (;f, data=x))
             #= FIXME: This isn't valid if x is written to
             x = if x isa Chunk
                 value = lock(TASK_SYNC) do
@@ -1553,7 +1554,7 @@ function do_task(to_proc, task_desc)
             x = @invokelatest move(to_proc, x)
             #end
             @dagdebug thunk_id :move "Moved argument $id to $to_proc: $(typeof(x))"
-            timespan_finish(ctx, :move, (;thunk_id, id), (;f, id, data=x); tasks=[Base.current_task()])
+            timespan_finish(ctx, :move, (;thunk_id, id, processor=to_proc), (;f, data=x); tasks=[Base.current_task()])
             return x
         end
     end
@@ -1587,7 +1588,7 @@ function do_task(to_proc, task_desc)
     =#
 
     real_time_util[] += est_time_util
-    timespan_start(ctx, :compute, thunk_id, (;f, to_proc))
+    timespan_start(ctx, :compute, (;thunk_id, processor=to_proc), (;f))
     res = nothing
 
     # Start counting time and GC allocations
@@ -1614,13 +1615,13 @@ function do_task(to_proc, task_desc)
         # Check if result is safe to store
         device = nothing
         if !(res isa Chunk)
-            timespan_start(ctx, :storage_safe_scan, thunk_id, (;T=typeof(res)))
+            timespan_start(ctx, :storage_safe_scan, (;thunk_id, processor=to_proc), (;T=typeof(res)))
             device = if walk_storage_safe(res)
                 to_storage
             else
                 MemPool.CPURAMDevice()
             end
-            timespan_finish(ctx, :storage_safe_scan, thunk_id, (;T=typeof(res)))
+            timespan_finish(ctx, :storage_safe_scan, (;thunk_id, processor=to_proc), (;T=typeof(res)))
         end
 
         # Construct result
@@ -1637,7 +1638,7 @@ function do_task(to_proc, task_desc)
     threadtime = cputhreadtime() - threadtime_start
     # FIXME: This is not a realistic measure of max. required memory
     #gc_allocd = min(max(UInt64(Base.gc_num().allocd) - UInt64(gcnum_start.allocd), UInt64(0)), UInt64(1024^4))
-    timespan_finish(ctx, :compute, thunk_id, (;f, to_proc))
+    timespan_finish(ctx, :compute, (;thunk_id, processor=to_proc), (;f))
     lock(TASK_SYNC) do
         real_time_util[] -= est_time_util
         pop!(TASKS_RUNNING, thunk_id)

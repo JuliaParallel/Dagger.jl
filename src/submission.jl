@@ -24,7 +24,9 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
         return thunk_ids
     end
 
-    timespan_start(ctx, :add_thunk, tid, 0)
+    id = next_id()
+
+    timespan_start(ctx, :add_thunk, (;thunk_id=id), (;f, args, options))
 
     # Lookup EagerThunk/ThunkID -> Thunk
     old_args = copy(args)
@@ -86,7 +88,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
 
     GC.@preserve old_args args begin
         # Create the `Thunk`
-        thunk = Thunk(f, args...; options...)
+        thunk = Thunk(f, args...; id, options...)
 
         # Create a `DRef` to `thunk` so that the caller can preserve it
         thunk_ref = poolset(thunk; size=64, device=MemPool.CPURAMDevice(),
@@ -118,7 +120,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
             put!(state.chan, Sch.RescheduleSignal())
         end
 
-        timespan_finish(ctx, :add_thunk, tid, 0)
+        timespan_finish(ctx, :add_thunk, (;thunk_id=id), (;f, args, options))
 
         return thunk_id
     end

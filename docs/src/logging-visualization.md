@@ -1,12 +1,42 @@
-# Scheduler Visualization with DaggerWebDash
+# Logs Visualization
+
+To make Dagger's logging facilities useful without having to write custom code,
+Dagger has built-in and easily accessible logs visualization capabilities.
+Currently, there are two general mechanisms to visualize logs:
+`show_logs`/`render_logs`, and `MultiEventLog` consumers.
+
+The former (`show_logs`/`render_logs`) renders a logs `Dict` (acquired from
+`fetch_logs!`) either to an `IO` (via `show_logs`) or by returning a renderable
+object (via `render_logs`). This system is designed for rendering a single
+snapshot of logs into one or a few renderable objects, and is easily extensible
+by libraries or directly by the user, using multiple dispatch on
+`show_logs(io::IO, logs::Dict, ::Val{mode})` and
+`render_logs(logs::Dict, ::Val{mode})`, where `mode` is a unique `Symbol`
+identifying the rendering mode to use. From the user's perspective, `show_logs`
+and `render_logs` take not a `Val` but a raw `Symbol`, which will be internally
+converted to a `Val` for dispatch purposes
+(i.e. `render_logs(logs::Dict, :myrenderer)` -> 
+`render_logs(logs, Val{:myrenderer}())`).
+
+Built-in rendering support exists for:
+- `render_logs(logs, :graphviz)` to generate a graph diagram of executed tasks and their dependencies
+- `render_logs(logs, :plots_gantt)` to generate a Gantt chart of task execution across all processors
+
+The latter (`MultiEventLog`) allows for continuously rendering logs as they're
+generated, permitting real-time visualization of Dagger's operations. This
+logic is utilized in `DaggerWebDash`, which provides a web-based dashboard for
+visualizing Dagger's operations as a real-time Gantt chart and set of plots for
+various system metrics (CPU usage, memory usage, worker utilization, etc.).
+
+## Visualization with DaggerWebDash
 
 When working with Dagger, especially when working with its scheduler, it can be
-helpful to visualize what Dagger is doing internally. To assist with this, a
-web dashboard is available in the DaggerWebDash.jl package. This web dashboard
-uses a web server running within each Dagger worker, along with event logging
-information, to expose details about the scheduler. Information like worker and
-processor saturation, memory allocations, profiling traces, and much more are
-available in easy-to-interpret plots.
+helpful to visualize what Dagger is doing internally in near-real-time. To
+assist with this, a web dashboard is available in the DaggerWebDash.jl package.
+This web dashboard uses a web server running within each Dagger worker, along
+with event logging information, to expose details about the scheduler.
+Information like worker and processor saturation, memory allocations, profiling
+traces, and much more are available in easy-to-interpret plots.
 
 Using the dashboard is relatively simple and straightforward; if you run
 Dagger's benchmarking script, it's enabled for you automatically if the

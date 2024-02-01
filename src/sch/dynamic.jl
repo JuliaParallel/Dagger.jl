@@ -201,7 +201,7 @@ end
 add_thunk!(f, h::SchedulerHandle, args...; future=nothing, ref=nothing, options...) =
     exec!(_add_thunk!, h, f, args, options, future, ref)
 function _add_thunk!(ctx, state, task, tid, (f, args, options, future, ref))
-    timespan_start(ctx, :add_thunk, tid, 0)
+    timespan_start(ctx, :add_thunk, (;thunk_id=tid), (;f, args, options))
     _args = map(args) do pos_arg
         if pos_arg[2] isa ThunkID
             return pos_arg[1] => state.thunk_dict[pos_arg[2].id]
@@ -228,7 +228,7 @@ function _add_thunk!(ctx, state, task, tid, (f, args, options, future, ref))
         end
         state.valid[thunk] = nothing
         put!(state.chan, RescheduleSignal())
-        timespan_finish(ctx, :add_thunk, tid, 0)
+        timespan_finish(ctx, :add_thunk, (;thunk_id=tid), (;f, args, options))
         return thunk_id
     end
 end
