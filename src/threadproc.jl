@@ -32,5 +32,6 @@ function execute!(proc::ThreadProc, @nospecialize(f), @nospecialize(args...); @n
 end
 get_parent(proc::ThreadProc) = OSProc(proc.owner)
 default_enabled(proc::ThreadProc) = true
+short_name(proc::ThreadProc) = "W: $(proc.owner), TID: $(proc.tid)"
 
 # TODO: ThreadGroupProc?
