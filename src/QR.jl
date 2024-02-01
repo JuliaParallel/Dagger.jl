@@ -6,108 +6,61 @@ include("LAPACK/tpqrt.jl")
 include("LAPACK/tpmqrt.jl")
 include("LAPACK/ormqr.jl")
 
+
 function geqrf!(::Type{T}, tilemat::TileMat, tileworkspace::TileWorkSpace, traversal::Symbol) where {T<: Number}
 
     mt = tilemat.mt
     nt = tilemat.nt
-
-
-    # I need to provide Julia implmenation of tsqrt, and tsmqr
-    # tsqrt is used to compute QR for  rectangular matrix 
-    # tsmqr is used to  applies the reflectors to two tiles
-
-    #_, tileworkspace.mat[1,1] = geqrt!(Float64, tilemat.mat[1,1], tileworkspace.mat[1,1])
-    D = TileMat(tilemat.m, tilemat.m, tilemat.nb, tilemat.nb)
-    for k in range(1, min(mt, nt))
-        geqrt!(T, tilemat.mat[k, k], tileworkspace.mat[k, k])
-        D.mat[k, k] = tril(tilemat.mat[k, k]) #Matrix{T}(I , tilemat.nb, tilemat.nb)
-        D.mat[k, k][diagind(D.mat[k, k])] .= 1
-        #display(D.mat[k, k])
+    
+    Dagger.spawn_datadeps() do
+        for k in range(1, min(mt, nt))
+            Dagger.@spawn geqrt!(T, InOut(tilemat.mat[k, k]), Out(tileworkspace.mat[k, k]))
         for n in range(k+1, nt)
-            #display(tileworkspace.mat[k, k])
-            ormqr!(T, 'L', 'T', D.mat[k, k], tileworkspace.mat[k, k], tilemat.mat[k, n])
-            #display((tileworkspace.mat[k, k]))
-            #println("length(vec(tileworkspace.mat[k, k]))", size((tileworkspace.mat[k, k])))
-            #LAPACK.ormqr!('L', 'T', D.mat[k, k], vec(tileworkspace.mat[k, k]), tilemat.mat[k, n])
-  
+           Dagger.@spawn ormqr!(T, 'L', 'T', In(tilemat.mat[k, k]), In(tileworkspace.mat[k, k]), InOut(tilemat.mat[k, n]))
         end
-
+        
         for m in range(k+1, mt)
-            tpqrt!(T, 0, tilemat.mat[k, k], tilemat.mat[m, k], tileworkspace.mat[m, k])
+            Dagger.@spawn tpqrt!(T, 0, InOut(tilemat.mat[k, k]), InOut(tilemat.mat[m, k]), Out(tileworkspace.mat[m, k]))
+            
             for n in range(k+1, nt)
-                tpmqrt!(T, 'L', 'T', 0,  tilemat.mat[m, k], tileworkspace.mat[m, k], tilemat.mat[k, n], tilemat.mat[m, n])
+                Dagger.@spawn tpmqrt!(T, 'L', 'T', 0,  In(tilemat.mat[m, k]), In(tileworkspace.mat[m, k]), InOut(tilemat.mat[k, n]), InOut(tilemat.mat[m, n]))
             end
         end
 
     end
-
+end
 end
 
-function main_geqrf(::Type{T}, m, nb, ib, check::Int64; traversal::Symbol=:inorder) where {T<: Number}
-    A = [0.500000 0.168087 0.069003 -0.145319 0.434364 0.400780 0.111140 0.020737 -0.406725 0.290238 -0.233935 -0.353666 0.147517 -0.191549 0.286296 0.270179 -0.301710 -0.460241 -0.263068 -0.194680 ;
-    0.178217 -0.021116 0.199974 -0.469803 -0.283313 -0.481824 -0.034191 0.412494 0.477982 0.137403 0.030024 -0.332407 0.467423 -0.243602 0.305415 -0.155359 0.019543 -0.309963 0.432185 0.127595 ;
-    0.113792 -0.493141 0.268635 0.019649 -0.363411 0.328349 -0.208761 -0.362454 -0.396559 -0.466715 -0.341321 -0.121647 0.201531 0.034951 -0.196414 -0.060733 -0.242603 -0.236981 -0.312614 -0.237639 ;
-    0.014628 0.222675 0.147614 0.058895 0.003233 0.070760 0.394988 -0.322930 0.006827 0.362810 0.378996 0.498768 -0.241402 -0.475096 0.342772 0.028544 -0.190221 -0.293716 0.143163 -0.089516 ;
-    0.131577 0.234283 -0.029372 -0.210360 0.364089 0.205463 -0.408573 -0.290015 -0.103916 0.274559 -0.124854 -0.421366 -0.077145 -0.020392 -0.264425 0.140293 0.102928 0.009756 -0.022120 0.274491 ;
-    0.465939 -0.264901 0.458432 0.356567 0.022873 -0.243554 0.488352 0.490734 0.197242 -0.165111 -0.031196 -0.116874 -0.479380 -0.436116 -0.127423 -0.145122 0.166885 0.458199 0.029137 -0.343413 ;
-    -0.125315 -0.076822 0.278746 -0.473852 -0.366296 0.202064 -0.246924 -0.165862 -0.075085 -0.300956 -0.488500 -0.412238 -0.014791 0.336448 -0.189544 0.292813 -0.062591 0.293692 -0.038996 0.102821 ;
-    0.375897 0.262157 -0.213312 0.027174 -0.459154 -0.169002 -0.489911 0.476180 0.443781 -0.349375 -0.228943 0.223565 -0.032220 -0.185404 0.140471 0.262088 -0.198879 0.211991 -0.078923 -0.373452 ;
-    0.072029 -0.467288 -0.015804 -0.193371 0.420955 -0.188071 -0.257216 0.366791 -0.361767 0.126760 0.429120 0.167105 0.103097 -0.319207 -0.368652 -0.450458 -0.207326 0.425066 0.159971 -0.003987 ;
-    -0.372039 -0.076959 -0.163965 0.035690 0.283330 0.172529 0.468800 0.247248 0.313880 0.277320 0.471212 0.229445 -0.353774 0.274156 0.442029 0.419295 0.072184 -0.075843 -0.326926 -0.116245 ;
-    0.393408 -0.185255 -0.372465 0.006214 0.271382 -0.404973 0.207472 0.036147 0.052550 -0.228810 0.414962 0.085898 0.283681 0.115047 0.218950 0.120166 0.385574 -0.137748 -0.484973 0.457047 ;
-    0.405678 -0.234048 0.329267 0.227195 -0.040089 -0.385769 -0.363845 0.146550 -0.206250 0.219585 -0.016905 -0.176268 -0.018469 0.362565 0.400815 -0.395214 0.100688 -0.158538 -0.404815 0.307660 ;
-    0.494948 0.481773 -0.328999 -0.333923 -0.404114 -0.044144 0.194116 0.395202 0.366641 0.478622 -0.238605 0.301022 -0.035114 0.498231 -0.219447 -0.498618 -0.114521 -0.022067 -0.111247 -0.114437 ;
-    0.484432 0.024351 0.023135 0.448526 0.015834 -0.236106 0.143913 -0.305224 0.292924 0.066776 0.402811 -0.383546 0.274265 -0.355916 0.289823 -0.226845 0.283959 0.244047 -0.238888 0.094158 ;
-    -0.372216 0.453901 0.115835 0.406867 -0.438241 -0.025152 0.499755 -0.011537 -0.194652 0.218025 -0.145258 0.495828 0.473937 0.301398 -0.404999 0.071657 -0.108917 -0.168715 -0.261244 0.333620 ;
-    0.480410 0.362170 -0.275866 0.248483 -0.442694 0.262895 -0.103324 -0.070796 -0.381324 -0.428018 0.069625 0.335702 0.024645 0.148388 -0.449893 -0.194524 0.381794 0.437575 -0.000864 0.150076 ;
-    0.043238 0.319289 -0.243587 0.244797 -0.090578 0.371787 -0.236749 0.140889 -0.208785 -0.408190 0.221012 -0.450546 -0.156090 -0.051299 -0.122581 0.194257 -0.186329 -0.209009 0.154165 0.007033 ;
-    0.462945 0.082990 0.276093 0.454616 0.183557 0.191613 0.119595 0.133258 0.374811 0.093568 -0.315530 0.234038 -0.079935 -0.015394 0.483292 -0.269617 0.413250 -0.405160 0.361184 -0.314466 ;
-    0.292684 -0.030160 -0.210379 -0.379625 0.392060 0.104898 -0.274982 0.138461 0.265259 0.113446 -0.454311 -0.138487 0.143824 0.259719 -0.487128 -0.482050 0.401276 0.397921 0.217959 0.031866 ;
-    0.407500 0.492063 0.359396 0.420648 -0.296076 0.341554 0.246000 0.139842 -0.095676 -0.403475 -0.411615 0.012059 0.042064 0.359415 0.408876 -0.197714 -0.295812 -0.411891 0.496088 -0.071816 ;
-    ]
-    #display(A)
-    tileA = TileMat(m, m, nb, nb)
-    lap2tile!(tileA, Matrix(A))
-    #generate_tiles!(T, tileA)
+function main_geqrf(::Type{T}, m, nb, check::Int64; traversal::Symbol=:inorder) where {T<: Number}
+	
 
-    tileworkspace = TileWorkSpace(m, m, ib, nb)
+    tileA = TileMat(m, m, nb, nb)
+    generate_tiles!(T, tileA)
+
+    tileworkspace = TileWorkSpace(m, m, 1, nb)
     init_workspace!(T, tileworkspace)
-    #diagposv!(Float64, tileA, m)
     
     if check == 1
         denseA = zeros(Float64, m, m)
         tile2lap!(tileA, denseA)
-        display(denseA)
+        #display(denseA)
     end
     
     BLAS.set_num_threads(1)
     println("Dagger:")
     @time geqrf!(T, tileA, tileworkspace, traversal)
 
-    if check == 1
-        factA = zeros(Float64, m, m)
-        rows = tileworkspace.m
-        cols = tileworkspace.n
-        tau = zeros(Float64, rows, cols)
-        tile2lap!(tileA, factA)
-        display(factA)
-        #tile2lap!(tileworkspace, tau)
-        #display(factA)
-    end
 
     if check == 1
-        BLAS.set_num_threads(3)#Sys.CPU_THREADS)
+        factA = zeros(Float64, m, m)
+        tile2lap!(tileA, factA)
+        display(factA)
+        BLAS.set_num_threads(10)#Sys.CPU_THREADS)
         println("BLAS:")
         #@time LAPACK.geqrt!(denseA, tau)
         @time LAPACK.geqrf!(denseA)
         display(denseA)
-        BLAS.set_num_threads(1)
-        Rnorm = norm(denseA - factA, 2)
-        println(Rnorm)
-        tilecheck(tileA, denseA)
+        # for checking the accuracy we need to do to compute A - Q * R Later
     end
-    
-    #gflops =  (((1.0 / 3.0) * m * m * m) / ((duration) * 1.0e+9));
-    #println("tile_potrf_cpu_threads!, ", m, ", ", nb, ", ", duration, ", ", gflops)
    
 end
