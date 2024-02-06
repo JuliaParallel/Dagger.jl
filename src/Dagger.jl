@@ -60,6 +60,8 @@ include("array/setindex.jl")
 include("array/matrix.jl")
 include("array/sparse_partition.jl")
 include("array/sort.jl")
+include("array/linalg.jl")
+include("array/cholesky.jl")
 
 # Other
 include("ui/graph-core.jl")

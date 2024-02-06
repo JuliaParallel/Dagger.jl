@@ -38,6 +38,16 @@ end
     @test r[1:10] != r[11:20]
 end
 
+@testset "view" begin
+    A = rand(64, 64)
+    DA = view(A, Blocks(8, 8))
+    @test collect(DA) == A
+    @test size(DA) == (64, 64)
+    A_v = fetch(first(DA.chunks))
+    @test A_v isa SubArray
+    @test A_v == A[1:8, 1:8]
+end
+
 @testset "map" begin
     X1 = ones(Blocks(10, 10), 100, 100)
     X2 = map(x->x+1, X1)
