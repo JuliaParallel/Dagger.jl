@@ -94,6 +94,7 @@ end
 function tile2lap!(tilemat::TileWorkSpace, dense::Matrix{Float64})
     Am = size(dense, 1)
     An = size(dense, 2)
+    mb=tilemat.ib
     nb = tilemat.nb
     
     m = tilemat.m
@@ -110,7 +111,7 @@ function tile2lap!(tilemat::TileWorkSpace, dense::Matrix{Float64})
         num_cols = j == tilemat.nt ? tilemat.n-(j-1)*tilemat.nb : tilemat.nb
         for i in range(1, mt)
             num_rows = i == tilemat.mt ? tilemat.m-(i-1)*tilemat.ib : tilemat.ib
-            starti = 1 + (i - 1) * nb
+            starti = 1 + (i - 1) * mb
             startj = 1 + (j - 1) * nb
             dense[starti:starti+num_rows-1, startj:startj+num_cols-1] = tilemat.mat[i, j] 
         end
@@ -129,7 +130,7 @@ function lap2tile!(tilemat::TileMat, dense::Matrix{Float64})
     nn = nb
     mt = tilemat.mt
     nt = tilemat.nt
-    println("Hello")
+
     for j in range(1, nt)
         for i in range(1, mt)
             if i == mt
