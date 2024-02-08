@@ -11,7 +11,7 @@ Applies a complex orthogonal matrix Q.
  to a general complex matrix C, which consists of two blocks A and B.
 """
 
-function ormqr!(::Type{T}, side::Char, trans::Char, A::AbstractMatrix{T}, 
+function core_ormqr!(::Type{T}, side::Char, trans::Char, A::AbstractMatrix{T}, 
     Tau::AbstractMatrix{T}, C::AbstractMatrix{T}) where {T<: Number}
     require_one_based_indexing(A, Tau, C)
     chktrans(trans)

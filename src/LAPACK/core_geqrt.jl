@@ -3,7 +3,7 @@ using LinearAlgebra: BlasInt, require_one_based_indexing
 using LinearAlgebra.LAPACK: liblapack, chkstride1, chklapackerror
 using LinearAlgebra.BLAS: @blasfunc
 
-function geqrt!(::Type{T}, A::AbstractMatrix{T}, Tau::AbstractMatrix{T}) where {T<: Number}
+function core_geqrt!(::Type{T}, A::AbstractMatrix{T}, Tau::AbstractMatrix{T}) where {T<: Number}
     require_one_based_indexing(A, Tau)
     chkstride1(A)
     m, n = size(A)

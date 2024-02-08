@@ -9,7 +9,7 @@ Computes a blocked QR factorization of a real or complex "triangular-pentagonal"
 composed of a triangular block and a pentagonal block, using the compact WY representation for Q.
 """
 ##TODO this for Float64 you have to put it in for loop to generate for all types see: vim ~/julia-1.9.3/share/julia/stdlib/v1.9/LinearAlgebra/src/lapack.jl
-function tpqrt!(::Type{T}, l::Int64, A::AbstractMatrix{T}, B::AbstractMatrix{T}, 
+function core_tpqrt!(::Type{T}, l::Int64, A::AbstractMatrix{T}, B::AbstractMatrix{T}, 
     Tau::AbstractMatrix{T}) where {T<: Number}
     require_one_based_indexing(A, Tau)
     chkstride1(A)

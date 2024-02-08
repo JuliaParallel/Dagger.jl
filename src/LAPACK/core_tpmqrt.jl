@@ -11,7 +11,7 @@ Applies a complex orthogonal matrix Q.
  to a general complex matrix C, which consists of two blocks A and B.
 """
 
-function tpmqrt!(::Type{T}, side::Char, trans::Char, l::Int64, V::AbstractMatrix{T}, 
+function core_tpmqrt!(::Type{T}, side::Char, trans::Char, l::Int64, V::AbstractMatrix{T}, 
     Tau::AbstractMatrix{T}, A::AbstractMatrix{T}, B::AbstractMatrix{T}) where {T<: Number}
     require_one_based_indexing(A, Tau)
     chkstride1(A)
