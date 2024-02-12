@@ -93,4 +93,12 @@ end
         end
         @test collect(delayed(mythunk)(1)) === ThreadProc
     end
+
+    @testset "all_processors" begin
+        all_procs = Dagger.all_processors()
+        for w in procs()
+            w_procs = Dagger.get_processors(OSProc(w))
+            @test all(proc->proc in all_procs, w_procs)
+        end
+    end
 end

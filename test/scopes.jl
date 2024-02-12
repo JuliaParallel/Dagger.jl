@@ -238,5 +238,29 @@
         end
     end
 
+    @testset "compatible_processors" begin
+        scope = Dagger.scope(workers=[])
+        comp_procs = Dagger.compatible_processors(scope)
+        @test !any(proc->proc in comp_procs, Dagger.get_processors(OSProc(wid1)))
+        @test !any(proc->proc in comp_procs, Dagger.get_processors(OSProc(wid2)))
+
+        scope = Dagger.scope(worker=wid1)
+        comp_procs = Dagger.compatible_processors(scope)
+        @test all(proc->proc in comp_procs, Dagger.get_processors(OSProc(wid1)))
+        @test !any(proc->proc in comp_procs, Dagger.get_processors(OSProc(wid2)))
+
+        scope = Dagger.scope(worker=wid1, thread=2)
+        comp_procs = Dagger.compatible_processors(scope)
+        @test length(comp_procs) == 1
+        @test !all(proc->proc in comp_procs, Dagger.get_processors(OSProc(wid1)))
+        @test !all(proc->proc in comp_procs, Dagger.get_processors(OSProc(wid2)))
+        @test Dagger.ThreadProc(wid1, 2) in comp_procs
+
+        scope = Dagger.scope(workers=[wid1, wid2])
+        comp_procs = Dagger.compatible_processors(scope)
+        @test all(proc->proc in comp_procs, Dagger.get_processors(OSProc(wid1)))
+        @test all(proc->proc in comp_procs, Dagger.get_processors(OSProc(wid2)))
+    end
+
     rmprocs([wid1, wid2])
 end
