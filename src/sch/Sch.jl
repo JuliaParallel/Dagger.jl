@@ -323,9 +323,6 @@ function init_proc(state, p, log_sink)
     gproc = OSProc(p.pid)
     lock(state.lock) do
         state.worker_time_pressure[p.pid] = Dict{Processor,UInt64}()
-        for proc in get_processors(gproc)
-            state.worker_time_pressure[p.pid][proc] = 0
-        end
 
         state.worker_storage_pressure[p.pid] = Dict{Union{StorageResource,Nothing},UInt64}()
         state.worker_storage_capacity[p.pid] = Dict{Union{StorageResource,Nothing},UInt64}()
@@ -768,7 +765,9 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
                         Vector{Tuple{Thunk,<:Any,<:Any,UInt64,UInt32}}()
                     end
                     push!(proc_tasks, (task, scope, est_time_util, est_alloc_util, est_occupancy))
-                    state.worker_time_pressure[gproc.pid][proc] += est_time_util
+                    state.worker_time_pressure[gproc.pid][proc] =
+                        get(state.worker_time_pressure[gproc.pid], proc, 0) +
+                        est_time_util
                     @dagdebug task :schedule "Scheduling to $gproc -> $proc"
                     @goto pop_task
                 end
