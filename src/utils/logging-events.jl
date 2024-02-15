@@ -102,7 +102,10 @@ struct TaskNames end
 function (::TaskNames)(ev::Event{:start})
     if ev.category == :add_thunk
         id = ev.id.thunk_id
-        f = Dagger.chunktype(ev.timeline.f).instance
+        f = Dagger.chunktype(ev.timeline.f)
+        if hasfield(f, :instance) && isdefined(f, :instance)
+            f = f.instance
+        end
         return "$(nameof(f)) [$id]"
     end
     return
