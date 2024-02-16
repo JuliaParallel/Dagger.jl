@@ -8,7 +8,7 @@ end
 
 import Dagger
 import Dagger: Chunk, Thunk, Processor
-import Dagger: show_plan
+import Dagger: show_logs
 import Dagger.TimespanLogging: Timespan
 
 ### DAG-based graphing
