@@ -91,11 +91,11 @@ function __init__()
     @static if !isdefined(Base, :get_extension)
         @require Graphs="86223c79-3864-5bf0-83f7-82e725a168b6" begin
             @require GraphViz="f526b714-d49f-11e8-06ff-31ed36ee7ee0" begin
-                include(joinpath(@__DIR__, "ext", "GraphVizExt.jl"))
+                include(joinpath(dirname(@__DIR__), "ext", "GraphVizExt.jl"))
             end
         end
         @require Colors="5ae59095-9a9b-59fe-a467-6f913c188581" begin
-            include(joinpath(@__DIR__, "ext", "GraphVizSimpleExt.jl"))
+            include(joinpath(dirname(@__DIR__), "ext", "GraphVizSimpleExt.jl"))
             # TODO: Move to Pkg extensions
             @require Luxor="ae8d54c2-7ccd-5906-9d76-62fc9837b5bc" begin
                 # Gantt chart renderer

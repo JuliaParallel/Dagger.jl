@@ -115,26 +115,21 @@ end
 """
     TaskArguments{MA}
 
-Records the arguments of each submitted task. If `MA` is `true`, then
+Records the raw arguments of each submitted task. If `MA` is `true`, then
 mutable arguments are also recorded.
 """
 struct TaskArguments{MA} end
 function (::TaskArguments{MA})(ev::Event{:start}) where MA
     if ev.category == :add_thunk
-        deps = Pair{Union{Symbol,Int},Union{UInt,Int}}[]
+        args = Pair{Union{Symbol,Int},UInt}[]
         for (idx, (pos, arg)) in enumerate(ev.timeline.args)
             pos_idx = pos === nothing ? idx : pos
             arg = Dagger.unwrap_weak_checked(arg)
-            if arg isa Dagger.Thunk || arg isa Dagger.Sch.ThunkID
-                push!(deps, pos_idx => Int(arg.id))
-            elseif arg isa Dagger.EagerThunk
-                # FIXME: Get TID
-                #push!(deps, pos_idx => arg.uid)
-            elseif MA && ismutable(arg)
-                push!(deps, pos_idx => objectid(arg))
+            if MA && ismutable(arg)
+                push!(args, pos_idx => objectid(arg))
             end
         end
-        return ev.id.thunk_id => deps
+        return ev.id.thunk_id => args
     end
     return
 end

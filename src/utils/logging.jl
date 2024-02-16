@@ -98,3 +98,16 @@ function logs_task_dependencies(logs::Dict)
     task_procs = Processor[tid_to_proc[tid] for tid in tids_sorted]
     return (g, tid_to_vertex, task_names, task_procs)
 end
+
+"""
+Associates an argument `arg` with `name` in the logs, which logs renderers may
+utilize for display purposes.
+"""
+function logs_annotate!(ctx::Context, arg, name::Union{String,Symbol})
+    ismutable(arg) || throw(ArgumentError("Argument must be mutable to be annotated"))
+    Dagger.TimespanLogging.timespan_start(ctx, :data_annotation, (;objectid=objectid(arg), name), nothing)
+    # TODO: Remove redundant log event
+    Dagger.TimespanLogging.timespan_finish(ctx, :data_annotation, nothing, nothing)
+end
+logs_annotate!(arg, name::Union{String,Symbol}) =
+    logs_annotate!(Dagger.Sch.eager_context(), arg, name)
