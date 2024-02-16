@@ -11,7 +11,19 @@ import Dagger: EagerThunk, Chunk
 import Dagger.TimespanLogging: Timespan
 using Dagger.Graphs
 
-function to_dot(g, labels, procs, tid_to_vertex, arg_names, task_args; disconnected=false, color_by=:fn, layout_engine="dot")
+function pretty_time(t; digits=3)
+    r(t) = round(t; digits)
+    if t > 1000^3
+        "$(r(t/(1000^3))) s"
+    elseif t > 1000^2
+        "$(r(t/(1000^2))) ms"
+    elseif t > 1000
+        "$(r(t/1000)) us"
+    else
+        "$(r(t)) ns"
+    end
+end
+function to_dot(logs, g, labels, procs, tid_to_vertex, arg_names, task_args; disconnected=false, color_by=:fn, layout_engine="dot", times::Bool=true, times_digits::Integer=3)
     if !disconnected
         discon_vs = filter(v->isempty(inneighbors(g, v)) && isempty(outneighbors(g, v)), vertices(g))
         con_vs = filter(v->!in(v, discon_vs), vertices(g))
@@ -37,6 +49,43 @@ function to_dot(g, labels, procs, tid_to_vertex, arg_names, task_args; disconnec
         str *= "a$id [label=\"$name\", shape=box]\n"
     end
 
+    if times
+        vertex_to_tid = Dict{Int,Int}(v=>k for (k,v) in tid_to_vertex)
+
+        # Determine per-worker start times
+        worker_start_times = Dict{Int,UInt64}()
+        for w in keys(logs)
+            start = typemax(UInt64)
+            for idx in 1:length(logs[w][:core])
+                if logs[w][:core][idx].category == :compute && logs[w][:core][idx].kind == :start
+                    tid = logs[w][:id][idx].thunk_id
+                    haskey(tid_to_vertex, tid) || continue
+                    id = tid_to_vertex[tid]
+                    id in con_vs || continue
+                    start = min(start, logs[w][:core][idx].timestamp)
+                end
+            end
+            worker_start_times[w] = start
+        end
+
+        # Determine per-task start and finish times
+        start_times = Dict{Int,UInt64}()
+        finish_times = Dict{Int,UInt64}()
+        for w in keys(logs)
+            start = typemax(UInt64)
+            for idx in 1:length(logs[w][:core])
+                if logs[w][:core][idx].category == :compute
+                    tid = logs[w][:id][idx].thunk_id
+                    if logs[w][:core][idx].kind == :start
+                        start_times[tid] = logs[w][:core][idx].timestamp - worker_start_times[w]
+                    else
+                        finish_times[tid] = logs[w][:core][idx].timestamp - worker_start_times[w]
+                    end
+                end
+            end
+        end
+    end
+
     # Add tasks
     for v in con_vs
         if !disconnected && (v in discon_vs)
@@ -46,7 +95,14 @@ function to_dot(g, labels, procs, tid_to_vertex, arg_names, task_args; disconnec
         color = colors[v]
         proc = procs[v]
         proc_str = "($(proc.owner), $(proc.tid))"
-        str *= "v$v [label=\"$label\\n$proc_str\", color=\"$color\", penwidth=2.0]\n"
+        label_str = "$label\\n$proc_str"
+        if times
+            tid = vertex_to_tid[v]
+            start_time = pretty_time(start_times[tid]; digits=times_digits)
+            finish_time = pretty_time(finish_times[tid]; digits=times_digits)
+            label_str *= "\\n[+$start_time -> +$finish_time]"
+        end
+        str *= "v$v [label=\"$label_str\", color=\"$color\", penwidth=2.0]\n"
     end
 
     # Add task dependencies
@@ -102,7 +158,7 @@ end
 function Dagger.render_logs(logs::Dict, ::Val{:graphviz}; options...)
     g, tid_to_vertex, task_names, task_procs = Dagger.logs_task_dependencies(logs)
     arg_names, task_args = logs_task_args(logs)
-    return to_dot(g, task_names, task_procs, tid_to_vertex, arg_names, task_args; options...)
+    return to_dot(logs, g, task_names, task_procs, tid_to_vertex, arg_names, task_args; options...)
 end
 
 end
