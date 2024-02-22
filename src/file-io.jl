@@ -335,7 +335,7 @@ function save(p::Computation, name::AbstractString)
 end
 
 function stage(ctx::Context, s::Save)
-    x = cached_stage(ctx, s.input)
+    x = stage(ctx, s.input)
     dir_path = s.name * "_data"
     if !isdir(dir_path)
         mkdir(dir_path)

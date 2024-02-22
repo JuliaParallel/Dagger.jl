@@ -80,12 +80,12 @@ Base.IndexStyle(::Type{<:ArrayOp}) = IndexCartesian()
 
 collect(x::ArrayOp) = collect(fetch(x))
 
-_to_darray(x::ArrayOp) = cached_stage(Context(global_context()), x)::DArray
+_to_darray(x::ArrayOp) = stage(Context(global_context()), x)::DArray
 Base.fetch(x::ArrayOp) = fetch(_to_darray(x))
 
 collect(x::Computation) = collect(fetch(x))
 
-Base.fetch(x::Computation) = fetch(cached_stage(Context(global_context()), x))
+Base.fetch(x::Computation) = fetch(stage(Context(global_context()), x))
 
 function Base.show(io::IO, ::MIME"text/plain", x::ArrayOp)
     write(io, string(typeof(x)))
@@ -302,36 +302,6 @@ function Base.fetch(c::DArray{T}) where T
     end
 end
 
-global _stage_cache = WeakKeyDict{Context, Dict}()
-
-"""
-    cached_stage(ctx::Context, x)
-
-A memoized version of stage. It is important that the
-tasks generated for the same `DArray` have the same
-identity, for example:
-
-```julia
-A = rand(Blocks(100,100), Float64, 1000, 1000)
-compute(A+A')
-```
-
-must not result in computation of `A` twice.
-"""
-function cached_stage(ctx::Context, x)
-    cache = if !haskey(_stage_cache, ctx)
-        _stage_cache[ctx] = Dict()
-    else
-        _stage_cache[ctx]
-    end
-
-    if haskey(cache, x)
-        cache[x]
-    else
-        cache[x] = stage(ctx, x)
-    end
-end
-
 Base.@deprecate_binding Cat DArray
 Base.@deprecate_binding ComputedArray DArray
 
@@ -366,7 +336,7 @@ end
 function stage(ctx::Context, d::Distribute)
     if isa(d.data, ArrayOp)
         # distributing a distributed array
-        x = cached_stage(ctx, d.data)
+        x = stage(ctx, d.data)
         if d.domainchunks == domainchunks(x)
             return x # already properly distributed
         end
@@ -374,7 +344,7 @@ function stage(ctx::Context, d::Distribute)
         T = eltype(d.data)
         concat = x.concat
         cs = map(d.domainchunks) do idx
-            chunks = cached_stage(ctx, x[idx]).chunks
+            chunks = stage(ctx, x[idx]).chunks
             shape = size(chunks)
             # TODO: fix hashing
             #hash = uhash(idx, Base.hash(Distribute, Base.hash(d.data)))

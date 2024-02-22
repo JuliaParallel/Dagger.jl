@@ -47,7 +47,7 @@ function _ctranspose(x::AbstractArray)
 end
 
 function stage(ctx::Context, node::Transpose)
-    inp = cached_stage(ctx, node.input)
+    inp = stage(ctx, node.input)
     thunks = _ctranspose(chunks(inp))
     return DArray(eltype(inp), domain(inp)', domainchunks(inp)', thunks, inp.partitioning', inp.concat)
 end
@@ -145,7 +145,7 @@ function promote_distribution(ctx::Context, m::MatMul, a,b)
     pb = domainchunks(b)
 
     d = DomainBlocks((1,1), (pa.cumlength[2], pb.cumlength[2])) # FIXME: this is not generic
-    a, cached_stage(ctx, Distribute(d, b))
+    a, stage(ctx, Distribute(d, b))
 end
 
 function stage_operands(ctx::Context, m::MatMul, a, b)
@@ -154,14 +154,14 @@ function stage_operands(ctx::Context, m::MatMul, a, b)
     end
     # take the row distribution of a and get b onto that.
 
-    stg_a = cached_stage(ctx, a)
-    stg_b = cached_stage(ctx, b)
+    stg_a = stage(ctx, a)
+    stg_b = stage(ctx, b)
     promote_distribution(ctx, m, stg_a, stg_b)
 end
 
 "An operand which should be distributed as per convenience"
 function stage_operands(ctx::Context, ::MatMul, a::ArrayOp, b::PromotePartition{T,1}) where T
-    stg_a = cached_stage(ctx, a)
+    stg_a = stage(ctx, a)
     dmn_a = domain(stg_a)
     dchunks_a = domainchunks(stg_a)
     dmn_b = domain(b.data)
@@ -170,7 +170,7 @@ function stage_operands(ctx::Context, ::MatMul, a::ArrayOp, b::PromotePartition{
     end
     dmn_out = DomainBlocks((1,),(dchunks_a.cumlength[2],))
 
-    stg_a, cached_stage(ctx, Distribute(dmn_out, b.data))
+    stg_a, stage(ctx, Distribute(dmn_out, b.data))
 end
 
 function stage_operands(ctx::Context, ::MatMul, a::PromotePartition, b::ArrayOp)
@@ -178,11 +178,11 @@ function stage_operands(ctx::Context, ::MatMul, a::PromotePartition, b::ArrayOp)
     if size(a, 2) != size(b, 1)
         throw(DimensionMismatch("Cannot promote array of domain $(dmn_b) to multiply with an array of size $(dmn_a)"))
     end
-    stg_b = cached_stage(ctx, b)
+    stg_b = stage(ctx, b)
 
     ps = domainchunks(stg_b)
     dmn_out = DomainBlocks((1,1),([size(a.data, 1)], ps.cumlength[1],))
-    cached_stage(ctx, Distribute(dmn_out, a.data)), stg_b
+    stage(ctx, Distribute(dmn_out, a.data)), stg_b
 end
 
 function stage(ctx::Context, mul::MatMul{T,N}) where {T,N}
@@ -217,11 +217,11 @@ scale(l::ArrayOp, r::ArrayOp) = _to_darray(Scale(l, r))
 function stage_operand(ctx::Context, ::Scale, a, b::PromotePartition)
     ps = domainchunks(a)
     b_parts = DomainBlocks((1,), (ps.cumlength[1],))
-    cached_stage(ctx, Distribute(b_parts, b.data))
+    stage(ctx, Distribute(b_parts, b.data))
 end
 
 function stage_operand(ctx::Context, ::Scale, a, b)
-    cached_stage(ctx, b)
+    stage(ctx, b)
 end
 
 function _scale(l, r)
@@ -233,7 +233,7 @@ function _scale(l, r)
 end
 
 function stage(ctx::Context, scal::Scale)
-    r = cached_stage(ctx, scal.r)
+    r = stage(ctx, scal.r)
     l = stage_operand(ctx, scal, r, scal.l)
 
     @assert size(domain(r), 1) == size(domain(l), 1)
@@ -267,7 +267,7 @@ function Base.cat(d::ArrayDomain, ds::ArrayDomain...; dims::Int)
 end
 
 function stage(ctx::Context, c::Concat)
-    inp = Any[cached_stage(ctx, x) for x in c.inputs]
+    inp = Any[stage(ctx, x) for x in c.inputs]
 
     dmns = map(domain, inp)
     dims = [[i == c.axis ? 0 : i for i in size(d)] for d in dmns]

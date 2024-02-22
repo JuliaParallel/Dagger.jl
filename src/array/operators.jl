@@ -28,19 +28,19 @@ BCast(b::Broadcasted) = BCast{typeof(b), combine_eltypes(b.f, b.args), length(ax
 size(x::BCast) = map(length, axes(x.bcasted))
 
 function stage_operands(ctx::Context, ::BCast, xs::ArrayOp...)
-    map(x->cached_stage(ctx, x), xs)
+    map(x->stage(ctx, x), xs)
 end
 
 function stage_operands(ctx::Context, ::BCast, x::ArrayOp, y::PromotePartition)
-    stg_x = cached_stage(ctx, x)
+    stg_x = stage(ctx, x)
     y1 = Distribute(domain(stg_x), y.data)
-    stg_x, cached_stage(ctx, y1)
+    stg_x, stage(ctx, y1)
 end
 
 function stage_operands(ctx::Context, ::BCast, x::PromotePartition, y::ArrayOp)
-    stg_y = cached_stage(ctx, y)
+    stg_y = stage(ctx, y)
     x1 = Distribute(domain(stg_y), x.data)
-    cached_stage(ctx, x1), stg_y
+    stage(ctx, x1), stg_y
 end
 
 struct DaggerBroadcastStyle <: BroadcastStyle end
@@ -57,7 +57,7 @@ function stage(ctx::Context, node::BCast{B,T,N}) where {B,T,N}
     bc = Broadcast.flatten(node.bcasted)
     args = bc.args
     args1 = map(args) do x
-        x isa ArrayOp ? cached_stage(ctx, x) : x
+        x isa ArrayOp ? stage(ctx, x) : x
     end
     ds = map(x->x isa DArray ? domainchunks(x) : nothing, args1)
     sz = size(node)
@@ -84,7 +84,7 @@ function stage(ctx::Context, node::BCast{B,T,N}) where {B,T,N}
                 end
             end |> Tuple
             dmn = DomainBlocks(ntuple(_->1, length(s)), splits)
-            cached_stage(ctx, Distribute(dmn, part, arg)).chunks
+            stage(ctx, Distribute(dmn, part, arg)).chunks
         else
             arg
         end
@@ -105,7 +105,7 @@ end
 mapchunk(f::Function, xs::ArrayOp...) = MapChunk(f, xs)
 Base.@deprecate mappart(args...) mapchunk(args...)
 function stage(ctx::Context, node::MapChunk)
-    inputs = map(x->cached_stage(ctx, x), node.input)
+    inputs = map(x->stage(ctx, x), node.input)
     thunks = map(map(chunks, inputs)...) do ps...
         Dagger.spawn(node.f, map(p->nothing=>p, ps)...)
     end

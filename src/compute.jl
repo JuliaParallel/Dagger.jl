@@ -1,4 +1,4 @@
-export stage, cached_stage, compute, debug_compute, cleanup
+export compute, debug_compute
 
 ###### Scheduler #######
 
