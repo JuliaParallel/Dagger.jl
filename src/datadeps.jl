@@ -73,8 +73,12 @@ function _enqueue!(queue::DataDepsTaskQueue, fullspec::Pair{EagerTaskSpec,EagerT
         end
         scope = new_scope
     end
+
     deps_to_add = Vector{Pair{Any, Tuple{Bool,Bool}}}()
+
+    # Track the task's arguments and access patterns
     for (idx, (pos, arg)) in enumerate(spec.args)
+        # Unwrap In/InOut/Out wrappers and record dependencies
         readdep = false
         writedep = false
         if arg isa In
@@ -91,7 +95,9 @@ function _enqueue!(queue::DataDepsTaskQueue, fullspec::Pair{EagerTaskSpec,EagerT
             readdep = true
         end
         spec.args[idx] = pos => arg
-        arg_data = arg isa EagerThunk ? fetch(arg; raw=true) : arg
+
+        # Unwrap the Chunk underlying any EagerThunk arguments
+        arg_data = arg isa EagerThunk && istaskstarted(arg) ? fetch(arg; raw=true) : arg
 
         push!(deps_to_add, arg_data => (readdep, writedep))
 
@@ -128,6 +134,10 @@ function _enqueue!(queue::DataDepsTaskQueue, fullspec::Pair{EagerTaskSpec,EagerT
            end
         end
     end
+
+    # Track the task result too
+    push!(deps_to_add, task => (true, true))
+
     for (arg_data, (readdep, writedep)) in deps_to_add
         argdeps = get!(queue.deps, arg_data) do
             Vector{Pair{Tuple{Bool,Bool}, EagerThunk}}()
@@ -217,8 +227,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
     # Track original and current data locations
     # We track data => space
-    data_origin = IdDict{Any,MemorySpace}(data=>memory_space(data) for data in keys(queue.deps))
-    data_locality = IdDict{Any,MemorySpace}(data=>memory_space(data) for data in keys(queue.deps))
+    data_origin = IdDict{Any,MemorySpace}(data=>memory_space(data) for data in keys(queue.deps) if !isa(data, EagerThunk) || istaskstarted(data))
+    data_locality = IdDict{Any,MemorySpace}(data=>memory_space(data) for data in keys(queue.deps) if !isa(data, EagerThunk) || istaskstarted(data))
 
     # Track writers ("owners") and readers
     args_owner = IdDict{Any,Union{EagerThunk,Nothing}}(arg=>nothing for arg in keys(queue.deps))
@@ -252,25 +262,32 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     # Make a copy of each piece of data on each worker
     # memory_space => {arg => copy_of_arg}
     remote_args = Dict{MemorySpace,IdDict{Any,Any}}(space=>IdDict{Any,Any}() for space in all_spaces)
+    function generate_slot!(space, data)
+        if data isa EagerThunk
+            data = fetch(data; raw=true)
+        end
+        data_space = memory_space(data)
+        if data_space == space
+            return Dagger.tochunk(data)
+        else
+            # TODO: Can't use @mutable with custom Chunk scope
+            #remote_args[w][data] = Dagger.@mutable worker=w copy(data)
+            to_proc = first(processors(space))
+            from_proc = first(processors(data_space))
+            w = only(unique(map(get_parent, collect(processors(space))))).pid
+            return remotecall_fetch(w, from_proc, to_proc, data) do from_proc, to_proc, data
+                data_raw = fetch(data)
+                data_converted = move(from_proc, to_proc, data_raw)
+                return Dagger.tochunk(data_converted)
+            end
+        end
+    end
     for space in all_spaces
         this_space_args = remote_args[space] = IdDict{Any,Any}()
         for data in keys(queue.deps)
             has_writedep(data) || continue
-            data_space = memory_space(data)
-            if data_space == space
-                this_space_args[data] = Dagger.tochunk(data)
-            else
-                # TODO: Can't use @mutable with custom Chunk scope
-                #remote_args[w][data] = Dagger.@mutable worker=w copy(data)
-                to_proc = first(processors(space))
-                from_proc = first(processors(data_space))
-                w = only(unique(map(get_parent, collect(processors(space))))).pid
-                this_space_args[data] = remotecall_fetch(w, from_proc, to_proc, data) do from_proc, to_proc, data
-                    data_raw = fetch(data)
-                    data_converted = move(from_proc, to_proc, data_raw)
-                    return Dagger.tochunk(data_converted)
-                end
-            end
+            data isa EagerThunk && !istaskstarted(data) && continue
+            this_space_args[data] = generate_slot!(space, data)
         end
     end
 
@@ -321,13 +338,15 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         throw(ArgumentError("Invalid traversal mode: $traversal"))
     end
 
+    # Start launching tasks and necessary copies
     for (spec, task) in queue.seen_tasks[task_order]
         our_proc = all_procs[proc_idx]
         our_space = only(memory_spaces(our_proc))
 
         # Spawn copies before user's task, as necessary
         @dagdebug nothing :spawn_datadeps "($(spec.f)) Scheduling: $our_proc ($our_space)"
-        task_args = map(((pos, arg)=_arg,)->pos=>(arg isa EagerThunk ? fetch(arg; raw=true) : arg), copy(spec.args))
+        #task_args = map(((pos, arg)=_arg,)->pos=>(arg isa EagerThunk ? fetch(arg; raw=true) : arg), copy(spec.args))
+        task_args = map(((pos, arg)=_arg,)->pos=>arg, copy(spec.args))
 
         # Copy args from local to remote
         for (idx, (pos, arg)) in enumerate(task_args)
@@ -340,12 +359,16 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             data_space = data_locality[arg]
 
             # Is the source of truth elsewhere?
-            arg_remote = remote_args[our_space][arg]
+            arg_remote = get!(remote_args[our_space], arg) do
+                generate_slot!(our_space, arg)
+            end
             nonlocal = our_space != data_space
             if nonlocal
                 # Add copy-to operation (depends on latest owner of arg)
                 @dagdebug nothing :spawn_datadeps "($(spec.f))[$idx] Enqueueing copy-to: $data_space => $our_space"
-                arg_local = remote_args[data_space][arg]
+                arg_local = get!(remote_args[data_space], arg) do
+                    generate_slot!(data_space, arg)
+                end
                 copy_to_scope = ExactScope(our_proc)
                 copy_to_syncdeps = Set{Any}()
                 get_write_deps!(arg, copy_to_syncdeps)
@@ -383,6 +406,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         task_scope = Dagger.ExactScope(our_proc)
         spec.options = merge(spec.options, (;syncdeps, scope=task_scope))
         enqueue!(upper_queue, spec=>task)
+
+        # Update read/write tracking for arguments
         for (idx, (_, arg)) in enumerate(task_args)
             if is_writedep(arg, task)
                 @dagdebug nothing :spawn_datadeps "($(spec.f))[$idx] Set as owner"
@@ -391,6 +416,11 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 add_reader!(arg, task)
             end
         end
+
+        # Update read/write/locality tracking for result
+        add_writer!(task, task)
+        data_locality[task] = our_space
+        data_origin[task] = our_space
 
         # Select the next processor to use
         proc_idx = mod1(proc_idx+1, length(all_procs))

@@ -45,20 +45,21 @@ mutable struct EagerThunk
 end
 
 Base.isready(t::EagerThunk) = isready(t.future)
+Base.istaskstarted(t::EagerThunk) = isdefined(t, :thunk_ref)
 function Base.wait(t::EagerThunk)
-    if !isdefined(t, :thunk_ref)
+    if !istaskstarted(t)
         throw(ConcurrencyViolationError("Cannot `wait` on an unlaunched `EagerThunk`"))
     end
     wait(t.future)
 end
 function Base.fetch(t::EagerThunk; raw=false)
-    if !isdefined(t, :thunk_ref)
+    if !istaskstarted(t)
         throw(ConcurrencyViolationError("Cannot `fetch` an unlaunched `EagerThunk`"))
     end
     return fetch(t.future; raw)
 end
 function Base.show(io::IO, t::EagerThunk)
-    status = if isdefined(t, :thunk_ref)
+    status = if istaskstarted(t)
         isready(t) ? "finished" : "running"
     else
         "not launched"
