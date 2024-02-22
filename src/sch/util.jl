@@ -285,9 +285,10 @@ function report_catch_error(err, desc=nothing)
 end
 
 chunktype(x) = typeof(x)
-function signature(task::Thunk, state)
-    sig = Any[chunktype(task.f)]
-    for (pos, input) in collect_task_inputs(state, task)
+signature(state, task::Thunk) = signature(state, task.f, task.inputs)
+function signature(state, f, inputs::Vector)
+    sig = Any[chunktype(f)]
+    for (pos, input) in collect_task_inputs(state, inputs)
         # N.B. Skips kwargs
         if pos === nothing
             push!(sig, chunktype(input))
@@ -419,9 +420,11 @@ function impute_sum(xs)
 end
 
 "Collects all arguments for `task`, converting Thunk inputs to Chunks."
-function collect_task_inputs(state, task)
+collect_task_inputs(state, task::Thunk) =
+    collect_task_inputs(state, task.inputs)
+function collect_task_inputs(state, inputs)
     inputs = Pair{Union{Symbol,Nothing},Any}[]
-    for (pos, input) in task.inputs
+    for (pos, input) in inputs
         input = unwrap_weak_checked(input)
         push!(inputs, pos => (istask(input) ? state.cache[input] : input))
     end

@@ -1,7 +1,7 @@
 LinearAlgebra.cholcopy(A::DArray{T,2}) where T = copy(A)
 function potrf_checked!(uplo, A, info_arr)
-    _A, info = LAPACK.potrf!(uplo, A)
-    if info > 0
+    _A, info = move(thunk_processor(), LAPACK.potrf!)(uplo, A)
+    if info != 0
         info_arr[1] = info
         throw(PosDefException(info))
     end
@@ -22,7 +22,7 @@ function LinearAlgebra._chol!(A::DArray{T,2}, ::Type{UpperTriangular}) where T
 
     info = [convert(LinearAlgebra.BlasInt, 0)]
     try
-        Dagger.spawn_datadeps() do
+        Dagger.spawn_datadeps(;aliasing=true) do
             for k in range(1, mt)
                 Dagger.@spawn potrf_checked!(uplo, InOut(Ac[k, k]), Out(info))
                 for n in range(k+1, nt)

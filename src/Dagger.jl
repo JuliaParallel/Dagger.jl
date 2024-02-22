@@ -12,7 +12,7 @@ import Distributed
 import Distributed: Future, RemoteChannel, myid, workers, nworkers, procs, remotecall, remotecall_wait, remotecall_fetch
 
 import LinearAlgebra
-import LinearAlgebra: Adjoint, BLAS, Diagonal, LAPACK, LowerTriangular, PosDefException, Transpose, UpperTriangular, diagind, ishermitian, issymmetric
+import LinearAlgebra: Adjoint, BLAS, Diagonal, Bidiagonal, Tridiagonal, LAPACK, LowerTriangular, PosDefException, Transpose, UpperTriangular, UnitLowerTriangular, UnitUpperTriangular, diagind, ishermitian, issymmetric
 
 import UUIDs: UUID, uuid4
 
@@ -23,7 +23,7 @@ else
 end
 
 if !isdefined(Base, :get_extension)
-using Requires
+    import Requires: @require
 end
 
 import TimespanLogging

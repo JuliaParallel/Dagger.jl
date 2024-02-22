@@ -569,7 +569,7 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
                 #state.worker_storage_pressure[pid][to_storage] = metadata.storage_pressure
                 #state.worker_storage_capacity[pid][to_storage] = metadata.storage_capacity
                 state.worker_loadavg[pid] = metadata.loadavg
-                sig = signature(node, state)
+                sig = signature(state, node)
                 state.signature_time_cost[sig] = (metadata.threadtime + get(state.signature_time_cost, sig, 0)) ÷ 2
                 state.signature_alloc_cost[sig] = (metadata.gc_allocd + get(state.signature_alloc_cost, sig, 0)) ÷ 2
                 if metadata.transfer_rate !== nothing
@@ -695,7 +695,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
             @goto pop_task
         end
         opts = merge(ctx.options, task.options)
-        sig = signature(task, state)
+        sig = signature(state, task)
 
         # Calculate scope
         scope = if task.f isa Chunk
