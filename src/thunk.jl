@@ -438,7 +438,7 @@ Base.hash(x::Thunk, h::UInt) = hash(x.id, hash(h, 0x7ad3bac49089a05f % UInt))
 Base.isequal(x::Thunk, y::Thunk) = x.id==y.id
 
 function show_thunk(io::IO, t)
-    lvl = get(io, :lazy_level, 2)
+    lvl = get(io, :lazy_level, 0)
     f = if t.f isa Chunk
         Tf = t.f.chunktype
         if isdefined(Tf, :instance)
