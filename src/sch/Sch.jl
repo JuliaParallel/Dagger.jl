@@ -1063,7 +1063,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
         @async begin
             timespan_start(ctx, :fire, gproc.pid, 0)
             try
-                remotecall_wait(do_tasks, gproc.pid, proc, state.chan, [ts])
+                remotecall_wait(do_tasks, gproc.pid, proc, state.chan, [ts]);
             catch err
                 bt = catch_backtrace()
                 thunk_id = ts[1]
