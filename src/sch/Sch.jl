@@ -1063,7 +1063,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
         @async begin
             timespan_start(ctx, :fire, gproc.pid, 0)
             try
-                remotecall_wait(do_tasks, gproc.pid, proc, state.chan, [ts])
+                remotecall_wait(do_tasks, gproc.pid, proc, state.chan, [ts]);
             catch err
                 bt = catch_backtrace()
                 thunk_id = ts[1]
@@ -1552,7 +1552,7 @@ function do_task(to_proc, task_desc)
             =#
             x = @invokelatest move(to_proc, x)
             #end
-            @dagdebug thunk_id :move "Moved argument $id to $to_proc: $x"
+            @dagdebug thunk_id :move "Moved argument $id to $to_proc: $(typeof(x))"
             timespan_finish(ctx, :move, (;thunk_id, id), (;f, id, data=x); tasks=[Base.current_task()])
             return x
         end
@@ -1595,7 +1595,7 @@ function do_task(to_proc, task_desc)
     # FIXME
     #gcnum_start = Base.gc_num()
 
-    @dagdebug thunk_id :execute "Executing"
+    @dagdebug thunk_id :execute "Executing $(typeof(f))"
 
     result_meta = try
         # Set TLS variables
