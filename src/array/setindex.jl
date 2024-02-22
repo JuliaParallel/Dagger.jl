@@ -12,7 +12,7 @@ function setindex(x::ArrayOp, val, idxs...)
 end
 
 function stage(ctx::Context, sidx::SetIndex)
-    inp = cached_stage(ctx, sidx.input)
+    inp = stage(ctx, sidx.input)
 
     dmn = domain(inp)
     idxs = [if isa(sidx.idx[i], Colon)

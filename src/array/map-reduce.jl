@@ -10,7 +10,7 @@ size(x::Map) = size(x.inputs[1])
 Map(f, inputs::Tuple) = Map{Any, ndims(inputs[1])}(f, inputs)
 
 function stage(ctx::Context, node::Map)
-    inputs = Any[cached_stage(ctx, n) for n in node.inputs]
+    inputs = Any[stage(ctx, n) for n in node.inputs]
     primary = inputs[1] # all others will align to this guy
     domains = domainchunks(primary)
     thunks = similar(domains, Any)
@@ -130,7 +130,7 @@ function Base.reduce(f::Function, x::ArrayOp; dims = nothing)
 end
 
 function stage(ctx::Context, r::Reducedim)
-    inp = cached_stage(ctx, r.input)
+    inp = stage(ctx, r.input)
     thunks = let op = r.op, dims=r.dims
         # do reducedim on each block
         tmp = map(p->Dagger.spawn(b->reduce(op,b,dims=dims), p), chunks(inp))
