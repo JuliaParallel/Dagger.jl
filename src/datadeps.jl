@@ -1,6 +1,6 @@
 using Graphs
 
-export In, Out, InOut, spawn_datadeps
+export In, Out, InOut, Deps, spawn_datadeps
 
 "Specifies a read-only dependency."
 struct In{T}
@@ -14,6 +14,12 @@ end
 struct InOut{T}
     x::T
 end
+"Specifies one or more dependencies."
+struct Deps{T,DT<:Tuple}
+    x::T
+    deps::DT
+end
+Deps(x, deps...) = Deps(x, deps)
 
 struct DataDepsTaskQueue <: AbstractTaskQueue
     # The queue above us
@@ -34,20 +40,33 @@ struct DataDepsTaskQueue <: AbstractTaskQueue
     # How to traverse the dependency graph when launching tasks
     traversal::Symbol
 
+    # Whether aliasing across arguments is possible
+    # The fields following only apply when aliasing==true
+    aliasing::Bool
+    # The mapping from arguments to their memory spans
+    arg_to_spans::IdDict{Any,Vector{MemorySpan}}
+    # The ordered list of tasks and their read/write dependencies
+    dependencies::Vector{Pair{EagerThunk,Vector{Tuple{Bool,Bool,Vector{MemorySpan}}}}}
+
     function DataDepsTaskQueue(upper_queue; static::Bool=true,
-                               traversal::Symbol=:inorder)
+                               traversal::Symbol=:inorder, aliasing::Bool=true)
         deps = IdDict{Any, Vector{Pair{Tuple{Bool,Bool}, EagerThunk}}}()
         if static
             seen_tasks = Pair{EagerTaskSpec,EagerThunk}[]
             g = SimpleDiGraph()
             task_to_id = Dict{EagerThunk,Int}()
+            arg_to_spans = IdDict{Any,Vector{MemorySpan}}()
+            dependencies = Pair{EagerThunk,Vector{Tuple{Bool,Bool,Vector{MemorySpan}}}}[]
         else
             seen_tasks = nothing
             g = nothing
             task_to_id = nothing
+            arg_to_spans = nothing
+            dependencies = nothing
         end
         return new(upper_queue, deps,
-                   static, seen_tasks, g, task_to_id, traversal)
+                   static, seen_tasks, g, task_to_id, traversal,
+                   aliasing, arg_to_spans, dependencies)
     end
 end
 
@@ -75,10 +94,11 @@ function _enqueue!(queue::DataDepsTaskQueue, fullspec::Pair{EagerTaskSpec,EagerT
     end
 
     deps_to_add = Vector{Pair{Any, Tuple{Bool,Bool}}}()
+    if queue.aliasing
+        dependencies_to_add = Vector{Tuple{Bool,Bool,Vector{MemorySpan}}}()
+    end
 
-    # Track the task's arguments and access patterns
-    for (idx, (pos, arg)) in enumerate(spec.args)
-        # Unwrap In/InOut/Out wrappers and record dependencies
+    function unwrap_inout(arg)
         readdep = false
         writedep = false
         if arg isa In
@@ -94,13 +114,41 @@ function _enqueue!(queue::DataDepsTaskQueue, fullspec::Pair{EagerTaskSpec,EagerT
         else
             readdep = true
         end
+        return arg, (readdep, writedep)
+    end
+    # Track the task's arguments and access patterns
+    for (idx, (pos, arg)) in enumerate(spec.args)
+        # Unwrap In/InOut/Out wrappers and record dependencies
+        alldeps = nothing
+        if arg isa Deps
+            # Conservative readdep/writedep status in case aliasing is disabled
+            readdep = any(dep->dep isa Union{In,InOut}, arg.deps)
+            writedep = any(dep->dep isa Union{Out,InOut}, arg.deps)
+            alldeps = arg.deps
+            #arg = arg.x
+        else
+            arg, (readdep, writedep) = unwrap_inout(arg)
+        end
         spec.args[idx] = pos => arg
 
         # Unwrap the Chunk underlying any EagerThunk arguments
-        arg_data = arg isa EagerThunk && istaskstarted(arg) ? fetch(arg; raw=true) : arg
+        arg_is_launched_task = arg isa EagerThunk && istaskstarted(arg)
+        arg_is_unlaunched_task = arg isa EagerThunk && !istaskstarted(arg)
+        arg_data = arg_is_launched_task ? fetch(arg; raw=true) : arg
 
         push!(deps_to_add, arg_data => (readdep, writedep))
+        if queue.aliasing && !arg_is_unlaunched_task
+            if alldeps !== nothing
+                for dep in alldeps
+                    dep_mod, (readdep, writedep) = unwrap_inout(dep)
+                    push!(dependencies_to_add, (readdep, writedep, memory_spans(arg_data.x, dep_mod)))
+                end
+            else
+                push!(dependencies_to_add, (readdep, writedep, memory_spans(arg_data)))
+            end
+        end
 
+        # FIXME: This is wrong for the dynamic scheduler, and for static graph building
         if !haskey(queue.deps, arg_data)
             continue
         end
@@ -137,12 +185,18 @@ function _enqueue!(queue::DataDepsTaskQueue, fullspec::Pair{EagerTaskSpec,EagerT
 
     # Track the task result too
     push!(deps_to_add, task => (true, true))
+    @warn "Push to dependencies_to_add, by not recording memory spans here" maxlog=1
 
+    # Record argument/result dependencies
     for (arg_data, (readdep, writedep)) in deps_to_add
+        # Record read/write dependencies per value
         argdeps = get!(queue.deps, arg_data) do
             Vector{Pair{Tuple{Bool,Bool}, EagerThunk}}()
         end
         push!(argdeps, (readdep, writedep) => task)
+        if queue.aliasing
+            push!(queue.dependencies, task => dependencies_to_add)
+        end
     end
 
     if !queue.static
@@ -169,36 +223,119 @@ function enqueue!(queue::DataDepsTaskQueue, specs::Vector{Pair{EagerTaskSpec,Eag
 end
 
 function distribute_tasks!(queue::DataDepsTaskQueue)
-    #= TODO: We currently assume:
-    # - All data is local to `myid()`
-    # - All data is approximately the same size
-    # - Copies won't occur automatically (TODO: GPUs)
-    # - All tasks take approximately the same amount of time to execute
-    # - All data will be written-back at the end of the computation
-    # - All tracked data supports `copyto!` (FIXME)
+    #= TODO: Improvements to be made:
+    # - Support for non-CPU processors
+    # - Support for copying non-AbstractArray arguments
+    # - Use graph coloring for scheduling OR use Dagger's scheduler directly
+    # - Generate slots on-the-fly
+    # - Parallelize read copies
+    # - Unreference unused slots
+    # - Reuse memory when possible (SafeTensors)
+    # - Account for differently-sized data
+    # - Account for different task execution times
     =#
 
-    # TODO: Don't do round-robin - instead, color the graph
-
     # Determine which arguments could be written to, and thus need tracking
-    arg_has_writedep = IdDict{Any,Bool}(arg=>any(argdep->argdep[1][2], argdeps) for (arg, argdeps) in queue.deps)
-    has_writedep(arg) = haskey(arg_has_writedep, arg) && arg_has_writedep[arg]
+    if queue.aliasing
+        arg_to_spans = queue.arg_to_spans
+        span_has_writedep = IdDict{MemorySpan,Bool}()
+    else
+        arg_has_writedep = IdDict{Any,Bool}()
+    end
+    function populate_writedeps!(arg, deps=nothing)
+        haskey(queue.deps, arg) || return
+        if queue.aliasing
+            haskey(arg_to_spans, arg) && return
+            if deps !== nothing
+                spans = MemorySpan[]
+                for dep in arg.deps
+                    dep_mod, _ = unwrap_inout(dep)
+                    append!(spans, memory_spans(arg.x, dep_mod))
+                end
+            else
+                spans = arg_to_spans[arg] = memory_spans(arg)
+            end
+            for span in spans
+                writedep = false
+                for (_, taskdeps) in queue.dependencies
+                    for (_, span_writedep, other_spans) in taskdeps
+                        span_writedep || continue
+                        if any(will_alias(span, other_span) for other_span in other_spans)
+                            writedep = true
+                            break
+                        end
+                    end
+                    writedep && break
+                end
+                span_has_writedep[span] = writedep
+            end
+        else
+            haskey(arg_has_writedep, arg) && return
+            writedep = any(argdep->argdep[1][2], queue.deps[arg])
+            arg_has_writedep[arg] = writedep
+        end
+    end
+    for (arg, argdeps) in queue.deps
+        arg isa EagerThunk && !istaskstarted(arg) && continue
+        populate_writedeps!(arg)
+    end
+    "Whether `arg` has any writedep in this datadeps region."
+    function has_writedep(arg)
+        haskey(queue.deps, arg) || return false
+        if queue.aliasing
+            return any(span->span_has_writedep[span], arg_to_spans[arg])
+        else
+            return arg_has_writedep[arg]
+        end
+    end
+    """
+    Whether `arg` has any writedep at or before executing `task` in this
+    datadeps region.
+    """
     function has_writedep(arg, task::EagerThunk)
-        haskey(arg_has_writedep, arg) || return false
+        haskey(queue.deps, arg) || return false
         any_writedep = false
-        for ((readdep, writedep), other_task) in queue.deps[arg]
-            any_writedep |= writedep
-            if task === other_task
-                return any_writedep
+        if queue.aliasing
+            for (other_task, other_taskdeps) in queue.dependencies
+                for (readdep, writedep, other_spans) in other_taskdeps
+                    writedep || continue
+                    any(will_alias(span, other_span) for span in arg_to_spans[arg], other_span in other_spans) || continue
+                    any_writedep = true
+                    break
+                end
+                if task === other_task
+                    return any_writedep
+                end
+            end
+        else
+            for ((readdep, writedep), other_task) in queue.deps[arg]
+                any_writedep |= writedep
+                if task === other_task
+                    return any_writedep
+                end
             end
         end
         error("Task isn't in argdeps set")
     end
+    "Whether `arg` is written to by `task`."
     function is_writedep(arg, task::EagerThunk)
-        haskey(arg_has_writedep, arg) || return false
-        for ((readdep, writedep), other_task) in queue.deps[arg]
-            if task === other_task
-                return writedep
+        haskey(queue.deps, arg) || return false
+        if queue.aliasing
+            for (other_task, other_taskdeps) in queue.dependencies
+                if task === other_task
+                    for (readdep, writedep, other_spans) in other_taskdeps
+                        writedep || continue
+                        any(will_alias(span, other_span) for span in arg_to_spans[arg], other_span in other_spans) || continue
+                        return true
+                    end
+                    return false
+                end
+            end
+        else
+            for ((readdep, writedep), other_task) in queue.deps[arg]
+                if task === other_task
+                    return writedep
+                end
             end
         end
         error("Task isn't in argdeps set")
@@ -231,32 +368,102 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     data_locality = IdDict{Any,MemorySpace}(data=>memory_space(data) for data in keys(queue.deps) if !isa(data, EagerThunk) || istaskstarted(data))
 
     # Track writers ("owners") and readers
-    args_owner = IdDict{Any,Union{EagerThunk,Nothing}}(arg=>nothing for arg in keys(queue.deps))
-    args_readers = IdDict{Any,Vector{EagerThunk}}(arg=>EagerThunk[] for arg in keys(queue.deps))
-    function get_write_deps!(arg, syncdeps)
-        haskey(args_owner, arg) || return
-        if (owner = args_owner[arg]) !== nothing
-            push!(syncdeps, owner)
+    args_tracked = IdDict{Any,Bool}()
+    if queue.aliasing
+        spans_owner = Dict{MemorySpan,Union{EagerThunk,Nothing}}()
+        spans_readers = Dict{MemorySpan,Vector{EagerThunk}}()
+    else
+        args_owner = IdDict{Any,Union{EagerThunk,Nothing}}()
+        args_readers = IdDict{Any,Vector{EagerThunk}}()
+    end
+    function populate_owner_readers!(arg)
+        haskey(args_tracked, arg) && return
+        args_tracked[arg] = true
+        if queue.aliasing
+            haskey(arg_to_spans, arg) || return
+            for span in arg_to_spans[arg]
+                spans_owner[span] = nothing
+                spans_readers[span] = EagerThunk[]
+            end
+        else
+            args_owner[arg] = nothing
+            args_readers[arg] = EagerThunk[]
         end
-        for reader in args_readers[arg]
-            push!(syncdeps, reader)
+    end
+    for arg in keys(queue.deps)
+        arg isa EagerThunk && !istaskstarted(arg) && continue
+        populate_owner_readers!(arg)
+    end
+
+    function get_write_deps!(arg, syncdeps)
+        haskey(args_tracked, arg) || return
+        if queue.aliasing
+            for span in arg_to_spans[arg]
+                for (other_arg, other_spans) in arg_to_spans
+                    for other_span in other_spans
+                        will_alias(span, other_span) || continue
+                        if (owner = spans_owner[other_span]) !== nothing
+                            push!(syncdeps, owner)
+                        end
+                        for reader in spans_readers[other_span]
+                            push!(syncdeps, reader)
+                        end
+                    end
+                end
+            end
+        else
+            if (owner = args_owner[arg]) !== nothing
+                push!(syncdeps, owner)
+            end
+            for reader in args_readers[arg]
+                push!(syncdeps, reader)
+            end
         end
     end
     function get_read_deps!(arg, syncdeps)
-        haskey(args_owner, arg) || return
-        if (owner = args_owner[arg]) !== nothing
-            push!(syncdeps, owner)
+        haskey(args_tracked, arg) || return
+        if queue.aliasing
+            for span in arg_to_spans[arg]
+                for (other_arg, other_spans) in arg_to_spans
+                    for other_span in other_spans
+                        will_alias(span, other_span) || continue
+                        if (owner = spans_owner[other_span]) !== nothing
+                            push!(syncdeps, owner)
+                        end
+                    end
+                end
+            end
+        else
+            if (owner = args_owner[arg]) !== nothing
+                push!(syncdeps, owner)
+            end
         end
     end
     function add_writer!(arg, task)
-        args_owner[arg] = task
-        empty!(args_readers[arg])
-        # Not necessary, but conceptually it's true
-        # It also means we don't need an extra `add_reader!` call
-        push!(args_readers[arg], task)
+        if queue.aliasing
+            for span in arg_to_spans[arg]
+                spans_owner[span] = task
+                empty!(spans_readers[span])
+                # Not necessary, but conceptually it's true
+                # It also means we don't need an extra `add_reader!` call
+                push!(spans_readers[span], task)
+            end
+        else
+            args_owner[arg] = task
+            empty!(args_readers[arg])
+            # Not necessary, but conceptually it's true
+            # It also means we don't need an extra `add_reader!` call
+            push!(args_readers[arg], task)
+        end
     end
     function add_reader!(arg, task)
-        push!(args_readers[arg], task)
+        if queue.aliasing
+            for span in arg_to_spans[arg]
+                push!(spans_readers[span], task)
+            end
+        else
+            push!(args_readers[arg], task)
+        end
     end
 
     # Make a copy of each piece of data on each worker
@@ -285,8 +492,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     for space in all_spaces
         this_space_args = remote_args[space] = IdDict{Any,Any}()
         for data in keys(queue.deps)
-            has_writedep(data) || continue
             data isa EagerThunk && !istaskstarted(data) && continue
+            has_writedep(data) || continue
             this_space_args[data] = generate_slot!(space, data)
         end
     end
@@ -345,12 +552,13 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
         # Spawn copies before user's task, as necessary
         @dagdebug nothing :spawn_datadeps "($(spec.f)) Scheduling: $our_proc ($our_space)"
-        #task_args = map(((pos, arg)=_arg,)->pos=>(arg isa EagerThunk ? fetch(arg; raw=true) : arg), copy(spec.args))
-        task_args = map(((pos, arg)=_arg,)->pos=>arg, copy(spec.args))
+        task_args = copy(spec.args)
 
         # Copy args from local to remote
         for (idx, (pos, arg)) in enumerate(task_args)
             # Is the data written previously or now?
+            populate_writedeps!(arg)
+            populate_owner_readers!(arg)
             if !has_writedep(arg, task)
                 @dagdebug nothing :spawn_datadeps "($(spec.f))[$idx] Skipped copy-to (unwritten)"
                 continue
@@ -395,8 +603,9 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         # Launch user's task
         spec.f = move(ThreadProc(myid(), 1), our_proc, spec.f)
         syncdeps = get(Set{Any}, spec.options, :syncdeps)
-        for (_, arg) in task_args
+        for (idx, (_, arg)) in enumerate(task_args)
             if is_writedep(arg, task)
+                @dagdebug nothing :spawn_datadeps "($(spec.f))[$idx] Sync with owner/readers"
                 get_write_deps!(arg, syncdeps)
             else
                 get_read_deps!(arg, syncdeps)
@@ -418,6 +627,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         end
 
         # Update read/write/locality tracking for result
+        populate_writedeps!(task)
+        populate_owner_readers!(task)
         add_writer!(task, task)
         data_locality[task] = our_space
         data_origin[task] = our_space
@@ -429,6 +640,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     # Copy args from remote to local
     for arg in keys(queue.deps)
         # Is the data previously written?
+        populate_writedeps!(arg)
+        populate_owner_readers!(arg)
         if !has_writedep(arg)
             @dagdebug nothing :spawn_datadeps "Skipped copy-from (unwritten)"
         end
@@ -495,10 +708,10 @@ better or worse performance for a given set of datadeps tasks. This argument
 is experimental and subject to change.
 """
 function spawn_datadeps(f::Base.Callable; static::Bool=true,
-                        traversal::Symbol=:inorder)
+                        traversal::Symbol=:inorder, aliasing::Bool=true)
     wait_all(; check_errors=true) do
         queue = DataDepsTaskQueue(get_options(:task_queue, EagerTaskQueue());
-                                  static, traversal)
+                                  static, traversal, aliasing)
         result = with_options(f; task_queue=queue)
         if queue.static
             distribute_tasks!(queue)
