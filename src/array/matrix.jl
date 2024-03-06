@@ -16,10 +16,10 @@ function size(x::Transpose)
     end
 end
 
-transpose(x::ArrayOp) = _to_darray(Transpose(transpose, x))
+#transpose(x::ArrayOp) = _to_darray(Transpose(transpose, x))
 transpose(x::Union{Chunk, EagerThunk}) = @spawn transpose(x)
 
-adjoint(x::ArrayOp) = _to_darray(Transpose(adjoint, x))
+#adjoint(x::ArrayOp) = _to_darray(Transpose(adjoint, x))
 adjoint(x::Union{Chunk, EagerThunk}) = @spawn adjoint(x)
 
 function adjoint(x::ArrayDomain{2})
