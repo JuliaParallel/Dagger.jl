@@ -197,11 +197,15 @@ function shard(@nospecialize(f); procs=nothing, workers=nothing, per_thread=fals
         end
     end
     isempty(procs) && throw(ArgumentError("Cannot create empty Shard"))
-    shard_dict = Dict{Processor,Chunk}()
+    shard_running_dict = Dict{Processor,EagerThunk}()
     for proc in procs
         scope = proc isa OSProc ? ProcessScope(proc) : ExactScope(proc)
         thunk = Dagger.@spawn scope=scope _mutable_inner(f, proc, scope)
-        shard_dict[proc] = fetch(thunk)[]
+        shard_running_dict[proc] = thunk
+    end
+    shard_dict = Dict{Processor,Chunk}()
+    for proc in procs
+        shard_dict[proc] = fetch(shard_running_dict[proc])[]
     end
     return Shard(shard_dict)
 end
