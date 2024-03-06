@@ -1,5 +1,36 @@
-function mul!(A::Dagger.DArray{T,2}, B::Dagger.DArray{T,2}, C::Dagger.DArray{T,2}, 
-    transA::Char, transB::Char, alpha::T, beta::T) where T
+
+import Dagger.DArray
+
+WrappedDArray{T,N} = Union{<:DArray{T,N}, Transpose{<:DArray{T,N}}, Adjoint{<:DArray{T,N}}}
+WrappedDMatrix{T} = WrappedDArray{T,2}
+WrappedDVector{T} = WrappedDArray{T,1}
+DMatrix{T} = DArray{T,2}
+DVector{T} = DArray{T,1}
+
+"""
+function LinearAlgebra.mul!(C::DMatrix{T}, A::WrappedDMatrix{T}, B::WrappedDMatrix{T}, alpha::Number, beta::Number) where T
+
+    mul!(C, A, B, T(alpha), T(beta))
+
+end
+
+
+function LinearAlgebra.mul!(C::DMatrix{T}, A::WrappedDMatrix{T}, B::WrappedDMatrix{T}, alpha::T, beta::T) where T
+
+
+    transA = LinearAlgebra.wrapper_char(A)
+    transB = LinearAlgebra.wrapper_char(B)
+
+    A = LinearAlgebra._unwrap(A)
+    B = LinearAlgebra._unwrap(B)
+    
+    LinearAlgebra.generic_matmatmul!(C, transA, transB, A, B, LinearAlgebra.MulAddMul(alpha, beta))
+end
+
+"""
+
+function LinearAlgebra.generic_matmatmul!(C::DMatrix{T}, transA::Char, transB::Char, A::DMatrix{T}, B::DMatrix{T}, _add::LinearAlgebra.MulAddMul) where T
+
 
     Ac = A.chunks
     Bc = B.chunks
@@ -8,11 +39,14 @@ function mul!(A::Dagger.DArray{T,2}, B::Dagger.DArray{T,2}, C::Dagger.DArray{T,2
     Bmt, Bnt = size(Bc)
     Cmt, Cnt = size(Cc)
 
+    alpha = _add.alpha
+    beta = _add.beta
     #=
     if Ant != Bmt
         throw(DimensionMismatch(lazy"A has number of blocks ($Amt,$Ant) but B has number of blocks ($Bmt,$Bnt)"))
     end
     =#
+    @show transA, transB, alpha, beta
 
     Dagger.spawn_datadeps() do
         for m in range(1, Cmt)
