@@ -192,8 +192,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     # Track writers ("owners") and readers
     args_tracked = IdDict{Any,Bool}()
     if queue.aliasing
-        ainfos_owner = Dict{AbstractAliasing,Union{EagerThunk,Nothing}}()
-        ainfos_readers = Dict{AbstractAliasing,Vector{EagerThunk}}()
+        ainfos_owner = Dict{AbstractAliasing,Union{Pair{EagerThunk,Int},Nothing}}()
+        ainfos_readers = Dict{AbstractAliasing,Vector{Pair{EagerThunk,Int}}}()
     else
         args_owner = IdDict{Any,Union{EagerThunk,Nothing}}()
         args_readers = IdDict{Any,Vector{EagerThunk}}()
@@ -238,7 +238,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 # Initialize owner and readers
                 if !haskey(ainfos_owner, ainfo)
                     ainfos_owner[ainfo] = nothing
-                    ainfos_readers[ainfo] = EagerThunk[]
+                    ainfos_readers[ainfo] = Pair{EagerThunk,Int}[]
                 end
 
                 # Assign data owner and locality
@@ -298,49 +298,40 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             end
             arg_has_writedep[arg] = writedep
         end
-
-        @label owner_readers
-        # Populate owner/readers
-        if queue.aliasing
-            for (dep_mod, _, _) in deps
-                ainfo = aliasing(arg, dep_mod)
-                ainfos_owner[ainfo] = nothing
-                ainfos_readers[ainfo] = EagerThunk[]
-            end
-        else
-            args_owner[arg] = nothing
-            args_readers[arg] = EagerThunk[]
-        end
     end
 
     # Aliasing
-    function get_write_deps!(ainfo::AbstractAliasing, task, syncdeps)
-        for (other_ainfo, other_task) in ainfos_owner
+    function get_write_deps!(ainfo::AbstractAliasing, task, write_num, syncdeps)
+        ainfo isa NoAliasing && return
+        for (other_ainfo, other_task_write_num) in ainfos_owner
+            other_ainfo isa NoAliasing && continue
             will_alias(ainfo, other_ainfo) || continue
-            if other_task !== nothing && other_task !== task
+            other_task_write_num === nothing && continue
+            other_task, other_write_num = other_task_write_num
+            write_num == other_write_num && continue
+            push!(syncdeps, other_task)
+        end
+        get_read_deps!(ainfo, task, write_num, syncdeps)
+    end
+    function get_read_deps!(ainfo::AbstractAliasing, task, write_num, syncdeps)
+        ainfo isa NoAliasing && return
+        for (other_ainfo, other_tasks) in ainfos_readers
+            other_ainfo isa NoAliasing && continue
+            will_alias(ainfo, other_ainfo) || continue
+            for (other_task, other_write_num) in other_tasks
+                write_num == other_write_num && continue
                 push!(syncdeps, other_task)
             end
         end
-        get_read_deps!(ainfo, task, syncdeps)
     end
-    function get_read_deps!(ainfo::AbstractAliasing, task, syncdeps)
-        for (other_ainfo, other_tasks) in ainfos_readers
-            will_alias(ainfo, other_ainfo) || continue
-            for other_task in other_tasks
-                if other_task !== task
-                    push!(syncdeps, other_task)
-                end
-            end
-        end
-    end
-    function add_writer!(ainfo::AbstractAliasing, task)
-        ainfos_owner[ainfo] = task
-        filter!(other_task->other_task === task, ainfos_readers[ainfo])
+    function add_writer!(ainfo::AbstractAliasing, task, write_num)
+        ainfos_owner[ainfo] = task=>write_num
+        empty!(ainfos_readers[ainfo])
         # Not necessary to assert a read, but conceptually it's true
-        add_reader!(ainfo, task)
+        add_reader!(ainfo, task, write_num)
     end
-    function add_reader!(ainfo::AbstractAliasing, task)
-        push!(ainfos_readers[ainfo], task)
+    function add_reader!(ainfo::AbstractAliasing, task, write_num)
+        push!(ainfos_readers[ainfo], task=>write_num)
     end
 
     # Non-Aliasing
@@ -449,10 +440,12 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     end
 
     # Start launching tasks and necessary copies
+    write_num = 1
     for (spec, task) in queue.seen_tasks[task_order]
         our_proc = all_procs[proc_idx]
         our_space = only(memory_spaces(our_proc))
 
+        spec.f = move(ThreadProc(myid(), 1), our_proc, spec.f)
         @dagdebug nothing :spawn_datadeps "($(spec.f)) Scheduling: $our_proc ($our_space)"
 
         # Copy raw task arguments for analysis
@@ -490,10 +483,10 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                         end
                         copy_to_scope = ExactScope(our_proc)
                         copy_to_syncdeps = Set{Any}()
-                        get_write_deps!(ainfo, task, copy_to_syncdeps)
+                        get_write_deps!(ainfo, task, write_num, copy_to_syncdeps)
                         @dagdebug nothing :spawn_datadeps "($(spec.f))[$idx][$dep_mod] $(length(copy_to_syncdeps)) syncdeps"
                         copy_to = Dagger.@spawn scope=copy_to_scope syncdeps=copy_to_syncdeps meta=true Dagger.move!(dep_mod, our_space, data_space, arg_remote, arg_local)
-                        add_writer!(ainfo, copy_to)
+                        add_writer!(ainfo, copy_to, write_num)
 
                         data_locality[ainfo] = our_space
                     else
@@ -523,6 +516,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             end
             spec.args[idx] = pos => arg_remote
         end
+        write_num += 1
 
         # Validate that we're not accidentally performing a copy
         for (idx, (_, arg)) in enumerate(spec.args)
@@ -534,7 +528,6 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         end
 
         # Launch user's task
-        spec.f = move(ThreadProc(myid(), 1), our_proc, spec.f)
         syncdeps = get(Set{Any}, spec.options, :syncdeps)
         for (idx, (_, arg)) in enumerate(task_args)
             arg, deps = unwrap_inout(arg)
@@ -543,9 +536,9 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                     ainfo = aliasing(arg, dep_mod)
                     if writedep
                         @dagdebug nothing :spawn_datadeps "($(spec.f))[$idx][$dep_mod] Sync with owner/readers"
-                        get_write_deps!(ainfo, task, syncdeps)
+                        get_write_deps!(ainfo, task, write_num, syncdeps)
                     else
-                        get_read_deps!(ainfo, task, syncdeps)
+                        get_read_deps!(ainfo, task, write_num, syncdeps)
                     end
                 end
             else
@@ -565,14 +558,15 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         # Update read/write tracking for arguments
         for (idx, (_, arg)) in enumerate(task_args)
             arg, deps = unwrap_inout(arg)
+            arg = arg isa EagerThunk ? fetch(arg; raw=true) : arg
             if queue.aliasing
                 for (dep_mod, _, writedep) in deps
                     ainfo = aliasing(arg, dep_mod)
                     if writedep
                         @dagdebug nothing :spawn_datadeps "($(spec.f))[$idx][$dep_mod] Set as owner"
-                        add_writer!(ainfo, task)
+                        add_writer!(ainfo, task, write_num)
                     else
-                        add_reader!(ainfo, task)
+                        add_reader!(ainfo, task, write_num)
                     end
                 end
             else
@@ -584,6 +578,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 end
             end
         end
+        write_num += 1
 
         # Select the next processor to use
         proc_idx = mod1(proc_idx+1, length(all_procs))
@@ -618,6 +613,11 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
         # Then, replay the writes from each owner in-order
         for (arg, ainfo_writes) in arg_writes
+            if length(ainfo_writes) > 1
+                #@warn "Multiple copy-backs of the same arg"
+                # FIXME: Remove me
+                deleteat!(ainfo_writes, 1:length(ainfo_writes)-1)
+            end
             for (ainfo, dep_mod, data_remote_space) in ainfo_writes
                 # Is the source of truth elsewhere?
                 data_local_space = data_origin[ainfo]
@@ -630,7 +630,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                     data_local_proc = first(processors(data_local_space))
                     copy_from_scope = ExactScope(data_local_proc)
                     copy_from_syncdeps = Set()
-                    get_write_deps!(ainfo, copy_from_syncdeps)
+                    get_write_deps!(ainfo, nothing, write_num, copy_from_syncdeps)
                     @dagdebug nothing :spawn_datadeps "$(length(copy_from_syncdeps)) syncdeps"
                     copy_from = Dagger.@spawn scope=copy_from_scope syncdeps=copy_from_syncdeps meta=true Dagger.move!(dep_mod, data_local_space, data_remote_space, arg_local, arg_remote)
                 else
