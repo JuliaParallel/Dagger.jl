@@ -17,7 +17,7 @@ function getindex(x::DomainBlocks{N}, idx::Int) where N
     if N == 1
         _getindex(x, (idx,))
     else
-        _getindex(x, ind2sub(x, idx))
+        _getindex(x, Base._ind2sub(x, idx))
     end
 end
 

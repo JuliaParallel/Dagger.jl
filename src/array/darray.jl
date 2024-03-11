@@ -234,7 +234,7 @@ Base.:(/)(x::DArray{T,N,B,F}, y::U) where {T<:Real,U<:Real,N,B,F} =
 A `view` of a `DArray` chunk returns a `DArray` of `Thunk`s.
 """
 function Base.view(c::DArray, d)
-    subchunks, subdomains = lookup_parts(chunks(c), domainchunks(c), d)
+    subchunks, subdomains = lookup_parts(c, chunks(c), domainchunks(c), d)
     d1 = alignfirst(d)
     DArray(eltype(c), d1, subdomains, subchunks, c.partitioning, c.concat)
 end
@@ -272,7 +272,7 @@ function group_indices(cumlength, idxs::AbstractRange)
 end
 
 _cumsum(x::AbstractArray) = length(x) == 0 ? Int[] : cumsum(x)
-function lookup_parts(ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomain{N}) where N
+function lookup_parts(A::DArray, ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomain{N}) where N
     groups = map(group_indices, subdmns.cumlength, indexes(d))
     sz = map(length, groups)
     pieces = Array{Any}(undef, sz)
@@ -284,7 +284,15 @@ function lookup_parts(ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomai
     end
     out_cumlength = map(g->_cumsum(map(x->length(x[2]), g)), groups)
     out_dmn = DomainBlocks(ntuple(x->1,Val(N)), out_cumlength)
-    pieces, out_dmn
+    return pieces, out_dmn
+end
+function lookup_parts(A::DArray, ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomain{S}) where {N,S}
+    if S != 1
+        throw(BoundsError(A, d.indexes))
+    end
+    inds = CartesianIndices(A)[d.indexes...]
+    new_d = ntuple(i->first(inds).I[i]:last(inds).I[i], N)
+    return lookup_parts(A, ps, subdmns, ArrayDomain(new_d))
 end
 
 """

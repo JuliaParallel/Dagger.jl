@@ -134,12 +134,7 @@ julia> DZ = DY .* 3
 Dagger.DArray{Float64, 2, Blocks{2}, typeof(cat)}(100, 100)
 ```
 
-Now, `DZ` will contain the result of computing `(DX .+ DX) .* 3`. Note that
-`DArray` objects are immutable, and operations on them are thus functional
-transformations of their input `DArray`.
-
-!!! note
-    Support for mutation of `DArray`s is planned for a future release
+Now, `DZ` will contain the result of computing `(DX .+ DX) .* 3`.
 
 ```
 julia> Dagger.chunks(DZ)
@@ -208,7 +203,7 @@ julia> collect(DZ)
 ```
 
 A variety of other operations exist on the `DArray`, and it should generally
-behavior otherwise similar to any other `AbstractArray` type. If you find that
+behave otherwise similar to any other `AbstractArray` type. If you find that
 it's missing an operation that you need, please file an issue!
 
 ### Known Supported Operations
@@ -216,6 +211,7 @@ it's missing an operation that you need, please file an issue!
 This list is not exhaustive, but documents operations which are known to work well with the `DArray`:
 
 From `Base`:
+- `getindex`/`setindex!`
 - Broadcasting
 - `similar`/`copy`/`copyto!`
 - `map`/`reduce`/`mapreduce`
