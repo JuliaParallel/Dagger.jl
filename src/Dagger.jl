@@ -65,7 +65,7 @@ include("array/map-reduce.jl")
 include("file-io.jl")
 
 include("array/operators.jl")
-include("array/getindex.jl")
+include("array/indexing.jl")
 include("array/setindex.jl")
 include("array/matrix.jl")
 include("array/sparse_partition.jl")
