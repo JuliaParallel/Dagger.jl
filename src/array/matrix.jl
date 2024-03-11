@@ -1,3 +1,4 @@
+#=
 struct Transpose{T,N} <: ArrayOp{T,N}
     f::Function
     input::ArrayOp
@@ -21,6 +22,7 @@ transpose(x::Union{Chunk, EagerThunk}) = @spawn transpose(x)
 
 #adjoint(x::ArrayOp) = _to_darray(Transpose(adjoint, x))
 adjoint(x::Union{Chunk, EagerThunk}) = @spawn adjoint(x)
+
 
 function adjoint(x::ArrayDomain{2})
     d = indexes(x)
@@ -49,7 +51,7 @@ function stage(ctx::Context, node::Transpose)
     thunks = _ctranspose(chunks(inp))
     return DArray(eltype(inp), domain(inp)', domainchunks(inp)', thunks, inp.partitioning', inp.concat)
 end
-
+=#
 import Base: *, +
 
 struct MatMul{T, N} <: ArrayOp{T, N}
@@ -67,10 +69,10 @@ end
 size(x::MatMul) = mul_size(x.a, x.b)
 MatMul(a,b) =
     MatMul{promote_type(eltype(a), eltype(b)), length(mul_size(a,b))}(a,b)
-(*)(a::ArrayOp, b::ArrayOp) = _to_darray(MatMul(a,b))
+#(*)(a::ArrayOp, b::ArrayOp) = _to_darray(MatMul(a,b))
 # Bonus method for matrix-vector multiplication
 (*)(a::ArrayOp, b::Vector) = _to_darray(MatMul(a,PromotePartition(b)))
-(*)(a::AbstractArray, b::ArrayOp) = _to_darray(MatMul(PromotePartition(a), b))
+#(*)(a::AbstractArray, b::ArrayOp) = _to_darray(MatMul(PromotePartition(a), b))
 
 function (*)(a::ArrayDomain{2}, b::ArrayDomain{2})
     if size(a, 2) != size(b, 1)
