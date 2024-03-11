@@ -1,5 +1,3 @@
-using Mmap
-
 """
 A buffer that drops all elements put into it. Only to be used as the output
 buffer for a task - will throw if attached as an input.
