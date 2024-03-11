@@ -43,6 +43,8 @@ include("utils/caching.jl")
 include("sch/Sch.jl"); using .Sch
 
 # Streaming
+include("stream-buffers.jl")
+include("stream-fetchers.jl")
 include("stream.jl")
 
 # Array computations

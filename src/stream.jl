@@ -1,11 +1,12 @@
-mutable struct StreamStore{T}
+mutable struct StreamStore{T,B}
     waiters::Vector{Int}
-    buffers::Dict{Int,Vector{Any}}
+    buffers::Dict{Int,B}
+    buffer_amount::Int
     open::Bool
     lock::Threads.Condition
-    StreamStore{T}() where T =
-        new{T}(zeros(Int, 0), Dict{Int,Vector{T}}(),
-               true, Threads.Condition())
+    StreamStore{T,B}(buffer_amount::Integer) where {T,B} =
+        new{T,B}(zeros(Int, 0), Dict{Int,B}(), buffer_amount,
+                 true, Threads.Condition())
 end
 tid() = Dagger.Sch.sch_handle().thunk_id.id
 function uid()
@@ -18,19 +19,19 @@ function uid()
         end
     end
 end
-function Base.put!(store::StreamStore{T}, @nospecialize(value::T)) where T
+function Base.put!(store::StreamStore{T,B}, value) where {T,B}
     @lock store.lock begin
-        while length(store.waiters) == 0 && isopen(store)
-            @dagdebug nothing :stream_put "[$(uid())] no waiters, not putting"
-            wait(store.lock)
-        end
         if !isopen(store)
             @dagdebug nothing :stream_put "[$(uid())] closed!"
             throw(InvalidStateException("Stream is closed", :closed))
         end
         @dagdebug nothing :stream_put "[$(uid())] adding $value"
         for buffer in values(store.buffers)
-            push!(buffer, value)
+            while isfull(buffer)
+                @dagdebug nothing :stream_put "[$(uid())] buffer full, waiting"
+                wait(store.lock)
+            end
+            put!(buffer, value)
         end
         notify(store.lock)
     end
@@ -38,7 +39,7 @@ end
 function Base.take!(store::StreamStore, id::UInt)
     @lock store.lock begin
         buffer = store.buffers[id]
-        while length(buffer) == 0 && isopen(store, id)
+        while isempty(buffer) && isopen(store, id)
             @dagdebug nothing :stream_take "[$(uid())] no elements, not taking"
             wait(store.lock)
         end
@@ -47,11 +48,19 @@ function Base.take!(store::StreamStore, id::UInt)
             @dagdebug nothing :stream_take "[$(uid())] closed!"
             throw(InvalidStateException("Stream is closed", :closed))
         end
-        value = popfirst!(buffer)
+        unlock(store.lock)
+        value = try
+            take!(buffer)
+        finally
+            lock(store.lock)
+        end
         @dagdebug nothing :stream_take "[$(uid())] value accepted"
+        notify(store.lock)
         return value
     end
 end
+Base.isempty(store::StreamStore, id::UInt) = isempty(store.buffers[id])
+isfull(store::StreamStore, id::UInt) = isfull(store.buffers[id])
 "Returns whether the store is actively open. Only check this when deciding if new values can be pushed."
 Base.isopen(store::StreamStore) = store.open
 "Returns whether the store is actively open, or if closing, still has remaining messages for `id`. Only check this when deciding if existing values can be taken."
@@ -64,13 +73,16 @@ function Base.isopen(store::StreamStore, id::UInt)
     end
 end
 function Base.close(store::StreamStore)
-    store.open = false
-    @lock store.lock notify(store.lock)
+    if store.open
+        store.open = false
+        @lock store.lock notify(store.lock)
+    end
 end
-function add_waiters!(store::StreamStore, waiters::Vector{Int})
+function add_waiters!(store::StreamStore{T,B}, waiters::Vector{Int}) where {T,B}
     @lock store.lock begin
         for w in waiters
-            store.buffers[w] = Any[]
+            buffer = initialize_stream_buffer(B, T, store.buffer_amount)
+            store.buffers[w] = buffer
         end
         append!(store.waiters, waiters)
         notify(store.lock)
@@ -87,51 +99,52 @@ function remove_waiters!(store::StreamStore, waiters::Vector{Int})
     end
 end
 
-mutable struct Stream{T} <: AbstractChannel{T}
-    ref::Chunk
-    function Stream{T}() where T
-        store = tochunk(StreamStore{T}())
-        return new{T}(store)
+mutable struct Stream{T,B}
+    store::Union{StreamStore{T,B},Nothing}
+    store_ref::Chunk
+    input_buffer::Union{B,Nothing}
+    buffer_amount::Int
+    function Stream{T,B}(buffer_amount::Integer=0) where {T,B}
+        # Creates a new output stream
+        store = StreamStore{T,B}(buffer_amount)
+        store_ref = tochunk(store)
+        return new{T,B}(store, store_ref, nothing, buffer_amount)
+    end
+    function Stream{B}(stream::Stream{T}, buffer_amount::Integer=0) where {T,B}
+        # References an existing output stream
+        return new{T,B}(nothing, stream.store_ref, nothing, buffer_amount)
     end
 end
-Stream() = Stream{Any}()
+function initialize_input_stream!(stream::Stream{T,B}) where {T,B}
+    stream.input_buffer = initialize_stream_buffer(B, T, stream.buffer_amount)
+end
 
-function Base.put!(stream::Stream, @nospecialize(value))
-    tls = Dagger.get_tls()
-    remotecall_wait(stream.ref.handle.owner, stream.ref.handle, value) do ref, value
-        Dagger.set_tls!(tls)
-        @nospecialize value
-        store = MemPool.poolget(ref)::StreamStore
-        put!(store, value)
-    end
-end
-function Base.take!(stream::Stream{T}, id::UInt) where T
-    tls = Dagger.get_tls()
-    return remotecall_fetch(stream.ref.handle.owner, stream.ref.handle) do ref
-        Dagger.set_tls!(tls)
-        store = MemPool.poolget(ref)::StreamStore
-        return take!(store, id)::T
-    end
+Base.put!(stream::Stream, @nospecialize(value)) =
+    put!(stream.store, value)
+function Base.take!(stream::Stream{T,B}, id::UInt) where {T,B}
+    @warn "Make remote fetcher configurable" maxlog=1
+    stream_fetch_values!(RemoteFetcher, T, stream.store_ref, stream.input_buffer, id)
+    return take!(stream.input_buffer)
 end
 function Base.isopen(stream::Stream, id::UInt)::Bool
-    return remotecall_fetch(stream.ref.handle.owner, stream.ref.handle) do ref
+    return remotecall_fetch(stream.store_ref.handle.owner, stream.store_ref.handle) do ref
         return isopen(MemPool.poolget(ref)::StreamStore, id)
     end
 end
 function Base.close(stream::Stream)
-    remotecall_wait(stream.ref.handle.owner, stream.ref.handle) do ref
+    remotecall_wait(stream.store_ref.handle.owner, stream.store_ref.handle) do ref
         close(MemPool.poolget(ref)::StreamStore)
     end
 end
 function add_waiters!(stream::Stream, waiters::Vector{Int})
-    remotecall_wait(stream.ref.handle.owner, stream.ref.handle) do ref
+    remotecall_wait(stream.store_ref.handle.owner, stream.store_ref.handle) do ref
         add_waiters!(MemPool.poolget(ref)::StreamStore, waiters)
     end
 end
 add_waiters!(stream::Stream, waiter::Integer) =
     add_waiters!(stream::Stream, Int[waiter])
 function remove_waiters!(stream::Stream, waiters::Vector{Int})
-    remotecall_wait(stream.ref.handle.owner, stream.ref.handle) do ref
+    remotecall_wait(stream.store_ref.handle.owner, stream.store_ref.handle) do ref
         remove_waiters!(MemPool.poolget(ref)::StreamStore, waiters)
     end
 end
@@ -139,37 +152,17 @@ remove_waiters!(stream::Stream, waiter::Integer) =
     remove_waiters!(stream::Stream, Int[waiter])
 
 function migrate_stream!(stream::Stream, w::Integer=myid())
-    # Take lock to prevent any further modifications
-    # N.B. Serialization automatically unlocks
-    remotecall_wait(stream.ref.handle.owner, stream.ref.handle) do ref
-        lock((MemPool.poolget(ref)::StreamStore).lock)
-    end
-
     # Perform migration of the StreamStore
     # MemPool will block access to the new ref until the migration completes
-    if stream.ref.handle.owner != w
-        MemPool.migrate!(stream.ref.handle, w)
+    if stream.store_ref.handle.owner != w
+        # Take lock to prevent any further modifications
+        # N.B. Serialization automatically unlocks
+        remotecall_wait(stream.store_ref.handle.owner, stream.store_ref.handle) do ref
+            lock((MemPool.poolget(ref)::StreamStore).lock)
+        end
+
+        MemPool.migrate!(stream.store_ref.handle, w)
     end
-end
-
-struct NullStream end
-Base.put!(ns::NullStream, x) = nothing
-Base.take!(ns::NullStream) = throw(ConcurrencyViolationError("Cannot `take!` from a `NullStream`"))
-
-mutable struct StreamWrapper{S}
-    stream::S
-    open::Bool
-    StreamWrapper(stream::S) where S = new{S}(stream, true)
-end
-Base.isopen(sw::StreamWrapper) = sw.open
-Base.close(sw::StreamWrapper) = (sw.open = false;)
-function Base.put!(sw::StreamWrapper, x)
-    isopen(sw) || throw(InvalidStateException("Stream is closed.", :closed))
-    put!(sw.stream, x)
-end
-function Base.take!(sw::StreamWrapper)
-    isopen(sw) || throw(InvalidStateException("Stream is closed.", :closed))
-    take!(sw.stream)
 end
 
 struct StreamingTaskQueue <: AbstractTaskQueue
@@ -193,24 +186,19 @@ function initialize_streaming!(self_streams, spec, task)
     if !isa(spec.f, StreamingFunction)
         # Adapt called function for streaming and generate output Streams
         T_old = Base.uniontypes(task.metadata.return_type)
-        T_old = map(t->(t !== Union{} && t <: FinishedStreaming) ? only(t.parameters) : t, T_old)
+        T_old = map(t->(t !== Union{} && t <: FinishStream) ? first(t.parameters) : t, T_old)
         # We treat non-dominating error paths as unreachable
         T_old = filter(t->t !== Union{}, T_old)
         T = task.metadata.return_type = !isempty(T_old) ? Union{T_old...} : Any
-        if haskey(spec.options, :stream)
-            if spec.options.stream !== nothing
-                # Use the user-provided stream
-                @warn "Replace StreamWrapper with Stream" maxlog=1
-                stream = StreamWrapper(spec.options.stream)
-            else
-                # Use a non-readable, non-writing stream
-                stream = StreamWrapper(NullStream())
-            end
-            spec.options = NamedTuple(filter(opt -> opt[1] != :stream, Base.pairs(spec.options)))
-        else
-            # Create a built-in Stream object
-            stream = Stream{T}()
+        output_buffer_amount = get(spec.options, :stream_output_buffer_amount, 1)
+        if output_buffer_amount <= 0
+            throw(ArgumentError("Output buffering is required; please specify a `stream_output_buffer_amount` greater than 0"))
         end
+        output_buffer = get(spec.options, :stream_output_buffer, ProcessRingBuffer)
+        stream = Stream{T,output_buffer}(output_buffer_amount)
+        spec.options = NamedTuple(filter(opt -> opt[1] != :stream_output_buffer &&
+                                                opt[1] != :stream_output_buffer_amount,
+                                         Base.pairs(spec.options)))
         self_streams[task.uid] = stream
 
         spec.f = StreamingFunction(spec.f, stream)
@@ -235,21 +223,31 @@ function spawn_streaming(f::Base.Callable)
     return result
 end
 
-struct FinishedStreaming{T}
+struct FinishStream{T,R}
     value::Union{Some{T},Nothing}
+    result::R
 end
-finish_streaming(value) = FinishedStreaming{Any}(Some{T}(value))
-finish_streaming() = FinishedStreaming{Union{}}(nothing)
+finish_stream(value::T; result::R=nothing) where {T,R} =
+    FinishStream{T,R}(Some{T}(value), result)
+finish_stream(; result::R=nothing) where R =
+    FinishStream{Union{},R}(nothing, result)
+
+function cancel_stream!(t::EagerThunk)
+    stream = task_to_stream(t.uid)
+    if stream !== nothing
+        close(stream)
+    end
+end
 
 struct StreamingFunction{F, S}
     f::F
     stream::S
 end
+chunktype(sf::StreamingFunction{F}) where F = F
 function (sf::StreamingFunction)(args...; kwargs...)
     @nospecialize sf args kwargs
     result = nothing
     thunk_id = tid()
-    @warn "Fetch from worker 1 more efficiently" maxlog=1
     uid = remotecall_fetch(1, thunk_id) do thunk_id
         lock(Sch.EAGER_ID_MAP) do id_map
             for (uid, otid) in id_map
@@ -259,12 +257,22 @@ function (sf::StreamingFunction)(args...; kwargs...)
             end
         end
     end
+
+    # Migrate our output stream to this worker
     if sf.stream isa Stream
         migrate_stream!(sf.stream)
     end
+
     try
+        # TODO: This kwarg song-and-dance is required to ensure that we don't
+        # allocate boxes within `stream!`, when possible
         kwarg_names = map(name->Val{name}(), map(first, (kwargs...,)))
         kwarg_values = map(last, (kwargs...,))
+        for arg in args
+            if arg isa Stream
+                initialize_input_stream!(arg)
+            end
+        end
         return stream!(sf, uid, (args...,), kwarg_names, kwarg_values)
     finally
         # Remove ourself as a waiter for upstream Streams
@@ -282,6 +290,7 @@ function (sf::StreamingFunction)(args...; kwargs...)
         for stream in streams
             @dagdebug nothing :stream_close "[$uid] dropping waiter"
             remove_waiters!(stream, uid)
+            @dagdebug nothing :stream_close "[$uid] dropped waiter"
         end
 
         # Ensure downstream tasks also terminate
@@ -292,39 +301,34 @@ end
 # N.B We specialize to minimize/eliminate allocations
 function stream!(sf::StreamingFunction, uid,
                  args::Tuple, kwarg_names::Tuple, kwarg_values::Tuple)
+    f = move(thunk_processor(), sf.f)
     while true
-    #@time begin
         # Get values from Stream args/kwargs
-        stream_args = _stream_take_values!(args)
-        stream_kwarg_values = _stream_take_values!(kwarg_values)
+        stream_args = _stream_take_values!(args, uid)
+        stream_kwarg_values = _stream_take_values!(kwarg_values, uid)
         stream_kwargs = _stream_namedtuple(kwarg_names, stream_kwarg_values)
 
         # Run a single cycle of f
-        stream_result = sf.f(stream_args...; stream_kwargs...)
+        stream_result = f(stream_args...; stream_kwargs...)
 
         # Exit streaming on graceful request
-        if stream_result isa FinishedStreaming
-            @info "Terminating!"
+        if stream_result isa FinishStream
             if stream_result.value !== nothing
                 value = something(stream_result.value)
                 put!(sf.stream, value)
-                return value
             end
-            return nothing
+            return stream_result.result
         end
 
         # Put the result into the output stream
         put!(sf.stream, stream_result)
-    #end
     end
 end
-function _stream_take_values!(args)
+function _stream_take_values!(args, uid)
     return ntuple(length(args)) do idx
         arg = args[idx]
         if arg isa Stream
             take!(arg, uid)
-        elseif arg isa Union{AbstractChannel,RemoteChannel,StreamWrapper} # FIXME: Use trait query
-            take!(arg)
         else
             arg
         end
@@ -336,6 +340,7 @@ end
     NT = :(NamedTuple{$name_ex,$stream_kwarg_values})
     return :($NT(stream_kwarg_values))
 end
+initialize_stream_buffer(B, T, buffer_amount) = B{T}(buffer_amount)
 
 const EAGER_THUNK_STREAMS = LockedObject(Dict{UInt,Any}())
 function task_to_stream(uid::UInt)
@@ -354,22 +359,31 @@ function finalize_streaming!(tasks::Vector{Pair{EagerTaskSpec,EagerThunk}}, self
     stream_waiter_changes = Dict{UInt,Vector{Int}}()
 
     for (spec, task) in tasks
-        if !haskey(self_streams, task.uid)
-            continue
-        end
+        @assert haskey(self_streams, task.uid)
 
         # Adapt args to accept Stream output of other streaming tasks
         for (idx, (pos, arg)) in enumerate(spec.args)
             if arg isa EagerThunk
+                # Check if this is a streaming task
                 if haskey(self_streams, arg.uid)
                     other_stream = self_streams[arg.uid]
+                else
+                    other_stream = task_to_stream(arg.uid)
+                end
+
+                if other_stream !== nothing
+                    # Get input stream configs and configure input stream
+                    @warn "Support no input buffering" maxlog=1
+                    input_buffer_amount = get(spec.options, :stream_input_buffer_amount, 1)
+                    input_buffer = get(spec.options, :stream_input_buffer, ProcessRingBuffer)
+                    # FIXME: input_fetcher = get(spec.options, :stream_input_fetcher, RemoteFetcher)
+                    @warn "Accept custom input fetcher" maxlog=1
+                    input_stream = Stream{input_buffer}(other_stream, input_buffer_amount)
+
+                    # Replace the EagerThunk with the input Stream
                     spec.args[idx] = pos => other_stream
-                    changes = get!(stream_waiter_changes, arg.uid) do
-                        Int[]
-                    end
-                    push!(changes, task.uid)
-                elseif (other_stream = task_to_stream(arg.uid)) !== nothing
-                    spec.args[idx] = pos => other_stream
+
+                    # Add this task as a waiter for the associated output Stream
                     changes = get!(stream_waiter_changes, arg.uid) do
                         Int[]
                     end
@@ -377,16 +391,22 @@ function finalize_streaming!(tasks::Vector{Pair{EagerTaskSpec,EagerThunk}}, self
                 end
             end
         end
+
+        # Filter out all streaming options
+        to_filter = (:stream_input_buffer, :stream_input_buffer_amount,
+                     :stream_output_buffer, :stream_output_buffer_amount)
+        spec.options = NamedTuple(filter(opt -> !(opt[1] in to_filter),
+                                         Base.pairs(spec.options)))
+        if haskey(spec.options, :propagates)
+            propagates = filter(opt -> !(opt in to_filter),
+                                spec.options.propagates)
+            spec.options = merge(spec.options, (;propagates))
+        end
     end
 
     # Adjust waiter count of Streams with dependencies
     for (uid, waiters) in stream_waiter_changes
         stream = task_to_stream(uid)
-        if stream isa Stream # FIXME: Use trait query
-            add_waiters!(stream, waiters)
-        end
+        add_waiters!(stream, waiters)
     end
 end
-
-# TODO: Allow stopping arbitrary tasks
-kill!(t::EagerThunk) = close(task_to_stream(t.uid))
