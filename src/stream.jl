@@ -152,6 +152,10 @@ remove_waiters!(stream::Stream, waiter::Integer) =
     remove_waiters!(stream::Stream, Int[waiter])
 
 function migrate_stream!(stream::Stream, w::Integer=myid())
+    if !isdefined(MemPool, :migrate!)
+        @warn "MemPool migration support not enabled!" maxlog=1
+        return
+    end
     # Perform migration of the StreamStore
     # MemPool will block access to the new ref until the migration completes
     if stream.store_ref.handle.owner != w
