@@ -1,7 +1,8 @@
 using LinearAlgebra, SparseArrays, Random, SharedArrays
 import Dagger: chunks, DArray, domainchunks, treereduce_nd
 import Distributed: myid, procs
-import Statistics: mean
+import Statistics: mean, var, std
+import OnlineStats
 
 @testset "treereduce_nd" begin
     xs = rand(1:10, 8,8,8)
@@ -79,28 +80,51 @@ end
     end
 end
 
-@testset "sum" begin
-    X = ones(Blocks(10, 10), 100, 100)
-    @test sum(X) == 10000
-    Y = zeros(Blocks(10, 10), 100, 100)
-    @test sum(Y) == 0
+function test_mapreduce(f, init_func; no_init=true, zero_init=zero,
+                        types=(Int32, Int64, Float32, Float64),
+                        cmp=isapprox)
+    @testset "$T" for T in types
+        X = init_func(Blocks(10, 10), T, 100, 100)
+        inits = ()
+        if no_init
+            inits = (inits..., nothing)
+        end
+        if zero_init !== nothing
+            inits = (inits..., zero_init(T))
+        end
+        @testset "dims=$dims" for dims in (Colon(), 1, 2, (1,), (2,))
+            @testset "init=$init" for init in inits
+                if init === nothing
+                    if dims == Colon()
+                        @test cmp(f(X; dims), f(collect(X); dims))
+                    else
+                        @test cmp(collect(f(X; dims)), f(collect(X); dims))
+                    end
+                else
+                    if dims == Colon()
+                        @test cmp(f(X; dims, init), f(collect(X); dims, init))
+                    else
+                        @test cmp(collect(f(X; dims, init)), f(collect(X); dims, init))
+                    end
+                end
+            end
+        end
+    end
 end
 
-@testset "prod" begin
-    x = randn(100, 100)
-    X = distribute(x, Blocks(10, 10))
-    @test prod(X) == prod(x)
-    Y = zeros(Blocks(10, 10), 100, 100)
-    @test prod(Y) == 0
-end
+# Base
+@testset "reduce" test_mapreduce((X; dims, init=Base._InitialValue())->reduce(+, X; dims, init), ones)
+@testset "mapreduce" test_mapreduce((X; dims, init=Base._InitialValue())->mapreduce(x->x+1, +, X; dims, init), ones)
+@testset "sum" test_mapreduce(sum, ones)
+@testset "prod" test_mapreduce(prod, rand)
+@testset "minimum" test_mapreduce(minimum, rand)
+@testset "maximum" test_mapreduce(maximum, rand)
+@testset "extrema" test_mapreduce(extrema, rand; cmp=Base.:(==), zero_init=T->(zero(T), zero(T)))
 
-@testset "mean" begin
-    x = randn(100, 100)
-    X = distribute(x, Blocks(10, 10))
-    @test mean(X) ≈ mean(x)
-    Y = zeros(Blocks(10, 10), 100, 100)
-    @test mean(Y) == 0
-end
+# Statistics
+@testset "mean" test_mapreduce(mean, rand; zero_init=nothing, types=(Float32, Float64))
+@testset "var" test_mapreduce(var, rand; zero_init=nothing, types=(Float32, Float64))
+@testset "std" test_mapreduce(std, rand; zero_init=nothing, types=(Float32, Float64))
 
 @testset "broadcast" begin
     X1 = rand(Blocks(10), 100)
@@ -231,12 +255,12 @@ end
 
 @testset "reducedim" begin
     x = rand(1:10, 10, 5)
-    X = Distribute(Blocks(3,3), x)
+    X = distribute(x, Blocks(3,3))
     @test reduce(+, x, dims=1) == collect(reduce(+, X, dims=1))
     @test reduce(+, x, dims=2) == collect(reduce(+, X, dims=2))
 
     x = rand(1:10, 10, 5)
-    X = Distribute(Blocks(10, 10), x)
+    X = distribute(x, Blocks(10, 10))
     @test sum(x, dims=1) == collect(sum(X, dims=1))
     @test sum(x, dims=2) == collect(sum(X, dims=2))
 end
