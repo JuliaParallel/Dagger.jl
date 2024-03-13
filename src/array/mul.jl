@@ -229,7 +229,7 @@ end
     A
 end
 
-@inline function copytile!(A::Matrix{T}, B::Matrix{T})  where T
+@inline function copytile!(A, B)
 
     m, n = size(A)
     for i = 1:m, j = 1:n
@@ -238,7 +238,7 @@ end
 
 end
 
-@inline function copydiagtile!(A::Matrix{T}, B::Matrix{T}, uplo::AbstractChar)  where T
+@inline function copydiagtile!(A, B, uplo) 
  
     m, n = size(A)  
 
