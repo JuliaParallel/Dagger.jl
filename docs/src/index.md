@@ -79,6 +79,20 @@ Now the launched task will *definitely* execute on worker 2 (or if it's not
 possible to run on worker 2, Dagger will throw an error when you try to `fetch`
 the result).
 
+### Spawning workers over SSH
+
+Dagger provides the capability to spawn workers on remote machines over SSH by
+using a tuple in the `machines` vector or the form `(machine_spec, count)`, where
+`count` is the number of workers to be spawned on the specified host. This allows
+for distributed computing across multiple machines.
+
+```julia
+Dagger.addprocs([("user@remotehost", 2)],)
+```
+
+The above line of code spawns 2 workers on the remote machine specified by
+`"user@remotehost"` using SSH.
+
 ### Parallelize nested loops
 
 Nested loops are a very common pattern in Julia, yet it's often difficult to
