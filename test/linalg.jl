@@ -1,11 +1,11 @@
 @testset "Linear Algebra" begin
     @testset "GEMM: $T" for T in (Float32, Float64, ComplexF32, ComplexF64)
 
-        A = rand(T, 128, 128);
-        B = rand(T, 128, 128);
+        A = rand(T, 128, 128)
+        B = rand(T, 128, 128)
         
-        DA = view(A, Blocks(32, 32));
-        DB = view(B, Blocks(32, 32));
+        DA = view(A, Blocks(32, 32))
+        DB = view(B, Blocks(32, 32))
 
         # Out-of-place gemm
         # No transA, No transB
@@ -70,16 +70,16 @@
 
         # In-of-place syrk
         # No trans, trans
-        C= zeros(T, 128, 128);
-        DC = view(C, Blocks(32, 32));
-        mul!(C, A, A');
-        mul!(DC, DA, DA');
+        C= zeros(T, 128, 128)
+        DC = view(C, Blocks(32, 32))
+        mul!(C, A, A')
+        mul!(DC, DA, DA')
         @test collect(DC)  ≈ C    
 
         # trans, No trans
         C= zeros(T, 128, 128)
         DC = view(C, Blocks(32, 32))
-        mul!(C, A', DA)
+        mul!(C, A', A)
         mul!(DC, DA', DA)
         @test collect(DC)  ≈ C 
 
