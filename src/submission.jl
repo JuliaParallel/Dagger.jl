@@ -221,7 +221,7 @@ end
 function DTaskMetadata(spec::DTaskSpec)
     f = chunktype(spec.f).instance
     arg_types = ntuple(i->chunktype(spec.args[i][2]), length(spec.args))
-    return_type = Base._return_type(f, Base.to_tuple_type(arg_types))
+    return_type = Base.promote_op(f, arg_types...)
     return DTaskMetadata(return_type)
 end
 
