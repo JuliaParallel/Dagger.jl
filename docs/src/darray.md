@@ -210,3 +210,18 @@ julia> collect(DZ)
 A variety of other operations exist on the `DArray`, and it should generally
 behavior otherwise similar to any other `AbstractArray` type. If you find that
 it's missing an operation that you need, please file an issue!
+
+### Known Supported Operations
+
+This list is not exhaustive, but documents operations which are known to work well with the `DArray`:
+
+From `Base`:
+- Broadcasting
+- `map`/`reduce`/`mapreduce`
+- `sum`/`prod`
+- `minimum`/`maximum`/`extrema`
+
+From `Statistics`:
+- `mean`
+- `var`
+- `std`
