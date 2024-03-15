@@ -31,12 +31,8 @@ function stage(ctx, a::AllocateArray)
 end
 
 function Base.rand(p::Blocks, eltype::Type, dims)
-    s = rand(UInt)
-    f = function (idx, x...)
-        rand(MersenneTwister(s+idx), x...)
-    end
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, f, d, partition(p, d), p)
+    a = AllocateArray(eltype, (_, x...) -> rand(x...), d, partition(p, d), p)
     return _to_darray(a)
 end
 
@@ -44,16 +40,14 @@ Base.rand(p::Blocks, t::Type, dims::Integer...) = rand(p, t, dims)
 Base.rand(p::Blocks, dims::Integer...) = rand(p, Float64, dims)
 Base.rand(p::Blocks, dims::Tuple) = rand(p, Float64, dims)
 
-function Base.randn(p::Blocks, dims)
-    s = rand(UInt)
-    f = function (idx, x...)
-        randn(MersenneTwister(s+idx), x...)
-    end
+function Base.randn(p::Blocks, eltype::Type, dims)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(Float64, f, d, partition(p, d), p)
+    a = AllocateArray(Float64, (_, x...) -> randn(x...), d, partition(p, d), p)
     return _to_darray(a)
 end
+Base.randn(p::Blocks, t::Type, dims::Integer...) = randn(p, t, dims)
 Base.randn(p::Blocks, dims::Integer...) = randn(p, dims)
+Base.randn(p::Blocks, dims::Tuple) = randn(p, Float64, dims)
 
 function Base.ones(p::Blocks, eltype::Type, dims)
     d = ArrayDomain(map(x->1:x, dims))
