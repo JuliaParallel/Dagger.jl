@@ -428,14 +428,6 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         timespan_finish(ctx, :scheduler_init, 0, master)
     end
 
-    # Register interrupt handler
-    if isdefined(Base, :register_interrupt_handler)
-        interrupt_task = errormonitor_tracked("interrupt handler", Threads.@spawn sch_interrupt_handler(state))
-        yield()
-        @assert Base.interrupt_handlers() isa Vector{Task}
-        Base.register_interrupt_handler(interrupt_task)
-    end
-
     value, errored = try
         scheduler_run(ctx, state, d, options)
     finally
@@ -450,36 +442,66 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         end
     end
 
-    # Unregister interrupt handler
-    if isdefined(Base, :register_interrupt_handler)
-        Base.unregister_interrupt_handler(interrupt_task)
-    end
-
     if errored
         throw(value)
     end
     return value
 end
 
-function sch_interrupt_handler(state::ComputeState)
-    while true
-        try
-            wait()
-        catch err
-            errormonitor_tracked("interrupt handler inner", Threads.@spawn begin
-                println("Scheduler:")
-                lock(state.lock) do
-                    print_sch_status(state)
+function sch_interrupt_handler()
+    cond = nothing
+    @lock Base.INTERRUPT_HANDLERS_LOCK begin
+        for (mod, handlers) in Base.INTERRUPT_HANDLERS
+            for (other_handler, _cond) in handlers
+                if current_task() === other_handler
+                    cond = _cond
+                    break
                 end
-                println()
-                proc_states(state.uid) do states
-                    for proc in keys(states)
-                        print_worker_status(states[proc], proc)
-                    end
-                end
-            end)
+            end
         end
     end
+    @assert cond !== nothing
+    while true
+        try
+            #Base.wait_for_interrupt()
+            @lock cond wait(cond)
+        catch err
+            err isa InterruptException || rethrow()
+        end
+        state = Dagger.Sch.EAGER_STATE[]
+        state !== nothing || continue
+        try
+            #=
+            println("Scheduler:")
+            @lock state.lock print_sch_status(state)
+            println()
+            proc_states(state.uid) do states
+                for proc in keys(states)
+                    print_worker_status(states[proc], proc)
+                end
+            end
+            =#
+
+            cancel!()
+        catch err
+            @error "Error in interrupt handler" exception=(err,catch_backtrace())
+        end
+    end
+end
+function cancel!()
+    # Cancel all ready or waiting tasks
+    for task in state.ready
+        cache_store!(state, task, InterruptException(), true)
+        set_failed!(state, task)
+    end
+    empty!(state.ready)
+    for task in keys(state.waiting)
+        cache_store!(state, task, InterruptException(), true)
+        set_failed!(state, task)
+    end
+    empty!(state.waiting)
+
+    # FIXME: Request cancel for all running tasks (except eager_thunk)
 end
 
 function scheduler_init(ctx, state::ComputeState, d::Thunk, options, deps)
@@ -1099,8 +1121,8 @@ function print_worker_status(state, proc)
     lock(istate.queue) do queue
         println("- Queued: $(length(queue))")
         println("- Running: $(length(istate.tasks))")
-        println("- Occupancy: $(istate.proc_occupancy[]/typemax(UInt32))")
-        println("- Pressure: $(istate.time_pressure[]/typemax(UInt64))")
+        println("- Occupancy: $(istate.proc_occupancy[]÷typemax(UInt32))")
+        println("- Pressure: $(istate.time_pressure[]÷typemax(UInt64))")
     end
 end
 
@@ -1680,6 +1702,20 @@ function do_task(to_proc::Processor, task::TaskSpec)
         end
     end
     return result_meta
+end
+
+function __init__()
+    if ccall(:jl_generating_output, Cint, ()) == 0
+        # Register interrupt handler
+        if isdefined(Base, :register_interrupt_handler)
+            interrupt_task = errormonitor_tracked("interrupt handler", Threads.@spawn sch_interrupt_handler())
+            Base.register_interrupt_handler(Dagger, interrupt_task)
+        end
+        atexit() do
+            # Unregister interrupt handler
+            Base.unregister_interrupt_handler(Dagger, interrupt_task)
+        end
+    end
 end
 
 end # module Sch
