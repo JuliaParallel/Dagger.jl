@@ -1673,10 +1673,10 @@ function __init__()
         if isdefined(Base, :register_interrupt_handler)
             interrupt_task = errormonitor_tracked("interrupt handler", Threads.@spawn sch_interrupt_handler())
             Base.register_interrupt_handler(Dagger, interrupt_task)
-        end
-        atexit() do
-            # Unregister interrupt handler
-            Base.unregister_interrupt_handler(Dagger, interrupt_task)
+            atexit() do
+                # Unregister interrupt handler
+                Base.unregister_interrupt_handler(Dagger, interrupt_task)
+            end
         end
     end
 end
