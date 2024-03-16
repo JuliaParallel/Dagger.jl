@@ -1,26 +1,9 @@
 abstract type AbstractMetric end
 
-function metric_region()
-    tls = task_local_storage()
-    if haskey(tls, :_dagger_local_metric_region)
-        return tls[:_dagger_local_metric_region]::Tuple{Symbol,Symbol}
-    end
-    return nothing
-end
-set_metric_region!(context::Symbol, op::Symbol) =
-    task_local_storage(:_dagger_local_metric_region, (context, op))
-set_metric_region!(region::Tuple{Symbol,Symbol}) =
-    set_metric_region!(region[1], region[2])
-
-function metric_key()
-    tls = task_local_storage()
-    if haskey(tls, :_dagger_local_metric_key)
-        return tls[:_dagger_local_metric_key]
-    end
-    return nothing
-end
-set_metric_key!(@nospecialize(key)) =
-    task_local_storage(:_dagger_local_metric_key, key)
+const METRIC_REGION = ScopedValue{Union{Tuple{Symbol,Symbol},Nothing}}(nothing)
+metric_region() = METRIC_REGION[]
+const METRIC_KEY = ScopedValue{Union{Some{Any},Nothing}}(nothing)
+metric_key() = something(METRIC_KEY[])
 
 metric_applies(@nospecialize(::AbstractMetric), _, _) = false
 
@@ -48,6 +31,11 @@ function with_metric(@nospecialize(f), m::AbstractMetric, context::Symbol, op::S
     end
 end
 function with_metrics(@nospecialize(f), ms::Vector, context::Symbol, op::Symbol, @nospecialize(key))
+    if EAGER_STATE[] === nothing
+        # Skip metrics collection during precompile
+        return f()
+    end
+
     inner_f = f
     for m in reverse(ms)
         if metric_applies(m, Val{context}(), Val{op}())
@@ -55,21 +43,16 @@ function with_metrics(@nospecialize(f), ms::Vector, context::Symbol, op::Symbol,
         end
     end
 
-    old_region = metric_region()
-    set_metric_region!(context, op)
-    old_key = metric_key()
-    set_metric_key!(key)
     @dagdebug nothing :metrics "Starting metrics collection for ($context, $op) [$key]"
     try
-        return inner_f()
+        @with METRIC_REGION=>(context, op) METRIC_KEY=>Some{Any}(key) begin
+            return inner_f()
+        end
     finally
         @dagdebug nothing :metrics "Finished metrics collection for ($context, $op) [$key]"
-        if old_region !== nothing || old_key !== nothing
-            # Re-enable previous metric region and key
-            @dagdebug nothing :metrics "Re-entering outer metrics region ($(old_region[1]), $(old_region[2])) [$old_key]"
-            set_metric_region!(old_region)
-            set_metric_key!(old_key)
-        end
+
+        # Merge local metrics into global scheduler metrics
+        merge_local_metrics!(context, op, key)
     end
 end
 function with_metric_callable(@nospecialize(f), m::AbstractMetric, context::Symbol, op::Symbol)
@@ -78,13 +61,14 @@ end
 
 #### Metric Contexts ####
 
+const METRIC_SUPPLEMENT = TaskLocalValue{NamedTuple}(()->NamedTuple())
 function setup_metric_supplement!(supp::NamedTuple)
-    task_local_storage(:_dagger_metric_supplement, supp)
+    METRIC_SUPPLEMENT[] = supp
 end
-clear_metric_supplement!() =
-    delete!(task_local_storage(), :_dagger_metric_supplement)
-metric_supplement() =
-    task_local_storage(:_dagger_metric_supplement)::NamedTuple
+function clear_metric_supplement!()
+    METRIC_SUPPLEMENT[] = NamedTuple()
+end
+metric_supplement() = METRIC_SUPPLEMENT[]
 
 #### Built-in Metrics ####
 

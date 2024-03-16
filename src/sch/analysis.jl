@@ -6,29 +6,10 @@ const RequiredMetrics = Dict{Tuple{Symbol,Symbol},Vector{AnalysisOrMetric}}
 const NO_REQUIRED_METRICS = RequiredMetrics()
 required_metrics(::AnalysisOrMetric, _, _) = NO_REQUIRED_METRICS
 
-#=
-struct AnalysisContext
-end
-function setup_analysis_context!(state)
-    c = AnalysisContext()
-    task_local_storage(:_dagger_sch_analysis_context, c)
-end
-analysis_context() = task_local_storage(:_dagger_sch_analysis_context)::AnalysisContext
-=#
-
 const MetricsCache = Dict{Tuple{Symbol,Symbol},Dict{AnalysisOrMetric,Any}}
-function global_metrics_cache()
-    tls = task_local_storage()
-    if !haskey(tls, :_dagger_global_metrics_cache)
-        throw(ConcurrencyViolationError("Tried to fetch metrics cache before it was configured"))
-    end
-    return tls[:_dagger_global_metrics_cache]::MetricsCache
-end
-global_metrics_cache(context::Symbol, op::Symbol) =
-    global_metrics_cache()[(context, op)]
+const MetricsCacheLocked = LockedObject{MetricsCache}
 function create_global_metrics_cache()
     metrics = MetricsCache()
-    # TODO: metrics[:worker] = Dict{AnalysisOrMetric,Dict{Int,Any}}()
     for op in (:run,)
         metrics[(:processor, op)] = Dict{AnalysisOrMetric,Dict{Processor,Any}}()
     end
@@ -38,29 +19,27 @@ function create_global_metrics_cache()
     for op in (:move,)
         metrics[(:chunk, op)] = Dict{AnalysisOrMetric,WeakKeyDict{Chunk,Any}}()
     end
-    return metrics
+    return LockedObject(metrics)
 end
-setup_global_metrics_cache!() =
-    setup_global_metrics_cache!(create_global_metrics_cache())
-function setup_global_metrics_cache!(metrics::MetricsCache)
-    tls = task_local_storage()
-    if !haskey(tls, :_dagger_global_metrics_cache)
-        task_local_storage(:_dagger_global_metrics_cache, metrics)
+const EMPTY_METRICS = create_global_metrics_cache()
+function global_metrics_cache()
+    state = EAGER_STATE[]
+    if state === nothing
+        return EMPTY_METRICS
     end
+    return state.metrics::MetricsCacheLocked
 end
 
 const LocalMetricsCache = Dict{AnalysisOrMetric,Any}
-function local_metrics_cache()
-    tls = task_local_storage()
-    return get!(LocalMetricsCache, tls, :_dagger_local_metrics_cache)::LocalMetricsCache
-end
+const LOCAL_METRICS_CACHE = TaskLocalValue{LocalMetricsCache}(()->LocalMetricsCache())
+local_metrics_cache() = LOCAL_METRICS_CACHE[]
 local_metrics_cache(context::Symbol, op::Symbol) =
     local_metrics_cache()[(context, op)]
 function fetch_local_metrics_cache!()
-    tls = task_local_storage()
-    metrics = deepcopy(tls[:_dagger_local_metrics_cache])
-    empty!(tls[:_dagger_local_metrics_cache])
-    return metrics
+    metrics = local_metrics_cache()
+    metrics_copy = deepcopy(metrics)
+    empty!(metrics)
+    return metrics_copy
 end
 function set_metric_value!(@nospecialize(m::AbstractMetric),
                            context::Symbol, op::Symbol,
@@ -68,53 +47,60 @@ function set_metric_value!(@nospecialize(m::AbstractMetric),
     local_metrics_cache()[m] = value
 end
 
-function transfer_local_metrics!(global_metrics::MetricsCache, context::Symbol, op::Symbol, key=metric_key())
+function merge_local_metrics!(context::Symbol, op::Symbol, key)
+    global_metrics = global_metrics_cache()
     local_metrics = fetch_local_metrics_cache!()
-    for m in keys(local_metrics)
-        global_metrics_selected = global_metrics[(context, op)]
-        if context == :worker
-            get!(Dict{Int,Any}, global_metrics_selected, m)[key] = local_metrics[m]
-        elseif context == :processor
-            get!(Dict{Processor,Any}, global_metrics_selected, m)[key] = local_metrics[m]
-        elseif context == :signature
-            get!(Dict{Signature,Any}, global_metrics_selected, m)[key] = local_metrics[m]
-        elseif context == :chunk
-            get!(WeakKeyDict{Chunk,Any}, global_metrics_selected, m)[key] = local_metrics[m]
+    lock(global_metrics) do global_metrics
+        for m in keys(local_metrics)
+            global_metrics_selected = global_metrics[(context, op)]
+            if context == :worker
+                get!(Dict{Int,Any}, global_metrics_selected, m)[key] = local_metrics[m]
+            elseif context == :processor
+                get!(Dict{Processor,Any}, global_metrics_selected, m)[key] = local_metrics[m]
+            elseif context == :signature
+                get!(Dict{Signature,Any}, global_metrics_selected, m)[key] = local_metrics[m]
+            elseif context == :chunk
+                get!(WeakKeyDict{Chunk,Any}, global_metrics_selected, m)[key] = local_metrics[m]
+            end
         end
     end
 end
-function transfer_remote_metrics!(global_metrics::MetricsCache, remote_metrics::MetricsCache)
-    for region in keys(remote_metrics)
-        context, op = region
-        for m in keys(remote_metrics[region])
-            global_metrics_selected = global_metrics[region]
-            remote_metrics_selected = remote_metrics[region][m]
-            for key in keys(remote_metrics[region][m])
-                if context == :worker
-                    get!(Dict{Int,Any}, global_metrics_selected, m)[key] = remote_metrics_selected[key]
-                elseif context == :processor
-                    get!(Dict{Processor,Any}, global_metrics_selected, m)[key] = remote_metrics_selected[key]
-                elseif context == :signature
-                    get!(Dict{Signature,Any}, global_metrics_selected, m)[key] = remote_metrics_selected[key]
-                elseif context == :chunk
-                    get!(WeakKeyDict{Chunk,Any}, global_metrics_selected, m)[key] = remote_metrics_selected[key]
+function merge_remote_metrics!(global_metrics::MetricsCacheLocked, remote_metrics::MetricsCache)
+    lock(global_metrics) do global_metrics
+        for region in keys(remote_metrics)
+            context, op = region
+            for m in keys(remote_metrics[region])
+                global_metrics_selected = global_metrics[region]
+                remote_metrics_selected = remote_metrics[region][m]
+                for key in keys(remote_metrics[region][m])
+                    if context == :worker
+                        get!(Dict{Int,Any}, global_metrics_selected, m)[key] = remote_metrics_selected[key]
+                    elseif context == :processor
+                        get!(Dict{Processor,Any}, global_metrics_selected, m)[key] = remote_metrics_selected[key]
+                    elseif context == :signature
+                        get!(Dict{Signature,Any}, global_metrics_selected, m)[key] = remote_metrics_selected[key]
+                    elseif context == :chunk
+                        get!(WeakKeyDict{Chunk,Any}, global_metrics_selected, m)[key] = remote_metrics_selected[key]
+                    end
                 end
             end
         end
     end
 end
-function delete_metrics_for!(global_metrics::MetricsCache, proc::OSProc)
+function delete_metrics_for!(global_metrics::MetricsCacheLocked, proc::OSProc)
     child_procs = Dagger.children(proc)
-    for region in keys(global_metrics)
-        context, op = region
-        for m in keys(global_metrics[region])
-            if context == :worker
-                @debug "-- DELETE for ($context, $op) $m [$(proc.pid)]"
-                delete!(global_metrics[region][m], proc.pid)
-            elseif context == :processor
-                for child_proc in child_procs
-                    @debug "-- DELETE for ($context, $op) $m [$child_proc]"
-                    delete!(global_metrics[region][m], child_proc)
+    lock(global_metrics) do global_metrics
+        for region in keys(global_metrics)
+            context, op = region
+            for m in keys(global_metrics[region])
+                if context == :worker
+                    @debug "-- DELETE for ($context, $op) $m [$(proc.pid)]"
+                    delete!(global_metrics[region][m], proc.pid)
+                elseif context == :processor
+                    for child_proc in child_procs
+                        @debug "-- DELETE for ($context, $op) $m [$child_proc]"
+                        delete!(global_metrics[region][m], child_proc)
+                    end
                 end
             end
         end
@@ -122,41 +108,47 @@ function delete_metrics_for!(global_metrics::MetricsCache, proc::OSProc)
 end
 
 function fetch_metric(@nospecialize(m::AnalysisOrMetric), context::Symbol, op::Symbol, @nospecialize(args...))
-    # Check if this is already cached
-    cache = global_metrics_cache()[(context, op)]
-    key = first(args)
-    # FIXME: Proper invalidation support
-    if m isa AbstractMetric
-        if haskey(cache, m) && haskey(cache[m], key)
-            value = cache[m][key]
-            @debug "-- HIT for ($context, $op) $m [$key] = $value"
+    global_metrics = global_metrics_cache()
+    lock(global_metrics) do global_metrics
+        # Check if this is already cached
+        cache = global_metrics[(context, op)]
+        key = first(args)
+        # FIXME: Proper invalidation support
+        if m isa AbstractMetric
+            if haskey(cache, m) && haskey(cache[m], key)
+                value = cache[m][key]
+                @debug "-- HIT for ($context, $op) $m [$key] = $value"
+                return value
+            else
+                # The metric isn't available yet
+                @debug "-- MISS for ($context, $op) $m [$key]"
+                return nothing
+            end
+        elseif m isa AbstractAnalysis
+            # Run the analysis
+            @debug "Running ($context, $op) $m [$key]"
+            value = run_analysis(m, Val{context}(), Val{op}(), args...)
+            # TODO: Allocate the correct Dict type
+            get!(Dict, cache, m)[key] = value
+            @debug "Finished ($context, $op) $m [$key] = $value"
             return value
-        else
-            # The metric isn't available yet
-            @debug "-- MISS for ($context, $op) $m [$key]"
-            return nothing
         end
-    elseif m isa AbstractAnalysis
-        # Run the analysis
-        @debug "Running ($context, $op) $m [$key]"
-        value = run_analysis(m, Val{context}(), Val{op}(), args...)
-        # TODO: Allocate the correct Dict type
-        get!(Dict, cache, m)[key] = value
-        @debug "Finished ($context, $op) $m [$key] = $value"
-        return value
     end
 end
 function fetch_metric_cached(@nospecialize(m::AnalysisOrMetric), context::Symbol, op::Symbol, @nospecialize(args...))
-    cache = global_metrics_cache()[(context, op)]
-    key = first(args)
-    if haskey(cache, m) && haskey(cache[m], key)
-        value = cache[m][key]
-        @debug "-- HIT (stale) for ($context, $op) $m [$key] = $value"
-        return value
+    global_metrics = global_metrics_cache()
+    lock(global_metrics) do global_metrics
+        cache = global_metrics[(context, op)]
+        key = first(args)
+        if haskey(cache, m) && haskey(cache[m], key)
+            value = cache[m][key]
+            @debug "-- HIT (stale) for ($context, $op) $m [$key] = $value"
+            return value
+        end
+        # The metric isn't available yet
+        @debug "-- MISS (stale) for ($context, $op) $m [$key]"
+        return nothing
     end
-    # The metric isn't available yet
-    @debug "-- MISS (stale) for ($context, $op) $m [$key]"
-    return nothing
 end
 
 #### Built-in Analyses ####

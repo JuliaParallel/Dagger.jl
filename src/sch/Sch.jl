@@ -7,6 +7,8 @@ import MemPool: poolset, storage_available, storage_capacity, storage_utilized, 
 import Statistics: mean
 import Random: randperm
 import Base: @invokelatest
+using ScopedValues
+using TaskLocalValues
 
 import ..Dagger
 import ..Dagger: Context, Processor, ThunkID, Thunk, ThunkRef, WeakThunk, ThunkFuture, ThunkFailedException, Chunk, WeakChunk, OSProc, AnyScope, DefaultScope, LockedObject
@@ -56,7 +58,7 @@ Fields:
 - `thunks_to_delete::Set{Thunk}` - The list of `Thunk`s ready to be deleted upon completion.
 - `node_order::Any` - Function that returns the order of a thunk
 - `worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}` - Communication channels between the scheduler and each worker
-- `metrics::MetricsCache` - For a given (context, operation) pair, for a given object (:global, worker, processor, task signature), the values of the metric
+- `metrics::MetricsCacheLocked` - For a given (context, operation) pair, for a given object (:global, worker, processor, task signature), the values of the metric
 - `halt::Base.Event` - Event indicating that the scheduler is halting
 - `lock::ReentrantLock` - Lock around operations which modify the state
 - `futures::Dict{Thunk, Vector{ThunkFuture}}` - Futures registered for waiting on the result of a thunk.
@@ -80,7 +82,7 @@ struct ComputeState
     thunks_to_delete::Set{Thunk}
     node_order::Any
     worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}
-    metrics::MetricsCache
+    metrics::MetricsCacheLocked
     halt::Base.Event
     lock::ReentrantLock
     futures::Dict{Thunk, Vector{ThunkFuture}}
@@ -126,11 +128,6 @@ function start_state(deps::Dict, node_order, chan, options)
         end
     end
     state
-end
-function setup_global_metrics_cache!(state::ComputeState)
-    lock(state.lock) do
-        setup_global_metrics_cache!(state.metrics)
-    end
 end
 
 """
@@ -600,8 +597,7 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
                 thunk = unwrap_weak_checked(state.thunk_dict[thunk_id])
                 if new_metrics !== nothing
                     # Copy returned metric values to cache
-                    sig = signature(thunk, state)
-                    transfer_remote_metrics!(state.metrics, new_metrics)
+                    merge_remote_metrics!(state.metrics, new_metrics)
                 end
                 cache_store!(state, thunk, result, thunk_failed)
                 if thunk.options !== nothing && thunk.options.checkpoint !== nothing
@@ -691,10 +687,6 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         # Tasks to schedule
         to_fire = Dict{Tuple{OSProc,<:Processor},Vector{Tuple{Thunk,<:Any,<:Any,UInt64,UInt32}}}()
 
-        # Link scheduler metrics cache and setup metric region
-        setup_global_metrics_cache!(state)
-        set_metric_region!(:signature, :schedule)
-
         # Select a new task and get its options
         task = nothing
         @label pop_task
@@ -770,8 +762,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
 
         # Decide on an ordered set of candidate processors to schedule on
         sig = signature(task, state)
-        set_metric_key!(sig) # TODO: Do this in make_decision
-        local_procs = make_decision(state.schedule_model, Val{:signature}(), Val{:schedule}(), sig, inputs, all_procs)
+        local_procs = make_decision(state.schedule_model, :signature, :schedule, sig, inputs, all_procs)
 
         # Select the first valid processor
         scheduled = false
@@ -1073,8 +1064,6 @@ function Base.notify(db::Doorbell)
 end
 end
 
-const WORKER_METRICS = LockedObject(create_global_metrics_cache())
-
 "A serializable description of a `Thunk` to be executed."
 struct TaskSpec
     thunk_id::ThunkID
@@ -1286,38 +1275,36 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                 end
 
                 # Extract metrics to send to the core
-                # TODO: run_analyses(processor_run_metrics, :processor, :run)
-                metrics = lock(WORKER_METRICS) do metrics
-                    local_metrics_cache() # N.B. Make sure we have a metrics cache setup
-                    transfer_local_metrics!(metrics, :processor, :run)
-
-                    # Grab all updated metrics
-                    function copy_worker_metrics(task::TaskSpec, metrics::MetricsCache)
-                        copied_metrics = MetricsCache()
-                        copied_metrics[(:processor, :run)] = Dict{AnalysisOrMetric,Any}()
-                        for m in unique(keys(metrics[(:processor, :run)]))
-                            copied_metrics[(:processor, :run)][m] = Dict{Processor,Any}()
-                            copied_metrics[(:processor, :run)][m][to_proc] = metrics[(:processor, :run)][m][to_proc]
-                        end
-                        copied_metrics[(:chunk, :move)] = Dict{AnalysisOrMetric,Any}()
-                        for m in unique(keys(metrics[(:chunk, :move)]))
-                            copied_metrics[(:chunk, :move)][m] = Dict{Chunk,Any}()
-                            for input in task.data
-                                input isa Chunk || continue
-                                copied_metrics[(:chunk, :move)][m][input] = metrics[(:chunk, :move)][m][input]
-                            end
-                        end
-                        copied_metrics[(:signature, :execute)] = Dict{AnalysisOrMetric,Any}()
-                        for m in unique(keys(metrics[(:signature, :execute)]))
-                            copied_metrics[(:signature, :execute)][m] = Dict{Signature,Any}()
-                            # TODO: This could be better
-                            signature = first(keys(metrics[(:signature, :execute)][m]))
-                            copied_metrics[(:signature, :execute)][m][signature] = metrics[(:signature, :execute)][m][signature]
-                        end
-                        return copied_metrics
+                @warn "Only transfer metrics explicitly requested for cross-worker transfer" maxlog=1
+                # FIXME: Copy relevant metrics from this worker's global metrics cache
+                #= Grab all updated metrics
+                function copy_worker_metrics(task::TaskSpec, metrics::MetricsCache)
+                    copied_metrics = MetricsCache()
+                    copied_metrics[(:processor, :run)] = Dict{AnalysisOrMetric,Any}()
+                    for m in unique(keys(metrics[(:processor, :run)]))
+                        copied_metrics[(:processor, :run)][m] = Dict{Processor,Any}()
+                        copied_metrics[(:processor, :run)][m][to_proc] = metrics[(:processor, :run)][m][to_proc]
                     end
-                    return copy_worker_metrics(task, metrics)
+                    copied_metrics[(:chunk, :move)] = Dict{AnalysisOrMetric,Any}()
+                    for m in unique(keys(metrics[(:chunk, :move)]))
+                        copied_metrics[(:chunk, :move)][m] = Dict{Chunk,Any}()
+                        for input in task.data
+                            input isa Chunk || continue
+                            copied_metrics[(:chunk, :move)][m][input] = metrics[(:chunk, :move)][m][input]
+                        end
+                    end
+                    copied_metrics[(:signature, :execute)] = Dict{AnalysisOrMetric,Any}()
+                    for m in unique(keys(metrics[(:signature, :execute)]))
+                        copied_metrics[(:signature, :execute)][m] = Dict{Signature,Any}()
+                        # TODO: This could be better
+                        signature = first(keys(metrics[(:signature, :execute)][m]))
+                        copied_metrics[(:signature, :execute)][m][signature] = metrics[(:signature, :execute)][m][signature]
+                    end
+                    return copied_metrics
                 end
+                metrics = copy_worker_metrics(task, metrics)
+                =#
+                metrics = lock(identity, EMPTY_METRICS)
 
                 # Mark this task as done
                 # Let the processor schedule more work
@@ -1506,7 +1493,6 @@ function do_task(to_proc::Processor, task::TaskSpec)
 
     # Determine which metrics to collect for chunk move
     chunk_move_metrics = required_metrics_to_collect(task.sch_model, :chunk, :move)
-    chunk_metrics_locked = LockedObject(Dict{Chunk,Dict{AnalysisOrMetric,Any}}())
 
     @dagdebug thunk_id :execute "Moving data"
 
@@ -1535,13 +1521,9 @@ function do_task(to_proc::Processor, task::TaskSpec)
                             # TODO: Choose "closest" processor of same type first
                             some_proc = first(keys(chunk_proc_cache))
                             some_value = chunk_proc_cache[some_proc]
-                            @dagdebug thunk_id :move "Cache hit for argument $id at $some_proc: $some_value"
+                            @dagdebug thunk_id :move "Cache hit for argument $id at $some_proc: $(typeof(some_value))"
                             with_metrics(chunk_move_metrics, :chunk, :move, chunk) do
                                 value = @invokelatest move(some_proc, to_proc, some_value)
-                            end
-                            # TODO: run_analyses(chunk_move_metrics, :chunk, :move)
-                            lock(chunk_metrics_locked) do chunk_metrics
-                                chunk_metrics[chunk] = local_metrics_cache()
                             end
                             chunk_proc_cache[to_proc] = value
                         end
@@ -1553,10 +1535,6 @@ function do_task(to_proc::Processor, task::TaskSpec)
                     from_proc = processor(chunk)
                     with_metrics(chunk_move_metrics, :chunk, :move, chunk) do
                         value = @invokelatest move(from_proc, to_proc, chunk)
-                    end
-                    # TODO: run_analyses(chunk_move_metrics, :chunk, :move)
-                    lock(chunk_metrics_locked) do chunk_metrics
-                        chunk_metrics[chunk] = local_metrics_cache()
                     end
 
                     @dagdebug thunk_id :move "Cache miss for argument $id at $from_proc"
@@ -1572,10 +1550,6 @@ function do_task(to_proc::Processor, task::TaskSpec)
                 with_metrics(chunk_move_metrics, :chunk, :move, chunk) do
                     value = @invokelatest move(to_proc, chunk)
                 end
-                # TODO: run_analyses(chunk_move_metrics, :chunk, :move)
-                lock(chunk_metrics_locked) do chunk_metrics
-                    chunk_metrics[chunk] = local_metrics_cache()
-                end
             else
                 # Not a Chunk
                 # FIXME: Collect metrics
@@ -1584,7 +1558,7 @@ function do_task(to_proc::Processor, task::TaskSpec)
             =#
             # FIXME: Collect metrics
             value = @invokelatest move(to_proc, chunk)
-            @dagdebug thunk_id :move "Moved argument $id to $to_proc: $(typeof(x))"
+            @dagdebug thunk_id :move "Moved argument $id to $to_proc: $(typeof(value))"
             timespan_finish(ctx, :move, (;thunk_id, id), (;f, data=value); tasks=[Base.current_task()])
             return value
         end
@@ -1649,7 +1623,6 @@ function do_task(to_proc::Processor, task::TaskSpec)
                 # Execute the task
                 result = execute!(to_proc, f, fetched_args...; fetched_kwargs...)
             end
-            # TODO: run_analyses(metrics_to_run, :signature, :execute)
         end
 
         # Check if result is safe to store
@@ -1691,16 +1664,6 @@ function do_task(to_proc::Processor, task::TaskSpec)
 
     # TODO: debug_storage("Releasing $to_storage_name")
 
-    chunk_metrics = lock(identity, chunk_metrics_locked)
-    lock(WORKER_METRICS) do metrics
-        transfer_local_metrics!(metrics, :signature, :execute, signature)
-        for (chunk, metric_to_value) in chunk_metrics
-            for (metric, value) in metric_to_value
-                all_chunks_this_metric = get!(WeakKeyDict{Chunk,Any}, metrics[(:chunk, :move)], metric)
-                all_chunks_this_metric[chunk] = value
-            end
-        end
-    end
     return result_meta
 end
 

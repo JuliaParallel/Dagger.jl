@@ -37,6 +37,17 @@ function required_metrics_for_all_decisions(@nospecialize(m::AbstractDecision))
     return metrics
 end
 
+function make_decision(model::AbstractDecision, context, op, key, args...)
+    if EAGER_STATE[] === nothing && model != DefaultModel()
+        # Make default decisions during precompile
+        return make_decision(DefaultModel(), context, op, key, args...)
+    end
+
+    @with METRIC_REGION=>(context, op) METRIC_KEY=>Some{Any}(key) begin
+        return make_decision(model, Val{context}(), Val{op}(), key, args...)
+    end
+end
+
 #### Contexts and Operations ####
 # Every metric, analysis, and decision is associated with a combination of a
 # "context" and an "operation", where the context is the kind of object being
@@ -56,6 +67,22 @@ end
 # Currently, all worker-cached metric values are returned to the core when each task completes.
 
 #### Built-in Scheduling Decisions ####
+
+"""
+    DefaultModel <: AbstractDecision
+
+The default decision model for when precompiling.
+"""
+struct DefaultModel <: AbstractDecision end
+
+required_metrics(::DefaultModel, ::Val{:signature}, ::Val{:schedule}) =
+    RequiredMetrics((:signature, :schedule) => [],
+                    (:processor, :run) => [],
+                    (:signature, :execute) => [])
+
+function make_decision(::DefaultModel, ::Val{:signature}, ::Val{:schedule}, signature, inputs, procs)
+    return procs
+end
 
 """
     SchDefaultModel <: AbstractDecision
@@ -199,5 +226,5 @@ function make_decision(::SchBasicModel, ::Val{:signature}, ::Val{:schedule}, sig
     @assert selected_entry !== nothing
     state.procs_cache_list[] = state.procs_cache_list[].next
 
-    return Processor[proc], Dict(proc=>UInt64(0))
+    return Processor[proc]
 end
