@@ -218,7 +218,7 @@ function eager_process_options_submission_to_local(id_map, options::NamedTuple)
     end
 end
 function EagerThunkMetadata(spec::EagerTaskSpec)
-    f = chunktype(spec.f).instance
+    f = spec.f isa StreamingFunction ? spec.f.f : spec.f
     arg_types = ntuple(i->chunktype(spec.args[i][2]), length(spec.args))
     return_type = Base.promote_op(f, arg_types...)
     return EagerThunkMetadata(return_type)
