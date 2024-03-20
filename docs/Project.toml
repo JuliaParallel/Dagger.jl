@@ -3,3 +3,6 @@ Dagger = "d58978e5-989f-55fb-8d15-ea34adc7bf54"
 DaggerWebDash = "cfc5aa84-1a2a-41ab-b391-ede92ecae40c"
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
 TimespanLogging = "a526e669-04d3-4846-9525-c66122c55f63"
+
+[compat]
+Documenter = "1"

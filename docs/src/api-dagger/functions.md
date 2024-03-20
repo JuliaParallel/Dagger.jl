@@ -26,6 +26,7 @@ default_option
 ## Data Management Functions
 ```@docs
 tochunk
+mutable
 @mutable
 @shard
 shard
