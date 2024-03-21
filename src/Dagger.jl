@@ -12,8 +12,10 @@ import LinearAlgebra: transpose
 
 using UUIDs
 
-if !isdefined(Base, :with)
-using ScopedValues
+if !isdefined(Base, :ScopedValues)
+    import ScopedValues: ScopedValue, with
+else
+    import Base.ScopedValues: ScopedValue, with
 end
 
 using Requires
