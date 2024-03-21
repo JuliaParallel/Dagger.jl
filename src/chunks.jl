@@ -122,7 +122,6 @@ end
 
 """
     mutable(f::Base.Callable; worker, processor, scope) -> Chunk
-    @mutable [worker=1] [processor=OSProc()] [scope=ProcessorScope()] f()
 
 Calls `f()` on the specified worker or processor, returning a `Chunk`
 referencing the result with the specified scope `scope`.
@@ -143,6 +142,11 @@ function mutable(@nospecialize(f); worker=nothing, processor=nothing, scope=noth
     return fetch(Dagger.@spawn scope=scope _mutable_inner(f, processor, scope))[]
 end
 
+"""
+    @mutable [worker=1] [processor=OSProc()] [scope=ProcessorScope()] f()
+
+Helper macro for [`mutable()`](@ref).
+"""
 macro mutable(exs...)
     opts = esc.(exs[1:end-1])
     ex = exs[end]
