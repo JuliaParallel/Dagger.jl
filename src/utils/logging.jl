@@ -1,3 +1,5 @@
+using Profile
+
 # Logging utilities
 
 function enable_logging!(;metrics::Bool=true,
@@ -6,7 +8,9 @@ function enable_logging!(;metrics::Bool=true,
                           taskdeps::Bool=true,
                           taskargs::Bool=false,
                           taskargmoves::Bool=false,
-                          profile::Bool=false)
+                          profile::Bool=false,
+                          profile_continuous::Bool=isdefined(Profile, :is_continuous))
+    ctx = Dagger.Sch.eager_context()
     ml = TimespanLogging.MultiEventLog()
     ml[:core] = TimespanLogging.Events.CoreMetrics()
     ml[:id] = TimespanLogging.Events.IDMetrics()
@@ -26,8 +30,15 @@ function enable_logging!(;metrics::Bool=true,
         ml[:taskargmoves] = Dagger.Events.TaskArgumentMoves()
     end
     if profile
-        ml[:profile] = DaggerWebDash.ProfileMetrics()
+        ml[:profile] = Dagger.Events.ProfileMetrics()
+        if isdefined(Profile, :is_continuous)
+            n, delay = Profile.init()
+            Profile.init(;n, delay, continuous=profile_continuous)
+        elseif profile_continuous
+            @warn "Profiler doesn't support continuous profiling\nFalling back to non-continuous profiling" maxlog=1
+        end
     end
+    ctx.profile = profile
     if metrics
         ml[:wsat] = Dagger.Events.WorkerSaturation()
         ml[:loadavg] = TimespanLogging.Events.CPULoadAverages()
@@ -36,7 +47,7 @@ function enable_logging!(;metrics::Bool=true,
         ml[:esat] = TimespanLogging.Events.EventSaturation()
         ml[:psat] = Dagger.Events.ProcessorSaturation()
     end
-    Dagger.Sch.eager_context().log_sink = ml
+    ctx.log_sink = ml
 end
 function disable_logging!()
     Dagger.Sch.eager_context().log_sink = TimespanLogging.NoOpLog()

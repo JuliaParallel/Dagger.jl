@@ -7,6 +7,8 @@ using ..TimespanLogging
 import .TimespanLogging: Event, init_similar
 import .TimespanLogging.Events: EventSaturation
 
+import Profile
+
 TimespanLogging.log_sink(ctx::Context) = ctx.log_sink
 TimespanLogging.profile(ctx::Context, category, id, tl) =
     ctx.profile && category == :compute
@@ -200,5 +202,47 @@ function (::TaskDependencies)(ev::Event{:start})
     return
 end
 (td::TaskDependencies)(ev::Event{:finish}) = nothing
+
+"""
+    ProfileMetrics
+
+Extracts the relevant profile traces for finished events.
+"""
+struct ProfileMetrics
+    start_times::Dict{Any,UInt64}
+end
+ProfileMetrics() = ProfileMetrics(Dict{Any,UInt64}())
+init_similar(::ProfileMetrics) = ProfileMetrics()
+function (pm::ProfileMetrics)(ev::Event{:start})
+    pm.start_times[(ev.category,ev.id)] = ev.timestamp
+    return
+end
+function (pm::ProfileMetrics)(ev::Event{:finish})
+    pr = ev.profiler_samples
+    samples = pr.samples
+    if isempty(samples)
+        return nothing
+    end
+
+    # Remove frames from before our start event
+    key = (ev.category, ev.id)
+    if haskey(pm.start_times, key)
+        start_time = pm.start_times[key]
+        to_delete_end = 0
+        for idx in length(samples):-1:Profile.nmeta
+            if Profile.is_block_end(samples, idx)
+                if to_delete_end != 0
+                    deleteat!(samples, (idx+1:to_delete_end))
+                    to_delete_end = 0
+                end
+                if samples[idx-Profile.META_OFFSET_CPUCYCLECLOCK] < start_time
+                    to_delete_end = idx
+                end
+            end
+        end
+    end
+
+    return samples
+end
 
 end # module Events
