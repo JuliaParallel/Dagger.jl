@@ -18,7 +18,6 @@ Environment Variables:
 - BENCHMARK_VISUALIZE - Whether to run the `visualize.jl` script on the output results. May be any value that can parse as a `Bool`.
 - BENCHMARK_RENDER - Which rendering mode to use. May be "live" to use the old (and soon to be removed) web renderer, "webdash" to use the DaggerWebDash renderer, or "offline" to use the old (and soon to be removed) offline renderer. The default of "" disables rendering.
 - BENCHMARK_LIVE_PORT - Which port to use for web rendering. Defaults to port 8000.
-- BENCHMARK_GRAPH - Whether to use dotviz graph rendering. Only useable if using "live" or "offline" rendering methods. Defaults to off, and may be any value that can parse as a `Bool`.
 - BENCHMARK_PROFILE - Whether to enable real-time profiling. Defaults to off, and may be any value with parses as a `Bool`. Currently experimental and very, very slow.
 - BENCHMARK_SAVE_LOGS - Whether to save logs collected at runtime to the output file. Defaults to off, and may be any value that can parse as a `Bool`.
 
@@ -123,10 +122,6 @@ end
 const RENDERS = Dict{Int,Dict}()
 const live_port = parse(Int, get(ENV, "BENCHMARK_LIVE_PORT", "8000"))
 
-const graph = parse(Bool, get(ENV, "BENCHMARK_GRAPH", "0"))
-if graph && render == "webdash"
-    @warn "BENCHMARK_GRAPH=1 is not compatible with BENCHMARK_RENDER=webdash; disabling graphing"
-end
 const profile = parse(Bool, get(ENV, "BENCHMARK_PROFILE", "0"))
 const savelogs = if parse(Bool, get(ENV, "BENCHMARK_SAVE_LOGS", "0"))
     if render == "live " || render == "offline"
@@ -155,9 +150,6 @@ function main()
     opts = (;profile=profile)
     if render == "live"
         opts = merge(opts, (;log_sink=LocalEventLog()))
-        if graph
-            opts = merge(opts, (;log_file=output_prefix*".dot"))
-        end
     elseif render == "webdash" || savelogs
         ml = TimespanLogging.MultiEventLog()
         ml[:core] = TimespanLogging.Events.CoreMetrics()

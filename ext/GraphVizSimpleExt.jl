@@ -1,8 +1,15 @@
-import .Colors
+module GraphVizSimpleExt
 
-import .Dagger
-import .Dagger: show_plan
-import .Dagger.TimespanLogging: Timespan
+if isdefined(Base, :get_extension)
+    using Colors
+else
+    using ..Colors
+end
+
+import Dagger
+import Dagger: Chunk, Thunk, Processor
+import Dagger: show_logs
+import Dagger.TimespanLogging: Timespan
 
 ### DAG-based graphing
 
@@ -109,32 +116,34 @@ function write_node(ctx, io, t, c, id=dec(hash(t)))
 end
 
 function write_node(ctx, io, ts::Timespan, c)
-    f, proc = ts.timeline
+    (;thunk_id, processor) = ts.id
+    (;f) = ts.timeline
     f = isa(f, Function) ? "$f" : "fn"
     t_comp = pretty_time(ts)
-    color = _proc_color(ctx, proc)
-    shape = _proc_shape(ctx, proc)
+    color = _proc_color(ctx, processor)
+    shape = _proc_shape(ctx, processor)
     # TODO: t_log = log(ts.finish - ts.start) / 5
-    ctx.id_to_proc[ts.id] = proc
-    println(io, "n_$(ts.id) [label=\"$f\n$t_comp\",color=\"$color\",shape=\"$shape\",penwidth=5];")
+    ctx.id_to_proc[thunk_id] = processor
+    println(io, "n_$thunk_id [label=\"$f\n$t_comp\",color=\"$color\",shape=\"$shape\",penwidth=5];")
     # TODO: "\n Thunk $(ts.id)\nResult Type: $res_type\nResult Size: $sz_comp\",
     c
 end
 
 function write_edge(ctx, io, ts_move::Timespan, logs, inputname=nothing, inputarg=nothing)
-    f, id = ts_move.timeline
+    (;thunk_id, id) = ts_move.id
+    (;f,) = ts_move.timeline
     t_move = pretty_time(ts_move)
     if id > 0
-        print(io, "n_$id -> n_$(ts_move.id[1]) [label=\"Move: $t_move")
+        print(io, "n_$id -> n_$thunk_id [label=\"Move: $t_move")
         color_src = _proc_color(ctx, id)
     else
         @assert inputname !== nothing
         @assert inputarg !== nothing
-        print(io, "n_$inputname -> n_$(ts_move.id[1]) [label=\"Move: $t_move")
+        print(io, "n_$inputname -> n_$thunk_id [label=\"Move: $t_move")
         proc = node_proc(inputarg)
         color_src = _proc_color(ctx, proc)
     end
-    color_dst = _proc_color(ctx, ts_move.id[1])
+    color_dst = _proc_color(ctx, thunk_id)
     # TODO: log_t = log(ts_move.finish-ts_move.start) / 5
     println(io, "\",color=\"$color_src;0.5:$color_dst\",penwidth=2];")
 end
@@ -147,7 +156,7 @@ function getargs!(d, t::Thunk)
     d[t.id] = [filter(x->!istask(x[2]), collect(enumerate(raw_inputs)))...,]
     foreach(i->getargs!(d, i), raw_inputs)
 end
-function write_dag(io, logs::Vector, t=nothing)
+function write_dag(io, t, logs::Vector)
     ctx = (proc_to_color = Dict{Processor,String}(),
            proc_colors = Colors.distinguishable_colors(128),
            proc_color_idx = Ref{Int}(1),
@@ -184,8 +193,8 @@ function write_dag(io, logs::Vector, t=nothing)
             end
             # Arg-to-compute edges
             for ts in filter(x->x.category==:move &&
-                                x.id[1]==id &&
-                                x.timeline[2]==-argidx, logs)
+                                x.id.thunk_id==id &&
+                                x.id.id==-argidx, logs)
                 write_edge(ctx, io, ts, logs, name, arg)
             end
             arg_c += 1
@@ -193,7 +202,7 @@ function write_dag(io, logs::Vector, t=nothing)
         argnodemap[id] = nodes
     end
     # Move edges
-    for ts in filter(x->x.category==:move && x.timeline[2]>0, logs)
+    for ts in filter(x->x.category==:move && x.id.id>0, logs)
         write_edge(ctx, io, ts, logs)
     end
     #= FIXME: Legend (currently it's laid out horizontally)
@@ -215,76 +224,21 @@ function write_dag(io, logs::Vector, t=nothing)
     =#
 end
 
-function show_plan(io::IO, t)
+function _show_plan(io::IO, t)
     println(io, """strict digraph {
     graph [layout=dot,rankdir=LR];""")
     write_dag(io, t)
     println(io, "}")
 end
-function show_plan(io::IO, logs::Vector{Timespan}, t::Thunk)
+function _show_plan(io::IO, t::Thunk, logs::Vector{Timespan})
     println(io, """strict digraph {
     graph [layout=dot,rankdir=LR];""")
-    write_dag(io, logs, t)
+    write_dag(io, t, logs)
     println(io, "}")
 end
 
-function show_plan(t::Union{Thunk,Vector{Timespan}})
-    io = IOBuffer()
-    show_plan(io, t)
-    return String(take!(io))
-end
-function show_plan(logs::Vector{Timespan}, t::Thunk)
-    io = IOBuffer()
-    show_plan(io, logs, t)
-    return String(take!(io))
-end
+show_logs(io::IO, t::Thunk, ::Val{:graphviz_simple}) = _show_plan(io, t)
+show_logs(io::IO, logs::Vector{Timespan}, ::Val{:graphviz_simple}) = _show_plan(io, logs)
+show_logs(io::IO, t::Thunk, logs::Vector{Timespan}, ::Val{:graphviz_simple}) = _show_plan(io, t, logs)
 
-function show_plan(c)
-    ctx = Context(global_context())
-    t = thunkize(ctx, stage(ctx, c))
-    show_plan(t)
 end
-
-function show_plan(t::Tuple)
-    show_plan(TupleCompute(t))
-end
-
-# function printing
-
-argname(x::Symbol) = x
-
-function argname(x)
-    @assert x.head == :(::)
-    x.args[1]
-end
-
-function show_statement(io, x)
-    if x.head == :return
-        x = x.args[1]
-    end
-    print(io, x)
-end
-
-function fnbody(io, x)
-    body = x.args[3]
-    statements = filter(x -> !isa(x, LineNumberNode), body.args)
-    for s in statements
-        show_statement(io, s)
-    end
-end
-
-function show_ast(io, f)
-    ast = Base.uncompressed_ast(f.code)
-    args = map(x -> string(argname(x)), ast.args[1])
-    write(io, "(", join(args, ','), ") -> ")
-    fnbody(io, ast)
-end
-
-function showfn(io, f::Function)
-    if isa(f, Function)
-        show(io, f)
-    else
-        show_ast(io, f)
-    end
-end
-showfn(io, f) = show(io, f)
