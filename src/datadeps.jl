@@ -789,7 +789,10 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         end
 
         # Calculate this task's syncdeps
-        syncdeps = get(Set{Any}, spec.options, :syncdeps)
+        if spec.options.syncdeps === nothing
+            spec.options.syncdeps = Set{Any}()
+        end
+        syncdeps = spec.options.syncdeps
         for (idx, (_, arg)) in enumerate(task_args)
             arg, deps = unwrap_inout(arg)
             arg = arg isa DTask ? fetch(arg; raw=true) : arg
@@ -819,8 +822,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         @dagdebug nothing :spawn_datadeps "($(repr(value(f)))) $(length(syncdeps)) syncdeps"
 
         # Launch user's task
-        task_scope = our_scope
-        spec.options = merge(spec.options, (;syncdeps, scope=task_scope))
+        spec.options.scope = our_scope
         enqueue!(upper_queue, spec=>task)
 
         # Update read/write tracking for arguments

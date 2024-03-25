@@ -46,19 +46,16 @@ unwrap_nested_exception(err::TaskFailedException) =
     unwrap_nested_exception(err.t.exception)
 unwrap_nested_exception(err) = err
 
-"Gets a `NamedTuple` of options propagated by `thunk`."
-function get_propagated_options(thunk)
+"Gets a `NamedTuple` of options propagated from `options`."
+function get_propagated_options(options::Options)
+    # FIXME: Just use an Options as output?
     nt = NamedTuple()
-    f = Dagger.value(thunk.inputs[1])
-    for key in thunk.propagates
-        value = if key == :scope
-            isa(f, Chunk) ? f.scope : DefaultScope()
-        elseif key == :processor
-            isa(f, Chunk) ? f.processor : OSProc()
-        elseif key in fieldnames(Thunk)
-            getproperty(thunk, key)
-        elseif key in fieldnames(ThunkOptions)
-            getproperty(thunk.options, key)
+    if options.propagates === nothing
+        return nt
+    end
+    for key in options.propagates
+        value = if hasfield(Options, key)
+            getfield(options, key)
         else
             throw(ArgumentError("Can't propagate unknown key: $key"))
         end
@@ -105,7 +102,8 @@ end
 `Set{Chunk}` of all chunks that can now be evicted from workers."
 function cleanup_syncdeps!(state, thunk)
     #to_evict = Set{Chunk}()
-    for inp in thunk.syncdeps
+    thunk.options.syncdeps === nothing && return
+    for inp in thunk.options.syncdeps
         inp = unwrap_weak_checked(inp)
         @assert istask(inp)
         if inp in keys(state.waiting_data)
@@ -189,24 +187,26 @@ function reschedule_syncdeps!(state, thunk, seen=nothing)
                 end
             end
             w = get!(()->Set{Thunk}(), state.waiting, thunk)
-            for input in thunk.syncdeps
-                input = unwrap_weak_checked(input)
-                istask(input) && input in seen && continue
+            if thunk.options.syncdeps !== nothing
+                for input in thunk.options.syncdeps
+                    input = unwrap_weak_checked(input)
+                    istask(input) && input in seen && continue
 
-                # Unseen
-                push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
-                istask(input) || continue
+                    # Unseen
+                    push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
+                    istask(input) || continue
 
-                # Unseen task
-                if get(state.errored, input, false)
-                    set_failed!(state, input, thunk)
-                end
-                input.finished && continue
+                    # Unseen task
+                    if get(state.errored, input, false)
+                        set_failed!(state, input, thunk)
+                    end
+                    input.finished && continue
 
-                # Unseen and unfinished task
-                push!(w, input)
-                if !((input in state.running) || (input in state.ready))
-                    push!(to_visit, input)
+                    # Unseen and unfinished task
+                    push!(w, input)
+                    if !((input in state.running) || (input in state.ready))
+                        push!(to_visit, input)
+                    end
                 end
             end
             if isempty(w)
@@ -286,7 +286,7 @@ function print_sch_status(io::IO, state, thunk; offset=0, limit=5, max_inputs=3)
         print(io, "($(status_string(thunk))) ")
     end
     println(io, "$(thunk.id): $(thunk.f)")
-    for (idx, input) in enumerate(thunk.syncdeps)
+    for (idx, input) in enumerate(thunk.options.syncdeps)
         if input isa WeakThunk
             input = Dagger.unwrap_weak(input)
             if input === nothing
@@ -343,38 +343,6 @@ function report_catch_error(err, desc=nothing)
     seek(iob.io, 0)
     write(stderr, iob)
 end
-
-struct Signature
-    sig::Vector{Any}#DataType}
-    hash::UInt
-    sig_nokw::SubArray{Any,1,Vector{Any},Tuple{UnitRange{Int}},true}
-    hash_nokw::UInt
-    function Signature(sig::Vector{Any})#DataType})
-        # Hash full signature
-        h = hash(Signature)
-        for T in sig
-            h = hash(T, h)
-        end
-
-        # Hash non-kwarg signature
-        @assert isdefined(Core, :kwcall) "FIXME: No kwcall! Use kwfunc"
-        idx = findfirst(T->T===typeof(Core.kwcall), sig)
-        if idx !== nothing
-            # Skip NT kwargs
-            sig_nokw = @view sig[idx+2:end]
-        else
-            sig_nokw = @view sig[1:end]
-        end
-        h_nokw = hash(Signature, UInt(1))
-        for T in sig_nokw
-            h_nokw = hash(T, h_nokw)
-        end
-
-        return new(sig, h, sig_nokw, h_nokw)
-    end
-end
-Base.hash(sig::Signature, h::UInt) = hash(sig.hash, h)
-Base.isequal(sig1::Signature, sig2::Signature) = sig1.hash == sig2.hash
 
 chunktype(x) = typeof(x)
 signature(state, task::Thunk) =
