@@ -33,7 +33,6 @@ it is passed to the scheduler to control its behavior. `Options` contains a
 
 There are also some extra optionss that can be passed, although they're considered advanced options to be used only by developers or library authors:
 - `get_result::Bool` -- return the actual result to the scheduler instead of `Chunk` objects. Used when `f` explicitly constructs a Chunk or when return value is small (e.g. in case of reduce)
-- `persist::Bool` -- the result of this Thunk should not be released after it becomes unused in the DAG
 - `cache::Bool` -- cache the result of this Thunk such that if the thunk is evaluated again, one can just reuse the cached value. If it’s been removed from cache, recompute the value.
 
 ## Simple example

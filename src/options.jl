@@ -1,3 +1,130 @@
+# Task options
+
+"""
+    Options
+
+Stores per-task options to be passed to the scheduler.
+
+# Arguments
+- `propagates::Vector{Symbol}`: The set of option names that will be propagated by this task to tasks that it spawns.
+- `single::Int=0`: (Deprecated) Force task onto worker with specified id. `0` disables this option.
+- `proclist=nothing`: (Deprecated) Force task to use one or more processors that are instances/subtypes of a contained type. Alternatively, a function can be supplied, and the function will be called with a processor as the sole argument and should return a `Bool` result to indicate whether or not to use the given processor. `nothing` enables all default processors.
+- `get_result::Bool=false`: Whether the worker should store the result directly (`true`) or as a `Chunk` (`false`)
+- `meta::Bool=false`: When `true`, values are not `move`d, and are passed directly as `Chunk`, if they are not immediate values
+- `cache::Bool=false`: When `true`, caches the task's result in it's associated `Thunk` as `.cache_ref`
+- `syncdeps::Set{Any}`: Contains any additional tasks to synchronize with
+- `time_util::Dict{Type,Any}`: Indicates the maximum expected time utilization for this task. Each keypair maps a processor type to the utilization, where the value can be a real (approximately the number of nanoseconds taken), or `MaxUtilization()` (utilizes all processors of this type). By default, the scheduler assumes that this task only uses one processor.
+- `alloc_util::Dict{Type,UInt64}`: Indicates the maximum expected memory utilization for this task. Each keypair maps a processor type to the utilization, where the value is an integer representing approximately the maximum number of bytes allocated at any one time.
+- `occupancy::Dict{Type,Real}`: Indicates the maximum expected processor occupancy for this task. Each keypair maps a processor type to the utilization, where the value can be a real between 0 and 1 (the occupancy ratio, where 1 is full occupancy). By default, the scheduler assumes that this task has full occupancy.
+- `checkpoint=nothing`: If not `nothing`, uses the provided function to save the result of the task to persistent storage, for later retrieval by `restore`.
+- `restore=nothing`: If not `nothing`, uses the provided function to return the (cached) result of this task, were it to execute.  If this returns a `Chunk`, this task will be skipped, and its result will be set to the `Chunk`.  If `nothing` is returned, restoring is skipped, and the task will execute as usual. If this function throws an error, restoring will be skipped, and the error will be displayed.
+- `storage::Union{Chunk,Nothing}=nothing`: If not `nothing`, references a `MemPool.StorageDevice` which will be passed to `MemPool.poolset` internally when constructing `Chunk`s (such as when constructing the return value). The device must support `MemPool.CPURAMResource`. When `nothing`, uses `MemPool.GLOBAL_DEVICE[]`.
+- `storage_root_tag::Any=nothing`: If not `nothing`, specifies the MemPool storage leaf tag to associate with the task's result. This tag can be used by MemPool's storage devices to manipulate their behavior, such as the file name used to store data on disk."
+- `storage_leaf_tag::Union{MemPool.Tag,Nothing}=nothing`: If not `nothing`, specifies the MemPool storage leaf tag to associate with the task's result. This tag can be used by MemPool's storage devices to manipulate their behavior, such as the file name used to store data on disk."
+- `storage_retain::Union{Bool,Nothing}=nothing`: The value of `retain` to pass to `MemPool.poolset` when constructing the result `Chunk`. `nothing` defaults to `false`.
+"""
+Base.@kwdef mutable struct Options
+    propagates::Union{Vector{Symbol},Nothing} = nothing
+
+    single::Union{Int,Nothing} = nothing
+    proclist = nothing
+
+    get_result::Bool = false
+    meta::Bool = false
+    cache::Bool = false
+
+    syncdeps::Union{Set{Any},Nothing} = nothing
+
+    time_util::Union{Dict{Type,Any},Nothing} = nothing
+    alloc_util::Union{Dict{Type,UInt64},Nothing} = nothing
+    occupancy::Union{Dict{Type,Real},Nothing} = nothing
+
+    checkpoint = nothing
+    restore = nothing
+
+    storage::Union{Chunk,Nothing} = nothing
+    storage_root_tag = nothing
+    storage_leaf_tag::Union{MemPool.Tag,Nothing} = nothing
+    storage_retain::Union{Bool,Nothing} = nothing
+end
+Options(::Nothing) = Options()
+function Options(old_options::NamedTuple)
+    new_options = Options()
+    options_merge!(new_options, old_options)
+    return new_options
+end
+function Base.copy(old_options::Options)
+    new_options = Options()
+    options_merge!(new_options, old_options)
+    return new_options
+end
+# Merge b -> a, where b takes precedence
+function options_merge!(a, b)
+    if a isa Options
+        options = a
+        source = b
+        override = true
+    elseif b isa Options
+        options = b
+        source = a
+        override = false
+    else
+        options = Options(;a...)
+        source = b
+        override = true
+    end
+    _options_merge!(options, source, override)
+    return options
+end
+@generated function _options_merge!(options, source, override)
+    ex = Expr(:block)
+    for field in fieldnames(Options)
+        push!(ex.args, quote
+            if hasproperty(source, $(QuoteNode(field))) && getproperty(source, $(QuoteNode(field))) !== nothing
+                if override || getproperty(options, $(QuoteNode(field))) === nothing
+                    setproperty!(options,
+                                 $(QuoteNode(field)),
+                                 getfield(source, $(QuoteNode(field))))
+                end
+            end
+        end)
+    end
+    return ex
+end
+
+"""
+    populate_defaults!(opts::Options, sig::Vector{DataType}) -> Options
+
+Returns a `Options` with default values filled in for a function call with
+signature `sig`, if the option was previously unspecified in `opts`.
+"""
+function populate_defaults!(opts::Options, sig)
+    function maybe_default!(opts, opt::Symbol)
+        if opts !== nothing && (old_opt = getproperty(opts, opt)) !== nothing
+            setproperty!(opts, opt, old_opt)
+        else
+            setproperty!(opts, opt, Dagger.default_option(Val(opt), sig...))
+        end
+    end
+    maybe_default!(opts, :propagates),
+    maybe_default!(opts, :single),
+    maybe_default!(opts, :proclist),
+    maybe_default!(opts, :get_result),
+    maybe_default!(opts, :meta),
+    maybe_default!(opts, :cache),
+    maybe_default!(opts, :syncdeps),
+    maybe_default!(opts, :time_util),
+    maybe_default!(opts, :alloc_util),
+    maybe_default!(opts, :occupancy),
+    maybe_default!(opts, :checkpoint),
+    maybe_default!(opts, :restore),
+    maybe_default!(opts, :storage),
+    maybe_default!(opts, :storage_root_tag),
+    maybe_default!(opts, :storage_leaf_tag),
+    maybe_default!(opts, :storage_retain),
+    return opts
+end
+
 # Scoped Options
 
 const options_context = ScopedValue{NamedTuple}(NamedTuple())
@@ -6,11 +133,12 @@ const options_context = ScopedValue{NamedTuple}(NamedTuple())
     with_options(f, options::NamedTuple) -> Any
     with_options(f; options...) -> Any
 
-Sets one or more options to the given values, executes `f()`, resets the
+Sets one or more scoped options to the given values, executes `f()`, resets the
 options to their previous values, and returns the result of `f()`. This is the
-recommended way to set options, as it only affects tasks spawned within its
-scope. Note that setting an option here will propagate its value across Julia
-or Dagger tasks spawned by `f()` or its callees (i.e. the options propagate).
+recommended way to set scoped options, as it only affects tasks spawned within
+its scope. Note that setting an option here will propagate its value across
+Julia or Dagger tasks spawned by `f()` or its callees (i.e. the options
+propagate).
 """
 function with_options(f, options::NamedTuple)
     prev_options = options_context[]
@@ -24,11 +152,13 @@ with_options(f; options...) = with_options(f, NamedTuple(options))
     get_options(key::Symbol, default) -> Any
     get_options(key::Symbol) -> Any
 
-Returns the value of the option named `key`. If `option` does not have a value set, then an error will be thrown, unless `default` is set, in which case it will be returned instead of erroring.
+Returns the value of the scoped option named `key`. If `option` does not have a
+value set, then an error will be thrown, unless `default` is set, in which case
+it will be returned instead of erroring.
 
     get_options() -> NamedTuple
 
-Returns a `NamedTuple` of all option key-value pairs.
+Returns a `NamedTuple` of all scoped option key-value pairs.
 """
 get_options() = options_context[]
 get_options(key::Symbol) = getproperty(get_options(), key)

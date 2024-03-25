@@ -68,12 +68,12 @@ function eager_submit_core!(ctx, state, task, tid, payload)
             end
             @inbounds syncdeps[idx] = newdep
         end
-        options = merge(options, (;syncdeps))
+        Dagger.options_merge!(options, (;syncdeps))
     end
 
     GC.@preserve old_args args begin
         # Create the `Thunk`
-        thunk = Thunk(f, args...; world, id, options...)
+        thunk = Thunk(f, args...; world, id, options)
 
         # Create a `DRef` to `thunk` so that the caller can preserve it
         thunk_dref = poolset(thunk; size=64, device=MemPool.CPURAMDevice(),
@@ -144,7 +144,7 @@ function eager_submit_local!(ntasks, id, future, finalizer_ref, f, args, options
     end
 
     # Create the `Thunk`
-    thunk = Thunk(f, args...; world, options...)
+    thunk = Thunk(f, args...; world, options)
 
     # Create a `DRef` to `thunk` so that the caller can preserve it
     thunk_ref = poolset(thunk; size=64, device=MemPool.CPURAMDevice())
@@ -180,8 +180,7 @@ function eager_submit_local!(ntasks, id, future, finalizer_ref, f, args, options
         local spec
         @lock state.lock begin
             sig = Sch.signature(thunk, state)
-            topts = Sch.ThunkOptions(;options...)
-            time_util, alloc_util, occupancy = Sch.task_utilization(state, to_proc, topts, sig)
+            time_util, alloc_util, occupancy = Sch.task_utilization(state, to_proc, options, sig)
             task_spec = Sch.prepare_fire_task!(ctx, state, thunk, to_proc, scopes, time_util, alloc_util, occupancy)
             @assert task_spec !== nothing
             state.thunk_dict[thunk.id] = WeakThunk(thunk)
@@ -263,12 +262,10 @@ function all_can_execute_locally(f, args, options, world, metadata)
         return false
     end
     if !(options isa Vector)
-        topts = Sch.ThunkOptions(;options...)
-        return can_execute_locally(f, args, topts, world, metadata)
+        return can_execute_locally(f, args, options, world, metadata)
     end
     for idx in 1:length(options)
-        topts = Sch.ThunkOptions(;options[idx]...)
-        if !can_execute_locally(f[idx], args[idx], topts, world[idx], metadata[idx])
+        if !can_execute_locally(f[idx], args[idx], options[idx], world[idx], metadata[idx])
             return false
         end
     end
@@ -350,24 +347,20 @@ function eager_process_args_submission_to_local(specs::Vector{Pair{EagerTaskSpec
         eager_process_args_submission_to_local(spec)
     end
 end
-function eager_process_options_submission_to_local(options::NamedTuple)
-    @nospecialize options
+function eager_process_options_submission_to_local!(options::Options)
     if haskey(options, :syncdeps)
         raw_syncdeps = options.syncdeps
         syncdeps = Set{Any}()
         for raw_dep in raw_syncdeps
             push!(syncdeps, eager_process_elem_submission_to_local(raw_dep))
         end
-        return merge(options, (;syncdeps))
-    else
-        return options
+        Dagger.options_merge!(options, (;syncdeps))
     end
 end
 function EagerThunkMetadata(spec::EagerTaskSpec)
     arg_types = ntuple(i->chunktype(spec.args[i][2]), length(spec.args))
     return_type = Base._return_type(spec.f, Base.to_tuple_type(arg_types), spec.world)
-    toptions = Sch.ThunkOptions(;spec.options...)
-    scope = Sch.calculate_scope(spec.f, spec.args, toptions)
+    scope = Sch.calculate_scope(spec.f, spec.args, spec.options)
     return EagerThunkMetadata(return_type, scope)
 end
 chunktype(t::EagerThunk) = t.metadata.return_type
@@ -384,12 +377,12 @@ end
 function eager_launch!((spec, task)::Pair{EagerTaskSpec,EagerThunk})
     # Lookup EagerThunk -> ThunkRef
     args = eager_process_args_submission_to_local(spec=>task)
-    options = eager_process_options_submission_to_local(spec.options)
+    eager_process_options_submission_to_local!(spec.options)
 
     # Submit the task
     thunk_ref = eager_submit!(1,
                               task.id, task.future, task.finalizer_ref,
-                              spec.f, args, options, spec.world,
+                              spec.f, args, spec.options, spec.world,
                               task.metadata)
     task.thunk_ref = thunk_ref.ref::DRef
 end
@@ -404,7 +397,7 @@ function eager_launch!(specs::Vector{Pair{EagerTaskSpec,EagerThunk}})
     all_fs = Any[spec.f for (spec, _) in specs]
     # Lookup EagerThunk -> ThunkRef
     all_args = eager_process_args_submission_to_local(specs)
-    all_options = Any[spec.options for (spec, _) in specs]
+    all_options = Option[spec.options for (spec, _) in specs]
     all_worlds = UInt64[spec.world for (spec, _) in specs]
     all_metadata = EagerThunkMetadata[task.metadata for (_, task) in specs]
 

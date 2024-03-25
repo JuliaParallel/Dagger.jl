@@ -32,8 +32,8 @@ unwrap_nested_exception(err::RemoteException) =
 unwrap_nested_exception(err) = err
 
 "Gets a `NamedTuple` of options propagated by `thunk`."
-function get_propagated_options(options, thunk=nothing)
-    options::ThunkOptions
+function get_propagated_options(options::Options, thunk=nothing)
+    # FIXME: Just use an Options as output?
     nt = NamedTuple()
     if options.propagates === nothing
         return nt
@@ -45,7 +45,7 @@ function get_propagated_options(options, thunk=nothing)
             isa(thunk.f, Chunk) ? thunk.f.processor : OSProc()
         elseif thunk !== nothing && key in fieldnames(Thunk)
             getproperty(thunk, key)
-        elseif thunk !== nothing && key in fieldnames(ThunkOptions)
+        elseif thunk !== nothing && key in fieldnames(Options)
             getproperty(thunk.options, key)
         else
             throw(ArgumentError("Can't propagate unknown key: $key"))

@@ -1,7 +1,7 @@
 mutable struct EagerTaskSpec
     f
     args::Vector{Pair{Union{Symbol,Nothing},Any}}
-    options::NamedTuple
+    options::Options
     world::UInt64
 end
 
@@ -42,8 +42,7 @@ end
 struct InOrderTaskQueue <: AbstractTaskQueue
     upper_queue::AbstractTaskQueue
     prev_tasks::Set{EagerThunk}
-    InOrderTaskQueue(upper_queue) = new(upper_queue,
-                                        Set{EagerThunk}())
+    InOrderTaskQueue(upper_queue) = new(upper_queue, Set{EagerThunk}())
 end
 function _add_prev_deps!(queue::InOrderTaskQueue, spec::EagerTaskSpec)
     # Add previously-enqueued task(s) to this task's syncdeps

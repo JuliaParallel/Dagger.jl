@@ -32,7 +32,7 @@ Useful if `f` is a function or callable struct that may only be transferred to,
 and executed within, the specified scope.
 
 ## Options
-- `options`: A `Sch.ThunkOptions` struct providing the options for the `Thunk`.
+- `options`: An `Options` struct providing the options for the `Thunk`.
 If omitted, options can also be specified by passing key-value pairs as
 `kwargs`.
 """
@@ -42,23 +42,14 @@ mutable struct Thunk
     world::UInt64
     syncdeps::Set{Any}
     id::ThunkID
-    get_result::Bool # whether the worker should send the result or only the metadata
-    meta::Bool
-    persist::Bool # don't `free!` result after computing
-    cache::Bool   # release the result giving the worker an opportunity to
-                  # cache it
     cache_ref::Any
     affinity::Union{Nothing, Pair{OSProc, Int}}
     eager_ref::Union{DRef,Nothing}
-    options::Any # stores scheduler-specific options
+    options::Union{Options,Nothing} # stores scheduler-specific options
     function Thunk(f, xs...;
                    world::UInt64=Base.get_world_counter(),
                    syncdeps=nothing,
                    id::ThunkID=next_id(),
-                   get_result::Bool=false,
-                   meta::Bool=false,
-                   persist::Bool=false,
-                   cache::Bool=false,
                    cache_ref=nothing,
                    affinity=nothing,
                    eager_ref=nothing,
@@ -83,13 +74,11 @@ mutable struct Thunk
         if options !== nothing
             @assert isempty(kwargs)
             new(f, xs, world, syncdeps_set, id,
-                get_result, meta, persist, cache,
                 cache_ref, affinity, eager_ref, options)
         else
             new(f, xs, world, syncdeps_set, id,
-                get_result, meta, persist, cache,
                 cache_ref, affinity, eager_ref,
-                Sch.ThunkOptions(;kwargs...))
+                Options(;kwargs...))
         end
     end
 end
@@ -163,7 +152,7 @@ Creates a [`Thunk`](@ref) object which can be executed later, which will call
 resulting `Thunk`.
 """
 function delayed(f, options::Options)
-    (args...; kwargs...) -> Thunk(f, args_kwargs_to_pairs(args, kwargs)...; options.options...)
+    (args...; kwargs...) -> Thunk(f, args_kwargs_to_pairs(args, kwargs)...; options)
 end
 delayed(f; kwargs...) = delayed(f, Options(;kwargs...))
 
@@ -278,35 +267,50 @@ function spawn(f, args...; kwargs...)
     @nospecialize f args kwargs
 
     # Get all options and determine which propagate beyond this task
-    options = get_options()
-    propagates = get(options, :propagates, ())
-    propagates = Tuple(unique(Symbol[propagates..., keys(options)...]))
-    if length(args) >= 1 && first(args) isa Options
-        spawn_options = first(args).options
-        options = merge(options, spawn_options)
-        args = args[2:end]
+    scoped_options = get_options()
+    if haskey(scoped_options, :propagates)
+        if scoped_options.propagates isa Tuple
+            propagates = Symbol[scoped_options.propagates...]
+        else
+            propagates = scoped_options.propagates::Vector{Symbol}
+        end
+    else
+        propagates = Symbol[]
     end
+    append!(propagates, keys(scoped_options)::NTuple{N,Symbol} where N)
+    if length(args) >= 1 && first(args) isa Options
+        # N.B. Make a defensive copy in case user aliases Options struct
+        task_options = copy(first(args)::Options)
+        args = args[2:end]
+    else
+        task_options = Options()
+    end
+    options_merge!(scoped_options, task_options)
 
     # Wrap f in a Chunk if necessary
-    processor = haskey(options, :processor) ? options.processor : nothing
-    scope = haskey(options, :scope) ? options.scope : nothing
+    processor = haskey(scoped_options, :processor) ? scoped_options.processor : nothing
+    scope = haskey(scoped_options, :scope) ? scoped_options.scope : nothing
     if !isnothing(processor) || !isnothing(scope)
         f = tochunk(f,
-                    something(processor, get_options(:processor, OSProc())),
-                    something(scope, get_options(:scope, DefaultScope())))
+                    something(processor, OSProc()),
+                    something(scope, DefaultScope()))
     end
 
     # Process the args and kwargs into Pair form
     args_kwargs = args_kwargs_to_pairs(args, kwargs)
 
     # Get task queue, and don't let it propagate
-    task_queue = get_options(:task_queue, EagerTaskQueue())
-    options = NamedTuple(filter(opt->opt[1] != :task_queue, Base.pairs(options)))
-    propagates = filter(prop->prop != :task_queue, propagates)
-    options = merge(options, (;propagates))
+    task_queue = get(scoped_options, :task_queue, EagerTaskQueue())::AbstractTaskQueue
+    filter!(prop -> prop != :task_queue, propagates)
+    if task_options.propagates !== nothing
+        append!(task_options.propagates, propagates)
+    else
+        task_options.propagates = propagates
+    end
+    unique!(task_options.propagates)
 
     # Construct task spec and handle
-    spec = EagerTaskSpec(f, args_kwargs, options, Base.get_world_counter())
+    spec = EagerTaskSpec(f, args_kwargs, task_options, Base.get_world_counter())
     task = eager_spawn(spec)
 
     # Enqueue the task into the task queue
@@ -404,7 +408,6 @@ end
 _par(ex::Symbol; kwargs...) = esc(ex)
 _par(ex; kwargs...) = ex
 
-persist!(t::Thunk) = (t.persist=true; t)
 cache_result!(t::Thunk) = (t.cache=true; t)
 
 # @generated function compose{N}(f, g, t::NTuple{N})

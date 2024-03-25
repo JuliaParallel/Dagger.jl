@@ -23,12 +23,6 @@ function Base.fetch(t::ThunkFuture; proc=OSProc(), raw=false)
 end
 Base.put!(t::ThunkFuture, x; error=false) = put!(t.future, (error, x))
 
-struct Options
-    options::NamedTuple
-end
-Options(;options...) = Options((;options...))
-Options(options...) = Options((;options...))
-
 """
     EagerThunkMetadata
 
