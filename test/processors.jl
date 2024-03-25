@@ -1,6 +1,5 @@
 using Distributed
-import Dagger: Context, Processor, OSProc, ThreadProc, get_parent, get_processors
-import Dagger.Sch: ThunkOptions
+import Dagger: Context, Options, Processor, OSProc, ThreadProc, get_parent, get_processors
 
 @everywhere begin
 
@@ -23,7 +22,7 @@ end
         unknown_func = () -> nothing
         tp = ThreadProc(1, 1)
         op = get_parent(tp)
-        opts = ThunkOptions()
+        opts = Options()
         us = UnknownStruct()
         for proc in (op, tp)
             @test Dagger.iscompatible_func(proc, opts, unknown_func)
@@ -36,11 +35,11 @@ end
         @test Dagger.default_enabled(OptOutProc()) == false
     end
     @testset "Processor exhaustion" begin
-        opts = ThunkOptions(proclist=[OptOutProc])
+        opts = Options(proclist=[OptOutProc])
         @test_throws_unwrap (Dagger.DTaskFailedException, Dagger.Sch.SchedulingException) reason="No processors available, try widening scope" collect(delayed(sum; options=opts)([1,2,3]))
-        opts = ThunkOptions(proclist=(proc)->false)
+        opts = Options(proclist=(proc)->false)
         @test_throws_unwrap (Dagger.DTaskFailedException, Dagger.Sch.SchedulingException) reason="No processors available, try widening scope" collect(delayed(sum; options=opts)([1,2,3]))
-        opts = ThunkOptions(proclist=nothing)
+        opts = Options(proclist=nothing)
         @test collect(delayed(sum; options=opts)([1,2,3])) == 6
     end
     @testset "Roundtrip move()" begin

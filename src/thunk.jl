@@ -7,29 +7,17 @@ const EMPTY_ARGS = Argument[]
 const EMPTY_SYNCDEPS = Set{Any}()
 Base.@kwdef mutable struct ThunkSpec
     fargs::Vector{Argument} = EMPTY_ARGS
-    syncdeps::Set{Any} = EMPTY_SYNCDEPS
     id::Int = 0
-    get_result::Bool = false
-    meta::Bool = false
-    persist::Bool = false
-    cache::Bool = false
     cache_ref::Any = nothing
     affinity::Union{Pair{OSProc,Int}, Nothing} = nothing
-    options::Any#=FIXME:ThunkOptions=# = nothing
-    propagates::Tuple = ()
+    options::Union{Options, Nothing} = nothing
 end
 function unset!(spec::ThunkSpec, _)
     spec.fargs = EMPTY_ARGS
-    spec.syncdeps = EMPTY_SYNCDEPS
     spec.id = 0
-    spec.get_result = false
-    spec.meta = false
-    spec.persist = false
-    spec.cache = false
     spec.cache_ref = nothing
     spec.affinity = nothing
     spec.options = nothing
-    spec.propagates = ()
 end
 
 """
@@ -72,42 +60,29 @@ called function. Useful if the called function is a callable struct that may
 only be transferred to, and executed within, the specified scope.
 
 ## Options
-- `options`: A `Sch.ThunkOptions` struct providing the options for the `Thunk`.
+- `options`: An `Options` struct providing the options for the `Thunk`.
 If omitted, options can also be specified by passing key-value pairs as
 `kwargs`.
 """
 mutable struct Thunk
     inputs::Vector{Argument} # TODO: Use `ImmutableArray` in 1.8
-    syncdeps::Set{Any}
     id::Int
-    get_result::Bool # whether the worker should send the result or only the metadata
-    meta::Bool
-    persist::Bool # don't `free!` result after computing
-    cache::Bool   # release the result giving the worker an opportunity to
-                  # cache it
     cache_ref::Any
     affinity::Union{Pair{OSProc,Int}, Nothing}
-    options::Any # stores scheduler-specific options
-    propagates::Tuple # which options we'll propagate
+    options::Union{Options, Nothing} # stores task options
     eager_accessible::Bool
     sch_accessible::Bool
     finished::Bool
     function Thunk(spec::ThunkSpec)
-        return new(spec.fargs,
-                   spec.syncdeps, spec.id,
-                   spec.get_result, spec.meta, spec.persist, spec.cache,
+        return new(spec.fargs, spec.id,
                    spec.cache_ref, spec.affinity,
-                   spec.options, spec.propagates,
+                   spec.options,
                    true, true, false)
     end
 end
 function Thunk(f, xs...;
                syncdeps=nothing,
                id::Int=next_id(),
-               get_result::Bool=false,
-               meta::Bool=false,
-               persist::Bool=false,
-               cache::Bool=false,
                cache_ref=nothing,
                affinity=nothing,
                processor=nothing,
@@ -121,7 +96,19 @@ function Thunk(f, xs...;
     if !(f isa Argument)
         f = Argument(ArgPosition(true, 0, :NULL), f)
     end
-    if !(valuetype(f) <: Chunk) && (!isnothing(processor) || !isnothing(scope))
+    if options !== nothing
+        if processor !== nothing
+            options.processor = processor
+        elseif options.processor !== nothing
+            processor = options.processor
+        end
+        if scope !== nothing
+            options.scope = scope
+        elseif options.scope !== nothing
+            scope = options.scope
+        end
+    end
+    if !isnothing(processor) || !isnothing(scope)
         f.value = tochunk(value(f),
                           something(processor, OSProc()),
                           something(scope, DefaultScope()); rewrap=true)
@@ -137,7 +124,14 @@ function Thunk(f, xs...;
             spec.fargs[idx+1] = Argument(something(x.first, idx), x.second)
         end
     end
-    syncdeps_set = Set{Any}()
+    if options === nothing
+        options = Options()
+    end
+    spec.options = options::Options
+    if options.syncdeps === nothing
+        options.syncdeps = Set{Any}()
+    end
+    syncdeps_set = options.syncdeps
     for idx in 2:length(spec.fargs)
         x = value(spec.fargs[idx])
         if is_task_or_chunk(x)
@@ -149,21 +143,12 @@ function Thunk(f, xs...;
             push!(syncdeps_set, dep)
         end
     end
-    spec.syncdeps = syncdeps_set
     spec.id = id
-    spec.get_result = get_result
-    spec.meta = meta
-    spec.persist = persist
-    spec.cache = cache
+    if kwargs !== nothing
+        options_merge!(options, (;kwargs...))
+    end
     spec.cache_ref = cache_ref
     spec.affinity = affinity
-    if options !== nothing
-        @assert isempty(kwargs)
-        spec.options = options::Sch.ThunkOptions
-    else
-        spec.options = Sch.ThunkOptions(;kwargs...)
-    end
-    spec.propagates = propagates
     return Thunk(spec)
 end
 Serialization.serialize(io::AbstractSerializer, t::Thunk) =
@@ -251,13 +236,21 @@ Creates a [`Thunk`](@ref) object which can be executed later, which will call
 resulting `Thunk`.
 """
 function _delayed(f, options::Options)
-    (args...; kwargs...) -> Thunk(args_kwargs_to_arguments(f, args, kwargs)...; options.options...)
+    (args...; kwargs...) -> Thunk(args_kwargs_to_arguments(f, args, kwargs)...; options)
 end
 function delayed(f, options::Options)
     @warn "`delayed` is deprecated. Use `Dagger.@spawn` or `Dagger.spawn` instead." maxlog=1
     return _delayed(f, options)
 end
-delayed(f; kwargs...) = delayed(f, Options(;kwargs...))
+function delayed(f; options=nothing, kwargs...)
+    if options !== nothing
+        options = options::Options
+    else
+        options = Options()
+    end
+    options_merge!(options, kwargs; override=true)
+    return delayed(f, options)
+end
 
 "A weak reference to a `Thunk`."
 struct WeakThunk
@@ -428,7 +421,7 @@ These options control a variety of properties of the resulting `DTask`:
 - `scope`: The execution "scope" of the task, which determines where the task will run. By default, the task will run on the first available compute resource. If you have multiple compute resources, you can specify a scope to run the task on a specific resource. For example, `Dagger.@spawn scope=Dagger.scope(worker=2) do_something(1, 3.0)` would run `do_something(1, 3.0)` on worker 2.
 - `meta`: If `true`, instead of the scheduler automatically fetching values from other tasks, the raw `Chunk` objects will be passed to `f`. Useful for doing manual fetching or manipulation of `Chunk` references. Non-`Chunk` arguments are still passed as-is.
 
-Other options exist; see `Dagger.Sch.ThunkOptions` for the full list.
+Other options exist; see `Dagger.Options` for the full list.
 
 This macro is a semi-thin wrapper around `Dagger.spawn` - it creates a call to
 `Dagger.spawn` on `f` with arguments `args` and keyword arguments `kwargs`, and
@@ -544,36 +537,54 @@ Spawns a `DTask` that will call `f(args...; kwargs...)`. Also supports passing a
 function spawn(f, args...; kwargs...)
     @nospecialize f args kwargs
 
-    # Get all options and determine which propagate beyond this task
-    options = get_options()
-    propagates = get(options, :propagates, ())
-    propagates = Tuple(unique(Symbol[propagates..., keys(options)...]))
-    if length(args) >= 1 && first(args) isa Options
-        spawn_options = first(args).options
-        options = merge(options, spawn_options)
-        args = args[2:end]
+    # Get all scoped options and determine which propagate beyond this task
+    scoped_options = get_options()::NamedTuple
+    if haskey(scoped_options, :propagates)
+        if scoped_options.propagates isa Tuple
+            propagates = Symbol[scoped_options.propagates...]
+        else
+            propagates = scoped_options.propagates::Vector{Symbol}
+        end
+    else
+        propagates = Symbol[]
     end
+    append!(propagates, keys(scoped_options)::NTuple{N,Symbol} where N)
+
+    # Merge all passed options
+    if length(args) >= 1 && first(args) isa Options
+        # N.B. Make a defensive copy in case user aliases Options struct
+        task_options = copy(first(args)::Options)
+        args = args[2:end]
+    else
+        task_options = Options()
+    end
+    # N.B. Merges into task_options
+    options_merge!(task_options, scoped_options; override=false)
 
     # Wrap f in a Chunk if necessary
-    processor = haskey(options, :processor) ? options.processor : nothing
-    scope = haskey(options, :scope) ? options.scope : nothing
-    if !isa(f, Chunk) && !isnothing(processor) || !isnothing(scope)
+    processor = task_options.processor
+    scope = task_options.scope
+    if !isnothing(processor) || !isnothing(scope)
         f = tochunk(f,
-                    something(processor, get_options(:processor, OSProc())),
-                    something(scope, get_options(:scope, DefaultScope())); rewrap=true)
+                    something(processor, OSProc()),
+                    something(scope, DefaultScope()); rewrap=true)
     end
 
     # Process the args and kwargs into Pair form
     args_kwargs = args_kwargs_to_arguments(f, args, kwargs)
 
     # Get task queue, and don't let it propagate
-    task_queue = get_options(:task_queue, DefaultTaskQueue())
-    options = NamedTuple(filter(opt->opt[1] != :task_queue, Base.pairs(options)))
-    propagates = filter(prop->prop != :task_queue, propagates)
-    options = merge(options, (;propagates))
+    task_queue = get(scoped_options, :task_queue, DefaultTaskQueue())::AbstractTaskQueue
+    filter!(prop -> prop != :task_queue, propagates)
+    if task_options.propagates !== nothing
+        append!(task_options.propagates, propagates)
+    else
+        task_options.propagates = propagates
+    end
+    unique!(task_options.propagates)
 
     # Construct task spec and handle
-    spec = DTaskSpec(args_kwargs, options)
+    spec = DTaskSpec(args_kwargs, task_options)
     task = eager_spawn(spec)
 
     # Enqueue the task into the task queue
@@ -581,23 +592,6 @@ function spawn(f, args...; kwargs...)
 
     return task
 end
-
-struct FetchAdaptor end
-Adapt.adapt_storage(::FetchAdaptor, x::DTask) = fetch(x)
-Adapt.adapt_structure(::FetchAdaptor, A::AbstractArray) =
-    map(x->Adapt.adapt(FetchAdaptor(), x), A)
-
-"""
-    Dagger.fetch_all(x)
-
-Recursively fetches all `DTask`s and `Chunk`s in `x`, returning an equivalent
-object. Useful for converting arbitrary Dagger-enabled objects into a
-non-Dagger form.
-"""
-fetch_all(x) = Adapt.adapt(FetchAdaptor(), x)
-
-persist!(t::Thunk) = (t.persist=true; t)
-cache_result!(t::Thunk) = (t.cache=true; t)
 
 # this gives a ~30x speedup in hashing
 Base.hash(x::Thunk, h::UInt) = hash(x.id, hash(h, 0x7ad3bac49089a05f % UInt))
