@@ -67,7 +67,7 @@ function dependents(node::Thunk)
         if !haskey(deps, next)
             deps[next] = Set{Thunk}()
         end
-        for inp in next.syncdeps
+        for inp in next.options.syncdeps
             if istask(inp) || (inp isa Chunk)
                 s = get!(()->Set{Thunk}(), deps, inp)
                 push!(s, next)
@@ -135,7 +135,7 @@ function order(node::Thunk, ndeps)
         haskey(output, next) && continue
         s += 1
         output[next] = s
-        parents = collect(filter(istask, next.syncdeps))
+        parents = collect(filter(istask, next.options.syncdeps))
         if !isempty(parents)
             # If parents is empty, sort! should be a no-op, but raises an ambiguity error
             # when InlineStrings.jl is loaded (at least, version 1.1.0), because InlineStrings

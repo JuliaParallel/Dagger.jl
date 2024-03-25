@@ -32,7 +32,6 @@ import TimespanLogging: timespan_start, timespan_finish
 
 import Adapt
 
-# Preferences
 import Preferences: @load_preference, @set_preferences!
 
 if @load_preference("distributed-package") == "DistributedNext"
@@ -43,6 +42,8 @@ else
     import Distributed: Future, RemoteChannel, myid, workers, nworkers, procs, remotecall, remotecall_wait, remotecall_fetch, check_same_host
 end
 
+import MacroTools: @capture
+
 include("lib/util.jl")
 include("utils/dagdebug.jl")
 
@@ -50,15 +51,15 @@ include("utils/dagdebug.jl")
 include("utils/locked-object.jl")
 include("utils/tasks.jl")
 include("utils/reuse.jl")
-
-import MacroTools: @capture
-include("options.jl")
 include("processor.jl")
 include("threadproc.jl")
 include("context.jl")
 include("utils/processors.jl")
 include("scopes.jl")
 include("utils/scopes.jl")
+include("chunks.jl")
+include("utils/signature.jl")
+include("options.jl")
 include("dtask.jl")
 include("cancellation.jl")
 include("task-tls.jl")
@@ -69,7 +70,6 @@ include("utils/fetch.jl")
 include("utils/chunks.jl")
 include("utils/logging.jl")
 include("submission.jl")
-include("chunks.jl")
 include("memory-spaces.jl")
 
 # Task scheduling

@@ -2,11 +2,12 @@ mutable struct PayloadOne
     uid::UInt
     future::ThunkFuture
     fargs::Vector{Argument}
-    options::NamedTuple
+    options::Options
     reschedule::Bool
 
     PayloadOne() = new()
-    PayloadOne(uid::UInt, future::ThunkFuture, fargs::Vector{Argument}, options::NamedTuple, reschedule::Bool) =
+    PayloadOne(uid::UInt, future::ThunkFuture,
+               fargs::Vector{Argument}, options::Options, reschedule::Bool) =
         new(uid, future, fargs, options, reschedule)
 end
 function unset!(p::PayloadOne, _)
@@ -22,7 +23,7 @@ mutable struct PayloadMulti
     uid::Vector{UInt}
     future::Vector{ThunkFuture}
     fargs::Vector{Vector{Argument}}
-    options::Vector{NamedTuple}
+    options::Vector{Options}
     reschedule::Bool
 end
 const AnyPayload = Union{PayloadOne, PayloadMulti}
@@ -78,7 +79,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload::AnyPayload; uid_
         old_fargs = @reusable_vector :eager_submit_internal!_old_fargs Argument Argument(ArgPosition(), nothing) 32
         append!(old_fargs, Iterators.map(copy, fargs))
         syncdeps_vec = @reusable_vector :eager_submit_interal!_syncdeps_vec Any nothing 32
-        if haskey(options, :syncdeps)
+        if options.syncdeps !== nothing
             append!(syncdeps_vec, options.syncdeps)
         end
 
@@ -132,39 +133,30 @@ function eager_submit_internal!(ctx, state, task, tid, payload::AnyPayload; uid_
                 end
             end
         end
-        #=FIXME:REALLOC=#
         if !isempty(syncdeps_vec) || any(arg->istask(value(arg)), fargs)
-            syncdeps = Set{Any}(syncdeps_vec)
+            if options.syncdeps === nothing
+                options.syncdeps = Set{Any}()
+            else
+                empty!(options.syncdeps)
+            end
+            syncdeps = options.syncdeps
+            for dep in syncdeps_vec
+                push!(syncdeps, dep)
+            end
             for arg in fargs
                 if istask(value(arg))
                     push!(syncdeps, value(arg))
                 end
             end
-        else
-            syncdeps = EMPTY_SYNCDEPS
         end
+        empty!(syncdeps_vec)
 
         GC.@preserve old_fargs fargs begin
             # Create the `Thunk`
             thunk = take_or_alloc!(THUNK_SPEC_CACHE[]) do thunk_spec
                 thunk_spec.fargs = fargs
-                thunk_spec.syncdeps = syncdeps
                 thunk_spec.id = id
-                thunk_spec.get_result = get(options, :get_result, false)
-                thunk_spec.meta = get(options, :meta, false)
-                thunk_spec.persist = get(options, :persist, false)
-                thunk_spec.cache = get(options, :cache, false)
-                new_options = (;filter(opt->hasfield(Sch.ThunkOptions, opt[1]), Base.pairs(options))...)
-                toptions = Sch.ThunkOptions(; new_options...)
-                #= FIXME: Allow in-place options updates
-                for field in keys(options)
-                    if hasfield(Sch.ThunkOptions, field)
-                        setproperty!(toptions, field, getproperty(options, field))
-                    end
-                end
-                =#
-                thunk_spec.options = toptions
-                thunk_spec.propagates = get(options, :propagates, ())
+                thunk_spec.options = options
                 return Thunk(thunk_spec)
             end
 
@@ -237,7 +229,6 @@ function (unref::UnrefThunk)()
     end)
 end
 
-
 # Local -> Remote
 function eager_submit!(payload::AnyPayload)
     if Dagger.in_task()
@@ -280,9 +271,8 @@ function eager_process_args_submission_to_local!(id_map, spec_pairs::Vector{Pair
         eager_process_args_submission_to_local!(id_map, spec_pair)
     end
 end
-function eager_process_options_submission_to_local(id_map, options::NamedTuple)
-    @nospecialize options
-    if haskey(options, :syncdeps)
+function eager_process_options_submission_to_local!(id_map, options::Options)
+    if options.syncdeps !== nothing
         raw_syncdeps = options.syncdeps
         syncdeps = Set{Any}()
         for raw_dep in raw_syncdeps
@@ -294,9 +284,7 @@ function eager_process_options_submission_to_local(id_map, options::NamedTuple)
                 error("Invalid syncdep type: $(typeof(raw_dep))")
             end
         end
-        return merge(options, (;syncdeps))
-    else
-        return options
+        options.syncdeps = syncdeps
     end
 end
 
@@ -323,16 +311,15 @@ function eager_launch!((spec, task)::Pair{DTaskSpec,DTask})
     eager_assign_name!(spec, task)
 
     # Lookup DTask -> ThunkID
-    local options
     lock(Sch.EAGER_ID_MAP) do id_map
         eager_process_args_submission_to_local!(id_map, spec=>task)
-        options = eager_process_options_submission_to_local(id_map, spec.options)
+        eager_process_options_submission_to_local!(id_map, spec.options)
     end
 
     # Submit the task
     #=FIXME:REALLOC=#
     thunk_id = eager_submit!(PayloadOne(task.uid, task.future,
-                                        spec.fargs, options, true))
+                                        spec.fargs, spec.options, true))
     task.thunk_ref = thunk_id.ref
 end
 function eager_launch!(specs::Vector{Pair{DTaskSpec,DTask}})
@@ -354,7 +341,7 @@ function eager_launch!(specs::Vector{Pair{DTaskSpec,DTask}})
         eager_process_args_submission_to_local!(id_map, specs)
         [spec.fargs for (spec, _) in specs]
     end
-    all_options = Any[spec.options for (spec, _) in specs]
+    all_options = Options[spec.options for (spec, _) in specs]
 
     # Submit the tasks
     #=FIXME:REALLOC=#
@@ -368,8 +355,7 @@ end
 
 function eager_assign_name!(spec::DTaskSpec, task::DTask)
     # Assign a name, if specified
-    if haskey(spec.options, :name)
+    if spec.options.name !== nothing
         Dagger.logs_annotate!(task, spec.options.name)
-        spec.options = (;filter(x -> x[1] != :name, Base.pairs(spec.options))...)
     end
 end
