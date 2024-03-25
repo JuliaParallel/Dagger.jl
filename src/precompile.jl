@@ -4,6 +4,22 @@
         ThreadProc(1, 1)
     end
     Sch.__init__()
+
+    # Initialize the scheduler, giving it 10 seconds to start
+    t = Threads.@spawn Sch.init_eager()
+    wait_ctr = 10
+    while !istaskdone(t)
+        sleep(1)
+        wait_ctr -= 1
+        wait_ctr == 0 && break
+    end
+    if !istaskdone(t)
+        throw(ConcurrencyViolationError("Scheduler failed to start"))
+    elseif istaskfailed(t)
+        # Rethrow the error
+        wait(t)
+    end
+
     # FIXME: t1 = @spawn 1+1
     t1 = spawn(+, 1, 1)
     fetch(t1)
