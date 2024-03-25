@@ -1,6 +1,7 @@
 using Distributed
 import Profile
 import Base.gc_num
+using TaskLocalValues
 
 export timespan_start, timespan_finish
 
@@ -8,13 +9,12 @@ const Timestamp = UInt64
 
 struct ProfilerResult
     samples::Vector{UInt}
-    lineinfo::AbstractDict
     tasks::Vector{UInt}
 end
-ProfilerResult(samples, lineinfo, tasks::Vector{Task}) =
-    ProfilerResult(samples, lineinfo, map(Base.pointer_from_objref, tasks))
-ProfilerResult(samples, lineinfo, tasks::Nothing) =
-    ProfilerResult(samples, lineinfo, map(Base.pointer_from_objref, UInt[]))
+ProfilerResult(samples, tasks::Vector{Task}) =
+    ProfilerResult(samples, map(Base.pointer_from_objref, tasks))
+ProfilerResult(samples, tasks::Nothing) =
+    ProfilerResult(samples, map(Base.pointer_from_objref, UInt[]))
 
 """
     Timespan
@@ -258,24 +258,19 @@ end
 
 # Core logging operations
 
-empty_prof() = ProfilerResult(UInt[], Dict{UInt64, Vector{Base.StackTraces.StackFrame}}(), UInt[])
+const empty_prof = ProfilerResult(UInt[], UInt[])
 
 const prof_refcount = Ref{Threads.Atomic{Int}}(Threads.Atomic{Int}(0))
 const prof_lock = Threads.ReentrantLock()
-const prof_tasks = IdDict{Any, Vector{Task}}()
+const prof_tasks = TaskLocalValue{Vector{Task}}(()->Task[])
 
-function prof_task_put!(id, task::Task=Base.current_task())
-    lock(prof_lock) do
-        push!(get!(()->Task[], prof_tasks, id), task)
-    end
-end
-function prof_tasks_take!(id)
-    lock(prof_lock) do
-        if haskey(prof_tasks, id)
-            pop!(prof_tasks, id)
-        else
-            Task[]
-        end
+prof_task_put!(task::Task=Base.current_task()) = push!(prof_tasks[], task)
+function prof_tasks_peek()
+    # FIXME: This is an implementation detail of TaskLocalValue
+    if haskey(task_local_storage(), prof_tasks)
+        return prof_tasks[]
+    else
+        return nothing
     end
 end
 
@@ -295,11 +290,9 @@ function timespan_start(ctx, category::Symbol, @nospecialize(id), @nospecialize(
     isa(sink, NoOpLog) && return
     do_profile = profile(ctx, category, id, tl)
     if do_profile && Threads.atomic_add!(prof_refcount[], 1) == 0
-        lock(prof_lock) do
-            Profile.start_timer()
-        end
+        @lock prof_lock Profile.start_timer()
     end
-    ev = Event(:start, category, id, tl, time_ns(), gc_num(), empty_prof())
+    ev = Event(:start, category, id, tl, time_ns(), gc_num(), empty_prof)
     write_event(sink, ev)
     nothing
 end
@@ -312,7 +305,7 @@ categorized by `category`, and uniquely identified by `id`; these two must be
 the same as previously passed to `timespan_start`. `tl` is the "timeline" of
 the event, which is just an arbitrary payload attached to the event.
 """
-function timespan_finish(ctx, category::Symbol, @nospecialize(id), @nospecialize(tl); tasks=prof_tasks_take!(id))
+function timespan_finish(ctx, category::Symbol, @nospecialize(id), @nospecialize(tl); tasks=nothing)
     sink = log_sink(ctx)
     isa(sink, NoOpLog) && return
     do_profile = profile(ctx, category, id, tl)
@@ -320,57 +313,45 @@ function timespan_finish(ctx, category::Symbol, @nospecialize(id), @nospecialize
     gcn = gc_num()
     prof = UInt[]
     lidict = Dict{UInt64, Vector{Base.StackTraces.StackFrame}}()
+    if tasks === nothing
+        tasks = prof_tasks_peek()
+        if tasks === nothing
+            tasks = [current_task()]
+        end
+    end
     GC.@preserve tasks begin
         if do_profile
-            lock(prof_lock) do
+            @lock prof_lock begin
                 prof_done = Threads.atomic_sub!(prof_refcount[], 1) == 1
                 if prof_done
                     Profile.stop_timer()
                 end
-                prof = @static if VERSION >= v"1.8-"
-                    Profile.fetch(;include_meta=true)
-                else
-                    Profile.fetch()
-                end
+                prof = Profile.fetch(;include_meta=true)
                 prof = tasks !== nothing ? filter_profile_data(prof, tasks) : prof
-                lidict = Profile.getdict(prof)
-                if prof_done
-                    Profile.clear()
-                end
             end
         end
-        ev = Event(:finish, category, id, tl, time, gcn, ProfilerResult(prof, lidict, tasks))
+        ev = Event(:finish, category, id, tl, time, gcn, ProfilerResult(prof, tasks))
         write_event(sink, ev)
     end
     nothing
 end
 
-@static if VERSION >= v"1.8-"
-    function filter_profile_data(prof, tasks::Vector{UInt})
-        newprof = UInt[]
-        startidx = 1
-        for i in 1:length(prof)
-            if prof[i] == 0
-                if (i > 2 && prof[i-2] == 0) ||
-                   (i > 3 && prof[i-3] == 0) ||
-                   (i > 4 && prof[i-4] == 0)
-                    # XXX: Somehow we can get truncated frames?
-                    continue
-                end
-                task = prof[i - 3]
-                if task in tasks
-                    append!(newprof, prof[startidx:i])
-                end
-                startidx = i+1
+function filter_profile_data(prof, tasks::Vector{UInt})
+    newprof = UInt[]
+    start_idx = 1
+    for idx in 1:length(prof)
+        if idx >= Profile.nmeta && Profile.is_block_end(prof, idx)
+            task = prof[idx - Profile.META_OFFSET_TASKID]
+            if task in tasks
+                append!(newprof, prof[start_idx:idx])
             end
+            start_idx = idx+1
         end
-        newprof
     end
-    filter_profile_data(prof, tasks::Vector{Task}) =
-        filter_profile_data(prof, map(x->UInt(Base.pointer_from_objref(x)), tasks))
-else
-    filter_profile_data(prof, tasks) = prof
+    return newprof
 end
+filter_profile_data(prof, tasks::Vector{Task}) =
+    filter_profile_data(prof, map(x->UInt(Base.pointer_from_objref(x)), tasks))
 
 """
 Overall state used during visualization
@@ -451,7 +432,6 @@ end
 
 function mix_samples(a,b)
     ProfilerResult(vcat(a.samples, b.samples),
-                   merge(a.lineinfo, b.lineinfo),
                    unique(vcat(a.tasks, b.tasks)))
 end
 
@@ -483,7 +463,7 @@ end
 function summarize_events(time_spent, gc_diff, profiler_samples)
     Base.time_print(time_spent, gc_diff.allocd, gc_diff.total_time, Base.gc_alloc_count(gc_diff))
     if !isempty(profiler_samples.samples)
-        Profile.print(profiler_samples.samples, profiler_samples.lineinfo)
+        Profile.print(profiler_samples.samples)
     end
 end
 

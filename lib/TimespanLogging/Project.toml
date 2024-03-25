@@ -6,6 +6,8 @@ version = "0.1.0"
 [deps]
 Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
 Profile = "9abbd945-dff8-562f-b5e8-e1ebf5ef1b79"
+TaskLocalValues = "ed4db957-447d-4319-bfb6-7fa9ae7ecf34"
 
 [compat]
+TaskLocalValues = "0.1.1"
 julia = "1"

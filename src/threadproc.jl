@@ -16,10 +16,10 @@ function execute!(proc::ThreadProc, @nospecialize(f), @nospecialize(args...); @n
     result = Ref{Any}()
     task = Task() do
         set_tls!(tls)
-        TimespanLogging.prof_task_put!(tls.sch_handle.thunk_id.id)
         result[] = @invokelatest f(args...; kwargs...)
         return
     end
+    TimespanLogging.prof_task_put!(task)
     set_task_tid!(task, proc.tid)
     schedule(task)
     try
