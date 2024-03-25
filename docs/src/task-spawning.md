@@ -12,9 +12,9 @@ or `spawn` if it's more convenient:
 
 `Dagger.spawn(f, Dagger.Options(options), args...; kwargs...)`
 
-When called, it creates an [`DTask`](@ref) (also known as a "thunk" or
-"task") object representing a call to function `f` with the arguments `args` and
-keyword arguments `kwargs`. If it is called with other thunks as args/kwargs,
+When called, it creates an [`DTask`](@ref) (also known as a "task" or
+"thunk") object representing a call to function `f` with the arguments `args` and
+keyword arguments `kwargs`. If it is called with other tasks as args/kwargs,
 such as in `Dagger.@spawn f(Dagger.@spawn g())`, then, in this example, the
 function `f` gets passed the results of executing `g()`, once that result is
 available. If `g()` isn't yet finished executing, then the execution of `f`
@@ -29,8 +29,16 @@ it'll be passed as-is to the function `f` (with some exceptions).
 
 !!! note "Task / thread occupancy"
     By default, `Dagger` assumes that tasks saturate the thread they are running on and does not try to schedule other tasks on the thread.
-    This default can be controlled by specifying [`Sch.ThunkOptions`](@ref) (more details can be found under [Scheduler and Thunk options](@ref)).
+    This default can be controlled by specifying [`Options`](@ref) (more details can be found under [Task and Scheduler options](@ref)).
     The section [Changing the thread occupancy](@ref) shows a runnable example of how to achieve this.
+
+## Options
+
+The [`Options`](@ref Dagger.Options) struct in the second argument position is
+optional; if provided, it is passed to the scheduler to control its
+behavior. [`Options`](@ref Dagger.Options) contains option
+key-value pairs, which can be any field in [`Options`](@ref)
+(see [Task and Scheduler options](@ref)).
 
 ## Simple example
 
@@ -51,7 +59,7 @@ s = Dagger.@spawn combine(p, q, r)
 @assert fetch(s) == 16
 ```
 
-The thunks `p`, `q`, `r`, and `s` have the following structure:
+The tasks `p`, `q`, `r`, and `s` have the following structure:
 
 ![graph](https://user-images.githubusercontent.com/25916/26920104-7b9b5fa4-4c55-11e7-97fb-fe5b9e73cae6.png)
 
@@ -108,7 +116,8 @@ x::DTask
 @assert fetch(x) == 3 # fetch the result of `@spawn`
 ```
 
-This is useful for nested execution, where an `@spawn`'d thunk calls `@spawn`. This is detailed further in [Dynamic Scheduler Control](@ref).
+This is useful for nested execution, where an `@spawn`'d task calls `@spawn`.
+This is detailed further in [Dynamic Scheduler Control](@ref).
 
 ## Options
 
@@ -116,7 +125,7 @@ The [`Options`](@ref Dagger.Options) struct in the second argument position is
 optional; if provided, it is passed to the scheduler to control its
 behavior. [`Options`](@ref Dagger.Options) contains a `NamedTuple` of option
 key-value pairs, which can be any of:
-- Any field in [`Sch.ThunkOptions`](@ref) (see [Scheduler and Thunk options](@ref))
+- Any field in [`Options`](@ref) (see [Task and Scheduler options](@ref))
 - `meta::Bool` -- Pass the input [`Chunk`](@ref) objects themselves to `f` and
   not the value contained in them.
 
@@ -127,19 +136,19 @@ There are also some extra options that can be passed, although they're considere
 
 ## Errors
 
-If a thunk errors while running under the eager scheduler, it will be marked as
-having failed, all dependent (downstream) thunks will be marked as failed, and
-any future thunks that use a failed thunk as input will fail. Failure can be
+If a task errors while running under the eager scheduler, it will be marked as
+having failed, all dependent (downstream) tasks will be marked as failed, and
+any future tasks that use a failed task as input will fail. Failure can be
 determined with `fetch`, which will re-throw the error that the
-originally-failing thunk threw. `wait` and `isready` will *not* check whether a
-thunk or its upstream failed; they only check if the thunk has completed, error
+originally-failing task threw. `wait` and `isready` will *not* check whether a
+task or its upstream failed; they only check if the task has completed, error
 or not.
 
 This failure behavior is not the default for lazy scheduling ([Lazy API](@ref)),
-but can be enabled by setting the scheduler/thunk option ([Scheduler and Thunk options](@ref))
+but can be enabled by setting the scheduler/task option ([Task and Scheduler options](@ref))
 `allow_error` to `true`.  However, this option isn't terribly useful for
-non-dynamic usecases, since any thunk failure will propagate down to the output
-thunk regardless of where it occurs.
+non-dynamic usecases, since any task failure will propagate down to the output
+task regardless of where it occurs.
 
 ## Cancellation
 
@@ -198,7 +207,7 @@ end
 ```
 
 Alternatively, if you want to compute but not fetch the result of a lazy
-operation, you can call `compute` on the thunk. This will return a `Chunk`
+operation, you can call `compute` on the task. This will return a `Chunk`
 object which references the result (see [Chunks](@ref) for more details):
 
 ```julia
@@ -215,16 +224,14 @@ Note that, as a legacy API, usage of the lazy API is generally discouraged for m
 - Distinct schedulers don't share runtime metrics or learned parameters, thus causing the scheduler to act less intelligently
 - Distinct schedulers can't share work or data directly
 
-## Scheduler and Thunk options
+## Task and Scheduler options
 
 While Dagger generally "just works", sometimes one needs to exert some more
 fine-grained control over how the scheduler allocates work. There are two
-parallel mechanisms to achieve this: Scheduler options (from
-[`Sch.SchedulerOptions`](@ref)) and Thunk options (from
-[`Sch.ThunkOptions`](@ref)). These two options structs contain many shared
-options, with the difference being that Scheduler options operate
-globally across an entire DAG, and Thunk options operate on a thunk-by-thunk
-basis.
+parallel mechanisms to achieve this: Task options (from [`Options`](@ref)) and
+Scheduler options (from [`Sch.SchedulerOptions`](@ref)). Scheduler
+options operate globally across an entire DAG, and Task options operate on a
+task-by-task basis.
 
 Scheduler options can be constructed and passed to `collect()` or `compute()`
 as the keyword argument `options` for lazy API usage:
@@ -238,7 +245,7 @@ compute(t; options=opts)
 collect(t; options=opts)
 ```
 
-Thunk options can be passed to `@spawn/spawn`, `@par`, and `delayed` similarly:
+Task options can be passed to `@spawn/spawn`, `@par`, and `delayed` similarly:
 
 ```julia
 # Execute on worker 1
@@ -251,8 +258,9 @@ delayed(+; single=1)(1, 2)
 
 ## Changing the thread occupancy
 
-One of the supported [`Sch.ThunkOptions`](@ref) is the `occupancy` keyword.
-This keyword can be used to communicate that a task is not expected to fully saturate a CPU core (e.g. due to being IO-bound).
+One of the supported [`Options`](@ref) is the `occupancy` keyword.
+This keyword can be used to communicate that a task is not expected to fully
+saturate a CPU core (e.g. due to being IO-bound).
 The basic usage looks like this:
 
 ```julia

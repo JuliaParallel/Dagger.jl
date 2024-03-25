@@ -332,11 +332,11 @@ end
         @testset "lazy API" begin
             a = delayed(+)(1,2)
             @test !(a.f isa Chunk)
-            @test a.compute_scope == Dagger.DefaultScope()
+            @test a.options.scope == nothing
 
             a = delayed(+; scope=NodeScope())(1,2)
             @test !(a.f isa Chunk)
-            @test a.compute_scope isa NodeScope
+            @test a.options.scope isa NodeScope
 
             @testset "Scope Restrictions" begin
                 pls = ProcessLockedStruct(Ptr{Int}(42))
@@ -361,7 +361,7 @@ end
             _a = Dagger.@spawn scope=NodeScope() 1+2
             a = Dagger.Sch._find_thunk(_a)
             @test !(a.f isa Chunk)
-            @test a.compute_scope isa NodeScope
+            @test a.options.scope isa NodeScope
         end
     end
     @testset "parent fetch child, one thread" begin

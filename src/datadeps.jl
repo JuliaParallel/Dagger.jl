@@ -516,7 +516,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
     # Get the set of all processors to be scheduled on
     all_procs = Processor[]
-    scope = get_options(:scope, DefaultScope())
+    scope = get_compute_scope()
     for w in procs()
         append!(all_procs, get_processors(OSProc(w)))
     end
@@ -724,7 +724,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         @assert our_proc in all_procs
         our_space = only(memory_spaces(our_proc))
         our_procs = filter(proc->proc in all_procs, collect(processors(our_space)))
-        task_scope = get(spec.options, :scope, AnyScope())
+        task_scope = @something(spec.options.scope, AnyScope())
         our_scope = constrain(UnionScope(map(ExactScope, our_procs)...), task_scope)
         if our_scope isa InvalidScope
             throw(Sch.SchedulingException("Scopes are not compatible: $(our_scope.x), $(our_scope.y)"))
@@ -819,7 +819,10 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         end
 
         # Calculate this task's syncdeps
-        syncdeps = get(Set{Any}, spec.options, :syncdeps)
+        if spec.options.syncdeps === nothing
+            spec.options.syncdeps = Set{Any}()
+        end
+        syncdeps = spec.options.syncdeps
         for (idx, (_, arg)) in enumerate(task_args)
             arg, deps = unwrap_inout(arg)
             arg = arg isa DTask ? fetch(arg; raw=true) : arg
@@ -849,8 +852,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         @dagdebug nothing :spawn_datadeps "($(repr(value(f)))) $(length(syncdeps)) syncdeps"
 
         # Launch user's task
-        task_scope = our_scope
-        spec.options = merge(spec.options, (;syncdeps, scope=task_scope))
+        spec.options.scope = our_scope
         enqueue!(upper_queue, spec=>task)
 
         # Update read/write tracking for arguments

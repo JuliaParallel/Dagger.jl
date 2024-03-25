@@ -86,7 +86,7 @@ function stage(ctx, a::AllocateArray)
         args = a.want_index ? (i, size(x)) : (size(x),)
 
         if isnothing(a.procgrid)
-            scope = get_options(:compute_scope, get_options(:scope, DefaultScope()))
+            scope = get_compute_scope()
         else
             scope = ExactScope(a.procgrid[CartesianIndex(mod1.(Tuple(I), size(a.procgrid))...)])
         end

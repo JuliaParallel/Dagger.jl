@@ -1,5 +1,5 @@
-import Dagger: Chunk
-import Dagger.Sch: SchedulerOptions, ThunkOptions, SchedulerHaltedException, ComputeState, ThunkID, sch_handle
+import Dagger: Chunk, Options
+import Dagger.Sch: SchedulerOptions, SchedulerHaltedException, ComputeState, ThunkID, sch_handle
 
 @everywhere begin
 using Dagger
@@ -142,18 +142,16 @@ end
             end
         end
         @testset "single worker" begin
-            options = ThunkOptions(;single=1)
+            options = Options(;single=1)
             a = delayed(checkwid; options=options)(1)
 
             @test collect(Context([1,workers()...]), a) == 1
         end
-        @static if VERSION >= v"1.3.0-DEV.573"
-            @testset "proclist" begin
-                options = ThunkOptions(;proclist=[Dagger.ThreadProc])
-                a = delayed(checktid; options=options)(1)
+        @testset "proclist" begin
+            options = Options(;proclist=[Dagger.ThreadProc])
+            a = delayed(checktid; options=options)(1)
 
-                @test collect(Context(), a) == 1
-            end
+            @test collect(Context(), a) == 1
         end
         @everywhere Dagger.add_processor_callback!(()->FakeProc(), :fakeproc)
         @testset "proclist FakeProc" begin
@@ -163,8 +161,10 @@ end
             @test Dagger.default_enabled(Dagger.ThreadProc(1,1)) == true
             @test Dagger.default_enabled(FakeProc()) == false
 
-            as = [delayed(identity; proclist=[Dagger.ThreadProc])(i) for i in 1:5]
-            b = delayed(fakesum; proclist=[FakeProc], compute_scope=Dagger.AnyScope())(as...)
+            opts = Options(;proclist=[Dagger.ThreadProc])
+            as = [delayed(identity; options=opts)(i) for i in 1:5]
+            opts = Options(;proclist=[FakeProc], compute_scope=Dagger.AnyScope())
+            b = delayed(fakesum; options=opts)(as...)
 
             @test collect(Context(), b) == FakeVal(57)
         end
@@ -178,11 +178,6 @@ end
             collect(b)
         end
         =#
-        @testset "allow errors" begin
-            opts = ThunkOptions(;allow_errors=true)
-            a = delayed(error; options=opts)("Test")
-            @test_throws_unwrap (Dagger.DTaskFailedException, ErrorException) collect(a)
-        end
     end
 
     @testset "Modify workers in running job" begin

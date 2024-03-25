@@ -465,7 +465,7 @@ function stage(ctx::Context, d::Distribute)
             # TODO: fix hashing
             #hash = uhash(idx, Base.hash(Distribute, Base.hash(d.data)))
             if isnothing(d.procgrid)
-                scope = get_options(:compute_scope, get_options(:scope, DefaultScope()))
+                scope = get_compute_scope()
             else
                 scope = ExactScope(d.procgrid[CartesianIndex(mod1.(Tuple(I), size(d.procgrid))...)])
             end
@@ -485,7 +485,7 @@ function stage(ctx::Context, d::Distribute)
             #hash = uhash(c, Base.hash(Distribute, Base.hash(d.data)))
             c = d.domainchunks[I]
             if isnothing(d.procgrid)
-                scope = get_options(:compute_scope, get_options(:scope, DefaultScope()))
+                scope = get_compute_scope()
             else
                 scope = ExactScope(d.procgrid[CartesianIndex(mod1.(Tuple(I), size(d.procgrid))...)])
             end
