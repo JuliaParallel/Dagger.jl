@@ -1,6 +1,6 @@
 mutable struct DTaskSpec
     fargs::Vector{Argument}
-    options::NamedTuple
+    options::Options
 end
 
 abstract type AbstractTaskQueue end
@@ -40,8 +40,7 @@ end
 struct InOrderTaskQueue <: AbstractTaskQueue
     upper_queue::AbstractTaskQueue
     prev_tasks::Set{DTask}
-    InOrderTaskQueue(upper_queue) = new(upper_queue,
-                                        Set{DTask}())
+    InOrderTaskQueue(upper_queue) = new(upper_queue, Set{DTask}())
 end
 function _add_prev_deps!(queue::InOrderTaskQueue, spec::DTaskSpec)
     # Add previously-enqueued task(s) to this task's syncdeps

@@ -25,19 +25,6 @@ end
 Base.put!(t::ThunkFuture, x; error=false) = put!(t.future, (error, x))
 
 """
-    Options(::NamedTuple)
-    Options(; kwargs...)
-
-Options for thunks and the scheduler. See [Task Spawning](@ref) for more
-information.
-"""
-struct Options
-    options::NamedTuple
-end
-Options(;options...) = Options((;options...))
-Options(options...) = Options((;options...))
-
-"""
     DTask
 
 Returned from `Dagger.@spawn`/`Dagger.spawn` calls. Represents a task that is

@@ -32,6 +32,8 @@ import TimespanLogging: timespan_start, timespan_finish
 
 import Adapt
 
+import MacroTools: @capture
+
 include("lib/util.jl")
 include("utils/dagdebug.jl")
 
@@ -42,9 +44,6 @@ include("utils/logging.jl")
 include("utils/locked-object.jl")
 include("utils/tasks.jl")
 include("utils/reuse.jl")
-
-import MacroTools: @capture
-include("options.jl")
 include("processor.jl")
 include("threadproc.jl")
 include("context.jl")
@@ -52,12 +51,16 @@ include("utils/processors.jl")
 include("task-tls.jl")
 include("scopes.jl")
 include("utils/scopes.jl")
+include("chunks.jl")
+include("utils/signature.jl")
+include("options.jl")
 include("dtask.jl")
 include("argument.jl")
 include("queue.jl")
 include("thunk.jl")
+include("utils/fetch.jl")
+include("utils/chunks.jl")
 include("submission.jl")
-include("chunks.jl")
 include("memory-spaces.jl")
 
 # Task scheduling
