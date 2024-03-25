@@ -24,45 +24,37 @@ function partition(p::AbstractBlocks, dom::ArrayDomain)
         map(_cumlength, map(length, indexes(dom)), p.blocksize))
 end
 
+_alloc_array(f, T, idx, sz) = f(idx, T, sz)
 function stage(ctx, a::AllocateArray)
-    alloc(idx, sz) = a.f(idx, a.eltype, sz)
-    thunks = [Dagger.@spawn alloc(i, size(x)) for (i, x) in enumerate(a.domainchunks)]
+    thunks = [Dagger.@spawn _alloc_array(a.f, a.eltype, i, size(x)) for (i, x) in enumerate(a.domainchunks)]
     return DArray(a.eltype, a.domain, a.domainchunks, thunks, a.partitioning)
 end
 
-function Base.rand(p::Blocks, eltype::Type, dims)
+struct _AllocArrayNoIdx{F,T} <: Function end
+(::_AllocArrayNoIdx{F,T})(_, _, sz...) where {F,T} = F(T, sz...)
+
+function _alloc_array_noidx(f, p::Blocks, ::Type{ET}, dims) where ET
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, (_, x...) -> rand(x...), d, partition(p, d), p)
+    inner_f = _AllocArrayNoIdx{f,ET}()
+    a = AllocateArray(ET, inner_f, d, partition(p, d), p)
     return _to_darray(a)
 end
-
+Base.rand(p::Blocks, eltype::Type, dims) = _alloc_array_noidx(rand, p, eltype, dims)
 Base.rand(p::Blocks, t::Type, dims::Integer...) = rand(p, t, dims)
 Base.rand(p::Blocks, dims::Integer...) = rand(p, Float64, dims)
 Base.rand(p::Blocks, dims::Tuple) = rand(p, Float64, dims)
 
-function Base.randn(p::Blocks, eltype::Type, dims)
-    d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(Float64, (_, x...) -> randn(x...), d, partition(p, d), p)
-    return _to_darray(a)
-end
+Base.randn(p::Blocks, eltype::Type, dims) = _alloc_array_noidx(randn, p, eltype, dims)
 Base.randn(p::Blocks, t::Type, dims::Integer...) = randn(p, t, dims)
 Base.randn(p::Blocks, dims::Integer...) = randn(p, dims)
 Base.randn(p::Blocks, dims::Tuple) = randn(p, Float64, dims)
 
-function Base.ones(p::Blocks, eltype::Type, dims)
-    d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, (_, x...) -> ones(x...), d, partition(p, d), p)
-    return _to_darray(a)
-end
+Base.ones(p::Blocks, eltype::Type, dims) = _alloc_array_noidx(ones, p, eltype, dims)
 Base.ones(p::Blocks, t::Type, dims::Integer...) = ones(p, t, dims)
 Base.ones(p::Blocks, dims::Integer...) = ones(p, Float64, dims)
 Base.ones(p::Blocks, dims::Tuple) = ones(p, Float64, dims)
 
-function Base.zeros(p::Blocks, eltype::Type, dims)
-    d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, (_, x...) -> zeros(x...), d, partition(p, d), p)
-    return _to_darray(a)
-end
+Base.zeros(p::Blocks, eltype::Type, dims) = _alloc_array_noidx(zeros, p, eltype, dims)
 Base.zeros(p::Blocks, t::Type, dims::Integer...) = zeros(p, t, dims)
 Base.zeros(p::Blocks, dims::Integer...) = zeros(p, Float64, dims)
 Base.zeros(p::Blocks, dims::Tuple) = zeros(p, Float64, dims)
