@@ -208,6 +208,13 @@ function Base.similar(x::DArray{T,N}) where {T,N}
     return DArray(T, x.domain, x.subdomains, thunks, x.partitioning, x.concat)
 end
 
+function Base.similar(A::DArray{T,N} where T, ::Type{S}, dims::Dims{N}) where {S,N}
+    d = ArrayDomain(map(x->1:x, dims))
+    p = A.partitioning
+    a = AllocateArray(S, (_, _, x...) -> Array{S,N}(undef, x...), d, partition(p, d), p)
+    return _to_darray(a)
+end
+
 Base.copy(x::DArray{T,N,B,F}) where {T,N,B,F} =
     map(identity, x)::DArray{T,N,B,F}
 
