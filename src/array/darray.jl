@@ -162,7 +162,7 @@ DArray{T, N}(domain, subdomains, chunks, partitioning, concat=cat) where {T,N} =
 
 function DArray(T, domain::DArrayDomain{N},
                 subdomains::AbstractArray{DArrayDomain{N}, N},
-                chunks::AbstractArray{<:Any, N}, partitioning::B, concat=cat) where {N,B<:AbstractMultiBlocks{N}}
+                chunks::AbstractArray{<:Any, N}, partitioning::B, concat=cat) where {N,B<:AbstractBlocks{N}}
     DArray{T,N,B,typeof(concat)}(domain, subdomains, chunks, partitioning, concat)
 end
 
