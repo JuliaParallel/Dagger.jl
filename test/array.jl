@@ -1,5 +1,5 @@
 using LinearAlgebra, SparseArrays, Random, SharedArrays
-import Dagger: chunks, DArray, domainchunks, treereduce_nd
+import Dagger: DArray, chunks, domainchunks, treereduce_nd
 import Distributed: myid, procs
 import Statistics: mean, var, std
 import OnlineStats
@@ -138,7 +138,7 @@ end
 
 @testset "distributing an array" begin
     function test_dist(X)
-        X1 = Distribute(Blocks(10, 20), X)
+        X1 = distribute(X, Blocks(10, 20))
         Xc = fetch(X1)
         @test Xc isa DArray{eltype(X),ndims(X)}
         @test Xc == X
@@ -147,7 +147,7 @@ end
         @test map(x->size(x) == (10, 20), domainchunks(Xc)) |> all
     end
     x = [1 2; 3 4]
-    @test Distribute(Blocks(1,1), x) == x
+    @test distribute(x, Blocks(1,1)) == x
     test_dist(rand(100, 100))
     test_dist(sprand(100, 100, 0.1))
 
@@ -158,7 +158,7 @@ end
 @testset "transpose" begin
     function test_transpose(X)
         x, y = size(X)
-        X1 = Distribute(Blocks(10, 20), X)
+        X1 = distribute(X, Blocks(10, 20))
         @test X1' == X'
         Xc = fetch(X1')
         @test chunks(Xc) |> size == (div(y, 20), div(x,10))
@@ -174,7 +174,7 @@ end
 @testset "matrix-matrix multiply" begin
     function test_mul(X)
         tol = 1e-12
-        X1 = Distribute(Blocks(10, 20), X)
+        X1 = distribute(X, Blocks(10, 20))
         @test_throws DimensionMismatch X1*X1
         X2 = X1'*X1
         X3 = X1*X1'
@@ -188,7 +188,7 @@ end
     test_mul(rand(40, 40))
 
     x = rand(10,10)
-    X = Distribute(Blocks(3,3), x)
+    X = distribute(x, Blocks(3,3))
     y = rand(10)
     @test norm(collect(X*y) - x*y) < 1e-13
 end
@@ -202,8 +202,8 @@ end
 
 @testset "concat" begin
     m = rand(75,75)
-    x = Distribute(Blocks(10,20), m)
-    y = Distribute(Blocks(10,10), m)
+    x = distribute(m, Blocks(10,20))
+    y = distribute(m, Blocks(10,10))
     @test hcat(m,m) == collect(hcat(x,x)) == collect(hcat(x,y))
     @test vcat(m,m) == collect(vcat(x,x))
     @test_throws DimensionMismatch vcat(x,y)
@@ -211,7 +211,7 @@ end
 
 @testset "scale" begin
     x = rand(10,10)
-    X = Distribute(Blocks(3,3), x)
+    X = distribute(x, Blocks(3,3))
     y = rand(10)
 
     @test Diagonal(y)*x == collect(Diagonal(y)*X)
@@ -219,7 +219,7 @@ end
 
 @testset "Getindex" begin
     function test_getindex(x)
-        X = Distribute(Blocks(3,3), x)
+        X = distribute(x, Blocks(3,3))
         @test collect(X[3:8, 2:7]) == x[3:8, 2:7]
         ragged_idx = [1,2,9,7,6,2,4,5]
         @test collect(X[ragged_idx, 2:7]) == x[ragged_idx, 2:7]
@@ -248,7 +248,7 @@ end
 
 
 @testset "cleanup" begin
-    X = Distribute(Blocks(10,10), rand(10,10))
+    X = distribute(rand(10,10), Blocks(10,10))
     @test collect(sin.(X)) == collect(sin.(X))
 end
 
@@ -269,7 +269,7 @@ end
     x=rand(10,10)
     y=copy(x)
     y[3:8, 2:7] .= 1.0
-    X = Distribute(Blocks(3,3), x)
+    X = distribute(x, Blocks(3,3))
     @test collect(setindex(X,1.0, 3:8, 2:7)) == y
     @test collect(X) == x
 end
@@ -292,7 +292,7 @@ end
     @test collect(sort(y)) == x
 
     x = ones(10)
-    y = Distribute(Blocks(3), x)
+    y = distribute(x, Blocks(3))
     @test_broken map(x->length(collect(x)), sort(y).chunks) == [3,3,3,1]
 end
 
