@@ -143,6 +143,13 @@ mutable struct DArray{T,N,B<:AbstractBlocks{N},F} <: ArrayOp{T, N}
     end
 end
 
+WrappedDArray{T,N} = Union{<:DArray{T,N}, Transpose{<:DArray{T,N}}, Adjoint{<:DArray{T,N}}}
+WrappedDMatrix{T} = WrappedDArray{T,2}
+WrappedDVector{T} = WrappedDArray{T,1}
+DMatrix{T} = DArray{T,2}
+DVector{T} = DArray{T,1}
+
+
 # mainly for backwards-compatibility
 DArray{T, N}(domain, subdomains, chunks, partitioning, concat=cat) where {T,N} =
     DArray(T, domain, subdomains, chunks, partitioning, concat)
