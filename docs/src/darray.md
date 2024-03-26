@@ -225,3 +225,9 @@ From `Statistics`:
 - `mean`
 - `var`
 - `std`
+
+From `LinearAlgebra`:
+- `transpose`/`adjoint` (Out-of-place transpose)
+- `*` (Out-of-place Matrix-(Matrix/Vector) multiply)
+- `mul!` (In-place Matrix-Matrix multiply)
+- `cholesky`/`cholesky!` (In-place/Out-of-place Cholesky factorization)
