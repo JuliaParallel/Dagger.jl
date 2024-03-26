@@ -10,9 +10,6 @@ as a `Vector{Int}`.
 
 Special fields include:
 - 'log_sink': A log sink object to use, if any.
-- `log_file::Union{String,Nothing}`: Path to logfile. If specified, at
-scheduler termination, logs will be collected, combined with input thunks, and
-written out in DOT format to this location.
 - `profile::Bool`: Whether or not to perform profiling with Profile stdlib.
 """
 mutable struct Context
@@ -20,20 +17,23 @@ mutable struct Context
     proc_lock::ReentrantLock
     proc_notify::Threads.Condition
     log_sink::Any
-    log_file::Union{String,Nothing}
     profile::Bool
     options
 end
 
-Context(procs::Vector{P}=Processor[OSProc(w) for w in procs()];
+function Context(procs::Vector{P}=Processor[OSProc(w) for w in procs()];
         proc_lock=ReentrantLock(), proc_notify=Threads.Condition(),
         log_sink=TimespanLogging.NoOpLog(), log_file=nothing, profile=false,
-        options=nothing) where {P<:Processor} =
-    Context(procs, proc_lock, proc_notify, log_sink, log_file,
+        options=nothing) where {P<:Processor}
+    if log_file !== nothing
+        @warn "`log_file` is no longer supported\nPlease instead load `GraphViz.jl` and use `render_logs(logs, :graphviz)`."
+    end
+    Context(procs, proc_lock, proc_notify, log_sink,
             profile, options)
+end
 Context(xs::Vector{Int}; kwargs...) = Context(map(OSProc, xs); kwargs...)
 Context(ctx::Context, xs::Vector=copy(procs(ctx))) = # make a copy
-    Context(xs; log_sink=ctx.log_sink, log_file=ctx.log_file,
+    Context(xs; log_sink=ctx.log_sink,
                 profile=ctx.profile, options=ctx.options)
 
 const GLOBAL_CONTEXT = Ref{Context}()

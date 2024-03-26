@@ -1,10 +1,11 @@
 using Dagger, TimespanLogging, DaggerWebDash
 using Documenter
+import Documenter.Remotes: GitHub
 
 makedocs(;
     modules = [Dagger, TimespanLogging, DaggerWebDash],
     authors = "JuliaParallel and contributors",
-    repo = "https://github.com/JuliaParallel/Dagger.jl/blob/{commit}{path}#L{line}",
+    repo = GitHub("JuliaParallel", "Dagger.jl"),
     sitename = "Dagger.jl",
     format = Documenter.HTML(;
         prettyurls = get(ENV, "CI", "false") == "true",
@@ -24,9 +25,12 @@ makedocs(;
         "Task Queues" => "task-queues.md",
         "Datadeps" => "datadeps.md",
         "Option Propagation" => "propagation.md",
-        "Logging and Graphing" => "logging.md",
+        "Logging and Visualization" => [
+            "Logging: Basics" => "logging.md",
+            "Logging: Visualization" => "logging-visualization.md",
+            "Logging: Advanced" => "logging-advanced.md",
+        ],
         "Checkpointing" => "checkpointing.md",
-        "Scheduler Visualization" => "scheduler-visualization.md",
         "Benchmarking" => "benchmarking.md",
         "Dynamic Scheduler Control" => "dynamic.md",
         "Scheduler Internals" => "scheduler-internals.md",
@@ -42,7 +46,8 @@ makedocs(;
             "Types" => "api-daggerwebdash/types.md",
             "Functions and Macros" => "api-daggerwebdash/functions.md",
         ],
-    ]
+    ],
+    warnonly=[:missing_docs]
 )
 
 deploydocs(;

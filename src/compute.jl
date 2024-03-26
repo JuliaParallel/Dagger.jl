@@ -1,4 +1,4 @@
-export stage, cached_stage, compute, debug_compute, cleanup
+export compute, debug_compute
 
 ###### Scheduler #######
 
@@ -19,20 +19,8 @@ Compute a Thunk - creates the DAG, assigns ranks to nodes for tie breaking and
 runs the scheduler with the specified options. Returns a Chunk which references
 the result.
 """
-function compute(ctx::Context, d::Thunk; options=nothing)
-    result = Sch.compute_dag(ctx, d; options=options)
-    if ctx.log_file !== nothing
-        if ctx.log_sink isa TimespanLogging.LocalEventLog
-            logs = TimespanLogging.get_logs!(ctx.log_sink)
-            open(ctx.log_file, "w") do io
-                Dagger.show_plan(io, logs, d)
-            end
-        else
-            @warn "Context log_sink not set to LocalEventLog, skipping"
-        end
-    end
-    result
-end
+compute(ctx::Context, d::Thunk; options=nothing) =
+    Sch.compute_dag(ctx, d; options=options)
 
 function debug_compute(ctx::Context, args...; profile=false, options=nothing)
     @time result = compute(ctx, args...; options=options)

@@ -228,7 +228,7 @@ function print_sch_status(io::IO, state, thunk; offset=0, limit=5, max_inputs=3)
     println(io, "$(thunk.id): $(thunk.f)")
     for (idx, input) in enumerate(thunk.syncdeps)
         if input isa WeakThunk
-            input = unwrap_weak(input)
+            input = Dagger.unwrap_weak(input)
             if input === nothing
                 println(io, repeat(' ', offset+2), "(???)")
                 continue

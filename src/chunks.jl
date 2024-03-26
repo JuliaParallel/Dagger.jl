@@ -122,7 +122,6 @@ end
 
 """
     mutable(f::Base.Callable; worker, processor, scope) -> Chunk
-    @mutable [worker=1] [processor=OSProc()] [scope=ProcessorScope()] f()
 
 Calls `f()` on the specified worker or processor, returning a `Chunk`
 referencing the result with the specified scope `scope`.
@@ -143,6 +142,11 @@ function mutable(@nospecialize(f); worker=nothing, processor=nothing, scope=noth
     return fetch(Dagger.@spawn scope=scope _mutable_inner(f, processor, scope))[]
 end
 
+"""
+    @mutable [worker=1] [processor=OSProc()] [scope=ProcessorScope()] f()
+
+Helper macro for [`mutable()`](@ref).
+"""
 macro mutable(exs...)
     opts = esc.(exs[1:end-1])
     ex = exs[end]
@@ -197,11 +201,15 @@ function shard(@nospecialize(f); procs=nothing, workers=nothing, per_thread=fals
         end
     end
     isempty(procs) && throw(ArgumentError("Cannot create empty Shard"))
-    shard_dict = Dict{Processor,Chunk}()
+    shard_running_dict = Dict{Processor,EagerThunk}()
     for proc in procs
         scope = proc isa OSProc ? ProcessScope(proc) : ExactScope(proc)
         thunk = Dagger.@spawn scope=scope _mutable_inner(f, proc, scope)
-        shard_dict[proc] = fetch(thunk)[]
+        shard_running_dict[proc] = thunk
+    end
+    shard_dict = Dict{Processor,Chunk}()
+    for proc in procs
+        shard_dict[proc] = fetch(shard_running_dict[proc])[]
     end
     return Shard(shard_dict)
 end

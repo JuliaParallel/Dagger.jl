@@ -12,27 +12,26 @@ iscompatible_func(proc::ThreadProc, opts, f) = true
 iscompatible_arg(proc::ThreadProc, opts, x) = true
 function execute!(proc::ThreadProc, @nospecialize(f), @nospecialize(args...); @nospecialize(kwargs...))
     tls = get_tls()
+    # FIXME: Use return type of the call to specialize container
+    result = Ref{Any}()
     task = Task() do
         set_tls!(tls)
         TimespanLogging.prof_task_put!(tls.sch_handle.thunk_id.id)
-        @invokelatest f(args...; kwargs...)
+        result[] = @invokelatest f(args...; kwargs...)
+        return
     end
     set_task_tid!(task, proc.tid)
     schedule(task)
     try
         fetch(task)
+        return result[]
     catch err
-        @static if VERSION < v"1.7-rc1"
-            stk = Base.catch_stack(task)
-        else
-            stk = Base.current_exceptions(task)
-        end
-        err, frames = stk[1]
+        err, frames = Base.current_exceptions(task)[1]
         rethrow(CapturedException(err, frames))
     end
 end
 get_parent(proc::ThreadProc) = OSProc(proc.owner)
 default_enabled(proc::ThreadProc) = true
+short_name(proc::ThreadProc) = "W: $(proc.owner), TID: $(proc.tid)"
 
 # TODO: ThreadGroupProc?
-

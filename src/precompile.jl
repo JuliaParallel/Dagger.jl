@@ -26,7 +26,7 @@
 
     # Wait for halt
     while Sch.EAGER_INIT[]
-        sleep(0.1)
+        sleep(0.5)
     end
 
     # Final clean-up
@@ -38,11 +38,9 @@
             return
         end
         for (name, t) in tracked
-            @warn "Waiting on $name"
             if t.state == :runnable
+                @warn "Waiting on $name"
                 Base.throwto(t, InterruptException())
-            else
-                wait(t)
             end
         end
     end

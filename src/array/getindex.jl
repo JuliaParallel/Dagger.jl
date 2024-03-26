@@ -7,7 +7,7 @@ GetIndex(input::ArrayOp, idx::Tuple) =
     GetIndex{eltype(input), ndims(input)}(input, idx)
 
 function stage(ctx::Context, gidx::GetIndex)
-    inp = cached_stage(ctx, gidx.input)
+    inp = stage(ctx, gidx.input)
 
     dmn = domain(inp)
     idxs = [if isa(gidx.idx[i], Colon)
@@ -32,7 +32,7 @@ struct GetIndexScalar <: Computation
 end
 
 function stage(ctx::Context, gidx::GetIndexScalar)
-    inp = cached_stage(ctx, gidx.input)
+    inp = stage(ctx, gidx.input)
     s = view(inp, ArrayDomain(gidx.idx))
     Dagger.@spawn identity(collect(s)[1])
 end
