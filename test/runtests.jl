@@ -11,8 +11,10 @@ tests = [
     ("Task Queues", "task-queues.jl"),
     ("Datadeps", "datadeps.jl"),
     ("Domain Utilities", "domain.jl"),
-    ("Array", "array.jl"),
-    ("Linear Algebra", "linalg.jl"),
+    ("Array - Core", "array/core.jl"),
+    ("Array - MapReduce", "array/mapreduce.jl"),
+    ("Array - LinearAlgebra - Matmul", "array/linalg/matmul.jl"),
+    ("Array - LinearAlgebra - Cholesky", "array/linalg/cholesky.jl"),
     ("Caching", "cache.jl"),
     ("Disk Caching", "diskcaching.jl"),
     ("File IO", "file-io.jl"),
@@ -70,6 +72,7 @@ end
 using Distributed
 addprocs(3)
 
+include("imports.jl")
 include("util.jl")
 include("fakeproc.jl")
 

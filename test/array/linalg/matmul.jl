@@ -1,6 +1,29 @@
-using LinearAlgebra
+@testset "Matmul" begin
+    X = rand(40, 40)
+    tol = 1e-12
 
-@testset "Linear Algebra" begin
+    X1 = distribute(X, Blocks(10, 20))
+    X2 = X1'*X1
+    X3 = X1*X1'
+    X4 = X1*X1
+
+    @test norm(collect(X2) - (X' * X)) < tol
+    @test norm(collect(X3) - (X * X')) < tol
+    @test norm(collect(X4) - (X * X)) < tol
+    @test chunks(X2) |> size == (2, 2)
+    @test chunks(X3) |> size == (4, 4)
+    @test chunks(X4) |> size == (4, 2)
+    @test map(x->size(x) == (20, 20), domainchunks(X2)) |> all
+    @test map(x->size(x) == (10, 10), domainchunks(X3)) |> all
+    @test map(x->size(x) == (10, 20), domainchunks(X4)) |> all
+
+    @testset "Powers" begin
+        x = rand(Blocks(4,4), 16, 16)
+        @test collect(x^1) == collect(x)
+        @test collect(x^2) == collect(x*x)
+        @test collect(x^3) == collect(x*x*x)
+    end
+
     @testset "GEMM: $T" for T in (Float32, Float64, ComplexF32, ComplexF64)
         A = rand(T, 128, 128)
         B = rand(T, 128, 128)
@@ -83,51 +106,5 @@ using LinearAlgebra
         mul!(C, A', A)
         mul!(DC, DA', DA)
         @test collect(DC) ≈ C
-    end
-
-    @testset "Cholesky: $T" for T in (Float32, Float64, ComplexF32, ComplexF64)
-        D = rand(Blocks(4, 4), T, 32, 32)
-        if !(T <: Complex)
-            @test !issymmetric(D)
-        end
-        @test !ishermitian(D)
-
-        A = rand(T, 128, 128)
-        A = A * A'
-        A[diagind(A)] .+= size(A, 1)
-        DA = view(A, Blocks(32, 32))
-        if !(T <: Complex)
-            @test issymmetric(DA)
-        end
-        @test ishermitian(DA)
-
-        # Out-of-place
-        chol_A = cholesky(A)
-        chol_DA = cholesky(DA)
-        @test chol_DA isa Cholesky
-        @test chol_A.L ≈ chol_DA.L
-        @test chol_A.U ≈ chol_DA.U
-
-        # In-place
-        A_copy = copy(A)
-        chol_A = cholesky!(A_copy)
-        chol_DA = cholesky!(DA)
-        @test chol_DA isa Cholesky
-        @test chol_A.L ≈ chol_DA.L
-        @test chol_A.U ≈ chol_DA.U
-        # Check that changes propagated to A
-        @test UpperTriangular(collect(DA)) ≈ UpperTriangular(collect(A))
-
-        # Non-PosDef matrix
-        A = rand(T, 128, 128)
-        A = A * A'
-        A[diagind(A)] .+= size(A, 1)
-        A[1, 1] = -100
-        DA = view(A, Blocks(32, 32))
-        if !(T <: Complex)
-            @test issymmetric(DA)
-        end
-        @test ishermitian(DA)
-        @test_throws_unwrap PosDefException cholesky(DA).U
     end
 end
