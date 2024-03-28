@@ -71,6 +71,7 @@ include("array/matrix.jl")
 include("array/sparse_partition.jl")
 include("array/sort.jl")
 include("array/linalg.jl")
+include("array/mul.jl")
 include("array/cholesky.jl")
 
 # Visualization

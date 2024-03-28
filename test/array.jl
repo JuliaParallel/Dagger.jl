@@ -1,5 +1,5 @@
 using LinearAlgebra, SparseArrays, Random, SharedArrays
-import Dagger: chunks, DArray, domainchunks, treereduce_nd
+import Dagger: DArray, chunks, domainchunks, treereduce_nd
 import Distributed: myid, procs
 import Statistics: mean, var, std
 import OnlineStats
@@ -158,7 +158,7 @@ end
 @testset "transpose" begin
     function test_transpose(X)
         x, y = size(X)
-        X1 = Distribute(Blocks(10, 20), X)
+        X1 = distribute(X, Blocks(10, 20))
         @test X1' == X'
         Xc = fetch(X1')
         @test chunks(Xc) |> size == (div(y, 20), div(x,10))

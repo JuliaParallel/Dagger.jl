@@ -143,6 +143,13 @@ mutable struct DArray{T,N,B<:AbstractBlocks{N},F} <: ArrayOp{T, N}
     end
 end
 
+WrappedDArray{T,N} = Union{<:DArray{T,N}, Transpose{<:DArray{T,N}}, Adjoint{<:DArray{T,N}}}
+WrappedDMatrix{T} = WrappedDArray{T,2}
+WrappedDVector{T} = WrappedDArray{T,1}
+DMatrix{T} = DArray{T,2}
+DVector{T} = DArray{T,1}
+
+
 # mainly for backwards-compatibility
 DArray{T, N}(domain, subdomains, chunks, partitioning, concat=cat) where {T,N} =
     DArray(T, domain, subdomains, chunks, partitioning, concat)
@@ -199,6 +206,13 @@ function Base.similar(x::DArray{T,N}) where {T,N}
     alloc(idx, sz) = Array{T,N}(undef, sz)
     thunks = [Dagger.@spawn alloc(i, size(x)) for (i, x) in enumerate(x.subdomains)]
     return DArray(T, x.domain, x.subdomains, thunks, x.partitioning, x.concat)
+end
+
+function Base.similar(A::DArray{T,N} where T, ::Type{S}, dims::Dims{N}) where {S,N}
+    d = ArrayDomain(map(x->1:x, dims))
+    p = A.partitioning
+    a = AllocateArray(S, (_, _, x...) -> Array{S,N}(undef, x...), d, partition(p, d), p)
+    return _to_darray(a)
 end
 
 Base.copy(x::DArray{T,N,B,F}) where {T,N,B,F} =

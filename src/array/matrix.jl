@@ -1,54 +1,22 @@
-struct Transpose{T,N} <: ArrayOp{T,N}
-    f::Function
-    input::ArrayOp
-end
+# Transpose/Adjoint
 
-function Transpose(f,x::ArrayOp)
-    @assert 1 <= ndims(x) && ndims(x) <= 2
-    Transpose{eltype(x), 2}(f,x)
-end
-function size(x::Transpose)
-    sz = size(x.input)
-    if length(sz) == 1
-        (1, sz[1])
-    else
-        (sz[2], sz[1])
+function copydiag(f, A::DArray{T, 2}) where T
+    Ac = A.chunks
+    Ac_copy = Matrix{Any}(undef, size(Ac, 2), size(Ac, 1))
+    _copytile(f, Ac) = copy(f(Ac))
+    for i in 1:size(Ac, 1), j in 1:size(Ac, 2)
+        Ac_copy[j, i] = Dagger.@spawn _copytile(f, Ac[i, j])
     end
+    return DArray(T, ArrayDomain(1:size(A,2), 1:size(A,1)), domainchunks(A)', Ac_copy, A.partitioning)
 end
+Base.fetch(A::Adjoint{T, <:DArray{T, 2}}) where T = copydiag(Adjoint, parent(A))
+Base.fetch(A::Transpose{T, <:DArray{T, 2}}) where T = copydiag(Transpose, parent(A))
+Base.copy(A::Adjoint{T, <:DArray{T, 2}}) where T = fetch(A)
+Base.copy(A::Transpose{T, <:DArray{T, 2}}) where T = fetch(A)
+Base.collect(A::Adjoint{T, <:DArray{T, 2}}) where T = collect(copy(A))
+Base.collect(A::Transpose{T, <:DArray{T, 2}}) where T = collect(copy(A))
 
-transpose(x::ArrayOp) = _to_darray(Transpose(transpose, x))
-transpose(x::Union{Chunk, EagerThunk}) = @spawn transpose(x)
-
-adjoint(x::ArrayOp) = _to_darray(Transpose(adjoint, x))
-adjoint(x::Union{Chunk, EagerThunk}) = @spawn adjoint(x)
-
-function adjoint(x::ArrayDomain{2})
-    d = indexes(x)
-    ArrayDomain(d[2], d[1])
-end
-function adjoint(x::ArrayDomain{1})
-    d = indexes(x)
-    ArrayDomain(1:1, d[1])
-end
-
-function adjoint(x::Blocks{2})
-    d = x.blocksize
-    Blocks(d[2], d[1])
-end
-function adjoint(x::Blocks{1})
-    d = x.blocksize
-    Blocks(1, d[1])
-end
-
-function _ctranspose(x::AbstractArray)
-    Any[Dagger.@spawn(adjoint(x[j,i])) for i=1:size(x,2), j=1:size(x,1)]
-end
-
-function stage(ctx::Context, node::Transpose)
-    inp = stage(ctx, node.input)
-    thunks = _ctranspose(chunks(inp))
-    return DArray(eltype(inp), domain(inp)', domainchunks(inp)', thunks, inp.partitioning', inp.concat)
-end
+# Matrix-(Matrix/Vector) multiply
 
 import Base: *, +
 
@@ -67,10 +35,9 @@ end
 size(x::MatMul) = mul_size(x.a, x.b)
 MatMul(a,b) =
     MatMul{promote_type(eltype(a), eltype(b)), length(mul_size(a,b))}(a,b)
-(*)(a::ArrayOp, b::ArrayOp) = _to_darray(MatMul(a,b))
+
 # Bonus method for matrix-vector multiplication
 (*)(a::ArrayOp, b::Vector) = _to_darray(MatMul(a,PromotePartition(b)))
-(*)(a::AbstractArray, b::ArrayOp) = _to_darray(MatMul(PromotePartition(a), b))
 
 function (*)(a::ArrayDomain{2}, b::ArrayDomain{2})
     if size(a, 2) != size(b, 1)
