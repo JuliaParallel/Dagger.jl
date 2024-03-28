@@ -155,7 +155,7 @@ function syrk_dagger!(
     alpha = _add.alpha
     beta = _add.beta
 
-    uplo = 'L'
+    uplo = 'U'
     #=
     if Ant != Bmt
         throw(DimensionMismatch(lazy"A has number of blocks ($Amt,$Ant) but B has number of blocks ($Bmt,$Bnt)"))
@@ -175,7 +175,7 @@ function syrk_dagger!(
                         Dagger.@spawn BLAS.herk!(
                             uplo,
                             trans,
-                            real(alpha),
+                            alpha,
                             In(Ac[n, k]),
                             mzone,
                             InOut(Cc[n, n]),
@@ -284,8 +284,7 @@ function syrk_dagger!(
             end
         end
     end
-
-    C = copytri!(C, 'L')
+    C = copytri!(C, uplo)
     return C
 end
 
@@ -301,7 +300,7 @@ end
         if uplo == 'U'
             for i = 1:Amt, j = (i):Amt
                 if (i == j)
-                    Dagger.@spawn copydiagtile!(Out(Ac[j, i]), In(Ac[i, j]), uplo)
+                    Dagger.@spawn copydiagtile!(InOut(Ac[i, j]), uplo)
                 else
                     Dagger.@spawn copytile!(Out(Ac[j, i]), In(Ac[i, j]))
                 end
@@ -309,7 +308,7 @@ end
         elseif uplo == 'L'
             for i = 1:Amt, j = (i):Amt
                 if (i == j)
-                    Dagger.@spawn copydiagtile!(Out(Ac[i, j]), In(Ac[j, i]), uplo)
+                    Dagger.@spawn copydiagtile!(InOut(Ac[i, j]), uplo)
                 else
                     Dagger.@spawn copytile!(Out(Ac[i, j]), In(Ac[j, i]))
                 end
@@ -325,26 +324,28 @@ end
 
 @inline function copytile!(A, B)
     m, n = size(A)
+    C = B'
 
     for i = 1:m, j = 1:n
-        A[j, i] = B[i, j]
+        A[i, j] = C[i, j]
     end
+
 end
 
-@inline function copydiagtile!(A, B, uplo)
+@inline function copydiagtile!(A, uplo)
     m, n = size(A)
+    Acpy = copy(A)
 
     if uplo == 'U'
-        for i = 1:m, j = 1:n
-            if j >= i
-                A[j, i] = B[i, j]
-            end
-        end
+        C= UpperTriangular(Acpy)' + UpperTriangular(Acpy)
+        C[diagind(C)] .= A[diagind(A)]
     elseif uplo == 'L'
-        for i = 1:m, j = 1:n
-            if j <= i
-                A[j, i] = B[i, j]
-            end
-        end
+        C = LowerTriangular(Acpy)' + Acpy - UpperTriangular(Acpy)
+        C[diagind(C)] .= A[diagind(A)]
+    end 
+ 
+    for i = 1:m, j = 1:n
+        A[i, j] = C[i, j]
     end
+
 end
