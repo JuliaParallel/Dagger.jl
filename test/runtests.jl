@@ -19,7 +19,7 @@ tests = [
     ("Fault Tolerance", "fault-tolerance.jl"),
 ]
 all_test_names = map(test -> replace(last(test), ".jl"=>""), tests)
-if realpath(PROGRAM_FILE) == @__FILE__
+if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
     push!(LOAD_PATH, joinpath(@__DIR__, ".."))
     push!(LOAD_PATH, @__DIR__)
     using Pkg
