@@ -23,6 +23,13 @@ function Base.fetch(t::ThunkFuture; proc=OSProc(), raw=false)
 end
 Base.put!(t::ThunkFuture, x; error=false) = put!(t.future, (error, x))
 
+"""
+    Options(::NamedTuple)
+    Options(; kwargs...)
+
+Options for thunks and the scheduler. See [Task Spawning](@ref) for more
+information.
+"""
 struct Options
     options::NamedTuple
 end
