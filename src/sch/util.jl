@@ -121,7 +121,7 @@ Cleans up any syncdeps that aren't needed any longer, and returns a
 """
 function cleanup_syncdeps!(state, node)
     to_evict = Set{Chunk}()
-    for inp in node.syncdeps
+    for inp in node.options.syncdeps
         inp = unwrap_weak_checked(inp)
         if !istask(inp) && !(inp isa Chunk)
             continue
@@ -221,7 +221,7 @@ function reschedule_syncdeps!(state, thunk, seen=Set{AnyThunk}())
             end
         end
         w = get!(()->Set{AnyThunk}(), state.waiting, thunk)
-        for input in thunk.syncdeps
+        for input in thunk.options.syncdeps
             input = unwrap_weak_checked(input)
             istask(input) && input in seen && continue
 
@@ -365,7 +365,7 @@ function print_sch_status(io::IO, state, thunk; offset=0, limit=5, max_inputs=3)
         print(io, "($(status_string(thunk))) ")
     end
     println(io, "$(thunk.id): $(thunk.f)")
-    for (idx, input) in enumerate(thunk.syncdeps)
+    for (idx, input) in enumerate(thunk.options.syncdeps)
         if input isa WeakThunk
             input = Dagger.unwrap_weak(input)
             if input === nothing

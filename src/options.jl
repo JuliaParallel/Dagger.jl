@@ -7,6 +7,7 @@ Stores per-task options to be passed to the scheduler.
 
 # Arguments
 - `propagates::Vector{Symbol}`: The set of option names that will be propagated by this task to tasks that it spawns.
+- `scope::AbstractScope`: The scope of the task, which determines where the task can be scheduled.
 - `single::Int=0`: (Deprecated) Force task onto worker with specified id. `0` disables this option.
 - `proclist=nothing`: (Deprecated) Force task to use one or more processors that are instances/subtypes of a contained type. Alternatively, a function can be supplied, and the function will be called with a processor as the sole argument and should return a `Bool` result to indicate whether or not to use the given processor. `nothing` enables all default processors.
 - `get_result::Bool=false`: Whether the worker should store the result directly (`true`) or as a `Chunk` (`false`)
@@ -26,6 +27,7 @@ Stores per-task options to be passed to the scheduler.
 Base.@kwdef mutable struct Options
     propagates::Union{Vector{Symbol},Nothing} = nothing
 
+    scope::Union{AbstractScope,Nothing} = nothing
     single::Union{Int,Nothing} = nothing
     proclist = nothing
 
@@ -107,6 +109,7 @@ function populate_defaults!(opts::Options, sig)
         end
     end
     maybe_default!(opts, :propagates),
+    maybe_default!(opts, :scope),
     maybe_default!(opts, :single),
     maybe_default!(opts, :proclist),
     maybe_default!(opts, :get_result),

@@ -63,15 +63,14 @@ function _enqueue!(queue::DataDepsTaskQueue, fullspec::Pair{EagerTaskSpec,EagerT
         add_vertex!(g)
         task_to_id[task] = our_task_id = nv(g)
     else
-        opts = spec.options
-        syncdeps = get(Set{Any}, opts, :syncdeps)
-        scope = get(DefaultScope, opts, :scope)
+        syncdeps = spec.options.syncdeps = @something(spec.options.syncdeps, Set())
+        scope = @something(spec.options.scope, DefaultScope())
         worker_scope = ProcessScope(myid())
         new_scope = constrain(scope, worker_scope)
         if new_scope isa InvalidScope
             throw(SchedulingException("Scopes are not compatible: $scope vs $worker_scope"))
         end
-        scope = new_scope
+        spec.options.scope = new_scope
     end
     deps_to_add = Vector{Pair{Any, Tuple{Bool,Bool}}}()
     for (idx, (pos, arg)) in enumerate(spec.args)
@@ -133,10 +132,6 @@ function _enqueue!(queue::DataDepsTaskQueue, fullspec::Pair{EagerTaskSpec,EagerT
             Vector{Pair{Tuple{Bool,Bool}, EagerThunk}}()
         end
         push!(argdeps, (readdep, writedep) => task)
-    end
-
-    if !queue.static
-        spec.options = merge(opts, (;syncdeps, scope))
     end
 end
 function enqueue!(queue::DataDepsTaskQueue, spec::Pair{EagerTaskSpec,EagerThunk})
@@ -371,7 +366,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
         # Launch user's task
         spec.f = move(ThreadProc(myid(), 1), our_proc, spec.f)
-        syncdeps = get(Set{Any}, spec.options, :syncdeps)
+        syncdeps = spec.options.syncdeps = @something(spec.options.syncdeps, Set())
         for (_, arg) in task_args
             if is_writedep(arg, task)
                 get_write_deps!(arg, syncdeps)
@@ -380,8 +375,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             end
         end
         @dagdebug nothing :spawn_datadeps "($(spec.f)) $(length(syncdeps)) syncdeps"
-        task_scope = Dagger.ExactScope(our_proc)
-        spec.options = merge(spec.options, (;syncdeps, scope=task_scope))
+        spec.options.scope = Dagger.ExactScope(our_proc)
         enqueue!(upper_queue, spec=>task)
         for (idx, (_, arg)) in enumerate(task_args)
             if is_writedep(arg, task)

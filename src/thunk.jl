@@ -40,7 +40,6 @@ mutable struct Thunk
     f::Any # usually a Function, but could be any callable
     inputs::Vector{Pair{Union{Symbol,Nothing},Any}} # TODO: Use `ImmutableArray` in 1.8
     world::UInt64
-    syncdeps::Set{Any}
     id::ThunkID
     cache_ref::Any
     affinity::Union{Nothing, Pair{OSProc, Int}}
@@ -48,7 +47,6 @@ mutable struct Thunk
     options::Union{Options,Nothing} # stores scheduler-specific options
     function Thunk(f, xs...;
                    world::UInt64=Base.get_world_counter(),
-                   syncdeps=nothing,
                    id::ThunkID=next_id(),
                    cache_ref=nothing,
                    affinity=nothing,
@@ -56,27 +54,28 @@ mutable struct Thunk
                    processor=nothing,
                    scope=nothing,
                    options=nothing,
-                   kwargs...
-                  )
+                   kwargs...)
+        @nospecialize f xs
         if !isa(f, Chunk) && (!isnothing(processor) || !isnothing(scope))
             f = tochunk(f,
                         something(processor, OSProc()),
                         something(scope, DefaultScope()))
         end
         xs = Base.mapany(identity, xs)
-        syncdeps_set = Set{Any}(filterany(is_task_or_chunk, Base.mapany(last, xs)))
-        if syncdeps !== nothing
-            for dep in syncdeps
-                push!(syncdeps_set, dep)
+        syncdeps = options.syncdeps = @something(options.syncdeps, Set())
+        for idx in 1:length(xs)
+            _, x = xs[idx]
+            if is_task_or_chunk(x)
+                push!(syncdeps, x)
             end
         end
         @assert all(x->x isa Pair, xs)
         if options !== nothing
             @assert isempty(kwargs)
-            new(f, xs, world, syncdeps_set, id,
+            new(f, xs, world, id,
                 cache_ref, affinity, eager_ref, options)
         else
-            new(f, xs, world, syncdeps_set, id,
+            new(f, xs, world, id,
                 cache_ref, affinity, eager_ref,
                 Options(;kwargs...))
         end

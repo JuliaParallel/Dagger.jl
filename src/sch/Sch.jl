@@ -118,7 +118,7 @@ function start_state(deps::Dict, node_order, chan, options)
 
     for k in sort(collect(keys(deps)), by=node_order)
         if istask(k)
-            waiting = Set{Thunk}(Iterators.filter(istask, k.syncdeps))
+            waiting = Set{Thunk}(Iterators.filter(istask, k.options.syncdeps))
             if isempty(waiting)
                 push!(state.ready, k)
             else
