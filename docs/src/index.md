@@ -356,12 +356,14 @@ In this example, the sort! function operates on array X, while the copyto! task 
 ```julia
 X = [4,5,6,7,1,2,3,9,8]
 C = zeros(10)
+Dagger.spawn_datadeps() do
+    Dagger.@spawn sort!(X)
+    Dagger.@spawn copyto!(C, X)
+end
 
-Dagger.@spawn sort!(InOut(X))
-Dagger.@spawn copyto!(Out(C), In(X))
 
 # C = [4,5,6,7,1,2,3,9,8]
 ```
 
-In contrast to the previous example, here, the tasks are executed without Datadeps and argument annotations. As a result, there is a possibility of the copyto! task being executed before the sort! task, leading to unexpected behavior in the output array C.
+In contrast to the previous example, here, the tasks are executed without argument annotations. As a result, there is a possibility of the copyto! task being executed before the sort! task, leading to unexpected behavior in the output array C.
 
