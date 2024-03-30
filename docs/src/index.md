@@ -319,6 +319,7 @@ collect(DA) # returns a `Matrix{Float64}`
 ## Quickstart: Datadeps
 
 Datadeps is a feature in Dagger.jl that facilitates parallelism control within designated regions, allowing tasks to write to their arguments while ensuring dependencies are respected.
+For more details: [Datadeps](@ref)
 
 ### Syntax
 The Dagger.spawn_datadeps() function is used to create a "datadeps region" where tasks are executed with parallelism controlled by specified dependencies.
