@@ -350,7 +350,7 @@ end
 # C = [1,2,3,4,5,6,7,8,9]
 ```
 
-In this example, the sort! function operates on array X, while the copyto! task operates on array C. By specifying dependencies using argument annotations, the tasks are executed in a controlled parallel manner, resulting in a sorted C array.
+In this example, the `sort!` function operates on array `X`, while the `copyto!` task reads from array `X` and reads from array `C`. By specifying dependencies using argument annotations, the tasks are executed in a controlled parallel manner, resulting in a sorted `C` array.
 
 ### Example without Datadeps
 
