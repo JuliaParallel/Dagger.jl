@@ -364,5 +364,5 @@ Dagger.@spawn copyto!(C, X)
 # C = [4,5,6,7,1,2,3,9,8]
 ```
 
-In contrast to the previous example, here, the tasks are executed without argument annotations. As a result, there is a possibility of the copyto! task being executed before the sort! task, leading to unexpected behavior in the output array C.
+In contrast to the previous example, here, the tasks are executed without argument annotations. As a result, there is a possibility of the `copyto!` task being executed before the sort! task, leading to unexpected results in the output array `C`.
 
