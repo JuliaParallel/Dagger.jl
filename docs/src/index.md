@@ -357,10 +357,8 @@ In this example, the sort! function operates on array X, while the copyto! task 
 ```julia
 X = [4,5,6,7,1,2,3,9,8]
 C = zeros(10)
-Dagger.spawn_datadeps() do
-    Dagger.@spawn sort!(X)
-    Dagger.@spawn copyto!(C, X)
-end
+Dagger.@spawn sort!(X)
+Dagger.@spawn copyto!(C, X)
 
 
 # C = [4,5,6,7,1,2,3,9,8]
