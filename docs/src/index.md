@@ -332,9 +332,9 @@ end
 ```
 ### Argument Annotation
 
-- In(X): Indicates that the variable X is an input to the task.
-- Out(X): Indicates that the variable X is an output of the task.
-- InOut: Indicates that the variable is both an input and an output.
+- `In(X)`: Indicates that the variable `X` is only read by the task (an "input").
+- `Out(X)`: Indicates that the variable `X` is only written to by the task (an "output").
+- `InOut(X)`: Indicates that the variable `X` is both read from and written to by the task (an "input" and "output" simultaneously).
 
 ### Example with Datadeps
 
