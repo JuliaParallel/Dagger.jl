@@ -322,7 +322,8 @@ Datadeps is a feature in Dagger.jl that facilitates parallelism control within d
 For more details: [Datadeps](@ref)
 
 ### Syntax
-The Dagger.spawn_datadeps() function is used to create a "datadeps region" where tasks are executed with parallelism controlled by specified dependencies.
+
+The Dagger.spawn_datadeps() function is used to create a "datadeps region" where tasks are executed with parallelism controlled by specified dependencies:
 
 ```julia
 Dagger.spawn_datadeps() do
