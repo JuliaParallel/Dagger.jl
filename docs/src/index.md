@@ -330,6 +330,7 @@ Dagger.spawn_datadeps() do
     Dagger.@spawn func!(Out(var_name_x), In(var_name_y))
 end
 ```
+
 ### Argument Annotation
 
 - `In(X)`: Indicates that the variable `X` is only read by the task (an "input").
