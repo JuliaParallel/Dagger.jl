@@ -309,7 +309,7 @@ function spawn(f, args...; kwargs...)
     args_kwargs = args_kwargs_to_pairs(args, kwargs)
 
     # Get task queue, and don't let it propagate
-    task_queue = get_options(:task_queue, EagerTaskQueue())
+    task_queue = get_options(:task_queue, MONITOR_QUEUE[])
     options = NamedTuple(filter(opt->opt[1] != :task_queue, Base.pairs(options)))
     propagates = filter(prop->prop != :task_queue, propagates)
     options = merge(options, (;propagates))
