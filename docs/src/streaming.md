@@ -17,7 +17,7 @@ out.
 
 Thankfully, if you have a problem which is best modeled as a streaming system
 of tasks, Dagger has you covered! Building on its support for
-["Task Queues"](@ref), Dagger provides a means to convert an entire DAG of
+[Task Queues](@ref), Dagger provides a means to convert an entire DAG of
 tasks into a streaming DAG, where data flows into and out of each task
 asynchronously, using the `spawn_streaming` function:
 
