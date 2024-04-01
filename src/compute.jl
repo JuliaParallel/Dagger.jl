@@ -36,12 +36,6 @@ end
 Base.@deprecate gather(ctx, x) collect(ctx, x)
 Base.@deprecate gather(x) collect(x)
 
-cleanup() = cleanup(Context(global_context()))
-function cleanup(ctx::Context)
-    Sch.cleanup(ctx)
-    nothing
-end
-
 function get_type(s::String)
     local T
     for t in split(s, ".")

@@ -307,9 +307,6 @@ function populate_defaults(opts::ThunkOptions, Tf, Targs)
     )
 end
 
-function cleanup(ctx)
-end
-
 # Eager scheduling
 include("eager.jl")
 
