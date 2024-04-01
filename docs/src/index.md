@@ -319,7 +319,7 @@ collect(DA) # returns a `Matrix{Float64}`
 ## Quickstart: Datadeps
 
 Datadeps is a feature in Dagger.jl that facilitates parallelism control within designated regions, allowing tasks to write to their arguments while ensuring dependencies are respected.
-For more details: [Datadeps](@ref)
+For more details: [Datadeps (Data Dependencies)](@ref)
 
 ### Syntax
 
