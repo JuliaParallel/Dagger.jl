@@ -406,7 +406,12 @@ function cleanup_proc(state, p, log_sink)
             delete!(WORKER_MONITOR_CHANS[wid], state.uid)
         end
     end
-    remote_do(_cleanup_proc, wid, state.uid, log_sink)
+
+    # If the worker process is still alive, clean it up
+    if wid in workers()
+        remotecall_wait(_cleanup_proc, wid, state.uid, log_sink)
+    end
+
     timespan_finish(ctx, :cleanup_proc, (;worker=wid), nothing)
 end
 
