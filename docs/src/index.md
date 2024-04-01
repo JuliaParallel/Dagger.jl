@@ -315,3 +315,55 @@ To get back an `Array` from a `DArray`, just call `collect`:
 DA = rand(Blocks(32, 32), 256, 128)
 collect(DA) # returns a `Matrix{Float64}`
 ```
+
+## Quickstart: Datadeps
+
+Datadeps is a feature in Dagger.jl that facilitates parallelism control within designated regions, allowing tasks to write to their arguments while ensuring dependencies are respected.
+For more details: [Datadeps (Data Dependencies)](@ref)
+
+### Syntax
+
+The Dagger.spawn_datadeps() function is used to create a "datadeps region" where tasks are executed with parallelism controlled by specified dependencies:
+
+```julia
+Dagger.spawn_datadeps() do
+    Dagger.@spawn func!(Out(var_name_x), In(var_name_y))
+end
+```
+
+### Argument Annotation
+
+- `In(X)`: Indicates that the variable `X` is only read by the task (an "input").
+- `Out(X)`: Indicates that the variable `X` is only written to by the task (an "output").
+- `InOut(X)`: Indicates that the variable `X` is both read from and written to by the task (an "input" and "output" simultaneously).
+
+### Example with Datadeps
+
+```julia
+X = [4,5,6,7,1,2,3,9,8]
+C = zeros(10)
+
+Dagger.spawn_datadeps() do
+    Dagger.@spawn sort!(InOut(X))
+    Dagger.@spawn copyto!(Out(C), In(X))
+end
+
+# C = [1,2,3,4,5,6,7,8,9]
+```
+
+In this example, the `sort!` function operates on array `X`, while the `copyto!` task reads from array `X` and reads from array `C`. By specifying dependencies using argument annotations, the tasks are executed in a controlled parallel manner, resulting in a sorted `C` array.
+
+### Example without Datadeps
+
+```julia
+X = [4,5,6,7,1,2,3,9,8]
+C = zeros(10)
+Dagger.@spawn sort!(X)
+Dagger.@spawn copyto!(C, X)
+
+
+# C = [4,5,6,7,1,2,3,9,8]
+```
+
+In contrast to the previous example, here, the tasks are executed without argument annotations. As a result, there is a possibility of the `copyto!` task being executed before the `sort!` task, leading to unexpected results in the output array `C`.
+
