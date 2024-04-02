@@ -1,4 +1,4 @@
-import Base: ndims, size, getindex
+import Base: size, getindex
 
 struct DomainBlocks{N} <: AbstractArray{ArrayDomain{N}, N}
     start::NTuple{N, Int}
@@ -6,7 +6,6 @@ struct DomainBlocks{N} <: AbstractArray{ArrayDomain{N}, N}
 end
 Base.@deprecate_binding BlockedDomains DomainBlocks
 
-ndims(x::DomainBlocks{N}) where {N} = N
 size(x::DomainBlocks) = map(length, x.cumlength)
 function _getindex(x::DomainBlocks{N}, idx::Tuple) where N
     starts = map((vec, i) -> i == 0 ? 0 : getindex(vec,i), x.cumlength, map(x->x-1, idx))
