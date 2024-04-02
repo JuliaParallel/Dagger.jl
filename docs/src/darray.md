@@ -217,6 +217,7 @@ This list is not exhaustive, but documents operations which are known to work we
 
 From `Base`:
 - Broadcasting
+- `similar`/`copy`/`copyto!`
 - `map`/`reduce`/`mapreduce`
 - `sum`/`prod`
 - `minimum`/`maximum`/`extrema`

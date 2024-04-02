@@ -60,6 +60,7 @@ include("datadeps.jl")
 include("array/darray.jl")
 include("array/alloc.jl")
 include("array/map-reduce.jl")
+include("array/copy.jl")
 
 # File IO
 include("file-io.jl")
