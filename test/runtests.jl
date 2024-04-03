@@ -12,6 +12,7 @@ tests = [
     ("Datadeps", "datadeps.jl"),
     ("Domain Utilities", "domain.jl"),
     ("Array - Core", "array/core.jl"),
+    ("Array - Copies", "array/copies.jl"),
     ("Array - MapReduce", "array/mapreduce.jl"),
     ("Array - LinearAlgebra - Matmul", "array/linalg/matmul.jl"),
     ("Array - LinearAlgebra - Cholesky", "array/linalg/cholesky.jl"),
