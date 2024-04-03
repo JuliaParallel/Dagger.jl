@@ -4,6 +4,7 @@
     queue: "juliaecosystem"
     sandbox_capable: "true"
     os: linux
+    arch: x86_64
   command: "julia --project -e 'using Pkg; Pkg.develop(;path=\"lib/TimespanLogging\")'"
 .bench: &bench
   if: build.message =~ /\[run benchmarks\]/
