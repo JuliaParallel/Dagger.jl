@@ -1,8 +1,8 @@
 import Base: size, getindex
 
-struct DomainBlocks{N} <: AbstractArray{ArrayDomain{N}, N}
+struct DomainBlocks{N} <: AbstractArray{ArrayDomain{N, NTuple{N, UnitRange{Int}}}, N}
     start::NTuple{N, Int}
-    cumlength::Tuple
+    cumlength::NTuple{N, Vector{Int}}
 end
 Base.@deprecate_binding BlockedDomains DomainBlocks
 

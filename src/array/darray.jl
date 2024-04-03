@@ -9,14 +9,19 @@ import Serialization: serialize, deserialize
 
 An `N`-dimensional domain over an array.
 """
-struct ArrayDomain{N}
-    indexes::NTuple{N, Any}
+struct ArrayDomain{N,T<:Tuple}
+    indexes::T
 end
-include("../lib/domain-blocks.jl")
 
-
-ArrayDomain(xs...) = ArrayDomain(xs)
+ArrayDomain(xs::T) where T<:Tuple = ArrayDomain{length(xs),T}(xs)
+ArrayDomain(xs::NTuple{N,Base.OneTo}) where N =
+    ArrayDomain{N,NTuple{N,UnitRange{Int}}}(ntuple(i->UnitRange(xs[i]), N))
+ArrayDomain(xs::NTuple{N,Int}) where N =
+    ArrayDomain{N,NTuple{N,UnitRange{Int}}}(ntuple(i->xs[i]:xs[i], N))
+ArrayDomain(xs...) = ArrayDomain((xs...,))
 ArrayDomain(xs::Array) = ArrayDomain((xs...,))
+
+include("../lib/domain-blocks.jl")
 
 indexes(a::ArrayDomain) = a.indexes
 chunks(a::ArrayDomain{N}) where {N} = DomainBlocks(
@@ -117,6 +122,7 @@ indicates the number of dimensions in the resulting array.
 """
 Blocks(xs::Int...) = Blocks(xs)
 
+const DArrayDomain{N} = ArrayDomain{N, NTuple{N, UnitRange{Int}}}
 
 """
     DArray{T,N,F}(domain, subdomains, chunks, concat)
@@ -133,8 +139,8 @@ An N-dimensional distributed array of element type T, with a concatenation funct
   and concatenates them along dimension `d`. `cat` is used by default.
 """
 mutable struct DArray{T,N,B<:AbstractBlocks{N},F} <: ArrayOp{T, N}
-    domain::ArrayDomain{N}
-    subdomains::AbstractArray{ArrayDomain{N}, N}
+    domain::DArrayDomain{N}
+    subdomains::AbstractArray{DArrayDomain{N}, N}
     chunks::AbstractArray{Any, N}
     partitioning::B
     concat::F
@@ -154,16 +160,16 @@ DVector{T} = DArray{T,1}
 DArray{T, N}(domain, subdomains, chunks, partitioning, concat=cat) where {T,N} =
     DArray(T, domain, subdomains, chunks, partitioning, concat)
 
-function DArray(T, domain::ArrayDomain{N},
-                subdomains::AbstractArray{ArrayDomain{N}, N},
+function DArray(T, domain::DArrayDomain{N},
+                subdomains::AbstractArray{DArrayDomain{N}, N},
                 chunks::AbstractArray{<:Any, N}, partitioning::B, concat=cat) where {N,B<:AbstractMultiBlocks{N}}
     DArray{T,N,B,typeof(concat)}(domain, subdomains, chunks, partitioning, concat)
 end
 
-function DArray(T, domain::ArrayDomain{N},
-                subdomains::ArrayDomain{N},
+function DArray(T, domain::DArrayDomain{N},
+                subdomains::DArrayDomain{N},
                 chunks::Any, partitioning::B, concat=cat) where {N,B<:AbstractSingleBlocks{N}}
-    _subdomains = Array{ArrayDomain{N}, N}(undef, ntuple(i->1, N)...)
+    _subdomains = Array{DArrayDomain{N}, N}(undef, ntuple(i->1, N)...)
     _subdomains[1] = subdomains
     _chunks = Array{Any, N}(undef, ntuple(i->1, N)...)
     _chunks[1] = chunks
