@@ -25,11 +25,12 @@ const AnyThunk = Union{Thunk, ThunkRef}
 const AnyDataRef = Union{AnyThunk, Chunk}
 
 # A function signature
-const Signature = Vector{Any}
+const Signature = Vector{DataType}
 
 include("util.jl")
 include("fault-handler.jl")
 include("dynamic.jl")
+include("schedule.jl")
 
 include("metrics.jl")
 include("analysis.jl")
@@ -489,6 +490,24 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
 
             if thunk_id !== nothing
                 @dagdebug thunk_id :take "Got finished task"
+                if !haskey(state.thunk_dict, thunk_id)
+                    @warn "Lost task $thunk_id"
+                    @show state.running keys(state.waiting_data)
+                    in_cache = false
+                    for key in keys(state.cache)
+                        if key isa Thunk && key.id == thunk_id
+                            in_cache = true
+                        end
+                    end
+                    if in_cache
+                        @warn "Already in cache! $thunk_id"
+                    else
+                        @info "Not yet in cache $thunk_id"
+                    end
+                    #Sch.print_sch_status(state)
+                    error()
+                    continue
+                end
                 thunk = unwrap_weak_checked(state.thunk_dict[thunk_id])
                 if new_metrics !== nothing
                     # Copy returned metric values to cache
@@ -574,124 +593,6 @@ end
 
 const CHUNK_CACHE = Dict{Chunk,Dict{Processor,Any}}()
 
-function schedule!(ctx, state, procs=procs_to_use(ctx))
-    lock(state.lock) do
-        safepoint(state)
-        @assert length(procs) > 0
-
-        # Tasks to schedule
-        to_fire = Dict{Tuple{OSProc,<:Processor},Vector{Tuple{Thunk,<:Any,<:Any,UInt64,UInt32}}}()
-
-        # Select a new task and get its options
-        task = nothing
-        @label pop_task
-        if task !== nothing
-            timespan_finish(ctx, :schedule, (;thunk_id=task.id), (;thunk_id=task.id))
-        end
-        if isempty(state.ready)
-            @goto fire_tasks
-        end
-        task = pop!(state.ready)
-
-        timespan_start(ctx, :schedule, (;thunk_id=task.id), (;thunk_id=task.id))
-
-        # Check if this task already has a result
-        if (result = cache_lookup(state, task)) !== nothing
-            if haskey(state.errored, task)
-                # An error was eagerly propagated to this task
-                finish_failed!(state, task)
-            else
-                # This shouldn't have happened
-                iob = IOBuffer()
-                println(iob, "Scheduling inconsistency: Task being scheduled is already cached!")
-                println(iob, "  Task: $(task.id)")
-                println(iob, "  Cache Entry: $(typeof(result))")
-                ex = SchedulingException(String(take!(iob)))
-                cache_store!(state, task, ex, true)
-            end
-            @goto pop_task
-        end
-
-        # Fetch all inputs from cache
-        inputs = collect_task_inputs(state, task)
-        sig = signature(task, state)
-
-        # Generate concrete options
-        opts = Options(ctx.options)
-        Dagger.options_merge!(opts, task.options)
-        Dagger.populate_defaults!(opts, sig)
-
-        # Calculate initial task scope
-        scope = if task.f isa Chunk
-            task.f.scope
-        else
-            if opts.proclist !== nothing
-                # proclist overrides scope selection
-                AnyScope()
-            else
-                DefaultScope()
-            end
-        end
-
-        # Filter out Chunks
-        chunks = Chunk[]
-        for input in Iterators.map(last, inputs)
-            if input isa Chunk
-                push!(chunks, input)
-            end
-        end
-
-        # Refine scope, and validate that Chunk scopes are compatible
-        for chunk in chunks
-            scope = constrain(scope, chunk.scope)
-            if scope isa Dagger.InvalidScope
-                ex = SchedulingException("Scopes are not compatible: $(scope.x), $(scope.y)")
-                cache_store!(state, task, ex, true)
-                set_failed!(state, task)
-                @goto pop_task
-            end
-        end
-
-        # Collect all known processors
-        all_procs = unique(vcat([collect(Dagger.get_processors(gp)) for gp in procs]...))
-
-        # Decide on an ordered set of candidate processors to schedule on
-        local_procs = make_decision(state.schedule_model, :signature, :schedule, sig, inputs, all_procs)
-
-        # Select the first valid processor
-        scheduled = false
-        for proc in local_procs
-            gproc = get_parent(proc)
-            can_use, scope = can_use_proc(task, gproc, proc, opts, scope)
-            if can_use
-                #=has_cap,=# est_time_util, est_alloc_util, est_occupancy =
-                    task_utilization(state, proc, opts, sig)
-                if true#has_cap
-                    # Schedule task onto proc
-                    proc_tasks = get!(to_fire, (gproc, proc)) do
-                        Vector{Tuple{Thunk,<:Any,<:Any,UInt64,UInt32}}()
-                    end
-                    push!(proc_tasks, (task, scope, est_time_util, est_alloc_util, est_occupancy))
-                    @dagdebug task :schedule "Scheduling to $gproc -> $proc"
-                    @goto pop_task
-                end
-            end
-        end
-
-        # Report that no processors were valid
-        ex = SchedulingException("No processors available, try widening scope")
-        cache_store!(state, task, ex, true)
-        set_failed!(state, task)
-        @goto pop_task
-
-        # Done scheduling, fire all newly-scheduled tasks
-        @label fire_tasks
-        for gpp in keys(to_fire)
-            fire_tasks!(ctx, to_fire[gpp], gpp, state)
-        end
-    end
-end
-
 """
 Monitors for workers being added/removed to/from `ctx`, sets up or tears down
 per-worker state, and notifies the scheduler so that work can be reassigned.
@@ -738,25 +639,25 @@ function remove_dead_proc!(ctx, state, proc, options=ctx.options)
     delete!(state.worker_chans, proc.pid)
 end
 
-function finish_task!(ctx, state, node, thunk_failed)
-    pop!(state.running, node)
-    delete!(state.running_on, node)
+function finish_task!(ctx, state, task, thunk_failed)
+    pop!(state.running, task)
+    delete!(state.running_on, task)
     if thunk_failed
-        set_failed!(state, node)
+        set_failed!(state, task)
     end
-    if node.cache
-        node.cache_ref = cache_lookup_checked(state, node)[1]
+    if task.options.cache
+        task.cache_ref = cache_lookup_checked(state, task)[1]
     end
-    schedule_dependents!(state, node, thunk_failed)
-    fill_registered_futures!(state, node, thunk_failed)
+    schedule_dependents!(state, task, thunk_failed)
+    fill_registered_futures!(state, task, thunk_failed)
 
-    to_evict = cleanup_syncdeps!(state, node)
-    if node.f isa Chunk
+    to_evict = cleanup_syncdeps!(state, task)
+    if task.f isa Chunk
         # FIXME: Check the graph for matching chunks
-        push!(to_evict, node.f)
+        push!(to_evict, task.f)
     end
-    if haskey(state.waiting_data, node) && isempty(state.waiting_data[node])
-        delete!(state.waiting_data, node)
+    if haskey(state.waiting_data, task) && isempty(state.waiting_data[task])
+        delete!(state.waiting_data, task)
     end
     #evict_all_chunks!(ctx, to_evict)
 end
@@ -823,7 +724,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
     to_send = []
     for (thunk, scope, time_util, alloc_util, occupancy) in thunks
         task_spec = prepare_fire_task!(ctx, state, thunk, proc, scope, time_util, alloc_util, occupancy)
-        task_spec === nothing && continue
+        @assert task_spec !== nothing
 
         # TODO: De-dup common fields (log_sink, uid, etc.)
         push!(to_send, task_spec)
@@ -1256,7 +1157,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
     end
     return errormonitor_tracked("processor $to_proc", schedule(proc_run_task))
 end
-function processor_queue(ctx, uid, proc, sch_model, return_queue)
+function processor_queue(ctx::Context, uid::UInt64, proc::Processor, sch_model::AbstractDecision, return_queue)
     proc_states(uid) do states
         get!(states, proc) do
             queue = PriorityQueue{TaskSpec, UInt32}()
@@ -1275,7 +1176,7 @@ function processor_queue(ctx, uid, proc, sch_model, return_queue)
         end
     end
 end
-function processor_enqueue!(ctx, state::ProcessorState, uid, to_proc::Processor, tasks::Vector{Vector{Any}})
+function processor_enqueue!(ctx, state::ProcessorState, uid, to_proc::Processor, tasks::Vector{TaskSpec})
     istate = state.state
     lock(istate.queue) do queue
         for task in tasks

@@ -27,10 +27,12 @@ Base.put!(t::ThunkFuture, x; error=false) = put!(t.future, (error, x))
     EagerThunkMetadata
 
 Represents some useful metadata pertaining to an `EagerThunk`:
+- `signature::Vector{DataType}` - The full type signature of the task
 - `return_type::Type` - The inferred return type of the task
 - `scope::AbstractScope` - The scope for the task
 """
 mutable struct EagerThunkMetadata
+    signature::Vector{DataType}
     return_type::Type
     scope::AbstractScope
 end

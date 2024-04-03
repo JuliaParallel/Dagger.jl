@@ -193,9 +193,27 @@ Prepares the scheduler to schedule `thunk`. Will mark `thunk` as ready if
 its inputs are satisfied.
 """
 function reschedule_syncdeps!(state, thunk, seen=Set{AnyThunk}())
+    # Bypass if this task has no upstream dependencies
+    @warn "Still need to handle waiting_data for Chunk deps" maxlog=1
+    any_task_deps = false
+    for idx in 1:length(thunk.inputs)
+        _, arg = thunk.inputs[idx]
+        if istask(arg)
+            any_task_deps = true
+            break
+        end
+    end
+    if !any_task_deps
+        push!(state.ready, thunk)
+        return true
+    end
+
+    ready = true
+    orig_thunk = thunk
     to_visit = AnyThunk[thunk]
     while !isempty(to_visit)
         thunk = pop!(to_visit)
+        thunk in seen && continue
         push!(seen, thunk)
         if haskey(state.valid, thunk)
             continue
@@ -258,6 +276,8 @@ function reschedule_syncdeps!(state, thunk, seen=Set{AnyThunk}())
             if !get(state.errored, thunk, false)
                 push!(state.ready, thunk)
             end
+        elseif thunk === orig_thunk
+            ready = false
         end
     end
 end
@@ -435,14 +455,12 @@ function signature(f, args)
     sig_kwarg_names = Symbol[]
     sig_kwarg_types = []
     for (pos, arg) in args
-        if arg isa Dagger.EagerThunk
-            arg = arg.metadata.return_type
-        end
+        T = chunktype(arg)
         if pos === nothing
-            push!(sig, chunktype(arg))
+            push!(sig, T)
         else
             push!(sig_kwarg_names, pos)
-            push!(sig_kwarg_types, chunktype(arg))
+            push!(sig_kwarg_types, T)
         end
     end
     if !isempty(sig_kwarg_names)
