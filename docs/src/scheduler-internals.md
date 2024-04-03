@@ -69,7 +69,7 @@ execution (called "firing"). Once all tasks are either waiting or running, the
 scheduler may sleep until actions need to be performed
 
 When fired tasks have completed executing, an entry will exist in the inbound
-queue signaling the task's result and other metadata. At this point, the most
+queue signalling the task's result and other metadata. At this point, the most
 recently-queued task is removed from the queue, "finished", and placed in the
 "finished" state. Finishing usually unlocks downstream tasks from the waiting
 state and allows them to transition to the ready state.
@@ -117,7 +117,7 @@ outdated, or when its estimates about the task's behavior are inaccurate. To
 minimize the possibility of workload imbalance, the worker schedulers'
 processors will attempt to steal tasks from each other when they are
 under-occupied. Tasks will only be stolen if the task's [scope](scopes.md) is
-compatibl with the processor attempting the steal, so tasks with wider scopes
+compatible with the processor attempting the steal, so tasks with wider scopes
 have better balancing potential.
 
 ## Core: Finishing

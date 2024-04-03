@@ -153,23 +153,23 @@ Stores DAG-global options to be passed to the Dagger.Sch scheduler.
 
 # Arguments
 - `single::Int=0`: (Deprecated) Force all work onto worker with specified id.
-`0` disables this option.
+  `0` disables this option.
 - `proclist=nothing`: (Deprecated) Force scheduler to use one or more
-processors that are instances/subtypes of a contained type. Alternatively, a
-function can be supplied, and the function will be called with a processor as
-the sole argument and should return a `Bool` result to indicate whether or not
-to use the given processor. `nothing` enables all default processors.
+  processors that are instances/subtypes of a contained type. Alternatively, a
+  function can be supplied, and the function will be called with a processor as
+  the sole argument and should return a `Bool` result to indicate whether or not
+  to use the given processor. `nothing` enables all default processors.
 - `allow_errors::Bool=true`: Allow thunks to error without affecting
-non-dependent thunks.
+  non-dependent thunks.
 - `checkpoint=nothing`: If not `nothing`, uses the provided function to save
-the final result of the current scheduler invocation to persistent storage, for
-later retrieval by `restore`.
+  the final result of the current scheduler invocation to persistent storage, for
+  later retrieval by `restore`.
 - `restore=nothing`: If not `nothing`, uses the provided function to return the
-(cached) final result of the current scheduler invocation, were it to execute.
-If this returns a `Chunk`, all thunks will be skipped, and the `Chunk` will be
-returned.  If `nothing` is returned, restoring is skipped, and the scheduler
-will execute as usual. If this function throws an error, restoring will be
-skipped, and the error will be displayed.
+  (cached) final result of the current scheduler invocation, were it to execute.
+  If this returns a `Chunk`, all thunks will be skipped, and the `Chunk` will be
+  returned.  If `nothing` is returned, restoring is skipped, and the scheduler
+  will execute as usual. If this function throws an error, restoring will be
+  skipped, and the error will be displayed.
 """
 Base.@kwdef struct SchedulerOptions
     single::Union{Int,Nothing} = nothing
@@ -186,52 +186,52 @@ Stores Thunk-local options to be passed to the Dagger.Sch scheduler.
 
 # Arguments
 - `single::Int=0`: (Deprecated) Force thunk onto worker with specified id. `0`
-disables this option.
+  disables this option.
 - `proclist=nothing`: (Deprecated) Force thunk to use one or more processors
-that are instances/subtypes of a contained type. Alternatively, a function can
-be supplied, and the function will be called with a processor as the sole
-argument and should return a `Bool` result to indicate whether or not to use
-the given processor. `nothing` enables all default processors.
+  that are instances/subtypes of a contained type. Alternatively, a function can
+  be supplied, and the function will be called with a processor as the sole
+  argument and should return a `Bool` result to indicate whether or not to use
+  the given processor. `nothing` enables all default processors.
 - `time_util::Dict{Type,Any}`: Indicates the maximum expected time utilization
-for this thunk. Each keypair maps a processor type to the utilization, where
-the value can be a real (approximately the number of nanoseconds taken), or
-`MaxUtilization()` (utilizes all processors of this type). By default, the
-scheduler assumes that this thunk only uses one processor.
+  for this thunk. Each keypair maps a processor type to the utilization, where
+  the value can be a real (approximately the number of nanoseconds taken), or
+  `MaxUtilization()` (utilizes all processors of this type). By default, the
+  scheduler assumes that this thunk only uses one processor.
 - `alloc_util::Dict{Type,UInt64}`: Indicates the maximum expected memory
-utilization for this thunk. Each keypair maps a processor type to the
-utilization, where the value is an integer representing approximately the
-maximum number of bytes allocated at any one time.
+  utilization for this thunk. Each keypair maps a processor type to the
+  utilization, where the value is an integer representing approximately the
+  maximum number of bytes allocated at any one time.
 - `occupancy::Dict{Type,Real}`: Indicates the maximum expected processor
-occupancy for this thunk. Each keypair maps a processor type to the
-utilization, where the value can be a real between 0 and 1 (the occupancy
-ratio, where 1 is full occupancy). By default, the scheduler assumes that this
-thunk has full occupancy.
+  occupancy for this thunk. Each keypair maps a processor type to the
+  utilization, where the value can be a real between 0 and 1 (the occupancy
+  ratio, where 1 is full occupancy). By default, the scheduler assumes that this
+  thunk has full occupancy.
 - `allow_errors::Bool=true`: Allow this thunk to error without affecting
-non-dependent thunks.
+  non-dependent thunks.
 - `checkpoint=nothing`: If not `nothing`, uses the provided function to save
-the result of the thunk to persistent storage, for later retrieval by
-`restore`.
+  the result of the thunk to persistent storage, for later retrieval by
+  `restore`.
 - `restore=nothing`: If not `nothing`, uses the provided function to return the
-(cached) result of this thunk, were it to execute.  If this returns a `Chunk`,
-this thunk will be skipped, and its result will be set to the `Chunk`.  If
-`nothing` is returned, restoring is skipped, and the thunk will execute as
-usual. If this function throws an error, restoring will be skipped, and the
-error will be displayed.
+  (cached) result of this thunk, were it to execute.  If this returns a `Chunk`,
+  this thunk will be skipped, and its result will be set to the `Chunk`.  If
+  `nothing` is returned, restoring is skipped, and the thunk will execute as
+  usual. If this function throws an error, restoring will be skipped, and the
+  error will be displayed.
 - `storage::Union{Chunk,Nothing}=nothing`: If not `nothing`, references a
-`MemPool.StorageDevice` which will be passed to `MemPool.poolset` internally
-when constructing `Chunk`s (such as when constructing the return value). The
-device must support `MemPool.CPURAMResource`. When `nothing`, uses
-`MemPool.GLOBAL_DEVICE[]`.
+  `MemPool.StorageDevice` which will be passed to `MemPool.poolset` internally
+  when constructing `Chunk`s (such as when constructing the return value). The
+  device must support `MemPool.CPURAMResource`. When `nothing`, uses
+  `MemPool.GLOBAL_DEVICE[]`.
 - `storage_root_tag::Any=nothing`: If not `nothing`,
-specifies the MemPool storage leaf tag to associate with the thunk's result.
-This tag can be used by MemPool's storage devices to manipulate their behavior,
-such as the file name used to store data on disk."
+  specifies the MemPool storage leaf tag to associate with the thunk's result.
+  This tag can be used by MemPool's storage devices to manipulate their behavior,
+  such as the file name used to store data on disk."
 - `storage_leaf_tag::MemPool.Tag,Nothing}=nothing`: If not `nothing`,
-specifies the MemPool storage leaf tag to associate with the thunk's result.
-This tag can be used by MemPool's storage devices to manipulate their behavior,
-such as the file name used to store data on disk."
+  specifies the MemPool storage leaf tag to associate with the thunk's result.
+  This tag can be used by MemPool's storage devices to manipulate their behavior,
+  such as the file name used to store data on disk."
 - `storage_retain::Bool=false`: The value of `retain` to pass to
-`MemPool.poolset` when constructing the result `Chunk`.
+  `MemPool.poolset` when constructing the result `Chunk`.
 """
 Base.@kwdef struct ThunkOptions
     single::Union{Int,Nothing} = nothing

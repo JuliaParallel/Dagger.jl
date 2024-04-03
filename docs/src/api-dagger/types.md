@@ -14,14 +14,14 @@ EagerThunk
 ```
 
 ## Task Options Types
-```
+```@docs
 Options
 Sch.ThunkOptions
 Sch.SchedulerOptions
 ```
 
 ## Data Management Types
-```
+```@docs
 Chunk
 Shard
 ```
