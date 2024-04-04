@@ -20,6 +20,8 @@ function errormonitor_tracked(name::String, t::Task)
 end
 const ERRORMONITOR_TRACKED = LockedObject(Pair{String,Task}[])
 
+isprecompiling() = ccall(:jl_generating_output, Cint, ()) != 0
+
 """
     unwrap_nested_exception(err::Exception) -> Bool
 

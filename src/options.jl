@@ -14,6 +14,7 @@ Stores per-task options to be passed to the scheduler.
 - `meta::Bool=false`: When `true`, values are not `move`d, and are passed directly as `Chunk`, if they are not immediate values
 - `cache::Bool=false`: When `true`, caches the task's result in it's associated `Thunk` as `.cache_ref`
 - `syncdeps::Set{Any}`: Contains any additional tasks to synchronize with
+- `schedule_model`: The scheduling decision model to use for this task. Defaults to the scheduler's global decision model.
 - `time_util::Dict{Type,Any}`: Indicates the maximum expected time utilization for this task. Each keypair maps a processor type to the utilization, where the value can be a real (approximately the number of nanoseconds taken), or `MaxUtilization()` (utilizes all processors of this type). By default, the scheduler assumes that this task only uses one processor.
 - `alloc_util::Dict{Type,UInt64}`: Indicates the maximum expected memory utilization for this task. Each keypair maps a processor type to the utilization, where the value is an integer representing approximately the maximum number of bytes allocated at any one time.
 - `occupancy::Dict{Type,Real}`: Indicates the maximum expected processor occupancy for this task. Each keypair maps a processor type to the utilization, where the value can be a real between 0 and 1 (the occupancy ratio, where 1 is full occupancy). By default, the scheduler assumes that this task has full occupancy.
@@ -36,6 +37,8 @@ Base.@kwdef mutable struct Options
     cache::Bool = false
 
     syncdeps::Union{Set{Any},Nothing} = nothing
+
+    schedule_model::Any = nothing
 
     time_util::Union{Dict{Type,Any},Nothing} = nothing
     alloc_util::Union{Dict{Type,UInt64},Nothing} = nothing
@@ -116,6 +119,7 @@ function populate_defaults!(opts::Options, sig)
     maybe_default!(opts, :meta),
     maybe_default!(opts, :cache),
     maybe_default!(opts, :syncdeps),
+    maybe_default!(opts, :schedule_model),
     maybe_default!(opts, :time_util),
     maybe_default!(opts, :alloc_util),
     maybe_default!(opts, :occupancy),

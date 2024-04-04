@@ -19,13 +19,13 @@ function schedule!(ctx, state, procs::Vector{<:Processor}=procs_to_use(ctx))
             for task in tasks
                 # FIXME: Don't recompute these
                 sig = signature(task, state)
-                opts = Options(ctx.options)
-                Dagger.options_merge!(opts, task.options)
-                Dagger.populate_defaults!(opts, sig)
+                options = Options(ctx.options)
+                Dagger.options_merge!(options, task.options)
+                Dagger.populate_defaults!(options, sig)
                 scope = if task.f isa Chunk
                     task.f.scope
                 else
-                    if opts.proclist !== nothing
+                    if options.proclist !== nothing
                         # proclist overrides scope selection
                         AnyScope()
                     else
@@ -33,7 +33,7 @@ function schedule!(ctx, state, procs::Vector{<:Processor}=procs_to_use(ctx))
                     end
                 end
                 #=has_cap,=# est_time_util, est_alloc_util, est_occupancy =
-                    task_utilization(state, proc, opts, sig)
+                    task_utilization(state, proc, options, sig)
                 if true#has_cap
                     # Schedule task onto proc
                     proc_tasks = get!(to_fire, proc) do
@@ -91,15 +91,15 @@ function schedule!(ctx, state, procs::Vector{<:Processor}, task_sched::TaskSched
     sig = signature(task, state)
 
     # Generate concrete options
-    opts = Options(ctx.options)
-    Dagger.options_merge!(opts, task.options)
-    Dagger.populate_defaults!(opts, sig)
+    options = Options(ctx.options)
+    Dagger.options_merge!(options, task.options)
+    Dagger.populate_defaults!(options, sig)
 
     # Calculate initial task scope
     scope = if task.f isa Chunk
         task.f.scope
     else
-        if opts.proclist !== nothing
+        if options.proclist !== nothing
             # proclist overrides scope selection
             AnyScope()
         else
@@ -130,13 +130,14 @@ function schedule!(ctx, state, procs::Vector{<:Processor}, task_sched::TaskSched
     all_procs = unique(vcat([collect(Dagger.get_processors(gp)) for gp in procs]...))
 
     # Decide on an ordered set of candidate processors to schedule on
-    local_procs = make_decision(state.schedule_model, :signature, :schedule, sig, inputs, all_procs)
+    schedule_model = @something(options.schedule_model, state.schedule_model)
+    local_procs = make_decision(schedule_model, :signature, :schedule, sig, inputs, all_procs)
 
     # Select the first valid processor
     scheduled = false
     for proc in local_procs
         gproc = get_parent(proc)
-        can_use, scope = can_use_proc(task, gproc, proc, opts, scope)
+        can_use, scope = can_use_proc(task, gproc, proc, options, scope)
         if can_use
             launch_group = get!(Vector{Thunk}, task_sched.launch_groups, proc)
             push!(launch_group, task)

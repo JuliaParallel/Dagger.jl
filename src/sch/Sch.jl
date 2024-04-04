@@ -807,7 +807,7 @@ function prepare_fire_task!(ctx, state, thunk, proc, scope, time_util, alloc_uti
                     options.get_result, options.cache, options.meta,
                     options, propagated,
                     (log_sink=ctx.log_sink, profile=ctx.profile),
-                    sch_handle, state.uid, state.schedule_model)
+                    sch_handle, state.uid)
 end
 
 @static if VERSION >= v"1.9"
@@ -891,14 +891,12 @@ struct TaskSpec
     ctx_vars::NamedTuple
     sch_handle::SchedulerHandle
     sch_uid::UInt64
-    sch_model::AbstractDecision
 end
 Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
 
 struct ProcessorInternalState
     ctx::Context
     proc::Processor
-    sch_model::AbstractDecision
     queue::LockedObject{PriorityQueue{TaskSpec, UInt32, Base.Order.ForwardOrdering}}
     reschedule::Doorbell
     tasks::Dict{ThunkID,Task}
@@ -949,7 +947,6 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
     to_proc = istate.proc
     proc_run_task = @task begin
         ctx = istate.ctx
-        sch_model = istate.sch_model
         tasks = istate.tasks
         proc_occupancy = istate.proc_occupancy
         time_pressure = istate.time_pressure
@@ -1068,7 +1065,17 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
 
             # Execute the task and return its result
             t = @task begin
-                processor_run_metrics = required_metrics_to_collect(sch_model, :processor, :run)
+                schedule_model = task.options.schedule_model
+                if schedule_model === nothing
+                    if !isprecompiling() && task.Tf !== typeof(eager_thunk)
+                        Sch.init_eager()
+                        sch_state = EAGER_STATE[]
+                        schedule_model = @lock sch_state.lock sch_state.schedule_model
+                    else
+                        schedule_model = FallbackModel()
+                    end
+                end
+                processor_run_metrics = required_metrics_to_collect(schedule_model, :processor, :run)
                 errored = false
                 result = nothing
                 metrics = nothing
@@ -1157,13 +1164,13 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
     end
     return errormonitor_tracked("processor $to_proc", schedule(proc_run_task))
 end
-function processor_queue(ctx::Context, uid::UInt64, proc::Processor, sch_model::AbstractDecision, return_queue)
+function processor_queue(ctx::Context, uid::UInt64, proc::Processor, return_queue)
     proc_states(uid) do states
         get!(states, proc) do
             queue = PriorityQueue{TaskSpec, UInt32}()
             queue_locked = LockedObject(queue)
             reschedule = Doorbell()
-            istate = ProcessorInternalState(ctx, proc, sch_model,
+            istate = ProcessorInternalState(ctx, proc,
                                             queue_locked, reschedule,
                                             Dict{Int,Task}(),
                                             Ref(UInt32(0)), Ref(UInt64(0)),
@@ -1226,8 +1233,7 @@ function do_tasks(to_proc, return_queue, tasks::Vector{TaskSpec})
     ctx_vars = first(tasks).ctx_vars
     ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
     uid = first(tasks).sch_uid
-    sch_model = first(tasks).sch_model
-    state = processor_queue(ctx, uid, to_proc, sch_model, return_queue)
+    state = processor_queue(ctx, uid, to_proc, return_queue)
     processor_enqueue!(ctx, state, uid, to_proc, tasks)
 end
 
@@ -1308,8 +1314,20 @@ function do_task(to_proc::Processor, task::TaskSpec)
     timespan_finish(ctx, :storage_wait, (;thunk_id, processor=to_proc), (;f, device=typeof(to_storage)))
     =#
 
+    # Get the scheduling model to use
+    schedule_model = task.options.schedule_model
+    if schedule_model === nothing
+        if !isprecompiling() && task.Tf !== typeof(eager_thunk)
+            Sch.init_eager()
+            sch_state = EAGER_STATE[]
+            schedule_model = @lock sch_state.lock sch_state.schedule_model
+        else
+            schedule_model = FallbackModel()
+        end
+    end
+
     # Determine which metrics to collect for chunk move
-    chunk_move_metrics = required_metrics_to_collect(task.sch_model, :chunk, :move)
+    chunk_move_metrics = required_metrics_to_collect(schedule_model, :chunk, :move)
 
     @dagdebug thunk_id :execute "Moving data"
 
@@ -1419,7 +1437,7 @@ function do_task(to_proc::Processor, task::TaskSpec)
 
     # Determine which metrics to collect for task execution
     signature_metrics = Dict{AnalysisOrMetric,Any}()
-    signature_execute_metrics = required_metrics_to_collect(task.sch_model, :signature, :execute)
+    signature_execute_metrics = required_metrics_to_collect(schedule_model, :signature, :execute)
 
     # Calculate the task's signature
     signature = Any[]

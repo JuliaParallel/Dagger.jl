@@ -159,7 +159,7 @@ function eager_submit_core!(id::ThunkID, future, finalizer_ref, f, args, options
 
             # Submit the task to a processor run queue
             uid = state.uid
-            state = Sch.processor_queue(ctx, uid, to_proc, task_spec.sch_model, state.chan)
+            state = Sch.processor_queue(ctx, uid, to_proc, state.chan)
             Sch.processor_enqueue!(ctx, state, uid, to_proc, [task_spec])
         else
             #@info "Core $id: $f"
@@ -216,7 +216,8 @@ function eager_submit_inline!(id::ThunkID, future, finalizer_ref, f, args, optio
     end
 
     _args, kwargs = process_positional_args(args)
-    metrics = Sch.required_metrics_to_collect(state.schedule_model, :signature, :execute)
+    schedule_model = @something(options.schedule_model, state.schedule_model)
+    metrics = Sch.required_metrics_to_collect(schedule_model, :signature, :execute)
     error = false
     result = try
         Sch.with_metrics(metrics, :signature, :execute, sig) do
