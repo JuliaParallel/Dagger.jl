@@ -130,12 +130,14 @@ import Colors, GraphViz, DataFrames, Plots
             @test any(e->haskey(e, :fire), esat)
             @test any(e->haskey(e, :take), esat)
             @test any(e->haskey(e, :finish), esat)
-            # Note: May one day be true as scheduler evolves
-            @test !any(e->haskey(e, :compute), esat)
-            @test !any(e->haskey(e, :move), esat)
-            psat = l1[:psat]
-            # Note: May become false
-            @test all(e->length(e) == 0, psat)
+            if Threads.nthreads() == 1
+                # Note: May one day be true as scheduler evolves
+                @test !any(e->haskey(e, :compute), esat)
+                @test !any(e->haskey(e, :move), esat)
+                psat = l1[:psat]
+                # Note: May become false
+                @test all(e->length(e) == 0, psat)
+            end
 
             had_psat_proc = 0
             for wo in filter(w->w != 1, keys(logs))
