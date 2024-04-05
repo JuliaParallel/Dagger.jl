@@ -169,6 +169,7 @@ import Colors, GraphViz, DataFrames, Plots
     if VERSION >= v"1.9-"
         @testset "show_plan/render_plan built-in" begin
             Dagger.enable_logging!()
+
             A = distribute(rand(4, 4), Blocks(8, 8))
             sum(A)
             logs = Dagger.fetch_logs!()
@@ -178,6 +179,8 @@ import Colors, GraphViz, DataFrames, Plots
 
             # PlotsExt
             @test Dagger.render_logs(logs, :plots_gantt) !== nothing
+
+            Dagger.disable_logging!()
         end
     end
 end
