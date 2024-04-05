@@ -3,6 +3,7 @@ abstract type MemorySpace end
 struct CPURAMMemorySpace <: MemorySpace
     owner::Int
 end
+root_worker_id(space::CPURAMMemorySpace) = space.owner
 
 memory_space(x) = CPURAMMemorySpace(myid())
 function memory_space(x::Chunk)

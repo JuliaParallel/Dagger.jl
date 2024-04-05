@@ -54,7 +54,15 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
                 # N.B. Different Chunks with the same DRef handle will hash to the same slot,
                 # so we just pick an equivalent Chunk as our upstream
                 if haskey(state.waiting_data, arg)
-                    arg = only(filter(o->o isa Chunk && o.handle == arg.handle, keys(state.waiting_data)))::Chunk
+                    newarg = nothing
+                    for other in keys(state.waiting_data)
+                        if other isa Chunk && other.handle == arg.handle
+                            newarg = other
+                            break
+                        end
+                    end
+                    @assert newarg !== nothing
+                    arg = newarg::Chunk
                 end
                 WeakChunk(arg)
             else

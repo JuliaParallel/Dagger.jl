@@ -113,3 +113,8 @@ function stage(ctx::Context, node::MapChunk)
     # TODO: Concrete type
     DArray(Any, domain(inputs[1]), domainchunks(inputs[1]), thunks)
 end
+
+# Basic indexing helpers
+
+Base.first(A::DArray) = A[begin]
+Base.last(A::DArray) = A[end]

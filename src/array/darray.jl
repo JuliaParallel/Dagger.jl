@@ -9,14 +9,19 @@ import Serialization: serialize, deserialize
 
 An `N`-dimensional domain over an array.
 """
-struct ArrayDomain{N}
-    indexes::NTuple{N, Any}
+struct ArrayDomain{N,T<:Tuple}
+    indexes::T
 end
-include("../lib/domain-blocks.jl")
 
-
-ArrayDomain(xs...) = ArrayDomain(xs)
+ArrayDomain(xs::T) where T<:Tuple = ArrayDomain{length(xs),T}(xs)
+ArrayDomain(xs::NTuple{N,Base.OneTo}) where N =
+    ArrayDomain{N,NTuple{N,UnitRange{Int}}}(ntuple(i->UnitRange(xs[i]), N))
+ArrayDomain(xs::NTuple{N,Int}) where N =
+    ArrayDomain{N,NTuple{N,UnitRange{Int}}}(ntuple(i->xs[i]:xs[i], N))
+ArrayDomain(xs...) = ArrayDomain((xs...,))
 ArrayDomain(xs::Array) = ArrayDomain((xs...,))
+
+include("../lib/domain-blocks.jl")
 
 indexes(a::ArrayDomain) = a.indexes
 chunks(a::ArrayDomain{N}) where {N} = DomainBlocks(
@@ -117,6 +122,7 @@ indicates the number of dimensions in the resulting array.
 """
 Blocks(xs::Int...) = Blocks(xs)
 
+const DArrayDomain{N} = ArrayDomain{N, NTuple{N, UnitRange{Int}}}
 
 """
     DArray{T,N,F}(domain, subdomains, chunks, concat)
@@ -133,8 +139,8 @@ An N-dimensional distributed array of element type T, with a concatenation funct
   and concatenates them along dimension `d`. `cat` is used by default.
 """
 mutable struct DArray{T,N,B<:AbstractBlocks{N},F} <: ArrayOp{T, N}
-    domain::ArrayDomain{N}
-    subdomains::AbstractArray{ArrayDomain{N}, N}
+    domain::DArrayDomain{N}
+    subdomains::AbstractArray{DArrayDomain{N}, N}
     chunks::AbstractArray{Any, N}
     partitioning::B
     concat::F
@@ -143,20 +149,27 @@ mutable struct DArray{T,N,B<:AbstractBlocks{N},F} <: ArrayOp{T, N}
     end
 end
 
+WrappedDArray{T,N} = Union{<:DArray{T,N}, Transpose{<:DArray{T,N}}, Adjoint{<:DArray{T,N}}}
+WrappedDMatrix{T} = WrappedDArray{T,2}
+WrappedDVector{T} = WrappedDArray{T,1}
+DMatrix{T} = DArray{T,2}
+DVector{T} = DArray{T,1}
+
+
 # mainly for backwards-compatibility
 DArray{T, N}(domain, subdomains, chunks, partitioning, concat=cat) where {T,N} =
     DArray(T, domain, subdomains, chunks, partitioning, concat)
 
-function DArray(T, domain::ArrayDomain{N},
-                subdomains::AbstractArray{ArrayDomain{N}, N},
-                chunks::AbstractArray{<:Any, N}, partitioning::B, concat=cat) where {N,B<:AbstractMultiBlocks{N}}
+function DArray(T, domain::DArrayDomain{N},
+                subdomains::AbstractArray{DArrayDomain{N}, N},
+                chunks::AbstractArray{<:Any, N}, partitioning::B, concat=cat) where {N,B<:AbstractBlocks{N}}
     DArray{T,N,B,typeof(concat)}(domain, subdomains, chunks, partitioning, concat)
 end
 
-function DArray(T, domain::ArrayDomain{N},
-                subdomains::ArrayDomain{N},
+function DArray(T, domain::DArrayDomain{N},
+                subdomains::DArrayDomain{N},
                 chunks::Any, partitioning::B, concat=cat) where {N,B<:AbstractSingleBlocks{N}}
-    _subdomains = Array{ArrayDomain{N}, N}(undef, ntuple(i->1, N)...)
+    _subdomains = Array{DArrayDomain{N}, N}(undef, ntuple(i->1, N)...)
     _subdomains[1] = subdomains
     _chunks = Array{Any, N}(undef, ntuple(i->1, N)...)
     _chunks[1] = chunks
@@ -201,6 +214,13 @@ function Base.similar(x::DArray{T,N}) where {T,N}
     return DArray(T, x.domain, x.subdomains, thunks, x.partitioning, x.concat)
 end
 
+function Base.similar(A::DArray{T,N} where T, ::Type{S}, dims::Dims{N}) where {S,N}
+    d = ArrayDomain(map(x->1:x, dims))
+    p = A.partitioning
+    a = AllocateArray(S, (_, _, x...) -> Array{S,N}(undef, x...), d, partition(p, d), p)
+    return _to_darray(a)
+end
+
 Base.copy(x::DArray{T,N,B,F}) where {T,N,B,F} =
     map(identity, x)::DArray{T,N,B,F}
 
@@ -214,7 +234,7 @@ Base.:(/)(x::DArray{T,N,B,F}, y::U) where {T<:Real,U<:Real,N,B,F} =
 A `view` of a `DArray` chunk returns a `DArray` of `Thunk`s.
 """
 function Base.view(c::DArray, d)
-    subchunks, subdomains = lookup_parts(chunks(c), domainchunks(c), d)
+    subchunks, subdomains = lookup_parts(c, chunks(c), domainchunks(c), d)
     d1 = alignfirst(d)
     DArray(eltype(c), d1, subdomains, subchunks, c.partitioning, c.concat)
 end
@@ -252,7 +272,7 @@ function group_indices(cumlength, idxs::AbstractRange)
 end
 
 _cumsum(x::AbstractArray) = length(x) == 0 ? Int[] : cumsum(x)
-function lookup_parts(ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomain{N}) where N
+function lookup_parts(A::DArray, ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomain{N}) where N
     groups = map(group_indices, subdmns.cumlength, indexes(d))
     sz = map(length, groups)
     pieces = Array{Any}(undef, sz)
@@ -264,7 +284,15 @@ function lookup_parts(ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomai
     end
     out_cumlength = map(g->_cumsum(map(x->length(x[2]), g)), groups)
     out_dmn = DomainBlocks(ntuple(x->1,Val(N)), out_cumlength)
-    pieces, out_dmn
+    return pieces, out_dmn
+end
+function lookup_parts(A::DArray, ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomain{S}) where {N,S}
+    if S != 1
+        throw(BoundsError(A, d.indexes))
+    end
+    inds = CartesianIndices(A)[d.indexes...]
+    new_d = ntuple(i->first(inds).I[i]:last(inds).I[i], N)
+    return lookup_parts(A, ps, subdmns, ArrayDomain(new_d))
 end
 
 """

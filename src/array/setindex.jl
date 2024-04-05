@@ -1,4 +1,3 @@
-
 export setindex
 
 struct SetIndex{T,N} <: ArrayOp{T,N}
@@ -41,6 +40,6 @@ function stage(ctx::Context, sidx::SetIndex)
             q
         end
     end
-    inp.chunks = ps
-    inp
+
+    return DArray(eltype(inp), d, subdmns, ps, inp.partitioning)
 end

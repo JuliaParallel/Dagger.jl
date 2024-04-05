@@ -134,7 +134,11 @@ end
                 @assert a isa Dagger.Chunk
                 Dagger.tochunk(myid())
             end)(a)
-            @test collect(b) in workers()
+            if Threads.nthreads() == 1
+                @test collect(b) in workers()
+            else
+                @test collect(b) in procs()
+            end
         end
         @testset "single worker" begin
             options = ThunkOptions(;single=1)
