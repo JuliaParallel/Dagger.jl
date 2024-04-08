@@ -405,7 +405,20 @@ function cleanup_proc(state, p, log_sink)
             delete!(WORKER_MONITOR_CHANS[wid], state.uid)
         end
     end
-    remote_do(_cleanup_proc, wid, state.uid, log_sink)
+
+    # If the worker process is still alive, clean it up
+    if wid in workers()
+        try
+            remotecall_wait(_cleanup_proc, wid, state.uid, log_sink)
+        catch ex
+            # We allow ProcessExitedException's, which means that the worker
+            # shutdown halfway through cleanup.
+            if !(ex isa ProcessExitedException)
+                rethrow()
+            end
+        end
+    end
+
     timespan_finish(ctx, :cleanup_proc, (;worker=wid), nothing)
 end
 
