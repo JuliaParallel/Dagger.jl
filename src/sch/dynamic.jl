@@ -33,9 +33,18 @@ function safepoint(state)
     if state.halt.set
         # Force dynamic thunks and listeners to terminate
         for (inp_chan,out_chan) in values(state.worker_chans)
-            close(inp_chan)
-            close(out_chan)
+            # Closing these channels will fail if the worker died, which we
+            # allow.
+            try
+                close(inp_chan)
+                close(out_chan)
+            catch ex
+                if !(ex isa ProcessExitedException)
+                    rethrow()
+                end
+            end
         end
+
         # Throw out of scheduler
         throw(SchedulerHaltedException())
     end
