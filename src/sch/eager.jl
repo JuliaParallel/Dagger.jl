@@ -6,7 +6,7 @@ const EAGER_STATE = Ref{Union{ComputeState,Nothing}}(nothing)
 
 function eager_context()
     if EAGER_CONTEXT[] === nothing
-        EAGER_CONTEXT[] = Context([myid(),workers()...])
+        EAGER_CONTEXT[] = Context(procs())
     end
     return EAGER_CONTEXT[]
 end
