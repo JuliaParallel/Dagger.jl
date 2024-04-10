@@ -7,8 +7,9 @@ function stream_fetch_values!(::Type{RemoteFetcher}, T, store_ref::Chunk{Store_r
             put!(buffer, value)
         end
     else
-        tls = Dagger.get_tls()
+        thunk_id = STREAM_THUNK_ID[]
         values = remotecall_fetch(store_ref.handle.owner, store_ref.handle, id, T, Store_remote) do store_ref, id, T, Store_remote
+            STREAM_THUNK_ID[] = thunk_id
             store = MemPool.poolget(store_ref)::Store_remote
             values = T[]
             while !isempty(store, id)
