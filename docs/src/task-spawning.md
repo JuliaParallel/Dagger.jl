@@ -141,6 +141,34 @@ but can be enabled by setting the scheduler/thunk option ([Scheduler and Thunk o
 non-dynamic usecases, since any thunk failure will propagate down to the output
 thunk regardless of where it occurs.
 
+## Cancellation
+
+Sometimes a task runs longer than expected (maybe it's hanging due to a bug),
+or the user decides that they don't want to wait on a task to run to
+completion. In these cases, Dagger provides the `Dagger.cancel!` function,
+which allows for stopping a task while it's running, or terminating it before
+it gets the chance to start running.
+
+```julia
+t = Dagger.@spawn sleep(1000)
+# We're bored, let's cancel `t`
+Dagger.cancel!(t)
+```
+
+`Dagger.cancel!` is generally safe to call, as it will not actually *force* a
+task to stop; instead, Dagger will simply "abandon" the task and allow it to
+finish on its own in the background, and it will not block the execution of
+other `DTask`s that are queued to run. It is possible to force-cancel a task by
+doing `Dagger.cancel!(t; force=true)`, but this is generally discouraged, as it
+can cause memory leaks, hangs, and segfaults.
+
+If it's desired to cancel all tasks that are scheduled or running, one can call
+`Dagger.cancel!()`, and all tasks will be abandoned (or force-cancelled, if
+specified). Additionally, if Dagger's scheduler needs to be restarted for any
+reason, one can call `Dagger.cancel!(;halt_sch=true)` to stop the scheduler and
+all tasks. The scheduler will be automatically restarted on the next
+`@spawn`/`spawn` call.
+
 ## Lazy API
 
 Alongside the modern eager API, Dagger also has a legacy lazy API, accessible

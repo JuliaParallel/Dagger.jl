@@ -535,3 +535,14 @@ end
         end
     end
 end
+
+@testset "Cancellation" begin
+    t = Dagger.@spawn scope=Dagger.scope(worker=1, thread=1) sleep(100)
+    start_time = time_ns()
+    Dagger.cancel!(t)
+    @test_throws_unwrap Dagger.DTaskFailedException fetch(t)
+    t = Dagger.@spawn scope=Dagger.scope(worker=1, thread=1) yield()
+    fetch(t)
+    finish_time = time_ns()
+    @test (finish_time - start_time) * 1e-9 < 100
+end
