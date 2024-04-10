@@ -3,7 +3,7 @@ function task_id end
 
 const DAGDEBUG_CATEGORIES = Symbol[:global, :submit, :schedule, :scope,
                                    :take, :execute, :move, :processor,
-                                   :stream]
+                                   :stream, :cancel]
 macro dagdebug(thunk, category, msg, args...)
     cat_sym = category.value
     @gensym id
