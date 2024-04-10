@@ -26,6 +26,12 @@ function execute!(proc::ThreadProc, @nospecialize(f), @nospecialize(args...); @n
         fetch(task)
         return result[]
     catch err
+        if err isa InterruptException
+            if !istaskdone(task)
+                # Propagate cancellation signal
+                Threads.@spawn Base.throwto(task, InterruptException())
+            end
+        end
         err, frames = Base.current_exceptions(task)[1]
         rethrow(CapturedException(err, frames))
     end
