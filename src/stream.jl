@@ -8,9 +8,7 @@ mutable struct StreamStore{T,B}
         new{T,B}(zeros(Int, 0), Dict{Int,B}(), buffer_amount,
                  true, Threads.Condition())
 end
-tid() = Dagger.Sch.sch_handle().thunk_id.id
-function uid()
-    thunk_id = tid()
+function tid_to_uid(thunk_id)
     lock(Sch.EAGER_ID_MAP) do id_map
         for (uid, otid) in id_map
             if thunk_id == otid
@@ -20,15 +18,17 @@ function uid()
     end
 end
 function Base.put!(store::StreamStore{T,B}, value) where {T,B}
+    thunk_id = STREAM_THUNK_ID[]
+    uid = tid_to_uid(thunk_id)
     @lock store.lock begin
         if !isopen(store)
-            @dagdebug nothing :stream_put "[$(uid())] closed!"
+            @dagdebug thunk_id :stream "[$uid] closed!"
             throw(InvalidStateException("Stream is closed", :closed))
         end
-        @dagdebug nothing :stream_put "[$(uid())] adding $value"
+        @dagdebug thunk_id :stream "[$uid] adding $value"
         for buffer in values(store.buffers)
             while isfull(buffer)
-                @dagdebug nothing :stream_put "[$(uid())] buffer full, waiting"
+                @dagdebug thunk_id :stream "[$uid] buffer full, waiting"
                 wait(store.lock)
             end
             put!(buffer, value)
@@ -37,15 +37,17 @@ function Base.put!(store::StreamStore{T,B}, value) where {T,B}
     end
 end
 function Base.take!(store::StreamStore, id::UInt)
+    thunk_id = STREAM_THUNK_ID[]
+    uid = tid_to_uid(thunk_id)
     @lock store.lock begin
         buffer = store.buffers[id]
         while isempty(buffer) && isopen(store, id)
-            @dagdebug nothing :stream_take "[$(uid())] no elements, not taking"
+            @dagdebug thunk_id :stream "[$uid] no elements, not taking"
             wait(store.lock)
         end
-        @dagdebug nothing :stream_take "[$(uid())] wait finished"
+        @dagdebug thunk_id :stream "[$uid] wait finished"
         if !isopen(store, id)
-            @dagdebug nothing :stream_take "[$(uid())] closed!"
+            @dagdebug thunk_id :stream "[$uid] closed!"
             throw(InvalidStateException("Stream is closed", :closed))
         end
         unlock(store.lock)
@@ -54,7 +56,7 @@ function Base.take!(store::StreamStore, id::UInt)
         finally
             lock(store.lock)
         end
-        @dagdebug nothing :stream_take "[$(uid())] value accepted"
+        @dagdebug thunk_id :stream "[$uid] value accepted"
         notify(store.lock)
         return value
     end
@@ -244,6 +246,8 @@ function cancel_stream!(t::DTask)
     end
 end
 
+const STREAM_THUNK_ID = TaskLocalValue{Int}(()->0)
+
 struct StreamingFunction{F, S}
     f::F
     stream::S
@@ -252,7 +256,9 @@ chunktype(sf::StreamingFunction{F}) where F = F
 function (sf::StreamingFunction)(args...; kwargs...)
     @nospecialize sf args kwargs
     result = nothing
-    thunk_id = tid()
+    thunk_id = Sch.sch_handle().thunk_id.id
+    STREAM_THUNK_ID[] = thunk_id
+    # FIXME: Remove when scheduler is distributed
     uid = remotecall_fetch(1, thunk_id) do thunk_id
         lock(Sch.EAGER_ID_MAP) do id_map
             for (uid, otid) in id_map
@@ -293,13 +299,13 @@ function (sf::StreamingFunction)(args...; kwargs...)
             end
         end
         for stream in streams
-            @dagdebug nothing :stream_close "[$uid] dropping waiter"
+            @dagdebug thunk_id :stream "[$uid] dropping waiter"
             remove_waiters!(stream, uid)
-            @dagdebug nothing :stream_close "[$uid] dropped waiter"
+            @dagdebug thunk_id :stream "[$uid] dropped waiter"
         end
 
         # Ensure downstream tasks also terminate
-        @dagdebug nothing :stream_close "[$uid] closed stream"
+        @dagdebug thunk_id :stream "[$uid] closed stream"
         close(sf.stream)
     end
 end
