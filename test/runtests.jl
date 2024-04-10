@@ -10,6 +10,7 @@ tests = [
     ("Mutation", "mutation.jl"),
     ("Task Queues", "task-queues.jl"),
     ("Datadeps", "datadeps.jl"),
+    ("Streaming", "streaming.jl"),
     ("Domain Utilities", "domain.jl"),
     ("Array - Allocation", "array/allocation.jl"),
     ("Array - Indexing", "array/indexing.jl"),
@@ -83,7 +84,6 @@ else
     to_test = all_test_names
     @info "Running all tests"
 end
-
 
 using Distributed
 if additional_workers > 0
