@@ -21,6 +21,7 @@ if !isdefined(Base, :ScopedValues)
 else
     import Base.ScopedValues: ScopedValue, with
 end
+import TaskLocalValues: TaskLocalValue
 
 if !isdefined(Base, :get_extension)
 using Requires
