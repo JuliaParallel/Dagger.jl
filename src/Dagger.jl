@@ -53,6 +53,7 @@ include("thunk.jl")
 include("submission.jl")
 include("chunks.jl")
 include("memory-spaces.jl")
+include("cancellation.jl")
 
 # Task scheduling
 include("compute.jl")
