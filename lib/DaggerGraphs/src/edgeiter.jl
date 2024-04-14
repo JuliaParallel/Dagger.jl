@@ -7,6 +7,7 @@ DGraphEdgeIter(g::DGraph{T}; metadata::Bool=false, meta_f=nothing) where T =
 struct DGraphEdgeIterState{T}
     adj::Bool
     part::Int
+    bg_part::Tuple{Int,Int}
     idx::Int
     cache
     cache_meta
@@ -22,11 +23,11 @@ function Base.iterate(iter::DGraphEdgeIter{T}) where T
     elseif sum(g.parts_ne; init=0) > 0
         # Start with partitions
         seen = is_directed(g) ? nothing : Set{Edge{T}}()
-        return iterate(iter, DGraphEdgeIterState{T}(false, 1, 1, nothing, nothing, seen))
+        return iterate(iter, DGraphEdgeIterState{T}(false, 1, (1, 1), 1, nothing, nothing, seen))
     elseif sum(g.bg_adjs_ne_src; init=0) > 0
         # Start with background AdjLists
         seen = is_directed(g) ? nothing : Set{Edge{T}}()
-        return iterate(iter, DGraphEdgeIterState{T}(true, 1, 1, nothing, nothing, seen))
+        return iterate(iter, DGraphEdgeIterState{T}(true, 1, (1, 1), 1, nothing, nothing, seen))
     else
         return nothing
     end
@@ -35,6 +36,7 @@ function Base.iterate(iter::DGraphEdgeIter{T,M}, state::DGraphEdgeIterState{T}) 
     g = iter.graph
     adj = state.adj
     part = state.part
+    bg_part = state.bg_part
     idx = state.idx
     cache = state.cache
     cache_meta = state.cache_meta
@@ -46,7 +48,7 @@ function Base.iterate(iter::DGraphEdgeIter{T,M}, state::DGraphEdgeIterState{T}) 
     if !adj
         if part > length(g.parts)
             # Restart with background AdjLists
-            return iterate(iter, DGraphEdgeIterState{T}(true, 1, 1, nothing, nothing, seen))
+            return iterate(iter, DGraphEdgeIterState{T}(true, 1, (1, 1), 1, nothing, nothing, seen))
         end
         if cache === nothing
             cache = map(Tuple, fetch(Dagger.@spawn edges(g.parts[part])))
@@ -64,14 +66,14 @@ function Base.iterate(iter::DGraphEdgeIter{T,M}, state::DGraphEdgeIterState{T}) 
             end
         end
     else
-        if part > length(g.bg_adjs)
+        if bg_part[1] > size(g.bg_adjs, 1) || bg_part[2] > size(g.bg_adjs, 2)
             # All done!
             return nothing
         end
         if cache === nothing
-            cache = map(Tuple, fetch(Dagger.@spawn edges(g.bg_adjs[part])))
+            cache = map(Tuple, fetch(Dagger.@spawn edges(g.bg_adjs[bg_part...])))
             if M
-                cache_meta = edge_metadata_for(fetch(g.bg_adjs_e_meta[part]), cache)
+                cache_meta = edge_metadata_for(fetch(g.bg_adjs_e_meta[bg_part...]), cache)
             end
         end
     end
@@ -80,7 +82,14 @@ function Base.iterate(iter::DGraphEdgeIter{T,M}, state::DGraphEdgeIterState{T}) 
 
     # Skip empty edge sets
     if isempty(cache)
-        part += 1
+        if !adj
+            part += 1
+        else
+            bg_part = (bg_part[1], bg_part[2] + 1)
+            if bg_part[2] > size(g.bg_adjs, 2)
+                bg_part = (bg_part[1] + 1, 1)
+            end
+        end
         idx = 1
         cache = nothing
         cache_meta = nothing
@@ -88,25 +97,27 @@ function Base.iterate(iter::DGraphEdgeIter{T,M}, state::DGraphEdgeIterState{T}) 
     end
     cache::Vector{Tuple{T,T}}
 
+
     # Get the current edge
     value = Edge(cache[idx])
     if M
         value_meta = cache_meta[idx]
     end
     idx += 1
-    cur_part = part
 
     # Reset if this partition/AdjList is exhausted
     if idx > length(cache)
-        part += 1
+        if !adj
+            part += 1
+        else
+            bg_part = (bg_part[1], bg_part[2] + 1)
+            if bg_part[2] > size(g.bg_adjs, 2)
+                bg_part = (bg_part[1] + 1, 1)
+            end
+        end
         idx = 1
         cache = nothing
-    end
-
-    # Restart if this edge isn't "owned" by this AdjList
-    # FIXME: Don't use src(value) for undirected
-    if adj && !(src(value) in g.parts_nv[cur_part])
-        @goto start
+        cache_meta = nothing
     end
 
     # Restart if this edge has already been seen (undirected case)
@@ -121,6 +132,9 @@ function Base.iterate(iter::DGraphEdgeIter{T,M}, state::DGraphEdgeIterState{T}) 
         push!(seen, value)
     end
 
+    if src(value) > nv(g) || dst(value) > nv(g)
+        error("Edge $value is out of bounds for graph with $(nv(g)) vertices")
+    end
     return (M ? (value, value_meta) : value,
-            DGraphEdgeIterState{T}(adj, part, idx, cache, cache_meta, seen))
+            DGraphEdgeIterState{T}(adj, part, bg_part, idx, cache, cache_meta, seen))
 end
