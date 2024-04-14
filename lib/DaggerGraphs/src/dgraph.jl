@@ -104,14 +104,20 @@ DGraph(x::T; kwargs...) where {T<:Integer} = DGraph{T}(x; kwargs...)
 DGraph(x::AbstractGraph{T}; kwargs...) where {T<:Integer} = DGraph{T}(x; kwargs...)
 DGraph{T}(n::S; kwargs...) where {T<:Integer,S<:Integer} =
     DGraph{T}(T(n); kwargs...)
-function DGraph{T}(n::T; freeze::Bool=false, kwargs...) where {T<:Integer}
-    g = DGraph{T}(; kwargs...)
+function DGraph{T}(n::T; freeze::Bool=false, chunksize=nothing, kwargs...) where {T<:Integer}
+    if chunksize === nothing
+        chunksize = n ÷ Dagger.num_processors()
+    end
+    g = DGraph{T}(; chunksize, kwargs...)
     add_vertices!(g, n)
     freeze && freeze!(g)
     return g
 end
-function DGraph{T}(sg::AbstractGraph{U}; directed::Bool=is_directed(sg), freeze::Bool=false, weights::Bool=true, kwargs...) where {T<:Integer, U<:Integer}
-    g = DGraph{T}(T(nv(sg)); directed, kwargs...)
+function DGraph{T}(sg::AbstractGraph{U}; directed::Bool=is_directed(sg), freeze::Bool=false, chunksize=nothing, weights::Bool=true, kwargs...) where {T<:Integer, U<:Integer}
+    if chunksize === nothing
+        chunksize = nv(sg) ÷ Dagger.num_processors()
+    end
+    g = DGraph{T}(T(nv(sg)); directed, chunksize, kwargs...)
     add_edges!(g, edges(sg))
     if weights
         sg_w = Graphs.weights(sg)
