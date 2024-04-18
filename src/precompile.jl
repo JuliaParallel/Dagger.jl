@@ -31,7 +31,7 @@
 
     # Final clean-up
     Sch.EAGER_CONTEXT[] = nothing
-    GC.gc(); yield()
+    GC.gc(); sleep(0.5)
     lock(Sch.ERRORMONITOR_TRACKED) do tracked
         if all(t->istaskdone(t) || istaskfailed(t), map(last, tracked))
             empty!(tracked)
@@ -40,7 +40,7 @@
         for (name, t) in tracked
             if t.state == :runnable
                 @warn "Waiting on $name"
-                Base.throwto(t, InterruptException())
+                @async Base.throwto(t, InterruptException())
             end
         end
     end
