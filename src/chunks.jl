@@ -1,5 +1,3 @@
-using Serialization
-
 export domain, UnitDomain, project, alignfirst, ArrayDomain
 
 import Base: isempty, getindex, intersect, ==, size, length, ndims

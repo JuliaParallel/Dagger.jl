@@ -1,7 +1,7 @@
-import Base.Sort: Forward, Ordering, Algorithm, lt
-using Distributed
+import Base.Sort: Forward, Ordering, lt
+import SharedArrays: SharedArray
 
-using StatsBase
+import StatsBase: fit!, sample
 
 
 function getmedians(x, n)

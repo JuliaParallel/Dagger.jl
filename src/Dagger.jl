@@ -1,16 +1,20 @@
 module Dagger
 
-using Distributed, SharedArrays, Serialization
+import Serialization
+import Serialization: AbstractSerializer, serialize, deserialize
+import SparseArrays: sprand, SparseMatrixCSC
 
-using MemPool
+import MemPool
+import MemPool: DRef, FileRef, poolget, poolset
 
-import Base: collect, adjoint, reduce
-import Distributed: procs
+import Base: collect, reduce
+import Distributed
+import Distributed: Future, RemoteChannel, myid, workers, nworkers, procs, remotecall, remotecall_wait, remotecall_fetch
 
-using LinearAlgebra
-import LinearAlgebra: transpose
+import LinearAlgebra
+import LinearAlgebra: Adjoint, BLAS, Diagonal, LAPACK, LowerTriangular, PosDefException, Transpose, UpperTriangular, diagind, ishermitian, issymmetric
 
-using UUIDs
+import UUIDs: UUID, uuid4
 
 if !isdefined(Base, :ScopedValues)
     import ScopedValues: ScopedValue, with
@@ -22,8 +26,8 @@ if !isdefined(Base, :get_extension)
 using Requires
 end
 
-using MacroTools
-using TimespanLogging
+import TimespanLogging
+import TimespanLogging: timespan_start, timespan_finish
 
 include("lib/util.jl")
 include("utils/dagdebug.jl")
@@ -31,6 +35,8 @@ include("utils/dagdebug.jl")
 # Distributed data
 include("utils/locked-object.jl")
 include("utils/tasks.jl")
+
+import MacroTools: @capture
 include("options.jl")
 include("processor.jl")
 include("threadproc.jl")
@@ -85,7 +91,7 @@ include("utils/logging-events.jl")
 include("utils/logging.jl")
 
 # Precompilation
-using PrecompileTools
+import PrecompileTools: @compile_workload
 include("precompile.jl")
 
 function __init__()
