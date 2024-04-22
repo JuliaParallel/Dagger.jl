@@ -285,13 +285,34 @@ function report_catch_error(err, desc=nothing)
 end
 
 chunktype(x) = typeof(x)
-signature(state, task::Thunk) = signature(state, task.f, task.inputs)
-function signature(state, f, inputs::Vector)
-    sig = Any[chunktype(f)]
-    for (pos, input) in collect_task_inputs(state, inputs)
-        # N.B. Skips kwargs
+signature(state, task::Thunk) =
+    signature(task.f, collect_task_inputs(state, task.inputs))
+function signature(f, args)
+    sig = DataType[chunktype(f)]
+    sig_kwarg_names = Symbol[]
+    sig_kwarg_types = []
+    for (pos, arg) in args
+        if arg isa Dagger.DTask
+            # Only occurs via manual usage of signature
+            arg = fetch(arg; raw=true)
+        end
+        T = chunktype(arg)
         if pos === nothing
-            push!(sig, chunktype(input))
+            push!(sig, T)
+        else
+            push!(sig_kwarg_names, pos)
+            push!(sig_kwarg_types, T)
+        end
+    end
+    if !isempty(sig_kwarg_names)
+        NT = NamedTuple{(sig_kwarg_names...,), Base.to_tuple_type(sig_kwarg_types)}
+        pushfirst!(sig, NT)
+        @static if isdefined(Core, :kwcall)
+            pushfirst!(sig, typeof(Core.kwcall))
+        else
+            f_instance = chunktype(f).instance
+            kw_f = Core.kwfunc(f_instance)
+            pushfirst!(sig, typeof(kw_f))
         end
     end
     return sig
@@ -423,12 +444,12 @@ end
 collect_task_inputs(state, task::Thunk) =
     collect_task_inputs(state, task.inputs)
 function collect_task_inputs(state, inputs)
-    inputs = Pair{Union{Symbol,Nothing},Any}[]
+    new_inputs = Pair{Union{Symbol,Nothing},Any}[]
     for (pos, input) in inputs
         input = unwrap_weak_checked(input)
-        push!(inputs, pos => (istask(input) ? state.cache[input] : input))
+        push!(new_inputs, pos => (istask(input) ? state.cache[input] : input))
     end
-    return inputs
+    return new_inputs
 end
 
 """
