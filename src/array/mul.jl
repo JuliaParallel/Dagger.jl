@@ -30,6 +30,7 @@ function LinearAlgebra.generic_matmatmul!(
         return gemm_dagger!(C, transA, transB, A, B, _add)
     end
 end
+# FIXME: Mixed-precision methods
 function _repartition_matmatmul(C, A, B, transA::Char, transB::Char)
     partA = A.partitioning.blocksize
     partB = B.partitioning.blocksize
@@ -124,28 +125,26 @@ function gemm_dagger!(
                         # A: NoTrans / B: NoTrans
                         for k in range(1, Ant)
                             mzone = k == 1 ? beta : T(1.0)
-                            Dagger.@spawn BLAS.gemm!(
+                            Dagger.@spawn LinearAlgebra.generic_matmatmul!(
+                                InOut(Cc[m, n]),
                                 transA,
                                 transB,
-                                alpha,
                                 In(Ac[m, k]),
                                 In(Bc[k, n]),
-                                mzone,
-                                InOut(Cc[m, n]),
+                                LinearAlgebra.MulAddMul(alpha, mzone),
                             )
                         end
                     else
                         # A: NoTrans / B: [Conj]Trans
                         for k in range(1, Ant)
                             mzone = k == 1 ? beta : T(1.0)
-                            Dagger.@spawn BLAS.gemm!(
+                            Dagger.@spawn LinearAlgebra.generic_matmatmul!(
+                                InOut(Cc[m, n]),
                                 transA,
                                 transB,
-                                alpha,
                                 In(Ac[m, k]),
                                 In(Bc[n, k]),
-                                mzone,
-                                InOut(Cc[m, n]),
+                                LinearAlgebra.MulAddMul(alpha, mzone),
                             )
                         end
                     end
@@ -154,28 +153,26 @@ function gemm_dagger!(
                         # A: [Conj]Trans / B: NoTrans
                         for k in range(1, Amt)
                             mzone = k == 1 ? beta : T(1.0)
-                            Dagger.@spawn BLAS.gemm!(
+                            Dagger.@spawn LinearAlgebra.generic_matmatmul!(
+                                InOut(Cc[m, n]),
                                 transA,
                                 transB,
-                                alpha,
                                 In(Ac[k, m]),
                                 In(Bc[k, n]),
-                                mzone,
-                                InOut(Cc[m, n]),
+                                LinearAlgebra.MulAddMul(alpha, mzone),
                             )
                         end
                     else
                         # A: [Conj]Trans / B: [Conj]Trans
                         for k in range(1, Amt)
                             mzone = k == 1 ? beta : T(1.0)
-                            Dagger.@spawn BLAS.gemm!(
+                            Dagger.@spawn LinearAlgebra.generic_matmatmul!(
+                                InOut(Cc[m, n]),
                                 transA,
                                 transB,
-                                alpha,
                                 In(Ac[k, m]),
                                 In(Bc[n, k]),
-                                mzone,
-                                InOut(Cc[m, n]),
+                                LinearAlgebra.MulAddMul(alpha, mzone),
                             )
                         end
                     end
