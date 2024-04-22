@@ -29,36 +29,71 @@ function test_gemm!(T, szA, szB, partA, partB)
     DA = distribute(A, partA)
     DB = distribute(B, partB)
 
+    SA = sprand(T, szA..., 0.1)
+    SB = sprand(T, szA..., 0.1)
+
+    DSA = distribute(SA, partA)
+    DSB = distribute(SB, partB)
+
     ## Out-of-place gemm
     # No transA, No transB
+    # Dense
     DC = DA * DB
     C = A * B
     @test collect(DC) ≈ C
+    # Sparse
+    DSC = DSA * DSB
+    SC = SA * SB
+    @test collect(DSC) ≈ SC
 
     if szA == szB
         # No transA, transB
+        # Dense
         DC = DA * DB'
         C = A * B'
         @test collect(DC) ≈ C
+        # Sparse
+        DSC = DSA * DSB'
+        SC = SA * SB'
+        @test collect(DSC) ≈ SC
 
         # transA, No transB
+        # Dense
         DC = DA' * DB
         C = A' * B
         @test collect(DC) ≈ C
+        # Sparse
+        DSC = DSA' * DSB
+        SC = SA' * SB
+        @test collect(DSC) ≈ SC
     end
 
     # transA, transB
+    # Dense
     DC = DA' * DB'
     C = A' * B'
     @test collect(DC) ≈ C
+    #= Sparse
+    DSC = DSA' * DSB'
+    SC = SA' * SB'
+    @test collect(DSC) ≈ SC
+    =#
 
     ## In-place gemm
     # No transA, No transB
+    # Dense
     C = zeros(T, szC...)
     DC = distribute(C, partC)
     mul!(C, A, B)
     mul!(DC, DA, DB)
     @test collect(DC) ≈ C
+    #= Sparse
+    SC = zeros(T, szC...)
+    DSC = distribute(SC, partC)
+    mul!(SC, SA, SB)
+    mul!(DSC, DSA, DSB)
+    @test collect(DSC) ≈ SC
+    =#
 
     if szA == szB
         # No transA, transB

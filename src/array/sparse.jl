@@ -70,3 +70,13 @@ function matmatmul!(
     # Forward to sparse matmatmul!, but allow in-place update of C
     return matmatmul!(C, transA, transB, A.mat, B.mat, alpha, beta)
 end
+
+function transpose_tile end
+function copytile!(A::DSparseMatrix, B::DSparseMatrix)
+    A.mat = transpose_tile(B.mat)
+    return
+end
+function copydiagtile!(A::DSparseMatrix, uplo)
+    A.mat = transpose_tile(A.mat, uplo)
+    return
+end
