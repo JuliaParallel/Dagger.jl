@@ -1,4 +1,4 @@
-using TaskLocalValues
+import TaskLocalValues: TaskLocalValue
 
 ### getindex
 

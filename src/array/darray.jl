@@ -1,6 +1,4 @@
 import Base: ==, fetch
-using Serialization
-import Serialization: serialize, deserialize
 
 ###### Array Domains ######
 

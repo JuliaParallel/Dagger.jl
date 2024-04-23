@@ -1,4 +1,4 @@
-using Graphs
+import Graphs: SimpleDiGraph, add_edge!, add_vertex!, inneighbors, outneighbors, nv
 
 export In, Out, InOut, spawn_datadeps
 
