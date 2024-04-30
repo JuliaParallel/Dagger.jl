@@ -23,8 +23,8 @@ tests = [
 ]
 all_test_names = map(test -> replace(last(test), ".jl"=>""), tests)
 if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
-    push!(LOAD_PATH, joinpath(@__DIR__, ".."))
-    push!(LOAD_PATH, @__DIR__)
+    pushfirst!(LOAD_PATH, @__DIR__)
+    pushfirst!(LOAD_PATH, joinpath(@__DIR__, ".."))
     using Pkg
     Pkg.activate(@__DIR__)
 
@@ -71,7 +71,7 @@ end
 
 
 using Distributed
-addprocs(3)
+addprocs(3; exeflags="--project=$(joinpath(@__DIR__, ".."))")
 
 include("imports.jl")
 include("util.jl")
