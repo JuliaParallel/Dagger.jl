@@ -96,18 +96,6 @@ collect(x::Computation) = collect(fetch(x))
 
 Base.fetch(x::Computation) = fetch(stage(Context(global_context()), x))
 
-function Base.show(io::IO, ::MIME"text/plain", x::ArrayOp)
-    write(io, string(typeof(x)))
-    write(io, string(size(x)))
-end
-
-function Base.show(io::IO, x::ArrayOp)
-    m = MIME"text/plain"()
-    show(io, m, x)
-end
-
-export BlockPartition, Blocks
-
 abstract type AbstractBlocks{N} end
 
 abstract type AbstractMultiBlocks{N}<:AbstractBlocks{N} end
@@ -197,6 +185,95 @@ function Base.collect(d::DArray; tree=false)
         collect(fetch(treereduce_nd(map(x -> ((args...,) -> Dagger.@spawn x(args...)) , dimcatfuncs), a.chunks)))
     else
         treereduce_nd(dimcatfuncs, asyncmap(fetch, a.chunks))
+    end
+end
+
+### show
+
+#= FIXME
+@static if isdefined(Base, :AnnotatedString)
+    # FIXME: Import StyledStrings
+    struct ColorElement{T}
+        color::Symbol
+        value::T
+    end
+    function Base.show(io::IO, ::MIME"text/plain", x::ColorElement)
+        print(io, styled"{(foreground=$(x.color)):$(x.value)}")
+    end
+else
+=#
+    struct ColorElement{T}
+        color::Symbol
+        value::Union{Some{T},Nothing}
+    end
+    function Base.show(io::IO, ::MIME"text/plain", x::ColorElement)
+        if x.value !== nothing
+            printstyled(io, something(x.value); color=x.color)
+        else
+            printstyled(io, "..."; color=x.color)
+        end
+    end
+    Base.alignment(io::IO, x::ColorElement) =
+        Base.alignment(io, something(x.value, "..."))
+#end
+struct ColorArray{T,N} <: DenseArray{T,N}
+    A::DArray{T,N}
+    color_map::Vector{Symbol}
+    seen_values::Dict{NTuple{N,Int},Union{Some{T},Nothing}}
+    function ColorArray(A::DArray{T,N}) where {T,N}
+        colors = [:red, :green, :yellow, :blue, :magenta, :cyan]
+        color_map = [colors[mod1(idx, length(colors))] for idx in 1:length(A.chunks)]
+        return new{T,N}(A, color_map, Dict{NTuple{N,Int},Union{Some{T},Nothing}}())
+    end
+end
+Base.size(A::ColorArray) = size(A.A)
+Base.getindex(A::ColorArray, idx::Integer) = getindex(A, (idx,))
+Base.getindex(A::ColorArray, idxs::Integer...) = getindex(A, (idxs...,))
+function Base.getindex(A::ColorArray{T,N}, idxs::NTuple{N,Int}) where {T,N}
+    sd_idx_tuple, _ = partition_for(A.A, idxs)
+    sd_idx = CartesianIndex(sd_idx_tuple)
+    sd_idx_linear = LinearIndices(A.A.chunks)[sd_idx]
+    if !haskey(A.seen_values, idxs)
+        chunk = A.A.chunks[sd_idx]
+        if chunk isa Chunk || isready(chunk)
+            value = A.seen_values[idxs] = Some(getindex(A.A, idxs))
+        else
+            # Show a placeholder instead
+            value = A.seen_values[idxs] = nothing
+        end
+    else
+        value = A.seen_values[idxs]
+    end
+    if value !== nothing
+        color = A.color_map[sd_idx_linear]
+    else
+        color = :light_black
+    end
+    return ColorElement{T}(color, value)
+end
+function Base.getindex(A::ColorArray{T,N}, idxs::Dims{S}) where {T,N,S}
+    if S > N
+        if all(idxs[(N+1):end] .== 1)
+            return getindex(A, idxs[1:N])
+        else
+            throw(BoundsError(A, idxs))
+        end
+    elseif S < N
+        throw(BoundsError(A, idxs))
+    end
+end
+function Base.show(io::IO, ::MIME"text/plain", A::DArray{T,N}) where {T,N}
+    write(io, string(DArray{T,N}))
+    write(io, string(size(A)))
+    write(io, " with $(join(size(A.chunks), 'x')) partitions of size $(join(A.partitioning.blocksize, 'x')):")
+    pct_complete = 100 * (sum(c->c isa Chunk ? true : isready(c), A.chunks) / length(A.chunks))
+    if pct_complete < 100
+        println(io)
+        printstyled(io, "~$(round(Int, pct_complete))% completed"; color=:yellow)
+    end
+    println(io)
+    with_index_caching(1) do
+        Base.print_array(IOContext(io, :compact=>true), ColorArray(A))
     end
 end
 
