@@ -2,6 +2,10 @@ import Base: ==, fetch
 using Serialization
 import Serialization: serialize, deserialize
 
+export DArray, DVector, DMatrix, Blocks, AutoBlocks
+export distribute
+
+
 ###### Array Domains ######
 
 """
@@ -149,11 +153,11 @@ mutable struct DArray{T,N,B<:AbstractBlocks{N},F} <: ArrayOp{T, N}
     end
 end
 
-WrappedDArray{T,N} = Union{<:DArray{T,N}, Transpose{<:DArray{T,N}}, Adjoint{<:DArray{T,N}}}
-WrappedDMatrix{T} = WrappedDArray{T,2}
-WrappedDVector{T} = WrappedDArray{T,1}
-DMatrix{T} = DArray{T,2}
-DVector{T} = DArray{T,1}
+const WrappedDArray{T,N} = Union{<:DArray{T,N}, Transpose{<:DArray{T,N}}, Adjoint{<:DArray{T,N}}}
+const WrappedDMatrix{T} = WrappedDArray{T,2}
+const WrappedDVector{T} = WrappedDArray{T,1}
+const DMatrix{T} = DArray{T,2}
+const DVector{T} = DArray{T,1}
 
 
 # mainly for backwards-compatibility
@@ -319,8 +323,6 @@ end
 Base.@deprecate_binding Cat DArray
 Base.@deprecate_binding ComputedArray DArray
 
-export Distribute, distribute
-
 struct Distribute{T,N,B<:AbstractBlocks} <: ArrayOp{T, N}
     domainchunks
     partitioning::B
@@ -385,22 +387,44 @@ function stage(ctx::Context, d::Distribute)
                   d.partitioning)
 end
 
-function distribute(x::AbstractArray, dist::Blocks)
-    _to_darray(Distribute(dist, x))
-end
+"""
+    AutoBlocks
 
+Automatically determines the size and number of blocks for a distributed array.
+This may construct any kind of `Dagger.AbstractBlocks` partitioning.
+"""
+struct AutoBlocks end
+function auto_blocks(dims::Dims{N}) where N
+    # TODO: Allow other partitioning schemes
+    np = num_processors()
+    p = cld(dims[end], np)
+    return Blocks(ntuple(i->i == N ? p : dims[i], N))
+end
+auto_blocks(A::AbstractArray{T,N}) where {T,N} = auto_blocks(size(A))
+
+distribute(A::AbstractArray) = distribute(A, AutoBlocks())
+distribute(A::AbstractArray{T,N}, dist::Blocks{N}) where {T,N} =
+    _to_darray(Distribute(dist, A))
+distribute(A::AbstractArray, ::AutoBlocks) = distribute(A, auto_blocks(A))
 function distribute(x::AbstractArray{T,N}, n::NTuple{N}) where {T,N}
     p = map((d, dn)->ceil(Int, d / dn), size(x), n)
     distribute(x, Blocks(p))
 end
-
-function distribute(x::AbstractVector, n::Int)
-    distribute(x, (n,))
-end
-
-function distribute(x::AbstractVector, n::Vector{<:Integer})
+distribute(x::AbstractVector, n::Int) = distribute(x, (n,))
+distribute(x::AbstractVector, n::Vector{<:Integer}) =
     distribute(x, DomainBlocks((1,), (cumsum(n),)))
-end
+
+DVector(A::AbstractVector{T}, part::Blocks{1}) where T = distribute(A, part)
+DMatrix(A::AbstractMatrix{T}, part::Blocks{2}) where T = distribute(A, part)
+DArray(A::AbstractArray{T,N}, part::Blocks{N}) where {T,N} = distribute(A, part)
+
+DVector(A::AbstractVector{T}) where T = DVector(A, AutoBlocks())
+DMatrix(A::AbstractMatrix{T}) where T = DMatrix(A, AutoBlocks())
+DArray(A::AbstractArray) = DArray(A, AutoBlocks())
+
+DVector(A::AbstractVector{T}, ::AutoBlocks) where T = DVector(A, auto_blocks(A))
+DMatrix(A::AbstractMatrix{T}, ::AutoBlocks) where T = DMatrix(A, auto_blocks(A))
+DArray(A::AbstractArray, ::AutoBlocks) = DArray(A, auto_blocks(A))
 
 function Base.:(==)(x::ArrayOp{T,N}, y::AbstractArray{S,N}) where {T,S,N}
     collect(x) == y

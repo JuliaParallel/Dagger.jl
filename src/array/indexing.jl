@@ -95,6 +95,18 @@ Base.getindex(A::DArray, idx::Integer) =
     getindex(A, Base._ind2sub(A, idx))
 Base.getindex(A::DArray, idx::CartesianIndex) =
     getindex(A, Tuple(idx))
+function Base.getindex(A::DArray{T,N}, idxs::Dims{S}) where {T,N,S}
+    if S > N
+        if all(idxs[(N+1):end] .== 1)
+            return getindex(A, idxs[1:N])
+        else
+            throw(BoundsError(A, idxs))
+        end
+    elseif S < N
+        throw(BoundsError(A, idxs))
+    end
+    error()
+end
 
 ### setindex!
 
@@ -126,6 +138,18 @@ Base.setindex!(A::DArray, value, idx::Integer) =
     setindex!(A, value, Base._ind2sub(A, idx))
 Base.setindex!(A::DArray, value, idx::CartesianIndex) =
     setindex!(A, value, Tuple(idx))
+function Base.setindex!(A::DArray{T,N}, value, idxs::Dims{S}) where {T,N,S}
+    if S > N
+        if all(idxs[(N+1):end] .== 1)
+            return setindex!(A, value, idxs[1:N])
+        else
+            throw(BoundsError(A, idxs))
+        end
+    elseif S < N
+        throw(BoundsError(A, idxs))
+    end
+    error()
+end
 
 ### Allow/disallow scalar indexing
 

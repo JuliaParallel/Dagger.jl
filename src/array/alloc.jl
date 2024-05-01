@@ -30,42 +30,71 @@ function stage(ctx, a::AllocateArray)
     return DArray(a.eltype, a.domain, a.domainchunks, thunks, a.partitioning)
 end
 
-function Base.rand(p::Blocks, eltype::Type, dims)
+const BlocksOrAuto = Union{Blocks{N} where N, AutoBlocks}
+
+function Base.rand(p::Blocks, eltype::Type, dims::Dims)
     d = ArrayDomain(map(x->1:x, dims))
     a = AllocateArray(eltype, (_, x...) -> rand(x...), d, partition(p, d), p)
     return _to_darray(a)
 end
+Base.rand(p::BlocksOrAuto, T::Type, dims::Integer...) = rand(p, T, dims)
+Base.rand(p::BlocksOrAuto, T::Type, dims::Dims) = rand(p, T, dims)
+Base.rand(p::BlocksOrAuto, dims::Integer...) = rand(p, Float64, dims)
+Base.rand(p::BlocksOrAuto, dims::Dims) = rand(p, Float64, dims)
+Base.rand(::AutoBlocks, eltype::Type, dims::Dims) =
+    rand(auto_blocks(dims), eltype, dims)
 
-Base.rand(p::Blocks, t::Type, dims::Integer...) = rand(p, t, dims)
-Base.rand(p::Blocks, dims::Integer...) = rand(p, Float64, dims)
-Base.rand(p::Blocks, dims::Tuple) = rand(p, Float64, dims)
-
-function Base.randn(p::Blocks, eltype::Type, dims)
+function Base.randn(p::Blocks, eltype::Type, dims::Dims)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(Float64, (_, x...) -> randn(x...), d, partition(p, d), p)
+    a = AllocateArray(eltype, (_, x...) -> randn(x...), d, partition(p, d), p)
     return _to_darray(a)
 end
-Base.randn(p::Blocks, t::Type, dims::Integer...) = randn(p, t, dims)
-Base.randn(p::Blocks, dims::Integer...) = randn(p, dims)
-Base.randn(p::Blocks, dims::Tuple) = randn(p, Float64, dims)
+Base.randn(p::BlocksOrAuto, T::Type, dims::Integer...) = randn(p, T, dims)
+Base.randn(p::BlocksOrAuto, T::Type, dims::Dims) = randn(p, T, dims)
+Base.randn(p::BlocksOrAuto, dims::Integer...) = randn(p, Float64, dims)
+Base.randn(p::BlocksOrAuto, dims::Dims) = randn(p, Float64, dims)
+Base.randn(::AutoBlocks, eltype::Type, dims::Dims) =
+    randn(auto_blocks(dims), eltype, dims)
 
-function Base.ones(p::Blocks, eltype::Type, dims)
+function sprand(p::Blocks, eltype::Type, dims::Dims, sparsity::AbstractFloat)
+    d = ArrayDomain(map(x->1:x, dims))
+    a = AllocateArray(eltype, (_, T, _dims) -> sprand(T, _dims..., sparsity), d, partition(p, d), p)
+    return _to_darray(a)
+end
+sprand(p::BlocksOrAuto, T::Type, dims_and_sparsity::Real...) =
+    sprand(p, T, dims_and_sparsity[1:end-1], dims_and_sparsity[end])
+sprand(p::BlocksOrAuto, T::Type, dims::Dims, sparsity::AbstractFloat) =
+    sprand(p, T, dims, sparsity)
+sprand(p::BlocksOrAuto, dims_and_sparsity::Real...) =
+    sprand(p, Float64, dims_and_sparsity[1:end-1], dims_and_sparsity[end])
+sprand(p::BlocksOrAuto, dims::Dims, sparsity::AbstractFloat) =
+    sprand(p, Float64, dims, sparsity)
+sprand(::AutoBlocks, eltype::Type, dims::Dims, sparsity::AbstractFloat) =
+    sprand(auto_blocks(dims), eltype, dims, sparsity)
+
+function Base.ones(p::Blocks, eltype::Type, dims::Dims)
     d = ArrayDomain(map(x->1:x, dims))
     a = AllocateArray(eltype, (_, x...) -> ones(x...), d, partition(p, d), p)
     return _to_darray(a)
 end
-Base.ones(p::Blocks, t::Type, dims::Integer...) = ones(p, t, dims)
-Base.ones(p::Blocks, dims::Integer...) = ones(p, Float64, dims)
-Base.ones(p::Blocks, dims::Tuple) = ones(p, Float64, dims)
+Base.ones(p::BlocksOrAuto, T::Type, dims::Integer...) = ones(p, T, dims)
+Base.ones(p::BlocksOrAuto, T::Type, dims::Dims) = ones(p, T, dims)
+Base.ones(p::BlocksOrAuto, dims::Integer...) = ones(p, Float64, dims)
+Base.ones(p::BlocksOrAuto, dims::Dims) = ones(p, Float64, dims)
+Base.ones(::AutoBlocks, eltype::Type, dims::Dims) =
+    ones(auto_blocks(dims), eltype, dims)
 
-function Base.zeros(p::Blocks, eltype::Type, dims)
+function Base.zeros(p::Blocks, eltype::Type, dims::Dims)
     d = ArrayDomain(map(x->1:x, dims))
     a = AllocateArray(eltype, (_, x...) -> zeros(x...), d, partition(p, d), p)
     return _to_darray(a)
 end
-Base.zeros(p::Blocks, t::Type, dims::Integer...) = zeros(p, t, dims)
-Base.zeros(p::Blocks, dims::Integer...) = zeros(p, Float64, dims)
-Base.zeros(p::Blocks, dims::Tuple) = zeros(p, Float64, dims)
+Base.zeros(p::BlocksOrAuto, T::Type, dims::Integer...) = zeros(p, T, dims)
+Base.zeros(p::BlocksOrAuto, T::Type, dims::Dims) = zeros(p, T, dims)
+Base.zeros(p::BlocksOrAuto, dims::Integer...) = zeros(p, Float64, dims)
+Base.zeros(p::BlocksOrAuto, dims::Dims) = zeros(p, Float64, dims)
+Base.zeros(::AutoBlocks, eltype::Type, dims::Dims) =
+    zeros(auto_blocks(dims), eltype, dims)
 
 function Base.zero(x::DArray{T,N}) where {T,N}
     dims = ntuple(i->x.domain.indexes[i].stop, N)
@@ -82,23 +111,4 @@ function Base.view(A::AbstractArray{T,N}, p::Blocks{N}) where {T,N}
     # taking views should be very fast
     chunks = [tochunk(view(A, x.indexes...)) for x in dc]
     return DArray(T, d, dc, chunks, p)
-end
-
-function sprand(p::Blocks, m::Integer, n::Integer, sparsity::Real)
-    s = rand(UInt)
-    f = function (idx, t,sz)
-        sprand(MersenneTwister(s+idx), sz...,sparsity)
-    end
-    d = ArrayDomain((1:m, 1:n))
-    a = AllocateArray(Float64, f, d, partition(p, d), p)
-    return _to_darray(a)
-end
-
-function sprand(p::Blocks, n::Integer, sparsity::Real)
-    s = rand(UInt)
-    f = function (idx,t,sz)
-        sprand(MersenneTwister(s+idx), sz...,sparsity)
-    end
-    a = AllocateArray(Float64, f, d, partition(p, ArrayDomain((1:n,))), p)
-    return _to_darray(a)
 end
