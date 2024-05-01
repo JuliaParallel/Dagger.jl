@@ -1,5 +1,9 @@
 import Base: ==, fetch
 
+export DArray, DVector, DMatrix, Blocks, AutoBlocks
+export distribute
+
+
 ###### Array Domains ######
 
 """
@@ -90,18 +94,6 @@ collect(x::Computation) = collect(fetch(x))
 
 Base.fetch(x::Computation) = fetch(stage(Context(global_context()), x))
 
-function Base.show(io::IO, ::MIME"text/plain", x::ArrayOp)
-    write(io, string(typeof(x)))
-    write(io, string(size(x)))
-end
-
-function Base.show(io::IO, x::ArrayOp)
-    m = MIME"text/plain"()
-    show(io, m, x)
-end
-
-export BlockPartition, Blocks
-
 abstract type AbstractBlocks{N} end
 
 abstract type AbstractMultiBlocks{N}<:AbstractBlocks{N} end
@@ -147,11 +139,11 @@ mutable struct DArray{T,N,B<:AbstractBlocks{N},F} <: ArrayOp{T, N}
     end
 end
 
-WrappedDArray{T,N} = Union{<:DArray{T,N}, Transpose{<:DArray{T,N}}, Adjoint{<:DArray{T,N}}}
-WrappedDMatrix{T} = WrappedDArray{T,2}
-WrappedDVector{T} = WrappedDArray{T,1}
-DMatrix{T} = DArray{T,2}
-DVector{T} = DArray{T,1}
+const WrappedDArray{T,N} = Union{<:DArray{T,N}, Transpose{<:DArray{T,N}}, Adjoint{<:DArray{T,N}}}
+const WrappedDMatrix{T} = WrappedDArray{T,2}
+const WrappedDVector{T} = WrappedDArray{T,1}
+const DMatrix{T} = DArray{T,2}
+const DVector{T} = DArray{T,1}
 
 
 # mainly for backwards-compatibility
@@ -191,6 +183,95 @@ function Base.collect(d::DArray; tree=false)
         collect(fetch(treereduce_nd(map(x -> ((args...,) -> Dagger.@spawn x(args...)) , dimcatfuncs), a.chunks)))
     else
         treereduce_nd(dimcatfuncs, asyncmap(fetch, a.chunks))
+    end
+end
+
+### show
+
+#= FIXME
+@static if isdefined(Base, :AnnotatedString)
+    # FIXME: Import StyledStrings
+    struct ColorElement{T}
+        color::Symbol
+        value::T
+    end
+    function Base.show(io::IO, ::MIME"text/plain", x::ColorElement)
+        print(io, styled"{(foreground=$(x.color)):$(x.value)}")
+    end
+else
+=#
+    struct ColorElement{T}
+        color::Symbol
+        value::Union{Some{T},Nothing}
+    end
+    function Base.show(io::IO, ::MIME"text/plain", x::ColorElement)
+        if x.value !== nothing
+            printstyled(io, something(x.value); color=x.color)
+        else
+            printstyled(io, "..."; color=x.color)
+        end
+    end
+    Base.alignment(io::IO, x::ColorElement) =
+        Base.alignment(io, something(x.value, "..."))
+#end
+struct ColorArray{T,N} <: DenseArray{T,N}
+    A::DArray{T,N}
+    color_map::Vector{Symbol}
+    seen_values::Dict{NTuple{N,Int},Union{Some{T},Nothing}}
+    function ColorArray(A::DArray{T,N}) where {T,N}
+        colors = [:red, :green, :yellow, :blue, :magenta, :cyan]
+        color_map = [colors[mod1(idx, length(colors))] for idx in 1:length(A.chunks)]
+        return new{T,N}(A, color_map, Dict{NTuple{N,Int},Union{Some{T},Nothing}}())
+    end
+end
+Base.size(A::ColorArray) = size(A.A)
+Base.getindex(A::ColorArray, idx::Integer) = getindex(A, (idx,))
+Base.getindex(A::ColorArray, idxs::Integer...) = getindex(A, (idxs...,))
+function Base.getindex(A::ColorArray{T,N}, idxs::NTuple{N,Int}) where {T,N}
+    sd_idx_tuple, _ = partition_for(A.A, idxs)
+    sd_idx = CartesianIndex(sd_idx_tuple)
+    sd_idx_linear = LinearIndices(A.A.chunks)[sd_idx]
+    if !haskey(A.seen_values, idxs)
+        chunk = A.A.chunks[sd_idx]
+        if chunk isa Chunk || isready(chunk)
+            value = A.seen_values[idxs] = Some(getindex(A.A, idxs))
+        else
+            # Show a placeholder instead
+            value = A.seen_values[idxs] = nothing
+        end
+    else
+        value = A.seen_values[idxs]
+    end
+    if value !== nothing
+        color = A.color_map[sd_idx_linear]
+    else
+        color = :light_black
+    end
+    return ColorElement{T}(color, value)
+end
+function Base.getindex(A::ColorArray{T,N}, idxs::Dims{S}) where {T,N,S}
+    if S > N
+        if all(idxs[(N+1):end] .== 1)
+            return getindex(A, idxs[1:N])
+        else
+            throw(BoundsError(A, idxs))
+        end
+    elseif S < N
+        throw(BoundsError(A, idxs))
+    end
+end
+function Base.show(io::IO, ::MIME"text/plain", A::DArray{T,N}) where {T,N}
+    write(io, string(DArray{T,N}))
+    write(io, string(size(A)))
+    write(io, " with $(join(size(A.chunks), 'x')) partitions of size $(join(A.partitioning.blocksize, 'x')):")
+    pct_complete = 100 * (sum(c->c isa Chunk ? true : isready(c), A.chunks) / length(A.chunks))
+    if pct_complete < 100
+        println(io)
+        printstyled(io, "~$(round(Int, pct_complete))% completed"; color=:yellow)
+    end
+    println(io)
+    with_index_caching(1) do
+        Base.print_array(IOContext(io, :compact=>true), ColorArray(A))
     end
 end
 
@@ -317,8 +398,6 @@ end
 Base.@deprecate_binding Cat DArray
 Base.@deprecate_binding ComputedArray DArray
 
-export Distribute, distribute
-
 struct Distribute{T,N,B<:AbstractBlocks} <: ArrayOp{T, N}
     domainchunks
     partitioning::B
@@ -383,22 +462,44 @@ function stage(ctx::Context, d::Distribute)
                   d.partitioning)
 end
 
-function distribute(x::AbstractArray, dist::Blocks)
-    _to_darray(Distribute(dist, x))
-end
+"""
+    AutoBlocks
 
+Automatically determines the size and number of blocks for a distributed array.
+This may construct any kind of `Dagger.AbstractBlocks` partitioning.
+"""
+struct AutoBlocks end
+function auto_blocks(dims::Dims{N}) where N
+    # TODO: Allow other partitioning schemes
+    np = num_processors()
+    p = cld(dims[end], np)
+    return Blocks(ntuple(i->i == N ? p : dims[i], N))
+end
+auto_blocks(A::AbstractArray{T,N}) where {T,N} = auto_blocks(size(A))
+
+distribute(A::AbstractArray) = distribute(A, AutoBlocks())
+distribute(A::AbstractArray{T,N}, dist::Blocks{N}) where {T,N} =
+    _to_darray(Distribute(dist, A))
+distribute(A::AbstractArray, ::AutoBlocks) = distribute(A, auto_blocks(A))
 function distribute(x::AbstractArray{T,N}, n::NTuple{N}) where {T,N}
     p = map((d, dn)->ceil(Int, d / dn), size(x), n)
     distribute(x, Blocks(p))
 end
-
-function distribute(x::AbstractVector, n::Int)
-    distribute(x, (n,))
-end
-
-function distribute(x::AbstractVector, n::Vector{<:Integer})
+distribute(x::AbstractVector, n::Int) = distribute(x, (n,))
+distribute(x::AbstractVector, n::Vector{<:Integer}) =
     distribute(x, DomainBlocks((1,), (cumsum(n),)))
-end
+
+DVector(A::AbstractVector{T}, part::Blocks{1}) where T = distribute(A, part)
+DMatrix(A::AbstractMatrix{T}, part::Blocks{2}) where T = distribute(A, part)
+DArray(A::AbstractArray{T,N}, part::Blocks{N}) where {T,N} = distribute(A, part)
+
+DVector(A::AbstractVector{T}) where T = DVector(A, AutoBlocks())
+DMatrix(A::AbstractMatrix{T}) where T = DMatrix(A, AutoBlocks())
+DArray(A::AbstractArray) = DArray(A, AutoBlocks())
+
+DVector(A::AbstractVector{T}, ::AutoBlocks) where T = DVector(A, auto_blocks(A))
+DMatrix(A::AbstractMatrix{T}, ::AutoBlocks) where T = DMatrix(A, auto_blocks(A))
+DArray(A::AbstractArray, ::AutoBlocks) = DArray(A, auto_blocks(A))
 
 function Base.:(==)(x::ArrayOp{T,N}, y::AbstractArray{S,N}) where {T,S,N}
     collect(x) == y

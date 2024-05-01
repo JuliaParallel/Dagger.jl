@@ -11,8 +11,10 @@ tests = [
     ("Task Queues", "task-queues.jl"),
     ("Datadeps", "datadeps.jl"),
     ("Domain Utilities", "domain.jl"),
+    ("Array - Allocation", "array/allocation.jl"),
+    ("Array - Indexing", "array/indexing.jl"),
     ("Array - Core", "array/core.jl"),
-    ("Array - Copies", "array/copies.jl"),
+    ("Array - Copyto", "array/copyto.jl"),
     ("Array - MapReduce", "array/mapreduce.jl"),
     ("Array - LinearAlgebra - Matmul", "array/linalg/matmul.jl"),
     ("Array - LinearAlgebra - Cholesky", "array/linalg/cholesky.jl"),
@@ -23,8 +25,8 @@ tests = [
 ]
 all_test_names = map(test -> replace(last(test), ".jl"=>""), tests)
 if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
-    push!(LOAD_PATH, joinpath(@__DIR__, ".."))
-    push!(LOAD_PATH, @__DIR__)
+    pushfirst!(LOAD_PATH, @__DIR__)
+    pushfirst!(LOAD_PATH, joinpath(@__DIR__, ".."))
     using Pkg
     Pkg.activate(@__DIR__)
 
@@ -71,7 +73,7 @@ end
 
 
 using Distributed
-addprocs(3)
+addprocs(3; exeflags="--project=$(joinpath(@__DIR__, ".."))")
 
 include("imports.jl")
 include("util.jl")
