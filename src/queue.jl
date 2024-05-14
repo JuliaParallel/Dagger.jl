@@ -15,9 +15,9 @@ enqueue!(::EagerTaskQueue, specs::Vector{Pair{EagerTaskSpec,EagerThunk}}) =
     eager_launch!(specs)
 
 enqueue!(spec::Pair{EagerTaskSpec,EagerThunk}) =
-    enqueue!(get_options(:task_queue, EagerTaskQueue()), spec)
+    enqueue!(get_options(:task_queue, MONITOR_QUEUE[]), spec)
 enqueue!(specs::Vector{Pair{EagerTaskSpec,EagerThunk}}) =
-    enqueue!(get_options(:task_queue, EagerTaskQueue()), specs)
+    enqueue!(get_options(:task_queue, MONITOR_QUEUE[]), specs)
 
 struct LazyTaskQueue <: AbstractTaskQueue
     tasks::Vector{Pair{EagerTaskSpec,EagerThunk}}
