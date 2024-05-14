@@ -9,7 +9,7 @@ end
 import Dagger
 import Dagger: EagerThunk, Chunk, Processor
 import Dagger.TimespanLogging: Timespan
-import Graphs: SimpleDiGraph, add_edge!, add_vertex!, inneighbors, outneighbors, vertices, is_directed, edges, nv
+import Graphs: SimpleDiGraph, add_edge!, add_vertex!, inneighbors, outneighbors, vertices, is_directed, edges, nv, src, dst
 
 function pretty_time(t; digits=3)
     r(t) = round(t; digits)
