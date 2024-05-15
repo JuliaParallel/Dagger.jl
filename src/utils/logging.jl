@@ -1,5 +1,19 @@
 # Logging utilities
 
+"""
+    enable_logging!(;kwargs...)
+
+Enables logging globally for all workers. Certain core events are always enabled by this call, but additional ones may be specified via `kwargs`.
+
+Extra events:
+- `metrics::Bool`: Enables various utilization and allocation metrics
+- `timeline::Bool`: Enables raw "timeline" values, which are event-specific; not recommended except for debugging
+- `tasknames::Bool`: Enables generating unique task names for each task
+- `taskdeps::Bool`: Enables reporting of upstream task dependencies (as task IDs) for each task argument
+- `taskargs::Bool`: Enables reporting of upstream non-task dependencies (as `objectid` hash) for each task argument
+- `taskargmoves::Bool`: Enables reporting of copies of upstream dependencies (as original and copy `objectid` hashes) for each task argument
+- `profile::Bool`: Enables profiling of task execution; not currently recommended, as it adds significant overhead
+"""
 function enable_logging!(;metrics::Bool=true,
                           timeline::Bool=false,
                           tasknames::Bool=true,
@@ -37,13 +51,30 @@ function enable_logging!(;metrics::Bool=true,
         ml[:psat] = Dagger.Events.ProcessorSaturation()
     end
     Dagger.Sch.eager_context().log_sink = ml
+    return
 end
+
+"""
+    disable_logging!()
+
+Disables logging previously enabled with `enable_logging!`.
+"""
 function disable_logging!()
     Dagger.Sch.eager_context().log_sink = TimespanLogging.NoOpLog()
+    return
 end
-function fetch_logs!()
-    return TimespanLogging.get_logs!(Dagger.Sch.eager_context())
-end
+
+"""
+    fetch_logs!() -> Dict{Int, Dict{Symbol, Vector}}
+
+Fetches and returns the currently-accumulated logs for each worker. Each entry
+of the outer `Dict` is keyed on worker ID, so `logs[1]` are the logs for worker
+`1`.
+
+Consider using `show_logs` or `render_logs` to generate a renderable display of
+these logs.
+"""
+fetch_logs!() = TimespanLogging.get_logs!(Dagger.Sch.eager_context())
 
 function logs_event_pairs(f, logs::Dict)
     running_events = Dict{Tuple,Int}()

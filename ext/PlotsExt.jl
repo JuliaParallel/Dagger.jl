@@ -67,6 +67,11 @@ end
 
 # Implementation adapted from:
 # https://discourse.julialang.org/t/how-to-make-a-gantt-plot-with-plots-jl/95165/7
+"""
+    Dagger.render_logs(logs::Dict, ::Val{:plots_gantt}; kwargs...)
+
+Render a Gantt chart of task execution in `logs` using Plots. `kwargs` are passed to `plot` directly.
+"""
 function Dagger.render_logs(logs::Dict, ::Val{:plots_gantt}; kwargs...)
     df = logs_to_df(logs)
 
