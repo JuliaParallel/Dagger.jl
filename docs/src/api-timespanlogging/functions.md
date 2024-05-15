@@ -12,7 +12,6 @@ Pages = ["functions.md"]
 timespan_start
 timespan_finish
 get_logs!
-make_timespan
 ```
 
 ## Logging Metric Functions

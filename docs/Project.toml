@@ -1,7 +1,10 @@
 [deps]
 Dagger = "d58978e5-989f-55fb-8d15-ea34adc7bf54"
 DaggerWebDash = "cfc5aa84-1a2a-41ab-b391-ede92ecae40c"
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+GraphViz = "f526b714-d49f-11e8-06ff-31ed36ee7ee0"
+Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
 TimespanLogging = "a526e669-04d3-4846-9525-c66122c55f63"
 
 [compat]

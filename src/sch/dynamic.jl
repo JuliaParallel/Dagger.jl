@@ -7,6 +7,7 @@ struct ThunkID
     ref::Union{DRef,Nothing}
 end
 ThunkID(id::Int) = ThunkID(id, nothing)
+Dagger.istask(::ThunkID) = true
 
 "A handle to the scheduler, used by dynamic thunks."
 struct SchedulerHandle

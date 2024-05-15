@@ -181,20 +181,27 @@ Records the dependencies of each submitted task.
 """
 struct TaskDependencies end
 function (::TaskDependencies)(ev::Event{:start})
-    if ev.category == :add_thunk
-        deps = Int[]
-        for dep in get(Set, ev.timeline.options, :syncdeps)
+    local deps_tids::Vector{Int}
+    function get_deps!(deps)
+        for dep in deps
             dep = Dagger.unwrap_weak_checked(dep)
             if dep isa Dagger.Thunk || dep isa Dagger.Sch.ThunkID
-                push!(deps, dep.id)
-            elseif dep isa Dagger.EagerThunk
-                # FIXME: Get TID
-                #push!(deps, dep.uid)
+                push!(deps_tids, dep.id)
+            elseif dep isa Dagger.EagerThunk && myid() == 1
+                tid = lock(Dagger.Sch.EAGER_ID_MAP) do id_map
+                    id_map[dep.uid]
+                end
+                push!(deps_tids, tid)
             else
                 @warn "Unexpected dependency type: $dep"
             end
         end
-        return ev.id.thunk_id => deps
+    end
+    if ev.category == :add_thunk
+        deps_tids = Int[]
+        get_deps!(Iterators.filter(Dagger.istask, Iterators.map(last, ev.timeline.args)))
+        get_deps!(get(Set, ev.timeline.options, :syncdeps))
+        return ev.id.thunk_id => deps_tids
     end
     return
 end

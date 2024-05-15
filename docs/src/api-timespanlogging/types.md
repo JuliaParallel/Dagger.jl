@@ -14,11 +14,6 @@ LocalEventLog
 NoOpLog
 ```
 
-## Event Types
-```@docs
-Event
-```
-
 ## Built-in Event Types
 ```@docs
 Events.CoreMetrics
@@ -30,5 +25,4 @@ Events.MemoryFree
 Events.EventSaturation
 Events.DebugMetrics
 Events.LogWindow
-```
 ```
