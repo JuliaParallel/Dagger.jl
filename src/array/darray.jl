@@ -30,7 +30,6 @@ chunks(a::ArrayDomain{N}) where {N} = DomainBlocks(
     ntuple(i->first(indexes(a)[i]), Val(N)), map(x->[length(x)], indexes(a)))
 
 (==)(a::ArrayDomain, b::ArrayDomain) = indexes(a) == indexes(b)
-Base.getindex(arr::AbstractArray, d::ArrayDomain) = arr[indexes(d)...]
 
 function intersect(a::ArrayDomain, b::ArrayDomain)
     if a === b
@@ -452,7 +451,8 @@ function stage(ctx::Context, d::Distribute)
         cs = map(d.domainchunks) do c
             # TODO: fix hashing
             #hash = uhash(c, Base.hash(Distribute, Base.hash(d.data)))
-            Dagger.@spawn identity(d.data[c])
+            data_view = d.data[indexes(c)...]
+            Dagger.@spawn identity(data_view)
         end
     end
     return DArray(eltype(d.data),
