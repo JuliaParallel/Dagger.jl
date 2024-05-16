@@ -24,6 +24,8 @@ tests = [
     #("Fault Tolerance", "fault-tolerance.jl"),
 ]
 all_test_names = map(test -> replace(last(test), ".jl"=>""), tests)
+additional_workers::Int = 3
+
 if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
     pushfirst!(LOAD_PATH, @__DIR__)
     pushfirst!(LOAD_PATH, joinpath(@__DIR__, ".."))
@@ -41,8 +43,13 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
             "-s", "--simulate"
                 action = :store_true
                 help = "Don't actually run the tests"
+            "-p", "--procs"
+                arg_type = Int
+                default = additional_workers
+                help = "How many additional workers to launch"
         end
     end
+
     parsed_args = parse_args(s)
     to_test = String[]
     for test in parsed_args["test"]
@@ -64,8 +71,11 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
             exit(1)
         end
     end
+
     @info "Running tests: $(join(to_test, ", "))"
     parsed_args["simulate"] && exit(0)
+
+    additional_workers = parsed_args["procs"]
 else
     to_test = all_test_names
     @info "Running all tests"
@@ -73,7 +83,11 @@ end
 
 
 using Distributed
-addprocs(3; exeflags="--project=$(joinpath(@__DIR__, ".."))")
+if additional_workers > 0
+    # We put this inside a branch because addprocs() takes a minimum of 1s to
+    # complete even if doing nothing, which is annoying.
+    addprocs(additional_workers; exeflags="--project=$(joinpath(@__DIR__, ".."))")
+end
 
 include("imports.jl")
 include("util.jl")
