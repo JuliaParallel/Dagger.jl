@@ -1,9 +1,19 @@
+"""
+    cancel!(tid=nothing; sch_uid=nothing, force=false, halt_sch=false)
+
+Cancel a running thunk. Note that if the scheduler has already shut down this
+will not do anything.
+"""
 function cancel!(tid::Union{Int,Nothing}=nothing;
                  sch_uid::Union{UInt64,Nothing}=nothing,
                  force::Bool=false, halt_sch::Bool=false)
     remotecall_fetch(1, tid, sch_uid, force, halt_sch) do tid, sch_uid, force, halt_sch
         state = Sch.EAGER_STATE[]
-        @lock state.lock _cancel!(state, tid, sch_uid, force, halt_sch)
+
+        # Check that the scheduler isn't stopping or has already stopped
+        if !isnothing(state) && !state.halt.set
+            @lock state.lock _cancel!(state, tid, sch_uid, force, halt_sch)
+        end
     end
 end
 function _cancel!(state, tid, sch_uid, force, halt_sch)
