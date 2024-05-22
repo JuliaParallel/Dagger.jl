@@ -171,8 +171,12 @@ Creates a [`Thunk`](@ref) object which can be executed later, which will call
 `f` with `args` and `kwargs`. `options` controls various properties of the
 resulting `Thunk`.
 """
-function delayed(f, options::Options)
+function _delayed(f, options::Options)
     (args...; kwargs...) -> Thunk(f, args_kwargs_to_pairs(args, kwargs)...; options.options...)
+end
+function delayed(f, options::Options)
+    Base.depwarn("`delayed` is deprecated. Use `Dagger.@spawn` or `Dagger.spawn` instead.", :delayed; force=true)
+    return _delayed(f, options)
 end
 delayed(f; kwargs...) = delayed(f, Options(;kwargs...))
 

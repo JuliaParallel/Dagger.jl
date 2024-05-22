@@ -24,7 +24,7 @@ function init_eager()
         sopts = SchedulerOptions(;allow_errors=true)
         opts = Dagger.Options((;scope=Dagger.ExactScope(Dagger.ThreadProc(1, 1)),
                                 occupancy=Dict(Dagger.ThreadProc=>0)))
-        Dagger.compute(ctx, Dagger.delayed(eager_thunk, opts)();
+        Dagger.compute(ctx, Dagger._delayed(eager_thunk, opts)();
                        options=sopts)
     catch err
         # Scheduler halting is considered normal
