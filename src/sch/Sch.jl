@@ -1189,7 +1189,7 @@ function proc_states(f::Base.Callable, uid::UInt64)
     end
 end
 proc_states(f::Base.Callable) =
-    proc_states(f, task_local_storage(:_dagger_sch_uid)::UInt64)
+    proc_states(f, Dagger.get_tls().sch_uid)
 
 task_tid_for_processor(::Processor) = nothing
 task_tid_for_processor(proc::Dagger.ThreadProc) = proc.tid

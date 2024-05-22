@@ -25,6 +25,8 @@ else
 end
 import TaskLocalValues: TaskLocalValue
 
+import TaskLocalValues: TaskLocalValue
+
 if !isdefined(Base, :get_extension)
     import Requires: @require
 end

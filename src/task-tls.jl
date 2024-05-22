@@ -1,41 +1,42 @@
 # In-Thunk Helpers
 
-"""
-    task_processor()
+struct DTaskTLS
+    processor::Processor
+    sch_uid::UInt
+    sch_handle::Any # FIXME: SchedulerHandle
+    task_spec::Vector{Any} # FIXME: TaskSpec
+end
 
-Get the current processor executing the current Dagger task.
-"""
-task_processor() = task_local_storage(:_dagger_processor)::Processor
-@deprecate thunk_processor() task_processor()
+const DTASK_TLS = TaskLocalValue{Union{DTaskTLS,Nothing}}(()->nothing)
 
 """
-    in_task()
+    in_task() -> Bool
 
 Returns `true` if currently executing in a [`DTask`](@ref), else `false`.
 """
-in_task() = haskey(task_local_storage(), :_dagger_sch_uid)
+in_task() = DTASK_TLS[] !== nothing
 @deprecate in_thunk() in_task()
 
 """
-    get_tls()
+    task_processor() -> Processor
 
-Gets all Dagger TLS variable as a `NamedTuple`.
+Get the current processor executing the current [`DTask`](@ref).
 """
-get_tls() = (
-    sch_uid=task_local_storage(:_dagger_sch_uid),
-    sch_handle=task_local_storage(:_dagger_sch_handle),
-    processor=task_processor(),
-    task_spec=task_local_storage(:_dagger_task_spec),
-)
+task_processor() = get_tls().processor
+@deprecate thunk_processor() task_processor()
+
+"""
+    get_tls() -> DTaskTLS
+
+Gets all Dagger TLS variable as a `DTaskTLS`.
+"""
+get_tls() = DTASK_TLS[]::DTaskTLS
 
 """
     set_tls!(tls)
 
-Sets all Dagger TLS variables from the `NamedTuple` `tls`.
+Sets all Dagger TLS variables from `tls`, which may be a `DTaskTLS` or a `NamedTuple`.
 """
 function set_tls!(tls)
-    task_local_storage(:_dagger_sch_uid, tls.sch_uid)
-    task_local_storage(:_dagger_sch_handle, tls.sch_handle)
-    task_local_storage(:_dagger_processor, tls.processor)
-    task_local_storage(:_dagger_task_spec, tls.task_spec)
+    DTASK_TLS[] = DTaskTLS(tls.processor, tls.sch_uid, tls.sch_handle, tls.task_spec)
 end
