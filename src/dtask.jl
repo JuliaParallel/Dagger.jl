@@ -40,9 +40,10 @@ Options(options...) = Options((;options...))
 """
     DTask
 
-Returned from `spawn`/`@spawn` calls. Represents a task that is in the
-scheduler, potentially ready to execute, executing, or finished executing. May
-be `fetch`'d or `wait`'d on at any time.
+Returned from `Dagger.@spawn`/`Dagger.spawn` calls. Represents a task that is
+in the scheduler, potentially ready to execute, executing, or finished
+executing. May be `fetch`'d or `wait`'d on at any time. See `Dagger.@spawn` for
+more details.
 """
 mutable struct DTask
     uid::UInt
