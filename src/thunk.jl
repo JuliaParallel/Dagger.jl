@@ -430,13 +430,13 @@ function spawn(f, args...; kwargs...)
     args_kwargs = args_kwargs_to_pairs(args, kwargs)
 
     # Get task queue, and don't let it propagate
-    task_queue = get_options(:task_queue, EagerTaskQueue())
+    task_queue = get_options(:task_queue, DefaultTaskQueue())
     options = NamedTuple(filter(opt->opt[1] != :task_queue, Base.pairs(options)))
     propagates = filter(prop->prop != :task_queue, propagates)
     options = merge(options, (;propagates))
 
     # Construct task spec and handle
-    spec = EagerTaskSpec(f, args_kwargs, options)
+    spec = DTaskSpec(f, args_kwargs, options)
     task = eager_spawn(spec)
 
     # Enqueue the task into the task queue

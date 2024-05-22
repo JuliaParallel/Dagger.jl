@@ -26,7 +26,7 @@ struct DataDepsTaskQueue <: AbstractTaskQueue
     # The fields following only apply when static==true
     static::Bool
     # The set of tasks that have already been seen
-    seen_tasks::Union{Vector{Pair{EagerTaskSpec,DTask}},Nothing}
+    seen_tasks::Union{Vector{Pair{DTaskSpec,DTask}},Nothing}
     # The data-dependency graph of all tasks
     g::Union{SimpleDiGraph{Int},Nothing}
     # The mapping from task to graph ID
@@ -38,7 +38,7 @@ struct DataDepsTaskQueue <: AbstractTaskQueue
                                traversal::Symbol=:inorder)
         deps = IdDict{Any, Vector{Pair{Tuple{Bool,Bool}, DTask}}}()
         if static
-            seen_tasks = Pair{EagerTaskSpec,DTask}[]
+            seen_tasks = Pair{DTaskSpec,DTask}[]
             g = SimpleDiGraph()
             task_to_id = Dict{DTask,Int}()
         else
@@ -51,7 +51,7 @@ struct DataDepsTaskQueue <: AbstractTaskQueue
     end
 end
 
-function _enqueue!(queue::DataDepsTaskQueue, fullspec::Pair{EagerTaskSpec,DTask})
+function _enqueue!(queue::DataDepsTaskQueue, fullspec::Pair{DTaskSpec,DTask})
     # If static, record this task and its edges in the graph
     if queue.static
         g = queue.g
@@ -139,7 +139,7 @@ function _enqueue!(queue::DataDepsTaskQueue, fullspec::Pair{EagerTaskSpec,DTask}
         spec.options = merge(opts, (;syncdeps, scope))
     end
 end
-function enqueue!(queue::DataDepsTaskQueue, spec::Pair{EagerTaskSpec,DTask})
+function enqueue!(queue::DataDepsTaskQueue, spec::Pair{DTaskSpec,DTask})
     _enqueue!(queue, spec)
     if queue.static
         push!(queue.seen_tasks, spec)
@@ -147,7 +147,7 @@ function enqueue!(queue::DataDepsTaskQueue, spec::Pair{EagerTaskSpec,DTask})
         enqueue!(queue.upper_queue, spec)
     end
 end
-function enqueue!(queue::DataDepsTaskQueue, specs::Vector{Pair{EagerTaskSpec,DTask}})
+function enqueue!(queue::DataDepsTaskQueue, specs::Vector{Pair{DTaskSpec,DTask}})
     for spec in specs
         _enqueue!(queue, spec)
     end
@@ -467,7 +467,7 @@ is experimental and subject to change.
 function spawn_datadeps(f::Base.Callable; static::Bool=true,
                         traversal::Symbol=:inorder)
     wait_all(; check_errors=true) do
-        queue = DataDepsTaskQueue(get_options(:task_queue, EagerTaskQueue());
+        queue = DataDepsTaskQueue(get_options(:task_queue, DefaultTaskQueue());
                                   static, traversal)
         result = with_options(f; task_queue=queue)
         if queue.static

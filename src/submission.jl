@@ -193,13 +193,13 @@ function eager_process_elem_submission_to_local(id_map, x)
     end
 end
 # TODO: This can probably operate in-place
-function eager_process_args_submission_to_local(id_map, spec::Pair{EagerTaskSpec,DTask})
+function eager_process_args_submission_to_local(id_map, spec::Pair{DTaskSpec,DTask})
     return Base.mapany(first(spec).args) do pos_x
         pos, x = pos_x
         return pos => eager_process_elem_submission_to_local(id_map, x)
     end
 end
-function eager_process_args_submission_to_local(id_map, specs::Vector{Pair{EagerTaskSpec,DTask}})
+function eager_process_args_submission_to_local(id_map, specs::Vector{Pair{DTaskSpec,DTask}})
     return Base.mapany(specs) do spec
         eager_process_args_submission_to_local(id_map, spec)
     end
@@ -217,7 +217,7 @@ function eager_process_options_submission_to_local(id_map, options::NamedTuple)
         return options
     end
 end
-function eager_spawn(spec::EagerTaskSpec)
+function eager_spawn(spec::DTaskSpec)
     # Generate new DTask
     uid = eager_next_id()
     future = ThunkFuture()
@@ -226,7 +226,7 @@ function eager_spawn(spec::EagerTaskSpec)
     # Return unlaunched DTask
     return DTask(uid, future, finalizer_ref)
 end
-function eager_launch!((spec, task)::Pair{EagerTaskSpec,DTask})
+function eager_launch!((spec, task)::Pair{DTaskSpec,DTask})
     # Lookup DTask -> ThunkID
     local args, options
     lock(Sch.EAGER_ID_MAP) do id_map
@@ -240,7 +240,7 @@ function eager_launch!((spec, task)::Pair{EagerTaskSpec,DTask})
                              spec.f, args, options)
     task.thunk_ref = thunk_id.ref
 end
-function eager_launch!(specs::Vector{Pair{EagerTaskSpec,DTask}})
+function eager_launch!(specs::Vector{Pair{DTaskSpec,DTask}})
     ntasks = length(specs)
 
     uids = [task.uid for (_, task) in specs]
