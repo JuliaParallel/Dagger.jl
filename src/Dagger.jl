@@ -22,6 +22,8 @@ else
     import Base.ScopedValues: ScopedValue, with
 end
 
+import TaskLocalValues: TaskLocalValue
+
 if !isdefined(Base, :get_extension)
     import Requires: @require
 end

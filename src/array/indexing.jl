@@ -1,5 +1,3 @@
-import TaskLocalValues: TaskLocalValue
-
 ### getindex
 
 struct GetIndex{T,N} <: ArrayOp{T,N}
