@@ -277,10 +277,10 @@ function Base.showerror(io::IO, ex::ThunkFailedException)
 end
 
 """
-    spawn(f, args...; kwargs...) -> EagerThunk
+    spawn(f, args...; kwargs...) -> DTask
 
 Spawns a task with `f` as the function, `args` as the arguments, and `kwargs`
-as the keyword arguments, returning an `EagerThunk`. Uses a scheduler running
+as the keyword arguments, returning an `DTask`. Uses a scheduler running
 in the background to execute code.
 """
 function spawn(f, args...; kwargs...)

@@ -224,7 +224,7 @@ function _add_thunk!(ctx, state, task, tid, (f, args, options, future, ref))
             @dagdebug thunk :submit "Registered future"
         end
         if ref !== nothing
-            # Preserve the `EagerThunkFinalizer` through `thunk`
+            # Preserve the `DTaskFinalizer` through `thunk`
             thunk.eager_ref = ref
         end
         state.valid[thunk] = nothing

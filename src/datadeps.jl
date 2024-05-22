@@ -20,27 +20,27 @@ struct DataDepsTaskQueue <: AbstractTaskQueue
     upper_queue::AbstractTaskQueue
     # The mapping of unique objects to previously-launched tasks,
     # and their data dependency on the object (read, write)
-    deps::IdDict{Any, Vector{Pair{Tuple{Bool,Bool}, EagerThunk}}}
+    deps::IdDict{Any, Vector{Pair{Tuple{Bool,Bool}, DTask}}}
 
     # Whether to analyze the DAG statically or eagerly
     # The fields following only apply when static==true
     static::Bool
     # The set of tasks that have already been seen
-    seen_tasks::Union{Vector{Pair{EagerTaskSpec,EagerThunk}},Nothing}
+    seen_tasks::Union{Vector{Pair{EagerTaskSpec,DTask}},Nothing}
     # The data-dependency graph of all tasks
     g::Union{SimpleDiGraph{Int},Nothing}
     # The mapping from task to graph ID
-    task_to_id::Union{Dict{EagerThunk,Int},Nothing}
+    task_to_id::Union{Dict{DTask,Int},Nothing}
     # How to traverse the dependency graph when launching tasks
     traversal::Symbol
 
     function DataDepsTaskQueue(upper_queue; static::Bool=true,
                                traversal::Symbol=:inorder)
-        deps = IdDict{Any, Vector{Pair{Tuple{Bool,Bool}, EagerThunk}}}()
+        deps = IdDict{Any, Vector{Pair{Tuple{Bool,Bool}, DTask}}}()
         if static
-            seen_tasks = Pair{EagerTaskSpec,EagerThunk}[]
+            seen_tasks = Pair{EagerTaskSpec,DTask}[]
             g = SimpleDiGraph()
-            task_to_id = Dict{EagerThunk,Int}()
+            task_to_id = Dict{DTask,Int}()
         else
             seen_tasks = nothing
             g = nothing
@@ -51,7 +51,7 @@ struct DataDepsTaskQueue <: AbstractTaskQueue
     end
 end
 
-function _enqueue!(queue::DataDepsTaskQueue, fullspec::Pair{EagerTaskSpec,EagerThunk})
+function _enqueue!(queue::DataDepsTaskQueue, fullspec::Pair{EagerTaskSpec,DTask})
     # If static, record this task and its edges in the graph
     if queue.static
         g = queue.g
@@ -91,18 +91,18 @@ function _enqueue!(queue::DataDepsTaskQueue, fullspec::Pair{EagerTaskSpec,EagerT
             readdep = true
         end
         spec.args[idx] = pos => arg
-        arg_data = arg isa EagerThunk ? fetch(arg; raw=true) : arg
+        arg_data = arg isa DTask ? fetch(arg; raw=true) : arg
 
         push!(deps_to_add, arg_data => (readdep, writedep))
 
         if !haskey(queue.deps, arg_data)
             continue
         end
-        argdeps = queue.deps[arg_data]::Vector{Pair{Tuple{Bool,Bool}, EagerThunk}}
+        argdeps = queue.deps[arg_data]::Vector{Pair{Tuple{Bool,Bool}, DTask}}
         if readdep
             # When you have an in dependency, sync with the previous out
             for ((other_readdep::Bool, other_writedep::Bool),
-                 other_task::EagerThunk) in argdeps
+                 other_task::DTask) in argdeps
                 if other_writedep
                     if queue.static
                         other_task_id = task_to_id[other_task]
@@ -116,7 +116,7 @@ function _enqueue!(queue::DataDepsTaskQueue, fullspec::Pair{EagerTaskSpec,EagerT
         if writedep
             # When you have an out dependency, sync with the previous in or out
             for ((other_readdep::Bool, other_writedep::Bool),
-                other_task::EagerThunk) in argdeps
+                other_task::DTask) in argdeps
                 if other_readdep || other_writedep
                     if queue.static
                         other_task_id = task_to_id[other_task]
@@ -130,7 +130,7 @@ function _enqueue!(queue::DataDepsTaskQueue, fullspec::Pair{EagerTaskSpec,EagerT
     end
     for (arg_data, (readdep, writedep)) in deps_to_add
         argdeps = get!(queue.deps, arg_data) do
-            Vector{Pair{Tuple{Bool,Bool}, EagerThunk}}()
+            Vector{Pair{Tuple{Bool,Bool}, DTask}}()
         end
         push!(argdeps, (readdep, writedep) => task)
     end
@@ -139,7 +139,7 @@ function _enqueue!(queue::DataDepsTaskQueue, fullspec::Pair{EagerTaskSpec,EagerT
         spec.options = merge(opts, (;syncdeps, scope))
     end
 end
-function enqueue!(queue::DataDepsTaskQueue, spec::Pair{EagerTaskSpec,EagerThunk})
+function enqueue!(queue::DataDepsTaskQueue, spec::Pair{EagerTaskSpec,DTask})
     _enqueue!(queue, spec)
     if queue.static
         push!(queue.seen_tasks, spec)
@@ -147,7 +147,7 @@ function enqueue!(queue::DataDepsTaskQueue, spec::Pair{EagerTaskSpec,EagerThunk}
         enqueue!(queue.upper_queue, spec)
     end
 end
-function enqueue!(queue::DataDepsTaskQueue, specs::Vector{Pair{EagerTaskSpec,EagerThunk}})
+function enqueue!(queue::DataDepsTaskQueue, specs::Vector{Pair{EagerTaskSpec,DTask}})
     for spec in specs
         _enqueue!(queue, spec)
     end
@@ -173,7 +173,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     # Determine which arguments could be written to, and thus need tracking
     arg_has_writedep = IdDict{Any,Bool}(arg=>any(argdep->argdep[1][2], argdeps) for (arg, argdeps) in queue.deps)
     has_writedep(arg) = haskey(arg_has_writedep, arg) && arg_has_writedep[arg]
-    function has_writedep(arg, task::EagerThunk)
+    function has_writedep(arg, task::DTask)
         haskey(arg_has_writedep, arg) || return false
         any_writedep = false
         for ((readdep, writedep), other_task) in queue.deps[arg]
@@ -184,7 +184,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         end
         error("Task isn't in argdeps set")
     end
-    function is_writedep(arg, task::EagerThunk)
+    function is_writedep(arg, task::DTask)
         haskey(arg_has_writedep, arg) || return false
         for ((readdep, writedep), other_task) in queue.deps[arg]
             if task === other_task
@@ -221,8 +221,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     data_locality = IdDict{Any,MemorySpace}(data=>memory_space(data) for data in keys(queue.deps))
 
     # Track writers ("owners") and readers
-    args_owner = IdDict{Any,Union{EagerThunk,Nothing}}(arg=>nothing for arg in keys(queue.deps))
-    args_readers = IdDict{Any,Vector{EagerThunk}}(arg=>EagerThunk[] for arg in keys(queue.deps))
+    args_owner = IdDict{Any,Union{DTask,Nothing}}(arg=>nothing for arg in keys(queue.deps))
+    args_readers = IdDict{Any,Vector{DTask}}(arg=>DTask[] for arg in keys(queue.deps))
     function get_write_deps!(arg, syncdeps)
         haskey(args_owner, arg) || return
         if (owner = args_owner[arg]) !== nothing
@@ -327,7 +327,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
         # Spawn copies before user's task, as necessary
         @dagdebug nothing :spawn_datadeps "($(spec.f)) Scheduling: $our_proc ($our_space)"
-        task_args = map(((pos, arg)=_arg,)->pos=>(arg isa EagerThunk ? fetch(arg; raw=true) : arg), copy(spec.args))
+        task_args = map(((pos, arg)=_arg,)->pos=>(arg isa DTask ? fetch(arg; raw=true) : arg), copy(spec.args))
 
         # Copy args from local to remote
         for (idx, (pos, arg)) in enumerate(task_args)

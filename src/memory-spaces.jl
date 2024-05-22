@@ -15,7 +15,7 @@ function memory_space(x::Chunk)
         return only(memory_spaces(proc))
     end
 end
-memory_space(x::EagerThunk) =
+memory_space(x::DTask) =
     memory_space(fetch(x; raw=true))
 
 memory_spaces(::P) where {P<:Processor} =

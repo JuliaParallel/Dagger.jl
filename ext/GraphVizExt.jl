@@ -7,7 +7,7 @@ else
 end
 
 import Dagger
-import Dagger: EagerThunk, Chunk, Processor
+import Dagger: DTask, Chunk, Processor
 import Dagger.TimespanLogging: Timespan
 import Graphs: SimpleDiGraph, add_edge!, add_vertex!, inneighbors, outneighbors, vertices, is_directed, edges, nv, src, dst
 

@@ -199,7 +199,7 @@ function shard(@nospecialize(f); procs=nothing, workers=nothing, per_thread=fals
         end
     end
     isempty(procs) && throw(ArgumentError("Cannot create empty Shard"))
-    shard_running_dict = Dict{Processor,EagerThunk}()
+    shard_running_dict = Dict{Processor,DTask}()
     for proc in procs
         scope = proc isa OSProc ? ProcessScope(proc) : ExactScope(proc)
         thunk = Dagger.@spawn scope=scope _mutable_inner(f, proc, scope)

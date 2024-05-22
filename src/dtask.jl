@@ -7,6 +7,7 @@ ThunkFuture() = ThunkFuture(Future())
 Base.isready(t::ThunkFuture) = isready(t.future)
 Base.wait(t::ThunkFuture) = Dagger.Sch.thunk_yield() do
     wait(t.future)
+    return
 end
 function Base.fetch(t::ThunkFuture; proc=OSProc(), raw=false)
     error, value = Dagger.Sch.thunk_yield() do
@@ -37,47 +38,49 @@ Options(;options...) = Options((;options...))
 Options(options...) = Options((;options...))
 
 """
-    EagerThunk
+    DTask
 
 Returned from `spawn`/`@spawn` calls. Represents a task that is in the
 scheduler, potentially ready to execute, executing, or finished executing. May
 be `fetch`'d or `wait`'d on at any time.
 """
-mutable struct EagerThunk
+mutable struct DTask
     uid::UInt
     future::ThunkFuture
     finalizer_ref::DRef
     thunk_ref::DRef
-    EagerThunk(uid, future, finalizer_ref) = new(uid, future, finalizer_ref)
+    DTask(uid, future, finalizer_ref) = new(uid, future, finalizer_ref)
 end
 
-Base.isready(t::EagerThunk) = isready(t.future)
-function Base.wait(t::EagerThunk)
+const EagerThunk = DTask
+
+Base.isready(t::DTask) = isready(t.future)
+function Base.wait(t::DTask)
     if !isdefined(t, :thunk_ref)
-        throw(ConcurrencyViolationError("Cannot `wait` on an unlaunched `EagerThunk`"))
+        throw(ConcurrencyViolationError("Cannot `wait` on an unlaunched `DTask`"))
     end
     wait(t.future)
 end
-function Base.fetch(t::EagerThunk; raw=false)
+function Base.fetch(t::DTask; raw=false)
     if !isdefined(t, :thunk_ref)
-        throw(ConcurrencyViolationError("Cannot `fetch` an unlaunched `EagerThunk`"))
+        throw(ConcurrencyViolationError("Cannot `fetch` an unlaunched `DTask`"))
     end
     return fetch(t.future; raw)
 end
-function Base.show(io::IO, t::EagerThunk)
+function Base.show(io::IO, t::DTask)
     status = if isdefined(t, :thunk_ref)
         isready(t) ? "finished" : "running"
     else
         "not launched"
     end
-    print(io, "EagerThunk ($status)")
+    print(io, "DTask ($status)")
 end
-istask(t::EagerThunk) = true
+istask(t::DTask) = true
 
-"When finalized, cleans-up the associated `EagerThunk`."
-mutable struct EagerThunkFinalizer
+"When finalized, cleans-up the associated `DTask`."
+mutable struct DTaskFinalizer
     uid::UInt
-    function EagerThunkFinalizer(uid)
+    function DTaskFinalizer(uid)
         x = new(uid)
         finalizer(Sch.eager_cleanup, x)
         x

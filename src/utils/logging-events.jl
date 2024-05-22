@@ -187,7 +187,7 @@ function (::TaskDependencies)(ev::Event{:start})
             dep = Dagger.unwrap_weak_checked(dep)
             if dep isa Dagger.Thunk || dep isa Dagger.Sch.ThunkID
                 push!(deps_tids, dep.id)
-            elseif dep isa Dagger.EagerThunk && myid() == 1
+            elseif dep isa Dagger.DTask && myid() == 1
                 tid = lock(Dagger.Sch.EAGER_ID_MAP) do id_map
                     id_map[dep.uid]
                 end
