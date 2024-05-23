@@ -305,7 +305,7 @@ function dsort_chunks(cs, nchunks=length(cs), nsamples=2000;
 end
 
 function propagate_affinity!(c, aff)
-    if !isa(c, EagerThunk)
+    if !isa(c, DTask)
         return
     end
     if c.affinity !== nothing

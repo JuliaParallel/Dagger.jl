@@ -9,7 +9,7 @@ else
 end
 
 import Dagger
-import Dagger: EagerThunk, Chunk, Processor
+import Dagger: DTask, Chunk, Processor
 import Dagger.TimespanLogging: Timespan
 
 function logs_to_df(logs::Dict)

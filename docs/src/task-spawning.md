@@ -12,7 +12,7 @@ or `spawn` if it's more convenient:
 
 `Dagger.spawn(f, Dagger.Options(options), args...; kwargs...)`
 
-When called, it creates an [`EagerThunk`](@ref) (also known as a "thunk" or
+When called, it creates an [`DTask`](@ref) (also known as a "thunk" or
 "task") object representing a call to function `f` with the arguments `args` and
 keyword arguments `kwargs`. If it is called with other thunks as args/kwargs,
 such as in `Dagger.@spawn f(Dagger.@spawn g())`, then, in this example, the
@@ -22,9 +22,9 @@ waits on `g()` to complete before executing.
 
 An important observation to make is that, for each argument to
 `@spawn`/`spawn`, if the argument is the result of another `@spawn`/`spawn`
-call (thus it's an [`EagerThunk`](@ref)), the argument will be computed first, and then
+call (thus it's an [`DTask`](@ref)), the argument will be computed first, and then
 its result will be passed into the function receiving the argument. If the
-argument is *not* an [`EagerThunk`](@ref) (instead, some other type of Julia object),
+argument is *not* an [`DTask`](@ref) (instead, some other type of Julia object),
 it'll be passed as-is to the function `f` (with some exceptions).
 
 ## Options
@@ -75,7 +75,7 @@ The final result (from `fetch(s)`) is the obvious consequence of the operation:
 
 Dagger's `@spawn` macro works similarly to `@async` and `Threads.@spawn`: when
 called, it wraps the function call specified by the user in an
-[`EagerThunk`](@ref) object, and immediately places it onto a running scheduler,
+[`DTask`](@ref) object, and immediately places it onto a running scheduler,
 to be executed once its dependencies are fulfilled.
 
 ```julia
@@ -114,7 +114,7 @@ One can also safely call `@spawn` from another worker (not ID 1), and it will be
 
 ```
 x = fetch(Distributed.@spawnat 2 Dagger.@spawn 1+2) # fetches the result of `@spawnat`
-x::EagerThunk
+x::DTask
 @assert fetch(x) == 3 # fetch the result of `@spawn`
 ```
 

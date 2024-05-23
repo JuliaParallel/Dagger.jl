@@ -353,8 +353,8 @@ Now, `DZ` will contain the result of computing `(DX .+ DX) .* 3`.
 ```
 julia> Dagger.chunks(DZ)
 2×2 Matrix{Any}:
- EagerThunk (finished)  EagerThunk (finished)
- EagerThunk (finished)  EagerThunk (finished)
+ DTask (finished)  DTask (finished)
+ DTask (finished)  DTask (finished)
 
 julia> Dagger.chunks(fetch(DZ))
 2×2 Matrix{Union{Thunk, Dagger.Chunk}}:
@@ -363,7 +363,7 @@ julia> Dagger.chunks(fetch(DZ))
 ```
 
 Here we can see the `DArray`'s internal representation of the partitions, which
-are stored as either `EagerThunk` objects (representing an ongoing or completed
+are stored as either `DTask` objects (representing an ongoing or completed
 computation) or `Chunk` objects (which reference data which exist locally or on
 other Julia workers). Of course, one doesn't typically need to worry about
 these internal details unless implementing low-level operations on `DArray`s.

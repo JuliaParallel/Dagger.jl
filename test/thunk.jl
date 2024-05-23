@@ -56,10 +56,10 @@ end
     @testset "per-call" begin
         x = 2
         a = @spawn x + x
-        @test a isa Dagger.EagerThunk
+        @test a isa Dagger.DTask
         b = @spawn sum([x,1,2])
         c = @spawn a * b
-        @test c isa Dagger.EagerThunk
+        @test c isa Dagger.DTask
         @test fetch(a) == 4
         @test fetch(b) == 5
         @test fetch(c) == 20
@@ -176,7 +176,7 @@ end
         a = fetch(Distributed.@spawnat 2 Dagger.@spawn 1+2)
         @test Dagger.Sch.EAGER_INIT[]
         @test fetch(Distributed.@spawnat 2 !(Dagger.Sch.EAGER_INIT[]))
-        @test a isa Dagger.EagerThunk
+        @test a isa Dagger.DTask
         @test fetch(a) == 3
 
         # Mild stress-test

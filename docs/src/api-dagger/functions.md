@@ -11,8 +11,6 @@ Pages = ["functions.md"]
 ```@docs
 @spawn
 spawn
-delayed
-@par
 ```
 
 ## Task Options Functions/Macros
@@ -36,16 +34,6 @@ shard
 ```@docs
 scope
 constrain
-```
-
-## Lazy Task Functions
-```@docs
-domain
-compute
-dependents
-noffspring
-order
-treereduce
 ```
 
 ## Processor Functions

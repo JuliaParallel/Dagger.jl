@@ -24,7 +24,7 @@ function init_eager()
         sopts = SchedulerOptions(;allow_errors=true)
         opts = Dagger.Options((;scope=Dagger.ExactScope(Dagger.ThreadProc(1, 1)),
                                 occupancy=Dict(Dagger.ThreadProc=>0)))
-        Dagger.compute(ctx, Dagger.delayed(eager_thunk, opts)();
+        Dagger.compute(ctx, Dagger._delayed(eager_thunk, opts)();
                        options=sopts)
     catch err
         # Scheduler halting is considered normal
@@ -100,7 +100,7 @@ function thunk_yield(f)
     end
 end
 
-eager_cleanup(t::Dagger.EagerThunkFinalizer) =
+eager_cleanup(t::Dagger.DTaskFinalizer) =
     errormonitor_tracked("eager_cleanup $(t.uid)", Threads.@spawn eager_cleanup(EAGER_STATE[], t.uid))
 function eager_cleanup(state, uid)
     tid = nothing
@@ -118,7 +118,7 @@ function eager_cleanup(state, uid)
     end
 end
 
-function _find_thunk(e::Dagger.EagerThunk)
+function _find_thunk(e::Dagger.DTask)
     tid = lock(EAGER_ID_MAP) do id_map
         id_map[e.uid]
     end
