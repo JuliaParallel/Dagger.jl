@@ -5,6 +5,7 @@
     end
     return x
 end
+
 function catch_interrupt(f)
     try
         f()
@@ -17,6 +18,7 @@ function catch_interrupt(f)
         rethrow(err)
     end
 end
+
 function test_finishes(f, message::String; ignore_timeout=false)
     t = @eval Threads.@spawn @testset $message catch_interrupt($f)
     if timedwait(()->istaskdone(t), 10) == :timed_out
@@ -29,6 +31,7 @@ function test_finishes(f, message::String; ignore_timeout=false)
     end
     return true
 end
+
 @testset "Basics" begin
     @test test_finishes("Single task") do
         local x
@@ -48,6 +51,21 @@ end
             end
         end
         fetch(x)
+    end
+
+    @test test_finishes("Max evaluations") do
+        counter = 0
+        function incrementer()
+            counter += 1
+        end
+
+        x = Dagger.with_options(; stream_max_evals=10) do
+            Dagger.spawn_streaming() do
+                Dagger.@spawn incrementer()
+            end
+        end
+        wait(x)
+        @test counter == 10
     end
 
     @test test_finishes("Two tasks (sequential)") do
