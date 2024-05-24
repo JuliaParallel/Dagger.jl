@@ -208,12 +208,10 @@ function initialize_streaming!(self_streams, spec, task)
         end
         output_buffer = get(spec.options, :stream_output_buffer, ProcessRingBuffer)
         stream = Stream{T,output_buffer}(output_buffer_amount)
-        spec.options = NamedTuple(filter(opt -> opt[1] != :stream_output_buffer &&
-                                                opt[1] != :stream_output_buffer_amount,
-                                         Base.pairs(spec.options)))
         self_streams[task.uid] = stream
 
-        spec.f = StreamingFunction(spec.f, stream)
+        max_evals = get(spec.options, :stream_max_evals, -1)
+        spec.f = StreamingFunction(spec.f, stream, max_evals)
         spec.options = merge(spec.options, (;occupancy=Dict(Any=>0)))
 
         # Register Stream globally
@@ -256,6 +254,7 @@ const STREAM_THUNK_ID = TaskLocalValue{Int}(()->0)
 struct StreamingFunction{F, S}
     f::F
     stream::S
+    max_evals::Int
 end
 chunktype(sf::StreamingFunction{F}) where F = F
 function (sf::StreamingFunction)(args...; kwargs...)
@@ -319,7 +318,9 @@ end
 function stream!(sf::StreamingFunction, uid,
                  args::Tuple, kwarg_names::Tuple, kwarg_values::Tuple)
     f = move(thunk_processor(), sf.f)
-    while true
+    counter = 0
+
+    while sf.max_evals < 0 || counter < sf.max_evals
         # Get values from Stream args/kwargs
         stream_args = _stream_take_values!(args, uid)
         stream_kwarg_values = _stream_take_values!(kwarg_values, uid)
@@ -327,6 +328,7 @@ function stream!(sf::StreamingFunction, uid,
 
         # Run a single cycle of f
         stream_result = f(stream_args...; stream_kwargs...)
+        counter += 1
 
         # Exit streaming on graceful request
         if stream_result isa FinishStream
@@ -412,7 +414,8 @@ function finalize_streaming!(tasks::Vector{Pair{DTaskSpec,DTask}}, self_streams)
 
         # Filter out all streaming options
         to_filter = (:stream_input_buffer, :stream_input_buffer_amount,
-                     :stream_output_buffer, :stream_output_buffer_amount)
+                     :stream_output_buffer, :stream_output_buffer_amount,
+                     :stream_max_evals)
         spec.options = NamedTuple(filter(opt -> !(opt[1] in to_filter),
                                          Base.pairs(spec.options)))
         if haskey(spec.options, :propagates)
