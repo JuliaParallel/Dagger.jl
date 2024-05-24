@@ -1,5 +1,3 @@
-@everywhere ENV["JULIA_DEBUG"] = "Dagger"
-
 @everywhere function rand_finite()
     x = rand()
     if x < 0.1
