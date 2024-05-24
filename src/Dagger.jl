@@ -81,6 +81,7 @@ include("array/linalg.jl")
 include("array/mul.jl")
 include("array/cholesky.jl")
 include("array/adapt_precision.jl")
+include("array/mixchol.jl")
 # Visualization
 include("visualization.jl")
 include("ui/gantt-common.jl")

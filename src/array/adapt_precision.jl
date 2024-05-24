@@ -157,7 +157,7 @@ function adapt_precision(A::DArray{T,2}, tolerance::T) where {T}
 
     global_norm = LinearAlgebra.norm2(A)
 
-    MP = fill("Float64", mt, nt)
+    MP = fill(T, mt, nt)
     DMP = view(MP, Blocks(1, 1))
     MPc = DMP.chunks
 
