@@ -7,6 +7,7 @@ struct ThunkID
     ref::Union{DRef,Nothing}
 end
 ThunkID(id::Int) = ThunkID(id, nothing)
+Dagger.istask(::ThunkID) = true
 
 "A handle to the scheduler, used by dynamic thunks."
 struct SchedulerHandle
@@ -223,7 +224,7 @@ function _add_thunk!(ctx, state, task, tid, (f, args, options, future, ref))
             @dagdebug thunk :submit "Registered future"
         end
         if ref !== nothing
-            # Preserve the `EagerThunkFinalizer` through `thunk`
+            # Preserve the `DTaskFinalizer` through `thunk`
             thunk.eager_ref = ref
         end
         state.valid[thunk] = nothing

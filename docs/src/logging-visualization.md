@@ -15,8 +15,7 @@ by libraries or directly by the user, using multiple dispatch on
 identifying the rendering mode to use. From the user's perspective, `show_logs`
 and `render_logs` take not a `Val` but a raw `Symbol`, which will be internally
 converted to a `Val` for dispatch purposes
-(i.e. `render_logs(logs::Dict, :myrenderer)` -> 
-`render_logs(logs, Val{:myrenderer}())`).
+(i.e. `render_logs(logs::Dict, :myrenderer)` -> `render_logs(logs, Val{:myrenderer}())`).
 
 Built-in rendering support exists for:
 - `render_logs(logs, :graphviz)` to generate a graph diagram of executed tasks and their dependencies

@@ -565,7 +565,7 @@ storage_safe_type(::Type{A}) where {A<:Array{T}} where {T} =
     storage_safe_type(T)
 
 storage_safe_type(::Type{Thunk}) = false
-storage_safe_type(::Type{Dagger.EagerThunk}) = false
+storage_safe_type(::Type{Dagger.DTask}) = false
 storage_safe_type(::Type{<:Chunk}) = false
 storage_safe_type(::Type{MemPool.DRef}) = false
 storage_safe_type(::Type{<:Ptr}) = false

@@ -1,16 +1,15 @@
 module Sch
 
-using Distributed
+import Distributed: Future, ProcessExitedException, RemoteChannel, RemoteException, myid, remote_do, remotecall_fetch, remotecall_wait, workers
 import MemPool
 import MemPool: DRef, StorageResource
-import MemPool: poolset, storage_available, storage_capacity, storage_utilized, externally_varying
-import Statistics: mean
+import MemPool: poolset, storage_capacity, storage_utilized
 import Random: randperm
 import Base: @invokelatest
 
 import ..Dagger
 import ..Dagger: Context, Processor, Thunk, WeakThunk, ThunkFuture, ThunkFailedException, Chunk, WeakChunk, OSProc, AnyScope, DefaultScope, LockedObject
-import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak_checked, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, processor, default_enabled, get_processors, get_parent, execute!, rmprocs!, addprocs!, thunk_processor, constrain, cputhreadtime
+import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak_checked, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, processor, get_processors, get_parent, execute!, rmprocs!, thunk_processor, constrain, cputhreadtime
 import ..Dagger: @dagdebug, @safe_lock_spin1
 import DataStructures: PriorityQueue, enqueue!, dequeue_pair!, peek
 
@@ -1473,7 +1472,7 @@ function do_task(to_proc, task_desc)
                 break
             end
             if est_alloc_util + real_alloc_util > storage_cap
-                if externally_varying(to_storage)
+                if MemPool.externally_varying(to_storage)
                     debug_storage("WARN: Insufficient space and allocation behavior is externally varying on $to_storage_name, proceeding anyway")
                     break
                 end

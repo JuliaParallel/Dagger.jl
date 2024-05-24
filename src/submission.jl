@@ -28,7 +28,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
 
     timespan_start(ctx, :add_thunk, (;thunk_id=id), (;f, args, options))
 
-    # Lookup EagerThunk/ThunkID -> Thunk
+    # Lookup DTask/ThunkID -> Thunk
     old_args = copy(args)
     args::Vector{Any}
     syncdeps = if haskey(options, :syncdeps)
@@ -39,7 +39,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
     lock(Sch.EAGER_ID_MAP) do id_map
         for (idx, (pos, arg)) in enumerate(args)
             pos::Union{Symbol,Nothing}
-            newarg = if arg isa EagerThunk
+            newarg = if arg isa DTask
                 arg_uid = arg.uid
                 arg_tid = if haskey(id_map, arg_uid)
                     id_map[arg_uid]
@@ -74,7 +74,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
             return
         end
         for (idx, dep) in enumerate(syncdeps)
-            newdep = if dep isa EagerThunk
+            newdep = if dep isa DTask
                 tid = if haskey(id_map, dep.uid)
                     id_map[dep.uid]
                 else
@@ -113,7 +113,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
             @dagdebug thunk :submit "Registered future"
         end
         if ref !== nothing
-            # Preserve the `EagerThunkFinalizer` through `thunk`
+            # Preserve the `DTaskFinalizer` through `thunk`
             thunk.eager_ref = ref
         end
         state.valid[thunk] = nothing
@@ -186,20 +186,20 @@ end
 function eager_process_elem_submission_to_local(id_map, x)
     @nospecialize x
     @assert !isa(x, Thunk) "Cannot use `Thunk`s in `@spawn`/`spawn`"
-    if x isa Dagger.EagerThunk && haskey(id_map, x.uid)
+    if x isa Dagger.DTask && haskey(id_map, x.uid)
         return Sch.ThunkID(id_map[x.uid], x.thunk_ref)
     else
         return x
     end
 end
 # TODO: This can probably operate in-place
-function eager_process_args_submission_to_local(id_map, spec::Pair{EagerTaskSpec,EagerThunk})
+function eager_process_args_submission_to_local(id_map, spec::Pair{DTaskSpec,DTask})
     return Base.mapany(first(spec).args) do pos_x
         pos, x = pos_x
         return pos => eager_process_elem_submission_to_local(id_map, x)
     end
 end
-function eager_process_args_submission_to_local(id_map, specs::Vector{Pair{EagerTaskSpec,EagerThunk}})
+function eager_process_args_submission_to_local(id_map, specs::Vector{Pair{DTaskSpec,DTask}})
     return Base.mapany(specs) do spec
         eager_process_args_submission_to_local(id_map, spec)
     end
@@ -217,17 +217,17 @@ function eager_process_options_submission_to_local(id_map, options::NamedTuple)
         return options
     end
 end
-function eager_spawn(spec::EagerTaskSpec)
-    # Generate new EagerThunk
+function eager_spawn(spec::DTaskSpec)
+    # Generate new DTask
     uid = eager_next_id()
     future = ThunkFuture()
-    finalizer_ref = poolset(EagerThunkFinalizer(uid); device=MemPool.CPURAMDevice())
+    finalizer_ref = poolset(DTaskFinalizer(uid); device=MemPool.CPURAMDevice())
 
-    # Return unlaunched EagerThunk
-    return EagerThunk(uid, future, finalizer_ref)
+    # Return unlaunched DTask
+    return DTask(uid, future, finalizer_ref)
 end
-function eager_launch!((spec, task)::Pair{EagerTaskSpec,EagerThunk})
-    # Lookup EagerThunk -> ThunkID
+function eager_launch!((spec, task)::Pair{DTaskSpec,DTask})
+    # Lookup DTask -> ThunkID
     local args, options
     lock(Sch.EAGER_ID_MAP) do id_map
         args = eager_process_args_submission_to_local(id_map, spec=>task)
@@ -240,7 +240,7 @@ function eager_launch!((spec, task)::Pair{EagerTaskSpec,EagerThunk})
                              spec.f, args, options)
     task.thunk_ref = thunk_id.ref
 end
-function eager_launch!(specs::Vector{Pair{EagerTaskSpec,EagerThunk}})
+function eager_launch!(specs::Vector{Pair{DTaskSpec,DTask}})
     ntasks = length(specs)
 
     uids = [task.uid for (_, task) in specs]
@@ -250,7 +250,7 @@ function eager_launch!(specs::Vector{Pair{EagerTaskSpec,EagerThunk}})
     # Get all functions, args/kwargs, and options
     all_fs = Any[spec.f for (spec, _) in specs]
     all_args = lock(Sch.EAGER_ID_MAP) do id_map
-        # Lookup EagerThunk -> ThunkID
+        # Lookup DTask -> ThunkID
         eager_process_args_submission_to_local(id_map, specs)
     end
     all_options = Any[spec.options for (spec, _) in specs]

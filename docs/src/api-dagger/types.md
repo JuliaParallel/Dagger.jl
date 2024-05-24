@@ -10,7 +10,7 @@ Pages = ["types.md"]
 ## Task Types
 ```@docs
 Thunk
-EagerThunk
+DTask
 ```
 
 ## Task Options Types

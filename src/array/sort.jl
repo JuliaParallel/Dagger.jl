@@ -1,7 +1,7 @@
-import Base.Sort: Forward, Ordering, Algorithm, lt
-using Distributed
+import Base.Sort: Forward, Ordering, lt
+import SharedArrays: SharedArray
 
-using StatsBase
+import StatsBase: fit!, sample
 
 
 function getmedians(x, n)
@@ -305,7 +305,7 @@ function dsort_chunks(cs, nchunks=length(cs), nsamples=2000;
 end
 
 function propagate_affinity!(c, aff)
-    if !isa(c, EagerThunk)
+    if !isa(c, DTask)
         return
     end
     if c.affinity !== nothing

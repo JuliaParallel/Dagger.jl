@@ -94,7 +94,7 @@ List of recommended Dagger.jl resources:
 ## Help and Discussion
 For help and discussion, we suggest asking in the following places:
 
-[Julia Discourse](https://discourse.julialang.org/c/domain/parallel/34) and on the [Julia Slack](https://julialang.org/slack/) in the `#distributed` channel.
+[Julia Discourse](https://discourse.julialang.org/c/domain/parallel/34) and on the [Julia Slack](https://julialang.org/slack/) in the `#dagger` channel.
 
 ## Acknowledgements
 

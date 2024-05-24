@@ -14,7 +14,7 @@ queues".
 A task queue in Dagger is an object that can be configured to accept unlaunched
 tasks from `@spawn`/`spawn` and either modify them or delay their launching
 arbitrarily. By default, Dagger tasks are enqueued through the
-`EagerTaskQueue`, which submits tasks directly into the scheduler before
+`DefaultTaskQueue`, which submits tasks directly into the scheduler before
 `@spawn`/`spawn` returns. However, Dagger also has an `InOrderTaskQueue`, which
 ensures that tasks enqueued through it execute sequentially with respect to
 each other. This queue can be allocated with `Dagger.spawn_sequential`:

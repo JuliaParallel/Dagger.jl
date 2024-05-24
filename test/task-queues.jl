@@ -8,7 +8,7 @@ function task_queue_wait_update(w, r, op, x, y)
     return op(x, y)
 end
 
-@testset "EagerTaskQueue" begin
+@testset "DefaultTaskQueue" begin
     r = Ref(0)
     R = Dagger.@mutable r
     d = begin

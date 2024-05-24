@@ -1,9 +1,11 @@
-using Dagger, TimespanLogging, DaggerWebDash
+using Dagger, TimespanLogging, DaggerWebDash, GraphViz, Plots, DataFrames
+const GraphVizExt = something(Base.get_extension(Dagger, :GraphVizExt))
+const PlotsExt = something(Base.get_extension(Dagger, :PlotsExt))
 using Documenter
 import Documenter.Remotes: GitHub
 
 makedocs(;
-    modules = [Dagger, TimespanLogging, DaggerWebDash],
+    modules = [Dagger, TimespanLogging, DaggerWebDash, GraphVizExt, PlotsExt],
     authors = "JuliaParallel and contributors",
     repo = GitHub("JuliaParallel", "Dagger.jl"),
     sitename = "Dagger.jl",

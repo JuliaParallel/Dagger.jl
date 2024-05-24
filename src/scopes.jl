@@ -150,8 +150,8 @@ Constructs a scope that is the intersection of scopes `x` and `y`.
 constrain(x, y) = x < y ? constrain(y, x) : throw(MethodError(constrain, x, y))
 
 Base.isless(::AnyScope, ::AnyScope) = false
-Base.isless(::AnyScope, x) = false
-Base.isless(x, ::AnyScope) = true
+Base.isless(::AnyScope, ::AbstractScope) = false
+Base.isless(::AbstractScope, ::AnyScope) = true
 constrain(::AnyScope, ::AnyScope) = AnyScope()
 constrain(::AnyScope, y) = y
 
@@ -161,8 +161,8 @@ taint_match(::DefaultEnabledTaint, x::Processor) = default_enabled(x)
 taint_match(::ProcessorTypeTaint{T}, x::Processor) where T = x isa T
 Base.isless(::TaintScope, ::TaintScope) = false
 Base.isless(::TaintScope, ::AnyScope) = true
-Base.isless(::TaintScope, x) = false
-Base.isless(x, ::TaintScope) = true
+Base.isless(::TaintScope, ::AbstractScope) = false
+Base.isless(::AbstractScope, ::TaintScope) = true
 function constrain(x::TaintScope, y::TaintScope)
     scope = constrain(x.scope, y.scope)
     if scope isa InvalidScope

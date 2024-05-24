@@ -66,7 +66,7 @@ function (+)(a::ArrayDomain, b::ArrayDomain)
 end
 
 struct BinaryComputeOp{F} end
-BinaryComputeOp{F}(x::Union{Chunk,EagerThunk}, y::Union{Chunk,EagerThunk}) where F = @spawn F(x, y)
+BinaryComputeOp{F}(x::Union{Chunk,DTask}, y::Union{Chunk,DTask}) where F = @spawn F(x, y)
 BinaryComputeOp{F}(x, y) where F = F(x, y)
 
 const AddComputeOp = BinaryComputeOp{+}

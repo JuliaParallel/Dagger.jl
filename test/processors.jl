@@ -100,5 +100,6 @@ end
             w_procs = Dagger.get_processors(OSProc(w))
             @test all(proc->proc in all_procs, w_procs)
         end
+        @test Dagger.num_processors(;all=true) == length(all_procs)
     end
 end

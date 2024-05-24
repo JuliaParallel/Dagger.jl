@@ -3,6 +3,33 @@
 Dagger.jl is a framework for parallel computing across all kinds of resources,
 like CPUs and GPUs, and across multiple threads and multiple servers.
 
+
+Note: when using Dagger with multiple workers, make sure that the workers are
+initialized *before* importing Dagger and doing any distributed operations. This
+is good:
+```julia-repl
+julia> using Distributed
+
+julia> addprocs(2)
+
+julia> using Dagger
+```
+
+But this will cause errors when using Dagger:
+```julia-repl
+julia> using Distributed, Dagger
+
+julia> addprocs(2)
+```
+
+The reason is because Distributed.jl requires packages to be loaded across all
+workers in order for the workers to use objects from the needed packages, and
+`using Dagger` will load Dagger on all existing workers. If you're executing
+custom functions then you will also need to define those on all workers with
+`@everywhere`, [see the Distributed.jl
+documentation](https://docs.julialang.org/en/v1/manual/distributed-computing/#code-availability)
+for more information.
+
 -----
 
 ## Quickstart: Task Spawning
