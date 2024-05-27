@@ -56,20 +56,23 @@ end
 const EagerThunk = DTask
 
 Base.isready(t::DTask) = isready(t.future)
+Base.istaskdone(t::DTask) = isready(t.future)
+Base.istaskstarted(t::DTask) = isdefined(t, :thunk_ref)
 function Base.wait(t::DTask)
-    if !isdefined(t, :thunk_ref)
+    if !istaskstarted(t)
         throw(ConcurrencyViolationError("Cannot `wait` on an unlaunched `DTask`"))
     end
     wait(t.future)
+    return
 end
 function Base.fetch(t::DTask; raw=false)
-    if !isdefined(t, :thunk_ref)
+    if !istaskstarted(t)
         throw(ConcurrencyViolationError("Cannot `fetch` an unlaunched `DTask`"))
     end
     return fetch(t.future; raw)
 end
 function Base.show(io::IO, t::DTask)
-    status = if isdefined(t, :thunk_ref)
+    status = if istaskstarted(t)
         isready(t) ? "finished" : "running"
     else
         "not launched"

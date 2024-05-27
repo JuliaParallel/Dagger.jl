@@ -3,10 +3,11 @@
 For many programs, the restriction that tasks cannot write to their arguments
 feels overly restrictive and makes certain kinds of programs (such as in-place
 linear algebra) hard to express efficiently in Dagger. Thankfully, there is a
-solution: `spawn_datadeps`. This function constructs a "datadeps region",
+solution called "Datadeps" (short for "data dependencies"), accessible through
+the `spawn_datadeps` function. This function constructs a "datadeps region",
 within which tasks are allowed to write to their arguments, with parallelism
-controlled via dependencies specified via argument annotations. Let's look at
-a simple example to make things concrete:
+controlled via dependencies specified via argument annotations. Let's look at a
+simple example to make things concrete:
 
 ```julia
 A = rand(1000)
@@ -94,3 +95,63 @@ Additionally, we can notice a powerful feature of this model - if the
 runs sequentially. This means that the structure of the program doesn't have to
 change in order to use Dagger for parallelization, which can make applying
 Dagger to existing algorithms quite effortless.
+
+## Aliasing Support
+
+Datadeps is smart enough to detect when two arguments from different tasks
+actually access the same memory (we say that these arguments "alias"). There's
+the obvious case where the two arguments are exactly the same object, but
+Datadeps is also aware of more subtle cases, such as when two arguments are
+different views into the same array, or where two arrays point to the same
+underlying memory. In these cases, Datadeps will ensure that the tasks are
+executed in the correct order - if one task writes to an argument which aliases
+with an argument read by another task, those two tasks will be executed in
+sequence, rather than in parallel.
+
+There are two ways to specify aliasing to Datadeps. The simplest way is the most straightforward: if the argument passed to a task is a view or another supported object (such as an `UpperTriangular`-wrapped array), Datadeps will compare it with all other task's arguments to determine if they alias. This works great when you want to pass that view or `UpperTriangular` object directly to the called function. For example:
+
+```julia
+A = rand(1000)
+A_l = view(A, 1:500)
+A_r = view(A, 501:1000)
+
+# inc! supports views, so we can pass A_l and A_r directly
+inc!(X) = X .+= 1
+
+Dagger.spawn_datadeps() do
+    # These two tasks don't alias, so they can run in parallel
+    Dagger.@spawn inc!(InOut(A_l))
+    Dagger.@spawn inc!(InOut(A_r))
+
+    # This task aliases with the previous two, so it will run after them
+    Dagger.@spawn inc!(InOut(A))
+end
+```
+
+The other way allows you to seperate what argument is passed to the function,
+from how that argument is accessed within the function. This is done with the
+`Deps` wrapper, which is used like so:
+
+```julia
+A = rand(1000, 1000)
+
+inc_upper!(X) = UpperTriangular(X) .+= 1
+inc_ulower!(X) = UnitLowerTriangular(X) .+= 1
+inc_diag!(X) = X[diagind(X)] .+= 1
+
+Dagger.spawn_datadeps() do
+    # These two tasks don't alias, so they can run in parallel
+    Dagger.@spawn inc_upper!(Deps(A, InOut(UpperTriangular)))
+    Dagger.@spawn inc_ulower!(Deps(A, InOut(UnitLowerTriangular)))
+
+    # This task aliases with the `inc_upper!` task (`UpperTriangular` accesses the diagonal of the array)
+    Dagger.@spawn inc_diag!(Deps(A, InOut(Diagonal)))
+end
+```
+
+You can pass any number of aliasing modifiers to `Deps`. This is particularly
+useful for declaring aliasing with `Diagonal`, `Bidiagonal`, `Tridiagonal`, and
+`SymTridiagonal` access, as these "wrappers" make a copy of their parent array
+and thus can't be used to "mask" access to the parent like `UpperTriangular`
+and `UnitLowerTriangular` can (which is valuable for writing memory-efficient,
+generic algorithms in Julia).
