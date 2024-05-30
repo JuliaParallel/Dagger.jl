@@ -109,8 +109,8 @@ function gemm_dagger!(
     Bmt, Bnt = size(Bc)
     Cmt, Cnt = size(Cc)
 
-    alpha = _add.alpha
-    beta = _add.beta
+    alpha = T(_add.alpha)
+    beta = T(_add.beta)
 
     if Ant != Bmt
         throw(DimensionMismatch(lazy"A has number of blocks ($Amt,$Ant) but B has number of blocks ($Bmt,$Bnt)"))
@@ -212,8 +212,8 @@ function syrk_dagger!(
     Amt, Ant = size(Ac)
     Cmt, Cnt = size(Cc)
 
-    alpha = _add.alpha
-    beta = _add.beta
+    alpha = T(_add.alpha)
+    beta = T(_add.beta)
 
     uplo = 'U'
     if Ant != Cmt
@@ -233,7 +233,7 @@ function syrk_dagger!(
                         Dagger.@spawn BLAS.herk!(
                             uplo,
                             trans,
-                            alpha,
+                            real(alpha),
                             In(Ac[n, k]),
                             mzone,
                             InOut(Cc[n, n]),
