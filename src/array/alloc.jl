@@ -4,7 +4,8 @@ export partition
 
 mutable struct AllocateArray{T,N} <: ArrayOp{T,N}
     eltype::Type{T}
-    f::Function
+    f
+    want_index::Bool
     domain::ArrayDomain{N}
     domainchunks
     partitioning::AbstractBlocks
@@ -23,9 +24,21 @@ function partition(p::AbstractBlocks, dom::ArrayDomain)
         map(_cumlength, map(length, indexes(dom)), p.blocksize))
 end
 
+function allocate_array(f, T, idx, sz)
+    new_f = allocate_array_func(thunk_processor(), f)
+    return new_f(idx, T, sz)
+end
+function allocate_array(f, T, sz)
+    new_f = allocate_array_func(thunk_processor(), f)
+    return new_f(T, sz)
+end
+allocate_array_func(::Processor, f) = f
 function stage(ctx, a::AllocateArray)
-    alloc(idx, sz) = a.f(idx, a.eltype, sz)
-    thunks = [Dagger.@spawn alloc(i, size(x)) for (i, x) in enumerate(a.domainchunks)]
+    if a.want_index
+        thunks = [Dagger.@spawn allocate_array(a.f, a.eltype, i, size(x)) for (i, x) in enumerate(a.domainchunks)]
+    else
+        thunks = [Dagger.@spawn allocate_array(a.f, a.eltype, size(x)) for (i, x) in enumerate(a.domainchunks)]
+    end
     return DArray(a.eltype, a.domain, a.domainchunks, thunks, a.partitioning)
 end
 
@@ -33,7 +46,7 @@ const BlocksOrAuto = Union{Blocks{N} where N, AutoBlocks}
 
 function Base.rand(p::Blocks, eltype::Type, dims::Dims)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, (_, x...) -> rand(x...), d, partition(p, d), p)
+    a = AllocateArray(eltype, rand, false, d, partition(p, d), p)
     return _to_darray(a)
 end
 Base.rand(p::BlocksOrAuto, T::Type, dims::Integer...) = rand(p, T, dims)
@@ -45,7 +58,7 @@ Base.rand(::AutoBlocks, eltype::Type, dims::Dims) =
 
 function Base.randn(p::Blocks, eltype::Type, dims::Dims)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, (_, x...) -> randn(x...), d, partition(p, d), p)
+    a = AllocateArray(eltype, randn, false, d, partition(p, d), p)
     return _to_darray(a)
 end
 Base.randn(p::BlocksOrAuto, T::Type, dims::Integer...) = randn(p, T, dims)
@@ -57,7 +70,7 @@ Base.randn(::AutoBlocks, eltype::Type, dims::Dims) =
 
 function sprand(p::Blocks, eltype::Type, dims::Dims, sparsity::AbstractFloat)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, (_, T, _dims) -> sprand(T, _dims..., sparsity), d, partition(p, d), p)
+    a = AllocateArray(eltype, (T, _dims) -> sprand(T, _dims..., sparsity), false, d, partition(p, d), p)
     return _to_darray(a)
 end
 sprand(p::BlocksOrAuto, T::Type, dims_and_sparsity::Real...) =
@@ -73,7 +86,7 @@ sprand(::AutoBlocks, eltype::Type, dims::Dims, sparsity::AbstractFloat) =
 
 function Base.ones(p::Blocks, eltype::Type, dims::Dims)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, (_, x...) -> ones(x...), d, partition(p, d), p)
+    a = AllocateArray(eltype, ones, false, d, partition(p, d), p)
     return _to_darray(a)
 end
 Base.ones(p::BlocksOrAuto, T::Type, dims::Integer...) = ones(p, T, dims)
@@ -85,7 +98,7 @@ Base.ones(::AutoBlocks, eltype::Type, dims::Dims) =
 
 function Base.zeros(p::Blocks, eltype::Type, dims::Dims)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, (_, x...) -> zeros(x...), d, partition(p, d), p)
+    a = AllocateArray(eltype, zeros, false, d, partition(p, d), p)
     return _to_darray(a)
 end
 Base.zeros(p::BlocksOrAuto, T::Type, dims::Integer...) = zeros(p, T, dims)
