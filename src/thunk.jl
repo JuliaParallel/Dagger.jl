@@ -175,7 +175,7 @@ function _delayed(f, options::Options)
     (args...; kwargs...) -> Thunk(f, args_kwargs_to_pairs(args, kwargs)...; options.options...)
 end
 function delayed(f, options::Options)
-    Base.depwarn("`delayed` is deprecated. Use `Dagger.@spawn` or `Dagger.spawn` instead.", :delayed; force=true)
+    @warn "`delayed` is deprecated. Use `Dagger.@spawn` or `Dagger.spawn` instead." maxlog=1
     return _delayed(f, options)
 end
 delayed(f; kwargs...) = delayed(f, Options(;kwargs...))
