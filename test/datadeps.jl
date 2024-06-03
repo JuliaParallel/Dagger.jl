@@ -1,75 +1,348 @@
-using LinearAlgebra
+using LinearAlgebra, Graphs
 
+empty!(Dagger.DAGDEBUG_CATEGORIES)
+push!(Dagger.DAGDEBUG_CATEGORIES, :spawn_datadeps)
+
+function with_logs(f)
+    Dagger.enable_logging!(;taskdeps=true, taskargs=true)
+    try
+        f()
+        return Dagger.fetch_logs!()
+    finally
+        Dagger.disable_logging!()
+    end
+end
+task_id(t::Dagger.DTask) = lock(Dagger.Sch.EAGER_ID_MAP) do id_map
+    id_map[t.uid]
+end
+function taskdeps_for_task(logs::Dict{Int,<:Dict}, tid::Int)
+    for w in keys(logs)
+        _logs = logs[w]
+        for idx in 1:length(_logs[:core])
+            core_log = _logs[:core][idx]
+            if core_log.category == :add_thunk && core_log.kind == :start
+                taskdeps = _logs[:taskdeps][idx]::Pair{Int,Vector{Int}}
+                if taskdeps[1] == tid
+                    return taskdeps[2]
+                end
+            end
+        end
+    end
+    error("Task $tid not found in logs")
+end
+function test_task_dominators(logs::Dict, tid::Int, doms::Vector; all_tids::Vector=[], nondom_check::Bool=true)
+    g = SimpleDiGraph()
+    tid_to_v = Dict{Int,Int}()
+    seen = Set{Int}()
+    to_visit = copy(all_tids)
+    while !isempty(to_visit)
+        this_tid = popfirst!(to_visit)
+        this_tid in seen && continue
+        push!(seen, this_tid)
+        if !(this_tid in keys(tid_to_v))
+            add_vertex!(g); tid_to_v[this_tid] = nv(g)
+        end
+
+        # Add syncdeps
+        deps = taskdeps_for_task(logs, this_tid)
+        for dep in deps
+            if !(dep in keys(tid_to_v))
+                add_vertex!(g); tid_to_v[dep] = nv(g)
+            end
+            add_edge!(g, tid_to_v[this_tid], tid_to_v[dep])
+            push!(to_visit, dep)
+        end
+    end
+    state = dijkstra_shortest_paths(g, tid_to_v[tid])
+    any_failed = false
+    @test !has_edge(g, tid_to_v[tid], tid_to_v[tid])
+    any_failed |= has_edge(g, tid_to_v[tid], tid_to_v[tid])
+    for dom in doms
+        @test state.pathcounts[tid_to_v[dom]] > 0
+        if state.pathcounts[tid_to_v[dom]] == 0
+            println("Expected dominance for $dom of $tid")
+            any_failed = true
+        end
+    end
+    if nondom_check
+        for nondom in all_tids
+            nondom == tid && continue
+            nondom in doms && continue
+            @test state.pathcounts[tid_to_v[nondom]] == 0
+            if state.pathcounts[tid_to_v[nondom]] > 0
+                println("Expected non-dominance for $nondom of $tid")
+                any_failed = true
+            end
+        end
+    end
+
+    # For debugging purposes
+    if any_failed
+        println("Failure detected!")
+        println("Root: $tid")
+        println("Exp. doms: $doms")
+        println("All: $all_tids")
+        e_vs = collect(edges(g))
+        e_tids = map(e->Edge(only(filter(tv->tv[2]==src(e), tid_to_v))[1],
+                             only(filter(tv->tv[2]==dst(e), tid_to_v))[1]),
+                     e_vs)
+        sort!(e_tids)
+        for e in e_tids
+            s_tid, d_tid = src(e), dst(e)
+            println("Edge: $s_tid -(up)> $d_tid")
+        end
+    end
+end
+
+@everywhere do_nothing(Xs...) = nothing
 function test_datadeps(;args_chunks::Bool,
                         args_thunks::Bool,
-                        args_loc::Int=1,
-                        static::Bool,
-                        traversal::Symbol)
+                        args_loc::Int,
+                        aliasing::Bool)
     # Returns last value
-    @test Dagger.spawn_datadeps(()->42; static, traversal) == 42
+    @test Dagger.spawn_datadeps(;aliasing) do
+        42
+    end == 42
 
-    # Throws any task exceptions
-    @test_throws Exception Dagger.spawn_datadeps(;static, traversal) do
+    # Tasks are started and finished as spawn_datadeps returns
+    ts = []
+    Dagger.spawn_datadeps(;aliasing) do
+        for i in 1:5
+            t = Dagger.@spawn sleep(0.1)
+            @test !istaskstarted(t)
+        end
+    end
+    @test all(istaskdone, ts)
+
+    # Rethrows any task exceptions
+    @test_throws Exception Dagger.spawn_datadeps(;aliasing) do
         Dagger.@spawn error("Test")
     end
 
-    # R+R Aliasing
-    A = rand(1000)
-    B = rand(1000)
-    expected = B .+ (10 .* (A .+ A))
+    A = rand(1)
     if args_chunks
         A = remotecall_fetch(Dagger.tochunk, args_loc, A)
-        B = remotecall_fetch(Dagger.tochunk, args_loc, B)
     elseif args_thunks
         A = Dagger.@spawn scope=Dagger.scope(worker=args_loc) copy(A)
-        B = Dagger.@spawn scope=Dagger.scope(worker=args_loc) copy(B)
     end
-    add_read_alias! = (Z, X, Y) -> Z .+= X .+ Y
-    Dagger.spawn_datadeps(;static, traversal) do
-        for i in 1:10
-            Dagger.@spawn add_read_alias!(InOut(B), In(A), In(A))
-        end
-    end
-    @test isapprox(fetch(B), expected)
 
-    # R+W Aliasing
-    A = rand(1000)
-    expected = 8 .* A
-    if args_chunks
-        A = remotecall_fetch(Dagger.tochunk, args_loc, A)
-    elseif args_thunks
-        A = Dagger.@spawn scope=Dagger.scope(worker=args_loc) copy(A)
-    end
-    add! = (X, Y) -> X .+= Y
-    Dagger.spawn_datadeps(;static, traversal) do
-        for i in 1:3
-            Dagger.@spawn add!(InOut(A), In(A))
+    # Task return values can be tracked
+    ts = []
+    logs = with_logs() do
+        Dagger.spawn_datadeps(;aliasing) do
+            t1 = Dagger.@spawn fill(42, 1)
+            push!(ts, t1)
+            push!(ts, Dagger.@spawn copyto!(Out(A), In(t1)))
         end
     end
-    @test isapprox(fetch(A), expected)
+    tid_1, tid_2 = task_id.(ts)
+    @test fetch(A)[1] == 42.0
+    test_task_dominators(logs, tid_1, []; all_tids=[tid_1, tid_2])
+    # FIXME: We don't record the task as a syncdep, but instead internally `fetch` the chunk
+    test_task_dominators(logs, tid_2, [#=tid_1=#]; all_tids=[tid_1, tid_2])
 
-    # W+W Aliasing
-    A = rand(1000)
-    expected = 27 .* A
-    if args_chunks
-        A = remotecall_fetch(Dagger.tochunk, args_loc, A)
-    elseif args_thunks
-        A = Dagger.@spawn scope=Dagger.scope(worker=args_loc) copy(A)
-    end
-    add_write_alias! = (X, Y) -> begin
-        Z = copy(Y)
-        X .+= Z
-        Y .+= Z
-    end
-    Dagger.spawn_datadeps(;static, traversal) do
-        for i in 1:3
-            Dagger.@spawn add_write_alias!(InOut(A), InOut(A))
+    # R->R Non-Aliasing
+    ts = []
+    logs = with_logs() do
+        Dagger.spawn_datadeps(;aliasing) do
+            push!(ts, Dagger.@spawn do_nothing(In(A)))
+            push!(ts, Dagger.@spawn do_nothing(In(A)))
         end
     end
-    @test isapprox(fetch(A), expected)
+    tid_1, tid_2 = task_id.(ts)
+    test_task_dominators(logs, tid_1, []; all_tids=[tid_1, tid_2])
+    test_task_dominators(logs, tid_2, []; all_tids=[tid_1, tid_2])
+
+    # R->W Aliasing
+    ts = []
+    logs = with_logs() do
+        Dagger.spawn_datadeps(;aliasing) do
+            push!(ts, Dagger.@spawn do_nothing(In(A)))
+            push!(ts, Dagger.@spawn do_nothing(Out(A)))
+        end
+    end
+    tid_1, tid_2 = task_id.(ts)
+    test_task_dominators(logs, tid_1, []; all_tids=[tid_1, tid_2])
+    test_task_dominators(logs, tid_2, [tid_1]; all_tids=[tid_1, tid_2])
+
+    # W->W Aliasing
+    ts = []
+    logs = with_logs() do
+        Dagger.spawn_datadeps(;aliasing) do
+            push!(ts, Dagger.@spawn do_nothing(Out(A)))
+            push!(ts, Dagger.@spawn do_nothing(Out(A)))
+        end
+    end
+    tid_1, tid_2 = task_id.(ts)
+    test_task_dominators(logs, tid_1, []; all_tids=[tid_1, tid_2])
+    test_task_dominators(logs, tid_2, [tid_1]; all_tids=[tid_1, tid_2])
+
+    # R->R Non-Self-Aliasing
+    ts = []
+    logs = with_logs() do
+        Dagger.spawn_datadeps(;aliasing) do
+            push!(ts, Dagger.@spawn do_nothing(In(A), In(A)))
+            push!(ts, Dagger.@spawn do_nothing(In(A), In(A)))
+        end
+    end
+    tid_1, tid_2 = task_id.(ts)
+    test_task_dominators(logs, tid_1, []; all_tids=[tid_1, tid_2])
+    test_task_dominators(logs, tid_2, []; all_tids=[tid_1, tid_2])
+
+    # R->W Self-Aliasing
+    ts = []
+    logs = with_logs() do
+        Dagger.spawn_datadeps(;aliasing) do
+            push!(ts, Dagger.@spawn do_nothing(In(A), In(A)))
+            push!(ts, Dagger.@spawn do_nothing(Out(A), Out(A)))
+        end
+    end
+    tid_1, tid_2 = task_id.(ts)
+    test_task_dominators(logs, tid_1, []; all_tids=[tid_1, tid_2])
+    test_task_dominators(logs, tid_2, [tid_1]; all_tids=[tid_1, tid_2])
+
+    # W->W Self-Aliasing
+    ts = []
+    logs = with_logs() do
+        Dagger.spawn_datadeps(;aliasing) do
+            push!(ts, Dagger.@spawn do_nothing(Out(A), Out(A)))
+            push!(ts, Dagger.@spawn do_nothing(Out(A), Out(A)))
+        end
+    end
+    tid_1, tid_2 = task_id.(ts)
+    test_task_dominators(logs, tid_1, []; all_tids=[tid_1, tid_2])
+    test_task_dominators(logs, tid_2, [tid_1]; all_tids=[tid_1, tid_2])
+
+    if aliasing
+        function wrap_chunk_thunk(f, args...)
+            if args_thunks || args_chunks
+                result = Dagger.@spawn scope=Dagger.scope(worker=args_loc) f(args...)
+                if args_thunks
+                    return result
+                elseif args_chunks
+                    return fetch(result; raw=true)
+                end
+            else
+                # N.B. We don't allocate remotely for raw data
+                return f(args...)
+            end
+        end
+        B = wrap_chunk_thunk(rand, 4, 4)
+
+        # Views
+        B_ul = wrap_chunk_thunk(view, B, 1:2, 1:2)
+        B_ur = wrap_chunk_thunk(view, B, 1:2, 3:4)
+        B_ll = wrap_chunk_thunk(view, B, 3:4, 1:2)
+        B_lr = wrap_chunk_thunk(view, B, 3:4, 3:4)
+        B_mid = wrap_chunk_thunk(view, B, 2:3, 2:3)
+        for (B_name, B_view) in (
+                                 (:B_ul, B_ul),
+                                 (:B_ur, B_ur),
+                                 (:B_ll, B_ll),
+                                 (:B_lr, B_lr),
+                                 (:B_mid, B_mid))
+            @test Dagger.will_alias(Dagger.aliasing(B), Dagger.aliasing(B_view))
+            B_view === B_mid && continue
+            @test Dagger.will_alias(Dagger.aliasing(B_mid), Dagger.aliasing(B_view))
+        end
+        local t_A, t_B, t_ul, t_ur, t_ll, t_lr, t_mid
+        local t_ul2, t_ur2, t_ll2, t_lr2
+        logs = with_logs() do
+            Dagger.spawn_datadeps(;aliasing) do
+                t_A = Dagger.@spawn do_nothing(InOut(A))
+                t_B = Dagger.@spawn do_nothing(InOut(B))
+                t_ul = Dagger.@spawn do_nothing(InOut(B_ul))
+                t_ur = Dagger.@spawn do_nothing(InOut(B_ur))
+                t_ll = Dagger.@spawn do_nothing(InOut(B_ll))
+                t_lr = Dagger.@spawn do_nothing(InOut(B_lr))
+                t_mid = Dagger.@spawn do_nothing(InOut(B_mid))
+                t_ul2 = Dagger.@spawn do_nothing(InOut(B_ul))
+                t_ur2 = Dagger.@spawn do_nothing(InOut(B_ur))
+                t_ll2 = Dagger.@spawn do_nothing(InOut(B_ll))
+                t_lr2 = Dagger.@spawn do_nothing(InOut(B_lr))
+            end
+        end
+        tid_A, tid_B, tid_ul, tid_ur, tid_ll, tid_lr, tid_mid =
+            task_id.([t_A, t_B, t_ul, t_ur, t_ll, t_lr, t_mid])
+        tid_ul2, tid_ur2, tid_ll2, tid_lr2 =
+            task_id.([t_ul2, t_ur2, t_ll2, t_lr2])
+        tids_all = [tid_A, tid_B, tid_ul, tid_ur, tid_ll, tid_lr, tid_mid,
+                    tid_ul2, tid_ur2, tid_ll2, tid_lr2]
+        test_task_dominators(logs, tid_A, []; all_tids=tids_all)
+        test_task_dominators(logs, tid_B, []; all_tids=tids_all)
+        test_task_dominators(logs, tid_ul, [tid_B]; all_tids=tids_all)
+        test_task_dominators(logs, tid_ur, [tid_B]; all_tids=tids_all)
+        test_task_dominators(logs, tid_ll, [tid_B]; all_tids=tids_all)
+        test_task_dominators(logs, tid_lr, [tid_B]; all_tids=tids_all)
+        test_task_dominators(logs, tid_mid, [tid_B, tid_ul, tid_ur, tid_ll, tid_lr]; all_tids=tids_all)
+        test_task_dominators(logs, tid_ul2, [tid_B, tid_mid, tid_ul]; all_tids=tids_all, nondom_check=false)
+        test_task_dominators(logs, tid_ur2, [tid_B, tid_mid, tid_ur]; all_tids=tids_all, nondom_check=false)
+        test_task_dominators(logs, tid_ll2, [tid_B, tid_mid, tid_ll]; all_tids=tids_all, nondom_check=false)
+        test_task_dominators(logs, tid_lr2, [tid_B, tid_mid, tid_lr]; all_tids=tids_all, nondom_check=false)
+
+        # (Unit)Upper/LowerTriangular and Diagonal
+        B_upper = wrap_chunk_thunk(UpperTriangular, B)
+        B_unitupper = wrap_chunk_thunk(UnitUpperTriangular, B)
+        B_lower = wrap_chunk_thunk(LowerTriangular, B)
+        B_unitlower = wrap_chunk_thunk(UnitLowerTriangular, B)
+        for (B_name, B_view) in (
+                                 (:B_upper, B_upper),
+                                 (:B_unitupper, B_unitupper),
+                                 (:B_lower, B_lower),
+                                 (:B_unitlower, B_unitlower))
+            @test Dagger.will_alias(Dagger.aliasing(B), Dagger.aliasing(B_view))
+        end
+        @test Dagger.will_alias(Dagger.aliasing(B_upper), Dagger.aliasing(B_lower))
+        @test !Dagger.will_alias(Dagger.aliasing(B_unitupper), Dagger.aliasing(B_unitlower))
+        @test Dagger.will_alias(Dagger.aliasing(B_upper), Dagger.aliasing(B_unitupper))
+        @test Dagger.will_alias(Dagger.aliasing(B_lower), Dagger.aliasing(B_unitlower))
+
+        @test Dagger.will_alias(Dagger.aliasing(B_upper), Dagger.aliasing(B, Diagonal))
+        @test Dagger.will_alias(Dagger.aliasing(B_lower), Dagger.aliasing(B, Diagonal))
+        @test !Dagger.will_alias(Dagger.aliasing(B_unitupper), Dagger.aliasing(B, Diagonal))
+        @test !Dagger.will_alias(Dagger.aliasing(B_unitlower), Dagger.aliasing(B, Diagonal))
+
+        local t_A, t_B, t_upper, t_unitupper, t_lower, t_unitlower, t_diag
+        local t_upper2, t_unitupper2, t_lower2, t_unitlower2
+        logs = with_logs() do
+            Dagger.spawn_datadeps(;aliasing) do
+                t_A = Dagger.@spawn do_nothing(InOut(A))
+                t_B = Dagger.@spawn do_nothing(InOut(B))
+                t_upper = Dagger.@spawn do_nothing(InOut(B_upper))
+                t_unitupper = Dagger.@spawn do_nothing(InOut(B_unitupper))
+                t_lower = Dagger.@spawn do_nothing(InOut(B_lower))
+                t_unitlower = Dagger.@spawn do_nothing(InOut(B_unitlower))
+                t_diag = Dagger.@spawn do_nothing(Deps(B, InOut(Diagonal)))
+                t_unitlower2 = Dagger.@spawn do_nothing(InOut(B_unitlower))
+                t_lower2 = Dagger.@spawn do_nothing(InOut(B_lower))
+                t_unitupper2 = Dagger.@spawn do_nothing(InOut(B_unitupper))
+                t_upper2 = Dagger.@spawn do_nothing(InOut(B_upper))
+            end
+        end
+        tid_A, tid_B, tid_upper, tid_unitupper, tid_lower, tid_unitlower, tid_diag =
+            task_id.([t_A, t_B, t_upper, t_unitupper, t_lower, t_unitlower, t_diag])
+        tid_upper2, tid_unitupper2, tid_lower2, tid_unitlower2 =
+            task_id.([t_upper2, t_unitupper2, t_lower2, t_unitlower2])
+        tids_all = [tid_A, tid_B, tid_upper, tid_unitupper, tid_lower, tid_unitlower, tid_diag,
+                    tid_upper2, tid_unitupper2, tid_lower2, tid_unitlower2]
+        test_task_dominators(logs, tid_A, []; all_tids=tids_all)
+        test_task_dominators(logs, tid_B, []; all_tids=tids_all)
+        # FIXME: Proper non-dominance checks
+        test_task_dominators(logs, tid_upper, [tid_B]; all_tids=tids_all, nondom_check=false)
+        test_task_dominators(logs, tid_unitupper, [tid_B, tid_upper]; all_tids=tids_all, nondom_check=false)
+        test_task_dominators(logs, tid_lower, [tid_B, tid_upper]; all_tids=tids_all, nondom_check=false)
+        test_task_dominators(logs, tid_unitlower, [tid_B, tid_lower]; all_tids=tids_all, nondom_check=false)
+        test_task_dominators(logs, tid_diag, [tid_B, tid_upper, tid_lower]; all_tids=tids_all, nondom_check=false)
+        test_task_dominators(logs, tid_unitlower2, [tid_B, tid_lower, tid_unitlower]; all_tids=tids_all, nondom_check=false)
+        test_task_dominators(logs, tid_lower2, [tid_B, tid_lower, tid_unitlower, tid_diag, tid_unitlower2]; all_tids=tids_all, nondom_check=false)
+        test_task_dominators(logs, tid_unitupper2, [tid_B, tid_upper, tid_unitupper]; all_tids=tids_all, nondom_check=false)
+        test_task_dominators(logs, tid_upper2, [tid_B, tid_upper, tid_unitupper, tid_diag, tid_unitupper2]; all_tids=tids_all, nondom_check=false)
+    end
+
+    # FIXME: Deps
 
     # Scope
-    exec_procs = fetch.(Dagger.spawn_datadeps(;static, traversal) do
+    exec_procs = fetch.(Dagger.spawn_datadeps(;aliasing) do
         [Dagger.@spawn Dagger.thunk_processor() for i in 1:10]
     end)
     unique!(exec_procs)
@@ -80,10 +353,7 @@ function test_datadeps(;args_chunks::Bool,
         @test proc in scope_procs
     end
     for proc in scope_procs
-        if !static && proc == Dagger.ThreadProc(1,1)
-            # Sch doesn't schedule tasks on the scheduler thread
-            continue
-        end
+        proc == Dagger.ThreadProc(1, 1) && continue
         @test proc in exec_procs
     end
 
@@ -92,6 +362,7 @@ function test_datadeps(;args_chunks::Bool,
     B = rand(1000)
     C = rand(1000)
     D = zeros(1000)
+    add!(X, Y) = (X .+= Y;)
     expected = (A .+ B) .+ (A .+ C)
     if args_chunks
         A = remotecall_fetch(Dagger.tochunk, args_loc, A)
@@ -104,7 +375,7 @@ function test_datadeps(;args_chunks::Bool,
         C = Dagger.@spawn scope=Dagger.scope(worker=args_loc) copy(C)
         D = Dagger.@spawn scope=Dagger.scope(worker=args_loc) copy(D)
     end
-    Dagger.spawn_datadeps(;static, traversal) do
+    Dagger.spawn_datadeps(;aliasing) do
         Dagger.@spawn add!(InOut(B), In(A))
         Dagger.@spawn add!(InOut(C), In(A))
         Dagger.@spawn add!(InOut(C), In(B))
@@ -121,7 +392,7 @@ function test_datadeps(;args_chunks::Bool,
     elseif args_thunks
         As = map(A->(Dagger.@spawn scope=Dagger.scope(worker=args_loc) copy(A)), As)
     end
-    Dagger.spawn_datadeps(;static, traversal) do
+    Dagger.spawn_datadeps(;aliasing) do
         to_reduce = Vector[]
         push!(to_reduce, As)
         while !isempty(to_reduce)
@@ -152,7 +423,7 @@ function test_datadeps(;args_chunks::Bool,
     elseif args_thunks
         M = map(m->(Dagger.@spawn scope=Dagger.scope(worker=args_loc) copy(m)), M)
     end
-    Dagger.spawn_datadeps(;static, traversal) do
+    Dagger.spawn_datadeps(;aliasing) do
         for k in range(1, mt)
             Dagger.@spawn LAPACK.potrf!('L', InOut(M[k, k]))
             for _m in range(k+1, mt)
@@ -171,36 +442,18 @@ function test_datadeps(;args_chunks::Bool,
     end
     @test isapprox(M_dense, expected)
 end
-@testset "Datadeps" begin
-    @testset "$(static ? "Static" : "Dynamic") Scheduling" for static in (true, false)
-        if static
-            @testset "$args_mode Data" for args_mode in (:Raw, :Chunk, :Thunk)
-                args_chunks = args_mode == :Chunk
-                args_thunks = args_mode == :Thunk
-                # TODO: BFS, DFS
-                @testset "$((;inorder="In-Order", bfs="BFS", dfs="DFS")[traversal]) Traversal" for traversal in (:inorder,)# :bfs, :dfs)
-                    for nw in (1, 2)
-                        args_loc = nw == 2 ? 2 : 1
-                        for nt in (1, 2)
-                            if nprocs() >= nw && Threads.nthreads() >= nt
-                                @testset "$nw Workers, $nt Threads" begin
-                                    Dagger.with_options(;scope=Dagger.scope(workers=1:nw, threads=1:nt)) do
-                                        test_datadeps(;args_chunks, args_thunks, static, traversal, args_loc)
-                                    end
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-        else
-            @testset "$(args_chunks ? "Chunk" : "Raw") Data" for args_chunks in (false, true)
-                for nt in (1, 2)
-                    if Threads.nthreads() >= nt
-                        @testset "$nt Threads" begin
-                            Dagger.with_options(;scope=Dagger.scope(worker=1, threads=1:nt)) do
-                                test_datadeps(;args_chunks, args_thunks=false, static, traversal=:inorder)
-                            end
+
+@testset "$(aliasing ? "With" : "Without") Aliasing Support" for aliasing in (true, false)
+    @testset "$args_mode Data" for args_mode in (:Raw, :Chunk, :Thunk)
+        args_chunks = args_mode == :Chunk
+        args_thunks = args_mode == :Thunk
+        for nw in (1, 2)
+            args_loc = nw == 2 ? 2 : 1
+            for nt in (1, 2)
+                if nprocs() >= nw && Threads.nthreads() >= nt
+                    @testset "$nw Workers, $nt Threads" begin
+                        Dagger.with_options(;scope=Dagger.scope(workers=1:nw, threads=1:nt)) do
+                            test_datadeps(;args_chunks, args_thunks, args_loc, aliasing)
                         end
                     end
                 end

@@ -270,9 +270,9 @@ function Base.show(io::IO, ::MIME"text/plain", A::DArray{T,N}) where {T,N}
         printstyled(io, "~$(round(Int, pct_complete))% completed"; color=:yellow)
     end
     println(io)
-    with_index_caching(1) do
+    # FIXME: with_index_caching(1) do
         Base.print_array(IOContext(io, :compact=>true), ColorArray(A))
-    end
+    # end
 end
 
 function (==)(x::ArrayOp, y::ArrayOp)

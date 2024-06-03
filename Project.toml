@@ -1,6 +1,6 @@
 name = "Dagger"
 uuid = "d58978e5-989f-55fb-8d15-ea34adc7bf54"
-version = "0.18.9"
+version = "0.18.10"
 
 [deps]
 DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"

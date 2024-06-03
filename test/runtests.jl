@@ -115,7 +115,9 @@ finally
         notify(state.halt)
     end
     sleep(1)
-    rmprocs(workers())
+    if nprocs() > 1
+        rmprocs(workers())
+    end
 end
 
 printstyled(stderr, "Tests Completed!\n"; color=:green)

@@ -350,59 +350,79 @@ end
 end
 
 @testset "Scheduler algorithms" begin
-    # New function to hide from scheduler's function cost cache
-    mynothing(args...) = nothing
+    @testset "Signature Calculation" begin
+        @test Dagger.Sch.signature(+, [nothing=>1, nothing=>2]) isa Vector{DataType}
+        @test Dagger.Sch.signature(+, [nothing=>1, nothing=>2]) == [typeof(+), Int, Int]
+        if isdefined(Core, :kwcall)
+            @test Dagger.Sch.signature(+, [nothing=>1, :a=>2]) == [typeof(Core.kwcall), @NamedTuple{a::Int64}, typeof(+), Int]
+        else
+            kw_f = Core.kwfunc(+)
+            @test Dagger.Sch.signature(+, [nothing=>1, :a=>2]) == [typeof(kw_f), @NamedTuple{a::Int64}, typeof(+), Int]
+        end
+        @test Dagger.Sch.signature(+, []) == [typeof(+)]
+        @test Dagger.Sch.signature(+, [nothing=>1]) == [typeof(+), Int]
 
-    # New non-singleton struct to hide from `approx_size`
-    struct MyStruct
-        x::Int
+        c = Dagger.tochunk(1.0)
+        @test Dagger.Sch.signature(*, [nothing=>c, nothing=>3]) == [typeof(*), Float64, Int]
+        t = Dagger.@spawn 1+2
+        @test Dagger.Sch.signature(/, [nothing=>t, nothing=>c, nothing=>3]) == [typeof(/), Int, Float64, Int]
     end
 
-    state = Dagger.Sch.EAGER_STATE[]
-    tproc1 = Dagger.ThreadProc(1, 1)
-    tproc2 = Dagger.ThreadProc(first(workers()), 1)
-    procs = [tproc1, tproc2]
+    @testset "Cost Estimation" begin
+        # New function to hide from scheduler's function cost cache
+        mynothing(args...) = nothing
 
-    pres1 = state.worker_time_pressure[1][tproc1]
-    pres2 = state.worker_time_pressure[first(workers())][tproc2]
-    tx_rate = state.transfer_rate[]
+        # New non-singleton struct to hide from `approx_size`
+        struct MyStruct
+            x::Int
+        end
 
-    for (args, tx_size) in [
-        ([1, 2], 0),
-        ([Dagger.tochunk(1), 2], sizeof(Int)),
-        ([1, Dagger.tochunk(2)], sizeof(Int)),
-        ([Dagger.tochunk(1), Dagger.tochunk(2)], 2*sizeof(Int)),
-        # TODO: Why does this work? Seems slow
-        ([Dagger.tochunk(MyStruct(1))], sizeof(MyStruct)),
-        ([Dagger.tochunk(MyStruct(1)), Dagger.tochunk(1)], sizeof(MyStruct)+sizeof(Int)),
-    ]
-        for arg in args
-            if arg isa Chunk
-                aff = Dagger.affinity(arg)
-                @test aff[1] == OSProc(1)
-                @test aff[2] == MemPool.approx_size(MemPool.poolget(arg.handle))
+        state = Dagger.Sch.EAGER_STATE[]
+        tproc1 = Dagger.ThreadProc(1, 1)
+        tproc2 = Dagger.ThreadProc(first(workers()), 1)
+        procs = [tproc1, tproc2]
+
+        pres1 = state.worker_time_pressure[1][tproc1]
+        pres2 = state.worker_time_pressure[first(workers())][tproc2]
+        tx_rate = state.transfer_rate[]
+
+        for (args, tx_size) in [
+            ([1, 2], 0),
+            ([Dagger.tochunk(1), 2], sizeof(Int)),
+            ([1, Dagger.tochunk(2)], sizeof(Int)),
+            ([Dagger.tochunk(1), Dagger.tochunk(2)], 2*sizeof(Int)),
+            # TODO: Why does this work? Seems slow
+            ([Dagger.tochunk(MyStruct(1))], sizeof(MyStruct)),
+            ([Dagger.tochunk(MyStruct(1)), Dagger.tochunk(1)], sizeof(MyStruct)+sizeof(Int)),
+        ]
+            for arg in args
+                if arg isa Chunk
+                    aff = Dagger.affinity(arg)
+                    @test aff[1] == OSProc(1)
+                    @test aff[2] == MemPool.approx_size(MemPool.poolget(arg.handle))
+                end
             end
+
+            cargs = map(arg->MemPool.poolget(arg.handle), filter(arg->isa(arg, Chunk), args))
+            est_tx_size = Dagger.Sch.impute_sum(map(MemPool.approx_size, cargs))
+            @test est_tx_size == tx_size
+
+            t = delayed(mynothing)(args...)
+            inputs = Dagger.Sch.collect_task_inputs(state, t)
+            sorted_procs, costs = Dagger.Sch.estimate_task_costs(state, procs, t, inputs)
+
+            @test tproc1 in sorted_procs
+            @test tproc2 in sorted_procs
+            if length(cargs) > 0
+                @test sorted_procs[1] == tproc1
+                @test sorted_procs[2] == tproc2
+            end
+
+            @test haskey(costs, tproc1)
+            @test haskey(costs, tproc2)
+            @test costs[tproc1] ≈ pres1 # All chunks are local
+            @test costs[tproc2] ≈ (tx_size/tx_rate) + pres2 # All chunks are remote
         end
-
-        cargs = map(arg->MemPool.poolget(arg.handle), filter(arg->isa(arg, Chunk), args))
-        est_tx_size = Dagger.Sch.impute_sum(map(MemPool.approx_size, cargs))
-        @test est_tx_size == tx_size
-
-        t = delayed(mynothing)(args...)
-        inputs = Dagger.Sch.collect_task_inputs(state, t)
-        sorted_procs, costs = Dagger.Sch.estimate_task_costs(state, procs, t, inputs)
-
-        @test tproc1 in sorted_procs
-        @test tproc2 in sorted_procs
-        if length(cargs) > 0
-            @test sorted_procs[1] == tproc1
-            @test sorted_procs[2] == tproc2
-        end
-
-        @test haskey(costs, tproc1)
-        @test haskey(costs, tproc2)
-        @test costs[tproc1] ≈ pres1 # All chunks are local
-        @test costs[tproc2] ≈ (tx_size/tx_rate) + pres2 # All chunks are remote
     end
 end
 
