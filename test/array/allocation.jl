@@ -41,7 +41,7 @@ end
             @test AX != collect(rand(dist, T, dims...))
             if T <: AbstractFloat
                 # FIXME: Not ideal, but I guess sometimes we can get 0?
-                @test sum(!.(AX .> 0)) < 10
+                @test sum(.!(AX .> 0)) < 10
             end
 
             if T in [Float32, Float64]
