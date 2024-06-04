@@ -20,6 +20,7 @@ ArrayDomain(xs::NTuple{N,Base.OneTo}) where N =
     ArrayDomain{N,NTuple{N,UnitRange{Int}}}(ntuple(i->UnitRange(xs[i]), N))
 ArrayDomain(xs::NTuple{N,Int}) where N =
     ArrayDomain{N,NTuple{N,UnitRange{Int}}}(ntuple(i->xs[i]:xs[i], N))
+ArrayDomain(::Tuple{}) = ArrayDomain{0,Tuple{}}(())
 ArrayDomain(xs...) = ArrayDomain((xs...,))
 ArrayDomain(xs::Array) = ArrayDomain((xs...,))
 
@@ -31,6 +32,7 @@ chunks(a::ArrayDomain{N}) where {N} = DomainBlocks(
 
 (==)(a::ArrayDomain, b::ArrayDomain) = indexes(a) == indexes(b)
 Base.getindex(arr::AbstractArray, d::ArrayDomain) = arr[indexes(d)...]
+Base.getindex(arr::AbstractArray{T,0} where T, d::ArrayDomain{0}) = arr
 
 function intersect(a::ArrayDomain, b::ArrayDomain)
     if a === b
@@ -145,7 +147,6 @@ const WrappedDVector{T} = WrappedDArray{T,1}
 const DMatrix{T} = DArray{T,2}
 const DVector{T} = DArray{T,1}
 
-
 # mainly for backwards-compatibility
 DArray{T, N}(domain, subdomains, chunks, partitioning, concat=cat) where {T,N} =
     DArray(T, domain, subdomains, chunks, partitioning, concat)
@@ -176,6 +177,10 @@ function Base.collect(d::DArray; tree=false)
     a = fetch(d)
     if isempty(d.chunks)
         return Array{eltype(d)}(undef, size(d)...)
+    end
+
+    if ndims(d) == 0
+        return fetch(a.chunks[1])
     end
 
     dimcatfuncs = [(x...) -> d.concat(x..., dims=i) for i in 1:ndims(d)]
@@ -214,6 +219,7 @@ else
     Base.alignment(io::IO, x::ColorElement) =
         Base.alignment(io, something(x.value, "..."))
 #end
+Base.show(io::IO, x::ColorElement) = show(io, MIME("text/plain"), x)
 struct ColorArray{T,N} <: DenseArray{T,N}
     A::DArray{T,N}
     color_map::Vector{Symbol}
@@ -261,9 +267,21 @@ function Base.getindex(A::ColorArray{T,N}, idxs::Dims{S}) where {T,N,S}
     end
 end
 function Base.show(io::IO, ::MIME"text/plain", A::DArray{T,N}) where {T,N}
-    write(io, string(DArray{T,N}))
-    write(io, string(size(A)))
-    write(io, " with $(join(size(A.chunks), 'x')) partitions of size $(join(A.partitioning.blocksize, 'x')):")
+    if N == 1
+        write(io, "$(length(A))-element ")
+        write(io, string(DVector{T}))
+    elseif N == 2
+        write(io, string(DMatrix{T}))
+    elseif N == 0
+        write(io, "0-dimensional ")
+        write(io, "DArray{$T, $N}")
+    else
+        write(io, "$(join(size(A), 'x')) ")
+        write(io, "DArray{$T, $N}")
+    end
+    nparts = N > 0 ? size(A.chunks) : 1
+    partsize = N > 0 ? A.partitioning.blocksize : 1
+    write(io, " with $(join(nparts, 'x')) partitions of size $(join(partsize, 'x')):")
     pct_complete = 100 * (sum(c->c isa Chunk ? true : isready(c), A.chunks) / length(A.chunks))
     if pct_complete < 100
         println(io)
@@ -472,7 +490,7 @@ struct AutoBlocks end
 function auto_blocks(dims::Dims{N}) where N
     # TODO: Allow other partitioning schemes
     np = num_processors()
-    p = cld(dims[end], np)
+    p = N > 0 ? cld(dims[end], np) : 1
     return Blocks(ntuple(i->i == N ? p : dims[i], N))
 end
 auto_blocks(A::AbstractArray{T,N}) where {T,N} = auto_blocks(size(A))
