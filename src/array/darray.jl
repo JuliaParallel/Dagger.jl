@@ -65,6 +65,10 @@ ArrayDomain((1:15), (1:80))
 alignfirst(a::ArrayDomain) =
     ArrayDomain(map(r->1:length(r), indexes(a)))
 
+alignfirst(a::CartesianIndices{N}) where N =
+    ArrayDomain(map(r->1:length(r), a.indices))
+
+
 function size(a::ArrayDomain, dim)
     idxs = indexes(a)
     length(idxs) < dim ? 1 : length(idxs[dim])
@@ -369,7 +373,7 @@ function group_indices(cumlength, idxs::AbstractRange)
 end
 
 _cumsum(x::AbstractArray) = length(x) == 0 ? Int[] : cumsum(x)
-function lookup_parts(A::DArray, ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomain{N}) where N
+function lookup_parts(A::DArray, ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomain{N}; slice::Bool=false) where N
     groups = map(group_indices, subdmns.cumlength, indexes(d))
     sz = map(length, groups)
     pieces = Array{Any}(undef, sz)
@@ -377,20 +381,30 @@ function lookup_parts(A::DArray, ps::AbstractArray, subdmns::DomainBlocks{N}, d:
         idx_and_dmn = map(getindex, groups, i.I)
         idx = map(x->x[1], idx_and_dmn)
         dmn = ArrayDomain(map(x->x[2], idx_and_dmn))
-        pieces[i] = Dagger.@spawn getindex(ps[idx...], project(subdmns[idx...], dmn))
+        if slice
+            pieces[i] = Dagger.@spawn getindex(ps[idx...], project(subdmns[idx...], dmn))
+        else
+            pieces[i] = Dagger.@spawn view(ps[idx...], project(subdmns[idx...], dmn).indexes...)
+        end
     end
     out_cumlength = map(g->_cumsum(map(x->length(x[2]), g)), groups)
     out_dmn = DomainBlocks(ntuple(x->1,Val(N)), out_cumlength)
     return pieces, out_dmn
 end
-function lookup_parts(A::DArray, ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomain{S}) where {N,S}
+function lookup_parts(A::DArray, ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomain{S}; slice::Bool=false) where {N,S}
     if S != 1
         throw(BoundsError(A, d.indexes))
     end
     inds = CartesianIndices(A)[d.indexes...]
     new_d = ntuple(i->first(inds).I[i]:last(inds).I[i], N)
-    return lookup_parts(A, ps, subdmns, ArrayDomain(new_d))
+    return lookup_parts(A, ps, subdmns, ArrayDomain(new_d); slice)
 end
+
+function lookup_parts(A::DArray, ps::AbstractArray, subdmns::DomainBlocks{N}, d::CartesianIndices; slice::Bool=false) where N
+    return lookup_parts(A, ps, subdmns, ArrayDomain(d.indices); slice)
+end
+
+
 
 """
     Base.fetch(c::DArray)
