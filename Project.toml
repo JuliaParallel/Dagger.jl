@@ -1,6 +1,6 @@
 name = "Dagger"
 uuid = "d58978e5-989f-55fb-8d15-ea34adc7bf54"
-version = "0.18.9"
+version = "0.18.10"
 
 [deps]
 DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
@@ -26,11 +26,14 @@ UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
 
 [compat]
 Colors = "0.12"
+DataFrames = "1"
 DataStructures = "0.18"
+GraphViz = "0.2"
 Graphs = "1"
 MacroTools = "0.5"
 MemPool = "0.4.6"
 OnlineStats = "1"
+Plots = "1"
 PrecompileTools = "1.2"
 Requires = "1"
 ScopedValues = "1.1"

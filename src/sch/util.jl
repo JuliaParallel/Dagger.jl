@@ -285,12 +285,34 @@ function report_catch_error(err, desc=nothing)
 end
 
 chunktype(x) = typeof(x)
-function signature(task::Thunk, state)
-    sig = Any[chunktype(task.f)]
-    for (pos, input) in collect_task_inputs(state, task)
-        # N.B. Skips kwargs
+signature(state, task::Thunk) =
+    signature(task.f, collect_task_inputs(state, task.inputs))
+function signature(f, args)
+    sig = DataType[chunktype(f)]
+    sig_kwarg_names = Symbol[]
+    sig_kwarg_types = []
+    for (pos, arg) in args
+        if arg isa Dagger.DTask
+            # Only occurs via manual usage of signature
+            arg = fetch(arg; raw=true)
+        end
+        T = chunktype(arg)
         if pos === nothing
-            push!(sig, chunktype(input))
+            push!(sig, T)
+        else
+            push!(sig_kwarg_names, pos)
+            push!(sig_kwarg_types, T)
+        end
+    end
+    if !isempty(sig_kwarg_names)
+        NT = NamedTuple{(sig_kwarg_names...,), Base.to_tuple_type(sig_kwarg_types)}
+        pushfirst!(sig, NT)
+        @static if isdefined(Core, :kwcall)
+            pushfirst!(sig, typeof(Core.kwcall))
+        else
+            f_instance = chunktype(f).instance
+            kw_f = Core.kwfunc(f_instance)
+            pushfirst!(sig, typeof(kw_f))
         end
     end
     return sig
@@ -419,13 +441,15 @@ function impute_sum(xs)
 end
 
 "Collects all arguments for `task`, converting Thunk inputs to Chunks."
-function collect_task_inputs(state, task)
-    inputs = Pair{Union{Symbol,Nothing},Any}[]
-    for (pos, input) in task.inputs
+collect_task_inputs(state, task::Thunk) =
+    collect_task_inputs(state, task.inputs)
+function collect_task_inputs(state, inputs)
+    new_inputs = Pair{Union{Symbol,Nothing},Any}[]
+    for (pos, input) in inputs
         input = unwrap_weak_checked(input)
-        push!(inputs, pos => (istask(input) ? state.cache[input] : input))
+        push!(new_inputs, pos => (istask(input) ? state.cache[input] : input))
     end
-    return inputs
+    return new_inputs
 end
 
 """
@@ -457,7 +481,8 @@ function estimate_task_costs(state, procs, task, inputs)
         tx_cost = impute_sum(affinity(chunk)[2] for chunk in chunks_filt)
 
         # Estimate total cost to move data and get task running after currently-scheduled tasks
-        costs[proc] = state.worker_time_pressure[get_parent(proc).pid][proc] + (tx_cost/tx_rate)
+        est_time_util = get(state.worker_time_pressure[get_parent(proc).pid], proc, 0)
+        costs[proc] = est_time_util + (tx_cost/tx_rate)
     end
 
     # Shuffle procs around, so equally-costly procs are equally considered
