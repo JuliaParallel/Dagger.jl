@@ -7,12 +7,12 @@ import SparseArrays: sprand, SparseMatrixCSC
 import MemPool
 import MemPool: DRef, FileRef, poolget, poolset
 
-import Base: collect, reduce
+import Base: collect, reduce, require_one_based_indexing
 import Distributed
 import Distributed: Future, RemoteChannel, myid, workers, nworkers, procs, remotecall, remotecall_wait, remotecall_fetch
 
 import LinearAlgebra
-import LinearAlgebra: Adjoint, BLAS, Diagonal, LAPACK, LowerTriangular, PosDefException, Transpose, UpperTriangular, diagind, ishermitian, issymmetric
+import LinearAlgebra: Adjoint, BLAS, Diagonal, LAPACK, LowerTriangular, PosDefException, Transpose, UpperTriangular, diagind, ishermitian, issymmetric, chkstride1
 
 import UUIDs: UUID, uuid4
 
@@ -77,8 +77,12 @@ include("array/setindex.jl")
 include("array/matrix.jl")
 include("array/sparse_partition.jl")
 include("array/sort.jl")
+
+# Linear algebra
 include("array/linalg.jl")
 include("array/mul.jl")
+include("array/trapezoidal.jl")
+include("array/triangular.jl")
 include("array/cholesky.jl")
 
 # Visualization
