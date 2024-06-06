@@ -85,6 +85,7 @@ include("array/mul.jl")
 include("array/trapezoidal.jl")
 include("array/triangular.jl")
 include("array/cholesky.jl")
+include("array/qr.jl")
 
 # Visualization
 include("visualization.jl")
