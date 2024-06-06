@@ -271,6 +271,7 @@ function Base.show(io::IO, ::MIME"text/plain", A::DArray{T,N}) where {T,N}
         write(io, "$(length(A))-element ")
         write(io, string(DVector{T}))
     elseif N == 2
+        write(io, "$(join(size(A), 'x')) ")
         write(io, string(DMatrix{T}))
     elseif N == 0
         write(io, "0-dimensional ")
