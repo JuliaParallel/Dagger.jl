@@ -31,7 +31,7 @@ end
 
 const BlocksOrAuto = Union{Blocks{N} where N, AutoBlocks}
 
-function DArray{T}(::UndefInitializer, p::Blocks, dims) where {T}
+function DArray{T}(::UndefInitializer, p::Blocks, dims::Dims) where {T}
     d = ArrayDomain(map(x->1:x, dims))
     part = partition(p, d)
     f = function (_, T, sz)
@@ -42,10 +42,10 @@ function DArray{T}(::UndefInitializer, p::Blocks, dims) where {T}
 end
 
 DArray(::UndefInitializer, p::BlocksOrAuto, dims::Integer...) = DArray{Float64}(undef, p, dims)
-DArray(::UndefInitializer, p::BlocksOrAuto, dims::Tuple) = DArray{Float64}(undef, p, dims)
+DArray(::UndefInitializer, p::BlocksOrAuto, dims::Dims) = DArray{Float64}(undef, p, dims)
 DArray{T}(::UndefInitializer, p::BlocksOrAuto, dims::Integer...) where {T} = DArray{T}(undef, p, dims)
-DArray{T}(::UndefInitializer, p::BlocksOrAuto, dims::Tuple) where {T} = DArray{T}(undef, p, dims)
-DArray{T}(::UndefInitializer, p::AutoBlocks, dims::Tuple) where {T} = DArray{T}(undef, auto_blocks(dims), dims)
+DArray{T}(::UndefInitializer, p::BlocksOrAuto, dims::Dims) where {T} = DArray{T}(undef, p, dims)
+DArray{T}(::UndefInitializer, p::AutoBlocks, dims::Dims) where {T} = DArray{T}(undef, auto_blocks(dims), dims)
 
 function Base.rand(p::Blocks, eltype::Type, dims::Dims)
     d = ArrayDomain(map(x->1:x, dims))

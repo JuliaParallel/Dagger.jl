@@ -334,11 +334,11 @@ Base.:(/)(x::DArray{T,N,B,F}, y::U) where {T<:Real,U<:Real,N,B,F} =
 
 A `view` of a `DArray` chunk returns a `DArray` of `Thunk`s.
 """
-function Base.view(c::DArray, d)
+#=function Base.view(c::DArray, d)
     subchunks, subdomains = lookup_parts(c, chunks(c), domainchunks(c), d)
     d1 = alignfirst(d)
     DArray(eltype(c), d1, subdomains, subchunks, c.partitioning, c.concat)
-end
+end=#
 
 function group_indices(cumlength, idxs,at=1, acc=Any[])
     at > length(idxs) && return acc
