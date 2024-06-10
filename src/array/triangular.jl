@@ -20,7 +20,7 @@ function _GenericTriangular(f::Union{Function, UndefInitializer}, p::Blocks{2}, 
             if compar(first(c.indexes[1]), first(c.indexes[2]))
                 push!(thunks, Dagger.@spawn alloc(sz))
             else
-                push!(thunks, Dagger.@spawn zeros(eltype, sz))
+                push!(thunks, Dagger.@spawn Matrix{Nothing}(nothing, sz))
             end
         end
     end
@@ -51,7 +51,7 @@ function _GenericTri!(A::Dagger.DArray{T, 2}, wrap) where {T}
             Ac[ind] = _DiagBuild(dc[ind].indexes, fetch(Ac[ind]), diag, wrap)
         else
             if compar(first(dc[ind].indexes[2]), first(dc[ind].indexes[1]))
-                Ac[ind] = Dagger.@spawn zeros(T, sz)
+                Ac[ind] = Dagger.@spawn Matrix{Nothing}(nothing, sz)
             end
         end
     end

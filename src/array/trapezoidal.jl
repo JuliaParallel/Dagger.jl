@@ -76,7 +76,7 @@ function _GenericTrapezoidal(f::Union{Function, UndefInitializer}, p::Blocks{2},
             if compar(mt, nt)
                 push!(thunks, Dagger.@spawn alloc(sz))
             else
-                push!(thunks, Dagger.@spawn zeros(eltype, sz))
+                push!(thunks, Dagger.@spawn Matrix{Nothing}(nothing, sz))
             end
         end
     end
@@ -120,7 +120,7 @@ function _GenericTra!(A::Dagger.DArray{T, 2}, wrap::Function, k::Integer) where 
         else
             mt, nt = k<0 ? (first(dc[ind].indexes[1]), first(dc[ind].indexes[2])-k) : (first(dc[ind].indexes[1])+k, first(dc[ind].indexes[2]))
             if compar(mt, nt)
-                Ac[ind] = Dagger.@spawn zeros(T, sz)
+                Ac[ind] = Dagger.@spawn Matrix{Nothing}(nothing, sz)
             end
         end
     end
