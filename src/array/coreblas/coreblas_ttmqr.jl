@@ -1,4 +1,3 @@
-using libcoreblas_jll
 for (gettmqr, T) in 
     ((:coreblas_dttmqr, Float64), 
      (:coreblas_sttmqr, Float32),
@@ -27,7 +26,7 @@ for (gettmqr, T) in
             workdim = side == 'L' ? n1 : ib
             work = Vector{$T}(undef, ldwork*workdim)
                 
-            err = ccall(($(QuoteNode(gettmqr)), libcoreblas), Int64,
+            err = ccall(($(QuoteNode(gettmqr)), :libcoreblas), Int64,
                 (Int64, Int64, Int64, Int64, 
                 Int64, Int64, Int64, Int64,
                 Ptr{$T}, Int64, Ptr{$T}, Int64, 

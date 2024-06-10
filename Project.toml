@@ -24,6 +24,7 @@ StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
 TaskLocalValues = "ed4db957-447d-4319-bfb6-7fa9ae7ecf34"
 TimespanLogging = "a526e669-04d3-4846-9525-c66122c55f63"
 UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
+libblastrampoline_jll = "8e850b90-86db-534c-a0d3-1478176c7d93"
 libcoreblas_jll = "339d4f0c-89b5-5ae2-b52c-218a0e582e15"
 
 [weakdeps]
