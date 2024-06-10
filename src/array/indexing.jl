@@ -69,7 +69,8 @@ function Base.getindex(A::DArray{T,N}, idx::NTuple{N,Int}) where {T,N}
     cache = GETINDEX_CACHE[]
     cache_size = GETINDEX_CACHE_SIZE[]
     if cache_size > 0 && haskey(cache, part_idx)
-        return cache[part_idx][offset_idx...]
+        val = cache[part_idx][offset_idx...]
+        return val === nothing ? zero(T) : val
     end
 
     # Uncached, fetch the partition
@@ -85,8 +86,10 @@ function Base.getindex(A::DArray{T,N}, idx::NTuple{N,Int}) where {T,N}
         cache[part_idx] = part
     end
 
+    val = part[offset_idx...]
+
     # Return the value
-    return part[offset_idx...]
+    return val === nothing ? zero(T) : val
 end
 function partition_for(A::DArray, idx::NTuple{N,Int}) where N
     part_idx = zeros(Int, N)
@@ -145,6 +148,12 @@ function Base.setindex!(A::DArray{T,N}, value, idx::NTuple{N,Int}) where {T,N}
 
     # Set the value
     part = A.chunks[part_idx...]
+
+    if part isa Chunk{AbstractArray{Nothing}}
+        part = fetch(part)
+        part = Dagger.tochunk(zeros(T, size(part)))
+    end
+
     space = memory_space(part)
     scope = Dagger.scope(worker=root_worker_id(space))
     return fetch(Dagger.@spawn scope=scope setindex!(part, value, offset_idx...))

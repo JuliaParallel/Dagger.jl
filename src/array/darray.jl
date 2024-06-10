@@ -177,6 +177,9 @@ domainchunks(d::DArray) = d.subdomains
 size(x::DArray) = size(domain(x))
 stage(ctx, c::DArray) = c
 
+unwrap_nothing(T, x::AbstractArray{Nothing}) = zeros(T, size(x))
+unwrap_nothing(T, x) = x
+
 function Base.collect(d::DArray; tree=false)
     a = fetch(d)
     if isempty(d.chunks)
@@ -188,10 +191,13 @@ function Base.collect(d::DArray; tree=false)
     end
 
     dimcatfuncs = [(x...) -> d.concat(x..., dims=i) for i in 1:ndims(d)]
+    cks = map(a.chunks) do chunk
+        Dagger.@spawn unwrap_nothing(eltype(a), chunk)
+    end
     if tree
-        collect(fetch(treereduce_nd(map(x -> ((args...,) -> Dagger.@spawn x(args...)) , dimcatfuncs), a.chunks)))
+        collect(fetch(treereduce_nd(map(x -> ((args...,) -> Dagger.@spawn x(args...)) , dimcatfuncs), cks)))
     else
-        treereduce_nd(dimcatfuncs, asyncmap(fetch, a.chunks))
+        treereduce_nd(dimcatfuncs, asyncmap(fetch, cks))
     end
 end
 
@@ -244,7 +250,8 @@ function Base.getindex(A::ColorArray{T,N}, idxs::NTuple{N,Int}) where {T,N}
     if !haskey(A.seen_values, idxs)
         chunk = A.A.chunks[sd_idx]
         if chunk isa Chunk || isready(chunk)
-            value = A.seen_values[idxs] = Some(getindex(A.A, idxs))
+            raw_value = getindex(A.A, idxs)
+            value = A.seen_values[idxs] = Some(something(raw_value, zero(T)))
         else
             # Show a placeholder instead
             value = A.seen_values[idxs] = nothing
