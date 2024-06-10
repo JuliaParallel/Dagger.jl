@@ -27,7 +27,7 @@ for (getsmqr, T) in
             work = Vector{$T}(undef, ib*nb)
 
                 
-            err = ccall(($(QuoteNode(getsmqr)), libcoreblas), Int64,
+            err = ccall(($(QuoteNode(getsmqr)), :libcoreblas), Int64,
                 (Int64, Int64, Int64, Int64, 
                 Int64, Int64, Int64, Int64,
                 Ptr{$T}, Int64, Ptr{$T}, Int64, 

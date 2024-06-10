@@ -16,7 +16,7 @@ for (getsqrt,T) in
             work = Vector{$T}(undef, (ib)*n)
             ttau = Vector{$T}(undef, n)
 
-            err = ccall(($(QuoteNode(getsqrt)), libcoreblas), Int64,
+            err = ccall(($(QuoteNode(getsqrt)), :libcoreblas), Int64,
                 (Int64, Int64, Int64,
                 Ptr{$T}, Int64, Ptr{$T}, Int64, 
                 Ptr{$T}, Int64, Ptr{$T}, Ptr{$T}),

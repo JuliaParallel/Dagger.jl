@@ -24,7 +24,7 @@ for (geormqr, T) in
             work = Vector{$T}(undef, ib*nb)
 
                 
-            err = ccall(($(QuoteNode(geormqr)), libcoreblas), Int64,
+            err = ccall(($(QuoteNode(geormqr)), :libcoreblas), Int64,
                 (Int64, Int64, Int64, Int64, 
                 Int64, Int64, 
                 Ptr{$T}, Int64, Ptr{$T}, Int64, 

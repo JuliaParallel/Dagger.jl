@@ -19,7 +19,7 @@ for (gettqrt, T) in
             ldt = max(1, stride(triT, 2))
 
 
-            err = ccall(($(QuoteNode(gettqrt)), libcoreblas), Int64,
+            err = ccall(($(QuoteNode(gettqrt)), :libcoreblas), Int64,
                     (Int64, Int64, Int64, Ptr{$T}, Int64, Ptr{$T}, Int64,
                     Ptr{$T}, Int64, Ptr{$T}, Ptr{$T}),
                     m1, n1, ib, A1, lda1, A2, lda2, triT, ldt, tau, work)
