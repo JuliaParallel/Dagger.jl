@@ -164,19 +164,14 @@ function geqrf!(A::Dagger.DArray{T, 2}, Tm::LowerTrapezoidal{T, <:Dagger.DMatrix
     Tc = Tm.data.chunks
     trans = T <: Complex ? 'C' : 'T'
 
-    Ccopy = Dagger.DArray{T}(undef, A.partitioning, A.partitioning.blocksize[1], min(mt, nt) * A.partitioning.blocksize[2])
-    Cc = Ccopy.chunks
     Dagger.spawn_datadeps(;static, traversal) do
         for k in 1:min(mt, nt) 
             Dagger.@spawn coreblas_geqrt!(InOut(Ac[k, k]), Out(Tc[k,k]))
-            # FIXME: This is a hack to avoid aliasing
-            Dagger.@spawn copyto!(InOut(Cc[1,k]), In(Ac[k, k]))
             for n in k+1:nt
-                #FIXME: Change Cc[1,k] to upper triangular of Ac[k,k]
-                Dagger.@spawn coreblas_ormqr!('L', trans, In(Cc[1, k]), In(Tc[k,k]), InOut(Ac[k, n]))
+                Dagger.@spawn coreblas_ormqr!('L', trans, Deps(Ac[k,k], In(LowerTriangular)), In(Tc[k,k]), InOut(Ac[k, n]))
             end
             for m in k+1:mt
-                Dagger.@spawn coreblas_tsqrt!(InOut(Ac[k, k]), InOut(Ac[m, k]), Out(Tc[m,k])) 
+                Dagger.@spawn coreblas_tsqrt!(Deps(Ac[k, k], InOut(UpperTriangular)), InOut(Ac[m, k]), Out(Tc[m,k])) 
                 for n in k+1:nt
                     Dagger.@spawn coreblas_tsmqr!('L', trans, InOut(Ac[k, n]), InOut(Ac[m, n]), In(Ac[m, k]), In(Tc[m,k]))
                 end
