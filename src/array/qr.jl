@@ -128,10 +128,10 @@ function cageqrf!(A::Dagger.DArray{T, 2}, Tm::LowerTrapezoidal{T, <:Dagger.DMatr
                 end
                 Dagger.@spawn coreblas_geqrt!(InOut(Ac[ibeg, k]), Out(Tc[ibeg,k]))
                 for n in k+1:nt
-                    Dagger.@spawn coreblas_ormqr!('L', trans, In(Ac[ibeg, k]), In(Tc[ibeg,k]), InOut(Ac[ibeg, n]))
+                    Dagger.@spawn coreblas_ormqr!('L', trans, Deps(Ac[ibeg, k], In(LowerTriangular)), In(Tc[ibeg,k]), InOut(Ac[ibeg, n]))
                 end
                 for m in ibeg+1:(pt * mtd)
-                    Dagger.@spawn coreblas_tsqrt!(InOut(Ac[ibeg, k]), InOut(Ac[m, k]), Out(Tc[m,k]))
+                    Dagger.@spawn coreblas_tsqrt!(Deps(Ac[ibeg, k], InOut(UpperTriangular)), InOut(Ac[m, k]), Out(Tc[m,k]))
                     for n in k+1:nt
                          Dagger.@spawn coreblas_tsmqr!('L', trans, InOut(Ac[ibeg, n]), InOut(Ac[m, n]), In(Ac[m, k]), In(Tc[m,k]))
                     end
@@ -146,9 +146,9 @@ function cageqrf!(A::Dagger.DArray{T, 2}, Tm::LowerTrapezoidal{T, <:Dagger.DMatr
                     if p1 == proot
                         i1 = k
                     end
-                    Dagger.@spawn coreblas_ttqrt!(InOut(Ac[i1, k]), InOut(Ac[i2, k]), Out(Tc[i2, k]))
+                    Dagger.@spawn coreblas_ttqrt!(Deps(Ac[i1, k], InOut(UpperTriangular)), Deps(Ac[i2, k], InOut(UpperTriangular)), Out(Tc[i2, k]))
                     for n in k+1:nt
-                        Dagger.@spawn coreblas_ttmqr!('L', trans, InOut(Ac[i1, n]), InOut(Ac[i2, n]), In(Ac[i2, k]), In(Tc[i2, k]))
+                        Dagger.@spawn coreblas_ttmqr!('L', trans, InOut(Ac[i1, n]), InOut(Ac[i2, n]), Deps(Ac[i2, k], In(UpperTriangular)), In(Tc[i2, k]))
                     end
                     p1 += 2^m
                     p2 += 2^m
