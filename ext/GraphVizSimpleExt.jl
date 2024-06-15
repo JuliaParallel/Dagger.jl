@@ -33,6 +33,22 @@ function node_id(t::Chunk)
     _part_labels[t]
 end
 
+function node_name(t::Thunk)
+    "n_$(t.id)"
+end
+
+function node_name(t::Chunk)
+    _part_labels[t]
+end
+
+function node_name(name::String)
+    "n_$name"
+end
+
+function node_name(id)
+    "n_$id"
+end
+
 function write_dag(io, t::Thunk)
     !istask(t) && return
     deps = dependents(t)
@@ -43,7 +59,7 @@ function write_dag(io, t::Thunk)
     for (k, v) in deps
         for dep in v
             if isa(k, Union{Chunk, Thunk})
-                println(io, "$(node_id(k)) -> $(node_id(dep))")
+                println(io, "$(node_name(k)) -> $(node_name(dep))")
             end
         end
     end
@@ -102,7 +118,7 @@ _proc_shape(ctx, ::Nothing) = "ellipse"
 
 function write_node(ctx, io, t::Thunk, c)
     f = isa(t.f, Function) ? "$(t.f)" : "fn"
-    println(io, "n_$(t.id) [label=\"$f - $(t.id)\"];")
+    println(io, "$(node_name(t)) [label=\"$f - $(t.id)\"];")
     c
 end
 
@@ -112,7 +128,7 @@ function write_node(ctx, io, t, c, id=dec(hash(t)))
     proc = node_proc(t)
     color = _proc_color(ctx, proc)
     shape = _proc_shape(ctx, proc)
-    println(io, "n_$id [label=\"$l\",color=\"$color\",shape=\"$shape\",penwidth=5];")
+    println(io, "$(node_name(id)) [label=\"$l\",color=\"$color\",shape=\"$shape\",penwidth=5];")
     c
 end
 
@@ -125,7 +141,7 @@ function write_node(ctx, io, ts::Timespan, c)
     shape = _proc_shape(ctx, processor)
     # TODO: t_log = log(ts.finish - ts.start) / 5
     ctx.id_to_proc[thunk_id] = processor
-    println(io, "n_$thunk_id [label=\"$f\n$t_comp\",color=\"$color\",shape=\"$shape\",penwidth=5];")
+    println(io, "$(node_name(thunk_id)) [label=\"$f\n$t_comp\",color=\"$color\",shape=\"$shape\",penwidth=5];")
     # TODO: "\n Thunk $(ts.id)\nResult Type: $res_type\nResult Size: $sz_comp\",
     c
 end
@@ -135,12 +151,12 @@ function write_edge(ctx, io, ts_move::Timespan, logs, inputname=nothing, inputar
     (;f,) = ts_move.timeline
     t_move = pretty_time(ts_move)
     if id > 0
-        print(io, "n_$id -> n_$thunk_id [label=\"Move: $t_move")
+        print(io, "$(node_name(id)) -> $(node_name(thunk_id)) [label=\"Move: $t_move")
         color_src = _proc_color(ctx, id)
     else
         @assert inputname !== nothing
         @assert inputarg !== nothing
-        print(io, "n_$inputname -> n_$thunk_id [label=\"Move: $t_move")
+        print(io, "$(node_name(inputname)) -> $(node_name(thunk_id)) [label=\"Move: $t_move")
         proc = node_proc(inputarg)
         color_src = _proc_color(ctx, proc)
     end
@@ -149,7 +165,7 @@ function write_edge(ctx, io, ts_move::Timespan, logs, inputname=nothing, inputar
     println(io, "\",color=\"$color_src;0.5:$color_dst\",penwidth=2];")
 end
 
-write_edge(ctx, io, from::String, to::String) = println(io, "n_$from -> n_$to;")
+write_edge(ctx, io, from::String, to::String) = println(io, "$(node_name(from)) -> $(node_name(to));")
 
 getargs!(d, t) = nothing
 function getargs!(d, t::Thunk)
