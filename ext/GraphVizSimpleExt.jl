@@ -16,7 +16,7 @@ import Dagger.TimespanLogging: Timespan
 
 global _part_labels = Dict()
 
-function write_node(ctx, io, t::Chunk, c)
+function write_node(io, t::Chunk, c, ctx=nothing)
     _part_labels[t]="part_$c"
     c+1
 end
@@ -51,16 +51,40 @@ end
 
 function write_dag(io, t::Thunk)
     !istask(t) && return
+
+    # Chunk/Thunk nodes
     deps = dependents(t)
     c=1
     for k in keys(deps)
-        c = write_node(nothing, io, k, c)
+        c = write_node(io, k, c)
     end
     for (k, v) in deps
         for dep in v
             if isa(k, Union{Chunk, Thunk})
                 println(io, "$(node_name(k)) -> $(node_name(dep))")
             end
+        end
+    end
+
+    # Argument nodes (not Chunks/Thunks)
+    argmap = Dict{Int,Vector}()
+    getargs!(argmap, t)
+    argids = IdDict{Any,String}()
+    for id in keys(argmap)
+        for (argidx,arg) in argmap[id]
+            name = "arg_$(argidx)_to_$(id)"
+            if !isimmutable(arg)
+                if arg in keys(argids)
+                    name = argids[arg]
+                else
+                    argids[arg] = name
+                    c = write_node(io, arg, c, name)
+                end
+            else
+                c = write_node(io, arg, c, name)
+            end
+            # Arg-to-compute edges
+            write_edge(io, name, id)
         end
     end
 end
@@ -116,14 +140,14 @@ _proc_shape(ctx, proc::Processor) = get!(ctx.proc_to_shape, typeof(proc)) do
 end
 _proc_shape(ctx, ::Nothing) = "ellipse"
 
-function write_node(ctx, io, t::Thunk, c)
+function write_node(io, t::Thunk, c, ctx=nothing)
     f = isa(t.f, Function) ? "$(t.f)" : "fn"
     println(io, "$(node_name(t)) [label=\"$f - $(t.id)\"];")
     c
 end
 
 dec(x) = Base.dec(x, 0, false)
-function write_node(ctx, io, t, c, id=dec(hash(t)))
+function write_node(io, t, c, ctx, id=dec(hash(t)))
     l = replace(node_label(t), "\""=>"")
     proc = node_proc(t)
     color = _proc_color(ctx, proc)
@@ -132,7 +156,13 @@ function write_node(ctx, io, t, c, id=dec(hash(t)))
     c
 end
 
-function write_node(ctx, io, ts::Timespan, c)
+function write_node(io, t, c, name::String)
+    l = replace(node_label(t), "\""=>"")
+    println(io, "$(node_name(name)) [label=\"$l\"];")
+    c
+end
+
+function write_node(io, ts::Timespan, c, ctx)
     (;thunk_id, processor) = ts.id
     (;f) = ts.timeline
     f = isa(f, Function) ? "$f" : "fn"
@@ -146,7 +176,7 @@ function write_node(ctx, io, ts::Timespan, c)
     c
 end
 
-function write_edge(ctx, io, ts_move::Timespan, logs, inputname=nothing, inputarg=nothing)
+function write_edge(io, ts_move::Timespan, logs, ctx, inputname=nothing, inputarg=nothing)
     (;thunk_id, id) = ts_move.id
     (;f,) = ts_move.timeline
     t_move = pretty_time(ts_move)
@@ -165,7 +195,8 @@ function write_edge(ctx, io, ts_move::Timespan, logs, inputname=nothing, inputar
     println(io, "\",color=\"$color_src;0.5:$color_dst\",penwidth=2];")
 end
 
-write_edge(ctx, io, from::String, to::String) = println(io, "$(node_name(from)) -> $(node_name(to));")
+write_edge(io, from::String, to::String, ctx=nothing) = println(io, "$(node_name(from)) -> $(node_name(to));")
+write_edge(io, from::String, to::Int, ctx=nothing) = println(io, "$(node_name(from)) -> $(node_name(to));")
 
 getargs!(d, t) = nothing
 function getargs!(d, t::Thunk)
@@ -186,7 +217,7 @@ function write_dag(io, t, logs::Vector)
     c = 1
     # Compute nodes
     for ts in filter(x->x.category==:compute, logs)
-        c = write_node(ctx, io, ts, c)
+        c = write_node(io, ts, c, ctx)
     end
     # Argument nodes
     argnodemap = Dict{Int,Vector{String}}()
@@ -201,18 +232,18 @@ function write_dag(io, t, logs::Vector)
                     name = argids[arg]
                 else
                     argids[arg] = name
-                    c = write_node(ctx, io, arg, c, name)
+                    c = write_node(io, arg, c, ctx, name)
                 end
                 push!(nodes, name)
             else
-                c = write_node(ctx, io, arg, c, name)
+                c = write_node(io, arg, c, ctx, name)
                 push!(nodes, name)
             end
             # Arg-to-compute edges
             for ts in filter(x->x.category==:move &&
                                 x.id.thunk_id==id &&
                                 x.id.id==-argidx, logs)
-                write_edge(ctx, io, ts, logs, name, arg)
+                write_edge(io, ts, logs, ctx, name, arg)
             end
             arg_c += 1
         end
@@ -220,7 +251,7 @@ function write_dag(io, t, logs::Vector)
     end
     # Move edges
     for ts in filter(x->x.category==:move && x.id.id>0, logs)
-        write_edge(ctx, io, ts, logs)
+        write_edge(io, ts, logs, ctx)
     end
     #= FIXME: Legend (currently it's laid out horizontally)
     println(io, """
