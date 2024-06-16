@@ -7,7 +7,7 @@ else
 end
 
 import Dagger
-import Dagger: Chunk, Thunk, Processor
+import Dagger: Chunk, Thunk, DTask, Processor
 import Dagger: show_logs
 import Dagger: istask, dependents
 import Dagger.TimespanLogging: Timespan
@@ -278,15 +278,15 @@ function _show_plan(io::IO, t)
     write_dag(io, t)
     println(io, "}")
 end
-function _show_plan(io::IO, t::Thunk, logs::Vector{Timespan})
+function _show_plan(io::IO, t::Union{Thunk,DTask}, logs::Vector{Timespan})
     println(io, """strict digraph {
     graph [layout=dot,rankdir=LR];""")
     write_dag(io, t, logs)
     println(io, "}")
 end
 
-show_logs(io::IO, t::Thunk, ::Val{:graphviz_simple}) = _show_plan(io, t)
+show_logs(io::IO, t::Union{Thunk,DTask}, ::Val{:graphviz_simple}) = _show_plan(io, t)
 show_logs(io::IO, logs::Vector{Timespan}, ::Val{:graphviz_simple}) = _show_plan(io, logs)
-show_logs(io::IO, t::Thunk, logs::Vector{Timespan}, ::Val{:graphviz_simple}) = _show_plan(io, t, logs)
+show_logs(io::IO, t::Union{Thunk,DTask}, logs::Vector{Timespan}, ::Val{:graphviz_simple}) = _show_plan(io, t, logs)
 
 end
