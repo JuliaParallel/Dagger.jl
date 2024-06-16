@@ -10,6 +10,7 @@ import Dagger
 import Dagger: Chunk, Thunk, DTask, Processor
 import Dagger: show_logs
 import Dagger: istask, dependents
+import Dagger: unwrap_weak
 import Dagger.TimespanLogging: Timespan
 
 ### DAG-based graphing
@@ -49,11 +50,47 @@ function node_name(id)
     "n_$id"
 end
 
+# Modified version of the function from Dagger compute.jl 
+function custom_dependents(node::Thunk)
+    deps = Dict{Union{Thunk,Chunk}, Set{Thunk}}()
+    visited = Set{Thunk}()
+    to_visit = Set{Thunk}()
+    push!(to_visit, node)
+    while !isempty(to_visit)
+        next = pop!(to_visit)
+        (next in visited) && continue
+        if !haskey(deps, next)
+            deps[next] = Set{Thunk}()
+        end
+        for inp in next.syncdeps
+            unwrapped = unwrap_weak(inp)
+            if (unwrapped === nothing)
+                continue
+            end
+            inp = unwrapped
+            if istask(inp) || (inp isa Chunk)
+                s = get!(()->Set{Thunk}(), deps, inp)
+                push!(s, next)
+                if istask(inp) && !(inp in visited)
+                    push!(to_visit, inp)
+                end
+            end
+        end
+        push!(visited, next)
+    end
+    return deps
+end
+
+function write_dag(io, e::DTask)
+    t = convert_to_thunk(e)
+    write_dag(io, t)
+end
+
 function write_dag(io, t::Thunk)
     !istask(t) && return
 
     # Chunk/Thunk nodes
-    deps = dependents(t)
+    deps = custom_dependents(t)
     c=1
     for k in keys(deps)
         c = write_node(io, k, c)
@@ -198,13 +235,22 @@ end
 write_edge(io, from::String, to::String, ctx=nothing) = println(io, "$(node_name(from)) -> $(node_name(to));")
 write_edge(io, from::String, to::Int, ctx=nothing) = println(io, "$(node_name(from)) -> $(node_name(to));")
 
+convert_to_thunk(t::Thunk) = t
+convert_to_thunk(t::DTask) = Dagger.Sch._find_thunk(t)
+
 getargs!(d, t) = nothing
+
 function getargs!(d, t::Thunk)
     raw_inputs = map(last, t.inputs)
     d[t.id] = [filter(x->!istask(x[2]), collect(enumerate(raw_inputs)))...,]
     foreach(i->getargs!(d, i), raw_inputs)
 end
-function write_dag(io, t, logs::Vector)
+
+function getargs!(d, e::DTask)
+    getargs!(d, convert_to_thunk(e))
+end
+
+function write_dag(io, logs::Vector, t::Union{Thunk, DTask, Nothing}=nothing)
     ctx = (proc_to_color = Dict{Processor,String}(),
            proc_colors = Colors.distinguishable_colors(128),
            proc_color_idx = Ref{Int}(1),
@@ -212,21 +258,55 @@ function write_dag(io, t, logs::Vector)
            proc_shapes = ("ellipse","box","triangle"),
            proc_shape_idx = Ref{Int}(1),
            id_to_proc = Dict{Int,Processor}())
-    argmap = Dict{Int,Vector}()
-    getargs!(argmap, t)
+    
     c = 1
     # Compute nodes
     for ts in filter(x->x.category==:compute, logs)
         c = write_node(io, ts, c, ctx)
     end
-    # Argument nodes
-    argnodemap = Dict{Int,Vector{String}}()
+
+    # Argument nodes & edges
+    argmap = Dict{Int,Vector}()
     argids = IdDict{Any,String}()
-    for id in keys(argmap)
-        nodes = String[]
-        arg_c = 1
-        for (argidx,arg) in argmap[id]
-            name = "arg_$(argidx)_to_$(id)"
+    if (t !== nothing) # Then can get info from the Thunk/DTask
+        t = convert_to_thunk(t)
+        deps = custom_dependents(t)
+        for t in keys(deps)
+            getargs!(argmap, t)
+        end
+        argnodemap = Dict{Int,Vector{String}}()
+        for id in keys(argmap)
+            nodes = String[]
+            arg_c = 1
+            for (argidx,arg) in argmap[id]
+                name = "arg_$(argidx)_to_$(id)"
+                if !isimmutable(arg)
+                    if arg in keys(argids)
+                        name = argids[arg]
+                    else
+                        argids[arg] = name
+                        c = write_node(io, arg, c, ctx, name)
+                    end
+                    push!(nodes, name)
+                else
+                    c = write_node(io, arg, c, ctx, name)
+                    push!(nodes, name)
+                end
+                # Arg-to-compute edges
+                for ts in filter(x->x.category==:move &&
+                                    x.id.thunk_id==id &&
+                                    x.id.id==-argidx, logs)
+                    write_edge(io, ts, logs, ctx, name, arg)
+                end
+                arg_c += 1
+            end
+            argnodemap[id] = nodes
+        end
+    else # Rely on the logs only
+        for ts in filter(x->x.category==:move && x.id.id < 0, logs)
+            (;thunk_id, id) = ts.id
+            arg = ts.timeline[2]
+            name = "arg_$(-id)_to_$(thunk_id)"
             if !isimmutable(arg)
                 if arg in keys(argids)
                     name = argids[arg]
@@ -234,21 +314,15 @@ function write_dag(io, t, logs::Vector)
                     argids[arg] = name
                     c = write_node(io, arg, c, ctx, name)
                 end
-                push!(nodes, name)
             else
                 c = write_node(io, arg, c, ctx, name)
-                push!(nodes, name)
             end
+        
             # Arg-to-compute edges
-            for ts in filter(x->x.category==:move &&
-                                x.id.thunk_id==id &&
-                                x.id.id==-argidx, logs)
-                write_edge(io, ts, logs, ctx, name, arg)
-            end
-            arg_c += 1
+            write_edge(io, ts, logs, ctx, name, arg)
         end
-        argnodemap[id] = nodes
     end
+           
     # Move edges
     for ts in filter(x->x.category==:move && x.id.id>0, logs)
         write_edge(io, ts, logs, ctx)
@@ -281,7 +355,7 @@ end
 function _show_plan(io::IO, t::Union{Thunk,DTask}, logs::Vector{Timespan})
     println(io, """strict digraph {
     graph [layout=dot,rankdir=LR];""")
-    write_dag(io, t, logs)
+    write_dag(io, logs, t)
     println(io, "}")
 end
 
