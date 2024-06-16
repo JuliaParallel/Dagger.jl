@@ -81,9 +81,15 @@ function custom_dependents(node::Thunk)
     return deps
 end
 
-function write_dag(io, e::DTask)
-    t = convert_to_thunk(e)
-    write_dag(io, t)
+# Writing DAG using DTask involves unwrapping WeakRefs, which might return `nothing` if garbage collected,
+# so the part of the DAG is not displayed. This is an unstable behavior, so disabled by default.
+function write_dag(io, e::DTask, stable::Bool=true)
+    if (stable)
+        throw(ArgumentError("Writing DAG for DTask is not supported by default. Use the logs instead."))
+    else
+        t = convert_to_thunk(e)
+        write_dag(io, t)
+    end
 end
 
 function write_dag(io, t::Thunk)
@@ -250,6 +256,7 @@ function getargs!(d, e::DTask)
     getargs!(d, convert_to_thunk(e))
 end
 
+# DTask is not used in the current implementation, as it would be unstable, and the logs provide all the necessary information
 function write_dag(io, logs::Vector, t::Union{Thunk, DTask, Nothing}=nothing)
     ctx = (proc_to_color = Dict{Processor,String}(),
            proc_colors = Colors.distinguishable_colors(128),
@@ -268,12 +275,8 @@ function write_dag(io, logs::Vector, t::Union{Thunk, DTask, Nothing}=nothing)
     # Argument nodes & edges
     argmap = Dict{Int,Vector}()
     argids = IdDict{Any,String}()
-    if (t !== nothing) # Then can get info from the Thunk/DTask
-        t = convert_to_thunk(t)
-        deps = custom_dependents(t)
-        for t in keys(deps)
-            getargs!(argmap, t)
-        end
+    if (isa(t, Thunk)) # Then can get info from the Thunk
+        getargs!(argmap, t)
         argnodemap = Dict{Int,Vector{String}}()
         for id in keys(argmap)
             nodes = String[]
