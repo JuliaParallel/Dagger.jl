@@ -363,25 +363,29 @@ function replace_broadcast(fn::Symbol)
 end
 
 function _par(ex::Expr; lazy=true, recur=true, opts=())
-    if ex.head == :call && recur
-        f = replace_broadcast(ex.args[1])
-        if length(ex.args) >= 2 && Meta.isexpr(ex.args[2], :parameters)
-            args = ex.args[3:end]
-            kwargs = ex.args[2]
-        else
-            args = ex.args[2:end]
-            kwargs = Expr(:parameters)
+    body = nothing
+    if recur && @capture(ex, f_(allargs__)) || @capture(ex, f_(allargs__) do cargs_ body_ end)
+        f = replace_broadcast(f)
+        args = filter(arg->!Meta.isexpr(arg, :parameters), allargs)
+        kwargs = filter(arg->Meta.isexpr(arg, :parameters), allargs)
+        if !isempty(kwargs)
+            kwargs = only(kwargs).args
         end
-        args_ex = _par.(args; lazy=lazy, recur=false)
-        kwargs_ex = _par.(kwargs.args; lazy=lazy, recur=false)
+        if body !== nothing
+            f = quote
+                ($(args...); $(kwargs...))->$f($(args...); $(kwargs...)) do $cargs
+                    $body
+                end
+            end
+        end
         if lazy
-            return :(Dagger.delayed($f, $Options(;$(opts...)))($(args_ex...); $(kwargs_ex...)))
+            return :(Dagger.delayed($f, $Options(;$(opts...)))($(args...); $(kwargs...)))
         else
             sync_var = Base.sync_varname
             @gensym result
             return quote
-                let args = ($(args_ex...),)
-                    $result = $spawn($f, $Options(;$(opts...)), args...; $(kwargs_ex...))
+                let
+                    $result = $spawn($f, $Options(;$(opts...)), $(args...); $(kwargs...))
                     if $(Expr(:islocal, sync_var))
                         put!($sync_var, schedule(Task(()->wait($result))))
                     end
@@ -389,11 +393,17 @@ function _par(ex::Expr; lazy=true, recur=true, opts=())
                 end
             end
         end
+    elseif lazy
+        # Recurse into the expression
+        return Expr(ex.head, _par_inner.(ex.args, lazy=lazy, recur=recur, opts=opts)...)
     else
-        return Expr(ex.head, _par.(ex.args, lazy=lazy, recur=recur, opts=opts)...)
+        throw(ArgumentError("Invalid Dagger task expression: $ex"))
     end
 end
-_par(ex; kwargs...) = ex
+_par(ex; kwargs...) = throw(ArgumentError("Invalid Dagger task expression: $ex"))
+
+_par_inner(ex; kwargs...) = ex
+_par_inner(ex::Expr; kwargs...) = _par(ex; kwargs...)
 
 """
     Dagger.spawn(f, args...; kwargs...) -> DTask

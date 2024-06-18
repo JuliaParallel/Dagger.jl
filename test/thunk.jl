@@ -81,7 +81,39 @@ end
     end
     @testset "inner macro" begin
         A = rand(4)
-        @test fetch(@spawn sum(@view A[2:3])) ≈ sum(@view A[2:3])
+        t = @spawn sum(@view A[2:3])
+        @test t isa Dagger.DTask
+        @test fetch(t) ≈ sum(@view A[2:3])
+    end
+    @testset "do block" begin
+        A = rand(4)
+
+        t = @spawn sum(A) do a
+            a + 1
+        end
+        @test t isa Dagger.DTask
+        @test fetch(t) ≈ sum(a->a+1, A)
+
+        t = @spawn sum(A; dims=1) do a
+            a + 1
+        end
+        @test t isa Dagger.DTask
+        @test fetch(t) ≈ sum(a->a+1, A; dims=1)
+
+        do_f = f -> f(42)
+        t = @spawn do_f() do x
+            x + 1
+        end
+        @test t isa Dagger.DTask
+        @test fetch(t) == 43
+    end
+    @testset "invalid expression" begin
+        @test_throws LoadError eval(:(@spawn 1))
+        @test_throws LoadError eval(:(@spawn begin 1 end))
+        @test_throws LoadError eval(:(@spawn begin
+            1+1
+            1+1
+        end))
     end
     @testset "waiting" begin
         a = @spawn sleep(1)
