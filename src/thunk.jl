@@ -365,8 +365,14 @@ end
 function _par(ex::Expr; lazy=true, recur=true, opts=())
     f = nothing
     body = nothing
-    if recur && @capture(ex, f_(allargs__)) || @capture(ex, f_(allargs__) do cargs_ body_ end) || @capture(ex, allargs__->body_)
+    arg1 = nothing
+    if recur && @capture(ex, f_(allargs__)) || @capture(ex, f_(allargs__) do cargs_ body_ end) || @capture(ex, allargs__->body_) || @capture(ex, arg1_[allargs__])
         f = replace_broadcast(f)
+        if arg1 !== nothing
+            # Indexing (A[2,3])
+            f = Base.getindex
+            pushfirst!(allargs, arg1)
+        end
         args = filter(arg->!Meta.isexpr(arg, :parameters), allargs)
         kwargs = filter(arg->Meta.isexpr(arg, :parameters), allargs)
         if !isempty(kwargs)
