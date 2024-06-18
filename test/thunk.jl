@@ -79,6 +79,10 @@ end
         @test fetch(@spawn A .+ B) ≈ A .+ B
         @test fetch(@spawn A .* B) ≈ A .* B
     end
+    @testset "inner macro" begin
+        A = rand(4)
+        @test fetch(@spawn sum(@view A[2:3])) ≈ sum(@view A[2:3])
+    end
     @testset "waiting" begin
         a = @spawn sleep(1)
         @test !isready(a)

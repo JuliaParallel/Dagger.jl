@@ -306,7 +306,7 @@ generated thunks.
 macro par(exs...)
     opts = exs[1:end-1]
     ex = exs[end]
-    _par(ex; lazy=true, opts=opts)
+    return esc(_par(ex; lazy=true, opts=opts))
 end
 
 """
@@ -348,7 +348,7 @@ also passes along any options in an `Options` struct. For example,
 macro spawn(exs...)
     opts = exs[1:end-1]
     ex = exs[end]
-    _par(ex; lazy=false, opts=opts)
+    return esc(_par(ex; lazy=false, opts=opts))
 end
 
 struct ExpandedBroadcast{F} end
@@ -372,17 +372,16 @@ function _par(ex::Expr; lazy=true, recur=true, opts=())
             args = ex.args[2:end]
             kwargs = Expr(:parameters)
         end
-        opts = esc.(opts)
         args_ex = _par.(args; lazy=lazy, recur=false)
         kwargs_ex = _par.(kwargs.args; lazy=lazy, recur=false)
         if lazy
-            return :(Dagger.delayed($(esc(f)), $Options(;$(opts...)))($(args_ex...); $(kwargs_ex...)))
+            return :(Dagger.delayed($f, $Options(;$(opts...)))($(args_ex...); $(kwargs_ex...)))
         else
-            sync_var = esc(Base.sync_varname)
+            sync_var = Base.sync_varname
             @gensym result
             return quote
                 let args = ($(args_ex...),)
-                    $result = $spawn($(esc(f)), $Options(;$(opts...)), args...; $(kwargs_ex...))
+                    $result = $spawn($f, $Options(;$(opts...)), args...; $(kwargs_ex...))
                     if $(Expr(:islocal, sync_var))
                         put!($sync_var, schedule(Task(()->wait($result))))
                     end
@@ -394,7 +393,6 @@ function _par(ex::Expr; lazy=true, recur=true, opts=())
         return Expr(ex.head, _par.(ex.args, lazy=lazy, recur=recur, opts=opts)...)
     end
 end
-_par(ex::Symbol; kwargs...) = esc(ex)
 _par(ex; kwargs...) = ex
 
 """
