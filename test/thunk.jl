@@ -107,6 +107,17 @@ end
         @test t isa Dagger.DTask
         @test fetch(t) == 43
     end
+    @testset "anonymous direct call" begin
+        A = rand(4)
+
+        t = @spawn A->sum(A)
+        @test t isa Dagger.DTask
+        @test fetch(t) == sum(A)
+
+        t = @spawn A->sum(A; dims=1)
+        @test t isa Dagger.DTask
+        @test fetch(t) == sum(A; dims=1)
+    end
     @testset "invalid expression" begin
         @test_throws LoadError eval(:(@spawn 1))
         @test_throws LoadError eval(:(@spawn begin 1 end))

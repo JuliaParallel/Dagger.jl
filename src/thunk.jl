@@ -363,8 +363,9 @@ function replace_broadcast(fn::Symbol)
 end
 
 function _par(ex::Expr; lazy=true, recur=true, opts=())
+    f = nothing
     body = nothing
-    if recur && @capture(ex, f_(allargs__)) || @capture(ex, f_(allargs__) do cargs_ body_ end)
+    if recur && @capture(ex, f_(allargs__)) || @capture(ex, f_(allargs__) do cargs_ body_ end) || @capture(ex, allargs__->body_)
         f = replace_broadcast(f)
         args = filter(arg->!Meta.isexpr(arg, :parameters), allargs)
         kwargs = filter(arg->Meta.isexpr(arg, :parameters), allargs)
@@ -372,9 +373,17 @@ function _par(ex::Expr; lazy=true, recur=true, opts=())
             kwargs = only(kwargs).args
         end
         if body !== nothing
-            f = quote
-                ($(args...); $(kwargs...))->$f($(args...); $(kwargs...)) do $cargs
-                    $body
+            if f !== nothing
+                f = quote
+                    ($(args...); $(kwargs...))->$f($(args...); $(kwargs...)) do $cargs
+                        $body
+                    end
+                end
+            else
+                f = quote
+                    ($(args...); $(kwargs...))->begin
+                        $body
+                    end
                 end
             end
         end
