@@ -31,6 +31,7 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
     pushfirst!(LOAD_PATH, joinpath(@__DIR__, ".."))
     using Pkg
     Pkg.activate(@__DIR__)
+    Pkg.instantiate()
 
     using ArgParse
     s = ArgParseSettings(description = "Dagger Testsuite")
