@@ -337,6 +337,59 @@ function test_datadeps(;args_chunks::Bool,
         test_task_dominators(logs, tid_lower2, [tid_B, tid_lower, tid_unitlower, tid_diag, tid_unitlower2]; all_tids=tids_all, nondom_check=false)
         test_task_dominators(logs, tid_unitupper2, [tid_B, tid_upper, tid_unitupper]; all_tids=tids_all, nondom_check=false)
         test_task_dominators(logs, tid_upper2, [tid_B, tid_upper, tid_unitupper, tid_diag, tid_unitupper2]; all_tids=tids_all, nondom_check=false)
+
+        # Additional aliasing tests
+        views_overlap(x, y) = Dagger.will_alias(Dagger.aliasing(x), Dagger.aliasing(y))
+
+        A = wrap_chunk_thunk(identity, B)
+
+        A_r1 = wrap_chunk_thunk(view, A, 1:1, 1:4)
+        A_r2 = wrap_chunk_thunk(view, A, 2:2, 1:4)
+        B_r1 = wrap_chunk_thunk(view, B, 1:1, 1:4)
+        B_r2 = wrap_chunk_thunk(view, B, 2:2, 1:4)
+
+        A_c1 = wrap_chunk_thunk(view, A, 1:4, 1:1)
+        A_c2 = wrap_chunk_thunk(view, A, 1:4, 2:2)
+        B_c1 = wrap_chunk_thunk(view, B, 1:4, 1:1)
+        B_c2 = wrap_chunk_thunk(view, B, 1:4, 2:2)
+
+        A_mid = wrap_chunk_thunk(view, A, 2:3, 2:3)
+        B_mid = wrap_chunk_thunk(view, B, 2:3, 2:3)
+
+        @test views_overlap(A_r1, A_r1)
+        @test views_overlap(B_r1, B_r1)
+        @test views_overlap(A_c1, A_c1)
+        @test views_overlap(B_c1, B_c1)
+
+        @test views_overlap(A_r1, B_r1)
+        @test views_overlap(A_r2, B_r2)
+        @test views_overlap(A_c1, B_c1)
+        @test views_overlap(A_c2, B_c2)
+
+        @test !views_overlap(A_r1, A_r2)
+        @test !views_overlap(B_r1, B_r2)
+        @test !views_overlap(A_c1, A_c2)
+        @test !views_overlap(B_c1, B_c2)
+
+        @test views_overlap(A_r1, A_c1)
+        @test views_overlap(A_r1, B_c1)
+        @test views_overlap(A_r2, A_c2)
+        @test views_overlap(A_r2, B_c2)
+
+        for (name, mid) in ((:A_mid, A_mid), (:B_mid, B_mid))
+            @test !views_overlap(A_r1, mid)
+            @test !views_overlap(B_r1, mid)
+            @test !views_overlap(A_c1, mid)
+            @test !views_overlap(B_c1, mid)
+
+            @test views_overlap(A_r2, mid)
+            @test views_overlap(B_r2, mid)
+            @test views_overlap(A_c2, mid)
+            @test views_overlap(B_c2, mid)
+        end
+
+        @test views_overlap(A_mid, A_mid)
+        @test views_overlap(A_mid, B_mid)
     end
 
     # FIXME: Deps

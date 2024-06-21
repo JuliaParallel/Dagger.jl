@@ -136,7 +136,9 @@ aliasing(x::Transpose) = aliasing(parent(x))
 aliasing(x::Adjoint) = aliasing(parent(x))
 
 struct StridedAliasing{T,N,S} <: AbstractAliasing
+    base_ptr::RemotePtr{Cvoid,S}
     ptr::RemotePtr{Cvoid,S}
+    base_inds::NTuple{N,UnitRange{Int}}
     lengths::NTuple{N,Int}
     strides::NTuple{N,Int}
 end
@@ -161,10 +163,12 @@ function _memory_spans(a::StridedAliasing{T,N,S}, spans, ptr, dim) where {T,N,S}
 
     return spans
 end
-function aliasing(x::SubArray{T}) where T
+function aliasing(x::SubArray{T,N,A}) where {T,N,A<:Array}
     if isbitstype(T)
         S = CPURAMMemorySpace
-        return StridedAliasing{T,ndims(x),S}(RemotePtr{Cvoid}(pointer(x)),
+        return StridedAliasing{T,ndims(x),S}(RemotePtr{Cvoid}(pointer(parent(x))),
+                                             RemotePtr{Cvoid}(pointer(x)),
+                                             parentindices(x),
                                              size(x), strides(parent(x)))
     else
         # FIXME: Also ContiguousAliasing of container
@@ -172,21 +176,21 @@ function aliasing(x::SubArray{T}) where T
         return UnknownAliasing()
     end
 end
-#= TODO: Fix and enable strided aliasing optimization
 function will_alias(x::StridedAliasing{T,N,S}, y::StridedAliasing{T,N,S}) where {T,N,S}
-    # TODO: Upgrade Contiguous/StridedAlising to same number of dims
+    if x.base_ptr != y.base_ptr
+        # FIXME: Conservatively incorrect via `unsafe_wrap` and friends
+        return false
+    end
+
     for dim in 1:N
-        # FIXME: Adjust ptrs to common base
-        x_span = MemorySpan{S}(x.ptr, sizeof(T)*x.strides[dim])
-        y_span = MemorySpan{S}(y.ptr, sizeof(T)*y.strides[dim])
-        @show dim x_span y_span
-        if !will_alias(x_span, y_span)
+        if ((x.base_inds[dim].stop) < (y.base_inds[dim].start) || (y.base_inds[dim].stop) < (x.base_inds[dim].start))
             return false
         end
     end
+
     return true
 end
-=#
+# FIXME: Upgrade Contiguous/StridedAlising to same number of dims
 
 struct TriangularAliasing{T,S} <: AbstractAliasing
     ptr::RemotePtr{Cvoid,S}
