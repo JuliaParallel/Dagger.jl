@@ -72,6 +72,7 @@ include("array/copy.jl")
 include("file-io.jl")
 
 include("array/operators.jl")
+include("array/broadcast.jl")
 include("array/indexing.jl")
 include("array/setindex.jl")
 include("array/matrix.jl")
