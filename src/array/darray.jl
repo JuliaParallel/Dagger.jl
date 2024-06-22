@@ -306,16 +306,12 @@ function Base.isequal(x::ArrayOp, y::ArrayOp)
     x === y
 end
 
-function Base.similar(x::DArray{T,N}) where {T,N}
-    alloc(idx, sz) = Array{T,N}(undef, sz)
-    thunks = [Dagger.@spawn alloc(i, size(x)) for (i, x) in enumerate(x.subdomains)]
-    return DArray(T, x.domain, x.subdomains, thunks, x.partitioning, x.concat)
-end
-
+struct AllocateUndef{S} end
+(::AllocateUndef{S})(T, dims::Dims{N}) where {S,N} = Array{S,N}(undef, dims)
 function Base.similar(A::DArray{T,N} where T, ::Type{S}, dims::Dims{N}) where {S,N}
     d = ArrayDomain(map(x->1:x, dims))
     p = A.partitioning
-    a = AllocateArray(S, (_, _, x...) -> Array{S,N}(undef, x...), d, partition(p, d), p)
+    a = AllocateArray(S, AllocateUndef{S}(), false, d, partition(p, d), p)
     return _to_darray(a)
 end
 
