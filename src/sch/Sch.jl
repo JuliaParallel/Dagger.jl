@@ -515,6 +515,11 @@ function scheduler_init(ctx, state::ComputeState, d::Thunk, options, deps)
         end
     end
 
+    # Halt scheduler on Julia exit
+    atexit() do
+        notify(state.halt)
+    end
+
     # Listen for new workers
     @async begin
         try
