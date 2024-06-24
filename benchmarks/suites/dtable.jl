@@ -75,7 +75,7 @@ function dtable_suite(ctx; method, accels)
             fetch_wait(dt)
         end setup=begin
             genchunk = $genchunk
-            @info "$(time_ns()) Writing mutiple CSVs"
+            @info "$(time_ns()) Writing multiple CSVs"
             path = mktempdir()
             nchunks = $nchunks
             wait.([Threads.@spawn CSV.write(joinpath(path, "datapart_$i.csv"), genchunk(MersenneTwister(1111+i), nchunks)) for i in 1:nchunks])

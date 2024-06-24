@@ -128,7 +128,7 @@ Dagger.spawn_datadeps() do
 end
 ```
 
-The other way allows you to seperate what argument is passed to the function,
+The other way allows you to separate what argument is passed to the function,
 from how that argument is accessed within the function. This is done with the
 `Deps` wrapper, which is used like so:
 
