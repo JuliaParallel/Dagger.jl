@@ -47,10 +47,10 @@ const BlocksOrAuto = Union{Blocks{N} where N, AutoBlocks}
 function DArray{T}(::UndefInitializer, p::Blocks, dims::Dims) where {T}
     d = ArrayDomain(map(x->1:x, dims))
     part = partition(p, d)
-    f = function (_, T, sz)
+    f = function (T, sz)
         Array{T, length(sz)}(undef, sz...)
     end
-    a = AllocateArray(T, f, d, part, p)
+    a = AllocateArray(T, f, false, d, part, p)
     return _to_darray(a)
 end
 
