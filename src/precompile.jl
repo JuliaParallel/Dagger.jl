@@ -49,4 +49,5 @@
     yield()
     @assert isempty(Sch.WORKER_MONITOR_CHANS)
     @assert isempty(Sch.WORKER_MONITOR_TASKS)
+    ID_COUNTER[] = 1
 end
