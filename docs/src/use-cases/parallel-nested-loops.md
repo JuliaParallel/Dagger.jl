@@ -74,7 +74,7 @@ In this code we have job interdependence. Firstly, we are calculating the
 standard deviation `σ` and than we are using that value in the function `f`.
 Since `Dagger.@spawn` yields an `DTask` rather than actual values, we need
 to use the `fetch` function to obtain those values. In this example, the value
-fetching is perfomed once all computations are completed (note that `@sync`
+fetching is performed once all computations are completed (note that `@sync`
 preceding the loop forces the loop to wait for all jobs to complete). Also,
 note that contrary to the previous example, we do not need to implement locking
 as we are just pushing the `DTask` results of `Dagger.@spawn` serially

@@ -19,7 +19,7 @@ end
         @test op isa OSProc
         @test op.pid == 1
     end
-    @testset "Function/argument compatability" begin
+    @testset "Function/argument compatibility" begin
         unknown_func = () -> nothing
         tp = ThreadProc(1, 1)
         op = get_parent(tp)
