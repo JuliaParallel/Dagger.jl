@@ -8,6 +8,7 @@ mutable struct StreamStore{T,B}
         new{T,B}(zeros(Int, 0), Dict{Int,B}(), buffer_amount,
                  true, Threads.Condition())
 end
+
 function tid_to_uid(thunk_id)
     lock(Sch.EAGER_ID_MAP) do id_map
         for (uid, otid) in id_map
@@ -17,6 +18,7 @@ function tid_to_uid(thunk_id)
         end
     end
 end
+
 function Base.put!(store::StreamStore{T,B}, value) where {T,B}
     thunk_id = STREAM_THUNK_ID[]
     @lock store.lock begin
@@ -35,6 +37,7 @@ function Base.put!(store::StreamStore{T,B}, value) where {T,B}
         notify(store.lock)
     end
 end
+
 function Base.take!(store::StreamStore, id::UInt)
     thunk_id = STREAM_THUNK_ID[]
     @lock store.lock begin
@@ -59,11 +62,18 @@ function Base.take!(store::StreamStore, id::UInt)
         return value
     end
 end
+
 Base.isempty(store::StreamStore, id::UInt) = isempty(store.buffers[id])
 isfull(store::StreamStore, id::UInt) = isfull(store.buffers[id])
+
 "Returns whether the store is actively open. Only check this when deciding if new values can be pushed."
 Base.isopen(store::StreamStore) = store.open
-"Returns whether the store is actively open, or if closing, still has remaining messages for `id`. Only check this when deciding if existing values can be taken."
+
+"""
+Returns whether the store is actively open, or if closing, still has remaining
+messages for `id`. Only check this when deciding if existing values can be
+taken.
+"""
 function Base.isopen(store::StreamStore, id::UInt)
     @lock store.lock begin
         if !isempty(store.buffers[id])
@@ -72,12 +82,14 @@ function Base.isopen(store::StreamStore, id::UInt)
         return store.open
     end
 end
+
 function Base.close(store::StreamStore)
     if store.open
         store.open = false
         @lock store.lock notify(store.lock)
     end
 end
+
 function add_waiters!(store::StreamStore{T,B}, waiters::Vector{Int}) where {T,B}
     @lock store.lock begin
         for w in waiters
@@ -88,6 +100,7 @@ function add_waiters!(store::StreamStore{T,B}, waiters::Vector{Int}) where {T,B}
         notify(store.lock)
     end
 end
+
 function remove_waiters!(store::StreamStore, waiters::Vector{Int})
     @lock store.lock begin
         for w in waiters
@@ -115,22 +128,25 @@ mutable struct Stream{T,B}
         return new{T,B}(nothing, stream.store_ref, nothing, buffer_amount)
     end
 end
+
 function initialize_input_stream!(stream::Stream{T,B}) where {T,B}
     stream.input_buffer = initialize_stream_buffer(B, T, stream.buffer_amount)
 end
 
-Base.put!(stream::Stream, @nospecialize(value)) =
-    put!(stream.store, value)
+Base.put!(stream::Stream, @nospecialize(value)) = put!(stream.store, value)
+
 function Base.take!(stream::Stream{T,B}, id::UInt) where {T,B}
     # FIXME: Make remote fetcher configurable
     stream_fetch_values!(RemoteFetcher, T, stream.store_ref, stream.input_buffer, id)
     return take!(stream.input_buffer)
 end
+
 function Base.isopen(stream::Stream, id::UInt)::Bool
     return MemPool.access_ref(stream.store_ref.handle, id) do store, id
         return isopen(store::StreamStore, id)
     end
 end
+
 function Base.close(stream::Stream)
     MemPool.access_ref(stream.store_ref.handle) do store
         close(store::StreamStore)
@@ -138,6 +154,7 @@ function Base.close(stream::Stream)
     end
     return
 end
+
 function add_waiters!(stream::Stream, waiters::Vector{Int})
     MemPool.access_ref(stream.store_ref.handle, waiters) do store, waiters
         add_waiters!(store::StreamStore, waiters)
@@ -145,8 +162,9 @@ function add_waiters!(stream::Stream, waiters::Vector{Int})
     end
     return
 end
-add_waiters!(stream::Stream, waiter::Integer) =
-    add_waiters!(stream::Stream, Int[waiter])
+
+add_waiters!(stream::Stream, waiter::Integer) = add_waiters!(stream, Int[waiter])
+
 function remove_waiters!(stream::Stream, waiters::Vector{Int})
     MemPool.access_ref(stream.store_ref.handle, waiters) do store, waiters
         remove_waiters!(store::StreamStore, waiters)
@@ -154,8 +172,8 @@ function remove_waiters!(stream::Stream, waiters::Vector{Int})
     end
     return
 end
-remove_waiters!(stream::Stream, waiter::Integer) =
-    remove_waiters!(stream::Stream, Int[waiter])
+
+remove_waiters!(stream::Stream, waiter::Integer) = remove_waiters!(stream, Int[waiter])
 
 function migrate_stream!(stream::Stream, w::Integer=myid())
     # Perform migration of the StreamStore
@@ -188,12 +206,14 @@ function enqueue!(queue::StreamingTaskQueue, spec::Pair{DTaskSpec,DTask})
     push!(queue.tasks, spec)
     initialize_streaming!(queue.self_streams, spec...)
 end
+
 function enqueue!(queue::StreamingTaskQueue, specs::Vector{Pair{DTaskSpec,DTask}})
     append!(queue.tasks, specs)
     for (spec, task) in specs
         initialize_streaming!(queue.self_streams, spec, task)
     end
 end
+
 function initialize_streaming!(self_streams, spec, task)
     if !isa(spec.f, StreamingFunction)
         # Adapt called function for streaming and generate output Streams
@@ -237,10 +257,10 @@ struct FinishStream{T,R}
     value::Union{Some{T},Nothing}
     result::R
 end
-finish_stream(value::T; result::R=nothing) where {T,R} =
-    FinishStream{T,R}(Some{T}(value), result)
-finish_stream(; result::R=nothing) where R =
-    FinishStream{Union{},R}(nothing, result)
+
+finish_stream(value::T; result::R=nothing) where {T,R} = FinishStream{T,R}(Some{T}(value), result)
+
+finish_stream(; result::R=nothing) where R = FinishStream{Union{},R}(nothing, result)
 
 function cancel_stream!(t::DTask)
     stream = task_to_stream(t.uid)
@@ -256,7 +276,9 @@ struct StreamingFunction{F, S}
     stream::S
     max_evals::Int
 end
+
 chunktype(sf::StreamingFunction{F}) where F = F
+
 function (sf::StreamingFunction)(args...; kwargs...)
     @nospecialize sf args kwargs
     result = nothing
@@ -314,6 +336,7 @@ function (sf::StreamingFunction)(args...; kwargs...)
         close(sf.stream)
     end
 end
+
 # N.B We specialize to minimize/eliminate allocations
 function stream!(sf::StreamingFunction, uid,
                  args::Tuple, kwarg_names::Tuple, kwarg_values::Tuple)
@@ -343,6 +366,7 @@ function stream!(sf::StreamingFunction, uid,
         put!(sf.stream, stream_result)
     end
 end
+
 function _stream_take_values!(args, uid)
     return ntuple(length(args)) do idx
         arg = args[idx]
@@ -353,12 +377,14 @@ function _stream_take_values!(args, uid)
         end
     end
 end
+
 @inline @generated function _stream_namedtuple(kwarg_names::Tuple,
                                                stream_kwarg_values::Tuple)
     name_ex = Expr(:tuple, map(name->QuoteNode(name.parameters[1]), kwarg_names.parameters)...)
     NT = :(NamedTuple{$name_ex,$stream_kwarg_values})
     return :($NT(stream_kwarg_values))
 end
+
 initialize_stream_buffer(B, T, buffer_amount) = B{T}(buffer_amount)
 
 const EAGER_THUNK_STREAMS = LockedObject(Dict{UInt,Any}())
