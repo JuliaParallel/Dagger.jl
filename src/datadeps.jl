@@ -451,6 +451,9 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                        InvalidScope),
             all_procs)
     exec_spaces = unique(vcat(map(proc->collect(memory_spaces(proc)), all_procs)...))
+    if !all(space->space isa CPURAMMemorySpace, exec_spaces) && !all(space->root_worker_id(space) == myid(), exec_spaces)
+        @warn "Datadeps support for multi-GPU, multi-worker is currently broken\nPlease be prepared for incorrect results or errors" maxlog=1
+    end
 
     # Round-robin assign tasks to processors
     upper_queue = get_options(:task_queue)
