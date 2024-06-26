@@ -10,6 +10,16 @@ end
 GetIndex(input::ArrayOp, idx::Tuple) =
     GetIndex{eltype(input), ndims(input)}(input, idx)
 
+function flatten(subdomains, subchunks, partitioning)
+    valdim = findfirst(j -> j != 1:1, subdomains[1].indexes)
+    flatc = []
+    flats = Array{ArrayDomain{1, Tuple{UnitRange{Int64}}}}(undef, 0)
+    map(x -> push!(flats, ArrayDomain(x.indexes[valdim])), subdomains)
+    map(x -> push!(flatc, x), subchunks)
+    newb = Blocks(partitioning.blocksize[valdim])
+    return flats, flatc, newb
+end
+
 function stage(ctx::Context, gidx::GetIndex)
     inp = stage(ctx, gidx.input)
 
@@ -21,7 +31,14 @@ function stage(ctx::Context, gidx::GetIndex)
     end for i in 1:length(gidx.idx)]
 
     # Figure out output dimension
-    view(inp, ArrayDomain(idxs))
+    d = ArrayDomain(idxs)
+    subchunks, subdomains = Dagger.lookup_parts(inp, chunks(inp), domainchunks(inp), d; slice = true)
+    d1 = alignfirst(d)
+    newb = inp.partitioning
+    if ndims(d1) != ndims(subdomains)
+        subdomains, subchunks, newb = flatten(subdomains, subchunks, inp.partitioning)
+    end
+    DArray(eltype(inp), d1, subdomains, subchunks, newb)
 end
 
 function size(x::GetIndex)

@@ -44,6 +44,22 @@ end
 
 const BlocksOrAuto = Union{Blocks{N} where N, AutoBlocks}
 
+function DArray{T}(::UndefInitializer, p::Blocks, dims::Dims) where {T}
+    d = ArrayDomain(map(x->1:x, dims))
+    part = partition(p, d)
+    f = function (T, sz)
+        Array{T, length(sz)}(undef, sz...)
+    end
+    a = AllocateArray(T, f, false, d, part, p)
+    return _to_darray(a)
+end
+
+DArray(::UndefInitializer, p::BlocksOrAuto, dims::Integer...) = DArray{Float64}(undef, p, dims)
+DArray(::UndefInitializer, p::BlocksOrAuto, dims::Dims) = DArray{Float64}(undef, p, dims)
+DArray{T}(::UndefInitializer, p::BlocksOrAuto, dims::Integer...) where {T} = DArray{T}(undef, p, dims)
+DArray{T}(::UndefInitializer, p::BlocksOrAuto, dims::Dims) where {T} = DArray{T}(undef, p, dims)
+DArray{T}(::UndefInitializer, p::AutoBlocks, dims::Dims) where {T} = DArray{T}(undef, auto_blocks(dims), dims)
+
 function Base.rand(p::Blocks, eltype::Type, dims::Dims)
     d = ArrayDomain(map(x->1:x, dims))
     a = AllocateArray(eltype, rand, false, d, partition(p, d), p)
