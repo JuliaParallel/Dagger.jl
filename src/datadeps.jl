@@ -450,6 +450,9 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     filter!(proc->!isa(constrain(ExactScope(proc), scope),
                        InvalidScope),
             all_procs)
+    if isempty(all_procs)
+        throw(Sch.SchedulingException("No processors available, try widening scope"))
+    end
     exec_spaces = unique(vcat(map(proc->collect(memory_spaces(proc)), all_procs)...))
     if !all(space->space isa CPURAMMemorySpace, exec_spaces) && !all(space->root_worker_id(space) == myid(), exec_spaces)
         @warn "Datadeps support for multi-GPU, multi-worker is currently broken\nPlease be prepared for incorrect results or errors" maxlog=1
