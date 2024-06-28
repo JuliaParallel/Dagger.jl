@@ -1,7 +1,7 @@
 function LinearAlgebra.norm2(A::DArray{T,2}) where T
     Ac = A.chunks
-    norms = [Dagger.@spawn mapreduce(LinearAlgebra.norm_sqr, +, chunk) for chunk in Ac]
-    return sqrt(sum(map(fetch, norms)))
+    norms = [Dagger.@spawn mapreduce(LinearAlgebra.norm_sqr, +, chunk) for chunk in Ac]::Matrix{DTask}
+    return sqrt(sum(map(norm->fetch(norm)::real(T), norms)))
 end
 function LinearAlgebra.norm2(A::UpperTriangular{T,<:DArray{T,2}}) where T
     Ac = parent(A).chunks
