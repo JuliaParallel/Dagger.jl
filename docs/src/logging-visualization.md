@@ -20,6 +20,7 @@ converted to a `Val` for dispatch purposes
 Built-in rendering support exists for:
 - `render_logs(logs, :graphviz)` to generate a graph diagram of executed tasks and their dependencies
 - `render_logs(logs, :plots_gantt)` to generate a Gantt chart of task execution across all processors
+- `render_logs(logs, :chrome_trace)` to generate a task execution timeline in the chrome-trace format (view in [perfetto web UI](https://ui.perfetto.dev/) or `about:tracing` in a chrome-based browser)
 
 The latter (`MultiEventLog`) allows for continuously rendering logs as they're
 generated, permitting real-time visualization of Dagger's operations. This
