@@ -320,14 +320,14 @@ function to_scope(sc::NamedTuple)
 
     workers = if haskey(sc, :worker)
         Int[sc.worker]
-    elseif haskey(sc, :workers)
+    elseif haskey(sc, :workers) && sc.workers != Colon()
         Int[sc.workers...]
     else
         nothing
     end
     threads = if haskey(sc, :thread)
         Int[sc.thread]
-    elseif haskey(sc, :threads)
+    elseif haskey(sc, :threads) && sc.threads != Colon()
         Int[sc.threads...]
     else
         nothing
