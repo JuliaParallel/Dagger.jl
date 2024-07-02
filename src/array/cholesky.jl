@@ -41,7 +41,7 @@ function LinearAlgebra._chol!(A::DArray{T,2}, ::Type{UpperTriangular}) where T
             end
         end
     catch err
-        err isa ThunkFailedException || rethrow()
+        err isa DTaskFailedException || rethrow()
         err = Dagger.Sch.unwrap_nested_exception(err.ex)
         err isa PosDefException || rethrow()
     end
@@ -82,7 +82,7 @@ function LinearAlgebra._chol!(A::DArray{T,2}, ::Type{LowerTriangular}) where T
             end
         end
     catch err
-        err isa ThunkFailedException || rethrow()
+        err isa DTaskFailedException || rethrow()
         err = Dagger.Sch.unwrap_nested_exception(err.ex)
         err isa PosDefException || rethrow()
     end
