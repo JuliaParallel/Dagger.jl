@@ -489,6 +489,7 @@ struct AutoBlocks end
 function auto_blocks(dims::Dims{N}) where N
     # TODO: Allow other partitioning schemes
     np = num_processors()
+    @assert np > 0 "No processors available, please loosen the execution scope"
     p = N > 0 ? cld(dims[end], np) : 1
     return Blocks(ntuple(i->i == N ? p : dims[i], N))
 end
