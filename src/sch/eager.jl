@@ -61,10 +61,10 @@ Allows a thunk to safely wait on another thunk by temporarily reducing its
 effective occupancy to 0, which allows a newly-spawned task to run.
 """
 function thunk_yield(f)
-    if Dagger.in_thunk()
+    if Dagger.in_task()
         h = sch_handle()
         tls = Dagger.get_tls()
-        proc = Dagger.thunk_processor()
+        proc = Dagger.task_processor()
         proc_istate = proc_states(tls.sch_uid) do states
             states[proc].state
         end

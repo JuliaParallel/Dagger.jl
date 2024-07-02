@@ -396,7 +396,7 @@ function test_datadeps(;args_chunks::Bool,
 
     # Scope
     exec_procs = fetch.(Dagger.spawn_datadeps(;aliasing) do
-        [Dagger.@spawn Dagger.thunk_processor() for i in 1:10]
+        [Dagger.@spawn Dagger.task_processor() for i in 1:10]
     end)
     unique!(exec_procs)
     scope = Dagger.get_options(:scope)

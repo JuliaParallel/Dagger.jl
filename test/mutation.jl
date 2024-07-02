@@ -48,7 +48,7 @@ end
         x = Dagger.@mutable worker=w Ref{Int}()
         @test fetch(Dagger.@spawn mutable_update!(x)) == w
         wo_scope = Dagger.ProcessScope(wo)
-        @test_throws_unwrap Dagger.ThunkFailedException fetch(Dagger.@spawn scope=wo_scope mutable_update!(x))
+        @test_throws_unwrap Dagger.DTaskFailedException fetch(Dagger.@spawn scope=wo_scope mutable_update!(x))
     end
 end # @testset "@mutable"
 
