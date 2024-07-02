@@ -1,6 +1,7 @@
 import Graphs: SimpleDiGraph, add_edge!, add_vertex!, inneighbors, outneighbors, nv
 
-export In, Out, InOut, Deps, spawn_datadeps
+export In, Out, InOut, Deps, Read, Write, ReadWrite
+export spawn_datadeps
 
 "Specifies a read-only dependency."
 struct In{T}
@@ -20,6 +21,10 @@ struct Deps{T,DT<:Tuple}
     deps::DT
 end
 Deps(x, deps...) = Deps(x, deps)
+
+const Read = In
+const Write = Out
+const ReadWrite = InOut
 
 struct DataDepsTaskQueue <: AbstractTaskQueue
     # The queue above us
