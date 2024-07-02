@@ -112,7 +112,13 @@ function gemm_dagger!(
     alpha = T(_add.alpha)
     beta = T(_add.beta)
 
-    if Ant != Bmt
+    if transA == 'N' && transB == 'N' && Ant != Bmt
+        throw(DimensionMismatch(lazy"A has number of blocks ($Amt,$Ant) but B has number of blocks ($Bmt,$Bnt)"))
+    elseif transA in ('T', 'C') && transB == 'N' && Amt != Bmt
+        throw(DimensionMismatch(lazy"A has number of blocks ($Amt,$Ant) but B has number of blocks ($Bmt,$Bnt)"))
+    elseif transA == 'N' && transB in ('T', 'C') && Ant != Bnt
+        throw(DimensionMismatch(lazy"A has number of blocks ($Amt,$Ant) but B has number of blocks ($Bmt,$Bnt)"))
+    elseif transA in ('T', 'C') && transB in ('T', 'C') && Amt != Bnt
         throw(DimensionMismatch(lazy"A has number of blocks ($Amt,$Ant) but B has number of blocks ($Bmt,$Bnt)"))
     end
 
