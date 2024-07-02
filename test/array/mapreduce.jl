@@ -31,8 +31,8 @@ function test_mapreduce(f, init_func; no_init=true, zero_init=zero,
 end
 
 # Base
-@testset "reduce" test_mapreduce((X; dims, init=Base._InitialValue())->reduce(+, X; dims, init), ones)
-@testset "mapreduce" test_mapreduce((X; dims, init=Base._InitialValue())->mapreduce(x->x+1, +, X; dims, init), ones)
+@testset "reduce" test_mapreduce((X; dims, init=Dagger.InitialValue())->reduce(+, X; dims, init), ones)
+@testset "mapreduce" test_mapreduce((X; dims, init=Dagger.InitialValue())->mapreduce(x->x+1, +, X; dims, init), ones)
 @testset "sum" test_mapreduce(sum, ones)
 @testset "prod" test_mapreduce(prod, rand)
 @testset "minimum" test_mapreduce(minimum, rand)

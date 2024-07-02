@@ -28,6 +28,8 @@ Base.map(f, x::DArray, xs::DArray...) = _to_darray(Map(f, (x, xs...)))
 
 #### MapReduce
 
+struct InitialValue end
+
 struct MapReduce{T,N} <: ArrayOp{T,N}
     f::Function
     op_inner::Union{Function,Nothing}
@@ -53,9 +55,17 @@ function stage(ctx::Context, r::MapReduce{T,N}) where {T,N}
     dims = r.dims === nothing ? Colon() : r.dims
     reduced_parts = map(chunks(inp)) do part
         if r.op_inner !== nothing
-            Dagger.@spawn r.op_inner(r.f, part; dims, init=r.init)
+            if r.init isa InitialValue
+                Dagger.@spawn r.op_inner(r.f, part; dims)
+            else
+                Dagger.@spawn r.op_inner(r.f, part; dims, init=r.init)
+            end
         else
-            Dagger.@spawn mapreduce(r.f, r.op_outer, part; dims=dims, init=r.init)
+            if r.init isa InitialValue
+                Dagger.@spawn mapreduce(r.f, r.op_outer, part; dims=dims)
+            else
+                Dagger.@spawn mapreduce(r.f, r.op_outer, part; dims=dims, init=r.init)
+            end
         end
     end
 
@@ -113,24 +123,24 @@ end
 import Statistics: mean, var, std
 import OnlineStats
 
-Base.mapreduce(f::Function, op::Function, x::DArray; dims=nothing, init=Base._InitialValue()) =
+Base.mapreduce(f::Function, op::Function, x::DArray; dims=nothing, init=InitialValue()) =
     _mapreduce_maybesync(f, nothing, op, x, dims, init)
 
-Base.sum(x::DArray; dims=nothing, init=Base._InitialValue()) =
+Base.sum(x::DArray; dims=nothing, init=InitialValue()) =
     sum(identity, x; dims, init)
-Base.sum(f::Function, x::DArray; dims=nothing, init=Base._InitialValue()) =
+Base.sum(f::Function, x::DArray; dims=nothing, init=InitialValue()) =
     _mapreduce_maybesync(f, sum, Base.add_sum, x, dims, init)
 
-Base.prod(x::DArray; dims=nothing, init=Base._InitialValue()) =
+Base.prod(x::DArray; dims=nothing, init=InitialValue()) =
     prod(identity, x; dims, init)
-Base.prod(f::Function, x::DArray; dims=nothing, init=Base._InitialValue()) =
+Base.prod(f::Function, x::DArray; dims=nothing, init=InitialValue()) =
     _mapreduce_maybesync(f, prod, Base.mul_prod, x, dims, init)
 
-Base.extrema(x::DArray; dims=nothing, init=Base._InitialValue()) =
+Base.extrema(x::DArray; dims=nothing, init=InitialValue()) =
     extrema(identity, x; dims, init)
-function Base.extrema(f::Function, x::DArray; dims=nothing, init=Base._InitialValue())
+function Base.extrema(f::Function, x::DArray; dims=nothing, init=InitialValue())
     if length(x) == 0
-        if init == Base._InitialValue()
+        if init == InitialValue()
             # Throws an appropriate error
             Base.reduce_empty(extrema, eltype(x))
         else
