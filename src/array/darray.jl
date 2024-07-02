@@ -322,6 +322,7 @@ Base.copy(x::DArray{T,N,B,F}) where {T,N,B,F} =
 Base.:(/)(x::DArray{T,N,B,F}, y::U) where {T<:Real,U<:Real,N,B,F} =
     (x ./ y)::DArray{Base.promote_op(/, T, U),N,B,F}
 
+#=
 """
     view(c::DArray, d)
 
@@ -332,6 +333,7 @@ function Base.view(c::DArray, d)
     d1 = alignfirst(d)
     DArray(eltype(c), d1, subdomains, subchunks, c.partitioning, c.concat)
 end
+=#
 
 function group_indices(cumlength, idxs,at=1, acc=Any[])
     at > length(idxs) && return acc
