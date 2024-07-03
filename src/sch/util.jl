@@ -175,7 +175,11 @@ end
 "Marks `thunk` and all dependent thunks as failed."
 function set_failed!(state, origin, thunk=origin)
     filter!(x->x!==thunk, state.ready)
-    ex = (state.cache[origin]::RemoteException).captured
+    ex = state.cache[origin]
+    if ex isa RemoteException
+        ex = ex.captured
+    end
+    ex::CapturedException
     state.cache[thunk] = DTaskFailedException(thunk, origin, ex)
     state.errored[thunk] = true
     finish_failed!(state, thunk, origin)

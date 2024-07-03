@@ -262,7 +262,7 @@ function Base.showerror(io::IO, ex::DTaskFailedException)
     t_str = thunk_string(t)
     o_str = thunk_string(o)
     println(io, "DTaskFailedException:")
-    println(io, "  Root Exception Type: $(typeof(root_ex))")
+    println(io, "  Root Exception Type: $(typeof(Sch.unwrap_nested_exception(root_ex)))")
     println(io, "  Root Exception:")
     Base.showerror(io, root_ex); println(io)
     if t.id !== o.id
