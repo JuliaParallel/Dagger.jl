@@ -362,6 +362,8 @@ function replace_broadcast(fn::Symbol)
     return fn
 end
 
+to_namedtuple(;kwargs...) = (;kwargs...)
+
 function _par(ex::Expr; lazy=true, recur=true, opts=())
     f = nothing
     body = nothing
@@ -371,7 +373,8 @@ function _par(ex::Expr; lazy=true, recur=true, opts=())
                 @capture(ex, f_(allargs__) do cargs_ body_ end) ||
                 @capture(ex, allargs__->body_) ||
                 @capture(ex, arg1_[allargs__]) ||
-                @capture(ex, arg1_.arg2_)
+                @capture(ex, arg1_.arg2_) ||
+                @capture(ex, (;allargs__))
         f = replace_broadcast(f)
         if arg1 !== nothing
             if arg2 !== nothing
@@ -383,6 +386,10 @@ function _par(ex::Expr; lazy=true, recur=true, opts=())
                 f = Base.getindex
                 pushfirst!(allargs, arg1)
             end
+        end
+        if f === nothing && body === nothing
+            # NamedTuple ((;a=1, b=2))
+            f = to_namedtuple
         end
         args = filter(arg->!Meta.isexpr(arg, :parameters), allargs)
         kwargs = filter(arg->Meta.isexpr(arg, :parameters), allargs)
