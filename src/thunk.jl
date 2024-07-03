@@ -366,12 +366,23 @@ function _par(ex::Expr; lazy=true, recur=true, opts=())
     f = nothing
     body = nothing
     arg1 = nothing
-    if recur && @capture(ex, f_(allargs__)) || @capture(ex, f_(allargs__) do cargs_ body_ end) || @capture(ex, allargs__->body_) || @capture(ex, arg1_[allargs__])
+    arg2 = nothing
+    if recur && @capture(ex, f_(allargs__)) ||
+                @capture(ex, f_(allargs__) do cargs_ body_ end) ||
+                @capture(ex, allargs__->body_) ||
+                @capture(ex, arg1_[allargs__]) ||
+                @capture(ex, arg1_.arg2_)
         f = replace_broadcast(f)
         if arg1 !== nothing
-            # Indexing (A[2,3])
-            f = Base.getindex
-            pushfirst!(allargs, arg1)
+            if arg2 !== nothing
+                # Getproperty (A.B)
+                f = Base.getproperty
+                allargs = Any[arg1, QuoteNode(arg2)]
+            else
+                # Indexing (A[2,3])
+                f = Base.getindex
+                pushfirst!(allargs, arg1)
+            end
         end
         args = filter(arg->!Meta.isexpr(arg, :parameters), allargs)
         kwargs = filter(arg->Meta.isexpr(arg, :parameters), allargs)
