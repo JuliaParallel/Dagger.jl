@@ -30,6 +30,11 @@ mutable
 shard
 ```
 
+## Data Dependencies Functions
+```@docs
+spawn_datadeps
+```
+
 ## Scope Functions
 ```@docs
 scope
