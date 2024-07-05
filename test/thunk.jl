@@ -378,4 +378,19 @@ end
             Dagger.@spawn error()
         end
     end
+    @testset "fetch_all" begin
+        ts = [Dagger.@spawn(1+1) for _ in 1:4]
+        @test Dagger.fetch_all(ts) == [2, 2, 2, 2]
+        cs = map(t->fetch(t; raw=true), ts)
+        @test Dagger.fetch_all(cs) == [2, 2, 2, 2]
+
+        ts = Tuple(Dagger.@spawn(1+1) for _ in 1:4)
+        @test Dagger.fetch_all(ts) == (2, 2, 2, 2)
+        cs = fetch.(ts; raw=true)
+        @test Dagger.fetch_all(cs) == (2, 2, 2, 2)
+
+        t = Dagger.@spawn 1+1
+        @test Dagger.fetch_all(t) == 2
+        @test Dagger.fetch_all(fetch(t; raw=true)) == 2
+    end
 end

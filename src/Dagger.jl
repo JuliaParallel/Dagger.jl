@@ -29,6 +29,8 @@ end
 import TimespanLogging
 import TimespanLogging: timespan_start, timespan_finish
 
+import Adapt
+
 include("lib/util.jl")
 include("utils/dagdebug.jl")
 
