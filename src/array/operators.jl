@@ -17,7 +17,18 @@ function stage(ctx::Context, node::MapChunk)
     DArray(Any, domain(inputs[1]), domainchunks(inputs[1]), thunks)
 end
 
-# Basic indexing helpers
+# Indexing utilities
 
 Base.first(A::DArray) = A[begin]
 Base.last(A::DArray) = A[end]
+
+# Array operations
+
+function Base.fill!(A::DArray, x)
+    Dagger.spawn_datadeps() do
+        for p in chunks(A)
+            Dagger.@spawn fill!(p, x)
+        end
+    end
+    return A
+end
