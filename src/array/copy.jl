@@ -24,7 +24,13 @@ function allocate_copy_buffer(part::Blocks{N}, A::DArray{T,N}) where {T,N}
     # FIXME: undef initializer
     return zeros(part, T, size(A))
 end
-function Base.copyto!(B::DArray{T,N}, A::DArray{T,N}) where {T,N}
+function copyto_view!(Bpart, Brange, Apart, Arange)
+    copyto!(view(Bpart, Brange), view(Apart, Arange))
+    return
+end
+
+# Same dimensionality
+function Base.copyto!(B::DArray{TB,N} where TB, A::DArray{TA,N} where TA) where {N}
     if size(B) != size(A)
         throw(DimensionMismatch("Cannot copy from array of size $(size(A)) to array of size $(size(B))"))
     end
@@ -105,7 +111,39 @@ function Base.copyto!(B::DArray{T,N}, A::DArray{T,N}) where {T,N}
 
     return B
 end
-function copyto_view!(Bpart, Brange, Apart, Arange)
-    copyto!(view(Bpart, Brange), view(Apart, Arange))
-    return
+function Base.copyto!(B::Array{TB,N} where TB, A::DArray{TA,N} where TA) where N
+    copyto!(view(B, AutoBlocks()), A)
+    return B
 end
+function Base.copyto!(B::DArray{TB,N} where TB, A::Array{TA,N} where TA) where N
+    copyto!(B, view(A, AutoBlocks()))
+    return B
+end
+#= TODO
+function Base.copyto!(B::SubArray{TB,N,<:Array} where TB, A::DArray{TA,N} where TA) where N
+    copyto!(view(B, AutoBlocks()), A)
+    return B
+end
+function Base.copyto!(B::DArray{TB,N} where TB, A::SubArray{TA,N,<:Array} where TA) where N
+    copyto!(B, view(A, AutoBlocks()))
+    return B
+end
+=#
+
+# Different dimensionality
+#= TODO
+function Base.copyto!(B::DArray{TB,NB} where TB, A::DArray{TA,NA} where TA) where {NB,NA}
+    error("Not implemented")
+    return B
+end
+function Base.copyto!(B::Array{TB,NB} where TB, A::DArray{TA,NA} where TA) where {NB,NA}
+    error("Not implemented")
+    return B
+end
+function Base.copyto!(B::DArray{TB,NB} where TB, A::Array{TA,NA} where TA) where {NB,NA}
+    error("Not implemented")
+    return B
+end
+=#
+
+# FIXME: SubArray methods
