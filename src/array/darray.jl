@@ -267,6 +267,7 @@ function Base.getindex(A::ColorArray{T,N}, idxs::Dims{S}) where {T,N,S}
     end
 end
 function Base.show(io::IO, ::MIME"text/plain", A::DArray{T,N}) where {T,N}
+    sleep(0.1)
     if N == 1
         write(io, "$(length(A))-element ")
         write(io, string(DVector{T}))
@@ -282,7 +283,7 @@ function Base.show(io::IO, ::MIME"text/plain", A::DArray{T,N}) where {T,N}
     end
     nparts = N > 0 ? size(A.chunks) : 1
     partsize = N > 0 ? A.partitioning.blocksize : 1
-    write(io, " with $(join(nparts, 'x')) partitions of size $(join(partsize, 'x')):")
+    write(io, " with $(join(nparts, 'x')) partitions (each of size $(join(partsize, 'x'))):")
     pct_complete = 100 * (sum(c->c isa Chunk ? true : isready(c), A.chunks) / length(A.chunks))
     if pct_complete < 100
         println(io)
