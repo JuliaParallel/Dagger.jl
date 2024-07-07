@@ -24,6 +24,11 @@ function pretty_time(t; digits=3)
     end
 end
 
+_name_to_color(name::AbstractString, colors) =
+    colors[mod1(hash(name), length(colors))]
+_name_to_color(name::AbstractString, ::Nothing) = "black"
+_default_colors = ["red", "orange", "green", "blue", "purple", "pink", "silver"]
+
 """
     Dagger.render_logs(logs::Dict, ::Val{:graphviz}; disconnected=false,
                        color_by=:fn, layout_engine="dot",
@@ -42,7 +47,8 @@ Options:
 """
 function Dagger.render_logs(logs::Dict, ::Val{:graphviz}; disconnected=false,
                             color_by=:fn, layout_engine="dot",
-                            times::Bool=true, times_digits::Integer=3)
+                            times::Bool=true, times_digits::Integer=3,
+                            colors=_default_colors, name_to_color=_name_to_color)
     # Lookup all relevant task/argument dependencies and values in logs
     g = SimpleDiGraph()
     tid_to_vertex = Dict{Int,Int}()
@@ -108,12 +114,12 @@ function Dagger.render_logs(logs::Dict, ::Val{:graphviz}; disconnected=false,
     labels = task_names
     all_fns = unique(map(label->first(split(label, " ")), labels[con_vs]))
     all_procs = unique(task_procs)
-    all_colors = ("red", "orange", "green", "blue", "purple", "pink", "silver")
+
     if color_by == :fn
-        _colors = [all_colors[mod1(i, length(all_colors))] for i in 1:length(all_fns)]
+        _colors = [name_to_color(all_fns[i], colors) for i in 1:length(all_fns)]
         colors = Dict(v=>_colors[findfirst(fn->occursin(fn, labels[v]), all_fns)] for v in con_vs)
     elseif color_by == :proc
-        _colors = [all_colors[mod1(i, length(all_colors))] for i in 1:length(all_procs)]
+        _colors = [name_to_color(string(all_procs[i]), colors) for i in 1:length(all_procs)]
         colors = Dict(v=>_colors[findfirst(proc->proc==task_procs[v], all_procs)] for v in con_vs)
     else
         throw(ArgumentError("Unknown `color_by` value: $color_by\nAllowed: :fn, :proc"))
