@@ -12,17 +12,52 @@ import Dagger
 import Dagger: DTask, Chunk, Processor
 import Dagger.TimespanLogging: Timespan
 
-function logs_to_df(logs::Dict)
-    df = DataFrame(proc=Processor[], proc_name=String[], tid=Int[], t_start=UInt64[], t_end=UInt64[])
+_name_to_color(name::AbstractString, colors) =
+    colors[mod1(hash(name), length(colors))]
+_name_to_color(name::AbstractString, ::Nothing) = "black"
+_default_colors = ["red", "orange", "green", "blue", "purple", "pink", "silver"]
+
+function logs_to_df(logs::Dict; colors=_default_colors, name_to_color=_name_to_color, color_by=:fn)
+    if color_by == :fn
+        # Generate function names
+        fn_names = Dict{Int, String}()
+        for w in keys(logs)
+            for idx in 1:length(logs[w][:core])
+                category = logs[w][:core][idx].category::Symbol
+                kind = logs[w][:core][idx].kind::Symbol
+                if category == :add_thunk && kind == :start
+                    tid = logs[w][:id][idx].thunk_id::Int
+                    if haskey(logs[w], :tasknames)
+                        fn_names[tid] = first(split(logs[w][:tasknames][idx]::String, ' '))
+                    else
+                        @warn "Task names missing from logs"
+                        fn_names[tid] = ""
+                    end
+                end
+            end
+        end
+    end
+
+    # FIXME: Color eltype
+    df = DataFrame(proc=Processor[], proc_name=String[], tid=Int[], t_start=UInt64[], t_end=UInt64[], color=Any[])
     Dagger.logs_event_pairs(logs) do w, start_idx, finish_idx
         category = logs[w][:core][start_idx].category
         if category == :compute
-            proc = logs[w][:id][start_idx].processor
+            proc = logs[w][:id][start_idx].processor::Processor
             proc_name = Dagger.short_name(proc)
-            tid = logs[w][:id][start_idx].thunk_id
-            t_start = logs[w][:core][start_idx].timestamp
-            t_end = logs[w][:core][finish_idx].timestamp
-            push!(df, (;proc, proc_name, tid, t_start, t_end))
+            tid = logs[w][:id][start_idx].thunk_id::Int
+            fn_name = get(fn_names, tid, "unknown")
+            t_start = logs[w][:core][start_idx].timestamp::UInt64
+            t_end = logs[w][:core][finish_idx].timestamp::UInt64
+            if color_by == :fn
+                fn_name = fn_names[tid]
+                color = name_to_color(fn_name, colors)
+            elseif color_by == :proc
+                color = name_to_color(proc_name, colors)
+            else
+                throw(ArgumentError("Invalid color_by value: $(repr(color_by))"))
+            end
+            push!(df, (;proc, proc_name, tid, t_start, t_end, color))
         end
     end
     return df
@@ -72,8 +107,10 @@ end
 
 Render a Gantt chart of task execution in `logs` using Plots. `kwargs` are passed to `plot` directly.
 """
-function Dagger.render_logs(logs::Dict, ::Val{:plots_gantt}; kwargs...)
-    df = logs_to_df(logs)
+function Dagger.render_logs(logs::Dict, ::Val{:plots_gantt};
+                            colors=_default_colors, name_to_color=_name_to_color,
+                            color_by=:fn, kwargs...)
+    df = logs_to_df(logs; colors, name_to_color, color_by)
 
     rect(w, h, x, y) = Shape(x .+ [0,w,w,0], y .+ [0,0,h,h])
 
@@ -85,8 +122,7 @@ function Dagger.render_logs(logs::Dict, ::Val{:plots_gantt}; kwargs...)
     dy = Dict(u .=> 1:length(u))
     r = [rect(t1, 1, t2, dy[t3]) for (t1,t2,t3) in zip(duration, t_start, df.proc_name)]
 
-    # FIXME: Colors
-    return plot(r; #=c=permutedims(df.color),=# yticks=(1.5:(nrow(df) + 0.5), u), xlabel="Time (seconds)", ylabel="Processor", labels=false, kwargs...)
+    return plot(r; color=permutedims(df.color), yticks=(1.5:(nrow(df) + 0.5), u), xlabel="Time (seconds)", ylabel="Processor", labels=false, kwargs...)
 end
 
 end # module PlotsExt
