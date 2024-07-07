@@ -413,7 +413,7 @@ function generate_slot!(state::DataDepsState, dest_space, data)
         w = only(unique(map(get_parent, collect(processors(dest_space))))).pid
         ctx = Sch.eager_context()
         id = rand(Int)
-        timespan_start(ctx, :move, (;thunk_id=0, id, processor=to_proc), (;f=nothing, data))
+        timespan_start(ctx, :move, (;thunk_id=0, id, position=0, processor=to_proc), (;f=nothing, data))
         dest_space_args[data] = remotecall_fetch(w, from_proc, to_proc, data) do from_proc, to_proc, data
             data_converted = move(from_proc, to_proc, data)
             data_chunk = tochunk(data_converted, to_proc)
@@ -422,7 +422,7 @@ function generate_slot!(state::DataDepsState, dest_space, data)
             @assert orig_space != memory_space(data_chunk) "space preserved! $orig_space != $(memory_space(data_chunk)) ($(typeof(data)) vs. $(typeof(data_chunk))), spaces ($orig_space -> $dest_space)"
             return data_chunk
         end
-        timespan_finish(ctx, :move, (;thunk_id=0, id, processor=to_proc), (;f=nothing, data=dest_space_args[data]))
+        timespan_finish(ctx, :move, (;thunk_id=0, id, position=0, processor=to_proc), (;f=nothing, data=dest_space_args[data]))
     end
     return dest_space_args[data]
 end

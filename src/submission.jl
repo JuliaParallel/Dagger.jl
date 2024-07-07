@@ -38,6 +38,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
     end::Union{Vector{Any},Nothing}
     lock(Sch.EAGER_ID_MAP) do id_map
         for (idx, (pos, arg)) in enumerate(args)
+            # FIXME: Switch to Union{Symbol,Int} to preserve positional information
             pos::Union{Symbol,Nothing}
             newarg = if arg isa DTask
                 arg_uid = arg.uid

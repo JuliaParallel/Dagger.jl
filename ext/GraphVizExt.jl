@@ -65,11 +65,8 @@ function Dagger.render_logs(logs::Dict, ::Val{:graphviz}; disconnected=false,
                 tid_to_vertex[tid] = nv(g)
                 push!(task_names, taskname)
                 for dep in deps
+                    haskey(tid_to_vertex, dep) || continue
                     add_edge!(g, tid_to_vertex[dep], nv(g))
-                end
-                if haskey(logs[w], :taskargs)
-                    id, args = logs[w][:taskargs][idx]::Pair{Int,<:Vector}
-                    append!(get!(Vector{Pair{Union{Int,Symbol},UInt}}, task_args, id), args)
                 end
             elseif category == :compute && kind == :start
                 id::NamedTuple
@@ -77,6 +74,10 @@ function Dagger.render_logs(logs::Dict, ::Val{:graphviz}; disconnected=false,
                 proc = id.processor
                 tid_to_proc[tid] = proc
             elseif category == :move && kind == :finish
+                if haskey(logs[w], :taskargs)
+                    id, args = logs[w][:taskargs][idx]::Pair{Int,<:Vector}
+                    append!(get!(Vector{Pair{Union{Int,Symbol},UInt}}, task_args, id), args)
+                end
                 if haskey(logs[w], :taskargmoves)
                     move_info = logs[w][:taskargmoves][idx]
                     move_info === nothing && continue
@@ -88,7 +89,7 @@ function Dagger.render_logs(logs::Dict, ::Val{:graphviz}; disconnected=false,
                 id::NamedTuple
                 objid = id.objectid
                 name = id.name
-                arg_names[objid] = name
+                arg_names[objid] = String(name)
             end
         end
     end
@@ -163,8 +164,12 @@ function Dagger.render_logs(logs::Dict, ::Val{:graphviz}; disconnected=false,
     end
 
     # Add argument moves
+    seen_moves = Set{Tuple{UInt,UInt}}()
     for (tid, moves) in arg_moves
         for (pos, (pre_objid, post_objid)) in moves
+            pre_objid == post_objid && continue
+            (pre_objid, post_objid) in seen_moves && continue
+            push!(seen_moves, (pre_objid, post_objid))
             move_str = "a$pre_objid -> a$post_objid [label=\"move\"]\n"
             str *= move_str
         end
@@ -205,6 +210,7 @@ function Dagger.render_logs(logs::Dict, ::Val{:graphviz}; disconnected=false,
         end
     end
     for (tid, args) in task_args
+        haskey(tid_to_vertex, tid) || continue
         id = tid_to_vertex[tid]
         id in con_vs || continue
         for (pos, arg) in args
