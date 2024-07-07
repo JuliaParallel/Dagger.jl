@@ -1,7 +1,7 @@
 import Base: ==, fetch
 
 export DArray, DVector, DMatrix, Blocks, AutoBlocks
-export distribute
+export distribute, chunks
 
 
 ###### Array Domains ######
