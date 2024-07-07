@@ -3,6 +3,7 @@ function cancel!(tid::Union{Int,Nothing}=nothing;
                  force::Bool=false, halt_sch::Bool=false)
     remotecall_fetch(1, tid, sch_uid, force, halt_sch) do tid, sch_uid, force, halt_sch
         state = Sch.EAGER_STATE[]
+        state === nothing && return
         @lock state.lock _cancel!(state, tid, sch_uid, force, halt_sch)
     end
 end
