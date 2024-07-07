@@ -117,21 +117,20 @@ end
 Records the raw (mutable) arguments of each submitted task.
 """
 struct TaskArguments end
-function (::TaskArguments)(ev::Event{:start})
-    if ev.category == :add_thunk
+(::TaskArguments)(ev::Event{:start}) = nothing
+function (ta::TaskArguments)(ev::Event{:finish})
+    if ev.category == :move
         args = Pair{Union{Symbol,Int},UInt}[]
-        for (idx, (pos, arg)) in enumerate(ev.timeline.args)
-            pos_idx = pos === nothing ? idx : pos
-            arg = Dagger.unwrap_weak_checked(arg)
-            if ismutable(arg)
-                push!(args, pos_idx => objectid(arg))
-            end
+        thunk_id = ev.id.thunk_id::Int
+        pos = ev.id.position::Union{Symbol,Int}
+        arg = ev.timeline.data
+        if ismutable(arg)
+            push!(args, pos => objectid(arg))
         end
-        return ev.id.thunk_id => args
+        return thunk_id => args
     end
     return
 end
-(ta::TaskArguments)(ev::Event{:finish}) = nothing
 
 """
     TaskArgumentMoves
@@ -148,8 +147,10 @@ function (ta::TaskArgumentMoves)(ev::Event{:start})
     if ev.category == :move
         data = ev.timeline.data
         if ismutable(data)
-            d = get!(Dict{Union{Int,Symbol},UInt}, ta.pre_move_args, ev.id.thunk_id)
-            d[ev.id.id] = objectid(data)
+            thunk_id = ev.id.thunk_id::Int
+            position = ev.id.position::Union{Symbol,Int}
+            d = get!(Dict{Union{Int,Symbol},UInt}, ta.pre_move_args, thunk_id)
+            d[position] = objectid(data)
         end
     end
     return
@@ -158,16 +159,18 @@ function (ta::TaskArgumentMoves)(ev::Event{:finish})
     if ev.category == :move
         post_data = ev.timeline.data
         if ismutable(post_data)
-            if haskey(ta.pre_move_args, ev.id.thunk_id)
-                d = ta.pre_move_args[ev.id.thunk_id]
-                if haskey(d, ev.id.id)
-                    pre_data = d[ev.id.id]
-                    return ev.id.thunk_id, ev.id.id, pre_data, objectid(post_data)
+            thunk_id = ev.id.thunk_id::Int
+            position = ev.id.position::Union{Symbol,Int}
+            if haskey(ta.pre_move_args, thunk_id)
+                d = ta.pre_move_args[thunk_id]
+                if haskey(d, position)
+                    pre_data = d[position]
+                    return thunk_id, position, pre_data, objectid(post_data)
                 else
-                    @warn "No TID $(ev.id.thunk_id), ID $(ev.id.id)"
+                    @warn "No TID $(thunk_id), Position $(position)"
                 end
             else
-                @warn "No TID $(ev.id.thunk_id)"
+                @warn "No TID $(thunk_id)"
             end
         end
     end
