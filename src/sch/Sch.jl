@@ -1049,13 +1049,21 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
 
         ids = Int[0]
         data = Any[thunk.f]
-        positions = Union{Symbol,Nothing}[]
+        positions = Union{Symbol,Int}[0]
+        arg_ctr = 1
         for (idx, pos_x) in enumerate(thunk.inputs)
             pos, x = pos_x
             x = unwrap_weak_checked(x)
             push!(ids, istask(x) ? x.id : -idx)
             push!(data, istask(x) ? state.cache[x] : x)
-            push!(positions, pos)
+            if pos !== nothing
+                # Keyword arg
+                push!(positions, pos)
+            else
+                # Positional arg
+                push!(positions, arg_ctr)
+                arg_ctr += 1
+            end
         end
         toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
         options = merge(ctx.options, toptions)
@@ -1538,14 +1546,14 @@ function do_task(to_proc, task_desc)
     # Initiate data transfers for function and arguments
     transfer_time = Threads.Atomic{UInt64}(0)
     transfer_size = Threads.Atomic{UInt64}(0)
-    _data, _ids = if meta
-        (Any[first(data)], Int[first(ids)]) # always fetch function
+    _data, _ids, _positions = if meta
+        (Any[first(data)], Int[first(ids)], Union{Symbol,Int}[0]) # always fetch function
     else
-        (data, ids)
+        (data, ids, positions)
     end
-    fetch_tasks = map(Iterators.zip(_data,_ids)) do (x, id)
+    fetch_tasks = map(Iterators.zip(_data, _ids, _positions)) do (x, id, position)
         @async begin
-            timespan_start(ctx, :move, (;thunk_id, id, processor=to_proc), (;f, data=x))
+            timespan_start(ctx, :move, (;thunk_id, id, position, processor=to_proc), (;f, data=x))
             #= FIXME: This isn't valid if x is written to
             x = if x isa Chunk
                 value = lock(TASK_SYNC) do
@@ -1588,11 +1596,13 @@ function do_task(to_proc, task_desc)
                 end
             else
             =#
-            x = @invokelatest move(to_proc, x)
+            new_x = @invokelatest move(to_proc, x)
             #end
-            @dagdebug thunk_id :move "Moved argument $id to $to_proc: $(typeof(x))"
-            timespan_finish(ctx, :move, (;thunk_id, id, processor=to_proc), (;f, data=x); tasks=[Base.current_task()])
-            return x
+            if new_x !== x
+                @dagdebug thunk_id :move "Moved argument $position to $to_proc: $(typeof(x)) -> $(typeof(new_x))"
+            end
+            timespan_finish(ctx, :move, (;thunk_id, id, position, processor=to_proc), (;f, data=new_x); tasks=[Base.current_task()])
+            return new_x
         end
     end
     fetched = Any[]
@@ -1609,7 +1619,7 @@ function do_task(to_proc, task_desc)
     fetched_kwargs = Pair{Symbol,Any}[]
     for (idx, x) in enumerate(fetched)
         pos = positions[idx]
-        if pos === nothing
+        if pos isa Int
             push!(fetched_args, x)
         else
             push!(fetched_kwargs, pos => x)
