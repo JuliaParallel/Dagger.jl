@@ -179,7 +179,6 @@ function set_failed!(state, origin, thunk=origin)
     if ex isa RemoteException
         ex = ex.captured
     end
-    ex::CapturedException
     state.cache[thunk] = DTaskFailedException(thunk, origin, ex)
     state.errored[thunk] = true
     finish_failed!(state, thunk, origin)
