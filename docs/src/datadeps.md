@@ -6,8 +6,10 @@ linear algebra) hard to express efficiently in Dagger. Thankfully, there is a
 solution called "Datadeps" (short for "data dependencies"), accessible through
 the `spawn_datadeps` function. This function constructs a "datadeps region",
 within which tasks are allowed to write to their arguments, with parallelism
-controlled via dependencies specified via argument annotations. Let's look at a
-simple example to make things concrete:
+controlled via dependencies specified via argument annotations. At the end of
+the "datadeps region" the `spawn_datadeps` will wait for the completion of all
+the tasks launched within it. Let's look at a simple example to make things
+concrete:
 
 ```julia
 A = rand(1000)

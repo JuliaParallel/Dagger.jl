@@ -26,6 +26,14 @@ Chunk
 Shard
 ```
 
+## Data Dependencies Types
+```@docs
+In
+Out
+InOut
+Deps
+```
+
 ## Processor Types
 ```@docs
 Processor
