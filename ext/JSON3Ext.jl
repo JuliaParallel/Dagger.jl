@@ -63,4 +63,4 @@ function Dagger.show_logs(io::IO, logs::Dict, ::Val{:chrome_trace})
     JSON3.write(io, logs_to_chrome_trace(logs))
 end
 
-end # module JSONExt
+end # module JSON3Ext
