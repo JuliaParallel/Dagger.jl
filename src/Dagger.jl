@@ -115,7 +115,7 @@ function __init__()
                 # Gantt chart HTTP server
                 include("ui/gantt-mux.jl")
             end
-            @reguire JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1" begin
+            @require JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1" begin
                 include(joinpath(dirname(@__DIR__), "ext", "JSONExt.jl"))
             end
         end
