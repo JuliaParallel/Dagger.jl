@@ -105,11 +105,14 @@ function (::TaskNames)(ev::Event{:start})
         if hasproperty(f, :instance) && isdefined(f, :instance)
             f = f.instance
         end
-        return "$(nameof(f)) [$id]"
+        return "$(func_name(f)) [$id]"
     end
     return
 end
 (td::TaskNames)(ev::Event{:finish}) = nothing
+func_name(f::Function) = nameof(f)
+func_name(x) = repr(x)
+func_name(::Dagger.ExpandedBroadcast{F}) where F = Symbol('.', nameof(F))
 
 """
     TaskArguments

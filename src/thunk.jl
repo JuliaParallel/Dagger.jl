@@ -362,8 +362,6 @@ function replace_broadcast(fn::Symbol)
     end
     return fn
 end
-# For TaskNames logging event
-Base.nameof(::ExpandedBroadcast{F}) where F = Symbol('.', nameof(F))
 
 to_namedtuple(;kwargs...) = (;kwargs...)
 
