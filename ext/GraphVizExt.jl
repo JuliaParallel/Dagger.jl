@@ -71,6 +71,7 @@ function Dagger.render_logs(logs::Dict, ::Val{:graphviz}; disconnected=false,
                 tid_to_vertex[tid] = nv(g)
                 push!(task_names, taskname)
                 for dep in deps
+                    haskey(tid_to_vertex, dep) || continue
                     add_edge!(g, tid_to_vertex[dep], nv(g))
                 end
             elseif category == :compute && kind == :start
