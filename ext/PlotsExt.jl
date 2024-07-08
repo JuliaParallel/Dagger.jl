@@ -44,7 +44,7 @@ function logs_to_df(logs::Dict; colors=_default_colors, name_to_color=_name_to_c
             proc = logs[w][:id][start_idx].processor::Processor
             proc_name = Dagger.short_name(proc)
             tid = logs[w][:id][start_idx].thunk_id::Int
-            fn_name = fn_names[tid]
+            fn_name = get(fn_names, tid, "unknown")
             t_start = logs[w][:core][start_idx].timestamp::UInt64
             t_end = logs[w][:core][finish_idx].timestamp::UInt64
             if color_by == :fn
