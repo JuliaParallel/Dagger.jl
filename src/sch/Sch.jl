@@ -1547,7 +1547,7 @@ function do_task(to_proc, task_desc)
     transfer_time = Threads.Atomic{UInt64}(0)
     transfer_size = Threads.Atomic{UInt64}(0)
     _data, _ids, _positions = if meta
-        (Any[first(data)], Int[first(ids)], Union{Symbol,Int}[0]) # always fetch function
+        (Any[first(data)], Int[first(ids)], Union{Symbol,Int}[first(positions)]) # always fetch function
     else
         (data, ids, positions)
     end
@@ -1618,7 +1618,7 @@ function do_task(to_proc, task_desc)
     fetched_args = Any[]
     fetched_kwargs = Pair{Symbol,Any}[]
     for (idx, x) in enumerate(fetched)
-        pos = positions[idx]
+        pos = positions[idx+1]
         if pos isa Int
             push!(fetched_args, x)
         else
