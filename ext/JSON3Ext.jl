@@ -10,6 +10,7 @@ using Dagger
 
 function logs_to_chrome_trace(logs::Dict)
     execution_logs = Dict{Int,Any}()
+    add_unknown_procs_metadata = false
     Dagger.logs_event_pairs(logs) do w, start_idx, finish_idx
         category = logs[w][:core][start_idx].category
         if category == :compute
@@ -22,8 +23,15 @@ function logs_to_chrome_trace(logs::Dict)
             proc = logs[w][:id][start_idx].processor
             execution_logs[tid][:ts] = t_start
             execution_logs[tid][:dur] = t_stop - t_start
-            execution_logs[tid][:pid] = proc.owner
-            execution_logs[tid][:tid] = proc.tid # thread id
+            if proc isa Dagger.ThreadProc
+                execution_logs[tid][:pid] = proc.owner
+                execution_logs[tid][:tid] = proc.tid # thread id
+            else
+                @warn "Compute event for [$tid] executed on non-Dagger.ThreadProc processor. Assigning unknown pid and tid"
+                execution_logs[tid][:pid] = -1
+                execution_logs[tid][:tid] = -1
+                add_unknown_procs_metadata = true
+            end
         elseif category == :add_thunk
             tid = logs[w][:id][start_idx].thunk_id
             if !haskey(execution_logs, tid)
@@ -39,6 +47,10 @@ function logs_to_chrome_trace(logs::Dict)
         v[:ph] = "X"
         v[:cat] = "compute"
         push!(events, v)
+    end
+    if add_unknown_procs_metadata
+        push!(events, Dict(:name => "process_name", :ph => "M", :cat => "__metadata", :pid => -1, :args => Dict(:name => "Unknown")))
+        push!(events, Dict(:name => "thread_name", :ph => "M", :cat => "__metadata", :pid => -1, :tid => -1, :args => Dict(:name => "Unknown")))
     end
     return Dict(:traceEvents => events)
 end
