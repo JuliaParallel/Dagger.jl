@@ -1,6 +1,6 @@
 import TimespanLogging
 import TimespanLogging: Timespan, Event, Events, LocalEventLog, MultiEventLog
-import Colors, GraphViz, DataFrames, Plots
+import Colors, GraphViz, DataFrames, Plots, JSON3
 
 @testset "Logging" begin
     @testset "LocalEventLog" begin
@@ -180,6 +180,9 @@ import Colors, GraphViz, DataFrames, Plots
             # PlotsExt
             @test Dagger.render_logs(logs, :plots_gantt) !== nothing
 
+            # JSON3Ext
+            @test Dagger.render_logs(logs, :chrome_trace) !== nothing
+            
             Dagger.disable_logging!()
         end
     end
