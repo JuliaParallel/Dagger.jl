@@ -29,9 +29,9 @@ function logs_to_chrome_trace(logs::Dict)
             if !haskey(execution_logs, tid)
                 execution_logs[tid] = Dict{Symbol,Any}()
             end
-            f = logs[w][:timeline][start_idx].f
-            name = "$f"
-            execution_logs[tid][:name] = name
+            taskname = logs[w][:tasknames][start_idx]
+            fname = first(split(taskname, ' '))
+            execution_logs[tid][:name] = fname
         end
     end
     events = Vector{Dict{Symbol,Any}}()
