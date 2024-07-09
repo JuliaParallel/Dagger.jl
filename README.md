@@ -68,11 +68,18 @@ more examples in the docs, and more use cases examples are welcome (just file
 an issue or PR).
 
 ## Contributing Guide
+
+Please see the roadmap for missing features or known bugs:
+
+[Dagger Features and Roadmap](FEATURES_ROADMAP.md)
+
+Other resources:
+
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](http://makeapullrequest.com)
 [![GitHub issues](https://img.shields.io/github/issues/JuliaParallel/Dagger.jl)](https://github.com/JuliaParallel/Dagger.jl/issues)
 [![GitHub contributors](https://img.shields.io/github/contributors/JuliaParallel/Dagger.jl)](https://github.com/JuliaParallel/Dagger.jl/graphs/contributors)
 
-Contributions are encouraged. 
+Contributions are encouraged.
 
 There are several ways to contribute to our project:
 
@@ -83,6 +90,7 @@ There are several ways to contribute to our project:
 Additional examples and documentation improvements are also very welcome.
 
 ## Resources
+
 List of recommended Dagger.jl resources:
 - Docs [![][docs-master-img]][docs-master-url]
 - Videos
