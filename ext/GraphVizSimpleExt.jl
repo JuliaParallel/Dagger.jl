@@ -134,9 +134,9 @@ end
 
 ### Timespan-based graphing
 
-pretty_time(ts::Timespan) = pretty_time(ts.finish-ts.start)
-function pretty_time(t)
-    r(t) = round(t; digits=3)
+pretty_time(ts::Timespan; digits::Integer=3) = pretty_time(ts.finish-ts.start; digits=digits)
+function pretty_time(t; digits::Integer=3)
+    r(t) = round(t; digits)
     if t > 1000^3
         "$(r(t/(1000^3))) s"
     elseif t > 1000^2
@@ -205,11 +205,11 @@ function write_node(io, t, c, name::String)
     c
 end
 
-function write_node(io, ts::Timespan, c, ctx)
+function write_node(io, ts::Timespan, c, ctx; times_digits::Integer=3)
     (;thunk_id, processor) = ts.id
     (;f) = ts.timeline
     f = isa(f, Function) ? "$f" : "fn"
-    t_comp = pretty_time(ts)
+    t_comp = pretty_time(ts; digits=times_digits)
     color = _proc_color(ctx, processor)
     shape = _proc_shape(ctx, processor)
     # TODO: t_log = log(ts.finish - ts.start) / 5
@@ -219,10 +219,10 @@ function write_node(io, ts::Timespan, c, ctx)
     c
 end
 
-function write_edge(io, ts_move::Timespan, logs, ctx, inputname=nothing, inputarg=nothing)
+function write_edge(io, ts_move::Timespan, logs, ctx, inputname=nothing, inputarg=nothing; times_digits::Integer=3)
     (;thunk_id, id) = ts_move.id
     (;f,) = ts_move.timeline
-    t_move = pretty_time(ts_move)
+    t_move = pretty_time(ts_move; digits=times_digits)
     if id > 0
         print(io, "$(node_name(id)) -> $(node_name(thunk_id)) [label=\"Move: $t_move")
         color_src = _proc_color(ctx, id)
@@ -257,7 +257,7 @@ function getargs!(d, e::DTask)
 end
 
 # DTask is not used in the current implementation, as it would be unstable, and the logs provide all the necessary information
-function write_dag(io, logs::Vector, t::Union{Thunk, DTask, Nothing}=nothing)
+function write_dag(io, logs::Vector, t::Union{Thunk, DTask, Nothing}=nothing; times_digits::Integer=3)
     ctx = (proc_to_color = Dict{Processor,String}(),
            proc_colors = Colors.distinguishable_colors(128),
            proc_color_idx = Ref{Int}(1),
@@ -269,7 +269,7 @@ function write_dag(io, logs::Vector, t::Union{Thunk, DTask, Nothing}=nothing)
     c = 1
     # Compute nodes
     for ts in filter(x->x.category==:compute, logs)
-        c = write_node(io, ts, c, ctx)
+        c = write_node(io, ts, c, ctx; times_digits=times_digits)
     end
 
     # Argument nodes & edges
@@ -299,7 +299,7 @@ function write_dag(io, logs::Vector, t::Union{Thunk, DTask, Nothing}=nothing)
                 for ts in filter(x->x.category==:move &&
                                     x.id.thunk_id==id &&
                                     x.id.id==-argidx, logs)
-                    write_edge(io, ts, logs, ctx, name, arg)
+                    write_edge(io, ts, logs, ctx, name, arg; times_digits=times_digits)
                 end
                 arg_c += 1
             end
@@ -322,13 +322,13 @@ function write_dag(io, logs::Vector, t::Union{Thunk, DTask, Nothing}=nothing)
             end
         
             # Arg-to-compute edges
-            write_edge(io, ts, logs, ctx, name, arg)
+            write_edge(io, ts, logs, ctx, name, arg; times_digits=times_digits)
         end
     end
            
     # Move edges
     for ts in filter(x->x.category==:move && x.id.id>0, logs)
-        write_edge(io, ts, logs, ctx)
+        write_edge(io, ts, logs, ctx; times_digits=times_digits)
     end
     #= FIXME: Legend (currently it's laid out horizontally)
     println(io, """
@@ -349,21 +349,28 @@ function write_dag(io, logs::Vector, t::Union{Thunk, DTask, Nothing}=nothing)
     =#
 end
 
-function _show_plan(io::IO, t)
+function _show_plan(io::IO, t::Union{Thunk,DTask})
     println(io, """strict digraph {
     graph [layout=dot,rankdir=LR];""")
     write_dag(io, t)
     println(io, "}")
 end
-function _show_plan(io::IO, t::Union{Thunk,DTask}, logs::Vector{Timespan})
+function _show_plan(io::IO, logs::Vector; times_digits::Integer=3)
     println(io, """strict digraph {
     graph [layout=dot,rankdir=LR];""")
-    write_dag(io, logs, t)
+    write_dag(io, logs; times_digits)
     println(io, "}")
 end
+function _show_plan(io::IO, t::Union{Thunk,DTask}, logs::Vector{Timespan}; times_digits::Integer=3)
+    println(io, """strict digraph {
+    graph [layout=dot,rankdir=LR];""")
+    write_dag(io, logs, t; times_digits)
+    println(io, "}/")
+end
 
-show_logs(io::IO, t::Union{Thunk,DTask}, ::Val{:graphviz_simple}) = _show_plan(io, t)
-show_logs(io::IO, logs::Vector{Timespan}, ::Val{:graphviz_simple}) = _show_plan(io, logs)
-show_logs(io::IO, t::Union{Thunk,DTask}, logs::Vector{Timespan}, ::Val{:graphviz_simple}) = _show_plan(io, t, logs)
+Dagger.show_logs(io::IO, t::Union{Thunk,DTask}, ::Val{:graphviz_simple}) = _show_plan(io, t)
+Dagger.show_logs(io::IO, logs::Vector{Timespan}, ::Val{:graphviz_simple}; times_digits::Integer=3) = _show_plan(io, logs; times_digits=times_digits)
+Dagger.show_logs(io::IO, t::Union{Thunk,DTask}, logs::Vector{Timespan}, ::Val{:graphviz_simple}; times_digits::Integer=3) = _show_plan(io, t, logs; times_digits=times_digits)
+
 
 end
