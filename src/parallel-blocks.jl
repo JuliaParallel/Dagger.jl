@@ -37,12 +37,20 @@ for fn in [:rand, :zeros, :ones]
     end
 end
 
-function Dagger.distribute(data::AbstractArray{T,N}, dist::ParallelBlocks{N}) where {T,N}
+function distribute(data::AbstractArray{T,N}, dist::ParallelBlocks{N}) where {T,N}
     dims = size(data)
     d = ArrayDomain(map(x->1:x, dims))
     s = Dagger.DomainBlocks(ntuple(_->1, N),
                             ntuple(i->[dims[i]], N))
     chunks = [Dagger.tochunk(copy(data)) for _ in 1:dist.n]
+    return Dagger.DArray(T, d, s, wrap_chunks(chunks, N, dist), dist)
+end
+function distribute_all(chunks::Vector, dist::ParallelBlocks{N}) where {N}
+    dims = fetch(Dagger.@spawn size(chunks[1]))
+    T = fetch(Dagger.@spawn eltype(chunks[1]))
+    d = ArrayDomain(map(x->1:x, dims))
+    s = Dagger.DomainBlocks(ntuple(_->1, N),
+                            ntuple(i->[dims[i]], N))
     return Dagger.DArray(T, d, s, wrap_chunks(chunks, N, dist), dist)
 end
 

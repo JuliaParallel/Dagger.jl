@@ -87,6 +87,8 @@ function spmd_exchange!(value::T, V::Vector{Chunk{T}}) where T
     return V
 end
 
+spmd_barrier() = spmd_exchange(0)
+
 #= FIXME
 function spmd_reduce(op, value::T) where T
     #V = spmd_exchange(value)
@@ -102,8 +104,9 @@ end
 function spmd_reduce!(op, value::T) where T
     V = spmd_exchange(value)
     if spmd_rank() == 1
-        DV = distribute(V, Dagger.ParallelBlocks{1}(spmd_size()))
+        DV = distribute_all(V, Dagger.ParallelBlocks{ndims(value)}(spmd_size()))
         allreduce!(op, DV)
     end
+    spmd_barrier()
     return
 end
