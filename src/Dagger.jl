@@ -85,6 +85,9 @@ include("array/linalg.jl")
 include("array/mul.jl")
 include("array/cholesky.jl")
 
+# SPMD
+include("spmd.jl")
+
 # Visualization
 include("visualization.jl")
 include("ui/gantt-common.jl")
