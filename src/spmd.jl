@@ -102,7 +102,7 @@ end
 function spmd_reduce!(op, value::T) where T
     V = spmd_exchange(value)
     if spmd_rank() == 1
-        DV = distribute(V, Dagger.ParallelBlocks())
+        DV = distribute(V, Dagger.ParallelBlocks{1}(spmd_size()))
         allreduce!(op, DV)
     end
     return
