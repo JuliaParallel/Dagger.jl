@@ -19,7 +19,7 @@ function spmd_size()
     return SPMD_SIZE[]
 end
 
-function spmd(f, nranks::Integer, data...; per_worker::Bool=true)
+function spmd(f, nranks::Integer, data...; parallelize=:threads)
     tasks = Vector{DTask}(undef, nranks)
     all_chans = [i != j ? RemoteChannel() : nothing for i in 1:nranks, j in 1:nranks]
     @sync for rank in 1:nranks
@@ -31,10 +31,12 @@ function spmd(f, nranks::Integer, data...; per_worker::Bool=true)
                 return d[rank]
             end
         end
-        if per_worker
+        if parallelize == :workers
             tasks[rank] = Dagger.@spawn scope=Dagger.scope(worker=rank, thread=1) _spmd(f, rank, nranks, all_chans, data_split...)
+        elseif parallelize == :threads
+            tasks[rank] = Dagger.@spawn scope=Dagger.scope(worker=1, thread=rank) _spmd(f, rank, nranks, all_chans, data_split...)
         else
-            tasks[rank] = Dagger.@spawn _spmd(f, rank, nranks, all_chans, data_split...)
+            error("Invalid parallelization strategy: $parallelize")
         end
     end
     return map(fetch, tasks)
@@ -85,11 +87,23 @@ function spmd_exchange!(value::T, V::Vector{Chunk{T}}) where T
     return V
 end
 
+#= FIXME
 function spmd_reduce(op, value::T) where T
+    #V = spmd_exchange(value)
+    #return reduce(op, V)
     V = spmd_exchange(value)
-    return reduce(op, V)
+    if spmd_rank() == 1
+        DV = distribute(V, Dagger.ParallelBlocks())
+        allreduce!(op, DV)
+    end
+    return V[spmd_rank()]
 end
+=#
 function spmd_reduce!(op, value::T) where T
-    value .= spmd_reduce(op, value)
+    V = spmd_exchange(value)
+    if spmd_rank() == 1
+        DV = distribute(V, Dagger.ParallelBlocks())
+        allreduce!(op, DV)
+    end
     return
 end
