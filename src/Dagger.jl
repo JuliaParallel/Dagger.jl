@@ -87,6 +87,7 @@ include("array/cholesky.jl")
 
 # SPMD
 include("spmd.jl")
+include("parallel-blocks.jl")
 
 # Visualization
 include("visualization.jl")
