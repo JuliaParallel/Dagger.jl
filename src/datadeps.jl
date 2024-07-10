@@ -406,7 +406,7 @@ function generate_slot!(state::DataDepsState, dest_space, data)
             data_converted = move(from_proc, to_proc, data)
             data_chunk = tochunk(data_converted, to_proc)
             @assert processor(data_chunk) in processors(dest_space)
-            @assert memory_space(data_chunk) == memory_space(data_converted)
+            @assert memory_space(data_converted) == memory_space(data_chunk) "space mismatch! $(memory_space(data_converted)) != $(memory_space(data_chunk)) ($(typeof(data_converted)) vs. $(typeof(data_chunk))), spaces ($orig_space -> $dest_space)"
             @assert orig_space != memory_space(data_chunk) "space preserved! $orig_space != $(memory_space(data_chunk)) ($(typeof(data)) vs. $(typeof(data_chunk))), spaces ($orig_space -> $dest_space)"
             return data_chunk
         end
