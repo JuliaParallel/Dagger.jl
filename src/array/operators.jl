@@ -111,3 +111,24 @@ end
 
 Base.first(A::DArray) = A[begin]
 Base.last(A::DArray) = A[end]
+
+# In-place operations
+
+function Base.map!(f, a::DArray{T}) where T
+    Dagger.spawn_datadeps() do
+        for ca in chunks(a)
+            Dagger.@spawn map!(f, InOut(ca), ca)
+        end
+    end
+    return a
+end
+
+function Base.map!(f, a::DArray{T}, b::AbstractArray{U}) where {T, U}
+    b2 = view(b, a.partitioning)
+    Dagger.spawn_datadeps() do
+        for (c_a, c_b2) in zip(chunks(a), chunks(b2))
+            Dagger.@spawn map!(f, InOut(c_a), c_b2)
+        end
+    end
+    return a
+end
