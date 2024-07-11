@@ -117,7 +117,7 @@ Base.last(A::DArray) = A[end]
 function Base.map!(f, a::DArray{T}) where T
     Dagger.spawn_datadeps() do
         for ca in vec(chunks(a))
-            Dagger.@spawn map!(x -> f() , ReadWrite(ca), ca)
+            Dagger.@spawn map!(x -> f() , InOut(ca), ca)
         end
     end
     return a
@@ -127,7 +127,7 @@ function Base.map!(f, a::DArray{T}, b::AbstractArray{U}) where {T, U}
     b2 = view(b, a.partitioning)
     Dagger.spawn_datadeps() do
         for (c_a, c_b2) in zip(vec(chunks(a)), vec(chunks(b2)))
-            Dagger.@spawn map!(x -> f(x) , ReadWrite(c_a), c_b2)
+            Dagger.@spawn map!(x -> f(x) , InOut(c_a), c_b2)
         end
     end
     return a
