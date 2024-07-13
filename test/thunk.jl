@@ -348,5 +348,9 @@ end
             result = Dagger.@spawn sleep(1)
         end
         @test isready(result)
+
+        @test_throws Exception @sync begin
+            Dagger.@spawn error()
+        end
     end
 end

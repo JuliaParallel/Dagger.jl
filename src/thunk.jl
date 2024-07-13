@@ -402,7 +402,7 @@ function _par(ex::Expr; lazy=true, recur=true, opts=())
                 let
                     $result = $spawn($f, $Options(;$(opts...)), $(args...); $(kwargs...))
                     if $(Expr(:islocal, sync_var))
-                        put!($sync_var, schedule(Task(()->wait($result))))
+                        put!($sync_var, schedule(Task(()->fetch($result; raw=true))))
                     end
                     $result
                 end
