@@ -27,6 +27,11 @@ its result will be passed into the function receiving the argument. If the
 argument is *not* an [`DTask`](@ref) (instead, some other type of Julia object),
 it'll be passed as-is to the function `f` (with some exceptions).
 
+!!! note "Task / thread occupancy"
+    By default, `Dagger` assumes that tasks saturate the thread they are running on and does not try to schedule other tasks on the thread.
+    This default can be controlled by specifying [`Sch.ThunkOptions`](@ref) (more details can be found under [Scheduler and Thunk options](@ref)).\
+    The section [Changing the thread occupancy for low-utilization tasks](@ref) shows a runnable example of how to achieve this.
+
 ## Options
 
 The [`Options`](@ref Dagger.Options) struct in the second argument position is
@@ -214,4 +219,56 @@ Dagger.@spawn single=1 1+2
 Dagger.spawn(+, Dagger.Options(;single=1), 1, 2)
 
 delayed(+; single=1)(1, 2)
+```
+
+### Changing the thread occupancy for low-utilization tasks
+
+One of the supported [`Sch.ThunkOptions`](@ref) is the `occupancy` keyword.
+The basic usage looks like this:
+
+```julia
+Dagger.@spawn occupancy=Dict(Dagger.ThreadProc=>0) fn
+```
+
+Consider the following function definitions:
+
+```@example sleep
+using Dagger
+
+function inner()
+    sleep(0.1)
+end
+
+function outer_full_occupancy()
+    @sync for _ in 1:2
+        # By default, full occupancy is assumed
+        Dagger.@spawn inner()
+    end
+end
+
+function outer_low_occupancy()
+    @sync for _ in 1:2
+        # Here, we're explicitly telling the scheduler to assume low occupancy
+        Dagger.@spawn occupancy=Dict(Dagger.ThreadProc => 0) inner()
+    end
+end
+nothing #hide
+```
+
+When running the first outer function N times in parallel, you should see parallelization until all threads are blocked:
+
+```@example sleep
+fetch.([Dagger.@spawn outer_full_occupancy() for _ in 1:1]); # hide
+for N in [1, 2, 4, 8, 16]
+    @time fetch.([Dagger.@spawn outer_full_occupancy() for _ in 1:N])
+end
+```
+
+Whereas running the outer function that communicates a low occupancy (`outer_low_occupancy`) should run fully in parallel:
+
+```@example sleep
+fetch.([Dagger.@spawn outer_low_occupancy() for _ in 1:1]); # hide
+for N in [1, 2, 4, 8, 16]
+    @time fetch.([Dagger.@spawn outer_low_occupancy() for _ in 1:N])
+end
 ```
