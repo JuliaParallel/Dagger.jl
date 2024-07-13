@@ -1,4 +1,4 @@
-<img src="docs/logo.jpg" alt="Dagger.jl">
+<img src="docs/src/assets/logo-with-text.jpg" alt="Dagger.jl">
 
 -----
 
