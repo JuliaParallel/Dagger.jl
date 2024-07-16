@@ -250,7 +250,7 @@ Base.length(s::Shard) = length(s.chunks)
 ### Core Stuff
 
 """
-    tochunk(x, proc::Processor, scope::AbstractScope; device=nothing, kwargs...) -> Chunk
+    tochunk(x, proc::Processor, scope::AbstractScope; device=nothing, rewrap=false, kwargs...) -> Chunk
 
 Create a chunk from data `x` which resides on `proc` and which has scope
 `scope`.
@@ -262,9 +262,12 @@ will be inspected to determine if it's safe to serialize; if so, the default
 MemPool storage device will be used; if not, then a `MemPool.CPURAMDevice` will
 be used.
 
+If `rewrap==true` and `x isa Chunk`, then the `Chunk` will be rewrapped in a
+new `Chunk`.
+
 All other kwargs are passed directly to `MemPool.poolset`.
 """
-function tochunk(x::X, proc::P=OSProc(), scope::S=AnyScope(); persist=false, cache=false, device=nothing, kwargs...) where {X,P,S}
+function tochunk(x::X, proc::P=OSProc(), scope::S=AnyScope(); persist=false, cache=false, device=nothing, rewrap=false, kwargs...) where {X,P,S}
     if device === nothing
         device = if Sch.walk_storage_safe(x)
             MemPool.GLOBAL_DEVICE[]
@@ -275,7 +278,15 @@ function tochunk(x::X, proc::P=OSProc(), scope::S=AnyScope(); persist=false, cac
     ref = poolset(x; device, kwargs...)
     Chunk{X,typeof(ref),P,S}(X, domain(x), ref, proc, scope, persist)
 end
-tochunk(x::Union{Chunk, Thunk}, proc=nothing, scope=nothing; kwargs...) = x
+function tochunk(x::Union{Chunk, Thunk}, proc=nothing, scope=nothing; rewrap=false, kwargs...)
+    if rewrap
+        return remotecall_fetch(x.handle.owner) do
+            tochunk(MemPool.poolget(x.handle), proc, scope; kwargs...)
+        end
+    else
+        return x
+    end
+end
 
 function savechunk(data, dir, f)
     sz = open(joinpath(dir, f), "w") do io
@@ -302,9 +313,13 @@ function unwrap_weak_checked(c::WeakChunk)
     @assert cw !== nothing "WeakChunk expired: ($(c.wid), $(c.id))"
     return cw
 end
+wrap_weak(c::Chunk) = WeakChunk(c)
+isweak(c::WeakChunk) = true
+isweak(c::Chunk) = false
 is_task_or_chunk(c::WeakChunk) = true
 Serialization.serialize(io::AbstractSerializer, wc::WeakChunk) =
     error("Cannot serialize a WeakChunk")
+chunktype(c::WeakChunk) = chunktype(unwrap_weak_checked(c))
 
 Base.@deprecate_binding AbstractPart Union{Chunk, Thunk}
 Base.@deprecate_binding Part Chunk

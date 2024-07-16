@@ -43,10 +43,23 @@ function _test_throws_unwrap(terr, ex; to_match=[])
         if $terr isa Tuple
             @test $oerr isa $terr[1]
             @test $rerr isa $terr[2]
+            if $rerr isa $terr[2]
+                $match_expr
+            else
+                println("Full error:")
+                Base.showerror(stdout, $oerr)
+                Base.show_backtrace(stdout, backtrace())
+            end
         else
             @test $rerr isa $terr
+            if $rerr isa $terr
+                $match_expr
+            else
+                println("Full error:")
+                Base.showerror(stdout, $oerr)
+                Base.show_backtrace(stdout, backtrace())
+            end
         end
-        $match_expr
     end
 end
 function _test_throws_unwrap(terr, args...)

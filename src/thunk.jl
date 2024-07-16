@@ -3,14 +3,33 @@ export Thunk, delayed
 const ID_COUNTER = Threads.Atomic{Int}(1)
 next_id() = Threads.atomic_add!(ID_COUNTER, 1)
 
-function filterany(f::Base.Callable, xs)
-    xs_filt = Any[]
-    for x in xs
-        if f(x)
-            push!(xs_filt, x)
-        end
-    end
-    return xs_filt
+const EMPTY_ARGS = Argument[]
+const EMPTY_SYNCDEPS = Set{Any}()
+Base.@kwdef mutable struct ThunkSpec
+    fargs::Vector{Argument} = EMPTY_ARGS
+    syncdeps::Set{Any} = EMPTY_SYNCDEPS
+    id::Int = 0
+    get_result::Bool = false
+    meta::Bool = false
+    persist::Bool = false
+    cache::Bool = false
+    cache_ref::Any = nothing
+    affinity::Union{Pair{OSProc,Int}, Nothing} = nothing
+    options::Any#=FIXME:ThunkOptions=# = nothing
+    propagates::Tuple = ()
+end
+function unset!(spec::ThunkSpec, _)
+    spec.fargs = EMPTY_ARGS
+    spec.syncdeps = EMPTY_SYNCDEPS
+    spec.id = 0
+    spec.get_result = false
+    spec.meta = false
+    spec.persist = false
+    spec.cache = false
+    spec.cache_ref = nothing
+    spec.affinity = nothing
+    spec.options = nothing
+    spec.propagates = ()
 end
 
 """
@@ -35,23 +54,22 @@ julia> collect(t)  # computes the result and returns it to the current process
 ```
 
 ## Arguments
-- `f`: The function to be called upon execution of the `Thunk`.
-- `args`: The arguments to be passed to the `Thunk`.
+- `fargs`: The function and arguments to be called upon execution of the `Thunk`.
 - `kwargs`: The properties describing unique behavior of this `Thunk`. Details
 for each property are described in the next section.
 - `option=value`: The same as passing `kwargs` to `delayed`.
 
 ## Public Properties
 - `meta::Bool=false`: If `true`, instead of fetching cached arguments from
-`Chunk`s and passing the raw arguments to `f`, instead pass the `Chunk`. Useful
-for doing manual fetching or manipulation of `Chunk` references. Non-`Chunk`
-arguments are still passed as-is.
-- `processor::Processor=OSProc()` - The processor associated with `f`. Useful if
-`f` is a callable struct that exists on a given processor and should be
-transferred appropriately.
-- `scope::Dagger.AbstractScope=DefaultScope()` - The scope associated with `f`.
-Useful if `f` is a function or callable struct that may only be transferred to,
-and executed within, the specified scope.
+`Chunk`s and passing the raw arguments to the called function, instead pass the
+`Chunk`. Useful for doing manual fetching or manipulation of `Chunk`
+references. Non-`Chunk` arguments are still passed as-is. -
+`processor::Processor=OSProc()` - The processor associated with the called
+function. Useful if the called function is a callable struct that exists on a
+given processor and should be transferred appropriately. -
+`scope::Dagger.AbstractScope=DefaultScope()` - The scope associated with the
+called function. Useful if the called function is a callable struct that may
+only be transferred to, and executed within, the specified scope.
 
 ## Options
 - `options`: A `Sch.ThunkOptions` struct providing the options for the `Thunk`.
@@ -59,8 +77,7 @@ If omitted, options can also be specified by passing key-value pairs as
 `kwargs`.
 """
 mutable struct Thunk
-    f::Any # usually a Function, but could be any callable
-    inputs::Vector{Pair{Union{Symbol,Nothing},Any}} # TODO: Use `ImmutableArray` in 1.8
+    inputs::Vector{Argument} # TODO: Use `ImmutableArray` in 1.8
     syncdeps::Set{Any}
     id::Int
     get_result::Bool # whether the worker should send the result or only the metadata
@@ -69,52 +86,95 @@ mutable struct Thunk
     cache::Bool   # release the result giving the worker an opportunity to
                   # cache it
     cache_ref::Any
-    affinity::Union{Nothing, Pair{OSProc, Int}}
-    eager_ref::Union{DRef,Nothing}
+    affinity::Union{Pair{OSProc,Int}, Nothing}
     options::Any # stores scheduler-specific options
     propagates::Tuple # which options we'll propagate
-    function Thunk(f, xs...;
-                   syncdeps=nothing,
-                   id::Int=next_id(),
-                   get_result::Bool=false,
-                   meta::Bool=false,
-                   persist::Bool=false,
-                   cache::Bool=false,
-                   cache_ref=nothing,
-                   affinity=nothing,
-                   eager_ref=nothing,
-                   processor=nothing,
-                   scope=nothing,
-                   options=nothing,
-                   propagates=(),
-                   kwargs...
-                  )
-        if !isa(f, Chunk) && (!isnothing(processor) || !isnothing(scope))
-            f = tochunk(f,
-                        something(processor, OSProc()),
-                        something(scope, DefaultScope()))
-        end
-        xs = Base.mapany(identity, xs)
-        syncdeps_set = Set{Any}(filterany(is_task_or_chunk, Base.mapany(last, xs)))
-        if syncdeps !== nothing
-            for dep in syncdeps
-                push!(syncdeps_set, dep)
-            end
-        end
-        @assert all(x->x isa Pair, xs)
-        if options !== nothing
-            @assert isempty(kwargs)
-            new(f, xs, syncdeps_set, id, get_result, meta, persist, cache,
-                cache_ref, affinity, eager_ref, options, propagates)
+    eager_accessible::Bool
+    sch_accessible::Bool
+    finished::Bool
+    function Thunk(spec::ThunkSpec)
+        return new(spec.fargs,
+                   spec.syncdeps, spec.id,
+                   spec.get_result, spec.meta, spec.persist, spec.cache,
+                   spec.cache_ref, spec.affinity,
+                   spec.options, spec.propagates,
+                   true, true, false)
+    end
+end
+function Thunk(f, xs...;
+               syncdeps=nothing,
+               id::Int=next_id(),
+               get_result::Bool=false,
+               meta::Bool=false,
+               persist::Bool=false,
+               cache::Bool=false,
+               cache_ref=nothing,
+               affinity=nothing,
+               processor=nothing,
+               scope=nothing,
+               options=nothing,
+               propagates=(),
+               kwargs...
+              )
+
+    spec = ThunkSpec()
+    if !(f isa Argument)
+        f = Argument(ArgPosition(true, 0, :NULL), f)
+    end
+    if !(valuetype(f) <: Chunk) && (!isnothing(processor) || !isnothing(scope))
+        f.value = tochunk(value(f),
+                          something(processor, OSProc()),
+                          something(scope, DefaultScope()); rewrap=true)
+    end
+    spec.fargs = Vector{Argument}(undef, length(xs)+1)
+    spec.fargs[1] = f
+    for idx in 1:length(xs)
+        x = xs[idx]
+        if x isa Argument
+            spec.fargs[idx+1] = x
         else
-            new(f, xs, syncdeps_set, id, get_result, meta, persist, cache,
-                cache_ref, affinity, eager_ref, Sch.ThunkOptions(;kwargs...),
-                propagates)
+            @assert x isa Pair "Invalid Thunk argument: $x"
+            spec.fargs[idx+1] = Argument(something(x.first, idx), x.second)
         end
     end
+    syncdeps_set = Set{Any}()
+    for idx in 2:length(spec.fargs)
+        x = value(spec.fargs[idx])
+        if is_task_or_chunk(x)
+            push!(syncdeps_set, x)
+        end
+    end
+    if syncdeps !== nothing
+        for dep in syncdeps
+            push!(syncdeps_set, dep)
+        end
+    end
+    spec.syncdeps = syncdeps_set
+    spec.id = id
+    spec.get_result = get_result
+    spec.meta = meta
+    spec.persist = persist
+    spec.cache = cache
+    spec.cache_ref = cache_ref
+    spec.affinity = affinity
+    if options !== nothing
+        @assert isempty(kwargs)
+        spec.options = options::Sch.ThunkOptions
+    else
+        spec.options = Sch.ThunkOptions(;kwargs...)
+    end
+    spec.propagates = propagates
+    return Thunk(spec)
 end
 Serialization.serialize(io::AbstractSerializer, t::Thunk) =
     throw(ArgumentError("Cannot serialize a Thunk"))
+function Base.getproperty(thunk::Thunk, field::Symbol)
+    if field == :f
+        return unwrap_weak_checked(value(first(thunk.inputs)))
+    else
+        return getfield(thunk, field)
+    end
+end
 
 function affinity(t::Thunk)
     if t.affinity !== nothing
@@ -152,13 +212,32 @@ end
 
 is_task_or_chunk(x) = istask(x)
 
-function args_kwargs_to_pairs(args, kwargs)
-    args_kwargs = Pair{Union{Symbol,Nothing},Any}[]
-    for arg in args
-        push!(args_kwargs, nothing => arg)
+function args_kwargs_to_arguments(f, args, kwargs)
+    @nospecialize f args kwargs
+    args_kwargs = Argument[]
+    push!(args_kwargs, Argument(ArgPosition(true, 0, :NULL), f))
+    for idx in 1:length(args)
+        arg = args[idx]
+        push!(args_kwargs, Argument(idx, arg))
     end
-    for kwarg in kwargs
-        push!(args_kwargs, kwarg[1] => kwarg[2])
+    for (kw, value) in kwargs
+        push!(args_kwargs, Argument(kw, value))
+    end
+    return args_kwargs
+end
+function args_kwargs_to_arguments(f, args)
+    @nospecialize f args
+    args_kwargs = Argument[]
+    push!(args_kwargs, Argument(ArgPosition(true, 0, :NULL), f))
+    pos_ctr = 1
+    for idx in 1:length(args)
+        pos, arg = args[idx]::Pair
+        if pos === nothing
+            push!(args_kwargs, Argument(pos_ctr, arg))
+            pos_ctr += 1
+        else
+            push!(args_kwargs, Argument(pos, arg))
+        end
     end
     return args_kwargs
 end
@@ -172,7 +251,7 @@ Creates a [`Thunk`](@ref) object which can be executed later, which will call
 resulting `Thunk`.
 """
 function _delayed(f, options::Options)
-    (args...; kwargs...) -> Thunk(f, args_kwargs_to_pairs(args, kwargs)...; options.options...)
+    (args...; kwargs...) -> Thunk(args_kwargs_to_arguments(f, args, kwargs)...; options.options...)
 end
 function delayed(f, options::Options)
     @warn "`delayed` is deprecated. Use `Dagger.@spawn` or `Dagger.spawn` instead." maxlog=1
@@ -195,22 +274,31 @@ function unwrap_weak_checked(t::WeakThunk)
     t
 end
 unwrap_weak_checked(t) = t
+wrap_weak(t::Thunk) = WeakThunk(t)
+wrap_weak(t::WeakThunk) = t
+wrap_weak(t) = t
+isweak(t::WeakThunk) = true
+isweak(t::Thunk) = false
+isweak(t) = true
 Base.show(io::IO, t::WeakThunk) = (print(io, "~"); Base.show(io, t.x.value))
 Base.convert(::Type{WeakThunk}, t::Thunk) = WeakThunk(t)
+chunktype(t::WeakThunk) = chunktype(unwrap_weak_checked(t))
 
 "A summary of the data contained in a Thunk, which can be safely serialized."
 struct ThunkSummary
     id::Int
-    f
-    inputs::Vector{Pair{Union{Symbol,Nothing},Any}}
+    inputs::Vector{Argument}
 end
 inputs(t::ThunkSummary) = t.inputs
 Base.show(io::IO, t::ThunkSummary) = show_thunk(io, t)
 function Base.convert(::Type{ThunkSummary}, t::Thunk)
-    return ThunkSummary(t.id,
-                        t.f,
-                        map(pos_inp->istask(pos_inp[2]) ? pos_inp[1]=>convert(ThunkSummary, pos_inp[2]) : pos_inp,
-                            t.inputs))
+    args = map(copy, t.inputs)
+    for arg in args
+        if istask(value(arg))
+            arg.value = convert(ThunkSummary, value(arg))
+        end
+    end
+    return ThunkSummary(t.id, args)
 end
 function Base.convert(::Type{ThunkSummary}, t::WeakThunk)
     t = unwrap_weak(t)
@@ -245,17 +333,19 @@ function Base.showerror(io::IO, ex::DTaskFailedException)
 
     function thunk_string(t)
         Tinputs = Any[]
-        for (_, input) in t.inputs
-            if istask(input)
-                push!(Tinputs, "DTask(id=$(input.id))")
+        for input in @view t.inputs[2:end]
+            x = value(input)
+            if istask(x)
+                push!(Tinputs, "DTask(id=$(x.id))")
             else
-                push!(Tinputs, input)
+                push!(Tinputs, x)
             end
         end
+        f = value(t.inputs[1])
         t_sig = if length(Tinputs) <= 4
-            "$(t.f)($(join(Tinputs, ", ")))"
+            "$(f)($(join(Tinputs, ", ")))"
         else
-            "$(t.f)($(length(Tinputs)) inputs...)"
+            "$(f)($(length(Tinputs)) inputs...)"
         end
         return "DTask(id=$(t.id), $t_sig)"
     end
@@ -467,14 +557,14 @@ function spawn(f, args...; kwargs...)
     # Wrap f in a Chunk if necessary
     processor = haskey(options, :processor) ? options.processor : nothing
     scope = haskey(options, :scope) ? options.scope : nothing
-    if !isnothing(processor) || !isnothing(scope)
+    if !isa(f, Chunk) && !isnothing(processor) || !isnothing(scope)
         f = tochunk(f,
                     something(processor, get_options(:processor, OSProc())),
-                    something(scope, get_options(:scope, DefaultScope())))
+                    something(scope, get_options(:scope, DefaultScope())); rewrap=true)
     end
 
     # Process the args and kwargs into Pair form
-    args_kwargs = args_kwargs_to_pairs(args, kwargs)
+    args_kwargs = args_kwargs_to_arguments(f, args, kwargs)
 
     # Get task queue, and don't let it propagate
     task_queue = get_options(:task_queue, DefaultTaskQueue())
@@ -483,7 +573,7 @@ function spawn(f, args...; kwargs...)
     options = merge(options, (;propagates))
 
     # Construct task spec and handle
-    spec = DTaskSpec(f, args_kwargs, options)
+    spec = DTaskSpec(args_kwargs, options)
     task = eager_spawn(spec)
 
     # Enqueue the task into the task queue
@@ -509,47 +599,32 @@ fetch_all(x) = Adapt.adapt(FetchAdaptor(), x)
 persist!(t::Thunk) = (t.persist=true; t)
 cache_result!(t::Thunk) = (t.cache=true; t)
 
-# @generated function compose{N}(f, g, t::NTuple{N})
-#     if N <= 4
-#       ( :(()->f(g())),
-#         :((a)->f(g(a))),
-#         :((a,b)->f(g(a,b))),
-#         :((a,b,c)->f(g(a,b,c))),
-#         :((a,b,c,d)->f(g(a,b,c,d))), )[N+1]
-#     else
-#         :((xs...) -> f(g(xs...)))
-#     end
-# end
-
-# function Thunk(f::Function, t::Tuple{Thunk})
-#     g = compose(f, t[1].f, t[1].inputs)
-#     Thunk(g, t[1].inputs)
-# end
-
 # this gives a ~30x speedup in hashing
 Base.hash(x::Thunk, h::UInt) = hash(x.id, hash(h, 0x7ad3bac49089a05f % UInt))
 Base.isequal(x::Thunk, y::Thunk) = x.id==y.id
 
 function show_thunk(io::IO, t)
     lvl = get(io, :lazy_level, 0)
-    f = if t.f isa Chunk
-        Tf = t.f.chunktype
+    f = value(first(t.inputs))
+    f = if f isa Chunk
+        Tf = f.chunktype
         if isdefined(Tf, :instance)
             Tf.instance
         else
             "instance of $Tf"
         end
     else
-        t.f
+        f
     end
     print(io, "Thunk[$(t.id)]($f, ")
     if lvl > 0
         t_inputs = Any[]
-        for (pos, input) in inputs(t)
-            if pos === nothing
+        for arg in inputs(t)[2:end]
+            input = value(arg)
+            if ispositional(arg)
                 push!(t_inputs, input)
             else
-                push!(t_inputs, pos => input)
+                push!(t_inputs, pos_kw(arg) => input)
             end
         end
         show(IOContext(io, :lazy_level => lvl-1), t_inputs)

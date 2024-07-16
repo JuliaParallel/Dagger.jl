@@ -238,9 +238,9 @@ function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
     dependencies_to_add = Vector{Tuple{Bool,Bool,AbstractAliasing,<:Any,<:Any}}()
 
     # Track the task's arguments and access patterns
-    for (idx, (pos, arg)) in enumerate(spec.args)
+    for (idx, _arg) in enumerate(spec.fargs)
         # Unwrap In/InOut/Out wrappers and record dependencies
-        arg, deps = unwrap_inout(arg)
+        arg, deps = unwrap_inout(value(_arg))
 
         # Unwrap the Chunk underlying any DTask arguments
         arg = arg isa DTask ? fetch(arg; raw=true) : arg
@@ -413,7 +413,7 @@ function generate_slot!(state::DataDepsState, dest_space, data)
         w = only(unique(map(get_parent, collect(processors(dest_space))))).pid
         ctx = Sch.eager_context()
         id = rand(Int)
-        timespan_start(ctx, :move, (;thunk_id=0, id, position=0, processor=to_proc), (;f=nothing, data))
+        timespan_start(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data))
         dest_space_args[data] = remotecall_fetch(w, from_proc, to_proc, data) do from_proc, to_proc, data
             data_converted = move(from_proc, to_proc, data)
             data_chunk = tochunk(data_converted, to_proc)
@@ -422,7 +422,7 @@ function generate_slot!(state::DataDepsState, dest_space, data)
             @assert orig_space != memory_space(data_chunk) "space preserved! $orig_space != $(memory_space(data_chunk)) ($(typeof(data)) vs. $(typeof(data_chunk))), spaces ($orig_space -> $dest_space)"
             return data_chunk
         end
-        timespan_finish(ctx, :move, (;thunk_id=0, id, position=0, processor=to_proc), (;f=nothing, data=dest_space_args[data]))
+        timespan_finish(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data=dest_space_args[data]))
     end
     return dest_space_args[data]
 end
@@ -536,7 +536,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
         scheduler = queue.scheduler
         if scheduler == :naive
-            raw_args = map(arg->tochunk(last(arg)), spec.args)
+            raw_args = map(arg->tochunk(value(arg)), spec.fargs)
             our_proc = remotecall_fetch(1, all_procs, raw_args) do all_procs, raw_args
                 Sch.init_eager()
                 sch_state = Sch.EAGER_STATE[]
@@ -551,13 +551,13 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 end
             end
         elseif scheduler == :smart
-            raw_args = map(filter(arg->haskey(astate.data_locality, arg), spec.args)) do arg
+            raw_args = map(filter(arg->haskey(astate.data_locality, value(arg)), spec.fargs)) do arg
                 arg_chunk = tochunk(last(arg))
                 # Only the owned slot is valid
                 # FIXME: Track up-to-date copies and pass all of those
                 return arg_chunk => data_locality[arg]
             end
-            f_chunk = tochunk(spec.f)
+            f_chunk = tochunk(value(f))
             our_proc, task_pressure = remotecall_fetch(1, all_procs, pressures, f_chunk, raw_args) do all_procs, pressures, f, chunks_locality
                 Sch.init_eager()
                 sch_state = Sch.EAGER_STATE[]
@@ -598,7 +598,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             # FIXME: Pressure should be decreased by pressure of syncdeps on same processor
             pressures[our_proc] = get(pressures, our_proc, UInt64(0)) + task_pressure
         elseif scheduler == :ultra
-            args = Base.mapany(spec.args) do arg
+            args = Base.mapany(spec.fargs) do arg
                 pos, data = arg
                 data, _ = unwrap_inout(data)
                 if data isa DTask
@@ -606,7 +606,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 end
                 return pos => tochunk(data)
             end
-            f_chunk = tochunk(spec.f)
+            f_chunk = tochunk(value(f))
             task_time = remotecall_fetch(1, f_chunk, args) do f, args
                 Sch.init_eager()
                 sch_state = Sch.EAGER_STATE[]
@@ -666,20 +666,21 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         our_procs = filter(proc->proc in all_procs, collect(processors(our_space)))
         our_scope = UnionScope(map(ExactScope, our_procs)...)
 
-        spec.f = move(ThreadProc(myid(), 1), our_proc, spec.f)
-        @dagdebug nothing :spawn_datadeps "($(repr(spec.f))) Scheduling: $our_proc ($our_space)"
+        f = spec.fargs[1]
+        f.value = move(ThreadProc(myid(), 1), our_proc, value(f))
+        @dagdebug nothing :spawn_datadeps "($(repr(value(f)))) Scheduling: $our_proc ($our_space)"
 
         # Copy raw task arguments for analysis
-        task_args = copy(spec.args)
+        task_args = map(copy, spec.fargs)
 
         # Copy args from local to remote
-        for (idx, (pos, arg)) in enumerate(task_args)
+        for (idx, _arg) in enumerate(task_args)
             # Is the data written previously or now?
-            arg, deps = unwrap_inout(arg)
+            arg, deps = unwrap_inout(value(_arg))
             arg = arg isa DTask ? fetch(arg; raw=true) : arg
             if !type_may_alias(typeof(arg)) || !has_writedep(state, arg, deps, task)
-                @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Skipped copy-to (unwritten)"
-                spec.args[idx] = pos => arg
+                @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$idx] Skipped copy-to (unwritten)"
+                spec.fargs[idx].value = arg
                 continue
             end
 
@@ -694,20 +695,20 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                     nonlocal = our_space != data_space
                     if nonlocal
                         # Add copy-to operation (depends on latest owner of arg)
-                        @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] Enqueueing copy-to: $data_space => $our_space"
+                        @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$idx][$dep_mod] Enqueueing copy-to: $data_space => $our_space"
                         arg_local = get!(get!(IdDict{Any,Any}, state.remote_args, data_space), arg) do
                             generate_slot!(state, data_space, arg)
                         end
                         copy_to_scope = our_scope
                         copy_to_syncdeps = Set{Any}()
                         get_write_deps!(state, ainfo, task, write_num, copy_to_syncdeps)
-                        @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] $(length(copy_to_syncdeps)) syncdeps"
+                        @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$idx][$dep_mod] $(length(copy_to_syncdeps)) syncdeps"
                         copy_to = Dagger.@spawn scope=copy_to_scope syncdeps=copy_to_syncdeps meta=true Dagger.move!(dep_mod, our_space, data_space, arg_remote, arg_local)
                         add_writer!(state, ainfo, copy_to, write_num)
 
                         astate.data_locality[ainfo] = our_space
                     else
-                        @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] Skipped copy-to (local): $data_space"
+                        @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$idx][$dep_mod] Skipped copy-to (local): $data_space"
                     end
                 end
             else
@@ -715,32 +716,33 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 nonlocal = our_space != data_space
                 if nonlocal
                     # Add copy-to operation (depends on latest owner of arg)
-                    @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Enqueueing copy-to: $data_space => $our_space"
+                    @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$idx] Enqueueing copy-to: $data_space => $our_space"
                     arg_local = get!(get!(IdDict{Any,Any}, state.remote_args, data_space), arg) do
                         generate_slot!(state, data_space, arg)
                     end
                     copy_to_scope = our_scope
                     copy_to_syncdeps = Set{Any}()
                     get_write_deps!(state, arg, task, write_num, copy_to_syncdeps)
-                    @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] $(length(copy_to_syncdeps)) syncdeps"
+                    @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$idx] $(length(copy_to_syncdeps)) syncdeps"
                     copy_to = Dagger.@spawn scope=copy_to_scope syncdeps=copy_to_syncdeps Dagger.move!(identity, our_space, data_space, arg_remote, arg_local)
                     add_writer!(state, arg, copy_to, write_num)
 
                     astate.data_locality[arg] = our_space
                 else
-                    @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Skipped copy-to (local): $data_space"
+                    @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$idx] Skipped copy-to (local): $data_space"
                 end
             end
-            spec.args[idx] = pos => arg_remote
+            spec.fargs[idx].value = arg_remote
         end
         write_num += 1
 
         # Validate that we're not accidentally performing a copy
-        for (idx, (_, arg)) in enumerate(spec.args)
-            _, deps = unwrap_inout(task_args[idx][2])
+        for (idx, _arg) in enumerate(spec.fargs)
+            arg = value(_arg)
+            _, deps = unwrap_inout(value(task_args[idx]))
             if is_writedep(arg, deps, task)
                 arg_space = memory_space(arg)
-                @assert arg_space == our_space "($(repr(spec.f)))[$idx] Tried to pass $(typeof(arg)) from $arg_space to $our_space"
+                @assert arg_space == our_space "($(repr(value(f))))[$idx] Tried to pass $(typeof(arg)) from $arg_space to $our_space"
             end
         end
 
@@ -754,24 +756,24 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 for (dep_mod, _, writedep) in deps
                     ainfo = aliasing(astate, arg, dep_mod)
                     if writedep
-                        @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] Syncing as writer"
+                        @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$idx][$dep_mod] Syncing as writer"
                         get_write_deps!(state, ainfo, task, write_num, syncdeps)
                     else
-                        @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] Syncing as reader"
+                        @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$idx][$dep_mod] Syncing as reader"
                         get_read_deps!(state, ainfo, task, write_num, syncdeps)
                     end
                 end
             else
                 if is_writedep(arg, deps, task)
-                    @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Syncing as writer"
+                    @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$idx] Syncing as writer"
                     get_write_deps!(state, arg, task, write_num, syncdeps)
                 else
-                    @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Syncing as reader"
+                    @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$idx] Syncing as reader"
                     get_read_deps!(state, arg, task, write_num, syncdeps)
                 end
             end
         end
-        @dagdebug nothing :spawn_datadeps "($(repr(spec.f))) $(length(syncdeps)) syncdeps"
+        @dagdebug nothing :spawn_datadeps "($(repr(value(f)))) $(length(syncdeps)) syncdeps"
 
         # Launch user's task
         task_scope = our_scope
@@ -787,7 +789,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 for (dep_mod, _, writedep) in deps
                     ainfo = aliasing(astate, arg, dep_mod)
                     if writedep
-                        @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] Set as owner"
+                        @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$idx][$dep_mod] Set as owner"
                         add_writer!(state, ainfo, task, write_num)
                     else
                         add_reader!(state, ainfo, task, write_num)
@@ -795,7 +797,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 end
             else
                 if is_writedep(arg, deps, task)
-                    @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Set as owner"
+                    @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$idx] Set as owner"
                     add_writer!(state, arg, task, write_num)
                 else
                     add_reader!(state, arg, task, write_num)

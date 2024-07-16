@@ -24,6 +24,7 @@ tests = [
     ("Caching", "cache.jl"),
     ("Disk Caching", "diskcaching.jl"),
     ("File IO", "file-io.jl"),
+    ("Reusable Data Structures", "reuse.jl"),
     ("External Languages - Python", "extlang/python.jl"),
     ("Preferences", "preferences.jl")
     #("Fault Tolerance", "fault-tolerance.jl"),

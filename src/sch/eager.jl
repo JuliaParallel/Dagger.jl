@@ -76,7 +76,7 @@ function thunk_yield(f)
         proc_istate = proc_states(tls.sch_uid) do states
             states[proc].state
         end
-        task_occupancy = tls.task_spec[4]
+        task_occupancy = tls.task_spec.est_occupancy
 
         # Decrease our occupancy and inform the processor to reschedule
         lock(proc_istate.queue) do _
@@ -105,31 +105,6 @@ function thunk_yield(f)
         end
     else
         return f()
-    end
-end
-
-eager_cleanup(t::Dagger.DTaskFinalizer) =
-    errormonitor_tracked("eager_cleanup $(t.uid)", Threads.@spawn eager_cleanup(EAGER_STATE[], t.uid))
-function eager_cleanup(state, uid)
-    tid = nothing
-    lock(EAGER_ID_MAP) do id_map
-        if !haskey(id_map, uid)
-            return
-        end
-        tid = id_map[uid]
-        delete!(id_map, uid)
-    end
-    tid === nothing && return
-    lock(state.lock) do
-        # N.B. cache and errored expire automatically
-        delete!(state.thunk_dict, tid)
-    end
-    remotecall_wait(1, uid) do uid
-        lock(Dagger.EAGER_THUNK_STREAMS) do global_streams
-            if haskey(global_streams, uid)
-                delete!(global_streams, uid)
-            end
-        end
     end
 end
 
