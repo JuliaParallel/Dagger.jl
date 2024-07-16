@@ -49,6 +49,7 @@ include("utils/dagdebug.jl")
 # Distributed data
 include("utils/locked-object.jl")
 include("utils/tasks.jl")
+include("utils/reuse.jl")
 
 import MacroTools: @capture
 include("options.jl")
@@ -56,13 +57,17 @@ include("processor.jl")
 include("threadproc.jl")
 include("context.jl")
 include("utils/processors.jl")
+include("scopes.jl")
+include("utils/scopes.jl")
 include("dtask.jl")
 include("cancellation.jl")
 include("task-tls.jl")
-include("scopes.jl")
-include("utils/scopes.jl")
+include("argument.jl")
 include("queue.jl")
 include("thunk.jl")
+include("utils/fetch.jl")
+include("utils/chunks.jl")
+include("utils/logging.jl")
 include("submission.jl")
 include("chunks.jl")
 include("memory-spaces.jl")
@@ -82,33 +87,34 @@ include("stream.jl")
 include("stream-buffers.jl")
 include("stream-transfer.jl")
 
+# File IO
+include("file-io.jl")
+
 # Array computations
 include("array/darray.jl")
 include("array/alloc.jl")
 include("array/map-reduce.jl")
 include("array/copy.jl")
-
-# File IO
-include("file-io.jl")
-
+include("array/random.jl")
 include("array/operators.jl")
 include("array/indexing.jl")
 include("array/setindex.jl")
 include("array/matrix.jl")
 include("array/sparse_partition.jl")
+include("array/parallel-blocks.jl")
 include("array/sort.jl")
 include("array/linalg.jl")
 include("array/mul.jl")
 include("array/cholesky.jl")
 include("array/lu.jl")
-include("array/random.jl")
 
-# Logging and Visualization
+# Logging
+include("utils/logging-events.jl")
+
+# Visualization
 include("visualization.jl")
 include("ui/gantt-common.jl")
 include("ui/gantt-text.jl")
-include("utils/logging-events.jl")
-include("utils/logging.jl")
 include("utils/viz.jl")
 
 """
