@@ -18,6 +18,17 @@ function errormonitor_tracked(name::String, t::Task)
         end
     end)
 end
+function errormonitor_tracked_set!(name::String, t::Task)
+    lock(ERRORMONITOR_TRACKED) do tracked
+        for idx in 1:length(tracked)
+            if tracked[idx][2] === t
+                tracked[idx] = name => t
+                return
+            end
+        end
+        error("Task not found in tracked list")
+    end
+end
 const ERRORMONITOR_TRACKED = LockedObject(Pair{String,Task}[])
 
 """
@@ -40,6 +51,7 @@ unwrap_nested_exception(err) = err
 "Gets a `NamedTuple` of options propagated by `thunk`."
 function get_propagated_options(thunk)
     nt = NamedTuple()
+    f = Dagger.value(thunk.inputs[1])
     for key in thunk.propagates
         value = if key == :scope
             thunk.compute_scope
@@ -52,57 +64,85 @@ function get_propagated_options(thunk)
         end
         nt = merge(nt, (key=>value,))
     end
-    nt
+    return nt
 end
 
-"Fills the result for all registered futures of `node`."
-function fill_registered_futures!(state, node, failed)
-    if haskey(state.futures, node)
+has_result(state, thunk) = thunk.cache_ref !== nothing
+function load_result(state, thunk)
+    @assert thunk.finished "Thunk[$(thunk.id)] is not yet finished"
+    return something(thunk.cache_ref)
+end
+function store_result!(state, thunk, value; error::Bool=false)
+    @assert islocked(state.lock)
+    @assert !thunk.finished "Thunk[$(thunk.id)] should not be finished yet"
+    @assert !has_result(state, thunk) "Thunk[$(thunk.id)] already contains a cached result"
+    thunk.finished = true
+    if error && value isa Exception && !(value isa DTaskFailedException)
+        thunk.cache_ref = Some{Any}(DTaskFailedException(thunk, thunk, value))
+    else
+        thunk.cache_ref = Some{Any}(value)
+    end
+    state.errored[thunk] = error
+end
+function clear_result!(state, thunk)
+    @assert islocked(state.lock)
+    thunk.cache_ref = nothing
+    delete!(state.errored, thunk)
+end
+
+"Fills the result for all registered futures of `thunk`."
+function fill_registered_futures!(state, thunk, failed)
+    if haskey(state.futures, thunk)
         # Notify any listening thunks
-        for future in state.futures[node]
-            put!(future, state.cache[node]; error=failed)
+        for future in state.futures[thunk]
+            put!(future, load_result(state, thunk); error=failed)
         end
-        delete!(state.futures, node)
+        delete!(state.futures, thunk)
     end
 end
 
 "Cleans up any syncdeps that aren't needed any longer, and returns a
 `Set{Chunk}` of all chunks that can now be evicted from workers."
-function cleanup_syncdeps!(state, node)
-    to_evict = Set{Chunk}()
-    for inp in node.syncdeps
+function cleanup_syncdeps!(state, thunk)
+    #to_evict = Set{Chunk}()
+    for inp in thunk.syncdeps
         inp = unwrap_weak_checked(inp)
-        if !istask(inp) && !(inp isa Chunk)
-            continue
-        end
+        @assert istask(inp)
         if inp in keys(state.waiting_data)
             w = state.waiting_data[inp]
-            if node in w
-                pop!(w, node)
+            if thunk in w
+                pop!(w, thunk)
             end
             if isempty(w)
-                if istask(inp) && haskey(state.cache, inp)
-                    _node = state.cache[inp]
-                    if _node isa Chunk
-                        push!(to_evict, _node)
+                #= FIXME: Worker-side cache is currently disabled
+                if istask(inp) && has_result(state, inp)
+                    _thunk = load_result(state, inp)
+                    if _thunk isa Chunk
+                        push!(to_evict, _thunk)
                     end
                 elseif inp isa Chunk
                     push!(to_evict, inp)
                 end
+                =#
                 delete!(state.waiting_data, inp)
+                inp.sch_accessible = false
+                delete_unused_task!(state, inp)
             end
         end
     end
-    return to_evict
+    #return to_evict
 end
 
 "Schedules any dependents that may be ready to execute."
-function schedule_dependents!(state, node, failed)
-    for dep in sort!(collect(get(()->Set{Thunk}(), state.waiting_data, node)), by=state.node_order)
+function schedule_dependents!(state, thunk, failed)
+    if !haskey(state.waiting_data, thunk) || isempty(state.waiting_data[thunk])
+        return
+    end
+    for dep in state.waiting_data[thunk]
         dep_isready = false
         if haskey(state.waiting, dep)
             set = state.waiting[dep]
-            node in set && pop!(set, node)
+            thunk in set && pop!(set, thunk)
             dep_isready = isempty(set)
             if dep_isready
                 delete!(state.waiting, dep)
@@ -122,72 +162,82 @@ end
 Prepares the scheduler to schedule `thunk`. Will mark `thunk` as ready if
 its inputs are satisfied.
 """
-function reschedule_syncdeps!(state, thunk, seen=Set{Thunk}())
-    to_visit = Thunk[thunk]
-    while !isempty(to_visit)
-        thunk = pop!(to_visit)
-        push!(seen, thunk)
-        if haskey(state.valid, thunk)
-            continue
-        end
-        if haskey(state.cache, thunk) || (thunk in state.ready) || (thunk in state.running)
-            continue
-        end
-        for (_,input) in thunk.inputs
-            if input isa WeakChunk
-                input = unwrap_weak_checked(input)
+function reschedule_syncdeps!(state, thunk, seen=nothing)
+    Dagger.maybe_take_or_alloc!(RESCHEDULE_SYNCDEPS_SEEN_CACHE[], seen) do seen
+        #=FIXME:REALLOC=#
+        to_visit = Thunk[thunk]
+        while !isempty(to_visit)
+            thunk = pop!(to_visit)
+            push!(seen, thunk)
+            if haskey(state.valid, thunk)
+                continue
             end
-            if input isa Chunk
-                # N.B. Different Chunks with the same DRef handle will hash to the same slot,
-                # so we just pick an equivalent Chunk as our upstream
-                if !haskey(state.waiting_data, input)
-                    push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
+            if thunk.finished || (thunk in state.ready) || (thunk in state.running)
+                continue
+            end
+            for idx in 1:length(thunk.inputs)
+                input = Dagger.value(thunk.inputs[idx])
+                if input isa WeakChunk
+                    input = unwrap_weak_checked(input)
+                end
+                if input isa Chunk
+                    # N.B. Different Chunks with the same DRef handle will hash to the same slot,
+                    # so we just pick an equivalent Chunk as our upstream
+                    if !haskey(state.waiting_data, input)
+                        push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
+                    end
+                end
+            end
+            w = get!(()->Set{Thunk}(), state.waiting, thunk)
+            for input in thunk.syncdeps
+                input = unwrap_weak_checked(input)
+                istask(input) && input in seen && continue
+
+                # Unseen
+                push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
+                istask(input) || continue
+
+                # Unseen task
+                if get(state.errored, input, false)
+                    set_failed!(state, input, thunk)
+                end
+                input.finished && continue
+
+                # Unseen and unfinished task
+                push!(w, input)
+                if !((input in state.running) || (input in state.ready))
+                    push!(to_visit, input)
+                end
+            end
+            if isempty(w)
+                # Inputs are ready
+                delete!(state.waiting, thunk)
+                if !get(state.errored, thunk, false)
+                    push!(state.ready, thunk)
                 end
             end
         end
-        w = get!(()->Set{Thunk}(), state.waiting, thunk)
-        for input in thunk.syncdeps
-            input = unwrap_weak_checked(input)
-            istask(input) && input in seen && continue
-
-            # Unseen
-            push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
-            istask(input) || continue
-
-            # Unseen task
-            if get(state.errored, input, false)
-                set_failed!(state, input, thunk)
-            end
-            haskey(state.cache, input) && continue
-
-            # Unseen and unfinished task
-            push!(w, input)
-            if !((input in state.running) || (input in state.ready))
-                push!(to_visit, input)
-            end
-        end
-        if isempty(w)
-            # Inputs are ready
-            delete!(state.waiting, thunk)
-            if !get(state.errored, thunk, false)
-                push!(state.ready, thunk)
-            end
-        end
     end
 end
+const RESCHEDULE_SYNCDEPS_SEEN_CACHE = TaskLocalValue{ReusableCache{Set{Thunk},Nothing}}(()->ReusableCache(Set{Thunk}, nothing, 1))
 
 "Marks `thunk` and all dependent thunks as failed."
 function set_failed!(state, origin, thunk=origin)
-    filter!(x->x!==thunk, state.ready)
-    ex = state.cache[origin]
-    if ex isa RemoteException
-        ex = ex.captured
+    @assert islocked(state.lock)
+    filter!(x -> x !== thunk, state.ready)
+    # N.B. If origin === thunk, we assume that the caller has already set the error
+    if origin !== thunk
+        origin_ex = load_result(state, origin)
+        if origin_ex isa RemoteException
+            origin_ex = origin_ex.captured
+        end
+        ex = DTaskFailedException(thunk, origin, origin_ex)
+        store_result!(state, thunk, ex; error=true)
     end
-    state.cache[thunk] = DTaskFailedException(thunk, origin, ex)
-    state.errored[thunk] = true
     finish_failed!(state, thunk, origin)
 end
 function finish_failed!(state, thunk, origin=nothing)
+    @assert islocked(state.lock)
     fill_registered_futures!(state, thunk, true)
     if haskey(state.waiting_data, thunk)
         for dep in state.waiting_data[thunk]
@@ -198,6 +248,8 @@ function finish_failed!(state, thunk, origin=nothing)
             origin !== nothing && set_failed!(state, origin, dep)
         end
         delete!(state.waiting_data, thunk)
+        thunk.sch_accessible = false
+        delete_unused_task!(state, thunk)
     end
     if haskey(state.waiting, thunk)
         delete!(state.waiting, thunk)
@@ -221,7 +273,7 @@ function print_sch_status(io::IO, state, thunk; offset=0, limit=5, max_inputs=3)
             status *= "r"
         elseif node in state.running
             status *= "R"
-        elseif haskey(state.cache, node)
+        elseif has_result(state, node)
             status *= "C"
         else
             status *= "?"
@@ -292,38 +344,81 @@ function report_catch_error(err, desc=nothing)
     write(stderr, iob)
 end
 
+struct Signature
+    sig::Vector{Any}#DataType}
+    hash::UInt
+    sig_nokw::SubArray{Any,1,Vector{Any},Tuple{UnitRange{Int}},true}
+    hash_nokw::UInt
+    function Signature(sig::Vector{Any})#DataType})
+        # Hash full signature
+        h = hash(Signature)
+        for T in sig
+            h = hash(T, h)
+        end
+
+        # Hash non-kwarg signature
+        @assert isdefined(Core, :kwcall) "FIXME: No kwcall! Use kwfunc"
+        idx = findfirst(T->T===typeof(Core.kwcall), sig)
+        if idx !== nothing
+            # Skip NT kwargs
+            sig_nokw = @view sig[idx+2:end]
+        else
+            sig_nokw = @view sig[1:end]
+        end
+        h_nokw = hash(Signature, UInt(1))
+        for T in sig_nokw
+            h_nokw = hash(T, h_nokw)
+        end
+
+        return new(sig, h, sig_nokw, h_nokw)
+    end
+end
+Base.hash(sig::Signature, h::UInt) = hash(sig.hash, h)
+Base.isequal(sig1::Signature, sig2::Signature) = sig1.hash == sig2.hash
+
 chunktype(x) = typeof(x)
 signature(state, task::Thunk) =
-    signature(task.f, collect_task_inputs(state, task.inputs))
+    signature(task.inputs[1], @view task.inputs[2:end])
 function signature(f, args)
-    sig = DataType[chunktype(f)]
+    n_pos = count(Dagger.ispositional, args)
+    any_kw = any(!Dagger.ispositional, args)
+    kw_extra = any_kw ? 2 : 0
+    sig = Vector{Any}(undef, 1+n_pos+kw_extra)
+    sig[1+kw_extra] = chunktype(f)
+    #=FIXME:REALLOC_N=#
     sig_kwarg_names = Symbol[]
     sig_kwarg_types = []
-    for (pos, arg) in args
-        if arg isa Dagger.DTask
+    for idx in 1:length(args)
+        arg = args[idx]
+        value = Dagger.value(arg)
+        if value isa Dagger.DTask
             # Only occurs via manual usage of signature
-            arg = fetch(arg; raw=true)
+            value = fetch(value; raw=true)
         end
-        T = chunktype(arg)
-        if pos === nothing
-            push!(sig, T)
+        if istask(value)
+            throw(ConcurrencyViolationError("Must call `collect_task_inputs!(state, task)` before calling `signature`"))
+        end
+        T = chunktype(value)
+        if Dagger.ispositional(arg)
+            sig[1+idx+kw_extra] = T
         else
-            push!(sig_kwarg_names, pos)
+            push!(sig_kwarg_names, Dagger.pos_kw(arg))
             push!(sig_kwarg_types, T)
         end
     end
-    if !isempty(sig_kwarg_names)
+    if any_kw
         NT = NamedTuple{(sig_kwarg_names...,), Base.to_tuple_type(sig_kwarg_types)}
-        pushfirst!(sig, NT)
+        sig[2] = NT
         @static if isdefined(Core, :kwcall)
-            pushfirst!(sig, typeof(Core.kwcall))
+            sig[1] = typeof(Core.kwcall)
         else
             f_instance = chunktype(f).instance
             kw_f = Core.kwfunc(f_instance)
-            pushfirst!(sig, typeof(kw_f))
+            sig[1] = typeof(kw_f)
         end
     end
-    return sig
+    #=FIXME:UNIQUE=#
+    return Signature(sig)
 end
 
 function can_use_proc(state, task, gproc, proc, opts, scope)
@@ -373,18 +468,18 @@ function can_use_proc(state, task, gproc, proc, opts, scope)
         return false, scope
     end
 
-    # Check against f/args
+    # Check against function and arguments
     Tf = chunktype(task.f)
     if !Dagger.iscompatible_func(proc, opts, Tf)
         @dagdebug task :scope "Rejected $proc: Not compatible with function type ($Tf)"
         return false, scope
     end
-    for (_, arg) in task.inputs
-        arg = unwrap_weak_checked(arg)
-        if arg isa Thunk
-            arg = state.cache[arg]
+    for arg in task.inputs[2:end]
+        value = unwrap_weak_checked(Dagger.value(arg))
+        if value isa Thunk
+            value = load_result(state, value)
         end
-        Targ = chunktype(arg)
+        Targ = chunktype(value)
         if !Dagger.iscompatible_arg(proc, opts, Targ)
             @dagdebug task :scope "Rejected $proc: Not compatible with argument type ($Targ)"
             return false, scope
@@ -404,7 +499,7 @@ function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
         time_util[T] * 1000^3
     else
         get(state.signature_time_cost, sig, 1000^3)
-    end)
+    end)::UInt64
     est_alloc_util = if alloc_util !== nothing && haskey(alloc_util, T)
         alloc_util[T]
     else
@@ -434,27 +529,6 @@ function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
     return true, est_time_util, est_alloc_util, est_occupancy
 end
 
-function populate_processor_cache_list!(state, procs)
-    # Populate the cache if empty
-    if state.procs_cache_list[] === nothing
-        current = nothing
-        for p in map(x->x.pid, procs)
-            for proc in get_processors(OSProc(p))
-                next = ProcessorCacheEntry(OSProc(p), proc)
-                if current === nothing
-                    current = next
-                    current.next = current
-                    state.procs_cache_list[] = current
-                else
-                    current.next = next
-                    current = next
-                    current.next = state.procs_cache_list[]
-                end
-            end
-        end
-    end
-end
-
 "Like `sum`, but replaces `nothing` entries with the average of non-`nothing` entries."
 function impute_sum(xs)
     total = 0
@@ -474,15 +548,16 @@ function impute_sum(xs)
 end
 
 "Collects all arguments for `task`, converting Thunk inputs to Chunks."
-collect_task_inputs(state, task::Thunk) =
-    collect_task_inputs(state, task.inputs)
-function collect_task_inputs(state, inputs)
-    new_inputs = Pair{Union{Symbol,Nothing},Any}[]
-    for (pos, input) in inputs
-        input = unwrap_weak_checked(input)
-        push!(new_inputs, pos => (istask(input) ? state.cache[input] : input))
+collect_task_inputs!(state, task::Thunk) =
+    collect_task_inputs!(state, task.inputs)
+function collect_task_inputs!(state, inputs)
+    for idx in 1:length(inputs)
+        input = unwrap_weak_checked(Dagger.value(inputs[idx]))
+        if istask(input)
+            inputs[idx].value = wrap_weak(load_result(state, input))
+        end
     end
-    return new_inputs
+    return
 end
 
 """
@@ -491,20 +566,26 @@ current estimated per-processor compute pressure, and transfer costs for each
 `Chunk` argument to `task`. Returns `(procs, costs)`, with `procs` sorted in
 order of ascending cost.
 """
-function estimate_task_costs(state, procs, task, inputs)
+function estimate_task_costs(state, procs, task)
+    sorted_procs = Vector{Processor}(undef, length(procs))
+    costs = Dict{Processor,Float64}()
+    estimate_task_costs!(sorted_procs, costs, state, procs, task)
+    return sorted_procs, costs
+end
+function estimate_task_costs!(sorted_procs, costs, state, procs, task)
     tx_rate = state.transfer_rate[]
 
     # Find all Chunks
-    chunks = Chunk[]
-    for input in inputs
-        if input isa Chunk
-            push!(chunks, input)
+    chunks = @reusable_vector :estimate_task_costs_chunks Union{Chunk,Nothing} nothing 32
+    for input in task.inputs
+        if Dagger.valuetype(input) <: Chunk
+            push!(chunks, Dagger.value(input)::Chunk)
         end
     end
 
-    costs = Dict{Processor,Float64}()
     for proc in procs
-        chunks_filt = Iterators.filter(c->get_parent(processor(c))!=get_parent(proc), chunks)
+        gproc = get_parent(proc)
+        chunks_filt = Iterators.filter(c->get_parent(processor(c)) != gproc, chunks)
 
         # Estimate network transfer costs based on data size
         # N.B. `affinity(x)` really means "data size of `x`"
@@ -514,18 +595,23 @@ function estimate_task_costs(state, procs, task, inputs)
         tx_cost = impute_sum(affinity(chunk)[2] for chunk in chunks_filt)
 
         # Estimate total cost to move data and get task running after currently-scheduled tasks
-        est_time_util = get(state.worker_time_pressure[get_parent(proc).pid], proc, 0)
+        est_time_util = get(state.worker_time_pressure[gproc.pid], proc, 0)
         costs[proc] = est_time_util + (tx_cost/tx_rate)
     end
+    empty!(chunks)
 
     # Shuffle procs around, so equally-costly procs are equally considered
-    P = randperm(length(procs))
-    procs = getindex.(Ref(procs), P)
+    np = length(procs)
+    @reusable :estimate_task_costs_P Vector{Int} 0 4 np P begin
+        copyto!(P, 1:np)
+        randperm!(P)
+        for idx in 1:np
+            sorted_procs[idx] = procs[P[idx]]
+        end
+    end
 
     # Sort by lowest cost first
-    sort!(procs, by=p->costs[p])
-
-    return procs, costs
+    sort!(sorted_procs, by=p->costs[p])
 end
 
 """

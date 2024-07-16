@@ -391,7 +391,7 @@ function enqueue!(queue::StreamingTaskQueue, specs::Vector{Pair{DTaskSpec,DTask}
 end
 
 function initialize_streaming!(self_streams, spec, task)
-    @assert !isa(spec.f, StreamingFunction) "Task is already in streaming form"
+    @assert !isa(value(spec.fargs[1]), StreamingFunction) "Task is already in streaming form"
 
     # Calculate the return type of the called function
     T_old = Base.uniontypes(task.metadata.return_type)
@@ -424,7 +424,7 @@ function initialize_streaming!(self_streams, spec, task)
     end
 
     # Wrap the function in a StreamingFunction
-    spec.f = StreamingFunction(spec.f, stream, max_evals)
+    spec.fargs[1].value = StreamingFunction(value(spec.fargs[1]), stream, max_evals)
 
     # Mark the task as non-blocking
     spec.options = merge(spec.options, (;occupancy=Dict(Any=>0)))
@@ -670,7 +670,8 @@ function finalize_streaming!(tasks::Vector{Pair{DTaskSpec,DTask}}, self_streams)
         our_stream = self_streams[task.uid]
 
         # Adapt args to accept Stream output of other streaming tasks
-        for (idx, (pos, arg)) in enumerate(spec.args)
+        for (idx, pos_arg) in enumerate(spec.fargs)
+            arg = value(pos_arg)
             if arg isa DTask
                 # Check if this is a streaming task
                 if haskey(self_streams, arg.uid)
@@ -684,7 +685,7 @@ function finalize_streaming!(tasks::Vector{Pair{DTaskSpec,DTask}}, self_streams)
                     # FIXME: Be configurable
                     input_fetcher = RemoteChannelFetcher()
                     other_stream_handle = Stream(other_stream)
-                    spec.args[idx] = pos => other_stream_handle
+                    pos_arg.value = other_stream_handle
                     our_stream.store.input_streams[arg.uid] = other_stream_handle
                     our_stream.store.input_fetchers[arg.uid] = input_fetcher
 
