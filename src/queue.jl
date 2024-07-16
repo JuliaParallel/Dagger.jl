@@ -1,6 +1,5 @@
 mutable struct DTaskSpec
-    f
-    args::Vector{Pair{Union{Symbol,Nothing},Any}}
+    fargs::Vector{Argument}
     options::NamedTuple
 end
 

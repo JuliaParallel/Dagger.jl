@@ -17,11 +17,11 @@
         GC.gc()
         yield()
     end
-    @assert length(state.thunk_dict) == 1
+    @assert length(state.thunk_dict) == 1 "Should have only 1 task running, but have $(length(state.thunk_dict)) tasks: $(collect(keys(state.thunk_dict)))"
 
     # Halt scheduler
     notify(state.halt)
-    put!(state.chan, (1, nothing, nothing, (Sch.SchedulerHaltedException(), nothing)))
+    put!(state.chan, Sch.TaskResult(1, OSProc(), 0, Sch.SchedulerHaltedException(), nothing))
     state = nothing
 
     # Wait for halt
