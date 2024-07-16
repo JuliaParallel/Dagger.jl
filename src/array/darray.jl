@@ -173,7 +173,7 @@ domainchunks(d::DArray) = d.subdomains
 size(x::DArray) = size(domain(x))
 stage(ctx, c::DArray) = c
 
-function Base.collect(d::DArray; tree=false)
+function Base.collect(d::DArray{T,N}; tree=false, copyto=false) where {T,N}
     a = fetch(d)
     if isempty(d.chunks)
         return Array{eltype(d)}(undef, size(d)...)
@@ -181,6 +181,13 @@ function Base.collect(d::DArray; tree=false)
 
     if ndims(d) == 0
         return fetch(a.chunks[1])
+    end
+
+    if copyto
+        C = Array{T,N}(undef, size(a))
+        DC = view(C, Blocks(size(a)...))
+        copyto!(DC, a)
+        return C
     end
 
     dimcatfuncs = [(x...) -> d.concat(x..., dims=i) for i in 1:ndims(d)]
