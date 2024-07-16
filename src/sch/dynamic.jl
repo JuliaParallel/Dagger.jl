@@ -96,13 +96,18 @@ function dynamic_listener!(ctx, state, wid)
                 end
             end
         end
+        return
     end
     errormonitor_tracked("dynamic_listener! $wid", listener_task)
     errormonitor_tracked("dynamic_listener! (halt+throw) $wid", Threads.@spawn begin
         wait(state.halt)
         # TODO: Not sure why we need the Threads.@spawn here, but otherwise we
         # don't stop all the listener tasks
-        Threads.@spawn Base.throwto(listener_task, SchedulerHaltedException())
+        Threads.@spawn begin
+            Base.throwto(listener_task, SchedulerHaltedException())
+            return
+        end
+        return
     end)
 end
 
@@ -124,7 +129,7 @@ end
 halt!(h::SchedulerHandle) = exec!(_halt, h, nothing)
 function _halt(ctx, state, task, tid, _)
     notify(state.halt)
-    put!(state.chan, (1, nothing, nothing, (SchedulerHaltedException(), nothing)))
+    put!(state.chan, TaskResult(1, OSProc(), 0, SchedulerHaltedException(), nothing))
     Base.throwto(task, SchedulerHaltedException())
 end
 
@@ -172,8 +177,8 @@ function _register_future!(ctx, state, task, tid, (future, id, check)::Tuple{Thu
             end
         end
         # TODO: Assert that future will be fulfilled
-        if haskey(state.cache, thunk)
-            put!(future, state.cache[thunk]; error=state.errored[thunk])
+        if has_result(state, thunk)
+            put!(future, load_result(state, thunk); error=state.errored[thunk])
         else
             futures = get!(()->ThunkFuture[], state.futures, thunk)
             push!(futures, future)
@@ -208,37 +213,15 @@ function _get_dag_ids(ctx, state, task, tid, _)
 end
 
 "Adds a new Thunk to the DAG."
-add_thunk!(f, h::SchedulerHandle, args...; future=nothing, ref=nothing, options...) =
-    exec!(_add_thunk!, h, f, args, options, future, ref)
-function _add_thunk!(ctx, state, task, tid, (f, args, options, future, ref))
-    timespan_start(ctx, :add_thunk, (;thunk_id=tid), (;f, args, options))
-    _args = map(args) do pos_arg
-        if pos_arg[2] isa ThunkID
-            return pos_arg[1] => state.thunk_dict[pos_arg[2].id]
-        else
-            return pos_arg[1] => pos_arg[2]
-        end
+function add_thunk!(f, h::SchedulerHandle, args...; future=nothing, ref=nothing, options...)
+    if future !== nothing || ref !== nothing
+        @warn "`future` and `ref` arguments are no longer supported in `add_thunk!`" maxlog=1
     end
-    GC.@preserve _args begin
-        thunk = Thunk(f, _args...; options...)
-        # Create a `DRef` to `thunk` so that the caller can preserve it
-        thunk_ref = poolset(thunk; size=64, device=MemPool.CPURAMDevice())
-        thunk_id = ThunkID(thunk.id, thunk_ref)
-        state.thunk_dict[thunk.id] = WeakThunk(thunk)
-        reschedule_syncdeps!(state, thunk)
-        @dagdebug thunk :submit "Added to scheduler"
-        if future !== nothing
-            # Ensure we attach a future before the thunk is scheduled
-            _register_future!(ctx, state, task, tid, (future, thunk_id, false))
-            @dagdebug thunk :submit "Registered future"
-        end
-        if ref !== nothing
-            # Preserve the `DTaskFinalizer` through `thunk`
-            thunk.eager_ref = ref
-        end
-        state.valid[thunk] = nothing
-        put!(state.chan, RescheduleSignal())
-        timespan_finish(ctx, :add_thunk, (;thunk_id=tid), (;f, args, options))
-        return thunk_id
-    end
+    return exec!(_add_thunk!, h, f, args, options)
+end
+function _add_thunk!(ctx, state, task, tid, (f, args, options))
+    spec = Dagger.DTaskSpec(Dagger.args_kwargs_to_arguments(f, args), (;options...))
+    dtask = Dagger.eager_spawn(spec)
+    Dagger.eager_launch!(spec=>dtask)
+    return dtask
 end

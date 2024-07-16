@@ -121,7 +121,9 @@ import Colors, GraphViz, DataFrames, Plots, JSON3
                     end
                 end
             end
-            @test length(keys(logs)) > 1
+            if nprocs() > 1
+                @test length(keys(logs)) > 1
+            end
 
             l1 = logs[1]
             core = l1[:core]
@@ -133,12 +135,14 @@ import Colors, GraphViz, DataFrames, Plots, JSON3
             @test any(e->haskey(e, :take), esat)
             @test any(e->haskey(e, :finish), esat)
             if Threads.nthreads() == 1
-                # Note: May one day be true as scheduler evolves
-                @test !any(e->haskey(e, :compute), esat)
-                @test !any(e->haskey(e, :move), esat)
-                psat = l1[:psat]
-                # Note: May become false
-                @test all(e->length(e) == 0, psat)
+                if nprocs() > 1
+                    # Note: May one day be true as scheduler evolves
+                    @test !any(e->haskey(e, :compute), esat)
+                    @test !any(e->haskey(e, :move), esat)
+                    psat = l1[:psat]
+                    # Note: May become false
+                    @test all(e->length(e) == 0, psat)
+                end
             end
 
             had_psat_proc = 0
@@ -157,7 +161,9 @@ import Colors, GraphViz, DataFrames, Plots, JSON3
                     @test any(e->haskey(e, :move), esat)
                 end
             end
-            @test had_psat_proc > 0
+            if nprocs() > 1
+                @test had_psat_proc > 0
+            end
 
             logs = TimespanLogging.get_logs!(ml)
             for w in keys(logs)

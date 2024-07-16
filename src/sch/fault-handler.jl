@@ -20,11 +20,13 @@ function handle_fault(ctx, state, deadproc)
     deadlist = Thunk[]
 
     # Evict cache entries that were stored on the worker
-    for t in keys(state.cache)
-        v = state.cache[t]
+    for t in values(state.thunk_dict)
+        t = unwrap_weak_checked(t)
+        has_result(state, t) || continue
+        v = load_result(state, t)
         if v isa Chunk && v.handle isa DRef && v.handle.owner == deadproc.pid
             push!(deadlist, t)
-            pop!(state.cache, t)
+            clear_result!(state, t)
         end
     end
     # Remove thunks that were running on the worker
