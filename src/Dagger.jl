@@ -21,6 +21,7 @@ if !isdefined(Base, :ScopedValues)
 else
     import Base.ScopedValues: ScopedValue, with
 end
+import TaskLocalValues: TaskLocalValue
 
 if !isdefined(Base, :get_extension)
     import Requires: @require
@@ -34,9 +35,13 @@ import Adapt
 include("lib/util.jl")
 include("utils/dagdebug.jl")
 
+# Logging Basics
+include("utils/logging.jl")
+
 # Distributed data
 include("utils/locked-object.jl")
 include("utils/tasks.jl")
+include("utils/reuse.jl")
 
 import MacroTools: @capture
 include("options.jl")
@@ -48,6 +53,7 @@ include("task-tls.jl")
 include("scopes.jl")
 include("utils/scopes.jl")
 include("dtask.jl")
+include("argument.jl")
 include("queue.jl")
 include("thunk.jl")
 include("submission.jl")
@@ -64,33 +70,33 @@ include("sch/Sch.jl"); using .Sch
 # Data dependency task queue
 include("datadeps.jl")
 
+# File IO
+include("file-io.jl")
+
 # Array computations
 include("array/darray.jl")
 include("array/alloc.jl")
 include("array/map-reduce.jl")
 include("array/copy.jl")
-
-# File IO
-include("file-io.jl")
-
+include("array/random.jl")
 include("array/operators.jl")
 include("array/indexing.jl")
 include("array/setindex.jl")
 include("array/matrix.jl")
 include("array/sparse_partition.jl")
+include("array/parallel-blocks.jl")
 include("array/sort.jl")
 include("array/linalg.jl")
 include("array/mul.jl")
 include("array/cholesky.jl")
 
+# Custom Logging Events
+include("utils/logging-events.jl")
+
 # Visualization
 include("visualization.jl")
 include("ui/gantt-common.jl")
 include("ui/gantt-text.jl")
-
-# Logging
-include("utils/logging-events.jl")
-include("utils/logging.jl")
 
 # Precompilation
 import PrecompileTools: @compile_workload

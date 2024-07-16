@@ -48,9 +48,8 @@ more details.
 mutable struct DTask
     uid::UInt
     future::ThunkFuture
-    finalizer_ref::DRef
     thunk_ref::DRef
-    DTask(uid, future, finalizer_ref) = new(uid, future, finalizer_ref)
+    DTask(uid, future) = new(uid, future)
 end
 
 const EagerThunk = DTask
@@ -80,16 +79,6 @@ function Base.show(io::IO, t::DTask)
     print(io, "DTask ($status)")
 end
 istask(t::DTask) = true
-
-"When finalized, cleans-up the associated `DTask`."
-mutable struct DTaskFinalizer
-    uid::UInt
-    function DTaskFinalizer(uid)
-        x = new(uid)
-        finalizer(Sch.eager_cleanup, x)
-        x
-    end
-end
 
 const EAGER_ID_COUNTER = Threads.Atomic{UInt64}(1)
 function eager_next_id()

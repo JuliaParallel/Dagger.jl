@@ -199,7 +199,7 @@ function (::TaskDependencies)(ev::Event{:start})
     end
     if ev.category == :add_thunk
         deps_tids = Int[]
-        get_deps!(Iterators.filter(Dagger.istask, Iterators.map(last, ev.timeline.args)))
+        get_deps!(Iterators.filter(Dagger.istask, Iterators.map(Dagger.value, ev.timeline.args)))
         get_deps!(get(Set, ev.timeline.options, :syncdeps))
         return ev.id.thunk_id => deps_tids
     end

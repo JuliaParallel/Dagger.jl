@@ -14,15 +14,15 @@ end
 replace_obj!(ex::Symbol, obj) = Expr(:(.), obj, QuoteNode(ex))
 replace_obj!(ex, obj) = ex
 function _test_throws_unwrap(terr, ex; to_match=[])
-    @gensym rerr
+    @gensym oerr rerr
     match_expr = Expr(:block)
     for m in to_match
         if m.head == :(=)
-            lhs, rhs = replace_obj!(m.args[1], rerr), m.args[2]
+            lhs, rhs = replace_obj!(m.args[1], oerr), m.args[2]
             push!(match_expr.args, :(@test $lhs == $rhs))
         elseif m.head == :call
             fn = m.args[1]
-            lhs, rhs = replace_obj!(m.args[2], rerr), m.args[3]
+            lhs, rhs = replace_obj!(m.args[2], oerr), m.args[3]
             if fn == :(<)
                 push!(match_expr.args, :(@test startswith($lhs, $rhs)))
             elseif fn == :(>)
@@ -35,12 +35,17 @@ function _test_throws_unwrap(terr, ex; to_match=[])
         end
     end
     quote
-        $rerr = try
-            $(esc(ex))
+        $oerr, $rerr = try
+            nothing, $(esc(ex))
         catch err
-            Dagger.Sch.unwrap_nested_exception(err)
+            (err, Dagger.Sch.unwrap_nested_exception(err))
         end
-        @test $rerr isa $terr
+        if $terr isa Tuple
+            @test $oerr isa $terr[1]
+            @test $rerr isa $terr[2]
+        else
+            @test $rerr isa $terr
+        end
         $match_expr
     end
 end
