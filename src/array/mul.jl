@@ -342,7 +342,7 @@ function syrk_dagger!(
             end
         end
     end
-    C = copytri!(C, uplo)
+    copytri!(C, uplo)
     return C
 end
 
@@ -381,27 +381,22 @@ end
 end
 
 @inline function copytile!(A, B)
-    m, n = size(A)
-    C = B'
-
-    for i = 1:m, j = 1:n
-        A[i, j] = C[i, j]
-    end
+    copyto!(A, B')
+    return
 end
 
 @inline function copydiagtile!(A, uplo)
     m, n = size(A)
     Acpy = copy(A)
 
+    # TODO: Avoid a copy here, reuse Acpy
     if uplo == 'U'
-        C = UpperTriangular(Acpy)' + UpperTriangular(Acpy)
-        C[diagind(C)] .= A[diagind(A)]
+        C = UpperTriangular(Acpy)' .+ UpperTriangular(Acpy)
     elseif uplo == 'L'
-        C = LowerTriangular(Acpy)' + Acpy - UpperTriangular(Acpy)
-        C[diagind(C)] .= A[diagind(A)]
+        C = LowerTriangular(Acpy)' .+ Acpy .- UpperTriangular(Acpy)
     end
+    C[diagind(C)] .= A[diagind(A)]
 
-    for i = 1:m, j = 1:n
-        A[i, j] = C[i, j]
-    end
+    copyto!(A, C)
+    return
 end
