@@ -65,24 +65,38 @@ is_task_or_chunk(c::Chunk) = true
 Base.:(==)(c1::Chunk, c2::Chunk) = c1.handle == c2.handle
 Base.hash(c::Chunk, x::UInt64) = hash(c.handle, hash(Chunk, x))
 
-collect_remote(chunk::Chunk) =
-    move(chunk.processor, OSProc(), poolget(chunk.handle))
-
-function collect(ctx::Context, chunk::Chunk; options=nothing)
-    # delegate fetching to handle by default.
-    if chunk.handle isa DRef && !(chunk.processor isa OSProc)
-        return remotecall_fetch(collect_remote, chunk.handle.owner, chunk)
-    elseif chunk.handle isa FileRef
-        return poolget(chunk.handle)
-    else
-        return move(chunk.processor, OSProc(), chunk.handle)
+macro remotecall_fetch_fast(id, ex)
+    @assert Meta.isexpr(ex, :call)
+    f = ex.args[1]
+    args = ex.args[2:end]
+    quote
+        if $myid() == id
+            $(ex)
+        else
+            $remotecall_fetch($f, id, $(args...))
+        end
     end
 end
+
+@inline function collect(chunk::Chunk)
+    # delegate fetching to handle by default.
+    #=if chunk.handle isa DRef && !(chunk.processor isa OSProc)
+        return remotecall_fetch(collect_remote, chunk.handle.owner, chunk)
+        #return @remotecall_fetch_fast chunk.handle.owner collect_remote(chunk)
+    elseif chunk.handle isa FileRef
+        return poolget(chunk.handle)
+    else=#
+        return move(chunk.processor, OSProc(), chunk)
+    #end
+end
+collect_remote(chunk::Chunk) =
+    move(chunk.processor, OSProc(), poolget(chunk.handle))
+collect(ctx::Context, chunk::Chunk; options=nothing) = collect(chunk)
 collect(ctx::Context, ref::DRef; options=nothing) =
     move(OSProc(ref.owner), OSProc(), ref)
 collect(ctx::Context, ref::FileRef; options=nothing) =
     poolget(ref) # FIXME: Do move call
-function Base.fetch(chunk::Chunk; raw=false)
+@inline function Base.fetch(chunk::Chunk; raw=false)
     if raw
         poolget(chunk.handle)
     else
@@ -91,9 +105,9 @@ function Base.fetch(chunk::Chunk; raw=false)
 end
 
 # Unwrap Chunk, DRef, and FileRef by default
-move(from_proc::Processor, to_proc::Processor, x::Chunk) =
+@inline move(from_proc::Processor, to_proc::Processor, x::Chunk) =
     move(from_proc, to_proc, x.handle)
-move(from_proc::Processor, to_proc::Processor, x::Union{DRef,FileRef}) =
+@inline move(from_proc::Processor, to_proc::Processor, x::Union{DRef,FileRef}) =
     move(from_proc, to_proc, poolget(x))
 
 # Determine from_proc when unspecified

@@ -7,8 +7,8 @@ compute(ctx, c::Chunk; options=nothing) = c
 
 collect(ctx::Context, t::Thunk; options=nothing) =
     collect(ctx, compute(ctx, t; options=options); options=options)
-collect(d::Union{Chunk,Thunk}; options=nothing) =
-    collect(Context(global_context()), d; options=options)
+collect(t::Thunk; options=nothing) =
+    collect(Context(global_context()), t; options=options)
 
 abstract type Computation end
 
