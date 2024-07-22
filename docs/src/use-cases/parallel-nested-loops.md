@@ -71,8 +71,8 @@ end
 ```
 
 In this code we have job interdependence. Firstly, we are calculating the
-standard deviation `σ` and than we are using that value in the function `f`.
-Since `Dagger.@spawn` yields an `DTask` rather than actual values, we need
+standard deviation `σ`, and then we are using that value in the function `f`.
+Since `Dagger.@spawn` yields a `DTask` rather than actual values, we need
 to use the `fetch` function to obtain those values. In this example, the value
 fetching is performed once all computations are completed (note that `@sync`
 preceding the loop forces the loop to wait for all jobs to complete). Also,
@@ -84,3 +84,9 @@ The above use case scenario has been tested by running `julia -t 8` (or with
 `JULIA_NUM_THREADS=8` as environment variable). The `Threads.@threads` code
 takes 1.8 seconds to run, while the Dagger code, which is also one line
 shorter, runs around 0.9 seconds, resulting in a 2x speedup.
+
+!!! warning
+    Annotating an inner loop with `@sync` will block the outer loop from
+    iterating until the inner `@sync` loop is fully completed, negating some
+    potential parallelism. `@sync` should only be applied to the outermost loop
+    before a `fetch`.
