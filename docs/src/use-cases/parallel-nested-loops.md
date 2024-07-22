@@ -87,6 +87,6 @@ shorter, runs around 0.9 seconds, resulting in a 2x speedup.
 
 !!! warning
     Annotating an inner loop with `@sync` will block the outer loop from
-    iterating until the inner @sync loop is fully completed, negating some
+    iterating until the inner `@sync` loop is fully completed, negating some
     potential parallelism. `@sync` should only be applied to the outermost loop
     before a `fetch`.
