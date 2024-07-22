@@ -125,7 +125,11 @@ end
         @test t isa Dagger.DTask
         @test fetch(t) == A[1, 2]
 
-        B = Dagger.@spawn rand(4, 4)
+        t = @spawn A[2]
+        @test t isa Dagger.DTask
+        @test fetch(t) == A[2]
+
+        B = @spawn rand(4, 4)
         t = @spawn B[1, 2]
         @test t isa Dagger.DTask
         @test fetch(t) == fetch(B)[1, 2]
@@ -134,6 +138,27 @@ end
         t = @spawn R[]
         @test t isa Dagger.DTask
         @test fetch(t) == 42
+    end
+    @testset "NamedTuple" begin
+        t = @spawn (;a=1, b=2)
+        @test t isa Dagger.DTask
+        @test fetch(t) == (;a=1, b=2)
+
+        t = @spawn (;)
+        @test t isa Dagger.DTask
+        @test fetch(t) == (;)
+    end
+    @testset "getproperty" begin
+        nt = (;a=1, b=2)
+
+        t = @spawn nt.b
+        @test t isa Dagger.DTask
+        @test fetch(t) == nt.b
+
+        nt2 = @spawn (;a=1, b=3)
+        t = @spawn nt2.b
+        @test t isa Dagger.DTask
+        @test fetch(t) == fetch(nt2).b
     end
     @testset "invalid expression" begin
         @test_throws LoadError eval(:(@spawn 1))
