@@ -65,6 +65,8 @@ is_task_or_chunk(c::Chunk) = true
 Base.:(==)(c1::Chunk, c2::Chunk) = c1.handle == c2.handle
 Base.hash(c::Chunk, x::UInt64) = hash(c.handle, hash(Chunk, x))
 
+Adapt.adapt_storage(::FetchAdaptor, x::Chunk) = fetch(x)
+
 collect_remote(chunk::Chunk) =
     move(chunk.processor, OSProc(), poolget(chunk.handle))
 
