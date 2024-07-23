@@ -31,6 +31,8 @@ end
 import TimespanLogging
 import TimespanLogging: timespan_start, timespan_finish
 
+import Adapt
+
 include("lib/util.jl")
 include("utils/dagdebug.jl")
 
@@ -121,6 +123,9 @@ function __init__()
             @require Mux="a975b10e-0019-58db-a62f-e48ff68538c9" begin
                 # Gantt chart HTTP server
                 include("ui/gantt-mux.jl")
+            end
+            @require JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1" begin
+                include(joinpath(dirname(@__DIR__), "ext", "JSON3Ext.jl"))
             end
         end
         # TODO: Move to Pkg extensions

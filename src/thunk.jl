@@ -306,7 +306,7 @@ generated thunks.
 macro par(exs...)
     opts = exs[1:end-1]
     ex = exs[end]
-    _par(ex; lazy=true, opts=opts)
+    return esc(_par(ex; lazy=true, opts=opts))
 end
 
 """
@@ -348,7 +348,7 @@ also passes along any options in an `Options` struct. For example,
 macro spawn(exs...)
     opts = exs[1:end-1]
     ex = exs[end]
-    _par(ex; lazy=false, opts=opts)
+    return esc(_par(ex; lazy=false, opts=opts))
 end
 
 struct ExpandedBroadcast{F} end
@@ -362,40 +362,81 @@ function replace_broadcast(fn::Symbol)
     return fn
 end
 
+to_namedtuple(;kwargs...) = (;kwargs...)
+
 function _par(ex::Expr; lazy=true, recur=true, opts=())
-    if ex.head == :call && recur
-        f = replace_broadcast(ex.args[1])
-        if length(ex.args) >= 2 && Meta.isexpr(ex.args[2], :parameters)
-            args = ex.args[3:end]
-            kwargs = ex.args[2]
-        else
-            args = ex.args[2:end]
-            kwargs = Expr(:parameters)
+    f = nothing
+    body = nothing
+    arg1 = nothing
+    arg2 = nothing
+    if recur && @capture(ex, f_(allargs__)) ||
+                @capture(ex, f_(allargs__) do cargs_ body_ end) ||
+                @capture(ex, allargs__->body_) ||
+                @capture(ex, arg1_[allargs__]) ||
+                @capture(ex, arg1_.arg2_) ||
+                @capture(ex, (;allargs__))
+        f = replace_broadcast(f)
+        if arg1 !== nothing
+            if arg2 !== nothing
+                # Getproperty (A.B)
+                f = Base.getproperty
+                allargs = Any[arg1, QuoteNode(arg2)]
+            else
+                # Indexing (A[2,3])
+                f = Base.getindex
+                pushfirst!(allargs, arg1)
+            end
         end
-        opts = esc.(opts)
-        args_ex = _par.(args; lazy=lazy, recur=false)
-        kwargs_ex = _par.(kwargs.args; lazy=lazy, recur=false)
+        if f === nothing && body === nothing
+            # NamedTuple ((;a=1, b=2))
+            f = to_namedtuple
+        end
+        args = filter(arg->!Meta.isexpr(arg, :parameters), allargs)
+        kwargs = filter(arg->Meta.isexpr(arg, :parameters), allargs)
+        if !isempty(kwargs)
+            kwargs = only(kwargs).args
+        end
+        if body !== nothing
+            if f !== nothing
+                f = quote
+                    ($(args...); $(kwargs...))->$f($(args...); $(kwargs...)) do $cargs
+                        $body
+                    end
+                end
+            else
+                f = quote
+                    ($(args...); $(kwargs...))->begin
+                        $body
+                    end
+                end
+            end
+        end
         if lazy
-            return :(Dagger.delayed($(esc(f)), $Options(;$(opts...)))($(args_ex...); $(kwargs_ex...)))
+            return :(Dagger.delayed($f, $Options(;$(opts...)))($(args...); $(kwargs...)))
         else
-            sync_var = esc(Base.sync_varname)
+            sync_var = Base.sync_varname
             @gensym result
             return quote
-                let args = ($(args_ex...),)
-                    $result = $spawn($(esc(f)), $Options(;$(opts...)), args...; $(kwargs_ex...))
+                let
+                    $result = $spawn($f, $Options(;$(opts...)), $(args...); $(kwargs...))
                     if $(Expr(:islocal, sync_var))
-                        put!($sync_var, schedule(Task(()->wait($result))))
+                        put!($sync_var, schedule(Task(()->fetch($result; raw=true))))
                     end
                     $result
                 end
             end
         end
+    elseif lazy
+        # Recurse into the expression
+        return Expr(ex.head, _par_inner.(ex.args, lazy=lazy, recur=recur, opts=opts)...)
     else
-        return Expr(ex.head, _par.(ex.args, lazy=lazy, recur=recur, opts=opts)...)
+        throw(ArgumentError("Invalid Dagger task expression: $ex"))
     end
 end
-_par(ex::Symbol; kwargs...) = esc(ex)
-_par(ex; kwargs...) = ex
+_par(ex; kwargs...) = throw(ArgumentError("Invalid Dagger task expression: $ex"))
+
+_par_inner(ex; kwargs...) = ex
+_par_inner(ex::Expr; kwargs...) = _par(ex; kwargs...)
 
 """
     Dagger.spawn(f, args...; kwargs...) -> DTask
@@ -444,6 +485,20 @@ function spawn(f, args...; kwargs...)
 
     return task
 end
+
+struct FetchAdaptor end
+Adapt.adapt_storage(::FetchAdaptor, x::DTask) = fetch(x)
+Adapt.adapt_structure(::FetchAdaptor, A::AbstractArray) =
+    map(x->Adapt.adapt(FetchAdaptor(), x), A)
+
+"""
+    Dagger.fetch_all(x)
+
+Recursively fetches all `DTask`s and `Chunk`s in `x`, returning an equivalent
+object. Useful for converting arbitrary Dagger-enabled objects into a
+non-Dagger form.
+"""
+fetch_all(x) = Adapt.adapt(FetchAdaptor(), x)
 
 persist!(t::Thunk) = (t.persist=true; t)
 cache_result!(t::Thunk) = (t.cache=true; t)

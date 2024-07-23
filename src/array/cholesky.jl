@@ -2,7 +2,7 @@ LinearAlgebra.cholcopy(A::DArray{T,2}) where T = copy(A)
 function potrf_checked!(uplo, A, info_arr)
     _A, info = move(thunk_processor(), LAPACK.potrf!)(uplo, A)
     if info != 0
-        info_arr[1] = info
+        fill!(info_arr, info)
         throw(PosDefException(info))
     end
     return _A, info

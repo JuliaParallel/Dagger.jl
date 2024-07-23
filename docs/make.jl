@@ -12,7 +12,7 @@ makedocs(;
     format = Documenter.HTML(;
         prettyurls = get(ENV, "CI", "false") == "true",
         canonical = "https://JuliaParallel.github.io/Dagger.jl",
-        assets = String[],
+        assets = String["assets/favicon.ico"],
     ),
     pages = [
         "Home" => "index.md",

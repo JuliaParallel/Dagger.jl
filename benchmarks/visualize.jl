@@ -119,7 +119,7 @@ push!(legend_names, "cpu+dagger")
 legend = fig[1, 2] = Legend(fig, line_plots, legend_names)
 save("weak_scaling.png", fig)
 
-# 3. Comparision against Base
+# 3. Comparison against Base
 
 fig = Figure(resolution = (1200, 800))
 perf = fig[1, 1] = Axis(fig, title = "Dagger vs Base")
