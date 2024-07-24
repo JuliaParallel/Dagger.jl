@@ -665,6 +665,10 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
             @maybelog ctx timespan_finish(ctx, :finish, (;thunk_id), (;thunk_id))
         end
 
+        # Allow data to be GC'd
+        tresult = nothing
+        res = nothing
+
         safepoint(state)
     end
 
@@ -1117,6 +1121,7 @@ function fire_tasks!(ctx, task_loc::FireTaskLocation, task_specs::Vector{FireTas
             finally
                 @maybelog ctx timespan_finish(ctx, :fire, (;worker=gproc.pid), nothing)
             end
+            return
         end
     end
     empty!(to_send)

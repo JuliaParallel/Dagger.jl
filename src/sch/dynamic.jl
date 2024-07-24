@@ -96,13 +96,18 @@ function dynamic_listener!(ctx, state, wid)
                 end
             end
         end
+        return
     end
     errormonitor_tracked("dynamic_listener! $wid", listener_task)
     errormonitor_tracked("dynamic_listener! (halt+throw) $wid", @async begin
         wait(state.halt)
         # TODO: Not sure why we need the @async here, but otherwise we
         # don't stop all the listener tasks
-        @async Base.throwto(listener_task, SchedulerHaltedException())
+        @async begin
+            Base.throwto(listener_task, SchedulerHaltedException())
+            return
+        end
+        return
     end)
 end
 
