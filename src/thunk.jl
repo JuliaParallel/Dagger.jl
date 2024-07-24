@@ -119,9 +119,12 @@ function Thunk(f, xs...;
                propagates=(),
                kwargs...
               )
-    @assert all(x->x isa Pair, xs)
+
     spec = ThunkSpec()
     @warn "Allow re-wrapping Chunk with new processor/scope" maxlog=1
+    if !(f isa Argument)
+        f = Argument(ArgPosition(true, 0, :NULL), f)
+    end
     if !(valuetype(f) <: Chunk) && (!isnothing(processor) || !isnothing(scope))
         f.value = tochunk(value(f),
                           something(processor, OSProc()),
@@ -129,7 +132,15 @@ function Thunk(f, xs...;
     end
     spec.fargs = Vector{Argument}(undef, length(xs)+1)
     spec.fargs[1] = f
-    copyto!(@view(spec.fargs[2:end]), xs)
+    for idx in 1:length(xs)
+        x = xs[idx]
+        if x isa Argument
+            spec.fargs[idx+1] = x
+        else
+            @assert x isa Pair "Invalid Thunk argument: $x"
+            spec.fargs[idx+1] = Argument(something(x.first, idx), x.second)
+        end
+    end
     syncdeps_set = Set{Any}()
     for idx in 2:length(spec.fargs)
         x = value(spec.fargs[idx])
