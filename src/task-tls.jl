@@ -1,18 +1,20 @@
 # In-Thunk Helpers
 
 """
-    thunk_processor()
+    task_processor()
 
-Get the current processor executing the current thunk.
+Get the current processor executing the current Dagger task.
 """
-thunk_processor() = task_local_storage(:_dagger_processor)::Processor
+task_processor() = task_local_storage(:_dagger_processor)::Processor
+@deprecate thunk_processor() task_processor()
 
 """
-    in_thunk()
+    in_task()
 
-Returns `true` if currently in a [`Thunk`](@ref) process, else `false`.
+Returns `true` if currently executing in a [`DTask`](@ref), else `false`.
 """
-in_thunk() = haskey(task_local_storage(), :_dagger_sch_uid)
+in_task() = haskey(task_local_storage(), :_dagger_sch_uid)
+@deprecate in_thunk() in_task()
 
 """
     get_tls()
@@ -22,7 +24,7 @@ Gets all Dagger TLS variable as a `NamedTuple`.
 get_tls() = (
     sch_uid=task_local_storage(:_dagger_sch_uid),
     sch_handle=task_local_storage(:_dagger_sch_handle),
-    processor=thunk_processor(),
+    processor=task_processor(),
     task_spec=task_local_storage(:_dagger_task_spec),
 )
 

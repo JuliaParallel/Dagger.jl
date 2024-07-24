@@ -182,7 +182,7 @@ end
         @testset "allow errors" begin
             opts = ThunkOptions(;allow_errors=true)
             a = delayed(error; options=opts)("Test")
-            @test_throws_unwrap Dagger.ThunkFailedException collect(a)
+            @test_throws_unwrap Dagger.DTaskFailedException collect(a)
         end
     end
 

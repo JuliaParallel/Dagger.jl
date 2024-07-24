@@ -1,3 +1,5 @@
+export DTask
+
 "A future holding the result of a `Thunk`."
 struct ThunkFuture
     future::Future

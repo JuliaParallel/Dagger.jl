@@ -159,7 +159,7 @@ end
 
 # Local -> Remote
 function eager_submit!(ntasks, uid, future, finalizer_ref, f, args, options)
-    if Dagger.in_thunk()
+    if Dagger.in_task()
         h = Dagger.sch_handle()
         return exec!(eager_submit_internal!, h, ntasks, uid, future, finalizer_ref, f, args, options, true)
     elseif myid() != 1
