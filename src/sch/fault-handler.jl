@@ -21,6 +21,7 @@ function handle_fault(ctx, state, deadproc)
 
     # Evict cache entries that were stored on the worker
     for t in values(state.thunk_dict)
+        t = unwrap_weak_checked(t)
         has_result(state, t) || continue
         v = load_result(state, t)
         if v isa Chunk && v.handle isa DRef && v.handle.owner == deadproc.pid
