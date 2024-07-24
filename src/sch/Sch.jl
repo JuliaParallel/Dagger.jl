@@ -649,9 +649,7 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
                     state.transfer_rate[] = (state.transfer_rate[] + metadata.transfer_rate) ÷ 2
                 end
             end
-            node.cache_ref = Some{Any}(res)
-            state.cache[node] = res
-            state.errored[node] = thunk_failed
+            store_result!(state, node, res; error=thunk_failed)
             if node.options !== nothing && node.options.checkpoint !== nothing
                 try
                     @invokelatest node.options.checkpoint(node, res)
@@ -673,7 +671,7 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
     end
 
     # Final value is ready
-    value = something(d.cache_ref)
+    value = load_result(state, d)
     errored = get(state.errored, d, false)
     if !errored
         if options.checkpoint !== nothing
@@ -765,7 +763,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         end
         task = pop!(state.ready)
         @maybelog ctx timespan_start(ctx, :schedule, (;thunk_id=task.id), (;thunk_id=task.id))
-        if haskey(state.cache, task)
+        if has_result(state, task)
             if haskey(state.errored, task)
                 # An error was eagerly propagated to this task
                 finish_failed!(state, task)
@@ -776,9 +774,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
                 println(iob, "  Task: $(task.id)")
                 println(iob, "  Cache Entry: $(typeof(something(task.cache_ref)))")
                 ex = SchedulingException(String(take!(iob)))
-                task.cache_ref = Some{Any}(ex)
-                state.cache[task] = ex
-                state.errored[task] = true
+                store_result!(state, task, ex; error=true)
             end
             @goto pop_task
         end
@@ -816,9 +812,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
             scope = constrain(scope, chunk.scope)
             if scope isa Dagger.InvalidScope
                 ex = SchedulingException("Scopes are not compatible: $(scope.x), $(scope.y)")
-                task.cache_ref = Some{Any}(ex)
-                state.cache[task] = ex
-                state.errored[task] = true
+                store_result!(state, task, ex; error=true)
                 set_failed!(state, task)
                 @goto pop_task
             end
@@ -876,9 +870,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
             end
         end
         ex = SchedulingException("No processors available, try widening scope")
-        task.cache_ref = Some{Any}(ex)
-        state.cache[task] = ex
-        state.errored[task] = true
+        store_result!(state, task, ex; error=true)
         set_failed!(state, task)
         empty!(sorted_procs)
         @goto pop_task
@@ -959,9 +951,6 @@ function finish_task!(ctx, state, node, thunk_failed)
     if thunk_failed
         set_failed!(state, node)
     end
-    #if node.cache
-        node.cache_ref = state.cache[node]
-    #end
     schedule_dependents!(state, node, thunk_failed)
     fill_registered_futures!(state, node, thunk_failed)
 
@@ -982,8 +971,7 @@ function finish_task!(ctx, state, node, thunk_failed)
 end
 
 function delete_unused_task!(state, thunk)
-    # N.B. We don't check state.cache since that requires taking a lock for each call
-    if thunk.cache_ref !== nothing && !thunk.eager_accessible && !thunk.sch_accessible
+    if has_result(state, thunk) && !thunk.eager_accessible && !thunk.sch_accessible
         # Will not be accessed further, delete all cached data
         task_delete!(state, thunk)
         return true
@@ -992,9 +980,7 @@ function delete_unused_task!(state, thunk)
     end
 end
 function task_delete!(state, thunk)
-    thunk.cache_ref = nothing
-    delete!(state.cache, thunk)
-    delete!(state.errored, thunk)
+    clear_result!(state, thunk)
     delete!(state.valid, thunk)
     delete!(state.thunk_dict, thunk.id)
 end
@@ -1049,27 +1035,17 @@ function fire_tasks!(ctx, task_loc::FireTaskLocation, task_specs::Vector{FireTas
         thunk = task_spec.task
         push!(state.running, thunk)
         state.running_on[thunk] = gproc
-        if thunk.cache && thunk.cache_ref !== nothing
-            # the result might be already cached
-            data = thunk.cache_ref
-            if data !== nothing
-                # cache hit
-                state.cache[thunk] = data
-                thunk_failed = get(state.errored, thunk, false)
-                finish_task!(ctx, state, thunk, thunk_failed)
-                continue
-            else
-                # cache miss
-                thunk.cache_ref = nothing
-            end
+        if has_result(state, thunk)
+            # the result is already cached
+            thunk_failed = get(state.errored, thunk, false)
+            finish_task!(ctx, state, thunk, thunk_failed)
+            continue
         end
         if thunk.options !== nothing && thunk.options.restore !== nothing
             try
                 result = @invokelatest thunk.options.restore(thunk)
                 if result isa Chunk
-                    thunk.cache_ref = Some{Any}(result)
-                    state.cache[thunk] = result
-                    state.errored[thunk] = false
+                    store_result!(state, thunk, result)
                     finish_task!(ctx, state, thunk, false)
                     continue
                 elseif result !== nothing

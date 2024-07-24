@@ -62,12 +62,26 @@ function get_propagated_options(thunk)
     return nt
 end
 
+has_result(state, thunk) = thunk.cache_ref !== nothing
+load_result(state, thunk) = something(thunk.cache_ref)
+function store_result!(state, thunk, value; error::Bool=false)
+    @assert islocked(state.lock)
+    @assert !has_result(state, thunk) "Thunk already contains a cached result"
+    thunk.cache_ref = Some{Any}(value)
+    state.errored[thunk] = error
+end
+function clear_result!(state, thunk)
+    @assert islocked(state.lock)
+    thunk.cache_ref = nothing
+    delete!(state.errored, thunk)
+end
+
 "Fills the result for all registered futures of `thunk`."
 function fill_registered_futures!(state, thunk, failed)
     if haskey(state.futures, thunk)
         # Notify any listening thunks
         for future in state.futures[thunk]
-            put!(future, state.cache[thunk]; error=failed)
+            put!(future, load_result(state, thunk); error=failed)
         end
         delete!(state.futures, thunk)
     end
@@ -89,8 +103,8 @@ function cleanup_syncdeps!(state, thunk)
             end
             if isempty(w)
                 #=
-                if istask(inp) && haskey(state.cache, inp)
-                    _thunk = state.cache[inp]
+                if istask(inp) && has_result(state, inp)
+                    _thunk = load_result(state, inp)
                     if _thunk isa Chunk
                         push!(to_evict, _thunk)
                     end
@@ -146,7 +160,7 @@ function reschedule_syncdeps!(state, thunk, seen=nothing)
             if haskey(state.valid, thunk)
                 continue
             end
-            if haskey(state.cache, thunk) || (thunk in state.ready) || (thunk in state.running)
+            if has_result(state, thunk) || (thunk in state.ready) || (thunk in state.running)
                 continue
             end
             for idx in 1:length(thunk.inputs)
@@ -175,7 +189,7 @@ function reschedule_syncdeps!(state, thunk, seen=nothing)
                 if get(state.errored, input, false)
                     set_failed!(state, input, thunk)
                 end
-                haskey(state.cache, input) && continue
+                has_result(state, input) && continue
 
                 # Unseen and unfinished task
                 push!(w, input)
@@ -197,9 +211,10 @@ const RESCHEDULE_SYNCDEPS_SEEN_CACHE = TaskLocalValue{ReusableCache{Set{Thunk},N
 
 "Marks `thunk` and all dependent thunks as failed."
 function set_failed!(state, origin, thunk=origin)
+    @assert islocked(state.lock)
     filter!(x->x!==thunk, state.ready)
-    state.cache[thunk] = ThunkFailedException(thunk, origin, state.cache[origin])
-    state.errored[thunk] = true
+    ex = ThunkFailedException(thunk, origin, load_result(state, origin))
+    store_result!(state, thunk, ex; error=true)
     finish_failed!(state, thunk, origin)
 end
 function finish_failed!(state, thunk, origin=nothing)
@@ -238,7 +253,7 @@ function print_sch_status(io::IO, state, thunk; offset=0, limit=5, max_inputs=3)
             status *= "r"
         elseif node in state.running
             status *= "R"
-        elseif haskey(state.cache, node)
+        elseif has_result(state, node)
             status *= "C"
         else
             status *= "?"
@@ -480,7 +495,7 @@ function collect_task_inputs!(state, inputs)
         input = Dagger.value(inputs[idx])
         input = unwrap_weak_checked(input)
         if istask(input)
-            inputs[idx].value = wrap_weak(state.cache[input])
+            inputs[idx].value = wrap_weak(load_result(state, input))
         end
     end
     return

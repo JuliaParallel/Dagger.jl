@@ -177,8 +177,8 @@ function _register_future!(ctx, state, task, tid, (future, id, check)::Tuple{Thu
             end
         end
         # TODO: Assert that future will be fulfilled
-        if haskey(state.cache, thunk)
-            put!(future, state.cache[thunk]; error=state.errored[thunk])
+        if has_result(state, thunk)
+            put!(future, load_result(state, thunk); error=state.errored[thunk])
         else
             futures = get!(()->ThunkFuture[], state.futures, thunk)
             push!(futures, future)
