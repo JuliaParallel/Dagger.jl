@@ -33,6 +33,8 @@ function unwrap(x::Chunk)
     @assert root_worker_id(x.processor) == myid()
     MemPool.poolget(x.handle)
 end
+move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::T, from::F) where {T,F} =
+    throw(ArgumentError("No `move!` implementation defined for $F -> $T"))
 function move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::Chunk, from::Chunk)
     to_w = root_worker_id(to_space)
     remotecall_wait(to_w, dep_mod, to_space, from_space, to, from) do dep_mod, to_space, from_space, to, from
@@ -42,6 +44,10 @@ function move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::Chun
         from_raw = to_w == from_w ? unwrap(from) : remotecall_fetch(unwrap, from_w, from)
         move!(dep_mod, to_space, from_space, to_raw, from_raw)
     end
+    return
+end
+function move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::Base.RefValue{T}, from::Base.RefValue{T}) where {T}
+    to[] = from[]
     return
 end
 function move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::AbstractArray{T,N}, from::AbstractArray{T,N}) where {T,N}
@@ -65,6 +71,23 @@ function move!(::Type{<:Tridiagonal}, to_space::MemorySpace, from_space::MemoryS
 end
 
 ### Aliasing and Memory Spans
+
+type_may_alias(::Type{String}) = false
+type_may_alias(::Type{Symbol}) = false
+type_may_alias(::Type{<:Type}) = false
+type_may_alias(::Type{C}) where C<:Chunk{T} where T = type_may_alias(T)
+function type_may_alias(::Type{T}) where T
+    if isbitstype(T)
+        return false
+    elseif ismutabletype(T)
+        return true
+    elseif isstructtype(T)
+        for FT in fieldtypes(T)
+            type_may_alias(FT) && return true
+        end
+    end
+    return false
+end
 
 may_alias(::MemorySpace, ::MemorySpace) = true
 may_alias(space1::CPURAMMemorySpace, space2::CPURAMMemorySpace) = space1.owner == space2.owner
@@ -104,8 +127,71 @@ memory_spans(::NoAliasing) = MemorySpan{CPURAMMemorySpace}[]
 struct UnknownAliasing <: AbstractAliasing end
 memory_spans(::UnknownAliasing) = [MemorySpan{CPURAMMemorySpace}(C_NULL, typemax(UInt))]
 
+warn_unknown_aliasing(T) =
+    @warn "Cannot resolve aliasing for object of type $T\nExecution may become sequential"
+
+struct CombinedAliasing <: AbstractAliasing
+    sub_ainfos::Vector{AbstractAliasing}
+end
+function memory_spans(ca::CombinedAliasing)
+    # FIXME: Don't hardcode CPURAMMemorySpace
+    all_spans = MemorySpan{CPURAMMemorySpace}[]
+    for sub_a in ca.sub_ainfos
+        append!(all_spans, memory_spans(sub_a))
+    end
+    return all_spans
+end
+Base.:(==)(ca1::CombinedAliasing, ca2::CombinedAliasing) =
+    ca1.sub_ainfos == ca2.sub_ainfos
+Base.hash(ca1::CombinedAliasing, h::UInt) =
+    hash(ca1.sub_ainfos, hash(CombinedAliasing, h))
+
+struct ObjectAliasing <: AbstractAliasing
+    ptr::Ptr{Cvoid}
+    sz::UInt
+end
+function ObjectAliasing(x::T) where T
+    @nospecialize x
+    ptr = pointer_from_objref(x)
+    sz = sizeof(T)
+    return ObjectAliasing(ptr, sz)
+end
+function memory_spans(oa::ObjectAliasing)
+    rptr = RemotePtr{Cvoid}(oa.ptr)
+    span = MemorySpan{CPURAMMemorySpace}(rptr, oa.sz)
+    return [span]
+end
+
 aliasing(x, T) = aliasing(T(x))
-aliasing(x) = isbits(x) ? NoAliasing() : UnknownAliasing()
+function aliasing(x::T) where T
+    if isbits(x)
+        return NoAliasing()
+    elseif isstructtype(T)
+        as = AbstractAliasing[]
+        # If the object itself is mutable, it can alias
+        if ismutabletype(T)
+            push!(as, ObjectAliasing(x))
+        end
+        # Check all object fields (recursive)
+        for field in fieldnames(T)
+            sub_as = aliasing(getfield(x, field))
+            if sub_as isa NoAliasing
+                continue
+            elseif sub_as isa CombinedAliasing
+                append!(as, sub_as.sub_ainfos)
+            else
+                push!(as, sub_as)
+            end
+        end
+        return CombinedAliasing(as)
+    else
+        warn_unknown_aliasing(T)
+        return UnknownAliasing()
+    end
+end
+aliasing(::String) = NoAliasing() # FIXME: Not necessarily true
+aliasing(::Symbol) = NoAliasing()
+aliasing(::Type) = NoAliasing()
 aliasing(x::Chunk, T) = remotecall_fetch(root_worker_id(x.processor), x, T) do x, T
     aliasing(unwrap(x), T)
 end
@@ -129,6 +215,7 @@ function aliasing(x::Array{T}) where T
     else
         # FIXME: Also ContiguousAliasing of container
         #return IteratedAliasing(x)
+        warn_unknown_aliasing(T)
         return UnknownAliasing()
     end
 end
@@ -173,6 +260,7 @@ function aliasing(x::SubArray{T,N,A}) where {T,N,A<:Array}
     else
         # FIXME: Also ContiguousAliasing of container
         #return IteratedAliasing(x)
+        warn_unknown_aliasing(T)
         return UnknownAliasing()
     end
 end

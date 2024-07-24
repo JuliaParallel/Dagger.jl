@@ -221,7 +221,7 @@ function is_writedep(arg, deps, task::DTask)
 end
 
 # Aliasing state setup
-function populate_task_info!(state::DataDepsState, spec, task)
+function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
     # Populate task dependencies
     dependencies_to_add = Vector{Tuple{Bool,Bool,AbstractAliasing,<:Any,<:Any}}()
 
@@ -233,8 +233,8 @@ function populate_task_info!(state::DataDepsState, spec, task)
         # Unwrap the Chunk underlying any DTask arguments
         arg = arg isa DTask ? fetch(arg; raw=true) : arg
 
-        # Skip non-mutable arguments
-        Base.datatype_pointerfree(typeof(arg)) && continue
+        # Skip non-aliasing arguments
+        type_may_alias(typeof(arg)) || continue
 
         # Add all aliasing dependencies
         for (dep_mod, readdep, writedep) in deps
@@ -251,7 +251,8 @@ function populate_task_info!(state::DataDepsState, spec, task)
     end
 
     # Track the task result too
-    push!(dependencies_to_add, (true, true, UnknownAliasing(), identity, task))
+    # N.B. We state no readdep/writedep because, while we can't model the aliasing info for the task result yet, we don't want to synchronize because of this
+    push!(dependencies_to_add, (false, false, UnknownAliasing(), identity, task))
 
     # Record argument/result dependencies
     push!(state.dependencies, task => dependencies_to_add)
@@ -664,7 +665,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             # Is the data written previously or now?
             arg, deps = unwrap_inout(arg)
             arg = arg isa DTask ? fetch(arg; raw=true) : arg
-            if Base.datatype_pointerfree(typeof(arg)) || !has_writedep(state, arg, deps, task)
+            if !type_may_alias(typeof(arg)) || !has_writedep(state, arg, deps, task)
                 @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Skipped copy-to (unwritten)"
                 spec.args[idx] = pos => arg
                 continue
@@ -736,7 +737,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         for (idx, (_, arg)) in enumerate(task_args)
             arg, deps = unwrap_inout(arg)
             arg = arg isa DTask ? fetch(arg; raw=true) : arg
-            Base.datatype_pointerfree(typeof(arg)) && continue
+            type_may_alias(typeof(arg)) || continue
             if queue.aliasing
                 for (dep_mod, _, writedep) in deps
                     ainfo = aliasing(arg, dep_mod)
@@ -769,7 +770,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         for (idx, (_, arg)) in enumerate(task_args)
             arg, deps = unwrap_inout(arg)
             arg = arg isa DTask ? fetch(arg; raw=true) : arg
-            Base.datatype_pointerfree(typeof(arg)) && continue
+            type_may_alias(typeof(arg)) || continue
             if queue.aliasing
                 for (dep_mod, _, writedep) in deps
                     ainfo = aliasing(arg, dep_mod)
@@ -864,7 +865,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         for arg in keys(astate.data_origin)
             # Is the data previously written?
             arg, deps = unwrap_inout(arg)
-            if Base.datatype_pointerfree(typeof(arg)) || !has_writedep(state, arg, deps)
+            if !type_may_alias(typeof(arg)) || !has_writedep(state, arg, deps)
                 @dagdebug nothing :spawn_datadeps "Skipped copy-from (unwritten)"
             end
 
