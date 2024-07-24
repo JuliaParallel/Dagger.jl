@@ -22,7 +22,7 @@ function LinearAlgebra._chol!(A::DArray{T,2}, ::Type{UpperTriangular}) where T
 
     info = [convert(LinearAlgebra.BlasInt, 0)]
     try
-        Dagger.spawn_datadeps(;aliasing=true) do
+        Dagger.spawn_datadeps() do
             for k in range(1, mt)
                 Dagger.@spawn potrf_checked!(uplo, InOut(Ac[k, k]), Out(info))
                 for n in range(k+1, nt)
