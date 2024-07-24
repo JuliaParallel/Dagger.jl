@@ -96,13 +96,18 @@ function dynamic_listener!(ctx, state, wid)
                 end
             end
         end
+        return
     end
     errormonitor_tracked("dynamic_listener! $wid", listener_task)
     errormonitor_tracked("dynamic_listener! (halt+throw) $wid", @async begin
         wait(state.halt)
         # TODO: Not sure why we need the @async here, but otherwise we
         # don't stop all the listener tasks
-        @async Base.throwto(listener_task, SchedulerHaltedException())
+        @async begin
+            Base.throwto(listener_task, SchedulerHaltedException())
+            return
+        end
+        return
     end)
 end
 
@@ -124,7 +129,7 @@ end
 halt!(h::SchedulerHandle) = exec!(_halt, h, nothing)
 function _halt(ctx, state, task, tid, _)
     notify(state.halt)
-    put!(state.chan, (1, nothing, nothing, (SchedulerHaltedException(), nothing)))
+    put!(state.chan, TaskResult(1, OSProc(), 0, SchedulerHaltedException(), nothing))
     Base.throwto(task, SchedulerHaltedException())
 end
 
@@ -172,8 +177,8 @@ function _register_future!(ctx, state, task, tid, (future, id, check)::Tuple{Thu
             end
         end
         # TODO: Assert that future will be fulfilled
-        if haskey(state.cache, thunk)
-            put!(future, state.cache[thunk]; error=state.errored[thunk])
+        if has_result(state, thunk)
+            put!(future, load_result(state, thunk); error=state.errored[thunk])
         else
             futures = get!(()->ThunkFuture[], state.futures, thunk)
             push!(futures, future)

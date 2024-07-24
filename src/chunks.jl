@@ -302,9 +302,13 @@ function unwrap_weak_checked(c::WeakChunk)
     @assert cw !== nothing "WeakChunk expired: ($(c.wid), $(c.id))"
     return cw
 end
+wrap_weak(c::Chunk) = WeakChunk(c)
+isweak(c::WeakChunk) = true
+isweak(c::Chunk) = false
 is_task_or_chunk(c::WeakChunk) = true
 Serialization.serialize(io::AbstractSerializer, wc::WeakChunk) =
     error("Cannot serialize a WeakChunk")
+chunktype(c::WeakChunk) = chunktype(unwrap_weak_checked(c))
 
 Base.@deprecate_binding AbstractPart Union{Chunk, Thunk}
 Base.@deprecate_binding Part Chunk

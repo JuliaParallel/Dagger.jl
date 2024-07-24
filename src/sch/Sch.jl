@@ -4,16 +4,21 @@ import Distributed: Future, ProcessExitedException, RemoteChannel, RemoteExcepti
 import MemPool
 import MemPool: DRef, StorageResource
 import MemPool: poolset, storage_capacity, storage_utilized
-import Random: randperm
+import Random: randperm, randperm!
 import Base: @invokelatest
 
 import ..Dagger
-import ..Dagger: Context, Processor, Thunk, WeakThunk, ThunkFuture, ThunkFailedException, Chunk, WeakChunk, OSProc, AnyScope, DefaultScope, LockedObject
-import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak_checked, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, processor, get_processors, get_parent, execute!, rmprocs!, thunk_processor, constrain, cputhreadtime
-import ..Dagger: @dagdebug, @safe_lock_spin1
+import ..Dagger: Context, Processor, Thunk, WeakThunk, ThunkFuture, ThunkFailedException, Chunk, WeakChunk, OSProc, AnyScope, DefaultScope, LockedObject, Argument
+import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak_checked, wrap_weak, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, processor, get_processors, get_parent, execute!, rmprocs!, thunk_processor, constrain, cputhreadtime, maybe_take_or_alloc!
+import ..Dagger: @dagdebug, @safe_lock_spin1, @maybelog, @take_or_alloc!
 import DataStructures: PriorityQueue, enqueue!, dequeue_pair!, peek
 
-import ..Dagger
+import ..Dagger: ReusableCache, ReusableLinkedList, ReusableDict
+import ..Dagger: @reusable, @reusable_dict, @reusable_vector, @reusable_tasks
+
+import TimespanLogging
+
+import TaskLocalValues: TaskLocalValue
 
 const OneToMany = Dict{Thunk, Set{Thunk}}
 
@@ -40,7 +45,47 @@ function Base.show(io::IO, entry::ProcessorCacheEntry)
     print(io, "ProcessorCacheEntry(pid $(entry.gproc.pid), $(entry.proc), $entries entries)")
 end
 
-const Signature = Vector{Any}
+struct Signature
+    sig::Vector{Any}#DataType}
+    hash::UInt
+    sig_nokw::SubArray{Any,1,Vector{Any},Tuple{UnitRange{Int}},true}
+    hash_nokw::UInt
+    function Signature(sig::Vector{Any})#DataType})
+        # Hash full signature
+        h = hash(Signature)
+        for T in sig
+            h = hash(T, h)
+        end
+
+        # Hash non-kwarg signature
+        @assert isdefined(Core, :kwcall) "FIXME: No kwcall! Use kwfunc"
+        idx = findfirst(T->T===Core.kwcall, sig)
+        if idx !== nothing
+            # Skip NT kwargs
+            sig_nokw = @view sig[idx+2:end]
+        else
+            sig_nokw = @view sig[1:end]
+        end
+        h_nokw = hash(Signature, UInt(1))
+        for T in sig_nokw
+            h_nokw = hash(T, h_nokw)
+        end
+
+        return new(sig, h, sig_nokw, h_nokw)
+    end
+end
+Base.hash(sig::Signature, h::UInt) = hash(sig.hash, h)
+Base.isequal(sig1::Signature, sig2::Signature) = sig1.hash == sig2.hash
+
+struct TaskResult
+    pid::Int
+    proc::Processor
+    thunk_id::Int
+    result::Any
+    metadata::Union{NamedTuple,Nothing}
+end
+
+const AnyTaskResult = Union{RescheduleSignal, TaskResult}
 
 """
     ComputeState
@@ -72,7 +117,7 @@ Fields:
 - `futures::Dict{Thunk, Vector{ThunkFuture}}` - Futures registered for waiting on the result of a thunk.
 - `errored::WeakKeyDict{Thunk,Bool}` - Indicates if a thunk's result is an error.
 - `thunks_to_delete::Set{Thunk}` - The list of `Thunk`s ready to be deleted upon completion.
-- `chan::RemoteChannel{Channel{Any}}` - Channel for receiving completed thunks.
+- `chan::RemoteChannel{Channel{AnyTaskResult}}` - Channel for receiving completed thunks.
 """
 struct ComputeState
     uid::UInt64
@@ -99,7 +144,7 @@ struct ComputeState
     futures::Dict{Thunk, Vector{ThunkFuture}}
     errored::WeakKeyDict{Thunk,Bool}
     thunks_to_delete::Set{Thunk}
-    chan::RemoteChannel{Channel{Any}}
+    chan::RemoteChannel{Channel{AnyTaskResult}}
 end
 
 const UID_COUNTER = Threads.Atomic{UInt64}(1)
@@ -276,36 +321,39 @@ Base.merge(sopts::SchedulerOptions, ::Nothing) =
                  nothing,
                  sopts.allow_errors)
 """
-    populate_defaults(opts::ThunkOptions, Tf, Targs) -> ThunkOptions
+    populate_defaults(opts::ThunkOptions, sig::Signature) -> ThunkOptions
 
-Returns a `ThunkOptions` with default values filled in for a function of type
-`Tf` with argument types `Targs`, if the option was previously unspecified in
-`opts`.
+Returns a `ThunkOptions` with default values filled in for a function with type
+signature `sig`, if the option was previously unspecified in `opts`.
 """
-function populate_defaults(opts::ThunkOptions, Tf, Targs)
-    function maybe_default(opt::Symbol)
-        old_opt = getproperty(opts, opt)
-        if old_opt !== nothing
-            return old_opt
-        else
-            return Dagger.default_option(Val(opt), Tf, Targs...)
-        end
-    end
+function populate_defaults(opts::ThunkOptions, sig::Signature)
     ThunkOptions(
-        maybe_default(:single),
-        maybe_default(:proclist),
-        maybe_default(:time_util),
-        maybe_default(:alloc_util),
-        maybe_default(:occupancy),
-        maybe_default(:allow_errors),
-        maybe_default(:checkpoint),
-        maybe_default(:restore),
-        maybe_default(:storage),
-        maybe_default(:storage_root_tag),
-        maybe_default(:storage_leaf_tag),
-        maybe_default(:storage_retain),
+        maybe_default(opts, Val{:single}(), sig),
+        maybe_default(opts, Val{:proclist}(), sig),
+        maybe_default(opts, Val{:time_util}(), sig),
+        maybe_default(opts, Val{:alloc_util}(), sig),
+        maybe_default(opts, Val{:occupancy}(), sig),
+        maybe_default(opts, Val{:allow_errors}(), sig),
+        maybe_default(opts, Val{:checkpoint}(), sig),
+        maybe_default(opts, Val{:restore}(), sig),
+        maybe_default(opts, Val{:storage}(), sig),
+        maybe_default(opts, Val{:storage_root_tag}(), sig),
+        maybe_default(opts, Val{:storage_leaf_tag}(), sig),
+        maybe_default(opts, Val{:storage_retain}(), sig),
     )
 end
+function maybe_default(opts, ::Val{opt}, sig::Signature) where opt
+    old_opt = getfield(opts, opt)
+    if old_opt !== nothing
+        return old_opt
+    else
+        @warn "SIGNATURE_DEFAULT_CACHE should use an LRU" maxlog=1
+        return get!(SIGNATURE_DEFAULT_CACHE[], (sig.hash_nokw, opt)) do
+            Dagger.default_option(Val{opt}(), sig.sig_nokw...)
+        end
+    end
+end
+const SIGNATURE_DEFAULT_CACHE = TaskLocalValue{Dict{Tuple{UInt,Symbol},Any}}(()->Dict{Tuple{UInt,Symbol},Any}())
 
 function cleanup(ctx)
 end
@@ -318,7 +366,7 @@ const WORKER_MONITOR_TASKS = Dict{Int,Task}()
 const WORKER_MONITOR_CHANS = Dict{Int,Dict{UInt64,RemoteChannel}}()
 function init_proc(state, p, log_sink)
     ctx = Context(Int[]; log_sink)
-    timespan_start(ctx, :init_proc, (;worker=p.pid), nothing)
+    @maybelog ctx timespan_start(ctx, :init_proc, (;worker=p.pid), nothing)
     # Initialize pressure and capacity
     gproc = OSProc(p.pid)
     lock(state.lock) do
@@ -355,7 +403,7 @@ function init_proc(state, p, log_sink)
                             d = WORKER_MONITOR_CHANS[wid]
                             for uid in keys(d)
                                 try
-                                    put!(d[uid], (wid, OSProc(wid), nothing, (ProcessExitedException(wid), nothing)))
+                                    put!(d[uid], TaskResult(wid, OSProc(wid), 0, ProcessExitedException(wid), nothing))
                                 catch
                                 end
                             end
@@ -383,7 +431,7 @@ function init_proc(state, p, log_sink)
     # Setup dynamic listener
     dynamic_listener!(ctx, state, p.pid)
 
-    timespan_finish(ctx, :init_proc, (;worker=p.pid), nothing)
+    @maybelog ctx timespan_finish(ctx, :init_proc, (;worker=p.pid), nothing)
 end
 function _cleanup_proc(uid, log_sink)
     empty!(CHUNK_CACHE) # FIXME: Should be keyed on uid!
@@ -399,7 +447,7 @@ end
 function cleanup_proc(state, p, log_sink)
     ctx = Context(Int[]; log_sink)
     wid = p.pid
-    timespan_start(ctx, :cleanup_proc, (;worker=wid), nothing)
+    @maybelog ctx timespan_start(ctx, :cleanup_proc, (;worker=wid), nothing)
     lock(WORKER_MONITOR_LOCK) do
         if haskey(WORKER_MONITOR_CHANS, wid)
             delete!(WORKER_MONITOR_CHANS[wid], state.uid)
@@ -419,7 +467,7 @@ function cleanup_proc(state, p, log_sink)
         end
     end
 
-    timespan_finish(ctx, :cleanup_proc, (;worker=wid), nothing)
+    @maybelog ctx timespan_finish(ctx, :cleanup_proc, (;worker=wid), nothing)
 end
 
 "Process-local condition variable (and lock) indicating task completion."
@@ -458,7 +506,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
         end
     end
 
-    chan = RemoteChannel(()->Channel(typemax(Int)))
+    chan = RemoteChannel(()->Channel{AnyTaskResult}(typemax(Int)))
     deps = dependents(d)
     ord = order(d, noffspring(deps))
 
@@ -467,24 +515,24 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
 
     master = OSProc(myid())
 
-    timespan_start(ctx, :scheduler_init, nothing, master)
+    @maybelog ctx timespan_start(ctx, :scheduler_init, nothing, master)
     try
         scheduler_init(ctx, state, d, options, deps)
     finally
-        timespan_finish(ctx, :scheduler_init, nothing, master)
+        @maybelog ctx timespan_finish(ctx, :scheduler_init, nothing, master)
     end
 
     value, errored = try
         scheduler_run(ctx, state, d, options)
     finally
         # Always try to tear down the scheduler
-        timespan_start(ctx, :scheduler_exit, nothing, master)
+        @maybelog ctx timespan_start(ctx, :scheduler_exit, nothing, master)
         try
             scheduler_exit(ctx, state, options)
         catch err
             @error "Error when tearing down scheduler" exception=(err,catch_backtrace())
         finally
-            timespan_finish(ctx, :scheduler_exit, nothing, master)
+            @maybelog ctx timespan_finish(ctx, :scheduler_exit, nothing, master)
         end
     end
 
@@ -539,20 +587,26 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
     while !isempty(state.ready) || !isempty(state.running)
         if !isempty(state.ready)
             # Nothing running, so schedule up to N thunks, 1 per N workers
-            schedule!(ctx, state)
+            @invokelatest schedule!(ctx, state)
         end
 
         check_integrity(ctx)
 
         isempty(state.running) && continue
-        timespan_start(ctx, :take, nothing, nothing)
+        @maybelog ctx timespan_start(ctx, :take, nothing, nothing)
         @dagdebug nothing :take "Waiting for results"
-        chan_value = take!(state.chan) # get result of completed thunk
-        timespan_finish(ctx, :take, nothing, nothing)
-        if chan_value isa RescheduleSignal
+        tresult = take!(state.chan) # get result of completed thunk
+        @maybelog ctx timespan_finish(ctx, :take, nothing, nothing)
+        if tresult isa RescheduleSignal
             continue
         end
-        pid, proc, thunk_id, (res, metadata) = chan_value
+
+        tresult::TaskResult
+        pid = tresult.pid
+        proc = tresult.proc
+        thunk_id = tresult.thunk_id
+        res = tresult.result
+
         @dagdebug thunk_id :take "Got finished task"
         gproc = OSProc(pid)
         safepoint(state)
@@ -563,13 +617,13 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
                     @warn "Worker $(pid) died, rescheduling work"
 
                     # Remove dead worker from procs list
-                    timespan_start(ctx, :remove_procs, (;worker=pid), nothing)
+                    @maybelog ctx timespan_start(ctx, :remove_procs, (;worker=pid), nothing)
                     remove_dead_proc!(ctx, state, gproc)
-                    timespan_finish(ctx, :remove_procs, (;worker=pid), nothing)
+                    @maybelog ctx timespan_finish(ctx, :remove_procs, (;worker=pid), nothing)
 
-                    timespan_start(ctx, :handle_fault, (;worker=pid), nothing)
+                    @maybelog ctx timespan_start(ctx, :handle_fault, (;worker=pid), nothing)
                     handle_fault(ctx, state, gproc)
-                    timespan_finish(ctx, :handle_fault, (;worker=pid), nothing)
+                    @maybelog ctx timespan_finish(ctx, :handle_fault, (;worker=pid), nothing)
                     return # effectively `continue`
                 else
                     if something(ctx.options.allow_errors, false) ||
@@ -580,13 +634,14 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
                     end
                 end
             end
-            node = unwrap_weak_checked(state.thunk_dict[thunk_id])
+            node = unwrap_weak_checked(state.thunk_dict[thunk_id])::Thunk
+            metadata = tresult.metadata
             if metadata !== nothing
                 state.worker_time_pressure[pid][proc] = metadata.time_pressure
                 #to_storage = fetch(node.options.storage)
                 #state.worker_storage_pressure[pid][to_storage] = metadata.storage_pressure
                 #state.worker_storage_capacity[pid][to_storage] = metadata.storage_capacity
-                state.worker_loadavg[pid] = metadata.loadavg
+                #state.worker_loadavg[pid] = metadata.loadavg
                 sig = signature(state, node)
                 state.signature_time_cost[sig] = (metadata.threadtime + get(state.signature_time_cost, sig, 0)) ÷ 2
                 state.signature_alloc_cost[sig] = (metadata.gc_allocd + get(state.signature_alloc_cost, sig, 0)) ÷ 2
@@ -594,8 +649,7 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
                     state.transfer_rate[] = (state.transfer_rate[] + metadata.transfer_rate) ÷ 2
                 end
             end
-            state.cache[node] = res
-            state.errored[node] = thunk_failed
+            store_result!(state, node, res; error=thunk_failed)
             if node.options !== nothing && node.options.checkpoint !== nothing
                 try
                     @invokelatest node.options.checkpoint(node, res)
@@ -604,18 +658,20 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
                 end
             end
 
-            timespan_start(ctx, :finish, (;thunk_id), (;thunk_id))
+            @maybelog ctx timespan_start(ctx, :finish, (;thunk_id), (;thunk_id))
             finish_task!(ctx, state, node, thunk_failed)
-            timespan_finish(ctx, :finish, (;thunk_id), (;thunk_id))
-
-            delete_unused_tasks!(state)
+            @maybelog ctx timespan_finish(ctx, :finish, (;thunk_id), (;thunk_id))
         end
+
+        # Allow data to be GC'd
+        tresult = nothing
+        res = nothing
 
         safepoint(state)
     end
 
     # Final value is ready
-    value = state.cache[d]
+    value = load_result(state, d)
     errored = get(state.errored, d, false)
     if !errored
         if options.checkpoint !== nothing
@@ -674,6 +730,17 @@ end
 
 const CHUNK_CACHE = Dict{Chunk,Dict{Processor,Any}}()
 
+struct FireTaskLocation
+    gproc::OSProc
+    proc::Processor
+end
+struct FireTaskSpec
+    task::Thunk
+    scope::Dagger.AbstractScope
+    est_time_util::UInt64
+    est_alloc_util::UInt64
+    est_occupancy::UInt32
+end
 function schedule!(ctx, state, procs=procs_to_use(ctx))
     lock(state.lock) do
         safepoint(state)
@@ -682,21 +749,21 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         populate_processor_cache_list!(state, procs)
 
         # Schedule tasks
-        to_fire = Dict{Tuple{OSProc,<:Processor},Vector{Tuple{Thunk,<:Any,<:Any,UInt64,UInt32}}}()
-        failed_scheduling = Thunk[]
+        to_fire = @reusable_dict :schedule!_to_fire FireTaskLocation Vector{FireTaskSpec} FireTaskLocation(OSProc(), OSProc()) FireTaskSpec[] 32
+        failed_scheduling = @reusable_vector :schedule!_failed_scheduling Union{Thunk,Nothing} nothing 32
 
         # Select a new task and get its options
         task = nothing
         @label pop_task
         if task !== nothing
-            timespan_finish(ctx, :schedule, (;thunk_id=task.id), (;thunk_id=task.id))
+            @maybelog ctx timespan_finish(ctx, :schedule, (;thunk_id=task.id), (;thunk_id=task.id))
         end
         if isempty(state.ready)
             @goto fire_tasks
         end
         task = pop!(state.ready)
-        timespan_start(ctx, :schedule, (;thunk_id=task.id), (;thunk_id=task.id))
-        if haskey(state.cache, task)
+        @maybelog ctx timespan_start(ctx, :schedule, (;thunk_id=task.id), (;thunk_id=task.id))
+        if has_result(state, task)
             if haskey(state.errored, task)
                 # An error was eagerly propagated to this task
                 finish_failed!(state, task)
@@ -705,19 +772,27 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
                 iob = IOBuffer()
                 println(iob, "Scheduling inconsistency: Task being scheduled is already cached!")
                 println(iob, "  Task: $(task.id)")
-                println(iob, "  Cache Entry: $(typeof(state.cache[task]))")
+                println(iob, "  Cache Entry: $(typeof(something(task.cache_ref)))")
                 ex = SchedulingException(String(take!(iob)))
-                state.cache[task] = ex
-                state.errored[task] = true
+                store_result!(state, task, ex; error=true)
             end
             @goto pop_task
         end
-        opts = merge(ctx.options, task.options)
+
+        # Load task inputs
+        collect_task_inputs!(state, task)
+
+        # Calculate signature
         sig = signature(state, task)
 
+        # Merge options and fill defaults
+        opts = merge(ctx.options, task.options)
+        opts = populate_defaults(opts, sig)
+
         # Calculate scope
-        scope = if task.f isa Chunk
-            task.f.scope
+        f = Dagger.value(task.inputs[1])
+        scope = if f isa Chunk
+            f.scope
         else
             if task.options.proclist !== nothing
                 # proclist overrides scope selection
@@ -726,11 +801,9 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
                 DefaultScope()
             end
         end
-        for (_,input) in task.inputs
-            input = unwrap_weak_checked(input)
-            chunk = if istask(input)
-                state.cache[input]
-            elseif input isa Chunk
+        for input in task.inputs
+            input = unwrap_weak_checked(Dagger.value(input))
+            chunk = if input isa Chunk
                 input
             else
                 nothing
@@ -739,38 +812,41 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
             scope = constrain(scope, chunk.scope)
             if scope isa Dagger.InvalidScope
                 ex = SchedulingException("Scopes are not compatible: $(scope.x), $(scope.y)")
-                state.cache[task] = ex
-                state.errored[task] = true
+                store_result!(state, task, ex; error=true)
                 set_failed!(state, task)
                 @goto pop_task
             end
         end
 
-        fallback_threshold = 1024 # TODO: Parameterize this threshold
-        if length(procs) > fallback_threshold
-            @goto fallback
-        end
-        local_procs = unique(vcat([collect(Dagger.get_processors(gp)) for gp in procs]...))
-        if length(local_procs) > fallback_threshold
-            @goto fallback
-        end
-
-        inputs = map(last, collect_task_inputs(state, task))
-        opts = populate_defaults(opts, chunktype(task.f), map(chunktype, inputs))
-        local_procs, costs = estimate_task_costs(state, local_procs, task, inputs)
-        scheduled = false
-
-        # Move our corresponding ThreadProc to be the last considered
-        if length(local_procs) > 1
-            sch_threadproc = Dagger.ThreadProc(myid(), Threads.threadid())
-            sch_thread_idx = findfirst(proc->proc==sch_threadproc, local_procs)
-            if sch_thread_idx !== nothing
-                deleteat!(local_procs, sch_thread_idx)
-                push!(local_procs, sch_threadproc)
+        # FIXME: Use compatible_processors
+        input_procs = @reusable_vector :schedule!_input_procs Processor OSProc() 32
+        for gp in procs
+            subprocs = get_processors(gp)
+            for proc in subprocs
+                if !(proc in input_procs)
+                    push!(input_procs, proc)
+                end
             end
         end
 
-        for proc in local_procs
+        sorted_procs = @reusable_vector :schedule!_sorted_procs Processor OSProc() 32
+        resize!(sorted_procs, length(input_procs))
+        costs = @reusable_dict :schedule!_costs Processor Float64 OSProc() 0.0 32
+        estimate_task_costs!(sorted_procs, costs, state, input_procs, task)
+        empty!(costs) # We don't use costs here
+        scheduled = false
+
+        # Move our corresponding ThreadProc to be the last considered
+        if length(sorted_procs) > 1
+            sch_threadproc = Dagger.ThreadProc(myid(), Threads.threadid())
+            sch_thread_idx = findfirst(proc->proc==sch_threadproc, sorted_procs)
+            if sch_thread_idx !== nothing
+                deleteat!(sorted_procs, sch_thread_idx)
+                push!(sorted_procs, sch_threadproc)
+            end
+        end
+
+        for proc in sorted_procs
             gproc = get_parent(proc)
             can_use, scope = can_use_proc(task, gproc, proc, opts, scope)
             if can_use
@@ -779,95 +855,35 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
                 if has_cap
                     # Schedule task onto proc
                     # FIXME: est_time_util = est_time_util isa MaxUtilization ? cap : est_time_util
-                    proc_tasks = get!(to_fire, (gproc, proc)) do
-                        Vector{Tuple{Thunk,<:Any,<:Any,UInt64,UInt32}}()
+                    proc_tasks = get!(to_fire, FireTaskLocation(gproc, proc)) do
+                        #=FIXME:REALLOC_VEC=#
+                        Vector{FireTaskSpec}()
                     end
-                    push!(proc_tasks, (task, scope, est_time_util, est_alloc_util, est_occupancy))
+                    push!(proc_tasks, FireTaskSpec(task, scope, est_time_util, est_alloc_util, est_occupancy))
                     state.worker_time_pressure[gproc.pid][proc] =
                         get(state.worker_time_pressure[gproc.pid], proc, 0) +
                         est_time_util
                     @dagdebug task :schedule "Scheduling to $gproc -> $proc"
+                    empty!(sorted_procs)
                     @goto pop_task
                 end
             end
         end
-        state.cache[task] = SchedulingException("No processors available, try widening scope")
-        state.errored[task] = true
+        ex = SchedulingException("No processors available, try widening scope")
+        store_result!(state, task, ex; error=true)
         set_failed!(state, task)
-        @goto pop_task
-
-        # Fast fallback algorithm, used when the smarter cost model algorithm
-        # would be too expensive
-        @label fallback
-        selected_entry = nothing
-        entry = state.procs_cache_list[]
-        cap, extra_util = nothing, nothing
-        procs_found = false
-        # N.B. if we only have one processor, we need to select it now
-        can_use, scope = can_use_proc(task, entry.gproc, entry.proc, opts, scope)
-        if can_use
-            has_cap, est_time_util, est_alloc_util, est_occupancy =
-                has_capacity(state, entry.proc, entry.gproc.pid, opts.time_util, opts.alloc_util, opts.occupancy, sig)
-            if has_cap
-                selected_entry = entry
-            else
-                procs_found = true
-                entry = entry.next
-            end
-        else
-            entry = entry.next
-        end
-        while selected_entry === nothing
-            if entry === state.procs_cache_list[]
-                # Exhausted all procs
-                if procs_found
-                    push!(failed_scheduling, task)
-                else
-                    state.cache[task] = SchedulingException("No processors available, try widening scope")
-                    state.errored[task] = true
-                    set_failed!(state, task)
-                end
-                @goto pop_task
-            end
-
-            can_use, scope = can_use_proc(task, entry.gproc, entry.proc, opts, scope)
-            if can_use
-                has_cap, est_time_util, est_alloc_util, est_occupancy =
-                    has_capacity(state, entry.proc, entry.gproc.pid, opts.time_util, opts.alloc_util, opts.occupancy, sig)
-                if has_cap
-                    # Select this processor
-                    selected_entry = entry
-                else
-                    # We could have selected it otherwise
-                    procs_found = true
-                    entry = entry.next
-                end
-            else
-                # Try next processor
-                entry = entry.next
-            end
-        end
-        @assert selected_entry !== nothing
-
-        # Schedule task onto proc
-        gproc, proc = entry.gproc, entry.proc
-        est_time_util = est_time_util isa MaxUtilization ? cap : est_time_util
-        proc_tasks = get!(to_fire, (gproc, proc)) do
-            Vector{Tuple{Thunk,<:Any,<:Any,UInt64,UInt32}}()
-        end
-        push!(proc_tasks, (task, scope, est_time_util, est_alloc_util, est_occupancy))
-
-        # Proceed to next entry to spread work
-        state.procs_cache_list[] = state.procs_cache_list[].next
+        empty!(sorted_procs)
         @goto pop_task
 
         # Fire all newly-scheduled tasks
         @label fire_tasks
-        for gpp in keys(to_fire)
-            fire_tasks!(ctx, to_fire[gpp], gpp, state)
+        for (task_loc, task_spec) in to_fire
+            fire_tasks!(ctx, task_loc, task_spec, state)
         end
+        empty!(to_fire)
 
         append!(state.ready, failed_scheduling)
+        empty!(failed_scheduling)
     end
 end
 
@@ -885,7 +901,7 @@ function monitor_procs_changed!(ctx, state)
             wait(ctx.proc_notify)
         end
 
-        timespan_start(ctx, :assign_procs, nothing, nothing)
+        @maybelog ctx timespan_start(ctx, :assign_procs, nothing, nothing)
 
         # Load new set of procs
         new_ps = procs_to_use(ctx)
@@ -913,7 +929,7 @@ function monitor_procs_changed!(ctx, state)
             end
         end
 
-        timespan_finish(ctx, :assign_procs, nothing, nothing)
+        @maybelog ctx timespan_finish(ctx, :assign_procs, nothing, nothing)
         old_ps = new_ps
     end
 end
@@ -935,40 +951,27 @@ function finish_task!(ctx, state, node, thunk_failed)
     if thunk_failed
         set_failed!(state, node)
     end
-    if node.cache
-        node.cache_ref = state.cache[node]
-    end
     schedule_dependents!(state, node, thunk_failed)
     fill_registered_futures!(state, node, thunk_failed)
 
+    #=
     to_evict = cleanup_syncdeps!(state, node)
     if node.f isa Chunk
         # FIXME: Check the graph for matching chunks
-        push!(to_evict, node.f)
+        #push!(to_evict, node.f)
     end
+    =#
+    cleanup_syncdeps!(state, node)
     if haskey(state.waiting_data, node) && isempty(state.waiting_data[node])
         delete!(state.waiting_data, node)
+        node.sch_accessible = false
+        delete_unused_task!(state, node)
     end
     #evict_all_chunks!(ctx, to_evict)
 end
 
-function delete_unused_tasks!(state)
-    to_delete = Thunk[]
-    for thunk in state.thunks_to_delete
-        if task_unused(state, thunk)
-            # Finished and nobody waiting on us, we can be deleted
-            push!(to_delete, thunk)
-        end
-    end
-    for thunk in to_delete
-        # Delete all cached data
-        task_delete!(state, thunk)
-
-        pop!(state.thunks_to_delete, thunk)
-    end
-end
 function delete_unused_task!(state, thunk)
-    if task_unused(state, thunk)
+    if has_result(state, thunk) && !thunk.eager_accessible && !thunk.sch_accessible
         # Will not be accessed further, delete all cached data
         task_delete!(state, thunk)
         return true
@@ -976,11 +979,8 @@ function delete_unused_task!(state, thunk)
         return false
     end
 end
-task_unused(state, thunk) =
-    haskey(state.cache, thunk) && !haskey(state.waiting_data, thunk)
 function task_delete!(state, thunk)
-    delete!(state.cache, thunk)
-    delete!(state.errored, thunk)
+    clear_result!(state, thunk)
     delete!(state.valid, thunk)
     delete!(state.thunk_dict, thunk.id)
 end
@@ -995,46 +995,57 @@ end
 function evict_chunks!(log_sink, chunks::Set{Chunk})
     # Need worker id or else Context might use Processors which user does not want us to use.
     # In particular workers which have not yet run using Dagger will cause the call below to throw an exception
-    ctx = Context([myid()];log_sink) 
+    ctx = Context([myid()]; log_sink)
     for chunk in chunks
         lock(TASK_SYNC) do
-            timespan_start(ctx, :evict, (;worker=myid()), (;data=chunk))
+            @maybelog ctx timespan_start(ctx, :evict, (;worker=myid()), (;data=chunk))
             haskey(CHUNK_CACHE, chunk) && delete!(CHUNK_CACHE, chunk)
-            timespan_finish(ctx, :evict, (;worker=myid()), (;data=chunk))
+            @maybelog ctx timespan_finish(ctx, :evict, (;worker=myid()), (;data=chunk))
         end
     end
     nothing
 end
 
-fire_task!(ctx, thunk::Thunk, p, state; scope=AnyScope(), time_util=10^9, alloc_util=10^6, occupancy=typemax(UInt32)) =
-    fire_task!(ctx, (thunk, scope, time_util, alloc_util, occupancy), p, state)
-fire_task!(ctx, (thunk, scope, time_util, alloc_util, occupancy)::Tuple{Thunk,<:Any}, p, state) =
-    fire_tasks!(ctx, [(thunk, scope, time_util, alloc_util, occupancy)], p, state)
-function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
-    to_send = []
-    for (thunk, scope, time_util, alloc_util, occupancy) in thunks
+"A serializable description of a `Thunk` to be executed."
+struct TaskSpec
+    thunk_id::Int
+    est_time_util::UInt64
+    est_alloc_util::UInt64
+    est_occupancy::UInt32
+    scope::Dagger.AbstractScope
+    Tf::Type
+    data::Vector{Argument}
+    # TODO: Get these from options
+    get_result::Bool
+    persist::Bool
+    cache::Bool
+    meta::Bool
+    options#::Options
+    propagated::NamedTuple
+    ctx_vars::NamedTuple
+    sch_handle::SchedulerHandle
+    sch_uid::UInt64
+end
+Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
+
+function fire_tasks!(ctx, task_loc::FireTaskLocation, task_specs::Vector{FireTaskSpec}, state)
+    gproc, proc = task_loc.gproc, task_loc.proc
+    to_send = @reusable_vector :fire_tasks!_to_send Union{TaskSpec,Nothing} nothing 32
+    for task_spec in task_specs
+        thunk = task_spec.task
         push!(state.running, thunk)
         state.running_on[thunk] = gproc
-        if thunk.cache && thunk.cache_ref !== nothing
-            # the result might be already cached
-            data = thunk.cache_ref
-            if data !== nothing
-                # cache hit
-                state.cache[thunk] = data
-                thunk_failed = get(state.errored, thunk, false)
-                finish_task!(ctx, state, thunk, thunk_failed)
-                continue
-            else
-                # cache miss
-                thunk.cache_ref = nothing
-            end
+        if has_result(state, thunk)
+            # the result is already cached
+            thunk_failed = get(state.errored, thunk, false)
+            finish_task!(ctx, state, thunk, thunk_failed)
+            continue
         end
         if thunk.options !== nothing && thunk.options.restore !== nothing
             try
                 result = @invokelatest thunk.options.restore(thunk)
                 if result isa Chunk
-                    state.cache[thunk] = result
-                    state.errored[thunk] = false
+                    store_result!(state, thunk, result)
                     finish_task!(ctx, state, thunk, false)
                     continue
                 elseif result !== nothing
@@ -1045,16 +1056,14 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
             end
         end
 
-        ids = Int[0]
-        data = Any[thunk.f]
-        positions = Union{Symbol,Nothing}[]
-        for (idx, pos_x) in enumerate(thunk.inputs)
-            pos, x = pos_x
-            x = unwrap_weak_checked(x)
-            push!(ids, istask(x) ? x.id : -idx)
-            push!(data, istask(x) ? state.cache[x] : x)
-            push!(positions, pos)
+        # Unwrap any weak arguments
+        args = map(copy, thunk.inputs)
+        for arg in args
+            # TODO: Only for non-delayed: @assert Dagger.isweak(Dagger.value(arg)) "Non-weak argument: $(arg)"
+            arg.value = unwrap_weak_checked(Dagger.value(arg))
         end
+        Tf = chunktype(first(args))
+
         toptions = thunk.options !== nothing ? thunk.options : ThunkOptions()
         options = merge(ctx.options, toptions)
         propagated = get_propagated_options(thunk)
@@ -1063,32 +1072,35 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
         sch_handle = SchedulerHandle(ThunkID(thunk.id, nothing), state.worker_chans[gproc.pid]...)
 
         # TODO: De-dup common fields (log_sink, uid, etc.)
-        push!(to_send, Any[thunk.id, time_util, alloc_util, occupancy,
-                           scope, chunktype(thunk.f), data,
-                           thunk.get_result, thunk.persist, thunk.cache, thunk.meta, options,
-                           propagated, ids, positions,
-                           (log_sink=ctx.log_sink, profile=ctx.profile),
-                           sch_handle, state.uid])
+        push!(to_send, TaskSpec(
+            thunk.id,
+            task_spec.est_time_util, task_spec.est_alloc_util, task_spec.est_occupancy,
+            task_spec.scope, Tf, args,
+            thunk.get_result, thunk.persist, thunk.cache, thunk.meta, options,
+            propagated,
+            (log_sink=ctx.log_sink, profile=ctx.profile),
+            sch_handle, state.uid))
     end
+
     # N.B. We don't batch these because we might get a deserialization
     # error due to something not being defined on the worker, and then we don't
     # know which task failed.
-    tasks = Task[]
-    for ts in to_send
-        # TODO: errormonitor
-        @async begin
-            timespan_start(ctx, :fire, (;worker=gproc.pid), nothing)
+    for (idx, task_spec) in enumerate(to_send)
+        @reusable_tasks :fire_tasks!_task_cache 32 _->nothing "fire_tasks!" ()->begin
+            @maybelog ctx timespan_start(ctx, :fire, (;worker=gproc.pid), nothing)
             try
-                remotecall_wait(do_tasks, gproc.pid, proc, state.chan, [ts]);
+                remotecall_wait(do_tasks, gproc.pid, proc, state.chan, [task_spec]);
             catch err
                 bt = catch_backtrace()
-                thunk_id = ts[1]
-                put!(state.chan, (gproc.pid, proc, thunk_id, (CapturedException(err, bt), nothing)))
+                thunk_id = task_spec.thunk_id
+                put!(state.chan, TaskResult(gproc.pid, proc, thunk_id, CapturedException(err, bt), nothing))
             finally
-                timespan_finish(ctx, :fire, (;worker=gproc.pid), nothing)
+                @maybelog ctx timespan_finish(ctx, :fire, (;worker=gproc.pid), nothing)
             end
+            return
         end
     end
+    empty!(to_send)
 end
 
 @static if VERSION >= v"1.9"
@@ -1151,18 +1163,10 @@ function Base.notify(db::Doorbell)
 end
 end
 
-struct TaskSpecKey
-    task_id::Int
-    task_spec::Vector{Any}
-    TaskSpecKey(task_spec::Vector{Any}) = new(task_spec[1], task_spec)
-end
-Base.getindex(key::TaskSpecKey) = key.task_spec
-Base.hash(key::TaskSpecKey, h::UInt) = hash(key.task_id, hash(TaskSpecKey, h))
-
 struct ProcessorInternalState
     ctx::Context
     proc::Processor
-    queue::LockedObject{PriorityQueue{TaskSpecKey, UInt32, Base.Order.ForwardOrdering}}
+    queue::LockedObject{PriorityQueue{TaskSpec, UInt32, Base.Order.ForwardOrdering}}
     reschedule::Doorbell
     tasks::Dict{Int,Task}
     proc_occupancy::Base.RefValue{UInt32}
@@ -1211,12 +1215,12 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
             # Wait for new tasks
             if !work_to_do
                 @dagdebug nothing :processor "Waiting for tasks"
-                timespan_start(ctx, :proc_run_wait, (;worker=wid, processor=to_proc), nothing)
+                @maybelog ctx timespan_start(ctx, :proc_run_wait, (;worker=wid, processor=to_proc), nothing)
                 wait(istate.reschedule)
                 @static if VERSION >= v"1.9"
                     reset(istate.reschedule)
                 end
-                timespan_finish(ctx, :proc_run_wait, (;worker=wid, processor=to_proc), nothing)
+                @maybelog ctx timespan_finish(ctx, :proc_run_wait, (;worker=wid, processor=to_proc), nothing)
                 if istate.done[]
                     return
                 end
@@ -1224,7 +1228,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
 
             # Fetch a new task to execute
             @dagdebug nothing :processor "Trying to dequeue"
-            timespan_start(ctx, :proc_run_fetch, (;worker=wid, processor=to_proc), nothing)
+            @maybelog ctx timespan_start(ctx, :proc_run_fetch, (;worker=wid, processor=to_proc), nothing)
             work_to_do = false
             task_and_occupancy = lock(istate.queue) do queue
                 # Only steal if there are multiple queued tasks, to prevent
@@ -1243,7 +1247,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                 return queue_result
             end
             if task_and_occupancy === nothing
-                timespan_finish(ctx, :proc_run_fetch, (;worker=wid, processor=to_proc), nothing)
+                @maybelog ctx timespan_finish(ctx, :proc_run_fetch, (;worker=wid, processor=to_proc), nothing)
 
                 @dagdebug nothing :processor "Failed to dequeue"
 
@@ -1258,7 +1262,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                 @dagdebug nothing :processor "Trying to steal"
 
                 # Try to steal a task
-                timespan_start(ctx, :steal_local, (;worker=wid, processor=to_proc), nothing)
+                @maybelog ctx timespan_start(ctx, :steal_local, (;worker=wid, processor=to_proc), nothing)
 
                 # Try to steal from local queues randomly
                 # TODO: Prioritize stealing from busiest processors
@@ -1278,9 +1282,8 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                         if length(queue) == 0
                             return nothing
                         end
-                        task_spec, occupancy = peek(queue)
-                        task = task_spec[]
-                        scope = task[5]
+                        task, occupancy = peek(queue)
+                        scope = task.scope
                         if !isa(constrain(scope, Dagger.ExactScope(to_proc)),
                                 Dagger.InvalidScope) &&
                            typemax(UInt32) - proc_occupancy_cached >= occupancy
@@ -1291,14 +1294,14 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                     end
                     if task_and_occupancy !== nothing
                         from_proc = other_istate.proc
-                        thunk_id = task[1]
+                        thunk_id = task.thunk_id
                         @dagdebug thunk_id :processor "Stolen from $from_proc by $to_proc"
-                        timespan_finish(ctx, :steal_local, (;worker=wid, processor=to_proc), (;from_proc, thunk_id))
+                        @maybelog ctx timespan_finish(ctx, :steal_local, (;worker=wid, processor=to_proc), (;from_proc, thunk_id))
                         # TODO: Keep stealing until we hit full occupancy?
                         @goto execute
                     end
                 end
-                timespan_finish(ctx, :steal_local, (;worker=wid, processor=to_proc), nothing)
+                @maybelog ctx timespan_finish(ctx, :steal_local, (;worker=wid, processor=to_proc), nothing)
 
                 # TODO: Try to steal from remote queues
 
@@ -1306,16 +1309,24 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
             end
 
             @label execute
-            task_spec, task_occupancy = task_and_occupancy
-            task = task_spec[]
-            thunk_id = task[1]
-            time_util = task[2]
-            timespan_finish(ctx, :proc_run_fetch, (;worker=wid, processor=to_proc), (;thunk_id, proc_occupancy=proc_occupancy[], task_occupancy))
+            task, task_occupancy = task_and_occupancy
+            thunk_id = task.thunk_id
+            time_util = task.est_time_util
+            @maybelog ctx timespan_finish(ctx, :proc_run_fetch, (;worker=wid, processor=to_proc), (;thunk_id, proc_occupancy=proc_occupancy[], task_occupancy))
             @dagdebug thunk_id :processor "Dequeued task"
 
             # Execute the task and return its result
-            t = @task begin
-                result = try
+            t = @reusable_tasks :start_processor_runner!_task_cache 32 t->begin
+                lock(istate.queue) do _
+                    tid = task_tid_for_processor(to_proc)
+                    if tid !== nothing
+                        Dagger.set_task_tid!(t, tid)
+                    else
+                        t.sticky = false
+                    end
+                end
+            end #="thunk $thunk_id"=#"thunk" ()->begin
+                result, metadata = try
                     do_task(to_proc, task)
                 catch err
                     bt = catch_backtrace()
@@ -1329,7 +1340,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                     notify(istate.reschedule)
                 end
                 try
-                    put!(return_queue, (myid(), to_proc, thunk_id, result))
+                    put!(return_queue, TaskResult(myid(), to_proc, thunk_id, result, metadata))
                 catch err
                     if unwrap_nested_exception(err) isa InvalidStateException || !isopen(return_queue)
                         @dagdebug thunk_id :execute "Return queue is closed, failing to put result" chan=return_queue exception=(err, catch_backtrace())
@@ -1337,15 +1348,10 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                         rethrow(err)
                     end
                 end
+                return
             end
             lock(istate.queue) do _
-                tid = task_tid_for_processor(to_proc)
-                if tid !== nothing
-                    Dagger.set_task_tid!(t, tid)
-                else
-                    t.sticky = false
-                end
-                tasks[thunk_id] = errormonitor_tracked("thunk $thunk_id", schedule(t))
+                tasks[thunk_id] = t
                 proc_occupancy[] += task_occupancy
                 time_pressure[] += time_util
             end
@@ -1369,13 +1375,12 @@ Executes a batch of tasks on `to_proc`, returning their results through
 function do_tasks(to_proc, return_queue, tasks)
     @dagdebug nothing :processor "Enqueuing task batch" batch_size=length(tasks)
 
-    # FIXME: This is terrible
-    ctx_vars = first(tasks)[16]
+    ctx_vars = first(tasks).ctx_vars
     ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
-    uid = first(tasks)[18]
+    uid = first(tasks).sch_uid
     state = proc_states(uid) do states
         get!(states, to_proc) do
-            queue = PriorityQueue{TaskSpecKey, UInt32}()
+            queue = PriorityQueue{TaskSpec, UInt32}()
             queue_locked = LockedObject(queue)
             reschedule = Doorbell()
             istate = ProcessorInternalState(ctx, to_proc,
@@ -1393,9 +1398,9 @@ function do_tasks(to_proc, return_queue, tasks)
     istate = state.state
     lock(istate.queue) do queue
         for task in tasks
-            thunk_id = task[1]
-            occupancy = task[4]
-            timespan_start(ctx, :enqueue, (;processor=to_proc, thunk_id), nothing)
+            thunk_id = task.thunk_id
+            occupancy = task.est_occupancy
+            @maybelog ctx timespan_start(ctx, :enqueue, (;processor=to_proc, thunk_id), nothing)
             should_launch = lock(TASK_SYNC) do
                 # Already running; don't try to re-launch
                 if !(thunk_id in TASKS_RUNNING)
@@ -1406,8 +1411,8 @@ function do_tasks(to_proc, return_queue, tasks)
                 end
             end
             should_launch || continue
-            enqueue!(queue, TaskSpecKey(task), occupancy)
-            timespan_finish(ctx, :enqueue, (;processor=to_proc, thunk_id), nothing)
+            enqueue!(queue, task, occupancy)
+            @maybelog ctx timespan_finish(ctx, :enqueue, (;processor=to_proc, thunk_id), nothing)
             @dagdebug thunk_id :processor "Enqueued task"
         end
     end
@@ -1428,42 +1433,48 @@ function do_tasks(to_proc, return_queue, tasks)
 end
 
 """
-    do_task(to_proc, task_desc) -> Any
+    do_task(to_proc, task::TaskSpec) -> Any
 
-Executes a single task specified by `task_desc` on `to_proc`.
+Executes a single task specified by `task` on `to_proc`.
 """
-function do_task(to_proc, task_desc)
-    thunk_id, est_time_util, est_alloc_util, est_occupancy,
-        scope, Tf, data,
-        send_result, persist, cache, meta,
-        options, propagated, ids, positions,
-        ctx_vars, sch_handle, sch_uid = task_desc
+function do_task(to_proc, task::TaskSpec)
+    thunk_id = task.thunk_id
+
+    ctx_vars = task.ctx_vars
     ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
 
     from_proc = OSProc()
-    Tdata = Any[]
-    for x in data
-        push!(Tdata, chunktype(x))
-    end
+    #Tdata = Any[]
+    data = task.data
+    #for arg in data
+    #    push!(Tdata, chunktype(Dagger.value(arg)))
+    #end
+    Tf = task.Tf
     f = isdefined(Tf, :instance) ? Tf.instance : nothing
 
     # Wait for required resources to become available
+    options = task.options
     to_storage = options.storage !== nothing ? fetch(options.storage) : MemPool.GLOBAL_DEVICE[]
-    to_storage_name = nameof(typeof(to_storage))
-    storage_cap = storage_capacity(to_storage)
+    #to_storage_name = nameof(typeof(to_storage))
+    #storage_cap = storage_capacity(to_storage)
 
-    timespan_start(ctx, :storage_wait, (;thunk_id, processor=to_proc), (;f, device=typeof(to_storage)))
+    @maybelog ctx timespan_start(ctx, :storage_wait, (;thunk_id, processor=to_proc), (;f, device=typeof(to_storage)))
+    est_time_util = task.est_time_util
+    est_alloc_util = task.est_alloc_util
     real_time_util = Ref{UInt64}(0)
     real_alloc_util = UInt64(0)
+    #= TODO
     if !meta
         # Factor in the memory costs for our lazy arguments
         for arg in data[2:end]
-            if arg isa Chunk
-                est_alloc_util += arg.handle.size
+            if Dagger.valuetype(arg) <: Chunk
+                est_alloc_util += Dagger.value(arg).handle.size
             end
         end
     end
+    =#
 
+    #= FIXME: Serialize on over-memory situation
     debug_storage(msg::String) = @debug begin
         let est_alloc_util=Base.format_bytes(est_alloc_util),
             real_alloc_util=Base.format_bytes(real_alloc_util),
@@ -1474,7 +1485,7 @@ function do_task(to_proc, task_desc)
     lock(TASK_SYNC) do
         while true
             # Get current time utilization for the selected processor
-            time_dict = get!(()->Dict{Processor,Ref{UInt64}}(), PROCESSOR_TIME_UTILIZATION, sch_uid)
+            time_dict = get!(()->Dict{Processor,Ref{UInt64}}(), PROCESSOR_TIME_UTILIZATION, task.sch_uid)
             real_time_util = get!(()->Ref{UInt64}(UInt64(0)), time_dict, to_proc)
 
             # Get current allocation utilization and capacity
@@ -1483,48 +1494,51 @@ function do_task(to_proc, task_desc)
 
             # Check if we'll go over memory capacity from running this thunk
             # Waits for free storage, if necessary
-            #= TODO: Implement a priority queue, ordered by est_alloc_util
-            if est_alloc_util > storage_cap
-                debug_storage("WARN: Estimated utilization above storage capacity on $to_storage_name, proceeding anyway")
-                break
-            end
-            if est_alloc_util + real_alloc_util > storage_cap
-                if MemPool.externally_varying(to_storage)
-                    debug_storage("WARN: Insufficient space and allocation behavior is externally varying on $to_storage_name, proceeding anyway")
-                    break
-                end
-                if length(TASKS_RUNNING) <= 2 # This task + eager submission task
-                    debug_storage("WARN: Insufficient space and no other running tasks on $to_storage_name, proceeding anyway")
-                    break
-                end
-                # Fully utilized, wait and re-check
-                debug_storage("Waiting for free $to_storage_name")
-                wait(TASK_SYNC)
-            else
-                # Sufficient free storage is available, prepare for execution
-                debug_storage("Using available $to_storage_name")
-                break
-            end
-            =#
+            # TODO: Implement a priority queue, ordered by est_alloc_util
+            #if est_alloc_util > storage_cap
+            #    debug_storage("WARN: Estimated utilization above storage capacity on $to_storage_name, proceeding anyway")
+            #    break
+            #end
+            #if est_alloc_util + real_alloc_util > storage_cap
+            #    if MemPool.externally_varying(to_storage)
+            #        debug_storage("WARN: Insufficient space and allocation behavior is externally varying on $to_storage_name, proceeding anyway")
+            #        break
+            #    end
+            #    if length(TASKS_RUNNING) <= 2 # This task + eager submission task
+            #        debug_storage("WARN: Insufficient space and no other running tasks on $to_storage_name, proceeding anyway")
+            #        break
+            #    end
+            #    # Fully utilized, wait and re-check
+            #    debug_storage("Waiting for free $to_storage_name")
+            #    wait(TASK_SYNC)
+            #else
+            #    # Sufficient free storage is available, prepare for execution
+            #    debug_storage("Using available $to_storage_name")
+            #    break
+            #end
             # FIXME
             break
         end
     end
-    timespan_finish(ctx, :storage_wait, (;thunk_id, processor=to_proc), (;f, device=typeof(to_storage)))
+    @maybelog ctx timespan_finish(ctx, :storage_wait, (;thunk_id, processor=to_proc), (;f, device=typeof(to_storage)))
+    =#
 
     @dagdebug thunk_id :execute "Moving data"
 
     # Initiate data transfers for function and arguments
     transfer_time = Threads.Atomic{UInt64}(0)
     transfer_size = Threads.Atomic{UInt64}(0)
-    _data, _ids = if meta
-        (Any[first(data)], Int[first(ids)]) # always fetch function
+    _data = if task.meta
+        Argument[first(data)] # always fetch function
     else
-        (data, ids)
+        data
     end
-    fetch_tasks = map(Iterators.zip(_data,_ids)) do (x, id)
+    fetch_tasks = map(_data) do arg
+        #=FIXME:REALLOC_TASKS=#
         @async begin
-            timespan_start(ctx, :move, (;thunk_id, id, processor=to_proc), (;f, data=x))
+            value = Dagger.value(arg)
+            pos = arg.pos
+            @maybelog ctx timespan_start(ctx, :move, (;thunk_id, pos, processor=to_proc), (;f, data=value))
             #= FIXME: This isn't valid if x is written to
             x = if x isa Chunk
                 value = lock(TASK_SYNC) do
@@ -1567,31 +1581,28 @@ function do_task(to_proc, task_desc)
                 end
             else
             =#
-            x = @invokelatest move(to_proc, x)
+            new_value = @invokelatest move(to_proc, value)
             #end
-            @dagdebug thunk_id :move "Moved argument $id to $to_proc: $(typeof(x))"
-            timespan_finish(ctx, :move, (;thunk_id, id, processor=to_proc), (;f, data=x); tasks=[Base.current_task()])
-            return x
+            @dagdebug thunk_id :move "Moved argument @ $pos to $to_proc: $(typeof(value)) -> $(typeof(new_value))"
+            @maybelog ctx timespan_finish(ctx, :move, (;thunk_id, pos, processor=to_proc), (;f, data=new_value); tasks=[Base.current_task()])
+            arg.value = new_value
+            return
         end
     end
-    fetched = Any[]
     for task in fetch_tasks
-        push!(fetched, fetch_report(task))
-    end
-    if meta
-        append!(fetched, data[2:end])
+        fetch_report(task)
     end
 
-    f = popfirst!(fetched)
+    f = Dagger.value(first(data))
     @assert !(f isa Chunk) "Failed to unwrap thunk function"
-    fetched_args = Any[]
-    fetched_kwargs = Pair{Symbol,Any}[]
-    for (idx, x) in enumerate(fetched)
-        pos = positions[idx]
-        if pos === nothing
-            push!(fetched_args, x)
+    fetched_args = @reusable_vector :do_task_fetched_args Any nothing 32
+    fetched_kwargs = @reusable_vector :do_task_fetched_kwargs Pair{Symbol,Any} :NULL=>nothing 32
+    for idx in 2:length(data)
+        arg = data[idx]
+        if Dagger.ispositional(arg)
+            push!(fetched_args, Dagger.value(arg))
         else
-            push!(fetched_kwargs, pos => x)
+            push!(fetched_kwargs, Dagger.arg_kw(arg) => Dagger.value(arg))
         end
     end
 
@@ -1604,8 +1615,7 @@ function do_task(to_proc, task_desc)
     =#
 
     real_time_util[] += est_time_util
-    timespan_start(ctx, :compute, (;thunk_id, processor=to_proc), (;f))
-    res = nothing
+    @maybelog ctx timespan_start(ctx, :compute, (;thunk_id, processor=to_proc), (;f))
 
     # Start counting time and GC allocations
     threadtime_start = cputhreadtime()
@@ -1614,38 +1624,49 @@ function do_task(to_proc, task_desc)
 
     @dagdebug thunk_id :execute "Executing $(typeof(f))"
 
+    logging_enabled = !(ctx.log_sink isa TimespanLogging.NoOpLog)
+
     result_meta = try
         # Set TLS variables
-        Dagger.set_tls!((
-            sch_uid,
-            sch_handle,
+        Dagger.set_tls!((;
+            sch_uid=task.sch_uid,
+            sch_handle=task.sch_handle,
             processor=to_proc,
-            task_spec=task_desc,
+            task_spec=task,
+            logging_enabled,
         ))
 
-        res = Dagger.with_options(propagated) do
+        result = Dagger.with_options(task.propagated) do
             # Execute
             execute!(to_proc, f, fetched_args...; fetched_kwargs...)
         end
+        empty!(fetched_args)
+        empty!(fetched_kwargs)
 
         # Check if result is safe to store
+        # FIXME: Move here and below *after* timespan_finish for :compute
         device = nothing
-        if !(res isa Chunk)
-            timespan_start(ctx, :storage_safe_scan, (;thunk_id, processor=to_proc), (;T=typeof(res)))
-            device = if walk_storage_safe(res)
+        if !(result isa Chunk)
+            @maybelog ctx timespan_start(ctx, :storage_safe_scan, (;thunk_id, processor=to_proc), (;T=typeof(result)))
+            device = if walk_storage_safe(result)
                 to_storage
             else
                 MemPool.CPURAMDevice()
             end
-            timespan_finish(ctx, :storage_safe_scan, (;thunk_id, processor=to_proc), (;T=typeof(res)))
+            @maybelog ctx timespan_finish(ctx, :storage_safe_scan, (;thunk_id, processor=to_proc), (;T=typeof(result)))
         end
 
         # Construct result
-        # TODO: We should cache this locally
-        send_result || meta ? res : tochunk(res, to_proc; device, persist, cache=persist ? true : cache,
-                                            tag=options.storage_root_tag,
-                                            leaf_tag=something(options.storage_leaf_tag, MemPool.Tag()),
-                                            retain=options.storage_retain)
+        result_meta = if task.get_result || task.meta
+            result
+        else
+            # TODO: We should cache this locally
+            cache = task.persist || task.cache
+            tochunk(result, to_proc; device, task.persist, cache,
+                    tag=options.storage_root_tag,
+                    leaf_tag=something(options.storage_leaf_tag, MemPool.Tag()),
+                    retain=options.storage_retain)
+        end
     catch ex
         bt = catch_backtrace()
         RemoteException(myid(), CapturedException(ex, bt))
@@ -1654,7 +1675,8 @@ function do_task(to_proc, task_desc)
     threadtime = cputhreadtime() - threadtime_start
     # FIXME: This is not a realistic measure of max. required memory
     #gc_allocd = min(max(UInt64(Base.gc_num().allocd) - UInt64(gcnum_start.allocd), UInt64(0)), UInt64(1024^4))
-    timespan_finish(ctx, :compute, (;thunk_id, processor=to_proc), (;f))
+    @maybelog ctx timespan_finish(ctx, :compute, (;thunk_id, processor=to_proc), (;f))
+
     lock(TASK_SYNC) do
         real_time_util[] -= est_time_util
         pop!(TASKS_RUNNING, thunk_id)
@@ -1666,12 +1688,13 @@ function do_task(to_proc, task_desc)
     # TODO: debug_storage("Releasing $to_storage_name")
     metadata = (
         time_pressure=real_time_util[],
-        storage_pressure=real_alloc_util,
-        storage_capacity=storage_cap,
-        loadavg=((Sys.loadavg()...,) ./ Sys.CPU_THREADS),
+        #storage_pressure=real_alloc_util,
+        #storage_capacity=storage_cap,
+        #loadavg=((Sys.loadavg()...,) ./ Sys.CPU_THREADS),
         threadtime=threadtime,
         # FIXME: Add runtime allocation tracking
-        gc_allocd=(isa(result_meta, Chunk) ? result_meta.handle.size : 0),
+        #gc_allocd=(isa(result_meta, Chunk) ? result_meta.handle.size : 0),
+        gc_allocd=0,
         transfer_rate=(transfer_size[] > 0 && transfer_time[] > 0) ? round(UInt64, transfer_size[] / (transfer_time[] / 10^9)) : nothing,
     )
     return (result_meta, metadata)
