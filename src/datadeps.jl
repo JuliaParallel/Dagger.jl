@@ -530,7 +530,14 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     write_num = 1
     proc_idx = 1
     pressures = Dict{Processor,Int}()
+    region_split = DATADEPS_REGION_SPLIT[]
+    task_count = 1
     for (spec, task) in queue.seen_tasks[task_order]
+        if task_count == region_split
+            # Split the region
+            break
+        end
+
         # Populate all task dependencies
         populate_task_info!(state, spec, task)
 
@@ -808,7 +815,11 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
         write_num += 1
         proc_idx = mod1(proc_idx + 1, length(all_procs))
+        task_count += 1
     end
+
+    # Remove processed tasks
+    deleteat!(queue.seen_tasks, 1:(task_count-1))
 
     # Copy args from remote to local
     if queue.aliasing
@@ -955,16 +966,23 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
                 queue = DataDepsTaskQueue(get_options(:task_queue);
                                           traversal, scheduler, aliasing)
                 with_options(f; task_queue=queue)
-                distribute_tasks!(queue)
+                while !isempty(queue.seen_tasks)
+                    @dagdebug nothing :spawn_datadeps "Entering Datadeps region"
+                    distribute_tasks!(queue)
+                end
             end
         else
             queue = DataDepsTaskQueue(get_options(:task_queue);
                                       traversal, scheduler, aliasing)
             result = with_options(f; task_queue=queue)
-            distribute_tasks!(queue)
+            while !isempty(queue.seen_tasks)
+                @dagdebug nothing :spawn_datadeps "Entering Datadeps region"
+                distribute_tasks!(queue)
+            end
         end
         return result
     end
 end
 const DATADEPS_SCHEDULER = ScopedValue{Union{Symbol,Nothing}}(nothing)
 const DATADEPS_LAUNCH_WAIT = ScopedValue{Union{Bool,Nothing}}(nothing)
+const DATADEPS_REGION_SPLIT = ScopedValue{Int}(typemax(Int))
