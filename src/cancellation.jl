@@ -1,5 +1,5 @@
 function cancel!(task::DTask; force::Bool=false)
-    tid = lock(Dagger.EAGER_ID_MAP) do id_map
+    tid = lock(Dagger.Sch.EAGER_ID_MAP) do id_map
         id_map[task.uid]
     end
     cancel!(tid; force)
