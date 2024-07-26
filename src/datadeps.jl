@@ -922,7 +922,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 else
                     get_write_deps!(state, arg, nothing, write_num, free_syncdeps)
                 end
-                Dagger.@spawn scope=free_scope syncdeps=free_syncdeps Dagger.unsafe_free!(remote_arg)
+                fetch(Dagger.@spawn scope=free_scope syncdeps=free_syncdeps Dagger.unsafe_free!(remote_arg); raw=true)
             end
         end
     end
