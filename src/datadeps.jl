@@ -258,6 +258,11 @@ function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
             push!(dependencies_to_add, (readdep, writedep, ainfo, dep_mod, arg))
         end
 
+        if !any(dep->dep[1] === identity, deps)
+            # Also add an identity dependency for unsafe_free
+            push!(deps, identity)
+        end
+
         # Populate argument write info
         populate_argument_info!(state, arg, deps)
     end
@@ -879,6 +884,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                     get_write_deps!(state, ainfo, nothing, write_num, copy_from_syncdeps)
                     @dagdebug nothing :spawn_datadeps "$(length(copy_from_syncdeps)) syncdeps"
                     copy_from = Dagger.@spawn scope=copy_from_scope syncdeps=copy_from_syncdeps meta=true Dagger.move!(dep_mod, data_local_space, data_remote_space, arg_local, arg_remote)
+                    add_writer!(state, ainfo, copy_from, write_num)
                 else
                     @dagdebug nothing :spawn_datadeps "[$dep_mod] Skipped copy-from (local): $data_remote_space"
                 end
@@ -907,8 +913,29 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 get_write_deps!(state, arg, nothing, write_num, copy_from_syncdeps)
                 @dagdebug nothing :spawn_datadeps "$(length(copy_from_syncdeps)) syncdeps"
                 copy_from = Dagger.@spawn scope=copy_from_scope syncdeps=copy_from_syncdeps meta=true Dagger.move!(identity, data_local_space, data_remote_space, arg_local, arg_remote)
+                add_writer!(state, arg, copy_from, write_num)
             else
                 @dagdebug nothing :spawn_datadeps "Skipped copy-from (local): $data_remote_space"
+            end
+        end
+    end
+    write_num += 1
+
+    # Free all allocated buffers
+    for remote_space in keys(state.remote_args)
+        for (arg, remote_arg) in state.remote_args[remote_space]
+            if memory_space(arg) != remote_space
+                # We allocated this buffer, we can free it
+                remote_proc = first(processors(remote_space))
+                free_scope = ExactScope(remote_proc)
+                free_syncdeps = Set()
+                if state.aliasing
+                    ainfo = aliasing(arg, identity)
+                    get_write_deps!(state, ainfo, nothing, write_num, free_syncdeps)
+                else
+                    get_write_deps!(state, arg, nothing, write_num, free_syncdeps)
+                end
+                fetch(Dagger.@spawn scope=free_scope syncdeps=free_syncdeps Dagger.unsafe_free!(remote_arg); raw=true)
             end
         end
     end
