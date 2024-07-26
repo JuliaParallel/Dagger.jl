@@ -981,6 +981,7 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
                                           traversal, scheduler, aliasing)
                 with_options(f; task_queue=queue)
                 while !isempty(queue.seen_tasks)
+                    @dagdebug nothing :spawn_datadeps "Entering Datadeps region"
                     distribute_tasks!(queue)
                 end
             end
@@ -989,6 +990,7 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
                                       traversal, scheduler, aliasing)
             result = with_options(f; task_queue=queue)
             while !isempty(queue.seen_tasks)
+                @dagdebug nothing :spawn_datadeps "Entering Datadeps region"
                 distribute_tasks!(queue)
             end
         end
