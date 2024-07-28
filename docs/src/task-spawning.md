@@ -29,8 +29,8 @@ it'll be passed as-is to the function `f` (with some exceptions).
 
 !!! note "Task / thread occupancy"
     By default, `Dagger` assumes that tasks saturate the thread they are running on and does not try to schedule other tasks on the thread.
-    This default can be controlled by specifying [`Sch.ThunkOptions`](@ref) (more details can be found under [Scheduler and Thunk options](@ref)).\
-    The section [Changing the thread occupancy for low-utilization tasks](@ref) shows a runnable example of how to achieve this.
+    This default can be controlled by specifying [`Sch.ThunkOptions`](@ref) (more details can be found under [Scheduler and Thunk options](@ref)).
+    The section [Changing the thread occupancy](@ref) shows a runnable example of how to achieve this.
 
 ## Options
 
