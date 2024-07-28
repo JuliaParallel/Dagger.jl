@@ -224,6 +224,7 @@ delayed(+; single=1)(1, 2)
 ## Changing the thread occupancy
 
 One of the supported [`Sch.ThunkOptions`](@ref) is the `occupancy` keyword.
+This keyword can be used to communicate that a task is not expected to fully saturate a CPU core (e.g. due to being IO-bound).
 The basic usage looks like this:
 
 ```julia
@@ -232,7 +233,7 @@ Dagger.@spawn occupancy=Dict(Dagger.ThreadProc=>0) fn
 
 Consider the following function definitions:
 
-```@example sleep
+```julia
 using Dagger
 
 function inner()
@@ -252,23 +253,40 @@ function outer_low_occupancy()
         Dagger.@spawn occupancy=Dict(Dagger.ThreadProc => 0) inner()
     end
 end
-nothing #hide
 ```
 
 When running the first outer function N times in parallel, you should see parallelization until all threads are blocked:
 
-```@example sleep
-fetch.([Dagger.@spawn outer_full_occupancy() for _ in 1:1]); # hide
+```julia
 for N in [1, 2, 4, 8, 16]
     @time fetch.([Dagger.@spawn outer_full_occupancy() for _ in 1:N])
 end
 ```
 
+The results from the above code snippet should look similar to this (the timings will be influenced by your specific machine):
+
+```text
+  0.124829 seconds (44.27 k allocations: 3.055 MiB, 12.61% compilation time)
+  0.104652 seconds (14.80 k allocations: 1.081 MiB)
+  0.110588 seconds (28.94 k allocations: 2.138 MiB, 4.91% compilation time)
+  0.208937 seconds (47.53 k allocations: 2.932 MiB)
+  0.527545 seconds (79.35 k allocations: 4.384 MiB, 0.64% compilation time)
+```
+
 Whereas running the outer function that communicates a low occupancy (`outer_low_occupancy`) should run fully in parallel:
 
-```@example sleep
-fetch.([Dagger.@spawn outer_low_occupancy() for _ in 1:1]); # hide
+```julia
 for N in [1, 2, 4, 8, 16]
     @time fetch.([Dagger.@spawn outer_low_occupancy() for _ in 1:N])
 end
+```
+
+In comparison, the `outer_low_occupancy` snippet should show results like this:
+
+```text
+  0.120686 seconds (44.38 k allocations: 3.070 MiB, 13.00% compilation time)
+  0.105665 seconds (15.40 k allocations: 1.072 MiB)
+  0.107495 seconds (28.56 k allocations: 1.940 MiB)
+  0.109904 seconds (55.03 k allocations: 3.631 MiB)
+  0.117239 seconds (87.95 k allocations: 5.372 MiB)
 ```
