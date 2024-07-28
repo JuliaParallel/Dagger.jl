@@ -187,7 +187,7 @@ Note that, as a legacy API, usage of the lazy API is generally discouraged for m
 - Distinct schedulers don't share runtime metrics or learned parameters, thus causing the scheduler to act less intelligently
 - Distinct schedulers can't share work or data directly
 
-### Scheduler and Thunk options
+## Scheduler and Thunk options
 
 While Dagger generally "just works", sometimes one needs to exert some more
 fine-grained control over how the scheduler allocates work. There are two
@@ -221,7 +221,7 @@ Dagger.spawn(+, Dagger.Options(;single=1), 1, 2)
 delayed(+; single=1)(1, 2)
 ```
 
-### Changing the thread occupancy for low-utilization tasks
+## Changing the thread occupancy
 
 One of the supported [`Sch.ThunkOptions`](@ref) is the `occupancy` keyword.
 The basic usage looks like this:
