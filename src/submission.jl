@@ -26,7 +26,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
 
     id = next_id()
 
-    timespan_start(ctx, :add_thunk, (;thunk_id=id), (;f, args, options))
+    timespan_start(ctx, :add_thunk, (;thunk_id=id), (;f, args, options, uid))
 
     # Lookup DTask/ThunkID -> Thunk
     old_args = copy(args)
@@ -129,7 +129,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
             put!(state.chan, Sch.RescheduleSignal())
         end
 
-        timespan_finish(ctx, :add_thunk, (;thunk_id=id), (;f, args, options))
+        timespan_finish(ctx, :add_thunk, (;thunk_id=id), (;f, args, options, uid))
 
         return thunk_id
     end
@@ -224,10 +224,13 @@ function eager_spawn(spec::DTaskSpec)
     future = ThunkFuture()
     finalizer_ref = poolset(DTaskFinalizer(uid); device=MemPool.CPURAMDevice())
 
-    # Return unlaunched DTask
+    # Create unlaunched DTask
     return DTask(uid, future, finalizer_ref)
 end
 function eager_launch!((spec, task)::Pair{DTaskSpec,DTask})
+    # Assign a name, if specified
+    eager_assign_name!(spec, task)
+
     # Lookup DTask -> ThunkID
     local args, options
     lock(Sch.EAGER_ID_MAP) do id_map
@@ -243,6 +246,11 @@ function eager_launch!((spec, task)::Pair{DTaskSpec,DTask})
 end
 function eager_launch!(specs::Vector{Pair{DTaskSpec,DTask}})
     ntasks = length(specs)
+
+    # Assign a name, if specified
+    for (spec, task) in specs
+        eager_assign_name!(spec, task)
+    end
 
     uids = [task.uid for (_, task) in specs]
     futures = [task.future for (_, task) in specs]
@@ -261,5 +269,13 @@ function eager_launch!(specs::Vector{Pair{DTaskSpec,DTask}})
     for i in 1:ntasks
         task = specs[i][2]
         task.thunk_ref = thunk_ids[i].ref
+    end
+end
+
+function eager_assign_name!(spec::DTaskSpec, task::DTask)
+    # Assign a name, if specified
+    if haskey(spec.options, :name)
+        Dagger.logs_annotate!(task, spec.options.name)
+        spec.options = (;filter(x -> x[1] != :name, Base.pairs(spec.options))...)
     end
 end
