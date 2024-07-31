@@ -936,7 +936,7 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
         throw(ArgumentError("Dynamic scheduling is no longer available"))
     end
     wait_all(; check_errors=true) do
-        scheduler = something(scheduler, DATADEPS_SCHEDULER[], :naive)::Symbol
+        scheduler = something(scheduler, DATADEPS_SCHEDULER[], :roundrobin)::Symbol
         launch_wait = something(launch_wait, DATADEPS_LAUNCH_WAIT[], false)::Bool
         if launch_wait
             result = spawn_bulk() do
