@@ -1,3 +1,8 @@
+struct LoggedMutableObject
+    objid::UInt
+    kind::Symbol
+end
+
 module Events
 
 import ..Dagger
@@ -123,12 +128,12 @@ struct TaskArguments end
 (::TaskArguments)(ev::Event{:start}) = nothing
 function (ta::TaskArguments)(ev::Event{:finish})
     if ev.category == :move
-        args = Pair{Union{Symbol,Int},UInt}[]
+        args = Pair{Union{Symbol,Int},Dagger.LoggedMutableObject}[]
         thunk_id = ev.id.thunk_id::Int
         pos = ev.id.position::Union{Symbol,Int}
         arg = ev.timeline.data
         if ismutable(arg)
-            push!(args, pos => objectid(arg))
+            push!(args, pos => Dagger.objectid_or_chunkid(arg))
         end
         return thunk_id => args
     end
@@ -141,10 +146,10 @@ end
 Records any `move`-derived copies of arguments of each task.
 """
 struct TaskArgumentMoves
-    pre_move_args::Dict{Int,Dict{Union{Int,Symbol},UInt}}
+    pre_move_args::Dict{Int,Dict{Union{Int,Symbol},Dagger.LoggedMutableObject}}
 end
 TaskArgumentMoves() =
-    TaskArgumentMoves(Dict{Int,Dict{Union{Int,Symbol},UInt}}())
+    TaskArgumentMoves(Dict{Int,Dict{Union{Int,Symbol},Dagger.LoggedMutableObject}}())
 init_similar(::TaskArgumentMoves) = TaskArgumentMoves()
 function (ta::TaskArgumentMoves)(ev::Event{:start})
     if ev.category == :move
@@ -152,8 +157,8 @@ function (ta::TaskArgumentMoves)(ev::Event{:start})
         if ismutable(data)
             thunk_id = ev.id.thunk_id::Int
             position = ev.id.position::Union{Symbol,Int}
-            d = get!(Dict{Union{Int,Symbol},UInt}, ta.pre_move_args, thunk_id)
-            d[position] = objectid(data)
+            d = get!(Dict{Union{Int,Symbol},Dagger.LoggedMutableObject}, ta.pre_move_args, thunk_id)
+            d[position] = Dagger.objectid_or_chunkid(data)
         end
     end
     return
@@ -168,13 +173,31 @@ function (ta::TaskArgumentMoves)(ev::Event{:finish})
                 d = ta.pre_move_args[thunk_id]
                 if haskey(d, position)
                     pre_data = d[position]
-                    return thunk_id, position, pre_data, objectid(post_data)
+                    return thunk_id, position, pre_data, Dagger.objectid_or_chunkid(post_data)
                 else
                     @warn "No TID $(thunk_id), Position $(position)"
                 end
             else
                 @warn "No TID $(thunk_id)"
             end
+        end
+    end
+    return
+end
+
+"""
+    TaskResult
+
+Records the raw (mutable) return value of each submitted task.
+"""
+struct TaskResult end
+(::TaskResult)(ev::Event{:start}) = nothing
+function (ta::TaskResult)(ev::Event{:finish})
+    if ev.category == :compute
+        thunk_id = ev.id.thunk_id::Int
+        result = ev.timeline.result
+        if ismutable(result)
+            return thunk_id => Dagger.objectid_or_chunkid(result)
         end
     end
     return
@@ -212,5 +235,35 @@ function (::TaskDependencies)(ev::Event{:start})
     return
 end
 (td::TaskDependencies)(ev::Event{:finish}) = nothing
+
+"""
+    TaskUIDtoTID
+
+Maps DTask UIDs to Thunk TIDs.
+"""
+struct TaskUIDtoTID end
+function (tut::TaskUIDtoTID)(ev::Event{:start})
+    if ev.category == :add_thunk
+        thunk_id = ev.id.thunk_id::Int
+        uid = ev.timeline.uid::UInt
+        return uid => thunk_id
+    end
+    return
+end
+(tut::TaskUIDtoTID)(ev::Event{:finish}) = nothing
+
+struct TaskToChunk end
+(td::TaskToChunk)(ev::Event{:start}) = nothing
+function (::TaskToChunk)(ev::Event{:finish})
+    if ev.category == :finish
+        thunk_id = ev.id.thunk_id::Int
+        result = ev.timeline.result
+        if ismutable(result)
+            chunk_id = Dagger.objectid_or_chunkid(result)
+            return thunk_id => chunk_id
+        end
+    end
+    return
+end
 
 end # module Events

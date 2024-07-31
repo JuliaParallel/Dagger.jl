@@ -168,7 +168,7 @@ import Colors, GraphViz, DataFrames, Plots, JSON3
 
     if VERSION >= v"1.9-"
         @testset "show_plan/render_plan built-in" begin
-            Dagger.enable_logging!()
+            Dagger.enable_logging!(;all_task_deps=true)
 
             A = distribute(rand(4, 4), Blocks(8, 8))
             sum(A)
@@ -182,7 +182,7 @@ import Colors, GraphViz, DataFrames, Plots, JSON3
 
             # JSON3Ext
             @test Dagger.render_logs(logs, :chrome_trace) !== nothing
-            
+
             Dagger.disable_logging!()
         end
     end
