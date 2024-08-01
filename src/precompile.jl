@@ -40,7 +40,7 @@
         for (name, t) in tracked
             if t.state == :runnable
                 @warn "Waiting on $name"
-                @async Base.throwto(t, InterruptException())
+                Threads.@spawn Base.throwto(t, InterruptException())
             end
         end
     end
