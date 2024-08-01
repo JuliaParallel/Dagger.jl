@@ -98,6 +98,9 @@ struct DataDepsAliasingState
     ainfos_readers::Dict{AbstractAliasing,Vector{Pair{DTask,Int}}}
     ainfos_overlaps::Dict{AbstractAliasing,Set{AbstractAliasing}}
 
+    # Cache ainfo lookups
+    ainfo_cache::Dict{Tuple{Any,Any},AbstractAliasing}
+
     function DataDepsAliasingState()
         data_origin = Dict{AbstractAliasing,MemorySpace}()
         data_locality = Dict{AbstractAliasing,MemorySpace}()
@@ -106,8 +109,11 @@ struct DataDepsAliasingState
         ainfos_readers = Dict{AbstractAliasing,Vector{Pair{DTask,Int}}}()
         ainfos_overlaps = Dict{AbstractAliasing,Set{AbstractAliasing}}()
 
+        ainfo_cache = Dict{Tuple{Any,Any},AbstractAliasing}()
+
         return new(data_origin, data_locality,
-                   ainfos_owner, ainfos_readers, ainfos_overlaps)
+                   ainfos_owner, ainfos_readers, ainfos_overlaps,
+                   ainfo_cache)
     end
 end
 struct DataDepsNonAliasingState
@@ -156,6 +162,12 @@ struct DataDepsState{State<:Union{DataDepsAliasingState,DataDepsNonAliasingState
     end
 end
 
+function aliasing(astate::DataDepsAliasingState, arg, dep_mod)
+    return get!(astate.ainfo_cache, (arg, dep_mod)) do
+        return aliasing(arg, dep_mod)
+    end
+end
+
 # Determine which arguments could be written to, and thus need tracking
 
 "Whether `arg` has any writedep in this datadeps region."
@@ -190,7 +202,7 @@ function has_writedep(state::DataDepsState, arg, deps, task::DTask)
             for (readdep, writedep, other_ainfo, _, _) in other_taskdeps
                 writedep || continue
                 for (dep_mod, _, _) in deps
-                    ainfo = aliasing(arg, dep_mod)
+                    ainfo = aliasing(state.alias_state, arg, dep_mod)
                     if will_alias(ainfo, other_ainfo)
                         return true
                     end
@@ -239,7 +251,7 @@ function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
         # Add all aliasing dependencies
         for (dep_mod, readdep, writedep) in deps
             if state.aliasing
-                ainfo = aliasing(arg, dep_mod)
+                ainfo = aliasing(state.alias_state, arg, dep_mod)
             else
                 ainfo = UnknownAliasing()
             end
@@ -260,7 +272,7 @@ end
 function populate_argument_info!(state::DataDepsState{DataDepsAliasingState}, arg, deps)
     astate = state.alias_state
     for (dep_mod, readdep, writedep) in deps
-        ainfo = aliasing(arg, dep_mod)
+        ainfo = aliasing(astate, arg, dep_mod)
 
         # Initialize owner and readers
         if !haskey(astate.ainfos_owner, ainfo)
@@ -677,7 +689,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             end
             if queue.aliasing
                 for (dep_mod, _, _) in deps
-                    ainfo = aliasing(arg, dep_mod)
+                    ainfo = aliasing(astate, arg, dep_mod)
                     data_space = astate.data_locality[ainfo]
                     nonlocal = our_space != data_space
                     if nonlocal
@@ -740,7 +752,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             type_may_alias(typeof(arg)) || continue
             if queue.aliasing
                 for (dep_mod, _, writedep) in deps
-                    ainfo = aliasing(arg, dep_mod)
+                    ainfo = aliasing(astate, arg, dep_mod)
                     if writedep
                         @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] Syncing as writer"
                         get_write_deps!(state, ainfo, task, write_num, syncdeps)
@@ -773,7 +785,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             type_may_alias(typeof(arg)) || continue
             if queue.aliasing
                 for (dep_mod, _, writedep) in deps
-                    ainfo = aliasing(arg, dep_mod)
+                    ainfo = aliasing(astate, arg, dep_mod)
                     if writedep
                         @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] Set as owner"
                         add_writer!(state, ainfo, task, write_num)
