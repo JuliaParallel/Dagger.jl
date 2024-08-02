@@ -220,22 +220,23 @@ function Base.convert(::Type{ThunkSummary}, t::WeakThunk)
     return t
 end
 
-struct ThunkFailedException{E<:Exception} <: Exception
+struct DTaskFailedException{E<:Exception} <: Exception
     thunk::ThunkSummary
     origin::ThunkSummary
     ex::E
 end
-ThunkFailedException(thunk, origin, ex::E) where E =
-    ThunkFailedException{E}(convert(ThunkSummary, thunk),
+DTaskFailedException(thunk, origin, ex::E) where E =
+    DTaskFailedException{E}(convert(ThunkSummary, thunk),
                             convert(ThunkSummary, origin),
                             ex)
-function Base.showerror(io::IO, ex::ThunkFailedException)
+@deprecate ThunkFailedException DTaskFailedException
+function Base.showerror(io::IO, ex::DTaskFailedException)
     t = ex.thunk
 
     # Find root-cause thunk
     last_tfex = ex
     failed_tasks = Union{ThunkSummary,Nothing}[]
-    while last_tfex.ex isa ThunkFailedException
+    while last_tfex.ex isa DTaskFailedException
         push!(failed_tasks, last_tfex.thunk)
         last_tfex = last_tfex.ex
     end
@@ -246,7 +247,7 @@ function Base.showerror(io::IO, ex::ThunkFailedException)
         Tinputs = Any[]
         for (_, input) in t.inputs
             if istask(input)
-                push!(Tinputs, "Thunk(id=$(input.id))")
+                push!(Tinputs, "DTask(id=$(input.id))")
             else
                 push!(Tinputs, input)
             end
@@ -256,28 +257,28 @@ function Base.showerror(io::IO, ex::ThunkFailedException)
         else
             "$(t.f)($(length(Tinputs)) inputs...)"
         end
-        return "Thunk(id=$(t.id), $t_sig)"
+        return "DTask(id=$(t.id), $t_sig)"
     end
     t_str = thunk_string(t)
     o_str = thunk_string(o)
-    println(io, "ThunkFailedException:")
-    println(io, "  Root Exception Type: $(typeof(root_ex))")
+    println(io, "DTaskFailedException:")
+    println(io, "  Root Exception Type: $(typeof(Sch.unwrap_nested_exception(root_ex)))")
     println(io, "  Root Exception:")
     Base.showerror(io, root_ex); println(io)
     if t.id !== o.id
-        println(io, "  Root Thunk:  $o_str")
+        println(io, "  Root Task:  $o_str")
         if length(failed_tasks) <= 4
             for i in failed_tasks
                 i_str = thunk_string(i)
-                println(io, "  Inner Thunk: $i_str")
+                println(io, "  Inner Task: $i_str")
             end
         else
             println(io, " ...")
-            println(io, "  $(length(failed_tasks)) Inner Thunks...")
+            println(io, "  $(length(failed_tasks)) Inner Tasks...")
             println(io, " ...")
         end
     end
-    print(io, "  This Thunk:  $t_str")
+    print(io, "  This Task:  $t_str")
 end
 
 """

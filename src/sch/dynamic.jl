@@ -132,7 +132,7 @@ end
 function Base.fetch(h::SchedulerHandle, id::ThunkID)
     future = ThunkFuture(Future(1))
     exec!(_register_future!, h, future, id, true)
-    fetch(future; proc=thunk_processor())
+    fetch(future; proc=task_processor())
 end
 """
 Waits on a thunk to complete, and fetches its result. If `check` is set to

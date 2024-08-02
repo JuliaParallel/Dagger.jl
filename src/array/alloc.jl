@@ -25,11 +25,11 @@ function partition(p::AbstractBlocks, dom::ArrayDomain)
 end
 
 function allocate_array(f, T, idx, sz)
-    new_f = allocate_array_func(thunk_processor(), f)
+    new_f = allocate_array_func(task_processor(), f)
     return new_f(idx, T, sz)
 end
 function allocate_array(f, T, sz)
-    new_f = allocate_array_func(thunk_processor(), f)
+    new_f = allocate_array_func(task_processor(), f)
     return new_f(T, sz)
 end
 allocate_array_func(::Processor, f) = f

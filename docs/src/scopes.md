@@ -23,7 +23,7 @@ using VideoIO, Distributed
 
 function get_handle()
     handle = VideoIO.opencamera()
-    proc = Dagger.thunk_processor()
+    proc = Dagger.task_processor()
     scope = Dagger.scope(worker=myid()) # constructs a `ProcessScope`
     return Dagger.tochunk(handle, proc, scope)
 end
@@ -78,7 +78,7 @@ function generate()
     fill!(arr, 1)
     Mmap.sync!(arr)
     # Note: Dagger.scope() does not yet support node scopes
-    Dagger.tochunk(path, Dagger.thunk_processor(), NodeScope())
+    Dagger.tochunk(path, Dagger.task_processor(), NodeScope())
 end
 
 function consume(path)
@@ -120,7 +120,7 @@ function generate_secrets()
     secrets = open("/shared/secret_results.txt", "r") do io
         String(read(io))
     end
-    Dagger.tochunk(secrets, Dagger.thunk_processor(), secrets_scope)
+    Dagger.tochunk(secrets, Dagger.task_processor(), secrets_scope)
 end
 
 summarize(secrets) = occursin("QA Pass", secrets)
@@ -144,7 +144,7 @@ constraints). For example:
 ps2 = ProcessScope(2)
 ps3 = ProcessScope(3)
 
-generate(scope) = Dagger.tochunk(rand(64), Dagger.thunk_processor(), scope)
+generate(scope) = Dagger.tochunk(rand(64), Dagger.task_processor(), scope)
 
 d2 = Dagger.@spawn generate(ps2) # Run on process 2
 d3 = Dagger.@spawn generate(ps3) # Run on process 3

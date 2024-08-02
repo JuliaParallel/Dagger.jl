@@ -27,6 +27,11 @@ its result will be passed into the function receiving the argument. If the
 argument is *not* an [`DTask`](@ref) (instead, some other type of Julia object),
 it'll be passed as-is to the function `f` (with some exceptions).
 
+!!! note "Task / thread occupancy"
+    By default, `Dagger` assumes that tasks saturate the thread they are running on and does not try to schedule other tasks on the thread.
+    This default can be controlled by specifying [`Sch.ThunkOptions`](@ref) (more details can be found under [Scheduler and Thunk options](@ref)).
+    The section [Changing the thread occupancy](@ref) shows a runnable example of how to achieve this.
+
 ## Options
 
 The [`Options`](@ref Dagger.Options) struct in the second argument position is
@@ -182,7 +187,7 @@ Note that, as a legacy API, usage of the lazy API is generally discouraged for m
 - Distinct schedulers don't share runtime metrics or learned parameters, thus causing the scheduler to act less intelligently
 - Distinct schedulers can't share work or data directly
 
-### Scheduler and Thunk options
+## Scheduler and Thunk options
 
 While Dagger generally "just works", sometimes one needs to exert some more
 fine-grained control over how the scheduler allocates work. There are two
@@ -214,4 +219,74 @@ Dagger.@spawn single=1 1+2
 Dagger.spawn(+, Dagger.Options(;single=1), 1, 2)
 
 delayed(+; single=1)(1, 2)
+```
+
+## Changing the thread occupancy
+
+One of the supported [`Sch.ThunkOptions`](@ref) is the `occupancy` keyword.
+This keyword can be used to communicate that a task is not expected to fully saturate a CPU core (e.g. due to being IO-bound).
+The basic usage looks like this:
+
+```julia
+Dagger.@spawn occupancy=Dict(Dagger.ThreadProc=>0) fn
+```
+
+Consider the following function definitions:
+
+```julia
+using Dagger
+
+function inner()
+    sleep(0.1)
+end
+
+function outer_full_occupancy()
+    @sync for _ in 1:2
+        # By default, full occupancy is assumed
+        Dagger.@spawn inner()
+    end
+end
+
+function outer_low_occupancy()
+    @sync for _ in 1:2
+        # Here, we're explicitly telling the scheduler to assume low occupancy
+        Dagger.@spawn occupancy=Dict(Dagger.ThreadProc => 0) inner()
+    end
+end
+```
+
+When running the first outer function N times in parallel, you should see parallelization until all threads are blocked:
+
+```julia
+for N in [1, 2, 4, 8, 16]
+    @time fetch.([Dagger.@spawn outer_full_occupancy() for _ in 1:N])
+end
+```
+
+The results from the above code snippet should look similar to this (the timings will be influenced by your specific machine):
+
+```text
+  0.124829 seconds (44.27 k allocations: 3.055 MiB, 12.61% compilation time)
+  0.104652 seconds (14.80 k allocations: 1.081 MiB)
+  0.110588 seconds (28.94 k allocations: 2.138 MiB, 4.91% compilation time)
+  0.208937 seconds (47.53 k allocations: 2.932 MiB)
+  0.527545 seconds (79.35 k allocations: 4.384 MiB, 0.64% compilation time)
+```
+
+Whereas running the outer function that communicates a low occupancy (`outer_low_occupancy`) should run fully in parallel:
+
+```julia
+for N in [1, 2, 4, 8, 16]
+    @time fetch.([Dagger.@spawn outer_low_occupancy() for _ in 1:N])
+end
+```
+
+In comparison, the `outer_low_occupancy` snippet should show results like this:
+
+```text
+  0.120686 seconds (44.38 k allocations: 3.070 MiB, 13.00% compilation time)
+  0.105665 seconds (15.40 k allocations: 1.072 MiB)
+  0.107495 seconds (28.56 k allocations: 1.940 MiB)
+  0.109904 seconds (55.03 k allocations: 3.631 MiB)
+  0.117239 seconds (87.95 k allocations: 5.372 MiB)
 ```

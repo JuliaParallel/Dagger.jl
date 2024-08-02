@@ -69,7 +69,7 @@ end
         A = rand(4, 4)
         @test fetch(@spawn sum(A; dims=1)) ≈ sum(A; dims=1)
 
-        @test_throws_unwrap Dagger.ThunkFailedException fetch(@spawn sum(A; fakearg=2))
+        @test_throws_unwrap Dagger.DTaskFailedException fetch(@spawn sum(A; fakearg=2))
 
         @test fetch(@spawn reduce(+, A; dims=1, init=2.0)) ≈
               reduce(+, A; dims=1, init=2.0)
@@ -187,7 +187,7 @@ end
             a = @spawn error("Test")
             wait(a)
             @test isready(a)
-            @test_throws_unwrap Dagger.ThunkFailedException fetch(a)
+            @test_throws_unwrap Dagger.DTaskFailedException fetch(a)
             b = @spawn 1+2
             @test fetch(b) == 3
         end
@@ -202,9 +202,9 @@ end
             end
             ex = Dagger.Sch.unwrap_nested_exception(ex)
             ex_str = sprint(io->Base.showerror(io,ex))
-            @test occursin(r"^ThunkFailedException:", ex_str)
+            @test occursin(r"^DTaskFailedException:", ex_str)
             @test occursin("Test", ex_str)
-            @test !occursin("Root Thunk", ex_str)
+            @test !occursin("Root Task", ex_str)
 
             ex = try
                 fetch(b)
@@ -214,33 +214,33 @@ end
             ex = Dagger.Sch.unwrap_nested_exception(ex)
             ex_str = sprint(io->Base.showerror(io,ex))
             @test occursin("Test", ex_str)
-            @test occursin("Root Thunk", ex_str)
+            @test occursin("Root Task", ex_str)
         end
         @testset "single dependent" begin
             a = @spawn error("Test")
             b = @spawn a+2
-            @test_throws_unwrap Dagger.ThunkFailedException fetch(a)
+            @test_throws_unwrap Dagger.DTaskFailedException fetch(a)
         end
         @testset "multi dependent" begin
             a = @spawn error("Test")
             b = @spawn a+2
             c = @spawn a*2
-            @test_throws_unwrap Dagger.ThunkFailedException fetch(b)
-            @test_throws_unwrap Dagger.ThunkFailedException fetch(c)
+            @test_throws_unwrap Dagger.DTaskFailedException fetch(b)
+            @test_throws_unwrap Dagger.DTaskFailedException fetch(c)
         end
         @testset "dependent chain" begin
             a = @spawn error("Test")
-            @test_throws_unwrap Dagger.ThunkFailedException fetch(a)
+            @test_throws_unwrap Dagger.DTaskFailedException fetch(a)
             b = @spawn a+1
-            @test_throws_unwrap Dagger.ThunkFailedException fetch(b)
+            @test_throws_unwrap Dagger.DTaskFailedException fetch(b)
             c = @spawn b+2
-            @test_throws_unwrap Dagger.ThunkFailedException fetch(c)
+            @test_throws_unwrap Dagger.DTaskFailedException fetch(c)
         end
         @testset "single input" begin
             a = @spawn 1+1
             b = @spawn (a->error("Test"))(a)
             @test fetch(a) == 2
-            @test_throws_unwrap Dagger.ThunkFailedException fetch(b)
+            @test_throws_unwrap Dagger.DTaskFailedException fetch(b)
         end
         @testset "multi input" begin
             a = @spawn 1+1
@@ -248,7 +248,7 @@ end
             c = @spawn ((a,b)->error("Test"))(a,b)
             @test fetch(a) == 2
             @test fetch(b) == 4
-            @test_throws_unwrap Dagger.ThunkFailedException fetch(c)
+            @test_throws_unwrap Dagger.DTaskFailedException fetch(c)
         end
         @testset "diamond" begin
             a = @spawn 1+1
@@ -258,7 +258,7 @@ end
             @test fetch(a) == 2
             @test fetch(b) == 3
             @test fetch(c) == 4
-            @test_throws_unwrap Dagger.ThunkFailedException fetch(d)
+            @test_throws_unwrap Dagger.DTaskFailedException fetch(d)
         end
     end
     @testset "remote spawn" begin
@@ -276,7 +276,7 @@ end
             t1 = Dagger.@spawn 1+"fail"
             Dagger.@spawn t1+1
         end
-        @test_throws_unwrap Dagger.ThunkFailedException fetch(t2)
+        @test_throws_unwrap Dagger.DTaskFailedException fetch(t2)
     end
     @testset "undefined function" begin
         # Issues #254, #255

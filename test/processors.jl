@@ -37,9 +37,9 @@ end
     end
     @testset "Processor exhaustion" begin
         opts = ThunkOptions(proclist=[OptOutProc])
-        @test_throws_unwrap Dagger.ThunkFailedException ex isa Dagger.Sch.SchedulingException ex.reason="No processors available, try widening scope" collect(delayed(sum; options=opts)([1,2,3]))
+        @test_throws_unwrap Dagger.DTaskFailedException ex isa Dagger.Sch.SchedulingException ex.reason="No processors available, try widening scope" collect(delayed(sum; options=opts)([1,2,3]))
         opts = ThunkOptions(proclist=(proc)->false)
-        @test_throws_unwrap Dagger.ThunkFailedException ex isa Dagger.Sch.SchedulingException ex.reason="No processors available, try widening scope" collect(delayed(sum; options=opts)([1,2,3]))
+        @test_throws_unwrap Dagger.DTaskFailedException ex isa Dagger.Sch.SchedulingException ex.reason="No processors available, try widening scope" collect(delayed(sum; options=opts)([1,2,3]))
         opts = ThunkOptions(proclist=nothing)
         @test collect(delayed(sum; options=opts)([1,2,3])) == 6
     end
@@ -89,7 +89,7 @@ end
 
     @testset "Processor TLS accessor" begin
         @everywhere function mythunk(x)
-            typeof(Dagger.thunk_processor())
+            typeof(Dagger.task_processor())
         end
         @test collect(delayed(mythunk)(1)) === ThreadProc
     end
