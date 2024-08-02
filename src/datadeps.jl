@@ -98,6 +98,9 @@ struct DataDepsAliasingState
     ainfos_readers::Dict{AbstractAliasing,Vector{Pair{DTask,Int}}}
     ainfos_overlaps::Dict{AbstractAliasing,Set{AbstractAliasing}}
 
+    # Cache ainfo lookups
+    ainfo_cache::Dict{Tuple{Any,Any},AbstractAliasing}
+
     function DataDepsAliasingState()
         data_origin = Dict{AbstractAliasing,MemorySpace}()
         data_locality = Dict{AbstractAliasing,MemorySpace}()
@@ -106,8 +109,11 @@ struct DataDepsAliasingState
         ainfos_readers = Dict{AbstractAliasing,Vector{Pair{DTask,Int}}}()
         ainfos_overlaps = Dict{AbstractAliasing,Set{AbstractAliasing}}()
 
+        ainfo_cache = Dict{Tuple{Any,Any},AbstractAliasing}()
+
         return new(data_origin, data_locality,
-                   ainfos_owner, ainfos_readers, ainfos_overlaps)
+                   ainfos_owner, ainfos_readers, ainfos_overlaps,
+                   ainfo_cache)
     end
 end
 struct DataDepsNonAliasingState
@@ -156,6 +162,12 @@ struct DataDepsState{State<:Union{DataDepsAliasingState,DataDepsNonAliasingState
     end
 end
 
+function aliasing(astate::DataDepsAliasingState, arg, dep_mod)
+    return get!(astate.ainfo_cache, (arg, dep_mod)) do
+        return aliasing(arg, dep_mod)
+    end
+end
+
 # Determine which arguments could be written to, and thus need tracking
 
 "Whether `arg` has any writedep in this datadeps region."
@@ -190,7 +202,7 @@ function has_writedep(state::DataDepsState, arg, deps, task::DTask)
             for (readdep, writedep, other_ainfo, _, _) in other_taskdeps
                 writedep || continue
                 for (dep_mod, _, _) in deps
-                    ainfo = aliasing(arg, dep_mod)
+                    ainfo = aliasing(state.alias_state, arg, dep_mod)
                     if will_alias(ainfo, other_ainfo)
                         return true
                     end
@@ -221,7 +233,7 @@ function is_writedep(arg, deps, task::DTask)
 end
 
 # Aliasing state setup
-function populate_task_info!(state::DataDepsState, spec, task)
+function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
     # Populate task dependencies
     dependencies_to_add = Vector{Tuple{Bool,Bool,AbstractAliasing,<:Any,<:Any}}()
 
@@ -233,13 +245,13 @@ function populate_task_info!(state::DataDepsState, spec, task)
         # Unwrap the Chunk underlying any DTask arguments
         arg = arg isa DTask ? fetch(arg; raw=true) : arg
 
-        # Skip non-mutable arguments
-        Base.datatype_pointerfree(typeof(arg)) && continue
+        # Skip non-aliasing arguments
+        type_may_alias(typeof(arg)) || continue
 
         # Add all aliasing dependencies
         for (dep_mod, readdep, writedep) in deps
             if state.aliasing
-                ainfo = aliasing(arg, dep_mod)
+                ainfo = aliasing(state.alias_state, arg, dep_mod)
             else
                 ainfo = UnknownAliasing()
             end
@@ -251,7 +263,8 @@ function populate_task_info!(state::DataDepsState, spec, task)
     end
 
     # Track the task result too
-    push!(dependencies_to_add, (true, true, UnknownAliasing(), identity, task))
+    # N.B. We state no readdep/writedep because, while we can't model the aliasing info for the task result yet, we don't want to synchronize because of this
+    push!(dependencies_to_add, (false, false, UnknownAliasing(), identity, task))
 
     # Record argument/result dependencies
     push!(state.dependencies, task => dependencies_to_add)
@@ -259,7 +272,7 @@ end
 function populate_argument_info!(state::DataDepsState{DataDepsAliasingState}, arg, deps)
     astate = state.alias_state
     for (dep_mod, readdep, writedep) in deps
-        ainfo = aliasing(arg, dep_mod)
+        ainfo = aliasing(astate, arg, dep_mod)
 
         # Initialize owner and readers
         if !haskey(astate.ainfos_owner, ainfo)
@@ -405,7 +418,7 @@ function generate_slot!(state::DataDepsState, dest_space, data)
             data_converted = move(from_proc, to_proc, data)
             data_chunk = tochunk(data_converted, to_proc)
             @assert processor(data_chunk) in processors(dest_space)
-            @assert memory_space(data_chunk) == memory_space(data_converted)
+            @assert memory_space(data_converted) == memory_space(data_chunk) "space mismatch! $(memory_space(data_converted)) != $(memory_space(data_chunk)) ($(typeof(data_converted)) vs. $(typeof(data_chunk))), spaces ($orig_space -> $dest_space)"
             @assert orig_space != memory_space(data_chunk) "space preserved! $orig_space != $(memory_space(data_chunk)) ($(typeof(data)) vs. $(typeof(data_chunk))), spaces ($orig_space -> $dest_space)"
             return data_chunk
         end
@@ -664,7 +677,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             # Is the data written previously or now?
             arg, deps = unwrap_inout(arg)
             arg = arg isa DTask ? fetch(arg; raw=true) : arg
-            if Base.datatype_pointerfree(typeof(arg)) || !has_writedep(state, arg, deps, task)
+            if !type_may_alias(typeof(arg)) || !has_writedep(state, arg, deps, task)
                 @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Skipped copy-to (unwritten)"
                 spec.args[idx] = pos => arg
                 continue
@@ -676,7 +689,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             end
             if queue.aliasing
                 for (dep_mod, _, _) in deps
-                    ainfo = aliasing(arg, dep_mod)
+                    ainfo = aliasing(astate, arg, dep_mod)
                     data_space = astate.data_locality[ainfo]
                     nonlocal = our_space != data_space
                     if nonlocal
@@ -736,10 +749,10 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         for (idx, (_, arg)) in enumerate(task_args)
             arg, deps = unwrap_inout(arg)
             arg = arg isa DTask ? fetch(arg; raw=true) : arg
-            Base.datatype_pointerfree(typeof(arg)) && continue
+            type_may_alias(typeof(arg)) || continue
             if queue.aliasing
                 for (dep_mod, _, writedep) in deps
-                    ainfo = aliasing(arg, dep_mod)
+                    ainfo = aliasing(astate, arg, dep_mod)
                     if writedep
                         @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] Syncing as writer"
                         get_write_deps!(state, ainfo, task, write_num, syncdeps)
@@ -769,10 +782,10 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         for (idx, (_, arg)) in enumerate(task_args)
             arg, deps = unwrap_inout(arg)
             arg = arg isa DTask ? fetch(arg; raw=true) : arg
-            Base.datatype_pointerfree(typeof(arg)) && continue
+            type_may_alias(typeof(arg)) || continue
             if queue.aliasing
                 for (dep_mod, _, writedep) in deps
-                    ainfo = aliasing(arg, dep_mod)
+                    ainfo = aliasing(astate, arg, dep_mod)
                     if writedep
                         @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] Set as owner"
                         add_writer!(state, ainfo, task, write_num)
@@ -864,7 +877,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         for arg in keys(astate.data_origin)
             # Is the data previously written?
             arg, deps = unwrap_inout(arg)
-            if Base.datatype_pointerfree(typeof(arg)) || !has_writedep(state, arg, deps)
+            if !type_may_alias(typeof(arg)) || !has_writedep(state, arg, deps)
                 @dagdebug nothing :spawn_datadeps "Skipped copy-from (unwritten)"
             end
 
@@ -935,7 +948,7 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
         throw(ArgumentError("Dynamic scheduling is no longer available"))
     end
     wait_all(; check_errors=true) do
-        scheduler = something(scheduler, DATADEPS_SCHEDULER[], :naive)::Symbol
+        scheduler = something(scheduler, DATADEPS_SCHEDULER[], :roundrobin)::Symbol
         launch_wait = something(launch_wait, DATADEPS_LAUNCH_WAIT[], false)::Bool
         if launch_wait
             result = spawn_bulk() do

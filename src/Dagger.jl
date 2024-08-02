@@ -13,6 +13,8 @@ import Distributed: Future, RemoteChannel, myid, workers, nworkers, procs, remot
 
 import LinearAlgebra
 import LinearAlgebra: Adjoint, BLAS, Diagonal, Bidiagonal, Tridiagonal, LAPACK, LowerTriangular, PosDefException, Transpose, UpperTriangular, UnitLowerTriangular, UnitUpperTriangular, diagind, ishermitian, issymmetric
+import Random
+import Random: AbstractRNG
 
 import UUIDs: UUID, uuid4
 
@@ -82,6 +84,7 @@ include("array/sort.jl")
 include("array/linalg.jl")
 include("array/mul.jl")
 include("array/cholesky.jl")
+include("array/random.jl")
 
 # Visualization
 include("visualization.jl")
@@ -101,6 +104,9 @@ function __init__()
     system_uuid()
 
     @static if !isdefined(Base, :get_extension)
+        @require Distributions="31c24e10-a181-5473-b8eb-7969acd0382f" begin
+            include(joinpath(dirname(@__DIR__), "ext", "DistributionsExt.jl"))
+        end
         @require Graphs="86223c79-3864-5bf0-83f7-82e725a168b6" begin
             @require GraphViz="f526b714-d49f-11e8-06ff-31ed36ee7ee0" begin
                 include(joinpath(dirname(@__DIR__), "ext", "GraphVizExt.jl"))

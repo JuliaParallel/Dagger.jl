@@ -12,6 +12,16 @@ end
     @test collect(X1) .+ 1 == collect(X2)
 end
 
+@testset "map!" begin
+    X = zeros(Blocks(10,10), Int, 40, 40)
+
+    map!(_ -> 1, X)
+    @test sum(X) == length(X)
+
+    map!(x -> 2x+1, X, Matrix(X))
+    @test sum(X) == 3*length(X)
+end
+
 @testset "DiffEq support" begin
     X = ones(Blocks(10), 100)
     X0 = zero(X)
