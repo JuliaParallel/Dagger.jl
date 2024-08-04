@@ -462,7 +462,7 @@ current estimated per-processor compute pressure, and transfer costs for each
 `Chunk` argument to `task`. Returns `(procs, costs)`, with `procs` sorted in
 order of ascending cost.
 """
-function estimate_task_costs(state, procs, task, inputs)
+function estimate_task_costs(state, procs, task, inputs; sig=nothing)
     tx_rate = state.transfer_rate[]
 
     # Find all Chunks
@@ -473,9 +473,17 @@ function estimate_task_costs(state, procs, task, inputs)
         end
     end
 
+    # Estimate the cost of executing the task itself
+    if sig === nothing
+        sig = signature(task.f, inputs)
+    end
+    est_time_util = get(state.signature_time_cost, sig, 1000^3)
+
+    # Estimate total cost for executing this task on each candidate processor
     costs = Dict{Processor,Float64}()
     for proc in procs
-        chunks_filt = Iterators.filter(c->get_parent(processor(c))!=get_parent(proc), chunks)
+        gproc = get_parent(proc)
+        chunks_filt = Iterators.filter(c->get_parent(processor(c))!=gproc, chunks)
 
         # Estimate network transfer costs based on data size
         # N.B. `affinity(x)` really means "data size of `x`"
@@ -485,8 +493,14 @@ function estimate_task_costs(state, procs, task, inputs)
         tx_cost = impute_sum(affinity(chunk)[2] for chunk in chunks_filt)
 
         # Estimate total cost to move data and get task running after currently-scheduled tasks
-        est_time_util = get(state.worker_time_pressure[get_parent(proc).pid], proc, 0)
-        costs[proc] = est_time_util + (tx_cost/tx_rate)
+        est_business = get(state.worker_time_pressure[get_parent(proc).pid], proc, 0)
+
+        # Add fixed cost for cross-worker task transfer (esimated at 1ms)
+        # TODO: Actually estimate/benchmark this
+        task_xfer_cost = gproc.pid != myid() ? 1_000_000 : 0 # 1ms
+
+        # Compute final cost
+        costs[proc] = est_time_util + est_business + (tx_cost/tx_rate) + task_xfer_cost
     end
 
     # Shuffle procs around, so equally-costly procs are equally considered
