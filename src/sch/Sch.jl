@@ -626,16 +626,17 @@ end
         resize!(sorted_procs, length(input_procs))
         costs = @reusable_dict :schedule!_costs Processor Float64 OSProc() 0.0 32
         costs_cleanup = @reuse_defer_cleanup empty!(costs)
-        estimate_task_costs!(sorted_procs, costs, state, input_procs, task)
-        costs_cleanup() # We don't use costs here
+        estimate_task_costs!(sorted_procs, costs, state, input_procs, task; sig)
         input_procs_cleanup()
         scheduled = false
 
-        # Move our corresponding ThreadProc to be the last considered
+        # Move our corresponding ThreadProc to be the last considered,
+        # if the task is expected to run for longer than the time it takes to
+        # schedule it onto another worker (estimated at 1ms).
         if length(sorted_procs) > 1
             sch_threadproc = Dagger.ThreadProc(myid(), Threads.threadid())
             sch_thread_idx = findfirst(proc->proc==sch_threadproc, sorted_procs)
-            if sch_thread_idx !== nothing
+            if sch_thread_idx !== nothing && costs[sch_threadproc] > 1_000_000 # 1ms
                 deleteat!(sorted_procs, sch_thread_idx)
                 push!(sorted_procs, sch_threadproc)
             end
