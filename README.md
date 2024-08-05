@@ -104,6 +104,25 @@ For help and discussion, we suggest asking in the following places:
 
 [Julia Discourse](https://discourse.julialang.org/c/domain/parallel/34) and on the [Julia Slack](https://julialang.org/slack/) in the `#dagger` channel.
 
+## References
+```bibtex
+@article{dagger1,
+  title={{{Dynamic Task Scheduling with Data Dependency Awareness Using Julia}},
+  author={Alomairy, Rabab and Tome, Felipe and Samaroo, Julian and Edelman, Alan},
+  pages={1--6},
+  year={2024},
+  publisher={MIT Open Access Articles}
+}
+```
+```bibtex
+@article{dagger2,
+  title={{{Efficient Dynamic Task Scheduling in Heterogeneous Environments with Julia}},
+  author={Samaroo, Julian and Alomairy, Rabab and  and Giordano, Mose and Edelman, Alan},
+  year={2024},
+  publisher={MIT Open Access Articles}
+}
+```
+
 ## Acknowledgements
 
 We thank DARPA, Intel, and the NIH for supporting this work at MIT.
