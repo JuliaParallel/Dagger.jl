@@ -124,17 +124,22 @@ function eager_submit_internal!(ctx, state, task, tid, payload::AnyPayload; uid_
                 end
             end
         end
-        #=FIXME:REALLOC=#
         if !isempty(syncdeps_vec) || any(arg->istask(value(arg)), fargs)
-            syncdeps = Set{Any}(syncdeps_vec)
+            if options.syncdeps === nothing
+                options.syncdeps = Set{Any}()
+            end
+            empty!(options.syncdeps)
+            syncdeps = options.syncdeps
+            for dep in syncdeps_vec
+                push!(syncdeps, dep)
+            end
             for arg in fargs
                 if istask(value(arg))
                     push!(syncdeps, value(arg))
                 end
             end
-        else
-            syncdeps = EMPTY_SYNCDEPS
         end
+        empty!(syncdeps_vec)
 
         GC.@preserve old_fargs fargs begin
             # Create the `Thunk`
