@@ -342,7 +342,7 @@ function init_proc(state, p, log_sink)
         lock(WORKER_MONITOR_LOCK) do
             wid = p.pid
             if !haskey(WORKER_MONITOR_TASKS, wid)
-                t = @async begin
+                t = Threads.@spawn begin
                     try
                         # Wait until this connection is terminated
                         remotecall_fetch(sleep, wid, typemax(UInt64))
@@ -505,7 +505,7 @@ function scheduler_init(ctx, state::ComputeState, d::Thunk, options, deps)
 
     # Initialize workers
     @sync for p in procs_to_use(ctx)
-        @async begin
+        Threads.@spawn begin
             try
                 init_proc(state, p, ctx.log_sink)
             catch err
@@ -521,7 +521,7 @@ function scheduler_init(ctx, state::ComputeState, d::Thunk, options, deps)
     end
 
     # Listen for new workers
-    @async begin
+    Threads.@spawn begin
         try
             monitor_procs_changed!(ctx, state)
         catch err
@@ -632,7 +632,7 @@ function scheduler_exit(ctx, state::ComputeState, options)
     @dagdebug nothing :global "Tearing down scheduler" uid=state.uid
 
     @sync for p in procs_to_use(ctx)
-        @async cleanup_proc(state, p, ctx.log_sink)
+        Threads.@spawn cleanup_proc(state, p, ctx.log_sink)
     end
 
     lock(state.lock) do
@@ -988,7 +988,7 @@ end
 function evict_all_chunks!(ctx, to_evict)
     if !isempty(to_evict)
         @sync for w in map(p->p.pid, procs_to_use(ctx))
-            @async remote_do(evict_chunks!, w, ctx.log_sink, to_evict)
+            Threads.@spawn remote_do(evict_chunks!, w, ctx.log_sink, to_evict)
         end
     end
 end
@@ -1075,8 +1075,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
     # know which task failed.
     tasks = Task[]
     for ts in to_send
-        # TODO: errormonitor
-        @async begin
+        task = Threads.@spawn begin
             timespan_start(ctx, :fire, (;worker=gproc.pid), nothing)
             try
                 remotecall_wait(do_tasks, gproc.pid, proc, state.chan, [ts]);
@@ -1523,7 +1522,7 @@ function do_task(to_proc, task_desc)
         (data, ids)
     end
     fetch_tasks = map(Iterators.zip(_data,_ids)) do (x, id)
-        @async begin
+        Threads.@spawn begin
             timespan_start(ctx, :move, (;thunk_id, id, processor=to_proc), (;f, data=x))
             #= FIXME: This isn't valid if x is written to
             x = if x isa Chunk
