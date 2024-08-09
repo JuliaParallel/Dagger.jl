@@ -66,6 +66,8 @@ include("sch/Sch.jl"); using .Sch
 
 # Data dependency task queue
 include("datadeps.jl")
+include("utils/haloarray.jl")
+include("stencil.jl")
 
 # Array computations
 include("array/darray.jl")
