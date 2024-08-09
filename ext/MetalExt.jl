@@ -274,6 +274,21 @@ function Dagger.execute!(proc::MtlArrayDeviceProc, f, args...; kwargs...)
     end
 end
 
+MtlArray(H::Dagger.HaloArray) = convert(MtlArray, H)
+Base.convert(::Type{C}, H::Dagger.HaloArray) where {C<:MtlArray} =
+    Dagger.HaloArray(C(H.center),
+                     C.(H.edges),
+                     C.(H.corners),
+                     H.halo_width)
+function Dagger.inner_stencil_proc!(::MtlArrayDeviceProc, f, output, read_vars)
+    Dagger.Kernel(_inner_stencil!)(f, output, read_vars; ndrange=size(output))
+    return
+end
+@kernel function _inner_stencil!(f, output, read_vars)
+    idx = @index(Global, Cartesian)
+    f(idx, output, read_vars)
+end
+
 function Base.show(io::IO, proc::MtlArrayDeviceProc)
     print(io, "MtlArrayDeviceProc(worker $(proc.owner), device $(something(_get_metal_device(proc)).name))")
 end

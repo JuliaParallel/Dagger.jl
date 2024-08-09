@@ -252,24 +252,6 @@ Dagger.move(from_proc::CPUProc, to_proc::CuArrayDeviceProc, x::Function) = x
 Dagger.move(from_proc::CPUProc, to_proc::CuArrayDeviceProc, x::Chunk{T}) where {T<:Function} =
     Dagger.move(from_proc, to_proc, fetch(x))
 
-# Adapt BLAS/LAPACK functions
-import LinearAlgebra: BLAS, LAPACK
-for lib in [BLAS, LAPACK]
-    for name in names(lib; all=true)
-        name == nameof(lib) && continue
-        startswith(string(name), '#') && continue
-        endswith(string(name), '!') || continue
-
-        for culib in [CUBLAS, CUSOLVER]
-            if name in names(culib; all=true)
-                fn = getproperty(lib, name)
-                cufn = getproperty(culib, name)
-                @eval Dagger.move(from_proc::CPUProc, to_proc::CuArrayDeviceProc, ::$(typeof(fn))) = $cufn
-            end
-        end
-    end
-end
-
 # Task execution
 function Dagger.execute!(proc::CuArrayDeviceProc, f, args...; kwargs...)
     @nospecialize f args kwargs
@@ -289,6 +271,44 @@ function Dagger.execute!(proc::CuArrayDeviceProc, f, args...; kwargs...)
         err, frames = stk[1]
         rethrow(CapturedException(err, frames))
     end
+end
+
+# Adapt BLAS/LAPACK functions
+import LinearAlgebra: BLAS, LAPACK
+for lib in [BLAS, LAPACK]
+    for name in names(lib; all=true)
+        name == nameof(lib) && continue
+        startswith(string(name), '#') && continue
+        endswith(string(name), '!') || continue
+
+        for culib in [CUBLAS, CUSOLVER]
+            if name in names(culib; all=true)
+                fn = getproperty(lib, name)
+                cufn = getproperty(culib, name)
+                @eval Dagger.move(from_proc::CPUProc, to_proc::CuArrayDeviceProc, ::$(typeof(fn))) = $cufn
+            end
+        end
+    end
+end
+
+CuArray(H::Dagger.HaloArray) = convert(CuArray, H)
+Base.convert(::Type{C}, H::Dagger.HaloArray) where {C<:CuArray} =
+    Dagger.HaloArray(C(H.center),
+                     C.(H.edges),
+                     C.(H.corners),
+                     H.halo_width)
+Adapt.adapt_structure(to::CUDA.KernelAdaptor, H::Dagger.HaloArray) =
+    Dagger.HaloArray(adapt(to, H.center),
+                     adapt.(Ref(to), H.edges),
+                     adapt.(Ref(to), H.corners),
+                     H.halo_width)
+function Dagger.inner_stencil_proc!(::CuArrayDeviceProc, f, output, read_vars)
+    Dagger.Kernel(_inner_stencil!)(f, output, read_vars; ndrange=size(output))
+    return
+end
+@kernel function _inner_stencil!(f, output, read_vars)
+    idx = @index(Global, Cartesian)
+    f(idx, output, read_vars)
 end
 
 Dagger.gpu_processor(::Val{:CUDA}) = CuArrayDeviceProc

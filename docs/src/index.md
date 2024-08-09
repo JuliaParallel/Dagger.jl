@@ -361,6 +361,39 @@ DA = rand(Blocks(32, 32), 256, 128)
 collect(DA) # returns a `Matrix{Float64}`
 ```
 
+-----
+
+## Quickstart: Stencil Operations
+
+Dagger's `@stencil` macro allows for easy specification of stencil operations on `DArray`s, often used in simulations and image processing. These operations typically involve updating an element based on the values of its neighbors.
+
+For more details: [Stencil Operations](@ref)
+
+### Applying a Simple Stencil
+
+Here's how to apply a stencil that averages each element with its immediate neighbors, using a `Wrap` boundary condition (where neighbor access at the array edges wrap around).
+
+```julia
+using Dagger
+import Dagger: @stencil, Wrap
+
+# Create a 5x5 DArray, partitioned into 2x2 blocks
+A = rand(Blocks(2, 2), 5, 5)
+B = zeros(Blocks(2,2), 5, 5)
+
+Dagger.spawn_datadeps() do
+    @stencil begin
+        # For each element in A, calculate the sum of its 3x3 neighborhood
+        # (including itself) and store the average in B.
+        # Values outside the array bounds are determined by Wrap().
+        B[idx] = sum(@neighbors(A[idx], 1, Wrap())) / 9.0
+    end
+end
+
+# B now contains the averaged values.
+```
+In this example, `idx` refers to the coordinates of each element being processed. `@neighbors(A[idx], 1, Wrap())` fetches the 3x3 neighborhood around `A[idx]`. The `1` indicates a neighborhood distance of 1 from the central element, and `Wrap()` specifies the boundary behavior.
+
 ## Quickstart: Datadeps
 
 Datadeps is a feature in Dagger.jl that facilitates parallelism control within designated regions, allowing tasks to write to their arguments while ensuring dependencies are respected.

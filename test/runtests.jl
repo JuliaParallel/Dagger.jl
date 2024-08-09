@@ -30,6 +30,7 @@ tests = [
     ("Array - LinearAlgebra - Cholesky", "array/linalg/cholesky.jl"),
     ("Array - LinearAlgebra - LU", "array/linalg/lu.jl"),
     ("Array - Random", "array/random.jl"),
+    ("Array - Stencils", "array/stencil.jl"),
     ("GPU", "gpu.jl"),
     ("Caching", "cache.jl"),
     ("Disk Caching", "diskcaching.jl"),
@@ -40,7 +41,10 @@ tests = [
 ]
 if USE_GPU
     # Only run GPU tests
-    tests = [("GPU", "gpu.jl")]
+    tests = [
+        ("GPU", "gpu.jl"),
+        ("Array - Stencils", "array/stencil.jl"),
+    ]
 end
 all_test_names = map(test -> replace(last(test), ".jl"=>""), tests)
 
