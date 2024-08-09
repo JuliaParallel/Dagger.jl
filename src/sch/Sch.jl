@@ -652,6 +652,8 @@ function scheduler_exit(ctx, state::ComputeState, options)
     lock(ctx.proc_notify) do
         notify(ctx.proc_notify)
     end
+
+    @dagdebug nothing :global "Tore down scheduler" uid=state.uid
 end
 
 function procs_to_use(ctx, options=ctx.options)
@@ -1161,11 +1163,14 @@ Base.hash(key::TaskSpecKey, h::UInt) = hash(key.task_id, hash(TaskSpecKey, h))
 struct ProcessorInternalState
     ctx::Context
     proc::Processor
+    return_queue::RemoteChannel
     queue::LockedObject{PriorityQueue{TaskSpecKey, UInt32, Base.Order.ForwardOrdering}}
     reschedule::Doorbell
     tasks::Dict{Int,Task}
+    task_specs::Dict{Int,Vector{Any}}
     proc_occupancy::Base.RefValue{UInt32}
     time_pressure::Base.RefValue{UInt64}
+    cancelled::Set{Int}
     done::Base.RefValue{Bool}
 end
 struct ProcessorState
@@ -1314,6 +1319,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
 
             # Execute the task and return its result
             t = @task begin
+                was_cancelled = false
                 result = try
                     do_task(to_proc, task)
                 catch err
@@ -1322,10 +1328,22 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                 finally
                     lock(istate.queue) do _
                         delete!(tasks, thunk_id)
-                        proc_occupancy[] -= task_occupancy
-                        time_pressure[] -= time_util
+                        delete!(istate.task_specs, thunk_id)
+                        if !(thunk_id in istate.cancelled)
+                            proc_occupancy[] -= task_occupancy
+                            time_pressure[] -= time_util
+                        else
+                            # Task was cancelled, so occupancy and pressure are
+                            # already reduced
+                            pop!(istate.cancelled, thunk_id)
+                            was_cancelled = true
+                        end
                     end
                     notify(istate.reschedule)
+                end
+                if was_cancelled
+                    # A result was already posted to the return queue
+                    return
                 end
                 try
                     put!(return_queue, (myid(), to_proc, thunk_id, result))
@@ -1345,6 +1363,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                     t.sticky = false
                 end
                 tasks[thunk_id] = errormonitor_tracked("thunk $thunk_id", schedule(t))
+                istate.task_specs[thunk_id] = task
                 proc_occupancy[] += task_occupancy
                 time_pressure[] += time_util
             end
@@ -1377,10 +1396,12 @@ function do_tasks(to_proc, return_queue, tasks)
             queue = PriorityQueue{TaskSpecKey, UInt32}()
             queue_locked = LockedObject(queue)
             reschedule = Doorbell()
-            istate = ProcessorInternalState(ctx, to_proc,
+            istate = ProcessorInternalState(ctx, to_proc, return_queue,
                                             queue_locked, reschedule,
                                             Dict{Int,Task}(),
+                                            Dict{Int,Vector{Any}}(),
                                             Ref(UInt32(0)), Ref(UInt64(0)),
+                                            Set{Int}(),
                                             Ref(false))
             runner = start_processor_runner!(istate, uid, return_queue)
             @static if VERSION < v"1.9"
