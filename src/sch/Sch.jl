@@ -757,14 +757,16 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
 
         inputs = map(last, collect_task_inputs(state, task))
         opts = populate_defaults(opts, chunktype(task.f), map(chunktype, inputs))
-        local_procs, costs = estimate_task_costs(state, local_procs, task, inputs)
+        local_procs, costs = estimate_task_costs(state, local_procs, task, inputs; sig)
         scheduled = false
 
-        # Move our corresponding ThreadProc to be the last considered
+        # Move our corresponding ThreadProc to be the last considered,
+        # if the task is expected to run for longer than the time it takes to
+        # schedule it onto another worker (estimated at 1ms).
         if length(local_procs) > 1
             sch_threadproc = Dagger.ThreadProc(myid(), Threads.threadid())
             sch_thread_idx = findfirst(proc->proc==sch_threadproc, local_procs)
-            if sch_thread_idx !== nothing
+            if sch_thread_idx !== nothing && costs[sch_threadproc] > 1_000_000 # 1ms
                 deleteat!(local_procs, sch_thread_idx)
                 push!(local_procs, sch_threadproc)
             end
@@ -786,7 +788,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
                     state.worker_time_pressure[gproc.pid][proc] =
                         get(state.worker_time_pressure[gproc.pid], proc, 0) +
                         est_time_util
-                    @dagdebug task :schedule "Scheduling to $gproc -> $proc"
+                    @dagdebug task :schedule "Scheduling to $gproc -> $proc (cost: $(costs[proc]))"
                     @goto pop_task
                 end
             end
