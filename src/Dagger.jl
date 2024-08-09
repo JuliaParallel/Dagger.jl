@@ -50,7 +50,8 @@ include("utils/dagdebug.jl")
 include("utils/locked-object.jl")
 include("utils/tasks.jl")
 
-import MacroTools: @capture
+import MacroTools: @capture, prewalk
+
 include("options.jl")
 include("processor.jl")
 include("threadproc.jl")
@@ -76,6 +77,8 @@ include("sch/Sch.jl"); using .Sch
 
 # Data dependency task queue
 include("datadeps.jl")
+include("utils/haloarray.jl")
+include("stencil.jl")
 
 # Streaming
 include("stream.jl")
