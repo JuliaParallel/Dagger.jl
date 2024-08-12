@@ -1,8 +1,8 @@
 # Define the HaloArray type with minimized halo storage
-struct HaloArray{T,N,E,C} <: AbstractArray{T,N}
-    center::Array{T,N}
-    edges::NTuple{E, Array{T,N}}
-    corners::NTuple{C, Array{T,N}}
+struct HaloArray{T,N,E,C,A,EA,CA} <: AbstractArray{T,N}
+    center::A
+    edges::NTuple{E, EA}
+    corners::NTuple{C, CA}
     halo_width::NTuple{N,Int}
 end
 
@@ -19,6 +19,9 @@ function HaloArray{T,N}(center_size::NTuple{N,Int}, halo_width::NTuple{N,Int}) w
     end
     return HaloArray{T,N,2N,2^N}(center, edges, corners, halo_width)
 end
+
+HaloArray(center::AT, edges::NTuple{E, EA}, corners::NTuple{C, CA}, halo_width::NTuple{N, Int}) where {T,N,AT<:AbstractArray{T,N},C,E,CA,EA} =
+    HaloArray{T,N,E,C,AT,EA,CA}(center, edges, corners, halo_width)
 
 Base.size(tile::HaloArray) = size(tile.center) .+ 2 .* tile.halo_width
 function Base.axes(tile::HaloArray{T,N,H}) where {T,N,H}
