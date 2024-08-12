@@ -25,7 +25,10 @@ makedocs(;
         "Scopes" => "scopes.md",
         "Processors" => "processors.md",
         "Task Queues" => "task-queues.md",
-        "Datadeps" => "datadeps.md",
+        "Datadeps" => [
+            "Basics" => "datadeps.md",
+            "Stencils" => "stencils.md",
+        ],
         "Option Propagation" => "propagation.md",
         "Logging and Visualization" => [
             "Logging: Basics" => "logging.md",
