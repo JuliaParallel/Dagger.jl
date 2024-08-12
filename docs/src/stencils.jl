@@ -20,7 +20,7 @@ import Dagger: @stencil, Wrap
 
 anim = @animate for _ in 1:niters
     Dagger.spawn_datadeps() do
-        @stencil idx = tiles begin
+        @stencil begin
             outputs[idx] = begin
                 nhood = @neighbors(tiles[idx], 1, Wrap())
                 neighs = sum(nhood) - tiles[idx]

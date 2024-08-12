@@ -131,7 +131,7 @@ A = zeros(Blocks(3, 3), Int, 9, 9)
 A[5, 5] = 1
 B = zeros(Blocks(3, 3), Int, 9, 9)
 Dagger.@spawn_datadeps() do
-    @stencil idx in A begin
+    @stencil begin
         # Sum values of all neighbors with self
         A[idx] = sum(@neighbors(A[idx], 1, Wrap()))
         # Decrement all values by 1
@@ -142,11 +142,12 @@ Dagger.@spawn_datadeps() do
 end
 ```
 
-Each expression within an `@stencil` region that accesses `A[idx]` is
-transformed into a set of tasks that operate on each chunk of `A`, and within
-each task, elements of that chunk of `A` can be accessed. Elements of other
-`DArray`s can also be accessed, such as `B[idx]`, so long as `B` has the same
-size, shape, and chunk layout as `A`.
+Each expression within an `@stencil` region that performs an in-place indexing
+expression like `A[idx] = ...` is transformed into a set of tasks that operate
+on each chunk of `A` or any other arrays specified as `A[idx]`, and within each
+task, elements of that chunk of `A` can be accessed. Elements of multiple
+`DArray`s can be accessed, such as `B[idx]`, so long as `B` has the same size,
+shape, and chunk layout as `A`.
 
 Additionally, the `@neighbors` macro can be used to access a neighborhood of
 values around `A[idx]`, at a configurable distance (in this case, 1 element
@@ -166,8 +167,7 @@ in `B[idx] = A[idx]`. Of course, pipelining and other optimizations may still
 occur, so long as they respect the sequential nature of `@stencil` (just like
 with other operations in `spawn_datadeps`).
 """
-macro stencil(index_ex, orig_ex)
-    @assert @capture(index_ex, index_var_ = index_range_) || @capture(index_ex, index_var_ in index_range_) "Invalid indexing expression: $index_ex"
+macro stencil(orig_ex)
     @assert Meta.isexpr(orig_ex, :block) "Invalid stencil block: $orig_ex"
 
     # Collect access pattern information
@@ -177,16 +177,16 @@ macro stencil(index_ex, orig_ex)
         inner_ex isa LineNumberNode && continue
         @assert @capture(inner_ex, write_ex_ = read_ex_) "Invalid update expression: $inner_ex"
         @assert @capture(write_ex, write_var_[write_idx_]) "Update expression requires a write: $write_ex"
-        @assert write_idx == index_var "Can only write to $index_var: $write_ex"
         accessed_vars = Set{Symbol}()
         read_vars = Set{Symbol}()
         neighborhoods = Dict{Symbol, Tuple{Any, Any}}()
         push!(accessed_vars, write_var)
         prewalk(read_ex) do read_inner_ex
-            if @capture(read_inner_ex, read_var_[read_idx_]) && read_idx == index_var
+            if @capture(read_inner_ex, read_var_[read_idx_]) && read_idx == write_idx
                 push!(accessed_vars, read_var)
                 push!(read_vars, read_var)
-            elseif @capture(read_inner_ex, @neighbors(read_var_[read_idx_], neigh_dist_, boundary_)) && read_idx == index_var
+            elseif @capture(read_inner_ex, @neighbors(read_var_[read_idx_], neigh_dist_, boundary_))
+                @assert read_idx == write_idx "Neighborhood access must be at the same index as the write: $read_inner_ex"
                 push!(accessed_vars, read_var)
                 push!(read_vars, read_var)
                 neighborhoods[read_var] = (neigh_dist, boundary)
@@ -207,10 +207,10 @@ macro stencil(index_ex, orig_ex)
         # Generate function with transformed body
         @gensym inner_index_var
         new_inner_ex_body = prewalk(inner_ex) do old_inner_ex
-            if @capture(old_inner_ex, read_var_[read_idx_]) && read_idx == index_var
+            if @capture(old_inner_ex, read_var_[read_idx_]) && read_idx == write_idx
                 # Direct access
                 return :($read_var[$inner_index_var])
-            elseif @capture(old_inner_ex, @neighbors(read_var_[read_idx_], neigh_dist_, boundary_)) && read_idx == index_var
+            elseif @capture(old_inner_ex, @neighbors(read_var_[read_idx_], neigh_dist_, boundary_))
                 # Neighborhood access
                 return :($load_neighborhood($read_var, $inner_index_var, $neigh_dist))
             end
@@ -247,7 +247,7 @@ macro stencil(index_ex, orig_ex)
 
         # Generate loop
         push!(final_ex.args, quote
-            for $chunk_idx in $CartesianIndices($chunks($index_range))
+            for $chunk_idx in $CartesianIndices($chunks($write_var))
                 $neighbor_copy_all_ex
                 $spawn_ex
             end
