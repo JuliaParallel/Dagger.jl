@@ -32,6 +32,8 @@ import TimespanLogging: timespan_start, timespan_finish
 
 import Adapt
 
+import FillArrays: Fill
+
 # Preferences
 import Preferences: @load_preference, @set_preferences!
 
@@ -50,7 +52,8 @@ include("utils/dagdebug.jl")
 include("utils/locked-object.jl")
 include("utils/tasks.jl")
 
-import MacroTools: @capture
+import MacroTools: @capture, prewalk
+
 include("options.jl")
 include("processor.jl")
 include("threadproc.jl")
