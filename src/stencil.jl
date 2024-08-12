@@ -3,51 +3,71 @@ const Read = In
 const Write = Out
 const ReadWrite = InOut
 
-function get_neighbor_edge(arr, dim, dir, dist)
+function load_neighbor_edge(arr, dim, dir, neigh_dist)
     if dir == -1
-        start_idx = CartesianIndex(ntuple(i -> i == dim ? (lastindex(arr, i) - dist + 1) : firstindex(arr, i), ndims(arr)))
+        start_idx = CartesianIndex(ntuple(i -> i == dim ? (lastindex(arr, i) - neigh_dist + 1) : firstindex(arr, i), ndims(arr)))
         stop_idx = CartesianIndex(ntuple(i -> i == dim ? lastindex(arr, i) : lastindex(arr, i), ndims(arr)))
     elseif dir == 1
         start_idx = CartesianIndex(ntuple(i -> i == dim ? firstindex(arr, i) : firstindex(arr, i), ndims(arr)))
-        stop_idx = CartesianIndex(ntuple(i -> i == dim ? (firstindex(arr, i) + dist - 1) : lastindex(arr, i), ndims(arr)))
+        stop_idx = CartesianIndex(ntuple(i -> i == dim ? (firstindex(arr, i) + neigh_dist - 1) : lastindex(arr, i), ndims(arr)))
     end
     return collect(@view arr[start_idx:stop_idx])
 end
-function get_neighbor_corner(chunk, corner_side, neigh_dist)
-    start_idx = CartesianIndex(ntuple(i -> corner_side[i] == 0 ? (lastindex(chunk, i) - neigh_dist + 1) : firstindex(chunk, i), ndims(chunk)))
-    stop_idx = CartesianIndex(ntuple(i -> corner_side[i] == 0 ? lastindex(chunk, i) : (firstindex(chunk, i) + neigh_dist - 1), ndims(chunk)))
-    return collect(@view chunk[start_idx:stop_idx])
+function load_neighbor_corner(arr, corner_side, neigh_dist)
+    start_idx = CartesianIndex(ntuple(i -> corner_side[i] == 0 ? (lastindex(arr, i) - neigh_dist + 1) : firstindex(arr, i), ndims(arr)))
+    stop_idx = CartesianIndex(ntuple(i -> corner_side[i] == 0 ? lastindex(arr, i) : (firstindex(arr, i) + neigh_dist - 1), ndims(arr)))
+    return collect(@view arr[start_idx:stop_idx])
 end
-function get_neighborhood_chunks(chunks, idx, neigh_dist, boundary)
+function select_neighborhood_chunks(chunks, idx, neigh_dist, boundary)
+    @assert neigh_dist isa Integer && neigh_dist > 0 "Neighborhood distance must be an Integer greater than 0"
+
+    # FIXME: Depends on neigh_dist and chunk size
     chunk_dist = 1
     # Get the center
     accesses = Any[chunks[idx]]
+
     # Get the edges
     for dim in 1:ndims(chunks)
         for dir in (-1, +1)
-            if dir == -1 && idx[dim] == firstindex(chunks, dim)
-                new_idx = idx + CartesianIndex(ntuple(i -> i == dim ? size(chunks, dim)-1 : 0, ndims(chunks)))
-            elseif dir == +1 && idx[dim] == lastindex(chunks, dim)
-                new_idx = idx - CartesianIndex(ntuple(i -> i == dim ? size(chunks, dim)-1 : 0, ndims(chunks)))
+            new_idx = idx + CartesianIndex(ntuple(i -> i == dim ? dir*chunk_dist : 0, ndims(chunks)))
+            if is_past_boundary(size(chunks), new_idx)
+                if boundary_has_transition(boundary)
+                    new_idx = boundary_transition(boundary, new_idx, size(chunks))
+                else
+                    new_idx = idx
+                end
+                chunk = chunks[new_idx]
+                push!(accesses, Dagger.@spawn load_boundary_edge(boundary, chunk, dim, dir, neigh_dist))
             else
-                new_idx = idx + CartesianIndex(ntuple(i -> i == dim ? dir*chunk_dist : 0, ndims(chunks)))
+                chunk = chunks[new_idx]
+                push!(accesses, Dagger.@spawn load_neighbor_edge(chunk, dim, dir, neigh_dist))
             end
-            chunk = chunks[new_idx]
-            push!(accesses, Dagger.@spawn get_neighbor_edge(chunk, dim, dir, neigh_dist))
         end
     end
+
     # Get the corners
     for corner_num in 1:(2^ndims(chunks))
         corner_side = CartesianIndex(reverse(ntuple(ndims(chunks)) do i
             ((corner_num-1) >> (((ndims(chunks) - i) + 1) - 1)) & 1
         end))
-        corner_idx = CartesianIndex(ntuple(ndims(chunks)) do i
+        corner_new_idx = CartesianIndex(ntuple(ndims(chunks)) do i
             corner_shift = iszero(corner_side[i]) ? -1 : 1
-            return mod1(idx[i] + corner_shift, size(chunks, i))
+            return idx[i] + corner_shift
         end)
-        chunk = chunks[corner_idx]
-        push!(accesses, Dagger.@spawn get_neighbor_corner(chunk, corner_side, neigh_dist))
+        if is_past_boundary(size(chunks), corner_new_idx)
+            if boundary_has_transition(boundary)
+                corner_new_idx = boundary_transition(boundary, corner_new_idx, size(chunks))
+            else
+                corner_new_idx = idx
+            end
+            chunk = chunks[corner_new_idx]
+            push!(accesses, Dagger.@spawn load_boundary_corner(boundary, chunk, corner_side, neigh_dist))
+        else
+            chunk = chunks[corner_new_idx]
+            push!(accesses, Dagger.@spawn load_neighbor_corner(chunk, corner_side, neigh_dist))
+        end
     end
+
     @assert length(accesses) == 1+2*ndims(chunks)+2^ndims(chunks) "Accesses mismatch: $(length(accesses))"
     return accesses
 end
@@ -66,16 +86,36 @@ function load_neighborhood(arr::HaloArray{T,N}, idx, neigh_dist) where {T,N}
     return collect(@view arr[start_idx:stop_idx])
 end
 
+is_past_boundary(size, idx) = any(ntuple(i -> idx[i] < 1 || idx[i] > size[i], length(size)))
+
 struct Wrap end
-boundary_init(::Wrap, arr, size) = similar(arr, eltype(arr), size)
 boundary_has_transition(::Wrap) = true
-boundary_transition(::Wrap, idx, size) = mod1(idx, size)
+boundary_transition(::Wrap, idx, size) =
+    CartesianIndex(ntuple(i -> mod1(idx[i], size[i]), length(size)))
+load_boundary_edge(::Wrap, arr, dim, dir, neigh_dist) = load_neighbor_edge(arr, dim, dir, neigh_dist)
+load_boundary_corner(::Wrap, arr, corner_side, neigh_dist) = load_neighbor_corner(arr, corner_side, neigh_dist)
 
 struct Pad{T}
     padval::T
 end
-boundary_init(::Pad{T}, arr, size) where T = Fill(padval, size)
 boundary_has_transition(::Pad) = false
+function load_boundary_edge(pad::Pad, arr, dim, dir, neigh_dist)
+    if dir == -1
+        start_idx = CartesianIndex(ntuple(i -> i == dim ? (lastindex(arr, i) - neigh_dist + 1) : firstindex(arr, i), ndims(arr)))
+        stop_idx = CartesianIndex(ntuple(i -> i == dim ? lastindex(arr, i) : lastindex(arr, i), ndims(arr)))
+    elseif dir == 1
+        start_idx = CartesianIndex(ntuple(i -> i == dim ? firstindex(arr, i) : firstindex(arr, i), ndims(arr)))
+        stop_idx = CartesianIndex(ntuple(i -> i == dim ? (firstindex(arr, i) + neigh_dist - 1) : lastindex(arr, i), ndims(arr)))
+    end
+    edge_size = ntuple(i -> length(start_idx[i]:stop_idx[i]), ndims(arr))
+    return Fill(pad.padval, edge_size)
+end
+function load_boundary_corner(pad::Pad, arr, corner_side, neigh_dist)
+    start_idx = CartesianIndex(ntuple(i -> corner_side[i] == 0 ? (lastindex(arr, i) - neigh_dist + 1) : firstindex(arr, i), ndims(arr)))
+    stop_idx = CartesianIndex(ntuple(i -> corner_side[i] == 0 ? lastindex(arr, i) : (firstindex(arr, i) + neigh_dist - 1), ndims(arr)))
+    corner_size = ntuple(i -> length(start_idx[i]:stop_idx[i]), ndims(arr))
+    return Fill(pad.padval, corner_size)
+end
 
 """
     @stencil idx in range begin body end
@@ -197,7 +237,7 @@ macro stencil(index_ex, orig_ex)
                 neigh_dist, boundary = neighborhoods[read_var]
                 deps_inner_ex = Expr(:block)
                 @gensym neighbor_copy_var
-                push!(neighbor_copy_all_ex.args, :($neighbor_copy_var = Dagger.@spawn $build_halo($neigh_dist, $boundary, map($Read, $get_neighborhood_chunks($chunks($read_var), $chunk_idx, $neigh_dist, $boundary))...)))
+                push!(neighbor_copy_all_ex.args, :($neighbor_copy_var = Dagger.@spawn $build_halo($neigh_dist, $boundary, map($Read, $select_neighborhood_chunks($chunks($read_var), $chunk_idx, $neigh_dist, $boundary))...)))
                 push!(deps_ex, Expr(:kw, read_var, :($Read($neighbor_copy_var))))
             else
                 push!(deps_ex, Expr(:kw, read_var, :($Read($chunks($read_var)[$chunk_idx]))))
