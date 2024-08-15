@@ -17,6 +17,9 @@ function init_eager()
     end
     if Threads.atomic_xchg!(EAGER_INIT, true)
         wait(EAGER_READY)
+        if EAGER_STATE[] === nothing
+            throw(ConcurrencyViolationError("Eager scheduler failed to start"))
+        end
         return
     end
     ctx = eager_context()
@@ -38,14 +41,19 @@ function init_eager()
         seek(iob.io, 0)
         write(stderr, iob)
     finally
-        reset(EAGER_READY)
+        # N.B. Sequence order matters to ensure that observers can see that we failed to start
         EAGER_STATE[] = nothing
+        notify(EAGER_READY)
+        reset(EAGER_READY)
         lock(EAGER_ID_MAP) do id_map
             empty!(id_map)
         end
         Threads.atomic_xchg!(EAGER_INIT, false)
     end)
     wait(EAGER_READY)
+    if EAGER_STATE[] === nothing
+        throw(ConcurrencyViolationError("Eager scheduler failed to start"))
+    end
 end
 function eager_thunk()
     exec!(Dagger.sch_handle()) do ctx, state, task, tid, _
