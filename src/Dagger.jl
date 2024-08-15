@@ -33,8 +33,6 @@ import TimespanLogging: timespan_start, timespan_finish
 
 import Adapt
 
-import FillArrays: Fill
-
 include("lib/util.jl")
 include("utils/dagdebug.jl")
 

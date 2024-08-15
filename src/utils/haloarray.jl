@@ -1,8 +1,8 @@
 # Define the HaloArray type with minimized halo storage
-struct HaloArray{T,N,E,C,A,EA,CA} <: AbstractArray{T,N}
+struct HaloArray{T,N,E,C,A,EAT<:Tuple,CAT<:Tuple} <: AbstractArray{T,N}
     center::A
-    edges::NTuple{E, EA}
-    corners::NTuple{C, CA}
+    edges::EAT
+    corners::CAT
     halo_width::NTuple{N,Int}
 end
 
@@ -17,11 +17,11 @@ function HaloArray{T,N}(center_size::NTuple{N,Int}, halo_width::NTuple{N,Int}) w
     corners = ntuple(2^N) do i
         return Array{T,N}(undef, halo_width)
     end
-    return HaloArray{T,N,2N,2^N}(center, edges, corners, halo_width)
+    return HaloArray(center, edges, corners, halo_width)
 end
 
-HaloArray(center::AT, edges::NTuple{E, EA}, corners::NTuple{C, CA}, halo_width::NTuple{N, Int}) where {T,N,AT<:AbstractArray{T,N},C,E,CA,EA} =
-    HaloArray{T,N,E,C,AT,EA,CA}(center, edges, corners, halo_width)
+HaloArray(center::AT, edges::EAT, corners::CAT, halo_width::NTuple{N, Int}) where {T,N,AT<:AbstractArray{T,N},CAT<:Tuple,EAT<:Tuple} =
+    HaloArray{T,N,length(edges),length(corners),AT,EAT,CAT}(center, edges, corners, halo_width)
 
 Base.size(tile::HaloArray) = size(tile.center) .+ 2 .* tile.halo_width
 function Base.axes(tile::HaloArray{T,N,H}) where {T,N,H}
@@ -57,10 +57,10 @@ function Base.getindex(tile::HaloArray{T,N}, I::Vararg{Int,N}) where {T,N}
     else
         for d in 1:N
             if I[d] < 1
-                halo_idx = (I[1:d-1]..., I[d] + tile.halo_width[d], I[d+1:end]...)
+                halo_idx = ntuple(i->i == d ? I[i] + tile.halo_width[i] : I[i], N)
                 return tile.edges[(2*(d-1))+1][halo_idx...]
             elseif I[d] > size(tile.center, d)
-                halo_idx = (I[1:d-1]..., I[d] - size(tile.center, d), I[d+1:end]...)
+                halo_idx = ntuple(i->i == d ? I[i] - size(tile.center, d) : I[i], N)
                 return tile.edges[(2*(d-1))+2][halo_idx...]
             end
         end
@@ -84,32 +84,13 @@ function Base.setindex!(tile::HaloArray{T,N}, value, I::Vararg{Int,N}) where {T,
         # Edge
         for d in 1:N
             if I[d] < 1
-                halo_idx = (I[1:d-1]..., I[d] + tile.halo_width[d], I[d+1:end]...)
+                halo_idx = ntuple(i->i == d ? I[i] + tile.halo_width[i] : I[i], N)
                 return tile.edges[(2*(d-1))+1][halo_idx...] = value
             elseif I[d] > size(tile.center, d)
-                halo_idx = (I[1:d-1]..., I[d] - size(tile.center, d), I[d+1:end]...)
+                halo_idx = ntuple(i->i == d ? I[i] - size(tile.center, d) : I[i], N)
                 return tile.edges[(2*(d-1))+2][halo_idx...] = value
             end
         end
     end
     error("Index out of bounds")
 end
-
-#=
-# Example usage
-center_size = (3, 5)
-halo_width = (1, 1)
-tile = HaloArray{Float64, 2}(center_size, halo_width)
-
-# Set values in the center and halo
-tile[2, 2] = 1.0
-tile[0, 2] = 2.0  # This should be in an edge
-tile[0, 0] = 3.0  # This should be in a corner
-tile[4, 6] = 4.0  # This should be in a corner
-
-# Get values from the center and halo
-println(tile[2, 2])  # 1.0
-println(tile[0, 2])  # 2.0
-println(tile[0, 0])  # 3.0
-println(tile[4, 6])  # 4.0
-=#
