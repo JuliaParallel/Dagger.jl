@@ -8,6 +8,7 @@
     A = rand(T, 128, 128)
     A = A * A'
     A[diagind(A)] .+= size(A, 1)
+    B = copy(A)
     DA = view(A, Blocks(32, 32))
     if !(T <: Complex)
         @test issymmetric(DA)
@@ -20,6 +21,8 @@
     @test chol_DA isa Cholesky
     @test chol_A.L ≈ chol_DA.L
     @test chol_A.U ≈ chol_DA.U
+    # Check that cholesky did not modify A or DA
+    @test A ≈ DA ≈ B
 
     # In-place
     A_copy = copy(A)

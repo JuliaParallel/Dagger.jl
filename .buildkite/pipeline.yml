@@ -15,16 +15,6 @@
     arch: x86_64
     num_cpus: 16
 steps:
-  - label: Julia 1.8
-    timeout_in_minutes: 90
-    <<: *test
-    plugins:
-      - JuliaCI/julia#v1:
-          version: "1.8"
-      - JuliaCI/julia-test#v1:
-          julia_args: "--threads=1"
-      - JuliaCI/julia-coverage#v1:
-          codecov: true
   - label: Julia 1.9
     timeout_in_minutes: 90
     <<: *test
@@ -55,7 +45,7 @@ steps:
           julia_args: "--threads=1"
       - JuliaCI/julia-coverage#v1:
           codecov: true
-  - label: Julia 1.8 (macOS)
+  - label: Julia 1.9 (macOS)
     timeout_in_minutes: 90
     <<: *test
     agents:
@@ -64,26 +54,26 @@ steps:
       arch: x86_64
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.8"
+          version: "1.9"
       - JuliaCI/julia-test#v1:
           julia_args: "--threads=1"
       - JuliaCI/julia-coverage#v1:
           codecov: true
-  - label: Julia 1.8 - TimespanLogging
+  - label: Julia 1.9 - TimespanLogging
     timeout_in_minutes: 20
     <<: *test
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.8"
+          version: "1.9"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: "julia --project -e 'using Pkg; Pkg.instantiate(); Pkg.develop(;path=\"lib/TimespanLogging\"); Pkg.test(\"TimespanLogging\")'"
-  - label: Julia 1.8 - DaggerWebDash
+  - label: Julia 1.9 - DaggerWebDash
     timeout_in_minutes: 20
     <<: *test
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.8"
+          version: "1.9"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: "julia -e 'using Pkg; Pkg.develop(;path=pwd()); Pkg.develop(;path=\"lib/TimespanLogging\"); Pkg.develop(;path=\"lib/DaggerWebDash\"); include(\"lib/DaggerWebDash/test/runtests.jl\")'"
@@ -92,7 +82,7 @@ steps:
     <<: *bench
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.8"
+          version: "1.9"
       - JuliaCI/julia-test#v1:
           run_tests: false
     command: "julia -e 'using Pkg; Pkg.add(\"BenchmarkTools\"); Pkg.develop(;path=pwd())'; JULIA_PROJECT=\"$PWD\" julia --project benchmarks/benchmark.jl"
@@ -107,7 +97,7 @@ steps:
     timeout_in_minutes: 20
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.8"
+          version: "1.9"
     env:
       JULIA_NUM_THREADS: "4"
     agents:

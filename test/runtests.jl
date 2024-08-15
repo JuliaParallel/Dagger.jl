@@ -18,6 +18,7 @@ tests = [
     ("Array - MapReduce", "array/mapreduce.jl"),
     ("Array - LinearAlgebra - Matmul", "array/linalg/matmul.jl"),
     ("Array - LinearAlgebra - Cholesky", "array/linalg/cholesky.jl"),
+    ("Array - LinearAlgebra - LU", "array/linalg/lu.jl"),
     ("Array - Random", "array/random.jl"),
     ("Caching", "cache.jl"),
     ("Disk Caching", "diskcaching.jl"),
