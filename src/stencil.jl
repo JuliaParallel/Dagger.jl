@@ -11,12 +11,13 @@ function load_neighbor_edge(arr, dim, dir, neigh_dist)
         start_idx = CartesianIndex(ntuple(i -> i == dim ? firstindex(arr, i) : firstindex(arr, i), ndims(arr)))
         stop_idx = CartesianIndex(ntuple(i -> i == dim ? (firstindex(arr, i) + neigh_dist - 1) : lastindex(arr, i), ndims(arr)))
     end
-    return collect(@view arr[start_idx:stop_idx])
+    # FIXME: Don't collect
+    return move(thunk_processor(), collect(@view arr[start_idx:stop_idx]))
 end
 function load_neighbor_corner(arr, corner_side, neigh_dist)
     start_idx = CartesianIndex(ntuple(i -> corner_side[i] == 0 ? (lastindex(arr, i) - neigh_dist + 1) : firstindex(arr, i), ndims(arr)))
     stop_idx = CartesianIndex(ntuple(i -> corner_side[i] == 0 ? lastindex(arr, i) : (firstindex(arr, i) + neigh_dist - 1), ndims(arr)))
-    return collect(@view arr[start_idx:stop_idx])
+    return move(thunk_processor(), collect(@view arr[start_idx:stop_idx]))
 end
 function select_neighborhood_chunks(chunks, idx, neigh_dist, boundary)
     @assert neigh_dist isa Integer && neigh_dist > 0 "Neighborhood distance must be an Integer greater than 0"
@@ -71,19 +72,30 @@ function select_neighborhood_chunks(chunks, idx, neigh_dist, boundary)
     @assert length(accesses) == 1+2*ndims(chunks)+2^ndims(chunks) "Accesses mismatch: $(length(accesses))"
     return accesses
 end
-function build_halo(neigh_dist, boundary, center::Array{T,N}, all_neighbors...) where {T,N}
-    # FIXME: Don't collect views
-    edges = collect.(all_neighbors[1:(2*N)])
-    corners = collect.(all_neighbors[((2^N)+1):end])
+function build_halo(neigh_dist, boundary, center, all_neighbors...)
+    N = ndims(center)
+    edges = all_neighbors[1:(2*N)]
+    corners = all_neighbors[((2^N)+1):end]
     @assert length(edges) == 2*N && length(corners) == 2^N "Halo mismatch: edges=$(length(edges)) corners=$(length(corners))"
-    arr = HaloArray(center, (edges...,), (corners...,), ntuple(_->neigh_dist, N))
-    return arr
+    return HaloArray(center, (edges...,), (corners...,), ntuple(_->neigh_dist, N))
 end
-function load_neighborhood(arr::HaloArray{T,N}, idx, neigh_dist) where {T,N}
+function load_neighborhood(arr::HaloArray{T,N}, idx) where {T,N}
+    @assert all(arr.halo_width .== arr.halo_width[1])
+    neigh_dist = arr.halo_width[1]
     start_idx = idx - CartesianIndex(ntuple(_->neigh_dist, ndims(arr)))
     stop_idx = idx + CartesianIndex(ntuple(_->neigh_dist, ndims(arr)))
-    # FIXME: Don't collect HaloArray view
-    return collect(@view arr[start_idx:stop_idx])
+    return @view arr[start_idx:stop_idx]
+end
+function inner_stencil!(f, output, read_vars)
+    processor = thunk_processor()
+    inner_stencil_proc!(processor, f, output, read_vars)
+end
+# Non-KA (for CPUs)
+function inner_stencil_proc!(::ThreadProc, f, output, read_vars)
+    for idx in CartesianIndices(output)
+        f(idx, output, read_vars)
+    end
+    return
 end
 
 is_past_boundary(size, idx) = any(ntuple(i -> idx[i] < 1 || idx[i] > size[i], length(size)))
@@ -108,17 +120,19 @@ function load_boundary_edge(pad::Pad, arr, dim, dir, neigh_dist)
         stop_idx = CartesianIndex(ntuple(i -> i == dim ? (firstindex(arr, i) + neigh_dist - 1) : lastindex(arr, i), ndims(arr)))
     end
     edge_size = ntuple(i -> length(start_idx[i]:stop_idx[i]), ndims(arr))
-    return Fill(pad.padval, edge_size)
+    # FIXME: return Fill(pad.padval, edge_size)
+    return move(thunk_processor(), fill(pad.padval, edge_size))
 end
 function load_boundary_corner(pad::Pad, arr, corner_side, neigh_dist)
     start_idx = CartesianIndex(ntuple(i -> corner_side[i] == 0 ? (lastindex(arr, i) - neigh_dist + 1) : firstindex(arr, i), ndims(arr)))
     stop_idx = CartesianIndex(ntuple(i -> corner_side[i] == 0 ? lastindex(arr, i) : (firstindex(arr, i) + neigh_dist - 1), ndims(arr)))
     corner_size = ntuple(i -> length(start_idx[i]:stop_idx[i]), ndims(arr))
-    return Fill(pad.padval, corner_size)
+    # FIXME: return Fill(pad.padval, corner_size)
+    return move(thunk_processor(), fill(pad.padval, corner_size))
 end
 
 """
-    @stencil idx in range begin body end
+    @stencil begin body end
 
 Allows the specification of stencil operations within a `spawn_datadeps`
 region. The `idx` variable is used to iterate over `range`, which must be a
@@ -205,21 +219,25 @@ macro stencil(orig_ex)
         @gensym chunk_idx
 
         # Generate function with transformed body
-        @gensym inner_index_var
+        @gensym inner_vars inner_index_var
         new_inner_ex_body = prewalk(inner_ex) do old_inner_ex
             if @capture(old_inner_ex, read_var_[read_idx_]) && read_idx == write_idx
                 # Direct access
-                return :($read_var[$inner_index_var])
+                if read_var == write_var
+                    return :($write_var[$inner_index_var])
+                else
+                    return :($inner_vars.$read_var[$inner_index_var])
+                end
             elseif @capture(old_inner_ex, @neighbors(read_var_[read_idx_], neigh_dist_, boundary_))
                 # Neighborhood access
-                return :($load_neighborhood($read_var, $inner_index_var, $neigh_dist))
+                return :($load_neighborhood($inner_vars.$read_var, $inner_index_var))
             end
             return old_inner_ex
         end
+        new_inner_f = :(($inner_index_var, $write_var, $inner_vars)->$new_inner_ex_body)
         new_inner_ex = quote
-            for $inner_index_var in CartesianIndices($write_var)
-                $new_inner_ex_body
-            end
+            $inner_vars = (;$(read_vars...))
+            $inner_stencil!($new_inner_f, $write_var, $inner_vars)
         end
         inner_fn = Expr(:->, Expr(:tuple, Expr(:parameters, write_var, read_vars...)), new_inner_ex)
 
@@ -254,7 +272,6 @@ macro stencil(orig_ex)
         end)
     end
 
-    @show final_ex
 
     return esc(final_ex)
 end

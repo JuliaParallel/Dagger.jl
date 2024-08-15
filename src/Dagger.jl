@@ -32,8 +32,6 @@ import TimespanLogging: timespan_start, timespan_finish
 
 import Adapt
 
-import FillArrays: Fill
-
 # Preferences
 import Preferences: @load_preference, @set_preferences!
 
