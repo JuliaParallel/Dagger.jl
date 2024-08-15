@@ -163,7 +163,7 @@ function tochunk(x::X, proc::P=OSProc(), scope::S=AnyScope(); cache=false, devic
     ref = poolset(x; device, kwargs...)
     Chunk{X,typeof(ref),P,S}(X, domain(x), ref, proc, scope)
 end
-function tochunk(x::Union{Chunk, Thunk}, proc=nothing, scope=nothing; rewrap=false, kwargs...)
+function tochunk(x::Chunk, proc=nothing, scope=nothing; rewrap=false, kwargs...)
     if rewrap
         return remotecall_fetch(x.handle.owner) do
             tochunk(MemPool.poolget(x.handle), proc, scope; kwargs...)
@@ -172,6 +172,7 @@ function tochunk(x::Union{Chunk, Thunk}, proc=nothing, scope=nothing; rewrap=fal
         return x
     end
 end
+tochunk(x::Thunk, proc=nothing, scope=nothing; kwargs...) = x
 
 function savechunk(data, dir, f)
     sz = open(joinpath(dir, f), "w") do io
