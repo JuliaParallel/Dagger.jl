@@ -277,7 +277,7 @@ end
                 t1 = Dagger.@spawn 1+"fail"
                 Dagger.@spawn t1+1
             end
-            @test_throws_unwrap (Dagger.ThunkFailedException, ErrorException) fetch(t2)
+            @test_throws_unwrap (Dagger.ThunkFailedException, MethodError) fetch(t2)
         end
     end
     if nprocs() > 1
