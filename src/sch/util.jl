@@ -62,7 +62,10 @@ function get_propagated_options(options::Options)
 end
 
 has_result(state, thunk) = thunk.cache_ref !== nothing
-load_result(state, thunk) = something(thunk.cache_ref)
+function load_result(state, thunk)
+    @assert thunk.finished "Thunk[$(thunk.id)] is not yet finished"
+    return something(thunk.cache_ref)
+end
 function store_result!(state, thunk, value; error::Bool=false)
     @assert islocked(state.lock)
     @assert !thunk.finished "Thunk[$(thunk.id)] should not be finished yet"
