@@ -96,6 +96,18 @@ function Thunk(f, xs...;
     if !(f isa Argument)
         f = Argument(ArgPosition(true, 0, :NULL), f)
     end
+    if options !== nothing
+        if processor !== nothing
+            options.processor = processor
+        elseif options.processor !== nothing
+            processor = options.processor
+        end
+        if scope !== nothing
+            options.scope = scope
+        elseif options.scope !== nothing
+            scope = options.scope
+        end
+    end
     if !isnothing(processor) || !isnothing(scope)
         f.value = tochunk(value(f),
                           something(processor, OSProc()),
@@ -536,9 +548,9 @@ function spawn(f, args...; kwargs...)
     options_merge!(task_options, scoped_options; override=false)
 
     # Wrap f in a Chunk if necessary
-    processor = haskey(scoped_options, :processor) ? scoped_options.processor : nothing
-    scope = haskey(scoped_options, :scope) ? scoped_options.scope : nothing
-    if !isa(f, Chunk) && !isnothing(processor) || !isnothing(scope)
+    processor = task_options.processor
+    scope = task_options.scope
+    if !isnothing(processor) || !isnothing(scope)
         f = tochunk(f,
                     something(processor, OSProc()),
                     something(scope, DefaultScope()); rewrap=true)
