@@ -31,8 +31,11 @@ function cancel!(tid::Union{Int,Nothing}=nothing;
                  force::Bool=false, halt_sch::Bool=false)
     remotecall_fetch(1, tid, force, halt_sch) do tid, force, halt_sch
         state = Sch.EAGER_STATE[]
-        state === nothing && return
-        @lock state.lock _cancel!(state, tid, force, halt_sch)
+
+        # Check that the scheduler isn't stopping or has already stopped
+        if !isnothing(state) && !state.halt.set
+            @lock state.lock _cancel!(state, tid, force, halt_sch)
+        end
     end
 end
 function _cancel!(state, tid, force, halt_sch)
