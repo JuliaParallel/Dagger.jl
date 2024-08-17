@@ -274,6 +274,7 @@ end
 function must_defer!(state::DataDepsState, spec::DTaskSpec, task::DTask)
     upstreams = Set{DTask}()
     for (_, arg) in spec.args
+        arg, _ = unwrap_inout(arg)
         if arg isa DTask && !istaskdone(arg)
             push!(upstreams, arg)
         end
