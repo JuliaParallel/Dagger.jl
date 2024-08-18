@@ -81,6 +81,18 @@ function Base.take!(rb::ProcessRingBuffer)
     return rb.buffer[to_read_idx]
 end
 
+"""
+`take!()` all the elements from a buffer and put them in a `Vector`.
+"""
+function collect!(rb::ProcessRingBuffer{T}) where T
+    output = Vector{T}(undef, rb.count)
+    for i in 1:rb.count
+        output[i] = take!(rb)
+    end
+
+    return output
+end
+
 #= TODO
 "A server-local ring buffer backed by shared-memory."
 mutable struct ServerRingBuffer{T}
