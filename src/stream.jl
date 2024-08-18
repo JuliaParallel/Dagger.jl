@@ -180,15 +180,29 @@ function migrate_stream!(stream::Stream, w::Integer=myid())
     # MemPool will block access to the new ref until the migration completes
     # FIXME: Do this with MemPool.access_ref, in case stream was already migrated
     if stream.store_ref.handle.owner != w
-        new_store_ref = MemPool.migrate!(stream.store_ref.handle, w; pre_migration=store->begin
-            # Lock store to prevent any further modifications
-            # N.B. Serialization automatically unlocks the migrated copy
-            lock((store::StreamStore).lock)
-        end, post_migration=store->begin
-            # Unlock the store
-            # FIXME: Indicate to all waiters that this store is dead
-            unlock((store::StreamStore).lock)
-        end)
+        new_store_ref = MemPool.migrate!(stream.store_ref.handle, w;
+                                         pre_migration=store->begin
+                                             # Lock store to prevent any further modifications
+                                             # N.B. Serialization automatically unlocks the migrated copy
+                                             lock((store::StreamStore).lock)
+
+                                             # Return the serializeable unsent outputs. We can't send the
+                                             # buffers themselves because they may be mmap'ed or something.
+                                             Dict(id => collect!(buffer) for (id, buffer) in store.buffers)
+                                         end,
+                                         dest_post_migration=(store, unsent_outputs)->begin
+                                             # Initialize the StreamStore on the destination with the unsent outputs.
+                                             for (id, outputs) in unsent_outputs
+                                                 for item in outputs
+                                                     put!(store.buffers[id], item)
+                                                 end
+                                             end
+                                         end,
+                                         post_migration=store->begin
+                                             # Unlock the store
+                                             # FIXME: Indicate to all waiters that this store is dead
+                                             unlock((store::StreamStore).lock)
+                                         end)
         if w == myid()
             stream.store = MemPool.access_ref(identity, new_store_ref; local_only=true)
         end
