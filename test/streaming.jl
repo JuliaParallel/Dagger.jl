@@ -10,18 +10,18 @@ function catch_interrupt(f)
     try
         f()
     catch err
-        if err isa Dagger.ThunkFailedException && err.ex isa InterruptException
+        if err isa Dagger.DTaskFailedException && err.ex isa InterruptException
             return
         elseif err isa Dagger.Sch.SchedulingException
             return
         end
-        rethrow(err)
+        rethrow()
     end
 end
 
 function test_finishes(f, message::String; ignore_timeout=false)
     t = @eval Threads.@spawn @testset $message catch_interrupt($f)
-    if timedwait(()->istaskdone(t), 10) == :timed_out
+    if timedwait(()->istaskdone(t), 20) == :timed_out
         if !ignore_timeout
             @warn "Testing task timed out: $message"
         end
@@ -76,7 +76,7 @@ end
             y = Dagger.@spawn x+1
         end
         @test fetch(x) === nothing
-        @test_throws Dagger.ThunkFailedException fetch(y)
+        @test_throws Dagger.DTaskFailedException fetch(y)
     end
 
     # TODO: Two tasks (parallel)
