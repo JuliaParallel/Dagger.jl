@@ -325,13 +325,20 @@ function to_scope(sc::NamedTuple)
     else
         nothing
     end
+    all_threads = false
     threads = if haskey(sc, :thread)
         Int[sc.thread]
     elseif haskey(sc, :threads)
-        Int[sc.threads...]
+        if sc.threads == Colon()
+            all_threads = true
+            nothing
+        else
+            Int[sc.threads...]
+        end
     else
         nothing
     end
+    want_threads = all_threads || threads !== nothing
 
     # Simple cases
     if workers !== nothing && threads !== nothing
@@ -341,18 +348,22 @@ function to_scope(sc::NamedTuple)
         end
         return simplified_union_scope(subscopes)
     elseif workers !== nothing && threads === nothing
-        subscopes = AbstractScope[ProcessScope(w) for w in workers]
-        return simplified_union_scope(subscopes)
+        subscopes = simplified_union_scope(AbstractScope[ProcessScope(w) for w in workers])
+        if all_threads
+            return constrain(subscopes, ProcessorTypeScope(ThreadProc))
+        else
+            return subscopes
+        end
     end
 
     # More complex cases that require querying the cluster
     # FIXME: Use per-field scope taint
     if workers === nothing
-        workers = procs()
+        workers = map(p->p.pid, filter(p->p isa OSProc, procs(Dagger.Sch.eager_context())))
     end
     subscopes = AbstractScope[]
     for w in workers
-        if threads === nothing
+        if threads === nothing && want_threads
             threads = map(c->c.tid,
                           filter(c->c isa ThreadProc,
                                  collect(children(OSProc(w)))))
