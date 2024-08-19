@@ -39,6 +39,30 @@ tab20_colors = [
 _default_colors = tab20_colors
 
 """
+    Dagger.show_logs(io::IO, logs::Dict, ::Val{:graphviz}; disconnected=false,
+                       color_by=:fn, times::Bool=true, times_digits::Integer=3)
+
+Write a graph of the task dependencies and data dependencies in `logs` to dot format
+
+Requires the following events enabled in `enable_logging!`: `taskdeps`, `tasknames`, `taskargs`, `taskargmoves`
+
+Options:
+- `disconnected`: If `true`, render disconnected vertices (tasks or arguments without upstream/downstream dependencies)
+- `color_by`: How to color tasks; if `:fn`, then color by unique function name, if `:proc`, then color by unique processor
+- `times`: If `true`, annotate each task with its start and finish times
+- `times_digits`: Number of digits to display in the time annotations
+- `colors`: A list of colors to use for coloring tasks
+- `name_to_color`: A function that maps task names to colors
+"""
+function Dagger.show_logs(io::IO, logs::Dict, ::Val{:graphviz}; disconnected=false,
+                          color_by=:fn, times::Bool=true, times_digits::Integer=3,
+                          colors=_default_colors, name_to_color=_name_to_color)
+    dot = logs_to_dot(logs; disconnected, times, times_digits,
+                      color_by, colors, name_to_color)
+    println(io, dot)
+end
+
+"""
     Dagger.render_logs(logs::Dict, ::Val{:graphviz}; disconnected=false,
                        color_by=:fn, layout_engine="dot",
                        times::Bool=true, times_digits::Integer=3)
@@ -50,14 +74,26 @@ Requires the `all_task_deps` event enabled in `enable_logging!`
 Options:
 - `disconnected`: If `true`, render disconnected vertices (tasks or arguments without upstream/downstream dependencies)
 - `color_by`: How to color tasks; if `:fn`, then color by unique function name, if `:proc`, then color by unique processor
-- `layout_engine`: The layout engine to use for GraphViz
+- `layout_engine`: The layout engine to use for GraphViz rendering
 - `times`: If `true`, annotate each task with its start and finish times
 - `times_digits`: Number of digits to display in the time annotations
+- `colors`: A list of colors to use for coloring tasks
+- `name_to_color`: A function that maps task names to colors
 """
 function Dagger.render_logs(logs::Dict, ::Val{:graphviz}; disconnected=false,
                             color_by=:fn, layout_engine="dot",
                             times::Bool=true, times_digits::Integer=3,
                             colors=_default_colors, name_to_color=_name_to_color)
+    dot = logs_to_dot(logs; disconnected, times, times_digits,
+                            color_by, colors, name_to_color)
+    gv = GraphViz.Graph(dot)
+    GraphViz.layout!(gv; engine=layout_engine)
+    return gv
+end
+
+function logs_to_dot(logs::Dict; disconnected=false, color_by=:fn,
+                     times::Bool=true, times_digits::Integer=3,
+                     colors=_default_colors, name_to_color=_name_to_color)
     # Lookup all relevant task/argument dependencies and values in logs
     g = SimpleDiGraph()
 
@@ -397,10 +433,7 @@ function Dagger.render_logs(logs::Dict, ::Val{:graphviz}; disconnected=false,
 
     # Generate the final graph
     str *= "}\n"
-    gv = GraphViz.Graph(str)
-    GraphViz.layout!(gv; engine=layout_engine)
-
-    return gv
+    return str
 end
 
 end

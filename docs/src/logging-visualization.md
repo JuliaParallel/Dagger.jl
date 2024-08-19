@@ -18,6 +18,7 @@ converted to a `Val` for dispatch purposes
 (i.e. `render_logs(logs::Dict, :myrenderer)` -> `render_logs(logs, Val{:myrenderer}())`).
 
 Built-in `IO` support exists for:
+- `show_logs(io, logs, :graphviz)` to write a Graphviz dot graph of executed tasks and their dependencies
 - `show_logs(io, logs, :chrome_trace)` to write a task execution timeline in the chrome-trace format (view in [perfetto web UI](https://ui.perfetto.dev/) or `about:tracing` in a chrome-based browser)
 
 Built-in rendering support exists for:
