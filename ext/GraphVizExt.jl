@@ -25,6 +25,27 @@ function pretty_time(t; digits=3)
 end
 
 """
+    Dagger.show_logs(io::IO, logs::Dict, ::Val{:graphviz}; disconnected=false,
+                       color_by=:fn, times::Bool=true, times_digits::Integer=3)
+
+Write a graph of the task dependencies and data dependencies in `logs` to dot format
+
+Requires the following events enabled in `enable_logging!`: `taskdeps`, `tasknames`, `taskargs`, `taskargmoves`
+
+Options:
+- `disconnected`: If `true`, render disconnected vertices (tasks or arguments without upstream/downstream dependencies)
+- `color_by`: How to color tasks; if `:fn`, then color by unique function name, if `:proc`, then color by unique processor
+- `times`: If `true`, annotate each task with its start and finish times
+- `times_digits`: Number of digits to display in the time annotations
+"""
+function Dagger.show_logs(io::IO, logs::Dict, ::Val{:graphviz}; disconnected=false,
+                          color_by=:fn, times::Bool=true, times_digits::Integer=3)
+    dot = logs_to_dot(logs; disconnected=disconnected, color_by=color_by,
+                      times=times, times_digits=times_digits)
+    println(io, dot)
+end
+
+"""
     Dagger.render_logs(logs::Dict, ::Val{:graphviz}; disconnected=false,
                        color_by=:fn, layout_engine="dot",
                        times::Bool=true, times_digits::Integer=3)
@@ -43,6 +64,15 @@ Options:
 function Dagger.render_logs(logs::Dict, ::Val{:graphviz}; disconnected=false,
                             color_by=:fn, layout_engine="dot",
                             times::Bool=true, times_digits::Integer=3)
+    dot = logs_to_dot(logs; disconnected=disconnected, color_by=color_by,
+                      times=times, times_digits=times_digits)
+    gv = GraphViz.Graph(dot)
+    GraphViz.layout!(gv; engine=layout_engine)
+    return gv
+end
+
+function logs_to_dot(logs::Dict; disconnected=false, color_by=:fn,
+                     times::Bool=true, times_digits::Integer=3)
     # Lookup all relevant task/argument dependencies and values in logs
     g = SimpleDiGraph()
     tid_to_vertex = Dict{Int,Int}()
@@ -217,9 +247,7 @@ function Dagger.render_logs(logs::Dict, ::Val{:graphviz}; disconnected=false,
     end
 
     str *= "}\n"
-    gv = GraphViz.Graph(str)
-    GraphViz.layout!(gv; engine=layout_engine)
-    return gv
+    return str
 end
 
 end
