@@ -6,21 +6,31 @@
     return x
 end
 
-function catch_interrupt(f)
-    try
-        f()
-    catch err
-        if err isa Dagger.DTaskFailedException && err.ex isa InterruptException
-            return
-        elseif err isa Dagger.Sch.SchedulingException
-            return
+function test_in_task(f, message, parent_testsets)
+    task_local_storage(:__BASETESTNEXT__, parent_testsets)
+
+    @testset "$message" begin
+        try
+            f()
+        catch err
+            if err isa Dagger.DTaskFailedException && err.ex isa InterruptException
+                return
+            elseif err isa Dagger.Sch.SchedulingException
+                return
+            end
+            rethrow()
         end
-        rethrow()
     end
 end
 
 function test_finishes(f, message::String; ignore_timeout=false)
-    t = @eval Threads.@spawn @testset $message catch_interrupt($f)
+    # We sneakily pass a magic variable from the current TLS into the new
+    # task. It's used by the Test stdlib to hold a list of the current
+    # testsets, so we need it to be able to record the tests from the new
+    # task in the original testset that we're currently running under.
+    parent_testsets = get(task_local_storage(), :__BASETESTNEXT__, [])
+    t = Threads.@spawn test_in_task(f, message, parent_testsets)
+
     if timedwait(()->istaskdone(t), 20) == :timed_out
         if !ignore_timeout
             @warn "Testing task timed out: $message"
