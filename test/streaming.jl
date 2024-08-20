@@ -1,9 +1,41 @@
-@everywhere function rand_finite()
-    x = rand()
-    if x < 0.1
-        return Dagger.finish_stream(x)
+@everywhere begin
+    """
+    A functor to produce a certain number of outputs.
+
+    Note: always use this like `Dagger.spawn(Producer())` rather than
+    `Dagger.@spawn Producer()`. The macro form will just create fresh objects
+    every time and stream forever.
+    """
+    mutable struct Producer
+        N::Union{Int, Float64}
+        count::Int
+        mailbox::Union{RemoteChannel, Nothing}
+
+        Producer(N=5, mailbox=nothing) = new(N, 0, mailbox)
     end
-    return x
+
+    function (self::Producer)()
+        self.count += 1
+
+        # Sleeping will make the loop yield (handy for single-threaded
+        # processes), and stops Dagger from being too spammy in debug mode.
+        if self.N == Inf
+            sleep(0.1)
+        end
+
+        # Check if there are any instructions for us
+        if !isnothing(self.mailbox) && isready(self.mailbox)
+            msg = take!(self.mailbox)
+            if msg === :exit
+                put!(self.mailbox, self.count)
+                return Dagger.finish_stream(self.count)
+            else
+                error("Unrecognized Producer message: $msg")
+            end
+        end
+
+        self.count >= self.N ? Dagger.finish_stream(self.count) : self.count
+    end
 end
 
 function test_in_task(f, message, parent_testsets)
@@ -43,10 +75,12 @@ function test_finishes(f, message::String; ignore_timeout=false)
 end
 
 @testset "Basics" begin
+    master_scope = Dagger.scope(worker=myid())
+
     @test test_finishes("Single task") do
         local x
         Dagger.spawn_streaming() do
-            x = Dagger.@spawn rand_finite()
+            x = Dagger.spawn(Producer())
         end
         @test fetch(x) === nothing
     end
@@ -64,25 +98,23 @@ end
     end
 
     @test test_finishes("Max evaluations") do
-        counter = 0
-        function incrementer()
-            counter += 1
-        end
-
+        producer = Producer(20)
         x = Dagger.with_options(; stream_max_evals=10) do
             Dagger.spawn_streaming() do
-                Dagger.@spawn incrementer()
+                # Spawn on the same node so we can access the local `producer` variable
+                Dagger.spawn(producer, Dagger.Options(; scope=master_scope))
             end
         end
+
         wait(x)
-        @test counter == 10
+        @test producer.count == 10
     end
 
     @test test_finishes("Two tasks (sequential)") do
         local x, y
         @warn "\n\n\nStart streaming\n\n\n"
         Dagger.spawn_streaming() do
-            x = Dagger.@spawn rand_finite()
+            x = Dagger.spawn(Producer())
             y = Dagger.@spawn x+1
         end
         @test fetch(x) === nothing
