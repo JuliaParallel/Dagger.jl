@@ -118,14 +118,12 @@ function logs_event_pairs(f, logs::Dict)
                 continue
             end
             id::NamedTuple
-            if haskey(id, :thunk_id)
-                event_key = (category, id)
-                if kind == :start
-                    running_events[event_key] = idx
-                else
-                    event_start_idx = running_events[event_key]
-                    f(w, event_start_idx, idx)
-                end
+            event_key = (category, id)
+            if kind == :start
+                running_events[event_key] = idx
+            else
+                event_start_idx = running_events[event_key]
+                f(w, event_start_idx, idx)
             end
         end
     end
