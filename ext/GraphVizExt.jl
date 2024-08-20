@@ -84,7 +84,7 @@ function Dagger.render_logs(logs::Dict, ::Val{:graphviz}; disconnected=false,
             if category == :add_thunk && kind == :start
                 id::NamedTuple
                 taskdeps = logs[w][:taskdeps][idx]::Pair{Int,Vector{Int}}
-                taskname = logs[w][:tasknames][idx]::String
+                taskname = logs[w][:taskfuncnames][idx]::String
                 tid, deps = taskdeps
                 v = get!(tid_to_vertex, tid) do
                     add_vertex!(g)

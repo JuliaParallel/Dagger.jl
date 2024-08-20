@@ -35,8 +35,8 @@ function logs_to_df(logs::Dict, ::Val{:execution}; colors=_default_colors, name_
             kind = logs[w][:core][idx].kind::Symbol
             if category == :add_thunk && kind == :start
                 tid = logs[w][:id][idx].thunk_id::Int
-                if haskey(logs[w], :tasknames)
-                    fn_names[tid] = first(split(logs[w][:tasknames][idx]::String, ' '))
+                if haskey(logs[w], :taskfuncnames)
+                    fn_names[tid] = logs[w][:taskfuncnames][idx]::String
                 else
                     @warn "Task names missing from logs"
                     fn_names[tid] = "unknown"

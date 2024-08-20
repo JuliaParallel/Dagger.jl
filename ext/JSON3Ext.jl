@@ -37,8 +37,7 @@ function logs_to_chrome_trace(logs::Dict)
             if !haskey(execution_logs, tid)
                 execution_logs[tid] = Dict{Symbol,Any}()
             end
-            taskname = logs[w][:tasknames][start_idx]
-            fname = first(split(taskname, ' '))
+            fname = logs[w][:taskfuncnames][start_idx]
             execution_logs[tid][:name] = fname
         end
     end

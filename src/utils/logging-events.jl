@@ -120,6 +120,24 @@ func_name(x) = repr(x)
 func_name(::Dagger.ExpandedBroadcast{F}) where F = Symbol('.', nameof(F))
 
 """
+    TaskFunctionNames
+
+Records the function name of each task.
+"""
+struct TaskFunctionNames end
+function (::TaskFunctionNames)(ev::Event{:start})
+    if ev.category == :add_thunk
+        f = Dagger.chunktype(ev.timeline.f)
+        if hasproperty(f, :instance) && isdefined(f, :instance)
+            f = f.instance
+        end
+        return String(func_name(f))
+    end
+    return
+end
+(td::TaskFunctionNames)(ev::Event{:finish}) = nothing
+
+"""
     TaskArguments
 
 Records the raw (mutable) arguments of each submitted task.

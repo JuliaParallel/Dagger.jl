@@ -10,6 +10,7 @@ Extra events:
 - `timeline::Bool`: Enables raw "timeline" values, which are event-specific; not recommended except for debugging
 - `all_task_deps::Bool`: Enables all task dependency-related logging
 - `tasknames::Bool`: Enables generating unique task names for each task
+- `taskfuncnames::Bool`: Enables reporting of task function names for each task
 - `taskdeps::Bool`: Enables reporting of upstream task dependencies (as task IDs) for each task argument
 - `taskargs::Bool`: Enables reporting of upstream non-task dependencies (as `objectid` hash) for each task argument
 - `taskargmoves::Bool`: Enables reporting of copies of upstream dependencies (as original and copy `objectid` hashes) for each task argument
@@ -22,6 +23,7 @@ function enable_logging!(;metrics::Bool=true,
                           timeline::Bool=false,
                           all_task_deps::Bool=false,
                           tasknames::Bool=true,
+                          taskfuncnames::Bool=false,
                           taskdeps::Bool=true,
                           taskargs::Bool=false,
                           taskargmoves::Bool=false,
@@ -36,7 +38,7 @@ function enable_logging!(;metrics::Bool=true,
         ml[:timeline] = TimespanLogging.Events.TimelineMetrics()
     end
     if all_task_deps
-        tasknames = true
+        taskfuncnames = true
         taskdeps = true
         taskargs = true
         taskargmoves = true
@@ -46,6 +48,9 @@ function enable_logging!(;metrics::Bool=true,
     end
     if tasknames
         ml[:tasknames] = Dagger.Events.TaskNames()
+    end
+    if taskfuncnames
+        ml[:taskfuncnames] = Dagger.Events.TaskFunctionNames()
     end
     if taskdeps
         ml[:taskdeps] = Dagger.Events.TaskDependencies()
