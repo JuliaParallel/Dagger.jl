@@ -10,6 +10,7 @@ tests = [
     ("Mutation", "mutation.jl"),
     ("Task Queues", "task-queues.jl"),
     ("Datadeps", "datadeps.jl"),
+    ("Streaming", "streaming.jl"),
     ("Domain Utilities", "domain.jl"),
     ("Array - Allocation", "array/allocation.jl"),
     ("Array - Indexing", "array/indexing.jl"),
@@ -50,6 +51,9 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
                 arg_type = Int
                 default = additional_workers
                 help = "How many additional workers to launch"
+            "-v", "--verbose"
+                action = :store_true
+                help = "Run the tests with debug logs from Dagger"
         end
     end
 
@@ -79,11 +83,14 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
     parsed_args["simulate"] && exit(0)
 
     additional_workers = parsed_args["procs"]
+
+    if parsed_args["verbose"]
+        ENV["JULIA_DEBUG"] = "Dagger"
+    end
 else
     to_test = all_test_names
     @info "Running all tests"
 end
-
 
 using Distributed
 if additional_workers > 0

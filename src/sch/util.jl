@@ -388,12 +388,19 @@ function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
     else
         get(state.signature_alloc_cost, sig, UInt64(0))
     end::UInt64
-    est_occupancy = if occupancy !== nothing && haskey(occupancy, T)
-        # Clamp to 0-1, and scale between 0 and `typemax(UInt32)`
-        Base.unsafe_trunc(UInt32, clamp(occupancy[T], 0, 1) * typemax(UInt32))
-    else
-        typemax(UInt32)
-    end::UInt32
+    est_occupancy::UInt32 = typemax(UInt32)
+    if occupancy !== nothing
+        occ = nothing
+        if haskey(occupancy, T)
+            occ = occupancy[T]
+        elseif haskey(occupancy, Any)
+            occ = occupancy[Any]
+        end
+        if occ !== nothing
+            # Clamp to 0-1, and scale between 0 and `typemax(UInt32)`
+            est_occupancy = Base.unsafe_trunc(UInt32, clamp(occ, 0, 1) * typemax(UInt32))
+        end
+    end
     #= FIXME: Estimate if cached data can be swapped to storage
     storage = storage_resource(p)
     real_alloc_util = state.worker_storage_pressure[gp][storage]
