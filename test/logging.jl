@@ -100,7 +100,9 @@ import Colors, GraphViz, DataFrames, Plots, JSON3
                 for idx in 1:length(logs[w][:core])
                     category = logs[w][:core][idx].category
                     if category in (:scheduler_init, :scheduler_exit, :take, :assign_procs)
-                        @test logs[w][:id][idx] === nothing
+                        @test logs[w][:id][idx] isa NamedTuple
+                        @test haskey(logs[w][:id][idx], :uid)
+                        @test logs[w][:id][idx].uid isa UInt
                     end
                     if category in (:add_thunk, :schedule, :finish, :move, :compute, :storage_wait, :storage_safe_scan, :enqueue)
                         @test logs[w][:id][idx] isa NamedTuple
