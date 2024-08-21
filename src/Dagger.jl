@@ -88,14 +88,13 @@ include("array/cholesky.jl")
 include("array/lu.jl")
 include("array/random.jl")
 
-# Visualization
+# Logging and Visualization
 include("visualization.jl")
 include("ui/gantt-common.jl")
 include("ui/gantt-text.jl")
-
-# Logging
 include("utils/logging-events.jl")
 include("utils/logging.jl")
+include("utils/viz.jl")
 
 # Precompilation
 import PrecompileTools: @compile_workload

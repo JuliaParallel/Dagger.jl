@@ -524,6 +524,13 @@ function Base.:(==)(x::AbstractArray{T,N}, y::ArrayOp{S,N}) where {T,S,N}
     return collect(x) == y
 end
 
+function logs_annotate!(ctx::Context, A::DArray, name::Union{String,Symbol})
+    for (idx, chunk) in enumerate(A.chunks)
+        sd = A.subdomains[idx]
+        Dagger.logs_annotate!(ctx, chunk, name*'['*join(sd.indexes, ',')*']')
+    end
+end
+
 # TODO: Allow `f` to return proc
 mapchunk(f, chunk) = tochunk(f(poolget(chunk.handle)))
 function mapchunks(f, d::DArray{T,N,F}) where {T,N,F}
