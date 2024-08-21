@@ -30,7 +30,7 @@ show_logs(t, logs, vizmode::Symbol; options...) =
     show_logs(t, logs, Val{vizmode}(); options...)
 function show_logs(logs, ::Val{vizmode}; options...) where vizmode
     iob = IOBuffer()
-    show_logs(iob, t, Val{vizmode}(); options...)
+    show_logs(iob, logs, Val{vizmode}(); options...)
     return String(take!(iob))
 end
 function show_logs(t, logs, ::Val{vizmode}; options...) where vizmode

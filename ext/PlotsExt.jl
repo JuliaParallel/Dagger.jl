@@ -12,19 +12,8 @@ import Dagger
 import Dagger: DTask, Chunk, Processor
 import Dagger.TimespanLogging: Timespan
 
-_name_to_color(name::AbstractString, colors) =
-    colors[mod1(hash(name), length(colors))]
-_name_to_color(name::AbstractString, ::Nothing) = "black"
-tab20_colors = [
-    "#1f77b4", "#aec7e8", "#ff7f0e", "#ffbb78",
-    "#2ca02c", "#98df8a", "#d62728", "#ff9896",
-    "#9467bd", "#c5b0d5", "#8c564b", "#c49c94",
-    "#e377c2", "#f7b6d2", "#7f7f7f", "#c7c7c7",
-    "#bcbd22", "#dbdb8d", "#17becf", "#9edae5"
-]
-_default_colors = tab20_colors
-
-function logs_to_df(logs::Dict, ::Val{:execution}; colors=_default_colors, name_to_color=_name_to_color, color_by=:fn)
+function logs_to_df(logs::Dict, ::Val{:execution};
+                    colors, name_to_color, color_by)
     # Generate function names
     fn_names = Dict{Int, String}()
     dtask_names = Dict{UInt, String}()
@@ -91,7 +80,8 @@ function logs_to_df(logs::Dict, ::Val{:execution}; colors=_default_colors, name_
     end
     return df
 end
-function logs_to_df(logs::Dict, ::Val{:processor}; colors=_default_colors, name_to_color=_name_to_color, kwargs...)
+function logs_to_df(logs::Dict, ::Val{:processor};
+                    colors, name_to_color, kwargs...)
     # Collect processor events
     # FIXME: Color eltype
     df = DataFrame(proc=Processor[], proc_name=String[], category=String[], t_start=UInt64[], t_end=UInt64[], color=Any[])
@@ -109,7 +99,8 @@ function logs_to_df(logs::Dict, ::Val{:processor}; colors=_default_colors, name_
     end
     return df
 end
-function logs_to_df(logs::Dict, ::Val{:scheduler}; colors=_default_colors, name_to_color=_name_to_color, kwargs...)
+function logs_to_df(logs::Dict, ::Val{:scheduler};
+                    colors, name_to_color, kwargs...)
     # Collect scheduler events
     # FIXME: Color eltype
     df = DataFrame(category=String[], t_start=UInt64[], t_end=UInt64[], color=Any[])
@@ -131,13 +122,24 @@ logs_to_df(logs::Dict, ::Val{target}; kwargs...) where target =
 # Implementation adapted from:
 # https://discourse.julialang.org/t/how-to-make-a-gantt-plot-with-plots-jl/95165/7
 """
-    Dagger.render_logs(logs::Dict, ::Val{:plots_gantt}; kwargs...)
+    Dagger.render_logs(logs::Dict, ::Val{:plots_gantt};
+                       target=:execution,
+                       colors, name_to_color, color_by=:fn,
+                       kwargs...)
 
-Render a Gantt chart of task execution in `logs` using Plots. `kwargs` are passed to `plot` directly.
+Render a Gantt chart of task execution in `logs` using Plots.
+
+Keyword arguments affect rendering behavior:
+- `target`: Which aspect of the logs to render. May be one of `:execution`, `:processor`, or `:scheduler`.
+- `colors`: A list of colors to use for rendering.
+- `name_to_color`: A function mapping names to colors.
+- `color_by`: Whether to color by function name (`:fn`) or processor name (`:proc`).
+- `kwargs` are passed to `plot` directly.
 """
 function Dagger.render_logs(logs::Dict, ::Val{:plots_gantt};
                             target=:execution,
-                            colors=_default_colors, name_to_color=_name_to_color,
+                            colors=Dagger.Viz.default_colors,
+                            name_to_color=Dagger.Viz.name_to_color,
                             color_by=:fn, kwargs...)
     df = logs_to_df(logs, Val{target}(); colors, name_to_color, color_by)
     y_elem = if target == :execution || target == :processor
