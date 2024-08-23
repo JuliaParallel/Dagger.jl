@@ -89,7 +89,8 @@ function type_may_alias(::Type{T}) where T
     return false
 end
 
-may_alias(::MemorySpace, ::MemorySpace) = true
+may_alias(::MemorySpace, ::MemorySpace) = false
+may_alias(space1::S, space2::S) where S = space1 == space2
 may_alias(space1::CPURAMMemorySpace, space2::CPURAMMemorySpace) = space1.owner == space2.owner
 
 struct RemotePtr{T,S<:MemorySpace} <: Ref{T}
