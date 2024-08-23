@@ -87,7 +87,7 @@ function logs_to_df(logs::Dict, ::Val{:processor};
     df = DataFrame(proc=Processor[], proc_name=String[], category=String[], t_start=UInt64[], t_end=UInt64[], color=Any[])
     Dagger.logs_event_pairs(logs) do w, start_idx, finish_idx
         category = logs[w][:core][start_idx].category
-        if category in (:compute, :storage_wait, :storage_safe_scan, :proc_run_fetch, :proc_steal_local)
+        if category in (:compute, :move, :storage_wait, :storage_safe_scan, :proc_run_fetch, :proc_steal_local)
             proc = logs[w][:id][start_idx].processor::Processor
             proc_name = Dagger.short_name(proc)
             t_start = logs[w][:core][start_idx].timestamp::UInt64
