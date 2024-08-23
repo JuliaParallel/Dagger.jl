@@ -148,20 +148,18 @@ Base.hash(ca1::CombinedAliasing, h::UInt) =
     hash(ca1.sub_ainfos, hash(CombinedAliasing, h))
 
 struct ObjectAliasing <: AbstractAliasing
-    ptr::Ptr{Cvoid}
+    ptr::RemotePtr{Cvoid, CPURAMMemorySpace}
     sz::UInt
 end
 function ObjectAliasing(x::T) where T
     @nospecialize x
     ptr = pointer_from_objref(x)
+    rptr = RemotePtr{Cvoid}(ptr)
     sz = sizeof(T)
-    return ObjectAliasing(ptr, sz)
+    return ObjectAliasing(rptr, sz)
 end
-function memory_spans(oa::ObjectAliasing)
-    rptr = RemotePtr{Cvoid}(oa.ptr)
-    span = MemorySpan{CPURAMMemorySpace}(rptr, oa.sz)
-    return [span]
-end
+memory_spans(oa::ObjectAliasing) =
+    [MemorySpan{CPURAMMemorySpace}(oa.ptr, oa.sz)]
 
 aliasing(x, T) = aliasing(T(x))
 function aliasing(x::T) where T
