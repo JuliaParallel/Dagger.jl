@@ -2,39 +2,30 @@ export compute, debug_compute
 
 ###### Scheduler #######
 
-compute(x; options=nothing) = compute(Context(global_context()), x; options=options)
-compute(ctx, c::Chunk; options=nothing) = c
+compute(x; options::Union{SchedulerOptions,Nothing}=nothing) =
+    compute(global_context(), x; options)
+compute(ctx, c::Chunk; options::Union{SchedulerOptions,Nothing}=nothing) = c
 
-collect(ctx::Context, t::Thunk; options=nothing) =
-    collect(ctx, compute(ctx, t; options=options); options=options)
-collect(d::Union{Chunk,Thunk}; options=nothing) =
-    collect(Context(global_context()), d; options=options)
+collect(ctx::Context, t::Thunk; options::Union{SchedulerOptions,Nothing}=nothing) =
+    collect(ctx, compute(ctx, t; options); options)
+collect(d::Union{Chunk,Thunk}; options::Union{SchedulerOptions,Nothing}=nothing) =
+    collect(global_context(), d; options)
 
 abstract type Computation end
 
 """
-    compute(ctx::Context, d::Thunk; options=nothing) -> Chunk
+    compute(ctx::Context, d::Thunk; options::Union{SchedulerOptions,Nothing}=nothing) -> Chunk
 
 Compute a Thunk - creates the DAG, assigns ranks to nodes for tie breaking and
 runs the scheduler with the specified options. Returns a Chunk which references
 the result.
 """
-compute(ctx::Context, d::Thunk; options=nothing) =
-    Sch.compute_dag(ctx, d; options=options)
-
-function debug_compute(ctx::Context, args...; profile=false, options=nothing)
-    @time result = compute(ctx, args...; options=options)
-    get_logs!(ctx.log_sink), result
+function compute(ctx::Context, d::Thunk; options::Union{SchedulerOptions,Nothing}=nothing)
+    if options === nothing
+        options = SchedulerOptions()
+    end
+    return Sch.compute_dag(ctx, d, options)
 end
-
-function debug_compute(arg; profile=false, options=nothing)
-    ctx = Context(global_context())
-    dbgctx = Context(procs(ctx), LocalEventLog(), profile)
-    debug_compute(dbgctx, arg; options=options)
-end
-
-Base.@deprecate gather(ctx, x) collect(ctx, x)
-Base.@deprecate gather(x) collect(x)
 
 function get_type(s::String)
     local T

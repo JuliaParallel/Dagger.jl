@@ -220,7 +220,7 @@ function add_thunk!(f, h::SchedulerHandle, args...; future=nothing, ref=nothing,
     return exec!(_add_thunk!, h, f, args, options)
 end
 function _add_thunk!(ctx, state, task, tid, (f, args, options))
-    spec = Dagger.DTaskSpec(Dagger.args_kwargs_to_arguments(f, args), (;options...))
+    spec = Dagger.DTaskSpec(Dagger.args_kwargs_to_arguments(f, args), Options(;options...))
     dtask = Dagger.eager_spawn(spec)
     Dagger.eager_launch!(spec=>dtask)
     return dtask
