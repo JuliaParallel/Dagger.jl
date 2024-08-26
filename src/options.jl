@@ -141,6 +141,24 @@ function maybe_default!(opts::Options, ::Val{opt}, sig::Signature) where opt
 end
 const SIGNATURE_DEFAULT_CACHE = TaskLocalValue{Dict{Tuple{UInt,Symbol},Any}}(()->Dict{Tuple{UInt,Symbol},Any}())
 
+# SchedulerOptions integration
+
+function Dagger.options_merge!(topts::Options, sopts::SchedulerOptions)
+    function field_merge!(field)
+        if getfield(topts, field) === nothing && getfield(sopts, field) !== nothing
+            setfield!(topts, field, getfield(sopts, field))
+        end
+    end
+    field_merge!(:single)
+    field_merge!(:proclist)
+    return topts
+end
+function Options(sopts::SchedulerOptions)
+    new_options = Options()
+    Dagger.options_merge!(new_options, sopts)
+    return new_options
+end
+
 # Scoped Options
 
 const options_context = ScopedValue{NamedTuple}(NamedTuple())
