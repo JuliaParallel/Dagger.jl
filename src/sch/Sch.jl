@@ -142,59 +142,6 @@ function start_state(deps::Dict, node_order, chan)
     state
 end
 
-"""
-    SchedulerOptions
-
-Stores DAG-global options to be passed to the Dagger.Sch scheduler.
-
-# Arguments
-- `single::Int=0`: (Deprecated) Force all work onto worker with specified id.
-  `0` disables this option.
-- `proclist=nothing`: (Deprecated) Force scheduler to use one or more
-  processors that are instances/subtypes of a contained type. Alternatively, a
-  function can be supplied, and the function will be called with a processor as
-  the sole argument and should return a `Bool` result to indicate whether or not
-  to use the given processor. `nothing` enables all default processors.
-- `allow_errors::Bool=true`: Allow thunks to error without affecting
-  non-dependent thunks.
-- `checkpoint=nothing`: If not `nothing`, uses the provided function to save
-  the final result of the current scheduler invocation to persistent storage, for
-  later retrieval by `restore`.
-- `restore=nothing`: If not `nothing`, uses the provided function to return the
-  (cached) final result of the current scheduler invocation, were it to execute.
-  If this returns a `Chunk`, all thunks will be skipped, and the `Chunk` will be
-  returned.  If `nothing` is returned, restoring is skipped, and the scheduler
-  will execute as usual. If this function throws an error, restoring will be
-  skipped, and the error will be displayed.
-"""
-Base.@kwdef struct SchedulerOptions
-    single::Union{Int,Nothing} = nothing
-    proclist = nothing
-    allow_errors::Union{Bool,Nothing} = false
-    checkpoint = nothing
-    restore = nothing
-end
-
-"""
-    options_merge!(sopts::SchedulerOptions, topts::Options)
-
-Merge relevant fields from `sopts` into `topts`.
-"""
-function Dagger.options_merge!(sopts::SchedulerOptions, topts::Options)
-    function field_merge!(field)
-        if getfield(sopts, field) !== nothing && getfield(topts, field) === nothing
-            setfield!(topts, field, getfield(sopts, field))
-        end
-    end
-    field_merge!(:single)
-    field_merge!(:proclist)
-end
-function Options(sopts::SchedulerOptions)
-    new_options = Options()
-    Dagger.options_merge!(sopts, new_options)
-    return new_options
-end
-
 # Eager scheduling
 include("eager.jl")
 
@@ -325,11 +272,7 @@ Indicates a thunk that uses all processors of a given type.
 """
 struct MaxUtilization end
 
-function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
-    if options === nothing
-        options = SchedulerOptions()
-    end
-    ctx.options = options
+function compute_dag(ctx::Context, d::Thunk, options=SchedulerOptions())
     if options.restore !== nothing
         try
             result = options.restore()
@@ -379,7 +322,7 @@ function compute_dag(ctx, d::Thunk; options=SchedulerOptions())
     return value
 end
 
-function scheduler_init(ctx, state::ComputeState, d::Thunk, options, deps)
+function scheduler_init(ctx, state::ComputeState, d::Thunk, options::SchedulerOptions, deps)
     # setup thunk_dict mappings
     for node in filter(istask, keys(deps))
         state.thunk_dict[node.id] = WeakThunk(node)
@@ -389,13 +332,13 @@ function scheduler_init(ctx, state::ComputeState, d::Thunk, options, deps)
     end
 
     # Initialize workers
-    @sync for p in procs_to_use(ctx)
+    @sync for p in procs_to_use(ctx, options)
         Threads.@spawn begin
             try
                 init_proc(state, p, ctx.log_sink)
             catch err
                 @error "Error initializing worker $p" exception=(err,catch_backtrace())
-                remove_dead_proc!(ctx, state, p)
+                remove_dead_proc!(ctx, state, p, options)
             end
         end
     end
@@ -408,14 +351,14 @@ function scheduler_init(ctx, state::ComputeState, d::Thunk, options, deps)
     # Listen for new workers
     Threads.@spawn begin
         try
-            monitor_procs_changed!(ctx, state)
+            monitor_procs_changed!(ctx, state, options)
         catch err
             @error "Error assigning workers" exception=(err,catch_backtrace())
         end
     end
 end
 
-function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
+function scheduler_run(ctx, state::ComputeState, d::Thunk, options::SchedulerOptions)
     @dagdebug nothing :global "Initializing scheduler" uid=state.uid
 
     safepoint(state)
@@ -424,10 +367,10 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
     while !isempty(state.ready) || !isempty(state.running)
         if !isempty(state.ready)
             # Nothing running, so schedule up to N thunks, 1 per N workers
-            @invokelatest schedule!(ctx, state)
+            @invokelatest schedule!(ctx, state, options)
         end
 
-        check_integrity(ctx)
+        check_workers_available(ctx, options)
 
         isempty(state.running) && continue
         @maybelog ctx timespan_start(ctx, :take, (;uid=state.uid), nothing)
@@ -455,7 +398,7 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
 
                     # Remove dead worker from procs list
                     @maybelog ctx timespan_start(ctx, :remove_procs, (;uid=state.uid, worker=pid), nothing)
-                    remove_dead_proc!(ctx, state, gproc)
+                    remove_dead_proc!(ctx, state, gproc, options)
                     @maybelog ctx timespan_finish(ctx, :remove_procs, (;uid=state.uid, worker=pid), nothing)
 
                     @maybelog ctx timespan_start(ctx, :handle_fault, (;uid=state.uid, worker=pid), nothing)
@@ -463,8 +406,7 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
                     @maybelog ctx timespan_finish(ctx, :handle_fault, (;uid=state.uid, worker=pid), nothing)
                     return # effectively `continue`
                 else
-                    if something(ctx.options.allow_errors, false) ||
-                       something(unwrap_weak_checked(state.thunk_dict[thunk_id]).options.allow_errors, false)
+                    if something(options.allow_errors, false)
                         thunk_failed = true
                     else
                         throw(res)
@@ -521,10 +463,10 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
     end
     return value, errored
 end
-function scheduler_exit(ctx, state::ComputeState, options)
+function scheduler_exit(ctx, state::ComputeState, options::SchedulerOptions)
     @dagdebug nothing :global "Tearing down scheduler" uid=state.uid
 
-    @sync for p in procs_to_use(ctx)
+    @sync for p in procs_to_use(ctx, options)
         Threads.@spawn cleanup_proc(state, p, ctx.log_sink)
     end
 
@@ -549,7 +491,7 @@ function scheduler_exit(ctx, state::ComputeState, options)
     @dagdebug nothing :global "Tore down scheduler" uid=state.uid
 end
 
-function procs_to_use(ctx, options=ctx.options)
+function procs_to_use(ctx::Context, options::SchedulerOptions)
     return if options.single !== nothing
         @assert options.single in vcat(1, workers()) "Sch option `single` must specify an active worker ID."
         OSProc[OSProc(options.single)]
@@ -558,7 +500,7 @@ function procs_to_use(ctx, options=ctx.options)
     end
 end
 
-check_integrity(ctx) = @assert !isempty(procs_to_use(ctx)) "No suitable workers available in context."
+check_workers_available(ctx, options) = @assert !isempty(procs_to_use(ctx, options)) "No remaining workers available."
 
 struct SchedulingException <: Exception
     reason::String
@@ -580,7 +522,7 @@ struct ScheduleTaskSpec
     est_alloc_util::UInt64
     est_occupancy::UInt32
 end
-function schedule!(ctx, state, procs=procs_to_use(ctx))
+function schedule!(ctx, state, sch_options, procs=procs_to_use(ctx, sch_options))
     lock(state.lock) do
         safepoint(state)
 
@@ -626,10 +568,9 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         # Calculate signature
         sig = signature(state, task)
 
-        # Merge context options and populate defaults
-        ctx_options = Options(ctx.options)
+        # Merge scheduler options and populate defaults
         options = task.options
-        Dagger.options_merge!(options, ctx_options; override=false)
+        Dagger.options_merge!(options, sch_options)
         Dagger.populate_defaults!(options, sig)
 
         # Calculate scope
@@ -734,9 +675,9 @@ end
 Monitors for workers being added/removed to/from `ctx`, sets up or tears down
 per-worker state, and notifies the scheduler so that work can be reassigned.
 """
-function monitor_procs_changed!(ctx, state)
+function monitor_procs_changed!(ctx, state, options)
     # Load current set of procs
-    old_ps = procs_to_use(ctx)
+    old_ps = procs_to_use(ctx, options)
 
     while !state.halt.set
         # Wait for the notification that procs have changed
@@ -747,7 +688,7 @@ function monitor_procs_changed!(ctx, state)
         @maybelog ctx timespan_start(ctx, :assign_procs, (;uid=state.uid), nothing)
 
         # Load new set of procs
-        new_ps = procs_to_use(ctx)
+        new_ps = procs_to_use(ctx, options)
 
         # Initialize new procs
         diffps = setdiff(new_ps, old_ps)
@@ -769,7 +710,7 @@ function monitor_procs_changed!(ctx, state)
     end
 end
 
-function remove_dead_proc!(ctx, state, proc, options=ctx.options)
+function remove_dead_proc!(ctx, state, proc, options)
     @assert options.single !== proc.pid "Single worker failed, cannot continue."
     rmprocs!(ctx, [proc])
     delete!(state.worker_time_pressure, proc.pid)
@@ -815,9 +756,9 @@ function task_delete!(state, thunk)
     delete!(state.thunk_dict, thunk.id)
 end
 
-function evict_all_chunks!(ctx, to_evict)
+function evict_all_chunks!(ctx, options, to_evict)
     if !isempty(to_evict)
-        @sync for w in map(p->p.pid, procs_to_use(ctx))
+        @sync for w in map(p->p.pid, procs_to_use(ctx, options))
             Threads.@spawn remote_do(evict_chunks!, w, ctx.log_sink, to_evict)
         end
     end

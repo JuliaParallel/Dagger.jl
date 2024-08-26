@@ -18,7 +18,6 @@ mutable struct Context
     proc_notify::Threads.Condition
     log_sink::Any
     profile::Bool
-    options
 end
 
 function Context(procs::Vector{P}=Processor[OSProc(w) for w in procs()];
@@ -28,13 +27,15 @@ function Context(procs::Vector{P}=Processor[OSProc(w) for w in procs()];
     if log_file !== nothing
         @warn "`log_file` is no longer supported\nPlease instead load `GraphViz.jl` and use `render_logs(logs, :graphviz)`."
     end
-    Context(procs, proc_lock, proc_notify, log_sink,
-            profile, options)
+    if options !== nothing
+        @warn "`options` is no longer supported\nPlease instead pass the options to `compute`/`collect` as a keyword argument."
+    end
+    return Context(procs, proc_lock, proc_notify,
+                   log_sink, profile)
 end
 Context(xs::Vector{Int}; kwargs...) = Context(map(OSProc, xs); kwargs...)
 Context(ctx::Context, xs::Vector=copy(procs(ctx))) = # make a copy
-    Context(xs; log_sink=ctx.log_sink,
-                profile=ctx.profile, options=ctx.options)
+    Context(xs; log_sink=ctx.log_sink, profile=ctx.profile)
 
 const GLOBAL_CONTEXT = Ref{Context}()
 function global_context()
