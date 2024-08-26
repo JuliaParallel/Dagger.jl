@@ -67,15 +67,21 @@ function options_merge!(options::Options, source; override=true)
     _options_merge!(options, source, override)
     return options
 end
+_has_option(options::Union{Options,NamedTuple}, field) = hasproperty(options, field)
+_get_option(options::Union{Options,NamedTuple}, field) = getproperty(options, field)
+_set_option!(options::Union{Options,NamedTuple}, field, value) = setproperty!(options, field, value)
+_has_option(options::Base.Pairs, field) = haskey(options, field)
+_get_option(options::Base.Pairs, field) = options[field]
+_set_option!(options::Base.Pairs, field, value) = error("Cannot set option in Base.Pairs")
 @generated function _options_merge!(options, source, override)
     ex = Expr(:block)
     for field in fieldnames(Options)
         push!(ex.args, quote
-            if hasproperty(source, $(QuoteNode(field))) && getproperty(source, $(QuoteNode(field))) !== nothing
-                if override || getproperty(options, $(QuoteNode(field))) === nothing
-                    setproperty!(options,
+            if _has_option(source, $(QuoteNode(field))) && _get_option(source, $(QuoteNode(field))) !== nothing
+                if override || _get_option(options, $(QuoteNode(field))) === nothing
+                    _set_option!(options,
                                  $(QuoteNode(field)),
-                                 getfield(source, $(QuoteNode(field))))
+                                 _get_option(source, $(QuoteNode(field))))
                 end
             end
         end)

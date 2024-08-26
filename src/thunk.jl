@@ -242,7 +242,15 @@ function delayed(f, options::Options)
     @warn "`delayed` is deprecated. Use `Dagger.@spawn` or `Dagger.spawn` instead." maxlog=1
     return _delayed(f, options)
 end
-delayed(f; kwargs...) = delayed(f, Options(;kwargs...))
+function delayed(f; options=nothing, kwargs...)
+    if options !== nothing
+        options = options::Options
+    else
+        options = Options()
+    end
+    options_merge!(options, kwargs; override=true)
+    return delayed(f, options)
+end
 
 "A weak reference to a `Thunk`."
 struct WeakThunk
