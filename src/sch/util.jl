@@ -388,12 +388,13 @@ function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
     else
         get(state.signature_alloc_cost, sig, UInt64(0))
     end::UInt64
-    est_occupancy = if occupancy !== nothing && haskey(occupancy, T)
+    #=est_occupancy = if occupancy !== nothing && any(x->T<:x,  keys(occupancy))
         # Clamp to 0-1, and scale between 0 and `typemax(UInt32)`
         Base.unsafe_trunc(UInt32, clamp(occupancy[T], 0, 1) * typemax(UInt32))
     else
         typemax(UInt32)
-    end::UInt32
+    end::UInt32=#
+    est_occupancy = UInt32(0)
     #= FIXME: Estimate if cached data can be swapped to storage
     storage = storage_resource(p)
     real_alloc_util = state.worker_storage_pressure[gp][storage]
@@ -485,7 +486,7 @@ function estimate_task_costs(state, procs, task, inputs)
         tx_cost = impute_sum(affinity(chunk)[2] for chunk in chunks_filt)
 
         # Estimate total cost to move data and get task running after currently-scheduled tasks
-        est_time_util = get(state.worker_time_pressure[get_parent(proc).pid], proc, 0)
+        est_time_util = get(state.worker_time_pressure[get_parent(proc)], proc, 0)
         costs[proc] = est_time_util + (tx_cost/tx_rate)
     end
 

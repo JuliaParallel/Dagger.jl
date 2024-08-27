@@ -23,7 +23,8 @@ function init_eager()
     errormonitor_tracked("eager compute()", Threads.@spawn try
         sopts = SchedulerOptions(;allow_errors=true)
         opts = Dagger.Options((;scope=Dagger.ExactScope(Dagger.ThreadProc(1, 1)),
-                                occupancy=Dict(Dagger.ThreadProc=>0)))
+                                occupancy=Dict(Dagger.ThreadProc=>0),
+                                acceleration=Dagger.DistributedAcceleration()))
         Dagger.compute(ctx, Dagger._delayed(eager_thunk, opts)();
                        options=sopts)
     catch err
@@ -38,14 +39,18 @@ function init_eager()
         seek(iob.io, 0)
         write(stderr, iob)
     finally
-        reset(EAGER_READY)
         EAGER_STATE[] = nothing
+        notify(EAGER_READY)
+        reset(EAGER_READY)
         lock(EAGER_ID_MAP) do id_map
             empty!(id_map)
         end
         Threads.atomic_xchg!(EAGER_INIT, false)
     end)
     wait(EAGER_READY)
+    if EAGER_STATE[] === nothing
+        throw(ConcurrencyViolationError("Eager scheduler failed to start"))
+    end
 end
 function eager_thunk()
     exec!(Dagger.sch_handle()) do ctx, state, task, tid, _
