@@ -135,8 +135,7 @@ struct CombinedAliasing <: AbstractAliasing
     sub_ainfos::Vector{AbstractAliasing}
 end
 function memory_spans(ca::CombinedAliasing)
-    # FIXME: Don't hardcode CPURAMMemorySpace
-    all_spans = MemorySpan{CPURAMMemorySpace}[]
+    all_spans = MemorySpan[]
     for sub_a in ca.sub_ainfos
         append!(all_spans, memory_spans(sub_a))
     end
@@ -333,15 +332,14 @@ end
 # FIXME: Bidiagonal
 # FIXME: Tridiagonal
 
-function will_alias(x, y)
+function will_alias(x::AbstractAliasing, y::AbstractAliasing)
     x isa NoAliasing || y isa NoAliasing && return false
     x isa UnknownAliasing || y isa UnknownAliasing && return true
-    # FIXME: Support mixed-space span sets (for nested data structures)
     x_spans = memory_spans(x)::Vector{<:MemorySpan}
     y_spans = memory_spans(y)::Vector{<:MemorySpan}
     return will_alias(x_spans, y_spans)
 end
-function will_alias(x_spans::Vector{MemorySpan{Sx}}, y_spans::Vector{MemorySpan{Sy}}) where {Sx,Sy}
+function will_alias(x_spans::Vector{<:MemorySpan}, y_spans::Vector{<:MemorySpan})
     # Quick check if spaces can alias
     if !isempty(x_spans) && !isempty(y_spans)
         x_space = x_spans[1].ptr.space
