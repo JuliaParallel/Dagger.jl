@@ -23,6 +23,7 @@ if !isdefined(Base, :ScopedValues)
 else
     import Base.ScopedValues: ScopedValue, with
 end
+import TaskLocalValues: TaskLocalValue
 
 if !isdefined(Base, :get_extension)
     import Requires: @require
@@ -53,9 +54,9 @@ include("dtask.jl")
 include("queue.jl")
 include("thunk.jl")
 include("submission.jl")
-include("chunks.jl")
-include("memory-spaces.jl")
 include("cancellation.jl")
+include("memory-spaces.jl")
+include("chunks.jl")
 
 # Task scheduling
 include("compute.jl")
@@ -95,6 +96,9 @@ include("ui/gantt-text.jl")
 include("utils/logging-events.jl")
 include("utils/logging.jl")
 include("utils/viz.jl")
+
+# MPI
+include("mpi.jl")
 
 # Precompilation
 import PrecompileTools: @compile_workload

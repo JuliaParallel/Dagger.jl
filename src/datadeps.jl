@@ -162,9 +162,9 @@ struct DataDepsState{State<:Union{DataDepsAliasingState,DataDepsNonAliasingState
     end
 end
 
-function aliasing(astate::DataDepsAliasingState, arg, dep_mod)
+function aliasing(astate::DataDepsAliasingState, accel::Acceleration, arg, dep_mod)
     return get!(astate.ainfo_cache, (arg, dep_mod)) do
-        return aliasing(arg, dep_mod)
+        return aliasing(accel, arg, dep_mod)
     end
 end
 
@@ -202,7 +202,7 @@ function has_writedep(state::DataDepsState, arg, deps, task::DTask)
             for (readdep, writedep, other_ainfo, _, _) in other_taskdeps
                 writedep || continue
                 for (dep_mod, _, _) in deps
-                    ainfo = aliasing(state.alias_state, arg, dep_mod)
+                    ainfo = aliasing(state.alias_state, current_acceleration(), arg, dep_mod)
                     if will_alias(ainfo, other_ainfo)
                         return true
                     end
@@ -251,7 +251,7 @@ function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
         # Add all aliasing dependencies
         for (dep_mod, readdep, writedep) in deps
             if state.aliasing
-                ainfo = aliasing(state.alias_state, arg, dep_mod)
+                ainfo = aliasing(state.alias_state, current_acceleration, arg, dep_mod)
             else
                 ainfo = UnknownAliasing()
             end
@@ -272,8 +272,7 @@ end
 function populate_argument_info!(state::DataDepsState{DataDepsAliasingState}, arg, deps)
     astate = state.alias_state
     for (dep_mod, readdep, writedep) in deps
-        ainfo = aliasing(astate, arg, dep_mod)
-
+        ainfo = aliasing(astate, current_acceleration(), arg, dep_mod)
         # Initialize owner and readers
         if !haskey(astate.ainfos_owner, ainfo)
             overlaps = Set{AbstractAliasing}()
@@ -394,6 +393,35 @@ function add_reader!(state::DataDepsState{DataDepsNonAliasingState}, arg, task, 
     push!(state.alias_state.args_readers[arg], task=>write_num)
 end
 
+remotecall_endpoint(a::Dagger.DistributedAcceleration, f, w, from_proc, to_proc, orig_space, dest_space, data) = remotecall_fetch(f, w.pid, from_proc, to_proc, data)
+
+function remotecall_endpoint(a::Dagger.MPIAcceleration, f, w, from_proc, to_proc, orig_space, dest_space, data)
+    loc_rank = MPI.Comm_rank(a.comm)
+    if data isa Chunk
+        tag = Base.unsafe_trunc(Int32, data.handle.id)
+        if loc_rank == to_proc.rank
+            data_chunk = Dagger.recv_yield(orig_space.rank, tag, a.comm)
+            data_chunk = move(to_proc, data_chunk)
+            data_chunk = tochunk(data_chunk, dest_space)
+        elseif loc_rank == from_proc.rank
+            data_buf = move(from_proc, data)
+            Dagger.send_yield(data_buf, to_proc.comm, to_proc.rank, tag)
+            data_chunk = tochunk(data_buf, dest_space)
+        else
+            data_chunk = tochunk(nothing, dest_space)
+        end
+    else
+        data_chunk = move(from_proc, data)
+        data_chunk = tochunk(data, dest_space)
+    end
+    return data_chunk
+end
+
+function remotecall_trampoline(f, w, from_proc, to_proc, orig_space, dest_space, data)
+    return remotecall_endpoint(current_acceleration(), f, w, from_proc, to_proc, orig_space, dest_space, data)
+end
+
+
 # Make a copy of each piece of data on each worker
 # memory_space => {arg => copy_of_arg}
 function generate_slot!(state::DataDepsState, dest_space, data)
@@ -404,22 +432,20 @@ function generate_slot!(state::DataDepsState, dest_space, data)
     to_proc = first(processors(dest_space))
     from_proc = first(processors(orig_space))
     dest_space_args = get!(IdDict{Any,Any}, state.remote_args, dest_space)
+    w = only(unique(map(get_parent, collect(processors(dest_space))))) 
     if orig_space == dest_space
         data_chunk = tochunk(data, from_proc)
         dest_space_args[data] = data_chunk
-        @assert processor(data_chunk) in processors(dest_space) || data isa Chunk && processor(data) isa Dagger.OSProc
         @assert memory_space(data_chunk) == orig_space
+        @assert processor(data_chunk) in processors(dest_space) || data isa Chunk && (processor(data) isa Dagger.OSProc || processor(data) isa Dagger.MPIOSProc)
     else
-        w = only(unique(map(get_parent, collect(processors(dest_space))))).pid
         ctx = Sch.eager_context()
         id = rand(Int)
         timespan_start(ctx, :move, (;thunk_id=0, id, position=0, processor=to_proc), (;f=nothing, data))
-        dest_space_args[data] = remotecall_fetch(w, from_proc, to_proc, data) do from_proc, to_proc, data
+        dest_space_args[data] = remotecall_trampoline(w, from_proc, to_proc, orig_space, dest_space, data) do from_proc, to_proc, data
             data_converted = move(from_proc, to_proc, data)
             data_chunk = tochunk(data_converted, to_proc)
-            @assert processor(data_chunk) in processors(dest_space)
             @assert memory_space(data_converted) == memory_space(data_chunk) "space mismatch! $(memory_space(data_converted)) != $(memory_space(data_chunk)) ($(typeof(data_converted)) vs. $(typeof(data_chunk))), spaces ($orig_space -> $dest_space)"
-            @assert orig_space != memory_space(data_chunk) "space preserved! $orig_space != $(memory_space(data_chunk)) ($(typeof(data)) vs. $(typeof(data_chunk))), spaces ($orig_space -> $dest_space)"
             return data_chunk
         end
         timespan_finish(ctx, :move, (;thunk_id=0, id, position=0, processor=to_proc), (;f=nothing, data=dest_space_args[data]))
@@ -457,9 +483,12 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     # Get the set of all processors to be scheduled on
     all_procs = Processor[]
     scope = get_options(:scope, DefaultScope())
-    for w in procs()
-        append!(all_procs, get_processors(OSProc(w)))
-    end
+    accel = current_acceleration()
+	accel_procs = filter(procs(Dagger.Sch.eager_context())) do proc
+		Dagger.accel_matches_proc(accel, proc)
+	end
+	all_procs = unique(vcat([collect(Dagger.get_processors(gp)) for gp in accel_procs]...))
+    sort!(all_procs, by=repr)
     filter!(proc->!isa(constrain(ExactScope(proc), scope),
                        InvalidScope),
             all_procs)
@@ -467,9 +496,9 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         throw(Sch.SchedulingException("No processors available, try widening scope"))
     end
     exec_spaces = unique(vcat(map(proc->collect(memory_spaces(proc)), all_procs)...))
-    if !all(space->space isa CPURAMMemorySpace, exec_spaces) && !all(space->root_worker_id(space) == myid(), exec_spaces)
+    #=if !all(space->space isa CPURAMMemorySpace, exec_spaces) && !all(space->root_worker_id(space) == myid(), exec_spaces)
         @warn "Datadeps support for multi-GPU, multi-worker is currently broken\nPlease be prepared for incorrect results or errors" maxlog=1
-    end
+    end=#
 
     # Round-robin assign tasks to processors
     upper_queue = get_options(:task_queue)
@@ -666,7 +695,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         our_procs = filter(proc->proc in all_procs, collect(processors(our_space)))
         our_scope = UnionScope(map(ExactScope, our_procs)...)
 
-        spec.f = move(ThreadProc(myid(), 1), our_proc, spec.f)
+        #may be wrong
+        spec.f = move(default_processor(), our_proc, spec.f)
         @dagdebug nothing :spawn_datadeps "($(repr(spec.f))) Scheduling: $our_proc ($our_space)"
 
         # Copy raw task arguments for analysis
@@ -689,7 +719,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             end
             if queue.aliasing
                 for (dep_mod, _, _) in deps
-                    ainfo = aliasing(astate, arg, dep_mod)
+                    ainfo = aliasing(astate, current_acceleration(), arg, dep_mod)
                     data_space = astate.data_locality[ainfo]
                     nonlocal = our_space != data_space
                     if nonlocal
@@ -702,9 +732,9 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                         copy_to_syncdeps = Set{Any}()
                         get_write_deps!(state, ainfo, task, write_num, copy_to_syncdeps)
                         @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] $(length(copy_to_syncdeps)) syncdeps"
-                        copy_to = Dagger.@spawn scope=copy_to_scope syncdeps=copy_to_syncdeps meta=true Dagger.move!(dep_mod, our_space, data_space, arg_remote, arg_local)
+                        #@dagdebug nothing :mpi "[$(MPI.Comm_rank(current_acceleration().comm))] Scheduled move from $(arg_local.handle.id) into $(arg_remote.handle.id)\n"
+                        copy_to = Dagger.@spawn scope=copy_to_scope occupancy=Dict(MPIProcessor=>0)  syncdeps=copy_to_syncdeps meta=true Dagger.move!(dep_mod, our_space, data_space, arg_remote, arg_local)
                         add_writer!(state, ainfo, copy_to, write_num)
-
                         astate.data_locality[ainfo] = our_space
                     else
                         @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] Skipped copy-to (local): $data_space"
@@ -723,7 +753,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                     copy_to_syncdeps = Set{Any}()
                     get_write_deps!(state, arg, task, write_num, copy_to_syncdeps)
                     @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] $(length(copy_to_syncdeps)) syncdeps"
-                    copy_to = Dagger.@spawn scope=copy_to_scope syncdeps=copy_to_syncdeps Dagger.move!(identity, our_space, data_space, arg_remote, arg_local)
+                    copy_to = Dagger.@spawn scope=copy_to_scope occupancy=Dict(MPIProcessor=>0) syncdeps=copy_to_syncdeps Dagger.move!(identity, our_space, data_space, arg_remote, arg_local)
                     add_writer!(state, arg, copy_to, write_num)
 
                     astate.data_locality[arg] = our_space
@@ -752,7 +782,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             type_may_alias(typeof(arg)) || continue
             if queue.aliasing
                 for (dep_mod, _, writedep) in deps
-                    ainfo = aliasing(astate, arg, dep_mod)
+                    ainfo = aliasing(astate, current_acceleration(), arg, dep_mod)
                     if writedep
                         @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] Syncing as writer"
                         get_write_deps!(state, ainfo, task, write_num, syncdeps)
@@ -785,7 +815,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             type_may_alias(typeof(arg)) || continue
             if queue.aliasing
                 for (dep_mod, _, writedep) in deps
-                    ainfo = aliasing(astate, arg, dep_mod)
+                    ainfo = aliasing(astate, current_acceleration(), arg, dep_mod)
                     if writedep
                         @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] Set as owner"
                         add_writer!(state, ainfo, task, write_num)
@@ -867,7 +897,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                     copy_from_syncdeps = Set()
                     get_write_deps!(state, ainfo, nothing, write_num, copy_from_syncdeps)
                     @dagdebug nothing :spawn_datadeps "$(length(copy_from_syncdeps)) syncdeps"
-                    copy_from = Dagger.@spawn scope=copy_from_scope syncdeps=copy_from_syncdeps meta=true Dagger.move!(dep_mod, data_local_space, data_remote_space, arg_local, arg_remote)
+                    #@dagdebug nothing :mpi "[$(MPI.Comm_rank(current_acceleration().comm))] Scheduled move from $(arg_remote.handle.id) into $(arg_local.handle.id)\n"
+                    copy_from = Dagger.@spawn scope=copy_from_scope occupancy=Dict(MPIProcessor=>0) syncdeps=copy_from_syncdeps meta=true Dagger.move!(dep_mod, data_local_space, data_remote_space, arg_local, arg_remote)
                 else
                     @dagdebug nothing :spawn_datadeps "[$dep_mod] Skipped copy-from (local): $data_remote_space"
                 end
@@ -895,7 +926,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 copy_from_syncdeps = Set()
                 get_write_deps!(state, arg, nothing, write_num, copy_from_syncdeps)
                 @dagdebug nothing :spawn_datadeps "$(length(copy_from_syncdeps)) syncdeps"
-                copy_from = Dagger.@spawn scope=copy_from_scope syncdeps=copy_from_syncdeps meta=true Dagger.move!(identity, data_local_space, data_remote_space, arg_local, arg_remote)
+                copy_from = Dagger.@spawn scope=copy_from_scope occupancy=Dict(MPIProcessor=>0) syncdeps=copy_from_syncdeps meta=true Dagger.move!(identity, data_local_space, data_remote_space, arg_local, arg_remote)
             else
                 @dagdebug nothing :spawn_datadeps "Skipped copy-from (local): $data_remote_space"
             end
