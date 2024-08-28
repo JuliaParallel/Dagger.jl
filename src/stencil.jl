@@ -143,7 +143,7 @@ import Dagger: @stencil, Wrap
 A = zeros(Blocks(3, 3), Int, 9, 9)
 A[5, 5] = 1
 B = zeros(Blocks(3, 3), Int, 9, 9)
-Dagger.@spawn_datadeps() do
+Dagger.spawn_datadeps() do
     @stencil begin
         # Sum values of all neighbors with self
         A[idx] = sum(@neighbors(A[idx], 1, Wrap()))
@@ -260,7 +260,7 @@ macro stencil(orig_ex)
                 push!(deps_ex, Expr(:kw, read_var, :($Read($chunks($read_var)[$chunk_idx]))))
             end
         end
-        spawn_ex = :(Dagger.@spawn $inner_fn(;$(deps_ex...)))
+        spawn_ex = :(Dagger.@spawn name="inner_stencil" $inner_fn(;$(deps_ex...)))
 
         # Generate loop
         push!(final_ex.args, quote
