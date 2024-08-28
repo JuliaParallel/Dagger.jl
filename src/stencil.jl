@@ -11,13 +11,12 @@ function load_neighbor_edge(arr, dim, dir, neigh_dist)
         start_idx = CartesianIndex(ntuple(i -> i == dim ? firstindex(arr, i) : firstindex(arr, i), ndims(arr)))
         stop_idx = CartesianIndex(ntuple(i -> i == dim ? (firstindex(arr, i) + neigh_dist - 1) : lastindex(arr, i), ndims(arr)))
     end
-    # FIXME: Don't collect
-    return move(thunk_processor(), collect(@view arr[start_idx:stop_idx]))
+    return move(thunk_processor(), arr[start_idx:stop_idx])
 end
 function load_neighbor_corner(arr, corner_side, neigh_dist)
     start_idx = CartesianIndex(ntuple(i -> corner_side[i] == 0 ? (lastindex(arr, i) - neigh_dist + 1) : firstindex(arr, i), ndims(arr)))
     stop_idx = CartesianIndex(ntuple(i -> corner_side[i] == 0 ? lastindex(arr, i) : (firstindex(arr, i) + neigh_dist - 1), ndims(arr)))
-    return move(thunk_processor(), collect(@view arr[start_idx:stop_idx]))
+    return move(thunk_processor(), arr[start_idx:stop_idx])
 end
 function select_neighborhood_chunks(chunks, idx, neigh_dist, boundary)
     @assert neigh_dist isa Integer && neigh_dist > 0 "Neighborhood distance must be an Integer greater than 0"
