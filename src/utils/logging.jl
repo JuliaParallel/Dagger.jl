@@ -136,8 +136,7 @@ utilize for display purposes.
 function logs_annotate!(ctx::Context, arg, name::Union{String,Symbol})
     ismutable(arg) || throw(ArgumentError("Argument must be mutable to be annotated"))
     Dagger.TimespanLogging.timespan_start(ctx, :data_annotation, (;objectid=objectid_or_chunkid(arg), name), nothing)
-    # TODO: Remove redundant log event
-    Dagger.TimespanLogging.timespan_finish(ctx, :data_annotation, nothing, nothing)
+    Dagger.TimespanLogging.timespan_finish(ctx, :data_annotation, (;objectid=objectid_or_chunkid(arg), name), nothing)
 end
 logs_annotate!(arg, name::Union{String,Symbol}) =
     logs_annotate!(Dagger.Sch.eager_context(), arg, name)
