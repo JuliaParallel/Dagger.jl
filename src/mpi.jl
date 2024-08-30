@@ -164,14 +164,21 @@ function processors(memSpace::MPIMemorySpace)
     return rawProc
 end
 
-const MPIidcount = Threads.Atomic{Int}(1)
+struct MPIRefID
+    tid::Int
+    uid::UInt
+    id::Int
+end
+
+const MPIREF_TID = Dict{Int, Threads.Atomic{Int}}()
+const MPIREF_UID = Dict{Int, Threads.Atomic{Int}}()
 
 mutable struct MPIRef
     comm::MPI.Comm
     rank::Int
     size::Int
     innerRef::Union{DRef, Nothing}
-    id::Int
+    id::MPIRefID
 end
 
 move(from_proc::Processor, to_proc::Processor, x::MPIRef) = move(from_proc, to_proc, poolget(x.innerRef))
@@ -187,10 +194,26 @@ end
 #TODO: partitioned scheduling with comm bifurcation
 function tochunk_pset(x, space::MPIMemorySpace; device=nothing, kwargs...)
     local_rank = MPI.Comm_rank(space.comm)
+    tid = 0
+    uid = 0
+    id = 0 
+    if Dagger.in_task()
+        tid = sch_handle().thunk_id.id
+        uid = 0
+        counter = get!(MPIREF_TID, tid, Threads.Atomic{Int}(1))
+        id = Threads.atomic_add!(counter, 1)
+    end
+    if MPI_UID[] != 0
+        tid = 0
+        uid = MPI_UID[]
+        counter = get!(MPIREF_UID, uid, Threads.Atomic{Int}(1))
+        id = Threads.atomic_add!(counter, 1)
+    end
+    Mid = MPIRefID(tid, uid, id)
     if local_rank != space.rank
-        return MPIRef(space.comm, space.rank, 0, nothing, Threads.atomic_add!(MPIidcount, 1))
+        return MPIRef(space.comm, space.rank, 0, nothing, Mid)
     else
-        return MPIRef(space.comm, space.rank, sizeof(x), poolset(x; device, kwargs...), Threads.atomic_add!(MPIidcount, 1))
+        return MPIRef(space.comm, space.rank, sizeof(x), poolset(x; device, kwargs...), Mid)
     end
 end
 
@@ -217,7 +240,7 @@ function recv_yield(src, tag, comm)
     end
 end
 #discuss this with julian
-WeakChunk(c::Chunk{T,H}) where {T,H<:MPIRef} = WeakChunk(c.handle.rank, c.handle.id, WeakRef(c))
+WeakChunk(c::Chunk{T,H}) where {T,H<:MPIRef} = WeakChunk(c.handle.rank, c.handle.id.id, WeakRef(c))
 
 function send_yield(value, comm, dest, tag) 
     #@dagdebug nothing :mpi "[$(MPI.Comm_rank(comm))][$tag] Hit probable hang while sending \n"
@@ -310,6 +333,7 @@ function execute!(proc::MPIProcessor, f, args...; kwargs...)
     else
 		res = nothing
     end
+
     return tochunk(res, proc, memory_space(proc))
 end
 
