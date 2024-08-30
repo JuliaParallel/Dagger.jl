@@ -1,4 +1,5 @@
 import Graphs: SimpleDiGraph, add_edge!, add_vertex!, inneighbors, outneighbors, nv
+using MPI
 
 export In, Out, InOut, Deps, spawn_datadeps
 
@@ -20,6 +21,10 @@ struct Deps{T,DT<:Tuple}
     deps::DT
 end
 Deps(x, deps...) = Deps(x, deps)
+
+struct MPIAcceleration <: Acceleration 
+    comm::MPI.Comm
+end
 
 struct DataDepsTaskQueue <: AbstractTaskQueue
     # The queue above us
@@ -381,38 +386,42 @@ function add_reader!(state::DataDepsState{DataDepsNonAliasingState}, arg, task, 
     push!(state.alias_state.args_readers[arg], task=>write_num)
 end
 
-remotecall_endpoint(a::Dagger.DistributedAcceleration, f, w, from_proc, to_proc, orig_space, dest_space, data) = remotecall_fetch(f, w.pid, from_proc, to_proc, data)
+remotecall_endpoint(a::Dagger.DistributedAcceleration, f, w, from_proc, to_proc, orig_space, dest_space, data, task) = remotecall_fetch(f, w.pid, from_proc, to_proc, data)
 
-function remotecall_endpoint(a::Dagger.MPIAcceleration, f, w, from_proc, to_proc, orig_space, dest_space, data)
+const MPI_UID = ScopedValue{Int64}(0)
+
+function remotecall_endpoint(a::Dagger.MPIAcceleration, f, w, from_proc, to_proc, orig_space, dest_space, data, task)
     loc_rank = MPI.Comm_rank(a.comm)
-    if data isa Chunk
-        tag = Base.unsafe_trunc(Int32, data.handle.id)
-        if loc_rank == to_proc.rank
-            data_chunk = Dagger.recv_yield(orig_space.rank, tag, a.comm)
-            data_chunk = move(to_proc, data_chunk)
-            data_chunk = tochunk(data_chunk, dest_space)
-        elseif loc_rank == from_proc.rank
-            data_buf = move(from_proc, data)
-            Dagger.send_yield(data_buf, to_proc.comm, to_proc.rank, tag)
-            data_chunk = tochunk(data_buf, dest_space)
+    with(MPI_UID=>task.uid) do
+        if data isa Chunk
+            tag = abs(Base.unsafe_trunc(Int32, hash(data.handle.id, UInt(0))))
+            if loc_rank == to_proc.rank
+                data_chunk = Dagger.recv_yield(orig_space.rank, tag, a.comm)
+                data_chunk = move(to_proc, data_chunk)
+                data_chunk = tochunk(data_chunk, dest_space)
+            elseif loc_rank == from_proc.rank
+                data_buf = move(from_proc, data)
+                Dagger.send_yield(data_buf, to_proc.comm, to_proc.rank, tag)
+                data_chunk = tochunk(data_buf, dest_space)
+            else
+                data_chunk = tochunk(nothing, dest_space)
+            end
         else
-            data_chunk = tochunk(nothing, dest_space)
+            data_chunk = move(from_proc, data)
+            data_chunk = tochunk(data, dest_space)
         end
-    else
-        data_chunk = move(from_proc, data)
-        data_chunk = tochunk(data, dest_space)
+        return data_chunk
     end
-    return data_chunk
 end
 
-function remotecall_trampoline(f, w, from_proc, to_proc, orig_space, dest_space, data)
-    return remotecall_endpoint(current_acceleration(), f, w, from_proc, to_proc, orig_space, dest_space, data)
+function remotecall_trampoline(f, w, from_proc, to_proc, orig_space, dest_space, data, task)
+    return remotecall_endpoint(current_acceleration(), f, w, from_proc, to_proc, orig_space, dest_space, data, task)
 end
 
 
 # Make a copy of each piece of data on each worker
 # memory_space => {arg => copy_of_arg}
-function generate_slot!(state::DataDepsState, dest_space, data)
+function generate_slot!(state::DataDepsState, dest_space, data, task)
     if data isa DTask
         data = fetch(data; raw=true)
     end
@@ -430,7 +439,7 @@ function generate_slot!(state::DataDepsState, dest_space, data)
         ctx = Sch.eager_context()
         id = rand(Int)
         timespan_start(ctx, :move, (;thunk_id=0, id, processor=to_proc), (;f=nothing, data)) 
-        dest_space_args[data] = remotecall_trampoline(w, from_proc, to_proc, orig_space, dest_space, data) do from_proc, to_proc, data
+        dest_space_args[data] = remotecall_trampoline(w, from_proc, to_proc, orig_space, dest_space, data, task) do from_proc, to_proc, data
             data_converted = move(from_proc, to_proc, data)
             data_chunk = tochunk(data_converted, to_proc)
             @assert memory_space(data_chunk) == memory_space(data_converted)
@@ -705,7 +714,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
             # Is the source of truth elsewhere?
             arg_remote = get!(get!(IdDict{Any,Any}, state.remote_args, our_space), arg) do
-                generate_slot!(state, our_space, arg)
+                generate_slot!(state, our_space, arg, task)
             end
             if queue.aliasing
                 for (dep_mod, _, _) in deps
@@ -716,7 +725,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                         # Add copy-to operation (depends on latest owner of arg)
                         @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] Enqueueing copy-to: $data_space => $our_space"
                         arg_local = get!(get!(IdDict{Any,Any}, state.remote_args, data_space), arg) do
-                            generate_slot!(state, data_space, arg)
+                            generate_slot!(state, data_space, arg, task)
                         end
                         copy_to_scope = our_scope
                         copy_to_syncdeps = Set{Any}()
@@ -737,7 +746,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                     # Add copy-to operation (depends on latest owner of arg)
                     @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Enqueueing copy-to: $data_space => $our_space"
                     arg_local = get!(get!(IdDict{Any,Any}, state.remote_args, data_space), arg) do
-                        generate_slot!(state, data_space, arg)
+                        generate_slot!(state, data_space, arg, task)
                     end
                     copy_to_scope = our_scope
                     copy_to_syncdeps = Set{Any}()
@@ -878,7 +887,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                     # Add copy-from operation
                     @dagdebug nothing :spawn_datadeps "[$dep_mod] Enqueueing copy-from: $data_remote_space => $data_local_space"
                     arg_local = get!(get!(IdDict{Any,Any}, state.remote_args, data_local_space), arg) do
-                        generate_slot!(state, data_local_space, arg)
+                        generate_slot!(state, data_local_space, arg, task)
                     end
                     arg_remote = state.remote_args[data_remote_space][arg]
                     @assert arg_remote !== arg_local
