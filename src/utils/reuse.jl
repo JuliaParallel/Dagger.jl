@@ -150,7 +150,7 @@ mutable struct ReusableLinkedList{T} <: AbstractVector{T}
     tail::Union{ReusableNode{T},Nothing}
     free_nodes::ReusableNode{T}
     null::T
-    len::Int
+    maxlen::Int
     function ReusableLinkedList{T}(null, N) where T
         free_root = ReusableNode{T}(null, nothing)
         for _ in 1:N
@@ -163,6 +163,7 @@ mutable struct ReusableLinkedList{T} <: AbstractVector{T}
 end
 Base.eltype(list::ReusableLinkedList{T}) where T = T
 function Base.getindex(list::ReusableLinkedList{T}, idx::Integer) where T
+    checkbounds(list, idx)
     node = list.head
     for _ in 1:(idx-1)
         node === nothing && throw(BoundsError(list, idx))
@@ -172,6 +173,7 @@ function Base.getindex(list::ReusableLinkedList{T}, idx::Integer) where T
     return node.value
 end
 function Base.setindex!(list::ReusableLinkedList{T}, value::T, idx::Integer) where T
+    checkbounds(list, idx)
     node = list.head
     for _ in 1:(idx-1)
         node === nothing && throw(BoundsError(list, idx))
@@ -199,7 +201,29 @@ function Base.push!(list::ReusableLinkedList{T}, value) where T
     end
     return list
 end
+
 function Base.pop!(list::ReusableLinkedList{T}) where T
+    if list.head === nothing
+        throw(ArgumentError("list must be non-empty"))
+    end
+    prev = node = list.head
+    while node.next !== nothing
+        prev = node
+        node = node.next
+    end
+    if prev !== node
+        list.tail = prev
+    else
+        list.head = list.tail = nothing
+    end
+    prev.next = nothing
+    node.next = list.free_nodes
+    list.free_nodes = node
+    value = node.value
+    node.value = list.null
+    return value
+end
+function Base.popfirst!(list::ReusableLinkedList{T}) where T
     if list.head === nothing
         throw(ArgumentError("list must be non-empty"))
     end
