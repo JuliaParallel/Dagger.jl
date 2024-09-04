@@ -466,14 +466,14 @@ end
 macro reusable_vector(name, T, null, N)
     vec_name = Symbol("__$(name)_TLV_ReusableLinkedList")
     if !hasproperty(__module__, vec_name)
-        __module__.eval(:(#=const=# $vec_name = $TaskLocalValue{$ReusableLinkedList{$T}}(()->$ReusableLinkedList{$T}($null, $N))))
+        __module__.eval(:(#=const=# $vec_name = $TaskLocalValue{$Vector{$T}}(()->$Vector{$T}())))
     end
     return :($(esc(vec_name))[])
 end
 macro reusable_dict(name, K, V, null_key, null_value, N)
     dict_name = Symbol("__$(name)_TLV_ReusableDict")
     if !hasproperty(__module__, dict_name)
-        __module__.eval(:(#=const=# $dict_name = $TaskLocalValue{$ReusableDict{$K,$V}}(()->$ReusableDict{$K,$V}($null_key, $null_value, $N))))
+        __module__.eval(:(#=const=# $dict_name = $TaskLocalValue{$Dict{$K,$V}}(()->$Dict{$K,$V}())))
     end
     return :($(esc(dict_name))[])
 end
