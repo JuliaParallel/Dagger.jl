@@ -21,6 +21,7 @@ tests = [
     ("Caching", "cache.jl"),
     ("Disk Caching", "diskcaching.jl"),
     ("File IO", "file-io.jl"),
+    ("Reusable Data Structures", "reuse.jl"),
     #("Fault Tolerance", "fault-tolerance.jl"),
 ]
 all_test_names = map(test -> replace(last(test), ".jl"=>""), tests)
