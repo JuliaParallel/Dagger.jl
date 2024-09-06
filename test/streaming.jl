@@ -1,3 +1,5 @@
+import MemPool: access_ref
+
 @everywhere begin
     """
     A functor to produce a certain number of outputs.
@@ -76,6 +78,44 @@ end
 
 @testset "Basics" begin
     master_scope = Dagger.scope(worker=myid())
+
+    @test test_finishes("Migration") do
+        if nprocs() == 1
+            @warn "Skipping migration test because it requires at least 1 extra worker"
+            return
+        end
+
+        # Start streaming locally
+        mailbox = RemoteChannel()
+        producer = Producer(Inf, mailbox)
+        x = Dagger.spawn_streaming() do
+            Dagger.spawn(producer, Dagger.Options(; scope=master_scope))
+        end
+
+        # Wait for the stream to get started
+        while producer.count < 2
+            sleep(0.1)
+        end
+
+        # Migrate to another worker
+        access_ref(x.thunk_ref) do thunk
+            access_ref(thunk.f.handle) do streaming_function
+                Dagger.migrate_stream!(streaming_function.stream, workers()[1])
+            end
+        end
+
+        # Wait a bit for the stream to get started again on the other node
+        sleep(0.5)
+
+        # Stop it
+        put!(mailbox, :exit)
+        fetch(x)
+
+        final_count = take!(mailbox)
+        @info "Counts:" producer.count final_count
+    end
+
+    return
 
     @test test_finishes("Single task") do
         local x
