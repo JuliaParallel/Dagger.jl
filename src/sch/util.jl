@@ -388,6 +388,7 @@ function signature(f, args)
     #=FIXME:UNIQUE=#
     return Signature(sig)
 end
+signature(spec::Dagger.DTaskSpec) = signature(spec.f, spec.args)
 
 function can_use_proc(state, task, gproc, proc, opts, scope)
     # Check against proclist
