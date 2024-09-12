@@ -1,4 +1,4 @@
-import Graphs: SimpleDiGraph, add_edge!, add_vertex!, inneighbors, outneighbors, nv
+import Graphs: SimpleDiGraph, nv, add_edge!, add_vertex!
 
 export In, Out, InOut, Deps, spawn_datadeps
 
@@ -26,28 +26,18 @@ struct DataDepsTaskQueue <: AbstractTaskQueue
     upper_queue::AbstractTaskQueue
     # The set of tasks that have already been seen
     seen_tasks::Union{Vector{Pair{DTaskSpec,DTask}},Nothing}
-    # The data-dependency graph of all tasks
-    g::Union{SimpleDiGraph{Int},Nothing}
-    # The mapping from task to graph ID
-    task_to_id::Union{Dict{DTask,Int},Nothing}
-    # How to traverse the dependency graph when launching tasks
-    traversal::Symbol
     # Which scheduler to use to assign tasks to processors
-    scheduler::Symbol
+    scheduler::Any
 
     # Whether aliasing across arguments is possible
     # The fields following only apply when aliasing==true
     aliasing::Bool
 
     function DataDepsTaskQueue(upper_queue;
-                               traversal::Symbol=:inorder,
-                               scheduler::Symbol=:naive,
+                               scheduler=RoundRobinScheduler(),
                                aliasing::Bool=true)
         seen_tasks = Pair{DTaskSpec,DTask}[]
-        g = SimpleDiGraph()
-        task_to_id = Dict{DTask,Int}()
-        return new(upper_queue, seen_tasks, g, task_to_id, traversal, scheduler,
-                   aliasing)
+        return new(upper_queue, seen_tasks, scheduler, aliasing)
     end
 end
 
@@ -79,6 +69,7 @@ function unwrap_inout(arg)
     end
     return arg, Tuple[(identity, readdep, writedep)]
 end
+unwrap_inout_value(arg) = first(unwrap_inout(arg))
 
 function enqueue!(queue::DataDepsTaskQueue, spec::Pair{DTaskSpec,DTask})
     push!(queue.seen_tasks, spec)
@@ -98,6 +89,11 @@ struct DataDepsAliasingState
     ainfos_readers::Dict{AbstractAliasing,Vector{Pair{DTask,Int}}}
     ainfos_overlaps::Dict{AbstractAliasing,Set{AbstractAliasing}}
 
+    # The data-dependency graph of all tasks
+    g::SimpleDiGraph{Int}
+    # The mapping from task to graph ID
+    task_to_id::IdDict{DTask,Int}
+
     # Cache ainfo lookups
     ainfo_cache::Dict{Tuple{Any,Any},AbstractAliasing}
 
@@ -109,11 +105,14 @@ struct DataDepsAliasingState
         ainfos_readers = Dict{AbstractAliasing,Vector{Pair{DTask,Int}}}()
         ainfos_overlaps = Dict{AbstractAliasing,Set{AbstractAliasing}}()
 
+        g = SimpleDiGraph()
+        task_to_id = IdDict{DTask,Int}()
+
         ainfo_cache = Dict{Tuple{Any,Any},AbstractAliasing}()
 
         return new(data_origin, data_locality,
                    ainfos_owner, ainfos_readers, ainfos_overlaps,
-                   ainfo_cache)
+                   g, task_to_id, ainfo_cache)
     end
 end
 struct DataDepsNonAliasingState
@@ -141,6 +140,9 @@ struct DataDepsState{State<:Union{DataDepsAliasingState,DataDepsNonAliasingState
     # Whether aliasing is being analyzed
     aliasing::Bool
 
+    # The set of processors to schedule on
+    all_procs::Vector{Processor}
+
     # The ordered list of tasks and their read/write dependencies
     dependencies::Vector{Pair{DTask,Vector{Tuple{Bool,Bool,<:AbstractAliasing,<:Any,<:Any}}}}
 
@@ -150,7 +152,7 @@ struct DataDepsState{State<:Union{DataDepsAliasingState,DataDepsNonAliasingState
     # The aliasing analysis state
     alias_state::State
 
-    function DataDepsState(aliasing::Bool)
+    function DataDepsState(aliasing::Bool, all_procs::Vector{Processor})
         dependencies = Pair{DTask,Vector{Tuple{Bool,Bool,<:AbstractAliasing,<:Any,<:Any}}}[]
         remote_args = Dict{MemorySpace,IdDict{Any,Any}}()
         if aliasing
@@ -158,7 +160,7 @@ struct DataDepsState{State<:Union{DataDepsAliasingState,DataDepsNonAliasingState
         else
             state = DataDepsNonAliasingState()
         end
-        return new{typeof(state)}(aliasing, dependencies, remote_args, state)
+        return new{typeof(state)}(aliasing, all_procs, dependencies, remote_args, state)
     end
 end
 
@@ -233,7 +235,14 @@ function is_writedep(arg, deps, task::DTask)
 end
 
 # Aliasing state setup
-function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
+function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask, write_num::Int)
+    astate = state.alias_state
+    g, task_to_id = astate.g, astate.task_to_id
+    if !haskey(task_to_id, task)
+        add_vertex!(g)
+        task_to_id[task] = nv(g)
+    end
+
     # Populate task dependencies
     dependencies_to_add = Vector{Tuple{Bool,Bool,AbstractAliasing,<:Any,<:Any}}()
 
@@ -259,7 +268,7 @@ function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
         end
 
         # Populate argument write info
-        populate_argument_info!(state, arg, deps)
+        populate_argument_info!(state, arg, deps, task, write_num)
     end
 
     # Track the task result too
@@ -268,9 +277,13 @@ function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
 
     # Record argument/result dependencies
     push!(state.dependencies, task => dependencies_to_add)
+
+    return write_num + 1
 end
-function populate_argument_info!(state::DataDepsState{DataDepsAliasingState}, arg, deps)
+function populate_argument_info!(state::DataDepsState{DataDepsAliasingState}, arg, deps, task, write_num)
     astate = state.alias_state
+    g = astate.g
+    task_to_id = astate.task_to_id
     for (dep_mod, readdep, writedep) in deps
         ainfo = aliasing(astate, arg, dep_mod)
 
@@ -288,16 +301,30 @@ function populate_argument_info!(state::DataDepsState{DataDepsAliasingState}, ar
             astate.ainfos_overlaps[ainfo] = overlaps
             astate.ainfos_owner[ainfo] = nothing
             astate.ainfos_readers[ainfo] = Pair{DTask,Int}[]
+
+            # Assign data owner and locality
+            if !haskey(astate.data_locality, ainfo)
+                astate.data_locality[ainfo] = memory_space(arg)
+                astate.data_origin[ainfo] = memory_space(arg)
+            end
         end
 
-        # Assign data owner and locality
-        if !haskey(astate.data_locality, ainfo)
-            astate.data_locality[ainfo] = memory_space(arg)
-            astate.data_origin[ainfo] = memory_space(arg)
+        # Calculate AOT task-to-task dependencies
+        syncdeps = Set{DTask}()
+        if writedep
+            get_write_deps!(state, ainfo, task, write_num, syncdeps)
+            add_writer!(state, ainfo, task, write_num)
+        else
+            get_read_deps!(state, ainfo, task, write_num, syncdeps)
+            add_reader!(state, ainfo, task, write_num)
+        end
+        for syncdep in syncdeps
+            add_edge!(g, task_to_id[syncdep], task_to_id[task])
         end
     end
 end
 function populate_argument_info!(state::DataDepsState{DataDepsNonAliasingState}, arg, deps)
+    error("FIXME")
     astate = state.alias_state
     # Initialize owner and readers
     if !haskey(astate.args_owner, arg)
@@ -321,6 +348,12 @@ function populate_return_info!(state::DataDepsState{DataDepsNonAliasingState}, t
     @assert !haskey(astate.data_locality, task)
     astate.data_locality[task] = space
     astate.data_origin[task] = space
+end
+function clear_ainfo_owner_readers!(astate::DataDepsAliasingState)
+    for ainfo in keys(astate.ainfos_owner)
+        astate.ainfos_owner[ainfo] = nothing
+        empty!(astate.ainfos_readers[ainfo])
+    end
 end
 
 # Read/write dependency management
@@ -427,22 +460,34 @@ function generate_slot!(state::DataDepsState, dest_space, data)
     return dest_space_args[data]
 end
 
-struct DataDepsSchedulerState
-    task_to_spec::Dict{DTask,DTaskSpec}
-    assignments::Dict{DTask,MemorySpace}
-    dependencies::Dict{DTask,Set{DTask}}
-    task_completions::Dict{DTask,UInt64}
-    space_completions::Dict{MemorySpace,UInt64}
-    capacities::Dict{MemorySpace,Int}
+struct RoundRobinScheduler end
+function datadeps_create_schedule(::RoundRobinScheduler, state, specs_tasks)
+    astate = state.alias_state
+    nprocs = length(state.all_procs)
+    id_to_proc = Dict(i => p for (i, p) in enumerate(state.all_procs))
 
-    function DataDepsSchedulerState()
-        return new(Dict{DTask,DTaskSpec}(),
-                   Dict{DTask,MemorySpace}(),
-                   Dict{DTask,Set{DTask}}(),
-                   Dict{DTask,UInt64}(),
-                   Dict{MemorySpace,UInt64}(),
-                   Dict{MemorySpace,Int}())
+    task_to_proc = Dict{DTask, Processor}()
+    for (idx, (_, task)) in enumerate(specs_tasks)
+        proc_idx = mod1(idx, nprocs)
+        task_to_proc[task] = id_to_proc[proc_idx]
     end
+
+    return task_to_proc
+end
+
+struct RandomScheduler end
+function datadeps_create_schedule(::RandomScheduler, state, specs_tasks)
+    astate = state.alias_state
+    nprocs = length(state.all_procs)
+    id_to_proc = Dict(i => p for (i, p) in enumerate(state.all_procs))
+
+    task_to_proc = Dict{DTask, Processor}()
+    for (_, task) in specs_tasks
+        proc_idx = rand(1:nprocs)
+        task_to_proc[task] = id_to_proc[proc_idx]
+    end
+
+    return task_to_proc
 end
 
 function distribute_tasks!(queue::DataDepsTaskQueue)
@@ -474,193 +519,27 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     # Round-robin assign tasks to processors
     upper_queue = get_options(:task_queue)
 
-    traversal = queue.traversal
-    if traversal == :inorder
-        # As-is
-        task_order = Colon()
-    elseif traversal == :bfs
-        # BFS
-        task_order = Int[1]
-        to_walk = Int[1]
-        seen = Set{Int}([1])
-        while !isempty(to_walk)
-            # N.B. next_root has already been seen
-            next_root = popfirst!(to_walk)
-            for v in outneighbors(queue.g, next_root)
-                if !(v in seen)
-                    push!(task_order, v)
-                    push!(seen, v)
-                    push!(to_walk, v)
-                end
-            end
-        end
-    elseif traversal == :dfs
-        # DFS (modified with backtracking)
-        task_order = Int[]
-        to_walk = Int[1]
-        seen = Set{Int}()
-        while length(task_order) < length(queue.seen_tasks) && !isempty(to_walk)
-            next_root = popfirst!(to_walk)
-            if !(next_root in seen)
-                iv = inneighbors(queue.g, next_root)
-                if all(v->v in seen, iv)
-                    push!(task_order, next_root)
-                    push!(seen, next_root)
-                    ov = outneighbors(queue.g, next_root)
-                    prepend!(to_walk, ov)
-                else
-                    push!(to_walk, next_root)
-                end
-            end
-        end
-    else
-        throw(ArgumentError("Invalid traversal mode: $traversal"))
-    end
-
-    state = DataDepsState(queue.aliasing)
+    state = DataDepsState(queue.aliasing, all_procs)
     astate = state.alias_state
-    sstate = DataDepsSchedulerState()
-    for proc in all_procs
-        space = only(memory_spaces(proc))
-        get!(()->0, sstate.capacities, space)
-        sstate.capacities[space] += 1
+
+    # Populate all task dependencies
+    write_num = 1
+    for (spec, task) in queue.seen_tasks
+        write_num = populate_task_info!(state, spec, task, write_num)
     end
 
-    # Start launching tasks and necessary copies
+    # AOT scheduling
+    schedule = datadeps_create_schedule(queue.scheduler, state, queue.seen_tasks)::Dict{DTask, Processor}
+    for (spec, task) in queue.seen_tasks
+        println("Task $(spec.f) scheduled on $(schedule[task])")
+    end
+
+    clear_ainfo_owner_readers!(astate)
+
+    # Launch tasks and necessary copies
     write_num = 1
-    proc_idx = 1
-    pressures = Dict{Processor,Int}()
-    for (spec, task) in queue.seen_tasks[task_order]
-        # Populate all task dependencies
-        populate_task_info!(state, spec, task)
-
-        scheduler = queue.scheduler
-        if scheduler == :naive
-            raw_args = map(arg->tochunk(last(arg)), spec.args)
-            our_proc = remotecall_fetch(1, all_procs, raw_args) do all_procs, raw_args
-                Sch.init_eager()
-                sch_state = Sch.EAGER_STATE[]
-
-                @lock sch_state.lock begin
-                    # Calculate costs per processor and select the most optimal
-                    # FIXME: This should consider any already-allocated slots,
-                    # whether they are up-to-date, and if not, the cost of moving
-                    # data to them
-                    procs, costs = Sch.estimate_task_costs(sch_state, all_procs, nothing, raw_args)
-                    return first(procs)
-                end
-            end
-        elseif scheduler == :smart
-            raw_args = map(filter(arg->haskey(astate.data_locality, arg), spec.args)) do arg
-                arg_chunk = tochunk(last(arg))
-                # Only the owned slot is valid
-                # FIXME: Track up-to-date copies and pass all of those
-                return arg_chunk => data_locality[arg]
-            end
-            f_chunk = tochunk(spec.f)
-            our_proc, task_pressure = remotecall_fetch(1, all_procs, pressures, f_chunk, raw_args) do all_procs, pressures, f, chunks_locality
-                Sch.init_eager()
-                sch_state = Sch.EAGER_STATE[]
-
-                @lock sch_state.lock begin
-                    tx_rate = sch_state.transfer_rate[]
-
-                    costs = Dict{Processor,Float64}()
-                    for proc in all_procs
-                        # Filter out chunks that are already local
-                        chunks_filt = Iterators.filter(((chunk, space)=chunk_locality)->!(proc in processors(space)), chunks_locality)
-
-                        # Estimate network transfer costs based on data size
-                        # N.B. `affinity(x)` really means "data size of `x`"
-                        # N.B. We treat same-worker transfers as having zero transfer cost
-                        tx_cost = Sch.impute_sum(affinity(chunk)[2] for chunk in chunks_filt)
-
-                        # Estimate total cost to move data and get task running after currently-scheduled tasks
-                        est_time_util = get(pressures, proc, UInt64(0))
-                        costs[proc] = est_time_util + (tx_cost/tx_rate)
-                    end
-
-                    # Look up estimated task cost
-                    sig = Sch.signature(sch_state, f, map(first, chunks_locality))
-                    task_pressure = get(sch_state.signature_time_cost, sig, 1000^3)
-
-                    # Shuffle procs around, so equally-costly procs are equally considered
-                    P = randperm(length(all_procs))
-                    procs = getindex.(Ref(all_procs), P)
-
-                    # Sort by lowest cost first
-                    sort!(procs, by=p->costs[p])
-
-                    best_proc = first(procs)
-                    return best_proc, task_pressure
-                end
-            end
-            # FIXME: Pressure should be decreased by pressure of syncdeps on same processor
-            pressures[our_proc] = get(pressures, our_proc, UInt64(0)) + task_pressure
-        elseif scheduler == :ultra
-            args = Base.mapany(spec.args) do arg
-                pos, data = arg
-                data, _ = unwrap_inout(data)
-                if data isa DTask
-                    data = fetch(data; raw=true)
-                end
-                return pos => tochunk(data)
-            end
-            f_chunk = tochunk(spec.f)
-            task_time = remotecall_fetch(1, f_chunk, args) do f, args
-                Sch.init_eager()
-                sch_state = Sch.EAGER_STATE[]
-                return @lock sch_state.lock begin
-                    sig = Sch.signature(sch_state, f, args)
-                    return get(sch_state.signature_time_cost, sig, 1000^3)
-                end
-            end
-
-            # FIXME: Copy deps are computed eagerly
-            deps = get(Set{Any}, spec.options, :syncdeps)
-
-            # Find latest time-to-completion of all syncdeps
-            deps_completed = UInt64(0)
-            for dep in deps
-                haskey(sstate.task_completions, dep) || continue # copy deps aren't recorded
-                deps_completed = max(deps_completed, sstate.task_completions[dep])
-            end
-
-            # Find latest time-to-completion of each memory space
-            # FIXME: Figure out space completions based on optimal packing
-            spaces_completed = Dict{MemorySpace,UInt64}()
-            for space in exec_spaces
-                completed = UInt64(0)
-                for (task, other_space) in sstate.assignments
-                    space == other_space || continue
-                    completed = max(completed, sstate.task_completions[task])
-                end
-                spaces_completed[space] = completed
-            end
-
-            # Choose the earliest-available memory space and processor
-            # FIXME: Consider move time
-            move_time = UInt64(0)
-            local our_space_completed
-            while true
-                our_space_completed, our_space = findmin(spaces_completed)
-                our_space_procs = filter(proc->proc in all_procs, processors(our_space))
-                if isempty(our_space_procs)
-                    delete!(spaces_completed, our_space)
-                    continue
-                end
-                our_proc = rand(our_space_procs)
-                break
-            end
-
-            sstate.task_to_spec[task] = spec
-            sstate.assignments[task] = our_space
-            sstate.task_completions[task] = our_space_completed + move_time + task_time
-        elseif scheduler == :roundrobin
-            our_proc = all_procs[proc_idx]
-        else
-            error("Invalid scheduler: $sched")
-        end
+    for (spec, task) in queue.seen_tasks
+        our_proc = schedule[task]
         @assert our_proc in all_procs
         our_space = only(memory_spaces(our_proc))
         our_procs = filter(proc->proc in all_procs, collect(processors(our_space)))
@@ -807,7 +686,6 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         populate_return_info!(state, task, our_space)
 
         write_num += 1
-        proc_idx = mod1(proc_idx + 1, length(all_procs))
     end
 
     # Copy args from remote to local
@@ -904,7 +782,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 end
 
 """
-    spawn_datadeps(f::Base.Callable; traversal::Symbol=:inorder)
+    spawn_datadeps(f::Base.Callable)
 
 Constructs a "datadeps" (data dependencies) region and calls `f` within it.
 Dagger tasks launched within `f` may wrap their arguments with `In`, `Out`, or
@@ -931,40 +809,32 @@ appropriately.
 At the end of executing `f`, `spawn_datadeps` will wait for all launched tasks
 to complete, rethrowing the first error, if any. The result of `f` will be
 returned from `spawn_datadeps`.
-
-The keyword argument `traversal` controls the order that tasks are launched by
-the scheduler, and may be set to `:bfs` or `:dfs` for Breadth-First Scheduling
-or Depth-First Scheduling, respectively. All traversal orders respect the
-dependencies and ordering of the launched tasks, but may provide better or
-worse performance for a given set of datadeps tasks. This argument is
-experimental and subject to change.
 """
 function spawn_datadeps(f::Base.Callable; static::Bool=true,
-                        traversal::Symbol=:inorder,
-                        scheduler::Union{Symbol,Nothing}=nothing,
+                        scheduler=nothing,
                         aliasing::Bool=true,
                         launch_wait::Union{Bool,Nothing}=nothing)
     if !static
         throw(ArgumentError("Dynamic scheduling is no longer available"))
     end
     wait_all(; check_errors=true) do
-        scheduler = something(scheduler, DATADEPS_SCHEDULER[], :roundrobin)::Symbol
+        scheduler = something(scheduler, DATADEPS_SCHEDULER[], RoundRobinScheduler())
         launch_wait = something(launch_wait, DATADEPS_LAUNCH_WAIT[], false)::Bool
         if launch_wait
             result = spawn_bulk() do
                 queue = DataDepsTaskQueue(get_options(:task_queue);
-                                          traversal, scheduler, aliasing)
+                                          scheduler, aliasing)
                 with_options(f; task_queue=queue)
                 distribute_tasks!(queue)
             end
         else
             queue = DataDepsTaskQueue(get_options(:task_queue);
-                                      traversal, scheduler, aliasing)
+                                      scheduler, aliasing)
             result = with_options(f; task_queue=queue)
             distribute_tasks!(queue)
         end
         return result
     end
 end
-const DATADEPS_SCHEDULER = ScopedValue{Union{Symbol,Nothing}}(nothing)
+const DATADEPS_SCHEDULER = ScopedValue{Any}(nothing)
 const DATADEPS_LAUNCH_WAIT = ScopedValue{Union{Bool,Nothing}}(nothing)
