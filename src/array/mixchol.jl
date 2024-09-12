@@ -1,7 +1,7 @@
-function mixedtrsm!(side, uplo, trans, diag, alpha, A, B, StoragePrecision)
+@inline function mixedtrsm!(side, uplo, trans, diag, alpha, A, B, StoragePrecision)
     T = StoragePrecision
+    m, n = size(B)
     if typeof(B) != Matrix{T}
-        println("B is not of type $T but of type $(typeof(B))")
         if typeof(A) != Matrix{T}
             Acopy = convert(Matrix{T}, A)
         else
@@ -9,11 +9,15 @@ function mixedtrsm!(side, uplo, trans, diag, alpha, A, B, StoragePrecision)
         end
         Bcopy = convert(Matrix{T}, B)
         BLAS.trsm!(side, uplo, trans, diag, T(alpha), Acopy, Bcopy)
+        copyto!(B, Bcopy)
+        return B
     end
     BLAS.trsm!(side, uplo, trans, diag, alpha, A, B)
+    return B
 end
-function mixedgemm!(transa, transb, alpha, A, B, beta, C, StoragePrecision)
+@inline function mixedgemm!(transa, transb, alpha, A, B, beta, C, StoragePrecision)
     T = StoragePrecision
+    m, n = size(C)
     if typeof(C) != Matrix{T}
         if typeof(A) != Matrix{T}
             Acopy = convert(Matrix{T}, A)
@@ -27,11 +31,15 @@ function mixedgemm!(transa, transb, alpha, A, B, beta, C, StoragePrecision)
         end
         Ccopy = convert(Matrix{T}, C)
         BLAS.gemm!(transa, transb, T(alpha), Acopy, Bcopy, T(beta), Ccopy)
+        copyto!(C, Ccopy)
+        return C
     end
     BLAS.gemm!(transa, transb, alpha, A, B, beta, C)
+    return C
 end
-function mixedsyrk!(uplo, trans, alpha, A, beta, C, StoragePrecision)
+@inline function mixedsyrk!(uplo, trans, alpha, A, beta, C, StoragePrecision)
     T = StoragePrecision
+    m, n = size(C)
     if typeof(C) != Matrix{T}
         if typeof(A) != Matrix{T}
             Acopy = convert(Matrix{T}, A)
@@ -40,10 +48,13 @@ function mixedsyrk!(uplo, trans, alpha, A, beta, C, StoragePrecision)
         end
         Ccopy = convert(Matrix{T}, C)
         BLAS.syrk!(uplo, trans, T(alpha), Acopy, T(beta), Ccopy)
+        copyto!(C, Ccopy)
+        return C
     end
     BLAS.syrk!(uplo, trans, alpha, A, beta, C)
+    return C
 end
-function mixedherk!(uplo, trans, alpha, A, beta, C, StoragePrecision)
+@inline function mixedherk!(uplo, trans, alpha, A, beta, C, StoragePrecision)
     T = StoragePrecision
     if typeof(C) != Matrix{T}
         if typeof(A) != Matrix{T}
@@ -53,10 +64,13 @@ function mixedherk!(uplo, trans, alpha, A, beta, C, StoragePrecision)
         end
         Ccopy = convert(Matrix{T}, C)
         BLAS.herk!(uplo, trans, T(alpha), Acopy, T(beta), Ccopy)
+        copyto!(C, Ccopy)
+        return C
     end
     BLAS.herk!(uplo, trans, alpha, A, beta, C)
+    return C
 end
-function MixedPrecisionChol!(A::DArray{T,2}, ::Type{LowerTriangular}, MP::Matrix{DataType}) where T
+function MixedPrecisionChol!(A::DMatrix{T}, ::Type{LowerTriangular}, MP::Matrix{DataType}) where T
     LinearAlgebra.checksquare(A)
 
     zone = one(T)
@@ -124,7 +138,7 @@ function MixedPrecisionChol!(A::DArray{T,2}, ::Type{UpperTriangular}, MP::Matrix
                     if iscomplex
                         Dagger.@spawn mixedherk!(uplo, 'C', rmzone, In(Ac[k, m]), rzone, InOut(Ac[m, m]))
                     else
-                        Dagger.@spawn mixedherk!(uplo, 'T', rmzone, In(Ac[k, m]), rzone, InOut(Ac[m, m]))
+                        Dagger.@spawn mixedsyrk!(uplo, 'T', rmzone, In(Ac[k, m]), rzone, InOut(Ac[m, m]))
                     end
                     for n in range(m+1, nt)
                         Dagger.@spawn mixedgemm!(trans, 'N', mzone, In(Ac[k, m]), In(Ac[k, n]), zone, InOut(Ac[m, n]))

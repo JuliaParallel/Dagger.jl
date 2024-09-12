@@ -175,3 +175,54 @@ function adapt_precision(A::DArray{T,2}, tolerance::T) where {T}
 
     return collect(DMP)
 end
+
+
+function tile_precision_and_convert(A, MP, global_norm, scalar_factor, tolerance)
+
+    tile_sqr = mapreduce(LinearAlgebra.norm_sqr, +, A)
+
+    tile_norm = sqrt(tile_sqr)
+
+    cal = tile_norm * scalar_factor / global_norm
+    decision_hp = tile_norm * scalar_factor / global_norm < tolerance / eps(Float16)
+    decision_sp = tile_norm * scalar_factor / global_norm < tolerance / eps(Float32)
+
+    #We are planning in near future to support fp8  E4M3 and E5M2 
+    #decision_fp8 = tile_norm * scalar_factor / global_norm < tolerance / 0.0625
+    #if decision_fp8
+    #    return Float8
+    if decision_hp
+        return Float16
+    elseif decision_sp
+        return Float32
+    else
+        return Float64
+    end
+end
+
+
+function adapt_precision_and_convert(A::DArray{T,2}, tolerance::T) where {T}
+
+    Ac = parent(A).chunks
+    mt, nt = size(Ac)
+
+    global_norm = LinearAlgebra.norm2(A)
+
+    MP = fill(T, mt, nt)
+    DMP = view(MP, Blocks(1, 1))
+    MPc = DMP.chunks
+
+
+    for m in range(1, mt)
+        for n in range(1, nt)
+                Dagger.@spawn tile_precision(
+                    InOut(Ac[m, n]),
+                    Out(MPc[m, n]),
+                    global_norm, 
+                    max(mt, nt), 
+                    tolerance)
+        end
+    end
+
+    return collect(DMP)
+end

@@ -4,6 +4,7 @@ This example shows how to compute kernel matrix and infer the precision per tile
     to compute distance matrix based by using Euclidean distance 
     and then it calls GammaExponentialKernel for each resulted distance
 """
+using Revise
 using Dagger
 using LinearAlgebra
 using KernelFunctions
