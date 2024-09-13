@@ -30,6 +30,10 @@ function Base.put!(store::StreamStore{T,B}, value) where {T,B}
         @dagdebug thunk_id :stream "adding $value"
         for buffer in values(store.buffers)
             while isfull(buffer)
+                if !isopen(store)
+                    @dagdebug thunk_id :stream "closed!"
+                    throw(InvalidStateException("Stream is closed", :closed))
+                end
                 @dagdebug thunk_id :stream "buffer full, waiting"
                 wait(store.lock)
             end
@@ -85,9 +89,10 @@ function Base.isopen(store::StreamStore, id::UInt)
 end
 
 function Base.close(store::StreamStore)
-    if store.open
+    @lock store.lock begin
+        store.open && return
         store.open = false
-        @lock store.lock notify(store.lock)
+        notify(store.lock)
     end
 end
 
@@ -408,6 +413,10 @@ function stream!(sf::StreamingFunction, uid,
     counter = 0
 
     while sf.max_evals < 0 || counter < sf.max_evals
+        # Exit streaming on cancellation
+        task_may_cancel!()
+
+        # Exit streaming on migration
         if sf.stream.store.migrating
             return StreamMigrating()
         end
