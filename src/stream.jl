@@ -238,6 +238,7 @@ function migrate_stream!(stream::Stream, w::Integer=myid())
                                              unlock((store::StreamStore).lock)
                                          end)
         if w == myid()
+            stream.store_ref.handle = new_store_ref # FIXME: It's not valid to mutate the Chunk handle, but we want to update this to enable fast location queries
             stream.store = MemPool.access_ref(identity, new_store_ref; local_only=true)
         end
 
@@ -327,13 +328,21 @@ struct StreamMigrating end
 
 function (sf::StreamingFunction)(args...; kwargs...)
     thunk_id = Sch.sch_handle().thunk_id.id
+    STREAM_THUNK_ID[] = thunk_id
+
+    # Migrate our output stream store to this worker
+    if sf.stream isa Stream
+        migrate_stream!(sf.stream)
+    end
+
     @label start
-    @dagdebug nothing :stream "Starting StreamingFunction"
+    @dagdebug thunk_id :stream "Starting StreamingFunction"
     worker_id = sf.stream.store_ref.handle.owner
     result = if worker_id == myid()
         _run_streamingfunction(nothing, sf, args...; kwargs...)
     else
         tls = get_tls()
+        # FIXME: Wire up listener to ferry cancel_token notifications to remote worker
         remotecall_fetch(_run_streamingfunction, worker_id, tls, sf, args...; kwargs...)
     end
     if result === StreamMigrating()
@@ -344,12 +353,14 @@ end
 
 function _run_streamingfunction(tls, sf, args...; kwargs...)
     @nospecialize sf args kwargs
+
     if tls !== nothing
         set_tls!(tls)
     end
-    result = nothing
+
     thunk_id = Sch.sch_handle().thunk_id.id
     STREAM_THUNK_ID[] = thunk_id
+
     # FIXME: Remove when scheduler is distributed
     uid = remotecall_fetch(1, thunk_id) do thunk_id
         lock(Sch.EAGER_ID_MAP) do id_map
@@ -359,11 +370,6 @@ function _run_streamingfunction(tls, sf, args...; kwargs...)
                 end
             end
         end
-    end
-
-    # Migrate our output stream store to this worker
-    if sf.stream isa Stream
-        migrate_stream!(sf.stream)
     end
 
     try
