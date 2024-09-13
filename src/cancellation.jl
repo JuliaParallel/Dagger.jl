@@ -1,3 +1,17 @@
+# DTask-level cancellation
+
+struct CancelToken
+    cancelled::Base.RefValue{Bool}
+end
+CancelToken() = CancelToken(Ref(false))
+function cancel!(token::CancelToken)
+    token.cancelled[] = true
+end
+
+const DTASK_CANCEL_TOKEN = TaskLocalValue{Union{CancelToken,Nothing}}(()->nothing)
+
+# Global-level cancellation
+
 """
     cancel!(task::DTask; force::Bool=false, halt_sch::Bool=false)
 
@@ -80,11 +94,11 @@ function _cancel!(state, tid, force, halt_sch)
                             Tf === typeof(Sch.eager_thunk) && continue
                             istaskdone(task) && continue
                             any_cancelled = true
-                            @dagdebug tid :cancel "Cancelling running task ($Tf)"
                             if force
                                 @dagdebug tid :cancel "Interrupting running task ($Tf)"
                                 Threads.@spawn Base.throwto(task, InterruptException())
                             else
+                                @dagdebug tid :cancel "Cancelling running task ($Tf)"
                                 # Tell the processor to just drop this task
                                 task_occupancy = task_spec[4]
                                 time_util = task_spec[2]
@@ -93,6 +107,7 @@ function _cancel!(state, tid, force, halt_sch)
                                 push!(istate.cancelled, tid)
                                 to_proc = istate.proc
                                 put!(istate.return_queue, (myid(), to_proc, tid, (InterruptException(), nothing)))
+                                cancel!(istate.cancel_tokens[tid])
                             end
                         end
                     end

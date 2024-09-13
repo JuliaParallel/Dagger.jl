@@ -27,8 +27,9 @@ function execute!(proc::ThreadProc, @nospecialize(f), @nospecialize(args...); @n
         return result[]
     catch err
         if err isa InterruptException
+            # Direct interrupt hit us, propagate cancellation signal
+            # FIXME: We should tell the scheduler that the user hit Ctrl-C
             if !istaskdone(task)
-                # Propagate cancellation signal
                 Threads.@spawn Base.throwto(task, InterruptException())
             end
         end
