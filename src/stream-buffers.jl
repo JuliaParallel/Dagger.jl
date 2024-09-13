@@ -64,6 +64,7 @@ function Base.put!(rb::ProcessRingBuffer{T}, x) where T
     len = length(rb.buffer)
     while (@atomic rb.count) == len
         yield()
+        task_may_cancel!()
     end
     to_write_idx = mod1(rb.write_idx, len)
     rb.buffer[to_write_idx] = convert(T, x)
@@ -73,6 +74,7 @@ end
 function Base.take!(rb::ProcessRingBuffer)
     while (@atomic rb.count) == 0
         yield()
+        task_may_cancel!()
     end
     to_read_idx = rb.read_idx
     rb.read_idx += 1

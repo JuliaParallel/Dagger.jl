@@ -28,6 +28,7 @@ function stream_fetch_values!(::Type{RemoteFetcher}, T, store_ref::Chunk{Store_r
         # might not yield when accessing data locally, which can cause this loop
         # to spin forever.
         yield()
+        task_may_cancel!()
     end
 
     @dagdebug thunk_id :stream "fetched $(length(values)) values"
