@@ -5,6 +5,7 @@ struct DTaskTLS
     sch_uid::UInt
     sch_handle::Any # FIXME: SchedulerHandle
     task_spec::Vector{Any} # FIXME: TaskSpec
+    cancel_token::CancelToken
 end
 
 const DTASK_TLS = TaskLocalValue{Union{DTaskTLS,Nothing}}(()->nothing)
@@ -22,7 +23,7 @@ get_tls() = DTASK_TLS[]::DTaskTLS
 Sets all Dagger TLS variables from `tls`, which may be a `DTaskTLS` or a `NamedTuple`.
 """
 function set_tls!(tls)
-    DTASK_TLS[] = DTaskTLS(tls.processor, tls.sch_uid, tls.sch_handle, tls.task_spec)
+    DTASK_TLS[] = DTaskTLS(tls.processor, tls.sch_uid, tls.sch_handle, tls.task_spec, tls.cancel_token)
 end
 
 """
@@ -40,3 +41,21 @@ Get the current processor executing the current [`DTask`](@ref).
 """
 task_processor() = get_tls().processor
 @deprecate thunk_processor() task_processor()
+
+"""
+    task_cancelled() -> Bool
+
+Returns `true` if the current [`DTask`](@ref) has been cancelled, else `false`.
+"""
+task_cancelled() = get_tls().cancel_token.cancelled[]
+
+"""
+    task_may_cancel!()
+
+Throws an `InterruptException` if the current [`DTask`](@ref) has been cancelled.
+"""
+function task_may_cancel!()
+    if task_cancelled()
+        throw(InterruptException())
+    end
+end
