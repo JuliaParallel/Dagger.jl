@@ -176,6 +176,18 @@ end
 
 remove_waiters!(stream::Stream, waiter::Integer) = remove_waiters!(stream, Int[waiter])
 
+struct StreamingFunction{F, S}
+    f::F
+    stream::S
+    max_evals::Int
+
+    status_event::Threads.Event
+    migration_complete::Threads.Event
+
+    StreamingFunction(f::F, stream::S, max_evals) where {F, S} =
+        new{F, S}(f, stream, max_evals, Threads.Event(), Threads.Event())
+end
+
 function migrate_streamingfunction!(sf::StreamingFunction, w::Integer=myid())
     current_worker = sf.stream.store_ref.handle.owner
     if myid() != current_worker
@@ -304,30 +316,32 @@ end
 
 const STREAM_THUNK_ID = TaskLocalValue{Int}(()->0)
 
-struct StreamingFunction{F, S}
-    f::F
-    stream::S
-    max_evals::Int
-    status_event::Threads.Event
-    migration_complete::Threads.Event
-end
-
 chunktype(sf::StreamingFunction{F}) where F = F
 
+struct StreamMigrating end
+
 function (sf::StreamingFunction)(args...; kwargs...)
-    ret = :migrating
-    while ret === :migrating
-        worker_id = sf.stream.store_ref.handle.owner
-        ret = if worker_id == myid()
-            _run_streamingfunction(args...; kwargs...)
-        else
-            remotecall_fetch(_run_streamingfunction, worker_id, args...; kwargs...)
-        end
+    thunk_id = Sch.sch_handle().thunk_id.id
+    @label start
+    @dagdebug nothing :stream "Starting StreamingFunction"
+    worker_id = sf.stream.store_ref.handle.owner
+    result = if worker_id == myid()
+        _run_streamingfunction(nothing, sf, args...; kwargs...)
+    else
+        tls = get_tls()
+        remotecall_fetch(_run_streamingfunction, worker_id, tls, sf, args...; kwargs...)
     end
+    if result === StreamMigrating()
+        @goto start
+    end
+    return result
 end
 
-function _run_streamingfunction(args...; kwargs...)
+function _run_streamingfunction(tls, sf, args...; kwargs...)
     @nospecialize sf args kwargs
+    if tls !== nothing
+        set_tls!(tls)
+    end
     result = nothing
     thunk_id = Sch.sch_handle().thunk_id.id
     STREAM_THUNK_ID[] = thunk_id
@@ -359,7 +373,7 @@ function _run_streamingfunction(args...; kwargs...)
         end
         return stream!(sf, uid, (args...,), kwarg_names, kwarg_values)
     finally
-        if !sf.stream.store.migrated
+        if !sf.stream.store.migrating
             # Remove ourself as a waiter for upstream Streams
             streams = Set{Stream}()
             for (idx, arg) in enumerate(args)
@@ -395,7 +409,7 @@ function stream!(sf::StreamingFunction, uid,
 
     while sf.max_evals < 0 || counter < sf.max_evals
         if sf.stream.store.migrating
-            return :migrating
+            return StreamMigrating()
         end
 
         # Get values from Stream args/kwargs
