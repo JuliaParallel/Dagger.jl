@@ -36,6 +36,7 @@ function Base.put!(store::StreamStore{T,B}, value) where {T,B}
                 end
                 @dagdebug thunk_id :stream "buffer full, waiting"
                 wait(store.lock)
+                task_may_cancel!()
             end
             put!(buffer, value)
         end
@@ -50,6 +51,7 @@ function Base.take!(store::StreamStore, id::UInt)
         while isempty(buffer) && isopen(store, id)
             @dagdebug thunk_id :stream "no elements, not taking"
             wait(store.lock)
+            task_may_cancel!()
         end
         @dagdebug thunk_id :stream "wait finished"
         if !isopen(store, id)
@@ -312,13 +314,6 @@ end
 finish_stream(value::T; result::R=nothing) where {T,R} = FinishStream{T,R}(Some{T}(value), result)
 
 finish_stream(; result::R=nothing) where R = FinishStream{Union{},R}(nothing, result)
-
-function cancel_stream!(t::DTask)
-    stream = task_to_stream(t.uid)
-    if stream !== nothing
-        close(stream)
-    end
-end
 
 const STREAM_THUNK_ID = TaskLocalValue{Int}(()->0)
 
