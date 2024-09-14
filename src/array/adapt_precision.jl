@@ -164,12 +164,14 @@ function adapt_precision(A::DArray{T,2}, tolerance::T) where {T}
 
     for m in range(1, mt)
         for n in range(1, nt)
-            MPc[m, n] =
-                Dagger.@spawn tile_precision(
-                    Ac[m, n],
-                    global_norm, 
-                    max(mt, nt), 
-                    tolerance)
+            if m!=n
+                MPc[m, n] =
+                    Dagger.@spawn tile_precision(
+                        Ac[m, n],
+                        global_norm, 
+                        max(mt, nt), 
+                        tolerance)
+            end
         end
     end
 

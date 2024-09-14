@@ -1,5 +1,8 @@
 @inline function mixedtrsm!(side, uplo, trans, diag, alpha, A, B, StoragePrecision)
     T = StoragePrecision
+    if T == Float16
+        T = Float32
+    end
     m, n = size(B)
     if typeof(B) != Matrix{T}
         if typeof(A) != Matrix{T}
@@ -30,11 +33,13 @@ end
             Bcopy = B
         end
         Ccopy = convert(Matrix{T}, C)
-        BLAS.gemm!(transa, transb, T(alpha), Acopy, Bcopy, T(beta), Ccopy)
+        #BLAS.gemm!(transa, transb, T(alpha), Acopy, Bcopy, T(beta), Ccopy)
+        LinearAlgebra.generic_matmatmul!(Ccopy, transa, transb, Acopy, Bcopy, LinearAlgebra.MulAddMul(T(alpha), T(beta)))
         copyto!(C, Ccopy)
         return C
     end
-    BLAS.gemm!(transa, transb, alpha, A, B, beta, C)
+    #BLAS.gemm!(transa, transb, alpha, A, B, beta, C)
+    LinearAlgebra.generic_matmatmul!(C, transa, transb, A, B, LinearAlgebra.MulAddMul(alpha, beta))
     return C
 end
 @inline function mixedsyrk!(uplo, trans, alpha, A, beta, C, StoragePrecision)
