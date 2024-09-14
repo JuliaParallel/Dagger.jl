@@ -1,12 +1,20 @@
 mutable struct StreamStore{T,B}
+    uid::UInt
     waiters::Vector{Int}
-    buffers::Dict{Int,B}
-    buffer_amount::Int
+    input_streams::Dict{UInt,Any} # FIXME: Concrete type
+    output_streams::Dict{UInt,Any} # FIXME: Concrete type
+    input_buffers::Dict{UInt,B}
+    output_buffers::Dict{UInt,B}
+    input_buffer_amount::Int
+    output_buffer_amount::Int
     open::Bool
     migrating::Bool
     lock::Threads.Condition
-    StreamStore{T,B}(buffer_amount::Integer) where {T,B} =
-        new{T,B}(zeros(Int, 0), Dict{Int,B}(), buffer_amount,
+    StreamStore{T,B}(uid::UInt, input_buffer_amount::Integer, output_buffer_amount::Integer) where {T,B} =
+        new{T,B}(uid, zeros(Int, 0),
+                 Dict{UInt,Any}(), Dict{UInt,Any}(),
+                 Dict{UInt,B}(), Dict{UInt,B}(),
+                 input_buffer_amount, output_buffer_amount,
                  true, false, Threads.Condition())
 end
 
@@ -27,8 +35,12 @@ function Base.put!(store::StreamStore{T,B}, value) where {T,B}
             @dagdebug thunk_id :stream "closed!"
             throw(InvalidStateException("Stream is closed", :closed))
         end
-        @dagdebug thunk_id :stream "adding $value"
-        for buffer in values(store.buffers)
+        @dagdebug thunk_id :stream "adding $value ($(length(store.output_streams)) outputs)"
+        for output_uid in keys(store.output_streams)
+            if !haskey(store.output_buffers, output_uid)
+                initialize_output_stream!(store, output_uid)
+            end
+            buffer = store.output_buffers[output_uid]
             while isfull(buffer)
                 if !isopen(store)
                     @dagdebug thunk_id :stream "closed!"
@@ -47,7 +59,11 @@ end
 function Base.take!(store::StreamStore, id::UInt)
     thunk_id = STREAM_THUNK_ID[]
     @lock store.lock begin
-        buffer = store.buffers[id]
+        if !haskey(store.output_buffers, id)
+            @assert haskey(store.output_streams, id)
+            error("Must first check isempty(store, id) before taking from a stream")
+        end
+        buffer = store.output_buffers[id]
         while isempty(buffer) && isopen(store, id)
             @dagdebug thunk_id :stream "no elements, not taking"
             wait(store.lock)
@@ -70,8 +86,14 @@ function Base.take!(store::StreamStore, id::UInt)
     end
 end
 
-Base.isempty(store::StreamStore, id::UInt) = isempty(store.buffers[id])
-isfull(store::StreamStore, id::UInt) = isfull(store.buffers[id])
+function Base.isempty(store::StreamStore, id::UInt)
+    if !haskey(store.output_buffers, id)
+        @assert haskey(store.output_streams, id)
+        return true
+    end
+    return isempty(store.output_buffers[id])
+end
+isfull(store::StreamStore, id::UInt) = isfull(store.output_buffers[id])
 
 "Returns whether the store is actively open. Only check this when deciding if new values can be pushed."
 Base.isopen(store::StreamStore) = store.open
@@ -83,7 +105,7 @@ taken.
 """
 function Base.isopen(store::StreamStore, id::UInt)
     @lock store.lock begin
-        if !isempty(store.buffers[id])
+        if !isempty(store.output_buffers[id])
             return true
         end
         return store.open
@@ -92,62 +114,113 @@ end
 
 function Base.close(store::StreamStore)
     @lock store.lock begin
-        store.open && return
+        store.open || return
         store.open = false
         notify(store.lock)
     end
 end
 
-function add_waiters!(store::StreamStore{T,B}, waiters::Vector{Int}) where {T,B}
+# FIXME: Just pass Stream directly, rather than its uid
+function add_waiters!(store::StreamStore{T,B}, waiters::Vector{UInt}) where {T,B}
+    our_uid = store.uid
     @lock store.lock begin
-        for w in waiters
-            buffer = initialize_stream_buffer(B, T, store.buffer_amount)
-            store.buffers[w] = buffer
+        for output_uid in waiters
+            store.output_streams[output_uid] = task_to_stream(output_uid)
         end
         append!(store.waiters, waiters)
         notify(store.lock)
     end
 end
 
-function remove_waiters!(store::StreamStore, waiters::Vector{Int})
+function remove_waiters!(store::StreamStore, waiters::Vector{UInt})
     @lock store.lock begin
         for w in waiters
-            delete!(store.buffers, w)
+            delete!(store.output_buffers, w)
             idx = findfirst(wo->wo==w, store.waiters)
             deleteat!(store.waiters, idx)
+            delete!(store.input_streams, w)
         end
         notify(store.lock)
     end
 end
 
 mutable struct Stream{T,B}
+    uid::UInt
     store::Union{StreamStore{T,B},Nothing}
     store_ref::Chunk
-    input_buffer::Union{B,Nothing}
-    buffer_amount::Int
-    function Stream{T,B}(buffer_amount::Integer=0) where {T,B}
+    function Stream{T,B}(uid::UInt, input_buffer_amount::Integer, output_buffer_amount::Integer) where {T,B}
         # Creates a new output stream
-        store = StreamStore{T,B}(buffer_amount)
+        store = StreamStore{T,B}(uid, input_buffer_amount, output_buffer_amount)
         store_ref = tochunk(store)
-        return new{T,B}(store, store_ref, nothing, buffer_amount)
+        return new{T,B}(uid, store, store_ref)
     end
-    function Stream{B}(stream::Stream{T}, buffer_amount::Integer=0) where {T,B}
+    function Stream(stream::Stream{T,B}) where {T,B}
         # References an existing output stream
-        return new{T,B}(nothing, stream.store_ref, nothing, buffer_amount)
+        return new{T,B}(stream.uid, nothing, stream.store_ref)
     end
 end
 
-function initialize_input_stream!(stream::Stream{T,B}) where {T,B}
-    stream.input_buffer = initialize_stream_buffer(B, T, stream.buffer_amount)
+struct StreamCancelledException <: Exception end
+struct StreamingValue{B}
+    buffer::B
+end
+Base.take!(sv::StreamingValue) = take!(sv.buffer)
+
+function initialize_input_stream!(our_store::StreamStore{OT,OB}, input_stream::Stream{IT,IB}) where {IT,OT,IB,OB}
+    input_uid = input_stream.uid
+    our_uid = our_store.uid
+    buffer = @lock our_store.lock begin
+        if haskey(our_store.input_buffers, input_uid)
+            return StreamingValue(our_store.input_buffers[input_uid])
+        end
+
+        buffer = initialize_stream_buffer(OB, IT, our_store.input_buffer_amount)
+        # FIXME: Also pass a RemoteChannel to track remote closure
+        our_store.input_buffers[input_uid] = buffer
+        buffer
+    end
+    thunk_id = STREAM_THUNK_ID[]
+    tls = get_tls()
+    Sch.errormonitor_tracked("streaming input: $input_uid -> $our_uid", Threads.@spawn begin
+        set_tls!(tls)
+        STREAM_THUNK_ID[] = thunk_id
+        try
+            while isopen(our_store)
+                # FIXME: Make remote fetcher configurable
+                stream_pull_values!(RemoteFetcher, IT, input_stream.store_ref, buffer, our_uid)
+            end
+        catch err
+            err isa InterruptException || rethrow(err)
+        finally
+            @dagdebug STREAM_THUNK_ID[] :stream "input stream closed"
+        end
+    end)
+    return StreamingValue(buffer)
+end
+initialize_input_stream!(our_store::StreamStore, arg) = arg
+function initialize_output_stream!(store::StreamStore{T,B}, output_uid::UInt) where {T,B}
+    @assert islocked(store.lock)
+    @dagdebug STREAM_THUNK_ID[] :stream "initializing output stream $output_uid"
+    buffer = initialize_stream_buffer(B, T, store.output_buffer_amount)
+    store.output_buffers[output_uid] = buffer
+    our_uid = store.uid
+    thunk_id = STREAM_THUNK_ID[]
+    Sch.errormonitor_tracked("streaming output: $our_uid -> $output_uid", Threads.@spawn begin
+        # FIXME: Track remote closure
+        try
+            while isopen(store)
+                # FIXME: Make remote fetcher configurable
+                stream_push_values!(RemoteFetcher, T, store, buffer, output_uid)
+            end
+        catch err
+            err isa InterruptException || rethrow(err)
+        finally
+            @dagdebug thunk_id :stream "output stream closed"
+        end
+    end)
 end
 
 Base.put!(stream::Stream, @nospecialize(value)) = put!(stream.store, value)
-
-function Base.take!(stream::Stream{T,B}, id::UInt) where {T,B}
-    # FIXME: Make remote fetcher configurable
-    stream_fetch_values!(RemoteFetcher, T, stream.store_ref, stream.input_buffer, id)
-    return take!(stream.input_buffer)
-end
 
 function Base.isopen(stream::Stream, id::UInt)::Bool
     return MemPool.access_ref(stream.store_ref.handle, id) do store, id
@@ -163,7 +236,7 @@ function Base.close(stream::Stream)
     return
 end
 
-function add_waiters!(stream::Stream, waiters::Vector{Int})
+function add_waiters!(stream::Stream, waiters::Vector{UInt})
     MemPool.access_ref(stream.store_ref.handle, waiters) do store, waiters
         add_waiters!(store::StreamStore, waiters)
         return
@@ -171,9 +244,9 @@ function add_waiters!(stream::Stream, waiters::Vector{Int})
     return
 end
 
-add_waiters!(stream::Stream, waiter::Integer) = add_waiters!(stream, Int[waiter])
+add_waiters!(stream::Stream, waiter::Integer) = add_waiters!(stream, UInt[waiter])
 
-function remove_waiters!(stream::Stream, waiters::Vector{Int})
+function remove_waiters!(stream::Stream, waiters::Vector{UInt})
     MemPool.access_ref(stream.store_ref.handle, waiters) do store, waiters
         remove_waiters!(store::StreamStore, waiters)
         return
@@ -211,7 +284,7 @@ function migrate_stream!(stream::Stream, w::Integer=myid())
     # FIXME: Do this with MemPool.access_ref, in case stream was already migrated
     if stream.store_ref.handle.owner != w
         thunk_id = STREAM_THUNK_ID[]
-        @dagdebug thunk_id :stream "Beginning migration..."
+        @dagdebug thunk_id :stream "Beginning migration... ($(length(stream.store.input_streams)) -> $(length(stream.store.output_streams)))"
 
         new_store_ref = MemPool.migrate!(stream.store_ref.handle, w;
                                          pre_migration=store->begin
@@ -219,15 +292,29 @@ function migrate_stream!(stream::Stream, w::Integer=myid())
                                              # N.B. Serialization automatically unlocks the migrated copy
                                              lock((store::StreamStore).lock)
 
-                                             # Return the serializeable unsent outputs. We can't send the
+                                             # Return the serializeable unsent inputs/outputs. We can't send the
                                              # buffers themselves because they may be mmap'ed or something.
-                                             Dict(id => collect!(buffer) for (id, buffer) in store.buffers)
+                                             unsent_inputs = Dict(uid => collect!(buffer) for (uid, buffer) in store.input_buffers)
+                                             unsent_outputs = Dict(uid => collect!(buffer) for (uid, buffer) in store.output_buffers)
+                                             empty!(store.input_buffers)
+                                             empty!(store.output_buffers)
+                                             return (unsent_inputs, unsent_outputs)
                                          end,
-                                         dest_post_migration=(store, unsent_outputs)->begin
-                                             # Initialize the StreamStore on the destination with the unsent outputs.
-                                             for (id, outputs) in unsent_outputs
+                                         dest_post_migration=(store, unsent)->begin
+                                             # Initialize the StreamStore on the destination with the unsent inputs/outputs.
+                                             STREAM_THUNK_ID[] = thunk_id
+                                             unsent_inputs, unsent_outputs = unsent
+                                             for (input_uid, inputs) in unsent_inputs
+                                                 input_stream = store.input_streams[input_uid]
+                                                 initialize_input_stream!(store, input_stream)
+                                                 for item in inputs
+                                                     put!(store.input_buffers[input_uid], item)
+                                                 end
+                                             end
+                                             for (output_uid, outputs) in unsent_outputs
+                                                 initialize_output_stream!(store, output_uid)
                                                  for item in outputs
-                                                     put!(store.buffers[id], item)
+                                                     put!(store.output_buffers[output_uid], item)
                                                  end
                                              end
 
@@ -244,7 +331,7 @@ function migrate_stream!(stream::Stream, w::Integer=myid())
             stream.store = MemPool.access_ref(identity, new_store_ref; local_only=true)
         end
 
-        @dagdebug thunk_id :stream "Migration complete"
+        @dagdebug thunk_id :stream "Migration complete ($(length(stream.store.input_streams)) -> $(length(stream.store.output_streams)))"
     end
 end
 
@@ -269,18 +356,28 @@ end
 
 function initialize_streaming!(self_streams, spec, task)
     if !isa(spec.f, StreamingFunction)
-        # Adapt called function for streaming and generate output Streams
+        # Calculate the return type of the called function
         T_old = Base.uniontypes(task.metadata.return_type)
         T_old = map(t->(t !== Union{} && t <: FinishStream) ? first(t.parameters) : t, T_old)
-        # We treat non-dominating error paths as unreachable
+        # N.B. We treat non-dominating error paths as unreachable
         T_old = filter(t->t !== Union{}, T_old)
         T = task.metadata.return_type = !isempty(T_old) ? Union{T_old...} : Any
+
+        # Get input buffer configuration
+        input_buffer_amount = get(spec.options, :stream_input_buffer_amount, 1)
+        if input_buffer_amount <= 0
+            throw(ArgumentError("Input buffering is required; please specify a `stream_input_buffer_amount` greater than 0"))
+        end
+
+        # Get output buffer configuration
         output_buffer_amount = get(spec.options, :stream_output_buffer_amount, 1)
         if output_buffer_amount <= 0
             throw(ArgumentError("Output buffering is required; please specify a `stream_output_buffer_amount` greater than 0"))
         end
-        output_buffer = get(spec.options, :stream_output_buffer, ProcessRingBuffer)
-        stream = Stream{T,output_buffer}(output_buffer_amount)
+
+        # Create the Stream
+        buffer_type = get(spec.options, :stream_buffer_type, ProcessRingBuffer)
+        stream = Stream{T,buffer_type}(task.uid, input_buffer_amount, output_buffer_amount)
         self_streams[task.uid] = stream
 
         max_evals = get(spec.options, :stream_max_evals, -1)
@@ -349,6 +446,8 @@ end
 function _run_streamingfunction(tls, sf, args...; kwargs...)
     @nospecialize sf args kwargs
 
+    store = sf.stream.store = MemPool.access_ref(identity, sf.stream.store_ref.handle; local_only=true)
+
     if tls !== nothing
         set_tls!(tls)
     end
@@ -372,11 +471,8 @@ function _run_streamingfunction(tls, sf, args...; kwargs...)
         # allocate boxes within `stream!`, when possible
         kwarg_names = map(name->Val{name}(), map(first, (kwargs...,)))
         kwarg_values = map(last, (kwargs...,))
-        for arg in args
-            if arg isa Stream
-                initialize_input_stream!(arg)
-            end
-        end
+        args = map(arg->initialize_input_stream!(store, arg), args)
+        kwarg_values = map(kwarg->initialize_input_stream!(store, kwarg), kwarg_values)
         return stream!(sf, uid, (args...,), kwarg_names, kwarg_values)
     finally
         if !sf.stream.store.migrating
@@ -423,8 +519,8 @@ function stream!(sf::StreamingFunction, uid,
         end
 
         # Get values from Stream args/kwargs
-        stream_args = _stream_take_values!(args, uid)
-        stream_kwarg_values = _stream_take_values!(kwarg_values, uid)
+        stream_args = _stream_take_values!(args)
+        stream_kwarg_values = _stream_take_values!(kwarg_values)
         stream_kwargs = _stream_namedtuple(kwarg_names, stream_kwarg_values)
 
         # Run a single cycle of f
@@ -445,13 +541,13 @@ function stream!(sf::StreamingFunction, uid,
     end
 end
 
-function _stream_take_values!(args, uid)
+function _stream_take_values!(args)
     return ntuple(length(args)) do idx
         arg = args[idx]
-        if arg isa Stream
-            take!(arg, uid)
+        if arg isa StreamingValue
+            return take!(arg)
         else
-            arg
+            return arg
         end
     end
 end
@@ -479,10 +575,11 @@ function task_to_stream(uid::UInt)
 end
 
 function finalize_streaming!(tasks::Vector{Pair{DTaskSpec,DTask}}, self_streams)
-    stream_waiter_changes = Dict{UInt,Vector{Int}}()
+    stream_waiter_changes = Dict{UInt,Vector{UInt}}()
 
     for (spec, task) in tasks
         @assert haskey(self_streams, task.uid)
+        our_stream = self_streams[task.uid]
 
         # Adapt args to accept Stream output of other streaming tasks
         for (idx, (pos, arg)) in enumerate(spec.args)
@@ -495,21 +592,15 @@ function finalize_streaming!(tasks::Vector{Pair{DTaskSpec,DTask}}, self_streams)
                 end
 
                 if other_stream !== nothing
-                    # Get input stream configs and configure input stream
-                    input_buffer_amount = get(spec.options, :stream_input_buffer_amount, 1)
-                    if input_buffer_amount <= 0
-                        throw(ArgumentError("Input buffering is required; please specify a `stream_input_buffer_amount` greater than 0"))
-                    end
-                    input_buffer = get(spec.options, :stream_input_buffer, ProcessRingBuffer)
+                    # Generate Stream handle for input
                     # FIXME: input_fetcher = get(spec.options, :stream_input_fetcher, RemoteFetcher)
-                    input_stream = Stream{input_buffer}(other_stream, input_buffer_amount)
-
-                    # Replace the DTask with the input Stream
-                    spec.args[idx] = pos => other_stream
+                    other_stream_handle = Stream(other_stream)
+                    spec.args[idx] = pos => other_stream_handle
+                    our_stream.store.input_streams[arg.uid] = other_stream_handle
 
                     # Add this task as a waiter for the associated output Stream
                     changes = get!(stream_waiter_changes, arg.uid) do
-                        Int[]
+                        UInt[]
                     end
                     push!(changes, task.uid)
                 end
@@ -517,8 +608,8 @@ function finalize_streaming!(tasks::Vector{Pair{DTaskSpec,DTask}}, self_streams)
         end
 
         # Filter out all streaming options
-        to_filter = (:stream_input_buffer, :stream_input_buffer_amount,
-                     :stream_output_buffer, :stream_output_buffer_amount,
+        to_filter = (:stream_buffer_type,
+                     :stream_input_buffer_amount, :stream_output_buffer_amount,
                      :stream_max_evals)
         spec.options = NamedTuple(filter(opt -> !(opt[1] in to_filter),
                                          Base.pairs(spec.options)))
