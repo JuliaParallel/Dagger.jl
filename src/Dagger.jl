@@ -72,7 +72,7 @@ include("datadeps.jl")
 
 # Streaming
 include("stream-buffers.jl")
-include("stream-fetchers.jl")
+include("stream-transfer.jl")
 include("stream.jl")
 
 # Array computations
