@@ -60,6 +60,7 @@ mutable struct ProcessRingBuffer{T}
 end
 Base.isempty(rb::ProcessRingBuffer) = (@atomic rb.count) == 0
 isfull(rb::ProcessRingBuffer) = (@atomic rb.count) == length(rb.buffer)
+Base.length(rb::ProcessRingBuffer) = @atomic rb.count
 function Base.put!(rb::ProcessRingBuffer{T}, x) where T
     len = length(rb.buffer)
     while (@atomic rb.count) == len
