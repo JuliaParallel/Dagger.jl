@@ -146,6 +146,16 @@ default_memory_space(accel::MPIAcceleration, x::Chunk) = MPIMemorySpace(CPURAMMe
 default_memory_space(accel::MPIAcceleration, x::Function) = MPIMemorySpace(CPURAMMemorySpace(myid()), accel.comm, MPI.Comm_rank(accel.comm))
 default_memory_space(accel::MPIAcceleration, T::Type) = MPIMemorySpace(CPURAMMemorySpace(myid()), accel.comm, MPI.Comm_rank(accel.comm))
 
+function memory_spaces(proc::MPIClusterProc)
+    rawMemSpace = Set{MemorySpace}()
+    for rnk in 0:(MPI.Comm_size(proc.comm) - 1)
+        for innerSpace in memory_spaces(OSProc())
+            push!(rawMemSpace, MPIMemorySpace(innerSpace, proc.comm, rnk))
+        end
+    end
+    return rawMemSpace
+end
+
 function memory_spaces(proc::MPIProcessor)
     rawMemSpace = Set{MemorySpace}()
     for innerSpace in memory_spaces(proc.innerProc)
