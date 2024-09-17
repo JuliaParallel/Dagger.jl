@@ -143,6 +143,16 @@ default_memory_space(accel::MPIAcceleration, x::Chunk) = MPIMemorySpace(CPURAMMe
 default_memory_space(accel::MPIAcceleration, x::Function) = MPIMemorySpace(CPURAMMemorySpace(myid()), accel.comm, MPI.Comm_rank(accel.comm))
 default_memory_space(accel::MPIAcceleration, T::Type) = MPIMemorySpace(CPURAMMemorySpace(myid()), accel.comm, MPI.Comm_rank(accel.comm))
 
+function memory_spaces(proc::MPIClusterProc)
+    rawMemSpace = Set{MemorySpace}()
+    for rnk in 0:(MPI.Comm_size(proc.comm) - 1)
+        for innerSpace in memory_spaces(OSProc())
+            push!(rawMemSpace, MPIMemorySpace(innerSpace, proc.comm, rnk))
+        end
+    end
+    return rawMemSpace
+end
+
 function memory_spaces(proc::MPIProcessor)
     rawMemSpace = Set{MemorySpace}()
     for innerSpace in memory_spaces(proc.innerProc)
@@ -353,3 +363,99 @@ accel_matches_proc(accel::MPIAcceleration, proc::MPIOSProc) = true
 accel_matches_proc(accel::MPIAcceleration, proc::MPIClusterProc) = true
 accel_matches_proc(accel::MPIAcceleration, proc::MPIProcessor) = true
 accel_matches_proc(accel::MPIAcceleration, proc) = false
+
+distribute(A::AbstractArray{T,N}, dist::Blocks{N}, root::Int; comm::MPI.Comm=MPI.COMM_WORLD) where {T,N} =
+    distribute(A::AbstractArray{T,N}, dist; comm, root) 
+distribute(A::AbstractArray, root::Int; comm::MPI.Comm=MPI.COMM_WORLD) = distribute(A, AutoBlocks(), root; comm)
+distribute(A::AbstractArray, ::AutoBlocks, root::Int; comm::MPI.Comm=MPI.COMM_WORLD) = distribute(A, auto_blocks(A), root; comm)
+function distribute(x::AbstractArray{T,N}, n::NTuple{N}, root::Int; comm::MPI.Comm=MPI.COMM_WORLD) where {T,N}
+    p = map((d, dn)->ceil(Int, d / dn), size(x), n)
+    distribute(x, Blocks(p), root; comm)
+end
+distribute(x::AbstractVector, n::Int, root::Int; comm::MPI.Comm=MPI.COMM_WORLD) = distribute(x, (n,), root; comm)
+distribute(x::AbstractVector, n::Vector{<:Integer}, root::Int; comm::MPI.Comm) =
+    distribute(x, DomainBlocks((1,), (cumsum(n),)); comm, root=0)
+
+
+distribute(A::AbstractArray{T,N}, dist::Blocks{N}, comm::MPI.Comm; root::Int=0) where {T,N} =
+    distribute(A::AbstractArray{T,N}, dist; comm, root) 
+distribute(A::AbstractArray, comm::MPI.Comm; root::Int=0) = distribute(A, AutoBlocks(), comm; root)
+distribute(A::AbstractArray, ::AutoBlocks, comm::MPI.Comm; root::Int=0) = distribute(A, auto_blocks(A), comm; root)
+function distribute(x::AbstractArray{T,N}, n::NTuple{N}, comm::MPI.Comm; root::Int=0) where {T,N}
+    p = map((d, dn)->ceil(Int, d / dn), size(x), n)
+    distribute(x, Blocks(p), comm; root)
+end
+distribute(x::AbstractVector, n::Int, comm::MPI.Comm; root::Int=0) = distribute(x, (n,), comm; root)
+distribute(x::AbstractVector, n::Vector{<:Integer}, comm::MPI.Comm; root::Int=0) =
+    distribute(x, DomainBlocks((1,), (cumsum(n),)), comm; root)
+
+function distribute(x::AbstractArray{T,N}, dist::Blocks{N}, ::MPIAcceleration) where {T,N}
+    return distribute(x, dist; comm=MPI.COMM_WORLD, root=0)
+end
+
+distribute(A::Nothing, dist::Blocks{N}) where N = distribute(nothing, dist; comm=MPI.COMM_WORLD, root=0)
+
+function distribute(A::Union{AbstractArray{T,N}, Nothing}, dist::Blocks{N}; comm::MPI.Comm, root::Int) where {T,N}
+    rnk = MPI.Comm_rank(comm)
+    isroot = rnk == root
+    d = MPI.bcast(domain(A), comm, root=root)
+    sd = partition(dist, d)
+    # TODO: Make better load balancing
+    type = MPI.bcast(eltype(A), comm, root=root)
+    data = Array{type,N}(undef, size(sd[rnk + 1]))
+    if isroot
+        intbuf = Array{T, N}(undef, size(A))
+        idx = 1
+        for part in sd
+            step = prod(map(length, part.indexes))
+            intbuf[idx:(idx - 1 + step)] = A[part]
+            idx += step
+        end
+        counts = reshape(Int32.(prod.(size.(sd))), prod(size(sd)))
+        MPI.Scatterv!(MPI.VBuffer(intbuf, counts), data, comm; root=root)
+    else
+        MPI.Scatterv!(nothing, data, comm; root=root)
+    end
+    cs = Array{Any}(undef, size(sd))
+    for (ind, cind) in enumerate(CartesianIndices(cs))
+        s = first(memory_spaces(MPIOSProc(comm, ind - 1)))
+        cs[cind] = tochunk(data, s)
+    end
+    return Dagger.DArray(type, d, sd, cs, dist)
+end
+
+function Base.collect(x::Dagger.DMatrix{T};
+        comm=MPI.COMM_WORLD, root=nothing, acrossranks::Bool=true) where {T}
+    if !acrossranks
+        if isempty(x.chunks)
+            return Array{eltype(d)}(undef, size(x)...)
+        end
+        rank = MPI.Comm_rank(comm)
+        return collect(x.chunks[rank + 1])
+    else
+        rank = MPI.Comm_rank(comm)
+        datasnd = collect(x, acrossranks=false) 
+        sd = x.subdomains 
+        counts = reshape(Int32.(prod.(size.(sd))), prod(size(sd)))
+        N = length(size(x))
+        datatmp = Array{T, N}(undef, size(x))
+        if root === nothing
+            MPI.Allgatherv!(datasnd, VBuffer(datatmp, counts), comm)
+        else
+            if root == rank
+                MPI.Gatherv!(datasnd, VBuffer(datamp, counts), comm; root=root)
+            else
+                MPI.Gatherv!(datasnd, nothing, comm; root=root)
+                return nothing
+            end
+        end
+        idx = 1
+        data = Array{eltype(datatmp), N}(undef, size(x))
+        for part in sd
+            step = prod(map(length, part.indexes))
+            data[part.indexes...] = datatmp[idx:(idx - 1 + step)]
+            idx += step
+        end
+        return data
+    end
+end

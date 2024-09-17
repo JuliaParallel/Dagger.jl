@@ -506,9 +506,12 @@ function auto_blocks(dims::Dims{N}) where N
 end
 auto_blocks(A::AbstractArray{T,N}) where {T,N} = auto_blocks(size(A))
 
-distribute(A::AbstractArray) = distribute(A, AutoBlocks())
-distribute(A::AbstractArray{T,N}, dist::Blocks{N}) where {T,N} =
+distribute(A::AbstractArray{T,N}, dist::Blocks{N}, ::DistributedAcceleration) where {T,N} =
     _to_darray(Distribute(dist, A))
+
+distribute(A::AbstractArray{T,N}, dist::Blocks{N}) where {T,N} =
+    distribute(A::AbstractArray{T,N}, dist, current_acceleration()) 
+distribute(A::AbstractArray) = distribute(A, AutoBlocks())
 distribute(A::AbstractArray, ::AutoBlocks) = distribute(A, auto_blocks(A))
 function distribute(x::AbstractArray{T,N}, n::NTuple{N}) where {T,N}
     p = map((d, dn)->ceil(Int, d / dn), size(x), n)
