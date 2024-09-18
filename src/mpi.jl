@@ -339,9 +339,7 @@ function execute!(proc::MPIProcessor, f, args...; kwargs...)
         res = execute!(proc.innerProc, f, args...; kwargs...)
     else
 		res = nothing
-        print("[$local_rank] skipping execution of $f \n")
     end
-
     return tochunk(res, proc, memory_space(proc))
 end
 
@@ -418,8 +416,9 @@ function distribute(A::Union{AbstractArray{T,N}, Nothing}, dist::Blocks{N}; comm
     end
     cs = Array{Any}(undef, size(sd))
     for (ind, cind) in enumerate(CartesianIndices(cs))
-        s = first(memory_spaces(MPIOSProc(comm, ind - 1)))
-        cs[cind] = tochunk(data, s)
+        p = MPIOSProc(comm, ind - 1)
+        s = first(memory_spaces(p))
+        cs[cind] = tochunk(data, p, s)
     end
     return Dagger.DArray(type, d, sd, cs, dist)
 end
