@@ -343,7 +343,6 @@ function execute!(proc::MPIProcessor, f, args...; kwargs...)
     else
 		res = nothing
     end
-
     return tochunk(res, proc, memory_space(proc))
 end
 
