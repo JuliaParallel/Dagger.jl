@@ -1,6 +1,6 @@
 # In-Thunk Helpers
 
-struct DTaskTLS
+mutable struct DTaskTLS
     processor::Processor
     sch_uid::UInt
     sch_handle::Any # FIXME: SchedulerHandle
@@ -9,6 +9,8 @@ struct DTaskTLS
 end
 
 const DTASK_TLS = TaskLocalValue{Union{DTaskTLS,Nothing}}(()->nothing)
+
+Base.copy(tls::DTaskTLS) = DTaskTLS(tls.processor, tls.sch_uid, tls.sch_handle, tls.task_spec, tls.cancel_token)
 
 """
     get_tls() -> DTaskTLS
@@ -32,7 +34,14 @@ end
 Returns `true` if currently executing in a [`DTask`](@ref), else `false`.
 """
 in_task() = DTASK_TLS[] !== nothing
-@deprecate in_thunk() in_task()
+@deprecate(in_thunk(), in_task())
+
+"""
+    task_id() -> Int
+
+Returns the ID of the current [`DTask`](@ref).
+"""
+task_id() = get_tls().sch_handle.thunk_id.id
 
 """
     task_processor() -> Processor
@@ -40,7 +49,7 @@ in_task() = DTASK_TLS[] !== nothing
 Get the current processor executing the current [`DTask`](@ref).
 """
 task_processor() = get_tls().processor
-@deprecate thunk_processor() task_processor()
+@deprecate(thunk_processor(), task_processor())
 
 """
     task_cancelled() -> Bool
