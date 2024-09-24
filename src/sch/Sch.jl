@@ -1361,6 +1361,9 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                     else
                         rethrow(err)
                     end
+                finally
+                    # Ensure that any spawned tasks get cleaned up
+                    Dagger.cancel!(cancel_token)
                 end
             end
             lock(istate.queue) do _
