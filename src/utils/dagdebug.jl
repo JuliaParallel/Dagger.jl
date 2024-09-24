@@ -32,6 +32,10 @@ macro dagdebug(thunk, category, msg, args...)
                     $debug_ex_noid
                 end
             end
+
+            # Always yield to reduce differing behavior for debug vs. non-debug
+            # TODO: Remove this eventually
+            yield()
         end
     end)
 end
