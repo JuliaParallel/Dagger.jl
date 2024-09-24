@@ -2,13 +2,34 @@
 
 struct CancelToken
     cancelled::Base.RefValue{Bool}
+    event::Base.Event
 end
-CancelToken() = CancelToken(Ref(false))
+CancelToken() = CancelToken(Ref(false), Base.Event())
 function cancel!(token::CancelToken)
     token.cancelled[] = true
+    notify(token.event)
+    return
 end
+is_cancelled(token::CancelToken) = token.cancelled[]
+Base.wait(token::CancelToken) = wait(token.event)
+# TODO: Enable this for safety
+#Serialization.serialize(io::AbstractSerializer, ::CancelToken) =
+#    throw(ConcurrencyViolationError("Cannot serialize a CancelToken"))
 
 const DTASK_CANCEL_TOKEN = TaskLocalValue{Union{CancelToken,Nothing}}(()->nothing)
+
+function clone_cancel_token_remote(orig_token::CancelToken, wid::Integer)
+    remote_token = remotecall_fetch(wid) do
+        return poolset(CancelToken())
+    end
+    errormonitor_tracked("remote cancel_token communicator", Threads.@spawn begin
+        wait(orig_token)
+        @dagdebug nothing :cancel "Cancelling remote token on worker $wid"
+        MemPool.access_ref(remote_token) do remote_token
+            cancel!(remote_token)
+        end
+    end)
+end
 
 # Global-level cancellation
 
