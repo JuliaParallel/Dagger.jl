@@ -53,18 +53,26 @@ mutable struct ProcessRingBuffer{T}
     write_idx::Int
     @atomic count::Int
     buffer::Vector{T}
+    open::Bool
     function ProcessRingBuffer{T}(len::Int=1024) where T
         buffer = Vector{T}(undef, len)
-        return new{T}(1, 1, 0, buffer)
+        return new{T}(1, 1, 0, buffer, true)
     end
 end
 Base.isempty(rb::ProcessRingBuffer) = (@atomic rb.count) == 0
 isfull(rb::ProcessRingBuffer) = (@atomic rb.count) == length(rb.buffer)
 Base.length(rb::ProcessRingBuffer) = @atomic rb.count
+Base.isopen(rb::ProcessRingBuffer) = rb.open
+function Base.close(rb::ProcessRingBuffer)
+    rb.open = false
+end
 function Base.put!(rb::ProcessRingBuffer{T}, x) where T
     len = length(rb.buffer)
     while (@atomic rb.count) == len
         yield()
+        if !isopen(rb)
+            throw(InvalidStateException("Stream is closed", :closed))
+        end
         task_may_cancel!()
     end
     to_write_idx = mod1(rb.write_idx, len)
@@ -75,6 +83,9 @@ end
 function Base.take!(rb::ProcessRingBuffer)
     while (@atomic rb.count) == 0
         yield()
+        if !isopen(rb)
+            throw(InvalidStateException("Stream is closed", :closed))
+        end
         task_may_cancel!()
     end
     to_read_idx = rb.read_idx
