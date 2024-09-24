@@ -1,22 +1,25 @@
 struct RemoteFetcher end
+# TODO: Switch to RemoteChannel approach
 function stream_pull_values!(::Type{RemoteFetcher}, T, store_ref::Chunk{Store_remote}, buffer::Blocal, id::UInt) where {Store_remote, Blocal}
     thunk_id = STREAM_THUNK_ID[]
     @dagdebug thunk_id :stream "fetching values"
 
-    values = T[]
     free_space = length(buffer.buffer) - length(buffer)
+    if free_space == 0
+        yield()
+        task_may_cancel!()
+        return
+    end
+
+    values = T[]
     while isempty(values)
-        # FIXME: Pass buffer free space
-        # TODO: It would be ideal if we could wait on store.lock, but get unlocked during migration
         values = MemPool.access_ref(store_ref.handle, id, T, Store_remote, thunk_id, free_space) do store, id, T, Store_remote, thunk_id, free_space
-            if !isopen(store)
-                throw(InvalidStateException("Stream is closed", :closed))
-            end
             @dagdebug thunk_id :stream "trying to fetch values at $(myid())"
             store::Store_remote
             in_store = store
             STREAM_THUNK_ID[] = thunk_id
             values = T[]
+            @dagdebug thunk_id :stream "trying to fetch: $(store.output_buffers[id].count) values, free_space: $free_space"
             while !isempty(store, id) && length(values) < free_space
                 value = take!(store, id)::T
                 @dagdebug thunk_id :stream "fetched $value"
@@ -39,5 +42,5 @@ function stream_pull_values!(::Type{RemoteFetcher}, T, store_ref::Chunk{Store_re
     end
 end
 function stream_push_values!(::Type{RemoteFetcher}, T, store_ref::Store_remote, buffer::Blocal, id::UInt) where {Store_remote, Blocal}
-    sleep(0.1)
+    sleep(1)
 end
