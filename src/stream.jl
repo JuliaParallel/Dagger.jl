@@ -386,7 +386,12 @@ function initialize_streaming!(self_streams, spec, task)
         stream = Stream{T,buffer_type}(task.uid, input_buffer_amount, output_buffer_amount)
         self_streams[task.uid] = stream
 
+        # Get max evaluation count
         max_evals = get(spec.options, :stream_max_evals, -1)
+        if max_evals == 0
+            throw(ArgumentError("stream_max_evals cannot be 0"))
+        end
+
         spec.f = StreamingFunction(spec.f, stream, max_evals)
         spec.options = merge(spec.options, (;occupancy=Dict(Any=>0)))
 
