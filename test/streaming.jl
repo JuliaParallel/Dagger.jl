@@ -1,192 +1,425 @@
-import MemPool: access_ref
-
-@everywhere begin
-    """
-    A functor to produce a certain number of outputs.
-
-    Note: always use this like `Dagger.spawn(Producer())` rather than
-    `Dagger.@spawn Producer()`. The macro form will just create fresh objects
-    every time and stream forever.
-    """
-    mutable struct Producer
-        N::Union{Int, Float64}
-        count::Int
-        mailbox::Union{RemoteChannel, Nothing}
-
-        Producer(N=5, mailbox=nothing) = new(N, 0, mailbox)
+@everywhere function rand_finite(T=Float64)
+    x = rand(T)
+    if rand() < 0.1
+        return Dagger.finish_stream(x)
     end
-
-    function (self::Producer)()
-        self.count += 1
-
-        # Sleeping will make the loop yield (handy for single-threaded
-        # processes), and stops Dagger from being too spammy in debug mode.
-        if self.N == Inf
-            sleep(0.1)
-        end
-
-        # Check if there are any instructions for us
-        if !isnothing(self.mailbox) && isready(self.mailbox)
-            msg = take!(self.mailbox)
-            if msg === :exit
-                put!(self.mailbox, self.count)
-                return Dagger.finish_stream(self.count)
-            else
-                error("Unrecognized Producer message: $msg")
-            end
-        end
-
-        self.count >= self.N ? Dagger.finish_stream(self.count) : self.count
+    return x
+end
+@everywhere function rand_finite_returns(T=Float64)
+    x = rand(T)
+    if rand() < 0.1
+        return Dagger.finish_stream(x; result=x)
     end
+    return x
 end
 
-function test_in_task(f, message, parent_testsets)
-    task_local_storage(:__BASETESTNEXT__, parent_testsets)
+const ACCUMULATOR = Dict{Int,Vector{Real}}()
+@everywhere function accumulator(x=0)
+    tid = Dagger.task_id()
+    remotecall_wait(1, tid, x) do tid, x
+        acc = get!(Vector{Real}, ACCUMULATOR, tid)
+        push!(acc, x)
+    end
+    return
+end
+@everywhere accumulator(xs...) = accumulator(sum(xs))
 
-    @testset "$message" begin
+function catch_interrupt(f)
+    try
+        f()
+    catch err
+        if err isa Dagger.DTaskFailedException && err.ex isa InterruptException
+            return
+        elseif err isa Dagger.Sch.SchedulingException
+            return
+        end
+        rethrow(err)
+    end
+end
+function merge_testset!(inner::Test.DefaultTestSet)
+    outer = Test.get_testset()
+    append!(outer.results, inner.results)
+    outer.n_passed += inner.n_passed
+end
+function test_finishes(f, message::String; ignore_timeout=false, max_evals=10)
+    t = @eval Threads.@spawn begin
+        tset = nothing
         try
-            f()
-        catch err
-            if err isa Dagger.DTaskFailedException && err.ex isa InterruptException
-                return
-            elseif err isa Dagger.Sch.SchedulingException
-                return
+            @testset $message begin
+                try
+                    @testset $message begin
+                        Dagger.with_options(;stream_max_evals=$max_evals) do
+                            catch_interrupt($f)
+                        end
+                    end
+                finally
+                    tset = Test.get_testset()
+                end
             end
-            rethrow()
+        catch
         end
+        return tset
     end
-end
-
-function test_finishes(f, message::String; ignore_timeout=false)
-    # We sneakily pass a magic variable from the current TLS into the new
-    # task. It's used by the Test stdlib to hold a list of the current
-    # testsets, so we need it to be able to record the tests from the new
-    # task in the original testset that we're currently running under.
-    parent_testsets = get(task_local_storage(), :__BASETESTNEXT__, [])
-    t = Threads.@spawn test_in_task(f, message, parent_testsets)
-
-    if timedwait(()->istaskdone(t), 20) == :timed_out
+    timed_out = timedwait(()->istaskdone(t), 5) == :timed_out
+    if timed_out
         if !ignore_timeout
             @warn "Testing task timed out: $message"
         end
-        Dagger.cancel!(;halt_sch=true, force=true)
+        Dagger.cancel!(;halt_sch=true)
         fetch(Dagger.@spawn 1+1)
-        return false
     end
-    return true
+    tset = fetch(t)::Test.DefaultTestSet
+    merge_testset!(tset)
+    return !timed_out
 end
 
-@testset "Basics" begin
-    master_scope = Dagger.scope(worker=myid())
-
-    @test test_finishes("Migration") do
-        if nprocs() == 1
-            @warn "Skipping migration test because it requires at least 1 extra worker"
-            return
-        end
-
-        # Start streaming locally
-        mailbox = RemoteChannel()
-        producer = Producer(Inf, mailbox)
-        x = Dagger.spawn_streaming() do
-            Dagger.spawn(producer, Dagger.Options(; scope=master_scope))
-        end
-
-        # Wait for the stream to get started
-        while producer.count < 2
-            sleep(0.1)
-        end
-
-        # Migrate to another worker
-        access_ref(x.thunk_ref) do thunk
-            access_ref(thunk.f.handle) do streaming_function
-                Dagger.migrate_stream!(streaming_function.stream, workers()[1])
-            end
-        end
-
-        # Wait a bit for the stream to get started again on the other node
-        sleep(0.5)
-
-        # Stop it
-        put!(mailbox, :exit)
-        fetch(x)
-
-        final_count = take!(mailbox)
-        @info "Counts:" producer.count final_count
+all_scopes = [Dagger.ExactScope(proc) for proc in Dagger.all_processors()]
+for idx in 1:5
+    if idx == 1
+        scopes = [Dagger.scope(worker = 1, thread = 1)]
+        scope_str = "Worker 1"
+    elseif idx == 2 && nprocs() > 1
+        scopes = [Dagger.scope(worker = 2, thread = 1)]
+        scope_str = "Worker 2"
+    else
+        scopes = all_scopes
+        scope_str = "All Workers"
     end
 
-    return
-
-    @test test_finishes("Single task") do
-        local x
-        Dagger.spawn_streaming() do
-            x = Dagger.spawn(Producer())
-        end
-        @test fetch(x) === nothing
-    end
-
-    @test !test_finishes("Single task running forever"; ignore_timeout=true) do
-        local x
-        Dagger.spawn_streaming() do
-            x = Dagger.spawn() do
-                y = rand()
-                sleep(1)
-                return y
-            end
-        end
-        fetch(x)
-    end
-
-    @test test_finishes("Max evaluations") do
-        producer = Producer(20)
-        x = Dagger.with_options(; stream_max_evals=10) do
+    @testset "Single Task Control Flow ($scope_str)" begin
+        @test !test_finishes("Single task running forever"; max_evals=1_000_000, ignore_timeout=true) do
+            local x
             Dagger.spawn_streaming() do
-                # Spawn on the same node so we can access the local `producer` variable
-                Dagger.spawn(producer, Dagger.Options(; scope=master_scope))
-            end
-        end
-
-        wait(x)
-        @test producer.count == 10
-    end
-
-    @test test_finishes("Two tasks (sequential)") do
-        local x, y
-        @warn "\n\n\nStart streaming\n\n\n"
-        Dagger.spawn_streaming() do
-            x = Dagger.spawn(Producer())
-            y = Dagger.@spawn x+1
-        end
-        @test fetch(x) === nothing
-        @test_throws Dagger.DTaskFailedException fetch(y)
-    end
-
-    # TODO: Two tasks (parallel)
-
-    # TODO: Three tasks (2 -> 1) and (1 -> 2)
-    # TODO: Four tasks (diamond)
-
-    # TODO: With pass-through/Without result
-    # TODO: With pass-through/With result
-    # TODO: Without pass-through/Without result
-
-    @test test_finishes("Without pass-through/With result") do
-        local x
-        Dagger.spawn_streaming() do
-            x = Dagger.spawn() do
-                x = rand()
-                if x < 0.1
-                    return Dagger.finish_stream(x; result=123)
+                x = Dagger.@spawn scope=rand(scopes) () -> begin
+                    y = rand()
+                    sleep(1)
+                    return y
                 end
-                return x
+            end
+            fetch(x)
+        end
+
+        @test test_finishes("Single task without result") do
+            local x
+            Dagger.spawn_streaming() do
+                x = Dagger.@spawn scope=rand(scopes) rand()
+            end
+            @test fetch(x) === nothing
+        end
+
+        @test test_finishes("Single task with result"; max_evals=1_000_000) do
+            local x
+            Dagger.spawn_streaming() do
+                x = Dagger.@spawn scope=rand(scopes) () -> begin
+                   x = rand()
+                    if x < 0.1
+                        return Dagger.finish_stream(x; result=123)
+                    end
+                    return x
+                end
+            end
+            @test fetch(x) == 123
+        end
+    end
+
+    @testset "Non-Streaming Inputs ($scope_str)" begin
+        @test test_finishes("() -> A") do
+            local A
+            Dagger.spawn_streaming() do
+                A = Dagger.@spawn scope=rand(scopes) accumulator()
+            end
+            @test fetch(A) === nothing
+            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            A_tid = Dagger.task_id(A)
+            @test length(values[A_tid]) == 10
+            @test all(==(0), values[A_tid])
+        end
+        @test test_finishes("42 -> A") do
+            local A
+            Dagger.spawn_streaming() do
+                A = Dagger.@spawn scope=rand(scopes) accumulator(42)
+            end
+            @test fetch(A) === nothing
+            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            A_tid = Dagger.task_id(A)
+            @test length(values[A_tid]) == 10
+            @test all(==(42), values[A_tid])
+        end
+        @test test_finishes("(42, 43) -> A") do
+            local A
+            Dagger.spawn_streaming() do
+                A = Dagger.@spawn scope=rand(scopes) accumulator(42, 43)
+            end
+            @test fetch(A) === nothing
+            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            A_tid = Dagger.task_id(A)
+            @test length(values[A_tid]) == 10
+            @test all(==(42 + 43), values[A_tid])
+        end
+    end
+
+    @testset "Non-Streaming Outputs ($scope_str)" begin
+        @test test_finishes("x -> A") do
+            local x, A
+            Dagger.spawn_streaming() do
+                x = Dagger.@spawn scope=rand(scopes) rand()
+            end
+            A = Dagger.@spawn accumulator(x)
+            @test fetch(x) === nothing
+            @test fetch(A) === nothing
+            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            A_tid = Dagger.task_id(A)
+            @test length(values[A_tid]) == 1
+            @test all(v -> 0 <= v <= 10, values[A_tid])
+        end
+        @test test_finishes("x -> (A, B)") do
+            local x, A, B
+            Dagger.spawn_streaming() do
+                x = Dagger.@spawn scope=rand(scopes) rand()
+            end
+            A = Dagger.@spawn accumulator(x)
+            B = Dagger.@spawn accumulator(x)
+            @test fetch(x) === nothing
+            @test fetch(A) === nothing
+            @test fetch(B) === nothing
+            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            A_tid = Dagger.task_id(A)
+            @test length(values[A_tid]) == 1
+            @test all(v -> 0 <= v <= 10, values[A_tid])
+            B_tid = Dagger.task_id(B)
+            @test length(values[B_tid]) == 1
+            @test all(v -> 0 <= v <= 10, values[B_tid])
+        end
+    end
+
+    @testset "Multiple Tasks ($scope_str)" begin
+        @test test_finishes("x -> A") do
+            local x, A
+            Dagger.spawn_streaming() do
+                x = Dagger.@spawn scope=rand(scopes) rand()
+                A = Dagger.@spawn scope=rand(scopes) accumulator(x)
+            end
+            @test fetch(x) === nothing
+            @test fetch(A) === nothing
+            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            A_tid = Dagger.task_id(A)
+            @test length(values[A_tid]) == 10
+            @test all(v -> 0 <= v <= 1, values[A_tid])
+        end
+
+        @test test_finishes("(x, A)") do
+            local x, A
+            Dagger.spawn_streaming() do
+                x = Dagger.@spawn scope=rand(scopes) rand()
+                A = Dagger.@spawn scope=rand(scopes) accumulator(1.0)
+            end
+            @test fetch(x) === nothing
+            @test fetch(A) === nothing
+            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            A_tid = Dagger.task_id(A)
+            @test length(values[A_tid]) == 10
+            @test all(v -> v == 1, values[A_tid])
+        end
+
+        @test test_finishes("x -> y -> A") do
+            local x, y, A
+            Dagger.spawn_streaming() do
+                x = Dagger.@spawn scope=rand(scopes) rand()
+                y = Dagger.@spawn scope=rand(scopes) x+1
+                A = Dagger.@spawn scope=rand(scopes) accumulator(y)
+            end
+            @test fetch(x) === nothing
+            @test fetch(y) === nothing
+            @test fetch(A) === nothing
+            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            A_tid = Dagger.task_id(A)
+            @test length(values[A_tid]) == 10
+            @test all(v -> 1 <= v <= 2, values[A_tid])
+        end
+
+        @test test_finishes("x -> (y, A)") do
+            local x, y, A
+            Dagger.spawn_streaming() do
+                x = Dagger.@spawn scope=rand(scopes) rand()
+                y = Dagger.@spawn scope=rand(scopes) x+1
+                A = Dagger.@spawn scope=rand(scopes) accumulator(x)
+            end
+            @test fetch(x) === nothing
+            @test fetch(y) === nothing
+            @test fetch(A) === nothing
+            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            A_tid = Dagger.task_id(A)
+            @test length(values[A_tid]) == 10
+            @test all(v -> 0 <= v <= 1, values[A_tid])
+        end
+
+        @test test_finishes("(x, y) -> A") do
+            local x, y, A
+            Dagger.spawn_streaming() do
+                x = Dagger.@spawn scope=rand(scopes) rand()
+                y = Dagger.@spawn scope=rand(scopes) rand()
+                A = Dagger.@spawn scope=rand(scopes) accumulator(x, y)
+            end
+            @test fetch(x) === nothing
+            @test fetch(y) === nothing
+            @test fetch(A) === nothing
+            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            A_tid = Dagger.task_id(A)
+            @test length(values[A_tid]) == 10
+            @test all(v -> 0 <= v <= 2, values[A_tid])
+        end
+
+        @test test_finishes("(x, y) -> z -> A") do
+            local x, y, z, A
+            Dagger.spawn_streaming() do
+                x = Dagger.@spawn scope=rand(scopes) rand()
+                y = Dagger.@spawn scope=rand(scopes) rand()
+                z = Dagger.@spawn scope=rand(scopes) x + y
+                A = Dagger.@spawn scope=rand(scopes) accumulator(z)
+            end
+            @test fetch(x) === nothing
+            @test fetch(y) === nothing
+            @test fetch(z) === nothing
+            @test fetch(A) === nothing
+            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            A_tid = Dagger.task_id(A)
+            @test length(values[A_tid]) == 10
+            @test all(v -> 0 <= v <= 2, values[A_tid])
+        end
+
+        @test test_finishes("x -> (y, z) -> A") do
+            local x, y, z, A
+            Dagger.spawn_streaming() do
+                x = Dagger.@spawn scope=rand(scopes) rand()
+                y = Dagger.@spawn scope=rand(scopes) x + 1
+                z = Dagger.@spawn scope=rand(scopes) x + 2
+                A = Dagger.@spawn scope=rand(scopes) accumulator(y, z)
+            end
+            @test fetch(x) === nothing
+            @test fetch(y) === nothing
+            @test fetch(z) === nothing
+            @test fetch(A) === nothing
+            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            A_tid = Dagger.task_id(A)
+            @test length(values[A_tid]) == 10
+            @test all(v -> 3 <= v <= 5, values[A_tid])
+        end
+
+        @test test_finishes("(x, y) -> z -> (A, B)") do
+            local x, y, z, A, B
+            Dagger.spawn_streaming() do
+                x = Dagger.@spawn scope=rand(scopes) rand()
+                y = Dagger.@spawn scope=rand(scopes) rand()
+                z = Dagger.@spawn scope=rand(scopes) x + y
+                A = Dagger.@spawn scope=rand(scopes) accumulator(z)
+                B = Dagger.@spawn scope=rand(scopes) accumulator(z)
+            end
+            @test fetch(x) === nothing
+            @test fetch(y) === nothing
+            @test fetch(z) === nothing
+            @test fetch(A) === nothing
+            @test fetch(A) === nothing
+            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            A_tid = Dagger.task_id(A)
+            @test length(values[A_tid]) == 10
+            @test all(v -> 0 <= v <= 2, values[A_tid])
+            B_tid = Dagger.task_id(B)
+            @test length(values[B_tid]) == 10
+            @test all(v -> 0 <= v <= 2, values[B_tid])
+        end
+
+        for T in (Float64, Int32, BigFloat)
+            @test test_finishes("Stream eltype $T") do
+                local x, A
+                Dagger.spawn_streaming() do
+                    x = Dagger.@spawn scope=rand(scopes) rand(T)
+                    A = Dagger.@spawn scope=rand(scopes) accumulator(x)
+                end
+                @test fetch(x) === nothing
+                @test fetch(A) === nothing
+                values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+                A_tid = Dagger.task_id(A)
+                @test length(values[A_tid]) == 10
+                @test all(v -> v isa T, values[A_tid])
             end
         end
-        @test fetch(x) == 123
     end
-end
-# TODO: Custom stream buffers/buffer amounts
-# TODO: Cross-worker streaming
-# TODO: Different stream element types (immutable and mutable)
 
-# TODO: Zero-allocation examples
-# FIXME: Streaming across threads
+    @testset "Max Evals ($scope_str)" begin
+        @test test_finishes("max_evals=0"; max_evals=0) do
+            @test_throws ArgumentError Dagger.spawn_streaming() do
+                A = Dagger.@spawn scope=rand(scopes) accumulator()
+            end
+        end
+        @test test_finishes("max_evals=1"; max_evals=1) do
+            local A
+            Dagger.spawn_streaming() do
+                A = Dagger.@spawn scope=rand(scopes) accumulator()
+            end
+            @test fetch(A) === nothing
+            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            A_tid = Dagger.task_id(A)
+            @test length(values[A_tid]) == 1
+        end
+        @test test_finishes("max_evals=100"; max_evals=100) do
+            local A
+            Dagger.spawn_streaming() do
+                A = Dagger.@spawn scope=rand(scopes) rand()
+            end
+            @test fetch(A) === nothing
+            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            A_tid = Dagger.task_id(A)
+            @test length(values[A_tid]) == 100
+        end
+    end
+
+    @testset "DropBuffer ($scope_str)" begin
+        @test test_finishes("x (drop)-> A") do
+            local x, A
+            Dagger.spawn_streaming() do
+                Dagger.with_options(;stream_buffer_type=>Dagger.DropBuffer) do
+                    x = Dagger.@spawn scope=rand(scopes) rand()
+                end
+                A = Dagger.@spawn scope=rand(scopes) accumulator(x)
+            end
+            @test fetch(A) === nothing
+            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            A_tid = Dagger.task_id(A)
+            @test !haskey(values, A_tid)
+        end
+        @test test_finishes("x ->(drop) A") do
+            local x, A
+            Dagger.spawn_streaming() do
+                x = Dagger.@spawn scope=rand(scopes) rand()
+                Dagger.with_options(;stream_buffer_type=>Dagger.DropBuffer) do
+                    A = Dagger.@spawn scope=rand(scopes) accumulator(x)
+                end
+            end
+            @test fetch(A) === nothing
+            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            A_tid = Dagger.task_id(A)
+            @test !haskey(values, A_tid)
+        end
+        @test test_finishes("x -(drop)> A") do
+            local x, A
+            Dagger.spawn_streaming() do
+                Dagger.with_options(;stream_buffer_type=>Dagger.DropBuffer) do
+                    x = Dagger.@spawn scope=rand(scopes) rand()
+                    A = Dagger.@spawn scope=rand(scopes) accumulator(x)
+                end
+            end
+            @test fetch(A) === nothing
+            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            A_tid = Dagger.task_id(A)
+            @test !haskey(values, A_tid)
+        end
+    end
+
+    # FIXME: Varying buffer amounts
+
+    #= TODO: Zero-allocation test
+    # First execution of a streaming task will almost guaranteed allocate (compiling, setup, etc.)
+    # BUT, second and later executions could possibly not allocate any further ("steady-state")
+    # We want to be able to validate that the steady-state execution for certain tasks is non-allocating
+    =#
+end
