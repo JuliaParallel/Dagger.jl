@@ -113,9 +113,15 @@ function Base.isopen(store::StreamStore, id::UInt)
 end
 
 function Base.close(store::StreamStore)
+    store.open || return
+    store.open = false
     @lock store.lock begin
-        store.open || return
-        store.open = false
+        for buffer in values(store.input_buffers)
+            close(buffer)
+        end
+        for buffer in values(store.output_buffers)
+            close(buffer)
+        end
         notify(store.lock)
     end
 end
