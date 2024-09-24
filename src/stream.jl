@@ -46,7 +46,7 @@ function Base.put!(store::StreamStore{T,B}, value) where {T,B}
                     @dagdebug thunk_id :stream "closed!"
                     throw(InvalidStateException("Stream is closed", :closed))
                 end
-                @dagdebug thunk_id :stream "buffer full, waiting"
+                @dagdebug thunk_id :stream "buffer full ($(length(buffer)) values), waiting"
                 wait(store.lock)
                 task_may_cancel!()
             end
@@ -211,8 +211,9 @@ function initialize_output_stream!(store::StreamStore{T,B}, output_uid::UInt) wh
     store.output_buffers[output_uid] = buffer
     our_uid = store.uid
     thunk_id = STREAM_THUNK_ID[]
+    tls = get_tls()
     Sch.errormonitor_tracked("streaming output: $our_uid -> $output_uid", Threads.@spawn begin
-        # FIXME: Track remote closure
+        set_tls!(tls)
         try
             while isopen(store)
                 # FIXME: Make remote fetcher configurable
@@ -267,21 +268,8 @@ struct StreamingFunction{F, S}
     stream::S
     max_evals::Int
 
-    status_event::Threads.Event
-    migration_complete::Threads.Event
-
     StreamingFunction(f::F, stream::S, max_evals) where {F, S} =
-        new{F, S}(f, stream, max_evals, Threads.Event(), Threads.Event())
-end
-
-function migrate_streamingfunction!(sf::StreamingFunction, w::Integer=myid())
-    current_worker = sf.stream.store_ref.handle.owner
-    if myid() != current_worker
-        return remotecall_fetch(migrate_streamingfunction!, current_worker, sf, w)
-    end
-
-    sf.stream.store.migrating = true
-    @lock sf.status_event wait(sf.status_event) # Wait for the streaming function to finish
+        new{F, S}(f, stream, max_evals)
 end
 
 function migrate_stream!(stream::Stream, w::Integer=myid())
@@ -291,6 +279,11 @@ function migrate_stream!(stream::Stream, w::Integer=myid())
     if stream.store_ref.handle.owner != w
         thunk_id = STREAM_THUNK_ID[]
         @dagdebug thunk_id :stream "Beginning migration... ($(length(stream.store.input_streams)) -> $(length(stream.store.output_streams)))"
+
+        # TODO: Wire up listener to ferry cancel_token notifications to remote worker
+        tls = get_tls()
+        @assert w == myid() "Only pull-based migration is currently supported"
+        #remote_cancel_token = clone_cancel_token_remote(get_tls().cancel_token, worker_id)
 
         new_store_ref = MemPool.migrate!(stream.store_ref.handle, w;
                                          pre_migration=store->begin
@@ -309,6 +302,9 @@ function migrate_stream!(stream::Stream, w::Integer=myid())
                                          dest_post_migration=(store, unsent)->begin
                                              # Initialize the StreamStore on the destination with the unsent inputs/outputs.
                                              STREAM_THUNK_ID[] = thunk_id
+                                             @assert !in_task()
+                                             set_tls!(tls)
+                                             #get_tls().cancel_token = MemPool.access_ref(identity, remote_cancel_token; local_only=true)
                                              unsent_inputs, unsent_outputs = unsent
                                              for (input_uid, inputs) in unsent_inputs
                                                  input_stream = store.input_streams[input_uid]
@@ -324,12 +320,16 @@ function migrate_stream!(stream::Stream, w::Integer=myid())
                                                  end
                                              end
 
-                                             # Ensure that the 'migrating' flag is not set
+                                             # Reset the state of this new store
+                                             store.open = true
                                              store.migrating = false
                                          end,
                                          post_migration=store->begin
+                                             # Indicate that this store has migrated
+                                             store.migrating = true
+                                             store.open = false
+
                                              # Unlock the store
-                                             # FIXME: Indicate to all waiters that this store is dead
                                              unlock((store::StreamStore).lock)
                                          end)
         if w == myid()
@@ -435,18 +435,17 @@ function (sf::StreamingFunction)(args...; kwargs...)
 
     # Migrate our output stream store to this worker
     if sf.stream isa Stream
-        migrate_stream!(sf.stream)
+        remote_cancel_token = migrate_stream!(sf.stream)
     end
 
     @label start
     @dagdebug thunk_id :stream "Starting StreamingFunction"
     worker_id = sf.stream.store_ref.handle.owner
     result = if worker_id == myid()
-        _run_streamingfunction(nothing, sf, args...; kwargs...)
+        _run_streamingfunction(nothing, nothing, sf, args...; kwargs...)
     else
         tls = get_tls()
-        # FIXME: Wire up listener to ferry cancel_token notifications to remote worker
-        remotecall_fetch(_run_streamingfunction, worker_id, tls, sf, args...; kwargs...)
+        remotecall_fetch(_run_streamingfunction, worker_id, tls, remote_cancel_token, sf, args...; kwargs...)
     end
     if result === StreamMigrating()
         @goto start
@@ -454,12 +453,15 @@ function (sf::StreamingFunction)(args...; kwargs...)
     return result
 end
 
-function _run_streamingfunction(tls, sf, args...; kwargs...)
+function _run_streamingfunction(tls, cancel_token, sf, args...; kwargs...)
     @nospecialize sf args kwargs
 
     store = sf.stream.store = MemPool.access_ref(identity, sf.stream.store_ref.handle; local_only=true)
+    @assert isopen(store)
 
     if tls !== nothing
+        # Setup TLS on this new task
+        tls.cancel_token = MemPool.access_ref(identity, cancel_token; local_only=true)
         set_tls!(tls)
     end
 
@@ -509,8 +511,6 @@ function _run_streamingfunction(tls, sf, args...; kwargs...)
             @dagdebug thunk_id :stream "closed stream"
             close(sf.stream)
         end
-
-        notify(sf.status_event)
     end
 end
 
@@ -520,12 +520,16 @@ function stream!(sf::StreamingFunction, uid,
     f = move(thunk_processor(), sf.f)
     counter = 0
 
-    while sf.max_evals < 0 || counter < sf.max_evals
+    while true
+        # Yield to other (streaming) tasks
+        yield()
+
         # Exit streaming on cancellation
         task_may_cancel!()
 
         # Exit streaming on migration
         if sf.stream.store.migrating
+            error("FIXME: max_evals should be retained")
             return StreamMigrating()
         end
 
@@ -549,6 +553,12 @@ function stream!(sf::StreamingFunction, uid,
 
         # Put the result into the output stream
         put!(sf.stream, stream_result)
+
+        # Exit streaming on eval limit
+        if sf.max_evals >= 0 && counter >= sf.max_evals
+            @dagdebug STREAM_THUNK_ID[] :stream "max evals reached"
+            return
+        end
     end
 end
 
