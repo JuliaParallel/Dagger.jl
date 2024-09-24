@@ -34,7 +34,10 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
     pushfirst!(LOAD_PATH, joinpath(@__DIR__, ".."))
     using Pkg
     Pkg.activate(@__DIR__)
-    Pkg.instantiate()
+    try
+        Pkg.instantiate()
+    catch
+    end
 
     using ArgParse
     s = ArgParseSettings(description = "Dagger Testsuite")
@@ -54,6 +57,9 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
             "-v", "--verbose"
                 action = :store_true
                 help = "Run the tests with debug logs from Dagger"
+            "-O", "--offline"
+                action = :store_true
+                help = "Set Pkg into offline mode"
         end
     end
 
@@ -86,6 +92,11 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
 
     if parsed_args["verbose"]
         ENV["JULIA_DEBUG"] = "Dagger"
+    end
+
+    if parsed_args["offline"]
+        Pkg.UPDATED_REGISTRY_THIS_SESSION[] = true
+        Pkg.offline(true)
     end
 else
     to_test = all_test_names
