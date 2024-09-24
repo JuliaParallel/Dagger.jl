@@ -56,7 +56,7 @@ task_processor() = get_tls().processor
 
 Returns `true` if the current [`DTask`](@ref) has been cancelled, else `false`.
 """
-task_cancelled() = get_tls().cancel_token.cancelled[]
+task_cancelled() = is_cancelled(get_tls().cancel_token)
 
 """
     task_may_cancel!()
@@ -68,3 +68,10 @@ function task_may_cancel!()
         throw(InterruptException())
     end
 end
+
+"""
+    task_cancel!()
+
+Cancels the current [`DTask`](@ref).
+"""
+task_cancel!() = cancel!(get_tls().cancel_token)
