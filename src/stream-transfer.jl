@@ -94,12 +94,23 @@ struct MQTT
     MQTT(ip::IPAddr, topic::String) = new(Protocol(ip, 1883), topic)
     MQTT(ip::IPAddr, port::Integer, topic::String) = new(Protocol(ip, port), topic)
 end
+# FIXME:
+# Add ZeroMQ support
 struct ZeroMQ
     protocol::Protocol
     ZeroMQ(ip::IPAddr, topic::String) = new(Protocol(ip, 1883), topic)
     ZeroMQ(ip::IPAddr, port::Integer, topic::String) = new(Protocol(ip, port), topic)
 end
 =#
+
+function _load_val_from_buffer!(buffer, T)
+    values = T[]
+    while !isempty(buffer)
+        value = take!(buffer)::T
+        push!(values, value)
+    end
+    return values
+end
 
 # UDP dispatch
 function stream_pull_values!(udp::UDP, T, our_store::StreamStore, their_stream::Stream, buffer)
