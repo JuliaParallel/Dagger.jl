@@ -68,6 +68,39 @@ function stream_pull_values!(fetcher::RemoteChannelFetcher, T, our_store::Stream
     @dagdebug our_tid :stream_pull "finished putting input value: $their_tid -> $our_tid"
 end
 
+struct Protocol
+    ip::IPAddr
+    port::Integer
+end
+struct TCP
+    protocol::Protocol
+    TCP(ip::IPAddr, port::Integer) = new(Protocol(ip,port))
+end
+struct UDP
+    protocol::Protocol
+    UDP(ip::IPAddr, port::Integer) = new(Protocol(ip,port))
+end
+
+#= FIXME
+struct NATS
+    protocol::Protocol
+    topic::String
+    NATS(ip::IPAddr, topic::String) = new(Protocol(ip, 4222), topic)
+    NATS(ip::IPAddr, port::Integer, topic::String) = new(Protocol(ip, port), topic)
+end
+struct MQTT
+    protocol::Protocol
+    topic::String
+    MQTT(ip::IPAddr, topic::String) = new(Protocol(ip, 1883), topic)
+    MQTT(ip::IPAddr, port::Integer, topic::String) = new(Protocol(ip, port), topic)
+end
+struct ZeroMQ
+    protocol::Protocol
+    ZeroMQ(ip::IPAddr, topic::String) = new(Protocol(ip, 1883), topic)
+    ZeroMQ(ip::IPAddr, port::Integer, topic::String) = new(Protocol(ip, port), topic)
+end
+=#
+
 #= TODO: Remove me
 # This is a bad implementation because it wants to sleep on the remote side to
 # wait for values, but this isn't semantically valid when done with MemPool.access_ref
