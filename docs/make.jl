@@ -32,6 +32,9 @@ makedocs(;
             "Logging: Visualization" => "logging-visualization.md",
             "Logging: Advanced" => "logging-advanced.md",
         ],
+        "External Languages" => [
+            "Python" => "external-languages/python.md",
+        ],
         "Checkpointing" => "checkpointing.md",
         "Benchmarking" => "benchmarking.md",
         "Dynamic Scheduler Control" => "dynamic.md",
