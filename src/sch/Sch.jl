@@ -774,7 +774,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
 
         for proc in local_procs
             gproc = get_parent(proc)
-            can_use, scope = can_use_proc(task, gproc, proc, opts, scope)
+            can_use, scope = can_use_proc(state, task, gproc, proc, opts, scope)
             if can_use
                 has_cap, est_time_util, est_alloc_util, est_occupancy =
                     has_capacity(state, proc, gproc.pid, opts.time_util, opts.alloc_util, opts.occupancy, sig)
@@ -806,7 +806,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         cap, extra_util = nothing, nothing
         procs_found = false
         # N.B. if we only have one processor, we need to select it now
-        can_use, scope = can_use_proc(task, entry.gproc, entry.proc, opts, scope)
+        can_use, scope = can_use_proc(state, task, entry.gproc, entry.proc, opts, scope)
         if can_use
             has_cap, est_time_util, est_alloc_util, est_occupancy =
                 has_capacity(state, entry.proc, entry.gproc.pid, opts.time_util, opts.alloc_util, opts.occupancy, sig)
@@ -832,7 +832,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
                 @goto pop_task
             end
 
-            can_use, scope = can_use_proc(task, entry.gproc, entry.proc, opts, scope)
+            can_use, scope = can_use_proc(state, task, entry.gproc, entry.proc, opts, scope)
             if can_use
                 has_cap, est_time_util, est_alloc_util, est_occupancy =
                     has_capacity(state, entry.proc, entry.gproc.pid, opts.time_util, opts.alloc_util, opts.occupancy, sig)

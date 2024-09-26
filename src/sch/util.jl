@@ -322,7 +322,7 @@ function signature(f, args)
     return sig
 end
 
-function can_use_proc(task, gproc, proc, opts, scope)
+function can_use_proc(state, task, gproc, proc, opts, scope)
     # Check against proclist
     if opts.proclist !== nothing
         @warn "The `proclist` option is deprecated, please use scopes instead\nSee https://juliaparallel.org/Dagger.jl/stable/scopes/ for details" maxlog=1
@@ -367,6 +367,24 @@ function can_use_proc(task, gproc, proc, opts, scope)
     if constrain(scope, proc_scope) isa Dagger.InvalidScope
         @dagdebug task :scope "Rejected $proc: Not contained in task scope ($scope)"
         return false, scope
+    end
+
+    # Check against f/args
+    Tf = chunktype(task.f)
+    if !Dagger.iscompatible_func(proc, opts, Tf)
+        @dagdebug task :scope "Rejected $proc: Not compatible with function type ($Tf)"
+        return false, scope
+    end
+    for (_, arg) in task.inputs
+        arg = unwrap_weak_checked(arg)
+        if arg isa Thunk
+            arg = state.cache[arg]
+        end
+        Targ = chunktype(arg)
+        if !Dagger.iscompatible_arg(proc, opts, Targ)
+            @dagdebug task :scope "Rejected $proc: Not compatible with argument type ($Targ)"
+            return false, scope
+        end
     end
 
     @label accept
