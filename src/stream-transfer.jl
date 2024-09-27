@@ -1,3 +1,5 @@
+using Sockets
+
 abstract type AbstractNetworkTransfer end
 
 struct RemoteChannelFetcher <: AbstractNetworkTransfer
@@ -116,12 +118,12 @@ end
 
 # UDP dispatch
 function stream_pull_values!(udp::UDP, T, our_store::StreamStore, their_stream::Stream, buffer)
-    udpsock = UDPSocket
+    udpsock = UDPSocket()
     Sockets.bind(udpsock, udp.protocol.ip, udp.protocol.port)
 
     values = T[]
-    values = recvfrom(udpsock)
-    data = reinterpret(T, data)
+    sender, data = recvfrom(udpsock)
+    values = reinterpret(T, data)
 
     for value in values
         put!(buffer, value)
