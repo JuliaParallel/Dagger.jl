@@ -1,4 +1,6 @@
-struct RemoteChannelFetcher
+abstract type AbstractNetworkTransfer end
+
+struct RemoteChannelFetcher <: AbstractNetworkTransfer
     chan::RemoteChannel
     RemoteChannelFetcher() = new(RemoteChannel())
 end
@@ -72,23 +74,23 @@ struct Protocol
     ip::IPAddr
     port::Integer
 end
-struct TCP
+struct TCP <: AbstractNetworkTransfer
     protocol::Protocol
     TCP(ip::IPAddr, port::Integer) = new(Protocol(ip,port))
 end
-struct UDP
+struct UDP <: AbstractNetworkTransfer
     protocol::Protocol
     UDP(ip::IPAddr, port::Integer) = new(Protocol(ip,port))
 end
 
 #= FIXME
-struct NATS
+struct NATS <: AbstractNetworkTransfer
     protocol::Protocol
     topic::String
     NATS(ip::IPAddr, topic::String) = new(Protocol(ip, 4222), topic)
     NATS(ip::IPAddr, port::Integer, topic::String) = new(Protocol(ip, port), topic)
 end
-struct MQTT
+struct MQTT <: AbstractNetworkTransfer
     protocol::Protocol
     topic::String
     MQTT(ip::IPAddr, topic::String) = new(Protocol(ip, 1883), topic)
@@ -96,7 +98,7 @@ struct MQTT
 end
 # FIXME:
 # Add ZeroMQ support
-struct ZeroMQ
+struct ZeroMQ <: AbstractNetworkTransfer
     protocol::Protocol
     ZeroMQ(ip::IPAddr, topic::String) = new(Protocol(ip, 1883), topic)
     ZeroMQ(ip::IPAddr, port::Integer, topic::String) = new(Protocol(ip, port), topic)
@@ -115,7 +117,7 @@ end
 # UDP dispatch
 function stream_pull_values!(udp::UDP, T, our_store::StreamStore, their_stream::Stream, buffer)
     udpsock = UDPSocket
-    bind(udpsock, udp.protocol.ip, udp.protocol.port)
+    Sockets.bind(udpsock, udp.protocol.ip, udp.protocol.port)
 
     values = T[]
     values = recvfrom(udpsock)
@@ -124,6 +126,8 @@ function stream_pull_values!(udp::UDP, T, our_store::StreamStore, their_stream::
     for value in values
         put!(buffer, value)
     end
+
+    println("Sent with UDP!")
 end
 function stream_push_values!(udp::UDP, T, our_store::StreamStore, their_stream::Stream, buffer)
     values = _load_val_from_buffer!(buffer, T)
@@ -148,18 +152,18 @@ function stream_pull_values!(tcp::TCP, T, our_store::StreamStore, their_stream::
     end
 
     if connection === nothing
-        sleep(5)
+        sleep(1)
         @goto pull_values_TCP
     end
 
-    length = read(connection, sizeof(T))
-    length = reinterpret(UInt64, length)[1]
-    data = read(connection, length * sizeof(T))
+    data = readavailable(connection)
     values = reinterpret(T, data)
 
     for value in values
         put!(buffer, value)
     end
+
+    println("Received with UDP!")
 end
 function stream_push_values!(tcp::TCP, T, our_store::StreamStore, their_stream::Stream, buffer)
     values = _load_val_from_buffer!(buffer, T)
@@ -322,7 +326,7 @@ end
 #= TODO: Remove me
 # This is a bad implementation because it wants to sleep on the remote side to
 # wait for values, but this isn't semantically valid when done with MemPool.access_ref
-struct RemoteFetcher end
+struct RemoteFetcher <: AbstractNetworkTransfer end
 function stream_push_values!(::Type{RemoteFetcher}, T, our_store::StreamStore, their_stream::Stream, buffer)
     sleep(1)
 end

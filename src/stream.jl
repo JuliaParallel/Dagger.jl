@@ -691,6 +691,8 @@ function finalize_streaming!(tasks::Vector{Pair{DTaskSpec,DTask}}, self_streams)
                     end
                     push!(changes, task.uid => input_fetcher)
                 end
+            elseif arg isa AbstractNetworkTransfer
+                error("FIXME: Implement custom fetcher")
             end
         end
 
