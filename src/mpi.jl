@@ -329,3 +329,172 @@ accel_matches_proc(accel::MPIAcceleration, proc::MPIOSProc) = true
 accel_matches_proc(accel::MPIAcceleration, proc::MPIClusterProc) = true
 accel_matches_proc(accel::MPIAcceleration, proc::MPIProcessor) = true
 accel_matches_proc(accel::MPIAcceleration, proc) = false
+
+distribute(A::AbstractArray{T,N}, dist::Blocks{N}, root::Int; comm::MPI.Comm=MPI.COMM_WORLD) where {T,N} =
+    distribute(A::AbstractArray{T,N}, dist; comm, root) 
+distribute(A::AbstractArray, root::Int; comm::MPI.Comm=MPI.COMM_WORLD) = distribute(A, AutoBlocks(), root; comm)
+distribute(A::AbstractArray, ::AutoBlocks, root::Int; comm::MPI.Comm=MPI.COMM_WORLD) = distribute(A, auto_blocks(A), root; comm)
+function distribute(x::AbstractArray{T,N}, n::NTuple{N}, root::Int; comm::MPI.Comm=MPI.COMM_WORLD) where {T,N}
+    p = map((d, dn)->ceil(Int, d / dn), size(x), n)
+    distribute(x, Blocks(p), root; comm)
+end
+distribute(x::AbstractVector, n::Int, root::Int; comm::MPI.Comm=MPI.COMM_WORLD) = distribute(x, (n,), root; comm)
+distribute(x::AbstractVector, n::Vector{<:Integer}, root::Int; comm::MPI.Comm) =
+    distribute(x, DomainBlocks((1,), (cumsum(n),)); comm, root=0)
+
+
+distribute(A::AbstractArray{T,N}, dist::Blocks{N}, comm::MPI.Comm; root::Int=0) where {T,N} =
+    distribute(A::AbstractArray{T,N}, dist; comm, root) 
+distribute(A::AbstractArray, comm::MPI.Comm; root::Int=0) = distribute(A, AutoBlocks(), comm; root)
+distribute(A::AbstractArray, ::AutoBlocks, comm::MPI.Comm; root::Int=0) = distribute(A, auto_blocks(A), comm; root)
+function distribute(x::AbstractArray{T,N}, n::NTuple{N}, comm::MPI.Comm; root::Int=0) where {T,N}
+    p = map((d, dn)->ceil(Int, d / dn), size(x), n)
+    distribute(x, Blocks(p), comm; root)
+end
+distribute(x::AbstractVector, n::Int, comm::MPI.Comm; root::Int=0) = distribute(x, (n,), comm; root)
+distribute(x::AbstractVector, n::Vector{<:Integer}, comm::MPI.Comm; root::Int=0) =
+    distribute(x, DomainBlocks((1,), (cumsum(n),)), comm; root)
+
+function distribute(x::AbstractArray{T,N}, dist::Blocks{N}, ::MPIAcceleration) where {T,N}
+    return distribute(x, dist; comm=MPI.COMM_WORLD, root=0)
+end
+
+distribute(A::Nothing, dist::Blocks{N}) where N = distribute(nothing, dist; comm=MPI.COMM_WORLD, root=0)
+
+function distribute(A::Union{AbstractArray{T,N}, Nothing}, dist::Blocks{N}; comm::MPI.Comm, root::Int) where {T,N}
+    rnk = MPI.Comm_rank(comm)
+    isroot = rnk == root
+    csz = MPI.Comm_size(comm)
+    d = MPI.bcast(domain(A), comm, root=root)
+    sd = partition(dist, d)
+    type = MPI.bcast(eltype(A), comm, root=root)
+    # TODO: Make better load balancing
+    cs = Array{Any}(undef, size(sd))
+    if prod(size(sd)) < csz
+        @warn "Number of chunks is less than number of ranks, performance may be suboptimal"
+    end
+    if isroot
+        dst = 0
+        for (idx, part) in enumerate(sd)
+            if dst != root
+                h = abs(Base.unsafe_trunc(Int32, hash(part, UInt(0))))
+                send_yield(A[part], comm, dst, h)
+                data = nothing
+            else
+                data = A[part]
+            end
+            p = MPIOSProc(comm, dst)
+            s = first(memory_spaces(p))
+            cs[idx] = tochunk(data, p, s)
+            dst += 1
+            if dst == csz
+                dst = 0
+            end
+        end
+        println("Sent all chunks")
+    else
+        dst = 0 
+        for (idx, part) in enumerate(sd)
+            data = nothing
+            if rnk == dst
+                h = abs(Base.unsafe_trunc(Int32, hash(part, UInt(0))))
+                data = recv_yield(root, h, comm)
+            end
+            p = MPIOSProc(comm, dst)
+            s = first(memory_spaces(p))
+            cs[idx] = tochunk(data, p, s)
+            dst += 1
+            if dst == csz
+                dst = 0
+            end
+            println("Received chunk $idx")
+            #MPI.Scatterv!(nothing, data, comm; root=root)
+        end
+    end
+    MPI.Barrier(comm)
+    return Dagger.DArray(type, d, sd, cs, dist)
+end
+
+function Base.collect(x::Dagger.DMatrix{T};
+        comm=MPI.COMM_WORLD, root=nothing, acrossranks::Bool=true) where {T} 
+    csz = MPI.Comm_size(comm)
+    rank = MPI.Comm_rank(comm)
+    sd = x.subdomains 
+    if !acrossranks
+        if isempty(x.chunks)
+            return Array{eltype(d)}(undef, size(x)...)
+        end
+        localarr = []
+        localparts = []
+        curpart = rank + 1
+        while curpart <= length(x.chunks)
+            push!(localarr, collect(x.chunks[curpart]))
+            push!(localparts, sd[curpart])
+            curpart += csz
+        end
+        return localarr, localparts
+    else
+        reqs = Vector{MPI.Request}()
+        dst = 0
+        if root === nothing
+            data = Matrix{T}(undef, size(x))
+            localarr, localparts = collect(x; acrossranks=false)
+            for (idx, part) in enumerate(localparts)
+                for i in 0:(csz - 1)
+                    if i != rank
+                        h = abs(Base.unsafe_trunc(Int32, hash(part, UInt(0))))
+                        print("[$rank] Sent chunk $idx to rank $i with tag $h \n")
+                        push!(reqs, MPI.isend(localarr[idx], comm; dest = i, tag = h))
+                    else
+                        data[part.indexes...] = localarr[idx]
+                    end
+                end
+            end
+            for (idx, part) in enumerate(sd)
+                h = abs(Base.unsafe_trunc(Int32, hash(part, UInt(0))))
+                if dst != rank
+                    print("[$rank] Waiting for chunk $idx from rank $dst with tag $h\n")
+                    data[part.indexes...] = recv_yield(dst, h, comm)
+                end
+                dst += 1
+                if dst == MPI.Comm_size(comm)
+                    dst = 0
+                end
+            end
+            MPI.Waitall(reqs)
+            return data
+        else
+            if rank == root
+                data = Matrix{T}(undef, size(x))
+                for (idx, part) in enumerate(sd)
+                    h = abs(Base.unsafe_trunc(Int32, hash(part, UInt(0))))
+                    if dst == rank
+                        localdata = collect(x.chunks[idx])
+                        data[part.indexes...] = localdata
+                    else
+                        data[part.indexes...] = recv_yield(dst, h, comm)
+                    end
+                    dst += 1
+                    if dst == MPI.Comm_size(comm)
+                        dst = 0
+                    end
+                end
+                return fetch.(data)
+            else
+                for (idx, part) in enumerate(sd)
+                    h = abs(Base.unsafe_trunc(Int32, hash(part, UInt(0))))
+                    if rank == dst
+                        localdata = collect(x.chunks[idx])
+                        push!(reqs, MPI.isend(localdata, comm; dest = root, tag = h))
+                    end
+                    dst += 1
+                    if dst == MPI.Comm_size(comm)
+                        dst = 0
+                    end
+                end
+                MPI.Waitall(reqs)
+                return nothing
+            end
+        end
+    end
+end
