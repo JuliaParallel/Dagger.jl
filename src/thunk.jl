@@ -307,7 +307,7 @@ generated thunks.
 macro par(exs...)
     opts = exs[1:end-1]
     ex = exs[end]
-    return esc(_par(ex; lazy=true, opts=opts))
+    return esc(_par(__module__, ex; lazy=true, opts=opts))
 end
 
 """
@@ -349,7 +349,7 @@ also passes along any options in an `Options` struct. For example,
 macro spawn(exs...)
     opts = exs[1:end-1]
     ex = exs[end]
-    return esc(_par(ex; lazy=false, opts=opts))
+    return esc(_par(__module__, ex; lazy=false, opts=opts))
 end
 
 struct ExpandedBroadcast{F} end
@@ -365,8 +365,9 @@ end
 
 to_namedtuple(;kwargs...) = (;kwargs...)
 
-function _par(ex::Expr; lazy=true, recur=true, opts=())
+function _par(mod, ex::Expr; lazy=true, recur=true, opts=())
     f = nothing
+    bf = nothing
     body = nothing
     arg1 = nothing
     arg2 = nothing
@@ -375,7 +376,11 @@ function _par(ex::Expr; lazy=true, recur=true, opts=())
                 @capture(ex, allargs__->body_) ||
                 @capture(ex, arg1_[allargs__]) ||
                 @capture(ex, arg1_.arg2_) ||
-                @capture(ex, (;allargs__))
+                @capture(ex, (;allargs__)) ||
+                @capture(ex, bf_.(allargs__))
+        if bf !== nothing
+            f = ExpandedBroadcast{mod.eval(bf)}()
+        end
         f = replace_broadcast(f)
         if arg1 !== nothing
             if arg2 !== nothing
@@ -429,15 +434,15 @@ function _par(ex::Expr; lazy=true, recur=true, opts=())
         end
     elseif lazy
         # Recurse into the expression
-        return Expr(ex.head, _par_inner.(ex.args, lazy=lazy, recur=recur, opts=opts)...)
+        return Expr(ex.head, _par_inner.(Ref(mod), ex.args, lazy=lazy, recur=recur, opts=opts)...)
     else
         throw(ArgumentError("Invalid Dagger task expression: $ex"))
     end
 end
-_par(ex; kwargs...) = throw(ArgumentError("Invalid Dagger task expression: $ex"))
+_par(mod, ex; kwargs...) = throw(ArgumentError("Invalid Dagger task expression: $ex"))
 
-_par_inner(ex; kwargs...) = ex
-_par_inner(ex::Expr; kwargs...) = _par(ex; kwargs...)
+_par_inner(mod, ex; kwargs...) = ex
+_par_inner(mod, ex::Expr; kwargs...) = _par(mod, ex; kwargs...)
 
 """
     Dagger.spawn(f, args...; kwargs...) -> DTask
