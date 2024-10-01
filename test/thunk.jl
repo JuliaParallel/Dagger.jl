@@ -160,6 +160,13 @@ end
         @test t isa Dagger.DTask
         @test fetch(t) == fetch(nt2).b
     end
+    @testset "broadcast" begin
+        x = randn(100)
+
+        t = @spawn abs.(x)
+        @test t isa Dagger.DTask
+        @test fetch(t) == abs.(x)
+    end
     @testset "invalid expression" begin
         @test_throws LoadError eval(:(@spawn 1))
         @test_throws LoadError eval(:(@spawn begin 1 end))
