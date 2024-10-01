@@ -185,7 +185,8 @@ function remove_waiters!(store::StreamStore, waiters::Vector{UInt})
             delete!(store.output_buffers, w)
             idx = findfirst(wo->wo==w, store.waiters)
             deleteat!(store.waiters, idx)
-            delete!(store.input_streams, w)
+            delete!(store.output_streams, w)
+            delete!(store.output_fetchers, w)
         end
         notify(store.lock)
     end
@@ -307,7 +308,7 @@ function add_waiters!(stream::Stream, waiters::Vector{Pair{UInt,Any}})
     return
 end
 
-add_waiters!(stream::Stream, waiter::Integer) = add_waiters!(stream, UInt[waiter])
+#add_waiters!(stream::Stream, waiter::Integer) = add_waiters!(stream, UInt[waiter])
 
 function remove_waiters!(stream::Stream, waiters::Vector{UInt})
     MemPool.access_ref(stream.store_ref.handle, waiters) do store, waiters
@@ -317,7 +318,7 @@ function remove_waiters!(stream::Stream, waiters::Vector{UInt})
     return
 end
 
-remove_waiters!(stream::Stream, waiter::Integer) = remove_waiters!(stream, Int[waiter])
+#remove_waiters!(stream::Stream, waiter::Integer) = remove_waiters!(stream, Int[waiter])
 
 struct StreamingFunction{F, S}
     f::F
@@ -667,7 +668,14 @@ function finalize_streaming!(tasks::Vector{Pair{DTaskSpec,DTask}}, self_streams)
         our_stream = self_streams[task.uid]
 
         # Adapt args to accept Stream output of other streaming tasks
+        # FIXME: Deal with the same task specified multiple times
         for (idx, (pos, arg)) in enumerate(spec.args)
+            fetcher = nothing
+            if arg isa AbstractNetworkTransfer
+                fetcher = new_fetcher(arg)
+                arg = fetcher_task(arg)
+            end
+
             if arg isa DTask
                 # Check if this is a streaming task
                 if haskey(self_streams, arg.uid)
@@ -678,21 +686,20 @@ function finalize_streaming!(tasks::Vector{Pair{DTaskSpec,DTask}}, self_streams)
 
                 if other_stream !== nothing
                     # Generate Stream handle for input
-                    # FIXME: Be configurable
-                    input_fetcher = RemoteChannelFetcher()
                     other_stream_handle = Stream(other_stream)
                     spec.args[idx] = pos => other_stream_handle
                     our_stream.store.input_streams[arg.uid] = other_stream_handle
-                    our_stream.store.input_fetchers[arg.uid] = input_fetcher
+                    if fetcher === nothing
+                        fetcher = RemoteChannelFetcher()
+                    end
+                    our_stream.store.input_fetchers[arg.uid] = fetcher
 
                     # Add this task as a waiter for the associated output Stream
                     changes = get!(stream_waiter_changes, arg.uid) do
                         Pair{UInt,Any}[]
                     end
-                    push!(changes, task.uid => input_fetcher)
+                    push!(changes, task.uid => fetcher)
                 end
-            elseif arg isa AbstractNetworkTransfer
-                error("FIXME: Implement custom fetcher")
             end
         end
 
