@@ -97,6 +97,9 @@ struct MPIProcessor{P<:Processor} <: Processor
     rank::Int
 end
 
+Dagger.iscompatible_func(::MPIProcessor, opts, ::Any) = true
+Dagger.iscompatible_arg(::MPIProcessor, opts, ::Any) = true
+
 default_enabled(proc::MPIProcessor) = default_enabled(proc.innerProc)
 
 root_worker_id(proc::MPIProcessor) = myid()
@@ -306,7 +309,6 @@ function execute!(proc::MPIProcessor, f, args...; kwargs...)
         res = execute!(proc.innerProc, f, args...; kwargs...)
     else
 		res = nothing
-        print("[$local_rank] skipping execution of $f \n")
     end
     return tochunk(res, proc, memory_space(proc))
 end
@@ -428,7 +430,8 @@ function Base.collect(x::Dagger.DMatrix{T};
         localparts = []
         curpart = rank + 1
         while curpart <= length(x.chunks)
-            push!(localarr, collect(x.chunks[curpart]))
+            print("[$rank] Collecting chunk $curpart\n")
+            push!(localarr, fetch(x.chunks[curpart]))
             push!(localparts, sd[curpart])
             curpart += csz
         end
@@ -469,7 +472,7 @@ function Base.collect(x::Dagger.DMatrix{T};
                 for (idx, part) in enumerate(sd)
                     h = abs(Base.unsafe_trunc(Int32, hash(part, UInt(0))))
                     if dst == rank
-                        localdata = collect(x.chunks[idx])
+                        localdata = fetch(x.chunks[idx])
                         data[part.indexes...] = localdata
                     else
                         data[part.indexes...] = recv_yield(dst, h, comm)
@@ -484,7 +487,7 @@ function Base.collect(x::Dagger.DMatrix{T};
                 for (idx, part) in enumerate(sd)
                     h = abs(Base.unsafe_trunc(Int32, hash(part, UInt(0))))
                     if rank == dst
-                        localdata = collect(x.chunks[idx])
+                        localdata = fetch(x.chunks[idx])
                         push!(reqs, MPI.isend(localdata, comm; dest = root, tag = h))
                     end
                     dst += 1
