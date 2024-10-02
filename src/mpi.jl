@@ -110,6 +110,8 @@ get_parent(proc::MPIClusterProc) = proc
 get_parent(proc::MPIOSProc) = MPIClusterProc(proc.comm)
 get_parent(proc::MPIProcessor) = MPIOSProc(proc.comm, proc.rank)    
 
+short_name(proc::MPIProcessor) = "(MPI: $(proc.rank), $(short_name(proc.innerProc)))"
+
 function get_processors(mosProc::MPIOSProc)
     populate_children(mosProc.comm)
     children = MPIClusterProcChildren[mosProc.comm]

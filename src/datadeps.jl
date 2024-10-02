@@ -493,11 +493,12 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     all_procs = Processor[]
     scope = get_options(:scope, DefaultScope())
     accel = current_acceleration()
-	accel_procs = filter(procs(Dagger.Sch.eager_context())) do proc
-		Dagger.accel_matches_proc(accel, proc)
-	end
-	all_procs = unique(vcat([collect(Dagger.get_processors(gp)) for gp in accel_procs]...))
-    sort!(all_procs, by=repr)
+    accel_procs = filter(procs(Dagger.Sch.eager_context())) do proc
+        Dagger.accel_matches_proc(accel, proc)
+    end
+    all_procs = unique(vcat([collect(Dagger.get_processors(gp)) for gp in accel_procs]...))
+    # FIXME: This is an unreliable way to ensure processor uniformity
+    sort!(all_procs, by=short_name)
     filter!(proc->!isa(constrain(ExactScope(proc), scope),
                        InvalidScope),
             all_procs)
