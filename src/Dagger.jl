@@ -154,6 +154,20 @@ function __init__()
             ThreadProc(myid(), tid)
         end
     end
+
+    # Set up @dagdebug categories, if specified
+    try
+        if haskey(ENV, "JULIA_DAGGER_DEBUG")
+            empty!(DAGDEBUG_CATEGORIES)
+            for category in split(ENV["JULIA_DAGGER_DEBUG"], ",")
+                if category != ""
+                    push!(DAGDEBUG_CATEGORIES, Symbol(category))
+                end
+            end
+        end
+    catch err
+        @warn "Error parsing JULIA_DAGGER_DEBUG" exception=err
+    end
 end
 
 end # module
