@@ -256,7 +256,7 @@ function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
         # Add all aliasing dependencies
         for (dep_mod, readdep, writedep) in deps
             if state.aliasing
-                ainfo = aliasing(state.alias_state, current_acceleration, arg, dep_mod)
+                ainfo = aliasing(state.alias_state, current_acceleration(), arg, dep_mod)
             else
                 ainfo = UnknownAliasing()
             end
