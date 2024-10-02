@@ -134,6 +134,16 @@ function move!(::Type{<:Tridiagonal}, to_space::MemorySpace, from_space::MemoryS
     return
 end
 
+# FIXME: Take MemorySpace instead
+function move_type(from_proc::Processor, to_proc::Processor, ::Type{T}) where T
+    if from_proc == to_proc
+        return T
+    end
+    return Base._return_type(move, Tuple{typeof(from_proc), typeof(to_proc), T})
+end
+move_type(from_proc::Processor, to_proc::Processor, ::Type{<:Chunk{T}}) where T =
+    move_type(from_proc, to_proc, T)
+
 ### Aliasing and Memory Spans
 
 type_may_alias(::Type{String}) = false

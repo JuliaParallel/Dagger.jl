@@ -208,7 +208,7 @@ function tochunk_pset(x, space::MPIMemorySpace; device=nothing, kwargs...)
     local_rank = MPI.Comm_rank(space.comm)
     tid = 0
     uid = 0
-    id = 0 
+    id = 0
     if Dagger.in_task()
         tid = sch_handle().thunk_id.id
         uid = 0
@@ -339,13 +339,17 @@ end
 #FIXME:try to think of a better move! scheme
 function execute!(proc::MPIProcessor, f, args...; kwargs...)
     local_rank = MPI.Comm_rank(proc.comm)
-	tid = sch_handle().thunk_id.id 
+    tid = sch_handle().thunk_id.id 
     if local_rank == proc.rank || f === move!
-        res = execute!(proc.innerProc, f, args...; kwargs...)
+        result = execute!(proc.innerProc, f, args...; kwargs...)
+        return tochunk(result, proc, memory_space(proc))
     else
-		res = nothing
+        @warn "FIXME: Kwargs" maxlog=1
+        # FIXME: If we get a bad result (something non-concrete, or Union{}),
+        # we should bcast the actual type
+        T = Base._return_type(f, Tuple{typeof.(args)...})
+        return tochunk(nothing, proc, memory_space(proc); type=T)
     end
-    return tochunk(res, proc, memory_space(proc))
 end
 
 accelerate!(::Val{:mpi}) = accelerate!(MPIAcceleration())
@@ -402,14 +406,15 @@ function distribute(A::Union{AbstractArray{T,N}, Nothing}, dist::Blocks{N}; comm
     rnk = MPI.Comm_rank(comm)
     isroot = rnk == root
     csz = MPI.Comm_size(comm)
-    d = MPI.bcast(domain(A), comm, root=root)
+    d = MPI.bcast(domain(A), comm; root)
     sd = partition(dist, d)
-    type = MPI.bcast(eltype(A), comm, root=root)
+    type = MPI.bcast(eltype(A), comm; root)
     # TODO: Make better load balancing
     cs = Array{Any}(undef, size(sd))
     if prod(size(sd)) < csz
         @warn "Number of chunks is less than number of ranks, performance may be suboptimal"
     end
+    AT = MPI.bcast(typeof(A), comm; root)
     if isroot
         dst = 0
         for (idx, part) in enumerate(sd)
@@ -422,15 +427,15 @@ function distribute(A::Union{AbstractArray{T,N}, Nothing}, dist::Blocks{N}; comm
             end
             p = MPIOSProc(comm, dst)
             s = first(memory_spaces(p))
-            cs[idx] = tochunk(data, p, s)
+            cs[idx] = tochunk(data, p, s; type=AT)
             dst += 1
             if dst == csz
                 dst = 0
             end
         end
-        println("Sent all chunks")
+        Core.print("[$rnk] Sent all chunks\n")
     else
-        dst = 0 
+        dst = 0
         for (idx, part) in enumerate(sd)
             data = nothing
             if rnk == dst
@@ -439,12 +444,12 @@ function distribute(A::Union{AbstractArray{T,N}, Nothing}, dist::Blocks{N}; comm
             end
             p = MPIOSProc(comm, dst)
             s = first(memory_spaces(p))
-            cs[idx] = tochunk(data, p, s)
+            cs[idx] = tochunk(data, p, s; type=AT)
             dst += 1
             if dst == csz
                 dst = 0
             end
-            println("Received chunk $idx")
+            Core.print("[$rnk] Received chunk $idx\n")
             #MPI.Scatterv!(nothing, data, comm; root=root)
         end
     end
