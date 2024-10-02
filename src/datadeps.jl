@@ -410,17 +410,18 @@ function remotecall_endpoint(a::Dagger.MPIAcceleration, f, w, from_proc, to_proc
             if loc_rank == to_proc.rank
                 data_chunk = Dagger.recv_yield(orig_space.rank, tag, a.comm)
                 data_chunk = move(to_proc, data_chunk)
-                data_chunk = tochunk(data_chunk, dest_space)
+                data_chunk = tochunk(data_chunk, to_proc, dest_space)
             elseif loc_rank == from_proc.rank
                 data_buf = move(from_proc, data)
                 Dagger.send_yield(data_buf, to_proc.comm, to_proc.rank, tag)
-                data_chunk = tochunk(data_buf, dest_space)
+                data_chunk = tochunk(data_buf, to_proc, dest_space)
             else
-                data_chunk = tochunk(nothing, dest_space)
+                T = move_type(from_proc, to_proc, chunktype(data))
+                data_chunk = tochunk(nothing, to_proc, dest_space; type=T)
             end
         else
             data_chunk = move(from_proc, data)
-            data_chunk = tochunk(data, dest_space)
+            data_chunk = tochunk(data, to_proc, dest_space)
         end
         return data_chunk
     end
@@ -443,7 +444,7 @@ function generate_slot!(state::DataDepsState, dest_space, data, task)
     dest_space_args = get!(IdDict{Any,Any}, state.remote_args, dest_space)
     w = only(unique(map(get_parent, collect(processors(dest_space))))) 
     if orig_space == dest_space
-        data_chunk = tochunk(data, from_proc)
+        data_chunk = tochunk(data, from_proc, dest_space)
         dest_space_args[data] = data_chunk
         @assert memory_space(data_chunk) == orig_space
         @assert processor(data_chunk) in processors(dest_space) || data isa Chunk && (processor(data) isa Dagger.OSProc || processor(data) isa Dagger.MPIOSProc)
@@ -453,7 +454,7 @@ function generate_slot!(state::DataDepsState, dest_space, data, task)
         timespan_start(ctx, :move, (;thunk_id=0, id, position=0, processor=to_proc), (;f=nothing, data))
         dest_space_args[data] = remotecall_trampoline(w, from_proc, to_proc, orig_space, dest_space, data, task) do from_proc, to_proc, data
             data_converted = move(from_proc, to_proc, data)
-            data_chunk = tochunk(data_converted, to_proc)
+            data_chunk = tochunk(data_converted, to_proc, dest_space)
             @assert memory_space(data_converted) == memory_space(data_chunk) "space mismatch! $(memory_space(data_converted)) != $(memory_space(data_chunk)) ($(typeof(data_converted)) vs. $(typeof(data_chunk))), spaces ($orig_space -> $dest_space)"
             return data_chunk
         end
@@ -705,7 +706,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         our_procs = filter(proc->proc in all_procs, collect(processors(our_space)))
         our_scope = UnionScope(map(ExactScope, our_procs)...)
 
-        #may be wrong
+        # FIXME: May not be correct to move this under uniformity
         spec.f = move(default_processor(), our_proc, spec.f)
         @dagdebug nothing :spawn_datadeps "($(repr(spec.f))) Scheduling: $our_proc ($our_space)"
 

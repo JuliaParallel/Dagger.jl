@@ -235,11 +235,18 @@ will be inspected to determine if it's safe to serialize; if so, the default
 MemPool storage device will be used; if not, then a `MemPool.CPURAMDevice` will
 be used.
 
+`type` can be specified manually to force the type to be `Chunk{type}`.
+
 All other kwargs are passed directly to `MemPool.poolset`.
 """
 
-tochunk(x::X, proc::P, space::M; persist=false, cache=false, device=nothing, kwargs...) where {X,P<:Processor,M<:MemorySpace} = tochunk(x, proc, AnyScope(), space; persist, cache, device, kwargs...)
-function tochunk(x::X, proc::P, scope::S, space::M; persist=false, cache=false, device=nothing, kwargs...) where {X,P<:Processor,S,M<:MemorySpace}
+tochunk(x::X, proc::P, space::M; kwargs...) where {X,P<:Processor,M<:MemorySpace} =
+    tochunk(x, proc, space, AnyScope(); kwargs...)
+function tochunk(x::X, proc::P, space::M, scope::S; persist=false, cache=false, device=nothing, type=X, kwargs...) where {X,P<:Processor,S,M<:MemorySpace}
+    if x isa Chunk
+        check_proc_space(x, proc, space)
+        return x
+    end
     if device === nothing
         device = if Sch.walk_storage_safe(x)
             MemPool.GLOBAL_DEVICE[]
@@ -248,10 +255,10 @@ function tochunk(x::X, proc::P, scope::S, space::M; persist=false, cache=false, 
         end
     end
     ref = tochunk_pset(x, space; device, kwargs...)
-    Chunk{X,typeof(ref),P,S,typeof(space)}(X, domain(x), ref, proc, scope, space, persist)
+    return Chunk{type,typeof(ref),P,S,typeof(space)}(type, domain(x), ref, proc, scope, space, persist)
 end
 
-function tochunk(x::X, proc::P, scope::S; persist=false, cache=false, device=nothing, kwargs...) where {X,P<:Processor,S}
+function tochunk(x::X, proc::P, scope::S; persist=false, cache=false, device=nothing, type=X, kwargs...) where {X,P<:Processor,S}
     if device === nothing
         device = if Sch.walk_storage_safe(x)
             MemPool.GLOBAL_DEVICE[]
@@ -260,11 +267,14 @@ function tochunk(x::X, proc::P, scope::S; persist=false, cache=false, device=not
         end
     end
     space = default_memory_space(current_acceleration(), x)
+    if x isa Chunk
+        check_proc_space(x, proc, space)
+        return x
+    end
     ref = tochunk_pset(x, space; device, kwargs...)
-    Chunk{X,typeof(ref),P,S,typeof(space)}(X, domain(x), ref, proc, scope, space, persist)
+    return Chunk{type,typeof(ref),P,S,typeof(space)}(type, domain(x), ref, proc, scope, space, persist)
 end
-tochunk(x, procOrSpace; kwargs...) = tochunk(x, procOrSpace, AnyScope(); kwargs...)
-function tochunk(x::X, space::M, scope::S; persist=false, cache=false, device=nothing, kwargs...) where {X,M<:MemorySpace,S} 
+function tochunk(x::X, space::M, scope::S; persist=false, cache=false, device=nothing, type=X, kwargs...) where {X,M<:MemorySpace,S}
     if device === nothing
         device = if Sch.walk_storage_safe(x)
             MemPool.GLOBAL_DEVICE[]
@@ -273,12 +283,25 @@ function tochunk(x::X, space::M, scope::S; persist=false, cache=false, device=no
         end
     end
     proc = default_processor(current_acceleration(), x)
+    if x isa Chunk
+        check_proc_space(x, proc, space)
+        return x
+    end
     ref = tochunk_pset(x, space; device, kwargs...)
-    Chunk{X,typeof(ref),typeof(proc),S,M}(X, domain(x), ref, proc, scope, space, persist)
+    return Chunk{type,typeof(ref),typeof(proc),S,M}(type, domain(x), ref, proc, scope, space, persist)
 end
+tochunk(x, procOrSpace; kwargs...) = tochunk(x, procOrSpace, AnyScope(); kwargs...)
 tochunk(x; kwargs...) = tochunk(x, default_memory_space(current_acceleration(), x), AnyScope(); kwargs...) 
-tochunk(x::Union{Chunk, Thunk}, P::Processor) = x
-tochunk(x::Union{Chunk, Thunk}, args...; kwargs...) = x
+
+check_proc_space(x, proc, space) = nothing
+function check_proc_space(x::Chunk, proc, space)
+    if x.space !== space
+        throw(ArgumentError("Memory space mismatch: Chunk=$(x.space) != Requested=$space"))
+    end
+end
+function check_proc_space(x::Thunk, proc, space)
+    # FIXME: Validate
+end
 
 tochunk_pset(x, space::MemorySpace; device=nothing, kwargs...) = poolset(x; device, kwargs...)
 
