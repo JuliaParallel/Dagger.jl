@@ -858,7 +858,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         # in the correct order
 
         # First, find the latest owners of each live ainfo
-        arg_writes = IdDict{Any,Vector{Tuple{AbstractAliasing,<:Any,MemorySpace}}}()
+        arg_writes = IdDict{Any,Vector{Tuple{AbstractAliasing,<:Any,MemorySpace,DTask}}}()
         for (task, taskdeps) in state.dependencies
             for (_, writedep, ainfo, dep_mod, arg) in taskdeps
                 writedep || continue
@@ -872,7 +872,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 end
 
                 # Get the set of writers
-                ainfo_writes = get!(Vector{Tuple{AbstractAliasing,<:Any,MemorySpace}}, arg_writes, arg)
+                ainfo_writes = get!(Vector{Tuple{AbstractAliasing,<:Any,MemorySpace,DTask}}, arg_writes, arg)
 
                 #= FIXME: If we fully overlap any writer, evict them
                 idxs = findall(ainfo_write->overlaps_all(ainfo, ainfo_write[1]), ainfo_writes)
@@ -880,7 +880,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 =#
 
                 # Make ourselves the latest writer
-                push!(ainfo_writes, (ainfo, dep_mod, astate.data_locality[ainfo]))
+                push!(ainfo_writes, (ainfo, dep_mod, astate.data_locality[ainfo], task))
             end
         end
 
@@ -892,7 +892,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 # FIXME: Remove me
                 deleteat!(ainfo_writes, 1:length(ainfo_writes)-1)
             end
-            for (ainfo, dep_mod, data_remote_space) in ainfo_writes
+            for (ainfo, dep_mod, data_remote_space, task) in ainfo_writes
                 # Is the source of truth elsewhere?
                 data_local_space = astate.data_origin[ainfo]
                 if data_local_space != data_remote_space
