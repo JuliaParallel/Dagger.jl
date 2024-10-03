@@ -52,26 +52,30 @@ task_processor() = get_tls().processor
 @deprecate(thunk_processor(), task_processor())
 
 """
-    task_cancelled() -> Bool
+    task_cancelled(; must_force::Bool=false) -> Bool
 
 Returns `true` if the current [`DTask`](@ref) has been cancelled, else `false`.
+If `must_force=true`, then only return `true` if the cancellation was forced.
 """
-task_cancelled() = is_cancelled(get_tls().cancel_token)
+task_cancelled(; must_force::Bool=false) =
+    is_cancelled(get_tls().cancel_token; must_force)
 
 """
-    task_may_cancel!()
+    task_may_cancel!(; must_force::Bool=false)
 
 Throws an `InterruptException` if the current [`DTask`](@ref) has been cancelled.
+If `must_force=true`, then only throw if the cancellation was forced.
 """
-function task_may_cancel!()
-    if task_cancelled()
+function task_may_cancel!(;must_force::Bool=false)
+    if task_cancelled(;must_force)
         throw(InterruptException())
     end
 end
 
 """
-    task_cancel!()
+    task_cancel!(; graceful::Bool=true)
 
-Cancels the current [`DTask`](@ref).
+Cancels the current [`DTask`](@ref). If `graceful=true`, then the task will be
+cancelled gracefully, otherwise it will be forced.
 """
-task_cancel!() = cancel!(get_tls().cancel_token)
+task_cancel!(; graceful::Bool=true) = cancel!(get_tls().cancel_token; graceful)
