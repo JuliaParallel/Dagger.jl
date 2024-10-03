@@ -1,16 +1,29 @@
 # DTask-level cancellation
 
-struct CancelToken
-    cancelled::Base.RefValue{Bool}
+mutable struct CancelToken
+    @atomic cancelled::Bool
+    @atomic graceful::Bool
     event::Base.Event
 end
-CancelToken() = CancelToken(Ref(false), Base.Event())
-function cancel!(token::CancelToken)
-    token.cancelled[] = true
+CancelToken() = CancelToken(false, false, Base.Event())
+function cancel!(token::CancelToken; graceful::Bool=true)
+    if !graceful
+        @atomic token.graceful = false
+    end
+    @atomic token.cancelled = true
     notify(token.event)
     return
 end
-is_cancelled(token::CancelToken) = token.cancelled[]
+function is_cancelled(token::CancelToken; must_force::Bool=false)
+    if token.cancelled[]
+        if must_force && token.graceful[]
+            # If we're only responding to forced cancellation, ignore graceful cancellations
+            return false
+        end
+        return true
+    end
+    return false
+end
 Base.wait(token::CancelToken) = wait(token.event)
 # TODO: Enable this for safety
 #Serialization.serialize(io::AbstractSerializer, ::CancelToken) =
@@ -128,7 +141,7 @@ function _cancel!(state, tid, force, halt_sch)
                                 push!(istate.cancelled, tid)
                                 to_proc = istate.proc
                                 put!(istate.return_queue, (myid(), to_proc, tid, (InterruptException(), nothing)))
-                                cancel!(istate.cancel_tokens[tid])
+                                cancel!(istate.cancel_tokens[tid]; graceful=false)
                             end
                         end
                     end
