@@ -96,7 +96,7 @@ function _cancel!(state, tid, force, halt_sch)
     for task in state.ready
         tid !== nothing && task.id != tid && continue
         @dagdebug tid :cancel "Cancelling ready task"
-        state.cache[task] = InterruptException()
+        state.cache[task] = DTaskFailedException(task, task, InterruptException())
         state.errored[task] = true
         Sch.set_failed!(state, task)
     end
@@ -106,7 +106,7 @@ function _cancel!(state, tid, force, halt_sch)
     for task in keys(state.waiting)
         tid !== nothing && task.id != tid && continue
         @dagdebug tid :cancel "Cancelling waiting task"
-        state.cache[task] = InterruptException()
+        state.cache[task] = DTaskFailedException(task, task, InterruptException())
         state.errored[task] = true
         Sch.set_failed!(state, task)
     end
