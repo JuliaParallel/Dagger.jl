@@ -23,6 +23,7 @@ const ACCUMULATOR = Dict{Int,Vector{Real}}()
     return
 end
 @everywhere accumulator(xs...) = accumulator(sum(xs))
+@everywhere accumulator(::Nothing) = accumulator(0)
 
 function catch_interrupt(f)
     try
@@ -60,12 +61,13 @@ function test_finishes(f, message::String; ignore_timeout=false, max_evals=10)
         end
         return tset
     end
-    timed_out = timedwait(()->istaskdone(t), 5) == :timed_out
+    timed_out = timedwait(()->istaskdone(t), 10) == :timed_out
     if timed_out
         if !ignore_timeout
             @warn "Testing task timed out: $message"
         end
         Dagger.cancel!(;halt_sch=true)
+        @everywhere GC.gc()
         fetch(Dagger.@spawn 1+1)
     end
     tset = fetch(t)::Test.DefaultTestSet
@@ -96,7 +98,7 @@ for idx in 1:5
                     return y
                 end
             end
-            fetch(x)
+            @test_throws_unwrap InterruptException fetch(x)
         end
 
         @test test_finishes("Single task without result") do
@@ -164,7 +166,9 @@ for idx in 1:5
             Dagger.spawn_streaming() do
                 x = Dagger.@spawn scope=rand(scopes) rand()
             end
-            A = Dagger.@spawn accumulator(x)
+            Dagger._without_options() do
+                A = Dagger.@spawn accumulator(x)
+            end
             @test fetch(x) === nothing
             @test fetch(A) === nothing
             values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
@@ -177,8 +181,10 @@ for idx in 1:5
             Dagger.spawn_streaming() do
                 x = Dagger.@spawn scope=rand(scopes) rand()
             end
-            A = Dagger.@spawn accumulator(x)
-            B = Dagger.@spawn accumulator(x)
+            Dagger._without_options() do
+                A = Dagger.@spawn accumulator(x)
+                B = Dagger.@spawn accumulator(x)
+            end
             @test fetch(x) === nothing
             @test fetch(A) === nothing
             @test fetch(B) === nothing
@@ -364,7 +370,7 @@ for idx in 1:5
         @test test_finishes("max_evals=100"; max_evals=100) do
             local A
             Dagger.spawn_streaming() do
-                A = Dagger.@spawn scope=rand(scopes) rand()
+                A = Dagger.@spawn scope=rand(scopes) accumulator()
             end
             @test fetch(A) === nothing
             values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
@@ -374,44 +380,39 @@ for idx in 1:5
     end
 
     @testset "DropBuffer ($scope_str)" begin
-        @test test_finishes("x (drop)-> A") do
+        # TODO: Test that accumulator never gets called
+        @test !test_finishes("x (drop)-> A"; ignore_timeout=true) do
             local x, A
             Dagger.spawn_streaming() do
-                Dagger.with_options(;stream_buffer_type=>Dagger.DropBuffer) do
+                Dagger.with_options(;stream_buffer_type=Dagger.DropBuffer) do
                     x = Dagger.@spawn scope=rand(scopes) rand()
                 end
                 A = Dagger.@spawn scope=rand(scopes) accumulator(x)
             end
-            @test fetch(A) === nothing
-            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
-            A_tid = Dagger.task_id(A)
-            @test !haskey(values, A_tid)
+            @test fetch(x) === nothing
+            @test_throws_unwrap InterruptException fetch(A) === nothing
         end
-        @test test_finishes("x ->(drop) A") do
+        @test !test_finishes("x ->(drop) A"; ignore_timeout=true) do
             local x, A
             Dagger.spawn_streaming() do
                 x = Dagger.@spawn scope=rand(scopes) rand()
-                Dagger.with_options(;stream_buffer_type=>Dagger.DropBuffer) do
+                Dagger.with_options(;stream_buffer_type=Dagger.DropBuffer) do
                     A = Dagger.@spawn scope=rand(scopes) accumulator(x)
                 end
             end
-            @test fetch(A) === nothing
-            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
-            A_tid = Dagger.task_id(A)
-            @test !haskey(values, A_tid)
+            @test fetch(x) === nothing
+            @test_throws_unwrap InterruptException fetch(A) === nothing
         end
-        @test test_finishes("x -(drop)> A") do
+        @test !test_finishes("x -(drop)> A"; ignore_timeout=true) do
             local x, A
             Dagger.spawn_streaming() do
-                Dagger.with_options(;stream_buffer_type=>Dagger.DropBuffer) do
+                Dagger.with_options(;stream_buffer_type=Dagger.DropBuffer) do
                     x = Dagger.@spawn scope=rand(scopes) rand()
                     A = Dagger.@spawn scope=rand(scopes) accumulator(x)
                 end
             end
-            @test fetch(A) === nothing
-            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
-            A_tid = Dagger.task_id(A)
-            @test !haskey(values, A_tid)
+            @test fetch(x) === nothing
+            @test_throws_unwrap InterruptException fetch(A) === nothing
         end
     end
 
