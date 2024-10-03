@@ -17,7 +17,7 @@ struct SchedulerHandle
 end
 
 "Gets the scheduler handle for the currently-executing thunk."
-sch_handle() = task_local_storage(:_dagger_sch_handle)::SchedulerHandle
+sch_handle() = Dagger.get_tls().sch_handle::SchedulerHandle
 
 "Thrown when the scheduler halts before finishing processing the DAG."
 struct SchedulerHaltedException <: Exception end

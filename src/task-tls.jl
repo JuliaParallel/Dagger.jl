@@ -1,41 +1,81 @@
 # In-Thunk Helpers
 
-"""
-    task_processor()
+mutable struct DTaskTLS
+    processor::Processor
+    sch_uid::UInt
+    sch_handle::Any # FIXME: SchedulerHandle
+    task_spec::Vector{Any} # FIXME: TaskSpec
+    cancel_token::CancelToken
+end
 
-Get the current processor executing the current Dagger task.
-"""
-task_processor() = task_local_storage(:_dagger_processor)::Processor
-@deprecate thunk_processor() task_processor()
+const DTASK_TLS = TaskLocalValue{Union{DTaskTLS,Nothing}}(()->nothing)
 
-"""
-    in_task()
-
-Returns `true` if currently executing in a [`DTask`](@ref), else `false`.
-"""
-in_task() = haskey(task_local_storage(), :_dagger_sch_uid)
-@deprecate in_thunk() in_task()
+Base.copy(tls::DTaskTLS) = DTaskTLS(tls.processor, tls.sch_uid, tls.sch_handle, tls.task_spec, tls.cancel_token)
 
 """
-    get_tls()
+    get_tls() -> DTaskTLS
 
-Gets all Dagger TLS variable as a `NamedTuple`.
+Gets all Dagger TLS variable as a `DTaskTLS`.
 """
-get_tls() = (
-    sch_uid=task_local_storage(:_dagger_sch_uid),
-    sch_handle=task_local_storage(:_dagger_sch_handle),
-    processor=task_processor(),
-    task_spec=task_local_storage(:_dagger_task_spec),
-)
+get_tls() = DTASK_TLS[]::DTaskTLS
 
 """
     set_tls!(tls)
 
-Sets all Dagger TLS variables from the `NamedTuple` `tls`.
+Sets all Dagger TLS variables from `tls`, which may be a `DTaskTLS` or a `NamedTuple`.
 """
 function set_tls!(tls)
-    task_local_storage(:_dagger_sch_uid, tls.sch_uid)
-    task_local_storage(:_dagger_sch_handle, tls.sch_handle)
-    task_local_storage(:_dagger_processor, tls.processor)
-    task_local_storage(:_dagger_task_spec, tls.task_spec)
+    DTASK_TLS[] = DTaskTLS(tls.processor, tls.sch_uid, tls.sch_handle, tls.task_spec, tls.cancel_token)
 end
+
+"""
+    in_task() -> Bool
+
+Returns `true` if currently executing in a [`DTask`](@ref), else `false`.
+"""
+in_task() = DTASK_TLS[] !== nothing
+@deprecate(in_thunk(), in_task())
+
+"""
+    task_id() -> Int
+
+Returns the ID of the current [`DTask`](@ref).
+"""
+task_id() = get_tls().sch_handle.thunk_id.id
+
+"""
+    task_processor() -> Processor
+
+Get the current processor executing the current [`DTask`](@ref).
+"""
+task_processor() = get_tls().processor
+@deprecate(thunk_processor(), task_processor())
+
+"""
+    task_cancelled(; must_force::Bool=false) -> Bool
+
+Returns `true` if the current [`DTask`](@ref) has been cancelled, else `false`.
+If `must_force=true`, then only return `true` if the cancellation was forced.
+"""
+task_cancelled(; must_force::Bool=false) =
+    is_cancelled(get_tls().cancel_token; must_force)
+
+"""
+    task_may_cancel!(; must_force::Bool=false)
+
+Throws an `InterruptException` if the current [`DTask`](@ref) has been cancelled.
+If `must_force=true`, then only throw if the cancellation was forced.
+"""
+function task_may_cancel!(;must_force::Bool=false)
+    if task_cancelled(;must_force)
+        throw(InterruptException())
+    end
+end
+
+"""
+    task_cancel!(; graceful::Bool=true)
+
+Cancels the current [`DTask`](@ref). If `graceful=true`, then the task will be
+cancelled gracefully, otherwise it will be forced.
+"""
+task_cancel!(; graceful::Bool=true) = cancel!(get_tls().cancel_token; graceful)

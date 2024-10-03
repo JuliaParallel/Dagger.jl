@@ -1170,6 +1170,7 @@ struct ProcessorInternalState
     proc_occupancy::Base.RefValue{UInt32}
     time_pressure::Base.RefValue{UInt64}
     cancelled::Set{Int}
+    cancel_tokens::Dict{Int,Dagger.CancelToken}
     done::Base.RefValue{Bool}
 end
 struct ProcessorState
@@ -1189,7 +1190,7 @@ function proc_states(f::Base.Callable, uid::UInt64)
     end
 end
 proc_states(f::Base.Callable) =
-    proc_states(f, task_local_storage(:_dagger_sch_uid)::UInt64)
+    proc_states(f, Dagger.get_tls().sch_uid)
 
 task_tid_for_processor(::Processor) = nothing
 task_tid_for_processor(proc::Dagger.ThreadProc) = proc.tid
@@ -1318,7 +1319,14 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
 
             # Execute the task and return its result
             t = @task begin
+                # Set up cancellation
+                cancel_token = Dagger.CancelToken()
+                Dagger.DTASK_CANCEL_TOKEN[] = cancel_token
+                lock(istate.queue) do _
+                    istate.cancel_tokens[thunk_id] = cancel_token
+                end
                 was_cancelled = false
+
                 result = try
                     do_task(to_proc, task)
                 catch err
@@ -1335,6 +1343,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                             # Task was cancelled, so occupancy and pressure are
                             # already reduced
                             pop!(istate.cancelled, thunk_id)
+                            delete!(istate.cancel_tokens, thunk_id)
                             was_cancelled = true
                         end
                     end
@@ -1352,6 +1361,9 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                     else
                         rethrow(err)
                     end
+                finally
+                    # Ensure that any spawned tasks get cleaned up
+                    Dagger.cancel!(cancel_token)
                 end
             end
             lock(istate.queue) do _
@@ -1401,6 +1413,7 @@ function do_tasks(to_proc, return_queue, tasks)
                                             Dict{Int,Vector{Any}}(),
                                             Ref(UInt32(0)), Ref(UInt64(0)),
                                             Set{Int}(),
+                                            Dict{Int,Dagger.CancelToken}(),
                                             Ref(false))
             runner = start_processor_runner!(istate, uid, return_queue)
             @static if VERSION < v"1.9"
@@ -1640,6 +1653,7 @@ function do_task(to_proc, task_desc)
             sch_handle,
             processor=to_proc,
             task_spec=task_desc,
+            cancel_token=Dagger.DTASK_CANCEL_TOKEN[],
         ))
 
         res = Dagger.with_options(propagated) do
