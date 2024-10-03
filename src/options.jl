@@ -20,6 +20,12 @@ function with_options(f, options::NamedTuple)
 end
 with_options(f; options...) = with_options(f, NamedTuple(options))
 
+function _without_options(f)
+    with(options_context => NamedTuple()) do
+        f()
+    end
+end
+
 """
     get_options(key::Symbol, default) -> Any
     get_options(key::Symbol) -> Any
