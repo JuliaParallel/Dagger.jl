@@ -425,12 +425,14 @@ function distribute(A::Union{AbstractArray{T,N}, Nothing}, dist::Blocks{N}; comm
             else
                 data = A[part]
             end
-            p = MPIOSProc(comm, dst)
-            s = first(memory_spaces(p))
-            cs[idx] = tochunk(data, p, s; type=AT)
-            dst += 1
-            if dst == csz
-                dst = 0
+            with(MPI_UID=>Dagger.eager_next_id()) do
+                p = MPIOSProc(comm, dst)
+                s = first(memory_spaces(p))
+                cs[idx] = tochunk(data, p, s; type=AT)
+                dst += 1
+                if dst == csz
+                    dst = 0
+                end
             end
         end
         Core.print("[$rnk] Sent all chunks\n")
@@ -442,14 +444,15 @@ function distribute(A::Union{AbstractArray{T,N}, Nothing}, dist::Blocks{N}; comm
                 h = abs(Base.unsafe_trunc(Int32, hash(part, UInt(0))))
                 data = recv_yield(root, h, comm)
             end
-            p = MPIOSProc(comm, dst)
-            s = first(memory_spaces(p))
-            cs[idx] = tochunk(data, p, s; type=AT)
-            dst += 1
-            if dst == csz
-                dst = 0
+            with(MPI_UID=>Dagger.eager_next_id()) do
+                p = MPIOSProc(comm, dst)
+                s = first(memory_spaces(p))
+                cs[idx] = tochunk(data, p, s; type=AT)
+                dst += 1
+                if dst == csz
+                    dst = 0
+                end
             end
-            Core.print("[$rnk] Received chunk $idx\n")
             #MPI.Scatterv!(nothing, data, comm; root=root)
         end
     end
