@@ -9,3 +9,9 @@ TimespanLogging = "a526e669-04d3-4846-9525-c66122c55f63"
 
 [compat]
 Documenter = "1"
+julia = "1.11"
+
+[sources]
+Dagger = {path = ".."}
+DaggerWebDash = {path = "../lib/DaggerWebDash"}
+TimespanLogging = {path = "../lib/TimespanLogging"}
