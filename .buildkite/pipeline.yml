@@ -5,7 +5,8 @@
     sandbox_capable: "true"
     os: linux
     arch: x86_64
-  command: "julia --project -e 'using Pkg; Pkg.develop(;path=\"lib/TimespanLogging\")'"
+  command: "julia --project -e 'using Pkg; Pkg.develop(;path=\"lib/TimespanLogging\"); Pkg.add(; url=\"https://github.com/JuliaData/MemPool.jl\", rev=\"jps/migration-helper\")'"
+
 .bench: &bench
   if: build.message =~ /\[run benchmarks\]/
   agents:
@@ -14,6 +15,7 @@
     os: linux
     arch: x86_64
     num_cpus: 16
+
 steps:
   - label: Julia 1.9
     timeout_in_minutes: 90
@@ -25,6 +27,7 @@ steps:
           julia_args: "--threads=1"
       - JuliaCI/julia-coverage#v1:
           codecov: true
+
   - label: Julia 1.10
     timeout_in_minutes: 90
     <<: *test
@@ -35,6 +38,7 @@ steps:
           julia_args: "--threads=1"
       - JuliaCI/julia-coverage#v1:
           codecov: true
+
   - label: Julia nightly
     timeout_in_minutes: 90
     <<: *test
@@ -77,6 +81,7 @@ steps:
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: "julia -e 'using Pkg; Pkg.develop(;path=pwd()); Pkg.develop(;path=\"lib/TimespanLogging\"); Pkg.develop(;path=\"lib/DaggerWebDash\"); include(\"lib/DaggerWebDash/test/runtests.jl\")'"
+
   - label: Benchmarks
     timeout_in_minutes: 120
     <<: *bench
@@ -93,6 +98,7 @@ steps:
       BENCHMARK_SCALE: "5:5:50"
     artifacts:
       - benchmarks/result*
+
   - label: DTables.jl stability test
     timeout_in_minutes: 20
     plugins:

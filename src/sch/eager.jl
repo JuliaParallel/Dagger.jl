@@ -6,7 +6,7 @@ const EAGER_STATE = Ref{Union{ComputeState,Nothing}}(nothing)
 
 function eager_context()
     if EAGER_CONTEXT[] === nothing
-        EAGER_CONTEXT[] = Context([myid(),workers()...])
+        EAGER_CONTEXT[] = Context(procs())
     end
     return EAGER_CONTEXT[]
 end
@@ -124,6 +124,13 @@ function eager_cleanup(state, uid)
         # N.B. cache and errored expire automatically
         delete!(state.thunk_dict, tid)
     end
+    remotecall_wait(1, uid) do uid
+        lock(Dagger.EAGER_THUNK_STREAMS) do global_streams
+            if haskey(global_streams, uid)
+                delete!(global_streams, uid)
+            end
+        end
+    end
 end
 
 function _find_thunk(e::Dagger.DTask)
@@ -133,4 +140,7 @@ function _find_thunk(e::Dagger.DTask)
     lock(EAGER_STATE[].lock) do
         unwrap_weak_checked(EAGER_STATE[].thunk_dict[tid])
     end
+end
+Dagger.task_id(t::Dagger.DTask) = lock(EAGER_ID_MAP) do id_map
+    id_map[t.uid]
 end

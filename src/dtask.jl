@@ -40,6 +40,16 @@ Options(;options...) = Options((;options...))
 Options(options...) = Options((;options...))
 
 """
+    DTaskMetadata
+
+Represents some useful metadata pertaining to a `DTask`:
+- `return_type::Type` - The inferred return type of the task
+"""
+mutable struct DTaskMetadata
+    return_type::Type
+end
+
+"""
     DTask
 
 Returned from `Dagger.@spawn`/`Dagger.spawn` calls. Represents a task that is
@@ -50,9 +60,11 @@ more details.
 mutable struct DTask
     uid::UInt
     future::ThunkFuture
+    metadata::DTaskMetadata
     finalizer_ref::DRef
     thunk_ref::DRef
-    DTask(uid, future, finalizer_ref) = new(uid, future, finalizer_ref)
+
+    DTask(uid, future, metadata, finalizer_ref) = new(uid, future, metadata, finalizer_ref)
 end
 
 const EagerThunk = DTask
