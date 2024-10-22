@@ -1,5 +1,23 @@
 using MPI
 
+function check_uniform(value::Integer)
+    comm = MPI.COMM_WORLD
+    rank = MPI.Comm_rank(comm)
+    Core.print("[$rank] Starting check_uniform...\n")
+    all_min = MPI.Allreduce(value, MPI.Op(min, typeof(value)), comm)
+    all_max = MPI.Allreduce(value, MPI.Op(max, typeof(value)), comm)
+    Core.print("[$rank] Fetched min ($all_min)/max ($all_max) for check_uniform\n")
+    if all_min != all_max
+        if rank == 0
+            Core.print("Found non-uniform value!\n")
+        end
+        Core.print("[$rank] value=$value\n")
+        exit(1)
+    end
+    flush(stdout)
+    MPI.Barrier(comm)
+end
+
 MPIAcceleration() = MPIAcceleration(MPI.COMM_WORLD)
 
 #default_processor(accel::MPIAcceleration) = MPIOSProc(accel.comm)
@@ -57,6 +75,11 @@ function MPIOSProc()
 end
 #Sch.init_proc(state, proc::MPIOSProc, log_sink) = Sch.init_proc(state, OSProc(), log_sink)
 
+function check_uniform(proc::MPIOSProc)
+    check_uniform(hash(MPIOSProc))
+    check_uniform(proc.rank)
+end
+
 function memory_spaces(proc::MPIOSProc)
     children = get_processors(proc)
     spaces = Set{MemorySpace}()
@@ -97,6 +120,13 @@ struct MPIProcessor{P<:Processor} <: Processor
     rank::Int
 end
 
+function check_uniform(proc::MPIProcessor)
+    check_uniform(hash(MPIProcessor))
+    check_uniform(proc.rank)
+    # TODO: Not always valid (if pointer is embedded, say for GPUs)
+    check_uniform(hash(proc.innerProc))
+end
+
 Dagger.iscompatible_func(::MPIProcessor, opts, ::Any) = true
 Dagger.iscompatible_arg(::MPIProcessor, opts, ::Any) = true
 
@@ -126,7 +156,7 @@ end
 #TODO: use a lazy iterator
 function get_processors(proc::MPIClusterProc)
     children = Set{Processor}()
-    for i in 0:(MPI.Comm_size(proc.comm) -1)
+    for i in 0:(MPI.Comm_size(proc.comm)-1)
         for innerProc in MPIClusterProcChildren[proc.comm]
             push!(children, MPIProcessor(innerProc, proc.comm, i))
         end
@@ -138,6 +168,12 @@ struct MPIMemorySpace{S<:MemorySpace} <: MemorySpace
     innerSpace::S
     comm::MPI.Comm
     rank::Int
+end
+
+function check_uniform(space::MPIMemorySpace)
+    check_uniform(space.rank)
+    # TODO: Not always valid (if pointer is embedded, say for GPUs)
+    check_uniform(hash(space.innerSpace))
 end
 
 default_processor(space::MPIMemorySpace) = MPIOSProc(space.comm, space.rank)
@@ -182,6 +218,12 @@ struct MPIRefID
     id::Int
 end
 
+function check_uniform(ref::MPIRefID)
+    check_uniform(ref.tid)
+    check_uniform(ref.uid)
+    check_uniform(ref.id)
+end
+
 const MPIREF_TID = Dict{Int, Threads.Atomic{Int}}()
 const MPIREF_UID = Dict{Int, Threads.Atomic{Int}}()
 
@@ -191,6 +233,11 @@ mutable struct MPIRef
     size::Int
     innerRef::Union{DRef, Nothing}
     id::MPIRefID
+end
+
+function check_uniform(ref::MPIRef)
+    check_uniform(ref.rank)
+    check_uniform(ref.id)
 end
 
 move(from_proc::Processor, to_proc::Processor, x::MPIRef) = move(from_proc, to_proc, poolget(x.innerRef))
