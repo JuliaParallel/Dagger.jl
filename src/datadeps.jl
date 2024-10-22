@@ -398,23 +398,33 @@ function add_reader!(state::DataDepsState{DataDepsNonAliasingState}, arg, task, 
     push!(state.alias_state.args_readers[arg], task=>write_num)
 end
 
-remotecall_endpoint(a::Dagger.DistributedAcceleration, f, w, from_proc, to_proc, orig_space, dest_space, data, task) = remotecall_fetch(f, w.pid, from_proc, to_proc, data)
+function remotecall_endpoint(::Dagger.DistributedAcceleration, w, from_proc, to_proc, orig_space, dest_space, data, task)
+    return remotecall_fetch(w.pid, from_proc, to_proc, data) do from_proc, to_proc, data
+        data_converted = move(from_proc, to_proc, data)
+        data_chunk = tochunk(data_converted, to_proc, dest_space)
+        @assert memory_space(data_converted) == memory_space(data_chunk) "space mismatch! $(memory_space(data_converted)) != $(memory_space(data_chunk)) ($(typeof(data_converted)) vs. $(typeof(data_chunk))), spaces ($orig_space -> $dest_space)"
+        return data_chunk
+    end
+end
 
 const MPI_UID = ScopedValue{Int64}(0)
 
-function remotecall_endpoint(a::Dagger.MPIAcceleration, f, w, from_proc, to_proc, orig_space, dest_space, data, task)
-    loc_rank = MPI.Comm_rank(a.comm)
+function remotecall_endpoint(accel::Dagger.MPIAcceleration, w, from_proc, to_proc, orig_space, dest_space, data, task)
+    loc_rank = MPI.Comm_rank(accel.comm)
     with(MPI_UID=>task.uid) do
         if data isa Chunk
-            tag = abs(Base.unsafe_trunc(Int32, hash(data.handle.id, UInt(0))))
-            if loc_rank == to_proc.rank
-                data_chunk = Dagger.recv_yield(a.comm, orig_space.rank, tag)
-                data_chunk = move(to_proc, data_chunk)
-                data_chunk = tochunk(data_chunk, to_proc, dest_space)
+            tag = abs(Base.unsafe_trunc(Int32, hash(data.handle.id)))
+            if loc_rank == from_proc.rank == to_proc.rank
+                data_converted = move(to_proc, data)
+                data_chunk = tochunk(data_converted, to_proc, dest_space)
+            elseif loc_rank == to_proc.rank
+                data_moved = Dagger.recv_yield(accel.comm, orig_space.rank, tag)
+                data_converted = move(to_proc, data_moved)
+                data_chunk = tochunk(data_converted, to_proc, dest_space)
             elseif loc_rank == from_proc.rank
-                data_buf = move(from_proc, data)
-                Dagger.send_yield(data_buf, to_proc.comm, to_proc.rank, tag)
-                data_chunk = tochunk(data_buf, to_proc, dest_space)
+                data_moved = move(from_proc, data)
+                Dagger.send_yield(data_moved, accel.comm, to_proc.rank, tag)
+                data_chunk = tochunk(data_moved, to_proc, dest_space)
             else
                 T = move_type(from_proc, to_proc, chunktype(data))
                 data_chunk = tochunk(nothing, to_proc, dest_space; type=T)
@@ -427,9 +437,6 @@ function remotecall_endpoint(a::Dagger.MPIAcceleration, f, w, from_proc, to_proc
     end
 end
 
-function remotecall_trampoline(f, w, from_proc, to_proc, orig_space, dest_space, data, task)
-    return remotecall_endpoint(current_acceleration(), f, w, from_proc, to_proc, orig_space, dest_space, data, task)
-end
 # Make a copy of each piece of data on each worker
 # memory_space => {arg => copy_of_arg}
 function generate_slot!(state::DataDepsState, dest_space, data, task)
@@ -450,12 +457,7 @@ function generate_slot!(state::DataDepsState, dest_space, data, task)
         ctx = Sch.eager_context()
         id = rand(Int)
         timespan_start(ctx, :move, (;thunk_id=0, id, position=0, processor=to_proc), (;f=nothing, data))
-        dest_space_args[data] = remotecall_trampoline(w, from_proc, to_proc, orig_space, dest_space, data, task) do from_proc, to_proc, data
-            data_converted = move(from_proc, to_proc, data)
-            data_chunk = tochunk(data_converted, to_proc, dest_space)
-            @assert memory_space(data_converted) == memory_space(data_chunk) "space mismatch! $(memory_space(data_converted)) != $(memory_space(data_chunk)) ($(typeof(data_converted)) vs. $(typeof(data_chunk))), spaces ($orig_space -> $dest_space)"
-            return data_chunk
-        end
+        dest_space_args[data] = remotecall_endpoint(current_acceleration(), w, from_proc, to_proc, orig_space, dest_space, data, task)
         timespan_finish(ctx, :move, (;thunk_id=0, id, position=0, processor=to_proc), (;f=nothing, data=dest_space_args[data]))
     end
     return dest_space_args[data]
