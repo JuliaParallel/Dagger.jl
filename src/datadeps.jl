@@ -22,7 +22,7 @@ struct Deps{T,DT<:Tuple}
 end
 Deps(x, deps...) = Deps(x, deps)
 
-struct MPIAcceleration <: Acceleration 
+struct MPIAcceleration <: Acceleration
     comm::MPI.Comm
 end
 
@@ -408,7 +408,7 @@ function remotecall_endpoint(a::Dagger.MPIAcceleration, f, w, from_proc, to_proc
         if data isa Chunk
             tag = abs(Base.unsafe_trunc(Int32, hash(data.handle.id, UInt(0))))
             if loc_rank == to_proc.rank
-                data_chunk = Dagger.recv_yield(orig_space.rank, tag, a.comm)
+                data_chunk = Dagger.recv_yield(a.comm, orig_space.rank, tag)
                 data_chunk = move(to_proc, data_chunk)
                 data_chunk = tochunk(data_chunk, to_proc, dest_space)
             elseif loc_rank == from_proc.rank
@@ -420,8 +420,8 @@ function remotecall_endpoint(a::Dagger.MPIAcceleration, f, w, from_proc, to_proc
                 data_chunk = tochunk(nothing, to_proc, dest_space; type=T)
             end
         else
-            data_chunk = move(from_proc, data)
-            data_chunk = tochunk(data, to_proc, dest_space)
+            data_converted = move(from_proc, data)
+            data_chunk = tochunk(data_converted, to_proc, dest_space)
         end
         return data_chunk
     end
@@ -430,8 +430,6 @@ end
 function remotecall_trampoline(f, w, from_proc, to_proc, orig_space, dest_space, data, task)
     return remotecall_endpoint(current_acceleration(), f, w, from_proc, to_proc, orig_space, dest_space, data, task)
 end
-
-
 # Make a copy of each piece of data on each worker
 # memory_space => {arg => copy_of_arg}
 function generate_slot!(state::DataDepsState, dest_space, data, task)
@@ -442,7 +440,7 @@ function generate_slot!(state::DataDepsState, dest_space, data, task)
     to_proc = first(processors(dest_space))
     from_proc = first(processors(orig_space))
     dest_space_args = get!(IdDict{Any,Any}, state.remote_args, dest_space)
-    w = only(unique(map(get_parent, collect(processors(dest_space))))) 
+    w = only(unique(map(get_parent, collect(processors(dest_space)))))
     if orig_space == dest_space
         data_chunk = tochunk(data, from_proc, dest_space)
         dest_space_args[data] = data_chunk
