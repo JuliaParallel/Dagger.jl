@@ -229,7 +229,7 @@ function tochunk_pset(x, space::MPIMemorySpace; device=nothing, kwargs...)
     end
 end
 
-function recv_yield(src, tag, comm)
+function recv_yield(comm, src, tag)
     #@dagdebug nothing :mpi "[$(MPI.Comm_rank(comm))][$tag] Hit probable hang on recv \n"
     while true
         (got, msg, stat) = MPI.Improbe(src, tag, comm, MPI.Status)
@@ -251,10 +251,7 @@ function recv_yield(src, tag, comm)
         yield()
     end
 end
-#discuss this with julian
-WeakChunk(c::Chunk{T,H}) where {T,H<:MPIRef} = WeakChunk(c.handle.rank, c.handle.id.id, WeakRef(c))
-
-function send_yield(value, comm, dest, tag) 
+function send_yield(value, comm, dest, tag)
     #@dagdebug nothing :mpi "[$(MPI.Comm_rank(comm))][$tag] Hit probable hang while sending \n"
     req = MPI.isend(value, comm; dest, tag)
     while true
@@ -266,6 +263,9 @@ function send_yield(value, comm, dest, tag)
         yield()
     end
 end
+
+#discuss this with julian
+WeakChunk(c::Chunk{T,H}) where {T,H<:MPIRef} = WeakChunk(c.handle.rank, c.handle.id.id, WeakRef(c))
 
 function poolget(ref::MPIRef)
     @assert ref.rank == MPI.Comm_rank(ref.comm) "MPIRef rank mismatch"
@@ -286,7 +286,7 @@ function move!(dep_mod, dst::MPIMemorySpace, src::MPIMemorySpace, dstarg::Chunk,
             send_yield(poolget(srcarg.handle), dst.comm, dst.rank, h)
         end
         if local_rank == dst.rank
-            val = recv_yield(src.rank, h, src.comm)
+            val = recv_yield(src.comm, src.rank, h)
             move!(dep_mod, dst.innerSpace, src.innerSpace, poolget(dstarg.handle), val)
         end
     end
@@ -324,13 +324,13 @@ move(::MPIProcessor, ::MPIProcessor, x::Union{Function,Type}) = x
 move(::MPIProcessor, ::MPIProcessor, x::Chunk{<:Union{Function,Type}}) = poolget(x.handle)
 
 function move(src::MPIProcessor, dst::MPIProcessor, x::Chunk)
-    @assert src.rank == dst.rank "Unwraping not permited"
+    @assert src.rank == dst.rank "Unwrapping not permitted"
     if Sch.SCHED_MOVE[]
-        if dst.rank == MPI.Comm_rank(dst.comm) 
+        if dst.rank == MPI.Comm_rank(dst.comm)
             return poolget(x.handle)
         end
     else
-        @assert src.rank == MPI.Comm_rank(src.comm) "Unwraping not permited"
+        @assert src.rank == MPI.Comm_rank(src.comm) "Unwrapping not permitted"
         @assert src.rank == x.handle.rank == dst.rank
         return poolget(x.handle)
     end
@@ -442,7 +442,7 @@ function distribute(A::Union{AbstractArray{T,N}, Nothing}, dist::Blocks{N}; comm
             data = nothing
             if rnk == dst
                 h = abs(Base.unsafe_trunc(Int32, hash(part, UInt(0))))
-                data = recv_yield(root, h, comm)
+                data = recv_yield(comm, root, h)
             end
             with(MPI_UID=>Dagger.eager_next_id()) do
                 p = MPIOSProc(comm, dst)
@@ -500,7 +500,7 @@ function Base.collect(x::Dagger.DMatrix{T};
                 h = abs(Base.unsafe_trunc(Int32, hash(part, UInt(0))))
                 if dst != rank
                     print("[$rank] Waiting for chunk $idx from rank $dst with tag $h\n")
-                    data[part.indexes...] = recv_yield(dst, h, comm)
+                    data[part.indexes...] = recv_yield(comm, dst, h)
                 end
                 dst += 1
                 if dst == MPI.Comm_size(comm)
@@ -518,7 +518,7 @@ function Base.collect(x::Dagger.DMatrix{T};
                         localdata = fetch(x.chunks[idx])
                         data[part.indexes...] = localdata
                     else
-                        data[part.indexes...] = recv_yield(dst, h, comm)
+                        data[part.indexes...] = recv_yield(comm, dst, h)
                     end
                     dst += 1
                     if dst == MPI.Comm_size(comm)
