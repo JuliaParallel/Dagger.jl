@@ -250,9 +250,9 @@ function affinity(x::MPIRef)
     end
 end
 
-#TODO: partitioned scheduling with comm bifurcation
-function tochunk_pset(x, space::MPIMemorySpace; device=nothing, kwargs...)
-    local_rank = MPI.Comm_rank(space.comm)
+peek_ref_id() = get_ref_id(false)
+take_ref_id!() = get_ref_id(true)
+function get_ref_id(take::Bool)
     tid = 0
     uid = 0
     id = 0
@@ -260,15 +260,30 @@ function tochunk_pset(x, space::MPIMemorySpace; device=nothing, kwargs...)
         tid = sch_handle().thunk_id.id
         uid = 0
         counter = get!(MPIREF_TID, tid, Threads.Atomic{Int}(1))
-        id = Threads.atomic_add!(counter, 1)
+        id = if take
+            Threads.atomic_add!(counter, 1)
+        else
+            counter[]
+        end
     end
     if MPI_UID[] != 0
         tid = 0
         uid = MPI_UID[]
         counter = get!(MPIREF_UID, uid, Threads.Atomic{Int}(1))
-        id = Threads.atomic_add!(counter, 1)
+        id = if take
+            Threads.atomic_add!(counter, 1)
+        else
+            counter[]
+        end
     end
-    Mid = MPIRefID(tid, uid, id)
+    return MPIRefID(tid, uid, id)
+end
+
+#TODO: partitioned scheduling with comm bifurcation
+function tochunk_pset(x, space::MPIMemorySpace; device=nothing, kwargs...)
+    @assert space.comm == MPI.COMM_WORLD "$(space.comm) != $(MPI.COMM_WORLD)"
+    local_rank = MPI.Comm_rank(space.comm)
+    Mid = take_ref_id!()
     if local_rank != space.rank
         return MPIRef(space.comm, space.rank, 0, nothing, Mid)
     else
@@ -310,6 +325,14 @@ function send_yield(value, comm, dest, tag)
         yield()
     end
 end
+function bcast_send_yield(value, comm, root, tag)
+    sz = MPI.Comm_size(comm)
+    rank = MPI.Comm_rank(comm)
+    for other_rank in 0:(sz-1)
+        rank == other_rank && continue
+        send_yield(value, comm, other_rank, tag)
+    end
+end
 
 #discuss this with julian
 WeakChunk(c::Chunk{T,H}) where {T,H<:MPIRef} = WeakChunk(c.handle.rank, c.handle.id.id, WeakRef(c))
@@ -324,7 +347,7 @@ function move!(dep_mod, dst::MPIMemorySpace, src::MPIMemorySpace, dstarg::Chunk,
     @assert dstarg.handle.comm == srcarg.handle.comm "MPIRef comm mismatch" 
     @assert dstarg.handle.rank == dst.rank && srcarg.handle.rank == src.rank "MPIRef rank mismatch"
     local_rank = MPI.Comm_rank(srcarg.handle.comm)
-    h = abs(Base.unsafe_trunc(Int32, hash(dep_mod, hash(srcarg.handle.id, hash(dstarg.handle.id, UInt(0))))))
+    h = abs(Base.unsafe_trunc(Int32, hash(dep_mod, hash(srcarg.handle.id, hash(dstarg.handle.id)))))
     @dagdebug nothing :mpi "[$local_rank][$h] Moving from  $(src.rank)  to  $(dst.rank)\n"
     if src.rank == dst.rank == local_rank
         move!(dep_mod, dst.innerSpace, src.innerSpace, dstarg, srcarg)
@@ -386,16 +409,25 @@ end
 #FIXME:try to think of a better move! scheme
 function execute!(proc::MPIProcessor, f, args...; kwargs...)
     local_rank = MPI.Comm_rank(proc.comm)
-    tid = sch_handle().thunk_id.id 
+    tag = abs(Base.unsafe_trunc(Int32, hash(peek_ref_id())))
+    tid = sch_handle().thunk_id.id
     if local_rank == proc.rank || f === move!
         result = execute!(proc.innerProc, f, args...; kwargs...)
-        return tochunk(result, proc, memory_space(proc))
+        bcast_send_yield(typeof(result), proc.comm, proc.rank, tag)
+        space = memory_space(result)::MPIMemorySpace
+        bcast_send_yield(space.innerSpace, proc.comm, proc.rank, tag)
+        return tochunk(result, proc, space)
     else
-        @warn "FIXME: Kwargs" maxlog=1
-        # FIXME: If we get a bad result (something non-concrete, or Union{}),
+        T = recv_yield(proc.comm, proc.rank, tag)
+        innerSpace = recv_yield(proc.comm, proc.rank, tag)
+        space = MPIMemorySpace(innerSpace, proc.comm, proc.rank)
+        #= FIXME: If we get a bad result (something non-concrete, or Union{}),
         # we should bcast the actual type
+        @warn "FIXME: Kwargs" maxlog=1
         T = Base._return_type(f, Tuple{typeof.(args)...})
         return tochunk(nothing, proc, memory_space(proc); type=T)
+        =#
+        return tochunk(nothing, proc, space; type=T)
     end
 end
 
