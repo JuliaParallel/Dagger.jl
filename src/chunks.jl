@@ -266,11 +266,11 @@ function tochunk(x::X, proc::P, scope::S; persist=false, cache=false, device=not
             MemPool.CPURAMDevice()
         end
     end
-    space = default_memory_space(current_acceleration(), x)
     if x isa Chunk
-        check_proc_space(x, proc, space)
+        check_proc_space(x, proc, x.space)
         return x
     end
+    space = default_memory_space(current_acceleration(), x)
     ref = tochunk_pset(x, space; device, kwargs...)
     return Chunk{type,typeof(ref),P,S,typeof(space)}(type, domain(x), ref, proc, scope, space, persist)
 end
@@ -282,11 +282,11 @@ function tochunk(x::X, space::M, scope::S; persist=false, cache=false, device=no
             MemPool.CPURAMDevice()
         end
     end
-    proc = default_processor(current_acceleration(), x)
     if x isa Chunk
-        check_proc_space(x, proc, space)
+        check_proc_space(x, x.processor, space)
         return x
     end
+    proc = default_processor(current_acceleration(), x)
     ref = tochunk_pset(x, space; device, kwargs...)
     return Chunk{type,typeof(ref),typeof(proc),S,M}(type, domain(x), ref, proc, scope, space, persist)
 end
