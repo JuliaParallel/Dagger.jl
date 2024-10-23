@@ -25,27 +25,30 @@ steps:
           julia_args: "--threads=1"
       - JuliaCI/julia-coverage#v1:
           codecov: true
-  - label: Julia 1.10
+
+  - label: Julia 1
     timeout_in_minutes: 90
     <<: *test
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.10"
+          version: "1"
       - JuliaCI/julia-test#v1:
           julia_args: "--threads=1"
       - JuliaCI/julia-coverage#v1:
           codecov: true
+
   - label: Julia nightly
     timeout_in_minutes: 90
     <<: *test
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.10-nightly"
+          version: "nightly"
       - JuliaCI/julia-test#v1:
           julia_args: "--threads=1"
       - JuliaCI/julia-coverage#v1:
           codecov: true
-  - label: Julia 1.9 (macOS)
+
+  - label: Julia 1 (macOS)
     timeout_in_minutes: 90
     <<: *test
     agents:
@@ -54,35 +57,38 @@ steps:
       arch: x86_64
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.9"
+          version: "1"
       - JuliaCI/julia-test#v1:
           julia_args: "--threads=1"
       - JuliaCI/julia-coverage#v1:
           codecov: true
-  - label: Julia 1.9 - TimespanLogging
+
+  - label: Julia 1 - TimespanLogging
     timeout_in_minutes: 20
     <<: *test
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.9"
+          version: "1"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: "julia --project -e 'using Pkg; Pkg.instantiate(); Pkg.develop(;path=\"lib/TimespanLogging\"); Pkg.test(\"TimespanLogging\")'"
-  - label: Julia 1.9 - DaggerWebDash
+
+  - label: Julia 1 - DaggerWebDash
     timeout_in_minutes: 20
     <<: *test
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.9"
+          version: "1"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: "julia -e 'using Pkg; Pkg.develop(;path=pwd()); Pkg.develop(;path=\"lib/TimespanLogging\"); Pkg.develop(;path=\"lib/DaggerWebDash\"); include(\"lib/DaggerWebDash/test/runtests.jl\")'"
+
   - label: Benchmarks
     timeout_in_minutes: 120
     <<: *bench
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.9"
+          version: "1"
       - JuliaCI/julia-test#v1:
           run_tests: false
     command: "julia -e 'using Pkg; Pkg.add(\"BenchmarkTools\"); Pkg.develop(;path=pwd())'; JULIA_PROJECT=\"$PWD\" julia --project benchmarks/benchmark.jl"
@@ -93,11 +99,12 @@ steps:
       BENCHMARK_SCALE: "5:5:50"
     artifacts:
       - benchmarks/result*
+
   - label: DTables.jl stability test
     timeout_in_minutes: 20
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.9"
+          version: "1"
     env:
       JULIA_NUM_THREADS: "4"
     agents:
@@ -106,3 +113,6 @@ steps:
       os: linux
       arch: x86_64
     command: "git clone https://github.com/JuliaParallel/DTables.jl.git ; julia -t4 -e 'using Pkg; Pkg.activate(\"DTables.jl\"); Pkg.develop(;path=\".\"); Pkg.instantiate(); Pkg.test()'"
+
+# env:
+#   SECRET_CODECOV_TOKEN: ""
