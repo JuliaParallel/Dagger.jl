@@ -1,6 +1,11 @@
 using MPI
 
+const CHECK_UNIFORMITY = TaskLocalValue{Bool}(()->false)
+function check_uniformity!(check::Bool=true)
+    CHECK_UNIFORMITY[] = check
+end
 function check_uniform(value::Integer)
+    CHECK_UNIFORMITY[] || return
     comm = MPI.COMM_WORLD
     rank = MPI.Comm_rank(comm)
     Core.print("[$rank] Starting check_uniform...\n")
