@@ -1,4 +1,4 @@
-import Graphs: SimpleDiGraph, nv, add_edge!, add_vertex!
+import Graphs: SimpleDiGraph, add_edge!, add_vertex!, inneighbors, outneighbors, nv, ne
 
 export In, Out, InOut, Deps, spawn_datadeps
 
@@ -78,6 +78,107 @@ function enqueue!(queue::DataDepsTaskQueue, specs::Vector{Pair{DTaskSpec,DTask}}
     append!(queue.seen_tasks, specs)
 end
 
+struct DatadepsArgSpec
+    pos::Union{Int, Symbol}
+    value_type::Type
+    dep_mod::Any
+    ainfo::AbstractAliasing
+end
+struct DTaskDAGID{id} end
+struct DAGSpec
+    g::SimpleDiGraph{Int}
+    id_to_uid::Dict{Int, UInt}
+    uid_to_id::Dict{UInt, Int}
+    id_to_functype::Dict{Int, Type} # FIXME: DatadepsArgSpec
+    id_to_argtypes::Dict{Int, Vector{DatadepsArgSpec}}
+    DAGSpec() = new(SimpleDiGraph{Int}(),
+                    Dict{Int, UInt}(), Dict{UInt, Int}(),
+                    Dict{Int, Type}(),
+                    Dict{Int, Vector{DatadepsArgSpec}}())
+end
+function Base.push!(dspec::DAGSpec, tspec::DTaskSpec, task::DTask)
+    add_vertex!(dspec.g)
+    id = nv(dspec.g)
+
+    dspec.id_to_functype[id] = typeof(tspec.f)
+
+    dspec.id_to_argtypes[id] = DatadepsArgSpec[]
+    for (idx, (kwpos, arg)) in enumerate(tspec.args)
+        arg, deps = unwrap_inout(arg)
+        pos = kwpos isa Symbol ? kwpos : idx
+        for (dep_mod, readdep, writedep) in deps
+            if arg isa DTask
+                if arg.uid in keys(dspec.uid_to_id)
+                    # Within-DAG dependency
+                    arg_id = dspec.uid_to_id[arg.uid]
+                    push!(dspec.id_to_argtypes[arg_id], DatadepsArgSpec(pos, DTaskDAGID{arg_id}, dep_mod, UnknownAliasing()))
+                    add_edge!(dspec.g, arg_id, id)
+                    continue
+                end
+
+                # External DTask, so fetch this and track it as a raw value
+                arg = fetch(arg; raw=true)
+            end
+            ainfo = aliasing(arg, dep_mod)
+            push!(dspec.id_to_argtypes[id], DatadepsArgSpec(pos, typeof(arg), dep_mod, ainfo))
+        end
+    end
+
+    # FIXME: Also record some portion of options
+    # FIXME: Record syncdeps
+    dspec.id_to_uid[id] = task.uid
+    dspec.uid_to_id[task.uid] = id
+
+    return
+end
+function Base.:(==)(dspec1::DAGSpec, dspec2::DAGSpec)
+    # Are the graphs the same size?
+    nv(dspec1.g) == nv(dspec2.g) || return false
+    ne(dspec1.g) == ne(dspec2.g) || return false
+
+    for id in 1:nv(dspec1.g)
+        # Are all the vertices the same?
+        id in keys(dspec2.id_to_uid) || return false
+        id in keys(dspec2.id_to_functype) || return false
+        id in keys(dspec2.id_to_argtypes) || return false
+
+        # Are all the edges the same?
+        inneighbors(dspec1.g, id) == inneighbors(dspec2.g, id) || return false
+        outneighbors(dspec1.g, id) == outneighbors(dspec2.g, id) || return false
+
+        # Are function types the same?
+        dspec1.id_to_functype[id] === dspec2.id_to_functype[id] || return false
+
+        # Are argument types/relative dependencies the same?
+        for argspec1 in dspec1.id_to_argtypes[id]
+            # Is this argument position present in both?
+            argspec2_idx = findfirst(argspec2->argspec1.pos == argspec2.pos, dspec2.id_to_argtypes[id])
+            argspec2_idx === nothing && return false
+            argspec2 = dspec2.id_to_argtypes[id][argspec2_idx]
+
+            # Are the arguments the same?
+            argspec1.value_type === argspec2.value_type || return false
+            argspec1.dep_mod === argspec2.dep_mod || return false
+            if !equivalent_structure(argspec1.ainfo, argspec2.ainfo)
+                @show argspec1.ainfo argspec2.ainfo
+                return false
+            end
+        end
+    end
+
+    return true
+end
+
+struct DAGSpecSchedule
+    id_to_proc::Dict{Int, Processor}
+    DAGSpecSchedule() = new(Dict{Int, Processor}())
+end
+
+#const DAG_SPECS = Vector{DAGSpec}()
+const DAG_SPECS = Vector{Pair{DAGSpec, DAGSpecSchedule}}()
+
+#const DAG_SCHEDULE_CACHE = Dict{DAGSpec, DAGSpecSchedule}()
+
 struct DataDepsAliasingState
     # Track original and current data locations
     # We track data => space
@@ -152,6 +253,9 @@ struct DataDepsState{State<:Union{DataDepsAliasingState,DataDepsNonAliasingState
     # The aliasing analysis state
     alias_state::State
 
+    # The DAG specification
+    dag_spec::DAGSpec
+
     function DataDepsState(aliasing::Bool, all_procs::Vector{Processor})
         dependencies = Pair{DTask,Vector{Tuple{Bool,Bool,<:AbstractAliasing,<:Any,<:Any}}}[]
         remote_args = Dict{MemorySpace,IdDict{Any,Any}}()
@@ -160,7 +264,8 @@ struct DataDepsState{State<:Union{DataDepsAliasingState,DataDepsNonAliasingState
         else
             state = DataDepsNonAliasingState()
         end
-        return new{typeof(state)}(aliasing, all_procs, dependencies, remote_args, state)
+        spec = DAGSpec()
+        return new{typeof(state)}(aliasing, all_procs, dependencies, remote_args, state, spec)
     end
 end
 
@@ -522,18 +627,54 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     state = DataDepsState(queue.aliasing, all_procs)
     astate = state.alias_state
 
+    schedule = Dict{DTask, Processor}()
+
+    if DATADEPS_SCHEDULE_REUSABLE[]
+        # Compute DAG spec
+        for (spec, task) in queue.seen_tasks
+            push!(state.dag_spec, spec, task)
+        end
+
+        # Find any matching DAG specs and reuse their schedule
+        for (other_spec, spec_schedule) in DAG_SPECS
+            if other_spec == state.dag_spec
+                @info "Found matching DAG spec!"
+                #spec_schedule = DAG_SCHEDULE_CACHE[other_spec]
+                schedule = Dict{DTask, Processor}()
+                for (id, proc) in spec_schedule.id_to_proc
+                    uid = state.dag_spec.id_to_uid[id]
+                    task_idx = findfirst(spec_task -> spec_task[2].uid == uid, queue.seen_tasks)
+                    task = queue.seen_tasks[task_idx][2]
+                    schedule[task] = proc
+                end
+                break
+            end
+        end
+    end
+
     # Populate all task dependencies
     write_num = 1
     for (spec, task) in queue.seen_tasks
         write_num = populate_task_info!(state, spec, task, write_num)
     end
 
-    # AOT scheduling
-    schedule = datadeps_create_schedule(queue.scheduler, state, queue.seen_tasks)::Dict{DTask, Processor}
-    for (spec, task) in queue.seen_tasks
-        println("Task $(spec.f) scheduled on $(schedule[task])")
+    if isempty(schedule)
+        # Run AOT scheduling
+        schedule = datadeps_create_schedule(queue.scheduler, state, queue.seen_tasks)::Dict{DTask, Processor}
+
+        if DATADEPS_SCHEDULE_REUSABLE[]
+            # Cache the schedule
+            spec_schedule = DAGSpecSchedule()
+            for (task, proc) in schedule
+                id = state.dag_spec.uid_to_id[task.uid]
+                spec_schedule.id_to_proc[id] = proc
+            end
+            #DAG_SCHEDULE_CACHE[state.dag_spec] = spec_schedule
+            push!(DAG_SPECS, state.dag_spec => spec_schedule)
+        end
     end
 
+    # Clear out ainfo database (will be repopulated during task execution)
     clear_ainfo_owner_readers!(astate)
 
     # Launch tasks and necessary copies
@@ -556,7 +697,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             # Is the data written previously or now?
             arg, deps = unwrap_inout(arg)
             arg = arg isa DTask ? fetch(arg; raw=true) : arg
-            if !type_may_alias(typeof(arg)) || !has_writedep(state, arg, deps, task)
+            if !type_may_alias(typeof(arg))
                 @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Skipped copy-to (unwritten)"
                 spec.args[idx] = pos => arg
                 continue
@@ -837,4 +978,5 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
     end
 end
 const DATADEPS_SCHEDULER = ScopedValue{Any}(nothing)
+const DATADEPS_SCHEDULE_REUSABLE = ScopedValue{Bool}(true)
 const DATADEPS_LAUNCH_WAIT = ScopedValue{Union{Bool,Nothing}}(nothing)

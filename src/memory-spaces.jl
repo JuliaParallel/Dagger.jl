@@ -124,8 +124,10 @@ memory_spans(x, T) = memory_spans(aliasing(x, T))
 
 struct NoAliasing <: AbstractAliasing end
 memory_spans(::NoAliasing) = MemorySpan{CPURAMMemorySpace}[]
+equivalent_structure(::NoAliasing, ::NoAliasing) = true
 struct UnknownAliasing <: AbstractAliasing end
 memory_spans(::UnknownAliasing) = [MemorySpan{CPURAMMemorySpace}(C_NULL, typemax(UInt))]
+equivalent_structure(::UnknownAliasing, ::UnknownAliasing) = true
 
 warn_unknown_aliasing(T) =
     @warn "Cannot resolve aliasing for object of type $T\nExecution may become sequential"
@@ -140,6 +142,18 @@ function memory_spans(ca::CombinedAliasing)
         append!(all_spans, memory_spans(sub_a))
     end
     return all_spans
+end
+function equivalent_structure(ainfo1::CombinedAliasing,
+                              ainfo2::CombinedAliasing)
+    for sub_ainfo1 in ainfo1.sub_ainfos
+        for sub_ainfo2 in ainfo2.sub_ainfos
+            if equivalent_structure(sub_ainfo1, sub_ainfo2)
+                break
+            end
+        end
+        return false
+    end
+    return true
 end
 Base.:(==)(ca1::CombinedAliasing, ca2::CombinedAliasing) =
     ca1.sub_ainfos == ca2.sub_ainfos
@@ -160,6 +174,10 @@ function memory_spans(oa::ObjectAliasing)
     rptr = RemotePtr{Cvoid}(oa.ptr)
     span = MemorySpan{CPURAMMemorySpace}(rptr, oa.sz)
     return [span]
+end
+function equivalent_structure(ainfo1::ObjectAliasing,
+                              ainfo2::ObjectAliasing)
+    return ainfo1.sz == ainfo2.sz
 end
 
 aliasing(x, T) = aliasing(T(x))
@@ -221,6 +239,10 @@ function aliasing(x::Array{T}) where T
 end
 aliasing(x::Transpose) = aliasing(parent(x))
 aliasing(x::Adjoint) = aliasing(parent(x))
+function equivalent_structure(ainfo1::ContiguousAliasing{S},
+                              ainfo2::ContiguousAliasing{S}) where {S}
+    return ainfo1.span.len == ainfo2.span.len
+end
 
 struct StridedAliasing{T,N,S} <: AbstractAliasing
     base_ptr::RemotePtr{Cvoid,S}
@@ -279,6 +301,12 @@ function will_alias(x::StridedAliasing{T,N,S}, y::StridedAliasing{T,N,S}) where 
     return true
 end
 # FIXME: Upgrade Contiguous/StridedAlising to same number of dims
+function equivalent_structure(ainfo1::StridedAliasing{T,N,S},
+                              ainfo2::StridedAliasing{T,N,S}) where {T,N,S}
+    return ainfo1.base_inds == ainfo2.base_inds &&
+           ainfo1.lengths == ainfo2.lengths &&
+           ainfo1.strides == ainfo2.strides
+end
 
 struct TriangularAliasing{T,S} <: AbstractAliasing
     ptr::RemotePtr{Cvoid,S}
@@ -311,6 +339,12 @@ aliasing(x::UnitUpperTriangular{T}) where T =
     TriangularAliasing{T,CPURAMMemorySpace}(pointer(parent(x)), size(parent(x), 1), true, false)
 aliasing(x::UnitLowerTriangular{T}) where T =
     TriangularAliasing{T,CPURAMMemorySpace}(pointer(parent(x)), size(parent(x), 1), false, false)
+function equivalent_structure(ainfo1::TriangularAliasing{T,S},
+                              ainfo2::TriangularAliasing{T,S}) where {T,S}
+    return ainfo1.stride == ainfo2.stride &&
+           ainfo1.isupper == ainfo2.isupper &&
+           ainfo1.diagonal == ainfo2.diagonal
+end
 
 struct DiagonalAliasing{T,S} <: AbstractAliasing
     ptr::RemotePtr{Cvoid,S}
@@ -330,6 +364,10 @@ function aliasing(x::AbstractMatrix{T}, ::Type{Diagonal}) where T
     S = memory_space(x)
     rptr = RemotePtr{Cvoid}(ptr, S)
     return DiagonalAliasing{T,typeof(S)}(rptr, size(parent(x), 1))
+end
+function equivalent_structure(ainfo1::DiagonalAliasing{T,S},
+                              ainfo2::DiagonalAliasing{T,S}) where {T,S}
+    return ainfo1.stride == ainfo2.stride
 end
 # FIXME: Bidiagonal
 # FIXME: Tridiagonal
@@ -368,3 +406,11 @@ function will_alias(x_span::MemorySpan, y_span::MemorySpan)
     y_end = y_span.ptr + y_span.len - 1
     return x_span.ptr <= y_end && y_span.ptr <= x_end
 end
+
+"""
+    equivalent_structure(ainfo1::AbstractAliasing, ainfo2::AbstractAliasing) -> Bool
+
+Returns `true` when `ainfo1` and `ainfo2` represent objects with the same
+memory structure, ignoring the specific memory addresses; otherwise, `false`.
+"""
+equivalent_structure(ainfo1::AbstractAliasing, ainfo2::AbstractAliasing) = false
