@@ -1,18 +1,3 @@
-@everywhere function rand_finite(T=Float64)
-    x = rand(T)
-    if rand() < 0.1
-        return Dagger.finish_stream(x)
-    end
-    return x
-end
-@everywhere function rand_finite_returns(T=Float64)
-    x = rand(T)
-    if rand() < 0.1
-        return Dagger.finish_stream(x; result=x)
-    end
-    return x
-end
-
 const ACCUMULATOR = Dict{Int,Vector{Real}}()
 @everywhere function accumulator(x=0)
     tid = Dagger.task_id()
@@ -37,12 +22,14 @@ function catch_interrupt(f)
         rethrow(err)
     end
 end
+
 function merge_testset!(inner::Test.DefaultTestSet)
     outer = Test.get_testset()
     append!(outer.results, inner.results)
     outer.n_passed += inner.n_passed
 end
-function test_finishes(f, message::String; ignore_timeout=false, max_evals=10)
+
+function test_finishes(f, message::String; timeout=10, ignore_timeout=false, max_evals=10)
     t = @eval Threads.@spawn begin
         tset = nothing
         try
@@ -61,7 +48,8 @@ function test_finishes(f, message::String; ignore_timeout=false, max_evals=10)
         end
         return tset
     end
-    timed_out = timedwait(()->istaskdone(t), 10) == :timed_out
+
+    timed_out = timedwait(()->istaskdone(t), timeout) == :timed_out
     if timed_out
         if !ignore_timeout
             @warn "Testing task timed out: $message"
@@ -70,6 +58,7 @@ function test_finishes(f, message::String; ignore_timeout=false, max_evals=10)
         @everywhere GC.gc()
         fetch(Dagger.@spawn 1+1)
     end
+
     tset = fetch(t)::Test.DefaultTestSet
     merge_testset!(tset)
     return !timed_out
@@ -176,6 +165,7 @@ for idx in 1:5
             @test length(values[A_tid]) == 1
             @test all(v -> 0 <= v <= 10, values[A_tid])
         end
+
         @test test_finishes("x -> (A, B)") do
             local x, A, B
             Dagger.spawn_streaming() do
@@ -324,7 +314,8 @@ for idx in 1:5
             @test fetch(y) === nothing
             @test fetch(z) === nothing
             @test fetch(A) === nothing
-            @test fetch(A) === nothing
+            @test fetch(B) === nothing
+
             values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
             A_tid = Dagger.task_id(A)
             @test length(values[A_tid]) == 10
