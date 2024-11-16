@@ -40,9 +40,6 @@ function Base.put!(store::StreamStore{T,B}, value) where {T,B}
         end
         @dagdebug thunk_id :stream "adding $value ($(length(store.output_streams)) outputs)"
         for output_uid in keys(store.output_streams)
-            if !haskey(store.output_buffers, output_uid)
-                initialize_output_stream!(store, output_uid)
-            end
             buffer = store.output_buffers[output_uid]
             while isfull(buffer)
                 if !isopen(store)
@@ -238,12 +235,18 @@ function initialize_input_stream!(our_store::StreamStore{OT,OB}, input_stream::S
                 stream_pull_values!(input_fetcher, IT, our_store, input_stream, buffer)
             end
         catch err
-            if err isa InterruptException || (err isa InvalidStateException && !isopen(buffer))
+            unwrapped_err = Sch.unwrap_nested_exception(err)
+            if unwrapped_err isa InterruptException || (unwrapped_err isa InvalidStateException && !isopen(input_fetcher.chan))
                 return
             else
-                rethrow(err)
+                rethrow()
             end
         finally
+            # Close the buffer because there will be no more values put into
+            # it. We don't close the entire store because there might be some
+            # remaining elements in the buffer to process and send to downstream
+            # tasks.
+            close(buffer)
             @dagdebug STREAM_THUNK_ID[] :stream "input stream closed"
         end
     end)
@@ -251,10 +254,13 @@ function initialize_input_stream!(our_store::StreamStore{OT,OB}, input_stream::S
 end
 initialize_input_stream!(our_store::StreamStore, arg) = arg
 function initialize_output_stream!(our_store::StreamStore{T,B}, output_uid::UInt) where {T,B}
-    @assert islocked(our_store.lock)
     @dagdebug STREAM_THUNK_ID[] :stream "initializing output stream $output_uid"
-    buffer = initialize_stream_buffer(B, T, our_store.output_buffer_amount)
-    our_store.output_buffers[output_uid] = buffer
+    local buffer
+    @lock our_store.lock begin
+        buffer = initialize_stream_buffer(B, T, our_store.output_buffer_amount)
+        our_store.output_buffers[output_uid] = buffer
+    end
+
     our_uid = our_store.uid
     output_stream = our_store.output_streams[output_uid]
     output_fetcher = our_store.output_fetchers[output_uid]
@@ -279,6 +285,7 @@ function initialize_output_stream!(our_store::StreamStore{T,B}, output_uid::UInt
                 rethrow(err)
             end
         finally
+            close(output_fetcher.chan)
             @dagdebug thunk_id :stream "output stream closed"
         end
     end)
@@ -476,6 +483,17 @@ struct FinishStream{T,R}
     result::R
 end
 
+"""
+    finish_stream(value=nothing; result=nothing)
+
+Tell Dagger to stop executing the streaming function and all of its downstream
+[`DTask`](@ref)'s.
+
+# Arguments
+- `value`: The final value to be returned by the streaming function. This will
+  be passed to all downstream [`DTask`](@ref)'s.
+- `result`: The value that will be returned by `fetch()`'ing the [`DTask`](@ref).
+"""
 finish_stream(value::T; result::R=nothing) where {T,R} = FinishStream{T,R}(Some{T}(value), result)
 
 finish_stream(; result::R=nothing) where R = FinishStream{Union{},R}(nothing, result)
@@ -577,6 +595,16 @@ function stream!(sf::StreamingFunction, uid,
     f = move(thunk_processor(), sf.f)
     counter = 0
 
+    # Initialize output streams. We can't do this in add_waiters!() because the
+    # output handlers depend on the DTaskTLS, so they have to be set up from
+    # within the DTask.
+    store = sf.stream.store
+    for output_uid in keys(store.output_streams)
+        if !haskey(store.output_buffers, output_uid)
+            initialize_output_stream!(store, output_uid)
+        end
+    end
+
     while true
         # Yield to other (streaming) tasks
         yield()
@@ -592,8 +620,21 @@ function stream!(sf::StreamingFunction, uid,
         end
 
         # Get values from Stream args/kwargs
-        stream_args = _stream_take_values!(args)
-        stream_kwarg_values = _stream_take_values!(kwarg_values)
+        local stream_args, stream_kwarg_values
+        try
+            stream_args = _stream_take_values!(args)
+            stream_kwarg_values = _stream_take_values!(kwarg_values)
+        catch ex
+            if ex isa InvalidStateException
+                # This means a buffer has been closed because an upstream task
+                # finished.
+                @dagdebug STREAM_THUNK_ID[] :stream "Upstream task finished, returning"
+                return nothing
+            else
+                rethrow()
+            end
+        end
+
         stream_kwargs = _stream_namedtuple(kwarg_names, stream_kwarg_values)
 
         if length(stream_args) > 0 || length(stream_kwarg_values) > 0

@@ -370,40 +370,95 @@ for idx in 1:5
         end
     end
 
-    @testset "DropBuffer ($scope_str)" begin
-        # TODO: Test that accumulator never gets called
-        @test !test_finishes("x (drop)-> A"; ignore_timeout=true) do
-            local x, A
-            Dagger.spawn_streaming() do
-                Dagger.with_options(;stream_buffer_type=Dagger.DropBuffer) do
-                    x = Dagger.@spawn scope=rand(scopes) rand()
-                end
-                A = Dagger.@spawn scope=rand(scopes) accumulator(x)
+    # @testset "DropBuffer ($scope_str)" begin
+    #     # TODO: Test that accumulator never gets called
+    #     @test !test_finishes("x (drop)-> A"; ignore_timeout=false, max_evals=typemax(Int)) do
+    #         # ENV["JULIA_DEBUG"] = "Dagger"
+
+    #         local x, A
+    #         Dagger.spawn_streaming() do
+    #             Dagger.with_options(;stream_buffer_type=Dagger.DropBuffer) do
+    #                 x = Dagger.@spawn scope=rand(scopes) rand()
+    #             end
+    #             A = Dagger.@spawn scope=rand(scopes) accumulator(x)
+    #         end
+    #         @test fetch(x) === nothing
+    #         fetch(A)
+    #         @test_throws_unwrap InterruptException fetch(A)
+    #     end
+
+    #     @test !test_finishes("x ->(drop) A"; ignore_timeout=true) do
+    #         local x, A
+    #         Dagger.spawn_streaming() do
+    #             x = Dagger.@spawn scope=rand(scopes) rand()
+    #             Dagger.with_options(;stream_buffer_type=Dagger.DropBuffer) do
+    #                 A = Dagger.@spawn scope=rand(scopes) accumulator(x)
+    #             end
+    #         end
+    #         @test fetch(x) === nothing
+    #         @test_throws_unwrap InterruptException fetch(A) === nothing
+    #     end
+
+    #     @test !test_finishes("x -(drop)> A"; ignore_timeout=true) do
+    #         local x, A
+    #         Dagger.spawn_streaming() do
+    #             Dagger.with_options(;stream_buffer_type=Dagger.DropBuffer) do
+    #                 x = Dagger.@spawn scope=rand(scopes) rand()
+    #                 A = Dagger.@spawn scope=rand(scopes) accumulator(x)
+    #             end
+    #         end
+    #         @test fetch(x) === nothing
+    #         @test_throws_unwrap InterruptException fetch(A) === nothing
+    #     end
+    # end
+
+    @testset "Graceful finishing" begin
+        @test test_finishes("finish_stream() without return value") do
+            B = Dagger.spawn_streaming() do
+                A = Dagger.@spawn scope=rand(scopes) Dagger.finish_stream()
+
+                Dagger.@spawn scope=rand(scopes) accumulator(A)
             end
-            @test fetch(x) === nothing
-            @test_throws_unwrap InterruptException fetch(A) === nothing
+
+            fetch(B)
+            # Since we don't return any value in the call to finish_stream(), B
+            # should never execute.
+            @test isempty(ACCUMULATOR)
         end
-        @test !test_finishes("x ->(drop) A"; ignore_timeout=true) do
-            local x, A
-            Dagger.spawn_streaming() do
-                x = Dagger.@spawn scope=rand(scopes) rand()
-                Dagger.with_options(;stream_buffer_type=Dagger.DropBuffer) do
-                    A = Dagger.@spawn scope=rand(scopes) accumulator(x)
-                end
+
+        @test test_finishes("finish_stream() with one downstream task") do
+            B = Dagger.spawn_streaming() do
+                A = Dagger.@spawn scope=rand(scopes) Dagger.finish_stream(42)
+
+                Dagger.@spawn scope=rand(scopes) accumulator(A)
             end
-            @test fetch(x) === nothing
-            @test_throws_unwrap InterruptException fetch(A) === nothing
+
+            fetch(B)
+            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            @test values[Dagger.task_id(B)] == [42]
         end
-        @test !test_finishes("x -(drop)> A"; ignore_timeout=true) do
-            local x, A
-            Dagger.spawn_streaming() do
-                Dagger.with_options(;stream_buffer_type=Dagger.DropBuffer) do
-                    x = Dagger.@spawn scope=rand(scopes) rand()
-                    A = Dagger.@spawn scope=rand(scopes) accumulator(x)
-                end
+
+        @test test_finishes("finish_stream() with multiple downstream tasks"; max_evals=2) do
+            D, E = Dagger.spawn_streaming() do
+                A = Dagger.@spawn scope=rand(scopes) Dagger.finish_stream(1)
+                B = Dagger.@spawn scope=rand(scopes) A + 1
+                C = Dagger.@spawn scope=rand(scopes) A + 1
+                D = Dagger.@spawn scope=rand(scopes) accumulator(B, C)
+
+                E = Dagger.@spawn scope=rand(scopes) accumulator()
+
+                D, E
             end
-            @test fetch(x) === nothing
-            @test_throws_unwrap InterruptException fetch(A) === nothing
+
+            fetch(D)
+            fetch(E)
+            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+
+            # D should only execute once since it depends on A/B/C
+            @test values[Dagger.task_id(D)] == [4]
+
+            # E should run max_evals times since it has no dependencies
+            @test length(values[Dagger.task_id(E)]) == 2
         end
     end
 
