@@ -182,7 +182,7 @@ end
         @testset "allow errors" begin
             opts = ThunkOptions(;allow_errors=true)
             a = delayed(error; options=opts)("Test")
-            @test_throws_unwrap Dagger.DTaskFailedException collect(a)
+            @test_throws_unwrap ErrorException collect(a)
         end
     end
 
@@ -396,7 +396,7 @@ end
             ([Dagger.tochunk(MyStruct(1)), Dagger.tochunk(1)], sizeof(MyStruct)+sizeof(Int)),
         ]
             for arg in args
-                if arg isa Chunk
+                if arg isa Dagger.Chunk
                     aff = Dagger.affinity(arg)
                     @test aff[1] == OSProc(1)
                     @test aff[2] == MemPool.approx_size(MemPool.poolget(arg.handle))
@@ -540,7 +540,7 @@ end
     t = Dagger.@spawn scope=Dagger.scope(worker=1, thread=1) sleep(100)
     start_time = time_ns()
     Dagger.cancel!(t)
-    @test_throws_unwrap Dagger.DTaskFailedException fetch(t)
+    @test_throws_unwrap InterruptException fetch(t)
     t = Dagger.@spawn scope=Dagger.scope(worker=1, thread=1) yield()
     fetch(t)
     finish_time = time_ns()

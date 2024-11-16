@@ -1,3 +1,5 @@
+import Dagger.Sch: SchedulingException
+
 @everywhere begin
     struct DynamicHistogram
         bins::Vector{Float64}
@@ -48,7 +50,7 @@ end
         x = Dagger.@mutable worker=w Ref{Int}()
         @test fetch(Dagger.@spawn mutable_update!(x)) == w
         wo_scope = Dagger.ProcessScope(wo)
-        @test_throws_unwrap Dagger.DTaskFailedException fetch(Dagger.@spawn scope=wo_scope mutable_update!(x))
+        @test_throws_unwrap SchedulingException fetch(Dagger.@spawn scope=wo_scope mutable_update!(x))
     end
 end # @testset "@mutable"
 

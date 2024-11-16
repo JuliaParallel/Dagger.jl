@@ -1,3 +1,5 @@
+import Dagger.Sch: SchedulingException
+
 @testset "Chunk Scopes" begin
     wid1, wid2 = addprocs(2, exeflags=["-t 2"])
     @everywhere [wid1,wid2] using Dagger
@@ -56,7 +58,7 @@
 
         # Different nodes
         for (ch1, ch2) in [(ns1_ch, ns2_ch), (ns2_ch, ns1_ch)]
-            @test_throws_unwrap Dagger.DTaskFailedException ex.reason<"Scopes are not compatible:" fetch(Dagger.@spawn ch1 + ch2)
+            @test_throws_unwrap SchedulingException reason<"Scopes are not compatible:" fetch(Dagger.@spawn ch1 + ch2)
         end
     end
     @testset "Process Scope" begin
@@ -75,7 +77,7 @@
 
         # Different process
         for (ch1, ch2) in [(ps1_ch, ps2_ch), (ps2_ch, ps1_ch)]
-            @test_throws_unwrap Dagger.DTaskFailedException ex.reason<"Scopes are not compatible:" fetch(Dagger.@spawn ch1 + ch2)
+            @test_throws_unwrap SchedulingException reason<"Scopes are not compatible:" fetch(Dagger.@spawn ch1 + ch2)
         end
 
         # Same process and node
@@ -83,7 +85,7 @@
 
         # Different process and node
         for (ch1, ch2) in [(ps1_ch, ns2_ch), (ns2_ch, ps1_ch)]
-            @test_throws_unwrap Dagger.DTaskFailedException ex.reason<"Scopes are not compatible:" fetch(Dagger.@spawn ch1 + ch2)
+            @test_throws_unwrap SchedulingException reason<"Scopes are not compatible:" fetch(Dagger.@spawn ch1 + ch2)
         end
     end
     @testset "Exact Scope" begin
@@ -104,14 +106,14 @@
 
         # Different process, different processor
         for (ch1, ch2) in [(es1_ch, es2_ch), (es2_ch, es1_ch)]
-            @test_throws_unwrap Dagger.DTaskFailedException ex.reason<"Scopes are not compatible:" fetch(Dagger.@spawn ch1 + ch2)
+            @test_throws_unwrap SchedulingException reason<"Scopes are not compatible:" fetch(Dagger.@spawn ch1 + ch2)
         end
 
         # Same process, different processor
         es1_2 = ExactScope(Dagger.ThreadProc(wid1, 2))
         es1_2_ch = Dagger.tochunk(nothing, OSProc(), es1_2)
         for (ch1, ch2) in [(es1_ch, es1_2_ch), (es1_2_ch, es1_ch)]
-            @test_throws_unwrap Dagger.DTaskFailedException ex.reason<"Scopes are not compatible:" fetch(Dagger.@spawn ch1 + ch2)
+            @test_throws_unwrap SchedulingException reason<"Scopes are not compatible:" fetch(Dagger.@spawn ch1 + ch2)
         end
     end
     @testset "Union Scope" begin
