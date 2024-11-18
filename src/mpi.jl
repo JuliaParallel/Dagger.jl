@@ -301,12 +301,18 @@ function recv_yield(comm, src, tag)
     while true
         (got, msg, stat) = MPI.Improbe(src, tag, comm, MPI.Status)
         if got
+            if MPI.Get_error(stat) != MPI.SUCCESS
+                error("recv_yield (Improbe) failed with error $(MPI.Get_error(stat))")
+            end
             count = MPI.Get_count(stat, UInt8)
             buf = Array{UInt8}(undef, count)
             req = MPI.Imrecv!(MPI.Buffer(buf), msg)
             while true
-                finish = MPI.Test(req)
+                finish, stat = MPI.Test(req, MPI.Status)
                 if finish
+                    if MPI.Get_error(stat) != MPI.SUCCESS
+                        error("recv_yield (Test) failed with error $(MPI.Get_error(stat))")
+                    end
                     value = MPI.deserialize(buf)
                     rnk = MPI.Comm_rank(comm)
                     #@dagdebug nothing :mpi "[$rnk][$tag] Left recv hang \n"
@@ -322,8 +328,11 @@ function send_yield(value, comm, dest, tag)
     #@dagdebug nothing :mpi "[$(MPI.Comm_rank(comm))][$tag] Hit probable hang while sending \n"
     req = MPI.isend(value, comm; dest, tag)
     while true
-        finish = MPI.Test(req)
+        finish, status = MPI.Test(req, MPI.Status)
         if finish
+            if MPI.Get_error(status) != MPI.SUCCESS
+                error("send_yield (Test) failed with error $(MPI.Get_error(status))")
+            end
             #@dagdebug nothing :mpi "[$(MPI.Comm_rank(comm))][$tag] Left send hang \n"
             return
         end
