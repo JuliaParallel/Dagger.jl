@@ -684,6 +684,9 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         safepoint(state)
         @assert length(procs) > 0
 
+        # Remove processors that aren't yet initialized
+        procs = filter(p -> haskey(state.worker_chans, Dagger.root_worker_id(p)), procs)
+
         populate_processor_cache_list!(state, procs)
 
         # Schedule tasks
