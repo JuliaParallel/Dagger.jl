@@ -1,6 +1,5 @@
 "Like `errormonitor`, but tracks how many outstanding tasks are running."
 function errormonitor_tracked(name::String, t::Task)
-    errormonitor(t)
     @safe_lock_spin1 ERRORMONITOR_TRACKED tracked begin
         push!(tracked, name => t)
     end
