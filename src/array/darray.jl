@@ -434,7 +434,7 @@ end
 
 function Distribute(data::AbstractArray{T,N}) where {T,N}
     nprocs = sum(w->length(Dagger.get_processors(OSProc(w))),
-                 Distributed.procs())
+                 procs())
     p = Blocks(ntuple(i->max(cld(size(data, i), nprocs), 1), N))
     return Distribute(partition(p, domain(data)), p, data)
 end

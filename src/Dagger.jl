@@ -8,8 +8,6 @@ import MemPool
 import MemPool: DRef, FileRef, poolget, poolset
 
 import Base: collect, reduce
-import Distributed
-import Distributed: Future, RemoteChannel, myid, workers, nworkers, procs, remotecall, remotecall_wait, remotecall_fetch
 
 import LinearAlgebra
 import LinearAlgebra: Adjoint, BLAS, Diagonal, Bidiagonal, Tridiagonal, LAPACK, LowerTriangular, PosDefException, Transpose, UpperTriangular, UnitLowerTriangular, UnitUpperTriangular, diagind, ishermitian, issymmetric
@@ -32,6 +30,17 @@ import TimespanLogging
 import TimespanLogging: timespan_start, timespan_finish
 
 import Adapt
+
+# Preferences
+import Preferences: @load_preference, @set_preferences!
+
+if @load_preference("distributed-package") == "DistributedNext"
+    import DistributedNext
+    import DistributedNext: Future, RemoteChannel, myid, workers, nworkers, procs, remotecall, remotecall_wait, remotecall_fetch, check_same_host
+else
+    import Distributed
+    import Distributed: Future, RemoteChannel, myid, workers, nworkers, procs, remotecall, remotecall_wait, remotecall_fetch, check_same_host
+end
 
 include("lib/util.jl")
 include("utils/dagdebug.jl")
@@ -95,6 +104,21 @@ include("ui/gantt-text.jl")
 include("utils/logging-events.jl")
 include("utils/logging.jl")
 include("utils/viz.jl")
+
+"""
+    set_distributed_package!(value[="Distributed|DistributedNext"])
+
+Set a [preference](https://github.com/JuliaPackaging/Preferences.jl) for using
+either the Distributed.jl stdlib or DistributedNext.jl. You will need to restart
+Julia after setting a new preference.
+"""
+function set_distributed_package!(value)
+    MemPool.set_distributed_package!(value)
+    TimespanLogging.set_distributed_package!(value)
+
+    @set_preferences!("distributed-package" => value)
+    @info "Dagger.jl preference has been set, restart your Julia session for this change to take effect!"
+end
 
 # Precompilation
 import PrecompileTools: @compile_workload
