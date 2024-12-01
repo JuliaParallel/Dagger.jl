@@ -30,6 +30,8 @@ unwrap_nested_exception(err::RemoteException) =
     unwrap_nested_exception(err.captured)
 unwrap_nested_exception(err::DTaskFailedException) =
     unwrap_nested_exception(err.ex)
+unwrap_nested_exception(err::TaskFailedException) =
+    unwrap_nested_exception(err.task.exception)
 unwrap_nested_exception(err) = err
 
 "Gets a `NamedTuple` of options propagated by `thunk`."

@@ -237,7 +237,8 @@ function initialize_input_stream!(our_store::StreamStore{OT,OB}, input_stream::S
                 stream_pull_values!(input_fetcher, IT, our_store, input_stream, buffer)
             end
         catch err
-            if err isa InterruptException || (err isa InvalidStateException && !isopen(buffer))
+            unwrapped_err = Sch.unwrap_nested_exception(err)
+            if unwrapped_err isa InterruptException || (unwrapped_err isa InvalidStateException && !isopen(buffer))
                 return
             else
                 rethrow(err)
