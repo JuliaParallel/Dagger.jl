@@ -59,9 +59,10 @@ function dynamic_listener!(ctx, state, wid)
             tid, f, data = try
                 take!(inp_chan)
             catch err
-                if !(unwrap_nested_exception(err) isa Union{SchedulerHaltedException,
-                                                            ProcessExitedException,
-                                                            InvalidStateException})
+                if (!isnothing(err) && # `nothing` appears sometimes to be thrown upon cancellation
+                    !(unwrap_nested_exception(err) isa Union{SchedulerHaltedException,
+                                                             ProcessExitedException,
+                                                             InvalidStateException}))
                     iob = IOContext(IOBuffer(), :color=>true)
                     println(iob, "Error in receiving dynamic request:")
                     Base.showerror(iob, err)
