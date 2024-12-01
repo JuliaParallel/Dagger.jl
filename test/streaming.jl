@@ -37,12 +37,14 @@ function catch_interrupt(f)
         rethrow(err)
     end
 end
+
 function merge_testset!(inner::Test.DefaultTestSet)
     outer = Test.get_testset()
     append!(outer.results, inner.results)
     outer.n_passed += inner.n_passed
 end
-function test_finishes(f, message::String; ignore_timeout=false, max_evals=10)
+
+function test_finishes(f, message::String; timeout=10, ignore_timeout=false, max_evals=10)
     t = @eval Threads.@spawn begin
         tset = nothing
         try
@@ -61,7 +63,7 @@ function test_finishes(f, message::String; ignore_timeout=false, max_evals=10)
         end
         return tset
     end
-    timed_out = timedwait(()->istaskdone(t), 10) == :timed_out
+    timed_out = timedwait(()->istaskdone(t), timeout) == :timed_out
     if timed_out
         if !ignore_timeout
             @warn "Testing task timed out: $message"
@@ -89,7 +91,7 @@ for idx in 1:5
     end
 
     @testset "Single Task Control Flow ($scope_str)" begin
-        @test !test_finishes("Single task running forever"; max_evals=1_000_000, ignore_timeout=true) do
+        @test !test_finishes("Single task running forever"; timeout=15, max_evals=1_000_000, ignore_timeout=true) do
             local x
             Dagger.spawn_streaming() do
                 x = Dagger.@spawn scope=rand(scopes) () -> begin
@@ -98,6 +100,7 @@ for idx in 1:5
                     return y
                 end
             end
+
             @test_throws_unwrap InterruptException fetch(x)
         end
 

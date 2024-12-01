@@ -12,13 +12,18 @@ mutable struct StreamStore{T,B}
     open::Bool
     migrating::Bool
     lock::Threads.Condition
+
+    input_handlers::Dict{UInt, Task}
+    output_handlers::Dict{UInt, Task}
+
     StreamStore{T,B}(uid::UInt, input_buffer_amount::Integer, output_buffer_amount::Integer) where {T,B} =
         new{T,B}(uid, zeros(Int, 0),
                  Dict{UInt,Any}(), Dict{UInt,Any}(),
                  Dict{UInt,B}(), Dict{UInt,B}(),
                  input_buffer_amount, output_buffer_amount,
                  Dict{UInt,Any}(), Dict{UInt,Any}(),
-                 true, false, Threads.Condition())
+                 true, false, Threads.Condition(),
+                 Dict{UInt, Task}(), Dict{UInt, Task}())
 end
 
 function tid_to_uid(thunk_id)
@@ -164,6 +169,19 @@ function Base.close(store::StreamStore)
         end
         notify(store.lock)
     end
+
+    # We have to close the input fetchers for the input handlers to finish
+    for fetcher in values(store.input_fetchers)
+        close(fetcher.chan)
+    end
+
+    # Wait for the handlers to finish
+    for handler in values(store.input_handlers)
+        wait(handler)
+    end
+    for handler in values(store.output_handlers)
+        wait(handler)
+    end
 end
 
 # FIXME: Just pass Stream directly, rather than its uid
@@ -229,7 +247,7 @@ function initialize_input_stream!(our_store::StreamStore{OT,OB}, input_stream::S
     end
     thunk_id = STREAM_THUNK_ID[]
     tls = get_tls()
-    Sch.errormonitor_tracked("streaming input: $input_uid -> $our_uid", Threads.@spawn begin
+    t = Sch.errormonitor_tracked("streaming input: $input_uid -> $our_uid", Threads.@spawn begin
         set_tls!(tls)
         STREAM_THUNK_ID[] = thunk_id
         try
@@ -247,9 +265,14 @@ function initialize_input_stream!(our_store::StreamStore{OT,OB}, input_stream::S
             @dagdebug STREAM_THUNK_ID[] :stream "input stream closed"
         end
     end)
+
+    our_store.input_handlers[input_uid] = t
+
     return StreamingValue(buffer)
 end
+
 initialize_input_stream!(our_store::StreamStore, arg) = arg
+
 function initialize_output_stream!(our_store::StreamStore{T,B}, output_uid::UInt) where {T,B}
     @assert islocked(our_store.lock)
     @dagdebug STREAM_THUNK_ID[] :stream "initializing output stream $output_uid"
@@ -260,7 +283,7 @@ function initialize_output_stream!(our_store::StreamStore{T,B}, output_uid::UInt
     output_fetcher = our_store.output_fetchers[output_uid]
     thunk_id = STREAM_THUNK_ID[]
     tls = get_tls()
-    Sch.errormonitor_tracked("streaming output: $our_uid -> $output_uid", Threads.@spawn begin
+    t = Sch.errormonitor_tracked("streaming output: $our_uid -> $output_uid", Threads.@spawn begin
         set_tls!(tls)
         STREAM_THUNK_ID[] = thunk_id
         try
@@ -282,6 +305,8 @@ function initialize_output_stream!(our_store::StreamStore{T,B}, output_uid::UInt
             @dagdebug thunk_id :stream "output stream closed"
         end
     end)
+
+    our_store.output_handlers[output_uid] = t
 end
 
 Base.put!(stream::Stream, @nospecialize(value)) = put!(stream.store, value)
