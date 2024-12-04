@@ -85,6 +85,32 @@ function Base.fetch(t::DTask; raw=false)
     end
     return fetch(t.future; raw)
 end
+function waitany(tasks::Vector{DTask})
+    if isempty(tasks)
+        return
+    end
+    cond = Threads.Condition()
+    for task in tasks
+        Sch.errormonitor_tracked("waitany listener", Threads.@spawn begin
+            wait(task)
+            @lock cond notify(cond)
+        end)
+    end
+    @lock cond wait(cond)
+    return
+end
+function waitall(tasks::Vector{DTask})
+    if isempty(tasks)
+        return
+    end
+    @sync for task in tasks
+        Threads.@spawn begin
+            wait(task)
+            @lock cond notify(cond)
+        end
+    end
+    return
+end
 function Base.show(io::IO, t::DTask)
     status = if istaskstarted(t)
         isready(t) ? "finished" : "running"
