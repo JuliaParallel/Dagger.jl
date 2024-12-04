@@ -79,9 +79,8 @@ end
 ```
 
 If you want to stop the streaming DAG and tear it all down, you can call
-`Dagger.cancel!.(all_vals)` and `Dagger.cancel!.(all_vals_written)` to
-terminate each streaming task. In the future, a more convenient way to tear
-down a full DAG will be added; for now, each task must be cancelled individually.
+`Dagger.cancel!(all_vals[1])` (or with any other task in the streaming DAG) to
+terminate all streaming tasks.
 
 Alternatively, tasks can stop themselves from the inside with
 `finish_stream`, optionally returning a value that can be `fetch`'d. Let's

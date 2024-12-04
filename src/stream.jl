@@ -426,12 +426,37 @@ function initialize_streaming!(self_streams, spec, task)
     end
 end
 
-function spawn_streaming(f::Base.Callable)
+"""
+Starts a streaming region, within which all tasks run continuously and
+concurrently. Any `DTask` argument that is itself a streaming task will be
+treated as a streaming input/output. The streaming region will automatically
+handle the buffering and synchronization of these tasks' values.
+
+# Keyword Arguments
+- `teardown::Bool=true`: If `true`, the streaming region will automatically
+  cancel all tasks if any task fails or is cancelled. Otherwise, a failing task
+  will not cancel the other tasks, which will continue running.
+"""
+function spawn_streaming(f::Base.Callable; teardown::Bool=true)
     queue = StreamingTaskQueue()
     result = with_options(f; task_queue=queue)
     if length(queue.tasks) > 0
         finalize_streaming!(queue.tasks, queue.self_streams)
         enqueue!(queue.tasks)
+
+        if teardown
+            # Start teardown monitor
+            dtasks = map(last, queue.tasks)::Vector{DTask}
+            Sch.errormonitor_tracked("streaming teardown", Threads.@spawn begin
+                # Wait for any task to finish
+                waitany(dtasks)
+
+                # Cancel all tasks
+                for task in dtasks
+                    cancel!(task; graceful=false)
+                end
+            end)
+        end
     end
     return result
 end
