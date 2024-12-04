@@ -182,7 +182,7 @@ end
         @testset "allow errors" begin
             opts = ThunkOptions(;allow_errors=true)
             a = delayed(error; options=opts)("Test")
-            @test_throws_unwrap Dagger.DTaskFailedException collect(a)
+            @test_throws_unwrap (Dagger.DTaskFailedException, ErrorException) collect(a)
         end
     end
 
@@ -396,7 +396,7 @@ end
             ([Dagger.tochunk(MyStruct(1)), Dagger.tochunk(1)], sizeof(MyStruct)+sizeof(Int)),
         ]
             for arg in args
-                if arg isa Chunk
+                if arg isa Dagger.Chunk
                     aff = Dagger.affinity(arg)
                     @test aff[1] == OSProc(1)
                     @test aff[2] == MemPool.approx_size(MemPool.poolget(arg.handle))
@@ -477,7 +477,7 @@ end
         @test res == 2
         @testset "self as input" begin
             a = delayed(dynamic_add_thunk_self_dominated)(1)
-            @test_throws_unwrap Dagger.Sch.DynamicThunkException reason="Cannot fetch result of dominated thunk" collect(Context(), a)
+            @test_throws_unwrap (RemoteException, Dagger.Sch.DynamicThunkException) reason="Cannot fetch result of dominated thunk" collect(Context(), a)
         end
     end
     @testset "Fetch/Wait" begin
@@ -487,11 +487,11 @@ end
         end
         @testset "self" begin
             a = delayed(dynamic_fetch_self)(1)
-            @test_throws_unwrap Dagger.Sch.DynamicThunkException reason="Cannot fetch own result" collect(Context(), a)
+            @test_throws_unwrap (RemoteException, Dagger.Sch.DynamicThunkException) reason="Cannot fetch own result" collect(Context(), a)
         end
         @testset "dominated" begin
             a = delayed(identity)(delayed(dynamic_fetch_dominated)(1))
-            @test_throws_unwrap Dagger.Sch.DynamicThunkException reason="Cannot fetch result of dominated thunk" collect(Context(), a)
+            @test_throws_unwrap (RemoteException, Dagger.Sch.DynamicThunkException) reason="Cannot fetch result of dominated thunk" collect(Context(), a)
         end
     end
 end
@@ -540,7 +540,7 @@ end
     t = Dagger.@spawn scope=Dagger.scope(worker=1, thread=1) sleep(100)
     start_time = time_ns()
     Dagger.cancel!(t)
-    @test_throws_unwrap Dagger.DTaskFailedException fetch(t)
+    @test_throws_unwrap (Dagger.DTaskFailedException, InterruptException) fetch(t)
     t = Dagger.@spawn scope=Dagger.scope(worker=1, thread=1) yield()
     fetch(t)
     finish_time = time_ns()
