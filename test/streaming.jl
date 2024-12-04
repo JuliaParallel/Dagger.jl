@@ -54,7 +54,7 @@ function test_finishes(f, message::String; timeout=10, ignore_timeout=false, max
         if !ignore_timeout
             @warn "Testing task timed out: $message"
         end
-        Dagger.cancel!(;halt_sch=true)
+        Dagger.cancel!(;halt_sch=true, graceful=false)
         @everywhere GC.gc()
         fetch(Dagger.@spawn 1+1)
     end
