@@ -1,4 +1,10 @@
-using Distributed
+import Preferences: @load_preference, @set_preferences!
+if @load_preference("distributed-package") == "DistributedNext"
+    using DistributedNext
+else
+    using Distributed
+end
+
 import Profile
 import Base.gc_num
 
@@ -15,6 +21,18 @@ ProfilerResult(samples, lineinfo, tasks::Vector{Task}) =
     ProfilerResult(samples, lineinfo, map(Base.pointer_from_objref, tasks))
 ProfilerResult(samples, lineinfo, tasks::Nothing) =
     ProfilerResult(samples, lineinfo, map(Base.pointer_from_objref, UInt[]))
+
+"""
+    set_distributed_package!(value[="Distributed|DistributedNext"])
+
+Set a [preference](https://github.com/JuliaPackaging/Preferences.jl) for using
+either the Distributed.jl stdlib or DistributedNext.jl. You will need to restart
+Julia after setting a new preference.
+"""
+function set_distributed_package!(value)
+    @set_preferences!("distributed-package" => value)
+    @info "TimespanLogging.jl preference has been set, restart your Julia session for this change to take effect!"
+end
 
 """
     Timespan

@@ -1,6 +1,12 @@
 module Sch
 
-import Distributed: Future, ProcessExitedException, RemoteChannel, RemoteException, myid, remote_do, remotecall_fetch, remotecall_wait, workers
+import Preferences: @load_preference
+if @load_preference("distributed-package") == "DistributedNext"
+    import DistributedNext: Future, ProcessExitedException, RemoteChannel, RemoteException, myid, remote_do, remotecall_fetch, remotecall_wait, workers
+else
+    import Distributed: Future, ProcessExitedException, RemoteChannel, RemoteException, myid, remote_do, remotecall_fetch, remotecall_wait, workers
+end
+
 import MemPool
 import MemPool: DRef, StorageResource
 import MemPool: poolset, storage_capacity, storage_utilized

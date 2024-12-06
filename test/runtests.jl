@@ -24,6 +24,7 @@ tests = [
     ("Disk Caching", "diskcaching.jl"),
     ("File IO", "file-io.jl"),
     ("External Languages - Python", "extlang/python.jl"),
+    ("Preferences", "preferences.jl")
     #("Fault Tolerance", "fault-tolerance.jl"),
 ]
 all_test_names = map(test -> replace(last(test), ".jl"=>""), tests)

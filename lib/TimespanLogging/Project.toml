@@ -5,7 +5,11 @@ version = "0.1.0"
 
 [deps]
 Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
+DistributedNext = "fab6aee4-877b-4bac-a744-3eca44acbb6f"
+Preferences = "21216c6a-2e73-6563-6e65-726566657250"
 Profile = "9abbd945-dff8-562f-b5e8-e1ebf5ef1b79"
 
 [compat]
+DistributedNext = "1.0.0"
+Preferences = "1.4.3"
 julia = "1"
