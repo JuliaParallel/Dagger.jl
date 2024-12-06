@@ -8,14 +8,14 @@ function eager_submit_internal!(@nospecialize(payload))
 end
 function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{UInt64,Int}())
     @nospecialize payload
-    ntasks, uid, future, ref, f, args, options, reschedule = payload
+    ntasks, uid, future, ref, f, args, options, world, reschedule = payload
 
     if uid isa Vector
         thunk_ids = Sch.ThunkID[]
         for i in 1:ntasks
             tid = eager_submit_internal!(ctx, state, task, tid,
                                          (1, uid[i], future[i], ref[i],
-                                          f[i], args[i], options[i],
+                                          f[i], args[i], options[i], world[i],
                                           false); uid_to_tid)
             push!(thunk_ids, tid)
             uid_to_tid[uid[i]] = tid.id
@@ -26,7 +26,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
 
     id = next_id()
 
-    timespan_start(ctx, :add_thunk, (;thunk_id=id), (;f, args, options, uid))
+    timespan_start(ctx, :add_thunk, (;thunk_id=id), (;f, args, options, world, uid))
 
     # Lookup DTask/ThunkID -> Thunk
     old_args = copy(args)
@@ -97,7 +97,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
 
     GC.@preserve old_args args begin
         # Create the `Thunk`
-        thunk = Thunk(f, args...; id, options...)
+        thunk = Thunk(f, args...; world, id, options...)
 
         # Create a `DRef` to `thunk` so that the caller can preserve it
         thunk_ref = poolset(thunk; size=64, device=MemPool.CPURAMDevice(),
@@ -129,7 +129,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
             put!(state.chan, Sch.RescheduleSignal())
         end
 
-        timespan_finish(ctx, :add_thunk, (;thunk_id=id), (;f, args, options, uid))
+        timespan_finish(ctx, :add_thunk, (;thunk_id=id), (;f, args, options, world, uid))
 
         return thunk_id
     end
@@ -159,12 +159,12 @@ end
 
 
 # Local -> Remote
-function eager_submit!(ntasks, uid, future, finalizer_ref, f, args, options)
+function eager_submit!(ntasks, uid, future, finalizer_ref, f, args, options, world)
     if Dagger.in_task()
         h = Dagger.sch_handle()
-        return exec!(eager_submit_internal!, h, ntasks, uid, future, finalizer_ref, f, args, options, true)
+        return exec!(eager_submit_internal!, h, ntasks, uid, future, finalizer_ref, f, args, options, world, true)
     elseif myid() != 1
-        return remotecall_fetch(1, (ntasks, uid, future, finalizer_ref, f, args, options, true)) do payload
+        return remotecall_fetch(1, (ntasks, uid, future, finalizer_ref, f, args, options, world, true)) do payload
             @nospecialize payload
             Sch.init_eager()
             state = Dagger.Sch.EAGER_STATE[]
@@ -177,7 +177,7 @@ function eager_submit!(ntasks, uid, future, finalizer_ref, f, args, options)
         state = Dagger.Sch.EAGER_STATE[]
         return lock(state.lock) do
             eager_submit_internal!((ntasks, uid, future, finalizer_ref,
-                                    f, args, options,
+                                    f, args, options, world,
                                     true))
         end
     end
@@ -253,7 +253,7 @@ function eager_launch!((spec, task)::Pair{DTaskSpec,DTask})
     # Submit the task
     thunk_id = eager_submit!(1,
                              task.uid, task.future, task.finalizer_ref,
-                             spec.f, args, options)
+                             spec.f, args, options, spec.world)
     task.thunk_ref = thunk_id.ref
 end
 function eager_launch!(specs::Vector{Pair{DTaskSpec,DTask}})

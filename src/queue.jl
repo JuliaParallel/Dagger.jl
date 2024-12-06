@@ -2,6 +2,7 @@ mutable struct DTaskSpec
     f
     args::Vector{Pair{Union{Symbol,Nothing},Any}}
     options::NamedTuple
+    world::UInt64
 end
 
 abstract type AbstractTaskQueue end
