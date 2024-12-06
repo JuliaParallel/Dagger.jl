@@ -220,10 +220,31 @@ function eager_process_options_submission_to_local(id_map, options::NamedTuple)
 end
 
 function DTaskMetadata(spec::DTaskSpec)
+    # Extract true function and argument types
+    # TODO: Let the user/dispatch specify assumed argument types
     f = spec.f isa StreamingFunction ? spec.f.f : spec.f
-    arg_types = ntuple(i->chunktype(spec.args[i][2]), length(spec.args))
-    return_type = Base.promote_op(f, arg_types...)
-    return DTaskMetadata(return_type)
+    arg_types = [chunktype(spec.args[i][2]) for i in 1:length(spec.args)]
+    world = spec.world
+
+    # Extra compiler-derived metadata about this signature
+    # TODO: Memoize these
+    if !any(at -> at === Union{}, arg_types)
+        return_type = Base.infer_return_type(f, arg_types; world)
+        effects = Base.infer_effects(f, arg_types; world)
+        exc_type = Base.infer_exception_type(f, arg_types; world)
+        inline_cost = typemax(UInt) # FIXME
+    else
+        return_type = Union{}
+        effects = Core.Compiler.Effects()
+        # TODO: Should we capture our DTask arguments' exception types?
+        exc_type = Union{}
+        inline_cost = typemax(UInt)
+    end
+
+    return DTaskMetadata(return_type,
+                         effects,
+                         exc_type,
+                         inline_cost)
 end
 
 function eager_spawn(spec::DTaskSpec)

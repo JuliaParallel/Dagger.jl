@@ -44,9 +44,15 @@ Options(options...) = Options((;options...))
 
 Represents some useful metadata pertaining to a `DTask`:
 - `return_type::Type` - The inferred return type of the task
+- `effects::Core.Compiler.Effects` - The inferred effects of the task
+- `exception_type::Any` - The inferred type of exception that the task may throw
+- `inline_cost::UInt` - The compiler's assigned inline cost of the task
 """
 mutable struct DTaskMetadata
     return_type::Type
+    effects::Core.Compiler.Effects
+    exception_type::Any
+    inline_cost::UInt
 end
 
 """
