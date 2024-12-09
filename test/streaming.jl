@@ -80,7 +80,7 @@ for idx in 1:5
     @testset "Single Task Control Flow ($scope_str)" begin
         @test !test_finishes("Single task running forever"; max_evals=1_000_000, ignore_timeout=true) do
             local x
-            Dagger.spawn_streaming() do
+            Dagger.spawn_streaming(;teardown=false) do
                 x = Dagger.@spawn scope=rand(scopes) () -> begin
                     y = rand()
                     sleep(1)
@@ -92,7 +92,7 @@ for idx in 1:5
 
         @test test_finishes("Single task without result") do
             local x
-            Dagger.spawn_streaming() do
+            Dagger.spawn_streaming(;teardown=false) do
                 x = Dagger.@spawn scope=rand(scopes) rand()
             end
             @test fetch(x) === nothing
@@ -100,7 +100,7 @@ for idx in 1:5
 
         @test test_finishes("Single task with result"; max_evals=1_000_000) do
             local x
-            Dagger.spawn_streaming() do
+            Dagger.spawn_streaming(;teardown=false) do
                 x = Dagger.@spawn scope=rand(scopes) () -> begin
                    x = rand()
                     if x < 0.1
@@ -116,7 +116,7 @@ for idx in 1:5
     @testset "Non-Streaming Inputs ($scope_str)" begin
         @test test_finishes("() -> A") do
             local A
-            Dagger.spawn_streaming() do
+            Dagger.spawn_streaming(;teardown=false) do
                 A = Dagger.@spawn scope=rand(scopes) accumulator()
             end
             @test fetch(A) === nothing
@@ -127,7 +127,7 @@ for idx in 1:5
         end
         @test test_finishes("42 -> A") do
             local A
-            Dagger.spawn_streaming() do
+            Dagger.spawn_streaming(;teardown=false) do
                 A = Dagger.@spawn scope=rand(scopes) accumulator(42)
             end
             @test fetch(A) === nothing
@@ -138,7 +138,7 @@ for idx in 1:5
         end
         @test test_finishes("(42, 43) -> A") do
             local A
-            Dagger.spawn_streaming() do
+            Dagger.spawn_streaming(;teardown=false) do
                 A = Dagger.@spawn scope=rand(scopes) accumulator(42, 43)
             end
             @test fetch(A) === nothing
@@ -152,7 +152,7 @@ for idx in 1:5
     @testset "Non-Streaming Outputs ($scope_str)" begin
         @test test_finishes("x -> A") do
             local x, A
-            Dagger.spawn_streaming() do
+            Dagger.spawn_streaming(;teardown=false) do
                 x = Dagger.@spawn scope=rand(scopes) rand()
             end
             Dagger._without_options() do
@@ -168,7 +168,7 @@ for idx in 1:5
 
         @test test_finishes("x -> (A, B)") do
             local x, A, B
-            Dagger.spawn_streaming() do
+            Dagger.spawn_streaming(;teardown=false) do
                 x = Dagger.@spawn scope=rand(scopes) rand()
             end
             Dagger._without_options() do
@@ -188,10 +188,45 @@ for idx in 1:5
         end
     end
 
+    @testset "Teardown" begin
+        @test test_finishes("teardown=true"; max_evals=1_000_000, ignore_timeout=true) do
+            local x, y
+            Dagger.spawn_streaming(;teardown=true) do
+                x = Dagger.@spawn scope=rand(scopes) () -> begin
+                    sleep(0.1)
+                    return rand()
+                end
+                y = Dagger.with_options(;stream_max_evals=10) do
+                    Dagger.@spawn scope=rand(scopes) identity(x)
+                end
+            end
+            @test fetch(y) === nothing
+            sleep(1) # Wait for teardown
+            @test istaskdone(x)
+            fetch(x)
+        end
+        @test !test_finishes("teardown=false"; max_evals=1_000_000, ignore_timeout=true) do
+            local x, y
+            Dagger.spawn_streaming(;teardown=false) do
+                x = Dagger.@spawn scope=rand(scopes) () -> begin
+                    sleep(0.1)
+                    return rand()
+                end
+                y = Dagger.with_options(;stream_max_evals=10) do
+                    Dagger.@spawn scope=rand(scopes) identity(x)
+                end
+            end
+            @test fetch(y) === nothing
+            sleep(1) # Wait to ensure `x` task is still running
+            @test !istaskdone(x)
+            @test_throws_unwrap InterruptException fetch(x)
+        end
+    end
+
     @testset "Multiple Tasks ($scope_str)" begin
         @test test_finishes("x -> A") do
             local x, A
-            Dagger.spawn_streaming() do
+            Dagger.spawn_streaming(;teardown=false) do
                 x = Dagger.@spawn scope=rand(scopes) rand()
                 A = Dagger.@spawn scope=rand(scopes) accumulator(x)
             end
@@ -205,7 +240,7 @@ for idx in 1:5
 
         @test test_finishes("(x, A)") do
             local x, A
-            Dagger.spawn_streaming() do
+            Dagger.spawn_streaming(;teardown=false) do
                 x = Dagger.@spawn scope=rand(scopes) rand()
                 A = Dagger.@spawn scope=rand(scopes) accumulator(1.0)
             end
@@ -219,7 +254,7 @@ for idx in 1:5
 
         @test test_finishes("x -> y -> A") do
             local x, y, A
-            Dagger.spawn_streaming() do
+            Dagger.spawn_streaming(;teardown=false) do
                 x = Dagger.@spawn scope=rand(scopes) rand()
                 y = Dagger.@spawn scope=rand(scopes) x+1
                 A = Dagger.@spawn scope=rand(scopes) accumulator(y)
@@ -235,7 +270,7 @@ for idx in 1:5
 
         @test test_finishes("x -> (y, A)") do
             local x, y, A
-            Dagger.spawn_streaming() do
+            Dagger.spawn_streaming(;teardown=false) do
                 x = Dagger.@spawn scope=rand(scopes) rand()
                 y = Dagger.@spawn scope=rand(scopes) x+1
                 A = Dagger.@spawn scope=rand(scopes) accumulator(x)
@@ -251,7 +286,7 @@ for idx in 1:5
 
         @test test_finishes("(x, y) -> A") do
             local x, y, A
-            Dagger.spawn_streaming() do
+            Dagger.spawn_streaming(;teardown=false) do
                 x = Dagger.@spawn scope=rand(scopes) rand()
                 y = Dagger.@spawn scope=rand(scopes) rand()
                 A = Dagger.@spawn scope=rand(scopes) accumulator(x, y)
@@ -267,7 +302,7 @@ for idx in 1:5
 
         @test test_finishes("(x, y) -> z -> A") do
             local x, y, z, A
-            Dagger.spawn_streaming() do
+            Dagger.spawn_streaming(;teardown=false) do
                 x = Dagger.@spawn scope=rand(scopes) rand()
                 y = Dagger.@spawn scope=rand(scopes) rand()
                 z = Dagger.@spawn scope=rand(scopes) x + y
@@ -285,7 +320,7 @@ for idx in 1:5
 
         @test test_finishes("x -> (y, z) -> A") do
             local x, y, z, A
-            Dagger.spawn_streaming() do
+            Dagger.spawn_streaming(;teardown=false) do
                 x = Dagger.@spawn scope=rand(scopes) rand()
                 y = Dagger.@spawn scope=rand(scopes) x + 1
                 z = Dagger.@spawn scope=rand(scopes) x + 2
@@ -303,7 +338,7 @@ for idx in 1:5
 
         @test test_finishes("(x, y) -> z -> (A, B)") do
             local x, y, z, A, B
-            Dagger.spawn_streaming() do
+            Dagger.spawn_streaming(;teardown=false) do
                 x = Dagger.@spawn scope=rand(scopes) rand()
                 y = Dagger.@spawn scope=rand(scopes) rand()
                 z = Dagger.@spawn scope=rand(scopes) x + y
@@ -328,7 +363,7 @@ for idx in 1:5
         for T in (Float64, Int32, BigFloat)
             @test test_finishes("Stream eltype $T") do
                 local x, A
-                Dagger.spawn_streaming() do
+                Dagger.spawn_streaming(;teardown=false) do
                     x = Dagger.@spawn scope=rand(scopes) rand(T)
                     A = Dagger.@spawn scope=rand(scopes) accumulator(x)
                 end
@@ -344,13 +379,13 @@ for idx in 1:5
 
     @testset "Max Evals ($scope_str)" begin
         @test test_finishes("max_evals=0"; max_evals=0) do
-            @test_throws ArgumentError Dagger.spawn_streaming() do
+            @test_throws ArgumentError Dagger.spawn_streaming(;teardown=false) do
                 A = Dagger.@spawn scope=rand(scopes) accumulator()
             end
         end
         @test test_finishes("max_evals=1"; max_evals=1) do
             local A
-            Dagger.spawn_streaming() do
+            Dagger.spawn_streaming(;teardown=false) do
                 A = Dagger.@spawn scope=rand(scopes) accumulator()
             end
             @test fetch(A) === nothing
@@ -360,7 +395,7 @@ for idx in 1:5
         end
         @test test_finishes("max_evals=100"; max_evals=100) do
             local A
-            Dagger.spawn_streaming() do
+            Dagger.spawn_streaming(;teardown=false) do
                 A = Dagger.@spawn scope=rand(scopes) accumulator()
             end
             @test fetch(A) === nothing

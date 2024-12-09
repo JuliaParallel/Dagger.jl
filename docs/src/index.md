@@ -427,4 +427,5 @@ wait(t)
 The above example demonstrates a streaming region that generates random numbers
 continuously and writes each random number to a file. The streaming region is
 terminated when a random number less than 0.01 is generated, which is done by
-calling `Dagger.finish_stream()` (this exits the current streaming task).
+calling `Dagger.finish_stream()` (this terminates the current task, and will
+also terminate all streaming tasks launched by `spawn_streaming`).
