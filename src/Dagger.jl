@@ -21,6 +21,7 @@ if !isdefined(Base, :ScopedValues)
 else
     import Base.ScopedValues: ScopedValue, with
 end
+import TaskLocalValues: TaskLocalValue
 
 if !isdefined(Base, :get_extension)
     import Requires: @require
@@ -55,16 +56,16 @@ include("processor.jl")
 include("threadproc.jl")
 include("context.jl")
 include("utils/processors.jl")
+include("dtask.jl")
+include("cancellation.jl")
 include("task-tls.jl")
 include("scopes.jl")
 include("utils/scopes.jl")
-include("dtask.jl")
 include("queue.jl")
 include("thunk.jl")
 include("submission.jl")
 include("chunks.jl")
 include("memory-spaces.jl")
-include("cancellation.jl")
 
 # Task scheduling
 include("compute.jl")
@@ -75,6 +76,11 @@ include("sch/Sch.jl"); using .Sch
 
 # Data dependency task queue
 include("datadeps.jl")
+
+# Streaming
+include("stream.jl")
+include("stream-buffers.jl")
+include("stream-transfer.jl")
 
 # Array computations
 include("array/darray.jl")
@@ -168,6 +174,20 @@ function __init__()
         add_processor_callback!("__cpu_thread_$(tid)__") do
             ThreadProc(myid(), tid)
         end
+    end
+
+    # Set up @dagdebug categories, if specified
+    try
+        if haskey(ENV, "JULIA_DAGGER_DEBUG")
+            empty!(DAGDEBUG_CATEGORIES)
+            for category in split(ENV["JULIA_DAGGER_DEBUG"], ",")
+                if category != ""
+                    push!(DAGDEBUG_CATEGORIES, Symbol(category))
+                end
+            end
+        end
+    catch err
+        @warn "Error parsing JULIA_DAGGER_DEBUG" exception=err
     end
 end
 

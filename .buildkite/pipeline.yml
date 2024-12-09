@@ -6,6 +6,7 @@
     os: linux
     arch: x86_64
   command: "julia --project -e 'using Pkg; Pkg.develop(;path=\"lib/TimespanLogging\")'"
+
 .bench: &bench
   if: build.message =~ /\[run benchmarks\]/
   agents:
@@ -14,6 +15,7 @@
     os: linux
     arch: x86_64
     num_cpus: 16
+
 steps:
   - label: Julia 1.9
     timeout_in_minutes: 90
