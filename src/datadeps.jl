@@ -677,8 +677,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             # Is the data written previously or now?
             arg, deps = unwrap_inout(arg)
             arg = arg isa DTask ? fetch(arg; raw=true) : arg
-            if !type_may_alias(typeof(arg)) || !has_writedep(state, arg, deps, task)
-                @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Skipped copy-to (unwritten)"
+            if !type_may_alias(typeof(arg))
+                @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Skipped copy-to (immutable)"
                 spec.args[idx] = pos => arg
                 continue
             end
@@ -877,8 +877,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         for arg in keys(astate.data_origin)
             # Is the data previously written?
             arg, deps = unwrap_inout(arg)
-            if !type_may_alias(typeof(arg)) || !has_writedep(state, arg, deps)
-                @dagdebug nothing :spawn_datadeps "Skipped copy-from (unwritten)"
+            if !type_may_alias(typeof(arg))
+                @dagdebug nothing :spawn_datadeps "Skipped copy-from (immutable)"
             end
 
             # Is the source of truth elsewhere?
