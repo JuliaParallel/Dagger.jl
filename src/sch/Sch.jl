@@ -18,6 +18,9 @@ import ..Dagger: Context, Processor, SchedulerOptions, Options, Thunk, WeakThunk
 import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak_checked, wrap_weak, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, default_enabled, processor, get_processors, get_parent, execute!, rmprocs!, task_processor, constrain, cputhreadtime, maybe_take_or_alloc!
 import ..Dagger: @dagdebug, @safe_lock_spin1, @maybelog, @take_or_alloc!
 import DataStructures: PriorityQueue, enqueue!, dequeue_pair!, peek
+import ScopedValues: @with
+
+import MetricsTracker as MT
 
 import ..Dagger: ReusableCache, ReusableLinkedList, ReusableDict
 import ..Dagger: @reusable, @reusable_dict, @reusable_vector, @reusable_tasks
@@ -1462,6 +1465,12 @@ function do_task(to_proc, task::TaskSpec)
         end
     end
 
+    # Compute signature
+    @warn "Fix kwargs" maxlog=1
+    sig = DataType[Tf, map(fetched_args) do x
+        chunktype(x)
+    end...]
+
     #= FIXME: If MaxUtilization, stop processors and wait
     if (est_time_util isa MaxUtilization) && (real_time_util > 0)
         # FIXME: Stop processors
@@ -1473,8 +1482,11 @@ function do_task(to_proc, task::TaskSpec)
     real_time_util[] += est_time_util
     @maybelog ctx timespan_start(ctx, :compute, (;thunk_id, processor=to_proc), (;f))
 
-    # Start counting time and GC allocations
-    threadtime_start = cputhreadtime()
+    # Setup metrics for time monitoring
+    mspec = MT.MetricsSpec(MT.TimeMetric(), Dagger.SignatureMetric(), Dagger.ProcessorMetric())
+    local_cache = MT.MetricsCache()
+
+    # Start counting GC allocations
     # FIXME
     #gcnum_start = Base.gc_num()
 
@@ -1496,6 +1508,11 @@ function do_task(to_proc, task::TaskSpec)
         result = Dagger.with_options(propagated) do
             # Execute
             execute!(to_proc, f, fetched_args...; fetched_kwargs...)
+            @with Dagger.TASK_SIGNATURE=>sig Dagger.TASK_PROCESSOR=>to_proc begin
+                MT.@with_metrics mspec Dagger :execute! thunk_id MT.SyncInto(local_cache) begin
+                    execute!(to_proc, f, fetched_args...; fetched_kwargs...)
+                end
+            end
         end
 
         # Check if result is safe to store
@@ -1530,10 +1547,15 @@ function do_task(to_proc, task::TaskSpec)
         empty!(fetched_kwargs)
     end
 
-    threadtime = cputhreadtime() - threadtime_start
+    lock(MT.GLOBAL_METRICS_CACHE) do global_cache
+        MT.sync_results_into!(global_cache, local_cache)
+    end
+
     # FIXME: This is not a realistic measure of max. required memory
     #gc_allocd = min(max(UInt64(Base.gc_num().allocd) - UInt64(gcnum_start.allocd), UInt64(0)), UInt64(1024^4))
     @maybelog ctx timespan_finish(ctx, :compute, (;thunk_id, processor=to_proc), (;f, result=result_meta))
+
+    threadtime = MT.cache_lookup(local_cache, Dagger, :execute!, thunk_id, MT.TimeMetric())
 
     lock(TASK_SYNC) do
         real_time_util[] -= est_time_util
@@ -1549,7 +1571,7 @@ function do_task(to_proc, task::TaskSpec)
         #storage_pressure=real_alloc_util,
         #storage_capacity=storage_cap,
         #loadavg=((Sys.loadavg()...,) ./ Sys.CPU_THREADS),
-        threadtime=threadtime,
+        threadtime,
         # FIXME: Add runtime allocation tracking
         #gc_allocd=(isa(result_meta, Chunk) ? result_meta.handle.size : 0),
         gc_allocd=0,

@@ -44,6 +44,10 @@ end
 
 import MacroTools: @capture
 
+import MetricsTracker as MT
+const reuse_metrics = @load_preference("reuse-metrics", false)
+const metrics_path = @load_preference("metrics-path", "metrics.json")
+
 include("lib/util.jl")
 include("utils/dagdebug.jl")
 
@@ -72,6 +76,9 @@ include("utils/chunks.jl")
 include("utils/logging.jl")
 include("submission.jl")
 include("memory-spaces.jl")
+
+# Metrics
+include("utils/metrics.jl")
 
 # Task scheduling
 include("compute.jl")
@@ -130,6 +137,30 @@ function set_distributed_package!(value)
     TimespanLogging.set_distributed_package!(value)
 
     @set_preferences!("distributed-package" => value)
+    @info "Dagger.jl preference has been set, restart your Julia session for this change to take effect!"
+end
+
+"""
+    set_reuse_metrics!(value::Bool)
+
+Set a [preference](https://github.com/JuliaPackaging/Preferences.jl) for
+enabling or disabling the reuse of collected metrics across Julia sessions.
+You will need to restart Julia after setting a new preference.
+"""
+function set_reuse_metrics!(value::Bool)
+    @set_preferences!("reuse-metrics" => value)
+    @info "Dagger.jl preference has been set, restart your Julia session for this change to take effect!"
+end
+
+"""
+    set_metrics_path!(value::String)
+
+Set a [preference](https://github.com/JuliaPackaging/Preferences.jl) for
+the path to save and load metrics. You will need to restart Julia after setting
+a new preference.
+"""
+function set_metrics_path!(value::String)
+    @set_preferences!("metrics-path" => value)
     @info "Dagger.jl preference has been set, restart your Julia session for this change to take effect!"
 end
 
@@ -195,6 +226,26 @@ function __init__()
         end
     catch err
         @warn "Error parsing JULIA_DAGGER_DEBUG" exception=err
+    end
+
+    if reuse_metrics
+        if isfile(metrics_path)
+            # Load metrics
+            @dagdebug nothing :metrics "Loading metrics"
+            try
+                MT.load_metrics!(metrics_path)
+            catch err
+                @warn "Error loading metrics" exception=(err, catch_backtrace())
+            end
+        else
+            @dagdebug nothing :metrics "Metrics file not found"
+        end
+
+        atexit() do
+            # Save metrics on exit
+            @dagdebug nothing :metrics "Saving metrics"
+            MT.save_metrics(metrics_path)
+        end
     end
 end
 
