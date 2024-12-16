@@ -49,8 +49,10 @@ end
 end
 
 @testset "@spawn" begin
-    @test_throws_unwrap ConcurrencyViolationError remotecall_fetch(last(workers())) do
-        Dagger.Sch.init_eager()
+    if nprocs() > 1
+        @test_throws_unwrap ConcurrencyViolationError remotecall_fetch(last(workers())) do
+            Dagger.Sch.init_eager()
+        end
     end
     @test Dagger.Sch.EAGER_CONTEXT[] === nothing
     @testset "per-call" begin
@@ -266,42 +268,46 @@ end
             @test_throws_unwrap (Dagger.DTaskFailedException, ErrorException) fetch(d)
         end
     end
-    @testset "remote spawn" begin
-        a = fetch(Distributed.@spawnat 2 Dagger.@spawn 1+2)
-        @test Dagger.Sch.EAGER_INIT[]
-        @test fetch(Distributed.@spawnat 2 !(Dagger.Sch.EAGER_INIT[]))
-        @test a isa Dagger.DTask
-        @test fetch(a) == 3
+    if 2 in workers()
+        @testset "remote spawn" begin
+            a = fetch(Distributed.@spawnat 2 Dagger.@spawn 1+2)
+            @test Dagger.Sch.EAGER_INIT[]
+            @test fetch(Distributed.@spawnat 2 !(Dagger.Sch.EAGER_INIT[]))
+            @test a isa Dagger.DTask
+            @test fetch(a) == 3
 
-        # Mild stress-test
-        @test dynamic_fib(10) == 55
+            # Mild stress-test
+            @test dynamic_fib(10) == 55
 
-        # Errors on remote are correctly scrubbed (#430)
-        t2 = remotecall_fetch(2) do
-            t1 = Dagger.@spawn 1+"fail"
-            Dagger.@spawn t1+1
+            # Errors on remote are correctly scrubbed (#430)
+            t2 = remotecall_fetch(2) do
+                t1 = Dagger.@spawn 1+"fail"
+                Dagger.@spawn t1+1
+            end
+            @test_throws_unwrap (Dagger.DTaskFailedException, MethodError) fetch(t2)
         end
-        @test_throws_unwrap (Dagger.DTaskFailedException, MethodError) fetch(t2)
     end
-    @testset "undefined function" begin
-        # Issues #254, #255
+    if nprocs() > 1
+        @testset "undefined function" begin
+            # Issues #254, #255
 
-        # only defined on head node
-        @eval evil_f(x) = x
+            # only defined on head node
+            @eval evil_f(x) = x
 
-        eager_thunks = map(1:10) do i
-            single = isodd(i) ? 1 : first(workers())
-            Dagger.@spawn single=single evil_f(i)
+            eager_thunks = map(1:10) do i
+                single = isodd(i) ? 1 : first(workers())
+                Dagger.@spawn single=single evil_f(i)
+            end
+
+            errored(t) = try
+                fetch(t)
+                false
+            catch
+                true
+            end
+            @test any(t->errored(t), eager_thunks)
+            @test any(t->!errored(t), eager_thunks)
         end
-
-        errored(t) = try
-            fetch(t)
-            false
-        catch
-            true
-        end
-        @test any(t->errored(t), eager_thunks)
-        @test any(t->!errored(t), eager_thunks)
     end
     @testset "function chunks" begin
         @testset "lazy API" begin
@@ -331,7 +337,9 @@ end
                 @test_skip !all(x->x==43, collect(ctx, delayed(vcat)([delayed(pls)(1) for i in 1:10]...)))
                 # Positive tests (no serialization)
                 @test all(x->x==43, collect(ctx, delayed(vcat)([delayed(pls; scope=ProcessScope())(1) for i in 1:10]...)))
-                @test all(x->x==1, collect(ctx, delayed(vcat)([delayed(pls; scope=ProcessScope(first(workers())))(1) for i in 1:10]...)))
+                if nprocs() > 1
+                    @test all(x->x==1, collect(ctx, delayed(vcat)([delayed(pls; scope=ProcessScope(first(workers())))(1) for i in 1:10]...)))
+                end
             end
             @testset "Processor Data Movement" begin
                 @everywhere Dagger.add_processor_callback!(()->MulProc(), :mulproc)

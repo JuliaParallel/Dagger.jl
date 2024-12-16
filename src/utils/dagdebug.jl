@@ -24,11 +24,11 @@ macro dagdebug(thunk, category, msg, args...)
                 $id = -1
             end
             if $id > 0
-                if $(QuoteNode(cat_sym)) in $DAGDEBUG_CATEGORIES
+                if $(QuoteNode(cat_sym)) in $DAGDEBUG_CATEGORIES || :all in $DAGDEBUG_CATEGORIES
                     $debug_ex_id
                 end
             elseif $id == 0
-                if $(QuoteNode(cat_sym)) in $DAGDEBUG_CATEGORIES
+                if $(QuoteNode(cat_sym)) in $DAGDEBUG_CATEGORIES || :all in $DAGDEBUG_CATEGORIES
                     $debug_ex_noid
                 end
             end

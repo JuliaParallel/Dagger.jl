@@ -71,7 +71,7 @@ z = collect(Z)
 ```
 
 Two changes were made: first, we `enumerate(X.chunks)` so that we can get a
-unique index to identify each `chunk`; second, we specify a `ThunkOptions` to
+unique index to identify each `chunk`; second, we specify options to
 `delayed` with a `checkpoint` and `restore` function that is specialized to
 write or read the given chunk to or from a file on disk, respectively. Notice
 the usage of `collect` in the `checkpoint` function, and the use of
