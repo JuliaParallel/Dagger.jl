@@ -7,6 +7,7 @@ ArgPosition() = ArgPosition(true, 0, :NULL)
 ArgPosition(pos::ArgPosition) = ArgPosition(pos.positional, pos.idx, pos.kw)
 ispositional(pos::ArgPosition) = pos.positional
 iskw(pos::ArgPosition) = !pos.positional
+raw_position(pos::ArgPosition) = ispositional(pos) ? pos.idx : pos.kw
 function pos_idx(pos::ArgPosition)
     @assert pos.positional
     @assert pos.idx > 0

@@ -32,25 +32,6 @@ include("util.jl")
 include("fault-handler.jl")
 include("dynamic.jl")
 
-mutable struct ProcessorCacheEntry
-    gproc::OSProc
-    proc::Processor
-    next::ProcessorCacheEntry
-
-    ProcessorCacheEntry(gproc::OSProc, proc::Processor) = new(gproc, proc)
-end
-Base.isequal(p1::ProcessorCacheEntry, p2::ProcessorCacheEntry) =
-    p1.proc === p2.proc
-function Base.show(io::IO, entry::ProcessorCacheEntry)
-    entries = 1
-    next = entry.next
-    while next !== entry
-        entries += 1
-        next = next.next
-    end
-    print(io, "ProcessorCacheEntry(pid $(entry.gproc.pid), $(entry.proc), $entries entries)")
-end
-
 struct TaskResult
     pid::Int
     proc::Processor
@@ -82,7 +63,6 @@ Fields:
 - `worker_storage_capacity::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}` - Maps from worker ID to storage resource capacity
 - `worker_loadavg::Dict{Int,NTuple{3,Float64}}` - Worker load average
 - `worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}` - Communication channels between the scheduler and each worker
-- `procs_cache_list::Base.RefValue{Union{ProcessorCacheEntry,Nothing}}` - Cached linked list of processors ready to be used
 - `signature_time_cost::Dict{Signature,UInt64}` - Cache of estimated CPU time (in nanoseconds) required to compute calls with the given signature
 - `signature_alloc_cost::Dict{Signature,UInt64}` - Cache of estimated CPU RAM (in bytes) required to compute calls with the given signature
 - `transfer_rate::Ref{UInt64}` - Estimate of the network transfer rate in bytes per second
@@ -109,7 +89,6 @@ struct ComputeState
     worker_storage_capacity::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}
     worker_loadavg::Dict{Int,NTuple{3,Float64}}
     worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}
-    procs_cache_list::Base.RefValue{Union{ProcessorCacheEntry,Nothing}}
     signature_time_cost::Dict{Signature,UInt64}
     signature_alloc_cost::Dict{Signature,UInt64}
     transfer_rate::Ref{UInt64}
@@ -139,7 +118,6 @@ function start_state(deps::Dict, node_order, chan)
                          Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}(),
                          Dict{Int,NTuple{3,Float64}}(),
                          Dict{Int, Tuple{RemoteChannel,RemoteChannel}}(),
-                         Ref{Union{ProcessorCacheEntry,Nothing}}(nothing),
                          Dict{Signature,UInt64}(),
                          Dict{Signature,UInt64}(),
                          Ref{UInt64}(1_000_000),
@@ -553,8 +531,6 @@ function schedule!(ctx, state, sch_options, procs=procs_to_use(ctx, sch_options)
         # Remove processors that aren't yet initialized
         procs = filter(p -> haskey(state.worker_chans, Dagger.root_worker_id(p)), procs)
 
-        populate_processor_cache_list!(state, procs)
-
         # Schedule tasks
         to_fire = @reusable_dict :schedule!_to_fire ScheduleTaskLocation Vector{ScheduleTaskSpec} ScheduleTaskLocation(OSProc(), OSProc()) ScheduleTaskSpec[] 1024
         failed_scheduling = @reusable_vector :schedule!_failed_scheduling Union{Thunk,Nothing} nothing 32
@@ -633,6 +609,7 @@ function schedule!(ctx, state, sch_options, procs=procs_to_use(ctx, sch_options)
         costs = @reusable_dict :schedule!_costs Processor Float64 OSProc() 0.0 32
         estimate_task_costs!(sorted_procs, costs, state, input_procs, task)
         empty!(costs) # We don't use costs here
+        empty!(input_procs)
         scheduled = false
 
         # Move our corresponding ThreadProc to be the last considered
@@ -710,10 +687,7 @@ function monitor_procs_changed!(ctx, state, options)
         for p in diffps
             init_proc(state, p, ctx.log_sink)
 
-            # Empty the processor cache list and force reschedule
-            lock(state.lock) do
-                state.procs_cache_list[] = nothing
-            end
+            # Force reschedule
             put!(state.chan, RescheduleSignal())
         end
 
@@ -721,11 +695,6 @@ function monitor_procs_changed!(ctx, state, options)
         diffps = setdiff(old_ps, new_ps)
         for p in diffps
             cleanup_proc(state, p, ctx.log_sink)
-
-            # Empty the processor cache list
-            lock(state.lock) do
-                state.procs_cache_list[] = nothing
-            end
         end
 
         @maybelog ctx timespan_finish(ctx, :assign_procs, (;uid=state.uid), nothing)
@@ -741,7 +710,6 @@ function remove_dead_proc!(ctx, state, proc, options)
     delete!(state.worker_storage_capacity, proc.pid)
     delete!(state.worker_loadavg, proc.pid)
     delete!(state.worker_chans, proc.pid)
-    state.procs_cache_list[] = nothing
 end
 
 function finish_task!(ctx, state, node, thunk_failed)

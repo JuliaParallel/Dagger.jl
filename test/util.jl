@@ -18,11 +18,11 @@ function _test_throws_unwrap(terr, ex; to_match=[])
     match_expr = Expr(:block)
     for m in to_match
         if m.head == :(=)
-            lhs, rhs = replace_obj!(m.args[1], oerr), m.args[2]
+            lhs, rhs = replace_obj!(m.args[1], rerr), m.args[2]
             push!(match_expr.args, :(@test $lhs == $rhs))
         elseif m.head == :call
             fn = m.args[1]
-            lhs, rhs = replace_obj!(m.args[2], oerr), m.args[3]
+            lhs, rhs = replace_obj!(m.args[2], rerr), m.args[3]
             if fn == :(<)
                 push!(match_expr.args, :(@test startswith($lhs, $rhs)))
             elseif fn == :(>)

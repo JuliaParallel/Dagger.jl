@@ -15,13 +15,13 @@ function maybetake!(cache::ReusableCache{T}, len=nothing) where T
     for idx in 1:length(cache.used)
         cache.used[idx] && continue
         if cache.sized && isassigned(cache.cache, idx) && length(cache.cache[idx]) != len
-            @debug "Skipping length $(length(cache.cache[idx])) (want length $len) @ $idx"
+            @dagdebug nothing :reuse "Skipping length $(length(cache.cache[idx])) (want length $len) @ $idx"
             continue
         end
         cache.used[idx] = true
         if !isassigned(cache.cache, idx)
             if cache.sized
-                @debug "Allocating length $len @ $idx"
+                @dagdebug nothing :reuse "Allocating length $len @ $idx"
                 cache.cache[idx] = alloc!(T, len)
             else
                 cache.cache[idx] = alloc!(T)

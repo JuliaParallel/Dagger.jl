@@ -402,7 +402,7 @@ function can_use_proc(state, task, gproc, proc, opts, scope)
             scope = constrain(scope, Dagger.ExactScope(proc))
         elseif opts.proclist isa Vector
             if !(typeof(proc) in opts.proclist)
-                @dagdebug task :scope "Rejected $proc: !(typeof(proc) in proclist)"
+                @dagdebug task :scope "Rejected $proc: !($(typeof(proc)) in proclist)"
                 return false, scope
             end
             scope = constrain(scope,
@@ -437,18 +437,18 @@ function can_use_proc(state, task, gproc, proc, opts, scope)
         return false, scope
     end
 
-    # Check against f/args
+    # Check against function and arguments
     Tf = chunktype(task.f)
     if !Dagger.iscompatible_func(proc, opts, Tf)
         @dagdebug task :scope "Rejected $proc: Not compatible with function type ($Tf)"
         return false, scope
     end
-    for (_, arg) in task.inputs
-        arg = unwrap_weak_checked(arg)
-        if arg isa Thunk
-            arg = state.cache[arg]
+    for arg in task.inputs[2:end]
+        value = unwrap_weak_checked(Dagger.value(arg))
+        if value isa Thunk
+            value = load_result(state, value)
         end
-        Targ = chunktype(arg)
+        Targ = chunktype(value)
         if !Dagger.iscompatible_arg(proc, opts, Targ)
             @dagdebug task :scope "Rejected $proc: Not compatible with argument type ($Targ)"
             return false, scope
@@ -496,27 +496,6 @@ function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
     end
     =#
     return true, est_time_util, est_alloc_util, est_occupancy
-end
-
-function populate_processor_cache_list!(state, procs)
-    # Populate the cache if empty
-    if state.procs_cache_list[] === nothing
-        current = nothing
-        for p in map(x->x.pid, procs)
-            for proc in get_processors(OSProc(p))
-                next = ProcessorCacheEntry(OSProc(p), proc)
-                if current === nothing
-                    current = next
-                    current.next = current
-                    state.procs_cache_list[] = current
-                else
-                    current.next = next
-                    current = next
-                    current.next = state.procs_cache_list[]
-                end
-            end
-        end
-    end
 end
 
 "Like `sum`, but replaces `nothing` entries with the average of non-`nothing` entries."
