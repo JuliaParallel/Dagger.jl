@@ -47,12 +47,14 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
     @eval begin
         @add_arg_table! s begin
             "--test"
-                nargs = '*'
-                default = all_test_names
+                nargs = 1
+                action = :append_arg
+                arg_type = String
                 help = "Enables the specified test to run in the testsuite"
             "--no-test"
-                nargs = '*'
-                default = String[]
+                nargs = 1
+                action = :append_arg
+                arg_type = String
                 help = "Disables the specified test from running in the testsuite"
             "-s", "--simulate"
                 action = :store_true
@@ -72,31 +74,35 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
 
     parsed_args = parse_args(s)
     to_test = String[]
-    for test in parsed_args["test"]
-        if isdir(joinpath(@__DIR__, test))
-            for (_, other_test) in tests
-                if startswith(other_test, test)
-                    push!(to_test, other_test)
-                    continue
+    if isempty(parsed_args["test"])
+        to_test = copy(all_test_names)
+    else
+        for _test in parsed_args["test"]
+            test = only(_test)
+            if isdir(joinpath(@__DIR__, test))
+                for (_, other_test) in tests
+                    if startswith(other_test, test)
+                        push!(to_test, other_test)
+                    end
                 end
+            elseif test in all_test_names
+                push!(to_test, test)
+            else
+                println(stderr, "Unknown test: $test")
+                println(stderr, "Available tests:")
+                for ((test_title, _), test_name) in zip(tests, all_test_names)
+                    println(stderr, "  $test_name: $test_title")
+                end
+                exit(1)
             end
-        elseif test in all_test_names
-            push!(to_test, test)
-        else
-            println(stderr, "Unknown test: $test")
-            println(stderr, "Available tests:")
-            for ((test_title, _), test_name) in zip(tests, all_test_names)
-                println(stderr, "  $test_name: $test_title")
-            end
-            exit(1)
         end
     end
-    for test in parsed_args["no-test"]
+    for _test in parsed_args["no-test"]
+        test = only(_test)
         if isdir(joinpath(@__DIR__, test))
             for (_, other_test) in tests
                 if startswith(other_test, test)
                     filter!(x -> x != other_test, to_test)
-                    continue
                 end
             end
         elseif test in all_test_names
