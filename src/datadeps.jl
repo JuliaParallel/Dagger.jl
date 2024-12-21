@@ -96,18 +96,34 @@ struct DAGSpec
                     Dict{Int, Type}(),
                     Dict{Int, Vector{DatadepsArgSpec}}())
 end
-function Base.push!(dspec::DAGSpec, tspec::DTaskSpec, task::DTask)
-    add_vertex!(dspec.g)
-    id = nv(dspec.g)
-
-    dspec.id_to_functype[id] = typeof(tspec.f)
-
-    dspec.id_to_argtypes[id] = DatadepsArgSpec[]
+function dag_add_task!(dspec::DAGSpec, tspec::DTaskSpec, task::DTask)
+    # Check if this task depends on any other tasks within the DAG,
+    # which we are not yet ready to handle
     for (idx, (kwpos, arg)) in enumerate(tspec.args)
         arg, deps = unwrap_inout(arg)
         pos = kwpos isa Symbol ? kwpos : idx
         for (dep_mod, readdep, writedep) in deps
             if arg isa DTask
+                if arg.uid in keys(dspec.uid_to_id)
+                    # Within-DAG dependency, bail out
+                    return false
+                end
+            end
+        end
+    end
+
+    add_vertex!(dspec.g)
+    id = nv(dspec.g)
+
+    # Record function signature
+    dspec.id_to_functype[id] = typeof(tspec.f)
+    argtypes = DatadepsArgSpec[]
+    for (idx, (kwpos, arg)) in enumerate(tspec.args)
+        arg, deps = unwrap_inout(arg)
+        pos = kwpos isa Symbol ? kwpos : idx
+        for (dep_mod, readdep, writedep) in deps
+            if arg isa DTask
+                #= TODO: Re-enable this when we can handle within-DAG dependencies
                 if arg.uid in keys(dspec.uid_to_id)
                     # Within-DAG dependency
                     arg_id = dspec.uid_to_id[arg.uid]
@@ -115,21 +131,26 @@ function Base.push!(dspec::DAGSpec, tspec::DTaskSpec, task::DTask)
                     add_edge!(dspec.g, arg_id, id)
                     continue
                 end
+                =#
 
                 # External DTask, so fetch this and track it as a raw value
                 arg = fetch(arg; raw=true)
             end
             ainfo = aliasing(arg, dep_mod)
-            push!(dspec.id_to_argtypes[id], DatadepsArgSpec(pos, typeof(arg), dep_mod, ainfo))
+            push!(argtypes, DatadepsArgSpec(pos, typeof(arg), dep_mod, ainfo))
         end
     end
+    dspec.id_to_argtypes[id] = argtypes
 
     # FIXME: Also record some portion of options
     # FIXME: Record syncdeps
     dspec.id_to_uid[id] = task.uid
     dspec.uid_to_id[task.uid] = id
 
-    return
+    return true
+end
+function dag_has_task(dspec::DAGSpec, task::DTask)
+    return task.uid in keys(dspec.uid_to_id)
 end
 function Base.:(==)(dspec1::DAGSpec, dspec2::DAGSpec)
     # Are the graphs the same size?
@@ -621,7 +642,6 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         @warn "Datadeps support for multi-GPU, multi-worker is currently broken\nPlease be prepared for incorrect results or errors" maxlog=1
     end
 
-    # Round-robin assign tasks to processors
     upper_queue = get_options(:task_queue)
 
     state = DataDepsState(queue.aliasing, all_procs)
@@ -632,7 +652,10 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     if DATADEPS_SCHEDULE_REUSABLE[]
         # Compute DAG spec
         for (spec, task) in queue.seen_tasks
-            push!(state.dag_spec, spec, task)
+            if !dag_add_task!(state.dag_spec, spec, task)
+                # This task needs to be deferred
+                break
+            end
         end
 
         # Find any matching DAG specs and reuse their schedule
@@ -654,13 +677,20 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
     # Populate all task dependencies
     write_num = 1
+    task_num = 0
     for (spec, task) in queue.seen_tasks
+        if !dag_has_task(state.dag_spec, task)
+            # This task needs to be deferred
+            break
+        end
         write_num = populate_task_info!(state, spec, task, write_num)
+        task_num += 1
     end
+    @assert task_num > 0
 
     if isempty(schedule)
         # Run AOT scheduling
-        schedule = datadeps_create_schedule(queue.scheduler, state, queue.seen_tasks)::Dict{DTask, Processor}
+        schedule = datadeps_create_schedule(queue.scheduler, state, queue.seen_tasks[1:task_num])::Dict{DTask, Processor}
 
         if DATADEPS_SCHEDULE_REUSABLE[]
             # Cache the schedule
@@ -680,6 +710,11 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     # Launch tasks and necessary copies
     write_num = 1
     for (spec, task) in queue.seen_tasks
+        if !dag_has_task(state.dag_spec, task)
+            # This task needs to be deferred
+            break
+        end
+
         our_proc = schedule[task]
         @assert our_proc in all_procs
         our_space = only(memory_spaces(our_proc))
@@ -829,6 +864,9 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         write_num += 1
     end
 
+    # Remove processed tasks
+    deleteat!(queue.seen_tasks, 1:task_num)
+
     # Copy args from remote to local
     if queue.aliasing
         # We need to replay the writes from all tasks in-order (skipping any
@@ -961,18 +999,25 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
     wait_all(; check_errors=true) do
         scheduler = something(scheduler, DATADEPS_SCHEDULER[], RoundRobinScheduler())
         launch_wait = something(launch_wait, DATADEPS_LAUNCH_WAIT[], false)::Bool
+        local result
         if launch_wait
-            result = spawn_bulk() do
+            spawn_bulk() do
                 queue = DataDepsTaskQueue(get_options(:task_queue);
                                           scheduler, aliasing)
-                with_options(f; task_queue=queue)
-                distribute_tasks!(queue)
+                result = with_options(f; task_queue=queue)
+                while !isempty(queue.seen_tasks)
+                    @dagdebug nothing :spawn_datadeps "Entering Datadeps region"
+                    distribute_tasks!(queue)
+                end
             end
         else
             queue = DataDepsTaskQueue(get_options(:task_queue);
                                       scheduler, aliasing)
             result = with_options(f; task_queue=queue)
-            distribute_tasks!(queue)
+            while !isempty(queue.seen_tasks)
+                @dagdebug nothing :spawn_datadeps "Entering Datadeps region"
+                distribute_tasks!(queue)
+            end
         end
         return result
     end
