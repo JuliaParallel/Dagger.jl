@@ -463,17 +463,24 @@ end
 
 function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
     T = typeof(p)
-    # FIXME: MaxUtilization
-    est_time_util = round(UInt64, if time_util !== nothing && haskey(time_util, T)
-        time_util[T] * 1000^3
+
+    @warn "Use special lookup to use other proc estimates" maxlog=1
+    est_time_util = if time_util !== nothing && haskey(time_util, T)
+        round(UInt64, time_util[T] * 1000^3)
+    elseif haskey(state.signature_time_cost, sig) && haskey(state.signature_time_cost[sig], p)
+        state.signature_time_cost[sig][p]
     else
-        get(state.signature_time_cost, sig, 1000^3)
-    end)::UInt64
-    est_alloc_util = if alloc_util !== nothing && haskey(alloc_util, T)
-        alloc_util[T]
-    else
-        get(state.signature_alloc_cost, sig, UInt64(0))
+        UInt64(1000^3)
     end::UInt64
+
+    est_alloc_util = if alloc_util !== nothing && haskey(alloc_util, T)
+        alloc_util[T]::UInt64
+    elseif haskey(state.signature_alloc_cost, sig) && haskey(state.signature_alloc_cost[sig], p)
+        state.signature_alloc_cost[sig][p]
+    else
+        UInt64(0)
+    end::UInt64
+
     est_occupancy::UInt32 = typemax(UInt32)
     if occupancy !== nothing
         occ = nothing
@@ -487,6 +494,7 @@ function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
             est_occupancy = Base.unsafe_trunc(UInt32, clamp(occ, 0, 1) * typemax(UInt32))
         end
     end
+
     #= FIXME: Estimate if cached data can be swapped to storage
     storage = storage_resource(p)
     real_alloc_util = state.worker_storage_pressure[gp][storage]
@@ -495,6 +503,7 @@ function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
         return false, est_time_util, est_alloc_util
     end
     =#
+
     return true, est_time_util, est_alloc_util, est_occupancy
 end
 
