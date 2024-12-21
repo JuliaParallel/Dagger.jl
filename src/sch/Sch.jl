@@ -73,8 +73,8 @@ Fields:
 - `worker_loadavg::Dict{Int,NTuple{3,Float64}}` - Worker load average
 - `worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}` - Communication channels between the scheduler and each worker
 - `procs_cache_list::Base.RefValue{Union{ProcessorCacheEntry,Nothing}}` - Cached linked list of processors ready to be used
-- `signature_time_cost::Dict{Signature,UInt64}` - Cache of estimated CPU time (in nanoseconds) required to compute calls with the given signature
-- `signature_alloc_cost::Dict{Signature,UInt64}` - Cache of estimated CPU RAM (in bytes) required to compute calls with the given signature
+- `signature_time_cost::Dict{Signature,Dict{Processor,UInt64}}` - Cache of estimated CPU time (in nanoseconds) required to compute calls with the given signature on a given processor
+- `signature_alloc_cost::Dict{Signature,Dict{Processor,UInt64}}` - Cache of estimated CPU RAM (in bytes) required to compute calls with the given signature on a given processor
 - `transfer_rate::Ref{UInt64}` - Estimate of the network transfer rate in bytes per second
 - `halt::Base.Event` - Event indicating that the scheduler is halting
 - `lock::ReentrantLock` - Lock around operations which modify the state
@@ -100,8 +100,8 @@ struct ComputeState
     worker_loadavg::Dict{Int,NTuple{3,Float64}}
     worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}
     procs_cache_list::Base.RefValue{Union{ProcessorCacheEntry,Nothing}}
-    signature_time_cost::Dict{Signature,UInt64}
-    signature_alloc_cost::Dict{Signature,UInt64}
+    signature_time_cost::Dict{Signature,Dict{Processor,UInt64}}
+    signature_alloc_cost::Dict{Signature,Dict{Processor,UInt64}}
     transfer_rate::Ref{UInt64}
     halt::Base.Event
     lock::ReentrantLock
@@ -130,8 +130,8 @@ function start_state(deps::Dict, node_order, chan)
                          Dict{Int,NTuple{3,Float64}}(),
                          Dict{Int, Tuple{RemoteChannel,RemoteChannel}}(),
                          Ref{Union{ProcessorCacheEntry,Nothing}}(nothing),
-                         Dict{Signature,UInt64}(),
-                         Dict{Signature,UInt64}(),
+                         Dict{Signature,Dict{Processor,UInt64}}(),
+                         Dict{Signature,Dict{Processor,UInt64}}(),
                          Ref{UInt64}(1_000_000),
                          Base.Event(),
                          ReentrantLock(),
@@ -590,16 +590,23 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
             end
             node = unwrap_weak_checked(state.thunk_dict[thunk_id])
             if metadata !== nothing
+                # Update metrics
                 state.worker_time_pressure[pid][proc] = metadata.time_pressure
                 #to_storage = fetch(node.options.storage)
                 #state.worker_storage_pressure[pid][to_storage] = metadata.storage_pressure
                 #state.worker_storage_capacity[pid][to_storage] = metadata.storage_capacity
                 state.worker_loadavg[pid] = metadata.loadavg
+
                 sig = signature(state, node)
-                state.signature_time_cost[sig] = (metadata.threadtime + get(state.signature_time_cost, sig, 0)) ÷ 2
-                state.signature_alloc_cost[sig] = (metadata.gc_allocd + get(state.signature_alloc_cost, sig, 0)) ÷ 2
+                time_costs_proc = get!(Dict{Processor,UInt64}, state.signature_time_cost, sig)
+                time_cost = get(time_costs_proc, proc, UInt64(0))
+                time_costs_proc[proc] = (metadata.threadtime + time_cost) ÷ UInt64(2)
+                alloc_costs_proc = get!(Dict{Processor,UInt64}, state.signature_alloc_cost, sig)
+                alloc_cost = get(alloc_costs_proc, proc, UInt64(0))
+                alloc_costs_proc[proc] = (metadata.gc_allocd + alloc_cost) ÷ UInt64(2)
+
                 if metadata.transfer_rate !== nothing
-                    state.transfer_rate[] = (state.transfer_rate[] + metadata.transfer_rate) ÷ 2
+                    state.transfer_rate[] = (state.transfer_rate[] + metadata.transfer_rate) ÷ UInt64(2)
                 end
             end
             state.cache[node] = res
