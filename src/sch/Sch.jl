@@ -544,7 +544,7 @@ function schedule!(ctx, state, sch_options, procs=procs_to_use(ctx, sch_options)
         if isempty(state.ready)
             @goto fire_tasks
         end
-        task = pop!(state.ready)
+        task = popfirst!(state.ready)
         @maybelog ctx timespan_start(ctx, :schedule, (;uid=state.uid, thunk_id=task.id), (;thunk_id=task.id))
         if has_result(state, task)
             if haskey(state.errored, task)
