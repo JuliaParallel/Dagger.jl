@@ -983,9 +983,12 @@ stealing_permitted(proc::Dagger.ThreadProc) = proc.owner != 1 || proc.tid != 1
 proc_has_occupancy(proc_occupancy, task_occupancy) =
     UInt64(task_occupancy) + UInt64(proc_occupancy) <= typemax(UInt32)
 
-function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, return_queue::RemoteChannel)
+function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, return_queue::RemoteChannel, start_event::Base.Event)
     to_proc = istate.proc
     proc_run_task = @task begin
+        # Wait for our ProcessorState to be configured
+        wait(start_event)
+
         # FIXME: Context changes aren't noticed over time
         ctx = istate.ctx
         tasks = istate.tasks
@@ -1154,23 +1157,29 @@ function (dts::DoTaskSpec)()
         (CapturedException(err, bt), nothing)
     finally
         istate = proc_states(task.sch_uid) do states
-            states[to_proc].state
-        end
-        lock(istate.queue) do _
-            delete!(istate.tasks, tid)
-            delete!(istate.task_specs, tid)
-            if !(tid in istate.cancelled)
-                istate.proc_occupancy[] -= task.est_occupancy
-                istate.time_pressure[] -= task.est_time_util
-            else
-                # Task was cancelled, so occupancy and pressure are
-                # already reduced
-                pop!(istate.cancelled, tid)
-                delete!(istate.cancel_tokens, tid)
-                was_cancelled = true
+            if haskey(states, to_proc)
+                return states[to_proc].state
             end
+            # Processor was removed due to scheduler exit
+            return nothing
         end
-        notify(istate.reschedule)
+        if istate !== nothing
+            lock(istate.queue) do _
+                delete!(istate.tasks, tid)
+                delete!(istate.task_specs, tid)
+                if !(tid in istate.cancelled)
+                    istate.proc_occupancy[] -= task.est_occupancy
+                    istate.time_pressure[] -= task.est_time_util
+                else
+                    # Task was cancelled, so occupancy and pressure are
+                    # already reduced
+                    pop!(istate.cancelled, tid)
+                    delete!(istate.cancel_tokens, tid)
+                    was_cancelled = true
+                end
+            end
+            notify(istate.reschedule)
+        end
 
         # Ensure that any spawned tasks get cleaned up
         Dagger.cancel!(dts.cancel_token)
@@ -1206,24 +1215,30 @@ function do_tasks(to_proc, return_queue, tasks)
     ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
     uid = first(tasks).sch_uid
     state = proc_states(uid) do states
-        get!(states, to_proc) do
-            queue = PriorityQueue{TaskSpec, UInt32}()
-            queue_locked = LockedObject(queue)
-            reschedule = Doorbell()
-            istate = ProcessorInternalState(ctx, to_proc, return_queue,
-                                            queue_locked, reschedule,
-                                            Dict{Int,Task}(),
-                                            Dict{Int,Vector{Any}}(),
-                                            Ref(UInt32(0)), Ref(UInt64(0)),
-                                            Set{Int}(),
-                                            Dict{Int,Dagger.CancelToken}(),
-                                            Ref(false))
-            runner = start_processor_runner!(istate, uid, return_queue)
-            @static if VERSION < v"1.9"
-                reschedule.waiter = runner
-            end
-            return ProcessorState(istate, runner)
+        if haskey(states, to_proc)
+            return states[to_proc]
         end
+
+        # Initialize the processor state and runner
+        queue = PriorityQueue{TaskSpec, UInt32}()
+        queue_locked = LockedObject(queue)
+        reschedule = Doorbell()
+        istate = ProcessorInternalState(ctx, to_proc, return_queue,
+                                        queue_locked, reschedule,
+                                        Dict{Int,Task}(),
+                                        Dict{Int,Vector{Any}}(),
+                                        Ref(UInt32(0)), Ref(UInt64(0)),
+                                        Set{Int}(),
+                                        Dict{Int,Dagger.CancelToken}(),
+                                        Ref(false))
+        start_event = Base.Event()
+        runner = start_processor_runner!(istate, uid, return_queue, start_event)
+        @static if VERSION < v"1.9"
+            reschedule.waiter = runner
+        end
+        state = states[to_proc] = ProcessorState(istate, runner)
+        notify(start_event)
+        return state
     end
     istate = state.state
     lock(istate.queue) do queue
