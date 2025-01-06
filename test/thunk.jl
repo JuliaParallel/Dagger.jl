@@ -139,6 +139,25 @@ end
         @test t isa Dagger.DTask
         @test fetch(t) == 42
     end
+    @testset "setindex!" begin
+        A = Dagger.@mutable rand(4, 4)
+
+        t = @spawn A[1, 2] = 3.0
+        @test t isa Dagger.DTask
+        @test fetch(t) == 3.0
+        @test fetch(@spawn A[1, 2]) == 3.0
+
+        t = @spawn A[2] = 4.0
+        @test t isa Dagger.DTask
+        @test fetch(t) == 4.0
+        @test fetch(@spawn A[2]) == 4.0
+
+        R = Dagger.@mutable Ref(42)
+        t = @spawn R[] = 43
+        @test t isa Dagger.DTask
+        @test fetch(t) == 43
+        @test fetch(@spawn R[]) == 43
+    end
     @testset "NamedTuple" begin
         t = @spawn (;a=1, b=2)
         @test t isa Dagger.DTask
