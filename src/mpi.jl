@@ -172,7 +172,13 @@ end
 struct MPIMemorySpace{S<:MemorySpace} <: MemorySpace
     innerSpace::S
     comm::MPI.Comm
+    win::Union{Tuple{MPI.Win, Int}, Nothing} 
     rank::Int
+end
+
+#TODO: Prototype only, remove once finished
+function MPIMemorySpace(innerSpace::MemorySpace, comm::MPI.Comm, rank::Int)
+    return MPIMemorySpace(innerSpace, comm, nothing, rank)
 end
 
 function check_uniform(space::MPIMemorySpace)
@@ -499,56 +505,65 @@ function distribute(A::Union{AbstractArray{T,N}, Nothing}, dist::Blocks{N}; comm
         @warn "Number of chunks is less than number of ranks, performance may be suboptimal"
     end
     AT = MPI.bcast(typeof(A), comm; root)
-    if isroot
-        dst = 0
-        for (idx, part) in enumerate(sd)
-            if dst != root
-                h = abs(Base.unsafe_trunc(Int32, hash(part, UInt(0))))
-                send_yield(A[part], comm, dst, h)
-                data = nothing
-            else
-                data = A[part]
-            end
-            with(MPI_UID=>Dagger.eager_next_id()) do
-                p = MPIOSProc(comm, dst)
-                s = first(memory_spaces(p))
-                cs[idx] = tochunk(data, p, s; type=AT)
-                dst += 1
-                if dst == csz
-                    dst = 0
-                end
-            end
+    wins = Array{MPI.Win, N}(undef, size(sd))
+    dst = 0
+    for (idx, part) in enumerate(sd) 
+        addr = 0
+        wins[idx] = MPI.Win_create_dynamic(comm)
+        print("[$rnk] Created window $idx\n")
+        MPI.Win_fence(0, wins[idx])
+        print("[$rnk] Left First fence\n")
+        if isroot
+            print("[$rnk] Attaching window $idx\n")
+            lin_data = Array{type,N}(undef, size(part))
+            lin_data[1:prod(dist.blocksize)] = A[part]
+            MPI.Win_attach!(wins[idx], lin_data)
+            print("[$rnk] Passed attachment calling\n")
+            addr = [addr]
+            MPI.API.MPI_Get_address(lin_data, addr)
+            print("[$rnk] Passed get address\n")
+            addr = addr[1]
         end
-        Core.print("[$rnk] Sent all chunks\n")
-    else
-        dst = 0
-        for (idx, part) in enumerate(sd)
-            data = nothing
-            if rnk == dst
-                h = abs(Base.unsafe_trunc(Int32, hash(part, UInt(0))))
-                data = recv_yield(comm, root, h)
-            end
-            with(MPI_UID=>Dagger.eager_next_id()) do
-                p = MPIOSProc(comm, dst)
-                s = first(memory_spaces(p))
-                cs[idx] = tochunk(data, p, s; type=AT)
-                dst += 1
-                if dst == csz
-                    dst = 0
-                end
-            end
-            #MPI.Scatterv!(nothing, data, comm; root=root)
+        print("[$rnk] Passed attachment\n")
+        addr = MPI.bcast(addr, comm; root)
+        data = nothing
+        if rnk == dst
+            data = MPI.Buffer(Array{type,N}(undef, size(part)))
+            MPI.Get!(data, wins[idx]; rank=root, disp=addr)
+            data = data.data
+        end
+        print("[$rnk] Passed get\n")
+        MPI.Win_fence(0, wins[idx])
+        if isroot
+            MPI.Win_detach!(wins[idx], lin_data)
+        end
+        if rnk == dst 
+            addr = [addr]
+            MPI.API.MPI_Get_address(data, addr)
+            addr = addr[1]
+            MPI.Win_attach!(wins[idx], data)
+        end
+        addr = MPI.bcast(addr, comm; root=dst)
+        print("[$rnk] Left Second fence\n")
+        p = MPIOSProc(comm, dst)
+        s = MPIMemorySpace(CPURAMMemorySpace(myid()), comm, (wins[idx], addr), dst) 
+        cs[idx] = tochunk(data, p, s; type=AT)
+        dst += 1
+        if dst == csz
+            dst = 0
         end
     end
-    MPI.Barrier(comm)
+    print("[$rnk] Finished distribution\n")
     return Dagger.DArray(type, d, sd, cs, dist)
 end
 
-function Base.collect(x::Dagger.DMatrix{T};
-        comm=MPI.COMM_WORLD, root=nothing, acrossranks::Bool=true) where {T} 
+function Base.collect(x::Dagger.DArray{T,N};
+        comm=MPI.COMM_WORLD, root=nothing, acrossranks::Bool=true) where {T,N} 
     csz = MPI.Comm_size(comm)
     rank = MPI.Comm_rank(comm)
-    sd = x.subdomains 
+    sd = x.subdomains
+    chks = x.chunks
+    dst = 0
     if !acrossranks
         if isempty(x.chunks)
             return Array{eltype(d)}(undef, size(x)...)
@@ -565,66 +580,40 @@ function Base.collect(x::Dagger.DMatrix{T};
         return localarr, localparts
     else
         reqs = Vector{MPI.Request}()
-        dst = 0
         if root === nothing
-            data = Matrix{T}(undef, size(x))
-            localarr, localparts = collect(x; acrossranks=false)
-            for (idx, part) in enumerate(localparts)
-                for i in 0:(csz - 1)
-                    if i != rank
-                        h = abs(Base.unsafe_trunc(Int32, hash(part, UInt(0))))
-                        print("[$rank] Sent chunk $idx to rank $i with tag $h \n")
-                        push!(reqs, MPI.isend(localarr[idx], comm; dest = i, tag = h))
-                    else
-                        data[part.indexes...] = localarr[idx]
-                    end
-                end
-            end
+            data = Array{T, N}(undef, size(x))
             for (idx, part) in enumerate(sd)
-                h = abs(Base.unsafe_trunc(Int32, hash(part, UInt(0))))
-                if dst != rank
-                    print("[$rank] Waiting for chunk $idx from rank $dst with tag $h\n")
-                    data[part.indexes...] = recv_yield(comm, dst, h)
-                end
+                buf = MPI.Buffer(Array{T}(undef, size(part)))
+                MPI.Get!(buf, (chks[idx].space.win)[1]; rank = dst, disp = (chks[idx].space.win)[2])
+                MPI.Win_fence(0, (chks[idx].space.win)[1])
+                data[part.indexes...] = buf.data 
                 dst += 1
-                if dst == MPI.Comm_size(comm)
+                if dst == csz
                     dst = 0
                 end
             end
-            MPI.Waitall(reqs)
             return data
         else
             if rank == root
                 data = Matrix{T}(undef, size(x))
-                for (idx, part) in enumerate(sd)
-                    h = abs(Base.unsafe_trunc(Int32, hash(part, UInt(0))))
-                    if dst == rank
-                        localdata = fetch(x.chunks[idx])
-                        data[part.indexes...] = localdata
-                    else
-                        data[part.indexes...] = recv_yield(comm, dst, h)
-                    end
-                    dst += 1
-                    if dst == MPI.Comm_size(comm)
-                        dst = 0
-                    end
-                end
-                return fetch.(data)
             else
-                for (idx, part) in enumerate(sd)
-                    h = abs(Base.unsafe_trunc(Int32, hash(part, UInt(0))))
-                    if rank == dst
-                        localdata = fetch(x.chunks[idx])
-                        push!(reqs, MPI.isend(localdata, comm; dest = root, tag = h))
-                    end
-                    dst += 1
-                    if dst == MPI.Comm_size(comm)
-                        dst = 0
-                    end
-                end
-                MPI.Waitall(reqs)
-                return nothing
+                data = nothing
             end
+            for (idx, part) in enumerate(sd)
+                if rank == root
+                    buf = MPI.Buffer(Array{T}(undef, size(part)))
+                    MPI.Get!(buf, (chks[idx].space.win)[1]; rank = dst, disp = (chks[idx].space.win)[2])
+                    MPI.Win_fence(0, (chks[idx].space.win)[1])
+                    data[part.indexes...] = buf.data
+                else
+                    MPI.Win_fence(0, (chks[idx].space.win)[1])
+                end
+                dst += 1
+                if dst == csz
+                    dst = 0
+                end
+            end
+            return data
         end
     end
 end
