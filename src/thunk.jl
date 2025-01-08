@@ -371,10 +371,12 @@ function _par(mod, ex::Expr; lazy=true, recur=true, opts=())
     body = nothing
     arg1 = nothing
     arg2 = nothing
+    value = nothing
     if recur && @capture(ex, f_(allargs__)) ||
                 @capture(ex, f_(allargs__) do cargs_ body_ end) ||
                 @capture(ex, allargs__->body_) ||
                 @capture(ex, arg1_[allargs__]) ||
+                @capture(ex, arg1_[allargs__] = value_) ||
                 @capture(ex, arg1_.arg2_) ||
                 @capture(ex, (;allargs__)) ||
                 @capture(ex, bf_.(allargs__))
@@ -387,8 +389,13 @@ function _par(mod, ex::Expr; lazy=true, recur=true, opts=())
                 # Getproperty (A.B)
                 f = Base.getproperty
                 allargs = Any[arg1, QuoteNode(arg2)]
+            elseif value !== nothing
+                # setindex! (A[2,3] = 4)
+                f = _setindex!_return_value
+                pushfirst!(allargs, value)
+                pushfirst!(allargs, arg1)
             else
-                # Indexing (A[2,3])
+                # getindex (A[2,3])
                 f = Base.getindex
                 pushfirst!(allargs, arg1)
             end
@@ -443,6 +450,11 @@ _par(mod, ex; kwargs...) = throw(ArgumentError("Invalid Dagger task expression: 
 
 _par_inner(mod, ex; kwargs...) = ex
 _par_inner(mod, ex::Expr; kwargs...) = _par(mod, ex; kwargs...)
+
+function _setindex!_return_value(A, value, idxs...)
+    setindex!(A, value, idxs...)
+    return value
+end
 
 """
     Dagger.spawn(f, args...; kwargs...) -> DTask
