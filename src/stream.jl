@@ -570,6 +570,9 @@ function stream!(sf::StreamingFunction, uid,
                  args::Tuple, kwarg_names::Tuple, kwarg_values::Tuple)
     f = move(task_processor(), sf.f)
     counter = 0
+    store = sf.stream.store
+    @warn "Fix eltype" maxlog=1
+    stream_results_one = Vector{Any}(undef, 1)
 
     while true
         # Yield to other (streaming) tasks
@@ -585,33 +588,63 @@ function stream!(sf::StreamingFunction, uid,
             return StreamMigrating()
         end
 
-        # Get values from Stream args/kwargs
-        stream_args = _stream_take_values!(args)
-        stream_kwarg_values = _stream_take_values!(kwarg_values)
-        stream_kwargs = _stream_namedtuple(kwarg_names, stream_kwarg_values)
+        # Determine how many elements we can process in this batch
+        remaining_evals = sf.max_evals == -1 ? typemax(Int) : sf.max_evals - counter
+        batch_size = _stream_batch_size(store, remaining_evals)
 
-        if length(stream_args) > 0 || length(stream_kwarg_values) > 0
-            # Notify tasks that input buffers may have space
-            @lock sf.stream.store.lock notify(sf.stream.store.lock)
-        end
+        if batch_size <= 1
+            # Get one value from each Stream args/kwargs
+            stream_args = _stream_take_values!(args)
+            stream_kwarg_values = _stream_take_values!(kwarg_values)
+            stream_kwargs = _stream_namedtuple(kwarg_names, stream_kwarg_values)
 
-        # Run a single cycle of f
-        counter += 1
-        @dagdebug STREAM_THUNK_ID[] :stream "executing $f (eval $counter)"
-        stream_result = f(stream_args...; stream_kwargs...)
-
-        # Exit streaming on graceful request
-        if stream_result isa FinishStream
-            if stream_result.value !== nothing
-                value = something(stream_result.value)
-                put!(sf.stream, value)
+            if length(stream_args) > 0 || length(stream_kwarg_values) > 0
+                # Notify tasks that input buffers may have space
+                @lock sf.stream.store.lock notify(sf.stream.store.lock)
             end
-            @dagdebug STREAM_THUNK_ID[] :stream "voluntarily returning"
-            return stream_result.result
+
+            # Run a single cycle of f
+            counter += 1
+            @dagdebug STREAM_THUNK_ID[] :stream "executing $f (batch size 1, eval $counter)"
+            stream_results = stream_results_one
+            stream_results[1] = f(stream_args...; stream_kwargs...)
+        else
+            # Get multiple values from each Stream args/kwargs
+            # FIXME: Do a bulk take
+            stream_args = ntuple(arg_idx -> [_stream_take_value!(args[arg_idx]) for _ in 1:batch_size], length(args))
+            stream_kwarg_values = ntuple(arg_idx -> [_stream_take_value!(kwarg_values[arg_idx]) for _ in 1:batch_size], length(kwarg_values))
+
+            if length(stream_args) > 0 || length(stream_kwarg_values) > 0
+                # Notify tasks that input buffers may have space
+                @lock sf.stream.store.lock notify(sf.stream.store.lock)
+            end
+
+            # Run multiple cycles of f
+            counter += batch_size
+            @dagdebug STREAM_THUNK_ID[] :stream "executing $f (batch size $batch_size, eval $counter)"
+            # FIXME: Use correct Vector type for processor
+            @warn "Fix eltype" maxlog=1
+            stream_results = Vector{Any}(undef, batch_size)
+            Batched(f)(stream_results, stream_args, kwarg_names, stream_kwarg_values)
         end
 
-        # Put the result into the output stream
-        put!(sf.stream, stream_result)
+        for idx in 1:length(stream_results)
+            stream_result = stream_results[idx]
+
+            # Exit streaming on graceful request
+            if stream_result isa FinishStream
+                if stream_result.value !== nothing
+                    value = something(stream_result.value)
+                    put!(sf.stream, value)
+                end
+                @dagdebug STREAM_THUNK_ID[] :stream "voluntarily returning"
+                return stream_result.result
+            end
+
+            # Put the result into the output stream
+            # FIXME: Do a bulk put
+            put!(sf.stream, stream_result)
+        end
 
         # Exit streaming on eval limit
         if sf.max_evals > 0 && counter >= sf.max_evals
@@ -623,13 +656,21 @@ end
 
 function _stream_take_values!(args)
     return ntuple(length(args)) do idx
-        arg = args[idx]
-        if arg isa StreamingValue
-            return take!(arg)
-        else
-            return arg
-        end
+        return _stream_take_value!(args[idx])
     end
+end
+_stream_take_value!(arg::StreamingValue) = take!(arg)
+_stream_take_value!(arg) = arg
+function _stream_batch_size(store::StreamStore, evals::Int)
+    size = typemax(Int)
+    size = min(size, evals)
+    for buffer in values(store.input_buffers)
+        size = min(size, length(buffer))
+    end
+    for buffer in values(store.output_buffers)
+        size = min(size, capacity(buffer)-length(buffer))
+    end
+    return size
 end
 
 @inline @generated function _stream_namedtuple(kwarg_names::Tuple,
@@ -697,4 +738,43 @@ function finalize_streaming!(tasks::Vector{Pair{DTaskSpec,DTask}}, self_streams)
         stream = task_to_stream(uid)
         add_waiters!(stream, waiters)
     end
+end
+
+struct Batched{F}
+    func::F
+end
+# Default behavior, can be overriden (for GPU, SIMD, etc.)
+# FIXME: Docstring
+# FIXME: Should we provide results, and thus not allow a custom result size?
+# FIXME: Should we expect the return value to communicate number of values consumed?
+function (b::Batched)(results, args_batch, kwarg_names, kwarg_values_batch)
+    stop = false
+    # FIXME: Determine better null_value?
+    null_value = nothing
+    batch_size = length(results)
+    for idx in 1:batch_size
+        if stop
+            results[idx] = null_value
+            continue
+        end
+        args = ntuple(length(args_batch)) do args_idx
+            args_batch[args_idx][idx]
+        end
+        kwarg_values = ntuple(length(kwarg_values_batch)) do kwarg_idx
+            kwarg_values_batch[kwarg_idx][idx]
+        end
+        kwargs = _stream_namedtuple(kwarg_names, kwarg_values)
+        result = b.func(args...; kwargs...)
+        if result isa FinishStream
+            if result.value !== nothing
+                results[idx] = result.value
+            else
+                results[idx] = null_value
+            end
+            stop = true
+        else
+            results[idx] = result
+        end
+    end
+    return
 end
