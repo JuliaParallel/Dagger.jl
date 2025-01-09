@@ -26,6 +26,7 @@ Stores per-task options to be passed to the scheduler.
 - `storage_leaf_tag::Union{MemPool.Tag,Nothing}=nothing`: If not `nothing`, specifies the MemPool storage leaf tag to associate with the task's result. This tag can be used by MemPool's storage devices to manipulate their behavior, such as the file name used to store data on disk."
 - `storage_retain::Union{Bool,Nothing}=nothing`: The value of `retain` to pass to `MemPool.poolset` when constructing the result `Chunk`. `nothing` defaults to `false`.
 - `name::Union{String,Nothing}=nothing`: If not `nothing`, annotates the task with a name for logging purposes.
+- `stream_exit_on_evals::Union{Bool,Nothing}=nothing`: If not `nothing`, specifies whether the stream should exit when the number of evaluations reaches `stream_max_evals` (`true`, the default), or wait for more evaluations to be added (`false`).
 """
 Base.@kwdef mutable struct Options
     propagates::Union{Vector{Symbol},Nothing} = nothing
@@ -59,6 +60,7 @@ Base.@kwdef mutable struct Options
     stream_output_buffer_amount::Union{Int,Nothing} = nothing
     stream_buffer_type::Union{Type, Nothing} = nothing
     stream_max_evals::Union{Int,Nothing} = nothing
+    stream_exit_on_evals::Union{Bool,Nothing} = nothing
 end
 Options(::Nothing) = Options()
 function Options(old_options::NamedTuple)
@@ -128,6 +130,7 @@ function populate_defaults!(opts::Options, sig)
     maybe_default!(opts, Val{:stream_output_buffer_amount}(), sig)
     maybe_default!(opts, Val{:stream_buffer_type}(), sig)
     maybe_default!(opts, Val{:stream_max_evals}(), sig)
+    maybe_default!(opts, Val{:stream_exit_on_evals}(), sig)
     return opts
 end
 function maybe_default!(opts::Options, ::Val{opt}, sig::Signature) where opt

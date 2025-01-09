@@ -9,16 +9,18 @@ mutable struct StreamStore{T,B}
     output_buffer_amount::Int
     input_fetchers::Dict{UInt,Any}
     output_fetchers::Dict{UInt,Any}
+    @atomic max_evals::Int
+    exit_on_evals::Bool
     open::Bool
     migrating::Bool
     lock::Threads.Condition
-    StreamStore{T,B}(uid::UInt, input_buffer_amount::Integer, output_buffer_amount::Integer) where {T,B} =
+    StreamStore{T,B}(uid::UInt, input_buffer_amount::Integer, output_buffer_amount::Integer, max_evals::Integer, exit_on_evals::Bool) where {T,B} =
         new{T,B}(uid, zeros(Int, 0),
                  Dict{UInt,Any}(), Dict{UInt,Any}(),
                  Dict{UInt,B}(), Dict{UInt,B}(),
                  input_buffer_amount, output_buffer_amount,
                  Dict{UInt,Any}(), Dict{UInt,Any}(),
-                 true, false, Threads.Condition())
+                 max_evals, exit_on_evals, true, false, Threads.Condition())
 end
 
 function tid_to_uid(thunk_id)
@@ -159,9 +161,9 @@ mutable struct Stream{T,B}
     uid::UInt
     store::Union{StreamStore{T,B},Nothing}
     store_ref::Chunk
-    function Stream{T,B}(uid::UInt, input_buffer_amount::Integer, output_buffer_amount::Integer) where {T,B}
+    function Stream{T,B}(uid::UInt, input_buffer_amount::Integer, output_buffer_amount::Integer, max_evals::Integer, exit_on_evals::Bool) where {T,B}
         # Creates a new output stream
-        store = StreamStore{T,B}(uid, input_buffer_amount, output_buffer_amount)
+        store = StreamStore{T,B}(uid, input_buffer_amount, output_buffer_amount, max_evals, exit_on_evals)
         store_ref = tochunk(store)
         return new{T,B}(uid, store, store_ref)
     end
@@ -283,10 +285,9 @@ end
 struct StreamingFunction{F, S}
     f::F
     stream::S
-    max_evals::Int
 
-    StreamingFunction(f::F, stream::S, max_evals) where {F, S} =
-        new{F, S}(f, stream, max_evals)
+    StreamingFunction(f::F, stream::S) where {F, S} =
+        new{F, S}(f, stream)
 end
 
 function migrate_stream!(stream::Stream, w::Integer=myid())
@@ -404,19 +405,19 @@ function initialize_streaming!(self_streams, spec, task)
         throw(ArgumentError("Output buffering is required; please specify a `stream_output_buffer_amount` greater than 0"))
     end
 
-    # Create the Stream
-    buffer_type = something(spec.options.stream_buffer_type, ProcessRingBuffer)
-    stream = Stream{T,buffer_type}(task.uid, input_buffer_amount, output_buffer_amount)
-    self_streams[task.uid] = stream
-
     # Get max evaluation count
     max_evals = something(spec.options.stream_max_evals, -1)
-    if max_evals == 0
-        throw(ArgumentError("stream_max_evals cannot be 0"))
-    end
+
+    # Get exit behavior on max evaluation exhaustion
+    exit_on_evals = something(spec.options.stream_exit_on_evals, true)
+
+    # Create the Stream
+    buffer_type = something(spec.options.stream_buffer_type, ProcessRingBuffer)
+    stream = Stream{T,buffer_type}(task.uid, input_buffer_amount, output_buffer_amount, max_evals, exit_on_evals)
+    self_streams[task.uid] = stream
 
     # Wrap the function in a StreamingFunction
-    spec.fargs[1].value = StreamingFunction(value(spec.fargs[1]), stream, max_evals)
+    spec.fargs[1].value = StreamingFunction(value(spec.fargs[1]), stream)
 
     # Mark the task as non-blocking
     spec.options.occupancy = @something(spec.options.occupancy, Dict())
@@ -570,6 +571,7 @@ function stream!(sf::StreamingFunction, uid,
                  args::Tuple, kwarg_names::Tuple, kwarg_values::Tuple)
     f = move(task_processor(), sf.f)
     counter = 0
+    store = something(sf.stream.store)
 
     while true
         # Yield to other (streaming) tasks
@@ -579,8 +581,7 @@ function stream!(sf::StreamingFunction, uid,
         task_may_cancel!()
 
         # Exit streaming on migration
-        if sf.stream.store.migrating
-            error("FIXME: max_evals should be retained")
+        if store.migrating
             @dagdebug STREAM_THUNK_ID[] :stream "returning for migration"
             return StreamMigrating()
         end
@@ -592,11 +593,12 @@ function stream!(sf::StreamingFunction, uid,
 
         if length(stream_args) > 0 || length(stream_kwarg_values) > 0
             # Notify tasks that input buffers may have space
-            @lock sf.stream.store.lock notify(sf.stream.store.lock)
+            @lock store.lock notify(store.lock)
         end
 
         # Run a single cycle of f
         counter += 1
+        @atomic :acquire_release store.max_evals -= 1
         @dagdebug STREAM_THUNK_ID[] :stream "executing $f (eval $counter)"
         stream_result = f(stream_args...; stream_kwargs...)
 
@@ -606,17 +608,33 @@ function stream!(sf::StreamingFunction, uid,
                 value = something(stream_result.value)
                 put!(sf.stream, value)
             end
-            @dagdebug STREAM_THUNK_ID[] :stream "voluntarily returning"
+            @dagdebug STREAM_THUNK_ID[] :stream "voluntarily returning (eval $counter)"
             return stream_result.result
         end
 
         # Put the result into the output stream
         put!(sf.stream, stream_result)
 
-        # Exit streaming on eval limit
-        if sf.max_evals > 0 && counter >= sf.max_evals
-            @dagdebug STREAM_THUNK_ID[] :stream "max evals reached (eval $counter)"
-            return
+        if (@atomic :acquire store.max_evals) == 0
+            # Max evals exhausted
+            if store.exit_on_evals
+                # Exit streaming
+                @dagdebug STREAM_THUNK_ID[] :stream "max evals reached (eval $counter), exiting"
+                return
+            else
+                @dagdebug STREAM_THUNK_ID[] :stream "max evals reached (eval $counter), waiting for new max evals"
+                @lock store.lock begin
+                    # Let listeners know that the max evals have changed
+                    notify(store.lock)
+
+                    # Wait for the limit to increase or for cancellation
+                    while (@atomic :acquire store.max_evals) == 0
+                        task_may_cancel!()
+                        wait(store.lock)
+                    end
+                    task_may_cancel!()
+                end
+            end
         end
     end
 end
@@ -696,5 +714,29 @@ function finalize_streaming!(tasks::Vector{Pair{DTaskSpec,DTask}}, self_streams)
     for (uid, waiters) in stream_waiter_changes
         stream = task_to_stream(uid)
         add_waiters!(stream, waiters)
+    end
+end
+
+function task_add_evals!(task::DTask, evals::Integer)
+    stream = lock(EAGER_THUNK_STREAMS) do global_streams
+        @assert haskey(global_streams, task.uid) "$task is not a streaming task"
+        return global_streams[task.uid]
+    end
+    MemPool.access_ref(stream.store_ref.handle) do store
+        @atomic :acquire_release store.max_evals += evals
+        @lock store.lock notify(store.lock)
+        return
+    end
+end
+function task_exit_on_evals!(task::DTask, exit_on_evals::Bool=true)
+    stream = lock(EAGER_THUNK_STREAMS) do global_streams
+        @assert haskey(global_streams, task.uid) "$task is not a streaming task"
+        return global_streams[task.uid]
+    end
+    MemPool.access_ref(stream.store_ref.handle) do store
+        @lock store.lock begin
+            store.exit_on_evals = exit_on_evals
+        end
+        return
     end
 end
