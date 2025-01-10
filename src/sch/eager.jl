@@ -31,7 +31,8 @@ function init_eager()
         sopts = SchedulerOptions(;allow_errors=true)
         opts = Dagger.Options((;scope=Dagger.ExactScope(Dagger.ThreadProc(1, 1)),
                                 occupancy=Dict(Dagger.ThreadProc=>0),
-                                time_util=Dict(Dagger.ThreadProc=>0)))
+                                time_util=Dict(Dagger.ThreadProc=>0),
+                                acceleration=Dagger.DistributedAcceleration()))
         Dagger.compute(ctx, Dagger._delayed(eager_thunk, opts)();
                        options=sopts)
     catch err

@@ -29,14 +29,23 @@ compatible_processors(scope::AbstractScope=get_compute_scope(), ctx::Context=Sch
 function compatible_processors(scope::AbstractScope, procs::Vector{<:Processor})
     compat_procs = Set{Processor}()
     for gproc in procs
-        # Fast-path in case entire process is incompatible
-        gproc_scope = ProcessScope(gproc)
-        if !isa(constrain(scope, gproc_scope), InvalidScope)
-            for proc in get_processors(gproc)
-                if proc_in_scope(proc, scope)
-                    push!(compat_procs, proc)
-                end
-            end
+        for proc in get_processors(gproc)
+            proc_in_scope(proc, scope) || continue
+            push!(compat_procs, proc)
+        end
+    end
+    return compat_procs
+end
+compatible_processors(acceleration::Acceleration, scope::AbstractScope=get_compute_scope(), ctx::Context=Sch.eager_context()) =
+    compatible_processors(acceleration, scope, procs(ctx))
+function compatible_processors(acceleration::Acceleration, scope::AbstractScope, procs::Vector{<:Processor})
+    compat_procs = Set{Processor}()
+    for gproc in procs
+        accel_matches_proc(acceleration, gproc) || continue
+        for proc in get_processors(gproc)
+            accel_matches_proc(acceleration, proc) || continue
+            proc_in_scope(proc, scope) || continue
+            push!(compat_procs, proc)
         end
     end
     return compat_procs
