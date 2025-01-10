@@ -333,7 +333,7 @@ function aliasing!(state::DataDepsState, target_space::MemorySpace, arg_w::Argum
     end
 
     # Calculate the ainfo
-    ainfo = AliasingWrapper(aliasing(remote_arg, arg_w.dep_mod))
+    ainfo = AliasingWrapper(aliasing(current_acceleration(), remote_arg, arg_w.dep_mod))
 
     # Cache the result
     state.ainfo_cache[remote_arg_w] = ainfo
@@ -369,7 +369,7 @@ function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
         arg, deps = unwrap_inout(arg)
 
         # Unwrap the Chunk underlying any DTask arguments
-        arg = arg isa DTask ? fetch(arg; raw=true) : arg
+        arg = arg isa DTask ? fetch(arg; move_value=false, unwrap=false) : arg
 
         # Skip non-aliasing arguments
         type_may_alias(typeof(arg)) || continue
@@ -458,8 +458,11 @@ use of `x`, and the data in `x` will not be updated when the `spawn_datadeps`
 region returns.
 """
 supports_inplace_move(x) = true
-supports_inplace_move(t::DTask) = supports_inplace_move(fetch(t; raw=true))
+supports_inplace_move(t::DTask) = supports_inplace_move(fetch(t; move_value=false, unwrap=false))
+@warn "Fix this to work with MPI (can't call poolget on the wrong rank)" maxlog=1
 function supports_inplace_move(c::Chunk)
+    # FIXME
+    return true
     # FIXME: Use MemPool.access_ref
     pid = root_worker_id(c.processor)
     if pid == myid()
@@ -531,6 +534,10 @@ function add_reader!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::M
     push!(state.ainfos_readers[ainfo], task=>write_num)
 end
 
+# FIXME: These should go in MPIExt.jl
+const MPI_TID = ScopedValue{Int64}(0)
+const MPI_UID = ScopedValue{Int64}(0)
+
 # Make a copy of each piece of data on each worker
 # memory_space => {arg => copy_of_arg}
 isremotehandle(x) = false
@@ -538,7 +545,7 @@ isremotehandle(x::DTask) = true
 isremotehandle(x::Chunk) = true
 function generate_slot!(state::DataDepsState, dest_space, data)
     if data isa DTask
-        data = fetch(data; raw=true)
+        data = fetch(data; move_value=false, unwrap=false)
     end
     # N.B. We do not perform any sync/copy with the current owner of the data,
     # because all we want here is to make a copy of some version of the data,
@@ -550,12 +557,15 @@ function generate_slot!(state::DataDepsState, dest_space, data)
     ALIASED_OBJECT_CACHE[] = get!(Dict{AbstractAliasing,Chunk}, state.ainfo_backing_chunk, dest_space)
     if orig_space == dest_space && (data isa Chunk || !isremotehandle(data))
         # Fast path for local data that's already in a Chunk or not a remote handle needing rewrapping
-        data_chunk = tochunk(data, from_proc)
+        task = DATADEPS_CURRENT_TASK[]
+        data_chunk = with(MPI_UID=>task.uid) do
+            tochunk(data, from_proc)
+        end
     else
         ctx = Sch.eager_context()
         id = rand(Int)
         @maybelog ctx timespan_start(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data))
-        data_chunk = move_rewrap(from_proc, to_proc, data)
+        data_chunk = move_rewrap(from_proc, to_proc, orig_space, dest_space, data)
         @maybelog ctx timespan_finish(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data=data_chunk))
     end
     @assert memory_space(data_chunk) == dest_space "space mismatch! $dest_space (dest) != $(memory_space(data_chunk)) (actual) ($(typeof(data)) (data) vs. $(typeof(data_chunk)) (chunk)), spaces ($orig_space -> $dest_space)"
@@ -563,6 +573,10 @@ function generate_slot!(state::DataDepsState, dest_space, data)
     state.remote_arg_to_original[data_chunk] = data
 
     ALIASED_OBJECT_CACHE[] = nothing
+
+    check_uniform(memory_space(dest_space_args[data]))
+    check_uniform(processor(dest_space_args[data]))
+    check_uniform(dest_space_args[data].handle)
 
     return dest_space_args[data]
 end
@@ -576,23 +590,26 @@ function get_or_generate_slot!(state, dest_space, data)
     end
     return state.remote_args[dest_space][data]
 end
-function move_rewrap(from_proc::Processor, to_proc::Processor, data)
+function move_rewrap(from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, data)
     return aliased_object!(data) do data
-        to_w = root_worker_id(to_proc)
-        return remotecall_fetch(to_w, from_proc, to_proc, data) do from_proc, to_proc, data
-            data_converted = move(from_proc, to_proc, data)
-            return tochunk(data_converted, to_proc)
-        end
+        return remotecall_endpoint(identity, current_acceleration(), from_proc, to_proc, from_space, to_space, data)
+    end
+end
+function remotecall_endpoint(f, ::Dagger.DistributedAcceleration, from_proc, to_proc, orig_space, dest_space, data)
+    to_w = root_worker_id(to_proc)
+    return remotecall_fetch(to_w, from_proc, to_proc, dest_space, data) do from_proc, to_proc, dest_space, data
+        data_converted = f(move(from_proc, to_proc, data))
+        return tochunk(data_converted, to_proc, dest_space)
     end
 end
 const ALIASED_OBJECT_CACHE = TaskLocalValue{Union{Dict{AbstractAliasing,Chunk}, Nothing}}(()->nothing)
 @warn "Document these public methods" maxlog=1
 # TODO: Use state to cache aliasing() results
-function declare_aliased_object!(x; ainfo=aliasing(x, identity))
+function declare_aliased_object!(x; ainfo=aliasing(current_acceleration(), x, identity))
     cache = ALIASED_OBJECT_CACHE[]
     cache[ainfo] = x
 end
-function aliased_object!(x; ainfo=aliasing(x, identity))
+function aliased_object!(x; ainfo=aliasing(current_acceleration(), x, identity))
     cache = ALIASED_OBJECT_CACHE[]
     if haskey(cache, ainfo)
         y = cache[ainfo]
@@ -603,7 +620,7 @@ function aliased_object!(x; ainfo=aliasing(x, identity))
     end
     return y
 end
-function aliased_object!(f, x; ainfo=aliasing(x, identity))
+function aliased_object!(f, x; ainfo=aliasing(current_acceleration(), x, identity))
     cache = ALIASED_OBJECT_CACHE[]
     if haskey(cache, ainfo)
         y = cache[ainfo]
@@ -616,7 +633,7 @@ function aliased_object!(f, x; ainfo=aliasing(x, identity))
 end
 function aliased_object_unwrap!(x::Chunk)
     y = unwrap(x)
-    ainfo = aliasing(y, identity)
+    ainfo = aliasing(current_acceleration(), y, identity)
     return unwrap(aliased_object!(x; ainfo))
 end
 

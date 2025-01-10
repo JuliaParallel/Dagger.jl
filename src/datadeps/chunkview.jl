@@ -25,7 +25,7 @@ function Base.view(c::Chunk, slices...)
     return ChunkView(c, slices)
 end
 
-Base.view(c::DTask, slices...) = view(fetch(c; raw=true), slices...)
+Base.view(c::DTask, slices...) = view(fetch(c; move_value=false, unwrap=false), slices...)
 
 aliasing(x::ChunkView) =
     throw(ConcurrencyViolationError("Cannot query aliasing of a ChunkView directly"))
@@ -33,31 +33,22 @@ memory_space(x::ChunkView) = memory_space(x.chunk)
 isremotehandle(x::ChunkView) = true
 
 # This definition is here because it's so similar to ChunkView
-function move_rewrap(from_proc::Processor, to_proc::Processor, v::SubArray)
-    to_w = root_worker_id(to_proc)
-    p_chunk = aliased_object!(parent(v)) do p
-        return remotecall_fetch(to_w, from_proc, to_proc, p) do from_proc, to_proc, p
-            return tochunk(move(from_proc, to_proc, p), to_proc)
-        end
+function move_rewrap(from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, v::SubArray)
+    p_chunk = aliased_object!(parent(v)) do p_chunk
+        return remotecall_endpoint(identity, current_acceleration(), from_proc, to_proc, from_space, to_space, p_chunk)
     end
     inds = parentindices(v)
-    return remotecall_fetch(to_w, from_proc, to_proc, p_chunk, inds) do from_proc, to_proc, p_chunk, inds
-        p_new = move(from_proc, to_proc, p_chunk)
-        v_new = view(p_new, inds...)
-        return tochunk(v_new, to_proc)
+    return remotecall_endpoint(current_acceleration(), from_proc, to_proc, from_space, to_space, p_chunk) do p_new
+        return view(p_new, inds...)
     end
 end
-function move_rewrap(from_proc::Processor, to_proc::Processor, slice::ChunkView)
-    to_w = root_worker_id(to_proc)
+function move_rewrap(from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, slice::ChunkView)
     p_chunk = aliased_object!(slice.chunk) do p_chunk
-        return remotecall_fetch(to_w, from_proc, to_proc, p_chunk) do from_proc, to_proc, p_chunk
-            return tochunk(move(from_proc, to_proc, p_chunk), to_proc)
-        end
+        return remotecall_endpoint(identity, current_acceleration(), from_proc, to_proc, from_space, to_space, p_chunk)
     end
-    return remotecall_fetch(to_w, from_proc, to_proc, p_chunk, slice.slices) do from_proc, to_proc, p_chunk, inds
-        p_new = move(from_proc, to_proc, p_chunk)
-        v_new = view(p_new, inds...)
-        return tochunk(v_new, to_proc)
+    inds = slice.slices
+    return remotecall_endpoint(current_acceleration(), from_proc, to_proc, from_space, to_space, p_chunk) do p_new
+        return view(p_new, inds...)
     end
 end
 

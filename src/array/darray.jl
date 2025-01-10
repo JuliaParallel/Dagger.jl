@@ -174,28 +174,46 @@ domainchunks(d::DArray) = d.subdomains
 size(x::DArray) = size(domain(x))
 stage(ctx, c::DArray) = c
 
-function Base.collect(d::DArray{T,N}; tree=false, copyto=false) where {T,N}
-    a = fetch(d)
-    if isempty(d.chunks)
-        return Array{eltype(d)}(undef, size(d)...)
+@warn "Dispatch uniform on acceleration" maxlog=1
+@warn "Take D.concat into account" maxlog=1
+function Base.collect(D::DArray{T,N}; tree=false, copyto=false, uniform::Bool=true) where {T,N}
+    if isempty(D.chunks)
+        return Array{eltype(D)}(undef, size(D)...)
     end
 
-    if ndims(d) == 0
-        return fetch(a.chunks[1])
+    # Return a scalar, as required by Julia's array interface
+    if ndims(D) == 0
+        return fetch(D.chunks[1]; unwrap=true)
     end
 
-    if copyto
-        C = Array{T,N}(undef, size(a))
-        DC = view(C, Blocks(size(a)...))
-        copyto!(DC, a)
-        return C
-    end
+    if uniform
+        @assert D.concat === cat "FIXME: Handle non-cat"
+        A = Array{eltype(D)}(undef, size(D)...)
+        DA = view(A, D.partitioning; space=CPURAMMemorySpace())
 
-    dimcatfuncs = [(x...) -> d.concat(x..., dims=i) for i in 1:ndims(d)]
-    if tree
-        collect(fetch(treereduce_nd(map(x -> ((args...,) -> Dagger.@spawn x(args...)) , dimcatfuncs), a.chunks)))
+        # Perform the equivalent of `copyto!(DA, D)`, but force local updates
+        # FIXME: Be more parallel?
+        for idx in eachindex(DA.chunks)
+            dest = fetch(DA.chunks[idx]; move_value=false, unwrap=true, uniform=true)::AbstractArray
+            src = fetch(D.chunks[idx]; move_value=true, unwrap=true, uniform=true)::AbstractArray
+            copyto!(dest, src)
+        end
+
+        return A
     else
-        treereduce_nd(dimcatfuncs, asyncmap(fetch, a.chunks))
+        if copyto
+            C = Array{T,N}(undef, size(D))
+            DC = view(C, Blocks(size(D)...))
+            copyto!(DC, D)
+            return C
+        end
+
+        dimcatfuncs = [(x...) -> D.concat(x..., dims=i) for i in 1:ndims(D)]
+        if tree
+            collect(fetch(treereduce_nd(map(x -> ((args...,) -> Dagger.@spawn x(args...)) , dimcatfuncs), D.chunks)))
+        else
+            treereduce_nd(dimcatfuncs, asyncmap(fetch, D.chunks))
+        end
     end
 end
 Array{T,N}(A::DArray{S,N}) where {T,N,S} = convert(Array{T,N}, collect(A))
@@ -384,23 +402,18 @@ function lookup_parts(A::DArray, ps::AbstractArray, subdmns::DomainBlocks{N}, d:
 end
 
 """
-    Base.fetch(c::DArray)
+    Base.fetch(A::DArray; unwrap::Bool=false, kwargs...) -> DArray
 
-If a `DArray` tree has a `Thunk` in it, make the whole thing a big thunk.
+Returns a new `DArray` with the same data as `A`, but where all values are
+fully computed.
 """
-function Base.fetch(c::DArray{T}) where T
-    if any(istask, chunks(c))
-        thunks = chunks(c)
-        sz = size(thunks)
-        dmn = domain(c)
-        dmnchunks = domainchunks(c)
-        return fetch(Dagger.spawn(Options(meta=true), thunks...) do results...
-            t = eltype(fetch(results[1]))
-            DArray(t, dmn, dmnchunks, reshape(Any[results...], sz),
-                   c.partitioning, c.concat)
-        end)
+function Base.fetch(A::DArray{T}; unwrap::Bool=false, kwargs...) where T
+    if any(unwrappable, chunks(A))
+        tasks = map(t->unwrappable(t) ? fetch(t; unwrap, kwargs...) : t, chunks(A))
+        B = DArray(T, A.domain, A.subdomains, tasks, A.partitioning, A.concat)
+        return B
     else
-        return c
+        return A
     end
 end
 
@@ -501,7 +514,6 @@ auto_blocks(A::AbstractArray{T,N}) where {T,N} = auto_blocks(size(A))
 
 const AssignmentType{N} = Union{Symbol, AbstractArray{<:Int, N}, AbstractArray{<:Processor, N}}
 
-distribute(A::AbstractArray, assignment::AssignmentType = :arbitrary) = distribute(A, AutoBlocks(), assignment)
 function distribute(A::AbstractArray{T,N}, dist::Blocks{N}, assignment::AssignmentType{N} = :arbitrary) where {T,N}
     procgrid = nothing
     availprocs = collect(Dagger.compatible_processors())
@@ -542,8 +554,10 @@ function distribute(A::AbstractArray{T,N}, dist::Blocks{N}, assignment::Assignme
         procgrid = assignment
     end
 
-    return _to_darray(Distribute(dist, A, procgrid))
+    return _distribute(current_acceleration(), A, dist, procgrid)
 end
+_distribute(::DistributedAcceleration, A::AbstractArray{T,N}, dist::Blocks{N}, procgrid) where {T,N} =
+    _to_darray(Distribute(dist, A, procgrid))
 
 distribute(A::AbstractArray, ::AutoBlocks, assignment::AssignmentType = :arbitrary) = distribute(A, auto_blocks(A), assignment)
 function distribute(x::AbstractArray{T,N}, n::NTuple{N}, assignment::AssignmentType{N} = :arbitrary) where {T,N}
@@ -551,7 +565,6 @@ function distribute(x::AbstractArray{T,N}, n::NTuple{N}, assignment::AssignmentT
     distribute(x, Blocks(p), assignment)
 end
 distribute(x::AbstractVector, n::Int, assignment::AssignmentType{1} = :arbitrary) = distribute(x, (n,), assignment)
-
 
 DVector(A::AbstractVector{T}, part::Blocks{1}, assignment::AssignmentType{1} = :arbitrary) where T = distribute(A, part, assignment)
 DMatrix(A::AbstractMatrix{T}, part::Blocks{2}, assignment::AssignmentType{2} = :arbitrary) where T = distribute(A, part, assignment)

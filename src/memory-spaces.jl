@@ -1,25 +1,56 @@
-abstract type MemorySpace end
+struct DistributedAcceleration <: Acceleration end
+
+const ACCELERATION = TaskLocalValue{Acceleration}(() -> DistributedAcceleration())
+
+current_acceleration() = ACCELERATION[]
+
+default_processor(::DistributedAcceleration) = OSProc(myid())
+default_processor(accel::DistributedAcceleration, x) = default_processor(accel) 
+default_processor() = default_processor(current_acceleration())
+
+accelerate!(accel::Symbol) = accelerate!(Val{accel}())
+accelerate!(::Val{:distributed}) = accelerate!(DistributedAcceleration())
+
+initialize_acceleration!(a::DistributedAcceleration) = nothing
+function accelerate!(accel::Acceleration) 
+    initialize_acceleration!(accel)
+    ACCELERATION[] = accel
+end
+
+accel_matches_proc(accel::DistributedAcceleration, proc::OSProc) = true
+accel_matches_proc(accel::DistributedAcceleration, proc) = true
 
 struct CPURAMMemorySpace <: MemorySpace
     owner::Int
 end
 root_worker_id(space::CPURAMMemorySpace) = space.owner
 
-memory_space(x) = CPURAMMemorySpace(myid())
-function memory_space(x::Chunk)
-    proc = processor(x)
-    if proc isa OSProc
-        # TODO: This should probably be programmable
-        return CPURAMMemorySpace(proc.pid)
-    else
-        return only(memory_spaces(proc))
-    end
-end
-memory_space(x::DTask) =
-    memory_space(fetch(x; raw=true))
+CPURAMMemorySpace() = CPURAMMemorySpace(myid())
+
+default_processor(space::CPURAMMemorySpace) = OSProc(space.owner)
+default_memory_space(accel::DistributedAcceleration) = CPURAMMemorySpace(myid())
+default_memory_space(accel::DistributedAcceleration, x) = default_memory_space(accel)
+default_memory_space(x) = default_memory_space(current_acceleration(), x)
+default_memory_space() = default_memory_space(current_acceleration())
+
+memory_space(x, proc::Processor=default_processor()) = first(memory_spaces(proc))
+memory_space(x::Processor) = first(memory_spaces(x))
+memory_space(x::Chunk) = x.space
+memory_space(x::DTask) = memory_space(fetch(x; move_value=false, unwrap=false))
 
 memory_spaces(::P) where {P<:Processor} =
     throw(ArgumentError("Must define `memory_spaces` for `$P`"))
+
+function memory_spaces(proc::OSProc)
+    children = get_processors(proc)
+    spaces = Set{MemorySpace}()
+    for proc in children
+        for space in memory_spaces(proc)
+            push!(spaces, space)
+        end
+    end
+    return spaces
+end
 memory_spaces(proc::ThreadProc) =
     Set([CPURAMMemorySpace(proc.owner)])
 processors(::S) where {S<:MemorySpace} =
@@ -29,9 +60,12 @@ processors(space::CPURAMMemorySpace) =
 
 ### In-place Data Movement
 
-function unwrap(x::Chunk)
-    @assert x.handle.owner == myid()
-    MemPool.poolget(x.handle)
+function unwrap(x::Chunk; uniform::Bool=false)
+    @assert root_worker_id(x.handle) == myid() "Chunk $x is not owned by this process: $(root_worker_id(x.handle)) != $(myid())"
+    if x.handle isa DRef
+        return MemPool.poolget(x.handle)
+    end
+    return MemPool.poolget(x.handle; uniform)
 end
 move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::T, from::F) where {T,F} =
     throw(ArgumentError("No `move!` implementation defined for $F -> $T"))
@@ -69,6 +103,16 @@ function move!(::Type{<:Tridiagonal}, to_space::MemorySpace, from_space::MemoryS
     copyto!(view(to, diagind(to, 1)), view(from, diagind(from, 1)))
     return
 end
+
+# FIXME: Take MemorySpace instead
+function move_type(from_proc::Processor, to_proc::Processor, ::Type{T}) where T
+    if from_proc == to_proc
+        return T
+    end
+    return Base._return_type(move, Tuple{typeof(from_proc), typeof(to_proc), T})
+end
+move_type(from_proc::Processor, to_proc::Processor, ::Type{<:Chunk{T}}) where T =
+    move_type(from_proc, to_proc, T)
 
 ### Aliasing and Memory Spans
 
@@ -183,6 +227,7 @@ function memory_spans(oa::ObjectAliasing)
     return [span]
 end
 
+aliasing(accel::Acceleration, x, T) = aliasing(x, T)
 function aliasing(x, dep_mod)
     if dep_mod isa Symbol
         return aliasing(getfield(x, dep_mod))
@@ -218,14 +263,16 @@ end
 aliasing(::String) = NoAliasing() # FIXME: Not necessarily true
 aliasing(::Symbol) = NoAliasing()
 aliasing(::Type) = NoAliasing()
-aliasing(x::Chunk, T) = remotecall_fetch(root_worker_id(x.processor), x, T) do x, T
-    aliasing(unwrap(x), T)
+aliasing(x::DTask, T) = aliasing(fetch(x; move_value=false, unwrap=false), T)
+aliasing(x::DTask) = aliasing(fetch(x; move_value=false, unwrap=false))
+function aliasing(accel::DistributedAcceleration, x::Chunk, T)
+    @assert x.handle isa DRef
+    return remotecall_fetch(root_worker_id(x.processor), x, T) do x, T
+        aliasing(unwrap(x), T)
+    end
 end
-aliasing(x::Chunk) = remotecall_fetch(root_worker_id(x.processor), x) do x
-    aliasing(unwrap(x))
-end
-aliasing(x::DTask, T) = aliasing(fetch(x; raw=true), T)
-aliasing(x::DTask) = aliasing(fetch(x; raw=true))
+aliasing(x::Chunk, T) = aliasing(unwrap(x), T)
+aliasing(x::Chunk) = aliasing(unwrap(x))
 
 struct ContiguousAliasing{S} <: AbstractAliasing
     span::MemorySpan{S}
@@ -438,4 +485,3 @@ Base.string(x::ManyPair) = "ManyPair($(x.pairs))"
 
 ManyMemorySpan{N}(start::ManyPair{N}, len::ManyPair{N}) where N =
     ManyMemorySpan{N}(ntuple(i -> LocalMemorySpan(start.pairs[i], len.pairs[i]), N))
-
