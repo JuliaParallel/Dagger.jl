@@ -101,6 +101,7 @@ end
 const DATADEPS_SCHEDULER = ScopedValue{Union{Symbol,Nothing}}(nothing)
 const DATADEPS_LAUNCH_WAIT = ScopedValue{Union{Bool,Nothing}}(nothing)
 
+@warn "Don't blindly set occupancy=0, only do for MPI" maxlog=1
 function distribute_tasks!(queue::DataDepsTaskQueue)
     #= TODO: Improvements to be made:
     # - Support for copying non-AbstractArray arguments
@@ -111,20 +112,24 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     =#
 
     # Get the set of all processors to be scheduled on
-    all_procs = Processor[]
     scope = get_compute_scope()
-    for w in procs()
-        append!(all_procs, get_processors(OSProc(w)))
+    accel = current_acceleration()
+    accel_procs = filter(procs(Dagger.Sch.eager_context())) do proc
+        Dagger.accel_matches_proc(accel, proc)
     end
-    filter!(proc->!isa(constrain(ExactScope(proc), scope),
-                       InvalidScope),
-            all_procs)
+    all_procs = unique(vcat([collect(Dagger.get_processors(gp)) for gp in accel_procs]...))
+    # FIXME: This is an unreliable way to ensure processor uniformity
+    sort!(all_procs, by=short_name)
+    filter!(proc->proc_in_scope(proc, scope), all_procs)
     if isempty(all_procs)
         throw(Sch.SchedulingException("No processors available, try widening scope"))
     end
     exec_spaces = unique(vcat(map(proc->collect(memory_spaces(proc)), all_procs)...))
-    if !all(space->space isa CPURAMMemorySpace, exec_spaces) && !all(space->root_worker_id(space) == myid(), exec_spaces)
+    #=if !all(space->space isa CPURAMMemorySpace, exec_spaces) && !all(space->root_worker_id(space) == myid(), exec_spaces)
         @warn "Datadeps support for multi-GPU, multi-worker is currently broken\nPlease be prepared for incorrect results or errors" maxlog=1
+    end=#
+    for proc in all_procs
+        check_uniform(proc)
     end
 
     # Round-robin assign tasks to processors
@@ -257,7 +262,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 pos, data = arg
                 data, _ = unwrap_inout(data)
                 if data isa DTask
-                    data = fetch(data; raw=true)
+                    data = fetch(data; move_value=false, unwrap=false)
                 end
                 return pos => tochunk(data)
             end
@@ -324,9 +329,12 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         if our_scope isa InvalidScope
             throw(Sch.SchedulingException("Scopes are not compatible: $(our_scope.x), $(our_scope.y)"))
         end
+        check_uniform(our_proc)
+        check_uniform(our_space)
 
         f = spec.fargs[1]
-        f.value = move(ThreadProc(myid(), 1), our_proc, value(f))
+        # FIXME: May not be correct to move this under uniformity
+        f.value = move(default_processor(), our_proc, value(f))
         @dagdebug nothing :spawn_datadeps "($(repr(value(f)))) Scheduling: $our_proc ($our_space)"
 
         # Copy raw task arguments for analysis
@@ -336,7 +344,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         task_arg_ws = map(task_args) do _arg
             arg = value(_arg)
             arg, deps = unwrap_inout(arg)
-            arg = arg isa DTask ? fetch(arg; raw=true) : arg
+            arg = arg isa DTask ? fetch(arg; move_value=false, unwrap=false) : arg
             if !type_may_alias(typeof(arg)) || !supports_inplace_move(state, arg)
                 return [(ArgumentWrapper(arg, identity), false, false)]
             end
@@ -368,7 +376,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             end
 
             # Is the source of truth elsewhere?
-            arg_remote = get_or_generate_slot!(state, our_space, arg)
+            arg_remote = get_or_generate_slot!(state, our_space, arg, task)
             for (arg_w, _, _) in arg_ws
                 dep_mod = arg_w.dep_mod
                 remainder = compute_remainder_for_arg!(state, our_space, arg_w, write_num)
@@ -423,6 +431,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
         # Launch user's task
         spec.options.scope = our_scope
+        spec.options.occupancy = Dict(Any=>0)
         enqueue!(upper_queue, spec=>task)
 
         # Update read/write tracking for arguments

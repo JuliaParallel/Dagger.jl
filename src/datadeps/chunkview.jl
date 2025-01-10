@@ -25,7 +25,7 @@ function Base.view(c::Chunk, slices...)
     return ChunkView(c, slices)
 end
 
-Base.view(c::DTask, slices...) = view(fetch(c; raw=true), slices...)
+Base.view(c::DTask, slices...) = view(fetch(c; move_value=false, unwrap=false), slices...)
 
 aliasing(x::ChunkView) =
     throw(ConcurrencyViolationError("Cannot query aliasing of a ChunkView directly"))
