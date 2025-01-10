@@ -64,8 +64,9 @@ include("utils/scopes.jl")
 include("queue.jl")
 include("thunk.jl")
 include("submission.jl")
-include("chunks.jl")
+include("cancellation.jl")
 include("memory-spaces.jl")
+include("chunks.jl")
 
 # Task scheduling
 include("compute.jl")
@@ -125,6 +126,8 @@ function set_distributed_package!(value)
     @set_preferences!("distributed-package" => value)
     @info "Dagger.jl preference has been set, restart your Julia session for this change to take effect!"
 end
+# MPI
+include("mpi.jl")
 
 # Precompilation
 import PrecompileTools: @compile_workload

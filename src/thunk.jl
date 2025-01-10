@@ -84,16 +84,25 @@ mutable struct Thunk
                    affinity=nothing,
                    eager_ref=nothing,
                    processor=nothing,
+                   memory_space=nothing,
                    scope=nothing,
                    options=nothing,
                    propagates=(),
                    kwargs...
                   )
-        if !isa(f, Chunk) && (!isnothing(processor) || !isnothing(scope))
-            f = tochunk(f,
-                        something(processor, OSProc()),
-                        something(scope, DefaultScope()))
-        end
+        #FIXME: dont force unwrap with fetch
+        f = fetch(f)
+        if (!isnothing(processor) || !isnothing(scope) || !isnothing(memory_space))
+            if !isnothing(processor)
+                f = tochunk(f,
+                            processor,
+                            something(scope, DefaultScope()))
+            else
+                f = tochunk(f,
+                            something(memory_space, default_memory_space(f)),
+                                      something(scope, DefaultScope()))
+            end
+        end 
         xs = Base.mapany(identity, xs)
         syncdeps_set = Set{Any}(filterany(is_task_or_chunk, Base.mapany(last, xs)))
         if syncdeps !== nothing
@@ -467,12 +476,21 @@ function spawn(f, args...; kwargs...)
     # Wrap f in a Chunk if necessary
     processor = haskey(options, :processor) ? options.processor : nothing
     scope = haskey(options, :scope) ? options.scope : nothing
-    if !isnothing(processor) || !isnothing(scope)
-        f = tochunk(f,
-                    something(processor, get_options(:processor, OSProc())),
-                    something(scope, get_options(:scope, DefaultScope())))
+    memory_space = haskey(options, :memory_space) ? options.memory_space : nothing
+    #FIXME: don't for unwrap with fetch
+    f = fetch(f)
+    if (!isnothing(processor) || !isnothing(scope) || !isnothing(memory_space))
+        if !isnothing(processor)
+            f = tochunk(f,
+                        processor,
+                        something(scope, DefaultScope()))
+        else
+            f = tochunk(f,
+                        something(memory_space, default_memory_space(f)),
+                                  something(scope, DefaultScope()))
+        end
     end
-
+   
     # Process the args and kwargs into Pair form
     args_kwargs = args_kwargs_to_pairs(args, kwargs)
 
@@ -481,6 +499,9 @@ function spawn(f, args...; kwargs...)
     options = NamedTuple(filter(opt->opt[1] != :task_queue, Base.pairs(options)))
     propagates = filter(prop->prop != :task_queue, propagates)
     options = merge(options, (;propagates))
+    if !haskey(options, :acceleration)
+        options = merge(options, (;acceleration=current_acceleration()))
+    end
 
     # Construct task spec and handle
     spec = DTaskSpec(f, args_kwargs, options)

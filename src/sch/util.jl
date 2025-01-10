@@ -514,7 +514,7 @@ function estimate_task_costs(state, procs, task, inputs)
         tx_cost = impute_sum(affinity(chunk)[2] for chunk in chunks_filt)
 
         # Estimate total cost to move data and get task running after currently-scheduled tasks
-        est_time_util = get(state.worker_time_pressure[get_parent(proc).pid], proc, 0)
+        est_time_util = get(state.worker_time_pressure[get_parent(proc)], proc, 0)
         costs[proc] = est_time_util + (tx_cost/tx_rate)
     end
 
