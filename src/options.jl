@@ -7,6 +7,7 @@ Stores per-task options to be passed to the scheduler.
 
 # Arguments
 - `propagates::Vector{Symbol}`: The set of option names that will be propagated by this task to tasks that it spawns.
+- `acceleration::Acceleration`: The acceleration (cluster/network) type to use for this task.
 - `processor::Processor`: The processor associated with this task's function. Generally ignored by the scheduler.
 - `compute_scope::AbstractScope`: The execution scope of the task, which determines where the task can be scheduled and executed. `scope` is another name for this option.
 - `result_scope::AbstractScope`: The data scope of the task's result, which determines where the task's result can be accessed from.
@@ -33,6 +34,7 @@ Stores per-task options to be passed to the scheduler.
 Base.@kwdef mutable struct Options
     propagates::Union{Vector{Symbol},Nothing} = nothing
 
+    acceleration::Union{Acceleration,Nothing} = nothing
     processor::Union{Processor,Nothing} = nothing
     scope::Union{AbstractScope,Nothing} = nothing
     compute_scope::Union{AbstractScope,Nothing} = scope
@@ -110,6 +112,7 @@ signature `sig`, if the option was previously unspecified in `opts`.
 """
 function populate_defaults!(opts::Options, sig)
     maybe_default!(opts, Val{:propagates}(), sig)
+    maybe_default!(opts, Val{:acceleration}(), sig)
     maybe_default!(opts, Val{:processor}(), sig)
     maybe_default!(opts, Val{:compute_scope}(), sig)
     maybe_default!(opts, Val{:result_scope}(), sig)

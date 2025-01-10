@@ -10,9 +10,9 @@ import MemPool: DRef, FileRef, poolget, poolset
 import Base: collect, reduce
 
 import LinearAlgebra
-import LinearAlgebra: Adjoint, BLAS, Diagonal, Bidiagonal, Tridiagonal, LAPACK, LowerTriangular, PosDefException, Transpose, UpperTriangular, UnitLowerTriangular, UnitUpperTriangular, diagind, ishermitian, issymmetric
 import Random
 import Random: AbstractRNG
+import LinearAlgebra: Adjoint, BLAS, Diagonal, Bidiagonal, Tridiagonal, LAPACK, LowerTriangular, PosDefException, Transpose, UpperTriangular, UnitLowerTriangular, UnitUpperTriangular, diagind, ishermitian, issymmetric
 
 import UUIDs: UUID, uuid4
 
@@ -47,6 +47,13 @@ import MacroTools: @capture, prewalk
 include("lib/util.jl")
 include("utils/dagdebug.jl")
 
+# Type definitions
+include("types/processor.jl")
+include("types/scope.jl")
+include("types/memory-space.jl")
+include("types/chunk.jl")
+include("types/acceleration.jl")
+
 # Distributed data
 include("utils/locked-object.jl")
 include("utils/tasks.jl")
@@ -58,7 +65,6 @@ include("context.jl")
 include("utils/processors.jl")
 include("scopes.jl")
 include("utils/scopes.jl")
-include("chunks.jl")
 include("utils/signature.jl")
 include("options.jl")
 include("dtask.jl")
@@ -68,7 +74,12 @@ include("argument.jl")
 include("queue.jl")
 include("thunk.jl")
 include("utils/fetch.jl")
-include("utils/chunks.jl")
+include("chunks.jl")
+include("affinity.jl")
+include("tochunk.jl")
+include("mutable.jl")
+include("shard.jl")
+include("weakchunk.jl")
 include("utils/logging.jl")
 include("submission.jl")
 include("memory-spaces.jl")
@@ -138,6 +149,9 @@ function set_distributed_package!(value)
     @set_preferences!("distributed-package" => value)
     @info "Dagger.jl preference has been set, restart your Julia session for this change to take effect!"
 end
+
+# MPI
+include("mpi.jl")
 
 # Precompilation
 import PrecompileTools: @compile_workload
