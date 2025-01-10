@@ -297,19 +297,23 @@ function tochunk_pset(x, space::MPIMemorySpace; device=nothing, kwargs...)
 end
 
 function recv_yield(comm, src, tag)
-    #@dagdebug nothing :mpi "[$(MPI.Comm_rank(comm))][$tag] Hit probable hang on recv \n"
     while true
-        (got, msg, stat) = MPI.Improbe(src, tag, comm, MPI.Status)
+        (got, stat) = MPI.Iprobe(comm, MPI.Status; source=src, tag=tag)
         if got
+            if MPI.Get_error(stat) != MPI.SUCCESS
+                error("recv_yield (Iprobe) failed with error $(MPI.Get_error(stat))")
+            end
             count = MPI.Get_count(stat, UInt8)
             buf = Array{UInt8}(undef, count)
-            req = MPI.Imrecv!(MPI.Buffer(buf), msg)
+            req = MPI.Irecv!(MPI.Buffer(buf), comm; source=src, tag=tag)
             while true
-                finish = MPI.Test(req)
+                finish, stat = MPI.Test(req, MPI.Status)
                 if finish
+                    if MPI.Get_error(stat) != MPI.SUCCESS
+                        error("recv_yield (Test) failed with error $(MPI.Get_error(stat))")
+                    end
                     value = MPI.deserialize(buf)
                     rnk = MPI.Comm_rank(comm)
-                    #@dagdebug nothing :mpi "[$rnk][$tag] Left recv hang \n"
                     return value
                 end
                 yield()
@@ -322,9 +326,11 @@ function send_yield(value, comm, dest, tag)
     #@dagdebug nothing :mpi "[$(MPI.Comm_rank(comm))][$tag] Hit probable hang while sending \n"
     req = MPI.isend(value, comm; dest, tag)
     while true
-        finish = MPI.Test(req)
+        finish, status = MPI.Test(req, MPI.Status)
         if finish
-            #@dagdebug nothing :mpi "[$(MPI.Comm_rank(comm))][$tag] Left send hang \n"
+            if MPI.Get_error(status) != MPI.SUCCESS
+                error("send_yield (Test) failed with error $(MPI.Get_error(status))")
+            end
             return
         end
         yield()

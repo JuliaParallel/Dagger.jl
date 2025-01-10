@@ -316,6 +316,9 @@ function populate_defaults(opts::ThunkOptions, Tf, Targs)
         maybe_default(:acceleration))
 end
 
+function cleanup(ctx)
+end
+
 # Eager scheduling
 include("eager.jl")
 
