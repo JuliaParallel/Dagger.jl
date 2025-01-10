@@ -15,10 +15,9 @@ import Base: @invokelatest
 
 import ..Dagger
 import ..Dagger: Context, Processor, SchedulerOptions, Options, Thunk, WeakThunk, ThunkFuture, DTaskFailedException, Chunk, WeakChunk, OSProc, AnyScope, DefaultScope, LockedObject, Argument, Signature
-import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak_checked, wrap_weak, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, default_enabled, processor, get_processors, get_parent, execute!, rmprocs!, task_processor, constrain, cputhreadtime, maybe_take_or_alloc!
+import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak_checked, wrap_weak, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, default_enabled, processor, get_processors, get_parent, root_worker_id, execute!, rmprocs!, task_processor, constrain, cputhreadtime, maybe_take_or_alloc!
 import ..Dagger: @dagdebug, @safe_lock_spin1, @maybelog, @take_or_alloc!
 import DataStructures: PriorityQueue, enqueue!, dequeue_pair!, peek
-import ScopedValues: @with
 
 import MetricsTracker as MT
 
@@ -27,6 +26,7 @@ import ..Dagger: @reusable, @reusable_dict, @reusable_vector, @reusable_tasks
 
 import TimespanLogging
 
+import ScopedValues: ScopedValue, with, @with
 import TaskLocalValues: TaskLocalValue
 
 const OneToMany = Dict{Thunk, Set{Thunk}}
@@ -62,10 +62,10 @@ Fields:
 - `thunk_dict::Dict{Int, WeakThunk}` - Maps from thunk IDs to a `Thunk`
 - `node_order::Any` - Function that returns the order of a thunk
 - `equiv_chunks::WeakKeyDict{DRef,Chunk}` - Cache mapping from `DRef` to a `Chunk` which contains it
-- `worker_time_pressure::Dict{Int,Dict{Processor,UInt64}}` - Maps from worker ID to processor pressure
-- `worker_storage_pressure::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}` - Maps from worker ID to storage resource pressure
-- `worker_storage_capacity::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}` - Maps from worker ID to storage resource capacity
-- `worker_loadavg::Dict{Int,NTuple{3,Float64}}` - Worker load average
+- `worker_time_pressure::Dict{Processor,Dict{Processor,UInt64}}` - Maps from worker to processor pressure
+- `worker_storage_pressure::Dict{Processor,Dict{Union{StorageResource,Nothing},UInt64}}` - Maps from worker to storage resource pressure
+- `worker_storage_capacity::Dict{Processor,Dict{Union{StorageResource,Nothing},UInt64}}` - Maps from worker to storage resource capacity
+- `worker_loadavg::Dict{Processor,NTuple{3,Float64}}` - Worker load average
 - `worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}` - Communication channels between the scheduler and each worker
 - `signature_time_cost::Dict{Signature,Dict{Processor,UInt64}}` - Cache of estimated CPU time (in nanoseconds) required to compute calls with the given signature on a given processor
 - `signature_alloc_cost::Dict{Signature,Dict{Processor,UInt64}}` - Cache of estimated CPU RAM (in bytes) required to compute calls with the given signature on a given processor
@@ -89,11 +89,11 @@ struct ComputeState
     thunk_dict::Dict{Int, WeakThunk}
     node_order::Any
     equiv_chunks::WeakKeyDict{DRef,Chunk}
-    worker_time_pressure::Dict{Int,Dict{Processor,UInt64}}
-    worker_storage_pressure::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}
-    worker_storage_capacity::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}
-    worker_loadavg::Dict{Int,NTuple{3,Float64}}
-    worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}
+    worker_time_pressure::Dict{Processor,Dict{Processor,UInt64}}
+    worker_storage_pressure::Dict{Processor,Dict{Union{StorageResource,Nothing},UInt64}}
+    worker_storage_capacity::Dict{Processor,Dict{Union{StorageResource,Nothing},UInt64}}
+    worker_loadavg::Dict{Processor,NTuple{3,Float64}}
+    worker_chans::Dict{Int,Tuple{RemoteChannel,RemoteChannel}}
     signature_time_cost::Dict{Signature,Dict{Processor,UInt64}}
     signature_alloc_cost::Dict{Signature,Dict{Processor,UInt64}}
     transfer_rate::Ref{UInt64}
@@ -119,10 +119,10 @@ function start_state(deps::Dict, node_order, chan)
                          Dict{Int, WeakThunk}(),
                          node_order,
                          WeakKeyDict{DRef,Chunk}(),
-                         Dict{Int,Dict{Processor,UInt64}}(),
-                         Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}(),
-                         Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}(),
-                         Dict{Int,NTuple{3,Float64}}(),
+                         Dict{Processor,Dict{Processor,UInt64}}(),
+                         Dict{Processor,Dict{Union{StorageResource,Nothing},UInt64}}(),
+                         Dict{Processor,Dict{Union{StorageResource,Nothing},UInt64}}(),
+                         Dict{Processor,NTuple{3,Float64}}(),
                          Dict{Int, Tuple{RemoteChannel,RemoteChannel}}(),
                          Dict{Signature,Dict{Processor,UInt64}}(),
                          Dict{Signature,Dict{Processor,UInt64}}(),
@@ -156,29 +156,30 @@ const WORKER_MONITOR_TASKS = Dict{Int,Task}()
 const WORKER_MONITOR_CHANS = Dict{Int,Dict{UInt64,RemoteChannel}}()
 function init_proc(state, p, log_sink)
     ctx = Context(Int[]; log_sink)
-    @maybelog ctx timespan_start(ctx, :init_proc, (;uid=state.uid, worker=p.pid), nothing)
-    # Initialize pressure and capacity
-    gproc = OSProc(p.pid)
-    lock(state.lock) do
-        state.worker_time_pressure[p.pid] = Dict{Processor,UInt64}()
+    pid = Dagger.root_worker_id(p)
+    @maybelog ctx timespan_start(ctx, :init_proc, (;uid=state.uid, worker=pid), nothing)
 
-        state.worker_storage_pressure[p.pid] = Dict{Union{StorageResource,Nothing},UInt64}()
-        state.worker_storage_capacity[p.pid] = Dict{Union{StorageResource,Nothing},UInt64}()
+    # Initialize pressure and capacity
+    lock(state.lock) do
+        state.worker_time_pressure[p] = Dict{Processor,UInt64}()
+
+        state.worker_storage_pressure[p] = Dict{Union{StorageResource,Nothing},UInt64}()
+        state.worker_storage_capacity[p] = Dict{Union{StorageResource,Nothing},UInt64}()
         #= FIXME
         for storage in get_storage_resources(gproc)
             pressure, capacity = remotecall_fetch(gproc.pid, storage) do storage
                 storage_pressure(storage), storage_capacity(storage)
             end
-            state.worker_storage_pressure[p.pid][storage] = pressure
-            state.worker_storage_capacity[p.pid][storage] = capacity
+            state.worker_storage_pressure[p][storage] = pressure
+            state.worker_storage_capacity[p][storage] = capacity
         end
         =#
 
-        state.worker_loadavg[p.pid] = (0.0, 0.0, 0.0)
+        state.worker_loadavg[p] = (0.0, 0.0, 0.0)
     end
-    if p.pid != 1
+    if pid != 1
         lock(WORKER_MONITOR_LOCK) do
-            wid = p.pid
+            wid = pid
             if !haskey(WORKER_MONITOR_TASKS, wid)
                 t = Threads.@spawn begin
                     try
@@ -212,16 +213,16 @@ function init_proc(state, p, log_sink)
     end
 
     # Setup worker-to-scheduler channels
-    inp_chan = RemoteChannel(p.pid)
-    out_chan = RemoteChannel(p.pid)
+    inp_chan = RemoteChannel(pid)
+    out_chan = RemoteChannel(pid)
     lock(state.lock) do
-        state.worker_chans[p.pid] = (inp_chan, out_chan)
+        state.worker_chans[pid] = (inp_chan, out_chan)
     end
 
     # Setup dynamic listener
-    dynamic_listener!(ctx, state, p.pid)
+    dynamic_listener!(ctx, state, pid)
 
-    @maybelog ctx timespan_finish(ctx, :init_proc, (;uid=state.uid, worker=p.pid), nothing)
+    @maybelog ctx timespan_finish(ctx, :init_proc, (;uid=state.uid, worker=pid), nothing)
 end
 function _cleanup_proc(uid, log_sink)
     empty!(CHUNK_CACHE) # FIXME: Should be keyed on uid!
@@ -236,7 +237,7 @@ function _cleanup_proc(uid, log_sink)
 end
 function cleanup_proc(state, p, log_sink)
     ctx = Context(Int[]; log_sink)
-    wid = p.pid
+    wid = root_worker_id(p)
     @maybelog ctx timespan_start(ctx, :cleanup_proc, (;uid=state.uid, worker=wid), nothing)
     lock(WORKER_MONITOR_LOCK) do
         if haskey(WORKER_MONITOR_CHANS, wid)
@@ -299,7 +300,7 @@ function compute_dag(ctx::Context, d::Thunk, options=SchedulerOptions())
     node_order = x -> -get(ord, x, 0)
     state = start_state(deps, node_order, chan)
 
-    master = OSProc(myid())
+    master = Dagger.default_processor()
 
     @maybelog ctx timespan_start(ctx, :scheduler_init, (;uid=state.uid), master)
     try
@@ -394,8 +395,8 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options::SchedulerOpt
         res = tresult.result
 
         @dagdebug thunk_id :take "Got finished task"
-        gproc = OSProc(pid)
         safepoint(state)
+        gproc = proc != nothing ? get_parent(proc) : OSProc(pid)
         lock(state.lock) do
             thunk_failed = false
             if res isa Exception
@@ -423,11 +424,11 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options::SchedulerOpt
             metadata = tresult.metadata
             if metadata !== nothing
                 # Update metrics
-                state.worker_time_pressure[pid][proc] = metadata.time_pressure
+                state.worker_time_pressure[gproc][proc] = metadata.time_pressure
                 #to_storage = fetch(node.options.storage)
-                #state.worker_storage_pressure[pid][to_storage] = metadata.storage_pressure
-                #state.worker_storage_capacity[pid][to_storage] = metadata.storage_capacity
-                #state.worker_loadavg[pid] = metadata.loadavg
+                #state.worker_storage_pressure[gproc][to_storage] = metadata.storage_pressure
+                #state.worker_storage_capacity[gproc][to_storage] = metadata.storage_capacity
+                #state.worker_loadavg[gproc] = metadata.loadavg
                 sig = signature(state, node)
                 time_costs_proc = get!(Dict{Processor,UInt64}, state.signature_time_cost, sig)
                 time_cost = get(time_costs_proc, proc, UInt64(0))
@@ -532,7 +533,7 @@ end
 const CHUNK_CACHE = Dict{Chunk,Dict{Processor,Any}}()
 
 struct ScheduleTaskLocation
-    gproc::OSProc
+    gproc::Processor
     proc::Processor
 end
 struct ScheduleTaskSpec
@@ -615,7 +616,9 @@ function schedule!(ctx, state, sch_options, procs=procs_to_use(ctx, sch_options)
 
         # FIXME: Use compatible_processors
         input_procs = @reusable_vector :schedule!_input_procs Processor OSProc() 32
+        accel = something(options.acceleration, Dagger.DistributedAcceleration())
         for gp in procs
+            Dagger.accel_matches_proc(accel, proc) || continue
             subprocs = get_processors(gp)
             for proc in subprocs
                 if !(proc in input_procs)
@@ -647,7 +650,7 @@ function schedule!(ctx, state, sch_options, procs=procs_to_use(ctx, sch_options)
             can_use, scope = can_use_proc(state, task, gproc, proc, options, scope)
             if can_use
                 has_cap, est_time_util, est_alloc_util, est_occupancy =
-                    has_capacity(state, proc, gproc.pid, options.time_util, options.alloc_util, options.occupancy, sig)
+                    has_capacity(state, proc, gproc, options.time_util, options.alloc_util, options.occupancy, sig)
                 if has_cap
                     # Schedule task onto proc
                     # FIXME: est_time_util = est_time_util isa MaxUtilization ? cap : est_time_util
@@ -656,8 +659,8 @@ function schedule!(ctx, state, sch_options, procs=procs_to_use(ctx, sch_options)
                         Vector{ScheduleTaskSpec}()
                     end
                     push!(proc_tasks, ScheduleTaskSpec(task, scope, est_time_util, est_alloc_util, est_occupancy))
-                    state.worker_time_pressure[gproc.pid][proc] =
-                        get(state.worker_time_pressure[gproc.pid], proc, 0) +
+                    state.worker_time_pressure[gproc][proc] =
+                        get(state.worker_time_pressure[gproc], proc, 0) +
                         est_time_util
                     @dagdebug task :schedule "Scheduling to $gproc -> $proc"
                     empty!(sorted_procs)
@@ -723,13 +726,13 @@ function monitor_procs_changed!(ctx, state, options)
 end
 
 function remove_dead_proc!(ctx, state, proc, options)
-    @assert options.single !== proc.pid "Single worker failed, cannot continue."
+    @assert options.single !== root_worker_id(proc) "Single worker failed, cannot continue."
     rmprocs!(ctx, [proc])
-    delete!(state.worker_time_pressure, proc.pid)
-    delete!(state.worker_storage_pressure, proc.pid)
-    delete!(state.worker_storage_capacity, proc.pid)
-    delete!(state.worker_loadavg, proc.pid)
-    delete!(state.worker_chans, proc.pid)
+    delete!(state.worker_time_pressure, proc)
+    delete!(state.worker_storage_pressure, proc)
+    delete!(state.worker_storage_capacity, proc)
+    delete!(state.worker_loadavg, proc)
+    delete!(state.worker_chans, root_worker_id(proc))
 end
 
 function finish_task!(ctx, state, node, thunk_failed)
@@ -776,7 +779,7 @@ end
 
 function evict_all_chunks!(ctx, options, to_evict)
     if !isempty(to_evict)
-        @sync for w in map(p->p.pid, procs_to_use(ctx, options))
+        @sync for w in map(p->root_worker_id(p), procs_to_use(ctx, options))
             Threads.@spawn remote_do(evict_chunks!, w, ctx.log_sink, to_evict)
         end
     end
@@ -814,11 +817,12 @@ Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
 
 function fire_tasks!(ctx, task_loc::ScheduleTaskLocation, task_specs::Vector{ScheduleTaskSpec}, state)
     gproc, proc = task_loc.gproc, task_loc.proc
+    pid = root_worker_id(gproc)
     to_send = @reusable_vector :fire_tasks!_to_send Union{TaskSpec,Nothing} nothing 1024
     for task_spec in task_specs
         thunk = task_spec.task
         push!(state.running, thunk)
-        state.running_on[thunk] = gproc
+        state.running_on[thunk] = OSProc(pid)
         if has_result(state, thunk)
             # the result is already cached
             thunk_failed = get(state.errored, thunk, false)
@@ -852,9 +856,9 @@ function fire_tasks!(ctx, task_loc::ScheduleTaskLocation, task_specs::Vector{Sch
         end
         Tf = chunktype(first(args))
         sig = signature(state, thunk)
-        @assert (options.single === nothing) || (gproc.pid == options.single)
+        @assert (options.single === nothing) || (pid == options.single)
         # TODO: Set `sch_handle.tid.ref` to the right `DRef`
-        sch_handle = SchedulerHandle(ThunkID(thunk.id, nothing), state.worker_chans[gproc.pid]...)
+        sch_handle = SchedulerHandle(ThunkID(thunk.id, nothing), state.worker_chans[pid]...)
 
         # TODO: De-dup common fields (log_sink, uid, etc.)
         push!(to_send, TaskSpec(
@@ -887,7 +891,7 @@ function (ets::FireTaskSpec)()
 
     proc = ets.init_proc
     chan = ets.return_chan
-    pid = Dagger.root_worker_id(proc)
+    pid = root_worker_id(proc)
 
     @maybelog ctx timespan_start(ctx, :fire, (;uid, worker=pid), nothing)
     try
@@ -1020,7 +1024,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
         proc_occupancy = istate.proc_occupancy
         time_pressure = istate.time_pressure
 
-        wid = get_parent(to_proc).pid
+        wid = root_worker_id(to_proc)
         work_to_do = false
         while isopen(return_queue)
             # Wait for new tasks
@@ -1302,6 +1306,8 @@ function do_tasks(to_proc, return_queue, tasks)
     @dagdebug nothing :processor "Kicked processors"
 end
 
+const SCHED_MOVE = ScopedValue{Bool}(false)
+
 """
     do_task(to_proc, task::TaskSpec) -> Any
 
@@ -1312,8 +1318,10 @@ function do_task(to_proc, task::TaskSpec)
 
     ctx_vars = task.ctx_vars
     ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
+    options = task.options
+    Dagger.accelerate!(options.acceleration)
 
-    from_proc = OSProc()
+    from_proc = Dagger.default_processor()
     #Tdata = Any[]
     data = task.data
     #for arg in data
@@ -1323,7 +1331,6 @@ function do_task(to_proc, task::TaskSpec)
     f = isdefined(Tf, :instance) ? Tf.instance : nothing
 
     # Wait for required resources to become available
-    options = task.options
     propagated = get_propagated_options(options)
     to_storage = options.storage !== nothing ? fetch(options.storage) : MemPool.GLOBAL_DEVICE[]
     #to_storage_name = nameof(typeof(to_storage))
@@ -1452,7 +1459,7 @@ function do_task(to_proc, task::TaskSpec)
                 end
             else
             =#
-            new_value = @invokelatest move(to_proc, value)
+            new_value = @with SCHED_MOVE=>true @invokelatest move(to_proc, value)
             #end
             if new_value !== value
                 @dagdebug thunk_id :move "Moved argument @ $position to $to_proc: $(typeof(value)) -> $(typeof(new_value))"

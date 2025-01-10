@@ -173,28 +173,43 @@ domainchunks(d::DArray) = d.subdomains
 size(x::DArray) = size(domain(x))
 stage(ctx, c::DArray) = c
 
-function Base.collect(d::DArray{T,N}; tree=false, copyto=false) where {T,N}
-    a = fetch(d)
-    if isempty(d.chunks)
-        return Array{eltype(d)}(undef, size(d)...)
+@warn "Dispatch uniform on acceleration" maxlog=1
+@warn "Take D.concat into account" maxlog=1
+function Base.collect(D::DArray{T,N}; tree=false, uniform::Bool=true) where {T,N}
+    # Materialize the DArray
+    #Df = fetch(D; uniform)
+    Df = D
+
+    if isempty(Df.chunks)
+        return Array{T,N}(undef, size(Df)...)
     end
 
-    if ndims(d) == 0
-        return fetch(a.chunks[1])
+    # Return a scalar, as required by Julia's array interface
+    if N == 0
+        return fetch(Df.chunks[1]; unwrap=true)
     end
 
-    if copyto
-        C = Array{T,N}(undef, size(a))
-        DC = view(C, Blocks(size(a)...))
-        copyto!(DC, a)
-        return C
-    end
+    if uniform
+        @assert D.concat === cat "FIXME: Handle non-cat"
+        A = Array{T,N}(undef, size(Df)...)
+        DA = view(A, Df.partitioning; space=CPURAMMemorySpace())
 
-    dimcatfuncs = [(x...) -> d.concat(x..., dims=i) for i in 1:ndims(d)]
-    if tree
-        collect(fetch(treereduce_nd(map(x -> ((args...,) -> Dagger.@spawn x(args...)) , dimcatfuncs), a.chunks)))
+        # Perform the equivalent of `copyto!(DA, Df)`, but force local updates
+        # FIXME: Be more parallel?
+        for idx in eachindex(DA.chunks)
+            dest = fetch(DA.chunks[idx]; move_value=false, unwrap=true, uniform=true)::AbstractArray
+            src = fetch(Df.chunks[idx]; move_value=true, unwrap=true, uniform=true)::AbstractArray
+            copyto!(dest, src)
+        end
+
+        return A
     else
-        treereduce_nd(dimcatfuncs, asyncmap(fetch, a.chunks))
+        dimcatfuncs = [(x...) -> Df.concat(x..., dims=i) for i in 1:N]
+        if tree
+            collect(fetch(treereduce_nd(map(x -> ((args...,) -> Dagger.@spawn x(args...)) , dimcatfuncs), Df.chunks)))
+        else
+            treereduce_nd(dimcatfuncs, asyncmap(fetch, a.chunks))
+        end
     end
 end
 
@@ -399,23 +414,18 @@ function lookup_parts(A::DArray, ps::AbstractArray, subdmns::DomainBlocks{N}, d:
 end
 
 """
-    Base.fetch(c::DArray)
+    Base.fetch(A::DArray; unwrap::Bool=false, kwargs...) -> DArray
 
-If a `DArray` tree has a `Thunk` in it, make the whole thing a big thunk.
+Returns a new `DArray` with the same data as `A`, but where all values are
+fully computed.
 """
-function Base.fetch(c::DArray{T}) where T
-    if any(istask, chunks(c))
-        thunks = chunks(c)
-        sz = size(thunks)
-        dmn = domain(c)
-        dmnchunks = domainchunks(c)
-        return fetch(Dagger.spawn(Options(meta=true), thunks...) do results...
-            t = eltype(fetch(results[1]))
-            DArray(t, dmn, dmnchunks, reshape(Any[results...], sz),
-                   c.partitioning, c.concat)
-        end)
+function Base.fetch(A::DArray{T}; unwrap::Bool=false, kwargs...) where T
+    if any(unwrappable, chunks(A))
+        tasks = map(t->unwrappable(t) ? fetch(t; unwrap, kwargs...) : t, chunks(A))
+        B = DArray(T, A.domain, A.subdomains, tasks, A.partitioning, A.concat)
+        return B
     else
-        return c
+        return A
     end
 end
 
@@ -501,9 +511,12 @@ function auto_blocks(dims::Dims{N}) where N
 end
 auto_blocks(A::AbstractArray{T,N}) where {T,N} = auto_blocks(size(A))
 
-distribute(A::AbstractArray) = distribute(A, AutoBlocks())
-distribute(A::AbstractArray{T,N}, dist::Blocks{N}) where {T,N} =
+distribute(A::AbstractArray{T,N}, dist::Blocks{N}, ::DistributedAcceleration) where {T,N} =
     _to_darray(Distribute(dist, A))
+
+distribute(A::AbstractArray{T,N}, dist::Blocks{N}) where {T,N} =
+    distribute(A::AbstractArray{T,N}, dist, current_acceleration())
+distribute(A::AbstractArray) = distribute(A, AutoBlocks())
 distribute(A::AbstractArray, ::AutoBlocks) = distribute(A, auto_blocks(A))
 function distribute(x::AbstractArray{T,N}, n::NTuple{N}) where {T,N}
     p = map((d, dn)->ceil(Int, d / dn), size(x), n)

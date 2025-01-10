@@ -10,16 +10,16 @@ import MemPool: DRef, FileRef, poolget, poolset
 import Base: collect, reduce
 
 import LinearAlgebra
-import LinearAlgebra: Adjoint, BLAS, Diagonal, Bidiagonal, Tridiagonal, LAPACK, LowerTriangular, PosDefException, Transpose, UpperTriangular, UnitLowerTriangular, UnitUpperTriangular, diagind, ishermitian, issymmetric
 import Random
 import Random: AbstractRNG
+import LinearAlgebra: Adjoint, BLAS, Diagonal, Bidiagonal, Tridiagonal, LAPACK, LowerTriangular, PosDefException, Transpose, UpperTriangular, UnitLowerTriangular, UnitUpperTriangular, diagind, ishermitian, issymmetric
 
 import UUIDs: UUID, uuid4
 
 if !isdefined(Base, :ScopedValues)
-    import ScopedValues: ScopedValue, with
+    import ScopedValues: ScopedValue, @with, with
 else
-    import Base.ScopedValues: ScopedValue, with
+    import Base.ScopedValues: ScopedValue, @with, with
 end
 import TaskLocalValues: TaskLocalValue
 
@@ -78,6 +78,7 @@ include("utils/chunks.jl")
 include("utils/logging.jl")
 include("submission.jl")
 include("memory-spaces.jl")
+include("chunks.jl")
 
 # Metrics
 include("utils/metrics.jl")
@@ -166,6 +167,9 @@ function set_metrics_path!(value::String)
     @set_preferences!("metrics-path" => value)
     @info "Dagger.jl preference has been set, restart your Julia session for this change to take effect!"
 end
+
+# MPI
+include("mpi.jl")
 
 # Precompilation
 import PrecompileTools: @compile_workload

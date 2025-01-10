@@ -134,6 +134,7 @@ Base.length(s::Shard) = length(s.chunks)
 
 ### Core Stuff
 
+@warn "Update tochunk docstring" maxlog=1
 """
     tochunk(x, proc::Processor, scope::AbstractScope; device=nothing, rewrap=false, kwargs...) -> Chunk
 
@@ -147,12 +148,20 @@ will be inspected to determine if it's safe to serialize; if so, the default
 MemPool storage device will be used; if not, then a `MemPool.CPURAMDevice` will
 be used.
 
+`type` can be specified manually to force the type to be `Chunk{type}`.
+
 If `rewrap==true` and `x isa Chunk`, then the `Chunk` will be rewrapped in a
 new `Chunk`.
 
 All other kwargs are passed directly to `MemPool.poolset`.
 """
-function tochunk(x::X, proc::P=OSProc(), scope::S=AnyScope(); device=nothing, rewrap=false, kwargs...) where {X,P,S}
+tochunk(x::X, proc::P, space::M; kwargs...) where {X,P<:Processor,M<:MemorySpace} =
+    tochunk(x, proc, space, AnyScope(); kwargs...)
+function tochunk(x::X, proc::P, space::M, scope::S; device=nothing, type=X, rewrap=false, kwargs...) where {X,P<:Processor,S,M<:MemorySpace}
+    if x isa Chunk
+        check_proc_space(x, proc, space)
+        return maybe_rewrap(x, proc, space, scope; type, rewrap)
+    end
     if device === nothing
         device = if Sch.walk_storage_safe(x)
             MemPool.GLOBAL_DEVICE[]
@@ -160,10 +169,56 @@ function tochunk(x::X, proc::P=OSProc(), scope::S=AnyScope(); device=nothing, re
             MemPool.CPURAMDevice()
         end
     end
-    ref = poolset(x; device, kwargs...)
-    Chunk{X,typeof(ref),P,S}(X, domain(x), ref, proc, scope)
+    ref = tochunk_pset(x, space; device, kwargs...)
+    return Chunk{type,typeof(ref),P,S,typeof(space)}(type, domain(x), ref, proc, scope, space)
 end
-function tochunk(x::Chunk, proc=nothing, scope=nothing; rewrap=false, kwargs...)
+function tochunk(x::X, proc::P, scope::S; device=nothing, type=X, kwargs...) where {X,P<:Processor,S}
+    if device === nothing
+        device = if Sch.walk_storage_safe(x)
+            MemPool.GLOBAL_DEVICE[]
+        else
+            MemPool.CPURAMDevice()
+        end
+    end
+    if x isa Chunk
+        space = x.space
+        check_proc_space(x, proc, space)
+        return maybe_rewrap(x, proc, space, scope; type, rewrap)
+    end
+    space = default_memory_space(current_acceleration(), x)
+    ref = tochunk_pset(x, space; device, kwargs...)
+    return Chunk{type,typeof(ref),P,S,typeof(space)}(type, domain(x), ref, proc, scope, space)
+end
+function tochunk(x::X, space::M, scope::S; device=nothing, type=X, rewrap=false, kwargs...) where {X,M<:MemorySpace,S}
+    if device === nothing
+        device = if Sch.walk_storage_safe(x)
+            MemPool.GLOBAL_DEVICE[]
+        else
+            MemPool.CPURAMDevice()
+        end
+    end
+    if x isa Chunk
+        proc = x.processor
+        check_proc_space(x, proc, space)
+        return maybe_rewrap(x, proc, space, scope; type, rewrap)
+    end
+    proc = default_processor(current_acceleration(), x)
+    ref = tochunk_pset(x, space; device, kwargs...)
+    return Chunk{type,typeof(ref),typeof(proc),S,M}(type, domain(x), ref, proc, scope, space)
+end
+tochunk(x, procOrSpace; kwargs...) = tochunk(x, procOrSpace, AnyScope(); kwargs...)
+tochunk(x; kwargs...) = tochunk(x, default_memory_space(current_acceleration(), x), AnyScope(); kwargs...)
+
+check_proc_space(x, proc, space) = nothing
+function check_proc_space(x::Chunk, proc, space)
+    if x.space !== space
+        throw(ArgumentError("Memory space mismatch: Chunk=$(x.space) != Requested=$space"))
+    end
+end
+function check_proc_space(x::Thunk, proc, space)
+    # FIXME: Validate
+end
+function maybe_rewrap(x, proc, space, scope; type, rewrap)
     if rewrap
         return remotecall_fetch(x.handle.owner) do
             tochunk(MemPool.poolget(x.handle), proc, scope; kwargs...)
@@ -172,7 +227,8 @@ function tochunk(x::Chunk, proc=nothing, scope=nothing; rewrap=false, kwargs...)
         return x
     end
 end
-tochunk(x::Thunk, proc=nothing, scope=nothing; kwargs...) = x
+
+tochunk_pset(x, space::MemorySpace; device=nothing, kwargs...) = poolset(x; device, kwargs...)
 
 function savechunk(data, dir, f)
     sz = open(joinpath(dir, f), "w") do io
@@ -182,5 +238,5 @@ function savechunk(data, dir, f)
     fr = FileRef(f, sz)
     proc = OSProc()
     scope = AnyScope() # FIXME: Scoped to this node
-    Chunk{typeof(data),typeof(fr),typeof(proc),typeof(scope)}(typeof(data), domain(data), fr, proc, scope, true)
+    return Chunk{typeof(data),typeof(fr),typeof(proc),typeof(scope)}(typeof(data), domain(data), fr, proc, scope, true)
 end

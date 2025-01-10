@@ -26,32 +26,6 @@ domain(x::Any) = UnitDomain()
 
 ###### Chunk ######
 
-"""
-    Chunk
-
-A reference to a piece of data located on a remote worker. `Chunk`s are
-typically created with `Dagger.tochunk(data)`, and the data can then be
-accessed from any worker with `collect(::Chunk)`. `Chunk`s are
-serialization-safe, and use distributed refcounting (provided by
-`MemPool.DRef`) to ensure that the data referenced by a `Chunk` won't be GC'd,
-as long as a reference exists on some worker.
-
-Each `Chunk` is associated with a given `Dagger.Processor`, which is (in a
-sense) the processor that "owns" or contains the data. Calling
-`collect(::Chunk)` will perform data movement and conversions defined by that
-processor to safely serialize the data to the calling worker.
-
-## Constructors
-See [`tochunk`](@ref).
-"""
-mutable struct Chunk{T, H, P<:Processor, S<:AbstractScope}
-    chunktype::Type{T}
-    domain
-    handle::H
-    processor::P
-    scope::S
-end
-
 domain(c::Chunk) = c.domain
 chunktype(c::Chunk) = c.chunktype
 processor(c::Chunk) = c.processor
@@ -72,20 +46,27 @@ function collect(ctx::Context, chunk::Chunk; options=nothing)
     elseif chunk.handle isa FileRef
         return poolget(chunk.handle)
     else
-        return move(chunk.processor, OSProc(), chunk.handle)
+        return move(chunk.processor, default_processor(), chunk.handle)
     end
 end
 collect(ctx::Context, ref::DRef; options=nothing) =
     move(OSProc(ref.owner), OSProc(), ref)
 collect(ctx::Context, ref::FileRef; options=nothing) =
     poolget(ref) # FIXME: Do move call
-function Base.fetch(chunk::Chunk; raw=false)
-    if raw
-        poolget(chunk.handle)
-    else
-        collect(chunk)
+@warn "Fix semantics of collect" maxlog=1
+function Base.fetch(chunk::Chunk{T}; unwrap::Bool=false, uniform::Bool=false, kwargs...) where T
+    value = fetch_handle(chunk.handle; uniform)::T
+    if unwrap && unwrappable(value)
+        return fetch(value; unwrap, uniform, kwargs...)
     end
+    return value
 end
+fetch_handle(ref::DRef; uniform::Bool=false) = poolget(ref)
+fetch_handle(ref::FileRef; uniform::Bool=false) = poolget(ref)
+unwrappable(x::Chunk) = true
+unwrappable(x::DRef) = true
+unwrappable(x::FileRef) = true
+unwrappable(x) = false
 
 # Unwrap Chunk, DRef, and FileRef by default
 move(from_proc::Processor, to_proc::Processor, x::Chunk) =
@@ -112,10 +93,12 @@ struct WeakChunk
     wid::Int
     id::Int
     x::WeakRef
-    function WeakChunk(c::Chunk)
-        return new(c.handle.owner, c.handle.id, WeakRef(c))
-    end
 end
+
+function WeakChunk(c::Chunk)
+    return WeakChunk(c.handle.owner, c.handle.id, WeakRef(c))
+end
+
 unwrap_weak(c::WeakChunk) = c.x.value
 function unwrap_weak_checked(c::WeakChunk)
     cw = unwrap_weak(c)

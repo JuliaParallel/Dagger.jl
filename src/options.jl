@@ -8,7 +8,9 @@ Stores per-task options to be passed to the scheduler.
 
 # Arguments
 - `propagates::Vector{Symbol}`: The set of option names that will be propagated by this task to tasks that it spawns.
+- `acceleration::Acceleration`: The acceleration implementation to use for cluster queries and cross-worker communication.
 - `processor::Processor`: The processor associated with this task's function. Generally ignored by the scheduler.
+- `memory_space::MemorySpace`: The memory space associated with this task's function. Generally ignored by the scheduler.
 - `scope::AbstractScope`: The scope of the task, which determines where the task can be scheduled and executed.
 - `single::Int=0`: (Deprecated) Force task onto worker with specified id. `0` disables this option.
 - `proclist=nothing`: (Deprecated) Force task to use one or more processors that are instances/subtypes of a contained type. Alternatively, a function can be supplied, and the function will be called with a processor as the sole argument and should return a `Bool` result to indicate whether or not to use the given processor. `nothing` enables all default processors.
@@ -29,7 +31,9 @@ Stores per-task options to be passed to the scheduler.
 Base.@kwdef mutable struct Options
     propagates::Union{Vector{Symbol},Nothing} = nothing
 
+    acceleration::Union{Acceleration,Nothing} = nothing
     processor::Union{Processor,Nothing} = nothing
+    memory_space::Union{MemorySpace,Nothing} = nothing
     scope::Union{AbstractScope,Nothing} = nothing
     single::Union{Int,Nothing} = nothing
     proclist = nothing
@@ -104,7 +108,9 @@ signature `sig`, if the option was previously unspecified in `opts`.
 """
 function populate_defaults!(opts::Options, sig)
     maybe_default!(opts, Val{:propagates}(), sig)
+    maybe_default!(opts, Val{:acceleration}(), sig)
     maybe_default!(opts, Val{:processor}(), sig)
+    maybe_default!(opts, Val{:memory_space}(), sig)
     maybe_default!(opts, Val{:scope}(), sig)
     maybe_default!(opts, Val{:single}(), sig)
     maybe_default!(opts, Val{:proclist}(), sig)
