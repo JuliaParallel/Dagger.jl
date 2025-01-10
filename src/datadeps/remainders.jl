@@ -9,11 +9,10 @@ This is used to perform partial data copies that only update the "remainder" reg
 struct RemainderAliasing{S<:MemorySpace} <: AbstractAliasing
     space::S
     spans::Vector{Tuple{LocalMemorySpan,LocalMemorySpan}}
-    ainfos::Vector{AliasingWrapper}
     syncdeps::Set{ThunkSyncdep}
 end
-RemainderAliasing(space::S, spans::Vector{Tuple{LocalMemorySpan,LocalMemorySpan}}, ainfos::Vector{AliasingWrapper}, syncdeps::Set{ThunkSyncdep}) where S =
-    RemainderAliasing{S}(space, spans, ainfos, syncdeps)
+RemainderAliasing(space::S, spans::Vector{Tuple{LocalMemorySpan,LocalMemorySpan}}, syncdeps::Set{ThunkSyncdep}) where S =
+    RemainderAliasing{S}(space, spans, syncdeps)
 
 memory_spans(ra::RemainderAliasing) = ra.spans
 
@@ -42,6 +41,42 @@ memory_spans(mra::MultiRemainderAliasing) = vcat(memory_spans.(mra.remainders)..
 
 Base.hash(mra::MultiRemainderAliasing, h::UInt) = hash(mra.remainders, hash(MultiRemainderAliasing, h))
 Base.:(==)(mra1::MultiRemainderAliasing, mra2::MultiRemainderAliasing) = mra1.remainders == mra2.remainders
+
+#= FIXME: Integrate with main documentation
+Problem statement:
+
+Remainder copy calculation needs to ensure that, for a given argument and
+dependency modifier, and for a given target memory space, any data not yet
+updated (whether through this arg or through another that aliases) is added to
+the remainder, while any data that has been updated is not in the remainder.
+Remainder copies may be multi-part, as data may be spread across multiple other
+memory spaces.
+
+Ainfo is not alone sufficient to identify the combination of argument and
+dependency modifier, as ainfo is specific to an allocation in a given memory
+space. Thus, this combination needs to be tracked together, and separately from
+memory space. However, information may span multiple memory spaces (and thus
+multiple ainfos), so we should try to make queries of cross-memory space
+information fast, as they will need to be performed for every task, for every
+combination.
+
+Game Plan:
+
+- Use ArgumentWrapper to track this combination throughout the codebase, ideally generated just once
+- Maintain the keying of remote_args only on argument, as the dependency modifier doesn’t affect the argument being passed into the task, so it should not factor into generating and tracking remote argument copies
+- Add a structure to track the mapping from ArgumentWrapper to memory space to ainfo, as a quick way to lookup all ainfos needing to be considered
+- When considering a remainder copy, only look at a single memory space’s ainfos at a time, as the ainfos should overlap exactly the same way on any memory space, and this allows us to use ainfo_overlaps to track overlaps
+- Remainder copies will need to separately consider the source memory space, and the destination memory space when acquiring spans to copy to/from
+- Memory spans for ainfos generated from the same ArgumentWrapper should be assumed to be paired in the same order, regardless of memory space, to ensure we can perform the translation from source to destination span address
+    - Alternatively, we might provide an API to take source and destination ainfos, and desired remainder memory spans, which then performs the copy for us
+- When a task or copy writes to arguments, we should record this happening for all overlapping ainfos, in a manner that will be efficient to query from another memory space. We can probably walk backwards and attach this to a structure keyed on ArgumentWrapper, as that will be very efficient for later queries (because the history will now be linearized in one vector).
+- Remainder copies will need to know, for all overlapping ainfos of the ArgumentWrapper ainfo at the target memory space, how recently that ainfo was updated relative to other ainfos, and relative to how recently the target ainfo was written.
+    - The last time the target ainfo was written is the furthest back we need to consider, as the target data must have been fully up-to-date when that write completed.
+    - Consideration of updates should start at most recent first, walking backwards in time, as the most recent updates contain the up-to-date data.
+        - For each span under consideration, we should subtract from it the current remainder set, to ensure we only copy up-to-date data.
+        - We must add that span portion to the remainder set no matter what, but if it was updated on the target memory space, we don’t need to schedule a copy for it, since it’s already where it needs to be.
+    - Even before the last target write is seen, we are allowed to stop searching if we find that our target ainfo is fully covered (because this implies that the target ainfo is fully out-of-date).
+=#
 
 struct FullCopy end
 
@@ -86,17 +121,16 @@ and returned.
 function compute_remainder_for_arg!(state::DataDepsState,
                                     target_space::MemorySpace,
                                     arg_w::ArgumentWrapper,
-                                    write_num::Int; compute_syncdeps::Bool=true)
+                                    write_num::Int)
+    @label restart
+
+    # Determine all memory spaces of the history
     spaces_set = Set{MemorySpace}()
     push!(spaces_set, target_space)
     owner_space = state.arg_owner[arg_w]
     push!(spaces_set, owner_space)
-
-    @label restart
-
-    # Determine all memory spaces of the history
-    for entry in state.arg_history[arg_w]
-        push!(spaces_set, entry.space)
+    for (_, space, _) in state.arg_history[arg_w]
+        push!(spaces_set, space)
     end
     spaces = collect(spaces_set)
     N = length(spaces)
@@ -109,12 +143,10 @@ function compute_remainder_for_arg!(state::DataDepsState,
         push!(target_ainfos, LocalMemorySpan.(spans))
     end
     nspans = length(first(target_ainfos))
-    @assert all(==(nspans), length.(target_ainfos)) "Aliasing info for $(typeof(arg_w.arg))[$(arg_w.dep_mod)] has different number of spans in different memory spaces"
 
     # FIXME: This is a hack to ensure that we don't miss any history generated by aliasing(...)
-    for entry in state.arg_history[arg_w]
-        if !in(entry.space, spaces)
-            @opcounter :compute_remainder_for_arg_restart
+    for (_, space, _) in state.arg_history[arg_w]
+        if !in(space, spaces)
             @goto restart
         end
     end
@@ -123,37 +155,29 @@ function compute_remainder_for_arg!(state::DataDepsState,
     # target space if this is the first time we've written to `arg_w`
     if isempty(state.arg_history[arg_w])
         if owner_space != target_space
-            return FullCopy(), 0
+            return FullCopy()
         else
-            return NoAliasing(), 0
+            return NoAliasing()
         end
     end
 
     # Create our remainder as an interval tree over all target ainfos
-    VERIFY_SPAN_CURRENT_OBJECT[] = arg_w.arg
     remainder = IntervalTree{ManyMemorySpan{N}}(ManyMemorySpan{N}(ntuple(i -> target_ainfos[i][j], N)) for j in 1:nspans)
-    for span in remainder
-        verify_span(span)
-    end
 
     # Create our tracker
-    tracker = Dict{MemorySpace,Tuple{Vector{Tuple{LocalMemorySpan,LocalMemorySpan}},Vector{AliasingWrapper},Set{ThunkSyncdep}}}()
+    tracker = Dict{MemorySpace,Tuple{Vector{Tuple{LocalMemorySpan,LocalMemorySpan}},Set{ThunkSyncdep}}}()
 
     # Walk backwards through the history of writes to this target
     # other_ainfo is the overlapping ainfo that was written to
     # other_space is the memory space of the overlapping ainfo
-    last_idx = length(state.arg_history[arg_w])
     for idx in length(state.arg_history[arg_w]):-1:0
         if isempty(remainder)
             # All done!
-            last_idx = idx
             break
         end
 
         if idx > 0
-            other_entry = state.arg_history[arg_w][idx]
-            other_ainfo = other_entry.ainfo
-            other_space = other_entry.space
+            (other_ainfo, other_space, _) = state.arg_history[arg_w][idx]
         else
             # If we've reached the end of the history, evaluate ourselves
             other_ainfo = aliasing!(state, owner_space, arg_w)
@@ -161,7 +185,7 @@ function compute_remainder_for_arg!(state::DataDepsState,
         end
 
         # Lookup all memory spans for arg_w in these spaces
-        other_remote_arg_w = first(collect(state.ainfo_arg[other_ainfo]))
+        other_remote_arg_w = state.ainfo_arg[other_ainfo]
         other_arg_w = ArgumentWrapper(state.remote_arg_to_original[other_remote_arg_w.arg], other_remote_arg_w.dep_mod)
         other_ainfos = Vector{Vector{LocalMemorySpan}}()
         for space in spaces
@@ -171,15 +195,11 @@ function compute_remainder_for_arg!(state::DataDepsState,
         end
         nspans = length(first(other_ainfos))
         other_many_spans = [ManyMemorySpan{N}(ntuple(i -> other_ainfos[i][j], N)) for j in 1:nspans]
-        foreach(other_many_spans) do span
-            verify_span(span)
-        end
 
         if other_space == target_space
             # Only subtract, this data is already up-to-date in target_space
             # N.B. We don't add to syncdeps here, because we'll see this ainfo
             # in get_write_deps!
-            @opcounter :compute_remainder_for_arg_subtract
             subtract_spans!(remainder, other_many_spans)
             continue
         end
@@ -188,34 +208,22 @@ function compute_remainder_for_arg!(state::DataDepsState,
         other_space_idx = something(findfirst(==(other_space), spaces))
         target_space_idx = something(findfirst(==(target_space), spaces))
         tracker_other_space = get!(tracker, other_space) do
-            (Vector{Tuple{LocalMemorySpan,LocalMemorySpan}}(), Vector{AliasingWrapper}(), Set{ThunkSyncdep}())
+            (Vector{Tuple{LocalMemorySpan,LocalMemorySpan}}(), Set{ThunkSyncdep}())
         end
-        @opcounter :compute_remainder_for_arg_schedule
-        has_overlap = schedule_remainder!(tracker_other_space[1], other_space_idx, target_space_idx, remainder, other_many_spans)
-        if compute_syncdeps && has_overlap
-            @assert haskey(state.ainfos_owner, other_ainfo) "[idx $idx] ainfo $(typeof(other_ainfo)) has no owner"
-            get_read_deps!(state, other_space, other_ainfo, write_num, tracker_other_space[3])
-            push!(tracker_other_space[2], other_ainfo)
-        end
-    end
-    VERIFY_SPAN_CURRENT_OBJECT[] = nothing
-
-    if isempty(tracker) || all(tracked->isempty(tracked[1]), values(tracker))
-        return NoAliasing(), 0
+        schedule_remainder!(tracker_other_space[1], other_space_idx, target_space_idx, remainder, other_many_spans)
+        get_read_deps!(state, other_space, other_ainfo, write_num, tracker_other_space[2])
     end
 
-    # Return scheduled copies and the index of the last ainfo we considered
+    if isempty(tracker)
+        return NoAliasing()
+    end
+
+    # Return scheduled copies
     mra = MultiRemainderAliasing()
-    for space in spaces
-        if haskey(tracker, space)
-            spans, ainfos, syncdeps = tracker[space]
-            if !isempty(spans)
-                push!(mra.remainders, RemainderAliasing(space, spans, ainfos, syncdeps))
-            end
-        end
+    for (space, (spans, syncdeps)) in tracker
+        push!(mra.remainders, RemainderAliasing(space, spans, syncdeps))
     end
-    @assert !isempty(mra.remainders) "Expected at least one remainder (spaces: $spaces, tracker spaces: $(collect(keys(tracker))))"
-    return mra, last_idx
+    return mra
 end
 
 ### Memory Span Set Operations for Remainder Computation
@@ -230,13 +238,12 @@ copy from `other_many_spans` to the subtraced portion of `remainder`.
 function schedule_remainder!(tracker::Vector, source_space_idx::Int, dest_space_idx::Int, remainder::IntervalTree, other_many_spans::Vector{ManyMemorySpan{N}}) where N
     diff = Vector{ManyMemorySpan{N}}()
     subtract_spans!(remainder, other_many_spans, diff)
+
     for span in diff
         source_span = span.spans[source_space_idx]
         dest_span = span.spans[dest_space_idx]
-        @assert span_len(source_span) == span_len(dest_span) "Source and dest spans are not the same size: $(span_len(source_span)) != $(span_len(dest_span))"
         push!(tracker, (source_span, dest_span))
     end
-    return !isempty(diff)
 end
 
 ### Remainder copy functions
@@ -250,7 +257,6 @@ Enqueues a copy operation to update the remainder regions of an object before a 
 function enqueue_remainder_copy_to!(state::DataDepsState, dest_space::MemorySpace, arg_w::ArgumentWrapper, remainder_aliasing::MultiRemainderAliasing,
                                     f, idx, dest_scope, task, write_num::Int)
     for remainder in remainder_aliasing.remainders
-        @assert !isempty(remainder.spans)
         enqueue_remainder_copy_to!(state, dest_space, arg_w, remainder, f, idx, dest_scope, task, write_num)
     end
 end
@@ -263,7 +269,7 @@ function enqueue_remainder_copy_to!(state::DataDepsState, dest_space::MemorySpac
     # overwritten by more recent partial updates
     source_space = remainder_aliasing.space
 
-    @dagdebug task.uid :spawn_datadeps "($(repr(f)))[$(idx-1)][$dep_mod] Enqueueing remainder copy-to for $(typeof(arg_w.arg))[$(arg_w.dep_mod)]: $source_space => $dest_space"
+    @dagdebug nothing :spawn_datadeps "($(repr(f)))[$(idx-1)][$dep_mod] Enqueueing remainder copy-to for $(typeof(arg_w.arg))[$(arg_w.dep_mod)]: $source_space => $dest_space"
 
     # Get the source and destination arguments
     arg_dest = state.remote_args[dest_space][arg_w.arg]
@@ -276,23 +282,14 @@ function enqueue_remainder_copy_to!(state::DataDepsState, dest_space::MemorySpac
         push!(remainder_syncdeps, syncdep)
     end
     empty!(remainder_aliasing.syncdeps) # We can't bring these to move!
-    source_ainfos = copy(remainder_aliasing.ainfos)
-    empty!(remainder_aliasing.ainfos)
     get_write_deps!(state, dest_space, target_ainfo, write_num, remainder_syncdeps)
 
-    @dagdebug task.uid :spawn_datadeps "($(repr(f)))[$(idx-1)][$dep_mod] Remainder copy-to has $(length(remainder_syncdeps)) syncdeps"
+    @dagdebug nothing :spawn_datadeps "($(repr(f)))[$(idx-1)][$dep_mod] Remainder copy-to has $(length(remainder_syncdeps)) syncdeps"
 
     # Launch the remainder copy task
-    ctx = Sch.eager_context()
-    id = rand(UInt)
-    @maybelog ctx timespan_start(ctx, :datadeps_copy, (;id), (;))
-    copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=remainder_syncdeps meta=true Dagger.move!(remainder_aliasing, dest_space, source_space, arg_dest, arg_source)
-    @maybelog ctx timespan_finish(ctx, :datadeps_copy, (;id), (;thunk_id=copy_task.uid, from_space=source_space, to_space=dest_space, arg_w, from_arg=arg_source, to_arg=arg_dest))
+    copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=remainder_syncdeps occupancy=Dict(Any=>0) meta=true Dagger.move!(remainder_aliasing, dest_space, source_space, arg_dest, arg_source)
 
-    # This copy task reads the sources and writes to the target
-    for ainfo in source_ainfos
-        add_reader!(state, arg_w, source_space, ainfo, copy_task, write_num)
-    end
+    # This copy task becomes a new writer for the target region
     add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num)
 end
 """
@@ -304,7 +301,6 @@ Enqueues a copy operation to update the remainder regions of an object back to t
 function enqueue_remainder_copy_from!(state::DataDepsState, dest_space::MemorySpace, arg_w::ArgumentWrapper, remainder_aliasing::MultiRemainderAliasing,
                                       dest_scope, write_num::Int)
     for remainder in remainder_aliasing.remainders
-        @assert !isempty(remainder.spans)
         enqueue_remainder_copy_from!(state, dest_space, arg_w, remainder, dest_scope, write_num)
     end
 end
@@ -330,23 +326,14 @@ function enqueue_remainder_copy_from!(state::DataDepsState, dest_space::MemorySp
         push!(remainder_syncdeps, syncdep)
     end
     empty!(remainder_aliasing.syncdeps) # We can't bring these to move!
-    source_ainfos = copy(remainder_aliasing.ainfos)
-    empty!(remainder_aliasing.ainfos)
     get_write_deps!(state, dest_space, target_ainfo, write_num, remainder_syncdeps)
 
     @dagdebug nothing :spawn_datadeps "($(typeof(arg_w.arg)))[$dep_mod] Remainder copy-from has $(length(remainder_syncdeps)) syncdeps"
 
     # Launch the remainder copy task
-    ctx = Sch.eager_context()
-    id = rand(UInt)
-    @maybelog ctx timespan_start(ctx, :datadeps_copy, (;id), (;))
-    copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=remainder_syncdeps meta=true Dagger.move!(remainder_aliasing, dest_space, source_space, arg_dest, arg_source)
-    @maybelog ctx timespan_finish(ctx, :datadeps_copy, (;id), (;thunk_id=copy_task.uid, from_space=source_space, to_space=dest_space, arg_w, from_arg=arg_source, to_arg=arg_dest))
+    copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=remainder_syncdeps occupancy=Dict(Any=>0) meta=true Dagger.move!(remainder_aliasing, dest_space, source_space, arg_dest, arg_source)
 
-    # This copy task reads the sources and writes to the target
-    for ainfo in source_ainfos
-        add_reader!(state, arg_w, source_space, ainfo, copy_task, write_num)
-    end
+    # This copy task becomes a new writer for the target region
     add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num)
 end
 
@@ -357,7 +344,7 @@ function enqueue_copy_to!(state::DataDepsState, dest_space::MemorySpace, arg_w::
     source_space = state.arg_owner[arg_w]
     target_ainfo = aliasing!(state, dest_space, arg_w)
 
-    @dagdebug task.uid :spawn_datadeps "($(repr(f)))[$(idx-1)][$dep_mod] Enqueueing full copy-to for $(typeof(arg_w.arg))[$(arg_w.dep_mod)]: $source_space => $dest_space"
+    @dagdebug nothing :spawn_datadeps "($(repr(f)))[$(idx-1)][$dep_mod] Enqueueing full copy-to for $(typeof(arg_w.arg))[$(arg_w.dep_mod)]: $source_space => $dest_space"
 
     # Get the source and destination arguments
     arg_dest = state.remote_args[dest_space][arg_w.arg]
@@ -370,17 +357,12 @@ function enqueue_copy_to!(state::DataDepsState, dest_space::MemorySpace, arg_w::
     get_read_deps!(state, source_space, source_ainfo, write_num, copy_syncdeps)
     get_write_deps!(state, dest_space, target_ainfo, write_num, copy_syncdeps)
 
-    @dagdebug task.uid :spawn_datadeps "($(repr(f)))[$(idx-1)][$dep_mod] Full copy-to has $(length(copy_syncdeps)) syncdeps"
+    @dagdebug nothing :spawn_datadeps "($(repr(f)))[$(idx-1)][$dep_mod] Full copy-to has $(length(copy_syncdeps)) syncdeps"
 
     # Launch the remainder copy task
-    ctx = Sch.eager_context()
-    id = rand(UInt)
-    @maybelog ctx timespan_start(ctx, :datadeps_copy, (;id), (;))
-    copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=copy_syncdeps meta=true Dagger.move!(dep_mod, dest_space, source_space, arg_dest, arg_source)
-    @maybelog ctx timespan_finish(ctx, :datadeps_copy, (;id), (;thunk_id=copy_task.uid, from_space=source_space, to_space=dest_space, arg_w, from_arg=arg_source, to_arg=arg_dest))
+    copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=copy_syncdeps occupancy=Dict(Any=>0) meta=true Dagger.move!(dep_mod, dest_space, source_space, arg_dest, arg_source)
 
-    # This copy task reads the source and writes to the target
-    add_reader!(state, arg_w, source_space, source_ainfo, copy_task, write_num)
+    # This copy task becomes a new writer for the target region
     add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num)
 end
 function enqueue_copy_from!(state::DataDepsState, dest_space::MemorySpace, arg_w::ArgumentWrapper,
@@ -405,136 +387,40 @@ function enqueue_copy_from!(state::DataDepsState, dest_space::MemorySpace, arg_w
     @dagdebug nothing :spawn_datadeps "($(typeof(arg_w.arg)))[$dep_mod] Full copy-from has $(length(copy_syncdeps)) syncdeps"
 
     # Launch the remainder copy task
-    ctx = Sch.eager_context()
-    id = rand(UInt)
-    @maybelog ctx timespan_start(ctx, :datadeps_copy, (;id), (;))
-    copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=copy_syncdeps meta=true Dagger.move!(dep_mod, dest_space, source_space, arg_dest, arg_source)
-    @maybelog ctx timespan_finish(ctx, :datadeps_copy, (;id), (;thunk_id=copy_task.uid, from_space=source_space, to_space=dest_space, arg_w, from_arg=arg_source, to_arg=arg_dest))
+    copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=copy_syncdeps occupancy=Dict(Any=>0) meta=true Dagger.move!(dep_mod, dest_space, source_space, arg_dest, arg_source)
 
-    # This copy task reads the source and writes to the target
-    add_reader!(state, arg_w, source_space, source_ainfo, copy_task, write_num)
+    # This copy task becomes a new writer for the target region
     add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num)
 end
 
 # Main copy function for RemainderAliasing
-function move!(dep_mod::RemainderAliasing{S}, to_space::MemorySpace, from_space::MemorySpace, to::Chunk, from::Chunk) where S
-    # TODO: Support direct copy between GPU memory spaces
-
-    # Copy the data from the source object
-    copies = remotecall_fetch(root_worker_id(from_space), from_space, dep_mod, from) do from_space, dep_mod, from
-        len = sum(span_tuple->span_len(span_tuple[1]), dep_mod.spans)
-        copies = Vector{UInt8}(undef, len)
-        from_raw = unwrap(from)
-        offset = UInt64(1)
-        with_context!(from_space)
-        GC.@preserve copies begin
-            for (from_span, _) in dep_mod.spans
-                read_remainder!(copies, offset, from_raw, from_span.ptr, from_span.len)
-                offset += from_span.len
+function move!(dep_mod::RemainderAliasing, to_space::MemorySpace, from_space::MemorySpace, to::Chunk, from::Chunk)
+    # Get the source data for each span
+    copies = remotecall_fetch(root_worker_id(from_space), dep_mod) do dep_mod
+        copies = Vector{UInt8}[]
+        for (from_span, _) in dep_mod.spans
+            copy = Vector{UInt8}(undef, from_span.len)
+            GC.@preserve copy begin
+                from_ptr = Ptr{UInt8}(from_span.ptr)
+                to_ptr = Ptr{UInt8}(pointer(copy))
+                unsafe_copyto!(to_ptr, from_ptr, from_span.len)
             end
+            push!(copies, copy)
         end
-        @assert offset == len+UInt64(1)
         return copies
     end
 
     # Copy the data into the destination object
-    offset = UInt64(1)
-    to_raw = unwrap(to)
-    GC.@preserve copies begin
-        for (_, to_span) in dep_mod.spans
-            write_remainder!(copies, offset, to_raw, to_span.ptr, to_span.len)
-            offset += to_span.len
+    for (copy, (_, to_span)) in zip(copies, dep_mod.spans)
+        GC.@preserve copy begin
+            from_ptr = Ptr{UInt8}(pointer(copy))
+            to_ptr = Ptr{UInt8}(to_span.ptr)
+            unsafe_copyto!(to_ptr, from_ptr, to_span.len)
         end
-        @assert offset == length(copies)+UInt64(1)
     end
 
     # Ensure that the data is visible
     Core.Intrinsics.atomic_fence(:release)
 
     return
-end
-
-function read_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, from::Array, from_ptr::UInt64, len::UInt64)
-    elsize = sizeof(eltype(from))
-    @assert len / elsize == round(UInt64, len / elsize) "Span length is not an integer multiple of the element size: $(len) / $(elsize) = $(len / elsize) (elsize: $elsize)"
-    n = UInt64(len / elsize)
-    from_offset_n = UInt64((from_ptr - UInt64(pointer(from))) / elsize) + UInt64(1)
-    from_vec = reshape(from, prod(size(from)))::DenseVector{eltype(from)}
-    # unsafe_wrap(Array, ...) doesn't like unaligned memory
-    unsafe_copyto!(Ptr{eltype(from)}(pointer(copies, copies_offset)), pointer(from_vec, from_offset_n), n)
-end
-function read_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, from::DenseArray, from_ptr::UInt64, len::UInt64)
-    elsize = sizeof(eltype(from))
-    @assert len / elsize == round(UInt64, len / elsize) "Span length is not an integer multiple of the element size: $(len) / $(elsize) = $(len / elsize) (elsize: $elsize)"
-    n = UInt64(len / elsize)
-    from_offset_n = UInt64((from_ptr - UInt64(pointer(from))) / elsize) + UInt64(1)
-    from_vec = reshape(from, prod(size(from)))::DenseVector{eltype(from)}
-    copies_typed = unsafe_wrap(Vector{eltype(from)}, Ptr{eltype(from)}(pointer(copies, copies_offset)), n)
-    copyto!(copies_typed, 1, from_vec, Int(from_offset_n), Int(n))
-end
-function read_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, from, from_ptr::UInt64, n::UInt64)
-    real_from = find_object_holding_ptr(from, from_ptr)
-    return read_remainder!(copies, copies_offset, real_from, from_ptr, n)
-end
-
-function write_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, to::Array, to_ptr::UInt64, len::UInt64)
-    elsize = sizeof(eltype(to))
-    @assert len / elsize == round(UInt64, len / elsize) "Span length is not an integer multiple of the element size: $(len) / $(elsize) = $(len / elsize) (elsize: $elsize)"
-    n = UInt64(len / elsize)
-    to_offset_n = UInt64((to_ptr - UInt64(pointer(to))) / elsize) + UInt64(1)
-    to_vec = reshape(to, prod(size(to)))::DenseVector{eltype(to)}
-    # unsafe_wrap(Array, ...) doesn't like unaligned memory
-    unsafe_copyto!(pointer(to_vec, to_offset_n), Ptr{eltype(to)}(pointer(copies, copies_offset)), n)
-end
-function write_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, to::DenseArray, to_ptr::UInt64, len::UInt64)
-    elsize = sizeof(eltype(to))
-    @assert len / elsize == round(UInt64, len / elsize) "Span length is not an integer multiple of the element size: $(len) / $(elsize) = $(len / elsize) (elsize: $elsize)"
-    n = UInt64(len / elsize)
-    to_offset_n = UInt64((to_ptr - UInt64(pointer(to))) / elsize) + UInt64(1)
-    to_vec = reshape(to, prod(size(to)))::DenseVector{eltype(to)}
-    copies_typed = unsafe_wrap(Vector{eltype(to)}, Ptr{eltype(to)}(pointer(copies, copies_offset)), n)
-    copyto!(to_vec, Int(to_offset_n), copies_typed, 1, Int(n))
-end
-function write_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, to, to_ptr::UInt64, n::UInt64)
-    real_to = find_object_holding_ptr(to, to_ptr)
-    return write_remainder!(copies, copies_offset, real_to, to_ptr, n)
-end
-
-# Remainder copies for common objects
-for wrapper in (UpperTriangular, LowerTriangular, UnitUpperTriangular, UnitLowerTriangular, SubArray)
-    @eval function read_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, from::$wrapper, from_ptr::UInt64, n::UInt64)
-        read_remainder!(copies, copies_offset, parent(from), from_ptr, n)
-    end
-    @eval function write_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, to::$wrapper, to_ptr::UInt64, n::UInt64)
-        write_remainder!(copies, copies_offset, parent(to), to_ptr, n)
-    end
-end
-
-function read_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, from::Base.RefValue, from_ptr::UInt64, n::UInt64)
-    if from_ptr == UInt64(Base.pointer_from_objref(from) + fieldoffset(typeof(from), 1))
-        unsafe_copyto!(pointer(copies, copies_offset), Ptr{UInt8}(from_ptr), n)
-    else
-        read_remainder!(copies, copies_offset, from[], from_ptr, n)
-    end
-end
-function write_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, to::Base.RefValue, to_ptr::UInt64, n::UInt64)
-    if to_ptr == UInt64(Base.pointer_from_objref(to) + fieldoffset(typeof(to), 1))
-        unsafe_copyto!(Ptr{UInt8}(to_ptr), pointer(copies, copies_offset), n)
-    else
-        write_remainder!(copies, copies_offset, to[], to_ptr, n)
-    end
-end
-
-function find_object_holding_ptr(A::SparseMatrixCSC, ptr::UInt64)
-    span = LocalMemorySpan(pointer(A.nzval), length(A.nzval)*sizeof(eltype(A.nzval)))
-    if span_start(span) <= ptr <= span_end(span)
-        return A.nzval
-    end
-    span = LocalMemorySpan(pointer(A.colptr), length(A.colptr)*sizeof(eltype(A.colptr)))
-    if span_start(span) <= ptr <= span_end(span)
-        return A.colptr
-    end
-    span = LocalMemorySpan(pointer(A.rowval), length(A.rowval)*sizeof(eltype(A.rowval)))
-    @assert span_start(span) <= ptr <= span_end(span) "Pointer $ptr not found in SparseMatrixCSC"
-    return A.rowval
 end

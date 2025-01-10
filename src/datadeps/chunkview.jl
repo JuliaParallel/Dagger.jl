@@ -3,10 +3,6 @@ struct ChunkView{N}
     slices::NTuple{N, Union{Int, AbstractRange{Int}, Colon}}
 end
 
-function _identity_hash(arg::ChunkView, h::UInt=UInt(0))
-    return hash(arg.slices, _identity_hash(arg.chunk, h))
-end
-
 function Base.view(c::Chunk, slices...)
     if c.domain isa ArrayDomain
         nd, sz = ndims(c.domain), size(c.domain)
@@ -29,38 +25,30 @@ function Base.view(c::Chunk, slices...)
     return ChunkView(c, slices)
 end
 
-Base.view(c::DTask, slices...) = view(fetch(c; raw=true), slices...)
+Base.view(c::DTask, slices...) = view(fetch(c; move_value=false, unwrap=false), slices...)
 
-function aliasing(x::ChunkView{N}) where N
-    return remotecall_fetch(root_worker_id(x.chunk.processor), x.chunk, x.slices) do x, slices
-        x = unwrap(x)
-        v = view(x, slices...)
-        return aliasing(v)
-    end
-end
+aliasing(x::ChunkView) =
+    throw(ConcurrencyViolationError("Cannot query aliasing of a ChunkView directly"))
 memory_space(x::ChunkView) = memory_space(x.chunk)
 isremotehandle(x::ChunkView) = true
 
-function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, slice::ChunkView)
-    to_w = root_worker_id(to_proc)
-    # N.B. We use move_rewrap (not rewrap_aliased_object!) so that if the inner
-    # chunk is a SubArray, it goes through the SubArray-aware path which shares
-    # the parent array via the aliased object cache. Using rewrap_aliased_object!
-    # would simply serialize the entire SubArray, creating a new parent copy on
-    # the destination, breaking aliasing with other views of the same parent.
-    p_chunk = move_rewrap(cache, from_proc, to_proc, from_space, to_space, slice.chunk)
-    return remotecall_fetch(to_w, from_proc, to_proc, from_space, to_space, p_chunk, slice.slices) do from_proc, to_proc, from_space, to_space, p_chunk, inds
-        p_new = move(from_proc, to_proc, p_chunk)
-        v_new = view(p_new, inds...)
-        return tochunk(v_new, to_proc)
+# This definition is here because it's so similar to ChunkView
+function move_rewrap(from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, v::SubArray)
+    p_chunk = aliased_object!(parent(v)) do p_chunk
+        return remotecall_endpoint(identity, current_acceleration(), from_proc, to_proc, from_space, to_space, p_chunk)
+    end
+    inds = parentindices(v)
+    return remotecall_endpoint(current_acceleration(), from_proc, to_proc, from_space, to_space, p_chunk) do p_new
+        return view(p_new, inds...)
     end
 end
-function move(from_proc::Processor, to_proc::Processor, slice::ChunkView)
-    to_w = root_worker_id(to_proc)
-    return remotecall_fetch(to_w, from_proc, to_proc, slice.chunk, slice.slices) do from_proc, to_proc, chunk, slices
-        chunk_new = move(from_proc, to_proc, chunk)
-        v_new = view(chunk_new, slices...)
-        return tochunk(v_new, to_proc)
+function move_rewrap(from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, slice::ChunkView)
+    p_chunk = aliased_object!(slice.chunk) do p_chunk
+        return remotecall_endpoint(identity, current_acceleration(), from_proc, to_proc, from_space, to_space, p_chunk)
+    end
+    inds = slice.slices
+    return remotecall_endpoint(current_acceleration(), from_proc, to_proc, from_space, to_space, p_chunk) do p_new
+        return view(p_new, inds...)
     end
 end
 

@@ -174,28 +174,46 @@ domainchunks(d::DArray) = d.subdomains
 size(x::DArray) = size(domain(x))
 stage(ctx, c::DArray) = c
 
-function Base.collect(d::DArray{T,N}; tree=false, copyto=false) where {T,N}
-    a = fetch(d)
-    if isempty(d.chunks)
-        return Array{eltype(d)}(undef, size(d)...)
+@warn "Dispatch uniform on acceleration" maxlog=1
+@warn "Take D.concat into account" maxlog=1
+function Base.collect(D::DArray{T,N}; tree=false, copyto=false, uniform::Bool=true) where {T,N}
+    if isempty(D.chunks)
+        return Array{eltype(D)}(undef, size(D)...)
     end
 
-    if ndims(d) == 0
-        return fetch(a.chunks[1])
+    # Return a scalar, as required by Julia's array interface
+    if ndims(D) == 0
+        return fetch(D.chunks[1]; unwrap=true)
     end
 
-    if copyto
-        C = Array{T,N}(undef, size(a))
-        DC = view(C, Blocks(size(a)...))
-        copyto!(DC, a)
-        return C
-    end
+    if uniform
+        @assert D.concat === cat "FIXME: Handle non-cat"
+        A = Array{eltype(D)}(undef, size(D)...)
+        DA = view(A, D.partitioning; space=CPURAMMemorySpace())
 
-    dimcatfuncs = [(x...) -> d.concat(x..., dims=i) for i in 1:ndims(d)]
-    if tree
-        collect(fetch(treereduce_nd(map(x -> ((args...,) -> Dagger.@spawn x(args...)) , dimcatfuncs), a.chunks)))
+        # Perform the equivalent of `copyto!(DA, D)`, but force local updates
+        # FIXME: Be more parallel?
+        for idx in eachindex(DA.chunks)
+            dest = fetch(DA.chunks[idx]; move_value=false, unwrap=true, uniform=true)::AbstractArray
+            src = fetch(D.chunks[idx]; move_value=true, unwrap=true, uniform=true)::AbstractArray
+            copyto!(dest, src)
+        end
+
+        return A
     else
-        collect(treereduce_nd(dimcatfuncs, asyncmap(fetch, a.chunks)))
+        if copyto
+            C = Array{T,N}(undef, size(D))
+            DC = view(C, Blocks(size(D)...))
+            copyto!(DC, D)
+            return C
+        end
+
+        dimcatfuncs = [(x...) -> D.concat(x..., dims=i) for i in 1:ndims(D)]
+        if tree
+            collect(fetch(treereduce_nd(map(x -> ((args...,) -> Dagger.@spawn x(args...)) , dimcatfuncs), D.chunks)))
+        else
+            treereduce_nd(dimcatfuncs, asyncmap(fetch, D.chunks))
+        end
     end
 end
 Array{T,N}(A::DArray{S,N}) where {T,N,S} = convert(Array{T,N}, collect(A))
@@ -317,8 +335,8 @@ function Base.isequal(x::ArrayOp, y::ArrayOp)
     x === y
 end
 
-Base.similar(D::DArray{T,N} where T, ::Type{S}, dims::Dims{N}) where {S,N} =
-    DArray{S,N}(undef, D.partitioning, dims)
+Base.similar(::DArray{T,N} where T, ::Type{S}, dims::Dims{N}) where {S,N} =
+    DArray{S,N}(undef, dims)
 
 Base.copy(x::DArray{T,N,B,F}) where {T,N,B,F} =
     map(identity, x)::DArray{T,N,B,F}
@@ -384,23 +402,18 @@ function lookup_parts(A::DArray, ps::AbstractArray, subdmns::DomainBlocks{N}, d:
 end
 
 """
-    Base.fetch(c::DArray)
+    Base.fetch(A::DArray; unwrap::Bool=false, kwargs...) -> DArray
 
-If a `DArray` tree has a `Thunk` in it, make the whole thing a big thunk.
+Returns a new `DArray` with the same data as `A`, but where all values are
+fully computed.
 """
-function Base.fetch(c::DArray{T}) where T
-    if any(istask, chunks(c))
-        thunks = chunks(c)
-        sz = size(thunks)
-        dmn = domain(c)
-        dmnchunks = domainchunks(c)
-        return fetch(Dagger.spawn(Options(meta=true), thunks...) do results...
-            t = eltype(fetch(results[1]))
-            DArray(t, dmn, dmnchunks, reshape(Any[results...], sz),
-                   c.partitioning, c.concat)
-        end)
+function Base.fetch(A::DArray{T}; unwrap::Bool=false, kwargs...) where T
+    if any(unwrappable, chunks(A))
+        tasks = map(t->unwrappable(t) ? fetch(t; unwrap, kwargs...) : t, chunks(A))
+        B = DArray(T, A.domain, A.subdomains, tasks, A.partitioning, A.concat)
+        return B
     else
-        return c
+        return A
     end
 end
 
@@ -501,7 +514,6 @@ auto_blocks(A::AbstractArray{T,N}) where {T,N} = auto_blocks(size(A))
 
 const AssignmentType{N} = Union{Symbol, AbstractArray{<:Int, N}, AbstractArray{<:Processor, N}}
 
-distribute(A::AbstractArray, assignment::AssignmentType = :arbitrary) = distribute(A, AutoBlocks(), assignment)
 function distribute(A::AbstractArray{T,N}, dist::Blocks{N}, assignment::AssignmentType{N} = :arbitrary) where {T,N}
     procgrid = nothing
     availprocs = collect(Dagger.compatible_processors())
@@ -542,8 +554,10 @@ function distribute(A::AbstractArray{T,N}, dist::Blocks{N}, assignment::Assignme
         procgrid = assignment
     end
 
-    return _to_darray(Distribute(dist, A, procgrid))
+    return _distribute(current_acceleration(), A, dist, procgrid)
 end
+_distribute(::DistributedAcceleration, A::AbstractArray{T,N}, dist::Blocks{N}, procgrid) where {T,N} =
+    _to_darray(Distribute(dist, A, procgrid))
 
 distribute(A::AbstractArray, ::AutoBlocks, assignment::AssignmentType = :arbitrary) = distribute(A, auto_blocks(A), assignment)
 function distribute(x::AbstractArray{T,N}, n::NTuple{N}, assignment::AssignmentType{N} = :arbitrary) where {T,N}
@@ -551,7 +565,6 @@ function distribute(x::AbstractArray{T,N}, n::NTuple{N}, assignment::AssignmentT
     distribute(x, Blocks(p), assignment)
 end
 distribute(x::AbstractVector, n::Int, assignment::AssignmentType{1} = :arbitrary) = distribute(x, (n,), assignment)
-
 
 DVector(A::AbstractVector{T}, part::Blocks{1}, assignment::AssignmentType{1} = :arbitrary) where T = distribute(A, part, assignment)
 DMatrix(A::AbstractMatrix{T}, part::Blocks{2}, assignment::AssignmentType{2} = :arbitrary) where T = distribute(A, part, assignment)
@@ -565,29 +578,26 @@ DVector(A::AbstractVector{T}, ::AutoBlocks, assignment::AssignmentType{1} = :arb
 DMatrix(A::AbstractMatrix{T}, ::AutoBlocks, assignment::AssignmentType{2} = :arbitrary) where T = DMatrix(A, auto_blocks(A), assignment)
 DArray(A::AbstractArray, ::AutoBlocks, assignment::AssignmentType = :arbitrary) = DArray(A, auto_blocks(A), assignment)
 
-struct AllocateUndef{S} end
-(::AllocateUndef{S})(T, dims::Dims{N}) where {S,N} = Array{S,N}(undef, dims)
-function DArray{T,N}(::UndefInitializer, dist::Blocks{N}, dims::NTuple{N,Int}; assignment::AssignmentType{N} = :arbitrary) where {T,N}
-    domain = ArrayDomain(map(x->1:x, dims))
-    subdomains = partition(dist, domain)
-    a = AllocateArray(T, AllocateUndef{T}(), false, domain, subdomains, dist, assignment)
-    return _to_darray(a)
+@warn "Add assignment to undef initializer" maxlog=1
+function DArray{T,N}(::UndefInitializer, dims::NTuple{N,Int}) where {T,N}
+    dist = auto_blocks(dims)
+    return DArray{T,N}(undef, dist, dims...)
 end
-DArray{T,N}(::UndefInitializer, dist::Blocks{N}, dims::Vararg{Int,N}; assignment::AssignmentType{N} = :arbitrary) where {T,N} =
-    DArray{T,N}(undef, dist, (dims...,); assignment)
-DArray{T,N}(::UndefInitializer, dims::NTuple{N,Int}; assignment::AssignmentType{N} = :arbitrary) where {T,N}  =
-    DArray{T,N}(undef, auto_blocks(dims), dims; assignment)
-DArray{T,N}(::UndefInitializer, dims::Vararg{Int,N}; assignment::AssignmentType{N} = :arbitrary) where {T,N} =
-    DArray{T,N}(undef, auto_blocks((dims...,)), (dims...,); assignment)
-
-DArray{T}(::UndefInitializer, dist::Blocks{N}, dims::NTuple{N,Int}; assignment::AssignmentType{N} = :arbitrary) where {T,N} =
-    DArray{T,N}(undef, dist, dims; assignment)
-DArray{T}(::UndefInitializer, dist::Blocks{N}, dims::Vararg{Int,N}; assignment::AssignmentType{N} = :arbitrary) where {T,N} =
-    DArray{T,N}(undef, dist, (dims...,); assignment)
-DArray{T}(::UndefInitializer, dims::NTuple{N,Int}; assignment::AssignmentType{N} = :arbitrary) where {T,N}  =
-    DArray{T,N}(undef, auto_blocks(dims), dims; assignment)
-DArray{T}(::UndefInitializer, dims::Vararg{Int,N}; assignment::AssignmentType{N} = :arbitrary) where {T,N} =
-    DArray{T,N}(undef, auto_blocks((dims...,)), (dims...,); assignment)
+function DArray{T,N}(::UndefInitializer, dist::Blocks{N}, dims::NTuple{N,Int}) where {T,N}
+    domain = ArrayDomain(ntuple(i->1:dims[i], N))
+    subdomains = partition(dist, domain)
+    tasks = Array{DTask,N}(undef, size(subdomains)...)
+    Dagger.spawn_datadeps() do
+        for (i, x) in enumerate(subdomains)
+            tasks[i] = Dagger.@spawn allocate_array_undef(T, size(x))
+        end
+    end
+    return DArray(T, domain, subdomains, tasks, dist)
+end
+DArray{T,N}(::UndefInitializer, dims::Vararg{Int,N}) where {T,N} =
+    DArray{T,N}(undef, auto_blocks((dims...,)), (dims...,))
+DArray{T,N}(::UndefInitializer, dist::Blocks{N}, dims::Vararg{Int,N}) where {T,N} =
+    DArray{T,N}(undef, dist, (dims...,))
 
 function Base.:(==)(x::ArrayOp{T,N}, y::AbstractArray{S,N}) where {T,S,N}
     collect(x) == y

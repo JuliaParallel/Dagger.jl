@@ -373,7 +373,7 @@ function signature(f, args)
         value = Dagger.value(arg)
         if value isa Dagger.DTask
             # Only occurs via manual usage of signature
-            value = fetch(value; raw=true)
+            value = fetch(value; move_value=false, unwrap=false)
         end
         if istask(value)
             throw(ConcurrencyViolationError("Must call `collect_task_inputs!(state, task)` before calling `signature`"))
@@ -403,6 +403,7 @@ end
 
 function can_use_proc(state, task, gproc, proc, opts, scope)
     # Check against proclist
+    pid = Dagger.root_worker_id(gproc)
     if opts.proclist !== nothing
         @warn "The `proclist` option is deprecated, please use scopes instead\nSee https://juliaparallel.org/Dagger.jl/stable/scopes/ for details" maxlog=1
         if opts.proclist isa Function
@@ -421,6 +422,10 @@ function can_use_proc(state, task, gproc, proc, opts, scope)
         else
             throw(SchedulingException("proclist must be a Function, Vector, or nothing"))
         end
+        if !Dagger.accel_matches_proc(opts.acceleration, proc)
+            @dagdebug task :scope "Rejected $proc: Not compatible with acceleration ($opts.acceleration)"
+            return false, scope
+        end
         if scope isa Dagger.InvalidScope
             @dagdebug task :scope "Rejected $proc: Not contained in task scope ($scope)"
             return false, scope
@@ -430,8 +435,8 @@ function can_use_proc(state, task, gproc, proc, opts, scope)
     # Check against single
     if opts.single !== nothing
         @warn "The `single` option is deprecated, please use scopes instead\nSee https://juliaparallel.org/Dagger.jl/stable/scopes/ for details" maxlog=1
-        if gproc.pid != opts.single
-            @dagdebug task :scope "Rejected $proc: gproc.pid ($(gproc.pid)) != single ($(opts.single))"
+        if pid != opts.single
+            @dagdebug task :scope "Rejected $proc: pid ($(pid)) != single ($(opts.single))"
             return false, scope
         end
         scope = constrain(scope, Dagger.ProcessScope(opts.single))
@@ -583,7 +588,7 @@ end
 
         # Add fixed cost for cross-worker task transfer (esimated at 1ms)
         # TODO: Actually estimate/benchmark this
-        task_xfer_cost = gproc.pid != myid() ? 1_000_000 : 0 # 1ms
+        task_xfer_cost = root_worker_id(gproc) != myid() ? 1_000_000 : 0 # 1ms
 
         # Compute final cost
         costs[proc] = est_time_util + (tx_cost/tx_rate) + task_xfer_cost

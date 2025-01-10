@@ -493,7 +493,7 @@ function _par(mod, ex::Expr; lazy=true, recur=true, opts=())
                         $spawn($f, $Options(;$(opts...)), $(args...); $(kwargs...))
                     end
                     if $(Expr(:islocal, sync_var))
-                        put!($sync_var, schedule(Task(()->fetch($result; raw=true))))
+                        put!($sync_var, schedule(Task(()->fetch($result; move_value=false, unwrap=false))))
                     end
                     $result
                 end
@@ -578,12 +578,19 @@ function _spawn(args_kwargs, task_options)
     # Get task queue, and don't let it propagate
     task_queue = get(scoped_options, :task_queue, DefaultTaskQueue())::AbstractTaskQueue
     filter!(prop -> prop != :task_queue, propagates)
+
+    # Update propagates from scoped options propagates
     if task_options.propagates !== nothing
         append!(task_options.propagates, propagates)
     else
         task_options.propagates = propagates
     end
     unique!(task_options.propagates)
+
+    # Read task-local acceleration into options
+    if task_options.acceleration === nothing
+        task_options.acceleration = current_acceleration()
+    end
 
     # Construct task spec and handle
     spec = DTaskSpec(args_kwargs, task_options)
