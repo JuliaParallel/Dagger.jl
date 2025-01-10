@@ -87,11 +87,13 @@ ProcessorTypeScope(T) =
                Set{AbstractScopeTaint}([ProcessorTypeTaint{T}()]))
 
 "Scoped to a specific processor."
-struct ExactScope <: AbstractScope
-    parent::ProcessScope
+struct ExactScope{P<:AbstractScope} <: AbstractScope
+    parent::P
     processor::Processor
 end
-ExactScope(proc) = ExactScope(ProcessScope(get_parent(proc).pid), proc)
+ExactScope(proc) = ExactScope(enclosing_scope(get_parent(proc)), proc)
+
+enclosing_scope(proc::OSProc) = ProcessScope(proc.pid)
 
 "Indicates that the applied scopes `x` and `y` are incompatible."
 struct InvalidScope <: AbstractScope

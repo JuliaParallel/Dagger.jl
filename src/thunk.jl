@@ -84,15 +84,26 @@ mutable struct Thunk
                    affinity=nothing,
                    eager_ref=nothing,
                    processor=nothing,
+                   memory_space=nothing,
                    scope=nothing,
                    options=nothing,
                    propagates=(),
                    kwargs...
                   )
-        if !isa(f, Chunk) && (!isnothing(processor) || !isnothing(scope))
-            f = tochunk(f,
-                        something(processor, OSProc()),
-                        something(scope, DefaultScope()))
+        #FIXME: dont force unwrap with fetch
+        f = fetch(f)
+        @with MPI_TID => id begin
+            if (!isnothing(processor) || !isnothing(scope) || !isnothing(memory_space))
+                if !isnothing(processor)
+                    f = tochunk(f,
+                                processor,
+                                something(scope, DefaultScope()))
+                else
+                    f = tochunk(f,
+                                something(memory_space, default_memory_space(f)),
+                                        something(scope, DefaultScope()))
+                end
+            end
         end
         xs = Base.mapany(identity, xs)
         syncdeps_set = Set{Any}(filterany(is_task_or_chunk, Base.mapany(last, xs)))
@@ -433,7 +444,7 @@ function _par(mod, ex::Expr; lazy=true, recur=true, opts=())
                 let
                     $result = $spawn($f, $Options(;$(opts...)), $(args...); $(kwargs...))
                     if $(Expr(:islocal, sync_var))
-                        put!($sync_var, schedule(Task(()->fetch($result; raw=true))))
+                        put!($sync_var, schedule(Task(()->fetch($result; move_value=false, unwrap=false))))
                     end
                     $result
                 end
@@ -456,6 +467,7 @@ function _setindex!_return_value(A, value, idxs...)
     return value
 end
 
+@warn "Make an ID available for function chunk creation" maxlog=1
 """
     Dagger.spawn(f, args...; kwargs...) -> DTask
 
@@ -479,11 +491,24 @@ function spawn(f, args...; kwargs...)
     # Wrap f in a Chunk if necessary
     processor = haskey(options, :processor) ? options.processor : nothing
     scope = haskey(options, :scope) ? options.scope : nothing
-    if !isnothing(processor) || !isnothing(scope)
-        f = tochunk(f,
-                    something(processor, get_options(:processor, OSProc())),
-                    something(scope, get_options(:scope, DefaultScope())))
+    memory_space = haskey(options, :memory_space) ? options.memory_space : nothing
+    #FIXME: don't force unwrap with fetch
+    f = fetch(f)
+    #=
+    @with MPI_UID => id begin
+        if (!isnothing(processor) || !isnothing(scope) || !isnothing(memory_space))
+            if !isnothing(processor)
+                f = tochunk(f,
+                            processor,
+                            something(scope, DefaultScope()))
+            else
+                f = tochunk(f,
+                            something(memory_space, default_memory_space(f)),
+                                    something(scope, DefaultScope()))
+            end
+        end
     end
+    =#
 
     # Process the args and kwargs into Pair form
     args_kwargs = args_kwargs_to_pairs(args, kwargs)
@@ -493,6 +518,9 @@ function spawn(f, args...; kwargs...)
     options = NamedTuple(filter(opt->opt[1] != :task_queue, Base.pairs(options)))
     propagates = filter(prop->prop != :task_queue, propagates)
     options = merge(options, (;propagates))
+    if !haskey(options, :acceleration)
+        options = merge(options, (;acceleration=current_acceleration()))
+    end
 
     # Construct task spec and handle
     spec = DTaskSpec(f, args_kwargs, options)

@@ -144,11 +144,12 @@ function Base.zero(x::DArray{T,N}) where {T,N}
     return _to_darray(a)
 end
 
-function Base.view(A::AbstractArray{T,N}, p::Blocks{N}) where {T,N}
+@warn "Consider a better way to provide a unique ID for each chunk" maxlog=1
+function Base.view(A::AbstractArray{T,N}, p::Blocks{N}; space=default_memory_space(current_acceleration(), A)) where {T,N}
     d = ArrayDomain(Base.index_shape(A))
     dc = partition(p, d)
     # N.B. We use `tochunk` because we only want to take the view locally, and
     # taking views should be very fast
-    chunks = [tochunk(view(A, x.indexes...)) for x in dc]
+    chunks = [@with(MPI_UID => eager_next_id(), tochunk(view(A, x.indexes...), space)) for x in dc]
     return DArray(T, d, dc, chunks, p)
 end
