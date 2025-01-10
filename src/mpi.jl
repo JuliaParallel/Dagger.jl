@@ -323,7 +323,6 @@ function recv_yield(comm, src, tag)
     end
 end
 function send_yield(value, comm, dest, tag)
-    #@dagdebug nothing :mpi "[$(MPI.Comm_rank(comm))][$tag] Hit probable hang while sending \n"
     req = MPI.isend(value, comm; dest, tag)
     while true
         finish, status = MPI.Test(req, MPI.Status)
