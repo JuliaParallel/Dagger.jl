@@ -101,7 +101,7 @@ struct ExactScope <: AbstractScope
     parent::ProcessScope
     processor::Processor
 end
-ExactScope(proc) = ExactScope(ProcessScope(get_parent(proc).pid), proc)
+ExactScope(proc) = ExactScope(ProcessScope(root_worker_id(get_parent(proc))), proc)
 proc_in_scope(proc::Processor, scope::ExactScope) = proc == scope.processor
 
 "Indicates that the applied scopes `x` and `y` are incompatible."

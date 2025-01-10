@@ -8,7 +8,7 @@ export In, Out, InOut, Deps, spawn_datadeps
 ==============================================================================
 
 This file implements the data dependencies system for Dagger tasks, which allows
-tasks to access their arguments in a controlled manner. The system maintains
+tasks to write to their arguments in a controlled manner. The system maintains
 data coherency across distributed workers by tracking aliasing relationships
 and orchestrating data movement operations.
 
@@ -25,59 +25,26 @@ KEY CONCEPTS:
 1. ALIASING ANALYSIS:
    - Every mutable argument is analyzed for its memory access pattern
    - Memory spans are computed to determine which bytes in memory are accessed
-   - Arguments that access overlapping memory spans are considered "aliasing"
+   - Objects that access overlapping memory spans are considered "aliasing"
    - Examples: An array A and view(A, 2:3, 2:3) alias each other
 
 2. DATA LOCALITY TRACKING:
    - The system tracks where the "source of truth" for each piece of data lives
    - As tasks execute and modify data, the source of truth may move between workers
-   - Each argument can have its own independent source of truth location
+   - Each aliasing region can have its own independent source of truth location
 
 3. ALIASED OBJECT MANAGEMENT:
    - When copying arguments between workers, the system tracks "aliased objects"
    - This ensures that if both an array and its view need to be copied to a worker,
      only one copy of the underlying array is made, with the view pointing to it
-   - The aliased_object!() and move_rewrap() functions manage this sharing
-
-ALIASING INFO:
---------------
-
-The system uses different types of aliasing info to represent different types of
-aliasing relationships:
-
-- ContiguousAliasing: Single contiguous memory region (e.g., full array)
-- StridedAliasing: Multiple non-contiguous regions (e.g., SubArray)
-- DiagonalAliasing: Diagonal elements only (e.g., Diagonal(A))
-- TriangularAliasing: Triangular regions (e.g., UpperTriangular(A))
-
-Any two aliasing objects can be compared using the will_alias function to
-determine if they overlap. Additionally, any aliasing object can be converted to
-a vector of memory spans, which represents the contiguous regions of memory that
-the aliasing object covers.
-
-DATA MOVEMENT FUNCTIONS:
-------------------------
-
-move!(dep_mod, to_space, from_space, to, from):
-- The core in-place data movement function
-- dep_mod specifies which part of the data to copy (identity, UpperTriangular, etc.)
-- Supports partial copies via RemainderAliasing dependency modifiers
-
-move_rewrap(...):
-- Handles copying of wrapped objects (SubArrays, ChunkViews)
-- Ensures aliased objects are reused on destination worker
-
-read/write_remainder!(...):
-- Read/write a span of memory from an object to/from a buffer
-- Used by move! to copy the remainder of an aliased object
+   - The aliased_object!() functions manage this sharing
 
 THE DISTRIBUTED ALIASING PROBLEM:
 ---------------------------------
 
 In a multithreaded environment, aliasing "just works" because all tasks operate
-on the user-provided memory. However, in a distributed environment, arguments
-must be copied between workers, which breaks aliasing relationships if care is
-not taken.
+on the same memory. However, in a distributed environment, arguments must be
+copied between workers, which breaks aliasing relationships.
 
 Consider this scenario:
 ```julia
@@ -96,9 +63,11 @@ MULTITHREADED BEHAVIOR (WORKS):
 - Task dependencies ensure correct ordering (e.g., Task 1 then Task 2)
 
 DISTRIBUTED BEHAVIOR (THE PROBLEM):
+- Tasks may be scheduled on different workers
 - Each argument must be copied to the destination worker
-- Without special handling, we would copy A and vA independently to another worker
-- This creates two separate arrays, breaking the aliasing relationship between A and vA
+- Without special handling, we would copy A to worker1 and vA to worker2
+- This creates two separate arrays, breaking the aliasing relationship
+- Updates to the view on worker2 don't affect the array on worker1
 
 THE SOLUTION - PARTIAL DATA MOVEMENT:
 -------------------------------------
@@ -112,13 +81,12 @@ The datadeps system solves this by:
 
 2. PARTIAL DATA TRANSFER:
    - Instead of copying entire objects, only transfer the "dirty" regions
-   - This prevents overwrites of data that has already been updated by another task
-   - This also minimizes network traffic and overall copy time
-   - Uses the move!(dep_mod, ...) function with RemainderAliasing dependency modifiers
+   - This minimizes network traffic and maximizes parallelism
+   - Uses the move!(dep_mod, ...) function with dependency modifiers
 
 3. REMAINDER TRACKING:
-   - When a task needs the full object, copy partial regions as needed
    - When a partial region is updated, track what parts still need updating
+   - Before a task needs the full object, copy the remaining "clean" regions
    - This preserves all updates while avoiding overwrites
 
 EXAMPLE EXECUTION FLOW:
@@ -140,24 +108,69 @@ Tasks: T1 modifies InOut(A), T2 modifies InOut(vA)
    - T2 needs vA, but vA aliases with A (which was modified by T1)
    - Copy vA-region of A from worker1 to worker2
    - This is a PARTIAL copy - only the 2:3, 2:3 region
-   - Create vA on worker2 pointing to the appropriate region of A
+   - Create vA on worker2 pointing to the appropriate region
    - T2 executes, modifying vA region on worker2
    - Update: vA's data_locality = worker2
 
 4. FINAL SYNCHRONIZATION:
-   - Need to copy-back A and vA to worker0
-   - A needs to be assembled from: worker1 (non-vA regions of A) + worker2 (vA region of A)
-   - REMAINDER COPY: Copy non-vA regions from worker1 to worker0
-   - REMAINDER COPY: Copy vA region from worker2 to worker0
+   - Some future task needs the complete A
+   - A needs to be assembled from: worker1 (non-vA regions) + worker2 (vA region)
+   - REMAINDER COPY: Copy non-vA regions from worker1 to worker2
+   - OR INVERSE: Copy vA-region from worker2 to worker1, then copy full A
 
-REMAINDER COMPUTATION:
-----------------------
+MEMORY SPAN COMPUTATION:
+------------------------
+
+The system uses memory spans to determine aliasing and compute remainders:
+
+- ContiguousAliasing: Single contiguous memory region (e.g., full array)
+- StridedAliasing: Multiple non-contiguous regions (e.g., SubArray)
+- DiagonalAliasing: Diagonal elements only (e.g., Diagonal(A))
+- TriangularAliasing: Triangular regions (e.g., UpperTriangular(A))
 
 Remainder computation involves:
 1. Computing memory spans for all overlapping aliasing objects
 2. Finding the set difference: full_object_spans - updated_spans
-3. Creating a RemainderAliasing object representing the difference between spans
-4. Performing one or more move! calls with this RemainderAliasing object to copy only needed data
+3. Creating a "remainder aliasing" object representing the not-yet-updated regions
+4. Performing move! with this remainder object to copy only needed data
+
+DATA MOVEMENT FUNCTIONS:
+------------------------
+
+move!(dep_mod, to_space, from_space, to, from):
+- The core in-place data movement function
+- dep_mod specifies which part of the data to copy (identity, UpperTriangular, etc.)
+- Supports partial copies via dependency modifiers
+
+move_rewrap():
+- Handles copying of wrapped objects (SubArrays, ChunkViews)
+- Ensures aliased objects are reused on destination worker
+
+enqueue_copy_to!():
+- Schedules data movement tasks before user tasks
+- Ensures data is up-to-date on the worker where a task will run
+
+CURRENT LIMITATIONS AND TODOS:
+-------------------------------
+
+1. REMAINDER COMPUTATION: 
+   - The system currently handles simple overlaps but needs sophisticated 
+     remainder calculation for complex aliasing patterns
+   - Need functions to compute span set differences
+
+2. ORDERING DEPENDENCIES:
+   - Need to ensure remainder copies happen in correct order
+   - Must not overwrite more recent updates with stale data
+
+3. COMPLEX ALIASING PATTERNS:
+   - Multiple overlapping views of the same array
+   - Nested aliasing structures (views of views)
+   - Mixed aliasing types (diagonal + triangular regions)
+
+4. PERFORMANCE OPTIMIZATION:
+   - Minimize number of copy operations
+   - Batch compatible transfers
+   - Optimize for common access patterns
 =#
 
 "Specifies a read-only dependency."
@@ -178,11 +191,6 @@ struct Deps{T,DT<:Tuple}
     deps::DT
 end
 Deps(x, deps...) = Deps(x, deps)
-
-chunktype(::In{T}) where T = T
-chunktype(::Out{T}) where T = T
-chunktype(::InOut{T}) where T = T
-chunktype(::Deps{T,DT}) where {T,DT} = T
 
 function unwrap_inout(arg)
     readdep = false
@@ -218,6 +226,7 @@ _identity_hash(arg::Chunk, h::UInt=UInt(0)) = hash(arg.handle, hash(Chunk, h))
 _identity_hash(arg::SubArray, h::UInt=UInt(0)) = hash(arg.indices, hash(arg.offset1, hash(arg.stride1, _identity_hash(arg.parent, h))))
 _identity_hash(arg::CartesianIndices, h::UInt=UInt(0)) = hash(arg.indices, hash(typeof(arg), h))
 
+@warn "Dispatch bcast behavior on acceleration" maxlog=1
 struct ArgumentWrapper
     arg
     dep_mod
@@ -226,6 +235,7 @@ struct ArgumentWrapper
     function ArgumentWrapper(arg, dep_mod)
         h = hash(dep_mod)
         h = _identity_hash(arg, h)
+        check_uniform(h, arg)
         return new(arg, dep_mod, h)
     end
 end
@@ -340,7 +350,7 @@ function set_key_stored!(cache::AliasedObjectCache, space::MemorySpace, ainfo::A
     cache_raw = unwrap(cache.chunk)::AliasedObjectCacheStore
     set_key_stored!(cache_raw, space, ainfo, value)
 end
-function aliased_object!(f, cache::AliasedObjectCache, x; ainfo=aliasing(x, identity))
+function aliased_object!(f, cache::AliasedObjectCache, x; ainfo=aliasing(current_acceleration(), x, identity))
     x_space = memory_space(x)
     if !is_key_present(cache, x_space, ainfo)
         # Preserve the object's memory-space/processor pairing when inserting
@@ -356,13 +366,14 @@ function aliased_object!(f, cache::AliasedObjectCache, x; ainfo=aliasing(x, iden
         @assert y isa Chunk "Didn't get a Chunk from functor"
         @assert memory_space(y) == cache.space "Space mismatch! $(memory_space(y)) != $(cache.space)"
         if memory_space(x) != cache.space
-            @assert ainfo != aliasing(y, identity) "Aliasing mismatch! $ainfo == $(aliasing(y, identity))"
+            @assert ainfo != aliasing(current_acceleration(), y, identity) "Aliasing mismatch! $ainfo == $(aliasing(current_acceleration(), y, identity))"
         end
         set_stored!(cache, y, ainfo)
         return y
     end
 end
 
+@warn "Switch ArgumentWrapper to contain just the argument, and add DependencyWrapper" maxlog=1
 struct DataDepsState
     # The mapping of original raw argument to its Chunk
     raw_arg_to_chunk::IdDict{Any,Chunk}
@@ -378,13 +389,10 @@ struct DataDepsState
     # The mapping of remote argument to original argument
     remote_arg_to_original::IdDict{Any,Any}
 
-    # The mapping of original argument wrapper to remote argument wrapper
-    remote_arg_w::Dict{ArgumentWrapper,Dict{MemorySpace,ArgumentWrapper}}
-
     # The mapping of ainfo to argument and dep_mod
     # Used to lookup which argument and dep_mod a given ainfo is generated from
     # N.B. This is a mapping for remote argument copies
-    ainfo_arg::Dict{AliasingWrapper,Set{ArgumentWrapper}}
+    ainfo_arg::Dict{AliasingWrapper,ArgumentWrapper}
 
     # The history of writes (direct or indirect) to each argument and dep_mod, in terms of ainfos directly written to, and the memory space they were written to
     # Updated when a new write happens on an overlapping ainfo
@@ -402,7 +410,7 @@ struct DataDepsState
 
     # The mapping of, for a given memory space, the backing Chunks that an ainfo references
     # Used by slot generation to replace the backing Chunks during move
-    ainfo_backing_chunk::Chunk{AliasedObjectCacheStore}
+    ainfo_backing_chunk::Dict{MemorySpace,Dict{AbstractAliasing,Chunk}}
 
     # Cache of argument's supports_inplace_move query result
     supports_inplace_cache::IdDict{Any,Bool}
@@ -410,10 +418,6 @@ struct DataDepsState
     # Cache of argument and dep_mod to ainfo
     # N.B. This is a mapping for remote argument copies
     ainfo_cache::Dict{ArgumentWrapper,AliasingWrapper}
-
-    # The oracle for aliasing lookups
-    # Used to populate ainfos_overlaps efficiently
-    ainfos_lookup::AliasingLookup
 
     # The overlapping ainfos for each ainfo
     # Incrementally updated as new ainfos are created
@@ -426,30 +430,58 @@ struct DataDepsState
     ainfos_owner::Dict{AliasingWrapper,Union{Pair{DTask,Int},Nothing}}
     ainfos_readers::Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}
 
-    function DataDepsState()
+    function DataDepsState(aliasing::Bool)
+        if !aliasing
+            @warn "aliasing=false is no longer supported, aliasing is now always enabled" maxlog=1
+        end
+
         arg_to_chunk = IdDict{Any,Chunk}()
         arg_origin = IdDict{Any,MemorySpace}()
         remote_args = Dict{MemorySpace,IdDict{Any,Any}}()
         remote_arg_to_original = IdDict{Any,Any}()
-        remote_arg_w = Dict{ArgumentWrapper,Dict{MemorySpace,ArgumentWrapper}}()
-        ainfo_arg = Dict{AliasingWrapper,Set{ArgumentWrapper}}()
-        arg_history = Dict{ArgumentWrapper,Vector{HistoryEntry}}()
+        ainfo_arg = Dict{AliasingWrapper,ArgumentWrapper}()
         arg_owner = Dict{ArgumentWrapper,MemorySpace}()
         arg_overlaps = Dict{ArgumentWrapper,Set{ArgumentWrapper}}()
-        ainfo_backing_chunk = tochunk(AliasedObjectCacheStore())
+        ainfo_backing_chunk = Dict{MemorySpace,Dict{AbstractAliasing,Chunk}}()
+        arg_history = Dict{ArgumentWrapper,Vector{HistoryEntry}}()
 
         supports_inplace_cache = IdDict{Any,Bool}()
         ainfo_cache = Dict{ArgumentWrapper,AliasingWrapper}()
 
-        ainfos_lookup = AliasingLookup()
         ainfos_overlaps = Dict{AliasingWrapper,Set{AliasingWrapper}}()
 
         ainfos_owner = Dict{AliasingWrapper,Union{Pair{DTask,Int},Nothing}}()
         ainfos_readers = Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}()
 
-        return new(arg_to_chunk, arg_origin, remote_args, remote_arg_to_original, remote_arg_w, ainfo_arg, arg_history, arg_owner, arg_overlaps, ainfo_backing_chunk,
-                   supports_inplace_cache, ainfo_cache, ainfos_lookup, ainfos_overlaps, ainfos_owner, ainfos_readers)
+        return new(arg_to_chunk, arg_origin, remote_args, remote_arg_to_original, ainfo_arg, arg_owner, arg_overlaps, ainfo_backing_chunk, arg_history,
+                   supports_inplace_cache, ainfo_cache, ainfos_overlaps, ainfos_owner, ainfos_readers)
     end
+end
+
+# N.B. arg_w must be the original argument wrapper, not a remote copy
+function aliasing!(state::DataDepsState, target_space::MemorySpace, arg_w::ArgumentWrapper)
+    # Grab the remote copy of the argument, and calculate the ainfo
+    remote_arg = get_or_generate_slot!(state, target_space, arg_w.arg)
+    remote_arg_w = ArgumentWrapper(remote_arg, arg_w.dep_mod)
+
+    # Check if we already have the result cached
+    if haskey(state.ainfo_cache, remote_arg_w)
+        return state.ainfo_cache[remote_arg_w]
+    end
+
+    # Calculate the ainfo
+    ainfo = AliasingWrapper(aliasing(current_acceleration(), remote_arg, arg_w.dep_mod))
+
+    # Cache the result
+    state.ainfo_cache[remote_arg_w] = ainfo
+
+    # Update the mapping of ainfo to argument and dep_mod
+    state.ainfo_arg[ainfo] = remote_arg_w
+
+    # Populate info for the new ainfo
+    populate_ainfo!(state, arg_w, ainfo, target_space)
+
+    return ainfo
 end
 
 function supports_inplace_move(state::DataDepsState, arg)
@@ -465,71 +497,69 @@ function is_writedep(arg, deps, task::DTask)
 end
 
 # Aliasing state setup
-function populate_task_info!(state::DataDepsState, task_args, spec::DTaskSpec, task::DTask)
-    # Track the task's arguments and access patterns
-    return map_or_ntuple(task_args) do idx
-        _arg = task_args[idx]
-
-        # Unwrap the argument
-        _arg_with_deps = value(_arg)
-        pos = _arg.pos
+# Internal: iterate over task args and call callback(arg, pos, may_alias, inplace_move, deps) for each tracked arg.
+function _populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask, callback)
+    for (idx, _arg) in enumerate(spec.fargs)
+        arg_pos = _arg.pos  # ArgPosition for this argument (Argument/TypedArgument have .pos)
+        arg = value(_arg)
 
         # Unwrap In/InOut/Out wrappers and record dependencies
-        arg_pre_unwrap, deps = unwrap_inout(_arg_with_deps)
+        arg, deps = unwrap_inout(arg)
 
-        # Unwrap the Chunk underlying any DTask arguments
-        arg = arg_pre_unwrap isa DTask ? fetch(arg_pre_unwrap; raw=true) : arg_pre_unwrap
-
-        # Skip non-aliasing arguments or arguments that don't support in-place move
-        may_alias = type_may_alias(typeof(arg))
-        inplace_move = may_alias && supports_inplace_move(state, arg)
-        if !may_alias || !inplace_move
-            arg_w = ArgumentWrapper(arg, identity)
-            if is_typed(spec)
-                return TypedDataDepsTaskArgument(arg, pos, may_alias, inplace_move, (DataDepsTaskDependency(arg_w, false, false),))
-            else
-                return DataDepsTaskArgument(arg, pos, may_alias, inplace_move, [DataDepsTaskDependency(arg_w, false, false)])
-            end
+        # Unwrap the Chunk underlying any DTask arguments only when already ready.
+        # Fetching an unready DTask here would deadlock: distribute_tasks! runs before
+        # the scheduler, so dependent tasks have not run yet. Skip aliasing for unready
+        # DTasks so we pass them through; the worker will fetch at execution time (may block on MPI).
+        if arg isa DTask
+            isready(arg) || continue
+            arg = fetch(arg; move_value=false, unwrap=false)
         end
+
+        # Skip non-aliasing arguments
+        type_may_alias(typeof(arg)) || continue
+
+        # Skip arguments not supporting in-place move
+        supports_inplace_move(state, arg) || continue
 
         # Generate a Chunk for the argument if necessary
         if haskey(state.raw_arg_to_chunk, arg)
-            arg_chunk = state.raw_arg_to_chunk[arg]
+            arg = state.raw_arg_to_chunk[arg]
         else
             if !(arg isa Chunk)
-                arg_chunk = tochunk(arg)
-                state.raw_arg_to_chunk[arg] = arg_chunk
+                new_arg = with(MPI_UID=>task.uid) do
+                    tochunk(arg)
+                end
+                state.raw_arg_to_chunk[arg] = new_arg
+                arg = new_arg
             else
                 state.raw_arg_to_chunk[arg] = arg
-                arg_chunk = arg
             end
         end
 
         # Track the origin space of the argument
-        origin_space = memory_space(arg_chunk)
-        state.arg_origin[arg_chunk] = origin_space
-        state.remote_arg_to_original[arg_chunk] = arg_chunk
+        origin_space = memory_space(arg)
+        check_uniform(origin_space)
+        state.arg_origin[arg] = origin_space
+        state.remote_arg_to_original[arg] = arg
+
+        may_alias = true
+        inplace_move = true
+        callback(arg, arg_pos, may_alias, inplace_move, deps)
 
         # Populate argument info for all aliasing dependencies
-        # And return the argument, dependencies, and ArgumentWrappers
-        if is_typed(spec)
-            deps = Tuple(DataDepsTaskDependency(arg_chunk, dep) for dep in deps)
-            map_or_ntuple(deps) do dep_idx
-                dep = deps[dep_idx]
-                # Populate argument info
-                populate_argument_info!(state, dep.arg_w, origin_space)
-            end
-            return TypedDataDepsTaskArgument(arg_chunk, pos, may_alias, inplace_move, deps)
-        else
-            deps = [DataDepsTaskDependency(arg_chunk, dep) for dep in deps]
-            map_or_ntuple(deps) do dep_idx
-                dep = deps[dep_idx]
-                # Populate argument info
-                populate_argument_info!(state, dep.arg_w, origin_space)
-            end
-            return DataDepsTaskArgument(arg_chunk, pos, may_alias, inplace_move, deps)
+        for (dep_mod, _, _) in deps
+            # Generate an ArgumentWrapper for the argument
+            aw = ArgumentWrapper(arg, dep_mod)
+
+            # Populate argument info
+            populate_argument_info!(state, aw, origin_space)
         end
     end
+end
+
+function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
+    # Track the task's arguments and access patterns (callback only for state updates)
+    _populate_task_info!(state, spec, task, (arg, pos, may_alias, inplace_move, deps) -> nothing)
 end
 function populate_argument_info!(state::DataDepsState, arg_w::ArgumentWrapper, origin_space::MemorySpace)
     # Initialize ownership and history
@@ -550,56 +580,23 @@ function populate_argument_info!(state::DataDepsState, arg_w::ArgumentWrapper, o
     # Calculate the ainfo (which will populate ainfo structures and merge history)
     aliasing!(state, origin_space, arg_w)
 end
-# N.B. arg_w must be the original argument wrapper, not a remote copy
-function aliasing!(state::DataDepsState, target_space::MemorySpace, arg_w::ArgumentWrapper)
-    if haskey(state.remote_arg_w, arg_w) && haskey(state.remote_arg_w[arg_w], target_space)
-        remote_arg_w = @inbounds state.remote_arg_w[arg_w][target_space]
-        remote_arg = remote_arg_w.arg
-    else
-        # Grab the remote copy of the argument, and calculate the ainfo
-        remote_arg = get_or_generate_slot!(state, target_space, arg_w.arg)
-        remote_arg_w = ArgumentWrapper(remote_arg, arg_w.dep_mod)
-        get!(Dict{MemorySpace,ArgumentWrapper}, state.remote_arg_w, arg_w)[target_space] = remote_arg_w
-    end
-
-    # Check if we already have the result cached
-    if haskey(state.ainfo_cache, remote_arg_w)
-        return state.ainfo_cache[remote_arg_w]
-    end
-
-    # Calculate the ainfo
-    ainfo = AliasingWrapper(aliasing(remote_arg, arg_w.dep_mod))
-
-    # Cache the result
-    state.ainfo_cache[remote_arg_w] = ainfo
-
-    # Update the mapping of ainfo to argument and dep_mod
-    if !haskey(state.ainfo_arg, ainfo)
-        state.ainfo_arg[ainfo] = Set{ArgumentWrapper}([remote_arg_w])
-    end
-    push!(state.ainfo_arg[ainfo], remote_arg_w)
-
-    # Populate info for the new ainfo
-    populate_ainfo!(state, arg_w, ainfo, target_space)
-
-    return ainfo
-end
 function populate_ainfo!(state::DataDepsState, original_arg_w::ArgumentWrapper, target_ainfo::AliasingWrapper, target_space::MemorySpace)
+    # Initialize owner and readers
     if !haskey(state.ainfos_owner, target_ainfo)
-        # Add ourselves to the lookup oracle
-        ainfo_idx = push!(state.ainfos_lookup, target_ainfo)
-
-        # Find overlapping ainfos
         overlaps = Set{AliasingWrapper}()
         push!(overlaps, target_ainfo)
-        for other_ainfo in intersect(state.ainfos_lookup, target_ainfo; ainfo_idx)
+        other_ainfos = (Dagger.current_acceleration() isa Dagger.MPIAcceleration
+            ? sort(collect(keys(state.ainfos_owner)), by=hash)
+            : keys(state.ainfos_owner))
+        for other_ainfo in other_ainfos
             target_ainfo == other_ainfo && continue
-            # Mark us and them as overlapping
-            push!(overlaps, other_ainfo)
-            push!(state.ainfos_overlaps[other_ainfo], target_ainfo)
+            if will_alias(target_ainfo, other_ainfo)
+                # Mark us and them as overlapping
+                push!(overlaps, other_ainfo)
+                push!(state.ainfos_overlaps[other_ainfo], target_ainfo)
 
-            # Add overlapping history to our own
-            for other_remote_arg_w in state.ainfo_arg[other_ainfo]
+                # Add overlapping history to our own
+                other_remote_arg_w = state.ainfo_arg[other_ainfo]
                 other_arg = state.remote_arg_to_original[other_remote_arg_w.arg]
                 other_arg_w = ArgumentWrapper(other_arg, other_remote_arg_w.dep_mod)
                 push!(state.arg_overlaps[original_arg_w], other_arg_w)
@@ -608,16 +605,13 @@ function populate_ainfo!(state::DataDepsState, original_arg_w::ArgumentWrapper, 
             end
         end
         state.ainfos_overlaps[target_ainfo] = overlaps
-
-        # Initialize owner and readers
         state.ainfos_owner[target_ainfo] = nothing
         state.ainfos_readers[target_ainfo] = Pair{DTask,Int}[]
     end
 end
 function merge_history!(state::DataDepsState, arg_w::ArgumentWrapper, other_arg_w::ArgumentWrapper)
     history = state.arg_history[arg_w]
-    @opcounter :merge_history
-    @opcounter :merge_history_complexity length(history)
+    largest_value_update!(length(history))
     origin_space = state.arg_origin[other_arg_w.arg]
     for other_entry in state.arg_history[other_arg_w]
         write_num_tuple = HistoryEntry(AliasingWrapper(NoAliasing()), origin_space, other_entry.write_num)
@@ -646,13 +640,10 @@ function merge_history!(state::DataDepsState, arg_w::ArgumentWrapper, other_arg_
     end
 end
 function truncate_history!(state::DataDepsState, arg_w::ArgumentWrapper)
-    # FIXME: Do this continuously if possible
     if haskey(state.arg_history, arg_w) && length(state.arg_history[arg_w]) > 100000
         origin_space = state.arg_origin[arg_w.arg]
-        @opcounter :truncate_history
         _, last_idx = compute_remainder_for_arg!(state, origin_space, arg_w, 0; compute_syncdeps=false)
         if last_idx > 0
-            @opcounter :truncate_history_removed last_idx
             deleteat!(state.arg_history[arg_w], 1:last_idx)
         end
     end
@@ -670,8 +661,11 @@ use of `x`, and the data in `x` will not be updated when the `spawn_datadeps`
 region returns.
 """
 supports_inplace_move(x) = true
-supports_inplace_move(t::DTask) = supports_inplace_move(fetch(t; raw=true))
+supports_inplace_move(t::DTask) = supports_inplace_move(fetch(t; move_value=false, unwrap=false))
+@warn "Fix this to work with MPI (can't call poolget on the wrong rank)" maxlog=1
 function supports_inplace_move(c::Chunk)
+    # FIXME
+    return true
     # FIXME: Use MemPool.access_ref
     pid = root_worker_id(c.processor)
     if pid == myid()
@@ -743,12 +737,19 @@ function add_reader!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::M
     push!(state.ainfos_readers[ainfo], task=>write_num)
 end
 
+# FIXME: These should go in MPIExt.jl
+const MPI_TID = ScopedValue{Int64}(0)
+const MPI_UID = ScopedValue{Int64}(0)
+
 # Make a copy of each piece of data on each worker
 # memory_space => {arg => copy_of_arg}
 isremotehandle(x) = false
 isremotehandle(x::DTask) = true
 isremotehandle(x::Chunk) = true
 function generate_slot!(state::DataDepsState, dest_space, data)
+    if data isa DTask
+        data = fetch(data; move_value=false, unwrap=false)
+    end
     # N.B. We do not perform any sync/copy with the current owner of the data,
     # because all we want here is to make a copy of some version of the data,
     # even if the data is not up to date.
@@ -756,15 +757,29 @@ function generate_slot!(state::DataDepsState, dest_space, data)
     to_proc = first(processors(dest_space))
     from_proc = first(processors(orig_space))
     dest_space_args = get!(IdDict{Any,Any}, state.remote_args, dest_space)
-    aliased_object_cache = AliasedObjectCache(dest_space, state.ainfo_backing_chunk)
-    ctx = Sch.eager_context()
-    id = rand(Int)
-    @maybelog ctx timespan_start(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data))
-    data_chunk = move_rewrap(aliased_object_cache, from_proc, to_proc, orig_space, dest_space, data)
-    @maybelog ctx timespan_finish(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data=data_chunk))
+    ALIASED_OBJECT_CACHE[] = get!(Dict{AbstractAliasing,Chunk}, state.ainfo_backing_chunk, dest_space)
+    if orig_space == dest_space && (data isa Chunk || !isremotehandle(data))
+        # Fast path for local data that's already in a Chunk or not a remote handle needing rewrapping
+        task = DATADEPS_CURRENT_TASK[]
+        data_chunk = with(MPI_UID=>task.uid) do
+            tochunk(data, from_proc)
+        end
+    else
+        ctx = Sch.eager_context()
+        id = rand(Int)
+        @maybelog ctx timespan_start(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data))
+        data_chunk = move_rewrap(from_proc, to_proc, orig_space, dest_space, data)
+        @maybelog ctx timespan_finish(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data=data_chunk))
+    end
     @assert memory_space(data_chunk) == dest_space "space mismatch! $dest_space (dest) != $(memory_space(data_chunk)) (actual) ($(typeof(data)) (data) vs. $(typeof(data_chunk)) (chunk)), spaces ($orig_space -> $dest_space)"
     dest_space_args[data] = data_chunk
     state.remote_arg_to_original[data_chunk] = data
+
+    ALIASED_OBJECT_CACHE[] = nothing
+
+    check_uniform(memory_space(dest_space_args[data]))
+    check_uniform(processor(dest_space_args[data]))
+    check_uniform(dest_space_args[data].handle)
 
     return dest_space_args[data]
 end
@@ -778,82 +793,86 @@ function get_or_generate_slot!(state, dest_space, data)
     end
     return state.remote_args[dest_space][data]
 end
-function remotecall_endpoint(f, from_proc, to_proc, from_space, to_space, data)
+function move_rewrap(from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, data)
+    return aliased_object!(data) do data
+        return remotecall_endpoint(identity, current_acceleration(), from_proc, to_proc, from_space, to_space, data)
+    end
+end
+function remotecall_endpoint(f, ::Dagger.DistributedAcceleration, from_proc, to_proc, orig_space, dest_space, data)
     to_w = root_worker_id(to_proc)
-    if to_w == myid()
+    return remotecall_fetch(to_w, from_proc, to_proc, dest_space, data) do from_proc, to_proc, dest_space, data
         data_converted = f(move(from_proc, to_proc, data))
-        return tochunk(data_converted, to_proc)
-    end
-    return remotecall_fetch(to_w, from_proc, to_proc, to_space, data) do from_proc, to_proc, to_space, data
-        data_converted = f(move(from_proc, to_proc, data))
-        return tochunk(data_converted, to_proc)
+        return tochunk(data_converted, to_proc, dest_space)
     end
 end
-function rewrap_aliased_object!(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, x)
-    return aliased_object!(cache, x) do x
-        return remotecall_endpoint(identity, from_proc, to_proc, from_space, to_space, x)
-    end
-end
-function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, data::Chunk)
-    # Unwrap so that we hit the right dispatch
-    wid = root_worker_id(data)
-    if wid != myid()
-        return remotecall_fetch(move_rewrap, wid, cache, from_proc, to_proc, from_space, to_space, data)
-    end
-    data_raw = unwrap(data)
-    return move_rewrap(cache, from_proc, to_proc, from_space, to_space, data_raw)
+const ALIASED_OBJECT_CACHE = TaskLocalValue{Union{Dict{AbstractAliasing,Chunk}, Nothing}}(()->nothing)
+
+# Explicit cache for move_rewrap (used by haloarray, tests)
+struct AliasedObjectCacheStore end
+struct AliasedObjectCache
+    dest_space::MemorySpace
+    backing::Chunk
+    cache::Dict{AbstractAliasing,Chunk}
+    AliasedObjectCache(dest_space::MemorySpace, backing::Chunk) = new(dest_space, backing, Dict{AbstractAliasing,Chunk}())
 end
 function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, data)
-    # For generic data
-    return aliased_object!(cache, data) do data
-        return remotecall_endpoint(identity, from_proc, to_proc, from_space, to_space, data)
+    old = ALIASED_OBJECT_CACHE[]
+    ALIASED_OBJECT_CACHE[] = cache.cache
+    try
+        return move_rewrap(from_proc, to_proc, from_space, to_space, data)
+    finally
+        ALIASED_OBJECT_CACHE[] = old
     end
 end
-function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, v::SubArray)
-    to_w = root_worker_id(to_proc)
-    p_chunk = rewrap_aliased_object!(cache, from_proc, to_proc, from_space, to_space, parent(v))
-    inds = parentindices(v)
-    return remotecall_fetch(to_w, from_proc, to_proc, from_space, to_space, p_chunk, inds) do from_proc, to_proc, from_space, to_space, p_chunk, inds
-        p_new = move(from_proc, to_proc, p_chunk)
-        v_new = view(p_new, inds...)
-        return tochunk(v_new, to_proc)
-    end
+
+@warn "Document these public methods" maxlog=1
+# TODO: Use state to cache aliasing() results
+function declare_aliased_object!(x; ainfo=aliasing(current_acceleration(), x, identity))
+    cache = ALIASED_OBJECT_CACHE[]
+    cache[ainfo] = x
 end
-# FIXME: Do this programmatically via recursive dispatch
-for wrapper in (UpperTriangular, LowerTriangular, UnitUpperTriangular, UnitLowerTriangular)
-    @eval function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, v::$(wrapper))
-        to_w = root_worker_id(to_proc)
-        p_chunk = rewrap_aliased_object!(cache, from_proc, to_proc, from_space, to_space, parent(v))
-        return remotecall_fetch(to_w, from_proc, to_proc, from_space, to_space, p_chunk) do from_proc, to_proc, from_space, to_space, p_chunk
-            p_new = move(from_proc, to_proc, p_chunk)
-            v_new = $(wrapper)(p_new)
-            return tochunk(v_new, to_proc)
-        end
-    end
-end
-function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, v::Base.RefValue)
-    return aliased_object!(cache, v) do v
-        return remotecall_endpoint(identity, from_proc, to_proc, from_space, to_space, v)
-    end
-end
-#= FIXME: Make this work so we can automatically move-rewrap recursive objects
-function move_rewrap_recursive(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, x::T) where T
-    if isstructtype(T)
-        # Check all object fields (recursive)
-        for field in fieldnames(T)
-            value = getfield(x, field)
-            new_value = aliased_object!(cache, value) do value
-                return move_rewrap_recursive(cache, from_proc, to_proc, from_space, to_space, value)
-            end
-            setfield!(x, field, new_value)
-        end
-        return x
+function aliased_object!(x; ainfo=aliasing(current_acceleration(), x, identity))
+    cache = ALIASED_OBJECT_CACHE[]
+    if haskey(cache, ainfo)
+        y = cache[ainfo]
     else
-        @warn "Cannot move-rewrap object of type $T"
-        return x
+        @assert x isa Chunk "x must be a Chunk\nUse functor form of aliased_object!"
+        cache[ainfo] = x
+        y = x
+    end
+    return y
+end
+function aliased_object!(f, x; ainfo=aliasing(current_acceleration(), x, identity))
+    cache = ALIASED_OBJECT_CACHE[]
+    if haskey(cache, ainfo)
+        y = cache[ainfo]
+    else
+        y = f(x)
+        @assert y isa Chunk "Didn't get a Chunk from functor"
+        cache[ainfo] = y
+    end
+    return y
+end
+function aliased_object_unwrap!(x::Chunk)
+    y = unwrap(x)
+    ainfo = aliasing(current_acceleration(), y, identity)
+    return unwrap(aliased_object!(x; ainfo))
+end
+
+struct DataDepsSchedulerState
+    task_to_spec::Dict{DTask,DTaskSpec}
+    assignments::Dict{DTask,MemorySpace}
+    dependencies::Dict{DTask,Set{DTask}}
+    task_completions::Dict{DTask,UInt64}
+    space_completions::Dict{MemorySpace,UInt64}
+    capacities::Dict{MemorySpace,Int}
+
+    function DataDepsSchedulerState()
+        return new(Dict{DTask,DTaskSpec}(),
+                   Dict{DTask,MemorySpace}(),
+                   Dict{DTask,Set{DTask}}(),
+                   Dict{DTask,UInt64}(),
+                   Dict{MemorySpace,UInt64}(),
+                   Dict{MemorySpace,Int}())
     end
 end
-move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, x::String) = x # FIXME: Not necessarily true
-move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, x::Symbol) = x
-move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, x::Type) = x
-=#

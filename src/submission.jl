@@ -285,7 +285,13 @@ function eager_process_args_submission_to_local(id_map, spec::DTaskSpec{true})
     return ntuple(i->eager_process_elem_submission_to_local(id_map, spec.fargs[i]), length(spec.fargs))
 end
 
-DTaskMetadata(spec::DTaskSpec) = DTaskMetadata(eager_metadata(spec.fargs))
+function DTaskMetadata(spec::DTaskSpec)
+    rt = spec.options.return_type
+    if rt !== nothing && isconcretetype(rt) && rt !== Any
+        return DTaskMetadata(rt)
+    end
+    return DTaskMetadata(eager_metadata(spec.fargs))
+end
 function eager_metadata(fargs)
     f = value(fargs[1])
     f = f isa StreamingFunction ? f.f : f
@@ -298,6 +304,10 @@ function eager_spawn(spec::DTaskSpec)
     uid = eager_next_id()
     future = ThunkFuture()
     metadata = DTaskMetadata(spec)
+    # Propagate inferred return type to options so execute! can skip MPI bcast
+    if isconcretetype(metadata.return_type)
+        spec.options.return_type = metadata.return_type
+    end
     return DTask(uid, future, metadata)
 end
 
@@ -320,10 +330,16 @@ function eager_launch!(pair::DTaskPair)
         end
     end
 
+    # Propagate DTask return_type into options so the created Thunk has chunktype for downstream inference
+    options = spec.options
+    if isconcretetype(task.metadata.return_type)
+        options = copy(options)
+        options.return_type = task.metadata.return_type
+    end
     # Submit the task
     #=FIXME:REALLOC=#
     thunk_id = eager_submit!(PayloadOne(task.uid, task.future,
-                                        fargs, spec.options, true))
+                                        fargs, options, true))
     task.thunk_ref = thunk_id.ref
 end
 # FIXME: Don't convert Tuple to Vector{Argument}
@@ -353,7 +369,13 @@ function eager_launch!(pairs::Vector{DTaskPair})
             end
         end
     end
-    all_options = Options[pair.spec.options for pair in pairs]
+    # Propagate DTask return_type into options so created Thunks have chunktype for downstream inference
+    all_options = Options[
+        let opts = pair.spec.options
+            isconcretetype(pair.task.metadata.return_type) ? (o = copy(opts); o.return_type = pair.task.metadata.return_type; o) : opts
+        end
+        for pair in pairs
+    ]
 
     # Submit the tasks
     #=FIXME:REALLOC=#
