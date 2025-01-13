@@ -1,25 +1,89 @@
+abstract type Acceleration end
+
+struct DistributedAcceleration <: Acceleration end
+
+const ACCELERATION = TaskLocalValue{Acceleration}(() -> DistributedAcceleration())
+
+current_acceleration() = ACCELERATION[]
+
+default_processor(::DistributedAcceleration) = OSProc(myid())
+default_processor(accel::DistributedAcceleration, x) = default_processor(accel) 
+default_processor() = default_processor(current_acceleration())
+
+accelerate!(accel::Symbol) = accelerate!(Val{accel}())
+accelerate!(::Val{:distributed}) = accelerate!(DistributedAcceleration())
+
+initialize_acceleration!(a::DistributedAcceleration) = nothing
+function accelerate!(accel::Acceleration) 
+    initialize_acceleration!(accel)
+    ACCELERATION[] = accel
+end
+
+accel_matches_proc(accel::DistributedAcceleration, proc::OSProc) = true
+accel_matches_proc(accel::DistributedAcceleration, proc) = true
+
 abstract type MemorySpace end
+
+"""
+    Chunk
+
+A reference to a piece of data located on a remote worker. `Chunk`s are
+typically created with `Dagger.tochunk(data)`, and the data can then be
+accessed from any worker with `collect(::Chunk)`. `Chunk`s are
+serialization-safe, and use distributed refcounting (provided by
+`MemPool.DRef`) to ensure that the data referenced by a `Chunk` won't be GC'd,
+as long as a reference exists on some worker.
+
+Each `Chunk` is associated with a given `Dagger.Processor`, which is (in a
+sense) the processor that "owns" or contains the data. Calling
+`collect(::Chunk)` will perform data movement and conversions defined by that
+processor to safely serialize the data to the calling worker.
+
+## Constructors
+See [`tochunk`](@ref).
+"""
+
+mutable struct Chunk{T, H, P<:Processor, S<:AbstractScope, M<:MemorySpace}
+    chunktype::Type{T}
+    domain
+    handle::H
+    processor::P
+    scope::S
+    space::M
+    persist::Bool
+end
 
 struct CPURAMMemorySpace <: MemorySpace
     owner::Int
 end
 root_worker_id(space::CPURAMMemorySpace) = space.owner
 
-memory_space(x) = CPURAMMemorySpace(myid())
-function memory_space(x::Chunk)
-    proc = processor(x)
-    if proc isa OSProc
-        # TODO: This should probably be programmable
-        return CPURAMMemorySpace(proc.pid)
-    else
-        return only(memory_spaces(proc))
-    end
-end
-memory_space(x::DTask) =
-    memory_space(fetch(x; raw=true))
+CPURAMMemorySpace() = CPURAMMemorySpace(myid())
+
+default_processor(space::CPURAMMemorySpace) = OSProc(space.owner)
+default_memory_space(accel::DistributedAcceleration) = CPURAMMemorySpace(myid())
+default_memory_space(accel::DistributedAcceleration, x) = default_memory_space(accel)
+default_memory_space(x) = default_memory_space(current_acceleration(), x)
+default_memory_space() = default_memory_space(current_acceleration())
+
+memory_space(x) = first(memory_spaces(default_processor()))
+memory_space(x::Processor) = first(memory_spaces(x))
+memory_space(x::Chunk) = x.space
+memory_space(x::DTask) = memory_space(fetch(x; raw=true))
 
 memory_spaces(::P) where {P<:Processor} =
     throw(ArgumentError("Must define `memory_spaces` for `$P`"))
+
+function memory_spaces(proc::OSProc)
+    children = get_processors(proc)
+    spaces = Set{MemorySpace}()
+    for proc in children
+        for space in memory_spaces(proc)
+            push!(spaces, space)
+        end
+    end
+    return spaces
+end
 memory_spaces(proc::ThreadProc) =
     Set([CPURAMMemorySpace(proc.owner)])
 processors(::S) where {S<:MemorySpace} =
@@ -69,6 +133,16 @@ function move!(::Type{<:Tridiagonal}, to_space::MemorySpace, from_space::MemoryS
     copyto!(view(to, diagind(to, 1)), view(from, diagind(from, 1)))
     return
 end
+
+# FIXME: Take MemorySpace instead
+function move_type(from_proc::Processor, to_proc::Processor, ::Type{T}) where T
+    if from_proc == to_proc
+        return T
+    end
+    return Base._return_type(move, Tuple{typeof(from_proc), typeof(to_proc), T})
+end
+move_type(from_proc::Processor, to_proc::Processor, ::Type{<:Chunk{T}}) where T =
+    move_type(from_proc, to_proc, T)
 
 ### Aliasing and Memory Spans
 
@@ -200,6 +274,7 @@ aliasing(x::Chunk) = remotecall_fetch(root_worker_id(x.processor), x) do x
 end
 aliasing(x::DTask, T) = aliasing(fetch(x; raw=true), T)
 aliasing(x::DTask) = aliasing(fetch(x; raw=true))
+aliasing(accel::DistributedAcceleration, x::Chunk, T) = aliasing(x, T) 
 
 struct ContiguousAliasing{S} <: AbstractAliasing
     span::MemorySpan{S}

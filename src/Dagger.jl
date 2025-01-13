@@ -10,9 +10,9 @@ import MemPool: DRef, FileRef, poolget, poolset
 import Base: collect, reduce
 
 import LinearAlgebra
-import LinearAlgebra: Adjoint, BLAS, Diagonal, Bidiagonal, Tridiagonal, LAPACK, LowerTriangular, PosDefException, Transpose, UpperTriangular, UnitLowerTriangular, UnitUpperTriangular, diagind, ishermitian, issymmetric
 import Random
 import Random: AbstractRNG
+import LinearAlgebra: Adjoint, BLAS, Diagonal, Bidiagonal, Tridiagonal, LAPACK, LowerTriangular, PosDefException, Transpose, UpperTriangular, UnitLowerTriangular, UnitUpperTriangular, diagind, ishermitian, issymmetric, chkstride1
 
 import UUIDs: UUID, uuid4
 
@@ -64,8 +64,8 @@ include("utils/scopes.jl")
 include("queue.jl")
 include("thunk.jl")
 include("submission.jl")
-include("chunks.jl")
 include("memory-spaces.jl")
+include("chunks.jl")
 
 # Task scheduling
 include("compute.jl")
@@ -125,6 +125,8 @@ function set_distributed_package!(value)
     @set_preferences!("distributed-package" => value)
     @info "Dagger.jl preference has been set, restart your Julia session for this change to take effect!"
 end
+# MPI
+include("mpi.jl")
 
 # Precompilation
 import PrecompileTools: @compile_workload
