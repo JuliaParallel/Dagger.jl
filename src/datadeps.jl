@@ -752,7 +752,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                         get_write_deps!(state, ainfo, task, write_num, copy_to_syncdeps)
                         @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] $(length(copy_to_syncdeps)) syncdeps"
                         #@dagdebug nothing :mpi "[$(MPI.Comm_rank(current_acceleration().comm))] Scheduled move from $(arg_local.handle.id) into $(arg_remote.handle.id)\n"
-                        copy_to = Dagger.@spawn scope=copy_to_scope occupancy=Dict(MPIProcessor=>0)  syncdeps=copy_to_syncdeps meta=true Dagger.move!(dep_mod, our_space, data_space, arg_remote, arg_local)
+                        copy_to = Dagger.@spawn scope=copy_to_scope occupancy=Dict(Any=>0)  syncdeps=copy_to_syncdeps meta=true Dagger.move!(dep_mod, our_space, data_space, arg_remote, arg_local)
                         add_writer!(state, ainfo, copy_to, write_num)
                         astate.data_locality[ainfo] = our_space
                     else
@@ -772,7 +772,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                     copy_to_syncdeps = Set{Any}()
                     get_write_deps!(state, arg, task, write_num, copy_to_syncdeps)
                     @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] $(length(copy_to_syncdeps)) syncdeps"
-                    copy_to = Dagger.@spawn scope=copy_to_scope occupancy=Dict(MPIProcessor=>0) syncdeps=copy_to_syncdeps Dagger.move!(identity, our_space, data_space, arg_remote, arg_local)
+                    copy_to = Dagger.@spawn scope=copy_to_scope occupancy=Dict(Any=>0) syncdeps=copy_to_syncdeps Dagger.move!(identity, our_space, data_space, arg_remote, arg_local)
                     add_writer!(state, arg, copy_to, write_num)
 
                     astate.data_locality[arg] = our_space
@@ -824,7 +824,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
         # Launch user's task
         task_scope = our_scope
-        spec.options = merge(spec.options, (;syncdeps, scope=task_scope))
+        spec.options = merge(spec.options, (;syncdeps, scope=task_scope, occupancy=Dict(Any=>0)))
         enqueue!(upper_queue, spec=>task)
 
         # Update read/write tracking for arguments
@@ -917,7 +917,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                     get_write_deps!(state, ainfo, nothing, write_num, copy_from_syncdeps)
                     @dagdebug nothing :spawn_datadeps "$(length(copy_from_syncdeps)) syncdeps"
                     #@dagdebug nothing :mpi "[$(MPI.Comm_rank(current_acceleration().comm))] Scheduled move from $(arg_remote.handle.id) into $(arg_local.handle.id)\n"
-                    copy_from = Dagger.@spawn scope=copy_from_scope occupancy=Dict(MPIProcessor=>0) syncdeps=copy_from_syncdeps meta=true Dagger.move!(dep_mod, data_local_space, data_remote_space, arg_local, arg_remote)
+                    copy_from = Dagger.@spawn scope=copy_from_scope occupancy=Dict(Any=>0) syncdeps=copy_from_syncdeps meta=true Dagger.move!(dep_mod, data_local_space, data_remote_space, arg_local, arg_remote)
                 else
                     @dagdebug nothing :spawn_datadeps "[$dep_mod] Skipped copy-from (local): $data_remote_space"
                 end
@@ -945,7 +945,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 copy_from_syncdeps = Set()
                 get_write_deps!(state, arg, nothing, write_num, copy_from_syncdeps)
                 @dagdebug nothing :spawn_datadeps "$(length(copy_from_syncdeps)) syncdeps"
-                copy_from = Dagger.@spawn scope=copy_from_scope occupancy=Dict(MPIProcessor=>0) syncdeps=copy_from_syncdeps meta=true Dagger.move!(identity, data_local_space, data_remote_space, arg_local, arg_remote)
+                copy_from = Dagger.@spawn scope=copy_from_scope occupancy=Dict(Any=>0) syncdeps=copy_from_syncdeps meta=true Dagger.move!(identity, data_local_space, data_remote_space, arg_local, arg_remote)
             else
                 @dagdebug nothing :spawn_datadeps "Skipped copy-from (local): $data_remote_space"
             end

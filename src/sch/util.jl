@@ -328,6 +328,7 @@ end
 
 function can_use_proc(state, task, gproc, proc, opts, scope)
     # Check against proclist
+    pid = Dagger.root_worker_id(gproc)
     if opts.proclist !== nothing
         @warn "The `proclist` option is deprecated, please use scopes instead\nSee https://juliaparallel.org/Dagger.jl/stable/scopes/ for details" maxlog=1
         if opts.proclist isa Function
@@ -355,8 +356,8 @@ function can_use_proc(state, task, gproc, proc, opts, scope)
     # Check against single
     if opts.single !== nothing
         @warn "The `single` option is deprecated, please use scopes instead\nSee https://juliaparallel.org/Dagger.jl/stable/scopes/ for details" maxlog=1
-        if gproc.pid != opts.single
-            @dagdebug task :scope "Rejected $proc: gproc.pid ($(gproc.pid)) != single ($(opts.single))"
+        if pid != opts.single
+            @dagdebug task :scope "Rejected $proc: pid ($(pid)) != single ($(opts.single))"
             return false, scope
         end
         scope = constrain(scope, Dagger.ProcessScope(opts.single))
@@ -438,7 +439,7 @@ function populate_processor_cache_list!(state, procs)
     # Populate the cache if empty
     if state.procs_cache_list[] === nothing
         current = nothing
-        for p in map(x->x.pid, procs)
+        for p in map(x->Dagger.root_worker_id(x), procs)
             for proc in get_processors(OSProc(p))
                 next = ProcessorCacheEntry(OSProc(p), proc)
                 if current === nothing

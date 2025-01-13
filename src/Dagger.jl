@@ -64,7 +64,6 @@ include("utils/scopes.jl")
 include("queue.jl")
 include("thunk.jl")
 include("submission.jl")
-include("cancellation.jl")
 include("memory-spaces.jl")
 include("chunks.jl")
 
