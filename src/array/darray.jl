@@ -191,6 +191,8 @@ function Base.collect(d::DArray; tree=false)
     end
 end
 
+Base.wait(A::DArray) = foreach(wait, A.chunks)
+
 ### show
 
 #= FIXME
