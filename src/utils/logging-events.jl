@@ -148,7 +148,7 @@ function (ta::TaskArguments)(ev::Event{:finish})
     if ev.category == :move
         args = Pair{Union{Symbol,Int},Dagger.LoggedMutableObject}[]
         thunk_id = ev.id.thunk_id::Int
-        pos = ev.id.position::Union{Symbol,Int}
+        pos = Dagger.raw_position(ev.id.position::Dagger.ArgPosition)::Union{Symbol,Int}
         arg = ev.timeline.data
         if ismutable(arg)
             push!(args, pos => Dagger.objectid_or_chunkid(arg))
@@ -174,7 +174,7 @@ function (ta::TaskArgumentMoves)(ev::Event{:start})
         data = ev.timeline.data
         if ismutable(data)
             thunk_id = ev.id.thunk_id::Int
-            position = ev.id.position::Union{Symbol,Int}
+            position = Dagger.raw_position(ev.id.position::Dagger.ArgPosition)::Union{Symbol,Int}
             d = get!(Dict{Union{Int,Symbol},Dagger.LoggedMutableObject}, ta.pre_move_args, thunk_id)
             d[position] = Dagger.objectid_or_chunkid(data)
         end
@@ -186,7 +186,7 @@ function (ta::TaskArgumentMoves)(ev::Event{:finish})
         post_data = ev.timeline.data
         if ismutable(post_data)
             thunk_id = ev.id.thunk_id::Int
-            position = ev.id.position::Union{Symbol,Int}
+            position = Dagger.raw_position(ev.id.position::Dagger.ArgPosition)::Union{Symbol,Int}
             if haskey(ta.pre_move_args, thunk_id)
                 d = ta.pre_move_args[thunk_id]
                 if haskey(d, position)
@@ -246,8 +246,8 @@ function (::TaskDependencies)(ev::Event{:start})
     end
     if ev.category == :add_thunk
         deps_tids = Int[]
-        get_deps!(Iterators.filter(Dagger.istask, Iterators.map(last, ev.timeline.args)))
-        get_deps!(get(Set, ev.timeline.options, :syncdeps))
+        get_deps!(Iterators.filter(Dagger.istask, Iterators.map(Dagger.value, ev.timeline.args)))
+        get_deps!(@something(ev.timeline.options.syncdeps, Set()))
         return ev.id.thunk_id => deps_tids
     end
     return

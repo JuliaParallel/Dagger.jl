@@ -16,7 +16,9 @@ function execute!(proc::ThreadProc, @nospecialize(f), @nospecialize(args...); @n
     result = Ref{Any}()
     task = Task() do
         set_tls!(tls)
-        TimespanLogging.prof_task_put!(tls.sch_handle.thunk_id.id)
+        if task_logging_enabled()
+            TimespanLogging.prof_task_put!(tls.sch_handle.thunk_id.id)
+        end
         result[] = @invokelatest f(args...; kwargs...)
         return
     end
