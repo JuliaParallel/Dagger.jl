@@ -570,7 +570,14 @@ function show_thunk(io::IO, t)
     end
     print(io, ")")
 end
-Base.show(io::IO, t::Thunk) = show_thunk(io, t)
+function Base.show(io::IO, t::Thunk)
+    lazy_level = parse(Int, get(ENV, "JULIA_DAGGER_SHOW_THUNK_VERBOSITY", "0"))
+    if lazy_level == 0
+        show_thunk(io, t)
+    else
+        show_thunk(IOContext(io, :lazy_level => lazy_level), t)
+    end
+end
 Base.summary(t::Thunk) = repr(t)
 
 inputs(x::Thunk) = x.inputs

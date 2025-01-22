@@ -9,7 +9,7 @@ function Random.rand!(rng::AbstractRNG, A::DArray{T}) where T
     Dagger.spawn_datadeps() do
         for Ac in chunks(A)
             rng = randfork(rng, part_sz)
-            Dagger.@spawn map!(_->rand(rng, T), InOut(Ac), Ac)
+            Dagger.@spawn imap!(InOut(_->rand(rng, T)), InOut(Ac))
         end
     end
     return A
@@ -19,7 +19,7 @@ function Random.randn!(rng::AbstractRNG, A::DArray{T}) where T
     Dagger.spawn_datadeps() do
         for Ac in chunks(A)
             rng = randfork(rng, part_sz)
-            Dagger.@spawn map!(_->randn(rng, T), InOut(Ac), Ac)
+            Dagger.@spawn imap!(InOut(_->randn(rng, T)), InOut(Ac))
         end
     end
     return A

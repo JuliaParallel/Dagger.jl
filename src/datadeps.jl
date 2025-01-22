@@ -147,24 +147,34 @@ struct DataDepsState{State<:Union{DataDepsAliasingState,DataDepsNonAliasingState
     # The mapping of memory space to remote argument copies
     remote_args::Dict{MemorySpace,IdDict{Any,Any}}
 
+    # Cache of whether arguments supports in-place move
+    supports_inplace_cache::IdDict{Any,Bool}
+
     # The aliasing analysis state
     alias_state::State
 
     function DataDepsState(aliasing::Bool)
         dependencies = Pair{DTask,Vector{Tuple{Bool,Bool,<:AbstractAliasing,<:Any,<:Any}}}[]
         remote_args = Dict{MemorySpace,IdDict{Any,Any}}()
+        supports_inplace_cache = IdDict{Any,Bool}()
         if aliasing
             state = DataDepsAliasingState()
         else
             state = DataDepsNonAliasingState()
         end
-        return new{typeof(state)}(aliasing, dependencies, remote_args, state)
+        return new{typeof(state)}(aliasing, dependencies, remote_args, supports_inplace_cache, state)
     end
 end
 
 function aliasing(astate::DataDepsAliasingState, arg, dep_mod)
     return get!(astate.ainfo_cache, (arg, dep_mod)) do
         return aliasing(arg, dep_mod)
+    end
+end
+
+function supports_inplace_move(state::DataDepsState, arg)
+    return get!(state.supports_inplace_cache, arg) do
+        return supports_inplace_move(arg)
     end
 end
 
@@ -322,6 +332,30 @@ function populate_return_info!(state::DataDepsState{DataDepsNonAliasingState}, t
     astate.data_locality[task] = space
     astate.data_origin[task] = space
 end
+
+"""
+    supports_inplace_move(x) -> Bool
+
+Returns `false` if `x` doesn't support being copied into from another object
+like `x`, via `move!`. This is used in `spawn_datadeps` to prevent attempting
+to copy between values which don't support mutation or otherwise don't have an
+implemented `move!` and want to skip in-place copies. When this returns
+`false`, datadeps will instead perform out-of-place copies for each non-local
+use of `x`, and the data in `x` will not be updated when the `spawn_datadeps`
+region returns.
+"""
+supports_inplace_move(x) = true
+supports_inplace_move(t::DTask) = supports_inplace_move(fetch(t; raw=true))
+function supports_inplace_move(c::Chunk)
+    # FIXME: Use MemPool.access_ref
+    pid = root_worker_id(c.processor)
+    if pid == myid()
+        return supports_inplace_move(poolget(c.handle))
+    else
+        return remotecall_fetch(supports_inplace_move, pid, c)
+    end
+end
+supports_inplace_move(::Function) = false
 
 # Read/write dependency management
 function get_write_deps!(state::DataDepsState, ainfo_or_arg, task, write_num, syncdeps)
@@ -677,8 +711,15 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             # Is the data written previously or now?
             arg, deps = unwrap_inout(arg)
             arg = arg isa DTask ? fetch(arg; raw=true) : arg
-            if !type_may_alias(typeof(arg)) || !has_writedep(state, arg, deps, task)
-                @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Skipped copy-to (unwritten)"
+            if !type_may_alias(typeof(arg))
+                @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Skipped copy-to (immutable)"
+                spec.args[idx] = pos => arg
+                continue
+            end
+
+            # Is the data writeable?
+            if !supports_inplace_move(state, arg)
+                @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Skipped copy-to (non-writeable)"
                 spec.args[idx] = pos => arg
                 continue
             end
@@ -738,7 +779,10 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         # Validate that we're not accidentally performing a copy
         for (idx, (_, arg)) in enumerate(spec.args)
             _, deps = unwrap_inout(task_args[idx][2])
-            if is_writedep(arg, deps, task)
+            # N.B. We only do this check when the argument supports in-place
+            # moves, because for the moment, we are not guaranteeing updates or
+            # write-back of results
+            if is_writedep(arg, deps, task) && supports_inplace_move(state, arg)
                 arg_space = memory_space(arg)
                 @assert arg_space == our_space "($(repr(spec.f)))[$idx] Tried to pass $(typeof(arg)) from $arg_space to $our_space"
             end
@@ -750,6 +794,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             arg, deps = unwrap_inout(arg)
             arg = arg isa DTask ? fetch(arg; raw=true) : arg
             type_may_alias(typeof(arg)) || continue
+            supports_inplace_move(state, arg) || continue
             if queue.aliasing
                 for (dep_mod, _, writedep) in deps
                     ainfo = aliasing(astate, arg, dep_mod)
@@ -830,6 +875,12 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                     continue
                 end
 
+                # Skip non-writeable arguments
+                if !supports_inplace_move(state, arg)
+                    @dagdebug nothing :spawn_datadeps "Skipped copy-from (non-writeable)"
+                    continue
+                end
+
                 # Get the set of writers
                 ainfo_writes = get!(Vector{Tuple{AbstractAliasing,<:Any,MemorySpace}}, arg_writes, arg)
 
@@ -877,8 +928,13 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         for arg in keys(astate.data_origin)
             # Is the data previously written?
             arg, deps = unwrap_inout(arg)
-            if !type_may_alias(typeof(arg)) || !has_writedep(state, arg, deps)
-                @dagdebug nothing :spawn_datadeps "Skipped copy-from (unwritten)"
+            if !type_may_alias(typeof(arg))
+                @dagdebug nothing :spawn_datadeps "Skipped copy-from (immutable)"
+            end
+
+            # Can the data be written back to?
+            if !supports_inplace_move(state, arg)
+                @dagdebug nothing :spawn_datadeps "Skipped copy-from (non-writeable)"
             end
 
             # Is the source of truth elsewhere?
@@ -912,7 +968,7 @@ Dagger tasks launched within `f` may wrap their arguments with `In`, `Out`, or
 argument, respectively. These argument dependencies will be used to specify
 which tasks depend on each other based on the following rules:
 
-- Dependencies across different arguments are independent; only dependencies on the same argument synchronize with each other ("same-ness" is determined based on `isequal`)
+- Dependencies across unrelated arguments are independent; only dependencies on arguments which overlap in memory synchronize with each other
 - `InOut` is the same as `In` and `Out` applied simultaneously, and synchronizes with the union of the `In` and `Out` effects
 - Any two or more `In` dependencies do not synchronize with each other, and may execute in parallel
 - An `Out` dependency synchronizes with any previous `In` and `Out` dependencies

@@ -114,10 +114,17 @@ Base.last(A::DArray) = A[end]
 
 # In-place operations
 
+function imap!(f, A)
+    for idx in eachindex(A)
+        A[idx] = f(A[idx])
+    end
+    return A
+end
+
 function Base.map!(f, a::DArray{T}) where T
     Dagger.spawn_datadeps() do
         for ca in chunks(a)
-            Dagger.@spawn map!(f, InOut(ca), ca)
+            Dagger.@spawn imap!(f, InOut(ca))
         end
     end
     return a

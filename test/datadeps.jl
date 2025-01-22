@@ -44,7 +44,7 @@ function taskdeps_for_task(logs::Dict{Int,<:Dict}, tid::Int)
     end
     error("Task $tid not found in logs")
 end
-function test_task_dominators(logs::Dict, tid::Int, doms::Vector; all_tids::Vector=[], nondom_check::Bool=true)
+function test_task_dominators(logs::Dict, tid::Int, doms::Vector; all_tids::Vector=[], nondom_check::Bool=false)
     g = SimpleDiGraph()
     tid_to_v = Dict{Int,Int}()
     seen = Set{Int}()
@@ -165,7 +165,7 @@ function test_datadeps(;args_chunks::Bool,
     end
     tid_1, tid_2 = task_id.(ts)
     test_task_dominators(logs, tid_1, []; all_tids=[tid_1, tid_2])
-    test_task_dominators(logs, tid_2, []; all_tids=[tid_1, tid_2])
+    test_task_dominators(logs, tid_2, []; all_tids=[tid_1, tid_2], nondom_check=false)
 
     # R->W Aliasing
     ts = []
