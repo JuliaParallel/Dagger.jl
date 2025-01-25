@@ -2,7 +2,7 @@ const SYSTEM_UUIDS = Dict{Int,UUID}()
 
 function system_uuid_fallback()
     get!(SYSTEM_UUIDS, myid()) do
-        username = get(ENV, "USER", "__global")
+        username = hash(get(ENV, "USER", "__global"))
         uuid_file = joinpath(tempdir(), "dagger-system-uuid-$username")
         if !isfile(uuid_file)
             temp_uuid_file, temp_io = mktemp(; cleanup=false)
