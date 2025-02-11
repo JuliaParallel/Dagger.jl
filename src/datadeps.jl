@@ -90,26 +90,26 @@ end
 struct DataDepsAliasingState
     # Track original and current data locations
     # We track data => space
-    data_origin::Dict{AbstractAliasing,MemorySpace}
-    data_locality::Dict{AbstractAliasing,MemorySpace}
+    data_origin::Dict{AliasingWrapper,MemorySpace}
+    data_locality::Dict{AliasingWrapper,MemorySpace}
 
     # Track writers ("owners") and readers
-    ainfos_owner::Dict{AbstractAliasing,Union{Pair{DTask,Int},Nothing}}
-    ainfos_readers::Dict{AbstractAliasing,Vector{Pair{DTask,Int}}}
-    ainfos_overlaps::Dict{AbstractAliasing,Set{AbstractAliasing}}
+    ainfos_owner::Dict{AliasingWrapper,Union{Pair{DTask,Int},Nothing}}
+    ainfos_readers::Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}
+    ainfos_overlaps::Dict{AliasingWrapper,Set{AliasingWrapper}}
 
     # Cache ainfo lookups
-    ainfo_cache::Dict{Tuple{Any,Any},AbstractAliasing}
+    ainfo_cache::Dict{Tuple{Any,Any},AliasingWrapper}
 
     function DataDepsAliasingState()
-        data_origin = Dict{AbstractAliasing,MemorySpace}()
-        data_locality = Dict{AbstractAliasing,MemorySpace}()
+        data_origin = Dict{AliasingWrapper,MemorySpace}()
+        data_locality = Dict{AliasingWrapper,MemorySpace}()
 
-        ainfos_owner = Dict{AbstractAliasing,Union{Pair{DTask,Int},Nothing}}()
-        ainfos_readers = Dict{AbstractAliasing,Vector{Pair{DTask,Int}}}()
-        ainfos_overlaps = Dict{AbstractAliasing,Set{AbstractAliasing}}()
+        ainfos_owner = Dict{AliasingWrapper,Union{Pair{DTask,Int},Nothing}}()
+        ainfos_readers = Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}()
+        ainfos_overlaps = Dict{AliasingWrapper,Set{AliasingWrapper}}()
 
-        ainfo_cache = Dict{Tuple{Any,Any},AbstractAliasing}()
+        ainfo_cache = Dict{Tuple{Any,Any},AliasingWrapper}()
 
         return new(data_origin, data_locality,
                    ainfos_owner, ainfos_readers, ainfos_overlaps,
@@ -142,7 +142,7 @@ struct DataDepsState{State<:Union{DataDepsAliasingState,DataDepsNonAliasingState
     aliasing::Bool
 
     # The ordered list of tasks and their read/write dependencies
-    dependencies::Vector{Pair{DTask,Vector{Tuple{Bool,Bool,<:AbstractAliasing,<:Any,<:Any}}}}
+    dependencies::Vector{Pair{DTask,Vector{Tuple{Bool,Bool,AliasingWrapper,<:Any,<:Any}}}}
 
     # The mapping of memory space to remote argument copies
     remote_args::Dict{MemorySpace,IdDict{Any,Any}}
@@ -154,7 +154,7 @@ struct DataDepsState{State<:Union{DataDepsAliasingState,DataDepsNonAliasingState
     alias_state::State
 
     function DataDepsState(aliasing::Bool)
-        dependencies = Pair{DTask,Vector{Tuple{Bool,Bool,<:AbstractAliasing,<:Any,<:Any}}}[]
+        dependencies = Pair{DTask,Vector{Tuple{Bool,Bool,AliasingWrapper,<:Any,<:Any}}}[]
         remote_args = Dict{MemorySpace,IdDict{Any,Any}}()
         supports_inplace_cache = IdDict{Any,Bool}()
         if aliasing
@@ -168,7 +168,7 @@ end
 
 function aliasing(astate::DataDepsAliasingState, arg, dep_mod)
     return get!(astate.ainfo_cache, (arg, dep_mod)) do
-        return aliasing(arg, dep_mod)
+        return AliasingWrapper(aliasing(arg, dep_mod))
     end
 end
 
@@ -245,7 +245,7 @@ end
 # Aliasing state setup
 function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
     # Populate task dependencies
-    dependencies_to_add = Vector{Tuple{Bool,Bool,AbstractAliasing,<:Any,<:Any}}()
+    dependencies_to_add = Vector{Tuple{Bool,Bool,AliasingWrapper,<:Any,<:Any}}()
 
     # Track the task's arguments and access patterns
     for (idx, _arg) in enumerate(spec.fargs)
@@ -263,7 +263,7 @@ function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
             if state.aliasing
                 ainfo = aliasing(state.alias_state, arg, dep_mod)
             else
-                ainfo = UnknownAliasing()
+                ainfo = AliasingWrapper(UnknownAliasing())
             end
             push!(dependencies_to_add, (readdep, writedep, ainfo, dep_mod, arg))
         end
@@ -274,7 +274,7 @@ function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
 
     # Track the task result too
     # N.B. We state no readdep/writedep because, while we can't model the aliasing info for the task result yet, we don't want to synchronize because of this
-    push!(dependencies_to_add, (false, false, UnknownAliasing(), identity, task))
+    push!(dependencies_to_add, (false, false, AliasingWrapper(UnknownAliasing()), identity, task))
 
     # Record argument/result dependencies
     push!(state.dependencies, task => dependencies_to_add)
@@ -286,7 +286,7 @@ function populate_argument_info!(state::DataDepsState{DataDepsAliasingState}, ar
 
         # Initialize owner and readers
         if !haskey(astate.ainfos_owner, ainfo)
-            overlaps = Set{AbstractAliasing}()
+            overlaps = Set{AliasingWrapper}()
             push!(overlaps, ainfo)
             for other_ainfo in keys(astate.ainfos_owner)
                 ainfo == other_ainfo && continue
@@ -368,7 +368,7 @@ end
 
 function _get_write_deps!(state::DataDepsState{DataDepsAliasingState}, ainfo::AbstractAliasing, task, write_num, syncdeps)
     astate = state.alias_state
-    ainfo isa NoAliasing && return
+    ainfo.inner isa NoAliasing && return
     for other_ainfo in astate.ainfos_overlaps[ainfo]
         other_task_write_num = astate.ainfos_owner[other_ainfo]
         @dagdebug nothing :spawn_datadeps "Considering sync with writer via $ainfo -> $other_ainfo"
@@ -381,7 +381,7 @@ function _get_write_deps!(state::DataDepsState{DataDepsAliasingState}, ainfo::Ab
 end
 function _get_read_deps!(state::DataDepsState{DataDepsAliasingState}, ainfo::AbstractAliasing, task, write_num, syncdeps)
     astate = state.alias_state
-    ainfo isa NoAliasing && return
+    ainfo.inner isa NoAliasing && return
     for other_ainfo in astate.ainfos_overlaps[ainfo]
         @dagdebug nothing :spawn_datadeps "Considering sync with reader via $ainfo -> $other_ainfo"
         other_tasks = astate.ainfos_readers[other_ainfo]
@@ -864,7 +864,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         # in the correct order
 
         # First, find the latest owners of each live ainfo
-        arg_writes = IdDict{Any,Vector{Tuple{AbstractAliasing,<:Any,MemorySpace}}}()
+        arg_writes = IdDict{Any,Vector{Tuple{AliasingWrapper,<:Any,MemorySpace}}}()
         for (task, taskdeps) in state.dependencies
             for (_, writedep, ainfo, dep_mod, arg) in taskdeps
                 writedep || continue
@@ -873,7 +873,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
                 # Skip virtual writes from task result aliasing
                 # FIXME: Make this less bad
-                if arg isa DTask && dep_mod === identity && ainfo isa UnknownAliasing
+                if arg isa DTask && dep_mod === identity && ainfo.inner isa UnknownAliasing
                     continue
                 end
 
@@ -884,7 +884,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 end
 
                 # Get the set of writers
-                ainfo_writes = get!(Vector{Tuple{AbstractAliasing,<:Any,MemorySpace}}, arg_writes, arg)
+                ainfo_writes = get!(Vector{Tuple{AliasingWrapper,<:Any,MemorySpace}}, arg_writes, arg)
 
                 #= FIXME: If we fully overlap any writer, evict them
                 idxs = findall(ainfo_write->overlaps_all(ainfo, ainfo_write[1]), ainfo_writes)
