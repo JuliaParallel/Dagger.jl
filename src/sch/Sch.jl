@@ -58,6 +58,7 @@ Fields:
 - `running_on::Dict{Thunk,OSProc}` - Map from `Thunk` to the OS process executing it
 - `thunk_dict::Dict{Int, WeakThunk}` - Maps from thunk IDs to a `Thunk`
 - `node_order::Any` - Function that returns the order of a thunk
+- `equiv_chunks::WeakKeyDict{DRef,Chunk}` - Cache mapping from `DRef` to a `Chunk` which contains it
 - `worker_time_pressure::Dict{Int,Dict{Processor,UInt64}}` - Maps from worker ID to processor pressure
 - `worker_storage_pressure::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}` - Maps from worker ID to storage resource pressure
 - `worker_storage_capacity::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}` - Maps from worker ID to storage resource capacity
@@ -84,6 +85,7 @@ struct ComputeState
     running_on::Dict{Thunk,OSProc}
     thunk_dict::Dict{Int, WeakThunk}
     node_order::Any
+    equiv_chunks::WeakKeyDict{DRef,Chunk}
     worker_time_pressure::Dict{Int,Dict{Processor,UInt64}}
     worker_storage_pressure::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}
     worker_storage_capacity::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}
@@ -113,6 +115,7 @@ function start_state(deps::Dict, node_order, chan)
                          Dict{Thunk,OSProc}(),
                          Dict{Int, WeakThunk}(),
                          node_order,
+                         WeakKeyDict{DRef,Chunk}(),
                          Dict{Int,Dict{Processor,UInt64}}(),
                          Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}(),
                          Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}(),
@@ -426,6 +429,11 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options::SchedulerOpt
                 state.signature_alloc_cost[sig] = (metadata.gc_allocd + get(state.signature_alloc_cost, sig, 0)) ÷ 2
                 if metadata.transfer_rate !== nothing
                     state.transfer_rate[] = (state.transfer_rate[] + metadata.transfer_rate) ÷ 2
+                end
+            end
+            if res isa Chunk
+                if !haskey(state.equiv_chunks, res)
+                    state.equiv_chunks[res.handle::DRef] = res
                 end
             end
             store_result!(state, node, res; error=thunk_failed)

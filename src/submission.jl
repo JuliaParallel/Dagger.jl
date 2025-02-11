@@ -102,17 +102,15 @@ function eager_submit_internal!(ctx, state, task, tid, payload::AnyPayload; uid_
                     # N.B. Different Chunks with the same DRef handle will hash to the same slot,
                     # so we just pick an equivalent Chunk as our upstream
                     chunk = value(arg)::Chunk
-                    if haskey(state.waiting_data, chunk)
-                        newchunk = nothing
-                        for other in keys(state.waiting_data)
-                            if other isa Chunk && other.handle == chunk.handle
-                                newchunk = other
-                                break
-                            end
+                    function find_equivalent_chunk(state, chunk::C) where {C<:Chunk}
+                        if haskey(state.equiv_chunks, chunk.handle)
+                            return state.equiv_chunks[chunk.handle]::C
+                        else
+                            state.equiv_chunks[chunk.handle] = chunk
+                            return chunk
                         end
-                        @assert newchunk !== nothing
-                        chunk = newchunk::Chunk
                     end
+                    chunk = find_equivalent_chunk(state, chunk)
                     #=FIXME:UNIQUE=#
                     @inbounds fargs[idx] = Argument(arg.pos, WeakChunk(chunk))
                 end
@@ -193,6 +191,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload::AnyPayload; uid_
 
             return thunk_id
         end
+        empty!(equiv_chunks)
     end
 end
 struct UnrefThunk
@@ -238,16 +237,12 @@ function eager_submit!(payload::AnyPayload)
         return remotecall_fetch(1, payload) do payload
             Sch.init_eager()
             state = Dagger.Sch.EAGER_STATE[]
-            @lock state.lock begin
-                eager_submit_internal!(payload)
-            end
+            @lock state.lock eager_submit_internal!(payload)
         end
     else
         Sch.init_eager()
         state = Dagger.Sch.EAGER_STATE[]
-        return lock(state.lock) do
-            eager_submit_internal!(payload)
-        end
+        return @lock state.lock eager_submit_internal!(payload)
     end
 end
 
