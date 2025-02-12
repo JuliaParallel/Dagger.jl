@@ -152,7 +152,7 @@ new `Chunk`.
 
 All other kwargs are passed directly to `MemPool.poolset`.
 """
-function tochunk(x::X, proc::P=OSProc(), scope::S=AnyScope(); cache=false, device=nothing, rewrap=false, kwargs...) where {X,P,S}
+function tochunk(x::X, proc::P=OSProc(), scope::S=AnyScope(); device=nothing, rewrap=false, kwargs...) where {X,P,S}
     if device === nothing
         device = if Sch.walk_storage_safe(x)
             MemPool.GLOBAL_DEVICE[]

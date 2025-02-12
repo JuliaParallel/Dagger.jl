@@ -47,18 +47,6 @@ julia> collect(t)  # computes the result and returns it to the current process
 for each property are described in the next section.
 - `option=value`: The same as passing `kwargs` to `delayed`.
 
-## Public Properties
-- `meta::Bool=false`: If `true`, instead of fetching cached arguments from
-`Chunk`s and passing the raw arguments to the called function, instead pass the
-`Chunk`. Useful for doing manual fetching or manipulation of `Chunk`
-references. Non-`Chunk` arguments are still passed as-is. -
-`processor::Processor=OSProc()` - The processor associated with the called
-function. Useful if the called function is a callable struct that exists on a
-given processor and should be transferred appropriately. -
-`scope::Dagger.AbstractScope=DefaultScope()` - The scope associated with the
-called function. Useful if the called function is a callable struct that may
-only be transferred to, and executed within, the specified scope.
-
 ## Options
 - `options`: An `Options` struct providing the options for the `Thunk`.
 If omitted, options can also be specified by passing key-value pairs as
@@ -147,6 +135,9 @@ function Thunk(f, xs...;
     if kwargs !== nothing
         options_merge!(options, (;kwargs...))
     end
+    if haskey(kwargs, :cache)
+        @warn "The cache argument is deprecated, as it is now always true" maxlog=1
+    end
     spec.cache_ref = cache_ref
     spec.affinity = affinity
     return Thunk(spec)
@@ -166,7 +157,7 @@ function affinity(t::Thunk)
         return t.affinity
     end
 
-    if t.cache && t.cache_ref !== nothing
+    if t.cache_ref !== nothing
         aff_vec = affinity(t.cache_ref)
     else
         aff = Dict{OSProc,Int}()

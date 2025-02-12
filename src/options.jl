@@ -14,7 +14,6 @@ Stores per-task options to be passed to the scheduler.
 - `proclist=nothing`: (Deprecated) Force task to use one or more processors that are instances/subtypes of a contained type. Alternatively, a function can be supplied, and the function will be called with a processor as the sole argument and should return a `Bool` result to indicate whether or not to use the given processor. `nothing` enables all default processors.
 - `get_result::Bool=false`: Whether the worker should store the result directly (`true`) or as a `Chunk` (`false`)
 - `meta::Bool=false`: When `true`, values are not `move`d, and are passed directly as `Chunk`, if they are not immediate values
-- `cache::Bool=false`: When `true`, caches the task's result in it's associated `Thunk` as `.cache_ref`
 - `syncdeps::Set{Any}`: Contains any additional tasks to synchronize with
 - `time_util::Dict{Type,Any}`: Indicates the maximum expected time utilization for this task. Each keypair maps a processor type to the utilization, where the value can be a real (approximately the number of nanoseconds taken), or `MaxUtilization()` (utilizes all processors of this type). By default, the scheduler assumes that this task only uses one processor.
 - `alloc_util::Dict{Type,UInt64}`: Indicates the maximum expected memory utilization for this task. Each keypair maps a processor type to the utilization, where the value is an integer representing approximately the maximum number of bytes allocated at any one time.
@@ -37,7 +36,6 @@ Base.@kwdef mutable struct Options
 
     get_result::Union{Bool,Nothing} = nothing
     meta::Union{Bool,Nothing} = nothing
-    cache::Union{Bool,Nothing} = nothing
 
     syncdeps::Union{Set{Any},Nothing} = nothing
 
@@ -112,7 +110,6 @@ function populate_defaults!(opts::Options, sig)
     maybe_default!(opts, Val{:proclist}(), sig)
     maybe_default!(opts, Val{:get_result}(), sig)
     maybe_default!(opts, Val{:meta}(), sig)
-    maybe_default!(opts, Val{:cache}(), sig)
     maybe_default!(opts, Val{:syncdeps}(), sig)
     maybe_default!(opts, Val{:time_util}(), sig)
     maybe_default!(opts, Val{:alloc_util}(), sig)

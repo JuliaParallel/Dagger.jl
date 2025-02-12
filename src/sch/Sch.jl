@@ -1517,7 +1517,7 @@ function do_task(to_proc, task::TaskSpec)
         else
             # TODO: Cache this Chunk locally in CHUNK_CACHE right now
             tochunk(result, to_proc;
-                    device, cache=something(options.cache, false),
+                    device,
                     tag=options.storage_root_tag,
                     leaf_tag=something(options.storage_leaf_tag, MemPool.Tag()),
                     retain=something(options.storage_retain, false))
