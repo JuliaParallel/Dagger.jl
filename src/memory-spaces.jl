@@ -50,10 +50,10 @@ function move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::Base
     to[] = from[]
     return
 end
-function move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::AbstractArray{T,N}, from::AbstractArray{T,N}) where {T,N}
+function move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::AbstractArray{T,N}, from::AbstractArray{S,N}) where {T,S,N}
     move!(to_space, from_space, dep_mod(to), dep_mod(from))
 end
-function move!(to_space::MemorySpace, from_space::MemorySpace, to::AbstractArray{T,N}, from::AbstractArray{T,N}) where {T,N}
+function move!(to_space::MemorySpace, from_space::MemorySpace, to::AbstractArray{T,N}, from::AbstractArray{S,N}) where {T,S,N}
     copyto!(to, from)
     return
 end
@@ -227,7 +227,7 @@ struct IteratedAliasing{T} <: AbstractAliasing
     x::T
 end
 function aliasing(x::Array{T}) where T
-    if isbitstype(T)
+    if isbitstype(T) || !type_may_alias(T)
         S = CPURAMMemorySpace
         return ContiguousAliasing(MemorySpan{S}(pointer(x), sizeof(T)*length(x)))
     else
@@ -273,12 +273,15 @@ function _memory_spans(a::StridedAliasing{T,N,S}, spans, ptr, dim) where {T,N,S}
     return spans
 end
 function aliasing(x::SubArray{T,N,A}) where {T,N,A<:Array}
-    if isbitstype(T)
+    if isbitstype(T) || !type_may_alias(T)
         S = CPURAMMemorySpace
-        return StridedAliasing{T,ndims(x),S}(RemotePtr{Cvoid}(pointer(parent(x))),
+        sz = N > 0 ? size(x) : ntuple(_->1, ndims(parent(x)))
+        nd = N > 0 ? ndims(x) : ndims(parent(x))
+        pi = N > 0 ? parentindices(x) : ntuple(_->Base.OneTo(1), ndims(parent(x)))
+        return StridedAliasing{T,nd,S}(RemotePtr{Cvoid}(pointer(parent(x))),
                                              RemotePtr{Cvoid}(pointer(x)),
-                                             parentindices(x),
-                                             size(x), strides(parent(x)))
+                                             pi,
+                                             sz, strides(parent(x)))
     else
         # FIXME: Also ContiguousAliasing of container
         #return IteratedAliasing(x)
