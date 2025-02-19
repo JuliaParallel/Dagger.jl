@@ -268,8 +268,11 @@ struct DataDepsState{State<:Union{DataDepsAliasingState,DataDepsNonAliasingState
     # The ordered list of tasks and their read/write dependencies
     dependencies::Vector{Pair{DTask,Vector{Tuple{Bool,Bool,<:AbstractAliasing,<:Any,<:Any}}}}
 
-    # The mapping of memory space to remote argument copies
-    remote_args::Dict{MemorySpace,IdDict{Any,Any}}
+    # The set of allocated buffers of each kind in each memory space
+    alloc_bufs::Dict{MemorySpace,Dict{AbstractStructure,Vector{Chunk}}}
+
+    # The cache of raw data to a Chunk wrapping it
+    data_to_chunk::IdDict{Any,Chunk}
 
     # The aliasing analysis state
     alias_state::State
@@ -279,14 +282,15 @@ struct DataDepsState{State<:Union{DataDepsAliasingState,DataDepsNonAliasingState
 
     function DataDepsState(aliasing::Bool, all_procs::Vector{Processor})
         dependencies = Pair{DTask,Vector{Tuple{Bool,Bool,<:AbstractAliasing,<:Any,<:Any}}}[]
-        remote_args = Dict{MemorySpace,IdDict{Any,Any}}()
+        alloc_bufs = Dict{MemorySpace,Dict{AbstractStructure,Vector{Chunk}}}()
+        data_to_chunk = IdDict{Any,Chunk}()
         if aliasing
             state = DataDepsAliasingState()
         else
             state = DataDepsNonAliasingState()
         end
         spec = DAGSpec()
-        return new{typeof(state)}(aliasing, all_procs, dependencies, remote_args, state, spec)
+        return new{typeof(state)}(aliasing, all_procs, dependencies, alloc_bufs, data_to_chunk, state, spec)
     end
 end
 
@@ -553,22 +557,60 @@ function add_reader!(state::DataDepsState{DataDepsNonAliasingState}, arg, task, 
     push!(state.alias_state.args_readers[arg], task=>write_num)
 end
 
-# Make a copy of each piece of data on each worker
-# memory_space => {arg => copy_of_arg}
-function generate_slot!(state::DataDepsState, dest_space, data)
+# Get a buffer for a given piece of data in a given space
+# FIXME: allocate is a terrible name
+function get_buffer!(state::DataDepsState, dest_space, data; allocate::Bool=true)
+    @nospecialize dest_space data
+
+    astate = state.alias_state
+
+    # Get the structure of this data
+    data_struct = memory_structure(data)
+
+    # Get the data as a Chunk
     if data isa DTask
         data = fetch(data; raw=true)
     end
-    orig_space = memory_space(data)
+    if !(data isa Chunk)
+        data = get!(state.data_to_chunk, data) do
+            tochunk(data)
+        end
+    end
+
+    # Lookup the allocated buffers for this destination
+    dest_bufs = get!(Dict{AbstractStructure,Vector{Chunk}}, state.alloc_bufs, dest_space)
+
+    # Check where the data currently resides
+    data_space, data_buf_idx = astate.data_locality[data]
+    _, data_origin = astate.data_origin[data]
+    if data_space == dest_space
+        # Data is already in dest_space
+        if data_buf_idx == 0
+            # Data is in its origin
+            buf = data
+        else
+            # Data is in a buffer
+            buf = dest_bufs[data_struct][data_buf_idx]
+        end
+        @assert processor(buf) in processors(dest_space) || processor(buf) isa Dagger.OSProc
+        @assert memory_space(buf) == data_space
+        return buf
+    end
+
+    @assert allocate "Allocation was disabled by caller"
+
+    # Data is not in dest_space, so we need to find a buffer
+    # FIXME: Check if we have enough space for another buffer
+    # FIXME: We should have already created these during scheduling
+    compatible_bufs = get!(Vector{Chunk}, dest_bufs, data_struct)
     to_proc = first(processors(dest_space))
-    from_proc = first(processors(orig_space))
-    dest_space_args = get!(IdDict{Any,Any}, state.remote_args, dest_space)
-    if orig_space == dest_space
-        data_chunk = tochunk(data, from_proc)
-        dest_space_args[data] = data_chunk
-        @assert processor(data_chunk) in processors(dest_space) || data isa Chunk && processor(data) isa Dagger.OSProc
-        @assert memory_space(data_chunk) == orig_space
+    from_proc = first(processors(data_space))
+    if !isempty(compatible_bufs)
+        # FIXME: Find the most suitable buffer
+        buf = first(compatible_bufs)
+        return buf
     else
+        # Attempt to generate a new buffer
         w = only(unique(map(get_parent, collect(processors(dest_space))))).pid
         ctx = Sch.eager_context()
         id = rand(Int)
@@ -577,13 +619,13 @@ function generate_slot!(state::DataDepsState, dest_space, data)
             data_converted = move(from_proc, to_proc, data)
             data_chunk = tochunk(data_converted, to_proc)
             @assert processor(data_chunk) in processors(dest_space)
-            @assert memory_space(data_converted) == memory_space(data_chunk) "space mismatch! $(memory_space(data_converted)) != $(memory_space(data_chunk)) ($(typeof(data_converted)) vs. $(typeof(data_chunk))), spaces ($orig_space -> $dest_space)"
-            @assert orig_space != memory_space(data_chunk) "space preserved! $orig_space != $(memory_space(data_chunk)) ($(typeof(data)) vs. $(typeof(data_chunk))), spaces ($orig_space -> $dest_space)"
+            @assert memory_space(data_converted) == memory_space(data_chunk) "space mismatch! $(memory_space(data_converted)) != $(memory_space(data_chunk)) ($(typeof(data_converted)) vs. $(typeof(data_chunk))), spaces ($data_space -> $dest_space)"
+            @assert data_space != memory_space(data_chunk) "space preserved! $data_space != $(memory_space(data_chunk)) ($(typeof(data)) vs. $(typeof(data_chunk))), spaces ($data_space -> $dest_space)"
             return data_chunk
         end
-        timespan_finish(ctx, :move, (;thunk_id=0, id, position=0, processor=to_proc), (;f=nothing, data=dest_space_args[data]))
+        timespan_finish(ctx, :move, (;thunk_id=0, id, position=0, processor=to_proc), (;f=nothing, data=buf))
+        return buf
     end
-    return dest_space_args[data]
 end
 
 struct RoundRobinScheduler end
@@ -739,9 +781,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             end
 
             # Is the source of truth elsewhere?
-            arg_remote = get!(get!(IdDict{Any,Any}, state.remote_args, our_space), arg) do
-                generate_slot!(state, our_space, arg)
-            end
+            arg_remote = get_buffer!(state, our_space, arg)
             if queue.aliasing
                 for (dep_mod, _, _) in deps
                     ainfo = aliasing(astate, arg, dep_mod)
@@ -750,9 +790,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                     if nonlocal
                         # Add copy-to operation (depends on latest owner of arg)
                         @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] Enqueueing copy-to: $data_space => $our_space"
-                        arg_local = get!(get!(IdDict{Any,Any}, state.remote_args, data_space), arg) do
-                            generate_slot!(state, data_space, arg)
-                        end
+                        arg_local = get_buffer!(state, data_space, arg)
                         copy_to_scope = our_scope
                         copy_to_syncdeps = Set{Any}()
                         get_write_deps!(state, ainfo, task, write_num, copy_to_syncdeps)
@@ -771,9 +809,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 if nonlocal
                     # Add copy-to operation (depends on latest owner of arg)
                     @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Enqueueing copy-to: $data_space => $our_space"
-                    arg_local = get!(get!(IdDict{Any,Any}, state.remote_args, data_space), arg) do
-                        generate_slot!(state, data_space, arg)
-                    end
+                    arg_local = get_buffer!(state, data_space, arg)
                     copy_to_scope = our_scope
                     copy_to_syncdeps = Set{Any}()
                     get_write_deps!(state, arg, task, write_num, copy_to_syncdeps)
@@ -914,10 +950,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 if data_local_space != data_remote_space
                     # Add copy-from operation
                     @dagdebug nothing :spawn_datadeps "[$dep_mod] Enqueueing copy-from: $data_remote_space => $data_local_space"
-                    arg_local = get!(get!(IdDict{Any,Any}, state.remote_args, data_local_space), arg) do
-                        generate_slot!(state, data_local_space, arg)
-                    end
-                    arg_remote = state.remote_args[data_remote_space][arg]
+                    arg_local = get_buffer!(state, data_local_space, arg)
+                    arg_remote = get_buffer!(state, data_remote_space, arg; allocate=false)
                     @assert arg_remote !== arg_local
                     data_local_proc = first(processors(data_local_space))
                     copy_from_scope = UnionScope(map(ExactScope, collect(processors(data_local_space)))...)
@@ -944,8 +978,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             if data_local_space != data_remote_space
                 # Add copy-from operation
                 @dagdebug nothing :spawn_datadeps "Enqueueing copy-from: $data_remote_space => $data_local_space"
-                arg_local = state.remote_args[data_local_space][arg]
-                arg_remote = state.remote_args[data_remote_space][arg]
+                arg_local = get_buffer!(state, data_local_space, arg; allocate=false)
+                arg_remote = get_buffer!(state, data_remote_space, arg; allocate=false)
                 @assert arg_remote !== arg_local
                 data_local_proc = first(processors(data_local_space))
                 copy_from_scope = ExactScope(data_local_proc)

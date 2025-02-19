@@ -8,6 +8,7 @@ end
 
 using Dagger
 using Dagger.Distributed
+using Dagger.MemPool
 import MetricsTracker as MT
 import Graphs: edges, nv, outdegree
 
@@ -143,8 +144,55 @@ function Dagger.datadeps_create_schedule(sched::JuMPScheduler, state, specs_task
         @constraint(m, t[l] + task_times[l, :]' * s[l, :] <= t_last_end)
     end
 
+    # Lookup the capacities of all memory spaces
+    space_capacity = Dict{Dagger.MemorySpace, UInt64}()
+    for space in state.all_spaces
+        device = Dagger.storage_device(space)
+        space_capacity[space] = MemPool.storage_capacity(device)
+    end
+
+    # Generate a cache of processor=>space and space=>processor
+    proc_to_spaces = Dict{Dagger.Processor, Vector{Dagger.MemorySpace}}()
+    space_to_procs = Dict{Dagger.MemorySpace, Vector{Dagger.Processor}}()
+    for proc in state.all_procs
+        spaces = Dagger.memory_spaces(proc)
+        for space in spaces
+            push!(get!(Vector{Dagger.MemorySpace}, proc_to_spaces, proc), space)
+            push!(get!(Vector{Dagger.Processor}, space_to_procs, space), proc)
+        end
+    end
+
+    # Get task argument sizes
+    task_arg_sizes = Vector{Vector{UInt64}}()
+    for (spec, task) in specs_tasks
+        arg_sizes = UInt64[]
+        for arg in spec.fargs
+            value = Dagger.value(arg)
+            if value isa DTask
+                value = Dagger.fetch(value; raw=true)
+            end
+            size = value isa Dagger.Chunk ? value.handle.size : MemPool.approx_size(value)
+            push!(arg_sizes, size)
+        end
+        push!(task_arg_sizes, arg_sizes)
+    end
+
+    # FIXME: Variable for each task, for each arg, indicating whether to allocate or reuse
+
+    # FIXME: Constraint limiting processor choice if reusing
+
+    # FIXME: Calculate the memory allocated total per task?
+
+    # FIXME: Calculate how many new allocations will be made per task
+
+    # FIXME: (Optional) Calculate the time cost of the alloction
+
+    # FIXME: Limit the max memory utilized per task to within capacity
+    @constraint(m, 
+
     # Minimize the total runtime of the DAG
     # TODO: Do we need to bias towards earlier start times?
+    # FIXME: Impose penalty on many tasks assigned to same processor during overlapping time periods
     @objective(m, Min, sched.Z*t_last_end + sum(t) .+ sum(p))
 
     # Solve the model

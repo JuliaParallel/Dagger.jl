@@ -117,10 +117,18 @@ end
 MemorySpan(ptr::RemotePtr{Cvoid,S}, len::Integer) where S =
     MemorySpan{S}(ptr, UInt(len))
 
+struct StructureSpan
+    len::UInt
+end
+Base.convert(::Type{StructureSpan}, span::MemorySpan) =
+    StructureSpan(span.len)
+
 abstract type AbstractAliasing end
 memory_spans(::T) where T<:AbstractAliasing = throw(ArgumentError("Must define `memory_spans` for `$T`"))
 memory_spans(x) = memory_spans(aliasing(x))
 memory_spans(x, T) = memory_spans(aliasing(x, T))
+
+abstract type AbstractStructure end
 
 struct NoAliasing <: AbstractAliasing end
 memory_spans(::NoAliasing) = MemorySpan{CPURAMMemorySpace}[]
@@ -222,7 +230,12 @@ aliasing(x::DTask) = aliasing(fetch(x; raw=true))
 struct ContiguousAliasing{S} <: AbstractAliasing
     span::MemorySpan{S}
 end
+struct ContiguousStructure <:AbstractStructure
+    span::StructureSpan
+end
 memory_spans(a::ContiguousAliasing{S}) where S = MemorySpan{S}[a.span]
+memory_structure(a::ContiguousAliasing) = ContiguousStructure(a.span)
+
 struct IteratedAliasing{T} <: AbstractAliasing
     x::T
 end
