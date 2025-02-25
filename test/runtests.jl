@@ -32,6 +32,7 @@ tests = [
     ("Array - LinearAlgebra - LU", "array/linalg/lu.jl"),
     ("Array - Random", "array/random.jl"),
     ("Array - Stencils", "array/stencil.jl"),
+    ("Array - FFT", "array/fft.jl"),
     ("GPU", "gpu.jl"),
     ("Caching", "cache.jl"),
     ("Disk Caching", "diskcaching.jl"),

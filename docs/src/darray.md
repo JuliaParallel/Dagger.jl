@@ -447,3 +447,7 @@ From `LinearAlgebra`:
 - `mul!` (In-place Matrix-Matrix multiply)
 - `cholesky`/`cholesky!` (In-place/Out-of-place Cholesky factorization)
 - `lu`/`lu!` (In-place/Out-of-place LU factorization (`NoPivot` only))
+
+From `AbstractFFTs`:
+- `fft`/`fft!`
+- `ifft`/`ifft!`
