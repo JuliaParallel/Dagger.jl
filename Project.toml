@@ -3,6 +3,7 @@ uuid = "d58978e5-989f-55fb-8d15-ea34adc7bf54"
 version = "0.18.14"
 
 [deps]
+AbstractFFTs = "621f4979-c628-5d54-868e-fcf4e3e8185c"
 Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
 DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
 Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
@@ -48,6 +49,7 @@ PlotsExt = ["DataFrames", "Plots"]
 PythonExt = "PythonCall"
 
 [compat]
+AbstractFFTs = "1.5.0"
 Adapt = "4.0.4"
 Colors = "0.12, 0.13"
 DataFrames = "1"

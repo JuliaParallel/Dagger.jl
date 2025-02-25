@@ -115,6 +115,7 @@ include("array/linalg.jl")
 include("array/mul.jl")
 include("array/cholesky.jl")
 include("array/lu.jl")
+include("array/fft.jl")
 
 # Logging
 include("utils/logging-events.jl")
