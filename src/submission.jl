@@ -76,6 +76,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
         end
         for (idx, dep) in enumerate(syncdeps)
             newdep = if dep isa DTask
+                @assert dep.uid != uid "Cannot depend on self"
                 tid = if haskey(id_map, dep.uid)
                     id_map[dep.uid]
                 else
@@ -83,6 +84,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
                 end
                 state.thunk_dict[tid]
             elseif dep isa Sch.ThunkID
+                @assert dep.id != id "Cannot depend on self"
                 tid = dep.id
                 state.thunk_dict[tid]
             else
@@ -240,6 +242,8 @@ end
 chunktype(t::DTask) = t.metadata.return_type
 
 function eager_launch!((spec, task)::Pair{DTaskSpec,DTask})
+    @assert !istaskstarted(task) "Cannot launch a task that is already started"
+
     # Assign a name, if specified
     eager_assign_name!(spec, task)
 
@@ -261,6 +265,7 @@ function eager_launch!(specs::Vector{Pair{DTaskSpec,DTask}})
 
     # Assign a name, if specified
     for (spec, task) in specs
+        @assert !istaskstarted(task) "Cannot launch a task that is already started"
         eager_assign_name!(spec, task)
     end
 
