@@ -130,7 +130,7 @@ struct DAGSpec
                     Dict{Int, Type}(),
                     Dict{Int, Vector{DatadepsArgSpec}}())
 end
-function dag_add_task!(dspec::DAGSpec, tspec::DTaskSpec, task::DTask)
+function dag_add_task!(dspec::DAGSpec, astate, tspec::DTaskSpec, task::DTask)
     # Check if this task depends on any other tasks within the DAG,
     # which we are not yet ready to handle
     for (idx, (kwpos, arg)) in enumerate(tspec.args)
@@ -170,7 +170,7 @@ function dag_add_task!(dspec::DAGSpec, tspec::DTaskSpec, task::DTask)
                 # External DTask, so fetch this and track it as a raw value
                 arg = fetch(arg; raw=true)
             end
-            ainfo = aliasing(arg, dep_mod)
+            ainfo = aliasing(astate, arg, dep_mod)
             push!(argtypes, DatadepsArgSpec(pos, typeof(arg), dep_mod, ainfo))
         end
     end
@@ -214,10 +214,7 @@ function Base.:(==)(dspec1::DAGSpec, dspec2::DAGSpec)
             # Are the arguments the same?
             argspec1.value_type === argspec2.value_type || return false
             argspec1.dep_mod === argspec2.dep_mod || return false
-            if !equivalent_structure(argspec1.ainfo, argspec2.ainfo)
-                @show argspec1.ainfo argspec2.ainfo
-                return false
-            end
+            equivalent_structure(argspec1.ainfo, argspec2.ainfo) || return false
         end
     end
 
@@ -534,7 +531,7 @@ function populate_return_info!(state::DataDepsState{DataDepsNonAliasingState}, t
     astate.data_locality[task] = space
     astate.data_origin[task] = space
 end
-function clear_ainfo_owner_readers!(astate::DataDepsAliasingState)
+function reset_ainfo_owner_readers!(astate::DataDepsAliasingState)
     for ainfo in keys(astate.ainfos_owner)
         astate.ainfos_owner[ainfo] = nothing
         empty!(astate.ainfos_readers[ainfo])
@@ -720,19 +717,19 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
     schedule = Dict{DTask, Processor}()
 
-    if DATADEPS_SCHEDULE_REUSABLE[]
-        # Compute DAG spec
-        for (spec, task) in queue.seen_tasks
-            if !dag_add_task!(state.dag_spec, spec, task)
-                # This task needs to be deferred
-                break
-            end
+    # Compute DAG spec
+    for (spec, task) in queue.seen_tasks
+        if !dag_add_task!(state.dag_spec, astate, spec, task)
+            # This task needs to be deferred
+            break
         end
+    end
 
+    if DATADEPS_SCHEDULE_REUSABLE[]
         # Find any matching DAG specs and reuse their schedule
         for (other_spec, spec_schedule) in DAG_SPECS
             if other_spec == state.dag_spec
-                @info "Found matching DAG spec!"
+                @dagdebug nothing :spawn_datadeps "Found matching DAG spec!"
                 #spec_schedule = DAG_SCHEDULE_CACHE[other_spec]
                 schedule = Dict{DTask, Processor}()
                 for (id, proc) in spec_schedule.id_to_proc
@@ -775,8 +772,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         end
     end
 
-    # Clear out ainfo database (will be repopulated during task execution)
-    clear_ainfo_owner_readers!(astate)
+    # Reset ainfo database (will be repopulated during task execution)
+    reset_ainfo_owner_readers!(astate)
 
     # Launch tasks and necessary copies
     write_num = 1
