@@ -1057,37 +1057,21 @@ returned from `spawn_datadeps`.
 """
 function spawn_datadeps(f::Base.Callable; static::Bool=true,
                         scheduler=nothing,
-                        aliasing::Bool=true,
-                        launch_wait::Union{Bool,Nothing}=nothing)
+                        aliasing::Bool=true)
     if !static
         throw(ArgumentError("Dynamic scheduling is no longer available"))
     end
-    wait_all(; check_errors=true) do
-        scheduler = something(scheduler, DATADEPS_SCHEDULER[], RoundRobinScheduler())
-        launch_wait = something(launch_wait, DATADEPS_LAUNCH_WAIT[], false)::Bool
-        local result
-        if launch_wait
-            spawn_bulk() do
-                queue = DataDepsTaskQueue(get_options(:task_queue);
-                                          scheduler, aliasing)
-                result = with_options(f; task_queue=queue)
-                while !isempty(queue.seen_tasks)
-                    @dagdebug nothing :spawn_datadeps "Entering Datadeps region"
-                    distribute_tasks!(queue)
-                end
-            end
-        else
-            queue = DataDepsTaskQueue(get_options(:task_queue);
-                                      scheduler, aliasing)
-            result = with_options(f; task_queue=queue)
-            while !isempty(queue.seen_tasks)
-                @dagdebug nothing :spawn_datadeps "Entering Datadeps region"
-                distribute_tasks!(queue)
-            end
+    scheduler = something(scheduler, DATADEPS_SCHEDULER[], RoundRobinScheduler())
+    queue = DataDepsTaskQueue(get_options(:task_queue, DefaultTaskQueue());
+                                scheduler, aliasing)
+    result = with_options(f; task_queue=queue)
+    while !isempty(queue.seen_tasks)
+        wait_all(; check_errors=true) do
+            @dagdebug nothing :spawn_datadeps "Entering Datadeps region"
+            distribute_tasks!(queue)
         end
-        return result
     end
+    return result
 end
 const DATADEPS_SCHEDULER = ScopedValue{Any}(nothing)
 const DATADEPS_SCHEDULE_REUSABLE = ScopedValue{Bool}(true)
-const DATADEPS_LAUNCH_WAIT = ScopedValue{Union{Bool,Nothing}}(nothing)
