@@ -20,6 +20,7 @@ struct Deps{T,DT<:Tuple}
     deps::DT
 end
 Deps(x, deps...) = Deps(x, deps)
+
 "Specifies a data format modifier."
 struct Modify{T,M}
     x::T
@@ -39,9 +40,13 @@ modify_data(x, ::NoModifier) = x
 
 struct FloatingPointModifier{T<:AbstractFloat} <: AbstractFormatModifier end
 FloatingPointModifier(T) = FloatingPointModifier{T}()
-modify_data(A::AbstractArray, mod::FloatingPointModifier{T}) where T =
-    convert.(T, A)
-modify_data(x::Real, mod::FloatingPointModifier{T}) where T = T(x)
+function modify_data(A::AbstractArray, ::FloatingPointModifier{T}) where T
+    if eltype(A) <: T
+        return A
+    end
+    return convert.(T, A)
+end
+modify_data(x::Real, ::FloatingPointModifier{T}) where T = T(x)
 
 struct DataDepsTaskQueue <: AbstractTaskQueue
     # The queue above us
