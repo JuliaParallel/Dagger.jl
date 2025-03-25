@@ -197,6 +197,24 @@ const DAG_SPECS = Vector{Pair{DAGSpec, DAGSpecSchedule}}()
 
 #const DAG_SCHEDULE_CACHE = Dict{DAGSpec, DAGSpecSchedule}()
 
+_identity_hash(arg, h::UInt=UInt(0)) = ismutable(arg) ? objectid(arg) : hash(arg, h)
+_identity_hash(arg::SubArray, h::UInt=UInt(0)) = hash(arg.indices, hash(arg.offset1, hash(arg.stride1, _identity_hash(arg.parent, h))))
+
+struct ArgumentWrapper
+    arg
+    dep_mod
+    hash::UInt
+
+    function ArgumentWrapper(arg, dep_mod)
+        h = hash(dep_mod)
+        h = _identity_hash(arg, h)
+        return new(arg, dep_mod, h)
+    end
+end
+Base.hash(aw::ArgumentWrapper) = hash(ArgumentWrapper, aw.hash)
+Base.:(==)(aw1::ArgumentWrapper, aw2::ArgumentWrapper) =
+    aw1.hash == aw2.hash
+
 struct DataDepsAliasingState
     # Track original and current data locations
     # We track data => space
@@ -214,7 +232,7 @@ struct DataDepsAliasingState
     task_to_id::IdDict{DTask,Int}
 
     # Cache ainfo lookups
-    ainfo_cache::Dict{Tuple{Any,Any},AliasingWrapper}
+    ainfo_cache::Dict{ArgumentWrapper,AliasingWrapper}
 
     function DataDepsAliasingState()
         data_origin = Dict{AliasingWrapper,MemorySpace}()
@@ -227,7 +245,7 @@ struct DataDepsAliasingState
         g = SimpleDiGraph()
         task_to_id = IdDict{DTask,Int}()
 
-        ainfo_cache = Dict{Tuple{Any,Any},AliasingWrapper}()
+        ainfo_cache = Dict{ArgumentWrapper,AliasingWrapper}()
 
         return new(data_origin, data_locality,
                    ainfos_owner, ainfos_readers, ainfos_overlaps,
@@ -292,7 +310,8 @@ struct DataDepsState{State<:Union{DataDepsAliasingState,DataDepsNonAliasingState
 end
 
 function aliasing(astate::DataDepsAliasingState, arg, dep_mod)
-    return get!(astate.ainfo_cache, (arg, dep_mod)) do
+    aw = ArgumentWrapper(arg, dep_mod)
+    get!(astate.ainfo_cache, aw) do
         return AliasingWrapper(aliasing(arg, dep_mod))
     end
 end
