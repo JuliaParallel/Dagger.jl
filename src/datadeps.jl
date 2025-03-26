@@ -611,20 +611,38 @@ end
 
 # Make a copy of each piece of data on each worker
 # memory_space => {arg => copy_of_arg}
-function generate_slot!(state::DataDepsState, dest_space, data, format_mod)
+function generate_slot!(state::DataDepsState, dest_space, data, dep_mod, format_mod)
+    # Unwrap DTask arguments
     if data isa DTask
         data = fetch(data; raw=true)
     end
-    orig_space = memory_space(data)
-    to_proc = first(processors(dest_space))
+
+    # Find the currently-owned data
+    astate = state.alias_state
+    ainfo = aliasing(astate, data, dep_mod)
+    orig_space = astate.data_origin[ainfo]
+    source_format = astate.data_format[ainfo]
+    if !haskey(state.remote_args, orig_space) || !haskey(state.remote_args[orig_space], data) || !haskey(state.remote_args[orig_space][data], source_format)
+        source_data = data
+        source_space = orig_space
+    else
+        source_space = astate.data_locality[ainfo]
+        source_data = state.remote_args[source_space][data][source_format]
+    end
+
     from_proc = first(processors(orig_space))
+    to_proc = first(processors(dest_space))
     dest_space_args = get!(Dict{AbstractFormatModifier,Any}, get!(IdDict{Any,Dict{AbstractFormatModifier,Any}}, state.remote_args, dest_space), data)
+
+    # Copy the data from the source to the destination
     if orig_space == dest_space
+        # Data is already on the destination processor
         data_chunk = tochunk(modify_data_unwrap(data, format_mod), from_proc)
         dest_space_args[format_mod] = data_chunk
         @assert processor(data_chunk) in processors(dest_space) || data isa Chunk && processor(data) isa Dagger.OSProc
         @assert memory_space(data_chunk) == orig_space
     else
+        # Data is on a different processor
         w = only(unique(map(get_parent, collect(processors(dest_space))))).pid
         ctx = Sch.eager_context()
         id = rand(Int)
@@ -634,14 +652,14 @@ function generate_slot!(state::DataDepsState, dest_space, data, format_mod)
             data_chunk = tochunk(data_converted, to_proc)
             @assert processor(data_chunk) in processors(dest_space)
             @assert memory_space(data_converted) == memory_space(data_chunk) "space mismatch! $(memory_space(data_converted)) != $(memory_space(data_chunk)) ($(typeof(data_converted)) vs. $(typeof(data_chunk))), spaces ($orig_space -> $dest_space)"
-            @assert orig_space != memory_space(data_chunk) "space preserved! $orig_space != $(memory_space(data_chunk)) ($(typeof(data)) vs. $(typeof(data_chunk))), spaces ($orig_space -> $dest_space)"
+            @assert source_space != memory_space(data_chunk) "space preserved! $source_space != $(memory_space(data_chunk)) ($(typeof(data)) vs. $(typeof(data_chunk))), spaces ($orig_space -> $dest_space)"
             return data_chunk
         end
         timespan_finish(ctx, :move, (;thunk_id=0, id, position=0, processor=to_proc), (;f=nothing, data=dest_space_args[data]))
     end
     return dest_space_args[format_mod]
 end
-function get_or_generate_slot!(state::DataDepsState, dest_space::MemorySpace, data, format_mod)
+function get_or_generate_slot!(state::DataDepsState, dest_space::MemorySpace, data, dep_mod, format_mod)
     if !haskey(state.remote_args, dest_space)
         state.remote_args[dest_space] = IdDict{Any,Dict{AbstractFormatModifier,Any}}()
     end
@@ -649,7 +667,7 @@ function get_or_generate_slot!(state::DataDepsState, dest_space::MemorySpace, da
         state.remote_args[dest_space][data] = Dict{AbstractFormatModifier,Any}()
     end
     if !haskey(state.remote_args[dest_space][data], format_mod)
-        return generate_slot!(state, dest_space, data, format_mod)
+        return generate_slot!(state, dest_space, data, dep_mod, format_mod)
     end
     return state.remote_args[dest_space][data][format_mod]
 end
@@ -810,7 +828,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             end
 
             # Is the source of truth elsewhere?
-            arg_remote = get_or_generate_slot!(state, our_space, arg, format_mod)
+            arg_remote = get_or_generate_slot!(state, our_space, arg, identity, format_mod)
             if queue.aliasing
                 for (dep_mod, _, _) in deps
                     ainfo = aliasing(astate, arg, dep_mod)
@@ -820,7 +838,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                     if nonlocal
                         # Add copy-to operation (depends on latest owner of arg)
                         @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] Enqueueing copy-to: $data_space[$data_format] => $our_space[$format_mod]"
-                        arg_local = get_or_generate_slot!(state, data_space, arg, format_mod)
+                        arg_local = get_or_generate_slot!(state, data_space, arg, dep_mod, format_mod)
                         copy_to_scope = our_scope
                         copy_to_syncdeps = Set{Any}()
                         get_write_deps!(state, ainfo, task, write_num, copy_to_syncdeps)
@@ -841,7 +859,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 if nonlocal
                     # Add copy-to operation (depends on latest owner of arg)
                     @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Enqueueing copy-to: $data_space[$data_format] => $our_space[$format_mod]"
-                    arg_local = get_or_generate_slot!(state, data_space, arg, format_mod)
+                    arg_local = get_or_generate_slot!(state, data_space, arg, identity, format_mod)
                     copy_to_scope = our_scope
                     copy_to_syncdeps = Set{Any}()
                     get_write_deps!(state, arg, task, write_num, copy_to_syncdeps)
@@ -983,7 +1001,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 if data_local_space != data_remote_space || data_remote_format != NoModifier()
                     # Add copy-from operation
                     @dagdebug nothing :spawn_datadeps "[$dep_mod] Enqueueing copy-from: $data_remote_space[$data_remote_format] => $data_local_space[NoModifier()]"
-                    arg_local = get_or_generate_slot!(state, data_local_space, arg, NoModifier())
+                    arg_local = get_or_generate_slot!(state, data_local_space, arg, dep_mod, NoModifier())
                     arg_remote = state.remote_args[data_remote_space][arg][data_remote_format]
                     @assert arg_remote !== arg_local
                     data_local_proc = first(processors(data_local_space))
