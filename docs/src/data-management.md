@@ -41,7 +41,7 @@ argument to a task, the task will be forced to execute on the same worker that
 `@mutable` was called on. For example:
 
 ```julia
-Dagger.@mutable worker=2 Threads.Atomic{Int}(0)
+x = Dagger.@mutable worker=2 Threads.Atomic{Int}(0)
 x::Dagger.Chunk # The result is always a `Chunk`
 
 # x is now considered mutable, and may only be accessed on worker 2:
