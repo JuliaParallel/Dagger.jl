@@ -102,7 +102,7 @@ include("array/mul.jl")
 include("array/cholesky.jl")
 include("array/lu.jl")
 include("array/random.jl")
-include("fft.jl")
+include("array/fft.jl")
 
 # Logging and Visualization
 include("visualization.jl")
