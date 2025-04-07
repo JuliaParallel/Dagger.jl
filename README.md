@@ -106,17 +106,18 @@ For help and discussion, we suggest asking in the following places:
 
 ## References
 ```bibtex
-@article{dagger1,
-  title={{{Dynamic Task Scheduling with Data Dependency Awareness Using Julia}},
+@inproceedings{alomairy2024dynamic,
+  title={Dynamic Task Scheduling with Data Dependency Awareness Using Julia},
   author={Alomairy, Rabab and Tome, Felipe and Samaroo, Julian and Edelman, Alan},
-  pages={1--6},
+  booktitle={2024 IEEE High Performance Extreme Computing Conference (HPEC)},
+  pages={1--7},
   year={2024},
-  publisher={MIT Open Access Articles}
+  organization={IEEE}
 }
 ```
 ```bibtex
 @article{dagger2,
-  title={{{Efficient Dynamic Task Scheduling in Heterogeneous Environments with Julia}},
+  title={Efficient Dynamic Task Scheduling in Heterogeneous Environments with Julia},
   author={Samaroo, Julian and Alomairy, Rabab and  and Giordano, Mose and Edelman, Alan},
   year={2024},
   publisher={MIT Open Access Articles}
