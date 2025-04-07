@@ -448,6 +448,7 @@ function generate_slot!(state::DataDepsState, dest_space, data, task)
     from_proc = first(processors(orig_space))
     dest_space_args = get!(IdDict{Any,Any}, state.remote_args, dest_space)
     w = only(unique(map(get_parent, collect(processors(dest_space)))))
+    accel = current_acceleration()
     if orig_space == dest_space
         data_chunk = tochunk(data, from_proc, dest_space)
         dest_space_args[data] = data_chunk
@@ -457,12 +458,12 @@ function generate_slot!(state::DataDepsState, dest_space, data, task)
         ctx = Sch.eager_context()
         id = rand(Int)
         timespan_start(ctx, :move, (;thunk_id=0, id, position=0, processor=to_proc), (;f=nothing, data))
-        dest_space_args[data] = remotecall_endpoint(current_acceleration(), w, from_proc, to_proc, orig_space, dest_space, data, task)
+        dest_space_args[data] = remotecall_endpoint(accel, w, from_proc, to_proc, orig_space, dest_space, data, task)
         timespan_finish(ctx, :move, (;thunk_id=0, id, position=0, processor=to_proc), (;f=nothing, data=dest_space_args[data]))
     end
-    check_uniform(memory_space(dest_space_args[data]))
-    check_uniform(processor(dest_space_args[data]))
-    check_uniform(dest_space_args[data].handle)
+    check_uniform(accel, memory_space(dest_space_args[data]))
+    check_uniform(accel, processor(dest_space_args[data]))
+    check_uniform(accel, dest_space_args[data].handle)
     return dest_space_args[data]
 end
 
@@ -514,7 +515,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         @warn "Datadeps support for multi-GPU, multi-worker is currently broken\nPlease be prepared for incorrect results or errors" maxlog=1
     end=#
     for proc in all_procs
-        check_uniform(proc)
+        check_uniform(accel, proc)
     end
 
     # Round-robin assign tasks to processors
@@ -711,8 +712,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         our_space = only(memory_spaces(our_proc))
         our_procs = filter(proc->proc in all_procs, collect(processors(our_space)))
         our_scope = UnionScope(map(ExactScope, our_procs)...)
-        check_uniform(our_proc)
-        check_uniform(our_space)
+        check_uniform(accel, our_proc)
+        check_uniform(accel, our_space)
 
         # FIXME: May not be correct to move this under uniformity
         spec.f = move(default_processor(), our_proc, spec.f)

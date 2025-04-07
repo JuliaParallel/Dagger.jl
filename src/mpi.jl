@@ -4,6 +4,8 @@ const CHECK_UNIFORMITY = TaskLocalValue{Bool}(()->false)
 function check_uniformity!(check::Bool=true)
     CHECK_UNIFORMITY[] = check
 end
+check_uniform(accel::MPIAcceleration, value) = check_uniform(value)
+check_uniform(accel::DistributedAcceleration, value) = nothing
 function check_uniform(value::Integer)
     CHECK_UNIFORMITY[] || return
     comm = MPI.COMM_WORLD
