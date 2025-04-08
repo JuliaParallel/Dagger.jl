@@ -29,22 +29,33 @@ apply_fft!(inout_part, transform, dim) = apply_fft!(inout_part, inout_part, tran
 
 # 3D out of place
 function fft(input::AbstractArray{T,3}, dims=(1, 2, 3); decomp::Decomposition=Pencil()) where T
-    N = size(input, 1)
-    np = length(Dagger.compatible_processors())
     if decomp isa Pencil
-        A = DArray(input, Blocks(N, div(N, np), div(N, np)))
-        B = zeros(Blocks(div(N, np), N, div(N, np)), size(input))
-        C = zeros(Blocks(div(N, np), div(N, np), N), size(input))
+        A, B, C = _fft_prealloc(decomp, input)
         _fft!(decomp, input, A, B, C; dims)
         return C
     elseif decomp isa Slab
-        A = DArray(input, Blocks(N, N, div(N, np)))
-        B = zeros(Blocks(div(N, np), N, N), size(input))
+        A, B = _fft_prealloc(decomp, input)
         _fft!(decomp, input, A, B; dims)
         return B
     else
         throw(ArgumentError("Unknown decomposition type: $decomp"))
     end
+end
+
+function _fft_prealloc(::Pencil, input::AbstractArray{T,3}) where T
+    N = size(input, 1)
+    np = max(1, length(Dagger.compatible_processors())-1)
+    A = DArray(input, Blocks(N, div(N, np), div(N, np)))
+    B = zeros(Blocks(div(N, np), N, div(N, np)), eltype(input), size(input))
+    C = zeros(Blocks(div(N, np), div(N, np), N), eltype(input), size(input))
+    return A, B, C
+end
+function _fft_prealloc(::Slab, input::AbstractArray{T,3}) where T
+    N = size(input, 1)
+    np = max(1, length(Dagger.compatible_processors())-1)
+    A = DArray(input, Blocks(N, N, div(N, np)))
+    B = zeros(Blocks(div(N, np), N, N), eltype(input), size(input))
+    return A, B
 end
 
 function _fft!(::Pencil, input::AbstractArray{T,3}, A::DArray{T,3}, B::DArray{T,3}, C::DArray{T,3}; 
@@ -56,17 +67,12 @@ end
 
 # 3D in place
 function fft!(output::AbstractArray{T,3}, input::AbstractArray{T,3}, dims=(1, 2, 3); decomp::Decomposition=Pencil()) where T
-    N = size(input, 1)
-    np = length(Dagger.compatible_processors())
     if decomp isa Pencil
-        A = DArray(input, Blocks(N, div(N, np), div(N, np)))
-        B = zeros(Blocks(div(N, np), N, div(N, np)), size(input))
-        C = zeros(Blocks(div(N, np), div(N, np), N), size(input))
+        A, B, C = _fft_prealloc(decomp, input)
         _fft!(decomp, output, input, A, B, C; dims)
         return output
     elseif decomp isa Slab
-        A = DArray(input, Blocks(N, N, div(N, np)))
-        B = zeros(Blocks(div(N, np), N, N), size(input))
+        A, B = _fft_prealloc(decomp, input)
         _fft!(decomp, output, input, A, B; dims)
         return output
     else
@@ -80,9 +86,8 @@ function _fft!(::Pencil, output::AbstractArray{T,3}, input::AbstractArray{T,3},
                A::DArray{T,3}, B::DArray{T,3}, C::DArray{T,3}; 
                dims) where T
     copyto!(A, input)
-    _fft!(Pencil(), output, input, A, B, C; dims)
+    _fft!(Pencil(), A, B, C; dims)
     copyto!(output, C)
-
     return
 end
 
@@ -157,42 +162,43 @@ end
 
 # 2D out of place
 function fft(input::AbstractArray{T,2}, dims=(1, 2)) where T
-    N = size(input, 1)
-    np = length(Dagger.compatible_processors())
-    A = DArray(input, Blocks(N, div(N, np)))
-    B = zeros(Blocks(div(N, np), N), eltype(input), size(input))
-    _fft!(input, A, B; dims)
+    A, B = _fft_prealloc(Pencil(), input)
+    _fft!(Pencil(), input, A, B; dims)
     return B
 end
 
-function _fft!(input::AbstractArray{T,2}, A::DMatrix{T}, B::DMatrix{T}; dims) where T
+function _fft_prealloc(::Pencil, input::AbstractArray{T,2}) where T
+    N = size(input, 1)
+    np = max(1, length(Dagger.compatible_processors())-1)
+    A = DArray(input, Blocks(N, div(N, np)))
+    B = zeros(Blocks(div(N, np), N), eltype(input), size(input))
+    return A, B
+end
+
+function _fft!(::Pencil, input::AbstractArray{T,2}, A::DMatrix{T}, B::DMatrix{T}; dims) where T
     copyto!(A, input)
-    _fft!(A, B; dims)
+    _fft!(Pencil(), A, B; dims)
     return
 end
 
 # 2D inplace
 function fft!(output::AbstractArray{T,2}, input::AbstractArray{T,2}, dims=(1, 2)) where T
-    N = size(input, 1)
-    np = length(Dagger.compatible_processors())
-    A = DArray(input, Blocks(N, div(N, np)))
-    B = zeros(Blocks(div(N, np), N), eltype(input), size(input))
-    _fft!(output, input, A, B; dims)
+    A, B = _fft_prealloc(Pencil(), input)
+    _fft!(Pencil(), output, input, A, B; dims)
     return output
 end
 fft!(input::AbstractArray{T,2}, dims=(1, 2)) where T =
     fft!(input, input, dims)
 
-function _fft!(output::AbstractArray{T,2}, input::AbstractArray{T,2}, A::DMatrix{T}, B::DMatrix{T}; 
+function _fft!(::Pencil, output::AbstractArray{T,2}, input::AbstractArray{T,2}, A::DMatrix{T}, B::DMatrix{T};
                dims) where T
     copyto!(A, input)
-    _fft!(A, B; dims)
+    _fft!(Pencil(), A, B; dims)
     copyto!(output, B)
-
     return
 end
 
-function _fft!(A::DMatrix{T}, B::DMatrix{T}; dims) where T
+function _fft!(::Pencil, A::DMatrix{T}, B::DMatrix{T}; dims) where T
     A_parts = A.chunks
     B_parts = B.chunks
 
@@ -203,6 +209,7 @@ function _fft!(A::DMatrix{T}, B::DMatrix{T}; dims) where T
     end
 
     copyto!(B, A)
+
     Dagger.spawn_datadeps() do
         for idx in eachindex(B_parts)
             Dagger.@spawn name="apply_fft!(dim 2)[$idx]" apply_fft!(InOut(B_parts[idx]), FFT!(), dims[2])
