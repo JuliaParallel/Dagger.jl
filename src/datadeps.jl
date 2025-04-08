@@ -199,6 +199,7 @@ const DAG_SPECS = Vector{Pair{DAGSpec, DAGSpecSchedule}}()
 
 _identity_hash(arg, h::UInt=UInt(0)) = ismutable(arg) ? objectid(arg) : hash(arg, h)
 _identity_hash(arg::SubArray, h::UInt=UInt(0)) = hash(arg.indices, hash(arg.offset1, hash(arg.stride1, _identity_hash(arg.parent, h))))
+_identity_hash(arg::CartesianIndices, h::UInt=UInt(0)) = hash(arg.indices, hash(typeof(arg), h))
 
 struct ArgumentWrapper
     arg
