@@ -110,3 +110,26 @@ function copyto_view!(Bpart, Brange, Apart, Arange)
     copyto!(view(Bpart, Brange), view(Apart, Arange))
     return
 end
+
+function Base.copyto!(B::DArray{T,N}, A::Array{T,N}) where {T,N}
+    if size(B) != size(A)
+        # Fallback to the default implementation
+        return Base.invoke(copyto!, Tuple{AbstractArray, AbstractArray}, B, A)
+    end
+
+    A_view = view(A, B.partitioning)
+    copyto!(B, A_view)
+
+    return B
+end
+function Base.copyto!(B::Array{T,N}, A::DArray{T,N}) where {T,N}
+    if size(B) != size(A)
+        # Fallback to the default implementation
+        return Base.invoke(copyto!, Tuple{AbstractArray, AbstractArray}, B, A)
+    end
+
+    B_view = view(B, A.partitioning)
+    copyto!(B_view, A)
+
+    return B
+end
