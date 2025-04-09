@@ -186,6 +186,7 @@ function Dagger.render_logs(logs::Dict, ::Val{:plots_gantt};
                 xlabel="Time (seconds)", ylabel,
                 xlim=(0.0, (global_t_end - global_t_start) / 1e9),
                 legendalpha=0, linewidth=0.1,
+                legend=:outerright, legend_position=:left,
                 kwargs...)
 end
 
