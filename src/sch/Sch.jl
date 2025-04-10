@@ -599,6 +599,9 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
                     state.transfer_rate[] = (state.transfer_rate[] + metadata.transfer_rate) ÷ 2
                 end
             end
+            if thunk_failed && res isa RemoteException
+                res = res.captured
+            end
             state.cache[node] = res
             state.errored[node] = thunk_failed
             if node.options !== nothing && node.options.checkpoint !== nothing
