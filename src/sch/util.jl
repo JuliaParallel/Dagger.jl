@@ -178,16 +178,29 @@ end
 
 "Marks `thunk` and all dependent thunks as failed."
 function set_failed!(state, origin, thunk=origin)
-    filter!(x->x!==thunk, state.ready)
-    ex = state.cache[origin]
-    if ex isa RemoteException
-        ex = ex.captured
+    @assert islocked(state.lock)
+
+    if haskey(state.cache, thunk)
+        @assert state.errored[thunk]
+        # We've already been called previously with this thunk
+        return
     end
-    state.cache[thunk] = DTaskFailedException(thunk, origin, ex)
-    state.errored[thunk] = true
+
+    filter!(x -> x !== thunk, state.ready)
+    # N.B. If origin === thunk, we assume that the caller has already set the error
+    if origin !== thunk
+        origin_ex = state.cache[origin]
+        if origin_ex isa RemoteException
+            origin_ex = origin_ex.captured
+        end
+        state.cache[thunk]  = DTaskFailedException(thunk, origin, origin_ex)
+        state.errored[thunk] = true
+    end
     finish_failed!(state, thunk, origin)
 end
 function finish_failed!(state, thunk, origin=nothing)
+    @assert islocked(state.lock)
+    # FIXME: This is duplicative with finish_task!
     fill_registered_futures!(state, thunk, true)
     if haskey(state.waiting_data, thunk)
         for dep in state.waiting_data[thunk]
