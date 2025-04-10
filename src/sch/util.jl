@@ -224,6 +224,13 @@ const RESCHEDULE_SYNCDEPS_SEEN_CACHE = TaskLocalValue{ReusableCache{Set{Thunk},N
 "Marks `thunk` and all dependent thunks as failed."
 function set_failed!(state, origin, thunk=origin)
     @assert islocked(state.lock)
+
+    if haskey(state.cache, thunk)
+        @assert state.errored[thunk]
+        # We've already been called previously with this thunk
+        return
+    end
+
     filter!(x -> x !== thunk, state.ready)
     # N.B. If origin === thunk, we assume that the caller has already set the error
     if origin !== thunk
@@ -238,6 +245,7 @@ function set_failed!(state, origin, thunk=origin)
 end
 function finish_failed!(state, thunk, origin=nothing)
     @assert islocked(state.lock)
+    # FIXME: This is duplicative with finish_task!
     fill_registered_futures!(state, thunk, true)
     if haskey(state.waiting_data, thunk)
         for dep in state.waiting_data[thunk]

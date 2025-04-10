@@ -445,6 +445,9 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options::SchedulerOpt
                     state.equiv_chunks[res.handle::DRef] = res
                 end
             end
+            if thunk_failed && res isa RemoteException
+                res = res.captured
+            end
             store_result!(state, node, res; error=thunk_failed)
             if node.options !== nothing && node.options.checkpoint !== nothing
                 try
