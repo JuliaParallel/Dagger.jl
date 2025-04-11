@@ -890,7 +890,11 @@ function (ets::FireTaskSpec)()
 
     @maybelog ctx timespan_start(ctx, :fire, (;uid, worker=pid), nothing)
     try
-        remotecall_wait(do_tasks, pid, proc, chan, [task]);
+        if pid == myid()
+            do_tasks(proc, chan, [task])
+        else
+            remotecall_wait(do_tasks, pid, proc, chan, [task]);
+        end
     catch err
         bt = catch_backtrace()
         thunk_id = task.thunk_id
