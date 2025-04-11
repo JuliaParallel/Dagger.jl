@@ -99,21 +99,21 @@ function _fft!(::Pencil, A::DArray{T,3}, B::DArray{T,3}, C::DArray{T,3};
 
     Dagger.spawn_datadeps() do
         for idx in eachindex(A_parts)
-            Dagger.@spawn name="apply_fft!(dim 1)[$idx]" apply_fft!(InOut(A_parts[idx]), FFT!(), dims[1])
+            Dagger.@spawn name="apply_fft!(dim 1)" apply_fft!(InOut(A_parts[idx]), FFT!(), dims[1])
         end
     end
 
     copyto!(B, A)
     Dagger.spawn_datadeps() do
         for idx in eachindex(B_parts)
-            Dagger.@spawn name="apply_fft!(dim 2)[$idx]" apply_fft!(InOut(B_parts[idx]), FFT!(), dims[2])
+            Dagger.@spawn name="apply_fft!(dim 2)" apply_fft!(InOut(B_parts[idx]), FFT!(), dims[2])
         end
     end
 
     copyto!(C, B)
     Dagger.spawn_datadeps() do
         for idx in eachindex(C_parts)
-            Dagger.@spawn name="apply_fft!(dim 3)[$idx]" apply_fft!(InOut(C_parts[idx]), FFT!(), dims[3])
+            Dagger.@spawn name="apply_fft!(dim 3)" apply_fft!(InOut(C_parts[idx]), FFT!(), dims[3])
         end
     end
 
@@ -146,14 +146,14 @@ function _fft!(::Slab, A::DArray{T,3}, B::DArray{T,3};
 
     Dagger.spawn_datadeps() do
         for idx in eachindex(A_parts)
-            Dagger.@spawn name="apply_fft!(dim 1&2)[$idx]" apply_fft!(InOut(A_parts[idx]), FFT!(), (dims[1], dims[2]))
+            Dagger.@spawn name="apply_fft!(dim 1&2)" apply_fft!(InOut(A_parts[idx]), FFT!(), (dims[1], dims[2]))
         end
     end
 
     copyto!(B, A)
     Dagger.spawn_datadeps() do
         for idx in eachindex(B_parts)
-            Dagger.@spawn name="apply_fft!(dim 2)[$idx]" apply_fft!(InOut(B_parts[idx]), FFT!(), dims[3])
+            Dagger.@spawn name="apply_fft!(dim 2)" apply_fft!(InOut(B_parts[idx]), FFT!(), dims[3])
         end
     end
 
@@ -204,7 +204,7 @@ function _fft!(::Pencil, A::DMatrix{T}, B::DMatrix{T}; dims) where T
 
     Dagger.spawn_datadeps() do
         for idx in eachindex(A_parts)
-            Dagger.@spawn name="apply_fft!(dim 1)[$idx]" apply_fft!(InOut(A_parts[idx]), FFT!(), dims[1])
+            Dagger.@spawn name="apply_fft!(dim 1)" apply_fft!(InOut(A_parts[idx]), FFT!(), dims[1])
         end
     end
 
@@ -212,7 +212,7 @@ function _fft!(::Pencil, A::DMatrix{T}, B::DMatrix{T}; dims) where T
 
     Dagger.spawn_datadeps() do
         for idx in eachindex(B_parts)
-            Dagger.@spawn name="apply_fft!(dim 2)[$idx]" apply_fft!(InOut(B_parts[idx]), FFT!(), dims[2])
+            Dagger.@spawn name="apply_fft!(dim 2)" apply_fft!(InOut(B_parts[idx]), FFT!(), dims[2])
         end
     end
 
@@ -257,21 +257,21 @@ function _ifft(A::DArray{T,3}, B::DArray{T,3}, C::DArray{T,3};
     
     Dagger.spawn_datadeps() do
         for idx in eachindex(A_parts)
-            Dagger.@spawn name="apply_ifft!(dim 3)[$idx]" apply_fft!(InOut(A_parts[idx]), In(transforms[3]), In(dims[3]))
+            Dagger.@spawn name="apply_ifft!(dim 3)" apply_fft!(InOut(A_parts[idx]), In(transforms[3]), In(dims[3]))
         end
     end
 
     copyto!(B, A)
     Dagger.spawn_datadeps() do
         for idx in eachindex(B_parts)
-            Dagger.@spawn name="apply_ifft!(dim 2)[$idx]" apply_fft!(InOut(B_parts[idx]), In(transforms[2]), In(dims[2]))
+            Dagger.@spawn name="apply_ifft!(dim 2)" apply_fft!(InOut(B_parts[idx]), In(transforms[2]), In(dims[2]))
         end
     end
 
     copyto!(C, B)
     Dagger.spawn_datadeps() do
         for idx in eachindex(C_parts)
-            Dagger.@spawn name="apply_ifft!(dim 1)[$idx]" apply_fft!(InOut(C_parts[idx]), In(transforms[1]), In(dims[1]))
+            Dagger.@spawn name="apply_ifft!(dim 1)" apply_fft!(InOut(C_parts[idx]), In(transforms[1]), In(dims[1]))
         end
     end
 
@@ -315,21 +315,21 @@ function _ifft!(A::DArray{T,3}, B::DArray{T,3}, C::DArray{T,3};
 
     Dagger.spawn_datadeps() do
         for idx in eachindex(A_parts)
-            Dagger.@spawn name="apply_ifft!(dim 3)[$idx]" apply_fft!(InOut(A_parts[idx]), In(transforms[3]), In(dims[3]))
+            Dagger.@spawn name="apply_ifft!(dim 3)" apply_fft!(InOut(A_parts[idx]), In(transforms[3]), In(dims[3]))
         end
     end
 
     copyto!(B, A)
     Dagger.spawn_datadeps() do
         for idx in eachindex(B_parts)
-            Dagger.@spawn name="apply_ifft!(dim 2)[$idx]" apply_fft!(InOut(B_parts[idx]), In(transforms[2]), In(dims[2]))
+            Dagger.@spawn name="apply_ifft!(dim 2)" apply_fft!(InOut(B_parts[idx]), In(transforms[2]), In(dims[2]))
         end
     end
 
     copyto!(C, B)
     Dagger.spawn_datadeps() do
         for idx in eachindex(C_parts)
-            Dagger.@spawn name="apply_ifft!(dim 1)[$idx]" apply_fft!(InOut(C_parts[idx]), In(transforms[1]), In(dims[1]))
+            Dagger.@spawn name="apply_ifft!(dim 1)" apply_fft!(InOut(C_parts[idx]), In(transforms[1]), In(dims[1]))
         end
     end
     return C
@@ -352,14 +352,14 @@ function _ifft(A::DArray{T,3}, B::DArray{T,3};
     
     Dagger.spawn_datadeps() do
         for idx in eachindex(A_parts)
-            Dagger.@spawn name="apply_ifft!(dim 3)[$idx]" apply_fft!(InOut(A_parts[idx]), In(transforms[3]), In(dims[3]))
+            Dagger.@spawn name="apply_ifft!(dim 3)" apply_fft!(InOut(A_parts[idx]), In(transforms[3]), In(dims[3]))
         end
     end
 
     copyto!(B, A)
     Dagger.spawn_datadeps() do
         for idx in eachindex(B_parts)
-            Dagger.@spawn name="apply_ifft!(dim 1&2)[$idx]" apply_fft!(InOut(B_parts[idx]), In(transforms[1]), In([dims[1], dims[2]]))
+            Dagger.@spawn name="apply_ifft!(dim 1&2)" apply_fft!(InOut(B_parts[idx]), In(transforms[1]), In([dims[1], dims[2]]))
         end
     end
 
@@ -386,14 +386,14 @@ function _ifft!(A::DArray{T,3}, B::DArray{T,3};
     
     Dagger.spawn_datadeps() do
         for idx in eachindex(A_parts)
-            Dagger.@spawn name="apply_ifft!(dim 3)[$idx]" apply_fft!(InOut(A_parts[idx]), In(transforms[3]), In(dims[3]))
+            Dagger.@spawn name="apply_ifft!(dim 3)" apply_fft!(InOut(A_parts[idx]), In(transforms[3]), In(dims[3]))
         end
     end
 
     copyto!(B, A)
     Dagger.spawn_datadeps() do
         for idx in eachindex(B_parts)
-            Dagger.@spawn name="apply_ifft!(dim 1&2)[$idx]" apply_fft!(InOut(B_parts[idx]), In(transforms[1]), In([dims[1], dims[2]]))
+            Dagger.@spawn name="apply_ifft!(dim 1&2)" apply_fft!(InOut(B_parts[idx]), In(transforms[1]), In([dims[1], dims[2]]))
         end
     end
 
@@ -421,14 +421,14 @@ function _ifft(A::DMatrix{T}, B::DMatrix{T}; dims) where T
     
     Dagger.spawn_datadeps() do
         for idx in eachindex(A_parts)
-            Dagger.@spawn name="apply_ifft!(dim 2)[$idx]" apply_fft!(InOut(A_parts[idx]), In(transforms[2]), In(dims[2]))
+            Dagger.@spawn name="apply_ifft!(dim 2)" apply_fft!(InOut(A_parts[idx]), In(transforms[2]), In(dims[2]))
         end
     end
 
     copyto!(B, A)
     Dagger.spawn_datadeps() do
         for idx in eachindex(B_parts)
-            Dagger.@spawn name="apply_ifft!(dim 1)[$idx]" apply_fft!(InOut(B_parts[idx]), In(transforms[1]), In(dims[1]))
+            Dagger.@spawn name="apply_ifft!(dim 1)" apply_fft!(InOut(B_parts[idx]), In(transforms[1]), In(dims[1]))
         end
     end
 
@@ -462,14 +462,14 @@ function _ifft!(A::DMatrix{T}, B::DMatrix{T}; dims) where T
 
     Dagger.spawn_datadeps() do
         for idx in eachindex(A_parts)
-            Dagger.@spawn name="apply_ifft!(dim 2)[$idx]" apply_fft!(InOut(A_parts[idx]), In(transforms[2]), In(dims[2]))
+            Dagger.@spawn name="apply_ifft!(dim 2)" apply_fft!(InOut(A_parts[idx]), In(transforms[2]), In(dims[2]))
         end
     end
 
     copyto!(B, A)
     Dagger.spawn_datadeps() do
         for idx in eachindex(B_parts)
-            Dagger.@spawn name="apply_ifft!(dim 1)[$idx]" apply_fft!(InOut(B_parts[idx]), In(transforms[1]), In(dims[1]))
+            Dagger.@spawn name="apply_ifft!(dim 1)" apply_fft!(InOut(B_parts[idx]), In(transforms[1]), In(dims[1]))
         end
     end
 
