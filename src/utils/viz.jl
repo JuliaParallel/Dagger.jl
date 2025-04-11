@@ -22,9 +22,9 @@ end
 
 sanitize_label(label::String) = replace(label, "\"" => "\\\"")
 
-name_to_color(name::AbstractString, colors) =
-    colors[mod1(hash(name), length(colors))]
-name_to_color(name::AbstractString, ::Nothing) = "black"
+name_to_color(name::AbstractString, colors; init_hash=UInt(0)) =
+    colors[mod1(hash(name, init_hash), length(colors))]
+name_to_color(name::AbstractString, ::Nothing; init_hash) = "black"
 tab20_colors = [
     "#1f77b4", "#aec7e8", "#ff7f0e", "#ffbb78",
     "#2ca02c", "#98df8a", "#d62728", "#ff9896",

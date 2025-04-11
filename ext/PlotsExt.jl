@@ -13,7 +13,7 @@ import Dagger: DTask, Chunk, Processor
 import Dagger.TimespanLogging: Timespan
 
 function logs_to_df(logs::Dict, ::Val{:execution};
-                    colors, name_to_color, color_by)
+                    colors, name_to_color, color_by, color_init_hash)
     # Generate function names
     fn_names = Dict{Int, String}()
     dtask_names = Dict{UInt, String}()
@@ -69,9 +69,9 @@ function logs_to_df(logs::Dict, ::Val{:execution};
             t_start = logs[w][:core][start_idx].timestamp::UInt64
             t_end = logs[w][:core][finish_idx].timestamp::UInt64
             if color_by == :fn
-                color = name_to_color(fn_name, colors)
+                color = name_to_color(fn_name, colors; init_hash=color_init_hash)
             elseif color_by == :proc
-                color = name_to_color(proc_name, colors)
+                color = name_to_color(proc_name, colors; init_hash=color_init_hash)
             else
                 throw(ArgumentError("Invalid color_by value: $(repr(color_by))"))
             end
@@ -81,7 +81,7 @@ function logs_to_df(logs::Dict, ::Val{:execution};
     return df
 end
 function logs_to_df(logs::Dict, ::Val{:processor};
-                    colors, name_to_color, kwargs...)
+                    colors, name_to_color, color_init_hash, kwargs...)
     # Collect processor events
     # FIXME: Color eltype
     df = DataFrame(proc=Processor[], proc_name=String[], category=String[], t_start=UInt64[], t_end=UInt64[], color=Any[])
@@ -93,14 +93,14 @@ function logs_to_df(logs::Dict, ::Val{:processor};
             t_start = logs[w][:core][start_idx].timestamp::UInt64
             t_end = logs[w][:core][finish_idx].timestamp::UInt64
             category_str = string(category)
-            color = name_to_color(category_str, colors)
+            color = name_to_color(category_str, colors; init_hash=color_init_hash)
             push!(df, (;proc, proc_name, category=category_str, t_start, t_end, color))
         end
     end
     return df
 end
 function logs_to_df(logs::Dict, ::Val{:scheduler};
-                    colors, name_to_color, kwargs...)
+                    colors, name_to_color, color_init_hash, kwargs...)
     # Collect scheduler events
     # FIXME: Color eltype
     df = DataFrame(category=String[], t_start=UInt64[], t_end=UInt64[], color=Any[])
@@ -110,7 +110,7 @@ function logs_to_df(logs::Dict, ::Val{:scheduler};
             t_start = logs[w][:core][start_idx].timestamp::UInt64
             t_end = logs[w][:core][finish_idx].timestamp::UInt64
             category_str = string(category)
-            color = name_to_color(category_str, colors)
+            color = name_to_color(category_str, colors; init_hash=color_init_hash)
             push!(df, (;category=category_str, t_start, t_end, color))
         end
     end
@@ -125,7 +125,7 @@ logs_to_df(logs::Dict, ::Val{target}; kwargs...) where target =
     Dagger.render_logs(logs::Dict, ::Val{:plots_gantt};
                        target=:execution,
                        colors, name_to_color, color_by=:fn,
-                       kwargs...)
+                       color_init_hash=UInt(0), kwargs...)
 
 Render a Gantt chart of task execution in `logs` using Plots.
 
@@ -134,14 +134,15 @@ Keyword arguments affect rendering behavior:
 - `colors`: A list of colors to use for rendering.
 - `name_to_color`: A function mapping names to colors.
 - `color_by`: Whether to color by function name (`:fn`) or processor name (`:proc`).
+- `color_init_hash`: A `UInt` value to use for initializing the color hash.
 - `kwargs` are passed to `plot` directly.
 """
 function Dagger.render_logs(logs::Dict, ::Val{:plots_gantt};
                             target=:execution,
                             colors=Dagger.Viz.default_colors,
                             name_to_color=Dagger.Viz.name_to_color,
-                            color_by=:fn, kwargs...)
-    df = logs_to_df(logs, Val{target}(); colors, name_to_color, color_by)
+                            color_by=:fn, color_init_hash=UInt(0), kwargs...)
+    df = logs_to_df(logs, Val{target}(); colors, name_to_color, color_by, color_init_hash)
     y_elem = if target == :execution || target == :processor
         :proc_name
     elseif target == :scheduler
