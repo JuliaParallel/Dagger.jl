@@ -1516,7 +1516,6 @@ function do_task(to_proc, task::TaskSpec)
 
         result = Dagger.with_options(propagated) do
             # Execute
-            execute!(to_proc, f, fetched_args...; fetched_kwargs...)
             @with Dagger.TASK_SIGNATURE=>sig Dagger.TASK_PROCESSOR=>to_proc begin
                 MT.@with_metrics mspec Dagger :execute! thunk_id MT.SyncInto(local_cache) begin
                     execute!(to_proc, f, fetched_args...; fetched_kwargs...)
