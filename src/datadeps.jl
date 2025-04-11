@@ -96,18 +96,16 @@ struct DAGSpec
                     Dict{Int, Type}(),
                     Dict{Int, Vector{DatadepsArgSpec}}())
 end
+@warn "Also record readdep/writedep in DAGSpec" maxlog=1
 function dag_add_task!(dspec::DAGSpec, astate, tspec::DTaskSpec, task::DTask)
     # Check if this task depends on any other tasks within the DAG,
     # which we are not yet ready to handle
-    for (idx, (kwpos, arg)) in enumerate(tspec.args)
-        arg, deps = unwrap_inout(arg)
-        pos = kwpos isa Symbol ? kwpos : idx
-        for (dep_mod, readdep, writedep) in deps
-            if arg isa DTask
-                if arg.uid in keys(dspec.uid_to_id)
-                    # Within-DAG dependency, bail out
-                    return false
-                end
+    for arg in tspec.fargs
+        val, _ = unwrap_inout(value(arg))
+        if val isa DTask
+            if val.uid in keys(dspec.uid_to_id)
+                # Within-DAG dependency, bail out
+                return false
             end
         end
     end
@@ -116,13 +114,13 @@ function dag_add_task!(dspec::DAGSpec, astate, tspec::DTaskSpec, task::DTask)
     id = nv(dspec.g)
 
     # Record function signature
-    dspec.id_to_functype[id] = typeof(tspec.f)
+    dspec.id_to_functype[id] = chunktype(tspec.fargs[1])
     argtypes = DatadepsArgSpec[]
-    for (idx, (kwpos, arg)) in enumerate(tspec.args)
-        arg, deps = unwrap_inout(arg)
-        pos = kwpos isa Symbol ? kwpos : idx
+    for arg in tspec.fargs
+        val, deps = unwrap_inout(value(arg))
+        pos = raw_position(arg)
         for (dep_mod, readdep, writedep) in deps
-            if arg isa DTask
+            if val isa DTask
                 #= TODO: Re-enable this when we can handle within-DAG dependencies
                 if arg.uid in keys(dspec.uid_to_id)
                     # Within-DAG dependency
@@ -134,10 +132,10 @@ function dag_add_task!(dspec::DAGSpec, astate, tspec::DTaskSpec, task::DTask)
                 =#
 
                 # External DTask, so fetch this and track it as a raw value
-                arg = fetch(arg; raw=true)
+                val = fetch(val; raw=true)
             end
-            ainfo = aliasing(astate, arg, dep_mod)
-            push!(argtypes, DatadepsArgSpec(pos, typeof(arg), dep_mod, ainfo))
+            ainfo = aliasing(astate, val, dep_mod)
+            push!(argtypes, DatadepsArgSpec(pos, typeof(val), dep_mod, ainfo))
         end
     end
     dspec.id_to_argtypes[id] = argtypes
