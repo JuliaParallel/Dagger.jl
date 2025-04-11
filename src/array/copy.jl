@@ -33,7 +33,6 @@ function Base.copyto!(B::DArray{T,N}, A::DArray{T,N}) where {T,N}
     Ac = A.chunks
     Asd_all = A.subdomains::DomainBlocks{N}
 
-    occupancy = Dict{Type,UInt32}(Any=>UInt32(0))
     Dagger.spawn_datadeps() do
         for Bidx in CartesianIndices(Bc)
             Bpart = Bc[Bidx]
@@ -99,7 +98,7 @@ function Base.copyto!(B::DArray{T,N}, A::DArray{T,N}) where {T,N}
                                range_start - CartesianIndex(Bsd_start) + CartesianIndex{N}(1) + range_diff)
 
                 # Perform view copy
-                Dagger.@spawn occupancy=occupancy copyto_view!(Out(Bpart), Brange, In(Apart), Arange)
+                Dagger.@spawn copyto_view!(Out(Bpart), Brange, In(Apart), Arange)
             end
         end
     end
