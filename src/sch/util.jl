@@ -469,10 +469,10 @@ function can_use_proc(state, task, gproc, proc, opts, scope)
     return true, scope
 end
 
+@warn "Use special lookup to use other proc estimates" maxlog=1
 function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
     T = typeof(p)
 
-    @warn "Use special lookup to use other proc estimates" maxlog=1
     est_time_util = if time_util !== nothing && haskey(time_util, T)
         round(UInt64, time_util[T] * 1000^3)
     elseif haskey(state.signature_time_cost, sig) && haskey(state.signature_time_cost[sig], p)

@@ -127,9 +127,9 @@ function populate_defaults!(opts::Options, sig)
     maybe_default!(opts, Val{:stream_max_evals}(), sig)
     return opts
 end
+@warn "SIGNATURE_DEFAULT_CACHE should use an LRU" maxlog=1
 function maybe_default!(opts::Options, ::Val{opt}, sig::Signature) where opt
     if getfield(opts, opt) === nothing
-        @warn "SIGNATURE_DEFAULT_CACHE should use an LRU" maxlog=1
         default_opt = get!(SIGNATURE_DEFAULT_CACHE[], (sig.hash_nokw, opt)) do
             Dagger.default_option(Val{opt}(), sig.sig_nokw...)
         end
