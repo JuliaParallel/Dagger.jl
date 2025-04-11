@@ -23,7 +23,11 @@ function init_eager()
         return
     end
     ctx = eager_context()
-    errormonitor_tracked("eager compute()", Threads.@spawn try
+    # N.B. We use @async here to prevent the scheduler task from running on a
+    # different thread than the one that is likely submitting work, as otherwise
+    # the scheduler task might sleep while holding the scheduler lock and
+    # prevent work submission until it wakes up. Further testing is needed.
+    errormonitor_tracked("eager compute()", @async try
         sopts = SchedulerOptions(;allow_errors=true)
         opts = Dagger.Options((;scope=Dagger.ExactScope(Dagger.ThreadProc(1, 1)),
                                 occupancy=Dict(Dagger.ThreadProc=>0),
