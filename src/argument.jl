@@ -30,6 +30,7 @@ ispositional(arg::Argument) = ispositional(arg.pos)
 iskw(arg::Argument) = iskw(arg.pos)
 pos_idx(arg::Argument) = pos_idx(arg.pos)
 pos_kw(arg::Argument) = pos_kw(arg.pos)
+raw_position(arg::Argument) = raw_position(arg.pos)
 value(arg::Argument) = arg.value
 valuetype(arg::Argument) = typeof(arg.value)
 Base.iterate(arg::Argument) = (arg.pos, true)
