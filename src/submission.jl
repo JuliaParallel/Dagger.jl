@@ -64,7 +64,9 @@ function eager_submit_internal!(ctx, state, task, tid, payload::AnyPayload; uid_
                 push!(thunk_ids, tid)
                 uid_to_tid[payload.uid[i]] = tid.id
             end
-            put!(state.chan, Sch.RescheduleSignal())
+            @lock state.lock begin
+                put!(state.chan, Sch.RescheduleSignal())
+            end
             return thunk_ids
         end
         payload::PayloadOne
@@ -94,20 +96,26 @@ function eager_submit_internal!(ctx, state, task, tid, payload::AnyPayload; uid_
                     else
                         uid_to_tid[arg_uid]
                     end
-                    @inbounds fargs[idx] = Argument(arg.pos, state.thunk_dict[arg_tid])
+                    @lock state.lock begin
+                        @inbounds fargs[idx] = Argument(arg.pos, state.thunk_dict[arg_tid])
+                    end
                 elseif valuetype(arg) <: Sch.ThunkID
                     arg_tid = (value(arg)::Sch.ThunkID).id
-                    @inbounds fargs[idx] = Argument(arg.pos, state.thunk_dict[arg_tid])
+                    @lock state.lock begin
+                        @inbounds fargs[idx] = Argument(arg.pos, state.thunk_dict[arg_tid])
+                    end
                 elseif valuetype(arg) <: Chunk
                     # N.B. Different Chunks with the same DRef handle will hash to the same slot,
                     # so we just pick an equivalent Chunk as our upstream
                     chunk = value(arg)::Chunk
                     function find_equivalent_chunk(state, chunk::C) where {C<:Chunk}
-                        if haskey(state.equiv_chunks, chunk.handle)
-                            return state.equiv_chunks[chunk.handle]::C
-                        else
-                            state.equiv_chunks[chunk.handle] = chunk
-                            return chunk
+                        @lock state.lock begin
+                            if haskey(state.equiv_chunks, chunk.handle)
+                                return state.equiv_chunks[chunk.handle]::C
+                            else
+                                state.equiv_chunks[chunk.handle] = chunk
+                                return chunk
+                            end
                         end
                     end
                     chunk = find_equivalent_chunk(state, chunk)
@@ -124,10 +132,14 @@ function eager_submit_internal!(ctx, state, task, tid, payload::AnyPayload; uid_
                     else
                         uid_to_tid[dep.uid]
                     end
-                    @inbounds syncdeps_vec[idx] = state.thunk_dict[tid]
+                    @lock state.lock begin
+                        @inbounds syncdeps_vec[idx] = state.thunk_dict[tid]
+                    end
                 elseif dep isa Sch.ThunkID
                     tid = dep.id
-                    @inbounds syncdeps_vec[idx] = state.thunk_dict[tid]
+                    @lock state.lock begin
+                        @inbounds syncdeps_vec[idx] = state.thunk_dict[tid]
+                    end
                 end
             end
         end
@@ -164,27 +176,29 @@ function eager_submit_internal!(ctx, state, task, tid, payload::AnyPayload; uid_
             #=FIXME:UNIQUE=#
             thunk_id = Sch.ThunkID(thunk.id, thunk_ref)
 
-            # Attach `thunk` within the scheduler
-            state.thunk_dict[thunk.id] = WeakThunk(thunk)
-            #=FIXME:REALLOC=#
-            Sch.reschedule_syncdeps!(state, thunk)
-            empty!(old_fargs) # reschedule_syncdeps! preserves all referenced tasks/chunks
-            @dagdebug thunk :submit "Added to scheduler"
-            if future !== nothing
-                # Ensure we attach a future before the thunk is scheduled
-                Sch._register_future!(ctx, state, task, tid, (future, thunk_id, false))
-                @dagdebug thunk :submit "Registered future"
-            end
-            state.valid[thunk] = nothing
+            @lock state.lock begin
+                # Attach `thunk` within the scheduler
+                state.thunk_dict[thunk.id] = WeakThunk(thunk)
+                #=FIXME:REALLOC=#
+                Sch.reschedule_syncdeps!(state, thunk)
+                empty!(old_fargs) # reschedule_syncdeps! preserves all referenced tasks/chunks
+                @dagdebug thunk :submit "Added to scheduler"
+                if future !== nothing
+                    # Ensure we attach a future before the thunk is scheduled
+                    Sch._register_future!(ctx, state, task, tid, (future, thunk_id, false))
+                    @dagdebug thunk :submit "Registered future"
+                end
+                state.valid[thunk] = nothing
 
-            # Register Eager UID -> Sch TID
-            lock(Sch.EAGER_ID_MAP) do id_map
-                id_map[uid] = thunk.id
-            end
+                # Register Eager UID -> Sch TID
+                lock(Sch.EAGER_ID_MAP) do id_map
+                    id_map[uid] = thunk.id
+                end
 
-            # Tell the scheduler that it has new tasks to schedule
-            if reschedule
-                put!(state.chan, Sch.RescheduleSignal())
+                # Tell the scheduler that it has new tasks to schedule
+                if reschedule
+                    put!(state.chan, Sch.RescheduleSignal())
+                end
             end
 
             @maybelog ctx timespan_finish(ctx, :add_thunk, (;thunk_id=id), (;f=fargs[1], args=fargs[2:end], options, uid))
@@ -236,13 +250,11 @@ function eager_submit!(payload::AnyPayload)
     elseif myid() != 1
         return remotecall_fetch(1, payload) do payload
             Sch.init_eager()
-            state = Dagger.Sch.EAGER_STATE[]
-            @lock state.lock eager_submit_internal!(payload)
+            eager_submit_internal!(payload)
         end
     else
         Sch.init_eager()
-        state = Dagger.Sch.EAGER_STATE[]
-        return @lock state.lock eager_submit_internal!(payload)
+        return eager_submit_internal!(payload)
     end
 end
 
