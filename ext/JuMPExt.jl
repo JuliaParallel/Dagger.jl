@@ -7,7 +7,6 @@ else
 end
 
 using Dagger
-using Dagger.Distributed
 import MetricsTracker as MT
 import Graphs: edges, nv, outdegree
 
@@ -36,7 +35,8 @@ function Dagger.datadeps_create_schedule(sched::JuMPScheduler, state, specs_task
                 # estimate is available and closest if not populated for this processor
                 # Exact match > same proc type, same node > same proc type, any node > any proc type
 
-                sig = Dagger.Sch.signature(spec.f, map(arg->Dagger.Argument(arg.pos, Dagger.unwrap_inout_value(Dagger.value(arg))), spec.args))
+                f, args... = map(arg->Dagger.Argument(arg.pos, Dagger.unwrap_inout_value(Dagger.value(arg))), spec.fargs)
+                sig = Dagger.Sch.signature(f, [args...])
                 proc = state.all_procs[p]
                 @warn "Use node, not worker id!" maxlog=1
                 pid = Dagger.root_worker_id(proc)
