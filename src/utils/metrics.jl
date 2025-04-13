@@ -1,7 +1,7 @@
-const TASK_SIGNATURE = ScopedValue{Union{Vector{DataType}, Nothing}}(nothing)
+const TASK_SIGNATURE = ScopedValue{Union{Signature, Nothing}}(nothing)
 struct SignatureMetric <: MT.AbstractMetric end
 MT.metric_applies(::SignatureMetric, ::Val{:execute!}) = true
-MT.metric_type(::SignatureMetric) = Union{Vector{DataType}, Nothing}
+MT.metric_type(::SignatureMetric) = Union{Signature, Nothing}
 MT.start_metric(::SignatureMetric) = nothing
 MT.stop_metric(::SignatureMetric, _) = TASK_SIGNATURE[]
 

@@ -93,8 +93,8 @@ struct LookupSubtype{M<:AbstractMetric,T} <: AbstractLookup
     supertype::Type{T}
 end
 lookup_match_metric(l::LookupSubtype, metric::AbstractMetric) = l.metric == metric
-lookup_match_value(l::LookupSubtype{M,T}, ::Type{T}) where {M,T} = true
-lookup_match_value(l::LookupSubtype{M,T1}, ::Type{T2}) where {M,T1,T2} = false
+lookup_match_value(l::LookupSubtype{M,T}, ::T) where {M,T} = true
+lookup_match_value(l::LookupSubtype{M,T1}, ::T2) where {M,T1,T2} = false
 
 struct LookupCustom{M<:AbstractMetric,F} <: AbstractLookup
     metric::M

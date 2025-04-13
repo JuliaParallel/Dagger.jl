@@ -805,6 +805,7 @@ struct TaskSpec
     Tf::Type
     data::Vector{Argument}
     options::Options
+    sig::Dagger.Signature
     ctx_vars::NamedTuple
     sch_handle::SchedulerHandle
     sch_uid::UInt64
@@ -850,7 +851,7 @@ function fire_tasks!(ctx, task_loc::ScheduleTaskLocation, task_specs::Vector{Sch
             arg.value = unwrap_weak_checked(Dagger.value(arg))
         end
         Tf = chunktype(first(args))
-
+        sig = signature(state, thunk)
         @assert (options.single === nothing) || (gproc.pid == options.single)
         # TODO: Set `sch_handle.tid.ref` to the right `DRef`
         sch_handle = SchedulerHandle(ThunkID(thunk.id, nothing), state.worker_chans[gproc.pid]...)
@@ -859,7 +860,7 @@ function fire_tasks!(ctx, task_loc::ScheduleTaskLocation, task_specs::Vector{Sch
         push!(to_send, TaskSpec(
             thunk.id,
             task_spec.est_time_util, task_spec.est_alloc_util, task_spec.est_occupancy,
-            task_spec.scope, Tf, args, options,
+            task_spec.scope, Tf, args, options, sig,
             (log_sink=ctx.log_sink, profile=ctx.profile),
             sch_handle, state.uid))
     end
@@ -1478,12 +1479,6 @@ function do_task(to_proc, task::TaskSpec)
         end
     end
 
-    # Compute signature
-    @warn "Fix kwargs" maxlog=1
-    sig = DataType[Tf, map(fetched_args) do x
-        chunktype(x)
-    end...]
-
     #= FIXME: If MaxUtilization, stop processors and wait
     if (est_time_util isa MaxUtilization) && (real_time_util > 0)
         # FIXME: Stop processors
@@ -1520,7 +1515,7 @@ function do_task(to_proc, task::TaskSpec)
 
         result = Dagger.with_options(propagated) do
             # Execute
-            @with Dagger.TASK_SIGNATURE=>sig Dagger.TASK_PROCESSOR=>to_proc begin
+            @with Dagger.TASK_SIGNATURE=>task.sig Dagger.TASK_PROCESSOR=>to_proc begin
                 MT.@with_metrics mspec Dagger :execute! thunk_id MT.SyncInto(local_cache) begin
                     execute!(to_proc, f, fetched_args...; fetched_kwargs...)
                 end
@@ -1567,7 +1562,7 @@ function do_task(to_proc, task::TaskSpec)
     #gc_allocd = min(max(UInt64(Base.gc_num().allocd) - UInt64(gcnum_start.allocd), UInt64(0)), UInt64(1024^4))
     @maybelog ctx timespan_finish(ctx, :compute, (;thunk_id, processor=to_proc), (;f, result=result_meta))
 
-    threadtime = MT.cache_lookup(local_cache, Dagger, :execute!, thunk_id, MT.TimeMetric())
+    threadtime = something(MT.cache_lookup(local_cache, Dagger, :execute!, thunk_id, MT.TimeMetric()))
 
     lock(TASK_SYNC) do
         real_time_util[] -= est_time_util
