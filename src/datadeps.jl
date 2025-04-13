@@ -190,7 +190,7 @@ struct DAGSpecSchedule
     DAGSpecSchedule() = new(Dict{Int, Processor}())
 end
 
-#const DAG_SPECS = Vector{DAGSpec}()
+@warn "DAG_SPECS should be an LRU cache" maxlog=1
 const DAG_SPECS = Vector{Pair{DAGSpec, DAGSpecSchedule}}()
 
 #const DAG_SCHEDULE_CACHE = Dict{DAGSpec, DAGSpecSchedule}()
