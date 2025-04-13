@@ -129,6 +129,8 @@ struct AliasingWrapper <: AbstractAliasing
     AliasingWrapper(inner::AbstractAliasing) = new(inner, hash(inner))
 end
 memory_spans(x::AliasingWrapper) = memory_spans(x.inner)
+equivalent_structure(x::AliasingWrapper, y::AliasingWrapper) =
+    x.hash == y.hash || equivalent_structure(x.inner, y.inner)
 Base.hash(x::AliasingWrapper, h::UInt64) = hash(x.hash, h)
 Base.isequal(x::AliasingWrapper, y::AliasingWrapper) = x.hash == y.hash
 will_alias(x::AliasingWrapper, y::AliasingWrapper) =
