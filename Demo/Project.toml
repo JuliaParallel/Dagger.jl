@@ -2,9 +2,17 @@
 AbstractFFTs = "621f4979-c628-5d54-868e-fcf4e3e8185c"
 Dagger = "d58978e5-989f-55fb-8d15-ea34adc7bf54"
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+DistributedNext = "fab6aee4-877b-4bac-a744-3eca44acbb6f"
 FFTW = "7a1cc6ca-52ef-59f5-83cd-3a7055c09341"
 GraphViz = "f526b714-d49f-11e8-06ff-31ed36ee7ee0"
+HiGHS = "87dc4568-4c63-4d18-b0c0-bb2238e4078b"
+JuMP = "4076af6c-e467-56ae-b986-b466b2749572"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
 Profile = "9abbd945-dff8-562f-b5e8-e1ebf5ef1b79"
 Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"
+ScopedValues = "7e506255-f358-4e82-b7e4-beb19740aa63"
+TimespanLogging = "a526e669-04d3-4846-9525-c66122c55f63"
+
+[extras]
+MemPool = "f9f48841-c794-520a-933b-121f7ba6ed94"
