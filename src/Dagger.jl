@@ -37,9 +37,11 @@ import Preferences: @load_preference, @set_preferences!
 if @load_preference("distributed-package") == "DistributedNext"
     import DistributedNext
     import DistributedNext: Future, RemoteChannel, myid, workers, nworkers, procs, remotecall, remotecall_wait, remotecall_fetch, check_same_host
+    const DistributedPackage = DistributedNext
 else
     import Distributed
     import Distributed: Future, RemoteChannel, myid, workers, nworkers, procs, remotecall, remotecall_wait, remotecall_fetch, check_same_host
+    const DistributedPackage = Distributed
 end
 
 import MacroTools: @capture
