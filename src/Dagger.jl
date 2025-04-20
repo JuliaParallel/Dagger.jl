@@ -84,6 +84,7 @@ include("stream-transfer.jl")
 
 # Array computations
 include("array/darray.jl")
+include("array/dbcarray.jl")
 include("array/alloc.jl")
 include("array/map-reduce.jl")
 include("array/copy.jl")
