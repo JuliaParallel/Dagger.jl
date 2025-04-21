@@ -1,4 +1,4 @@
-export DBCArray, DBCVector, DBCMatrix, 
+export DBCArray, DBCVector, DBCMatrix
 
 ### darray.jl
 
