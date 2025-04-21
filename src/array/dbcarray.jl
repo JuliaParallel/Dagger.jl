@@ -1,11 +1,18 @@
+export DBCArray, DBCVector, DBCMatrix, 
+
+### darray.jl
+
 mutable struct DBCArray{T,N,B,F} <: ArrayOp{T, N}
     darray::DArray{T,N,B,F}
     pdomain::AbstractArray{Dagger.Processor, N}
-    # function DArray{T,N,B,F}(domain, subdomains, chunks, partitioning::B, concat::Function) where {T,N,B,F}
-    #     new{T,N,B,F}(domain, subdomains, chunks, partitioning, concat)
+    # function DBCArray{T,N,B,F}(domain, subdomains, chunks, partitioning::B, concat::Function, pdomain) where {T,N,B,F}
+    #     new{T,N,B,F}(domain, subdomains, chunks, partitioning, concat, pdomain)
     # end
 end
 
+const WrappedDBCArray{T,N} = Union{<:DBCArray{T,N}, Transpose{<:DBCArray{T,N}}, Adjoint{<:DBCArray{T,N}}}
+const WrappedDBCMatrix{T} = WrappedDBCArray{T,2}
+const WrappedDBCVector{T} = WrappedDBCArray{T,1}
 const DBCMatrix{T} = DBCArray{T,2}
 const DBCVector{T} = DBCArray{T,1}
 
@@ -26,12 +33,6 @@ const DBCVector{T} = DBCArray{T,1}
     # _chunks[1] = chunks
     # DArray{T,N,B,typeof(concat)}(domain, _subdomains, _chunks, partitioning, concat)
 # end
-
-domain(d::DBCArray) = domain(d.darray)
-chunks(d::DBCArray) = chunks(d.darray)
-domainchunks(d::DBCArray) = domainchunks(d.darray)
-size(x::DBCArray) = size(domain(x))
-stage(ctx, c::DBCArray) = stage(ctx, c.darray)
 
 function DBCArray(A::DArray{T,N,B,F}, pdomain::AbstractArray{Dagger.Processor, N}) where {T,N,B,F}
     
@@ -54,6 +55,13 @@ function DBCArray(A::DArray{T,N,B,F}, pdomain::AbstractArray{Dagger.Processor, N
     return DBCArray{T,N,B,F}(A_copy, pdomain)
 end
 
+domain(d::DBCArray) = domain(d.darray)
+chunks(d::DBCArray) = chunks(d.darray)
+domainchunks(d::DBCArray) = domainchunks(d.darray)
+size(x::DBCArray) = size(domain(x))
+stage(ctx, c::DBCArray) = stage(ctx, c.darray)
+pdomain(A::DBCArray) = A.pdomain
+
 function Base.collect(d::DBCArray; tree=false)
     return collect(d.darray; tree=tree)
 end
@@ -74,49 +82,24 @@ function Base.show(io::IO, ::MIME"text/plain", A::DBCArray{T,N,B,F}) where {T,N,
     Base.print_array(IOContext(io, :compact=>true), ColorArray(A.darray))
 end
 
-# function (==)(x::ArrayOp, y::ArrayOp)
-#     x === y || reduce((a,b)->a&&b, map(==, x, y))
-# end
-
-# function Base.hash(x::ArrayOp, i::UInt)
-#     7*objectid(x)-2
-# end
-
-# function Base.isequal(x::ArrayOp, y::ArrayOp)
-#     x === y
+# function Base.similar(A::DArray{T,N} where T, ::Type{S}, dims::Dims{N}) where {S,N}
+#     d = ArrayDomain(map(x->1:x, dims))
+#     p = A.partitioning
+#     a = AllocateArray(S, AllocateUndef{S}(), false, d, partition(p, d), p)
+#     return _to_darray(a)
 # end
 
 Base.copy(x::DBCArray{T,N,B,F}) where {T,N,B,F} =  DBCArray{T,N,B,F}(x.darray, x.pdomain)
 
 Base.:(/)(x::DBCArray{T,N,B,F}, y::U) where {T<:Real, U<:Real, N, B, F} = DBCArray(x.darray / y, x.pdomain)
 
-# Base.fetch(c::DBCArray{T,N,B,F}) where {T,N,B,F} = c
-
-auto_blocks(A::DBCArray{T,N,B,F}) where {T,N,B,F} = auto_blocks(size(A))
-
-# distribute(A::AbstractArray) = distribute(A, AutoBlocks())
-# distribute(A::AbstractArray{T,N}, dist::Blocks{N}) where {T,N} =
-#     _to_darray(Distribute(dist, A))
-# distribute(A::AbstractArray, ::AutoBlocks) = distribute(A, auto_blocks(A))
-# function distribute(x::AbstractArray{T,N}, n::NTuple{N}) where {T,N}
-#     p = map((d, dn)->ceil(Int, d / dn), size(x), n)
-#     distribute(x, Blocks(p))
+# function Base.view(c::DArray, d)
+#     subchunks, subdomains = lookup_parts(c, chunks(c), domainchunks(c), d)
+#     d1 = alignfirst(d)
+#     DArray(eltype(c), d1, subdomains, subchunks, c.partitioning, c.concat)
 # end
-# distribute(x::AbstractVector, n::Int) = distribute(x, (n,))
-# distribute(x::AbstractVector, n::Vector{<:Integer}) =
-#     distribute(x, DomainBlocks((1,), (cumsum(n),)))
 
-# DVector(A::AbstractVector{T}, part::Blocks{1}) where T = distribute(A, part)
-# DMatrix(A::AbstractMatrix{T}, part::Blocks{2}) where T = distribute(A, part)
-# DArray(A::AbstractArray{T,N}, part::Blocks{N}) where {T,N} = distribute(A, part)
-
-# DVector(A::AbstractVector{T}) where T = DVector(A, AutoBlocks())
-# DMatrix(A::AbstractMatrix{T}) where T = DMatrix(A, AutoBlocks())
-# DArray(A::AbstractArray) = DArray(A, AutoBlocks())
-
-# DVector(A::AbstractVector{T}, ::AutoBlocks) where T = DVector(A, auto_blocks(A))
-# DMatrix(A::AbstractMatrix{T}, ::AutoBlocks) where T = DMatrix(A, auto_blocks(A))
-# DArray(A::AbstractArray, ::AutoBlocks) = DArray(A, auto_blocks(A))
+# Base.fetch(c::DBCArray{T,N,B,F}) where {T,N,B,F} = c
 
 # function Base.:(==)(x::ArrayOp{T,N}, y::AbstractArray{S,N}) where {T,S,N}
 #     collect(x) == y
@@ -142,9 +125,7 @@ end
 # end
 
 
-const WrappedDBCArray{T,N} = Union{<:DBCArray{T,N}, Transpose{<:DBCArray{T,N}}, Adjoint{<:DBCArray{T,N}}}
-const WrappedDBCMatrix{T} = WrappedDBCArray{T,2}
-const WrappedDBCVector{T} = WrappedDBCArray{T,1}
+### matrix.jl
 
 function copydiag(f, A::DBCArray{T, 2}) where T
     Ac = A.darray.chunks
@@ -170,6 +151,8 @@ Base.collect(A::Transpose{T, <:DBCArray{T, 2}}) where T = collect(copy(A))
 # Base.power_by_squaring(x::DBCArray{T,N,B,F}, i::Int) where {T,N,B,F} = foldl(*, ntuple(_ -> x, i))
 
 
+# indexing.jl
+
 Base.getindex(A::DBCArray{T,N}, idx::NTuple{N,Int}) where {T,N} = getindex(A.darray, idx)
 
 Base.getindex(A::DBCArray, idx::Integer...) = getindex(A.darray, idx)
@@ -182,12 +165,3 @@ Base.setindex!(A::DBCArray, value, idx::Integer...) = setindex!(A.darray, value,
 Base.setindex!(A::DArray, value, idx::Integer) = setindex!(A.darray, value,idx)
 Base.setindex!(A::DArray, value, idx::CartesianIndex) = setindex!(A.darray, value, idx)
 Base.setindex!(A::DBCArray{T,N}, value, idxs::Dims{S}) where {T,N,S} = setindex!(A.darray, value, idxs)
-
-
-# function Base.zero(x::DBCArray{T,N}) where {T,N}
-#     dims = ntuple(i->x.domain.indexes[i].stop, N)
-#     sd = first(x.subdomains)
-#     part_size = ntuple(i->sd.indexes[i].stop, N)
-#     a = zeros(Blocks(part_size...), T, dims)
-#     return _to_darray(a)
-# end
