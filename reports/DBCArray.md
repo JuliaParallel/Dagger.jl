@@ -281,7 +281,7 @@ Then, define `pdomain` as a 2×2 matrix of Dagger processors for block-cyclic di
 Create a `DBCArray` using the constructor with a random matrix:
 
 ```julia
-A = rand(Blocks(3, 3), 15, 15)
+A = rand(Blocks(3, 3), 15, 15);
 Adbc = DBCArray(A, pdomain);
 ```
 
@@ -295,10 +295,10 @@ Use the available utility functions to query properties:
 
 ```julia
 domain(Adbc)        # Returns the domain of the array
-chunks(Adbc)        # Returns the individual blocks
-domainchunks(Adbc)  # Returns domain-specific chunk mapping
+Dagger.chunks(Adbc)        # Returns the individual blocks
+Dagger.domainchunks(Adbc)  # Returns domain-specific chunk mapping
 size(Adbc)          # Returns array size
-pdomain(Adbc)       # Returns processor domain
+Dagger.pdomain(Adbc)       # Returns processor domain
 ```
 
 Use standard Base methods similar to how they work with DArray:
