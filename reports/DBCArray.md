@@ -6,7 +6,7 @@
 
 ## Main Goal
 
-The objective of this project was to add distributed linear algebra capabilities to Dagger.jl. This involved implementing operations such as matrix multiplication and factorizations using various data distribution schemes (cyclic, block-cyclic, 2D, 3D) that can run efficiently across multiple devices using the Dagger.jl APIs.
+The objective of this project is to add distributed linear algebra capabilities to Dagger.jl. This involved implementing operations such as matrix multiplication and factorizations using various data distribution schemes (cyclic, block-cyclic, 2D, 3D) that can run efficiently across multiple devices using the Dagger.jl APIs.
 
 ## Steps Toward Implementation
 
