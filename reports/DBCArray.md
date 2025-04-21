@@ -2,7 +2,7 @@
 
 **Author**: Akhil Akkapelli
 
-**Mentor**: Julian Samaroo
+**Mentor**: Julian Samaroo, Rabab Alomairy
 
 ## Main Goal
 
