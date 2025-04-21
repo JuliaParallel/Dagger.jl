@@ -343,6 +343,10 @@ A = rand(Blocks(3, 3), 15, 15)
 Adbc = Dagger.DBCArray(A, pdomain)
 
 @everywhere logs = Dagger.fetch_logs!()
+
+open(raw"graph.dot", "w") do io
+    Dagger.show_logs(io, logs, :graphviz; disconnected=true)
+end
 ```
 
 However, the DOT graph generated didn't show processor assignment visually.
