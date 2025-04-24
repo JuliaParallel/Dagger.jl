@@ -47,6 +47,10 @@ function project(a::ArrayDomain, b::ArrayDomain)
     end |> ArrayDomain
 end
 
+function getindex(a::ArrayDomain, b::ArrayDomain)
+    ArrayDomain(map(getindex, indexes(a), indexes(b)))
+end
+
 """
     alignfirst(a) -> ArrayDomain
 
@@ -144,7 +148,8 @@ const DMatrix{T} = DArray{T,2}
 const DVector{T} = DArray{T,1}
 
 # mainly for backwards-compatibility
-DArray{T, N}(domain, subdomains, chunks, partitioning, concat=cat) where {T,N} = DArray(T, domain, subdomains, chunks, partitioning, concat)
+DArray{T, N}(domain, subdomains, chunks, partitioning, concat=cat) where {T,N} = 
+    DArray(T, domain, subdomains, chunks, partitioning, concat)
 
 function DArray(T, domain::DArrayDomain{N},
                 subdomains::AbstractArray{DArrayDomain{N}, N},
@@ -155,7 +160,6 @@ end
 function DArray(T, domain::DArrayDomain{N},
                 subdomains::DArrayDomain{N},
                 chunks::Any, partitioning::B, concat=cat) where {N,B<:AbstractSingleBlocks{N}}
-
     _subdomains = Array{DArrayDomain{N}, N}(undef, ntuple(i->1, N)...)
     _subdomains[1] = subdomains
     _chunks = Array{Any, N}(undef, ntuple(i->1, N)...)
@@ -163,11 +167,21 @@ function DArray(T, domain::DArrayDomain{N},
     DArray{T,N,B,typeof(concat)}(domain, _subdomains, _chunks, partitioning, concat)
 end
 
+# function DArray(d::DArray, assignment::Symbol= :arbitrary)
+#     if dist_type == :arbitrary
+#         DArray(d)
+#     elseif dist_type == :blockcyclic
+#         DArray(d)
+#     else
+#         error("Unknown assignment: $assignment, can be :arbitrary or :blockcyclic")
+#     end
+# end
+
 domain(d::DArray) = d.domain
 chunks(d::DArray) = d.chunks
 domainchunks(d::DArray) = d.subdomains
 size(x::DArray) = size(domain(x))
-stage(ctx, c::DArray) =  c
+stage(ctx, c::DArray) = c
 
 function Base.collect(d::DArray; tree=false)
     a = fetch(d)
