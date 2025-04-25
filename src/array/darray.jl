@@ -148,7 +148,7 @@ const DMatrix{T} = DArray{T,2}
 const DVector{T} = DArray{T,1}
 
 # mainly for backwards-compatibility
-DArray{T, N}(domain, subdomains, chunks, partitioning, concat=cat) where {T,N} = 
+DArray{T, N}(domain, subdomains, chunks, partitioning, concat=cat) where {T,N} =
     DArray(T, domain, subdomains, chunks, partitioning, concat)
 
 function DArray(T, domain::DArrayDomain{N},
@@ -166,16 +166,6 @@ function DArray(T, domain::DArrayDomain{N},
     _chunks[1] = chunks
     DArray{T,N,B,typeof(concat)}(domain, _subdomains, _chunks, partitioning, concat)
 end
-
-# function DArray(d::DArray, assignment::Symbol= :arbitrary)
-#     if dist_type == :arbitrary
-#         DArray(d)
-#     elseif dist_type == :blockcyclic
-#         DArray(d)
-#     else
-#         error("Unknown assignment: $assignment, can be :arbitrary or :blockcyclic")
-#     end
-# end
 
 domain(d::DArray) = d.domain
 chunks(d::DArray) = d.chunks
@@ -217,7 +207,6 @@ Base.wait(A::DArray) = foreach(wait, A.chunks)
     end
 else
 =#
-
     struct ColorElement{T}
         color::Symbol
         value::Union{Some{T},Nothing}
@@ -328,7 +317,8 @@ function Base.similar(A::DArray{T,N} where T, ::Type{S}, dims::Dims{N}) where {S
     return _to_darray(a)
 end
 
-Base.copy(x::DArray{T,N,B,F}) where {T,N,B,F} = map(identity, x)::DArray{T,N,B,F}
+Base.copy(x::DArray{T,N,B,F}) where {T,N,B,F} =
+    map(identity, x)::DArray{T,N,B,F}
 
 # Because OrdinaryDiffEq uses `Base.promote_op(/, ::DArray, ::Real)`
 Base.:(/)(x::DArray{T,N,B,F}, y::U) where {T<:Real,U<:Real,N,B,F} =
@@ -429,7 +419,7 @@ struct Distribute{T,N,B<:AbstractBlocks} <: ArrayOp{T, N}
     domainchunks
     partitioning::B
     data::AbstractArray{T,N}
-    pgrid::Union{AbstractArray{<:Processor, N}, Nothing}
+    procgrid::Union{AbstractArray{<:Processor, N}, Nothing}
 end
 
 size(x::Distribute) = size(domain(x.data))
@@ -437,19 +427,18 @@ size(x::Distribute) = size(domain(x.data))
 Base.@deprecate BlockPartition Blocks
 
 
-Distribute(p::Blocks, data::AbstractArray, pgrid::Union{AbstractArray{<:Processor},Nothing} = nothing) =
-    Distribute(partition(p, domain(data)), p, data, pgrid)
+Distribute(p::Blocks, data::AbstractArray, procgrid::Union{AbstractArray{<:Processor},Nothing} = nothing) =
+    Distribute(partition(p, domain(data)), p, data, procgrid)
 
-function Distribute(domainchunks::DomainBlocks{N}, data::AbstractArray{T,N}, pgrid::Union{AbstractArray{<:Processor, N},Nothing} = nothing) where {T,N}
+function Distribute(domainchunks::DomainBlocks{N}, data::AbstractArray{T,N}, procgrid::Union{AbstractArray{<:Processor, N},Nothing} = nothing) where {T,N}
     p = Blocks(ntuple(i->first(domainchunks.cumlength[i]), N))
-    Distribute(domainchunks, p, data, pgrid)
+    Distribute(domainchunks, p, data, procgrid)
 end
 
-function Distribute(data::AbstractArray{T,N}, pgrid::Union{AbstractArray{<:Processor, N},Nothing} = nothing) where {T,N}
-    nprocs = sum(w->length(Dagger.get_processors(OSProc(w))),
-                 procs())
+function Distribute(data::AbstractArray{T,N}, procgrid::Union{AbstractArray{<:Processor, N},Nothing} = nothing) where {T,N}
+    nprocs = sum(w->length(get_processors(OSProc(w))),procs())
     p = Blocks(ntuple(i->max(cld(size(data, i), nprocs), 1), N))
-    return Distribute(partition(p, domain(data)), p, data, pgrid)
+    return Distribute(partition(p, domain(data)), p, data, procgrid)
 end
 
 function stage(ctx::Context, d::Distribute)
@@ -466,6 +455,8 @@ function stage(ctx::Context, d::Distribute)
             idx = d.domainchunks[I]
             chunks = stage(ctx, x[idx]).chunks
             shape = size(chunks)
+            # TODO: fix hashing
+            #hash = uhash(idx, Base.hash(Distribute, Base.hash(d.data)))
             Dagger.spawn(shape, chunks...) do shape, parts...
                 if prod(shape) == 0
                     return Array{T}(undef, shape)
@@ -477,11 +468,13 @@ function stage(ctx::Context, d::Distribute)
         end
     else
         cs = map(CartesianIndices(d.domainchunks)) do I
+            # TODO: fix hashing
+            #hash = uhash(c, Base.hash(Distribute, Base.hash(d.data)))
             c = d.domainchunks[I]
-            if isnothing(d.pgrid)
+            if isnothing(d.procgrid)
                 Dagger.@spawn identity(d.data[c])
             else
-                proc =  d.pgrid[CartesianIndex(mod1.(Tuple(I), size(d.pgrid))...)]
+                proc =  d.procgrid[CartesianIndex(mod1.(Tuple(I), size(d.procgrid))...)]
                 scope = ExactScope(proc)
                 Dagger.@spawn scope=scope Dagger.tochunk(d.data[c], proc, scope)
             end
@@ -495,7 +488,6 @@ function stage(ctx::Context, d::Distribute)
                   d.partitioning)
 end
 
-
 """
     AutoBlocks
 
@@ -503,34 +495,38 @@ Automatically determines the size and number of blocks for a distributed array.
 This may construct any kind of `Dagger.AbstractBlocks` partitioning.
 """
 struct AutoBlocks end
-    function auto_blocks(dims::Dims{N}) where N
-        # TODO: Allow other partitioning schemes
-        p = N > 0 ? cld(dims[end], num_processors()) : 1
-        return Blocks(ntuple(i->i == N ? p : dims[i], N))
-    end
-
-
+function auto_blocks(dims::Dims{N}) where N
+    # TODO: Allow other partitioning schemes
+    np = num_processors()
+    p = N > 0 ? cld(dims[end], np) : 1
+    return Blocks(ntuple(i->i == N ? p : dims[i], N))
+end
 auto_blocks(A::AbstractArray{T,N}) where {T,N} = auto_blocks(size(A))
 
-distribute(A::AbstractArray, assignment::Union{Symbol, AbstractArray{<:Int}, AbstractArray{<:Processor}} = :arbitrary) = distribute(A, AutoBlocks(); assignment)
+distribute(A::AbstractArray, assignment::Union{Symbol, AbstractArray{<:Int}, AbstractArray{<:Processor}} = :arbitrary) = distribute(A, AutoBlocks(), assignment)
 function distribute(A::AbstractArray{T,N}, dist::Blocks{N}, assignment::Union{Symbol, AbstractArray{<:Int, N}, AbstractArray{<:Processor, N}} = :arbitrary) where {T,N} 
-    pgrid = nothing
+    procgrid = nothing
     if assignment isa Symbol
         if assignment == :arbitrary
-            pgrid = nothing
+            procgrid = nothing
         elseif assignment == :blockcyclic
             p = ntuple(i -> i == N ? num_processors() : 1, N)
-            pgrid = reshape([only(Dagger.get_processors(OSProc(i))) for i in procs()], p)
+            procgrid = reshape([proc for i in procs() for proc in get_processors(OSProc(i))], p)
         else
             error("Unsupported assignment symbol: $assignment, use :arbitrary or :blockcyclic")
         end
     elseif assignment isa AbstractArray{<:Int, N}
-        pgrid = [only(Dagger.get_processors(OSProc(assignment[I]))) for I in CartesianIndices(assignment)]
+        missingprocs = filter(p -> p ∉ procs(), assignment)
+        isempty(missingprocs) || error("Missing processors: $missingprocs")
+        procgrid = [first(get_processors(OSProc(proc))) for proc in assignment]
     elseif assignment isa AbstractArray{<:Processor, N}
-        pgrid = assignment
+        availprocs = [proc for i in procs() for proc in get_processors(OSProc(i))]
+        missingprocs = filter(p -> p ∉ availprocs, assignment)
+        isempty(missingprocs) || error("Missing processors: $missingprocs")
+        procgrid = assignment
     end
 
-    return _to_darray(Distribute(dist, A, pgrid))
+    return _to_darray(Distribute(dist, A, procgrid))
 end
 
 distribute(A::AbstractArray, ::AutoBlocks, assignment::Union{Symbol, AbstractArray{<:Int}, AbstractArray{<:Processor}} = :arbitrary) = distribute(A, auto_blocks(A), assignment)
