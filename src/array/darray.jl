@@ -430,11 +430,6 @@ struct Distribute{T,N,B<:AbstractBlocks} <: ArrayOp{T, N}
     partitioning::B
     data::AbstractArray{T,N}
     pgrid::Union{AbstractArray{<:Processor, N}, Nothing}
-
-    function Distribute(domainchunks, partitioning::B, data::AbstractArray{T,N}, pgrid::Union{AbstractArray{<:Processor, N}, Nothing} = nothing) where {T,N,B<:AbstractBlocks}
-        new{T,N,B}(domainchunks, partitioning, data, pgrid)
-    end
-
 end
 
 size(x::Distribute) = size(domain(x.data))
