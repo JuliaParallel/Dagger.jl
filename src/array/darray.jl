@@ -486,7 +486,9 @@ function stage(ctx::Context, d::Distribute)
             if isnothing(d.pgrid)
                 Dagger.@spawn identity(d.data[c])
             else
-                Dagger.@spawn scope=ExactScope(d.pgrid[CartesianIndex(mod1.(Tuple(I), size(d.pgrid))...)]) Dagger.tochunk(d.data[c], d.pgrid[CartesianIndex(mod1.(Tuple(I), size(d.pgrid))...)], ExactScope(d.pgrid[CartesianIndex(mod1.(Tuple(I), size(d.pgrid))...)]))
+                proc =  d.pgrid[CartesianIndex(mod1.(Tuple(I), size(d.pgrid))...)]
+                scope = ExactScope(proc)
+                Dagger.@spawn scope=scope Dagger.tochunk(d.data[c], proc, scope)
             end
         end
     end
@@ -515,8 +517,8 @@ struct AutoBlocks end
 
 auto_blocks(A::AbstractArray{T,N}) where {T,N} = auto_blocks(size(A))
 
-distribute(A::AbstractArray, assignment::Union{Symbol, AbstractArray{<:Int}, AbstractArray{<:Processor}}) = distribute(A, AutoBlocks(); assignment)
-function distribute(A::AbstractArray{T,N}, dist::Blocks{N}, assignment::Union{Symbol, AbstractArray{<:Int, N}, AbstractArray{<:Processor, N}}) where {T,N} 
+distribute(A::AbstractArray, assignment::Union{Symbol, AbstractArray{<:Int}, AbstractArray{<:Processor}} = :arbitrary) = distribute(A, AutoBlocks(); assignment)
+function distribute(A::AbstractArray{T,N}, dist::Blocks{N}, assignment::Union{Symbol, AbstractArray{<:Int, N}, AbstractArray{<:Processor, N}} = :arbitrary) where {T,N} 
     pgrid = nothing
     if assignment isa Symbol
         if assignment == :arbitrary
@@ -536,7 +538,7 @@ function distribute(A::AbstractArray{T,N}, dist::Blocks{N}, assignment::Union{Sy
     return _to_darray(Distribute(dist, A, pgrid))
 end
 
-distribute(A::AbstractArray, ::AutoBlocks, assignment::Union{Symbol, AbstractArray{<:Int}, AbstractArray{<:Processor}}) = distribute(A, auto_blocks(A), assignment)
+distribute(A::AbstractArray, ::AutoBlocks, assignment::Union{Symbol, AbstractArray{<:Int}, AbstractArray{<:Processor}} = :arbitrary) = distribute(A, auto_blocks(A), assignment)
 function distribute(x::AbstractArray{T,N}, n::NTuple{N}, assignment::Union{Symbol, AbstractArray{<:Int, N}, AbstractArray{<:Processor, N}} = :arbitrary) where {T,N}
     p = map((d, dn)->ceil(Int, d / dn), size(x), n)
     distribute(x, Blocks(p), assignment)
