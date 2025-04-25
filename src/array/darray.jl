@@ -511,14 +511,16 @@ function distribute(A::AbstractArray{T,N}, dist::Blocks{N}, assignment::Union{Sy
             procgrid = nothing
         elseif assignment == :blockcyclic
             p = ntuple(i -> i == N ? num_processors() : 1, N)
-            procgrid = reshape([proc for i in procs() for proc in get_processors(OSProc(i))], p)
+            availprocs = [proc for i in procs() for proc in get_processors(OSProc(i))]
+            sortedavailprocs = sort!(availprocs, by = x -> (x.owner, x.tid)) 
+            procgrid = reshape(sortedavailprocs, p)
         else
             error("Unsupported assignment symbol: $assignment, use :arbitrary or :blockcyclic")
         end
     elseif assignment isa AbstractArray{<:Int, N}
         missingprocs = filter(p -> p ∉ procs(), assignment)
         isempty(missingprocs) || error("Missing processors: $missingprocs")
-        procgrid = [first(get_processors(OSProc(proc))) for proc in assignment]
+        procgrid = [Dagger.ThreadProc(proc, 1) for proc in assignment]
     elseif assignment isa AbstractArray{<:Processor, N}
         availprocs = [proc for i in procs() for proc in get_processors(OSProc(i))]
         missingprocs = filter(p -> p ∉ availprocs, assignment)
