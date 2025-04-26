@@ -211,6 +211,165 @@ across the workers in the Julia cluster in a relatively even distribution;
 future operations on a `DArray` may produce a different distribution from the
 one chosen by previous calls.
 
+<!--  -->
+
+### Explicit Processor Mapping of DArray Blocks
+
+This feature allows you to control how `DArray` blocks (chunks) are assigned to specific processors or threads within the cluster. Fine-grained control over data locality can be crucial for optimizing the performance of certain distributed algorithms.
+
+You specify the mapping using the optional `assignment` keyword argument in the `DArray` constructor functions (`DArray`, `DVector`, and `DMatrix`) and the `distribute` function.
+
+The `assignment` argument accepts the following values:
+
+* `:arbitrary` (Default):
+
+    * If `assignment` is not provided or is set to symbol `:arbitrary`, Dagger's scheduler assigns blocks to processors automatically. This is the default behavior.
+* `:blockcyclic`:
+
+    * If `assignment` is set to `:blockcyclic`, `DArray` blocks are assigned to processors in a block-cyclic manner. Blocks are distributed cyclically across processors, iterating through the processors in increasing rank along the *last* dimension of the block distribution.
+    * Any other symbol used for `assignment` results in an error.
+* `AbstractArray{<:Int, N}`:
+
+    * Provide an N-dimensional array of integer worker IDs. The dimension `N` must match the number of dimensions of the `DArray`.
+    * Dagger maps blocks to worker IDs in a block-cyclic manner. The block at index `(i, j, ...)` is assigned to the first thread of the processor with ID `assignment[i, j, ...]`. This pattern repeats in a block-cyclic fashion to assign all blocks.
+* `AbstractArray{<:Processor, N}`:
+
+    * Provide an N-dimensional array of `Processor` objects. The dimension `N` must match the number of dimensions of the `DArray` blocks.
+    * Blocks are mapped in a block-cyclic manner according to the `Processor` objects in the `assignment` array. The block at index `(i, j, ...)` is assigned to the processor at `assignment[i, j, ...]`. This pattern repeats in a block-cyclic fashion to assign all blocks.
+
+####   Examples and Usage
+
+The `assignment` argument works similarly for `DArray`, `DVector`, and `DMatrix`, as well as the `distribute` function. The key difference lies in the dimensionality of the resulting distributed array:
+
+* `DArray`: For N-dimensional distributed arrays.
+
+* `DVector`: Specifically for 1-dimensional distributed arrays.
+
+* `DMatrix`: Specifically for 2-dimensional distributed arrays.
+
+* `distribute`: General function to distribute arrays.
+
+Here are some examples using a setup with one processor and three worker processors.
+
+First, let's create some sample arrays:
+
+```julia
+A = rand(7, 11)   # 2D array
+v = rand(15)      # 1D array
+M = rand(5, 5, 5) # 3D array
+```
+
+1.  **Arbitrary Assignment:**
+
+    ```julia
+    Ad = distribute(A, Blocks(2, 2), :arbitrary)
+    # DMatrix(A, Blocks(2, 2), :arbitrary)
+
+    vd = distribute(v, Blocks(3), :arbitrary) 
+    # DVector(v, Blocks(3), :arbitrary)
+    
+    Md = distribute(M, Blocks(2, 2, 2), :arbitrary) 
+    # DArray(M, Blocks(2,2,2), :arbitrary)
+    ```
+
+    This creates distributed arrays with the specified block sizes, and Dagger assigns the blocks to processors arbitrarily. For example, the assignment for `Ad` might look like this:
+
+    ```julia
+    4×6 Matrix{Dagger.ThreadProc}:
+      ThreadProc(4, 1)  ThreadProc(3, 1)  ThreadProc(3, 1)  ThreadProc(2, 1) ThreadProc(4, 1)  ThreadProc(3, 1)
+      ThreadProc(3, 1)  ThreadProc(4, 1)  ThreadProc(3, 1)  ThreadProc(4, 1)  ThreadProc(2, 1)  ThreadProc(2, 1)
+      ThreadProc(2, 1)  ThreadProc(2, 1)  ThreadProc(2, 1)  ThreadProc(3, 1)  ThreadProc(4, 1)  ThreadProc(4, 1)
+      ThreadProc(2, 1)  ThreadProc(4, 1)  ThreadProc(4, 1)  ThreadProc(3, 1)  ThreadProc(2, 1)  ThreadProc(3, 1)
+    
+    ```
+
+2.  **Block-Cyclic Assignment:**
+
+    ```julia
+    Ad = distribute(A, Blocks(2, 2), :blockcyclic) 
+    # DMatrix(A, Blocks(2, 2), :blockcyclic)
+    
+    vd = distribute(v, Blocks(3), :blockcyclic) 
+    # DVector(v, Blocks(3), :blockcyclic)
+
+    Md = distribute(M, Blocks(2, 2, 2), :blockcyclic) 
+    # DArray(M, Blocks(2,2,2), :blockcyclic)
+    ```
+
+    This assigns blocks cyclically along the last dimension across the available processors with increasing rank.  For the 2D case (`Ad`), the assignment will look like this:
+
+    ```julia
+    4×6 Matrix{Dagger.ThreadProc}:
+      ThreadProc(1, 1)  ThreadProc(2, 1)  ThreadProc(3, 1)  ThreadProc(4, 1)  ThreadProc(1, 1)  ThreadProc(2, 1)
+      ThreadProc(1, 1)  ThreadProc(2, 1)  ThreadProc(3, 1)  ThreadProc(4, 1)  ThreadProc(1, 1)  ThreadProc(2, 1)
+      ThreadProc(1, 1)  ThreadProc(2, 1)  ThreadProc(3, 1)  ThreadProc(4, 1)  ThreadProc(1, 1)  ThreadProc(2, 1)
+      ThreadProc(1, 1)  ThreadProc(2, 1)  ThreadProc(3, 1)  ThreadProc(4, 1)  ThreadProc(1, 1)  ThreadProc(2, 1)
+    
+    ```
+
+3.  **Block-Cyclic Assignment with Integer Array:**
+
+    ```julia
+    assignment_2d = [3 1; 4 2]
+    Ad = distribute(A, Blocks(2, 2), assignment_2d) 
+    # DMatrix(A, Blocks(2, 2), [3 1; 4 2])
+    
+    assignment_1d = [2,3,1,4]
+    vd = distribute(v, Blocks(3), assignment_1d) 
+    # DVector(v, Blocks(3), [2,3,1,4])
+    
+    assignment_3d = cat([1 2; 3 4], [4 3; 2 1], dims=3)
+    Md = distribute(M, Blocks(2, 2, 2), assignment_3d) 
+    # DArray(M, Blocks(2, 2, 2), cat([1 2; 3 4], [4 3; 2 1], dims=3))
+    
+    ```
+
+    Here, the assignment arrays define how processors are arranged.  For example, `assignment_2d` creates a 2x2 processor grid for the 2D array.
+
+    The assignment for `Ad` would be:
+
+    ```julia
+    4×6 Matrix{Dagger.ThreadProc}:
+      ThreadProc(3, 1)  ThreadProc(1, 1)  ThreadProc(3, 1)  ThreadProc(1, 1)  ThreadProc(3, 1)  ThreadProc(1, 1)
+      ThreadProc(2, 1)  ThreadProc(4, 1)  ThreadProc(2, 1)  ThreadProc(4, 1)  ThreadProc(2, 1)  ThreadProc(4, 1)
+      ThreadProc(3, 1)  ThreadProc(1, 1)  ThreadProc(3, 1)  ThreadProc(1, 1)  ThreadProc(3, 1)  ThreadProc(1, 1)
+      ThreadProc(2, 1)  ThreadProc(4, 1)  ThreadProc(2, 1)  ThreadProc(4, 1)  ThreadProc(2, 1)  ThreadProc(4, 1)
+    
+    ```
+
+4.  **Block-Cyclic Assignment with Processor Array:**
+
+    ```julia
+    assignment_2d = [Dagger.ThreadProc(3, 1) Dagger.ThreadProc(1, 1);
+                     Dagger.ThreadProc(4, 1) Dagger.ThreadProc(2, 1)]
+    Ad = distribute(A, Blocks(2, 2), assignment_2d) 
+    # DMatrix(A, Blocks(2, 2), assignment_2d)
+    
+    assignment_1d = [Dagger.ThreadProc(2,1), Dagger.ThreadProc(3,1), Dagger.ThreadProc(1,1), Dagger.ThreadProc(4,1)]
+    vd = distribute(v, Blocks(3), assignment_1d) 
+    # DVector(v, Blocks(3), assignment_1d)
+    
+    assignment_3d = cat([Dagger.ThreadProc(1,1) Dagger.ThreadProc(2,1); Dagger.ThreadProc(3,1) Dagger.ThreadProc(4,1)],
+                        [Dagger.ThreadProc(4,1) Dagger.ThreadProc(3,1); Dagger.ThreadProc(2,1) Dagger.ThreadProc(1,1)], dims=3)
+    Md = distribute(M, Blocks(2, 2, 2), assignment_3d) 
+    # DArray(M, Blocks(2, 2, 2), assignment_3d)
+    
+    ```
+
+    If the assignment is a matrix of `Processor` objects, the blocks are assigned as follows:
+    For `Ad`:
+
+    ```julia
+    4×6 Matrix{Dagger.ThreadProc}:
+      ThreadProc(3, 1)  ThreadProc(1, 1)  ThreadProc(3, 1)  ThreadProc(1, 1)  ThreadProc(3, 1)  ThreadProc(1, 1)
+      ThreadProc(4, 1)  ThreadProc(2, 1)  ThreadProc(4, 1)  ThreadProc(2, 1)  ThreadProc(4, 1)  ThreadProc(2, 1)
+      ThreadProc(3, 1)  ThreadProc(1, 1)  ThreadProc(3, 1)  ThreadProc(1, 1)  ThreadProc(3, 1)  ThreadProc(1, 1)
+      ThreadProc(4, 1)  ThreadProc(2, 1)  ThreadProc(4, 1)  ThreadProc(2, 1)  ThreadProc(4, 1)  ThreadProc(2, 1)
+    
+    ```
+
+<!--  -->
+
 ## Broadcasting
 
 As the `DArray` is a subtype of `AbstractArray` and generally satisfies Julia's
