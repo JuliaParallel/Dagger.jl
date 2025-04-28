@@ -310,7 +310,7 @@ M = rand(5, 5, 5) # 3D array
 3.  **Block-Cyclic Assignment with Integer Array:**
 
     ```julia
-    assignment_2d = [3 1; 4 2]
+    assignment_2d = [2 1; 4 3]
     Ad = distribute(A, Blocks(2, 2), assignment_2d) 
     # DMatrix(A, Blocks(2, 2), [3 1; 4 2])
     
@@ -330,10 +330,10 @@ M = rand(5, 5, 5) # 3D array
 
     ```julia
     4×6 Matrix{Dagger.ThreadProc}:
-      ThreadProc(3, 1)  ThreadProc(1, 1)  ThreadProc(3, 1)  ThreadProc(1, 1)  ThreadProc(3, 1)  ThreadProc(1, 1)
-      ThreadProc(2, 1)  ThreadProc(4, 1)  ThreadProc(2, 1)  ThreadProc(4, 1)  ThreadProc(2, 1)  ThreadProc(4, 1)
-      ThreadProc(3, 1)  ThreadProc(1, 1)  ThreadProc(3, 1)  ThreadProc(1, 1)  ThreadProc(3, 1)  ThreadProc(1, 1)
-      ThreadProc(2, 1)  ThreadProc(4, 1)  ThreadProc(2, 1)  ThreadProc(4, 1)  ThreadProc(2, 1)  ThreadProc(4, 1)
+      ThreadProc(2, 1)  ThreadProc(1, 1)  ThreadProc(2, 1)  ThreadProc(1, 1)  ThreadProc(2, 1)  ThreadProc(1, 1)
+      ThreadProc(4, 1)  ThreadProc(3, 1)  ThreadProc(4, 1)  ThreadProc(3, 1)  ThreadProc(4, 1)  ThreadProc(3, 1)
+      ThreadProc(2, 1)  ThreadProc(1, 1)  ThreadProc(2, 1)  ThreadProc(1, 1)  ThreadProc(2, 1)  ThreadProc(1, 1)
+      ThreadProc(4, 1)  ThreadProc(3, 1)  ThreadProc(4, 1)  ThreadProc(3, 1)  ThreadProc(4, 1)  ThreadProc(3, 1)
     
     ```
 
