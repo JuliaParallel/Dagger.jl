@@ -203,16 +203,16 @@ end
 
 @testset "Constructor with assignment" begin
    
-  availprocs = [proc for i in procs() for proc in get_processors(OSProc(i))]
+  availprocs = [proc for i in procs() for proc in Dagger.get_processors(Dagger.OSProc(i))]
   sort!(availprocs, by = x -> (x.owner, x.tid))
   numprocs = length(availprocs)
 
 
   function chunk_processors(Ad::DArray)
-      [processor(Ad.chunks[idx].future.future.v.value[2]) for idx in CartesianIndices(size(domainchunks(Ad)))]
+      [Dagger.processor(Ad.chunks[idx].future.future.v.value[2]) for idx in CartesianIndices(size(Dagger.domainchunks(Ad)))]
   end
 
-  function tile_processors(proc_grid::AbstractArray{<:Processor,N}, block_grid::Tuple{Vararg{Int,N}}) where N
+  function tile_processors(proc_grid::AbstractArray{<:Dagger.Processor,N}, block_grid::Tuple{Vararg{Int,N}}) where N
       reps       = Int.(ceil.(block_grid ./ size(proc_grid)))
       tiled      = repeat(proc_grid, reps...)
       idx_slices = [1:block_grid[d] for d in 1:length(block_grid)]
@@ -231,18 +231,18 @@ end
   M = rand(76,118)
 
   t_blocks_a = (4,3,2)
-  d_blocks_a = Blocks(t_blocks_a)
+  d_blocks_a = Dagger.Blocks(t_blocks_a)
   blocks_a   = cld.(size(A), t_blocks_a)
 
   n_blocks_v = 3
   t_blocks_v = (n_blocks_v,)
   v_blocks_v = [n_blocks_v]
-  d_blocks_v = Blocks(t_blocks_v)
+  d_blocks_v = Dagger.Blocks(t_blocks_v)
   blocks_v   = cld.(size(v), t_blocks_v)
   blocks_nv  = blocks_v[1]
 
   t_blocks_m = (2,3)
-  d_blocks_m = Blocks(t_blocks_m)
+  d_blocks_m = Dagger.Blocks(t_blocks_m)
   blocks_m   = cld.(size(M), t_blocks_m)
 
 
@@ -266,7 +266,7 @@ end
       @test distribute(A, d_blocks_a, assignment) isa DArray  && distribute(A, blocks_a, assignment) isa DArray
       @test distribute(v, d_blocks_v, assignment) isa DVector && distribute(v, blocks_v,  assignment) isa DVector
       @test distribute(v, n_blocks_v, assignment) isa DVector
-      # @test distribute(v, v_blocks_v, assignment) isa DVector ## Failed: no method matching distribute(::Vector{Float64}, ::DomainBlocks{1}, ::Symbol)
+      # @test distribute(v, v_blocks_v, assignment) isa DVector ## )distribute(::Vector{Float64}, ::DomainBlocks{1}, ::Symbol)
       @test distribute(M, d_blocks_m, assignment) isa DMatrix && distribute(M, blocks_m, assignment) isa DMatrix
 
       @test DArray( A, d_blocks_a, assignment) isa DArray
@@ -340,21 +340,21 @@ end
     function get_random_osproc_ids(data)
       ndims_data = ndims(data)
       if     ndims_data == 3
-          return rand(procs(), 3, 2, 2)
+          return rand(Dagger.procs(), 3, 2, 2)
       elseif ndims_data == 1
-          return rand(procs(), 11)
+          return rand(Dagger.procs(), 11)
       elseif ndims_data == 2
-          return rand(procs(), 2, 5)
+          return rand(Dagger.procs(), 2, 5)
       end
     end
 
     function get_random_osprocs(proc_ids)
-      [ThreadProc(proc, 1) for proc in proc_ids]
+      [Dagger.ThreadProc(proc, 1) for proc in proc_ids]
     end
 
-    rand_osproc_ids_A = rand(procs(), 3, 2, 2)
-    rand_osproc_ids_v = rand(procs(), 11)
-    rand_osproc_ids_M = rand(procs(), 2, 5)
+    rand_osproc_ids_A = rand(Dagger.procs(), 3, 2, 2)
+    rand_osproc_ids_v = rand(Dagger.procs(), 11)
+    rand_osproc_ids_M = rand(Dagger.procs(), 2, 5)
 
     @testset "Auto Blocks" begin
 
@@ -406,9 +406,9 @@ end
 
   @testset "Explicit Processor Array Assignment (AbstractArray{<:Processor, N})" begin
 
-    rand_procs_A = reshape(availprocs[ rand(procs(),  6) ], 2, 3, 1)
-    rand_procs_v = reshape(availprocs[ rand(procs(),  5) ], 5)
-    rand_procs_M = reshape(availprocs[ rand(procs(), 14) ], 2, 7)
+    rand_procs_A = reshape(availprocs[ rand(Dagger.procs(),  6) ], 2, 3, 1)
+    rand_procs_v = reshape(availprocs[ rand(Dagger.procs(),  5) ], 5)
+    rand_procs_M = reshape(availprocs[ rand(Dagger.procs(), 14) ], 2, 7)
 
 
     @testset "Auto Blocks" begin
