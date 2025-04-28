@@ -201,6 +201,265 @@ end
     end
 end
 
+@testset "Constructor with assignment" begin
+   
+  availprocs = [proc for i in procs() for proc in get_processors(OSProc(i))]
+  sort!(availprocs, by = x -> (x.owner, x.tid))
+  numprocs = length(availprocs)
+
+
+  function chunk_processors(Ad::DArray)
+      [processor(Ad.chunks[idx].future.future.v.value[2]) for idx in CartesianIndices(size(domainchunks(Ad)))]
+  end
+
+  function tile_processors(proc_grid::AbstractArray{<:Processor,N}, block_grid::Tuple{Vararg{Int,N}}) where N
+      reps       = Int.(ceil.(block_grid ./ size(proc_grid)))
+      tiled      = repeat(proc_grid, reps...)
+      idx_slices = [1:block_grid[d] for d in 1:length(block_grid)]
+      return tiled[idx_slices...]
+  end
+
+  function get_default_blockgrid(data, numprocs)
+      ndims_data = ndims(data)
+      size_data  = size(data)
+      ntuple(i->i == ndims_data ? cld( size_data[ndims_data], cld(size_data[ndims_data], numprocs) ) : 1, ndims_data)
+  end
+
+
+  A = rand(41, 35, 12)
+  v = rand(23)
+  M = rand(76,118)
+
+  t_blocks_a = (4,3,2)
+  d_blocks_a = Blocks(t_blocks_a)
+  blocks_a   = cld.(size(A), t_blocks_a)
+
+  n_blocks_v = 3
+  t_blocks_v = (n_blocks_v,)
+  v_blocks_v = [n_blocks_v]
+  d_blocks_v = Blocks(t_blocks_v)
+  blocks_v   = cld.(size(v), t_blocks_v)
+  blocks_nv  = blocks_v[1]
+
+  t_blocks_m = (2,3)
+  d_blocks_m = Blocks(t_blocks_m)
+  blocks_m   = cld.(size(M), t_blocks_m)
+
+
+  @testset "Arbitrary Assignment (:arbitrary)" begin
+    assignment = :arbitrary
+
+    @testset "Auto Blocks" begin
+
+      @test distribute(A, assignment) isa DArray  && distribute(A, AutoBlocks(), assignment) isa DArray
+      @test distribute(v, assignment) isa DVector && distribute(v, AutoBlocks(), assignment) isa DVector
+      @test distribute(M, assignment) isa DMatrix && distribute(M, AutoBlocks(), assignment) isa DMatrix
+
+      @test DArray( A,    assignment) isa DArray  && DArray(    A, AutoBlocks(), assignment) isa DArray
+      @test DVector(v,    assignment) isa DVector && DVector(   v, AutoBlocks(), assignment) isa DVector
+      @test DMatrix(M,    assignment) isa DMatrix && DMatrix(   M, AutoBlocks(), assignment) isa DMatrix
+
+    end
+
+    @testset "Explicit Blocks" begin
+
+      @test distribute(A, d_blocks_a, assignment) isa DArray  && distribute(A, blocks_a, assignment) isa DArray
+      @test distribute(v, d_blocks_v, assignment) isa DVector && distribute(v, blocks_v,  assignment) isa DVector
+      @test distribute(v, n_blocks_v, assignment) isa DVector
+      # @test distribute(v, v_blocks_v, assignment) isa DVector ## Failed: no method matching distribute(::Vector{Float64}, ::DomainBlocks{1}, ::Symbol)
+      @test distribute(M, d_blocks_m, assignment) isa DMatrix && distribute(M, blocks_m, assignment) isa DMatrix
+
+      @test DArray( A, d_blocks_a, assignment) isa DArray
+      @test DVector(v, d_blocks_v, assignment) isa DVector
+      @test DMatrix(M, d_blocks_m, assignment) isa DMatrix
+
+    end
+
+  end
+
+
+  @testset "Blockcyclic Assignment (:blockcyclic)" begin
+    assignment = :blockcyclic
+
+    function get_default_procgrid(data, numprocs)
+      ndims_data = ndims(data)
+      reshape(availprocs, ntuple(i -> i == ndims_data ? numprocs : 1, ndims_data))
+    end
+
+    @testset "Auto Blocks" begin
+
+      dist_A_def_auto = distribute(A,               assignment); wait(dist_A_def_auto)
+      dist_A_auto_def = distribute(A, AutoBlocks(), assignment); wait(dist_A_auto_def)
+      dist_v_def_auto = distribute(v,               assignment); wait(dist_v_def_auto)
+      dist_v_auto_def = distribute(v, AutoBlocks(), assignment); wait(dist_v_auto_def)
+      dist_M_def_auto = distribute(M,               assignment); wait(dist_M_def_auto)
+      dist_M_auto_def = distribute(M, AutoBlocks(), assignment); wait(dist_M_auto_def)
+
+      darr_A_def_auto = DArray(    A,               assignment); wait(darr_A_def_auto)
+      darr_A_auto_def = DArray(    A, AutoBlocks(), assignment); wait(darr_A_auto_def)
+      dvec_v_def_auto = DVector(   v,               assignment); wait(dvec_v_def_auto)
+      dvec_v_auto_def = DVector(   v, AutoBlocks(), assignment); wait(dvec_v_auto_def)
+      dmat_M_def_auto = DMatrix(   M,               assignment); wait(dmat_M_def_auto)
+      dmat_M_auto_def = DMatrix(   M, AutoBlocks(), assignment); wait(dmat_M_auto_def)
+
+      @test chunk_processors(dist_A_def_auto) == chunk_processors(dist_A_auto_def) == chunk_processors(darr_A_def_auto) == chunk_processors(darr_A_auto_def) == tile_processors(get_default_procgrid(A, numprocs), get_default_blockgrid(A, numprocs))
+      @test chunk_processors(dist_v_def_auto) == chunk_processors(dist_v_auto_def) == chunk_processors(dvec_v_def_auto) == chunk_processors(dvec_v_auto_def) == tile_processors(get_default_procgrid(v, numprocs), get_default_blockgrid(v, numprocs))
+      @test chunk_processors(dist_M_def_auto) == chunk_processors(dist_M_auto_def) == chunk_processors(dmat_M_def_auto) == chunk_processors(dmat_M_auto_def) == tile_processors(get_default_procgrid(M, numprocs), get_default_blockgrid(M, numprocs))
+      
+    end
+
+    @testset "Explicit Blocks" begin
+
+      dist_A_exp_def     = distribute(A, d_blocks_a, assignment); wait(dist_A_exp_def)
+      dist_A_blocks_exp  = distribute(A, blocks_a,   assignment); wait(dist_A_blocks_exp)
+      dist_v_exp_def     = distribute(v, d_blocks_v, assignment); wait(dist_v_exp_def)
+      dist_v_blocks_exp  = distribute(v, blocks_v,   assignment); wait(dist_v_blocks_exp)
+      dist_v_nblocks_exp = distribute(v, blocks_nv,  assignment); wait(dist_v_nblocks_exp)
+      # dist_v_vblocks_exp = distribute(v, v_blocks_v, assignment); wait(dist_v_vblocks_exp)
+      dist_M_exp_def     = distribute(M, d_blocks_m, assignment); wait(dist_M_exp_def)
+      dist_M_blocks_exp  = distribute(M, blocks_m,   assignment); wait(dist_M_blocks_exp)
+
+      darr_A_exp_def     = DArray(    A, d_blocks_a, assignment); wait(darr_A_exp_def)
+      dvec_v_exp_def     = DVector(   v, d_blocks_v, assignment); wait(dvec_v_exp_def)
+      dmat_M_exp_def     = DMatrix(   M, d_blocks_m, assignment); wait(dmat_M_exp_def)
+
+
+      @test chunk_processors(dist_A_exp_def) == chunk_processors(dist_A_blocks_exp) == chunk_processors(darr_A_exp_def) == tile_processors(get_default_procgrid(A, numprocs), blocks_a)
+      @test chunk_processors(dist_v_exp_def) == chunk_processors(dist_v_blocks_exp) == chunk_processors(dvec_v_exp_def) == tile_processors(get_default_procgrid(v, numprocs), blocks_v)
+      @test chunk_processors(dist_v_nblocks_exp)  == tile_processors(get_default_procgrid(v, numprocs), blocks_v)
+      # @test chunk_processors(dist_v_vblocks_exp) == tile_processors(get_default_procgrid(v, numprocs), blocksv) ## Failed: no method matching distribute(::Vector{Float64}, ::DomainBlocks{1}, ::Symbol)
+      @test chunk_processors(dist_M_exp_def) == chunk_processors(dist_M_blocks_exp) == chunk_processors(dmat_M_exp_def) == tile_processors(get_default_procgrid(M, numprocs), blocks_m)
+      
+    end
+
+  end
+
+
+  @testset "OSProc ID Array Assignment (AbstractArray{<:Int, N})" begin
+
+    function get_random_osproc_ids(data)
+      ndims_data = ndims(data)
+      if     ndims_data == 3
+          return rand(procs(), 3, 2, 2)
+      elseif ndims_data == 1
+          return rand(procs(), 11)
+      elseif ndims_data == 2
+          return rand(procs(), 2, 5)
+      end
+    end
+
+    function get_random_osprocs(proc_ids)
+      [ThreadProc(proc, 1) for proc in proc_ids]
+    end
+
+    rand_osproc_ids_A = rand(procs(), 3, 2, 2)
+    rand_osproc_ids_v = rand(procs(), 11)
+    rand_osproc_ids_M = rand(procs(), 2, 5)
+
+    @testset "Auto Blocks" begin
+
+      dist_A_rand_osproc_auto = distribute(A,               rand_osproc_ids_A); wait(dist_A_rand_osproc_auto)
+      dist_A_auto_rand_osproc = distribute(A, AutoBlocks(), rand_osproc_ids_A); wait(dist_A_auto_rand_osproc)
+      # dist_v_rand_osproc_auto = distribute(v,               rand_osproc_ids_v); wait(dist_v_rand_osproc_auto)
+      dist_v_auto_rand_osproc = distribute(v, AutoBlocks(), rand_osproc_ids_v); wait(dist_v_auto_rand_osproc)
+      dist_M_rand_osproc_auto = distribute(M,               rand_osproc_ids_M); wait(dist_M_rand_osproc_auto)
+      dist_M_auto_rand_osproc = distribute(M, AutoBlocks(), rand_osproc_ids_M); wait(dist_M_auto_rand_osproc)
+
+      darr_A_rand_osproc_auto = DArray(    A,               rand_osproc_ids_A); wait(darr_A_rand_osproc_auto)
+      darr_A_auto_rand_osproc = DArray(    A, AutoBlocks(), rand_osproc_ids_A); wait(darr_A_auto_rand_osproc)
+      dvec_v_rand_osproc_auto = DVector(   v,               rand_osproc_ids_v); wait(dvec_v_rand_osproc_auto)
+      dvec_v_auto_rand_osproc = DVector(   v, AutoBlocks(), rand_osproc_ids_v); wait(dvec_v_auto_rand_osproc)
+      dmat_M_rand_osproc_auto = DMatrix(   M,               rand_osproc_ids_M); wait(dmat_M_rand_osproc_auto)
+      dmat_M_auto_rand_osproc = DMatrix(   M, AutoBlocks(), rand_osproc_ids_M); wait(dmat_M_auto_rand_osproc)
+
+      @test chunk_processors(dist_A_rand_osproc_auto) == chunk_processors(dist_A_auto_rand_osproc) == chunk_processors(darr_A_rand_osproc_auto) == chunk_processors(darr_A_auto_rand_osproc) == tile_processors(get_random_osprocs(rand_osproc_ids_A), get_default_blockgrid(A, numprocs))
+      @test                                              chunk_processors(dist_v_auto_rand_osproc) == chunk_processors(dvec_v_rand_osproc_auto) == chunk_processors(dvec_v_auto_rand_osproc) == tile_processors(get_random_osprocs(rand_osproc_ids_v), get_default_blockgrid(v, numprocs))
+      # @test chunk_processors(dist_v_rand_osproc_auto) == tile_processors(rand_osproc_ids_v, get_default_blockgrid(v, numprocs)) ## Failed: no method matching distribute(::Vector{Float64}, ::DomainBlocks{1}, ::Symbol)
+      @test chunk_processors(dist_M_rand_osproc_auto) == chunk_processors(dist_M_auto_rand_osproc) == chunk_processors(dmat_M_rand_osproc_auto) == chunk_processors(dmat_M_auto_rand_osproc) == tile_processors(get_random_osprocs(rand_osproc_ids_M), get_default_blockgrid(M, numprocs))
+    end
+
+    @testset "Explicit Blocks" begin
+
+      dist_A_exp_rand_osproc     = distribute(A, d_blocks_a, rand_osproc_ids_A); wait(dist_A_exp_rand_osproc)
+      dist_A_blocks_rand_osproc  = distribute(A, blocks_a,   rand_osproc_ids_A); wait(dist_A_blocks_rand_osproc)
+      dist_v_exp_rand_osproc     = distribute(v, d_blocks_v, rand_osproc_ids_v); wait(dist_v_exp_rand_osproc)
+      dist_v_blocks_rand_osproc  = distribute(v, blocks_v,   rand_osproc_ids_v); wait(dist_v_blocks_rand_osproc)
+      dist_v_nblocks_rand_osproc = distribute(v, blocks_nv,  rand_osproc_ids_v); wait(dist_v_nblocks_rand_osproc)
+      # dist_v_vblocks_rand_osproc = distribute(v, v_blocks_v, rand_osproc_ids_v); wait(dist_v_vblocks_rand_osproc)
+      dist_M_exp_rand_osproc     = distribute(M, d_blocks_m, rand_osproc_ids_M); wait(dist_M_exp_rand_osproc)
+      dist_M_blocks_rand_osproc  = distribute(M, blocks_m,   rand_osproc_ids_M); wait(dist_M_blocks_rand_osproc)
+
+      darr_A_exp_rand_osproc     = DArray(    A, d_blocks_a, rand_osproc_ids_A); wait(darr_A_exp_rand_osproc)
+      dvec_v_exp_rand_osproc     = DVector(   v, d_blocks_v, rand_osproc_ids_v); wait(dvec_v_exp_rand_osproc)
+      dmat_M_exp_rand_osproc     = DMatrix(   M, d_blocks_m, rand_osproc_ids_M); wait(dmat_M_exp_rand_osproc)
+
+      @test chunk_processors(dist_A_exp_rand_osproc) == chunk_processors(dist_A_blocks_rand_osproc) == chunk_processors(darr_A_exp_rand_osproc) == tile_processors(get_random_osprocs(rand_osproc_ids_A), blocks_a)
+      @test chunk_processors(dist_v_exp_rand_osproc) == chunk_processors(dist_v_blocks_rand_osproc) == chunk_processors(dvec_v_exp_rand_osproc) == tile_processors(get_random_osprocs(rand_osproc_ids_v), blocks_v)
+      @test chunk_processors(dist_v_nblocks_rand_osproc)                                                                                        == tile_processors(get_random_osprocs(rand_osproc_ids_v), blocks_v)
+      # @test chunk_processors(dist_v_vblocks_rand_osproc) == tile_processors(get_random_osprocs(rand_osproc_ids_v), blocksv) ## Failed: no method matching distribute(::Vector{Float64}, ::DomainBlocks{1}, ::Symbol)
+      @test chunk_processors(dist_M_exp_rand_osproc) == chunk_processors(dist_M_blocks_rand_osproc) == chunk_processors(dmat_M_exp_rand_osproc) == tile_processors(get_random_osprocs(rand_osproc_ids_M), blocks_m)
+
+    end
+
+  end
+
+
+  @testset "Explicit Processor Array Assignment (AbstractArray{<:Processor, N})" begin
+
+    rand_procs_A = reshape(availprocs[ rand(procs(),  6) ], 2, 3, 1)
+    rand_procs_v = reshape(availprocs[ rand(procs(),  5) ], 5)
+    rand_procs_M = reshape(availprocs[ rand(procs(), 14) ], 2, 7)
+
+
+    @testset "Auto Blocks" begin
+
+      dist_A_rand_procs_auto = distribute(A,               rand_procs_A); wait(dist_A_rand_procs_auto)
+      dist_A_auto_rand_procs = distribute(A, AutoBlocks(), rand_procs_A); wait(dist_A_auto_rand_procs)
+      dist_v_rand_procs_auto = distribute(v,               rand_procs_v); wait(dist_v_rand_procs_auto)
+      dist_v_auto_rand_procs = distribute(v, AutoBlocks(), rand_procs_v); wait(dist_v_auto_rand_procs)
+      dist_M_rand_procs_auto = distribute(M,               rand_procs_M); wait(dist_M_rand_procs_auto)
+      dist_M_auto_rand_procs = distribute(M, AutoBlocks(), rand_procs_M); wait(dist_M_auto_rand_procs)
+
+      darr_A_rand_procs_auto = DArray(    A,               rand_procs_A); wait(darr_A_rand_procs_auto)
+      darr_A_auto_rand_procs = DArray(    A, AutoBlocks(), rand_procs_A); wait(darr_A_auto_rand_procs)
+      dvec_v_rand_procs_auto = DVector(   v,               rand_procs_v); wait(dvec_v_rand_procs_auto)
+      dvec_v_auto_rand_procs = DVector(   v, AutoBlocks(), rand_procs_v); wait(dvec_v_auto_rand_procs)
+      dmat_M_rand_procs_auto = DMatrix(   M,               rand_procs_M); wait(dmat_M_rand_procs_auto)
+      dmat_M_auto_rand_procs = DMatrix(   M, AutoBlocks(), rand_procs_M); wait(dmat_M_auto_rand_procs)
+
+      @test chunk_processors(dist_A_rand_procs_auto) == chunk_processors(dist_A_auto_rand_procs) == chunk_processors(darr_A_rand_procs_auto) == chunk_processors(darr_A_auto_rand_procs) == tile_processors(rand_procs_A, get_default_blockgrid(A, numprocs))
+      @test chunk_processors(dist_v_rand_procs_auto) == chunk_processors(dist_v_auto_rand_procs) == chunk_processors(dvec_v_rand_procs_auto) == chunk_processors(dvec_v_auto_rand_procs) == tile_processors(rand_procs_v, get_default_blockgrid(v, numprocs))
+      @test chunk_processors(dist_M_rand_procs_auto) == chunk_processors(dist_M_auto_rand_procs) == chunk_processors(dmat_M_rand_procs_auto) == chunk_processors(dmat_M_auto_rand_procs) == tile_processors(rand_procs_M, get_default_blockgrid(M, numprocs))
+
+    end
+
+    @testset "Explicit Blocks" begin
+
+      dist_A_exp_rand_procs     = distribute(A, d_blocks_a, rand_procs_A); wait(dist_A_exp_rand_procs)
+      dist_A_blocks_rand_procs  = distribute(A, blocks_a,   rand_procs_A); wait(dist_A_blocks_rand_procs)
+      dist_v_exp_rand_procs     = distribute(v, d_blocks_v, rand_procs_v); wait(dist_v_exp_rand_procs)
+      dist_v_blocks_rand_procs  = distribute(v, blocks_v,   rand_procs_v); wait(dist_v_blocks_rand_procs)
+      dist_v_nblocks_rand_procs = distribute(v, blocks_nv, rand_procs_v); wait(dist_v_nblocks_rand_procs)
+      # dist_v_vblocks_rand_procs = distribute(v, v_blocks_v, rand_procs_v); wait(dist_v_vblocks_rand_procs)
+      dist_M_exp_rand_procs     = distribute(M, d_blocks_m, rand_procs_M); wait(dist_M_exp_rand_procs)
+      dist_M_blocks_rand_procs  = distribute(M, blocks_m,   rand_procs_M); wait(dist_M_blocks_rand_procs)
+
+      darr_A_exp_rand_procs     = DArray(    A, d_blocks_a, rand_procs_A); wait(darr_A_exp_rand_procs)
+      dvec_v_exp_rand_procs     = DVector(   v, d_blocks_v, rand_procs_v); wait(dvec_v_exp_rand_procs)
+      dmat_M_exp_rand_procs     = DMatrix(   M, d_blocks_m, rand_procs_M); wait(dmat_M_exp_rand_procs)
+
+      @test chunk_processors(dist_A_exp_rand_procs)     == chunk_processors(dist_A_blocks_rand_procs)  == chunk_processors(darr_A_exp_rand_procs) == tile_processors(rand_procs_A, blocks_a)
+      @test chunk_processors(dist_v_exp_rand_procs)     == chunk_processors(dist_v_blocks_rand_procs)  == chunk_processors(dvec_v_exp_rand_procs) == tile_processors(rand_procs_v, blocks_v)
+      @test chunk_processors(dist_v_nblocks_rand_procs)                                                                                           == tile_processors(rand_procs_v, blocks_v)
+      # @test chunk_processors(dist_v_vblocks_rand_procs) == tile_processors(rand_procs_v, blocks_v) ## Failed: no method matching distribute(::Vector{Float64}, ::DomainBlocks{1}, ::Symbol)
+      @test chunk_processors(dist_M_exp_rand_procs)     == chunk_processors(dist_M_blocks_rand_procs)  == chunk_processors(dmat_M_exp_rand_procs) == tile_processors(rand_procs_M, blocks_m)
+
+    end
+
+  end
+
+end
+
 @testset "view" begin
     A = rand(64, 64)
     DA = view(A, Blocks(8, 8))
