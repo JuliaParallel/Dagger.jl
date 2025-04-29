@@ -197,6 +197,7 @@ function Base.collect(D::DArray{T,N}; tree=false, uniform::Bool=true) where {T,N
         # Perform the equivalent of `copyto!(DA, Df)`, but force local updates
         # FIXME: Be more parallel?
         for idx in eachindex(DA.chunks)
+            # TODO: Remove uniform=true for dest?
             dest = fetch(DA.chunks[idx]; move_value=false, unwrap=true, uniform=true)::AbstractArray
             src = fetch(Df.chunks[idx]; move_value=true, unwrap=true, uniform=true)::AbstractArray
             copyto!(dest, src)

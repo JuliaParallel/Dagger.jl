@@ -1,242 +1,57 @@
-### Mutation
+###### Chunk Methods ######
 
-function _mutable_inner(@nospecialize(f), proc, scope)
-    result = f()
-    return Ref(Dagger.tochunk(result, proc, scope))
-end
+domain(c::Chunk) = c.domain
+chunktype(c::Chunk) = c.chunktype
+processor(c::Chunk) = c.processor
+affinity(c::Chunk) = affinity(c.handle)
 
-"""
-    mutable(f::Base.Callable; worker, processor, scope) -> Chunk
+is_task_or_chunk(c::Chunk) = true
 
-Calls `f()` on the specified worker or processor, returning a `Chunk`
-referencing the result with the specified scope `scope`.
-"""
-function mutable(@nospecialize(f); worker=nothing, processor=nothing, scope=nothing)
-    if processor === nothing
-        if worker === nothing
-            processor = OSProc()
-        else
-            processor = OSProc(worker)
-        end
+Base.:(==)(c1::Chunk, c2::Chunk) = c1.handle == c2.handle
+Base.hash(c::Chunk, x::UInt64) = hash(c.handle, hash(Chunk, x))
+
+collect_remote(chunk::Chunk) =
+    move(chunk.processor, OSProc(), poolget(chunk.handle))
+
+function collect(ctx::Context, chunk::Chunk; options=nothing)
+    # delegate fetching to handle by default.
+    if chunk.handle isa DRef && !(chunk.processor isa OSProc)
+        return remotecall_fetch(collect_remote, chunk.handle.owner, chunk)
+    elseif chunk.handle isa FileRef
+        return poolget(chunk.handle)
     else
-        @assert worker === nothing "mutable: Can't mix worker and processor"
-    end
-    if scope === nothing
-        scope = processor isa OSProc ? ProcessScope(processor) : ExactScope(processor)
-    end
-    return fetch(Dagger.@spawn scope=scope _mutable_inner(f, processor, scope))[]
-end
-
-"""
-    @mutable [worker=1] [processor=OSProc()] [scope=ProcessorScope()] f()
-
-Helper macro for [`mutable()`](@ref).
-"""
-macro mutable(exs...)
-    opts = esc.(exs[1:end-1])
-    ex = exs[end]
-    quote
-        let f = @noinline ()->$(esc(ex))
-            $mutable(f; $(opts...))
-        end
+        return move(chunk.processor, default_processor(), chunk.handle)
     end
 end
-
-"""
-Maps a value to one of multiple distributed "mirror" values automatically when
-used as a thunk argument. Construct using `@shard` or `shard`.
-"""
-struct Shard
-    chunks::Dict{Processor,Chunk}
+collect(ctx::Context, ref::DRef; options=nothing) =
+    move(OSProc(ref.owner), OSProc(), ref)
+collect(ctx::Context, ref::FileRef; options=nothing) =
+    poolget(ref) # FIXME: Do move call
+@warn "Fix semantics of collect" maxlog=1
+function Base.fetch(chunk::Chunk{T}; unwrap::Bool=false, uniform::Bool=false, kwargs...) where T
+    value = fetch_handle(chunk.handle; uniform)::T
+    if unwrap && unwrappable(value)
+        return fetch(value; unwrap, uniform, kwargs...)
+    end
+    return value
 end
+fetch_handle(ref::DRef; uniform::Bool=false) = poolget(ref)
+fetch_handle(ref::FileRef; uniform::Bool=false) = poolget(ref)
+unwrappable(x::Chunk) = true
+unwrappable(x::DRef) = true
+unwrappable(x::FileRef) = true
+unwrappable(x) = false
 
-"""
-    shard(f; kwargs...) -> Chunk{Shard}
+# Unwrap Chunk, DRef, and FileRef by default
+move(from_proc::Processor, to_proc::Processor, x::Chunk) =
+    move(from_proc, to_proc, x.handle)
+move(from_proc::Processor, to_proc::Processor, x::Union{DRef,FileRef}) =
+    move(from_proc, to_proc, poolget(x))
 
-Executes `f` on all workers in `workers`, wrapping the result in a
-process-scoped `Chunk`, and constructs a `Chunk{Shard}` containing all of these
-`Chunk`s on the current worker.
-
-Keyword arguments:
-- `procs` -- The list of processors to create pieces on. May be any iterable container of `Processor`s.
-- `workers` -- The list of workers to create pieces on. May be any iterable container of `Integer`s.
-- `per_thread::Bool=false` -- If `true`, creates a piece per each thread, rather than a piece per each worker.
-"""
-function shard(@nospecialize(f); procs=nothing, workers=nothing, per_thread=false)
-    if procs === nothing
-        if workers !== nothing
-            procs = [OSProc(w) for w in workers]
-        else
-            procs = lock(Sch.eager_context()) do
-                copy(Sch.eager_context().procs)
-            end
-        end
-        if per_thread
-            _procs = ThreadProc[]
-            for p in procs
-                append!(_procs, filter(p->p isa ThreadProc, get_processors(p)))
-            end
-            procs = _procs
-        end
-    else
-        if workers !== nothing
-            throw(ArgumentError("Cannot combine `procs` and `workers`"))
-        elseif per_thread
-            throw(ArgumentError("Cannot combine `procs` and `per_thread=true`"))
-        end
-    end
-    isempty(procs) && throw(ArgumentError("Cannot create empty Shard"))
-    shard_running_dict = Dict{Processor,DTask}()
-    for proc in procs
-        scope = proc isa OSProc ? ProcessScope(proc) : ExactScope(proc)
-        thunk = Dagger.@spawn scope=scope _mutable_inner(f, proc, scope)
-        shard_running_dict[proc] = thunk
-    end
-    shard_dict = Dict{Processor,Chunk}()
-    for proc in procs
-        shard_dict[proc] = fetch(shard_running_dict[proc])[]
-    end
-    return Shard(shard_dict)
-end
-
-"Creates a `Shard`. See [`Dagger.shard`](@ref) for details."
-macro shard(exs...)
-    opts = esc.(exs[1:end-1])
-    ex = exs[end]
-    quote
-        let f = @noinline ()->$(esc(ex))
-            $shard(f; $(opts...))
-        end
-    end
-end
-
-function move(from_proc::Processor, to_proc::Processor, shard::Shard)
-    # Match either this proc or some ancestor
-    # N.B. This behavior may bypass the piece's scope restriction
-    proc = to_proc
-    if haskey(shard.chunks, proc)
-        return move(from_proc, to_proc, shard.chunks[proc])
-    end
-    parent = Dagger.get_parent(proc)
-    while parent != proc
-        proc = parent
-        parent = Dagger.get_parent(proc)
-        if haskey(shard.chunks, proc)
-            return move(from_proc, to_proc, shard.chunks[proc])
-        end
-    end
-
-    throw(KeyError(to_proc))
-end
-Base.iterate(s::Shard) = iterate(values(s.chunks))
-Base.iterate(s::Shard, state) = iterate(values(s.chunks), state)
-Base.length(s::Shard) = length(s.chunks)
-
-### Core Stuff
-
-@warn "Update tochunk docstring" maxlog=1
-"""
-    tochunk(x, proc::Processor, scope::AbstractScope; device=nothing, rewrap=false, kwargs...) -> Chunk
-
-Create a chunk from data `x` which resides on `proc` and which has scope
-`scope`.
-
-`device` specifies a `MemPool.StorageDevice` (which is itself wrapped in a
-`Chunk`) which will be used to manage the reference contained in the `Chunk`
-generated by this function. If `device` is `nothing` (the default), the data
-will be inspected to determine if it's safe to serialize; if so, the default
-MemPool storage device will be used; if not, then a `MemPool.CPURAMDevice` will
-be used.
-
-`type` can be specified manually to force the type to be `Chunk{type}`.
-
-If `rewrap==true` and `x isa Chunk`, then the `Chunk` will be rewrapped in a
-new `Chunk`.
-
-All other kwargs are passed directly to `MemPool.poolset`.
-"""
-tochunk(x::X, proc::P, space::M; kwargs...) where {X,P<:Processor,M<:MemorySpace} =
-    tochunk(x, proc, space, AnyScope(); kwargs...)
-function tochunk(x::X, proc::P, space::M, scope::S; device=nothing, type=X, rewrap=false, kwargs...) where {X,P<:Processor,S,M<:MemorySpace}
-    if x isa Chunk
-        check_proc_space(x, proc, space)
-        return maybe_rewrap(x, proc, space, scope; type, rewrap)
-    end
-    if device === nothing
-        device = if Sch.walk_storage_safe(x)
-            MemPool.GLOBAL_DEVICE[]
-        else
-            MemPool.CPURAMDevice()
-        end
-    end
-    ref = tochunk_pset(x, space; device, kwargs...)
-    return Chunk{type,typeof(ref),P,S,typeof(space)}(type, domain(x), ref, proc, scope, space)
-end
-function tochunk(x::X, proc::P, scope::S; device=nothing, type=X, kwargs...) where {X,P<:Processor,S}
-    if device === nothing
-        device = if Sch.walk_storage_safe(x)
-            MemPool.GLOBAL_DEVICE[]
-        else
-            MemPool.CPURAMDevice()
-        end
-    end
-    if x isa Chunk
-        space = x.space
-        check_proc_space(x, proc, space)
-        return maybe_rewrap(x, proc, space, scope; type, rewrap)
-    end
-    space = default_memory_space(current_acceleration(), x)
-    ref = tochunk_pset(x, space; device, kwargs...)
-    return Chunk{type,typeof(ref),P,S,typeof(space)}(type, domain(x), ref, proc, scope, space)
-end
-function tochunk(x::X, space::M, scope::S; device=nothing, type=X, rewrap=false, kwargs...) where {X,M<:MemorySpace,S}
-    if device === nothing
-        device = if Sch.walk_storage_safe(x)
-            MemPool.GLOBAL_DEVICE[]
-        else
-            MemPool.CPURAMDevice()
-        end
-    end
-    if x isa Chunk
-        proc = x.processor
-        check_proc_space(x, proc, space)
-        return maybe_rewrap(x, proc, space, scope; type, rewrap)
-    end
-    proc = default_processor(current_acceleration(), x)
-    ref = tochunk_pset(x, space; device, kwargs...)
-    return Chunk{type,typeof(ref),typeof(proc),S,M}(type, domain(x), ref, proc, scope, space)
-end
-tochunk(x, procOrSpace; kwargs...) = tochunk(x, procOrSpace, AnyScope(); kwargs...)
-tochunk(x; kwargs...) = tochunk(x, default_memory_space(current_acceleration(), x), AnyScope(); kwargs...)
-
-check_proc_space(x, proc, space) = nothing
-function check_proc_space(x::Chunk, proc, space)
-    if x.space !== space
-        throw(ArgumentError("Memory space mismatch: Chunk=$(x.space) != Requested=$space"))
-    end
-end
-function check_proc_space(x::Thunk, proc, space)
-    # FIXME: Validate
-end
-function maybe_rewrap(x, proc, space, scope; type, rewrap)
-    if rewrap
-        return remotecall_fetch(x.handle.owner) do
-            tochunk(MemPool.poolget(x.handle), proc, scope; kwargs...)
-        end
-    else
-        return x
-    end
-end
-
-tochunk_pset(x, space::MemorySpace; device=nothing, kwargs...) = poolset(x; device, kwargs...)
-
-function savechunk(data, dir, f)
-    sz = open(joinpath(dir, f), "w") do io
-        serialize(io, MemPool.MMWrap(data))
-        return position(io)
-    end
-    fr = FileRef(f, sz)
-    proc = OSProc()
-    scope = AnyScope() # FIXME: Scoped to this node
-    return Chunk{typeof(data),typeof(fr),typeof(proc),typeof(scope)}(typeof(data), domain(data), fr, proc, scope, true)
-end
+# Determine from_proc when unspecified
+move(to_proc::Processor, chunk::Chunk) =
+    move(chunk.processor, to_proc, chunk)
+move(to_proc::Processor, d::DRef) =
+    move(OSProc(d.owner), to_proc, d)
+move(to_proc::Processor, x) =
+    move(OSProc(), to_proc, x)

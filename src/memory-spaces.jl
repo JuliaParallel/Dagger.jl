@@ -1,5 +1,3 @@
-abstract type Acceleration end
-
 struct DistributedAcceleration <: Acceleration end
 
 const ACCELERATION = TaskLocalValue{Acceleration}(() -> DistributedAcceleration())
@@ -22,42 +20,12 @@ end
 accel_matches_proc(accel::DistributedAcceleration, proc::OSProc) = true
 accel_matches_proc(accel::DistributedAcceleration, proc) = true
 
-abstract type MemorySpace end
-
-"""
-    Chunk
-
-A reference to a piece of data located on a remote worker. `Chunk`s are
-typically created with `Dagger.tochunk(data)`, and the data can then be
-accessed from any worker with `collect(::Chunk)`. `Chunk`s are
-serialization-safe, and use distributed refcounting (provided by
-`MemPool.DRef`) to ensure that the data referenced by a `Chunk` won't be GC'd,
-as long as a reference exists on some worker.
-
-Each `Chunk` is associated with a given `Dagger.Processor`, which is (in a
-sense) the processor that "owns" or contains the data. Calling
-`collect(::Chunk)` will perform data movement and conversions defined by that
-processor to safely serialize the data to the calling worker.
-
-## Constructors
-See [`tochunk`](@ref).
-"""
-
-mutable struct Chunk{T, H, P<:Processor, S<:AbstractScope, M<:MemorySpace}
-    chunktype::Type{T}
-    domain
-    handle::H
-    processor::P
-    scope::S
-    space::M
-end
-
 struct CPURAMMemorySpace <: MemorySpace
     owner::Int
 end
-root_worker_id(space::CPURAMMemorySpace) = space.owner
-
 CPURAMMemorySpace() = CPURAMMemorySpace(myid())
+
+root_worker_id(space::CPURAMMemorySpace) = space.owner
 
 default_processor(space::CPURAMMemorySpace) = OSProc(space.owner)
 default_memory_space(accel::DistributedAcceleration) = CPURAMMemorySpace(myid())

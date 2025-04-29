@@ -619,8 +619,8 @@ function spawn(f, args...; kwargs...)
     unique!(task_options.propagates)
 
     # Read task-local acceleration
-    if options.acceleration === nothing
-        options.acceleration = current_acceleration()
+    if task_options.acceleration === nothing
+        task_options.acceleration = current_acceleration()
     end
 
     # Construct task spec and handle

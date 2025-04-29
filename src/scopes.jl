@@ -1,7 +1,5 @@
 export AnyScope, DefaultScope, UnionScope, NodeScope, ProcessScope, ExactScope, ProcessorTypeScope
 
-abstract type AbstractScope end
-
 "Widest scope that contains all processors."
 struct AnyScope <: AbstractScope end
 

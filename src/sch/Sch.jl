@@ -61,7 +61,7 @@ Fields:
 - `running_on::Dict{Thunk,OSProc}` - Map from `Thunk` to the OS process executing it
 - `thunk_dict::Dict{Int, WeakThunk}` - Maps from thunk IDs to a `Thunk`
 - `node_order::Any` - Function that returns the order of a thunk
-- `equiv_chunks::WeakKeyDict{DRef,Chunk}` - Cache mapping from `DRef` to a `Chunk` which contains it
+- `equiv_chunks::WeakKeyDict{Any,Chunk}` - Cache mapping from handle to a `Chunk` which contains it
 - `worker_time_pressure::Dict{Processor,Dict{Processor,UInt64}}` - Maps from worker to processor pressure
 - `worker_storage_pressure::Dict{Processor,Dict{Union{StorageResource,Nothing},UInt64}}` - Maps from worker to storage resource pressure
 - `worker_storage_capacity::Dict{Processor,Dict{Union{StorageResource,Nothing},UInt64}}` - Maps from worker to storage resource capacity
@@ -88,7 +88,7 @@ struct ComputeState
     running_on::Dict{Thunk,OSProc}
     thunk_dict::Dict{Int, WeakThunk}
     node_order::Any
-    equiv_chunks::WeakKeyDict{DRef,Chunk}
+    equiv_chunks::WeakKeyDict{Any,Chunk}
     worker_time_pressure::Dict{Processor,Dict{Processor,UInt64}}
     worker_storage_pressure::Dict{Processor,Dict{Union{StorageResource,Nothing},UInt64}}
     worker_storage_capacity::Dict{Processor,Dict{Union{StorageResource,Nothing},UInt64}}
@@ -118,7 +118,7 @@ function start_state(deps::Dict, node_order, chan)
                          Dict{Thunk,OSProc}(),
                          Dict{Int, WeakThunk}(),
                          node_order,
-                         WeakKeyDict{DRef,Chunk}(),
+                         WeakKeyDict{Any,Chunk}(),
                          Dict{Processor,Dict{Processor,UInt64}}(),
                          Dict{Processor,Dict{Union{StorageResource,Nothing},UInt64}}(),
                          Dict{Processor,Dict{Union{StorageResource,Nothing},UInt64}}(),
@@ -442,8 +442,8 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options::SchedulerOpt
                 end
             end
             if res isa Chunk
-                if !haskey(state.equiv_chunks, res)
-                    state.equiv_chunks[res.handle::DRef] = res
+                if !haskey(state.equiv_chunks, res.handle)
+                    state.equiv_chunks[res.handle] = res
                 end
             end
             if thunk_failed && res isa RemoteException
@@ -618,7 +618,7 @@ function schedule!(ctx, state, sch_options, procs=procs_to_use(ctx, sch_options)
         input_procs = @reusable_vector :schedule!_input_procs Processor OSProc() 32
         accel = something(options.acceleration, Dagger.DistributedAcceleration())
         for gp in procs
-            Dagger.accel_matches_proc(accel, proc) || continue
+            Dagger.accel_matches_proc(accel, gp) || continue
             subprocs = get_processors(gp)
             for proc in subprocs
                 if !(proc in input_procs)

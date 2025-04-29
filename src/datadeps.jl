@@ -132,9 +132,9 @@ function dag_add_task!(dspec::DAGSpec, astate, tspec::DTaskSpec, task::DTask)
                 =#
 
                 # External DTask, so fetch this and track it as a raw value
-                val = fetch(val; raw=true)
+                val = fetch(val; move_value=false, unwrap=false)
             end
-            ainfo = aliasing(astate, val, dep_mod)
+            ainfo = aliasing(astate, current_acceleration(), val, dep_mod)
             push!(argtypes, DatadepsArgSpec(pos, typeof(val), dep_mod, ainfo))
         end
     end
@@ -785,7 +785,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         end
 
         our_proc = schedule[task]
-        @assert our_proc in all_procs
+        @assert our_proc in all_procs "Processor $our_proc not in all_procs"
         our_space = only(memory_spaces(our_proc))
         our_procs = filter(proc->proc in all_procs, collect(processors(our_space)))
         our_scope = UnionScope(map(ExactScope, our_procs)...)

@@ -50,6 +50,12 @@ import MetricsTracker as MT
 const reuse_metrics = @load_preference("reuse-metrics", false)
 const metrics_path = @load_preference("metrics-path", "metrics.json")
 
+# Types
+include("types/processor.jl")
+include("types/memory-space.jl")
+include("types/scope.jl")
+include("types/chunk.jl")
+
 include("lib/util.jl")
 include("utils/dagdebug.jl")
 
@@ -64,7 +70,8 @@ include("context.jl")
 include("utils/processors.jl")
 include("scopes.jl")
 include("utils/scopes.jl")
-include("chunks.jl")
+include("utils/affinity.jl")
+include("utils/weakchunk.jl")
 include("utils/signature.jl")
 include("options.jl")
 include("dtask.jl")
@@ -74,11 +81,15 @@ include("argument.jl")
 include("queue.jl")
 include("thunk.jl")
 include("utils/fetch.jl")
-include("utils/chunks.jl")
 include("utils/logging.jl")
 include("submission.jl")
 include("memory-spaces.jl")
-include("chunks.jl")
+
+# Chunk utilities
+include("utils/chunks.jl")
+include("utils/tochunk.jl")
+include("utils/mutable.jl")
+include("utils/shards.jl")
 
 # Metrics
 include("utils/metrics.jl")
