@@ -1,5 +1,5 @@
 import Base: cat
-import Random: MersenneTwister
+import Random: MersenneTwister, rand!, randn!
 export partition
 
 mutable struct AllocateArray{T,N} <: ArrayOp{T,N}
@@ -24,29 +24,41 @@ function partition(p::AbstractBlocks, dom::ArrayDomain)
         map(_cumlength, map(length, indexes(dom)), p.blocksize))
 end
 
-function allocate_array(f, T, idx, sz)
-    new_f = allocate_array_func(task_processor(), f)
-    return new_f(idx, T, sz)
+allocate_array_undef(T, sz) = allocate_array_undef(task_processor(), T, sz)
+allocate_array_undef(_::Processor, T, sz) = Array{T,length(sz)}(undef, sz...)
+function allocate_array!(A, f, idx)
+    new_f! = allocate_array_func(task_processor(), f)
+    new_f!(A, idx)
+    return
 end
-function allocate_array(f, T, sz)
-    new_f = allocate_array_func(task_processor(), f)
-    return new_f(T, sz)
+function allocate_array!(A, f)
+    new_f! = allocate_array_func(task_processor(), f)
+    new_f!(A)
+    return
 end
 allocate_array_func(::Processor, f) = f
-function stage(ctx, a::AllocateArray)
-    if a.want_index
-        thunks = [Dagger.@spawn allocate_array(a.f, a.eltype, i, size(x)) for (i, x) in enumerate(a.domainchunks)]
-    else
-        thunks = [Dagger.@spawn allocate_array(a.f, a.eltype, size(x)) for (i, x) in enumerate(a.domainchunks)]
+@warn "Do parallel allocation" maxlog=1
+function stage(ctx, A::AllocateArray)
+    tasks = Array{DTask,ndims(A.domainchunks)}(undef, size(A.domainchunks)...)
+    Dagger.spawn_datadeps() do
+        for (i, x) in enumerate(A.domainchunks)
+            task = Dagger.@spawn allocate_array_undef(A.eltype, size(x))
+            if A.want_index
+                Dagger.@spawn allocate_array!(Out(task), A.f, i)
+            else
+                Dagger.@spawn allocate_array!(Out(task), A.f)
+            end
+            tasks[i] = task
+        end
     end
-    return DArray(a.eltype, a.domain, a.domainchunks, thunks, a.partitioning)
+    return DArray(A.eltype, A.domain, A.domainchunks, tasks, A.partitioning)
 end
 
 const BlocksOrAuto = Union{Blocks{N} where N, AutoBlocks}
 
 function Base.rand(p::Blocks, eltype::Type, dims::Dims)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, rand, false, d, partition(p, d), p)
+    a = AllocateArray(eltype, rand!, false, d, partition(p, d), p)
     return _to_darray(a)
 end
 Base.rand(p::BlocksOrAuto, T::Type, dims::Integer...) = rand(p, T, dims)
@@ -58,7 +70,7 @@ Base.rand(::AutoBlocks, eltype::Type, dims::Dims) =
 
 function Base.randn(p::Blocks, eltype::Type, dims::Dims)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, randn, false, d, partition(p, d), p)
+    a = AllocateArray(eltype, randn!, false, d, partition(p, d), p)
     return _to_darray(a)
 end
 Base.randn(p::BlocksOrAuto, T::Type, dims::Integer...) = randn(p, T, dims)
@@ -68,9 +80,15 @@ Base.randn(p::BlocksOrAuto, dims::Dims) = randn(p, Float64, dims)
 Base.randn(::AutoBlocks, eltype::Type, dims::Dims) =
     randn(auto_blocks(dims), eltype, dims)
 
+struct DArrayInnerSPRAND!{T<:AbstractFloat}
+    sparsity::T
+end
+function (s::DArrayInnerSPRAND!)(A)
+    error("FIXME")
+end
 function sprand(p::Blocks, eltype::Type, dims::Dims, sparsity::AbstractFloat)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, (T, _dims) -> sprand(T, _dims..., sparsity), false, d, partition(p, d), p)
+    a = AllocateArray(eltype, DArrayInnerSPRAND!(sparsity)#=(T, _dims) -> sprand(T, _dims..., sparsity)=#, false, d, partition(p, d), p)
     return _to_darray(a)
 end
 sprand(p::BlocksOrAuto, T::Type, dims_and_sparsity::Real...) =
@@ -84,9 +102,14 @@ sprand(p::BlocksOrAuto, dims::Dims, sparsity::AbstractFloat) =
 sprand(::AutoBlocks, eltype::Type, dims::Dims, sparsity::AbstractFloat) =
     sprand(auto_blocks(dims), eltype, dims, sparsity)
 
+function darray_inner_ones!(A)
+    for idx in eachindex(A)
+        A[idx] = one(eltype(A))
+    end
+end
 function Base.ones(p::Blocks, eltype::Type, dims::Dims)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, ones, false, d, partition(p, d), p)
+    a = AllocateArray(eltype, darray_inner_ones!, false, d, partition(p, d), p)
     return _to_darray(a)
 end
 Base.ones(p::BlocksOrAuto, T::Type, dims::Integer...) = ones(p, T, dims)
@@ -96,9 +119,14 @@ Base.ones(p::BlocksOrAuto, dims::Dims) = ones(p, Float64, dims)
 Base.ones(::AutoBlocks, eltype::Type, dims::Dims) =
     ones(auto_blocks(dims), eltype, dims)
 
+function darray_inner_zeros!(A)
+    for idx in eachindex(A)
+        A[idx] = zero(eltype(A))
+    end
+end
 function Base.zeros(p::Blocks, eltype::Type, dims::Dims)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, zeros, false, d, partition(p, d), p)
+    a = AllocateArray(eltype, darray_inner_zeros!, false, d, partition(p, d), p)
     return _to_darray(a)
 end
 Base.zeros(p::BlocksOrAuto, T::Type, dims::Integer...) = zeros(p, T, dims)
