@@ -1,5 +1,5 @@
 import Base: cat
-import Random: MersenneTwister
+import Random: MersenneTwister, rand!, randn!
 export partition
 
 mutable struct AllocateArray{T,N} <: ArrayOp{T,N}
@@ -70,40 +70,49 @@ function partition(p::AbstractBlocks, dom::ArrayDomain)
         map(_cumlength, map(length, indexes(dom)), p.blocksize))
 end
 
-function allocate_array(f, T, idx, sz)
-    new_f = allocate_array_func(task_processor(), f)
-    return new_f(idx, T, sz)
+allocate_array_undef(T, sz) = allocate_array_undef(task_processor(), T, sz)
+allocate_array_undef(_::Processor, T, sz) = Array{T,length(sz)}(undef, sz...)
+function allocate_array!(A, f, idx)
+    new_f! = allocate_array_func(task_processor(), f)
+    new_f!(A, idx)
+    return
 end
-function allocate_array(f, T, sz)
-    new_f = allocate_array_func(task_processor(), f)
-    return new_f(T, sz)
+function allocate_array!(A, f)
+    new_f! = allocate_array_func(task_processor(), f)
+    new_f!(A)
+    return
 end
 allocate_array_func(::Processor, f) = f
-function stage(ctx, a::AllocateArray)
-    chunks = map(CartesianIndices(a.domainchunks)) do I
-        x = a.domainchunks[I]
-        i = LinearIndices(a.domainchunks)[I]
-        args = a.want_index ? (i, size(x)) : (size(x),)
+function stage(ctx, A::AllocateArray)
+    tasks = Array{DTask,ndims(A.domainchunks)}(undef, size(A.domainchunks)...)
+    Dagger.spawn_datadeps() do
+        for I in CartesianIndices(A.domainchunks)
+            x = A.domainchunks[I]
+            i = LinearIndices(A.domainchunks)[I]
 
-        if isnothing(a.procgrid)
-            scope = get_compute_scope()
-        else
-            scope = ExactScope(a.procgrid[CartesianIndex(mod1.(Tuple(I), size(a.procgrid))...)])
-        end
-        if a.want_index
-            Dagger.@spawn compute_scope=scope allocate_array(a.f, a.eltype, i, args...)
-        else
-            Dagger.@spawn compute_scope=scope allocate_array(a.f, a.eltype, args...)
+            if isnothing(A.procgrid)
+                scope = nothing
+            else
+                scope = ExactScope(A.procgrid[CartesianIndex(mod1.(Tuple(I), size(A.procgrid))...)])
+            end
+
+            task = Dagger.@spawn compute_scope=scope allocate_array_undef(A.eltype, size(x))
+            if A.want_index
+                Dagger.@spawn compute_scope=scope allocate_array!(Out(task), A.f, i)
+            else
+                Dagger.@spawn compute_scope=scope allocate_array!(Out(task), A.f)
+            end
+            tasks[i] = task
         end
     end
-    return DArray(a.eltype, a.domain, a.domainchunks, chunks, a.partitioning)
+    return DArray(A.eltype, A.domain, A.domainchunks, tasks, A.partitioning)
 end
 
 const BlocksOrAuto = Union{Blocks{N} where N, AutoBlocks}
 
 function Base.rand(p::Blocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, rand, false, d, partition(p, d), p, assignment)
+    a = AllocateArray(eltype, rand!, false, d, partition(p, d), p, assignment)
     return _to_darray(a)
 end
 Base.rand(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) = rand(p, T, dims; assignment)
@@ -114,7 +123,7 @@ Base.rand(::AutoBlocks, eltype::Type, dims::Dims; assignment::AssignmentType = :
 
 function Base.randn(p::Blocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, randn, false, d, partition(p, d), p, assignment)
+    a = AllocateArray(eltype, randn!, false, d, partition(p, d), p, assignment)
     return _to_darray(a)
 end
 Base.randn(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) = randn(p, T, dims; assignment)
@@ -123,9 +132,18 @@ Base.randn(p::BlocksOrAuto, dims::Dims; assignment::AssignmentType = :arbitrary)
 Base.randn(::AutoBlocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary) =
     randn(auto_blocks(dims), eltype, dims; assignment)
 
+struct DArrayInnerSPRAND!{T<:AbstractFloat}
+    sparsity::T
+end
+function (s::DArrayInnerSPRAND!)(A)
+    # FIXME: This isn't super efficient
+    B = sprand(eltype(A), size(A)..., s.sparsity)
+    copyto!(A, B)
+    return
+end
 function sprand(p::Blocks, eltype::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, (T, _dims) -> sprand(T, _dims..., sparsity), false, d, partition(p, d), p, assignment)
+    a = AllocateArray(eltype, DArrayInnerSPRAND!(sparsity), false, d, partition(p, d), p, assignment)
     return _to_darray(a)
 end
 sprand(p::BlocksOrAuto, T::Type, dims_and_sparsity::Real...; assignment::AssignmentType = :arbitrary) =
@@ -137,9 +155,13 @@ sprand(p::BlocksOrAuto, dims::Dims, sparsity::AbstractFloat; assignment::Assignm
 sprand(::AutoBlocks, eltype::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary) =
     sprand(auto_blocks(dims), eltype, dims, sparsity; assignment)
 
+function darray_inner_ones!(A)
+    fill!(A, one(eltype(A)))
+    return
+end
 function Base.ones(p::Blocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, ones, false, d, partition(p, d), p, assignment)
+    a = AllocateArray(eltype, darray_inner_ones!, false, d, partition(p, d), p, assignment)
     return _to_darray(a)
 end
 Base.ones(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) = ones(p, T, dims; assignment)
@@ -148,9 +170,13 @@ Base.ones(p::BlocksOrAuto, dims::Dims; assignment::AssignmentType = :arbitrary) 
 Base.ones(::AutoBlocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary) =
     ones(auto_blocks(dims), eltype, dims; assignment)
 
+function darray_inner_zeros!(A)
+    fill!(A, zero(eltype(A)))
+    return
+end
 function Base.zeros(p::Blocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, zeros, false, d, partition(p, d), p, assignment)
+    a = AllocateArray(eltype, darray_inner_zeros!, false, d, partition(p, d), p, assignment)
     return _to_darray(a)
 end
 Base.zeros(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) = zeros(p, T, dims; assignment)
