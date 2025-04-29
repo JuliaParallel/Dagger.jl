@@ -96,7 +96,7 @@ function memory_spaces(proc::MPIOSProc)
     return spaces
 end
 
-struct MPIProcessScope <: AbstractScope 
+struct MPIProcessScope <: AbstractScope
     comm::MPI.Comm
     rank::Int
 end
@@ -118,6 +118,39 @@ constrain(x::MPIProcessScope, y::ExactScope) =
 function enclosing_scope(proc::MPIOSProc)
     return MPIProcessScope(proc.comm, proc.rank)
 end
+
+function Dagger.to_scope(::Val{:mpi_rank}, sc::NamedTuple)
+    if sc.mpi_rank == Colon()
+        return Dagger.to_scope(Val{:mpi_ranks}(), merge(sc, (;mpi_ranks=Colon())))
+    else
+        @assert sc.mpi_rank isa Integer "Expected a single GPU device ID for :mpi_rank, got $(sc.mpi_rank)\nConsider using :mpi_ranks instead."
+        return Dagger.to_scope(Val{:mpi_ranks}(), merge(sc, (;mpi_ranks=[sc.mpi_rank])))
+    end
+end
+Dagger.scope_key_precedence(::Val{:mpi_rank}) = 2
+function Dagger.to_scope(::Val{:mpi_ranks}, sc::NamedTuple)
+    comm = get(sc, :mpi_comm, MPI.COMM_WORLD)
+    if sc.ranks != Colon()
+        ranks = sc.ranks
+    else
+        ranks = MPI.Comm_size(comm)
+    end
+    inner_sc = NamedTuple(filter(kv->kv[1] != :mpi_ranks, Base.pairs(sc))...)
+    # FIXME: What to do here?
+    inner_scope = Dagger.to_scope(inner_sc)
+    scopes = Dagger.ExactScope[]
+    for rank in ranks
+        procs = Dagger.get_processors(Dagger.MPIOSProc(comm, rank))
+        rank_scope = MPIProcessScope(comm, rank)
+        for proc in procs
+            proc_scope = Dagger.ExactScope(proc)
+            constrain(proc_scope, rank_scope) isa Dagger.InvalidScope && continue
+            push!(scopes, proc_scope)
+        end
+    end
+    return Dagger.UnionScope(scopes)
+end
+Dagger.scope_key_precedence(::Val{:mpi_ranks}) = 2
 
 struct MPIProcessor{P<:Processor} <: Processor
     innerProc::P
@@ -143,7 +176,7 @@ root_worker_id(proc::MPIClusterProc) = myid()
 
 get_parent(proc::MPIClusterProc) = proc
 get_parent(proc::MPIOSProc) = MPIClusterProc(proc.comm)
-get_parent(proc::MPIProcessor) = MPIOSProc(proc.comm, proc.rank)    
+get_parent(proc::MPIProcessor) = MPIOSProc(proc.comm, proc.rank)
 
 short_name(proc::MPIProcessor) = "(MPI: $(proc.rank), $(short_name(proc.innerProc)))"
 
@@ -298,6 +331,8 @@ end
 
 function recv_yield(comm, src, tag)
     #@dagdebug nothing :mpi "[$(MPI.Comm_rank(comm))][$tag] Hit probable hang on recv \n"
+    dest = MPI.Comm_rank(comm)
+    #Core.print("[$src -> $dest][$tag] Starting recv_yield...\n")
     while true
         (got, msg, stat) = MPI.Improbe(src, tag, comm, MPI.Status)
         if got
@@ -320,6 +355,8 @@ function recv_yield(comm, src, tag)
 end
 function send_yield(value, comm, dest, tag)
     #@dagdebug nothing :mpi "[$(MPI.Comm_rank(comm))][$tag] Hit probable hang while sending \n"
+    src = MPI.Comm_rank(comm)
+    #Core.print("[$src -> $dest][$tag] Starting send_yield...\n")
     req = MPI.isend(value, comm; dest, tag)
     while true
         finish = MPI.Test(req)
@@ -519,7 +556,7 @@ function distribute(A::Union{AbstractArray{T,N}, Nothing}, dist::Blocks{N}; comm
                 end
             end
         end
-        Core.print("[$rnk] Sent all chunks\n")
+        #Core.print("[$rnk] Sent all chunks\n")
     else
         dst = 0
         for (idx, part) in enumerate(sd)
@@ -557,7 +594,7 @@ function Base.collect(x::Dagger.DMatrix{T};
         localparts = []
         curpart = rank + 1
         while curpart <= length(x.chunks)
-            print("[$rank] Collecting chunk $curpart\n")
+            #print("[$rank] Collecting chunk $curpart\n")
             push!(localarr, fetch(x.chunks[curpart]))
             push!(localparts, sd[curpart])
             curpart += csz
@@ -573,7 +610,7 @@ function Base.collect(x::Dagger.DMatrix{T};
                 for i in 0:(csz - 1)
                     if i != rank
                         h = abs(Base.unsafe_trunc(Int32, hash(part, UInt(0))))
-                        print("[$rank] Sent chunk $idx to rank $i with tag $h \n")
+                        #print("[$rank] Sent chunk $idx to rank $i with tag $h \n")
                         push!(reqs, MPI.isend(localarr[idx], comm; dest = i, tag = h))
                     else
                         data[part.indexes...] = localarr[idx]
@@ -583,7 +620,7 @@ function Base.collect(x::Dagger.DMatrix{T};
             for (idx, part) in enumerate(sd)
                 h = abs(Base.unsafe_trunc(Int32, hash(part, UInt(0))))
                 if dst != rank
-                    print("[$rank] Waiting for chunk $idx from rank $dst with tag $h\n")
+                    #print("[$rank] Waiting for chunk $idx from rank $dst with tag $h\n")
                     data[part.indexes...] = recv_yield(comm, dst, h)
                 end
                 dst += 1
