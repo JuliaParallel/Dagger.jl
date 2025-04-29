@@ -517,13 +517,14 @@ function reusable_task_cache_init!(setup_f::Function, cache::ReusableTaskCache)
     cache.init = true
     return
 end
+@warn "Ensure tasks exit with scheduler" maxlog=1
 function reusable_task_loop(chan::Channel{Any}, ready::Threads.Atomic{Bool})
     r = rand(1:128)
-    while true
+    while isopen(chan)
         f = try
             take!(chan)
-        catch
-            if !isopen(chan)
+        catch err
+            if !isopen(chan) || err isa InterruptException
                 return
             else
                 rethrow()
