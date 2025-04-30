@@ -317,14 +317,8 @@ function Base.isequal(x::ArrayOp, y::ArrayOp)
     x === y
 end
 
-struct AllocateUndef{S} end
-(::AllocateUndef{S})(T, dims::Dims{N}) where {S,N} = Array{S,N}(undef, dims)
-function Base.similar(A::DArray{T,N} where T, ::Type{S}, dims::Dims{N}) where {S,N}
-    d = ArrayDomain(map(x->1:x, dims))
-    p = A.partitioning
-    a = AllocateArray(S, AllocateUndef{S}(), false, d, partition(p, d), p)
-    return _to_darray(a)
-end
+Base.similar(::DArray{T,N} where T, ::Type{S}, dims::Dims{N}) where {S,N} =
+    DArray{S,N}(undef, dims)
 
 Base.copy(x::DArray{T,N,B,F}) where {T,N,B,F} =
     map(identity, x)::DArray{T,N,B,F}
@@ -570,6 +564,27 @@ DArray(A::AbstractArray, assignment::AssignmentType = :arbitrary) = DArray(A, Au
 DVector(A::AbstractVector{T}, ::AutoBlocks, assignment::AssignmentType{1} = :arbitrary) where T = DVector(A, auto_blocks(A), assignment)
 DMatrix(A::AbstractMatrix{T}, ::AutoBlocks, assignment::AssignmentType{2} = :arbitrary) where T = DMatrix(A, auto_blocks(A), assignment)
 DArray(A::AbstractArray, ::AutoBlocks, assignment::AssignmentType = :arbitrary) = DArray(A, auto_blocks(A), assignment)
+
+@warn "Add assignment to undef initializer" maxlog=1
+function DArray{T,N}(::UndefInitializer, dims::NTuple{N,Int}) where {T,N}
+    dist = auto_blocks(dims)
+    return DArray{T,N}(undef, dist, dims...)
+end
+function DArray{T,N}(::UndefInitializer, dist::Blocks{N}, dims::NTuple{N,Int}) where {T,N}
+    domain = ArrayDomain(ntuple(i->1:dims[i], N))
+    subdomains = partition(dist, domain)
+    tasks = Array{DTask,N}(undef, size(subdomains)...)
+    Dagger.spawn_datadeps() do
+        for (i, x) in enumerate(subdomains)
+            tasks[i] = Dagger.@spawn allocate_array_undef(T, size(x))
+        end
+    end
+    return DArray(T, domain, subdomains, tasks, dist)
+end
+DArray{T,N}(::UndefInitializer, dims::Vararg{Int,N}) where {T,N} =
+    DArray{T,N}(undef, auto_blocks((dims...,)), (dims...,))
+DArray{T,N}(::UndefInitializer, dist::Blocks{N}, dims::Vararg{Int,N}) where {T,N} =
+    DArray{T,N}(undef, dist, (dims...,))
 
 function Base.:(==)(x::ArrayOp{T,N}, y::AbstractArray{S,N}) where {T,S,N}
     collect(x) == y
