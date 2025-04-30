@@ -17,9 +17,8 @@ function check_uniform(value::Integer)
             Core.print("[$rank] Found non-uniform value!\n")
         end
         Core.print("[$rank] value=$value\n")
-        exit(1)
+        throw(ArgumentError("Non-uniform value"))
     end
-    flush(stdout)
     MPI.Barrier(comm)
 end
 function check_uniform(value)
@@ -138,7 +137,8 @@ end
 function MPIOSProc()
     return MPIOSProc(MPI.COMM_WORLD)
 end
-#Sch.init_proc(state, proc::MPIOSProc, log_sink) = Sch.init_proc(state, OSProc(), log_sink)
+
+ProcessScope(p::MPIOSProc) = ProcessScope(myid())
 
 function check_uniform(proc::MPIOSProc)
     check_uniform(hash(MPIOSProc))
@@ -406,8 +406,9 @@ const RECV_WAITING = Base.Lockable(Dict{Tuple{MPI.Comm, Int, Int}, Base.Event}()
 function recv_yield(comm, src, tag)
     time_start = time_ns()
     detect = DEADLOCK_DETECT[]
-    warn_period = DEADLOCK_WARN_PERIOD[]
-    timeout_period = DEADLOCK_TIMEOUT_PERIOD[]
+    warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
+    timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
+    rank = MPI.Comm_rank(comm)
     #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Starting recv from [$src]")
 
     # Ensure no other receiver is waiting
@@ -452,23 +453,11 @@ function recv_yield(comm, src, tag)
                     #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Released lock")
                     return value
                 end
-                if detect && ((time_ns() - time_start) ÷ 1e9 > warn_period)
-                    @warn "[rank $(MPI.Comm_rank(comm))][tag $tag] Hit probable hang on recv (src: $src)"
-                    warn_period = Inf
-                end
-                if detect && ((time_ns() - time_start) ÷ 1e9 > timeout_period)
-                    error("[rank $(MPI.Comm_rank(comm))][tag $tag] Hit probable hang on recv (src: $src)")
-                end
+                warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, rank, tag, "recv", src)
                 yield()
             end
         end
-        if detect && ((time_ns() - time_start) ÷ 1e9 > warn_period)
-            @warn "[rank $(MPI.Comm_rank(comm))][tag $tag] Hit probable hang on recv (src: $src)"
-            warn_period = Inf
-        end
-        if detect && ((time_ns() - time_start) ÷ 1e9 > timeout_period)
-            error("[rank $(MPI.Comm_rank(comm))][tag $tag] Hit probable hang on recv (src: $src)")
-        end
+        warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, rank, tag, "recv", src)
         yield()
     end
 end
@@ -476,8 +465,9 @@ const SEEN_TAGS = Dict{Int32, Type}()
 function send_yield(value, comm, dest, tag; check_seen::Bool=true)
     time_start = time_ns()
     detect = DEADLOCK_DETECT[]
-    warn_period = DEADLOCK_WARN_PERIOD[]
-    timeout_period = DEADLOCK_TIMEOUT_PERIOD[]
+    warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
+    timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
+    rank = MPI.Comm_rank(comm)
     if check_seen && haskey(SEEN_TAGS, tag) && SEEN_TAGS[tag] !== typeof(value)
         @error "[rank $(MPI.Comm_rank(comm))][tag $tag] Already seen tag (previous type: $(SEEN_TAGS[tag]), new type: $(typeof(value)))" exception=(InterruptException(),backtrace())
     end
@@ -494,13 +484,7 @@ function send_yield(value, comm, dest, tag; check_seen::Bool=true)
             end
             return
         end
-        if detect && ((time_ns() - time_start) ÷ 1e9 > warn_period)
-            @warn "[rank $(MPI.Comm_rank(comm))][tag $tag] Hit probable hang on send (dest: $dest)"
-            warn_period = Inf
-        end
-        if detect && ((time_ns() - time_start) ÷ 1e9 > timeout_period)
-            error("[rank $(MPI.Comm_rank(comm))][tag $tag] Hit probable hang on send (dest: $dest)")
-        end
+        warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, rank, tag, "send", dest)
         yield()
     end
 end
@@ -511,6 +495,17 @@ function bcast_send_yield(value, comm, root, tag)
         rank == other_rank && continue
         send_yield(value, comm, other_rank, tag)
     end
+end
+function mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, rank, tag, kind, srcdest)
+    time_elapsed = (time_ns() - time_start)
+    if detect && time_elapsed > warn_period
+        @warn "[rank $rank][tag $tag] Hit probable hang on $kind (dest: $srcdest)"
+        return typemax(UInt64)
+    end
+    if detect && time_elapsed > timeout_period
+        error("[rank $rank][tag $tag] Hit probable hang on $kind (dest: $srcdest)")
+    end
+    return warn_period
 end
 
 #discuss this with julian
@@ -656,6 +651,17 @@ accel_matches_proc(accel::MPIAcceleration, proc::MPIOSProc) = true
 accel_matches_proc(accel::MPIAcceleration, proc::MPIClusterProc) = true
 accel_matches_proc(accel::MPIAcceleration, proc::MPIProcessor) = true
 accel_matches_proc(accel::MPIAcceleration, proc) = false
+
+function distribute(A::AbstractArray{T,N}, dist::Blocks{N}, accel::MPIAcceleration) where {T,N}
+    comm = accel.comm
+    rank = MPI.Comm_rank(comm)
+
+    DA = view(A, dist)
+    DB = DArray{T,N}(undef, dist, size(A))
+    copyto!(DB, DA)
+
+    return DB
+end
 
 #=
 distribute(A::AbstractArray{T,N}, dist::Blocks{N}, root::Int; comm::MPI.Comm=MPI.COMM_WORLD) where {T,N} =
