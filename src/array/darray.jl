@@ -539,6 +539,26 @@ DVector(A::AbstractVector{T}, ::AutoBlocks) where T = DVector(A, auto_blocks(A))
 DMatrix(A::AbstractMatrix{T}, ::AutoBlocks) where T = DMatrix(A, auto_blocks(A))
 DArray(A::AbstractArray, ::AutoBlocks) = DArray(A, auto_blocks(A))
 
+function DArray{T,N}(::UndefInitializer, dims::NTuple{N,Int}) where {T,N}
+    dist = auto_blocks(dims)
+    return DArray{T,N}(undef, dist, dims...)
+end
+function DArray{T,N}(::UndefInitializer, dist::Blocks{N}, dims::NTuple{N,Int}) where {T,N}
+    domain = ArrayDomain(ntuple(i->1:dims[i], N))
+    subdomains = partition(dist, domain)
+    tasks = Array{DTask,N}(undef, size(subdomains)...)
+    Dagger.spawn_datadeps() do
+        for (i, x) in enumerate(subdomains)
+            tasks[i] = Dagger.@spawn allocate_array_undef(T, size(x))
+        end
+    end
+    return DArray(T, domain, subdomains, tasks, dist)
+end
+DArray{T,N}(::UndefInitializer, dims::Vararg{Int,N}) where {T,N} =
+    DArray{T,N}(undef, auto_blocks((dims...,)), (dims...,))
+DArray{T,N}(::UndefInitializer, dist::Blocks{N}, dims::Vararg{Int,N}) where {T,N} =
+    DArray{T,N}(undef, dist, (dims...,))
+
 function Base.:(==)(x::ArrayOp{T,N}, y::AbstractArray{S,N}) where {T,S,N}
     collect(x) == y
 end
