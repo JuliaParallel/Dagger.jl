@@ -31,6 +31,35 @@
     end
 end
 
+@testset "undef" begin
+    for T in [Float32, Float64, Int32, Int64]
+        for dims in [(),
+                     (100,),
+                     (100, 100),
+                     (100, 100, 100)]
+            # Automatic blocksize
+            for DA in [DArray{T}(undef, dims; assignment=:arbitrary),
+                       DArray{T}(undef, dims...; assignment=:arbitrary)]
+                @test DA isa DArray{T,length(dims)}
+                A = collect(DA)
+                @test eltype(DA) == eltype(A) == T
+                @test size(DA) == size(A) == dims
+            end
+
+            # Manual blocksize
+            dist = Blocks(ntuple(i->10, length(dims))...)
+            for DA in [DArray{T}(undef, dist, dims; assignment=:arbitrary),
+                       DArray{T}(undef, dist, dims...; assignment=:arbitrary)]
+                @test DA isa DArray{T,length(dims)}
+                A = collect(DA)
+                @test eltype(DA) == eltype(A) == T
+                @test size(DA) == size(A) == dims
+                @test DA.partitioning == dist
+            end
+        end
+    end
+end
+
 @testset "random" begin
     for T in [Float32, Float64, Int32, Int64]
         for dims in [(),
