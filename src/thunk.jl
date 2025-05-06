@@ -73,6 +73,7 @@ mutable struct Thunk
     eager_ref::Union{DRef,Nothing}
     options::Any # stores scheduler-specific options
     propagates::Tuple # which options we'll propagate
+    data_scope::AbstractScope
     function Thunk(f, xs...;
                    syncdeps=nothing,
                    id::Int=next_id(),
@@ -85,6 +86,8 @@ mutable struct Thunk
                    eager_ref=nothing,
                    processor=nothing,
                    scope=nothing,
+                   compute_scope=AnyScope(),
+                   data_scope=AnyScope(),
                    options=nothing,
                    propagates=(),
                    kwargs...
@@ -105,11 +108,11 @@ mutable struct Thunk
         if options !== nothing
             @assert isempty(kwargs)
             new(f, xs, syncdeps_set, id, get_result, meta, persist, cache,
-                cache_ref, affinity, eager_ref, options, propagates)
+                cache_ref, affinity, eager_ref, options, propagates, data_scope)
         else
             new(f, xs, syncdeps_set, id, get_result, meta, persist, cache,
                 cache_ref, affinity, eager_ref, Sch.ThunkOptions(;kwargs...),
-                propagates)
+                propagates, data_scope)
         end
     end
 end
@@ -479,6 +482,17 @@ function spawn(f, args...; kwargs...)
     # Wrap f in a Chunk if necessary
     processor = haskey(options, :processor) ? options.processor : nothing
     scope = haskey(options, :scope) ? options.scope : nothing
+    compute_scope = haskey(options, :compute_scope) ? options.compute_scope : nothing
+    data_scope = haskey(options, :data_scope) ? options.data_scope : nothing
+
+    if compute_scope !== nothing && data_scope !== nothing
+        constrained = constrain(compute_scope, data_scope) 
+        if !(constrained isa Dagger.InvalidScope) 
+            compute_scope = constrained
+        end
+    end
+
+    scope = scope === nothing ? compute_scope : scope
     if !isnothing(processor) || !isnothing(scope)
         f = tochunk(f,
                     something(processor, get_options(:processor, OSProc())),
