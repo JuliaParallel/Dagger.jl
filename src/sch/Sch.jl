@@ -1086,7 +1086,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
                            thunk.get_result, thunk.persist, thunk.cache, thunk.meta, options,
                            propagated, ids, positions,
                            (log_sink=ctx.log_sink, profile=ctx.profile),
-                           sch_handle, state.uid])
+                           sch_handle, state.uid, thunk.data_scope])
     end
     # N.B. We don't batch these because we might get a deserialization
     # error due to something not being defined on the worker, and then we don't
@@ -1488,7 +1488,7 @@ function do_task(to_proc, task_desc)
         scope, Tf, data,
         send_result, persist, cache, meta,
         options, propagated, ids, positions,
-        ctx_vars, sch_handle, sch_uid = task_desc
+        ctx_vars, sch_handle, sch_uid, data_scope = task_desc
     ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
 
     from_proc = OSProc()
@@ -1696,7 +1696,7 @@ function do_task(to_proc, task_desc)
 
         # Construct result
         # TODO: We should cache this locally
-        send_result || meta ? res : tochunk(res, to_proc; device, persist, cache=persist ? true : cache,
+        send_result || meta ? res : tochunk(res, to_proc, data_scope; device, persist, cache=persist ? true : cache,
                                             tag=options.storage_root_tag,
                                             leaf_tag=something(options.storage_leaf_tag, MemPool.Tag()),
                                             retain=options.storage_retain)
