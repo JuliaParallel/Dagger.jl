@@ -1,0 +1,13 @@
+[deps]
+Dagger = "d58978e5-989f-55fb-8d15-ea34adc7bf54"
+DataAugmentation = "88a5189c-e7ff-4f85-ac6b-e6158070f02e"
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
+Flux = "587475ba-b771-5e3f-ad9e-33799f191a9c"
+GraphViz = "f526b714-d49f-11e8-06ff-31ed36ee7ee0"
+Images = "916415d5-f1e6-5110-898d-aaa5f9f070e0"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Metalhead = "dbeba491-748d-5e0e-a39e-b530a07fa0cc"
+Optimisers = "3bd65402-5787-11e9-1adc-39752487f4e2"
+Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
+Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"
