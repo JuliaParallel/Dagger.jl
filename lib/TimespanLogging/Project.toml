@@ -1,7 +1,7 @@
 name = "TimespanLogging"
 uuid = "a526e669-04d3-4846-9525-c66122c55f63"
 authors = ["Julian P Samaroo <jpsamaroo@jpsamaroo.me>"]
-version = "0.1.0"
+version = "0.1.1"
 
 [deps]
 Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
