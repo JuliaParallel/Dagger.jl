@@ -485,12 +485,12 @@ function spawn(f, args...; kwargs...)
     compute_scope = haskey(options, :compute_scope) ? options.compute_scope : nothing
     data_scope = haskey(options, :data_scope) ? options.data_scope : nothing
 
-    if compute_scope !== nothing && data_scope !== nothing
-        constrained = constrain(compute_scope, data_scope) 
-        if !(constrained isa Dagger.InvalidScope) 
-            compute_scope = constrained
-        end
-    end
+    # if compute_scope !== nothing && data_scope !== nothing
+    #     constrained = constrain(compute_scope, data_scope) 
+    #     if !(constrained isa Dagger.InvalidScope) 
+    #         compute_scope = constrained
+    #     end
+    # end
 
     scope = scope === nothing ? compute_scope : scope
     if !isnothing(processor) || !isnothing(scope)
