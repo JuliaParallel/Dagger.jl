@@ -1,8 +1,20 @@
+#using Pkg; Pkg.add("Dagger")
+
 using Distributed
 
 addprocs(4; exeflags="--project=$(pwd())")
 
 using Dagger
+
+tasks = [Dagger.@spawn 1+i for i in 1:10]
+
+tasks = [Dagger.@spawn (i->begin
+    value = 1+i
+    println("Task $i has value $value")
+    return value
+end)(i) for i in 1:10]
+
+foreach(println, fetch.(tasks))
 
 using Plots, DataFrames
 using GraphViz
