@@ -107,6 +107,15 @@ these logs.
 """
 fetch_logs!() = TimespanLogging.get_logs!(Dagger.Sch.eager_context())
 
+# Convenience macros to reduce allocations when logging is disabled
+macro maybelog(ctx, ex)
+    quote
+        if !($(esc(ctx)).log_sink isa $(TimespanLogging.NoOpLog))
+            $(esc(ex))
+        end
+    end
+end
+
 function logs_event_pairs(f, logs::Dict)
     running_events = Dict{Tuple,Int}()
     for w in keys(logs)
@@ -133,7 +142,7 @@ end
 Associates an argument `arg` with `name` in the logs, which logs renderers may
 utilize for display purposes.
 """
-function logs_annotate!(ctx::Context, arg, name::Union{String,Symbol})
+function logs_annotate!(ctx#=::Context=#, arg, name::Union{String,Symbol})
     ismutable(arg) || throw(ArgumentError("Argument must be mutable to be annotated"))
     Dagger.TimespanLogging.timespan_start(ctx, :data_annotation, (;objectid=objectid_or_chunkid(arg), name), nothing)
     Dagger.TimespanLogging.timespan_finish(ctx, :data_annotation, (;objectid=objectid_or_chunkid(arg), name), nothing)

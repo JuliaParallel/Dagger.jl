@@ -98,8 +98,8 @@ function _cancel!(state, tid, force, graceful, halt_sch)
     for task in state.ready
         tid !== nothing && task.id != tid && continue
         @dagdebug tid :cancel "Cancelling ready task"
-        state.cache[task] = DTaskFailedException(task, task, InterruptException())
-        state.errored[task] = true
+        ex = DTaskFailedException(task, task, InterruptException())
+        Sch.store_result!(state, task, ex; error=true)
         Sch.set_failed!(state, task)
     end
     empty!(state.ready)
@@ -108,8 +108,8 @@ function _cancel!(state, tid, force, graceful, halt_sch)
     for task in keys(state.waiting)
         tid !== nothing && task.id != tid && continue
         @dagdebug tid :cancel "Cancelling waiting task"
-        state.cache[task] = DTaskFailedException(task, task, InterruptException())
-        state.errored[task] = true
+        ex = DTaskFailedException(task, task, InterruptException())
+        Sch.store_result!(state, task, ex; error=true)
         Sch.set_failed!(state, task)
     end
     empty!(state.waiting)
@@ -126,7 +126,7 @@ function _cancel!(state, tid, force, graceful, halt_sch)
                         for (tid, task) in istate.tasks
                             _tid !== nothing && tid != _tid && continue
                             task_spec = istate.task_specs[tid]
-                            Tf = task_spec[6]
+                            Tf = task_spec.Tf
                             Tf === typeof(Sch.eager_thunk) && continue
                             istaskdone(task) && continue
                             any_cancelled = true
@@ -136,13 +136,13 @@ function _cancel!(state, tid, force, graceful, halt_sch)
                             else
                                 @dagdebug tid :cancel "Cancelling running task ($Tf)"
                                 # Tell the processor to just drop this task
-                                task_occupancy = task_spec[4]
-                                time_util = task_spec[2]
+                                task_occupancy = task_spec.est_occupancy
+                                time_util = task_spec.est_time_util
                                 istate.proc_occupancy[] -= task_occupancy
                                 istate.time_pressure[] -= time_util
                                 push!(istate.cancelled, tid)
                                 to_proc = istate.proc
-                                put!(istate.return_queue, (myid(), to_proc, tid, (InterruptException(), nothing)))
+                                put!(istate.return_queue, Sch.TaskResult(myid(), to_proc, tid, InterruptException(), nothing))
                                 cancel!(istate.cancel_tokens[tid]; graceful)
                             end
                         end
@@ -165,7 +165,7 @@ function _cancel!(state, tid, force, graceful, halt_sch)
             # Halt the scheduler
             @dagdebug nothing :cancel "Halting the scheduler"
             notify(state.halt)
-            put!(state.chan, (1, nothing, nothing, (Sch.SchedulerHaltedException(), nothing)))
+            put!(state.chan, Sch.TaskResult(1, OSProc(), 0, Sch.SchedulerHaltedException(), nothing))
 
             # Wait for the scheduler to halt
             @dagdebug nothing :cancel "Waiting for scheduler to halt"

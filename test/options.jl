@@ -29,9 +29,8 @@ end
         # Special handling
         (:scope, AnyScope(), ProcessScope(first_wid), ProcessScope(last_wid)),
         (:processor, OSProc(), Dagger.ThreadProc(first_wid, 1), Dagger.ThreadProc(last_wid, 1)),
-        # ThunkOptions field
+        # Options field
         (:single, 0, first_wid, last_wid),
-        # Thunk field
         (:meta, false, true, false)
     ]
         # Test local and remote default values
