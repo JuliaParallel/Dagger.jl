@@ -419,6 +419,7 @@ struct Distribute{T,N,B<:AbstractBlocks} <: ArrayOp{T, N}
     domainchunks
     partitioning::B
     data::AbstractArray{T,N}
+    procgrid::Union{AbstractArray{<:Processor, N}, Nothing}
 end
 
 size(x::Distribute) = size(domain(x.data))
@@ -426,19 +427,18 @@ size(x::Distribute) = size(domain(x.data))
 Base.@deprecate BlockPartition Blocks
 
 
-Distribute(p::Blocks, data::AbstractArray) =
-    Distribute(partition(p, domain(data)), p, data)
+Distribute(p::Blocks, data::AbstractArray, procgrid::Union{AbstractArray{<:Processor},Nothing} = nothing) =
+    Distribute(partition(p, domain(data)), p, data, procgrid)
 
-function Distribute(domainchunks::DomainBlocks{N}, data::AbstractArray{T,N}) where {T,N}
+function Distribute(domainchunks::DomainBlocks{N}, data::AbstractArray{T,N}, procgrid::Union{AbstractArray{<:Processor, N},Nothing} = nothing) where {T,N}
     p = Blocks(ntuple(i->first(domainchunks.cumlength[i]), N))
-    Distribute(domainchunks, p, data)
+    Distribute(domainchunks, p, data, procgrid)
 end
 
-function Distribute(data::AbstractArray{T,N}) where {T,N}
-    nprocs = sum(w->length(Dagger.get_processors(OSProc(w))),
-                 procs())
+function Distribute(data::AbstractArray{T,N}, procgrid::Union{AbstractArray{<:Processor, N},Nothing} = nothing) where {T,N}
+    nprocs = sum(w->length(get_processors(OSProc(w))),procs())
     p = Blocks(ntuple(i->max(cld(size(data, i), nprocs), 1), N))
-    return Distribute(partition(p, domain(data)), p, data)
+    return Distribute(partition(p, domain(data)), p, data, procgrid)
 end
 
 function stage(ctx::Context, d::Distribute)
@@ -451,7 +451,8 @@ function stage(ctx::Context, d::Distribute)
         Nd = ndims(x)
         T = eltype(d.data)
         concat = x.concat
-        cs = map(d.domainchunks) do idx
+        cs = map(CartesianIndices(d.domainchunks)) do I
+            idx = d.domainchunks[I]
             chunks = stage(ctx, x[idx]).chunks
             shape = size(chunks)
             # TODO: fix hashing
@@ -466,12 +467,20 @@ function stage(ctx::Context, d::Distribute)
             end
         end
     else
-        cs = map(d.domainchunks) do c
+        cs = map(CartesianIndices(d.domainchunks)) do I
             # TODO: fix hashing
             #hash = uhash(c, Base.hash(Distribute, Base.hash(d.data)))
-            Dagger.@spawn identity(d.data[c])
+            c = d.domainchunks[I]
+            if isnothing(d.procgrid)
+                Dagger.@spawn identity(d.data[c])
+            else
+                proc =  d.procgrid[CartesianIndex(mod1.(Tuple(I), size(d.procgrid))...)]
+                scope = ExactScope(proc)
+                Dagger.@spawn scope=scope Dagger.tochunk(d.data[c], proc, scope)
+            end
         end
     end
+    
     return DArray(eltype(d.data),
                   domain(d.data),
                   d.domainchunks,
@@ -494,29 +503,53 @@ function auto_blocks(dims::Dims{N}) where N
 end
 auto_blocks(A::AbstractArray{T,N}) where {T,N} = auto_blocks(size(A))
 
-distribute(A::AbstractArray) = distribute(A, AutoBlocks())
-distribute(A::AbstractArray{T,N}, dist::Blocks{N}) where {T,N} =
-    _to_darray(Distribute(dist, A))
-distribute(A::AbstractArray, ::AutoBlocks) = distribute(A, auto_blocks(A))
-function distribute(x::AbstractArray{T,N}, n::NTuple{N}) where {T,N}
-    p = map((d, dn)->ceil(Int, d / dn), size(x), n)
-    distribute(x, Blocks(p))
+distribute(A::AbstractArray, assignment::Union{Symbol, AbstractArray{<:Int}, AbstractArray{<:Processor}} = :arbitrary) = distribute(A, AutoBlocks(), assignment)
+function distribute(A::AbstractArray{T,N}, dist::Blocks{N}, assignment::Union{Symbol, AbstractArray{<:Int, N}, AbstractArray{<:Processor, N}} = :arbitrary) where {T,N} 
+    procgrid = nothing
+    if assignment isa Symbol
+        if assignment == :arbitrary
+            procgrid = nothing
+        elseif assignment == :blockcyclic
+            p = ntuple(i -> i == N ? num_processors() : 1, N)
+            availprocs = [proc for i in procs() for proc in get_processors(OSProc(i))]
+            sortedavailprocs = sort!(availprocs, by = x -> (x.owner, x.tid)) 
+            procgrid = reshape(sortedavailprocs, p)
+        else
+            error("Unsupported assignment symbol: $assignment, use :arbitrary or :blockcyclic")
+        end
+    elseif assignment isa AbstractArray{<:Int, N}
+        missingprocs = filter(p -> p ∉ procs(), assignment)
+        isempty(missingprocs) || error("Missing processors: $missingprocs")
+        procgrid = [Dagger.ThreadProc(proc, 1) for proc in assignment]
+    elseif assignment isa AbstractArray{<:Processor, N}
+        availprocs = [proc for i in procs() for proc in get_processors(OSProc(i))]
+        missingprocs = filter(p -> p ∉ availprocs, assignment)
+        isempty(missingprocs) || error("Missing processors: $missingprocs")
+        procgrid = assignment
+    end
+
+    return _to_darray(Distribute(dist, A, procgrid))
 end
-distribute(x::AbstractVector, n::Int) = distribute(x, (n,))
-distribute(x::AbstractVector, n::Vector{<:Integer}) =
-    distribute(x, DomainBlocks((1,), (cumsum(n),)))
 
-DVector(A::AbstractVector{T}, part::Blocks{1}) where T = distribute(A, part)
-DMatrix(A::AbstractMatrix{T}, part::Blocks{2}) where T = distribute(A, part)
-DArray(A::AbstractArray{T,N}, part::Blocks{N}) where {T,N} = distribute(A, part)
+distribute(A::AbstractArray, ::AutoBlocks, assignment::Union{Symbol, AbstractArray{<:Int}, AbstractArray{<:Processor}} = :arbitrary) = distribute(A, auto_blocks(A), assignment)
+function distribute(x::AbstractArray{T,N}, n::NTuple{N}, assignment::Union{Symbol, AbstractArray{<:Int, N}, AbstractArray{<:Processor, N}} = :arbitrary) where {T,N}
+    p = map((d, dn)->ceil(Int, d / dn), size(x), n)
+    distribute(x, Blocks(p), assignment)
+end
+distribute(x::AbstractVector, n::Int, assignment::Union{Symbol, AbstractArray{<:Int, 1}, AbstractArray{<:Processor, 1}} = :arbitrary) = distribute(x, (n,), assignment)
+distribute(x::AbstractVector, n::Vector{<:Integer}, assignment::Union{Symbol, AbstractArray{<:Int, 1}, AbstractArray{<:Processor, 1}} = :arbitrary) = distribute(x, DomainBlocks((1,), (cumsum(n),)), assignment)
 
-DVector(A::AbstractVector{T}) where T = DVector(A, AutoBlocks())
-DMatrix(A::AbstractMatrix{T}) where T = DMatrix(A, AutoBlocks())
-DArray(A::AbstractArray) = DArray(A, AutoBlocks())
+DVector(A::AbstractVector{T}, part::Blocks{1}, assignment::Union{Symbol, AbstractArray{<:Int, 1}, AbstractArray{<:Processor, 1}} = :arbitrary) where T = distribute(A, part, assignment)
+DMatrix(A::AbstractMatrix{T}, part::Blocks{2}, assignment::Union{Symbol, AbstractArray{<:Int, 2}, AbstractArray{<:Processor, 2}} = :arbitrary) where T = distribute(A, part, assignment)
+DArray(A::AbstractArray{T,N}, part::Blocks{N}, assignment::Union{Symbol, AbstractArray{<:Int, N}, AbstractArray{<:Processor, N}} = :arbitrary) where {T,N} = distribute(A, part, assignment)
 
-DVector(A::AbstractVector{T}, ::AutoBlocks) where T = DVector(A, auto_blocks(A))
-DMatrix(A::AbstractMatrix{T}, ::AutoBlocks) where T = DMatrix(A, auto_blocks(A))
-DArray(A::AbstractArray, ::AutoBlocks) = DArray(A, auto_blocks(A))
+DVector(A::AbstractVector{T}, assignment::Union{Symbol, AbstractArray{<:Int, 1}, AbstractArray{<:Processor, 1}} = :arbitrary) where T = DVector(A, AutoBlocks(), assignment)
+DMatrix(A::AbstractMatrix{T}, assignment::Union{Symbol, AbstractArray{<:Int, 2}, AbstractArray{<:Processor, 2}} = :arbitrary) where T = DMatrix(A, AutoBlocks(), assignment)
+DArray(A::AbstractArray, assignment::Union{Symbol, AbstractArray{<:Int}, AbstractArray{<:Processor}} = :arbitrary) = DArray(A, AutoBlocks(), assignment) 
+
+DVector(A::AbstractVector{T}, ::AutoBlocks, assignment::Union{Symbol, AbstractArray{<:Int, 1}, AbstractArray{<:Processor, 1}} = :arbitrary) where T = DVector(A, auto_blocks(A), assignment)
+DMatrix(A::AbstractMatrix{T}, ::AutoBlocks, assignment::Union{Symbol, AbstractArray{<:Int, 2}, AbstractArray{<:Processor, 2}} = :arbitrary) where T = DMatrix(A, auto_blocks(A), assignment)
+DArray(A::AbstractArray, ::AutoBlocks, assignment::Union{Symbol, AbstractArray{<:Int}, AbstractArray{<:Processor}} = :arbitrary) = DArray(A, auto_blocks(A), assignment)
 
 function Base.:(==)(x::ArrayOp{T,N}, y::AbstractArray{S,N}) where {T,S,N}
     collect(x) == y
