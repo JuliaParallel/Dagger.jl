@@ -73,6 +73,8 @@ mutable struct Thunk
     eager_ref::Union{DRef,Nothing}
     options::Any # stores scheduler-specific options
     propagates::Tuple # which options we'll propagate
+    compute_scope::AbstractScope
+    result_scope::AbstractScope
     function Thunk(f, xs...;
                    syncdeps=nothing,
                    id::Int=next_id(),
@@ -85,6 +87,8 @@ mutable struct Thunk
                    eager_ref=nothing,
                    processor=nothing,
                    scope=nothing,
+                   compute_scope=DefaultScope(),
+                   result_scope=AnyScope(),
                    options=nothing,
                    propagates=(),
                    kwargs...
@@ -102,14 +106,14 @@ mutable struct Thunk
             end
         end
         @assert all(x->x isa Pair, xs)
-        if options !== nothing
+        if options !== nothing  
             @assert isempty(kwargs)
             new(f, xs, syncdeps_set, id, get_result, meta, persist, cache,
-                cache_ref, affinity, eager_ref, options, propagates)
+                cache_ref, affinity, eager_ref, options, propagates, compute_scope, result_scope)
         else
             new(f, xs, syncdeps_set, id, get_result, meta, persist, cache,
                 cache_ref, affinity, eager_ref, Sch.ThunkOptions(;kwargs...),
-                propagates)
+                propagates, compute_scope, result_scope)
         end
     end
 end
@@ -479,6 +483,9 @@ function spawn(f, args...; kwargs...)
     # Wrap f in a Chunk if necessary
     processor = haskey(options, :processor) ? options.processor : nothing
     scope = haskey(options, :scope) ? options.scope : nothing
+    compute_scope = haskey(options, :compute_scope) ? options.compute_scope : nothing
+    result_scope = haskey(options, :result_scope) ? options.result_scope : nothing
+
     if !isnothing(processor) || !isnothing(scope)
         f = tochunk(f,
                     something(processor, get_options(:processor, OSProc())),
