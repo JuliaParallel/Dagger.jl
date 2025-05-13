@@ -14,7 +14,7 @@ import Random: randperm
 import Base: @invokelatest
 
 import ..Dagger
-import ..Dagger: Context, Processor, Thunk, WeakThunk, ThunkFuture, DTaskFailedException, Chunk, WeakChunk, OSProc, AnyScope, DefaultScope, LockedObject
+import ..Dagger: Context, Processor, Thunk, WeakThunk, ThunkFuture, DTaskFailedException, Chunk, WeakChunk, OSProc, AnyScope, DefaultScope, InvalidScope, LockedObject
 import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak_checked, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, processor, get_processors, get_parent, execute!, rmprocs!, task_processor, constrain, cputhreadtime
 import ..Dagger: @dagdebug, @safe_lock_spin1
 import DataStructures: PriorityQueue, enqueue!, dequeue_pair!, peek
@@ -733,7 +733,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
                 # proclist overrides scope selection
                 AnyScope()
             else
-                DefaultScope()
+                !(constrain(task.compute_scope, task.result_scope) isa InvalidScope) ? constrain(task.compute_scope, task.result_scope) : task.compute_scope
             end
         end
         for (_,input) in task.inputs
@@ -744,7 +744,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
                 input
             else
                 nothing
-            end
+            end 
             chunk isa Chunk || continue
             scope = constrain(scope, chunk.scope)
             if scope isa Dagger.InvalidScope
@@ -1086,7 +1086,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
                            thunk.get_result, thunk.persist, thunk.cache, thunk.meta, options,
                            propagated, ids, positions,
                            (log_sink=ctx.log_sink, profile=ctx.profile),
-                           sch_handle, state.uid, thunk.data_scope])
+                           sch_handle, state.uid, thunk.result_scope])
     end
     # N.B. We don't batch these because we might get a deserialization
     # error due to something not being defined on the worker, and then we don't
@@ -1488,7 +1488,7 @@ function do_task(to_proc, task_desc)
         scope, Tf, data,
         send_result, persist, cache, meta,
         options, propagated, ids, positions,
-        ctx_vars, sch_handle, sch_uid, data_scope = task_desc
+        ctx_vars, sch_handle, sch_uid, result_scope = task_desc
     ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
 
     from_proc = OSProc()
@@ -1693,10 +1693,10 @@ function do_task(to_proc, task_desc)
             end
             timespan_finish(ctx, :storage_safe_scan, (;thunk_id, processor=to_proc), (;T=typeof(res)))
         end
-
+ 
         # Construct result
         # TODO: We should cache this locally
-        send_result || meta ? res : tochunk(res, to_proc, data_scope; device, persist, cache=persist ? true : cache,
+        send_result || meta ? res : tochunk(res, to_proc, result_scope; device, persist, cache=persist ? true : cache,
                                             tag=options.storage_root_tag,
                                             leaf_tag=something(options.storage_leaf_tag, MemPool.Tag()),
                                             retain=options.storage_retain)
