@@ -476,7 +476,7 @@ function stage(ctx::Context, d::Distribute)
             else
                 proc =  d.procgrid[CartesianIndex(mod1.(Tuple(I), size(d.procgrid))...)]
                 scope = ExactScope(proc)
-                Dagger.@spawn scope=scope Dagger.tochunk(d.data[c], proc, scope)
+                Dagger.@spawn compute_scope=scope identity(d.data[c])
             end
         end
     end
@@ -506,23 +506,35 @@ auto_blocks(A::AbstractArray{T,N}) where {T,N} = auto_blocks(size(A))
 distribute(A::AbstractArray, assignment::Union{Symbol, AbstractArray{<:Int}, AbstractArray{<:Processor}} = :arbitrary) = distribute(A, AutoBlocks(), assignment)
 function distribute(A::AbstractArray{T,N}, dist::Blocks{N}, assignment::Union{Symbol, AbstractArray{<:Int, N}, AbstractArray{<:Processor, N}} = :arbitrary) where {T,N} 
     procgrid = nothing
+    availprocs = [proc for i in procs() for proc in get_processors(OSProc(i))]
+    sort!(availprocs, by = x -> (x.owner, x.tid))
     if assignment isa Symbol
         if assignment == :arbitrary
             procgrid = nothing
-        elseif assignment == :blockcyclic
+        elseif assignment == :blockrow
+            p = ntuple(i -> i == 1 ? Int(ceil(size(A,1) / dist.blocksize[1])) : 1, N)
+            rows_per_proc, extra = divrem(Int(ceil(size(A,1) / dist.blocksize[1])), num_processors())
+            counts = [rows_per_proc + (i <= extra ? 1 : 0) for i in 1:num_processors()]
+            procgrid = reshape(vcat(fill.(availprocs, counts)...), p)   
+        elseif assignment == :blockcol
+            p = ntuple(i -> i == N ? Int(ceil(size(A,N) / dist.blocksize[N])) : 1, N)
+            cols_per_proc, extra = divrem(Int(ceil(size(A,N) / dist.blocksize[N])), num_processors())
+            counts = [cols_per_proc + (i <= extra ? 1 : 0) for i in 1:num_processors()]
+            procgrid = reshape(vcat(fill.(availprocs, counts)...), p)
+        elseif assignment == :cyclicrow
+            p = ntuple(i -> i == 1 ? num_processors() : 1, N)
+            procgrid = reshape(availprocs, p)
+        elseif assignment == :cycliccol
             p = ntuple(i -> i == N ? num_processors() : 1, N)
-            availprocs = [proc for i in procs() for proc in get_processors(OSProc(i))]
-            sortedavailprocs = sort!(availprocs, by = x -> (x.owner, x.tid)) 
-            procgrid = reshape(sortedavailprocs, p)
+            procgrid = reshape(availprocs, p)
         else
-            error("Unsupported assignment symbol: $assignment, use :arbitrary or :blockcyclic")
+            error("Unsupported assignment symbol: $assignment, use :arbitrary, :blockrow, :blockcol, :cyclicrow or :cycliccol")
         end
     elseif assignment isa AbstractArray{<:Int, N}
         missingprocs = filter(p -> p ∉ procs(), assignment)
         isempty(missingprocs) || error("Missing processors: $missingprocs")
         procgrid = [Dagger.ThreadProc(proc, 1) for proc in assignment]
     elseif assignment isa AbstractArray{<:Processor, N}
-        availprocs = [proc for i in procs() for proc in get_processors(OSProc(i))]
         missingprocs = filter(p -> p ∉ availprocs, assignment)
         isempty(missingprocs) || error("Missing processors: $missingprocs")
         procgrid = assignment
