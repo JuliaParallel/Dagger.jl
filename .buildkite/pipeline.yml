@@ -116,5 +116,5 @@ steps:
       arch: x86_64
     command: "git clone https://github.com/JuliaParallel/DTables.jl.git ; julia -t4 -e 'using Pkg; Pkg.activate(\"DTables.jl\"); Pkg.develop(;path=\".\"); Pkg.instantiate(); Pkg.test()'"
 
-# env:
-#   SECRET_CODECOV_TOKEN: ""
+env:
+  SECRET_CODECOV_TOKEN: "T0/oGuV4sBKPh23xeCOVSXiaDWAwqzw9km8WdrhPbkG6jialQjZhSyYoKPi3HXvD/XMjykbQY415tGVI6cqZ70X/OtphDrt4RejTprqnkgYfzJBIis6+WErMuDSZW7MC6iYjbpC/b599B429Bop47u6hDXH9WX3glAMM4dlDMVBoeINAdfADz0BFCNzrcCFuUACHn33838bvxWS9lAL4p962weCCIVwMn1sY5b7hFmfkN57bw4a+Lngd/jgZm10gDy6o8pw/2QrH8ZOgU05g+LuJ0i5bvtVMLKfImW6m1b/Uv5Kd7o4GRwEEnvCB5JPYXK1TwE8Q4u20o1lxv3K82w==;U2FsdGVkX1+hEolHZYWVb8VbQJW7ccvMGqI1MFV1swBnCYhgtlqLU8RgJLCTMFTLnJhx/OxoaRRmfNuk2Dv7AA=="
