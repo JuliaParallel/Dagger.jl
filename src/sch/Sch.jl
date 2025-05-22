@@ -7,10 +7,12 @@ else
     import Distributed: Future, ProcessExitedException, RemoteChannel, RemoteException, myid, remote_do, remotecall_fetch, remotecall_wait, workers
 end
 
+import ThreadPinning: getnumanode
+
 import MemPool
 import MemPool: DRef, StorageResource
 import MemPool: poolset, storage_capacity, storage_utilized
-import Random: randperm, randperm!
+import Random: randperm, randperm!, shuffle!
 import Base: @invokelatest
 
 import ..Dagger
@@ -1084,8 +1086,12 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                 # TODO: Prioritize stealing from busiest processors
                 states = proc_states(all_states->collect(values(all_states)), uid)
                 # TODO: Try to pre-allocate this
-                P = randperm(length(states))
-                for state in getindex.(Ref(states), P)
+                #P = randperm(length(states))
+                shuffle!(states)
+                locnuma = getnumanode()
+                sort!(states,by=x->x.state.proc isa Dagger.ThreadProc ? (getnumanode(;threadid=x.state.proc.tid) == locnuma ? 0 : 1) : typemax(Int))
+                @dagdebug nothing :processor "[$(Threads.threadid())] Stealing from $(map(x->(x.state.proc.tid, getnumanode(;threadid=x.state.proc.tid)), states))"
+                for state in states
                     other_istate = state.state
                     if other_istate.proc === to_proc
                         continue
