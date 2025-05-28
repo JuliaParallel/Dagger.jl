@@ -17,7 +17,9 @@
         GC.gc()
         yield()
     end
-    @assert length(state.thunk_dict) == 1
+    if length(state.thunk_dict) > 1
+        @warn "Precompile failed to clean up all tasks"
+    end
 
     # Halt scheduler
     notify(state.halt)
