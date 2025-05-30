@@ -594,7 +594,7 @@ function move(src::MPIProcessor, dst::MPIProcessor, x::Chunk)
 end
 
 #FIXME:try to think of a better move! scheme
-function execute!(proc::MPIProcessor, f, args...; kwargs...)
+function execute!(proc::MPIProcessor, world::UInt64, f, args...; kwargs...)
     local_rank = MPI.Comm_rank(proc.comm)
     tag_T = to_tag(hash(sch_handle().thunk_id.id, hash(:execute!, UInt(0))))
     tag_space = to_tag(hash(sch_handle().thunk_id.id, hash(:execute!, UInt(1))))
@@ -602,7 +602,7 @@ function execute!(proc::MPIProcessor, f, args...; kwargs...)
     inplace_move = f === move!
     result = nothing
     if islocal || inplace_move
-        result = execute!(proc.innerProc, f, args...; kwargs...)
+        result = execute!(proc.innerProc, world, f, args...; kwargs...)
     end
     if inplace_move
         # move! already handles communication
