@@ -403,13 +403,80 @@ const DEADLOCK_DETECT = TaskLocalValue{Bool}(()->true)
 const DEADLOCK_WARN_PERIOD = TaskLocalValue{Float64}(()->10.0)
 const DEADLOCK_TIMEOUT_PERIOD = TaskLocalValue{Float64}(()->60.0)
 const RECV_WAITING = Base.Lockable(Dict{Tuple{MPI.Comm, Int, Int}, Base.Event}())
+
+function supports_inplace_mpi(value)
+    if value isa DenseArray && isbitstype(eltype(value))
+        return true
+    else
+        return false
+    end
+end
+function recv_yield!(buffer, comm, src, tag)
+    println("buffer recv: $buffer, type of buffer: $(typeof(buffer)), is in place? $(supports_inplace_mpi(buffer))")
+    if !supports_inplace_mpi(buffer)
+        return recv_yield(comm, src, tag), false
+    end
+    time_start = time_ns()
+    detect = DEADLOCK_DETECT[]
+    warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
+    timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
+    rank = MPI.Comm_rank(comm)
+    Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Starting recv! from [$src]")
+
+    # Ensure no other receiver is waiting
+    our_event = Base.Event()
+    @label retry
+    other_event = lock(RECV_WAITING) do waiting
+        if haskey(waiting, (comm, src, tag))
+            waiting[(comm, src, tag)]
+        else
+            waiting[(comm, src, tag)] = our_event
+            nothing
+        end
+    end
+    if other_event !== nothing
+        #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Waiting for other receiver...")
+        wait(other_event)
+        @goto retry
+    end
+    while true
+        (got, msg, stat) = MPI.Improbe(src, tag, comm, MPI.Status)
+        if got
+            if MPI.Get_error(stat) != MPI.SUCCESS
+                error("recv_yield (Improbe) failed with error $(MPI.Get_error(stat))")
+            end
+            
+            req = MPI.Imrecv!(MPI.Buffer(buffer), msg)
+            while true
+                finish, stat = MPI.Test(req, MPI.Status)
+                if finish
+                    if MPI.Get_error(stat) != MPI.SUCCESS
+                        error("recv_yield (Test) failed with error $(MPI.Get_error(stat))")
+                    end
+                    
+                    #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Received value")
+                    lock(RECV_WAITING) do waiting
+                        delete!(waiting, (comm, src, tag))
+                        notify(our_event)
+                    end
+                    #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Released lock")
+                    return value, true
+                end
+                warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, rank, tag, "recv", src)
+                yield()
+            end
+        end
+        warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, rank, tag, "recv", src)
+        yield()
+    end
+end
 function recv_yield(comm, src, tag)
     time_start = time_ns()
     detect = DEADLOCK_DETECT[]
     warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
     timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
     rank = MPI.Comm_rank(comm)
-    #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Starting recv from [$src]")
+    Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Starting recv from [$src]")
 
     # Ensure no other receiver is waiting
     our_event = Base.Event()
@@ -468,14 +535,20 @@ function send_yield(value, comm, dest, tag; check_seen::Bool=true)
     warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
     timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
     rank = MPI.Comm_rank(comm)
+
     if check_seen && haskey(SEEN_TAGS, tag) && SEEN_TAGS[tag] !== typeof(value)
         @error "[rank $(MPI.Comm_rank(comm))][tag $tag] Already seen tag (previous type: $(SEEN_TAGS[tag]), new type: $(typeof(value)))" exception=(InterruptException(),backtrace())
     end
     if check_seen
         SEEN_TAGS[tag] = typeof(value)
     end
-    req = MPI.isend(value, comm; dest, tag)
-    #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Starting send to [$dest]: $(typeof(value))")
+    Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Starting send to [$dest]: $(typeof(value)), is support inplace? $(supports_inplace_mpi(value))")
+    if supports_inplace_mpi(value)
+        req = MPI.Isend(value, comm; dest, tag)
+    else
+        req = MPI.isend(value, comm; dest, tag)
+    end
+
     while true
         finish, status = MPI.Test(req, MPI.Status)
         if finish
@@ -543,8 +616,13 @@ function move!(dep_mod, dst::MPIMemorySpace, src::MPIMemorySpace, dstarg::Chunk,
         if local_rank == src.rank
             send_yield(poolget(srcarg.handle; uniform=false), dst.comm, dst.rank, tag)
         elseif local_rank == dst.rank
-            val = recv_yield(src.comm, src.rank, tag)
-            move!(dep_mod, dst.innerSpace, src.innerSpace, poolget(dstarg.handle; uniform=false), val)
+            @dagdebug nothing :mpi "[$local_rank][$tag] Receiving from rank $(src.rank) with tag $tag, type of buffer: $(poolget(dstarg.handle; uniform=false))"
+            val, inplace = recv_yield!(poolget(dstarg.handle; uniform=false), src.comm, src.rank, tag)
+            if !inplace
+                move!(dep_mod, dst.innerSpace, src.innerSpace, poolget(dstarg.handle; uniform=false), val)
+            end
+            
+            
         end
     end
     @dagdebug nothing :mpi "[$local_rank][$tag] Finished moving from  $(src.rank)  to  $(dst.rank) successfuly\n"
@@ -594,7 +672,7 @@ function move(src::MPIProcessor, dst::MPIProcessor, x::Chunk)
 end
 
 #FIXME:try to think of a better move! scheme
-function execute!(proc::MPIProcessor, f, args...; kwargs...)
+function execute!(proc::MPIProcessor, world::UInt64, f, args...; kwargs...)
     local_rank = MPI.Comm_rank(proc.comm)
     tag_T = to_tag(hash(sch_handle().thunk_id.id, hash(:execute!, UInt(0))))
     tag_space = to_tag(hash(sch_handle().thunk_id.id, hash(:execute!, UInt(1))))
@@ -602,7 +680,7 @@ function execute!(proc::MPIProcessor, f, args...; kwargs...)
     inplace_move = f === move!
     result = nothing
     if islocal || inplace_move
-        result = execute!(proc.innerProc, f, args...; kwargs...)
+        result = execute!(proc.innerProc, world, f, args...; kwargs...)
     end
     if inplace_move
         # move! already handles communication
