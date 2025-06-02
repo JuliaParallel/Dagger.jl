@@ -529,7 +529,11 @@ function recv_yield(comm, src, tag)
     end
 end
 const SEEN_TAGS = Dict{Int32, Type}()
-function send_yield(value, comm, dest, tag; check_seen::Bool=true)
+send_yield!(value, comm, dest, tag; check_seen::Bool=true) =
+    _send_yield(value, comm, dest, tag; check_seen, inplace=true)
+send_yield(value, comm, dest, tag; check_seen::Bool=true) =
+    _send_yield(value, comm, dest, tag; check_seen, inplace=false)
+function _send_yield(value, comm, dest, tag; check_seen::Bool=true, inplace::Bool)
     time_start = time_ns()
     detect = DEADLOCK_DETECT[]
     warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
@@ -543,7 +547,7 @@ function send_yield(value, comm, dest, tag; check_seen::Bool=true)
         SEEN_TAGS[tag] = typeof(value)
     end
     Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Starting send to [$dest]: $(typeof(value)), is support inplace? $(supports_inplace_mpi(value))")
-    if supports_inplace_mpi(value)
+    if inplace && supports_inplace_mpi(value)
         req = MPI.Isend(value, comm; dest, tag)
     else
         req = MPI.isend(value, comm; dest, tag)
@@ -614,15 +618,14 @@ function move!(dep_mod, dst::MPIMemorySpace, src::MPIMemorySpace, dstarg::Chunk,
         move!(dep_mod, dst.innerSpace, src.innerSpace, dstarg, srcarg)
     else
         if local_rank == src.rank
-            send_yield(poolget(srcarg.handle; uniform=false), dst.comm, dst.rank, tag)
+            send_yield!(poolget(srcarg.handle; uniform=false), dst.comm, dst.rank, tag)
         elseif local_rank == dst.rank
             @dagdebug nothing :mpi "[$local_rank][$tag] Receiving from rank $(src.rank) with tag $tag, type of buffer: $(poolget(dstarg.handle; uniform=false))"
-            val, inplace = recv_yield!(poolget(dstarg.handle; uniform=false), src.comm, src.rank, tag)
+            dstarg_val = poolget(dstarg.handle; uniform=false)
+            val, inplace = recv_yield!(dstarg_val, src.comm, src.rank, tag)
             if !inplace
-                move!(dep_mod, dst.innerSpace, src.innerSpace, poolget(dstarg.handle; uniform=false), val)
+                move!(dep_mod, dst.innerSpace, src.innerSpace, dstarg_val, val)
             end
-            
-            
         end
     end
     @dagdebug nothing :mpi "[$local_rank][$tag] Finished moving from  $(src.rank)  to  $(dst.rank) successfuly\n"
@@ -638,7 +641,7 @@ function move(src::MPIOSProc, dst::MPIProcessor, x::Chunk)
         if dst.rank == MPI.Comm_rank(dst.comm) 
             return poolget(x.handle)
         end
-    else 
+    else
         @assert src.rank == MPI.Comm_rank(src.comm) "Unwrapping not permited"
         @assert src.rank == x.handle.rank == dst.rank 
         return poolget(x.handle)
