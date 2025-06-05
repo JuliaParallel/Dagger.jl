@@ -264,7 +264,7 @@ be used.
 
 All other kwargs are passed directly to `MemPool.poolset`.
 """
-function tochunk(x::X, proc::P=OSProc(), scope::S=AnyScope(); persist=false, cache=false, device=nothing, kwargs...) where {X,P,S}
+function tochunk(x::X, proc::P=OSProc(), scope::S=DefaultScope(); persist=false, cache=false, device=nothing, kwargs...) where {X,P,S}
     if device === nothing
         device = if Sch.walk_storage_safe(x)
             MemPool.GLOBAL_DEVICE[]
@@ -284,7 +284,7 @@ function savechunk(data, dir, f)
     end
     fr = FileRef(f, sz)
     proc = OSProc()
-    scope = AnyScope() # FIXME: Scoped to this node
+    scope = DefaultScope() # FIXME: Scoped to this node
     Chunk{typeof(data),typeof(fr),typeof(proc),typeof(scope)}(typeof(data), domain(data), fr, proc, scope, true)
 end
 
