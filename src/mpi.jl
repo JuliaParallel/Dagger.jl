@@ -470,6 +470,10 @@ function recv_yield!(buffer, comm, src, tag)
         yield()
     end
 end
+struct InplaceInfo
+    type::DataType
+    shape::Tuple
+end
 function recv_yield(comm, src, tag)
     time_start = time_ns()
     detect = DEADLOCK_DETECT[]
@@ -496,48 +500,75 @@ function recv_yield(comm, src, tag)
     end
     #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Receiving...")
 
+    type = nothing
+    @label receive
+    value = recv_yield_serialized(comm, rank, src, tag)
+    if value isa InplaceInfo
+        value = recv_yield_inplace(value, comm, rank, src, tag)
+    end
+    lock(RECV_WAITING) do waiting
+        delete!(waiting, (comm, src, tag))
+        notify(our_event)
+    end
+    return value
+end
+function recv_yield_serialized(comm, my_rank, their_rank, tag)
+    time_start = time_ns()
+    detect = DEADLOCK_DETECT[]
+    warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
+    timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
     while true
-        (got, msg, stat) = MPI.Improbe(src, tag, comm, MPI.Status)
+        (got, msg, stat) = MPI.Improbe(their_rank, tag, comm, MPI.Status)
         if got
             if MPI.Get_error(stat) != MPI.SUCCESS
-                error("recv_yield (Improbe) failed with error $(MPI.Get_error(stat))")
+                error("recv_yield failed with error $(MPI.Get_error(stat))")
             end
             count = MPI.Get_count(stat, UInt8)
             buf = Array{UInt8}(undef, count)
             req = MPI.Imrecv!(MPI.Buffer(buf), msg)
-            while true
-                finish, stat = MPI.Test(req, MPI.Status)
-                if finish
-                    if MPI.Get_error(stat) != MPI.SUCCESS
-                        error("recv_yield (Test) failed with error $(MPI.Get_error(stat))")
-                    end
-                    value = MPI.deserialize(buf)
-                    #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Received value")
-                    lock(RECV_WAITING) do waiting
-                        delete!(waiting, (comm, src, tag))
-                        notify(our_event)
-                    end
-                    #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Released lock")
-                    return value
-                end
-                warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, rank, tag, "recv", src)
-                yield()
-            end
+            __wait_for_request(req, comm, my_rank, their_rank, tag, "recv_yield", "recv")
+            return MPI.deserialize(buf)
         end
-        warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, rank, tag, "recv", src)
+        warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, my_rank, tag, "recv", their_rank)
         yield()
     end
 end
+function recv_yield_inplace(_value::InplaceInfo, comm, my_rank, their_rank, tag)
+    time_start = time_ns()
+    detect = DEADLOCK_DETECT[]
+    warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
+    timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
+
+    T = _value.type
+    @assert T <: Array && isbitstype(eltype(T)) "recv_yield_inplace only supports inplace MPI transfers of bitstype dense arrays"
+    array = Array{eltype(T)}(undef, _value.shape)
+
+    while true
+        (got, msg, stat) = MPI.Improbe(their_rank, tag, comm, MPI.Status)
+        if got
+            if MPI.Get_error(stat) != MPI.SUCCESS
+                error("recv_yield failed with error $(MPI.Get_error(stat))")
+            end
+            count = MPI.Get_count(stat, UInt8)
+            @assert count == sizeof(array) "recv_yield_inplace: expected $(sizeof(array)) bytes, got $count"
+            buf = MPI.Buffer(array)
+            req = MPI.Imrecv!(buf, msg)
+            __wait_for_request(req, comm, my_rank, their_rank, tag, "recv_yield", "recv")
+            break
+        end
+        warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, my_rank, tag, "recv", their_rank)
+        yield()
+    end
+
+    return array
+end
+
 const SEEN_TAGS = Dict{Int32, Type}()
 send_yield!(value, comm, dest, tag; check_seen::Bool=true) =
     _send_yield(value, comm, dest, tag; check_seen, inplace=true)
 send_yield(value, comm, dest, tag; check_seen::Bool=true) =
     _send_yield(value, comm, dest, tag; check_seen, inplace=false)
 function _send_yield(value, comm, dest, tag; check_seen::Bool=true, inplace::Bool)
-    time_start = time_ns()
-    detect = DEADLOCK_DETECT[]
-    warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
-    timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
     rank = MPI.Comm_rank(comm)
 
     if check_seen && haskey(SEEN_TAGS, tag) && SEEN_TAGS[tag] !== typeof(value)
@@ -546,25 +577,44 @@ function _send_yield(value, comm, dest, tag; check_seen::Bool=true, inplace::Boo
     if check_seen
         SEEN_TAGS[tag] = typeof(value)
     end
-    Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Starting send to [$dest]: $(typeof(value)), is support inplace? $(supports_inplace_mpi(value))")
+    #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Starting send to [$dest]: $(typeof(value)), is support inplace? $(supports_inplace_mpi(value))")
     if inplace && supports_inplace_mpi(value)
-        req = MPI.Isend(value, comm; dest, tag)
+        send_yield_inplace(value, comm, rank, dest, tag)
     else
-        req = MPI.isend(value, comm; dest, tag)
+        send_yield_serialized(value, comm, rank, dest, tag)
     end
-
+end
+function send_yield_inplace(value, comm, my_rank, their_rank, tag)
+    req = MPI.Isend(value, comm; dest=their_rank, tag)
+    __wait_for_request(req, comm, my_rank, their_rank, tag, "send_yield", "send")
+end
+function send_yield_serialized(value, comm, my_rank, their_rank, tag)
+    if value isa Array && isbitstype(eltype(value))
+        send_yield_serialized(InplaceInfo(typeof(value), size(value)), comm, my_rank, their_rank, tag)
+        send_yield_inplace(value, comm, my_rank, their_rank, tag)
+    else
+        req = MPI.isend(value, comm; dest=their_rank, tag)
+        __wait_for_request(req, comm, my_rank, their_rank, tag, "send_yield", "send")
+    end
+end
+function __wait_for_request(req, comm, my_rank, their_rank, tag, fn::String, kind::String)
+    time_start = time_ns()
+    detect = DEADLOCK_DETECT[]
+    warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
+    timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
     while true
         finish, status = MPI.Test(req, MPI.Status)
         if finish
             if MPI.Get_error(status) != MPI.SUCCESS
-                error("send_yield (Test) failed with error $(MPI.Get_error(status))")
+                error("$fn failed with error $(MPI.Get_error(status))")
             end
             return
         end
-        warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, rank, tag, "send", dest)
+        warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, my_rank, tag, kind, their_rank)
         yield()
     end
 end
+
 function bcast_send_yield(value, comm, root, tag)
     sz = MPI.Comm_size(comm)
     rank = MPI.Comm_rank(comm)
