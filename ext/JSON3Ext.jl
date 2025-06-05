@@ -80,7 +80,7 @@ function logs_to_chrome_trace(logs::Dict)
 end
 
 function Dagger.render_logs(logs::Dict, ::Val{:chrome_trace})
-    @warn "Dagger.render_logs(logs, :chrome_trace) is deprecated, use Dagger.show_logs(io, logs, :chrome_trace) instead."
+    @warn "Dagger.render_logs(logs, :chrome_trace) is deprecated, use Dagger.show_logs(io, logs, :chrome_trace) instead." maxlog=1
     return JSON3.write(logs_to_chrome_trace(logs))
 end
 
