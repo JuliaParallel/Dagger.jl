@@ -59,7 +59,7 @@ addprocs!
 rmprocs!
 ```
 
-## Package Management Functions
+## Distributed Package Selection Functions
 ```@docs
 set_distributed_package!
 ```
