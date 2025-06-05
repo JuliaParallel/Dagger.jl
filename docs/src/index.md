@@ -304,6 +304,24 @@ data on disk to be specified as desired.
 
 -----
 
+## Quickstart: Distributed Package Selection
+
+Dagger.jl can use either the built-in `Distributed` package or the `DistributedNext` package for distributed operations. You can set your preference using the `Dagger.set_distributed_package!` function.
+
+### Setting the Distributed Package
+
+To set your preferred distributed package (e.g., to `DistributedNext`):
+
+```julia
+Dagger.set_distributed_package!("DistributedNext")
+```
+
+This will set a preference that persists across Julia sessions. Remember that **you need to restart your Julia session** for this change to take effect.
+
+For more details, see [`Dagger.set_distributed_package!`](@ref).
+
+-----
+
 ## Quickstart: Distributed Arrays
 
 Dagger's `DArray` type represents a distributed array, where a single large
