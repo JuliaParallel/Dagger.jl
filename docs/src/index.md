@@ -304,7 +304,7 @@ data on disk to be specified as desired.
 
 -----
 
-## Quickstart: Package Management
+## Quickstart: Distributed Package Selection
 
 Dagger.jl can use either the built-in `Distributed` package or the `DistributedNext` package for distributed operations. You can set your preference using the `Dagger.set_distributed_package!` function.
 
