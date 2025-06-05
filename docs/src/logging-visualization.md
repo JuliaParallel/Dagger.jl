@@ -24,7 +24,6 @@ Built-in `IO` support exists for:
 Built-in rendering support exists for:
 - `render_logs(logs, :graphviz)` to generate a graph diagram of executed tasks and their dependencies (requires `GraphViz.jl` to be loaded)
 - `render_logs(logs, :plots_gantt)` to generate a Gantt chart of task execution across all processors (requires `Plots.jl` and `DataFrames.jl` to be loaded)
-- `render_logs(logs, :chrome_trace)` to generate a `String` with chrome-trace formatted task execution timeline
 
 The latter (`MultiEventLog`) allows for continuously rendering logs as they're
 generated, permitting real-time visualization of Dagger's operations. This
