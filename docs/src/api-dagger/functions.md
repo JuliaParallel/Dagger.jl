@@ -59,6 +59,11 @@ addprocs!
 rmprocs!
 ```
 
+## Distributed Package Selection Functions
+```@docs
+set_distributed_package!
+```
+
 ## DTask Execution Environment Functions
 
 These functions are used within the function called by a `DTask`.
