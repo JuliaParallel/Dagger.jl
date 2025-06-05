@@ -5,6 +5,7 @@ Dagger has built-in and easily accessible logs visualization capabilities.
 Currently, there are two general mechanisms to visualize logs:
 `show_logs`/`render_logs`, and `MultiEventLog` consumers.
 
+## Logs visualization with show_logs/render_logs
 The former (`show_logs`/`render_logs`) renders a logs `Dict` (acquired from
 `fetch_logs!`) either to an `IO` (via `show_logs`) or by returning a renderable
 object (via `render_logs`). This system is designed for rendering a single
@@ -26,8 +27,8 @@ Built-in rendering support exists for:
 - `render_logs(logs, :plots_gantt)` to generate a Gantt chart of task execution across all processors
 - `render_logs(logs, :chrome_trace)` to generate a `String` with chrome-trace formatted task execution timeline
 
-The latter (`MultiEventLog`) allows for continuously rendering logs as they're
-generated, permitting real-time visualization of Dagger's operations. This
+## Continuous Visualization with MultiEventLog
+The `MultiEventLog` mechanism is designed for continuous rendering of logs as they are generated, which permits real-time visualization of Dagger's operations. This
 logic is utilized in `DaggerWebDash`, which provides a web-based dashboard for
 visualizing Dagger's operations as a real-time Gantt chart and set of plots for
 various system metrics (CPU usage, memory usage, worker utilization, etc.).
