@@ -42,13 +42,12 @@ function stage(ctx, A::AllocateArray)
     tasks = Array{DTask,ndims(A.domainchunks)}(undef, size(A.domainchunks)...)
     Dagger.spawn_datadeps() do
         for (i, x) in enumerate(A.domainchunks)
-            task = Dagger.@spawn allocate_array_undef(A.eltype, size(x))
+            task = tasks[i] = Dagger.@spawn allocate_array_undef(A.eltype, size(x)) # FIXME: Move this out of spawn_datadeps, required for MPI
             if A.want_index
                 Dagger.@spawn allocate_array!(Out(task), A.f, i)
             else
                 Dagger.@spawn allocate_array!(Out(task), A.f)
             end
-            tasks[i] = task
         end
     end
     return DArray(A.eltype, A.domain, A.domainchunks, tasks, A.partitioning)

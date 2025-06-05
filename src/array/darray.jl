@@ -331,14 +331,8 @@ function Base.isequal(x::ArrayOp, y::ArrayOp)
     x === y
 end
 
-struct AllocateUndef{S} end
-(::AllocateUndef{S})(T, dims::Dims{N}) where {S,N} = Array{S,N}(undef, dims)
-function Base.similar(A::DArray{T,N} where T, ::Type{S}, dims::Dims{N}) where {S,N}
-    d = ArrayDomain(map(x->1:x, dims))
-    p = A.partitioning
-    a = AllocateArray(S, AllocateUndef{S}(), false, d, partition(p, d), p)
-    return _to_darray(a)
-end
+Base.similar(::DArray{T,N} where T, ::Type{S}, dims::Dims{N}) where {S,N} =
+    DArray{S,N}(undef, dims)
 
 Base.copy(x::DArray{T,N,B,F}) where {T,N,B,F} =
     map(identity, x)::DArray{T,N,B,F}
@@ -547,7 +541,7 @@ function DArray{T,N}(::UndefInitializer, dist::Blocks{N}, dims::NTuple{N,Int}) w
     domain = ArrayDomain(ntuple(i->1:dims[i], N))
     subdomains = partition(dist, domain)
     tasks = Array{DTask,N}(undef, size(subdomains)...)
-    Dagger.spawn_datadeps() do
+    Dagger.spawn_datadeps() do # FIXME: Required for MPI
         for (i, x) in enumerate(subdomains)
             tasks[i] = Dagger.@spawn allocate_array_undef(T, size(x))
         end
