@@ -19,7 +19,7 @@ converted to a `Val` for dispatch purposes
 
 Built-in `IO` support exists for:
 - `show_logs(io, logs, :graphviz)` to write a Graphviz dot graph of executed tasks and their dependencies (requires `GraphViz.jl` to be loaded)
-- `show_logs(io, logs, :chrome_trace)` to write a task execution timeline in the chrome-trace format (view in [perfetto web UI](https://ui.perfetto.dev/) or `about:tracing` in a chrome-based browser)
+- `show_logs(io, logs, :chrome_trace)` to write a task execution timeline in the chrome-trace format (view in [perfetto web UI](https://ui.perfetto.dev/) or `about:tracing` in a chrome-based browser) (requires `JSON3.jl` to be loaded)
 
 Built-in rendering support exists for:
 - `render_logs(logs, :graphviz)` to generate a graph diagram of executed tasks and their dependencies (requires `GraphViz.jl` to be loaded)
