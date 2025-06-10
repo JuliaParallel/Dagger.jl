@@ -40,4 +40,15 @@ function Dagger.render_logs(logs::Dict, ::Val{:graphviz}; disconnected=false,
     return gv
 end
 
+function Dagger.show_logs(io::IO, logs::Dict, ::Val{:graphviz}; disconnected=false,
+                          color_by=:fn, layout_engine="dot",
+                          times::Bool=true, times_digits::Integer=3,
+                          colors=Dagger.Viz.default_colors,
+                          name_to_color=Dagger.Viz.name_to_color)
+    dot = Dagger.Viz.logs_to_dot(logs; disconnected, times, times_digits,
+                                 color_by, colors, name_to_color)
+    write(io, dot)
+    return
+end
+
 end
