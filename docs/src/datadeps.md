@@ -15,7 +15,7 @@ concrete:
 A = rand(1000)
 B = rand(1000)
 C = zeros(1000)
-add!(X, Y) = X .+= Y
+@everywhere add!(X, Y) = X .+= Y
 Dagger.spawn_datadeps() do
     Dagger.@spawn add!(InOut(B), In(A))
     Dagger.@spawn copyto!(Out(C), In(B))
@@ -118,7 +118,7 @@ A_l = view(A, 1:500)
 A_r = view(A, 501:1000)
 
 # inc! supports views, so we can pass A_l and A_r directly
-inc!(X) = X .+= 1
+@everywhere inc!(X) = X .+= 1
 
 Dagger.spawn_datadeps() do
     # These two tasks don't alias, so they can run in parallel
@@ -137,9 +137,9 @@ from how that argument is accessed within the function. This is done with the
 ```julia
 A = rand(1000, 1000)
 
-inc_upper!(X) = UpperTriangular(X) .+= 1
-inc_ulower!(X) = UnitLowerTriangular(X) .+= 1
-inc_diag!(X) = X[diagind(X)] .+= 1
+@everywhere inc_upper!(X) = UpperTriangular(X) .+= 1
+@everywhere inc_ulower!(X) = UnitLowerTriangular(X) .+= 1
+@everywhere inc_diag!(X) = X[diagind(X)] .+= 1
 
 Dagger.spawn_datadeps() do
     # These two tasks don't alias, so they can run in parallel
