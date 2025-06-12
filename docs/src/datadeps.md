@@ -100,7 +100,7 @@ Dagger to existing algorithms quite effortless.
 
 ## Limitations
 
-It's important to be aware of a key limitation when working with `Dagger.spawn_datadeps`. Operations that involve explicit synchronization or fetching results of other Dagger tasks, such as `fetch`, `wait`, or `Dagger.@sync` (or its functional equivalent `Dagger.sync()`), cannot be used directly inside a `spawn_datadeps` block.
+It's important to be aware of a key limitation when working with `Dagger.spawn_datadeps`. Operations that involve explicit synchronization or fetching results of other Dagger tasks, such as `fetch`, `wait`, or `@sync`, cannot be used directly inside a `spawn_datadeps` block.
 
 The `spawn_datadeps` region is designed to manage data dependencies automatically based on the `In`, `Out`, and `InOut` annotations. Introducing explicit synchronization primitives can interfere with this mechanism and lead to unexpected behavior or errors.
 
@@ -116,8 +116,8 @@ Dagger.spawn_datadeps() do
     task2 = Dagger.@spawn InOut(B) my_func2!(B)
     wait(task2) # This will also lead to issues
 
-    # Incorrect: Using Dagger.@sync inside spawn_datadeps
-    Dagger.@sync begin
+    # Incorrect: Using @sync inside spawn_datadeps
+    @sync begin
         Dagger.@spawn InOut(C) my_func3!(C)
         Dagger.@spawn InOut(D) my_func4!(D)
     end
