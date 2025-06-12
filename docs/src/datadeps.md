@@ -98,6 +98,34 @@ runs sequentially. This means that the structure of the program doesn't have to
 change in order to use Dagger for parallelization, which can make applying
 Dagger to existing algorithms quite effortless.
 
+## Limitations
+
+It's important to be aware of a key limitation when working with `Dagger.spawn_datadeps`. Operations that involve explicit synchronization or fetching results of other Dagger tasks, such as `fetch`, `wait`, or `Dagger.@sync` (or its functional equivalent `Dagger.sync()`), cannot be used directly inside a `spawn_datadeps` block.
+
+The `spawn_datadeps` region is designed to manage data dependencies automatically based on the `In`, `Out`, and `InOut` annotations. Introducing explicit synchronization primitives can interfere with this mechanism and lead to unexpected behavior or errors.
+
+**Example of what NOT to do:**
+
+```julia
+Dagger.spawn_datadeps() do
+    # Incorrect: Using fetch inside spawn_datadeps
+    task1 = Dagger.@spawn InOut(A) my_func1!(A)
+    result1 = fetch(task1) # This will not work as expected
+
+    # Incorrect: Using wait inside spawn_datadeps
+    task2 = Dagger.@spawn InOut(B) my_func2!(B)
+    wait(task2) # This will also lead to issues
+
+    # Incorrect: Using Dagger.@sync inside spawn_datadeps
+    Dagger.@sync begin
+        Dagger.@spawn InOut(C) my_func3!(C)
+        Dagger.@spawn InOut(D) my_func4!(D)
+    end
+end
+```
+
+If you need to synchronize or fetch results, these operations should be performed outside the `spawn_datadeps` block. The primary purpose of `spawn_datadeps` is to define a region where data dependencies for mutable operations are automatically managed.
+
 ## Aliasing Support
 
 Datadeps is smart enough to detect when two arguments from different tasks
