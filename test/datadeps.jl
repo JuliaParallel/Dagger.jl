@@ -109,6 +109,7 @@ function test_task_dominators(logs::Dict, tid::Int, doms::Vector; all_tids::Vect
 end
 
 @everywhere do_nothing(Xs...) = nothing
+@everywhere mut_ref!(R) = (R[] .= 0;)
 function test_datadeps(;args_chunks::Bool,
                         args_thunks::Bool,
                         args_loc::Int,
@@ -425,9 +426,16 @@ function test_datadeps(;args_chunks::Bool,
     end
 
     # Inner Scope
-    @test_throws Dagger.Sch.SchedulingException Dagger.spawn_datadeps() do 
+    @test_throws Dagger.Sch.SchedulingException Dagger.spawn_datadeps() do
         Dagger.@spawn scope=Dagger.ExactScope(Dagger.ThreadProc(1, 5000)) 1+1
     end
+
+    # Field aliasing
+    X = Ref(rand(1000))
+    @test all(x->x==0, fetch(Dagger.spawn_datadeps() do
+        Dagger.@spawn mut_ref!(Deps(X, InOut(:x)))
+        Dagger.@spawn getfield(Deps(X, In(:x)), :x)
+    end))
 
     # Add-to-copy
     A = rand(1000)

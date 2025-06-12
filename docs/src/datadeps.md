@@ -179,9 +179,20 @@ Dagger.spawn_datadeps() do
 end
 ```
 
-You can pass any number of aliasing modifiers to `Deps`. This is particularly
-useful for declaring aliasing with `Diagonal`, `Bidiagonal`, `Tridiagonal`, and
-`SymTridiagonal` access, as these "wrappers" make a copy of their parent array
-and thus can't be used to "mask" access to the parent like `UpperTriangular`
-and `UnitLowerTriangular` can (which is valuable for writing memory-efficient,
-generic algorithms in Julia).
+We call `InOut(Diagonal)` an "aliasing modifier". The purpose of `Deps` is to
+pass an argument (here, `A`) as-is, while specifying to Datadeps what portions
+of the argument will be accessed (in this case, the diagonal elements) and how
+(read/write/both). You can pass any number of aliasing modifiers to `Deps`.
+
+`Deps` is particularly useful for declaring aliasing with `Diagonal`,
+`Bidiagonal`, `Tridiagonal`, and `SymTridiagonal` access, as these "wrappers"
+make a copy of their parent array and thus can't be used to "mask" access to the
+parent like `UpperTriangular` and `UnitLowerTriangular` can (which is valuable
+for writing memory-efficient, generic algorithms in Julia).
+
+### Supported Aliasing Modifiers
+
+- Any function that returns the original object or a view of the original object
+- `UpperTriangular`/`LowerTriangular`/`UnitUpperTriangular`/`UnitLowerTriangular`
+- `Diagonal`/`Bidiagonal`/`Tridiagonal`/`SymTridiagonal` (via `Deps`, e.g. to read from the diagonal of `X`: `Dagger.@spawn sum(Deps(X, In(Diagonal)))`)
+- `Symbol` for field access (via `Deps`, e.g. to write to `X.value`: `Dagger.@spawn setindex!(Deps(X, InOut(:value)), :value, 42)`
