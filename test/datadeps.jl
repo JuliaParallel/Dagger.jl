@@ -408,7 +408,7 @@ function test_datadeps(;args_chunks::Bool,
 
     # FIXME: Deps
 
-    # Scope
+    # Outer Scope
     exec_procs = fetch.(Dagger.spawn_datadeps(;aliasing) do
         [Dagger.@spawn Dagger.task_processor() for i in 1:10]
     end)
@@ -422,6 +422,11 @@ function test_datadeps(;args_chunks::Bool,
     for proc in scope_procs
         proc == Dagger.ThreadProc(1, 1) && continue
         @test proc in exec_procs
+    end
+
+    # Inner Scope
+    @test_throws Dagger.Sch.SchedulingException Dagger.spawn_datadeps() do 
+        Dagger.@spawn scope=Dagger.ExactScope(Dagger.ThreadProc(1, 5000)) 1+1
     end
 
     # Add-to-copy

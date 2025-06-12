@@ -698,7 +698,11 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         @assert our_proc in all_procs
         our_space = only(memory_spaces(our_proc))
         our_procs = filter(proc->proc in all_procs, collect(processors(our_space)))
-        our_scope = UnionScope(map(ExactScope, our_procs)...)
+        task_scope = get(spec.options, :scope, AnyScope())
+        our_scope = constrain(UnionScope(map(ExactScope, our_procs)...), task_scope)
+        if our_scope isa InvalidScope
+            throw(Sch.SchedulingException("Scopes are not compatible: $(our_scope.x), $(our_scope.y)"))
+        end
 
         spec.f = move(ThreadProc(myid(), 1), our_proc, spec.f)
         @dagdebug nothing :spawn_datadeps "($(repr(spec.f))) Scheduling: $our_proc ($our_space)"
