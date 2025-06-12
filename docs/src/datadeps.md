@@ -109,17 +109,17 @@ The `spawn_datadeps` region is designed to manage data dependencies automaticall
 ```julia
 Dagger.spawn_datadeps() do
     # Incorrect: Using fetch inside spawn_datadeps
-    task1 = Dagger.@spawn InOut(A) my_func1!(A)
+    task1 = Dagger.@spawn my_func1!(InOut(A))
     result1 = fetch(task1) # This will not work as expected
 
     # Incorrect: Using wait inside spawn_datadeps
-    task2 = Dagger.@spawn InOut(B) my_func2!(B)
+    task2 = Dagger.@spawn my_func2!(InOut(B))
     wait(task2) # This will also lead to issues
 
     # Incorrect: Using @sync inside spawn_datadeps
     @sync begin
-        Dagger.@spawn InOut(C) my_func3!(C)
-        Dagger.@spawn InOut(D) my_func4!(D)
+        Dagger.@spawn my_func3!(InOut(C))
+        Dagger.@spawn my_func4!(InOut(D))
     end
 end
 ```
