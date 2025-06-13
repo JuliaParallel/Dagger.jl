@@ -14,7 +14,7 @@ import Random: randperm
 import Base: @invokelatest
 
 import ..Dagger
-import ..Dagger: Context, Processor, Thunk, WeakThunk, ThunkFuture, DTaskFailedException, Chunk, WeakChunk, OSProc, AnyScope, DefaultScope, LockedObject
+import ..Dagger: Context, Processor, Thunk, WeakThunk, ThunkFuture, DTaskFailedException, Chunk, WeakChunk, OSProc, AnyScope, DefaultScope, InvalidScope, LockedObject
 import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak_checked, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, processor, get_processors, get_parent, execute!, rmprocs!, task_processor, constrain, cputhreadtime
 import ..Dagger: @dagdebug, @safe_lock_spin1
 import DataStructures: PriorityQueue, enqueue!, dequeue_pair!, peek
@@ -726,16 +726,32 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         sig = signature(state, task)
 
         # Calculate scope
-        scope = if task.f isa Chunk
-            task.f.scope
-        else
-            if task.options.proclist !== nothing
-                # proclist overrides scope selection
-                AnyScope()
-            else
-                DefaultScope()
+        scope = constrain(task.compute_scope, task.result_scope)
+        if scope isa InvalidScope
+            ex = SchedulingException("Compute and Result Scopes are not compatible: $(scope.x), $(scope.y)")
+            state.cache[task] = ex
+            state.errored[task] = true
+            set_failed!(state, task)
+            @goto pop_task
+        end
+        if task.f isa Chunk
+            scope = constrain(scope, task.f.scope)
+            if scope isa InvalidScope
+                ex = SchedulingException("Compute and Chunk Scopes are not compatible: $(scope.x), $(scope.y)")
+                state.cache[task] = ex
+                state.errored[task] = true
+                set_failed!(state, task)
+                @goto pop_task
             end
         end
+
+        # if task.options.proclist !== nothing
+        #     # proclist overrides scope selection
+        #     AnyScope()
+        # else
+        #     DefaultScope()
+        # end
+
         for (_,input) in task.inputs
             input = unwrap_weak_checked(input)
             chunk = if istask(input)
@@ -747,8 +763,8 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
             end
             chunk isa Chunk || continue
             scope = constrain(scope, chunk.scope)
-            if scope isa Dagger.InvalidScope
-                ex = SchedulingException("Scopes are not compatible: $(scope.x), $(scope.y)")
+            if scope isa InvalidScope
+                ex = SchedulingException("Final Compute and Argument Chunk Scopes are not compatible: $(scope.x), $(scope.y)")
                 state.cache[task] = ex
                 state.errored[task] = true
                 set_failed!(state, task)
@@ -1086,7 +1102,7 @@ function fire_tasks!(ctx, thunks::Vector{<:Tuple}, (gproc, proc), state)
                            thunk.get_result, thunk.persist, thunk.cache, thunk.meta, options,
                            propagated, ids, positions,
                            (log_sink=ctx.log_sink, profile=ctx.profile),
-                           sch_handle, state.uid])
+                           sch_handle, state.uid, thunk.result_scope])
     end
     # N.B. We don't batch these because we might get a deserialization
     # error due to something not being defined on the worker, and then we don't
@@ -1305,7 +1321,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                         task = task_spec[]
                         scope = task[5]
                         if !isa(constrain(scope, Dagger.ExactScope(to_proc)),
-                                Dagger.InvalidScope) &&
+                                InvalidScope) &&
                            typemax(UInt32) - proc_occupancy_cached >= occupancy
                             # Compatible, steal this task
                             return dequeue_pair!(queue)
@@ -1488,7 +1504,7 @@ function do_task(to_proc, task_desc)
         scope, Tf, data,
         send_result, persist, cache, meta,
         options, propagated, ids, positions,
-        ctx_vars, sch_handle, sch_uid = task_desc
+        ctx_vars, sch_handle, sch_uid, result_scope = task_desc
     ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
 
     from_proc = OSProc()
@@ -1696,7 +1712,7 @@ function do_task(to_proc, task_desc)
 
         # Construct result
         # TODO: We should cache this locally
-        send_result || meta ? res : tochunk(res, to_proc; device, persist, cache=persist ? true : cache,
+        send_result || meta ? res : tochunk(res, to_proc, result_scope; device, persist, cache=persist ? true : cache,
                                             tag=options.storage_root_tag,
                                             leaf_tag=something(options.storage_leaf_tag, MemPool.Tag()),
                                             retain=options.storage_retain)
@@ -1704,6 +1720,8 @@ function do_task(to_proc, task_desc)
         bt = catch_backtrace()
         RemoteException(myid(), CapturedException(ex, bt))
     end
+
+    # @dagdebug thunk_id :scope "Result scope is $result_scope"
 
     threadtime = cputhreadtime() - threadtime_start
     # FIXME: This is not a realistic measure of max. required memory

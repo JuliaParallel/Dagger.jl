@@ -20,6 +20,7 @@ makedocs(;
             "Parallel Nested Loops" => "use-cases/parallel-nested-loops.md",
         ],
         "Task Spawning" => "task-spawning.md",
+        "Task Affinity" => "task-affinity.md",
         "Data Management" => "data-management.md",
         "Distributed Arrays" => "darray.md",
         "Streaming Tasks" => "streaming.md",
