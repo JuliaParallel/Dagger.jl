@@ -162,7 +162,12 @@ function memory_spans(oa::ObjectAliasing)
     return [span]
 end
 
-aliasing(x, T) = aliasing(T(x))
+function aliasing(x, dep_mod)
+    if dep_mod isa Symbol
+        return aliasing(getfield(x, dep_mod))
+    end
+    return aliasing(dep_mod(x))
+end
 function aliasing(x::T) where T
     if isbits(x)
         return NoAliasing()
