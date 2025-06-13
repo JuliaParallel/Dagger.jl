@@ -1,6 +1,5 @@
-#@everywhere ENV["JULIA_DEBUG"] = "Dagger"
 @testset "Chunk Scopes" begin
-    wid1, wid2 = addprocs(2, exeflags=["-t 2"])
+    wid1, wid2 = addprocs(2, exeflags=["-t2", "--project=$(Base.active_project())"])
     @everywhere [wid1,wid2] using Dagger
     Dagger.addprocs!(Dagger.Sch.eager_context(), [wid1,wid2])
     fetch(Dagger.@spawn 1+1) # Force scheduler to pick up new workers
@@ -57,7 +56,7 @@
 
         # Different nodes
         for (ch1, ch2) in [(ns1_ch, ns2_ch), (ns2_ch, ns1_ch)]
-            @test_throws_unwrap (Dagger.DTaskFailedException, Dagger.Sch.SchedulingException) reason<"Scopes are not compatible:" fetch(Dagger.@spawn ch1 + ch2)
+            @test_throws_unwrap (Dagger.DTaskFailedException, Dagger.Sch.SchedulingException) reason<"Current scope and argument Chunk scope are not compatible:" fetch(Dagger.@spawn ch1 + ch2)
         end
     end
     @testset "Process Scope" begin
@@ -76,7 +75,7 @@
 
         # Different process
         for (ch1, ch2) in [(ps1_ch, ps2_ch), (ps2_ch, ps1_ch)]
-            @test_throws_unwrap (Dagger.DTaskFailedException, Dagger.Sch.SchedulingException) reason<"Scopes are not compatible:" fetch(Dagger.@spawn ch1 + ch2)
+            @test_throws_unwrap (Dagger.DTaskFailedException, Dagger.Sch.SchedulingException) reason<"Current scope and argument Chunk scope are not compatible:" fetch(Dagger.@spawn ch1 + ch2)
         end
 
         # Same process and node
@@ -84,7 +83,7 @@
 
         # Different process and node
         for (ch1, ch2) in [(ps1_ch, ns2_ch), (ns2_ch, ps1_ch)]
-            @test_throws_unwrap (Dagger.DTaskFailedException, Dagger.Sch.SchedulingException) reason<"Scopes are not compatible:" fetch(Dagger.@spawn ch1 + ch2)
+            @test_throws_unwrap (Dagger.DTaskFailedException, Dagger.Sch.SchedulingException) reason<"Current scope and argument Chunk scope are not compatible:" fetch(Dagger.@spawn ch1 + ch2)
         end
     end
     @testset "Exact Scope" begin
@@ -105,14 +104,14 @@
 
         # Different process, different processor
         for (ch1, ch2) in [(es1_ch, es2_ch), (es2_ch, es1_ch)]
-            @test_throws_unwrap (Dagger.DTaskFailedException, Dagger.Sch.SchedulingException) reason<"Scopes are not compatible:" fetch(Dagger.@spawn ch1 + ch2)
+            @test_throws_unwrap (Dagger.DTaskFailedException, Dagger.Sch.SchedulingException) reason<"Current scope and argument Chunk scope are not compatible:" fetch(Dagger.@spawn ch1 + ch2)
         end
 
         # Same process, different processor
         es1_2 = ExactScope(Dagger.ThreadProc(wid1, 2))
         es1_2_ch = Dagger.tochunk(nothing, OSProc(), es1_2)
         for (ch1, ch2) in [(es1_ch, es1_2_ch), (es1_2_ch, es1_ch)]
-            @test_throws_unwrap (Dagger.DTaskFailedException, Dagger.Sch.SchedulingException) reason<"Scopes are not compatible:" fetch(Dagger.@spawn ch1 + ch2)
+            @test_throws_unwrap (Dagger.DTaskFailedException, Dagger.Sch.SchedulingException) reason<"Current scope and argument Chunk scope are not compatible:" fetch(Dagger.@spawn ch1 + ch2)
         end
     end
     @testset "Union Scope" begin
@@ -267,6 +266,17 @@
 
         comp_procs = Dagger.compatible_processors()
         @test Dagger.num_processors() == length(comp_procs)
+    end
+
+    @testset "scope comparison" begin
+        scope1 = Dagger.scope(worker=wid1)
+        scope2 = Dagger.scope(worker=wid1, thread=1)
+        @test issubset(scope2, scope1)
+        @test !issubset(scope1, scope2)
+        @test issetequal(scope1, scope1)
+        @test issetequal(scope2, scope2)
+        @test !issetequal(scope1, scope2)
+        @test !issetequal(scope2, scope1)
     end
 
     rmprocs([wid1, wid2])

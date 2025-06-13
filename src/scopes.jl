@@ -240,6 +240,17 @@ constrain(x::ProcessScope, y::ExactScope) =
 constrain(x::NodeScope, y::ExactScope) =
     x == y.parent.parent ? y : InvalidScope(x, y)
 
+
+function constrain(scope1, scope2, scopes...)
+    scope1 = constrain(scope1, scope2)
+    scope1 isa InvalidScope && return scope1
+    for s in scopes
+        scope1 = constrain(scope1, s)
+        scope1 isa InvalidScope && return scope1
+    end
+    return scope1
+end
+
 ### Scopes helper
 
 """
@@ -412,3 +423,26 @@ to_scope(::Val{key}, sc::NamedTuple) where key =
 
 # Base case for all Dagger-owned keys
 scope_key_precedence(::Val) = 0
+
+### Scope comparison helpers
+
+function Base.issetequal(scopes::AbstractScope...)
+    scope1 = scopes[1]
+    scope1_procs = Dagger.compatible_processors(scope1)
+    for scope2 in scopes[2:end]
+        scope2_procs = Dagger.compatible_processors(scope2)
+        if !issetequal(scope1_procs, scope2_procs)
+            return false
+        end
+    end
+    return true
+end
+
+function Base.issubset(scope1::AbstractScope, scope2::AbstractScope)
+    scope1_procs = compatible_processors(scope1)
+    scope2_procs = compatible_processors(scope2)
+    for proc in scope1_procs
+        proc in scope2_procs || return false
+    end
+    return true
+end
