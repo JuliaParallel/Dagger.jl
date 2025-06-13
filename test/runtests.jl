@@ -18,6 +18,7 @@ tests = [
     ("Options", "options.jl"),
     ("Mutation", "mutation.jl"),
     ("Task Queues", "task-queues.jl"),
+    ("Task Affinity", "task-affinity.jl"),
     ("Datadeps", "datadeps.jl"),
     ("Streaming", "streaming.jl"),
     ("Domain Utilities", "domain.jl"),
