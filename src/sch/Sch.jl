@@ -728,7 +728,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         # Calculate scope
         scope = constrain(task.compute_scope, task.result_scope)
         if scope isa InvalidScope
-            ex = SchedulingException("Compute and Result Scopes are not compatible: $(scope.x), $(scope.y)")
+            ex = SchedulingException("compute_scope and result_scope are not compatible: $(scope.x), $(scope.y)")
             state.cache[task] = ex
             state.errored[task] = true
             set_failed!(state, task)
@@ -737,20 +737,13 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         if task.f isa Chunk
             scope = constrain(scope, task.f.scope)
             if scope isa InvalidScope
-                ex = SchedulingException("Compute and Chunk Scopes are not compatible: $(scope.x), $(scope.y)")
+                ex = SchedulingException("Current scope and function Chunk Scope are not compatible: $(scope.x), $(scope.y)")
                 state.cache[task] = ex
                 state.errored[task] = true
                 set_failed!(state, task)
                 @goto pop_task
             end
         end
-
-        # if task.options.proclist !== nothing
-        #     # proclist overrides scope selection
-        #     AnyScope()
-        # else
-        #     DefaultScope()
-        # end
 
         for (_,input) in task.inputs
             input = unwrap_weak_checked(input)
@@ -764,7 +757,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
             chunk isa Chunk || continue
             scope = constrain(scope, chunk.scope)
             if scope isa InvalidScope
-                ex = SchedulingException("Final Compute and Argument Chunk Scopes are not compatible: $(scope.x), $(scope.y)")
+                ex = SchedulingException("Current scope and argument Chunk scope are not compatible: $(scope.x), $(scope.y)")
                 state.cache[task] = ex
                 state.errored[task] = true
                 set_failed!(state, task)
@@ -1720,8 +1713,6 @@ function do_task(to_proc, task_desc)
         bt = catch_backtrace()
         RemoteException(myid(), CapturedException(ex, bt))
     end
-
-    # @dagdebug thunk_id :scope "Result scope is $result_scope"
 
     threadtime = cputhreadtime() - threadtime_start
     # FIXME: This is not a realistic measure of max. required memory

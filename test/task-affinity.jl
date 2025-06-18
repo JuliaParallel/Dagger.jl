@@ -1,12 +1,4 @@
-@testset "Dagger Task affinity Tests" begin
-
-    function shuffle!(v::AbstractVector)
-        for i in length(v):-1:2
-            j = rand(1:i)
-            v[i], v[j] = v[j], v[i]
-        end
-        return v
-    end
+@testset "Task affinity" begin
 
     get_compute_scope(x::DTask) = try
         Dagger.Sch._find_thunk(x).compute_scope
@@ -35,21 +27,21 @@
         return scope1.scopes
     end
 
-    availprocs  = [proc for i in Dagger.procs() for proc in Dagger.get_processors(Dagger.OSProc(i))]
+    availprocs  = collect(Dagger.all_processors())
     availscopes = shuffle!(Dagger.ExactScope.(availprocs))
     numscopes   = length(availscopes)
 
     master_proc  = Dagger.ThreadProc(1, 1)
     master_scope = Dagger.ExactScope(master_proc)
 
-    @testset "Dagger Function: scope, compute_scope and result_scope Tests" begin
+    @testset "Function: scope, compute_scope and result_scope" begin
 
         @everywhere f(x) = x + 1
 
-        @testset "scope Tests" begin
+        @testset "scope" begin
             scope_only = Dagger.UnionScope(rand(availscopes, rand(1:length(availscopes))))
 
-            task1 = Dagger.@spawn scope=scope_only f(10); wait(task1); fetch(task1)
+            task1 = Dagger.@spawn scope=scope_only f(10); fetch(task1)
             @test get_compute_scope(task1) == scope_only
             @test get_result_scope(task1) == Dagger.AnyScope()
 
@@ -57,12 +49,12 @@
             @test execution_scope1 in intersect_scopes(execution_scope1,scope_only)
         end
 
-        @testset "compute_scope Tests" begin
+        @testset "compute_scope" begin
             compute_scope_only = Dagger.UnionScope(rand(availscopes, rand(1:length(availscopes))))
             scope              = Dagger.UnionScope(rand(availscopes, rand(1:length(availscopes))))
 
-            task1 = Dagger.@spawn compute_scope=compute_scope_only f(10);             wait(task1); fetch(task1)
-            task2 = Dagger.@spawn scope=scope compute_scope=compute_scope_only f(20); wait(task2); fetch(task2) 
+            task1 = Dagger.@spawn compute_scope=compute_scope_only f(10);             fetch(task1)
+            task2 = Dagger.@spawn scope=scope compute_scope=compute_scope_only f(20); fetch(task2) 
 
             @test get_compute_scope(task1) == get_compute_scope(task2) == compute_scope_only
             @test get_result_scope(task1)  == get_result_scope(task2)  == Dagger.AnyScope()
@@ -73,16 +65,16 @@
                 execution_scope2 in intersect_scopes(execution_scope2, compute_scope_only)
         end
 
-        @testset "result_scope Tests" begin
+        @testset "result_scope" begin
             result_scope_only = Dagger.UnionScope(rand(availscopes, rand(1:length(availscopes))))
 
-            task1 = Dagger.@spawn result_scope=result_scope_only f(10); wait(task1); fetch(task1)
+            task1 = Dagger.@spawn result_scope=result_scope_only f(10); fetch(task1)
 
             @test get_compute_scope(task1) == Dagger.DefaultScope()
             @test get_result_scope(task1)  == result_scope_only
         end
 
-        @testset "compute_scope and result_scope Tests with Intersection" begin
+        @testset "compute_scope and result_scope with intersection" begin
             if numscopes >= 3
                 n = cld(numscopes, 3)
 
@@ -95,9 +87,9 @@
                 scope_rand               = Dagger.UnionScope(rand(availscopes, rand(1:length(availscopes))))
                 result_scope_intersect   = Dagger.UnionScope(scope_b..., scope_c...)
 
-                task1 = Dagger.@spawn compute_scope=compute_scope_intersect result_scope=result_scope_intersect f(10);                  wait(task1); fetch(task1)
-                task2 = Dagger.@spawn scope=scope_intersect result_scope=result_scope_intersect f(20);                                  wait(task2); fetch(task2)
-                task3 = Dagger.@spawn compute_scope=compute_scope_intersect scope=scope_rand result_scope=result_scope_intersect f(30); wait(task3); fetch(task3)
+                task1 = Dagger.@spawn compute_scope=compute_scope_intersect result_scope=result_scope_intersect f(10);                  fetch(task1)
+                task2 = Dagger.@spawn scope=scope_intersect result_scope=result_scope_intersect f(20);                                  fetch(task2)
+                task3 = Dagger.@spawn compute_scope=compute_scope_intersect scope=scope_rand result_scope=result_scope_intersect f(30); fetch(task3)
 
                 @test get_compute_scope(task1) == get_compute_scope(task2) == get_compute_scope(task3) == compute_scope_intersect
                 @test get_result_scope(task1)  == get_result_scope(task2)  == get_result_scope(task3)  == result_scope_intersect
@@ -111,7 +103,7 @@
             end
         end
 
-        @testset "compute_scope and result_scope Tests without Intersection" begin
+        @testset "compute_scope and result_scope without intersection" begin
             if length(availscopes) >= 2
                 n = cld(numscopes, 2)
 
@@ -136,20 +128,20 @@
 
     end
 
-    @testset "Dagger Chunk in Task: scope, compute_scope and result_scope Tests" begin 
+    @testset "Chunk function: scope, compute_scope and result_scope" begin 
 
         @everywhere g(x, y) = x * 2 + y * 3
         
-        availscopes = shuffle!(Dagger.ExactScope.([proc for i in Dagger.procs() for proc in Dagger.get_processors(Dagger.OSProc(i))]))
+        availscopes = shuffle!(Dagger.ExactScope.(collect(Dagger.all_processors())))
         n = cld(numscopes, 2)
 
         chunk_scope = Dagger.UnionScope(rand(availscopes, rand(1:numscopes)))
         chunk_proc = rand(availprocs)
 
-        @testset "scope Tests" begin
+        @testset "scope" begin
             scope_only  = Dagger.UnionScope(rand(availscopes, rand(1:numscopes)))
 
-            task1  = Dagger.@spawn scope=scope_only Dagger.tochunk(g(10, 11), chunk_proc, chunk_scope); wait(task1); fetch(task1)
+            task1  = Dagger.@spawn scope=scope_only Dagger.tochunk(g(10, 11), chunk_proc, chunk_scope); fetch(task1)
 
             @test get_compute_scope(task1) == scope_only
             @test get_result_scope(task1)  == chunk_scope
@@ -159,12 +151,12 @@
             @test execution_scope1 == Dagger.ExactScope(chunk_proc)
         end
 
-        @testset "compute_scope Tests" begin
+        @testset "compute_scope" begin
             compute_scope_only = Dagger.UnionScope(rand(availscopes, rand(1:numscopes)))
             scope              = Dagger.UnionScope(rand(availscopes, rand(1:numscopes)))
             
-            task1  = Dagger.@spawn compute_scope=compute_scope_only Dagger.tochunk(g(10, 11), chunk_proc, chunk_scope);             wait(task1 ); fetch(task1)
-            task2  = Dagger.@spawn scope=scope compute_scope=compute_scope_only Dagger.tochunk(g(20, 21), chunk_proc, chunk_scope); wait(task2 ); fetch(task2)
+            task1  = Dagger.@spawn compute_scope=compute_scope_only Dagger.tochunk(g(10, 11), chunk_proc, chunk_scope);             fetch(task1)
+            task2  = Dagger.@spawn scope=scope compute_scope=compute_scope_only Dagger.tochunk(g(20, 21), chunk_proc, chunk_scope); fetch(task2)
 
             @test get_compute_scope(task1) == get_compute_scope(task2) == compute_scope_only
             @test get_result_scope(task1)  == get_result_scope(task2)  == chunk_scope
@@ -174,10 +166,10 @@
             @test execution_scope1 == execution_scope2  == Dagger.ExactScope(chunk_proc)
         end
 
-        @testset "result_scope Tests" begin
+        @testset "result_scope" begin
             result_scope_only = Dagger.UnionScope(rand(availscopes, rand(1:numscopes)))
             
-            task1  = Dagger.@spawn result_scope=result_scope_only Dagger.tochunk(g(10, 11), chunk_proc, chunk_scope); wait(task1 ); fetch(task1)
+            task1  = Dagger.@spawn result_scope=result_scope_only Dagger.tochunk(g(10, 11), chunk_proc, chunk_scope); fetch(task1)
 
             @test get_compute_scope(task1) == Dagger.DefaultScope()
             @test get_result_scope(task1)  == chunk_scope 
@@ -186,7 +178,7 @@
             @test execution_scope1  == Dagger.ExactScope(chunk_proc)
         end
 
-        @testset "compute_scope and result_scope Tests with Intersection" begin
+        @testset "compute_scope and result_scope with intersection" begin
             if length(availscopes) >= 3
                 n = cld(numscopes, 3)
 
@@ -200,9 +192,9 @@
                 scope_rand               = Dagger.UnionScope(rand(availscopes, rand(1:length(availscopes))))
                 result_scope_intersect   = Dagger.UnionScope(scope_b..., scope_c...)
 
-                task1  = Dagger.@spawn compute_scope=compute_scope_intersect result_scope=result_scope_intersect Dagger.tochunk(g(10, 11), chunk_proc, chunk_scope);                          wait(task1 ); fetch(task1 )
-                task2  = Dagger.@spawn scope=scope_intersect result_scope=result_scope_intersect Dagger.tochunk(g(20, 21), chunk_proc, chunk_scope);                                          wait(task2 ); fetch(task2 )
-                task3  = Dagger.@spawn compute_scope=compute_scope_intersect scope=scope_rand result_scope=result_scope_intersect Dagger.tochunk(g(30, 31), chunk_proc, chunk_scope);         wait(task3 ); fetch(task3 )
+                task1  = Dagger.@spawn compute_scope=compute_scope_intersect result_scope=result_scope_intersect Dagger.tochunk(g(10, 11), chunk_proc, chunk_scope);                  fetch(task1 )
+                task2  = Dagger.@spawn scope=scope_intersect result_scope=result_scope_intersect Dagger.tochunk(g(20, 21), chunk_proc, chunk_scope);                                  fetch(task2 )
+                task3  = Dagger.@spawn compute_scope=compute_scope_intersect scope=scope_rand result_scope=result_scope_intersect Dagger.tochunk(g(30, 31), chunk_proc, chunk_scope); fetch(task3 )
                 
                 @test get_compute_scope(task1) == get_compute_scope(task2) == get_compute_scope(task3) == compute_scope_intersect
                 @test get_result_scope(task1)  == get_result_scope(task2)  == get_result_scope(task3)  == chunk_scope 
@@ -214,7 +206,7 @@
             end
         end
 
-        @testset "compute_scope and result_scope Tests without Intersection" begin
+        @testset "compute_scope and result_scope without intersection" begin
             if length(availscopes) >= 2
                 n = cld(length(availscopes), 2)
 
@@ -243,11 +235,11 @@
 
     end 
 
-    @testset "Dagger Chunk Arguments in Task: scope, compute_scope and result_scope Tests with non-Intersection of chunk arg and scope" begin 
+    @testset "Chunk arguments: scope, compute_scope and result_scope with non-intersection of chunk arg and scope" begin 
 
         @everywhere g(x, y) = x * 2 + y * 3
         
-        availscopes = shuffle!(Dagger.ExactScope.([proc for i in Dagger.procs() for proc in Dagger.get_processors(Dagger.OSProc(i))]))
+        availscopes = shuffle!(Dagger.ExactScope.(collect(Dagger.all_processors())))
         n = cld(numscopes, 2)
         scope_a = availscopes[1:n]
         scope_b = availscopes[n+1:end]
@@ -256,7 +248,7 @@
         arg_proc = rand(availprocs)
         arg    = Dagger.tochunk(g(1, 2), arg_proc, arg_scope)
 
-        @testset "scope Tests" begin
+        @testset "scope" begin
             scope_only  = Dagger.UnionScope(rand(scope_b, rand(1:length(scope_b))))
 
             task11 = Dagger.@spawn scope=scope_only g(arg, 11); wait(task11)
@@ -269,7 +261,7 @@
             @test execution_scope11 == Dagger.InvalidScope
         end
 
-        @testset "compute_scope Tests" begin
+        @testset "compute_scope" begin
             compute_scope_only = Dagger.UnionScope(rand(scope_b, rand(1:length(scope_b))))
             scope              = Dagger.UnionScope(rand(scope_b, rand(1:length(scope_b))))
             
@@ -284,7 +276,7 @@
             @test execution_scope11 == execution_scope21  == Dagger.InvalidScope
         end
 
-        @testset "result_scope Tests" begin
+        @testset "result_scope" begin
             result_scope_only = Dagger.UnionScope(rand(scope_b, rand(1:length(scope_b))))
             
             task11  = Dagger.@spawn result_scope=result_scope_only g(arg, 11); wait(task11)
@@ -296,7 +288,7 @@
             @test execution_scope11  == Dagger.InvalidScope
         end
 
-        @testset "compute_scope and result_scope Tests with Intersection" begin
+        @testset "compute_scope and result_scope with intersection" begin
             if length(scope_b) >= 3
                 n = cld(length(scope_b), 3)
 
@@ -323,7 +315,7 @@
             end
         end
 
-        @testset "compute_scope and result_scope Tests without Intersection" begin
+        @testset "compute_scope and result_scope without intersection" begin
             if length(scope_b) >= 2
                 n = cld(length(scope_b), 2)
 
@@ -337,7 +329,7 @@
 
                 task11  = Dagger.@spawn compute_scope=compute_scope_no_intersect result_scope=result_scope_no_intersect g(arg, 11); ;                  wait(task11 )
                 task21  = Dagger.@spawn scope=scope_no_intersect result_scope=result_scope_no_intersect g(arg, 21); ;                                  wait(task21 )
-                task31  = Dagger.@spawn compute_scope=compute_scope_no_intersect scope=scope_rand result_scope=result_scope_no_intersect g(arg, 31); wait(task31 )
+                task31  = Dagger.@spawn compute_scope=compute_scope_no_intersect scope=scope_rand result_scope=result_scope_no_intersect g(arg, 31);   wait(task31 )
 
                 @test get_compute_scope(task11) == get_compute_scope(task21) == get_compute_scope(task31) == compute_scope_no_intersect
                 @test get_result_scope(task11)  == get_result_scope(task21)  == get_result_scope(task31)  == Dagger.InvalidScope 
@@ -351,11 +343,11 @@
 
     end
 
-    @testset "Dagger Chunk Arguments in Task: scope, compute_scope and result_scope Tests with Intersection of chunk arg and scope" begin 
+    @testset "Chunk arguments: scope, compute_scope and result_scope with intersection of chunk arg and scope" begin 
 
         @everywhere g(x, y) = x * 2 + y * 3
         
-        availscopes = shuffle!(Dagger.ExactScope.([proc for i in Dagger.procs() for proc in Dagger.get_processors(Dagger.OSProc(i))]))
+        availscopes = shuffle!(Dagger.ExactScope.(collect(Dagger.all_processors())))
         n = cld(numscopes, 3)
         scope_a = availscopes[1:n]
         scope_b = availscopes[n+1:2n]
@@ -365,10 +357,10 @@
         arg_proc = rand(availprocs)
         arg    = Dagger.tochunk(g(1, 2), arg_proc, arg_scope)
 
-        @testset "scope Tests" begin
+        @testset "scope" begin
             scope_only  = Dagger.UnionScope(rand(scope_b, rand(1:length(scope_b)))..., rand(scope_c, rand(1:length(scope_c)))...)
 
-            task11  = Dagger.@spawn scope=scope_only g(arg, 11); wait(task11); fetch(task11)
+            task11  = Dagger.@spawn scope=scope_only g(arg, 11); fetch(task11)
 
             @test get_compute_scope(task11) == scope_only
             @test get_result_scope(task11)  == Dagger.AnyScope()
@@ -378,12 +370,12 @@
             @test execution_scope11 in intersect_scopes(execution_scope11, scope_only, arg_scope)
         end
 
-        @testset "compute_scope Tests" begin
+        @testset "compute_scope" begin
             compute_scope_only = Dagger.UnionScope(rand(scope_b, rand(1:length(scope_b)))..., rand(scope_c, rand(1:length(scope_c)))...)
             scope              = Dagger.UnionScope(rand(scope_b, rand(1:length(scope_b)))..., rand(scope_c, rand(1:length(scope_c)))...)
             
-            task11  = Dagger.@spawn compute_scope=compute_scope_only g(arg, 11);             wait(task11 ); fetch(task11)
-            task21  = Dagger.@spawn scope=scope compute_scope=compute_scope_only g(arg, 21); wait(task21 ); fetch(task21)
+            task11  = Dagger.@spawn compute_scope=compute_scope_only g(arg, 11);             fetch(task11)
+            task21  = Dagger.@spawn scope=scope compute_scope=compute_scope_only g(arg, 21); fetch(task21)
 
             @test get_compute_scope(task11) == get_compute_scope(task21) == compute_scope_only
             @test get_result_scope(task11)  == get_result_scope(task21)  == Dagger.AnyScope()
@@ -394,10 +386,10 @@
                   execution_scope11 in intersect_scopes(execution_scope11, compute_scope_only, arg_scope)
         end
 
-        @testset "result_scope Tests" begin
+        @testset "result_scope" begin
             result_scope_only = Dagger.UnionScope(rand(scope_b, rand(1:length(scope_b)))..., rand(scope_c, rand(1:length(scope_c)))...)
             
-            task11  = Dagger.@spawn result_scope=result_scope_only g(arg, 11); wait(task11 ); fetch(task11)
+            task11  = Dagger.@spawn result_scope=result_scope_only g(arg, 11); fetch(task11)
 
             @test get_compute_scope(task11) == Dagger.DefaultScope()
             @test get_result_scope(task11)  == result_scope_only 
@@ -406,7 +398,7 @@
             @test execution_scope11 in intersect_scopes(execution_scope11, result_scope_only, arg_scope)
         end
 
-        @testset "compute_scope and result_scope Tests with Intersection" begin
+        @testset "compute_scope and result_scope with intersection" begin
             scope_bc = [scope_b...,scope_c...]
             if length(scope_bc) >= 3
                 n = cld(length(scope_bc), 3)
@@ -420,9 +412,9 @@
                 scope_rand               = Dagger.UnionScope(rand(availscopes, rand(1:length(availscopes))))
                 result_scope_intersect   = Dagger.UnionScope(scope_bcb..., scope_bcc...)
 
-                task11  = Dagger.@spawn compute_scope=compute_scope_intersect result_scope=result_scope_intersect g(arg, 11);                  wait(task11 ); fetch(task11 )
-                task21  = Dagger.@spawn scope=scope_intersect result_scope=result_scope_intersect g(arg, 21);                                  wait(task21 ); fetch(task21 )
-                task31  = Dagger.@spawn compute_scope=compute_scope_intersect scope=scope_rand result_scope=result_scope_intersect g(arg, 31); wait(task31 ); fetch(task31 )
+                task11  = Dagger.@spawn compute_scope=compute_scope_intersect result_scope=result_scope_intersect g(arg, 11);                  fetch(task11 )
+                task21  = Dagger.@spawn scope=scope_intersect result_scope=result_scope_intersect g(arg, 21);                                  fetch(task21 )
+                task31  = Dagger.@spawn compute_scope=compute_scope_intersect scope=scope_rand result_scope=result_scope_intersect g(arg, 31); fetch(task31 )
                 
                 @test get_compute_scope(task11) == get_compute_scope(task21) == get_compute_scope(task31) == compute_scope_intersect
                 @test get_result_scope(task11)  == get_result_scope(task21)  == get_result_scope(task31)  == result_scope_intersect
@@ -436,7 +428,7 @@
             end
         end
 
-        @testset "compute_scope and result_scope Tests without Intersection" begin
+        @testset "compute_scope and result_scope without intersection" begin
             scope_bc = [scope_b...,scope_c...]
             if length(scope_bc) >= 2
                 n = cld(length(scope_bc), 2)
@@ -465,11 +457,11 @@
 
     end 
 
-    # @testset "Dagger Chunk with Chunk Arguments in Task: scope, compute_scope and result_scope Tests with non-Intersection of chunk arg and chunk scope" begin 
+    # @testset "Chunk function with Chunk arguments: scope, compute_scope and result_scope with non-intersection of chunk arg and chunk scope" begin 
 
     #     @everywhere g(x, y) = x * 2 + y * 3
         
-    #     availscopes = shuffle!(Dagger.ExactScope.([proc for i in Dagger.procs() for proc in Dagger.get_processors(Dagger.OSProc(i))]))
+    #     availscopes = shuffle!(Dagger.ExactScope.(collect(Dagger.all_processors())))
 
     #     chunk_scope = Dagger.UnionScope(rand(availscopes, rand(1:numscopes)))
     #     chunk_proc = rand(chunk_scope.scopes).processor
@@ -477,10 +469,10 @@
     #     arg_proc = rand(arg_scope.scopes).processor
     #     arg    = Dagger.tochunk(g(1, 2), arg_proc, arg_scope)
 
-    #     @testset "scope Tests" begin
+    #     @testset "scope" begin
     #         scope_only  = Dagger.UnionScope(rand(availscopes, rand(1:numscopes)))
 
-    #         task11 = Dagger.@spawn scope=scope_only arg -> Dagger.tochunk(g(arg, 11), chunk_proc, chunk_scope); wait(task11); fetch(task11)
+    #         task11 = Dagger.@spawn scope=scope_only arg -> Dagger.tochunk(g(arg, 11), chunk_proc, chunk_scope); fetch(task11)
 
     #         @test get_compute_scope(task11) == scope_only
     #         @test get_result_scope(task11)  == chunk_scope
@@ -490,12 +482,12 @@
     #         @test execution_scope11 == Dagger.ExactScope(chunk_proc)
     #     end
 
-    #     @testset "compute_scope Tests" begin
+    #     @testset "compute_scope" begin
     #         compute_scope_only = Dagger.UnionScope(rand(availscopes, rand(1:numscopes)))
     #         scope              = Dagger.UnionScope(rand(availscopes, rand(1:numscopes)))
             
-    #         task11 = Dagger.@spawn compute_scope=compute_scope_only  arg -> Dagger.tochunk(g(arg, 11), chunk_proc, chunk_scope);            wait(task11); fetch(task11)
-    #         task21 = Dagger.@spawn scope=scope compute_scope=compute_scope_only arg -> Dagger.tochunk(g(arg, 21), chunk_proc, chunk_scope); wait(task21); fetch(task21)
+    #         task11 = Dagger.@spawn compute_scope=compute_scope_only  arg -> Dagger.tochunk(g(arg, 11), chunk_proc, chunk_scope);            fetch(task11)
+    #         task21 = Dagger.@spawn scope=scope compute_scope=compute_scope_only arg -> Dagger.tochunk(g(arg, 21), chunk_proc, chunk_scope); fetch(task21)
 
     #         @test get_compute_scope(task11) == get_compute_scope(task21) == compute_scope_only
     #         @test get_result_scope(task11)  == get_result_scope(task21)  == chunk_scope
@@ -505,10 +497,10 @@
     #         @test execution_scope11 == execution_scope21  == Dagger.ExactScope(chunk_proc)
     #     end
 
-    #     @testset "result_scope Tests" begin
+    #     @testset "result_scope" begin
     #         result_scope_only = Dagger.UnionScope(rand(availscopes, rand(1:numscopes)))
             
-    #         task11  = Dagger.@spawn result_scope=result_scope_only arg -> Dagger.tochunk(g(arg, 11), chunk_proc, chunk_scope); wait(task11); fetch(task11) 
+    #         task11  = Dagger.@spawn result_scope=result_scope_only arg -> Dagger.tochunk(g(arg, 11), chunk_proc, chunk_scope); fetch(task11) 
 
     #         @test get_compute_scope(task11) == Dagger.DefaultScope()
     #         @test get_result_scope(task11)  == chunk_scope
@@ -517,7 +509,7 @@
     #         @test execution_scope11  == Dagger.ExactScope(chunk_proc)
     #     end
 
-    #     @testset "compute_scope and result_scope Tests with Intersection" begin
+    #     @testset "compute_scope and result_scope with intersection" begin
     #         if numscopes >= 3
     #             n = cld(numscopes, 3)
 
@@ -545,7 +537,7 @@
     #         end
     #     end
 
-    #     @testset "compute_scope and result_scope Tests without Intersection" begin
+    #     @testset "compute_scope and result_scope without intersection" begin
     #         if numscopes >= 2
     #             n = cld(numscopes, 2)
 

@@ -93,11 +93,6 @@ mutable struct Thunk
                    propagates=(),
                    kwargs...
                   )
-        # if !isa(f, Chunk) && (!isnothing(processor) || !isnothing(scope))
-        #     f = tochunk(f,
-        #                 something(processor, OSProc()),
-        #                 something(scope, DefaultScope()))
-        # end
 
         xs = Base.mapany(identity, xs)
         syncdeps_set = Set{Any}(filterany(is_task_or_chunk, Base.mapany(last, xs)))
@@ -480,17 +475,6 @@ function spawn(f, args...; kwargs...)
         options = merge(options, spawn_options)
         args = args[2:end]
     end
-
-    # Wrap f in a Chunk if necessary
-    # processor = haskey(options, :processor) ? options.processor : nothing
-    # compute_scope = haskey(options, :compute_scope) ? options.compute_scope : (haskey(options, :scope) ? options.scope : nothing)
-    # result_scope = haskey(options, :result_scope) ? options.result_scope : nothing
-    
-    # if !isnothing(processor) || !isnothing(scope)
-    #     f = tochunk(f,
-    #                 something(processor, get_options(:processor, OSProc())),
-    #                 something(scope, get_options(:scope, DefaultScope())))
-    # end
 
     # Process the args and kwargs into Pair form
     args_kwargs = args_kwargs_to_pairs(args, kwargs)
