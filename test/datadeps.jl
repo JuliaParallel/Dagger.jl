@@ -110,6 +110,7 @@ end
 
 @everywhere do_nothing(Xs...) = nothing
 @everywhere mut_ref!(R) = (R[] .= 0;)
+@everywhere mut_V!(V) = (V .= 1;)
 function test_datadeps(;args_chunks::Bool,
                         args_thunks::Bool,
                         args_loc::Int,
@@ -405,6 +406,14 @@ function test_datadeps(;args_chunks::Bool,
 
         @test views_overlap(A_mid, A_mid)
         @test views_overlap(A_mid, B_mid)
+
+        # SubArray hashing
+        V = zeros(3)
+        Dagger.spawn_datadeps(;aliasing) do
+            Dagger.@spawn mut_V!(InOut(view(V, 1:2)))
+            Dagger.@spawn mut_V!(InOut(view(V, 2:3)))
+        end
+        @test fetch(V) == [1, 1, 1]
     end
 
     # FIXME: Deps
@@ -426,7 +435,7 @@ function test_datadeps(;args_chunks::Bool,
     end
 
     # Inner Scope
-    @test_throws Dagger.Sch.SchedulingException Dagger.spawn_datadeps() do
+    @test_throws Dagger.Sch.SchedulingException Dagger.spawn_datadeps(;aliasing) do
         Dagger.@spawn scope=Dagger.ExactScope(Dagger.ThreadProc(1, 5000)) 1+1
     end
 
