@@ -1,0 +1,3 @@
+[submodule "task-affinity"]
+	path = task-affinity
+	url = https://github.com/AkhilAkkapelli/Dagger.jl.git
