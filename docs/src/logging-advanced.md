@@ -28,12 +28,6 @@ explained later in this document. Most users are recommended to use the
 `MultiEventLog` (ideally via `enable_logging!`) since it's far more flexible
 and extensible, and is more performant in general.
 
-Log sinks are explained in detail in [Logging: Advanced](@ref); however, if
-using `enable_logging!`, everything is already configured for you. Then, all
-you need to do is call `Dagger.fetch_logs!()` to get the logs for all workers
-as a `Dict`. A variety of tools can operate on these logs, including
-visualization through `show_logs` and `render_logs`.
-
 ## MultiEventLog
 
 The `MultiEventLog` is intended to be configurable to exclude unnecessary

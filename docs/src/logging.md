@@ -19,8 +19,7 @@ using Dagger
 Dagger.enable_logging!()
 
 # Run some Dagger computations
-Dagger.@spawn sum([1, 2, 3])
-Dagger.collect(ans)
+wait(Dagger.@spawn sum([1, 2, 3]))
 
 # Fetch logs
 logs = Dagger.fetch_logs!()
@@ -29,7 +28,7 @@ logs = Dagger.fetch_logs!()
 Dagger.disable_logging!()
 
 # You can now inspect the `logs` Dict or use visualization tools
-# like `show_logs` and `render_logs` (details in Advanced Logging).
+# like `show_logs` and `render_logs` (see [Logging: Visualization](@ref logging-visualization.md)).
 ```
 
 For more advanced logging configurations, such as custom log sinks and consumers, see [Logging: Advanced](@ref logging-advanced.md).
