@@ -168,24 +168,32 @@ import Colors, GraphViz, DataFrames, Plots, JSON3
         end
     end
 
-    if VERSION >= v"1.9-"
-        @testset "show_plan/render_plan built-in" begin
-            Dagger.enable_logging!(;all_task_deps=true)
+    @testset "show_plan/render_plan built-in" begin
+        Dagger.enable_logging!(;all_task_deps=true)
 
-            A = distribute(rand(4, 4), Blocks(8, 8))
-            sum(A)
-            logs = Dagger.fetch_logs!()
+        A = distribute(rand(4, 4), Blocks(8, 8))
+        sum(A)
+        logs = Dagger.fetch_logs!()
 
-            # GraphVizExt
-            @test Dagger.render_logs(logs, :graphviz) !== nothing
+        # Core
+        str = Dagger.show_logs(logs, :graphviz)
+        @test str isa String && !isempty(str)
 
-            # PlotsExt
-            @test Dagger.render_logs(logs, :plots_gantt) !== nothing
+        io = IOBuffer()
+        Dagger.show_logs(io, logs, :graphviz)
+        seek(io, 0)
+        str = take!(io)
+        @test !isempty(str)
 
-            # JSON3Ext
-            @test Dagger.render_logs(logs, :chrome_trace) !== nothing
+        # GraphVizExt
+        @test Dagger.render_logs(logs, :graphviz) !== nothing
 
-            Dagger.disable_logging!()
-        end
+        # PlotsExt
+        @test Dagger.render_logs(logs, :plots_gantt) !== nothing
+
+        # JSON3Ext
+        @test Dagger.show_logs(logs, :chrome_trace) !== nothing
+
+        Dagger.disable_logging!()
     end
 end
