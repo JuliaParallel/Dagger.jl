@@ -507,7 +507,7 @@ const AssignmentType{N} = Union{Symbol, AbstractArray{<:Int, N}, AbstractArray{<
 distribute(A::AbstractArray, assignment::AssignmentType = :arbitrary) = distribute(A, AutoBlocks(), assignment)
 function distribute(A::AbstractArray{T,N}, dist::Blocks{N}, assignment::AssignmentType{N} = :arbitrary) where {T,N} 
     procgrid = nothing
-    availprocs = [proc for i in procs() for proc in get_processors(OSProc(i))]
+    availprocs = collect(Dagger.all_processors())
     sort!(availprocs, by = x -> (x.owner, x.tid))
     if assignment isa Symbol
         if assignment == :arbitrary

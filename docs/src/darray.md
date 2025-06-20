@@ -217,7 +217,7 @@ one chosen by previous calls.
 
 This feature allows you to control how `DArray` blocks (chunks) are assigned to specific processors within the cluster. Controlling data locality is crucial for optimizing the performance of distributed algorithms.
 
-You can specify the mapping using the optional `assignment`  keyword argument in the `DArray` constructor functions (`DArray`, `DVector`, and `DMatrix`) and the `distribute` function.
+You can specify the mapping using the optional `assignment` argument in the `DArray` constructor functions (`DArray`, `DVector`, and `DMatrix`), the `distribute` function, and also directly within constructor-like functions such as `rand`, `randn`, `sprand`, `ones`, and `zeros` using the `assignment` optional keyword argument.
 
 The `assignment` argument accepts the following values:
 
@@ -253,7 +253,7 @@ The `assignment` argument accepts the following values:
 
 ####   Examples and Usage
 
-The `assignment` argument works similarly for `DArray`, `DVector`, and `DMatrix`, as well as the `distribute` function. The key difference lies in the dimensionality of the resulting distributed array:
+The `assignment` argument works similarly for `DArray`, `DVector`, and `DMatrix`, as well as the `distribute` function. The key difference lies in the dimensionality of the resulting distributed array. For functions like `rand`, `randn`, `sprand`, `ones`, and `zeros`, `assignment` is an keyword argument.
 
 * `DArray`: For N-dimensional distributed arrays.
 
@@ -263,14 +263,16 @@ The `assignment` argument works similarly for `DArray`, `DVector`, and `DMatrix`
 
 * `distribute`: General function to distribute arrays.
 
+* `rand`, `randn`, `sprand`, `ones`, `zeros`: Functions to create DArrays with initial values, also supporting `assignment`.
+
 Here are some examples using a setup with one master processor and three worker processors.
 
-First, let's create some sample arrays:
+First, let's create some sample arrays for `distribute` (and constructor functions):
 
 ```julia
 A = rand(7, 11)   # 2D array
-v = rand(15)      # 1D array
-M = rand(5, 5, 5) # 3D array
+v = ones(15)      # 1D array
+M = zeros(5, 5, 5) # 3D array
 ```
 
 1.  **Arbitrary Assignment:**
@@ -284,6 +286,9 @@ M = rand(5, 5, 5) # 3D array
     
     Md = distribute(M, Blocks(2, 2, 2), :arbitrary) 
     # DArray(M, Blocks(2,2,2), :arbitrary)
+
+    Rd = rand(Blocks(2, 2), 7, 11; assignment=:arbitrary)
+    # distribute(rand(7, 11), Blocks(2, 2), :arbitrary)
     ```
 
    This creates distributed arrays with the specified block sizes, and assigns the blocks to processors arbitrarily. For example, the assignment for `Ad` might look like this:
@@ -309,9 +314,12 @@ M = rand(5, 5, 5) # 3D array
 
     Md = distribute(M, Blocks(2, 2, 2), :blockrow)
     # DArray(M, Blocks(2,2,2), :blockrow)
+
+    Od = ones(Blocks(1, 2), 7, 11; assignment=:blockrow)
+    # distribute(ones(7, 11), Blocks(1, 2), :blockrow)
     ```
 
-    This creates distributed arrays with the specified block sizes, and assigns contiguous row-blocks to processors evenly. For example, the assignment for `Ad` will look like this:
+    This creates distributed arrays with the specified block sizes, and assigns contiguous row-blocks to processors evenly. For example, the assignment for `Ad` (and `Od`) will look like this:
 
     ```julia
     7×6 Matrix{Dagger.ThreadProc}:
@@ -335,9 +343,12 @@ M = rand(5, 5, 5) # 3D array
 
     Md = distribute(M, Blocks(2, 2, 2), :blockcol)
     # DArray(M, Blocks(2,2,2), :blockcol)
+
+    Rd = randn(Blocks(2, 2), 7, 11; assignment=:blockcol)
+    # distribute(randn(7, 11), Blocks(2, 2), :blockcol)
     ```
 
-    This creates distributed arrays with the specified block sizes, and assigns contiguous column-blocks to processors evenly. For example, the assignment for `Ad` will look like this:
+    This creates distributed arrays with the specified block sizes, and assigns contiguous column-blocks to processors evenly. For example, the assignment for `Ad` (and `Rd`) will look like this:
 
     ```julia
     4×6 Matrix{Dagger.ThreadProc}:
@@ -358,9 +369,12 @@ M = rand(5, 5, 5) # 3D array
 
     Md = distribute(M, Blocks(2, 2, 2), :cyclicrow)
     # DArray(M, Blocks(2,2,2), :cyclicrow)
+
+    Zd = zeros(Blocks(1, 2), 7, 11; assignment=:cyclicrow)
+    # distribute(zeros(7, 11), Blocks(1, 2), :cyclicrow)
     ```
 
-    This creates distributed arrays with the specified block sizes, and assigns row-blocks to processors in round-robin fashion. For example, the assignment for `Ad` will look like this:
+    This creates distributed arrays with the specified block sizes, and assigns row-blocks to processors in round-robin fashion. For example, the assignment for `Ad` (and `Zd`) will look like this:
 
     ```julia
     7×6 Matrix{Dagger.ThreadProc}:
@@ -384,9 +398,12 @@ M = rand(5, 5, 5) # 3D array
 
     Md = distribute(M, Blocks(2, 2, 2), :cycliccol)
     # DArray(M, Blocks(2,2,2), :cycliccol)
+
+    Od = ones(Blocks(2, 2), 7, 11; assignment=:cycliccol)
+    # distribute(ones(7, 11), Blocks(2, 2), :cycliccol)
     ```
 
-    This creates distributed arrays with the specified block sizes, and assigns column-blocks to processors in round-robin fashion. For example, the assignment for `Ad` will look like this:
+    This creates distributed arrays with the specified block sizes, and assigns column-blocks to processors in round-robin fashion. For example, the assignment for `Ad` (and `Od`) will look like this:
 
     ```julia
     4×6 Matrix{Dagger.ThreadProc}:
@@ -410,9 +427,12 @@ M = rand(5, 5, 5) # 3D array
     assignment_3d = cat([1 2; 3 4], [4 3; 2 1], dims=3)
     Md = distribute(M, Blocks(2, 2, 2), assignment_3d) 
     # DArray(M, Blocks(2, 2, 2), cat([1 2; 3 4], [4 3; 2 1], dims=3))
+
+    Rd = sprand(Blocks(2, 2), 7, 11, 0.2; assignment=assignment_2d)
+    # distribute(sprand(7,11, 0.2), Blocks(2, 2), assignment_2d)
     ```
 
-    The assignment is a integer matrix of `Processor` ID’s,  the blocks are assigned in block-cyclic manner to first thread `Processor` ID’s. The assignment for `Ad` would be
+    The assignment is a integer matrix of `Processor` ID’s,  the blocks are assigned in block-cyclic manner to first thread `Processor` ID’s. The assignment for `Ad` (and `Rd`) would be
 
     ```julia
     4×6 Matrix{Dagger.ThreadProc}:
@@ -438,9 +458,12 @@ M = rand(5, 5, 5) # 3D array
                         [Dagger.ThreadProc(4,1) Dagger.ThreadProc(3,1); Dagger.ThreadProc(2,1) Dagger.ThreadProc(1,1)], dims=3)
     Md = distribute(M, Blocks(2, 2, 2), assignment_3d) 
     # DArray(M, Blocks(2, 2, 2), assignment_3d)
+
+    Rd = rand(Blocks(2, 2), 7, 11; assignment=assignment_2d))
+    # distribute(rand(7,11), Blocks(2, 2), assignment_2d)
     ```
 
-    The assignment is a matrix of `Processor` objects, the blocks are assigned in block-cyclic manner to `Processor` objects. The assignment for `Ad` would be:
+    The assignment is a matrix of `Processor` objects, the blocks are assigned in block-cyclic manner to `Processor` objects. The assignment for `Ad` (and `Rd`) would be:
 
     ```julia
     4×6 Matrix{Dagger.ThreadProc}:
