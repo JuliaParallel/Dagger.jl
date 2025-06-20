@@ -31,4 +31,4 @@ Dagger.disable_logging!()
 # like `show_logs` and `render_logs` (see [Logging: Visualization](@ref logging-visualization.md)).
 ```
 
-For more advanced logging configurations, such as custom log sinks and consumers, see [Logging: Advanced](@ref logging-advanced.md).
+For more advanced logging configurations, such as custom log sinks and consumers, see [Logging: Advanced](@ref).
