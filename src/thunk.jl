@@ -73,6 +73,8 @@ mutable struct Thunk
     eager_ref::Union{DRef,Nothing}
     options::Any # stores scheduler-specific options
     propagates::Tuple # which options we'll propagate
+    compute_scope::AbstractScope
+    result_scope::AbstractScope
     function Thunk(f, xs...;
                    syncdeps=nothing,
                    id::Int=next_id(),
@@ -84,16 +86,14 @@ mutable struct Thunk
                    affinity=nothing,
                    eager_ref=nothing,
                    processor=nothing,
-                   scope=nothing,
+                   scope=DefaultScope(),
+                   compute_scope=scope,
+                   result_scope=AnyScope(),
                    options=nothing,
                    propagates=(),
                    kwargs...
                   )
-        if !isa(f, Chunk) && (!isnothing(processor) || !isnothing(scope))
-            f = tochunk(f,
-                        something(processor, OSProc()),
-                        something(scope, DefaultScope()))
-        end
+
         xs = Base.mapany(identity, xs)
         syncdeps_set = Set{Any}(filterany(is_task_or_chunk, Base.mapany(last, xs)))
         if syncdeps !== nothing
@@ -105,11 +105,11 @@ mutable struct Thunk
         if options !== nothing
             @assert isempty(kwargs)
             new(f, xs, syncdeps_set, id, get_result, meta, persist, cache,
-                cache_ref, affinity, eager_ref, options, propagates)
+                cache_ref, affinity, eager_ref, options, propagates, compute_scope, result_scope)
         else
             new(f, xs, syncdeps_set, id, get_result, meta, persist, cache,
                 cache_ref, affinity, eager_ref, Sch.ThunkOptions(;kwargs...),
-                propagates)
+                propagates, compute_scope, result_scope)
         end
     end
 end
@@ -474,15 +474,6 @@ function spawn(f, args...; kwargs...)
         spawn_options = first(args).options
         options = merge(options, spawn_options)
         args = args[2:end]
-    end
-
-    # Wrap f in a Chunk if necessary
-    processor = haskey(options, :processor) ? options.processor : nothing
-    scope = haskey(options, :scope) ? options.scope : nothing
-    if !isnothing(processor) || !isnothing(scope)
-        f = tochunk(f,
-                    something(processor, get_options(:processor, OSProc())),
-                    something(scope, get_options(:scope, DefaultScope())))
     end
 
     # Process the args and kwargs into Pair form
