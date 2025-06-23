@@ -38,12 +38,12 @@ Here's an example of a custom `move` implementation:
 
 ```julia
 struct MyCustomType
-    data::Vector{Int}
+    data::Vector{Float64}
 end
 
 # Custom move function for MyCustomType
 function Dagger.move(from_proc::Dagger.Processor, to_proc::Dagger.Processor, x::MyCustomType)
-    return MyCustomType(copy(x.data))
+    return x.data
 end
 
 A = MyCustomType(rand(100))

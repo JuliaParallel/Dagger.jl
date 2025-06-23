@@ -210,19 +210,13 @@ Users have the option to define their own `move!` implementations for custom dat
 Here's an example of a custom `move!` implementation:
 
 ```julia
-struct MyCustomArrayWrapper{T,N} <: AbstractArray{T,N}
+struct MyCustomArrayWrapper{T,N}
     data::Array{T,N}
 end
 
-# Required AbstractArray interface methods for MyCustomArrayWrapper
-Base.size(A::MyCustomArrayWrapper) = size(A.data)
-Base.getindex(A::MyCustomArrayWrapper, i::Int...) = A.data[i...]
-Base.setindex!(A::MyCustomArrayWrapper, v, i::Int...) = (A.data[i...] = v)
-Base.similar(A::MyCustomArrayWrapper, ::Type{T}, dims::Dims) where {T} = MyCustomArrayWrapper(similar(A.data, T, dims))
-
 # Custom move! function for MyCustomArrayWrapper
 function Dagger.move!(dep_mod::Any, from_space::Dagger.MemorySpace, to_space::Dagger.MemorySpace, from::MyCustomArrayWrapper, to::MyCustomArrayWrapper)
-    copyto!(to.data, from.data)
+    copyto!(dep_mod(to.data), dep_mod(from.data))
     return
 end
 ```
