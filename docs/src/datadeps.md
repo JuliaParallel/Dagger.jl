@@ -196,3 +196,13 @@ for writing memory-efficient, generic algorithms in Julia).
 - `UpperTriangular`/`LowerTriangular`/`UnitUpperTriangular`/`UnitLowerTriangular`
 - `Diagonal`/`Bidiagonal`/`Tridiagonal`/`SymTridiagonal` (via `Deps`, e.g. to read from the diagonal of `X`: `Dagger.@spawn sum(Deps(X, In(Diagonal)))`)
 - `Symbol` for field access (via `Deps`, e.g. to write to `X.value`: `Dagger.@spawn setindex!(Deps(X, InOut(:value)), :value, 42)`
+
+## In-place data movement rules
+
+Datadeps uses a specialized 5-argument function, `move!(to_processor::Processor, from_processor::Processor, to, from, x)`, for managing in-place data movement. This function is an in-place variant of the more general `move` function (see [Data movement rules](@ref data-management.md#Data-movement-rules)) and is exclusively used within the Datadeps system.
+
+The core responsibility of `move!` is to read data from the `from` argument and write it directly into the `to` argument. This is crucial for operations that modify data in place, as often encountered in numerical computing and linear algebra.
+
+The default implementation of `move!` handles `Chunk` objects by unwrapping them and then recursively calling `move!` on the underlying values. This ensures that the in-place operation is performed on the actual data.
+
+Users have the option to define their own `move!` implementations for custom data types. However, this is typically not necessary for types that are subtypes of `AbstractArray` (i.e., `<:AbstractArray`), provided that these types support the standard `copyto!(to, from)` function. The default `move!` will leverage `copyto!` for such array types, enabling efficient in-place updates.
