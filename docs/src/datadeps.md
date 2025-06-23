@@ -196,3 +196,27 @@ for writing memory-efficient, generic algorithms in Julia).
 - `UpperTriangular`/`LowerTriangular`/`UnitUpperTriangular`/`UnitLowerTriangular`
 - `Diagonal`/`Bidiagonal`/`Tridiagonal`/`SymTridiagonal` (via `Deps`, e.g. to read from the diagonal of `X`: `Dagger.@spawn sum(Deps(X, In(Diagonal)))`)
 - `Symbol` for field access (via `Deps`, e.g. to write to `X.value`: `Dagger.@spawn setindex!(Deps(X, InOut(:value)), :value, 42)`
+
+## In-place data movement rules
+
+Datadeps uses a specialized 5-argument function, `Dagger.move!(dep_mod, from_space::Dagger.MemorySpace, to_space::Dagger.MemorySpace, from, to)`, for managing in-place data movement. This function is an in-place variant of the more general `move` function (see [Data movement rules](@ref)) and is exclusively used within the Datadeps system. The `dep_mod` argument is usually just `identity`, but it can also be an access modifier function like `UpperTriangular`, which limits what portion of the data should be read from and written to.
+
+The core responsibility of `move!` is to read data from the `from` argument and write it directly into the `to` argument. This is crucial for operations that modify data in place, as often encountered in numerical computing and linear algebra.
+
+The default implementation of `move!` handles `Chunk` objects by unwrapping them and then recursively calling `move!` on the underlying values. This ensures that the in-place operation is performed on the actual data.
+
+Users have the option to define their own `move!` implementations for custom data types. However, this is typically not necessary for types that are subtypes of `AbstractArray`, provided that these types support the standard `Base.copyto!(to, from)` function. The default `move!` will leverage `copyto!` for such array types, enabling efficient in-place updates.
+
+Here's an example of a custom `move!` implementation:
+
+```julia
+struct MyCustomArrayWrapper{T,N}
+    data::Array{T,N}
+end
+
+# Custom move! function for MyCustomArrayWrapper
+function Dagger.move!(dep_mod::Any, from_space::Dagger.MemorySpace, to_space::Dagger.MemorySpace, from::MyCustomArrayWrapper, to::MyCustomArrayWrapper)
+    copyto!(dep_mod(to.data), dep_mod(from.data))
+    return
+end
+```
