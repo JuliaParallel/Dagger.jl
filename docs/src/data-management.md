@@ -28,11 +28,38 @@ how these properties can be used to control scheduling behavior around `Chunk`s.
 
 ## Data movement rules
 
-Dagger utilizes a 3-argument function `move(to_processor::Processor, from_processor::Processor, x)` to manage data movement between processors. This function is invoked by the scheduler for every argument of a task, including the task's function itself, before the task is executed. The purpose of `move` is to transfer the argument `x` from its current processor (`from_processor`) to the target processor (`to_processor`) where the task will run.
+Dagger utilizes a 3-argument function `Dagger.move(from_proc::Dagger.Processor, to_proc::Dagger.Processor, x)` to manage data movement between processors. This function is invoked by the scheduler for every argument of a task, including the task's function itself, before the task is executed. The purpose of `move` is to transfer the argument `x` from its current processor (`from_proc`) to the target processor (`to_proc`) where the task will run.
 
 This `move` mechanism is fundamental to how Dagger handles `Chunk` objects. When a `Chunk` is passed as an argument to a task, the `move` function is responsible for unwrapping the `Chunk` and providing its underlying value to the task.
 
 While users can define custom `move` implementations for their specific data types if needed, the default fallback implementation of `move` is designed to handle most common use cases effectively. Therefore, custom implementations are generally unnecessary.
+
+Here's an example of a custom `move` implementation:
+
+```julia
+struct MyCustomType
+    data::Vector{Int}
+end
+
+# Custom move function for MyCustomType
+function Dagger.move(from_proc::Dagger.Processor, to_proc::Dagger.Processor, x::MyCustomType)
+    # In this example, we assume MyCustomType is simple and can be reconstructed.
+    # For more complex types, you might need specific serialization/deserialization logic
+    # or transfer mechanisms.
+    if from_proc == to_proc
+        return x # No move needed if processors are the same
+    end
+    @info "Moving MyCustomType from \$(from_proc) to \$(to_proc)"
+    # This is a simplistic example; real-world scenarios might involve
+    # network transfer, GPU data movement, etc.
+    return MyCustomType(copy(x.data))
+end
+
+# Example usage (conceptual, actual Dagger scheduling handles this):
+# Assume obj is an instance of MyCustomType on processorA
+# When a task needing obj is scheduled on processorB, Dagger would internally call:
+# Dagger.move(processorA, processorB, obj)
+```
 
 ## Mutation
 

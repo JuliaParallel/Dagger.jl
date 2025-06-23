@@ -199,10 +199,62 @@ for writing memory-efficient, generic algorithms in Julia).
 
 ## In-place data movement rules
 
-Datadeps uses a specialized 5-argument function, `move!(to_processor::Processor, from_processor::Processor, to, from, x)`, for managing in-place data movement. This function is an in-place variant of the more general `move` function (see [Data movement rules](@ref data-management.md#Data-movement-rules)) and is exclusively used within the Datadeps system.
+Datadeps uses a specialized 5-argument function, `Dagger.move!(dep_mod, from_space::Dagger.MemorySpace, to_space::Dagger.MemorySpace, from, to)`, for managing in-place data movement. This function is an in-place variant of the more general `move` function (see [Data movement rules](@ref data-management.md#Data-movement-rules)) and is exclusively used within the Datadeps system. The `dep_mod` argument usually corresponds to the `Val` of the dependency type (`Val{:in}`, `Val{:out}`, or `Val{:inout}`).
 
 The core responsibility of `move!` is to read data from the `from` argument and write it directly into the `to` argument. This is crucial for operations that modify data in place, as often encountered in numerical computing and linear algebra.
 
 The default implementation of `move!` handles `Chunk` objects by unwrapping them and then recursively calling `move!` on the underlying values. This ensures that the in-place operation is performed on the actual data.
 
 Users have the option to define their own `move!` implementations for custom data types. However, this is typically not necessary for types that are subtypes of `AbstractArray` (i.e., `<:AbstractArray`), provided that these types support the standard `copyto!(to, from)` function. The default `move!` will leverage `copyto!` for such array types, enabling efficient in-place updates.
+
+Here's an example of a custom `move!` implementation:
+
+```julia
+struct MyCustomArrayWrapper{T,N} <: AbstractArray{T,N}
+    data::Array{T,N}
+end
+
+# Required AbstractArray interface methods for MyCustomArrayWrapper
+Base.size(A::MyCustomArrayWrapper) = size(A.data)
+Base.getindex(A::MyCustomArrayWrapper, i::Int...) = A.data[i...]
+Base.setindex!(A::MyCustomArrayWrapper, v, i::Int...) = (A.data[i...] = v)
+Base.similar(A::MyCustomArrayWrapper, ::Type{T}, dims::Dims) where {T} = MyCustomArrayWrapper(similar(A.data, T, dims))
+
+# Custom move! function for MyCustomArrayWrapper
+function Dagger.move!(dep_mod::Any, from_space::Dagger.MemorySpace, to_space::Dagger.MemorySpace, from::MyCustomArrayWrapper, to::MyCustomArrayWrapper)
+    @info "Custom move! for MyCustomArrayWrapper from \$(from_space) to \$(to_space)"
+    # Assuming from_space and to_space are compatible for this type,
+    # and the operation makes sense for the dep_mod.
+    # For :in or :inout, we copy `from` to `to`.
+    # For :out, `from` might not be fully initialized, so direct copy might be skipped or handled differently.
+    # This example uses copyto! which is common for array types.
+    if dep_mod isa Val{:in} || dep_mod isa Val{:inout}
+        copyto!(to.data, from.data)
+    elseif dep_mod isa Val{:out}
+        # For :out, `to` is the destination. `from` might be uninitialized or a placeholder.
+        # Depending on the semantics, you might initialize `to` or expect it to be written by the task.
+        # If `from` contains initial data for an output (e.g. zeroing), handle here.
+        # For simplicity, we assume `to` will be populated by the task.
+    end
+    return to
+end
+
+# Example usage (conceptual, Dagger's Datadeps handles this):
+# Assume `input_obj` and `output_obj` are instances of MyCustomArrayWrapper.
+# For a task like Dagger.@spawn my_func!(InOut(output_obj), In(input_obj)),
+# Dagger might internally use move! to prepare `output_obj` based on `input_obj`
+# if they are on different memory spaces or require specific handling.
+#
+# Dagger.spawn_datadeps() do
+#   A = MyCustomArrayWrapper(ones(10))
+#   B = MyCustomArrayWrapper(zeros(10))
+#   Dagger.@spawn my_custom_add!(InOut(B), In(A)) # my_custom_add! would operate on the .data fields
+# end
+#
+# where my_custom_add!(b_wrapper, a_wrapper) = b_wrapper.data .+= a_wrapper.data
+# Before my_custom_add! is called, Dagger would ensure data is moved correctly.
+# If A and B were on different workers or memory spaces, move! would be invoked.
+# For InOut(B), move! would be called like:
+# Dagger.move!(Val(:inout), space_of_A, space_of_B, A_chunk_val, B_chunk_val_to_be_written_to)
+# For In(A), move would be called.
+```
