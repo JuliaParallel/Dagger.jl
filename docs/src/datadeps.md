@@ -199,7 +199,7 @@ for writing memory-efficient, generic algorithms in Julia).
 
 ## In-place data movement rules
 
-Datadeps uses a specialized 5-argument function, `Dagger.move!(dep_mod, from_space::Dagger.MemorySpace, to_space::Dagger.MemorySpace, from, to)`, for managing in-place data movement. This function is an in-place variant of the more general `move` function (see [Data movement rules](@ref data-management.md#Data-movement-rules)) and is exclusively used within the Datadeps system. The `dep_mod` argument is usually just `identity`, but it can also be an access modifier function like `UpperTriangular`, which limits what portion of the data should be read from and written to.
+Datadeps uses a specialized 5-argument function, `Dagger.move!(dep_mod, from_space::Dagger.MemorySpace, to_space::Dagger.MemorySpace, from, to)`, for managing in-place data movement. This function is an in-place variant of the more general `move` function (see [Data movement rules](@ref)) and is exclusively used within the Datadeps system. The `dep_mod` argument is usually just `identity`, but it can also be an access modifier function like `UpperTriangular`, which limits what portion of the data should be read from and written to.
 
 The core responsibility of `move!` is to read data from the `from` argument and write it directly into the `to` argument. This is crucial for operations that modify data in place, as often encountered in numerical computing and linear algebra.
 
