@@ -336,10 +336,6 @@ B = rand(4)
 add_task = Dagger.@spawn A .+ B
 @assert fetch(add_task) ≈ A .+ B
 
-# Spawn a task to compute A .* B
-mul_task = Dagger.@spawn A .* B
-@assert fetch(mul_task) ≈ A .* B
-
 x = randn(100)
 abs_task = Dagger.@spawn abs.(x)
 @assert fetch(abs_task) == abs.(x)
@@ -379,14 +375,15 @@ A = rand(4)
 anon_task = Dagger.@spawn A -> sum(A)
 @assert fetch(anon_task) == sum(A)
 
-# Anonymous function with keyword arguments
-anon_kwargs_task = Dagger.@spawn A -> sum(A; dims=1)
-@assert fetch(anon_kwargs_task) == sum(A; dims=1)
+# Anonymous function with closed-over arguments
+dims = 1
+anon_kwargs_task = Dagger.@spawn A -> sum(A; dims=dims)
+@assert fetch(anon_kwargs_task) == sum(A; dims=dims)
 ```
 
 ### Getindex
 
-Spawning tasks that retrieve elements from arrays or `Ref` objects using index notation is supported.
+Spawning tasks that retrieve elements from indexable collections, such as arrays, using index notation is supported.
 
 ```julia
 using Dagger
@@ -413,7 +410,7 @@ ref_getindex_task = Dagger.@spawn R[]
 
 ### Setindex!
 
-Similarly, tasks can be spawned to modify elements of mutable arrays or `Ref` objects. The object being modified must be wrapped with `Dagger.@mutable` to signal that its contents can be changed by Dagger tasks.
+Similarly, tasks can be spawned to modify elements of mutable collections (such as arrays). The object being modified must be running under Datadeps, or wrapped with `Dagger.@mutable`, to ensure that its contents can be mutated correctly.
 
 ```julia
 using Dagger
@@ -438,7 +435,7 @@ fetch(ref_setindex_task)
 
 ### NamedTuple
 
-Tasks can be spawned to create `NamedTuple`s.
+Tasks can be spawned to conveniently create `NamedTuple`s.
 
 ```julia
 using Dagger
