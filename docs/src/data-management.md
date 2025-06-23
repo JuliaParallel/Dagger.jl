@@ -43,22 +43,12 @@ end
 
 # Custom move function for MyCustomType
 function Dagger.move(from_proc::Dagger.Processor, to_proc::Dagger.Processor, x::MyCustomType)
-    # In this example, we assume MyCustomType is simple and can be reconstructed.
-    # For more complex types, you might need specific serialization/deserialization logic
-    # or transfer mechanisms.
-    if from_proc == to_proc
-        return x # No move needed if processors are the same
-    end
-    @info "Moving MyCustomType from \$(from_proc) to \$(to_proc)"
-    # This is a simplistic example; real-world scenarios might involve
-    # network transfer, GPU data movement, etc.
     return MyCustomType(copy(x.data))
 end
 
-# Example usage (conceptual, actual Dagger scheduling handles this):
-# Assume obj is an instance of MyCustomType on processorA
-# When a task needing obj is scheduled on processorB, Dagger would internally call:
-# Dagger.move(processorA, processorB, obj)
+A = MyCustomType(rand(100))
+s = fetch(Dagger.@spawn sum(A))
+@assert s == sum(A.data)
 ```
 
 ## Mutation
