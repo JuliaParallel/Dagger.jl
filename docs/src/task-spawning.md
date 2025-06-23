@@ -32,21 +32,6 @@ it'll be passed as-is to the function `f` (with some exceptions).
     This default can be controlled by specifying [`Sch.ThunkOptions`](@ref) (more details can be found under [Scheduler and Thunk options](@ref)).
     The section [Changing the thread occupancy](@ref) shows a runnable example of how to achieve this.
 
-## Options
-
-The [`Options`](@ref Dagger.Options) struct in the second argument position is
-optional; if provided, it is passed to the scheduler to control its
-behavior. [`Options`](@ref Dagger.Options) contains a `NamedTuple` of option
-key-value pairs, which can be any of:
-- Any field in [`Sch.ThunkOptions`](@ref) (see [Scheduler and Thunk options](@ref))
-- `meta::Bool` -- Pass the input [`Chunk`](@ref) objects themselves to `f` and
-  not the value contained in them.
-
-There are also some extra options that can be passed, although they're considered advanced options to be used only by developers or library authors:
-- `get_result::Bool` -- return the actual result to the scheduler instead of [`Chunk`](@ref) objects. Used when `f` explicitly constructs a [`Chunk`](@ref) or when return value is small (e.g. in case of reduce)
-- `persist::Bool` -- the result of this Thunk should not be released after it becomes unused in the DAG
-- `cache::Bool` -- cache the result of this Thunk such that if the thunk is evaluated again, one can just reuse the cached value. If it’s been removed from cache, recompute the value.
-
 ## Simple example
 
 Let's see a very simple directed acyclic graph (or DAG) constructed with Dagger:
@@ -124,6 +109,21 @@ x::DTask
 ```
 
 This is useful for nested execution, where an `@spawn`'d thunk calls `@spawn`. This is detailed further in [Dynamic Scheduler Control](@ref).
+
+## Options
+
+The [`Options`](@ref Dagger.Options) struct in the second argument position is
+optional; if provided, it is passed to the scheduler to control its
+behavior. [`Options`](@ref Dagger.Options) contains a `NamedTuple` of option
+key-value pairs, which can be any of:
+- Any field in [`Sch.ThunkOptions`](@ref) (see [Scheduler and Thunk options](@ref))
+- `meta::Bool` -- Pass the input [`Chunk`](@ref) objects themselves to `f` and
+  not the value contained in them.
+
+There are also some extra options that can be passed, although they're considered advanced options to be used only by developers or library authors:
+- `get_result::Bool` -- return the actual result to the scheduler instead of [`Chunk`](@ref) objects. Used when `f` explicitly constructs a [`Chunk`](@ref) or when return value is small (e.g. in case of reduce)
+- `persist::Bool` -- the result of this Thunk should not be released after it becomes unused in the DAG
+- `cache::Bool` -- cache the result of this Thunk such that if the thunk is evaluated again, one can just reuse the cached value. If it’s been removed from cache, recompute the value.
 
 ## Errors
 
