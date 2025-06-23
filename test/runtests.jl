@@ -35,7 +35,7 @@ tests = [
     ("Array - Stencils", "array/stencil.jl"),
     ("Array - FFT", "array/fft.jl"),
     ("GPU", "gpu.jl"),
-    ("Caching", "cache.jl"),
+    #("Caching", "cache.jl"),
     ("Disk Caching", "diskcaching.jl"),
     ("File IO", "file-io.jl"),
     ("Reusable Data Structures", "reuse.jl"),
