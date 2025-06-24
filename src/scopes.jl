@@ -82,8 +82,8 @@ ProcessScope() = ProcessScope(myid())
 struct ProcessorTypeTaint{T} <: AbstractScopeTaint end
 
 "Scoped to any processor with a given supertype."
-ProcessorTypeScope(T) =
-    TaintScope(AnyScope(),
+ProcessorTypeScope(T, inner_scope=AnyScope()) =
+    TaintScope(inner_scope,
                Set{AbstractScopeTaint}([ProcessorTypeTaint{T}()]))
 
 "Scoped to a specific processor."
@@ -318,47 +318,86 @@ function to_scope(sc::NamedTuple)
         return to_scope(Val(max_prec_key), sc)
     end
 
+    all_workers = false
     workers = if haskey(sc, :worker)
         Int[sc.worker]
     elseif haskey(sc, :workers)
-        Int[sc.workers...]
+        if sc.workers == Colon()
+            all_workers = true
+            nothing
+        else
+            Int[sc.workers...]
+        end
     else
+        all_workers = true
         nothing
     end
+
+    all_threads = false
+    want_threads = false
     threads = if haskey(sc, :thread)
+        want_threads = true
         Int[sc.thread]
     elseif haskey(sc, :threads)
-        Int[sc.threads...]
+        want_threads = true
+        if sc.threads == Colon()
+            all_threads = true
+            nothing
+        else
+            Int[sc.threads...]
+        end
     else
+        all_threads = true
         nothing
     end
 
     # Simple cases
+    if workers !== nothing && isempty(workers)
+        throw(ArgumentError("Cannot construct scope with workers=[]"))
+    end
+    if threads !== nothing && isempty(threads)
+        throw(ArgumentError("Cannot construct scope with threads=[]"))
+    end
     if workers !== nothing && threads !== nothing
         subscopes = AbstractScope[]
         for w in workers, t in threads
             push!(subscopes, ExactScope(ThreadProc(w, t)))
         end
         return simplified_union_scope(subscopes)
-    elseif workers !== nothing && threads === nothing
-        subscopes = AbstractScope[ProcessScope(w) for w in workers]
-        return simplified_union_scope(subscopes)
+    end
+    if workers !== nothing && threads === nothing
+        subscopes = simplified_union_scope(AbstractScope[ProcessScope(w) for w in workers])
+        if all_threads
+            return constrain(subscopes, ProcessorTypeScope(ThreadProc))
+        else
+            return subscopes
+        end
+    end
+    if all_threads && want_threads
+        if all_workers
+            return ProcessorTypeScope(ThreadProc)
+        end
+        return UnionScope([ProcessorTypeScope(ThreadProc, ProcessScope(w)) for w in workers])
     end
 
     # More complex cases that require querying the cluster
     # FIXME: Use per-field scope taint
     if workers === nothing
-        workers = procs()
+        workers = map(p->p.pid, filter(p->p isa OSProc, procs(Dagger.Sch.eager_context())))
     end
     subscopes = AbstractScope[]
     for w in workers
-        if threads === nothing
-            threads = map(c->c.tid,
-                          filter(c->c isa ThreadProc,
-                                 collect(children(OSProc(w)))))
-        end
-        for t in threads
-            push!(subscopes, ExactScope(ThreadProc(w, t)))
+        if want_threads
+            if threads === nothing
+                threads = map(c->c.tid,
+                              filter(c->c isa ThreadProc,
+                                     collect(children(OSProc(w)))))
+            end
+            for t in threads
+                push!(subscopes, ExactScope(ThreadProc(w, t)))
+            end
+        else
+            push!(subscopes, ProcessScope(w))
         end
     end
     return simplified_union_scope(subscopes)

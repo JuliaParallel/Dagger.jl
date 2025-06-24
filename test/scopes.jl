@@ -169,17 +169,16 @@
         @test Dagger.scope(()) == UnionScope()
 
         @test Dagger.scope(worker=wid1) ==
-              Dagger.scope(workers=[wid1]) ==
-              ProcessScope(wid1)
+              Dagger.scope(workers=[wid1])
         @test Dagger.scope(workers=[wid1,wid2]) == UnionScope([ProcessScope(wid1),
                                                                ProcessScope(wid2)])
-        @test Dagger.scope(workers=[]) == UnionScope()
+        @test_throws ArgumentError Dagger.scope(workers=[])
 
         @test Dagger.scope(thread=1) ==
               Dagger.scope(threads=[1]) ==
               UnionScope([ExactScope(Dagger.ThreadProc(w,1)) for w in procs()])
         @test Dagger.scope(threads=[1,2]) == UnionScope([ExactScope(Dagger.ThreadProc(w,t)) for t in [1,2] for w in procs()])
-        @test Dagger.scope(threads=[]) == UnionScope()
+        @test_throws ArgumentError Dagger.scope(threads=[])
 
         @test Dagger.scope(worker=wid1,thread=1) ==
               Dagger.scope(thread=1,worker=wid1) ==
@@ -201,6 +200,12 @@
                           ExactScope(Dagger.ThreadProc(wid1, 2))])
         @test_throws ArgumentError Dagger.scope((;blah=1))
         @test_throws ArgumentError Dagger.scope((thread=1, blah=1))
+
+        @test Dagger.scope(workers=:) == UnionScope([Dagger.ProcessScope(w) for w in procs()])
+        @test Dagger.scope(threads=:) == Dagger.ProcessorTypeScope(Dagger.ThreadProc)
+        @test Dagger.scope(worker=1, threads=:) == Dagger.ProcessorTypeScope(Dagger.ThreadProc, Dagger.ProcessScope(1))
+        @test Dagger.scope(workers=:, thread=1) == UnionScope([ExactScope(Dagger.ThreadProc(w, 1)) for w in procs()]...)
+        @test Dagger.scope(workers=:, threads=:) == Dagger.ProcessorTypeScope(Dagger.ThreadProc)
 
         @testset "custom handler" begin
             @eval begin
@@ -240,12 +245,6 @@
     end
 
     @testset "compatible_processors" begin
-        scope = Dagger.scope(workers=[])
-        comp_procs = Dagger.compatible_processors(scope)
-        @test Dagger.num_processors(scope) == length(comp_procs)
-        @test !any(proc->proc in comp_procs, Dagger.get_processors(OSProc(wid1)))
-        @test !any(proc->proc in comp_procs, Dagger.get_processors(OSProc(wid2)))
-
         scope = Dagger.scope(worker=wid1)
         comp_procs = Dagger.compatible_processors(scope)
         @test Dagger.num_processors(scope) == length(comp_procs)
