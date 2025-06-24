@@ -21,12 +21,12 @@ tests = [
     ("Array - LinearAlgebra - Cholesky", "array/linalg/cholesky.jl"),
     ("Array - LinearAlgebra - LU", "array/linalg/lu.jl"),
     ("Array - Random", "array/random.jl"),
+    ("Array - Stencils", "array/stencil.jl"),
     ("Caching", "cache.jl"),
     ("Disk Caching", "diskcaching.jl"),
     ("File IO", "file-io.jl"),
     ("External Languages - Python", "extlang/python.jl"),
-    ("Preferences", "preferences.jl"),
-    ("Stencil", "stencil.jl")
+    ("Preferences", "preferences.jl")
     #("Fault Tolerance", "fault-tolerance.jl"),
 ]
 all_test_names = map(test -> replace(last(test), ".jl"=>""), tests)

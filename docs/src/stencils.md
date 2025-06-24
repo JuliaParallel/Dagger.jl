@@ -94,8 +94,8 @@ expected_B_padded = [
 Expressions within a `@stencil` block are executed sequentially in terms of their effect on the data. This means that the result of one statement is visible to the subsequent statements, as if they were applied "all at once" across all indices before the next statement begins.
 
 ```julia
-A = Dagger.DArray(zeros(Int, 4, 4), Blocks(2, 2))
-B = Dagger.DArray(zeros(Int, 4, 4), Blocks(2, 2))
+A = zeros(Blocks(2, 2), Int, 4, 4)
+B = zeros(Blocks(2, 2), Int, 4, 4)
 
 Dagger.spawn_datadeps() do
     @stencil begin
@@ -140,15 +140,15 @@ N = 27 # Size of one dimension of a tile
 nt = 3 # Number of tiles in each dimension (results in nt x nt grid of tiles)
 niters = 10 # Number of iterations for the animation
 
-tiles = Dagger.DArray(zeros(Bool, N*nt, N*nt), Blocks(N, N))
-outputs = Dagger.DArray(zeros(Bool, N*nt, N*nt), Blocks(N, N))
+tiles = zeros(Blocks(N, N), Bool, N*nt, N*nt)
+outputs = zeros(Blocks(N, N), Bool, N*nt, N*nt)
 
 # Create a fun initial state (e.g., a glider and some random noise)
-tiles[13, 14] = 1
-tiles[14, 14] = 1
-tiles[15, 14] = 1
-tiles[15, 15] = 1 # Corrected glider part
-tiles[14, 16] = 1
+tiles[13, 14] = true
+tiles[14, 14] = true
+tiles[15, 14] = true
+tiles[15, 15] = true # Corrected glider part
+tiles[14, 16] = true
 # Add some random noise in one of the tiles
 # Make sure to use Dagger-compatible assignment if you were to modify chunks directly
 # For simplicity, direct array indexing is used here for initial setup.
