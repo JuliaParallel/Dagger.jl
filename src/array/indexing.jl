@@ -127,7 +127,7 @@ function Base.setindex!(A::DArray{T,N}, value, idx::NTuple{N,Int}) where {T,N}
     # Set the value
     part = A.chunks[part_idx...]
     space = memory_space(part)
-    scope = Dagger.scope(worker=root_worker_id(space))
+    scope = UnionScope(map(ExactScope, collect(processors(space))))
     return fetch(Dagger.@spawn scope=scope setindex!(part, value, offset_idx...))
 end
 Base.setindex!(A::DArray, value, idx::Integer...) =
