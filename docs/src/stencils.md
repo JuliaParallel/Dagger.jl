@@ -1,10 +1,10 @@
 # Stencil Operations
 
-The `@stencil` macro in Dagger.jl provides a convenient way to perform stencil computations on `DArray`s. It operates within a `Dagger.spawn_datadeps()` block and allows you to define operations that apply to each element of a `DArray`, potentially considering its neighbors.
+The `@stencil` macro in Dagger.jl provides a convenient way to perform stencil computations on `DArray`s. It operates within a `Dagger.spawn_datadeps()` block and allows you to define operations that apply to each element of a `DArray`, potentially accessing values from each element's neighbors.
 
 ## Basic Usage
 
-The fundamental structure of a `@stencil` block involves iterating over an implicit index, `idx`, which represents the coordinates of an element in the processed `DArray`s.
+The fundamental structure of a `@stencil` block involves iterating over an implicit index, named `idx` in the following example , which represents the coordinates of an element in the processed `DArray`s.
 
 ```julia
 using Dagger
@@ -32,13 +32,15 @@ The true power of stencils comes from accessing neighboring elements. The `@neig
 
 - `array[idx]`: The array and current index from which to find neighbors.
 - `distance`: An integer specifying the extent of the neighborhood (e.g., `1` for a 3x3 neighborhood in 2D).
-- `boundary_condition`: Defines how to handle accesses beyond the array boundaries. Common conditions are:
+- `boundary_condition`: Defines how to handle accesses beyond the array boundaries. Available conditions are:
     - `Wrap()`: Wraps around to the other side of the array.
     - `Pad(value)`: Pads with a specified `value`.
 
 ### Example: Averaging Neighbors with `Wrap`
 
 ```julia
+import Dagger: Wrap
+
 # Initialize a DArray
 A = ones(Blocks(1, 1), Int, 3, 3)
 A[2,2] = 10 # Central element has a different value
@@ -69,6 +71,8 @@ end
 ### Example: Convolution with `Pad`
 
 ```julia
+import Pad
+
 # Initialize a DArray
 A = ones(Blocks(2, 2), Int, 4, 4)
 B = zeros(Blocks(2, 2), Int, 4, 4)
@@ -99,12 +103,12 @@ B = zeros(Blocks(2, 2), Int, 4, 4)
 
 Dagger.spawn_datadeps() do
     @stencil begin
-        A[idx] = idx[1] + idx[2]  # First, A is filled based on coordinates
+        A[idx] = 1  # First, A is initialized
         B[idx] = A[idx] * 2       # Then, B is computed using the new values of A
     end
 end
 
-expected_A = [(r+c) for r in 1:4, c in 1:4]
+expected_A = [1 for r in 1:4, c in 1:4]
 expected_B_seq = expected_A .* 2
 
 @assert collect(A) == expected_A
@@ -117,15 +121,15 @@ You can read from and write to multiple `DArray`s within a single `@stencil` blo
 
 ```julia
 A = ones(Blocks(1, 1), Int, 2, 2)
-B_multi = Dagger.fill(Blocks(1, 1), 2, Int, 2, 2) # Renamed to avoid conflict, corrected fill
+B = DArray(fill(3, 2, 2), Blocks(1, 1))
 C = zeros(Blocks(1, 1), Int, 2, 2)
 
 Dagger.spawn_datadeps() do
     @stencil begin
-        C[idx] = A[idx] + B_multi[idx] # Use the renamed B_multi
+        C[idx] = A[idx] + B[idx]
     end
 end
-@assert all(collect(C) .== 3)
+@assert all(collect(C) .== 4)
 ```
 
 ## Example: Game of Life
@@ -134,7 +138,7 @@ The following demonstrates a more complex example: Conway's Game of Life.
 
 ```julia
 # Ensure Plots and other necessary packages are available for the example
-# using Plots
+using Plots
 
 N = 27 # Size of one dimension of a tile
 nt = 3 # Number of tiles in each dimension (results in nt x nt grid of tiles)
@@ -147,74 +151,33 @@ outputs = zeros(Blocks(N, N), Bool, N*nt, N*nt)
 tiles[13, 14] = true
 tiles[14, 14] = true
 tiles[15, 14] = true
-tiles[15, 15] = true # Corrected glider part
+tiles[15, 15] = true
 tiles[14, 16] = true
 # Add some random noise in one of the tiles
-# Make sure to use Dagger-compatible assignment if you were to modify chunks directly
-# For simplicity, direct array indexing is used here for initial setup.
-rand_tile_data = rand(Bool, N, N)
-# To assign this to a specific block, you'd typically work with chunks,
-# but for initial setup, direct indexing on the collected array or careful DArray construction is easier.
-# For this example, we'll simplify and assume direct modification is for setup.
-# A Dagger-idiomatic way for partial modification might involve map! or similar.
-# Here, we just modify the underlying array before it's heavily used by Dagger tasks if possible,
-# or use Dagger operations.
-# For collected view for setup:
-temp_tiles = collect(tiles) # This collect is fine for initial setup visualization/modification
-temp_tiles[(2N+1):3N, (2N+1):3N] .= rand_tile_data
-tiles = Dagger.distribute(temp_tiles, Blocks(N,N)) # Use distribute to create DArray from existing array
+@view(tiles[(2N+1):3N, (2N+1):3N]) .= rand(Bool, N, N)
 
 
-# The animation part requires a graphical environment.
-# If running in a headless environment, you might comment out the @animate macro
-# and inspect `outputs` programmatically.
-# anim = @animate for _ in 1:niters
-#     Dagger.spawn_datadeps() do
-#         @stencil begin
-#             outputs[idx] = begin
-#                 nhood = @neighbors(tiles[idx], 1, Wrap())
-#                 live_neighbors = sum(nhood) - tiles[idx] # Subtract self if it was counted
-#                 if tiles[idx] # If current cell is alive
-#                     if live_neighbors < 2 || live_neighbors > 3
-#                         false # Dies by underpopulation or overpopulation
-#                     else
-#                         true  # Survives
-#                     end
-#                 else # If current cell is dead
-#                     if live_neighbors == 3
-#                         true  # Becomes alive by reproduction
-#                     else
-#                         false # Stays dead
-#                     end
-#                 end
-#             end
-#             tiles[idx] = outputs[idx] # Update tiles for the next iteration
-#         end
-#     end
-#     # heatmap(Int.(collect(outputs))) # Visualize (requires Plots.jl)
-# end
-# path = mp4(anim; fps=5, show_msg=true).filename # Save animation (requires Plots.jl)
 
-# For testing without animation:
-# Execute one iteration:
-Dagger.spawn_datadeps() do
-    @stencil begin
-        outputs[idx] = begin
-            nhood = @neighbors(tiles[idx], 1, Wrap())
-            live_neighbors = sum(nhood) - tiles[idx]
-            if tiles[idx]
-                if live_neighbors < 2 || live_neighbors > 3; false
-                else; true; end
-            else
-                if live_neighbors == 3; true
-                else; false; end
+anim = @animate for _ in 1:niters
+    Dagger.spawn_datadeps() do
+        @stencil begin
+            outputs[idx] = begin
+                nhood = @neighbors(tiles[idx], 1, Wrap())
+                neighs = sum(nhood) - tiles[idx] # Sum neighborhood, but subtract own value
+                if tiles[idx] && neighs < 2
+                    0 # Dies of underpopulation
+                elseif tiles[idx] && neighs > 3
+                    0 # Dies of overpopulation
+                elseif !tiles[idx] && neighs == 3
+                    1 # Becomes alive by reproduction
+                else
+                    tiles[idx] # Keeps its prior value
+                end
             end
+            tiles[idx] = outputs[idx] # Update tiles for the next iteration
         end
-        tiles[idx] = outputs[idx]
     end
+    heatmap(Int.(collect(outputs))) # Generate a heatmap visualization
 end
-# You can inspect `collect(outputs)` or `collect(tiles)` here.
-println("Game of Life example processed one iteration.")
+path = mp4(anim; fps=5, show_msg=true).filename # Create an animation of the heatmaps over time
 ```
-
-This updated documentation provides a more structured explanation of `@stencil`, including its syntax, common use cases like neighborhood access with different boundary conditions, the sequential nature of its operations, and how to use it with multiple `DArray`s. The Game of Life example is also slightly corrected and clarified.

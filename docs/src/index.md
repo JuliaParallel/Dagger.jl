@@ -367,19 +367,19 @@ collect(DA) # returns a `Matrix{Float64}`
 
 Dagger's `@stencil` macro allows for easy specification of stencil operations on `DArray`s, often used in simulations and image processing. These operations typically involve updating an element based on the values of its neighbors.
 
-For more details: [Stencil Operations](@ref stencils.md)
+For more details: [Stencil Operations](@ref)
 
 ### Applying a Simple Stencil
 
-Here's how to apply a stencil that averages each element with its immediate neighbors, using a `Wrap` boundary condition (where edges wrap around).
+Here's how to apply a stencil that averages each element with its immediate neighbors, using a `Wrap` boundary condition (where neighbor access at the array edges wrap around).
 
 ```julia
 using Dagger
 import Dagger: @stencil, Wrap
 
 # Create a 5x5 DArray, partitioned into 2x2 blocks
-A = Dagger.rand(Blocks(2, 2), Int, 5, 5)
-B = Dagger.zeros(Blocks(2,2), Float64, 5, 5)
+A = rand(Blocks(2, 2), 5, 5)
+B = zeros(Blocks(2,2), 5, 5)
 
 Dagger.spawn_datadeps() do
     @stencil begin
@@ -391,9 +391,8 @@ Dagger.spawn_datadeps() do
 end
 
 # B now contains the averaged values.
-# You can inspect it with collect(B)
 ```
-In this example, `idx` refers to the coordinates of each element being processed. `@neighbors(A[idx], 1, Wrap())` fetches the 3x3 neighborhood around `A[idx]`. The `1` indicates a distance of 1 from the central element, and `Wrap()` specifies the boundary behavior.
+In this example, `idx` refers to the coordinates of each element being processed. `@neighbors(A[idx], 1, Wrap())` fetches the 3x3 neighborhood around `A[idx]`. The `1` indicates a neighborhood distance of 1 from the central element, and `Wrap()` specifies the boundary behavior.
 
 ## Quickstart: Datadeps
 
@@ -445,40 +444,6 @@ Dagger.@spawn copyto!(C, X)
 ```
 
 In contrast to the previous example, here, the tasks are executed without argument annotations. As a result, there is a possibility of the `copyto!` task being executed before the `sort!` task, leading to unexpected results in the output array `C`.
-
------
-
-## Quickstart: Stencil Operations
-
-Dagger's `@stencil` macro allows for easy specification of stencil operations on `DArray`s, often used in simulations and image processing. These operations typically involve updating an element based on the values of its neighbors.
-
-For more details: [Stencil Operations](@ref stencils.md)
-
-### Applying a Simple Stencil
-
-Here's how to apply a stencil that averages each element with its immediate neighbors, using a `Wrap` boundary condition (where edges wrap around).
-
-```julia
-using Dagger
-import Dagger: @stencil, Wrap
-
-# Create a 5x5 DArray, partitioned into 2x2 blocks
-A = Dagger.rand(Blocks(2, 2), Int, 5, 5)
-B = Dagger.zeros(Blocks(2,2), Float64, 5, 5)
-
-Dagger.spawn_datadeps() do
-    @stencil begin
-        # For each element in A, calculate the sum of its 3x3 neighborhood
-        # (including itself) and store the average in B.
-        # Values outside the array bounds are determined by Wrap().
-        B[idx] = sum(@neighbors(A[idx], 1, Wrap())) / 9.0
-    end
-end
-
-# B now contains the averaged values.
-# You can inspect it with collect(B)
-```
-In this example, `idx` refers to the coordinates of each element being processed. `@neighbors(A[idx], 1, Wrap())` fetches the 3x3 neighborhood around `A[idx]`. The `1` indicates a distance of 1 from the central element, and `Wrap()` specifies the boundary behavior.
 
 ## Quickstart: Streaming
 

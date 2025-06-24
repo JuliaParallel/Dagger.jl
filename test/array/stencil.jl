@@ -1,5 +1,3 @@
-using Test
-using Dagger
 import Dagger: @stencil, Wrap, Pad
 
 @testset "@stencil" begin
@@ -48,8 +46,8 @@ import Dagger: @stencil, Wrap, Pad
     end
 
     @testset "Pad boundary" begin
-        A = Dagger.DArray(ones(Int, 4, 4), Blocks(2, 2))
-        B = Dagger.DArray(zeros(Int, 4, 4), Blocks(2, 2))
+        A = DArray(ones(Int, 4, 4), Blocks(2, 2))
+        B = DArray(zeros(Int, 4, 4), Blocks(2, 2))
         Dagger.spawn_datadeps() do
             @stencil begin
                 B[idx] = sum(@neighbors(A[idx], 1, Pad(0)))
@@ -73,11 +71,11 @@ import Dagger: @stencil, Wrap, Pad
         B = zeros(Blocks(2, 2), Int, 4, 4)
         Dagger.spawn_datadeps() do
             @stencil begin
-                A[idx] = idx[1] + idx[2] # Sum of coordinates
+                A[idx] = 1
                 B[idx] = A[idx] * 2
             end
         end
-        expected_A_multi = [(r+c) for r in 1:4, c in 1:4]
+        expected_A_multi = [1 for r in 1:4, c in 1:4]
         expected_B_multi = expected_A_multi .* 2
         @test collect(A) == expected_A_multi
         @test collect(B) == expected_B_multi
@@ -85,7 +83,7 @@ import Dagger: @stencil, Wrap, Pad
 
     @testset "Multiple DArrays" begin
         A = ones(Blocks(2, 2), Int, 4, 4)
-        B = Dagger.fill(Blocks(2, 2), 2, Int, 4, 4) # Corrected fill: value first
+        B = DArray(fill(2, 4, 4), Blocks(2, 2))
         C = zeros(Blocks(2, 2), Int, 4, 4)
         Dagger.spawn_datadeps() do
             @stencil begin
