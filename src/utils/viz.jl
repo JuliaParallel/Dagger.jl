@@ -44,22 +44,24 @@ Requires the following events enabled in `enable_logging!`: `taskdeps`, `tasknam
 
 Options:
 - `disconnected`: If `true`, render disconnected vertices (tasks or arguments without upstream/downstream dependencies)
+- `show_data`: If `true`, show the data dependencies in the graph
 - `color_by`: How to color tasks; if `:fn`, then color by unique function name, if `:proc`, then color by unique processor
 - `times`: If `true`, annotate each task with its start and finish times
 - `times_digits`: Number of digits to display in the time annotations
 - `colors`: A list of colors to use for coloring tasks
 - `name_to_color`: A function that maps task names to colors
 """
-function show_logs(io::IO, logs::Dict, ::Val{:graphviz}; disconnected=false,
+function show_logs(io::IO, logs::Dict, ::Val{:graphviz};
+                   disconnected=false, show_data::Bool=true,
                    color_by=:fn, times::Bool=true, times_digits::Integer=3,
                    colors=default_colors, name_to_color=name_to_color)
-    dot = logs_to_dot(logs; disconnected, times, times_digits,
+    dot = logs_to_dot(logs; disconnected, show_data, times, times_digits,
                       color_by, colors, name_to_color)
     println(io, dot)
 end
 
-function logs_to_dot(logs::Dict; disconnected=false, color_by=:fn,
-                     times::Bool=true, times_digits::Integer=3,
+function logs_to_dot(logs::Dict; disconnected=false, show_data::Bool=true,
+                     color_by=:fn, times::Bool=true, times_digits::Integer=3,
                      colors=default_colors, name_to_color=name_to_color)
     # Lookup all relevant task/argument dependencies and values in logs
     g = SimpleDiGraph()
@@ -325,36 +327,40 @@ function logs_to_dot(logs::Dict; disconnected=false, color_by=:fn,
     end
 
     # Add object vertices
-    for objid in all_objids
-        objid_v = objid_to_vertex[objid]
-        if !disconnected && !(objid_v in con_vs)
-            continue
+    if show_data
+        for objid in all_objids
+            objid_v = objid_to_vertex[objid]
+            if !disconnected && !(objid_v in con_vs)
+                continue
+            end
+            if objid in dtasks_to_patch || haskey(uid_to_tid, objid)
+                # DTask, skip it
+                continue
+            end
+            # Object
+            if haskey(objid_to_name, objid)
+                label = sanitize_label(objid_to_name[objid])
+                label *= "\\nData: $(repr(objid))"
+            else
+                label = "Data: $(repr(objid))"
+            end
+            str *= "a$objid_v [label=\"$label\", shape=oval]\n"
         end
-        if objid in dtasks_to_patch || haskey(uid_to_tid, objid)
-            # DTask, skip it
-            continue
-        end
-        # Object
-        if haskey(objid_to_name, objid)
-            label = sanitize_label(objid_to_name[objid])
-            label *= "\\nData: $(repr(objid))"
-        else
-            label = "Data: $(repr(objid))"
-        end
-        str *= "a$objid_v [label=\"$label\", shape=oval]\n"
     end
 
     # Add task argument move edges
-    seen_moves = Set{Tuple{UInt,UInt}}()
-    for (tid, moves) in task_arg_moves
-        for (pos, (pre_objid, post_objid)) in moves
-            pre_objid == post_objid && continue
-            (pre_objid, post_objid) in seen_moves && continue
-            push!(seen_moves, (pre_objid, post_objid))
-            pre_objid_v = objid_to_vertex[pre_objid]
-            post_objid_v = objid_to_vertex[post_objid]
-            move_str = "a$pre_objid_v -> a$post_objid_v [label=\"move\"]\n"
-            str *= move_str
+    if show_data
+        seen_moves = Set{Tuple{UInt,UInt}}()
+        for (tid, moves) in task_arg_moves
+            for (pos, (pre_objid, post_objid)) in moves
+                pre_objid == post_objid && continue
+                (pre_objid, post_objid) in seen_moves && continue
+                push!(seen_moves, (pre_objid, post_objid))
+                pre_objid_v = objid_to_vertex[pre_objid]
+                post_objid_v = objid_to_vertex[post_objid]
+                move_str = "a$pre_objid_v -> a$post_objid_v [label=\"move\"]\n"
+                str *= move_str
+            end
         end
     end
 
@@ -371,31 +377,33 @@ function logs_to_dot(logs::Dict; disconnected=false, color_by=:fn,
         str *= "v$(src(edge)) $edge_sep v$(dst(edge)) [label=\"syncdep\"]\n"
     end
 
-    # Add task argument edges
-    for (tid, args) in task_args
-        haskey(tid_to_vertex, tid) || continue
-        tid_v = tid_to_vertex[tid]
-        tid_v in con_vs || continue
-        for (pos, arg) in args
-            arg_v = objid_to_vertex[arg]
-            if !disconnected && !(arg_v in con_vs)
+    if show_data
+        # Add task argument edges
+        for (tid, args) in task_args
+            haskey(tid_to_vertex, tid) || continue
+            tid_v = tid_to_vertex[tid]
+            tid_v in con_vs || continue
+            for (pos, arg) in args
+                arg_v = objid_to_vertex[arg]
+                if !disconnected && !(arg_v in con_vs)
+                    continue
+                end
+                arg_str = sanitize_label(pos isa Int ? "arg $pos" : "kwarg $pos")
+                str *= "a$arg_v $edge_sep v$tid_v [label=\"$arg_str\"]\n"
+            end
+        end
+
+        # Add task result edges
+        for (tid, result) in task_result
+            haskey(tid_to_vertex, tid) || continue
+            tid_v = tid_to_vertex[tid]
+            tid_v in con_vs || continue
+            result_v = objid_to_vertex[result]
+            if !disconnected && !(result_v in con_vs)
                 continue
             end
-            arg_str = sanitize_label(pos isa Int ? "arg $pos" : "kwarg $pos")
-            str *= "a$arg_v $edge_sep v$tid_v [label=\"$arg_str\"]\n"
+            str *= "v$tid_v $edge_sep a$result_v [label=\"result\"]\n"
         end
-    end
-
-    # Add task result edges
-    for (tid, result) in task_result
-        haskey(tid_to_vertex, tid) || continue
-        tid_v = tid_to_vertex[tid]
-        tid_v in con_vs || continue
-        result_v = objid_to_vertex[result]
-        if !disconnected && !(result_v in con_vs)
-            continue
-        end
-        str *= "v$tid_v $edge_sep a$result_v [label=\"result\"]\n"
     end
 
     # Generate the final graph
