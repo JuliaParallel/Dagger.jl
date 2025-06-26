@@ -1128,8 +1128,6 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
             end "thunk $thunk_id" DoTaskSpec(to_proc, return_queue, task, cancel_token)
 
             # Update task accounting
-            # FIXME: This can race with the task
-            @warn "Fix this race" maxlog=1
             lock(istate.queue) do _
                 tasks[thunk_id] = t
                 istate.task_specs[thunk_id] = task
@@ -1172,19 +1170,28 @@ function (dts::DoTaskSpec)()
             return nothing
         end
         if istate !== nothing
-            lock(istate.queue) do _
-                delete!(istate.tasks, tid)
-                delete!(istate.task_specs, tid)
-                if !(tid in istate.cancelled)
-                    istate.proc_occupancy[] -= task.est_occupancy
-                    istate.time_pressure[] -= task.est_time_util
-                else
-                    # Task was cancelled, so occupancy and pressure are
-                    # already reduced
-                    pop!(istate.cancelled, tid)
-                    delete!(istate.cancel_tokens, tid)
-                    was_cancelled = true
+            while true
+                # Wait until the task has been recorded in the processor state
+                done = lock(istate.queue) do _
+                    if haskey(istate.tasks, tid)
+                        delete!(istate.tasks, tid)
+                        delete!(istate.task_specs, tid)
+                        if !(tid in istate.cancelled)
+                            istate.proc_occupancy[] -= task.est_occupancy
+                            istate.time_pressure[] -= task.est_time_util
+                        else
+                            # Task was cancelled, so occupancy and pressure are
+                            # already reduced
+                            pop!(istate.cancelled, tid)
+                            delete!(istate.cancel_tokens, tid)
+                            was_cancelled = true
+                        end
+                        return true
+                    end
+                    return false
                 end
+                done && break
+                sleep(0.1)
             end
             notify(istate.reschedule)
         end
