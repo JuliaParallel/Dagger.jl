@@ -1,6 +1,5 @@
 # Task options
 
-@warn "Document streaming options" maxlog=1
 """
     Options
 
@@ -25,6 +24,10 @@ Stores per-task options to be passed to the scheduler.
 - `storage_leaf_tag::Union{MemPool.Tag,Nothing}=nothing`: If not `nothing`, specifies the MemPool storage leaf tag to associate with the task's result. This tag can be used by MemPool's storage devices to manipulate their behavior, such as the file name used to store data on disk."
 - `storage_retain::Union{Bool,Nothing}=nothing`: The value of `retain` to pass to `MemPool.poolset` when constructing the result `Chunk`. `nothing` defaults to `false`.
 - `name::Union{String,Nothing}=nothing`: If not `nothing`, annotates the task with a name for logging purposes.
+- `stream_input_buffer_amount::Union{Int,Nothing}=nothing`: (Streaming only) Specifies the amount of slots to allocate for the input buffer of the task. Defaults to 1.
+- `stream_output_buffer_amount::Union{Int,Nothing}=nothing`: (Streaming only) Specifies the amount of slots to allocate for the output buffer of the task. Defaults to 1.
+- `stream_buffer_type::Union{Type,Nothing}=nothing`: (Streaming only) Specifies the type of buffer to use for the input and output buffers of the task. Defaults to `Dagger.ProcessRingBuffer`.
+- `stream_max_evals::Union{Int,Nothing}=nothing`: (Streaming only) Specifies the maximum number of times the task will be evaluated before returning a result. Defaults to infinite evaluations.
 """
 Base.@kwdef mutable struct Options
     propagates::Union{Vector{Symbol},Nothing} = nothing
@@ -129,14 +132,38 @@ function populate_defaults!(opts::Options, sig)
 end
 function maybe_default!(opts::Options, ::Val{opt}, sig::Signature) where opt
     if getfield(opts, opt) === nothing
-        @warn "SIGNATURE_DEFAULT_CACHE should use an LRU" maxlog=1
         default_opt = get!(SIGNATURE_DEFAULT_CACHE[], (sig.hash_nokw, opt)) do
             Dagger.default_option(Val{opt}(), sig.sig_nokw...)
         end
         setfield!(opts, opt, default_opt)
     end
 end
-const SIGNATURE_DEFAULT_CACHE = TaskLocalValue{Dict{Tuple{UInt,Symbol},Any}}(()->Dict{Tuple{UInt,Symbol},Any}())
+
+struct BasicLFUCache{K,V}
+    cache::Dict{K,V}
+    freq::Dict{K,Int}
+    max_size::Int
+
+    BasicLFUCache{K,V}(max_size::Int) where {K,V} = new(Dict{K,V}(), Dict{K,Int}(), max_size)
+end
+function Base.get!(f, cache::BasicLFUCache{K,V}, key::K) where {K,V}
+    if haskey(cache.cache, key)
+        cache.freq[key] += 1
+        return cache.cache[key]
+    end
+    val = f()::V
+    cache.cache[key] = val
+    cache.freq[key] = 1
+    if length(cache.cache) > cache.max_size
+        # Find the least frequently used key
+        _, lfu_key::K = findmin(cache.freq)
+        delete!(cache.cache, lfu_key)
+        delete!(cache.freq, lfu_key)
+    end
+    return val
+end
+
+const SIGNATURE_DEFAULT_CACHE = TaskLocalValue{BasicLFUCache{Tuple{UInt,Symbol},Any}}(()->BasicLFUCache{Tuple{UInt,Symbol},Any}(1000))
 
 # SchedulerOptions integration
 
