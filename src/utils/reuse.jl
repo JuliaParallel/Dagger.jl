@@ -1,3 +1,40 @@
+struct ReuseCleanup
+    done::Base.RefValue{Bool}
+    f::Function
+end
+const REUSE_SCOPE_DEFERRED = ScopedValue{Union{Vector{ReuseCleanup},Nothing}}(nothing)
+macro reuse_scope(ex)
+    @assert @capture(ex, function f_(args__) body_ end)
+    esc(quote
+        function $f($(args...))
+            @with $REUSE_SCOPE_DEFERRED=>Vector{$ReuseCleanup}() begin
+                try
+                    $body
+                finally
+                    deferred = $REUSE_SCOPE_DEFERRED[]
+                    @assert deferred !== nothing
+                    for cleanup in deferred
+                        cleanup.done[] || cleanup()
+                    end
+                end
+            end
+        end
+    end)
+end
+macro reuse_defer_cleanup(ex)
+    @gensym cleanup
+    quote
+        let $cleanup = $ReuseCleanup(Base.RefValue(false), ()->$(esc(ex)))
+            push!($REUSE_SCOPE_DEFERRED[], $cleanup)
+            $cleanup
+        end
+    end
+end
+function (cleanup::ReuseCleanup)()
+    cleanup.done[] = true
+    cleanup.f()
+end
+
 struct ReusableCache{T,Tnull}
     cache::Vector{T}
     used::Vector{Bool}
@@ -140,8 +177,6 @@ end
 
 # FIXME: Provide ReusableObject{T} interface
 # FIXME: Allow objects to be GC'd (if lost via throw/unexpected control flow) (provide optional warning mode on finalization)
-# FIXME: Add take/replace interface
-# FIXME: Add function annotation for multiple reuse points
 
 #= FIXME: UniquingCache
 struct UniquingCache{K,V}

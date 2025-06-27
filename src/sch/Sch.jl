@@ -20,11 +20,12 @@ import ..Dagger: @dagdebug, @safe_lock_spin1, @maybelog, @take_or_alloc!
 import DataStructures: PriorityQueue, enqueue!, dequeue_pair!, peek
 
 import ..Dagger: ReusableCache, ReusableLinkedList, ReusableDict
-import ..Dagger: @reusable, @reusable_dict, @reusable_vector, @reusable_tasks
+import ..Dagger: @reusable, @reusable_dict, @reusable_vector, @reusable_tasks, @reuse_scope, @reuse_defer_cleanup
 
 import TimespanLogging
 
 import TaskLocalValues: TaskLocalValue
+import ScopedValues: @with
 
 const OneToMany = Dict{Thunk, Set{Thunk}}
 
@@ -530,7 +531,7 @@ struct ScheduleTaskSpec
     est_alloc_util::UInt64
     est_occupancy::UInt32
 end
-function schedule!(ctx, state, sch_options, procs=procs_to_use(ctx, sch_options))
+@reuse_scope function schedule!(ctx, state, sch_options, procs=procs_to_use(ctx, sch_options))
     lock(state.lock) do
         safepoint(state)
 
@@ -541,8 +542,9 @@ function schedule!(ctx, state, sch_options, procs=procs_to_use(ctx, sch_options)
 
         # Schedule tasks
         to_fire = @reusable_dict :schedule!_to_fire ScheduleTaskLocation Vector{ScheduleTaskSpec} ScheduleTaskLocation(OSProc(), OSProc()) ScheduleTaskSpec[] 1024
+        to_fire_cleanup = @reuse_defer_cleanup empty!(to_fire)
         failed_scheduling = @reusable_vector :schedule!_failed_scheduling Union{Thunk,Nothing} nothing 32
-
+        failed_scheduling_cleanup = @reuse_defer_cleanup empty!(failed_scheduling)
         # Select a new task and get its options
         task = nothing
         @label pop_task
@@ -611,21 +613,20 @@ function schedule!(ctx, state, sch_options, procs=procs_to_use(ctx, sch_options)
 
         input_procs = @reusable_vector :schedule!_input_procs Processor OSProc() 32
         input_procs_cleanup = @reuse_defer_cleanup empty!(input_procs)
-        for gp in Dagger.compatible_processors(scope, procs)
-            subprocs = get_processors(gp)
-            for proc in subprocs
-                if !(proc in input_procs)
-                    push!(input_procs, proc)
-                end
+        for proc in Dagger.compatible_processors(scope, procs)
+            if !(proc in input_procs)
+                push!(input_procs, proc)
             end
         end
 
         sorted_procs = @reusable_vector :schedule!_sorted_procs Processor OSProc() 32
+        sorted_procs_cleanup = @reuse_defer_cleanup empty!(sorted_procs)
         resize!(sorted_procs, length(input_procs))
         costs = @reusable_dict :schedule!_costs Processor Float64 OSProc() 0.0 32
+        costs_cleanup = @reuse_defer_cleanup empty!(costs)
         estimate_task_costs!(sorted_procs, costs, state, input_procs, task)
-        empty!(costs) # We don't use costs here
-        empty!(input_procs)
+        costs_cleanup() # We don't use costs here
+        input_procs_cleanup()
         scheduled = false
 
         # Move our corresponding ThreadProc to be the last considered
@@ -655,8 +656,9 @@ function schedule!(ctx, state, sch_options, procs=procs_to_use(ctx, sch_options)
                     state.worker_time_pressure[gproc.pid][proc] =
                         get(state.worker_time_pressure[gproc.pid], proc, 0) +
                         est_time_util
-                    @dagdebug task :schedule "Scheduling to $gproc -> $proc"
-                    empty!(sorted_procs)
+                    @dagdebug task :schedule "Scheduling to $gproc -> $proc (cost: $(costs[proc]), pressure: $(state.worker_time_pressure[gproc.pid][proc]))"
+                    sorted_procs_cleanup()
+                    costs_cleanup()
                     @goto pop_task
                 end
             end
@@ -664,7 +666,8 @@ function schedule!(ctx, state, sch_options, procs=procs_to_use(ctx, sch_options)
         ex = SchedulingException("No processors available, try widening scope")
         store_result!(state, task, ex; error=true)
         set_failed!(state, task)
-        empty!(sorted_procs)
+        sorted_procs_cleanup()
+        costs_cleanup()
         @goto pop_task
 
         # Fire all newly-scheduled tasks
@@ -672,10 +675,10 @@ function schedule!(ctx, state, sch_options, procs=procs_to_use(ctx, sch_options)
         for (task_loc, task_spec) in to_fire
             fire_tasks!(ctx, task_loc, task_spec, state)
         end
-        empty!(to_fire)
+        to_fire_cleanup()
 
         append!(state.ready, failed_scheduling)
-        empty!(failed_scheduling)
+        failed_scheduling_cleanup()
     end
 end
 
@@ -801,9 +804,10 @@ struct TaskSpec
 end
 Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
 
-function fire_tasks!(ctx, task_loc::ScheduleTaskLocation, task_specs::Vector{ScheduleTaskSpec}, state)
+@reuse_scope function fire_tasks!(ctx, task_loc::ScheduleTaskLocation, task_specs::Vector{ScheduleTaskSpec}, state)
     gproc, proc = task_loc.gproc, task_loc.proc
     to_send = @reusable_vector :fire_tasks!_to_send Union{TaskSpec,Nothing} nothing 1024
+    to_send_cleanup = @reuse_defer_cleanup empty!(to_send)
     for task_spec in task_specs
         thunk = task_spec.task
         push!(state.running, thunk)
@@ -859,7 +863,7 @@ function fire_tasks!(ctx, task_loc::ScheduleTaskLocation, task_specs::Vector{Sch
             @reusable_tasks :fire_tasks!_task_cache 32 _->nothing "fire_tasks!" FireTaskSpec(proc, state.chan, task_spec)
         end
     end
-    empty!(to_send)
+    to_send_cleanup()
 end
 
 struct FireTaskSpec
@@ -1306,7 +1310,7 @@ end
 
 Executes a single task specified by `task` on `to_proc`.
 """
-function do_task(to_proc, task::TaskSpec)
+@reuse_scope function do_task(to_proc, task::TaskSpec)
     thunk_id = task.thunk_id
 
     ctx_vars = task.ctx_vars
@@ -1461,7 +1465,9 @@ function do_task(to_proc, task::TaskSpec)
     f = Dagger.value(first(data))
     @assert !(f isa Chunk) "Failed to unwrap thunk function"
     fetched_args = @reusable_vector :do_task_fetched_args Any nothing 32
+    fetched_args_cleanup = @reuse_defer_cleanup empty!(fetched_args)
     fetched_kwargs = @reusable_vector :do_task_fetched_kwargs Pair{Symbol,Any} :NULL=>nothing 32
+    fetched_kwargs_cleanup = @reuse_defer_cleanup empty!(fetched_kwargs)
     for idx in 2:length(data)
         arg = data[idx]
         if Dagger.ispositional(arg)
@@ -1535,8 +1541,8 @@ function do_task(to_proc, task::TaskSpec)
         bt = catch_backtrace()
         RemoteException(myid(), CapturedException(ex, bt))
     finally
-        empty!(fetched_args)
-        empty!(fetched_kwargs)
+        fetched_args_cleanup()
+        fetched_kwargs_cleanup()
     end
 
     threadtime = cputhreadtime() - threadtime_start

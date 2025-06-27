@@ -52,7 +52,7 @@ end
 eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
     eager_submit_internal!(ctx, state, task, tid, payload[1])
 const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}(()->ReusableCache(Dict{UInt64,Int}, nothing, 1))
-function eager_submit_internal!(ctx, state, task, tid, payload::AnyPayload; uid_to_tid=nothing)
+@reuse_scope function eager_submit_internal!(ctx, state, task, tid, payload::AnyPayload; uid_to_tid=nothing)
     maybe_take_or_alloc!(UID_TO_TID_CACHE[], uid_to_tid) do uid_to_tid
         if payload isa PayloadMulti
             thunk_ids = Sch.ThunkID[]
@@ -79,8 +79,11 @@ function eager_submit_internal!(ctx, state, task, tid, payload::AnyPayload; uid_
         @maybelog ctx timespan_start(ctx, :add_thunk, (;thunk_id=id), (;f=fargs[1], args=fargs[2:end], options, uid))
 
         old_fargs = @reusable_vector :eager_submit_internal!_old_fargs Argument Argument(ArgPosition(), nothing) 32
+        old_fargs_cleanup = @reuse_defer_cleanup empty!(old_fargs)
         append!(old_fargs, Iterators.map(copy, fargs))
+
         syncdeps_vec = @reusable_vector :eager_submit_interal!_syncdeps_vec Any nothing 32
+        syncdeps_vec_cleanup = @reuse_defer_cleanup empty!(syncdeps_vec)
         if options.syncdeps !== nothing
             append!(syncdeps_vec, options.syncdeps)
         end
@@ -159,7 +162,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload::AnyPayload; uid_
                 end
             end
         end
-        empty!(syncdeps_vec)
+        syncdeps_vec_cleanup()
 
         GC.@preserve old_fargs fargs begin
             # Create the `Thunk`
@@ -181,7 +184,7 @@ function eager_submit_internal!(ctx, state, task, tid, payload::AnyPayload; uid_
                 state.thunk_dict[thunk.id] = WeakThunk(thunk)
                 #=FIXME:REALLOC=#
                 Sch.reschedule_syncdeps!(state, thunk)
-                empty!(old_fargs) # reschedule_syncdeps! preserves all referenced tasks/chunks
+                old_fargs_cleanup() # reschedule_syncdeps! preserves all referenced tasks/chunks
                 @dagdebug thunk :submit "Added to scheduler"
                 if future !== nothing
                     # Ensure we attach a future before the thunk is scheduled
@@ -205,7 +208,6 @@ function eager_submit_internal!(ctx, state, task, tid, payload::AnyPayload; uid_
 
             return thunk_id
         end
-        empty!(equiv_chunks)
     end
 end
 struct UnrefThunk

@@ -17,9 +17,9 @@ import Random: AbstractRNG
 import UUIDs: UUID, uuid4
 
 if !isdefined(Base, :ScopedValues)
-    import ScopedValues: ScopedValue, with
+    import ScopedValues: ScopedValue, @with, with
 else
-    import Base.ScopedValues: ScopedValue, with
+    import Base.ScopedValues: ScopedValue, @with, with
 end
 import TaskLocalValues: TaskLocalValue
 

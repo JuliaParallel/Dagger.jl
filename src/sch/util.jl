@@ -542,11 +542,12 @@ function estimate_task_costs(state, procs, task)
     estimate_task_costs!(sorted_procs, costs, state, procs, task)
     return sorted_procs, costs
 end
-function estimate_task_costs!(sorted_procs, costs, state, procs, task)
+@reuse_scope function estimate_task_costs!(sorted_procs, costs, state, procs, task)
     tx_rate = state.transfer_rate[]
 
     # Find all Chunks
     chunks = @reusable_vector :estimate_task_costs_chunks Union{Chunk,Nothing} nothing 32
+    chunks_cleanup = @reuse_defer_cleanup empty!(chunks)
     for input in task.inputs
         if Dagger.valuetype(input) <: Chunk
             push!(chunks, Dagger.value(input)::Chunk)
@@ -568,7 +569,7 @@ function estimate_task_costs!(sorted_procs, costs, state, procs, task)
         est_time_util = get(state.worker_time_pressure[gproc.pid], proc, 0)
         costs[proc] = est_time_util + (tx_cost/tx_rate)
     end
-    empty!(chunks)
+    chunks_cleanup()
 
     # Shuffle procs around, so equally-costly procs are equally considered
     np = length(procs)
