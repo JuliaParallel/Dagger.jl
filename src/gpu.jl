@@ -7,7 +7,7 @@ Kernel(f) = Kernel{f}()
 
 function (::Kernel{F})(args...; ndrange) where F
     @nospecialize args
-    dev = kernel_backend()
+    dev = gpu_kernel_backend()
     kern = F(dev)
     kern(args...; ndrange)
     KernelAbstractions.synchronize(dev)
