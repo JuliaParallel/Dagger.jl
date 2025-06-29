@@ -7,6 +7,9 @@
     arch: x86_64
   command: "julia --project -e 'using Pkg; Pkg.develop(;path=\"lib/TimespanLogging\")'"
 
+.gputest: &gputest
+  if: build.message !~ /\[skip tests\]/
+
 .bench: &bench
   if: build.message =~ /\[run benchmarks\]/
   agents:
