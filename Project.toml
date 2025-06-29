@@ -55,7 +55,7 @@ PythonExt = "PythonCall"
 ROCExt = "AMDGPU"
 
 [compat]
-AMDGPU = "0.9.4"
+AMDGPU = "1"
 Adapt = "4"
 CUDA = "3, 4, 5"
 Colors = "0.12, 0.13"
