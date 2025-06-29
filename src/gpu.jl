@@ -36,8 +36,8 @@ move_optimized(from_proc::Processor,
                to_proc::Processor,
                x) = nothing
 
-kernel_backend() = kernel_backend(task_processor())
-kernel_backend(::ThreadProc) = CPU()
+gpu_kernel_backend() = gpu_kernel_backend(task_processor())
+gpu_kernel_backend(::ThreadProc) = CPU()
 
 gpu_synchronize(proc::Processor) = nothing
 gpu_synchronize(kind::Symbol) = gpu_synchronize(Val(kind))

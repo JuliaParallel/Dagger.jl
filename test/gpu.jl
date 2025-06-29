@@ -55,7 +55,7 @@ end
         A[idx] = x
     end
     function fill_thunk(A, x)
-        backend = Dagger.kernel_backend()
+        backend = Dagger.gpu_kernel_backend()
         k = fill_kernel(backend, 8)
         k(A, x; ndrange=8)
         KernelAbstractions.synchronize(backend)
