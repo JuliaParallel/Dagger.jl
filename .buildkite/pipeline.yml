@@ -7,6 +7,9 @@
     arch: x86_64
   command: "julia --project -e 'using Pkg; Pkg.develop(;path=\"lib/TimespanLogging\")'"
 
+.gputest: &gputest
+  if: build.message !~ /\[skip tests\]/
+
 .bench: &bench
   if: build.message =~ /\[run benchmarks\]/
   agents:
@@ -86,6 +89,67 @@ steps:
           julia_args: "--threads=1"
       - JuliaCI/julia-coverage#v1:
           codecov: true
+
+  - label: Julia 1.11 (CUDA)
+    timeout_in_minutes: 20
+    <<: *gputest
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+      - JuliaCI/julia-test#v1: ~
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
+    agents:
+      queue: "juliagpu"
+      cuda: "*"
+    env:
+      CI_USE_CUDA: "1"
+
+  - label: Julia 1.11 (ROCm)
+    timeout_in_minutes: 20
+    <<: *gputest
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+      - JuliaCI/julia-test#v1: ~
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
+    agents:
+      queue: "juliagpu"
+      rocm: "*"
+    env:
+      CI_USE_ROCM: "1"
+
+  - label: Julia 1.11 (oneAPI)
+    timeout_in_minutes: 20
+    <<: *gputest
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+      - JuliaCI/julia-test#v1: ~
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
+    agents:
+      queue: "juliagpu"
+      intel: "*"
+    env:
+      CI_USE_ONEAPI: "1"
+
+  - label: Julia 1.11 (Metal)
+    timeout_in_minutes: 20
+    <<: *gputest
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+      - JuliaCI/julia-test#v1: ~
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
+    agents:
+      queue: "juliaecosystem"
+      os: "macos"
+      arch: "aarch64"
+    env:
+      CI_USE_METAL: "1"
 
   - label: Julia 1 - TimespanLogging
     timeout_in_minutes: 20
