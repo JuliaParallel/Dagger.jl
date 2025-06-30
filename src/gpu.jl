@@ -10,7 +10,6 @@ function (::Kernel{F})(args...; ndrange) where F
     dev = gpu_kernel_backend()
     kern = F(dev)
     kern(args...; ndrange)
-    KernelAbstractions.synchronize(dev)
 end
 
 macro gpuproc(PROC, T)
