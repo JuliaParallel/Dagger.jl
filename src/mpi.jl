@@ -619,7 +619,7 @@ function send_yield_serialized(value, comm, my_rank, their_rank, tag)
     if value isa Array && isbitstype(eltype(value))
         send_yield_serialized(InplaceInfo(typeof(value), size(value)), comm, my_rank, their_rank, tag)
         send_yield_inplace(value, comm, my_rank, their_rank, tag)
-    elseif value isa SparseMatrixCSC
+    elseif value isa SparseMatrixCSC && isbitstype(eltype(value))
         send_yield_serialized(InplaceSparseInfo(typeof(value), value.m, value.n, length(value.colptr), length(value.rowval), length(value.nzval)), comm, my_rank, their_rank, tag)
         send_yield!(value.colptr, comm, their_rank, tag; check_seen=false)
         send_yield!(value.rowval, comm, their_rank, tag; check_seen=false)
