@@ -17,25 +17,45 @@ if USE_METAL
     using Pkg
     Pkg.add("Metal")
 end
+if USE_OPENCL
+    using Pkg
+    Pkg.add("OpenCL")
+    Pkg.add("pocl_jll")
+end
 
 @everywhere begin
-    if !$IN_CI || $USE_CUDA
+    if $USE_CUDA
+        using CUDA
+    elseif !$IN_CI
         try using CUDA
         catch end
     end
 
-    if !$IN_CI || $USE_ROCM
+    if $USE_ROCM
+        using AMDGPU
+    elseif !$IN_CI
         try using AMDGPU
         catch end
     end
 
-    if !$IN_CI || $USE_ONEAPI
+    if $USE_ONEAPI
+        using oneAPI
+    elseif !$IN_CI
         try using oneAPI
         catch end
     end
 
-    if !$IN_CI || $USE_METAL
+    if $USE_METAL
+        using Metal
+    elseif !$IN_CI
         try using Metal
+        catch end
+    end
+
+    if $USE_OPENCL
+        using pocl_jll, OpenCL
+    elseif !$IN_CI
+        try using pocl_jll, OpenCL
         catch end
     end
 
@@ -585,6 +605,100 @@ end
             @test_broken array[1, 2] == 3.0f0
             @test_broken array[2, 1] == 4.0f0
             @test_broken array[2, 2] == 5.0f0
+        end
+    end
+end
+
+@testset "OpenCL" begin
+    if !Dagger.gpu_can_compute(:OpenCL)
+        @warn "No OpenCL devices available, skipping tests"
+    else
+        clproc = Base.get_extension(Dagger, :OpenCLExt).CLArrayDeviceProc
+        @test Dagger.gpu_processor(:OpenCL) === clproc
+        ndevices = length(cl.devices(cl.default_platform()))
+        gpu_configs = Any[1]
+        if ndevices > 1
+            push!(gpu_configs, 2)
+        end
+        single_gpu_configs = copy(gpu_configs)
+        push!(gpu_configs, :all)
+
+        @testset "Arrays (GPU $gpu)" for gpu in gpu_configs
+            scope = Dagger.scope(cl_devices=(gpu == :all ? Colon() : [gpu]))
+
+            b = generate_thunks()
+            c = Dagger.with_options(;scope) do
+                @test fetch(Dagger.@spawn isongpu(b))
+                Dagger.@spawn sum(b)
+            end
+            @test !fetch(Dagger.@spawn isongpu(b))
+            @test fetch(Dagger.@spawn identity(c)) == 20
+        end
+
+        @testset "KernelAbstractions (GPU $gpu)" for gpu in gpu_configs
+            scope = Dagger.scope(cl_devices=(gpu == :all ? Colon() : [gpu]))
+            local_scope = Dagger.scope(worker=1, cl_devices=(gpu == :all ? Colon() : [gpu]))
+
+            A = rand(Float32, 8)
+            DA, T = Dagger.with_options(;scope) do
+                fetch(Dagger.@spawn fill_thunk(A, 2.3f0))
+            end
+            @test all(DA .== 2.3f0)
+            @test T <: CLArray
+
+            if gpu != :all
+                local A, B
+                cl.device!(cl.devices(cl.default_platform())[gpu]) do
+                    A = OpenCL.rand(128)
+                    B = OpenCL.zeros(128)
+                end
+                Dagger.with_options(;scope=local_scope) do
+                    fetch(Dagger.@spawn Kernel(copy_kernel)(B, A; ndrange=length(A)))
+                    Dagger.gpu_synchronize(:OpenCL)
+                end
+                cl.device!(cl.devices(cl.default_platform())[gpu]) do
+                    @test all(B .== A)
+                end
+            end
+        end
+
+        @testset "DArray Allocation (GPU $gpu)" for gpu in single_gpu_configs
+            scope = Dagger.scope(cl_device=gpu)
+
+            DA_cpu = rand(Blocks(4, 4), 8, 8)
+            Dagger.with_options(;scope) do
+                DA_gpu = similar(DA_cpu)
+                for chunk in DA_gpu.chunks
+                    chunk = fetch(chunk; raw=true)
+                    @test chunk isa Dagger.Chunk{<:CLArray}
+                    # FIXME
+                    @test_skip remotecall_fetch(chunk.handle.owner, chunk) do chunk
+                        devs = collect(cl.devices(cl.default_platform()))
+                        arr = Dagger.MemPool.poolget(chunk.handle)
+                        arr_queue = arr.data[].queue
+                        OpenCLExt = Base.get_extension(Dagger, :OpenCLExt)
+                        arr_dev = OpenCLExt.DEVICES[findfirst(==(arr_queue), OpenCLExt.QUEUES)]
+                        return arr_dev == devs[gpu]
+                    end
+                end
+
+                for fn in (rand, randn, ones, zeros)
+                    DA = rand(Blocks(4, 4), 8, 8)
+                    for chunk in DA.chunks
+                        chunk = fetch(chunk; raw=true)
+                        @test chunk isa Dagger.Chunk{<:CLArray}
+                        # FIXME
+                        @test_skip remotecall_fetch(chunk.handle.owner, chunk) do chunk
+                            devs = collect(cl.devices(cl.default_platform()))
+                            arr = Dagger.MemPool.poolget(chunk.handle)
+                            arr_queue = arr.data[].queue
+                            OpenCLExt = Base.get_extension(Dagger, :OpenCLExt)
+                            arr_dev = OpenCLExt.DEVICES[findfirst(==(arr_queue), OpenCLExt.QUEUES)]
+                            return arr_dev == devs[gpu]
+                        end
+                    end
+                end
+            end
         end
     end
 end

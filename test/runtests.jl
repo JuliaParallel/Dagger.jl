@@ -4,7 +4,8 @@ USE_CUDA = parse(Bool, get(ENV, "CI_USE_CUDA", "0"))
 USE_ROCM = parse(Bool, get(ENV, "CI_USE_ROCM", "0"))
 USE_ONEAPI = parse(Bool, get(ENV, "CI_USE_ONEAPI", "0"))
 USE_METAL = parse(Bool, get(ENV, "CI_USE_METAL", "0"))
-USE_GPU = USE_CUDA || USE_ROCM || USE_ONEAPI || USE_METAL
+USE_OPENCL = parse(Bool, get(ENV, "CI_USE_OPENCL", "0"))
+USE_GPU = USE_CUDA || USE_ROCM || USE_ONEAPI || USE_METAL || USE_OPENCL
 
 tests = [
     ("Thunk", "thunk.jl"),
