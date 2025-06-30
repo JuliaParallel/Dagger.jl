@@ -103,6 +103,9 @@ include("array/cholesky.jl")
 include("array/lu.jl")
 include("array/random.jl")
 
+# SPMD
+include("spmd.jl")
+
 # Logging and Visualization
 include("visualization.jl")
 include("ui/gantt-common.jl")
