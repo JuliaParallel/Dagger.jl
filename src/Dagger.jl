@@ -103,6 +103,11 @@ include("array/cholesky.jl")
 include("array/lu.jl")
 include("array/random.jl")
 
+import KernelAbstractions, Adapt
+
+# GPU
+include("gpu.jl")
+
 # Logging and Visualization
 include("visualization.jl")
 include("ui/gantt-common.jl")

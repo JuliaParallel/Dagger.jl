@@ -1,3 +1,12 @@
+IN_CI = parse(Bool, get(ENV, "CI", "0"))
+
+USE_CUDA = parse(Bool, get(ENV, "CI_USE_CUDA", "0"))
+USE_ROCM = parse(Bool, get(ENV, "CI_USE_ROCM", "0"))
+USE_ONEAPI = parse(Bool, get(ENV, "CI_USE_ONEAPI", "0"))
+USE_METAL = parse(Bool, get(ENV, "CI_USE_METAL", "0"))
+USE_OPENCL = parse(Bool, get(ENV, "CI_USE_OPENCL", "0"))
+USE_GPU = USE_CUDA || USE_ROCM || USE_ONEAPI || USE_METAL || USE_OPENCL
+
 tests = [
     ("Thunk", "thunk.jl"),
     ("Scheduler", "scheduler.jl"),
@@ -21,14 +30,20 @@ tests = [
     ("Array - LinearAlgebra - Cholesky", "array/linalg/cholesky.jl"),
     ("Array - LinearAlgebra - LU", "array/linalg/lu.jl"),
     ("Array - Random", "array/random.jl"),
+    ("GPU", "gpu.jl"),
     ("Caching", "cache.jl"),
     ("Disk Caching", "diskcaching.jl"),
     ("File IO", "file-io.jl"),
     ("External Languages - Python", "extlang/python.jl"),
-    ("Preferences", "preferences.jl")
+    ("Preferences", "preferences.jl"),
     #("Fault Tolerance", "fault-tolerance.jl"),
 ]
+if USE_GPU
+    # Only run GPU tests
+    tests = [("GPU", "gpu.jl")]
+end
 all_test_names = map(test -> replace(last(test), ".jl"=>""), tests)
+
 additional_workers::Int = 3
 
 if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__

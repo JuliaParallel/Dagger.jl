@@ -27,6 +27,7 @@ makedocs(;
         "Processors" => "processors.md",
         "Task Queues" => "task-queues.md",
         "Datadeps" => "datadeps.md",
+        "GPUs" => "gpu.md",
         "Option Propagation" => "propagation.md",
         "Logging and Visualization" => [
             "Logging: Basics" => "logging.md",
