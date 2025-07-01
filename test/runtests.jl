@@ -136,6 +136,11 @@ using Dagger
 using UUIDs
 import MemPool
 
+GPU_SCOPES = Pair{Symbol, Dagger.AbstractScope}[]
+if USE_GPU
+    include("setup_gpu.jl")
+end
+
 try
     for test in to_test
         test_title = tests[findfirst(x->x[2]==test * ".jl", tests)][1]
