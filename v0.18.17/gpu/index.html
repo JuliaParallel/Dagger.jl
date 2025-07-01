@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>GPUs · Dagger.jl</title><meta name="title" content="GPUs · Dagger.jl"/><meta property="og:title" content="GPUs · Dagger.jl"/><meta property="twitter:title" content="GPUs · Dagger.jl"/><meta name="description" content="Documentation for Dagger.jl."/><meta property="og:description" content="Documentation for Dagger.jl."/><meta property="twitter:description" content="Documentation for Dagger.jl."/><meta property="og:url" content="https://JuliaParallel.github.io/Dagger.jl/gpu/"/><meta property="twitter:url" content="https://JuliaParallel.github.io/Dagger.jl/gpu/"/><link rel="canonical" href="https://JuliaParallel.github.io/Dagger.jl/gpu/"/><script data-outdated-warner src="../assets/warner.js"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/lato-font/3.0.0/css/lato-font.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/juliamono/0.050/juliamono.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/fontawesome.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/solid.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/brands.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.8/katex.min.css" rel="stylesheet" type="text/css"/><script>documenterBaseURL=".."</script><script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js" data-main="../assets/documenter.js"></script><script src="../search_index.js"></script><script src="../siteinfo.js"></script><script src="../../versions.js"></script><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-mocha.css" data-theme-name="catppuccin-mocha"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-macchiato.css" data-theme-name="catppuccin-macchiato"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-frappe.css" data-theme-name="catppuccin-frappe"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-latte.css" data-theme-name="catppuccin-latte"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/documenter-dark.css" data-theme-name="documenter-dark" data-theme-primary-dark/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/documenter-light.css" data-theme-name="documenter-light" data-theme-primary/><script src="../assets/themeswap.js"></script><link href="../assets/favicon.ico" rel="icon" type="image/x-icon"/></head><body><div id="documenter"><nav class="docs-sidebar"><a class="docs-logo" href="../"><img src="../assets/logo.svg" alt="Dagger.jl logo"/></a><div class="docs-package-name"><span class="docs-autofit"><a href="../">Dagger.jl</a></span></div><button class="docs-search-query input is-rounded is-small is-clickable my-2 mx-auto py-1 px-2" id="documenter-search-query">Search docs (Ctrl + /)</button><ul class="docs-menu"><li><a class="tocitem" href="../">Home</a></li><li><span class="tocitem">Use Cases</span><ul><li><a class="tocitem" href="../use-cases/parallel-nested-loops/">Parallel Nested Loops</a></li></ul></li><li><a class="tocitem" href="../task-spawning/">Task Spawning</a></li><li><a class="tocitem" href="../data-management/">Data Management</a></li><li><a class="tocitem" href="../darray/">Distributed Arrays</a></li><li><a class="tocitem" href="../streaming/">Streaming Tasks</a></li><li><a class="tocitem" href="../scopes/">Scopes</a></li><li><a class="tocitem" href="../processors/">Processors</a></li><li><a class="tocitem" href="../task-queues/">Task Queues</a></li><li><a class="tocitem" href="../datadeps/">Datadeps</a></li><li class="is-active"><a class="tocitem" href>GPUs</a><ul class="internal"><li><a class="tocitem" href="#Package-Loading"><span>Package Loading</span></a></li><li><a class="tocitem" href="#KernelAbstractions"><span>KernelAbstractions</span></a></li><li><a class="tocitem" href="#DArray:-Distributed-GPU-Arrays"><span>DArray: Distributed GPU Arrays</span></a></li><li><a class="tocitem" href="#Datadeps:-GPU-Compatible-Algorithms"><span>Datadeps: GPU-Compatible Algorithms</span></a></li><li><a class="tocitem" href="#Distributed-GPU-Computing"><span>Distributed GPU Computing</span></a></li></ul></li><li><a class="tocitem" href="../propagation/">Option Propagation</a></li><li><span class="tocitem">Logging and Visualization</span><ul><li><a class="tocitem" href="../logging/">Logging: Basics</a></li><li><a class="tocitem" href="../logging-visualization/">Logging: Visualization</a></li><li><a class="tocitem" href="../logging-advanced/">Logging: Advanced</a></li></ul></li><li><span class="tocitem">External Languages</span><ul><li><a class="tocitem" href="../external-languages/python/">Python</a></li></ul></li><li><a class="tocitem" href="../checkpointing/">Checkpointing</a></li><li><a class="tocitem" href="../benchmarking/">Benchmarking</a></li><li><a class="tocitem" href="../dynamic/">Dynamic Scheduler Control</a></li><li><a class="tocitem" href="../scheduler-internals/">Scheduler Internals</a></li><li><span class="tocitem">Dagger API</span><ul><li><a class="tocitem" href="../api-dagger/types/">Types</a></li><li><a class="tocitem" href="../api-dagger/functions/">Functions and Macros</a></li></ul></li><li><span class="tocitem">TimespanLogging API</span><ul><li><a class="tocitem" href="../api-timespanlogging/types/">Types</a></li><li><a class="tocitem" href="../api-timespanlogging/functions/">Functions and Macros</a></li></ul></li><li><span class="tocitem">DaggerWebDash API</span><ul><li><a class="tocitem" href="../api-daggerwebdash/types/">Types</a></li><li><a class="tocitem" href="../api-daggerwebdash/functions/">Functions and Macros</a></li></ul></li></ul><div class="docs-version-selector field has-addons"><div class="control"><span class="docs-label button is-static is-size-7">Version</span></div><div class="docs-selector control is-expanded"><div class="select is-fullwidth is-size-7"><select id="documenter-version-selector"></select></div></div></div></nav><div class="docs-main"><header class="docs-navbar"><a class="docs-sidebar-button docs-navbar-link fa-solid fa-bars is-hidden-desktop" id="documenter-sidebar-button" href="#"></a><nav class="breadcrumb"><ul class="is-hidden-mobile"><li class="is-active"><a href>GPUs</a></li></ul><ul class="is-hidden-tablet"><li class="is-active"><a href>GPUs</a></li></ul></nav><div class="docs-right"><a class="docs-navbar-link" href="https://github.com/JuliaParallel/Dagger.jl" title="View the repository on GitHub"><span class="docs-icon fa-brands"></span><span class="docs-label is-hidden-touch">GitHub</span></a><a class="docs-navbar-link" href="https://github.com/JuliaParallel/Dagger.jl/blob/master/docs/src/gpu.md" title="Edit source on GitHub"><span class="docs-icon fa-solid"></span></a><a class="docs-settings-button docs-navbar-link fa-solid fa-gear" id="documenter-settings-button" href="#" title="Settings"></a><a class="docs-article-toggle-button fa-solid fa-chevron-up" id="documenter-article-toggle-button" href="javascript:;" title="Collapse all docstrings"></a></div></header><article class="content" id="documenter-page"><h1 id="GPU-Support"><a class="docs-heading-anchor" href="#GPU-Support">GPU Support</a><a id="GPU-Support-1"></a><a class="docs-heading-anchor-permalink" href="#GPU-Support" title="Permalink"></a></h1><p>Dagger supports GPU acceleration for CUDA, ROCm (AMD), Intel oneAPI, Metal (Apple), and OpenCL devices. GPU support enables automatic data movement between CPU and GPU memory, distributed GPU computing across multiple devices, and seamless integration with Julia&#39;s GPU ecosystem.</p><p>Dagger&#39;s GPU support is built on top of the <a href="https://github.com/JuliaGPU/KernelAbstractions.jl">KernelAbstractions.jl</a> package, as well as the specific GPU-specific packages for each backend (e.g. <a href="https://github.com/JuliaGPU/CUDA.jl">CUDA.jl</a>, <a href="https://github.com/JuliaGPU/AMDGPU.jl">AMDGPU.jl</a>, <a href="https://github.com/JuliaGPU/oneAPI.jl">oneAPI.jl</a>, <a href="https://github.com/JuliaGPU/Metal.jl">Metal.jl</a>, and <a href="https://github.com/JuliaGPU/OpenCL.jl">OpenCL.jl</a>). Dagger&#39;s GPU support is designed to be fully interoperable with the Julia GPU ecosystem, allowing you to use Dagger to distribute your GPU computations across multiple devices.</p><p>There are a few ways to use Dagger&#39;s GPU support:</p><ol><li><strong>KernelAbstractions</strong>: Use the <code>KernelAbstractions.jl</code> interface to write GPU kernels, and then use <code>Dagger.Kernel</code> and <code>Dagger.@spawn</code> to execute them.</li><li><strong>DArray</strong>: Use the <code>DArray</code> interface to create distributed GPU arrays, and then call regular array operations on them, which will be automatically executed on the GPU.</li><li><strong>Datadeps</strong>: Use the <code>Datadeps.jl</code> interface to create GPU-compatible algorithms, within which you can call kernels or array operations.</li><li><strong>Manual</strong>: Use <code>Dagger.gpu_kernel_backend()</code> to get the appropriate backend for the current processor, and use that to execute kernels.</li></ol><p>In all cases, you need to ensure that right GPU-specific package is loaded.</p><h2 id="Package-Loading"><a class="docs-heading-anchor" href="#Package-Loading">Package Loading</a><a id="Package-Loading-1"></a><a class="docs-heading-anchor-permalink" href="#Package-Loading" title="Permalink"></a></h2><p>Dagger&#39;s GPU support requires loading one of the following packages:</p><ul><li><a href="https://github.com/JuliaGPU/CUDA.jl">CUDA.jl</a> for NVIDIA GPUs</li><li><a href="https://github.com/JuliaGPU/AMDGPU.jl">AMDGPU.jl</a> for AMD GPUs</li><li><a href="https://github.com/JuliaGPU/oneAPI.jl">oneAPI.jl</a> for Intel GPUs</li><li><a href="https://github.com/JuliaGPU/Metal.jl">Metal.jl</a> for Apple GPUs</li><li><a href="https://github.com/JuliaGPU/OpenCL.jl">OpenCL.jl</a> for OpenCL devices</li></ul><h3 id="Backend-Detection"><a class="docs-heading-anchor" href="#Backend-Detection">Backend Detection</a><a id="Backend-Detection-1"></a><a class="docs-heading-anchor-permalink" href="#Backend-Detection" title="Permalink"></a></h3><p>You can check if a given kind of GPU is supported by calling:</p><ul><li>CUDA: <code>Dagger.gpu_can_compute(:CUDA)</code></li><li>AMDGPU: <code>Dagger.gpu_can_compute(:ROC)</code></li><li>oneAPI: <code>Dagger.gpu_can_compute(:oneAPI)</code></li><li>Metal: <code>Dagger.gpu_can_compute(:Metal)</code></li><li>OpenCL: <code>Dagger.gpu_can_compute(:OpenCL)</code></li></ul><h3 id="Backend-Specific-Scopes"><a class="docs-heading-anchor" href="#Backend-Specific-Scopes">Backend-Specific Scopes</a><a id="Backend-Specific-Scopes-1"></a><a class="docs-heading-anchor-permalink" href="#Backend-Specific-Scopes" title="Permalink"></a></h3><p>Once you&#39;ve loaded the appropriate package, you can create a scope for that backend by calling:</p><pre><code class="language-julia hljs"># First GPU of different GPU types
+cuda_scope = Dagger.scope(cuda_gpu=1)
+rocm_scope = Dagger.scope(rocm_gpu=1)  
+intel_scope = Dagger.scope(intel_gpu=1)
+metal_scope = Dagger.scope(metal_gpu=1)
+opencl_scope = Dagger.scope(cl_device=1)</code></pre><p>These kinds of scopes can be passed to <code>Dagger.@spawn</code> or <code>Dagger.with_options</code> to enable GPU acceleration on the given backend. Note that by default, Dagger will not use any GPU if a compatible scope isn&#39;t provided through one of these mechanisms.</p><h2 id="KernelAbstractions"><a class="docs-heading-anchor" href="#KernelAbstractions">KernelAbstractions</a><a id="KernelAbstractions-1"></a><a class="docs-heading-anchor-permalink" href="#KernelAbstractions" title="Permalink"></a></h2><p>The most direct way to use GPU acceleration in Dagger is through the KernelAbstractions.jl interface. Dagger provides seamless integration with KernelAbstractions, automatically selecting the appropriate backend for the current processor.</p><h3 id="Basic-Kernel-Usage"><a class="docs-heading-anchor" href="#Basic-Kernel-Usage">Basic Kernel Usage</a><a id="Basic-Kernel-Usage-1"></a><a class="docs-heading-anchor-permalink" href="#Basic-Kernel-Usage" title="Permalink"></a></h3><p>Write your kernels using the standard KernelAbstractions syntax:</p><pre><code class="language-julia hljs">using KernelAbstractions
+
+@kernel function vector_add!(c, a, b)
+    i = @index(Global, Linear)
+    c[i] = a[i] + b[i]
+end
+
+@kernel function fill_kernel!(arr, value)
+    i = @index(Global, Linear)
+    arr[i] = value
+end</code></pre><h3 id="Using-Dagger.Kernel-for-Automatic-Backend-Selection"><a class="docs-heading-anchor" href="#Using-Dagger.Kernel-for-Automatic-Backend-Selection">Using <code>Dagger.Kernel</code> for Automatic Backend Selection</a><a id="Using-Dagger.Kernel-for-Automatic-Backend-Selection-1"></a><a class="docs-heading-anchor-permalink" href="#Using-Dagger.Kernel-for-Automatic-Backend-Selection" title="Permalink"></a></h3><p><code>Dagger.Kernel</code> wraps your kernel functions and automatically selects the correct backend based on the current processor:</p><pre><code class="language-julia hljs"># Use in tasks - backend is selected automatically
+cpu_array = Dagger.@mutable zeros(1000)
+gpu_array = Dagger.@mutable CUDA.zeros(1000)
+
+# Runs on CPU
+fetch(Dagger.@spawn Dagger.Kernel(fill_kernel!)(cpu_array, 42.0; ndrange=length(cpu_array)))
+
+# Runs on GPU when scoped appropriately
+Dagger.with_options(;scope=Dagger.scope(cuda_gpu=1)) do
+    fetch(Dagger.@spawn Dagger.Kernel(fill_kernel!)(gpu_array, 42.0; ndrange=length(gpu_array)))
+
+    # Synchronize the GPU
+    Dagger.gpu_synchronize(:CUDA)
+end</code></pre><p>Notice the usage of <code>Dagger.@mutable</code> to create mutable arrays on the GPU. This is required when mutating arrays in-place with Dagger-launched kernels.</p><h3 id="Manual-Backend-Selection-with-gpu_kernel_backend"><a class="docs-heading-anchor" href="#Manual-Backend-Selection-with-gpu_kernel_backend">Manual Backend Selection with <code>gpu_kernel_backend</code></a><a id="Manual-Backend-Selection-with-gpu_kernel_backend-1"></a><a class="docs-heading-anchor-permalink" href="#Manual-Backend-Selection-with-gpu_kernel_backend" title="Permalink"></a></h3><p>For more control, use <code>Dagger.gpu_kernel_backend()</code> to get the backend for the current processor:</p><pre><code class="language-julia hljs">function manual_kernel_execution(arr, value)
+    # Get the backend for the current processor
+    backend = Dagger.gpu_kernel_backend()
+
+    # Create kernel with specific backend
+    kernel = fill_kernel!(backend)
+
+    # Execute kernel
+    kernel(arr, value; ndrange=length(arr))
+
+    return arr
+end
+
+# Use within a Dagger task
+arr = Dagger.@mutable CUDA.zeros(1000)
+Dagger.with_options(;scope=Dagger.scope(cuda_gpu=1)) do
+    fetch(Dagger.@spawn manual_kernel_execution(arr, 42.0))
+
+    Dagger.gpu_synchronize(:CUDA)
+end</code></pre><h3 id="Kernel-Synchronization"><a class="docs-heading-anchor" href="#Kernel-Synchronization">Kernel Synchronization</a><a id="Kernel-Synchronization-1"></a><a class="docs-heading-anchor-permalink" href="#Kernel-Synchronization" title="Permalink"></a></h3><p>Dagger handles synchronization automatically within Dagger tasks, but if you mixed Dagger-launched and non-Dagger-launched kernels, you can synchronize the GPU manually:</p><pre><code class="language-julia hljs"># Launch kernel as a task - Dagger.Kernel handles backend selection automatically
+arr = Dagger.@mutable CUDA.zeros(1000)
+Dagger.with_options(;scope=Dagger.scope(cuda_gpu=1)) do
+    result = fetch(Dagger.@spawn Dagger.Kernel(fill_kernel!)(arr, 42.0; ndrange=length(arr)))
+
+    # Synchronize kernels launched by Dagger tasks
+    Dagger.gpu_synchronize()
+
+    # Launch kernel as a task - Dagger.Kernel handles backend selection automatically
+    fill_kernel(CUDABackend())(arr, 42.0; ndrange=length(arr))
+
+    return result
+end</code></pre><h2 id="DArray:-Distributed-GPU-Arrays"><a class="docs-heading-anchor" href="#DArray:-Distributed-GPU-Arrays">DArray: Distributed GPU Arrays</a><a id="DArray:-Distributed-GPU-Arrays-1"></a><a class="docs-heading-anchor-permalink" href="#DArray:-Distributed-GPU-Arrays" title="Permalink"></a></h2><p>Dagger&#39;s <code>DArray</code> type seamlessly supports GPU acceleration, allowing you to create distributed arrays that are automatically allocated in GPU memory when using appropriate scopes.</p><h3 id="GPU-Array-Allocation"><a class="docs-heading-anchor" href="#GPU-Array-Allocation">GPU Array Allocation</a><a id="GPU-Array-Allocation-1"></a><a class="docs-heading-anchor-permalink" href="#GPU-Array-Allocation" title="Permalink"></a></h3><p>Allocate <code>DArray</code>s directly on GPU devices:</p><pre><code class="language-julia hljs">using CUDA  # or AMDGPU, oneAPI, Metal
+
+# Single GPU allocation
+gpu_scope = Dagger.scope(cuda_gpu=1)
+Dagger.with_options(;scope=gpu_scope) do
+    # All standard allocation functions work
+    DA_rand = rand(Blocks(32, 32), Float32, 128, 128)
+    DA_ones = ones(Blocks(32, 32), Float32, 128, 128)
+    DA_zeros = zeros(Blocks(32, 32), Float32, 128, 128)
+    DA_randn = randn(Blocks(32, 32), Float32, 128, 128)
+end</code></pre><h3 id="Multi-GPU-Distribution"><a class="docs-heading-anchor" href="#Multi-GPU-Distribution">Multi-GPU Distribution</a><a id="Multi-GPU-Distribution-1"></a><a class="docs-heading-anchor-permalink" href="#Multi-GPU-Distribution" title="Permalink"></a></h3><p>Distribute arrays across multiple GPUs:</p><pre><code class="language-julia hljs"># Use all available CUDA GPUs
+all_gpu_scope = Dagger.scope(cuda_gpus=:)
+Dagger.with_options(;scope=all_gpu_scope) do
+    DA = rand(Blocks(64, 64), Float32, 256, 256)
+    # Each chunk may be allocated on a different GPU
+end
+
+# Use specific GPUs
+multi_gpu_scope = Dagger.scope(cuda_gpus=[1, 2, 3])
+Dagger.with_options(;scope=multi_gpu_scope) do
+    DA = ones(Blocks(32, 32), Float32, 192, 192)
+end</code></pre><h3 id="Converting-Between-CPU-and-GPU-Arrays"><a class="docs-heading-anchor" href="#Converting-Between-CPU-and-GPU-Arrays">Converting Between CPU and GPU Arrays</a><a id="Converting-Between-CPU-and-GPU-Arrays-1"></a><a class="docs-heading-anchor-permalink" href="#Converting-Between-CPU-and-GPU-Arrays" title="Permalink"></a></h3><p>Move existing arrays to GPU:</p><pre><code class="language-julia hljs"># Create CPU DArray
+cpu_array = rand(Blocks(32, 32), 128, 128)
+
+# Convert to GPU
+gpu_scope = Dagger.scope(cuda_gpu=1)
+Dagger.with_options(;scope=gpu_scope) do
+    gpu_array = similar(cpu_array)
+    # gpu_array now has the same structure but is allocated on GPU
+end
+
+# Convert back to CPU
+cpu_result = collect(gpu_array)  # Brings all data back to CPU</code></pre><h3 id="(Advanced)-Verifying-GPU-Allocation"><a class="docs-heading-anchor" href="#(Advanced)-Verifying-GPU-Allocation">(Advanced) Verifying GPU Allocation</a><a id="(Advanced)-Verifying-GPU-Allocation-1"></a><a class="docs-heading-anchor-permalink" href="#(Advanced)-Verifying-GPU-Allocation" title="Permalink"></a></h3><p>If necessary for testing or debugging, you can check that your <code>DArray</code> chunks are actually living on the GPU:</p><pre><code class="language-julia hljs">gpu_scope = Dagger.scope(cuda_gpu=1)
+Dagger.with_options(;scope=gpu_scope) do
+    DA = rand(Blocks(4, 4), Float32, 8, 8)
+
+    # Check each chunk
+    for chunk in DA.chunks
+        raw_chunk = fetch(chunk; raw=true)
+        @assert raw_chunk isa Dagger.Chunk{&lt;:CuArray}
+
+        # Verify it&#39;s on the correct GPU device
+        @assert remotecall_fetch(raw_chunk.handle.owner, raw_chunk) do chunk
+            arr = Dagger.MemPool.poolget(chunk.handle)
+            return CUDA.device(arr) == CUDA.devices()[1]  # GPU 1
+        end
+    end
+end</code></pre><h2 id="Datadeps:-GPU-Compatible-Algorithms"><a class="docs-heading-anchor" href="#Datadeps:-GPU-Compatible-Algorithms">Datadeps: GPU-Compatible Algorithms</a><a id="Datadeps:-GPU-Compatible-Algorithms-1"></a><a class="docs-heading-anchor-permalink" href="#Datadeps:-GPU-Compatible-Algorithms" title="Permalink"></a></h2><p>Datadeps regions work seamlessly with GPU arrays, enabling complex GPU algorithms with automatic dependency management. Unlike without Datadeps, you don&#39;t need to use <code>Dagger.@mutable</code>, as Datadeps ensures that array mutation is performed correctly.</p><h3 id="In-Place-GPU-Operations"><a class="docs-heading-anchor" href="#In-Place-GPU-Operations">In-Place GPU Operations</a><a id="In-Place-GPU-Operations-1"></a><a class="docs-heading-anchor-permalink" href="#In-Place-GPU-Operations" title="Permalink"></a></h3><pre><code class="language-julia hljs">using LinearAlgebra
+
+# Create GPU arrays
+gpu_scope = Dagger.scope(cuda_gpu=1)
+Dagger.with_options(;scope=gpu_scope) do
+    DA = rand(Blocks(4, 4), Float32, 8, 8)
+    DB = rand(Blocks(4, 4), Float32, 8, 8)
+    DC = zeros(Blocks(4, 4), Float32, 8, 8)
+
+    # In-place matrix multiplication on GPU
+    Dagger.spawn_datadeps() do
+        Dagger.@spawn mul!(Out(DC), In(DA), In(DB))
+    end
+
+    # Verify result
+    @assert collect(DC) ≈ collect(DA) * collect(DB)
+end</code></pre><p>Notice that we didn&#39;t need to call <code>Dagger.gpu_synchronize()</code> here, because the <code>DArray</code> is automatically synchronized when the <code>DArray</code> is collected.</p><h3 id="Out-of-Place-GPU-Operations"><a class="docs-heading-anchor" href="#Out-of-Place-GPU-Operations">Out-of-Place GPU Operations</a><a id="Out-of-Place-GPU-Operations-1"></a><a class="docs-heading-anchor-permalink" href="#Out-of-Place-GPU-Operations" title="Permalink"></a></h3><p>Because Dagger options propagate into function calls, you can call algorithms that use Datadeps (such as <code>DArray</code> matrix multiplication) on GPUs, without having to do any extra work:</p><pre><code class="language-julia hljs">gpu_scope = Dagger.scope(cuda_gpu=1)
+Dagger.with_options(;scope=gpu_scope) do
+    DA = rand(Blocks(4, 4), Float32, 8, 8)
+    DB = rand(Blocks(4, 4), Float32, 8, 8)
+
+    # Out-of-place operations
+    DC = DA * DB  # Automatically runs on GPU
+
+    @assert collect(DC) ≈ collect(DA) * collect(DB)
+end</code></pre><h3 id="Complex-GPU-Algorithms"><a class="docs-heading-anchor" href="#Complex-GPU-Algorithms">Complex GPU Algorithms</a><a id="Complex-GPU-Algorithms-1"></a><a class="docs-heading-anchor-permalink" href="#Complex-GPU-Algorithms" title="Permalink"></a></h3><pre><code class="language-julia hljs">using LinearAlgebra
+
+gpu_scope = Dagger.scope(cuda_gpu=1)
+Dagger.with_options(;scope=gpu_scope) do
+    # Create a positive definite matrix for Cholesky decomposition
+    A = rand(Float32, 8, 8)
+    A = A * A&#39;
+    A[diagind(A)] .+= size(A, 1)
+    DA = DArray(A, Blocks(4, 4))
+    
+    # Cholesky decomposition on GPU
+    chol_result = cholesky(DA)
+    @assert collect(chol_result.U) ≈ cholesky(collect(DA)).U
+end</code></pre><h3 id="Cross-Backend-Operations"><a class="docs-heading-anchor" href="#Cross-Backend-Operations">Cross-Backend Operations</a><a id="Cross-Backend-Operations-1"></a><a class="docs-heading-anchor-permalink" href="#Cross-Backend-Operations" title="Permalink"></a></h3><pre><code class="language-julia hljs"># You can even mix different GPU types in a single computation
+# (though data movement between different GPU types goes through CPU)
+
+cuda_data = Dagger.with_options(;scope=Dagger.scope(cuda_gpu=1)) do
+    rand(Blocks(32, 32), Float32, 64, 64)
+end
+
+rocm_result = Dagger.with_options(;scope=Dagger.scope(rocm_gpu=1)) do
+    # Data automatically moved: CUDA GPU -&gt; CPU -&gt; ROCm GPU
+    fetch(Dagger.@spawn sum(cuda_data))
+end</code></pre><h2 id="Distributed-GPU-Computing"><a class="docs-heading-anchor" href="#Distributed-GPU-Computing">Distributed GPU Computing</a><a id="Distributed-GPU-Computing-1"></a><a class="docs-heading-anchor-permalink" href="#Distributed-GPU-Computing" title="Permalink"></a></h2><p>You can easily combine GPU acceleration with distributed computing across multiple workers.</p><h3 id="Multi-Worker-GPU-Setup"><a class="docs-heading-anchor" href="#Multi-Worker-GPU-Setup">Multi-Worker GPU Setup</a><a id="Multi-Worker-GPU-Setup-1"></a><a class="docs-heading-anchor-permalink" href="#Multi-Worker-GPU-Setup" title="Permalink"></a></h3><pre><code class="language-julia hljs">using Distributed
+addprocs(4)  # Add 4 workers
+
+@everywhere using Dagger, CUDA
+
+# Use GPU 1 on worker 2
+distributed_gpu_scope = Dagger.scope(worker=2, cuda_gpu=1)
+
+Dagger.with_options(;scope=distributed_gpu_scope) do
+    # Create a GPU array and sum it on worker 2, GPU 1
+    DA = rand(Blocks(32, 32), Float32, 128, 128)
+    result = fetch(Dagger.@spawn sum(DA))
+end</code></pre><h3 id="Load-Balancing-Across-GPUs-and-Workers"><a class="docs-heading-anchor" href="#Load-Balancing-Across-GPUs-and-Workers">Load Balancing Across GPUs and Workers</a><a id="Load-Balancing-Across-GPUs-and-Workers-1"></a><a class="docs-heading-anchor-permalink" href="#Load-Balancing-Across-GPUs-and-Workers" title="Permalink"></a></h3><pre><code class="language-julia hljs"># Distribute work across multiple workers and their GPUs
+workers_with_gpus = [
+    Dagger.scope(worker=2, cuda_gpu=1),
+    Dagger.scope(worker=3, cuda_gpu=1),
+    Dagger.scope(worker=4, rocm_gpu=1)  # Mix of GPU types
+]
+
+# Dagger will automatically balance work across available resources
+results = map(workers_with_gpus) do scope
+    Dagger.with_options(;scope) do
+        DA = rand(Blocks(16, 16), Float32, 64, 64)
+        fetch(Dagger.@spawn sum(DA))
+    end
+end</code></pre></article><nav class="docs-footer"><a class="docs-footer-prevpage" href="../datadeps/">« Datadeps</a><a class="docs-footer-nextpage" href="../propagation/">Option Propagation »</a><div class="flexbox-break"></div><p class="footer-message">Powered by <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> and the <a href="https://julialang.org/">Julia Programming Language</a>.</p></nav></div><div class="modal" id="documenter-settings"><div class="modal-background"></div><div class="modal-card"><header class="modal-card-head"><p class="modal-card-title">Settings</p><button class="delete"></button></header><section class="modal-card-body"><p><label class="label">Theme</label><div class="select"><select id="documenter-themepicker"><option value="auto">Automatic (OS)</option><option value="documenter-light">documenter-light</option><option value="documenter-dark">documenter-dark</option><option value="catppuccin-latte">catppuccin-latte</option><option value="catppuccin-frappe">catppuccin-frappe</option><option value="catppuccin-macchiato">catppuccin-macchiato</option><option value="catppuccin-mocha">catppuccin-mocha</option></select></div></p><hr/><p>This document was generated with <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> version 1.13.0 on <span class="colophon-date" title="Tuesday 1 July 2025 05:38">Tuesday 1 July 2025</span>. Using Julia version 1.11.5.</p></section><footer class="modal-card-foot"></footer></div></div></div></body></html>
