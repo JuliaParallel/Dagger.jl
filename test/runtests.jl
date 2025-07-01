@@ -21,6 +21,7 @@ tests = [
     ("Array - LinearAlgebra - Cholesky", "array/linalg/cholesky.jl"),
     ("Array - LinearAlgebra - LU", "array/linalg/lu.jl"),
     ("Array - Random", "array/random.jl"),
+    ("Array - Stencils", "array/stencil.jl"),
     ("Caching", "cache.jl"),
     ("Disk Caching", "diskcaching.jl"),
     ("File IO", "file-io.jl"),
