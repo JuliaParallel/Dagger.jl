@@ -284,7 +284,7 @@ Dagger.gpu_kernel_backend(proc::MtlArrayDeviceProc) = MetalBackend()
 # TODO: Switch devices
 Dagger.gpu_with_device(f, proc::MtlArrayDeviceProc) = f()
 
-function Dagger.gpu_synchronize(proc::MtlArrayDeviceProc)q
+function Dagger.gpu_synchronize(proc::MtlArrayDeviceProc)
     with_context(proc) do
         Metal.synchronize()
     end
