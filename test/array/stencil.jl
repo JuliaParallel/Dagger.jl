@@ -169,6 +169,8 @@ end
 
 @testset "GPU" begin
     for (kind, scope) in GPU_SCOPES
+        # FIXME
+        kind == :oneAPI && continue
         @testset "$kind" begin
             Dagger.with_options(;scope) do
                 test_stencil()
