@@ -162,8 +162,8 @@ steps:
           codecov: true
     agents:
       queue: "juliaecosystem"
-      os: linux
-      arch: x86_64
+      os: macos
+      arch: aarch64
     env:
       CI_USE_OPENCL: "1"
 

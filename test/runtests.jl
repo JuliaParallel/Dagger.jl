@@ -30,6 +30,7 @@ tests = [
     ("Array - LinearAlgebra - Cholesky", "array/linalg/cholesky.jl"),
     ("Array - LinearAlgebra - LU", "array/linalg/lu.jl"),
     ("Array - Random", "array/random.jl"),
+    ("Array - Stencils", "array/stencil.jl"),
     ("GPU", "gpu.jl"),
     ("Caching", "cache.jl"),
     ("Disk Caching", "diskcaching.jl"),
@@ -40,7 +41,10 @@ tests = [
 ]
 if USE_GPU
     # Only run GPU tests
-    tests = [("GPU", "gpu.jl")]
+    tests = [
+        ("GPU", "gpu.jl"),
+        ("Array - Stencils", "array/stencil.jl"),
+    ]
 end
 all_test_names = map(test -> replace(last(test), ".jl"=>""), tests)
 
@@ -135,6 +139,11 @@ using Test
 using Dagger
 using UUIDs
 import MemPool
+
+GPU_SCOPES = Pair{Symbol, Dagger.AbstractScope}[]
+if USE_GPU
+    include("setup_gpu.jl")
+end
 
 try
     for test in to_test

@@ -261,6 +261,21 @@ function Dagger.execute!(proc::ROCArrayDeviceProc, f, args...; kwargs...)
     end
 end
 
+ROCArray(H::Dagger.HaloArray) = convert(ROCArray, H)
+Base.convert(::Type{C}, H::Dagger.HaloArray) where {C<:ROCArray} =
+    Dagger.HaloArray(C(H.center),
+                     C.(H.edges),
+                     C.(H.corners),
+                     H.halo_width)
+function Dagger.inner_stencil_proc!(::ROCArrayDeviceProc, f, output, read_vars)
+    Dagger.Kernel(_inner_stencil!)(f, output, read_vars; ndrange=size(output))
+    return
+end
+@kernel function _inner_stencil!(f, output, read_vars)
+    idx = @index(Global, Cartesian)
+    f(idx, output, read_vars)
+end
+
 Dagger.gpu_processor(::Val{:ROC}) = ROCArrayDeviceProc
 Dagger.gpu_can_compute(::Val{:ROC}) = AMDGPU.functional()
 Dagger.gpu_kernel_backend(proc::ROCArrayDeviceProc) = ROCBackend()

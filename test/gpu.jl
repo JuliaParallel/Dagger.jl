@@ -1,64 +1,7 @@
 using Random
 using LinearAlgebra
 
-if USE_CUDA
-    using Pkg
-    Pkg.add("CUDA")
-end
-if USE_ROCM
-    using Pkg
-    Pkg.add("AMDGPU")
-end
-if USE_ONEAPI
-    using Pkg
-    Pkg.add("oneAPI")
-end
-if USE_METAL
-    using Pkg
-    Pkg.add("Metal")
-end
-if USE_OPENCL
-    using Pkg
-    Pkg.add("OpenCL")
-    Pkg.add("pocl_jll")
-end
-
 @everywhere begin
-    if $USE_CUDA
-        using CUDA
-    elseif !$IN_CI
-        try using CUDA
-        catch end
-    end
-
-    if $USE_ROCM
-        using AMDGPU
-    elseif !$IN_CI
-        try using AMDGPU
-        catch end
-    end
-
-    if $USE_ONEAPI
-        using oneAPI
-    elseif !$IN_CI
-        try using oneAPI
-        catch end
-    end
-
-    if $USE_METAL
-        using Metal
-    elseif !$IN_CI
-        try using Metal
-        catch end
-    end
-
-    if $USE_OPENCL
-        using pocl_jll, OpenCL
-    elseif !$IN_CI
-        try using pocl_jll, OpenCL
-        catch end
-    end
-
     using Distributed, Dagger
     import Dagger: Kernel
     using KernelAbstractions
