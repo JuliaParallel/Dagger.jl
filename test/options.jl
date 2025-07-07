@@ -79,7 +79,7 @@ end
         @test fetch(Dagger.@spawn sf(obj)) == 0
         @test fetch(Dagger.@spawn sf(obj)) == 0
     end
-    Dagger.with_options(;scope=Dagger.ExactScope(Dagger.ThreadProc(1,1)), processor=OSProc(1), meta=true) do
+    Dagger.with_options(;scope=Dagger.ExactScope(Dagger.ThreadProc(1,1)), meta=true) do
         @test fetch(Dagger.@spawn sf(obj)) == 43
         @test fetch(Dagger.@spawn sf(obj)) == 43
     end
