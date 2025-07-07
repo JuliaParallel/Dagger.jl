@@ -13,7 +13,7 @@ mutable struct AllocateArray{T,N} <: ArrayOp{T,N}
 end
 size(a::AllocateArray) = size(a.domain)
 
-function AllocateArray(eltype::Type{T}, f, want_index::Bool, d::ArrayDomain{N}, domainchunks, p::AbstractBlocks{N}, assignment::AssignmentType{N}) where {T,N}
+function AllocateArray(assignment::AssignmentType{N}, eltype::Type{T}, f, want_index::Bool, d::ArrayDomain{N}, domainchunks, p::AbstractBlocks{N}) where {T,N}
     sizeA = map(length, d.indexes)
     procgrid = nothing
     availprocs = collect(Dagger.all_processors())
@@ -94,7 +94,7 @@ const BlocksOrAuto = Union{Blocks{N} where N, AutoBlocks}
 
 function Base.rand(p::Blocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, rand, false, d, partition(p, d), p, assignment)
+    a = AllocateArray(assignment, eltype, rand, false, d, partition(p, d), p)
     return _to_darray(a)
 end
 Base.rand(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) = rand(p, T, dims; assignment=assignment)
@@ -106,7 +106,7 @@ Base.rand(::AutoBlocks, eltype::Type, dims::Dims; assignment::AssignmentType = :
 
 function Base.randn(p::Blocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, randn, false, d, partition(p, d), p, assignment)
+    a = AllocateArray(assignment, eltype, randn, false, d, partition(p, d), p)
     return _to_darray(a)
 end
 Base.randn(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) = randn(p, T, dims; assignment=assignment)
@@ -118,7 +118,7 @@ Base.randn(::AutoBlocks, eltype::Type, dims::Dims; assignment::AssignmentType = 
 
 function sprand(p::Blocks, eltype::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, (T, _dims) -> sprand(T, _dims..., sparsity), false, d, partition(p, d), p, assignment)
+    a = AllocateArray(assignment, eltype, (T, _dims) -> sprand(T, _dims..., sparsity), false, d, partition(p, d), p)
     return _to_darray(a)
 end
 sprand(p::BlocksOrAuto, T::Type, dims_and_sparsity::Real...; assignment::AssignmentType = :arbitrary) =
@@ -134,7 +134,7 @@ sprand(::AutoBlocks, eltype::Type, dims::Dims, sparsity::AbstractFloat; assignme
 
 function Base.ones(p::Blocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, ones, false, d, partition(p, d), p, assignment)
+    a = AllocateArray(assignment, eltype, ones, false, d, partition(p, d), p)
     return _to_darray(a)
 end
 Base.ones(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) = ones(p, T, dims; assignment=assignment)
@@ -146,7 +146,7 @@ Base.ones(::AutoBlocks, eltype::Type, dims::Dims; assignment::AssignmentType = :
 
 function Base.zeros(p::Blocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, zeros, false, d, partition(p, d), p, assignment)
+    a = AllocateArray(assignment, eltype, zeros, false, d, partition(p, d), p)
     return _to_darray(a)
 end
 Base.zeros(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) = zeros(p, T, dims; assignment=assignment)
