@@ -19,12 +19,12 @@ Extra events:
 - `tasktochunk::Bool`: Enables reporting of DTask-to-Chunk mappings
 - `profile::Bool`: Enables profiling of task execution; not currently recommended, as it adds significant overhead
 """
-function enable_logging!(;metrics::Bool=true,
+function enable_logging!(;metrics::Bool=false,
                           timeline::Bool=false,
-                          all_task_deps::Bool=false,
+                          all_task_deps::Bool=true,
                           tasknames::Bool=true,
                           taskfuncnames::Bool=false,
-                          taskdeps::Bool=true,
+                          taskdeps::Bool=false,
                           taskargs::Bool=false,
                           taskargmoves::Bool=false,
                           taskresult::Bool=false,

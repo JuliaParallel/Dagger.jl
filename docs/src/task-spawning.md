@@ -32,21 +32,6 @@ it'll be passed as-is to the function `f` (with some exceptions).
     This default can be controlled by specifying [`Sch.ThunkOptions`](@ref) (more details can be found under [Scheduler and Thunk options](@ref)).
     The section [Changing the thread occupancy](@ref) shows a runnable example of how to achieve this.
 
-## Options
-
-The [`Options`](@ref Dagger.Options) struct in the second argument position is
-optional; if provided, it is passed to the scheduler to control its
-behavior. [`Options`](@ref Dagger.Options) contains a `NamedTuple` of option
-key-value pairs, which can be any of:
-- Any field in [`Sch.ThunkOptions`](@ref) (see [Scheduler and Thunk options](@ref))
-- `meta::Bool` -- Pass the input [`Chunk`](@ref) objects themselves to `f` and
-  not the value contained in them.
-
-There are also some extra options that can be passed, although they're considered advanced options to be used only by developers or library authors:
-- `get_result::Bool` -- return the actual result to the scheduler instead of [`Chunk`](@ref) objects. Used when `f` explicitly constructs a [`Chunk`](@ref) or when return value is small (e.g. in case of reduce)
-- `persist::Bool` -- the result of this Thunk should not be released after it becomes unused in the DAG
-- `cache::Bool` -- cache the result of this Thunk such that if the thunk is evaluated again, one can just reuse the cached value. If it’s been removed from cache, recompute the value.
-
 ## Simple example
 
 Let's see a very simple directed acyclic graph (or DAG) constructed with Dagger:
@@ -124,6 +109,21 @@ x::DTask
 ```
 
 This is useful for nested execution, where an `@spawn`'d thunk calls `@spawn`. This is detailed further in [Dynamic Scheduler Control](@ref).
+
+## Options
+
+The [`Options`](@ref Dagger.Options) struct in the second argument position is
+optional; if provided, it is passed to the scheduler to control its
+behavior. [`Options`](@ref Dagger.Options) contains a `NamedTuple` of option
+key-value pairs, which can be any of:
+- Any field in [`Sch.ThunkOptions`](@ref) (see [Scheduler and Thunk options](@ref))
+- `meta::Bool` -- Pass the input [`Chunk`](@ref) objects themselves to `f` and
+  not the value contained in them.
+
+There are also some extra options that can be passed, although they're considered advanced options to be used only by developers or library authors:
+- `get_result::Bool` -- return the actual result to the scheduler instead of [`Chunk`](@ref) objects. Used when `f` explicitly constructs a [`Chunk`](@ref) or when return value is small (e.g. in case of reduce)
+- `persist::Bool` -- the result of this Thunk should not be released after it becomes unused in the DAG
+- `cache::Bool` -- cache the result of this Thunk such that if the thunk is evaluated again, one can just reuse the cached value. If it’s been removed from cache, recompute the value.
 
 ## Errors
 
@@ -317,4 +317,152 @@ In comparison, the `outer_low_occupancy` snippet should show results like this:
   0.107495 seconds (28.56 k allocations: 1.940 MiB)
   0.109904 seconds (55.03 k allocations: 3.631 MiB)
   0.117239 seconds (87.95 k allocations: 5.372 MiB)
+```
+
+## Different ways to spawn tasks
+
+Beyond the standard function call syntax `Dagger.@spawn f(args...)`, Dagger also supports several other convenient ways to spawn tasks, mirroring Julia's own syntax variations.
+
+### Broadcast
+
+Tasks can be spawned using Julia's broadcast syntax. This is useful for applying an operation element-wise to collections.
+
+```julia
+using Dagger
+A = rand(4)
+B = rand(4)
+
+# Spawn a task to compute A .+ B
+add_task = Dagger.@spawn A .+ B
+@assert fetch(add_task) ≈ A .+ B
+
+x = randn(100)
+abs_task = Dagger.@spawn abs.(x)
+@assert fetch(abs_task) == abs.(x)
+```
+
+### Do block
+
+Dagger supports spawning tasks using Julia's `do` block syntax, which is often used for functions that take another function as an argument, especially anonymous functions.
+
+```julia
+using Dagger
+A = rand(4)
+
+# Spawn a task using a do block with sum
+sum_do_task = Dagger.@spawn sum(A) do a
+    a + 1
+end
+@assert fetch(sum_do_task) ≈ sum(a -> a + 1, A)
+
+# Spawn a task with a function that accepts a do block
+do_f = f -> f(42)
+do_task = Dagger.@spawn do_f() do x
+    x + 1
+end
+@assert fetch(do_task) == 43
+```
+
+### Anonymous direct call
+
+Tasks can be spawned directly from anonymous function definitions.
+
+```julia
+using Dagger
+A = rand(4)
+
+# Spawn a task from an anonymous function
+anon_task = Dagger.@spawn A -> sum(A)
+@assert fetch(anon_task) == sum(A)
+
+# Anonymous function with closed-over arguments
+dims = 1
+anon_kwargs_task = Dagger.@spawn A -> sum(A; dims=dims)
+@assert fetch(anon_kwargs_task) == sum(A; dims=dims)
+```
+
+### Getindex
+
+Spawning tasks that retrieve elements from indexable collections, such as arrays, using index notation is supported.
+
+```julia
+using Dagger
+A = rand(4, 4)
+
+# Spawn a task to get A[1, 2]
+getindex_task1 = Dagger.@spawn A[1, 2]
+@assert fetch(getindex_task1) == A[1, 2]
+
+# Spawn a task to get A[2] (linear indexing)
+getindex_task2 = Dagger.@spawn A[2]
+@assert fetch(getindex_task2) == A[2]
+
+# Getindex from a DTask result
+B_task = Dagger.@spawn rand(4, 4)
+getindex_task_from_dtask = Dagger.@spawn B_task[1, 2]
+@assert fetch(getindex_task_from_dtask) == fetch(B_task)[1, 2]
+
+R = Ref(42)
+# Spawn a task to get R[]
+ref_getindex_task = Dagger.@spawn R[]
+@assert fetch(ref_getindex_task) == 42
+```
+
+### Setindex!
+
+Similarly, tasks can be spawned to modify elements of mutable collections (such as arrays). The object being modified must be running under Datadeps, or wrapped with `Dagger.@mutable`, to ensure that its contents can be mutated correctly.
+
+```julia
+using Dagger
+A = Dagger.@mutable rand(4, 4)
+
+# Spawn a task to set A[1, 2] = 3.0
+setindex_task1 = Dagger.@spawn A[1, 2] = 3.0
+fetch(setindex_task1) # Wait for the setindex! to complete
+@assert fetch(Dagger.@spawn A[1, 2]) == 3.0
+
+# Spawn a task to set A[2] = 4.0 (linear indexing)
+setindex_task2 = Dagger.@spawn A[2] = 4.0
+fetch(setindex_task2)
+@assert fetch(Dagger.@spawn A[2]) == 4.0
+
+R = Dagger.@mutable Ref(42)
+# Spawn a task to set R[] = 43
+ref_setindex_task = Dagger.@spawn R[] = 43
+fetch(ref_setindex_task)
+@assert fetch(Dagger.@spawn R[]) == 43
+```
+
+### NamedTuple
+
+Tasks can be spawned to conveniently create `NamedTuple`s.
+
+```julia
+using Dagger
+
+# Spawn a task to create a NamedTuple
+nt_task = Dagger.@spawn (;a=1, b=2)
+@assert fetch(nt_task) == (;a=1, b=2)
+
+# Spawn a task to create an empty NamedTuple
+empty_nt_task = Dagger.@spawn (;)
+@assert fetch(empty_nt_task) == (;)
+```
+
+### Getproperty
+
+Tasks can be spawned to access properties of `NamedTuple`s (or other objects supporting `getproperty`).
+
+```julia
+using Dagger
+nt = (;a=1, b=2)
+
+# Spawn a task to get nt.b
+getprop_task = Dagger.@spawn nt.b
+@assert fetch(getprop_task) == nt.b
+
+# Getproperty from a DTask result
+nt2_task = Dagger.@spawn (;a=1, b=3)
+getprop_task_from_dtask = Dagger.@spawn nt2_task.b
+@assert fetch(getprop_task_from_dtask) == fetch(nt2_task).b
 ```

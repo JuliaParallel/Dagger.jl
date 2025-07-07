@@ -122,6 +122,20 @@ memory_spans(::T) where T<:AbstractAliasing = throw(ArgumentError("Must define `
 memory_spans(x) = memory_spans(aliasing(x))
 memory_spans(x, T) = memory_spans(aliasing(x, T))
 
+struct AliasingWrapper <: AbstractAliasing
+    inner::AbstractAliasing
+    hash::UInt64
+
+    AliasingWrapper(inner::AbstractAliasing) = new(inner, hash(inner))
+end
+memory_spans(x::AliasingWrapper) = memory_spans(x.inner)
+equivalent_structure(x::AliasingWrapper, y::AliasingWrapper) =
+    x.hash == y.hash || equivalent_structure(x.inner, y.inner)
+Base.hash(x::AliasingWrapper, h::UInt64) = hash(x.hash, h)
+Base.isequal(x::AliasingWrapper, y::AliasingWrapper) = x.hash == y.hash
+will_alias(x::AliasingWrapper, y::AliasingWrapper) =
+    will_alias(x.inner, y.inner)
+
 struct NoAliasing <: AbstractAliasing end
 memory_spans(::NoAliasing) = MemorySpan{CPURAMMemorySpace}[]
 struct UnknownAliasing <: AbstractAliasing end
@@ -162,7 +176,12 @@ function memory_spans(oa::ObjectAliasing)
     return [span]
 end
 
-aliasing(x, T) = aliasing(T(x))
+function aliasing(x, dep_mod)
+    if dep_mod isa Symbol
+        return aliasing(getfield(x, dep_mod))
+    end
+    return aliasing(dep_mod(x))
+end
 function aliasing(x::T) where T
     if isbits(x)
         return NoAliasing()

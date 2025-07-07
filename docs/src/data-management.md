@@ -26,6 +26,31 @@ VRAM, etc.) the value resides, and where the value is allowed to be transferred
 and dereferenced. See [Processors](@ref) and [Scopes](@ref) for more details on
 how these properties can be used to control scheduling behavior around `Chunk`s.
 
+## Data movement rules
+
+Dagger utilizes a 3-argument function `Dagger.move(from_proc::Dagger.Processor, to_proc::Dagger.Processor, x)` to manage data movement between processors. This function is invoked by the scheduler for every argument of a task, including the task's function itself, before the task is executed. The purpose of `move` is to transfer the argument `x` from its current processor (`from_proc`) to the target processor (`to_proc`) where the task will run, and to perform any necessary data conversion or unwrapping before execution.
+
+This `move` mechanism is fundamental to how Dagger handles `Chunk` objects. When a `Chunk` is passed as an argument to a task, the `move` function is responsible for unwrapping the `Chunk` and providing its underlying value to the task.
+
+While users can define custom `move` implementations for their specific data types if needed, the default fallback implementation of `move` is designed to handle most common use cases effectively. Therefore, custom implementations are generally unnecessary.
+
+Here's an example of a custom `move` implementation:
+
+```julia
+struct MyCustomType
+    data::Vector{Float64}
+end
+
+# Custom move function for MyCustomType
+function Dagger.move(from_proc::Dagger.Processor, to_proc::Dagger.Processor, x::MyCustomType)
+    return x.data
+end
+
+A = MyCustomType(rand(100))
+s = fetch(Dagger.@spawn sum(A))
+@assert s == sum(A.data)
+```
+
 ## Mutation
 
 Normally, Dagger tasks should be functional and "pure": never mutating their

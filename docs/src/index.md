@@ -361,6 +361,39 @@ DA = rand(Blocks(32, 32), 256, 128)
 collect(DA) # returns a `Matrix{Float64}`
 ```
 
+-----
+
+## Quickstart: Stencil Operations
+
+Dagger's `@stencil` macro allows for easy specification of stencil operations on `DArray`s, often used in simulations and image processing. These operations typically involve updating an element based on the values of its neighbors.
+
+For more details: [Stencil Operations](@ref)
+
+### Applying a Simple Stencil
+
+Here's how to apply a stencil that averages each element with its immediate neighbors, using a `Wrap` boundary condition (where neighbor access at the array edges wrap around).
+
+```julia
+using Dagger
+import Dagger: @stencil, Wrap
+
+# Create a 5x5 DArray, partitioned into 2x2 blocks
+A = rand(Blocks(2, 2), 5, 5)
+B = zeros(Blocks(2,2), 5, 5)
+
+Dagger.spawn_datadeps() do
+    @stencil begin
+        # For each element in A, calculate the sum of its 3x3 neighborhood
+        # (including itself) and store the average in B.
+        # Values outside the array bounds are determined by Wrap().
+        B[idx] = sum(@neighbors(A[idx], 1, Wrap())) / 9.0
+    end
+end
+
+# B now contains the averaged values.
+```
+In this example, `idx` refers to the coordinates of each element being processed. `@neighbors(A[idx], 1, Wrap())` fetches the 3x3 neighborhood around `A[idx]`. The `1` indicates a neighborhood distance of 1 from the central element, and `Wrap()` specifies the boundary behavior.
+
 ## Quickstart: Datadeps
 
 Datadeps is a feature in Dagger.jl that facilitates parallelism control within designated regions, allowing tasks to write to their arguments while ensuring dependencies are respected.
@@ -447,3 +480,148 @@ continuously and writes each random number to a file. The streaming region is
 terminated when a random number less than 0.01 is generated, which is done by
 calling `Dagger.finish_stream()` (this terminates the current task, and will
 also terminate all streaming tasks launched by `spawn_streaming`).
+
+## Quickstart: GPUs
+
+Dagger supports GPU acceleration for CUDA, ROCm (AMD), Intel oneAPI, Metal (Apple), and OpenCL devices. GPU support enables automatic data movement between CPU and GPU memory, distributed GPU computing across multiple devices, and seamless integration with Julia's GPU ecosystem.
+
+For more details: [GPU Support](@ref)
+
+### Allocate distributed arrays on GPUs
+
+You can allocate `DArray`s directly on GPUs by using scopes to target specific GPU devices. The arrays will be automatically allocated in GPU memory:
+
+```julia
+using CUDA  # or AMDGPU, oneAPI, Metal
+
+# Allocate a DArray on the first CUDA GPU
+gpu_scope = Dagger.scope(cuda_gpu=1)
+Dagger.with_options(;scope=gpu_scope) do
+    DA = rand(Blocks(32, 32), Float32, 128, 128)
+    # DA is now distributed across GPU memory
+end
+```
+
+You can also target multiple GPUs or all available GPUs:
+
+```julia
+# Use all available CUDA GPUs
+all_gpu_scope = Dagger.scope(cuda_gpus=:)
+Dagger.with_options(;scope=all_gpu_scope) do
+    DA = ones(Blocks(64, 64), Float32, 256, 256)
+end
+
+# Use specific GPUs (e.g., GPUs 1 and 2)
+multi_gpu_scope = Dagger.scope(cuda_gpus=[1, 2])
+Dagger.with_options(;scope=multi_gpu_scope) do
+    DA = zeros(Blocks(32, 32), Float32, 128, 128)
+end
+```
+
+### Convert CPU arrays to GPU arrays
+
+You can move existing CPU `DArray`s to GPU by using `similar` within a GPU scope:
+
+```julia
+# Create a CPU DArray
+cpu_array = rand(Blocks(32, 32), 128, 128)
+
+# Move to GPU
+gpu_scope = Dagger.scope(cuda_gpu=1)
+Dagger.with_options(;scope=gpu_scope) do
+    gpu_array = similar(cpu_array)
+    # gpu_array is now allocated on GPU with same structure as cpu_array
+end
+```
+
+### Run custom GPU kernels with `Dagger.Kernel`
+
+Dagger integrates with KernelAbstractions.jl to run custom GPU kernels. Use `Dagger.Kernel` to wrap your kernel functions:
+
+```julia
+using KernelAbstractions
+
+# Define a kernel function
+@kernel function vector_add!(c, a, b)
+    i = @index(Global, Linear)
+    c[i] = a[i] + b[i]
+end
+
+# Run on GPU
+# Note: GPU arrays must be marked @mutable or use Datadeps to ensure mutability
+gpu_scope = Dagger.scope(cuda_gpu=1)
+a = Dagger.@mutable CUDA.rand(1000)
+b = Dagger.@mutable CUDA.rand(1000)
+c = Dagger.@mutable CUDA.zeros(1000)
+result = Dagger.with_options(;scope=gpu_scope) do
+    fetch(Dagger.@spawn Dagger.Kernel(vector_add!)(c, a, b; ndrange=length(c)))
+    # Synchronize the GPU
+    Dagger.gpu_synchronize(:CUDA)
+end
+```
+
+### Use `gpu_kernel_backend` within tasks
+
+When writing functions that will run on different devices, use `Dagger.gpu_kernel_backend()` to get the appropriate KernelAbstractions backend for the current processor:
+
+```julia
+@kernel function fill_kernel!(arr, value)
+    i = @index(Global, Linear)
+    arr[i] = value
+end
+
+function fill_array_task!(arr, value)
+    # Get the backend for the current processor (CPU, CUDA, ROCm, etc.)
+    backend = Dagger.gpu_kernel_backend()
+    kernel = fill_kernel!(backend)
+    kernel(arr, value; ndrange=length(arr))
+    return arr
+end
+
+# This function works on both CPU and GPU
+cpu_array = Dagger.@mutable zeros(1000)
+gpu_array = Dagger.@mutable CUDA.zeros(1000)
+
+# Runs on CPU
+fetch(Dagger.@spawn fill_array_task!(cpu_array, 42.0))
+
+# Runs on GPU when scoped appropriately
+Dagger.with_options(;scope=Dagger.scope(cuda_gpu=1)) do
+    fetch(Dagger.@spawn fill_array_task!(gpu_array, 42.0))
+
+    # Synchronize the GPU
+    Dagger.gpu_synchronize(:CUDA)
+end
+```
+
+### Multi-GPU and multi-backend support
+
+Dagger supports multiple GPU backends simultaneously. You can specify different GPU types using their respective scope keywords:
+
+```julia
+# CUDA GPUs
+cuda_scope = Dagger.scope(cuda_gpu=1)
+
+# ROCm/AMD GPUs  
+rocm_scope = Dagger.scope(rocm_gpu=1)
+
+# Intel GPUs
+intel_scope = Dagger.scope(intel_gpu=1)
+
+# Metal GPUs (Apple)
+metal_scope = Dagger.scope(metal_gpu=1)
+
+# OpenCL devices
+opencl_scope = Dagger.scope(cl_device=1)
+```
+
+You can also combine GPU scopes with worker scopes for distributed GPU computing:
+
+```julia
+# Use CUDA GPU 1 on worker 2
+distributed_gpu_scope = Dagger.scope(worker=2, cuda_gpu=1)
+Dagger.with_options(;scope=distributed_gpu_scope) do
+    DA = rand(Blocks(32, 32), Float32, 128, 128)
+    result = fetch(Dagger.@spawn sum(DA))
+end
+```

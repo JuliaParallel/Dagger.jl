@@ -1,35 +1,34 @@
-# Logging and Graphing
+# Logging
 
-Dagger's scheduler keeps track of the important and potentially expensive
-actions it does, such as moving data between workers or executing thunks, and
-tracks how much time and memory allocations these operations consume, among
-other things. It does it through the `TimespanLogging.jl` package (which used
-to be directly integrated into Dagger). Saving this information somewhere
-accessible is disabled by default, but it's quite easy to turn it on, through
-two mechanisms.
+Dagger provides mechanisms to log and visualize scheduler events. This can be useful for debugging and performance analysis.
 
-The first is `Dagger.enable_logging!`, which provides an easy-to-use interface
-to both enable and configure logging. The defaults are usually sufficient for
-most users, but can be tweaked with keyword arguments.
+## Basic Logging Functions
 
-The second is done by setting a "log sink" in the Dagger `Context` being used,
-as `ctx.log_sink`. These log sinks drive how Dagger's logging behaves, and are
-configurable by the user, without the need to tweak any of Dagger's internal
-code.
+The primary functions for controlling logging are:
 
-A variety of log sinks are built-in to TimespanLogging; the `NoOpLog` is the
-default log sink when one isn't explicitly specified, and disables logging
-entirely (to minimize overhead). There are currently two other log sinks of
-interest; the first and newer of the two is the `MultiEventLog`, which
-generates multiple independent log streams, one per "consumer" (details in the
-next section). This is the log sink that `enable_logging!` uses, as it's easily
-the most flexible. The second and older sink is the `LocalEventLog`, which is
-explained later in this document. Most users are recommended to use the
-`MultiEventLog` (ideally via `enable_logging!`) since it's far more flexible
-and extensible, and is more performant in general.
+- `Dagger.enable_logging!`: Enables logging. This function uses the `MultiEventLog` by default, which is flexible and performant. You can customize its behavior with keyword arguments.
+- `Dagger.disable_logging!`: Disables logging.
+- `Dagger.fetch_logs!`: Fetches the logs from all workers. This returns a `Dict` where keys are worker IDs and values are the logs.
 
-Log sinks are explained in detail in [Logging: Advanced](@ref); however, if
-using `enable_logging!`, everything is already configured for you. Then, all
-you need to do is call `Dagger.fetch_logs!()` to get the logs for all workers
-as a `Dict`. A variety of tools can operate on these logs, including
-visualization through `show_logs` and `render_logs`.
+## Example Usage
+
+```julia
+using Dagger
+
+# Enable logging
+Dagger.enable_logging!()
+
+# Run some Dagger computations
+wait(Dagger.@spawn sum([1, 2, 3]))
+
+# Fetch logs
+logs = Dagger.fetch_logs!()
+
+# Disable logging
+Dagger.disable_logging!()
+
+# You can now inspect the `logs` Dict or use visualization tools
+# like `show_logs` and `render_logs` (see [Logging: Visualization](@ref logging-visualization.md)).
+```
+
+For more advanced logging configurations, such as custom log sinks and consumers, see [Logging: Advanced](@ref).
