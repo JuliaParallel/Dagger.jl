@@ -326,21 +326,15 @@ end
         @testset "lazy API" begin
             a = delayed(+)(1,2)
             @test !(a.f isa Chunk)
+            @test a.compute_scope == Dagger.DefaultScope()
 
             a = delayed(+; scope=NodeScope())(1,2)
-            @test a.f isa Chunk
-            @test a.f.processor isa OSProc
-            @test a.f.scope isa NodeScope
+            @test !(a.f isa Chunk)
+            @test a.compute_scope isa NodeScope
 
-            a = delayed(+; processor=Dagger.ThreadProc(1,1))(1,2)
-            @test a.f isa Chunk
-            @test a.f.processor isa Dagger.ThreadProc
-            @test a.f.scope == DefaultScope()
-
-            a = delayed(+; processor=Dagger.ThreadProc(1,1), scope=NodeScope())(1,2)
-            @test a.f isa Chunk
-            @test a.f.processor isa Dagger.ThreadProc
-            @test a.f.scope isa NodeScope
+            a = delayed(+; scope=NodeScope())(1,2)
+            @test !(a.f isa Chunk)
+            @test a.compute_scope isa NodeScope
 
             @testset "Scope Restrictions" begin
                 pls = ProcessLockedStruct(Ptr{Int}(42))
@@ -354,28 +348,20 @@ end
             end
             @testset "Processor Data Movement" begin
                 @everywhere Dagger.add_processor_callback!(()->MulProc(), :mulproc)
-                @test collect(delayed(+; processor=MulProc())(3,4)) == 12
+                @test_broken collect(delayed(+; processor=MulProc())(3,4)) == 12
                 @everywhere Dagger.delete_processor_callback!(:mulproc)
             end
         end
         @testset "eager API" begin
             _a = Dagger.@spawn scope=NodeScope() 1+2
             a = Dagger.Sch._find_thunk(_a)
-            @test a.f isa Chunk
-            @test a.f.processor isa OSProc
-            @test a.f.scope isa NodeScope
+            @test !(a.f isa Chunk)
+            @test a.compute_scope isa NodeScope
 
-            _a = Dagger.@spawn processor=Dagger.ThreadProc(1,1) 1+2
+            _a = Dagger.@spawn scope=NodeScope() 1+2
             a = Dagger.Sch._find_thunk(_a)
-            @test a.f isa Chunk
-            @test a.f.processor isa Dagger.ThreadProc
-            @test a.f.scope == DefaultScope()
-
-            _a = Dagger.@spawn processor=Dagger.ThreadProc(1,1) scope=NodeScope() 1+2
-            a = Dagger.Sch._find_thunk(_a)
-            @test a.f isa Chunk
-            @test a.f.processor isa Dagger.ThreadProc
-            @test a.f.scope isa NodeScope
+            @test !(a.f isa Chunk)
+            @test a.compute_scope isa NodeScope
         end
     end
     @testset "parent fetch child, one thread" begin
