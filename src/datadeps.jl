@@ -450,6 +450,9 @@ end
 
 # Make a copy of each piece of data on each worker
 # memory_space => {arg => copy_of_arg}
+isremotehandle(x) = false
+isremotehandle(x::DTask) = true
+isremotehandle(x::Chunk) = true
 function generate_slot!(state::DataDepsState, dest_space, data)
     if data isa DTask
         data = fetch(data; raw=true)
@@ -458,22 +461,25 @@ function generate_slot!(state::DataDepsState, dest_space, data)
     to_proc = first(processors(dest_space))
     from_proc = first(processors(orig_space))
     dest_space_args = get!(IdDict{Any,Any}, state.remote_args, dest_space)
-    if orig_space == dest_space
+    if orig_space == dest_space && (data isa Chunk || !isremotehandle(data))
+        # Fast path for local data or data already in a Chunk
         data_chunk = tochunk(data, from_proc)
         dest_space_args[data] = data_chunk
         @assert processor(data_chunk) in processors(dest_space) || data isa Chunk && processor(data) isa Dagger.OSProc
         @assert memory_space(data_chunk) == orig_space
     else
-        w = only(unique(map(get_parent, collect(processors(dest_space))))).pid
+        to_w = root_worker_id(dest_space)
         ctx = Sch.eager_context()
         id = rand(Int)
         timespan_start(ctx, :move, (;thunk_id=0, id, position=0, processor=to_proc), (;f=nothing, data))
-        dest_space_args[data] = remotecall_fetch(w, from_proc, to_proc, data) do from_proc, to_proc, data
+        dest_space_args[data] = remotecall_fetch(to_w, from_proc, to_proc, data) do from_proc, to_proc, data
             data_converted = move(from_proc, to_proc, data)
             data_chunk = tochunk(data_converted, to_proc)
             @assert processor(data_chunk) in processors(dest_space)
             @assert memory_space(data_converted) == memory_space(data_chunk) "space mismatch! $(memory_space(data_converted)) != $(memory_space(data_chunk)) ($(typeof(data_converted)) vs. $(typeof(data_chunk))), spaces ($orig_space -> $dest_space)"
-            @assert orig_space != memory_space(data_chunk) "space preserved! $orig_space != $(memory_space(data_chunk)) ($(typeof(data)) vs. $(typeof(data_chunk))), spaces ($orig_space -> $dest_space)"
+            if orig_space != dest_space
+                @assert orig_space != memory_space(data_chunk) "space preserved! $orig_space != $(memory_space(data_chunk)) ($(typeof(data)) vs. $(typeof(data_chunk))), spaces ($orig_space -> $dest_space)"
+            end
             return data_chunk
         end
         timespan_finish(ctx, :move, (;thunk_id=0, id, position=0, processor=to_proc), (;f=nothing, data=dest_space_args[data]))
