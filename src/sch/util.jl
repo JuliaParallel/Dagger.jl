@@ -42,9 +42,7 @@ function get_propagated_options(thunk)
     nt = NamedTuple()
     for key in thunk.propagates
         value = if key == :scope
-            isa(thunk.f, Chunk) ? thunk.f.scope : DefaultScope()
-        elseif key == :processor
-            isa(thunk.f, Chunk) ? thunk.f.processor : OSProc()
+            thunk.compute_scope
         elseif key in fieldnames(Thunk)
             getproperty(thunk, key)
         elseif key in fieldnames(ThunkOptions)
