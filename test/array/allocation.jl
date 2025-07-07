@@ -721,6 +721,44 @@ end
     @test A_v == A[1:8, 1:8]
 end
 
+@testset "Chunk view of DArray" begin
+    A = rand(64, 64)
+    DA = DArray(A, Blocks(8,8))
+    chunk = DA.chunks[1,1]
+
+    @testset "Valid Slices" begin
+        @test view(chunk, :, :)     isa ChunkSlice && view(chunk, 1:8, 1:8)   isa ChunkSlice
+        @test view(chunk, 1:2:7, :) isa ChunkSlice && view(chunk, :, 2:2:8)   isa ChunkSlice
+        @test view(chunk, 1, :)     isa ChunkSlice && view(chunk, :, 1)       isa ChunkSlice
+        @test view(chunk, 3:3, 5:5) isa ChunkSlice && view(chunk, 5:7, 1:2:4) isa ChunkSlice
+        @test view(chunk, 8, 8)     isa ChunkSlice
+        @test view(chunk, 1:0, :)   isa ChunkSlice
+    end
+
+    @testset "Dimension Mismatch" begin
+        @test_throws DimensionMismatch view(chunk, :)
+        @test_throws DimensionMismatch view(chunk, :, :, :)
+    end
+
+    @testset "Int Slice Out of Bounds" begin
+        @test_throws ArgumentError view(chunk, 0, :)
+        @test_throws ArgumentError view(chunk, :, 9)
+        @test_throws ArgumentError view(chunk, 9, 1)
+    end
+
+    @testset "Range Slice Out of Bounds" begin
+        @test_throws ArgumentError view(chunk, 0:5, :)
+        @test_throws ArgumentError view(chunk, 1:8, 5:10)
+        @test_throws ArgumentError view(chunk, 2:2:10, :)
+    end
+
+    @testset "Invalid Slice Types" begin
+        @test_throws DimensionMismatch view(chunk, (1:2, :))
+        @test_throws ArgumentError view(chunk, :, [1, 2])
+    end
+
+end 
+
 @testset "copy/similar" begin
     X1 = ones(Blocks(10, 10), 100, 100)
     X2 = copy(X1)
