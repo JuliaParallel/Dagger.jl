@@ -119,5 +119,5 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Boo
         end
     end
 
-    return LinearAlgebra.LU{T,DMatrix{T},Vector{Int}}(A, ipiv, 0)    
+    return LinearAlgebra.LU{T,DMatrix{T},DVector{Int}}(A, ipiv, 0)    
 end 
