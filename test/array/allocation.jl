@@ -120,7 +120,7 @@ end
 
 @testset "AutoBlocks" begin
     function test_auto_blocks(DA, dims)
-        np = Dagger.num_processors()
+        np = num_processors()
         part = DA.partitioning
         @test part isa Blocks
         part_size = part.blocksize
@@ -201,18 +201,18 @@ end
     end
 end
 
-@testset "Constructors and Functions with assignment" begin
+@testset "Constructor with assignment" begin
    
-  availprocs = collect(Dagger.all_processors())
+  availprocs = collect(all_processors())
   sort!(availprocs, by = x -> (x.owner, x.tid))
   numprocs = length(availprocs)
 
 
   function chunk_processors(Ad::DArray)
-      [Dagger.processor(Ad.chunks[idx].future.future.v.value[2]) for idx in CartesianIndices(size(Dagger.domainchunks(Ad)))]
+      [processor(Ad.chunks[idx].future.future.v.value[2]) for idx in CartesianIndices(size(domainchunks(Ad)))]
   end
 
-  function tile_processors(proc_grid::AbstractArray{<:Dagger.Processor,N}, block_grid::Tuple{Vararg{Int,N}}) where N
+  function tile_processors(proc_grid::AbstractArray{<:Processor,N}, block_grid::Tuple{Vararg{Int,N}}) where N
       reps       = Int.(ceil.(block_grid ./ size(proc_grid)))
       tiled      = repeat(proc_grid, reps...)
       idx_slices = [1:block_grid[d] for d in 1:length(block_grid)]
@@ -225,18 +225,17 @@ end
   M = rand(76,118)
 
   t_blocks_a = (4,3,2)
-  d_blocks_a = Dagger.Blocks(t_blocks_a)
+  d_blocks_a = Blocks(t_blocks_a)
   blocks_a   = cld.(size(A), t_blocks_a)
 
   n_blocks_v = 3
   t_blocks_v = (n_blocks_v,)
-  d_blocks_v = Dagger.Blocks(t_blocks_v)
+  d_blocks_v = Blocks(t_blocks_v)
   blocks_v   = cld.(size(v), t_blocks_v)
-  blocks_vv = [blocks_v...]
   blocks_nv  = blocks_v[1]
 
   t_blocks_m = (2,3)
-  d_blocks_m = Dagger.Blocks(t_blocks_m)
+  d_blocks_m = Blocks(t_blocks_m)
   blocks_m   = cld.(size(M), t_blocks_m)
 
   function get_default_blockgrid(data, numprocs)
@@ -267,9 +266,8 @@ end
       @test randn( AutoBlocks(), size(v)...     ; assignment=assignment) isa DVector && randn( AutoBlocks(), size(v);      assignment=assignment) isa DVector
       @test randn( AutoBlocks(), size(M)...     ; assignment=assignment) isa DMatrix && randn( AutoBlocks(), size(M);      assignment=assignment) isa DMatrix
 
-      @test Dagger.sprand(AutoBlocks(), size(A)..., 0.5; assignment=assignment) isa DArray  && Dagger.sprand(AutoBlocks(), size(A), 0.5; assignment=assignment) isa DArray
-      @test Dagger.sprand(AutoBlocks(), size(v)..., 0.5; assignment=assignment) isa DVector && Dagger.sprand(AutoBlocks(), size(v), 0.5; assignment=assignment) isa DVector
-      @test Dagger.sprand(AutoBlocks(), size(M)..., 0.5; assignment=assignment) isa DMatrix && Dagger.sprand(AutoBlocks(), size(M), 0.5; assignment=assignment) isa DMatrix
+      @test sprand(AutoBlocks(), size(v)..., 0.5; assignment=assignment) isa DVector && sprand(AutoBlocks(), size(v), 0.5; assignment=assignment) isa DVector
+      @test sprand(AutoBlocks(), size(M)..., 0.5; assignment=assignment) isa DMatrix && sprand(AutoBlocks(), size(M), 0.5; assignment=assignment) isa DMatrix
 
       @test ones(  AutoBlocks(), size(A)...     ; assignment=assignment) isa DArray  && ones(  AutoBlocks(), size(A);      assignment=assignment) isa DArray
       @test ones(  AutoBlocks(), size(v)...     ; assignment=assignment) isa DVector && ones(  AutoBlocks(), size(v);      assignment=assignment) isa DVector
@@ -285,7 +283,7 @@ end
 
       @test distribute(A, d_blocks_a, assignment) isa DArray  && distribute(A, blocks_a, assignment) isa DArray
       @test distribute(v, d_blocks_v, assignment) isa DVector && distribute(v, blocks_v,  assignment) isa DVector
-      @test distribute(v, n_blocks_v, assignment) isa DVector && distribute(v, blocks_vv, assignment) isa DVector
+      @test distribute(v, n_blocks_v, assignment) isa DVector 
       @test distribute(M, d_blocks_m, assignment) isa DMatrix && distribute(M, blocks_m, assignment) isa DMatrix
 
       @test DArray( A, d_blocks_a, assignment) isa DArray
@@ -300,9 +298,8 @@ end
       @test randn( d_blocks_v, size(v)...     ; assignment=assignment) isa DVector && randn( d_blocks_v, size(v);      assignment=assignment) isa DVector
       @test randn( d_blocks_m, size(M)...     ; assignment=assignment) isa DMatrix && randn( d_blocks_m, size(M);      assignment=assignment) isa DMatrix
 
-      @test Dagger.sprand(d_blocks_a, size(A)..., 0.5; assignment=assignment) isa DArray  && Dagger.sprand(d_blocks_a, size(A), 0.5; assignment=assignment) isa DArray
-      @test Dagger.sprand(d_blocks_v, size(v)..., 0.5; assignment=assignment) isa DVector && Dagger.sprand(d_blocks_v, size(v), 0.5; assignment=assignment) isa DVector
-      @test Dagger.sprand(d_blocks_m, size(M)..., 0.5; assignment=assignment) isa DMatrix && Dagger.sprand(d_blocks_m, size(M), 0.5; assignment=assignment) isa DMatrix
+      @test sprand(d_blocks_v, size(v)..., 0.5; assignment=assignment) isa DVector && sprand(d_blocks_v, size(v), 0.5; assignment=assignment) isa DVector
+      @test sprand(d_blocks_m, size(M)..., 0.5; assignment=assignment) isa DMatrix && sprand(d_blocks_m, size(M), 0.5; assignment=assignment) isa DMatrix
 
       @test ones(  d_blocks_a, size(A)...     ; assignment=assignment) isa DArray  && ones(  d_blocks_a, size(A);      assignment=assignment) isa DArray
       @test ones(  d_blocks_v, size(v)...     ; assignment=assignment) isa DVector && ones(  d_blocks_v, size(v);      assignment=assignment) isa DVector
@@ -393,9 +390,8 @@ end
           randn_v_auto  =        randn( AutoBlocks(), size(v)...;      assignment=assignment); fetch(randn_v_auto)
           randn_M_auto  =        randn( AutoBlocks(), size(M)...;      assignment=assignment); fetch(randn_M_auto)
 
-          # sprand_A_auto = Dagger.sprand(AutoBlocks(), size(A)..., 0.5; assignment=assignment); fetch(sprand_A_auto)
-          sprand_v_auto = Dagger.sprand(AutoBlocks(), size(v)..., 0.5; assignment=assignment); fetch(sprand_v_auto)
-          sprand_M_auto = Dagger.sprand(AutoBlocks(), size(M)..., 0.5; assignment=assignment); fetch(sprand_M_auto)
+          sprand_v_auto = sprand(AutoBlocks(), size(v)..., 0.5; assignment=assignment); fetch(sprand_v_auto)
+          sprand_M_auto = sprand(AutoBlocks(), size(M)..., 0.5; assignment=assignment); fetch(sprand_M_auto)
 
           ones_A_auto   =        ones(  AutoBlocks(), size(A)...;      assignment=assignment); fetch(ones_A_auto)
           ones_v_auto   =        ones(  AutoBlocks(), size(v)...;      assignment=assignment); fetch(ones_v_auto)
@@ -406,7 +402,6 @@ end
           zeros_M_auto  =        zeros( AutoBlocks(), size(M)...;      assignment=assignment); fetch(zeros_M_auto)
 
           @test chunk_processors(rand_A_auto)   == chunk_processors(randn_A_auto) ==                                    chunk_processors(ones_A_auto) == chunk_processors(zeros_A_auto) ==  tile_processors(get_assignment_procgrid(A, numprocs, get_default_blockgrid(A, numprocs)), get_default_blockgrid(A, numprocs))
-          # @test chunk_processors(sprand_A_auto) ==  tile_processors(get_assignment_procgrid(A, numprocs, get_default_blockgrid(A, numprocs)), get_default_blockgrid(A, numprocs))
           @test chunk_processors(rand_v_auto)   == chunk_processors(randn_v_auto) == chunk_processors(sprand_v_auto) == chunk_processors(ones_v_auto) == chunk_processors(zeros_v_auto) ==  tile_processors(get_assignment_procgrid(v, numprocs, get_default_blockgrid(v, numprocs)), get_default_blockgrid(v, numprocs))
           @test chunk_processors(rand_M_auto)   == chunk_processors(randn_M_auto) == chunk_processors(sprand_M_auto) == chunk_processors(ones_M_auto) == chunk_processors(zeros_M_auto) ==  tile_processors(get_assignment_procgrid(M, numprocs, get_default_blockgrid(M, numprocs)), get_default_blockgrid(M, numprocs))
 
@@ -419,7 +414,6 @@ end
           dist_v_exp_def     = distribute(v, d_blocks_v, assignment); fetch(dist_v_exp_def)
           dist_v_blocks_exp  = distribute(v, blocks_v,   assignment); fetch(dist_v_blocks_exp)
           dist_v_nblocks_exp = distribute(v, blocks_nv,  assignment); fetch(dist_v_nblocks_exp)
-          dist_v_vblocks_exp = distribute(v, blocks_vv,  assignment); fetch(dist_v_vblocks_exp)
           dist_M_exp_def     = distribute(M, d_blocks_m, assignment); fetch(dist_M_exp_def)
           dist_M_blocks_exp  = distribute(M, blocks_m,   assignment); fetch(dist_M_blocks_exp)
 
@@ -430,7 +424,7 @@ end
 
           @test chunk_processors(dist_A_exp_def)      == chunk_processors(dist_A_blocks_exp) == chunk_processors(darr_A_exp_def) == tile_processors(get_assignment_procgrid(A, numprocs, blocks_a), blocks_a)
           @test chunk_processors(dist_v_exp_def)      == chunk_processors(dist_v_blocks_exp) == chunk_processors(dvec_v_exp_def) == tile_processors(get_assignment_procgrid(v, numprocs, blocks_v), blocks_v)
-          @test chunk_processors(dist_v_nblocks_exp)  == chunk_processors(dist_v_vblocks_exp)                                    == tile_processors(get_assignment_procgrid(v, numprocs, blocks_v), blocks_v)
+          @test chunk_processors(dist_v_nblocks_exp)                                                                             == tile_processors(get_assignment_procgrid(v, numprocs, blocks_v), blocks_v)
           @test chunk_processors(dist_M_exp_def)      == chunk_processors(dist_M_blocks_exp) == chunk_processors(dmat_M_exp_def) == tile_processors(get_assignment_procgrid(M, numprocs, blocks_m), blocks_m)
           
         end
@@ -441,17 +435,12 @@ end
           rand_v_exp   =        rand(  d_blocks_v, size(v)...;   assignment=assignment); fetch(rand_v_exp)
           rand_M_exp   =        rand(  d_blocks_m, size(M)...;   assignment=assignment); fetch(rand_M_exp)
 
-          rand_A_exp    =        rand(  d_blocks_a, size(A)...; assignment=assignment); fetch(rand_A_exp)
-          rand_v_exp    =        rand(  d_blocks_v, size(v)...; assignment=assignment); fetch(rand_v_exp)
-          rand_M_exp    =        rand(  d_blocks_m, size(M)...; assignment=assignment); fetch(rand_M_exp)
-
           randn_A_exp   =        randn( d_blocks_a, size(A)...; assignment=assignment); fetch(randn_A_exp)
           randn_v_exp   =        randn( d_blocks_v, size(v)...; assignment=assignment); fetch(randn_v_exp)
           randn_M_exp   =        randn( d_blocks_m, size(M)...; assignment=assignment); fetch(randn_M_exp)
 
-          # sprand_A_exp  = Dagger.sprand(d_blocks_a, size(A)..., 0.5; assignment=assignment); fetch(sprand_A_exp)
-          sprand_v_exp  = Dagger.sprand(d_blocks_v, size(v)..., 0.5; assignment=assignment); fetch(sprand_v_exp)
-          sprand_M_exp  = Dagger.sprand(d_blocks_m, size(M)..., 0.5; assignment=assignment); fetch(sprand_M_exp)
+          sprand_v_exp  = sprand(d_blocks_v, size(v)..., 0.5; assignment=assignment); fetch(sprand_v_exp)
+          sprand_M_exp  = sprand(d_blocks_m, size(M)..., 0.5; assignment=assignment); fetch(sprand_M_exp)
 
           ones_A_exp    =        ones(  d_blocks_a, size(A)...; assignment=assignment); fetch(ones_A_exp)
           ones_v_exp    =        ones(  d_blocks_v, size(v)...; assignment=assignment); fetch(ones_v_exp)
@@ -461,10 +450,9 @@ end
           zeros_v_exp   =        zeros( d_blocks_v, size(v)...; assignment=assignment); fetch(zeros_v_exp)
           zeros_M_exp   =        zeros( d_blocks_m, size(M)...; assignment=assignment); fetch(zeros_M_exp)
 
-          # @test chunk_processors(rand_A_exp) == chunk_processors(randn_A_exp) ==                                   chunk_processors(ones_A_exp) == chunk_processors(zeros_A_exp) == tile_processors(get_assignment_procgrid(A, numprocs, get_default_blockgrid(A, numprocs)), get_default_blockgrid(A, numprocs))
-          # @test chunk_processors(sprand_A_exp) == tile_processors(get_assignment_procgrid(A, numprocs, get_default_blockgrid(A, numprocs)), get_default_blockgrid(A, numprocs))
-          # @test chunk_processors(rand_v_exp) == chunk_processors(randn_v_exp) == chunk_processors(sprand_v_exp) == chunk_processors(ones_v_exp) == chunk_processors(zeros_v_exp) == tile_processors(get_assignment_procgrid(v, numprocs, get_default_blockgrid(v, numprocs)), get_default_blockgrid(v, numprocs))
-          # @test chunk_processors(rand_M_exp) == chunk_processors(randn_M_exp) == chunk_processors(sprand_M_exp) == chunk_processors(ones_M_exp) == chunk_processors(zeros_M_exp) == tile_processors(get_assignment_procgrid(M, numprocs, get_default_blockgrid(M, numprocs)), get_default_blockgrid(M, numprocs))
+          @test chunk_processors(rand_A_exp) == chunk_processors(randn_A_exp) ==                                   chunk_processors(ones_A_exp) == chunk_processors(zeros_A_exp) == tile_processors(get_assignment_procgrid(A, numprocs, blocks_a), blocks_a)
+          @test chunk_processors(rand_v_exp) == chunk_processors(randn_v_exp) == chunk_processors(sprand_v_exp) == chunk_processors(ones_v_exp) == chunk_processors(zeros_v_exp) == tile_processors(get_assignment_procgrid(v, numprocs, blocks_v), blocks_v)
+          @test chunk_processors(rand_M_exp) == chunk_processors(randn_M_exp) == chunk_processors(sprand_M_exp) == chunk_processors(ones_M_exp) == chunk_processors(zeros_M_exp) == tile_processors(get_assignment_procgrid(M, numprocs, blocks_m), blocks_m)
 
         end
             
@@ -481,19 +469,19 @@ end
 
   @testset "OSProc ID Array Assignment (AbstractArray{<:Int, N})" begin
 
-    function get_random_threadprocs(proc_ids)
-      [Dagger.ThreadProc(proc, 1) for proc in proc_ids]
+      function get_random_threadprocs(proc_ids)
+      [ThreadProc(proc, 1) for proc in proc_ids]
     end
 
-    rand_osproc_ids_A = rand(Dagger.procs(), 3, 2, 2)
-    rand_osproc_ids_v = rand(Dagger.procs(), 11)
-    rand_osproc_ids_M = rand(Dagger.procs(), 2, 5)
+    rand_osproc_ids_A = rand(procs(), 3, 2, 2)
+    rand_osproc_ids_v = rand(procs(), 11)
+    rand_osproc_ids_M = rand(procs(), 2, 5)
 
     @testset "Auto Blocks" begin
 
       dist_A_rand_osproc_auto = distribute(A,               rand_osproc_ids_A); fetch(dist_A_rand_osproc_auto)
       dist_A_auto_rand_osproc = distribute(A, AutoBlocks(), rand_osproc_ids_A); fetch(dist_A_auto_rand_osproc)
-      # dist_v_rand_osproc_auto = distribute(v,               rand_osproc_ids_v); fetch(dist_v_rand_osproc_auto)
+      dist_v_rand_osproc_auto = distribute(v,               rand_osproc_ids_v); fetch(dist_v_rand_osproc_auto)
       dist_v_auto_rand_osproc = distribute(v, AutoBlocks(), rand_osproc_ids_v); fetch(dist_v_auto_rand_osproc)
       dist_M_rand_osproc_auto = distribute(M,               rand_osproc_ids_M); fetch(dist_M_rand_osproc_auto)
       dist_M_auto_rand_osproc = distribute(M, AutoBlocks(), rand_osproc_ids_M); fetch(dist_M_auto_rand_osproc)
@@ -502,14 +490,14 @@ end
       darr_A_auto_rand_osproc = DArray(    A, AutoBlocks(), rand_osproc_ids_A); fetch(darr_A_auto_rand_osproc)
       dvec_v_rand_osproc_auto = DVector(   v,               rand_osproc_ids_v); fetch(dvec_v_rand_osproc_auto)
       dvec_v_auto_rand_osproc = DVector(   v, AutoBlocks(), rand_osproc_ids_v); fetch(dvec_v_auto_rand_osproc)
-      # dmat_M_rand_osproc_auto = DMatrix(   M,               rand_osproc_ids_M); fetch(dmat_M_rand_osproc_auto) ### rand_osproc_ids_M assigned as Blocks
+      dmat_M_rand_osproc_auto = DMatrix(   M,               rand_osproc_ids_M); fetch(dmat_M_rand_osproc_auto) ### rand_osproc_ids_M assigned as Blocks
       dmat_M_auto_rand_osproc = DMatrix(   M, AutoBlocks(), rand_osproc_ids_M); fetch(dmat_M_auto_rand_osproc)
 
       @test chunk_processors(dist_A_rand_osproc_auto) == chunk_processors(dist_A_auto_rand_osproc) == chunk_processors(darr_A_rand_osproc_auto) == chunk_processors(darr_A_auto_rand_osproc) == tile_processors(get_random_threadprocs(rand_osproc_ids_A), get_default_blockgrid(A, numprocs))
       @test                                              chunk_processors(dist_v_auto_rand_osproc) == chunk_processors(dvec_v_rand_osproc_auto) == chunk_processors(dvec_v_auto_rand_osproc) == tile_processors(get_random_threadprocs(rand_osproc_ids_v), get_default_blockgrid(v, numprocs))
-      # @test chunk_processors(dist_v_rand_osproc_auto) == tile_processors(get_random_threadprocs(rand_osproc_ids_v), get_default_blockgrid(v, numprocs)) 
+      @test chunk_processors(dist_v_rand_osproc_auto) == tile_processors(get_random_threadprocs(rand_osproc_ids_v), get_default_blockgrid(v, numprocs)) 
       @test chunk_processors(dist_M_rand_osproc_auto) == chunk_processors(dist_M_auto_rand_osproc)  == chunk_processors(dmat_M_auto_rand_osproc) == tile_processors(get_random_threadprocs(rand_osproc_ids_M), get_default_blockgrid(M, numprocs))
-      # @test chunk_processors(dmat_M_rand_osproc_auto) == tile_processors(get_random_threadprocs(rand_osproc_ids_M), get_default_blockgrid(M, numprocs))
+      @test chunk_processors(dmat_M_rand_osproc_auto) == tile_processors(get_random_threadprocs(rand_osproc_ids_M), get_default_blockgrid(M, numprocs))
     end
 
     @testset "Functions with AutoBlocks" begin
@@ -522,9 +510,8 @@ end
       randn_v_auto   =        randn( AutoBlocks(), size(v)...; assignment=rand_osproc_ids_v); fetch(randn_v_auto)
       randn_M_auto   =        randn( AutoBlocks(), size(M)...; assignment=rand_osproc_ids_M); fetch(randn_M_auto)
 
-      # sprand_A_auto  = Dagger.sprand(AutoBlocks(), size(A)..., 0.5; assignment=rand_osproc_ids_A); fetch(sprand_A_auto)
-      sprand_v_auto  = Dagger.sprand(AutoBlocks(), size(v)..., 0.5; assignment=rand_osproc_ids_v); fetch(sprand_v_auto)
-      sprand_M_auto  = Dagger.sprand(AutoBlocks(), size(M)..., 0.5; assignment=rand_osproc_ids_M); fetch(sprand_M_auto)
+      sprand_v_auto  = sprand(AutoBlocks(), size(v)..., 0.5; assignment=rand_osproc_ids_v); fetch(sprand_v_auto)
+      sprand_M_auto  = sprand(AutoBlocks(), size(M)..., 0.5; assignment=rand_osproc_ids_M); fetch(sprand_M_auto)
 
       ones_A_auto    =        ones(  AutoBlocks(), size(A)...; assignment=rand_osproc_ids_A); fetch(ones_A_auto)
       ones_v_auto    =        ones(  AutoBlocks(), size(v)...; assignment=rand_osproc_ids_v); fetch(ones_v_auto)
@@ -536,7 +523,6 @@ end
 
  
       @test chunk_processors(rand_A_auto)   == chunk_processors(randn_A_auto) ==                                    chunk_processors(ones_A_auto) == chunk_processors(zeros_A_auto) == tile_processors(get_random_threadprocs(rand_osproc_ids_A), get_default_blockgrid(rand_A_auto, numprocs))
-    # @test chunk_processors(sprand_A_auto) == tile_processors(get_assignment_procgrid(A, numprocs, get_default_blockgrid(A, numprocs)), get_default_blockgrid(A, numprocs))
       @test chunk_processors(rand_v_auto)   == chunk_processors(randn_v_auto) == chunk_processors(sprand_v_auto) == chunk_processors(ones_v_auto) == chunk_processors(zeros_v_auto) == tile_processors(get_random_threadprocs(rand_osproc_ids_v), get_default_blockgrid(rand_v_auto, numprocs))
       @test chunk_processors(rand_M_auto)   == chunk_processors(randn_M_auto) == chunk_processors(sprand_M_auto) ==  chunk_processors(ones_M_auto) == chunk_processors(zeros_M_auto) == tile_processors(get_random_threadprocs(rand_osproc_ids_M), get_default_blockgrid(rand_M_auto, numprocs))
 
@@ -549,7 +535,6 @@ end
       dist_v_exp_rand_osproc     = distribute(v, d_blocks_v, rand_osproc_ids_v); fetch(dist_v_exp_rand_osproc)
       dist_v_blocks_rand_osproc  = distribute(v, blocks_v,   rand_osproc_ids_v); fetch(dist_v_blocks_rand_osproc)
       dist_v_nblocks_rand_osproc = distribute(v, blocks_nv,  rand_osproc_ids_v); fetch(dist_v_nblocks_rand_osproc)
-      dist_v_vblocks_rand_osproc = distribute(v, blocks_vv, rand_osproc_ids_v); fetch(dist_v_vblocks_rand_osproc)
       dist_M_exp_rand_osproc     = distribute(M, d_blocks_m, rand_osproc_ids_M); fetch(dist_M_exp_rand_osproc)
       dist_M_blocks_rand_osproc  = distribute(M, blocks_m,   rand_osproc_ids_M); fetch(dist_M_blocks_rand_osproc)
 
@@ -559,7 +544,7 @@ end
 
       @test chunk_processors(dist_A_exp_rand_osproc) == chunk_processors(dist_A_blocks_rand_osproc) == chunk_processors(darr_A_exp_rand_osproc) == tile_processors(get_random_threadprocs(rand_osproc_ids_A), blocks_a)
       @test chunk_processors(dist_v_exp_rand_osproc) == chunk_processors(dist_v_blocks_rand_osproc) == chunk_processors(dvec_v_exp_rand_osproc) == tile_processors(get_random_threadprocs(rand_osproc_ids_v), blocks_v)
-      @test chunk_processors(dist_v_nblocks_rand_osproc) == chunk_processors(dist_v_vblocks_rand_osproc)                                        == tile_processors(get_random_threadprocs(rand_osproc_ids_v), blocks_v)
+      @test chunk_processors(dist_v_nblocks_rand_osproc)                                                                                        == tile_processors(get_random_threadprocs(rand_osproc_ids_v), blocks_v)
       @test chunk_processors(dist_M_exp_rand_osproc) == chunk_processors(dist_M_blocks_rand_osproc) == chunk_processors(dmat_M_exp_rand_osproc) == tile_processors(get_random_threadprocs(rand_osproc_ids_M), blocks_m)
 
     end
@@ -574,9 +559,8 @@ end
       randn_v_exp   =        randn( d_blocks_v, size(v)...; assignment=rand_osproc_ids_v); fetch(randn_v_exp)
       randn_M_exp   =        randn( d_blocks_m, size(M)...; assignment=rand_osproc_ids_M); fetch(randn_M_exp)
 
-      # sprand_A_exp  = Dagger.sprand(d_blocks_a, size(A)..., 0.5; assignment=rand_osproc_ids_A); fetch(sprand_A_exp)
-      sprand_v_exp  = Dagger.sprand(d_blocks_v, size(v)..., 0.5; assignment=rand_osproc_ids_v); fetch(sprand_v_exp)
-      sprand_M_exp  = Dagger.sprand(d_blocks_m, size(M)..., 0.5; assignment=rand_osproc_ids_M); fetch(sprand_M_exp)
+      sprand_v_exp  = sprand(d_blocks_v, size(v)..., 0.5; assignment=rand_osproc_ids_v); fetch(sprand_v_exp)
+      sprand_M_exp  = sprand(d_blocks_m, size(M)..., 0.5; assignment=rand_osproc_ids_M); fetch(sprand_M_exp)
 
       ones_A_exp    =        ones(  d_blocks_a, size(A)...; assignment=rand_osproc_ids_A); fetch(ones_A_exp)
       ones_v_exp    =        ones(  d_blocks_v, size(v)...; assignment=rand_osproc_ids_v); fetch(ones_v_exp)
@@ -588,7 +572,6 @@ end
 
  
       @test chunk_processors(rand_A_exp)   == chunk_processors(randn_A_exp) ==                                    chunk_processors(ones_A_exp) == chunk_processors(zeros_A_exp) == tile_processors(get_random_threadprocs(rand_osproc_ids_A), blocks_a)
-    # @test chunk_processors(sprand_A_exp) == tile_processors(get_assignment_procgrid(A, numprocs, get_default_blockgrid(A, numprocs)), blocks_a)
       @test chunk_processors(rand_v_exp)   == chunk_processors(randn_v_exp) == chunk_processors(sprand_v_exp) == chunk_processors(ones_v_exp) == chunk_processors(zeros_v_exp) == tile_processors(get_random_threadprocs(rand_osproc_ids_v), blocks_v)
       @test chunk_processors(rand_M_exp)   == chunk_processors(randn_M_exp) == chunk_processors(sprand_M_exp) ==  chunk_processors(ones_M_exp) == chunk_processors(zeros_M_exp) == tile_processors(get_random_threadprocs(rand_osproc_ids_M), blocks_m)
 
@@ -599,9 +582,9 @@ end
 
   @testset "Explicit Processor Array Assignment (AbstractArray{<:Processor, N})" begin
 
-    rand_procs_A = reshape(availprocs[ rand(Dagger.procs(),  6) ], 2, 3, 1)
-    rand_procs_v = reshape(availprocs[ rand(Dagger.procs(),  5) ], 5)
-    rand_procs_M = reshape(availprocs[ rand(Dagger.procs(), 14) ], 2, 7)
+    rand_procs_A = reshape(availprocs[ rand(procs(),  6) ], 2, 3, 1)
+    rand_procs_v = reshape(availprocs[ rand(procs(),  5) ], 5)
+    rand_procs_M = reshape(availprocs[ rand(procs(), 14) ], 2, 7)
 
 
     @testset "Auto Blocks" begin
@@ -628,31 +611,29 @@ end
 
     @testset "Functions with AutoBlocks" begin
 
-      # rand_A_auto    =        rand(  AutoBlocks(), size(A)...; assignment=rand_procs_A); fetch(rand_A_auto)
-      # rand_v_auto    =        rand(  AutoBlocks(), size(v)...; assignment=rand_procs_v); fetch(rand_v_auto)
-      # rand_M_auto    =        rand(  AutoBlocks(), size(M)...; assignment=rand_procs_M); fetch(rand_M_auto)
+      rand_A_auto    =        rand(  AutoBlocks(), size(A)...; assignment=rand_procs_A); fetch(rand_A_auto)
+      rand_v_auto    =        rand(  AutoBlocks(), size(v)...; assignment=rand_procs_v); fetch(rand_v_auto)
+      rand_M_auto    =        rand(  AutoBlocks(), size(M)...; assignment=rand_procs_M); fetch(rand_M_auto)
 
-      # randn_A_auto   =        randn( AutoBlocks(), size(A)...; assignment=rand_procs_A); fetch(randn_A_auto)
-      # randn_v_auto   =        randn( AutoBlocks(), size(v)...; assignment=rand_procs_v); fetch(randn_v_auto)
-      # randn_M_auto   =        randn( AutoBlocks(), size(M)...; assignment=rand_procs_M); fetch(randn_M_auto)
+      randn_A_auto   =        randn( AutoBlocks(), size(A)...; assignment=rand_procs_A); fetch(randn_A_auto)
+      randn_v_auto   =        randn( AutoBlocks(), size(v)...; assignment=rand_procs_v); fetch(randn_v_auto)
+      randn_M_auto   =        randn( AutoBlocks(), size(M)...; assignment=rand_procs_M); fetch(randn_M_auto)
 
-      # # sprand_A_auto  = Dagger.sprand(AutoBlocks(), size(A)..., 0.5; assignment=rand_procs_A); fetch(sprand_A_auto)
-      # sprand_v_auto  = Dagger.sprand(AutoBlocks(), size(v)..., 0.5; assignment=rand_procs_v); fetch(sprand_v_auto)
-      # sprand_M_auto  = Dagger.sprand(AutoBlocks(), size(M)..., 0.5; assignment=rand_procs_M); fetch(sprand_M_auto)
+      sprand_v_auto  = sprand(AutoBlocks(), size(v)..., 0.5; assignment=rand_procs_v); fetch(sprand_v_auto)
+      sprand_M_auto  = sprand(AutoBlocks(), size(M)..., 0.5; assignment=rand_procs_M); fetch(sprand_M_auto)
 
-      # ones_A_auto    =        ones(  AutoBlocks(), size(A)...; assignment=rand_procs_A); fetch(ones_A_auto)
-      # ones_v_auto    =        ones(  AutoBlocks(), size(v)...; assignment=rand_procs_v); fetch(ones_v_auto)
-      # ones_M_auto    =        ones(  AutoBlocks(), size(M)...; assignment=rand_procs_M); fetch(ones_M_auto)
+      ones_A_auto    =        ones(  AutoBlocks(), size(A)...; assignment=rand_procs_A); fetch(ones_A_auto)
+      ones_v_auto    =        ones(  AutoBlocks(), size(v)...; assignment=rand_procs_v); fetch(ones_v_auto)
+      ones_M_auto    =        ones(  AutoBlocks(), size(M)...; assignment=rand_procs_M); fetch(ones_M_auto)
 
-      # zeros_A_auto   =        zeros( AutoBlocks(), size(A)...; assignment=rand_procs_A); fetch(zeros_A_auto)
-      # zeros_v_auto   =        zeros( AutoBlocks(), size(v)...; assignment=rand_procs_v); fetch(zeros_v_auto)
-      # zeros_M_auto   =        zeros( AutoBlocks(), size(M)...; assignment=rand_procs_M); fetch(zeros_M_auto)
+      zeros_A_auto   =        zeros( AutoBlocks(), size(A)...; assignment=rand_procs_A); fetch(zeros_A_auto)
+      zeros_v_auto   =        zeros( AutoBlocks(), size(v)...; assignment=rand_procs_v); fetch(zeros_v_auto)
+      zeros_M_auto   =        zeros( AutoBlocks(), size(M)...; assignment=rand_procs_M); fetch(zeros_M_auto)
 
  
       @test chunk_processors(rand_A_auto)   == chunk_processors(randn_A_auto) ==                                    chunk_processors(ones_A_auto) == chunk_processors(zeros_A_auto) == tile_processors(rand_procs_A, get_default_blockgrid(A, numprocs))
-    # @test chunk_processors(sprand_A_auto) == tile_processors(get_assignment_procgrid(A, numprocs, get_default_blockgrid(A, numprocs)), get_default_blockgrid(A, numprocs))
-      # @test chunk_processors(rand_v_auto)   == chunk_processors(randn_v_auto) == chunk_processors(sprand_v_auto) == chunk_processors(ones_v_auto) == chunk_processors(zeros_v_auto) == tile_processors(rand_procs_v, get_default_blockgrid(v, numprocs))
-      # @test chunk_processors(rand_M_auto)   == chunk_processors(randn_M_auto) == chunk_processors(sprand_M_auto) ==  chunk_processors(ones_M_auto) == chunk_processors(zeros_M_auto) == tile_processors(rand_procs_M, get_default_blockgrid(M, numprocs))
+      @test chunk_processors(rand_v_auto)   == chunk_processors(randn_v_auto) == chunk_processors(sprand_v_auto) == chunk_processors(ones_v_auto) == chunk_processors(zeros_v_auto) == tile_processors(rand_procs_v, get_default_blockgrid(v, numprocs))
+      @test chunk_processors(rand_M_auto)   == chunk_processors(randn_M_auto) == chunk_processors(sprand_M_auto) ==  chunk_processors(ones_M_auto) == chunk_processors(zeros_M_auto) == tile_processors(rand_procs_M, get_default_blockgrid(M, numprocs))
 
     end
 
@@ -663,7 +644,6 @@ end
       dist_v_exp_rand_procs     = distribute(v, d_blocks_v, rand_procs_v); fetch(dist_v_exp_rand_procs)
       dist_v_blocks_rand_procs  = distribute(v, blocks_v,   rand_procs_v); fetch(dist_v_blocks_rand_procs)
       dist_v_nblocks_rand_procs = distribute(v, blocks_nv, rand_procs_v); fetch(dist_v_nblocks_rand_procs)
-      dist_v_vblocks_rand_procs = distribute(v, blocks_vv, rand_procs_v); fetch(dist_v_vblocks_rand_procs)
       dist_M_exp_rand_procs     = distribute(M, d_blocks_m, rand_procs_M); fetch(dist_M_exp_rand_procs)
       dist_M_blocks_rand_procs  = distribute(M, blocks_m,   rand_procs_M); fetch(dist_M_blocks_rand_procs)
 
@@ -673,37 +653,35 @@ end
 
       @test chunk_processors(dist_A_exp_rand_procs)     == chunk_processors(dist_A_blocks_rand_procs)  == chunk_processors(darr_A_exp_rand_procs) == tile_processors(rand_procs_A, blocks_a)
       @test chunk_processors(dist_v_exp_rand_procs)     == chunk_processors(dist_v_blocks_rand_procs)  == chunk_processors(dvec_v_exp_rand_procs) == tile_processors(rand_procs_v, blocks_v)
-      @test chunk_processors(dist_v_nblocks_rand_procs) == chunk_processors(dist_v_vblocks_rand_procs)                                            == tile_processors(rand_procs_v, blocks_v)
+      @test chunk_processors(dist_v_nblocks_rand_procs)                                                                                           == tile_processors(rand_procs_v, blocks_v)
       @test chunk_processors(dist_M_exp_rand_procs)     == chunk_processors(dist_M_blocks_rand_procs)  == chunk_processors(dmat_M_exp_rand_procs) == tile_processors(rand_procs_M, blocks_m)
 
     end
 
     @testset "Functions with Explicit Blocks" begin
 
-      # rand_A_exp    =        rand(  d_blocks_a, size(A)...; assignment=rand_procs_A); fetch(rand_A_exp)
-      # rand_v_exp    =        rand(  d_blocks_v, size(v)...; assignment=rand_procs_v); fetch(rand_v_exp)
-      # rand_M_exp    =        rand(  d_blocks_m, size(M)...; assignment=rand_procs_M); fetch(rand_M_exp)
+      rand_A_exp    =        rand(  d_blocks_a, size(A)...; assignment=rand_procs_A); fetch(rand_A_exp)
+      rand_v_exp    =        rand(  d_blocks_v, size(v)...; assignment=rand_procs_v); fetch(rand_v_exp)
+      rand_M_exp    =        rand(  d_blocks_m, size(M)...; assignment=rand_procs_M); fetch(rand_M_exp)
 
-      # randn_A_exp   =        randn( d_blocks_a, size(A)...; assignment=rand_procs_A); fetch(randn_A_exp)
-      # randn_v_exp   =        randn( d_blocks_v, size(v)...; assignment=rand_procs_v); fetch(randn_v_exp)
-      # randn_M_exp   =        randn( d_blocks_m, size(M)...; assignment=rand_procs_M); fetch(randn_M_exp)
+      randn_A_exp   =        randn( d_blocks_a, size(A)...; assignment=rand_procs_A); fetch(randn_A_exp)
+      randn_v_exp   =        randn( d_blocks_v, size(v)...; assignment=rand_procs_v); fetch(randn_v_exp)
+      randn_M_exp   =        randn( d_blocks_m, size(M)...; assignment=rand_procs_M); fetch(randn_M_exp)
 
-      # # sprand_A_exp  = Dagger.sprand(d_blocks_a, size(A)..., 0.5; assignment=rand_procs_A); fetch(sprand_A_exp)
-      # sprand_v_exp  = Dagger.sprand(d_blocks_v, size(v)..., 0.5; assignment=rand_procs_v); fetch(sprand_v_exp)
-      # sprand_M_exp  = Dagger.sprand(d_blocks_m, size(M)..., 0.5; assignment=rand_procs_M); fetch(sprand_M_exp)
+      sprand_v_exp  =        sprand(d_blocks_v, size(v)..., 0.5; assignment=rand_procs_v); fetch(sprand_v_exp)
+      sprand_M_exp  =        sprand(d_blocks_m, size(M)..., 0.5; assignment=rand_procs_M); fetch(sprand_M_exp)
 
-      # ones_A_exp    =        ones(  d_blocks_a, size(A)...; assignment=rand_procs_A); fetch(ones_A_exp)
-      # ones_v_exp    =        ones(  d_blocks_v, size(v)...; assignment=rand_procs_v); fetch(ones_v_exp)
-      # ones_M_exp    =        ones(  d_blocks_m, size(M)...; assignment=rand_procs_M); fetch(ones_M_exp)
+      ones_A_exp    =        ones(  d_blocks_a, size(A)...; assignment=rand_procs_A); fetch(ones_A_exp)
+      ones_v_exp    =        ones(  d_blocks_v, size(v)...; assignment=rand_procs_v); fetch(ones_v_exp)
+      ones_M_exp    =        ones(  d_blocks_m, size(M)...; assignment=rand_procs_M); fetch(ones_M_exp)
 
-      # zeros_A_exp   =        zeros( d_blocks_a, size(A)...; assignment=rand_procs_A); fetch(zeros_A_exp)
-      # zeros_v_exp   =        zeros( d_blocks_v, size(v)...; assignment=rand_procs_v); fetch(zeros_v_exp)
-      # zeros_M_exp   =        zeros( d_blocks_m, size(M)...; assignment=rand_procs_M); fetch(zeros_M_exp)
+      zeros_A_exp   =        zeros( d_blocks_a, size(A)...; assignment=rand_procs_A); fetch(zeros_A_exp)
+      zeros_v_exp   =        zeros( d_blocks_v, size(v)...; assignment=rand_procs_v); fetch(zeros_v_exp)
+      zeros_M_exp   =        zeros( d_blocks_m, size(M)...; assignment=rand_procs_M); fetch(zeros_M_exp)
  
-      # @test chunk_processors(rand_A_exp)   == chunk_processors(randn_A_exp) ==                                    chunk_processors(ones_A_exp) == chunk_processors(zeros_A_exp) == tile_processors(rand_procs_A, blocks_a)
-    # @test chunk_processors(sprand_A_exp) == tile_processors(get_assignment_procgrid(A, numprocs, get_default_blockgrid(A, numprocs)), blocks_a)
-      # @test chunk_processors(rand_v_exp)   == chunk_processors(randn_v_exp) == chunk_processors(sprand_v_exp) == chunk_processors(ones_v_exp) == chunk_processors(zeros_v_exp) == tile_processors(rand_procs_A, blocks_a)
-      # @test chunk_processors(rand_M_exp)   == chunk_processors(randn_M_exp) == chunk_processors(sprand_M_exp) ==  chunk_processors(ones_M_exp) == chunk_processors(zeros_M_exp) == tile_processors(rand_procs_A, blocks_a)
+      @test chunk_processors(rand_A_exp)   == chunk_processors(randn_A_exp) ==                                    chunk_processors(ones_A_exp) == chunk_processors(zeros_A_exp) == tile_processors(rand_procs_A, blocks_a)
+      @test chunk_processors(rand_v_exp)   == chunk_processors(randn_v_exp) == chunk_processors(sprand_v_exp) == chunk_processors(ones_v_exp) == chunk_processors(zeros_v_exp) == tile_processors(rand_procs_v, blocks_v)
+      @test chunk_processors(rand_M_exp)   == chunk_processors(randn_M_exp) == chunk_processors(sprand_M_exp) ==  chunk_processors(ones_M_exp) == chunk_processors(zeros_M_exp) == tile_processors(rand_procs_M, blocks_m)
 
     end
 

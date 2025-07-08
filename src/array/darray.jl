@@ -550,7 +550,6 @@ function distribute(x::AbstractArray{T,N}, n::NTuple{N}, assignment::AssignmentT
     distribute(x, Blocks(p), assignment)
 end
 distribute(x::AbstractVector, n::Int, assignment::AssignmentType{1} = :arbitrary) = distribute(x, (n,), assignment)
-distribute(x::AbstractVector, n::Vector{<:Integer}, assignment::AssignmentType{1} = :arbitrary) = distribute(x, n[1], assignment)
 
 DVector(A::AbstractVector{T}, part::Blocks{1}, assignment::AssignmentType{1} = :arbitrary) where T = distribute(A, part, assignment)
 DMatrix(A::AbstractMatrix{T}, part::Blocks{2}, assignment::AssignmentType{2} = :arbitrary) where T = distribute(A, part, assignment)
