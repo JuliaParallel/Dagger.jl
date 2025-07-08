@@ -32,13 +32,11 @@ function searchmax_pivot!(piv_idx::AbstractArray{Int}, piv_val::AbstractArray{T}
     max_idx = argmax(abs.(A[:]))
     piv_idx[1] = offset+max_idx
     piv_val[1] = A[max_idx]
-    println("searchmax_pivot: ", piv_idx[1], "\n", abs(piv_val[1]))
 end
 
 function update_ipiv!(ipivl, piv_idx::AbstractArray{Int}, piv_val::AbstractArray{T}, k::Int, nb::Int) where T
     max_piv_idx = argmax(abs.(piv_val))
     ipivl[1] = (max_piv_idx+k-2)*nb +  piv_idx[max_piv_idx]
-    println("update_ipiv: ", ipivl[1])
 end
 
 function swaprows_panel!(A::AbstractArray{T}, M::AbstractArray{T}, ipivl::AbstractVector{Int}, m::Int, p::Int, nb::Int) where T
@@ -46,7 +44,6 @@ function swaprows_panel!(A::AbstractArray{T}, M::AbstractArray{T}, ipivl::Abstra
     r = (ipivl[1]-1)%nb+1
     if m == q
         A[p,:], M[r,:] = M[r,:], A[p,:]
-        println("swaprows_panel: ", imag.(A[p,:]), "\n", imag.(M[r,:]))
     end
 end
 
@@ -62,7 +59,6 @@ function swaprows_trail!(A::AbstractArray{T}, M::AbstractArray{T}, ipiv::Abstrac
         r = (ipiv[p]-1)%nb+1
         if m == q
             A[p,:], M[r,:] = M[r,:], A[p,:]
-        println("swaprows_trail: ", imag.(A[p,:]), "\n", imag.(M[r,:]))
         end
     end
 end
