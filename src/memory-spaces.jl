@@ -389,7 +389,7 @@ function will_alias(x_span::MemorySpan, y_span::MemorySpan)
     return x_span.ptr <= y_end && y_span.ptr <= x_end
 end
 
-struct DView{N}
+struct ChunkView{N}
     chunk::Chunk
     slices::NTuple{N, Union{Int, AbstractRange{Int}, Colon}}
 end
@@ -413,23 +413,23 @@ function Base.view(c::Chunk, slices...)
         end
     end
 
-    return DView(c, slices)
+    return ChunkView(c, slices)
 end
 
 Base.view(c::DTask, slices...) = view(fetch(c; raw=true), slices...)
 
-function aliasing(x::DView{N}) where N
+function aliasing(x::ChunkView{N}) where N
     remotecall_fetch(root_worker_id(x.chunk.processor), x.chunk, x.slices) do x, slices
         x = unwrap(x)
         v = view(x, slices...)
         return aliasing(v)
     end
 end
-memory_space(x::DView) = memory_space(x.chunk)
-isremotehandle(x::DView) = true
+memory_space(x::ChunkView) = memory_space(x.chunk)
+isremotehandle(x::ChunkView) = true
 
 #=
-function move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::DView, from::DView)
+function move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::ChunkView, from::ChunkView)
     to_w = root_worker_id(to_space)
     @assert to_w == myid()
     to_raw = unwrap(to.chunk)
@@ -442,7 +442,7 @@ function move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::DVie
 end
 =#
 
-function move(from_proc::Processor, to_proc::Processor, slice::DView)
+function move(from_proc::Processor, to_proc::Processor, slice::ChunkView)
     if from_proc == to_proc
         return view(unwrap(slice.chunk), slice.slices...)
     else
@@ -455,4 +455,4 @@ function move(from_proc::Processor, to_proc::Processor, slice::DView)
     end
 end
 
-Base.fetch(slice::DView) = view(fetch(slice.chunk), slice.slices...)
+Base.fetch(slice::ChunkView) = view(fetch(slice.chunk), slice.slices...)

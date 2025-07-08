@@ -221,13 +221,16 @@ function Dagger.move!(dep_mod::Any, from_space::Dagger.MemorySpace, to_space::Da
 end
 ```
 
-### Chunk and DTask slicing with `view`
+## Chunk and DTask slicing with `view`
 
-The `view` function allows you to efficiently create a "view" of a `Chunk` or `DTask` that contains an array. This enables operations on specific parts of your distributed data using standard Julia array slicing, without needing to materialize the entire chunk.
+The `view` function allows you to efficiently create a "view" of a `Chunk` or `DTask` that contains an array. This enables operations on specific parts of your distributed data using standard Julia array slicing, without needing to materialize the entire array.
 
-```view(c::Chunk, slices...) & view(c::DTask, slices...)```
+```julia
+    view(c::Chunk, slices...) -> ChunkView
+    view(c::DTask, slices...) -> ChunkView
+```
 
-These methods create a `view` for a `DArray` `Chunk` object or for a `DTask` that will produce a `DArray` `Chunk`. You specify the desired sub-region using standard Julia array slicing syntax, identical to how you would slice a regular Array.
+These methods create a `ChunkView` of a `Chunk` or `DTask`, which may be used as an argument to a `Dagger.@spawn` call in a Datadeps region. You specify the desired view using standard Julia array slicing syntax, identical to how you would slice a regular array.
 
 #### Examples
 
@@ -260,10 +263,11 @@ ChunkSlice{2}(Dagger.Chunk(...), (1:2:7, 2:2:8))
 ```
 
 #### Example Usage: Parallel Row Summation of a DArray using `view`
-This example demonstrates how to sum multiple rows of a `DArray` by using `view` to process individual rows within chunks to get Row Sum Vector.
+
+This example demonstrates how to sum multiple rows of a `DArray` by using `view` to process individual rows within chunks to get a vector of row sums.
 
 ```julia
-julia> A = DArray(rand(10,1000), Blocks(2,1000))
+julia> A = DArray(rand(10, 1000), Blocks(2, 1000))
 10x1000 DMatrix{Float64} with 5x1 partitions of size 2x1000: 
 [...]
 
@@ -283,12 +287,14 @@ julia> Dagger.spawn_datadeps() do
            sz = size(A.chunks,1) 
            nrows_per_chunk = nrows ÷ sz
            for i in 1:sz
-              for j in 1:nrows_per_chunk
-               Dagger.@spawn sum_array_row!(Out(view(row_sums, (nrows_per_chunk*(i-1)+j):(nrows_per_chunk*(i-1)+j))), In(Dagger.view(BD.chunks[i,1], j:j, :)))
+               for j in 1:nrows_per_chunk
+                   Dagger.@spawn sum_array_row!(Out(view(row_sums, (nrows_per_chunk*(i-1)+j):(nrows_per_chunk*(i-1)+j))),
+                                                In(Dagger.view(A.chunks[i,1], j:j, :)))
+               end
            end
        end
 
 # Print the result
-julia> println("Row sum Vector: ", row_sums)
-Row sum Vector: [499.8765, 500.1234, ..., 499.9876]
+julia> println("Row sums: ", row_sums)
+Row sums: [499.8765, 500.1234, ..., 499.9876]
 ```

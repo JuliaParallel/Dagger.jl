@@ -1,4 +1,4 @@
-import Dagger: DView, Chunk
+import Dagger: ChunkView, Chunk
 using LinearAlgebra, Graphs
 
 @testset "Memory Aliasing" begin
@@ -18,7 +18,7 @@ using LinearAlgebra, Graphs
     @test s.sz == sizeof(3)
 end
 
-@testset "DView" begin
+@testset "ChunkView" begin
     DA = rand(Blocks(8, 8), 64, 64)
     task1 = DA.chunks[1,1]::DTask
     chunk1 = fetch(task1; raw=true)::Chunk
@@ -29,12 +29,12 @@ end
 
     for obj in (chunk1, task1)
         @testset "Valid Slices" begin
-            @test view(obj, :, :)     isa DView && view(obj, 1:8, 1:8)   isa DView
-            @test view(obj, 1:2:7, :) isa DView && view(obj, :, 2:2:8)   isa DView
-            @test view(obj, 1, :)     isa DView && view(obj, :, 1)       isa DView
-            @test view(obj, 3:3, 5:5) isa DView && view(obj, 5:7, 1:2:4) isa DView
-            @test view(obj, 8, 8)     isa DView
-            @test view(obj, 1:0, :)   isa DView
+            @test view(obj, :, :)     isa ChunkView && view(obj, 1:8, 1:8)   isa ChunkView
+            @test view(obj, 1:2:7, :) isa ChunkView && view(obj, :, 2:2:8)   isa ChunkView
+            @test view(obj, 1, :)     isa ChunkView && view(obj, :, 1)       isa ChunkView
+            @test view(obj, 3:3, 5:5) isa ChunkView && view(obj, 5:7, 1:2:4) isa ChunkView
+            @test view(obj, 8, 8)     isa ChunkView
+            @test view(obj, 1:0, :)   isa ChunkView
         end
 
         @testset "Dimension Mismatch" begin
