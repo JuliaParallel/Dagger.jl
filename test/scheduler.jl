@@ -1,3 +1,4 @@
+import Dagger: Chunk
 import Dagger.Sch: SchedulerOptions, ThunkOptions, SchedulerHaltedException, ComputeState, ThunkID, sch_handle
 
 @everywhere begin
@@ -162,10 +163,8 @@ end
             @test Dagger.default_enabled(Dagger.ThreadProc(1,1)) == true
             @test Dagger.default_enabled(FakeProc()) == false
 
-            opts = Dagger.Sch.ThunkOptions(;proclist=[Dagger.ThreadProc])
-            as = [delayed(identity; options=opts)(i) for i in 1:5]
-            opts = Dagger.Sch.ThunkOptions(;proclist=[FakeProc])
-            b = delayed(fakesum; options=opts)(as...)
+            as = [delayed(identity; proclist=[Dagger.ThreadProc])(i) for i in 1:5]
+            b = delayed(fakesum; proclist=[FakeProc], compute_scope=Dagger.AnyScope())(as...)
 
             @test collect(Context(), b) == FakeVal(57)
         end

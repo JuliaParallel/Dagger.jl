@@ -28,7 +28,6 @@ end
     for (option, default, value, value2) in [
         # Special handling
         (:scope, AnyScope(), ProcessScope(first_wid), ProcessScope(last_wid)),
-        (:processor, OSProc(), Dagger.ThreadProc(first_wid, 1), Dagger.ThreadProc(last_wid, 1)),
         # ThunkOptions field
         (:single, 0, first_wid, last_wid),
         # Thunk field
@@ -80,7 +79,7 @@ end
         @test fetch(Dagger.@spawn sf(obj)) == 0
         @test fetch(Dagger.@spawn sf(obj)) == 0
     end
-    Dagger.with_options(;scope=Dagger.ExactScope(Dagger.ThreadProc(1,1)), processor=OSProc(1), meta=true) do
+    Dagger.with_options(;scope=Dagger.ExactScope(Dagger.ThreadProc(1,1)), meta=true) do
         @test fetch(Dagger.@spawn sf(obj)) == 43
         @test fetch(Dagger.@spawn sf(obj)) == 43
     end

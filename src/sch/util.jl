@@ -42,9 +42,7 @@ function get_propagated_options(thunk)
     nt = NamedTuple()
     for key in thunk.propagates
         value = if key == :scope
-            isa(thunk.f, Chunk) ? thunk.f.scope : DefaultScope()
-        elseif key == :processor
-            isa(thunk.f, Chunk) ? thunk.f.processor : OSProc()
+            thunk.compute_scope
         elseif key in fieldnames(Thunk)
             getproperty(thunk, key)
         elseif key in fieldnames(ThunkOptions)
@@ -340,7 +338,7 @@ function can_use_proc(state, task, gproc, proc, opts, scope)
             scope = constrain(scope, Dagger.ExactScope(proc))
         elseif opts.proclist isa Vector
             if !(typeof(proc) in opts.proclist)
-                @dagdebug task :scope "Rejected $proc: !(typeof(proc) in proclist)"
+                @dagdebug task :scope "Rejected $proc: !(typeof(proc) in proclist) ($(opts.proclist))"
                 return false, scope
             end
             scope = constrain(scope,

@@ -289,6 +289,20 @@ struct StreamingFunction{F, S}
         new{F, S}(f, stream, max_evals)
 end
 
+struct DestPostMigration
+    thunk_id::Int
+    cancel_token::CancelToken
+    f
+    DestPostMigration(thunk_id, tls, f) = new(thunk_id, tls.cancel_token, f)
+end
+function (dpm::DestPostMigration)(store, unsent)
+    STREAM_THUNK_ID[] = dpm.thunk_id
+    @assert !in_task()
+    tls = DTaskTLS(OSProc(), typemax(UInt64), nothing, [], dpm.cancel_token)
+    set_tls!(tls)
+    return dpm.f(store, unsent)
+end
+
 function migrate_stream!(stream::Stream, w::Integer=myid())
     # Perform migration of the StreamStore
     # MemPool will block access to the new ref until the migration completes
@@ -318,11 +332,8 @@ function migrate_stream!(stream::Stream, w::Integer=myid())
                                              empty!(store.output_buffers)
                                              return (unsent_inputs, unsent_outputs)
                                          end,
-                                         dest_post_migration=(store, unsent)->begin
+                                         dest_post_migration=DestPostMigration(thunk_id, tls, (store, unsent)->begin
                                              # Initialize the StreamStore on the destination with the unsent inputs/outputs.
-                                             STREAM_THUNK_ID[] = thunk_id
-                                             @assert !in_task()
-                                             set_tls!(tls)
                                              #get_tls().cancel_token = MemPool.access_ref(identity, remote_cancel_token; local_only=true)
                                              unsent_inputs, unsent_outputs = unsent
                                              for (input_uid, inputs) in unsent_inputs
@@ -342,7 +353,7 @@ function migrate_stream!(stream::Stream, w::Integer=myid())
                                              # Reset the state of this new store
                                              store.open = true
                                              store.migrating = false
-                                         end,
+                                         end),
                                          post_migration=store->begin
                                              # Indicate that this store has migrated
                                              store.migrating = true
