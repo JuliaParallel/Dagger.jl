@@ -46,6 +46,7 @@ if USE_GPU
     tests = [
         ("GPU", "gpu.jl"),
         ("Array - Stencils", "array/stencil.jl"),
+        ("Array - FFT", "array/fft.jl"),
     ]
 end
 all_test_names = map(test -> replace(last(test), ".jl"=>""), tests)
