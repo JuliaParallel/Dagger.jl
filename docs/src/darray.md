@@ -211,6 +211,78 @@ across the workers in the Julia cluster in a relatively even distribution;
 future operations on a `DArray` may produce a different distribution from the
 one chosen by previous calls.
 
+### DArray Chunk Slicing with `view`
+
+Dagger's `view` function allows you to efficiently create a "view" of a `DArray`'s `Chunk` or a `DTask` that produces a `DArray` `Chunk`. This enables operations on specific parts of your distributed data using standard Julia array slicing, without needing to materialize the entire chunk.
+
+```view(c::Chunk, slices...) & view(c::DTask, slices...)```
+
+These methods create a `view` for a `DArray` `Chunk` object or for a `DTask` that will produce a `DArray` `Chunk`. You specify the desired sub-region using standard Julia array slicing syntax, identical to how you would slice a regular Array.
+
+#### Examples
+
+```julia
+julia> A = rand(64, 64)
+64×64 Matrix{Float64}:
+[...]
+
+julia> DA = DArray(A, Blocks(8,8)) 
+64x64 DMatrix{Float64} with 8x8 partitions of size 8x8:
+[...]
+
+julia> chunk = DA.chunks[1,1] 
+DTask (finished)
+
+julia> view(chunk, :, :) # View the entire 8x8 chunk
+ChunkSlice{2}(Dagger.Chunk(...), (Colon(), Colon()))
+
+julia> view(chunk, 1:4, 1:4) # View the top-left 4x4 sub-region of the chunk
+ChunkSlice{2}(Dagger.Chunk(...), (1:4, 1:4))
+
+julia> view(chunk, 1, :) # View the first row of the chunk
+ChunkSlice{2}(Dagger.Chunk(...), (1, Colon()))
+
+julia> view(chunk, :, 5) # View the fifth column of the chunk
+ChunkSlice{2}(Dagger.Chunk(...), (Colon(), 5))
+
+julia> view(chunk, 1:2:7, 2:2:8) # View with stepped ranges
+ChunkSlice{2}(Dagger.Chunk(...), (1:2:7, 2:2:8))
+```
+
+#### Example Usage: Parallel Row Summation of a DArray using `view`
+This example demonstrates how to sum multiple rows of a `DArray` by using `view` to process individual rows within chunks to get Row Sum Vector.
+
+```julia
+julia> A = DArray(rand(10,1000), Blocks(2,1000))
+10x1000 DMatrix{Float64} with 5x1 partitions of size 2x1000: 
+[...]
+
+# Helper function to sum a single row and store it in a provided array view
+julia> @everywhere function sum_array_row!(row_sum::AbstractArray{Float64}, x::AbstractArray{Float64})
+    row_sum[1] = sum(x)
+end
+
+# Number of rows
+julia> nrows = size(A,1)
+
+# Initialize a zero array in the final row sums
+julia> row_sums = zeros(nrows)
+
+# Spawn tasks to sum each row in parallel using views
+julia> Dagger.spawn_datadeps() do
+           sz = size(A.chunks,1) 
+           nrows_per_chunk = nrows ÷ sz
+           for i in 1:sz
+              for j in 1:nrows_per_chunk
+               Dagger.@spawn sum_array_row!(Out(view(row_sums, (nrows_per_chunk*(i-1)+j):(nrows_per_chunk*(i-1)+j))), In(Dagger.view(BD.chunks[i,1], j:j, :)))
+           end
+       end
+
+# Print the result
+julia> println("Row sum Vector: ", row_sums)
+Row sum Vector: [499.8765, 500.1234, ..., 499.9876]
+```
+
 <!--  -->
 
 ### Explicit Processor Mapping of DArray Blocks
