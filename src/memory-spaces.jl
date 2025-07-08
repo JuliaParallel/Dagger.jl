@@ -122,7 +122,6 @@ memory_spans(::T) where T<:AbstractAliasing = throw(ArgumentError("Must define `
 memory_spans(x) = memory_spans(aliasing(x))
 memory_spans(x, T) = memory_spans(aliasing(x, T))
 
-
 struct AliasingWrapper <: AbstractAliasing
     inner::AbstractAliasing
     hash::UInt64
@@ -388,55 +387,3 @@ function will_alias(x_span::MemorySpan, y_span::MemorySpan)
     y_end = y_span.ptr + y_span.len - 1
     return x_span.ptr <= y_end && y_span.ptr <= x_end
 end
-
-struct ChunkSlice{N} #<: AbstractAliasing
-    chunk::Chunk
-    slices::NTuple{N, Union{Int, AbstractRange{Int}, Colon}}
-end
-
-Base.copyto!(dest::ChunkSlice, src::ChunkSlice) = copyto!(view(unwrap(dest.chunk), dest.slices...), view(unwrap(src.chunk), src.slices...))
-
-@inline function view(c::Chunk, slices...)
-    isa(c.domain, ArrayDomain) || throw(ArgumentError("Chunk must of a DArray (ArrayDomain), got $(typeof(c.domain))"))
-    nd, sz = ndims(c.domain), size(c.domain)
-    nd == length(slices) || throw(DimensionMismatch("Expected $nd slices, got $(length(slices))"))
-    
-    for (i, s) in enumerate(slices)
-        if s isa Int
-            1 ≤ s ≤ sz[i] || throw(ArgumentError("Index $s out of bounds for dimension $i (size $(sz[i]))"))
-        elseif s isa AbstractRange
-            isempty(s) && continue
-            1 ≤ first(s) ≤ last(s) ≤ sz[i] || throw(ArgumentError("Range $s out of bounds for dimension $i (size $(sz[i]))"))
-        elseif s === Colon()
-            continue
-        else
-            throw(ArgumentError("Invalid slice type $(typeof(s)) at dimension $i, Expected Type of Int, AbstractRange, or Colon"))  
-        end
-    end
-
-    return ChunkSlice(c, slices)
-end
-
-view(c::DTask, slices...) = view(fetch(c; raw=true), slices...)
-
-function aliasing(x::ChunkSlice{N}) where N
-    remotecall_fetch(root_worker_id(x.chunk.processor), x.chunk, x.slices) do x, slices
-        x = unwrap(x)
-        v = view(x, slices...)
-        return aliasing(v)
-    end
-end
-
-function move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::ChunkSlice, from::ChunkSlice)
-    to_w = root_worker_id(to_space)
-    remotecall_wait(to_w, dep_mod, to_space, from_space, to, from) do dep_mod, to_space, from_space, to, from
-        to_raw = unwrap(to.chunk)
-        from_w = root_worker_id(from_space)
-        from_raw = to_w == from_w ? unwrap(from.chunk) : remotecall_fetch(unwrap, from_w, from.chunk)
-        from_view = view(from_raw, from.slices...)
-        to_view = view(to_raw, to.slices...)
-        move!(dep_mod, to_space, from_space, to_view, from_view)
-    end
-end
-
-move(from_proc::Processor, to_proc::Processor, slice::ChunkSlice) = view(move(from_proc, to_proc, slice.chunk), slice.slices...)
