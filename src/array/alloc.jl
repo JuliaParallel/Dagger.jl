@@ -10,48 +10,49 @@ mutable struct AllocateArray{T,N} <: ArrayOp{T,N}
     domainchunks
     partitioning::AbstractBlocks{N}
     procgrid::Union{AbstractArray{<:Processor, N}, Nothing}
-end
-size(a::AllocateArray) = size(a.domain)
 
-function AllocateArray(assignment::AssignmentType{N}, eltype::Type{T}, f, want_index::Bool, d::ArrayDomain{N}, domainchunks, p::AbstractBlocks{N}) where {T,N}
-    sizeA = map(length, d.indexes)
-    procgrid = nothing
-    availprocs = collect(Dagger.all_processors())
-    sort!(availprocs, by = x -> (x.owner, x.tid))
-    if assignment isa Symbol
-        if assignment == :arbitrary
-            procgrid = nothing
-        elseif assignment == :blockrow
-            q = ntuple(i -> i == 1 ? Int(ceil(sizeA[1] / p.blocksize[1])) : 1, N)
-            rows_per_proc, extra = divrem(Int(ceil(sizeA[1] / p.blocksize[1])), num_processors())
-            counts = [rows_per_proc + (i <= extra ? 1 : 0) for i in 1:num_processors()]
-            procgrid = reshape(vcat(fill.(availprocs, counts)...), q)
-        elseif assignment == :blockcol
-            q = ntuple(i -> i == N ? Int(ceil(sizeA[N] / p.blocksize[N])) : 1, N)
-            cols_per_proc, extra = divrem(Int(ceil(sizeA[N] / p.blocksize[N])), num_processors())
-            counts = [cols_per_proc + (i <= extra ? 1 : 0) for i in 1:num_processors()]
-            procgrid = reshape(vcat(fill.(availprocs, counts)...), q)
-        elseif assignment == :cyclicrow
-            q = ntuple(i -> i == 1 ? num_processors() : 1, N)
-            procgrid = reshape(availprocs, q)
-        elseif assignment == :cycliccol
-            q = ntuple(i -> i == N ? num_processors() : 1, N)
-            procgrid = reshape(availprocs, q)
-        else
-            error("Unsupported assignment symbol: $assignment, use :arbitrary, :blockrow, :blockcol, :cyclicrow or :cycliccol")
+    function AllocateArray(eltype::Type{T}, f, want_index::Bool, d::ArrayDomain{N}, domainchunks, p::AbstractBlocks{N}, assignment::Union{AssignmentType{N},Nothing} = nothing) where {T,N}
+        sizeA = map(length, d.indexes)
+        procgrid = nothing
+        availprocs = collect(Dagger.all_processors())
+        sort!(availprocs, by = x -> (x.owner, x.tid))
+        if assignment isa Symbol
+            if assignment == :arbitrary
+                procgrid = nothing
+            elseif assignment == :blockrow
+                q = ntuple(i -> i == 1 ? Int(ceil(sizeA[1] / p.blocksize[1])) : 1, N)
+                rows_per_proc, extra = divrem(Int(ceil(sizeA[1] / p.blocksize[1])), num_processors())
+                counts = [rows_per_proc + (i <= extra ? 1 : 0) for i in 1:num_processors()]
+                procgrid = reshape(vcat(fill.(availprocs, counts)...), q)
+            elseif assignment == :blockcol
+                q = ntuple(i -> i == N ? Int(ceil(sizeA[N] / p.blocksize[N])) : 1, N)
+                cols_per_proc, extra = divrem(Int(ceil(sizeA[N] / p.blocksize[N])), num_processors())
+                counts = [cols_per_proc + (i <= extra ? 1 : 0) for i in 1:num_processors()]
+                procgrid = reshape(vcat(fill.(availprocs, counts)...), q)
+            elseif assignment == :cyclicrow
+                q = ntuple(i -> i == 1 ? num_processors() : 1, N)
+                procgrid = reshape(availprocs, q)
+            elseif assignment == :cycliccol
+                q = ntuple(i -> i == N ? num_processors() : 1, N)
+                procgrid = reshape(availprocs, q)
+            else
+                error("Unsupported assignment symbol: $assignment, use :arbitrary, :blockrow, :blockcol, :cyclicrow or :cycliccol")
+            end
+        elseif assignment isa AbstractArray{<:Int, N}
+            missingprocs = filter(q -> q ∉ procs(), assignment)
+            isempty(missingprocs) || error("Missing processors: $missingprocs")
+            procgrid = [Dagger.ThreadProc(proc, 1) for proc in assignment]
+        elseif assignment isa AbstractArray{<:Processor, N}
+            missingprocs = filter(q -> q ∉ availprocs, assignment)
+            isempty(missingprocs) || error("Missing processors: $missingprocs")
+            procgrid = assignment
         end
-    elseif assignment isa AbstractArray{<:Int, N}
-        missingprocs = filter(q -> q ∉ procs(), assignment)
-        isempty(missingprocs) || error("Missing processors: $missingprocs")
-        procgrid = [Dagger.ThreadProc(proc, 1) for proc in assignment]
-    elseif assignment isa AbstractArray{<:Processor, N}
-        missingprocs = filter(q -> q ∉ availprocs, assignment)
-        isempty(missingprocs) || error("Missing processors: $missingprocs")
-        procgrid = assignment
+
+        return new{T,N}(eltype, f, want_index, d, domainchunks, p, procgrid)  
     end
 
-    return AllocateArray{T,N}(eltype, f, want_index, d, domainchunks, p, procgrid)
 end
+size(a::AllocateArray) = size(a.domain)
 
 function _cumlength(len, step)
     nice_pieces = div(len, step)
@@ -94,7 +95,7 @@ const BlocksOrAuto = Union{Blocks{N} where N, AutoBlocks}
 
 function Base.rand(p::Blocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(assignment, eltype, rand, false, d, partition(p, d), p)
+    a = AllocateArray(eltype, rand, false, d, partition(p, d), p, assignment)
     return _to_darray(a)
 end
 Base.rand(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) = rand(p, T, dims; assignment=assignment)
@@ -106,7 +107,7 @@ Base.rand(::AutoBlocks, eltype::Type, dims::Dims; assignment::AssignmentType = :
 
 function Base.randn(p::Blocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(assignment, eltype, randn, false, d, partition(p, d), p)
+    a = AllocateArray(eltype, randn, false, d, partition(p, d), p, assignment)
     return _to_darray(a)
 end
 Base.randn(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) = randn(p, T, dims; assignment=assignment)
@@ -118,13 +119,13 @@ Base.randn(::AutoBlocks, eltype::Type, dims::Dims; assignment::AssignmentType = 
 
 function sprand(p::Blocks, eltype::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(assignment, eltype, (T, _dims) -> sprand(T, _dims..., sparsity), false, d, partition(p, d), p)
+    a = AllocateArray(eltype, (T, _dims) -> sprand(T, _dims..., sparsity), false, d, partition(p, d), p, assignment)
     return _to_darray(a)
 end
 sprand(p::BlocksOrAuto, T::Type, dims_and_sparsity::Real...; assignment::AssignmentType = :arbitrary) =
     sprand(p, T, dims_and_sparsity[1:end-1], dims_and_sparsity[end]; assignment=assignment)
-sprand(p::BlocksOrAuto, T::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary) =
-    sprand(p, T, dims, sparsity; assignment=assignment)
+# sprand(p::BlocksOrAuto, T::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary) =
+#     sprand(p, T, dims, sparsity; assignment=assignment)
 sprand(p::BlocksOrAuto, dims_and_sparsity::Real...; assignment::AssignmentType = :arbitrary) =
     sprand(p, Float64, dims_and_sparsity[1:end-1], dims_and_sparsity[end]; assignment=assignment)
 sprand(p::BlocksOrAuto, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary) =
@@ -134,7 +135,7 @@ sprand(::AutoBlocks, eltype::Type, dims::Dims, sparsity::AbstractFloat; assignme
 
 function Base.ones(p::Blocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(assignment, eltype, ones, false, d, partition(p, d), p)
+    a = AllocateArray(eltype, ones, false, d, partition(p, d), p, assignment)
     return _to_darray(a)
 end
 Base.ones(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) = ones(p, T, dims; assignment=assignment)
@@ -146,7 +147,7 @@ Base.ones(::AutoBlocks, eltype::Type, dims::Dims; assignment::AssignmentType = :
 
 function Base.zeros(p::Blocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(assignment, eltype, zeros, false, d, partition(p, d), p)
+    a = AllocateArray(eltype, zeros, false, d, partition(p, d), p, assignment)
     return _to_darray(a)
 end
 Base.zeros(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) = zeros(p, T, dims; assignment=assignment)
