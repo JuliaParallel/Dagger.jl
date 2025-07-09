@@ -1,3 +1,4 @@
+import Dagger: ChunkView, Chunk
 using LinearAlgebra, Graphs
 
 @testset "Memory Aliasing" begin
@@ -15,6 +16,70 @@ using LinearAlgebra, Graphs
     @test s isa Dagger.ObjectAliasing
     @test s.ptr == pointer_from_objref(r)
     @test s.sz == sizeof(3)
+end
+
+@testset "ChunkView" begin
+    DA = rand(Blocks(8, 8), 64, 64)
+    task1 = DA.chunks[1,1]::DTask
+    chunk1 = fetch(task1; raw=true)::Chunk
+    v1 = view(chunk1, :, :)
+    task2 = DA.chunks[1,2]::DTask
+    chunk2 = fetch(task2; raw=true)::Chunk
+    v2 = view(chunk2, :, :)
+
+    for obj in (chunk1, task1)
+        @testset "Valid Slices" begin
+            @test view(obj, :, :)     isa ChunkView && view(obj, 1:8, 1:8)   isa ChunkView
+            @test view(obj, 1:2:7, :) isa ChunkView && view(obj, :, 2:2:8)   isa ChunkView
+            @test view(obj, 1, :)     isa ChunkView && view(obj, :, 1)       isa ChunkView
+            @test view(obj, 3:3, 5:5) isa ChunkView && view(obj, 5:7, 1:2:4) isa ChunkView
+            @test view(obj, 8, 8)     isa ChunkView
+            @test view(obj, 1:0, :)   isa ChunkView
+        end
+
+        @testset "Dimension Mismatch" begin
+            @test_throws DimensionMismatch view(obj, :)
+            @test_throws DimensionMismatch view(obj, :, :, :)
+        end
+
+        @testset "Int Slice Out of Bounds" begin
+            @test_throws ArgumentError view(obj, 0, :)
+            @test_throws ArgumentError view(obj, :, 9)
+            @test_throws ArgumentError view(obj, 9, 1)
+        end
+
+        @testset "Range Slice Out of Bounds" begin
+            @test_throws ArgumentError view(obj, 0:5, :)
+            @test_throws ArgumentError view(obj, 1:8, 5:10)
+            @test_throws ArgumentError view(obj, 2:2:10, :)
+        end
+
+        @testset "Invalid Slice Types" begin
+            @test_throws DimensionMismatch view(obj, (1:2, :))
+            @test_throws ArgumentError view(obj, :, [1, 2])
+        end
+    end
+
+    @test fetch(v1) == fetch(chunk1)
+
+    @test Dagger.memory_space(v1) == Dagger.memory_space(chunk1)
+    @test Dagger.aliasing(v1) isa Dagger.StridedAliasing
+    ptr = remotecall_fetch(chunk1.handle.owner, chunk1) do chunk
+        UInt(pointer(Dagger.unwrap(chunk)))
+    end
+    @test Dagger.aliasing(v1).base_ptr.addr == ptr
+
+    @testset "Aliasing" begin
+        f! = v1 -> begin
+            @show typeof(v1) v1
+            v1 .= 0
+            return
+        end
+        Dagger.spawn_datadeps() do
+            Dagger.@spawn f!(InOut(v1))
+        end
+        @test collect(DA)[1:8, 1:8] == zeros(8, 8)
+    end
 end
 
 function with_logs(f)
