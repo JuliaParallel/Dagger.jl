@@ -28,18 +28,18 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool=t
     return LinearAlgebra.LU{T,DMatrix{T},DVector{Int}}(A, ipiv, 0)
 end
 
-function searchmax_pivot!(piv_idx::AbstractArray{Int}, piv_val::AbstractArray{T}, A::AbstractArray{T}, offset::Int=0) where T
+function searchmax_pivot!(piv_idx::AbstractVector{Int}, piv_val::AbstractVector{T}, A::AbstractMatrix{T}, offset::Int=0) where T
     max_idx = argmax(abs.(A[:]))
     piv_idx[1] = offset+max_idx
     piv_val[1] = A[max_idx]
 end
 
-function update_ipiv!(ipivl, piv_idx::AbstractArray{Int}, piv_val::AbstractArray{T}, k::Int, nb::Int) where T
+function update_ipiv!(ipivl::AbstractVector{Int}, piv_idx::AbstractVector{Int}, piv_val::AbstractVector{T}, k::Int, nb::Int) where T
     max_piv_idx = argmax(abs.(piv_val))
     ipivl[1] = (max_piv_idx+k-2)*nb +  piv_idx[max_piv_idx]
 end
 
-function swaprows_panel!(A::AbstractArray{T}, M::AbstractArray{T}, ipivl::AbstractVector{Int}, m::Int, p::Int, nb::Int) where T
+function swaprows_panel!(A::AbstractMatrix{T}, M::AbstractMatrix{T}, ipivl::AbstractVector{Int}, m::Int, p::Int, nb::Int) where T
     q = div(ipivl[1]-1,nb) + 1
     r = (ipivl[1]-1)%nb+1
     if m == q
@@ -47,13 +47,13 @@ function swaprows_panel!(A::AbstractArray{T}, M::AbstractArray{T}, ipivl::Abstra
     end
 end
 
-function update_panel!(M::AbstractArray{T}, A::AbstractArray{T}, p::Int) where T
+function update_panel!(M::AbstractMatrix{T}, A::AbstractMatrix{T}, p::Int) where T
     Acinv = one(T) / A[p,p]  
     LinearAlgebra.BLAS.scal!(Acinv, view(M, :, p))
     LinearAlgebra.BLAS.ger!(-one(T), view(M, :, p), conj.(view(A, p, p+1:size(A,2))), view(M, :, p+1:size(M,2)))
 end
 
-function swaprows_trail!(A::AbstractArray{T}, M::AbstractArray{T}, ipiv::AbstractVector{Int}, m::Int, nb::Int) where T
+function swaprows_trail!(A::AbstractMatrix{T}, M::AbstractMatrix{T}, ipiv::AbstractVector{Int}, m::Int, nb::Int) where T
     for p in eachindex(ipiv)
         q = div(ipiv[p]-1,nb) + 1
         r = (ipiv[p]-1)%nb+1
