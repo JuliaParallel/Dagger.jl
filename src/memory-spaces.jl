@@ -270,11 +270,13 @@ function _memory_spans(a::StridedAliasing{T,N,S}, spans, ptr, dim) where {T,N,S}
 
     return spans
 end
+memory_space(x::SubArray) = memory_space(parent(x))
 function aliasing(x::SubArray{T,N,A}) where {T,N,A<:Array}
     if isbitstype(T)
-        S = CPURAMMemorySpace
-        return StridedAliasing{T,ndims(x),S}(RemotePtr{Cvoid}(pointer(parent(x))),
-                                             RemotePtr{Cvoid}(pointer(x)),
+        space = memory_space(x)
+        S = typeof(space)
+        return StridedAliasing{T,ndims(x),S}(RemotePtr{Cvoid}(pointer(parent(x)), space),
+                                             RemotePtr{Cvoid}(pointer(x), space),
                                              parentindices(x),
                                              size(x), strides(parent(x)))
     else
