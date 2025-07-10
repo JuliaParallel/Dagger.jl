@@ -6,15 +6,13 @@
     # Out-of-place
     lu_A = lu(A, pivot)
     lu_DA = lu(DA, pivot)
-    @test lu_DA isa LU{T,DMatrix{T},DVector{Int}}
-    if !(T in (Float32, ComplexF32, ComplexF64)) # FIXME: NoPivot is unstable for FP32
+    @test lu_DA isa LU{T,DMatrix{T},DVector{Int}} 
+    if !(T in (Float32, ComplexF32)) && pivot == NoPivot() # FIXME: NoPivot is unstable for FP32
         @test lu_A.L ≈ lu_DA.L
         @test lu_A.U ≈ lu_DA.U
     end
-    if !(T in (ComplexF32, ComplexF64))
-        @test lu_A.P ≈ lu_DA.P
-        @test lu_A.p ≈ lu_DA.p
-    end
+    @test lu_A.P ≈ lu_DA.P
+    @test lu_A.p ≈ lu_DA.p
     # Check that lu did not modify A or DA
     @test A ≈ DA ≈ B
 
@@ -23,14 +21,12 @@
     lu_A = lu!(A_copy, pivot)
     lu_DA = lu!(DA, pivot)
     @test lu_DA isa LU{T,DMatrix{T},DVector{Int}}
-    if !(T in (Float32, ComplexF32, ComplexF64)) # FIXME: NoPivot is unstable for FP32
+    if !(T in (Float32, ComplexF32)) && pivot == NoPivot() # FIXME: NoPivot is unstable for FP32
         @test lu_A.L ≈ lu_DA.L
         @test lu_A.U ≈ lu_DA.U
     end
-    if !(T in (ComplexF32, ComplexF64))
-        @test lu_A.P ≈ lu_DA.P
-        @test lu_A.p ≈ lu_DA.p
-    end
+    @test lu_A.P ≈ lu_DA.P
+    @test lu_A.p ≈ lu_DA.p
     # Check that changes propagated to A
     @test DA ≈ A
     @test !(B ≈ A)
