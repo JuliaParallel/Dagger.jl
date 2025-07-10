@@ -30,4 +30,8 @@
     # Check that changes propagated to A
     @test DA ≈ A
     @test !(B ≈ A)
+
+    # Non-square block sizes are not supported
+    @test_throws ArgumentError lu(rand(Blocks(64, 32), T, 128, 128), pivot)
+    @test_throws ArgumentError lu!(rand(Blocks(64, 32), T, 128, 128), pivot)
 end
