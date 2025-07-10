@@ -37,7 +37,7 @@ end
 function update_ipiv!(ipivl::AbstractVector{Int}, piv_idx::AbstractVector{Int}, piv_val::AbstractVector{T}, k::Int, nb::Int) where T
     max_piv_idx = argmax(abs.(piv_val))
     max_piv_val = abs(piv_val[max_piv_idx])
-    isapprox(max_piv_val, zero(T); atol=eps(T)) && throw(SingularException(k))
+    isapprox(max_piv_val, zero(T); atol=eps(T)) && throw(LinearAlgebra.SingularException(k))
     ipivl[1] = (max_piv_idx+k-2)*nb +  piv_idx[max_piv_idx]
 end
 
