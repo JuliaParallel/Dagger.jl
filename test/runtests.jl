@@ -7,49 +7,47 @@ USE_METAL = parse(Bool, get(ENV, "CI_USE_METAL", "0"))
 USE_OPENCL = parse(Bool, get(ENV, "CI_USE_OPENCL", "0"))
 USE_GPU = USE_CUDA || USE_ROCM || USE_ONEAPI || USE_METAL || USE_OPENCL
 
+# (title, filename, supports_gpu)
 tests = [
-    ("Thunk", "thunk.jl"),
-    ("Scheduler", "scheduler.jl"),
-    ("Processors", "processors.jl"),
-    ("Memory Spaces", "memory-spaces.jl"),
-    ("Logging", "logging.jl"),
-    ("Checkpointing", "checkpoint.jl"),
-    ("Scopes", "scopes.jl"),
-    ("Options", "options.jl"),
-    ("Mutation", "mutation.jl"),
-    ("Task Queues", "task-queues.jl"),
-    ("Task Affinity", "task-affinity.jl"),
-    ("Datadeps", "datadeps.jl"),
-    ("Streaming", "streaming.jl"),
-    ("Domain Utilities", "domain.jl"),
-    ("Array - Allocation", "array/allocation.jl"),
-    ("Array - Indexing", "array/indexing.jl"),
-    ("Array - Core", "array/core.jl"),
-    ("Array - Copyto", "array/copyto.jl"),
-    ("Array - MapReduce", "array/mapreduce.jl"),
-    ("Array - LinearAlgebra - Core", "array/linalg/core.jl"),
-    ("Array - LinearAlgebra - Matmul", "array/linalg/matmul.jl"),
-    ("Array - LinearAlgebra - Cholesky", "array/linalg/cholesky.jl"),
-    ("Array - LinearAlgebra - LU", "array/linalg/lu.jl"),
-    ("Array - Random", "array/random.jl"),
-    ("Array - Stencils", "array/stencil.jl"),
-    ("Array - FFT", "array/fft.jl"),
-    ("GPU", "gpu.jl"),
-    ("Caching", "cache.jl"),
-    ("Disk Caching", "diskcaching.jl"),
-    ("File IO", "file-io.jl"),
-    ("External Languages - Python", "extlang/python.jl"),
-    ("Preferences", "preferences.jl"),
-    #("Fault Tolerance", "fault-tolerance.jl"),
+    ("Thunk", "thunk.jl", false),
+    ("Scheduler", "scheduler.jl", false),
+    ("Processors", "processors.jl", false),
+    ("Memory Spaces", "memory-spaces.jl", false),
+    ("Logging", "logging.jl", false),
+    ("Checkpointing", "checkpoint.jl", false),
+    ("Scopes", "scopes.jl", false),
+    ("Options", "options.jl", false),
+    ("Mutation", "mutation.jl", false),
+    ("Task Queues", "task-queues.jl", false),
+    ("Task Affinity", "task-affinity.jl", false),
+    ("Datadeps", "datadeps.jl", false),
+    ("Streaming", "streaming.jl", false),
+    ("Domain Utilities", "domain.jl", false),
+    ("Array - Allocation", "array/allocation.jl", false),
+    ("Array - Indexing", "array/indexing.jl", false),
+    ("Array - Core", "array/core.jl", false),
+    ("Array - Copyto", "array/copyto.jl", false),
+    ("Array - MapReduce", "array/mapreduce.jl", false),
+    ("Array - LinearAlgebra - Core", "array/linalg/core.jl", true),
+    ("Array - LinearAlgebra - Matmul", "array/linalg/matmul.jl", true),
+    ("Array - LinearAlgebra - Cholesky", "array/linalg/cholesky.jl", true),
+    ("Array - LinearAlgebra - LU", "array/linalg/lu.jl", true),
+    ("Array - Random", "array/random.jl", false),
+    ("Array - Stencils", "array/stencil.jl", true),
+    ("Array - FFT", "array/fft.jl", false),
+    ("GPU", "gpu.jl", true),
+    ("Caching", "cache.jl", false),
+    ("Disk Caching", "diskcaching.jl", false),
+    ("File IO", "file-io.jl", false),
+    ("External Languages - Python", "extlang/python.jl", false),
+    ("Preferences", "preferences.jl", false),
+    #("Fault Tolerance", "fault-tolerance.jl", false),
 ]
 if USE_GPU
     # Only run GPU tests
-    tests = [
-        ("GPU", "gpu.jl"),
-        ("Array - Stencils", "array/stencil.jl"),
-    ]
+    filter!(test->test[3], tests)
 end
-all_test_names = map(test -> replace(last(test), ".jl"=>""), tests)
+all_test_names = map(test -> replace(test[2], ".jl"=>""), tests)
 
 additional_workers::Int = 3
 
@@ -91,7 +89,7 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
     to_test = String[]
     for test in parsed_args["test"]
         if isdir(joinpath(@__DIR__, test))
-            for (_, other_test) in tests
+            for (_, other_test, _) in tests
                 if startswith(other_test, test)
                     push!(to_test, other_test)
                     continue
@@ -102,7 +100,7 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
         else
             println(stderr, "Unknown test: $test")
             println(stderr, "Available tests:")
-            for ((test_title, _), test_name) in zip(tests, all_test_names)
+            for ((test_title, _, _), test_name) in zip(tests, all_test_names)
                 println(stderr, "  $test_name: $test_title")
             end
             exit(1)
@@ -145,10 +143,17 @@ using UUIDs
 
 @everywhere MemPool.MEM_RESERVED[] = 0
 
-GPU_SCOPES = Pair{Symbol, Dagger.AbstractScope}[]
+CPU_SCOPES = Tuple{Symbol, Type, Dagger.AbstractScope}[]
+GPU_SCOPES = Tuple{Symbol, Type, Dagger.AbstractScope}[]
 if USE_GPU
     include("setup_gpu.jl")
+else
+    push!(CPU_SCOPES, (:OneWorker_SingleThreaded, Array, Dagger.scope(;worker=1, thread=1)))
+    push!(CPU_SCOPES, (:OneWorker_MultiThreaded, Array, Dagger.scope(;worker=1, threads=:)))
+    push!(CPU_SCOPES, (:MultiWorker_SingleThreaded, Array, Dagger.scope(;workers=:, thread=1)))
+    push!(CPU_SCOPES, (:MultiWorker_MultiThreaded, Array, Dagger.scope(;workers=:, threads=:)))
 end
+ALL_SCOPES = vcat(CPU_SCOPES, GPU_SCOPES)
 
 try
     for test in to_test

@@ -58,32 +58,32 @@ end
 end
 
 if USE_CUDA
-    push!(GPU_SCOPES, :CUDA => Dagger.scope(;worker=1, cuda_gpu=1))
+    push!(GPU_SCOPES, (:CUDA, CuArray, Dagger.scope(;worker=1, cuda_gpu=1)))
     if length(CUDA.devices()) > 1
-        push!(GPU_SCOPES, :CUDA => Dagger.scope(;worker=1, cuda_gpu=2))
+        push!(GPU_SCOPES, (:CUDA, CuArray, Dagger.scope(;worker=1, cuda_gpu=2)))
     end
 end
 if USE_ROCM
-    push!(GPU_SCOPES, :ROCm => Dagger.scope(;worker=1, rocm_gpu=1))
+    push!(GPU_SCOPES, (:ROCm, ROCArray, Dagger.scope(;worker=1, rocm_gpu=1)))
     if length(AMDGPU.devices()) > 1
-        push!(GPU_SCOPES, :ROCm => Dagger.scope(;worker=1, rocm_gpu=2))
+        push!(GPU_SCOPES, (:ROCm, ROCmrray, Dagger.scope(;worker=1, rocm_gpu=2)))
     end
 end
 if USE_ONEAPI
-    push!(GPU_SCOPES, :oneAPI => Dagger.scope(;worker=1, intel_gpu=1))
+    push!(GPU_SCOPES, (:oneAPI, oneArray, Dagger.scope(;worker=1, intel_gpu=1)))
     if length(oneAPI.devices()) > 1
-        push!(GPU_SCOPES, :oneAPI => Dagger.scope(;worker=1, intel_gpu=2))
+        push!(GPU_SCOPES, (:oneAPI, oneArray, Dagger.scope(;worker=1, intel_gpu=2)))
     end
 end
 if USE_METAL
-    push!(GPU_SCOPES, :Metal => Dagger.scope(;worker=1, metal_gpu=1))
+    push!(GPU_SCOPES, (:Metal, MtlArray, Dagger.scope(;worker=1, metal_gpu=1)))
     if length(Metal.devices()) > 1
-        push!(GPU_SCOPES, :Metal => Dagger.scope(;worker=1, metal_gpu=2))
+        push!(GPU_SCOPES, (:Metal, MtlArray, Dagger.scope(;worker=1, metal_gpu=2)))
     end
 end
 if USE_OPENCL
-    push!(GPU_SCOPES, :OpenCL => Dagger.scope(;worker=1, cl_device=1))
+    push!(GPU_SCOPES, (:OpenCL, CLArray, Dagger.scope(;worker=1, cl_device=1)))
     if length(cl.devices(cl.default_platform())) > 1
-        push!(GPU_SCOPES, :OpenCL => Dagger.scope(;worker=1, cl_device=2))
+        push!(GPU_SCOPES, (:OpenCL, CLArray, Dagger.scope(;worker=1, cl_device=2)))
     end
 end
