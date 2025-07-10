@@ -77,7 +77,7 @@ function stage(ctx::Context, node::BCast{B,T,N}) where {B,T,N}
                 end
             end |> Tuple
             dmn = DomainBlocks(ntuple(_->1, length(s)), splits)
-            stage(ctx, Distribute(dmn, part, arg)).chunks
+            stage(ctx, Distribute(dmn, part, arg, nothing)).chunks
         else
             arg
         end

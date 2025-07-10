@@ -1,7 +1,8 @@
 function LinearAlgebra.norm2(A::DArray{T,2}) where T
     Ac = A.chunks
     norms = [Dagger.@spawn mapreduce(LinearAlgebra.norm_sqr, +, chunk) for chunk in Ac]::Matrix{DTask}
-    return sqrt(sum(map(norm->fetch(norm)::real(T), norms)))
+    zeroRT = zero(real(T))
+    return sqrt(sum(map(norm->fetch(norm)::real(T), norms); init=zeroRT))
 end
 function LinearAlgebra.norm2(A::UpperTriangular{T,<:DArray{T,2}}) where T
     Ac = parent(A).chunks
@@ -12,7 +13,10 @@ function LinearAlgebra.norm2(A::UpperTriangular{T,<:DArray{T,2}}) where T
     upper_norms = [Dagger.@spawn mapreduce(LinearAlgebra.norm_sqr, +, chunk) for chunk in Ac_upper]
     Ac_diag = [Dagger.spawn(UpperTriangular, Ac[i,i]) for i in 1:size(Ac, 1)]
     diag_norms = [Dagger.@spawn mapreduce(LinearAlgebra.norm_sqr, +, chunk) for chunk in Ac_diag]
-    return sqrt(sum(map(fetch, upper_norms)) + sum(map(fetch, diag_norms)))
+    upper_norms_values = map(fetch, upper_norms)
+    diag_norms_values = map(fetch, diag_norms)
+    zeroRT = zero(real(T))
+    return sqrt(sum(upper_norms_values; init=zeroRT) + sum(diag_norms_values; init=zeroRT))
 end
 function LinearAlgebra.norm2(A::LowerTriangular{T,<:DArray{T,2}}) where T
     Ac = parent(A).chunks
@@ -23,7 +27,10 @@ function LinearAlgebra.norm2(A::LowerTriangular{T,<:DArray{T,2}}) where T
     lower_norms = [Dagger.@spawn mapreduce(LinearAlgebra.norm_sqr, +, chunk) for chunk in Ac_lower]
     Ac_diag = [Dagger.spawn(LowerTriangular, Ac[i,i]) for i in 1:size(Ac, 1)]
     diag_norms = [Dagger.@spawn mapreduce(LinearAlgebra.norm_sqr, +, chunk) for chunk in Ac_diag]
-    return sqrt(sum(map(fetch, lower_norms)) + sum(map(fetch, diag_norms)))
+    lower_norms_values = map(fetch, lower_norms)
+    diag_norms_values = map(fetch, diag_norms)
+    zeroRT = zero(real(T))
+    return sqrt(sum(lower_norms_values; init=zeroRT) + sum(diag_norms_values; init=zeroRT))
 end
 
 is_cross_symmetric(A1, A2) = A1 == A2'

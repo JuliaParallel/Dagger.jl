@@ -27,6 +27,7 @@ tests = [
     ("Array - Core", "array/core.jl"),
     ("Array - Copyto", "array/copyto.jl"),
     ("Array - MapReduce", "array/mapreduce.jl"),
+    ("Array - LinearAlgebra - Core", "array/linalg/core.jl"),
     ("Array - LinearAlgebra - Matmul", "array/linalg/matmul.jl"),
     ("Array - LinearAlgebra - Cholesky", "array/linalg/cholesky.jl"),
     ("Array - LinearAlgebra - LU", "array/linalg/lu.jl"),
@@ -140,7 +141,9 @@ include("fakeproc.jl")
 using Test
 using Dagger
 using UUIDs
-import MemPool
+@everywhere import MemPool
+
+@everywhere MemPool.MEM_RESERVED[] = 0
 
 GPU_SCOPES = Pair{Symbol, Dagger.AbstractScope}[]
 if USE_GPU
