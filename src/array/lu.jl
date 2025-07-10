@@ -29,15 +29,16 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool=t
 end
 
 function searchmax_pivot!(piv_idx::AbstractVector{Int}, piv_val::AbstractVector{T}, A::AbstractMatrix{T}, offset::Int=0) where T
-    max_idx = argmax(abs.(A[:]))
+    max_idx = LinearAlgebra.BLAS.iamax(A[:])
     piv_idx[1] = offset+max_idx
     piv_val[1] = A[max_idx]
 end
 
 function update_ipiv!(ipivl::AbstractVector{Int}, piv_idx::AbstractVector{Int}, piv_val::AbstractVector{T}, k::Int, nb::Int) where T
-    max_piv_idx = argmax(abs.(piv_val))
-    max_piv_val = abs(piv_val[max_piv_idx])
-    isapprox(max_piv_val, zero(T); atol=eps(real(T))) && throw(LinearAlgebra.SingularException(k))
+    max_piv_idx = LinearAlgebra.BLAS.iamax(piv_val)
+    max_piv_val = piv_val[max_piv_idx]
+    abs_max_piv_val = max_piv_val isa Real ? abs(max_piv_val) : abs(real(max_piv_val)) + abs(imag(max_piv_val))
+    isapprox(abs_max_piv_val, zero(T); atol=eps(real(T))) && throw(LinearAlgebra.SingularException(k))
     ipivl[1] = (max_piv_idx+k-2)*nb +  piv_idx[max_piv_idx]
 end
 
