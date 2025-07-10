@@ -684,6 +684,9 @@ From `Base`:
 From `Random`:
 - `rand!`/`randn!`
 
+From `SparseArrays`:
+- `sprand`
+
 From `Statistics`:
 - `mean`
 - `var`
