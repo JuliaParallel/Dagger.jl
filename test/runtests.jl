@@ -141,7 +141,9 @@ include("fakeproc.jl")
 using Test
 using Dagger
 using UUIDs
-import MemPool
+@everywhere import MemPool
+
+@everywhere MemPool.MEM_RESERVED[] = 0
 
 GPU_SCOPES = Pair{Symbol, Dagger.AbstractScope}[]
 if USE_GPU
