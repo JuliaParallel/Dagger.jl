@@ -107,6 +107,9 @@ struct AllocateUndef{S} end
 (::AllocateUndef{S})(T, dims::Dims{N}) where {S,N} = CLArray{S,N}(undef, dims)
 Dagger.allocate_array_func(::CLArrayDeviceProc, ::Dagger.AllocateUndef{S}) where S = AllocateUndef{S}()
 
+# Indexing
+Base.getindex(arr::CLArray, d::Dagger.ArrayDomain) = arr[Dagger.indexes(d)...]
+
 # In-place
 # N.B. These methods assume that later operations will implicitly or
 # explicitly synchronize with their associated stream
