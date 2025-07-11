@@ -138,6 +138,7 @@ end
 parts_to_test = vcat(part_sets_to_test...)
 
 for (kind, AT, scope) in ALL_SCOPES
+    kind == :ROCm && continue # missing herk!
     kind == :oneAPI || kind == :Metal || kind == :OpenCL && continue
     @testset "$kind" begin
         Dagger.with_options(;scope) do
