@@ -17,14 +17,14 @@ end
     @test collect(x^3) == collect(x*x*x)
 end
 
-function test_gemm!(T, szA, szB, partA, partB)
+function test_gemm!(AT, T, szA, szB, partA, partB)
     @assert szA[1] == szB[2]
     szC = (szA[1], szA[1])
     @assert partA.blocksize[1] == partB.blocksize[2]
     partC = Blocks(partA.blocksize[1], partB.blocksize[2])
 
-    A = rand(T, szA...)
-    B = rand(T, szB...)
+    A = AT(rand(T, szA...))
+    B = AT(rand(T, szB...))
 
     DA = distribute(A, partA)
     DB = distribute(B, partB)
@@ -33,82 +33,82 @@ function test_gemm!(T, szA, szB, partA, partB)
     # No transA, No transB
     DC = DA * DB
     C = A * B
-    @test collect(DC) ≈ C
+    @test AT(collect(DC)) ≈ C
 
     if szA == szB
         # No transA, transB
         DC = DA * DB'
         C = A * B'
-        @test collect(DC) ≈ C
+        @test AT(collect(DC)) ≈ C
 
         # transA, No transB
         DC = DA' * DB
         C = A' * B
-        @test collect(DC) ≈ C
+        @test AT(collect(DC)) ≈ C
     end
 
     # transA, transB
     DC = DA' * DB'
     C = A' * B'
-    @test collect(DC) ≈ C
+    @test AT(collect(DC)) ≈ C
 
     ## In-place gemm
     # No transA, No transB
-    C = zeros(T, szC...)
+    C = AT(zeros(T, szC...))
     DC = distribute(C, partC)
     mul!(C, A, B)
     mul!(DC, DA, DB)
-    @test collect(DC) ≈ C
+    @test AT(collect(DC)) ≈ C
 
     if szA == szB
         # No transA, transB
-        C = zeros(T, szC...)
+        C = AT(zeros(T, szC...))
         DC = distribute(C, partC)
         mul!(C, A, B')
         mul!(DC, DA, DB')
-        @test collect(DC) ≈ C
+        @test AT(collect(DC)) ≈ C
 
         # transA, No transB
-        C = zeros(T, szC...)
+        C = AT(zeros(T, szC...))
         DC = distribute(C, partC)
         mul!(C, A', B)
         mul!(DC, DA', DB)
-        @test collect(DC) ≈ C
+        @test AT(collect(DC)) ≈ C
     end
 
     # transA, transB
-    C = zeros(T, szA[2], szA[2])
+    C = AT(zeros(T, szA[2], szA[2]))
     DC = distribute(C, partC)
     mul!(C, A', B')
     mul!(DC, DA', DB')
-    collect(DC) ≈ C
+    @test AT(collect(DC)) ≈ C
 
     if szA == szB
         ## Out-of-place syrk
         # No trans, trans
         DC = DA * DA'
         C = A * A'
-        @test collect(DC) ≈ C
+        @test AT(collect(DC)) ≈ C
 
         # trans, No trans
         DC = DA' * DA
         C = A' * A
-        @test collect(DC) ≈ C
+        @test AT(collect(DC)) ≈ C
 
         ## In-place syrk
         # No trans, trans
-        C = zeros(T, szC...)
+        C = AT(zeros(T, szC...))
         DC = distribute(C, partC)
         mul!(C, A, A')
         mul!(DC, DA, DA')
-        @test collect(DC) ≈ C
+        @test AT(collect(DC)) ≈ C
 
         # trans, No trans
-        C = zeros(T, szC...)
+        C = AT(zeros(T, szC...))
         DC = distribute(C, partC)
         mul!(C, A', A)
         mul!(DC, DA', DA)
-        @test collect(DC) ≈ C
+        @test AT(collect(DC)) ≈ C
     end
 end
 
@@ -136,10 +136,19 @@ part_sets_to_test = map(_sizes_to_test) do sz
     ]
 end
 parts_to_test = vcat(part_sets_to_test...)
-@testset "Size=$szA*$szB" for (szA, szB) in sizes_to_test
-    @testset "Partitioning=$partA*$partB" for (partA,partB) in parts_to_test
-        @testset "T=$T" for T in (Float32, Float64, ComplexF32, ComplexF64)
-            test_gemm!(T, szA, szB, partA, partB)
+
+for (kind, AT, scope) in ALL_SCOPES
+    kind == :oneAPI || kind == :Metal || kind == :OpenCL && continue
+    @testset "$kind" begin
+        Dagger.with_options(;scope) do
+            @testset "Size=$szA*$szB" for (szA, szB) in sizes_to_test
+                @testset "Partitioning=$partA*$partB" for (partA,partB) in parts_to_test
+                    @testset "T=$T" for T in (Float32, Float64, ComplexF32, ComplexF64)
+                        kind == :ROCm && (T == ComplexF32 || T == ComplexF64) && continue # missing herk!
+                        test_gemm!(AT, T, szA, szB, partA, partB)
+                    end
+                end
+            end
         end
     end
 end

@@ -1,33 +1,48 @@
-@testset "$T" for T in (Float32, Float64, ComplexF32, ComplexF64)
-    A = rand(T, 128, 128)
-    B = copy(A)
-    DA = view(A, Blocks(64, 64))
+function test_lu(AT)
+    @testset "$T with $pivot" for T in (Float32, Float64, ComplexF32, ComplexF64), pivot in (NoPivot(), RowMaximum())
+        A = AT(rand(T, 128, 128))
+        B = copy(A)
+        DA = view(A, Blocks(64, 64))
 
-    # Out-of-place
-    lu_A = lu(A, NoPivot())
-    lu_DA = lu(DA, NoPivot())
-    @test lu_DA isa LU{T,DMatrix{T},DVector{Int}}
-    if !(T in (Float32, ComplexF32)) # FIXME: NoPivot is unstable for FP32
-        @test lu_A.L ≈ lu_DA.L
-        @test lu_A.U ≈ lu_DA.U
-    end
-    @test lu_A.P ≈ lu_DA.P
-    @test lu_A.p ≈ lu_DA.p
-    # Check that lu did not modify A or DA
-    @test A ≈ DA ≈ B
+        # Out-of-place
+        lu_A = lu(A, pivot)
+        lu_DA = lu(DA, pivot)
+        @test lu_DA isa LU{T,DMatrix{T},DVector{Int}}
+        if !(T in (Float32, ComplexF32) && pivot == NoPivot()) # FIXME: NoPivot is unstable for FP32
+            @test lu_A.L ≈ lu_DA.L
+            @test lu_A.U ≈ lu_DA.U
+        end
+        @test lu_A.P ≈ lu_DA.P
+        @test lu_A.p ≈ lu_DA.p
+        # Check that lu did not modify A or DA
+        @test A ≈ DA ≈ B
 
-    # In-place
-    A_copy = copy(A)
-    lu_A = lu!(A_copy, NoPivot())
-    lu_DA = lu!(DA, NoPivot())
-    @test lu_DA isa LU{T,DMatrix{T},DVector{Int}}
-    if !(T in (Float32, ComplexF32)) # FIXME: NoPivot is unstable for FP32
-        @test lu_A.L ≈ lu_DA.L
-        @test lu_A.U ≈ lu_DA.U
+        # In-place
+        A_copy = copy(A)
+        lu_A = lu!(A_copy, pivot)
+        lu_DA = lu!(DA, pivot)
+        @test lu_DA isa LU{T,DMatrix{T},DVector{Int}}
+        if !(T in (Float32, ComplexF32) && pivot == NoPivot()) # FIXME: NoPivot is unstable for FP32
+            @test lu_A.L ≈ lu_DA.L
+            @test lu_A.U ≈ lu_DA.U
+        end
+        @test lu_A.P ≈ lu_DA.P
+        @test lu_A.p ≈ lu_DA.p
+        # Check that changes propagated to A
+        @test DA ≈ A
+        @test !(B ≈ A)
+
+        # Non-square block sizes are not supported
+        @test_throws ArgumentError lu(rand(Blocks(64, 32), T, 128, 128), pivot)
+        @test_throws ArgumentError lu!(rand(Blocks(64, 32), T, 128, 128), pivot)
     end
-    @test lu_A.P ≈ lu_DA.P
-    @test lu_A.p ≈ lu_DA.p
-    # Check that changes propagated to A
-    @test DA ≈ A
-    @test !(B ≈ A)
+end
+
+for (kind, AT, scope) in ALL_SCOPES
+    kind == :oneAPI || kind == :Metal || kind == :OpenCL && continue
+    @testset "$kind" begin
+        Dagger.with_options(;scope) do
+            test_lu(AT)
+        end
+    end
 end

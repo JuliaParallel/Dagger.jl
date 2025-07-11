@@ -1,6 +1,6 @@
 import Dagger: @stencil, Wrap, Pad
 
-function test_stencil()
+function test_stencil(AT)
     @testset "Simple assignment" begin
         A = zeros(Blocks(2, 2), Int, 4, 4)
         Dagger.spawn_datadeps() do
@@ -12,7 +12,7 @@ function test_stencil()
     end
 
     @testset "Wrap boundary" begin
-        A = zeros(Int, 4, 4)
+        A = AT(zeros(Int, 4, 4))
         A[1,1] = 10
         A = DArray(A, Blocks(2, 2))
         B = zeros(Blocks(2, 2), Int, 4, 4)
@@ -84,7 +84,7 @@ function test_stencil()
 
     @testset "Multiple DArrays" begin
         A = ones(Blocks(2, 2), Int, 4, 4)
-        B = DArray(fill(2, 4, 4), Blocks(2, 2))
+        B = DArray(AT(fill(2, 4, 4)), Blocks(2, 2))
         C = zeros(Blocks(2, 2), Int, 4, 4)
         Dagger.spawn_datadeps() do
             @stencil begin
@@ -115,7 +115,7 @@ function test_stencil()
         # Sum = 5*5 (for the padded values) + 1*4 (for the actual values from A) = 25 + 4 = 29.
         # This logic applies to all elements in B because the array A is small (2x2) and the neighborhood is 1.
         # Every element's 3x3 neighborhood will include 5 padded values and the 4 values of A.
-        expected_B_pad_val = fill(pad_value*5 + 1*4, 2, 2)
+        expected_B_pad_val = AT(fill(pad_value*5 + 1*4, 2, 2))
         @test collect(B) == expected_B_pad_val
     end
 
@@ -163,18 +163,12 @@ function test_stencil()
     end
 end
 
-@testset "CPU" begin
-    test_stencil()
-end
-
-@testset "GPU" begin
-    for (kind, scope) in GPU_SCOPES
-        # FIXME
-        kind == :oneAPI && continue
-        @testset "$kind" begin
-            Dagger.with_options(;scope) do
-                test_stencil()
-            end
+for (kind, AT, scope) in ALL_SCOPES
+    # FIXME: These both crash in LLVM
+    kind == :oneAPI || kind == :OpenCL && continue
+    @testset "$kind" begin
+        Dagger.with_options(;scope) do
+            test_stencil(AT)
         end
     end
 end

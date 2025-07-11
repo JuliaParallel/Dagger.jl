@@ -111,6 +111,12 @@ struct AllocateUndef{S} end
 (::AllocateUndef{S})(T, dims::Dims{N}) where {S,N} = CuArray{S,N}(undef, dims)
 Dagger.allocate_array_func(::CuArrayDeviceProc, ::Dagger.AllocateUndef{S}) where S = AllocateUndef{S}()
 
+# Indexing
+Base.getindex(arr::CuArray, d::Dagger.ArrayDomain) = arr[Dagger.indexes(d)...]
+
+# Views
+Base.view(A::CuArray{T,N}, p::Dagger.Blocks{N}) where {T,N} = Dagger._view(A, p)
+
 # In-place
 # N.B. These methods assume that later operations will implicitly or
 # explicitly synchronize with their associated stream

@@ -384,9 +384,7 @@ end
     m, n = size(A)
     C = B'
 
-    for i = 1:m, j = 1:n
-        A[i, j] = C[i, j]
-    end
+    A[1:m, 1:n] .= view(C, 1:m, 1:n)
 end
 
 @inline function copydiagtile!(A, uplo)
@@ -401,7 +399,5 @@ end
         C[diagind(C)] .= A[diagind(A)]
     end
 
-    for i = 1:m, j = 1:n
-        A[i, j] = C[i, j]
-    end
+    A[1:m, 1:n] .= view(C, 1:m, 1:n)
 end
