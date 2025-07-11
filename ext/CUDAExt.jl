@@ -114,6 +114,9 @@ Dagger.allocate_array_func(::CuArrayDeviceProc, ::Dagger.AllocateUndef{S}) where
 # Indexing
 Base.getindex(arr::CuArray, d::Dagger.ArrayDomain) = arr[Dagger.indexes(d)...]
 
+# Views
+Base.view(A::CuArray{T,N}, p::Blocks{N}) where {T,N} = Dagger._view(A, p)
+
 # In-place
 # N.B. These methods assume that later operations will implicitly or
 # explicitly synchronize with their associated stream

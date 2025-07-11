@@ -167,7 +167,8 @@ function Base.zero(x::DArray{T,N}) where {T,N}
     return _to_darray(a)
 end
 
-function Base.view(A::AbstractArray{T,N}, p::Blocks{N}) where {T,N}
+Base.view(A::AbstractArray{T,N}, p::Blocks{N}) where {T,N} = _view(A, p)
+function _view(A::AbstractArray{T,N}, p::Blocks{N}) where {T,N}
     d = ArrayDomain(Base.index_shape(A))
     dc = partition(p, d)
     # N.B. We use `tochunk` because we only want to take the view locally, and
