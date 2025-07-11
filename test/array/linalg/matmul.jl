@@ -33,24 +33,24 @@ function test_gemm!(AT, T, szA, szB, partA, partB)
     # No transA, No transB
     DC = DA * DB
     C = A * B
-    @test collect(DC) ≈ C
+    @test AT(collect(DC)) ≈ C
 
     if szA == szB
         # No transA, transB
         DC = DA * DB'
         C = A * B'
-        @test collect(DC) ≈ C
+        @test AT(collect(DC)) ≈ C
 
         # transA, No transB
         DC = DA' * DB
         C = A' * B
-        @test collect(DC) ≈ C
+        @test AT(collect(DC)) ≈ C
     end
 
     # transA, transB
     DC = DA' * DB'
     C = A' * B'
-    @test collect(DC) ≈ C
+    @test AT(collect(DC)) ≈ C
 
     ## In-place gemm
     # No transA, No transB
@@ -58,7 +58,7 @@ function test_gemm!(AT, T, szA, szB, partA, partB)
     DC = distribute(C, partC)
     mul!(C, A, B)
     mul!(DC, DA, DB)
-    @test collect(DC) ≈ C
+    @test AT(collect(DC)) ≈ C
 
     if szA == szB
         # No transA, transB
@@ -66,14 +66,14 @@ function test_gemm!(AT, T, szA, szB, partA, partB)
         DC = distribute(C, partC)
         mul!(C, A, B')
         mul!(DC, DA, DB')
-        @test collect(DC) ≈ C
+        @test AT(collect(DC)) ≈ C
 
         # transA, No transB
         C = AT(zeros(T, szC...))
         DC = distribute(C, partC)
         mul!(C, A', B)
         mul!(DC, DA', DB)
-        @test collect(DC) ≈ C
+        @test AT(collect(DC)) ≈ C
     end
 
     # transA, transB
@@ -81,19 +81,19 @@ function test_gemm!(AT, T, szA, szB, partA, partB)
     DC = distribute(C, partC)
     mul!(C, A', B')
     mul!(DC, DA', DB')
-    collect(DC) ≈ C
+    @test AT(collect(DC)) ≈ C
 
     if szA == szB
         ## Out-of-place syrk
         # No trans, trans
         DC = DA * DA'
         C = A * A'
-        @test collect(DC) ≈ C
+        @test AT(collect(DC)) ≈ C
 
         # trans, No trans
         DC = DA' * DA
         C = A' * A
-        @test collect(DC) ≈ C
+        @test AT(collect(DC)) ≈ C
 
         ## In-place syrk
         # No trans, trans
@@ -101,14 +101,14 @@ function test_gemm!(AT, T, szA, szB, partA, partB)
         DC = distribute(C, partC)
         mul!(C, A, A')
         mul!(DC, DA, DA')
-        @test collect(DC) ≈ C
+        @test AT(collect(DC)) ≈ C
 
         # trans, No trans
         C = AT(zeros(T, szC...))
         DC = distribute(C, partC)
         mul!(C, A', A)
         mul!(DC, DA', DA)
-        @test collect(DC) ≈ C
+        @test AT(collect(DC)) ≈ C
     end
 end
 
