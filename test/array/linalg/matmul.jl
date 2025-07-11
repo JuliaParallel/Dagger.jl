@@ -138,13 +138,13 @@ end
 parts_to_test = vcat(part_sets_to_test...)
 
 for (kind, AT, scope) in ALL_SCOPES
-    kind == :ROCm && continue # missing herk!
     kind == :oneAPI || kind == :Metal || kind == :OpenCL && continue
     @testset "$kind" begin
         Dagger.with_options(;scope) do
             @testset "Size=$szA*$szB" for (szA, szB) in sizes_to_test
                 @testset "Partitioning=$partA*$partB" for (partA,partB) in parts_to_test
                     @testset "T=$T" for T in (Float32, Float64, ComplexF32, ComplexF64)
+                        kind == :ROCm && (T == ComplexF32 || T == ComplexF64) && continue # missing herk!
                         test_gemm!(AT, T, szA, szB, partA, partB)
                     end
                 end
