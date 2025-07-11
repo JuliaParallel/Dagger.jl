@@ -12,13 +12,20 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool =
 
     zone = one(T)
     mzone = -one(T)
-    Ac = A.chunks
-    mt, nt = size(Ac)
+
     mb, nb = A.partitioning.blocksize
 
-    info = 0
+    if mb != nb 
+        mb = nb = min(mb, nb)
+        A = maybe_copy_buffered(A => Blocks(nb, nb)) do A
+            A
+        end
+    end
 
-    mb != nb && throw(ArgumentError("Unequal block sizes are not supported: mb = $mb, nb = $nb"))
+    Ac = A.chunks
+    mt, nt = size(Ac)
+
+    info = 0
 
     Dagger.spawn_datadeps() do
         for k in range(1, min(mt, nt))
@@ -93,14 +100,20 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Boo
     zone = one(T)
     mzone = -one(T)
 
+    mb, nb = A.partitioning.blocksize
+
+    if mb != nb 
+        mb = nb = min(mb, nb)
+        A = maybe_copy_buffered(A => Blocks(nb, nb)) do A
+            A
+        end
+    end
+
     Ac = A.chunks
     mt, nt = size(Ac)
     m,  n  = size(A)
-    mb, nb = A.partitioning.blocksize
 
-    mb != nb && throw(ArgumentError("Unequal block sizes are not supported: mb = $mb, nb = $nb"))
-
-    ipiv = DVector(collect(1:min(m, n)), Blocks(mb))
+    ipiv = DVector(collect(1:min(m, n)), Blocks(nb))
     ipivc = ipiv.chunks
 
     info = Ref(0)
