@@ -34,4 +34,7 @@
     # Non-square block sizes are not supported
     @test_throws ArgumentError lu(rand(Blocks(64, 32), T, 128, 128), pivot)
     @test_throws ArgumentError lu!(rand(Blocks(64, 32), T, 128, 128), pivot)
+
+        # Singular Values
+    pivot == RowMaximum() || @test_throws LinearAlgebra.SingularException lu(rand(Blocks(64,64), T, 128, 128)) # FIXME: NoPivot needs Singular Exception Check
 end
