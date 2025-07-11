@@ -7,7 +7,7 @@
     lu_A = lu(A, pivot)
     lu_DA = lu(DA, pivot)
     @test lu_DA isa LU{T,DMatrix{T},DVector{Int}}
-    if !(T in (Float32, ComplexF32) && pivot == NoPivot()) # FIXME: NoPivot is unstable for FP32
+    if !(T in (Float32, ComplexF32)) && pivot == NoPivot() # FIXME: NoPivot is unstable for FP32
         @test lu_A.L ≈ lu_DA.L
         @test lu_A.U ≈ lu_DA.U
     end
@@ -21,7 +21,7 @@
     lu_A = lu!(A_copy, pivot)
     lu_DA = lu!(DA, pivot)
     @test lu_DA isa LU{T,DMatrix{T},DVector{Int}}
-    if !(T in (Float32, ComplexF32) && pivot == NoPivot()) # FIXME: NoPivot is unstable for FP32
+    if !(T in (Float32, ComplexF32)) && pivot == NoPivot() # FIXME: NoPivot is unstable for FP32
         @test lu_A.L ≈ lu_DA.L
         @test lu_A.U ≈ lu_DA.U
     end
