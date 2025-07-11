@@ -31,10 +31,10 @@
     @test DA ≈ A
     @test !(B ≈ A)
 
-    # Non-square block sizes are not supported
-    @test_throws ArgumentError lu(rand(Blocks(64, 32), T, 128, 128), pivot)
-    @test_throws ArgumentError lu!(rand(Blocks(64, 32), T, 128, 128), pivot)
+    # Non-square block sizes
+    @test lu(rand(Blocks(64, 32), T, 128, 128), pivot) isa LU{T,DMatrix{T},DVector{Int}}
+    @test lu!(rand(Blocks(64, 32), T, 128, 128), pivot) isa LU{T,DMatrix{T},DVector{Int}}
 
-        # Singular Values
+    # Singular Values
     pivot == RowMaximum() || @test_throws LinearAlgebra.SingularException lu(ones(Blocks(64,64), T, 128, 128)) # FIXME: NoPivot needs Singular Exception Check
 end
