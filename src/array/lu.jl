@@ -49,34 +49,35 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool =
     return LinearAlgebra.LU{T,DMatrix{T},DVector{Int}}(A, ipiv, info)
 end
 
-function searchmax_pivot!(piv_idx::AbstractVector{Int}, piv_val::AbstractVector{T}, A::AbstractMatrix{T}, offset::Int=0) where T
-    max_idx = LinearAlgebra.BLAS.iamax(A[:])
-    piv_idx[1] = offset+max_idx
-    piv_val[1] = A[max_idx]
+
+function searchmax_panel!(piv_idx::AbstractVector{Int}, piv_val::AbstractVector{T}, A::AbstractMatrix{T}, p::Int, offset::Int=1) where T
+    max_idx = LinearAlgebra.BLAS.iamax(view(A, offset:size(A,1),p))
+    piv_idx[1] = offset-1+max_idx
+    piv_val[1] = A[offset-1+max_idx,p]
 end
 
-function update_ipiv!(ipivl::AbstractVector{Int}, info::Ref{Int}, piv_idx::AbstractVector{Int}, piv_val::AbstractVector{T}, k::Int, nb::Int) where T
-    max_piv_idx = LinearAlgebra.BLAS.iamax(piv_val)
-    max_piv_val = piv_val[max_piv_idx]
+function update_ipiv!(ipivl::AbstractVector{Int}, info::Ref{Int}, piv_idx::AbstractVector{Int}, piv_val::AbstractVector{T}, p::Int, k::Int, nb::Int) where T
+    max_piv_idx = LinearAlgebra.BLAS.iamax(piv_val[k:end])
+    max_piv_val = piv_val[k-1 + max_piv_idx]
     abs_max_piv_val = max_piv_val isa Real ? abs(max_piv_val) : abs(real(max_piv_val)) + abs(imag(max_piv_val))    
     if isapprox(abs_max_piv_val, zero(T); atol=eps(real(T)))
         info[] = k
     end
-    ipivl[1] = (max_piv_idx+k-2)*nb + piv_idx[max_piv_idx]
+    ipivl[p] = (max_piv_idx+k-2)*nb + piv_idx[k-1 + max_piv_idx]
 end
 
 function swaprows_panel!(A::AbstractMatrix{T}, M::AbstractMatrix{T}, ipivl::AbstractVector{Int}, m::Int, p::Int, nb::Int) where T
-    q = div(ipivl[1]-1,nb) + 1
-    r = (ipivl[1]-1)%nb+1
+    q = div(ipivl[p]-1,nb) + 1
+    r = (ipivl[p]-1)%nb+1
     if m == q
         A[p,:], M[r,:] = M[r,:], A[p,:]
     end
 end
 
-function update_panel!(M::AbstractMatrix{T}, A::AbstractMatrix{T}, p::Int) where T
+function update_panel!(M::AbstractMatrix{T}, A::AbstractMatrix{T}, p::Int, offset::Int=1) where T
     Acinv = one(T) / A[p,p]
-    LinearAlgebra.BLAS.scal!(Acinv, view(M, :, p))
-    LinearAlgebra.BLAS.ger!(-one(T), view(M, :, p), conj.(view(A, p, p+1:size(A,2))), view(M, :, p+1:size(M,2)))
+    LinearAlgebra.BLAS.scal!(Acinv, view(M,offset:size(M,1),p))
+    LinearAlgebra.BLAS.ger!(-one(T), view(M,offset:size(M,1),p), conj.(view(A,p,p+1:size(A,2))), view(M,offset:size(M,1),p+1:size(M,2)))
 end
 
 function swaprows_trail!(A::AbstractMatrix{T}, M::AbstractMatrix{T}, ipiv::AbstractVector{Int}, m::Int, nb::Int) where T
@@ -88,6 +89,7 @@ function swaprows_trail!(A::AbstractMatrix{T}, M::AbstractMatrix{T}, ipiv::Abstr
         end
     end
 end
+
 
 function LinearAlgebra.lu(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
     A_copy = LinearAlgebra._lucopy(A, LinearAlgebra.lutype(T))
@@ -124,15 +126,15 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Boo
     Dagger.spawn_datadeps() do
         for k in 1:min(mt, nt)
             for p in 1:min(nb, m-(k-1)*nb, n-(k-1)*nb)
-                Dagger.@spawn searchmax_pivot!(Out(view(max_piv_idx, k:k)), Out(view(max_piv_val, k:k)), In(view(Ac[k,k],p:min(nb,m-(k-1)*nb),p:p)), p-1)
+                Dagger.@spawn searchmax_panel!(Out(view(max_piv_idx,k:k)), Out(view(max_piv_val,k:k)), In(Ac[k,k]), p, p)
                 for i in k+1:mt
-                    Dagger.@spawn searchmax_pivot!(Out(view(max_piv_idx, i:i)), Out(view(max_piv_val, i:i)), In(view(Ac[i,k],:,p:p)))
+                    Dagger.@spawn searchmax_panel!(Out(view(max_piv_idx,i:i)), Out(view(max_piv_val,i:i)), In(Ac[i,k]), p)
                 end
-                Dagger.@spawn update_ipiv!(InOut(view(ipivc[k],p:p)), InOut(info), In(view(max_piv_idx, k:mt)), In(view(max_piv_val, k:mt)), k, nb)
+                Dagger.@spawn update_ipiv!(InOut(ipivc[k]), InOut(info), In(max_piv_idx), In(max_piv_val), p, k, nb)
                 for i in k:mt
-                    Dagger.@spawn swaprows_panel!(InOut(Ac[k, k]), InOut(Ac[i, k]), In(view(ipivc[k],p:p)), i, p, nb)
+                    Dagger.@spawn swaprows_panel!(InOut(Ac[k, k]), InOut(Ac[i, k]), In(ipivc[k]), i, p, nb)
                 end
-                Dagger.@spawn update_panel!(InOut(view(Ac[k,k],p+1:min(nb,m-(k-1)*nb),:)), In(Ac[k,k]), p)
+                Dagger.@spawn update_panel!(InOut(Ac[k,k]), In(Ac[k,k]), p, p+1)
                 for i in k+1:mt
                     Dagger.@spawn update_panel!(InOut(Ac[i, k]), In(Ac[k,k]), p)
                 end
