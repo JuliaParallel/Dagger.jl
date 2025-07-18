@@ -51,7 +51,7 @@ end
 
 
 function searchmax_panel!(piv_idx::AbstractVector{Int}, piv_val::AbstractVector{T}, A::AbstractMatrix{T}, p::Int, offset::Int=1) where T
-    max_idx = LinearAlgebra.BLAS.iamax(view(A, offset:size(A,1),p))
+    max_idx = LinearAlgebra.BLAS.iamax(A[offset:size(A,1),p])
     piv_idx[1] = offset-1+max_idx
     piv_val[1] = A[offset-1+max_idx,p]
 end
@@ -76,8 +76,13 @@ end
 
 function update_panel!(M::AbstractMatrix{T}, A::AbstractMatrix{T}, p::Int, offset::Int=1) where T
     Acinv = one(T) / A[p,p]
-    LinearAlgebra.BLAS.scal!(Acinv, view(M,offset:size(M,1),p))
-    LinearAlgebra.BLAS.ger!(-one(T), view(M,offset:size(M,1),p), conj.(view(A,p,p+1:size(A,2))), view(M,offset:size(M,1),p+1:size(M,2)))
+    M[offset:end, p] .*= Acinv
+    for j in (p + 1):size(M, 2)
+        a = -conj(A[p, j])
+        for i in offset:size(M, 1)
+            M[i, j] += a * M[i, p]
+        end
+    end
 end
 
 function swaprows_trail!(A::AbstractMatrix{T}, M::AbstractMatrix{T}, ipiv::AbstractVector{Int}, m::Int, nb::Int) where T
@@ -120,15 +125,15 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Boo
 
     info = Ref(0)
 
-    max_piv_idx = zeros(Int,mt)
-    max_piv_val = zeros(T, mt)
+    max_piv_idx =  DVector(zeros(Int,mt), Blocks(1))
+    max_piv_val = DVector(zeros(T,mt), Blocks(1))
 
     Dagger.spawn_datadeps() do
         for k in 1:min(mt, nt)
             for p in 1:min(nb, m-(k-1)*nb, n-(k-1)*nb)
-                Dagger.@spawn searchmax_panel!(Out(view(max_piv_idx,k:k)), Out(view(max_piv_val,k:k)), In(Ac[k,k]), p, p)
+                Dagger.@spawn searchmax_panel!(Out(max_piv_idx[k]), Out(max_piv_val), In(Ac[k,k]), p, p)
                 for i in k+1:mt
-                    Dagger.@spawn searchmax_panel!(Out(view(max_piv_idx,i:i)), Out(view(max_piv_val,i:i)), In(Ac[i,k]), p)
+                    Dagger.@spawn searchmax_panel!(Out(max_piv_idx[i]), Out(max_piv_val), In(Ac[i,k]), p)
                 end
                 Dagger.@spawn update_ipiv!(InOut(ipivc[k]), InOut(info), In(max_piv_idx), In(max_piv_val), p, k, nb)
                 for i in k:mt
