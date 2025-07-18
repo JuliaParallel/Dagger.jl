@@ -125,17 +125,20 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Boo
 
     info = Ref(0)
 
-    max_piv_idx =  DVector(zeros(Int,mt), Blocks(1))
+    max_piv_idx = DVector(zeros(Int,mt), Blocks(1))
     max_piv_val = DVector(zeros(T,mt), Blocks(1))
+
+    max_piv_idxc = max_piv_idx.chunks
+    max_piv_valc = max_piv_val.chunks
 
     Dagger.spawn_datadeps() do
         for k in 1:min(mt, nt)
             for p in 1:min(nb, m-(k-1)*nb, n-(k-1)*nb)
-                Dagger.@spawn searchmax_panel!(Out(max_piv_idx[k]), Out(max_piv_val), In(Ac[k,k]), p, p)
+                Dagger.@spawn searchmax_panel!(Out(max_piv_idxc[k]), Out(max_piv_valc[k]), In(Ac[k,k]), p, p)
                 for i in k+1:mt
-                    Dagger.@spawn searchmax_panel!(Out(max_piv_idx[i]), Out(max_piv_val), In(Ac[i,k]), p)
+                    Dagger.@spawn searchmax_panel!(Out(max_piv_idxc[i]), Out(max_piv_valc[i]), In(Ac[i,k]), p)
                 end
-                Dagger.@spawn update_ipiv!(InOut(ipivc[k]), InOut(info), In(max_piv_idx), In(max_piv_val), p, k, nb)
+                Dagger.@spawn update_ipiv!(InOut(ipivc[k]), InOut(info), In(max_piv_idxc), In(max_piv_valc), p, k, nb)
                 for i in k:mt
                     Dagger.@spawn swaprows_panel!(InOut(Ac[k, k]), InOut(Ac[i, k]), In(ipivc[k]), i, p, nb)
                 end
