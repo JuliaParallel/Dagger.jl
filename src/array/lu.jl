@@ -1,12 +1,12 @@
-LinearAlgebra.lu(A::DMatrix{T}, pivot::Union{LinearAlgebra.RowMaximum,LinearAlgebra.NoPivot} = LinearAlgebra.RowMaximum(); check::Bool=true, allowsingular::Bool=false) where {T<:LinearAlgebra.BlasFloat} = LinearAlgebra.lu(A, pivot; check=check, allowsingular=allowsingular)
+LinearAlgebra.lu(A::DMatrix{T}, pivot::Union{LinearAlgebra.RowMaximum,LinearAlgebra.NoPivot} = LinearAlgebra.RowMaximum(); check::Bool=true) where {T<:LinearAlgebra.BlasFloat} = LinearAlgebra.lu(A, pivot; check=check)
 
-LinearAlgebra.lu!(A::DMatrix{T}, pivot::Union{LinearAlgebra.RowMaximum,LinearAlgebra.NoPivot} = LinearAlgebra.RowMaximum(); check::Bool=true, allowsingular::Bool=false) where {T<:LinearAlgebra.BlasFloat} = LinearAlgebra.lu(A, pivot; check=check, allowsingular=allowsingular)
+LinearAlgebra.lu!(A::DMatrix{T}, pivot::Union{LinearAlgebra.RowMaximum,LinearAlgebra.NoPivot} = LinearAlgebra.RowMaximum(); check::Bool=true) where {T<:LinearAlgebra.BlasFloat} = LinearAlgebra.lu(A, pivot; check=check)
 
-function LinearAlgebra.lu(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
+function LinearAlgebra.lu(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool = true) where {T<:LinearAlgebra.BlasFloat}
     A_copy = LinearAlgebra._lucopy(A, LinearAlgebra.lutype(T))
     return LinearAlgebra.lu!(A_copy, LinearAlgebra.NoPivot(); check=check)
 end
-function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
+function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool = true) where {T<:LinearAlgebra.BlasFloat}
   
     check && LinearAlgebra.LAPACK.chkfinite(A)
 
@@ -43,8 +43,6 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool =
     end
 
     ipiv = DVector([i for i in 1:min(size(A)...)])
-
-    check && LinearAlgebra._check_lu_success(info, allowsingular)
 
     return LinearAlgebra.LU{T,DMatrix{T},DVector{Int}}(A, ipiv, info)
 end
@@ -91,11 +89,11 @@ function swaprows_trail!(A::AbstractMatrix{T}, M::AbstractMatrix{T}, ipiv::Abstr
 end
 
 
-function LinearAlgebra.lu(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
+function LinearAlgebra.lu(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Bool = true) where {T<:LinearAlgebra.BlasFloat}
     A_copy = LinearAlgebra._lucopy(A, LinearAlgebra.lutype(T))
-    return LinearAlgebra.lu!(A_copy, LinearAlgebra.RowMaximum(); check=check, allowsingular=allowsingular)
+    return LinearAlgebra.lu!(A_copy, LinearAlgebra.RowMaximum(); check=check)
 end
-function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
+function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Bool = true) where {T<:LinearAlgebra.BlasFloat}
     
     check && LinearAlgebra.LAPACK.chkfinite(A)
 
@@ -152,8 +150,6 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Boo
             end
         end
     end
-
-    check && LinearAlgebra._check_lu_success(info[], allowsingular)
 
     return LinearAlgebra.LU{T,DMatrix{T},DVector{Int}}(A, ipiv, info[])
 end
