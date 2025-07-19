@@ -1,18 +1,35 @@
-function LinearAlgebra.lu(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool=true) where T
+LinearAlgebra.lu(A::DMatrix{T}, pivot::Union{LinearAlgebra.RowMaximum,LinearAlgebra.NoPivot} = LinearAlgebra.RowMaximum(); check::Bool=true, allowsingular::Bool=false) where {T<:LinearAlgebra.BlasFloat} = LinearAlgebra.lu(A, pivot; check=check, allowsingular=allowsingular)
+
+LinearAlgebra.lu!(A::DMatrix{T}, pivot::Union{LinearAlgebra.RowMaximum,LinearAlgebra.NoPivot} = LinearAlgebra.RowMaximum(); check::Bool=true, allowsingular::Bool=false) where {T<:LinearAlgebra.BlasFloat} = LinearAlgebra.lu(A, pivot; check=check, allowsingular=allowsingular)
+
+function LinearAlgebra.lu(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
     A_copy = LinearAlgebra._lucopy(A, LinearAlgebra.lutype(T))
-    return LinearAlgebra.lu!(A_copy, LinearAlgebra.NoPivot(); check=check)
+    return LinearAlgebra.lu!(A_copy, LinearAlgebra.NoPivot(); check=check, allowsingular=allowsingular)
 end
-function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool=true) where T
+function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
+  
+    check && LinearAlgebra.LAPACK.chkfinite(A)
+
     zone = one(T)
     mzone = -one(T)
+
+    mb, nb = A.partitioning.blocksize
+
+    if mb != nb 
+        mb = nb = min(mb, nb)
+        A = maybe_copy_buffered(A => Blocks(nb, nb)) do A
+            A
+        end
+    end
+
     Ac = A.chunks
     mt, nt = size(Ac)
-    iscomplex = T <: Complex
-    trans = iscomplex ? 'C' : 'T'
+
+    info = 0
 
     Dagger.spawn_datadeps() do
         for k in range(1, min(mt, nt))
-            Dagger.@spawn LinearAlgebra.generic_lufact!(InOut(Ac[k, k]), LinearAlgebra.NoPivot(); check)
+            Dagger.@spawn LinearAlgebra.generic_lufact!(InOut(Ac[k, k]), LinearAlgebra.NoPivot(); check=check, allowsingular=allowsingular)
             for m in range(k+1, mt)
                 Dagger.@spawn BLAS.trsm!('R', 'U', 'N', 'N', zone, In(Ac[k, k]), InOut(Ac[m, k]))
             end
@@ -27,5 +44,134 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool=t
 
     ipiv = DVector([i for i in 1:min(size(A)...)])
 
-    return LinearAlgebra.LU{T,DMatrix{T},DVector{Int}}(A, ipiv, 0)
+    check && LinearAlgebra._check_lu_success(info, allowsingular)
+
+    return LinearAlgebra.LU{T,DMatrix{T},DVector{Int}}(A, ipiv, info)
+end
+
+
+function searchmax_pivot!(piv_idx::AbstractVector{Int}, piv_val::AbstractVector{T}, A::AbstractMatrix{T}, p::Int, offset::Int=1) where T
+    max_idx = LinearAlgebra.BLAS.iamax(A[offset:size(A,1),p])
+    piv_idx[1] = offset-1+max_idx
+    piv_val[1] = A[offset-1+max_idx,p]
+end
+
+function searchmax_panel!(panel_max_piv::Tuple{Int,T}, piv_idx::AbstractVector{Int}, piv_val::AbstractVector{T}) where T
+    if piv_val[1] > panel_max_piv[2]
+        panel_max_piv[2] = piv_val[1]
+        panel_max_piv[1] = piv_idx
+    end
+end
+
+function update_ipiv!(ipivl::AbstractVector{Int}, info::Ref{Int}, panel_max_piv::Tuple{Int,T}, p::Int, k::Int, nb::Int) where T
+    abs_max_piv_val = panel_max_piv[2] isa Real ? abs(panel_max_piv[2]) : abs(real(panel_max_piv[2])) + abs(imag(panel_max_piv[2]))    
+    if isapprox(abs_max_piv_val, zero(T); atol=eps(real(T)))
+        info[] = k
+    end
+    ipivl[p] = (panel_max_piv[1]+k-2)*nb + piv_idx[k-1 + panel_max_piv[1]]
+end
+
+function swaprows_panel!(A::AbstractMatrix{T}, M::AbstractMatrix{T}, ipivl::AbstractVector{Int}, m::Int, p::Int, nb::Int) where T
+    q = div(ipivl[p]-1,nb) + 1
+    r = (ipivl[p]-1)%nb+1
+    if m == q
+        A[p,:], M[r,:] = M[r,:], A[p,:]
+    end
+end
+
+function update_panel!(M::AbstractMatrix{T}, A::AbstractMatrix{T}, p::Int, offset::Int=1) where T
+    Acinv = one(T) / A[p,p]
+    M[offset:end, p] .*= Acinv
+    for j in (p + 1):size(M, 2)
+        a = -conj(A[p, j])
+        for i in offset:size(M, 1)
+            M[i, j] += a * M[i, p]
+        end
+    end
+end
+
+function swaprows_trail!(A::AbstractMatrix{T}, M::AbstractMatrix{T}, ipiv::AbstractVector{Int}, m::Int, nb::Int) where T
+    for p in eachindex(ipiv)
+        q = div(ipiv[p]-1,nb) + 1
+        r = (ipiv[p]-1)%nb+1
+        if m == q
+            A[p,:], M[r,:] = M[r,:], A[p,:]
+        end
+    end
+end
+
+printx(args...) = println(args...)
+
+
+
+function LinearAlgebra.lu(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
+    A_copy = LinearAlgebra._lucopy(A, LinearAlgebra.lutype(T))
+    return LinearAlgebra.lu!(A_copy, LinearAlgebra.RowMaximum(); check=check, allowsingular=allowsingular)
+end
+function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
+    
+    check && LinearAlgebra.LAPACK.chkfinite(A)
+
+    zone = one(T)
+    mzone = -one(T)
+
+    mb, nb = A.partitioning.blocksize
+
+    if mb != nb 
+        mb = nb = min(mb, nb)
+        A = maybe_copy_buffered(A => Blocks(nb, nb)) do A
+            A
+        end
+    end
+
+    Ac = A.chunks
+    mt, nt = size(Ac)
+    m,  n  = size(A)
+
+    ipiv = DVector(collect(1:min(m, n)), Blocks(nb))
+    ipivc = ipiv.chunks
+
+    info = Ref(0)
+
+    max_piv_idx = DVector(zeros(Int,mt), Blocks(1)).chunks
+    max_piv_val = DVector(zeros(T,mt), Blocks(1)).chunks
+
+    panel_max_piv = Ref((0, zero(T)))
+
+    Dagger.spawn_datadeps() do
+        for k in 1:min(mt, nt)
+            for p in 1:min(nb, m-(k-1)*nb, n-(k-1)*nb)
+                Dagger.@spawn searchmax_pivot!(Out(max_piv_idx[k]), Out(max_piv_val[k]), In(Ac[k,k]), p, p)
+                for i in k+1:mt
+                    Dagger.@spawn searchmax_pivot!(Out(max_piv_idx[i]), Out(max_piv_val[i]), In(Ac[i,k]), p)
+                end
+                for i in k:mt
+                    Dagger.@spawn searchmax_panel!(InOut(panel_max_piv), In(max_piv_idx[i]), In(max_piv_val[i]))
+                end
+                Dagger.@spawn update_ipiv!(InOut(ipivc[k]), InOut(info), In(panel_max_piv), p, k, nb)
+                for i in k:mt
+                    Dagger.@spawn swaprows_panel!(InOut(Ac[k, k]), InOut(Ac[i, k]), In(ipivc[k]), i, p, nb)
+                end
+                Dagger.@spawn update_panel!(InOut(Ac[k,k]), In(Ac[k,k]), p, p+1)
+                for i in k+1:mt
+                    Dagger.@spawn update_panel!(InOut(Ac[i, k]), In(Ac[k,k]), p)
+                end
+            end
+            for j in Iterators.flatten((1:k-1, k+1:nt))
+                for i in k:mt
+                    Dagger.@spawn swaprows_trail!(InOut(Ac[k, j]), InOut(Ac[i, j]), In(ipivc[k]), i, mb)
+                end
+            end
+            for j in k+1:nt
+                Dagger.@spawn BLAS.trsm!('L', 'L', 'N', 'U', zone, In(Ac[k, k]), InOut(Ac[k, j]))
+                for i in k+1:mt
+                    Dagger.@spawn BLAS.gemm!('N', 'N', mzone, In(Ac[i, k]), In(Ac[k, j]), zone, InOut(Ac[i, j]))
+                end
+            end
+        end
+    end
+
+    check && LinearAlgebra._check_lu_success(info[], allowsingular)
+
+    return LinearAlgebra.LU{T,DMatrix{T},DVector{Int}}(A, ipiv, info[])
 end
