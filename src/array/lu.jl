@@ -50,20 +50,25 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool =
 end
 
 
-function searchmax_panel!(piv_idx::AbstractVector{Int}, piv_val::AbstractVector{T}, A::AbstractMatrix{T}, p::Int, offset::Int=1) where T
+function searchmax_pivot!(piv_idx::AbstractVector{Int}, piv_val::AbstractVector{T}, A::AbstractMatrix{T}, p::Int, offset::Int=1) where T
     max_idx = LinearAlgebra.BLAS.iamax(A[offset:size(A,1),p])
     piv_idx[1] = offset-1+max_idx
     piv_val[1] = A[offset-1+max_idx,p]
 end
 
-function update_ipiv!(ipivl::AbstractVector{Int}, info::Ref{Int}, piv_idx::AbstractVector{Int}, piv_val::AbstractVector{T}, p::Int, k::Int, nb::Int) where T
-    max_piv_idx = LinearAlgebra.BLAS.iamax(piv_val[k:end])
-    max_piv_val = piv_val[k-1 + max_piv_idx]
-    abs_max_piv_val = max_piv_val isa Real ? abs(max_piv_val) : abs(real(max_piv_val)) + abs(imag(max_piv_val))    
+function searchmax_panel!(panel_max_piv::Tuple{Int,T}, piv_idx::AbstractVector{Int}, piv_val::AbstractVector{T}) where T
+    if piv_val[1] > panel_max_piv[2]
+        panel_max_piv[2] = piv_val[1]
+        panel_max_piv[1] = piv_idx
+    end
+end
+
+function update_ipiv!(ipivl::AbstractVector{Int}, info::Ref{Int}, panel_max_piv::Tuple{Int,T}, p::Int, k::Int, nb::Int) where T
+    abs_max_piv_val = panel_max_piv[2] isa Real ? abs(panel_max_piv[2]) : abs(real(panel_max_piv[2])) + abs(imag(panel_max_piv[2]))    
     if isapprox(abs_max_piv_val, zero(T); atol=eps(real(T)))
         info[] = k
     end
-    ipivl[p] = (max_piv_idx+k-2)*nb + piv_idx[k-1 + max_piv_idx]
+    ipivl[p] = (panel_max_piv[1]+k-2)*nb + piv_idx[k-1 + panel_max_piv[1]]
 end
 
 function swaprows_panel!(A::AbstractMatrix{T}, M::AbstractMatrix{T}, ipivl::AbstractVector{Int}, m::Int, p::Int, nb::Int) where T
@@ -95,6 +100,9 @@ function swaprows_trail!(A::AbstractMatrix{T}, M::AbstractMatrix{T}, ipiv::Abstr
     end
 end
 
+printx(args...) = println(args...)
+
+
 
 function LinearAlgebra.lu(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
     A_copy = LinearAlgebra._lucopy(A, LinearAlgebra.lutype(T))
@@ -125,20 +133,22 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Boo
 
     info = Ref(0)
 
-    max_piv_idx = DVector(zeros(Int,mt), Blocks(1))
-    max_piv_val = DVector(zeros(T,mt), Blocks(1))
+    max_piv_idx = DVector(zeros(Int,mt), Blocks(1)).chunks
+    max_piv_val = DVector(zeros(T,mt), Blocks(1)).chunks
 
-    max_piv_idxc = max_piv_idx.chunks
-    max_piv_valc = max_piv_val.chunks
+    panel_max_piv = Ref((0, zero(T)))
 
     Dagger.spawn_datadeps() do
         for k in 1:min(mt, nt)
             for p in 1:min(nb, m-(k-1)*nb, n-(k-1)*nb)
-                Dagger.@spawn searchmax_panel!(Out(max_piv_idxc[k]), Out(max_piv_valc[k]), In(Ac[k,k]), p, p)
+                Dagger.@spawn searchmax_pivot!(Out(max_piv_idx[k]), Out(max_piv_val[k]), In(Ac[k,k]), p, p)
                 for i in k+1:mt
-                    Dagger.@spawn searchmax_panel!(Out(max_piv_idxc[i]), Out(max_piv_valc[i]), In(Ac[i,k]), p)
+                    Dagger.@spawn searchmax_pivot!(Out(max_piv_idx[i]), Out(max_piv_val[i]), In(Ac[i,k]), p)
                 end
-                Dagger.@spawn update_ipiv!(InOut(ipivc[k]), InOut(info), In(max_piv_idxc), In(max_piv_valc), p, k, nb)
+                for i in k:mt
+                    Dagger.@spawn searchmax_panel!(InOut(panel_max_piv), In(max_piv_idx[i]), In(max_piv_val[i]))
+                end
+                Dagger.@spawn update_ipiv!(InOut(ipivc[k]), InOut(info), In(panel_max_piv), p, k, nb)
                 for i in k:mt
                     Dagger.@spawn swaprows_panel!(InOut(Ac[k, k]), InOut(Ac[i, k]), In(ipivc[k]), i, p, nb)
                 end
