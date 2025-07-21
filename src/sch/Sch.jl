@@ -549,6 +549,7 @@ end
         task = nothing
         @label pop_task
         if task !== nothing
+            @dagdebug task :schedule "Finished scheduling task"
             @maybelog ctx timespan_finish(ctx, :schedule, (;uid=state.uid, thunk_id=task.id), (;thunk_id=task.id))
         end
         if isempty(state.ready)
@@ -564,6 +565,7 @@ end
                 finish_failed!(state, task)
             else
                 # This shouldn't have happened
+                @dagdebug task :schedule "Scheduling inconsistency: Task being scheduled is already cached!"
                 iob = IOBuffer()
                 println(iob, "Scheduling inconsistency: Task being scheduled is already cached!")
                 println(iob, "  Task: $(task.id)")
@@ -591,7 +593,7 @@ end
         if scope isa InvalidScope
             ex = SchedulingException("compute_scope and result_scope are not compatible: $(scope.x), $(scope.y)")
             store_result!(state, task, ex; error=true)
-            set_failed!(state, task)
+            finish_failed!(state, task)
             @goto pop_task
         end
         for arg in task.inputs
@@ -608,7 +610,7 @@ end
             if scope isa InvalidScope
                 ex = SchedulingException("Current scope and argument Chunk scope are not compatible: $(scope.x), $(scope.y)")
                 store_result!(state, task, ex; error=true)
-                set_failed!(state, task)
+                finish_failed!(state, task)
                 @goto pop_task
             end
         end
@@ -669,7 +671,7 @@ end
 
         ex = SchedulingException("No processors available, try widening scope")
         store_result!(state, task, ex; error=true)
-        set_failed!(state, task)
+        finish_failed!(state, task)
         @dagdebug task :schedule "No processors available, skipping"
         sorted_procs_cleanup()
         costs_cleanup()
