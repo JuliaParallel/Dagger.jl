@@ -861,14 +861,16 @@ Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
             sch_handle, state.uid))
     end
 
-    if Dagger.root_worker_id(gproc) == myid()
-        @reusable_tasks :fire_tasks!_task_cache 32 _->nothing "fire_tasks!" FireTaskSpec(proc, state.chan, to_send)
-    else
-        # N.B. We don't batch these because we might get a deserialization
-        # error due to something not being defined on the worker, and then we don't
-        # know which task failed.
-        for (idx, task_spec) in enumerate(to_send)
-            @reusable_tasks :fire_tasks!_task_cache 32 _->nothing "fire_tasks!" FireTaskSpec(proc, state.chan, task_spec)
+    if !isempty(to_send)
+        if Dagger.root_worker_id(gproc) == myid()
+            @reusable_tasks :fire_tasks!_task_cache 32 _->nothing "fire_tasks!" FireTaskSpec(proc, state.chan, to_send)
+        else
+            # N.B. We don't batch these because we might get a deserialization
+            # error due to something not being defined on the worker, and then we don't
+            # know which task failed.
+            for task_spec in to_send
+                @reusable_tasks :fire_tasks!_task_cache 32 _->nothing "fire_tasks!" FireTaskSpec(proc, state.chan, task_spec)
+            end
         end
     end
     to_send_cleanup()
