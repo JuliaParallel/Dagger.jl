@@ -587,15 +587,12 @@ end
         # TODO: Measure and model processor move overhead
         tx_cost = impute_sum(affinity(chunk)[2] for chunk in chunks_filt)
 
-        # Estimate total cost to move data and get task running after currently-scheduled tasks
-        est_business = get(state.worker_time_pressure[get_parent(proc).pid], proc, 0)
-
         # Add fixed cost for cross-worker task transfer (esimated at 1ms)
         # TODO: Actually estimate/benchmark this
         task_xfer_cost = gproc.pid != myid() ? 1_000_000 : 0 # 1ms
 
         # Compute final cost
-        costs[proc] = est_time_util + est_business + (tx_cost/tx_rate) + task_xfer_cost
+        costs[proc] = est_time_util + (tx_cost/tx_rate) + task_xfer_cost
     end
     chunks_cleanup()
 

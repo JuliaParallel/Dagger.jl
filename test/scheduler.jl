@@ -400,13 +400,18 @@ end
         end
 
         state = Dagger.Sch.EAGER_STATE[]
-        tproc1 = Dagger.ThreadProc(1, 1)
-        tproc2 = Dagger.ThreadProc(first(workers()), 1)
-        procs = [tproc1, tproc2]
+        tproc1_1 = Dagger.ThreadProc(1, 1)
+        tproc2_1 = Dagger.ThreadProc(first(workers()), 1)
+        procs = [tproc1_1, tproc2_1]
 
-        pres1 = state.worker_time_pressure[1][tproc1]
-        pres2 = state.worker_time_pressure[first(workers())][tproc2]
+        # Ensure that this worker has been used at least once
+        fetch(Dagger.@spawn scope=Dagger.ExactScope(tproc2_1) 1+1)
+
+        #pres1_1 = state.worker_time_pressure[1][tproc1_1]
+        #pres2_1 = state.worker_time_pressure[first(workers())][tproc2_1]
         tx_rate = state.transfer_rate[]
+        tx_xfer_cost = 1e6
+        sig_unknown_cost = 1e9
 
         for (args, tx_size) in [
             ([1, 2], 0),
@@ -433,18 +438,18 @@ end
             Dagger.Sch.collect_task_inputs!(state, t)
             sorted_procs, costs = Dagger.Sch.estimate_task_costs(state, procs, t)
 
-            @test tproc1 in sorted_procs
-            @test tproc2 in sorted_procs
+            @test tproc1_1 in sorted_procs
+            @test tproc2_1 in sorted_procs
             if length(cargs) > 0
-                @test sorted_procs[1] == tproc1
-                @test sorted_procs[2] == tproc2
+                @test sorted_procs[1] == tproc1_1
+                @test sorted_procs[2] == tproc2_1
             end
 
-            @test haskey(costs, tproc1)
-            @test haskey(costs, tproc2)
-            @test costs[tproc1] ≈ pres1 # All chunks are local
+            @test haskey(costs, tproc1_1)
+            @test haskey(costs, tproc2_1)
+            @test costs[tproc1_1] ≈ #=pres1_1 +=# sig_unknown_cost # All chunks are local, and this signature is unknown
             if nprocs() > 1
-                @test costs[tproc2] ≈ (tx_size/tx_rate) + pres2 # All chunks are remote
+                @test costs[tproc2_1] ≈ (tx_size/tx_rate) + tx_xfer_cost + #=pres2_1 +=# sig_unknown_cost # All chunks are remote, and this signature is unknown
             end
         end
     end
@@ -564,12 +569,32 @@ end
 end
 
 @testset "Cancellation" begin
-    t = Dagger.@spawn scope=Dagger.scope(worker=1, thread=1) sleep(100)
+    # Ready task cancellation
     start_time = time_ns()
+    t = Dagger.@spawn scope=Dagger.scope(worker=1, thread=1) sleep(100)
     Dagger.cancel!(t)
-    @test_throws_unwrap (Dagger.DTaskFailedException, InterruptException) fetch(t)
+    @test timedwait(()->istaskdone(t), 10) == :ok
+    if istaskdone(t)
+        @test_throws_unwrap (Dagger.DTaskFailedException, InterruptException) fetch(t)
+        @test (time_ns() - start_time) * 1e-9 < 100
+    end
+
+    # Running task cancellation
+    start_time = time_ns()
+    t = Dagger.@spawn scope=Dagger.scope(worker=1, thread=1) sleep(100)
+    sleep(0.1) # Give the scheduler a chance to schedule the task
+    Dagger.cancel!(t)
+    @test timedwait(()->istaskdone(t), 10) == :ok
+    if istaskdone(t)
+        @test_throws_unwrap (Dagger.DTaskFailedException, InterruptException) fetch(t)
+        @test (time_ns() - start_time) * 1e-9 < 100
+    end
+
+    # Normal task execution
+    start_time = time_ns()
     t = Dagger.@spawn scope=Dagger.scope(worker=1, thread=1) yield()
-    fetch(t)
-    finish_time = time_ns()
-    @test (finish_time - start_time) * 1e-9 < 100
+    @test timedwait(()->istaskdone(t), 10) == :ok
+    if istaskdone(t)
+        @test (time_ns() - start_time) * 1e-9 < 100
+    end
 end

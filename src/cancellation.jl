@@ -100,9 +100,14 @@ function _cancel!(state, tid, force, graceful, halt_sch)
         @dagdebug tid :cancel "Cancelling ready task"
         ex = DTaskFailedException(task, task, InterruptException())
         Sch.store_result!(state, task, ex; error=true)
-        Sch.set_failed!(state, task)
+        Sch.finish_failed!(state, task, task)
     end
-    empty!(state.ready)
+    if tid === nothing
+        empty!(state.ready)
+    else
+        idx = findfirst(t->t.id == tid, state.ready)
+        idx !== nothing && deleteat!(state.ready, idx)
+    end
 
     # Cancel waiting tasks
     for task in keys(state.waiting)
@@ -110,9 +115,15 @@ function _cancel!(state, tid, force, graceful, halt_sch)
         @dagdebug tid :cancel "Cancelling waiting task"
         ex = DTaskFailedException(task, task, InterruptException())
         Sch.store_result!(state, task, ex; error=true)
-        Sch.set_failed!(state, task)
+        Sch.finish_failed!(state, task, task)
     end
-    empty!(state.waiting)
+    if tid === nothing
+        empty!(state.waiting)
+    else
+        if haskey(state.waiting, tid)
+            delete!(state.waiting, tid)
+        end
+    end
 
     # Cancel running tasks at the processor level
     wids = unique(map(root_worker_id, values(state.running_on)))
@@ -155,6 +166,7 @@ function _cancel!(state, tid, force, graceful, halt_sch)
             return
         end
     end
+    put!(state.chan, Sch.RescheduleSignal())
 
     if halt_sch
         unlock(state.lock)
