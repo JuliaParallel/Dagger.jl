@@ -555,10 +555,12 @@ end
             @goto fire_tasks
         end
         task = popfirst!(state.ready)
+        @dagdebug task :schedule "Scheduling task"
         @maybelog ctx timespan_start(ctx, :schedule, (;uid=state.uid, thunk_id=task.id), (;thunk_id=task.id))
         if has_result(state, task)
             if haskey(state.errored, task)
                 # An error was eagerly propagated to this task
+                @dagdebug task :schedule "Task received upstream error, finishing"
                 finish_failed!(state, task)
             else
                 # This shouldn't have happened
@@ -663,9 +665,11 @@ end
                 end
             end
         end
+
         ex = SchedulingException("No processors available, try widening scope")
         store_result!(state, task, ex; error=true)
         set_failed!(state, task)
+        @dagdebug task :schedule "No processors available, skipping"
         sorted_procs_cleanup()
         costs_cleanup()
         @goto pop_task
@@ -732,6 +736,7 @@ function remove_dead_proc!(ctx, state, proc, options)
 end
 
 function finish_task!(ctx, state, node, thunk_failed)
+    @dagdebug node :finish "Finishing with $(thunk_failed ? "error" : "result")"
     pop!(state.running, node)
     delete!(state.running_on, node)
     if thunk_failed
@@ -1224,7 +1229,7 @@ function (dts::DoTaskSpec)()
         if unwrap_nested_exception(err) isa InvalidStateException || !isopen(return_queue)
             @dagdebug tid :execute "Return queue is closed, failing to put result" chan=return_queue exception=(err, catch_backtrace())
         else
-            rethrow(err)
+            rethrow()
         end
     end
     return

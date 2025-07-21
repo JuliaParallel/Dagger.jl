@@ -185,7 +185,8 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
                 #=FIXME:REALLOC=#
                 Sch.reschedule_syncdeps!(state, thunk)
                 old_fargs_cleanup() # reschedule_syncdeps! preserves all referenced tasks/chunks
-                @dagdebug thunk :submit "Added to scheduler"
+                n_upstreams = haskey(state.waiting, thunk) ? length(state.waiting[thunk]) : 0
+                @dagdebug thunk :submit "Added to scheduler with $n_upstreams upstreams"
                 if future !== nothing
                     # Ensure we attach a future before the thunk is scheduled
                     Sch._register_future!(ctx, state, task, tid, (future, thunk_id, false))

@@ -26,7 +26,7 @@ compatible with the given scope.
 """
 compatible_processors(scope::AbstractScope=get_compute_scope(), ctx::Context=Sch.eager_context()) =
     compatible_processors(scope, procs(ctx))
-function compatible_processors(scope::AbstractScope, procs::Vector{Processor})
+function compatible_processors(scope::AbstractScope, procs::Vector{<:Processor})
     compat_procs = Set{Processor}()
     for gproc in procs
         # Fast-path in case entire process is incompatible

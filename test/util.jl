@@ -14,7 +14,7 @@ end
 replace_obj!(ex::Symbol, obj) = Expr(:(.), obj, QuoteNode(ex))
 replace_obj!(ex, obj) = ex
 function _test_throws_unwrap(terr, ex; to_match=[])
-    @gensym oerr rerr
+    @gensym oerr rerr bt
     match_expr = Expr(:block)
     for m in to_match
         if m.head == :(=)
@@ -35,9 +35,11 @@ function _test_throws_unwrap(terr, ex; to_match=[])
         end
     end
     quote
+        $bt = nothing
         $oerr, $rerr = try
             nothing, $(esc(ex))
         catch err
+            $bt = catch_backtrace()
             (err, Dagger.Sch.unwrap_nested_exception(err))
         end
         if $terr isa Tuple
@@ -48,7 +50,7 @@ function _test_throws_unwrap(terr, ex; to_match=[])
             else
                 println("Full error:")
                 Base.showerror(stdout, $oerr)
-                Base.show_backtrace(stdout, backtrace())
+                Base.show_backtrace(stdout, $bt)
             end
         else
             @test $rerr isa $terr
@@ -57,7 +59,7 @@ function _test_throws_unwrap(terr, ex; to_match=[])
             else
                 println("Full error:")
                 Base.showerror(stdout, $oerr)
-                Base.show_backtrace(stdout, backtrace())
+                Base.show_backtrace(stdout, $bt)
             end
         end
     end

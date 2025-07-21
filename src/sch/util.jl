@@ -93,6 +93,7 @@ end
 function fill_registered_futures!(state, thunk, failed)
     if haskey(state.futures, thunk)
         # Notify any listening thunks
+        @dagdebug thunk :finish "Notifying $(length(state.futures[thunk])) futures"
         for future in state.futures[thunk]
             put!(future, load_result(state, thunk); error=failed)
         end
@@ -135,14 +136,20 @@ end
 
 "Schedules any dependents that may be ready to execute."
 function schedule_dependents!(state, thunk, failed)
+    @dagdebug thunk :finish "Checking dependents"
     if !haskey(state.waiting_data, thunk) || isempty(state.waiting_data[thunk])
         return
     end
+    ctr = 0
     for dep in state.waiting_data[thunk]
+        @dagdebug dep :schedule "Checking dependent"
         dep_isready = false
         if haskey(state.waiting, dep)
             set = state.waiting[dep]
             thunk in set && pop!(set, thunk)
+            if length(set) > 0
+                @dagdebug dep :schedule "Dependent has $(length(set)) upstreams"
+            end
             dep_isready = isempty(set)
             if dep_isready
                 delete!(state.waiting, dep)
@@ -151,11 +158,17 @@ function schedule_dependents!(state, thunk, failed)
             dep_isready = true
         end
         if dep_isready
+            ctr += 1
             if !failed
                 push!(state.ready, dep)
+                @dagdebug dep :schedule "Dependent is now ready"
+            else
+                set_failed!(state, thunk, dep)
+                @dagdebug dep :schedule "Dependent has transitively failed"
             end
         end
     end
+    @dagdebug thunk :finish "Marked $ctr dependents as $(failed ? "failed" : "ready")"
 end
 
 """
@@ -226,6 +239,8 @@ const RESCHEDULE_SYNCDEPS_SEEN_CACHE = TaskLocalValue{ReusableCache{Set{Thunk},N
 "Marks `thunk` and all dependent thunks as failed."
 function set_failed!(state, origin, thunk=origin)
     @assert islocked(state.lock)
+    has_result(state, thunk) && return
+    @dagdebug thunk :finish "Setting as failed"
     filter!(x -> x !== thunk, state.ready)
     # N.B. If origin === thunk, we assume that the caller has already set the error
     if origin !== thunk
@@ -554,6 +569,7 @@ end
         end
     end
 
+    # Estimate total cost for executing this task on each candidate processor
     for proc in procs
         gproc = get_parent(proc)
         chunks_filt = Iterators.filter(c->get_parent(processor(c)) != gproc, chunks)
