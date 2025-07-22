@@ -298,7 +298,7 @@ end
 function (dpm::DestPostMigration)(store, unsent)
     STREAM_THUNK_ID[] = dpm.thunk_id
     @assert !in_task()
-    tls = DTaskTLS(OSProc(), typemax(UInt64), nothing, [], dpm.cancel_token)
+    tls = DTaskTLS(OSProc(), typemax(UInt64), nothing, [], dpm.cancel_token, false)
     set_tls!(tls)
     return dpm.f(store, unsent)
 end
