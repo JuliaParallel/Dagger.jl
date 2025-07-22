@@ -71,7 +71,6 @@ end
 
     @testset "Aliasing" begin
         f! = v1 -> begin
-            @show typeof(v1) v1
             v1 .= 0
             return
         end
