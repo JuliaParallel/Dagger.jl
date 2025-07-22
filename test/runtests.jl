@@ -22,6 +22,7 @@ tests = [
     ("Datadeps", "datadeps.jl"),
     ("Streaming", "streaming.jl"),
     ("Domain Utilities", "domain.jl"),
+    ("Rules", "rules.jl"),
     ("Array - Allocation", "array/allocation.jl"),
     ("Array - Indexing", "array/indexing.jl"),
     ("Array - Core", "array/core.jl"),
