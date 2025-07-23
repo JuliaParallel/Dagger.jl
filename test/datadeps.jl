@@ -71,7 +71,6 @@ end
 
     @testset "Aliasing" begin
         f! = v1 -> begin
-            @show typeof(v1) v1
             v1 .= 0
             return
         end
@@ -488,7 +487,7 @@ function test_datadeps(;args_chunks::Bool,
         [Dagger.@spawn Dagger.task_processor() for i in 1:10]
     end)
     unique!(exec_procs)
-    scope = Dagger.get_options(:scope)
+    scope = Dagger.get_compute_scope()
     all_procs = vcat([collect(Dagger.get_processors(OSProc(w))) for w in procs()]...)
     scope_procs = filter(proc->!isa(Dagger.constrain(scope, ExactScope(proc)), Dagger.InvalidScope), all_procs)
     for proc in exec_procs

@@ -17,9 +17,9 @@ import Random: AbstractRNG
 import UUIDs: UUID, uuid4
 
 if !isdefined(Base, :ScopedValues)
-    import ScopedValues: ScopedValue, with
+    import ScopedValues: ScopedValue, @with, with
 else
-    import Base.ScopedValues: ScopedValue, with
+    import Base.ScopedValues: ScopedValue, @with, with
 end
 import TaskLocalValues: TaskLocalValue
 
@@ -32,7 +32,6 @@ import TimespanLogging: timespan_start, timespan_finish
 
 import Adapt
 
-# Preferences
 import Preferences: @load_preference, @set_preferences!
 
 if @load_preference("distributed-package") == "DistributedNext"
@@ -43,29 +42,35 @@ else
     import Distributed: Future, RemoteChannel, myid, workers, nworkers, procs, remotecall, remotecall_wait, remotecall_fetch, check_same_host
 end
 
+import MacroTools: @capture, prewalk
+
 include("lib/util.jl")
 include("utils/dagdebug.jl")
 
 # Distributed data
 include("utils/locked-object.jl")
 include("utils/tasks.jl")
-
-import MacroTools: @capture, prewalk
-
-include("options.jl")
+include("utils/reuse.jl")
 include("processor.jl")
 include("threadproc.jl")
+include("sch_options.jl")
 include("context.jl")
 include("utils/processors.jl")
+include("scopes.jl")
+include("utils/scopes.jl")
+include("chunks.jl")
+include("utils/signature.jl")
+include("options.jl")
 include("dtask.jl")
 include("cancellation.jl")
 include("task-tls.jl")
-include("scopes.jl")
-include("utils/scopes.jl")
+include("argument.jl")
 include("queue.jl")
 include("thunk.jl")
+include("utils/fetch.jl")
+include("utils/chunks.jl")
+include("utils/logging.jl")
 include("submission.jl")
-include("chunks.jl")
 include("memory-spaces.jl")
 
 # Task scheduling
@@ -85,15 +90,15 @@ include("stream.jl")
 include("stream-buffers.jl")
 include("stream-transfer.jl")
 
+# File IO
+include("file-io.jl")
+
 # Array computations
 include("array/darray.jl")
 include("array/alloc.jl")
 include("array/map-reduce.jl")
 include("array/copy.jl")
-
-# File IO
-include("file-io.jl")
-
+include("array/random.jl")
 include("array/operators.jl")
 include("array/indexing.jl")
 include("array/setindex.jl")
@@ -104,19 +109,19 @@ include("array/linalg.jl")
 include("array/mul.jl")
 include("array/cholesky.jl")
 include("array/lu.jl")
-include("array/random.jl")
 
 import KernelAbstractions, Adapt
 
 # GPU
 include("gpu.jl")
 
-# Logging and Visualization
+# Logging
+include("utils/logging-events.jl")
+
+# Visualization
 include("visualization.jl")
 include("ui/gantt-common.jl")
 include("ui/gantt-text.jl")
-include("utils/logging-events.jl")
-include("utils/logging.jl")
 include("utils/viz.jl")
 
 """

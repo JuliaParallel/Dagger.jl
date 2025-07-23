@@ -16,7 +16,6 @@ DTask
 ## Task Options Types
 ```@docs
 Options
-Sch.ThunkOptions
 Sch.SchedulerOptions
 ```
 

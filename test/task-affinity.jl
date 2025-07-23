@@ -6,9 +6,13 @@
         @assert Dagger.Sch.unwrap_nested_exception(err) isa Dagger.Sch.SchedulingException
         return Dagger.InvalidScope
     end
-    get_compute_scope(x::DTask) = Dagger.Sch._find_thunk(x).compute_scope
+    function get_compute_scope(x::DTask)
+        thunk = Dagger.Sch._find_thunk(x)
+        return @something(thunk.options.compute_scope, thunk.options.scope, Dagger.DefaultScope())
+    end
 
-    get_result_scope(x::DTask) = Dagger.Sch._find_thunk(x).result_scope
+    get_result_scope(x::DTask) =
+        @something(Dagger.Sch._find_thunk(x).options.result_scope, Dagger.AnyScope())
 
     get_final_result_scope(x::DTask) = @something(fetch_or_invalidscope(x), fetch(x; raw=true).scope)
 
@@ -18,18 +22,18 @@
             return res
         end
         thunk = Dagger.Sch._find_thunk(x)
-        compute_scope = thunk.compute_scope
-        result_scope = thunk.result_scope
-        f_scope = thunk.f isa Dagger.Chunk ? thunk.f.scope : Dagger.AnyScope()
+        compute_scope = @something(thunk.options.compute_scope, thunk.options.scope, Dagger.DefaultScope())
+        result_scope = @something(thunk.options.result_scope, Dagger.AnyScope())
         inputs_scopes = Dagger.AbstractScope[]
         for input in thunk.inputs
+            input = Dagger.unwrap_weak_checked(Dagger.value(input))
             if input isa Dagger.Chunk
                 push!(inputs_scopes, input.scope)
             else
                 push!(inputs_scopes, Dagger.AnyScope())
             end
         end
-        return Dagger.constrain(compute_scope, result_scope, f_scope, inputs_scopes...)
+        return Dagger.constrain(compute_scope, result_scope, inputs_scopes...)
     end
 
     availprocs  = collect(Dagger.all_processors())

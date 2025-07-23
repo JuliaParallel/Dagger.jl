@@ -1,3 +1,5 @@
+import Dagger: Options
+
 @testset "Scheduler Checkpointing" begin
     ctx = Context([1,workers()...])
     d = Ref(false)
@@ -86,7 +88,7 @@ end
 @testset "Thunk Checkpointing" begin
     ctx = Context([1,workers()...])
     d = Ref(false)
-    opts = Dagger.Sch.ThunkOptions(;
+    opts = Options(;
     single=1,
     checkpoint=(thunk, result)->begin
         @assert thunk.f != Base.:*
@@ -102,7 +104,7 @@ end
     @test d[]
     @test f[] == 1
 
-    opts = Dagger.Sch.ThunkOptions(;
+    opts = Options(;
     single=1,
     restore=(thunk)->begin
         @assert thunk.f != Base.:*
@@ -122,7 +124,7 @@ end
     @testset "Checkpoint Failure" begin
         d = Ref(false)
         e = Ref(false)
-        opts = Dagger.Sch.ThunkOptions(;
+        opts = Options(;
         single=1,
         checkpoint=(thunk, result)->begin
             e[] = true
@@ -142,7 +144,7 @@ end
     @testset "Restore Failure" begin
         d = Ref(false)
         e = Ref(false)
-        opts = Dagger.Sch.ThunkOptions(;
+        opts = Options(;
         single=1,
         restore=(thunk)->begin
             e[] = true
@@ -161,7 +163,7 @@ end
         @test e[] # restore executed
     end
     @testset "Restore Failure (quiet)" begin
-        opts = Dagger.Sch.ThunkOptions(;
+        opts = Options(;
         single=1,
         restore=(thunk)->begin
             nothing

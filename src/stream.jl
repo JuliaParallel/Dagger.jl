@@ -298,7 +298,7 @@ end
 function (dpm::DestPostMigration)(store, unsent)
     STREAM_THUNK_ID[] = dpm.thunk_id
     @assert !in_task()
-    tls = DTaskTLS(OSProc(), typemax(UInt64), nothing, [], dpm.cancel_token)
+    tls = DTaskTLS(OSProc(), typemax(UInt64), nothing, [], dpm.cancel_token, false)
     set_tls!(tls)
     return dpm.f(store, unsent)
 end
@@ -391,7 +391,7 @@ function enqueue!(queue::StreamingTaskQueue, specs::Vector{Pair{DTaskSpec,DTask}
 end
 
 function initialize_streaming!(self_streams, spec, task)
-    @assert !isa(spec.f, StreamingFunction) "Task is already in streaming form"
+    @assert !isa(value(spec.fargs[1]), StreamingFunction) "Task is already in streaming form"
 
     # Calculate the return type of the called function
     T_old = Base.uniontypes(task.metadata.return_type)
@@ -401,33 +401,34 @@ function initialize_streaming!(self_streams, spec, task)
     T = task.metadata.return_type = !isempty(T_old) ? Union{T_old...} : Any
 
     # Get input buffer configuration
-    input_buffer_amount = get(spec.options, :stream_input_buffer_amount, 1)
+    input_buffer_amount = something(spec.options.stream_input_buffer_amount, 1)
     if input_buffer_amount <= 0
         throw(ArgumentError("Input buffering is required; please specify a `stream_input_buffer_amount` greater than 0"))
     end
 
     # Get output buffer configuration
-    output_buffer_amount = get(spec.options, :stream_output_buffer_amount, 1)
+    output_buffer_amount = something(spec.options.stream_output_buffer_amount, 1)
     if output_buffer_amount <= 0
         throw(ArgumentError("Output buffering is required; please specify a `stream_output_buffer_amount` greater than 0"))
     end
 
     # Create the Stream
-    buffer_type = get(spec.options, :stream_buffer_type, ProcessRingBuffer)
+    buffer_type = something(spec.options.stream_buffer_type, ProcessRingBuffer)
     stream = Stream{T,buffer_type}(task.uid, input_buffer_amount, output_buffer_amount)
     self_streams[task.uid] = stream
 
     # Get max evaluation count
-    max_evals = get(spec.options, :stream_max_evals, -1)
+    max_evals = something(spec.options.stream_max_evals, -1)
     if max_evals == 0
         throw(ArgumentError("stream_max_evals cannot be 0"))
     end
 
     # Wrap the function in a StreamingFunction
-    spec.f = StreamingFunction(spec.f, stream, max_evals)
+    spec.fargs[1].value = StreamingFunction(value(spec.fargs[1]), stream, max_evals)
 
     # Mark the task as non-blocking
-    spec.options = merge(spec.options, (;occupancy=Dict(Any=>0)))
+    spec.options.occupancy = @something(spec.options.occupancy, Dict())
+    spec.options.occupancy[Any] = 0
 
     # Register Stream globally
     remotecall_wait(1, task.uid, stream) do uid, stream
@@ -670,7 +671,8 @@ function finalize_streaming!(tasks::Vector{Pair{DTaskSpec,DTask}}, self_streams)
         our_stream = self_streams[task.uid]
 
         # Adapt args to accept Stream output of other streaming tasks
-        for (idx, (pos, arg)) in enumerate(spec.args)
+        for (idx, pos_arg) in enumerate(spec.fargs)
+            arg = value(pos_arg)
             if arg isa DTask
                 # Check if this is a streaming task
                 if haskey(self_streams, arg.uid)
@@ -684,7 +686,7 @@ function finalize_streaming!(tasks::Vector{Pair{DTaskSpec,DTask}}, self_streams)
                     # FIXME: Be configurable
                     input_fetcher = RemoteChannelFetcher()
                     other_stream_handle = Stream(other_stream)
-                    spec.args[idx] = pos => other_stream_handle
+                    pos_arg.value = other_stream_handle
                     our_stream.store.input_streams[arg.uid] = other_stream_handle
                     our_stream.store.input_fetchers[arg.uid] = input_fetcher
 
@@ -695,18 +697,6 @@ function finalize_streaming!(tasks::Vector{Pair{DTaskSpec,DTask}}, self_streams)
                     push!(changes, task.uid => input_fetcher)
                 end
             end
-        end
-
-        # Filter out all streaming options
-        to_filter = (:stream_buffer_type,
-                     :stream_input_buffer_amount, :stream_output_buffer_amount,
-                     :stream_max_evals)
-        spec.options = NamedTuple(filter(opt -> !(opt[1] in to_filter),
-                                         Base.pairs(spec.options)))
-        if haskey(spec.options, :propagates)
-            propagates = filter(opt -> !(opt in to_filter),
-                                spec.options.propagates)
-            spec.options = merge(spec.options, (;propagates))
         end
     end
 

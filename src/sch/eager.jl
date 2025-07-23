@@ -23,10 +23,15 @@ function init_eager()
         return
     end
     ctx = eager_context()
-    errormonitor_tracked("eager compute()", Threads.@spawn try
+    # N.B. We use @async here to prevent the scheduler task from running on a
+    # different thread than the one that is likely submitting work, as otherwise
+    # the scheduler task might sleep while holding the scheduler lock and
+    # prevent work submission until it wakes up. Further testing is needed.
+    errormonitor_tracked("eager compute()", @async try
         sopts = SchedulerOptions(;allow_errors=true)
         opts = Dagger.Options((;scope=Dagger.ExactScope(Dagger.ThreadProc(1, 1)),
-                                occupancy=Dict(Dagger.ThreadProc=>0)))
+                                occupancy=Dict(Dagger.ThreadProc=>0),
+                                time_util=Dict(Dagger.ThreadProc=>0)))
         Dagger.compute(ctx, Dagger._delayed(eager_thunk, opts)();
                        options=sopts)
     catch err
@@ -76,7 +81,7 @@ function thunk_yield(f)
         proc_istate = proc_states(tls.sch_uid) do states
             states[proc].state
         end
-        task_occupancy = tls.task_spec[4]
+        task_occupancy = tls.task_spec.est_occupancy
 
         # Decrease our occupancy and inform the processor to reschedule
         lock(proc_istate.queue) do _
@@ -105,31 +110,6 @@ function thunk_yield(f)
         end
     else
         return f()
-    end
-end
-
-eager_cleanup(t::Dagger.DTaskFinalizer) =
-    errormonitor_tracked("eager_cleanup $(t.uid)", Threads.@spawn eager_cleanup(EAGER_STATE[], t.uid))
-function eager_cleanup(state, uid)
-    tid = nothing
-    lock(EAGER_ID_MAP) do id_map
-        if !haskey(id_map, uid)
-            return
-        end
-        tid = id_map[uid]
-        delete!(id_map, uid)
-    end
-    tid === nothing && return
-    lock(state.lock) do
-        # N.B. cache and errored expire automatically
-        delete!(state.thunk_dict, tid)
-    end
-    remotecall_wait(1, uid) do uid
-        lock(Dagger.EAGER_THUNK_STREAMS) do global_streams
-            if haskey(global_streams, uid)
-                delete!(global_streams, uid)
-            end
-        end
     end
 end
 

@@ -28,9 +28,8 @@ end
     for (option, default, value, value2) in [
         # Special handling
         (:scope, AnyScope(), ProcessScope(first_wid), ProcessScope(last_wid)),
-        # ThunkOptions field
+        # Options field
         (:single, 0, first_wid, last_wid),
-        # Thunk field
         (:meta, false, true, false)
     ]
         # Test local and remote default values

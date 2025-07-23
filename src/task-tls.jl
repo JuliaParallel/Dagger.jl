@@ -4,13 +4,20 @@ mutable struct DTaskTLS
     processor::Processor
     sch_uid::UInt
     sch_handle::Any # FIXME: SchedulerHandle
-    task_spec::Vector{Any} # FIXME: TaskSpec
+    task_spec::Any # FIXME: TaskSpec
     cancel_token::CancelToken
+    logging_enabled::Bool
 end
 
 const DTASK_TLS = TaskLocalValue{Union{DTaskTLS,Nothing}}(()->nothing)
 
-Base.copy(tls::DTaskTLS) = DTaskTLS(tls.processor, tls.sch_uid, tls.sch_handle, tls.task_spec, tls.cancel_token)
+Base.copy(tls::DTaskTLS) =
+    DTaskTLS(tls.processor,
+             tls.sch_uid,
+             tls.sch_handle,
+             tls.task_spec,
+             tls.cancel_token,
+             tls.logging_enabled)
 
 """
     get_tls() -> DTaskTLS
@@ -20,12 +27,17 @@ Gets all Dagger TLS variable as a `DTaskTLS`.
 get_tls() = DTASK_TLS[]::DTaskTLS
 
 """
-    set_tls!(tls)
+    set_tls!(tls::NamedTuple)
 
 Sets all Dagger TLS variables from `tls`, which may be a `DTaskTLS` or a `NamedTuple`.
 """
 function set_tls!(tls)
-    DTASK_TLS[] = DTaskTLS(tls.processor, tls.sch_uid, tls.sch_handle, tls.task_spec, tls.cancel_token)
+    DTASK_TLS[] = DTaskTLS(tls.processor,
+                           tls.sch_uid,
+                           tls.sch_handle,
+                           tls.task_spec,
+                           tls.cancel_token,
+                           tls.logging_enabled)
 end
 
 """
@@ -79,3 +91,10 @@ Cancels the current [`DTask`](@ref). If `graceful=true`, then the task will be
 cancelled gracefully, otherwise it will be forced.
 """
 task_cancel!(; graceful::Bool=true) = cancel!(get_tls().cancel_token; graceful)
+
+"""
+    task_logging_enabled() -> Bool
+
+Returns `true` if logging is enabled for the current [`DTask`](@ref), else `false`.
+"""
+task_logging_enabled() = get_tls().logging_enabled

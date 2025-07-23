@@ -2,8 +2,8 @@ function istask end
 function task_id end
 
 const DAGDEBUG_CATEGORIES = Symbol[:global, :submit, :schedule, :scope,
-                                   :take, :execute, :move, :processor, :cancel,
-                                   :stream]
+                                   :take, :execute, :move, :processor, :finish,
+                                   :cancel, :stream]
 macro dagdebug(thunk, category, msg, args...)
     cat_sym = category.value
     @gensym id
@@ -24,18 +24,14 @@ macro dagdebug(thunk, category, msg, args...)
                 $id = -1
             end
             if $id > 0
-                if $(QuoteNode(cat_sym)) in $DAGDEBUG_CATEGORIES
+                if $(QuoteNode(cat_sym)) in $DAGDEBUG_CATEGORIES || :all in $DAGDEBUG_CATEGORIES
                     $debug_ex_id
                 end
             elseif $id == 0
-                if $(QuoteNode(cat_sym)) in $DAGDEBUG_CATEGORIES
+                if $(QuoteNode(cat_sym)) in $DAGDEBUG_CATEGORIES || :all in $DAGDEBUG_CATEGORIES
                     $debug_ex_noid
                 end
             end
-
-            # Always yield to reduce differing behavior for debug vs. non-debug
-            # TODO: Remove this eventually
-            yield()
         end
     end)
 end

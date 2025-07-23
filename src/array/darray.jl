@@ -173,7 +173,7 @@ domainchunks(d::DArray) = d.subdomains
 size(x::DArray) = size(domain(x))
 stage(ctx, c::DArray) = c
 
-function Base.collect(d::DArray; tree=false)
+function Base.collect(d::DArray{T,N}; tree=false, copyto=false) where {T,N}
     a = fetch(d)
     if isempty(d.chunks)
         return Array{eltype(d)}(undef, size(d)...)
@@ -181,6 +181,13 @@ function Base.collect(d::DArray; tree=false)
 
     if ndims(d) == 0
         return fetch(a.chunks[1])
+    end
+
+    if copyto
+        C = Array{T,N}(undef, size(a))
+        DC = view(C, Blocks(size(a)...))
+        copyto!(DC, a)
+        return C
     end
 
     dimcatfuncs = [(x...) -> d.concat(x..., dims=i) for i in 1:ndims(d)]
@@ -458,7 +465,7 @@ function stage(ctx::Context, d::Distribute)
             # TODO: fix hashing
             #hash = uhash(idx, Base.hash(Distribute, Base.hash(d.data)))
             if isnothing(d.procgrid)
-                scope = get_options(:compute_scope, get_options(:scope, DefaultScope()))
+                scope = get_compute_scope()
             else
                 scope = ExactScope(d.procgrid[CartesianIndex(mod1.(Tuple(I), size(d.procgrid))...)])
             end
@@ -478,7 +485,7 @@ function stage(ctx::Context, d::Distribute)
             #hash = uhash(c, Base.hash(Distribute, Base.hash(d.data)))
             c = d.domainchunks[I]
             if isnothing(d.procgrid)
-                scope = get_options(:compute_scope, get_options(:scope, DefaultScope()))
+                scope = get_compute_scope()
             else
                 scope = ExactScope(d.procgrid[CartesianIndex(mod1.(Tuple(I), size(d.procgrid))...)])
             end

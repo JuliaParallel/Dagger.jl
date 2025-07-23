@@ -27,19 +27,6 @@ end
 Base.put!(t::ThunkFuture, x; error=false) = put!(t.future, (error, x))
 
 """
-    Options(::NamedTuple)
-    Options(; kwargs...)
-
-Options for thunks and the scheduler. See [Task Spawning](@ref) for more
-information.
-"""
-struct Options
-    options::NamedTuple
-end
-Options(;options...) = Options((;options...))
-Options(options...) = Options((;options...))
-
-"""
     DTaskMetadata
 
 Represents some useful metadata pertaining to a `DTask`:
@@ -61,10 +48,9 @@ mutable struct DTask
     uid::UInt
     future::ThunkFuture
     metadata::DTaskMetadata
-    finalizer_ref::DRef
     thunk_ref::DRef
 
-    DTask(uid, future, metadata, finalizer_ref) = new(uid, future, metadata, finalizer_ref)
+    DTask(uid, future, metadata) = new(uid, future, metadata)
 end
 
 const EagerThunk = DTask
@@ -120,16 +106,6 @@ function Base.show(io::IO, t::DTask)
     print(io, "DTask ($status)")
 end
 istask(t::DTask) = true
-
-"When finalized, cleans-up the associated `DTask`."
-mutable struct DTaskFinalizer
-    uid::UInt
-    function DTaskFinalizer(uid)
-        x = new(uid)
-        finalizer(Sch.eager_cleanup, x)
-        x
-    end
-end
 
 const EAGER_ID_COUNTER = Threads.Atomic{UInt64}(1)
 function eager_next_id()
