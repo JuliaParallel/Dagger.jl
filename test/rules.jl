@@ -70,11 +70,11 @@ mktempdir() do dir
 
     # prepare inputs
 
-    mean_squared_input = Float64[]
+    sum_squared_input = Float64[]
     for sample_idx in 1:5
         x = rand(10)
         writefile("$(dir)/sample_$(sample_idx).csv", x)
-        push!(mean_squared_input, mean(x.^2))
+        push!(sum_squared_input, sum(x.^2))
     end
 
     samples = ["$(dir)/sample_$(sample_idx).csv" for sample_idx in 1:5]
@@ -93,8 +93,8 @@ mktempdir() do dir
 
     make_summary = Dagger.Rule(squared_rule_outputs => "$(dir)/samples_summary.csv"; forcerun=false) do inputs, output
         xs = readfile.(inputs)
-        mean_squared = [mean(x) for x in xs]
-        writefile(output[1], mean_squared)
+        sum_squared = [sum(x) for x in xs]
+        writefile(output[1], sum_squared)
         output
     end
 
@@ -104,7 +104,7 @@ mktempdir() do dir
     
     out = readfile(fetch(summary_file)[1])
     
-    @test out == mean_squared_input
+    @test out == sum_squared_input
 
     @test Dagger.needs_update(make_summary) == false
     sleep(1)
