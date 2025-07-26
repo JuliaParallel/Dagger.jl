@@ -33,6 +33,7 @@ Stores per-task options to be passed to the scheduler.
 Base.@kwdef mutable struct Options
     propagates::Union{Vector{Symbol},Nothing} = nothing
 
+    ainfo::Union{TaskAliasingInfo,Nothing} = nothing
     processor::Union{Processor,Nothing} = nothing
     scope::Union{AbstractScope,Nothing} = nothing
     compute_scope::Union{AbstractScope,Nothing} = scope
@@ -110,6 +111,7 @@ signature `sig`, if the option was previously unspecified in `opts`.
 """
 function populate_defaults!(opts::Options, sig)
     maybe_default!(opts, Val{:propagates}(), sig)
+    maybe_default!(opts, Val{:ainfo}(), sig)
     maybe_default!(opts, Val{:processor}(), sig)
     maybe_default!(opts, Val{:compute_scope}(), sig)
     maybe_default!(opts, Val{:result_scope}(), sig)

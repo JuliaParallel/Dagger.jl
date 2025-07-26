@@ -456,3 +456,16 @@ function move(from_proc::Processor, to_proc::Processor, slice::ChunkView)
 end
 
 Base.fetch(slice::ChunkView) = view(fetch(slice.chunk), slice.slices...)
+
+struct ArgAliasingInfo
+    ainfo::AliasingWrapper
+    writedep::Bool
+end
+
+struct TaskAliasingInfo
+    ainfos::Vector{Vector{ArgAliasingInfo}}
+end
+
+function TaskAliasingInfo()
+    return TaskAliasingInfo(Vector{Vector{ArgAliasingInfo}}())
+end

@@ -10,7 +10,7 @@ end
 import MemPool
 import MemPool: DRef, StorageResource
 import MemPool: poolset, storage_capacity, storage_utilized
-import Random: randperm, randperm!
+import Random: randperm, randperm!, shuffle!
 import Base: @invokelatest
 
 import ..Dagger
@@ -21,6 +21,8 @@ import DataStructures: PriorityQueue, enqueue!, dequeue_pair!, peek
 
 import ..Dagger: ReusableCache, ReusableLinkedList, ReusableDict
 import ..Dagger: @reusable, @reusable_dict, @reusable_vector, @reusable_tasks, @reuse_scope, @reuse_defer_cleanup
+
+import ThreadPinning: getnumanode
 
 import TimespanLogging
 
@@ -1084,9 +1086,11 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                 # Try to steal from local queues randomly
                 # TODO: Prioritize stealing from busiest processors
                 states = proc_states(all_states->collect(values(all_states)), uid)
+                shuffle!(states)
+                locnuma = getnumanode()
+                sort!(states,by=x->x.state.proc isa Dagger.ThreadProc ? (getnumanode(;threadid=x.state.proc.tid) == locnuma ? 0 : 1) : typemax(Int))
                 # TODO: Try to pre-allocate this
-                P = randperm(length(states))
-                for state in getindex.(Ref(states), P)
+                for state in states
                     other_istate = state.state
                     if other_istate.proc === to_proc
                         continue

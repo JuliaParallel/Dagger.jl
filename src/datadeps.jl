@@ -822,15 +822,22 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         if spec.options.syncdeps === nothing
             spec.options.syncdeps = Set{Any}()
         end
+
+        if spec.options.ainfo === nothing
+            spec.options.ainfo = TaskAliasingInfo()
+        end
+
         syncdeps = spec.options.syncdeps
         for (idx, (_, arg)) in enumerate(task_args)
             arg, deps = unwrap_inout(arg)
             arg = arg isa DTask ? fetch(arg; raw=true) : arg
             type_may_alias(typeof(arg)) || continue
             supports_inplace_move(state, arg) || continue
+            arg_ainfo = Vector{ArgAliasingInfo}() 
             if queue.aliasing
                 for (dep_mod, _, writedep) in deps
                     ainfo = aliasing(astate, arg, dep_mod)
+                    inner_ainfo = ArgAliasingInfo(ainfo, writedep)
                     if writedep
                         @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$idx][$dep_mod] Syncing as writer"
                         get_write_deps!(state, ainfo, task, write_num, syncdeps)
@@ -838,8 +845,10 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                         @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$idx][$dep_mod] Syncing as reader"
                         get_read_deps!(state, ainfo, task, write_num, syncdeps)
                     end
+                    push!(arg_ainfo, inner_ainfo)
                 end
             else
+                push!(arg_ainfo, ArgAliasingInfo(aliasing(arg), is_writedep(arg, deps, task)))
                 if is_writedep(arg, deps, task)
                     @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$idx] Syncing as writer"
                     get_write_deps!(state, arg, task, write_num, syncdeps)
@@ -848,6 +857,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                     get_read_deps!(state, arg, task, write_num, syncdeps)
                 end
             end
+            push!(spec.options.ainfo.ainfos, arg_ainfo)
         end
         @dagdebug nothing :spawn_datadeps "($(repr(value(f)))) $(length(syncdeps)) syncdeps"
 
