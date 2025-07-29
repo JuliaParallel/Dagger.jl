@@ -447,8 +447,7 @@ function can_use_proc(state, task, gproc, proc, opts, scope)
     end
 
     # Check against scope
-    proc_scope = Dagger.ExactScope(proc)
-    if constrain(scope, proc_scope) isa Dagger.InvalidScope
+    if !Dagger.proc_in_scope(proc, scope)
         @dagdebug task :scope "Rejected $proc: Not contained in task scope ($scope)"
         return false, scope
     end
