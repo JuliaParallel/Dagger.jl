@@ -4,8 +4,11 @@ abstract type AbstractScope end
 
 "Widest scope that contains all processors."
 struct AnyScope <: AbstractScope end
+proc_in_scope(::Processor, ::AnyScope) = true
 
 abstract type AbstractScopeTaint end
+proc_in_scope(proc::Processor, scope::AbstractScope) =
+    !isa(constrain(scope, ExactScope(proc)), InvalidScope)
 
 "Taints a scope for later evaluation."
 struct TaintScope <: AbstractScope
@@ -44,6 +47,8 @@ UnionScope(scopes...) = UnionScope((scopes...,))
 UnionScope(scopes::Vector{<:AbstractScope}) = UnionScope((scopes...,))
 UnionScope(s::AbstractScope) = UnionScope((s,))
 UnionScope() = UnionScope(())
+proc_in_scope(proc::Processor, scope::UnionScope) =
+    any(subscope->proc_in_scope(proc, subscope), scope.scopes)
 
 function Base.:(==)(us1::UnionScope, us2::UnionScope)
     if length(us1.scopes) != length(us2.scopes)
@@ -78,6 +83,8 @@ function ProcessScope(wid::Integer)
 end
 ProcessScope(p::OSProc) = ProcessScope(p.pid)
 ProcessScope() = ProcessScope(myid())
+proc_in_scope(proc::Processor, scope::ProcessScope) =
+    root_worker_id(proc) == scope.wid
 
 struct ProcessorTypeTaint{T} <: AbstractScopeTaint end
 
@@ -92,12 +99,14 @@ struct ExactScope <: AbstractScope
     processor::Processor
 end
 ExactScope(proc) = ExactScope(ProcessScope(get_parent(proc).pid), proc)
+proc_in_scope(proc::Processor, scope::ExactScope) = proc == scope.processor
 
 "Indicates that the applied scopes `x` and `y` are incompatible."
 struct InvalidScope <: AbstractScope
     x::AbstractScope
     y::AbstractScope
 end
+proc_in_scope(::Processor, ::InvalidScope) = false
 
 # Show methods
 
