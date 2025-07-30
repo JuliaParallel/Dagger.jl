@@ -1,56 +1,61 @@
 using Dagger
 using MPI
+using LinearAlgebra
 using SparseArrays
 
 Dagger.accelerate!(:mpi)
 
+comm = MPI.COMM_WORLD
+rank = MPI.Comm_rank(comm)
+size = MPI.Comm_size(comm)
 
-if MPI.Comm_rank(MPI.COMM_WORLD) == 0
-    B = rand(4, 4)
-    Dagger.send_yield!(B, MPI.COMM_WORLD, 1, 0)
-    println("rank $(MPI.Comm_rank(MPI.COMM_WORLD)) send_yield! Array: B: $B")
+# Use a large array (adjust size as needed for your RAM)
+N = 100
+tag = 123
+
+if rank == 0
+    arr = sprand(N, N, 0.6)
 else
-    B = zeros(4, 4)
-    Dagger.recv_yield!(B, MPI.COMM_WORLD, 0, 0) 
-    println("rank $(MPI.Comm_rank(MPI.COMM_WORLD)) recv_yield! Array: B: $B")
+    arr = spzeros(N, N)
 end
 
-MPI.Barrier(MPI.COMM_WORLD)
+# --- Out-of-place broadcast ---
+function bcast_outofplace()
+    MPI.Barrier(comm)
+    if rank == 0
+        Dagger.bcast_send_yield(arr, comm, 0, tag+1)
+    else
+        Dagger.bcast_recv_yield(comm, 0, tag+1)
+    end
+    MPI.Barrier(comm)
+end
+# --- In-place broadcast ---
 
-if MPI.Comm_rank(MPI.COMM_WORLD) == 0
-    B = "hello"
-    Dagger.send_yield!(B, MPI.COMM_WORLD, 1, 2)
-    println("rank $(MPI.Comm_rank(MPI.COMM_WORLD)) send_yield String: B: $B")
-else
-    B = "Goodbye"
-    B1, _ = Dagger.recv_yield!(B, MPI.COMM_WORLD, 0, 2) 
-    println("rank $(MPI.Comm_rank(MPI.COMM_WORLD)) recv_yield! String: B1: $B1")
+function bcast_inplace()
+    MPI.Barrier(comm)
+    if rank == 0
+        Dagger.bcast_send_yield!(arr, comm, 0, tag)
+    else
+        Dagger.bcast_recv_yield!(arr, comm, 0, tag)
+    end
+    MPI.Barrier(comm)
 end
 
-MPI.Barrier(MPI.COMM_WORLD)
-
-if MPI.Comm_rank(MPI.COMM_WORLD) == 0
-    B = sprand(4,4,0.2)
-    Dagger.send_yield(B, MPI.COMM_WORLD, 1, 1)
-    println("rank $(MPI.Comm_rank(MPI.COMM_WORLD)) send_yield (half in-place) Sparse: B: $B")
-else
-    B1 = Dagger.recv_yield(MPI.COMM_WORLD, 0, 1)
-    println("rank $(MPI.Comm_rank(MPI.COMM_WORLD)) recv_yield (half in-place) Sparse: B1: $B1")
+function bcast_inplace_metadata()
+    MPI.Barrier(comm)
+    if rank == 0
+        Dagger.bcast_send_yield_metadata(arr, comm, 0)
+    end
+    MPI.Barrier(comm)
 end
 
-MPI.Barrier(MPI.COMM_WORLD)
 
-if MPI.Comm_rank(MPI.COMM_WORLD) == 0
-    B = rand(4, 4)
-    Dagger.send_yield(B, MPI.COMM_WORLD, 1, 0)
-    println("rank $(MPI.Comm_rank(MPI.COMM_WORLD)) send_yield (half in-place) Dense: B: $B")
-else
-    
-    B = Dagger.recv_yield( MPI.COMM_WORLD, 0, 0) 
-    println("rank $(MPI.Comm_rank(MPI.COMM_WORLD)) recv_yield (half in-place) Dense: B: $B")
-end
+inplace = @time bcast_inplace()
 
-MPI.Barrier(MPI.COMM_WORLD)
+
+MPI.Barrier(comm)
+MPI.Finalize()
+
 
 
 
@@ -58,6 +63,8 @@ MPI.Barrier(MPI.COMM_WORLD)
 A = rand(Blocks(2,2), 4, 4)
 Ac = collect(A)
 println(Ac)
+
+
+move!(identity, Ac[1].space , Ac[2].space, Ac[1], Ac[2])
 =#
 
-#move!(identity, Ac[1].space , Ac[2].space, Ac[1], Ac[2])

@@ -58,6 +58,7 @@ function aliasing(accel::MPIAcceleration, x::Chunk, T)
     @assert accel.comm == handle.comm "MPIAcceleration comm mismatch"
     tag = to_tag(hash(handle.id, hash(:aliasing)))
     rank = MPI.Comm_rank(accel.comm)
+
     if handle.rank == rank
         ainfo = aliasing(x, T)
         #Core.print("[$rank] aliasing: $ainfo, sending\n")
@@ -425,16 +426,11 @@ function supports_inplace_mpi(value)
     end
 end
 function recv_yield!(buffer, comm, src, tag)
+    rank = MPI.Comm_rank(comm)
     #println("buffer recv: $buffer, type of buffer: $(typeof(buffer)), is in place? $(supports_inplace_mpi(buffer))")
     if !supports_inplace_mpi(buffer)
         return recv_yield(comm, src, tag), false
     end
-    
-    time_start = time_ns()
-    detect = DEADLOCK_DETECT[]
-    warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
-    timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
-    rank = MPI.Comm_rank(comm)
     #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Starting recv! from [$src]")
 
     # Ensure no other receiver is waiting
@@ -453,36 +449,16 @@ function recv_yield!(buffer, comm, src, tag)
         wait(other_event)
         @goto retry
     end
-    while true
-        (got, msg, stat) = MPI.Improbe(src, tag, comm, MPI.Status)
-        if got
-            if MPI.Get_error(stat) != MPI.SUCCESS
-                error("recv_yield (Improbe) failed with error $(MPI.Get_error(stat))")
-            end
-            
-            req = MPI.Imrecv!(MPI.Buffer(buffer), msg)
-            while true
-                finish, stat = MPI.Test(req, MPI.Status)
-                if finish
-                    if MPI.Get_error(stat) != MPI.SUCCESS
-                        error("recv_yield (Test) failed with error $(MPI.Get_error(stat))")
-                    end
-                    
-                    #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Received value")
-                    lock(RECV_WAITING) do waiting
-                        delete!(waiting, (comm, src, tag))
-                        notify(our_event)
-                    end
-                    #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Released lock")
-                    return buffer, true
-                end
-                warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, rank, tag, "recv", src)
-                yield()
-            end
-        end
-        warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, rank, tag, "recv", src)
-        yield()
+
+    buffer = recv_yield_inplace!(buffer, comm, rank, src, tag)
+
+    lock(RECV_WAITING) do waiting
+        delete!(waiting, (comm, src, tag))
+        notify(our_event)
     end
+
+    return buffer, true
+
 end
 
 function recv_yield(comm, src, tag)
@@ -513,6 +489,7 @@ function recv_yield(comm, src, tag)
     if value isa InplaceInfo || value isa InplaceSparseInfo
         value = recv_yield_inplace(value, comm, rank, src, tag)
     end
+
     lock(RECV_WAITING) do waiting
         delete!(waiting, (comm, src, tag))
         notify(our_event)
@@ -537,12 +514,11 @@ function recv_yield_inplace!(array, comm, my_rank, their_rank, tag)
             buf = MPI.Buffer(array)
             req = MPI.Imrecv!(buf, msg)
             __wait_for_request(req, comm, my_rank, their_rank, tag, "recv_yield", "recv")
-            break
+            return array
         end
         warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, my_rank, tag, "recv", their_rank)
         yield()
     end
-    return array
 end
 
 function recv_yield_inplace(_value::InplaceInfo, comm, my_rank, their_rank, tag)
@@ -560,8 +536,7 @@ function recv_yield_inplace(_value::InplaceSparseInfo, comm, my_rank, their_rank
     rowval = recv_yield_inplace!(Vector{Int64}(undef, _value.rowval), comm, my_rank, their_rank, tag)
     nzval = recv_yield_inplace!(Vector{eltype(T)}(undef, _value.nzval), comm, my_rank, their_rank, tag)
 
-    SparseArray = SparseMatrixCSC{eltype(T), Int64}(_value.m, _value.n, colptr, rowval, nzval)
-    return SparseArray
+    return SparseMatrixCSC{eltype(T), Int64}(_value.m, _value.n, colptr, rowval, nzval)
     
 end
 
@@ -621,9 +596,9 @@ function send_yield_serialized(value, comm, my_rank, their_rank, tag)
         send_yield_inplace(value, comm, my_rank, their_rank, tag)
     elseif value isa SparseMatrixCSC && isbitstype(eltype(value))
         send_yield_serialized(InplaceSparseInfo(typeof(value), value.m, value.n, length(value.colptr), length(value.rowval), length(value.nzval)), comm, my_rank, their_rank, tag)
-        send_yield!(value.colptr, comm, their_rank, tag; check_seen=false)
-        send_yield!(value.rowval, comm, their_rank, tag; check_seen=false)
-        send_yield!(value.nzval,  comm, their_rank, tag; check_seen=false)
+        send_yield_inplace(value.colptr, comm, my_rank, their_rank, tag)
+        send_yield_inplace(value.rowval, comm, my_rank, their_rank, tag)
+        send_yield_inplace(value.nzval,  comm, my_rank, their_rank, tag)
     else
         req = MPI.isend(value, comm; dest=their_rank, tag)
         __wait_for_request(req, comm, my_rank, their_rank, tag, "send_yield", "send")
@@ -657,6 +632,25 @@ function bcast_send_yield(value, comm, root, tag)
     end
 end
 
+#= Maybe can be worth it to implement this
+function bcast_send_yield!(value, comm, root, tag)
+    sz = MPI.Comm_size(comm)
+    rank = MPI.Comm_rank(comm)
+
+    for other_rank in 0:(sz-1)
+        rank == other_rank && continue
+        #println("[rank $rank] Sending to rank $other_rank")
+        send_yield!(value, comm, other_rank, tag)
+    end
+end
+
+function bcast_recv_yield!(value, comm, root, tag)
+    sz = MPI.Comm_size(comm)
+    rank = MPI.Comm_rank(comm)
+    #println("[rank $rank] receive from rank $root")
+    recv_yield!(value, comm, root, tag)
+end
+=#
 function mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, rank, tag, kind, srcdest)
     time_elapsed = (time_ns() - time_start)
     if detect && time_elapsed > warn_period
@@ -761,7 +755,7 @@ end
 #FIXME:try to think of a better move! scheme
 function execute!(proc::MPIProcessor, world::UInt64, f, args...; kwargs...)
     local_rank = MPI.Comm_rank(proc.comm)
-    tag_T = to_tag(hash(sch_handle().thunk_id.id, hash(:execute!, UInt(0))))
+    #tag_T = to_tag(hash(sch_handle().thunk_id.id, hash(:execute!, UInt(0))))
     tag_space = to_tag(hash(sch_handle().thunk_id.id, hash(:execute!, UInt(1))))
     islocal = local_rank == proc.rank
     inplace_move = f === move!
@@ -777,14 +771,14 @@ function execute!(proc::MPIProcessor, world::UInt64, f, args...; kwargs...)
         # Handle communication ourselves
         if islocal
             T = typeof(result)
-            bcast_send_yield(T, proc.comm, proc.rank, tag_T)
             space = memory_space(result, proc)::MPIMemorySpace
-            bcast_send_yield(space.innerSpace, proc.comm, proc.rank, tag_space)
-            #Core.print("[$local_rank] execute!: sending $T assigned to $space\n")
+            T_space = (T, space)
+            bcast_send_yield(T_space, proc.comm, proc.rank, tag_space)
             return tochunk(result, proc, space)
         else
-            T = recv_yield(proc.comm, proc.rank, tag_T)
-            innerSpace = recv_yield(proc.comm, proc.rank, tag_space)
+            #T = recv_yield(proc.comm, proc.rank, tag_T)
+            #innerSpace = recv_yield(proc.comm, proc.rank, tag_space)
+            T, innerSpace = recv_yield(proc.comm, proc.rank, tag_space)
             space = MPIMemorySpace(innerSpace, proc.comm, proc.rank)
             #= FIXME: If we get a bad result (something non-concrete, or Union{}),
             # we should bcast the actual type
