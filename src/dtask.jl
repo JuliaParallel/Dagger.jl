@@ -81,7 +81,7 @@ function Base.put!(t::ThunkFuture, x; error=false)
         notify(t.local_future.ready)
     end
     if t.remote_future !== nothing
-        put!(t.future, (error, x))
+        put!(t.remote_future, (error, x))
     end
 
     return x
@@ -97,7 +97,7 @@ function Serialization.serialize(io::AbstractSerializer, t::ThunkFuture)
 end
 function Serialization.deserialize(io::AbstractSerializer, ::Type{ThunkFuture})
     # Deserialize normally
-    t = invoke(deserialize, Tuple{typeof(io), DataType}, io, ThunkFuture)
+    t = invoke(deserialize, Tuple{AbstractSerializer, DataType}, io, ThunkFuture)
 
     if t.local_future !== nothing
         # Remove the (now useless) LocalFuture
