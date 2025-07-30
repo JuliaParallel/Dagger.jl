@@ -97,7 +97,7 @@ function Serialization.serialize(io::AbstractSerializer, t::ThunkFuture)
 end
 function Serialization.deserialize(io::AbstractSerializer, ::Type{ThunkFuture})
     # Deserialize normally
-    t = invoke(deserialize, Tuple{typeof(io), Any}, io, ThunkFuture)
+    t = invoke(deserialize, Tuple{typeof(io), DataType}, io, ThunkFuture)
 
     if t.local_future !== nothing
         # Remove the (now useless) LocalFuture
