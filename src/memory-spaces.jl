@@ -37,6 +37,10 @@ move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::T, from::F) w
     throw(ArgumentError("No `move!` implementation defined for $F -> $T"))
 function move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::Chunk, from::Chunk)
     to_w = root_worker_id(to_space)
+    #=@lock A_LOCK begin
+        display(from)
+        display(to)
+    end=#
     remotecall_wait(to_w, dep_mod, to_space, from_space, to, from) do dep_mod, to_space, from_space, to, from
         to_raw = unwrap(to)
         from_w = root_worker_id(from_space)
@@ -389,70 +393,316 @@ function will_alias(x_span::MemorySpan, y_span::MemorySpan)
     return x_span.ptr <= y_end && y_span.ptr <= x_end
 end
 
-struct ChunkView{N}
-    chunk::Chunk
-    slices::NTuple{N, Union{Int, AbstractRange{Int}, Colon}}
+### Memory Span Set Operations for Remainder Computation
+
+"""
+    subtract_spans(base_spans::Vector{MemorySpan{S}}, subtract_spans::Vector{MemorySpan{S}}) where S
+
+Computes the set difference: base_spans - subtract_spans.
+Returns a vector of memory spans representing the parts of base_spans that do not
+overlap with any span in subtract_spans.
+
+This is used for remainder computation in datadeps: when we need to copy only the
+parts of an object that haven't been updated by previous partial operations.
+"""
+function subtract_spans(base_spans::Vector{<:MemorySpan}, subtract_spans::Vector{<:MemorySpan})
+    if isempty(base_spans)
+        return MemorySpan[]
+    end
+    if isempty(subtract_spans)
+        return copy(base_spans)
+    end
+    
+    result = MemorySpan[]
+    
+    for base_span in base_spans
+        # Start with the full base span
+        remaining_spans = [base_span]
+        
+        # Subtract each overlapping span
+        for sub_span in subtract_spans
+            new_remaining = MemorySpan[]
+            
+            for remaining in remaining_spans
+                # Find the intersection and compute the remaining parts
+                append!(new_remaining, _subtract_single_span(remaining, sub_span))
+            end
+            
+            remaining_spans = new_remaining
+        end
+        
+        append!(result, remaining_spans)
+    end
+    
+    return result
 end
 
-function Base.view(c::Chunk, slices...)
-    if c.domain isa ArrayDomain
-        nd, sz = ndims(c.domain), size(c.domain)
-        nd == length(slices) || throw(DimensionMismatch("Expected $nd slices, got $(length(slices))"))
+"""
+    _subtract_single_span(base::MemorySpan{S}, subtract::MemorySpan{S}) where S
 
-        for (i, s) in enumerate(slices)
-            if s isa Int
-                1 ≤ s ≤ sz[i] || throw(ArgumentError("Index $s out of bounds for dimension $i (size $(sz[i]))"))
-            elseif s isa AbstractRange
-                isempty(s) && continue
-                1 ≤ first(s) ≤ last(s) ≤ sz[i] || throw(ArgumentError("Range $s out of bounds for dimension $i (size $(sz[i]))"))
-            elseif s === Colon()
-                continue
-            else
-                throw(ArgumentError("Invalid slice type $(typeof(s)) at dimension $i, Expected Type of Int, AbstractRange, or Colon"))
+Helper function to subtract a single span from a base span.
+Returns 0-2 spans representing the non-overlapping parts of base.
+"""
+function _subtract_single_span(base::MemorySpan{S}, subtract::MemorySpan{S}) where S
+    # Check if spans are in the same memory space
+    if base.ptr.space != subtract.ptr.space
+        return [base]  # No overlap possible
+    end
+
+    base_start = base.ptr.addr
+    base_end = base_start + base.len - 1
+    sub_start = subtract.ptr.addr
+    sub_end = sub_start + subtract.len - 1
+
+    # No overlap
+    if sub_end < base_start || sub_start > base_end
+        return [base]
+    end
+
+    result = MemorySpan{S}[]
+
+    # Left remainder (before the subtracted region)
+    if base_start < sub_start
+        left_len = min(sub_start - base_start, base.len)
+        left_span = MemorySpan{S}(base.ptr, left_len)
+        push!(result, left_span)
+    end
+
+    # Right remainder (after the subtracted region)
+    if base_end > sub_end
+        right_start_addr = max(sub_end + 1, base_start)
+        right_len = base_end - right_start_addr + 1
+        if right_len > 0
+            right_ptr = RemotePtr{Cvoid,S}(right_start_addr, base.ptr.space)
+            right_span = MemorySpan{S}(right_ptr, right_len)
+            push!(result, right_span)
+        end
+    end
+
+    return result
+end
+
+"""
+    RemainderAliasing{S<:MemorySpace} <: AbstractAliasing
+
+Represents the memory spans that remain after subtracting some regions from a base aliasing object.
+This is used to perform partial data copies that only update the "remainder" regions.
+"""
+struct RemainderAliasing{S<:MemorySpace} <: AbstractAliasing
+    space::S
+    spans::Vector{MemorySpan{S}}
+
+    function RemainderAliasing{S}(space::S, spans::Vector{MemorySpan{S}}) where S
+        # Filter out empty spans and sort for consistency
+        filtered_spans = filter(s -> s.len > 0, spans)
+        sorted_spans = sort(filtered_spans, by = s -> s.ptr.addr)
+        return new{S}(space, sorted_spans)
+    end
+end
+RemainderAliasing(space::S, spans::Vector{MemorySpan{S}}) where S =
+    RemainderAliasing{S}(space, spans)
+
+memory_spans(ra::RemainderAliasing) = ra.spans
+
+Base.hash(ra::RemainderAliasing, h::UInt) = hash(ra.spans, hash(RemainderAliasing, h))
+Base.:(==)(ra1::RemainderAliasing, ra2::RemainderAliasing) = ra1.spans == ra2.spans
+
+# Add will_alias support for RemainderAliasing
+function will_alias(x::RemainderAliasing, y::AbstractAliasing)
+    return will_alias(memory_spans(x), memory_spans(y))
+end
+
+function will_alias(x::AbstractAliasing, y::RemainderAliasing)
+    return will_alias(memory_spans(x), memory_spans(y))
+end
+
+function will_alias(x::RemainderAliasing, y::RemainderAliasing)
+    return will_alias(memory_spans(x), memory_spans(y))
+end
+
+struct MultiRemainderAliasing <: AbstractAliasing
+    remainders::Vector{<:RemainderAliasing}
+end
+
+memory_spans(mra::MultiRemainderAliasing) = vcat(memory_spans.(mra.remainders)...)
+
+Base.hash(mra::MultiRemainderAliasing, h::UInt) = hash(mra.remainders, hash(MultiRemainderAliasing, h))
+Base.:(==)(mra1::MultiRemainderAliasing, mra2::MultiRemainderAliasing) = mra1.remainders == mra2.remainders
+
+"""
+    compute_remainder_aliasing(base_aliasing::AbstractAliasing, subtract_aliasings::Vector{<:AbstractAliasing})
+
+Computes the remainder aliasing object representing the parts of base_aliasing that don't
+overlap with any aliasing in subtract_aliasings.
+
+This is the key function for remainder computation in datadeps.
+"""
+function compute_remainder_aliasing(base_aliasing::AbstractAliasing, subtract_aliasings::Vector{<:AbstractAliasing})
+    base_spans = memory_spans(base_aliasing)
+    if isempty(base_spans)
+        return NoAliasing()
+    end
+
+    # Collect all spans to subtract
+    spans_to_subtract = MemorySpan[]
+    for sub_aliasing in subtract_aliasings
+        append!(spans_to_subtract, memory_spans(sub_aliasing))
+    end
+
+    # Group spans by memory space
+    base_spans_by_space = group_spans_by_space(base_spans)
+    subtract_spans_by_space = group_spans_by_space(spans_to_subtract)
+
+    all_remainder_spans = MemorySpan[]
+
+    all_spaces = Set{MemorySpace}()
+    for space in keys(base_spans_by_space)
+        push!(all_spaces, space)
+    end
+    for space in keys(subtract_spans_by_space)
+        push!(all_spaces, space)
+    end
+    @info "All spaces: $all_spaces"
+    for space in all_spaces
+        S = typeof(space)
+        space_base_spans = get(base_spans_by_space, space, MemorySpan{S}[])
+        space_subtract_spans = get(subtract_spans_by_space, space, MemorySpan{S}[])
+        remainder_spans = subtract_spans(space_base_spans, space_subtract_spans)
+        append!(all_remainder_spans, remainder_spans)
+    end
+
+    if isempty(all_remainder_spans)
+        return NoAliasing()
+    end
+
+    # If all spans are in the same space, create a typed RemainderAliasing
+    spaces = unique(span.ptr.space for span in all_remainder_spans)
+    if length(spaces) == 1
+        space = first(spaces)
+        S = typeof(space)
+        typed_spans = Vector{MemorySpan{S}}(all_remainder_spans)
+        return RemainderAliasing{S}(space, typed_spans)
+    else
+        @info "Constructing MultiRemainderAliasing"
+        # Mixed spaces - use a more general approach
+        # For now, create individual RemainderAliasing per space and combine into MultiRemainderAliasing
+        sub_ainfos = RemainderAliasing[]
+        spans_by_space = group_spans_by_space(all_remainder_spans)
+        for (space, space_spans) in spans_by_space
+            S = typeof(space)
+            typed_spans = Vector{MemorySpan{S}}(space_spans)
+            push!(sub_ainfos, RemainderAliasing{S}(space, typed_spans))
+        end
+        return MultiRemainderAliasing(sub_ainfos)
+    end
+end
+
+"""
+    group_spans_by_space(spans::Vector{MemorySpan}) -> Dict
+
+Groups memory spans by their memory space for easier processing.
+"""
+function group_spans_by_space(spans::Vector{<:MemorySpan})
+    result = Dict{MemorySpace,Vector{<:MemorySpan}}()
+    for span in spans
+        space = span.ptr.space
+        if !haskey(result, space)
+            result[space] = MemorySpan[]
+        end
+        push!(result[space], span)
+    end
+    return result
+end
+
+# Move function for RemainderAliasing - copies only the remainder regions
+function move!(dep_mod::RemainderAliasing{S}, to_space::MemorySpace, from_space::MemorySpace, to::AbstractArray{T,N}, from::AbstractArray{T,N}) where {S,T,N}
+    # For RemainderAliasing, we need to copy only the specified memory spans
+    # This is complex for general arrays, so we'll implement a simplified version
+    # that works for contiguous and simple strided patterns
+
+    # For now, we'll use a conservative approach: if the remainder represents
+    # a simple pattern we can handle, do the optimized copy; otherwise, fall back
+    # to a full copy with a warning
+
+    spans = memory_spans(dep_mod)
+    if isempty(spans)
+        return  # Nothing to copy
+    end
+
+    # Try to detect common patterns
+    if _is_contiguous_remainder(spans, to)
+        _copy_contiguous_remainder(spans, to, from)
+    elseif _is_strided_remainder(spans, to)
+        _copy_strided_remainder(spans, to, from)
+    else
+        # Fall back to element-wise copy for complex patterns
+        @warn "Using slow element-wise copy for complex remainder pattern" maxlog=1
+        _copy_remainder_elementwise(spans, to, from)
+    end
+
+    return
+end
+
+# Helper function to check if remainder represents contiguous blocks
+function _is_contiguous_remainder(spans::Vector{MemorySpan{S}}, arr::AbstractArray) where S
+    # Check if all spans are contiguous within the array's memory
+    if length(spans) <= 2  # Simple case: at most 2 contiguous blocks
+        return true
+    end
+    return false
+end
+
+# Helper function to copy contiguous remainder blocks
+function _copy_contiguous_remainder(spans::Vector{MemorySpan{S}}, to::AbstractArray{T}, from::AbstractArray{T}) where {S,T}
+    arr_ptr = pointer(to)
+    arr_start = UInt(arr_ptr)
+    element_size = sizeof(T)
+
+    for span in spans
+        # Calculate the offset in terms of array elements
+        offset_bytes = span.ptr.addr - arr_start
+        offset_elements = Int(offset_bytes ÷ element_size)
+        length_elements = Int(span.len ÷ element_size)
+
+        if offset_elements >= 0 && offset_elements + length_elements <= length(to)
+            # Safe to copy this span
+            to_view = view(to, (offset_elements+1):(offset_elements+length_elements))
+            from_view = view(from, (offset_elements+1):(offset_elements+length_elements))
+            copyto!(to_view, from_view)
+        end
+    end
+end
+
+# Helper function to check if remainder represents strided patterns
+function _is_strided_remainder(spans::Vector{MemorySpan{S}}, arr::AbstractArray) where S
+    # For now, return false - we'll implement this for specific patterns as needed
+    return false
+end
+
+# Helper function to copy strided remainder patterns
+function _copy_strided_remainder(spans::Vector{MemorySpan{S}}, to::AbstractArray{T}, from::AbstractArray{T}) where {S,T}
+    # Implementation for strided patterns - placeholder for now
+    _copy_remainder_elementwise(spans, to, from)
+end
+
+# Element-wise copy for complex remainder patterns (slow but correct)
+function _copy_remainder_elementwise(spans::Vector{MemorySpan{S}}, to::AbstractArray{T}, from::AbstractArray{T}) where {S,T}
+    arr_ptr = pointer(to)
+    arr_start = UInt(arr_ptr)
+    element_size = sizeof(T)
+
+    for span in spans
+        offset_bytes = span.ptr.addr - arr_start
+        offset_elements = Int(offset_bytes ÷ element_size)
+        length_elements = Int(span.len ÷ element_size)
+
+        # Copy element by element for safety
+        for i in 1:length_elements
+            idx = offset_elements + i
+            if 1 <= idx <= length(to)
+                @info "Copying element $idx of $length_elements: $(from[idx])"
+                to[idx] = from[idx]
             end
         end
     end
-
-    return ChunkView(c, slices)
 end
-
-Base.view(c::DTask, slices...) = view(fetch(c; raw=true), slices...)
-
-function aliasing(x::ChunkView{N}) where N
-    remotecall_fetch(root_worker_id(x.chunk.processor), x.chunk, x.slices) do x, slices
-        x = unwrap(x)
-        v = view(x, slices...)
-        return aliasing(v)
-    end
-end
-memory_space(x::ChunkView) = memory_space(x.chunk)
-isremotehandle(x::ChunkView) = true
-
-#=
-function move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::ChunkView, from::ChunkView)
-    to_w = root_worker_id(to_space)
-    @assert to_w == myid()
-    to_raw = unwrap(to.chunk)
-    from_w = root_worker_id(from_space)
-    from_raw = to_w == from_w ? unwrap(from.chunk) : remotecall_fetch(f->copy(unwrap(f)), from_w, from.chunk)
-    from_view = view(from_raw, from.slices...)
-    to_view = view(to_raw, to.slices...)
-    move!(dep_mod, to_space, from_space, to_view, from_view)
-    return
-end
-=#
-
-function move(from_proc::Processor, to_proc::Processor, slice::ChunkView)
-    if from_proc == to_proc
-        return view(unwrap(slice.chunk), slice.slices...)
-    else
-        # Need to copy the underlying data, so collapse the view
-        from_w = root_worker_id(from_proc)
-        data = remotecall_fetch(from_w, slice.chunk, slice.slices) do chunk, slices
-            copy(view(unwrap(chunk), slices...))
-        end
-        return move(from_proc, to_proc, data)
-    end
-end
-
-Base.fetch(slice::ChunkView) = view(fetch(slice.chunk), slice.slices...)

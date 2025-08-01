@@ -4,10 +4,9 @@ LinearAlgebra.lu!(A::DMatrix{T}, pivot::Union{LinearAlgebra.RowMaximum,LinearAlg
 
 function LinearAlgebra.lu(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
     A_copy = LinearAlgebra._lucopy(A, LinearAlgebra.lutype(T))
-    return LinearAlgebra.lu!(A_copy, LinearAlgebra.NoPivot(); check=check)
+    return LinearAlgebra.lu!(A_copy, LinearAlgebra.NoPivot(); check, allowsingular)
 end
 function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
-  
     check && LinearAlgebra.LAPACK.chkfinite(A)
 
     zone = one(T)
@@ -15,7 +14,7 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool =
 
     mb, nb = A.partitioning.blocksize
 
-    if mb != nb 
+    if mb != nb
         mb = nb = min(mb, nb)
         A = maybe_copy_buffered(A => Blocks(nb, nb)) do A
             A
@@ -60,6 +59,7 @@ function update_ipiv!(ipivl::AbstractVector{Int}, info::Ref{Int}, piv_idx::Abstr
     max_piv_val = piv_val[max_piv_idx]
     abs_max_piv_val = max_piv_val isa Real ? abs(max_piv_val) : abs(real(max_piv_val)) + abs(imag(max_piv_val))    
     if isapprox(abs_max_piv_val, zero(T); atol=eps(real(T)))
+        @show k
         info[] = k
     end
     ipivl[1] = (max_piv_idx+k-2)*nb + piv_idx[max_piv_idx]
@@ -91,10 +91,9 @@ end
 
 function LinearAlgebra.lu(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
     A_copy = LinearAlgebra._lucopy(A, LinearAlgebra.lutype(T))
-    return LinearAlgebra.lu!(A_copy, LinearAlgebra.RowMaximum(); check=check, allowsingular=allowsingular)
+    return LinearAlgebra.lu!(A_copy, LinearAlgebra.RowMaximum(); check=check, allowsingular)
 end
 function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
-    
     check && LinearAlgebra.LAPACK.chkfinite(A)
 
     zone = one(T)
@@ -102,7 +101,7 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Boo
 
     mb, nb = A.partitioning.blocksize
 
-    if mb != nb 
+    if mb != nb
         mb = nb = min(mb, nb)
         A = maybe_copy_buffered(A => Blocks(nb, nb)) do A
             A
