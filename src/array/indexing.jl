@@ -36,12 +36,12 @@ Base.getindex(c::ArrayOp, idx...) =
 const GETINDEX_CACHE = TaskLocalValue{Dict{Tuple,Any}}(()->Dict{Tuple,Any}())
 const GETINDEX_CACHE_SIZE = ScopedValue{Int}(0)
 with_index_caching(f, size::Integer=1) = with(f, GETINDEX_CACHE_SIZE=>size)
-function Base.getindex(A::DArray{T,N}, idx::NTuple{N,Int}) where {T,N}
+@inline function Base.getindex(A::DArray{T,N}, idx::NTuple{N,Int}) where {T,N}
     # Scalar indexing check
     assert_allowscalar()
 
     # Boundscheck
-    checkbounds(A, idx...)
+    Base.@boundscheck checkbounds(A, idx...)
 
     # Find the associated partition and offset within it
     part_idx, offset_idx = partition_for(A, idx)
@@ -108,12 +108,12 @@ end
 
 ### setindex!
 
-function Base.setindex!(A::DArray{T,N}, value, idx::NTuple{N,Int}) where {T,N}
+@inline function Base.setindex!(A::DArray{T,N}, value, idx::NTuple{N,Int}) where {T,N}
     # Scalar indexing check
     assert_allowscalar()
 
     # Boundscheck
-    checkbounds(A, idx...)
+    Base.@boundscheck checkbounds(A, idx...)
 
     # Find the associated partition and offset within it
     part_idx, offset_idx = partition_for(A, idx)

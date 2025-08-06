@@ -44,8 +44,8 @@ function Base.copy(tile::HaloArray{T,N,H}) where {T,N,H}
 end
 
 # Define getindex for HaloArray
-function Base.getindex(tile::HaloArray{T,N}, I::Vararg{Int,N}) where {T,N}
-    checkbounds(tile, I...)
+@inline function Base.getindex(tile::HaloArray{T,N}, I::Vararg{Int,N}) where {T,N}
+    Base.@boundscheck checkbounds(tile, I...)
     if all(1 .<= I .<= size(tile.center))
         return tile.center[I...]
     elseif !any(1 .<= I .<= size(tile.center))
@@ -69,8 +69,8 @@ function Base.getindex(tile::HaloArray{T,N}, I::Vararg{Int,N}) where {T,N}
 end
 
 # Define setindex! for HaloArray
-function Base.setindex!(tile::HaloArray{T,N}, value, I::Vararg{Int,N}) where {T,N}
-    checkbounds(tile, I...)
+@inline function Base.setindex!(tile::HaloArray{T,N}, value, I::Vararg{Int,N}) where {T,N}
+    Base.@boundscheck checkbounds(tile, I...)
     if all(1 .<= I .<= size(tile.center))
         # Center
         return tile.center[I...] = value

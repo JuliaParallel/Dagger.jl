@@ -208,8 +208,8 @@ mutable struct ReusableLinkedList{T} <: AbstractVector{T}
     end
 end
 Base.eltype(list::ReusableLinkedList{T}) where T = T
-function Base.getindex(list::ReusableLinkedList{T}, idx::Integer) where T
-    checkbounds(list, idx)
+@inline function Base.getindex(list::ReusableLinkedList{T}, idx::Integer) where T
+    Base.@boundscheck checkbounds(list, idx)
     node = list.head
     for _ in 1:(idx-1)
         node === nothing && throw(BoundsError(list, idx))
@@ -218,8 +218,8 @@ function Base.getindex(list::ReusableLinkedList{T}, idx::Integer) where T
     node === nothing && throw(BoundsError(list, idx))
     return node.value
 end
-function Base.setindex!(list::ReusableLinkedList{T}, value::T, idx::Integer) where T
-    checkbounds(list, idx)
+@inline function Base.setindex!(list::ReusableLinkedList{T}, value::T, idx::Integer) where T
+    Base.@boundscheck checkbounds(list, idx)
     node = list.head
     for _ in 1:(idx-1)
         node === nothing && throw(BoundsError(list, idx))
@@ -377,8 +377,8 @@ function Base.resize!(list::ReusableLinkedList, N::Integer)
     end
     return list
 end
-function Base.deleteat!(list::ReusableLinkedList, idx::Integer)
-    checkbounds(list, idx)
+@inline function Base.deleteat!(list::ReusableLinkedList, idx::Integer)
+    Base.@boundscheck checkbounds(list, idx)
     if idx == 1
         deleted = list.head
         list.head = list.head.next
