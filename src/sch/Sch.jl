@@ -905,7 +905,9 @@ function (ets::FireTaskSpec)()
         bt = catch_backtrace()
         # FIXME: Catch the correct task ID
         thunk_id = first_task.thunk_id
-        put!(chan, TaskResult(pid, proc, thunk_id, CapturedException(err, bt), nothing))
+        if isopen(chan)
+            put!(chan, TaskResult(pid, proc, thunk_id, CapturedException(err, bt), nothing))
+        end
     finally
         @maybelog ctx timespan_finish(ctx, :fire, (;uid, worker=pid), nothing)
     end
