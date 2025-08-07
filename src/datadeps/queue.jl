@@ -331,11 +331,27 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         # Copy raw task arguments for analysis
         task_args = copy(spec.args)
 
-        # Copy args from local to remote
-        for (idx, (pos, arg)) in enumerate(task_args)
-            # Is the data written previously or now?
+        # Generate a list of ArgumentWrappers for each task argument
+        task_arg_ws = map(task_args) do (pos, arg)
             arg, deps = unwrap_inout(arg)
             arg = arg isa DTask ? fetch(arg; raw=true) : arg
+            if !type_may_alias(typeof(arg)) || !supports_inplace_move(state, arg)
+                return [(ArgumentWrapper(arg, identity), false, false)]
+            end
+            arg_ws = Tuple{ArgumentWrapper,Bool,Bool}[]
+            for (dep_mod, readdep, writedep) in deps
+                push!(arg_ws, (ArgumentWrapper(arg, dep_mod), readdep, writedep))
+            end
+            return arg_ws
+        end
+        task_arg_ws = task_arg_ws::Vector{Vector{Tuple{ArgumentWrapper,Bool,Bool}}}
+
+        # Copy args from local to remote
+        for (idx, arg_ws) in enumerate(task_arg_ws)
+            arg = first(arg_ws)[1].arg
+            pos = task_args[idx][1]
+
+            # Is the data written previously or now?
             if !type_may_alias(typeof(arg))
                 @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Skipped copy-to (immutable)"
                 spec.args[idx] = pos => arg
@@ -350,25 +366,20 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             end
 
             # Is the source of truth elsewhere?
-            get_or_generate_slot!(state, our_space, arg, deps)
-            #record_argument_dep!(state, task, arg, deps, our_space)
-            for (dep_mod, _, _) in deps
-                arg_remote = state.remote_args[our_space][arg]
-                ainfo_remote = aliasing(state, arg_remote, dep_mod)
-
-                # Check if we need a remainder copy before the regular copy
-                remainder = compute_remainder_for_task!(state, our_space, arg, dep_mod, ainfo_remote)
-                @warn "Use simple copy-to if possible" maxlog=1
-                if !(remainder isa NoAliasing)
-                    enqueue_remainder_copy_to!(state, spec.f, remainder, arg, deps, idx, our_space, our_scope, task, write_num)
-                    state.arg_owner[arg] = our_space
+            arg_remote = get_or_generate_slot!(state, our_space, arg)
+            for (arg_w, _, _) in arg_ws
+                dep_mod = arg_w.dep_mod
+                remainder = compute_remainder_for_arg!(state, our_space, arg_w)
+                if remainder isa MultiRemainderAliasing
+                    enqueue_remainder_copy_to!(state, our_space, arg_w, remainder, spec.f, idx, our_scope, task, write_num)
+                elseif remainder isa FullCopy
+                    enqueue_copy_to!(state, our_space, arg_w, spec.f, idx, our_scope, task, write_num)
                 else
-                    @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Skipped copy-to (up-to-date): $our_space"
-                    #enqueue_copy_to!(state, spec.f, dep_mod, arg, arg, idx, 0, our_space, our_scope, task, write_num)
+                    @assert remainder isa NoAliasing
+                    @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] Skipped copy-to (up-to-date): $our_space"
                 end
             end
-            spec.args[idx] = pos => state.remote_args[our_space][arg]
-            state.arg_owner[arg] = our_space
+            spec.args[idx] = pos => arg_remote
         end
         write_num += 1
 
@@ -386,14 +397,13 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
         # Calculate this task's syncdeps
         syncdeps = get(Set{Any}, spec.options, :syncdeps)
-        for (idx, (_, arg)) in enumerate(task_args)
-            arg, deps = unwrap_inout(arg)
-            arg = arg isa DTask ? fetch(arg; raw=true) : arg
+        for (idx, arg_ws) in enumerate(task_arg_ws)
+            arg = first(arg_ws)[1].arg
             type_may_alias(typeof(arg)) || continue
             supports_inplace_move(state, arg) || continue
-            for (dep_mod, _, writedep) in deps
-                current_arg = state.remote_args[our_space][arg]
-                ainfo = aliasing(state, current_arg, dep_mod)
+            for (arg_w, _, writedep) in arg_ws
+                ainfo = aliasing(state, our_space, arg_w)
+                dep_mod = arg_w.dep_mod
                 if writedep
                     @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] Syncing as writer"
                     get_write_deps!(state, our_space, ainfo, task, write_num, syncdeps)
@@ -411,25 +421,17 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         enqueue!(upper_queue, spec=>task)
 
         # Update read/write tracking for arguments
-        for (idx, (_, arg)) in enumerate(task_args)
-            arg, deps = unwrap_inout(arg)
-            arg = arg isa DTask ? fetch(arg; raw=true) : arg
+        for (idx, arg_ws) in enumerate(task_arg_ws)
+            arg = first(arg_ws)[1].arg
             type_may_alias(typeof(arg)) || continue
-            for (dep_mod, _, writedep) in deps
-                current_arg = state.remote_args[our_space][arg]
-                ainfo = aliasing(state, current_arg, dep_mod)
+            for (arg_w, _, writedep) in arg_ws
+                ainfo = aliasing(state, our_space, arg_w)
+                dep_mod = arg_w.dep_mod
                 if writedep
                     @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] Set as owner"
-                    add_writer!(state, ainfo, task, write_num)
-
-                    # Track this as a region update for remainder computation
-                    # Find the base aliasing object (the full array/object)
-                    base_ainfo = aliasing(state, arg, identity)
-                    if ainfo != base_ainfo
-                        track_region_update!(state, ainfo, base_ainfo)
-                    end
+                    add_writer!(state, arg_w, our_space, ainfo, task, write_num)
                 else
-                    add_reader!(state, ainfo, task, write_num)
+                    add_reader!(state, arg_w, our_space, ainfo, task, write_num)
                 end
             end
         end
@@ -442,23 +444,19 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     end
 
     # Copy args from remote to local
-    # We need to replay the writes from all tasks in-order (skipping any
-    # outdated write owners), to ensure that overlapping writes are applied
-    # in the correct order
-    for (arg, arg_space) in state.arg_owner
-        for (dep_mod, _, writedep) in deps
-            writedep || continue
-            ainfo = aliasing(state, arg, dep_mod)
-            data_local_space = state.data_origin[ainfo]
-            arg_remote = state.remote_args[arg_space][arg]
-            @show typeof(arg) dep_mod
-            ainfo_remote = aliasing(state, arg_remote, dep_mod)
-            remainder = compute_remainder_for_task!(state, data_local_space, arg, dep_mod, ainfo_remote)
-            @show ainfo
-            if !(remainder isa NoAliasing)
-                data_local_scope = UnionScope(map(ExactScope, collect(processors(data_local_space)))...)
-                enqueue_remainder_copy_from!(state, ainfo, arg, remainder, data_local_space, data_local_scope, write_num)
-            end
+    for arg_w in keys(state.arg_owner)
+        arg = arg_w.arg
+        origin_space = state.arg_origin[arg]
+        remainder = compute_remainder_for_arg!(state, origin_space, arg_w)
+        if remainder isa MultiRemainderAliasing
+            origin_scope = UnionScope(map(ExactScope, collect(processors(origin_space)))...)
+            enqueue_remainder_copy_from!(state, origin_space, arg_w, remainder, origin_scope, write_num)
+        elseif remainder isa FullCopy
+            origin_scope = UnionScope(map(ExactScope, collect(processors(origin_space)))...)
+            enqueue_copy_from!(state, origin_space, arg_w, origin_scope, write_num)
+        else
+            @assert remainder isa NoAliasing
+            @dagdebug nothing :spawn_datadeps "Skipped copy-from (up-to-date): $origin_space"
         end
     end
     return
@@ -513,7 +511,6 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             if !(remainder isa NoAliasing)
                 data_local_scope = UnionScope(map(ExactScope, collect(processors(data_local_space)))...)
                 enqueue_remainder_copy_from!(state, ainfo, arg, remainder, data_local_space, data_local_scope, write_num)
-                state.arg_owner[arg] = data_local_space
                 #=
                 # Add copy-from operation: copy from remote space to local/original space
                 @dagdebug nothing :spawn_datadeps "[$dep_mod] Enqueueing copy-from: $data_remote_space => $data_local_space"

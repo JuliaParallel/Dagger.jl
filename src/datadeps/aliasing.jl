@@ -173,42 +173,6 @@ CURRENT LIMITATIONS AND TODOS:
    - Optimize for common access patterns
 =#
 
-#= FIXME: Integrate with above
-Problem statement:
-
-Remainder copy calculation needs to ensure that, for a given argument and
-dependency modifier, and for a given target memory space, any data not yet
-updated (whether through this arg or through another that aliases) is added to
-the remainder, while any data that has been updated is not in the remainder.
-Remainder copies may be multi-part, as data may be spread across multiple other
-memory spaces.
-
-Ainfo is not alone sufficient to identify the combination of argument and
-dependency modifier, as ainfo is specific to an allocation in a given memory
-space. Thus, this combination needs to be tracked together, and separately from
-memory space. However, information may span multiple memory spaces (and thus
-multiple ainfos), so we should try to make queries of cross-memory space
-information fast, as they will need to be performed for every task, for every
-combination.
-
-Game Plan:
-
-- Use ArgumentWrapper to track this combination throughout the codebase, ideally generated just once
-- Maintain the keying of remote_args only on argument, as the dependency modifier doesn’t affect the argument being passed into the task, so it should not factor into generating and tracking remote argument copies
-- Add a structure to track the mapping from ArgumentWrapper to memory space to ainfo, as a quick way to lookup all ainfos needing to be considered
-- When considering a remainder copy, only look at a single memory space’s ainfos at a time, as the ainfos should overlap exactly the same way on any memory space, and this allows us to use ainfo_overlaps to track overlaps
-- Remainder copies will need to separately consider the source memory space, and the destination memory space when acquiring spans to copy to/from
-- Memory spans for ainfos generated from the same ArgumentWrapper should be assumed to be paired in the same order, regardless of memory space, to ensure we can perform the translation from source to destination span address
-    - Alternatively, we might provide an API to take source and destination ainfos, and desired remainder memory spans, which then performs the copy for us
-- When a task or copy writes to arguments, we should record this happening for all overlapping ainfos, in a manner that will be efficient to query from another memory space. We can probably walk backwards and attach this to a structure keyed on ArgumentWrapper, as that will be very efficient for later queries (because the history will now be linearized in one vector).
-- Remainder copies will need to know, for all overlapping ainfos of the ArgumentWrapper ainfo at the target memory space, how recently that ainfo was updated relative to other ainfos, and relative to how recently the target ainfo was written.
-    - The last time the target ainfo was written is the furthest back we need to consider, as the target data must have been fully up-to-date when that write completed.
-    - Consideration of updates should start at most recent first, walking backwards in time, as the most recent updates contain the up-to-date data.
-        - For each span under consideration, we should subtract from it the current remainder set, to ensure we only copy up-to-date data.
-        - We must add that span portion to the remainder set no matter what, but if it was updated on the target memory space, we don’t need to schedule a copy for it, since it’s already where it needs to be.
-    - Even before the last target write is seen, we are allowed to stop searching if we find that our target ainfo is fully covered (because this implies that the target ainfo is fully out-of-date).
-=#
-
 "Specifies a read-only dependency."
 struct In{T}
     x::T
@@ -276,6 +240,7 @@ Base.hash(aw::ArgumentWrapper) = hash(ArgumentWrapper, aw.hash)
 Base.:(==)(aw1::ArgumentWrapper, aw2::ArgumentWrapper) =
     aw1.hash == aw2.hash
 
+@warn "Switch ArgumentWrapper to contain just the argument, and add DependencyWrapper" maxlog=1
 struct DataDepsState
     # The ordered list of tasks and their read/write dependencies
     # FIXME: Remove me
@@ -289,35 +254,37 @@ struct DataDepsState
     # Used to replace an argument with its remote copy
     remote_args::Dict{MemorySpace,IdDict{Any,Chunk}}
 
+    # The mapping of remote argument to original argument
+    remote_arg_to_original::Dict{Any,Any}
+
     # The mapping of argument and dep_mod to memory space to ainfo
     # Used to lookup which ainfos represent a given argument and dep_mod
+    # N.B. This is a mapping for remote copies
     arg_ainfos::IdDict{ArgumentWrapper,Dict{MemorySpace,AliasingWrapper}}
 
     # The mapping of ainfo to argument and dep_mod
     # Used to lookup which argument and dep_mod a given ainfo is generated from
-    ainfos_arg::Dict{AliasingWrapper,ArgumentWrapper}
+    # N.B. This is a mapping for remote argument copies
+    ainfo_arg::Dict{AliasingWrapper,ArgumentWrapper}
 
-    # The history of writes (direct or indirect) to each argument and dep_mod, in terms of ainfos directly written to
+    # The history of writes (direct or indirect) to each argument and dep_mod, in terms of ainfos directly written to, and the memory space they were written to
     # Updated when a new write happens on an overlapping ainfo
-    # Used by remainder copies to track which portions of an argument and dep_mod are up-to-date
-    arg_history::Dict{ArgunmentWrapper,Vector{AliasingWrapper}}
+    # Used by remainder copies to track which portions of an argument and dep_mod were written to elsewhere, through another argument
+    arg_history::Dict{ArgumentWrapper,Vector{Tuple{AliasingWrapper,MemorySpace,Int}}}
 
     # The mapping of memory space and argument to the memory space of the last direct write
     # Used by remainder copies to lookup the "backstop" if any portion of the target ainfo is not updated by the remainder
-    arg_owner::IdDict{ArgumentWrapper,MemorySpace}
+    arg_owner::Dict{ArgumentWrapper,MemorySpace}
 
     # The mapping of, for a given memory space, the backing Chunks that an ainfo references
     # Used by slot generation to replace the backing Chunks during move
     ainfo_backing_chunk::Dict{MemorySpace,Dict{AbstractAliasing,Chunk}}
 
-    # The history of aliasing objects for each argument
-    # FIXME: Remove me
-    #args_history::Dict{AliasingWrapper,Vector{AliasingWrapper}}
-
     # Cache of argument's supports_inplace_move query result
     supports_inplace_cache::IdDict{Any,Bool}
 
     # Cache of argument and dep_mod to ainfo
+    # N.B. This is a mapping for remote argument copies
     ainfo_cache::Dict{ArgumentWrapper,AliasingWrapper}
 
     # The overlapping ainfos for each ainfo
@@ -326,19 +293,10 @@ struct DataDepsState
     ainfos_overlaps::Dict{AliasingWrapper,Set{AliasingWrapper}}
 
     # Track writers ("owners") and readers
-    # FIXME: Remove me?
+    # Updated as new writer and reader tasks are launched
+    # Used by task dependency tracking to calculate syncdeps and ensure correct launch ordering
     ainfos_owner::Dict{AliasingWrapper,Union{Pair{DTask,Int},Nothing}}
     ainfos_readers::Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}
-
-    # Remainder tracking: for each base aliasing object, track which sub-regions have been updated
-    # This maps base_ainfo => Set{updated_sub_ainfos}
-    # FIXME: Remove me
-    #updated_regions::Dict{AliasingWrapper,Set{AliasingWrapper}}
-
-    # Track the base aliasing object for each sub-region
-    # This maps sub_ainfo => base_ainfo
-    # FIXME: Remove me
-    #region_to_base::Dict{AliasingWrapper,AliasingWrapper}
 
     function DataDepsState(aliasing::Bool)
         if !aliasing
@@ -347,11 +305,12 @@ struct DataDepsState
 
         arg_origin = IdDict{Any,MemorySpace}()
         remote_args = Dict{MemorySpace,IdDict{Any,Any}}()
+        remote_arg_to_original = IdDict{Any,Any}()
         arg_ainfos = IdDict{ArgumentWrapper,Dict{MemorySpace,AliasingWrapper}}()
-        ainfos_arg = Dict{AliasingWrapper,ArgumentWrapper}()
-        arg_owner = IdDict{Any,MemorySpace}()
+        ainfo_arg = Dict{AliasingWrapper,ArgumentWrapper}()
+        arg_owner = Dict{ArgumentWrapper,MemorySpace}()
         ainfo_backing_chunk = Dict{MemorySpace,Dict{AbstractAliasing,Chunk}}()
-        arg_history = Dict{AliasingWrapper,Vector{AliasingWrapper}}()
+        arg_history = Dict{ArgumentWrapper,Vector{Tuple{AliasingWrapper,MemorySpace,Int}}}()
 
         supports_inplace_cache = IdDict{Any,Bool}()
         ainfo_cache = Dict{ArgumentWrapper,AliasingWrapper}()
@@ -361,22 +320,39 @@ struct DataDepsState
         ainfos_owner = Dict{AliasingWrapper,Union{Pair{DTask,Int},Nothing}}()
         ainfos_readers = Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}()
 
-        #updated_regions = Dict{AliasingWrapper,Set{AliasingWrapper}}()
-        #region_to_base = Dict{AliasingWrapper,AliasingWrapper}()
-
-        return new(arg_origin, remote_args, arg_ainfos, ainfos_arg, arg_owner, ainfo_backing_chunk, arg_history,
+        return new(arg_origin, remote_args, remote_arg_to_original, arg_ainfos, ainfo_arg, arg_owner, ainfo_backing_chunk, arg_history,
                    supports_inplace_cache, ainfo_cache, ainfos_overlaps, ainfos_owner, ainfos_readers)
     end
 end
 
-function aliasing(state::DataDepsState, aw::ArgumentWrapper)
-    arg = aw.arg
-    dep_mod = aw.dep_mod
-    return get!(state.ainfo_cache, aw) do
-        return AliasingWrapper(aliasing(arg, dep_mod))
+# N.B. arg_w must be the original argument wrapper, not a remote copy
+function aliasing(state::DataDepsState, target_space::MemorySpace, arg_w::ArgumentWrapper)
+    # Grab the remote copy of the argument, and calculate the ainfo
+    remote_arg = get_or_generate_slot!(state, target_space, arg_w.arg)
+    remote_arg_w = ArgumentWrapper(remote_arg, arg_w.dep_mod)
+
+    # Check if we already have the result cached
+    if haskey(state.ainfo_cache, remote_arg_w)
+        return state.ainfo_cache[remote_arg_w]
     end
+
+    # Calculate the ainfo
+    ainfo = AliasingWrapper(aliasing(remote_arg, arg_w.dep_mod))
+
+    # Cache the result
+    state.ainfo_cache[remote_arg_w] = ainfo
+
+    # Update the mapping of ainfo to argument and dep_mod
+    state.ainfo_arg[ainfo] = remote_arg_w
+    # FIXME: Remove me
+    #arg_ainfos = get!(state.arg_ainfos, aw, Set{AliasingWrapper}())
+    #push!(get!(state.arg_ainfos, aw, Set{AliasingWrapper}()), ainfo)
+
+    # Populate info for the new ainfo
+    populate_ainfo!(state, arg_w, ainfo, target_space)
+
+    return ainfo
 end
-aliasing(state::DataDepsState, arg, dep_mod) = aliasing(state, ArgumentWrapper(arg, dep_mod))
 
 function supports_inplace_move(state::DataDepsState, arg)
     return get!(state.supports_inplace_cache, arg) do
@@ -406,17 +382,16 @@ function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
         # Skip non-aliasing arguments
         type_may_alias(typeof(arg)) || continue
 
-        # Populate argument info and generate slots
+        # Track the origin space of the argument
         origin_space = memory_space(arg)
-        ainfo = aliasing(state, arg, identity)
-        populate_argument_info!(state, ainfo, origin_space)
-        get_or_generate_slot!(state, origin_space, arg, deps)
+        state.arg_origin[arg] = origin_space
+        state.remote_arg_to_original[arg] = arg
 
-        # Add all aliasing dependencies
+        # Populate argument info for all aliasing dependencies
         for (dep_mod, readdep, writedep) in deps
-            ainfo = aliasing(state, arg, dep_mod)
+            aw = ArgumentWrapper(arg, dep_mod)
+            populate_argument_info!(state, aw, origin_space)
             #push!(dependencies_to_add, (readdep, writedep, ainfo, dep_mod, arg))
-            state.args_history[ainfo] = Vector{AliasingWrapper}()
         end
     end
 
@@ -427,6 +402,7 @@ function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
     # Record argument/result dependencies
     #push!(state.dependencies, task => dependencies_to_add)
 end
+#= FIXME: Remove me
 function record_argument_dep!(state::DataDepsState, task::DTask, arg, deps, dest_space::MemorySpace)
     deps_idx = findfirst(t->t[1] === task, state.dependencies)
     deps_record = state.dependencies[deps_idx][2]
@@ -435,34 +411,62 @@ function record_argument_dep!(state::DataDepsState, task::DTask, arg, deps, dest
         push!(deps_record, (readdep, writedep, ainfo, dep_mod, arg))
     end
 end
-function populate_argument_info!(state::DataDepsState, ainfo::AbstractAliasing, origin_space::MemorySpace)
-    # Initialize owner and readers
-    if !haskey(state.ainfos_owner, ainfo)
-        overlaps = Set{AliasingWrapper}()
-        push!(overlaps, ainfo)
-        for other_ainfo in keys(state.ainfos_owner)
-            ainfo == other_ainfo && continue
-            if will_alias(ainfo, other_ainfo)
-                push!(overlaps, other_ainfo)
-                push!(state.ainfos_overlaps[other_ainfo], ainfo)
-            end
-        end
-        state.ainfos_overlaps[ainfo] = overlaps
-        state.ainfos_owner[ainfo] = nothing
-        state.ainfos_readers[ainfo] = Pair{DTask,Int}[]
-        state.ainfos_history[ainfo] = AliasingWrapper[]
+=#
+function populate_argument_info!(state::DataDepsState, arg_w::ArgumentWrapper, origin_space::MemorySpace)
+    # Initialize ownership and history
+    if !haskey(state.arg_owner, arg_w)
+        state.arg_owner[arg_w] = origin_space
+    end
+    if !haskey(state.arg_history, arg_w)
+        state.arg_history[arg_w] = Vector{Tuple{AliasingWrapper,MemorySpace,Int}}()
     end
 
-    # Assign data owner and locality
-    if !haskey(state.data_locality, ainfo)
-        @info "[$origin_space] Populating argument info for $ainfo ($(length(overlaps)) overlaps)"
-        state.data_locality[ainfo] = origin_space
-        state.data_origin[ainfo] = origin_space
+    # Calculate the ainfo (which will populate info for it)
+    aliasing(state, origin_space, arg_w)
+end
+function populate_ainfo!(state::DataDepsState, original_arg_w::ArgumentWrapper, target_ainfo::AliasingWrapper, target_space::MemorySpace)
+    # Initialize owner and readers
+    if !haskey(state.ainfos_owner, target_ainfo)
+        overlaps = Set{AliasingWrapper}()
+        push!(overlaps, target_ainfo)
+        for other_ainfo in keys(state.ainfos_owner)
+            target_ainfo == other_ainfo && continue
+            if will_alias(target_ainfo, other_ainfo)
+                push!(overlaps, other_ainfo)
+                push!(state.ainfos_overlaps[other_ainfo], target_ainfo)
+
+                # Add overlap's history to our own
+                other_remote_arg_w = state.ainfo_arg[other_ainfo]
+                other_arg = state.remote_arg_to_original[other_remote_arg_w.arg]
+                other_arg_w = ArgumentWrapper(other_arg, other_remote_arg_w.dep_mod)
+                @info "[$target_space] Merging history:\n$(typeof(other_arg_w.arg))[$(other_arg_w.dep_mod)]\n  =>\n$(typeof(original_arg_w.arg))[$(original_arg_w.dep_mod)]"
+                merge_history!(state, original_arg_w, other_arg_w)
+            end
+        end
+        state.ainfos_overlaps[target_ainfo] = overlaps
+        state.ainfos_owner[target_ainfo] = nothing
+        state.ainfos_readers[target_ainfo] = Pair{DTask,Int}[]
     end
 end
 function populate_return_info!(state::DataDepsState, task, space)
-    @assert !haskey(state.data_locality, task)
+    # FIXME: Remove me
+    #@assert !haskey(state.data_locality, task)
     # FIXME: We don't yet know about ainfos for this task
+end
+function merge_history!(state::DataDepsState, arg_w::ArgumentWrapper, other_arg_w::ArgumentWrapper)
+    history = state.arg_history[arg_w]
+    for (other_ainfo, other_space, write_num) in state.arg_history[other_arg_w]
+        idx = findfirst(h->h[3] > write_num, history)
+        if idx === nothing
+            if isempty(history)
+                idx = 1
+            else
+                idx = length(history) + 1
+            end
+        end
+        @info "[$other_space] Inserting entry"
+        insert!(history, idx, (other_ainfo, other_space, write_num))
+    end
 end
 
 """
@@ -508,8 +512,6 @@ function _get_write_deps!(state::DataDepsState, dest_space::MemorySpace, ainfo::
         write_num == other_write_num && continue
         @dagdebug nothing :spawn_datadeps_sync "Sync with writer via $ainfo -> $other_ainfo"
         push!(syncdeps, other_task)
-        #@info "[$dest_space] Adding $ainfo to history of $other_ainfo"
-        #push!(state.ainfos_history[other_ainfo], ainfo)
     end
 end
 function _get_read_deps!(state::DataDepsState, dest_space::MemorySpace, ainfo::AbstractAliasing, task, write_num, syncdeps)
@@ -524,13 +526,34 @@ function _get_read_deps!(state::DataDepsState, dest_space::MemorySpace, ainfo::A
         end
     end
 end
-function add_writer!(state::DataDepsState, ainfo::AbstractAliasing, task, write_num)
+function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::MemorySpace, ainfo::AbstractAliasing, task, write_num)
     state.ainfos_owner[ainfo] = task=>write_num
     empty!(state.ainfos_readers[ainfo])
+
+    # Clear the history for this target, since this is a new write event
+    empty!(state.arg_history[arg_w])
+
+    # Add our own history
+    push!(state.arg_history[arg_w], (ainfo, dest_space, write_num))
+
+    # Find overlapping arguments and update their history
+    for other_ainfo in state.ainfos_overlaps[ainfo]
+        other_ainfo == ainfo && continue
+        other_remote_arg_w = state.ainfo_arg[other_ainfo]
+        other_arg = state.remote_arg_to_original[other_remote_arg_w.arg]
+        other_arg_w = ArgumentWrapper(other_arg, other_remote_arg_w.dep_mod)
+        other_arg_w == arg_w && continue
+        @info "[$dest_space] Adding history:\n$(typeof(arg_w.arg))[$(arg_w.dep_mod)]\n  =>\n$(typeof(other_arg_w.arg))[$(other_remote_arg_w.dep_mod)]"
+        push!(state.arg_history[other_arg_w], (ainfo, dest_space, write_num))
+    end
+
+    # Update our owner
+    state.arg_owner[arg_w] = dest_space
+
     # Not necessary to assert a read, but conceptually it's true
-    add_reader!(state, ainfo, task, write_num)
+    add_reader!(state, arg_w, dest_space, ainfo, task, write_num)
 end
-function add_reader!(state::DataDepsState, ainfo::AbstractAliasing, task, write_num)
+function add_reader!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::MemorySpace, ainfo::AbstractAliasing, task, write_num)
     push!(state.ainfos_readers[ainfo], task=>write_num)
 end
 
@@ -542,7 +565,7 @@ isremotehandle(x::Chunk) = true
 @warn "Use state for aliasing checks" maxlog=1
 @warn "Re-enable assertions" maxlog=1
 @warn "DON'T PULL FROM ORIGIN BLINDLY, IT'S NOT ALWAYS UP TO DATE" maxlog=1
-function generate_slot!(state::DataDepsState, dest_space, data, deps)
+function generate_slot!(state::DataDepsState, dest_space, data)
     if data isa DTask
         data = fetch(data; raw=true)
     end
@@ -553,7 +576,6 @@ function generate_slot!(state::DataDepsState, dest_space, data, deps)
     dest_space_args = get!(IdDict{Any,Any}, state.remote_args, dest_space)
     ALIASED_OBJECT_CACHE[] = get!(Dict{AbstractAliasing,Chunk}, state.ainfo_backing_chunk, dest_space)
     ALIASED_OBJECTS[] = Vector{Any}()
-    STATE[] = state
     if orig_space == dest_space && (data isa Chunk || !isremotehandle(data))
         # Fast path for local data or data already in a Chunk
         data_chunk = tochunk(data, from_proc)
@@ -571,34 +593,21 @@ function generate_slot!(state::DataDepsState, dest_space, data, deps)
             @assert orig_space != memory_space(data_chunk) "space preserved! $orig_space != $(memory_space(data_chunk)) ($(typeof(data)) vs. $(typeof(data_chunk))), spaces ($orig_space -> $dest_space)"
         end
     end
-    # ainfo = aliasing(state, data, identity)
-    # ALIASED_OBJECT_CACHE[][ainfo] = data_chunk
     dest_space_args[data] = data_chunk
-    state.arg_owner[data] = orig_space
-
-    # Join aliased objects to the base object
-    for obj in ALIASED_OBJECTS[]
-        base_ainfo = aliasing(state, obj, identity)
-        populate_argument_info!(state, base_ainfo, dest_space)
-        for (dep_mod, _, _) in deps
-            aliased_ainfo = aliasing(state, data_chunk, dep_mod)
-            state.region_to_base[aliased_ainfo] = base_ainfo
-            populate_argument_info!(state, aliased_ainfo, dest_space)
-        end
-    end
+    state.remote_arg_to_original[data_chunk] = data
 
     ALIASED_OBJECTS[] = nothing
     ALIASED_OBJECT_CACHE[] = nothing
-    STATE[] = nothing
 
     return dest_space_args[data]
 end
-function get_or_generate_slot!(state, dest_space, data, deps)
+function get_or_generate_slot!(state, dest_space, data)
+    @assert !(data isa ArgumentWrapper)
     if !haskey(state.remote_args, dest_space)
         state.remote_args[dest_space] = IdDict{Any,Any}()
     end
     if !haskey(state.remote_args[dest_space], data)
-        return generate_slot!(state, dest_space, data, deps)
+        return generate_slot!(state, dest_space, data)
     end
     return state.remote_args[dest_space][data]
 end
@@ -611,14 +620,13 @@ function move_rewrap(from_proc::Processor, to_proc::Processor, data)
         end
     end
 end
-const STATE = TaskLocalValue{Union{DataDepsState,Nothing}}(()->nothing)
 const ALIASED_OBJECT_CACHE = TaskLocalValue{Union{Dict{AbstractAliasing,Chunk}, Nothing}}(()->nothing)
 const ALIASED_OBJECTS = TaskLocalValue{Union{Vector{Any}, Nothing}}(()->nothing)
 @warn "Document these public methods" maxlog=1
 function declare_aliased_object!(x)
     push!(ALIASED_OBJECTS[], x)
 end
-function aliased_object!(x; ainfo=aliasing(STATE[], x, identity))
+function aliased_object!(x; ainfo=aliasing(x, identity))
     cache = ALIASED_OBJECT_CACHE[]
     if haskey(cache, ainfo)
         y = cache[ainfo]
@@ -630,7 +638,7 @@ function aliased_object!(x; ainfo=aliasing(STATE[], x, identity))
     push!(ALIASED_OBJECTS[], y)
     return y
 end
-function aliased_object!(f, x; ainfo=aliasing(STATE[], x, identity))
+function aliased_object!(f, x; ainfo=aliasing(x, identity))
     cache = ALIASED_OBJECT_CACHE[]
     if haskey(cache, ainfo)
         y = cache[ainfo]
@@ -644,7 +652,7 @@ function aliased_object!(f, x; ainfo=aliasing(STATE[], x, identity))
 end
 function aliased_object_unwrap!(x::Chunk)
     y = unwrap(x)
-    ainfo = aliasing(STATE[], y, identity)
+    ainfo = aliasing(y, identity)
     return unwrap(aliased_object!(x; ainfo))
 end
 

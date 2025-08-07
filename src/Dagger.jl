@@ -78,6 +78,7 @@ include("sch/Sch.jl"); using .Sch
 # Data dependency task queue
 include("datadeps/aliasing.jl")
 include("datadeps/chunkview.jl")
+include("datadeps/interval_tree.jl")
 include("datadeps/remainders.jl")
 include("datadeps/queue.jl")
 
