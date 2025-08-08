@@ -98,9 +98,9 @@ end
 function _fft!(output::DMatrix{T}, input::DMatrix{T}, dims=(1, 2)) where T
     N = size(input, 1)
     np = length(Dagger.compatible_processors())
-    A = zeros(Blocks(N, div(N, np)), T, size(input))
+    A = zeros(Blocks(N, cld(N, np)), T, size(input))
     copyto!(A, input)
-    B = zeros(Blocks(div(N, np), N), T, size(input))
+    B = zeros(Blocks(cld(N, np), N), T, size(input))
     __fft!(A, B, dims)
     copyto!(output, B)
     return output
@@ -108,9 +108,9 @@ end
 function _ifft!(output::DMatrix{T}, input::DMatrix{T}, dims=(1, 2)) where T
     N = size(input, 1)
     np = length(Dagger.compatible_processors())
-    A = zeros(Blocks(N, div(N, np)), T, size(input))
+    A = zeros(Blocks(N, cld(N, np)), T, size(input))
     copyto!(A, input)
-    B = zeros(Blocks(div(N, np), N), T, size(input))
+    B = zeros(Blocks(cld(N, np), N), T, size(input))
     __ifft!(A, B, dims)
     copyto!(output, B)
     return output
@@ -121,16 +121,16 @@ function _fft!(output::DArray{T,3}, input::DArray{T,3}, dims=(1, 2, 3); decomp::
     N = size(input, 1)
     np = length(Dagger.compatible_processors())
     if decomp isa Pencil
-        A = zeros(Blocks(N, div(N, np), div(N, np)), T, size(input))
-        B = zeros(Blocks(div(N, np), N, div(N, np)), T, size(input))
-        C = zeros(Blocks(div(N, np), div(N, np), N), T, size(input))
+        A = zeros(Blocks(N, cld(N, np), cld(N, np)), T, size(input))
+        B = zeros(Blocks(cld(N, np), N, cld(N, np)), T, size(input))
+        C = zeros(Blocks(cld(N, np), cld(N, np), N), T, size(input))
         copyto!(A, input)
         __fft!(decomp, A, B, C, dims)
         copyto!(output, C)
         return output
     elseif decomp isa Slab
-        A = zeros(Blocks(N, N, div(N, np)), T, size(input))
-        B = zeros(Blocks(div(N, np), div(N, np), N), T, size(input))
+        A = zeros(Blocks(N, N, cld(N, np)), T, size(input))
+        B = zeros(Blocks(cld(N, np), cld(N, np), N), T, size(input))
         copyto!(A, input)
         __fft!(decomp, A, B, dims)
         copyto!(output, B)
@@ -143,16 +143,16 @@ function _ifft!(output::DArray{T,3}, input::DArray{T,3}, dims=(1, 2, 3); decomp:
     N = size(input, 1)
     np = length(Dagger.compatible_processors())
     if decomp isa Pencil
-        A = zeros(Blocks(div(N, np), div(N, np), N), T, size(input))
-        B = zeros(Blocks(div(N, np), N, div(N, np)), T, size(input))
-        C = zeros(Blocks(N, div(N, np), div(N, np)), T, size(input))
+        A = zeros(Blocks(cld(N, np), cld(N, np), N), T, size(input))
+        B = zeros(Blocks(cld(N, np), N, cld(N, np)), T, size(input))
+        C = zeros(Blocks(N, cld(N, np), cld(N, np)), T, size(input))
         copyto!(A, input)
         __ifft!(decomp, A, B, C, dims)
         copyto!(output, C)
         return output
     elseif decomp isa Slab
-        A = zeros(Blocks(div(N, np), div(N, np), N), T, size(input))
-        B = zeros(Blocks(N, N, div(N, np)), T, size(input))
+        A = zeros(Blocks(cld(N, np), cld(N, np), N), T, size(input))
+        B = zeros(Blocks(N, N, cld(N, np)), T, size(input))
         copyto!(A, input)
         __ifft!(decomp, A, B, dims)
         copyto!(output, B)
