@@ -587,8 +587,8 @@ function reusable_task_loop(chan::Channel{Any}, ready::Threads.Atomic{Bool})
     while true
         f = try
             take!(chan)
-        catch
-            if !isopen(chan)
+        catch err
+            if !isopen(chan) || err isa InterruptException # scheduler exiting
                 return
             else
                 rethrow()
