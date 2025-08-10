@@ -203,13 +203,14 @@ function reschedule_syncdeps!(state, thunk, seen=nothing)
             end
             w = get!(()->Set{Thunk}(), state.waiting, thunk)
             if thunk.options.syncdeps !== nothing
-                for input in thunk.options.syncdeps
-                    input = unwrap_weak_checked(input)
-                    istask(input) && input in seen && continue
+                syncdeps = WeakThunk[thunk.options.syncdeps...]
+                for weak_input in syncdeps
+                    input = unwrap_weak_checked(weak_input)::Thunk
+                    input in seen && continue
 
                     # Unseen
                     push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
-                    istask(input) || continue
+                    #istask(input) || continue
 
                     # Unseen task
                     if get(state.errored, input, false)
@@ -234,6 +235,7 @@ function reschedule_syncdeps!(state, thunk, seen=nothing)
         end
     end
 end
+# N.B. Vector is faster than Set for small collections (which are probably most common)
 const RESCHEDULE_SYNCDEPS_SEEN_CACHE = TaskLocalValue{ReusableCache{Set{Thunk},Nothing}}(()->ReusableCache(Set{Thunk}, nothing, 1))
 
 "Marks `thunk` and all dependent thunks as failed."
