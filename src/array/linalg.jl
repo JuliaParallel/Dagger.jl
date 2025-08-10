@@ -66,3 +66,98 @@ function LinearAlgebra.ishermitian(A::DArray{T,2}) where T
 
     return all(fetch, to_check)
 end
+
+DMatrix{T}(::LinearAlgebra.UniformScaling, m::Int, n::Int, IBlocks::Blocks) where T = DMatrix(Matrix{T}(I, m, n), IBlocks)
+
+DMatrix{T}(::LinearAlgebra.UniformScaling, size::Tuple, IBlocks::Blocks) where T = DMatrix(Matrix{T}(I, size), IBlocks)
+
+function LinearAlgebra.inv(F::LU{T,<:DMatrix}) where T 
+    n = size(F, 1)
+    dest = DMatrix{T}(I, n, n, F.factors.partitioning)
+    LinearAlgebra.ldiv!(F, dest)
+    return dest
+end
+
+function LinearAlgebra.inv(A::LowerTriangular{T,<:DMatrix}) where T
+    S = typeof(LinearAlgebra.inv(oneunit(T)))
+    dest = DMatrix{S}(I, size(A), A.data.partitioning)
+    LinearAlgebra.ldiv!(convert(AbstractArray{S}, A), dest)
+    dest = LowerTriangular(dest)
+    return dest
+end
+
+function LinearAlgebra.inv(A::UpperTriangular{T,<:DMatrix}) where T
+    S = typeof(LinearAlgebra.inv(oneunit(T)))
+    dest = DMatrix{S}(I, size(A), A.data.partitioning)
+    LinearAlgebra.ldiv!(convert(AbstractArray{S}, A), dest)
+    dest = UpperTriangular(dest)
+    return dest
+end
+
+function LinearAlgebra.inv(A::UnitLowerTriangular{T,<:DMatrix}) where T
+    S = typeof(LinearAlgebra.inv(oneunit(T)))
+    dest = DMatrix{S}(I, size(A), A.data.partitioning)
+    LinearAlgebra.ldiv!(convert(AbstractArray{S}, A), dest)
+    dest = UnitLowerTriangular(dest)
+    return dest
+end
+
+function LinearAlgebra.inv(A::UnitUpperTriangular{T,<:DMatrix}) where T
+    S = typeof(LinearAlgebra.inv(oneunit(T)))
+    dest = DMatrix{S}(I, size(A), A.data.partitioning)
+    LinearAlgebra.ldiv!(convert(AbstractArray{S}, A), dest)
+    dest = UnitUpperTriangular(dest)
+    return dest
+end
+
+function LinearAlgebra.inv(A::DMatrix{T}) where T
+    n = LinearAlgebra.checksquare(A)
+    S = typeof(zero(T)/one(T))      # dimensionful
+    S0 = typeof(zero(T)/oneunit(T)) # dimensionless
+    dest = DMatrix{S0}(I, n, n, A.partitioning)
+    F = factorize(convert(AbstractMatrix{S}, A))
+    LinearAlgebra.ldiv!(F, dest)
+    return dest
+end
+
+
+function LinearAlgebra.ldiv!(A::LU{<:Any,<:DMatrix}, B::AbstractVecOrMat)
+    LinearAlgebra._apply_ipiv_rows!(A, B)
+    LinearAlgebra.ldiv!(UnitLowerTriangular(A.factors), B)
+    LinearAlgebra.ldiv!(UpperTriangular(A.factors), B)
+end
+
+function LinearAlgebra.ldiv!(A::Union{LowerTriangular{<:Any,<:DMatrix},UnitLowerTriangular{<:Any,<:DMatrix},UpperTriangular{<:Any,<:DMatrix},UnitUpperTriangular{<:Any,<:DMatrix}}, B::AbstractVecOrMat)
+    alpha = one(eltype(A))
+    trans = 'N'
+    diag = isa(A, UnitUpperTriangular) || isa(A, UnitLowerTriangular) ? 'U' : 'N'
+
+    if isa(A, UpperTriangular) || isa(A, UnitUpperTriangular)
+        uplo = 'U'
+    elseif isa(A, LowerTriangular) || isa(A, UnitLowerTriangular)
+        uplo = 'L'
+    end
+
+    dB = B isa DVecOrMat ? B : view(B, A.data.partitioning)
+
+    if isa(B, AbstractVector)
+        Dagger.trsv!(uplo, trans, diag, alpha, A.data, dB)
+    elseif isa(B, AbstractMatrix)
+        min_bsa = min(A.data.partitioning.blocksize...)
+        Dagger.maybe_copy_buffered(A.data => Blocks(min_bsa, min_bsa), dB=>Blocks(min_bsa, min_bsa)) do A, dB
+            Dagger.trsm!('L', uplo, trans, diag, alpha, A, dB) 
+        end
+    end
+end
+
+function LinearAlgebra.ldiv!(Y::DArray, A::DMatrix, B::DArray) 
+    LinearAlgebra.ldiv!(A, copyto!(Y, B))
+end
+
+function LinearAlgebra.ldiv!(A::DMatrix, B::DArray) 
+    LinearAlgebra.ldiv!(LinearAlgebra.lu(A), B)
+end
+
+function LinearAlgebra.ldiv!(C::DVecOrMat, A::Union{LowerTriangular{<:Any,<:DMatrix},UnitLowerTriangular{<:Any,<:DMatrix},UpperTriangular{<:Any,<:DMatrix},UnitUpperTriangular{<:Any,<:DMatrix}}, B::DVecOrMat)
+    LinearAlgebra.ldiv!(A, copyto!(C, B))
+end
