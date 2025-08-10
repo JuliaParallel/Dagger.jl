@@ -288,20 +288,29 @@ function aliasing(x::SubArray{T,N,A}) where {T,N,A<:Array}
         return UnknownAliasing()
     end
 end
-function will_alias(x::StridedAliasing{T,N,S}, y::StridedAliasing{T,N,S}) where {T,N,S}
+function will_alias(x::StridedAliasing{T1,N1,S1}, y::StridedAliasing{T2,N2,S2}) where {T1,T2,N1,N2,S1,S2}
+    # Check if the base pointers are the same
+    # FIXME: Conservatively incorrect via `unsafe_wrap` and friends
     if x.base_ptr != y.base_ptr
-        # FIXME: Conservatively incorrect via `unsafe_wrap` and friends
         return false
     end
 
-    for dim in 1:N
-        if ((x.base_inds[dim].stop) < (y.base_inds[dim].start) || (y.base_inds[dim].stop) < (x.base_inds[dim].start))
-            return false
+    if T1 === T2 && N1 == N2 && may_alias(x.base_ptr.space, y.base_ptr.space)
+        # Check if the base indices overlap
+        for dim in 1:N1
+            if ((x.base_inds[dim].stop) < (y.base_inds[dim].start) || (y.base_inds[dim].stop) < (x.base_inds[dim].start))
+                return false
+            end
         end
+        return true
+    else
+        return invoke(will_alias, Tuple{Any, Any}, x, y)
     end
-
-    return true
 end
+will_alias(x::StridedAliasing{T,N,S}, y::ContiguousAliasing{S}) where {T,N,S} =
+    x.base_ptr == y.span.ptr
+will_alias(x::ContiguousAliasing{S}, y::StridedAliasing{T,N,S}) where {T,N,S} =
+    will_alias(y, x)
 # FIXME: Upgrade Contiguous/StridedAlising to same number of dims
 
 struct TriangularAliasing{T,S} <: AbstractAliasing
