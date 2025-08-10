@@ -1,6 +1,6 @@
 import Base: ==, fetch
 
-export DArray, DVector, DMatrix, Blocks, AutoBlocks
+export DArray, DVector, DMatrix, DVecOrMat, Blocks, AutoBlocks
 export distribute
 
 
@@ -148,6 +148,7 @@ const WrappedDMatrix{T} = WrappedDArray{T,2}
 const WrappedDVector{T} = WrappedDArray{T,1}
 const DMatrix{T} = DArray{T,2}
 const DVector{T} = DArray{T,1}
+const DVecOrMat{T} = Union{DVector{T}, DMatrix{T}}
 
 # mainly for backwards-compatibility
 DArray{T, N}(domain, subdomains, chunks, partitioning, concat=cat) where {T,N} =
