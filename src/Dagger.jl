@@ -10,7 +10,7 @@ import MemPool: DRef, FileRef, poolget, poolset
 import Base: collect, reduce, view
 
 import LinearAlgebra
-import LinearAlgebra: Adjoint, BLAS, Diagonal, Bidiagonal, Tridiagonal, LAPACK, LowerTriangular, PosDefException, Transpose, UpperTriangular, UnitLowerTriangular, UnitUpperTriangular, diagind, ishermitian, issymmetric
+import LinearAlgebra: Adjoint, BLAS, Diagonal, Bidiagonal, Tridiagonal, LAPACK, LU, LowerTriangular, PosDefException, Transpose, UpperTriangular, UnitLowerTriangular, UnitUpperTriangular, diagind, ishermitian, issymmetric, I
 import Random
 import Random: AbstractRNG
 
@@ -108,6 +108,7 @@ include("array/sort.jl")
 include("array/linalg.jl")
 include("array/mul.jl")
 include("array/cholesky.jl")
+include("array/trsm.jl")
 include("array/lu.jl")
 
 import KernelAbstractions, Adapt
