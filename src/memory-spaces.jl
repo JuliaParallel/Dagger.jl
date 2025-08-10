@@ -134,6 +134,7 @@ equivalent_structure(x::AliasingWrapper, y::AliasingWrapper) =
     x.hash == y.hash || equivalent_structure(x.inner, y.inner)
 Base.hash(x::AliasingWrapper, h::UInt64) = hash(x.hash, h)
 Base.isequal(x::AliasingWrapper, y::AliasingWrapper) = x.hash == y.hash
+Base.:(==)(x::AliasingWrapper, y::AliasingWrapper) = x.hash == y.hash
 will_alias(x::AliasingWrapper, y::AliasingWrapper) =
     will_alias(x.inner, y.inner)
 
@@ -225,6 +226,8 @@ struct ContiguousAliasing{S} <: AbstractAliasing
     span::MemorySpan{S}
 end
 memory_spans(a::ContiguousAliasing{S}) where S = MemorySpan{S}[a.span]
+will_alias(x::ContiguousAliasing{S}, y::ContiguousAliasing{S}) where S =
+    will_alias(x.span, y.span)
 struct IteratedAliasing{T} <: AbstractAliasing
     x::T
 end
@@ -284,21 +287,31 @@ function aliasing(x::SubArray{T,N,A}) where {T,N,A<:Array}
         return UnknownAliasing()
     end
 end
-function will_alias(x::StridedAliasing{T,N,S}, y::StridedAliasing{T,N,S}) where {T,N,S}
+function will_alias(x::StridedAliasing{T1,N1,S1}, y::StridedAliasing{T2,N2,S2}) where {T1,T2,N1,N2,S1,S2}
+    # Check if the base pointers are the same
+    # FIXME: Conservatively incorrect via `unsafe_wrap` and friends
     if x.base_ptr != y.base_ptr
-        # FIXME: Conservatively incorrect via `unsafe_wrap` and friends
         return false
     end
 
-    for dim in 1:N
-        if ((x.base_inds[dim].stop) < (y.base_inds[dim].start) || (y.base_inds[dim].stop) < (x.base_inds[dim].start))
-            return false
+    if T1 === T2 && N1 == N2 && may_alias(x.base_ptr.space, y.base_ptr.space)
+        # Check if the base indices overlap
+        for dim in 1:N1
+            if ((x.base_inds[dim].stop) < (y.base_inds[dim].start) || (y.base_inds[dim].stop) < (x.base_inds[dim].start))
+                return false
+            end
         end
+        return true
+    else
+        return invoke(will_alias, Tuple{Any, Any}, x, y)
     end
-
-    return true
 end
-# FIXME: Upgrade Contiguous/StridedAlising to same number of dims
+# TODO: We need to validate that the StridedAliasing is actually a subview of the ContiguousAliasing
+will_alias(x::StridedAliasing{T,N,S}, y::ContiguousAliasing{S}) where {T,N,S} =
+    x.base_ptr == y.span.ptr
+will_alias(x::ContiguousAliasing{S}, y::StridedAliasing{T,N,S}) where {T,N,S} =
+    will_alias(y, x)
+# FIXME: Upgrade StridedAlisings to same number of dims
 
 struct TriangularAliasing{T,S} <: AbstractAliasing
     ptr::RemotePtr{Cvoid,S}
