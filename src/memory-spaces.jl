@@ -30,7 +30,7 @@ processors(space::CPURAMMemorySpace) =
 ### In-place Data Movement
 
 function unwrap(x::Chunk)
-    @assert root_worker_id(x.processor) == myid()
+    @assert x.handle.owner == myid()
     MemPool.poolget(x.handle)
 end
 move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::T, from::F) where {T,F} =
@@ -99,10 +99,13 @@ end
 RemotePtr{T}(addr::UInt, space::S) where {T,S} = RemotePtr{T,S}(addr, space)
 RemotePtr{T}(ptr::Ptr{V}, space::S) where {T,V,S} = RemotePtr{T,S}(UInt(ptr), space)
 RemotePtr{T}(ptr::Ptr{V}) where {T,V} = RemotePtr{T}(UInt(ptr), CPURAMMemorySpace(myid()))
+# FIXME: Don't hardcode CPURAMMemorySpace
+RemotePtr(addr::UInt) = RemotePtr{Cvoid}(addr, CPURAMMemorySpace(myid()))
 Base.convert(::Type{RemotePtr}, x::Ptr{T}) where T =
     RemotePtr(UInt(x), CPURAMMemorySpace(myid()))
 Base.convert(::Type{<:RemotePtr{V}}, x::Ptr{T}) where {V,T} =
     RemotePtr{V}(UInt(x), CPURAMMemorySpace(myid()))
+Base.convert(::Type{UInt}, ptr::RemotePtr) = ptr.addr
 Base.:+(ptr::RemotePtr{T}, offset::Integer) where T = RemotePtr{T}(ptr.addr + offset, ptr.space)
 Base.:-(ptr::RemotePtr{T}, offset::Integer) where T = RemotePtr{T}(ptr.addr - offset, ptr.space)
 function Base.isless(ptr1::RemotePtr, ptr2::RemotePtr)
@@ -116,12 +119,14 @@ struct MemorySpan{S}
 end
 MemorySpan(ptr::RemotePtr{Cvoid,S}, len::Integer) where S =
     MemorySpan{S}(ptr, UInt(len))
-
+MemorySpan{S}(addr::UInt, len::Integer) where S =
+    MemorySpan{S}(RemotePtr{Cvoid,S}(addr), UInt(len))
+Base.isless(a::MemorySpan, b::MemorySpan) = a.ptr < b.ptr
+Base.isempty(x::MemorySpan) = x.len == 0
 abstract type AbstractAliasing end
 memory_spans(::T) where T<:AbstractAliasing = throw(ArgumentError("Must define `memory_spans` for `$T`"))
 memory_spans(x) = memory_spans(aliasing(x))
 memory_spans(x, T) = memory_spans(aliasing(x, T))
-
 
 struct AliasingWrapper <: AbstractAliasing
     inner::AbstractAliasing
@@ -275,7 +280,7 @@ function aliasing(x::SubArray{T,N,A}) where {T,N,A<:Array}
         return StridedAliasing{T,ndims(x),S}(RemotePtr{Cvoid}(pointer(parent(x))),
                                              RemotePtr{Cvoid}(pointer(x)),
                                              parentindices(x),
-                                             size(x), strides(parent(x)))
+                                             size(x), strides(x))
     else
         # FIXME: Also ContiguousAliasing of container
         #return IteratedAliasing(x)
@@ -388,70 +393,35 @@ function will_alias(x_span::MemorySpan, y_span::MemorySpan)
     return x_span.ptr <= y_end && y_span.ptr <= x_end
 end
 
-struct ChunkView{N}
-    chunk::Chunk
-    slices::NTuple{N, Union{Int, AbstractRange{Int}, Colon}}
+### More space-efficient memory spans
+
+struct LocalMemorySpan
+    ptr::UInt
+    len::UInt
 end
+LocalMemorySpan(span::MemorySpan) = LocalMemorySpan(span.ptr.addr, span.len)
+Base.isempty(x::LocalMemorySpan) = x.len == 0
 
-function Base.view(c::Chunk, slices...)
-    if c.domain isa ArrayDomain
-        nd, sz = ndims(c.domain), size(c.domain)
-        nd == length(slices) || throw(DimensionMismatch("Expected $nd slices, got $(length(slices))"))
-
-        for (i, s) in enumerate(slices)
-            if s isa Int
-                1 ≤ s ≤ sz[i] || throw(ArgumentError("Index $s out of bounds for dimension $i (size $(sz[i]))"))
-            elseif s isa AbstractRange
-                isempty(s) && continue
-                1 ≤ first(s) ≤ last(s) ≤ sz[i] || throw(ArgumentError("Range $s out of bounds for dimension $i (size $(sz[i]))"))
-            elseif s === Colon()
-                continue
-            else
-                throw(ArgumentError("Invalid slice type $(typeof(s)) at dimension $i, Expected Type of Int, AbstractRange, or Colon"))
-            end
-        end
-    end
-
-    return ChunkView(c, slices)
+# FIXME: Store the length separately, since it's shared by all spans
+struct ManyMemorySpan{N}
+    spans::NTuple{N,LocalMemorySpan}
 end
+Base.isempty(x::ManyMemorySpan) = all(isempty, x.spans)
 
-Base.view(c::DTask, slices...) = view(fetch(c; raw=true), slices...)
-
-function aliasing(x::ChunkView{N}) where N
-    remotecall_fetch(root_worker_id(x.chunk.processor), x.chunk, x.slices) do x, slices
-        x = unwrap(x)
-        v = view(x, slices...)
-        return aliasing(v)
-    end
+struct ManyPair{N} <: Unsigned
+    pairs::NTuple{N,UInt}
 end
-memory_space(x::ChunkView) = memory_space(x.chunk)
-isremotehandle(x::ChunkView) = true
+Base.promote_rule(::Type{ManyPair}, ::Type{T}) where {T<:Integer} = ManyPair
+Base.convert(::Type{ManyPair{N}}, x::T) where {T<:Integer,N} = ManyPair(ntuple(i -> x, N))
+Base.convert(::Type{ManyPair}, x::ManyPair) = x
+Base.:+(x::ManyPair{N}, y::ManyPair{N}) where N = ManyPair(ntuple(i -> x.pairs[i] + y.pairs[i], N))
+Base.:-(x::ManyPair{N}, y::ManyPair{N}) where N = ManyPair(ntuple(i -> x.pairs[i] - y.pairs[i], N))
+Base.:-(x::ManyPair) = error("Can't negate a ManyPair")
+Base.:(==)(x::ManyPair, y::ManyPair) = x.pairs == y.pairs
+Base.isless(x::ManyPair, y::ManyPair) = x.pairs[1] < y.pairs[1]
+Base.:(<)(x::ManyPair, y::ManyPair) = x.pairs[1] < y.pairs[1]
+Base.string(x::ManyPair) = "ManyPair($(x.pairs))"
 
-#=
-function move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::ChunkView, from::ChunkView)
-    to_w = root_worker_id(to_space)
-    @assert to_w == myid()
-    to_raw = unwrap(to.chunk)
-    from_w = root_worker_id(from_space)
-    from_raw = to_w == from_w ? unwrap(from.chunk) : remotecall_fetch(f->copy(unwrap(f)), from_w, from.chunk)
-    from_view = view(from_raw, from.slices...)
-    to_view = view(to_raw, to.slices...)
-    move!(dep_mod, to_space, from_space, to_view, from_view)
-    return
-end
-=#
+ManyMemorySpan{N}(start::ManyPair{N}, len::ManyPair{N}) where N =
+    ManyMemorySpan{N}(ntuple(i -> LocalMemorySpan(start.pairs[i], len.pairs[i]), N))
 
-function move(from_proc::Processor, to_proc::Processor, slice::ChunkView)
-    if from_proc == to_proc
-        return view(unwrap(slice.chunk), slice.slices...)
-    else
-        # Need to copy the underlying data, so collapse the view
-        from_w = root_worker_id(from_proc)
-        data = remotecall_fetch(from_w, slice.chunk, slice.slices) do chunk, slices
-            copy(view(unwrap(chunk), slices...))
-        end
-        return move(from_proc, to_proc, data)
-    end
-end
-
-Base.fetch(slice::ChunkView) = view(fetch(slice.chunk), slice.slices...)

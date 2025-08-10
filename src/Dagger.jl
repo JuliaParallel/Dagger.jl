@@ -81,7 +81,13 @@ include("utils/caching.jl")
 include("sch/Sch.jl"); using .Sch
 
 # Data dependency task queue
-include("datadeps.jl")
+include("datadeps/aliasing.jl")
+include("datadeps/chunkview.jl")
+include("datadeps/interval_tree.jl")
+include("datadeps/remainders.jl")
+include("datadeps/queue.jl")
+
+# Stencils
 include("utils/haloarray.jl")
 include("stencil.jl")
 
