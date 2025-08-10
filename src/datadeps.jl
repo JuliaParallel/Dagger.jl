@@ -631,10 +631,12 @@ function generate_slot!(state::DataDepsState, dest_space, data, task)
     dest_space_args = get!(IdDict{Any,Any}, state.remote_args, dest_space)
     w = only(unique(map(get_parent, collect(processors(dest_space)))))
     if orig_space == dest_space
-        data_chunk = tochunk(data, from_proc, dest_space)
-        dest_space_args[data] = data_chunk
-        @assert memory_space(data_chunk) == orig_space
-        @assert processor(data_chunk) in processors(dest_space) || data isa Chunk && (processor(data) isa Dagger.OSProc || processor(data) isa Dagger.MPIOSProc)
+        with(MPI_UID=>task.uid) do
+            data_chunk = tochunk(data, from_proc, dest_space)
+            dest_space_args[data] = data_chunk
+            @assert memory_space(data_chunk) == orig_space
+            @assert processor(data_chunk) in processors(dest_space) || data isa Chunk && (processor(data) isa Dagger.OSProc || processor(data) isa Dagger.MPIOSProc)
+        end
     else
         ctx = Sch.eager_context()
         id = rand(Int)
