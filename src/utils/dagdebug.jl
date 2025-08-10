@@ -35,3 +35,28 @@ macro dagdebug(thunk, category, msg, args...)
         end
     end)
 end
+
+# FIXME: Calculate fast-growth based on clock time, not iteration
+const OPCOUNTER_CATEGORIES = Symbol[]
+const OPCOUNTER_FAST_GROWTH_THRESHOLD = Ref(10_000_000)
+struct OpCounter
+    value::Threads.Atomic{Int}
+end
+OpCounter() = OpCounter(Threads.Atomic{Int}(0))
+macro opcounter(category, count=1)
+    cat_sym = category.value
+    @gensym old
+    opcounter_sym = Symbol(:OPCOUNTER_, cat_sym)
+    if !isdefined(__module__, opcounter_sym)
+        __module__.eval(:(#=const=# $opcounter_sym = OpCounter()))
+    end
+    esc(quote
+        if $(QuoteNode(cat_sym)) in $OPCOUNTER_CATEGORIES
+            $old = Threads.atomic_add!($opcounter_sym.value, Int($count))
+            if $old > 1 && (mod1($old, $OPCOUNTER_FAST_GROWTH_THRESHOLD[]) == 1 || $count > $OPCOUNTER_FAST_GROWTH_THRESHOLD[])
+                println("Fast-growing counter: $($(QuoteNode(cat_sym))) = $($old)")
+            end
+        end
+    end)
+end
+opcounter(mod::Module, category::Symbol) = getfield(mod, Symbol(:OPCOUNTER_, category)).value[]
