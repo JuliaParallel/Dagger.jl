@@ -10,7 +10,7 @@ import MemPool: DRef, FileRef, poolget, poolset
 import Base: collect, reduce, view
 import NextLA
 import LinearAlgebra
-import LinearAlgebra: Adjoint, BLAS, Diagonal, Bidiagonal, Tridiagonal, LAPACK, LU, LowerTriangular, PosDefException, Transpose, UpperTriangular, UnitLowerTriangular, UnitUpperTriangular, Cholesky, diagind, ishermitian, issymmetric, I
+import LinearAlgebra: Adjoint, BLAS, Diagonal, Bidiagonal, Tridiagonal, LAPACK, LU, LowerTriangular, PosDefException, Transpose, UpperTriangular, UnitLowerTriangular, UnitUpperTriangular, diagind, ishermitian, issymmetric, I
 import Random
 import Random: AbstractRNG
 

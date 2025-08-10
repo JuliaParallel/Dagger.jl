@@ -1,4 +1,5 @@
-function trsv!(uplo::Char, trans::Char, diag::Char, alpha::T, A::DMatrix{T}, B::DVector{T}) where T
+function trsv!(uplo::Char, trans::Char, diag::Char, alpha::T, A::DArray{T,2}, B::AbstractArray{T,1}) where T
+
     zone = one(T)
     mzone = -one(T)
 
@@ -23,12 +24,12 @@ function trsv!(uplo::Char, trans::Char, diag::Char, alpha::T, A::DMatrix{T}, B::
                         Dagger.@spawn BLAS.gemv!('N', mzone, In(Ac[i, k]), In(Bc[k]), lalpha, InOut(Bc[i]))
                     end
                 end
-            elseif trans == 'T' || trans == 'C'
+            elseif trans == 'T'
                 for k in 1:Bnt
                     lalpha = (k == 1) ? alpha : zone
-                    Dagger.@spawn BLAS.trsv!('U', trans, diag, In(Ac[k, k]), InOut(Bc[k]))
+                    Dagger.@spawn BLAS.trsv!('U', 'T', diag, In(Ac[k, k]), InOut(Bc[k]))
                     for i in k+1:Bnt
-                        Dagger.@spawn BLAS.gemv!(trans, mzone, In(Ac[k, i]), In(Bc[i]), lalpha, InOut(Bc[k]))
+                        Dagger.@spawn BLAS.gemv!('T', mzone, In(Ac[k, i]), In(Bc[i]), lalpha, InOut(Bc[k]))
                     end
                 end
             end
@@ -41,12 +42,12 @@ function trsv!(uplo::Char, trans::Char, diag::Char, alpha::T, A::DMatrix{T}, B::
                         Dagger.@spawn BLAS.gemv!('N', mzone, In(Ac[i, k]), In(Bc[k]), lalpha, InOut(Bc[i]))
                     end
                 end
-            elseif trans == 'T' || trans == 'C'
+            elseif trans == 'T'
                 for k in reverse(1:Bnt)
                     lalpha = (k == Bnt) ? alpha : zone
-                    Dagger.@spawn BLAS.trsv!('L', trans, diag, In(Ac[k, k]), InOut(Bc[k]))
+                    Dagger.@spawn BLAS.trsv!('L', 'T', diag, In(Ac[k, k]), InOut(Bc[k]))
                     for i in 1:k-1
-                        Dagger.@spawn BLAS.gemv!(trans, mzone, In(Ac[k, i]), In(Bc[i]), lalpha, InOut(Bc[k]))
+                        Dagger.@spawn BLAS.gemv!('T', mzone, In(Ac[k, i]), In(Bc[i]), lalpha, InOut(Bc[k]))
                     end
                 end
             end
@@ -56,7 +57,8 @@ function trsv!(uplo::Char, trans::Char, diag::Char, alpha::T, A::DMatrix{T}, B::
 
 end
 
-function trsm!(side::Char, uplo::Char, trans::Char, diag::Char, alpha::T, A::DMatrix{T}, B::DVecOrMat{T}) where T
+function trsm!(side::Char, uplo::Char, trans::Char, diag::Char, alpha::T, A::DArray{T,2}, B::DArray{T,2}) where T
+   
     zone = one(T)
     mzone = -one(T)
 
@@ -100,7 +102,7 @@ function trsm!(side::Char, uplo::Char, trans::Char, diag::Char, alpha::T, A::DMa
                             end
                         end
                     end
-                elseif trans == 'T' || trans == 'C'
+                elseif trans == 'T'
                     for k in range(1, Bmt)
                         lalpha = k == 1 ? alpha : zone;
                         for n in range(1, Bnt)
@@ -108,7 +110,7 @@ function trsm!(side::Char, uplo::Char, trans::Char, diag::Char, alpha::T, A::DMa
                         end
                         for m in range(k+1, Bmt)
                             for n in range(1, Bnt)
-                                Dagger.@spawn BLAS.gemm!(trans, 'N', mzone, In(Ac[k, m]), In(Bc[k, n]), lalpha, InOut(Bc[m, n]))
+                                Dagger.@spawn BLAS.gemm!('T', 'N', mzone, In(Ac[k, m]), In(Bc[k, n]), lalpha, InOut(Bc[m, n]))
                             end
                         end
                     end
@@ -126,7 +128,7 @@ function trsm!(side::Char, uplo::Char, trans::Char, diag::Char, alpha::T, A::DMa
                             end
                         end
                     end
-                elseif trans == 'T' || trans == 'C'
+                elseif trans == 'T'
                     for k in range(1, Bmt)
                         lalpha = k == 1 ? alpha : zone;
                         for n in range(1, Bnt)
@@ -134,7 +136,7 @@ function trsm!(side::Char, uplo::Char, trans::Char, diag::Char, alpha::T, A::DMa
                         end
                         for m in range(k+1, Bmt)
                             for n in range(1, Bnt)
-                                Dagger.@spawn BLAS.gemm!(trans, 'N', mzone, In(Ac[(Bmt-k)+1, (Bmt-m)+1]), In(Bc[(Bmt-k)+1, n]), lalpha, InOut(Bc[(Bmt-m)+1, n]))
+                                Dagger.@spawn BLAS.gemm!('T', 'N', mzone, In(Ac[(Bmt-k)+1, (Bmt-m)+1]), In(Bc[(Bmt-k)+1, n]), lalpha, InOut(Bc[(Bmt-m)+1, n]))
                             end
                         end
                     end
@@ -154,12 +156,12 @@ function trsm!(side::Char, uplo::Char, trans::Char, diag::Char, alpha::T, A::DMa
                             end
                         end
                     end
-                elseif trans == 'T' || trans == 'C'
+                elseif trans == 'T'
                     for k in range(1, Bnt)
                         for m in range(1, Bmt)
                             Dagger.@spawn BLAS.trsm!(side, uplo, trans, diag, alpha, In(Ac[(Bnt-k)+1, (Bnt-k)+1]), InOut(Bc[m, (Bnt-k)+1]))
                             for n in range(k+1, Bnt)
-                                Dagger.@spawn BLAS.gemm!('N', trans, mzone, In(Bc[m, (Bnt-k)+1]), In(Ac[(Bnt-n)+1, (Bnt-k)+1]), zone, InOut(Bc[m, (Bnt-n)+1]))
+                                Dagger.@spawn BLAS.gemm!('N', 'T', minvalpha, In(B[m, (Bnt-k)+1]), In(Ac[(Bnt-n)+1, (Bnt-k)+1]), zone, InOut(Bc[m, (Bnt-n)+1]))
                             end
                         end
                     end
@@ -175,12 +177,12 @@ function trsm!(side::Char, uplo::Char, trans::Char, diag::Char, alpha::T, A::DMa
                             end
                         end
                     end
-                elseif trans == 'T' || trans == 'C'
+                elseif trans == 'T'
                     for k in range(1, Bnt)
                         for m in range(1, Bmt)
                             Dagger.@spawn BLAS.trsm!(side, uplo, trans, diag, alpha, In(Ac[k, k]), InOut(Bc[m, k]))
                             for n in range(k+1, Bnt)
-                                Dagger.@spawn BLAS.gemm!('N', trans, mzone, In(Bc[m, k]), In(Ac[n, k]), zone, InOut(Bc[m, n]))
+                                Dagger.@spawn BLAS.gemm!('N', 'T', minvalpha, In(Bc[m, k]), In(Ac[n, k]), zone, InOut(Bc[m, n]))
                             end
                         end
                     end
