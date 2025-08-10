@@ -80,8 +80,7 @@ struct ComputeState
     waiting::OneToMany
     waiting_data::Dict{Union{Thunk,Chunk},Set{Thunk}}
     ready::Vector{Thunk}
-    cache::WeakKeyDict{Thunk, Any}
-    valid::WeakKeyDict{Thunk, Nothing}
+    valid::Dict{Thunk, Nothing}
     running::Set{Thunk}
     running_on::Dict{Thunk,OSProc}
     thunk_dict::Dict{Int, WeakThunk}
@@ -98,7 +97,7 @@ struct ComputeState
     halt::Base.Event
     lock::ReentrantLock
     futures::Dict{Thunk, Vector{ThunkFuture}}
-    errored::WeakKeyDict{Thunk,Bool}
+    errored::Dict{Thunk,Bool}
     thunks_to_delete::Set{Thunk}
     chan::RemoteChannel{Channel{AnyTaskResult}}
 end
@@ -110,8 +109,7 @@ function start_state(deps::Dict, node_order, chan)
                          OneToMany(),
                          deps,
                          Vector{Thunk}(undef, 0),
-                         WeakKeyDict{Thunk, Any}(),
-                         WeakKeyDict{Thunk, Nothing}(),
+                         Dict{Thunk, Nothing}(),
                          Set{Thunk}(),
                          Dict{Thunk,OSProc}(),
                          Dict{Int, WeakThunk}(),
@@ -128,7 +126,7 @@ function start_state(deps::Dict, node_order, chan)
                          Base.Event(),
                          ReentrantLock(),
                          Dict{Thunk, Vector{ThunkFuture}}(),
-                         WeakKeyDict{Thunk,Bool}(),
+                         Dict{Thunk,Bool}(),
                          Set{Thunk}(),
                          chan)
 
@@ -772,6 +770,7 @@ end
 function task_delete!(state, thunk)
     clear_result!(state, thunk)
     delete!(state.valid, thunk)
+    delete!(state.errored, thunk)
     delete!(state.thunk_dict, thunk.id)
 end
 
