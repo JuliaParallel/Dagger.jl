@@ -175,8 +175,9 @@ end
 Prepares the scheduler to schedule `thunk`. Will mark `thunk` as ready if
 its inputs are satisfied.
 """
-function reschedule_syncdeps!(state, thunk, seen=nothing)
-    Dagger.maybe_take_or_alloc!(RESCHEDULE_SYNCDEPS_SEEN_CACHE[], seen) do seen
+function reschedule_syncdeps!(state, thunk)
+    #Dagger.maybe_take_or_alloc!(RESCHEDULE_SYNCDEPS_SEEN_CACHE[], seen) do seen
+    seen = Vector{Thunk}()
         #=FIXME:REALLOC=#
         to_visit = Thunk[thunk]
         while !isempty(to_visit)
@@ -203,13 +204,14 @@ function reschedule_syncdeps!(state, thunk, seen=nothing)
             end
             w = get!(()->Set{Thunk}(), state.waiting, thunk)
             if thunk.options.syncdeps !== nothing
-                for input in thunk.options.syncdeps
-                    input = unwrap_weak_checked(input)
-                    istask(input) && input in seen && continue
+                syncdeps = WeakThunk[thunk.options.syncdeps...]
+                for weak_input in syncdeps
+                    input = unwrap_weak_checked(weak_input)::Thunk
+                    input in seen && continue
 
                     # Unseen
                     push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
-                    istask(input) || continue
+                    #istask(input) || continue
 
                     # Unseen task
                     if get(state.errored, input, false)
@@ -232,9 +234,10 @@ function reschedule_syncdeps!(state, thunk, seen=nothing)
                 end
             end
         end
-    end
+    #end
 end
-const RESCHEDULE_SYNCDEPS_SEEN_CACHE = TaskLocalValue{ReusableCache{Set{Thunk},Nothing}}(()->ReusableCache(Set{Thunk}, nothing, 1))
+# N.B. Vector is faster than Set for small collections (which are probably most common)
+const RESCHEDULE_SYNCDEPS_SEEN_CACHE = TaskLocalValue{ReusableCache{Vector{Thunk},Nothing}}(()->ReusableCache(Vector{Thunk}, nothing, 1))
 
 "Marks `thunk` and all dependent thunks as failed."
 function set_failed!(state, origin, thunk=origin)
