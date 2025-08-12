@@ -9,9 +9,9 @@ This is used to perform partial data copies that only update the "remainder" reg
 struct RemainderAliasing{S<:MemorySpace} <: AbstractAliasing
     space::S
     spans::Vector{Tuple{LocalMemorySpan,LocalMemorySpan}}
-    syncdeps::Set{Any}
+    syncdeps::Set{ThunkSyncdep}
 end
-RemainderAliasing(space::S, spans::Vector{Tuple{LocalMemorySpan,LocalMemorySpan}}, syncdeps::Set{Any}) where S =
+RemainderAliasing(space::S, spans::Vector{Tuple{LocalMemorySpan,LocalMemorySpan}}, syncdeps::Set{ThunkSyncdep}) where S =
     RemainderAliasing{S}(space, spans, syncdeps)
 
 memory_spans(ra::RemainderAliasing) = ra.spans
@@ -165,7 +165,7 @@ function compute_remainder_for_arg!(state::DataDepsState,
     remainder = IntervalTree{ManyMemorySpan{N}}(ManyMemorySpan{N}(ntuple(i -> target_ainfos[i][j], N)) for j in 1:nspans)
 
     # Create our tracker
-    tracker = Dict{MemorySpace,Tuple{Vector{Tuple{LocalMemorySpan,LocalMemorySpan}},Set{Any}}}()
+    tracker = Dict{MemorySpace,Tuple{Vector{Tuple{LocalMemorySpan,LocalMemorySpan}},Set{ThunkSyncdep}}}()
 
     # Walk backwards through the history of writes to this target
     # other_ainfo is the overlapping ainfo that was written to
@@ -208,7 +208,7 @@ function compute_remainder_for_arg!(state::DataDepsState,
         other_space_idx = something(findfirst(==(other_space), spaces))
         target_space_idx = something(findfirst(==(target_space), spaces))
         tracker_other_space = get!(tracker, other_space) do
-            (Vector{Tuple{LocalMemorySpan,LocalMemorySpan}}(), Set{Any}())
+            (Vector{Tuple{LocalMemorySpan,LocalMemorySpan}}(), Set{ThunkSyncdep}())
         end
         schedule_remainder!(tracker_other_space[1], other_space_idx, target_space_idx, remainder, other_many_spans)
         get_read_deps!(state, other_space, other_ainfo, write_num, tracker_other_space[2])

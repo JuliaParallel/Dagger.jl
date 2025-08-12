@@ -43,7 +43,7 @@ Base.@kwdef mutable struct Options
     get_result::Union{Bool,Nothing} = nothing
     meta::Union{Bool,Nothing} = nothing
 
-    syncdeps::Union{Set{Any},Nothing} = nothing
+    syncdeps::Union{Set{ThunkSyncdep},Nothing} = nothing
 
     time_util::Union{Dict{Type,Any},Nothing} = nothing
     alloc_util::Union{Dict{Type,UInt64},Nothing} = nothing
