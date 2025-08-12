@@ -490,7 +490,7 @@ function _get_write_deps!(state::DataDepsState, dest_space::MemorySpace, ainfo::
         other_task, other_write_num = other_task_write_num
         write_num == other_write_num && continue
         @dagdebug nothing :spawn_datadeps_sync "Sync with writer via $ainfo -> $other_ainfo"
-        push!(syncdeps, other_task)
+        push!(syncdeps, ThunkSyncdep(other_task))
     end
 end
 function _get_read_deps!(state::DataDepsState, dest_space::MemorySpace, ainfo::AbstractAliasing, write_num, syncdeps)
@@ -501,7 +501,7 @@ function _get_read_deps!(state::DataDepsState, dest_space::MemorySpace, ainfo::A
         for (other_task, other_write_num) in other_tasks
             write_num == other_write_num && continue
             @dagdebug nothing :spawn_datadeps_sync "Sync with reader via $ainfo -> $other_ainfo"
-            push!(syncdeps, other_task)
+            push!(syncdeps, ThunkSyncdep(other_task))
         end
     end
 end

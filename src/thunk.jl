@@ -4,7 +4,7 @@ const ID_COUNTER = Threads.Atomic{Int}(1)
 next_id() = Threads.atomic_add!(ID_COUNTER, 1)
 
 const EMPTY_ARGS = Argument[]
-const EMPTY_SYNCDEPS = Set{Any}()
+const EMPTY_SYNCDEPS = Set{ThunkSyncdep}()
 Base.@kwdef mutable struct ThunkSpec
     fargs::Vector{Argument} = EMPTY_ARGS
     id::Int = 0
@@ -100,12 +100,12 @@ function Thunk(f, xs...;
     end
     spec.options = options::Options
     if options.syncdeps === nothing
-        options.syncdeps = Set{Any}()
+        options.syncdeps = Set{ThunkSyncdep}()
     end
     syncdeps_set = options.syncdeps
     for idx in 2:length(spec.fargs)
         x = value(spec.fargs[idx])
-        if is_task_or_chunk(x)
+        if istask(x)
             push!(syncdeps_set, x)
         end
     end
@@ -235,12 +235,11 @@ istask(::WeakThunk) = true
 task_id(t::WeakThunk) = task_id(unwrap_weak_checked(t))
 unwrap_weak(t::WeakThunk) = t.x.value
 unwrap_weak(t) = t
-function unwrap_weak_checked(t::WeakThunk)
-    t = unwrap_weak(t)
-    @assert t !== nothing
-    t
+function unwrap_weak_checked(t)
+    t_val = unwrap_weak(t)
+    @assert !isweak(t) || t_val !== nothing
+    return t_val
 end
-unwrap_weak_checked(t) = t
 wrap_weak(t::Thunk) = WeakThunk(t)
 wrap_weak(t::WeakThunk) = t
 wrap_weak(t) = t
@@ -250,6 +249,8 @@ isweak(t) = true
 Base.show(io::IO, t::WeakThunk) = (print(io, "~"); Base.show(io, t.x.value))
 Base.convert(::Type{WeakThunk}, t::Thunk) = WeakThunk(t)
 chunktype(t::WeakThunk) = chunktype(unwrap_weak_checked(t))
+Base.convert(::Type{ThunkSyncdep}, t::WeakThunk) = ThunkSyncdep(nothing, t)
+ThunkSyncdep(t::WeakThunk) = ThunkSyncdep(nothing, t)
 
 "A summary of the data contained in a Thunk, which can be safely serialized."
 struct ThunkSummary
