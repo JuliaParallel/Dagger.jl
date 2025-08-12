@@ -858,7 +858,7 @@ function execute!(proc::MPIProcessor, world::UInt64, f, args...; kwargs...)
         if islocal
             T = typeof(result)
             space = memory_space(result, proc)::MPIMemorySpace
-            T_space = (T, space)
+            T_space = (T, space.innerSpace)
             bcast_send_yield(T_space, proc.comm, proc.rank, tag_space)
             return tochunk(result, proc, space)
         else
