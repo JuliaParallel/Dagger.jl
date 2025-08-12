@@ -778,8 +778,8 @@ function execute!(proc::MPIProcessor, world::UInt64, f, args...; kwargs...)
         else
             #T = recv_yield(proc.comm, proc.rank, tag_T)
             #innerSpace = recv_yield(proc.comm, proc.rank, tag_space)
-            T, innerSpace = recv_yield(proc.comm, proc.rank, tag_space)
-            space = MPIMemorySpace(innerSpace, proc.comm, proc.rank)
+            T, outspace = recv_yield(proc.comm, proc.rank, tag_space)
+            space = MPIMemorySpace(outspace.innerSpace, proc.comm, proc.rank)
             #= FIXME: If we get a bad result (something non-concrete, or Union{}),
             # we should bcast the actual type
             @warn "FIXME: Kwargs" maxlog=1
