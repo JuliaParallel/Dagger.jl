@@ -33,8 +33,7 @@ function compatible_processors(scope::AbstractScope, procs::Vector{<:Processor})
         gproc_scope = ProcessScope(gproc)
         if !isa(constrain(scope, gproc_scope), InvalidScope)
             for proc in get_processors(gproc)
-                proc_scope = ExactScope(proc)
-                if !isa(constrain(scope, proc_scope), InvalidScope)
+                if proc_in_scope(proc, scope)
                     push!(compat_procs, proc)
                 end
             end
