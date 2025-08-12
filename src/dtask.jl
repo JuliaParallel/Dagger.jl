@@ -106,6 +106,13 @@ function Base.show(io::IO, t::DTask)
     print(io, "DTask ($status)")
 end
 istask(t::DTask) = true
+function Base.convert(::Type{ThunkSyncdep}, task::Dagger.DTask)
+    tid = lock(Sch.EAGER_ID_MAP) do id_map
+        id_map[task.uid]
+    end
+    ThunkSyncdep(ThunkID(tid, task.thunk_ref))
+end
+ThunkSyncdep(task::DTask) = convert(ThunkSyncdep, task)
 
 const EAGER_ID_COUNTER = Threads.Atomic{UInt64}(1)
 function eager_next_id()
