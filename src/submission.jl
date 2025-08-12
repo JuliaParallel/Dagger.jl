@@ -82,7 +82,7 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
         old_fargs_cleanup = @reuse_defer_cleanup empty!(old_fargs)
         append!(old_fargs, Iterators.map(copy, fargs))
 
-        syncdeps_vec = @reusable_vector :eager_submit_interal!_syncdeps_vec Any nothing 32
+        syncdeps_vec = @reusable_vector :eager_submit_interal!_syncdeps_vec ThunkSyncdep ThunkSyncdep() 32
         syncdeps_vec_cleanup = @reuse_defer_cleanup empty!(syncdeps_vec)
         if options.syncdeps !== nothing
             append!(syncdeps_vec, options.syncdeps)
@@ -128,27 +128,15 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
             end
             # TODO: Iteration protocol would be faster
             for idx in 1:length(syncdeps_vec)
-                dep = syncdeps_vec[idx]
-                if dep isa DTask
-                    tid = if haskey(id_map, dep.uid)
-                        id_map[dep.uid]
-                    else
-                        uid_to_tid[dep.uid]
-                    end
-                    @lock state.lock begin
-                        @inbounds syncdeps_vec[idx] = state.thunk_dict[tid]
-                    end
-                elseif dep isa Sch.ThunkID
-                    tid = dep.id
-                    @lock state.lock begin
-                        @inbounds syncdeps_vec[idx] = state.thunk_dict[tid]
-                    end
-                end
+                dep = syncdeps_vec[idx]::ThunkSyncdep
+                @assert dep.id !== nothing && dep.thunk === nothing
+                thunk = @lock state.lock state.thunk_dict[dep.id.id]
+                @inbounds syncdeps_vec[idx] = ThunkSyncdep(thunk)
             end
         end
         if !isempty(syncdeps_vec) || any(arg->istask(value(arg)), fargs)
             if options.syncdeps === nothing
-                options.syncdeps = Set{Any}()
+                options.syncdeps = Set{ThunkSyncdep}()
             else
                 empty!(options.syncdeps)
             end
@@ -158,7 +146,7 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
             end
             for arg in fargs
                 if istask(value(arg))
-                    push!(syncdeps, value(arg))
+                    push!(syncdeps, ThunkSyncdep(value(arg)))
                 end
             end
         end
@@ -214,6 +202,7 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
                 end
             end
 
+            @assert options.syncdeps === nothing || all(dep->dep isa Dagger.ThunkSyncdep && dep.thunk isa Dagger.WeakThunk, options.syncdeps)
             @maybelog ctx timespan_finish(ctx, :add_thunk, (;thunk_id=id), (;f=fargs[1], args=fargs[2:end], options, uid))
 
             return thunk_id
@@ -290,22 +279,6 @@ function eager_process_args_submission_to_local!(id_map, spec_pairs::Vector{Pair
         eager_process_args_submission_to_local!(id_map, spec_pair)
     end
 end
-function eager_process_options_submission_to_local!(id_map, options::Options)
-    if options.syncdeps !== nothing
-        raw_syncdeps = options.syncdeps
-        syncdeps = Set{Any}()
-        for raw_dep in raw_syncdeps
-            if raw_dep isa DTask
-                push!(syncdeps, Sch.ThunkID(id_map[raw_dep.uid], raw_dep.thunk_ref))
-            elseif raw_dep isa Sch.ThunkID
-                push!(syncdeps, raw_dep)
-            else
-                error("Invalid syncdep type: $(typeof(raw_dep))")
-            end
-        end
-        options.syncdeps = syncdeps
-    end
-end
 
 function DTaskMetadata(spec::DTaskSpec)
     f = value(spec.fargs[1])
@@ -332,7 +305,6 @@ function eager_launch!((spec, task)::Pair{DTaskSpec,DTask})
     # Lookup DTask -> ThunkID
     lock(Sch.EAGER_ID_MAP) do id_map
         eager_process_args_submission_to_local!(id_map, spec=>task)
-        eager_process_options_submission_to_local!(id_map, spec.options)
     end
 
     # Submit the task

@@ -142,14 +142,10 @@ function schedule_dependents!(state, thunk, failed)
     end
     ctr = 0
     for dep in state.waiting_data[thunk]
-        @dagdebug dep :schedule "Checking dependent"
         dep_isready = false
         if haskey(state.waiting, dep)
             set = state.waiting[dep]
             thunk in set && pop!(set, thunk)
-            if length(set) > 0
-                @dagdebug dep :schedule "Dependent has $(length(set)) upstreams"
-            end
             dep_isready = isempty(set)
             if dep_isready
                 delete!(state.waiting, dep)
@@ -203,14 +199,11 @@ function reschedule_syncdeps!(state, thunk, seen=nothing)
             end
             w = get!(()->Set{Thunk}(), state.waiting, thunk)
             if thunk.options.syncdeps !== nothing
-                syncdeps = WeakThunk[thunk.options.syncdeps...]
-                for weak_input in syncdeps
-                    input = unwrap_weak_checked(weak_input)::Thunk
+                for input in Dagger.syncdeps_iterator(thunk)
                     input in seen && continue
 
                     # Unseen
                     push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
-                    #istask(input) || continue
 
                     # Unseen task
                     if get(state.errored, input, false)
