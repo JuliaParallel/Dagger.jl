@@ -1,14 +1,6 @@
 export SchedulerHaltedException
 export sch_handle, halt!, exec!, get_dag_ids, add_thunk!
 
-"Identifies a thunk by its ID, and preserves the thunk in the scheduler."
-struct ThunkID
-    id::Int
-    ref::Union{DRef,Nothing}
-end
-ThunkID(id::Int) = ThunkID(id, nothing)
-Dagger.istask(::ThunkID) = true
-
 "A handle to the scheduler, used by dynamic thunks."
 struct SchedulerHandle
     thunk_id::ThunkID
