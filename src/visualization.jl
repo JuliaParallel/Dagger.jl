@@ -15,10 +15,10 @@ Returns a string representation of the logs of a task `t` and/or logs object `lo
 """
 function show_logs end
 
-show_logs(io::IO, logs, vizmode::Symbol; options...) =
-    show_logs(io, logs, Val{vizmode}(); options...)
+show_logs(io::IO, arg, vizmode::Symbol; options...) =
+    show_logs(io, arg, Val{vizmode}(); options...)
 show_logs(io::IO, t, logs, vizmode::Symbol; options...) =
-    show_logs(io, t, Val{vizmode}(); options...)
+    show_logs(io, t, logs, Val{vizmode}(); options...)
 show_logs(io::IO, ::T, ::Val{vizmode}; options...) where {T,vizmode} =
     throw(ArgumentError("show_logs: Task/logs type `$T` not supported for visualization mode `$(repr(vizmode))`"))
 show_logs(io::IO, ::T, ::Logs, ::Val{vizmode}; options...) where {T,Logs,vizmode} =
