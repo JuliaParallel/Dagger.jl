@@ -1,0 +1,20 @@
+name = "DaggerImGuiDash"
+uuid = "d9a9aedf-3684-4bd7-b6b6-001f8c61829c"
+authors = ["Julian P Samaroo <jpsamaroo@jpsamaroo.me>"]
+version = "0.1.0"
+
+[deps]
+CImGui = "5d785b6c-b76f-510e-a07c-3070796c7e87"
+CSyntax = "ea656a56-6ca6-5dda-bba5-7b6963a5f74c"
+GLFW = "f7f18e0c-5ee9-5ccd-a5bf-e8befd85ed98"
+ModernGL = "66fc600b-dfda-50eb-8b99-91cfa97b1301"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+TimespanLogging = "a526e669-04d3-4846-9525-c66122c55f63"
+
+[compat]
+CImGui = "1.82"
+CSyntax = "0.4"
+GLFW = "3"
+ModernGL = "1"
+TimespanLogging = "0.1"
+julia = "1"
