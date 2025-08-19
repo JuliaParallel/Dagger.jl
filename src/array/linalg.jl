@@ -122,10 +122,40 @@ end
 
 
 function LinearAlgebra.ldiv!(A::LU{<:Any,<:DMatrix}, B::AbstractVecOrMat)
-    LinearAlgebra._apply_ipiv_rows!(A, B)
+    # FIXME: Don't apply pivots for NoPivot
+    LinearAlgebra._apply_ipiv_rows!(A, B) #apply_ipiv_rows!(A.ipiv, B)
     LinearAlgebra.ldiv!(UnitLowerTriangular(A.factors), B)
     LinearAlgebra.ldiv!(UpperTriangular(A.factors), B)
 end
+#= Adapted from LinearAlgebra.jl
+function apply_ipiv_rows!(ipiv::DVector{Int}, B::AbstractVecOrMat)
+    ipivc = ipiv.chunks
+    offset = 0
+    incr = ipiv.partitioning.blocksize[1]
+    Dagger.spawn_datadeps() do
+        for ic in ipivc
+            Dagger.@spawn swap_ipiv_rows!(InOut(B), In(ic), offset)
+            offset += incr
+        end
+    end
+end
+function swap_ipiv_rows!(B::AbstractVecOrMat, ic::AbstractVector, offset::Int)
+    for raw_i in 1:length(ic)
+        i = raw_i + offset
+        if i != ic[i]
+            _swap_rows!(B, i, ic[i])
+        end
+    end
+end
+function swap_ipiv_rows!(B::AbstractVector, i::Integer, j::Integer)
+    B[i], B[j] = B[j], B[i]
+end
+function swap_ipiv_rows!(B::AbstractMatrix, i::Integer, j::Integer)
+    for col in 1:size(B, 2)
+        B[i,col], B[j,col] = B[j,col], B[i,col]
+    end
+end=#
+
 
 function LinearAlgebra.ldiv!(A::Union{LowerTriangular{<:Any,<:DMatrix},UnitLowerTriangular{<:Any,<:DMatrix},UpperTriangular{<:Any,<:DMatrix},UnitUpperTriangular{<:Any,<:DMatrix}}, B::AbstractVecOrMat)
     alpha = one(eltype(A))
@@ -145,7 +175,7 @@ function LinearAlgebra.ldiv!(A::Union{LowerTriangular{<:Any,<:DMatrix},UnitLower
     elseif isa(B, AbstractMatrix)
         min_bsa = min(A.data.partitioning.blocksize...)
         Dagger.maybe_copy_buffered(A.data => Blocks(min_bsa, min_bsa), dB=>Blocks(min_bsa, min_bsa)) do A, dB
-            Dagger.trsm!('L', uplo, trans, diag, alpha, A, dB) 
+            Dagger.trsm!('L', uplo, trans, diag, alpha, A, dB)
         end
     end
 end
