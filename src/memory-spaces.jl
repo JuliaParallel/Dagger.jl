@@ -323,13 +323,13 @@ function memory_spans(a::TriangularAliasing{T,S}) where {T,S}
     return spans
 end
 aliasing(x::UpperTriangular{T}) where T =
-    TriangularAliasing{T,CPURAMMemorySpace}(pointer(parent(x)), size(parent(x), 1), true, true)
+    TriangularAliasing{T,CPURAMMemorySpace}(RemotePtr{Cvoid}(pointer(parent(x))), size(parent(x), 1), true, true)
 aliasing(x::LowerTriangular{T}) where T =
-    TriangularAliasing{T,CPURAMMemorySpace}(pointer(parent(x)), size(parent(x), 1), false, true)
+    TriangularAliasing{T,CPURAMMemorySpace}(RemotePtr{Cvoid}(pointer(parent(x))), size(parent(x), 1), false, true)
 aliasing(x::UnitUpperTriangular{T}) where T =
-    TriangularAliasing{T,CPURAMMemorySpace}(pointer(parent(x)), size(parent(x), 1), true, false)
+    TriangularAliasing{T,CPURAMMemorySpace}(RemotePtr{Cvoid}(pointer(parent(x))), size(parent(x), 1), true, false)
 aliasing(x::UnitLowerTriangular{T}) where T =
-    TriangularAliasing{T,CPURAMMemorySpace}(pointer(parent(x)), size(parent(x), 1), false, false)
+    TriangularAliasing{T,CPURAMMemorySpace}(RemotePtr{Cvoid}(pointer(parent(x))), size(parent(x), 1), false, false)
 
 struct DiagonalAliasing{T,S} <: AbstractAliasing
     ptr::RemotePtr{Cvoid,S}
