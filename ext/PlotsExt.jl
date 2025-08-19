@@ -185,7 +185,7 @@ function Dagger.render_logs(logs::Dict, ::Val{:plots_gantt};
                 yticks=(1.5:(nrow(df) + 0.5), u),
                 xlabel="Time (seconds)", ylabel,
                 xlim=(0.0, (global_t_end - global_t_start) / 1e9),
-                legendalpha=0,
+                legendalpha=0, legend=:outertopright,
                 kwargs...)
 end
 
