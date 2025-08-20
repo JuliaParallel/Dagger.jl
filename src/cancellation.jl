@@ -129,8 +129,9 @@ function _cancel!(state, tid, force, graceful, halt_sch)
     wids = unique(map(root_worker_id, values(state.running_on)))
     for wid in wids
         remotecall_fetch(wid, tid, sch_uid, force) do _tid, sch_uid, force
-            Dagger.Sch.proc_states(sch_uid) do states
-                for (proc, state) in states
+            states = Dagger.Sch.proc_states(sch_uid)
+            MemPool.lock_read(states.lock) do
+                for (proc, state) in states.dict
                     istate = state.state
                     any_cancelled = false
                     @lock istate.queue begin

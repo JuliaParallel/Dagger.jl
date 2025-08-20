@@ -78,9 +78,7 @@ function thunk_yield(f)
         h = sch_handle()
         tls = Dagger.get_tls()
         proc = Dagger.task_processor()
-        proc_istate = proc_states(tls.sch_uid) do states
-            states[proc].state
-        end
+        proc_istate = proc_state(tls.sch_uid, proc).state
         task_occupancy = tls.task_spec.est_occupancy
 
         # Decrease our occupancy and inform the processor to reschedule
