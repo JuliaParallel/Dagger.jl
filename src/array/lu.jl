@@ -4,10 +4,9 @@ LinearAlgebra.lu!(A::DMatrix{T}, pivot::Union{LinearAlgebra.RowMaximum,LinearAlg
 
 function LinearAlgebra.lu(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
     A_copy = LinearAlgebra._lucopy(A, LinearAlgebra.lutype(T))
-    return LinearAlgebra.lu!(A_copy, LinearAlgebra.NoPivot(); check=check)
+    return LinearAlgebra.lu!(A_copy, LinearAlgebra.NoPivot(); check)
 end
 function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
-  
     check && LinearAlgebra.LAPACK.chkfinite(A)
 
     zone = one(T)
@@ -52,7 +51,7 @@ end
 function update_ipiv!(ipivl::AbstractVector{Int}, info::Ref{Int}, piv_idx::AbstractVector{Int}, piv_val::AbstractVector{T}, k::Int, nb::Int) where T
     max_piv_idx = LinearAlgebra.BLAS.iamax(piv_val)
     max_piv_val = piv_val[max_piv_idx]
-    abs_max_piv_val = max_piv_val isa Real ? abs(max_piv_val) : abs(real(max_piv_val)) + abs(imag(max_piv_val))    
+    abs_max_piv_val = max_piv_val isa Real ? abs(max_piv_val) : abs(real(max_piv_val)) + abs(imag(max_piv_val))
     if isapprox(abs_max_piv_val, zero(T); atol=eps(real(T)))
         info[] = k
     end
@@ -85,7 +84,7 @@ end
 
 function LinearAlgebra.lu(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
     A_copy = LinearAlgebra._lucopy(A, LinearAlgebra.lutype(T))
-    return LinearAlgebra.lu!(A_copy, LinearAlgebra.RowMaximum(); check=check, allowsingular=allowsingular)
+    return LinearAlgebra.lu!(A_copy, LinearAlgebra.RowMaximum(); check, allowsingular)
 end
 function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
     check && LinearAlgebra.LAPACK.chkfinite(A)
