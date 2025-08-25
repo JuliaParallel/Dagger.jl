@@ -159,6 +159,21 @@ Base.zeros(p::BlocksOrAuto, dims::Dims; assignment::AssignmentType = :arbitrary)
 Base.zeros(::AutoBlocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary) =
     zeros(auto_blocks(dims), eltype, dims; assignment)
 
+
+function SparseArrays.spzeros(p::Blocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
+    d = ArrayDomain(map(x->1:x, dims))
+    a = AllocateArray(eltype, spzeros, false, d, partition(p, d), p, assignment)
+    return _to_darray(a)
+end
+SparseArrays.spzeros(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) =
+    spzeros(p, T, dims; assignment)
+SparseArrays.spzeros(p::BlocksOrAuto, dims::Integer...; assignment::AssignmentType = :arbitrary) =
+    spzeros(p, Float64, dims; assignment)
+SparseArrays.spzeros(p::BlocksOrAuto, dims::Dims; assignment::AssignmentType = :arbitrary) =
+    spzeros(p, Float64, dims; assignment)
+SparseArrays.spzeros(::AutoBlocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary) =
+    spzeros(auto_blocks(dims), eltype, dims; assignment)
+
 function Base.zero(x::DArray{T,N}) where {T,N}
     dims = ntuple(i->x.domain.indexes[i].stop, N)
     sd = first(x.subdomains)

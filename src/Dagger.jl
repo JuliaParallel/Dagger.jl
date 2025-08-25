@@ -2,7 +2,7 @@ module Dagger
 
 import Serialization
 import Serialization: AbstractSerializer, serialize, deserialize
-import SparseArrays: sprand, SparseMatrixCSC
+import SparseArrays: SparseMatrixCSC, sprand, spzeros
 
 import MemPool
 import MemPool: DRef, FileRef, poolget, poolset
