@@ -124,28 +124,26 @@ function gemm_dagger!(
                         # A: NoTrans / B: NoTrans
                         for k in range(1, Ant)
                             mzone = k == 1 ? beta : T(1.0)
-                            Dagger.@spawn BLAS.gemm!(
+                            Dagger.@spawn LinearAlgebra.generic_matmatmul!(
+                                InOut(Cc[m, n]),
                                 transA,
                                 transB,
-                                alpha,
                                 In(Ac[m, k]),
                                 In(Bc[k, n]),
-                                mzone,
-                                InOut(Cc[m, n]),
+                                LinearAlgebra.MulAddMul(alpha, mzone),
                             )
                         end
                     else
                         # A: NoTrans / B: [Conj]Trans
                         for k in range(1, Ant)
                             mzone = k == 1 ? beta : T(1.0)
-                            Dagger.@spawn BLAS.gemm!(
+                            Dagger.@spawn LinearAlgebra.generic_matmatmul!(
+                                InOut(Cc[m, n]),
                                 transA,
                                 transB,
-                                alpha,
                                 In(Ac[m, k]),
-                                In(Bc[n, k]),
-                                mzone,
-                                InOut(Cc[m, n]),
+                                In(Bc[k, n]),
+                                LinearAlgebra.MulAddMul(alpha, mzone),
                             )
                         end
                     end
@@ -154,28 +152,26 @@ function gemm_dagger!(
                         # A: [Conj]Trans / B: NoTrans
                         for k in range(1, Amt)
                             mzone = k == 1 ? beta : T(1.0)
-                            Dagger.@spawn BLAS.gemm!(
+                            Dagger.@spawn LinearAlgebra.generic_matmatmul!(
+                                InOut(Cc[m, n]),
                                 transA,
                                 transB,
-                                alpha,
                                 In(Ac[k, m]),
                                 In(Bc[k, n]),
-                                mzone,
-                                InOut(Cc[m, n]),
+                                LinearAlgebra.MulAddMul(alpha, mzone),
                             )
                         end
                     else
                         # A: [Conj]Trans / B: [Conj]Trans
                         for k in range(1, Amt)
                             mzone = k == 1 ? beta : T(1.0)
-                            Dagger.@spawn BLAS.gemm!(
+                            Dagger.@spawn LinearAlgebra.generic_matmatmul!(
+                                InOut(Cc[m, n]),
                                 transA,
                                 transB,
-                                alpha,
                                 In(Ac[k, m]),
                                 In(Bc[n, k]),
-                                mzone,
-                                InOut(Cc[m, n]),
+                                LinearAlgebra.MulAddMul(alpha, mzone),
                             )
                         end
                     end
@@ -222,6 +218,7 @@ function syrk_dagger!(
 
     iscomplex = T <: Complex
     transs = iscomplex ? 'C' : 'T'
+    anti_transs = trans == 'N' ? transs : 'N'
 
     Dagger.spawn_datadeps() do
         for n in range(1, Cnt)
@@ -229,114 +226,57 @@ function syrk_dagger!(
                 # NoTrans
                 for k in range(1, Ant)
                     mzone = k == 1 ? real(beta) : one(real(T))
-                    if iscomplex
-                        Dagger.@spawn BLAS.herk!(
-                            uplo,
-                            trans,
-                            real(alpha),
-                            In(Ac[n, k]),
-                            mzone,
-                            InOut(Cc[n, n]),
-                        )
-                    else
-                        Dagger.@spawn BLAS.syrk!(
-                            uplo,
-                            trans,
-                            alpha,
-                            In(Ac[n, k]),
-                            mzone,
-                            InOut(Cc[n, n]),
-                        )
-                    end
+                    _alpha = iscomplex ? real(alpha) : alpha
+                    Dagger.@spawn LinearAlgebra.generic_matmatmul!(
+                        InOut(Cc[n, n]),
+                        trans,
+                        anti_transs,
+                        In(Ac[n, k]),
+                        In(Ac[n, k]),
+                        LinearAlgebra.MulAddMul(_alpha, mzone),
+                    )
                 end
-                if uplo == 'L'
-                    # NoTrans / Lower
-                    for m in range(n + 1, Cmt)
-                        for k in range(1, Ant)
-                            mzone = k == 1 ? beta : one(T)
-                            Dagger.@spawn BLAS.gemm!(
-                                trans,
-                                transs,
-                                alpha,
-                                In(Ac[m, k]),
-                                In(Ac[n, k]),
-                                mzone,
-                                InOut(Cc[m, n]),
-                            )
-                        end
-                    end
-                else
-                    # NoTrans / Upper
-                    for m in range(n + 1, Cmt)
-                        for k in range(1, Ant)
-                            mzone = k == 1 ? beta : one(T)
-                            Dagger.@spawn BLAS.gemm!(
-                                trans,
-                                transs,
-                                alpha,
-                                In(Ac[n, k]),
-                                In(Ac[m, k]),
-                                mzone,
-                                InOut(Cc[n, m]),
-                            )
-                        end
+                # NoTrans / Upper
+                for m in range(n + 1, Cmt)
+                    for k in range(1, Ant)
+                        mzone = k == 1 ? beta : one(T)
+                        Dagger.@spawn LinearAlgebra.generic_matmatmul!(
+                            InOut(Cc[n, m]),
+                            trans,
+                            transs,
+                            In(Ac[n, k]),
+                            In(Ac[m, k]),
+                            LinearAlgebra.MulAddMul(alpha, mzone),
+                        )
                     end
                 end
             else
                 # [Conj]Trans
                 for k in range(1, Amt)
                     mzone = k == 1 ? real(beta) : one(real(T))
-                    if iscomplex
-                        Dagger.@spawn BLAS.herk!(
-                            uplo,
-                            transs,
-                            real(alpha),
-                            In(Ac[k, n]),
-                            mzone,
-                            InOut(Cc[n, n]),
-                        )
-                    else
-                        Dagger.@spawn BLAS.syrk!(
-                            uplo,
-                            trans,
-                            alpha,
-                            In(Ac[k, n]),
-                            mzone,
-                            InOut(Cc[n, n]),
-                        )
-                    end
+                    _alpha = iscomplex ? real(alpha) : alpha
+                    _trans = iscomplex ? transs : trans
+                    Dagger.@spawn LinearAlgebra.generic_matmatmul!(
+                        InOut(Cc[n, n]),
+                        _trans,
+                        anti_transs,
+                        In(Ac[k, n]),
+                        In(Ac[k, n]),
+                        LinearAlgebra.MulAddMul(_alpha, mzone),
+                    )
                 end
-                if uplo == 'L'
-                    # [Conj]Trans / Lower
-                    for m in range(n + 1, Cmt)
-                        for k in range(1, Amt)
-                            mzone = k == 1 ? beta : one(T)
-                            Dagger.@spawn BLAS.gemm!(
-                                transs,
-                                'N',
-                                alpha,
-                                In(Ac[k, m]),
-                                In(Ac[k, n]),
-                                mzone,
-                                InOut(Cc[m, n]),
-                            )
-                        end
-                    end
-                else
-                    # [Conj]Trans / Upper
-                    for m in range(n + 1, Cmt)
-                        for k in range(1, Amt)
-                            mzone = k == 1 ? beta : one(T)
-                            Dagger.@spawn BLAS.gemm!(
-                                transs,
-                                'N',
-                                alpha,
-                                In(Ac[k, n]),
-                                In(Ac[k, m]),
-                                mzone,
-                                InOut(Cc[n, m]),
-                            )
-                        end
+                # [Conj]Trans / Upper
+                for m in range(n + 1, Cmt)
+                    for k in range(1, Amt)
+                        mzone = k == 1 ? beta : one(T)
+                        Dagger.@spawn LinearAlgebra.generic_matmatmul!(
+                            InOut(Cc[n, m]),
+                            transs,
+                            'N',
+                            In(Ac[k, n]),
+                            In(Ac[k, m]),
+                            LinearAlgebra.MulAddMul(alpha, mzone),
+                        )
                     end
                 end
             end
