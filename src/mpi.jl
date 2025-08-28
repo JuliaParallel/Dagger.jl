@@ -690,8 +690,7 @@ end
 #FIXME:try to think of a better move! scheme
 function execute!(proc::MPIProcessor, world::UInt64, f, args...; kwargs...)
     local_rank = MPI.Comm_rank(proc.comm)
-    tag_T = to_tag(hash(sch_handle().thunk_id.id, hash(:execute!, UInt(0))))
-    tag_space = to_tag(hash(sch_handle().thunk_id.id, hash(:execute!, UInt(1))))
+    tag = to_tag(hash(sch_handle().thunk_id.id, hash(:execute!, UInt(0))))
     islocal = local_rank == proc.rank
     inplace_move = f === move!
     result = nothing
@@ -706,13 +705,11 @@ function execute!(proc::MPIProcessor, world::UInt64, f, args...; kwargs...)
         # Handle communication ourselves
         if islocal
             T = typeof(result)
-            bcast_send_yield(T, proc.comm, proc.rank, tag_T)
             space = memory_space(result, proc)::MPIMemorySpace
-            bcast_send_yield(space.innerSpace, proc.comm, proc.rank, tag_space)
+            bcast_send_yield((T, space.innerSpace), proc.comm, proc.rank, tag)
             return tochunk(result, proc, space)
         else
-            T = recv_yield(proc.comm, proc.rank, tag_T)
-            innerSpace = recv_yield(proc.comm, proc.rank, tag_space)
+            T, innerSpace = recv_yield(proc.comm, proc.rank, tag)
             space = MPIMemorySpace(innerSpace, proc.comm, proc.rank)
             return tochunk(nothing, proc, space; type=T)
         end
