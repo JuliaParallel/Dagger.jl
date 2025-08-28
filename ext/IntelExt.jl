@@ -239,13 +239,13 @@ end
 =#
 
 # Task execution
-function Dagger.execute!(proc::oneArrayDeviceProc, f, args...; kwargs...)
+function Dagger.execute!(proc::oneArrayDeviceProc, world::UInt64, f, args...; kwargs...)
     @nospecialize f args kwargs
     tls = Dagger.get_tls()
     task = Threads.@spawn begin
         Dagger.set_tls!(tls)
         with_context!(proc)
-        result = Base.@invokelatest f(args...; kwargs...)
+        result = Base.invoke_in_world(world, f, args...; kwargs...)
         # N.B. Synchronization must be done when accessing result or args
         return result
     end

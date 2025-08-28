@@ -235,6 +235,6 @@ function _add_thunk!(ctx, state, task, tid, (f, args, options, future))
             push!(fargs, Dagger.Argument(pos, arg))
         end
     end
-    payload = Dagger.PayloadOne(UInt(0), future, fargs, _options, true)
+    payload = Dagger.PayloadOne(UInt(0), future, fargs, Base.get_world_counter(), _options, true)
     return Dagger.eager_submit_internal!(ctx, state, task, tid, payload)
 end
