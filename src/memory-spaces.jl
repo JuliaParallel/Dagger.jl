@@ -60,9 +60,12 @@ processors(space::CPURAMMemorySpace) =
 
 ### In-place Data Movement
 
-function unwrap(x::Chunk)
-    @assert x.handle.owner == myid()
-    MemPool.poolget(x.handle)
+function unwrap(x::Chunk; uniform::Bool=false)
+    @assert root_worker_id(x.handle) == myid() "Chunk $x is not owned by this process: $(root_worker_id(x.handle)) != $(myid())"
+    if x.handle isa DRef
+        return MemPool.poolget(x.handle)
+    end
+    return MemPool.poolget(x.handle; uniform)
 end
 move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::T, from::F) where {T,F} =
     throw(ArgumentError("No `move!` implementation defined for $F -> $T"))
@@ -259,15 +262,16 @@ end
 aliasing(::String) = NoAliasing() # FIXME: Not necessarily true
 aliasing(::Symbol) = NoAliasing()
 aliasing(::Type) = NoAliasing()
-aliasing(x::Chunk, T) = remotecall_fetch(root_worker_id(x.processor), x, T) do x, T
-    aliasing(unwrap(x), T)
-end
-aliasing(x::Chunk) = remotecall_fetch(root_worker_id(x.processor), x) do x
-    aliasing(unwrap(x))
-end
 aliasing(x::DTask, T) = aliasing(fetch(x; move_value=false, unwrap=false), T)
 aliasing(x::DTask) = aliasing(fetch(x; move_value=false, unwrap=false))
-aliasing(accel::DistributedAcceleration, x::Chunk, T) = aliasing(x, T) 
+function aliasing(accel::DistributedAcceleration, x::Chunk, T)
+    @assert x.handle isa DRef
+    return remotecall_fetch(root_worker_id(x.processor), x, T) do x, T
+        aliasing(unwrap(x), T)
+    end
+end
+aliasing(x::Chunk, T) = aliasing(unwrap(x), T)
+aliasing(x::Chunk) = aliasing(unwrap(x))
 
 struct ContiguousAliasing{S} <: AbstractAliasing
     span::MemorySpan{S}

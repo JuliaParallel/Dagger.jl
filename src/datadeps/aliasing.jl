@@ -322,9 +322,9 @@ struct DataDepsState
 end
 
 # N.B. arg_w must be the original argument wrapper, not a remote copy
-function aliasing!(state::DataDepsState, target_space::MemorySpace, arg_w::ArgumentWrapper, task)
+function aliasing!(state::DataDepsState, target_space::MemorySpace, arg_w::ArgumentWrapper)
     # Grab the remote copy of the argument, and calculate the ainfo
-    remote_arg = get_or_generate_slot!(state, target_space, arg_w.arg, task)
+    remote_arg = get_or_generate_slot!(state, target_space, arg_w.arg)
     remote_arg_w = ArgumentWrapper(remote_arg, arg_w.dep_mod)
 
     # Check if we already have the result cached
@@ -534,14 +534,6 @@ function add_reader!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::M
     push!(state.ainfos_readers[ainfo], task=>write_num)
 end
 
-function remotecall_endpoint(::Dagger.DistributedAcceleration, w, from_proc, to_proc, orig_space, dest_space, data, task)
-    return remotecall_fetch(w, from_proc, to_proc, data) do from_proc, to_proc, data
-        data_converted = move(from_proc, to_proc, data)
-        data_chunk = tochunk(data_converted, to_proc, dest_space)
-        return data_chunk
-    end
-end
-
 # FIXME: These should go in MPIExt.jl
 const MPI_TID = ScopedValue{Int64}(0)
 const MPI_UID = ScopedValue{Int64}(0)
@@ -551,7 +543,7 @@ const MPI_UID = ScopedValue{Int64}(0)
 isremotehandle(x) = false
 isremotehandle(x::DTask) = true
 isremotehandle(x::Chunk) = true
-function generate_slot!(state::DataDepsState, dest_space, data, task)
+function generate_slot!(state::DataDepsState, dest_space, data)
     if data isa DTask
         data = fetch(data; move_value=false, unwrap=false)
     end
@@ -565,16 +557,15 @@ function generate_slot!(state::DataDepsState, dest_space, data, task)
     ALIASED_OBJECT_CACHE[] = get!(Dict{AbstractAliasing,Chunk}, state.ainfo_backing_chunk, dest_space)
     if orig_space == dest_space && (data isa Chunk || !isremotehandle(data))
         # Fast path for local data that's already in a Chunk or not a remote handle needing rewrapping
+        task = DATADEPS_CURRENT_TASK[]
         data_chunk = with(MPI_UID=>task.uid) do
             tochunk(data, from_proc)
         end
     else
         ctx = Sch.eager_context()
         id = rand(Int)
-        error("Deal with this, combine remotecall_endpoint with move_rewrap")
         @maybelog ctx timespan_start(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data))
-        data_chunk = move_rewrap(from_proc, to_proc, data)
-        data_chunk = remotecall_endpoint(current_acceleration(), to_w, from_proc, to_proc, orig_space, dest_space, data, task)
+        data_chunk = move_rewrap(from_proc, to_proc, orig_space, dest_space, data)
         @maybelog ctx timespan_finish(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data=data_chunk))
     end
     @assert memory_space(data_chunk) == dest_space "space mismatch! $dest_space (dest) != $(memory_space(data_chunk)) (actual) ($(typeof(data)) (data) vs. $(typeof(data_chunk)) (chunk)), spaces ($orig_space -> $dest_space)"
@@ -589,33 +580,36 @@ function generate_slot!(state::DataDepsState, dest_space, data, task)
 
     return dest_space_args[data]
 end
-function get_or_generate_slot!(state, dest_space, data, task)
+function get_or_generate_slot!(state, dest_space, data)
     @assert !(data isa ArgumentWrapper)
     if !haskey(state.remote_args, dest_space)
         state.remote_args[dest_space] = IdDict{Any,Any}()
     end
     if !haskey(state.remote_args[dest_space], data)
-        return generate_slot!(state, dest_space, data, task)
+        return generate_slot!(state, dest_space, data)
     end
     return state.remote_args[dest_space][data]
 end
-function move_rewrap(from_proc::Processor, to_proc::Processor, data)
+function move_rewrap(from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, data)
     return aliased_object!(data) do data
-        to_w = root_worker_id(to_proc)
-        return remotecall_fetch(to_w, from_proc, to_proc, data) do from_proc, to_proc, data
-            data_converted = move(from_proc, to_proc, data)
-            return tochunk(data_converted, to_proc)
-        end
+        return remotecall_endpoint(identity, current_acceleration(), from_proc, to_proc, from_space, to_space, data)
+    end
+end
+function remotecall_endpoint(f, ::Dagger.DistributedAcceleration, from_proc, to_proc, orig_space, dest_space, data)
+    to_w = root_worker_id(to_proc)
+    return remotecall_fetch(to_w, from_proc, to_proc, dest_space, data) do from_proc, to_proc, dest_space, data
+        data_converted = f(move(from_proc, to_proc, data))
+        return tochunk(data_converted, to_proc, dest_space)
     end
 end
 const ALIASED_OBJECT_CACHE = TaskLocalValue{Union{Dict{AbstractAliasing,Chunk}, Nothing}}(()->nothing)
 @warn "Document these public methods" maxlog=1
 # TODO: Use state to cache aliasing() results
-function declare_aliased_object!(x; ainfo=aliasing(x, identity))
+function declare_aliased_object!(x; ainfo=aliasing(current_acceleration(), x, identity))
     cache = ALIASED_OBJECT_CACHE[]
     cache[ainfo] = x
 end
-function aliased_object!(x; ainfo=aliasing(x, identity))
+function aliased_object!(x; ainfo=aliasing(current_acceleration(), x, identity))
     cache = ALIASED_OBJECT_CACHE[]
     if haskey(cache, ainfo)
         y = cache[ainfo]
@@ -626,7 +620,7 @@ function aliased_object!(x; ainfo=aliasing(x, identity))
     end
     return y
 end
-function aliased_object!(f, x; ainfo=aliasing(x, identity))
+function aliased_object!(f, x; ainfo=aliasing(current_acceleration(), x, identity))
     cache = ALIASED_OBJECT_CACHE[]
     if haskey(cache, ainfo)
         y = cache[ainfo]
@@ -639,7 +633,7 @@ function aliased_object!(f, x; ainfo=aliasing(x, identity))
 end
 function aliased_object_unwrap!(x::Chunk)
     y = unwrap(x)
-    ainfo = aliasing(y, identity)
+    ainfo = aliasing(current_acceleration(), y, identity)
     return unwrap(aliased_object!(x; ainfo))
 end
 

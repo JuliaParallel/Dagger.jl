@@ -273,7 +273,7 @@ function enqueue_remainder_copy_to!(state::DataDepsState, dest_space::MemorySpac
 
     # Get the source and destination arguments
     arg_dest = state.remote_args[dest_space][arg_w.arg]
-    arg_source = get_or_generate_slot!(state, source_space, arg_w.arg, task)
+    arg_source = get_or_generate_slot!(state, source_space, arg_w.arg)
 
     # Create a copy task for the remainder
     remainder_syncdeps = Set{Any}()
@@ -317,7 +317,7 @@ function enqueue_remainder_copy_from!(state::DataDepsState, dest_space::MemorySp
 
     # Get the source and destination arguments
     arg_dest = state.remote_args[dest_space][arg_w.arg]
-    arg_source = get_or_generate_slot!(state, source_space, arg_w.arg, task)
+    arg_source = get_or_generate_slot!(state, source_space, arg_w.arg)
 
     # Create a copy task for the remainder
     remainder_syncdeps = Set{Any}()
@@ -348,7 +348,7 @@ function enqueue_copy_to!(state::DataDepsState, dest_space::MemorySpace, arg_w::
 
     # Get the source and destination arguments
     arg_dest = state.remote_args[dest_space][arg_w.arg]
-    arg_source = get_or_generate_slot!(state, source_space, arg_w.arg, task)
+    arg_source = get_or_generate_slot!(state, source_space, arg_w.arg)
 
     # Create a copy task for the remainder
     copy_syncdeps = Set{Any}()
@@ -375,7 +375,7 @@ function enqueue_copy_from!(state::DataDepsState, dest_space::MemorySpace, arg_w
 
     # Get the source and destination arguments
     arg_dest = state.remote_args[dest_space][arg_w.arg]
-    arg_source = get_or_generate_slot!(state, source_space, arg_w.arg, task)
+    arg_source = get_or_generate_slot!(state, source_space, arg_w.arg)
 
     # Create a copy task for the remainder
     copy_syncdeps = Set{Any}()
@@ -394,7 +394,7 @@ function enqueue_copy_from!(state::DataDepsState, dest_space::MemorySpace, arg_w
 end
 
 # Main copy function for RemainderAliasing
-function move!(dep_mod::RemainderAliasing{S}, to_space::MemorySpace, from_space::MemorySpace, to::Chunk, from::Chunk) where S
+function move!(dep_mod::RemainderAliasing, to_space::MemorySpace, from_space::MemorySpace, to::Chunk, from::Chunk)
     # Get the source data for each span
     copies = remotecall_fetch(root_worker_id(from_space), dep_mod) do dep_mod
         copies = Vector{UInt8}[]

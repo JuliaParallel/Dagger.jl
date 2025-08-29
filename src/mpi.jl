@@ -305,6 +305,9 @@ mutable struct MPIRef
     innerRef::Union{DRef, Nothing}
     id::MPIRefID
 end
+root_worker_id(ref::MPIRef) = myid()
+@warn "Move this definition somewhere else" maxlog=1
+root_worker_id(ref::DRef) = ref.owner
 
 function check_uniform(ref::MPIRef)
     check_uniform(ref.rank)
@@ -608,7 +611,7 @@ end
 WeakChunk(c::Chunk{T,H}) where {T,H<:MPIRef} = WeakChunk(c.handle.rank, c.handle.id.id, WeakRef(c))
 
 function MemPool.poolget(ref::MPIRef; uniform::Bool=false)
-    @assert uniform || ref.rank == MPI.Comm_rank(ref.comm) "MPIRef rank mismatch"
+    @assert uniform || ref.rank == MPI.Comm_rank(ref.comm) "MPIRef rank mismatch: $(ref.rank) != $(MPI.Comm_rank(ref.comm))"
     if uniform
         tag = to_tag(hash(ref.id, hash(:poolget)))
         if ref.rank == MPI.Comm_rank(ref.comm)
@@ -624,29 +627,84 @@ function MemPool.poolget(ref::MPIRef; uniform::Bool=false)
 end
 fetch_handle(ref::MPIRef; uniform::Bool=false) = poolget(ref; uniform)
 
-function move!(dep_mod, dst::MPIMemorySpace, src::MPIMemorySpace, dstarg::Chunk, srcarg::Chunk)
-    @assert dstarg.handle isa MPIRef && srcarg.handle isa MPIRef "MPIRef expected"
-    @assert dstarg.handle.comm == srcarg.handle.comm "MPIRef comm mismatch"
-    @assert dstarg.handle.rank == dst.rank && srcarg.handle.rank == src.rank "MPIRef rank mismatch"
-    local_rank = MPI.Comm_rank(srcarg.handle.comm)
-    tag = to_tag(hash(dep_mod, hash(srcarg.handle.id, hash(dstarg.handle.id, hash(:move!)))))
-    @dagdebug nothing :mpi "[$local_rank][$tag] Moving from  $(src.rank)  to  $(dst.rank)\n"
-    if src.rank == dst.rank == local_rank
-        move!(dep_mod, dst.innerSpace, src.innerSpace, dstarg, srcarg)
+function move!(dep_mod, to_space::MPIMemorySpace, from_space::MPIMemorySpace, to::Chunk, from::Chunk)
+    @assert to.handle isa MPIRef && from.handle isa MPIRef "MPIRef expected"
+    @assert to.handle.comm == from.handle.comm "MPIRef comm mismatch"
+    @assert to.handle.rank == to_space.rank && from.handle.rank == from_space.rank "MPIRef rank mismatch"
+    local_rank = MPI.Comm_rank(from.handle.comm)
+    if to_space.rank == from_space.rank == local_rank
+        move!(dep_mod, to_space.innerSpace, from_space.innerSpace, to, from)
     else
-        if local_rank == src.rank
-            send_yield!(poolget(srcarg.handle; uniform=false), dst.comm, dst.rank, tag)
-        elseif local_rank == dst.rank
-            @dagdebug nothing :mpi "[$local_rank][$tag] Receiving from rank $(src.rank) with tag $tag, type of buffer: $(poolget(dstarg.handle; uniform=false))"
-            dstarg_val = poolget(dstarg.handle; uniform=false)
-            val, inplace = recv_yield!(dstarg_val, src.comm, src.rank, tag)
+        tag = to_tag(hash(dep_mod, hash(to.handle.id, hash(from.handle.id, hash(:move!)))))
+        @dagdebug nothing :mpi "[$local_rank][$tag] Moving from  $(from_space.rank)  to  $(to_space.rank)\n"
+        if local_rank == from_space.rank
+            send_yield!(poolget(from.handle; uniform=false), to_space.comm, to_space.rank, tag)
+        elseif local_rank == to_space.rank
+            @dagdebug nothing :mpi "[$local_rank][$tag] Receiving from rank $(from_space.rank) with tag $tag, type of buffer: $(poolget(to.handle; uniform=false))"
+            to_val = poolget(to.handle; uniform=false)
+            val, inplace = recv_yield!(to_val, from_space.comm, from_space.rank, tag)
             if !inplace
-                move!(dep_mod, dst.innerSpace, src.innerSpace, dstarg_val, val)
+                move!(dep_mod, to_space.innerSpace, from_space.innerSpace, to_val, val)
             end
         end
     end
-    @dagdebug nothing :mpi "[$local_rank][$tag] Finished moving from  $(src.rank)  to  $(dst.rank) successfuly\n"
+    @dagdebug nothing :mpi "[$local_rank][$tag] Finished moving from  $(from_space.rank)  to  $(to_space.rank) successfuly\n"
 end
+function move!(dep_mod::RemainderAliasing{<:MPIMemorySpace}, to_space::MPIMemorySpace, from_space::MPIMemorySpace, to::Chunk, from::Chunk)
+    @assert to.handle isa MPIRef && from.handle isa MPIRef "MPIRef expected"
+    @assert to.handle.comm == from.handle.comm "MPIRef comm mismatch"
+    @assert to.handle.rank == to_space.rank && from.handle.rank == from_space.rank "MPIRef rank mismatch"
+    local_rank = MPI.Comm_rank(from.handle.comm)
+    if to_space.rank == from_space.rank == local_rank
+        move!(dep_mod, to_space.innerSpace, from_space.innerSpace, to, from)
+    else
+        tag = to_tag(hash(dep_mod, hash(to.handle.id, hash(from.handle.id, hash(:move!)))))
+        @dagdebug nothing :mpi "[$local_rank][$tag] Moving from  $(from_space.rank)  to  $(to_space.rank)\n"
+        if local_rank == from_space.rank
+            # Get the source data for each span
+            len = sum(span_tuple->span_len(span_tuple[1]), dep_mod.spans)
+            copies = Vector{UInt8}(undef, len)
+            offset = 1
+            for (from_span, _) in dep_mod.spans
+                #GC.@preserve copy begin
+                    from_ptr = Ptr{UInt8}(from_span.ptr)
+                    to_ptr = Ptr{UInt8}(pointer(copies, offset))
+                    unsafe_copyto!(to_ptr, from_ptr, from_span.len)
+                    offset += from_span.len
+                #end
+            end
+
+            # Send the spans
+            send_yield(len, to_space.comm, to_space.rank, tag)
+            send_yield!(copies, to_space.comm, to_space.rank, tag; check_seen=false)
+            #send_yield(copies, to_space.comm, to_space.rank, tag)
+        elseif local_rank == to_space.rank
+            # Receive the spans
+            len = recv_yield(from_space.comm, from_space.rank, tag)
+            copies = Vector{UInt8}(undef, len)
+            recv_yield!(copies, from_space.comm, from_space.rank, tag)
+            #copies = recv_yield(from_space.comm, from_space.rank, tag)
+
+            # Copy the data into the destination object
+            #for (copy, (_, to_span)) in zip(copies, dep_mod.spans)
+            offset = 1
+            for (_, to_span) in dep_mod.spans
+                #GC.@preserve copy begin
+                    from_ptr = Ptr{UInt8}(pointer(copies, offset))
+                    to_ptr = Ptr{UInt8}(to_span.ptr)
+                    unsafe_copyto!(to_ptr, from_ptr, to_span.len)
+                    offset += to_span.len
+                #end
+            end
+
+            # Ensure that the data is visible
+            Core.Intrinsics.atomic_fence(:release)
+        end
+    end
+
+    return
+end
+
 
 move(::MPIOSProc, ::MPIProcessor, x::Union{Function,Type}) = x
 move(::MPIOSProc, ::MPIProcessor, x::Chunk{<:Union{Function,Type}}) = poolget(x.handle)
@@ -665,28 +723,32 @@ function move(src::MPIOSProc, dst::MPIProcessor, x::Chunk)
     end
 end
 
-function remotecall_endpoint(accel::Dagger.MPIAcceleration, w, from_proc, to_proc, orig_space, dest_space, data, task)
+function remotecall_endpoint(f, accel::Dagger.MPIAcceleration, from_proc, to_proc, orig_space, dest_space, data)
     loc_rank = MPI.Comm_rank(accel.comm)
+    task = DATADEPS_CURRENT_TASK[]
     with(MPI_UID=>task.uid) do
         if data isa Chunk
             tag = to_tag(hash(data.handle.id))
             if loc_rank == from_proc.rank == to_proc.rank
-                data_converted = move(to_proc, data)
+                data_converted = f(move(to_proc, data))
                 data_chunk = tochunk(data_converted, to_proc, dest_space)
             elseif loc_rank == to_proc.rank
                 data_moved = Dagger.recv_yield(accel.comm, orig_space.rank, tag)
-                data_converted = move(to_proc, data_moved)
+                data_converted = f(move(to_proc, data_moved))
                 data_chunk = tochunk(data_converted, to_proc, dest_space)
             elseif loc_rank == from_proc.rank
-                data_moved = move(from_proc, data)
+                data_moved = f(move(from_proc, data))
                 Dagger.send_yield(data_moved, accel.comm, to_proc.rank, tag)
                 data_chunk = tochunk(data_moved, to_proc, dest_space)
             else
                 T = move_type(from_proc, to_proc, chunktype(data))
+                if f !== identity
+                    error("Perform return type inference on f")
+                end
                 data_chunk = tochunk(nothing, to_proc, dest_space; type=T)
             end
         else
-            data_converted = move(from_proc, data)
+            data_converted = f(move(from_proc, data))
             data_chunk = tochunk(data_converted, to_proc, dest_space)
         end
         return data_chunk

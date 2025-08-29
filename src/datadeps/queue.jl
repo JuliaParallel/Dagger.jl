@@ -35,6 +35,8 @@ function enqueue!(queue::DataDepsTaskQueue, specs::Vector{Pair{DTaskSpec,DTask}}
     append!(queue.seen_tasks, specs)
 end
 
+const DATADEPS_CURRENT_TASK = TaskLocalValue{Union{DTask,Nothing}}(Returns(nothing))
+
 """
     spawn_datadeps(f::Base.Callable; traversal::Symbol=:inorder)
 
@@ -95,6 +97,7 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
             result = with_options(f; task_queue=queue)
             distribute_tasks!(queue)
         end
+        DATADEPS_CURRENT_TASK[] = nothing
         return result
     end
 end
@@ -191,6 +194,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     proc_idx = 1
     pressures = Dict{Processor,Int}()
     for (spec, task) in queue.seen_tasks[task_order]
+        DATADEPS_CURRENT_TASK[] = task
+
         # Populate all task dependencies
         populate_task_info!(state, spec, task)
 
@@ -376,7 +381,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             end
 
             # Is the source of truth elsewhere?
-            arg_remote = get_or_generate_slot!(state, our_space, arg, task)
+            arg_remote = get_or_generate_slot!(state, our_space, arg)
             for (arg_w, _, _) in arg_ws
                 dep_mod = arg_w.dep_mod
                 remainder = compute_remainder_for_arg!(state, our_space, arg_w, write_num)
