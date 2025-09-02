@@ -19,10 +19,10 @@ Extra events:
 - `tasktochunk::Bool`: Enables reporting of DTask-to-Chunk mappings
 - `profile::Bool`: Enables profiling of task execution; not currently recommended, as it adds significant overhead
 """
-function enable_logging!(;metrics::Bool=true,
+function enable_logging!(;metrics::Bool=false,
                           timeline::Bool=false,
-                          all_task_deps::Bool=false,
-                          tasknames::Bool=true,
+                          all_task_deps::Bool=true,
+                          tasknames::Bool=false,
                           taskfuncnames::Bool=false,
                           taskdeps::Bool=true,
                           taskargs::Bool=false,
@@ -105,7 +105,11 @@ of the outer `Dict` is keyed on worker ID, so `logs[1]` are the logs for worker
 Consider using `show_logs` or `render_logs` to generate a renderable display of
 these logs.
 """
-fetch_logs!() = TimespanLogging.get_logs!(Dagger.Sch.eager_context())
+
+
+get_logs!(accel::DistributedAcceleration, ml; only_local=only_local) = TimespanLogging.get_logs!(ml; only_local=only_local)
+
+fetch_logs!() = get_logs!(current_acceleration(), Dagger.Sch.eager_context().log_sink; only_local=false)
 
 # Convenience macros to reduce allocations when logging is disabled
 macro maybelog(ctx, ex)
@@ -117,8 +121,8 @@ macro maybelog(ctx, ex)
 end
 
 function logs_event_pairs(f, logs::Dict)
-    running_events = Dict{Tuple,Int}()
     for w in keys(logs)
+        running_events = Dict{Tuple,Int}()
         for idx in 1:length(logs[w][:core])
             kind = logs[w][:core][idx].kind
             category = logs[w][:core][idx].category

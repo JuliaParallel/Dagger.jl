@@ -81,9 +81,9 @@ include("argument.jl")
 include("queue.jl")
 include("thunk.jl")
 include("utils/fetch.jl")
+include("memory-spaces.jl")
 include("utils/logging.jl")
 include("submission.jl")
-include("memory-spaces.jl")
 
 # Chunk utilities
 include("utils/chunks.jl")
