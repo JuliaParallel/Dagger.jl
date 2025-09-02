@@ -412,7 +412,6 @@ function supports_inplace_mpi(value)
     end
 end
 function recv_yield!(buffer, comm, src, tag)
-    println("buffer recv: $buffer, type of buffer: $(typeof(buffer)), is in place? $(supports_inplace_mpi(buffer))")
     if !supports_inplace_mpi(buffer)
         return recv_yield(comm, src, tag), false
     end
@@ -421,7 +420,6 @@ function recv_yield!(buffer, comm, src, tag)
     warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
     timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
     rank = MPI.Comm_rank(comm)
-    Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Starting recv! from [$src]")
 
     # Ensure no other receiver is waiting
     our_event = Base.Event()
@@ -480,7 +478,6 @@ function recv_yield(comm, src, tag)
     warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
     timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
     rank = MPI.Comm_rank(comm)
-    Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Starting recv from [$src]")
 
     # Ensure no other receiver is waiting
     our_event = Base.Event()
@@ -792,6 +789,30 @@ function distribute(A::AbstractArray{T,N}, dist::Blocks{N}, accel::MPIAccelerati
     copyto!(DB, DA)
 
     return DB
+end
+
+function get_logs!(accel::MPIAcceleration, ml::TimespanLogging.MultiEventLog; only_local=false)
+    mls = TimespanLogging.get_state(ml)
+    sublogs = lock(TimespanLogging.event_log_lock) do
+        sublogs = Dict{Symbol,Vector}()
+        for name in keys(mls.consumers)
+            sublogs[name] = copy(mls.consumer_logs[name])
+            mls.consumer_logs[name] = []
+        end
+        sublogs
+    end
+    rank = MPI.Comm_rank(accel.comm)
+    if rank == 0 
+        logs = Dict{Int, Dict{Symbol,Vector}}()
+    end
+
+    logsvec = MPI.gather(sublogs, accel.comm)
+    if rank == 0
+        for (rnk, sublogs) in enumerate(logsvec)
+            logs[rnk] = sublogs
+        end
+        return logs
+    end
 end
 
 #=
