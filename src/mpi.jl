@@ -427,12 +427,10 @@ function supports_inplace_mpi(value)
 end
 function recv_yield!(buffer, comm, src, tag)
     rank = MPI.Comm_rank(comm)
-    #println("buffer recv: $buffer, type of buffer: $(typeof(buffer)), is in place? $(supports_inplace_mpi(buffer))")
     if !supports_inplace_mpi(buffer)
         return recv_yield(comm, src, tag), false
     end
-    #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Starting recv! from [$src]")
-
+    
     # Ensure no other receiver is waiting
     our_event = Base.Event()
     @label retry
@@ -480,7 +478,6 @@ function recv_yield(comm, src, tag)
         wait(other_event)
         @goto retry
     end
-    #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Receiving...")
 
     type = nothing
     @label receive
@@ -631,25 +628,6 @@ function bcast_send_yield(value, comm, root, tag)
     end
 end
 
-#= Maybe can be worth it to implement this
-function bcast_send_yield!(value, comm, root, tag)
-    sz = MPI.Comm_size(comm)
-    rank = MPI.Comm_rank(comm)
-
-    for other_rank in 0:(sz-1)
-        rank == other_rank && continue
-        #println("[rank $rank] Sending to rank $other_rank")
-        send_yield!(value, comm, other_rank, tag)
-    end
-end
-
-function bcast_recv_yield!(value, comm, root, tag)
-    sz = MPI.Comm_size(comm)
-    rank = MPI.Comm_rank(comm)
-    #println("[rank $rank] receive from rank $root")
-    recv_yield!(value, comm, root, tag)
-end
-=#
 function mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, rank, tag, kind, srcdest)
     time_elapsed = (time_ns() - time_start)
     if detect && time_elapsed > warn_period
