@@ -810,7 +810,7 @@ accel_matches_proc(accel::MPIAcceleration, proc::MPIClusterProc) = true
 accel_matches_proc(accel::MPIAcceleration, proc::MPIProcessor) = true
 accel_matches_proc(accel::MPIAcceleration, proc) = false
 
-#=
+
 function distribute(A::AbstractArray{T,N}, dist::Blocks{N}, accel::MPIAcceleration) where {T,N}
     comm = accel.comm
     rank = MPI.Comm_rank(comm)
@@ -845,7 +845,7 @@ function get_logs!(accel::MPIAcceleration, ml::TimespanLogging.MultiEventLog; on
         return logs
     end
 end
-
+#=
 distribute(A::AbstractArray{T,N}, dist::Blocks{N}, root::Int; comm::MPI.Comm=MPI.COMM_WORLD) where {T,N} =
     distribute(A::AbstractArray{T,N}, dist; comm, root) 
 distribute(A::AbstractArray, root::Int; comm::MPI.Comm=MPI.COMM_WORLD) = distribute(A, AutoBlocks(), root; comm)
@@ -1019,3 +1019,4 @@ function Base.collect(x::Dagger.DMatrix{T};
         end
     end
 end
+=#
