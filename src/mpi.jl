@@ -437,7 +437,6 @@ end
 
 function recv_yield(comm, src, tag)
     rank = MPI.Comm_rank(comm)
-    #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Starting recv from [$src]")
 
     # Ensure no other receiver is waiting
     our_event = Base.Event()
@@ -899,4 +898,28 @@ function distribute(accel::MPIAcceleration, A::AbstractArray{T,N}, dist::Blocks{
     copyto!(DB, DA)
 
     return DB
+end
+
+function get_logs!(accel::MPIAcceleration, ml::TimespanLogging.MultiEventLog; only_local=false)
+    mls = TimespanLogging.get_state(ml)
+    sublogs = lock(TimespanLogging.event_log_lock) do
+        sublogs = Dict{Symbol,Vector}()
+        for name in keys(mls.consumers)
+            sublogs[name] = copy(mls.consumer_logs[name])
+            mls.consumer_logs[name] = []
+        end
+        sublogs
+    end
+    rank = MPI.Comm_rank(accel.comm)
+    if rank == 0 
+        logs = Dict{Int, Dict{Symbol,Vector}}()
+    end
+
+    logsvec = MPI.gather(sublogs, accel.comm)
+    if rank == 0
+        for (rnk, sublogs) in enumerate(logsvec)
+            logs[rnk] = sublogs
+        end
+        return logs
+    end
 end

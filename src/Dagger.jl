@@ -83,7 +83,6 @@ include("shard.jl")
 include("weakchunk.jl")
 include("utils/logging.jl")
 include("submission.jl")
-include("memory-spaces.jl")
 
 # Task scheduling
 include("compute.jl")

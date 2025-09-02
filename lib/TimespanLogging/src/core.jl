@@ -263,7 +263,7 @@ function get_logs!(ml::MultiEventLog; only_local=false)
                 lock(event_log_lock) do
                     sublogs = Dict{Symbol,Vector}()
                     for name in keys(mls.consumers)
-                        sublogs[name] = mls.consumer_logs[name]
+                        sublogs[name] = copy(mls.consumer_logs[name])
                         mls.consumer_logs[name] = []
                     end
                     sublogs
