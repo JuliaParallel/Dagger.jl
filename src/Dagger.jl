@@ -72,6 +72,7 @@ include("utils/chunks.jl")
 include("utils/logging.jl")
 include("submission.jl")
 include("memory-spaces.jl")
+include("rules.jl")
 
 # Task scheduling
 include("compute.jl")
