@@ -52,6 +52,7 @@ function aliasing(accel::MPIAcceleration, x::Chunk, T)
     handle = x.handle::MPIRef
     @assert accel.comm == handle.comm "MPIAcceleration comm mismatch"
     tag = to_tag(hash(handle.id, hash(:aliasing)))
+    check_uniform(tag)
     rank = MPI.Comm_rank(accel.comm)
     if handle.rank == rank
         ainfo = aliasing(x, T)
@@ -62,6 +63,7 @@ function aliasing(accel::MPIAcceleration, x::Chunk, T)
         ainfo = recv_yield(accel.comm, handle.rank, tag)
         #Core.print("[$rank] aliasing: received $ainfo\n")
     end
+    check_uniform(ainfo)
     return ainfo
 end
 default_processor(accel::MPIAcceleration) = MPIOSProc(accel.comm, 0)
@@ -640,7 +642,7 @@ function move!(dep_mod, to_space::MPIMemorySpace, from_space::MPIMemorySpace, to
         if local_rank == from_space.rank
             send_yield!(poolget(from.handle; uniform=false), to_space.comm, to_space.rank, tag)
         elseif local_rank == to_space.rank
-            @dagdebug nothing :mpi "[$local_rank][$tag] Receiving from rank $(from_space.rank) with tag $tag, type of buffer: $(poolget(to.handle; uniform=false))"
+            #@dagdebug nothing :mpi "[$local_rank][$tag] Receiving from rank $(from_space.rank) with tag $tag, type of buffer: $(typeof(poolget(to.handle; uniform=false)))"
             to_val = poolget(to.handle; uniform=false)
             val, inplace = recv_yield!(to_val, from_space.comm, from_space.rank, tag)
             if !inplace
@@ -723,35 +725,58 @@ function move(src::MPIOSProc, dst::MPIProcessor, x::Chunk)
     end
 end
 
-function remotecall_endpoint(f, accel::Dagger.MPIAcceleration, from_proc, to_proc, orig_space, dest_space, data)
+const MPI_UNIFORM = ScopedValue{Bool}(false)
+
+@warn "bcast T if return type is not concrete" maxlog=1
+function remotecall_endpoint(f, accel::Dagger.MPIAcceleration, from_proc, to_proc, from_space, to_space, data)
     loc_rank = MPI.Comm_rank(accel.comm)
     task = DATADEPS_CURRENT_TASK[]
-    with(MPI_UID=>task.uid) do
+    return with(MPI_UID=>task.uid, MPI_UNIFORM=>true) do
         if data isa Chunk
             tag = to_tag(hash(data.handle.id))
-            if loc_rank == from_proc.rank == to_proc.rank
-                data_converted = f(move(to_proc, data))
-                data_chunk = tochunk(data_converted, to_proc, dest_space)
-            elseif loc_rank == to_proc.rank
-                data_moved = Dagger.recv_yield(accel.comm, orig_space.rank, tag)
-                data_converted = f(move(to_proc, data_moved))
-                data_chunk = tochunk(data_converted, to_proc, dest_space)
-            elseif loc_rank == from_proc.rank
-                data_moved = f(move(from_proc, data))
-                Dagger.send_yield(data_moved, accel.comm, to_proc.rank, tag)
-                data_chunk = tochunk(data_moved, to_proc, dest_space)
-            else
-                T = move_type(from_proc, to_proc, chunktype(data))
-                if f !== identity
-                    error("Perform return type inference on f")
+            space = memory_space(data)
+            if space.rank != from_proc.rank
+                # If the data is already where it needs to be
+                @assert space.rank == to_proc.rank
+                if space.rank == loc_rank
+                    value = poolget(data.handle)
+                    data_converted = f(move(from_proc.innerProc, to_proc.innerProc, value))
+                    return tochunk(data_converted, to_proc, to_space)
+                else
+                    T = move_type(from_proc.innerProc, to_proc.innerProc, chunktype(data))
+                    T_new = f !== identity ? Base._return_type(f, Tuple{T}) : T
+                    @assert isconcretetype(T_new) "Return type inference failed, expected concrete type, got $T -> $T_new"
+                    return tochunk(nothing, to_proc, to_space; type=T_new)
                 end
-                data_chunk = tochunk(nothing, to_proc, dest_space; type=T)
+            end
+
+            # The data is on the source rank
+            @assert space.rank == from_proc.rank
+            if loc_rank == from_proc.rank == to_proc.rank
+                value = poolget(data.handle)
+                data_converted = f(move(from_proc.innerProc, to_proc.innerProc, value))
+                return tochunk(data_converted, to_proc, to_space)
+            elseif loc_rank == from_proc.rank
+                value = poolget(data.handle)
+                data_moved = move(from_proc.innerProc, to_proc.innerProc, value)
+                Dagger.send_yield(data_moved, accel.comm, to_proc.rank, tag)
+                # FIXME: This is wrong to take typeof(data_moved), because the type may change
+                return tochunk(nothing, to_proc, to_space; type=typeof(data_moved))
+            elseif loc_rank == to_proc.rank
+                data_moved = Dagger.recv_yield(accel.comm, from_space.rank, tag)
+                data_converted = f(move(from_proc.innerProc, to_proc.innerProc, data_moved))
+                return tochunk(data_converted, to_proc, to_space)
+            else
+                T = move_type(from_proc.innerProc, to_proc.innerProc, chunktype(data))
+                T_new = f !== identity ? Base._return_type(f, Tuple{T}) : T
+                @assert isconcretetype(T_new) "Return type inference failed, expected concrete type, got $T -> $T_new"
+                return tochunk(nothing, to_proc, to_space; type=T_new)
             end
         else
-            data_converted = f(move(from_proc, data))
-            data_chunk = tochunk(data_converted, to_proc, dest_space)
+            error("We shouldn't call f here, if we're not the destination rank")
+            data_converted = f(move(from_proc, to_proc, data))
+            return tochunk(data_converted, to_proc, to_space)
         end
-        return data_chunk
     end
 end
 
@@ -766,16 +791,22 @@ move(to_proc::MPIProcessor, x) =
 move(::MPIProcessor, ::MPIProcessor, x::Union{Function,Type}) = x
 move(::MPIProcessor, ::MPIProcessor, x::Chunk{<:Union{Function,Type}}) = poolget(x.handle)
 
+@warn "Is this uniform logic valuable to have?" maxlog=1
 function move(src::MPIProcessor, dst::MPIProcessor, x::Chunk)
-    @assert src.rank == dst.rank "Unwrapping not permitted"
+    uniform = false #uniform = MPI_UNIFORM[]
+    @assert uniform || src.rank == dst.rank "Unwrapping not permitted"
     if Sch.SCHED_MOVE[]
+        # We can either unwrap locally, or return nothing
         if dst.rank == MPI.Comm_rank(dst.comm)
             return poolget(x.handle)
         end
     else
-        @assert src.rank == MPI.Comm_rank(src.comm) "Unwrapping not permitted"
-        @assert src.rank == x.handle.rank == dst.rank
-        return poolget(x.handle)
+        # Either we're uniform (so everyone cooperates), or we're unwrapping locally
+        if !uniform
+            @assert src.rank == MPI.Comm_rank(src.comm) "Unwrapping not permitted"
+            @assert src.rank == x.handle.rank == dst.rank
+        end
+        return poolget(x.handle; uniform)
     end
 end
 
