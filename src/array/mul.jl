@@ -405,3 +405,91 @@ end
         A[i, j] = C[i, j]
     end
 end
+function LinearAlgebra.generic_matvecmul!(
+    C::DVector{T},
+    transA::Char,
+    A::DMatrix{T},
+    B::DVector{T},
+    _add::LinearAlgebra.MulAddMul,
+) where {T}
+    partC, partA, partB = _repartition_matvecmul(C, A, B, transA)
+    return maybe_copy_buffered(C=>partC, A=>partA, B=>partB) do C, A, B
+        return gemv_dagger!(C, transA, A, B, _add)
+    end
+end
+function _repartition_matvecmul(C, A, B, transA::Char)
+    partA = A.partitioning.blocksize
+    partB = B.partitioning.blocksize
+    istransA = transA == 'T' || transA == 'C'
+    dimA_other = !istransA ? partA[2] : partA[1]
+    dimB = partB[1]
+
+    # If A and B rows/cols don't match, fix them
+    # Uses the smallest blocking of all dimensions
+    sz = minimum((partA[1], partA[2], partB[1]))
+    if dimA_other != dimB
+        dimA_other = dimB = sz
+        if !istransA
+            partA = (partA[1], sz)
+        else
+            partA = (sz, partA[2])
+        end
+    end
+    partC = (dimB,)
+    return Blocks(partC...), Blocks(partA...), Blocks(partB...)
+end
+function gemv_dagger!(
+    C::DVector{T},
+    transA::Char,
+    A::DMatrix{T},
+    B::DVector{T},
+    _add::LinearAlgebra.MulAddMul,
+) where {T}
+    Ac = A.chunks
+    Bc = B.chunks
+    Cc = C.chunks
+    Amt, Ant = size(Ac)
+    Bmt = size(Bc)[1]
+    Cmt = size(Cc)[1]
+
+    alpha = T(_add.alpha)
+    beta = T(_add.beta)
+
+    if Ant != Bmt
+        throw(DimensionMismatch(lazy"A has number of blocks ($Amt,$Ant) but B has number of blocks ($Bmt)"))
+    end
+
+    Dagger.spawn_datadeps() do
+        for m in range(1, Cmt)
+            if transA == 'N'
+                # A: NoTrans
+                for k in range(1, Ant)
+                    mzone = k == 1 ? beta : T(1.0)
+                    Dagger.@spawn BLAS.gemv!(
+                        transA,
+                        alpha,
+                        In(Ac[m, k]),
+                        In(Bc[k]),
+                        mzone,
+                        InOut(Cc[m]),
+                    )
+                end
+            else
+                # A: [Conj]Trans
+                for k in range(1, Amt)
+                    mzone = k == 1 ? beta : T(1.0)
+                    Dagger.@spawn BLAS.gemv!(
+                        transA,
+                        alpha,
+                        In(Ac[k, m]),
+                        In(Bc[k]),
+                        mzone,
+                        InOut(Cc[m]),
+                    )
+                end
+            end
+        end
+    end
+
+    return C
+end
