@@ -1,6 +1,6 @@
-function LinearAlgebra.norm2(A::DArray{T,2}) where T
+function LinearAlgebra.norm2(A::DArray{T,N}) where {T,N}
     Ac = A.chunks
-    norms = [Dagger.@spawn mapreduce(LinearAlgebra.norm_sqr, +, chunk) for chunk in Ac]::Matrix{DTask}
+    norms = [Dagger.@spawn mapreduce(LinearAlgebra.norm_sqr, +, chunk) for chunk in Ac]::Array{DTask,N}
     zeroRT = zero(real(T))
     return sqrt(sum(map(norm->fetch(norm)::real(T), norms); init=zeroRT))
 end
