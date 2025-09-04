@@ -693,9 +693,10 @@ From `Statistics`:
 - `std`
 
 From `LinearAlgebra`:
+- `norm`
 - `transpose`/`adjoint` (Out-of-place transpose)
 - `*` (Out-of-place Matrix-(Matrix/Vector) multiply)
-- `mul!` (In-place Matrix-Matrix multiply)
+- `mul!` (In-place Matrix-Matrix and Matrix-Vector multiply)
 - `cholesky`/`cholesky!` (In-place/Out-of-place Cholesky factorization)
 - `lu`/`lu!` (In-place/Out-of-place LU factorization (`NoPivot` only))
 

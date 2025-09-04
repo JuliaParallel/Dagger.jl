@@ -136,10 +136,87 @@ part_sets_to_test = map(_sizes_to_test) do sz
     ]
 end
 parts_to_test = vcat(part_sets_to_test...)
-@testset "Size=$szA*$szB" for (szA, szB) in sizes_to_test
-    @testset "Partitioning=$partA*$partB" for (partA,partB) in parts_to_test
-        @testset "T=$T" for T in (Float32, Float64, ComplexF32, ComplexF64)
-            test_gemm!(T, szA, szB, partA, partB)
+@testset "GEMM" begin
+    @testset "Size=$szA*$szB" for (szA, szB) in sizes_to_test
+        @testset "Partitioning=$partA*$partB" for (partA,partB) in parts_to_test
+            @testset "T=$T" for T in (Float32, Float64, ComplexF32, ComplexF64)
+                test_gemm!(T, szA, szB, partA, partB)
+            end
+        end
+    end
+end
+
+function test_gemv!(T, szA, szB, partA, partB)
+    @assert szA[2] == szB[1]
+    szC = (szA[1],)
+    @assert partA.blocksize[2] == partB.blocksize[1]
+    partC = Blocks(partA.blocksize[1],)
+
+    A = rand(T, szA...)
+    B = rand(T, szB...)
+
+    DA = distribute(A, partA)
+    DB = distribute(B, partB)
+
+    ## Out-of-place gemm
+    # No transA
+    DC = DA * DB
+    C = A * B
+    @test collect(DC) ≈ C
+
+    if szA[1] == szB[1]
+        # transA
+        DC = DA' * DB
+        C = A' * B
+        @test collect(DC) ≈ C
+    end
+
+    ## In-place gemm
+    # No transA
+    C = zeros(T, szC...)
+    DC = distribute(C, partC)
+    mul!(C, A, B)
+    mul!(DC, DA, DB)
+    @test collect(DC) ≈ C
+
+    if szA[1] == szB[1]
+        # transA
+        C = zeros(T, szC...)
+        DC = distribute(C, partC)
+        mul!(C, A', B)
+        mul!(DC, DA', DB)
+        @test collect(DC) ≈ C
+    end
+end
+
+_sizes_to_test = [
+    (4, 4),
+    (7, 7),
+    (12, 12),
+    (16, 16),
+]
+size_sets_to_test = map(_sizes_to_test) do sz
+    rows, cols = sz
+    return [
+        (rows, cols) => (cols,),
+        (rows, cols ÷ 2) => (cols ÷ 2,),
+    ]
+end
+sizes_to_test = vcat(size_sets_to_test...)
+part_sets_to_test = map(_sizes_to_test) do sz
+    rows, cols = sz
+    return [
+        Blocks(rows, cols) => Blocks(cols,),
+        Blocks(rows, cols ÷ 2) => Blocks(cols ÷ 2,),
+    ]
+end
+parts_to_test = vcat(part_sets_to_test...)
+@testset "GEMV" begin
+    @testset "Size=$szA*$szB" for (szA, szB) in sizes_to_test
+        @testset "Partitioning=$partA*$partB" for (partA,partB) in parts_to_test
+            @testset "T=$T" for T in (Float32, Float64, ComplexF32, ComplexF64)
+                test_gemv!(T, szA, szB, partA, partB)
+            end
         end
     end
 end
