@@ -251,7 +251,7 @@ struct DataDepsState
     remote_args::Dict{MemorySpace,IdDict{Any,Chunk}}
 
     # The mapping of remote argument to original argument
-    remote_arg_to_original::Dict{Any,Any}
+    remote_arg_to_original::IdDict{Any,Any}
 
     # The mapping of ainfo to argument and dep_mod
     # Used to lookup which argument and dep_mod a given ainfo is generated from
