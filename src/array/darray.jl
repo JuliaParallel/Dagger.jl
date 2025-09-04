@@ -566,7 +566,7 @@ function distribute(A::AbstractArray{T,N}, dist::Blocks{N}, assignment::Assignme
 
     return _distribute(current_acceleration(), A, dist, procgrid)
 end
-distribute(::DistributedAcceleration, A::AbstractArray{T,N}, dist::Blocks{N}, procgrid) where {T,N} =
+_distribute(::DistributedAcceleration, A::AbstractArray{T,N}, dist::Blocks{N}, procgrid) where {T,N} =
     _to_darray(Distribute(dist, A, procgrid))
 
 distribute(A::AbstractArray, ::AutoBlocks, assignment::AssignmentType = :arbitrary) = distribute(A, auto_blocks(A), assignment)
