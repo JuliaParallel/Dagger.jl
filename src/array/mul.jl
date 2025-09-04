@@ -413,7 +413,6 @@ function LinearAlgebra.generic_matvecmul!(
     _add::LinearAlgebra.MulAddMul,
 ) where {T}
     partC, partA, partB = _repartition_matvecmul(C, A, B, transA)
-    @show partC, partA, partB
     return maybe_copy_buffered(C=>partC, A=>partA, B=>partB) do C, A, B
         return gemv_dagger!(C, transA, A, B, _add)
     end
