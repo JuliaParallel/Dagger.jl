@@ -589,6 +589,11 @@ end
         Dagger.populate_defaults!(options, sig)
 
         # Calculate scope
+        if options.exec_scope !== nothing
+            # Bypass scope calculation if it's been done for us already
+            scope = options.exec_scope
+            @goto scope_computed
+        end
         scope = constrain(@something(options.compute_scope, options.scope, DefaultScope()),
                           @something(options.result_scope, AnyScope()))
         if scope isa InvalidScope
@@ -615,6 +620,7 @@ end
                 @goto pop_task
             end
         end
+        @label scope_computed
 
         input_procs = @reusable_vector :schedule!_input_procs Processor OSProc() 32
         input_procs_cleanup = @reuse_defer_cleanup empty!(input_procs)
