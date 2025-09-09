@@ -8,3 +8,4 @@ Manifest.toml
 *.jls
 *.dot
 docs/build
+.vscode
