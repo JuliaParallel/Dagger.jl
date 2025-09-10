@@ -74,7 +74,7 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
         uid, future = payload.uid, payload.future
         fargs, options, reschedule = payload.fargs, payload.options, payload.reschedule
 
-        id = next_id()
+        id = Int(uid)
 
         @maybelog ctx timespan_start(ctx, :add_thunk, (;thunk_id=id), (;f=fargs[1], args=fargs[2:end], options, uid))
 
