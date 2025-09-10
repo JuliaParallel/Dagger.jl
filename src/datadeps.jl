@@ -590,6 +590,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     write_num = 1
     proc_idx = 1
     pressures = Dict{Processor,Int}()
+    proc_to_scope_lfu = BasicLFUCache{Processor,AbstractScope}(1024)
     for (spec, task) in queue.seen_tasks[task_order]
         # Populate all task dependencies
         populate_task_info!(state, spec, task)
@@ -723,9 +724,20 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         end
         @assert our_proc in all_procs
         our_space = only(memory_spaces(our_proc))
-        our_procs = filter(proc->proc in all_procs, collect(processors(our_space)))
-        task_scope = @something(spec.options.scope, AnyScope())
-        our_scope = constrain(UnionScope(map(ExactScope, our_procs)...), task_scope)
+
+        # Find the scope for this task (and its copies)
+        task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
+        if task_scope == scope
+            # Optimize for the common case, cache the proc=>scope mapping
+            our_scope = get!(proc_to_scope_lfu, our_proc) do
+                our_procs = filter(proc->proc in all_procs, collect(processors(our_space)))
+                return constrain(UnionScope(map(ExactScope, our_procs)...), scope)
+            end
+        else
+            # Use the provided scope and constrain it to the available processors
+            our_procs = filter(proc->proc in all_procs, collect(processors(our_space)))
+            our_scope = constrain(UnionScope(map(ExactScope, our_procs)...), task_scope)
+        end
         if our_scope isa InvalidScope
             throw(Sch.SchedulingException("Scopes are not compatible: $(our_scope.x), $(our_scope.y)"))
         end
