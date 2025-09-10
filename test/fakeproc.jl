@@ -20,6 +20,6 @@ Dagger.iscompatible_arg(proc::FakeProc, opts, ::Type{<:Integer}) = true
 Dagger.iscompatible_arg(proc::FakeProc, opts, ::Type{<:FakeVal}) = true
 Dagger.move(from_proc::OSProc, to_proc::FakeProc, x::Integer) = FakeVal(x)
 Dagger.move(from_proc::ThreadProc, to_proc::FakeProc, x::Integer) = FakeVal(x)
-Dagger.execute!(proc::FakeProc, world, func, args...) = FakeVal(42+func(args...).x)
+Dagger.execute!(proc::FakeProc, func, args...) = FakeVal(42+func(args...).x)
 
 end

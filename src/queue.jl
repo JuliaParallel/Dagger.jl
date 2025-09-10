@@ -1,6 +1,5 @@
 mutable struct DTaskSpec
     fargs::Vector{Argument}
-    world::UInt64
     options::Options
 end
 
