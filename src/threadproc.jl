@@ -10,8 +10,7 @@ end
 iscompatible(proc::ThreadProc, opts, f, args...) = true
 iscompatible_func(proc::ThreadProc, opts, f) = true
 iscompatible_arg(proc::ThreadProc, opts, x) = true
-function execute!(proc::ThreadProc, world::UInt64, f, args...; kwargs...)
-    @nospecialize f args kwargs
+function execute!(proc::ThreadProc, @nospecialize(f), @nospecialize(args...); @nospecialize(kwargs...))
     tls = get_tls()
     # FIXME: Use return type of the call to specialize container
     result = Ref{Any}()
@@ -20,7 +19,7 @@ function execute!(proc::ThreadProc, world::UInt64, f, args...; kwargs...)
         if task_logging_enabled()
             TimespanLogging.prof_task_put!(tls.sch_handle.thunk_id.id)
         end
-        result[] = Base.invoke_in_world(world, f, args...; kwargs...)
+        result[] = @invokelatest f(args...; kwargs...)
         return
     end
     set_task_tid!(task, proc.tid)

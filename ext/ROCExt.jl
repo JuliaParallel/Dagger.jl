@@ -241,13 +241,13 @@ for lib in [BLAS, LAPACK]
 end
 
 # Task execution
-function Dagger.execute!(proc::ROCArrayDeviceProc, world::UInt64, f, args...; kwargs...)
+function Dagger.execute!(proc::ROCArrayDeviceProc, f, args...; kwargs...)
     @nospecialize f args kwargs
     tls = Dagger.get_tls()
     task = Threads.@spawn begin
         Dagger.set_tls!(tls)
         with_context!(proc)
-        result = Base.invoke_in_world(world, f, args...; kwargs...)
+        result = Base.@invokelatest f(args...; kwargs...)
         # N.B. Synchronization must be done when accessing result or args
         return result
     end

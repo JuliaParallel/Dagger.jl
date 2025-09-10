@@ -805,7 +805,6 @@ struct TaskSpec
     scope::Dagger.AbstractScope
     Tf::Type
     data::Vector{Argument}
-    world::UInt64
     options::Options
     ctx_vars::NamedTuple
     sch_handle::SchedulerHandle
@@ -857,7 +856,7 @@ Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
         push!(to_send, TaskSpec(
             thunk.id,
             task_spec.est_time_util, task_spec.est_alloc_util, task_spec.est_occupancy,
-            task_spec.scope, Tf, args, thunk.world, options,
+            task_spec.scope, Tf, args, options,
             (log_sink=ctx.log_sink, profile=ctx.profile),
             sch_handle, state.uid))
     end
@@ -1522,7 +1521,7 @@ Executes a single task specified by `task` on `to_proc`.
 
         result = Dagger.with_options(propagated) do
             # Execute
-            execute!(to_proc, task.world, f, fetched_args...; fetched_kwargs...)
+            execute!(to_proc, f, fetched_args...; fetched_kwargs...)
         end
 
         # Check if result is safe to store
