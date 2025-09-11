@@ -88,15 +88,30 @@ function logs_to_dot(logs::Dict; disconnected=false, show_data::Bool=true,
             id = logs[w][:id][idx]
             if category == :add_thunk && kind == :start
                 id::NamedTuple
-                taskdeps = logs[w][:taskdeps][idx]::Pair{Int,Vector{Int}}
+                tid = id.thunk_id::Int
                 taskname = logs[w][:taskfuncnames][idx]::String
-                tid, deps = taskdeps
                 v = get!(tid_to_vertex, tid) do
                     add_vertex!(g)
                     tid_to_vertex[tid] = nv(g)
                     nv(g)
                 end
                 tid_to_auto_name[tid] = taskname
+                if haskey(logs[w], :taskuidtotid)
+                    uid_tid = logs[w][:taskuidtotid][idx]
+                    if uid_tid !== nothing
+                        uid, tid = uid_tid::Pair{UInt,Int}
+                        uid_to_tid[uid] = tid
+                    end
+                end
+            elseif category == :add_thunk && kind == :finish
+                id::NamedTuple
+                taskdeps = logs[w][:taskdeps][idx]::Pair{Int,Vector{Int}}
+                tid, deps = taskdeps
+                v = get!(tid_to_vertex, tid) do
+                    add_vertex!(g)
+                    tid_to_vertex[tid] = nv(g)
+                    nv(g)
+                end
                 for dep in deps
                     dep_v = get!(tid_to_vertex, dep) do
                         add_vertex!(g)
@@ -104,13 +119,6 @@ function logs_to_dot(logs::Dict; disconnected=false, show_data::Bool=true,
                         nv(g)
                     end
                     add_edge!(g, dep_v, v)
-                end
-                if haskey(logs[w], :taskuidtotid)
-                    uid_tid = logs[w][:taskuidtotid][idx]
-                    if uid_tid !== nothing
-                        uid, tid = uid_tid::Pair{UInt,Int}
-                        uid_to_tid[uid] = tid
-                    end
                 end
             elseif category == :compute && kind == :start
                 id::NamedTuple

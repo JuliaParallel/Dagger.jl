@@ -1,8 +1,7 @@
-using PythonCall
 using CondaPkg
-
 CondaPkg.add("numpy")
 
+using PythonCall
 np = pyimport("numpy")
 
 # Restart scheduler to see new methods

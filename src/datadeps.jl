@@ -396,7 +396,7 @@ function _get_write_deps!(state::DataDepsState{DataDepsAliasingState}, ainfo::Ab
         other_task, other_write_num = other_task_write_num
         write_num == other_write_num && continue
         @dagdebug nothing :spawn_datadeps "Sync with writer via $ainfo -> $other_ainfo"
-        push!(syncdeps, other_task)
+        push!(syncdeps, ThunkSyncdep(other_task))
     end
 end
 function _get_read_deps!(state::DataDepsState{DataDepsAliasingState}, ainfo::AbstractAliasing, task, write_num, syncdeps)
@@ -408,7 +408,7 @@ function _get_read_deps!(state::DataDepsState{DataDepsAliasingState}, ainfo::Abs
         for (other_task, other_write_num) in other_tasks
             write_num == other_write_num && continue
             @dagdebug nothing :spawn_datadeps "Sync with reader via $ainfo -> $other_ainfo"
-            push!(syncdeps, other_task)
+            push!(syncdeps, ThunkSyncdep(other_task))
         end
     end
 end
@@ -427,14 +427,14 @@ function _get_write_deps!(state::DataDepsState{DataDepsNonAliasingState}, arg, t
     if other_task_write_num !== nothing
         other_task, other_write_num = other_task_write_num
         if write_num != other_write_num
-            push!(syncdeps, other_task)
+            push!(syncdeps, ThunkSyncdep(other_task))
         end
     end
 end
 function _get_read_deps!(state::DataDepsState{DataDepsNonAliasingState}, arg, task, write_num, syncdeps)
     for (other_task, other_write_num) in state.alias_state.args_readers[arg]
         if write_num != other_write_num
-            push!(syncdeps, other_task)
+            push!(syncdeps, ThunkSyncdep(other_task))
         end
     end
 end
@@ -590,6 +590,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     write_num = 1
     proc_idx = 1
     pressures = Dict{Processor,Int}()
+    proc_to_scope_lfu = BasicLFUCache{Processor,AbstractScope}(1024)
     for (spec, task) in queue.seen_tasks[task_order]
         # Populate all task dependencies
         populate_task_info!(state, spec, task)
@@ -723,9 +724,20 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         end
         @assert our_proc in all_procs
         our_space = only(memory_spaces(our_proc))
-        our_procs = filter(proc->proc in all_procs, collect(processors(our_space)))
-        task_scope = @something(spec.options.scope, AnyScope())
-        our_scope = constrain(UnionScope(map(ExactScope, our_procs)...), task_scope)
+
+        # Find the scope for this task (and its copies)
+        task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
+        if task_scope == scope
+            # Optimize for the common case, cache the proc=>scope mapping
+            our_scope = get!(proc_to_scope_lfu, our_proc) do
+                our_procs = filter(proc->proc in all_procs, collect(processors(our_space)))
+                return constrain(UnionScope(map(ExactScope, our_procs)...), scope)
+            end
+        else
+            # Use the provided scope and constrain it to the available processors
+            our_procs = filter(proc->proc in all_procs, collect(processors(our_space)))
+            our_scope = constrain(UnionScope(map(ExactScope, our_procs)...), task_scope)
+        end
         if our_scope isa InvalidScope
             throw(Sch.SchedulingException("Scopes are not compatible: $(our_scope.x), $(our_scope.y)"))
         end
@@ -769,10 +781,10 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                             generate_slot!(state, data_space, arg)
                         end
                         copy_to_scope = our_scope
-                        copy_to_syncdeps = Set{Any}()
+                        copy_to_syncdeps = Set{ThunkSyncdep}()
                         get_write_deps!(state, ainfo, task, write_num, copy_to_syncdeps)
                         @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$idx][$dep_mod] $(length(copy_to_syncdeps)) syncdeps"
-                        copy_to = Dagger.@spawn scope=copy_to_scope syncdeps=copy_to_syncdeps meta=true Dagger.move!(dep_mod, our_space, data_space, arg_remote, arg_local)
+                        copy_to = Dagger.@spawn scope=copy_to_scope exec_scope=copy_to_scope syncdeps=copy_to_syncdeps meta=true Dagger.move!(dep_mod, our_space, data_space, arg_remote, arg_local)
                         add_writer!(state, ainfo, copy_to, write_num)
 
                         astate.data_locality[ainfo] = our_space
@@ -790,10 +802,10 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                         generate_slot!(state, data_space, arg)
                     end
                     copy_to_scope = our_scope
-                    copy_to_syncdeps = Set{Any}()
+                    copy_to_syncdeps = Set{ThunkSyncdep}()
                     get_write_deps!(state, arg, task, write_num, copy_to_syncdeps)
                     @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$idx] $(length(copy_to_syncdeps)) syncdeps"
-                    copy_to = Dagger.@spawn scope=copy_to_scope syncdeps=copy_to_syncdeps Dagger.move!(identity, our_space, data_space, arg_remote, arg_local)
+                    copy_to = Dagger.@spawn scope=copy_to_scope exec_scope=copy_to_scope syncdeps=copy_to_syncdeps Dagger.move!(identity, our_space, data_space, arg_remote, arg_local)
                     add_writer!(state, arg, copy_to, write_num)
 
                     astate.data_locality[arg] = our_space
@@ -820,7 +832,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
         # Calculate this task's syncdeps
         if spec.options.syncdeps === nothing
-            spec.options.syncdeps = Set{Any}()
+            spec.options.syncdeps = Set{ThunkSyncdep}()
         end
         syncdeps = spec.options.syncdeps
         for (idx, (_, arg)) in enumerate(task_args)
@@ -853,6 +865,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
         # Launch user's task
         spec.options.scope = our_scope
+        spec.options.exec_scope = our_scope
         enqueue!(upper_queue, spec=>task)
 
         # Update read/write tracking for arguments
@@ -947,10 +960,10 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                     @assert arg_remote !== arg_local
                     data_local_proc = first(processors(data_local_space))
                     copy_from_scope = UnionScope(map(ExactScope, collect(processors(data_local_space)))...)
-                    copy_from_syncdeps = Set()
+                    copy_from_syncdeps = Set{ThunkSyncdep}()
                     get_write_deps!(state, ainfo, nothing, write_num, copy_from_syncdeps)
                     @dagdebug nothing :spawn_datadeps "$(length(copy_from_syncdeps)) syncdeps"
-                    copy_from = Dagger.@spawn scope=copy_from_scope syncdeps=copy_from_syncdeps meta=true Dagger.move!(dep_mod, data_local_space, data_remote_space, arg_local, arg_remote)
+                    copy_from = Dagger.@spawn scope=copy_from_scope exec_scope=copy_from_scope syncdeps=copy_from_syncdeps meta=true Dagger.move!(dep_mod, data_local_space, data_remote_space, arg_local, arg_remote)
                 else
                     @dagdebug nothing :spawn_datadeps "[$dep_mod] Skipped copy-from (local): $data_remote_space"
                 end
@@ -980,10 +993,10 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 @assert arg_remote !== arg_local
                 data_local_proc = first(processors(data_local_space))
                 copy_from_scope = ExactScope(data_local_proc)
-                copy_from_syncdeps = Set()
+                copy_from_syncdeps = Set{ThunkSyncdep}()
                 get_write_deps!(state, arg, nothing, write_num, copy_from_syncdeps)
                 @dagdebug nothing :spawn_datadeps "$(length(copy_from_syncdeps)) syncdeps"
-                copy_from = Dagger.@spawn scope=copy_from_scope syncdeps=copy_from_syncdeps meta=true Dagger.move!(identity, data_local_space, data_remote_space, arg_local, arg_remote)
+                copy_from = Dagger.@spawn scope=copy_from_scope exec_scope=copy_from_scope syncdeps=copy_from_syncdeps meta=true Dagger.move!(identity, data_local_space, data_remote_space, arg_local, arg_remote)
             else
                 @dagdebug nothing :spawn_datadeps "Skipped copy-from (local): $data_remote_space"
             end

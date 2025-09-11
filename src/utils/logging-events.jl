@@ -172,8 +172,8 @@ init_similar(::TaskArgumentMoves) = TaskArgumentMoves()
 function (ta::TaskArgumentMoves)(ev::Event{:start})
     if ev.category == :move
         data = ev.timeline.data
-        if ismutable(data)
-            thunk_id = ev.id.thunk_id::Int
+        thunk_id = ev.id.thunk_id::Int
+        if ismutable(data) && thunk_id != 0 # Ignore Datadeps moves, because we don't have TIDs for them
             position = Dagger.raw_position(ev.id.position::Dagger.ArgPosition)::Union{Symbol,Int}
             d = get!(Dict{Union{Int,Symbol},Dagger.LoggedMutableObject}, ta.pre_move_args, thunk_id)
             d[position] = Dagger.objectid_or_chunkid(data)
@@ -195,7 +195,7 @@ function (ta::TaskArgumentMoves)(ev::Event{:finish})
                 else
                     @warn "No TID $(thunk_id), Position $(position)"
                 end
-            else
+            elseif thunk_id != 0
                 @warn "No TID $(thunk_id)"
             end
         end
@@ -227,32 +227,24 @@ end
 Records the dependencies of each submitted task.
 """
 struct TaskDependencies end
-function (::TaskDependencies)(ev::Event{:start})
+(td::TaskDependencies)(ev::Event{:start}) = nothing
+function (::TaskDependencies)(ev::Event{:finish})
     local deps_tids::Vector{Int}
     function get_deps!(deps)
         for dep in deps
+            @assert dep isa Dagger.ThunkSyncdep && dep.thunk isa Dagger.WeakThunk
             dep = Dagger.unwrap_weak_checked(dep)
-            if dep isa Dagger.Thunk || dep isa Dagger.Sch.ThunkID
-                push!(deps_tids, dep.id)
-            elseif dep isa Dagger.DTask && myid() == 1
-                tid = lock(Dagger.Sch.EAGER_ID_MAP) do id_map
-                    id_map[dep.uid]
-                end
-                push!(deps_tids, tid)
-            else
-                @warn "Unexpected dependency type: $dep"
-            end
+            @assert dep isa Dagger.Thunk
+            push!(deps_tids, dep.id)
         end
     end
     if ev.category == :add_thunk
         deps_tids = Int[]
-        get_deps!(Iterators.filter(Dagger.istask, Iterators.map(Dagger.value, ev.timeline.args)))
         get_deps!(@something(ev.timeline.options.syncdeps, Set()))
         return ev.id.thunk_id => deps_tids
     end
     return
 end
-(td::TaskDependencies)(ev::Event{:finish}) = nothing
 
 """
     TaskUIDtoTID
