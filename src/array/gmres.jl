@@ -135,8 +135,9 @@ end
 function example_usage()
     # Create test problem
     n = 100
-    A = DArray(randn(n, n) + 5*I)  # Well-conditioned matrix
-    x_true = randn(AutoBlocks(), n)
+    bs = n ÷ 2
+    A = DArray(randn(n, n) + 5*I, Blocks(bs, bs))  # Well-conditioned matrix
+    x_true = randn(Blocks(bs), n)
     b = A * x_true
     
     # Solve with GMRES
