@@ -421,6 +421,7 @@ function _repartition_matvecmul(C, A, B, transA::Char)
     partA = A.partitioning.blocksize
     partB = B.partitioning.blocksize
     istransA = transA == 'T' || transA == 'C'
+    dimA_same = !istransA ? partA[1] : partA[2]
     dimA_other = !istransA ? partA[2] : partA[1]
     dimB = partB[1]
 
@@ -435,7 +436,7 @@ function _repartition_matvecmul(C, A, B, transA::Char)
             partA = (sz, partA[2])
         end
     end
-    partC = (dimB,)
+    partC = (dimA_same,)
     return Blocks(partC...), Blocks(partA...), Blocks(partB...)
 end
 function gemv_dagger!(
@@ -455,8 +456,11 @@ function gemv_dagger!(
     alpha = T(_add.alpha)
     beta = T(_add.beta)
 
-    if Ant != Bmt
-        throw(DimensionMismatch(lazy"A has number of blocks ($Amt,$Ant) but B has number of blocks ($Bmt)"))
+    if transA == 'N' ? (Amt != Cmt) : (Ant != Cmt)
+        throw(DimensionMismatch(lazy"A ($(transA == 'N' ? \"NoTrans\" : \"ConjTrans\")) has number of blocks ($Amt,$Ant) but C has number of blocks ($Cmt)"))
+    end
+    if transA == 'N' ? (Ant != Bmt) : (Amt != Bmt)
+        throw(DimensionMismatch(lazy"A ($(transA == 'N' ? \"NoTrans\" : \"ConjTrans\")) has number of blocks ($Amt,$Ant) but B has number of blocks ($Bmt)"))
     end
 
     Dagger.spawn_datadeps() do
