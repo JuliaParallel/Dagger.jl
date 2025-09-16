@@ -148,6 +148,15 @@ function Base.setindex!(A::DArray{T,N}, value, idxs::Dims{S}) where {T,N,S}
     end
     error()
 end
+function Base.setindex!(A::DArray, value, idx...)
+    @show size(A) size(A.chunks) typeof(value) size(value) idx to_indices(A, idx)
+    A_view = view(A, idx...)
+    @show A_view isa StridedDArray
+    @show typeof(A_view)
+    @show value isa StridedDArray
+    copyto!(A_view, value)
+    return value
+end
 
 ### Allow/disallow scalar indexing
 
