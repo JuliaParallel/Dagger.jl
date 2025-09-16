@@ -1,7 +1,10 @@
 ### getindex
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
+=======
+>>>>>>> ed9a7039 (DArray: Add slicing indexing methods and view support for copyto!)
 struct GetIndex{T,N} <: ArrayOp{T,N}
     input::ArrayOp
     idx::Tuple
@@ -52,7 +55,12 @@ Base.getindex(c::ArrayOp, idx::ArrayDomain) =
 Base.getindex(c::ArrayOp, idx...) =
     _to_darray(GetIndex(c, idx))
 
+<<<<<<< HEAD
 >>>>>>> 194bcb27 (CAQR: final working copy and adjusted NextLA calls)
+=======
+=======
+>>>>>>> 9ec2716c (DArray: Add slicing indexing methods and view support for copyto!)
+>>>>>>> ed9a7039 (DArray: Add slicing indexing methods and view support for copyto!)
 const GETINDEX_CACHE = TaskLocalValue{Dict{Tuple,Any}}(()->Dict{Tuple,Any}())
 const GETINDEX_CACHE_SIZE = ScopedValue{Int}(0)
 with_index_caching(f, size::Integer=1) = with(f, GETINDEX_CACHE_SIZE=>size)
