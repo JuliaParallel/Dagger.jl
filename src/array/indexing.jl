@@ -1,38 +1,5 @@
 ### getindex
 
-struct GetIndex{T,N} <: ArrayOp{T,N}
-    input::ArrayOp
-    idx::Tuple
-end
-
-GetIndex(input::ArrayOp, idx::Tuple) =
-    GetIndex{eltype(input), ndims(input)}(input, idx)
-
-function stage(ctx::Context, gidx::GetIndex)
-    inp = stage(ctx, gidx.input)
-
-    dmn = domain(inp)
-    idxs = [if isa(gidx.idx[i], Colon)
-        indexes(dmn)[i]
-    else
-        gidx.idx[i]
-    end for i in 1:length(gidx.idx)]
-
-    # Figure out output dimension
-    view(inp, ArrayDomain(idxs))
-end
-
-function size(x::GetIndex)
-    map(a -> a[2] isa Colon ?
-        size(x.input, a[1]) : length(a[2]),
-        enumerate(x.idx)) |> Tuple
-end
-
-Base.getindex(c::ArrayOp, idx::ArrayDomain) =
-    _to_darray(GetIndex(c, indexes(idx)))
-Base.getindex(c::ArrayOp, idx...) =
-    _to_darray(GetIndex(c, idx))
-
 const GETINDEX_CACHE = TaskLocalValue{Dict{Tuple,Any}}(()->Dict{Tuple,Any}())
 const GETINDEX_CACHE_SIZE = ScopedValue{Int}(0)
 with_index_caching(f, size::Integer=1) = with(f, GETINDEX_CACHE_SIZE=>size)
@@ -105,6 +72,23 @@ function Base.getindex(A::DArray{T,N}, idxs::Dims{S}) where {T,N,S}
     end
     error()
 end
+function Base.getindex(A::DArray, idx...)
+    inds = to_indices(A, idx)
+    A_view = view(A, inds...)
+    nd = length(inds)
+    sz = ntuple(i->length(inds[i]), nd)
+    # TODO: Pad out to same number of dims?
+    part = nd == length(A.partitioning.blocksize) ? A.partitioning : auto_blocks(sz)
+    B = zeros(part, eltype(A), sz) # FIXME: Use undef initializer
+    copyto!(B, A_view)
+    if size(A_view) != sz
+        # N.B. Base automatically transposes a row vector to a column vector
+        return DArray(reshape(B, size(A_view)))
+    end
+    return B
+end
+Base.getindex(A::DArray, idx::ArrayDomain) =
+    getindex(A, indexes(idx)...)
 
 ### setindex!
 
@@ -147,6 +131,12 @@ function Base.setindex!(A::DArray{T,N}, value, idxs::Dims{S}) where {T,N,S}
         throw(BoundsError(A, idxs))
     end
     error()
+end
+function Base.setindex!(A::DArray, value, idx...)
+    inds = to_indices(A, idx)
+    A_view = view(A, inds...)
+    copyto!(A_view, value)
+    return value
 end
 
 ### Allow/disallow scalar indexing
