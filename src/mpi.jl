@@ -800,7 +800,7 @@ function remotecall_endpoint(f, accel::Dagger.MPIAcceleration, from_proc, to_pro
                 return tochunk(nothing, to_proc, to_space; type=T_new)
             end
         else
-            error("We shouldn't call f here, if we're not the destination rank")
+            #error("We shouldn't call f here, if we're not the destination rank")
             data_converted = f(move(from_proc, to_proc, data))
             return tochunk(data_converted, to_proc, to_space)
         end
@@ -889,7 +889,7 @@ accel_matches_proc(accel::MPIAcceleration, proc::MPIClusterProc) = true
 accel_matches_proc(accel::MPIAcceleration, proc::MPIProcessor) = true
 accel_matches_proc(accel::MPIAcceleration, proc) = false
 
-function distribute(accel::MPIAcceleration, A::AbstractArray{T,N}, dist::Blocks{N}) where {T,N}
+function _distribute(accel::MPIAcceleration, A::AbstractArray{T,N}, dist::Blocks{N}, procgrid::Nothing) where {T,N}
     comm = accel.comm
     rank = MPI.Comm_rank(comm)
 

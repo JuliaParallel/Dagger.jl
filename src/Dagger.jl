@@ -81,6 +81,7 @@ include("tochunk.jl")
 include("mutable.jl")
 include("shard.jl")
 include("weakchunk.jl")
+include("memory-spaces.jl")
 include("utils/logging.jl")
 include("submission.jl")
 
