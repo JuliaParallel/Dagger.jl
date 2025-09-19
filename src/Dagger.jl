@@ -8,7 +8,7 @@ import MemPool
 import MemPool: DRef, FileRef, poolget, poolset
 
 import Base: collect, reduce, view
-
+import NextLA
 import LinearAlgebra
 import LinearAlgebra: Adjoint, BLAS, Diagonal, Bidiagonal, Tridiagonal, LAPACK, LU, LowerTriangular, PosDefException, Transpose, UpperTriangular, UnitLowerTriangular, UnitUpperTriangular, Cholesky, diagind, ishermitian, issymmetric, I
 import Random
@@ -127,6 +127,7 @@ include("array/mul.jl")
 include("array/cholesky.jl")
 include("array/trsm.jl")
 include("array/lu.jl")
+include("array/qr.jl")
 
 # GPU
 include("gpu.jl")
