@@ -24,88 +24,113 @@ function allocate_copy_buffer(part::Blocks{N}, A::DArray{T,N}) where {T,N}
     # FIXME: undef initializer
     return zeros(part, T, size(A))
 end
-function Base.copyto!(B::DArray{T,N}, A::DArray{T,N}) where {T,N}
-    if size(B) != size(A)
-        throw(DimensionMismatch("Cannot copy from array of size $(size(A)) to array of size $(size(B))"))
-    end
+
+crop_range(x::UnitRange, y::UnitRange) = max(x.start, y.start):min(x.stop, y.stop)
+
+function darray_copyto!(B::DArray{TB,NB}, A::DArray{TA,NA},  Binds=parentindices(B), Ainds=parentindices(A)) where {TB,NB,TA,NA}
+    Nmax = max(NA, NB)
+
+    pad1(x, i) = length(x) < i ? 1 : x[i]
+    pad1range(x, i) = length(x) < i ? (1:1) : x[i]
+
+    to_range(x::UnitRange) = x
+    to_range(x::Integer) = x:x
+    to_range(x::Base.OneTo{Int}) = UnitRange(x)
+    to_range(x::Base.Slice{Base.OneTo{Int}}) = UnitRange(x)
+
+    Bsd = B.subdomains::DomainBlocks{NB}
+    Asd = A.subdomains::DomainBlocks{NA}
+
+    Bsd_all = collect(reshape(Bsd, ntuple(i->pad1(size(Bsd), i), Nmax)))
+    Asd_all = collect(reshape(Asd, ntuple(i->pad1(size(Asd), i), Nmax)))
+
+    bszA = A.partitioning.blocksize
+    bszB = B.partitioning.blocksize
+
+    Bidx_real = ntuple(i->to_range(pad1(Binds, i)), Nmax)
+    Aidx_real = ntuple(i->to_range(pad1(Ainds, i)), Nmax)
 
     Bc = B.chunks
     Ac = A.chunks
-    Asd_all = A.subdomains::DomainBlocks{N}
+
+    #Define which chunks of B we will be copying into
+    Bidx_start = ntuple(i->fld1(pad1range(Bidx_real, i).start, pad1(bszB, i)), Nmax)
+    Bidx_end = ntuple(i->fld1(pad1range(Bidx_real, i).stop, pad1(bszB, i)), Nmax)
+    spanBidx = CartesianIndices(ntuple(i->Bidx_start[i]:Bidx_end[i], Nmax))
+
+    #Define which chunks of A we will be copying from
+    Aidx_start = ntuple(i->fld1(pad1range(Aidx_real, i).start, pad1(bszA, i)), Nmax)
+    #Aidx_end = ntuple(i->fld1(pad1range(Aidx_real, i).stop, pad1(bszA, i)), Nmax)
+    #spanAidx = CartesianIndices(ntuple(i->Aidx_start[i]:Aidx_end[i], Nmax))
+
+    #Adjust the subdomain indexes to be relative to the real index range
+    Bsd_all[first(spanBidx)] = ArrayDomain(ntuple(i->crop_range(pad1range(Bsd_all[first(spanBidx)].indexes, i), Bidx_real[i]), Nmax))
+    Bsd_all[last(spanBidx)] = ArrayDomain(ntuple(i->crop_range(pad1range(Bsd_all[last(spanBidx)].indexes, i), Bidx_real[i]), Nmax))
+
+    prev_Aidx = CartesianIndex(ntuple(i->Aidx_start[i], Nmax))
+    Acc_len = ntuple(zero, Nmax)
+
+    prev_Bsd = Bsd_all[first(spanBidx)].indexes
+    if first(spanBidx) == last(spanBidx)
+        Aidx_end = ntuple(i -> i > length(bszA) ? 1 : Aidx_start[i] + fld(length(prev_Bsd[i]), bszA[i]), Nmax)
+    else
+        Aidx_end = ntuple(i -> i > length(bszA) ? 1 : Aidx_start[i] + fld(Bsd_all[spanBidx[2]].indexes[i].start - prev_Bsd[i].start, bszA[i]), Nmax)
+    end
 
     Dagger.spawn_datadeps() do
-        for Bidx in CartesianIndices(Bc)
+        for Bidx in spanBidx
             Bpart = Bc[Bidx]
-            Bsd = B.subdomains[Bidx]
+            Bsdcur = ArrayDomain(ntuple(i->crop_range(pad1range(Bsd_all[Bidx].indexes, i), Bidx_real[i]), Nmax))
 
-            # Find the first overlapping subdomain of A
-            if A.partitioning isa Blocks
-                Aidx = CartesianIndex(ntuple(i->fld1(Bsd.indexes[i].start, A.partitioning.blocksize[i]), N))
-            else
-                # Fallback just in case of non-dense partitioning
-                Aidx = first(CartesianIndices(Ac))
-                Asd = first(Asd_all)
-                for dim in 1:N
-                    while Asd.indexes[dim].stop < Bsd.indexes[dim].start
-                        Aidx += CartesianIndex(ntuple(i->i==dim, N))
-                        Asd = Asd_all[Aidx]
-                    end
-                end
-            end
-            Aidx_start = Aidx
+            Aidx_start = ntuple(i->i > length(bszA) ? 1 : fld1(Bsdcur.indexes[i].start - prev_Bsd[i].start + Asd_all[prev_Aidx].indexes[i].start, bszA[i]), Nmax)
+            Aidx_end = ntuple(i->i > length(bszA) ? 1 : fld1(Bsdcur.indexes[i].start - prev_Bsd[i].start + Asd_all[prev_Aidx].indexes[i].stop, bszA[i]), Nmax)
+            Aidx_span = CartesianIndices(ntuple(i->Aidx_start[i]:Aidx_end[i], Nmax))
+            prev_Bsd = Bsdcur.indexes
 
-            # Find the last overlapping subdomain of A
-            for dim in 1:N
-                while true
-                    Aidx_next = Aidx + CartesianIndex(ntuple(i->i==dim, N))
-                    if !(Aidx_next in CartesianIndices(Ac))
-                        break
-                    end
-                    Asd_next = Asd_all[Aidx_next]
-                    if Asd_next.indexes[dim].start <= Bsd.indexes[dim].stop
-                        Aidx = Aidx_next
-                    else
-                        break
-                    end
-                end
-            end
-            Aidx_end = Aidx
-
-            # Find the span and set of subdomains of A overlapping Bpart
-            Aidx_span = Aidx_start:Aidx_end
-            Asd_view = view(A.subdomains, Aidx_span)
-
-            # Copy all overlapping subdomains of A
+            # Copy all overlapping subdomains of A into Bpart
+            Bacc_len = ntuple(zero, Nmax)
             for Aidx in Aidx_span
-                Asd = Asd_all[Aidx]
                 Apart = Ac[Aidx]
+                Asdcur =  ArrayDomain(ntuple(i->crop_range(pad1range(Asd_all[Aidx].indexes, i), Aidx_real[i]), NA))
+                
+                if prev_Aidx != Aidx
+                    Acc_len = ntuple(zero, Nmax)
+                end
+                prev_Aidx = Aidx
 
-                # Compute the true range
-                range_start = CartesianIndex(ntuple(i->max(Bsd.indexes[i].start, Asd.indexes[i].start), N))
-                range_end = CartesianIndex(ntuple(i->min(Bsd.indexes[i].stop, Asd.indexes[i].stop), N))
-                range_diff = range_end - range_start
+                tempBstart = ntuple(i->pad1range(Bsdcur.indexes, i).start + Bacc_len[i], Nmax)
+                tempAstart = ntuple(i->pad1range(Asdcur.indexes, i).start + Acc_len[i], Nmax)
+                Cp_len = ntuple(i->min(pad1range(Asdcur.indexes, i).stop - tempAstart[i] + 1, pad1range(Bsdcur.indexes, i).stop - tempBstart[i] + 1), Nmax)
 
                 # Compute the offset range into Apart
-                Asd_start = ntuple(i->Asd.indexes[i].start, N)
-                Asd_end = ntuple(i->Asd.indexes[i].stop, N)
-                Arange = range(range_start - CartesianIndex(Asd_start) + CartesianIndex{N}(1),
-                               range_start - CartesianIndex(Asd_start) + CartesianIndex{N}(1) + range_diff)
+                Aintra = ntuple(i->tempAstart[i] - pad1range(Asd[Aidx].indexes, i).start + 1, Nmax)
+                Arange = ntuple(i->(Aintra[i]):(Aintra[i] + Cp_len[i] - 1), Nmax)
+                Acc_len = ntuple(i->Cp_len[i] == 1 ? Acc_len[i] : Acc_len[i] + length(Arange[i]), Nmax)
 
                 # Compute the offset range into Bpart
-                Bsd_start = ntuple(i->Bsd.indexes[i].start, N)
-                Bsd_end = ntuple(i->Bsd.indexes[i].stop, N)
-                Brange = range(range_start - CartesianIndex(Bsd_start) + CartesianIndex{N}(1),
-                               range_start - CartesianIndex(Bsd_start) + CartesianIndex{N}(1) + range_diff)
+                Bintra = ntuple(i->tempBstart[i] - pad1range(Bsd[Bidx].indexes, i).start + 1, Nmax)
+                Brange = ntuple(i->(Bintra[i]):(Bintra[i] + Cp_len[i] - 1), Nmax)
+                Bacc_len = ntuple(i -> Cp_len[i] == 1 ?  Bacc_len[i] : Bacc_len[i] + length(Brange[i]), Nmax)
 
-                # Perform view copy
                 Dagger.@spawn copyto_view!(Out(Bpart), Brange, In(Apart), Arange)
             end
         end
     end
-
     return B
 end
 function copyto_view!(Bpart, Brange, Apart, Arange)
-    copyto!(view(Bpart, Brange), view(Apart, Arange))
+    copyto!(view(Bpart, Brange...), view(Apart, Arange...))
     return
 end
+
+Base.copyto!(B::DArray{T,N}, A::DArray{T,N}) where {T,N} =
+    darray_copyto!(B, A)
+Base.copyto!(B::DArray{T,N}, A::Array{T,N}) where {T,N} =
+    darray_copyto!(B, view(A, B.partitioning))
+Base.copyto!(B::Array{T,N}, A::DArray{T,N}) where {T,N} =
+    darray_copyto!(view(B, A.partitioning), A)
+
+StridedDArray{T,N} = Union{<:DArray{T,N}, SubArray{T,N,<:DArray{T,NP}} where NP}
+
+Base.copyto!(B::StridedDArray, A::StridedDArray) =
+    darray_copyto!(parent(B), parent(A), parentindices(B), parentindices(A))
