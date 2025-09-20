@@ -16,21 +16,13 @@ datatype = [Float32, Float64]
 datasize = 18000
 
 for T in datatype
-    #println("  Testing data type: $T")
-    if rank == 0
-        #blocksize = div(datasize, 4)
-        A = rand(T, datasize, datasize)
-        A = A * A' 
-        A[diagind(A)] .+= size(A, 1)
-        B = copy(A)
-        @assert ishermitian(B)
-        DA = distribute(A, Blocks(2000,2000))
-        DB = distribute(B, Blocks(2000,2000))
-    else 
-        DA = distribute(nothing, Blocks(2000,2000))
-        DB = distribute(nothing, Blocks(2000,2000))
-    end
-    
+    A = rand(T, datasize, datasize)
+    A = A * A'
+    A[diagind(A)] .+= size(A, 1)
+    B = copy(A)
+    @assert ishermitian(B)
+    DA = distribute(A, Blocks(2000,2000))
+    DB = distribute(B, Blocks(2000,2000))
     
     LinearAlgebra._chol!(DA, UpperTriangular)
     elapsed_time = @elapsed chol_DB = LinearAlgebra._chol!(DB, UpperTriangular)

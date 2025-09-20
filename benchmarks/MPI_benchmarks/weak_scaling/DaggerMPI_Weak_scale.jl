@@ -16,22 +16,21 @@ datatype = [Float32, Float64]
 datasize = 256 * floor(Int, sqrt(sz))
 
 for T in datatype
-    if rank == 0
-        #blocksize = div(datasize, 4)
-        A = rand(T, datasize, datasize)
-        A = A * A' 
-        A[diagind(A)] .+= size(A, 1)
-        B = copy(A)
-        @assert ishermitian(B)
-        DA = distribute(A, Blocks(256,256))
-        DB = distribute(B, Blocks(256,256))
-    else
-        DA = distribute(nothing, Blocks(256,256))
-        DB = distribute(nothing, Blocks(256,256))
+    A = rand(T, datasize, datasize)
+    A = A * A' 
+    A[diagind(A)] .+= size(A, 1)
+    B = copy(A)
+    @assert ishermitian(B)
+    DA = distribute(A, Blocks(256,256))
+    DB = distribute(B, Blocks(256,256))
+
+    try
+        LinearAlgebra._chol!(DA, UpperTriangular)
+    catch e
+        if rank == 0 && T == Float64
+            Base.showerror(stderr, e, stacktrace(catch_backtrace()))
+        end
     end
-    
-    
-    LinearAlgebra._chol!(DA, UpperTriangular)
     elapsed_time = @elapsed chol_DB = LinearAlgebra._chol!(DB, UpperTriangular)
     
     # Store results
@@ -55,12 +54,11 @@ if rank == 0
         CSV.write("benchmarks/results/DaggerMPI_Weak_scale_results.csv", df)
         
     end
-    =#
     # Summary statistics
+    =#
     for result in mpidagger_all_results
         println(result.procs, ",", result.dtype, ",", result.size, ",", result.time, ",", result.gflops)
     end
     #println("\nAll Cholesky tests completed!")
 end
-a.comm.finalize()
 
