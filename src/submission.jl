@@ -199,6 +199,15 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
                     id_map[uid] = thunk.id
                 end
 
+                # Reset sch_accessible for all syncdeps
+                if options.syncdeps !== nothing
+                    for dep_weak in options.syncdeps
+                        dep = unwrap_weak_checked(dep_weak)
+                        @assert dep.eager_accessible "GC bug: lost eager reference to syncdep"
+                        dep.sch_accessible = true
+                    end
+                end
+
                 # Tell the scheduler that it has new tasks to schedule
                 if reschedule
                     put!(state.chan, Sch.RescheduleSignal())
