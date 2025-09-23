@@ -101,3 +101,6 @@ function gpu_synchronize(kind::Symbol)
     end
 end
 gpu_synchronize(::Val{:CPU}) = nothing
+
+with_context!(proc::Processor) = nothing
+with_context!(space::MemorySpace) = nothing

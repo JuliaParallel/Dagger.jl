@@ -39,6 +39,13 @@ end
 Dagger.root_worker_id(space::ROCVRAMMemorySpace) = space.owner
 Dagger.memory_space(x::ROCArray) =
     ROCVRAMMemorySpace(myid(), AMDGPU.device(x).device_id)
+function Dagger.aliasing(x::ROCArray{T}) where T
+    space = Dagger.memory_space(x)
+    S = typeof(space)
+    gpu_ptr = pointer(x)
+    rptr = Dagger.RemotePtr{Cvoid}(UInt64(gpu_ptr), space)
+    return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
+end
 
 Dagger.memory_spaces(proc::ROCArrayDeviceProc) = Set([ROCVRAMMemorySpace(proc.owner, proc.device_id)])
 Dagger.processors(space::ROCVRAMMemorySpace) = Set([ROCArrayDeviceProc(space.owner, space.device_id)])
@@ -67,6 +74,8 @@ function with_context!(space::ROCVRAMMemorySpace)
     @assert Dagger.root_worker_id(space) == myid()
     with_context!(space.device_id)
 end
+Dagger.with_context!(proc::ROCArrayDeviceProc) = with_context!(proc)
+Dagger.with_context!(space::ROCVRAMMemorySpace) = with_context!(space)
 function with_context(f, x)
     old_ctx = context()
     old_device = AMDGPU.device()

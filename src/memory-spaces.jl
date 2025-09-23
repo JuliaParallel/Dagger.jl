@@ -1,6 +1,7 @@
 struct CPURAMMemorySpace <: MemorySpace
     owner::Int
 end
+CPURAMMemorySpace() = CPURAMMemorySpace(myid())
 root_worker_id(space::CPURAMMemorySpace) = space.owner
 
 memory_space(x) = CPURAMMemorySpace(myid())
@@ -87,7 +88,8 @@ function type_may_alias(::Type{T}) where T
     return false
 end
 
-may_alias(::MemorySpace, ::MemorySpace) = true
+may_alias(::MemorySpace, ::MemorySpace) = false
+may_alias(space1::M, space2::M) where M<:MemorySpace = space1 == space2
 may_alias(space1::CPURAMMemorySpace, space2::CPURAMMemorySpace) = space1.owner == space2.owner
 
 abstract type AbstractAliasing end
@@ -448,19 +450,22 @@ function _memory_spans(a::StridedAliasing{T,N,S}, spans, ptr, dim) where {T,N,S}
 
     return spans
 end
-function aliasing(x::SubArray{T,N,A}) where {T,N,A<:Array}
+function aliasing(x::SubArray{T,N}) where {T,N}
     if isbitstype(T)
-        S = CPURAMMemorySpace
         p = parent(x)
+        space = memory_space(p)
+        S = typeof(space)
+        parent_ptr = RemotePtr{Cvoid}(UInt64(pointer(p)), space)
+        ptr = RemotePtr{Cvoid}(UInt64(pointer(x)), space)
         NA = ndims(p)
         raw_inds = parentindices(x)
         inds = ntuple(i->raw_inds[i] isa Integer ? (raw_inds[i]:raw_inds[i]) : UnitRange(raw_inds[i]), NA)
         sz = ntuple(i->length(inds[i]), NA)
-        return StridedAliasing{T,NA,S}(RemotePtr{Cvoid}(pointer(p)),
-                                             RemotePtr{Cvoid}(pointer(x)),
-                                             inds,
-                                             sz,
-                                             strides(p))
+        return StridedAliasing{T,NA,S}(parent_ptr,
+                                       ptr,
+                                       inds,
+                                       sz,
+                                       strides(p))
     else
         # FIXME: Also ContiguousAliasing of container
         #return IteratedAliasing(x)
@@ -577,7 +582,7 @@ end
 function will_alias(x_span::MemorySpan, y_span::MemorySpan)
     may_alias(x_span.ptr.space, y_span.ptr.space) || return false
     # FIXME: Allow pointer conversion instead of just failing
-    @assert x_span.ptr.space == y_span.ptr.space
+    @assert x_span.ptr.space == y_span.ptr.space "Memory spans are in different spaces: $(x_span.ptr.space) vs. $(y_span.ptr.space)"
     x_end = x_span.ptr + x_span.len - 1
     y_end = y_span.ptr + y_span.len - 1
     return x_span.ptr <= y_end && y_span.ptr <= x_end
