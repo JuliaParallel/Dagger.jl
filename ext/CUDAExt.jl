@@ -48,6 +48,22 @@ function Dagger.memory_space(x::CuArray)
     device_uuid = CUDA.uuid(dev)
     return CUDAVRAMMemorySpace(myid(), device_id, device_uuid)
 end
+function Dagger.aliasing(x::CuArray{T}) where T
+    space = Dagger.memory_space(x)
+    S = typeof(space)
+    cuptr = pointer(x)
+    rptr = Dagger.RemotePtr{Cvoid}(UInt64(cuptr), space)
+    return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
+end
+Dagger.pointer_in_space(ptr::UInt64, space::CUDAVRAMMemorySpace) =
+    CUDA.CuPtr{UInt8}(ptr)
+# TODO: Make async=true
+Dagger.unsafe_copyto_spaces!(to_space::CUDAVRAMMemorySpace, from_space::CUDAVRAMMemorySpace, to_ptr, from_ptr, len::UInt64) =
+    unsafe_copyto!(to_ptr, from_ptr, len; async=false)
+Dagger.unsafe_copyto_spaces!(to_space::CUDAVRAMMemorySpace, from_space::CPURAMMemorySpace, to_ptr, from_ptr, len::UInt64) =
+    unsafe_copyto!(to_ptr, from_ptr, len; async=false)
+Dagger.unsafe_copyto_spaces!(to_space::CPURAMMemorySpace, from_space::CUDAVRAMMemorySpace, to_ptr, from_ptr, len::UInt64) =
+    unsafe_copyto!(to_ptr, from_ptr, len; async=false)
 
 Dagger.memory_spaces(proc::CuArrayDeviceProc) = Set([CUDAVRAMMemorySpace(proc.owner, proc.device, proc.device_uuid)])
 Dagger.processors(space::CUDAVRAMMemorySpace) = Set([CuArrayDeviceProc(space.owner, space.device, space.device_uuid)])

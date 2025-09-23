@@ -3,6 +3,7 @@ abstract type MemorySpace end
 struct CPURAMMemorySpace <: MemorySpace
     owner::Int
 end
+CPURAMMemorySpace() = CPURAMMemorySpace(myid())
 root_worker_id(space::CPURAMMemorySpace) = space.owner
 
 memory_space(x) = CPURAMMemorySpace(myid())
@@ -89,7 +90,8 @@ function type_may_alias(::Type{T}) where T
     return false
 end
 
-may_alias(::MemorySpace, ::MemorySpace) = true
+may_alias(::MemorySpace, ::MemorySpace) = false
+may_alias(space1::M, space2::M) where M<:MemorySpace = space1 == space2
 may_alias(space1::CPURAMMemorySpace, space2::CPURAMMemorySpace) = space1.owner == space2.owner
 
 struct RemotePtr{T,S<:MemorySpace} <: Ref{T}
@@ -396,7 +398,7 @@ end
 function will_alias(x_span::MemorySpan, y_span::MemorySpan)
     may_alias(x_span.ptr.space, y_span.ptr.space) || return false
     # FIXME: Allow pointer conversion instead of just failing
-    @assert x_span.ptr.space == y_span.ptr.space
+    @assert x_span.ptr.space == y_span.ptr.space "Memory spans are in different spaces: $(x_span.ptr.space) vs. $(y_span.ptr.space)"
     x_end = x_span.ptr + x_span.len - 1
     y_end = y_span.ptr + y_span.len - 1
     return x_span.ptr <= y_end && y_span.ptr <= x_end
