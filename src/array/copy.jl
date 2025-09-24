@@ -24,81 +24,103 @@ function allocate_copy_buffer(part::Blocks{N}, A::DArray{T,N}) where {T,N}
     # FIXME: undef initializer
     return zeros(part, T, size(A))
 end
-function Base.copyto!(B::DArray{T,N}, A::DArray{T,N}) where {T,N}
-    if size(B) != size(A)
-        throw(DimensionMismatch("Cannot copy from array of size $(size(A)) to array of size $(size(B))"))
+
+function darray_copyto!(B::DArray{TB,NB}, A::DArray{TA,NA}, Binds=parentindices(B), Ainds=parentindices(A)) where {TB,NB,TA,NA}
+    Nmax = max(NA, NB)
+
+    pad1(x, i) = length(x) < i ? 1 : x[i]
+    pad1range(x, i) = length(x) < i ? (1:1) : x[i]
+    pad1range(x::ArrayDomain, i) = length(x.indexes) < i ? (1:1) : x.indexes[i]
+    padNmax(x) = ntuple(i->pad1range(x, i), Nmax)
+    padNmax(x::ArrayDomain) = padNmax(x.indexes)
+
+    to_range(x::UnitRange) = x
+    to_range(x::Integer) = x:x
+    to_range(x::Base.OneTo{Int}) = UnitRange(x)
+    to_range(x::Base.Slice{Base.OneTo{Int}}) = UnitRange(x)
+    to_range(::StepRange) = throw(ArgumentError("Non-continuous ranges are not yet supported for DArray copy"))
+    to_range(x) = throw(ArgumentError("Unsupported range type for DArray copy: $(typeof(x))"))
+
+    if any(x->x isa Vector, Binds) || any(x->x isa Vector, Ainds)
+        # Split the copy into multiple copies
+        dims_with_vector = findall(x->x[1] isa Vector || x[2] isa Vector, collect(zip(Binds, Ainds)))
+        Binds_set = Iterators.product(ntuple(i->i in dims_with_vector ? pad1range(Binds, i) : Ref(pad1range(Binds, i)), Nmax)...)
+        Ainds_set = Iterators.product(ntuple(i->i in dims_with_vector ? pad1range(Ainds, i) : Ref(pad1range(Ainds, i)), Nmax)...)
+        for (Binds_inner, Ainds_inner) in zip(Binds_set, Ainds_set)
+            darray_copyto!(B, A, Binds_inner, Ainds_inner)
+        end
+        return
     end
 
-    Bc = B.chunks
-    Ac = A.chunks
-    Asd_all = A.subdomains::DomainBlocks{N}
+    if !all(ntuple(i->length(pad1range(Binds, i)) == length(pad1range(Ainds, i)), Nmax))
+        throw(DimensionMismatch("Cannot copy from array of size $(size(A)) (indices $Ainds) to array of size $(size(B)) (indices $Binds)"))
+    end
+
+    # Global element ranges
+    Binds_range = ntuple(i->to_range(pad1range(Binds, i)), Nmax)
+    Ainds_range = ntuple(i->to_range(pad1range(Ainds, i)), Nmax)
+
+    # Global element offsets
+    Binds_offset = ntuple(i->Binds_range[i].start-1, Nmax)
+    Ainds_offset = ntuple(i->Ainds_range[i].start-1, Nmax)
+
+    # Limited chunk ranges
+    Bblocksize = ntuple(i->pad1(B.partitioning.blocksize, i), Nmax)
+    Ablocksize = ntuple(i->pad1(A.partitioning.blocksize, i), Nmax)
+    Bidx_range = ntuple(i->UnitRange(fld1(Binds_range[i].start, Bblocksize[i]), fld1(Binds_range[i].stop, Bblocksize[i])), Nmax)
+    Aidx_range = ntuple(i->UnitRange(fld1(Ainds_range[i].start, Ablocksize[i]), fld1(Ainds_range[i].stop, Ablocksize[i])), Nmax)
+
+    # Limited chunk indices
+    Bci = CartesianIndices(Bidx_range)
+    Aci = CartesianIndices(Aidx_range)
+
+    # Per-chunk ranges
+    Bsd = B.subdomains::DomainBlocks{NB}
+    Asd = A.subdomains::DomainBlocks{NA}
+    Bsd_all = collect(reshape(Bsd, ntuple(i->pad1(size(Bsd), i), Nmax)))
+    Asd_all = collect(reshape(Asd, ntuple(i->pad1(size(Asd), i), Nmax)))
+
+    shift_ranges(x::NTuple{N1,UnitRange}, offset::NTuple{N2,Int}) where {N1,N2} =
+        ntuple(i->UnitRange(x[i].start-offset[i], x[i].stop-offset[i]), Nmax)
 
     Dagger.spawn_datadeps() do
-        for Bidx in CartesianIndices(Bc)
-            Bpart = Bc[Bidx]
-            Bsd = B.subdomains[Bidx]
+        for Bidx in Bci
+            Bpart = B.chunks[Bidx]
+            Bsd_global_raw = padNmax(Bsd_all[Bidx])
+            Bsd_global_shifted = shift_ranges(Bsd_global_raw, Binds_offset)
 
-            # Find the first overlapping subdomain of A
-            if A.partitioning isa Blocks
-                Aidx = CartesianIndex(ntuple(i->fld1(Bsd.indexes[i].start, A.partitioning.blocksize[i]), N))
-            else
-                # Fallback just in case of non-dense partitioning
-                Aidx = first(CartesianIndices(Ac))
-                Asd = first(Asd_all)
-                for dim in 1:N
-                    while Asd.indexes[dim].stop < Bsd.indexes[dim].start
-                        Aidx += CartesianIndex(ntuple(i->i==dim, N))
-                        Asd = Asd_all[Aidx]
-                    end
-                end
-            end
-            Aidx_start = Aidx
-
-            # Find the last overlapping subdomain of A
-            for dim in 1:N
-                while true
-                    Aidx_next = Aidx + CartesianIndex(ntuple(i->i==dim, N))
-                    if !(Aidx_next in CartesianIndices(Ac))
-                        break
-                    end
-                    Asd_next = Asd_all[Aidx_next]
-                    if Asd_next.indexes[dim].start <= Bsd.indexes[dim].stop
-                        Aidx = Aidx_next
-                    else
-                        break
-                    end
-                end
-            end
-            Aidx_end = Aidx
-
-            # Find the span and set of subdomains of A overlapping Bpart
-            Aidx_span = Aidx_start:Aidx_end
-            Asd_view = view(A.subdomains, Aidx_span)
+            ## Find the overlapping subdomains of A
+            # Calculate start indices based on overlap with Bsd
+            Asd_global_target = shift_ranges(Bsd_global_shifted, map(-, Ainds_offset))
+            Aidx_start_vals = ntuple(i->clamp(fld1(Asd_global_target[i].start, Ablocksize[i]), Aidx_range[i].start, Aidx_range[i].stop), Nmax)
+            Aidx_start = CartesianIndex(Aidx_start_vals)
+            # Calculate end indices based on overlap with Bsd
+            Aidx_end_vals = ntuple(i->clamp(fld1(Asd_global_target[i].stop, Ablocksize[i]), Aidx_range[i].start, Aidx_range[i].stop), Nmax)
+            Aidx_end = CartesianIndex(Aidx_end_vals)
 
             # Copy all overlapping subdomains of A
-            for Aidx in Aidx_span
-                Asd = Asd_all[Aidx]
-                Apart = Ac[Aidx]
+            for Aidx in Aidx_start:Aidx_end
+                Apart = A.chunks[Aidx]
+                Asd_global_raw = padNmax(Asd_all[Aidx])
+                Asd_global_shifted = shift_ranges(Asd_global_raw, Ainds_offset)
 
-                # Compute the true range
-                range_start = CartesianIndex(ntuple(i->max(Bsd.indexes[i].start, Asd.indexes[i].start), N))
-                range_end = CartesianIndex(ntuple(i->min(Bsd.indexes[i].stop, Asd.indexes[i].stop), N))
-                range_diff = range_end - range_start
+                # Compute the global ranges
+                range_overlap = intersect(CartesianIndices(Bsd_global_shifted), CartesianIndices(Asd_global_shifted))
+                Brange_start = ntuple(i->Bsd_global_raw[i].start, Nmax)
+                Arange_start = ntuple(i->Asd_global_raw[i].start, Nmax)
+                Brange_global = range_overlap .+ CartesianIndex(Binds_offset)
+                Arange_global = range_overlap .+ CartesianIndex(Ainds_offset)
 
-                # Compute the offset range into Apart
-                Asd_start = ntuple(i->Asd.indexes[i].start, N)
-                Asd_end = ntuple(i->Asd.indexes[i].stop, N)
-                Arange = range(range_start - CartesianIndex(Asd_start) + CartesianIndex{N}(1),
-                               range_start - CartesianIndex(Asd_start) + CartesianIndex{N}(1) + range_diff)
+                # Clamp to the selected indices
+                Brange_global_clamped = intersect(Brange_global, CartesianIndices(Binds_range))
+                Arange_global_clamped = intersect(Arange_global, CartesianIndices(Ainds_range))
 
-                # Compute the offset range into Bpart
-                Bsd_start = ntuple(i->Bsd.indexes[i].start, N)
-                Bsd_end = ntuple(i->Bsd.indexes[i].stop, N)
-                Brange = range(range_start - CartesianIndex(Bsd_start) + CartesianIndex{N}(1),
-                               range_start - CartesianIndex(Bsd_start) + CartesianIndex{N}(1) + range_diff)
+                # Compute the local ranges
+                Brange_local = Brange_global_clamped .- CartesianIndex(Brange_start) .+ CartesianIndex{Nmax}(1)
+                Arange_local = Arange_global_clamped .- CartesianIndex(Arange_start) .+ CartesianIndex{Nmax}(1)
 
-                # Perform view copy
-                Dagger.@spawn copyto_view!(Out(Bpart), Brange, In(Apart), Arange)
+                # Perform local view copy
+                Dagger.@spawn copyto_view!(Out(Bpart), Brange_local, In(Apart), Arange_local)
             end
         end
     end
@@ -109,3 +131,15 @@ function copyto_view!(Bpart, Brange, Apart, Arange)
     copyto!(view(Bpart, Brange), view(Apart, Arange))
     return
 end
+
+Base.copyto!(B::DArray{T,N}, A::DArray{T,N}) where {T,N} =
+    darray_copyto!(B, A)
+Base.copyto!(B::DArray{T,N}, A::Array{T,N}) where {T,N} =
+    darray_copyto!(B, view(A, B.partitioning))
+Base.copyto!(B::Array{T,N}, A::DArray{T,N}) where {T,N} =
+    darray_copyto!(view(B, A.partitioning), A)
+
+StridedDArray{T,N} = Union{<:DArray{T,N}, SubArray{T,N,<:DArray{T,NP}} where NP}
+
+Base.copyto!(B::StridedDArray, A::StridedDArray) =
+    darray_copyto!(parent(B), parent(A), parentindices(B), parentindices(A))

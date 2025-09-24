@@ -197,6 +197,7 @@ function Base.collect(d::DArray{T,N}; tree=false, copyto=false) where {T,N}
         treereduce_nd(dimcatfuncs, asyncmap(fetch, a.chunks))
     end
 end
+Array{T,N}(A::DArray{S,N}) where {T,N,S} = convert(Array{T,N}, collect(A))
 
 Base.wait(A::DArray) = foreach(wait, A.chunks)
 
@@ -330,17 +331,6 @@ Base.copy(x::DArray{T,N,B,F}) where {T,N,B,F} =
 # Because OrdinaryDiffEq uses `Base.promote_op(/, ::DArray, ::Real)`
 Base.:(/)(x::DArray{T,N,B,F}, y::U) where {T<:Real,U<:Real,N,B,F} =
     (x ./ y)::DArray{Base.promote_op(/, T, U),N,B,F}
-
-"""
-    view(c::DArray, d)
-
-A `view` of a `DArray` chunk returns a `DArray` of `Thunk`s.
-"""
-function Base.view(c::DArray, d)
-    subchunks, subdomains = lookup_parts(c, chunks(c), domainchunks(c), d)
-    d1 = alignfirst(d)
-    DArray(eltype(c), d1, subdomains, subchunks, c.partitioning, c.concat)
-end
 
 function group_indices(cumlength, idxs,at=1, acc=Any[])
     at > length(idxs) && return acc

@@ -22,14 +22,13 @@
     end
 end
 
-@testset "Getindex" begin
+@testset "getindex" begin
     function test_getindex(x)
         X = distribute(x, Blocks(3,3))
         @test collect(X[3:8, 2:7]) == x[3:8, 2:7]
         ragged_idx = [1,2,9,7,6,2,4,5]
         @test collect(X[ragged_idx, 2:7]) == x[ragged_idx, 2:7]
         @test collect(X[ragged_idx, reverse(ragged_idx)]) == x[ragged_idx, reverse(ragged_idx)]
-        ragged_idx = [1,2,9,7,6,2,4,5]
         @test collect(X[[2,7,10], :]) == x[[2,7,10], :]
         @test collect(X[[], ragged_idx]) == x[[], ragged_idx]
         @test collect(X[[], []]) == x[[], []]
@@ -58,4 +57,46 @@ end
     X = distribute(x, Blocks(3,3))
     @test collect(setindex(X,1.0, 3:8, 2:7)) == y
     @test collect(X) == x
+end
+
+@testset "slicing" begin
+    A = zeros(Blocks(5, 3), 10, 10)
+    @test A[1:2, 1:2] isa DArray
+
+    # Matrix - Vector
+    for idx in 1:10
+        A = zeros(Blocks(5, 3), 10, 10)
+        b = rand(Blocks(2), 10)
+        Dagger.allowscalar(false) do
+            A[:, idx] = b
+        end
+        @test all(collect(A)[:, idx] .== b)
+        @test all(collect(A)[:, 1:idx-1] .== 0)
+        @test all(collect(A)[:, idx+1:end] .== 0)
+    end
+
+    # Matrix - Vector (transposed)
+    for idx in 1:10
+        A = zeros(Blocks(5, 3), 10, 10)
+        b = rand(Blocks(2), 10)
+        bT = DArray(b')
+        Dagger.allowscalar(false) do
+            A[idx, :] = bT
+        end
+        @test all(collect(A)[idx, :] .== b)
+        @test all(collect(A)[1:idx-1, :] .== 0)
+        @test all(collect(A)[idx+1:end, :] .== 0)
+    end
+
+    # Matrix - Matrix
+    for idx in 1:9
+        A = zeros(Blocks(5, 3), 10, 10)
+        B = rand(Blocks(2, 2), 10, 10)
+        Dagger.allowscalar(false) do
+            A[idx:(idx+1), idx:(idx+1)] = view(B, idx:(idx+1), idx:(idx+1))
+        end
+        diff = setdiff(CartesianIndices(A), CartesianIndices((idx:(idx+1), idx:(idx+1))))
+        @test all(collect(A)[diff] .== 0)
+        @test all(collect(A)[idx:(idx+1), idx:(idx+1)] .== collect(B)[idx:(idx+1), idx:(idx+1)])
+    end
 end
