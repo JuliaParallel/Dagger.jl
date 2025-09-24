@@ -197,6 +197,7 @@ function Base.collect(d::DArray{T,N}; tree=false, copyto=false) where {T,N}
         treereduce_nd(dimcatfuncs, asyncmap(fetch, a.chunks))
     end
 end
+Array{T,N}(A::DArray{S,N}) where {T,N,S} = convert(Array{T,N}, collect(A))
 
 Base.wait(A::DArray) = foreach(wait, A.chunks)
 
