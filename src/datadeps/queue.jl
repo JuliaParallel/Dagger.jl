@@ -353,6 +353,10 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             if !type_may_alias(typeof(arg)) || !supports_inplace_move(state, arg)
                 return [(ArgumentWrapper(arg, identity), false, false)]
             end
+
+            # Get the Chunk for the argument
+            arg = state.raw_arg_to_chunk[arg]
+
             arg_ws = Tuple{ArgumentWrapper,Bool,Bool}[]
             for (dep_mod, readdep, writedep) in deps
                 push!(arg_ws, (ArgumentWrapper(arg, dep_mod), readdep, writedep))
@@ -460,7 +464,9 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     end
 
     # Copy args from remote to local
-    for arg_w in keys(state.arg_owner)
+    # N.B. We sort the keys to ensure a deterministic order for uniformity
+    for arg_w in sort(collect(keys(state.arg_owner)); by=arg_w->arg_w.hash)
+        check_uniform(arg_w)
         arg = arg_w.arg
         origin_space = state.arg_origin[arg]
         remainder = compute_remainder_for_arg!(state, origin_space, arg_w, write_num)

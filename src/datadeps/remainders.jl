@@ -150,6 +150,8 @@ function compute_remainder_for_arg!(state::DataDepsState,
             @goto restart
         end
     end
+    check_uniform(spaces)
+    check_uniform(target_ainfos)
 
     # We may only need to schedule a full copy from the origin space to the
     # target space if this is the first time we've written to `arg_w`
@@ -183,6 +185,8 @@ function compute_remainder_for_arg!(state::DataDepsState,
             other_ainfo = aliasing!(state, owner_space, arg_w)
             other_space = owner_space
         end
+        check_uniform(other_ainfo)
+        check_uniform(other_space)
 
         # Lookup all memory spans for arg_w in these spaces
         other_remote_arg_w = state.ainfo_arg[other_ainfo]
@@ -195,6 +199,9 @@ function compute_remainder_for_arg!(state::DataDepsState,
         end
         nspans = length(first(other_ainfos))
         other_many_spans = [ManyMemorySpan{N}(ntuple(i -> other_ainfos[i][j], N)) for j in 1:nspans]
+
+        check_uniform(other_many_spans)
+        check_uniform(spaces)
 
         if other_space == target_space
             # Only subtract, this data is already up-to-date in target_space
@@ -220,8 +227,13 @@ function compute_remainder_for_arg!(state::DataDepsState,
 
     # Return scheduled copies
     mra = MultiRemainderAliasing()
-    for (space, (spans, syncdeps)) in tracker
-        push!(mra.remainders, RemainderAliasing(space, spans, syncdeps))
+    for space in spaces
+        if haskey(tracker, space)
+            spans, syncdeps = tracker[space]
+            if !isempty(spans)
+                push!(mra.remainders, RemainderAliasing(space, spans, syncdeps))
+            end
+        end
     end
     return mra
 end
@@ -257,6 +269,9 @@ Enqueues a copy operation to update the remainder regions of an object before a 
 function enqueue_remainder_copy_to!(state::DataDepsState, dest_space::MemorySpace, arg_w::ArgumentWrapper, remainder_aliasing::MultiRemainderAliasing,
                                     f, idx, dest_scope, task, write_num::Int)
     for remainder in remainder_aliasing.remainders
+        check_uniform(remainder.space)
+        @assert !isempty(remainder.spans)
+        check_uniform(remainder.spans)
         enqueue_remainder_copy_to!(state, dest_space, arg_w, remainder, f, idx, dest_scope, task, write_num)
     end
 end
@@ -301,6 +316,9 @@ Enqueues a copy operation to update the remainder regions of an object back to t
 function enqueue_remainder_copy_from!(state::DataDepsState, dest_space::MemorySpace, arg_w::ArgumentWrapper, remainder_aliasing::MultiRemainderAliasing,
                                       dest_scope, write_num::Int)
     for remainder in remainder_aliasing.remainders
+        check_uniform(remainder.space)
+        @assert !isempty(remainder.spans)
+        check_uniform(remainder.spans)
         enqueue_remainder_copy_from!(state, dest_space, arg_w, remainder, dest_scope, write_num)
     end
 end

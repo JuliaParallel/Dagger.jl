@@ -759,39 +759,15 @@ function remotecall_endpoint(f, accel::Dagger.MPIAcceleration, from_proc, to_pro
     loc_rank = MPI.Comm_rank(accel.comm)
     task = DATADEPS_CURRENT_TASK[]
     return with(MPI_UID=>task.uid, MPI_UNIFORM=>true) do
-        if data isa Chunk
-            tag = to_tag(hash(data.handle.id))
-            space = memory_space(data)
-            if space.rank != from_proc.rank
-                # If the data is already where it needs to be
-                @assert space.rank == to_proc.rank
-                if space.rank == loc_rank
-                    value = poolget(data.handle)
-                    data_converted = f(move(from_proc.innerProc, to_proc.innerProc, value))
-                    return tochunk(data_converted, to_proc, to_space)
-                else
-                    T = move_type(from_proc.innerProc, to_proc.innerProc, chunktype(data))
-                    T_new = f !== identity ? Base._return_type(f, Tuple{T}) : T
-                    @assert isconcretetype(T_new) "Return type inference failed, expected concrete type, got $T -> $T_new"
-                    return tochunk(nothing, to_proc, to_space; type=T_new)
-                end
-            end
-
-            # The data is on the source rank
-            @assert space.rank == from_proc.rank
-            if loc_rank == from_proc.rank == to_proc.rank
+        @assert data isa Chunk "Expected Chunk, got $(typeof(data))"
+        tag = to_tag(hash(data.handle.id))
+        space = memory_space(data)
+        if space.rank != from_proc.rank
+            # If the data is already where it needs to be
+            @assert space.rank == to_proc.rank
+            if space.rank == loc_rank
                 value = poolget(data.handle)
                 data_converted = f(move(from_proc.innerProc, to_proc.innerProc, value))
-                return tochunk(data_converted, to_proc, to_space)
-            elseif loc_rank == from_proc.rank
-                value = poolget(data.handle)
-                data_moved = move(from_proc.innerProc, to_proc.innerProc, value)
-                Dagger.send_yield(data_moved, accel.comm, to_proc.rank, tag)
-                # FIXME: This is wrong to take typeof(data_moved), because the type may change
-                return tochunk(nothing, to_proc, to_space; type=typeof(data_moved))
-            elseif loc_rank == to_proc.rank
-                data_moved = Dagger.recv_yield(accel.comm, from_space.rank, tag)
-                data_converted = f(move(from_proc.innerProc, to_proc.innerProc, data_moved))
                 return tochunk(data_converted, to_proc, to_space)
             else
                 T = move_type(from_proc.innerProc, to_proc.innerProc, chunktype(data))
@@ -799,10 +775,29 @@ function remotecall_endpoint(f, accel::Dagger.MPIAcceleration, from_proc, to_pro
                 @assert isconcretetype(T_new) "Return type inference failed, expected concrete type, got $T -> $T_new"
                 return tochunk(nothing, to_proc, to_space; type=T_new)
             end
-        else
-            #error("We shouldn't call f here, if we're not the destination rank")
-            data_converted = f(move(from_proc, to_proc, data))
+        end
+
+        # The data is on the source rank
+        @assert space.rank == from_proc.rank
+        if loc_rank == from_proc.rank == to_proc.rank
+            value = poolget(data.handle)
+            data_converted = f(move(from_proc.innerProc, to_proc.innerProc, value))
             return tochunk(data_converted, to_proc, to_space)
+        elseif loc_rank == from_proc.rank
+            value = poolget(data.handle)
+            data_moved = move(from_proc.innerProc, to_proc.innerProc, value)
+            Dagger.send_yield(data_moved, accel.comm, to_proc.rank, tag)
+            # FIXME: This is wrong to take typeof(data_moved), because the type may change
+            return tochunk(nothing, to_proc, to_space; type=typeof(data_moved))
+        elseif loc_rank == to_proc.rank
+            data_moved = Dagger.recv_yield(accel.comm, from_space.rank, tag)
+            data_converted = f(move(from_proc.innerProc, to_proc.innerProc, data_moved))
+            return tochunk(data_converted, to_proc, to_space)
+        else
+            T = move_type(from_proc.innerProc, to_proc.innerProc, chunktype(data))
+            T_new = f !== identity ? Base._return_type(f, Tuple{T}) : T
+            @assert isconcretetype(T_new) "Return type inference failed, expected concrete type, got $T -> $T_new"
+            return tochunk(nothing, to_proc, to_space; type=T_new)
         end
     end
 end

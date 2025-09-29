@@ -225,6 +225,7 @@ _identity_hash(arg, h::UInt=UInt(0)) = ismutable(arg) ? objectid(arg) : hash(arg
 _identity_hash(arg::SubArray, h::UInt=UInt(0)) = hash(arg.indices, hash(arg.offset1, hash(arg.stride1, _identity_hash(arg.parent, h))))
 _identity_hash(arg::CartesianIndices, h::UInt=UInt(0)) = hash(arg.indices, hash(typeof(arg), h))
 
+@warn "Dispatch bcast behavior on acceleration" maxlog=1
 struct ArgumentWrapper
     arg
     dep_mod
@@ -232,16 +233,29 @@ struct ArgumentWrapper
 
     function ArgumentWrapper(arg, dep_mod)
         h = hash(dep_mod)
-        h = _identity_hash(arg, h)
+        # FIXME: This is causing non-uniformity issues
+        #h = _identity_hash(arg, h)
+        rank = MPI.Comm_rank(MPI.COMM_WORLD)
+        if rank == 0
+            h = _identity_hash(arg, h)
+            bcast_send_yield(h, MPI.COMM_WORLD, 0, UInt32(0))
+        else
+            h = recv_yield(MPI.COMM_WORLD, 0, UInt32(0))::UInt
+        end
         return new(arg, dep_mod, h)
     end
 end
 Base.hash(aw::ArgumentWrapper) = hash(ArgumentWrapper, aw.hash)
 Base.:(==)(aw1::ArgumentWrapper, aw2::ArgumentWrapper) =
     aw1.hash == aw2.hash
+Base.isequal(aw1::ArgumentWrapper, aw2::ArgumentWrapper) =
+    aw1.hash == aw2.hash
 
 @warn "Switch ArgumentWrapper to contain just the argument, and add DependencyWrapper" maxlog=1
 struct DataDepsState
+    # The mapping of original raw argument to its Chunk
+    raw_arg_to_chunk::IdDict{Any,Chunk}
+
     # The origin memory space of each argument
     # Used to track the original location of an argument, for final copy-from
     arg_origin::IdDict{Any,MemorySpace}
@@ -299,6 +313,7 @@ struct DataDepsState
             @warn "aliasing=false is no longer supported, aliasing is now always enabled" maxlog=1
         end
 
+        arg_to_chunk = IdDict{Any,Chunk}()
         arg_origin = IdDict{Any,MemorySpace}()
         remote_args = Dict{MemorySpace,IdDict{Any,Any}}()
         remote_arg_to_original = IdDict{Any,Any}()
@@ -316,7 +331,7 @@ struct DataDepsState
         ainfos_owner = Dict{AliasingWrapper,Union{Pair{DTask,Int},Nothing}}()
         ainfos_readers = Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}()
 
-        return new(arg_origin, remote_args, remote_arg_to_original, ainfo_arg, arg_owner, arg_overlaps, ainfo_backing_chunk, arg_history,
+        return new(arg_to_chunk, arg_origin, remote_args, remote_arg_to_original, ainfo_arg, arg_owner, arg_overlaps, ainfo_backing_chunk, arg_history,
                    supports_inplace_cache, ainfo_cache, ainfos_overlaps, ainfos_owner, ainfos_readers)
     end
 end
@@ -374,14 +389,36 @@ function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
         # Skip non-aliasing arguments
         type_may_alias(typeof(arg)) || continue
 
+        # Skip arguments not supporting in-place move
+        supports_inplace_move(state, arg) || continue
+
+        # Generate a Chunk for the argument if necessary
+        if haskey(state.raw_arg_to_chunk, arg)
+            arg = state.raw_arg_to_chunk[arg]
+        else
+            if !(arg isa Chunk)
+                new_arg = with(MPI_UID=>task.uid) do
+                    tochunk(arg)
+                end
+                state.raw_arg_to_chunk[arg] = new_arg
+                arg = new_arg
+            else
+                state.raw_arg_to_chunk[arg] = arg
+            end
+        end
+
         # Track the origin space of the argument
         origin_space = memory_space(arg)
+        check_uniform(origin_space)
         state.arg_origin[arg] = origin_space
         state.remote_arg_to_original[arg] = arg
 
         # Populate argument info for all aliasing dependencies
         for (dep_mod, _, _) in deps
+            # Generate an ArgumentWrapper for the argument
             aw = ArgumentWrapper(arg, dep_mod)
+
+            # Populate argument info
             populate_argument_info!(state, aw, origin_space)
         end
     end
