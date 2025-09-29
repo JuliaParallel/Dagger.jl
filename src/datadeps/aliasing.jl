@@ -233,15 +233,20 @@ struct ArgumentWrapper
 
     function ArgumentWrapper(arg, dep_mod)
         h = hash(dep_mod)
-        # FIXME: This is causing non-uniformity issues
-        #h = _identity_hash(arg, h)
-        rank = MPI.Comm_rank(MPI.COMM_WORLD)
-        if rank == 0
+        #if !type_may_alias(typeof(arg))
             h = _identity_hash(arg, h)
-            bcast_send_yield(h, MPI.COMM_WORLD, 0, UInt32(0))
+            #=
         else
-            h = recv_yield(MPI.COMM_WORLD, 0, UInt32(0))::UInt
+            rank = MPI.Comm_rank(MPI.COMM_WORLD)
+            if rank == 0
+                h = _identity_hash(arg, h)
+                @opcounter :argwrapper_bcast_send_yield
+                bcast_send_yield(h, MPI.COMM_WORLD, 0, UInt32(0))
+            else
+                h = recv_yield(MPI.COMM_WORLD, 0, UInt32(0))::UInt
+            end
         end
+        =#
         return new(arg, dep_mod, h)
     end
 end
@@ -250,6 +255,12 @@ Base.:(==)(aw1::ArgumentWrapper, aw2::ArgumentWrapper) =
     aw1.hash == aw2.hash
 Base.isequal(aw1::ArgumentWrapper, aw2::ArgumentWrapper) =
     aw1.hash == aw2.hash
+
+struct HistoryEntry
+    ainfo::AliasingWrapper
+    space::MemorySpace
+    write_num::Int
+end
 
 @warn "Switch ArgumentWrapper to contain just the argument, and add DependencyWrapper" maxlog=1
 struct DataDepsState
@@ -275,7 +286,7 @@ struct DataDepsState
     # The history of writes (direct or indirect) to each argument and dep_mod, in terms of ainfos directly written to, and the memory space they were written to
     # Updated when a new write happens on an overlapping ainfo
     # Used by remainder copies to track which portions of an argument and dep_mod were written to elsewhere, through another argument
-    arg_history::Dict{ArgumentWrapper,Vector{Tuple{AliasingWrapper,MemorySpace,Int}}}
+    arg_history::Dict{ArgumentWrapper,Vector{HistoryEntry}}
 
     # The mapping of memory space and argument to the memory space of the last direct write
     # Used by remainder copies to lookup the "backstop" if any portion of the target ainfo is not updated by the remainder
@@ -321,7 +332,7 @@ struct DataDepsState
         arg_owner = Dict{ArgumentWrapper,MemorySpace}()
         arg_overlaps = Dict{ArgumentWrapper,Set{ArgumentWrapper}}()
         ainfo_backing_chunk = Dict{MemorySpace,Dict{AbstractAliasing,Chunk}}()
-        arg_history = Dict{ArgumentWrapper,Vector{Tuple{AliasingWrapper,MemorySpace,Int}}}()
+        arg_history = Dict{ArgumentWrapper,Vector{HistoryEntry}}()
 
         supports_inplace_cache = IdDict{Any,Bool}()
         ainfo_cache = Dict{ArgumentWrapper,AliasingWrapper}()
@@ -436,7 +447,7 @@ function populate_argument_info!(state::DataDepsState, arg_w::ArgumentWrapper, o
         state.arg_overlaps[arg_w] = Set{ArgumentWrapper}()
     end
     if !haskey(state.arg_history, arg_w)
-        state.arg_history[arg_w] = Vector{Tuple{AliasingWrapper,MemorySpace,Int}}()
+        state.arg_history[arg_w] = Vector{HistoryEntry}()
     end
 
     # Calculate the ainfo (which will populate ainfo structures and merge history)
@@ -470,19 +481,33 @@ function populate_ainfo!(state::DataDepsState, original_arg_w::ArgumentWrapper, 
 end
 function merge_history!(state::DataDepsState, arg_w::ArgumentWrapper, other_arg_w::ArgumentWrapper)
     history = state.arg_history[arg_w]
-    for (other_ainfo, other_space, write_num) in state.arg_history[other_arg_w]
-        @opcounter :merge_history
-        @opcounter :merge_history_complexity length(history)
-        write_num_tuple = (0, 0, write_num)
-        idx = searchsortedfirst(history, write_num_tuple; by=x->x[3])
-        if idx === nothing
-            if isempty(history)
-                idx = 1
-            else
-                idx = length(history) + 1
+    @opcounter :merge_history
+    @opcounter :merge_history_complexity length(history)
+    #largest_value_update!(length(history))
+    for other_entry in state.arg_history[other_arg_w]
+        write_num_tuple = HistoryEntry(AliasingWrapper(NoAliasing()), CPURAMMemorySpace(), other_entry.write_num)
+        range = searchsorted(history, write_num_tuple; by=x->x.write_num)
+        if !isempty(range)
+            # Find and skip duplicates
+            match = false
+            for source_idx in range
+                source_entry = history[source_idx]
+                if source_entry.ainfo == other_entry.ainfo &&
+                    source_entry.space == other_entry.space &&
+                    source_entry.write_num == other_entry.write_num
+                    match = true
+                    break
+                end
             end
+            match && continue
+
+            # Insert at the first position
+            idx = first(range)
+        else
+            # Insert at the last position
+            idx = length(history) + 1
         end
-        insert!(history, idx, (other_ainfo, other_space, write_num))
+        insert!(history, idx, other_entry)
     end
 end
 
@@ -556,12 +581,12 @@ function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::M
     empty!(state.arg_history[arg_w])
 
     # Add our own history
-    push!(state.arg_history[arg_w], (ainfo, dest_space, write_num))
+    push!(state.arg_history[arg_w], HistoryEntry(ainfo, dest_space, write_num))
 
     # Find overlapping arguments and update their history
     for other_arg_w in state.arg_overlaps[arg_w]
         other_arg_w == arg_w && continue
-        push!(state.arg_history[other_arg_w], (ainfo, dest_space, write_num))
+        push!(state.arg_history[other_arg_w], HistoryEntry(ainfo, dest_space, write_num))
     end
 
     # Record the last place we were fully written to
