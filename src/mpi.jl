@@ -704,12 +704,12 @@ function move!(dep_mod::RemainderAliasing{<:MPIMemorySpace}, to_space::MPIMemory
             end
 
             # Send the spans
-            send_yield(len, to_space.comm, to_space.rank, tag)
+            #send_yield(len, to_space.comm, to_space.rank, tag)
             send_yield!(copies, to_space.comm, to_space.rank, tag; check_seen=false)
             #send_yield(copies, to_space.comm, to_space.rank, tag)
         elseif local_rank == to_space.rank
             # Receive the spans
-            len = recv_yield(from_space.comm, from_space.rank, tag)
+            len = sum(span_tuple->span_len(span_tuple[1]), dep_mod.spans)
             copies = Vector{UInt8}(undef, len)
             recv_yield!(copies, from_space.comm, from_space.rank, tag)
             #copies = recv_yield(from_space.comm, from_space.rank, tag)
