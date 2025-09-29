@@ -222,9 +222,11 @@ function unwrap_inout(arg)
 end
 
 _identity_hash(arg, h::UInt=UInt(0)) = ismutable(arg) ? objectid(arg) : hash(arg, h)
+_identity_hash(arg::Chunk, h::UInt=UInt(0)) = hash(arg.handle, hash(Chunk, h))
 _identity_hash(arg::SubArray, h::UInt=UInt(0)) = hash(arg.indices, hash(arg.offset1, hash(arg.stride1, _identity_hash(arg.parent, h))))
 _identity_hash(arg::CartesianIndices, h::UInt=UInt(0)) = hash(arg.indices, hash(typeof(arg), h))
 
+@warn "Dispatch bcast behavior on acceleration" maxlog=1
 struct ArgumentWrapper
     arg
     dep_mod
@@ -233,15 +235,27 @@ struct ArgumentWrapper
     function ArgumentWrapper(arg, dep_mod)
         h = hash(dep_mod)
         h = _identity_hash(arg, h)
+        check_uniform(h, arg)
         return new(arg, dep_mod, h)
     end
 end
 Base.hash(aw::ArgumentWrapper) = hash(ArgumentWrapper, aw.hash)
 Base.:(==)(aw1::ArgumentWrapper, aw2::ArgumentWrapper) =
     aw1.hash == aw2.hash
+Base.isequal(aw1::ArgumentWrapper, aw2::ArgumentWrapper) =
+    aw1.hash == aw2.hash
+
+struct HistoryEntry
+    ainfo::AliasingWrapper
+    space::MemorySpace
+    write_num::Int
+end
 
 @warn "Switch ArgumentWrapper to contain just the argument, and add DependencyWrapper" maxlog=1
 struct DataDepsState
+    # The mapping of original raw argument to its Chunk
+    raw_arg_to_chunk::IdDict{Any,Chunk}
+
     # The origin memory space of each argument
     # Used to track the original location of an argument, for final copy-from
     arg_origin::IdDict{Any,MemorySpace}
@@ -261,7 +275,7 @@ struct DataDepsState
     # The history of writes (direct or indirect) to each argument and dep_mod, in terms of ainfos directly written to, and the memory space they were written to
     # Updated when a new write happens on an overlapping ainfo
     # Used by remainder copies to track which portions of an argument and dep_mod were written to elsewhere, through another argument
-    arg_history::Dict{ArgumentWrapper,Vector{Tuple{AliasingWrapper,MemorySpace,Int}}}
+    arg_history::Dict{ArgumentWrapper,Vector{HistoryEntry}}
 
     # The mapping of memory space and argument to the memory space of the last direct write
     # Used by remainder copies to lookup the "backstop" if any portion of the target ainfo is not updated by the remainder
@@ -299,6 +313,7 @@ struct DataDepsState
             @warn "aliasing=false is no longer supported, aliasing is now always enabled" maxlog=1
         end
 
+        arg_to_chunk = IdDict{Any,Chunk}()
         arg_origin = IdDict{Any,MemorySpace}()
         remote_args = Dict{MemorySpace,IdDict{Any,Any}}()
         remote_arg_to_original = IdDict{Any,Any}()
@@ -306,7 +321,7 @@ struct DataDepsState
         arg_owner = Dict{ArgumentWrapper,MemorySpace}()
         arg_overlaps = Dict{ArgumentWrapper,Set{ArgumentWrapper}}()
         ainfo_backing_chunk = Dict{MemorySpace,Dict{AbstractAliasing,Chunk}}()
-        arg_history = Dict{ArgumentWrapper,Vector{Tuple{AliasingWrapper,MemorySpace,Int}}}()
+        arg_history = Dict{ArgumentWrapper,Vector{HistoryEntry}}()
 
         supports_inplace_cache = IdDict{Any,Bool}()
         ainfo_cache = Dict{ArgumentWrapper,AliasingWrapper}()
@@ -316,7 +331,7 @@ struct DataDepsState
         ainfos_owner = Dict{AliasingWrapper,Union{Pair{DTask,Int},Nothing}}()
         ainfos_readers = Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}()
 
-        return new(arg_origin, remote_args, remote_arg_to_original, ainfo_arg, arg_owner, arg_overlaps, ainfo_backing_chunk, arg_history,
+        return new(arg_to_chunk, arg_origin, remote_args, remote_arg_to_original, ainfo_arg, arg_owner, arg_overlaps, ainfo_backing_chunk, arg_history,
                    supports_inplace_cache, ainfo_cache, ainfos_overlaps, ainfos_owner, ainfos_readers)
     end
 end
@@ -374,14 +389,36 @@ function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
         # Skip non-aliasing arguments
         type_may_alias(typeof(arg)) || continue
 
+        # Skip arguments not supporting in-place move
+        supports_inplace_move(state, arg) || continue
+
+        # Generate a Chunk for the argument if necessary
+        if haskey(state.raw_arg_to_chunk, arg)
+            arg = state.raw_arg_to_chunk[arg]
+        else
+            if !(arg isa Chunk)
+                new_arg = with(MPI_UID=>task.uid) do
+                    tochunk(arg)
+                end
+                state.raw_arg_to_chunk[arg] = new_arg
+                arg = new_arg
+            else
+                state.raw_arg_to_chunk[arg] = arg
+            end
+        end
+
         # Track the origin space of the argument
         origin_space = memory_space(arg)
+        check_uniform(origin_space)
         state.arg_origin[arg] = origin_space
         state.remote_arg_to_original[arg] = arg
 
         # Populate argument info for all aliasing dependencies
         for (dep_mod, _, _) in deps
+            # Generate an ArgumentWrapper for the argument
             aw = ArgumentWrapper(arg, dep_mod)
+
+            # Populate argument info
             populate_argument_info!(state, aw, origin_space)
         end
     end
@@ -399,7 +436,7 @@ function populate_argument_info!(state::DataDepsState, arg_w::ArgumentWrapper, o
         state.arg_overlaps[arg_w] = Set{ArgumentWrapper}()
     end
     if !haskey(state.arg_history, arg_w)
-        state.arg_history[arg_w] = Vector{Tuple{AliasingWrapper,MemorySpace,Int}}()
+        state.arg_history[arg_w] = Vector{HistoryEntry}()
     end
 
     # Calculate the ainfo (which will populate ainfo structures and merge history)
@@ -433,18 +470,45 @@ function populate_ainfo!(state::DataDepsState, original_arg_w::ArgumentWrapper, 
 end
 function merge_history!(state::DataDepsState, arg_w::ArgumentWrapper, other_arg_w::ArgumentWrapper)
     history = state.arg_history[arg_w]
-    for (other_ainfo, other_space, write_num) in state.arg_history[other_arg_w]
-        @opcounter :merge_history
-        @opcounter :merge_history_complexity length(history)
-        idx = findfirst(h->h[3] > write_num, history)
-        if idx === nothing
-            if isempty(history)
-                idx = 1
-            else
-                idx = length(history) + 1
+    @opcounter :merge_history
+    @opcounter :merge_history_complexity length(history)
+    largest_value_update!(length(history))
+    origin_space = state.arg_origin[other_arg_w.arg]
+    for other_entry in state.arg_history[other_arg_w]
+        write_num_tuple = HistoryEntry(AliasingWrapper(NoAliasing()), origin_space, other_entry.write_num)
+        range = searchsorted(history, write_num_tuple; by=x->x.write_num)
+        if !isempty(range)
+            # Find and skip duplicates
+            match = false
+            for source_idx in range
+                source_entry = history[source_idx]
+                if source_entry.ainfo == other_entry.ainfo &&
+                    source_entry.space == other_entry.space &&
+                    source_entry.write_num == other_entry.write_num
+                    match = true
+                    break
+                end
             end
+            match && continue
+
+            # Insert at the first position
+            idx = first(range)
+        else
+            # Insert at the last position
+            idx = length(history) + 1
         end
-        insert!(history, idx, (other_ainfo, other_space, write_num))
+        insert!(history, idx, other_entry)
+    end
+end
+function truncate_history!(state::DataDepsState, arg_w::ArgumentWrapper)
+    if haskey(state.arg_history, arg_w) && length(state.arg_history[arg_w]) > 100000
+        origin_space = state.arg_origin[arg_w.arg]
+        @opcounter :truncate_history
+        _, last_idx = compute_remainder_for_arg!(state, origin_space, arg_w, 0; compute_syncdeps=false)
+        if last_idx > 0
+            @opcounter :truncate_history_removed last_idx
+            deleteat!(state.arg_history[arg_w], 1:last_idx)
+        end
     end
 end
 
@@ -518,12 +582,12 @@ function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::M
     empty!(state.arg_history[arg_w])
 
     # Add our own history
-    push!(state.arg_history[arg_w], (ainfo, dest_space, write_num))
+    push!(state.arg_history[arg_w], HistoryEntry(ainfo, dest_space, write_num))
 
     # Find overlapping arguments and update their history
     for other_arg_w in state.arg_overlaps[arg_w]
         other_arg_w == arg_w && continue
-        push!(state.arg_history[other_arg_w], (ainfo, dest_space, write_num))
+        push!(state.arg_history[other_arg_w], HistoryEntry(ainfo, dest_space, write_num))
     end
 
     # Record the last place we were fully written to
