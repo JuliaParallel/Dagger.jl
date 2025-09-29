@@ -35,3 +35,25 @@ macro dagdebug(thunk, category, msg, args...)
         end
     end)
 end
+
+@warn "Make this threadsafe by putting counter into Module" maxlog=1
+@warn "Calculate fast-growth based on clock time, not iteration" maxlog=1
+const OPCOUNTER_CATEGORIES = Symbol[]
+const OPCOUNTER_FAST_GROWTH_THRESHOLD = Ref(10_000_000)
+const OPCOUNTERS = Dict{Symbol,Threads.Atomic{Int}}()
+macro opcounter(category, count=1)
+    cat_sym = category.value
+    @gensym old
+    esc(quote
+        if $(QuoteNode(cat_sym)) in $OPCOUNTER_CATEGORIES
+            if !haskey($OPCOUNTERS, $(QuoteNode(cat_sym)))
+                $OPCOUNTERS[$(QuoteNode(cat_sym))] = Threads.Atomic{Int}(0)
+            end
+            $old = Threads.atomic_add!($OPCOUNTERS[$(QuoteNode(cat_sym))], Int($count))
+            if $old > 1 && (mod1($old, $OPCOUNTER_FAST_GROWTH_THRESHOLD[]) == 1 || $count > $OPCOUNTER_FAST_GROWTH_THRESHOLD[])
+                println("Fast-growing counter: $($(QuoteNode(cat_sym))) = $($old)")
+            end
+        end
+    end)
+end
+opcounters() = Dict(cat=>OPCOUNTERS[cat][] for cat in keys(OPCOUNTERS))
