@@ -98,7 +98,14 @@ function Base.copyto!(B::DArray{T,N}, A::DArray{T,N}) where {T,N}
                                range_start - CartesianIndex(Bsd_start) + CartesianIndex{N}(1) + range_diff)
 
                 # Perform view copy
-                Dagger.@spawn copyto_view!(Out(Bpart), Brange, In(Apart), Arange)
+                space = (Bpart isa DTask ? fetch(Bpart; move_value=false, unwrap=false) : Bpart).space
+                procs = processors(space)
+                scope = UnionScope([ExactScope(proc) for proc in procs])
+                check_uniform(space)
+                for proc in procs
+                    check_uniform(proc)
+                end
+                Dagger.@spawn scope = scope copyto_view!(Out(Bpart), Brange, In(Apart), Arange)
             end
         end
     end
