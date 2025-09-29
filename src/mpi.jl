@@ -1,11 +1,11 @@
 using MPI
 
-const CHECK_UNIFORMITY = TaskLocalValue{Bool}(()->false)
+const CHECK_UNIFORMITY = Ref{Bool}(false)
 function check_uniformity!(check::Bool=true)
     CHECK_UNIFORMITY[] = check
 end
-function check_uniform(value::Integer)
-    CHECK_UNIFORMITY[] || return
+function check_uniform(value::Integer, original=value)
+    CHECK_UNIFORMITY[] || return true
     comm = MPI.COMM_WORLD
     rank = MPI.Comm_rank(comm)
     matched = compare_all(value, comm)
@@ -13,14 +13,15 @@ function check_uniform(value::Integer)
         if rank == 0
             Core.print("[$rank] Found non-uniform value!\n")
         end
-        Core.print("[$rank] value=$value\n")
+        Core.print("[$rank] value=$value, original=$original")
         throw(ArgumentError("Non-uniform value"))
     end
     MPI.Barrier(comm)
+    return matched
 end
-function check_uniform(value)
-    CHECK_UNIFORMITY[] || return
-    check_uniform(hash(value))
+function check_uniform(value, original=value)
+    CHECK_UNIFORMITY[] || return true
+    return check_uniform(hash(value), original)
 end
 
 function compare_all(value, comm)
@@ -109,9 +110,9 @@ end
 
 ProcessScope(p::MPIOSProc) = ProcessScope(myid())
 
-function check_uniform(proc::MPIOSProc)
-    check_uniform(hash(MPIOSProc))
-    check_uniform(proc.rank)
+function check_uniform(proc::MPIOSProc, original=proc)
+    return check_uniform(hash(MPIOSProc), original) &&
+           check_uniform(proc.rank, original)
 end
 
 function memory_spaces(proc::MPIOSProc)
@@ -190,11 +191,11 @@ proc_in_scope(proc::Processor, scope::MPIProcessScope) = false
 proc_in_scope(proc::MPIProcessor, scope::MPIProcessScope) =
     proc.comm == scope.comm && proc.rank == scope.rank
 
-function check_uniform(proc::MPIProcessor)
-    check_uniform(hash(MPIProcessor))
-    check_uniform(proc.rank)
-    # TODO: Not always valid (if pointer is embedded, say for GPUs)
-    check_uniform(hash(proc.innerProc))
+function check_uniform(proc::MPIProcessor, original=proc)
+    return check_uniform(hash(MPIProcessor), original) &&
+           check_uniform(proc.rank, original) &&
+           # TODO: Not always valid (if pointer is embedded, say for GPUs)
+           check_uniform(hash(proc.innerProc), original)
 end
 
 Dagger.iscompatible_func(::MPIProcessor, opts, ::Any) = true
@@ -240,10 +241,10 @@ struct MPIMemorySpace{S<:MemorySpace} <: MemorySpace
     rank::Int
 end
 
-function check_uniform(space::MPIMemorySpace)
-    check_uniform(space.rank)
-    # TODO: Not always valid (if pointer is embedded, say for GPUs)
-    check_uniform(hash(space.innerSpace))
+function check_uniform(space::MPIMemorySpace, original=space)
+    return check_uniform(space.rank, original) &&
+           # TODO: Not always valid (if pointer is embedded, say for GPUs)
+           check_uniform(hash(space.innerSpace), original)
 end
 
 default_processor(space::MPIMemorySpace) = MPIOSProc(space.comm, space.rank)
@@ -292,10 +293,10 @@ struct MPIRefID
     end
 end
 
-function check_uniform(ref::MPIRefID)
-    check_uniform(ref.tid)
-    check_uniform(ref.uid)
-    check_uniform(ref.id)
+function check_uniform(ref::MPIRefID, original=ref)
+    return check_uniform(ref.tid, original) &&
+           check_uniform(ref.uid, original) &&
+           check_uniform(ref.id, original)
 end
 
 const MPIREF_TID = Dict{Int, Threads.Atomic{Int}}()
@@ -312,9 +313,9 @@ root_worker_id(ref::MPIRef) = myid()
 @warn "Move this definition somewhere else" maxlog=1
 root_worker_id(ref::DRef) = ref.owner
 
-function check_uniform(ref::MPIRef)
-    check_uniform(ref.rank)
-    check_uniform(ref.id)
+function check_uniform(ref::MPIRef, original=ref)
+    return check_uniform(ref.rank, original) &&
+           check_uniform(ref.id, original)
 end
 
 move(from_proc::Processor, to_proc::Processor, x::MPIRef) =
