@@ -434,6 +434,8 @@ end
 function merge_history!(state::DataDepsState, arg_w::ArgumentWrapper, other_arg_w::ArgumentWrapper)
     history = state.arg_history[arg_w]
     for (other_ainfo, other_space, write_num) in state.arg_history[other_arg_w]
+        @opcounter :merge_history
+        @opcounter :merge_history_complexity length(history)
         idx = findfirst(h->h[3] > write_num, history)
         if idx === nothing
             if isempty(history)
