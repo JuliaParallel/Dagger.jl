@@ -353,6 +353,10 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             if !type_may_alias(typeof(arg)) || !supports_inplace_move(state, arg)
                 return [(ArgumentWrapper(arg, identity), false, false)]
             end
+
+            # Get the Chunk for the argument
+            arg = state.raw_arg_to_chunk[arg]
+
             arg_ws = Tuple{ArgumentWrapper,Bool,Bool}[]
             for (dep_mod, readdep, writedep) in deps
                 push!(arg_ws, (ArgumentWrapper(arg, dep_mod), readdep, writedep))
@@ -360,6 +364,13 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             return arg_ws
         end
         task_arg_ws = task_arg_ws::Vector{Vector{Tuple{ArgumentWrapper,Bool,Bool}}}
+
+        # Truncate the history for each argument
+        for arg_ws in task_arg_ws
+            for (arg_w, _, _) in arg_ws
+                truncate_history!(state, arg_w)
+            end
+        end
 
         # Copy args from local to remote
         for (idx, arg_ws) in enumerate(task_arg_ws)
@@ -384,13 +395,13 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             arg_remote = get_or_generate_slot!(state, our_space, arg)
             for (arg_w, _, _) in arg_ws
                 dep_mod = arg_w.dep_mod
-                remainder = compute_remainder_for_arg!(state, our_space, arg_w, write_num)
+                remainder, _ = compute_remainder_for_arg!(state, our_space, arg_w, write_num)
                 if remainder isa MultiRemainderAliasing
                     enqueue_remainder_copy_to!(state, our_space, arg_w, remainder, value(f), idx, our_scope, task, write_num)
                 elseif remainder isa FullCopy
                     enqueue_copy_to!(state, our_space, arg_w, value(f), idx, our_scope, task, write_num)
                 else
-                    @assert remainder isa NoAliasing
+                    @assert remainder isa NoAliasing "Expected NoAliasing, got $(typeof(remainder))"
                     @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$(idx-1)][$dep_mod] Skipped copy-to (up-to-date): $our_space"
                 end
             end
@@ -460,10 +471,13 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     end
 
     # Copy args from remote to local
-    for arg_w in keys(state.arg_owner)
+    # N.B. We sort the keys to ensure a deterministic order for uniformity
+    check_uniform(length(state.arg_owner))
+    for arg_w in sort(collect(keys(state.arg_owner)); by=arg_w->arg_w.hash)
+        check_uniform(arg_w)
         arg = arg_w.arg
         origin_space = state.arg_origin[arg]
-        remainder = compute_remainder_for_arg!(state, origin_space, arg_w, write_num)
+        remainder, _ = compute_remainder_for_arg!(state, origin_space, arg_w, write_num)
         if remainder isa MultiRemainderAliasing
             origin_scope = UnionScope(map(ExactScope, collect(processors(origin_space)))...)
             enqueue_remainder_copy_from!(state, origin_space, arg_w, remainder, origin_scope, write_num)
@@ -471,7 +485,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             origin_scope = UnionScope(map(ExactScope, collect(processors(origin_space)))...)
             enqueue_copy_from!(state, origin_space, arg_w, origin_scope, write_num)
         else
-            @assert remainder isa NoAliasing
+            @assert remainder isa NoAliasing "Expected NoAliasing, got $(typeof(remainder))"
             @dagdebug nothing :spawn_datadeps "Skipped copy-from (up-to-date): $origin_space"
         end
     end
