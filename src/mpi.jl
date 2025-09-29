@@ -59,6 +59,7 @@ function aliasing(accel::MPIAcceleration, x::Chunk, T)
     if handle.rank == rank
         ainfo = aliasing(x, T)
         #Core.print("[$rank] aliasing: $ainfo, sending\n")
+        @opcounter :aliasing_bcast_send_yield
         bcast_send_yield(ainfo, accel.comm, handle.rank, tag)
     else
         #Core.print("[$rank] aliasing: receiving from $(handle.rank)\n")
@@ -292,6 +293,8 @@ struct MPIRefID
         return new(tid, uid, id)
     end
 end
+Base.hash(id::MPIRefID, h::UInt=UInt(0)) =
+    hash(id.tid, hash(id.uid, hash(id.id, hash(MPIRefID, h))))
 
 function check_uniform(ref::MPIRefID, original=ref)
     return check_uniform(ref.tid, original) &&
@@ -309,6 +312,7 @@ mutable struct MPIRef
     innerRef::Union{DRef, Nothing}
     id::MPIRefID
 end
+Base.hash(ref::MPIRef, h::UInt=UInt(0)) = hash(ref.id, hash(MPIRef, h))
 root_worker_id(ref::MPIRef) = myid()
 @warn "Move this definition somewhere else" maxlog=1
 root_worker_id(ref::DRef) = ref.owner
@@ -560,11 +564,13 @@ function _send_yield(value, comm, dest, tag; check_seen::Bool=true, inplace::Boo
 end
 
 function send_yield_inplace(value, comm, my_rank, their_rank, tag)
+    @opcounter :send_yield_inplace
     req = MPI.Isend(value, comm; dest=their_rank, tag)
     __wait_for_request(req, comm, my_rank, their_rank, tag, "send_yield", "send")
 end
 
 function send_yield_serialized(value, comm, my_rank, their_rank, tag)
+    @opcounter :send_yield_serialized
     if value isa Array && isbitstype(eltype(value))
         send_yield_serialized(InplaceInfo(typeof(value), size(value)), comm, my_rank, their_rank, tag)
         send_yield_inplace(value, comm, my_rank, their_rank, tag)
@@ -598,6 +604,7 @@ function __wait_for_request(req, comm, my_rank, their_rank, tag, fn::String, kin
 end
 
 function bcast_send_yield(value, comm, root, tag)
+    @opcounter :bcast_send_yield
     sz = MPI.Comm_size(comm)
     rank = MPI.Comm_rank(comm)
     for other_rank in 0:(sz-1)
@@ -646,6 +653,7 @@ function MemPool.poolget(ref::MPIRef; uniform::Bool=false)
         tag = to_tag(hash(ref.id, hash(:poolget)))
         if ref.rank == MPI.Comm_rank(ref.comm)
             value = poolget(ref.innerRef)
+            @opcounter :poolget_bcast_send_yield
             bcast_send_yield(value, ref.comm, ref.rank, tag)
             return value
         else
@@ -705,12 +713,12 @@ function move!(dep_mod::RemainderAliasing{<:MPIMemorySpace}, to_space::MPIMemory
             end
 
             # Send the spans
-            send_yield(len, to_space.comm, to_space.rank, tag)
+            #send_yield(len, to_space.comm, to_space.rank, tag)
             send_yield!(copies, to_space.comm, to_space.rank, tag; check_seen=false)
             #send_yield(copies, to_space.comm, to_space.rank, tag)
         elseif local_rank == to_space.rank
             # Receive the spans
-            len = recv_yield(from_space.comm, from_space.rank, tag)
+            len = sum(span_tuple->span_len(span_tuple[1]), dep_mod.spans)
             copies = Vector{UInt8}(undef, len)
             recv_yield!(copies, from_space.comm, from_space.rank, tag)
             #copies = recv_yield(from_space.comm, from_space.rank, tag)
@@ -760,39 +768,15 @@ function remotecall_endpoint(f, accel::Dagger.MPIAcceleration, from_proc, to_pro
     loc_rank = MPI.Comm_rank(accel.comm)
     task = DATADEPS_CURRENT_TASK[]
     return with(MPI_UID=>task.uid, MPI_UNIFORM=>true) do
-        if data isa Chunk
-            tag = to_tag(hash(data.handle.id))
-            space = memory_space(data)
-            if space.rank != from_proc.rank
-                # If the data is already where it needs to be
-                @assert space.rank == to_proc.rank
-                if space.rank == loc_rank
-                    value = poolget(data.handle)
-                    data_converted = f(move(from_proc.innerProc, to_proc.innerProc, value))
-                    return tochunk(data_converted, to_proc, to_space)
-                else
-                    T = move_type(from_proc.innerProc, to_proc.innerProc, chunktype(data))
-                    T_new = f !== identity ? Base._return_type(f, Tuple{T}) : T
-                    @assert isconcretetype(T_new) "Return type inference failed, expected concrete type, got $T -> $T_new"
-                    return tochunk(nothing, to_proc, to_space; type=T_new)
-                end
-            end
-
-            # The data is on the source rank
-            @assert space.rank == from_proc.rank
-            if loc_rank == from_proc.rank == to_proc.rank
+        @assert data isa Chunk "Expected Chunk, got $(typeof(data))"
+        tag = to_tag(hash(data.handle.id))
+        space = memory_space(data)
+        if space.rank != from_proc.rank
+            # If the data is already where it needs to be
+            @assert space.rank == to_proc.rank
+            if space.rank == loc_rank
                 value = poolget(data.handle)
                 data_converted = f(move(from_proc.innerProc, to_proc.innerProc, value))
-                return tochunk(data_converted, to_proc, to_space)
-            elseif loc_rank == from_proc.rank
-                value = poolget(data.handle)
-                data_moved = move(from_proc.innerProc, to_proc.innerProc, value)
-                Dagger.send_yield(data_moved, accel.comm, to_proc.rank, tag)
-                # FIXME: This is wrong to take typeof(data_moved), because the type may change
-                return tochunk(nothing, to_proc, to_space; type=typeof(data_moved))
-            elseif loc_rank == to_proc.rank
-                data_moved = Dagger.recv_yield(accel.comm, from_space.rank, tag)
-                data_converted = f(move(from_proc.innerProc, to_proc.innerProc, data_moved))
                 return tochunk(data_converted, to_proc, to_space)
             else
                 T = move_type(from_proc.innerProc, to_proc.innerProc, chunktype(data))
@@ -800,10 +784,29 @@ function remotecall_endpoint(f, accel::Dagger.MPIAcceleration, from_proc, to_pro
                 @assert isconcretetype(T_new) "Return type inference failed, expected concrete type, got $T -> $T_new"
                 return tochunk(nothing, to_proc, to_space; type=T_new)
             end
-        else
-            error("We shouldn't call f here, if we're not the destination rank")
-            data_converted = f(move(from_proc, to_proc, data))
+        end
+
+        # The data is on the source rank
+        @assert space.rank == from_proc.rank
+        if loc_rank == from_proc.rank == to_proc.rank
+            value = poolget(data.handle)
+            data_converted = f(move(from_proc.innerProc, to_proc.innerProc, value))
             return tochunk(data_converted, to_proc, to_space)
+        elseif loc_rank == from_proc.rank
+            value = poolget(data.handle)
+            data_moved = move(from_proc.innerProc, to_proc.innerProc, value)
+            Dagger.send_yield(data_moved, accel.comm, to_proc.rank, tag)
+            # FIXME: This is wrong to take typeof(data_moved), because the type may change
+            return tochunk(nothing, to_proc, to_space; type=typeof(data_moved))
+        elseif loc_rank == to_proc.rank
+            data_moved = Dagger.recv_yield(accel.comm, from_space.rank, tag)
+            data_converted = f(move(from_proc.innerProc, to_proc.innerProc, data_moved))
+            return tochunk(data_converted, to_proc, to_space)
+        else
+            T = move_type(from_proc.innerProc, to_proc.innerProc, chunktype(data))
+            T_new = f !== identity ? Base._return_type(f, Tuple{T}) : T
+            @assert isconcretetype(T_new) "Return type inference failed, expected concrete type, got $T -> $T_new"
+            return tochunk(nothing, to_proc, to_space; type=T_new)
         end
     end
 end
@@ -858,6 +861,7 @@ function execute!(proc::MPIProcessor, world::UInt64, f, args...; kwargs...)
             T = typeof(result)
             space = memory_space(result, proc)::MPIMemorySpace
             T_space = (T, space.innerSpace)
+            @opcounter :execute_bcast_send_yield
             bcast_send_yield(T_space, proc.comm, proc.rank, tag)
             return tochunk(result, proc, space)
         else
