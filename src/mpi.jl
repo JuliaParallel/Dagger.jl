@@ -59,6 +59,7 @@ function aliasing(accel::MPIAcceleration, x::Chunk, T)
     if handle.rank == rank
         ainfo = aliasing(x, T)
         #Core.print("[$rank] aliasing: $ainfo, sending\n")
+        @opcounter :aliasing_bcast_send_yield
         bcast_send_yield(ainfo, accel.comm, handle.rank, tag)
     else
         #Core.print("[$rank] aliasing: receiving from $(handle.rank)\n")
@@ -292,6 +293,8 @@ struct MPIRefID
         return new(tid, uid, id)
     end
 end
+Base.hash(id::MPIRefID, h::UInt=UInt(0)) =
+    hash(id.tid, hash(id.uid, hash(id.id, hash(MPIRefID, h))))
 
 function check_uniform(ref::MPIRefID, original=ref)
     return check_uniform(ref.tid, original) &&
@@ -309,6 +312,7 @@ mutable struct MPIRef
     innerRef::Union{DRef, Nothing}
     id::MPIRefID
 end
+Base.hash(ref::MPIRef, h::UInt=UInt(0)) = hash(ref.id, hash(MPIRef, h))
 root_worker_id(ref::MPIRef) = myid()
 @warn "Move this definition somewhere else" maxlog=1
 root_worker_id(ref::DRef) = ref.owner
@@ -511,7 +515,6 @@ function recv_yield_inplace(_value::InplaceSparseInfo, comm, my_rank, their_rank
     nzval = recv_yield_inplace!(Vector{eltype(T)}(undef, _value.nzval), comm, my_rank, their_rank, tag)
 
     return SparseMatrixCSC{eltype(T), Int64}(_value.m, _value.n, colptr, rowval, nzval)
-    
 end
 
 function recv_yield_serialized(comm, my_rank, their_rank, tag)
@@ -560,11 +563,13 @@ function _send_yield(value, comm, dest, tag; check_seen::Bool=true, inplace::Boo
 end
 
 function send_yield_inplace(value, comm, my_rank, their_rank, tag)
+    @opcounter :send_yield_inplace
     req = MPI.Isend(value, comm; dest=their_rank, tag)
     __wait_for_request(req, comm, my_rank, their_rank, tag, "send_yield", "send")
 end
 
 function send_yield_serialized(value, comm, my_rank, their_rank, tag)
+    @opcounter :send_yield_serialized
     if value isa Array && isbitstype(eltype(value))
         send_yield_serialized(InplaceInfo(typeof(value), size(value)), comm, my_rank, their_rank, tag)
         send_yield_inplace(value, comm, my_rank, their_rank, tag)
@@ -598,6 +603,7 @@ function __wait_for_request(req, comm, my_rank, their_rank, tag, fn::String, kin
 end
 
 function bcast_send_yield(value, comm, root, tag)
+    @opcounter :bcast_send_yield
     sz = MPI.Comm_size(comm)
     rank = MPI.Comm_rank(comm)
     for other_rank in 0:(sz-1)
@@ -646,6 +652,7 @@ function MemPool.poolget(ref::MPIRef; uniform::Bool=false)
         tag = to_tag(hash(ref.id, hash(:poolget)))
         if ref.rank == MPI.Comm_rank(ref.comm)
             value = poolget(ref.innerRef)
+            @opcounter :poolget_bcast_send_yield
             bcast_send_yield(value, ref.comm, ref.rank, tag)
             return value
         else
@@ -854,6 +861,7 @@ function execute!(proc::MPIProcessor, world::UInt64, f, args...; kwargs...)
             T = typeof(result)
             space = memory_space(result, proc)::MPIMemorySpace
             T_space = (T, space.innerSpace)
+            @opcounter :execute_bcast_send_yield
             bcast_send_yield(T_space, proc.comm, proc.rank, tag_space)
             return tochunk(result, proc, space)
         else

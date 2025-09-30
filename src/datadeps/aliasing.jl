@@ -222,6 +222,7 @@ function unwrap_inout(arg)
 end
 
 _identity_hash(arg, h::UInt=UInt(0)) = ismutable(arg) ? objectid(arg) : hash(arg, h)
+_identity_hash(arg::Chunk, h::UInt=UInt(0)) = hash(arg.handle, hash(Chunk, h))
 _identity_hash(arg::SubArray, h::UInt=UInt(0)) = hash(arg.indices, hash(arg.offset1, hash(arg.stride1, _identity_hash(arg.parent, h))))
 _identity_hash(arg::CartesianIndices, h::UInt=UInt(0)) = hash(arg.indices, hash(typeof(arg), h))
 
@@ -233,20 +234,8 @@ struct ArgumentWrapper
 
     function ArgumentWrapper(arg, dep_mod)
         h = hash(dep_mod)
-        #if !type_may_alias(typeof(arg))
-            h = _identity_hash(arg, h)
-            #=
-        else
-            rank = MPI.Comm_rank(MPI.COMM_WORLD)
-            if rank == 0
-                h = _identity_hash(arg, h)
-                @opcounter :argwrapper_bcast_send_yield
-                bcast_send_yield(h, MPI.COMM_WORLD, 0, UInt32(0))
-            else
-                h = recv_yield(MPI.COMM_WORLD, 0, UInt32(0))::UInt
-            end
-        end
-        =#
+        h = _identity_hash(arg, h)
+        check_uniform(h, arg)
         return new(arg, dep_mod, h)
     end
 end
@@ -484,8 +473,9 @@ function merge_history!(state::DataDepsState, arg_w::ArgumentWrapper, other_arg_
     @opcounter :merge_history
     @opcounter :merge_history_complexity length(history)
     #largest_value_update!(length(history))
+    origin_space = state.arg_origin[other_arg_w.arg]
     for other_entry in state.arg_history[other_arg_w]
-        write_num_tuple = HistoryEntry(AliasingWrapper(NoAliasing()), CPURAMMemorySpace(), other_entry.write_num)
+        write_num_tuple = HistoryEntry(AliasingWrapper(NoAliasing()), origin_space, other_entry.write_num)
         range = searchsorted(history, write_num_tuple; by=x->x.write_num)
         if !isempty(range)
             # Find and skip duplicates
@@ -508,6 +498,16 @@ function merge_history!(state::DataDepsState, arg_w::ArgumentWrapper, other_arg_
             idx = length(history) + 1
         end
         insert!(history, idx, other_entry)
+    end
+
+    # If the history is too long, truncate the beginning of the history
+    # FIXME: Use a pared-down version of compute_remainder_for_arg!
+    if length(history) > 10000
+        @opcounter :merge_history_truncate
+        _, last_idx = compute_remainder_for_arg!(state, origin_space, arg_w, 0)
+        if last_idx > 0
+            deleteat!(history, 1:last_idx)
+        end
     end
 end
 

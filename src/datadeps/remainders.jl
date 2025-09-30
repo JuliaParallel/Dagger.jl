@@ -158,9 +158,9 @@ function compute_remainder_for_arg!(state::DataDepsState,
     # target space if this is the first time we've written to `arg_w`
     if isempty(state.arg_history[arg_w])
         if owner_space != target_space
-            return FullCopy()
+            return FullCopy(), 0
         else
-            return NoAliasing()
+            return NoAliasing(), 0
         end
     end
 
@@ -173,9 +173,11 @@ function compute_remainder_for_arg!(state::DataDepsState,
     # Walk backwards through the history of writes to this target
     # other_ainfo is the overlapping ainfo that was written to
     # other_space is the memory space of the overlapping ainfo
+    last_idx = length(state.arg_history[arg_w])
     for idx in length(state.arg_history[arg_w]):-1:0
         if isempty(remainder)
             # All done!
+            last_idx = idx
             break
         end
 
@@ -227,10 +229,10 @@ function compute_remainder_for_arg!(state::DataDepsState,
     end
 
     if isempty(tracker)
-        return NoAliasing()
+        return NoAliasing(), 0
     end
 
-    # Return scheduled copies
+    # Return scheduled copies and the index of the last ainfo we considered
     mra = MultiRemainderAliasing()
     for space in spaces
         if haskey(tracker, space)
@@ -240,7 +242,7 @@ function compute_remainder_for_arg!(state::DataDepsState,
             end
         end
     end
-    return mra
+    return mra, last_idx
 end
 
 ### Memory Span Set Operations for Remainder Computation
