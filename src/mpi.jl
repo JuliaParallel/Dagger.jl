@@ -451,7 +451,7 @@ function recv_yield(comm, src, tag)
         end
     end
     if other_event !== nothing
-        Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Waitingg for other receiver...")
+        #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Waiting for other receiver...")
         wait(other_event)
         @goto retry
     end
@@ -511,7 +511,6 @@ function recv_yield_inplace(_value::InplaceSparseInfo, comm, my_rank, their_rank
     nzval = recv_yield_inplace!(Vector{eltype(T)}(undef, _value.nzval), comm, my_rank, their_rank, tag)
 
     return SparseMatrixCSC{eltype(T), Int64}(_value.m, _value.n, colptr, rowval, nzval)
-    
 end
 
 function recv_yield_serialized(comm, my_rank, their_rank, tag)
@@ -841,8 +840,7 @@ end
 #FIXME:try to think of a better move! scheme
 function execute!(proc::MPIProcessor, world::UInt64, f, args...; kwargs...)
     local_rank = MPI.Comm_rank(proc.comm)
-    #tag_T = to_tag(hash(sch_handle().thunk_id.id, hash(:execute!, UInt(0))))
-    tag_space = to_tag(hash(sch_handle().thunk_id.id, hash(:execute!, UInt(1))))
+    tag = to_tag(hash(sch_handle().thunk_id.id, hash(:execute!, UInt(0))))
     islocal = local_rank == proc.rank
     inplace_move = f === move!
     result = nothing
@@ -858,13 +856,11 @@ function execute!(proc::MPIProcessor, world::UInt64, f, args...; kwargs...)
         if islocal
             T = typeof(result)
             space = memory_space(result, proc)::MPIMemorySpace
-            T_space = (T, space)
-            bcast_send_yield(T_space, proc.comm, proc.rank, tag_space)
+            T_space = (T, space.innerSpace)
+            bcast_send_yield(T_space, proc.comm, proc.rank, tag)
             return tochunk(result, proc, space)
         else
-            #T = recv_yield(proc.comm, proc.rank, tag_T)
-            #innerSpace = recv_yield(proc.comm, proc.rank, tag_space)
-            T, innerSpace = recv_yield(proc.comm, proc.rank, tag_space)
+            T, innerSpace = recv_yield(proc.comm, proc.rank, tag)
             space = MPIMemorySpace(innerSpace, proc.comm, proc.rank)
             return tochunk(nothing, proc, space; type=T)
         end
