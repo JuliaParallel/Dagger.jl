@@ -57,3 +57,15 @@ macro opcounter(category, count=1)
     end)
 end
 opcounters() = Dict(cat=>OPCOUNTERS[cat][] for cat in keys(OPCOUNTERS))
+
+const LARGEST_VALUE_COUNTER = Ref(0)
+function largest_value_update!(value)
+    prev = LARGEST_VALUE_COUNTER[]
+    if value > prev
+        LARGEST_VALUE_COUNTER[] = value
+        if value - prev > 10_000 || value > 1_000_000
+            println("Largest value growing: $value")
+        end
+    end
+end
+largest_value_counter() = LARGEST_VALUE_COUNTER[]
