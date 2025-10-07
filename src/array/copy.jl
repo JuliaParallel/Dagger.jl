@@ -126,7 +126,7 @@ function darray_copyto!(B::DArray{TB,NB}, A::DArray{TA,NA}, Binds=parentindices(
     return B
 end
 function copyto_view!(Bpart, Brange, Apart, Arange)
-    copyto!(view(Bpart, Brange...), view(Apart, Arange...))
+    copyto!(view(Bpart, Brange), view(Apart, Arange))
     return
 end
 
