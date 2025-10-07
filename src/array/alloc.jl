@@ -1,6 +1,7 @@
 import Base: cat
 import Random: MersenneTwister
 export partition
+import LinearAlgebra: UniformScaling
 
 mutable struct AllocateArray{T,N} <: ArrayOp{T,N}
     eltype::Type{T}
@@ -83,17 +84,15 @@ function stage(ctx, a::AllocateArray)
     chunks = map(CartesianIndices(a.domainchunks)) do I
         x = a.domainchunks[I]
         i = LinearIndices(a.domainchunks)[I]
-        args = a.want_index ? (i, size(x)) : (size(x),)
-
         if isnothing(a.procgrid)
             scope = get_compute_scope()
         else
             scope = ExactScope(a.procgrid[CartesianIndex(mod1.(Tuple(I), size(a.procgrid))...)])
         end
         if a.want_index
-            Dagger.@spawn compute_scope=scope allocate_array(a.f, a.eltype, i, args...)
+            Dagger.@spawn compute_scope=scope allocate_array(a.f, a.eltype, i, size(x))
         else
-            Dagger.@spawn compute_scope=scope allocate_array(a.f, a.eltype, args...)
+            Dagger.@spawn compute_scope=scope allocate_array(a.f, a.eltype, size(x))
         end
     end
     return DArray(a.eltype, a.domain, a.domainchunks, chunks, a.partitioning)
@@ -159,6 +158,7 @@ Base.zeros(p::BlocksOrAuto, dims::Dims; assignment::AssignmentType = :arbitrary)
 Base.zeros(::AutoBlocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary) =
     zeros(auto_blocks(dims), eltype, dims; assignment)
 
+
 function Base.zero(x::DArray{T,N}) where {T,N}
     dims = ntuple(i->x.domain.indexes[i].stop, N)
     sd = first(x.subdomains)
@@ -166,6 +166,39 @@ function Base.zero(x::DArray{T,N}) where {T,N}
     a = zeros(Blocks(part_size...), T, dims)
     return _to_darray(a)
 end
+
+function _allocate_diag(i,T, _dims, subdomain)
+    sA = zeros(T, _dims)
+    if !isempty(intersect(subdomain.indexes[1], subdomain.indexes[2]))
+        for j in range(1, min(_dims[1], _dims[2]))
+            sA[j,j] = one(T)
+        end
+    end
+    return sA
+end
+
+function DMatrix(p::BlocksOrAuto, s::UniformScaling, dims::Dims, assignment::AssignmentType = :arbitrary)
+    d = ArrayDomain(map(x->1:x, dims))
+    sd = partition(p, d)
+    T = eltype(s)
+    a = AllocateArray(T, (i, T, _dims) -> _allocate_diag(i, T, _dims, sd[i]), true, d, partition(p, d), p, assignment)
+    return _to_darray(a)
+end
+DMatrix(p::BlocksOrAuto, s::UniformScaling, dims::Integer...; assignment::AssignmentType = :arbitrary) = 
+    DMatrix(p, s, dims; assignment)
+DMatrix(::AutoBlocks, s::UniformScaling, dims::Dims; assignment::AssignmentType = :arbitrary) =
+    DMatrix(auto_blocks(dims), s::UniformScaling, dims; assignment)
+
+function DArray{T}(p::BlocksOrAuto, ::UndefInitializer, dims::Dims; assignment::AssignmentType = :arbitrary) where {T}
+    d = ArrayDomain(map(x->1:x, dims))
+    a = AllocateArray(T, AllocateUndef{T}(), false, d, partition(p, d), p, assignment)
+    return _to_darray(a)
+end
+
+DArray{T}(p::BlocksOrAuto, ::UndefInitializer, dims::Integer...; assignment::AssignmentType = :arbitrary) where {T} = 
+    DArray{T}(p, undef, dims; assignment)
+DArray{T}(p::AutoBlocks, ::UndefInitializer, dims::Dims; assignment::AssignmentType = :arbitrary) where {T} = 
+    DArray{T}(auto_blocks(dims), undef, dims; assignment)
 
 function Base.view(A::AbstractArray{T,N}, p::Blocks{N}) where {T,N}
     d = ArrayDomain(Base.index_shape(A))

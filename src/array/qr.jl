@@ -8,26 +8,26 @@ import Base.:*
 (*)(Q::AdjointQ{T, QRCompactWYQ{T, M, C}}, b::Number) where {T<:Number, M<:DMatrix{T}, C<:M} = DMatrix(Q) * b
 (*)(b::Number, Q::AdjointQ{T, QRCompactWYQ{T, M, C}}) where {T<:Number, M<:DMatrix{T}, C<:M} = DMatrix(Q) * b
 
-LinearAlgebra.lmul!(B::QRCompactWYQ{T, M}, A::M) where {T, M<:DMatrix{T}} = pormqr!('L', 'N', B.factors, B.T, A)
-function LinearAlgebra.lmul!(B::AdjointQ{T, <:QRCompactWYQ{T, M}}, A::M) where {T, M<:Dagger.DMatrix{T}}
+LinearAlgebra.lmul!(B::QRCompactWYQ{T, <:DMatrix{T}}, A::DMatrix{T}) where {T} = pormqr!('L', 'N', B.factors, B.T, A)
+function LinearAlgebra.lmul!(B::AdjointQ{T, <:QRCompactWYQ{T, <:Dagger.DMatrix{T}}}, A::Dagger.DMatrix{T}) where {T}
     trans = T <: Complex ? 'C' : 'T'
     pormqr!('L', trans, B.Q.factors, B.Q.T, A)
 end
 
-LinearAlgebra.rmul!(A::Dagger.DMatrix{T}, B::QRCompactWYQ{T, M}) where {T, M<:Dagger.DMatrix{T}} = pormqr!('R', 'N', B.factors, B.T, A)
-function LinearAlgebra.rmul!(A::Dagger.DMatrix{T}, B::AdjointQ{T, <:QRCompactWYQ{T, M}}) where {T, M<:Dagger.DMatrix{T}} 
+LinearAlgebra.rmul!(A::Dagger.DMatrix{T}, B::QRCompactWYQ{T, <:Dagger.DMatrix{T}}) where {T} = pormqr!('R', 'N', B.factors, B.T, A)
+function LinearAlgebra.rmul!(A::Dagger.DMatrix{T}, B::AdjointQ{T, <:QRCompactWYQ{T, <:Dagger.DMatrix{T}}}) where {T} 
     trans = T <: Complex ? 'C' : 'T'
     pormqr!('R', trans, B.Q.factors, B.Q.T, A)
 end
 
 function Dagger.DMatrix(Q::QRCompactWYQ{T, <:Dagger.DMatrix{T}}) where {T}
-    DQ = distribute(Matrix(I*one(T), size(Q.factors)[1], size(Q.factors)[1]), Q.factors.partitioning)
+    DQ = DMatrix(Q.factors.partitioning, I*one(T), size(Q))
     porgqr!('N', Q.factors, Q.T, DQ)
     return DQ
 end
 
 function Dagger.DMatrix(AQ::AdjointQ{T, <:QRCompactWYQ{T, <:Dagger.DMatrix{T}}}) where {T}
-    DQ = distribute(Matrix(I*one(T), size(AQ.Q.factors)[1], size(AQ.Q.factors)[1]), AQ.Q.factors.partitioning)
+    DQ = DMatrix(AQ.Q.factors.partitioning, I*one(T), size(AQ))
     trans = T <: Complex ? 'C' : 'T'
     porgqr!(trans, AQ.Q.factors, AQ.Q.T, DQ)
     return DQ
@@ -36,7 +36,37 @@ end
 Base.collect(Q::QRCompactWYQ{T, <:Dagger.DMatrix{T}}) where {T} = collect(Dagger.DMatrix(Q))
 Base.collect(AQ::AdjointQ{T, <:QRCompactWYQ{T, <:Dagger.DMatrix{T}}}) where {T} = collect(Dagger.DMatrix(AQ))
 
+function _repartition_pormqr(A, Tm, C, side::Char, trans::Char)
+    partA = A.partitioning.blocksize
+    partTm = Tm.partitioning.blocksize
+    partC = C.partitioning.blocksize
+
+    # The pormqr! kernels assume that the number of row tiles (index k)
+    # matches between the reflector matrix A and the target matrix C.
+    # Adjust C's block size accordingly but avoid reshaping A or Tm,
+    # as their chunking encodes the factorisation structure.
+    partC_new = partC
+    if side == 'L'
+        # Q * C or Q' * C: C's row blocking must match A's row blocking.
+        partC_new = (partA[1], partC[2])
+    else
+        # C * Q or C * Q': C's column blocking must match A's row blocking
+        # because the kernels iterate over the k index along columns.
+        partC_new = (partC[1], partA[1])
+    end
+
+    return Blocks(partA...), Blocks(partTm...), Blocks(partC_new...)
+end
+
 function pormqr!(side::Char, trans::Char, A::Dagger.DMatrix{T}, Tm::Dagger.DMatrix{T}, C::Dagger.DMatrix{T}) where {T<:Number}
+    partA, partTm, partC = _repartition_pormqr(A, Tm, C, side, trans)
+    
+    return maybe_copy_buffered(A=>partA, Tm=>partTm, C=>partC) do A, Tm, C
+        return _pormqr_impl!(side, trans, A, Tm, C)
+    end
+end
+
+function _pormqr_impl!(side::Char, trans::Char, A::Dagger.DMatrix{T}, Tm::Dagger.DMatrix{T}, C::Dagger.DMatrix{T}) where {T<:Number}
     m, n = size(C)
     Ac = A.chunks
     Tc = Tm.chunks
@@ -46,8 +76,6 @@ function pormqr!(side::Char, trans::Char, A::Dagger.DMatrix{T}, Tm::Dagger.DMatr
     Tmt, Tnt = size(Tc)
     Cmt, Cnt = size(Cc)
     minMT = min(Amt, Ant)
-
-    display(C)
 
     Dagger.spawn_datadeps() do
         if side == 'L'
@@ -220,11 +248,8 @@ end
 
 function LinearAlgebra.qr!(A::Dagger.DMatrix{T}; ib::Int64=1, p::Int64=1) where {T<:Number}   
     lm, ln = meas_ws(A, ib)
-    Ac = A.chunks
     nb = A.partitioning.blocksize[2]
-    mt, nt = size(Ac)
-    st = nb * (nt - 1)
-    Tm = zeros(Blocks(ib, nb), T, lm, ln)
+    Tm = DArray{T}(Blocks(ib, nb), undef, (lm, ln))
     cageqrf!(A, Tm; p=p)
     return QRCompactWY(A, Tm);
 end
