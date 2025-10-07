@@ -142,12 +142,6 @@ function Base.setindex!(A::DArray, value, idx...)
     copyto!(A_view, value)
     return value
 end
-function Base.setindex!(A::DArray, value, idx...)
-    inds = to_indices(A, idx)
-    A_view = view(A, inds...)
-    copyto!(A_view, value)
-    return value
-end
 
 ### Allow/disallow scalar indexing
 
