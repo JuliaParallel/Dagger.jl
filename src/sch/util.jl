@@ -593,6 +593,7 @@ end
     # Shuffle procs around, so equally-costly procs are equally considered
     np = length(procs)
     @reusable :estimate_task_costs_P Vector{Int} 0 4 np P begin
+        resize!(P, np)
         copyto!(P, 1:np)
         randperm!(P)
         for idx in 1:np
