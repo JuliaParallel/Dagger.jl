@@ -98,7 +98,7 @@ function taskdeps_for_task(logs::Dict{Int,<:Dict}, tid::Int)
         _logs = logs[w]
         for idx in 1:length(_logs[:core])
             core_log = _logs[:core][idx]
-            if core_log.category == :add_thunk && core_log.kind == :start
+            if core_log.category == :add_thunk && core_log.kind == :finish
                 taskdeps = _logs[:taskdeps][idx]::Pair{Int,Vector{Int}}
                 if taskdeps[1] == tid
                     return taskdeps[2]

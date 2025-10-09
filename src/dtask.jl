@@ -106,12 +106,15 @@ function Base.show(io::IO, t::DTask)
     print(io, "DTask ($status)")
 end
 istask(t::DTask) = true
+function Base.convert(::Type{ThunkSyncdep}, task::Dagger.DTask)
+    return ThunkSyncdep(ThunkID(task.uid, isdefined(task, :thunk_ref) ? task.thunk_ref : nothing))
+end
+ThunkSyncdep(task::DTask) = convert(ThunkSyncdep, task)
 
-const EAGER_ID_COUNTER = Threads.Atomic{UInt64}(1)
 function eager_next_id()
     if myid() == 1
-        Threads.atomic_add!(EAGER_ID_COUNTER, one(UInt64))
+        return UInt64(next_id())
     else
-        remotecall_fetch(eager_next_id, 1)
+        return remotecall_fetch(eager_next_id, 1)::UInt64
     end
 end

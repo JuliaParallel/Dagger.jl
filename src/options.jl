@@ -10,6 +10,7 @@ Stores per-task options to be passed to the scheduler.
 - `processor::Processor`: The processor associated with this task's function. Generally ignored by the scheduler.
 - `compute_scope::AbstractScope`: The execution scope of the task, which determines where the task can be scheduled and executed. `scope` is another name for this option.
 - `result_scope::AbstractScope`: The data scope of the task's result, which determines where the task's result can be accessed from.
+- `exec_scope::AbstractScope`: The execution scope of the task, which determines where the task can be scheduled and executed. Can be set to avoid computing the scope in the scheduler, when known.
 - `single::Int=0`: (Deprecated) Force task onto worker with specified id. `0` disables this option.
 - `proclist=nothing`: (Deprecated) Force task to use one or more processors that are instances/subtypes of a contained type. Alternatively, a function can be supplied, and the function will be called with a processor as the sole argument and should return a `Bool` result to indicate whether or not to use the given processor. `nothing` enables all default processors.
 - `get_result::Bool=false`: Whether the worker should store the result directly (`true`) or as a `Chunk` (`false`)
@@ -37,13 +38,14 @@ Base.@kwdef mutable struct Options
     scope::Union{AbstractScope,Nothing} = nothing
     compute_scope::Union{AbstractScope,Nothing} = scope
     result_scope::Union{AbstractScope,Nothing} = nothing
+    exec_scope::Union{AbstractScope,Nothing} = nothing
     single::Union{Int,Nothing} = nothing
     proclist = nothing
 
     get_result::Union{Bool,Nothing} = nothing
     meta::Union{Bool,Nothing} = nothing
 
-    syncdeps::Union{Set{Any},Nothing} = nothing
+    syncdeps::Union{Set{ThunkSyncdep},Nothing} = nothing
 
     time_util::Union{Dict{Type,Any},Nothing} = nothing
     alloc_util::Union{Dict{Type,UInt64},Nothing} = nothing
@@ -101,6 +103,15 @@ _set_option!(options::Base.Pairs, field, value) = error("Cannot set option in Ba
     end
     return ex
 end
+function Base.setproperty!(options::Options, field::Symbol, value)
+    if field == :scope || field == :compute_scope || field == :result_scope
+        # If the scope is changed, we need to clear the exec_scope as it is no longer valid
+        setfield!(options, :exec_scope, nothing)
+    end
+    fidx = findfirst(==(field), fieldnames(Options))
+    ftype = fieldtypes(Options)[fidx]
+    return setfield!(options, field, convert(ftype, value))
+end
 
 """
     populate_defaults!(opts::Options, sig::Vector{DataType}) -> Options
@@ -113,6 +124,7 @@ function populate_defaults!(opts::Options, sig)
     maybe_default!(opts, Val{:processor}(), sig)
     maybe_default!(opts, Val{:compute_scope}(), sig)
     maybe_default!(opts, Val{:result_scope}(), sig)
+    maybe_default!(opts, Val{:exec_scope}(), sig)
     maybe_default!(opts, Val{:single}(), sig)
     maybe_default!(opts, Val{:proclist}(), sig)
     maybe_default!(opts, Val{:get_result}(), sig)
@@ -141,30 +153,6 @@ function maybe_default!(opts::Options, ::Val{opt}, sig::Signature) where opt
         end
         setfield!(opts, opt, default_opt)
     end
-end
-
-struct BasicLFUCache{K,V}
-    cache::Dict{K,V}
-    freq::Dict{K,Int}
-    max_size::Int
-
-    BasicLFUCache{K,V}(max_size::Int) where {K,V} = new(Dict{K,V}(), Dict{K,Int}(), max_size)
-end
-function Base.get!(f, cache::BasicLFUCache{K,V}, key::K) where {K,V}
-    if haskey(cache.cache, key)
-        cache.freq[key] += 1
-        return cache.cache[key]
-    end
-    val = f()::V
-    cache.cache[key] = val
-    cache.freq[key] = 1
-    if length(cache.cache) > cache.max_size
-        # Find the least frequently used key
-        _, lfu_key::K = findmin(cache.freq)
-        delete!(cache.cache, lfu_key)
-        delete!(cache.freq, lfu_key)
-    end
-    return val
 end
 
 const SIGNATURE_DEFAULT_CACHE = TaskLocalValue{BasicLFUCache{Tuple{UInt,Symbol},Any}}(()->BasicLFUCache{Tuple{UInt,Symbol},Any}(256))

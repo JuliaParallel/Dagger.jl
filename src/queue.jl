@@ -45,9 +45,9 @@ end
 function _add_prev_deps!(queue::InOrderTaskQueue, spec::DTaskSpec)
     # Add previously-enqueued task(s) to this task's syncdeps
     opts = spec.options
-    syncdeps = opts.syncdeps = @something(opts.syncdeps, Set())
+    syncdeps = opts.syncdeps = @something(opts.syncdeps, Set{ThunkSyncdep}())
     for task in queue.prev_tasks
-        push!(syncdeps, task)
+        push!(syncdeps, ThunkSyncdep(task))
     end
 end
 function enqueue!(queue::InOrderTaskQueue, spec::Pair{DTaskSpec,DTask})

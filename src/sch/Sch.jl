@@ -14,7 +14,7 @@ import Random: randperm, randperm!
 import Base: @invokelatest
 
 import ..Dagger
-import ..Dagger: Context, Processor, SchedulerOptions, Options, Thunk, WeakThunk, ThunkFuture, DTaskFailedException, Chunk, WeakChunk, OSProc, AnyScope, DefaultScope, InvalidScope, LockedObject, Argument, Signature
+import ..Dagger: Context, Processor, SchedulerOptions, Options, Thunk, WeakThunk, ThunkFuture, ThunkID, DTaskFailedException, Chunk, WeakChunk, OSProc, AnyScope, DefaultScope, InvalidScope, LockedObject, Argument, Signature
 import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak_checked, wrap_weak, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, default_enabled, processor, get_processors, get_parent, execute!, rmprocs!, task_processor, constrain, cputhreadtime, maybe_take_or_alloc!
 import ..Dagger: @dagdebug, @safe_lock_spin1, @maybelog, @take_or_alloc!
 import DataStructures: PriorityQueue, enqueue!, dequeue_pair!, peek
@@ -80,8 +80,7 @@ struct ComputeState
     waiting::OneToMany
     waiting_data::Dict{Union{Thunk,Chunk},Set{Thunk}}
     ready::Vector{Thunk}
-    cache::WeakKeyDict{Thunk, Any}
-    valid::WeakKeyDict{Thunk, Nothing}
+    valid::Dict{Thunk, Nothing}
     running::Set{Thunk}
     running_on::Dict{Thunk,OSProc}
     thunk_dict::Dict{Int, WeakThunk}
@@ -98,7 +97,7 @@ struct ComputeState
     halt::Base.Event
     lock::ReentrantLock
     futures::Dict{Thunk, Vector{ThunkFuture}}
-    errored::WeakKeyDict{Thunk,Bool}
+    errored::Dict{Thunk,Bool}
     thunks_to_delete::Set{Thunk}
     chan::RemoteChannel{Channel{AnyTaskResult}}
 end
@@ -110,8 +109,7 @@ function start_state(deps::Dict, node_order, chan)
                          OneToMany(),
                          deps,
                          Vector{Thunk}(undef, 0),
-                         WeakKeyDict{Thunk, Any}(),
-                         WeakKeyDict{Thunk, Nothing}(),
+                         Dict{Thunk, Nothing}(),
                          Set{Thunk}(),
                          Dict{Thunk,OSProc}(),
                          Dict{Int, WeakThunk}(),
@@ -128,13 +126,13 @@ function start_state(deps::Dict, node_order, chan)
                          Base.Event(),
                          ReentrantLock(),
                          Dict{Thunk, Vector{ThunkFuture}}(),
-                         WeakKeyDict{Thunk,Bool}(),
+                         Dict{Thunk,Bool}(),
                          Set{Thunk}(),
                          chan)
 
     for k in sort(collect(keys(deps)), by=node_order)
         if istask(k)
-            waiting = Set{Thunk}(Iterators.filter(istask, k.options.syncdeps))
+            waiting = Set{Thunk}(Dagger.syncdeps_iterator(k))
             if isempty(waiting)
                 push!(state.ready, k)
             else
@@ -223,13 +221,16 @@ function init_proc(state, p, log_sink)
 end
 function _cleanup_proc(uid, log_sink)
     empty!(CHUNK_CACHE) # FIXME: Should be keyed on uid!
-    proc_states(uid) do states
-        for (proc, state) in states
+    states = proc_states(uid)
+    MemPool.lock_read(states.lock) do
+        for (proc, state) in states.dict
             istate = state.state
             istate.done[] = true
             notify(istate.reschedule)
         end
-        empty!(states)
+    end
+    MemPool.lock(states.lock) do
+        empty!(states.dict)
     end
 end
 function cleanup_proc(state, p, log_sink)
@@ -588,6 +589,11 @@ end
         Dagger.populate_defaults!(options, sig)
 
         # Calculate scope
+        if options.exec_scope !== nothing
+            # Bypass scope calculation if it's been done for us already
+            scope = options.exec_scope
+            @goto scope_computed
+        end
         scope = constrain(@something(options.compute_scope, options.scope, DefaultScope()),
                           @something(options.result_scope, AnyScope()))
         if scope isa InvalidScope
@@ -614,6 +620,7 @@ end
                 @goto pop_task
             end
         end
+        @label scope_computed
 
         input_procs = @reusable_vector :schedule!_input_procs Processor OSProc() 32
         input_procs_cleanup = @reuse_defer_cleanup empty!(input_procs)
@@ -772,6 +779,7 @@ end
 function task_delete!(state, thunk)
     clear_result!(state, thunk)
     delete!(state.valid, thunk)
+    delete!(state.errored, thunk)
     delete!(state.thunk_dict, thunk.id)
 end
 
@@ -993,19 +1001,59 @@ struct ProcessorState
     runner::Task
 end
 
-const PROCESSOR_TASK_STATE = LockedObject(Dict{UInt64,Dict{Processor,ProcessorState}}())
+const PROCESSOR_TASK_STATE_LOCK = MemPool.ReadWriteLock()
+struct ProcessorStateDict
+    lock::MemPool.ReadWriteLock
+    dict::Dict{Processor,ProcessorState}
+    ProcessorStateDict() = new(MemPool.ReadWriteLock(), Dict{Processor,ProcessorState}())
+end
+const PROCESSOR_TASK_STATE = Dict{UInt64,ProcessorStateDict}()
 
-function proc_states(f::Base.Callable, uid::UInt64)
-    lock(PROCESSOR_TASK_STATE) do all_states
-        if !haskey(all_states, uid)
-            all_states[uid] = Dict{Processor,ProcessorState}()
+function proc_states(uid::UInt64=Dagger.get_tls().sch_uid)
+    states = MemPool.lock_read(PROCESSOR_TASK_STATE_LOCK) do
+        if haskey(PROCESSOR_TASK_STATE, uid)
+            return PROCESSOR_TASK_STATE[uid]
         end
-        our_states = all_states[uid]
-        return f(our_states)
+        return nothing
+    end
+    if states === nothing
+        states = MemPool.lock(PROCESSOR_TASK_STATE_LOCK) do
+            dict = ProcessorStateDict()
+            PROCESSOR_TASK_STATE[uid] = dict
+            return dict
+        end
+    end
+    return states
+end
+function proc_states_values(uid::UInt64=Dagger.get_tls().sch_uid)
+    states = proc_states(uid)
+    return MemPool.lock_read(states.lock) do
+        return collect(values(states.dict))
     end
 end
-proc_states(f::Base.Callable) =
-    proc_states(f, Dagger.get_tls().sch_uid)
+function proc_state!(f, uid::UInt64, proc::Processor)
+    states = proc_states(uid)
+    state = MemPool.lock_read(states.lock) do
+        return get(states.dict, proc, nothing)
+    end
+    if state === nothing
+        state = f()::ProcessorState
+        MemPool.lock(states.lock) do
+            states.dict[proc] = state
+        end
+    end
+    return state
+end
+proc_state!(f, proc::Processor) = proc_state!(f, Dagger.get_tls().sch_uid, proc)
+function maybe_proc_state(uid::UInt64, proc::Processor)
+    states = proc_states(uid)
+    return MemPool.lock_read(states.lock) do
+        return get(states.dict, proc, nothing)
+    end
+end
+maybe_proc_state(proc::Processor) = maybe_proc_state(Dagger.get_tls().sch_uid, proc)
+proc_state(uid::UInt64, proc::Processor) = something(maybe_proc_state(uid, proc))
+proc_state(proc::Processor) = proc_state(Dagger.get_tls().sch_uid, proc)
 
 task_tid_for_processor(::Processor) = nothing
 task_tid_for_processor(proc::Dagger.ThreadProc) = proc.tid
@@ -1085,7 +1133,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
 
                 # Try to steal from local queues randomly
                 # TODO: Prioritize stealing from busiest processors
-                states = proc_states(all_states->collect(values(all_states)), uid)
+                states = proc_states_values(uid)
                 # TODO: Try to pre-allocate this
                 P = randperm(length(states))
                 for state in getindex.(Ref(states), P)
@@ -1186,14 +1234,10 @@ function (dts::DoTaskSpec)()
         bt = catch_backtrace()
         (CapturedException(err, bt), nothing)
     finally
-        istate = proc_states(task.sch_uid) do states
-            if haskey(states, to_proc)
-                return states[to_proc].state
-            end
-            # Processor was removed due to scheduler exit
-            return nothing
-        end
-        if istate !== nothing
+        state = maybe_proc_state(task.sch_uid, to_proc)
+        # state will be nothing if processor was removed due to scheduler exit
+        if state !== nothing
+            istate = state.state
             while true
                 # Wait until the task has been recorded in the processor state
                 done = lock(istate.queue) do _
@@ -1253,11 +1297,8 @@ function do_tasks(to_proc, return_queue, tasks)
     ctx_vars = first(tasks).ctx_vars
     ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
     uid = first(tasks).sch_uid
-    state = proc_states(uid) do states
-        if haskey(states, to_proc)
-            return states[to_proc]
-        end
-
+    start_event = nothing
+    state = proc_state!(uid, to_proc) do
         # Initialize the processor state and runner
         queue = PriorityQueue{TaskSpec, UInt32}()
         queue_locked = LockedObject(queue)
@@ -1275,9 +1316,10 @@ function do_tasks(to_proc, return_queue, tasks)
         @static if VERSION < v"1.9"
             reschedule.waiter = runner
         end
-        state = states[to_proc] = ProcessorState(istate, runner)
+        return ProcessorState(istate, runner)
+    end
+    if start_event !== nothing
         notify(start_event)
-        return state
     end
     istate = state.state
     lock(istate.queue) do queue
@@ -1304,7 +1346,7 @@ function do_tasks(to_proc, return_queue, tasks)
 
     # Kick other processors to make them steal
     # TODO: Alternatively, automatically balance work instead of blindly enqueueing
-    states = collect(proc_states(values, uid))
+    states = proc_states_values(uid)
     P = randperm(length(states))
     for other_state in getindex.(Ref(states), P)
         other_istate = other_state.state

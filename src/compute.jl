@@ -48,7 +48,7 @@ end
 Find the set of direct dependents for each task.
 """
 function dependents(node::Thunk)
-    deps = Dict{Union{Thunk,Chunk}, Set{Thunk}}()
+    deps = Dict{Thunk, Set{Thunk}}()
     visited = Set{Thunk}()
     to_visit = Set{Thunk}()
     push!(to_visit, node)
@@ -58,29 +58,30 @@ function dependents(node::Thunk)
         if !haskey(deps, next)
             deps[next] = Set{Thunk}()
         end
-        for inp in next.options.syncdeps
-            if istask(inp) || (inp isa Chunk)
-                s = get!(()->Set{Thunk}(), deps, inp)
-                push!(s, next)
-                if istask(inp) && !(inp in visited)
-                    push!(to_visit, inp)
-                end
+        for inp in syncdeps_iterator(next)
+            s = get!(()->Set{Thunk}(), deps, inp)
+            push!(s, next)
+            if !(inp in visited)
+                push!(to_visit, inp)
             end
         end
         push!(visited, next)
     end
     return deps
 end
+syncdeps_iterator(thunk::Thunk) =
+    Iterators.map(syncdep->unwrap_weak_checked(something(syncdep.thunk))::Thunk,
+                  thunk.options.syncdeps)
 
 """
-    noffspring(dpents::Dict{Union{Thunk,Chunk}, Set{Thunk}}) -> Dict{Thunk, Int}
+    noffspring(dpents::Dict{Thunk, Set{Thunk}}) -> Dict{Thunk, Int}
 
 Recursively find the number of tasks dependent on each task in the DAG.
 Takes a Dict as returned by [`dependents`](@ref).
 """
-function noffspring(dpents::Dict{Union{Thunk,Chunk}, Set{Thunk}})
+function noffspring(dpents::Dict{Thunk, Set{Thunk}})
     noff = Dict{Thunk,Int}()
-    to_visit = collect(filter(istask, keys(dpents)))
+    to_visit = collect(keys(dpents))
     while !isempty(to_visit)
         next = popfirst!(to_visit)
         haskey(noff, next) && continue
@@ -126,7 +127,7 @@ function order(node::Thunk, ndeps)
         haskey(output, next) && continue
         s += 1
         output[next] = s
-        parents = collect(filter(istask, next.options.syncdeps))
+        parents = collect(syncdeps_iterator(next))
         if !isempty(parents)
             # If parents is empty, sort! should be a no-op, but raises an ambiguity error
             # when InlineStrings.jl is loaded (at least, version 1.1.0), because InlineStrings
