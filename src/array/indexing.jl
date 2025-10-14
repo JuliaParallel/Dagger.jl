@@ -1,4 +1,4 @@
-### getindex
+#get index 
 
 const GETINDEX_CACHE = TaskLocalValue{Dict{Tuple,Any}}(()->Dict{Tuple,Any}())
 const GETINDEX_CACHE_SIZE = ScopedValue{Int}(0)
@@ -36,6 +36,7 @@ with_index_caching(f, size::Integer=1) = with(f, GETINDEX_CACHE_SIZE=>size)
     # Return the value
     return part[offset_idx...]
 end
+
 function partition_for(A::DArray, idx::NTuple{N,Int}) where N
     part_idx = zeros(Int, N)
     offset_idx = zeros(Int, N)
