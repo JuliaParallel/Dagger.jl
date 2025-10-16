@@ -382,8 +382,14 @@ end
 aliasing(::String) = NoAliasing() # FIXME: Not necessarily true
 aliasing(::Symbol) = NoAliasing()
 aliasing(::Type) = NoAliasing()
-aliasing(x::Chunk, T) = remotecall_fetch(root_worker_id(x.processor), x, T) do x, T
-    aliasing(unwrap(x), T)
+function aliasing(x::Chunk, T)
+    @assert x.handle isa DRef
+    if root_worker_id(x.processor) == myid()
+        return aliasing(unwrap(x), T)
+    end
+    return remotecall_fetch(root_worker_id(x.processor), x, T) do x, T
+        aliasing(unwrap(x), T)
+    end
 end
 aliasing(x::Chunk) = remotecall_fetch(root_worker_id(x.processor), x) do x
     aliasing(unwrap(x))

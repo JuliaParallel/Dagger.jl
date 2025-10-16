@@ -258,6 +258,9 @@ struct DataDepsState
     # The mapping of remote argument to original argument
     remote_arg_to_original::IdDict{Any,Any}
 
+    # The mapping of original argument wrapper to remote argument wrapper
+    remote_arg_w::Dict{ArgumentWrapper,Dict{MemorySpace,ArgumentWrapper}}
+
     # The mapping of ainfo to argument and dep_mod
     # Used to lookup which argument and dep_mod a given ainfo is generated from
     # N.B. This is a mapping for remote argument copies
@@ -312,6 +315,7 @@ struct DataDepsState
         arg_origin = IdDict{Any,MemorySpace}()
         remote_args = Dict{MemorySpace,IdDict{Any,Any}}()
         remote_arg_to_original = IdDict{Any,Any}()
+        remote_arg_w = Dict{ArgumentWrapper,Dict{MemorySpace,ArgumentWrapper}}()
         ainfo_arg = Dict{AliasingWrapper,ArgumentWrapper}()
         arg_owner = Dict{ArgumentWrapper,MemorySpace}()
         arg_overlaps = Dict{ArgumentWrapper,Set{ArgumentWrapper}}()
@@ -327,35 +331,9 @@ struct DataDepsState
         ainfos_owner = Dict{AliasingWrapper,Union{Pair{DTask,Int},Nothing}}()
         ainfos_readers = Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}()
 
-        return new(arg_to_chunk, arg_origin, remote_args, remote_arg_to_original, ainfo_arg, arg_owner, arg_overlaps, ainfo_backing_chunk, arg_history,
+        return new(arg_to_chunk, arg_origin, remote_args, remote_arg_to_original, remote_arg_w, ainfo_arg, arg_owner, arg_overlaps, ainfo_backing_chunk, arg_history,
                    supports_inplace_cache, ainfo_cache, ainfos_lookup, ainfos_overlaps, ainfos_owner, ainfos_readers)
     end
-end
-
-# N.B. arg_w must be the original argument wrapper, not a remote copy
-function aliasing!(state::DataDepsState, target_space::MemorySpace, arg_w::ArgumentWrapper)
-    # Grab the remote copy of the argument, and calculate the ainfo
-    remote_arg = get_or_generate_slot!(state, target_space, arg_w.arg)
-    remote_arg_w = ArgumentWrapper(remote_arg, arg_w.dep_mod)
-
-    # Check if we already have the result cached
-    if haskey(state.ainfo_cache, remote_arg_w)
-        return state.ainfo_cache[remote_arg_w]
-    end
-
-    # Calculate the ainfo
-    ainfo = AliasingWrapper(aliasing(remote_arg, arg_w.dep_mod))
-
-    # Cache the result
-    state.ainfo_cache[remote_arg_w] = ainfo
-
-    # Update the mapping of ainfo to argument and dep_mod
-    state.ainfo_arg[ainfo] = remote_arg_w
-
-    # Populate info for the new ainfo
-    populate_ainfo!(state, arg_w, ainfo, target_space)
-
-    return ainfo
 end
 
 function supports_inplace_move(state::DataDepsState, arg)
@@ -455,6 +433,41 @@ function populate_argument_info!(state::DataDepsState, arg_w::ArgumentWrapper, o
 
     # Calculate the ainfo (which will populate ainfo structures and merge history)
     aliasing!(state, origin_space, arg_w)
+end
+# N.B. arg_w must be the original argument wrapper, not a remote copy
+function aliasing!(state::DataDepsState, target_space::MemorySpace, arg_w::ArgumentWrapper)
+    if haskey(state.remote_arg_w, arg_w) && haskey(state.remote_arg_w[arg_w], target_space)
+        remote_arg_w = @inbounds state.remote_arg_w[arg_w][target_space]
+        remote_arg = remote_arg_w.arg
+    else
+        # Grab the remote copy of the argument, and calculate the ainfo
+        remote_arg = get_or_generate_slot!(state, target_space, arg_w.arg)
+        remote_arg_w = ArgumentWrapper(remote_arg, arg_w.dep_mod)
+        get!(Dict{MemorySpace,ArgumentWrapper}, state.remote_arg_w, arg_w)[target_space] = remote_arg_w
+    end
+
+    # Check if we already have the result cached
+    if haskey(state.ainfo_cache, remote_arg_w)
+        return state.ainfo_cache[remote_arg_w]
+    end
+
+    # Calculate the ainfo
+    ainfo = AliasingWrapper(aliasing(remote_arg, arg_w.dep_mod))
+
+    # Cache the result
+    state.ainfo_cache[remote_arg_w] = ainfo
+
+    # Update the mapping of ainfo to argument and dep_mod
+    if !haskey(state.ainfo_arg, ainfo)
+        state.ainfo_arg[ainfo] = remote_arg_w
+    else
+        @assert state.ainfo_arg[ainfo] == remote_arg_w
+    end
+
+    # Populate info for the new ainfo
+    populate_ainfo!(state, arg_w, ainfo, target_space)
+
+    return ainfo
 end
 function populate_ainfo!(state::DataDepsState, original_arg_w::ArgumentWrapper, target_ainfo::AliasingWrapper, target_space::MemorySpace)
     if !haskey(state.ainfos_owner, target_ainfo)
@@ -662,11 +675,18 @@ function get_or_generate_slot!(state, dest_space, data)
 end
 function move_rewrap(from_proc::Processor, to_proc::Processor, data)
     return aliased_object!(data) do data
-        to_w = root_worker_id(to_proc)
-        return remotecall_fetch(to_w, from_proc, to_proc, data) do from_proc, to_proc, data
-            data_converted = move(from_proc, to_proc, data)
-            return tochunk(data_converted, to_proc)
-        end
+        return remotecall_endpoint(identity, from_proc, to_proc, from_space, to_space, data)
+    end
+end
+function remotecall_endpoint(f, from_proc, to_proc, orig_space, dest_space, data)
+    to_w = root_worker_id(to_proc)
+    if to_w == myid()
+        data_converted = f(move(from_proc, to_proc, data))
+        return tochunk(data_converted, to_proc, dest_space)
+    end
+    return remotecall_fetch(to_w, from_proc, to_proc, dest_space, data) do from_proc, to_proc, dest_space, data
+        data_converted = f(move(from_proc, to_proc, data))
+        return tochunk(data_converted, to_proc, dest_space)
     end
 end
 const ALIASED_OBJECT_CACHE = TaskLocalValue{Union{Dict{AbstractAliasing,Chunk}, Nothing}}(()->nothing)
