@@ -17,8 +17,6 @@ function unset!(spec::ThunkSpec, _)
     spec.id = 0
     spec.cache_ref = nothing
     spec.affinity = nothing
-    compute_scope = DefaultScope()
-    result_scope = AnyScope()
     spec.options = nothing
 end
 
