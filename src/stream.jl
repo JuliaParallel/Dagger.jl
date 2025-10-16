@@ -372,21 +372,21 @@ function migrate_stream!(stream::Stream, w::Integer=myid())
 end
 
 struct StreamingTaskQueue <: AbstractTaskQueue
-    tasks::Vector{Pair{DTaskSpec,DTask}}
+    tasks::Vector{DTaskPair}
     self_streams::Dict{UInt,Any}
-    StreamingTaskQueue() = new(Pair{DTaskSpec,DTask}[],
+    StreamingTaskQueue() = new(DTaskPair[],
                                Dict{UInt,Any}())
 end
 
-function enqueue!(queue::StreamingTaskQueue, spec::Pair{DTaskSpec,DTask})
-    push!(queue.tasks, spec)
-    initialize_streaming!(queue.self_streams, spec...)
+function enqueue!(queue::StreamingTaskQueue, pair::DTaskPair)
+    push!(queue.tasks, pair)
+    initialize_streaming!(queue.self_streams, pair.spec, pair.task)
 end
 
-function enqueue!(queue::StreamingTaskQueue, specs::Vector{Pair{DTaskSpec,DTask}})
-    append!(queue.tasks, specs)
-    for (spec, task) in specs
-        initialize_streaming!(queue.self_streams, spec, task)
+function enqueue!(queue::StreamingTaskQueue, pairs::Vector{DTaskPair})
+    append!(queue.tasks, pairs)
+    for pair in pairs
+        initialize_streaming!(queue.self_streams, pair.spec, pair.task)
     end
 end
 
@@ -458,7 +458,7 @@ function spawn_streaming(f::Base.Callable; teardown::Bool=true)
 
         if teardown
             # Start teardown monitor
-            dtasks = map(last, queue.tasks)::Vector{DTask}
+            dtasks = map(pair->pair.task, queue.tasks)::Vector{DTask}
             Sch.errormonitor_tracked("streaming teardown", Threads.@spawn begin
                 # Wait for any task to finish
                 waitany(dtasks)
@@ -663,10 +663,12 @@ function task_to_stream(uid::UInt)
     end
 end
 
-function finalize_streaming!(tasks::Vector{Pair{DTaskSpec,DTask}}, self_streams)
+function finalize_streaming!(tasks::Vector{DTaskPair}, self_streams)
     stream_waiter_changes = Dict{UInt,Vector{Pair{UInt,Any}}}()
 
-    for (spec, task) in tasks
+    for pair in tasks
+        spec = pair.spec
+        task = pair.task
         @assert haskey(self_streams, task.uid)
         our_stream = self_streams[task.uid]
 
