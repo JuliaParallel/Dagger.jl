@@ -431,6 +431,9 @@ aliasing(x::DTask, T) = aliasing(fetch(x; move_value=false, unwrap=false), T)
 aliasing(x::DTask) = aliasing(fetch(x; move_value=false, unwrap=false))
 function aliasing(accel::DistributedAcceleration, x::Chunk, T)
     @assert x.handle isa DRef
+    if root_worker_id(x.processor) == myid()
+        return aliasing(unwrap(x), T)
+    end
     return remotecall_fetch(root_worker_id(x.processor), x, T) do x, T
         aliasing(unwrap(x), T)
     end
