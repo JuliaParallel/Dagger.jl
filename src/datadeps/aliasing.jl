@@ -192,6 +192,11 @@ struct Deps{T,DT<:Tuple}
 end
 Deps(x, deps...) = Deps(x, deps)
 
+chunktype(::In{T}) where T = T
+chunktype(::Out{T}) where T = T
+chunktype(::InOut{T}) where T = T
+chunktype(::Deps{T,DT}) where {T,DT} = T
+
 function unwrap_inout(arg)
     readdep = false
     writedep = false
@@ -375,51 +380,72 @@ function is_writedep(arg, deps, task::DTask)
 end
 
 # Aliasing state setup
-function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
+function populate_task_info!(state::DataDepsState, task_args, spec::DTaskSpec, task::DTask)
     # Track the task's arguments and access patterns
-    for (idx, _arg) in enumerate(spec.fargs)
-        arg = value(_arg)
+    return map_or_ntuple(task_args) do idx
+        _arg = task_args[idx]
+
+        # Unwrap the argument
+        _arg_with_deps = value(_arg)
+        pos = _arg.pos
 
         # Unwrap In/InOut/Out wrappers and record dependencies
-        arg, deps = unwrap_inout(arg)
+        arg_pre_unwrap, deps = unwrap_inout(_arg_with_deps)
 
         # Unwrap the Chunk underlying any DTask arguments
-        arg = arg isa DTask ? fetch(arg; move_value=false, unwrap=false) : arg
+        arg = arg_pre_unwrap isa DTask ? fetch(arg_pre_unwrap; move_value=false, unwrap=false) : arg_pre_unwrap
 
-        # Skip non-aliasing arguments
-        type_may_alias(typeof(arg)) || continue
-
-        # Skip arguments not supporting in-place move
-        supports_inplace_move(state, arg) || continue
+        # Skip non-aliasing arguments or arguments that don't support in-place move
+        may_alias = type_may_alias(typeof(arg))
+        inplace_move = may_alias && supports_inplace_move(state, arg)
+        if !may_alias || !inplace_move
+            arg_w = ArgumentWrapper(arg, identity)
+            if is_typed(spec)
+                return TypedDataDepsTaskArgument(arg, pos, may_alias, inplace_move, (DataDepsTaskDependency(arg_w, false, false),))
+            else
+                return DataDepsTaskArgument(arg, pos, may_alias, inplace_move, [DataDepsTaskDependency(arg_w, false, false)])
+            end
+        end
 
         # Generate a Chunk for the argument if necessary
         if haskey(state.raw_arg_to_chunk, arg)
-            arg = state.raw_arg_to_chunk[arg]
+            arg_chunk = state.raw_arg_to_chunk[arg]
         else
             if !(arg isa Chunk)
-                new_arg = with(MPI_UID=>task.uid) do
+                arg_chunk = with(MPI_UID=>task.uid) do
                     tochunk(arg)
                 end
-                state.raw_arg_to_chunk[arg] = new_arg
-                arg = new_arg
+                state.raw_arg_to_chunk[arg] = arg_chunk
             else
                 state.raw_arg_to_chunk[arg] = arg
+                arg_chunk = arg
             end
         end
 
         # Track the origin space of the argument
-        origin_space = memory_space(arg)
+        origin_space = memory_space(arg_chunk)
         check_uniform(origin_space)
-        state.arg_origin[arg] = origin_space
-        state.remote_arg_to_original[arg] = arg
+        state.arg_origin[arg_chunk] = origin_space
+        state.remote_arg_to_original[arg_chunk] = arg_chunk
 
         # Populate argument info for all aliasing dependencies
-        for (dep_mod, _, _) in deps
-            # Generate an ArgumentWrapper for the argument
-            aw = ArgumentWrapper(arg, dep_mod)
-
-            # Populate argument info
-            populate_argument_info!(state, aw, origin_space)
+        # And return the argument, dependencies, and ArgumentWrappers
+        if is_typed(spec)
+            deps = Tuple(DataDepsTaskDependency(arg_chunk, dep) for dep in deps)
+            map_or_ntuple(deps) do dep_idx
+                dep = deps[dep_idx]
+                # Populate argument info
+                populate_argument_info!(state, dep.arg_w, origin_space)
+            end
+            return TypedDataDepsTaskArgument(arg_chunk, pos, may_alias, inplace_move, deps)
+        else
+            deps = [DataDepsTaskDependency(arg_chunk, dep) for dep in deps]
+            map_or_ntuple(deps) do dep_idx
+                dep = deps[dep_idx]
+                # Populate argument info
+                populate_argument_info!(state, dep.arg_w, origin_space)
+            end
+            return DataDepsTaskArgument(arg_chunk, pos, may_alias, inplace_move, deps)
         end
     end
 end

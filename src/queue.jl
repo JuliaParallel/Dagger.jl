@@ -1,6 +1,37 @@
-mutable struct DTaskSpec
-    fargs::Vector{Argument}
+mutable struct DTaskSpec{typed,FA<:Tuple}
+    _fargs::Vector{Argument}
+    _typed_fargs::FA
     options::Options
+end
+DTaskSpec(fargs::Vector{Argument}, options::Options) =
+    DTaskSpec{false, Tuple{}}(fargs, (), options)
+DTaskSpec(fargs::FA, options::Options) where FA  =
+    DTaskSpec{true, FA}(Argument[], fargs, options)
+is_typed(spec::DTaskSpec{typed}) where typed = typed
+function Base.getproperty(spec::DTaskSpec{typed}, field::Symbol) where typed
+    if field === :fargs
+        if typed
+            return getfield(spec, :_typed_fargs)
+        else
+            return getfield(spec, :_fargs)
+        end
+    else
+        return getfield(spec, field)
+    end
+end
+
+struct DTaskPair
+    spec::DTaskSpec
+    task::DTask
+end
+is_typed(pair::DTaskPair) = is_typed(pair.spec)
+Base.iterate(pair::DTaskPair) = (pair.spec, true)
+function Base.iterate(pair::DTaskPair, state::Bool)
+    if state
+        return (pair.task, false)
+    else
+        return nothing
+    end
 end
 
 abstract type AbstractTaskQueue end
@@ -8,25 +39,25 @@ abstract type AbstractTaskQueue end
 function enqueue! end
 
 struct DefaultTaskQueue <: AbstractTaskQueue end
-enqueue!(::DefaultTaskQueue, spec::Pair{DTaskSpec,DTask}) =
-    eager_launch!(spec)
-enqueue!(::DefaultTaskQueue, specs::Vector{Pair{DTaskSpec,DTask}}) =
-    eager_launch!(specs)
+enqueue!(::DefaultTaskQueue, pair::DTaskPair) =
+    eager_launch!(pair)
+enqueue!(::DefaultTaskQueue, pairs::Vector{DTaskPair}) =
+    eager_launch!(pairs)
 
-enqueue!(spec::Pair{DTaskSpec,DTask}) =
-    enqueue!(get_options(:task_queue, DefaultTaskQueue()), spec)
-enqueue!(specs::Vector{Pair{DTaskSpec,DTask}}) =
-    enqueue!(get_options(:task_queue, DefaultTaskQueue()), specs)
+enqueue!(pair::DTaskPair) =
+    enqueue!(get_options(:task_queue, DefaultTaskQueue()), pair)
+enqueue!(pairs::Vector{DTaskPair}) =
+    enqueue!(get_options(:task_queue, DefaultTaskQueue()), pairs)
 
 struct LazyTaskQueue <: AbstractTaskQueue
-    tasks::Vector{Pair{DTaskSpec,DTask}}
-    LazyTaskQueue() = new(Pair{DTaskSpec,DTask}[])
+    tasks::Vector{DTaskPair}
+    LazyTaskQueue() = new(DTaskPair[])
 end
-function enqueue!(queue::LazyTaskQueue, spec::Pair{DTaskSpec,DTask})
-    push!(queue.tasks, spec)
+function enqueue!(queue::LazyTaskQueue, pair::DTaskPair)
+    push!(queue.tasks, pair)
 end
-function enqueue!(queue::LazyTaskQueue, specs::Vector{Pair{DTaskSpec,DTask}})
-    append!(queue.tasks, specs)
+function enqueue!(queue::LazyTaskQueue, pairs::Vector{DTaskPair})
+    append!(queue.tasks, pairs)
 end
 function spawn_bulk(f::Base.Callable)
     queue = LazyTaskQueue()
@@ -50,25 +81,25 @@ function _add_prev_deps!(queue::InOrderTaskQueue, spec::DTaskSpec)
         push!(syncdeps, ThunkSyncdep(task))
     end
 end
-function enqueue!(queue::InOrderTaskQueue, spec::Pair{DTaskSpec,DTask})
+function enqueue!(queue::InOrderTaskQueue, pair::DTaskPair)
     if length(queue.prev_tasks) > 0
-        _add_prev_deps!(queue, first(spec))
+        _add_prev_deps!(queue, pair.spec)
         empty!(queue.prev_tasks)
     end
-    push!(queue.prev_tasks, last(spec))
-    enqueue!(queue.upper_queue, spec)
+    push!(queue.prev_tasks, pair.task)
+    enqueue!(queue.upper_queue, pair)
 end
-function enqueue!(queue::InOrderTaskQueue, specs::Vector{Pair{DTaskSpec,DTask}})
+function enqueue!(queue::InOrderTaskQueue, pairs::Vector{DTaskPair})
     if length(queue.prev_tasks) > 0
-        for (spec, task) in specs
-            _add_prev_deps!(queue, spec)
+        for pair in pairs
+            _add_prev_deps!(queue, pair.spec)
         end
         empty!(queue.prev_tasks)
     end
-    for (spec, task) in specs
-        push!(queue.prev_tasks, task)
+    for pair in pairs
+        push!(queue.prev_tasks, pair.task)
     end
-    enqueue!(queue.upper_queue, specs)
+    enqueue!(queue.upper_queue, pairs)
 end
 function spawn_sequential(f::Base.Callable)
     queue = InOrderTaskQueue(get_options(:task_queue, DefaultTaskQueue()))
@@ -79,15 +110,15 @@ struct WaitAllQueue <: AbstractTaskQueue
     upper_queue::AbstractTaskQueue
     tasks::Vector{DTask}
 end
-function enqueue!(queue::WaitAllQueue, spec::Pair{DTaskSpec,DTask})
-    push!(queue.tasks, spec[2])
-    enqueue!(queue.upper_queue, spec)
+function enqueue!(queue::WaitAllQueue, pair::DTaskPair)
+    push!(queue.tasks, pair.task)
+    enqueue!(queue.upper_queue, pair)
 end
-function enqueue!(queue::WaitAllQueue, specs::Vector{Pair{DTaskSpec,DTask}})
-    for (_, task) in specs
-        push!(queue.tasks, task)
+function enqueue!(queue::WaitAllQueue, pairs::Vector{DTaskPair})
+    for pair in pairs
+        push!(queue.tasks, pair.task)
     end
-    enqueue!(queue.upper_queue, specs)
+    enqueue!(queue.upper_queue, pairs)
 end
 function wait_all(f; check_errors::Bool=false)
     queue = WaitAllQueue(get_options(:task_queue, DefaultTaskQueue()), DTask[])

@@ -268,24 +268,29 @@ function eager_process_elem_submission_to_local!(id_map, arg::Argument)
         arg.value = Sch.ThunkID(id_map[value(arg).uid], value(arg).thunk_ref)
     end
 end
-function eager_process_args_submission_to_local!(id_map, spec_pair::Pair{DTaskSpec,DTask})
-    spec, task = spec_pair
+function eager_process_elem_submission_to_local(id_map, arg::TypedArgument{T}) where T
+    @assert !(T <: Thunk) "Cannot use `Thunk`s in `@spawn`/`spawn`"
+    if T <: DTask && haskey(id_map, (value(arg)::DTask).uid)
+        #=FIXME:UNIQUE=#
+        return Sch.ThunkID(id_map[value(arg).uid], value(arg).thunk_ref)
+    end
+    return arg
+end
+function eager_process_args_submission_to_local!(id_map, spec::DTaskSpec{false})
     for arg in spec.fargs
         eager_process_elem_submission_to_local!(id_map, arg)
     end
 end
-function eager_process_args_submission_to_local!(id_map, spec_pairs::Vector{Pair{DTaskSpec,DTask}})
-    for spec_pair in spec_pairs
-        eager_process_args_submission_to_local!(id_map, spec_pair)
-    end
+function eager_process_args_submission_to_local(id_map, spec::DTaskSpec{true})
+    return ntuple(i->eager_process_elem_submission_to_local(id_map, spec.fargs[i]), length(spec.fargs))
 end
 
-function DTaskMetadata(spec::DTaskSpec)
-    f = value(spec.fargs[1])
+DTaskMetadata(spec::DTaskSpec) = DTaskMetadata(eager_metadata(spec.fargs))
+function eager_metadata(fargs)
+    f = value(fargs[1])
     f = f isa StreamingFunction ? f.f : f
-    arg_types = ntuple(i->chunktype(value(spec.fargs[i+1])), length(spec.fargs)-1)
-    return_type = Base.promote_op(f, arg_types...)
-    return DTaskMetadata(return_type)
+    arg_types = ntuple(i->chunktype(value(fargs[i+1])), length(fargs)-1)
+    return Base.promote_op(f, arg_types...)
 end
 
 function eager_spawn(spec::DTaskSpec)
@@ -298,48 +303,64 @@ end
 
 chunktype(t::DTask) = t.metadata.return_type
 
-function eager_launch!((spec, task)::Pair{DTaskSpec,DTask})
+function eager_launch!(pair::DTaskPair)
+    spec = pair.spec
+    task = pair.task
+
     # Assign a name, if specified
     eager_assign_name!(spec, task)
 
     # Lookup DTask -> ThunkID
-    lock(Sch.EAGER_ID_MAP) do id_map
-        eager_process_args_submission_to_local!(id_map, spec=>task)
+    fargs = lock(Sch.EAGER_ID_MAP) do id_map
+        if is_typed(spec)
+            return Argument[map(Argument, eager_process_args_submission_to_local(id_map, spec))...]
+        else
+            eager_process_args_submission_to_local!(id_map, spec)
+            return spec.fargs
+        end
     end
 
     # Submit the task
     #=FIXME:REALLOC=#
     thunk_id = eager_submit!(PayloadOne(task.uid, task.future,
-                                        spec.fargs, spec.options, true))
+                                        fargs, spec.options, true))
     task.thunk_ref = thunk_id.ref
 end
-function eager_launch!(specs::Vector{Pair{DTaskSpec,DTask}})
-    ntasks = length(specs)
+@warn "Don't convert Tuple to Vector{Argument}" maxlog=1
+function eager_launch!(pairs::Vector{DTaskPair})
+    ntasks = length(pairs)
 
     # Assign a name, if specified
-    for (spec, task) in specs
-        eager_assign_name!(spec, task)
+    for pair in pairs
+        eager_assign_name!(pair.spec, pair.task)
     end
 
     #=FIXME:REALLOC_N=#
-    uids = [task.uid for (_, task) in specs]
-    futures = [task.future for (_, task) in specs]
+    uids = [pair.task.uid for pair in pairs]
+    futures = [pair.task.future for pair in pairs]
 
     # Get all functions, args/kwargs, and options
     #=FIXME:REALLOC_N=#
     all_fargs = lock(Sch.EAGER_ID_MAP) do id_map
         # Lookup DTask -> ThunkID
-        eager_process_args_submission_to_local!(id_map, specs)
-        [spec.fargs for (spec, _) in specs]
+        return map(pairs) do pair
+            spec = pair.spec
+            if is_typed(spec)
+                return Argument[map(Argument, eager_process_args_submission_to_local(id_map, spec))...]
+            else
+                eager_process_args_submission_to_local!(id_map, spec)
+                return spec.fargs
+            end
+        end
     end
-    all_options = Options[spec.options for (spec, _) in specs]
+    all_options = Options[pair.spec.options for pair in pairs]
 
     # Submit the tasks
     #=FIXME:REALLOC=#
     thunk_ids = eager_submit!(PayloadMulti(ntasks, uids, futures,
                                            all_fargs, all_options, true))
     for i in 1:ntasks
-        task = specs[i][2]
+        task = pairs[i].task
         task.thunk_ref = thunk_ids[i].ref
     end
 end
