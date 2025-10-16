@@ -302,6 +302,10 @@ struct DataDepsState
     # N.B. This is a mapping for remote argument copies
     ainfo_cache::Dict{ArgumentWrapper,AliasingWrapper}
 
+    # The oracle for aliasing lookups
+    # Used to populate ainfos_overlaps efficiently
+    ainfos_lookup::AliasingLookup
+
     # The overlapping ainfos for each ainfo
     # Incrementally updated as new ainfos are created
     # Used for fast will_alias lookups
@@ -331,13 +335,14 @@ struct DataDepsState
         supports_inplace_cache = IdDict{Any,Bool}()
         ainfo_cache = Dict{ArgumentWrapper,AliasingWrapper}()
 
+        ainfos_lookup = AliasingLookup()
         ainfos_overlaps = Dict{AliasingWrapper,Set{AliasingWrapper}}()
 
         ainfos_owner = Dict{AliasingWrapper,Union{Pair{DTask,Int},Nothing}}()
         ainfos_readers = Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}()
 
         return new(arg_to_chunk, arg_origin, remote_args, remote_arg_to_original, ainfo_arg, arg_owner, arg_overlaps, ainfo_backing_chunk, arg_history,
-                   supports_inplace_cache, ainfo_cache, ainfos_overlaps, ainfos_owner, ainfos_readers)
+                   supports_inplace_cache, ainfo_cache, ainfos_lookup, ainfos_overlaps, ainfos_owner, ainfos_readers)
     end
 end
 
@@ -469,27 +474,30 @@ function populate_argument_info!(state::DataDepsState, arg_w::ArgumentWrapper, o
     aliasing!(state, origin_space, arg_w)
 end
 function populate_ainfo!(state::DataDepsState, original_arg_w::ArgumentWrapper, target_ainfo::AliasingWrapper, target_space::MemorySpace)
-    # Initialize owner and readers
     if !haskey(state.ainfos_owner, target_ainfo)
+        # Add ourselves to the lookup oracle
+        ainfo_idx = push!(state.ainfos_lookup, target_ainfo)
+
+        # Find overlapping ainfos
         overlaps = Set{AliasingWrapper}()
         push!(overlaps, target_ainfo)
-        for other_ainfo in keys(state.ainfos_owner)
+        for other_ainfo in intersect(state.ainfos_lookup, target_ainfo; ainfo_idx)
             target_ainfo == other_ainfo && continue
-            if will_alias(target_ainfo, other_ainfo)
-                # Mark us and them as overlapping
-                push!(overlaps, other_ainfo)
-                push!(state.ainfos_overlaps[other_ainfo], target_ainfo)
+            # Mark us and them as overlapping
+            push!(overlaps, other_ainfo)
+            push!(state.ainfos_overlaps[other_ainfo], target_ainfo)
 
-                # Add overlapping history to our own
-                other_remote_arg_w = state.ainfo_arg[other_ainfo]
-                other_arg = state.remote_arg_to_original[other_remote_arg_w.arg]
-                other_arg_w = ArgumentWrapper(other_arg, other_remote_arg_w.dep_mod)
-                push!(state.arg_overlaps[original_arg_w], other_arg_w)
-                push!(state.arg_overlaps[other_arg_w], original_arg_w)
-                merge_history!(state, original_arg_w, other_arg_w)
-            end
+            # Add overlapping history to our own
+            other_remote_arg_w = state.ainfo_arg[other_ainfo]
+            other_arg = state.remote_arg_to_original[other_remote_arg_w.arg]
+            other_arg_w = ArgumentWrapper(other_arg, other_remote_arg_w.dep_mod)
+            push!(state.arg_overlaps[original_arg_w], other_arg_w)
+            push!(state.arg_overlaps[other_arg_w], original_arg_w)
+            merge_history!(state, original_arg_w, other_arg_w)
         end
         state.ainfos_overlaps[target_ainfo] = overlaps
+
+        # Initialize owner and readers
         state.ainfos_owner[target_ainfo] = nothing
         state.ainfos_readers[target_ainfo] = Pair{DTask,Int}[]
     end

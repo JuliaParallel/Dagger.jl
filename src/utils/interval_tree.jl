@@ -1,16 +1,3 @@
-# Get the start address of a span
-span_start(span::MemorySpan) = span.ptr.addr
-span_start(span::LocalMemorySpan) = span.ptr
-span_start(span::ManyMemorySpan{N}) where N = ManyPair(ntuple(i -> span_start(span.spans[i]), N))
-# Get the length of a span
-span_len(span::MemorySpan) = span.len
-span_len(span::LocalMemorySpan) = span.len
-span_len(span::ManyMemorySpan{N}) where N = ManyPair(ntuple(i -> span_len(span.spans[i]), N))
-
-# Get the end address of a span
-span_end(span::MemorySpan) = span.ptr.addr + span.len
-span_end(span::LocalMemorySpan) = span.ptr + span.len
-span_end(span::ManyMemorySpan{N}) where N = ManyPair(ntuple(i -> span_end(span.spans[i]), N))
 mutable struct IntervalNode{M,E}
     span::M
     max_end::E  # Maximum end value in this subtree
@@ -20,6 +7,7 @@ mutable struct IntervalNode{M,E}
     IntervalNode(span::M) where M <: MemorySpan = new{M,UInt64}(span, span_end(span), nothing, nothing)
     IntervalNode(span::LocalMemorySpan) = new{LocalMemorySpan,UInt64}(span, span_end(span), nothing, nothing)
     IntervalNode(span::ManyMemorySpan{N}) where N = new{ManyMemorySpan{N},ManyPair{N}}(span, span_end(span), nothing, nothing)
+    IntervalNode(span::LocatorMemorySpan{T}) where T = new{LocatorMemorySpan{T},UInt64}(span, span_end(span), nothing, nothing)
 end
 
 mutable struct IntervalTree{M,E}
@@ -28,6 +16,7 @@ mutable struct IntervalTree{M,E}
     IntervalTree{M}() where M<:MemorySpan = new{M,UInt64}(nothing)
     IntervalTree{LocalMemorySpan}() = new{LocalMemorySpan,UInt64}(nothing)
     IntervalTree{ManyMemorySpan{N}}() where N = new{ManyMemorySpan{N},ManyPair{N}}(nothing)
+    IntervalTree{LocatorMemorySpan{T}}() where T = new{LocatorMemorySpan{T},UInt64}(nothing)
 end
 
 # Construct interval tree from unsorted set of spans
@@ -94,19 +83,48 @@ end
 
 # Update max_end value for a node based on its children
 function update_max_end!(node::IntervalNode)
-    node.max_end = span_end(node.span)
+    max_end = span_end(node.span)
     if node.left !== nothing
-        node.max_end = max(node.max_end, node.left.max_end)
+        max_end = max(max_end, node.left.max_end)
     end
     if node.right !== nothing
-        node.max_end = max(node.max_end, node.right.max_end)
+        max_end = max(max_end, node.right.max_end)
     end
+    node.max_end = max_end
 end
 
 # Insert a span into the interval tree
-function Base.insert!(tree::IntervalTree{M}, span::M) where M
+function Base.insert!(tree::IntervalTree{M,E}, span::M) where {M,E}
     if !isempty(span)
-        tree.root = insert_node!(tree.root, span)
+        if tree.root === nothing
+            tree.root = IntervalNode(span)
+            update_max_end!(tree.root)
+            return span
+        end
+        #tree.root = insert_node!(tree.root, span)
+        to_update = Vector{IntervalNode{M,E}}()
+        prev_node = tree.root
+        cur_node = tree.root
+        while cur_node !== nothing
+            if span_start(span) <= span_start(cur_node.span)
+                cur_node = cur_node.left
+            else
+                cur_node = cur_node.right
+            end
+            if cur_node !== nothing
+                prev_node = cur_node
+                push!(to_update, cur_node)
+            end
+        end
+        if prev_node.left === nothing
+            prev_node.left = IntervalNode(span)
+        else
+            prev_node.right = IntervalNode(span)
+        end
+        for node_idx in eachindex(to_update)
+            node = to_update[node_idx]
+            update_max_end!(node)
+        end
     end
     return span
 end
@@ -221,46 +239,42 @@ function find_min(node::IntervalNode)
     return node
 end
 
-# Check if two spans overlap
-function spans_overlap(span1::MemorySpan, span2::MemorySpan)
-    return span_start(span1) < span_end(span2) && span_start(span2) < span_end(span1)
-end
-function spans_overlap(span1::LocalMemorySpan, span2::LocalMemorySpan)
-    return span_start(span1) < span_end(span2) && span_start(span2) < span_end(span1)
-end
-function spans_overlap(span1::ManyMemorySpan{N}, span2::ManyMemorySpan{N}) where N
-    # N.B. The spans are assumed to be the same length and relative offset
-    return spans_overlap(span1.spans[1], span2.spans[1])
-end
-
 # Find all spans that overlap with the given query span
-function find_overlapping(tree::IntervalTree{M}, query::M) where M
+function find_overlapping(tree::IntervalTree{M}, query::M; exact::Bool=true) where M
     result = M[]
-    find_overlapping!(tree.root, query, result)
+    find_overlapping!(tree.root, query, result; exact)
+    return result
+end
+function find_overlapping!(tree::IntervalTree{M}, query::M, result::Vector{M}; exact::Bool=true) where M
+    find_overlapping!(tree.root, query, result; exact)
     return result
 end
 
-function find_overlapping!(::Nothing, query::M, result::Vector{M}) where M
+function find_overlapping!(::Nothing, query::M, result::Vector{M}; exact::Bool=true) where M
     return
 end
-function find_overlapping!(node::IntervalNode{M,E}, query::M, result::Vector{M}) where {M,E}
+function find_overlapping!(node::IntervalNode{M,E}, query::M, result::Vector{M}; exact::Bool=true) where {M,E}
     # Check if current node overlaps with query
     if spans_overlap(node.span, query)
-        # Get the overlapping portion of the span
-        overlap_start = max(span_start(node.span), span_start(query))
-        overlap_end = min(span_end(node.span), span_end(query))
-        overlap = M(overlap_start, overlap_end - overlap_start)
-        push!(result, overlap)
+        if exact
+            # Get the overlapping portion of the span
+            overlap_start = max(span_start(node.span), span_start(query))
+            overlap_end = min(span_end(node.span), span_end(query))
+            overlap = M(overlap_start, overlap_end - overlap_start)
+            push!(result, overlap)
+        else
+            push!(result, node.span)
+        end
     end
 
     # Recursively search left subtree if it might contain overlapping intervals
     if node.left !== nothing && node.left.max_end > span_start(query)
-        find_overlapping!(node.left, query, result)
+        find_overlapping!(node.left, query, result; exact)
     end
 
     # Recursively search right subtree if query extends beyond current node's start
     if node.right !== nothing && span_end(query) > span_start(node.span)
-        find_overlapping!(node.right, query, result)
+        find_overlapping!(node.right, query, result; exact)
     end
 end
 

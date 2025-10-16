@@ -84,6 +84,8 @@ include("shard.jl")
 include("weakchunk.jl")
 include("utils/logging.jl")
 include("submission.jl")
+include("utils/memory-span.jl")
+include("utils/interval_tree.jl")
 include("memory-spaces.jl")
 
 # Task scheduling
@@ -96,7 +98,6 @@ include("sch/Sch.jl"); using .Sch
 # Data dependency task queue
 include("datadeps/aliasing.jl")
 include("datadeps/chunkview.jl")
-include("datadeps/interval_tree.jl")
 include("datadeps/remainders.jl")
 include("datadeps/queue.jl")
 
