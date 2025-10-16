@@ -9,3 +9,17 @@
     L2 = LowerTriangular(DArray(A, Blocks(16, 16)))
     @test isapprox(L1, L2)
 end
+
+@testset "norm" begin
+    A = rand(16, 16)
+    DA = DArray(A)
+    @test isapprox(norm(A), norm(DA))
+
+    A = rand(16)
+    DA = DArray(A)
+    @test isapprox(norm(A), norm(DA))
+
+    A = rand(16, 16, 16)
+    DA = DArray(A)
+    @test isapprox(norm(A), norm(DA))
+end
