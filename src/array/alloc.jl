@@ -134,20 +134,6 @@ Base.randn(p::BlocksOrAuto, dims::Dims; assignment::AssignmentType = :arbitrary)
 Base.randn(::AutoBlocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary) =
     randn(auto_blocks(dims), T, dims; assignment)
 
-function sprand(p::Blocks, T::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary)
-    d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(T, (T, _dims) -> sprand(T, _dims..., sparsity), false, d, partition(p, d), p, assignment)
-    return _to_darray(a)
-end
-sprand(p::BlocksOrAuto, T::Type, dims_and_sparsity::Real...; assignment::AssignmentType = :arbitrary) =
-    sprand(p, T, dims_and_sparsity[1:end-1], dims_and_sparsity[end]; assignment)
-sprand(p::BlocksOrAuto, dims_and_sparsity::Real...; assignment::AssignmentType = :arbitrary) =
-    sprand(p, Float64, dims_and_sparsity[1:end-1], dims_and_sparsity[end]; assignment)
-sprand(p::BlocksOrAuto, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary) =
-    sprand(p, Float64, dims, sparsity; assignment)
-sprand(::AutoBlocks, T::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary) =
-    sprand(auto_blocks(dims), T, dims, sparsity; assignment)
-
 function Base.ones(p::Blocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
     d = ArrayDomain(map(x->1:x, dims))
     a = AllocateArray(T, ones, false, d, partition(p, d), p, assignment)
