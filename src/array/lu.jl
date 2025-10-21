@@ -21,14 +21,39 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool =
 
         Dagger.spawn_datadeps() do
             for k in range(1, min(mt, nt))
-                Dagger.@spawn LinearAlgebra.generic_lufact!(InOut(Ac[k, k]), LinearAlgebra.NoPivot(); check, allowsingular)
+                Dagger.@spawn LinearAlgebra.generic_lufact!(
+                    InOut(Ac[k, k]),
+                    LinearAlgebra.NoPivot();
+                    check, allowsingular
+                )
                 for m in range(k+1, mt)
-                    Dagger.@spawn BLAS.trsm!('R', 'U', 'N', 'N', zone, In(Ac[k, k]), InOut(Ac[m, k]))
+                    Dagger.@spawn LinearAlgebra.generic_mattridiv!(
+                        InOut(Ac[m, k]),
+                        'U',
+                        'N',
+                        identity,
+                        In(Ac[k, k]),
+                        InOut(Ac[m, k])
+                    )
                 end
                 for n in range(k+1, nt)
-                    Dagger.@spawn BLAS.trsm!('L', 'L', 'N', 'U', zone, In(Ac[k, k]), InOut(Ac[k, n]))
+                    Dagger.@spawn LinearAlgebra.generic_trimatdiv!(
+                        InOut(Ac[k, n]),
+                        'L',
+                        'U',
+                        identity,
+                        In(Ac[k, k]),
+                        InOut(Ac[k, n])
+                    )
                     for m in range(k+1, mt)
-                        Dagger.@spawn BLAS.gemm!('N', 'N', mzone, In(Ac[m, k]), In(Ac[k, n]), zone, InOut(Ac[m, n]))
+                        Dagger.@spawn LinearAlgebra.generic_matmatmul!(
+                            InOut(Ac[m, n]),
+                            'N',
+                            'N',
+                            In(Ac[m, k]),
+                            In(Ac[k, n]),
+                            LinearAlgebra.MulAddMul(mzone, zone)
+                        )
                     end
                 end
             end
