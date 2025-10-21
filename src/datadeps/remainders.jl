@@ -548,17 +548,3 @@ function write_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, to::Base
         write_remainder!(copies, copies_offset, to[], to_ptr, n)
     end
 end
-
-function find_object_holding_ptr(A::SparseMatrixCSC, ptr::UInt64)
-    span = LocalMemorySpan(pointer(A.nzval), length(A.nzval)*sizeof(eltype(A.nzval)))
-    if span_start(span) <= ptr <= span_end(span)
-        return A.nzval
-    end
-    span = LocalMemorySpan(pointer(A.colptr), length(A.colptr)*sizeof(eltype(A.colptr)))
-    if span_start(span) <= ptr <= span_end(span)
-        return A.colptr
-    end
-    span = LocalMemorySpan(pointer(A.rowval), length(A.rowval)*sizeof(eltype(A.rowval)))
-    @assert span_start(span) <= ptr <= span_end(span) "Pointer $ptr not found in SparseMatrixCSC"
-    return A.rowval
-end

@@ -1,0 +1,49 @@
+module FinchExt
+
+import Finch
+import Dagger
+import Dagger: Blocks, AutoBlocks, BlocksOrAuto, AssignmentType, DSparseMatrix
+
+Dagger.sparse_mode(::Finch.Tensor) = :finch
+Dagger._sparse_alloc(::Val{:finch}, T::Type, dims::Dims) =
+    Finch.fspzeros(T, dims...)
+Dagger._sparse_collect(A::Finch.Tensor) = Array(A)
+
+function Finch.fsprand(p::Blocks, T::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary)
+    d = Dagger.ArrayDomain(map(x->1:x, dims))
+    a = Dagger.AllocateArray(T, (T, _dims) -> DSparseMatrix{T}(Finch.fsprand(T, _dims..., sparsity)), false, d, Dagger.partition(p, d), p, assignment)
+    return Dagger._to_darray(a)
+end
+Finch.fsprand(p::BlocksOrAuto, T::Type, dims_and_sparsity::Real...; assignment::AssignmentType = :arbitrary) =
+    Finch.fsprand(p, T, dims_and_sparsity[1:end-1], dims_and_sparsity[end]; assignment)
+Finch.fsprand(p::BlocksOrAuto, dims_and_sparsity::Real...; assignment::AssignmentType = :arbitrary) =
+    Finch.fsprand(p, Float64, dims_and_sparsity[1:end-1], dims_and_sparsity[end]; assignment)
+Finch.fsprand(p::BlocksOrAuto, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary) =
+    Finch.fsprand(p, Float64, dims, sparsity; assignment)
+Finch.fsprand(::AutoBlocks, T::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary) =
+    Finch.fsprand(Dagger.auto_blocks(dims), T, dims, sparsity; assignment)
+
+function Dagger.matmatmul!(
+    C::DSparseMatrix,
+    transA::Char,
+    transB::Char,
+    A::Finch.Tensor,
+    B::Finch.Tensor,
+    alpha,
+    beta
+)
+    if !isa(C.mat, Finch.Tensor)
+        # Not supported here, forward to generic matmatmul!
+        return Dagger.matmatmul!(C.mat, transA, transB, A, B, alpha, beta)
+    end
+
+    # Use optimized Finch operations
+    Cm = C.mat
+    Finch.@einsum Cm[i,j] += A[i,k] * B[k,j]
+    display(Cm)
+    C.mat = Cm
+
+    return C
+end
+
+end # module FinchExt
