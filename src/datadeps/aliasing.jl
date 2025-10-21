@@ -452,6 +452,13 @@ mutable struct DataDepsState
     # N.B. Values are Chunks, or raw remote handles (e.g. ChunkView under MPI)
     raw_arg_to_chunk::IdDict{Any,Any}
 
+    # The mapping of a bare sparse container passed as a task argument to the
+    # `DSparseArray` Datadeps adopted it into (see `adopt_sparse_arg!`).
+    # Memoized so repeated uses within a region share one tracked container.
+    # N.B. `Any`-valued because `DSparseArray` is defined in array/sparse.jl,
+    # which loads later; `adopt_sparse_arg!` declares the narrower return type.
+    sparse_arg_wrap::IdDict{Any,Any}
+
     # The origin memory space of each argument
     # Used to track the original location of an argument, for final copy-from
     arg_origin::IdDict{Any,MemorySpace}
@@ -531,6 +538,7 @@ mutable struct DataDepsState
 
     function DataDepsState()
         arg_to_chunk = IdDict{Any,Any}()
+        sparse_arg_wrap = IdDict{Any,Any}()
         arg_origin = IdDict{Any,MemorySpace}()
         remote_args = Dict{MemorySpace,IdDict{Any,Any}}()
         remote_arg_to_original = IdDict{Any,Any}()
@@ -554,7 +562,7 @@ mutable struct DataDepsState
         ainfos_owner = Dict{AliasingWrapper,Union{Pair{DTask,Int},Nothing}}()
         ainfos_readers = Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}()
 
-        return new(arg_to_chunk, arg_origin, remote_args, remote_arg_to_original, remote_arg_w, ainfo_arg, arg_history, arg_owner, arg_current, arg_overlaps, ainfo_backing_chunk,
+        return new(arg_to_chunk, sparse_arg_wrap, arg_origin, remote_args, remote_arg_to_original, remote_arg_w, ainfo_arg, arg_history, arg_owner, arg_current, arg_overlaps, ainfo_backing_chunk,
                    supports_inplace_cache, ainfo_cache, ainfos_lookup, ainfos_overlaps, ainfos_owner, ainfos_readers,
                    TaskArgInfo[], DataDepsTaskDependency[], Any[])
     end
@@ -576,6 +584,49 @@ end
 # Chunks; remote handles that are already rank-replicated metadata under SPMD
 # (e.g. ChunkView under MPI) override this to stay raw.
 datadeps_arg_wrap(arg) = tochunk(arg)
+
+"""
+    adopt_sparse_arg!(state, arg, raw_deps) -> DSparseArray
+
+Adopt a bare sparse container passed directly to a Datadeps task (rather than as
+a tile of a sparse `DArray`) into a [`DSparseArray`](@ref), which is what
+Datadeps can actually track: a stable mutable identity for whole-object
+aliasing, plus a `move!` that reallocates instead of span-copying.
+
+Read-only access is wrapped automatically. Write access is rejected: the wrapper
+owns a private copy of the storage (see `maybe_wrap_tile`), so a write would land
+somewhere the caller cannot observe, and writing the caller's container in place
+is not possible anyway -- sparse storage is reallocated when the sparsity pattern
+changes, and `SparseMatrixCSC`/`Finch.Tensor` are immutable structs whose
+identity would change with it.
+
+The wrapper is memoized per region so every task sees the same container (and so
+Datadeps moves it once per memory space, not once per task).
+"""
+function adopt_sparse_arg!(state::DataDepsState, arg, raw_deps)::DSparseArray
+    for dep in raw_deps
+        if dep[3] # writedep
+            throw(ArgumentError("""
+            Datadeps cannot take write access to a `$(typeof(arg))` argument.
+
+            Sparse storage is reallocated when its sparsity pattern changes, so it
+            has to be written through Dagger's `DSparseArray` wrapper, which keeps a
+            stable identity across that reallocation. Read-only (`In`) sparse
+            arguments are wrapped for you; for write access, wrap it yourself and
+            read the result back out afterwards:
+
+                S = Dagger.DSparseArray(A)
+                Dagger.spawn_datadeps() do
+                    Dagger.@spawn f!(InOut(S))
+                end
+                A = S.mat
+
+            A sparse `DArray` (e.g. `distribute(A, Blocks(m, n))`) already has
+            wrapped tiles and can be written to directly."""))
+        end
+    end
+    return get!(() -> maybe_wrap_tile(arg)::DSparseArray, state.sparse_arg_wrap, arg)
+end
 
 """
     get_or_make_arg_chunk!(state, arg, task) -> chunk
@@ -635,6 +686,29 @@ function _populate_one_arg!(state::DataDepsState, infos::Vector{TaskArgInfo},
     # Unwrap the Chunk underlying any DTask arguments
     arg = arg_pre_unwrap isa DTask ? fetch(arg_pre_unwrap; raw=true) : arg_pre_unwrap
 
+    # Bare sparse storage has no identity Datadeps can track; adopt a wrapper.
+    #
+    # N.B. The wrapper re-enters through the barrier below as a *fresh*
+    # argument, rather than being assigned back over `arg`. Assigning it back
+    # would give `arg` a second, unrelated type, and inference must then widen
+    # it for the entire remaining body -- so on the `TypedArgument` path, where
+    # every use below otherwise infers concretely, the value would be boxed and
+    # each of `type_may_alias`, `supports_inplace_move`, `ArgumentWrapper`, and
+    # `get_or_make_arg_chunk!` would dispatch dynamically. This is the same
+    # single-assignment discipline `get_or_make_arg_chunk!` exists for.
+    if wraps_as_sparse_tile(arg)
+        return _populate_arg_deps!(state, infos, deps_vec,
+                                   adopt_sparse_arg!(state, arg, raw_deps),
+                                   pos, raw_deps, task)
+    end
+    return _populate_arg_deps!(state, infos, deps_vec, arg, pos, raw_deps, task)
+end
+# Record the aliasing and dependency info for one already-resolved argument.
+# Split out of `_populate_one_arg!` so that this body specializes on the
+# concrete argument type; see the note there.
+function _populate_arg_deps!(state::DataDepsState, infos::Vector{TaskArgInfo},
+                             deps_vec::Vector{DataDepsTaskDependency}, arg,
+                             pos::ArgPosition, raw_deps, task::DTask)
     # Skip non-aliasing arguments or arguments that don't support in-place move
     may_alias = type_may_alias(typeof(arg))
     inplace_move = may_alias && supports_inplace_move(state, arg)
@@ -700,7 +774,12 @@ function aliasing!(state::DataDepsState, target_space::MemorySpace, arg_w::Argum
         return state.ainfo_cache[remote_arg_w]
     end
 
-    # Calculate the ainfo
+    # Calculate the ainfo via the current acceleration so SPMD backends (MPI)
+    # can broadcast owner-computed aliasing and keep ranks uniform. The generic
+    # `aliasing(::Acceleration, ...)` fallback uses `aliasing_unwrapped`, which
+    # resolves wrappers of whole-object containers (e.g. a view of a
+    # `DSparseArray`) to the container itself. For `Chunk`s, unwrap+aliasing
+    # happen where the data lives (remotely / on the owning rank).
     ainfo = AliasingWrapper(aliasing(current_acceleration(), remote_arg, arg_w.dep_mod))
 
     # Cache the result

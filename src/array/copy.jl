@@ -32,9 +32,70 @@ function copy_buffered(f, args...)
 
     return result
 end
-function allocate_copy_buffer(part::Blocks{N}, A::DArray{T,N}) where {T,N}
-    return DArray{T}(undef, part, size(A))
+"""
+    allocate_tiled(::Type{TT}, ::Type{T}, part::Blocks{N}, dims::Dims{N}) -> DArray
+
+Allocate a `part`-partitioned `DArray{T,N}` of `dims` whose tiles have the same
+*backend* as tiles of type `TT`. Dispatching on the tile type is what keeps a
+re-tiling of a sparse array sparse: allocating dense tiles for it would turn a
+repartitioning copy into a densification, which for a large sparse operator is
+an out-of-memory multiplier rather than a slowdown.
+
+`array/sparse.jl` adds the [`DSparseArray`](@ref) method.
+"""
+allocate_tiled(::Type{TT}, ::Type{T}, part::Blocks{N}, dims::Dims{N}) where {TT,T,N} =
+    DArray{T}(undef, part, dims)
+
+# The tile type of `A`, for `allocate_tiled`. A `DArray`'s own type parameters do
+# not record it, so it comes off a chunk.
+#
+# A `DTask`'s `chunktype` is only its declared or inferred `return_type`, which
+# is not always the type it will actually produce: `distribute` spawns
+# `maybe_wrap_tile` per tile, whose return type is the *union* of the wrapped and
+# unwrapped tile types, so a sparse array's tiles advertise something that is not
+# `<:DSparseArray`. Dispatching on that gives dense tiles and silently densifies
+# the array -- numerically correct, so tests pass, while memory use explodes. Ask
+# the chunk itself in that case; `raw=true` keeps it a `Chunk`, so this waits for
+# the tile's task but moves no data, and every caller is about to copy the whole
+# array anyway.
+function darray_tiletype(A::DArray)
+    isempty(A.chunks) && return Any
+    c = first(A.chunks)
+    TT = chunktype(c)
+    isconcretetype(TT) && return TT
+    return chunktype(_resolved_chunk(c))
 end
+_resolved_chunk(c::Chunk) = c
+_resolved_chunk(c) = fetch(c; raw=true)
+
+allocate_copy_buffer(part::Blocks{N}, A::DArray{T,N}) where {T,N} =
+    allocate_tiled(darray_tiletype(A), T, part, size(A))
+
+"""
+    repartition(A::DArray, part::Blocks) -> DArray
+
+A copy of `A` re-tiled to `part`, preserving the tile backend (sparse tiles stay
+sparse). Returns `A` itself if it is already partitioned that way.
+
+Unlike `maybe_copy_buffered`, the result is an ordinary array whose
+lifetime is not tied to a call: that function frees its buffers as soon as its
+body returns, which is wrong whenever the re-tiled *tiles* outlive the call —
+e.g. a block preconditioner, whose per-tile operators are built from them by
+tasks it does not await.
+"""
+function repartition(A::DArray{T,N}, part::Blocks{N}) where {T,N}
+    A.partitioning == part && return A
+    B = allocate_tiled(darray_tiletype(A), T, part, size(A))
+    copyto!(B, A)
+    return B
+end
+
+to_range(x::UnitRange) = x
+to_range(x::Integer) = x:x
+to_range(x::Base.OneTo{Int}) = UnitRange(x)
+to_range(x::Base.Slice{Base.OneTo{Int}}) = UnitRange(x)
+to_range(::StepRange) = throw(ArgumentError("Cannot convert StepRange to UnitRange"))
+to_range(x) = throw(ArgumentError("Cannot convert $(typeof(x)) to UnitRange"))
 
 function darray_copyto!(B::DArray{TB,NB}, A::DArray{TA,NA}, Binds=parentindices(B), Ainds=parentindices(A)) where {TB,NB,TA,NA}
     Nmax = max(NA, NB)
@@ -44,13 +105,6 @@ function darray_copyto!(B::DArray{TB,NB}, A::DArray{TA,NA}, Binds=parentindices(
     pad1range(x::ArrayDomain, i) = length(x.indexes) < i ? (1:1) : x.indexes[i]
     padNmax(x) = ntuple(i->pad1range(x, i), Nmax)
     padNmax(x::ArrayDomain) = padNmax(x.indexes)
-
-    to_range(x::UnitRange) = x
-    to_range(x::Integer) = x:x
-    to_range(x::Base.OneTo{Int}) = UnitRange(x)
-    to_range(x::Base.Slice{Base.OneTo{Int}}) = UnitRange(x)
-    to_range(::StepRange) = throw(ArgumentError("Non-continuous ranges are not yet supported for DArray copy"))
-    to_range(x) = throw(ArgumentError("Unsupported range type for DArray copy: $(typeof(x))"))
 
     if any(x->x isa Vector, Binds) || any(x->x isa Vector, Ainds)
         # Split the copy into multiple copies
@@ -154,3 +208,13 @@ StridedDArray{T,N} = Union{<:DArray{T,N}, SubArray{T,N,<:DArray{T,NP}} where NP}
 
 Base.copyto!(B::StridedDArray, A::StridedDArray) =
     darray_copyto!(parent(B), parent(A), parentindices(B), parentindices(A))
+function Base.copyto!(B::Array, A::StridedDArray)
+    DB = view(B, AutoBlocks())
+    darray_copyto!(DB, parent(A), parentindices(DB), parentindices(A))
+    return B
+end
+function Base.copyto!(B::SubArray, A::StridedDArray)
+    DB = view(parent(B), AutoBlocks())
+    darray_copyto!(DB, parent(A), parentindices(B), parentindices(A))
+    return B
+end

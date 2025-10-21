@@ -8,14 +8,16 @@ import Dagger: @dagdebug, @opcounter
 # extends with new methods (for MPI-specific types) or calls directly.
 import Dagger:
     AbstractAliasing, accelerate!, accel_matches_proc, accel_kind, aliased_object!,
-    AliasedObjectCache, AliasedObjectCacheStore, aliasing, bind_moved_argument,
+    AliasedObjectCache, AliasedObjectCacheStore, aliasing, aliasing_unwrapped,
+    bind_moved_argument,
     chunktype, ChunkView, check_uniform, check_uniformity!, CHECK_UNIFORMITY,
     cleanup_tasks_accel!, constrain, CPURAMMemorySpace,
     current_acceleration, CyclicProcGrid, datasize, default_enabled,
     default_memory_space, default_processor, default_procgrid,
     finalize_acceleration!, execute!, fetch_handle, fire_order_key, get_parent,
     get_processors, gpu_kernel_backend, gpu_memory_kind,
-    initialize_acceleration!, InvalidScope, ipc_copyto!, ipc_eligible,
+    initialize_acceleration!, inplace_mpi_alloc, inplace_mpi_build,
+    inplace_mpi_parts, InvalidScope, ipc_copyto!, ipc_eligible,
     ipc_export, ipc_materialize, IPC_MIN_BYTES, ipc_release!, is_local,
     istask, LockedObject, memory_space, memory_spaces, MemorySpan,
     memory_spans, move, move!, move_rewrap, move_rewrap_build, DATADEPS_THUNK_ID,
@@ -45,8 +47,6 @@ else
 end
 
 import TaskLocalValues: TaskLocalValue
-
-import SparseArrays: SparseMatrixCSC
 
 import Random
 import Serialization
@@ -733,51 +733,26 @@ const RECV_WAITING = LockedObject(Dict{Tuple{MPI.Comm, Int, Int}, Base.Event}())
 
 # Envelope for the out-of-place raw-bytes MPI path: serialize a small
 # descriptor, then send contiguous bitstype buffers. Types register via
-# inplace_mpi_parts / inplace_mpi_alloc / inplace_mpi_build (same style as
-# move_rewrap_parts / move_rewrap_build).
+# Dagger's inplace_mpi_parts / inplace_mpi_alloc / inplace_mpi_build (same style
+# as move_rewrap_parts / move_rewrap_build). Those generics are declared in core
+# Dagger so container-specific methods can live in the extension owning the
+# container (e.g. `SparseMatrixCSC` in MPISparseExt).
 struct InplaceInfo
     type::DataType
     header  # Any MPI-serializable reconstruction metadata
 end
 
-# Extensibility defaults: unsupported → full Julia serialize
-inplace_mpi_parts(x) = nothing
-# -> (parts::Tuple, header) where each part is a DenseArray with bitstype eltype
-inplace_mpi_alloc(::Type{T}, header) where T =
-    error("inplace_mpi_alloc not defined for $T")
-inplace_mpi_build(::Type{T}, parts, header) where T =
-    error("inplace_mpi_build not defined for $T")
-
 # DenseArray: single contiguous buffer + shape header
-function inplace_mpi_parts(A::DenseArray)
+function Dagger.inplace_mpi_parts(A::DenseArray)
     isbitstype(eltype(A)) || return nothing
     return ((A,), size(A))
 end
-function inplace_mpi_alloc(::Type{T}, shape::Tuple) where {T<:DenseArray}
+function Dagger.inplace_mpi_alloc(::Type{T}, shape::Tuple) where {T<:DenseArray}
     # Always materialize on the host: the sender host-stages device arrays,
     # and callers convert to the destination space's native storage
     return (Array{eltype(T)}(undef, shape),)
 end
-inplace_mpi_build(::Type{<:DenseArray}, (A,), ::Tuple) = A
-
-# SparseMatrixCSC: three vectors + (m, n, lengths) header; preserve Ti
-function inplace_mpi_parts(S::SparseMatrixCSC)
-    isbitstype(eltype(S)) || return nothing
-    return ((S.colptr, S.rowval, S.nzval),
-            (S.m, S.n, length(S.colptr), length(S.rowval), length(S.nzval)))
-end
-function inplace_mpi_alloc(::Type{T}, header::Tuple) where {T<:SparseMatrixCSC}
-    Tv, Ti = eltype(T), T.parameters[2]
-    _, _, ncolptr, nrowval, nnzval = header
-    return (Vector{Ti}(undef, ncolptr),
-            Vector{Ti}(undef, nrowval),
-            Vector{Tv}(undef, nnzval))
-end
-function inplace_mpi_build(::Type{T}, (colptr, rowval, nzval), header::Tuple) where {T<:SparseMatrixCSC}
-    m, n, _, _, _ = header
-    Tv, Ti = eltype(T), T.parameters[2]
-    return SparseMatrixCSC{Tv,Ti}(m, n, colptr, rowval, nzval)
-end
+Dagger.inplace_mpi_build(::Type{<:DenseArray}, (A,), ::Tuple) = A
 
 function supports_inplace_mpi(value)
     if value isa DenseArray && isbitstype(eltype(value))
@@ -1835,7 +1810,9 @@ function aliasing(accel::MPIAcceleration, x::ChunkView, dep_mod)
     if handle.rank == rank
         ainfo = _with_default_acceleration() do
             v = view(unwrap(x.chunk), x.slices...)
-            aliasing(v, dep_mod)
+            # Resolve whole-object containers (e.g. `DSparseArray`) where `v`
+            # lives; see `aliasing_unwrapped`.
+            aliasing_unwrapped(v, dep_mod)
         end
         ainfo = mpi_remap_ainfo(ainfo, handle.rank)
         @opcounter :aliasing_bcast_send_yield

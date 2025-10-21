@@ -34,6 +34,14 @@ end
 @testset "reduce" test_mapreduce((X; dims, init=Base._InitialValue())->reduce(+, X; dims, init), ones)
 @testset "mapreduce" test_mapreduce((X; dims, init=Base._InitialValue())->mapreduce(x->x+1, +, X; dims, init), ones)
 @testset "sum" test_mapreduce(sum, ones)
+
+# A single partition's full reduction is a bare scalar; `collect` must wrap it.
+@testset "single-partition scalar" begin
+    X = ones(Blocks(100, 100), 100, 100)
+    @test sum(X) == 10000
+    @test prod(X) == 1
+    @test mapreduce(identity, +, X) == 10000
+end
 @testset "prod" test_mapreduce(prod, rand)
 @testset "minimum" test_mapreduce(minimum, rand)
 @testset "maximum" test_mapreduce(maximum, rand)

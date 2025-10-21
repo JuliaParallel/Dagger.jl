@@ -994,6 +994,66 @@ end
     end
 end
 
+# Bare sparse arguments
+#
+# A `SparseMatrixCSC` (or Finch tensor, or GPU CSC) passed straight to a
+# Datadeps task is not something Datadeps can track: it is an immutable struct
+# whose storage is reallocated on write, so it has neither a stable identity for
+# whole-object aliasing nor a usable data pointer for the span machinery.
+# Datadeps adopts read-only ones into a `DSparseArray` and rejects writes.
+
+include(joinpath(@__DIR__, "array", "sparse_defs.jl"))
+
+@testset "Bare Sparse Arguments" begin
+    @testset "wraps_as_sparse_tile trait" begin
+        @test Dagger.wraps_as_sparse_tile(sprand(4, 4, 0.5))
+        @test Dagger.wraps_as_sparse_tile(sprand(4, 0.5))
+        @test !Dagger.wraps_as_sparse_tile(rand(4, 4))
+        # Already-wrapped containers are tracked directly, not re-wrapped.
+        @test !Dagger.wraps_as_sparse_tile(Dagger.DSparseArray(sprand(4, 4, 0.5)))
+    end
+
+    @testset "maybe_wrap_tile takes a private copy" begin
+        S = sprand(6, 6, 0.4)
+        W = Dagger.maybe_wrap_tile(S)
+        @test W isa Dagger.DSparseMatrix
+        @test W.mat == S
+
+        # The wrapper must share no storage with `S`. A `DSparseArray`'s
+        # aliasing identity is the wrapper's own `objectid`, so two wrappers
+        # over shared storage look disjoint to Datadeps -- which frees its
+        # region-internal slots eagerly, making this a use-after-free rather
+        # than merely a stale read.
+        @test W.mat !== S
+        @test W.mat.colptr !== S.colptr
+        @test W.mat.rowval !== S.rowval
+        @test W.mat.nzval !== S.nzval
+
+        # Dense tiles keep the plain-copy behavior.
+        A = rand(4, 4)
+        @test Dagger.maybe_wrap_tile(A) == A
+        @test Dagger.maybe_wrap_tile(A) !== A
+    end
+
+    # The task sees the adopted wrapper, exactly as it would for a tile of a
+    # sparse `DArray`. Run across one and two workers so the cross-worker move
+    # of the adopted container is exercised too. (The same body runs under MPI
+    # in `test/mpi.jl`.)
+    @testset "adoption, $nw worker(s)" for nw in (1, 2)
+        nprocs() >= nw || continue
+        test_sparse_bare_args(; scope=Dagger.scope(workers=1:nw))
+    end
+
+    @testset "read-only sparse vector" begin
+        sv = sprand(16, 0.5)
+        total = nothing
+        Dagger.spawn_datadeps() do
+            total = Dagger.@spawn sparse_defs_nzsum(In(sv))
+        end
+        @test fetch(total) ≈ sum(sv)
+    end
+end
+
 # Custom scheduler tests
 
 struct DummyErrorScheduler <: Dagger.DataDepsScheduler end
