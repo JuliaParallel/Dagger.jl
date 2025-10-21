@@ -318,10 +318,18 @@ end
 struct AllocateUndef{S} end
 (::AllocateUndef{S})(T, dims::Dims{N}) where {S,N} = Array{S,N}(undef, dims)
 function Base.similar(A::DArray{T,N} where T, ::Type{S}, dims::Dims{N}) where {S,N}
+    #= FIXME
     d = ArrayDomain(map(x->1:x, dims))
     p = A.partitioning
     a = AllocateArray(S, AllocateUndef{S}(), false, d, partition(p, d), p)
     return _to_darray(a)
+    =#
+    @assert dims == size(A)
+    chunks = Matrix{Any}(undef, size(A.chunks))
+    for idx in eachindex(chunks)
+        chunks[idx] = Dagger.@spawn similar(A.chunks[idx])
+    end
+    return DArray(S, domain(A), domainchunks(A), chunks, A.partitioning, A.concat)
 end
 
 Base.copy(x::DArray{T,N,B,F}) where {T,N,B,F} =
