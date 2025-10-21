@@ -1,6 +1,8 @@
 LinearAlgebra.cholcopy(A::DArray{T,2}) where T = copy(A)
 function potrf_checked!(uplo, A, info_arr)
-    _A, info = move(task_processor(), LAPACK.potrf!)(uplo, A)
+    #_A, info = move(task_processor(), LAPACK.potrf!)(uplo, A)
+    UL = uplo == 'U' ? UpperTriangular : LowerTriangular
+    _A, info = LinearAlgebra._chol!(A, UL)
     if info != 0
         fill!(info_arr, info)
         throw(PosDefException(info))
@@ -26,16 +28,56 @@ function LinearAlgebra._chol!(A::DArray{T,2}, ::Type{UpperTriangular}) where T
             for k in range(1, mt)
                 Dagger.@spawn potrf_checked!(uplo, InOut(Ac[k, k]), Out(info))
                 for n in range(k+1, nt)
-                    Dagger.@spawn BLAS.trsm!('L', uplo, trans, 'N', zone, In(Ac[k, k]), InOut(Ac[k, n]))
+                    #= Ax=B
+                    # A = Ac[k, k]
+                    # B = Ac[k, n]
+                    # A is upper triangular, transposed, not unit triangular
+                    # alpha = zone
+                    Dagger.@spawn BLAS.trsm!(
+                        'L',
+                        uplo,
+                        trans,
+                        'N',
+                        zone,
+                        In(Ac[k, k]), 
+                        InOut(Ac[k, n])
+                    )
+                    =#
+                    tfun = iscomplex ? adjoint : transpose
+                    Dagger.@spawn LinearAlgebra.generic_trimatdiv!(
+                        InOut(Ac[k, n]),
+                        uplo,
+                        'N',
+                        tfun,
+                        In(Ac[k, k]),
+                        InOut(Ac[k, n])
+                    )
                 end
                 for m in range(k+1, mt)
+                    #=
                     if iscomplex
                         Dagger.@spawn BLAS.herk!(uplo, 'C', rmzone, In(Ac[k, m]), rzone, InOut(Ac[m, m]))
                     else
                         Dagger.@spawn BLAS.syrk!(uplo, 'T', rmzone, In(Ac[k, m]), rzone, InOut(Ac[m, m]))
                     end
+                    =#
+                    Dagger.@spawn LinearAlgebra.generic_matmatmul!(
+                        InOut(Ac[m, m]),
+                        trans,
+                        'N',
+                        In(Ac[k, m]),
+                        In(Ac[k, m]),
+                        LinearAlgebra.MulAddMul(rmzone, rzone)
+                    )
                     for n in range(m+1, nt)
-                        Dagger.@spawn BLAS.gemm!(trans, 'N', mzone, In(Ac[k, m]), In(Ac[k, n]), zone, InOut(Ac[m, n]))
+                        Dagger.@spawn LinearAlgebra.generic_matmatmul!(
+                            InOut(Ac[m, n]),
+                            trans,
+                            'N',
+                            In(Ac[k, m]),
+                            In(Ac[k, n]),
+                            LinearAlgebra.MulAddMul(mzone, zone)
+                        )
                     end
                 end
             end
