@@ -1,3 +1,74 @@
+"""
+    matmatmul!(C, transA::Char, transB::Char, A, B, alpha, beta)
+
+A general-purpose matrix-matrix multiply, like `LinearAlgebra.generic_matmatmul!`,
+but with extra functionality. May internally convert `A` and `B` to a type that
+better matches `C` and provides optimal portability and, when possible,
+better performance. The actual matrix multiply operation should happen in
+`LinearAlgebra.generic_matmatmul!` or an equivalent call.
+
+The following automatic conversions are performed:
+- If no `LinearAlgebra.generic_matmatmul!` method is available, convert `A` and `B` to dense Array-like
+- If `C` is a `DSparseMatrix`, perform the operation out-of-place and then update `C` in-place
+"""
+function matmatmul!(
+    C,
+    transA::Char,
+    transB::Char,
+    A,
+    B,
+    alpha,
+    beta
+)
+    EC = eltype(C)
+    EA = eltype(A)
+    EB = eltype(B)
+
+    TC = typeof(C)
+    TA = typeof(A)
+    TB = typeof(B)
+
+    mam = LinearAlgebra.MulAddMul(alpha, beta)
+
+    # Check if C doesn't support in-place operations (e.g. DSparseMatrix)
+    # We'll get here if A and B don't have equivalent types
+    if isa(C, DSparseMatrix)
+        C.mat = alpha * A * B + beta * C.mat
+        return C
+    end
+
+    # Check if the call will fail due to MethodError
+    sig = Tuple{TC, Char, Char, TA, TB, typeof(mam)}
+    if !hasmethod(LinearAlgebra.generic_matmatmul!, sig)
+        # Convert to Array-like
+        # FIXME: GPU support
+        C_new = C
+        A_new = collect(A)
+        B_new = collect(B)
+        alpha_new = alpha
+        beta_new = beta
+        # FIXME: Re-check hasmethod, and if no method, then convert and bounce C
+        @goto ready
+    end
+
+    C_new = C
+    A_new = A
+    B_new = B
+    alpha_new = alpha
+    beta_new = beta
+
+    @label ready
+    mam_new = LinearAlgebra.MulAddMul(alpha_new, beta_new)
+    return LinearAlgebra.generic_matmatmul!(
+        C_new,
+        transA,
+        transB,
+        A_new,
+        B_new,
+        mam_new
+    )
+end
+
 function LinearAlgebra.generic_matmatmul!(
     C::DMatrix{T},
     transA::Char,
