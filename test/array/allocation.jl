@@ -97,9 +97,11 @@ end
                 Xsp = sprand(dist, T, dims..., 0.1)
                 @test Xsp isa DArray{T,length(dims)}
                 @test size(Xsp) == dims
-                AXsp = collect(Xsp)
                 AT = length(dims) == 2 ? SparseMatrixCSC : SparseVector
-                @test AXsp isa AT{T}
+                Ach = fetch(Xsp.chunks[1])
+                @test Ach isa AT{T}
+                AXsp = collect(Xsp)
+                @test AXsp isa Array{T,length(dims)}
                 @test AXsp == collect(Xsp)
                 @test AXsp != collect(sprand(dist, T, dims..., 0.1))
                 @test !allunique(AXsp)
@@ -212,7 +214,7 @@ end
             for dist in [Blocks(ntuple(i->10, length(dims))...),
                          AutoBlocks()]
                 if fn === sprand
-                    if length(dims) > 2
+                    if length(dims) > 2 || length(dims) == 0
                         continue
                     end
                     @test fn(dist, dims..., 0.1) isa DArray{Float64,length(dims)}
