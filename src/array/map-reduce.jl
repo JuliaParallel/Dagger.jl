@@ -61,9 +61,18 @@ function stage(ctx::Context, r::MapReduce{T,N}) where {T,N}
 
     # Tree-reduce intermediate reductions
     dims_materialized = dims === Colon() ? ntuple(identity, ndims(inp)) : dims
-    treered_f(op, x, y) = op.(x, y)
+    function to_array(x, N)
+        A = Array{typeof(x),N}(undef, ntuple(i->1, N))
+        A[1] = x
+        return A
+    end
+    to_array(x::Array, N) = x
+    function treered_f(op, x, y, N)
+        value = op.(x, y)
+        return to_array(value, N)
+    end
     thunks = treereducedim(reduced_parts, dims_materialized) do x, y
-        Dagger.@spawn treered_f(r.op_outer, x, y)
+        Dagger.@spawn treered_f(r.op_outer, x, y, length(dims_materialized))
     end
 
     c = domainchunks(inp)
@@ -86,7 +95,7 @@ _mapreduce_maybesync(f, op_inner, op_outer, x, ::Colon, init) =
     _mapreduce_maybesync(f, op_inner, op_outer, x, nothing, init)
 function _mapreduce_maybesync(f, op_inner, op_outer, x::DArray{T,N}, dims::Nothing, init) where {T,N}
     Dx = _to_darray(MapReduce(f, op_inner, op_outer, x, dims, init))
-    return collect(Dx)
+    return only(collect(Dx))
 end
 
 function Base.size(r::MapReduce)

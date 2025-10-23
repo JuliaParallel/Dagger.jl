@@ -194,7 +194,7 @@ function Base.collect(d::DArray{T,N}; tree=false, copyto=false) where {T,N}
     if tree
         collect(fetch(treereduce_nd(map(x -> ((args...,) -> Dagger.@spawn x(args...)) , dimcatfuncs), a.chunks)))
     else
-        treereduce_nd(dimcatfuncs, asyncmap(fetch, a.chunks))
+        collect(treereduce_nd(dimcatfuncs, asyncmap(fetch, a.chunks)))
     end
 end
 Array{T,N}(A::DArray{S,N}) where {T,N,S} = convert(Array{T,N}, collect(A))
