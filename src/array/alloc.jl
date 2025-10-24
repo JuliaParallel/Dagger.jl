@@ -1,5 +1,5 @@
 import Base: cat
-import Random: MersenneTwister
+import Random: MersenneTwister, rand!, randn!
 export partition
 
 mutable struct AllocateArray{T,N} <: ArrayOp{T,N}
@@ -79,53 +79,64 @@ function allocate_array(f, T, sz)
     return new_f(T, sz)
 end
 allocate_array_func(::Processor, f) = f
-function stage(ctx, a::AllocateArray)
-    chunks = map(CartesianIndices(a.domainchunks)) do I
-        x = a.domainchunks[I]
-        i = LinearIndices(a.domainchunks)[I]
-        args = a.want_index ? (i, size(x)) : (size(x),)
+function stage(ctx, A::AllocateArray)
+    tasks = Array{DTask,ndims(A.domainchunks)}(undef, size(A.domainchunks)...)
+    Dagger.spawn_datadeps() do
+        default_scope = get_compute_scope()
+        for I in CartesianIndices(A.domainchunks)
+            x = A.domainchunks[I]
+            i = LinearIndices(A.domainchunks)[I]
 
-        if isnothing(a.procgrid)
-            scope = get_compute_scope()
-        else
-            scope = ExactScope(a.procgrid[CartesianIndex(mod1.(Tuple(I), size(a.procgrid))...)])
-        end
-        if a.want_index
-            Dagger.@spawn compute_scope=scope allocate_array(a.f, a.eltype, i, args...)
-        else
-            Dagger.@spawn compute_scope=scope allocate_array(a.f, a.eltype, args...)
+            if isnothing(A.procgrid)
+                scope = default_scope
+            else
+                scope = ExactScope(A.procgrid[CartesianIndex(mod1.(Tuple(I), size(A.procgrid))...)])
+            end
+
+            if A.want_index
+                task = Dagger.@spawn compute_scope=scope allocate_array(A.f, A.eltype, i, size(x))
+            else
+                task = Dagger.@spawn compute_scope=scope allocate_array(A.f, A.eltype, size(x))
+            end
+            tasks[i] = task
         end
     end
-    return DArray(a.eltype, a.domain, a.domainchunks, chunks, a.partitioning)
+    return DArray(A.eltype, A.domain, A.domainchunks, tasks, A.partitioning)
 end
 
 const BlocksOrAuto = Union{Blocks{N} where N, AutoBlocks}
 
-function Base.rand(p::Blocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
+function Base.rand(p::Blocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, rand, false, d, partition(p, d), p, assignment)
+    a = AllocateArray(T, rand, false, d, partition(p, d), p, assignment)
     return _to_darray(a)
 end
-Base.rand(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) = rand(p, T, dims; assignment)
-Base.rand(p::BlocksOrAuto, dims::Integer...; assignment::AssignmentType = :arbitrary) = rand(p, Float64, dims; assignment)
-Base.rand(p::BlocksOrAuto, dims::Dims; assignment::AssignmentType = :arbitrary) = rand(p, Float64, dims; assignment)
-Base.rand(::AutoBlocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary) =
-    rand(auto_blocks(dims), eltype, dims; assignment)
+Base.rand(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) =
+    rand(p, T, dims; assignment)
+Base.rand(p::BlocksOrAuto, dims::Integer...; assignment::AssignmentType = :arbitrary) =
+    rand(p, Float64, dims; assignment)
+Base.rand(p::BlocksOrAuto, dims::Dims; assignment::AssignmentType = :arbitrary) =
+    rand(p, Float64, dims; assignment)
+Base.rand(::AutoBlocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary) =
+    rand(auto_blocks(dims), T, dims; assignment)
 
-function Base.randn(p::Blocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
+function Base.randn(p::Blocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, randn, false, d, partition(p, d), p, assignment)
+    a = AllocateArray(T, randn, false, d, partition(p, d), p, assignment)
     return _to_darray(a)
 end
-Base.randn(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) = randn(p, T, dims; assignment)
-Base.randn(p::BlocksOrAuto, dims::Integer...; assignment::AssignmentType = :arbitrary) = randn(p, Float64, dims; assignment)
-Base.randn(p::BlocksOrAuto, dims::Dims; assignment::AssignmentType = :arbitrary) = randn(p, Float64, dims; assignment)
-Base.randn(::AutoBlocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary) =
-    randn(auto_blocks(dims), eltype, dims; assignment)
+Base.randn(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) =
+    randn(p, T, dims; assignment)
+Base.randn(p::BlocksOrAuto, dims::Integer...; assignment::AssignmentType = :arbitrary) =
+    randn(p, Float64, dims; assignment)
+Base.randn(p::BlocksOrAuto, dims::Dims; assignment::AssignmentType = :arbitrary) =
+    randn(p, Float64, dims; assignment)
+Base.randn(::AutoBlocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary) =
+    randn(auto_blocks(dims), T, dims; assignment)
 
-function sprand(p::Blocks, eltype::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary)
+function sprand(p::Blocks, T::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, (T, _dims) -> sprand(T, _dims..., sparsity), false, d, partition(p, d), p, assignment)
+    a = AllocateArray(T, (T, _dims) -> sprand(T, _dims..., sparsity), false, d, partition(p, d), p, assignment)
     return _to_darray(a)
 end
 sprand(p::BlocksOrAuto, T::Type, dims_and_sparsity::Real...; assignment::AssignmentType = :arbitrary) =
@@ -134,30 +145,36 @@ sprand(p::BlocksOrAuto, dims_and_sparsity::Real...; assignment::AssignmentType =
     sprand(p, Float64, dims_and_sparsity[1:end-1], dims_and_sparsity[end]; assignment)
 sprand(p::BlocksOrAuto, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary) =
     sprand(p, Float64, dims, sparsity; assignment)
-sprand(::AutoBlocks, eltype::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary) =
-    sprand(auto_blocks(dims), eltype, dims, sparsity; assignment)
+sprand(::AutoBlocks, T::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary) =
+    sprand(auto_blocks(dims), T, dims, sparsity; assignment)
 
-function Base.ones(p::Blocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
+function Base.ones(p::Blocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, ones, false, d, partition(p, d), p, assignment)
+    a = AllocateArray(T, ones, false, d, partition(p, d), p, assignment)
     return _to_darray(a)
 end
-Base.ones(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) = ones(p, T, dims; assignment)
-Base.ones(p::BlocksOrAuto, dims::Integer...; assignment::AssignmentType = :arbitrary) = ones(p, Float64, dims; assignment)
-Base.ones(p::BlocksOrAuto, dims::Dims; assignment::AssignmentType = :arbitrary) = ones(p, Float64, dims; assignment)
-Base.ones(::AutoBlocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary) =
-    ones(auto_blocks(dims), eltype, dims; assignment)
+Base.ones(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) =
+    ones(p, T, dims; assignment)
+Base.ones(p::BlocksOrAuto, dims::Integer...; assignment::AssignmentType = :arbitrary) =
+    ones(p, Float64, dims; assignment)
+Base.ones(p::BlocksOrAuto, dims::Dims; assignment::AssignmentType = :arbitrary) =
+    ones(p, Float64, dims; assignment)
+Base.ones(::AutoBlocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary) =
+    ones(auto_blocks(dims), T, dims; assignment)
 
-function Base.zeros(p::Blocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
+function Base.zeros(p::Blocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(eltype, zeros, false, d, partition(p, d), p, assignment)
+    a = AllocateArray(T, zeros, false, d, partition(p, d), p, assignment)
     return _to_darray(a)
 end
-Base.zeros(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) = zeros(p, T, dims; assignment)
-Base.zeros(p::BlocksOrAuto, dims::Integer...; assignment::AssignmentType = :arbitrary) = zeros(p, Float64, dims; assignment)
-Base.zeros(p::BlocksOrAuto, dims::Dims; assignment::AssignmentType = :arbitrary) = zeros(p, Float64, dims; assignment)
-Base.zeros(::AutoBlocks, eltype::Type, dims::Dims; assignment::AssignmentType = :arbitrary) =
-    zeros(auto_blocks(dims), eltype, dims; assignment)
+Base.zeros(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) =
+    zeros(p, T, dims; assignment)
+Base.zeros(p::BlocksOrAuto, dims::Integer...; assignment::AssignmentType = :arbitrary) =
+    zeros(p, Float64, dims; assignment)
+Base.zeros(p::BlocksOrAuto, dims::Dims; assignment::AssignmentType = :arbitrary) =
+    zeros(p, Float64, dims; assignment)
+Base.zeros(::AutoBlocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary) =
+    zeros(auto_blocks(dims), T, dims; assignment)
 
 function Base.zero(x::DArray{T,N}) where {T,N}
     dims = ntuple(i->x.domain.indexes[i].stop, N)

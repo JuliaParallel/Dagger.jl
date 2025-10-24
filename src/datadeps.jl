@@ -595,6 +595,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         # Populate all task dependencies
         populate_task_info!(state, spec, task)
 
+        task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
         scheduler = queue.scheduler
         if scheduler == :naive
             raw_args = map(arg->tochunk(value(arg)), spec.fargs)
@@ -719,6 +720,17 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             sstate.task_completions[task] = our_space_completed + move_time + task_time
         elseif scheduler == :roundrobin
             our_proc = all_procs[proc_idx]
+            if task_scope == scope
+                # all_procs is already limited to scope
+            else
+                if isa(constrain(task_scope, scope), InvalidScope)
+                    throw(Sch.SchedulingException("Scopes are not compatible: $(scope), $(task_scope)"))
+                end
+                while !proc_in_scope(our_proc, task_scope)
+                    proc_idx = mod1(proc_idx + 1, length(all_procs))
+                    our_proc = all_procs[proc_idx]
+                end
+            end
         else
             error("Invalid scheduler: $sched")
         end
@@ -726,7 +738,6 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         our_space = only(memory_spaces(our_proc))
 
         # Find the scope for this task (and its copies)
-        task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
         if task_scope == scope
             # Optimize for the common case, cache the proc=>scope mapping
             our_scope = get!(proc_to_scope_lfu, our_proc) do

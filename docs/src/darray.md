@@ -672,6 +672,12 @@ it's missing an operation that you need, please file an issue!
 
 This list is not exhaustive, but documents operations which are known to work well with the `DArray`:
 
+Allocation with:
+- `undef`
+- `rand`/`randn`
+- `sprand`
+- `ones`/`zeros`
+
 From `Base`:
 - `getindex`/`setindex!`
 - Broadcasting
