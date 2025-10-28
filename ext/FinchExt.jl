@@ -9,6 +9,20 @@ Dagger._sparse_alloc(::Val{:finch}, T::Type, dims::Dims) =
     Finch.fspzeros(T, dims...)
 Dagger._sparse_collect(A::Finch.Tensor) = Array(A)
 
+function Finch.fspzeros(p::Blocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
+    d = Dagger.ArrayDomain(map(x->1:x, dims))
+    a = Dagger.AllocateArray(T, (T, _dims) -> DSparseMatrix{T}(Finch.fspzeros(T, _dims...)), false, d, Dagger.partition(p, d), p, assignment)
+    return Dagger._to_darray(a)
+end
+Finch.fspzeros(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) =
+    Finch.fspzeros(p, T, dims; assignment)
+Finch.fspzeros(p::BlocksOrAuto, dims::Integer...; assignment::AssignmentType = :arbitrary) =
+    Finch.fspzeros(p, Float64, dims; assignment)
+Finch.fspzeros(p::BlocksOrAuto, dims::Dims; assignment::AssignmentType = :arbitrary) =
+    Finch.fspzeros(p, Float64, dims; assignment)
+Finch.fspzeros(::AutoBlocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary) =
+    Finch.fspzeros(Dagger.auto_blocks(dims), T, dims; assignment)
+
 function Finch.fsprand(p::Blocks, T::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary)
     d = Dagger.ArrayDomain(map(x->1:x, dims))
     a = Dagger.AllocateArray(T, (T, _dims) -> DSparseMatrix{T}(Finch.fsprand(T, _dims..., sparsity)), false, d, Dagger.partition(p, d), p, assignment)
