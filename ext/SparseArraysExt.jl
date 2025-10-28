@@ -8,6 +8,20 @@ Dagger.sparse_mode(::SparseArrays.SparseMatrixCSC) = :sparsearrays
 Dagger._sparse_alloc(::Val{:sparsearrays}, T::Type, dims::Dims) =
     SparseArrays.spzeros(T, dims...)
 
+function SparseArrays.spzeros(p::Blocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
+    d = Dagger.ArrayDomain(map(x->1:x, dims))
+    a = Dagger.AllocateArray(T, SparseArrays.spzeros, false, d, Dagger.partition(p, d), p, assignment)
+    return Dagger._to_darray(a)
+end
+SparseArrays.spzeros(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) =
+    SparseArrays.spzeros(p, T, dims; assignment)
+SparseArrays.spzeros(p::BlocksOrAuto, dims::Integer...; assignment::AssignmentType = :arbitrary) =
+    SparseArrays.spzeros(p, Float64, dims; assignment)
+SparseArrays.spzeros(p::BlocksOrAuto, dims::Dims; assignment::AssignmentType = :arbitrary) =
+    SparseArrays.spzeros(p, Float64, dims; assignment)
+SparseArrays.spzeros(::AutoBlocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary) =
+    SparseArrays.spzeros(Dagger.auto_blocks(dims), T, dims; assignment)
+
 function SparseArrays.sprand(p::Blocks, T::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary)
     d = Dagger.ArrayDomain(map(x->1:x, dims))
     a = Dagger.AllocateArray(T, (T, _dims) -> DSparseMatrix{T}(SparseArrays.sprand(T, _dims..., sparsity)), false, d, Dagger.partition(p, d), p, assignment)
