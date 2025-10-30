@@ -312,7 +312,9 @@ function enqueue_remainder_copy_to!(state::DataDepsState, dest_space::MemorySpac
     @dagdebug nothing :spawn_datadeps "($(repr(f)))[$(idx-1)][$dep_mod] Remainder copy-to has $(length(remainder_syncdeps)) syncdeps"
 
     # Launch the remainder copy task
-    copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=remainder_syncdeps occupancy=Dict(Any=>0) meta=true Dagger.move!(remainder_aliasing, dest_space, source_space, arg_dest, arg_source)
+    copy_task = Dagger.with_options(; tag=to_tag()) do
+      Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=remainder_syncdeps occupancy=Dict(Any=>0) meta=true Dagger.move!(remainder_aliasing, dest_space, source_space, arg_dest, arg_source)
+    end
 
     # This copy task becomes a new writer for the target region
     add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num)
@@ -359,7 +361,9 @@ function enqueue_remainder_copy_from!(state::DataDepsState, dest_space::MemorySp
     @dagdebug nothing :spawn_datadeps "($(typeof(arg_w.arg)))[$dep_mod] Remainder copy-from has $(length(remainder_syncdeps)) syncdeps"
 
     # Launch the remainder copy task
-    copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=remainder_syncdeps occupancy=Dict(Any=>0) meta=true Dagger.move!(remainder_aliasing, dest_space, source_space, arg_dest, arg_source)
+    copy_task = Dagger.with_options(; tag=to_tag()) do
+       Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=remainder_syncdeps occupancy=Dict(Any=>0) meta=true Dagger.move!(remainder_aliasing, dest_space, source_space, arg_dest, arg_source)
+    end
 
     # This copy task becomes a new writer for the target region
     add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num)
@@ -388,9 +392,9 @@ function enqueue_copy_to!(state::DataDepsState, dest_space::MemorySpace, arg_w::
     @dagdebug nothing :spawn_datadeps "($(repr(f)))[$(idx-1)][$dep_mod] Full copy-to has $(length(copy_syncdeps)) syncdeps"
 
     # Launch the remainder copy task
-    copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=copy_syncdeps occupancy=Dict(Any=>0) meta=true Dagger.move!(dep_mod, dest_space, source_space, arg_dest, arg_source)
-
-    # This copy task becomes a new writer for the target region
+    copy_task = Dagger.with_options(; tag=to_tag()) do
+         Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=copy_syncdeps occupancy=Dict(Any=>0) meta=true Dagger.move!(dep_mod, dest_space, source_space, arg_dest, arg_source)
+    end
     add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num)
 end
 function enqueue_copy_from!(state::DataDepsState, dest_space::MemorySpace, arg_w::ArgumentWrapper,
@@ -415,7 +419,9 @@ function enqueue_copy_from!(state::DataDepsState, dest_space::MemorySpace, arg_w
     @dagdebug nothing :spawn_datadeps "($(typeof(arg_w.arg)))[$dep_mod] Full copy-from has $(length(copy_syncdeps)) syncdeps"
 
     # Launch the remainder copy task
-    copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=copy_syncdeps occupancy=Dict(Any=>0) meta=true Dagger.move!(dep_mod, dest_space, source_space, arg_dest, arg_source)
+    copy_task = Dagger.with_options(; tag=to_tag()) do
+         Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=copy_syncdeps occupancy=Dict(Any=>0) meta=true Dagger.move!(dep_mod, dest_space, source_space, arg_dest, arg_source)
+    end
 
     # This copy task becomes a new writer for the target region
     add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num)
