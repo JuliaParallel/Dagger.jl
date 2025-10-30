@@ -1,3 +1,18 @@
+
+const TAG_WAITING = Base.Lockable(Ref{UInt32}(1))
+function to_tag()
+    intask = Dagger.in_task()
+    opts = Dagger.get_options()
+    if intask
+        return Dagger.get_tls().task_spec.options.tag::UInt32
+    end
+    lock(TAG_WAITING) do counter_ref
+        tag = counter_ref[]
+        counter_ref[] = tag + 1 > MPI.tag_ub() ? 1 : tag + 1
+        return tag
+    end
+end
+
 struct DataDepsTaskQueue <: AbstractTaskQueue
     # The queue above us
     upper_queue::AbstractTaskQueue
@@ -485,6 +500,10 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     if spec.options.syncdeps === nothing
         spec.options.syncdeps = Set{Any}()
     end
+    if spec.options.tag === nothing
+	spec.options.tag = to_tag()
+    end
+
     syncdeps = spec.options.syncdeps
     map_or_ntuple(task_arg_ws) do idx
         arg_ws = task_arg_ws[idx]
