@@ -55,7 +55,6 @@ function aliasing(accel::MPIAcceleration, x::Chunk, T)
     tag = to_tag(hash(handle.id, hash(:aliasing)))
     check_uniform(tag)
     rank = MPI.Comm_rank(accel.comm)
-
     if handle.rank == rank
         ainfo = aliasing(x, T)
         #Core.print("[$rank] aliasing: $ainfo, sending\n")
@@ -354,17 +353,6 @@ function take_ref_id!()
         id = Threads.atomic_add!(counter, 1)
     end
     return MPIRefID(tid, uid, id)
-end
-
-function to_tag(h::UInt)
-    # FIXME: Use some kind of bounded re-hashing
-    # FIXME: Re-hash with upper and lower
-    bound = MPI.tag_ub()
-    tag = abs(Base.unsafe_trunc(Int32, h))
-    while tag > bound
-        tag = tag - bound
-    end
-    return tag
 end
 
 #TODO: partitioned scheduling with comm bifurcation
@@ -673,8 +661,8 @@ function move!(dep_mod, to_space::MPIMemorySpace, from_space::MPIMemorySpace, to
     if to_space.rank == from_space.rank == local_rank
         move!(dep_mod, to_space.innerSpace, from_space.innerSpace, to, from)
     else
-        tag = to_tag(hash(dep_mod, hash(to.handle.id, hash(from.handle.id, hash(:move!)))))
         @dagdebug nothing :mpi "[$local_rank][$tag] Moving from  $(from_space.rank)  to  $(to_space.rank)\n"
+        tag = to_tag()
         if local_rank == from_space.rank
             send_yield!(poolget(from.handle; uniform=false), to_space.comm, to_space.rank, tag)
         elseif local_rank == to_space.rank
@@ -769,8 +757,8 @@ function remotecall_endpoint(f, accel::Dagger.MPIAcceleration, from_proc, to_pro
     task = DATADEPS_CURRENT_TASK[]
     return with(MPI_UID=>task.uid, MPI_UNIFORM=>true) do
         @assert data isa Chunk "Expected Chunk, got $(typeof(data))"
-        tag = to_tag(hash(data.handle.id))
         space = memory_space(data)
+        tag = to_tag()
         if space.rank != from_proc.rank
             # If the data is already where it needs to be
             @assert space.rank == to_proc.rank
@@ -792,21 +780,23 @@ function remotecall_endpoint(f, accel::Dagger.MPIAcceleration, from_proc, to_pro
             value = poolget(data.handle)
             data_converted = f(move(from_proc.innerProc, to_proc.innerProc, value))
             return tochunk(data_converted, to_proc, to_space)
-        elseif loc_rank == from_proc.rank
-            value = poolget(data.handle)
-            data_moved = move(from_proc.innerProc, to_proc.innerProc, value)
-            Dagger.send_yield(data_moved, accel.comm, to_proc.rank, tag)
-            # FIXME: This is wrong to take typeof(data_moved), because the type may change
-            return tochunk(nothing, to_proc, to_space; type=typeof(data_moved))
-        elseif loc_rank == to_proc.rank
-            data_moved = Dagger.recv_yield(accel.comm, from_space.rank, tag)
-            data_converted = f(move(from_proc.innerProc, to_proc.innerProc, data_moved))
-            return tochunk(data_converted, to_proc, to_space)
         else
-            T = move_type(from_proc.innerProc, to_proc.innerProc, chunktype(data))
-            T_new = f !== identity ? Base._return_type(f, Tuple{T}) : T
-            @assert isconcretetype(T_new) "Return type inference failed, expected concrete type, got $T -> $T_new"
-            return tochunk(nothing, to_proc, to_space; type=T_new)
+            if loc_rank == from_proc.rank
+                value = poolget(data.handle)
+                data_moved = move(from_proc.innerProc, to_proc.innerProc, value)
+                Dagger.send_yield(data_moved, accel.comm, to_proc.rank, tag)
+                # FIXME: This is wrong to take typeof(data_moved), because the type may change
+                return tochunk(nothing, to_proc, to_space; type=typeof(data_moved))
+            elseif loc_rank == to_proc.rank
+                data_moved = Dagger.recv_yield(accel.comm, from_space.rank, tag)
+                data_converted = f(move(from_proc.innerProc, to_proc.innerProc, data_moved))
+                return tochunk(data_converted, to_proc, to_space)
+            else
+                T = move_type(from_proc.innerProc, to_proc.innerProc, chunktype(data))
+                T_new = f !== identity ? Base._return_type(f, Tuple{T}) : T
+                @assert isconcretetype(T_new) "Return type inference failed, expected concrete type, got $T -> $T_new"
+                return tochunk(nothing, to_proc, to_space; type=T_new)
+            end
         end
     end
 end
@@ -844,19 +834,18 @@ end
 #FIXME:try to think of a better move! scheme
 function execute!(proc::MPIProcessor, world::UInt64, f, args...; kwargs...)
     local_rank = MPI.Comm_rank(proc.comm)
-    tag = to_tag(hash(sch_handle().thunk_id.id, hash(:execute!, UInt(0))))
     islocal = local_rank == proc.rank
     inplace_move = f === move!
     result = nothing
+    tag_space = to_tag()
     if islocal || inplace_move
         result = execute!(proc.innerProc, world, f, args...; kwargs...)
     end
     if inplace_move
-        # move! already handles communication
         space = memory_space(nothing, proc)::MPIMemorySpace
         return tochunk(nothing, proc, space)
     else
-        # Handle communication ourselves
+        # Handle commun1ication ourselves
         if islocal
             T = typeof(result)
             space = memory_space(result, proc)::MPIMemorySpace
