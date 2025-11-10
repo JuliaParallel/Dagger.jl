@@ -52,7 +52,7 @@ MPIAcceleration() = MPIAcceleration(MPI.COMM_WORLD)
 function aliasing(accel::MPIAcceleration, x::Chunk, T)
     handle = x.handle::MPIRef
     @assert accel.comm == handle.comm "MPIAcceleration comm mismatch"
-    tag = to_tag(hash(handle.id, hash(:aliasing)))
+    tag = to_tag()
     check_uniform(tag)
     rank = MPI.Comm_rank(accel.comm)
     if handle.rank == rank
@@ -638,7 +638,7 @@ WeakChunk(c::Chunk{T,H}) where {T,H<:MPIRef} = WeakChunk(c.handle.rank, c.handle
 function MemPool.poolget(ref::MPIRef; uniform::Bool=false)
     @assert uniform || ref.rank == MPI.Comm_rank(ref.comm) "MPIRef rank mismatch: $(ref.rank) != $(MPI.Comm_rank(ref.comm))"
     if uniform
-        tag = to_tag(hash(ref.id, hash(:poolget)))
+        tag = to_tag()
         if ref.rank == MPI.Comm_rank(ref.comm)
             value = poolget(ref.innerRef)
             @opcounter :poolget_bcast_send_yield
@@ -684,7 +684,7 @@ function move!(dep_mod::RemainderAliasing{<:MPIMemorySpace}, to_space::MPIMemory
     if to_space.rank == from_space.rank == local_rank
         move!(dep_mod, to_space.innerSpace, from_space.innerSpace, to, from)
     else
-        tag = to_tag(hash(dep_mod, hash(to.handle.id, hash(from.handle.id, hash(:move!)))))
+        tag = to_tag()
         @dagdebug nothing :mpi "[$local_rank][$tag] Moving from  $(from_space.rank)  to  $(to_space.rank)\n"
         if local_rank == from_space.rank
             # Get the source data for each span
