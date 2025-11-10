@@ -7,6 +7,7 @@ function to_tag()
         return Dagger.get_tls().task_spec.options.tag::UInt32
     end
     lock(TAG_WAITING) do counter_ref
+	@assert Sch.SCHED_MOVE[] == false "We should not create a tag on the scheduler unwrap move"
         tag = counter_ref[]
         counter_ref[] = tag + 1 > MPI.tag_ub() ? 1 : tag + 1
         return tag
