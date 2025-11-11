@@ -177,16 +177,15 @@ end
 @everywhere mut_V!(V) = (V .= 1;)
 function test_datadeps(;args_chunks::Bool,
                         args_thunks::Bool,
-                        args_loc::Int,
-                        aliasing::Bool)
+                        args_loc::Int)
     # Returns last value
-    @test Dagger.spawn_datadeps(;aliasing) do
+    @test Dagger.spawn_datadeps() do
         42
     end == 42
 
     # Tasks are started and finished as spawn_datadeps returns
     ts = []
-    Dagger.spawn_datadeps(;aliasing) do
+    Dagger.spawn_datadeps() do
         for i in 1:5
             t = Dagger.@spawn sleep(0.1)
             @test !istaskstarted(t)
@@ -195,7 +194,7 @@ function test_datadeps(;args_chunks::Bool,
     @test all(istaskdone, ts)
 
     # Rethrows any task exceptions
-    @test_throws Exception Dagger.spawn_datadeps(;aliasing) do
+    @test_throws Exception Dagger.spawn_datadeps() do
         Dagger.@spawn error("Test")
     end
 
@@ -209,7 +208,7 @@ function test_datadeps(;args_chunks::Bool,
     # Task return values can be tracked
     ts = []
     logs = with_logs() do
-        Dagger.spawn_datadeps(;aliasing) do
+        Dagger.spawn_datadeps() do
             t1 = Dagger.@spawn fill(42, 1)
             push!(ts, t1)
             push!(ts, Dagger.@spawn copyto!(Out(A), In(t1)))
@@ -224,7 +223,7 @@ function test_datadeps(;args_chunks::Bool,
     # R->R Non-Aliasing
     ts = []
     logs = with_logs() do
-        Dagger.spawn_datadeps(;aliasing) do
+        Dagger.spawn_datadeps() do
             push!(ts, Dagger.@spawn do_nothing(In(A)))
             push!(ts, Dagger.@spawn do_nothing(In(A)))
         end
@@ -236,7 +235,7 @@ function test_datadeps(;args_chunks::Bool,
     # R->W Aliasing
     ts = []
     logs = with_logs() do
-        Dagger.spawn_datadeps(;aliasing) do
+        Dagger.spawn_datadeps() do
             push!(ts, Dagger.@spawn do_nothing(In(A)))
             push!(ts, Dagger.@spawn do_nothing(Out(A)))
         end
@@ -248,7 +247,7 @@ function test_datadeps(;args_chunks::Bool,
     # W->W Aliasing
     ts = []
     logs = with_logs() do
-        Dagger.spawn_datadeps(;aliasing) do
+        Dagger.spawn_datadeps() do
             push!(ts, Dagger.@spawn do_nothing(Out(A)))
             push!(ts, Dagger.@spawn do_nothing(Out(A)))
         end
@@ -260,7 +259,7 @@ function test_datadeps(;args_chunks::Bool,
     # R->R Non-Self-Aliasing
     ts = []
     logs = with_logs() do
-        Dagger.spawn_datadeps(;aliasing) do
+        Dagger.spawn_datadeps() do
             push!(ts, Dagger.@spawn do_nothing(In(A), In(A)))
             push!(ts, Dagger.@spawn do_nothing(In(A), In(A)))
         end
@@ -272,7 +271,7 @@ function test_datadeps(;args_chunks::Bool,
     # R->W Self-Aliasing
     ts = []
     logs = with_logs() do
-        Dagger.spawn_datadeps(;aliasing) do
+        Dagger.spawn_datadeps() do
             push!(ts, Dagger.@spawn do_nothing(In(A), In(A)))
             push!(ts, Dagger.@spawn do_nothing(Out(A), Out(A)))
         end
@@ -284,7 +283,7 @@ function test_datadeps(;args_chunks::Bool,
     # W->W Self-Aliasing
     ts = []
     logs = with_logs() do
-        Dagger.spawn_datadeps(;aliasing) do
+        Dagger.spawn_datadeps() do
             push!(ts, Dagger.@spawn do_nothing(Out(A), Out(A)))
             push!(ts, Dagger.@spawn do_nothing(Out(A), Out(A)))
         end
@@ -293,197 +292,195 @@ function test_datadeps(;args_chunks::Bool,
     test_task_dominators(logs, tid_1, []; all_tids=[tid_1, tid_2])
     test_task_dominators(logs, tid_2, [tid_1]; all_tids=[tid_1, tid_2])
 
-    if aliasing
-        function wrap_chunk_thunk(f, args...)
-            if args_thunks || args_chunks
-                result = Dagger.@spawn scope=Dagger.scope(worker=args_loc) f(args...)
-                if args_thunks
-                    return result
-                elseif args_chunks
-                    return fetch(result; raw=true)
-                end
-            else
-                # N.B. We don't allocate remotely for raw data
-                return f(args...)
+    function wrap_chunk_thunk(f, args...)
+        if args_thunks || args_chunks
+            result = Dagger.@spawn scope=Dagger.scope(worker=args_loc) f(args...)
+            if args_thunks
+                return result
+            elseif args_chunks
+                return fetch(result; raw=true)
             end
+        else
+            # N.B. We don't allocate remotely for raw data
+            return f(args...)
         end
-        B = wrap_chunk_thunk(rand, 4, 4)
-
-        # Views
-        B_ul = wrap_chunk_thunk(view, B, 1:2, 1:2)
-        B_ur = wrap_chunk_thunk(view, B, 1:2, 3:4)
-        B_ll = wrap_chunk_thunk(view, B, 3:4, 1:2)
-        B_lr = wrap_chunk_thunk(view, B, 3:4, 3:4)
-        B_mid = wrap_chunk_thunk(view, B, 2:3, 2:3)
-        for (B_name, B_view) in (
-                                 (:B_ul, B_ul),
-                                 (:B_ur, B_ur),
-                                 (:B_ll, B_ll),
-                                 (:B_lr, B_lr),
-                                 (:B_mid, B_mid))
-            @test Dagger.will_alias(Dagger.aliasing(B), Dagger.aliasing(B_view))
-            B_view === B_mid && continue
-            @test Dagger.will_alias(Dagger.aliasing(B_mid), Dagger.aliasing(B_view))
-        end
-        local t_A, t_B, t_ul, t_ur, t_ll, t_lr, t_mid
-        local t_ul2, t_ur2, t_ll2, t_lr2
-        logs = with_logs() do
-            Dagger.spawn_datadeps(;aliasing) do
-                t_A = Dagger.@spawn do_nothing(InOut(A))
-                t_B = Dagger.@spawn do_nothing(InOut(B))
-                t_ul = Dagger.@spawn do_nothing(InOut(B_ul))
-                t_ur = Dagger.@spawn do_nothing(InOut(B_ur))
-                t_ll = Dagger.@spawn do_nothing(InOut(B_ll))
-                t_lr = Dagger.@spawn do_nothing(InOut(B_lr))
-                t_mid = Dagger.@spawn do_nothing(InOut(B_mid))
-                t_ul2 = Dagger.@spawn do_nothing(InOut(B_ul))
-                t_ur2 = Dagger.@spawn do_nothing(InOut(B_ur))
-                t_ll2 = Dagger.@spawn do_nothing(InOut(B_ll))
-                t_lr2 = Dagger.@spawn do_nothing(InOut(B_lr))
-            end
-        end
-        tid_A, tid_B, tid_ul, tid_ur, tid_ll, tid_lr, tid_mid =
-            task_id.([t_A, t_B, t_ul, t_ur, t_ll, t_lr, t_mid])
-        tid_ul2, tid_ur2, tid_ll2, tid_lr2 =
-            task_id.([t_ul2, t_ur2, t_ll2, t_lr2])
-        tids_all = [tid_A, tid_B, tid_ul, tid_ur, tid_ll, tid_lr, tid_mid,
-                    tid_ul2, tid_ur2, tid_ll2, tid_lr2]
-        test_task_dominators(logs, tid_A, []; all_tids=tids_all)
-        test_task_dominators(logs, tid_B, []; all_tids=tids_all)
-        test_task_dominators(logs, tid_ul, [tid_B]; all_tids=tids_all)
-        test_task_dominators(logs, tid_ur, [tid_B]; all_tids=tids_all)
-        test_task_dominators(logs, tid_ll, [tid_B]; all_tids=tids_all)
-        test_task_dominators(logs, tid_lr, [tid_B]; all_tids=tids_all)
-        test_task_dominators(logs, tid_mid, [tid_B, tid_ul, tid_ur, tid_ll, tid_lr]; all_tids=tids_all)
-        test_task_dominators(logs, tid_ul2, [tid_B, tid_mid, tid_ul]; all_tids=tids_all, nondom_check=false)
-        test_task_dominators(logs, tid_ur2, [tid_B, tid_mid, tid_ur]; all_tids=tids_all, nondom_check=false)
-        test_task_dominators(logs, tid_ll2, [tid_B, tid_mid, tid_ll]; all_tids=tids_all, nondom_check=false)
-        test_task_dominators(logs, tid_lr2, [tid_B, tid_mid, tid_lr]; all_tids=tids_all, nondom_check=false)
-
-        # (Unit)Upper/LowerTriangular and Diagonal
-        B_upper = wrap_chunk_thunk(UpperTriangular, B)
-        B_unitupper = wrap_chunk_thunk(UnitUpperTriangular, B)
-        B_lower = wrap_chunk_thunk(LowerTriangular, B)
-        B_unitlower = wrap_chunk_thunk(UnitLowerTriangular, B)
-        for (B_name, B_view) in (
-                                 (:B_upper, B_upper),
-                                 (:B_unitupper, B_unitupper),
-                                 (:B_lower, B_lower),
-                                 (:B_unitlower, B_unitlower))
-            @test Dagger.will_alias(Dagger.aliasing(B), Dagger.aliasing(B_view))
-        end
-        @test Dagger.will_alias(Dagger.aliasing(B_upper), Dagger.aliasing(B_lower))
-        @test !Dagger.will_alias(Dagger.aliasing(B_unitupper), Dagger.aliasing(B_unitlower))
-        @test Dagger.will_alias(Dagger.aliasing(B_upper), Dagger.aliasing(B_unitupper))
-        @test Dagger.will_alias(Dagger.aliasing(B_lower), Dagger.aliasing(B_unitlower))
-
-        @test Dagger.will_alias(Dagger.aliasing(B_upper), Dagger.aliasing(B, Diagonal))
-        @test Dagger.will_alias(Dagger.aliasing(B_lower), Dagger.aliasing(B, Diagonal))
-        @test !Dagger.will_alias(Dagger.aliasing(B_unitupper), Dagger.aliasing(B, Diagonal))
-        @test !Dagger.will_alias(Dagger.aliasing(B_unitlower), Dagger.aliasing(B, Diagonal))
-
-        local t_A, t_B, t_upper, t_unitupper, t_lower, t_unitlower, t_diag
-        local t_upper2, t_unitupper2, t_lower2, t_unitlower2
-        logs = with_logs() do
-            Dagger.spawn_datadeps(;aliasing) do
-                t_A = Dagger.@spawn do_nothing(InOut(A))
-                t_B = Dagger.@spawn do_nothing(InOut(B))
-                t_upper = Dagger.@spawn do_nothing(InOut(B_upper))
-                t_unitupper = Dagger.@spawn do_nothing(InOut(B_unitupper))
-                t_lower = Dagger.@spawn do_nothing(InOut(B_lower))
-                t_unitlower = Dagger.@spawn do_nothing(InOut(B_unitlower))
-                t_diag = Dagger.@spawn do_nothing(Deps(B, InOut(Diagonal)))
-                t_unitlower2 = Dagger.@spawn do_nothing(InOut(B_unitlower))
-                t_lower2 = Dagger.@spawn do_nothing(InOut(B_lower))
-                t_unitupper2 = Dagger.@spawn do_nothing(InOut(B_unitupper))
-                t_upper2 = Dagger.@spawn do_nothing(InOut(B_upper))
-            end
-        end
-        tid_A, tid_B, tid_upper, tid_unitupper, tid_lower, tid_unitlower, tid_diag =
-            task_id.([t_A, t_B, t_upper, t_unitupper, t_lower, t_unitlower, t_diag])
-        tid_upper2, tid_unitupper2, tid_lower2, tid_unitlower2 =
-            task_id.([t_upper2, t_unitupper2, t_lower2, t_unitlower2])
-        tids_all = [tid_A, tid_B, tid_upper, tid_unitupper, tid_lower, tid_unitlower, tid_diag,
-                    tid_upper2, tid_unitupper2, tid_lower2, tid_unitlower2]
-        test_task_dominators(logs, tid_A, []; all_tids=tids_all)
-        test_task_dominators(logs, tid_B, []; all_tids=tids_all)
-        # FIXME: Proper non-dominance checks
-        test_task_dominators(logs, tid_upper, [tid_B]; all_tids=tids_all, nondom_check=false)
-        test_task_dominators(logs, tid_unitupper, [tid_B, tid_upper]; all_tids=tids_all, nondom_check=false)
-        test_task_dominators(logs, tid_lower, [tid_B, tid_upper]; all_tids=tids_all, nondom_check=false)
-        test_task_dominators(logs, tid_unitlower, [tid_B, tid_lower]; all_tids=tids_all, nondom_check=false)
-        test_task_dominators(logs, tid_diag, [tid_B, tid_upper, tid_lower]; all_tids=tids_all, nondom_check=false)
-        test_task_dominators(logs, tid_unitlower2, [tid_B, tid_lower, tid_unitlower]; all_tids=tids_all, nondom_check=false)
-        test_task_dominators(logs, tid_lower2, [tid_B, tid_lower, tid_unitlower, tid_diag, tid_unitlower2]; all_tids=tids_all, nondom_check=false)
-        test_task_dominators(logs, tid_unitupper2, [tid_B, tid_upper, tid_unitupper]; all_tids=tids_all, nondom_check=false)
-        test_task_dominators(logs, tid_upper2, [tid_B, tid_upper, tid_unitupper, tid_diag, tid_unitupper2]; all_tids=tids_all, nondom_check=false)
-
-        # Additional aliasing tests
-        views_overlap(x, y) = Dagger.will_alias(Dagger.aliasing(x), Dagger.aliasing(y))
-
-        A = wrap_chunk_thunk(identity, B)
-
-        A_r1 = wrap_chunk_thunk(view, A, 1:1, 1:4)
-        A_r2 = wrap_chunk_thunk(view, A, 2:2, 1:4)
-        B_r1 = wrap_chunk_thunk(view, B, 1:1, 1:4)
-        B_r2 = wrap_chunk_thunk(view, B, 2:2, 1:4)
-
-        A_c1 = wrap_chunk_thunk(view, A, 1:4, 1:1)
-        A_c2 = wrap_chunk_thunk(view, A, 1:4, 2:2)
-        B_c1 = wrap_chunk_thunk(view, B, 1:4, 1:1)
-        B_c2 = wrap_chunk_thunk(view, B, 1:4, 2:2)
-
-        A_mid = wrap_chunk_thunk(view, A, 2:3, 2:3)
-        B_mid = wrap_chunk_thunk(view, B, 2:3, 2:3)
-
-        @test views_overlap(A_r1, A_r1)
-        @test views_overlap(B_r1, B_r1)
-        @test views_overlap(A_c1, A_c1)
-        @test views_overlap(B_c1, B_c1)
-
-        @test views_overlap(A_r1, B_r1)
-        @test views_overlap(A_r2, B_r2)
-        @test views_overlap(A_c1, B_c1)
-        @test views_overlap(A_c2, B_c2)
-
-        @test !views_overlap(A_r1, A_r2)
-        @test !views_overlap(B_r1, B_r2)
-        @test !views_overlap(A_c1, A_c2)
-        @test !views_overlap(B_c1, B_c2)
-
-        @test views_overlap(A_r1, A_c1)
-        @test views_overlap(A_r1, B_c1)
-        @test views_overlap(A_r2, A_c2)
-        @test views_overlap(A_r2, B_c2)
-
-        for (name, mid) in ((:A_mid, A_mid), (:B_mid, B_mid))
-            @test !views_overlap(A_r1, mid)
-            @test !views_overlap(B_r1, mid)
-            @test !views_overlap(A_c1, mid)
-            @test !views_overlap(B_c1, mid)
-
-            @test views_overlap(A_r2, mid)
-            @test views_overlap(B_r2, mid)
-            @test views_overlap(A_c2, mid)
-            @test views_overlap(B_c2, mid)
-        end
-
-        @test views_overlap(A_mid, A_mid)
-        @test views_overlap(A_mid, B_mid)
-
-        # SubArray hashing
-        V = zeros(3)
-        Dagger.spawn_datadeps(;aliasing) do
-            Dagger.@spawn mut_V!(InOut(view(V, 1:2)))
-            Dagger.@spawn mut_V!(InOut(view(V, 2:3)))
-        end
-        @test fetch(V) == [1, 1, 1]
     end
+    B = wrap_chunk_thunk(rand, 4, 4)
+
+    # Views
+    B_ul = wrap_chunk_thunk(view, B, 1:2, 1:2)
+    B_ur = wrap_chunk_thunk(view, B, 1:2, 3:4)
+    B_ll = wrap_chunk_thunk(view, B, 3:4, 1:2)
+    B_lr = wrap_chunk_thunk(view, B, 3:4, 3:4)
+    B_mid = wrap_chunk_thunk(view, B, 2:3, 2:3)
+    for (B_name, B_view) in (
+                                (:B_ul, B_ul),
+                                (:B_ur, B_ur),
+                                (:B_ll, B_ll),
+                                (:B_lr, B_lr),
+                                (:B_mid, B_mid))
+        @test Dagger.will_alias(Dagger.aliasing(B), Dagger.aliasing(B_view))
+        B_view === B_mid && continue
+        @test Dagger.will_alias(Dagger.aliasing(B_mid), Dagger.aliasing(B_view))
+    end
+    local t_A, t_B, t_ul, t_ur, t_ll, t_lr, t_mid
+    local t_ul2, t_ur2, t_ll2, t_lr2
+    logs = with_logs() do
+        Dagger.spawn_datadeps() do
+            t_A = Dagger.@spawn do_nothing(InOut(A))
+            t_B = Dagger.@spawn do_nothing(InOut(B))
+            t_ul = Dagger.@spawn do_nothing(InOut(B_ul))
+            t_ur = Dagger.@spawn do_nothing(InOut(B_ur))
+            t_ll = Dagger.@spawn do_nothing(InOut(B_ll))
+            t_lr = Dagger.@spawn do_nothing(InOut(B_lr))
+            t_mid = Dagger.@spawn do_nothing(InOut(B_mid))
+            t_ul2 = Dagger.@spawn do_nothing(InOut(B_ul))
+            t_ur2 = Dagger.@spawn do_nothing(InOut(B_ur))
+            t_ll2 = Dagger.@spawn do_nothing(InOut(B_ll))
+            t_lr2 = Dagger.@spawn do_nothing(InOut(B_lr))
+        end
+    end
+    tid_A, tid_B, tid_ul, tid_ur, tid_ll, tid_lr, tid_mid =
+        task_id.([t_A, t_B, t_ul, t_ur, t_ll, t_lr, t_mid])
+    tid_ul2, tid_ur2, tid_ll2, tid_lr2 =
+        task_id.([t_ul2, t_ur2, t_ll2, t_lr2])
+    tids_all = [tid_A, tid_B, tid_ul, tid_ur, tid_ll, tid_lr, tid_mid,
+                tid_ul2, tid_ur2, tid_ll2, tid_lr2]
+    test_task_dominators(logs, tid_A, []; all_tids=tids_all)
+    test_task_dominators(logs, tid_B, []; all_tids=tids_all)
+    test_task_dominators(logs, tid_ul, [tid_B]; all_tids=tids_all)
+    test_task_dominators(logs, tid_ur, [tid_B]; all_tids=tids_all)
+    test_task_dominators(logs, tid_ll, [tid_B]; all_tids=tids_all)
+    test_task_dominators(logs, tid_lr, [tid_B]; all_tids=tids_all)
+    test_task_dominators(logs, tid_mid, [tid_B, tid_ul, tid_ur, tid_ll, tid_lr]; all_tids=tids_all)
+    test_task_dominators(logs, tid_ul2, [tid_B, tid_mid, tid_ul]; all_tids=tids_all, nondom_check=false)
+    test_task_dominators(logs, tid_ur2, [tid_B, tid_mid, tid_ur]; all_tids=tids_all, nondom_check=false)
+    test_task_dominators(logs, tid_ll2, [tid_B, tid_mid, tid_ll]; all_tids=tids_all, nondom_check=false)
+    test_task_dominators(logs, tid_lr2, [tid_B, tid_mid, tid_lr]; all_tids=tids_all, nondom_check=false)
+
+    # (Unit)Upper/LowerTriangular and Diagonal
+    B_upper = wrap_chunk_thunk(UpperTriangular, B)
+    B_unitupper = wrap_chunk_thunk(UnitUpperTriangular, B)
+    B_lower = wrap_chunk_thunk(LowerTriangular, B)
+    B_unitlower = wrap_chunk_thunk(UnitLowerTriangular, B)
+    for (B_name, B_view) in (
+                                (:B_upper, B_upper),
+                                (:B_unitupper, B_unitupper),
+                                (:B_lower, B_lower),
+                                (:B_unitlower, B_unitlower))
+        @test Dagger.will_alias(Dagger.aliasing(B), Dagger.aliasing(B_view))
+    end
+    @test Dagger.will_alias(Dagger.aliasing(B_upper), Dagger.aliasing(B_lower))
+    @test !Dagger.will_alias(Dagger.aliasing(B_unitupper), Dagger.aliasing(B_unitlower))
+    @test Dagger.will_alias(Dagger.aliasing(B_upper), Dagger.aliasing(B_unitupper))
+    @test Dagger.will_alias(Dagger.aliasing(B_lower), Dagger.aliasing(B_unitlower))
+
+    @test Dagger.will_alias(Dagger.aliasing(B_upper), Dagger.aliasing(B, Diagonal))
+    @test Dagger.will_alias(Dagger.aliasing(B_lower), Dagger.aliasing(B, Diagonal))
+    @test !Dagger.will_alias(Dagger.aliasing(B_unitupper), Dagger.aliasing(B, Diagonal))
+    @test !Dagger.will_alias(Dagger.aliasing(B_unitlower), Dagger.aliasing(B, Diagonal))
+
+    local t_A, t_B, t_upper, t_unitupper, t_lower, t_unitlower, t_diag
+    local t_upper2, t_unitupper2, t_lower2, t_unitlower2
+    logs = with_logs() do
+        Dagger.spawn_datadeps() do
+            t_A = Dagger.@spawn do_nothing(InOut(A))
+            t_B = Dagger.@spawn do_nothing(InOut(B))
+            t_upper = Dagger.@spawn do_nothing(InOut(B_upper))
+            t_unitupper = Dagger.@spawn do_nothing(InOut(B_unitupper))
+            t_lower = Dagger.@spawn do_nothing(InOut(B_lower))
+            t_unitlower = Dagger.@spawn do_nothing(InOut(B_unitlower))
+            t_diag = Dagger.@spawn do_nothing(Deps(B, InOut(Diagonal)))
+            t_unitlower2 = Dagger.@spawn do_nothing(InOut(B_unitlower))
+            t_lower2 = Dagger.@spawn do_nothing(InOut(B_lower))
+            t_unitupper2 = Dagger.@spawn do_nothing(InOut(B_unitupper))
+            t_upper2 = Dagger.@spawn do_nothing(InOut(B_upper))
+        end
+    end
+    tid_A, tid_B, tid_upper, tid_unitupper, tid_lower, tid_unitlower, tid_diag =
+        task_id.([t_A, t_B, t_upper, t_unitupper, t_lower, t_unitlower, t_diag])
+    tid_upper2, tid_unitupper2, tid_lower2, tid_unitlower2 =
+        task_id.([t_upper2, t_unitupper2, t_lower2, t_unitlower2])
+    tids_all = [tid_A, tid_B, tid_upper, tid_unitupper, tid_lower, tid_unitlower, tid_diag,
+                tid_upper2, tid_unitupper2, tid_lower2, tid_unitlower2]
+    test_task_dominators(logs, tid_A, []; all_tids=tids_all)
+    test_task_dominators(logs, tid_B, []; all_tids=tids_all)
+    # FIXME: Proper non-dominance checks
+    test_task_dominators(logs, tid_upper, [tid_B]; all_tids=tids_all, nondom_check=false)
+    test_task_dominators(logs, tid_unitupper, [tid_B, tid_upper]; all_tids=tids_all, nondom_check=false)
+    test_task_dominators(logs, tid_lower, [tid_B, tid_upper]; all_tids=tids_all, nondom_check=false)
+    test_task_dominators(logs, tid_unitlower, [tid_B, tid_lower]; all_tids=tids_all, nondom_check=false)
+    test_task_dominators(logs, tid_diag, [tid_B, tid_upper, tid_lower]; all_tids=tids_all, nondom_check=false)
+    test_task_dominators(logs, tid_unitlower2, [tid_B, tid_lower, tid_unitlower]; all_tids=tids_all, nondom_check=false)
+    test_task_dominators(logs, tid_lower2, [tid_B, tid_lower, tid_unitlower, tid_diag, tid_unitlower2]; all_tids=tids_all, nondom_check=false)
+    test_task_dominators(logs, tid_unitupper2, [tid_B, tid_upper, tid_unitupper]; all_tids=tids_all, nondom_check=false)
+    test_task_dominators(logs, tid_upper2, [tid_B, tid_upper, tid_unitupper, tid_diag, tid_unitupper2]; all_tids=tids_all, nondom_check=false)
+
+    # Additional aliasing tests
+    views_overlap(x, y) = Dagger.will_alias(Dagger.aliasing(x), Dagger.aliasing(y))
+
+    A = wrap_chunk_thunk(identity, B)
+
+    A_r1 = wrap_chunk_thunk(view, A, 1:1, 1:4)
+    A_r2 = wrap_chunk_thunk(view, A, 2:2, 1:4)
+    B_r1 = wrap_chunk_thunk(view, B, 1:1, 1:4)
+    B_r2 = wrap_chunk_thunk(view, B, 2:2, 1:4)
+
+    A_c1 = wrap_chunk_thunk(view, A, 1:4, 1:1)
+    A_c2 = wrap_chunk_thunk(view, A, 1:4, 2:2)
+    B_c1 = wrap_chunk_thunk(view, B, 1:4, 1:1)
+    B_c2 = wrap_chunk_thunk(view, B, 1:4, 2:2)
+
+    A_mid = wrap_chunk_thunk(view, A, 2:3, 2:3)
+    B_mid = wrap_chunk_thunk(view, B, 2:3, 2:3)
+
+    @test views_overlap(A_r1, A_r1)
+    @test views_overlap(B_r1, B_r1)
+    @test views_overlap(A_c1, A_c1)
+    @test views_overlap(B_c1, B_c1)
+
+    @test views_overlap(A_r1, B_r1)
+    @test views_overlap(A_r2, B_r2)
+    @test views_overlap(A_c1, B_c1)
+    @test views_overlap(A_c2, B_c2)
+
+    @test !views_overlap(A_r1, A_r2)
+    @test !views_overlap(B_r1, B_r2)
+    @test !views_overlap(A_c1, A_c2)
+    @test !views_overlap(B_c1, B_c2)
+
+    @test views_overlap(A_r1, A_c1)
+    @test views_overlap(A_r1, B_c1)
+    @test views_overlap(A_r2, A_c2)
+    @test views_overlap(A_r2, B_c2)
+
+    for (name, mid) in ((:A_mid, A_mid), (:B_mid, B_mid))
+        @test !views_overlap(A_r1, mid)
+        @test !views_overlap(B_r1, mid)
+        @test !views_overlap(A_c1, mid)
+        @test !views_overlap(B_c1, mid)
+
+        @test views_overlap(A_r2, mid)
+        @test views_overlap(B_r2, mid)
+        @test views_overlap(A_c2, mid)
+        @test views_overlap(B_c2, mid)
+    end
+
+    @test views_overlap(A_mid, A_mid)
+    @test views_overlap(A_mid, B_mid)
+
+    # SubArray hashing
+    V = zeros(3)
+    Dagger.spawn_datadeps() do
+        Dagger.@spawn mut_V!(InOut(view(V, 1:2)))
+        Dagger.@spawn mut_V!(InOut(view(V, 2:3)))
+    end
+    @test fetch(V) == [1, 1, 1]
 
     # FIXME: Deps
 
     # Outer Scope
-    exec_procs = fetch.(Dagger.spawn_datadeps(;aliasing) do
+    exec_procs = fetch.(Dagger.spawn_datadeps() do
         [Dagger.@spawn Dagger.task_processor() for i in 1:10]
     end)
     unique!(exec_procs)
@@ -499,7 +496,7 @@ function test_datadeps(;args_chunks::Bool,
     end
 
     # Inner Scope
-    @test_throws Dagger.Sch.SchedulingException Dagger.spawn_datadeps(;aliasing) do
+    @test_throws Dagger.Sch.SchedulingException Dagger.spawn_datadeps() do
         Dagger.@spawn scope=Dagger.ExactScope(Dagger.ThreadProc(1, 5000)) 1+1
     end
 
@@ -528,7 +525,7 @@ function test_datadeps(;args_chunks::Bool,
         C = Dagger.@spawn scope=Dagger.scope(worker=args_loc) copy(C)
         D = Dagger.@spawn scope=Dagger.scope(worker=args_loc) copy(D)
     end
-    Dagger.spawn_datadeps(;aliasing) do
+    Dagger.spawn_datadeps() do
         Dagger.@spawn add!(InOut(B), In(A))
         Dagger.@spawn add!(InOut(C), In(A))
         Dagger.@spawn add!(InOut(C), In(B))
@@ -545,7 +542,7 @@ function test_datadeps(;args_chunks::Bool,
     elseif args_thunks
         As = map(A->(Dagger.@spawn scope=Dagger.scope(worker=args_loc) copy(A)), As)
     end
-    Dagger.spawn_datadeps(;aliasing) do
+    Dagger.spawn_datadeps() do
         to_reduce = Vector[]
         push!(to_reduce, As)
         while !isempty(to_reduce)
@@ -576,7 +573,7 @@ function test_datadeps(;args_chunks::Bool,
     elseif args_thunks
         M = map(m->(Dagger.@spawn scope=Dagger.scope(worker=args_loc) copy(m)), M)
     end
-    Dagger.spawn_datadeps(;aliasing) do
+    Dagger.spawn_datadeps() do
         for k in range(1, mt)
             Dagger.@spawn LAPACK.potrf!('L', InOut(M[k, k]))
             for _m in range(k+1, mt)
@@ -596,18 +593,16 @@ function test_datadeps(;args_chunks::Bool,
     @test isapprox(M_dense, expected)
 end
 
-@testset "$(aliasing ? "With" : "Without") Aliasing Support" for aliasing in (true, false)
-    @testset "$args_mode Data" for args_mode in (:Raw, :Chunk, :Thunk)
-        args_chunks = args_mode == :Chunk
-        args_thunks = args_mode == :Thunk
-        for nw in (1, 2)
-            args_loc = nw == 2 ? 2 : 1
-            for nt in (1, 2)
-                if nprocs() >= nw && Threads.nthreads() >= nt
-                    @testset "$nw Workers, $nt Threads" begin
-                        Dagger.with_options(;scope=Dagger.scope(workers=1:nw, threads=1:nt)) do
-                            test_datadeps(;args_chunks, args_thunks, args_loc, aliasing)
-                        end
+@testset @testset "$args_mode Data" for args_mode in (:Raw, :Chunk, :Thunk)
+    args_chunks = args_mode == :Chunk
+    args_thunks = args_mode == :Thunk
+    for nw in (1, 2)
+        args_loc = nw == 2 ? 2 : 1
+        for nt in (1, 2)
+            if nprocs() >= nw && Threads.nthreads() >= nt
+                @testset "$nw Workers, $nt Threads" begin
+                    Dagger.with_options(;scope=Dagger.scope(workers=1:nw, threads=1:nt)) do
+                        test_datadeps(;args_chunks, args_thunks, args_loc)
                     end
                 end
             end
