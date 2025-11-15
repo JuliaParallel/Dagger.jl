@@ -264,7 +264,7 @@ struct DataDepsState
     # The mapping of ainfo to argument and dep_mod
     # Used to lookup which argument and dep_mod a given ainfo is generated from
     # N.B. This is a mapping for remote argument copies
-    ainfo_arg::Dict{AliasingWrapper,ArgumentWrapper}
+    ainfo_arg::Dict{AliasingWrapper,Set{ArgumentWrapper}}
 
     # The history of writes (direct or indirect) to each argument and dep_mod, in terms of ainfos directly written to, and the memory space they were written to
     # Updated when a new write happens on an overlapping ainfo
@@ -316,7 +316,7 @@ struct DataDepsState
         remote_args = Dict{MemorySpace,IdDict{Any,Any}}()
         remote_arg_to_original = IdDict{Any,Any}()
         remote_arg_w = Dict{ArgumentWrapper,Dict{MemorySpace,ArgumentWrapper}}()
-        ainfo_arg = Dict{AliasingWrapper,ArgumentWrapper}()
+        ainfo_arg = Dict{AliasingWrapper,Set{ArgumentWrapper}}()
         arg_owner = Dict{ArgumentWrapper,MemorySpace}()
         arg_overlaps = Dict{ArgumentWrapper,Set{ArgumentWrapper}}()
         ainfo_backing_chunk = Dict{MemorySpace,Dict{AbstractAliasing,Chunk}}()
@@ -459,10 +459,9 @@ function aliasing!(state::DataDepsState, target_space::MemorySpace, arg_w::Argum
 
     # Update the mapping of ainfo to argument and dep_mod
     if !haskey(state.ainfo_arg, ainfo)
-        state.ainfo_arg[ainfo] = remote_arg_w
-    else
-        @assert state.ainfo_arg[ainfo] == remote_arg_w
+        state.ainfo_arg[ainfo] = Set{ArgumentWrapper}([remote_arg_w])
     end
+    push!(state.ainfo_arg[ainfo], remote_arg_w)
 
     # Populate info for the new ainfo
     populate_ainfo!(state, arg_w, ainfo, target_space)
@@ -484,12 +483,13 @@ function populate_ainfo!(state::DataDepsState, original_arg_w::ArgumentWrapper, 
             push!(state.ainfos_overlaps[other_ainfo], target_ainfo)
 
             # Add overlapping history to our own
-            other_remote_arg_w = state.ainfo_arg[other_ainfo]
-            other_arg = state.remote_arg_to_original[other_remote_arg_w.arg]
-            other_arg_w = ArgumentWrapper(other_arg, other_remote_arg_w.dep_mod)
-            push!(state.arg_overlaps[original_arg_w], other_arg_w)
-            push!(state.arg_overlaps[other_arg_w], original_arg_w)
-            merge_history!(state, original_arg_w, other_arg_w)
+            for other_remote_arg_w in state.ainfo_arg[other_ainfo]
+                other_arg = state.remote_arg_to_original[other_remote_arg_w.arg]
+                other_arg_w = ArgumentWrapper(other_arg, other_remote_arg_w.dep_mod)
+                push!(state.arg_overlaps[original_arg_w], other_arg_w)
+                push!(state.arg_overlaps[other_arg_w], original_arg_w)
+                merge_history!(state, original_arg_w, other_arg_w)
+            end
         end
         state.ainfos_overlaps[target_ainfo] = overlaps
 

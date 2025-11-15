@@ -154,7 +154,7 @@ function compute_remainder_for_arg!(state::DataDepsState,
         end
 
         # Lookup all memory spans for arg_w in these spaces
-        other_remote_arg_w = state.ainfo_arg[other_ainfo]
+        other_remote_arg_w = first(collect(state.ainfo_arg[other_ainfo]))
         other_arg_w = ArgumentWrapper(state.remote_arg_to_original[other_remote_arg_w.arg], other_remote_arg_w.dep_mod)
         other_ainfos = Vector{Vector{LocalMemorySpan}}()
         for space in spaces
