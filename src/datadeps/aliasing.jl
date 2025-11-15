@@ -502,7 +502,6 @@ function merge_history!(state::DataDepsState, arg_w::ArgumentWrapper, other_arg_
     history = state.arg_history[arg_w]
     @opcounter :merge_history
     @opcounter :merge_history_complexity length(history)
-    largest_value_update!(length(history))
     origin_space = state.arg_origin[other_arg_w.arg]
     for other_entry in state.arg_history[other_arg_w]
         write_num_tuple = HistoryEntry(AliasingWrapper(NoAliasing()), origin_space, other_entry.write_num)
@@ -665,29 +664,25 @@ function get_or_generate_slot!(state, dest_space, data)
     end
     return state.remote_args[dest_space][data]
 end
-function move_rewrap(from_proc::Processor, to_proc::Processor, data)
+function move_rewrap(from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, data)
     return aliased_object!(data) do data
         return remotecall_endpoint(identity, from_proc, to_proc, from_space, to_space, data)
     end
 end
-function remotecall_endpoint(f, from_proc, to_proc, orig_space, dest_space, data)
+function remotecall_endpoint(f, from_proc, to_proc, from_space, to_space, data)
     to_w = root_worker_id(to_proc)
     if to_w == myid()
         data_converted = f(move(from_proc, to_proc, data))
-        return tochunk(data_converted, to_proc, dest_space)
+        return tochunk(data_converted, to_proc)
     end
-    return remotecall_fetch(to_w, from_proc, to_proc, dest_space, data) do from_proc, to_proc, dest_space, data
+    return remotecall_fetch(to_w, from_proc, to_proc, to_space, data) do from_proc, to_proc, to_space, data
         data_converted = f(move(from_proc, to_proc, data))
-        return tochunk(data_converted, to_proc, dest_space)
+        return tochunk(data_converted, to_proc)
     end
 end
 const ALIASED_OBJECT_CACHE = TaskLocalValue{Union{Dict{AbstractAliasing,Chunk}, Nothing}}(()->nothing)
 @warn "Document these public methods" maxlog=1
 # TODO: Use state to cache aliasing() results
-function declare_aliased_object!(x; ainfo=aliasing(x, identity))
-    cache = ALIASED_OBJECT_CACHE[]
-    cache[ainfo] = x
-end
 function aliased_object!(x; ainfo=aliasing(x, identity))
     cache = ALIASED_OBJECT_CACHE[]
     if haskey(cache, ainfo)
@@ -709,11 +704,6 @@ function aliased_object!(f, x; ainfo=aliasing(x, identity))
         cache[ainfo] = y
     end
     return y
-end
-function aliased_object_unwrap!(x::Chunk)
-    y = unwrap(x)
-    ainfo = aliasing(y, identity)
-    return unwrap(aliased_object!(x; ainfo))
 end
 
 struct DataDepsSchedulerState
