@@ -634,9 +634,6 @@ isremotehandle(x) = false
 isremotehandle(x::DTask) = true
 isremotehandle(x::Chunk) = true
 function generate_slot!(state::DataDepsState, dest_space, data)
-    if data isa DTask
-        data = fetch(data; raw=true)
-    end
     # N.B. We do not perform any sync/copy with the current owner of the data,
     # because all we want here is to make a copy of some version of the data,
     # even if the data is not up to date.
@@ -645,16 +642,11 @@ function generate_slot!(state::DataDepsState, dest_space, data)
     from_proc = first(processors(orig_space))
     dest_space_args = get!(IdDict{Any,Any}, state.remote_args, dest_space)
     ALIASED_OBJECT_CACHE[] = get!(Dict{AbstractAliasing,Chunk}, state.ainfo_backing_chunk, dest_space)
-    if orig_space == dest_space && (data isa Chunk || !isremotehandle(data))
-        # Fast path for local data that's already in a Chunk or not a remote handle needing rewrapping
-        data_chunk = tochunk(data, from_proc)
-    else
-        ctx = Sch.eager_context()
-        id = rand(Int)
-        @maybelog ctx timespan_start(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data))
-        data_chunk = move_rewrap(from_proc, to_proc, data)
-        @maybelog ctx timespan_finish(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data=data_chunk))
-    end
+    ctx = Sch.eager_context()
+    id = rand(Int)
+    @maybelog ctx timespan_start(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data))
+    data_chunk = move_rewrap(from_proc, to_proc, orig_space, dest_space, data)
+    @maybelog ctx timespan_finish(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data=data_chunk))
     @assert memory_space(data_chunk) == dest_space "space mismatch! $dest_space (dest) != $(memory_space(data_chunk)) (actual) ($(typeof(data)) (data) vs. $(typeof(data_chunk)) (chunk)), spaces ($orig_space -> $dest_space)"
     dest_space_args[data] = data_chunk
     state.remote_arg_to_original[data_chunk] = data
