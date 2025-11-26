@@ -10,13 +10,20 @@ mutable struct AllocateArray{T,N} <: ArrayOp{T,N}
     domainchunks
     partitioning::AbstractBlocks{N}
     procgrid::Union{AbstractProcGrid{N}, Nothing}
+    # Optional concrete tile type for staged `@spawn`s. When `nothing`, leave
+    # `return_type` unset so inference (and MPI `post_stage_array_chunks!`,
+    # which defaults dense tiles to `Array{T,N}`) decide. Sparse allocators
+    # pass e.g. `DSparseArray{T,N}` so MPI does not overwrite with `Array`.
+    return_type::Union{Type,Nothing}
 
-    function AllocateArray(eltype::Type{T}, f, want_index::Bool, d::ArrayDomain{N}, domainchunks, p::AbstractBlocks{N}, assignment::Union{AssignmentType{N},Nothing} = nothing) where {T,N}
+    function AllocateArray(eltype::Type{T}, f, want_index::Bool, d::ArrayDomain{N},
+                           domainchunks, p::AbstractBlocks{N},
+                           assignment::Union{AssignmentType{N},Nothing} = nothing;
+                           return_type::Union{Type,Nothing} = nothing) where {T,N}
         sizeA = map(length, d.indexes)
         procgrid = build_procgrid(something(assignment, :arbitrary), Tuple(sizeA), p.blocksize, current_acceleration())
-        return new{T,N}(eltype, f, want_index, d, domainchunks, p, procgrid)
+        return new{T,N}(eltype, f, want_index, d, domainchunks, p, procgrid, return_type)
     end
-
 end
 size(a::AllocateArray) = size(a.domain)
 
@@ -45,12 +52,22 @@ function stage(ctx, A::AllocateArray)
     tasks = emit_chunk_tasks!(A.domainchunks, A.procgrid, A.eltype,
         (scope, I, i) -> begin
         x = A.domainchunks[I]
-        N = ndims(A.domainchunks)
-        ret_type = Array{A.eltype, N}
-        if A.want_index
-            Dagger.@spawn compute_scope=scope return_type=ret_type allocate_array(A.f, A.eltype, i, size(x))
+        if A.f isa DArray
+            # `similar(::DArray)` carries the source tile type (e.g. sparse) forward.
+            chunk = A.f.chunks[I]
+            Dagger.@spawn compute_scope=scope similar(chunk, A.eltype, size(x))
+        elseif A.want_index
+            if A.return_type !== nothing
+                Dagger.@spawn compute_scope=scope return_type=A.return_type allocate_array(A.f, A.eltype, i, size(x))
+            else
+                Dagger.@spawn compute_scope=scope allocate_array(A.f, A.eltype, i, size(x))
+            end
         else
-            Dagger.@spawn compute_scope=scope return_type=ret_type allocate_array(A.f, A.eltype, size(x))
+            if A.return_type !== nothing
+                Dagger.@spawn compute_scope=scope return_type=A.return_type allocate_array(A.f, A.eltype, size(x))
+            else
+                Dagger.@spawn compute_scope=scope allocate_array(A.f, A.eltype, size(x))
+            end
         end
     end)
     return DArray(A.eltype, A.domain, A.domainchunks, tasks, A.partitioning)
