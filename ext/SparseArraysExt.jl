@@ -1,10 +1,11 @@
 module SparseArraysExt
 
 import SparseArrays
+import SparseArrays: SparseMatrixCSC
 import Dagger
 import Dagger: Blocks, AutoBlocks, BlocksOrAuto, AssignmentType, DSparseMatrix
 
-Dagger.sparse_mode(::SparseArrays.SparseMatrixCSC) = :sparsearrays
+Dagger.sparse_mode(::SparseMatrixCSC) = :sparsearrays
 Dagger._sparse_alloc(::Val{:sparsearrays}, T::Type, dims::Dims) =
     SparseArrays.spzeros(T, dims...)
 
@@ -40,8 +41,8 @@ function Dagger.matmatmul!(
     C::DSparseMatrix,
     transA::Char,
     transB::Char,
-    A::SparseArrays.SparseMatrixCSC,
-    B::SparseArrays.SparseMatrixCSC,
+    A::SparseMatrixCSC,
+    B::SparseMatrixCSC,
     alpha,
     beta
 )
@@ -50,6 +51,10 @@ function Dagger.matmatmul!(
     C.mat = alpha * A * B + beta * C.mat
 
     return C
+end
+
+function Dagger.transpose_tile(B::SparseMatrixCSC)
+    return SparseArrays.sparse(B')
 end
 
 end # module SparseArraysExt

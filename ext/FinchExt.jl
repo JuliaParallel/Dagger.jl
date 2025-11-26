@@ -53,11 +53,47 @@ function Dagger.matmatmul!(
 
     # Use optimized Finch operations
     Cm = C.mat
-    Finch.@einsum Cm[i,j] += A[i,k] * B[k,j]
-    display(Cm)
-    C.mat = Cm
+    C_out = Finch.fspzeros(eltype(Cm), size(Cm)...)
+    # N.B. BEWARE: @einsum doesn't work correctly with Cm[i,j] = ... assignments.
+    #Finch.@einsum Cm[i,j] = alpha * (A[i,k] * B[k,j]) + beta * Cm[i,j]
+    Finch.@einsum C_out[i,j] += alpha * (A[i,k] * B[k,j])
+    if beta != 0
+        C_out += beta * Cm
+    end
+    # TODO: Remove this once we're sure @einsum works correctly
+    @assert Array(C_out) ≈ (alpha * Array(A) * Array(B)) .+ (beta * Array(Cm))
+    C.mat = C_out
 
     return C
+end
+
+function Dagger.transpose_tile(B::Finch.Tensor, uplo=nothing)
+    if uplo == 'U'
+        Finch.@finch begin
+            C .= 0
+            for i in _, j in _
+                if i <= j
+                    C[i, j] = B[j, i]
+                end
+            end
+            return C
+        end
+        return C
+    elseif uplo == 'L'
+        Finch.@finch begin
+            C .= 0
+            for i in _, j in _
+                if i >= j
+                    C[i, j] = B[j, i]
+                end
+            end
+            return C
+        end
+        return C
+    else
+        Finch.@einsum C[i,j] = B[j,i]
+        return C
+    end
 end
 
 end # module FinchExt

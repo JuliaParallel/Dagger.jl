@@ -400,7 +400,7 @@ end
     return A
 end
 
-@inline function copytile!(A, B)
+function copytile!(A, B)
     m, n = size(A)
     C = B'
 
@@ -409,15 +409,14 @@ end
     end
 end
 
-@inline function copydiagtile!(A, uplo)
+function copydiagtile!(A, uplo)
     m, n = size(A)
-    Acpy = copy(A)
 
     if uplo == 'U'
-        C = UpperTriangular(Acpy)' + UpperTriangular(Acpy)
+        C = UpperTriangular(A)' + UpperTriangular(A)
         C[diagind(C)] .= A[diagind(A)]
     elseif uplo == 'L'
-        C = LowerTriangular(Acpy)' + Acpy - UpperTriangular(Acpy)
+        C = LowerTriangular(A)' + A - UpperTriangular(A)
         C[diagind(C)] .= A[diagind(A)]
     end
 
