@@ -37,7 +37,8 @@ Base.ndims(M::DSparseMatrix) = 2
 Base.iterate(M::DSparseMatrix) = iterate(M.mat)
 Base.iterate(M::DSparseMatrix, state) = iterate(M.mat, state)
 Base.similar(M::DSparseMatrix, ::Type{T}, dims::Tuple{Int, Int}) where T =
-    DSparseMatrix{T}(similar(M.mat, T, dims))
+    #DSparseMatrix{T}(similar(M.mat, T, dims))
+    DSparseMatrix{T}(_sparse_alloc(Val(sparse_mode(M.mat)), T, dims))
 Base.collect(M::DSparseMatrix) = _sparse_collect(M.mat)
 
 # N.B. hash and aliasing shouldn't change even if M.mat changes

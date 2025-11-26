@@ -81,6 +81,7 @@ end
 allocate_array_func(::Processor, f) = f
 function stage(ctx, A::AllocateArray)
     tasks = Array{DTask,ndims(A.domainchunks)}(undef, size(A.domainchunks)...)
+    f = A.f
     Dagger.spawn_datadeps() do
         default_scope = get_compute_scope()
         for I in CartesianIndices(A.domainchunks)
@@ -93,10 +94,15 @@ function stage(ctx, A::AllocateArray)
                 scope = ExactScope(A.procgrid[CartesianIndex(mod1.(Tuple(I), size(A.procgrid))...)])
             end
 
-            if A.want_index
-                task = Dagger.@spawn compute_scope=scope allocate_array(A.f, A.eltype, i, size(x))
+            if f isa DArray
+                chunk = f.chunks[I]
+                task = Dagger.@spawn compute_scope=scope similar(chunk, A.eltype, size(x))
             else
-                task = Dagger.@spawn compute_scope=scope allocate_array(A.f, A.eltype, size(x))
+                if A.want_index
+                    task = Dagger.@spawn compute_scope=scope allocate_array(f, A.eltype, i, size(x))
+                else
+                    task = Dagger.@spawn compute_scope=scope allocate_array(f, A.eltype, size(x))
+                end
             end
             tasks[i] = task
         end

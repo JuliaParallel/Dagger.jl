@@ -316,8 +316,16 @@ function Base.isequal(x::ArrayOp, y::ArrayOp)
     x === y
 end
 
-Base.similar(D::DArray{T,N} where T, ::Type{S}, dims::Dims{N}) where {S,N} =
-    DArray{S,N}(undef, D.partitioning, dims)
+function Base.similar(D::DArray{T,N} where T, ::Type{S}, dims::Dims{N}) where {S,N}
+    if dims == size(D)
+        domain = ArrayDomain(map(x->1:x, dims))
+        subdomains = partition(D.partitioning, domain)
+        a = AllocateArray(S, D, false, domain, subdomains, D.partitioning, nothing)
+        return _to_darray(a)
+    else
+        return DArray{S,N}(undef, D.partitioning, dims)
+    end
+end
 
 Base.copy(x::DArray{T,N,B,F}) where {T,N,B,F} =
     map(identity, x)::DArray{T,N,B,F}
