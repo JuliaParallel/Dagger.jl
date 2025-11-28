@@ -263,7 +263,7 @@ function is_writedep(arg, deps, task::DTask)
 end
 
 # Aliasing state setup
-function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
+function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask, proc::Processor)
     # Populate task dependencies
     dependencies_to_add = Vector{Tuple{Bool,Bool,AliasingWrapper,<:Any,<:Any}}()
 
@@ -277,6 +277,11 @@ function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
 
         # Skip non-aliasing arguments
         type_may_alias(typeof(arg)) || continue
+
+        # Unwrap Shards
+        if arg isa Shard
+            arg = shard_unwrap(arg, proc)
+        end
 
         # Add all aliasing dependencies
         for (dep_mod, readdep, writedep) in deps
@@ -592,9 +597,6 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     pressures = Dict{Processor,Int}()
     proc_to_scope_lfu = BasicLFUCache{Processor,AbstractScope}(1024)
     for (spec, task) in queue.seen_tasks[task_order]
-        # Populate all task dependencies
-        populate_task_info!(state, spec, task)
-
         task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
         scheduler = queue.scheduler
         if scheduler == :naive
@@ -737,6 +739,9 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         @assert our_proc in all_procs
         our_space = only(memory_spaces(our_proc))
 
+        # Populate all task dependencies
+        populate_task_info!(state, spec, task, our_proc)
+
         # Find the scope for this task (and its copies)
         if task_scope == scope
             # Optimize for the common case, cache the proc=>scope mapping
@@ -774,6 +779,11 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$idx] Skipped copy-to (non-writeable)"
                 spec.fargs[idx].value = arg
                 continue
+            end
+
+            # Unwrap Shards
+            if arg isa Shard
+                arg = shard_unwrap(arg, our_proc)
             end
 
             # Is the source of truth elsewhere?
@@ -851,6 +861,12 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             arg = arg isa DTask ? fetch(arg; raw=true) : arg
             type_may_alias(typeof(arg)) || continue
             supports_inplace_move(state, arg) || continue
+
+            # Unwrap Shards
+            if arg isa Shard
+                arg = shard_unwrap(arg, our_proc)
+            end
+
             if queue.aliasing
                 for (dep_mod, _, writedep) in deps
                     ainfo = aliasing(astate, arg, dep_mod)
@@ -884,6 +900,12 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             arg, deps = unwrap_inout(arg)
             arg = arg isa DTask ? fetch(arg; raw=true) : arg
             type_may_alias(typeof(arg)) || continue
+
+            # Unwrap Shards
+            if arg isa Shard
+                arg = shard_unwrap(arg, our_proc)
+            end
+
             if queue.aliasing
                 for (dep_mod, _, writedep) in deps
                     ainfo = aliasing(astate, arg, dep_mod)
