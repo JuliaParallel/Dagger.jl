@@ -75,6 +75,7 @@ end
 type_may_alias(::Type{String}) = false
 type_may_alias(::Type{Symbol}) = false
 type_may_alias(::Type{<:Type}) = false
+type_may_alias(::Type{Shard}) = true
 type_may_alias(::Type{C}) where C<:Chunk{T} where T = type_may_alias(T)
 function type_may_alias(::Type{T}) where T
     if isbitstype(T)
@@ -213,6 +214,7 @@ end
 aliasing(::String) = NoAliasing() # FIXME: Not necessarily true
 aliasing(::Symbol) = NoAliasing()
 aliasing(::Type) = NoAliasing()
+aliasing(::Shard) = throw(ArgumentError("Cannot resolve aliasing for Shard"))
 aliasing(x::Chunk, T) = remotecall_fetch(root_worker_id(x.processor), x, T) do x, T
     aliasing(unwrap(x), T)
 end

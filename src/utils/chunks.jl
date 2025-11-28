@@ -110,23 +110,25 @@ macro shard(exs...)
     end
 end
 
-function move(from_proc::Processor, to_proc::Processor, shard::Shard)
+function shard_unwrap(shard::Shard, proc::Processor)
     # Match either this proc or some ancestor
     # N.B. This behavior may bypass the piece's scope restriction
-    proc = to_proc
     if haskey(shard.chunks, proc)
-        return move(from_proc, to_proc, shard.chunks[proc])
+        return shard.chunks[proc]
     end
     parent = Dagger.get_parent(proc)
     while parent != proc
         proc = parent
         parent = Dagger.get_parent(proc)
         if haskey(shard.chunks, proc)
-            return move(from_proc, to_proc, shard.chunks[proc])
+            return shard.chunks[proc]
         end
     end
 
-    throw(KeyError(to_proc))
+    throw(KeyError(proc))
+end
+function move(from_proc::Processor, to_proc::Processor, shard::Shard)
+    return move(from_proc, to_proc, shard_unwrap(shard, to_proc))
 end
 Base.iterate(s::Shard) = iterate(values(s.chunks))
 Base.iterate(s::Shard, state) = iterate(values(s.chunks), state)
