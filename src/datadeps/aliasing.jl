@@ -640,17 +640,19 @@ function generate_slot!(state::DataDepsState, dest_space, data)
     to_proc = first(processors(dest_space))
     from_proc = first(processors(orig_space))
     dest_space_args = get!(IdDict{Any,Any}, state.remote_args, dest_space)
-    ALIASED_OBJECT_CACHE[] = get!(Dict{AbstractAliasing,Chunk}, state.ainfo_backing_chunk, dest_space)
+    if !haskey(state.ainfo_backing_chunk, dest_space)
+        state.ainfo_backing_chunk[dest_space] = Dict{AbstractAliasing,Chunk}()
+    end
+    # FIXME: tochunk the cache just once per space
+    aliased_object_cache = AliasedObjectCache(tochunk(state.ainfo_backing_chunk[dest_space]))
     ctx = Sch.eager_context()
     id = rand(Int)
     @maybelog ctx timespan_start(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data))
-    data_chunk = move_rewrap(from_proc, to_proc, orig_space, dest_space, data)
+    data_chunk = move_rewrap(aliased_object_cache, from_proc, to_proc, orig_space, dest_space, data)
     @maybelog ctx timespan_finish(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data=data_chunk))
     @assert memory_space(data_chunk) == dest_space "space mismatch! $dest_space (dest) != $(memory_space(data_chunk)) (actual) ($(typeof(data)) (data) vs. $(typeof(data_chunk)) (chunk)), spaces ($orig_space -> $dest_space)"
     dest_space_args[data] = data_chunk
     state.remote_arg_to_original[data_chunk] = data
-
-    ALIASED_OBJECT_CACHE[] = nothing
 
     return dest_space_args[data]
 end
@@ -664,8 +666,47 @@ function get_or_generate_slot!(state, dest_space, data)
     end
     return state.remote_args[dest_space][data]
 end
-function move_rewrap(from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, data)
-    return aliased_object!(data) do data
+struct AliasedObjectCache
+    chunk::Chunk
+end
+@warn "Document these public methods" maxlog=1
+function Base.haskey(cache::AliasedObjectCache, ainfo::AbstractAliasing)
+    wid = root_worker_id(cache.chunk)
+    if wid != myid()
+        return remotecall_fetch(haskey, wid, cache, ainfo)
+    end
+    cache_raw = unwrap(cache.chunk)::Dict{AbstractAliasing,Chunk}
+    return haskey(cache_raw, ainfo)
+end
+function Base.getindex(cache::AliasedObjectCache, ainfo::AbstractAliasing)
+    wid = root_worker_id(cache.chunk)
+    if wid != myid()
+        return remotecall_fetch(getindex, wid, cache, ainfo)
+    end
+    cache_raw = unwrap(cache.chunk)::Dict{AbstractAliasing,Chunk}
+    return getindex(cache_raw, ainfo)
+end
+function Base.setindex!(cache::AliasedObjectCache, value::Chunk, ainfo::AbstractAliasing)
+    wid = root_worker_id(cache.chunk)
+    if wid != myid()
+        return remotecall_fetch(setindex!, wid, cache, value, ainfo)
+    end
+    cache_raw = unwrap(cache.chunk)::Dict{AbstractAliasing,Chunk}
+    cache_raw[ainfo] = value
+    return
+end
+function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, data::Chunk)
+    # Unwrap so that we hit the right dispatch
+    wid = root_worker_id(data)
+    if wid != myid()
+        return remotecall_fetch(move_rewrap, wid, cache, from_proc, to_proc, from_space, to_space, data)
+    end
+    data_raw = unwrap(data)
+    return move_rewrap(cache, from_proc, to_proc, from_space, to_space, data_raw)
+end
+function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, data)
+    # For generic data
+    return aliased_object!(cache, data) do data
         return remotecall_endpoint(identity, from_proc, to_proc, from_space, to_space, data)
     end
 end
@@ -680,30 +721,15 @@ function remotecall_endpoint(f, from_proc, to_proc, from_space, to_space, data)
         return tochunk(data_converted, to_proc)
     end
 end
-const ALIASED_OBJECT_CACHE = TaskLocalValue{Union{Dict{AbstractAliasing,Chunk}, Nothing}}(()->nothing)
-@warn "Document these public methods" maxlog=1
-# TODO: Use state to cache aliasing() results
-function aliased_object!(x; ainfo=aliasing(x, identity))
-    cache = ALIASED_OBJECT_CACHE[]
+function aliased_object!(f, cache::AliasedObjectCache, x; ainfo=aliasing(x, identity))
     if haskey(cache, ainfo)
-        y = cache[ainfo]
-    else
-        @assert x isa Chunk "x must be a Chunk\nUse functor form of aliased_object!"
-        cache[ainfo] = x
-        y = x
-    end
-    return y
-end
-function aliased_object!(f, x; ainfo=aliasing(x, identity))
-    cache = ALIASED_OBJECT_CACHE[]
-    if haskey(cache, ainfo)
-        y = cache[ainfo]
+        return cache[ainfo]
     else
         y = f(x)
         @assert y isa Chunk "Didn't get a Chunk from functor"
         cache[ainfo] = y
+        return y
     end
-    return y
 end
 
 struct DataDepsSchedulerState
