@@ -192,3 +192,5 @@ function Base.view(A::AbstractArray{T,N}, p::Blocks{N}) where {T,N}
     chunks = [tochunk(view(A, x.indexes...)) for x in dc]
     return DArray(T, d, dc, chunks, p)
 end
+Base.view(A::AbstractArray, ::AutoBlocks) =
+    view(A, auto_blocks(size(A)))
