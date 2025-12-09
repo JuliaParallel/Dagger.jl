@@ -206,6 +206,10 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         else
             @assert remainder isa NoAliasing "Expected NoAliasing, got $(typeof(remainder))"
             @dagdebug nothing :spawn_datadeps "Skipped copy-from (up-to-date): $origin_space"
+            ctx = Sch.eager_context()
+            id = rand(UInt)
+            @maybelog ctx timespan_start(ctx, :datadeps_copy_skip, (;id), (;))
+            @maybelog ctx timespan_finish(ctx, :datadeps_copy_skip, (;id), (;thunk_id=0, from_space=origin_space, to_space=origin_space, arg_w, from_arg=arg, to_arg=arg))
         end
     end
 end
@@ -520,7 +524,10 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     new_spec.options.scope = our_scope
     new_spec.options.exec_scope = our_scope
     new_spec.options.occupancy = Dict(Any=>0)
+    ctx = Sch.eager_context()
+    @maybelog ctx timespan_start(ctx, :datadeps_execute, (;thunk_id=task.uid), (;))
     enqueue!(queue.upper_queue, DTaskPair(new_spec, task))
+    @maybelog ctx timespan_finish(ctx, :datadeps_execute, (;thunk_id=task.uid), (;space=our_space, deps=task_arg_ws, args=remote_args))
 
     # Update read/write tracking for arguments
     map_or_ntuple(task_arg_ws) do idx

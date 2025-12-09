@@ -275,7 +275,11 @@ function enqueue_remainder_copy_to!(state::DataDepsState, dest_space::MemorySpac
     @dagdebug nothing :spawn_datadeps "($(repr(f)))[$(idx-1)][$dep_mod] Remainder copy-to has $(length(remainder_syncdeps)) syncdeps"
 
     # Launch the remainder copy task
+    ctx = Sch.eager_context()
+    id = rand(UInt)
+    @maybelog ctx timespan_start(ctx, :datadeps_copy, (;id), (;))
     copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=remainder_syncdeps meta=true Dagger.move!(remainder_aliasing, dest_space, source_space, arg_dest, arg_source)
+    @maybelog ctx timespan_finish(ctx, :datadeps_copy, (;id), (;thunk_id=copy_task.uid, from_space=source_space, to_space=dest_space, arg_w, from_arg=arg_source, to_arg=arg_dest))
 
     # This copy task becomes a new writer for the target region
     add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num)
@@ -320,7 +324,11 @@ function enqueue_remainder_copy_from!(state::DataDepsState, dest_space::MemorySp
     @dagdebug nothing :spawn_datadeps "($(typeof(arg_w.arg)))[$dep_mod] Remainder copy-from has $(length(remainder_syncdeps)) syncdeps"
 
     # Launch the remainder copy task
+    ctx = Sch.eager_context()
+    id = rand(UInt)
+    @maybelog ctx timespan_start(ctx, :datadeps_copy, (;id), (;))
     copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=remainder_syncdeps meta=true Dagger.move!(remainder_aliasing, dest_space, source_space, arg_dest, arg_source)
+    @maybelog ctx timespan_finish(ctx, :datadeps_copy, (;id), (;thunk_id=copy_task.uid, from_space=source_space, to_space=dest_space, arg_w, from_arg=arg_source, to_arg=arg_dest))
 
     # This copy task becomes a new writer for the target region
     add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num)
@@ -349,7 +357,11 @@ function enqueue_copy_to!(state::DataDepsState, dest_space::MemorySpace, arg_w::
     @dagdebug nothing :spawn_datadeps "($(repr(f)))[$(idx-1)][$dep_mod] Full copy-to has $(length(copy_syncdeps)) syncdeps"
 
     # Launch the remainder copy task
+    ctx = Sch.eager_context()
+    id = rand(UInt)
+    @maybelog ctx timespan_start(ctx, :datadeps_copy, (;id), (;))
     copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=copy_syncdeps meta=true Dagger.move!(dep_mod, dest_space, source_space, arg_dest, arg_source)
+    @maybelog ctx timespan_finish(ctx, :datadeps_copy, (;id), (;thunk_id=copy_task.uid, from_space=source_space, to_space=dest_space, arg_w, from_arg=arg_source, to_arg=arg_dest))
 
     # This copy task becomes a new writer for the target region
     add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num)
@@ -376,7 +388,11 @@ function enqueue_copy_from!(state::DataDepsState, dest_space::MemorySpace, arg_w
     @dagdebug nothing :spawn_datadeps "($(typeof(arg_w.arg)))[$dep_mod] Full copy-from has $(length(copy_syncdeps)) syncdeps"
 
     # Launch the remainder copy task
+    ctx = Sch.eager_context()
+    id = rand(UInt)
+    @maybelog ctx timespan_start(ctx, :datadeps_copy, (;id), (;))
     copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=copy_syncdeps meta=true Dagger.move!(dep_mod, dest_space, source_space, arg_dest, arg_source)
+    @maybelog ctx timespan_finish(ctx, :datadeps_copy, (;id), (;thunk_id=copy_task.uid, from_space=source_space, to_space=dest_space, arg_w, from_arg=arg_source, to_arg=arg_dest))
 
     # This copy task becomes a new writer for the target region
     add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num)
