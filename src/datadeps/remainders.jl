@@ -384,28 +384,33 @@ end
 
 # Main copy function for RemainderAliasing
 function move!(dep_mod::RemainderAliasing{S}, to_space::MemorySpace, from_space::MemorySpace, to::Chunk, from::Chunk) where S
-    # Get the source data for each span
+    # Copy the data from the source object
     copies = remotecall_fetch(root_worker_id(from_space), dep_mod) do dep_mod
-        copies = Vector{UInt8}[]
-        for (from_span, _) in dep_mod.spans
-            copy = Vector{UInt8}(undef, from_span.len)
-            GC.@preserve copy begin
+        len = sum(span_tuple->span_len(span_tuple[1]), dep_mod.spans)
+        copies = Vector{UInt8}(undef, len)
+        offset = 1
+        GC.@preserve copies begin
+            for (from_span, _) in dep_mod.spans
                 from_ptr = Ptr{UInt8}(from_span.ptr)
-                to_ptr = Ptr{UInt8}(pointer(copy))
+                to_ptr = Ptr{UInt8}(pointer(copies, offset))
                 unsafe_copyto!(to_ptr, from_ptr, from_span.len)
+                offset += from_span.len
             end
-            push!(copies, copy)
         end
+        @assert offset == len+1
         return copies
     end
 
     # Copy the data into the destination object
-    for (copy, (_, to_span)) in zip(copies, dep_mod.spans)
-        GC.@preserve copy begin
-            from_ptr = Ptr{UInt8}(pointer(copy))
+    offset = 1
+    GC.@preserve copies begin
+        for (_, to_span) in dep_mod.spans
+            from_ptr = Ptr{UInt8}(pointer(copies, offset))
             to_ptr = Ptr{UInt8}(to_span.ptr)
             unsafe_copyto!(to_ptr, from_ptr, to_span.len)
+            offset += to_span.len
         end
+        @assert offset == length(copies)+1
     end
 
     # Ensure that the data is visible
