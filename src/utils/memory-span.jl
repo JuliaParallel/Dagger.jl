@@ -38,6 +38,18 @@ span_len(span::MemorySpan) = span.len
 span_end(span::MemorySpan) = span.ptr.addr + span.len
 spans_overlap(span1::MemorySpan, span2::MemorySpan) =
     span_start(span1) < span_end(span2) && span_start(span2) < span_end(span1)
+function span_diff(span1::MemorySpan, span2::MemorySpan)
+    @assert span1.ptr.space == span2.ptr.space
+    start = max(span_start(span1), span_start(span2))
+    stop = min(span_end(span1), span_end(span2))
+    start_ptr = RemotePtr(start, span1.ptr.space)
+    if start < stop
+        len = stop - start
+        return MemorySpan(start_ptr, len)
+    else
+        return MemorySpan(start_ptr, 0)
+    end
+end
 
 ### More space-efficient memory spans
 
@@ -52,6 +64,16 @@ span_len(span::LocalMemorySpan) = span.len
 span_end(span::LocalMemorySpan) = span.ptr + span.len
 spans_overlap(span1::LocalMemorySpan, span2::LocalMemorySpan) =
     span_start(span1) < span_end(span2) && span_start(span2) < span_end(span1)
+function span_diff(span1::LocalMemorySpan, span2::LocalMemorySpan)
+    start = max(span_start(span1), span_start(span2))
+    stop = min(span_end(span1), span_end(span2))
+    if start < stop
+        len = stop - start
+        return LocalMemorySpan(start, len)
+    else
+        return LocalMemorySpan(start, 0)
+    end
+end
 
 # FIXME: Store the length separately, since it's shared by all spans
 struct ManyMemorySpan{N}
@@ -64,6 +86,20 @@ span_end(span::ManyMemorySpan{N}) where N = ManyPair(ntuple(i -> span_end(span.s
 spans_overlap(span1::ManyMemorySpan{N}, span2::ManyMemorySpan{N}) where N =
     # N.B. The spans are assumed to be the same length and relative offset
     spans_overlap(span1.spans[1], span2.spans[1])
+function span_diff(span1::ManyMemorySpan{N}, span2::ManyMemorySpan{N}) where N
+    verify_span(span1)
+    verify_span(span2)
+    span = ManyMemorySpan(ntuple(i -> span_diff(span1.spans[i], span2.spans[i]), N))
+    matches = ntuple(i->span1.spans[i].ptr == span2.spans[i].ptr, Val(N))
+    @assert !(any(matches) && !all(matches)) "Spans only partially match:\n  Span1: $span1\n  Span2: $span2\n  Result: $span"
+    @assert allequal(span_len, span.spans) "Uneven span_diff result:\n  Span1: $span1\n  Span2: $span2\n  Result: $span"
+    verify_span(span)
+    return span
+end
+const VERIFY_SPAN_CURRENT_OBJECT = TaskLocalValue{Any}(()->nothing)
+function verify_span(span::ManyMemorySpan{N}) where N
+    @assert allequal(span_len, span.spans) "All spans must be the same: $(map(span_len, span.spans))\nWhile processing $(typeof(VERIFY_SPAN_CURRENT_OBJECT[]))"
+end
 
 struct ManyPair{N} <: Unsigned
     pairs::NTuple{N,UInt}
@@ -78,6 +114,7 @@ Base.:(==)(x::ManyPair, y::ManyPair) = x.pairs == y.pairs
 Base.isless(x::ManyPair, y::ManyPair) = x.pairs[1] < y.pairs[1]
 Base.:(<)(x::ManyPair, y::ManyPair) = x.pairs[1] < y.pairs[1]
 Base.string(x::ManyPair) = "ManyPair($(x.pairs))"
+Base.show(io::IO, x::ManyPair) = print(io, string(x))
 
 ManyMemorySpan{N}(start::ManyPair{N}, len::ManyPair{N}) where N =
     ManyMemorySpan{N}(ntuple(i -> LocalMemorySpan(start.pairs[i], len.pairs[i]), N))
@@ -96,3 +133,11 @@ span_end(x::LocatorMemorySpan) = span_end(x.span)
 span_len(x::LocatorMemorySpan) = span_len(x.span)
 spans_overlap(span1::LocatorMemorySpan{T}, span2::LocatorMemorySpan{T}) where T =
     spans_overlap(span1.span, span2.span)
+function span_diff(span1::LocatorMemorySpan{T}, span2::LocatorMemorySpan{T}) where T
+    span = LocatorMemorySpan(span_diff(span1.span, span2.span), 0)
+    verify_span(span)
+    return span
+end
+function verify_span(span::LocatorMemorySpan{T}) where T
+    verify_span(span.span)
+end

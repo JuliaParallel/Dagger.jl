@@ -127,7 +127,11 @@ function compute_remainder_for_arg!(state::DataDepsState,
     end
 
     # Create our remainder as an interval tree over all target ainfos
+    VERIFY_SPAN_CURRENT_OBJECT[] = arg_w.arg
     remainder = IntervalTree{ManyMemorySpan{N}}(ManyMemorySpan{N}(ntuple(i -> target_ainfos[i][j], N)) for j in 1:nspans)
+    for span in remainder
+        verify_span(span)
+    end
 
     # Create our tracker
     tracker = Dict{MemorySpace,Tuple{Vector{Tuple{LocalMemorySpan,LocalMemorySpan}},Set{ThunkSyncdep}}}()
@@ -164,6 +168,9 @@ function compute_remainder_for_arg!(state::DataDepsState,
         end
         nspans = length(first(other_ainfos))
         other_many_spans = [ManyMemorySpan{N}(ntuple(i -> other_ainfos[i][j], N)) for j in 1:nspans]
+        foreach(other_many_spans) do span
+            verify_span(span)
+        end
 
         if other_space == target_space
             # Only subtract, this data is already up-to-date in target_space
@@ -187,6 +194,7 @@ function compute_remainder_for_arg!(state::DataDepsState,
             get_read_deps!(state, other_space, other_ainfo, write_num, tracker_other_space[2])
         end
     end
+    VERIFY_SPAN_CURRENT_OBJECT[] = nothing
 
     if isempty(tracker)
         return NoAliasing(), 0
@@ -217,10 +225,10 @@ copy from `other_many_spans` to the subtraced portion of `remainder`.
 function schedule_remainder!(tracker::Vector, source_space_idx::Int, dest_space_idx::Int, remainder::IntervalTree, other_many_spans::Vector{ManyMemorySpan{N}}) where N
     diff = Vector{ManyMemorySpan{N}}()
     subtract_spans!(remainder, other_many_spans, diff)
-
     for span in diff
         source_span = span.spans[source_space_idx]
         dest_span = span.spans[dest_space_idx]
+        @assert span_len(source_span) == span_len(dest_span) "Source and dest spans are not the same size: $(span_len(source_span)) != $(span_len(dest_span))"
         push!(tracker, (source_span, dest_span))
     end
 end

@@ -25,6 +25,7 @@ function IntervalTree{M}(spans) where M
     for span in spans
         insert!(tree, span)
     end
+    verify_spans(tree)
     return tree
 end
 IntervalTree(spans::Vector{M}) where M = IntervalTree{M}(spans)
@@ -42,6 +43,13 @@ function Base.collect(tree::IntervalTree{M}) where M
         push!(result, span)
     end
     return result
+end
+
+# Useful for debugging when spans get misaligned
+function verify_spans(tree::IntervalTree{ManyMemorySpan{N}}) where N
+    for span in tree
+        verify_span(span)
+    end
 end
 
 function Base.iterate(tree::IntervalTree{M}) where M
@@ -196,6 +204,7 @@ function delete_node!(node::IntervalNode{M,E}, span::M) where {M,E}
         original_end = span_end(original_span)
         del_start = span_start(span)
         del_end = span_end(span)
+        verify_span(span)
 
         # Left portion: exists if original starts before deleted span
         if original_start < del_start
@@ -258,10 +267,10 @@ function find_overlapping!(node::IntervalNode{M,E}, query::M, result::Vector{M};
     if spans_overlap(node.span, query)
         if exact
             # Get the overlapping portion of the span
-            overlap_start = max(span_start(node.span), span_start(query))
-            overlap_end = min(span_end(node.span), span_end(query))
-            overlap = M(overlap_start, overlap_end - overlap_start)
-            push!(result, overlap)
+            overlap = span_diff(node.span, query)
+            if !isempty(overlap)
+                push!(result, overlap)
+            end
         else
             push!(result, node.span)
         end
