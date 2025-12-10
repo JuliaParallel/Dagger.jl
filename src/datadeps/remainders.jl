@@ -188,15 +188,15 @@ function compute_remainder_for_arg!(state::DataDepsState,
             (Vector{Tuple{LocalMemorySpan,LocalMemorySpan}}(), Set{ThunkSyncdep}())
         end
         @opcounter :compute_remainder_for_arg_schedule
-        schedule_remainder!(tracker_other_space[1], other_space_idx, target_space_idx, remainder, other_many_spans)
-        if compute_syncdeps
+        has_overlap = schedule_remainder!(tracker_other_space[1], other_space_idx, target_space_idx, remainder, other_many_spans)
+        if compute_syncdeps && has_overlap
             @assert haskey(state.ainfos_owner, other_ainfo) "[idx $idx] ainfo $(typeof(other_ainfo)) has no owner"
             get_read_deps!(state, other_space, other_ainfo, write_num, tracker_other_space[2])
         end
     end
     VERIFY_SPAN_CURRENT_OBJECT[] = nothing
 
-    if isempty(tracker)
+    if isempty(tracker) || all(tracked->isempty(tracked[1]), values(tracker))
         return NoAliasing(), 0
     end
 
@@ -210,6 +210,7 @@ function compute_remainder_for_arg!(state::DataDepsState,
             end
         end
     end
+    @assert !isempty(mra.remainders) "Expected at least one remainder (spaces: $spaces, tracker spaces: $(collect(keys(tracker))))"
     return mra, last_idx
 end
 
@@ -231,6 +232,7 @@ function schedule_remainder!(tracker::Vector, source_space_idx::Int, dest_space_
         @assert span_len(source_span) == span_len(dest_span) "Source and dest spans are not the same size: $(span_len(source_span)) != $(span_len(dest_span))"
         push!(tracker, (source_span, dest_span))
     end
+    return !isempty(diff)
 end
 
 ### Remainder copy functions
