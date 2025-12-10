@@ -184,6 +184,18 @@ function Base.zero(x::DArray{T,N}) where {T,N}
     return _to_darray(a)
 end
 
+# Weird LinearAlgebra dispatch in `\` needs this
+function LinearAlgebra._zeros(::Type{T}, B::DVector, n::Integer) where T
+    m = max(size(B, 1), n)
+    sz = (m,)
+    return zeros(auto_blocks(sz), T, sz)
+end
+function LinearAlgebra._zeros(::Type{T}, B::DMatrix, n::Integer) where T
+    m = max(size(B, 1), n)
+    sz = (m, size(B, 2))
+    return zeros(auto_blocks(sz), T, sz)
+end
+
 function Base.view(A::AbstractArray{T,N}, p::Blocks{N}) where {T,N}
     d = ArrayDomain(Base.index_shape(A))
     dc = partition(p, d)
