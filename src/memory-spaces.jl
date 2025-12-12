@@ -451,10 +451,16 @@ end
 function aliasing(x::SubArray{T,N,A}) where {T,N,A<:Array}
     if isbitstype(T)
         S = CPURAMMemorySpace
-        return StridedAliasing{T,ndims(x),S}(RemotePtr{Cvoid}(pointer(parent(x))),
+        p = parent(x)
+        NA = ndims(p)
+        raw_inds = parentindices(x)
+        inds = ntuple(i->raw_inds[i] isa Integer ? (raw_inds[i]:raw_inds[i]) : UnitRange(raw_inds[i]), NA)
+        sz = ntuple(i->length(inds[i]), NA)
+        return StridedAliasing{T,NA,S}(RemotePtr{Cvoid}(pointer(p)),
                                              RemotePtr{Cvoid}(pointer(x)),
-                                             parentindices(x),
-                                             size(x), strides(x))
+                                             inds,
+                                             sz,
+                                             strides(p))
     else
         # FIXME: Also ContiguousAliasing of container
         #return IteratedAliasing(x)
