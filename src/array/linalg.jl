@@ -67,6 +67,18 @@ function LinearAlgebra.ishermitian(A::DArray{T,2}) where T
     return all(fetch, to_check)
 end
 
+function LinearAlgebra.LAPACK.chkfinite(A::DArray)
+    Ac = A.chunks
+    chunk_finite = [Ref(true) for _ in Ac]
+    chkfinite!(finite, A) = finite[] = LinearAlgebra.LAPACK.chkfinite(A)
+    Dagger.spawn_datadeps() do
+        for idx in eachindex(Ac)
+            Dagger.@spawn chkfinite!(Out(chunk_finite[idx]), In(Ac[idx]))
+        end
+    end
+    return all(getindex, chunk_finite)
+end
+
 DMatrix{T}(::LinearAlgebra.UniformScaling, m::Int, n::Int, IBlocks::Blocks) where T = DMatrix(Matrix{T}(I, m, n), IBlocks)
 
 DMatrix{T}(::LinearAlgebra.UniformScaling, size::Tuple, IBlocks::Blocks) where T = DMatrix(Matrix{T}(I, size), IBlocks)
