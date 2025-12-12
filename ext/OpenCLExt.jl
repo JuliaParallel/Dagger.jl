@@ -52,6 +52,11 @@ function Dagger.aliasing(x::CLArray{T}) where T
     return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
 end
 
+function Dagger.unsafe_free!(x::CLArray)
+    OpenCL.unsafe_free!(x)
+    return
+end
+
 Dagger.memory_spaces(proc::CLArrayDeviceProc) = Set([CLMemorySpace(proc.owner, proc.device)])
 Dagger.processors(space::CLMemorySpace) = Set([CLArrayDeviceProc(space.owner, space.device)])
 
