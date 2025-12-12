@@ -432,8 +432,10 @@ function _repartition_matvecmul(C, A, B, transA::Char)
         dimA_other = dimB = sz
         if !istransA
             partA = (partA[1], sz)
+            partB = (sz,)
         else
             partA = (sz, partA[2])
+            partB = (sz,)
         end
     end
     partC = (dimA,)
