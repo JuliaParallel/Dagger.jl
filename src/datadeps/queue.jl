@@ -215,6 +215,25 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             @maybelog ctx timespan_finish(ctx, :datadeps_copy_skip, (;id), (;thunk_id=0, from_space=origin_space, to_space=origin_space, arg_w, from_arg=arg, to_arg=arg))
         end
     end
+    write_num += 1
+
+    # Free all allocated buffers
+    obj_cache = unwrap(state.ainfo_backing_chunk)
+    for remote_space in keys(obj_cache.values)
+        for (ainfo, remote_arg) in obj_cache.values[remote_space]
+            if !(ainfo in obj_cache.originals)
+                # We allocated this buffer, we can free it
+                remote_proc = first(processors(remote_space))
+                free_scope = ExactScope(remote_proc)
+                free_syncdeps = Set{ThunkSyncdep}()
+                # FIXME: Send ainfo through aliasing! to calculate overlaps
+                #ainfo = AliasingWrapper(aliasing(arg, identity))
+                @assert haskey(state.ainfo_arg, ainfo) "Ainfo not found in state.ainfo_arg: $ainfo"
+                get_write_deps!(state, remote_space, ainfo, write_num, free_syncdeps)
+                fetch(Dagger.@spawn scope=free_scope syncdeps=free_syncdeps Dagger.unsafe_free!(remote_arg); raw=true)
+            end
+        end
+    end
 end
 struct DataDepsTaskDependency
     arg_w::ArgumentWrapper
