@@ -590,3 +590,11 @@ function will_alias(x_span::MemorySpan, y_span::MemorySpan)
     y_end = y_span.ptr + y_span.len - 1
     return x_span.ptr <= y_end && y_span.ptr <= x_end
 end
+
+### Unsafe Free
+
+unsafe_free!(x::Chunk) = remotecall_wait(root_worker_id(x), x) do x
+    unsafe_free!(unwrap(x))
+end
+unsafe_free!(x::DTask) = unsafe_free!(fetch(x; raw=true))
+unsafe_free!(x) = nothing # Do nothing by default

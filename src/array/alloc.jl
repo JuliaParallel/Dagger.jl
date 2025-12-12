@@ -206,3 +206,10 @@ function Base.view(A::AbstractArray{T,N}, p::Blocks{N}) where {T,N}
 end
 Base.view(A::AbstractArray, ::AutoBlocks) =
     view(A, auto_blocks(size(A)))
+
+function unsafe_free!(A::DArray)
+    @sync for chunk in A.chunks
+        scope = UnionScope(map(ExactScope, collect(processors(memory_space(chunk)))))
+        Dagger.@spawn scope=scope unsafe_free!(chunk)
+    end
+end

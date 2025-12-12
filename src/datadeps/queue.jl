@@ -215,6 +215,22 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             @maybelog ctx timespan_finish(ctx, :datadeps_copy_skip, (;id), (;thunk_id=0, from_space=origin_space, to_space=origin_space, arg_w, from_arg=arg, to_arg=arg))
         end
     end
+    write_num += 1
+
+    # Free all allocated buffers
+    for remote_space in keys(state.remote_args)
+        for (arg, remote_arg) in state.remote_args[remote_space]
+            if memory_space(arg) != remote_space
+                # We allocated this buffer, we can free it
+                remote_proc = first(processors(remote_space))
+                free_scope = ExactScope(remote_proc)
+                free_syncdeps = Set{ThunkSyncdep}()
+                ainfo = AliasingWrapper(aliasing(arg, identity))
+                get_write_deps!(state, remote_space, ainfo, write_num, free_syncdeps)
+                fetch(Dagger.@spawn scope=free_scope syncdeps=free_syncdeps Dagger.unsafe_free!(remote_arg); raw=true)
+            end
+        end
+    end
 end
 struct DataDepsTaskDependency
     arg_w::ArgumentWrapper
