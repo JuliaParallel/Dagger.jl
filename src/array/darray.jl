@@ -251,7 +251,9 @@ function Base.getindex(A::ColorArray{T,N}, idxs::NTuple{N,Int}) where {T,N}
     if !haskey(A.seen_values, idxs)
         chunk = A.A.chunks[sd_idx]
         if chunk isa Chunk || isready(chunk)
-            value = A.seen_values[idxs] = Some(getindex(A.A, idxs))
+            value = A.seen_values[idxs] = allowscalar() do
+                Some(getindex(A.A, idxs))
+            end
         else
             # Show a placeholder instead
             value = A.seen_values[idxs] = nothing
