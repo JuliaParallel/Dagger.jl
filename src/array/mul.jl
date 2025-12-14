@@ -6,20 +6,31 @@ function LinearAlgebra.generic_matmatmul!(
     B::DMatrix{T},
     _add::LinearAlgebra.MulAddMul,
 ) where {T}
+    return LinearAlgebra.generic_matmatmul!(C, transA, transB, A, B, _add.alpha, _add.beta)
+end
+function LinearAlgebra.generic_matmatmul!(
+    C::DMatrix{T},
+    transA::Char,
+    transB::Char,
+    A::DMatrix{T},
+    B::DMatrix{T},
+    alpha::Number,
+    beta::Number,
+) where {T}
     partC, partA, partB = _repartition_matmatmul(C, A, B, transA, transB)
 
     if all(in(('N', 'T', 'C')), (transA, transB))
         if (transA == 'T' || transA == 'C') && transB == 'N' && A === B
             return maybe_copy_buffered(C=>partC, A=>partA) do C, A
-                return syrk_dagger!(C, transA, A, _add)
+                return syrk_dagger!(C, transA, A, alpha, beta)
             end
         elseif transA == 'N' && (transB == 'T' || transB == 'C') && A === B
             return maybe_copy_buffered(C=>partC, A=>partA) do C, A
-                return syrk_dagger!(C, transA, A, _add)
+                return syrk_dagger!(C, transA, A, alpha, beta)
             end
         else
             return maybe_copy_buffered(C=>partC, A=>partA, B=>partB) do C, A, B
-                return gemm_dagger!(C, transA, transB, A, B, _add)
+                return gemm_dagger!(C, transA, transB, A, B, alpha, beta)
             end
         end
     end
@@ -27,7 +38,7 @@ function LinearAlgebra.generic_matmatmul!(
     # FIXME Add symm and hemm implementation (please note hemm will be inside symm as the case for syrk)
 
     return maybe_copy_buffered(C=>partC, A=>partA, B=>partB) do C, A, B
-        return gemm_dagger!(C, transA, transB, A, B, _add)
+        return gemm_dagger!(C, transA, transB, A, B, alpha, beta)
     end
 end
 function _repartition_matmatmul(C, A, B, transA::Char, transB::Char)
@@ -100,7 +111,8 @@ function gemm_dagger!(
     transB::Char,
     A::DMatrix{T},
     B::DMatrix{T},
-    _add::LinearAlgebra.MulAddMul,
+    _alpha,
+    _beta,
 ) where {T}
     Ac = A.chunks
     Bc = B.chunks
@@ -109,8 +121,8 @@ function gemm_dagger!(
     Bmt, Bnt = size(Bc)
     Cmt, Cnt = size(Cc)
 
-    alpha = T(_add.alpha)
-    beta = T(_add.beta)
+    alpha = T(_alpha)
+    beta = T(_beta)
 
     if Ant != Bmt
         throw(DimensionMismatch(lazy"A has number of blocks ($Amt,$Ant) but B has number of blocks ($Bmt,$Bnt)"))
@@ -204,7 +216,8 @@ function syrk_dagger!(
     C::DMatrix{T},
     trans::Char,
     A::DMatrix{T},
-    _add::LinearAlgebra.MulAddMul,
+    _alpha,
+    _beta,
 ) where {T}
 
     Ac = A.chunks
@@ -212,8 +225,8 @@ function syrk_dagger!(
     Amt, Ant = size(Ac)
     Cmt, Cnt = size(Cc)
 
-    alpha = T(_add.alpha)
-    beta = T(_add.beta)
+    alpha = T(_alpha)
+    beta = T(_beta)
 
     uplo = 'U'
     if Ant != Cmt
@@ -412,9 +425,19 @@ function LinearAlgebra.generic_matvecmul!(
     B::DVector{T},
     _add::LinearAlgebra.MulAddMul,
 ) where {T}
+    return LinearAlgebra.generic_matvecmul!(C, transA, A, B, _add.alpha, _add.beta)
+end
+function LinearAlgebra.generic_matvecmul!(
+    C::DVector{T},
+    transA::Char,
+    A::DMatrix{T},
+    B::DVector{T},
+    _alpha::Number,
+    _beta::Number,
+) where {T}
     partC, partA, partB = _repartition_matvecmul(C, A, B, transA)
     return maybe_copy_buffered(C=>partC, A=>partA, B=>partB) do C, A, B
-        return gemv_dagger!(C, transA, A, B, _add)
+        return gemv_dagger!(C, transA, A, B, _alpha, _beta)
     end
 end
 function _repartition_matvecmul(C, A, B, transA::Char)
@@ -446,7 +469,8 @@ function gemv_dagger!(
     transA::Char,
     A::DMatrix{T},
     B::DVector{T},
-    _add::LinearAlgebra.MulAddMul,
+    _alpha,
+    _beta,
 ) where {T}
     Ac = A.chunks
     Bc = B.chunks
@@ -455,8 +479,8 @@ function gemv_dagger!(
     Bmt = size(Bc)[1]
     Cmt = size(Cc)[1]
 
-    alpha = T(_add.alpha)
-    beta = T(_add.beta)
+    alpha = T(_alpha)
+    beta = T(_beta)
 
     if Ant != Bmt
         throw(DimensionMismatch(lazy"A has number of blocks ($Amt,$Ant) but B has number of blocks ($Bmt)"))
