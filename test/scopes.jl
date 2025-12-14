@@ -123,8 +123,8 @@
         us_es1_multi_ch = Dagger.tochunk(nothing, OSProc(), UnionScope(es1, es1))
         @test fetch(Dagger.@spawn exact_scope_test(us_es1_multi_ch)) == es1.processor
 
-        # No inner scopes
-        @test UnionScope() isa UnionScope
+        # No inner scopes (disallowed)
+        @test_throws ArgumentError UnionScope()
 
         # Same inner scope
         @test fetch(Dagger.@spawn exact_scope_test(us_es1_ch, us_es1_ch)) == es1.processor
@@ -165,7 +165,7 @@
         @test Dagger.scope(:any) isa AnyScope
         @test Dagger.scope(:default) == DefaultScope()
         @test_throws ArgumentError Dagger.scope(:blah)
-        @test Dagger.scope(()) == UnionScope()
+        @test_throws ArgumentError Dagger.scope(())
 
         @test Dagger.scope(worker=wid1) ==
               Dagger.scope(workers=[wid1])
