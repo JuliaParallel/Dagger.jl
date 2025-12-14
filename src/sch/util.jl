@@ -238,7 +238,7 @@ function set_failed!(state, origin, thunk=origin)
     @dagdebug thunk :finish "Setting as failed"
     filter!(x -> x !== thunk, state.ready)
     # N.B. If origin === thunk, we assume that the caller has already set the error
-    if origin !== thunk
+    if origin !== thunk && !has_result(state, thunk)
         origin_ex = load_result(state, origin)
         if origin_ex isa RemoteException
             origin_ex = origin_ex.captured
