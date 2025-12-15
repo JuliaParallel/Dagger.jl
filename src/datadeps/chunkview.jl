@@ -37,73 +37,9 @@ end
 memory_space(x::ChunkView) = memory_space(x.chunk)
 isremotehandle(x::ChunkView) = true
 
-# This definition is here because it's so similar to ChunkView
-function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, v::SubArray)
-    to_w = root_worker_id(to_proc)
-    p_chunk = aliased_object!(cache, parent(v)) do p
-        return remotecall_fetch(to_w, from_proc, to_proc, from_space, to_space, p) do from_proc, to_proc, from_space, to_space, p
-            return tochunk(move(from_proc, to_proc, p), to_proc)
-        end
-    end
-    inds = parentindices(v)
-    return remotecall_fetch(to_w, from_proc, to_proc, from_space, to_space, p_chunk, inds) do from_proc, to_proc, from_space, to_space, p_chunk, inds
-        p_new = move(from_proc, to_proc, p_chunk)
-        v_new = view(p_new, inds...)
-        return tochunk(v_new, to_proc)
-    end
-end
-# FIXME: Do this programmatically via recursive dispatch
-for wrapper in (UpperTriangular, LowerTriangular, UnitUpperTriangular, UnitLowerTriangular)
-    @eval function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, v::$(wrapper))
-        to_w = root_worker_id(to_proc)
-        p_chunk = aliased_object!(cache, parent(v)) do p
-            return remotecall_fetch(to_w, from_proc, to_proc, from_space, to_space, p) do from_proc, to_proc, from_space, to_space, p
-                return tochunk(move(from_proc, to_proc, p), to_proc)
-            end
-        end
-        return remotecall_fetch(to_w, from_proc, to_proc, from_space, to_space, p_chunk) do from_proc, to_proc, from_space, to_space, p_chunk
-            p_new = move(from_proc, to_proc, p_chunk)
-            v_new = $(wrapper)(p_new)
-            return tochunk(v_new, to_proc)
-        end
-    end
-end
-function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, v::Base.RefValue)
-    to_w = root_worker_id(to_proc)
-    return aliased_object!(cache, v[]) do p
-        return remotecall_fetch(to_w, from_proc, to_proc, from_space, to_space, p) do from_proc, to_proc, from_space, to_space, p
-            return tochunk(Ref(move(from_proc, to_proc, p)), to_proc)
-        end
-    end
-end
-#=
-function move_rewrap_recursive(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, x::T) where T
-    if isstructtype(T)
-        # Check all object fields (recursive)
-        for field in fieldnames(T)
-            value = getfield(x, field)
-            new_value = aliased_object!(cache, value) do value
-                return move_rewrap_recursive(cache, from_proc, to_proc, from_space, to_space, value)
-            end
-            setfield!(x, field, new_value)
-        end
-        return x
-    else
-        @warn "Cannot move-rewrap object of type $T"
-        return x
-    end
-end
-move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, x::String) = x # FIXME: Not necessarily true
-move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, x::Symbol) = x
-move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, x::Type) = x
-=#
 function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, slice::ChunkView)
     to_w = root_worker_id(to_proc)
-    p_chunk = aliased_object!(cache, slice.chunk) do p_chunk
-        return remotecall_fetch(to_w, from_proc, to_proc, from_space, to_space, p_chunk) do from_proc, to_proc, from_space, to_space, p_chunk
-            return tochunk(move(from_proc, to_proc, p_chunk), to_proc)
-        end
-    end
+    p_chunk = rewrap_aliased_object!(cache, from_proc, to_proc, from_space, to_space, slice.chunk)
     return remotecall_fetch(to_w, from_proc, to_proc, from_space, to_space, p_chunk, slice.slices) do from_proc, to_proc, from_space, to_space, p_chunk, inds
         p_new = move(from_proc, to_proc, p_chunk)
         v_new = view(p_new, inds...)

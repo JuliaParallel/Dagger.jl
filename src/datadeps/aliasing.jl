@@ -25,19 +25,19 @@ KEY CONCEPTS:
 1. ALIASING ANALYSIS:
    - Every mutable argument is analyzed for its memory access pattern
    - Memory spans are computed to determine which bytes in memory are accessed
-   - Objects that access overlapping memory spans are considered "aliasing"
+   - Arguments that access overlapping memory spans are considered "aliasing"
    - Examples: An array A and view(A, 2:3, 2:3) alias each other
 
 2. DATA LOCALITY TRACKING:
    - The system tracks where the "source of truth" for each piece of data lives
    - As tasks execute and modify data, the source of truth may move between workers
-   - Each aliasing region can have its own independent source of truth location
+   - Each argument can have its own independent source of truth location
 
 3. ALIASED OBJECT MANAGEMENT:
    - When copying arguments between workers, the system tracks "aliased objects"
    - This ensures that if both an array and its view need to be copied to a worker,
      only one copy of the underlying array is made, with the view pointing to it
-   - The aliased_object!() functions manage this sharing
+   - The aliased_object!() and move_rewrap() functions manage this sharing
 
 ALIASING INFO:
 --------------
@@ -96,11 +96,9 @@ MULTITHREADED BEHAVIOR (WORKS):
 - Task dependencies ensure correct ordering (e.g., Task 1 then Task 2)
 
 DISTRIBUTED BEHAVIOR (THE PROBLEM):
-- Tasks may be scheduled on different workers
 - Each argument must be copied to the destination worker
-- Without special handling, we would copy A to worker1 and vA to worker2
-- This creates two separate arrays, breaking the aliasing relationship
-- Updates to the view on worker2 don't affect the array on worker1
+- Without special handling, we would copy A and vA independently to another worker
+- This creates two separate arrays, breaking the aliasing relationship between A and vA
 
 THE SOLUTION - PARTIAL DATA MOVEMENT:
 -------------------------------------
@@ -695,6 +693,32 @@ function Base.setindex!(cache::AliasedObjectCache, value::Chunk, ainfo::Abstract
     cache_raw[ainfo] = value
     return
 end
+function aliased_object!(f, cache::AliasedObjectCache, x; ainfo=aliasing(x, identity))
+    if haskey(cache, ainfo)
+        return cache[ainfo]
+    else
+        y = f(x)
+        @assert y isa Chunk "Didn't get a Chunk from functor"
+        cache[ainfo] = y
+        return y
+    end
+end
+function remotecall_endpoint(f, from_proc, to_proc, from_space, to_space, data)
+    to_w = root_worker_id(to_proc)
+    if to_w == myid()
+        data_converted = f(move(from_proc, to_proc, data))
+        return tochunk(data_converted, to_proc)
+    end
+    return remotecall_fetch(to_w, from_proc, to_proc, to_space, data) do from_proc, to_proc, to_space, data
+        data_converted = f(move(from_proc, to_proc, data))
+        return tochunk(data_converted, to_proc)
+    end
+end
+function rewrap_aliased_object!(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, x)
+    return aliased_object!(cache, x) do x
+        return remotecall_endpoint(identity, from_proc, to_proc, from_space, to_space, x)
+    end
+end
 function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, data::Chunk)
     # Unwrap so that we hit the right dispatch
     wid = root_worker_id(data)
@@ -710,27 +734,58 @@ function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::P
         return remotecall_endpoint(identity, from_proc, to_proc, from_space, to_space, data)
     end
 end
-function remotecall_endpoint(f, from_proc, to_proc, from_space, to_space, data)
+function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, v::SubArray)
     to_w = root_worker_id(to_proc)
-    if to_w == myid()
-        data_converted = f(move(from_proc, to_proc, data))
-        return tochunk(data_converted, to_proc)
-    end
-    return remotecall_fetch(to_w, from_proc, to_proc, to_space, data) do from_proc, to_proc, to_space, data
-        data_converted = f(move(from_proc, to_proc, data))
-        return tochunk(data_converted, to_proc)
+    p_chunk = rewrap_aliased_object!(cache, from_proc, to_proc, from_space, to_space, parent(v))
+    inds = parentindices(v)
+    return remotecall_fetch(to_w, from_proc, to_proc, from_space, to_space, p_chunk, inds) do from_proc, to_proc, from_space, to_space, p_chunk, inds
+        p_new = move(from_proc, to_proc, p_chunk)
+        v_new = view(p_new, inds...)
+        return tochunk(v_new, to_proc)
     end
 end
-function aliased_object!(f, cache::AliasedObjectCache, x; ainfo=aliasing(x, identity))
-    if haskey(cache, ainfo)
-        return cache[ainfo]
+# FIXME: Do this programmatically via recursive dispatch
+for wrapper in (UpperTriangular, LowerTriangular, UnitUpperTriangular, UnitLowerTriangular)
+    @eval function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, v::$(wrapper))
+        to_w = root_worker_id(to_proc)
+        p_chunk = rewrap_aliased_object!(cache, from_proc, to_proc, from_space, to_space, parent(v))
+        return remotecall_fetch(to_w, from_proc, to_proc, from_space, to_space, p_chunk) do from_proc, to_proc, from_space, to_space, p_chunk
+            p_new = move(from_proc, to_proc, p_chunk)
+            v_new = $(wrapper)(p_new)
+            return tochunk(v_new, to_proc)
+        end
+    end
+end
+function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, v::Base.RefValue)
+    to_w = root_worker_id(to_proc)
+    p_chunk = rewrap_aliased_object!(cache, from_proc, to_proc, from_space, to_space, v[])
+    return remotecall_fetch(to_w, from_proc, to_proc, from_space, to_space, p_chunk) do from_proc, to_proc, from_space, to_space, p_chunk
+        p_new = move(from_proc, to_proc, p_chunk)
+        v_new = Ref(p_new)
+        return tochunk(v_new, to_proc)
+    end
+end
+#=
+function move_rewrap_recursive(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, x::T) where T
+    if isstructtype(T)
+        # Check all object fields (recursive)
+        for field in fieldnames(T)
+            value = getfield(x, field)
+            new_value = aliased_object!(cache, value) do value
+                return move_rewrap_recursive(cache, from_proc, to_proc, from_space, to_space, value)
+            end
+            setfield!(x, field, new_value)
+        end
+        return x
     else
-        y = f(x)
-        @assert y isa Chunk "Didn't get a Chunk from functor"
-        cache[ainfo] = y
-        return y
+        @warn "Cannot move-rewrap object of type $T"
+        return x
     end
 end
+move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, x::String) = x # FIXME: Not necessarily true
+move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, x::Symbol) = x
+move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, x::Type) = x
+=#
 
 struct DataDepsSchedulerState
     task_to_spec::Dict{DTask,DTaskSpec}
