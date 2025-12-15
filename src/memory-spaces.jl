@@ -322,8 +322,11 @@ struct CombinedAliasing <: AbstractAliasing
 end
 function memory_spans(ca::CombinedAliasing)
     # FIXME: Don't hardcode CPURAMMemorySpace
-    all_spans = MemorySpan{CPURAMMemorySpace}[]
-    for sub_a in ca.sub_ainfos
+    if length(ca.sub_ainfos) == 0
+        return MemorySpan{CPURAMMemorySpace}[]
+    end
+    all_spans = memory_spans(ca.sub_ainfos[1])
+    for sub_a in ca.sub_ainfos[2:end]
         append!(all_spans, memory_spans(sub_a))
     end
     return all_spans
