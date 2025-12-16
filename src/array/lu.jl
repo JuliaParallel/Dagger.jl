@@ -120,7 +120,9 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Boo
                     for i in k:mt
                         Dagger.@spawn swaprows_panel!(InOut(Ac[k, k]), InOut(Ac[i, k]), In(view(ipivc[k],p:p)), i, p, nb)
                     end
-                    Dagger.@spawn update_panel!(InOut(view(Ac[k,k],p+1:min(nb,m-(k-1)*nb),:)), In(Ac[k,k]), p)
+                    if length(p+1:min(nb,m-(k-1)*nb)) > 0
+                        Dagger.@spawn update_panel!(InOut(view(Ac[k,k],p+1:min(nb,m-(k-1)*nb),:)), In(Ac[k,k]), p)
+                    end
                     for i in k+1:mt
                         Dagger.@spawn update_panel!(InOut(Ac[i, k]), In(Ac[k,k]), p)
                     end
