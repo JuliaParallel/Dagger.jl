@@ -26,6 +26,7 @@ function _apply_dense_qr!(side::Char, trans::Char, Q::QRCompactWYQ{T, <:DMatrix{
     end
     pormqr!(side, trans, Q.factors, Q.T, Cd)
     copyto!(M, collect(Cd))
+    unsafe_free!(Cd)
     return M
 end
 LinearAlgebra.lmul!(B::QRCompactWYQ{T, <:DMatrix{T}}, A::StridedVecOrMat{T}) where {T} = _apply_dense_qr!('L', 'N', B, A)
@@ -241,6 +242,8 @@ function _pormqr_irregular!(side::Char, trans::Char, A::DMatrix{T}, Tm::DMatrix{
               side == 'R' ? C * Qop :
               throw(ArgumentError("side must be 'L' or 'R', got '$side'"))
     copyto!(C, updated)
+    unsafe_free!(updated)
+    unsafe_free!(Q)
     return C
 end
 

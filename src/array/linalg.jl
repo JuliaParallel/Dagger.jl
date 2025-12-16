@@ -156,6 +156,8 @@ function LinearAlgebra.inv(A::DMatrix{T}) where T
     dest = DMatrix{S0}(I, n, n, A.partitioning)
     F = factorize(convert(AbstractMatrix{S}, A))
     LinearAlgebra.ldiv!(F, dest)
+    unsafe_free!(F.factors)
+    unsafe_free!(F.ipiv)
     return dest
 end
 
@@ -200,7 +202,10 @@ function LinearAlgebra.ldiv!(Y::DArray, A::DMatrix, B::DArray)
 end
 
 function LinearAlgebra.ldiv!(A::DMatrix, B::DArray)
-    LinearAlgebra.ldiv!(LinearAlgebra.lu(A), B)
+    F = LinearAlgebra.lu(A)
+    LinearAlgebra.ldiv!(F, B)
+    unsafe_free!(F.factors)
+    unsafe_free!(F.ipiv)
 end
 
 function LinearAlgebra.ldiv!(C::DVecOrMat, A::Union{LowerTriangular{<:Any,<:DMatrix},UnitLowerTriangular{<:Any,<:DMatrix},UpperTriangular{<:Any,<:DMatrix},UnitUpperTriangular{<:Any,<:DMatrix}}, B::DVecOrMat)
