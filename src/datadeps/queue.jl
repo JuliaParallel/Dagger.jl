@@ -405,9 +405,10 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     end
 
     f = spec.fargs[1]
+    tid = task.uid
     # FIXME: May not be correct to move this under uniformity
     #f.value = move(default_processor(), our_proc, value(f))
-    @dagdebug nothing :spawn_datadeps "($(repr(value(f)))) Scheduling: $our_proc ($our_space)"
+    @dagdebug tid :spawn_datadeps "($(repr(value(f)))) Scheduling: $our_proc ($our_space)"
 
     # Copy raw task arguments for analysis
     # N.B. Used later for checking dependencies
@@ -434,13 +435,13 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
 
         # Is the data written previously or now?
         if !arg_ws.may_alias
-            @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$(idx-1)] Skipped copy-to (immutable)"
+            @dagdebug tid :spawn_datadeps "($(repr(value(f))))[$(idx-1)] Skipped copy-to (immutable)"
             return arg
         end
 
         # Is the data writeable?
         if !arg_ws.inplace_move
-            @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$(idx-1)] Skipped copy-to (non-writeable)"
+            @dagdebug tid :spawn_datadeps "($(repr(value(f))))[$(idx-1)] Skipped copy-to (non-writeable)"
             return arg
         end
 
@@ -457,7 +458,7 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
                 enqueue_copy_to!(state, our_space, arg_w, value(f), idx, our_scope, task, write_num)
             else
                 @assert remainder isa NoAliasing "Expected NoAliasing, got $(typeof(remainder))"
-                @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$(idx-1)][$dep_mod] Skipped copy-to (up-to-date): $our_space"
+                @dagdebug tid :spawn_datadeps "($(repr(value(f))))[$(idx-1)][$dep_mod] Skipped copy-to (up-to-date): $our_space"
             end
         end
         return arg_remote
@@ -501,16 +502,16 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
             ainfo = aliasing!(state, our_space, arg_w)
             dep_mod = arg_w.dep_mod
             if dep.writedep
-                @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$(idx-1)][$dep_mod] Syncing as writer"
+                @dagdebug tid :spawn_datadeps "($(repr(value(f))))[$(idx-1)][$dep_mod] Syncing as writer"
                 get_write_deps!(state, our_space, ainfo, write_num, syncdeps)
             else
-                @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$(idx-1)][$dep_mod] Syncing as reader"
+                @dagdebug tid :spawn_datadeps "($(repr(value(f))))[$(idx-1)][$dep_mod] Syncing as reader"
                 get_read_deps!(state, our_space, ainfo, write_num, syncdeps)
             end
         end
         return
     end
-    @dagdebug nothing :spawn_datadeps "($(repr(value(f)))) Task has $(length(syncdeps)) syncdeps"
+    @dagdebug tid :spawn_datadeps "($(repr(value(f)))) Task has $(length(syncdeps)) syncdeps"
 
     # Launch user's task
     new_fargs = map_or_ntuple(task_arg_ws) do idx
@@ -540,7 +541,7 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
             ainfo = aliasing!(state, our_space, arg_w)
             dep_mod = arg_w.dep_mod
             if dep.writedep
-                @dagdebug nothing :spawn_datadeps "($(repr(value(f))))[$(idx-1)][$dep_mod] Task set as writer"
+                @dagdebug tid :spawn_datadeps "($(repr(value(f))))[$(idx-1)][$dep_mod] Task set as writer"
                 add_writer!(state, arg_w, our_space, ainfo, task, write_num)
             else
                 add_reader!(state, arg_w, our_space, ainfo, task, write_num)

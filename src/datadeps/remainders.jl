@@ -260,7 +260,7 @@ function enqueue_remainder_copy_to!(state::DataDepsState, dest_space::MemorySpac
     # overwritten by more recent partial updates
     source_space = remainder_aliasing.space
 
-    @dagdebug nothing :spawn_datadeps "($(repr(f)))[$(idx-1)][$dep_mod] Enqueueing remainder copy-to for $(typeof(arg_w.arg))[$(arg_w.dep_mod)]: $source_space => $dest_space"
+    @dagdebug task.uid :spawn_datadeps "($(repr(f)))[$(idx-1)][$dep_mod] Enqueueing remainder copy-to for $(typeof(arg_w.arg))[$(arg_w.dep_mod)]: $source_space => $dest_space"
 
     # Get the source and destination arguments
     arg_dest = state.remote_args[dest_space][arg_w.arg]
@@ -275,7 +275,7 @@ function enqueue_remainder_copy_to!(state::DataDepsState, dest_space::MemorySpac
     empty!(remainder_aliasing.syncdeps) # We can't bring these to move!
     get_write_deps!(state, dest_space, target_ainfo, write_num, remainder_syncdeps)
 
-    @dagdebug nothing :spawn_datadeps "($(repr(f)))[$(idx-1)][$dep_mod] Remainder copy-to has $(length(remainder_syncdeps)) syncdeps"
+    @dagdebug task.uid :spawn_datadeps "($(repr(f)))[$(idx-1)][$dep_mod] Remainder copy-to has $(length(remainder_syncdeps)) syncdeps"
 
     # Launch the remainder copy task
     ctx = Sch.eager_context()
@@ -344,7 +344,7 @@ function enqueue_copy_to!(state::DataDepsState, dest_space::MemorySpace, arg_w::
     source_space = state.arg_owner[arg_w]
     target_ainfo = aliasing!(state, dest_space, arg_w)
 
-    @dagdebug nothing :spawn_datadeps "($(repr(f)))[$(idx-1)][$dep_mod] Enqueueing full copy-to for $(typeof(arg_w.arg))[$(arg_w.dep_mod)]: $source_space => $dest_space"
+    @dagdebug task.uid :spawn_datadeps "($(repr(f)))[$(idx-1)][$dep_mod] Enqueueing full copy-to for $(typeof(arg_w.arg))[$(arg_w.dep_mod)]: $source_space => $dest_space"
 
     # Get the source and destination arguments
     arg_dest = state.remote_args[dest_space][arg_w.arg]
@@ -357,7 +357,7 @@ function enqueue_copy_to!(state::DataDepsState, dest_space::MemorySpace, arg_w::
     get_read_deps!(state, source_space, source_ainfo, write_num, copy_syncdeps)
     get_write_deps!(state, dest_space, target_ainfo, write_num, copy_syncdeps)
 
-    @dagdebug nothing :spawn_datadeps "($(repr(f)))[$(idx-1)][$dep_mod] Full copy-to has $(length(copy_syncdeps)) syncdeps"
+    @dagdebug task.uid :spawn_datadeps "($(repr(f)))[$(idx-1)][$dep_mod] Full copy-to has $(length(copy_syncdeps)) syncdeps"
 
     # Launch the remainder copy task
     ctx = Sch.eager_context()
