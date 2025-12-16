@@ -18,6 +18,7 @@ function copy_buffered(f, args...)
     for (buf_arg, arg) in zip(buffered_args, real_args)
         copyto!(arg, buf_arg)
     end
+    foreach(unsafe_free!, buffered_args)
     return result
 end
 function allocate_copy_buffer(part::Blocks{N}, A::DArray{T,N}) where {T,N}
