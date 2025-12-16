@@ -183,10 +183,13 @@ end
 function LinearAlgebra.ldiv!(C::Cholesky{<:Any,<:DMatrix}, B::DVecOrMat)
     # L * y = B
     y = copyto!(similar(B), B)
-    LinearAlgebra.ldiv!(C.L, y)
+    L = C.L
+    LinearAlgebra.ldiv!(L, y)
+    unsafe_free!(parent(L))
 
     # L' * x = y
     copyto!(B, y)
+    unsafe_free!(y)
     LinearAlgebra.ldiv!(C.U, B)
 
     return B
