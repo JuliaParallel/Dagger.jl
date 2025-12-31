@@ -118,3 +118,23 @@ function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::P
         return tochunk(HaloArray(center_new, edges_new, corners_new, halo_width), to_proc)
     end
 end
+function find_object_holding_ptr(object::HaloArray, ptr::UInt64)
+    for i in 1:length(object.edges)
+        edge = object.edges[i]
+        span = LocalMemorySpan(pointer(edge), length(edge)*sizeof(eltype(edge)))
+        if span_start(span) <= ptr <= span_end(span)
+            return edge
+        end
+    end
+    for i in 1:length(object.corners)
+        corner = object.corners[i]
+        span = LocalMemorySpan(pointer(corner), length(corner)*sizeof(eltype(corner)))
+        if span_start(span) <= ptr <= span_end(span)
+            return corner
+        end
+    end
+    center = object.center
+    span = LocalMemorySpan(pointer(center), length(center)*sizeof(eltype(center)))
+    @assert span_start(span) <= ptr <= span_end(span) "Pointer $ptr not found in HaloArray"
+    return center
+end

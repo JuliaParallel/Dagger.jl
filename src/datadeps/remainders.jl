@@ -406,8 +406,6 @@ end
 function move!(dep_mod::RemainderAliasing{S}, to_space::MemorySpace, from_space::MemorySpace, to::Chunk, from::Chunk) where S
     # TODO: Support direct copy between GPU memory spaces
 
-    @assert sizeof(eltype(chunktype(from))) == sizeof(eltype(chunktype(to))) "Source and destination chunks have different element sizes: $(sizeof(eltype(chunktype(from)))) != $(sizeof(eltype(chunktype(to))))"
-
     # Copy the data from the source object
     copies = remotecall_fetch(root_worker_id(from_space), from_space, dep_mod, from) do from_space, dep_mod, from
         len = sum(span_tuple->span_len(span_tuple[1]), dep_mod.spans)
@@ -417,10 +415,7 @@ function move!(dep_mod::RemainderAliasing{S}, to_space::MemorySpace, from_space:
         with_context!(from_space)
         GC.@preserve copies begin
             for (from_span, _) in dep_mod.spans
-                elsize = sizeof(eltype(from_raw))
-                offset_n = UInt64((offset-1) / elsize) + UInt64(1)
-                n = UInt64(from_span.len / elsize)
-                read_remainder!(copies, offset_n, from_raw, from_span.ptr, n)
+                read_remainder!(copies, offset, from_raw, from_span.ptr, from_span.len)
                 offset += from_span.len
             end
         end
@@ -433,10 +428,7 @@ function move!(dep_mod::RemainderAliasing{S}, to_space::MemorySpace, from_space:
     to_raw = unwrap(to)
     GC.@preserve copies begin
         for (_, to_span) in dep_mod.spans
-            elsize = sizeof(eltype(to_raw))
-            offset_n = UInt64((offset-1) / elsize) + UInt64(1)
-            n = UInt64(to_span.len / elsize)
-            write_remainder!(copies, offset_n, to_raw, to_span.ptr, n)
+            write_remainder!(copies, offset, to_raw, to_span.ptr, to_span.len)
             offset += to_span.len
         end
         @assert offset == length(copies)+UInt64(1)
@@ -448,24 +440,79 @@ function move!(dep_mod::RemainderAliasing{S}, to_space::MemorySpace, from_space:
     return
 end
 
-function read_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, from::DenseArray, from_ptr::UInt64, n::UInt64)
+function read_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, from::Array, from_ptr::UInt64, len::UInt64)
     elsize = sizeof(eltype(from))
-    from_offset = UInt64((from_ptr - UInt64(pointer(from))) / elsize) + UInt64(1)
+    @assert len / elsize == round(UInt64, len / elsize) "Span length is not an integer multiple of the element size: $(len) / $(elsize) = $(len / elsize) (elsize: $elsize)"
+    n = UInt64(len / elsize)
+    from_offset_n = UInt64((from_ptr - UInt64(pointer(from))) / elsize) + UInt64(1)
+    from_vec = reshape(from, prod(size(from)))::DenseVector{eltype(from)}
+    # unsafe_wrap(Array, ...) doesn't like unaligned memory
+    unsafe_copyto!(Ptr{eltype(from)}(pointer(copies, copies_offset)), pointer(from_vec, from_offset_n), n)
+end
+function read_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, from::DenseArray, from_ptr::UInt64, len::UInt64)
+    elsize = sizeof(eltype(from))
+    @assert len / elsize == round(UInt64, len / elsize) "Span length is not an integer multiple of the element size: $(len) / $(elsize) = $(len / elsize) (elsize: $elsize)"
+    n = UInt64(len / elsize)
+    from_offset_n = UInt64((from_ptr - UInt64(pointer(from))) / elsize) + UInt64(1)
     from_vec = reshape(from, prod(size(from)))::DenseVector{eltype(from)}
     copies_typed = unsafe_wrap(Vector{eltype(from)}, Ptr{eltype(from)}(pointer(copies, copies_offset)), n)
-    copyto!(copies_typed, 1, from_vec, Int(from_offset), Int(n))
+    copyto!(copies_typed, 1, from_vec, Int(from_offset_n), Int(n))
 end
-function read_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, from::SubArray, from_ptr::UInt64, n::UInt64)
-    read_remainder!(copies, copies_offset, parent(from), from_ptr, n)
+function read_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, from, from_ptr::UInt64, n::UInt64)
+    real_from = find_object_holding_ptr(from, from_ptr)
+    return read_remainder!(copies, copies_offset, real_from, from_ptr, n)
 end
 
-function write_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, to::DenseArray, to_ptr::UInt64, n::UInt64)
+function write_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, to::Array, to_ptr::UInt64, len::UInt64)
     elsize = sizeof(eltype(to))
-    to_offset = UInt64((to_ptr - UInt64(pointer(to))) / elsize) + UInt64(1)
+    @assert len / elsize == round(UInt64, len / elsize) "Span length is not an integer multiple of the element size: $(len) / $(elsize) = $(len / elsize) (elsize: $elsize)"
+    n = UInt64(len / elsize)
+    to_offset_n = UInt64((to_ptr - UInt64(pointer(to))) / elsize) + UInt64(1)
+    to_vec = reshape(to, prod(size(to)))::DenseVector{eltype(to)}
+    # unsafe_wrap(Array, ...) doesn't like unaligned memory
+    unsafe_copyto!(pointer(to_vec, to_offset_n), Ptr{eltype(to)}(pointer(copies, copies_offset)), n)
+end
+function write_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, to::DenseArray, to_ptr::UInt64, len::UInt64)
+    elsize = sizeof(eltype(to))
+    @assert len / elsize == round(UInt64, len / elsize) "Span length is not an integer multiple of the element size: $(len) / $(elsize) = $(len / elsize) (elsize: $elsize)"
+    n = UInt64(len / elsize)
+    to_offset_n = UInt64((to_ptr - UInt64(pointer(to))) / elsize) + UInt64(1)
     to_vec = reshape(to, prod(size(to)))::DenseVector{eltype(to)}
     copies_typed = unsafe_wrap(Vector{eltype(to)}, Ptr{eltype(to)}(pointer(copies, copies_offset)), n)
-    copyto!(to_vec, Int(to_offset), copies_typed, 1, Int(n))
+    copyto!(to_vec, Int(to_offset_n), copies_typed, 1, Int(n))
 end
-function write_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, to::SubArray, to_ptr::UInt64, n::UInt64)
-    write_remainder!(copies, copies_offset, parent(to), to_ptr, n)
+function write_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, to, to_ptr::UInt64, n::UInt64)
+    real_to = find_object_holding_ptr(to, to_ptr)
+    return write_remainder!(copies, copies_offset, real_to, to_ptr, n)
+end
+
+# Remainder copies for common objects
+for wrapper in (UpperTriangular, LowerTriangular, UnitUpperTriangular, UnitLowerTriangular, SubArray)
+    @eval function read_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, from::$wrapper, from_ptr::UInt64, n::UInt64)
+        read_remainder!(copies, copies_offset, parent(from), from_ptr, n)
+    end
+    @eval function write_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, to::$wrapper, to_ptr::UInt64, n::UInt64)
+        write_remainder!(copies, copies_offset, parent(to), to_ptr, n)
+    end
+end
+# N.B. We don't handle pointer aliasing in remainder copies
+function read_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, from::Base.RefValue, from_ptr::UInt64, n::UInt64)
+    read_remainder!(copies, copies_offset, from[], from_ptr, n)
+end
+function write_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, to::Base.RefValue, to_ptr::UInt64, n::UInt64)
+    write_remainder!(copies, copies_offset, to[], to_ptr, n)
+end
+
+function find_object_holding_ptr(A::SparseMatrixCSC, ptr::UInt64)
+    span = LocalMemorySpan(pointer(A.nzval), length(A.nzval)*sizeof(eltype(A.nzval)))
+    if span_start(span) <= ptr <= span_end(span)
+        return A.nzval
+    end
+    span = LocalMemorySpan(pointer(A.colptr), length(A.colptr)*sizeof(eltype(A.colptr)))
+    if span_start(span) <= ptr <= span_end(span)
+        return A.colptr
+    end
+    span = LocalMemorySpan(pointer(A.rowval), length(A.rowval)*sizeof(eltype(A.rowval)))
+    @assert span_start(span) <= ptr <= span_end(span) "Pointer $ptr not found in SparseMatrixCSC"
+    return A.rowval
 end
