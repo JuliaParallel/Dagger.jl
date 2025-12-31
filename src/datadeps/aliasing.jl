@@ -241,6 +241,95 @@ struct HistoryEntry
     write_num::Int
 end
 
+struct AliasedObjectCacheStore
+    keys::Vector{AbstractAliasing}
+    derived::Dict{AbstractAliasing,AbstractAliasing}
+    stored::Dict{MemorySpace,Set{AbstractAliasing}}
+    values::Dict{MemorySpace,Dict{AbstractAliasing,Chunk}}
+end
+AliasedObjectCacheStore() =
+    AliasedObjectCacheStore(Vector{AbstractAliasing}(),
+                            Dict{AbstractAliasing,AbstractAliasing}(),
+                            Dict{MemorySpace,Set{AbstractAliasing}}(),
+                            Dict{MemorySpace,Dict{AbstractAliasing,Chunk}}())
+
+function is_stored(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::AbstractAliasing)
+    if !haskey(cache.stored, space)
+        return false
+    end
+    if !haskey(cache.derived, ainfo)
+        return false
+    end
+    key = cache.derived[ainfo]
+    return key in cache.stored[space]
+end
+function get_stored(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::AbstractAliasing)
+    @assert is_stored(cache, space, ainfo) "Cache does not have key $ainfo"
+    key = cache.derived[ainfo]
+    return cache.values[space][key]
+end
+function set_stored!(cache::AliasedObjectCacheStore, dest_space::MemorySpace, value::Chunk, ainfo::AbstractAliasing, orig_space::MemorySpace)
+    @assert !is_stored(cache, dest_space, ainfo) "Cache already has key $ainfo"
+    if !haskey(cache.derived, ainfo)
+        push!(cache.keys, ainfo)
+        cache.derived[ainfo] = ainfo
+        push!(get!(Set{AbstractAliasing}, cache.stored, orig_space), ainfo)
+        key = ainfo
+    else
+        key = cache.derived[ainfo]
+    end
+    value_ainfo = aliasing(value, identity)
+    cache.derived[value_ainfo] = key
+    push!(get!(Set{AbstractAliasing}, cache.stored, dest_space), key)
+    values_dict = get!(Dict{AbstractAliasing,Chunk}, cache.values, dest_space)
+    values_dict[key] = value
+    return
+end
+
+struct AliasedObjectCache
+    space::MemorySpace
+    chunk::Chunk
+end
+function is_stored(cache::AliasedObjectCache, ainfo::AbstractAliasing)
+    wid = root_worker_id(cache.chunk)
+    if wid != myid()
+        return remotecall_fetch(is_stored, wid, cache, ainfo)
+    end
+    cache_raw = unwrap(cache.chunk)::AliasedObjectCacheStore
+    return is_stored(cache_raw, cache.space, ainfo)
+end
+function get_stored(cache::AliasedObjectCache, ainfo::AbstractAliasing)
+    wid = root_worker_id(cache.chunk)
+    if wid != myid()
+        return remotecall_fetch(get_stored, wid, cache, ainfo)
+    end
+    cache_raw = unwrap(cache.chunk)::AliasedObjectCacheStore
+    return get_stored(cache_raw, cache.space, ainfo)
+end
+function set_stored!(cache::AliasedObjectCache, value::Chunk, ainfo::AbstractAliasing, orig_space::MemorySpace)
+    wid = root_worker_id(cache.chunk)
+    if wid != myid()
+        return remotecall_fetch(set_stored!, wid, cache, value, ainfo, orig_space)
+    end
+    cache_raw = unwrap(cache.chunk)::AliasedObjectCacheStore
+    set_stored!(cache_raw, cache.space, value, ainfo, orig_space)
+    return
+end
+function aliased_object!(f, cache::AliasedObjectCache, x; ainfo=aliasing(x, identity))
+    if is_stored(cache, ainfo)
+        return get_stored(cache, ainfo)
+    else
+        y = f(x)
+        @assert y isa Chunk "Didn't get a Chunk from functor"
+        @assert memory_space(y) == cache.space "Space mismatch! $(memory_space(y)) != $(cache.space)"
+        if memory_space(x) != cache.space
+            @assert ainfo != aliasing(y, identity) "Aliasing mismatch! $ainfo == $(aliasing(y, identity))"
+        end
+        set_stored!(cache, y, ainfo, memory_space(x))
+        return y
+    end
+end
+
 struct DataDepsState
     # The mapping of original raw argument to its Chunk
     raw_arg_to_chunk::IdDict{Any,Chunk}
@@ -280,7 +369,7 @@ struct DataDepsState
 
     # The mapping of, for a given memory space, the backing Chunks that an ainfo references
     # Used by slot generation to replace the backing Chunks during move
-    ainfo_backing_chunk::Dict{MemorySpace,Dict{AbstractAliasing,Chunk}}
+    ainfo_backing_chunk::Chunk{AliasedObjectCacheStore}
 
     # Cache of argument's supports_inplace_move query result
     supports_inplace_cache::IdDict{Any,Bool}
@@ -315,10 +404,10 @@ struct DataDepsState
         remote_arg_to_original = IdDict{Any,Any}()
         remote_arg_w = Dict{ArgumentWrapper,Dict{MemorySpace,ArgumentWrapper}}()
         ainfo_arg = Dict{AliasingWrapper,Set{ArgumentWrapper}}()
+        arg_history = Dict{ArgumentWrapper,Vector{HistoryEntry}}()
         arg_owner = Dict{ArgumentWrapper,MemorySpace}()
         arg_overlaps = Dict{ArgumentWrapper,Set{ArgumentWrapper}}()
-        ainfo_backing_chunk = Dict{MemorySpace,Dict{AbstractAliasing,Chunk}}()
-        arg_history = Dict{ArgumentWrapper,Vector{HistoryEntry}}()
+        ainfo_backing_chunk = tochunk(AliasedObjectCacheStore())
 
         supports_inplace_cache = IdDict{Any,Bool}()
         ainfo_cache = Dict{ArgumentWrapper,AliasingWrapper}()
@@ -329,7 +418,7 @@ struct DataDepsState
         ainfos_owner = Dict{AliasingWrapper,Union{Pair{DTask,Int},Nothing}}()
         ainfos_readers = Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}()
 
-        return new(arg_to_chunk, arg_origin, remote_args, remote_arg_to_original, remote_arg_w, ainfo_arg, arg_owner, arg_overlaps, ainfo_backing_chunk, arg_history,
+        return new(arg_to_chunk, arg_origin, remote_args, remote_arg_to_original, remote_arg_w, ainfo_arg, arg_history, arg_owner, arg_overlaps, ainfo_backing_chunk,
                    supports_inplace_cache, ainfo_cache, ainfos_lookup, ainfos_overlaps, ainfos_owner, ainfos_readers)
     end
 end
@@ -638,11 +727,7 @@ function generate_slot!(state::DataDepsState, dest_space, data)
     to_proc = first(processors(dest_space))
     from_proc = first(processors(orig_space))
     dest_space_args = get!(IdDict{Any,Any}, state.remote_args, dest_space)
-    if !haskey(state.ainfo_backing_chunk, dest_space)
-        state.ainfo_backing_chunk[dest_space] = Dict{AbstractAliasing,Chunk}()
-    end
-    # FIXME: tochunk the cache just once per space
-    aliased_object_cache = AliasedObjectCache(tochunk(state.ainfo_backing_chunk[dest_space]))
+    aliased_object_cache = AliasedObjectCache(dest_space, state.ainfo_backing_chunk)
     ctx = Sch.eager_context()
     id = rand(Int)
     @maybelog ctx timespan_start(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data))
@@ -663,45 +748,6 @@ function get_or_generate_slot!(state, dest_space, data)
         return generate_slot!(state, dest_space, data)
     end
     return state.remote_args[dest_space][data]
-end
-struct AliasedObjectCache
-    chunk::Chunk
-end
-@warn "Document these public methods" maxlog=1
-function Base.haskey(cache::AliasedObjectCache, ainfo::AbstractAliasing)
-    wid = root_worker_id(cache.chunk)
-    if wid != myid()
-        return remotecall_fetch(haskey, wid, cache, ainfo)
-    end
-    cache_raw = unwrap(cache.chunk)::Dict{AbstractAliasing,Chunk}
-    return haskey(cache_raw, ainfo)
-end
-function Base.getindex(cache::AliasedObjectCache, ainfo::AbstractAliasing)
-    wid = root_worker_id(cache.chunk)
-    if wid != myid()
-        return remotecall_fetch(getindex, wid, cache, ainfo)
-    end
-    cache_raw = unwrap(cache.chunk)::Dict{AbstractAliasing,Chunk}
-    return getindex(cache_raw, ainfo)
-end
-function Base.setindex!(cache::AliasedObjectCache, value::Chunk, ainfo::AbstractAliasing)
-    wid = root_worker_id(cache.chunk)
-    if wid != myid()
-        return remotecall_fetch(setindex!, wid, cache, value, ainfo)
-    end
-    cache_raw = unwrap(cache.chunk)::Dict{AbstractAliasing,Chunk}
-    cache_raw[ainfo] = value
-    return
-end
-function aliased_object!(f, cache::AliasedObjectCache, x; ainfo=aliasing(x, identity))
-    if haskey(cache, ainfo)
-        return cache[ainfo]
-    else
-        y = f(x)
-        @assert y isa Chunk "Didn't get a Chunk from functor"
-        cache[ainfo] = y
-        return y
-    end
 end
 function remotecall_endpoint(f, from_proc, to_proc, from_space, to_space, data)
     to_w = root_worker_id(to_proc)
@@ -765,7 +811,7 @@ function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::P
         return tochunk(v_new, to_proc)
     end
 end
-#=
+#= FIXME: Make this work so we can automatically move-rewrap recursive objects
 function move_rewrap_recursive(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, x::T) where T
     if isstructtype(T)
         # Check all object fields (recursive)
