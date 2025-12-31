@@ -86,13 +86,14 @@ function compute_remainder_for_arg!(state::DataDepsState,
                                     target_space::MemorySpace,
                                     arg_w::ArgumentWrapper,
                                     write_num::Int; compute_syncdeps::Bool=true)
-    @label restart
-
-    # Determine all memory spaces of the history
     spaces_set = Set{MemorySpace}()
     push!(spaces_set, target_space)
     owner_space = state.arg_owner[arg_w]
     push!(spaces_set, owner_space)
+
+    @label restart
+
+    # Determine all memory spaces of the history
     for entry in state.arg_history[arg_w]
         push!(spaces_set, entry.space)
     end
