@@ -105,6 +105,7 @@ struct ManyPair{N} <: Unsigned
     pairs::NTuple{N,UInt}
 end
 Base.promote_rule(::Type{ManyPair}, ::Type{T}) where {T<:Integer} = ManyPair
+Base.convert(::Type{ManyPair{N}}, pair::ManyPair{N}) where N = pair
 Base.convert(::Type{ManyPair{N}}, x::T) where {T<:Integer,N} = ManyPair(ntuple(i -> x, N))
 Base.convert(::Type{ManyPair}, x::ManyPair) = x
 Base.:+(x::ManyPair{N}, y::ManyPair{N}) where N = ManyPair(ntuple(i -> x.pairs[i] + y.pairs[i], N))
