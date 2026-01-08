@@ -1080,3 +1080,96 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
 end
 const DATADEPS_SCHEDULER = ScopedValue{Union{Symbol,Nothing}}(nothing)
 const DATADEPS_LAUNCH_WAIT = ScopedValue{Union{Bool,Nothing}}(nothing)
+
+# Simpler version, focusing on the core logic from the prompt
+# This is the version I will proceed with.
+
+"""
+    move!(to::T, from::T) where T
+
+Recursively moves data from `from` object to `to` object, assuming they are of the same type `T`.
+
+Logic per field:
+- If the field is a "simple" type (primitive, Symbol, String, Type, Function), use `getfield` and `setfield!`.
+  (Requires `to` to be a mutable struct).
+- If the field is an `AbstractArray`, use `copyto!`.
+- If the surrounding struct `T` is immutable, the field is immutable, and `Base.datatype_pointerfree(typeof(field))` is true, then skip this field.
+- Otherwise (typically other struct types), recurse into the field: `move!(getfield(to, fieldname), getfield(from, fieldname))`.
+"""
+function move!(to::T, from::T) where T
+    # If T itself is not a struct type, this field-by-field logic doesn't apply.
+    !isstructtype(T) && return to
+
+    for i in 1:fieldcount(T)
+        fname = fieldname(T, i)
+        val_from = getfield(from, fname)
+
+        # Skip condition from the problem description
+        if !ismutable(T) && !ismutable(val_from) && Base.datatype_pointerfree(typeof(val_from))
+            continue
+        end
+
+        # Check for type mismatch if `to` field is defined, to prevent errors with setfield! or copyto!
+        if isdefined(to, fname) && typeof(getfield(to, fname)) != typeof(val_from)
+            @warn "move!: Type mismatch for field '$fname' between `to` ($(typeof(getfield(to,fname)))) and `from` ($(typeof(val_from))) objects of type $T. Skipping field."
+            continue
+        end
+
+        if val_from isa AbstractArray
+            val_to = getfield(to, fname)
+            if val_to isa AbstractArray
+                if size(val_to) == size(val_from)
+                    try
+                        copyto!(val_to, val_from)
+                    catch e
+                        @warn "move!: copyto! failed for array field '$fname' of type $(typeof(val_from)): $e. Skipping field."
+                    end
+                else
+                    @warn "move!: Array sizes mismatch for field '$fname'. `to` size: $(size(val_to)), `from` size: $(size(val_from)). Skipping field."
+                end
+            else
+                @warn "move!: Field '$fname' in `from` is an AbstractArray, but in `to` it is $(typeof(val_to)). Skipping field."
+            end
+        elseif isprimitivetype(typeof(val_from)) ||
+               typeof(val_from) <: Symbol ||
+               typeof(val_from) <: String ||
+               typeof(val_from) <: Type ||
+               typeof(val_from) <: Function
+            if ismutable(T)
+                try
+                    setfield!(to, fname, val_from)
+                catch e
+                    @warn "move!: setfield! failed for simple field '$fname' of type $(typeof(val_from)) on mutable $T: $e. Skipping field."
+                end
+            end
+            # If T is immutable, simple fields cannot be changed (and should have been skipped if also immutable & pointerfree)
+        elseif isstructtype(typeof(val_from)) && !ismutable(val_from) # Field is an immutable struct
+            if ismutable(T) # Parent is mutable
+                try
+                    setfield!(to, fname, val_from) # Replace the immutable struct instance
+                catch e
+                    @warn "move!: setfield! failed for immutable struct field '$fname' of type $(typeof(val_from)) on mutable $T: $e. Skipping field."
+                end
+            else # Parent T is also immutable
+                 # We can't setfield!. Recurse only if val_from is not pointer-free (might contain mutable fields).
+                 # If val_from is pointer-free, it should have been skipped by the main skip condition.
+                 # If it wasn't skipped (i.e., it's not pointer-free), then recurse.
+                if !Base.datatype_pointerfree(typeof(val_from))
+                    val_to = getfield(to, fname) # This is an immutable struct
+                    move!(val_to, val_from) # Recurse to handle its potentially mutable contents
+                end
+            end
+        else # Field is a mutable struct or other complex type not covered above
+            val_to = getfield(to, fname)
+            # Ensure `val_to` is actually of the same type before recursing.
+            # This was partially checked by the `isdefined` and type check at the start of the loop for `fname`.
+            if typeof(val_to) == typeof(val_from)
+                 move!(val_to, val_from) # Recurse
+            else
+                # This case should ideally be caught by the initial type check for the field.
+                @warn "move!: Recursive call for field '$fname' skipped due to type mismatch between to's field and from's field ($(typeof(val_to)) vs $(typeof(val_from))) for parent $T."
+            end
+        end
+    end
+    return to
+end
