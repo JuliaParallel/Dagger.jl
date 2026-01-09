@@ -79,6 +79,9 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
     if !static
         throw(ArgumentError("Dynamic scheduling is no longer available"))
     end
+    if !aliasing
+        throw(ArgumentError("Aliasing analysis is no longer optional"))
+    end
     wait_all(; check_errors=true) do
         scheduler = something(scheduler, DATADEPS_SCHEDULER[], :roundrobin)::Symbol
         launch_wait = something(launch_wait, DATADEPS_LAUNCH_WAIT[], false)::Bool
