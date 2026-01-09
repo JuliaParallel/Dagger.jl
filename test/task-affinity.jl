@@ -135,7 +135,7 @@
     @testset "Chunk function, scope, compute_scope and result_scope" begin 
         @everywhere g(x, y) = x * 2 + y * 3
 
-        n = cld(numscopes, 3)
+        n = fld(numscopes, 3)
 
         shuffle!(availscopes)
         scope_a = availscopes[1:n]

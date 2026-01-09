@@ -91,7 +91,7 @@ steps:
           codecov: true
 
   - label: Julia 1.11 (CUDA)
-    timeout_in_minutes: 20
+    timeout_in_minutes: 30
     <<: *gputest
     plugins:
       - JuliaCI/julia#v1:

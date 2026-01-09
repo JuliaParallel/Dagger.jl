@@ -174,6 +174,9 @@ function tochunk(x::Chunk, proc=nothing, scope=nothing; rewrap=false, kwargs...)
 end
 tochunk(x::Thunk, proc=nothing, scope=nothing; kwargs...) = x
 
+root_worker_id(chunk::Chunk) = root_worker_id(chunk.handle)
+root_worker_id(dref::DRef) = dref.owner # FIXME: Migration
+
 function savechunk(data, dir, f)
     sz = open(joinpath(dir, f), "w") do io
         serialize(io, MemPool.MMWrap(data))

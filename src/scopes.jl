@@ -40,6 +40,9 @@ struct UnionScope <: AbstractScope
                 push!(scope_set, scope)
             end
         end
+        if isempty(scope_set)
+            throw(ArgumentError("Cannot construct UnionScope with no inner scopes"))
+        end
         return new((collect(scope_set)...,))
     end
 end

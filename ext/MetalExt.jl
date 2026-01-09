@@ -43,6 +43,13 @@ function Dagger.memory_space(x::MtlArray)
     return MetalVRAMMemorySpace(myid(), device_id)
 end
 _device_id(dev::MtlDevice) = findfirst(other_dev->other_dev === dev, Metal.devices())
+function Dagger.aliasing(x::MtlArray{T}) where T
+    space = Dagger.memory_space(x)
+    S = typeof(space)
+    gpu_ptr = pointer(x)
+    rptr = Dagger.RemotePtr{Cvoid}(UInt64(gpu_ptr), space)
+    return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
+end
 
 Dagger.memory_spaces(proc::MtlArrayDeviceProc) = Set([MetalVRAMMemorySpace(proc.owner, proc.device_id)])
 Dagger.processors(space::MetalVRAMMemorySpace) = Set([MtlArrayDeviceProc(space.owner, space.device_id)])
@@ -66,6 +73,8 @@ end
 function with_context!(space::MetalVRAMMemorySpace)
     @assert Dagger.root_worker_id(space) == myid()
 end
+Dagger.with_context!(proc::MtlArrayDeviceProc) = with_context!(proc)
+Dagger.with_context!(space::MetalVRAMMemorySpace) = with_context!(space)
 function with_context(f, x)
     with_context!(x)
     return f()

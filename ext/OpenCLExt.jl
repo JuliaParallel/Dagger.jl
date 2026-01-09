@@ -44,6 +44,13 @@ function Dagger.memory_space(x::CLArray)
     idx = findfirst(==(queue), QUEUES)
     return CLMemorySpace(myid(), idx)
 end
+function Dagger.aliasing(x::CLArray{T}) where T
+    space = Dagger.memory_space(x)
+    S = typeof(space)
+    gpu_ptr = pointer(x)
+    rptr = Dagger.RemotePtr{Cvoid}(UInt64(gpu_ptr), space)
+    return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
+end
 
 Dagger.memory_spaces(proc::CLArrayDeviceProc) = Set([CLMemorySpace(proc.owner, proc.device)])
 Dagger.processors(space::CLMemorySpace) = Set([CLArrayDeviceProc(space.owner, space.device)])
@@ -71,6 +78,8 @@ function with_context!(space::CLMemorySpace)
     @assert Dagger.root_worker_id(space) == myid()
     with_context!(space.device)
 end
+Dagger.with_context!(proc::CLArrayDeviceProc) = with_context!(proc)
+Dagger.with_context!(space::CLMemorySpace) = with_context!(space)
 function with_context(f, x)
     old_ctx = cl.context()
     old_queue = cl.queue()

@@ -100,3 +100,41 @@ Adapt.adapt_structure(to, H::Dagger.HaloArray) =
               Adapt.adapt.(Ref(to), H.edges),
               Adapt.adapt.(Ref(to), H.corners),
               H.halo_width)
+
+function aliasing(A::HaloArray)
+    return CombinedAliasing([aliasing(A.center), map(aliasing, A.edges)..., map(aliasing, A.corners)...])
+end
+memory_space(A::HaloArray) = memory_space(A.center)
+function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, A::HaloArray)
+    center_chunk = rewrap_aliased_object!(cache, from_proc, to_proc, from_space, to_space, A.center)
+    edge_chunks = ntuple(i->rewrap_aliased_object!(cache, from_proc, to_proc, from_space, to_space, A.edges[i]), length(A.edges))
+    corner_chunks = ntuple(i->rewrap_aliased_object!(cache, from_proc, to_proc, from_space, to_space, A.corners[i]), length(A.corners))
+    halo_width = A.halo_width
+    to_w = root_worker_id(to_proc)
+    return remotecall_fetch(to_w, from_proc, to_proc, from_space, to_space, center_chunk, edge_chunks, corner_chunks, halo_width) do from_proc, to_proc, from_space, to_space, center_chunk, edge_chunks, corner_chunks, halo_width
+        center_new = move(from_proc, to_proc, center_chunk)
+        edges_new = ntuple(i->move(from_proc, to_proc, edge_chunks[i]), length(edge_chunks))
+        corners_new = ntuple(i->move(from_proc, to_proc, corner_chunks[i]), length(corner_chunks))
+        return tochunk(HaloArray(center_new, edges_new, corners_new, halo_width), to_proc)
+    end
+end
+function find_object_holding_ptr(object::HaloArray, ptr::UInt64)
+    for i in 1:length(object.edges)
+        edge = object.edges[i]
+        span = LocalMemorySpan(pointer(edge), length(edge)*sizeof(eltype(edge)))
+        if span_start(span) <= ptr <= span_end(span)
+            return edge
+        end
+    end
+    for i in 1:length(object.corners)
+        corner = object.corners[i]
+        span = LocalMemorySpan(pointer(corner), length(corner)*sizeof(eltype(corner)))
+        if span_start(span) <= ptr <= span_end(span)
+            return corner
+        end
+    end
+    center = object.center
+    span = LocalMemorySpan(pointer(center), length(center)*sizeof(eltype(center)))
+    @assert span_start(span) <= ptr <= span_end(span) "Pointer $ptr not found in HaloArray"
+    return center
+end

@@ -73,6 +73,9 @@ include("utils/fetch.jl")
 include("utils/chunks.jl")
 include("utils/logging.jl")
 include("submission.jl")
+abstract type MemorySpace end
+include("utils/memory-span.jl")
+include("utils/interval_tree.jl")
 include("memory-spaces.jl")
 
 # Task scheduling
@@ -83,7 +86,12 @@ include("utils/caching.jl")
 include("sch/Sch.jl"); using .Sch
 
 # Data dependency task queue
-include("datadeps.jl")
+include("datadeps/aliasing.jl")
+include("datadeps/chunkview.jl")
+include("datadeps/remainders.jl")
+include("datadeps/queue.jl")
+
+# Stencils
 include("utils/haloarray.jl")
 include("stencil.jl")
 

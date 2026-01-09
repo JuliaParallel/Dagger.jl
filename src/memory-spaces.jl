@@ -1,8 +1,7 @@
-abstract type MemorySpace end
-
 struct CPURAMMemorySpace <: MemorySpace
     owner::Int
 end
+CPURAMMemorySpace() = CPURAMMemorySpace(myid())
 root_worker_id(space::CPURAMMemorySpace) = space.owner
 
 memory_space(x) = CPURAMMemorySpace(myid())
@@ -30,7 +29,7 @@ processors(space::CPURAMMemorySpace) =
 ### In-place Data Movement
 
 function unwrap(x::Chunk)
-    @assert root_worker_id(x.processor) == myid()
+    @assert x.handle.owner == myid()
     MemPool.poolget(x.handle)
 end
 move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::T, from::F) where {T,F} =
@@ -89,44 +88,20 @@ function type_may_alias(::Type{T}) where T
     return false
 end
 
-may_alias(::MemorySpace, ::MemorySpace) = true
+may_alias(::MemorySpace, ::MemorySpace) = false
+may_alias(space1::M, space2::M) where M<:MemorySpace = space1 == space2
 may_alias(space1::CPURAMMemorySpace, space2::CPURAMMemorySpace) = space1.owner == space2.owner
-
-struct RemotePtr{T,S<:MemorySpace} <: Ref{T}
-    addr::UInt
-    space::S
-end
-RemotePtr{T}(addr::UInt, space::S) where {T,S} = RemotePtr{T,S}(addr, space)
-RemotePtr{T}(ptr::Ptr{V}, space::S) where {T,V,S} = RemotePtr{T,S}(UInt(ptr), space)
-RemotePtr{T}(ptr::Ptr{V}) where {T,V} = RemotePtr{T}(UInt(ptr), CPURAMMemorySpace(myid()))
-Base.convert(::Type{RemotePtr}, x::Ptr{T}) where T =
-    RemotePtr(UInt(x), CPURAMMemorySpace(myid()))
-Base.convert(::Type{<:RemotePtr{V}}, x::Ptr{T}) where {V,T} =
-    RemotePtr{V}(UInt(x), CPURAMMemorySpace(myid()))
-Base.:+(ptr::RemotePtr{T}, offset::Integer) where T = RemotePtr{T}(ptr.addr + offset, ptr.space)
-Base.:-(ptr::RemotePtr{T}, offset::Integer) where T = RemotePtr{T}(ptr.addr - offset, ptr.space)
-function Base.isless(ptr1::RemotePtr, ptr2::RemotePtr)
-    @assert ptr1.space == ptr2.space
-    return ptr1.addr < ptr2.addr
-end
-
-struct MemorySpan{S}
-    ptr::RemotePtr{Cvoid,S}
-    len::UInt
-end
-MemorySpan(ptr::RemotePtr{Cvoid,S}, len::Integer) where S =
-    MemorySpan{S}(ptr, UInt(len))
 
 abstract type AbstractAliasing end
 memory_spans(::T) where T<:AbstractAliasing = throw(ArgumentError("Must define `memory_spans` for `$T`"))
 memory_spans(x) = memory_spans(aliasing(x))
 memory_spans(x, T) = memory_spans(aliasing(x, T))
 
+### Type-generic aliasing info wrapper
 
-struct AliasingWrapper <: AbstractAliasing
+mutable struct AliasingWrapper <: AbstractAliasing
     inner::AbstractAliasing
     hash::UInt64
-
     AliasingWrapper(inner::AbstractAliasing) = new(inner, hash(inner))
 end
 memory_spans(x::AliasingWrapper) = memory_spans(x.inner)
@@ -135,8 +110,204 @@ equivalent_structure(x::AliasingWrapper, y::AliasingWrapper) =
 Base.hash(x::AliasingWrapper, h::UInt64) = hash(x.hash, h)
 Base.isequal(x::AliasingWrapper, y::AliasingWrapper) = x.hash == y.hash
 Base.:(==)(x::AliasingWrapper, y::AliasingWrapper) = x.hash == y.hash
-will_alias(x::AliasingWrapper, y::AliasingWrapper) =
-    will_alias(x.inner, y.inner)
+will_alias(x::AliasingWrapper, y::AliasingWrapper) = will_alias(x.inner, y.inner)
+
+### Small dictionary type
+
+struct SmallDict{K,V} <: AbstractDict{K,V}
+    keys::Vector{K}
+    vals::Vector{V}
+end
+SmallDict{K,V}() where {K,V} = SmallDict{K,V}(Vector{K}(), Vector{V}())
+function Base.getindex(d::SmallDict{K,V}, key) where {K,V}
+    key_idx = findfirst(==(convert(K, key)), d.keys)
+    if key_idx === nothing
+        throw(KeyError(key))
+    end
+    return @inbounds d.vals[key_idx]
+end
+function Base.setindex!(d::SmallDict{K,V}, val, key) where {K,V}
+    key_conv = convert(K, key)
+    key_idx = findfirst(==(key_conv), d.keys)
+    if key_idx === nothing
+        push!(d.keys, key_conv)
+        push!(d.vals, convert(V, val))
+    else
+        d.vals[key_idx] = convert(V, val)
+    end
+    return val
+end
+Base.haskey(d::SmallDict{K,V}, key) where {K,V} = in(convert(K, key), d.keys)
+Base.keys(d::SmallDict) = d.keys
+Base.length(d::SmallDict) = length(d.keys)
+Base.iterate(d::SmallDict) = iterate(d, 1)
+Base.iterate(d::SmallDict, state) = state > length(d.keys) ? nothing : (d.keys[state] => d.vals[state], state+1)
+
+### Type-stable lookup structure for AliasingWrappers
+
+struct AliasingLookup
+    # The set of memory spaces that are being tracked
+    spaces::Vector{MemorySpace}
+    # The set of AliasingWrappers that are being tracked
+    # One entry for each AliasingWrapper
+    ainfos::Vector{AliasingWrapper}
+    # The memory spaces for each AliasingWrapper
+    # One entry for each AliasingWrapper
+    ainfos_spaces::Vector{Vector{Int}}
+    # The spans for each AliasingWrapper in each memory space
+    # One entry for each AliasingWrapper
+    spans::Vector{SmallDict{Int,Vector{LocalMemorySpan}}}
+    # The set of AliasingWrappers that only exist in a single memory space
+    # One entry for each AliasingWrapper
+    ainfos_only_space::Vector{Int}
+    # The bounding span for each AliasingWrapper in each memory space
+    # One entry for each AliasingWrapper
+    bounding_spans::Vector{SmallDict{Int,LocalMemorySpan}}
+    # The interval tree of the bounding spans for each AliasingWrapper
+    # One entry for each MemorySpace
+    bounding_spans_tree::Vector{IntervalTree{LocatorMemorySpan{Int},UInt64}}
+
+    AliasingLookup() = new(MemorySpace[],
+                           AliasingWrapper[],
+                           Vector{Int}[],
+                           SmallDict{Int,Vector{LocalMemorySpan}}[],
+                           Int[],
+                           SmallDict{Int,LocalMemorySpan}[],
+                           IntervalTree{LocatorMemorySpan{Int},UInt64}[])
+end
+function Base.push!(lookup::AliasingLookup, ainfo::AliasingWrapper)
+    # Update the set of memory spaces and spans,
+    # and find the bounding spans for this AliasingWrapper
+    spaces_set = Set{MemorySpace}(lookup.spaces)
+    self_spaces_set = Set{Int}()
+    spans = SmallDict{Int,Vector{LocalMemorySpan}}()
+    for span in memory_spans(ainfo)
+        space = span.ptr.space
+        if !in(space, spaces_set)
+            push!(spaces_set, space)
+            push!(lookup.spaces, space)
+            push!(lookup.bounding_spans_tree, IntervalTree{LocatorMemorySpan{Int}}())
+        end
+        space_idx = findfirst(==(space), lookup.spaces)
+        push!(self_spaces_set, space_idx)
+        spans_in_space = get!(Vector{LocalMemorySpan}, spans, space_idx)
+        push!(spans_in_space, LocalMemorySpan(span))
+    end
+    push!(lookup.ainfos_spaces, collect(self_spaces_set))
+    push!(lookup.spans, spans)
+
+    # Update the set of AliasingWrappers
+    push!(lookup.ainfos, ainfo)
+    ainfo_idx = length(lookup.ainfos)
+
+    # Check if the AliasingWrapper only exists in a single memory space
+    if length(self_spaces_set) == 1
+        space_idx = only(self_spaces_set)
+        push!(lookup.ainfos_only_space, space_idx)
+    else
+        push!(lookup.ainfos_only_space, 0)
+    end
+
+    # Add the bounding spans for this AliasingWrapper
+    bounding_spans = SmallDict{Int,LocalMemorySpan}()
+    for space_idx in keys(spans)
+        space_spans = spans[space_idx]
+        bound_start = minimum(span_start, space_spans)
+        bound_end = maximum(span_end, space_spans)
+        bounding_span = LocalMemorySpan(bound_start, bound_end - bound_start)
+        bounding_spans[space_idx] = bounding_span
+        insert!(lookup.bounding_spans_tree[space_idx], LocatorMemorySpan(bounding_span, ainfo_idx))
+    end
+    push!(lookup.bounding_spans, bounding_spans)
+
+    return ainfo_idx
+end
+struct AliasingLookupFinder
+    lookup::AliasingLookup
+    ainfo::AliasingWrapper
+    ainfo_idx::Int
+    spaces_idx::Vector{Int}
+    to_consider::Vector{Int}
+end
+Base.eltype(::AliasingLookupFinder) = AliasingWrapper
+Base.IteratorSize(::AliasingLookupFinder) = Base.SizeUnknown()
+# FIXME: We should use a Dict{UInt,Int} to find the ainfo_idx instead of linear search
+function Base.intersect(lookup::AliasingLookup, ainfo::AliasingWrapper; ainfo_idx=nothing)
+    if ainfo_idx === nothing
+        ainfo_idx = something(findfirst(==(ainfo), lookup.ainfos))
+    end
+    spaces_idx = lookup.ainfos_spaces[ainfo_idx]
+    to_consider_spans = LocatorMemorySpan{Int}[]
+    for space_idx in spaces_idx
+        bounding_spans_tree = lookup.bounding_spans_tree[space_idx]
+        self_bounding_span = LocatorMemorySpan(lookup.bounding_spans[ainfo_idx][space_idx], 0)
+        find_overlapping!(bounding_spans_tree, self_bounding_span, to_consider_spans; exact=false)
+    end
+    to_consider = Int[locator.owner for locator in to_consider_spans]
+    @assert all(to_consider .> 0)
+    return AliasingLookupFinder(lookup, ainfo, ainfo_idx, spaces_idx, to_consider)
+end
+Base.iterate(finder::AliasingLookupFinder) = iterate(finder, 1)
+function Base.iterate(finder::AliasingLookupFinder, cursor_ainfo_idx)
+    ainfo_spaces = nothing
+    cursor_space_idx = 1
+
+    # New ainfos enter here
+    @label ainfo_restart
+
+    # Check if we've exhausted all ainfos
+    if cursor_ainfo_idx > length(finder.to_consider)
+        return nothing
+    end
+    ainfo_idx = finder.to_consider[cursor_ainfo_idx]
+
+    # Find the appropriate memory spaces for this ainfo
+    if ainfo_spaces === nothing
+        ainfo_spaces = finder.lookup.ainfos_spaces[ainfo_idx]
+    end
+
+    # New memory spaces (for the same ainfo) enter here
+    @label space_restart
+
+    # Check if we've exhausted all memory spaces for this ainfo, and need to move to the next ainfo
+    if cursor_space_idx > length(ainfo_spaces)
+        cursor_ainfo_idx += 1
+        ainfo_spaces = nothing
+        cursor_space_idx = 1
+        @goto ainfo_restart
+    end
+
+    # Find the currently considered memory space for this ainfo
+    space_idx = ainfo_spaces[cursor_space_idx]
+
+    # Check if this memory space is part of our target ainfo's spaces
+    if !(space_idx in finder.spaces_idx)
+        cursor_space_idx += 1
+        @goto space_restart
+    end
+
+    # Check if this ainfo's bounding span is part of our target ainfo's bounding span in this memory space
+    other_ainfo_bounding_span = finder.lookup.bounding_spans[ainfo_idx][space_idx]
+    self_bounding_span = finder.lookup.bounding_spans[finder.ainfo_idx][space_idx]
+    if !spans_overlap(other_ainfo_bounding_span, self_bounding_span)
+        cursor_space_idx += 1
+        @goto space_restart
+    end
+
+    # We have a overlapping bounds in the same memory space, so check if the ainfos are aliasing
+    # This is the slow path!
+    other_ainfo = finder.lookup.ainfos[ainfo_idx]
+    aliasing = will_alias(finder.ainfo, other_ainfo)
+    if !aliasing
+        cursor_ainfo_idx += 1
+        ainfo_spaces = nothing
+        cursor_space_idx = 1
+        @goto ainfo_restart
+    end
+
+    # We overlap, so return the ainfo and the next ainfo index
+    return other_ainfo, cursor_ainfo_idx+1
+end
 
 struct NoAliasing <: AbstractAliasing end
 memory_spans(::NoAliasing) = MemorySpan{CPURAMMemorySpace}[]
@@ -151,8 +322,11 @@ struct CombinedAliasing <: AbstractAliasing
 end
 function memory_spans(ca::CombinedAliasing)
     # FIXME: Don't hardcode CPURAMMemorySpace
-    all_spans = MemorySpan{CPURAMMemorySpace}[]
-    for sub_a in ca.sub_ainfos
+    if length(ca.sub_ainfos) == 0
+        return MemorySpan{CPURAMMemorySpace}[]
+    end
+    all_spans = memory_spans(ca.sub_ainfos[1])
+    for sub_a in ca.sub_ainfos[2:end]
         append!(all_spans, memory_spans(sub_a))
     end
     return all_spans
@@ -213,8 +387,14 @@ end
 aliasing(::String) = NoAliasing() # FIXME: Not necessarily true
 aliasing(::Symbol) = NoAliasing()
 aliasing(::Type) = NoAliasing()
-aliasing(x::Chunk, T) = remotecall_fetch(root_worker_id(x.processor), x, T) do x, T
-    aliasing(unwrap(x), T)
+function aliasing(x::Chunk, T)
+    @assert x.handle isa DRef
+    if root_worker_id(x.processor) == myid()
+        return aliasing(unwrap(x), T)
+    end
+    return remotecall_fetch(root_worker_id(x.processor), x, T) do x, T
+        aliasing(unwrap(x), T)
+    end
 end
 aliasing(x::Chunk) = remotecall_fetch(root_worker_id(x.processor), x) do x
     aliasing(unwrap(x))
@@ -273,13 +453,22 @@ function _memory_spans(a::StridedAliasing{T,N,S}, spans, ptr, dim) where {T,N,S}
 
     return spans
 end
-function aliasing(x::SubArray{T,N,A}) where {T,N,A<:Array}
+function aliasing(x::SubArray{T,N}) where {T,N}
     if isbitstype(T)
-        S = CPURAMMemorySpace
-        return StridedAliasing{T,ndims(x),S}(RemotePtr{Cvoid}(pointer(parent(x))),
-                                             RemotePtr{Cvoid}(pointer(x)),
-                                             parentindices(x),
-                                             size(x), strides(parent(x)))
+        p = parent(x)
+        space = memory_space(p)
+        S = typeof(space)
+        parent_ptr = RemotePtr{Cvoid}(UInt64(pointer(p)), space)
+        ptr = RemotePtr{Cvoid}(UInt64(pointer(x)), space)
+        NA = ndims(p)
+        raw_inds = parentindices(x)
+        inds = ntuple(i->raw_inds[i] isa Integer ? (raw_inds[i]:raw_inds[i]) : UnitRange(raw_inds[i]), NA)
+        sz = ntuple(i->length(inds[i]), NA)
+        return StridedAliasing{T,NA,S}(parent_ptr,
+                                       ptr,
+                                       inds,
+                                       sz,
+                                       strides(p))
     else
         # FIXME: Also ContiguousAliasing of container
         #return IteratedAliasing(x)
@@ -396,76 +585,8 @@ end
 function will_alias(x_span::MemorySpan, y_span::MemorySpan)
     may_alias(x_span.ptr.space, y_span.ptr.space) || return false
     # FIXME: Allow pointer conversion instead of just failing
-    @assert x_span.ptr.space == y_span.ptr.space
+    @assert x_span.ptr.space == y_span.ptr.space "Memory spans are in different spaces: $(x_span.ptr.space) vs. $(y_span.ptr.space)"
     x_end = x_span.ptr + x_span.len - 1
     y_end = y_span.ptr + y_span.len - 1
     return x_span.ptr <= y_end && y_span.ptr <= x_end
 end
-
-struct ChunkView{N}
-    chunk::Chunk
-    slices::NTuple{N, Union{Int, AbstractRange{Int}, Colon}}
-end
-
-function Base.view(c::Chunk, slices...)
-    if c.domain isa ArrayDomain
-        nd, sz = ndims(c.domain), size(c.domain)
-        nd == length(slices) || throw(DimensionMismatch("Expected $nd slices, got $(length(slices))"))
-
-        for (i, s) in enumerate(slices)
-            if s isa Int
-                1 ≤ s ≤ sz[i] || throw(ArgumentError("Index $s out of bounds for dimension $i (size $(sz[i]))"))
-            elseif s isa AbstractRange
-                isempty(s) && continue
-                1 ≤ first(s) ≤ last(s) ≤ sz[i] || throw(ArgumentError("Range $s out of bounds for dimension $i (size $(sz[i]))"))
-            elseif s === Colon()
-                continue
-            else
-                throw(ArgumentError("Invalid slice type $(typeof(s)) at dimension $i, Expected Type of Int, AbstractRange, or Colon"))
-            end
-        end
-    end
-
-    return ChunkView(c, slices)
-end
-
-Base.view(c::DTask, slices...) = view(fetch(c; raw=true), slices...)
-
-function aliasing(x::ChunkView{N}) where N
-    remotecall_fetch(root_worker_id(x.chunk.processor), x.chunk, x.slices) do x, slices
-        x = unwrap(x)
-        v = view(x, slices...)
-        return aliasing(v)
-    end
-end
-memory_space(x::ChunkView) = memory_space(x.chunk)
-isremotehandle(x::ChunkView) = true
-
-#=
-function move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::ChunkView, from::ChunkView)
-    to_w = root_worker_id(to_space)
-    @assert to_w == myid()
-    to_raw = unwrap(to.chunk)
-    from_w = root_worker_id(from_space)
-    from_raw = to_w == from_w ? unwrap(from.chunk) : remotecall_fetch(f->copy(unwrap(f)), from_w, from.chunk)
-    from_view = view(from_raw, from.slices...)
-    to_view = view(to_raw, to.slices...)
-    move!(dep_mod, to_space, from_space, to_view, from_view)
-    return
-end
-=#
-
-function move(from_proc::Processor, to_proc::Processor, slice::ChunkView)
-    if from_proc == to_proc
-        return view(unwrap(slice.chunk), slice.slices...)
-    else
-        # Need to copy the underlying data, so collapse the view
-        from_w = root_worker_id(from_proc)
-        data = remotecall_fetch(from_w, slice.chunk, slice.slices) do chunk, slices
-            copy(view(unwrap(chunk), slices...))
-        end
-        return move(from_proc, to_proc, data)
-    end
-end
-
-Base.fetch(slice::ChunkView) = view(fetch(slice.chunk), slice.slices...)

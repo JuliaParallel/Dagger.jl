@@ -17,8 +17,6 @@ function unset!(spec::ThunkSpec, _)
     spec.id = 0
     spec.cache_ref = nothing
     spec.affinity = nothing
-    compute_scope = DefaultScope()
-    result_scope = AnyScope()
     spec.options = nothing
 end
 
@@ -186,21 +184,19 @@ function args_kwargs_to_arguments(f, args, kwargs)
     end
     return args_kwargs
 end
-function args_kwargs_to_arguments(f, args)
-    @nospecialize f args
-    args_kwargs = Argument[]
-    push!(args_kwargs, Argument(ArgPosition(true, 0, :NULL), f))
-    pos_ctr = 1
-    for idx in 1:length(args)
-        pos, arg = args[idx]::Pair
-        if pos === nothing
-            push!(args_kwargs, Argument(pos_ctr, arg))
-            pos_ctr += 1
+function args_kwargs_to_typedarguments(f, args, kwargs)
+    nargs = 1 + length(args) + length(kwargs)
+    return ntuple(nargs) do idx
+        if idx == 1
+            return TypedArgument(ArgPosition(true, 0, :NULL), f)
+        elseif idx in 2:(1+length(args))
+            arg = args[idx-1]
+            return TypedArgument(idx, arg)
         else
-            push!(args_kwargs, Argument(pos, arg))
+            kw, value = kwargs[idx-length(args)-1]
+            return TypedArgument(kw, value)
         end
     end
-    return args_kwargs
 end
 
 """
@@ -491,7 +487,11 @@ function _par(mod, ex::Expr; lazy=true, recur=true, opts=())
             @gensym result
             return quote
                 let
-                    $result = $spawn($f, $Options(;$(opts...)), $(args...); $(kwargs...))
+                    $result = if $get_task_typed()
+                        $typed_spawn($f, $Options(;$(opts...)), $(args...); $(kwargs...))
+                    else
+                        $spawn($f, $Options(;$(opts...)), $(args...); $(kwargs...))
+                    end
                     if $(Expr(:islocal, sync_var))
                         put!($sync_var, schedule(Task(()->fetch($result; raw=true))))
                     end
@@ -516,6 +516,9 @@ function _setindex!_return_value(A, value, idxs...)
     return value
 end
 
+const TASK_TYPED = ScopedValue{Bool}(false)
+get_task_typed() = TASK_TYPED[]
+
 """
     Dagger.spawn(f, args...; kwargs...) -> DTask
 
@@ -526,6 +529,36 @@ Spawns a `DTask` that will call `f(args...; kwargs...)`. Also supports passing a
 function spawn(f, args...; kwargs...)
     @nospecialize f args kwargs
 
+    # Merge all passed options
+    if length(args) >= 1 && first(args) isa Options
+        # N.B. Make a defensive copy in case user aliases Options struct
+        task_options = copy(first(args)::Options)
+        args = args[2:end]
+    else
+        task_options = Options()
+    end
+
+    # Process the args and kwargs into Argument form
+    args_kwargs = args_kwargs_to_arguments(f, args, kwargs)
+
+    return _spawn(args_kwargs, task_options)
+end
+function typed_spawn(f, args...; kwargs...)
+    # Merge all passed options
+    if length(args) >= 1 && first(args) isa Options
+        # N.B. Make a defensive copy in case user aliases Options struct
+        task_options = copy(first(args)::Options)
+        args = args[2:end]
+    else
+        task_options = Options()
+    end
+
+    # Process the args and kwargs into Tuple of TypedArgument form
+    args_kwargs = args_kwargs_to_typedarguments(f, args, kwargs)
+
+    return _spawn(args_kwargs, task_options)
+end
+function _spawn(args_kwargs, task_options)
     # Get all scoped options and determine which propagate beyond this task
     scoped_options = get_options()::NamedTuple
     if haskey(scoped_options, :propagates)
@@ -539,19 +572,8 @@ function spawn(f, args...; kwargs...)
     end
     append!(propagates, keys(scoped_options)::NTuple{N,Symbol} where N)
 
-    # Merge all passed options
-    if length(args) >= 1 && first(args) isa Options
-        # N.B. Make a defensive copy in case user aliases Options struct
-        task_options = copy(first(args)::Options)
-        args = args[2:end]
-    else
-        task_options = Options()
-    end
     # N.B. Merges into task_options
     options_merge!(task_options, scoped_options; override=false)
-
-    # Process the args and kwargs into Pair form
-    args_kwargs = args_kwargs_to_arguments(f, args, kwargs)
 
     # Get task queue, and don't let it propagate
     task_queue = get(scoped_options, :task_queue, DefaultTaskQueue())::AbstractTaskQueue
@@ -568,7 +590,7 @@ function spawn(f, args...; kwargs...)
     task = eager_spawn(spec)
 
     # Enqueue the task into the task queue
-    enqueue!(task_queue, spec=>task)
+    enqueue!(task_queue, DTaskPair(spec, task))
 
     return task
 end

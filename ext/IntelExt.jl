@@ -46,6 +46,13 @@ function Dagger.memory_space(x::oneArray)
     return IntelVRAMMemorySpace(myid(), device_id)
 end
 _device_id(dev::ZeDevice) = findfirst(other_dev->other_dev === dev, collect(oneAPI.devices()))
+function Dagger.aliasing(x::oneArray{T}) where T
+    space = Dagger.memory_space(x)
+    S = typeof(space)
+    gpu_ptr = pointer(x)
+    rptr = Dagger.RemotePtr{Cvoid}(UInt64(gpu_ptr), space)
+    return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
+end
 
 Dagger.memory_spaces(proc::oneArrayDeviceProc) = Set([IntelVRAMMemorySpace(proc.owner, proc.device_id)])
 Dagger.processors(space::IntelVRAMMemorySpace) = Set([oneArrayDeviceProc(space.owner, space.device_id)])
@@ -68,6 +75,8 @@ function with_context!(space::IntelVRAMMemorySpace)
     @assert Dagger.root_worker_id(space) == myid()
     with_context!(space.device_id)
 end
+Dagger.with_context!(proc::oneArrayDeviceProc) = with_context!(proc)
+Dagger.with_context!(space::IntelVRAMMemorySpace) = with_context!(space)
 function with_context(f, x)
     old_drv = driver()
     old_dev = device()
