@@ -46,7 +46,8 @@ _device_id(dev::MtlDevice) = findfirst(other_dev->other_dev === dev, Metal.devic
 function Dagger.aliasing(x::MtlArray{T}) where T
     space = Dagger.memory_space(x)
     S = typeof(space)
-    gpu_ptr = pointer(x)
+    mtl_ptr = pointer(x)
+    gpu_ptr = Metal.contents(mtl_ptr.buffer) + mtl_ptr.offset
     rptr = Dagger.RemotePtr{Cvoid}(UInt64(gpu_ptr), space)
     return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
 end
