@@ -53,7 +53,7 @@ function stage(ctx::Context, r::MapReduce{T,N}) where {T,N}
     dims = r.dims === nothing ? Colon() : r.dims
     reduced_parts = map(chunks(inp)) do part
         if r.op_inner !== nothing
-            Dagger.@spawn r.op_inner(r.f, part; dims, init=r.init)
+            Dagger.@spawn name="mapreduce inner" r.op_inner(r.f, part; dims, init=r.init)
         else
             Dagger.@spawn mapreduce(r.f, r.op_outer, part; dims=dims, init=r.init)
         end
