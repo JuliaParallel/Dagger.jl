@@ -79,7 +79,7 @@ function Base.getindex(A::DArray, idx...)
     sz = ntuple(i->length(inds[i]), nd)
     # TODO: Pad out to same number of dims?
     part = nd == length(A.partitioning.blocksize) ? A.partitioning : auto_blocks(sz)
-    B = zeros(part, eltype(A), sz) # FIXME: Use undef initializer
+    B = DArray{eltype(A)}(undef, part, sz)
     copyto!(B, A_view)
     if size(A_view) != sz
         # N.B. Base automatically transposes a row vector to a column vector
