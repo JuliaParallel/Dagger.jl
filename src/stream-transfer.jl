@@ -8,11 +8,7 @@ function stream_push_values!(fetcher::RemoteChannelFetcher, T, our_store::Stream
     our_uid = our_store.uid
     their_uid = their_stream.uid
     if _THEIR_TID[] == 0
-        _THEIR_TID[] = remotecall_fetch(1) do
-            lock(Sch.EAGER_ID_MAP) do id_map
-                id_map[their_uid]
-            end
-        end
+        _THEIR_TID[] = Int(their_uid)
     end
     their_tid = _THEIR_TID[]
     @dagdebug our_tid :stream_push "taking output value: $our_tid -> $their_tid"
@@ -41,11 +37,7 @@ function stream_pull_values!(fetcher::RemoteChannelFetcher, T, our_store::Stream
     our_uid = our_store.uid
     their_uid = their_stream.uid
     if _THEIR_TID[] == 0
-        _THEIR_TID[] = remotecall_fetch(1) do
-            lock(Sch.EAGER_ID_MAP) do id_map
-                id_map[their_uid]
-            end
-        end
+        _THEIR_TID[] = Int(their_uid)
     end
     their_tid = _THEIR_TID[]
     @dagdebug our_tid :stream_pull "pulling input value: $their_tid -> $our_tid"

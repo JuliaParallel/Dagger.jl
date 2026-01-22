@@ -125,6 +125,7 @@ logs_to_df(logs::Dict, ::Val{target}; kwargs...) where target =
     Dagger.render_logs(logs::Dict, ::Val{:plots_gantt};
                        target=:execution,
                        colors, name_to_color, color_by=:fn,
+                       show_task_ids=true,
                        kwargs...)
 
 Render a Gantt chart of task execution in `logs` using Plots.
@@ -134,13 +135,16 @@ Keyword arguments affect rendering behavior:
 - `colors`: A list of colors to use for rendering.
 - `name_to_color`: A function mapping names to colors.
 - `color_by`: Whether to color by function name (`:fn`) or processor name (`:proc`).
+- `show_task_ids`: Whether to display task IDs on each task bar (default: `true`). Only applies to `:execution` target.
 - `kwargs` are passed to `plot` directly.
 """
 function Dagger.render_logs(logs::Dict, ::Val{:plots_gantt};
                             target=:execution,
                             colors=Dagger.Viz.default_colors,
                             name_to_color=Dagger.Viz.name_to_color,
-                            color_by=:fn, kwargs...)
+                            color_by=:fn,
+                            show_task_ids=true,
+                            kwargs...)
     df = logs_to_df(logs, Val{target}(); colors, name_to_color, color_by)
     y_elem = if target == :execution || target == :processor
         :proc_name
@@ -181,12 +185,24 @@ function Dagger.render_logs(logs::Dict, ::Val{:plots_gantt};
         end
     end
 
-    return plot(r; color=permutedims(df.color), labels,
-                yticks=(1.5:(nrow(df) + 0.5), u),
-                xlabel="Time (seconds)", ylabel,
-                xlim=(0.0, (global_t_end - global_t_start) / 1e9),
-                legendalpha=0, legend=:outertopright,
-                kwargs...)
+    plt = plot(r; color=permutedims(df.color), labels,
+               yticks=(1.5:(nrow(df) + 0.5), u),
+               xlabel="Time (seconds)", ylabel,
+               xlim=(0.0, (global_t_end - global_t_start) / 1e9),
+               legendalpha=0, legend=:outertopright,
+               kwargs...)
+
+    # Add task ID annotations to each task bar
+    if show_task_ids && target == :execution
+        for (i, row) in enumerate(eachrow(df))
+            # Calculate center position of the task bar
+            x_center = t_start[i] + duration[i] / 2
+            y_center = dy[row[y_elem]] + 0.5
+            annotate!(plt, x_center, y_center, text(string(row.tid), :center, 8, :black))
+        end
+    end
+
+    return plt
 end
 
 end # module PlotsExt
