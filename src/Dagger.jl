@@ -7,7 +7,7 @@ import SparseArrays: sprand, SparseMatrixCSC
 import MemPool
 import MemPool: DRef, FileRef, poolget, poolset
 
-import Base: collect, reduce
+import Base: collect, reduce, view
 
 import LinearAlgebra
 import LinearAlgebra: Adjoint, BLAS, Diagonal, Bidiagonal, Tridiagonal, LAPACK, LowerTriangular, PosDefException, Transpose, UpperTriangular, UnitLowerTriangular, UnitUpperTriangular, diagind, ishermitian, issymmetric
