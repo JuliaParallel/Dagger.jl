@@ -393,7 +393,7 @@ function Base.fetch(c::DArray{T}) where T
         sz = size(thunks)
         dmn = domain(c)
         dmnchunks = domainchunks(c)
-        return fetch(Dagger.spawn(Options(meta=true), thunks...) do results...
+        return fetch(Dagger.spawn(Options(meta=true, name="fetch(DArray)"), thunks...) do results...
             t = eltype(fetch(results[1]))
             DArray(t, dmn, dmnchunks, reshape(Any[results...], sz),
                    c.partitioning, c.concat)
