@@ -2,15 +2,10 @@ struct RemoteChannelFetcher
     chan::RemoteChannel
     RemoteChannelFetcher() = new(RemoteChannel())
 end
-const _THEIR_TID = TaskLocalValue{Int}(()->0)
 function stream_push_values!(fetcher::RemoteChannelFetcher, T, our_store::StreamStore, their_stream::Stream, buffer)
     our_tid = STREAM_THUNK_ID[]
     our_uid = our_store.uid
-    their_uid = their_stream.uid
-    if _THEIR_TID[] == 0
-        _THEIR_TID[] = Int(their_uid)
-    end
-    their_tid = _THEIR_TID[]
+    their_tid = Int(their_stream.uid)
     @dagdebug our_tid :stream_push "taking output value: $our_tid -> $their_tid"
     value = try
         take!(buffer)
@@ -35,11 +30,7 @@ end
 function stream_pull_values!(fetcher::RemoteChannelFetcher, T, our_store::StreamStore, their_stream::Stream, buffer)
     our_tid = STREAM_THUNK_ID[]
     our_uid = our_store.uid
-    their_uid = their_stream.uid
-    if _THEIR_TID[] == 0
-        _THEIR_TID[] = Int(their_uid)
-    end
-    their_tid = _THEIR_TID[]
+    their_tid = Int(their_stream.uid)
     @dagdebug our_tid :stream_pull "pulling input value: $their_tid -> $our_tid"
     value = try
         take!(fetcher.chan)

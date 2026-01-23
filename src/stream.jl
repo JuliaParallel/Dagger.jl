@@ -21,16 +21,6 @@ mutable struct StreamStore{T,B}
                  true, false, Threads.Condition())
 end
 
-function tid_to_uid(thunk_id)
-    lock(Sch.EAGER_ID_MAP) do id_map
-        for (uid, otid) in id_map
-            if thunk_id == otid
-                return uid
-            end
-        end
-    end
-end
-
 function Base.put!(store::StreamStore{T,B}, value) where {T,B}
     thunk_id = STREAM_THUNK_ID[]
     @lock store.lock begin
@@ -528,15 +518,7 @@ function _run_streamingfunction(tls, cancel_token, sf, args...; kwargs...)
     STREAM_THUNK_ID[] = thunk_id
 
     # FIXME: Remove when scheduler is distributed
-    uid = remotecall_fetch(1, thunk_id) do thunk_id
-        lock(Sch.EAGER_ID_MAP) do id_map
-            for (uid, otid) in id_map
-                if thunk_id == otid
-                    return uid
-                end
-            end
-        end
-    end
+    uid = UInt(thunk_id)
 
     try
         # TODO: This kwarg song-and-dance is required to ensure that we don't
