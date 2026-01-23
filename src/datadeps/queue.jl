@@ -7,24 +7,14 @@ struct DataDepsTaskQueue <: AbstractTaskQueue
     g::Union{SimpleDiGraph{Int},Nothing}
     # The mapping from task to graph ID
     task_to_id::Union{Dict{DTask,Int},Nothing}
-    # How to traverse the dependency graph when launching tasks
-    traversal::Symbol
     # Which scheduler to use to assign tasks to processors
     scheduler::Symbol
 
-    # Whether aliasing across arguments is possible
-    # The fields following only apply when aliasing==true
-    aliasing::Bool
-
-    function DataDepsTaskQueue(upper_queue;
-                               traversal::Symbol=:inorder,
-                               scheduler::Symbol=:naive,
-                               aliasing::Bool=true)
+    function DataDepsTaskQueue(upper_queue; scheduler::Symbol)
         seen_tasks = DTaskPair[]
         g = SimpleDiGraph()
         task_to_id = Dict{DTask,Int}()
-        return new(upper_queue, seen_tasks, g, task_to_id, traversal, scheduler,
-                   aliasing)
+        return new(upper_queue, seen_tasks, g, task_to_id, scheduler)
     end
 end
 
@@ -36,7 +26,7 @@ function enqueue!(queue::DataDepsTaskQueue, pairs::Vector{DTaskPair})
 end
 
 """
-    spawn_datadeps(f::Base.Callable; traversal::Symbol=:inorder)
+    spawn_datadeps(f::Base.Callable)
 
 Constructs a "datadeps" (data dependencies) region and calls `f` within it.
 Dagger tasks launched within `f` may wrap their arguments with `In`, `Out`, or
@@ -63,13 +53,6 @@ appropriately.
 At the end of executing `f`, `spawn_datadeps` will wait for all launched tasks
 to complete, rethrowing the first error, if any. The result of `f` will be
 returned from `spawn_datadeps`.
-
-The keyword argument `traversal` controls the order that tasks are launched by
-the scheduler, and may be set to `:bfs` or `:dfs` for Breadth-First Scheduling
-or Depth-First Scheduling, respectively. All traversal orders respect the
-dependencies and ordering of the launched tasks, but may provide better or
-worse performance for a given set of datadeps tasks. This argument is
-experimental and subject to change.
 """
 function spawn_datadeps(f::Base.Callable; static::Bool=true,
                         traversal::Symbol=:inorder,
@@ -79,6 +62,9 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
     if !static
         throw(ArgumentError("Dynamic scheduling is no longer available"))
     end
+    if traversal != :inorder
+        throw(ArgumentError("Traversal order is no longer configurable, and always :inorder"))
+    end
     if !aliasing
         throw(ArgumentError("Aliasing analysis is no longer optional"))
     end
@@ -87,14 +73,12 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
         launch_wait = something(launch_wait, DATADEPS_LAUNCH_WAIT[], false)::Bool
         if launch_wait
             result = spawn_bulk() do
-                queue = DataDepsTaskQueue(get_options(:task_queue);
-                                          traversal, scheduler, aliasing)
+                queue = DataDepsTaskQueue(get_options(:task_queue); scheduler)
                 with_options(f; task_queue=queue)
                 distribute_tasks!(queue)
             end
         else
-            queue = DataDepsTaskQueue(get_options(:task_queue);
-                                      traversal, scheduler, aliasing)
+            queue = DataDepsTaskQueue(get_options(:task_queue); scheduler)
             result = with_options(f; task_queue=queue)
             distribute_tasks!(queue)
         end
@@ -132,49 +116,6 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     # Round-robin assign tasks to processors
     upper_queue = get_options(:task_queue)
 
-    traversal = queue.traversal
-    if traversal == :inorder
-        # As-is
-        task_order = Colon()
-    elseif traversal == :bfs
-        # BFS
-        task_order = Int[1]
-        to_walk = Int[1]
-        seen = Set{Int}([1])
-        while !isempty(to_walk)
-            # N.B. next_root has already been seen
-            next_root = popfirst!(to_walk)
-            for v in outneighbors(queue.g, next_root)
-                if !(v in seen)
-                    push!(task_order, v)
-                    push!(seen, v)
-                    push!(to_walk, v)
-                end
-            end
-        end
-    elseif traversal == :dfs
-        # DFS (modified with backtracking)
-        task_order = Int[]
-        to_walk = Int[1]
-        seen = Set{Int}()
-        while length(task_order) < length(queue.seen_tasks) && !isempty(to_walk)
-            next_root = popfirst!(to_walk)
-            if !(next_root in seen)
-                iv = inneighbors(queue.g, next_root)
-                if all(v->v in seen, iv)
-                    push!(task_order, next_root)
-                    push!(seen, next_root)
-                    ov = outneighbors(queue.g, next_root)
-                    prepend!(to_walk, ov)
-                else
-                    push!(to_walk, next_root)
-                end
-            end
-        end
-    else
-        throw(ArgumentError("Invalid traversal mode: $traversal"))
-    end
-
     state = DataDepsState(queue.aliasing)
     sstate = DataDepsSchedulerState()
     for proc in all_procs
@@ -188,7 +129,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     proc_idx = 1
     #pressures = Dict{Processor,Int}()
     proc_to_scope_lfu = BasicLFUCache{Processor,AbstractScope}(1024)
-    for pair in queue.seen_tasks[task_order]
+    for pair in queue.seen_tasks
         spec = pair.spec
         task = pair.task
         write_num, proc_idx = distribute_task!(queue, state, all_procs, scope, spec, task, spec.fargs, proc_to_scope_lfu, write_num, proc_idx)
