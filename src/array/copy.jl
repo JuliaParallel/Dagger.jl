@@ -21,8 +21,7 @@ function copy_buffered(f, args...)
     return result
 end
 function allocate_copy_buffer(part::Blocks{N}, A::DArray{T,N}) where {T,N}
-    # FIXME: undef initializer
-    return zeros(part, T, size(A))
+    return DArray{T}(undef, part, size(A))
 end
 
 function darray_copyto!(B::DArray{TB,NB}, A::DArray{TA,NA}, Binds=parentindices(B), Ainds=parentindices(A)) where {TB,NB,TA,NA}
