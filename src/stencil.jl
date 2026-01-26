@@ -18,83 +18,77 @@ function validate_neigh_dist(neigh_dist, size)
     end
 end
 
-function load_neighbor_edge(arr, dim, dir, neigh_dist)
+# Load a halo region from a neighboring chunk
+# region_code: N-tuple where each element is -1 (low), 0 (full extent), or +1 (high)
+# For dimensions with code 0, we take the full extent of the array
+# For dimensions with code -1, we take the last neigh_dist elements (to go to neighbor's low side)
+# For dimensions with code +1, we take the first neigh_dist elements (to go to neighbor's high side)
+function load_neighbor_region(arr, region_code::NTuple{N,Int}, neigh_dist) where N
     validate_neigh_dist(neigh_dist, size(arr))
-    if dir == -1
-        start_idx = CartesianIndex(ntuple(i -> i == dim ? (lastindex(arr, i) - neigh_dist + 1) : firstindex(arr, i), ndims(arr)))
-        stop_idx = CartesianIndex(ntuple(i -> i == dim ? lastindex(arr, i) : lastindex(arr, i), ndims(arr)))
-    elseif dir == 1
-        start_idx = CartesianIndex(ntuple(i -> i == dim ? firstindex(arr, i) : firstindex(arr, i), ndims(arr)))
-        stop_idx = CartesianIndex(ntuple(i -> i == dim ? (firstindex(arr, i) + neigh_dist - 1) : lastindex(arr, i), ndims(arr)))
-    end
+    start_idx = CartesianIndex(ntuple(N) do i
+        if region_code[i] == -1
+            lastindex(arr, i) - neigh_dist + 1
+        else
+            firstindex(arr, i)
+        end
+    end)
+    stop_idx = CartesianIndex(ntuple(N) do i
+        if region_code[i] == +1
+            firstindex(arr, i) + neigh_dist - 1
+        else
+            lastindex(arr, i)
+        end
+    end)
     # FIXME: Don't collect
-    return move(task_processor(), collect(@view arr[start_idx:stop_idx]))
-end
-function load_neighbor_corner(arr, corner_side, neigh_dist)
-    validate_neigh_dist(neigh_dist, size(arr))
-    start_idx = CartesianIndex(ntuple(i -> corner_side[i] == 0 ? (lastindex(arr, i) - neigh_dist + 1) : firstindex(arr, i), ndims(arr)))
-    stop_idx = CartesianIndex(ntuple(i -> corner_side[i] == 0 ? lastindex(arr, i) : (firstindex(arr, i) + neigh_dist - 1), ndims(arr)))
     return move(task_processor(), collect(@view arr[start_idx:stop_idx]))
 end
 function select_neighborhood_chunks(chunks, idx, neigh_dist, boundary)
     validate_neigh_dist(neigh_dist)
 
+    N = ndims(chunks)
     # FIXME: Depends on neigh_dist and chunk size
     chunk_dist = 1
+
     # Get the center
     accesses = Any[chunks[idx]]
 
-    # Get the edges
-    for dim in 1:ndims(chunks)
-        for dir in (-1, +1)
-            new_idx = idx + CartesianIndex(ntuple(i -> i == dim ? dir*chunk_dist : 0, ndims(chunks)))
-            if is_past_boundary(size(chunks), new_idx)
-                if boundary_has_transition(boundary)
-                    new_idx = boundary_transition(boundary, new_idx, size(chunks))
-                else
-                    new_idx = idx
-                end
-                chunk = chunks[new_idx]
-                push!(accesses, Dagger.@spawn load_boundary_edge(boundary, chunk, dim, dir, neigh_dist))
-            else
-                chunk = chunks[new_idx]
-                push!(accesses, Dagger.@spawn load_neighbor_edge(chunk, dim, dir, neigh_dist))
-            end
+    # Iterate over all 3^N - 1 halo regions (excluding center)
+    # Each region is identified by a code tuple where each element is -1, 0, or +1
+    for i in 0:(3^N - 1)
+        region_code = ntuple(N) do d
+            ((i ÷ 3^(d-1)) % 3) - 1  # Maps 0,1,2 -> -1,0,+1
         end
-    end
+        all(==(0), region_code) && continue  # Skip center
 
-    # Get the corners
-    for corner_num in 1:(2^ndims(chunks))
-        corner_side = CartesianIndex(reverse(ntuple(ndims(chunks)) do i
-            ((corner_num-1) >> (((ndims(chunks) - i) + 1) - 1)) & 1
-        end))
-        corner_new_idx = CartesianIndex(ntuple(ndims(chunks)) do i
-            corner_shift = iszero(corner_side[i]) ? -1 : 1
-            return idx[i] + corner_shift
+        # Compute the chunk offset for this region
+        # For each dimension: -1 means go to previous chunk, +1 means go to next chunk, 0 means same chunk
+        chunk_offset = CartesianIndex(ntuple(N) do d
+            region_code[d] * chunk_dist
         end)
-        if is_past_boundary(size(chunks), corner_new_idx)
+        new_idx = idx + chunk_offset
+
+        if is_past_boundary(size(chunks), new_idx)
             if boundary_has_transition(boundary)
-                corner_new_idx = boundary_transition(boundary, corner_new_idx, size(chunks))
+                new_idx = boundary_transition(boundary, new_idx, size(chunks))
             else
-                corner_new_idx = idx
+                new_idx = idx
             end
-            chunk = chunks[corner_new_idx]
-            push!(accesses, Dagger.@spawn load_boundary_corner(boundary, chunk, corner_side, neigh_dist))
+            chunk = chunks[new_idx]
+            push!(accesses, Dagger.@spawn load_boundary_region(boundary, chunk, region_code, neigh_dist))
         else
-            chunk = chunks[corner_new_idx]
-            push!(accesses, Dagger.@spawn load_neighbor_corner(chunk, corner_side, neigh_dist))
+            chunk = chunks[new_idx]
+            push!(accesses, Dagger.@spawn load_neighbor_region(chunk, region_code, neigh_dist))
         end
     end
 
-    @assert length(accesses) == 1+2*ndims(chunks)+2^ndims(chunks) "Accesses mismatch: $(length(accesses))"
+    @assert length(accesses) == 3^N "Accesses mismatch: expected $(3^N), got $(length(accesses))"
     return accesses
 end
-function build_halo(neigh_dist, boundary, center, all_neighbors...)
+function build_halo(neigh_dist, boundary, center, all_halos...)
     N = ndims(center)
-    edges = all_neighbors[1:(2*N)]
-    corners = all_neighbors[((2^N)+1):end]
-    @assert length(edges) == 2*N && length(corners) == 2^N "Halo mismatch: edges=$(length(edges)) corners=$(length(corners))"
-    return HaloArray(center, (edges...,), (corners...,), ntuple(_->neigh_dist, N))
+    expected_halos = 3^N - 1
+    @assert length(all_halos) == expected_halos "Halo mismatch: N=$N expected $expected_halos halos, got $(length(all_halos))"
+    return HaloArray(center, (all_halos...,), ntuple(_->neigh_dist, N))
 end
 function load_neighborhood(arr::HaloArray{T,N}, idx) where {T,N}
     @assert all(arr.halo_width .== arr.halo_width[1])
@@ -121,31 +115,21 @@ struct Wrap end
 boundary_has_transition(::Wrap) = true
 boundary_transition(::Wrap, idx, size) =
     CartesianIndex(ntuple(i -> mod1(idx[i], size[i]), length(size)))
-load_boundary_edge(::Wrap, arr, dim, dir, neigh_dist) = load_neighbor_edge(arr, dim, dir, neigh_dist)
-load_boundary_corner(::Wrap, arr, corner_side, neigh_dist) = load_neighbor_corner(arr, corner_side, neigh_dist)
+load_boundary_region(::Wrap, arr, region_code, neigh_dist) = load_neighbor_region(arr, region_code, neigh_dist)
 
 struct Pad{T}
     padval::T
 end
 boundary_has_transition(::Pad) = false
-function load_boundary_edge(pad::Pad, arr, dim, dir, neigh_dist)
-    if dir == -1
-        start_idx = CartesianIndex(ntuple(i -> i == dim ? (lastindex(arr, i) - neigh_dist + 1) : firstindex(arr, i), ndims(arr)))
-        stop_idx = CartesianIndex(ntuple(i -> i == dim ? lastindex(arr, i) : lastindex(arr, i), ndims(arr)))
-    elseif dir == 1
-        start_idx = CartesianIndex(ntuple(i -> i == dim ? firstindex(arr, i) : firstindex(arr, i), ndims(arr)))
-        stop_idx = CartesianIndex(ntuple(i -> i == dim ? (firstindex(arr, i) + neigh_dist - 1) : lastindex(arr, i), ndims(arr)))
+function load_boundary_region(pad::Pad, arr, region_code::NTuple{N,Int}, neigh_dist) where N
+    # Compute the size of this halo region
+    # For dimensions with code 0, use full array size
+    # For dimensions with code -1 or +1, use neigh_dist
+    region_size = ntuple(N) do i
+        region_code[i] == 0 ? size(arr, i) : neigh_dist
     end
-    edge_size = ntuple(i -> length(start_idx[i]:stop_idx[i]), ndims(arr))
-    # FIXME: return Fill(pad.padval, edge_size)
-    return move(task_processor(), fill(pad.padval, edge_size))
-end
-function load_boundary_corner(pad::Pad, arr, corner_side, neigh_dist)
-    start_idx = CartesianIndex(ntuple(i -> corner_side[i] == 0 ? (lastindex(arr, i) - neigh_dist + 1) : firstindex(arr, i), ndims(arr)))
-    stop_idx = CartesianIndex(ntuple(i -> corner_side[i] == 0 ? lastindex(arr, i) : (firstindex(arr, i) + neigh_dist - 1), ndims(arr)))
-    corner_size = ntuple(i -> length(start_idx[i]:stop_idx[i]), ndims(arr))
-    # FIXME: return Fill(pad.padval, corner_size)
-    return move(task_processor(), fill(pad.padval, corner_size))
+    # FIXME: return Fill(pad.padval, region_size)
+    return move(task_processor(), fill(pad.padval, region_size))
 end
 
 """

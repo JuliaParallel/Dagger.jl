@@ -273,8 +273,11 @@ end
 ROCArray(H::Dagger.HaloArray) = convert(ROCArray, H)
 Base.convert(::Type{C}, H::Dagger.HaloArray) where {C<:ROCArray} =
     Dagger.HaloArray(C(H.center),
-                     C.(H.edges),
-                     C.(H.corners),
+                     C.(H.halos),
+                     H.halo_width)
+Adapt.adapt_structure(to::AMDGPU.Runtime.Adaptor, H::Dagger.HaloArray) =
+    Dagger.HaloArray(adapt(to, H.center),
+                     adapt.(Ref(to), H.halos),
                      H.halo_width)
 function Dagger.inner_stencil_proc!(::ROCArrayDeviceProc, f, output, read_vars)
     Dagger.Kernel(_inner_stencil!)(f, output, read_vars; ndrange=size(output))
