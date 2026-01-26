@@ -119,6 +119,22 @@ function test_stencil()
         @test collect(B) == expected_B_pad_val
     end
 
+    # From issue #669
+    for N in 3:4
+        @testset "$(N)D array" begin
+            A = ones(Blocks(ntuple(_->1, N)...), Int, ntuple(_->3, N)...)
+            A[:] = 1:length(A)
+            B = zeros(Blocks(ntuple(_->1, N)...), Float64, ntuple(_->3, N)...)
+
+            Dagger.spawn_datadeps() do
+                @stencil begin
+                    B[idx] = sum(@neighbors(A[idx], 1, Wrap())) / length(A)
+                end
+            end
+            @test all(==(Float64(sum(1:length(A)) / length(A))), collect(B))
+        end
+    end
+
     @testset "Invalid neighborhood distance" begin
         A = ones(Blocks(1, 1), Int, 2, 2)
         B = zeros(Blocks(1, 1), Int, 2, 2)
