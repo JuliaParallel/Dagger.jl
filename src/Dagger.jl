@@ -32,6 +32,8 @@ import TimespanLogging: timespan_start, timespan_finish
 
 import Adapt
 
+import GPUArraysCore
+
 import Preferences: @load_preference, @set_preferences!
 
 if @load_preference("distributed-package") == "DistributedNext"
