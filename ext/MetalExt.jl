@@ -289,6 +289,10 @@ Base.convert(::Type{C}, H::Dagger.HaloArray) where {C<:MtlArray} =
     Dagger.HaloArray(C(H.center),
                      C.(H.halos),
                      H.halo_width)
+Adapt.adapt_structure(to::Metal.Adaptor, H::Dagger.HaloArray) =
+    Dagger.HaloArray(adapt(to, H.center),
+                     adapt.(Ref(to), H.halos),
+                     H.halo_width)
 function Dagger.inner_stencil_proc!(::MtlArrayDeviceProc, f, output, read_vars)
     Dagger.Kernel(_inner_stencil!)(f, output, read_vars; ndrange=size(output))
     return
