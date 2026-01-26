@@ -254,13 +254,11 @@ end
 CLArray(H::Dagger.HaloArray) = convert(CLArray, H)
 Base.convert(::Type{C}, H::Dagger.HaloArray) where {C<:CLArray} =
     Dagger.HaloArray(C(H.center),
-                     C.(H.edges),
-                     C.(H.corners),
+                     C.(H.halos),
                      H.halo_width)
 Adapt.adapt_structure(to::OpenCL.KernelAdaptor, H::Dagger.HaloArray) =
     Dagger.HaloArray(adapt(to, H.center),
-                     adapt.(Ref(to), H.edges),
-                     adapt.(Ref(to), H.corners),
+                     adapt.(Ref(to), H.halos),
                      H.halo_width)
 function Dagger.inner_stencil_proc!(::CLArrayDeviceProc, f, output, read_vars)
     Dagger.Kernel(_inner_stencil!)(f, output, read_vars; ndrange=size(output))
