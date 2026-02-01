@@ -271,13 +271,11 @@ end
 oneArray(H::Dagger.HaloArray) = convert(oneArray, H)
 Base.convert(::Type{C}, H::Dagger.HaloArray) where {C<:oneArray} =
     Dagger.HaloArray(C(H.center),
-                     C.(H.edges),
-                     C.(H.corners),
+                     C.(H.halos),
                      H.halo_width)
 Adapt.adapt_structure(to::oneAPI.KernelAdaptor, H::Dagger.HaloArray) =
     Dagger.HaloArray(adapt(to, H.center),
-                     adapt.(Ref(to), H.edges),
-                     adapt.(Ref(to), H.corners),
+                     adapt.(Ref(to), H.halos),
                      H.halo_width)
 function Dagger.inner_stencil_proc!(::oneArrayDeviceProc, f, output, read_vars)
     Dagger.Kernel(_inner_stencil!)(f, output, read_vars; ndrange=size(output))

@@ -34,7 +34,7 @@ with_index_caching(f, size::Integer=1) = with(f, GETINDEX_CACHE_SIZE=>size)
     end
 
     # Return the value
-    return part[offset_idx...]
+    return GPUArraysCore.@allowscalar part[offset_idx...]
 end
 function partition_for(A::DArray, idx::NTuple{N,Int}) where N
     part_idx = zeros(Int, N)
@@ -112,7 +112,10 @@ Base.getindex(A::DArray, idx::ArrayDomain) =
     part = A.chunks[part_idx...]
     space = memory_space(part)
     scope = UnionScope(map(ExactScope, collect(processors(space))))
-    return fetch(Dagger.@spawn scope=scope setindex!(part, value, offset_idx...))
+    return fetch(Dagger.@spawn scope=scope setindex_allowscalar!(part, value, offset_idx...))
+end
+function setindex_allowscalar!(part, value, offset_idx...)
+    GPUArraysCore.@allowscalar setindex!(part, value, offset_idx...)
 end
 Base.setindex!(A::DArray, value, idx::Integer...) =
     setindex!(A, value, idx)

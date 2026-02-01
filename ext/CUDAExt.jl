@@ -303,13 +303,11 @@ end
 CuArray(H::Dagger.HaloArray) = convert(CuArray, H)
 Base.convert(::Type{C}, H::Dagger.HaloArray) where {C<:CuArray} =
     Dagger.HaloArray(C(H.center),
-                     C.(H.edges),
-                     C.(H.corners),
+                     C.(H.halos),
                      H.halo_width)
 Adapt.adapt_structure(to::CUDA.KernelAdaptor, H::Dagger.HaloArray) =
     Dagger.HaloArray(adapt(to, H.center),
-                     adapt.(Ref(to), H.edges),
-                     adapt.(Ref(to), H.corners),
+                     adapt.(Ref(to), H.halos),
                      H.halo_width)
 function Dagger.inner_stencil_proc!(::CuArrayDeviceProc, f, output, read_vars)
     Dagger.Kernel(_inner_stencil!)(f, output, read_vars; ndrange=size(output))
