@@ -4,10 +4,10 @@ const Write = Out
 const ReadWrite = InOut
 
 function validate_neigh_dist(neigh_dist)
-    if !(neigh_dist isa Integer)
-        throw(ArgumentError("Neighborhood distance ($neigh_dist) must be an Integer"))
+    if !(neigh_dist isa Integer) && !(neigh_dist isa Tuple)
+        throw(ArgumentError("Neighborhood distance ($neigh_dist) must be an Integer or Tuple"))
     end
-    if neigh_dist <= 0
+    if any(neigh_dist .<= 0)
         throw(ArgumentError("Neighborhood distance ($neigh_dist) must be greater than 0"))
     end
 end
@@ -18,6 +18,10 @@ function validate_neigh_dist(neigh_dist, size)
     end
 end
 
+get_neigh_dist(neigh_dist::Integer, i::Int) = neigh_dist
+get_neigh_dist(neigh_dist::Tuple, i::Int) = neigh_dist[i]
+
+
 # Load a halo region from a neighboring chunk
 # region_code: N-tuple where each element is -1 (low), 0 (full extent), or +1 (high)
 # For dimensions with code 0, we take the full extent of the array
@@ -27,14 +31,14 @@ function load_neighbor_region(arr, region_code::NTuple{N,Int}, neigh_dist) where
     validate_neigh_dist(neigh_dist, size(arr))
     start_idx = CartesianIndex(ntuple(N) do i
         if region_code[i] == -1
-            lastindex(arr, i) - neigh_dist + 1
+            lastindex(arr, i) - get_neigh_dist(neigh_dist, i) + 1
         else
             firstindex(arr, i)
         end
     end)
     stop_idx = CartesianIndex(ntuple(N) do i
         if region_code[i] == +1
-            firstindex(arr, i) + neigh_dist - 1
+            firstindex(arr, i) + get_neigh_dist(neigh_dist, i) - 1
         else
             lastindex(arr, i)
         end
@@ -88,13 +92,11 @@ function build_halo(neigh_dist, boundary, center, all_halos...)
     N = ndims(center)
     expected_halos = 3^N - 1
     @assert length(all_halos) == expected_halos "Halo mismatch: N=$N expected $expected_halos halos, got $(length(all_halos))"
-    return HaloArray(center, (all_halos...,), ntuple(_->neigh_dist, N))
+    return HaloArray(center, (all_halos...,), ntuple(i->get_neigh_dist(neigh_dist, i), N))
 end
 function load_neighborhood(arr::HaloArray{T,N}, idx) where {T,N}
-    @assert all(arr.halo_width .== arr.halo_width[1])
-    neigh_dist = arr.halo_width[1]
-    start_idx = idx - CartesianIndex(ntuple(_->neigh_dist, ndims(arr)))
-    stop_idx = idx + CartesianIndex(ntuple(_->neigh_dist, ndims(arr)))
+    start_idx = idx - CartesianIndex(ntuple(i->arr.halo_width[i], ndims(arr)))
+    stop_idx = idx + CartesianIndex(ntuple(i->arr.halo_width[i], ndims(arr)))
     return @view arr[start_idx:stop_idx]
 end
 function inner_stencil!(f, output, read_vars)
@@ -126,7 +128,7 @@ function load_boundary_region(pad::Pad, arr, region_code::NTuple{N,Int}, neigh_d
     # For dimensions with code 0, use full array size
     # For dimensions with code -1 or +1, use neigh_dist
     region_size = ntuple(N) do i
-        region_code[i] == 0 ? size(arr, i) : neigh_dist
+        region_code[i] == 0 ? size(arr, i) : get_neigh_dist(neigh_dist, i)
     end
     # FIXME: return Fill(pad.padval, region_size)
     return move(task_processor(), fill(pad.padval, region_size))

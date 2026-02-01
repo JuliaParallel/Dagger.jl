@@ -137,27 +137,94 @@ function test_stencil()
         end
     end
 
+    @testset "Tuple neighborhood distance" begin
+        # 1D case: distance (2,)
+        @testset "1D with distance (2,)" begin
+            A = DArray([1, 2, 3, 4, 5, 6], Blocks(2,))
+            B = zeros(Blocks(2,), Int, 6)
+            Dagger.spawn_datadeps() do
+                @stencil begin
+                    B[idx] = sum(@neighbors(A[idx], (2,), Wrap()))
+                end
+            end
+            # For each element, neighbors at distance 2 in 1D: [-2, -1, 0, 1, 2]
+            # B[1] neighbors: A[5], A[6], A[1], A[2], A[3] (wrapping) = 5+6+1+2+3 = 17
+            # B[2] neighbors: A[6], A[1], A[2], A[3], A[4] = 6+1+2+3+4 = 16
+            # B[3] neighbors: A[1], A[2], A[3], A[4], A[5] = 1+2+3+4+5 = 15
+            # B[4] neighbors: A[2], A[3], A[4], A[5], A[6] = 2+3+4+5+6 = 20
+            # B[5] neighbors: A[3], A[4], A[5], A[6], A[1] = 3+4+5+6+1 = 19
+            # B[6] neighbors: A[4], A[5], A[6], A[1], A[2] = 4+5+6+1+2 = 18
+            expected_B_1d = [17, 16, 15, 20, 19, 18]
+            @test collect(B) == expected_B_1d
+        end
+
+        # 2D case: distance (1, 2) - different per dimension
+        @testset "2D with distance (1, 2)" begin
+            A = DArray(reshape(1:12, 3, 4), Blocks(1, 2))
+            B = zeros(Blocks(1, 2), Int, 3, 4)
+            Dagger.spawn_datadeps() do
+                @stencil begin
+                    B[idx] = sum(@neighbors(A[idx], (1, 2), Wrap()))
+                end
+            end
+            # Distance (1, 2) means:
+            # - dimension 1 (rows): offsets -1, 0, 1
+            # - dimension 2 (cols): offsets -2, -1, 0, 1, 2
+            # Total neighborhood size: 3 * 5 = 15 elements
+            expected_B_2d = zeros(Int, 3, 4)
+            for i in 1:3, j in 1:4
+                sum_val = 0
+                for di in -1:1, dj in -2:2
+                    row = mod1(i+di, 3)
+                    col = mod1(j+dj, 4)
+                    sum_val += A[row, col]
+                end
+                expected_B_2d[i, j] = sum_val
+            end
+            @test collect(B) == expected_B_2d
+        end
+
+        # 3D case: distance (1, 2, 1) - different per dimension
+        @testset "3D with distance (1, 2, 1)" begin
+            # Need chunk sizes >= 2*distance+1 for each dimension
+            # distance (1, 2, 1) requires chunks >= (3, 5, 3)
+            A = DArray(reshape(1:120, 4, 5, 6), Blocks(4, 5, 3))
+            B = zeros(Blocks(4, 5, 3), Int, 4, 5, 6)
+            Dagger.spawn_datadeps() do
+                @stencil begin
+                    B[idx] = sum(@neighbors(A[idx], (1, 2, 1), Wrap()))
+                end
+            end
+            # Distance (1, 2, 1) means:
+            # - dimension 1: offsets -1, 0, 1 (3 elements)
+            # - dimension 2: offsets -2, -1, 0, 1, 2 (5 elements)
+            # - dimension 3: offsets -1, 0, 1 (3 elements)
+            # Total neighborhood size: 3 * 5 * 3 = 45 elements
+            expected_B_3d = zeros(Int, 4, 5, 6)
+            for i in 1:4, j in 1:5, k in 1:6
+                sum_val = 0
+                for di in -1:1, dj in -2:2, dk in -1:1
+                    row = mod1(i+di, 4)
+                    col = mod1(j+dj, 5)
+                    depth = mod1(k+dk, 6)
+                    sum_val += A[row, col, depth]
+                end
+                expected_B_3d[i, j, k] = sum_val
+            end
+            @test collect(B) == expected_B_3d
+        end
+    end
+
     @testset "Invalid neighborhood distance" begin
         A = ones(Blocks(1, 1), Int, 2, 2)
         B = zeros(Blocks(1, 1), Int, 2, 2)
-        @test_throws_unwrap ArgumentError Dagger.spawn_datadeps() do
-            @stencil begin
-                B[idx] = sum(@neighbors(A[idx], 0, Wrap()))
-            end
-        end
-        @test_throws_unwrap ArgumentError Dagger.spawn_datadeps() do
-            @stencil begin
-                B[idx] = sum(@neighbors(A[idx], -1, Wrap()))
-            end
-        end
-        @test_throws_unwrap ArgumentError Dagger.spawn_datadeps() do
-            @stencil begin
-                B[idx] = sum(@neighbors(A[idx], 1.5, Wrap()))
-            end
-        end
-        @test_throws_unwrap ArgumentError Dagger.spawn_datadeps() do
-            @stencil begin
-                B[idx] = sum(@neighbors(A[idx], 2, Wrap()))
+        for value in [0, -1, 1.5, 2]
+            for dist in [value, (value,)]
+                @test_throws_unwrap ArgumentError Dagger.spawn_datadeps() do
+                    @stencil begin
+                        B[idx] = sum(@neighbors(A[idx], value, Wrap()))
+                    end
+                end
             end
         end
     end
@@ -196,3 +263,4 @@ end
         end
     end
 end
+
