@@ -18,7 +18,18 @@ function copy_buffered(f, args...)
     for (buf_arg, arg) in zip(buffered_args, real_args)
         copyto!(arg, buf_arg)
     end
+
+    # Free the buffers
     foreach(unsafe_free!, buffered_args)
+
+    # If the result is one of the buffered args, return the corresponding
+    # original arg instead (since we've already copied data back to it,
+    # and the buffer has been freed)
+    result_idx = findfirst(buf_arg -> buf_arg === result, buffered_args)
+    if result_idx !== nothing
+        return real_args[result_idx]
+    end
+
     return result
 end
 function allocate_copy_buffer(part::Blocks{N}, A::DArray{T,N}) where {T,N}
