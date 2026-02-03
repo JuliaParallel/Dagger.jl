@@ -163,6 +163,20 @@ end
                 @test collect(DA * DB) ≈ collect(DA) * collect(DB)
             end
 
+            # Matrix addition / subtraction
+            Dagger.with_options(;scope=local_scope) do
+                @test collect(DA + DB) == collect(DA) + collect(DB)
+                @test collect(DA - DB) == collect(DA) - collect(DB)
+            end
+
+            # Vector addition / subtraction
+            Da = rand(Blocks(4), 8)
+            Db_vec = rand(Blocks(4), 8)
+            Dagger.with_options(;scope=local_scope) do
+                @test collect(Da + Db_vec) == collect(Da) + collect(Db_vec)
+                @test collect(Da - Db_vec) == collect(Da) - collect(Db_vec)
+            end
+
             # Out-of-place Cholesky
             A = rand(8, 8)
             A = A * A'
@@ -277,6 +291,20 @@ end
             # Out-of-place Matmul
             Dagger.with_options(;scope=local_scope) do
                 @test collect(DA * DB) ≈ collect(DA) * collect(DB)
+            end
+
+            # Matrix addition / subtraction
+            Dagger.with_options(;scope=local_scope) do
+                @test collect(DA + DB) == collect(DA) + collect(DB)
+                @test collect(DA - DB) == collect(DA) - collect(DB)
+            end
+
+            # Vector addition / subtraction
+            Da = rand(Blocks(4), 8)
+            Db_vec = rand(Blocks(4), 8)
+            Dagger.with_options(;scope=local_scope) do
+                @test collect(Da + Db_vec) == collect(Da) + collect(Db_vec)
+                @test collect(Da - Db_vec) == collect(Da) - collect(Db_vec)
             end
 
             # Out-of-place Cholesky
