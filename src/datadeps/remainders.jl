@@ -9,10 +9,11 @@ This is used to perform partial data copies that only update the "remainder" reg
 struct RemainderAliasing{S<:MemorySpace} <: AbstractAliasing
     space::S
     spans::Vector{Tuple{LocalMemorySpan,LocalMemorySpan}}
+    ainfos::Vector{AliasingWrapper}
     syncdeps::Set{ThunkSyncdep}
 end
-RemainderAliasing(space::S, spans::Vector{Tuple{LocalMemorySpan,LocalMemorySpan}}, syncdeps::Set{ThunkSyncdep}) where S =
-    RemainderAliasing{S}(space, spans, syncdeps)
+RemainderAliasing(space::S, spans::Vector{Tuple{LocalMemorySpan,LocalMemorySpan}}, ainfos::Vector{AliasingWrapper}, syncdeps::Set{ThunkSyncdep}) where S =
+    RemainderAliasing{S}(space, spans, ainfos, syncdeps)
 
 memory_spans(ra::RemainderAliasing) = ra.spans
 
@@ -136,7 +137,7 @@ function compute_remainder_for_arg!(state::DataDepsState,
     end
 
     # Create our tracker
-    tracker = Dict{MemorySpace,Tuple{Vector{Tuple{LocalMemorySpan,LocalMemorySpan}},Set{ThunkSyncdep}}}()
+    tracker = Dict{MemorySpace,Tuple{Vector{Tuple{LocalMemorySpan,LocalMemorySpan}},Vector{AliasingWrapper},Set{ThunkSyncdep}}}()
 
     # Walk backwards through the history of writes to this target
     # other_ainfo is the overlapping ainfo that was written to
@@ -187,13 +188,14 @@ function compute_remainder_for_arg!(state::DataDepsState,
         other_space_idx = something(findfirst(==(other_space), spaces))
         target_space_idx = something(findfirst(==(target_space), spaces))
         tracker_other_space = get!(tracker, other_space) do
-            (Vector{Tuple{LocalMemorySpan,LocalMemorySpan}}(), Set{ThunkSyncdep}())
+            (Vector{Tuple{LocalMemorySpan,LocalMemorySpan}}(), Vector{AliasingWrapper}(), Set{ThunkSyncdep}())
         end
         @opcounter :compute_remainder_for_arg_schedule
         has_overlap = schedule_remainder!(tracker_other_space[1], other_space_idx, target_space_idx, remainder, other_many_spans)
         if compute_syncdeps && has_overlap
             @assert haskey(state.ainfos_owner, other_ainfo) "[idx $idx] ainfo $(typeof(other_ainfo)) has no owner"
-            get_read_deps!(state, other_space, other_ainfo, write_num, tracker_other_space[2])
+            get_read_deps!(state, other_space, other_ainfo, write_num, tracker_other_space[3])
+            push!(tracker_other_space[2], other_ainfo)
         end
     end
     VERIFY_SPAN_CURRENT_OBJECT[] = nothing
@@ -206,9 +208,9 @@ function compute_remainder_for_arg!(state::DataDepsState,
     mra = MultiRemainderAliasing()
     for space in spaces
         if haskey(tracker, space)
-            spans, syncdeps = tracker[space]
+            spans, ainfos, syncdeps = tracker[space]
             if !isempty(spans)
-                push!(mra.remainders, RemainderAliasing(space, spans, syncdeps))
+                push!(mra.remainders, RemainderAliasing(space, spans, ainfos, syncdeps))
             end
         end
     end
@@ -274,6 +276,8 @@ function enqueue_remainder_copy_to!(state::DataDepsState, dest_space::MemorySpac
         push!(remainder_syncdeps, syncdep)
     end
     empty!(remainder_aliasing.syncdeps) # We can't bring these to move!
+    source_ainfos = copy(remainder_aliasing.ainfos)
+    empty!(remainder_aliasing.ainfos)
     get_write_deps!(state, dest_space, target_ainfo, write_num, remainder_syncdeps)
 
     @dagdebug task.uid :spawn_datadeps "($(repr(f)))[$(idx-1)][$dep_mod] Remainder copy-to has $(length(remainder_syncdeps)) syncdeps"
@@ -285,7 +289,10 @@ function enqueue_remainder_copy_to!(state::DataDepsState, dest_space::MemorySpac
     copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=remainder_syncdeps meta=true Dagger.move!(remainder_aliasing, dest_space, source_space, arg_dest, arg_source)
     @maybelog ctx timespan_finish(ctx, :datadeps_copy, (;id), (;thunk_id=copy_task.uid, from_space=source_space, to_space=dest_space, arg_w, from_arg=arg_source, to_arg=arg_dest))
 
-    # This copy task becomes a new writer for the target region
+    # This copy task reads the sources and writes to the target
+    for ainfo in source_ainfos
+        add_reader!(state, arg_w, source_space, ainfo, copy_task, write_num)
+    end
     add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num)
 end
 """
@@ -323,6 +330,8 @@ function enqueue_remainder_copy_from!(state::DataDepsState, dest_space::MemorySp
         push!(remainder_syncdeps, syncdep)
     end
     empty!(remainder_aliasing.syncdeps) # We can't bring these to move!
+    source_ainfos = copy(remainder_aliasing.ainfos)
+    empty!(remainder_aliasing.ainfos)
     get_write_deps!(state, dest_space, target_ainfo, write_num, remainder_syncdeps)
 
     @dagdebug nothing :spawn_datadeps "($(typeof(arg_w.arg)))[$dep_mod] Remainder copy-from has $(length(remainder_syncdeps)) syncdeps"
@@ -334,7 +343,10 @@ function enqueue_remainder_copy_from!(state::DataDepsState, dest_space::MemorySp
     copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=remainder_syncdeps meta=true Dagger.move!(remainder_aliasing, dest_space, source_space, arg_dest, arg_source)
     @maybelog ctx timespan_finish(ctx, :datadeps_copy, (;id), (;thunk_id=copy_task.uid, from_space=source_space, to_space=dest_space, arg_w, from_arg=arg_source, to_arg=arg_dest))
 
-    # This copy task becomes a new writer for the target region
+    # This copy task reads the sources and writes to the target
+    for ainfo in source_ainfos
+        add_reader!(state, arg_w, source_space, ainfo, copy_task, write_num)
+    end
     add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num)
 end
 
@@ -367,7 +379,8 @@ function enqueue_copy_to!(state::DataDepsState, dest_space::MemorySpace, arg_w::
     copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=copy_syncdeps meta=true Dagger.move!(dep_mod, dest_space, source_space, arg_dest, arg_source)
     @maybelog ctx timespan_finish(ctx, :datadeps_copy, (;id), (;thunk_id=copy_task.uid, from_space=source_space, to_space=dest_space, arg_w, from_arg=arg_source, to_arg=arg_dest))
 
-    # This copy task becomes a new writer for the target region
+    # This copy task reads the source and writes to the target
+    add_reader!(state, arg_w, source_space, source_ainfo, copy_task, write_num)
     add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num)
 end
 function enqueue_copy_from!(state::DataDepsState, dest_space::MemorySpace, arg_w::ArgumentWrapper,
@@ -398,7 +411,8 @@ function enqueue_copy_from!(state::DataDepsState, dest_space::MemorySpace, arg_w
     copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=copy_syncdeps meta=true Dagger.move!(dep_mod, dest_space, source_space, arg_dest, arg_source)
     @maybelog ctx timespan_finish(ctx, :datadeps_copy, (;id), (;thunk_id=copy_task.uid, from_space=source_space, to_space=dest_space, arg_w, from_arg=arg_source, to_arg=arg_dest))
 
-    # This copy task becomes a new writer for the target region
+    # This copy task reads the source and writes to the target
+    add_reader!(state, arg_w, source_space, source_ainfo, copy_task, write_num)
     add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num)
 end
 
