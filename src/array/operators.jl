@@ -112,6 +112,41 @@ end
 Base.first(A::DArray) = A[begin]
 Base.last(A::DArray) = A[end]
 
+# Addition and subtraction
+
+function elementwise_op!(f, C, A, B)
+    @assert size(C) == size(A) == size(B)
+    for idx in eachindex(C)
+        C[idx] = f(A[idx], B[idx])
+    end
+    return
+end
+function elementwise_op(f, A::DArray, B::DArray)
+    if size(A) != size(B)
+        throw(DimensionMismatch("Sizes of A and B must match"))
+    end
+    A_part = A.partitioning
+    B_part = B.partitioning
+    if A.partitioning != B.partitioning
+        B_part = A_part
+    end
+    C = similar(A)
+    maybe_copy_buffered(B=>B_part, A=>A_part) do B, A
+        Ac = A.chunks
+        Bc = B.chunks
+        Cc = C.chunks
+        Dagger.spawn_datadeps() do
+            for idx in eachindex(Cc)
+                Dagger.@spawn elementwise_op!(f, Out(Cc[idx]), In(Ac[idx]), In(Bc[idx]))
+            end
+        end
+        return
+    end
+    return C
+end
+Base.:(+)(A::DArray, B::DArray) = elementwise_op(+, A, B)
+Base.:(-)(A::DArray, B::DArray) = elementwise_op(-, A, B)
+
 # In-place operations
 
 function imap!(f, A)
