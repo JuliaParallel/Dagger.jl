@@ -799,12 +799,8 @@ for wrapper in (UpperTriangular, LowerTriangular, UnitUpperTriangular, UnitLower
     end
 end
 function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, v::Base.RefValue)
-    to_w = root_worker_id(to_proc)
-    p_chunk = rewrap_aliased_object!(cache, from_proc, to_proc, from_space, to_space, v[])
-    return remotecall_fetch(to_w, from_proc, to_proc, from_space, to_space, p_chunk) do from_proc, to_proc, from_space, to_space, p_chunk
-        p_new = move(from_proc, to_proc, p_chunk)
-        v_new = Ref(p_new)
-        return tochunk(v_new, to_proc)
+    return aliased_object!(cache, v) do v
+        return remotecall_endpoint(identity, from_proc, to_proc, from_space, to_space, v)
     end
 end
 #= FIXME: Make this work so we can automatically move-rewrap recursive objects
