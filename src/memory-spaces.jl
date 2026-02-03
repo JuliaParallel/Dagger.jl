@@ -402,6 +402,12 @@ end
 aliasing(x::DTask, T) = aliasing(fetch(x; raw=true), T)
 aliasing(x::DTask) = aliasing(fetch(x; raw=true))
 
+function aliasing(x::Base.RefValue{T}) where T
+    addr = UInt(Base.pointer_from_objref(x) + fieldoffset(typeof(x), 1))
+    ptr = RemotePtr{Cvoid}(addr, CPURAMMemorySpace(myid()))
+    return ObjectAliasing(ptr, sizeof(x))
+end
+
 struct ContiguousAliasing{S} <: AbstractAliasing
     span::MemorySpan{S}
 end
