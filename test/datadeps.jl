@@ -15,7 +15,7 @@ using LinearAlgebra, Graphs
     @test length(a.sub_ainfos) == 1
     s = only(a.sub_ainfos)
     @test s isa Dagger.ObjectAliasing
-    @test s.ptr == pointer_from_objref(r)
+    @test s.ptr.addr == UInt(pointer_from_objref(r))
     @test s.sz == sizeof(3)
 end
 
