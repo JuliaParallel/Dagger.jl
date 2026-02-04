@@ -8,7 +8,7 @@ The fundamental structure of a `@stencil` block involves iterating over an impli
 
 ```julia
 using Dagger
-import Dagger: @stencil, Wrap, Pad
+import Dagger: @stencil, Wrap, Pad, Reflect
 
 # Initialize a DArray
 A = zeros(Blocks(2, 2), Int, 4, 4)
@@ -35,6 +35,9 @@ The true power of stencils comes from accessing neighboring elements. The `@neig
 - `boundary_condition`: Defines how to handle accesses beyond the array boundaries. Available conditions are:
     - `Wrap()`: Wraps around to the other side of the array.
     - `Pad(value)`: Pads with a specified `value`.
+    - `Reflect(symmetric)`: Reflects values back into the array at boundaries. The `symmetric` boolean controls whether the edge element is included in the reflection:
+        - `Reflect(true)` (symmetric): Edge element IS repeated. For array `[a,b,c,d]`, extends as `[...,c,b,a,a,b,c,d,d,c,b,...]`.
+        - `Reflect(false)` (mirror): Edge element NOT repeated. For array `[a,b,c,d]`, extends as `[...,d,c,b,a,b,c,d,c,b,a,...]`.
 
 ### Example: Averaging Neighbors with `Wrap`
 
@@ -91,6 +94,59 @@ expected_B_padded = [
     4 6 6 4
 ]
 @assert collect(B) == expected_B_padded
+```
+
+### Example: Smoothing with `Reflect`
+
+The `Reflect` boundary condition mirrors values at the edges, which is useful for operations like smoothing or image processing where you want to avoid artificial discontinuities at boundaries.
+
+#### Symmetric Reflection (`Reflect(true)`)
+
+With symmetric reflection, the edge element is repeated in the reflection:
+
+```julia
+import Dagger: Reflect
+
+# Simple 1D example to illustrate symmetric reflection
+# Array [1, 2, 3, 4] extends as [..., 3, 2, 1, 1, 2, 3, 4, 4, 3, 2, ...]
+#                                         ^edge^         ^edge^
+A = DArray([1, 2, 3, 4], Blocks(2))
+B = zeros(Blocks(2), Int, 4)
+
+Dagger.spawn_datadeps() do
+    @stencil begin
+        B[idx] = sum(@neighbors(A[idx], 1, Reflect(true)))
+    end
+end
+
+# B[1]: indices 0,1,2 -> 0 reflects to 1, so [1,1,2] = 4
+# B[2]: indices 1,2,3 -> all in bounds, [1,2,3] = 6
+# B[3]: indices 2,3,4 -> all in bounds, [2,3,4] = 9
+# B[4]: indices 3,4,5 -> 5 reflects to 4, so [3,4,4] = 11
+@assert collect(B) == [4, 6, 9, 11]
+```
+
+#### Mirror Reflection (`Reflect(false)`)
+
+With mirror reflection, the edge element is NOT repeated:
+
+```julia
+# Array [1, 2, 3, 4] extends as [..., 4, 3, 2, 1, 2, 3, 4, 3, 2, 1, ...]
+#                                            ^edge^   ^edge^
+A = DArray([1, 2, 3, 4], Blocks(2))
+B = zeros(Blocks(2), Int, 4)
+
+Dagger.spawn_datadeps() do
+    @stencil begin
+        B[idx] = sum(@neighbors(A[idx], 1, Reflect(false)))
+    end
+end
+
+# B[1]: indices 0,1,2 -> 0 reflects to 2, so [2,1,2] = 5
+# B[2]: indices 1,2,3 -> all in bounds, [1,2,3] = 6
+# B[3]: indices 2,3,4 -> all in bounds, [2,3,4] = 9
+# B[4]: indices 3,4,5 -> 5 reflects to 3, so [3,4,3] = 10
+@assert collect(B) == [5, 6, 9, 10]
 ```
 
 ## Sequential Semantics
