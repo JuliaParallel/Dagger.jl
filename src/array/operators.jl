@@ -116,9 +116,7 @@ Base.last(A::DArray) = A[end]
 
 function elementwise_op!(f, C, A, B)
     @assert size(C) == size(A) == size(B)
-    for idx in eachindex(C)
-        C[idx] = f(A[idx], B[idx])
-    end
+    C .= f.(A, B)
     return
 end
 function elementwise_op(f, A::DArray, B::DArray)
