@@ -509,14 +509,20 @@ for wrapper in (UpperTriangular, LowerTriangular, UnitUpperTriangular, UnitLower
         write_remainder!(copies, copies_offset, parent(to), to_ptr, n)
     end
 end
-# N.B. We don't handle pointer aliasing in remainder copies
+
 function read_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, from::Base.RefValue, from_ptr::UInt64, n::UInt64)
-    @assert from_ptr == UInt64(Base.pointer_from_objref(from) + fieldoffset(typeof(from), 1)) "Pointer $from_ptr not found in RefValue"
-    unsafe_copyto!(pointer(copies, copies_offset), Ptr{UInt8}(from_ptr), n)
+    if from_ptr == UInt64(Base.pointer_from_objref(from) + fieldoffset(typeof(from), 1))
+        unsafe_copyto!(pointer(copies, copies_offset), Ptr{UInt8}(from_ptr), n)
+    else
+        read_remainder!(copies, copies_offset, from[], from_ptr, n)
+    end
 end
 function write_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, to::Base.RefValue, to_ptr::UInt64, n::UInt64)
-    @assert to_ptr == UInt64(Base.pointer_from_objref(to) + fieldoffset(typeof(to), 1)) "Pointer $to_ptr not found in RefValue"
-    unsafe_copyto!(Ptr{UInt8}(to_ptr), pointer(copies, copies_offset), n)
+    if to_ptr == UInt64(Base.pointer_from_objref(to) + fieldoffset(typeof(to), 1))
+        unsafe_copyto!(Ptr{UInt8}(to_ptr), pointer(copies, copies_offset), n)
+    else
+        write_remainder!(copies, copies_offset, to[], to_ptr, n)
+    end
 end
 
 function find_object_holding_ptr(A::SparseMatrixCSC, ptr::UInt64)
