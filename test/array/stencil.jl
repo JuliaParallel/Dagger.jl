@@ -1,4 +1,4 @@
-import Dagger: @stencil, Wrap, Pad
+import Dagger: @stencil, Wrap, Pad, Reflect
 
 function test_stencil()
     @testset "Simple assignment" begin
@@ -65,6 +65,99 @@ function test_stencil()
             4 6 6 4
         ]
         @test collect(B) == expected_B_pad
+    end
+
+    @testset "Reflect boundary (symmetric)" begin
+        # Test symmetric reflection (edge element IS included/repeated)
+        # For A = [1, 2, 3, 4] with Reflect(true):
+        # idx=0 → 1, idx=-1 → 2 (reflection includes edge)
+        # idx=5 → 4, idx=6 → 3 (reflection includes edge)
+        A = DArray([1, 2, 3, 4], Blocks(2))
+        B = zeros(Blocks(2), Int, 4)
+        Dagger.spawn_datadeps() do
+            @stencil begin
+                B[idx] = sum(@neighbors(A[idx], 1, Reflect(true)))
+            end
+        end
+        # B[1]: neighbors at indices 0, 1, 2 -> reflected 0 becomes 1, so [1, 1, 2] = 4
+        # B[2]: neighbors at indices 1, 2, 3 -> [1, 2, 3] = 6
+        # B[3]: neighbors at indices 2, 3, 4 -> [2, 3, 4] = 9
+        # B[4]: neighbors at indices 3, 4, 5 -> reflected 5 becomes 4, so [3, 4, 4] = 11
+        expected_B_symm = [4, 6, 9, 11]
+        @test collect(B) == expected_B_symm
+    end
+
+    @testset "Reflect boundary (mirror)" begin
+        # Test mirror reflection (edge element NOT included/repeated)
+        # For A = [1, 2, 3, 4] with Reflect(false):
+        # idx=0 → 2, idx=-1 → 3 (reflection skips edge)
+        # idx=5 → 3, idx=6 → 2 (reflection skips edge)
+        A = DArray([1, 2, 3, 4], Blocks(2))
+        B = zeros(Blocks(2), Int, 4)
+        Dagger.spawn_datadeps() do
+            @stencil begin
+                B[idx] = sum(@neighbors(A[idx], 1, Reflect(false)))
+            end
+        end
+        # B[1]: neighbors at indices 0, 1, 2 -> reflected 0 becomes 2, so [2, 1, 2] = 5
+        # B[2]: neighbors at indices 1, 2, 3 -> [1, 2, 3] = 6
+        # B[3]: neighbors at indices 2, 3, 4 -> [2, 3, 4] = 9
+        # B[4]: neighbors at indices 3, 4, 5 -> reflected 5 becomes 3, so [3, 4, 3] = 10
+        expected_B_mirror = [5, 6, 9, 10]
+        @test collect(B) == expected_B_mirror
+    end
+
+    @testset "Reflect boundary 2D (symmetric)" begin
+        # Test 2D symmetric reflection with a gradient pattern
+        A = DArray(reshape(1:16, 4, 4), Blocks(2, 2))
+        B = zeros(Blocks(2, 2), Int, 4, 4)
+        Dagger.spawn_datadeps() do
+            @stencil begin
+                B[idx] = sum(@neighbors(A[idx], 1, Reflect(true)))
+            end
+        end
+        # Symmetric: idx < 1 → 1 - idx, idx > size → 2*size + 1 - idx
+        A_collected = collect(A)
+        expected_B_symm = zeros(Int, 4, 4)
+        for i in 1:4, j in 1:4
+            sum_val = 0
+            for di in -1:1, dj in -1:1
+                ni, nj = i + di, j + dj
+                # Apply symmetric reflection logic
+                # For symmetric: idx < 1 → 1 - idx, idx > size → 2*size + 1 - idx
+                ni = ni < 1 ? 1 - ni : (ni > 4 ? 2*4 + 1 - ni : ni)
+                nj = nj < 1 ? 1 - nj : (nj > 4 ? 2*4 + 1 - nj : nj)
+                sum_val += A_collected[ni, nj]
+            end
+            expected_B_symm[i, j] = sum_val
+        end
+        @test collect(B) == expected_B_symm
+    end
+
+    @testset "Reflect boundary 2D (mirror)" begin
+        # Test 2D mirror reflection with a gradient pattern
+        A = DArray(reshape(1:16, 4, 4), Blocks(2, 2))
+        B = zeros(Blocks(2, 2), Int, 4, 4)
+        Dagger.spawn_datadeps() do
+            @stencil begin
+                B[idx] = sum(@neighbors(A[idx], 1, Reflect(false)))
+            end
+        end
+        # Mirror: idx < 1 → 2 - idx, idx > size → 2*size - idx
+        A_collected = collect(A)
+        expected_B_mirror = zeros(Int, 4, 4)
+        for i in 1:4, j in 1:4
+            sum_val = 0
+            for di in -1:1, dj in -1:1
+                ni, nj = i + di, j + dj
+                # Apply mirror reflection logic
+                ni = ni < 1 ? 2 - ni : (ni > 4 ? 2*4 - ni : ni)
+                nj = nj < 1 ? 2 - nj : (nj > 4 ? 2*4 - nj : nj)
+                sum_val += A_collected[ni, nj]
+            end
+            expected_B_mirror[i, j] = sum_val
+        end
+        @test collect(B) == expected_B_mirror
     end
 
     @testset "Multiple expressions" begin

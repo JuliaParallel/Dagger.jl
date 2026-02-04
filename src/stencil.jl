@@ -21,7 +21,6 @@ end
 get_neigh_dist(neigh_dist::Integer, i::Int) = neigh_dist
 get_neigh_dist(neigh_dist::Tuple, i::Int) = neigh_dist[i]
 
-
 # Load a halo region from a neighboring chunk
 # region_code: N-tuple where each element is -1 (low), 0 (full extent), or +1 (high)
 # For dimensions with code 0, we take the full extent of the array
@@ -72,13 +71,17 @@ function select_neighborhood_chunks(chunks, idx, neigh_dist, boundary)
         new_idx = idx + chunk_offset
 
         if is_past_boundary(size(chunks), new_idx)
+            # Compute which dimensions are actually past boundary
+            boundary_dims = ntuple(N) do d
+                new_idx[d] < 1 || new_idx[d] > size(chunks)[d]
+            end
             if boundary_has_transition(boundary)
                 new_idx = boundary_transition(boundary, new_idx, size(chunks))
             else
                 new_idx = idx
             end
             chunk = chunks[new_idx]
-            push!(accesses, Dagger.@spawn load_boundary_region(boundary, chunk, region_code, neigh_dist))
+            push!(accesses, Dagger.@spawn load_boundary_region(boundary, chunk, region_code, neigh_dist, boundary_dims))
         else
             chunk = chunks[new_idx]
             push!(accesses, Dagger.@spawn load_neighbor_region(chunk, region_code, neigh_dist))
@@ -113,17 +116,23 @@ end
 
 is_past_boundary(size, idx) = any(ntuple(i -> idx[i] < 1 || idx[i] > size[i], length(size)))
 
+"""
+Wrap boundary condition. Non-local accesses wrap around to the other side of the array.
+"""
 struct Wrap end
 boundary_has_transition(::Wrap) = true
 boundary_transition(::Wrap, idx, size) =
     CartesianIndex(ntuple(i -> mod1(idx[i], size[i]), length(size)))
-load_boundary_region(::Wrap, arr, region_code, neigh_dist) = load_neighbor_region(arr, region_code, neigh_dist)
+load_boundary_region(::Wrap, arr, region_code, neigh_dist, boundary_dims) = load_neighbor_region(arr, region_code, neigh_dist)
 
+"""
+Pad boundary condition. Non-local accesses are padded with a specified value.
+"""
 struct Pad{T}
     padval::T
 end
 boundary_has_transition(::Pad) = false
-function load_boundary_region(pad::Pad, arr, region_code::NTuple{N,Int}, neigh_dist) where N
+function load_boundary_region(pad::Pad, arr, region_code::NTuple{N,Int}, neigh_dist, boundary_dims::NTuple{N,Bool}) where N
     # Compute the size of this halo region
     # For dimensions with code 0, use full array size
     # For dimensions with code -1 or +1, use neigh_dist
@@ -132,6 +141,76 @@ function load_boundary_region(pad::Pad, arr, region_code::NTuple{N,Int}, neigh_d
     end
     # FIXME: return Fill(pad.padval, region_size)
     return move(task_processor(), fill(pad.padval, region_size))
+end
+
+"""
+Reflect boundary condition. Non-local accesses are reflected back into the array.
+If `symm` is true, the reflected values include the nearest center elements.
+If `symm` is false, the reflected values do not include the nearest center elements.
+"""
+struct Reflect{Symmetric} end
+Reflect(symm::Bool) = Reflect{symm}()
+boundary_has_transition(::Reflect) = true
+# Clamp to valid chunk indices - we stay at the boundary chunk
+boundary_transition(::Reflect, idx, size) =
+    CartesianIndex(ntuple(i -> clamp(idx[i], 1, size[i]), length(size)))
+function load_boundary_region(::Reflect{Symm}, arr, region_code::NTuple{N,Int}, neigh_dist, boundary_dims::NTuple{N,Bool}) where {N, Symm}
+    # Only flip region_code for dimensions that are BOTH:
+    # 1. Non-zero in region_code (we're accessing a neighbor in that dimension)
+    # 2. Actually past boundary (boundary_dims[i] is true)
+    # For dimensions not past boundary, keep the original region_code behavior
+    flipped_code = ntuple(N) do i
+        if region_code[i] != 0 && boundary_dims[i]
+            # This dimension needs reflection - flip the code
+            -region_code[i]
+        else
+            # Keep original code (either 0, or not past boundary)
+            region_code[i]
+        end
+    end
+
+    # For non-symmetric (mirror), skip 1 element to exclude the edge
+    # For symmetric, include the edge element (skip = 0)
+    # Only apply skip to dimensions that are being reflected
+    skip = Symm ? 0 : 1
+
+    # Compute region indices
+    start_idx = CartesianIndex(ntuple(N) do i
+        needs_skip = boundary_dims[i] && region_code[i] != 0
+        actual_skip = needs_skip ? skip : 0
+        if flipped_code[i] == -1
+            # Taking from end (high side)
+            lastindex(arr, i) - get_neigh_dist(neigh_dist, i) + 1 - actual_skip
+        elseif flipped_code[i] == +1
+            # Taking from start (low side)
+            firstindex(arr, i) + actual_skip
+        else
+            firstindex(arr, i)
+        end
+    end)
+    stop_idx = CartesianIndex(ntuple(N) do i
+        needs_skip = boundary_dims[i] && region_code[i] != 0
+        actual_skip = needs_skip ? skip : 0
+        if flipped_code[i] == +1
+            firstindex(arr, i) + get_neigh_dist(neigh_dist, i) - 1 + actual_skip
+        elseif flipped_code[i] == -1
+            lastindex(arr, i) - actual_skip
+        else
+            lastindex(arr, i)
+        end
+    end)
+
+    region = move(task_processor(), collect(@view arr[start_idx:stop_idx]))
+
+    # Reverse only along dimensions that are actually being reflected
+    # (both non-zero in region_code AND past boundary)
+    for i in 1:N
+        if region_code[i] != 0 && boundary_dims[i]
+            region = reverse(region, dims=i)
+        end
+    end
+
+    return region
 end
 
 """
