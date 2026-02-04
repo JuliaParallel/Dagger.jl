@@ -263,26 +263,30 @@ function is_stored(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::Ab
     key = cache.derived[ainfo]
     return key in cache.stored[space]
 end
+function is_key_present(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::AbstractAliasing)
+    return haskey(cache.derived, ainfo)
+end
 function get_stored(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::AbstractAliasing)
-    @assert is_stored(cache, space, ainfo) "Cache does not have key $ainfo"
+    @assert is_stored(cache, space, ainfo) "Cache does not have derived ainfo $ainfo"
     key = cache.derived[ainfo]
     return cache.values[space][key]
 end
-function set_stored!(cache::AliasedObjectCacheStore, dest_space::MemorySpace, value::Chunk, ainfo::AbstractAliasing, orig_space::MemorySpace)
-    @assert !is_stored(cache, dest_space, ainfo) "Cache already has key $ainfo"
-    if !haskey(cache.derived, ainfo)
-        push!(cache.keys, ainfo)
-        cache.derived[ainfo] = ainfo
-        push!(get!(Set{AbstractAliasing}, cache.stored, orig_space), ainfo)
-        key = ainfo
-    else
-        key = cache.derived[ainfo]
-    end
+function set_stored!(cache::AliasedObjectCacheStore, dest_space::MemorySpace, value::Chunk, ainfo::AbstractAliasing)
+    @assert !is_stored(cache, dest_space, ainfo) "Cache already has derived ainfo $ainfo"
+    key = cache.derived[ainfo]
     value_ainfo = aliasing(value, identity)
     cache.derived[value_ainfo] = key
     push!(get!(Set{AbstractAliasing}, cache.stored, dest_space), key)
     values_dict = get!(Dict{AbstractAliasing,Chunk}, cache.values, dest_space)
     values_dict[key] = value
+    return
+end
+function set_key_stored!(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::AbstractAliasing, value::Chunk)
+    push!(cache.keys, ainfo)
+    cache.derived[ainfo] = ainfo
+    push!(get!(Set{AbstractAliasing}, cache.stored, space), ainfo)
+    values_dict = get!(Dict{AbstractAliasing,Chunk}, cache.values, space)
+    values_dict[ainfo] = value
     return
 end
 
@@ -298,6 +302,14 @@ function is_stored(cache::AliasedObjectCache, ainfo::AbstractAliasing)
     cache_raw = unwrap(cache.chunk)::AliasedObjectCacheStore
     return is_stored(cache_raw, cache.space, ainfo)
 end
+function is_key_present(cache::AliasedObjectCache, space::MemorySpace, ainfo::AbstractAliasing)
+    wid = root_worker_id(cache.chunk)
+    if wid != myid()
+        return remotecall_fetch(is_key_present, wid, cache, space, ainfo)
+    end
+    cache_raw = unwrap(cache.chunk)::AliasedObjectCacheStore
+    return is_key_present(cache_raw, space, ainfo)
+end
 function get_stored(cache::AliasedObjectCache, ainfo::AbstractAliasing)
     wid = root_worker_id(cache.chunk)
     if wid != myid()
@@ -306,16 +318,28 @@ function get_stored(cache::AliasedObjectCache, ainfo::AbstractAliasing)
     cache_raw = unwrap(cache.chunk)::AliasedObjectCacheStore
     return get_stored(cache_raw, cache.space, ainfo)
 end
-function set_stored!(cache::AliasedObjectCache, value::Chunk, ainfo::AbstractAliasing, orig_space::MemorySpace)
+function set_stored!(cache::AliasedObjectCache, value::Chunk, ainfo::AbstractAliasing)
     wid = root_worker_id(cache.chunk)
     if wid != myid()
-        return remotecall_fetch(set_stored!, wid, cache, value, ainfo, orig_space)
+        return remotecall_fetch(set_stored!, wid, cache, value, ainfo)
     end
     cache_raw = unwrap(cache.chunk)::AliasedObjectCacheStore
-    set_stored!(cache_raw, cache.space, value, ainfo, orig_space)
+    set_stored!(cache_raw, cache.space, value, ainfo)
     return
 end
+function set_key_stored!(cache::AliasedObjectCache, space::MemorySpace, ainfo::AbstractAliasing, value::Chunk)
+    wid = root_worker_id(cache.chunk)
+    if wid != myid()
+        return remotecall_fetch(set_key_stored!, wid, cache, space, ainfo, value)
+    end
+    cache_raw = unwrap(cache.chunk)::AliasedObjectCacheStore
+    set_key_stored!(cache_raw, space, ainfo, value)
+end
 function aliased_object!(f, cache::AliasedObjectCache, x; ainfo=aliasing(x, identity))
+    x_space = memory_space(x)
+    if !is_key_present(cache, x_space, ainfo)
+        set_key_stored!(cache, x_space, ainfo, x isa Chunk ? x : tochunk(x))
+    end
     if is_stored(cache, ainfo)
         return get_stored(cache, ainfo)
     else
@@ -325,7 +349,7 @@ function aliased_object!(f, cache::AliasedObjectCache, x; ainfo=aliasing(x, iden
         if memory_space(x) != cache.space
             @assert ainfo != aliasing(y, identity) "Aliasing mismatch! $ainfo == $(aliasing(y, identity))"
         end
-        set_stored!(cache, y, ainfo, memory_space(x))
+        set_stored!(cache, y, ainfo)
         return y
     end
 end
