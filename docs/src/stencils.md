@@ -8,7 +8,7 @@ The fundamental structure of a `@stencil` block involves iterating over an impli
 
 ```julia
 using Dagger
-import Dagger: @stencil, Wrap, Pad, Reflect
+import Dagger: @stencil, Wrap, Pad, Reflect, Clamp, LinearExtrapolate
 
 # Initialize a DArray
 A = zeros(Blocks(2, 2), Int, 4, 4)
@@ -31,13 +31,16 @@ The true power of stencils comes from accessing neighboring elements. The `@neig
 `@neighbors(array[idx], distance, boundary_condition)`
 
 - `array[idx]`: The array and current index from which to find neighbors.
-- `distance`: An integer specifying the extent of the neighborhood (e.g., `1` for a 3x3 neighborhood in 2D).
+- `distance`: An integer or `Tuple` of integers specifying the extent of the neighborhood (e.g., `1` for a 3x3 neighborhood in 2D).
 - `boundary_condition`: Defines how to handle accesses beyond the array boundaries. Available conditions are:
-    - `Wrap()`: Wraps around to the other side of the array.
+    - `Wrap()`: Wraps around to the other side of the array (periodic boundaries).
     - `Pad(value)`: Pads with a specified `value`.
     - `Reflect(symmetric)`: Reflects values back into the array at boundaries. The `symmetric` boolean controls whether the edge element is included in the reflection:
         - `Reflect(true)` (symmetric): Edge element IS repeated. For array `[a,b,c,d]`, extends as `[...,c,b,a,a,b,c,d,d,c,b,...]`.
         - `Reflect(false)` (mirror): Edge element NOT repeated. For array `[a,b,c,d]`, extends as `[...,d,c,b,a,b,c,d,c,b,a,...]`.
+    - `Clamp()`: Clamps to the boundary value (repeats edge elements). For array `[a,b,c,d]`, extends as `[...,a,a,a,a,b,c,d,d,d,d,...]`.
+    - `LinearExtrapolate()`: Linearly extrapolates using the slope at the boundary. Only works with `Real` element types. For array `[2,4,6,8]`, the slope at the low boundary is `4-2=2`, so index 0 would be `2-2=0`.
+    - **Mixed BCs (Tuple)**: You can specify different boundary conditions per dimension using a tuple. For example, `(Wrap(), Pad(0))` uses `Wrap` for dimension 1 and `Pad(0)` for dimension 2.
 
 ### Example: Averaging Neighbors with `Wrap`
 
@@ -148,6 +151,80 @@ end
 # B[4]: indices 3,4,5 -> 5 reflects to 3, so [3,4,3] = 10
 @assert collect(B) == [5, 6, 9, 10]
 ```
+
+### Example: Edge Detection with `Clamp`
+
+The `Clamp` boundary condition repeats edge values, which is useful when you want boundary elements to have a neutral effect:
+
+```julia
+import Dagger: Clamp
+
+# Array [1, 2, 3, 4] extends as [..., 1, 1, 1, 1, 2, 3, 4, 4, 4, 4, ...]
+A = DArray([1, 2, 3, 4], Blocks(2))
+B = zeros(Blocks(2), Int, 4)
+
+Dagger.spawn_datadeps() do
+    @stencil begin
+        B[idx] = sum(@neighbors(A[idx], 1, Clamp()))
+    end
+end
+
+# B[1]: indices 0,1,2 -> 0 clamps to 1, so [1,1,2] = 4
+# B[2]: indices 1,2,3 -> all in bounds, [1,2,3] = 6
+# B[3]: indices 2,3,4 -> all in bounds, [2,3,4] = 9
+# B[4]: indices 3,4,5 -> 5 clamps to 4, so [3,4,4] = 11
+@assert collect(B) == [4, 6, 9, 11]
+```
+
+### Example: Smooth Extrapolation with `LinearExtrapolate`
+
+The `LinearExtrapolate` boundary condition extrapolates linearly based on the slope at the boundary. This is useful for maintaining trends at edges:
+
+```julia
+import Dagger: LinearExtrapolate
+
+# Array [2.0, 4.0, 6.0, 8.0] has slope 2.0 at both boundaries
+# At low boundary: index 0 -> 2.0 + 2.0*(-1) = 0.0
+# At high boundary: index 5 -> 8.0 + 2.0*(1) = 10.0
+A = DArray([2.0, 4.0, 6.0, 8.0], Blocks(2))
+B = zeros(Blocks(2), Float64, 4)
+
+Dagger.spawn_datadeps() do
+    @stencil begin
+        B[idx] = sum(@neighbors(A[idx], 1, LinearExtrapolate()))
+    end
+end
+
+# B[1]: indices 0,1,2 -> [0.0, 2.0, 4.0] = 6.0
+# B[2]: indices 1,2,3 -> [2.0, 4.0, 6.0] = 12.0
+# B[3]: indices 2,3,4 -> [4.0, 6.0, 8.0] = 18.0
+# B[4]: indices 3,4,5 -> [6.0, 8.0, 10.0] = 24.0
+@assert collect(B) ≈ [6.0, 12.0, 18.0, 24.0]
+```
+
+### Example: Mixed Boundary Conditions
+
+You can specify different boundary conditions for each dimension using a tuple. This is useful when different boundaries have different physical meanings:
+
+```julia
+import Dagger: Wrap, Pad
+
+# 2D array with Wrap in dimension 1 (rows) and Pad(0) in dimension 2 (columns)
+A = DArray(reshape(1:16, 4, 4), Blocks(2, 2))
+B = zeros(Blocks(2, 2), Int, 4, 4)
+
+Dagger.spawn_datadeps() do
+    @stencil begin
+        B[idx] = sum(@neighbors(A[idx], 1, (Wrap(), Pad(0))))
+    end
+end
+
+# For each element:
+# - Row neighbors wrap around (periodic in rows)
+# - Column neighbors are padded with 0 (zero-flux at column boundaries)
+```
+
+This is particularly useful for physical simulations where, for example, you might have periodic boundaries in one direction and fixed boundaries in another.
 
 ## Sequential Semantics
 
