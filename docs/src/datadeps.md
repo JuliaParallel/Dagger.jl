@@ -221,6 +221,66 @@ function Dagger.move!(dep_mod::Any, from_space::Dagger.MemorySpace, to_space::Da
 end
 ```
 
+## Custom Schedulers
+
+The `spawn_datadeps` function accepts an optional `scheduler` keyword argument that controls how tasks are assigned to processors. By default, `spawn_datadeps` uses `RoundRobinScheduler()`, which cycles through available processors in a round-robin fashion.
+
+### Built-in Schedulers
+
+- **`RoundRobinScheduler()`** (default): Assigns tasks to processors in round-robin order. This is a simple and effective scheduler for most use cases.
+- **`NaiveScheduler()`**: Uses the main Dagger scheduler's cost estimation to select processors. (Currently experimental)
+- **`UltraScheduler()`**: An advanced scheduler that tracks task completion times and tries to minimize overall execution time. (Currently experimental)
+
+### Using a Different Scheduler
+
+You can pass a scheduler to `spawn_datadeps` like so:
+
+```julia
+Dagger.spawn_datadeps(; scheduler=Dagger.RoundRobinScheduler()) do
+    Dagger.@spawn my_task!(InOut(A))
+    Dagger.@spawn another_task!(In(B))
+end
+```
+
+### Writing Your Own Scheduler
+
+You can implement a custom scheduler by:
+1. Defining a struct that subtypes `Dagger.DataDepsScheduler`
+2. Implementing the `Dagger.datadeps_schedule_task` method for your scheduler
+
+The scheduler's job is to select which processor should execute a given task. Here's a simple example that randomly selects a processor:
+
+```julia
+# Define the scheduler type
+struct RandomScheduler <: Dagger.DataDepsScheduler end
+
+# Implement the scheduling function
+function Dagger.datadeps_schedule_task(::RandomScheduler, state, all_procs, all_scope, task_scope, spec, task)
+    # Reduce the available processors to the ones that are compatible with the task scope
+    compatible_procs = filter(proc->proc_in_scope(proc, task_scope), all_procs)
+    if isempty(compatible_procs)
+        throw(SchedulingException("No processors available for task $(task.uid) with scope $(task_scope)"))
+    end
+    # Simply pick a random processor from the compatible ones
+    return rand(compatible_procs)
+end
+
+# Use it
+Dagger.spawn_datadeps(; scheduler=RandomScheduler()) do
+    Dagger.@spawn my_task!(InOut(A))
+end
+```
+
+The `datadeps_schedule_task` function receives:
+- `state`: Internal datadeps state (typically not needed for simple schedulers)
+- `all_procs`: Vector of all available processors
+- `all_scope`: The combined scope of all processors
+- `task_scope`: The scope constraint for this specific task
+- `spec`: The task specification
+- `task`: The DTask being scheduled
+
+The function must return a processor from `all_procs` that is compatible with `task_scope`.
+
 ## Chunk and DTask slicing with `view`
 
 The `view` function allows you to efficiently create a "view" of a `Chunk` or `DTask` that contains an array. This enables operations on specific parts of your distributed data using standard Julia array slicing, without needing to materialize the entire array.
