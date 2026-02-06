@@ -9,6 +9,7 @@ RemotePtr{T}(ptr::Ptr{V}, space::S) where {T,V,S} = RemotePtr{T,S}(UInt(ptr), sp
 RemotePtr{T}(ptr::Ptr{V}) where {T,V} = RemotePtr{T}(UInt(ptr), CPURAMMemorySpace(myid()))
 # FIXME: Don't hardcode CPURAMMemorySpace
 RemotePtr(addr::UInt) = RemotePtr{Cvoid}(addr, CPURAMMemorySpace(myid()))
+RemotePtr(addr::UInt, space::S) where {S<:MemorySpace} = RemotePtr{Cvoid,S}(addr, space)
 Base.convert(::Type{RemotePtr}, x::Ptr{T}) where T =
     RemotePtr(UInt(x), CPURAMMemorySpace(myid()))
 Base.convert(::Type{<:RemotePtr{V}}, x::Ptr{T}) where {V,T} =
@@ -91,8 +92,8 @@ function span_diff(span1::ManyMemorySpan{N}, span2::ManyMemorySpan{N}) where N
     verify_span(span2)
     span = ManyMemorySpan(ntuple(i -> span_diff(span1.spans[i], span2.spans[i]), N))
     matches = ntuple(i->span1.spans[i].ptr == span2.spans[i].ptr, Val(N))
-    @assert !(any(matches) && !all(matches)) "Spans only partially match:\n  Span1: $span1\n  Span2: $span2\n  Result: $span"
-    @assert allequal(span_len, span.spans) "Uneven span_diff result:\n  Span1: $span1\n  Span2: $span2\n  Result: $span"
+    @assert !(any(matches) && !all(matches)) "Spans only partially match:\n  Span1: $span1\n  Span2: $span2\n  Result: $span\nWhile processing $(typeof(VERIFY_SPAN_CURRENT_OBJECT[]))"
+    @assert allequal(span_len, span.spans) "Uneven span_diff result:\n  Span1: $span1\n  Span2: $span2\n  Result: $span\nWhile processing $(typeof(VERIFY_SPAN_CURRENT_OBJECT[]))"
     verify_span(span)
     return span
 end
