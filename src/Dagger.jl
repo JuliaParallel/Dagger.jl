@@ -46,6 +46,10 @@ end
 
 import MacroTools: @capture, prewalk
 
+import KernelAbstractions
+import KernelAbstractions: @kernel, @index
+import Adapt
+
 include("lib/util.jl")
 include("utils/dagdebug.jl")
 
@@ -122,8 +126,6 @@ include("array/linalg.jl")
 include("array/mul.jl")
 include("array/cholesky.jl")
 include("array/lu.jl")
-
-import KernelAbstractions, Adapt
 
 # GPU
 include("gpu.jl")

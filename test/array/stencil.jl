@@ -1,4 +1,4 @@
-import Dagger: @stencil, Wrap, Pad, Reflect
+import Dagger: @stencil, Wrap, Pad, Reflect, Clamp, LinearExtrapolate
 
 function test_stencil()
     @testset "Simple assignment" begin
@@ -65,6 +65,175 @@ function test_stencil()
             4 6 6 4
         ]
         @test collect(B) == expected_B_pad
+    end
+
+    @testset "Clamp boundary" begin
+        # Test clamping to boundary values
+        # For A = [1, 2, 3, 4] with Clamp():
+        # idx=0 → 1, idx=-1 → 1 (clamp to first element)
+        # idx=5 → 4, idx=6 → 4 (clamp to last element)
+        A = DArray([1, 2, 3, 4], Blocks(2))
+        B = zeros(Blocks(2), Int, 4)
+        Dagger.spawn_datadeps() do
+            @stencil begin
+                B[idx] = sum(@neighbors(A[idx], 1, Clamp()))
+            end
+        end
+        # B[1]: neighbors at indices 0, 1, 2 -> clamped 0 becomes 1, so [1, 1, 2] = 4
+        # B[2]: neighbors at indices 1, 2, 3 -> [1, 2, 3] = 6
+        # B[3]: neighbors at indices 2, 3, 4 -> [2, 3, 4] = 9
+        # B[4]: neighbors at indices 3, 4, 5 -> clamped 5 becomes 4, so [3, 4, 4] = 11
+        expected_B_clamp = [4, 6, 9, 11]
+        @test collect(B) == expected_B_clamp
+    end
+
+    @testset "Clamp boundary 2D" begin
+        # Test 2D clamping with a gradient pattern
+        A = DArray(reshape(1:16, 4, 4), Blocks(2, 2))
+        B = zeros(Blocks(2, 2), Int, 4, 4)
+        Dagger.spawn_datadeps() do
+            @stencil begin
+                B[idx] = sum(@neighbors(A[idx], 1, Clamp()))
+            end
+        end
+        A_collected = collect(A)
+        expected_B_clamp = zeros(Int, 4, 4)
+        for i in 1:4, j in 1:4
+            sum_val = 0
+            for di in -1:1, dj in -1:1
+                ni, nj = i + di, j + dj
+                # Apply clamp logic
+                ni = clamp(ni, 1, 4)
+                nj = clamp(nj, 1, 4)
+                sum_val += A_collected[ni, nj]
+            end
+            expected_B_clamp[i, j] = sum_val
+        end
+        @test collect(B) == expected_B_clamp
+    end
+
+    @testset "LinearExtrapolate boundary" begin
+        # Test linear extrapolation using slope at boundary
+        # For A = [2.0, 4.0, 6.0, 8.0] with LinearExtrapolate():
+        # slope at low boundary = 4.0 - 2.0 = 2.0
+        # slope at high boundary = 8.0 - 6.0 = 2.0
+        # idx=0 → 2.0 + 2.0*(-1) = 0.0
+        # idx=5 → 8.0 + 2.0*(1) = 10.0
+        A = DArray([2.0, 4.0, 6.0, 8.0], Blocks(2))
+        B = zeros(Blocks(2), Float64, 4)
+        Dagger.spawn_datadeps() do
+            @stencil begin
+                B[idx] = sum(@neighbors(A[idx], 1, LinearExtrapolate()))
+            end
+        end
+        # B[1]: neighbors at indices 0, 1, 2 -> extrapolated 0 becomes 0.0, so [0.0, 2.0, 4.0] = 6.0
+        # B[2]: neighbors at indices 1, 2, 3 -> [2.0, 4.0, 6.0] = 12.0
+        # B[3]: neighbors at indices 2, 3, 4 -> [4.0, 6.0, 8.0] = 18.0
+        # B[4]: neighbors at indices 3, 4, 5 -> extrapolated 5 becomes 10.0, so [6.0, 8.0, 10.0] = 24.0
+        expected_B_extrap = [6.0, 12.0, 18.0, 24.0]
+        @test collect(B) ≈ expected_B_extrap
+    end
+
+    @testset "LinearExtrapolate boundary 2D" begin
+        # Test 2D linear extrapolation with a gradient pattern
+        A = DArray(Float64.(reshape(1:16, 4, 4)), Blocks(2, 2))
+        B = zeros(Blocks(2, 2), Float64, 4, 4)
+        Dagger.spawn_datadeps() do
+            @stencil begin
+                B[idx] = sum(@neighbors(A[idx], 1, LinearExtrapolate()))
+            end
+        end
+        A_collected = collect(A)
+        expected_B_extrap = zeros(Float64, 4, 4)
+        for i in 1:4, j in 1:4
+            sum_val = 0.0
+            for di in -1:1, dj in -1:1
+                ni, nj = i + di, j + dj
+                val = 0.0
+                # Apply linear extrapolation logic for each dimension
+                if ni < 1
+                    # Low boundary in dim 1: extrapolate using slope from A[1,:] to A[2,:]
+                    base_nj = clamp(nj, 1, 4)
+                    slope = A_collected[2, base_nj] - A_collected[1, base_nj]
+                    val = A_collected[1, base_nj] + slope * (ni - 1)
+                elseif ni > 4
+                    # High boundary in dim 1: extrapolate using slope from A[3,:] to A[4,:]
+                    base_nj = clamp(nj, 1, 4)
+                    slope = A_collected[4, base_nj] - A_collected[3, base_nj]
+                    val = A_collected[4, base_nj] + slope * (ni - 4)
+                elseif nj < 1
+                    # Low boundary in dim 2: extrapolate using slope from A[:,1] to A[:,2]
+                    slope = A_collected[ni, 2] - A_collected[ni, 1]
+                    val = A_collected[ni, 1] + slope * (nj - 1)
+                elseif nj > 4
+                    # High boundary in dim 2: extrapolate using slope from A[:,3] to A[:,4]
+                    slope = A_collected[ni, 4] - A_collected[ni, 3]
+                    val = A_collected[ni, 4] + slope * (nj - 4)
+                else
+                    val = A_collected[ni, nj]
+                end
+                sum_val += val
+            end
+            expected_B_extrap[i, j] = sum_val
+        end
+        @test collect(B) ≈ expected_B_extrap
+    end
+
+    @testset "Mixed boundary conditions" begin
+        # Test different BCs per dimension using a Tuple
+        # Use Wrap in dimension 1 and Pad(0) in dimension 2
+        A = DArray(reshape(1:16, 4, 4), Blocks(2, 2))
+        B = zeros(Blocks(2, 2), Int, 4, 4)
+        Dagger.spawn_datadeps() do
+            @stencil begin
+                B[idx] = sum(@neighbors(A[idx], 1, (Wrap(), Pad(0))))
+            end
+        end
+        A_collected = collect(A)
+        expected_B_mixed = zeros(Int, 4, 4)
+        for i in 1:4, j in 1:4
+            sum_val = 0
+            for di in -1:1, dj in -1:1
+                # Dim 1: Wrap
+                ni = mod1(i + di, 4)
+                # Dim 2: Pad(0)
+                nj = j + dj
+                if nj < 1 || nj > 4
+                    # Padded with 0
+                    sum_val += 0
+                else
+                    sum_val += A_collected[ni, nj]
+                end
+            end
+            expected_B_mixed[i, j] = sum_val
+        end
+        @test collect(B) == expected_B_mixed
+    end
+
+    @testset "Mixed boundary conditions (Clamp, Reflect)" begin
+        # Test Clamp in dimension 1 and Reflect(true) in dimension 2
+        A = DArray(reshape(1:16, 4, 4), Blocks(2, 2))
+        B = zeros(Blocks(2, 2), Int, 4, 4)
+        Dagger.spawn_datadeps() do
+            @stencil begin
+                B[idx] = sum(@neighbors(A[idx], 1, (Clamp(), Reflect(true))))
+            end
+        end
+        A_collected = collect(A)
+        expected_B_mixed = zeros(Int, 4, 4)
+        for i in 1:4, j in 1:4
+            sum_val = 0
+            for di in -1:1, dj in -1:1
+                # Dim 1: Clamp
+                ni = clamp(i + di, 1, 4)
+                # Dim 2: Reflect(true) - symmetric
+                nj = j + dj
+                nj = nj < 1 ? 1 - nj : (nj > 4 ? 2*4 + 1 - nj : nj)
+                sum_val += A_collected[ni, nj]
+            end
+            expected_B_mixed[i, j] = sum_val
+        end
+        @test collect(B) == expected_B_mixed
     end
 
     @testset "Reflect boundary (symmetric)" begin
