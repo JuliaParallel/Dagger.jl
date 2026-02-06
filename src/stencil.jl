@@ -180,6 +180,34 @@ boundary_has_transition(::Clamp) = true
 boundary_transition(::Clamp, idx, size) =
     CartesianIndex(ntuple(i -> clamp(idx[i], 1, size[i]), length(size)))
 
+KernelAbstractions.@kernel function load_boundary_region_kernel(::Clamp, result, arr, region_code::NTuple{N,Int}, neigh_dist, boundary_dims::NTuple{N,Bool}) where N
+    raw_idx = KernelAbstractions.@index(Global)
+
+    # Convert linear index to Cartesian index
+    idx = CartesianIndices(result)[raw_idx]
+
+    # Compute source index for each dimension
+    src_idx = CartesianIndex(ntuple(N) do i
+        nd = get_neigh_dist(neigh_dist, i)
+        if boundary_dims[i] && region_code[i] == -1
+            # Low boundary - clamp to first element
+            firstindex(arr, i)
+        elseif boundary_dims[i] && region_code[i] == +1
+            # High boundary - clamp to last element
+            lastindex(arr, i)
+        elseif region_code[i] == -1
+            # Not at boundary but loading from low side of neighbor
+            lastindex(arr, i) - nd + idx[i]
+        elseif region_code[i] == +1
+            # Not at boundary but loading from high side of neighbor
+            firstindex(arr, i) + idx[i] - 1
+        else
+            # Full extent
+            idx[i]
+        end
+    end)
+    result[idx] = arr[src_idx]
+end
 function load_boundary_region(::Clamp, arr, region_code::NTuple{N,Int}, neigh_dist, boundary_dims::NTuple{N,Bool}) where N
     # Compute the size of this halo region
     region_size = ntuple(N) do i
@@ -188,29 +216,7 @@ function load_boundary_region(::Clamp, arr, region_code::NTuple{N,Int}, neigh_di
 
     result = similar(arr, region_size)
 
-    for idx in CartesianIndices(result)
-        # Compute source index for each dimension
-        src_idx = CartesianIndex(ntuple(N) do i
-            nd = get_neigh_dist(neigh_dist, i)
-            if boundary_dims[i] && region_code[i] == -1
-                # Low boundary - clamp to first element
-                firstindex(arr, i)
-            elseif boundary_dims[i] && region_code[i] == +1
-                # High boundary - clamp to last element
-                lastindex(arr, i)
-            elseif region_code[i] == -1
-                # Not at boundary but loading from low side of neighbor
-                lastindex(arr, i) - nd + idx[i]
-            elseif region_code[i] == +1
-                # Not at boundary but loading from high side of neighbor
-                firstindex(arr, i) + idx[i] - 1
-            else
-                # Full extent
-                idx[i]
-            end
-        end)
-        result[idx] = arr[src_idx]
-    end
+    Kernel(load_boundary_region_kernel)(Clamp(), result, arr, region_code, neigh_dist, boundary_dims; ndrange=size(result))
 
     return move(task_processor(), result)
 end
@@ -244,6 +250,66 @@ boundary_has_transition(::LinearExtrapolate) = true
 boundary_transition(::LinearExtrapolate, idx, size) =
     CartesianIndex(ntuple(i -> clamp(idx[i], 1, size[i]), length(size)))
 
+KernelAbstractions.@kernel function load_boundary_region_kernel(::LinearExtrapolate, result, arr, region_code::NTuple{N,Int}, neigh_dist, boundary_dims::NTuple{N,Bool}, ::Val{extrap_dim}, ::Val{nd}) where {N,extrap_dim,nd}
+    raw_idx = KernelAbstractions.@index(Global)
+
+    # Convert linear index to Cartesian index
+    idx = CartesianIndices(result)[raw_idx]
+
+    if extrap_dim == 0
+        # No boundary dimensions - normal neighbor access
+        src_idx = CartesianIndex(ntuple(Val(N)) do i
+            ndi = get_neigh_dist(neigh_dist, i)::Int
+            if region_code[i] == -1
+                lastindex(arr, i) - ndi + idx[i]
+            elseif region_code[i] == +1
+                firstindex(arr, i) + idx[i] - 1
+            else
+                idx[i]
+            end
+        end)
+        result[idx] = arr[src_idx]
+    else
+        # Extrapolate along extrap_dim, clamp other boundary dimensions
+        #nd = get_neigh_dist(neigh_dist, extrap_dim)::Int
+
+        # Compute base index (for other dimensions, clamp if at boundary)
+        base_idx = ntuple(Val(N)) do i
+            ndi = get_neigh_dist(neigh_dist, i)
+            if i == extrap_dim
+                # Will be set for slope computation
+                region_code[i] == -1 ? firstindex(arr, i) : lastindex(arr, i)
+            elseif boundary_dims[i] && region_code[i] == -1
+                firstindex(arr, i)
+            elseif boundary_dims[i] && region_code[i] == +1
+                lastindex(arr, i)
+            elseif region_code[i] == -1
+                lastindex(arr, i) - ndi + idx[i]
+            elseif region_code[i] == +1
+                firstindex(arr, i) + idx[i] - 1
+            else
+                idx[i]
+            end
+        end
+
+        # Compute slope at boundary
+        if region_code[extrap_dim] == -1
+            # Low boundary: slope = arr[2] - arr[1]
+            idx1 = ntuple(i -> i == extrap_dim ? firstindex(arr, i) : base_idx[i], Val(N))
+            idx2 = ntuple(i -> i == extrap_dim ? firstindex(arr, i) + 1 : base_idx[i], Val(N))
+            slope = arr[CartesianIndex(idx2)] - arr[CartesianIndex(idx1)]
+            dist = -(nd - idx[extrap_dim] + 1)
+            result[idx] = arr[CartesianIndex(idx1)] + slope * dist
+        else
+            # High boundary: slope = arr[end] - arr[end-1]
+            idx1 = ntuple(i -> i == extrap_dim ? lastindex(arr, i) - 1 : base_idx[i], Val(N))
+            idx2 = ntuple(i -> i == extrap_dim ? lastindex(arr, i) : base_idx[i], Val(N))
+            slope = arr[CartesianIndex(idx2)] - arr[CartesianIndex(idx1)]
+            dist = idx[extrap_dim]
+            result[idx] = arr[CartesianIndex(idx2)] + slope * dist
+        end
+    end
+end
 function load_boundary_region(::LinearExtrapolate, arr::AbstractArray{T}, region_code::NTuple{N,Int}, neigh_dist, boundary_dims::NTuple{N,Bool}) where {T<:Real,N}
     # Compute the size of this halo region
     region_size = ntuple(N) do i
@@ -252,70 +318,18 @@ function load_boundary_region(::LinearExtrapolate, arr::AbstractArray{T}, region
 
     result = similar(arr, region_size)
 
-    for idx in CartesianIndices(result)
-        # Find the first boundary dimension that needs extrapolation
-        extrap_dim = 0
-        for d in 1:N
-            if boundary_dims[d] && region_code[d] != 0
-                extrap_dim = d
-                break
-            end
-        end
-
-        if extrap_dim == 0
-            # No boundary dimensions - normal neighbor access
-            src_idx = CartesianIndex(ntuple(N) do i
-                nd = get_neigh_dist(neigh_dist, i)
-                if region_code[i] == -1
-                    lastindex(arr, i) - nd + idx[i]
-                elseif region_code[i] == +1
-                    firstindex(arr, i) + idx[i] - 1
-                else
-                    idx[i]
-                end
-            end)
-            result[idx] = arr[src_idx]
-        else
-            # Extrapolate along extrap_dim, clamp other boundary dimensions
-            nd = get_neigh_dist(neigh_dist, extrap_dim)
-
-            # Compute base index (for other dimensions, clamp if at boundary)
-            base_idx = ntuple(N) do i
-                ndi = get_neigh_dist(neigh_dist, i)
-                if i == extrap_dim
-                    # Will be set for slope computation
-                    region_code[i] == -1 ? firstindex(arr, i) : lastindex(arr, i)
-                elseif boundary_dims[i] && region_code[i] == -1
-                    firstindex(arr, i)
-                elseif boundary_dims[i] && region_code[i] == +1
-                    lastindex(arr, i)
-                elseif region_code[i] == -1
-                    lastindex(arr, i) - ndi + idx[i]
-                elseif region_code[i] == +1
-                    firstindex(arr, i) + idx[i] - 1
-                else
-                    idx[i]
-                end
-            end
-
-            # Compute slope at boundary
-            if region_code[extrap_dim] == -1
-                # Low boundary: slope = arr[2] - arr[1]
-                idx1 = ntuple(i -> i == extrap_dim ? firstindex(arr, i) : base_idx[i], N)
-                idx2 = ntuple(i -> i == extrap_dim ? firstindex(arr, i) + 1 : base_idx[i], N)
-                slope = arr[CartesianIndex(idx2)] - arr[CartesianIndex(idx1)]
-                dist = -(nd - idx[extrap_dim] + 1)
-                result[idx] = arr[CartesianIndex(idx1)] + slope * dist
-            else
-                # High boundary: slope = arr[end] - arr[end-1]
-                idx1 = ntuple(i -> i == extrap_dim ? lastindex(arr, i) - 1 : base_idx[i], N)
-                idx2 = ntuple(i -> i == extrap_dim ? lastindex(arr, i) : base_idx[i], N)
-                slope = arr[CartesianIndex(idx2)] - arr[CartesianIndex(idx1)]
-                dist = idx[extrap_dim]
-                result[idx] = arr[CartesianIndex(idx2)] + slope * dist
-            end
+    # Find the first boundary dimension that needs extrapolation
+    extrap_dim = 0
+    for d in 1:N
+        if boundary_dims[d] && region_code[d] != 0
+            extrap_dim = d
+            break
         end
     end
+
+    nd = get_neigh_dist(neigh_dist, extrap_dim)
+
+    Kernel(load_boundary_region_kernel)(LinearExtrapolate(), result, arr, region_code, neigh_dist, boundary_dims, Val(extrap_dim), Val(nd); ndrange=size(result))
 
     return move(task_processor(), result)
 end
