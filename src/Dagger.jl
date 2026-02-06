@@ -46,7 +46,9 @@ end
 
 import MacroTools: @capture, prewalk
 
-import KernelAbstractions, Adapt
+import KernelAbstractions
+import KernelAbstractions: @kernel, @index
+import Adapt
 
 include("lib/util.jl")
 include("utils/dagdebug.jl")

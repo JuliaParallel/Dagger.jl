@@ -180,8 +180,8 @@ boundary_has_transition(::Clamp) = true
 boundary_transition(::Clamp, idx, size) =
     CartesianIndex(ntuple(i -> clamp(idx[i], 1, size[i]), length(size)))
 
-KernelAbstractions.@kernel function load_boundary_region_kernel(::Clamp, result, arr, region_code::NTuple{N,Int}, neigh_dist, boundary_dims::NTuple{N,Bool}) where N
-    raw_idx = KernelAbstractions.@index(Global)
+@kernel function load_boundary_region_kernel(::Clamp, result, arr, region_code::NTuple{N,Int}, neigh_dist, boundary_dims::NTuple{N,Bool}) where N
+    raw_idx = @index(Global, Linear)
 
     # Convert linear index to Cartesian index
     idx = CartesianIndices(result)[raw_idx]
@@ -216,7 +216,7 @@ function load_boundary_region(::Clamp, arr, region_code::NTuple{N,Int}, neigh_di
 
     result = similar(arr, region_size)
 
-    Kernel(load_boundary_region_kernel)(Clamp(), result, arr, region_code, neigh_dist, boundary_dims; ndrange=size(result))
+    Kernel(load_boundary_region_kernel)(Clamp(), result, arr, region_code, neigh_dist, boundary_dims; ndrange=length(result))
 
     return move(task_processor(), result)
 end
@@ -250,8 +250,8 @@ boundary_has_transition(::LinearExtrapolate) = true
 boundary_transition(::LinearExtrapolate, idx, size) =
     CartesianIndex(ntuple(i -> clamp(idx[i], 1, size[i]), length(size)))
 
-KernelAbstractions.@kernel function load_boundary_region_kernel(::LinearExtrapolate, result, arr, region_code::NTuple{N,Int}, neigh_dist, boundary_dims::NTuple{N,Bool}, ::Val{extrap_dim}, ::Val{nd}) where {N,extrap_dim,nd}
-    raw_idx = KernelAbstractions.@index(Global)
+@kernel function load_boundary_region_kernel(::LinearExtrapolate, result, arr, region_code::NTuple{N,Int}, neigh_dist, boundary_dims::NTuple{N,Bool}, ::Val{extrap_dim}, ::Val{nd}) where {N,extrap_dim,nd}
+    raw_idx = @index(Global, Linear)
 
     # Convert linear index to Cartesian index
     idx = CartesianIndices(result)[raw_idx]
@@ -270,9 +270,6 @@ KernelAbstractions.@kernel function load_boundary_region_kernel(::LinearExtrapol
         end)
         result[idx] = arr[src_idx]
     else
-        # Extrapolate along extrap_dim, clamp other boundary dimensions
-        #nd = get_neigh_dist(neigh_dist, extrap_dim)::Int
-
         # Compute base index (for other dimensions, clamp if at boundary)
         base_idx = ntuple(Val(N)) do i
             ndi = get_neigh_dist(neigh_dist, i)
@@ -327,9 +324,10 @@ function load_boundary_region(::LinearExtrapolate, arr::AbstractArray{T}, region
         end
     end
 
+    # Extrapolate along extrap_dim, clamp other boundary dimensions
     nd = get_neigh_dist(neigh_dist, extrap_dim)
 
-    Kernel(load_boundary_region_kernel)(LinearExtrapolate(), result, arr, region_code, neigh_dist, boundary_dims, Val(extrap_dim), Val(nd); ndrange=size(result))
+    Kernel(load_boundary_region_kernel)(LinearExtrapolate(), result, arr, region_code, neigh_dist, boundary_dims, Val(extrap_dim), Val(nd); ndrange=length(result))
 
     return move(task_processor(), result)
 end
