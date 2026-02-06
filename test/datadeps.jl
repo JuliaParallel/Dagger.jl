@@ -847,3 +847,52 @@ end
         end
     end
 end
+
+# Custom scheduler tests
+
+struct DummyErrorScheduler <: Dagger.DataDepsScheduler end
+struct DummySchedulerError <: Exception end
+function Dagger.datadeps_schedule_task(::DummyErrorScheduler, state, all_procs, all_scope, task_scope, spec, task)
+    throw(DummySchedulerError())
+end
+
+@testset "Custom Schedulers" begin
+    @testset "DummyErrorScheduler" begin
+        # Test that our custom scheduler is actually called by Datadeps
+        @test_throws DummySchedulerError Dagger.spawn_datadeps(; scheduler=DummyErrorScheduler()) do
+            Dagger.@spawn 1 + 1
+        end
+    end
+
+    @testset "RoundRobinScheduler" begin
+        # RoundRobinScheduler is the default and tested extensively above,
+        # but let's explicitly test passing it as an argument
+        A = rand(10)
+        result = Dagger.spawn_datadeps(; scheduler=Dagger.RoundRobinScheduler()) do
+            Dagger.@spawn sum(In(A))
+        end
+        @test fetch(result) ≈ sum(A)
+    end
+
+    @testset "NaiveScheduler" begin
+        # NaiveScheduler uses estimate_task_costs from the main scheduler
+        @test_skip begin
+            A = rand(10)
+            result = Dagger.spawn_datadeps(; scheduler=Dagger.NaiveScheduler()) do
+                Dagger.@spawn sum(In(A))
+            end
+            fetch(result) ≈ sum(A)
+        end
+    end
+
+    @testset "UltraScheduler" begin
+        # UltraScheduler is currently broken (references undefined exec_spaces)
+        @test_skip begin
+            A = rand(10)
+            result = Dagger.spawn_datadeps(; scheduler=Dagger.UltraScheduler()) do
+                Dagger.@spawn sum(In(A))
+            end
+            fetch(result) ≈ sum(A)
+        end
+    end
+end

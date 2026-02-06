@@ -91,6 +91,7 @@ include("sch/Sch.jl"); using .Sch
 include("datadeps/aliasing.jl")
 include("datadeps/chunkview.jl")
 include("datadeps/remainders.jl")
+include("datadeps/scheduling.jl")
 include("datadeps/queue.jl")
 
 # Stencils

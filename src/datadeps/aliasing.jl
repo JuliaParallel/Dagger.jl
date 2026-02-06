@@ -393,11 +393,7 @@ struct DataDepsState
     ainfos_owner::Dict{AliasingWrapper,Union{Pair{DTask,Int},Nothing}}
     ainfos_readers::Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}
 
-    function DataDepsState(aliasing::Bool)
-        if !aliasing
-            @warn "aliasing=false is no longer supported, aliasing is now always enabled" maxlog=1
-        end
-
+    function DataDepsState()
         arg_to_chunk = IdDict{Any,Chunk}()
         arg_origin = IdDict{Any,MemorySpace}()
         remote_args = Dict{MemorySpace,IdDict{Any,Any}}()
@@ -832,21 +828,3 @@ move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor,
 move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, x::Symbol) = x
 move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, x::Type) = x
 =#
-
-struct DataDepsSchedulerState
-    task_to_spec::Dict{DTask,DTaskSpec}
-    assignments::Dict{DTask,MemorySpace}
-    dependencies::Dict{DTask,Set{DTask}}
-    task_completions::Dict{DTask,UInt64}
-    space_completions::Dict{MemorySpace,UInt64}
-    capacities::Dict{MemorySpace,Int}
-
-    function DataDepsSchedulerState()
-        return new(Dict{DTask,DTaskSpec}(),
-                   Dict{DTask,MemorySpace}(),
-                   Dict{DTask,Set{DTask}}(),
-                   Dict{DTask,UInt64}(),
-                   Dict{MemorySpace,UInt64}(),
-                   Dict{MemorySpace,Int}())
-    end
-end

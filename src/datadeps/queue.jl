@@ -1,4 +1,4 @@
-struct DataDepsTaskQueue <: AbstractTaskQueue
+struct DataDepsTaskQueue{Scheduler<:DataDepsScheduler} <: AbstractTaskQueue
     # The queue above us
     upper_queue::AbstractTaskQueue
     # The set of tasks that have already been seen
@@ -8,13 +8,13 @@ struct DataDepsTaskQueue <: AbstractTaskQueue
     # The mapping from task to graph ID
     task_to_id::Union{Dict{DTask,Int},Nothing}
     # Which scheduler to use to assign tasks to processors
-    scheduler::Symbol
+    scheduler::Scheduler
 
-    function DataDepsTaskQueue(upper_queue; scheduler::Symbol)
+    function DataDepsTaskQueue(upper_queue; scheduler::DataDepsScheduler)
         seen_tasks = DTaskPair[]
         g = SimpleDiGraph()
         task_to_id = Dict{DTask,Int}()
-        return new(upper_queue, seen_tasks, g, task_to_id, scheduler)
+        return new{typeof(scheduler)}(upper_queue, seen_tasks, g, task_to_id, scheduler)
     end
 end
 
@@ -56,7 +56,7 @@ returned from `spawn_datadeps`.
 """
 function spawn_datadeps(f::Base.Callable; static::Bool=true,
                         traversal::Symbol=:inorder,
-                        scheduler::Union{Symbol,Nothing}=nothing,
+                        scheduler::Union{DataDepsScheduler,Nothing}=nothing,
                         aliasing::Bool=true,
                         launch_wait::Union{Bool,Nothing}=nothing)
     if !static
@@ -69,7 +69,7 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
         throw(ArgumentError("Aliasing analysis is no longer optional"))
     end
     wait_all(; check_errors=true) do
-        scheduler = something(scheduler, DATADEPS_SCHEDULER[], :roundrobin)::Symbol
+        scheduler = something(scheduler, DATADEPS_SCHEDULER[], RoundRobinScheduler())
         launch_wait = something(launch_wait, DATADEPS_LAUNCH_WAIT[], false)::Bool
         if launch_wait
             result = spawn_bulk() do
@@ -85,7 +85,7 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
         return result
     end
 end
-const DATADEPS_SCHEDULER = ScopedValue{Union{Symbol,Nothing}}(nothing)
+const DATADEPS_SCHEDULER = ScopedValue{Union{DataDepsScheduler,Nothing}}(nothing)
 const DATADEPS_LAUNCH_WAIT = ScopedValue{Union{Bool,Nothing}}(nothing)
 
 function distribute_tasks!(queue::DataDepsTaskQueue)
@@ -107,7 +107,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     if isempty(all_procs)
         throw(Sch.SchedulingException("No processors available, try widening scope"))
     end
-    scope = UnionScope(map(ExactScope, all_procs))
+    all_scope = UnionScope(map(ExactScope, all_procs))
     exec_spaces = unique(vcat(map(proc->collect(memory_spaces(proc)), all_procs)...))
     if !all(space->space isa CPURAMMemorySpace, exec_spaces) && !all(space->root_worker_id(space) == myid(), exec_spaces)
         @warn "Datadeps support for multi-GPU, multi-worker is currently broken\nPlease be prepared for incorrect results or errors" maxlog=1
@@ -116,23 +116,14 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     # Round-robin assign tasks to processors
     upper_queue = get_options(:task_queue)
 
-    state = DataDepsState(queue.aliasing)
-    sstate = DataDepsSchedulerState()
-    for proc in all_procs
-        space = only(memory_spaces(proc))
-        get!(()->0, sstate.capacities, space)
-        sstate.capacities[space] += 1
-    end
-
     # Start launching tasks and necessary copies
+    state = DataDepsState()
     write_num = 1
-    proc_idx = 1
-    #pressures = Dict{Processor,Int}()
     proc_to_scope_lfu = BasicLFUCache{Processor,AbstractScope}(1024)
     for pair in queue.seen_tasks
         spec = pair.spec
         task = pair.task
-        write_num, proc_idx = distribute_task!(queue, state, all_procs, scope, spec, task, spec.fargs, proc_to_scope_lfu, write_num, proc_idx)
+        write_num = distribute_task!(queue, state, all_procs, all_scope, spec, task, spec.fargs, proc_to_scope_lfu, write_num)
     end
 
     # Copy args from remote to local
@@ -180,7 +171,7 @@ struct TypedDataDepsTaskArgument{T,N}
 end
 map_or_ntuple(f, xs::Vector) = map(f, 1:length(xs))
 @inline map_or_ntuple(@specialize(f), xs::NTuple{N,T}) where {N,T} = ntuple(f, Val(N))
-function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_procs, scope, spec::DTaskSpec{typed}, task::DTask, fargs, proc_to_scope_lfu, write_num::Int, proc_idx::Int) where typed
+function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_procs, all_scope, spec::DTaskSpec{typed}, task::DTask, fargs, proc_to_scope_lfu, write_num::Int) where typed
     @specialize spec fargs
 
     if typed
@@ -191,153 +182,17 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
 
     task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
     scheduler = queue.scheduler
-    if scheduler == :naive
-        raw_args = map(arg->tochunk(value(arg)), spec.fargs)
-        our_proc = remotecall_fetch(1, all_procs, raw_args) do all_procs, raw_args
-            Sch.init_eager()
-            sch_state = Sch.EAGER_STATE[]
-
-            @lock sch_state.lock begin
-                # Calculate costs per processor and select the most optimal
-                # FIXME: This should consider any already-allocated slots,
-                # whether they are up-to-date, and if not, the cost of moving
-                # data to them
-                procs, costs = Sch.estimate_task_costs(sch_state, all_procs, nothing, raw_args)
-                return first(procs)
-            end
-        end
-    elseif scheduler == :smart
-        raw_args = map(filter(arg->haskey(state.data_locality, value(arg)), spec.fargs)) do arg
-            arg_chunk = tochunk(value(arg))
-            # Only the owned slot is valid
-            # FIXME: Track up-to-date copies and pass all of those
-            return arg_chunk => data_locality[arg]
-        end
-        f_chunk = tochunk(value(spec.fargs[1]))
-        our_proc, task_pressure = remotecall_fetch(1, all_procs, pressures, f_chunk, raw_args) do all_procs, pressures, f, chunks_locality
-            Sch.init_eager()
-            sch_state = Sch.EAGER_STATE[]
-
-            @lock sch_state.lock begin
-                tx_rate = sch_state.transfer_rate[]
-
-                costs = Dict{Processor,Float64}()
-                for proc in all_procs
-                    # Filter out chunks that are already local
-                    chunks_filt = Iterators.filter(((chunk, space)=chunk_locality)->!(proc in processors(space)), chunks_locality)
-
-                    # Estimate network transfer costs based on data size
-                    # N.B. `affinity(x)` really means "data size of `x`"
-                    # N.B. We treat same-worker transfers as having zero transfer cost
-                    tx_cost = Sch.impute_sum(affinity(chunk)[2] for chunk in chunks_filt)
-
-                    # Estimate total cost to move data and get task running after currently-scheduled tasks
-                    est_time_util = get(pressures, proc, UInt64(0))
-                    costs[proc] = est_time_util + (tx_cost/tx_rate)
-                end
-
-                # Look up estimated task cost
-                sig = Sch.signature(sch_state, f, map(first, chunks_locality))
-                task_pressure = get(sch_state.signature_time_cost, sig, 1000^3)
-
-                # Shuffle procs around, so equally-costly procs are equally considered
-                P = randperm(length(all_procs))
-                procs = getindex.(Ref(all_procs), P)
-
-                # Sort by lowest cost first
-                sort!(procs, by=p->costs[p])
-
-                best_proc = first(procs)
-                return best_proc, task_pressure
-            end
-        end
-        # FIXME: Pressure should be decreased by pressure of syncdeps on same processor
-        pressures[our_proc] = get(pressures, our_proc, UInt64(0)) + task_pressure
-    elseif scheduler == :ultra
-        args = Base.mapany(spec.fargs) do arg
-            pos, data = arg
-            data, _ = unwrap_inout(data)
-            if data isa DTask
-                data = fetch(data; move_value=false, unwrap=false)
-            end
-            return pos => tochunk(data)
-        end
-        f_chunk = tochunk(value(spec.fargs[1]))
-        task_time = remotecall_fetch(1, f_chunk, args) do f, args
-            Sch.init_eager()
-            sch_state = Sch.EAGER_STATE[]
-            return @lock sch_state.lock begin
-                sig = Sch.signature(sch_state, f, args)
-                return get(sch_state.signature_time_cost, sig, 1000^3)
-            end
-        end
-
-        # FIXME: Copy deps are computed eagerly
-        deps = @something(spec.options.syncdeps, Set{Any}())
-
-        # Find latest time-to-completion of all syncdeps
-        deps_completed = UInt64(0)
-        for dep in deps
-            haskey(sstate.task_completions, dep) || continue # copy deps aren't recorded
-            deps_completed = max(deps_completed, sstate.task_completions[dep])
-        end
-
-        # Find latest time-to-completion of each memory space
-        # FIXME: Figure out space completions based on optimal packing
-        spaces_completed = Dict{MemorySpace,UInt64}()
-        for space in exec_spaces
-            completed = UInt64(0)
-            for (task, other_space) in sstate.assignments
-                space == other_space || continue
-                completed = max(completed, sstate.task_completions[task])
-            end
-            spaces_completed[space] = completed
-        end
-
-        # Choose the earliest-available memory space and processor
-        # FIXME: Consider move time
-        move_time = UInt64(0)
-        local our_space_completed
-        while true
-            our_space_completed, our_space = findmin(spaces_completed)
-            our_space_procs = filter(proc->proc in all_procs, processors(our_space))
-            if isempty(our_space_procs)
-                delete!(spaces_completed, our_space)
-                continue
-            end
-            our_proc = rand(our_space_procs)
-            break
-        end
-
-        sstate.task_to_spec[task] = spec
-        sstate.assignments[task] = our_space
-        sstate.task_completions[task] = our_space_completed + move_time + task_time
-    elseif scheduler == :roundrobin
-        our_proc = all_procs[proc_idx]
-        if task_scope == scope
-            # all_procs is already limited to scope
-        else
-            if isa(constrain(task_scope, scope), InvalidScope)
-                throw(Sch.SchedulingException("Scopes are not compatible: $(scope), $(task_scope)"))
-            end
-            while !proc_in_scope(our_proc, task_scope)
-                proc_idx = mod1(proc_idx + 1, length(all_procs))
-                our_proc = all_procs[proc_idx]
-            end
-        end
-    else
-        error("Invalid scheduler: $sched")
-    end
+    our_proc = datadeps_schedule_task(scheduler, state, all_procs, all_scope, task_scope, spec, task)
     @assert our_proc in all_procs
     our_space = only(memory_spaces(our_proc))
 
     # Find the scope for this task (and its copies)
     task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
-    if task_scope == scope
+    if task_scope == all_scope
         # Optimize for the common case, cache the proc=>scope mapping
         our_scope = get!(proc_to_scope_lfu, our_proc) do
             our_procs = filter(proc->proc in all_procs, collect(processors(our_space)))
-            return constrain(UnionScope(map(ExactScope, our_procs)...), scope)
+            return constrain(UnionScope(map(ExactScope, our_procs)...), all_scope)
         end
     else
         # Use the provided scope and constrain it to the available processors
@@ -495,7 +350,6 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     end
 
     write_num += 1
-    proc_idx = mod1(proc_idx + 1, length(all_procs))
 
-    return write_num, proc_idx
+    return write_num
 end
