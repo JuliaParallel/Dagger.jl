@@ -505,6 +505,48 @@ function compute_boundary_value(boundary, arr, region_code, neigh_dist, boundary
     return base_value
 end
 
+# GPU-compatible helper: recursively apply boundary value transformations for mixed boundaries.
+# Uses Val{d} to ensure boundary[d] is resolved at compile time (avoiding type instability
+# from indexing a heterogeneous Tuple with a runtime variable).
+@inline function _fold_boundary_value(boundary::Tuple, base_value, arr, region_code::NTuple{N,Int}, neigh_dist, boundary_dims::NTuple{N,Bool}, idx, src_idx, ::Val{d}) where {N, d}
+    if boundary_dims[d] && region_code[d] != 0
+        dim_boundary = boundary[d]
+        base_value = apply_boundary_value(dim_boundary, base_value, arr, region_code[d], get_neigh_dist(neigh_dist, d), idx[d], src_idx, d)
+    end
+    if d < N
+        return _fold_boundary_value(boundary, base_value, arr, region_code, neigh_dist, boundary_dims, idx, src_idx, Val(d + 1))
+    end
+    return base_value
+end
+
+@kernel function load_boundary_region_kernel(boundary::B, result, arr, region_code::NTuple{N,Int}, neigh_dist, boundary_dims::NTuple{N,Bool}) where {B<:Tuple, N}
+    raw_idx = @index(Global, Linear)
+
+    # Convert linear index to Cartesian index
+    idx = CartesianIndices(result)[raw_idx]
+
+    # Compute source index for each dimension
+    src_idx = ntuple(Val(N)) do d
+        dim_boundary = boundary[d]
+        nd = get_neigh_dist(neigh_dist, d)
+        if !boundary_dims[d]
+            if region_code[d] == -1
+                lastindex(arr, d) - nd + idx[d]
+            elseif region_code[d] == +1
+                firstindex(arr, d) + idx[d] - 1
+            else
+                idx[d]
+            end
+        else
+            boundary_source_index(dim_boundary, arr, region_code[d], nd, idx[d], d)
+        end
+    end
+
+    # Get base value and apply boundary transformations dimension by dimension
+    base_value = arr[CartesianIndex(src_idx)]
+    result[idx] = _fold_boundary_value(boundary, base_value, arr, region_code, neigh_dist, boundary_dims, idx, src_idx, Val(1))
+end
+
 """
 Mixed boundary conditions. When a Tuple of boundary conditions is provided, each dimension uses its own boundary condition.
 """
@@ -516,18 +558,7 @@ function load_boundary_region(boundary::Tuple, arr, region_code::NTuple{N,Int}, 
 
     result = similar(arr, region_size)
 
-    for idx in CartesianIndices(result)
-        # For each element, compute its value based on per-dimension boundary conditions
-        # Start by finding the source index in the array
-        src_idx = ntuple(N) do d
-            dim_boundary = get_boundary(boundary, d)
-            compute_source_index_for_dim(dim_boundary, arr, region_code, neigh_dist, boundary_dims, idx, d)
-        end
-
-        # Compute the value using per-dimension logic
-        value = compute_boundary_value(boundary, arr, region_code, neigh_dist, boundary_dims, idx, src_idx)
-        result[idx] = value
-    end
+    Kernel(load_boundary_region_kernel)(boundary, result, arr, region_code, neigh_dist, boundary_dims; ndrange=length(result))
 
     return move(task_processor(), result)
 end
