@@ -3,6 +3,10 @@ struct ChunkView{N}
     slices::NTuple{N, Union{Int, AbstractRange{Int}, Colon}}
 end
 
+function _identity_hash(arg::ChunkView, h::UInt=UInt(0))
+    return hash(arg.slices, _identity_hash(arg.chunk, h))
+end
+
 function Base.view(c::Chunk, slices...)
     if c.domain isa ArrayDomain
         nd, sz = ndims(c.domain), size(c.domain)
