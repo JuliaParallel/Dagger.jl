@@ -39,7 +39,12 @@ isremotehandle(x::ChunkView) = true
 
 function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, slice::ChunkView)
     to_w = root_worker_id(to_proc)
-    p_chunk = rewrap_aliased_object!(cache, from_proc, to_proc, from_space, to_space, slice.chunk)
+    # N.B. We use move_rewrap (not rewrap_aliased_object!) so that if the inner
+    # chunk is a SubArray, it goes through the SubArray-aware path which shares
+    # the parent array via the aliased object cache. Using rewrap_aliased_object!
+    # would simply serialize the entire SubArray, creating a new parent copy on
+    # the destination, breaking aliasing with other views of the same parent.
+    p_chunk = move_rewrap(cache, from_proc, to_proc, from_space, to_space, slice.chunk)
     return remotecall_fetch(to_w, from_proc, to_proc, from_space, to_space, p_chunk, slice.slices) do from_proc, to_proc, from_space, to_space, p_chunk, inds
         p_new = move(from_proc, to_proc, p_chunk)
         v_new = view(p_new, inds...)
