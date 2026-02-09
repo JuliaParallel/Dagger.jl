@@ -9,6 +9,13 @@ function test_stencil()
             end
         end
         @test all(collect(A) .== 1)
+
+        # Single expression syntax
+        B = zeros(Blocks(2, 2), Int, 4, 4)
+        Dagger.spawn_datadeps() do
+            @stencil B[idx] = 2
+        end
+        @test all(collect(B) .== 2)
     end
 
     @testset "Wrap boundary" begin

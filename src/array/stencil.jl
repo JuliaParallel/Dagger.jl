@@ -698,7 +698,7 @@ as that would currently cause race conditions and lead to undefined behavior.
 """
 macro stencil(orig_ex)
     if !Meta.isexpr(orig_ex, :block)
-        throw(ArgumentError("Invalid stencil block: $orig_ex"))
+        orig_ex = Expr(:block, orig_ex)
     end
 
     # Collect access pattern information
