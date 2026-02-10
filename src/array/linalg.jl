@@ -180,14 +180,36 @@ function LinearAlgebra.ldiv!(C::DVecOrMat, A::Union{LowerTriangular{<:Any,<:DMat
     LinearAlgebra.ldiv!(A, copyto!(C, B))
 end
 
-function LinearAlgebra.ldiv!(C::Cholesky{<:Any,<:DMatrix}, B::DVecOrMat)
-    # L * y = B
-    y = copyto!(similar(B), B)
-    LinearAlgebra.ldiv!(C.L, y)
+function LinearAlgebra.ldiv!(C::Cholesky{T,<:DMatrix}, B::DVecOrMat) where T
+    # Solve directly with C.factors and the trans parameter to avoid
+    # C.L / C.U which use copy(adjoint(factors)) — that creates a DMatrix
+    # with inconsistent block metadata vs chunk layout, breaking darray_copyto!.
+    factors = C.factors
+    alpha = one(T)
+    iscomplex = T <: Complex
+    trans = iscomplex ? 'C' : 'T'  # conjugate transpose for complex, plain transpose for real
 
-    # L' * x = y
-    copyto!(B, y)
-    LinearAlgebra.ldiv!(C.U, B)
+    parent_A = factors
+    dB = B isa DVecOrMat ? B : (B isa AbstractMatrix ? view(B, factors.partitioning) : view(B, AutoBlocks()))
+    min_bsa = min(parent_A.partitioning.blocksize...)
+
+    if C.uplo == 'U'
+        # A = U'U → solve U'y = B, then Ux = y
+        maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => Blocks(min_bsa, min_bsa)) do pA, pB
+            Dagger.trsm!('L', 'U', trans, 'N', alpha, pA, pB)
+        end
+        maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => Blocks(min_bsa, min_bsa)) do pA, pB
+            Dagger.trsm!('L', 'U', 'N', 'N', alpha, pA, pB)
+        end
+    else
+        # A = LL' → solve Ly = B, then L'x = y
+        maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => Blocks(min_bsa, min_bsa)) do pA, pB
+            Dagger.trsm!('L', 'L', 'N', 'N', alpha, pA, pB)
+        end
+        maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => Blocks(min_bsa, min_bsa)) do pA, pB
+            Dagger.trsm!('L', 'L', trans, 'N', alpha, pA, pB)
+        end
+    end
 
     return B
 end
