@@ -12,11 +12,13 @@ end
 
 size(p::PromotePartition) = size(domain(p.data))
 
-struct BCast{B, T, Nd} <: ArrayOp{T, Nd}
+struct BCast{B, T, Nd, D} <: ArrayOp{T, Nd}
     bcasted::B
+    dest::D
 end
 
-BCast(b::Broadcasted) = BCast{typeof(b), combine_eltypes(b.f, b.args), length(axes(b))}(b)
+BCast(b::Broadcasted) = BCast{typeof(b), combine_eltypes(b.f, b.args), length(axes(b)), Nothing}(b, nothing)
+BCast(dest::DArray, b::Broadcasted) = BCast{typeof(b), eltype(dest), ndims(dest), typeof(dest)}(b, dest)
 
 size(x::BCast) = map(length, axes(x.bcasted))
 
@@ -46,7 +48,12 @@ function Base.copy(b::Broadcast.Broadcasted{<:DaggerBroadcastStyle})
     return _to_darray(BCast(b))
 end
 
-function stage(ctx::Context, node::BCast{B,T,N}) where {B,T,N}
+function Base.copyto!(dest::DArray, b::Broadcast.Broadcasted{<:DaggerBroadcastStyle})
+    _to_darray(BCast(dest, b))
+    return dest
+end
+
+function stage(ctx::Context, node::BCast{B,T,N,D}) where {B,T,N,D}
     bc = Broadcast.flatten(node.bcasted)
     args = bc.args
     args1 = map(args) do x
@@ -55,14 +62,20 @@ function stage(ctx::Context, node::BCast{B,T,N}) where {B,T,N}
     ds = map(x->x isa DArray ? domainchunks(x) : nothing, args1)
     sz = size(node)
     dss = filter(x->x !== nothing, collect(ds))
-    # TODO: Use a more intelligent scheme
-    part = args1[findfirst(arg->arg isa DArray && ndims(arg) == N, args1)].partitioning
-    cumlengths = ntuple(ndims(node)) do i
-        idx = findfirst(d -> i <= length(d.cumlength), dss)
-        if idx === nothing
-            [sz[i]] # just one slice
+    if node.dest !== nothing
+        part = node.dest.partitioning
+        cumlengths = domainchunks(node.dest).cumlength
+    else
+        # TODO: Use a more intelligent scheme
+        part = args1[findfirst(arg->arg isa DArray && ndims(arg) == N, args1)].partitioning
+        cumlengths = ntuple(ndims(node)) do i
+            idx = findfirst(d -> i <= length(d.cumlength), dss)
+            if idx === nothing
+                [sz[i]] # just one slice
+            else
+                dss[idx].cumlength[i]
+            end
         end
-        dss[idx].cumlength[i]
     end
 
     args2 = map(args1) do arg
@@ -84,8 +97,17 @@ function stage(ctx::Context, node::BCast{B,T,N}) where {B,T,N}
     end
     blcks = DomainBlocks(map(_->1, size(node)), cumlengths)
 
-    thunks = broadcast((args3...)->Dagger.spawn((args...)->broadcast(bc.f, args...), args3...), args2...)
-    DArray(eltype(node), domain(node), blcks, thunks, part)
+    if node.dest !== nothing
+        Dagger.spawn_datadeps() do
+            broadcast(node.dest.chunks, args2...) do d, args3...
+                Dagger.@spawn broadcast!(bc.f, InOut(d), args3...)
+            end
+        end
+        return node.dest
+    else
+        thunks = broadcast((args3...)->Dagger.spawn((args...)->broadcast(bc.f, args...), args3...), args2...)
+        return DArray(eltype(node), domain(node), blcks, thunks, part)
+    end
 end
 
 export mappart, mapchunk
