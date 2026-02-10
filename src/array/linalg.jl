@@ -33,17 +33,30 @@ function LinearAlgebra.norm2(A::LowerTriangular{T,<:DArray{T,2}}) where T
     return sqrt(sum(lower_norms_values; init=zeroRT) + sum(diag_norms_values; init=zeroRT))
 end
 
-is_cross_symmetric(A1, A2) = A1 == A2'
+is_cross_hermitian(A1, A2) = A1 ≈ A2'
+is_cross_symmetric(A1, A2) = A1 ≈ LinearAlgebra.transpose(A2)
 function LinearAlgebra.issymmetric(A::DArray{T,2}) where T
-    Ac = A.chunks
-    if size(Ac, 1) != size(Ac, 2)
+    if size(A, 1) != size(A, 2)
         return false
     end
 
-    to_check = [Dagger.@spawn issymmetric(Ac[i, i]) for i in 1:size(Ac, 1)]
-    for i in 2:(size(Ac, 1)-1)
-        j_pre_diag = i - 1
-        for j in 1:j_pre_diag
+    mb, nb = A.partitioning.blocksize
+
+    # Block-based check requires a square chunk grid (equal row/column block sizes)
+    if mb != nb
+        # Use maybe_copy_buffered to reshape to square blocks
+        min_bs = min(mb, nb)
+        return maybe_copy_buffered(A => Blocks(min_bs, min_bs)) do A_square
+            issymmetric(A_square)
+        end
+    end
+
+    Ac = A.chunks
+    mt = size(Ac, 1)
+
+    to_check = [Dagger.@spawn issymmetric(Ac[i, i]) for i in 1:mt]
+    for i in 2:mt
+        for j in 1:i-1
             push!(to_check, Dagger.@spawn is_cross_symmetric(Ac[i, j], Ac[j, i]))
         end
     end
@@ -51,16 +64,28 @@ function LinearAlgebra.issymmetric(A::DArray{T,2}) where T
     return all(fetch, to_check)
 end
 function LinearAlgebra.ishermitian(A::DArray{T,2}) where T
-    Ac = A.chunks
-    if size(Ac, 1) != size(Ac, 2)
+    if size(A, 1) != size(A, 2)
         return false
     end
 
-    to_check = [Dagger.@spawn ishermitian(Ac[i, i]) for i in 1:size(Ac, 1)]
-    for i in 2:(size(Ac, 1)-1)
-        j_pre_diag = i - 1
-        for j in 1:j_pre_diag
-            push!(to_check, Dagger.@spawn is_cross_symmetric(Ac[i, j], Ac[j, i]))
+    mb, nb = A.partitioning.blocksize
+
+    # Block-based check requires a square chunk grid (equal row/column block sizes)
+    if mb != nb
+        # Use maybe_copy_buffered to reshape to square blocks
+        min_bs = min(mb, nb)
+        return maybe_copy_buffered(A => Blocks(min_bs, min_bs)) do A_square
+            ishermitian(A_square)
+        end
+    end
+
+    Ac = A.chunks
+    mt = size(Ac, 1)
+
+    to_check = [Dagger.@spawn ishermitian(Ac[i, i]) for i in 1:mt]
+    for i in 2:mt
+        for j in 1:i-1
+            push!(to_check, Dagger.@spawn is_cross_hermitian(Ac[i, j], Ac[j, i]))
         end
     end
 
