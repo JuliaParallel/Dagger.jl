@@ -42,46 +42,85 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool =
     return LinearAlgebra.LU{T,DMatrix{T},DVector{Int}}(A, ipiv, 0)
 end
 
-function searchmax_pivot!(piv_idx::AbstractVector{Int}, piv_val::AbstractVector{T}, A::AbstractMatrix{T}, offset::Int=0) where T
-    max_idx = LinearAlgebra.BLAS.iamax(A[:])
-    piv_idx[1] = offset+max_idx
-    piv_val[1] = A[max_idx]
-end
+# N.B. Task functions receive full Chunk data and create views internally.
+# The full-Chunk approach is used here for simplicity,
+# but ChunkViews could be used for finer-grained dependencies if needed.
 
-function update_ipiv!(ipivl::AbstractVector{Int}, info::Ref{Int}, piv_idx::AbstractVector{Int}, piv_val::AbstractVector{T}, k::Int, nb::Int) where T
-    max_piv_idx = LinearAlgebra.BLAS.iamax(piv_val)
-    max_piv_val = piv_val[max_piv_idx]
-    abs_max_piv_val = max_piv_val isa Real ? abs(max_piv_val) : abs(real(max_piv_val)) + abs(imag(max_piv_val))
-    if isapprox(abs_max_piv_val, zero(T); atol=eps(real(T)))
-        info[] = k
+# Combined search+reduce: searches all block columns for the pivot and
+# updates ipiv. Receives full Chunks for the diagonal block and off-diagonal
+# blocks; creates column views internally.
+function search_and_update_ipiv!(ipiv_chunk::AbstractVector{Int}, info::Ref{Int},
+                                  diag_block::AbstractMatrix{T},
+                                  k::Int, p::Int, mb::Int, m::Int,
+                                  n_offdiag::Int,
+                                  offdiag_blocks::Vararg{AbstractMatrix{T}}) where T
+    # Search diagonal block column p (rows p:end)
+    diag_col = view(diag_block, p:min(mb, m-(k-1)*mb), p:p)
+    max_idx = LinearAlgebra.BLAS.iamax(diag_col[:])
+    best_piv_idx = (p - 1) + max_idx
+    best_piv_val = diag_col[max_idx]
+    best_block = 1
+
+    # Search off-diagonal block columns
+    for (bi, blk) in enumerate(offdiag_blocks)
+        col = view(blk, :, p:p)
+        idx = LinearAlgebra.BLAS.iamax(col[:])
+        val = col[idx]
+        abs_best = best_piv_val isa Real ? abs(best_piv_val) : abs(real(best_piv_val)) + abs(imag(best_piv_val))
+        abs_val = val isa Real ? abs(val) : abs(real(val)) + abs(imag(val))
+        if abs_val > abs_best
+            best_piv_idx = idx
+            best_piv_val = val
+            best_block = bi + 1
+        end
     end
-    ipivl[1] = (max_piv_idx+k-2)*nb + piv_idx[max_piv_idx]
+
+    # Singularity detection
+    abs_best = best_piv_val isa Real ? abs(best_piv_val) : abs(real(best_piv_val)) + abs(imag(best_piv_val))
+    if info[] == 0 && isapprox(abs_best, zero(T); atol=eps(real(T)))
+        info[] = (k-1)*mb + p
+    end
+
+    # Update ipiv
+    ipiv_chunk[p] = (best_block+k-2)*mb + best_piv_idx
 end
 
-function swaprows_panel!(A::AbstractMatrix{T}, M::AbstractMatrix{T}, ipivl::AbstractVector{Int}, m::Int, p::Int, nb::Int) where T
-    q = div(ipivl[1]-1,nb) + 1
-    r = (ipivl[1]-1)%nb+1
+# Swap rows in the panel column. Receives full Chunks.
+function swaprows_panel!(A::AbstractMatrix{T}, M::AbstractMatrix{T}, ipiv_chunk::AbstractVector{Int}, m::Int, p::Int, mb::Int) where T
+    q = div(ipiv_chunk[p]-1,mb) + 1
+    r = (ipiv_chunk[p]-1)%mb+1
     if m == q
         A[p,:], M[r,:] = M[r,:], A[p,:]
     end
 end
 
-function update_panel!(M::AbstractMatrix{T}, A::AbstractMatrix{T}, p::Int) where T
+# Update panel on the diagonal block (rows p+1:end). Receives the full block.
+function update_panel_diag!(A::AbstractMatrix{T}, p::Int, row_end::Int) where T
+    M = view(A, p+1:row_end, :)
     Acinv = one(T) / A[p,p]
     LinearAlgebra.BLAS.scal!(Acinv, view(M, :, p))
-    LinearAlgebra.BLAS.ger!(-one(T), view(M, :, p), conj.(view(A, p, p+1:size(A,2))), view(M, :, p+1:size(M,2)))
+    LinearAlgebra.BLAS.geru!(-one(T), view(M, :, p), view(A, p, p+1:size(A,2)), view(M, :, p+1:size(M,2)))
 end
 
-function swaprows_trail!(A::AbstractMatrix{T}, M::AbstractMatrix{T}, ipiv::AbstractVector{Int}, m::Int, nb::Int) where T
+# Update panel on an off-diagonal block. Receives full Chunks.
+function update_panel_offdiag!(M::AbstractMatrix{T}, A::AbstractMatrix{T}, p::Int) where T
+    Acinv = one(T) / A[p,p]
+    LinearAlgebra.BLAS.scal!(Acinv, view(M, :, p))
+    LinearAlgebra.BLAS.geru!(-one(T), view(M, :, p), view(A, p, p+1:size(A,2)), view(M, :, p+1:size(M,2)))
+end
+
+# Swap rows in trailing columns. Receives full Chunks.
+function swaprows_trail!(A::AbstractMatrix{T}, M::AbstractMatrix{T}, ipiv::AbstractVector{Int}, m::Int, mb::Int) where T
     for p in eachindex(ipiv)
-        q = div(ipiv[p]-1,nb) + 1
-        r = (ipiv[p]-1)%nb+1
+        q = div(ipiv[p]-1,mb) + 1
+        r = (ipiv[p]-1)%mb+1
         if m == q
             A[p,:], M[r,:] = M[r,:], A[p,:]
         end
     end
 end
 
+# Implementation of https://inria.hal.science/hal-04984070v1/file/ipdps_paper.pdf
 function LinearAlgebra.lu(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
     A_copy = LinearAlgebra._lucopy(A, LinearAlgebra.lutype(T))
     return LinearAlgebra.lu!(A_copy, LinearAlgebra.RowMaximum(); check, allowsingular)
@@ -106,32 +145,50 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Boo
         ipiv = DVector(collect(1:min(m, n)), Blocks(nb))
         ipivc = ipiv.chunks
 
-        max_piv_idx = zeros(Int, mt)
-        max_piv_val = zeros(T, mt)
-
+        # Using full Chunks in annotations for simplicity
+        # ChunkViews work correctly and could be used here if needed.
         Dagger.spawn_datadeps() do
             for k in 1:min(mt, nt)
-                for p in 1:min(nb, m-(k-1)*nb, n-(k-1)*nb)
-                    Dagger.@spawn searchmax_pivot!(Out(view(max_piv_idx, k:k)), Out(view(max_piv_val, k:k)), In(view(Ac[k,k],p:min(nb,m-(k-1)*nb),p:p)), p-1)
+                for p in 1:min(mb, nb, m-(k-1)*mb, n-(k-1)*nb)
+                    # Search all blocks in column k for pivot, then update ipiv.
+                    # Uses Dagger.spawn for variable number of In arguments.
+                    n_offdiag = mt - k
+                    spawn_args = Any[
+                        search_and_update_ipiv!,
+                        InOut(ipivc[k]),
+                        InOut(info),
+                        In(Ac[k,k]),
+                        k, p, mb, m, n_offdiag,
+                    ]
                     for i in k+1:mt
-                        Dagger.@spawn searchmax_pivot!(Out(view(max_piv_idx, i:i)), Out(view(max_piv_val, i:i)), In(view(Ac[i,k],:,p:p)))
+                        push!(spawn_args, In(Ac[i,k]))
                     end
-                    Dagger.@spawn update_ipiv!(InOut(view(ipivc[k],p:p)), InOut(info), In(view(max_piv_idx, k:mt)), In(view(max_piv_val, k:mt)), k, nb)
+                    Dagger.spawn(spawn_args...)
+
+                    # Swap rows in the panel column
                     for i in k:mt
-                        Dagger.@spawn swaprows_panel!(InOut(Ac[k, k]), InOut(Ac[i, k]), In(view(ipivc[k],p:p)), i, p, nb)
+                        Dagger.@spawn swaprows_panel!(InOut(Ac[k, k]), InOut(Ac[i, k]), In(ipivc[k]), i, p, mb)
                     end
-                    if length(p+1:min(nb,m-(k-1)*nb)) > 0
-                        Dagger.@spawn update_panel!(InOut(view(Ac[k,k],p+1:min(nb,m-(k-1)*nb),:)), In(Ac[k,k]), p)
+
+                    # Update panel: scale and rank-1 update on diagonal block
+                    if length(p+1:min(mb,m-(k-1)*mb)) > 0
+                        Dagger.@spawn update_panel_diag!(InOut(Ac[k,k]), p, min(mb, m-(k-1)*mb))
                     end
+
+                    # Update panel: off-diagonal blocks
                     for i in k+1:mt
-                        Dagger.@spawn update_panel!(InOut(Ac[i, k]), In(Ac[k,k]), p)
+                        Dagger.@spawn update_panel_offdiag!(InOut(Ac[i, k]), In(Ac[k,k]), p)
                     end
                 end
+
+                # Trailing submatrix row swaps
                 for j in Iterators.flatten((1:k-1, k+1:nt))
                     for i in k:mt
                         Dagger.@spawn swaprows_trail!(InOut(Ac[k, j]), InOut(Ac[i, j]), In(ipivc[k]), i, mb)
                     end
                 end
+
+                # TRSM and GEMM
                 for j in k+1:nt
                     Dagger.@spawn BLAS.trsm!('L', 'L', 'N', 'U', zone, In(Ac[k, k]), InOut(Ac[k, j]))
                     for i in k+1:mt
