@@ -706,43 +706,83 @@ macro stencil(orig_ex)
     all_accessed_vars = Set{Symbol}()
     for inner_ex in orig_ex.args
         inner_ex isa LineNumberNode && continue
-        if !@capture(inner_ex, write_ex_ = read_ex_)
-            throw(ArgumentError("Invalid update expression: $inner_ex"))
+
+        # Determine if this is an assignment or a naked expression
+        is_allocation = false
+        if @capture(inner_ex, w_ex_ = r_ex_)
+            if !@capture(w_ex, w_var_[w_idx_])
+                throw(ArgumentError("Update expression requires a write to an index: $w_ex"))
+            end
+            write_var = w_var
+            write_idx = w_idx
+            read_ex = r_ex
+        else
+            read_ex = inner_ex
+            is_allocation = true
+            write_var = nothing
+            write_idx = nothing
         end
-        if !@capture(write_ex, write_var_[write_idx_])
-            throw(ArgumentError("Update expression requires a write: $write_ex"))
-        end
+
         accessed_vars = Set{Symbol}()
         read_vars = Set{Symbol}()
         neighborhoods = Dict{Symbol, Tuple{Any, Any}}()
-        push!(accessed_vars, write_var)
+        source_var = nothing
         prewalk(read_ex) do read_inner_ex
-            if @capture(read_inner_ex, read_var_[read_idx_]) && read_idx == write_idx
-                push!(accessed_vars, read_var)
-                push!(read_vars, read_var)
-            elseif @capture(read_inner_ex, @neighbors(read_var_[read_idx_], neigh_dist_, boundary_))
-                if read_idx != write_idx
-                    throw(ArgumentError("Neighborhood access must be at the same index as the write: $read_inner_ex"))
+            if @capture(read_inner_ex, r_var_[r_idx_])
+                if isnothing(write_idx)
+                    write_idx = r_idx
                 end
-                if write_var == read_var
-                    throw(ArgumentError("Cannot write to the same variable as the neighborhood access: $read_inner_ex"))
+                if isnothing(source_var)
+                    source_var = r_var
                 end
-                push!(accessed_vars, read_var)
-                push!(read_vars, read_var)
-                neighborhoods[read_var] = (neigh_dist, boundary)
+                if r_idx == write_idx
+                    push!(accessed_vars, r_var)
+                    push!(read_vars, r_var)
+                end
+            elseif @capture(read_inner_ex, @neighbors(r_var_[r_idx_], neigh_dist_, boundary_))
+                if isnothing(write_idx)
+                    write_idx = r_idx
+                end
+                if isnothing(source_var)
+                    source_var = r_var
+                end
+                if r_idx == write_idx
+                    push!(accessed_vars, r_var)
+                    push!(read_vars, r_var)
+                    neighborhoods[r_var] = (neigh_dist, boundary)
+                else
+                    throw(ArgumentError("Neighborhood access must be at the same index: $read_inner_ex"))
+                end
             end
             return read_inner_ex
         end
+
+        if isnothing(write_idx)
+            throw(ArgumentError("Invalid stencil expression (no index found): $inner_ex"))
+        end
+        if is_allocation
+            if isnothing(source_var)
+                throw(ArgumentError("Could not find a source DArray in expression: $inner_ex"))
+            end
+            write_var = gensym("out")
+            inner_ex = :($write_var[$write_idx] = $read_ex)
+        end
+
+        push!(accessed_vars, write_var)
         union!(all_accessed_vars, accessed_vars)
-        push!(inners, (;inner_ex, accessed_vars, write_var, write_idx, read_ex, read_vars, neighborhoods))
+        push!(inners, (;inner_ex, accessed_vars, write_var, write_idx, read_ex, read_vars, neighborhoods, is_allocation, source_var))
     end
 
     # Codegen update functions
     final_ex = Expr(:block)
-    @gensym chunk_idx
-    for (;inner_ex, accessed_vars, write_var, write_idx, read_ex, read_vars, neighborhoods) in inners
+    for (i, (;inner_ex, accessed_vars, write_var, write_idx, read_ex, read_vars, neighborhoods, is_allocation, source_var)) in enumerate(inners)
         # Generate a variable for chunk access
         @gensym chunk_idx
+
+        if is_allocation
+            # FIXME: We might want to manually escape our current spawn_datadeps region for this
+            push!(final_ex.args, :($write_var = Dagger.spawn_datadeps() do; similar($source_var); end))
+        end
 
         # Generate function with transformed body
         @gensym inner_vars inner_index_var
@@ -761,11 +801,12 @@ macro stencil(orig_ex)
             return old_inner_ex
         end
         new_inner_f = :(($inner_index_var, $write_var, $inner_vars)->$new_inner_ex_body)
+        unique_read_vars = filter(v -> v != write_var, collect(read_vars))
         new_inner_ex = quote
-            $inner_vars = (;$(read_vars...))
+            $inner_vars = (;$(unique_read_vars...))
             $inner_stencil!($new_inner_f, $write_var, $inner_vars)
         end
-        inner_fn = Expr(:->, Expr(:tuple, Expr(:parameters, write_var, read_vars...)), new_inner_ex)
+        inner_fn = Expr(:->, Expr(:tuple, Expr(:parameters, write_var, unique_read_vars...)), new_inner_ex)
 
         # Generate @spawn call with appropriate vars and deps
         deps_ex = Any[]
@@ -776,6 +817,9 @@ macro stencil(orig_ex)
         end
         neighbor_copy_all_ex = Expr(:block)
         for read_var in read_vars
+            if read_var == write_var
+                continue
+            end
             if read_var in keys(neighborhoods)
                 # Generate a neighborhood copy operation
                 neigh_dist, boundary = neighborhoods[read_var]
@@ -796,6 +840,10 @@ macro stencil(orig_ex)
                 $spawn_ex
             end
         end)
+
+        if i == length(inners) && is_allocation
+            push!(final_ex.args, write_var)
+        end
     end
 
 

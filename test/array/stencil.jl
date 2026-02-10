@@ -351,6 +351,26 @@ function test_stencil()
         @test collect(B) == expected_B_multi
     end
 
+    @testset "Allocation syntax" begin
+        A = ones(Blocks(2, 2), Int, 4, 4)
+        B = nothing
+        Dagger.spawn_datadeps() do
+            global B = @stencil sum(@neighbors(A[idx], 1, Wrap()))
+        end
+        @test B isa DArray
+        @test all(collect(B) .== 9)
+
+        C = nothing
+        Dagger.spawn_datadeps() do
+            global C = @stencil begin
+                A[idx] = A[idx] + 1
+                sum(@neighbors(A[idx], 1, Wrap()))
+            end
+        end
+        @test C isa DArray
+        @test all(collect(C) .== 18)
+    end
+
     @testset "Multiple DArrays" begin
         A = ones(Blocks(2, 2), Int, 4, 4)
         B = DArray(fill(2, 4, 4), Blocks(2, 2))
