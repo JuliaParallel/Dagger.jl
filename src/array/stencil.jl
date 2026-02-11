@@ -618,7 +618,7 @@ function build_halo(neigh_dist, boundary, center, all_halos...)
     N = ndims(center)
     expected_halos = 3^N - 1
     @assert length(all_halos) == expected_halos "Halo mismatch: N=$N expected $expected_halos halos, got $(length(all_halos))"
-    return HaloArray(center, (all_halos...,), ntuple(i->get_neigh_dist(neigh_dist, i), N))
+    return HaloArray(copy(center), (all_halos...,), ntuple(i->get_neigh_dist(neigh_dist, i), N))
 end
 
 function load_neighborhood(arr::HaloArray{T,N}, idx) where {T,N}
@@ -775,22 +775,27 @@ macro stencil(orig_ex)
 
     # Codegen update functions
     final_ex = Expr(:block)
-    for (i, (;inner_ex, accessed_vars, write_var, write_idx, read_ex, read_vars, neighborhoods, is_allocation, source_var)) in enumerate(inners)
+
+    # 1. Allocations (outside spawn_datadeps)
+    for inner in inners
+        if inner.is_allocation
+            push!(final_ex.args, :($(inner.write_var) = similar($(inner.source_var))))
+        end
+    end
+
+    # 2. Stencil operations (inside spawn_datadeps)
+    datadeps_body = Expr(:block)
+    for (;inner_ex, accessed_vars, write_var, write_idx, read_ex, read_vars, neighborhoods, is_allocation, source_var) in inners
         # Generate a variable for chunk access
         @gensym chunk_idx
 
-        if is_allocation
-            # FIXME: We might want to manually escape our current spawn_datadeps region for this
-            push!(final_ex.args, :($write_var = Dagger.spawn_datadeps() do; similar($source_var); end))
-        end
-
         # Generate function with transformed body
-        @gensym inner_vars inner_index_var
+        @gensym inner_vars inner_index_var inner_write_var
         new_inner_ex_body = prewalk(inner_ex) do old_inner_ex
             if @capture(old_inner_ex, read_var_[read_idx_]) && read_idx == write_idx
                 # Direct access
                 if read_var == write_var
-                    return :($write_var[$inner_index_var])
+                    return :($inner_write_var[$inner_index_var])
                 else
                     return :($inner_vars.$read_var[$inner_index_var])
                 end
@@ -800,52 +805,66 @@ macro stencil(orig_ex)
             end
             return old_inner_ex
         end
-        new_inner_f = :(($inner_index_var, $write_var, $inner_vars)->$new_inner_ex_body)
-        unique_read_vars = filter(v -> v != write_var, collect(read_vars))
+        new_inner_f = :(($inner_index_var, $inner_write_var, $inner_vars)->$new_inner_ex_body)
+        actual_read_vars = filter(v -> (v != write_var) || (v in keys(neighborhoods)), collect(read_vars))
         new_inner_ex = quote
-            $inner_vars = (;$(unique_read_vars...))
-            $inner_stencil!($new_inner_f, $write_var, $inner_vars)
+            $inner_vars = (;$(actual_read_vars...))
+            $inner_stencil!($new_inner_f, $inner_write_var, $inner_vars)
         end
-        inner_fn = Expr(:->, Expr(:tuple, Expr(:parameters, write_var, unique_read_vars...)), new_inner_ex)
+        inner_fn = Expr(:->, Expr(:tuple, Expr(:parameters, inner_write_var, actual_read_vars...)), new_inner_ex)
 
-        # Generate @spawn call with appropriate vars and deps
+        # 2a. Pre-spawn all halos for this expression
+        # This ensures all readers capture the "old" state before any writers start.
+        @gensym halo_tasks_map
+        push!(datadeps_body.args, :($halo_tasks_map = Dict{Symbol, Any}()))
+        for read_var in read_vars
+            if read_var in keys(neighborhoods)
+                neigh_dist, boundary = neighborhoods[read_var]
+                @gensym halo_tasks
+                push!(datadeps_body.args, :($halo_tasks = Array{$DTask}(undef, size($chunks($read_var)))))
+                push!(datadeps_body.args, quote
+                    for $chunk_idx in $CartesianIndices($chunks($read_var))
+                        $halo_tasks[$chunk_idx] = Dagger.@spawn name="stencil_build_halo" $build_halo($neigh_dist, $boundary, map($Read, $select_neighborhood_chunks($chunks($read_var), $chunk_idx, $neigh_dist, $boundary))...)
+                    end
+                end)
+                push!(datadeps_body.args, :($halo_tasks_map[$(QuoteNode(read_var))] = $halo_tasks))
+            end
+        end
+
+        # 2b. Generate @spawn call with appropriate vars and deps
         deps_ex = Any[]
         if write_var in read_vars
-            push!(deps_ex, Expr(:kw, write_var, :($ReadWrite($chunks($write_var)[$chunk_idx]))))
+            push!(deps_ex, Expr(:kw, inner_write_var, :($ReadWrite($chunks($write_var)[$chunk_idx]))))
         else
-            push!(deps_ex, Expr(:kw, write_var, :($Write($chunks($write_var)[$chunk_idx]))))
+            push!(deps_ex, Expr(:kw, inner_write_var, :($Write($chunks($write_var)[$chunk_idx]))))
         end
-        neighbor_copy_all_ex = Expr(:block)
-        for read_var in read_vars
-            if read_var == write_var
-                continue
-            end
+        for read_var in actual_read_vars
             if read_var in keys(neighborhoods)
-                # Generate a neighborhood copy operation
-                neigh_dist, boundary = neighborhoods[read_var]
-                deps_inner_ex = Expr(:block)
-                @gensym neighbor_copy_var
-                push!(neighbor_copy_all_ex.args, :($neighbor_copy_var = Dagger.@spawn name="stencil_build_halo" $build_halo($neigh_dist, $boundary, map($Read, $select_neighborhood_chunks($chunks($read_var), $chunk_idx, $neigh_dist, $boundary))...)))
-                push!(deps_ex, Expr(:kw, read_var, :($Read($neighbor_copy_var))))
+                push!(deps_ex, Expr(:kw, read_var, :($Read($halo_tasks_map[$(QuoteNode(read_var))][$chunk_idx]))))
             else
-                push!(deps_ex, Expr(:kw, read_var, :($Read($chunks($read_var)[$chunk_idx]))))
+                if read_var != write_var
+                    push!(deps_ex, Expr(:kw, read_var, :($Read($chunks($read_var)[$chunk_idx]))))
+                end
             end
         end
         spawn_ex = :(Dagger.@spawn name="stencil_inner_fn" $inner_fn(;$(deps_ex...)))
 
-        # Generate loop
-        push!(final_ex.args, quote
+        # 2c. Generate loop to spawn stencil tasks
+        push!(datadeps_body.args, quote
             for $chunk_idx in $CartesianIndices($chunks($write_var))
-                $neighbor_copy_all_ex
                 $spawn_ex
             end
         end)
-
-        if i == length(inners) && is_allocation
-            push!(final_ex.args, write_var)
-        end
     end
 
+    push!(final_ex.args, :(Dagger.spawn_datadeps() do
+        $datadeps_body
+    end))
+
+    # 3. Return last allocated var if applicable
+    if !isempty(inners) && inners[end].is_allocation
+        push!(final_ex.args, inners[end].write_var)
+    end
 
     return esc(final_ex)
 end

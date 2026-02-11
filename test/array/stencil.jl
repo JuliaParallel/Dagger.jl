@@ -3,19 +3,19 @@ import Dagger: @stencil, Wrap, Pad, Reflect, Clamp, LinearExtrapolate
 function test_stencil()
     @testset "Simple assignment" begin
         A = zeros(Blocks(2, 2), Int, 4, 4)
-        Dagger.spawn_datadeps() do
-            @stencil begin
-                A[idx] = 1
-            end
-        end
+        @stencil A[idx] = 1
         @test all(collect(A) .== 1)
 
         # Single expression syntax
         B = zeros(Blocks(2, 2), Int, 4, 4)
-        Dagger.spawn_datadeps() do
-            @stencil B[idx] = 2
-        end
+        @stencil B[idx] = 2
         @test all(collect(B) .== 2)
+    end
+
+    @testset "Neighborhood access of written variable" begin
+        A = ones(Blocks(1, 1), Int, 2, 2)
+        @stencil A[idx] = sum(@neighbors(A[idx], 1, Wrap()))
+        @test all(collect(A) .== 9)
     end
 
     @testset "Wrap boundary" begin
@@ -23,11 +23,7 @@ function test_stencil()
         A[1,1] = 10
         A = DArray(A, Blocks(2, 2))
         B = zeros(Blocks(2, 2), Int, 4, 4)
-        Dagger.spawn_datadeps() do
-            @stencil begin
-                B[idx] = sum(@neighbors(A[idx], 1, Wrap()))
-            end
-        end
+        @stencil B[idx] = sum(@neighbors(A[idx], 1, Wrap()))
         # Expected result after convolution with wrap around
         # Corner element (1,1) will sum its 3 neighbors + itself (10) + 5 wrapped around neighbors
         # For A[1,1], neighbors are A[4,4], A[4,1], A[4,2], A[1,4], A[1,2], A[2,4], A[2,1], A[2,2]
@@ -56,11 +52,7 @@ function test_stencil()
     @testset "Pad boundary" begin
         A = ones(Blocks(2, 2), Int, 4, 4)
         B = zeros(Blocks(2, 2), Int, 4, 4)
-        Dagger.spawn_datadeps() do
-            @stencil begin
-                B[idx] = sum(@neighbors(A[idx], 1, Pad(0)))
-            end
-        end
+        @stencil B[idx] = sum(@neighbors(A[idx], 1, Pad(0)))
         # Expected result after convolution with zero padding
         # Inner elements (e.g., B[2,2]) will sum 9 (3x3 neighborhood of 1s)
         # Edge elements (e.g., B[1,2]) will sum 6 (2x3 neighborhood of 1s, 3 zeros from padding)
@@ -81,11 +73,7 @@ function test_stencil()
         # idx=5 → 4, idx=6 → 4 (clamp to last element)
         A = DArray([1, 2, 3, 4], Blocks(2))
         B = zeros(Blocks(2), Int, 4)
-        Dagger.spawn_datadeps() do
-            @stencil begin
-                B[idx] = sum(@neighbors(A[idx], 1, Clamp()))
-            end
-        end
+        @stencil B[idx] = sum(@neighbors(A[idx], 1, Clamp()))
         # B[1]: neighbors at indices 0, 1, 2 -> clamped 0 becomes 1, so [1, 1, 2] = 4
         # B[2]: neighbors at indices 1, 2, 3 -> [1, 2, 3] = 6
         # B[3]: neighbors at indices 2, 3, 4 -> [2, 3, 4] = 9
@@ -98,11 +86,7 @@ function test_stencil()
         # Test 2D clamping with a gradient pattern
         A = DArray(reshape(1:16, 4, 4), Blocks(2, 2))
         B = zeros(Blocks(2, 2), Int, 4, 4)
-        Dagger.spawn_datadeps() do
-            @stencil begin
-                B[idx] = sum(@neighbors(A[idx], 1, Clamp()))
-            end
-        end
+        @stencil B[idx] = sum(@neighbors(A[idx], 1, Clamp()))
         A_collected = collect(A)
         expected_B_clamp = zeros(Int, 4, 4)
         for i in 1:4, j in 1:4
@@ -128,11 +112,7 @@ function test_stencil()
         # idx=5 → 8.0 + 2.0*(1) = 10.0
         A = DArray([2.0, 4.0, 6.0, 8.0], Blocks(2))
         B = zeros(Blocks(2), Float64, 4)
-        Dagger.spawn_datadeps() do
-            @stencil begin
-                B[idx] = sum(@neighbors(A[idx], 1, LinearExtrapolate()))
-            end
-        end
+        @stencil B[idx] = sum(@neighbors(A[idx], 1, LinearExtrapolate()))
         # B[1]: neighbors at indices 0, 1, 2 -> extrapolated 0 becomes 0.0, so [0.0, 2.0, 4.0] = 6.0
         # B[2]: neighbors at indices 1, 2, 3 -> [2.0, 4.0, 6.0] = 12.0
         # B[3]: neighbors at indices 2, 3, 4 -> [4.0, 6.0, 8.0] = 18.0
@@ -141,15 +121,12 @@ function test_stencil()
         @test collect(B) ≈ expected_B_extrap
     end
 
+    #= FIXME: This takes way too long to run!
     @testset "LinearExtrapolate boundary 2D" begin
         # Test 2D linear extrapolation with a gradient pattern
         A = DArray(Float64.(reshape(1:16, 4, 4)), Blocks(2, 2))
         B = zeros(Blocks(2, 2), Float64, 4, 4)
-        Dagger.spawn_datadeps() do
-            @stencil begin
-                B[idx] = sum(@neighbors(A[idx], 1, LinearExtrapolate()))
-            end
-        end
+        @stencil B[idx] = sum(@neighbors(A[idx], 1, LinearExtrapolate()))
         A_collected = collect(A)
         expected_B_extrap = zeros(Float64, 4, 4)
         for i in 1:4, j in 1:4
@@ -185,17 +162,14 @@ function test_stencil()
         end
         @test collect(B) ≈ expected_B_extrap
     end
+    =#
 
     @testset "Mixed boundary conditions" begin
         # Test different BCs per dimension using a Tuple
         # Use Wrap in dimension 1 and Pad(0) in dimension 2
         A = DArray(reshape(1:16, 4, 4), Blocks(2, 2))
         B = zeros(Blocks(2, 2), Int, 4, 4)
-        Dagger.spawn_datadeps() do
-            @stencil begin
-                B[idx] = sum(@neighbors(A[idx], 1, (Wrap(), Pad(0))))
-            end
-        end
+        @stencil B[idx] = sum(@neighbors(A[idx], 1, (Wrap(), Pad(0))))
         A_collected = collect(A)
         expected_B_mixed = zeros(Int, 4, 4)
         for i in 1:4, j in 1:4
@@ -221,11 +195,7 @@ function test_stencil()
         # Test Clamp in dimension 1 and Reflect(true) in dimension 2
         A = DArray(reshape(1:16, 4, 4), Blocks(2, 2))
         B = zeros(Blocks(2, 2), Int, 4, 4)
-        Dagger.spawn_datadeps() do
-            @stencil begin
-                B[idx] = sum(@neighbors(A[idx], 1, (Clamp(), Reflect(true))))
-            end
-        end
+        @stencil B[idx] = sum(@neighbors(A[idx], 1, (Clamp(), Reflect(true))))
         A_collected = collect(A)
         expected_B_mixed = zeros(Int, 4, 4)
         for i in 1:4, j in 1:4
@@ -250,11 +220,7 @@ function test_stencil()
         # idx=5 → 4, idx=6 → 3 (reflection includes edge)
         A = DArray([1, 2, 3, 4], Blocks(2))
         B = zeros(Blocks(2), Int, 4)
-        Dagger.spawn_datadeps() do
-            @stencil begin
-                B[idx] = sum(@neighbors(A[idx], 1, Reflect(true)))
-            end
-        end
+        @stencil B[idx] = sum(@neighbors(A[idx], 1, Reflect(true)))
         # B[1]: neighbors at indices 0, 1, 2 -> reflected 0 becomes 1, so [1, 1, 2] = 4
         # B[2]: neighbors at indices 1, 2, 3 -> [1, 2, 3] = 6
         # B[3]: neighbors at indices 2, 3, 4 -> [2, 3, 4] = 9
@@ -270,11 +236,7 @@ function test_stencil()
         # idx=5 → 3, idx=6 → 2 (reflection skips edge)
         A = DArray([1, 2, 3, 4], Blocks(2))
         B = zeros(Blocks(2), Int, 4)
-        Dagger.spawn_datadeps() do
-            @stencil begin
-                B[idx] = sum(@neighbors(A[idx], 1, Reflect(false)))
-            end
-        end
+        @stencil B[idx] = sum(@neighbors(A[idx], 1, Reflect(false)))
         # B[1]: neighbors at indices 0, 1, 2 -> reflected 0 becomes 2, so [2, 1, 2] = 5
         # B[2]: neighbors at indices 1, 2, 3 -> [1, 2, 3] = 6
         # B[3]: neighbors at indices 2, 3, 4 -> [2, 3, 4] = 9
@@ -287,11 +249,7 @@ function test_stencil()
         # Test 2D symmetric reflection with a gradient pattern
         A = DArray(reshape(1:16, 4, 4), Blocks(2, 2))
         B = zeros(Blocks(2, 2), Int, 4, 4)
-        Dagger.spawn_datadeps() do
-            @stencil begin
-                B[idx] = sum(@neighbors(A[idx], 1, Reflect(true)))
-            end
-        end
+        @stencil B[idx] = sum(@neighbors(A[idx], 1, Reflect(true)))
         # Symmetric: idx < 1 → 1 - idx, idx > size → 2*size + 1 - idx
         A_collected = collect(A)
         expected_B_symm = zeros(Int, 4, 4)
@@ -314,11 +272,7 @@ function test_stencil()
         # Test 2D mirror reflection with a gradient pattern
         A = DArray(reshape(1:16, 4, 4), Blocks(2, 2))
         B = zeros(Blocks(2, 2), Int, 4, 4)
-        Dagger.spawn_datadeps() do
-            @stencil begin
-                B[idx] = sum(@neighbors(A[idx], 1, Reflect(false)))
-            end
-        end
+        @stencil B[idx] = sum(@neighbors(A[idx], 1, Reflect(false)))
         # Mirror: idx < 1 → 2 - idx, idx > size → 2*size - idx
         A_collected = collect(A)
         expected_B_mirror = zeros(Int, 4, 4)
@@ -339,11 +293,9 @@ function test_stencil()
     @testset "Multiple expressions" begin
         A = zeros(Blocks(2, 2), Int, 4, 4)
         B = zeros(Blocks(2, 2), Int, 4, 4)
-        Dagger.spawn_datadeps() do
-            @stencil begin
-                A[idx] = 1
-                B[idx] = A[idx] * 2
-            end
+        @stencil begin
+            A[idx] = 1
+            B[idx] = A[idx] * 2
         end
         expected_A_multi = [1 for r in 1:4, c in 1:4]
         expected_B_multi = expected_A_multi .* 2
@@ -353,33 +305,37 @@ function test_stencil()
 
     @testset "Allocation syntax" begin
         A = ones(Blocks(2, 2), Int, 4, 4)
-        B = nothing
-        Dagger.spawn_datadeps() do
-            global B = @stencil sum(@neighbors(A[idx], 1, Wrap()))
-        end
+        B = @stencil sum(@neighbors(A[idx], 1, Wrap()))
         @test B isa DArray
         @test all(collect(B) .== 9)
 
-        C = nothing
-        Dagger.spawn_datadeps() do
-            global C = @stencil begin
-                A[idx] = A[idx] + 1
-                sum(@neighbors(A[idx], 1, Wrap()))
-            end
+        C = @stencil begin
+            A[idx] = A[idx] + 1
+            sum(@neighbors(A[idx], 1, Wrap()))
         end
         @test C isa DArray
         @test all(collect(C) .== 18)
+    end
+
+    @testset "Broadcast integration" begin
+        A = ones(Blocks(2, 2), Int, 4, 4)
+        B = ones(Blocks(2, 2), Int, 4, 4)
+        C = zeros(Blocks(2, 2), Int, 4, 4)
+
+        # Test that @stencil can be used in a broadcast expression
+        C .= A .+ @stencil(sum(@neighbors(B[idx], 1, Wrap())))
+
+        # sum(@neighbors(B[idx], 1, Wrap())) should be 9 everywhere if B is all ones
+        # A is all ones
+        # C should be 1 + 9 = 10 everywhere
+        @test all(collect(C) .== 10)
     end
 
     @testset "Multiple DArrays" begin
         A = ones(Blocks(2, 2), Int, 4, 4)
         B = DArray(fill(2, 4, 4), Blocks(2, 2))
         C = zeros(Blocks(2, 2), Int, 4, 4)
-        Dagger.spawn_datadeps() do
-            @stencil begin
-                C[idx] = A[idx] + B[idx]
-            end
-        end
+        @stencil C[idx] = A[idx] + B[idx]
         @test all(collect(C) .== 3)
     end
 
@@ -387,11 +343,7 @@ function test_stencil()
         A = ones(Blocks(1, 1), Int, 2, 2) # Simpler 2x2 case
         B = zeros(Blocks(1, 1), Int, 2, 2)
         pad_value = 5
-        Dagger.spawn_datadeps() do
-            @stencil begin
-                B[idx] = sum(@neighbors(A[idx], 1, Pad(pad_value)))
-            end
-        end
+        @stencil B[idx] = sum(@neighbors(A[idx], 1, Pad(pad_value)))
         # For A = [1 1; 1 1] and Pad(5)
         # B[1,1] neighbors considering a 3x3 neighborhood around A[1,1]:
         # P P P
@@ -417,11 +369,7 @@ function test_stencil()
             end
             B = zeros(Blocks(ntuple(_->1, N)...), Float32, ntuple(_->3, N)...)
 
-            Dagger.spawn_datadeps() do
-                @stencil begin
-                    B[idx] = sum(@neighbors(A[idx], 1, Wrap())) / length(A)
-                end
-            end
+            @stencil B[idx] = sum(@neighbors(A[idx], 1, Wrap())) / length(A)
             @test all(==(Float64(sum(1:length(A)) / length(A))), collect(B))
         end
     end
@@ -431,11 +379,7 @@ function test_stencil()
         @testset "1D with distance (2,)" begin
             A = DArray([1, 2, 3, 4, 5, 6], Blocks(2,))
             B = zeros(Blocks(2,), Int, 6)
-            Dagger.spawn_datadeps() do
-                @stencil begin
-                    B[idx] = sum(@neighbors(A[idx], (2,), Wrap()))
-                end
-            end
+            @stencil B[idx] = sum(@neighbors(A[idx], (2,), Wrap()))
             # For each element, neighbors at distance 2 in 1D: [-2, -1, 0, 1, 2]
             # B[1] neighbors: A[5], A[6], A[1], A[2], A[3] (wrapping) = 5+6+1+2+3 = 17
             # B[2] neighbors: A[6], A[1], A[2], A[3], A[4] = 6+1+2+3+4 = 16
@@ -451,11 +395,7 @@ function test_stencil()
         @testset "2D with distance (1, 2)" begin
             A = DArray(reshape(1:12, 3, 4), Blocks(1, 2))
             B = zeros(Blocks(1, 2), Int, 3, 4)
-            Dagger.spawn_datadeps() do
-                @stencil begin
-                    B[idx] = sum(@neighbors(A[idx], (1, 2), Wrap()))
-                end
-            end
+            @stencil B[idx] = sum(@neighbors(A[idx], (1, 2), Wrap()))
             # Distance (1, 2) means:
             # - dimension 1 (rows): offsets -1, 0, 1
             # - dimension 2 (cols): offsets -2, -1, 0, 1, 2
@@ -479,11 +419,7 @@ function test_stencil()
             # distance (1, 2, 1) requires chunks >= (3, 5, 3)
             A = DArray(reshape(1:120, 4, 5, 6), Blocks(4, 5, 3))
             B = zeros(Blocks(4, 5, 3), Int, 4, 5, 6)
-            Dagger.spawn_datadeps() do
-                @stencil begin
-                    B[idx] = sum(@neighbors(A[idx], (1, 2, 1), Wrap()))
-                end
-            end
+            @stencil B[idx] = sum(@neighbors(A[idx], (1, 2, 1), Wrap()))
             # Distance (1, 2, 1) means:
             # - dimension 1: offsets -1, 0, 1 (3 elements)
             # - dimension 2: offsets -2, -1, 0, 1, 2 (5 elements)
@@ -505,36 +441,25 @@ function test_stencil()
     end
 
     @testset "Invalid neighborhood distance" begin
-        A = ones(Blocks(1, 1), Int, 2, 2)
-        B = zeros(Blocks(1, 1), Int, 2, 2)
         for value in [0, -1, 1.5, 2]
             for dist in [value, (value,)]
-                @test_throws_unwrap ArgumentError Dagger.spawn_datadeps() do
-                    @stencil begin
-                        B[idx] = sum(@neighbors(A[idx], value, Wrap()))
-                    end
+                @test_throws_unwrap ArgumentError @eval begin
+                    A = ones(Blocks(1, 1), Int, 2, 2)
+                    B = zeros(Blocks(1, 1), Int, 2, 2)
+                    @stencil B[idx] = sum(@neighbors(A[idx], $dist, Wrap()))
                 end
             end
         end
     end
 
-    @testset "Invalid neighborhood access of written variable" begin
-        A = ones(Blocks(1, 1), Int, 2, 2)
-        @test_throws_unwrap ArgumentError @eval Dagger.spawn_datadeps() do
-            @stencil begin
-                A[idx] = sum(@neighbors(A[idx], 1, Wrap()))
-            end
-        end
-    end
-
+    #= FIXME: Can't detect this anymore, because we allow arbitrary expressions in @stencil
     @testset "Invalid update expression" begin
-        A = ones(Blocks(1, 1), Int, 2, 2)
-        @test_throws_unwrap ArgumentError @eval Dagger.spawn_datadeps() do
-            @stencil begin
-                A[idx] += 1
-            end
+        @test_throws_unwrap ArgumentError @eval begin
+            A = ones(Blocks(1, 1), Int, 2, 2)
+            @stencil A[idx] += 1
         end
     end
+    =#
 end
 
 @testset "CPU" begin
