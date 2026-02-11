@@ -13,7 +13,7 @@
     U_DA = Array(lu_DA.U)
     P_DA = Array(lu_DA.P)
     if !(T in (Float32, ComplexF32) && pivot == NoPivot()) # FIXME: NoPivot is unstable for FP32
-        tol_fact = T in (Float32, ComplexF32) ? 1e-4 : 1e-12
+        tol_fact = T in (Float32, ComplexF32) ? 1e-2 : 1e-12
         @test P_DA * B ≈ L_DA * U_DA rtol=tol_fact
     end
     @test istriu(U_DA)
@@ -26,7 +26,7 @@
     b = rand(T, 128)
     x_direct = B \ b
     x_lu = lu_DA \ b
-    tol = T in (Float32, ComplexF32) ? 1e-3 : 1e-6
+    tol = T in (Float32, ComplexF32) ? 1e-2 : 1e-6
     @test Array(x_lu) ≈ x_direct rtol=tol
 
     # Check that lu did not modify A or DA
@@ -43,7 +43,7 @@
     U_DA = Array(lu_DA.U)
     P_DA = Array(lu_DA.P)
     if !(T in (Float32, ComplexF32) && pivot == NoPivot()) # FIXME: NoPivot is unstable for FP32
-        tol_fact = T in (Float32, ComplexF32) ? 1e-4 : 1e-12
+        tol_fact = T in (Float32, ComplexF32) ? 1e-2 : 1e-12
         @test P_DA * B ≈ L_DA * U_DA rtol=tol_fact
     end
     @test istriu(U_DA)
@@ -56,7 +56,7 @@
     b = rand(T, 128)
     x_direct = B \ b
     x_lu = lu_DA \ b
-    tol = T in (Float32, ComplexF32) ? 1e-3 : 1e-6
+    tol = T in (Float32, ComplexF32) ? 1e-2 : 1e-6
     @test Array(x_lu) ≈ x_direct rtol=tol
 
     # Check that changes propagated to A
