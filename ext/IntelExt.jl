@@ -101,6 +101,7 @@ function _ensure_device(x::oneArray, device_id::Int)
     src_dev_id = _device_id(x)
     @assert src_dev_id !== nothing "Unknown source device for oneArray"
     # Ensure any pending work on the source device is complete before DtoD copy
+    # N.B. oneAPI does not synchronize the source in `copyto!`, making this necessary
     with_context(src_dev_id) do
         oneAPI.synchronize()
     end
