@@ -36,16 +36,16 @@ Base.isless(a::MemorySpan, b::MemorySpan) = a.ptr < b.ptr
 Base.isempty(x::MemorySpan) = x.len == 0
 span_start(span::MemorySpan) = span.ptr.addr
 span_len(span::MemorySpan) = span.len
-span_end(span::MemorySpan) = span.ptr.addr + span.len
+span_end(span::MemorySpan) = isempty(span) ? span.ptr.addr : span.ptr.addr + span.len - 1
 spans_overlap(span1::MemorySpan, span2::MemorySpan) =
-    span_start(span1) < span_end(span2) && span_start(span2) < span_end(span1)
+    span_start(span1) <= span_end(span2) && span_start(span2) <= span_end(span1)
 function span_diff(span1::MemorySpan, span2::MemorySpan)
     @assert span1.ptr.space == span2.ptr.space
     start = max(span_start(span1), span_start(span2))
     stop = min(span_end(span1), span_end(span2))
     start_ptr = RemotePtr(start, span1.ptr.space)
-    if start < stop
-        len = stop - start
+    if start <= stop
+        len = stop - start + 1
         return MemorySpan(start_ptr, len)
     else
         return MemorySpan(start_ptr, 0)
@@ -62,14 +62,14 @@ LocalMemorySpan(span::MemorySpan) = LocalMemorySpan(span.ptr.addr, span.len)
 Base.isempty(x::LocalMemorySpan) = x.len == 0
 span_start(span::LocalMemorySpan) = span.ptr
 span_len(span::LocalMemorySpan) = span.len
-span_end(span::LocalMemorySpan) = span.ptr + span.len
+span_end(span::LocalMemorySpan) = isempty(span) ? span.ptr : span.ptr + span.len - 1
 spans_overlap(span1::LocalMemorySpan, span2::LocalMemorySpan) =
-    span_start(span1) < span_end(span2) && span_start(span2) < span_end(span1)
+    span_start(span1) <= span_end(span2) && span_start(span2) <= span_end(span1)
 function span_diff(span1::LocalMemorySpan, span2::LocalMemorySpan)
     start = max(span_start(span1), span_start(span2))
     stop = min(span_end(span1), span_end(span2))
-    if start < stop
-        len = stop - start
+    if start <= stop
+        len = stop - start + 1
         return LocalMemorySpan(start, len)
     else
         return LocalMemorySpan(start, 0)
