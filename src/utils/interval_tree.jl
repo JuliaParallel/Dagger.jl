@@ -30,10 +30,13 @@ function IntervalTree{M}(spans) where M
 end
 IntervalTree(spans::Vector{M}) where M = IntervalTree{M}(spans)
 
+_span_one(x::Unsigned) = one(typeof(x))
+_span_one(x::ManyPair{N}) where N = ManyPair(ntuple(_ -> UInt(1), N))
+
 function Base.show(io::IO, tree::IntervalTree)
     println(io, "$(typeof(tree)) (with $(length(tree)) spans):")
     for (i, span) in enumerate(tree)
-        println(io, "  $i: [$(span_start(span)), $(span_end(span))) (len=$(span_len(span)))")
+        println(io, "  $i: [$(span_start(span)), $(span_end(span))] (len=$(span_len(span)))")
     end
 end
 
@@ -263,9 +266,9 @@ function delete_node!(root::IntervalNode{M,E}, span::M) where {M,E}
 
         # Left portion: exists if original starts before deleted span
         if original_start < del_start
-            left_end = min(original_end, del_start)
-            if left_end > original_start
-                left_span = M(original_start, left_end - original_start)
+            left_end = min(original_end, del_start - _span_one(del_start))
+            if left_end >= original_start
+                left_span = M(original_start, left_end - original_start + _span_one(left_end))
                 if !isempty(left_span)
                     replacement = insert_node!(replacement, left_span)
                 end
@@ -274,9 +277,9 @@ function delete_node!(root::IntervalNode{M,E}, span::M) where {M,E}
 
         # Right portion: exists if original extends beyond deleted span
         if original_end > del_end
-            right_start = max(original_start, del_end)
-            if original_end > right_start
-                right_span = M(right_start, original_end - right_start)
+            right_start = max(original_start, del_end + _span_one(del_end))
+            if original_end >= right_start
+                right_span = M(right_start, original_end - right_start + _span_one(original_end))
                 if !isempty(right_span)
                     replacement = insert_node!(replacement, right_span)
                 end
@@ -356,12 +359,12 @@ function find_overlapping!(node::IntervalNode{M,E}, query::M, result::Vector{M};
         end
 
         # Enqueue left subtree if it might contain overlapping intervals
-        if current.left !== nothing && current.left.max_end > span_start(query)
+        if current.left !== nothing && current.left.max_end >= span_start(query)
             push!(queue, current.left)
         end
 
         # Enqueue right subtree if query extends beyond current node's start
-        if current.right !== nothing && span_end(query) > span_start(current.span)
+        if current.right !== nothing && span_end(query) >= span_start(current.span)
             push!(queue, current.right)
         end
     end
@@ -430,9 +433,9 @@ function add_remaining_portions!(tree::IntervalTree{M}, original::M, subtracted:
 
     # Left portion: exists if original starts before subtracted
     if original_start < sub_start
-        left_end = min(original_end, sub_start)
-        if left_end > original_start
-            left_span = M(original_start, left_end - original_start)
+        left_end = min(original_end, sub_start - _span_one(sub_start))
+        if left_end >= original_start
+            left_span = M(original_start, left_end - original_start + _span_one(left_end))
             if !isempty(left_span)
                 insert!(tree, left_span)
             end
@@ -441,9 +444,9 @@ function add_remaining_portions!(tree::IntervalTree{M}, original::M, subtracted:
 
     # Right portion: exists if original extends beyond subtracted
     if original_end > sub_end
-        right_start = max(original_start, sub_end)
-        if original_end > right_start
-            right_span = M(right_start, original_end - right_start)
+        right_start = max(original_start, sub_end + _span_one(sub_end))
+        if original_end >= right_start
+            right_span = M(right_start, original_end - right_start + _span_one(original_end))
             if !isempty(right_span)
                 insert!(tree, right_span)
             end
