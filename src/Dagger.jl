@@ -100,7 +100,7 @@ include("datadeps/queue.jl")
 
 # Stencils
 include("utils/haloarray.jl")
-include("stencil.jl")
+include("array/stencil.jl")
 
 # Streaming
 include("stream.jl")

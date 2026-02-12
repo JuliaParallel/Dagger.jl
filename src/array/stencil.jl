@@ -618,7 +618,7 @@ function build_halo(neigh_dist, boundary, center, all_halos...)
     N = ndims(center)
     expected_halos = 3^N - 1
     @assert length(all_halos) == expected_halos "Halo mismatch: N=$N expected $expected_halos halos, got $(length(all_halos))"
-    return HaloArray(center, (all_halos...,), ntuple(i->get_neigh_dist(neigh_dist, i), N))
+    return HaloArray(copy(center), (all_halos...,), ntuple(i->get_neigh_dist(neigh_dist, i), N))
 end
 
 function load_neighborhood(arr::HaloArray{T,N}, idx) where {T,N}
@@ -698,7 +698,7 @@ as that would currently cause race conditions and lead to undefined behavior.
 """
 macro stencil(orig_ex)
     if !Meta.isexpr(orig_ex, :block)
-        throw(ArgumentError("Invalid stencil block: $orig_ex"))
+        orig_ex = Expr(:block, orig_ex)
     end
 
     # Collect access pattern information
@@ -706,51 +706,96 @@ macro stencil(orig_ex)
     all_accessed_vars = Set{Symbol}()
     for inner_ex in orig_ex.args
         inner_ex isa LineNumberNode && continue
-        if !@capture(inner_ex, write_ex_ = read_ex_)
-            throw(ArgumentError("Invalid update expression: $inner_ex"))
+
+        # Determine if this is an assignment or a naked expression
+        is_allocation = false
+        if @capture(inner_ex, w_ex_ = r_ex_)
+            if !@capture(w_ex, w_var_[w_idx_])
+                throw(ArgumentError("Update expression requires a write to an index: $w_ex"))
+            end
+            write_var = w_var
+            write_idx = w_idx
+            read_ex = r_ex
+        else
+            read_ex = inner_ex
+            is_allocation = true
+            write_var = nothing
+            write_idx = nothing
         end
-        if !@capture(write_ex, write_var_[write_idx_])
-            throw(ArgumentError("Update expression requires a write: $write_ex"))
-        end
+
         accessed_vars = Set{Symbol}()
         read_vars = Set{Symbol}()
         neighborhoods = Dict{Symbol, Tuple{Any, Any}}()
-        push!(accessed_vars, write_var)
+        source_var = nothing
         prewalk(read_ex) do read_inner_ex
-            if @capture(read_inner_ex, read_var_[read_idx_]) && read_idx == write_idx
-                push!(accessed_vars, read_var)
-                push!(read_vars, read_var)
-            elseif @capture(read_inner_ex, @neighbors(read_var_[read_idx_], neigh_dist_, boundary_))
-                if read_idx != write_idx
-                    throw(ArgumentError("Neighborhood access must be at the same index as the write: $read_inner_ex"))
+            if @capture(read_inner_ex, r_var_[r_idx_])
+                if isnothing(write_idx)
+                    write_idx = r_idx
                 end
-                if write_var == read_var
-                    throw(ArgumentError("Cannot write to the same variable as the neighborhood access: $read_inner_ex"))
+                if isnothing(source_var)
+                    source_var = r_var
                 end
-                push!(accessed_vars, read_var)
-                push!(read_vars, read_var)
-                neighborhoods[read_var] = (neigh_dist, boundary)
+                if r_idx == write_idx
+                    push!(accessed_vars, r_var)
+                    push!(read_vars, r_var)
+                end
+            elseif @capture(read_inner_ex, @neighbors(r_var_[r_idx_], neigh_dist_, boundary_))
+                if isnothing(write_idx)
+                    write_idx = r_idx
+                end
+                if isnothing(source_var)
+                    source_var = r_var
+                end
+                if r_idx == write_idx
+                    push!(accessed_vars, r_var)
+                    push!(read_vars, r_var)
+                    neighborhoods[r_var] = (neigh_dist, boundary)
+                else
+                    throw(ArgumentError("Neighborhood access must be at the same index: $read_inner_ex"))
+                end
             end
             return read_inner_ex
         end
+
+        if isnothing(write_idx)
+            throw(ArgumentError("Invalid stencil expression (no index found): $inner_ex"))
+        end
+        if is_allocation
+            if isnothing(source_var)
+                throw(ArgumentError("Could not find a source DArray in expression: $inner_ex"))
+            end
+            write_var = gensym("out")
+            inner_ex = :($write_var[$write_idx] = $read_ex)
+        end
+
+        push!(accessed_vars, write_var)
         union!(all_accessed_vars, accessed_vars)
-        push!(inners, (;inner_ex, accessed_vars, write_var, write_idx, read_ex, read_vars, neighborhoods))
+        push!(inners, (;inner_ex, accessed_vars, write_var, write_idx, read_ex, read_vars, neighborhoods, is_allocation, source_var))
     end
 
     # Codegen update functions
     final_ex = Expr(:block)
-    @gensym chunk_idx
-    for (;inner_ex, accessed_vars, write_var, write_idx, read_ex, read_vars, neighborhoods) in inners
+
+    # 1. Allocations (outside spawn_datadeps)
+    for inner in inners
+        if inner.is_allocation
+            push!(final_ex.args, :($(inner.write_var) = similar($(inner.source_var))))
+        end
+    end
+
+    # 2. Stencil operations (inside spawn_datadeps)
+    datadeps_body = Expr(:block)
+    for (;inner_ex, accessed_vars, write_var, write_idx, read_ex, read_vars, neighborhoods, is_allocation, source_var) in inners
         # Generate a variable for chunk access
         @gensym chunk_idx
 
         # Generate function with transformed body
-        @gensym inner_vars inner_index_var
+        @gensym inner_vars inner_index_var inner_write_var
         new_inner_ex_body = prewalk(inner_ex) do old_inner_ex
             if @capture(old_inner_ex, read_var_[read_idx_]) && read_idx == write_idx
                 # Direct access
                 if read_var == write_var
-                    return :($write_var[$inner_index_var])
+                    return :($inner_write_var[$inner_index_var])
                 else
                     return :($inner_vars.$read_var[$inner_index_var])
                 end
@@ -760,44 +805,66 @@ macro stencil(orig_ex)
             end
             return old_inner_ex
         end
-        new_inner_f = :(($inner_index_var, $write_var, $inner_vars)->$new_inner_ex_body)
+        new_inner_f = :(($inner_index_var, $inner_write_var, $inner_vars)->$new_inner_ex_body)
+        actual_read_vars = filter(v -> (v != write_var) || (v in keys(neighborhoods)), collect(read_vars))
         new_inner_ex = quote
-            $inner_vars = (;$(read_vars...))
-            $inner_stencil!($new_inner_f, $write_var, $inner_vars)
+            $inner_vars = (;$(actual_read_vars...))
+            $inner_stencil!($new_inner_f, $inner_write_var, $inner_vars)
         end
-        inner_fn = Expr(:->, Expr(:tuple, Expr(:parameters, write_var, read_vars...)), new_inner_ex)
+        inner_fn = Expr(:->, Expr(:tuple, Expr(:parameters, inner_write_var, actual_read_vars...)), new_inner_ex)
 
-        # Generate @spawn call with appropriate vars and deps
-        deps_ex = Any[]
-        if write_var in read_vars
-            push!(deps_ex, Expr(:kw, write_var, :($ReadWrite($chunks($write_var)[$chunk_idx]))))
-        else
-            push!(deps_ex, Expr(:kw, write_var, :($Write($chunks($write_var)[$chunk_idx]))))
-        end
-        neighbor_copy_all_ex = Expr(:block)
+        # 2a. Pre-spawn all halos for this expression
+        # This ensures all readers capture the "old" state before any writers start.
+        @gensym halo_tasks_map
+        push!(datadeps_body.args, :($halo_tasks_map = Dict{Symbol, Any}()))
         for read_var in read_vars
             if read_var in keys(neighborhoods)
-                # Generate a neighborhood copy operation
                 neigh_dist, boundary = neighborhoods[read_var]
-                deps_inner_ex = Expr(:block)
-                @gensym neighbor_copy_var
-                push!(neighbor_copy_all_ex.args, :($neighbor_copy_var = Dagger.@spawn name="stencil_build_halo" $build_halo($neigh_dist, $boundary, map($Read, $select_neighborhood_chunks($chunks($read_var), $chunk_idx, $neigh_dist, $boundary))...)))
-                push!(deps_ex, Expr(:kw, read_var, :($Read($neighbor_copy_var))))
+                @gensym halo_tasks
+                push!(datadeps_body.args, :($halo_tasks = Array{$DTask}(undef, size($chunks($read_var)))))
+                push!(datadeps_body.args, quote
+                    for $chunk_idx in $CartesianIndices($chunks($read_var))
+                        $halo_tasks[$chunk_idx] = Dagger.@spawn name="stencil_build_halo" $build_halo($neigh_dist, $boundary, map($Read, $select_neighborhood_chunks($chunks($read_var), $chunk_idx, $neigh_dist, $boundary))...)
+                    end
+                end)
+                push!(datadeps_body.args, :($halo_tasks_map[$(QuoteNode(read_var))] = $halo_tasks))
+            end
+        end
+
+        # 2b. Generate @spawn call with appropriate vars and deps
+        deps_ex = Any[]
+        if write_var in read_vars
+            push!(deps_ex, Expr(:kw, inner_write_var, :($ReadWrite($chunks($write_var)[$chunk_idx]))))
+        else
+            push!(deps_ex, Expr(:kw, inner_write_var, :($Write($chunks($write_var)[$chunk_idx]))))
+        end
+        for read_var in actual_read_vars
+            if read_var in keys(neighborhoods)
+                push!(deps_ex, Expr(:kw, read_var, :($Read($halo_tasks_map[$(QuoteNode(read_var))][$chunk_idx]))))
             else
-                push!(deps_ex, Expr(:kw, read_var, :($Read($chunks($read_var)[$chunk_idx]))))
+                if read_var != write_var
+                    push!(deps_ex, Expr(:kw, read_var, :($Read($chunks($read_var)[$chunk_idx]))))
+                end
             end
         end
         spawn_ex = :(Dagger.@spawn name="stencil_inner_fn" $inner_fn(;$(deps_ex...)))
 
-        # Generate loop
-        push!(final_ex.args, quote
+        # 2c. Generate loop to spawn stencil tasks
+        push!(datadeps_body.args, quote
             for $chunk_idx in $CartesianIndices($chunks($write_var))
-                $neighbor_copy_all_ex
                 $spawn_ex
             end
         end)
     end
 
+    push!(final_ex.args, :(Dagger.spawn_datadeps() do
+        $datadeps_body
+    end))
+
+    # 3. Return last allocated var if applicable
+    if !isempty(inners) && inners[end].is_allocation
+        push!(final_ex.args, inners[end].write_var)
+    end
 
     return esc(final_ex)
 end
