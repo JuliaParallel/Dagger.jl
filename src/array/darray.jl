@@ -364,7 +364,7 @@ function group_indices(cumlength, idxs::AbstractRange)
 end
 
 _cumsum(x::AbstractArray) = length(x) == 0 ? Int[] : cumsum(x)
-function lookup_parts(A::DArray, ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomain{N}; slice::Bool=false) where N
+function lookup_parts(A::DArray, ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomain{N}) where N
     groups = map(group_indices, subdmns.cumlength, indexes(d))
     sz = map(length, groups)
     pieces = Array{Any}(undef, sz)
@@ -378,16 +378,16 @@ function lookup_parts(A::DArray, ps::AbstractArray, subdmns::DomainBlocks{N}, d:
     out_dmn = DomainBlocks(ntuple(x->1,Val(N)), out_cumlength)
     return pieces, out_dmn
 end
-function lookup_parts(A::DArray, ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomain{S}; slice::Bool=false) where {N,S}
+function lookup_parts(A::DArray, ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomain{S}) where {N,S}
     if S != 1
         throw(BoundsError(A, d.indexes))
     end
     inds = CartesianIndices(A)[d.indexes...]
     new_d = ntuple(i->first(inds).I[i]:last(inds).I[i], N)
-    return lookup_parts(A, ps, subdmns, ArrayDomain(new_d); slice)
+    return lookup_parts(A, ps, subdmns, ArrayDomain(new_d))
 end
 
-lookup_parts(A::DArray, ps::AbstractArray, subdmns::DomainBlocks{N}, d::CartesianIndices; slice::Bool=false) where {N} = lookup_parts(A, ps, subdmns, ArrayDomain(d.indices); slice)
+lookup_parts(A::DArray, ps::AbstractArray, subdmns::DomainBlocks{N}, d::CartesianIndices) where {N} = lookup_parts(A, ps, subdmns, ArrayDomain(d.indices))
 
 """
     Base.fetch(c::DArray)

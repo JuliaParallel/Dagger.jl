@@ -125,7 +125,38 @@ end
                 @test all(A .== value)
                 @test eltype(DA) == eltype(A) == T
                 @test size(DA) == size(A) == dims
+                if length(dims) == 2
+                    I = UniformScaling{T}(one(T))
+                    DId_varargs = DMatrix(dist, I, dims...)
+                    DId_tuple = DMatrix(dist, I, dims)
+                    for DId in (DId_varargs, DId_tuple)
+                        @test DId isa DMatrix{T}
+                        AId = collect(DId)
+                        @test eltype(DId) == eltype(AId) == T
+                        @test size(DId) == size(AId) == dims
+                        @test AId ≈ Matrix(I, dims...)
+                    end
+                end
             end
+        end
+    end
+end
+
+@testset "UniformScaling (I)" begin
+    for T in [Float32, Float64, Int32, Int64]
+        dim = (100, 100)
+        for bsz in [(33, 33),
+                     (30, 30),
+                     (10, 10),
+                     (25, 25)]
+            dist = Blocks(bsz...)
+            I_DA = UniformScaling{T}(one(T))
+            DA = DArray(dist, I_DA, dim...)
+            @test DA isa DArray{T,length(dim)}
+            A = collect(DA)
+            @test eltype(DA) == eltype(A) == T
+            @test size(DA) == size(A) == dim
+            @test A ≈ Matrix(I_DA, dim...)
         end
     end
 end
@@ -202,6 +233,18 @@ end
             end
             test_auto_blocks(DA, dims)
         end
+
+        if length(dims) == 2
+            I = UniformScaling{Float64}(one(Float64))
+            DId_varargs = DMatrix(AutoBlocks(), I, dims...)
+            DId_tuple = DMatrix(AutoBlocks(), I, dims)
+            for DId in (DId_varargs, DId_tuple)
+                test_auto_blocks(DId, dims)
+                AId = collect(DId)
+                @test size(DId) == size(AId) == dims
+                @test AId ≈ Matrix(I, dims...)
+            end
+        end
     end
 end
 
@@ -226,6 +269,15 @@ end
                     @test fn(dist, dims) isa DArray{Float64,length(dims)}
                     @test fn(dist, Float32, dims...) isa DArray{Float32,length(dims)}
                     @test fn(dist, Float32, dims) isa DArray{Float32,length(dims)}
+                end
+
+                if length(dims) == 2
+                    I64 = UniformScaling{Float64}(one(Float64))
+                    I32 = UniformScaling{Float32}(one(Float32))
+                    @test DMatrix(dist, I64, dims...) isa DMatrix{Float64}
+                    @test DMatrix(dist, I64, dims) isa DMatrix{Float64}
+                    @test DMatrix(dist, I32, dims...) isa DMatrix{Float32}
+                    @test DMatrix(dist, I32, dims) isa DMatrix{Float32}
                 end
             end
         end
@@ -255,7 +307,9 @@ function wait_array(A)
 end
 
 availprocs = collect(Dagger.all_processors())
-sort!(availprocs, by = x -> (x.owner, x.tid))
+filter!(p -> hasproperty(p, :tid), availprocs)
+proc_tid(p) = hasproperty(p, :tid) ? getproperty(p, :tid) : 0
+sort!(availprocs, by = p -> (getproperty(p, :owner), proc_tid(p)))
 numprocs = length(availprocs)
 
 A = rand(41, 35, 12)
@@ -306,6 +360,14 @@ blocks_m   = cld.(size(M), t_blocks_m)
             @test wait_array(zeros( AutoBlocks(), size(A)...     ; assignment)) isa DArray  && wait_array(zeros( AutoBlocks(), size(A);      assignment)) isa DArray
             @test wait_array(zeros( AutoBlocks(), size(v)...     ; assignment)) isa DVector && wait_array(zeros( AutoBlocks(), size(v);      assignment)) isa DVector
             @test wait_array(zeros( AutoBlocks(), size(M)...     ; assignment)) isa DMatrix && wait_array(zeros( AutoBlocks(), size(M);      assignment)) isa DMatrix
+
+            I_assign = UniformScaling{Float64}(one(Float64))
+            DId_M_auto_varargs = wait_array(DMatrix(AutoBlocks(), I_assign, size(M)...; assignment))
+            DId_M_auto_tuple = wait_array(DMatrix(AutoBlocks(), I_assign, size(M); assignment))
+            for DM in (DId_M_auto_varargs, DId_M_auto_tuple)
+                @test DM isa DMatrix{Float64}
+                @test collect(DM) ≈ Matrix(I_assign, size(M)...)
+            end
         end
 
         @testset "Explicit Blocks" begin
@@ -336,6 +398,14 @@ blocks_m   = cld.(size(M), t_blocks_m)
             @test wait_array(zeros( d_blocks_a, size(A)...     ; assignment)) isa DArray  && wait_array(zeros( d_blocks_a, size(A);      assignment)) isa DArray
             @test wait_array(zeros( d_blocks_v, size(v)...     ; assignment)) isa DVector && wait_array(zeros( d_blocks_v, size(v);      assignment)) isa DVector
             @test wait_array(zeros( d_blocks_m, size(M)...     ; assignment)) isa DMatrix && wait_array(zeros( d_blocks_m, size(M);      assignment)) isa DMatrix
+
+            I_assign = UniformScaling{Float64}(one(Float64))
+            DId_M_exp_varargs = wait_array(DMatrix(d_blocks_m, I_assign, size(M)...; assignment))
+            DId_M_exp_tuple = wait_array(DMatrix(d_blocks_m, I_assign, size(M); assignment))
+            for DM in (DId_M_exp_varargs, DId_M_exp_tuple)
+                @test DM isa DMatrix{Float64}
+                @test collect(DM) ≈ Matrix(I_assign, size(M)...)
+            end
         end
     end
 end
@@ -410,9 +480,14 @@ function test_assignment_strategy(assignment::Symbol, get_assignment_procgrid)
             zeros_v_auto  =        wait_array(zeros( AutoBlocks(), size(v)...; assignment))
             zeros_M_auto  =        wait_array(zeros( AutoBlocks(), size(M)...; assignment))
 
+            I_assign = UniformScaling{Float64}(one(Float64))
+            eye_M_auto        = wait_array(DMatrix(AutoBlocks(), I_assign, size(M)...; assignment))
+            eye_M_auto_tuple  = wait_array(DMatrix(AutoBlocks(), I_assign, size(M); assignment))
+
             @test chunk_processors(rand_A_auto)   == chunk_processors(randn_A_auto) ==                                    chunk_processors(ones_A_auto) == chunk_processors(zeros_A_auto) ==  tile_processors(get_assignment_procgrid(A, numprocs, get_default_blockgrid(A, numprocs)), get_default_blockgrid(A, numprocs))
             @test chunk_processors(rand_v_auto)   == chunk_processors(randn_v_auto) == chunk_processors(sprand_v_auto) == chunk_processors(ones_v_auto) == chunk_processors(zeros_v_auto) ==  tile_processors(get_assignment_procgrid(v, numprocs, get_default_blockgrid(v, numprocs)), get_default_blockgrid(v, numprocs))
-            @test chunk_processors(rand_M_auto)   == chunk_processors(randn_M_auto) == chunk_processors(sprand_M_auto) == chunk_processors(ones_M_auto) == chunk_processors(zeros_M_auto) ==  tile_processors(get_assignment_procgrid(M, numprocs, get_default_blockgrid(M, numprocs)), get_default_blockgrid(M, numprocs))
+            @test chunk_processors(rand_M_auto)   == chunk_processors(randn_M_auto) == chunk_processors(sprand_M_auto) == chunk_processors(ones_M_auto) == chunk_processors(zeros_M_auto) == chunk_processors(eye_M_auto) == tile_processors(get_assignment_procgrid(M, numprocs, get_default_blockgrid(M, numprocs)), get_default_blockgrid(M, numprocs))
+            @test chunk_processors(eye_M_auto) == chunk_processors(eye_M_auto_tuple)
         end
 
         @testset "Explicit Blocks" begin
@@ -454,9 +529,14 @@ function test_assignment_strategy(assignment::Symbol, get_assignment_procgrid)
             zeros_v_exp   =        wait_array(zeros( d_blocks_v, size(v)...; assignment))
             zeros_M_exp   =        wait_array(zeros( d_blocks_m, size(M)...; assignment))
 
+            I_assign = UniformScaling{Float64}(one(Float64))
+            eye_M_exp        = wait_array(DMatrix(d_blocks_m, I_assign, size(M)...; assignment))
+            eye_M_exp_tuple  = wait_array(DMatrix(d_blocks_m, I_assign, size(M); assignment))
+
             @test chunk_processors(rand_A_exp) == chunk_processors(randn_A_exp) ==                                   chunk_processors(ones_A_exp) == chunk_processors(zeros_A_exp) == tile_processors(get_assignment_procgrid(A, numprocs, blocks_a), blocks_a)
             @test chunk_processors(rand_v_exp) == chunk_processors(randn_v_exp) == chunk_processors(sprand_v_exp) == chunk_processors(ones_v_exp) == chunk_processors(zeros_v_exp) == tile_processors(get_assignment_procgrid(v, numprocs, blocks_v), blocks_v)
-            @test chunk_processors(rand_M_exp) == chunk_processors(randn_M_exp) == chunk_processors(sprand_M_exp) == chunk_processors(ones_M_exp) == chunk_processors(zeros_M_exp) == tile_processors(get_assignment_procgrid(M, numprocs, blocks_m), blocks_m)
+            @test chunk_processors(rand_M_exp) == chunk_processors(randn_M_exp) == chunk_processors(sprand_M_exp) == chunk_processors(ones_M_exp) == chunk_processors(zeros_M_exp) == chunk_processors(eye_M_exp) == tile_processors(get_assignment_procgrid(M, numprocs, blocks_m), blocks_m)
+            @test chunk_processors(eye_M_exp) == chunk_processors(eye_M_exp_tuple)
         end
     end
 end
@@ -517,10 +597,14 @@ test_assignment_strategy(:cycliccol, get_cycliccol_procgrid)
         zeros_v_auto   =        wait_array(zeros( AutoBlocks(), size(v)...; assignment=rand_osproc_ids_v))
         zeros_M_auto   =        wait_array(zeros( AutoBlocks(), size(M)...; assignment=rand_osproc_ids_M))
 
+        I_assign = UniformScaling{Float64}(one(Float64))
+        eye_M_auto        = wait_array(DMatrix(AutoBlocks(), I_assign, size(M)...; assignment=rand_osproc_ids_M))
+        eye_M_auto_tuple  = wait_array(DMatrix(AutoBlocks(), I_assign, size(M); assignment=rand_osproc_ids_M))
 
         @test chunk_processors(rand_A_auto)   == chunk_processors(randn_A_auto) ==                                    chunk_processors(ones_A_auto) == chunk_processors(zeros_A_auto) == tile_processors(get_random_threadprocs(rand_osproc_ids_A), get_default_blockgrid(rand_A_auto, numprocs))
         @test chunk_processors(rand_v_auto)   == chunk_processors(randn_v_auto) == chunk_processors(sprand_v_auto) == chunk_processors(ones_v_auto) == chunk_processors(zeros_v_auto) == tile_processors(get_random_threadprocs(rand_osproc_ids_v), get_default_blockgrid(rand_v_auto, numprocs))
-        @test chunk_processors(rand_M_auto)   == chunk_processors(randn_M_auto) == chunk_processors(sprand_M_auto) == chunk_processors(ones_M_auto) == chunk_processors(zeros_M_auto) == tile_processors(get_random_threadprocs(rand_osproc_ids_M), get_default_blockgrid(rand_M_auto, numprocs))
+        @test chunk_processors(rand_M_auto)   == chunk_processors(randn_M_auto) == chunk_processors(sprand_M_auto) == chunk_processors(ones_M_auto) == chunk_processors(zeros_M_auto) == chunk_processors(eye_M_auto) == tile_processors(get_random_threadprocs(rand_osproc_ids_M), get_default_blockgrid(rand_M_auto, numprocs))
+        @test chunk_processors(eye_M_auto) == chunk_processors(eye_M_auto_tuple)
     end
 
     @testset "Explicit Blocks" begin
@@ -562,10 +646,14 @@ test_assignment_strategy(:cycliccol, get_cycliccol_procgrid)
         zeros_v_exp   =        wait_array(zeros( d_blocks_v, size(v)...; assignment=rand_osproc_ids_v))
         zeros_M_exp   =        wait_array(zeros( d_blocks_m, size(M)...; assignment=rand_osproc_ids_M))
 
+        I_assign = UniformScaling{Float64}(one(Float64))
+        eye_M_exp        = wait_array(DMatrix(d_blocks_m, I_assign, size(M)...; assignment=rand_osproc_ids_M))
+        eye_M_exp_tuple  = wait_array(DMatrix(d_blocks_m, I_assign, size(M); assignment=rand_osproc_ids_M))
 
         @test chunk_processors(rand_A_exp)   == chunk_processors(randn_A_exp) ==                                   chunk_processors(ones_A_exp) == chunk_processors(zeros_A_exp) == tile_processors(get_random_threadprocs(rand_osproc_ids_A), blocks_a)
         @test chunk_processors(rand_v_exp)   == chunk_processors(randn_v_exp) == chunk_processors(sprand_v_exp) == chunk_processors(ones_v_exp) == chunk_processors(zeros_v_exp) == tile_processors(get_random_threadprocs(rand_osproc_ids_v), blocks_v)
-        @test chunk_processors(rand_M_exp)   == chunk_processors(randn_M_exp) == chunk_processors(sprand_M_exp) == chunk_processors(ones_M_exp) == chunk_processors(zeros_M_exp) == tile_processors(get_random_threadprocs(rand_osproc_ids_M), blocks_m)
+        @test chunk_processors(rand_M_exp)   == chunk_processors(randn_M_exp) == chunk_processors(sprand_M_exp) == chunk_processors(ones_M_exp) == chunk_processors(zeros_M_exp) == chunk_processors(eye_M_exp) == tile_processors(get_random_threadprocs(rand_osproc_ids_M), blocks_m)
+        @test chunk_processors(eye_M_exp) == chunk_processors(eye_M_exp_tuple)
     end
 end
 
@@ -614,10 +702,14 @@ end
         zeros_v_auto   =        wait_array(zeros( AutoBlocks(), size(v)...; assignment=rand_procs_v))
         zeros_M_auto   =        wait_array(zeros( AutoBlocks(), size(M)...; assignment=rand_procs_M))
 
+        I_assign = UniformScaling{Float64}(one(Float64))
+        eye_M_auto        = wait_array(DMatrix(AutoBlocks(), I_assign, size(M)...; assignment=rand_procs_M))
+        eye_M_auto_tuple  = wait_array(DMatrix(AutoBlocks(), I_assign, size(M); assignment=rand_procs_M))
 
         @test chunk_processors(rand_A_auto)   == chunk_processors(randn_A_auto) ==                                    chunk_processors(ones_A_auto) == chunk_processors(zeros_A_auto) == tile_processors(rand_procs_A, get_default_blockgrid(A, numprocs))
         @test chunk_processors(rand_v_auto)   == chunk_processors(randn_v_auto) == chunk_processors(sprand_v_auto) == chunk_processors(ones_v_auto) == chunk_processors(zeros_v_auto) == tile_processors(rand_procs_v, get_default_blockgrid(v, numprocs))
-        @test chunk_processors(rand_M_auto)   == chunk_processors(randn_M_auto) == chunk_processors(sprand_M_auto) == chunk_processors(ones_M_auto) == chunk_processors(zeros_M_auto) == tile_processors(rand_procs_M, get_default_blockgrid(M, numprocs))
+        @test chunk_processors(rand_M_auto)   == chunk_processors(randn_M_auto) == chunk_processors(sprand_M_auto) == chunk_processors(ones_M_auto) == chunk_processors(zeros_M_auto) == chunk_processors(eye_M_auto) == tile_processors(rand_procs_M, get_default_blockgrid(M, numprocs))
+        @test chunk_processors(eye_M_auto) == chunk_processors(eye_M_auto_tuple)
     end
 
     @testset "Explicit Blocks" begin
@@ -659,9 +751,14 @@ end
         zeros_v_exp   =        wait_array(zeros( d_blocks_v, size(v)...; assignment=rand_procs_v))
         zeros_M_exp   =        wait_array(zeros( d_blocks_m, size(M)...; assignment=rand_procs_M))
 
+        I_assign = UniformScaling{Float64}(one(Float64))
+        eye_M_exp        = wait_array(DMatrix(d_blocks_m, I_assign, size(M)...; assignment=rand_procs_M))
+        eye_M_exp_tuple  = wait_array(DMatrix(d_blocks_m, I_assign, size(M); assignment=rand_procs_M))
+
         @test chunk_processors(rand_A_exp)   == chunk_processors(randn_A_exp) ==                                   chunk_processors(ones_A_exp) == chunk_processors(zeros_A_exp) == tile_processors(rand_procs_A, blocks_a)
         @test chunk_processors(rand_v_exp)   == chunk_processors(randn_v_exp) == chunk_processors(sprand_v_exp) == chunk_processors(ones_v_exp) == chunk_processors(zeros_v_exp) == tile_processors(rand_procs_v, blocks_v)
-        @test chunk_processors(rand_M_exp)   == chunk_processors(randn_M_exp) == chunk_processors(sprand_M_exp) == chunk_processors(ones_M_exp) == chunk_processors(zeros_M_exp) == tile_processors(rand_procs_M, blocks_m)
+        @test chunk_processors(rand_M_exp)   == chunk_processors(randn_M_exp) == chunk_processors(sprand_M_exp) == chunk_processors(ones_M_exp) == chunk_processors(zeros_M_exp) == chunk_processors(eye_M_exp) == tile_processors(rand_procs_M, blocks_m)
+        @test chunk_processors(eye_M_exp) == chunk_processors(eye_M_exp_tuple)
     end
 end
 

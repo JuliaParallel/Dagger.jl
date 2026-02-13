@@ -186,27 +186,49 @@ function Base.zero(x::DArray{T,N}) where {T,N}
     return _to_darray(a)
 end
 
-function _allocate_diag(i,T, _dims, subdomain)
+function _allocate_diag(i,T, _dims, domain, p)
     sA = zeros(T, _dims)
-    if !isempty(intersect(subdomain.indexes[1], subdomain.indexes[2]))
-        for j in range(1, min(_dims[1], _dims[2]))
-            sA[j,j] = one(T)
+    dom_idx = indexes(domain)
+    chunk_counts = ntuple(j -> cld(length(dom_idx[j]), p.blocksize[j]), length(dom_idx))
+    subinds_idx = CartesianIndices(ntuple(j -> Base.OneTo(chunk_counts[j]), length(chunk_counts)))[i]
+    subinds = Tuple(subinds_idx)
+    sd = map(enumerate(dom_idx)) do (idx, range)
+        bsz = div(last(range), p.blocksize[idx])
+        start = first(range) + p.blocksize[idx] * (subinds[idx] - 1)
+        stop = subinds[idx] == bsz + 1 ? last(range) : first(range) + p.blocksize[idx] * subinds[idx] - 1
+        start:stop
+    end
+    overlap = intersect(sd[1], sd[2])
+    if !isempty(overlap)
+        row_offset = first(sd[1]) - 1
+        col_offset = first(sd[2]) - 1
+        for g in overlap
+            sA[g - row_offset, g - col_offset] = one(T)
         end
     end
     return sA
 end
 
-function DMatrix(p::BlocksOrAuto, s::UniformScaling, dims::Dims, assignment::AssignmentType = :arbitrary)
+function DMatrix(p::BlocksOrAuto, s::UniformScaling, dims::Dims; assignment::AssignmentType = :arbitrary)
     d = ArrayDomain(map(x->1:x, dims))
     sd = partition(p, d)
     T = eltype(s)
-    a = AllocateArray(T, (i, T, _dims) -> _allocate_diag(i, T, _dims, sd[i]), true, d, partition(p, d), p, assignment)
+    a = AllocateArray(T, (i, T, _dims) -> _allocate_diag(i, T, _dims, d, p), true, d, partition(p, d), p, assignment)
     return _to_darray(a)
 end
 DMatrix(p::BlocksOrAuto, s::UniformScaling, dims::Integer...; assignment::AssignmentType = :arbitrary) = 
     DMatrix(p, s, dims; assignment)
 DMatrix(::AutoBlocks, s::UniformScaling, dims::Dims; assignment::AssignmentType = :arbitrary) =
     DMatrix(auto_blocks(dims), s::UniformScaling, dims; assignment)
+
+function DArray(p::BlocksOrAuto, s::UniformScaling, dims::Dims; assignment::AssignmentType = :arbitrary)
+    length(dims) == 2 || throw(ArgumentError("UniformScaling allocation requires exactly two dimensions"))
+    return DMatrix(p, s, dims; assignment)
+end
+DArray(p::BlocksOrAuto, s::UniformScaling, dims::Integer...; assignment::AssignmentType = :arbitrary) =
+    DArray(p, s, dims; assignment)
+DArray(::AutoBlocks, s::UniformScaling, dims::Dims; assignment::AssignmentType = :arbitrary) =
+    DArray(auto_blocks(dims), s::UniformScaling, dims; assignment)
 
 function DArray{T}(p::BlocksOrAuto, ::UndefInitializer, dims::Dims; assignment::AssignmentType = :arbitrary) where {T}
     d = ArrayDomain(map(x->1:x, dims))
