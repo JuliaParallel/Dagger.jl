@@ -21,9 +21,6 @@ import .cl: Device, Context, CmdQueue
 
 using UUIDs
 
-@inline Base.getindex(arr::CLArray, d::Dagger.ArrayDomain) = arr[Dagger.indexes(d)...]
-@inline Base.getindex(arr::CLArray{T,0}, d::Dagger.ArrayDomain{0}) where {T} = arr
-
 "Represents a single OpenCL device."
 struct CLArrayDeviceProc <: Dagger.Processor
     owner::Int

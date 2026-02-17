@@ -21,9 +21,6 @@ import Metal: MtlArray, MetalBackend
 const MtlDevice = Metal.MTL.MTLDeviceInstance
 const MtlStream = Metal.MTL.MTLCommandQueue
 
-@inline Base.getindex(arr::MtlArray, d::Dagger.ArrayDomain) = arr[Dagger.indexes(d)...]
-@inline Base.getindex(arr::MtlArray{T,0}, d::Dagger.ArrayDomain{0}) where {T} = arr
-
 struct MtlArrayDeviceProc <: Dagger.Processor
     owner::Int
     device_id::UInt64
