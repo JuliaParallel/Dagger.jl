@@ -297,6 +297,16 @@ end
 @assert all(collect(C) .== 4)
 ```
 
+## Update Operators
+
+You can use update operators like `+=`, `-=`, `*=`, and `/=` within a `@stencil` block. These are automatically transformed into the corresponding assignment and operation.
+
+```julia
+A = ones(Blocks(2, 2), Int, 4, 4)
+@stencil A[idx] += 1
+@assert all(collect(A) .== 2)
+```
+
 ## Example: Game of Life
 
 The following demonstrates a more complex example: Conway's Game of Life.
