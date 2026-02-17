@@ -22,6 +22,9 @@ import oneAPI: driver, driver!, device, device!, context, context!
 
 using UUIDs
 
+@inline Base.getindex(arr::oneArray, d::Dagger.ArrayDomain) = arr[Dagger.indexes(d)...]
+@inline Base.getindex(arr::oneArray{T,0}, d::Dagger.ArrayDomain{0}) where {T} = arr
+
 "Represents a single Intel GPU device."
 struct oneArrayDeviceProc <: Dagger.Processor
     owner::Int

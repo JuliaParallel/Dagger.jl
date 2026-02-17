@@ -20,6 +20,9 @@ import AMDGPU: HIPDevice, HIPContext, HIPStream, ROCArray, ROCBackend
 import AMDGPU: devices, context, context!, stream, stream!
 import AMDGPU: rocBLAS, rocSOLVER
 
+@inline Base.getindex(arr::ROCArray, d::Dagger.ArrayDomain) = arr[Dagger.indexes(d)...]
+@inline Base.getindex(arr::ROCArray{T,0}, d::Dagger.ArrayDomain{0}) where {T} = arr
+
 struct ROCArrayDeviceProc <: Dagger.Processor
     owner::Int
     device_id::Int

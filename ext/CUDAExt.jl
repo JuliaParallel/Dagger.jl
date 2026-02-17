@@ -22,6 +22,9 @@ import CUDA: CUBLAS, CUSOLVER
 
 using UUIDs
 
+@inline Base.getindex(arr::CuArray, d::Dagger.ArrayDomain) = arr[Dagger.indexes(d)...]
+@inline Base.getindex(arr::CuArray{T,0}, d::Dagger.ArrayDomain{0}) where {T} = arr
+
 "Represents a single CUDA GPU device."
 struct CuArrayDeviceProc <: Dagger.Processor
     owner::Int
