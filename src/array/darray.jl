@@ -33,6 +33,8 @@ chunks(a::ArrayDomain{N}) where {N} = DomainBlocks(
 (==)(a::ArrayDomain, b::ArrayDomain) = indexes(a) == indexes(b)
 Base.getindex(arr::AbstractArray, d::ArrayDomain) = arr[indexes(d)...]
 Base.getindex(arr::AbstractArray{T,0} where T, d::ArrayDomain{0}) = arr
+Base.getindex(arr::GPUArraysCore.AbstractGPUArray, d::ArrayDomain) = arr[indexes(d)...]
+Base.getindex(arr::GPUArraysCore.AbstractGPUArray{T,0} where T, d::ArrayDomain{0}) = arr
 
 function intersect(a::ArrayDomain, b::ArrayDomain)
     if a === b
