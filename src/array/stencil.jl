@@ -707,6 +707,12 @@ macro stencil(orig_ex)
     for inner_ex in orig_ex.args
         inner_ex isa LineNumberNode && continue
 
+        # Lower update operators to standard assignments
+        if inner_ex isa Expr && inner_ex.head in (:(+=), :(-=), :(*=), :(/=), :(\=), :(%=), :(^=), :(&=), :(|=), :(⊻=), :(<<=), :(>>=), :(>>>=))
+            op = Symbol(string(inner_ex.head)[1:end-1])
+            inner_ex = Expr(:(=), inner_ex.args[1], Expr(:call, op, inner_ex.args[1], inner_ex.args[2]))
+        end
+
         # Determine if this is an assignment or a naked expression
         is_allocation = false
         if @capture(inner_ex, w_ex_ = r_ex_)

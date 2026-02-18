@@ -339,6 +339,31 @@ function test_stencil()
         @test all(collect(C) .== 3)
     end
 
+    @testset "Update operators" begin
+        A = ones(Blocks(2, 2), Int, 4, 4)
+        @stencil A[idx] += 1
+        @test all(collect(A) .== 2)
+
+        B = ones(Blocks(2, 2), Int, 4, 4)
+        @stencil B[idx] *= 3
+        @test all(collect(B) .== 3)
+
+        C = DArray(fill(10.0, 4, 4), Blocks(2, 2))
+        @stencil C[idx] /= 2.0
+        @test all(collect(C) .== 5.0)
+
+        D = DArray(fill(10, 4, 4), Blocks(2, 2))
+        @stencil D[idx] -= 1
+        @test all(collect(D) .== 9)
+
+        E = ones(Blocks(2, 2), Int, 4, 4)
+        @stencil E[idx] += sum(@neighbors(E[idx], 1, Wrap()))
+        # E initially all 1s.
+        # Neighborhood sum is 9.
+        # E[idx] = E[idx] + 9 = 1 + 9 = 10
+        @test all(collect(E) .== 10)
+    end
+
     @testset "Pad boundary with non-zero value" begin
         A = ones(Blocks(1, 1), Int, 2, 2) # Simpler 2x2 case
         B = zeros(Blocks(1, 1), Int, 2, 2)
