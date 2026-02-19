@@ -338,7 +338,11 @@ end
 function aliased_object!(f, cache::AliasedObjectCache, x; ainfo=aliasing(x, identity))
     x_space = memory_space(x)
     if !is_key_present(cache, x_space, ainfo)
-        set_key_stored!(cache, x_space, ainfo, x isa Chunk ? x : tochunk(x))
+        # Preserve the object's memory-space/processor pairing when inserting
+        # the source key. Using bare `tochunk(x)` defaults to OSProc, which can
+        # incorrectly wrap GPU-backed objects as CPU chunks.
+        x_chunk = x isa Chunk ? x : tochunk(x, first(processors(x_space)))
+        set_key_stored!(cache, x_space, ainfo, x_chunk)
     end
     if is_stored(cache, ainfo)
         return get_stored(cache, ainfo)
