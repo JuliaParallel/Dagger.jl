@@ -263,11 +263,8 @@ function is_stored(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::Ab
     key = cache.derived[ainfo]
     return key in cache.stored[space]
 end
-function is_key_stored(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::AbstractAliasing)
-    if !haskey(cache.stored, space)
-        return false
-    end
-    return ainfo in cache.stored[space]
+function is_key_present(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::AbstractAliasing)
+    return haskey(cache.derived, ainfo)
 end
 function get_stored(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::AbstractAliasing)
     @assert is_stored(cache, space, ainfo) "Cache does not have derived ainfo $ainfo"
@@ -305,13 +302,13 @@ function is_stored(cache::AliasedObjectCache, ainfo::AbstractAliasing)
     cache_raw = unwrap(cache.chunk)::AliasedObjectCacheStore
     return is_stored(cache_raw, cache.space, ainfo)
 end
-function is_key_stored(cache::AliasedObjectCache, space::MemorySpace, ainfo::AbstractAliasing)
+function is_key_present(cache::AliasedObjectCache, space::MemorySpace, ainfo::AbstractAliasing)
     wid = root_worker_id(cache.chunk)
     if wid != myid()
-        return remotecall_fetch(is_key_stored, wid, cache, space, ainfo)
+        return remotecall_fetch(is_key_present, wid, cache, space, ainfo)
     end
     cache_raw = unwrap(cache.chunk)::AliasedObjectCacheStore
-    return is_key_stored(cache_raw, space, ainfo)
+    return is_key_present(cache_raw, space, ainfo)
 end
 function get_stored(cache::AliasedObjectCache, ainfo::AbstractAliasing)
     wid = root_worker_id(cache.chunk)
@@ -340,7 +337,7 @@ function set_key_stored!(cache::AliasedObjectCache, space::MemorySpace, ainfo::A
 end
 function aliased_object!(f, cache::AliasedObjectCache, x; ainfo=aliasing(x, identity))
     x_space = memory_space(x)
-    if !is_key_stored(cache, x_space, ainfo)
+    if !is_key_present(cache, x_space, ainfo)
         set_key_stored!(cache, x_space, ainfo, x isa Chunk ? x : tochunk(x))
     end
     if is_stored(cache, ainfo)
