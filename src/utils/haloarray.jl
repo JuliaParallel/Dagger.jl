@@ -155,13 +155,13 @@ end
 memory_space(A::HaloArray) = memory_space(A.center)
 
 function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, A::HaloArray)
-    center_chunk = rewrap_aliased_object!(cache, from_proc, to_proc, from_space, to_space, A.center)
-    halo_chunks = ntuple(i -> rewrap_aliased_object!(cache, from_proc, to_proc, from_space, to_space, A.halos[i]), length(A.halos))
+    center_chunk = move_rewrap(cache, from_proc, to_proc, from_space, to_space, A.center)
+    halo_chunks = ntuple(i -> move_rewrap(cache, from_proc, to_proc, from_space, to_space, A.halos[i]), length(A.halos))
     halo_width = A.halo_width
     to_w = root_worker_id(to_proc)
     return remotecall_fetch(to_w, from_proc, to_proc, from_space, to_space, center_chunk, halo_chunks, halo_width) do from_proc, to_proc, from_space, to_space, center_chunk, halo_chunks, halo_width
-        center_new = move(from_proc, to_proc, center_chunk)
-        halos_new = ntuple(i -> move(from_proc, to_proc, halo_chunks[i]), length(halo_chunks))
+        center_new = unwrap(center_chunk)
+        halos_new = ntuple(i -> unwrap(halo_chunks[i]), length(halo_chunks))
         return tochunk(HaloArray(center_new, halos_new, halo_width), to_proc)
     end
 end
