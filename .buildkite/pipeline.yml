@@ -43,15 +43,15 @@ steps:
           codecov: true
 
   - label: Julia 1.12
-  timeout_in_minutes: 90
-  <<: *test
-  plugins:
-    - JuliaCI/julia#v1:
-        version: "1.12"
-    - JuliaCI/julia-test#v1:
-        julia_args: "--threads=1"
-    - JuliaCI/julia-coverage#v1:
-        codecov: true
+    timeout_in_minutes: 90
+    <<: *test
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.12"
+      - JuliaCI/julia-test#v1:
+          julia_args: "--threads=1"
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
 
   - label: Julia 1
     timeout_in_minutes: 90
