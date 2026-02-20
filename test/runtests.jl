@@ -32,6 +32,7 @@ tests = [
     ("Array - LinearAlgebra - Matmul", "array/linalg/matmul.jl"),
     ("Array - LinearAlgebra - Cholesky", "array/linalg/cholesky.jl"),
     ("Array - LinearAlgebra - LU", "array/linalg/lu.jl"),
+    ("Array - LinearAlgebra - QR", "array/linalg/qr.jl"),
     ("Array - Random", "array/random.jl"),
     ("Array - Stencils", "array/stencil.jl"),
     ("Array - FFT", "array/fft.jl"),

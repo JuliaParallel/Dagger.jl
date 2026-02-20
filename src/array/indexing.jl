@@ -1,5 +1,55 @@
 ### getindex
 
+struct GetIndex{T,N} <: ArrayOp{T,N}
+    input::ArrayOp
+    idx::Tuple
+end
+
+GetIndex(input::ArrayOp, idx::Tuple) =
+    GetIndex{eltype(input), ndims(input)}(input, idx)
+
+function flatten(subdomains, subchunks, partitioning)
+    valdim = findfirst(j -> j != 1:1, subdomains[1].indexes)
+    flatc = []
+    flats = Array{ArrayDomain{1, Tuple{UnitRange{Int64}}}}(undef, 0)
+    map(x -> push!(flats, ArrayDomain(x.indexes[valdim])), subdomains)
+    map(x -> push!(flatc, x), subchunks)
+    newb = Blocks(partitioning.blocksize[valdim])
+    return flats, flatc, newb
+end
+
+function stage(ctx::Context, gidx::GetIndex)
+    inp = stage(ctx, gidx.input)
+
+    dmn = domain(inp)
+    idxs = [if isa(gidx.idx[i], Colon)
+        indexes(dmn)[i]
+    else
+        gidx.idx[i]
+    end for i in 1:length(gidx.idx)]
+
+    # Figure out output dimension
+    d = ArrayDomain(idxs)
+    subchunks, subdomains = Dagger.lookup_parts(inp, chunks(inp), domainchunks(inp), d)
+    d1 = alignfirst(d)
+    newb = inp.partitioning
+    if ndims(d1) != ndims(subdomains)
+        subdomains, subchunks, newb = flatten(subdomains, subchunks, inp.partitioning)
+    end
+    DArray(eltype(inp), d1, subdomains, subchunks, newb)
+end
+
+function size(x::GetIndex)
+    map(a -> a[2] isa Colon ?
+        size(x.input, a[1]) : length(a[2]),
+        enumerate(x.idx)) |> Tuple
+end
+
+Base.getindex(c::ArrayOp, idx::ArrayDomain) =
+    _to_darray(GetIndex(c, indexes(idx)))
+Base.getindex(c::ArrayOp, idx...) =
+    _to_darray(GetIndex(c, idx))
+
 const GETINDEX_CACHE = TaskLocalValue{Dict{Tuple,Any}}(()->Dict{Tuple,Any}())
 const GETINDEX_CACHE_SIZE = ScopedValue{Int}(0)
 with_index_caching(f, size::Integer=1) = with(f, GETINDEX_CACHE_SIZE=>size)
@@ -36,6 +86,7 @@ with_index_caching(f, size::Integer=1) = with(f, GETINDEX_CACHE_SIZE=>size)
     # Return the value
     return GPUArraysCore.@allowscalar part[offset_idx...]
 end
+
 function partition_for(A::DArray, idx::NTuple{N,Int}) where N
     part_idx = zeros(Int, N)
     offset_idx = zeros(Int, N)

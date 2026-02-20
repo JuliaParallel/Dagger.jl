@@ -1,6 +1,7 @@
 import Base: cat
 import Random: MersenneTwister, rand!, randn!
 export partition
+import LinearAlgebra: UniformScaling
 
 mutable struct AllocateArray{T,N} <: ArrayOp{T,N}
     eltype::Type{T}
@@ -176,6 +177,7 @@ Base.zeros(p::BlocksOrAuto, dims::Dims; assignment::AssignmentType = :arbitrary)
 Base.zeros(::AutoBlocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary) =
     zeros(auto_blocks(dims), T, dims; assignment)
 
+
 function Base.zero(x::DArray{T,N}) where {T,N}
     dims = ntuple(i->x.domain.indexes[i].stop, N)
     sd = first(x.subdomains)
@@ -183,6 +185,61 @@ function Base.zero(x::DArray{T,N}) where {T,N}
     a = zeros(Blocks(part_size...), T, dims)
     return _to_darray(a)
 end
+
+function _allocate_diag(i,T, _dims, domain, p)
+    sA = zeros(T, _dims)
+    dom_idx = indexes(domain)
+    chunk_counts = ntuple(j -> cld(length(dom_idx[j]), p.blocksize[j]), length(dom_idx))
+    subinds_idx = CartesianIndices(ntuple(j -> Base.OneTo(chunk_counts[j]), length(chunk_counts)))[i]
+    subinds = Tuple(subinds_idx)
+    sd = map(enumerate(dom_idx)) do (idx, range)
+        bsz = div(last(range), p.blocksize[idx])
+        start = first(range) + p.blocksize[idx] * (subinds[idx] - 1)
+        stop = subinds[idx] == bsz + 1 ? last(range) : first(range) + p.blocksize[idx] * subinds[idx] - 1
+        start:stop
+    end
+    overlap = intersect(sd[1], sd[2])
+    if !isempty(overlap)
+        row_offset = first(sd[1]) - 1
+        col_offset = first(sd[2]) - 1
+        for g in overlap
+            sA[g - row_offset, g - col_offset] = one(T)
+        end
+    end
+    return sA
+end
+
+function DMatrix(p::BlocksOrAuto, s::UniformScaling, dims::Dims; assignment::AssignmentType = :arbitrary)
+    d = ArrayDomain(map(x->1:x, dims))
+    sd = partition(p, d)
+    T = eltype(s)
+    a = AllocateArray(T, (i, T, _dims) -> _allocate_diag(i, T, _dims, d, p), true, d, partition(p, d), p, assignment)
+    return _to_darray(a)
+end
+DMatrix(p::BlocksOrAuto, s::UniformScaling, dims::Integer...; assignment::AssignmentType = :arbitrary) = 
+    DMatrix(p, s, dims; assignment)
+DMatrix(::AutoBlocks, s::UniformScaling, dims::Dims; assignment::AssignmentType = :arbitrary) =
+    DMatrix(auto_blocks(dims), s::UniformScaling, dims; assignment)
+
+function DArray(p::BlocksOrAuto, s::UniformScaling, dims::Dims; assignment::AssignmentType = :arbitrary)
+    length(dims) == 2 || throw(ArgumentError("UniformScaling allocation requires exactly two dimensions"))
+    return DMatrix(p, s, dims; assignment)
+end
+DArray(p::BlocksOrAuto, s::UniformScaling, dims::Integer...; assignment::AssignmentType = :arbitrary) =
+    DArray(p, s, dims; assignment)
+DArray(::AutoBlocks, s::UniformScaling, dims::Dims; assignment::AssignmentType = :arbitrary) =
+    DArray(auto_blocks(dims), s::UniformScaling, dims; assignment)
+
+function DArray{T}(p::BlocksOrAuto, ::UndefInitializer, dims::Dims; assignment::AssignmentType = :arbitrary) where {T}
+    d = ArrayDomain(map(x->1:x, dims))
+    a = AllocateArray(T, AllocateUndef{T}(), false, d, partition(p, d), p, assignment)
+    return _to_darray(a)
+end
+
+DArray{T}(p::BlocksOrAuto, ::UndefInitializer, dims::Integer...; assignment::AssignmentType = :arbitrary) where {T} = 
+    DArray{T}(p, undef, dims; assignment)
+DArray{T}(p::AutoBlocks, ::UndefInitializer, dims::Dims; assignment::AssignmentType = :arbitrary) where {T} = 
+    DArray{T}(auto_blocks(dims), undef, dims; assignment)
 
 function Base.view(A::AbstractArray{T,N}, p::Blocks{N}) where {T,N}
     d = ArrayDomain(Base.index_shape(A))

@@ -21,7 +21,7 @@
 
 steps:
   - label: Julia 1.9
-    timeout_in_minutes: 90
+    timeout_in_minutes: 120
     <<: *test
     plugins:
       - JuliaCI/julia#v1:
@@ -32,7 +32,7 @@ steps:
           codecov: true
 
   - label: Julia 1.10
-    timeout_in_minutes: 90
+    timeout_in_minutes: 120
     <<: *test
     plugins:
       - JuliaCI/julia#v1:
@@ -43,7 +43,7 @@ steps:
           codecov: true
 
   - label: Julia 1.11
-    timeout_in_minutes: 90
+    timeout_in_minutes: 120
     <<: *test
     plugins:
       - JuliaCI/julia#v1:
@@ -54,7 +54,7 @@ steps:
           codecov: true
 
   - label: Julia 1
-    timeout_in_minutes: 90
+    timeout_in_minutes: 120
     <<: *test
     plugins:
       - JuliaCI/julia#v1:
@@ -65,7 +65,7 @@ steps:
           codecov: true
 
   - label: Julia nightly
-    timeout_in_minutes: 90
+    timeout_in_minutes: 120
     <<: *test
     plugins:
       - JuliaCI/julia#v1:
@@ -76,7 +76,7 @@ steps:
           codecov: true
 
   - label: Julia 1 (macOS)
-    timeout_in_minutes: 90
+    timeout_in_minutes: 120
     <<: *test
     agents:
       queue: "juliaecosystem"
