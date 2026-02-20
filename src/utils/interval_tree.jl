@@ -294,12 +294,12 @@ function find_overlapping!(node::IntervalNode{M,E}, query::M, result::Vector{M};
 
         # Enqueue left subtree if it might contain overlapping intervals
         if current.left !== nothing && current.left.max_end >= span_start(query)
-            push!(queue, current.left)
+            push!(stack, current.left)
         end
 
         # Enqueue right subtree if query extends beyond current node's start
         if current.right !== nothing && span_end(query) >= span_start(current.span)
-            push!(queue, current.right)
+            push!(stack, current.right)
         end
     end
 end
