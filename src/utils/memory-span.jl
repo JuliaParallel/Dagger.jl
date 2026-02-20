@@ -9,6 +9,7 @@ RemotePtr{T}(ptr::Ptr{V}, space::S) where {T,V,S} = RemotePtr{T,S}(UInt(ptr), sp
 RemotePtr{T}(ptr::Ptr{V}) where {T,V} = RemotePtr{T}(UInt(ptr), CPURAMMemorySpace(myid()))
 # FIXME: Don't hardcode CPURAMMemorySpace
 RemotePtr(addr::UInt) = RemotePtr{Cvoid}(addr, CPURAMMemorySpace(myid()))
+RemotePtr(addr::UInt, space::S) where {S<:MemorySpace} = RemotePtr{Cvoid,S}(addr, space)
 Base.convert(::Type{RemotePtr}, x::Ptr{T}) where T =
     RemotePtr(UInt(x), CPURAMMemorySpace(myid()))
 Base.convert(::Type{<:RemotePtr{V}}, x::Ptr{T}) where {V,T} =
@@ -35,16 +36,16 @@ Base.isless(a::MemorySpan, b::MemorySpan) = a.ptr < b.ptr
 Base.isempty(x::MemorySpan) = x.len == 0
 span_start(span::MemorySpan) = span.ptr.addr
 span_len(span::MemorySpan) = span.len
-span_end(span::MemorySpan) = span.ptr.addr + span.len
+span_end(span::MemorySpan) = isempty(span) ? span.ptr.addr : span.ptr.addr + span.len - 1
 spans_overlap(span1::MemorySpan, span2::MemorySpan) =
-    span_start(span1) < span_end(span2) && span_start(span2) < span_end(span1)
+    span_start(span1) <= span_end(span2) && span_start(span2) <= span_end(span1)
 function span_diff(span1::MemorySpan, span2::MemorySpan)
     @assert span1.ptr.space == span2.ptr.space
     start = max(span_start(span1), span_start(span2))
     stop = min(span_end(span1), span_end(span2))
     start_ptr = RemotePtr(start, span1.ptr.space)
-    if start < stop
-        len = stop - start
+    if start <= stop
+        len = stop - start + 1
         return MemorySpan(start_ptr, len)
     else
         return MemorySpan(start_ptr, 0)
@@ -61,14 +62,14 @@ LocalMemorySpan(span::MemorySpan) = LocalMemorySpan(span.ptr.addr, span.len)
 Base.isempty(x::LocalMemorySpan) = x.len == 0
 span_start(span::LocalMemorySpan) = span.ptr
 span_len(span::LocalMemorySpan) = span.len
-span_end(span::LocalMemorySpan) = span.ptr + span.len
+span_end(span::LocalMemorySpan) = isempty(span) ? span.ptr : span.ptr + span.len - 1
 spans_overlap(span1::LocalMemorySpan, span2::LocalMemorySpan) =
-    span_start(span1) < span_end(span2) && span_start(span2) < span_end(span1)
+    span_start(span1) <= span_end(span2) && span_start(span2) <= span_end(span1)
 function span_diff(span1::LocalMemorySpan, span2::LocalMemorySpan)
     start = max(span_start(span1), span_start(span2))
     stop = min(span_end(span1), span_end(span2))
-    if start < stop
-        len = stop - start
+    if start <= stop
+        len = stop - start + 1
         return LocalMemorySpan(start, len)
     else
         return LocalMemorySpan(start, 0)
@@ -91,8 +92,8 @@ function span_diff(span1::ManyMemorySpan{N}, span2::ManyMemorySpan{N}) where N
     verify_span(span2)
     span = ManyMemorySpan(ntuple(i -> span_diff(span1.spans[i], span2.spans[i]), N))
     matches = ntuple(i->span1.spans[i].ptr == span2.spans[i].ptr, Val(N))
-    @assert !(any(matches) && !all(matches)) "Spans only partially match:\n  Span1: $span1\n  Span2: $span2\n  Result: $span"
-    @assert allequal(span_len, span.spans) "Uneven span_diff result:\n  Span1: $span1\n  Span2: $span2\n  Result: $span"
+    @assert !(any(matches) && !all(matches)) "Spans only partially match:\n  Span1: $span1\n  Span2: $span2\n  Result: $span\nWhile processing $(typeof(VERIFY_SPAN_CURRENT_OBJECT[]))"
+    @assert allequal(span_len, span.spans) "Uneven span_diff result:\n  Span1: $span1\n  Span2: $span2\n  Result: $span\nWhile processing $(typeof(VERIFY_SPAN_CURRENT_OBJECT[]))"
     verify_span(span)
     return span
 end

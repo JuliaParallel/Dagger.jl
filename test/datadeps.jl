@@ -15,7 +15,7 @@ using LinearAlgebra, Graphs
     @test length(a.sub_ainfos) == 1
     s = only(a.sub_ainfos)
     @test s isa Dagger.ObjectAliasing
-    @test s.ptr == pointer_from_objref(r)
+    @test s.ptr.addr == UInt(pointer_from_objref(r))
     @test s.sz == sizeof(3)
 end
 
@@ -79,6 +79,116 @@ end
             Dagger.@spawn f!(InOut(v1))
         end
         @test collect(DA)[1:8, 1:8] == zeros(8, 8)
+    end
+end
+
+function test_move_rewrap_aliasing(obj, dest_space)
+    src_space = Dagger.memory_space(obj)
+    from_proc = first(Dagger.processors(src_space))
+    to_proc = first(Dagger.processors(dest_space))
+
+    # move_rewrap like generate_slot!
+    dummy_backing = Dagger.tochunk(Dagger.AliasedObjectCacheStore())
+    cache = Dagger.AliasedObjectCache(dest_space, dummy_backing)
+
+    dest_obj_chunk = Dagger.move_rewrap(cache, from_proc, to_proc, src_space, dest_space, obj)
+
+    # VERIFICATION: Check that source and destination have compatible memory spans
+    # Use the chunk directly for aliasing so it handles remote workers correctly
+    src_ainfo = Dagger.aliasing(obj, identity)
+    dst_ainfo = Dagger.aliasing(dest_obj_chunk, identity)
+    src_spans = Dagger.memory_spans(src_ainfo)
+    dst_spans = Dagger.memory_spans(dst_ainfo)
+
+    # Verify that the source and destination memory spans are the same length and do not overlap
+    @test length(src_spans) == length(dst_spans)
+    for (ss, ds) in zip(src_spans, dst_spans)
+        @test Dagger.span_len(ss) == Dagger.span_len(ds)
+        @test !Dagger.spans_overlap(ss, ds)
+    end
+
+    # Verify that no span is contained in another within the same space
+    for (i, ss_i) in enumerate(src_spans)
+        for (j, ss_j) in enumerate(src_spans)
+            if i != j
+                @test !Dagger.spans_overlap(ss_i, ss_j)
+            end
+        end
+    end
+    for (i, ds_i) in enumerate(dst_spans)
+        for (j, ds_j) in enumerate(dst_spans)
+            if i != j
+                @test !Dagger.spans_overlap(ds_i, ds_j)
+            end
+        end
+    end
+
+    # Constructs an IntervalTree{ManyMemorySpan} using the source obj memory spans
+    # Subtracts all of the memory spans of dest_obj from the IntervalTree
+    # Verifies that the IntervalTree is now empty
+
+    # N.B. We need ManyMemorySpan to track both spaces simultaneously
+    # to catch misalignment between them.
+    N = 2
+    tree = Dagger.IntervalTree{Dagger.ManyMemorySpan{N}}()
+    @test isempty(tree)
+    for (ss, ds) in zip(src_spans, dst_spans)
+        # Test that insert is fully reversible
+        insert!(tree, Dagger.ManyMemorySpan{N}((Dagger.LocalMemorySpan(ss), Dagger.LocalMemorySpan(ds))))
+        Dagger.subtract_spans!(tree, [Dagger.ManyMemorySpan{N}((Dagger.LocalMemorySpan(ss), Dagger.LocalMemorySpan(ds)))])
+        @test isempty(tree)
+    end
+    for (ss, ds) in zip(src_spans, dst_spans)
+        # Insert the same spans again
+        insert!(tree, Dagger.ManyMemorySpan{N}((Dagger.LocalMemorySpan(ss), Dagger.LocalMemorySpan(ds))))
+    end
+
+    # Now subtract using the same pairs from dest_obj
+    Dagger.subtract_spans!(tree, [Dagger.ManyMemorySpan{N}((Dagger.LocalMemorySpan(ss), Dagger.LocalMemorySpan(ds))) for (ss, ds) in zip(src_spans, dst_spans)])
+
+    @test isempty(tree)
+end
+@testset "Aliased Object Copying" begin
+    spaces = [Dagger.CPURAMMemorySpace(w) for w in 1:3]
+
+    for (w_src, w_dst) in [(1, 2), (2, 1), (2, 3)]
+        @testset "Worker $w_src -> $w_dst" begin
+            # Array
+            @testset "Array" begin
+                obj = remotecall_fetch(w_src) do
+                    Dagger.tochunk(zeros(Int, 4, 4))
+                end
+                test_move_rewrap_aliasing(obj, spaces[w_dst])
+            end
+
+            # SubArray
+            @testset "SubArray" begin
+                obj = remotecall_fetch(w_src) do
+                    A = zeros(Int, 4, 4)
+                    Dagger.tochunk(view(A, 1:2, 1:2))
+                end
+                test_move_rewrap_aliasing(obj, spaces[w_dst])
+            end
+
+            # ChunkView
+            @testset "ChunkView" begin
+                obj = remotecall_fetch(w_src) do
+                    A = zeros(Int, 4, 4)
+                    A_chunk = Dagger.tochunk(A)
+                    view(A_chunk, 1:2, 1:2)
+                end
+                test_move_rewrap_aliasing(obj, spaces[w_dst])
+            end
+
+            # HaloArray
+            @testset "HaloArray" begin
+                obj = remotecall_fetch(w_src) do
+                    H = Dagger.HaloArray{Int, 2}((4, 4), (1, 1))
+                    Dagger.tochunk(H)
+                end
+                test_move_rewrap_aliasing(obj, spaces[w_dst])
+            end
+        end
     end
 end
 

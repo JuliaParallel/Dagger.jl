@@ -30,10 +30,13 @@ function IntervalTree{M}(spans) where M
 end
 IntervalTree(spans::Vector{M}) where M = IntervalTree{M}(spans)
 
+_span_one(x::Unsigned) = one(typeof(x))
+_span_one(x::ManyPair{N}) where N = ManyPair(ntuple(_ -> UInt(1), N))
+
 function Base.show(io::IO, tree::IntervalTree)
     println(io, "$(typeof(tree)) (with $(length(tree)) spans):")
     for (i, span) in enumerate(tree)
-        println(io, "  $i: [$(span_start(span)), $(span_end(span))) (len=$(span_len(span)))")
+        println(io, "  $i: [$(span_start(span)), $(span_end(span))] (len=$(span_len(span)))")
     end
 end
 
@@ -71,12 +74,12 @@ function Base.iterate(root::IntervalNode, state)
     if isempty(state)
         return nothing
     end
-    current = popfirst!(state)
+    current = pop!(state)
     if current.right !== nothing
-        pushfirst!(state, current.right)
+        push!(state, current.right)
     end
     if current.left !== nothing
-        pushfirst!(state, current.left)
+        push!(state, current.left)
     end
     return current.span, state
 end
@@ -103,47 +106,19 @@ end
 
 # Insert a span into the interval tree
 function Base.insert!(tree::IntervalTree{M,E}, span::M) where {M,E}
-    if !isempty(span)
-        if tree.root === nothing
-            tree.root = IntervalNode(span)
-            update_max_end!(tree.root)
-            return span
-        end
-        #tree.root = insert_node!(tree.root, span)
-        to_update = Vector{IntervalNode{M,E}}()
-        prev_node = tree.root
-        cur_node = tree.root
-        while cur_node !== nothing
-            if span_start(span) <= span_start(cur_node.span)
-                cur_node = cur_node.left
-            else
-                cur_node = cur_node.right
-            end
-            if cur_node !== nothing
-                prev_node = cur_node
-                push!(to_update, cur_node)
-            end
-        end
-        if prev_node.left === nothing
-            prev_node.left = IntervalNode(span)
-        else
-            prev_node.right = IntervalNode(span)
-        end
-        for node_idx in eachindex(to_update)
-            node = to_update[node_idx]
-            update_max_end!(node)
-        end
+    if isempty(span)
+        return span
     end
-    return span
-end
 
-function insert_node!(::Nothing, span::M) where M
-    return IntervalNode(span)
-end
-function insert_node!(root::IntervalNode{M,E}, span::M) where {M,E}
-    # Use a queue to track the path for updating max_end after insertion
+    if tree.root === nothing
+        tree.root = IntervalNode(span)
+        update_max_end!(tree.root)
+        return span
+    end
+
+    # Track the path for updating max_end after insertion
     path = Vector{IntervalNode{M,E}}()
-    current = root
+    current = tree.root
 
     # Traverse to find the insertion point
     while current !== nothing
@@ -169,155 +144,84 @@ function insert_node!(root::IntervalNode{M,E}, span::M) where {M,E}
         update_max_end!(node)
     end
 
-    return root
-end
-
-# Remove a specific span from the tree (split as needed)
-function Base.delete!(tree::IntervalTree{M}, span::M) where M
-    if !isempty(span)
-        tree.root = delete_node!(tree.root, span)
-    end
     return span
 end
 
-function delete_node!(::Nothing, span::M) where M
-    return nothing
-end
-function delete_node!(root::IntervalNode{M,E}, span::M) where {M,E}
-    # Track the path to the target node: (node, direction_to_child)
-    path = Vector{Tuple{IntervalNode{M,E}, Symbol}}()
-    current = root
+# Remove a specific span from the tree (split as needed)
+function Base.delete!(tree::IntervalTree{M,E}, span::M) where {M,E}
+    if isempty(span) || tree.root === nothing
+        return span
+    end
+
+    # Search for target node, keeping track of path
+    path = Vector{IntervalNode{M,E}}()
+    current = tree.root
     target = nothing
-    target_type = :none  # :exact or :overlap
-
-    # Phase 1: Search for target node
     while current !== nothing
+        push!(path, current)
         is_exact = span_start(current.span) == span_start(span) && span_len(current.span) == span_len(span)
-        is_overlap = !is_exact && spans_overlap(current.span, span)
-
         if is_exact
             target = current
-            target_type = :exact
-            break
-        elseif is_overlap
-            target = current
-            target_type = :overlap
             break
         elseif span_start(span) <= span_start(current.span)
-            push!(path, (current, :left))
             current = current.left
         else
-            push!(path, (current, :right))
             current = current.right
         end
     end
 
     if target === nothing
-        return root
+        return span
     end
 
-    # Phase 2: Compute replacement for target node
-    original_span = target.span
-    succ_path = Vector{IntervalNode{M,E}}()  # Path to successor (for max_end updates)
-    local replacement::Union{IntervalNode{M,E}, Nothing}
+    # Standard BST deletion
+    if target.left !== nothing && target.right !== nothing
+        # Two children: replace target's span with inorder successor's span, then delete successor
+        succ_path = Vector{IntervalNode{M,E}}()
+        succ = target.right
+        while succ.left !== nothing
+            push!(succ_path, succ)
+            succ = succ.left
+        end
 
-    if target.left === nothing && target.right === nothing
-        # Leaf node
-        replacement = nothing
-    elseif target.left === nothing
-        # Only right child
-        replacement = target.right
-    elseif target.right === nothing
-        # Only left child
-        replacement = target.left
-    else
-        # Two children - find and remove inorder successor
-        successor = find_min(target.right)
+        target.span = succ.span
 
-        if target.right === successor
-            # Successor is direct right child
-            target.right = successor.right
+        # Remove successor node (it has at most one child: right)
+        parent_of_succ = isempty(succ_path) ? target : succ_path[end]
+        replacement = succ.right
+        if parent_of_succ.left === succ
+            parent_of_succ.left = replacement
         else
-            # Track path to successor for max_end updates
-            succ_parent = target.right
-            push!(succ_path, succ_parent)
-            while succ_parent.left !== successor
-                succ_parent = succ_parent.left
-                push!(succ_path, succ_parent)
-            end
-            # Remove successor by replacing with its right child
-            succ_parent.left = successor.right
+            parent_of_succ.right = replacement
         end
 
-        target.span = successor.span
-        replacement = target
-    end
-
-    # Phase 3: Handle overlap case - add remaining portions
-    if target_type == :overlap
-        original_start = span_start(original_span)
-        original_end = span_end(original_span)
-        del_start = span_start(span)
-        del_end = span_end(span)
-        verify_span(span)
-
-        # Left portion: exists if original starts before deleted span
-        if original_start < del_start
-            left_end = min(original_end, del_start)
-            if left_end > original_start
-                left_span = M(original_start, left_end - original_start)
-                if !isempty(left_span)
-                    replacement = insert_node!(replacement, left_span)
-                end
-            end
+        # Update max_end bottom-up for the successor's original path
+        update_max_end!(parent_of_succ)
+        for i in length(succ_path)-1:-1:1
+            update_max_end!(succ_path[i])
         end
-
-        # Right portion: exists if original extends beyond deleted span
-        if original_end > del_end
-            right_start = max(original_start, del_end)
-            if original_end > right_start
-                right_span = M(right_start, original_end - right_start)
-                if !isempty(right_span)
-                    replacement = insert_node!(replacement, right_span)
-                end
-            end
-        end
-    end
-
-    # Phase 4: Update parent's child pointer
-    if isempty(path)
-        root = replacement
     else
-        parent, dir = path[end]
-        if dir == :left
-            parent.left = replacement
+        # Zero or one child
+        replacement = target.left !== nothing ? target.left : target.right
+        pop!(path) # Remove target from path since it's being removed from the tree
+        if isempty(path)
+            tree.root = replacement
         else
-            parent.right = replacement
+            parent = path[end]
+            if parent.left === target
+                parent.left = replacement
+            else
+                parent.right = replacement
+            end
         end
     end
 
-    # Phase 5: Update max_end in correct order (bottom-up)
-    # First: successor path (if any)
-    for i in length(succ_path):-1:1
-        update_max_end!(succ_path[i])
-    end
-    # Second: target node (if it wasn't removed)
-    if replacement === target
-        update_max_end!(target)
-    end
-    # Third: main path (ancestors of target)
+    # Update max_end for the main path (ancestors of the removed/modified node)
     for i in length(path):-1:1
-        update_max_end!(path[i][1])
+        update_max_end!(path[i])
     end
 
-    return root
-end
-
-function find_min(node::IntervalNode)
-    while node.left !== nothing
-        node = node.left
-    end
-    return node
+    return span
 end
 
 # Find all spans that overlap with the given query span
@@ -335,12 +239,12 @@ function find_overlapping!(::Nothing, query::M, result::Vector{M}; exact::Bool=t
     return
 end
 function find_overlapping!(node::IntervalNode{M,E}, query::M, result::Vector{M}; exact::Bool=true) where {M,E}
-    # Use a queue for breadth-first traversal
-    queue = Vector{IntervalNode{M,E}}()
-    push!(queue, node)
+    # Use a stack for iterative depth-first traversal
+    stack = Vector{IntervalNode{M,E}}()
+    push!(stack, node)
 
-    while !isempty(queue)
-        current = popfirst!(queue)
+    while !isempty(stack)
+        current = pop!(stack)
 
         # Check if current node overlaps with query
         if spans_overlap(current.span, query)
@@ -355,14 +259,16 @@ function find_overlapping!(node::IntervalNode{M,E}, query::M, result::Vector{M};
             end
         end
 
-        # Enqueue left subtree if it might contain overlapping intervals
-        if current.left !== nothing && current.left.max_end > span_start(query)
-            push!(queue, current.left)
+        # Search left subtree if its max_end is at least query_start
+        if current.left !== nothing && current.left.max_end >= span_start(query)
+            push!(stack, current.left)
         end
 
-        # Enqueue right subtree if query extends beyond current node's start
-        if current.right !== nothing && span_end(query) > span_start(current.span)
-            push!(queue, current.right)
+        # Search right subtree if it could contain an overlap
+        if current.right !== nothing &&
+           span_start(current.span) <= span_end(query) &&
+           current.right.max_end >= span_start(query)
+            push!(stack, current.right)
         end
     end
 end
@@ -393,26 +299,30 @@ end
     subtract_single_span!(tree::IntervalTree, sub_span::MemorySpan, diff=nothing)
 
 Subtract a single span from the interval tree. This function:
-1. Finds all overlapping spans in the tree
-2. Removes each overlapping span
+1. Finds all intervals in the tree that overlap with the subtrahend
+2. Removes each overlapping interval
 3. Adds back the non-overlapping portions (left and/or right remnants)
-4. If diff is provided, add the overlapping span to diff
+4. If diff is provided, add the overlapping portion to diff
 """
 function subtract_single_span!(tree::IntervalTree{M}, sub_span::M, diff=nothing) where M
-    # Find all spans that overlap with the subtrahend
-    overlapping_spans = find_overlapping(tree, sub_span)
+    # Find all intervals currently in the tree that overlap with the subtrahend
+    overlapping_intervals = find_overlapping(tree, sub_span; exact=false)
 
-    # Process each overlapping span
-    for overlap_span in overlapping_spans
-        # Remove the overlapping span from the tree
-        delete!(tree, overlap_span)
+    # Process each overlapping interval
+    for interval in overlapping_intervals
+        # If we are tracking the difference, calculate the intersection before deletion
+        if diff !== nothing
+            overlap = span_diff(interval, sub_span)
+            if !isempty(overlap)
+                push!(diff, overlap)
+            end
+        end
+
+        # Remove the original interval from the tree
+        delete!(tree, interval)
 
         # Calculate and add back the portions that should remain
-        add_remaining_portions!(tree, overlap_span, sub_span)
-
-        if diff !== nothing && !isempty(overlap_span)
-            push!(diff, overlap_span)
-        end
+        add_remaining_portions!(tree, interval, sub_span)
     end
 end
 
@@ -430,9 +340,9 @@ function add_remaining_portions!(tree::IntervalTree{M}, original::M, subtracted:
 
     # Left portion: exists if original starts before subtracted
     if original_start < sub_start
-        left_end = min(original_end, sub_start)
-        if left_end > original_start
-            left_span = M(original_start, left_end - original_start)
+        left_end = min(original_end, sub_start - _span_one(sub_start))
+        if left_end >= original_start
+            left_span = M(original_start, left_end - original_start + _span_one(left_end))
             if !isempty(left_span)
                 insert!(tree, left_span)
             end
@@ -441,9 +351,9 @@ function add_remaining_portions!(tree::IntervalTree{M}, original::M, subtracted:
 
     # Right portion: exists if original extends beyond subtracted
     if original_end > sub_end
-        right_start = max(original_start, sub_end)
-        if original_end > right_start
-            right_span = M(right_start, original_end - right_start)
+        right_start = max(original_start, sub_end + _span_one(sub_end))
+        if original_end >= right_start
+            right_span = M(right_start, original_end - right_start + _span_one(original_end))
             if !isempty(right_span)
                 insert!(tree, right_span)
             end

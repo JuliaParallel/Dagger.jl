@@ -336,19 +336,20 @@ Base.:(==)(ca1::CombinedAliasing, ca2::CombinedAliasing) =
 Base.hash(ca1::CombinedAliasing, h::UInt) =
     hash(ca1.sub_ainfos, hash(CombinedAliasing, h))
 
-struct ObjectAliasing <: AbstractAliasing
-    ptr::Ptr{Cvoid}
+struct ObjectAliasing{S<:MemorySpace} <: AbstractAliasing
+    ptr::RemotePtr{Cvoid,S}
     sz::UInt
 end
+ObjectAliasing(ptr::RemotePtr{Cvoid,S}, sz::Integer) where {S<:MemorySpace} =
+    ObjectAliasing{S}(ptr, UInt(sz))
 function ObjectAliasing(x::T) where T
     @nospecialize x
-    ptr = pointer_from_objref(x)
+    ptr = RemotePtr{Cvoid}(pointer_from_objref(x))
     sz = sizeof(T)
     return ObjectAliasing(ptr, sz)
 end
-function memory_spans(oa::ObjectAliasing)
-    rptr = RemotePtr{Cvoid}(oa.ptr)
-    span = MemorySpan{CPURAMMemorySpace}(rptr, oa.sz)
+function memory_spans(oa::ObjectAliasing{S}) where S
+    span = MemorySpan{S}(oa.ptr, oa.sz)
     return [span]
 end
 
@@ -401,6 +402,17 @@ aliasing(x::Chunk) = remotecall_fetch(root_worker_id(x.processor), x) do x
 end
 aliasing(x::DTask, T) = aliasing(fetch(x; raw=true), T)
 aliasing(x::DTask) = aliasing(fetch(x; raw=true))
+
+function aliasing(x::Base.RefValue{T}) where T
+    addr = UInt(Base.pointer_from_objref(x) + fieldoffset(typeof(x), 1))
+    ptr = RemotePtr{Cvoid}(addr, CPURAMMemorySpace(myid()))
+    ainfo = ObjectAliasing(ptr, sizeof(x))
+    if isassigned(x) && type_may_alias(T) && type_may_alias(typeof(x[]))
+        return CombinedAliasing([ainfo, aliasing(x[])])
+    else
+        return CombinedAliasing([ainfo])
+    end
+end
 
 struct ContiguousAliasing{S} <: AbstractAliasing
     span::MemorySpan{S}
