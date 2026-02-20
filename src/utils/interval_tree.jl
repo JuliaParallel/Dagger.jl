@@ -195,44 +195,11 @@ function Base.delete!(tree::IntervalTree{M,E}, span::M) where {M,E}
             parent_of_succ.right = replacement
         end
 
-        target.span = successor.span
-        replacement = target
-    end
-
-    # Phase 3: Handle overlap case - add remaining portions
-    if target_type == :overlap
-        original_start = span_start(original_span)
-        original_end = span_end(original_span)
-        del_start = span_start(span)
-        del_end = span_end(span)
-        verify_span(span)
-
-        # Left portion: exists if original starts before deleted span
-        if original_start < del_start
-            left_end = min(original_end, del_start - _span_one(del_start))
-            if left_end >= original_start
-                left_span = M(original_start, left_end - original_start + _span_one(left_end))
-                if !isempty(left_span)
-                    replacement = insert_node!(replacement, left_span)
-                end
-            end
+        # Update max_end bottom-up for the successor's original path
+        update_max_end!(parent_of_succ)
+        for i in length(succ_path)-1:-1:1
+            update_max_end!(succ_path[i])
         end
-
-        # Right portion: exists if original extends beyond deleted span
-        if original_end > del_end
-            right_start = max(original_start, del_end + _span_one(del_end))
-            if original_end >= right_start
-                right_span = M(right_start, original_end - right_start + _span_one(original_end))
-                if !isempty(right_span)
-                    replacement = insert_node!(replacement, right_span)
-                end
-            end
-        end
-    end
-
-    # Phase 4: Update parent's child pointer
-    if isempty(path)
-        root = replacement
     else
         # Zero or one child
         replacement = target.left !== nothing ? target.left : target.right
@@ -292,13 +259,15 @@ function find_overlapping!(node::IntervalNode{M,E}, query::M, result::Vector{M};
             end
         end
 
-        # Enqueue left subtree if it might contain overlapping intervals
+        # Search left subtree if its max_end is at least query_start
         if current.left !== nothing && current.left.max_end >= span_start(query)
             push!(stack, current.left)
         end
 
-        # Enqueue right subtree if query extends beyond current node's start
-        if current.right !== nothing && span_end(query) >= span_start(current.span)
+        # Search right subtree if it could contain an overlap
+        if current.right !== nothing &&
+           span_start(current.span) <= span_end(query) &&
+           current.right.max_end >= span_start(query)
             push!(stack, current.right)
         end
     end
