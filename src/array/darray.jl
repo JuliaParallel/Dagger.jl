@@ -1,6 +1,6 @@
 import Base: ==, fetch
 
-export DArray, DVector, DMatrix, Blocks, AutoBlocks
+export DArray, DVector, DMatrix, DVecOrMat, Blocks, AutoBlocks
 export distribute
 
 
@@ -148,6 +148,7 @@ const WrappedDMatrix{T} = WrappedDArray{T,2}
 const WrappedDVector{T} = WrappedDArray{T,1}
 const DMatrix{T} = DArray{T,2}
 const DVector{T} = DArray{T,1}
+const DVecOrMat{T} = Union{DVector{T}, DMatrix{T}}
 
 # mainly for backwards-compatibility
 DArray{T, N}(domain, subdomains, chunks, partitioning, concat=cat) where {T,N} =
@@ -252,7 +253,9 @@ function Base.getindex(A::ColorArray{T,N}, idxs::NTuple{N,Int}) where {T,N}
     if !haskey(A.seen_values, idxs)
         chunk = A.A.chunks[sd_idx]
         if chunk isa Chunk || isready(chunk)
-            value = A.seen_values[idxs] = Some(getindex(A.A, idxs))
+            value = A.seen_values[idxs] = allowscalar() do
+                Some(getindex(A.A, idxs))
+            end
         else
             # Show a placeholder instead
             value = A.seen_values[idxs] = nothing
