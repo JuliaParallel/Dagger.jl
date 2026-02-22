@@ -34,7 +34,13 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool =
             end
         end
 
-        check && LinearAlgebra._check_lu_success(0, allowsingular)
+        if check
+            @static if VERSION >= v"1.11-"
+                LinearAlgebra._check_lu_success(0, allowsingular)
+            else
+                LinearAlgebra.checknonsingular(0)
+            end
+        end
     end
 
     ipiv = DVector([i for i in 1:min(size(A)...)])
@@ -94,19 +100,49 @@ function swaprows_panel!(A::AbstractMatrix{T}, M::AbstractMatrix{T}, ipiv_chunk:
     end
 end
 
+@static if !isdefined(LinearAlgebra.BLAS, :geru!)
+    for elty in (:Float64, :Float32)
+        @eval begin
+            geru!(α::$elty, x::AbstractVector{$elty}, y::AbstractVector{$elty}, A::AbstractMatrix{$elty}) =
+                LinearAlgebra.BLAS.ger!(α, x, y, A)
+        end
+    end
+    for (fname, elty) in ((:zgeru_,:ComplexF64), (:cgeru_,:ComplexF32))
+        @eval begin
+            function geru!(α::$elty, x::AbstractVector{$elty}, y::AbstractVector{$elty}, A::AbstractMatrix{$elty})
+                Base.require_one_based_indexing(A, x, y)
+                m, n = size(A)
+                if m != length(x) || n != length(y)
+                    throw(DimensionMismatch(lazy"A has size ($m,$n), x has length $(length(x)), y has length $(length(y))"))
+                end
+                px, stx = LinearAlgebra.BLAS.vec_pointer_stride(x, ArgumentError("input vector with 0 stride is not allowed"))
+                py, sty = LinearAlgebra.BLAS.vec_pointer_stride(y, ArgumentError("input vector with 0 stride is not allowed"))
+                GC.@preserve x y ccall((LinearAlgebra.BLAS.@blasfunc($fname), LinearAlgebra.BLAS.libblas), Cvoid,
+                    (Ref{Int64}, Ref{Int64}, Ref{$elty}, Ptr{$elty},
+                     Ref{Int64}, Ptr{$elty}, Ref{Int64}, Ptr{$elty},
+                     Ref{Int64}),
+                     m, n, α, px, stx, py, sty, A, max(1,stride(A,2)))
+                A
+            end
+        end
+    end
+else
+    geru! = LinearAlgebra.BLAS.geru!
+end
+
 # Update panel on the diagonal block (rows p+1:end). Receives the full block.
 function update_panel_diag!(A::AbstractMatrix{T}, p::Int, row_end::Int) where T
     M = view(A, p+1:row_end, :)
     Acinv = one(T) / A[p,p]
     LinearAlgebra.BLAS.scal!(Acinv, view(M, :, p))
-    LinearAlgebra.BLAS.geru!(-one(T), view(M, :, p), view(A, p, p+1:size(A,2)), view(M, :, p+1:size(M,2)))
+    geru!(-one(T), view(M, :, p), view(A, p, p+1:size(A,2)), view(M, :, p+1:size(M,2)))
 end
 
 # Update panel on an off-diagonal block. Receives full Chunks.
 function update_panel_offdiag!(M::AbstractMatrix{T}, A::AbstractMatrix{T}, p::Int) where T
     Acinv = one(T) / A[p,p]
     LinearAlgebra.BLAS.scal!(Acinv, view(M, :, p))
-    LinearAlgebra.BLAS.geru!(-one(T), view(M, :, p), view(A, p, p+1:size(A,2)), view(M, :, p+1:size(M,2)))
+    geru!(-one(T), view(M, :, p), view(A, p, p+1:size(A,2)), view(M, :, p+1:size(M,2)))
 end
 
 # Swap rows in trailing columns. Receives full Chunks.
@@ -198,7 +234,13 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Boo
             end
         end
 
-        check && LinearAlgebra._check_lu_success(info[], allowsingular)
+        if check
+            @static if VERSION >= v"1.11-"
+                LinearAlgebra._check_lu_success(info[], allowsingular)
+            else
+                LinearAlgebra.checknonsingular(info[])
+            end
+        end
     end
 
     return LinearAlgebra.LU{T,DMatrix{T},DVector{Int}}(A, ipiv, info[])
