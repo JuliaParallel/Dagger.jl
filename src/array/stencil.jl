@@ -425,7 +425,8 @@ function load_boundary_region(::Reflect{Symm}, arr, region_code::NTuple{N,Int}, 
     # Reverse only along dimensions that are actually being reflected
     # (both non-zero in region_code AND past boundary)
     for i in 1:N
-        if region_code[i] != 0 && boundary_dims[i]
+        # FIXME: allowscalar because some GPU backends don't overload reverse
+        GPUArraysCore.@allowscalar if region_code[i] != 0 && boundary_dims[i]
             region = reverse(region, dims=i)
         end
     end
