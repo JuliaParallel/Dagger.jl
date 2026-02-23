@@ -105,8 +105,10 @@ function LinearAlgebra.LAPACK.chkfinite(A::DArray)
 end
 
 DMatrix{T}(::LinearAlgebra.UniformScaling, m::Int, n::Int, IBlocks::Blocks) where T = DMatrix(Matrix{T}(I, m, n), IBlocks)
+DMatrix(::LinearAlgebra.UniformScaling{T}, m::Int, n::Int, IBlocks::Blocks) where T = DMatrix(Matrix{T}(I, m, n), IBlocks)
 
 DMatrix{T}(::LinearAlgebra.UniformScaling, size::Tuple, IBlocks::Blocks) where T = DMatrix(Matrix{T}(I, size), IBlocks)
+DMatrix(::LinearAlgebra.UniformScaling{T}, size::Tuple, IBlocks::Blocks) where T = DMatrix(Matrix{T}(I, size), IBlocks)
 
 function LinearAlgebra.inv(F::LU{T,<:DMatrix}) where T 
     n = size(F, 1)
