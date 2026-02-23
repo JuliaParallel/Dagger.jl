@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Stencils · Dagger.jl</title><meta name="title" content="Stencils · Dagger.jl"/><meta property="og:title" content="Stencils · Dagger.jl"/><meta property="twitter:title" content="Stencils · Dagger.jl"/><meta name="description" content="Documentation for Dagger.jl."/><meta property="og:description" content="Documentation for Dagger.jl."/><meta property="twitter:description" content="Documentation for Dagger.jl."/><meta property="og:url" content="https://JuliaParallel.github.io/Dagger.jl/stencils/"/><meta property="twitter:url" content="https://JuliaParallel.github.io/Dagger.jl/stencils/"/><link rel="canonical" href="https://JuliaParallel.github.io/Dagger.jl/stencils/"/><script data-outdated-warner src="../assets/warner.js"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/lato-font/3.0.0/css/lato-font.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/juliamono/0.050/juliamono.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/fontawesome.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/solid.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/brands.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.8/katex.min.css" rel="stylesheet" type="text/css"/><script>documenterBaseURL=".."</script><script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js" data-main="../assets/documenter.js"></script><script src="../search_index.js"></script><script src="../siteinfo.js"></script><script src="../../versions.js"></script><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-mocha.css" data-theme-name="catppuccin-mocha"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-macchiato.css" data-theme-name="catppuccin-macchiato"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-frappe.css" data-theme-name="catppuccin-frappe"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-latte.css" data-theme-name="catppuccin-latte"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/documenter-dark.css" data-theme-name="documenter-dark" data-theme-primary-dark/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/documenter-light.css" data-theme-name="documenter-light" data-theme-primary/><script src="../assets/themeswap.js"></script><link href="../assets/favicon.ico" rel="icon" type="image/x-icon"/></head><body><div id="documenter"><nav class="docs-sidebar"><a class="docs-logo" href="../"><img src="../assets/logo.svg" alt="Dagger.jl logo"/></a><div class="docs-package-name"><span class="docs-autofit"><a href="../">Dagger.jl</a></span></div><button class="docs-search-query input is-rounded is-small is-clickable my-2 mx-auto py-1 px-2" id="documenter-search-query">Search docs (Ctrl + /)</button><ul class="docs-menu"><li><a class="tocitem" href="../">Home</a></li><li><span class="tocitem">Use Cases</span><ul><li><a class="tocitem" href="../use-cases/parallel-nested-loops/">Parallel Nested Loops</a></li></ul></li><li><a class="tocitem" href="../task-spawning/">Task Spawning</a></li><li><a class="tocitem" href="../task-affinity/">Task Affinity</a></li><li><a class="tocitem" href="../data-management/">Data Management</a></li><li><a class="tocitem" href="../darray/">Distributed Arrays</a></li><li><a class="tocitem" href="../streaming/">Streaming Tasks</a></li><li><a class="tocitem" href="../scopes/">Scopes</a></li><li><a class="tocitem" href="../processors/">Processors</a></li><li><a class="tocitem" href="../task-queues/">Task Queues</a></li><li><span class="tocitem">Datadeps</span><ul><li><a class="tocitem" href="../datadeps/">Basics</a></li><li class="is-active"><a class="tocitem" href>Stencils</a><ul class="internal"><li><a class="tocitem" href="#Basic-Usage"><span>Basic Usage</span></a></li><li><a class="tocitem" href="#Allocation-and-Return-Syntax"><span>Allocation and Return Syntax</span></a></li><li><a class="tocitem" href="#Broadcast-Integration"><span>Broadcast Integration</span></a></li><li><a class="tocitem" href="#Neighborhood-Access-with-@neighbors"><span>Neighborhood Access with <code>@neighbors</code></span></a></li><li><a class="tocitem" href="#Sequential-Semantics"><span>Sequential Semantics</span></a></li><li><a class="tocitem" href="#Operations-on-Multiple-DArrays"><span>Operations on Multiple <code>DArray</code>s</span></a></li><li><a class="tocitem" href="#Update-Operators"><span>Update Operators</span></a></li><li><a class="tocitem" href="#Example:-Game-of-Life"><span>Example: Game of Life</span></a></li></ul></li></ul></li><li><a class="tocitem" href="../gpu/">GPUs</a></li><li><a class="tocitem" href="../propagation/">Option Propagation</a></li><li><span class="tocitem">Logging and Visualization</span><ul><li><a class="tocitem" href="../logging/">Logging: Basics</a></li><li><a class="tocitem" href="../logging-visualization/">Logging: Visualization</a></li><li><a class="tocitem" href="../logging-advanced/">Logging: Advanced</a></li></ul></li><li><span class="tocitem">External Languages</span><ul><li><a class="tocitem" href="../external-languages/python/">Python</a></li></ul></li><li><a class="tocitem" href="../checkpointing/">Checkpointing</a></li><li><a class="tocitem" href="../benchmarking/">Benchmarking</a></li><li><a class="tocitem" href="../dynamic/">Dynamic Scheduler Control</a></li><li><a class="tocitem" href="../scheduler-internals/">Scheduler Internals</a></li><li><span class="tocitem">Dagger API</span><ul><li><a class="tocitem" href="../api-dagger/types/">Types</a></li><li><a class="tocitem" href="../api-dagger/functions/">Functions and Macros</a></li></ul></li><li><span class="tocitem">TimespanLogging API</span><ul><li><a class="tocitem" href="../api-timespanlogging/types/">Types</a></li><li><a class="tocitem" href="../api-timespanlogging/functions/">Functions and Macros</a></li></ul></li><li><span class="tocitem">DaggerWebDash API</span><ul><li><a class="tocitem" href="../api-daggerwebdash/types/">Types</a></li><li><a class="tocitem" href="../api-daggerwebdash/functions/">Functions and Macros</a></li></ul></li></ul><div class="docs-version-selector field has-addons"><div class="control"><span class="docs-label button is-static is-size-7">Version</span></div><div class="docs-selector control is-expanded"><div class="select is-fullwidth is-size-7"><select id="documenter-version-selector"></select></div></div></div></nav><div class="docs-main"><header class="docs-navbar"><a class="docs-sidebar-button docs-navbar-link fa-solid fa-bars is-hidden-desktop" id="documenter-sidebar-button" href="#"></a><nav class="breadcrumb"><ul class="is-hidden-mobile"><li><a class="is-disabled">Datadeps</a></li><li class="is-active"><a href>Stencils</a></li></ul><ul class="is-hidden-tablet"><li class="is-active"><a href>Stencils</a></li></ul></nav><div class="docs-right"><a class="docs-navbar-link" href="https://github.com/JuliaParallel/Dagger.jl" title="View the repository on GitHub"><span class="docs-icon fa-brands"></span><span class="docs-label is-hidden-touch">GitHub</span></a><a class="docs-navbar-link" href="https://github.com/JuliaParallel/Dagger.jl/blob/master/docs/src/stencils.md" title="Edit source on GitHub"><span class="docs-icon fa-solid"></span></a><a class="docs-settings-button docs-navbar-link fa-solid fa-gear" id="documenter-settings-button" href="#" title="Settings"></a><a class="docs-article-toggle-button fa-solid fa-chevron-up" id="documenter-article-toggle-button" href="javascript:;" title="Collapse all docstrings"></a></div></header><article class="content" id="documenter-page"><h1 id="Stencil-Operations"><a class="docs-heading-anchor" href="#Stencil-Operations">Stencil Operations</a><a id="Stencil-Operations-1"></a><a class="docs-heading-anchor-permalink" href="#Stencil-Operations" title="Permalink"></a></h1><p>The <code>@stencil</code> macro in Dagger.jl provides a convenient way to perform stencil computations on <code>DArray</code>s. It automatically wraps its operations in a <code>Dagger.spawn_datadeps()</code> block and allows you to define operations that apply to each element of a <code>DArray</code>, potentially accessing values from each element&#39;s neighbors.</p><h2 id="Basic-Usage"><a class="docs-heading-anchor" href="#Basic-Usage">Basic Usage</a><a id="Basic-Usage-1"></a><a class="docs-heading-anchor-permalink" href="#Basic-Usage" title="Permalink"></a></h2><p>The fundamental structure of a <code>@stencil</code> block involves iterating over an implicit index, named <code>idx</code> in the following example, which represents the coordinates of an element in the processed <code>DArray</code>s.</p><h3 id="Block-Syntax"><a class="docs-heading-anchor" href="#Block-Syntax">Block Syntax</a><a id="Block-Syntax-1"></a><a class="docs-heading-anchor-permalink" href="#Block-Syntax" title="Permalink"></a></h3><p>Multiple stencil operations can be performed within a <code>begin...end</code> block:</p><pre><code class="language-julia hljs">using Dagger
+import Dagger: @stencil, Wrap, Pad, Reflect, Clamp, LinearExtrapolate
+
+# Initialize a DArray
+A = zeros(Blocks(2, 2), Int, 4, 4)
+
+@stencil begin
+    A[idx] = 1 # Assign 1 to every element of A
+end
+
+@assert all(collect(A) .== 1)</code></pre><h3 id="Single-Expression-Syntax"><a class="docs-heading-anchor" href="#Single-Expression-Syntax">Single-Expression Syntax</a><a id="Single-Expression-Syntax-1"></a><a class="docs-heading-anchor-permalink" href="#Single-Expression-Syntax" title="Permalink"></a></h3><p>If only one stencil operation is needed, the <code>begin...end</code> block can be omitted:</p><pre><code class="language-julia hljs">B = zeros(Blocks(2, 2), Int, 4, 4)
+@stencil B[idx] = 2
+@assert all(collect(B) .== 2)</code></pre><p>In these examples, the stencil operation is executed for each chunk of the target array. The <code>idx</code> variable corresponds to the indices within each chunk.</p><h2 id="Allocation-and-Return-Syntax"><a class="docs-heading-anchor" href="#Allocation-and-Return-Syntax">Allocation and Return Syntax</a><a id="Allocation-and-Return-Syntax-1"></a><a class="docs-heading-anchor-permalink" href="#Allocation-and-Return-Syntax" title="Permalink"></a></h2><p>The <code>@stencil</code> macro also supports a functional syntax that automatically allocates an output <code>DArray</code> and returns it. This is triggered when the stencil expression (or the last expression in a block) is a &quot;naked&quot; expression (not an assignment).</p><pre><code class="language-julia hljs">A = ones(Blocks(2, 2), Int, 4, 4)
+
+# Automatically allocates B as a DArray similar to A
+B = @stencil sum(@neighbors(A[idx], 1, Wrap()))
+
+@assert B isa DArray
+@assert all(collect(B) .== 9)</code></pre><p>This syntax can also be used as the last expression in a block:</p><pre><code class="language-julia hljs">C = @stencil begin
+    A[idx] = A[idx] + 1
+    sum(@neighbors(A[idx], 1, Wrap())) # Returns a new DArray
+end</code></pre><h2 id="Broadcast-Integration"><a class="docs-heading-anchor" href="#Broadcast-Integration">Broadcast Integration</a><a id="Broadcast-Integration-1"></a><a class="docs-heading-anchor-permalink" href="#Broadcast-Integration" title="Permalink"></a></h2><p>Because <code>@stencil</code> can return a <code>DArray</code>, it can be used directly within Julia&#39;s broadcast expressions:</p><pre><code class="language-julia hljs">A = ones(Blocks(2, 2), Int, 4, 4)
+B = ones(Blocks(2, 2), Int, 4, 4)
+C = zeros(Blocks(2, 2), Int, 4, 4)
+
+# Combine broadcasted addition with a stencil operation
+C .= A .+ @stencil(sum(@neighbors(B[idx], 1, Wrap())))
+
+@assert all(collect(C) .== 10)</code></pre><h2 id="Neighborhood-Access-with-@neighbors"><a class="docs-heading-anchor" href="#Neighborhood-Access-with-@neighbors">Neighborhood Access with <code>@neighbors</code></a><a id="Neighborhood-Access-with-@neighbors-1"></a><a class="docs-heading-anchor-permalink" href="#Neighborhood-Access-with-@neighbors" title="Permalink"></a></h2><p>The true power of stencils comes from accessing neighboring elements. The <code>@neighbors</code> macro facilitates this.</p><p><code>@neighbors(array[idx], distance, boundary_condition)</code></p><ul><li><code>array[idx]</code>: The array and current index from which to find neighbors.</li><li><code>distance</code>: An integer or <code>Tuple</code> of integers specifying the extent of the neighborhood (e.g., <code>1</code> for a 3x3 neighborhood in 2D).</li><li><code>boundary_condition</code>: Defines how to handle accesses beyond the array boundaries. Available conditions are:<ul><li><code>Wrap()</code>: Wraps around to the other side of the array (periodic boundaries).</li><li><code>Pad(value)</code>: Pads with a specified <code>value</code>.</li><li><code>Reflect(symmetric)</code>: Reflects values back into the array at boundaries. The <code>symmetric</code> boolean controls whether the edge element is included in the reflection:<ul><li><code>Reflect(true)</code> (symmetric): Edge element IS repeated. For array <code>[a,b,c,d]</code>, extends as <code>[...,c,b,a,a,b,c,d,d,c,b,...]</code>.</li><li><code>Reflect(false)</code> (mirror): Edge element NOT repeated. For array <code>[a,b,c,d]</code>, extends as <code>[...,d,c,b,a,b,c,d,c,b,a,...]</code>.</li></ul></li><li><code>Clamp()</code>: Clamps to the boundary value (repeats edge elements). For array <code>[a,b,c,d]</code>, extends as <code>[...,a,a,a,a,b,c,d,d,d,d,...]</code>.</li><li><code>LinearExtrapolate()</code>: Linearly extrapolates using the slope at the boundary. Only works with <code>Real</code> element types. For array <code>[2,4,6,8]</code>, the slope at the low boundary is <code>4-2=2</code>, so index 0 would be <code>2-2=0</code>.</li><li><strong>Mixed BCs (Tuple)</strong>: You can specify different boundary conditions per dimension using a tuple. For example, <code>(Wrap(), Pad(0))</code> uses <code>Wrap</code> for dimension 1 and <code>Pad(0)</code> for dimension 2.</li></ul></li></ul><h3 id="Example:-Averaging-Neighbors-with-Wrap"><a class="docs-heading-anchor" href="#Example:-Averaging-Neighbors-with-Wrap">Example: Averaging Neighbors with <code>Wrap</code></a><a id="Example:-Averaging-Neighbors-with-Wrap-1"></a><a class="docs-heading-anchor-permalink" href="#Example:-Averaging-Neighbors-with-Wrap" title="Permalink"></a></h3><pre><code class="language-julia hljs">import Dagger: Wrap
+
+# Initialize a DArray
+A = ones(Blocks(1, 1), Int, 3, 3)
+A[2,2] = 10 # Central element has a different value
+B = zeros(Blocks(1, 1), Float64, 3, 3)
+
+@stencil begin
+    # Calculate the average of the 3x3 neighborhood (including the center)
+    B[idx] = sum(@neighbors(A[idx], 1, Wrap())) / 9.0
+end
+
+# Manually calculate expected B for verification
+expected_B = zeros(Float64, 3, 3)
+A_collected = collect(A)
+for r in 1:3, c in 1:3
+    local_sum = 0.0
+    for dr in -1:1, dc in -1:1
+        nr, nc = mod1(r+dr, 3), mod1(c+dc, 3)
+        local_sum += A_collected[nr, nc]
+    end
+    expected_B[r,c] = local_sum / 9.0
+end
+
+@assert collect(B) ≈ expected_B</code></pre><h3 id="Example:-Convolution-with-Pad"><a class="docs-heading-anchor" href="#Example:-Convolution-with-Pad">Example: Convolution with <code>Pad</code></a><a id="Example:-Convolution-with-Pad-1"></a><a class="docs-heading-anchor-permalink" href="#Example:-Convolution-with-Pad" title="Permalink"></a></h3><pre><code class="language-julia hljs">import Pad
+
+# Initialize a DArray
+A = ones(Blocks(2, 2), Int, 4, 4)
+B = zeros(Blocks(2, 2), Int, 4, 4)
+
+@stencil begin
+    B[idx] = sum(@neighbors(A[idx], 1, Pad(0))) # Pad with 0
+end
+
+# Expected result for a 3x3 sum filter with zero padding
+expected_B_padded = [
+    4 6 6 4;
+    6 9 9 6;
+    6 9 9 6;
+    4 6 6 4
+]
+@assert collect(B) == expected_B_padded</code></pre><h3 id="Example:-Smoothing-with-Reflect"><a class="docs-heading-anchor" href="#Example:-Smoothing-with-Reflect">Example: Smoothing with <code>Reflect</code></a><a id="Example:-Smoothing-with-Reflect-1"></a><a class="docs-heading-anchor-permalink" href="#Example:-Smoothing-with-Reflect" title="Permalink"></a></h3><p>The <code>Reflect</code> boundary condition mirrors values at the edges, which is useful for operations like smoothing or image processing where you want to avoid artificial discontinuities at boundaries.</p><h4 id="Symmetric-Reflection-(Reflect(true))"><a class="docs-heading-anchor" href="#Symmetric-Reflection-(Reflect(true))">Symmetric Reflection (<code>Reflect(true)</code>)</a><a id="Symmetric-Reflection-(Reflect(true))-1"></a><a class="docs-heading-anchor-permalink" href="#Symmetric-Reflection-(Reflect(true))" title="Permalink"></a></h4><p>With symmetric reflection, the edge element is repeated in the reflection:</p><pre><code class="language-julia hljs">import Dagger: Reflect
+
+# Simple 1D example to illustrate symmetric reflection
+# Array [1, 2, 3, 4] extends as [..., 3, 2, 1, 1, 2, 3, 4, 4, 3, 2, ...]
+#                                         ^edge^         ^edge^
+A = DArray([1, 2, 3, 4], Blocks(2))
+B = zeros(Blocks(2), Int, 4)
+
+@stencil begin
+    B[idx] = sum(@neighbors(A[idx], 1, Reflect(true)))
+end
+
+# B[1]: indices 0,1,2 -&gt; 0 reflects to 1, so [1,1,2] = 4
+# B[2]: indices 1,2,3 -&gt; all in bounds, [1,2,3] = 6
+# B[3]: indices 2,3,4 -&gt; all in bounds, [2,3,4] = 9
+# B[4]: indices 3,4,5 -&gt; 5 reflects to 4, so [3,4,4] = 11
+@assert collect(B) == [4, 6, 9, 11]</code></pre><h4 id="Mirror-Reflection-(Reflect(false))"><a class="docs-heading-anchor" href="#Mirror-Reflection-(Reflect(false))">Mirror Reflection (<code>Reflect(false)</code>)</a><a id="Mirror-Reflection-(Reflect(false))-1"></a><a class="docs-heading-anchor-permalink" href="#Mirror-Reflection-(Reflect(false))" title="Permalink"></a></h4><p>With mirror reflection, the edge element is NOT repeated:</p><pre><code class="language-julia hljs"># Array [1, 2, 3, 4] extends as [..., 4, 3, 2, 1, 2, 3, 4, 3, 2, 1, ...]
+#                                            ^edge^   ^edge^
+A = DArray([1, 2, 3, 4], Blocks(2))
+B = zeros(Blocks(2), Int, 4)
+
+@stencil begin
+    B[idx] = sum(@neighbors(A[idx], 1, Reflect(false)))
+end
+
+# B[1]: indices 0,1,2 -&gt; 0 reflects to 2, so [2,1,2] = 5
+# B[2]: indices 1,2,3 -&gt; all in bounds, [1,2,3] = 6
+# B[3]: indices 2,3,4 -&gt; all in bounds, [2,3,4] = 9
+# B[4]: indices 3,4,5 -&gt; 5 reflects to 3, so [3,4,3] = 10
+@assert collect(B) == [5, 6, 9, 10]</code></pre><h3 id="Example:-Edge-Detection-with-Clamp"><a class="docs-heading-anchor" href="#Example:-Edge-Detection-with-Clamp">Example: Edge Detection with <code>Clamp</code></a><a id="Example:-Edge-Detection-with-Clamp-1"></a><a class="docs-heading-anchor-permalink" href="#Example:-Edge-Detection-with-Clamp" title="Permalink"></a></h3><p>The <code>Clamp</code> boundary condition repeats edge values, which is useful when you want boundary elements to have a neutral effect:</p><pre><code class="language-julia hljs">import Dagger: Clamp
+
+# Array [1, 2, 3, 4] extends as [..., 1, 1, 1, 1, 2, 3, 4, 4, 4, 4, ...]
+A = DArray([1, 2, 3, 4], Blocks(2))
+B = zeros(Blocks(2), Int, 4)
+
+@stencil begin
+    B[idx] = sum(@neighbors(A[idx], 1, Clamp()))
+end
+
+# B[1]: indices 0,1,2 -&gt; 0 clamps to 1, so [1,1,2] = 4
+# B[2]: indices 1,2,3 -&gt; all in bounds, [1,2,3] = 6
+# B[3]: indices 2,3,4 -&gt; all in bounds, [2,3,4] = 9
+# B[4]: indices 3,4,5 -&gt; 5 clamps to 4, so [3,4,4] = 11
+@assert collect(B) == [4, 6, 9, 11]</code></pre><h3 id="Example:-Smooth-Extrapolation-with-LinearExtrapolate"><a class="docs-heading-anchor" href="#Example:-Smooth-Extrapolation-with-LinearExtrapolate">Example: Smooth Extrapolation with <code>LinearExtrapolate</code></a><a id="Example:-Smooth-Extrapolation-with-LinearExtrapolate-1"></a><a class="docs-heading-anchor-permalink" href="#Example:-Smooth-Extrapolation-with-LinearExtrapolate" title="Permalink"></a></h3><p>The <code>LinearExtrapolate</code> boundary condition extrapolates linearly based on the slope at the boundary. This is useful for maintaining trends at edges:</p><pre><code class="language-julia hljs">import Dagger: LinearExtrapolate
+
+# Array [2.0, 4.0, 6.0, 8.0] has slope 2.0 at both boundaries
+# At low boundary: index 0 -&gt; 2.0 + 2.0*(-1) = 0.0
+# At high boundary: index 5 -&gt; 8.0 + 2.0*(1) = 10.0
+A = DArray([2.0, 4.0, 6.0, 8.0], Blocks(2))
+B = zeros(Blocks(2), Float64, 4)
+
+@stencil begin
+    B[idx] = sum(@neighbors(A[idx], 1, LinearExtrapolate()))
+end
+
+# B[1]: indices 0,1,2 -&gt; [0.0, 2.0, 4.0] = 6.0
+# B[2]: indices 1,2,3 -&gt; [2.0, 4.0, 6.0] = 12.0
+# B[3]: indices 2,3,4 -&gt; [4.0, 6.0, 8.0] = 18.0
+# B[4]: indices 3,4,5 -&gt; [6.0, 8.0, 10.0] = 24.0
+@assert collect(B) ≈ [6.0, 12.0, 18.0, 24.0]</code></pre><h3 id="Example:-Mixed-Boundary-Conditions"><a class="docs-heading-anchor" href="#Example:-Mixed-Boundary-Conditions">Example: Mixed Boundary Conditions</a><a id="Example:-Mixed-Boundary-Conditions-1"></a><a class="docs-heading-anchor-permalink" href="#Example:-Mixed-Boundary-Conditions" title="Permalink"></a></h3><p>You can specify different boundary conditions for each dimension using a tuple. This is useful when different boundaries have different physical meanings:</p><pre><code class="language-julia hljs">import Dagger: Wrap, Pad
+
+# 2D array with Wrap in dimension 1 (rows) and Pad(0) in dimension 2 (columns)
+A = DArray(reshape(1:16, 4, 4), Blocks(2, 2))
+B = zeros(Blocks(2, 2), Int, 4, 4)
+
+@stencil begin
+    B[idx] = sum(@neighbors(A[idx], 1, (Wrap(), Pad(0))))
+end
+
+# For each element:
+# - Row neighbors wrap around (periodic in rows)
+# - Column neighbors are padded with 0 (zero-flux at column boundaries)</code></pre><p>This is particularly useful for physical simulations where, for example, you might have periodic boundaries in one direction and fixed boundaries in another.</p><h2 id="Sequential-Semantics"><a class="docs-heading-anchor" href="#Sequential-Semantics">Sequential Semantics</a><a id="Sequential-Semantics-1"></a><a class="docs-heading-anchor-permalink" href="#Sequential-Semantics" title="Permalink"></a></h2><p>Expressions within a <code>@stencil</code> block are executed sequentially in terms of their effect on the data. This means that the result of one statement is visible to the subsequent statements, as if they were applied &quot;all at once&quot; across all indices before the next statement begins.</p><pre><code class="language-julia hljs">A = zeros(Blocks(2, 2), Int, 4, 4)
+B = zeros(Blocks(2, 2), Int, 4, 4)
+
+@stencil begin
+    A[idx] = 1  # First, A is initialized
+    B[idx] = A[idx] * 2       # Then, B is computed using the new values of A
+end
+
+expected_A = [1 for r in 1:4, c in 1:4]
+expected_B_seq = expected_A .* 2
+
+@assert collect(A) == expected_A
+@assert collect(B) == expected_B_seq</code></pre><h2 id="Operations-on-Multiple-DArrays"><a class="docs-heading-anchor" href="#Operations-on-Multiple-DArrays">Operations on Multiple <code>DArray</code>s</a><a id="Operations-on-Multiple-DArrays-1"></a><a class="docs-heading-anchor-permalink" href="#Operations-on-Multiple-DArrays" title="Permalink"></a></h2><p>You can read from and write to multiple <code>DArray</code>s within a single <code>@stencil</code> block, provided they have compatible chunk structures.</p><pre><code class="language-julia hljs">A = ones(Blocks(1, 1), Int, 2, 2)
+B = DArray(fill(3, 2, 2), Blocks(1, 1))
+C = zeros(Blocks(1, 1), Int, 2, 2)
+
+@stencil begin
+    C[idx] = A[idx] + B[idx]
+end
+@assert all(collect(C) .== 4)</code></pre><h2 id="Update-Operators"><a class="docs-heading-anchor" href="#Update-Operators">Update Operators</a><a id="Update-Operators-1"></a><a class="docs-heading-anchor-permalink" href="#Update-Operators" title="Permalink"></a></h2><p>You can use update operators like <code>+=</code>, <code>-=</code>, <code>*=</code>, and <code>/=</code> within a <code>@stencil</code> block. These are automatically transformed into the corresponding assignment and operation.</p><pre><code class="language-julia hljs">A = ones(Blocks(2, 2), Int, 4, 4)
+@stencil A[idx] += 1
+@assert all(collect(A) .== 2)</code></pre><h2 id="Example:-Game-of-Life"><a class="docs-heading-anchor" href="#Example:-Game-of-Life">Example: Game of Life</a><a id="Example:-Game-of-Life-1"></a><a class="docs-heading-anchor-permalink" href="#Example:-Game-of-Life" title="Permalink"></a></h2><p>The following demonstrates a more complex example: Conway&#39;s Game of Life.</p><pre><code class="language-julia hljs"># Ensure Plots and other necessary packages are available for the example
+using Plots
+
+N = 27 # Size of one dimension of a tile
+nt = 3 # Number of tiles in each dimension (results in nt x nt grid of tiles)
+niters = 10 # Number of iterations for the animation
+
+tiles = zeros(Blocks(N, N), Bool, N*nt, N*nt)
+outputs = zeros(Blocks(N, N), Bool, N*nt, N*nt)
+
+# Create a fun initial state (e.g., a glider and some random noise)
+tiles[13, 14] = true
+tiles[14, 14] = true
+tiles[15, 14] = true
+tiles[15, 15] = true
+tiles[14, 16] = true
+# Add some random noise in one of the tiles
+@view(tiles[(2N+1):3N, (2N+1):3N]) .= rand(Bool, N, N)
+
+
+
+anim = @animate for _ in 1:niters
+    @stencil begin
+        outputs[idx] = begin
+            nhood = @neighbors(tiles[idx], 1, Wrap())
+            neighs = sum(nhood) - tiles[idx] # Sum neighborhood, but subtract own value
+            if tiles[idx] &amp;&amp; neighs &lt; 2
+                0 # Dies of underpopulation
+            elseif tiles[idx] &amp;&amp; neighs &gt; 3
+                0 # Dies of overpopulation
+            elseif !tiles[idx] &amp;&amp; neighs == 3
+                1 # Becomes alive by reproduction
+            else
+                tiles[idx] # Keeps its prior value
+            end
+        end
+        tiles[idx] = outputs[idx] # Update tiles for the next iteration
+    end
+    heatmap(Int.(collect(outputs))) # Generate a heatmap visualization
+end
+path = mp4(anim; fps=5, show_msg=true).filename # Create an animation of the heatmaps over time</code></pre></article><nav class="docs-footer"><a class="docs-footer-prevpage" href="../datadeps/">« Basics</a><a class="docs-footer-nextpage" href="../gpu/">GPUs »</a><div class="flexbox-break"></div><p class="footer-message">Powered by <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> and the <a href="https://julialang.org/">Julia Programming Language</a>.</p></nav></div><div class="modal" id="documenter-settings"><div class="modal-background"></div><div class="modal-card"><header class="modal-card-head"><p class="modal-card-title">Settings</p><button class="delete"></button></header><section class="modal-card-body"><p><label class="label">Theme</label><div class="select"><select id="documenter-themepicker"><option value="auto">Automatic (OS)</option><option value="documenter-light">documenter-light</option><option value="documenter-dark">documenter-dark</option><option value="catppuccin-latte">catppuccin-latte</option><option value="catppuccin-frappe">catppuccin-frappe</option><option value="catppuccin-macchiato">catppuccin-macchiato</option><option value="catppuccin-mocha">catppuccin-mocha</option></select></div></p><hr/><p>This document was generated with <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> version 1.17.0 on <span class="colophon-date" title="Monday 23 February 2026 23:12">Monday 23 February 2026</span>. Using Julia version 1.12.5.</p></section><footer class="modal-card-foot"></footer></div></div></div></body></html>
