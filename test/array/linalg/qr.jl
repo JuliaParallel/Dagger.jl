@@ -62,7 +62,7 @@ end
 
     # F is a QRCompactWY; extract Q and R
     DQ_mat = DMatrix(F.Q)
-    DR = DArray{T}(DA_copy.partitioning, undef, size(DA_copy))
+    DR = DArray{T}( undef, DA_copy.partitioning, size(DA_copy))
     # Extract upper triangle from the factored DA_copy into DR
     R_local = triu(collect(DA_copy))
     DR = distribute(R_local, DA_copy.partitioning)
@@ -269,13 +269,13 @@ end
 
     nb = DA_copy.partitioning.blocksize[2]
     ib = 1
-    lm, ln = Dagger.meas_ws(DA_copy, ib)
-    Tm = DArray{T}(Blocks(ib, nb), undef, (lm, ln))
+    lm, ln = Dagger.qr_measure_workspace(DA_copy, ib)
+    Tm = DArray{T}(undef, Blocks(ib, nb), (lm, ln))
 
     geqrf!(DA_copy, Tm)
 
     # Build Q explicitly via porgqr!
-    DQ = DMatrix(DA_copy.partitioning, I*one(T), (size(A, 1), size(A, 1)))
+    DQ = DMatrix(I*one(T), (size(A, 1), size(A, 1)), DA_copy.partitioning)
     porgqr!('N', DA_copy, Tm, DQ)
 
     Q_dense = collect(DQ)
@@ -289,35 +289,6 @@ end
 
     @test res1 < 2.0
     @test res2 < 2.0
-end
-
-# ======================================================================
-# 10. static/traversal keyword options
-# ======================================================================
-@testset "Scheduler options (static=$s, traversal=$t): $T" for T in (Float64,),
-        s in (true,),
-        t in (:inorder,)
-    A = rand(T, 128, 64)
-    DA = distribute(A, Blocks(32,32))
-    DA_copy = copy(DA)
-
-    nb = DA_copy.partitioning.blocksize[2]
-    ib = 1
-    lm, ln = Dagger.meas_ws(DA_copy, ib)
-    Tm = DArray{T}(Blocks(ib, nb), undef, (lm, ln))
-
-    geqrf!(DA_copy, Tm; static=s, traversal=t)
-
-    DQ = DMatrix(DA_copy.partitioning, I*one(T), (size(A, 1), size(A, 1)))
-    porgqr!('N', DA_copy, Tm, DQ; static=s, traversal=t)
-
-    Q_dense = collect(DQ)
-    R = triu(collect(DA_copy))
-    eps_val = eps(real(T))
-
-    QR = Q_dense * R
-    res = opnorm(A - QR, 1) / (opnorm(A, 1) * max(size(A)...) * eps_val)
-    @test res < 2.0
 end
 
 # ======================================================================
@@ -465,7 +436,7 @@ end
     DA_copy = copy(DA)
     F = qr!(DA_copy; p=p)
 
-    DQ = DMatrix(F.Q.factors.partitioning, I*one(T), (size(A, 1), size(A, 1)))
+    DQ = DMatrix(I*one(T), (size(A, 1), size(A, 1)), F.Q.factors.partitioning)
     porgqr!(trans, F.Q.factors, F.Q.T, DQ; p=p)
 
     Q_dense = collect(DQ)
@@ -500,13 +471,13 @@ end
 
     nb = DA_copy.partitioning.blocksize[2]
     ib = 1
-    lm, ln = Dagger.meas_ws(DA_copy, ib)
-    Tm = DArray{T}(Blocks(ib, nb), undef, (lm, 2 * ln))  # 2× for tree T
+    lm, ln = Dagger.qr_measure_workspace(DA_copy, ib)
+    Tm = DArray{T}(undef, Blocks(ib, nb), (lm, 2 * ln))  # 2× for tree T
 
     cageqrf!(DA_copy, Tm; p=p)
 
     # Build Q
-    DQ = DMatrix(DA_copy.partitioning, I*one(T), (size(A, 1), size(A, 1)))
+    DQ = DMatrix(I*one(T), (size(A, 1), size(A, 1)), DA_copy.partitioning)
     porgqr!('N', DA_copy, Tm, DQ; p=p)
 
     Q_dense = collect(DQ)
@@ -534,7 +505,7 @@ end
     ib = 1
     lm = ib * cld(100, 30)
     ln = nb * cld(60, 20)
-    Tm = DArray{Float64}(Blocks(ib, nb), undef, (lm, 2 * ln))
+    Tm = DArray{Float64}(undef, Blocks(ib, nb), (lm, 2 * ln))
 
     @test_throws ArgumentError cageqrf!(DA_copy, Tm; p=2)
 end

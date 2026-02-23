@@ -1,4 +1,3 @@
-export geqrf!, porgqr!, pormqr!, cageqrf!
 import LinearAlgebra: QRCompactWY, AdjointQ, BlasFloat, QRCompactWYQ, AbstractQ, StridedVecOrMat, I
 import Base.:*
 
@@ -13,11 +12,11 @@ const _CAQR_P_MAP = WeakKeyDict{DArray, Int}()
 (*)(b::Number, Q::AdjointQ{T, QRCompactWYQ{T, M, C}}) where {T<:Number, M<:DMatrix{T}, C<:M} = DMatrix(Q) * b
 
 LinearAlgebra.lmul!(B::QRCompactWYQ{T, <:DMatrix{T}}, A::DMatrix{T}) where {T} = pormqr!('L', 'N', B.factors, B.T, A)
-function LinearAlgebra.lmul!(B::AdjointQ{T, <:QRCompactWYQ{T, <:Dagger.DMatrix{T}}}, A::Dagger.DMatrix{T}) where {T}
+function LinearAlgebra.lmul!(B::AdjointQ{T, <:QRCompactWYQ{T, <:DMatrix{T}}}, A::DMatrix{T}) where {T}
     trans = T <: Complex ? 'C' : 'T'
     pormqr!('L', trans, B.Q.factors, B.Q.T, A)
 end
-function _apply_dense_qr!(side::Char, trans::Char, Q::QRCompactWYQ{T, <:Dagger.DMatrix{T}}, M::AbstractMatrix{T}) where {T}
+function _apply_dense_qr!(side::Char, trans::Char, Q::QRCompactWYQ{T, <:DMatrix{T}}, M::AbstractMatrix{T}) where {T}
     # Distribute M with block sizes compatible with the Q factorization.
     # _repartition_pormqr will further adjust, but we need a sane starting point.
     bs = Q.factors.partitioning.blocksize  # (mb, nb)
@@ -31,22 +30,22 @@ function _apply_dense_qr!(side::Char, trans::Char, Q::QRCompactWYQ{T, <:Dagger.D
     return M
 end
 LinearAlgebra.lmul!(B::QRCompactWYQ{T, <:DMatrix{T}}, A::StridedVecOrMat{T}) where {T} = _apply_dense_qr!('L', 'N', B, A)
-function LinearAlgebra.lmul!(B::AdjointQ{T, <:QRCompactWYQ{T, <:Dagger.DMatrix{T}}}, A::StridedVecOrMat{T}) where {T}
+function LinearAlgebra.lmul!(B::AdjointQ{T, <:QRCompactWYQ{T, <:DMatrix{T}}}, A::StridedVecOrMat{T}) where {T}
     trans = T <: Complex ? 'C' : 'T'
     return _apply_dense_qr!('L', trans, B.Q, A)
 end
 
-LinearAlgebra.rmul!(A::Dagger.DMatrix{T}, B::QRCompactWYQ{T, <:Dagger.DMatrix{T}}) where {T} = pormqr!('R', 'N', B.factors, B.T, A)
-function LinearAlgebra.rmul!(A::Dagger.DMatrix{T}, B::AdjointQ{T, <:QRCompactWYQ{T, <:Dagger.DMatrix{T}}}) where {T} 
+LinearAlgebra.rmul!(A::DMatrix{T}, B::QRCompactWYQ{T, <:DMatrix{T}}) where {T} = pormqr!('R', 'N', B.factors, B.T, A)
+function LinearAlgebra.rmul!(A::DMatrix{T}, B::AdjointQ{T, <:QRCompactWYQ{T, <:DMatrix{T}}}) where {T} 
     trans = T <: Complex ? 'C' : 'T'
     pormqr!('R', trans, B.Q.factors, B.Q.T, A)
 end
-LinearAlgebra.rmul!(A::StridedVecOrMat{T}, B::QRCompactWYQ{T, <:Dagger.DMatrix{T}}) where {T} = _apply_dense_qr!('R', 'N', B, A)
-function LinearAlgebra.rmul!(A::StridedVecOrMat{T}, B::AdjointQ{<:Any, <:QRCompactWYQ{T, <:Dagger.DMatrix{T}, <:Dagger.DMatrix{T}}}) where {T<:Union{Float32,Float64}}
-    trans = 'T'
+LinearAlgebra.rmul!(A::StridedVecOrMat{T}, B::QRCompactWYQ{T, <:DMatrix{T}}) where {T} = _apply_dense_qr!('R', 'N', B, A)
+function LinearAlgebra.rmul!(A::StridedVecOrMat{T}, B::AdjointQ{<:Any, <:QRCompactWYQ{T, <:DMatrix{T}, <:DMatrix{T}}}) where {T<:Union{Float32,Float64}}
+    trans = T <: Complex ? 'C' : 'T'
     return _apply_dense_qr!('R', trans, B.Q, A)
 end
-function LinearAlgebra.rmul!(A::StridedVecOrMat{T}, B::AdjointQ{<:Any, <:QRCompactWYQ{T, <:Dagger.DMatrix{T}, <:Dagger.DMatrix{T}}}) where {T<:Union{ComplexF32,ComplexF64}}
+function LinearAlgebra.rmul!(A::StridedVecOrMat{T}, B::AdjointQ{<:Any, <:QRCompactWYQ{T, <:DMatrix{T}, <:DMatrix{T}}}) where {T<:Union{ComplexF32,ComplexF64}}
     trans = T <: Complex ? 'C' : 'T'
     return _apply_dense_qr!('R', trans, B.Q, A)
 end
@@ -58,7 +57,7 @@ Infer the CAQR domain count `p` from the reflector matrix `A` and the
 T-factor matrix `Tm`.  First checks the `_CAQR_P_MAP` cache; falls back
 to heuristic detection from Tm column count.
 """
-function _infer_caqr_p(A::Dagger.DMatrix, Tm::Dagger.DMatrix)
+function _infer_caqr_p(A::DMatrix, Tm::DMatrix)
     # Check the explicit cache first
     haskey(_CAQR_P_MAP, Tm) && return _CAQR_P_MAP[Tm]
     Ant = size(A.chunks, 2)
@@ -88,7 +87,7 @@ end
     return idx, pos - prev
 end
 
-function _is_uniform_square_tiling(A::Dagger.DMatrix)
+function _is_uniform_square_tiling(A::DMatrix)
     rcum = A.subdomains.cumlength[1]
     ccum = A.subdomains.cumlength[2]
     (isempty(rcum) || isempty(ccum)) && return false
@@ -97,9 +96,9 @@ function _is_uniform_square_tiling(A::Dagger.DMatrix)
     return all(==(r[1]), r) && all(==(c[1]), c) && r[1] == c[1]
 end
 
-@inline _use_irregular_qr_tiling(A::Dagger.DMatrix) = !_is_uniform_square_tiling(A)
+@inline _use_irregular_qr_tiling(A::DMatrix) = !_is_uniform_square_tiling(A)
 
-function _largest_square_redistribution_block(A::Dagger.DMatrix)
+function _largest_square_redistribution_block(A::DMatrix)
     m, n = size(A)
     mb, nb = A.partitioning.blocksize
     lim = min(m, n, mb, nb)
@@ -116,7 +115,7 @@ function _largest_square_redistribution_block(A::Dagger.DMatrix)
     return nothing
 end
 
-function _panel_steps(A::Dagger.DMatrix)
+function _panel_steps(A::DMatrix)
     rcum = A.subdomains.cumlength[1]
     ccum = A.subdomains.cumlength[2]
     m, n = size(A)
@@ -140,14 +139,14 @@ function _panel_steps(A::Dagger.DMatrix)
     return steps, rcum, ccum
 end
 
-function _geqrf_irregular!(A::Dagger.DMatrix{T}, Tm::Dagger.DMatrix{T}; static::Bool=true, traversal::Symbol=:inorder) where {T<:Number}
+function _geqrf_irregular!(A::DMatrix{T}, Tm::DMatrix{T}) where {T<:Number}
     Ac = A.chunks
     Tc = Tm.chunks
     mt, nt = size(Ac)
     trans = T <: Complex ? 'C' : 'T'
     steps, _, ccum = _panel_steps(A)
 
-    Dagger.spawn_datadeps(; static, traversal) do
+    spawn_datadeps() do
         for (rd, kc, lr, rend, lc, cend, b) in steps
             Av = view(Ac[rd, kc], lr:rend, lc:cend)
             Tv = view(Tc[rd, kc], :, lc:cend)
@@ -184,7 +183,7 @@ function _geqrf_irregular!(A::Dagger.DMatrix{T}, Tm::Dagger.DMatrix{T}; static::
     return A
 end
 
-function _porgqr_irregular!(trans::Char, A::Dagger.DMatrix{T}, Tm::Dagger.DMatrix{T}, Q::Dagger.DMatrix{T}; static::Bool=true, traversal::Symbol=:inorder) where {T<:Number}
+function _porgqr_irregular!(trans::Char, A::DMatrix{T}, Tm::DMatrix{T}, Q::DMatrix{T}) where {T<:Number}
     Ac = A.chunks
     Tc = Tm.chunks
     Qc = Q.chunks
@@ -193,7 +192,7 @@ function _porgqr_irregular!(trans::Char, A::Dagger.DMatrix{T}, Tm::Dagger.DMatri
     qmt == mt || throw(ArgumentError("Q row tiling must match A row tiling for irregular QR"))
     steps, _, _ = _panel_steps(A)
 
-    Dagger.spawn_datadeps(; static, traversal) do
+    spawn_datadeps() do
         if trans == 'N'
             for (rd, kc, lr, rend, lc, cend, b) in Iterators.reverse(steps)
                 for m in qmt:-1:rd+1, n in 1:qnt
@@ -231,8 +230,8 @@ function _porgqr_irregular!(trans::Char, A::Dagger.DMatrix{T}, Tm::Dagger.DMatri
     return Q
 end
 
-function _pormqr_irregular!(side::Char, trans::Char, A::Dagger.DMatrix{T}, Tm::Dagger.DMatrix{T}, C::Dagger.DMatrix{T}) where {T<:Number}
-    Q = Dagger.DMatrix(QRCompactWYQ(A, Tm))
+function _pormqr_irregular!(side::Char, trans::Char, A::DMatrix{T}, Tm::DMatrix{T}, C::DMatrix{T}) where {T<:Number}
+    Q = DMatrix(QRCompactWYQ(A, Tm))
     Qop =
         trans == 'N' ? Q :
         trans == 'T' ? transpose(Q) :
@@ -246,23 +245,23 @@ function _pormqr_irregular!(side::Char, trans::Char, A::Dagger.DMatrix{T}, Tm::D
     return C
 end
 
-function Dagger.DMatrix(Q::QRCompactWYQ{T, <:Dagger.DMatrix{T}}) where {T}
-    DQ = DMatrix(Q.factors.partitioning, I*one(T), size(Q))
+function DMatrix(Q::QRCompactWYQ{T, <:DMatrix{T}}) where {T}
+    DQ = DMatrix(I*one(T), size(Q), Q.factors.partitioning)
     p = _infer_caqr_p(Q.factors, Q.T)
     porgqr!('N', Q.factors, Q.T, DQ; p=p)
     return DQ
 end
 
-function Dagger.DMatrix(AQ::AdjointQ{T, <:QRCompactWYQ{T, <:Dagger.DMatrix{T}}}) where {T}
-    DQ = DMatrix(AQ.Q.factors.partitioning, I*one(T), size(AQ))
+function DMatrix(AQ::AdjointQ{T, <:QRCompactWYQ{T, <:DMatrix{T}}}) where {T}
+    DQ = DMatrix(I*one(T), size(AQ), AQ.Q.factors.partitioning)
     trans = T <: Complex ? 'C' : 'T'
     p = _infer_caqr_p(AQ.Q.factors, AQ.Q.T)
     porgqr!(trans, AQ.Q.factors, AQ.Q.T, DQ; p=p)
     return DQ
 end
 
-Base.collect(Q::QRCompactWYQ{T, <:Dagger.DMatrix{T}}) where {T} = collect(Dagger.DMatrix(Q))
-Base.collect(AQ::AdjointQ{T, <:QRCompactWYQ{T, <:Dagger.DMatrix{T}}}) where {T} = collect(Dagger.DMatrix(AQ))
+Base.collect(Q::QRCompactWYQ{T, <:DMatrix{T}}) where {T} = collect(DMatrix(Q))
+Base.collect(AQ::AdjointQ{T, <:QRCompactWYQ{T, <:DMatrix{T}}}) where {T} = collect(DMatrix(AQ))
 
 function _repartition_pormqr(A, Tm, C, side::Char, trans::Char)
     partA = A.partitioning.blocksize
@@ -286,7 +285,7 @@ function _repartition_pormqr(A, Tm, C, side::Char, trans::Char)
     return Blocks(partA...), Blocks(partTm...), Blocks(partC_new...)
 end
 
-function pormqr!(side::Char, trans::Char, A::Dagger.DMatrix{T}, Tm::Dagger.DMatrix{T}, C::Dagger.DMatrix{T}; p::Int=_infer_caqr_p(A, Tm)) where {T<:Number}
+function pormqr!(side::Char, trans::Char, A::DMatrix{T}, Tm::DMatrix{T}, C::DMatrix{T}; p::Int=_infer_caqr_p(A, Tm)) where {T<:Number}
     if _use_irregular_qr_tiling(A)
         return _pormqr_irregular!(side, trans, A, Tm, C)
     end
@@ -298,7 +297,7 @@ function pormqr!(side::Char, trans::Char, A::Dagger.DMatrix{T}, Tm::Dagger.DMatr
     end
 end
 
-function _pormqr_impl!(side::Char, trans::Char, A::Dagger.DMatrix{T}, Tm::Dagger.DMatrix{T}, C::Dagger.DMatrix{T}; p::Int=1) where {T<:Number}
+function _pormqr_impl!(side::Char, trans::Char, A::DMatrix{T}, Tm::DMatrix{T}, C::DMatrix{T}; p::Int=1) where {T<:Number}
     m, n = size(C)
     Ac = A.chunks
     Tc = Tm.chunks
@@ -317,9 +316,9 @@ function _pormqr_impl!(side::Char, trans::Char, A::Dagger.DMatrix{T}, Tm::Dagger
     # When tree_first, apply ttmqr (descend: root→leaves) BEFORE local ops;
     # otherwise, apply local ops first, then ttmqr (ascend: leaves→root).
 
-    Dagger.spawn_datadeps() do
+    spawn_datadeps() do
         if side == 'L'
-            if (trans == 'T' || trans == 'C')
+            if trans == 'T' || trans == 'C'
                 # Left, ConjTrans: unmqr first, then ttmqr ascending.  k forward.
                 for k in 1:minMT
                     proot = p > 1 ? ((k - 1) ÷ mtd) + 1 : 1
@@ -488,9 +487,9 @@ function _pormqr_impl!(side::Char, trans::Char, A::Dagger.DMatrix{T}, Tm::Dagger
     return C
 end
 
-function cageqrf!(A::Dagger.DMatrix{T}, Tm::Dagger.DMatrix{T}; static::Bool=true, traversal::Symbol=:inorder, p::Int=1) where {T<: Number}
+function cageqrf!(A::DMatrix{T}, Tm::DMatrix{T}; p::Int=1) where {T<: Number}
     if p == 1 
-        return geqrf!(A, Tm; static, traversal)
+        return geqrf!(A, Tm)
     end
 
     _use_irregular_qr_tiling(A) && throw(ArgumentError("p > 1 requires uniform square tiling"))
@@ -506,7 +505,7 @@ function cageqrf!(A::Dagger.DMatrix{T}, Tm::Dagger.DMatrix{T}; static::Bool=true
     proot = 1
     nxtmt = mtd
     trans = T <: Complex ? 'C' : 'T'
-    Dagger.spawn_datadeps(;static, traversal) do
+    spawn_datadeps() do
         for k in 1:min(mt, nt)
             if k > nxtmt
                 proot += 1
@@ -549,9 +548,9 @@ function cageqrf!(A::Dagger.DMatrix{T}, Tm::Dagger.DMatrix{T}; static::Bool=true
     end
 end
 
-function geqrf!(A::Dagger.DMatrix{T}, Tm::Dagger.DMatrix{T}; static::Bool=true, traversal::Symbol=:inorder) where {T<: Number}
+function geqrf!(A::DMatrix{T}, Tm::DMatrix{T}) where {T<: Number}
     if _use_irregular_qr_tiling(A)
-        return _geqrf_irregular!(A, Tm; static, traversal)
+        return _geqrf_irregular!(A, Tm)
     end
 
     Ac = A.chunks
@@ -559,7 +558,7 @@ function geqrf!(A::Dagger.DMatrix{T}, Tm::Dagger.DMatrix{T}; static::Bool=true, 
     Tc = Tm.chunks
     trans = T <: Complex ? 'C' : 'T'
 
-    Dagger.spawn_datadeps(;static, traversal) do
+    spawn_datadeps() do
         for k in 1:min(mt, nt) 
             Dagger.@spawn NextLA.geqrt!(InOut(Ac[k, k]), Out(Tc[k,k]))
             for n in k+1:nt
@@ -575,9 +574,9 @@ function geqrf!(A::Dagger.DMatrix{T}, Tm::Dagger.DMatrix{T}; static::Bool=true, 
     end
 end
 
-function porgqr!(trans::Char, A::Dagger.DMatrix{T}, Tm::Dagger.DMatrix{T}, Q::Dagger.DMatrix{T}; static::Bool=true, traversal::Symbol=:inorder, p::Int=_infer_caqr_p(A, Tm)) where {T<:Number} 
+function porgqr!(trans::Char, A::DMatrix{T}, Tm::DMatrix{T}, Q::DMatrix{T}; p::Int=_infer_caqr_p(A, Tm)) where {T<:Number} 
     if _use_irregular_qr_tiling(A)
-        return _porgqr_irregular!(trans, A, Tm, Q; static, traversal)
+        return _porgqr_irregular!(trans, A, Tm, Q)
     end
 
     Ac = A.chunks
@@ -589,7 +588,7 @@ function porgqr!(trans::Char, A::Dagger.DMatrix{T}, Tm::Dagger.DMatrix{T}, Q::Da
     Tc2_offset = has_tree ? size(Tc, 2) ÷ 2 : 0
     mtd = p > 1 ? mt ÷ p : mt    # tiles per domain
     
-    Dagger.spawn_datadeps(;static, traversal) do
+    spawn_datadeps() do
         if has_tree && p > 1
             if trans == 'N'
                 # Build Q with CAQR tree:
@@ -745,7 +744,7 @@ function porgqr!(trans::Char, A::Dagger.DMatrix{T}, Tm::Dagger.DMatrix{T}, Q::Da
     end
 end
 
-function meas_ws(A::Dagger.DMatrix{T}, ib::Int) where {T<: Number}
+function qr_measure_workspace(A::DMatrix{T}, ib::Int) where {T<: Number}
     mb, nb = A.partitioning.blocksize
     m, n = size(A)
     MT = cld(m, mb)
@@ -755,14 +754,14 @@ function meas_ws(A::Dagger.DMatrix{T}, ib::Int) where {T<: Number}
     lm, ln
 end
 
-function _qr_impl!(A::Dagger.DMatrix{T}; ib::Int=1, p::Int=1) where {T<:Number}
+function _qr_impl!(A::DMatrix{T}; ib::Int=1, p::Int=1) where {T<:Number}
     p >= 1 || throw(ArgumentError("p must be >= 1, got $p"))
-    lm, ln = meas_ws(A, ib)
+    lm, ln = qr_measure_workspace(A, ib)
     nb = A.partitioning.blocksize[2]
     irregular = _use_irregular_qr_tiling(A)
 
     Tm_cols = p > 1 ? 2 * ln : ln
-    Tm = zeros(Blocks(ib, nb), T, (lm, Tm_cols))
+    Tm = DArray{T}(undef, Blocks(ib, nb), (lm, Tm_cols))
 
     if irregular
         # Hierarchical irregular path (no CAQR tree metadata).
@@ -776,7 +775,7 @@ function _qr_impl!(A::Dagger.DMatrix{T}; ib::Int=1, p::Int=1) where {T<:Number}
     return QRCompactWY(A, Tm)
 end
 
-function LinearAlgebra.qr!(A::Dagger.DMatrix{T}; ib::Int=1, p::Int=1) where {T<:Number}
+function LinearAlgebra.qr!(A::DMatrix{T}; ib::Int=1, p::Int=1) where {T<:Number}
     p >= 1 || throw(ArgumentError("p must be >= 1, got $p"))
 
     if !_use_irregular_qr_tiling(A)

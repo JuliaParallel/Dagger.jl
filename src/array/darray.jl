@@ -67,9 +67,6 @@ ArrayDomain((1:15), (1:80))
 alignfirst(a::ArrayDomain) =
     ArrayDomain(map(r->1:length(r), indexes(a)))
 
-alignfirst(a::CartesianIndices{N}) where N =
-    ArrayDomain(map(r->1:length(r), a.indices))
-
 function size(a::ArrayDomain, dim)
     idxs = indexes(a)
     length(idxs) < dim ? 1 : length(idxs[dim])
@@ -389,8 +386,6 @@ function lookup_parts(A::DArray, ps::AbstractArray, subdmns::DomainBlocks{N}, d:
     new_d = ntuple(i->first(inds).I[i]:last(inds).I[i], N)
     return lookup_parts(A, ps, subdmns, ArrayDomain(new_d))
 end
-
-lookup_parts(A::DArray, ps::AbstractArray, subdmns::DomainBlocks{N}, d::CartesianIndices) where {N} = lookup_parts(A, ps, subdmns, ArrayDomain(d.indices))
 
 """
     Base.fetch(c::DArray)
