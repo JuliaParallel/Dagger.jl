@@ -1,15 +1,14 @@
 import LinearAlgebra: QRCompactWY, AdjointQ, BlasFloat, QRCompactWYQ, AbstractQ, StridedVecOrMat, I
-import Base.:*
-
 # Maps Tm DArray → p (CAQR domain count) so that porgqr!/pormqr! can
 # reconstruct the butterfly tree without requiring p as an argument.
+# The algorithms used in this implementation are based on https://www.netlib.org/lapack/lawnspdf/lawn222.pdf
 const _CAQR_P_MAP = WeakKeyDict{DArray, Int}()
 
-(*)(Q::QRCompactWYQ{T, M}, b::Number) where {T<:Number, M<:DMatrix{T}} = DMatrix(Q) * b
-(*)(b::Number, Q::QRCompactWYQ{T, M}) where {T<:Number, M<:DMatrix{T}} = DMatrix(Q) * b
+Base.:(*)(Q::QRCompactWYQ{T, M}, b::Number) where {T<:Number, M<:DMatrix{T}} = DMatrix(Q) * b
+Base.:(*)(b::Number, Q::QRCompactWYQ{T, M}) where {T<:Number, M<:DMatrix{T}} = DMatrix(Q) * b
 
-(*)(Q::AdjointQ{T, QRCompactWYQ{T, M, C}}, b::Number) where {T<:Number, M<:DMatrix{T}, C<:M} = DMatrix(Q) * b
-(*)(b::Number, Q::AdjointQ{T, QRCompactWYQ{T, M, C}}) where {T<:Number, M<:DMatrix{T}, C<:M} = DMatrix(Q) * b
+Base.:(*)(Q::AdjointQ{T, QRCompactWYQ{T, M, C}}, b::Number) where {T<:Number, M<:DMatrix{T}, C<:M} = DMatrix(Q) * b
+Base.:(*)(b::Number, Q::AdjointQ{T, QRCompactWYQ{T, M, C}}) where {T<:Number, M<:DMatrix{T}, C<:M} = DMatrix(Q) * b
 
 LinearAlgebra.lmul!(B::QRCompactWYQ{T, <:DMatrix{T}}, A::DMatrix{T}) where {T} = pormqr!('L', 'N', B.factors, B.T, A)
 function LinearAlgebra.lmul!(B::AdjointQ{T, <:QRCompactWYQ{T, <:DMatrix{T}}}, A::DMatrix{T}) where {T}
@@ -486,6 +485,7 @@ function _pormqr_impl!(side::Char, trans::Char, A::DMatrix{T}, Tm::DMatrix{T}, C
     end
     return C
 end
+
 
 function cageqrf!(A::DMatrix{T}, Tm::DMatrix{T}; p::Int=1) where {T<: Number}
     if p == 1 
