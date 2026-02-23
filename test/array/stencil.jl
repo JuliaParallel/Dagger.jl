@@ -110,14 +110,14 @@ function test_stencil()
         # slope at high boundary = 8.0 - 6.0 = 2.0
         # idx=0 → 2.0 + 2.0*(-1) = 0.0
         # idx=5 → 8.0 + 2.0*(1) = 10.0
-        A = DArray([2.0, 4.0, 6.0, 8.0], Blocks(2))
-        B = zeros(Blocks(2), Float64, 4)
+        A = DArray([2f0, 4f0, 6f0, 8f0], Blocks(2))
+        B = zeros(Blocks(2), Float32, 4)
         @stencil B[idx] = sum(@neighbors(A[idx], 1, LinearExtrapolate()))
         # B[1]: neighbors at indices 0, 1, 2 -> extrapolated 0 becomes 0.0, so [0.0, 2.0, 4.0] = 6.0
         # B[2]: neighbors at indices 1, 2, 3 -> [2.0, 4.0, 6.0] = 12.0
         # B[3]: neighbors at indices 2, 3, 4 -> [4.0, 6.0, 8.0] = 18.0
         # B[4]: neighbors at indices 3, 4, 5 -> extrapolated 5 becomes 10.0, so [6.0, 8.0, 10.0] = 24.0
-        expected_B_extrap = [6.0, 12.0, 18.0, 24.0]
+        expected_B_extrap = [6f0, 12f0, 18f0, 24f0]
         @test collect(B) ≈ expected_B_extrap
     end
 
@@ -348,9 +348,9 @@ function test_stencil()
         @stencil B[idx] *= 3
         @test all(collect(B) .== 3)
 
-        C = DArray(fill(10.0, 4, 4), Blocks(2, 2))
-        @stencil C[idx] /= 2.0
-        @test all(collect(C) .== 5.0)
+        C = DArray(fill(10f0, 4, 4), Blocks(2, 2))
+        @stencil C[idx] /= 2f0
+        @test all(collect(C) .== 5f0)
 
         D = DArray(fill(10, 4, 4), Blocks(2, 2))
         @stencil D[idx] -= 1
