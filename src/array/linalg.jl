@@ -219,22 +219,43 @@ function LinearAlgebra.ldiv!(C::Cholesky{T,<:DMatrix}, B::DVecOrMat) where T
     parent_A = factors
     dB = B isa DVecOrMat ? B : (B isa AbstractMatrix ? view(B, factors.partitioning) : view(B, AutoBlocks()))
     min_bsa = min(parent_A.partitioning.blocksize...)
+    partB = Blocks(ntuple(_->min_bsa, ndims(B))...)
 
-    if C.uplo == 'U'
-        # A = U'U → solve U'y = B, then Ux = y
-        maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => Blocks(min_bsa, min_bsa)) do pA, pB
-            Dagger.trsm!('L', 'U', trans, 'N', alpha, pA, pB)
-        end
-        maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => Blocks(min_bsa, min_bsa)) do pA, pB
-            Dagger.trsm!('L', 'U', 'N', 'N', alpha, pA, pB)
+    if B isa DVector
+        if C.uplo == 'U'
+            # A = U'U → solve U'y = B, then Ux = y
+            maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => partB) do pA, pB
+                Dagger.trsv!('U', trans, 'N', alpha, pA, pB)
+            end
+            maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => partB) do pA, pB
+                Dagger.trsv!('U', 'N', 'N', alpha, pA, pB)
+            end
+        else
+            # A = LL' → solve Ly = B, then L'x = y
+            maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => partB) do pA, pB
+                Dagger.trsv!('L', 'N', 'N', alpha, pA, pB)
+            end
+            maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => partB) do pA, pB
+                Dagger.trsv!('L', trans, 'N', alpha, pA, pB)
+            end
         end
     else
-        # A = LL' → solve Ly = B, then L'x = y
-        maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => Blocks(min_bsa, min_bsa)) do pA, pB
-            Dagger.trsm!('L', 'L', 'N', 'N', alpha, pA, pB)
-        end
-        maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => Blocks(min_bsa, min_bsa)) do pA, pB
-            Dagger.trsm!('L', 'L', trans, 'N', alpha, pA, pB)
+        if C.uplo == 'U'
+            # A = U'U → solve U'y = B, then Ux = y
+            maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => partB) do pA, pB
+                Dagger.trsm!('L', 'U', trans, 'N', alpha, pA, pB)
+            end
+            maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => partB) do pA, pB
+                Dagger.trsm!('L', 'U', 'N', 'N', alpha, pA, pB)
+            end
+        else
+            # A = LL' → solve Ly = B, then L'x = y
+            maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => partB) do pA, pB
+                Dagger.trsm!('L', 'L', 'N', 'N', alpha, pA, pB)
+            end
+            maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => partB) do pA, pB
+                Dagger.trsm!('L', 'L', trans, 'N', alpha, pA, pB)
+            end
         end
     end
 
