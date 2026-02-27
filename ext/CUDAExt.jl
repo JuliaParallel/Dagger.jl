@@ -335,6 +335,37 @@ for lib in [BLAS, LAPACK]
     end
 end
 
+# Adapt RefValue
+Dagger.move(from_proc::CPUProc, to_proc::CuArrayDeviceProc, x::Base.RefValue) =
+    Dagger.GPURef(Dagger.move(from_proc, to_proc, x[]), only(Dagger.memory_spaces(to_proc)))
+Dagger.move(from_proc::CuArrayDeviceProc, to_proc::CPUProc, x::Dagger.GPURef{T,CUDAVRAMMemorySpace} where T) =
+    Ref(Dagger.move(from_proc, to_proc, x[]))
+function Dagger.move!(dep_mod, to_space::CPURAMMemorySpace, from_space::CUDAVRAMMemorySpace, to::Base.RefValue, from::Dagger.GPURef)
+    if Dagger.type_may_alias(typeof(from[]))
+        Dagger.move!(dep_mod, to_space, from_space, to[], from[])
+    else
+        to[] = dep_mod(from[])
+    end
+    return
+end
+function Dagger.move!(dep_mod, to_space::CUDAVRAMMemorySpace, from_space::CPURAMMemorySpace, to::Dagger.GPURef, from::Base.RefValue)
+    if Dagger.type_may_alias(typeof(from[]))
+        Dagger.move!(dep_mod, to_space, from_space, to[], from[])
+    else
+        to[] = dep_mod(from[])
+    end
+    return
+end
+function Dagger.move!(dep_mod, to_space::CUDAVRAMMemorySpace, from_space::CUDAVRAMMemorySpace, to::Dagger.GPURef, from::Dagger.GPURef)
+    if Dagger.type_may_alias(typeof(from[]))
+        Dagger.move!(dep_mod, to_space, from_space, to[], from[])
+    else
+        to[] = dep_mod(from[])
+    end
+    return
+end
+
+# Adapt HaloArray
 CuArray(H::Dagger.HaloArray) = convert(CuArray, H)
 Base.convert(::Type{C}, H::Dagger.HaloArray) where {C<:CuArray} =
     Dagger.HaloArray(C(H.center),
