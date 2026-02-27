@@ -291,9 +291,9 @@ end
 
 # Adapt RefValue
 Dagger.move(from_proc::CPUProc, to_proc::MtlArrayDeviceProc, x::Base.RefValue) =
-    Dagger.GPURef(move(from_proc, to_proc, x[]), only(memory_spaces(to_proc)))
+    Dagger.GPURef(Dagger.move(from_proc, to_proc, x[]), only(Dagger.memory_spaces(to_proc)))
 Dagger.move(from_proc::MtlArrayDeviceProc, to_proc::CPUProc, x::Dagger.GPURef{T,MetalVRAMMemorySpace} where T) =
-    Ref(move(from_proc, to_proc, x[]))
+    Ref(Dagger.move(from_proc, to_proc, x[]))
 function Dagger.move!(dep_mod, to_space::CPURAMMemorySpace, from_space::MetalVRAMMemorySpace, to::Base.RefValue, from::Dagger.GPURef)
     if Dagger.type_may_alias(typeof(from[]))
         Dagger.move!(dep_mod, to_space, from_space, to[], from[])
