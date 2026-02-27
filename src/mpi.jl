@@ -49,21 +49,38 @@ struct MPIAcceleration <: Acceleration
 end
 MPIAcceleration() = MPIAcceleration(MPI.COMM_WORLD)
 
+const ALIASING_REQUEST_TAG = UInt32(0xFF00)
+
+# Deterministic tag for data movement (remotecall_endpoint). Uses a separate tag space
+# so it cannot collide with the global to_tag() counter used by execute! / aliasing.
+# Prevents symmetric deadlock when one rank blocks in remotecall_endpoint recv while
+# another rank consumes the same counter value in execute! recv.
+const REMOTECALL_TAG_BASE = 100_000
+const REMOTECALL_TAG_RANGE = 424_287  # so base+range-1 <= typical tag_ub
+function remotecall_tag(comm::MPI.Comm, uid, from_rank::Int, to_rank::Int, ref_id)
+    tag_ub = Int(MPI.tag_ub())
+    range = min(REMOTECALL_TAG_RANGE, max(1, tag_ub - REMOTECALL_TAG_BASE + 1))
+    h = hash((uid, from_rank, to_rank, ref_id))
+    tag = REMOTECALL_TAG_BASE + Int(rem(h, UInt(range)))
+    return UInt32(tag)
+end
+
 function aliasing(accel::MPIAcceleration, x::Chunk, T)
     handle = x.handle::MPIRef
     @assert accel.comm == handle.comm "MPIAcceleration comm mismatch"
-    tag = to_tag()
-    check_uniform(tag)
     rank = MPI.Comm_rank(accel.comm)
     if handle.rank == rank
         ainfo = aliasing(x, T)
-        #Core.print("[$rank] aliasing: $ainfo, sending\n")
-        @opcounter :aliasing_bcast_send_yield
-        bcast_send_yield(ainfo, accel.comm, handle.rank, tag)
-    else
-        #Core.print("[$rank] aliasing: receiving from $(handle.rank)\n")
-        ainfo = recv_yield(accel.comm, handle.rank, tag)
-        #Core.print("[$rank] aliasing: received $ainfo\n")
+        check_uniform(ainfo)
+        return ainfo
+    end
+    response_tag = to_tag()
+    check_uniform(response_tag)
+    request_payload = (handle, T, response_tag)
+    _send_yield_raw(request_payload, accel.comm, handle.rank, Int(ALIASING_REQUEST_TAG))
+    ainfo = recv_yield(accel.comm, handle.rank, response_tag)
+    if ainfo isa Exception
+        throw(ainfo)
     end
     check_uniform(ainfo)
     return ainfo
@@ -251,6 +268,8 @@ default_processor(space::MPIMemorySpace) = MPIOSProc(space.comm, space.rank)
 default_memory_space(accel::MPIAcceleration) = MPIMemorySpace(CPURAMMemorySpace(myid()), accel.comm, 0)
 
 default_memory_space(accel::MPIAcceleration, x) = MPIMemorySpace(CPURAMMemorySpace(myid()), accel.comm, 0)
+default_memory_space(accel::MPIAcceleration, x::Array) = MPIMemorySpace(CPURAMMemorySpace(myid()), accel.comm, MPI.Comm_rank(accel.comm))
+default_memory_space(accel::MPIAcceleration, x::AliasedObjectCacheStore) = MPIMemorySpace(CPURAMMemorySpace(myid()), accel.comm, MPI.Comm_rank(accel.comm))
 default_memory_space(accel::MPIAcceleration, x::Chunk) = MPIMemorySpace(CPURAMMemorySpace(myid()), x.handle.comm, x.handle.rank)
 default_memory_space(accel::MPIAcceleration, x::Function) = MPIMemorySpace(CPURAMMemorySpace(myid()), accel.comm, MPI.Comm_rank(accel.comm))
 default_memory_space(accel::MPIAcceleration, T::Type) = MPIMemorySpace(CPURAMMemorySpace(myid()), accel.comm, MPI.Comm_rank(accel.comm))
@@ -332,27 +351,164 @@ function affinity(x::MPIRef)
     end
 end
 
+const MPIREF_ORPHAN = Threads.Atomic{Int}(1)
+
 function take_ref_id!()
     tid = 0
     uid = 0
     id = 0
+    _branch = ""
     if Dagger.in_task()
         tid = sch_handle().thunk_id.id
         uid = 0
         counter = get!(MPIREF_TID, tid, Threads.Atomic{Int}(1))
         id = Threads.atomic_add!(counter, 1)
+        _branch = "in_task"
     elseif MPI_TID[] != 0
         tid = MPI_TID[]
         uid = 0
         counter = get!(MPIREF_TID, tid, Threads.Atomic{Int}(1))
         id = Threads.atomic_add!(counter, 1)
+        _branch = "MPI_TID"
     elseif MPI_UID[] != 0
         tid = 0
         uid = MPI_UID[]
         counter = get!(MPIREF_UID, uid, Threads.Atomic{Int}(1))
         id = Threads.atomic_add!(counter, 1)
+        _branch = "MPI_UID"
+    else
+        tid = 0
+        uid = Int(Threads.atomic_add!(MPIREF_ORPHAN, 1))
+        counter = get!(MPIREF_UID, uid, Threads.Atomic{Int}(1))
+        id = Threads.atomic_add!(counter, 1)
+        _branch = "orphan"
     end
     return MPIRefID(tid, uid, id)
+end
+
+const MPIREF_REGISTRY = Base.Lockable(Dict{MPIRefID, DRef}())
+
+const ALIASING_PENDING = Vector{Tuple{MPIRef, Any, UInt32, Int}}()
+
+"""
+Service any pending aliasing requests where we are the owner.
+Called from recv_yield loops to avoid deadlock when a requester is blocking
+waiting for aliasing from us while we're blocked waiting for someone else.
+"""
+# #region agent log
+const _SAR_ACTIVE = Threads.Atomic{Int}(0)
+# #endregion
+const _SAR_OUTBOX = Vector{Tuple{Any, MPI.Comm, Int, UInt32}}()
+
+const _SAR_STATE = Ref{Symbol}(:idle)
+const _SAR_LEN_BUF = Int64[0]
+const _SAR_REQ = Ref{Union{Nothing, MPI.Request}}(nothing)
+const _SAR_DATA_BUF = Ref{Vector{UInt8}}(UInt8[])
+const _SAR_SRC = Ref{Int}(0)
+
+function service_aliasing_requests(comm::MPI.Comm)
+    _prev = Threads.atomic_add!(_SAR_ACTIVE, 1)
+    if _prev > 0
+        Threads.atomic_sub!(_SAR_ACTIVE, 1)
+        return
+    end
+
+    rank = MPI.Comm_rank(comm)
+
+    if !isempty(ALIASING_PENDING)
+        still_pending = Tuple{MPIRef, Any, UInt32, Int}[]
+        for (handle, dep_mod, response_tag, src) in ALIASING_PENDING
+            inner_ref = lock(MPIREF_REGISTRY) do reg
+                get(reg, handle.id, nothing)
+            end
+            if inner_ref !== nothing
+                value = poolget(inner_ref)
+                ainfo = aliasing(value, dep_mod)
+                push!(_SAR_OUTBOX, (ainfo, comm, src, response_tag))
+            else
+                push!(still_pending, (handle, dep_mod, response_tag, src))
+            end
+        end
+        empty!(ALIASING_PENDING)
+        append!(ALIASING_PENDING, still_pending)
+    end
+
+    while true
+        if _SAR_STATE[] == :idle
+            _SAR_LEN_BUF[1] = 0
+            _SAR_REQ[] = MPI.Irecv!(MPI.Buffer(_SAR_LEN_BUF), comm;
+                source=Int(MPI.API.MPI_ANY_SOURCE[]), tag=Int(ALIASING_REQUEST_TAG))
+            _SAR_STATE[] = :wait_len
+        end
+
+        if _SAR_STATE[] == :wait_len
+            done, status = MPI.Test(_SAR_REQ[], MPI.Status)
+            if !done
+                break
+            end
+            _SAR_SRC[] = MPI.Get_source(status)
+            nbytes = _SAR_LEN_BUF[1]
+            _SAR_DATA_BUF[] = Array{UInt8}(undef, nbytes)
+            _SAR_REQ[] = MPI.Irecv!(MPI.Buffer(_SAR_DATA_BUF[]), comm;
+                source=_SAR_SRC[], tag=Int(ALIASING_REQUEST_TAG))
+            _SAR_STATE[] = :wait_data
+        end
+
+        if _SAR_STATE[] == :wait_data
+            done, status = MPI.Test(_SAR_REQ[], MPI.Status)
+            if !done
+                break
+            end
+            payload = MPI.deserialize(_SAR_DATA_BUF[])
+            # (SAR recv log removed to reduce noise)
+            (handle::MPIRef, dep_mod, response_tag::UInt32) = payload
+            if handle.rank == rank
+                inner_ref = handle.innerRef
+                if inner_ref === nothing
+                    inner_ref = lock(MPIREF_REGISTRY) do reg
+                        get(reg, handle.id, nothing)
+                    end
+                end
+                if inner_ref !== nothing
+                    value = poolget(inner_ref)
+                    ainfo = aliasing(value, dep_mod)
+                    push!(_SAR_OUTBOX, (ainfo, comm, _SAR_SRC[], response_tag))
+                else
+                    push!(ALIASING_PENDING, (handle, dep_mod, response_tag, _SAR_SRC[]))
+                end
+            end
+            _SAR_STATE[] = :idle
+            continue
+        end
+    end
+
+    while !isempty(_SAR_OUTBOX)
+        (ainfo, _comm, dest, rtag) = popfirst!(_SAR_OUTBOX)
+        _send_outbox_response(ainfo, _comm, dest, Int(rtag))
+    end
+
+    Threads.atomic_sub!(_SAR_ACTIVE, 1)
+end
+
+function _send_outbox_response(value, comm, dest, tag)
+    buf = MPI.serialize(value)
+    len_buf = Int64[length(buf)]
+    lock(SEND_SERIALIZE_LOCK) do
+        GC.@preserve buf len_buf begin
+            req_len = MPI.Isend(len_buf, comm; dest, tag)
+            while true
+                finish, _ = MPI.Test(req_len, MPI.Status)
+                finish && break
+                yield()
+            end
+            req_data = MPI.Isend(buf, comm; dest, tag)
+            while true
+                finish, _ = MPI.Test(req_data, MPI.Status)
+                finish && break
+                yield()
+            end
+        end
+    end
 end
 
 #TODO: partitioned scheduling with comm bifurcation
@@ -363,14 +519,28 @@ function tochunk_pset(x, space::MPIMemorySpace; device=nothing, kwargs...)
     if local_rank != space.rank
         return MPIRef(space.comm, space.rank, 0, nothing, Mid)
     else
-        return MPIRef(space.comm, space.rank, sizeof(x), poolset(x; device, kwargs...), Mid)
+        innerRef = poolset(x; device, kwargs...)
+        lock(MPIREF_REGISTRY) do reg
+            reg[Mid] = innerRef
+        end
+        return MPIRef(space.comm, space.rank, sizeof(x), innerRef, Mid)
     end
 end
 
 const DEADLOCK_DETECT = TaskLocalValue{Bool}(()->true)
 const DEADLOCK_WARN_PERIOD = TaskLocalValue{Float64}(()->10.0)
 const DEADLOCK_TIMEOUT_PERIOD = TaskLocalValue{Float64}(()->60.0)
+# When true, __wait_for_request spins without yield so remotecall sender completes before other tasks run.
+const REMOTECALL_SENDER_NO_YIELD = TaskLocalValue{Bool}(()->false)
 const RECV_WAITING = Base.Lockable(Dict{Tuple{MPI.Comm, Int, Int}, Base.Event}())
+
+# MPI_ANY_TAG + queue: pool of Irecv(ANY_SOURCE, ANY_TAG) and completion queue keyed by (comm, source, tag).
+const RECV_POOL_SIZE = 64
+const _RECV_POOL = Dict{MPI.Comm, Any}()  # comm -> RecvPoolState
+const _RECV_POOL_LOCK = ReentrantLock()
+
+# Completion queue: (comm, source, tag) -> list of received values (one waiter per key at a time).
+const _RECV_COMPLETION_QUEUE = Base.Lockable(Dict{Tuple{MPI.Comm, Int, Int}, Vector{Any}}())
 
 struct InplaceInfo
     type::DataType
@@ -385,6 +555,52 @@ struct InplaceSparseInfo
     nzval::Int
 end
 
+# MPI.Buffer uses Int32 for count; reject corrupt or oversized length to avoid InexactError.
+const MAX_SERIALIZED_RECV_LENGTH = Int64(typemax(Int32))
+
+# Per-slot state for the recv pool. Phase: :waiting_length | :waiting_data | :waiting_inplace_* | :idle (slot free).
+mutable struct RecvPoolSlot
+    phase::Symbol
+    comm::MPI.Comm
+    source::Int
+    tag::Int
+    len_buf::Vector{Int64}
+    req::Union{MPI.Request, Nothing}
+    data_buf::Vector{UInt8}
+    # Inplace: for InplaceInfo we store the array buffer; for InplaceSparseInfo we store (colptr, rowval, nzval) as we go.
+    inplace_info::Union{InplaceInfo, InplaceSparseInfo, Nothing}
+    inplace_bufs::Vector{Any}  # accumulated inplace arrays
+end
+
+mutable struct RecvPoolState
+    slots::Vector{RecvPoolSlot}
+    initialized::Bool
+end
+
+function _recv_pool_for_comm(comm::MPI.Comm)
+    lock(_RECV_POOL_LOCK) do
+        if !haskey(_RECV_POOL, comm)
+            _RECV_POOL[comm] = RecvPoolState(RecvPoolSlot[], false)
+        end
+        return _RECV_POOL[comm]
+    end
+end
+
+const _MPI_ANY_SOURCE = Int(MPI.API.MPI_ANY_SOURCE[])
+const _MPI_ANY_TAG = Int(MPI.API.MPI_ANY_TAG[])
+
+function _recv_pool_init!(pool::RecvPoolState, comm::MPI.Comm)
+    pool.initialized && return
+    rank = MPI.Comm_rank(comm)
+    for i in 1:RECV_POOL_SIZE
+        len_buf = Int64[0]
+        req = MPI.Irecv!(MPI.Buffer(len_buf), comm; source=_MPI_ANY_SOURCE, tag=_MPI_ANY_TAG)
+        slot = RecvPoolSlot(:waiting_length, comm, -1, -1, len_buf, req, UInt8[], nothing, Any[])
+        push!(pool.slots, slot)
+    end
+    pool.initialized = true
+end
+
 function supports_inplace_mpi(value)
     if value isa DenseArray && isbitstype(eltype(value))
         return true
@@ -394,74 +610,74 @@ function supports_inplace_mpi(value)
 end
 function recv_yield!(buffer, comm, src, tag)
     rank = MPI.Comm_rank(comm)
-    #Core.println("buffer recv: $buffer, type of buffer: $(typeof(buffer)), is in place? $(supports_inplace_mpi(buffer))")
     if !supports_inplace_mpi(buffer)
         return recv_yield(comm, src, tag), false
     end
-    #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Starting recv! from [$src]")
-
-    # Ensure no other receiver is waiting
-    our_event = Base.Event()
-    @label retry
-    other_event = lock(RECV_WAITING) do waiting
-        if haskey(waiting, (comm, src, tag))
-            waiting[(comm, src, tag)]
-        else
-            waiting[(comm, src, tag)] = our_event
-            nothing
-        end
-    end
-    if other_event !== nothing
-        #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Waiting for other receiver...")
-        wait(other_event)
-        @goto retry
-    end
-
-    buffer = recv_yield_inplace!(buffer, comm, rank, src, tag)
-
-    lock(RECV_WAITING) do waiting
-        delete!(waiting, (comm, src, tag))
-        notify(our_event)
-    end
-
+    # Inplace: sender uses InplaceInfo+array (length-prefix), pool assembles and queues the array; copy to user buffer.
+    value = recv_yield(comm, src, tag)
+    copy!(buffer, value)
     return buffer, true
-
 end
 
 function recv_yield(comm, src, tag)
     rank = MPI.Comm_rank(comm)
-    #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Starting recv from [$src]")
+    key = (comm, src, tag)
 
-    # Ensure no other receiver is waiting
+    # Check completion queue first (message may already have been received by the pool).
+    value = lock(_RECV_COMPLETION_QUEUE) do q
+        if haskey(q, key) && !isempty(q[key])
+            ref = popfirst!(q[key])
+            isempty(q[key]) && delete!(q, key)
+            return poolget(ref)
+        end
+        return nothing
+    end
+    if value !== nothing
+        return value
+    end
+
+    # Ensure no other receiver is waiting for this (comm, src, tag).
     our_event = Base.Event()
     @label retry
     other_event = lock(RECV_WAITING) do waiting
-        if haskey(waiting, (comm, src, tag))
-            waiting[(comm, src, tag)]
+        if haskey(waiting, key)
+            waiting[key]
         else
-            waiting[(comm, src, tag)] = our_event
+            waiting[key] = our_event
             nothing
         end
     end
     if other_event !== nothing
-        #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Waiting for other receiver...")
         wait(other_event)
         @goto retry
     end
-    #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Receiving...")
 
-    type = nothing
-    @label receive
-    value = recv_yield_serialized(comm, rank, src, tag)
-    if value isa InplaceInfo || value isa InplaceSparseInfo
-        value = recv_yield_inplace(value, comm, rank, src, tag)
+    # Loop: drain pool, check queue, service aliasing, deadlock detect, yield.
+    time_start = time_ns()
+    detect = DEADLOCK_DETECT[]
+    warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
+    timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
+    @label wait_loop
+    service_recv_pool(comm)
+    value = lock(_RECV_COMPLETION_QUEUE) do q
+        if haskey(q, key) && !isempty(q[key])
+            ref = popfirst!(q[key])
+            isempty(q[key]) && delete!(q, key)
+            return poolget(ref)
+        end
+        return nothing
     end
-
-    lock(RECV_WAITING) do waiting
-        delete!(waiting, (comm, src, tag))
-        notify(our_event)
+    if value !== nothing
+        lock(RECV_WAITING) do waiting
+            delete!(waiting, key)
+            notify(our_event)
+        end
+        return value
     end
-    return value
+    service_aliasing_requests(comm)
+    warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, rank, tag, "recv", src)
+    yield()
+    @goto wait_loop
 end
 
 function recv_yield_inplace!(array, comm, my_rank, their_rank, tag)
@@ -470,19 +686,17 @@ function recv_yield_inplace!(array, comm, my_rank, their_rank, tag)
     warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
     timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
 
+    req = MPI.Irecv!(MPI.Buffer(array), comm; source=their_rank, tag=tag)
     while true
-        (got, msg, stat) = MPI.Improbe(their_rank, tag, comm, MPI.Status)
-        if got
-            if MPI.Get_error(stat) != MPI.SUCCESS
-                error("recv_yield failed with error $(MPI.Get_error(stat))")
+        finish, status = MPI.Test(req, MPI.Status)
+        if finish
+            if MPI.Get_error(status) != MPI.SUCCESS
+                error("recv_yield failed with error $(MPI.Get_error(status))")
             end
-            count = MPI.Get_count(stat, UInt8)
-            @assert count == sizeof(array) "recv_yield_inplace: expected $(sizeof(array)) bytes, got $count"
-            buf = MPI.Buffer(array)
-            req = MPI.Imrecv!(buf, msg)
-            __wait_for_request(req, comm, my_rank, their_rank, tag, "recv_yield", "recv")
             return array
         end
+        service_recv_pool(comm)
+        service_aliasing_requests(comm)
         warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, my_rank, tag, "recv", their_rank)
         yield()
     end
@@ -506,30 +720,228 @@ function recv_yield_inplace(_value::InplaceSparseInfo, comm, my_rank, their_rank
     return SparseMatrixCSC{eltype(T), Int64}(_value.m, _value.n, colptr, rowval, nzval)
 end
 
+"""
+Drain the recv pool: Test each slot's request; when complete, advance the state machine
+(length -> data -> optional inplace -> ready). Push completed messages to the completion
+queue and notify waiters. Replenish slots with new Irecv(ANY_SOURCE, ANY_TAG) for length.
+Called from recv_yield's wait loop and from __wait_for_request (and recv_yield_inplace!).
+"""
+function service_recv_pool(comm::MPI.Comm)
+    pool = _recv_pool_for_comm(comm)
+    _recv_pool_init!(pool, comm)
+    rank = MPI.Comm_rank(comm)
+
+    for slot in pool.slots
+        slot.req === nothing && continue
+        done, status = MPI.Test(slot.req, MPI.Status)
+        if !done
+            continue
+        end
+        if MPI.Get_error(status) != MPI.SUCCESS
+            error("recv pool slot failed with error $(MPI.Get_error(status))")
+        end
+
+        if slot.phase == :waiting_length
+            slot.source = MPI.Get_source(status)
+            slot.tag = MPI.Get_tag(status)
+            count = slot.len_buf[1]
+            if count < 0 || count > MAX_SERIALIZED_RECV_LENGTH
+                error("recv pool: invalid or corrupt length $count (max $(MAX_SERIALIZED_RECV_LENGTH)); source=$(slot.source), tag=$(slot.tag)")
+            end
+            slot.data_buf = Array{UInt8}(undef, count)
+            slot.req = MPI.Irecv!(MPI.Buffer(slot.data_buf), comm; source=slot.source, tag=slot.tag)
+            slot.phase = :waiting_data
+            continue
+        end
+
+        if slot.phase == :waiting_data
+            value = MPI.deserialize(slot.data_buf)
+            if slot.tag == Int(ALIASING_REQUEST_TAG)
+                # Hand off to aliasing path (same as service_aliasing_requests).
+                (handle::MPIRef, dep_mod, response_tag::UInt32) = value
+                if handle.rank == rank
+                    inner_ref = handle.innerRef
+                    if inner_ref === nothing
+                        inner_ref = lock(MPIREF_REGISTRY) do reg
+                            get(reg, handle.id, nothing)
+                        end
+                    end
+                    if inner_ref !== nothing
+                        v = poolget(inner_ref)
+                        ainfo = aliasing(v, dep_mod)
+                        push!(_SAR_OUTBOX, (ainfo, comm, slot.source, response_tag))
+                    else
+                        push!(ALIASING_PENDING, (handle, dep_mod, response_tag, slot.source))
+                    end
+                end
+                _recv_pool_slot_reset!(slot, comm)
+                continue
+            end
+
+            if value isa InplaceInfo
+                T = value.type
+                @assert T <: Array && isbitstype(eltype(T))
+                arr = Array{eltype(T)}(undef, value.shape)
+                slot.inplace_info = value
+                slot.inplace_bufs = [arr]
+                slot.req = MPI.Irecv!(MPI.Buffer(arr), comm; source=slot.source, tag=slot.tag)
+                slot.phase = :waiting_inplace_dense
+                continue
+            end
+
+            if value isa InplaceSparseInfo
+                slot.inplace_info = value
+                colptr_buf = Vector{Int64}(undef, value.colptr)
+                slot.inplace_bufs = [colptr_buf]
+                slot.req = MPI.Irecv!(MPI.Buffer(colptr_buf), comm; source=slot.source, tag=slot.tag)
+                slot.phase = :waiting_inplace_colptr
+                continue
+            end
+
+            # Serialized value complete.
+            _recv_pool_push_and_reset!(slot, comm, value)
+            continue
+        end
+
+        if slot.phase == :waiting_inplace_dense
+            arr = slot.inplace_bufs[1]
+            _recv_pool_push_and_reset!(slot, comm, arr)
+            continue
+        end
+
+        if slot.phase == :waiting_inplace_colptr
+            sp = slot.inplace_info::InplaceSparseInfo
+            rowval_buf = Vector{Int64}(undef, sp.rowval)
+            push!(slot.inplace_bufs, rowval_buf)
+            slot.req = MPI.Irecv!(MPI.Buffer(rowval_buf), comm; source=slot.source, tag=slot.tag)
+            slot.phase = :waiting_inplace_rowval
+            continue
+        end
+
+        if slot.phase == :waiting_inplace_rowval
+            sp = slot.inplace_info::InplaceSparseInfo
+            nzval_buf = Vector{eltype(sp.type)}(undef, sp.nzval)
+            push!(slot.inplace_bufs, nzval_buf)
+            slot.req = MPI.Irecv!(MPI.Buffer(nzval_buf), comm; source=slot.source, tag=slot.tag)
+            slot.phase = :waiting_inplace_nzval
+            continue
+        end
+
+        if slot.phase == :waiting_inplace_nzval
+            sp = slot.inplace_info::InplaceSparseInfo
+            colptr = slot.inplace_bufs[1]::Vector{Int64}
+            rowval = slot.inplace_bufs[2]::Vector{Int64}
+            nzval = slot.inplace_bufs[3]
+            mat = SparseMatrixCSC{eltype(sp.type), Int64}(sp.m, sp.n, colptr, rowval, nzval)
+            _recv_pool_push_and_reset!(slot, comm, mat)
+            continue
+        end
+    end
+end
+
+function _recv_pool_slot_reset!(slot::RecvPoolSlot, comm::MPI.Comm)
+    slot.phase = :waiting_length
+    slot.source = -1
+    slot.tag = -1
+    slot.len_buf[1] = 0
+    slot.req = MPI.Irecv!(MPI.Buffer(slot.len_buf), comm; source=_MPI_ANY_SOURCE, tag=_MPI_ANY_TAG)
+    slot.data_buf = UInt8[]
+    slot.inplace_info = nothing
+    slot.inplace_bufs = Any[]
+end
+
+function _recv_pool_push_and_reset!(slot::RecvPoolSlot, comm::MPI.Comm, value::Any)
+    key = (comm, slot.source, slot.tag)
+    ref = poolset(value)
+    lock(_RECV_COMPLETION_QUEUE) do q
+        if !haskey(q, key)
+            q[key] = Any[]
+        end
+        push!(q[key], ref)
+    end
+    lock(RECV_WAITING) do waiting
+        if haskey(waiting, key)
+            notify(waiting[key])
+        end
+    end
+    _recv_pool_slot_reset!(slot, comm)
+end
+
 function recv_yield_serialized(comm, my_rank, their_rank, tag)
     time_start = time_ns()
     detect = DEADLOCK_DETECT[]
     warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
     timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
-
+    len_buf = Int64[0]
+    local req_len
+    try
+        req_len = MPI.Irecv!(MPI.Buffer(len_buf), comm; source=their_rank, tag=tag)
+    catch e
+        # #region agent log
+        try; open("/flare/dagger/fdadagger/.cursor/debug-852f70.log", "a") do io; println(io, "{\"sessionId\":\"852f70\",\"hypothesisId\":\"H15_mpi_err\",\"location\":\"mpi.jl:recv_ser:Irecv_len\",\"message\":\"Irecv! len threw\",\"data\":{\"rank\":$my_rank,\"tag\":$tag,\"src\":$their_rank,\"error\":\"$(sprint(showerror, e))\"},\"timestamp\":$(round(Int,time()*1000))}"); end; catch; end
+        # #endregion
+        rethrow()
+    end
     while true
-        (got, msg, stat) = MPI.Improbe(their_rank, tag, comm, MPI.Status)
-        if got
-            if MPI.Get_error(stat) != MPI.SUCCESS
-                error("recv_yield failed with error $(MPI.Get_error(stat))")
+        local finish, status
+        try
+            finish, status = MPI.Test(req_len, MPI.Status)
+        catch e
+            # #region agent log
+            try; open("/flare/dagger/fdadagger/.cursor/debug-852f70.log", "a") do io; println(io, "{\"sessionId\":\"852f70\",\"hypothesisId\":\"H15_mpi_err\",\"location\":\"mpi.jl:recv_ser:Test_len\",\"message\":\"Test len threw\",\"data\":{\"rank\":$my_rank,\"tag\":$tag,\"src\":$their_rank,\"error\":\"$(sprint(showerror, e))\"},\"timestamp\":$(round(Int,time()*1000))}"); end; catch; end
+            # #endregion
+            rethrow()
+        end
+        if finish
+            if MPI.Get_error(status) != MPI.SUCCESS
+                error("recv_yield_serialized len failed with error $(MPI.Get_error(status))")
             end
-            count = MPI.Get_count(stat, UInt8)
-            buf = Array{UInt8}(undef, count)
-            req = MPI.Imrecv!(MPI.Buffer(buf), msg)
-            __wait_for_request(req, comm, my_rank, their_rank, tag, "recv_yield", "recv")
+            break
+        end
+        service_aliasing_requests(comm)
+        warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, my_rank, tag, "recv", their_rank)
+        yield()
+    end
+
+    count = len_buf[1]
+    if count < 0 || count > MAX_SERIALIZED_RECV_LENGTH
+        error("recv_yield_serialized: invalid or corrupt length $count (max $(MAX_SERIALIZED_RECV_LENGTH)); src=$their_rank, tag=$tag")
+    end
+    buf = Array{UInt8}(undef, count)
+    local req_data
+    try
+        req_data = MPI.Irecv!(MPI.Buffer(buf), comm; source=their_rank, tag=tag)
+    catch e
+        # #region agent log
+        try; open("/flare/dagger/fdadagger/.cursor/debug-852f70.log", "a") do io; println(io, "{\"sessionId\":\"852f70\",\"hypothesisId\":\"H15_mpi_err\",\"location\":\"mpi.jl:recv_ser:Irecv_data\",\"message\":\"Irecv! data threw\",\"data\":{\"rank\":$my_rank,\"tag\":$tag,\"src\":$their_rank,\"count\":$count,\"error\":\"$(sprint(showerror, e))\"},\"timestamp\":$(round(Int,time()*1000))}"); end; catch; end
+        # #endregion
+        rethrow()
+    end
+    while true
+        local finish, status
+        try
+            finish, status = MPI.Test(req_data, MPI.Status)
+        catch e
+            # #region agent log
+            try; open("/flare/dagger/fdadagger/.cursor/debug-852f70.log", "a") do io; println(io, "{\"sessionId\":\"852f70\",\"hypothesisId\":\"H15_mpi_err\",\"location\":\"mpi.jl:recv_ser:Test_data\",\"message\":\"Test data threw\",\"data\":{\"rank\":$my_rank,\"tag\":$tag,\"src\":$their_rank,\"error\":\"$(sprint(showerror, e))\"},\"timestamp\":$(round(Int,time()*1000))}"); end; catch; end
+            # #endregion
+            rethrow()
+        end
+        if finish
+            if MPI.Get_error(status) != MPI.SUCCESS
+                error("recv_yield_serialized data failed with error $(MPI.Get_error(status))")
+            end
             return MPI.deserialize(buf)
         end
+        service_aliasing_requests(comm)
         warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, my_rank, tag, "recv", their_rank)
         yield()
     end
 end
 
 const SEEN_TAGS = Dict{Int32, Type}()
+# Serialize nonblocking sends so only one Isend+wait is in flight at a time; avoids MPICH internal_Isend segfault with many concurrent requests.
+const SEND_SERIALIZE_LOCK = ReentrantLock()
 send_yield!(value, comm, dest, tag; check_seen::Bool=true) =
     _send_yield(value, comm, dest, tag; check_seen, inplace=true)
 send_yield(value, comm, dest, tag; check_seen::Bool=true) =
@@ -543,8 +955,9 @@ function _send_yield(value, comm, dest, tag; check_seen::Bool=true, inplace::Boo
     if check_seen
         SEEN_TAGS[tag] = typeof(value)
     end
-    #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Starting send to [$dest]: $(typeof(value)), is support inplace? $(supports_inplace_mpi(value))")
+    # Inplace sends use InplaceInfo+array so the recv pool (ANY_TAG) can receive them; never send raw array only.
     if inplace && supports_inplace_mpi(value)
+        send_yield_serialized(InplaceInfo(typeof(value), size(value)), comm, rank, dest, tag)
         send_yield_inplace(value, comm, rank, dest, tag)
     else
         send_yield_serialized(value, comm, rank, dest, tag)
@@ -553,8 +966,20 @@ end
 
 function send_yield_inplace(value, comm, my_rank, their_rank, tag)
     @opcounter :send_yield_inplace
-    req = MPI.Isend(value, comm; dest=their_rank, tag)
-    __wait_for_request(req, comm, my_rank, their_rank, tag, "send_yield", "send")
+    lock(SEND_SERIALIZE_LOCK) do
+        GC.@preserve value begin
+            local req
+            try
+                req = MPI.Isend(value, comm; dest=their_rank, tag)
+            catch e
+                # #region agent log
+                try; open("/flare/dagger/fdadagger/.cursor/debug-852f70.log", "a") do io; println(io, "{\"sessionId\":\"852f70\",\"hypothesisId\":\"H15_mpi_err\",\"location\":\"mpi.jl:send_inplace:Isend\",\"message\":\"Isend inplace threw\",\"data\":{\"rank\":$my_rank,\"tag\":$tag,\"dest\":$their_rank,\"error\":\"$(sprint(showerror, e))\"},\"timestamp\":$(round(Int,time()*1000))}"); end; catch; end
+                # #endregion
+                rethrow()
+            end
+            __wait_for_request(req, comm, my_rank, their_rank, tag, "send_yield", "send")
+        end
+    end
 end
 
 function send_yield_serialized(value, comm, my_rank, their_rank, tag)
@@ -568,8 +993,59 @@ function send_yield_serialized(value, comm, my_rank, their_rank, tag)
         send_yield_inplace(value.rowval, comm, my_rank, their_rank, tag)
         send_yield_inplace(value.nzval,  comm, my_rank, their_rank, tag)
     else
-        req = MPI.isend(value, comm; dest=their_rank, tag)
-        __wait_for_request(req, comm, my_rank, their_rank, tag, "send_yield", "send")
+        buf = MPI.serialize(value)
+        n = length(buf)
+        lock(SEND_SERIALIZE_LOCK) do
+            # Non-GC buffers so MPICH gets a stable pointer. Still Isend + yielding wait (no blocking).
+            ptr_len = Base.Libc.malloc(8)
+            ptr_len === C_NULL && throw(OutOfMemoryError())
+            try
+                arr_len = Base.unsafe_wrap(Array, Ptr{Int64}(ptr_len), (1,); own=false)
+                arr_len[1] = n
+                req_len = MPI.Isend(arr_len, comm; dest=their_rank, tag)
+                __wait_for_request(req_len, comm, my_rank, their_rank, tag, "send_yield", "send")
+            finally
+                Base.Libc.free(ptr_len)
+            end
+            ptr = Base.Libc.malloc(n)
+            ptr === C_NULL && throw(OutOfMemoryError())
+            try
+                arr = Base.unsafe_wrap(Array, Ptr{UInt8}(ptr), (n,); own=false)
+                copyto!(arr, buf)
+                req_data = MPI.Isend(arr, comm; dest=their_rank, tag)
+                __wait_for_request(req_data, comm, my_rank, their_rank, tag, "send_yield", "send")
+            finally
+                Base.Libc.free(ptr)
+            end
+        end
+    end
+end
+
+function _send_yield_raw(value, comm, dest, tag)
+    rank = MPI.Comm_rank(comm)
+    buf = MPI.serialize(value)
+    n = length(buf)
+    lock(SEND_SERIALIZE_LOCK) do
+        ptr_len = Base.Libc.malloc(8)
+        ptr_len === C_NULL && throw(OutOfMemoryError())
+        try
+            arr_len = Base.unsafe_wrap(Array, Ptr{Int64}(ptr_len), (1,); own=false)
+            arr_len[1] = n
+            req_len = MPI.Isend(arr_len, comm; dest, tag)
+            __wait_for_request(req_len, comm, rank, dest, tag, "send_yield_raw_len", "send")
+        finally
+            Base.Libc.free(ptr_len)
+        end
+        ptr = Base.Libc.malloc(n)
+        ptr === C_NULL && throw(OutOfMemoryError())
+        try
+            arr = Base.unsafe_wrap(Array, Ptr{UInt8}(ptr), (n,); own=false)
+            copyto!(arr, buf)
+            req_data = MPI.Isend(arr, comm; dest, tag)
+            __wait_for_request(req_data, comm, rank, dest, tag, "send_yield_raw_data", "send")
+        finally
+            Base.Libc.free(ptr)
+        end
     end
 end
 
@@ -579,13 +1055,30 @@ function __wait_for_request(req, comm, my_rank, their_rank, tag, fn::String, kin
     warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
     timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
     while true
-        finish, status = MPI.Test(req, MPI.Status)
+        local finish, status
+        try
+            finish, status = MPI.Test(req, MPI.Status)
+        catch e
+            # #region agent log
+            try; open("/flare/dagger/fdadagger/.cursor/debug-852f70.log", "a") do io; println(io, "{\"sessionId\":\"852f70\",\"hypothesisId\":\"H15_mpi_err\",\"location\":\"mpi.jl:__wait_for_request:Test\",\"message\":\"MPI.Test threw\",\"data\":{\"rank\":$my_rank,\"tag\":$tag,\"fn\":\"$fn\",\"kind\":\"$kind\",\"dest\":$their_rank,\"error\":\"$(sprint(showerror, e))\"},\"timestamp\":$(round(Int,time()*1000))}"); end; catch; end
+            # #endregion
+            rethrow()
+        end
         if finish
             if MPI.Get_error(status) != MPI.SUCCESS
                 error("$fn failed with error $(MPI.Get_error(status))")
             end
             return
         end
+        if REMOTECALL_SENDER_NO_YIELD[]
+            # Sender in remotecall_endpoint: spin until send completes so we don't yield to other tasks.
+            if detect && (time_ns() - time_start) > timeout_period
+                error("[rank $my_rank][tag $tag] Hit hang on $kind (dest: $their_rank) [remotecall sender spin]")
+            end
+            continue
+        end
+        service_recv_pool(comm)
+        service_aliasing_requests(comm)
         warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, my_rank, tag, kind, their_rank)
         yield()
     end
@@ -623,10 +1116,13 @@ end
 function mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, rank, tag, kind, srcdest)
     time_elapsed = (time_ns() - time_start)
     if detect && time_elapsed > warn_period
-        @warn "[rank $rank][tag $tag] Hit probable hang on $kind (dest: $srcdest)"
+        @warn "[rank $rank][tag $tag] Hit probable hang on $kind (dest: $srcdest) [$(round(time_elapsed/1e9, digits=1))s]"
         return typemax(UInt64)
     end
     if detect && time_elapsed > timeout_period
+        # #region agent log
+        try; open("/flare/dagger/fdadagger/.cursor/debug-852f70.log", "a") do io; println(io, "{\"sessionId\":\"852f70\",\"hypothesisId\":\"H11_timeout\",\"location\":\"mpi.jl:deadlock_detect:TIMEOUT\",\"message\":\"deadlock TIMEOUT - will throw\",\"data\":{\"rank\":$rank,\"tag\":$tag,\"kind\":\"$kind\",\"srcdest\":$srcdest,\"elapsed_s\":$(time_elapsed/1e9)},\"timestamp\":$(round(Int,time()*1000))}"); end; catch; end
+        # #endregion
         error("[rank $rank][tag $tag] Hit hang on $kind (dest: $srcdest)")
     end
     return warn_period
@@ -636,6 +1132,11 @@ end
 WeakChunk(c::Chunk{T,H}) where {T,H<:MPIRef} = WeakChunk(c.handle.rank, c.handle.id.id, WeakRef(c))
 
 function MemPool.poolget(ref::MPIRef; uniform::Bool=false)
+    if !uniform && ref.rank != MPI.Comm_rank(ref.comm)
+        # #region agent log
+        _r = MPI.Comm_rank(ref.comm); try; open("/flare/dagger/fdadagger/.cursor/debug-852f70.log", "a") do io; println(io, "{\"sessionId\":\"852f70\",\"hypothesisId\":\"H12_poolget\",\"location\":\"mpi.jl:poolget\",\"message\":\"MPIRef rank mismatch about to assert\",\"data\":{\"local_rank\":$_r,\"ref_rank\":$(ref.rank),\"ref_id\":\"$(ref.id)\",\"uniform\":$uniform,\"backtrace\":\"$(replace(sprint(Base.show_backtrace, backtrace()), '\"'=>'\'', '\n'=>' '))\"},\"timestamp\":$(round(Int,time()*1000))}"); end; catch; end
+        # #endregion
+    end
     @assert uniform || ref.rank == MPI.Comm_rank(ref.comm) "MPIRef rank mismatch: $(ref.rank) != $(MPI.Comm_rank(ref.comm))"
     if uniform
         tag = to_tag()
@@ -758,7 +1259,10 @@ function remotecall_endpoint(f, accel::Dagger.MPIAcceleration, from_proc, to_pro
     return with(MPI_UID=>task.uid, MPI_UNIFORM=>true) do
         @assert data isa Chunk "Expected Chunk, got $(typeof(data))"
         space = memory_space(data)
-        tag = to_tag()
+        tag = remotecall_tag(accel.comm, task.uid, from_proc.rank, to_proc.rank, data.handle.id)
+        # #region agent log
+        if loc_rank <= 1 && tag >= 598 && tag <= 612; try; open("/flare/dagger/fdadagger/.cursor/debug-852f70.log", "a") do io; println(io, "{\"sessionId\":\"852f70\",\"hypothesisId\":\"H16_tag_op\",\"location\":\"mpi.jl:remotecall_endpoint\",\"message\":\"remotecall tag assigned\",\"data\":{\"rank\":$loc_rank,\"tag\":$tag,\"from_rank\":$(from_proc.rank),\"to_rank\":$(to_proc.rank),\"space_rank\":$(space.rank),\"task_uid\":$(task.uid),\"task_id\":$(task.id)},\"timestamp\":$(round(Int,time()*1000))}"); end; catch; end; end
+        # #endregion
         if space.rank != from_proc.rank
             # If the data is already where it needs to be
             @assert space.rank == to_proc.rank
@@ -784,7 +1288,12 @@ function remotecall_endpoint(f, accel::Dagger.MPIAcceleration, from_proc, to_pro
             if loc_rank == from_proc.rank
                 value = poolget(data.handle)
                 data_moved = move(from_proc.innerProc, to_proc.innerProc, value)
-                Dagger.send_yield(data_moved, accel.comm, to_proc.rank, tag)
+                try
+                    REMOTECALL_SENDER_NO_YIELD[] = true
+                    Dagger.send_yield(data_moved, accel.comm, to_proc.rank, tag)
+                finally
+                    REMOTECALL_SENDER_NO_YIELD[] = false
+                end
                 # FIXME: This is wrong to take typeof(data_moved), because the type may change
                 return tochunk(nothing, to_proc, to_space; type=typeof(data_moved))
             elseif loc_rank == to_proc.rank
@@ -831,33 +1340,39 @@ function move(src::MPIProcessor, dst::MPIProcessor, x::Chunk)
     end
 end
 
-#FIXME:try to think of a better move! scheme
-function execute!(proc::MPIProcessor, world::UInt64, f, args...; kwargs...)
+_precise_typeof(x) = typeof(x)
+_precise_typeof(::Type{T}) where {T} = Type{T}
+
+function execute!(proc::MPIProcessor, f, args...; kwargs...)
     local_rank = MPI.Comm_rank(proc.comm)
     islocal = local_rank == proc.rank
     inplace_move = f === move!
     result = nothing
-    tag_space = to_tag()
+
     if islocal || inplace_move
-        result = execute!(proc.innerProc, world, f, args...; kwargs...)
+        result = execute!(proc.innerProc, f, args...; kwargs...)
     end
+
     if inplace_move
         space = memory_space(nothing, proc)::MPIMemorySpace
         return tochunk(nothing, proc, space)
+    end
+
+    tag = to_tag()
+    # #region agent log
+    if local_rank <= 1 && tag >= 598 && tag <= 612; try; open("/flare/dagger/fdadagger/.cursor/debug-852f70.log", "a") do io; println(io, "{\"sessionId\":\"852f70\",\"hypothesisId\":\"H16_tag_op\",\"location\":\"mpi.jl:execute!\",\"message\":\"execute! tag assigned\",\"data\":{\"rank\":$local_rank,\"tag\":$tag,\"proc_rank\":$(proc.rank),\"islocal\":$islocal,\"f\":\"$(nameof(f))\"},\"timestamp\":$(round(Int,time()*1000))}"); end; catch; end; end
+    # #endregion
+    if islocal
+        T = typeof(result)
+        space = memory_space(result, proc)::MPIMemorySpace
+        T_space = (T, space.innerSpace)
+        @opcounter :execute_bcast_send_yield
+        bcast_send_yield(T_space, proc.comm, proc.rank, tag)
+        return tochunk(result, proc, space)
     else
-        # Handle commun1ication ourselves
-        if islocal
-            T = typeof(result)
-            space = memory_space(result, proc)::MPIMemorySpace
-            T_space = (T, space.innerSpace)
-            @opcounter :execute_bcast_send_yield
-            bcast_send_yield(T_space, proc.comm, proc.rank, tag)
-            return tochunk(result, proc, space)
-        else
-            T, innerSpace = recv_yield(proc.comm, proc.rank, tag)
-            space = MPIMemorySpace(innerSpace, proc.comm, proc.rank)
-            return tochunk(nothing, proc, space; type=T)
-        end
+        T, innerSpace = recv_yield(proc.comm, proc.rank, tag)
+        space = MPIMemorySpace(innerSpace, proc.comm, proc.rank)
+        return tochunk(nothing, proc, space; type=T)
     end
 end
 
@@ -867,6 +1382,9 @@ function initialize_acceleration!(a::MPIAcceleration)
     if !MPI.Initialized()
         MPI.Init(;threadlevel=:multiple)
     end
+    # #region agent log
+    _r = MPI.Comm_rank(a.comm); _tl = MPI.Query_thread(); if _r <= 1; try; open("/flare/dagger/fdadagger/.cursor/debug-852f70.log", "a") do io; println(io, "{\"sessionId\":\"852f70\",\"hypothesisId\":\"H2_init\",\"location\":\"mpi.jl:initialize_acceleration!\",\"message\":\"MPI init\",\"data\":{\"rank\":$_r,\"nthreads\":$(Threads.nthreads()),\"mpi_thread_level\":$_tl,\"tag_ub\":$(MPI.tag_ub())},\"timestamp\":$(round(Int,time()*1000))}"); end; catch; end; end
+    # #endregion
     ctx = Dagger.Sch.eager_context()
     sz = MPI.Comm_size(a.comm)
     for i in 0:(sz-1)

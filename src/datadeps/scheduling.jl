@@ -1,4 +1,9 @@
+export DataDepsScheduler, RoundRobinScheduler, NaiveScheduler, UltraScheduler
+
 abstract type DataDepsScheduler end
+
+# Set by distribute_tasks! before the task loop for UltraScheduler
+const DATADEPS_EXEC_SPACES = Ref{Union{Vector{<:MemorySpace},Nothing}}(nothing)
 
 mutable struct RoundRobinScheduler <: DataDepsScheduler
     proc_idx::Int
@@ -79,7 +84,7 @@ function datadeps_schedule_task(sched::UltraScheduler, state::DataDepsState, all
     end
 
     # FIXME: Copy deps are computed eagerly
-    deps = @something(spec.options.syncdeps, Set{ThunkSyncdep}())
+    deps = @something(spec.options.syncdeps, Set{Any}())
 
     # Find latest time-to-completion of all syncdeps
     deps_completed = UInt64(0)
@@ -90,6 +95,8 @@ function datadeps_schedule_task(sched::UltraScheduler, state::DataDepsState, all
 
     # Find latest time-to-completion of each memory space
     # FIXME: Figure out space completions based on optimal packing
+    # exec_spaces is set by distribute_tasks! before the task loop
+    exec_spaces = something(DATADEPS_EXEC_SPACES[], unique(vcat(map(proc->collect(memory_spaces(proc)), all_procs)...)))
     spaces_completed = Dict{MemorySpace,UInt64}()
     for space in exec_spaces
         completed = UInt64(0)
