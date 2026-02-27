@@ -563,7 +563,7 @@ end
             if haskey(state.errored, task)
                 # An error was eagerly propagated to this task
                 @dagdebug task :schedule "Task received upstream error, finishing"
-                finish_failed!(state, task)
+                set_failed!(state, task)
             else
                 # This shouldn't have happened
                 @dagdebug task :schedule "Scheduling inconsistency: Task being scheduled is already cached!"
@@ -598,8 +598,7 @@ end
                           @something(options.result_scope, AnyScope()))
         if scope isa InvalidScope
             ex = SchedulingException("compute_scope and result_scope are not compatible: $(scope.x), $(scope.y)")
-            store_result!(state, task, ex; error=true)
-            finish_failed!(state, task)
+            set_failed!(state, task; ex)
             @goto pop_task
         end
         for arg in task.inputs
@@ -615,8 +614,7 @@ end
             scope = constrain(scope, chunk.scope)
             if scope isa InvalidScope
                 ex = SchedulingException("Current scope and argument Chunk scope are not compatible: $(scope.x), $(scope.y)")
-                store_result!(state, task, ex; error=true)
-                finish_failed!(state, task)
+                set_failed!(state, task; ex)
                 @goto pop_task
             end
         end
@@ -677,8 +675,7 @@ end
         end
 
         ex = SchedulingException("No processors available, try widening scope")
-        store_result!(state, task, ex; error=true)
-        finish_failed!(state, task)
+        set_failed!(state, task; ex)
         @dagdebug task :schedule "No processors available, skipping"
         sorted_procs_cleanup()
         costs_cleanup()
@@ -750,7 +747,7 @@ function finish_task!(ctx, state, node, thunk_failed)
     pop!(state.running, node)
     delete!(state.running_on, node)
     if thunk_failed
-        set_failed!(state, node)
+        set_failed!(state, node; ex=load_result(state, node))
     end
     schedule_dependents!(state, node, thunk_failed)
     fill_registered_futures!(state, node, thunk_failed)

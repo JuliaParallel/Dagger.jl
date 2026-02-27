@@ -62,7 +62,7 @@ function search_and_update_ipiv!(ipiv_chunk::AbstractVector{Int}, info::Ref{Int}
                                   offdiag_blocks::Vararg{AbstractMatrix{T}}) where T
     # Search diagonal block column p (rows p:end)
     diag_col = view(diag_block, p:min(mb, m-(k-1)*mb), p:p)
-    max_idx = LinearAlgebra.BLAS.iamax(diag_col[:])
+    max_idx = move(task_processor(), LinearAlgebra.BLAS.iamax)(diag_col[:])
     best_piv_idx = (p - 1) + max_idx
     best_piv_val = diag_col[max_idx]
     best_block = 1
@@ -70,7 +70,7 @@ function search_and_update_ipiv!(ipiv_chunk::AbstractVector{Int}, info::Ref{Int}
     # Search off-diagonal block columns
     for (bi, blk) in enumerate(offdiag_blocks)
         col = view(blk, :, p:p)
-        idx = LinearAlgebra.BLAS.iamax(col[:])
+        idx = move(task_processor(), LinearAlgebra.BLAS.iamax)(col[:])
         val = col[idx]
         abs_best = best_piv_val isa Real ? abs(best_piv_val) : abs(real(best_piv_val)) + abs(imag(best_piv_val))
         abs_val = val isa Real ? abs(val) : abs(real(val)) + abs(imag(val))
@@ -100,48 +100,29 @@ function swaprows_panel!(A::AbstractMatrix{T}, M::AbstractMatrix{T}, ipiv_chunk:
     end
 end
 
-@static if !isdefined(LinearAlgebra.BLAS, :geru!)
-    for elty in (:Float64, :Float32)
-        @eval begin
-            geru!(α::$elty, x::AbstractVector{$elty}, y::AbstractVector{$elty}, A::AbstractMatrix{$elty}) =
-                LinearAlgebra.BLAS.ger!(α, x, y, A)
-        end
-    end
-    for (fname, elty) in ((:zgeru_,:ComplexF64), (:cgeru_,:ComplexF32))
-        @eval begin
-            function geru!(α::$elty, x::AbstractVector{$elty}, y::AbstractVector{$elty}, A::AbstractMatrix{$elty})
-                Base.require_one_based_indexing(A, x, y)
-                m, n = size(A)
-                if m != length(x) || n != length(y)
-                    throw(DimensionMismatch(lazy"A has size ($m,$n), x has length $(length(x)), y has length $(length(y))"))
-                end
-                px, stx = LinearAlgebra.BLAS.vec_pointer_stride(x, ArgumentError("input vector with 0 stride is not allowed"))
-                py, sty = LinearAlgebra.BLAS.vec_pointer_stride(y, ArgumentError("input vector with 0 stride is not allowed"))
-                GC.@preserve x y ccall((LinearAlgebra.BLAS.@blasfunc($fname), LinearAlgebra.BLAS.libblas), Cvoid,
-                    (Ref{Int64}, Ref{Int64}, Ref{$elty}, Ptr{$elty},
-                     Ref{Int64}, Ptr{$elty}, Ref{Int64}, Ptr{$elty},
-                     Ref{Int64}),
-                     m, n, α, px, stx, py, sty, A, max(1,stride(A,2)))
-                A
-            end
-        end
-    end
-else
-    geru! = LinearAlgebra.BLAS.geru!
+@kernel function _geru_kernel!(alpha, x, y, A)
+    i, j = @index(Global, NTuple)
+    @inbounds A[i, j] = A[i, j] + alpha * x[i] * y[j]
+end
+
+function geru!(α::T, x::AbstractVector{T}, y::AbstractVector{T}, A::AbstractMatrix{T}) where T
+    isempty(A) && return A
+    Kernel(_geru_kernel!)(α, x, y, A; ndrange=size(A))
+    return A
 end
 
 # Update panel on the diagonal block (rows p+1:end). Receives the full block.
 function update_panel_diag!(A::AbstractMatrix{T}, p::Int, row_end::Int) where T
     M = view(A, p+1:row_end, :)
     Acinv = one(T) / A[p,p]
-    LinearAlgebra.BLAS.scal!(Acinv, view(M, :, p))
+    view(M, :, p) .= Acinv .* view(M, :, p)
     geru!(-one(T), view(M, :, p), view(A, p, p+1:size(A,2)), view(M, :, p+1:size(M,2)))
 end
 
 # Update panel on an off-diagonal block. Receives full Chunks.
 function update_panel_offdiag!(M::AbstractMatrix{T}, A::AbstractMatrix{T}, p::Int) where T
     Acinv = one(T) / A[p,p]
-    LinearAlgebra.BLAS.scal!(Acinv, view(M, :, p))
+    view(M, :, p) .= Acinv .* view(M, :, p)
     geru!(-one(T), view(M, :, p), view(A, p, p+1:size(A,2)), view(M, :, p+1:size(M,2)))
 end
 
