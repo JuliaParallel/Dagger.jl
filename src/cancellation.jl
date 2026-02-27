@@ -99,8 +99,7 @@ function _cancel!(state, tid, force, graceful, halt_sch)
         tid !== nothing && task.id != tid && continue
         @dagdebug tid :cancel "Cancelling ready task"
         ex = DTaskFailedException(task, task, InterruptException())
-        Sch.store_result!(state, task, ex; error=true)
-        Sch.finish_failed!(state, task, task)
+        Sch.set_failed!(state, task; ex)
     end
     if tid === nothing
         empty!(state.ready)
@@ -114,8 +113,7 @@ function _cancel!(state, tid, force, graceful, halt_sch)
         tid !== nothing && task.id != tid && continue
         @dagdebug tid :cancel "Cancelling waiting task"
         ex = DTaskFailedException(task, task, InterruptException())
-        Sch.store_result!(state, task, ex; error=true)
-        Sch.finish_failed!(state, task, task)
+        Sch.set_failed!(state, task; ex)
     end
     if tid === nothing
         empty!(state.waiting)
