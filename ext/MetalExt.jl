@@ -52,6 +52,11 @@ function Dagger.aliasing(x::MtlArray{T}) where T
     return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
 end
 
+function Dagger.unsafe_free!(x::MtlArray)
+    Metal.unsafe_free!(x)
+    return
+end
+
 Dagger.memory_spaces(proc::MtlArrayDeviceProc) = Set([MetalVRAMMemorySpace(proc.owner, proc.device_id)])
 Dagger.processors(space::MetalVRAMMemorySpace) = Set([MtlArrayDeviceProc(space.owner, space.device_id)])
 

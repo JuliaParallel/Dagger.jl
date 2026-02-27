@@ -57,11 +57,8 @@ function Dagger.aliasing(x::CuArray{T}) where T
 end
 
 function Dagger.unsafe_free!(x::CuArray)
-    ctx_idx = findfirst(==(context(x)), CONTEXTS)
-    @assert ctx_idx !== nothing
-    with_context(ctx_idx) do
-        CUDA.unsafe_free!(x)
-    end
+    CUDA.unsafe_free!(x)
+    return
 end
 
 Dagger.memory_spaces(proc::CuArrayDeviceProc) = Set([CUDAVRAMMemorySpace(proc.owner, proc.device, proc.device_uuid)])
