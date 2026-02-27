@@ -268,11 +268,14 @@ Dagger.move(from_proc::CPUProc, to_proc::ROCArrayDeviceProc, x::Chunk{T}) where 
 
 # Adapt BLAS/LAPACK functions
 import LinearAlgebra: BLAS, LAPACK
+_keep_blas_functions = Set(["iamax"])
 for lib in [BLAS, LAPACK]
     for name in names(lib; all=true)
         name == nameof(lib) && continue
         startswith(string(name), '#') && continue
-        endswith(string(name), '!') || continue
+        if !endswith(string(name), '!') && !any(endswith(string(name), func) for func in _keep_blas_functions)
+            continue
+        end
 
         for roclib in [rocBLAS, rocSOLVER]
             if name in names(roclib; all=true)
