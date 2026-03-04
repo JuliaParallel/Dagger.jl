@@ -70,11 +70,11 @@ function partition(p::AbstractBlocks, dom::ArrayDomain)
         map(_cumlength, map(length, indexes(dom)), p.blocksize))
 end
 
-function allocate_array(f, ::Type{T}, idx, sz::NTuple{N,Int})::Array{T,N} where {T,N}
+function allocate_array(f, T, idx, sz)
     new_f = allocate_array_func(task_processor(), f)
     return new_f(idx, T, sz)
 end
-function allocate_array(f, ::Type{T}, sz::NTuple{N,Int})::Array{T,N} where {T,N}
+function allocate_array(f, T, sz)
     new_f = allocate_array_func(task_processor(), f)
     return new_f(T, sz)
 end
@@ -189,15 +189,8 @@ function Base.view(A::AbstractArray{T,N}, p::Blocks{N}; space=default_memory_spa
     d = ArrayDomain(Base.index_shape(A))
     dc = partition(p, d)
     # N.B. We use `tochunk` because we only want to take the view locally, and
-    # taking views should be very fast.
-    # Per-chunk space for DArray: use each chunk's owner so tochunk on owner uses
-    # local_rank == space.rank and registers refs correctly (fixes MPI aliasing).
-    if A isa DArray && size(A.chunks) == size(dc)
-        chunks = [@with(MPI_UID => eager_next_id(), tochunk(view(A, x.indexes...),
-            (c = A.chunks[I]; c isa Chunk ? memory_space(c) : space))) for (I, x) in pairs(IndexCartesian(), dc)]
-    else
-        chunks = [@with(MPI_UID => eager_next_id(), tochunk(view(A, x.indexes...), space)) for x in dc]
-    end
+    # taking views should be very fast
+    chunks = [@with(MPI_UID => eager_next_id(), tochunk(view(A, x.indexes...), space)) for x in dc]
     return DArray(T, d, dc, chunks, p)
 end
 Base.view(A::AbstractArray, ::AutoBlocks) =

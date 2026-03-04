@@ -15,7 +15,7 @@ import Base: @invokelatest
 
 import ..Dagger
 import ..Dagger: Context, Processor, SchedulerOptions, Options, Thunk, WeakThunk, ThunkFuture, ThunkID, DTaskFailedException, Chunk, WeakChunk, OSProc, AnyScope, DefaultScope, InvalidScope, LockedObject, Argument, Signature
-import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak_checked, wrap_weak, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, default_enabled, processor, get_processors, get_parent, root_worker_id, execute!, rmprocs!, task_processor, constrain, cputhreadtime, maybe_take_or_alloc!
+import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak_checked, wrap_weak, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, default_enabled, processor, get_processors, get_parent, root_worker_id, execute!, rmprocs!, task_processor, constrain, cputhreadtime, maybe_take_or_alloc!, is_local_processor, fire_order_key
 import ..Dagger: @dagdebug, @safe_lock_spin1, @maybelog, @take_or_alloc!
 import DataStructures: PriorityQueue, enqueue!, dequeue_pair!, peek
 
@@ -685,10 +685,12 @@ end
         costs_cleanup()
         @goto pop_task
 
-        # Fire all newly-scheduled tasks
+        # Fire all newly-scheduled tasks (owner/local first, then by fire_order_key to avoid MPI execute! deadlock)
         @label fire_tasks
-        for (task_loc, task_spec) in to_fire
-            fire_tasks!(ctx, task_loc, task_spec, state)
+        task_locs = collect(keys(to_fire))
+        sort!(task_locs; by=loc -> (is_local_processor(loc.proc) ? 0 : 1, fire_order_key(loc.proc)))
+        for task_loc in task_locs
+            fire_tasks!(ctx, task_loc, to_fire[task_loc], state)
         end
         to_fire_cleanup()
 

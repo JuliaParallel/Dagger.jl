@@ -32,14 +32,23 @@ aliasing(x::ChunkView) =
 memory_space(x::ChunkView) = memory_space(x.chunk)
 isremotehandle(x::ChunkView) = true
 
-function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, slice::ChunkView)
-    to_w = root_worker_id(to_proc)
-    p_chunk = move_rewrap(cache, from_proc, to_proc, from_space, to_space, slice.chunk)
+# This definition is here because it's so similar to ChunkView
+function move_rewrap(from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, v::SubArray)
+    p_chunk = aliased_object!(parent(v)) do p_chunk
+        return remotecall_endpoint(identity, current_acceleration(), from_proc, to_proc, from_space, to_space, p_chunk)
+    end
+    inds = parentindices(v)
+    return remotecall_endpoint(current_acceleration(), from_proc, to_proc, from_space, to_space, p_chunk) do p_new
+        return view(p_new, inds...)
+    end
+end
+function move_rewrap(from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, slice::ChunkView)
+    p_chunk = aliased_object!(slice.chunk) do p_chunk
+        return remotecall_endpoint(identity, current_acceleration(), from_proc, to_proc, from_space, to_space, p_chunk)
+    end
     inds = slice.slices
-    return remotecall_fetch(to_w, from_proc, to_proc, from_space, to_space, p_chunk, inds) do from_proc, to_proc, from_space, to_space, p_chunk, inds
-        p_new = move(from_proc, to_proc, p_chunk)
-        v_new = view(p_new, inds...)
-        return tochunk(v_new, to_proc, to_space)
+    return remotecall_endpoint(current_acceleration(), from_proc, to_proc, from_space, to_space, p_chunk) do p_new
+        return view(p_new, inds...)
     end
 end
 

@@ -84,10 +84,6 @@ function darray_copyto!(B::DArray{TB,NB}, A::DArray{TA,NA}, Binds=parentindices(
 
     Dagger.spawn_datadeps() do
         for Bidx in Bci
-            accel = current_acceleration()
-            if accel isa MPIAcceleration
-                service_aliasing_requests(accel.comm)
-            end
             Bpart = B.chunks[Bidx]
             Bsd_global_raw = padNmax(Bsd_all[Bidx])
             Bsd_global_shifted = shift_ranges(Bsd_global_raw, Binds_offset)
