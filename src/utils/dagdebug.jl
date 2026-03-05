@@ -36,36 +36,27 @@ macro dagdebug(thunk, category, msg, args...)
     end)
 end
 
-@warn "Make this threadsafe by putting counter into Module" maxlog=1
-@warn "Calculate fast-growth based on clock time, not iteration" maxlog=1
+# FIXME: Calculate fast-growth based on clock time, not iteration
 const OPCOUNTER_CATEGORIES = Symbol[]
 const OPCOUNTER_FAST_GROWTH_THRESHOLD = Ref(10_000_000)
-const OPCOUNTERS = Dict{Symbol,Threads.Atomic{Int}}()
+struct OpCounter
+    value::Threads.Atomic{Int}
+end
+OpCounter() = OpCounter(Threads.Atomic{Int}(0))
 macro opcounter(category, count=1)
     cat_sym = category.value
     @gensym old
+    opcounter_sym = Symbol(:OPCOUNTER_, cat_sym)
+    if !isdefined(__module__, opcounter_sym)
+        __module__.eval(:(#=const=# $opcounter_sym = OpCounter()))
+    end
     esc(quote
         if $(QuoteNode(cat_sym)) in $OPCOUNTER_CATEGORIES
-            if !haskey($OPCOUNTERS, $(QuoteNode(cat_sym)))
-                $OPCOUNTERS[$(QuoteNode(cat_sym))] = Threads.Atomic{Int}(0)
-            end
-            $old = Threads.atomic_add!($OPCOUNTERS[$(QuoteNode(cat_sym))], Int($count))
+            $old = Threads.atomic_add!($opcounter_sym.value, Int($count))
             if $old > 1 && (mod1($old, $OPCOUNTER_FAST_GROWTH_THRESHOLD[]) == 1 || $count > $OPCOUNTER_FAST_GROWTH_THRESHOLD[])
                 println("Fast-growing counter: $($(QuoteNode(cat_sym))) = $($old)")
             end
         end
     end)
 end
-opcounters() = Dict(cat=>OPCOUNTERS[cat][] for cat in keys(OPCOUNTERS))
-
-const LARGEST_VALUE_COUNTER = Ref(0)
-function largest_value_update!(value)
-    prev = LARGEST_VALUE_COUNTER[]
-    if value > prev
-        LARGEST_VALUE_COUNTER[] = value
-        if value - prev > 10_000 || value > 1_000_000
-            println("Largest value growing: $value")
-        end
-    end
-end
-largest_value_counter() = LARGEST_VALUE_COUNTER[]
+opcounter(mod::Module, category::Symbol) = getfield(mod, Symbol(:OPCOUNTER_, category)).value[]

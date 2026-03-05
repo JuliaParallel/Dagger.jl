@@ -2,6 +2,8 @@ export OSProc, Context, addprocs!, rmprocs!
 
 import Base: @invokelatest
 
+abstract type Processor end
+
 const PROCESSOR_CALLBACKS = Dict{Symbol,Any}()
 const OSPROC_PROCESSOR_CACHE = LockedObject(Dict{Int,Set{Processor}}())
 
@@ -138,3 +140,20 @@ iscompatible_arg(proc::OSProc, opts, args...) =
 "Returns a very brief `String` representation of `proc`."
 short_name(proc::Processor) = string(proc)
 short_name(p::OSProc) = "W: $(p.pid)"
+
+"Returns true if the processor is on the local worker (for MPI/ordering)."
+is_local_processor(proc::Processor) = (root_worker_id(proc) == myid())
+
+"Ordering key for task firing (used by MPI to avoid deadlock)."
+fire_order_key(proc::Processor) = (root_worker_id(proc), 0)
+
+@doc """
+    Processor
+
+An abstract type representing a processing device and associated memory, where
+data can be stored and operated on. Subtypes should be immutable, and
+instances should compare equal if they represent the same logical processing
+device/memory. Subtype instances should be serializable between different
+nodes. Subtype instances may contain a "parent" `Processor` to make it easy to
+transfer data to/from other types of `Processor` at runtime.
+""" Processor

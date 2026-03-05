@@ -373,7 +373,7 @@ function signature(f, args)
         value = Dagger.value(arg)
         if value isa Dagger.DTask
             # Only occurs via manual usage of signature
-            value = fetch(value; move_value=false, unwrap=false)
+            value = fetch(value; raw=true)
         end
         if istask(value)
             throw(ConcurrencyViolationError("Must call `collect_task_inputs!(state, task)` before calling `signature`"))
@@ -403,7 +403,6 @@ end
 
 function can_use_proc(state, task, gproc, proc, opts, scope)
     # Check against proclist
-    pid = Dagger.root_worker_id(gproc)
     if opts.proclist !== nothing
         @warn "The `proclist` option is deprecated, please use scopes instead\nSee https://juliaparallel.org/Dagger.jl/stable/scopes/ for details" maxlog=1
         if opts.proclist isa Function
@@ -422,10 +421,6 @@ function can_use_proc(state, task, gproc, proc, opts, scope)
         else
             throw(SchedulingException("proclist must be a Function, Vector, or nothing"))
         end
-        if !Dagger.accel_matches_proc(opts.acceleration, proc)
-            @dagdebug task :scope "Rejected $proc: Not compatible with acceleration ($opts.acceleration)"
-            return false, scope
-        end
         if scope isa Dagger.InvalidScope
             @dagdebug task :scope "Rejected $proc: Not contained in task scope ($scope)"
             return false, scope
@@ -435,8 +430,8 @@ function can_use_proc(state, task, gproc, proc, opts, scope)
     # Check against single
     if opts.single !== nothing
         @warn "The `single` option is deprecated, please use scopes instead\nSee https://juliaparallel.org/Dagger.jl/stable/scopes/ for details" maxlog=1
-        if pid != opts.single
-            @dagdebug task :scope "Rejected $proc: pid ($(pid)) != single ($(opts.single))"
+        if root_worker_id(gproc) != opts.single
+            @dagdebug task :scope "Rejected $proc: gproc root_worker_id ($(root_worker_id(gproc))) != single ($(opts.single))"
             return false, scope
         end
         scope = constrain(scope, Dagger.ProcessScope(opts.single))

@@ -2,9 +2,10 @@
 const TAG_WAITING = Base.Lockable(Ref{UInt32}(1))
 function to_tag()
     intask = Dagger.in_task()
-    opts = Dagger.get_options()
     if intask
-        return Dagger.get_tls().task_spec.options.tag::UInt32
+        opts = Dagger.get_tls().task_spec.options
+        tag = opts.tag
+        return tag
     end
     lock(TAG_WAITING) do counter_ref
 	@assert Sch.SCHED_MOVE[] == false "We should not create a tag on the scheduler unwrap move"
@@ -259,6 +260,17 @@ struct TypedDataDepsTaskArgument{T,N}
 end
 map_or_ntuple(f, xs::Vector) = map(f, 1:length(xs))
 map_or_ntuple(f, xs::Tuple) = ntuple(f, length(xs))
+
+# 4-arg version: side effects + returns Vector/Tuple of DataDepsTaskArgument for distribute_task!
+function populate_task_info!(state::DataDepsState, task_args, spec::DTaskSpec, task::DTask)
+    result = DataDepsTaskArgument[]
+    _populate_task_info!(state, spec, task, (arg, pos, may_alias, inplace_move, deps) -> begin
+        dep_infos = DataDepsTaskDependency[DataDepsTaskDependency(arg, d) for d in deps]
+        push!(result, DataDepsTaskArgument(arg, pos, may_alias, inplace_move, dep_infos))
+    end)
+    return spec.fargs isa Tuple ? (result...,) : result
+end
+
 function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_procs, spec::DTaskSpec{typed}, task::DTask, fargs, proc_to_scope_lfu, write_num::Int, proc_idx::Int) where typed
     @specialize spec fargs
 
@@ -528,13 +540,29 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     end
     @dagdebug nothing :spawn_datadeps "($(repr(value(f)))) Task has $(length(syncdeps)) syncdeps"
 
-    # Launch user's task
-    new_fargs = map_or_ntuple(task_arg_ws) do idx
-        if is_typed(spec)
-            return TypedArgument(task_arg_ws[idx].pos, remote_args[idx])
-        else
-            return Argument(task_arg_ws[idx].pos, remote_args[idx])
+    # Launch user's task: preserve full argument list (spec.fargs); use remote values only for tracked args
+    new_fargs = if spec.fargs isa Tuple
+        ntuple(length(spec.fargs)) do i
+            arg = spec.fargs[i]
+            pos = arg.pos
+            j = findfirst(w -> w.pos == pos, task_arg_ws)
+            if j !== nothing
+                val = remote_args[j]
+                is_typed(spec) ? TypedArgument(pos, val) : Argument(pos, val)
+            else
+                copy(arg)
+            end
         end
+    else
+        [let arg = spec.fargs[i], pos = arg.pos
+            j = findfirst(w -> w.pos == pos, task_arg_ws)
+            if j !== nothing
+                val = remote_args[j]
+                is_typed(spec) ? TypedArgument(pos, val) : Argument(pos, val)
+            else
+                copy(arg)
+            end
+        end for i in 1:length(spec.fargs)]
     end
     new_spec = DTaskSpec(new_fargs, spec.options)
     new_spec.options.scope = our_scope

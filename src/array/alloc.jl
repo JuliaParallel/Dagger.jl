@@ -184,13 +184,24 @@ function Base.zero(x::DArray{T,N}) where {T,N}
     return _to_darray(a)
 end
 
-@warn "Consider a better way to provide a unique ID for each chunk" maxlog=1
-function Base.view(A::AbstractArray{T,N}, p::Blocks{N}; space=default_memory_space(current_acceleration(), A)) where {T,N}
+# Weird LinearAlgebra dispatch in `\` needs this
+function LinearAlgebra._zeros(::Type{T}, B::DVector, n::Integer) where T
+    m = max(size(B, 1), n)
+    sz = (m,)
+    return zeros(auto_blocks(sz), T, sz)
+end
+function LinearAlgebra._zeros(::Type{T}, B::DMatrix, n::Integer) where T
+    m = max(size(B, 1), n)
+    sz = (m, size(B, 2))
+    return zeros(auto_blocks(sz), T, sz)
+end
+
+function Base.view(A::AbstractArray{T,N}, p::Blocks{N}) where {T,N}
     d = ArrayDomain(Base.index_shape(A))
     dc = partition(p, d)
     # N.B. We use `tochunk` because we only want to take the view locally, and
     # taking views should be very fast
-    chunks = [@with(MPI_UID => eager_next_id(), tochunk(view(A, x.indexes...), space)) for x in dc]
+    chunks = [tochunk(view(A, x.indexes...)) for x in dc]
     return DArray(T, d, dc, chunks, p)
 end
 Base.view(A::AbstractArray, ::AutoBlocks) =

@@ -119,14 +119,7 @@ function darray_copyto!(B::DArray{TB,NB}, A::DArray{TA,NA}, Binds=parentindices(
                 Arange_local = Arange_global_clamped .- CartesianIndex(Arange_start) .+ CartesianIndex{Nmax}(1)
 
                 # Perform local view copy
-                space = (Bpart isa DTask ? fetch(Bpart; move_value=false, unwrap=false) : Bpart).space
-                procs = processors(space)
-                scope = UnionScope([ExactScope(proc) for proc in procs])
-                check_uniform(space)
-                for proc in procs
-                    check_uniform(proc)
-                end
-                Dagger.@spawn scope = scope copyto_view!(Out(Bpart), Brange_local, In(Apart), Arange_local)
+                Dagger.@spawn copyto_view!(Out(Bpart), Brange_local, In(Apart), Arange_local)
             end
         end
     end

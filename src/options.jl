@@ -7,7 +7,6 @@ Stores per-task options to be passed to the scheduler.
 
 # Arguments
 - `propagates::Vector{Symbol}`: The set of option names that will be propagated by this task to tasks that it spawns.
-- `acceleration::Acceleration`: The acceleration (cluster/network) type to use for this task.
 - `processor::Processor`: The processor associated with this task's function. Generally ignored by the scheduler.
 - `compute_scope::AbstractScope`: The execution scope of the task, which determines where the task can be scheduled and executed. `scope` is another name for this option.
 - `result_scope::AbstractScope`: The data scope of the task's result, which determines where the task's result can be accessed from.
@@ -27,6 +26,7 @@ Stores per-task options to be passed to the scheduler.
 - `storage_leaf_tag::Union{MemPool.Tag,Nothing}=nothing`: If not `nothing`, specifies the MemPool storage leaf tag to associate with the task's result. This tag can be used by MemPool's storage devices to manipulate their behavior, such as the file name used to store data on disk."
 - `storage_retain::Union{Bool,Nothing}=nothing`: The value of `retain` to pass to `MemPool.poolset` when constructing the result `Chunk`. `nothing` defaults to `false`.
 - `name::Union{String,Nothing}=nothing`: If not `nothing`, annotates the task with a name for logging purposes.
+- `tag::Union{UInt32,Nothing}=nothing`: (Data-deps/MPI) MPI message tag for this task; assigned automatically if `nothing`.
 - `stream_input_buffer_amount::Union{Int,Nothing}=nothing`: (Streaming only) Specifies the amount of slots to allocate for the input buffer of the task. Defaults to 1.
 - `stream_output_buffer_amount::Union{Int,Nothing}=nothing`: (Streaming only) Specifies the amount of slots to allocate for the output buffer of the task. Defaults to 1.
 - `stream_buffer_type::Union{Type,Nothing}=nothing`: (Streaming only) Specifies the type of buffer to use for the input and output buffers of the task. Defaults to `Dagger.ProcessRingBuffer`.
@@ -35,8 +35,6 @@ Stores per-task options to be passed to the scheduler.
 Base.@kwdef mutable struct Options
     propagates::Union{Vector{Symbol},Nothing} = nothing
 
-    tag::Union{UInt32,Nothing} = nothing
-    acceleration::Union{Acceleration,Nothing} = nothing
     processor::Union{Processor,Nothing} = nothing
     scope::Union{AbstractScope,Nothing} = nothing
     compute_scope::Union{AbstractScope,Nothing} = scope
@@ -64,10 +62,14 @@ Base.@kwdef mutable struct Options
 
     name::Union{String,Nothing} = nothing
 
+    tag::Union{UInt32,Nothing} = nothing
+
     stream_input_buffer_amount::Union{Int,Nothing} = nothing
     stream_output_buffer_amount::Union{Int,Nothing} = nothing
     stream_buffer_type::Union{Type, Nothing} = nothing
     stream_max_evals::Union{Int,Nothing} = nothing
+
+    acceleration::Union{Acceleration,Nothing} = nothing
 end
 Options(::Nothing) = Options()
 function Options(old_options::NamedTuple)
@@ -124,8 +126,6 @@ signature `sig`, if the option was previously unspecified in `opts`.
 """
 function populate_defaults!(opts::Options, sig)
     maybe_default!(opts, Val{:propagates}(), sig)
-    maybe_default!(opts, Val{:tag}(), sig)
-    maybe_default!(opts, Val{:acceleration}(), sig)
     maybe_default!(opts, Val{:processor}(), sig)
     maybe_default!(opts, Val{:compute_scope}(), sig)
     maybe_default!(opts, Val{:result_scope}(), sig)

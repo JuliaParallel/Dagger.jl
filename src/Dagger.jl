@@ -10,7 +10,7 @@ import MemPool: DRef, FileRef, poolget, poolset
 import Base: collect, reduce, view
 import NextLA
 import LinearAlgebra
-import LinearAlgebra: Adjoint, BLAS, Diagonal, Bidiagonal, Tridiagonal, LAPACK, LU, LowerTriangular, PosDefException, Transpose, UpperTriangular, UnitLowerTriangular, UnitUpperTriangular, diagind, ishermitian, issymmetric, I, norm, dot
+import LinearAlgebra: Adjoint, BLAS, Diagonal, Bidiagonal, Tridiagonal, LAPACK, LU, LowerTriangular, PosDefException, Transpose, UpperTriangular, UnitLowerTriangular, UnitUpperTriangular, Cholesky, diagind, ishermitian, issymmetric, I
 import Random
 import Random: AbstractRNG
 
@@ -53,7 +53,7 @@ import Adapt
 include("lib/util.jl")
 include("utils/dagdebug.jl")
 
-# Type definitions
+# Type definitions (for MPI/acceleration)
 include("types/processor.jl")
 include("types/scope.jl")
 include("types/memory-space.jl")
@@ -71,6 +71,7 @@ include("context.jl")
 include("utils/processors.jl")
 include("scopes.jl")
 include("utils/scopes.jl")
+include("chunks.jl")
 include("utils/signature.jl")
 include("thunkid.jl")
 include("utils/lfucache.jl")
@@ -82,11 +83,7 @@ include("argument.jl")
 include("queue.jl")
 include("thunk.jl")
 include("utils/fetch.jl")
-include("chunks.jl")
-include("affinity.jl")
-include("tochunk.jl")
-include("mutable.jl")
-include("shard.jl")
+include("utils/chunks.jl")
 include("weakchunk.jl")
 include("utils/logging.jl")
 include("submission.jl")
@@ -101,6 +98,7 @@ include("utils/clock.jl")
 include("utils/system_uuid.jl")
 include("utils/caching.jl")
 include("sch/Sch.jl"); using .Sch
+include("tochunk.jl")
 
 # Data dependency task queue
 include("datadeps/aliasing.jl")
@@ -138,7 +136,7 @@ include("array/mul.jl")
 include("array/cholesky.jl")
 include("array/trsm.jl")
 include("array/lu.jl")
-include("array/gmres.jl")
+include("array/qr.jl")
 
 # GPU
 include("gpu.jl")
@@ -167,8 +165,9 @@ function set_distributed_package!(value)
     @info "Dagger.jl preference has been set, restart your Julia session for this change to take effect!"
 end
 
-# MPI
+# MPI (mpi.jl loads MPI; mpi_mempool uses it)
 include("mpi.jl")
+include("mpi_mempool.jl")
 
 # Precompilation
 import PrecompileTools: @compile_workload

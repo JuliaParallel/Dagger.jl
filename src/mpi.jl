@@ -313,8 +313,6 @@ mutable struct MPIRef
 end
 Base.hash(ref::MPIRef, h::UInt=UInt(0)) = hash(ref.id, hash(MPIRef, h))
 root_worker_id(ref::MPIRef) = myid()
-@warn "Move this definition somewhere else" maxlog=1
-root_worker_id(ref::DRef) = ref.owner
 
 function check_uniform(ref::MPIRef, original=ref)
     return check_uniform(ref.rank, original) &&
@@ -831,15 +829,16 @@ function move(src::MPIProcessor, dst::MPIProcessor, x::Chunk)
     end
 end
 
+
 #FIXME:try to think of a better move! scheme
-function execute!(proc::MPIProcessor, world::UInt64, f, args...; kwargs...)
+function execute!(proc::MPIProcessor, f, args...; kwargs...)
     local_rank = MPI.Comm_rank(proc.comm)
     islocal = local_rank == proc.rank
     inplace_move = f === move!
     result = nothing
-    tag_space = to_tag()
+    tag = to_tag()
     if islocal || inplace_move
-        result = execute!(proc.innerProc, world, f, args...; kwargs...)
+        result = execute!(proc.innerProc, f, args...; kwargs...)
     end
     if inplace_move
         space = memory_space(nothing, proc)::MPIMemorySpace

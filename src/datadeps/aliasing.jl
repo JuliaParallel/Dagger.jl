@@ -375,16 +375,23 @@ function is_writedep(arg, deps, task::DTask)
 end
 
 # Aliasing state setup
-function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
-    # Track the task's arguments and access patterns
+# Internal: iterate over task args and call callback(arg, pos, may_alias, inplace_move, deps) for each tracked arg.
+function _populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask, callback)
     for (idx, _arg) in enumerate(spec.fargs)
+        arg_pos = _arg.pos  # ArgPosition for this argument (Argument/TypedArgument have .pos)
         arg = value(_arg)
 
         # Unwrap In/InOut/Out wrappers and record dependencies
         arg, deps = unwrap_inout(arg)
 
-        # Unwrap the Chunk underlying any DTask arguments
-        arg = arg isa DTask ? fetch(arg; move_value=false, unwrap=false) : arg
+        # Unwrap the Chunk underlying any DTask arguments only when already ready.
+        # Fetching an unready DTask here would deadlock: distribute_tasks! runs before
+        # the scheduler, so dependent tasks have not run yet. Skip aliasing for unready
+        # DTasks so we pass them through; the worker will fetch at execution time (may block on MPI).
+        if arg isa DTask
+            isready(arg) || continue
+            arg = fetch(arg; move_value=false, unwrap=false)
+        end
 
         # Skip non-aliasing arguments
         type_may_alias(typeof(arg)) || continue
@@ -413,6 +420,10 @@ function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
         state.arg_origin[arg] = origin_space
         state.remote_arg_to_original[arg] = arg
 
+        may_alias = true
+        inplace_move = true
+        callback(arg, arg_pos, may_alias, inplace_move, deps)
+
         # Populate argument info for all aliasing dependencies
         for (dep_mod, _, _) in deps
             # Generate an ArgumentWrapper for the argument
@@ -422,6 +433,11 @@ function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
             populate_argument_info!(state, aw, origin_space)
         end
     end
+end
+
+function populate_task_info!(state::DataDepsState, spec::DTaskSpec, task::DTask)
+    # Track the task's arguments and access patterns (callback only for state updates)
+    _populate_task_info!(state, spec, task, (arg, pos, may_alias, inplace_move, deps) -> nothing)
 end
 function populate_argument_info!(state::DataDepsState, arg_w::ArgumentWrapper, origin_space::MemorySpace)
     # Initialize ownership and history
@@ -669,6 +685,25 @@ function remotecall_endpoint(f, ::Dagger.DistributedAcceleration, from_proc, to_
     end
 end
 const ALIASED_OBJECT_CACHE = TaskLocalValue{Union{Dict{AbstractAliasing,Chunk}, Nothing}}(()->nothing)
+
+# Explicit cache for move_rewrap (used by haloarray, tests)
+struct AliasedObjectCacheStore end
+struct AliasedObjectCache
+    dest_space::MemorySpace
+    backing::Chunk
+    cache::Dict{AbstractAliasing,Chunk}
+    AliasedObjectCache(dest_space::MemorySpace, backing::Chunk) = new(dest_space, backing, Dict{AbstractAliasing,Chunk}())
+end
+function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, data)
+    old = ALIASED_OBJECT_CACHE[]
+    ALIASED_OBJECT_CACHE[] = cache.cache
+    try
+        return move_rewrap(from_proc, to_proc, from_space, to_space, data)
+    finally
+        ALIASED_OBJECT_CACHE[] = old
+    end
+end
+
 @warn "Document these public methods" maxlog=1
 # TODO: Use state to cache aliasing() results
 function declare_aliased_object!(x; ainfo=aliasing(current_acceleration(), x, identity))

@@ -1,5 +1,7 @@
 export AnyScope, DefaultScope, UnionScope, NodeScope, ProcessScope, ExactScope, ProcessorTypeScope
 
+abstract type AbstractScope end
+
 "Widest scope that contains all processors."
 struct AnyScope <: AbstractScope end
 proc_in_scope(::Processor, ::AnyScope) = true
@@ -95,12 +97,11 @@ ProcessorTypeScope(T, inner_scope=AnyScope()) =
                Set{AbstractScopeTaint}([ProcessorTypeTaint{T}()]))
 
 "Scoped to a specific processor."
-struct ExactScope{P<:AbstractScope} <: AbstractScope
-    parent::P
+struct ExactScope <: AbstractScope
+    parent::ProcessScope
     processor::Processor
 end
-ExactScope(proc) = ExactScope(enclosing_scope(get_parent(proc)), proc)
-enclosing_scope(proc::OSProc) = ProcessScope(proc.pid)
+ExactScope(proc) = ExactScope(ProcessScope(root_worker_id(get_parent(proc))), proc)
 proc_in_scope(proc::Processor, scope::ExactScope) = proc == scope.processor
 
 "Indicates that the applied scopes `x` and `y` are incompatible."

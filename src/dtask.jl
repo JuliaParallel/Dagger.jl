@@ -11,31 +11,18 @@ Base.wait(t::ThunkFuture) = Dagger.Sch.thunk_yield() do
     wait(t.future)
     return
 end
-const FETCH_UNIFORM = ScopedValue{Bool}(false)
-@warn "Docstrings" maxlog=1
-# uniform: Asserts that this is a uniform call
-# move_value: Moves the value to the specified processor
-# unwrap: Unwraps the value if it is unwrappable
-function Base.fetch(t::ThunkFuture; proc::Processor=OSProc(),
-                    throw_on_error::Bool=true,
-                    uniform::Bool=false,
-                    move_value::Bool=true,
-                    unwrap::Bool=false)
+function Base.fetch(t::ThunkFuture; proc=OSProc(), raw=false)
     error, value = Dagger.Sch.thunk_yield() do
         fetch(t.future)
     end
-    if throw_on_error && error
+    if error
         throw(value)
     end
-    if move_value
-        value = @with FETCH_UNIFORM => uniform begin
-            move(proc, value)
-        end
+    if raw
+        return value
+    else
+        return move(proc, value)
     end
-    if unwrap && unwrappable(value)
-        return fetch(value; proc, throw_on_error, uniform, move_value, unwrap)
-    end
-    return value
 end
 Base.put!(t::ThunkFuture, x; error=false) = put!(t.future, (error, x))
 
@@ -78,13 +65,14 @@ function Base.wait(t::DTask)
     wait(t.future)
     return
 end
-function Base.fetch(t::DTask; kwargs...)
+function Base.fetch(t::DTask; raw=false, move_value=nothing, unwrap=nothing)
     if !istaskstarted(t)
         throw(ConcurrencyViolationError("Cannot `fetch` an unlaunched `DTask`"))
     end
-    return fetch(t.future; kwargs...)
+    # Datadeps/aliasing API: move_value=false => don't move => raw=true
+    raw_eff = move_value !== nothing ? !move_value : raw
+    return fetch(t.future; raw=raw_eff)
 end
-unwrappable(x::DTask) = true
 function waitany(tasks::Vector{DTask})
     if isempty(tasks)
         return

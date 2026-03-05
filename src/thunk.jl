@@ -462,7 +462,7 @@ function _par(mod, ex::Expr; lazy=true, recur=true, opts=())
         end
         args = filter(arg->!Meta.isexpr(arg, :parameters), allargs)
         kwargs = filter(arg->Meta.isexpr(arg, :parameters), allargs)
-        if !isempty(kwargs)
+        if !Base.isempty(kwargs)
             kwargs = only(kwargs).args
         end
         if body !== nothing
@@ -493,7 +493,7 @@ function _par(mod, ex::Expr; lazy=true, recur=true, opts=())
                         $spawn($f, $Options(;$(opts...)), $(args...); $(kwargs...))
                     end
                     if $(Expr(:islocal, sync_var))
-                        put!($sync_var, schedule(Task(()->fetch($result; move_value=false, unwrap=false))))
+                        put!($sync_var, schedule(Task(()->fetch($result; raw=true))))
                     end
                     $result
                 end
@@ -530,7 +530,7 @@ function spawn(f, args...; kwargs...)
     @nospecialize f args kwargs
 
     # Merge all passed options
-    if length(args) >= 1 && first(args) isa Options
+        if length(args) >= 1 && first(args) isa Options
         # N.B. Make a defensive copy in case user aliases Options struct
         task_options = copy(first(args)::Options)
         args = args[2:end]
@@ -545,7 +545,7 @@ function spawn(f, args...; kwargs...)
 end
 function typed_spawn(f, args...; kwargs...)
     # Merge all passed options
-    if length(args) >= 1 && first(args) isa Options
+        if length(args) >= 1 && first(args) isa Options
         # N.B. Make a defensive copy in case user aliases Options struct
         task_options = copy(first(args)::Options)
         args = args[2:end]
@@ -578,19 +578,12 @@ function _spawn(args_kwargs, task_options)
     # Get task queue, and don't let it propagate
     task_queue = get(scoped_options, :task_queue, DefaultTaskQueue())::AbstractTaskQueue
     filter!(prop -> prop != :task_queue, propagates)
-
-    # Update propagates from scoped options propagates
     if task_options.propagates !== nothing
         append!(task_options.propagates, propagates)
     else
         task_options.propagates = propagates
     end
     unique!(task_options.propagates)
-
-    # Read task-local acceleration into options
-    if task_options.acceleration === nothing
-        task_options.acceleration = current_acceleration()
-    end
 
     # Construct task spec and handle
     spec = DTaskSpec(args_kwargs, task_options)

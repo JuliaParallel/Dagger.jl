@@ -12,13 +12,20 @@ accelerate!(accel::Symbol) = accelerate!(Val{accel}())
 accelerate!(::Val{:distributed}) = accelerate!(DistributedAcceleration())
 
 initialize_acceleration!(a::DistributedAcceleration) = nothing
-function accelerate!(accel::Acceleration) 
+function accelerate!(accel::Acceleration)
     initialize_acceleration!(accel)
     ACCELERATION[] = accel
 end
+accelerate!(::Nothing) = nothing
 
 accel_matches_proc(accel::DistributedAcceleration, proc::OSProc) = true
 accel_matches_proc(accel::DistributedAcceleration, proc) = true
+
+function compatible_processors(accel::Union{Acceleration,Nothing}, scope::AbstractScope, procs::Vector{<:Processor})
+    comp = compatible_processors(scope, procs)
+    accel === nothing && return comp
+    return Set(p for p in comp if accel_matches_proc(accel, p))
+end
 
 struct CPURAMMemorySpace <: MemorySpace
     owner::Int
@@ -136,37 +143,8 @@ end
 may_alias(::MemorySpace, ::MemorySpace) = true
 may_alias(space1::CPURAMMemorySpace, space2::CPURAMMemorySpace) = space1.owner == space2.owner
 
-struct RemotePtr{T,S<:MemorySpace} <: Ref{T}
-    addr::UInt
-    space::S
-end
-RemotePtr{T}(addr::UInt, space::S) where {T,S} = RemotePtr{T,S}(addr, space)
-RemotePtr{T}(ptr::Ptr{V}, space::S) where {T,V,S} = RemotePtr{T,S}(UInt(ptr), space)
-RemotePtr{T}(ptr::Ptr{V}) where {T,V} = RemotePtr{T}(UInt(ptr), CPURAMMemorySpace(myid()))
-# FIXME: Don't hardcode CPURAMMemorySpace
-RemotePtr(addr::UInt) = RemotePtr{Cvoid}(addr, CPURAMMemorySpace(myid()))
-Base.convert(::Type{RemotePtr}, x::Ptr{T}) where T =
-    RemotePtr(UInt(x), CPURAMMemorySpace(myid()))
-Base.convert(::Type{<:RemotePtr{V}}, x::Ptr{T}) where {V,T} =
-    RemotePtr{V}(UInt(x), CPURAMMemorySpace(myid()))
-Base.convert(::Type{UInt}, ptr::RemotePtr) = ptr.addr
-Base.:+(ptr::RemotePtr{T}, offset::Integer) where T = RemotePtr{T}(ptr.addr + offset, ptr.space)
-Base.:-(ptr::RemotePtr{T}, offset::Integer) where T = RemotePtr{T}(ptr.addr - offset, ptr.space)
-function Base.isless(ptr1::RemotePtr, ptr2::RemotePtr)
-    @assert ptr1.space == ptr2.space
-    return ptr1.addr < ptr2.addr
-end
+# RemotePtr and MemorySpan are defined in utils/memory-span.jl (included earlier).
 
-struct MemorySpan{S}
-    ptr::RemotePtr{Cvoid,S}
-    len::UInt
-end
-MemorySpan(ptr::RemotePtr{Cvoid,S}, len::Integer) where S =
-    MemorySpan{S}(ptr, UInt(len))
-MemorySpan{S}(addr::UInt, len::Integer) where S =
-    MemorySpan{S}(RemotePtr{Cvoid,S}(addr), UInt(len))
-Base.isless(a::MemorySpan, b::MemorySpan) = a.ptr < b.ptr
-Base.isempty(x::MemorySpan) = x.len == 0
 abstract type AbstractAliasing end
 memory_spans(::T) where T<:AbstractAliasing = throw(ArgumentError("Must define `memory_spans` for `$T`"))
 memory_spans(x) = memory_spans(aliasing(x))
@@ -454,34 +432,4 @@ function will_alias(x_span::MemorySpan, y_span::MemorySpan)
     return x_span.ptr <= y_end && y_span.ptr <= x_end
 end
 
-### More space-efficient memory spans
-
-struct LocalMemorySpan
-    ptr::UInt
-    len::UInt
-end
-LocalMemorySpan(span::MemorySpan) = LocalMemorySpan(span.ptr.addr, span.len)
-Base.isempty(x::LocalMemorySpan) = x.len == 0
-
-# FIXME: Store the length separately, since it's shared by all spans
-struct ManyMemorySpan{N}
-    spans::NTuple{N,LocalMemorySpan}
-end
-Base.isempty(x::ManyMemorySpan) = all(isempty, x.spans)
-
-struct ManyPair{N} <: Unsigned
-    pairs::NTuple{N,UInt}
-end
-Base.promote_rule(::Type{ManyPair}, ::Type{T}) where {T<:Integer} = ManyPair
-Base.convert(::Type{ManyPair{N}}, x::T) where {T<:Integer,N} = ManyPair(ntuple(i -> x, N))
-Base.convert(::Type{ManyPair}, x::ManyPair) = x
-Base.:+(x::ManyPair{N}, y::ManyPair{N}) where N = ManyPair(ntuple(i -> x.pairs[i] + y.pairs[i], N))
-Base.:-(x::ManyPair{N}, y::ManyPair{N}) where N = ManyPair(ntuple(i -> x.pairs[i] - y.pairs[i], N))
-Base.:-(x::ManyPair) = error("Can't negate a ManyPair")
-Base.:(==)(x::ManyPair, y::ManyPair) = x.pairs == y.pairs
-Base.isless(x::ManyPair, y::ManyPair) = x.pairs[1] < y.pairs[1]
-Base.:(<)(x::ManyPair, y::ManyPair) = x.pairs[1] < y.pairs[1]
-Base.string(x::ManyPair) = "ManyPair($(x.pairs))"
-
-ManyMemorySpan{N}(start::ManyPair{N}, len::ManyPair{N}) where N =
-    ManyMemorySpan{N}(ntuple(i -> LocalMemorySpan(start.pairs[i], len.pairs[i]), N))
+# LocalMemorySpan, ManyMemorySpan, ManyPair are defined in utils/memory-span.jl (included earlier).

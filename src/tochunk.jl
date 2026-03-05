@@ -36,6 +36,16 @@ function tochunk(x::X, proc::P, space::M, scope::S; device=nothing, type=X, rewr
     ref = tochunk_pset(x, space; device, kwargs...)
     return Chunk{type,typeof(ref),P,S,typeof(space)}(type, domain(x), ref, proc, scope, space)
 end
+# Disambiguate: Chunk-specific 3-arg so kwcall(tochunk, Chunk, Processor, Scope) is not ambiguous with utils/chunks.jl
+function tochunk(x::Chunk, proc::P, scope::S; rewrap=false, kwargs...) where {P<:Processor,S}
+    if rewrap
+        return remotecall_fetch(x.handle.owner) do
+            tochunk(MemPool.poolget(x.handle), proc, scope; kwargs...)
+        end
+    else
+        return x
+    end
+end
 function tochunk(x::X, proc::P, scope::S; device=nothing, type=X, rewrap=false, kwargs...) where {X,P<:Processor,S}
     if device === nothing
         device = if Sch.walk_storage_safe(x)
@@ -70,8 +80,11 @@ function tochunk(x::X, space::M, scope::S; device=nothing, type=X, rewrap=false,
     ref = tochunk_pset(x, space; device, kwargs...)
     return Chunk{type,typeof(ref),typeof(proc),S,M}(type, domain(x), ref, proc, scope, space)
 end
-tochunk(x, procOrSpace; kwargs...) = tochunk(x, procOrSpace, AnyScope(); kwargs...)
-tochunk(x; kwargs...) = tochunk(x, default_memory_space(current_acceleration(), x), AnyScope(); kwargs...)
+# 2-arg: avoid overwriting utils/chunks.jl's tochunk(Any, Any) and tochunk(Any); only add Processor/MemorySpace variants
+# Chunk + Processor: disambiguate vs utils/chunks.jl's tochunk(x::Chunk, proc; ...)
+tochunk(x::Chunk, proc::Processor; kwargs...) = tochunk(x, proc, AnyScope(); kwargs...)
+tochunk(x, proc::Processor; kwargs...) = tochunk(x, proc, AnyScope(); kwargs...)
+tochunk(x, space::MemorySpace; kwargs...) = tochunk(x, space, AnyScope(); kwargs...)
 
 check_proc_space(x, proc, space) = nothing
 function check_proc_space(x::Chunk, proc, space)
@@ -94,13 +107,4 @@ end
 
 tochunk_pset(x, space::MemorySpace; device=nothing, kwargs...) = poolset(x; device, kwargs...)
 
-function savechunk(data, dir, f)
-    sz = open(joinpath(dir, f), "w") do io
-        serialize(io, MemPool.MMWrap(data))
-        return position(io)
-    end
-    fr = FileRef(f, sz)
-    proc = OSProc()
-    scope = AnyScope() # FIXME: Scoped to this node
-    return Chunk{typeof(data),typeof(fr),typeof(proc),typeof(scope)}(typeof(data), domain(data), fr, proc, scope, true)
-end
+# savechunk: defined in utils/chunks.jl (fork Chunk has space field; do not duplicate here)
