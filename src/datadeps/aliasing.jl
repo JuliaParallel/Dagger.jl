@@ -463,7 +463,10 @@ function populate_ainfo!(state::DataDepsState, original_arg_w::ArgumentWrapper, 
     if !haskey(state.ainfos_owner, target_ainfo)
         overlaps = Set{AliasingWrapper}()
         push!(overlaps, target_ainfo)
-        for other_ainfo in keys(state.ainfos_owner)
+        other_ainfos = (Dagger.current_acceleration() isa Dagger.MPIAcceleration
+            ? sort(collect(keys(state.ainfos_owner)), by=hash)
+            : keys(state.ainfos_owner))
+        for other_ainfo in other_ainfos
             target_ainfo == other_ainfo && continue
             if will_alias(target_ainfo, other_ainfo)
                 # Mark us and them as overlapping

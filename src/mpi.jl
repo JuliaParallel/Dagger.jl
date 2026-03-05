@@ -367,7 +367,7 @@ end
 
 const DEADLOCK_DETECT = TaskLocalValue{Bool}(()->true)
 const DEADLOCK_WARN_PERIOD = TaskLocalValue{Float64}(()->10.0)
-const DEADLOCK_TIMEOUT_PERIOD = TaskLocalValue{Float64}(()->60.0)
+const DEADLOCK_TIMEOUT_PERIOD = TaskLocalValue{Float64}(()->600.0)
 const RECV_WAITING = Base.Lockable(Dict{Tuple{MPI.Comm, Int, Int}, Base.Event}())
 
 struct InplaceInfo

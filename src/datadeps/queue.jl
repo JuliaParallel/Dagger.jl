@@ -332,9 +332,13 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
                 sig = Sch.signature(sch_state, f, map(first, chunks_locality))
                 task_pressure = get(sch_state.signature_time_cost, sig, 1000^3)
 
-                # Shuffle procs around, so equally-costly procs are equally considered
-                P = randperm(length(all_procs))
-                procs = getindex.(Ref(all_procs), P)
+                # Shuffle procs around, so equally-costly procs are equally considered (skip when MPI for deterministic tie-breaking)
+                procs = if current_acceleration() isa Dagger.MPIAcceleration
+                    collect(all_procs)
+                else
+                    P = randperm(length(all_procs))
+                    getindex.(Ref(all_procs), P)
+                end
 
                 # Sort by lowest cost first
                 sort!(procs, by=p->costs[p])
@@ -397,7 +401,11 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
                 delete!(spaces_completed, our_space)
                 continue
             end
-            our_proc = rand(our_space_procs)
+            our_proc = if current_acceleration() isa Dagger.MPIAcceleration
+                first(sort(collect(our_space_procs), by=short_name))
+            else
+                rand(our_space_procs)
+            end
             break
         end
 

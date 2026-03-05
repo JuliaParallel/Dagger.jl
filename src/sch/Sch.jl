@@ -532,6 +532,25 @@ struct ScheduleTaskSpec
     est_alloc_util::UInt64
     est_occupancy::UInt32
 end
+
+"Ordering key for task locations when using MPI acceleration (deterministic across ranks)."
+function _mpi_fire_order_key(loc::ScheduleTaskLocation)
+    g = loc.gproc
+    p = loc.proc
+    g_rank = g isa Union{Dagger.MPIOSProc, Dagger.MPIProcessor} ? g.rank : root_worker_id(g)
+    p_rank = p isa Union{Dagger.MPIOSProc, Dagger.MPIProcessor} ? p.rank : root_worker_id(p)
+    return (g_rank, p_rank)
+end
+
+"Ordering key for a single Processor when using MPI acceleration (deterministic across ranks)."
+function _mpi_proc_rank(proc::Processor)
+    g = get_parent(proc)
+    p = proc
+    g_rank = g isa Union{Dagger.MPIOSProc, Dagger.MPIProcessor} ? g.rank : root_worker_id(g)
+    p_rank = p isa Union{Dagger.MPIOSProc, Dagger.MPIProcessor} ? p.rank : root_worker_id(p)
+    return (g_rank, p_rank)
+end
+
 @reuse_scope function schedule!(ctx, state, sch_options, procs=procs_to_use(ctx, sch_options))
     lock(state.lock) do
         safepoint(state)
@@ -688,14 +707,17 @@ end
         # Fire all newly-scheduled tasks (owner/local first, then by fire_order_key to avoid MPI execute! deadlock)
         @label fire_tasks
         task_locs = collect(keys(to_fire))
+        if Dagger.current_acceleration() isa Dagger.MPIAcceleration
+            sort!(task_locs, by=_mpi_fire_order_key)
+        end
         rank = try
             M = parentmodule(@__MODULE__)
             (isdefined(M, :MPI) && M.MPI.Initialized()) ? Int(M.MPI.Comm_rank(M.MPI.COMM_WORLD)) : nothing
         catch
             nothing
         end
-        Core.println("fire order rank=", rank, " task_locs=", task_locs)
-        for task_loc in task_locs
+	for (i, task_loc) in enumerate(task_locs)
+            #Core.println("fire_order rank=", rank, " [", i, "/", length(task_locs), "] task_loc=", task_loc)
             fire_tasks!(ctx, task_loc, to_fire[task_loc], state)
         end
         to_fire_cleanup()
@@ -1141,12 +1163,15 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                 # Try to steal a task
                 @maybelog ctx timespan_start(ctx, :proc_steal_local, (;uid, worker=wid, processor=to_proc), nothing)
 
-                # Try to steal from local queues randomly
+                # Try to steal from local queues randomly (deterministic order when MPI to avoid deadlocks)
                 # TODO: Prioritize stealing from busiest processors
                 states = proc_states_values(uid)
-                # TODO: Try to pre-allocate this
-                P = randperm(length(states))
-                for state in getindex.(Ref(states), P)
+                order = if Dagger.current_acceleration() isa Dagger.MPIAcceleration
+                    sort(1:length(states), by=i->_mpi_proc_rank(states[i].state.proc))
+                else
+                    randperm(length(states))
+                end
+                for state in getindex.(Ref(states), order)
                     other_istate = state.state
                     if other_istate.proc === to_proc
                         continue
@@ -1355,11 +1380,15 @@ function do_tasks(to_proc, return_queue, tasks)
     end
     notify(istate.reschedule)
 
-    # Kick other processors to make them steal
+    # Kick other processors to make them steal (deterministic order when MPI to avoid deadlocks)
     # TODO: Alternatively, automatically balance work instead of blindly enqueueing
     states = proc_states_values(uid)
-    P = randperm(length(states))
-    for other_state in getindex.(Ref(states), P)
+    order = if Dagger.current_acceleration() isa Dagger.MPIAcceleration
+        sort(1:length(states), by=i->_mpi_proc_rank(states[i].state.proc))
+    else
+        randperm(length(states))
+    end
+    for other_state in getindex.(Ref(states), order)
         other_istate = other_state.state
         if other_istate.proc === to_proc
             continue
@@ -1477,11 +1506,13 @@ Executes a single task specified by `task` on `to_proc`.
             #= FIXME: This isn't valid if x is written to
             x = if x isa Chunk
                 value = lock(TASK_SYNC) do
-                    if haskey(CHUNK_CACHE, x)
-                        Some{Any}(get!(CHUNK_CACHE[x], to_proc) do
-                            # Convert from cached value
-                            # TODO: Choose "closest" processor of same type first
-                            some_proc = first(keys(CHUNK_CACHE[x]))
+                        if haskey(CHUNK_CACHE, x)
+                            Some{Any}(get!(CHUNK_CACHE[x], to_proc) do
+                                # Convert from cached value
+                                # TODO: Choose "closest" processor of same type first
+                                cache_procs = keys(CHUNK_CACHE[x])
+                                some_proc = Dagger.current_acceleration() isa Dagger.MPIAcceleration ?
+                                    minimum(cache_procs, by=_mpi_proc_rank) : first(cache_procs)
                             some_x = CHUNK_CACHE[x][some_proc]
                             @dagdebug thunk_id :move "Cache hit for argument $id at $some_proc: $some_x"
                             @invokelatest move(some_proc, to_proc, some_x)
