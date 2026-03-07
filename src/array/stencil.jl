@@ -631,6 +631,7 @@ end
 function inner_stencil!(f, output, read_vars)
     processor = task_processor()
     inner_stencil_proc!(processor, f, output, read_vars)
+    foreach(v -> v isa HaloArray && unsafe_free!(v), values(read_vars))
 end
 
 # Non-KA (for CPUs)
