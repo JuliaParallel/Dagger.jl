@@ -185,6 +185,47 @@ end
             Dagger.with_options(;scope=local_scope) do
                 @test collect(cholesky(DA).U) ≈ cholesky(collect(DA)).U
             end
+
+            # Out-of-place LU
+            A = rand(8, 8)
+            DA = DArray(A, Blocks(4, 4))
+            Dagger.with_options(;scope=local_scope) do
+                lu_DA = lu(DA, RowMaximum())
+                L_DA = collect(lu_DA.L)
+                U_DA = collect(lu_DA.U)
+                P_DA = collect(lu_DA.P)
+                @test P_DA * A ≈ L_DA * U_DA rtol=1e-5
+            end
+
+            # ldiv! with DVector RHS — LU
+            A = rand(8, 8)
+            b = rand(8)
+            b_ref = copy(b)
+            DA = DArray(A, Blocks(4, 4))
+            Db = DArray(b, Blocks(4))
+            lu_ref = lu(A, RowMaximum())
+            LinearAlgebra.ldiv!(lu_ref, b_ref)
+            Dagger.with_options(;scope=local_scope) do
+                lu_DA = lu(DA, RowMaximum())
+                LinearAlgebra.ldiv!(lu_DA, Db)
+            end
+            @test collect(Db) ≈ b_ref rtol=1e-5
+
+            # ldiv! with DVector RHS — Cholesky
+            A = rand(8, 8)
+            A = A * A'
+            A[diagind(A)] .+= size(A, 1)
+            b = rand(8)
+            b_ref = copy(b)
+            DA = DArray(A, Blocks(4, 4))
+            Db = DArray(b, Blocks(4))
+            chol_ref = cholesky(A)
+            LinearAlgebra.ldiv!(chol_ref, b_ref)
+            Dagger.with_options(;scope=local_scope) do
+                chol_DA = cholesky(DA)
+                LinearAlgebra.ldiv!(chol_DA, Db)
+            end
+            @test collect(Db) ≈ b_ref rtol=1e-5
         end
     end
 end
@@ -313,6 +354,47 @@ end
             Dagger.with_options(;scope=local_scope) do
                 @test collect(cholesky(DA).U) ≈ cholesky(collect(DA)).U
             end
+
+            # Out-of-place LU
+            A = rand(8, 8)
+            DA = DArray(A, Blocks(4, 4))
+            Dagger.with_options(;scope=local_scope) do
+                lu_DA = lu(DA, RowMaximum())
+                L_DA = collect(lu_DA.L)
+                U_DA = collect(lu_DA.U)
+                P_DA = collect(lu_DA.P)
+                @test P_DA * A ≈ L_DA * U_DA rtol=1e-5
+            end
+
+            # ldiv! with DVector RHS — LU
+            A = rand(8, 8)
+            b = rand(8)
+            b_ref = copy(b)
+            DA = DArray(A, Blocks(4, 4))
+            Db = DArray(b, Blocks(4))
+            lu_ref = lu(A, RowMaximum())
+            LinearAlgebra.ldiv!(lu_ref, b_ref)
+            Dagger.with_options(;scope=local_scope) do
+                lu_DA = lu(DA, RowMaximum())
+                LinearAlgebra.ldiv!(lu_DA, Db)
+            end
+            @test collect(Db) ≈ b_ref rtol=1e-5
+
+            # ldiv! with DVector RHS — Cholesky
+            A = rand(8, 8)
+            A = A * A'
+            A[diagind(A)] .+= size(A, 1)
+            b = rand(8)
+            b_ref = copy(b)
+            DA = DArray(A, Blocks(4, 4))
+            Db = DArray(b, Blocks(4))
+            chol_ref = cholesky(A)
+            LinearAlgebra.ldiv!(chol_ref, b_ref)
+            Dagger.with_options(;scope=local_scope) do
+                chol_DA = cholesky(DA)
+                LinearAlgebra.ldiv!(chol_DA, Db)
+            end
+            @test collect(Db) ≈ b_ref rtol=1e-5
         end
     end
 end
