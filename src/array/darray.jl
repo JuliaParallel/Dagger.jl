@@ -323,6 +323,8 @@ end
 
 Base.similar(D::DArray{T,N} where T, ::Type{S}, dims::Dims{N}) where {S,N} =
     DArray{S,N}(undef, D.partitioning, dims)
+Base.similar(D::DArray{T,N1} where T, ::Type{S}, dims::Dims{N2}) where {S,N1,N2} =
+    DArray{S,N2}(undef, auto_blocks(dims), dims)
 
 Base.copy(x::DArray{T,N,B,F}) where {T,N,B,F} =
     map(identity, x)::DArray{T,N,B,F}
