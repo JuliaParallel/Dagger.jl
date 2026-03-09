@@ -29,6 +29,7 @@ tests = [
     ("Array - MapReduce", "array/mapreduce.jl"),
     ("Array - Broadcast", "array/broadcast.jl"),
     ("Array - LinearAlgebra - Core", "array/linalg/core.jl"),
+    ("Array - LinearAlgebra - Arithmetic", "array/linalg/arithmetic.jl"),
     ("Array - LinearAlgebra - Matmul", "array/linalg/matmul.jl"),
     ("Array - LinearAlgebra - Cholesky", "array/linalg/cholesky.jl"),
     ("Array - LinearAlgebra - LU", "array/linalg/lu.jl"),
