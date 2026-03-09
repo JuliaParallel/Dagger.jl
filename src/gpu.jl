@@ -104,3 +104,33 @@ gpu_synchronize(::Val{:CPU}) = nothing
 
 with_context!(proc::Processor) = nothing
 with_context!(space::MemorySpace) = nothing
+
+# Adapt RefValue
+mutable struct GPURef{T,S<:MemorySpace} <: Ref{T}
+    value::T
+    space::S # This is ignored for aliasing
+end
+Base.getindex(x::GPURef) = x.value
+Base.setindex!(x::GPURef, value) = x.value = value
+# FIXME: Wire up with adapt
+function aliasing(x::GPURef)
+    addr = UInt(Base.pointer_from_objref(x) + fieldoffset(typeof(x), 1))
+    ptr = RemotePtr{Cvoid}(addr, x.space)
+    ainfo = ObjectAliasing(ptr, sizeof(x.value))
+    return CombinedAliasing([ainfo])
+end
+memory_space(x::GPURef) = x.space
+function read_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, from::GPURef, from_ptr::UInt64, n::UInt64)
+    if from_ptr == UInt64(Base.pointer_from_objref(from) + fieldoffset(typeof(from), 1))
+        unsafe_copyto!(pointer(copies, copies_offset), Ptr{UInt8}(from_ptr), n)
+    else
+        read_remainder!(copies, copies_offset, from[], from_ptr, n)
+    end
+end
+function write_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, to::GPURef, to_ptr::UInt64, n::UInt64)
+    if to_ptr == UInt64(Base.pointer_from_objref(to) + fieldoffset(typeof(to), 1))
+        unsafe_copyto!(Ptr{UInt8}(to_ptr), pointer(copies, copies_offset), n)
+    else
+        write_remainder!(copies, copies_offset, to[], to_ptr, n)
+    end
+end

@@ -52,6 +52,11 @@ function Dagger.aliasing(x::MtlArray{T}) where T
     return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
 end
 
+function Dagger.unsafe_free!(x::MtlArray)
+    Metal.unsafe_free!(x)
+    return
+end
+
 Dagger.memory_spaces(proc::MtlArrayDeviceProc) = Set([MetalVRAMMemorySpace(proc.owner, proc.device_id)])
 Dagger.processors(space::MetalVRAMMemorySpace) = Set([MtlArrayDeviceProc(space.owner, space.device_id)])
 
@@ -284,6 +289,37 @@ function Dagger.execute!(proc::MtlArrayDeviceProc, f, args...; kwargs...)
     end
 end
 
+# Adapt RefValue
+Dagger.move(from_proc::CPUProc, to_proc::MtlArrayDeviceProc, x::Base.RefValue) =
+    Dagger.GPURef(Dagger.move(from_proc, to_proc, x[]), only(Dagger.memory_spaces(to_proc)))
+Dagger.move(from_proc::MtlArrayDeviceProc, to_proc::CPUProc, x::Dagger.GPURef{T,MetalVRAMMemorySpace} where T) =
+    Ref(Dagger.move(from_proc, to_proc, x[]))
+function Dagger.move!(dep_mod, to_space::CPURAMMemorySpace, from_space::MetalVRAMMemorySpace, to::Base.RefValue, from::Dagger.GPURef)
+    if Dagger.type_may_alias(typeof(from[]))
+        Dagger.move!(dep_mod, to_space, from_space, to[], from[])
+    else
+        to[] = dep_mod(from[])
+    end
+    return
+end
+function Dagger.move!(dep_mod, to_space::MetalVRAMMemorySpace, from_space::CPURAMMemorySpace, to::Dagger.GPURef, from::Base.RefValue)
+    if Dagger.type_may_alias(typeof(from[]))
+        Dagger.move!(dep_mod, to_space, from_space, to[], from[])
+    else
+        to[] = dep_mod(from[])
+    end
+    return
+end
+function Dagger.move!(dep_mod, to_space::MetalVRAMMemorySpace, from_space::MetalVRAMMemorySpace, to::Dagger.GPURef, from::Dagger.GPURef)
+    if Dagger.type_may_alias(typeof(from[]))
+        Dagger.move!(dep_mod, to_space, from_space, to[], from[])
+    else
+        to[] = dep_mod(from[])
+    end
+    return
+end
+
+# Adapt HaloArray
 MtlArray(H::Dagger.HaloArray) = convert(MtlArray, H)
 Base.convert(::Type{C}, H::Dagger.HaloArray) where {C<:MtlArray} =
     Dagger.HaloArray(C(H.center),

@@ -166,6 +166,11 @@ function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::P
     end
 end
 
+function Dagger.unsafe_free!(A::HaloArray)
+    unsafe_free!(A.center)
+    foreach(unsafe_free!, A.halos)
+end
+
 function find_object_holding_ptr(object::HaloArray, ptr::UInt64)
     for i in 1:length(object.halos)
         halo = object.halos[i]

@@ -47,6 +47,11 @@ function Dagger.aliasing(x::ROCArray{T}) where T
     return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
 end
 
+function Dagger.unsafe_free!(x::ROCArray)
+    AMDGPU.unsafe_free!(x)
+    return
+end
+
 Dagger.memory_spaces(proc::ROCArrayDeviceProc) = Set([ROCVRAMMemorySpace(proc.owner, proc.device_id)])
 Dagger.processors(space::ROCVRAMMemorySpace) = Set([ROCArrayDeviceProc(space.owner, space.device_id)])
 
@@ -231,24 +236,6 @@ Dagger.move(from_proc::CPUProc, to_proc::ROCArrayDeviceProc, x::Function) = x
 Dagger.move(from_proc::CPUProc, to_proc::ROCArrayDeviceProc, x::Chunk{T}) where {T<:Function} =
     Dagger.move(from_proc, to_proc, fetch(x))
 
-# Adapt BLAS/LAPACK functions
-import LinearAlgebra: BLAS, LAPACK
-for lib in [BLAS, LAPACK]
-    for name in names(lib; all=true)
-        name == nameof(lib) && continue
-        startswith(string(name), '#') && continue
-        endswith(string(name), '!') || continue
-
-        for roclib in [rocBLAS, rocSOLVER]
-            if name in names(roclib; all=true)
-                fn = getproperty(lib, name)
-                rocfn = getproperty(roclib, name)
-                @eval Dagger.move(from_proc::CPUProc, to_proc::ROCArrayDeviceProc, ::$(typeof(fn))) = $rocfn
-            end
-        end
-    end
-end
-
 # Task execution
 function Dagger.execute!(proc::ROCArrayDeviceProc, f, args...; kwargs...)
     @nospecialize f args kwargs
@@ -270,6 +257,58 @@ function Dagger.execute!(proc::ROCArrayDeviceProc, f, args...; kwargs...)
     end
 end
 
+# Adapt BLAS/LAPACK functions
+import LinearAlgebra: BLAS, LAPACK
+_keep_blas_functions = Set(["iamax"])
+for lib in [BLAS, LAPACK]
+    for name in names(lib; all=true)
+        name == nameof(lib) && continue
+        startswith(string(name), '#') && continue
+        if !endswith(string(name), '!') && !any(endswith(string(name), func) for func in _keep_blas_functions)
+            continue
+        end
+
+        for roclib in [rocBLAS, rocSOLVER]
+            if name in names(roclib; all=true)
+                fn = getproperty(lib, name)
+                rocfn = getproperty(roclib, name)
+                @eval Dagger.move(from_proc::CPUProc, to_proc::ROCArrayDeviceProc, ::$(typeof(fn))) = $rocfn
+            end
+        end
+    end
+end
+
+# Adapt RefValue
+Dagger.move(from_proc::CPUProc, to_proc::ROCArrayDeviceProc, x::Base.RefValue) =
+    Dagger.GPURef(Dagger.move(from_proc, to_proc, x[]), only(Dagger.memory_spaces(to_proc)))
+Dagger.move(from_proc::ROCArrayDeviceProc, to_proc::CPUProc, x::Dagger.GPURef{T,ROCVRAMMemorySpace} where T) =
+    Ref(Dagger.move(from_proc, to_proc, x[]))
+function Dagger.move!(dep_mod, to_space::CPURAMMemorySpace, from_space::ROCVRAMMemorySpace, to::Base.RefValue, from::Dagger.GPURef)
+    if Dagger.type_may_alias(typeof(from[]))
+        Dagger.move!(dep_mod, to_space, from_space, to[], from[])
+    else
+        to[] = dep_mod(from[])
+    end
+    return
+end
+function Dagger.move!(dep_mod, to_space::ROCVRAMMemorySpace, from_space::CPURAMMemorySpace, to::Dagger.GPURef, from::Base.RefValue)
+    if Dagger.type_may_alias(typeof(from[]))
+        Dagger.move!(dep_mod, to_space, from_space, to[], from[])
+    else
+        to[] = dep_mod(from[])
+    end
+    return
+end
+function Dagger.move!(dep_mod, to_space::ROCVRAMMemorySpace, from_space::ROCVRAMMemorySpace, to::Dagger.GPURef, from::Dagger.GPURef)
+    if Dagger.type_may_alias(typeof(from[]))
+        Dagger.move!(dep_mod, to_space, from_space, to[], from[])
+    else
+        to[] = dep_mod(from[])
+    end
+    return
+end
+
+# Adapt HaloArray
 ROCArray(H::Dagger.HaloArray) = convert(ROCArray, H)
 Base.convert(::Type{C}, H::Dagger.HaloArray) where {C<:ROCArray} =
     Dagger.HaloArray(C(H.center),
