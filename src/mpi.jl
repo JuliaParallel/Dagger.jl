@@ -857,40 +857,23 @@ function execute!(proc::MPIProcessor, f, args...; kwargs...)
     inplace_move = f === move!
     result = nothing
     tag = to_tag()
+
     if islocal || inplace_move
         result = execute!(proc.innerProc, f, args...; kwargs...)
     end
+
     if inplace_move
         space = memory_space(nothing, proc)::MPIMemorySpace
-        # move!(..., to, from): result type is the destination chunk's type
-        dest_type = length(args) >= 4 && args[4] isa Chunk ? chunktype(args[4]) : Any
+        dest_type = chunktype(args[4])
         return tochunk(nothing, proc, space; type=dest_type)
     end
 
     # Infer return type; only bcast when inference is not concrete
     fname = nameof(f)
     arg_types = map(chunktype, args)
-    for (i, a) in enumerate(args)
-        if arg_types[i] === Nothing
-            if a === nothing
-                error("Argument at position $i is the value `nothing` (dependency not resolved on this rank). f=$fname arg_types=$arg_types")
-            else
-                error("Argument at position $i has chunktype Nothing. f=$fname arg_types=$arg_types")
-            end
-        end
-    end
     inferred_type = Base.promote_op(f, arg_types...)
-    if (inferred_type === Any || !isconcretetype(inferred_type)) && f === Dagger.allocate_array && length(args) >= 2
-        T_el = args[2]
-        sz = args[end]
-        if T_el isa Type && isconcretetype(T_el) && sz isa Tuple{Vararg{Integer}}
-            inferred_type = Array{T_el, length(sz)}
-        end
-    end
+
     need_bcast = !isconcretetype(inferred_type) || inferred_type === Union{} || inferred_type === Nothing || inferred_type === Any
-    if inferred_type === Nothing
-        error("execute!: inferred type is Nothing. f=$fname arg_types=$arg_types")
-    end
 
     if islocal
         T = typeof(result)

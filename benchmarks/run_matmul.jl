@@ -14,7 +14,7 @@ if !isdefined(Dagger, :accelerate!)
 end
 Dagger.accelerate!(:mpi)
 
-const N = 10_000
+const N = 2_000
 const comm = MPI.COMM_WORLD
 const rank = MPI.Comm_rank(comm)
 const nranks = MPI.Comm_size(comm)
@@ -54,7 +54,6 @@ if CHECK_CORRECTNESS
         t_upload = @elapsed begin
             A_g = CUDA.cu(A_full)
             B_g = CUDA.cu(B_full)
-            C_dagger_g = CUDA.cu(C_dagger)
         end
         println("Collect + upload time: ", round(t_collect + t_upload; digits=4), " s")
 
@@ -63,44 +62,43 @@ if CHECK_CORRECTNESS
         end
         println("Baseline (GPU/CUDA) time: ", round(t_baseline; digits=4), " s")
 
-        rtol = 1f-5
-        atol = 1f-6
-        err = norm(C_dagger_g - C_ref_g)
-        ref_norm = norm(C_ref_g)
-        rel_err = ref_norm > 0 ? err / ref_norm : err
-        ok = err <= atol + rtol * ref_norm
+        # Require all elements within 100× machine epsilon relative error (componentwise)
+        C_dagger_cpu = C_dagger
+        C_ref_cpu = Array(C_ref_g)
+        eps_f = eps(Float32)
+        rtol = 50.0f0 * eps_f
+        diff = C_dagger_cpu .- C_ref_cpu
+        # rel_ij = |diff|/|C_ref|, denominator at least eps to avoid div by zero
+        denom = max.(abs.(C_ref_cpu), eps_f)
+        rel_err = abs.(diff) ./ denom
+        max_rel_err = Float32(maximum(rel_err))
+        ok = max_rel_err <= rtol
         if ok
-            println("Correctness: OK (rel_err = ", Float32(rel_err), ", abs_err = ", Float32(err), ")")
+            println("Correctness: OK (max rel_err = ", max_rel_err, " <= 100×eps = ", rtol, ")")
         else
-            println("Correctness: FAIL (rel_err = ", Float32(rel_err), ", abs_err = ", Float32(err), ", rtol=$rtol, atol=$atol)")
+            println("Correctness: FAIL (max rel_err = ", max_rel_err, " > 100×eps = ", rtol, ")")
         end
 
-        # Per-block analysis: which sections exceed tolerance (same block size as Dagger layout)
-        C_dagger_cpu = Array(C_dagger_g)
-        C_ref_cpu = Array(C_ref_g)
+        # Per-block: which blocks have any element with rel_err > 100×eps
         n_bi = ceil(Int, N / BLOCK)
         n_bj = ceil(Int, N / BLOCK)
-        bad_blocks = Tuple{Int,Int,Float32,Float32}[]
+        bad_blocks = Tuple{Int,Int,Float32}[]
         for bi in 1:n_bi, bj in 1:n_bj
             ri = (bi - 1) * BLOCK + 1 : min(bi * BLOCK, N)
             rj = (bj - 1) * BLOCK + 1 : min(bj * BLOCK, N)
-            diff_block = @view(C_dagger_cpu[ri, rj]) .- @view(C_ref_cpu[ri, rj])
-            ref_block = @view(C_ref_cpu[ri, rj])
-            block_err = norm(diff_block)
-            block_ref = norm(ref_block)
-            block_rel = block_ref > 0 ? block_err / block_ref : block_err
-            if block_err > atol + rtol * block_ref
-                push!(bad_blocks, (bi, bj, Float32(block_rel), Float32(block_err)))
+            block_rel = Float32(maximum(@view(rel_err[ri, rj])))
+            if block_rel > rtol
+                push!(bad_blocks, (bi, bj, block_rel))
             end
         end
         if isempty(bad_blocks)
-            println("Per-block: all ", n_bi * n_bj, " blocks within tolerance.")
+            println("Per-block: all ", n_bi * n_bj, " blocks within 100×eps rel_err.")
         else
-            println("Per-block: ", length(bad_blocks), " block(s) exceed tolerance (block size ", BLOCK, "×", BLOCK, "):")
+            println("Per-block: ", length(bad_blocks), " block(s) exceed 100×eps rel_err (block size ", BLOCK, "×", BLOCK, "):")
             sort!(bad_blocks; by = x -> -x[3])
-            for (bi, bj, brel, babs) in bad_blocks
+            for (bi, bj, block_rel) in bad_blocks
                 println("  block [", bi, ",", bj, "] rows ", (bi - 1) * BLOCK + 1, ":", min(bi * BLOCK, N),
-                        ", cols ", (bj - 1) * BLOCK + 1, ":", min(bj * BLOCK, N), "  rel_err = ", brel, "  abs_err = ", babs)
+                        ", cols ", (bj - 1) * BLOCK + 1, ":", min(bj * BLOCK, N), "  max rel_err = ", block_rel)
             end
         end
     end
