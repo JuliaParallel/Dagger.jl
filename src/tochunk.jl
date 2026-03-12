@@ -22,6 +22,9 @@ All other kwargs are passed directly to `MemPool.poolset`.
 tochunk(x::X, proc::P, space::M; kwargs...) where {X,P<:Processor,M<:MemorySpace} =
     tochunk(x, proc, space, AnyScope(); kwargs...)
 function tochunk(x::X, proc::P, space::M, scope::S; device=nothing, type=X, rewrap=false, kwargs...) where {X,P<:Processor,S,M<:MemorySpace}
+    if type === Nothing
+        throw(ArgumentError("Chunk type cannot be Nothing. Placeholder chunks must be created with an explicit type= (e.g. tochunk(nothing, proc, space; type=Matrix{Float64})). x=$(repr(x))"))
+    end
     if x isa Chunk
         check_proc_space(x, proc, space)
         return maybe_rewrap(x, proc, space, scope; type, rewrap)
@@ -33,7 +36,7 @@ function tochunk(x::X, proc::P, space::M, scope::S; device=nothing, type=X, rewr
             MemPool.CPURAMDevice()
         end
     end
-    ref = tochunk_pset(x, space; device, kwargs...)
+    ref = tochunk_pset(x, space; device, type, kwargs...)
     return Chunk{type,typeof(ref),P,S,typeof(space)}(type, domain(x), ref, proc, scope, space)
 end
 # Disambiguate: Chunk-specific 3-arg so kwcall(tochunk, Chunk, Processor, Scope) is not ambiguous with utils/chunks.jl
@@ -47,6 +50,9 @@ function tochunk(x::Chunk, proc::P, scope::S; rewrap=false, kwargs...) where {P<
     end
 end
 function tochunk(x::X, proc::P, scope::S; device=nothing, type=X, rewrap=false, kwargs...) where {X,P<:Processor,S}
+    if type === Nothing
+        throw(ArgumentError("Chunk type cannot be Nothing. Placeholder chunks must be created with an explicit type= (e.g. tochunk(nothing, proc, space; type=Matrix{Float64})). x=$(repr(x))"))
+    end
     if device === nothing
         device = if Sch.walk_storage_safe(x)
             MemPool.GLOBAL_DEVICE[]
@@ -60,10 +66,13 @@ function tochunk(x::X, proc::P, scope::S; device=nothing, type=X, rewrap=false, 
         return maybe_rewrap(x, proc, space, scope; type, rewrap)
     end
     space = default_memory_space(current_acceleration(), x)
-    ref = tochunk_pset(x, space; device, kwargs...)
+    ref = tochunk_pset(x, space; device, type, kwargs...)
     return Chunk{type,typeof(ref),P,S,typeof(space)}(type, domain(x), ref, proc, scope, space)
 end
 function tochunk(x::X, space::M, scope::S; device=nothing, type=X, rewrap=false, kwargs...) where {X,M<:MemorySpace,S}
+    if type === Nothing
+        throw(ArgumentError("Chunk type cannot be Nothing. Placeholder chunks must be created with an explicit type= (e.g. tochunk(nothing, proc, space; type=Matrix{Float64})). x=$(repr(x))"))
+    end
     if device === nothing
         device = if Sch.walk_storage_safe(x)
             MemPool.GLOBAL_DEVICE[]
@@ -77,7 +86,7 @@ function tochunk(x::X, space::M, scope::S; device=nothing, type=X, rewrap=false,
         return maybe_rewrap(x, proc, space, scope; type, rewrap)
     end
     proc = default_processor(current_acceleration(), x)
-    ref = tochunk_pset(x, space; device, kwargs...)
+    ref = tochunk_pset(x, space; device, type, kwargs...)
     return Chunk{type,typeof(ref),typeof(proc),S,M}(type, domain(x), ref, proc, scope, space)
 end
 # 2-arg: avoid overwriting utils/chunks.jl's tochunk(Any, Any) and tochunk(Any); only add Processor/MemorySpace variants
@@ -105,6 +114,6 @@ function maybe_rewrap(x, proc, space, scope; type, rewrap)
     end
 end
 
-tochunk_pset(x, space::MemorySpace; device=nothing, kwargs...) = poolset(x; device, kwargs...)
+tochunk_pset(x, space::MemorySpace; device=nothing, type=nothing, kwargs...) = poolset(x; device, kwargs...)
 
 # savechunk: defined in utils/chunks.jl (fork Chunk has space field; do not duplicate here)

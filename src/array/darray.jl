@@ -1,7 +1,7 @@
 import Base: ==, fetch, length, isempty, size
 
 export DArray, DVector, DMatrix, DVecOrMat, Blocks, AutoBlocks
-export distribute
+export distribute, collect_datadeps
 
 
 ###### Array Domains ######
@@ -175,6 +175,7 @@ domain(d::DArray) = d.domain
 chunks(d::DArray) = d.chunks
 domainchunks(d::DArray) = d.subdomains
 size(x::DArray) = size(domain(x))
+Base.ndims(d::DArray{T,N}) where {T,N} = N
 stage(ctx, c::DArray) = c
 
 function Base.collect(d::DArray{T,N}; tree=false, copyto=false) where {T,N}
@@ -200,6 +201,31 @@ function Base.collect(d::DArray{T,N}; tree=false, copyto=false) where {T,N}
     else
         collect(treereduce_nd(dimcatfuncs, asyncmap(fetch, a.chunks)))
     end
+end
+
+"""
+    collect_datadeps(d::DArray; root=nothing)
+
+Collect a DArray to a single array by fetching every chunk on the current rank
+and assembling into a full array. No datadeps scheduling or root-only assembly:
+each rank that calls this gets the full matrix (useful when correctness matters
+more than communication cost).
+"""
+function collect_datadeps(d::DArray{T,N}; root=nothing) where {T,N}
+    if isempty(d.chunks)
+        return Array{eltype(d)}(undef, size(d)...)
+    end
+    if N == 0
+        return fetch(d.chunks[1])
+    end
+
+    chks = d.chunks
+    doms = domainchunks(d)
+    out = Array{T,N}(undef, size(d))
+    for I in CartesianIndices(chks)
+        copyto!(view(out, indexes(doms[I])...), fetch(chks[I]))
+    end
+    return out
 end
 Array{T,N}(A::DArray{S,N}) where {T,N,S} = convert(Array{T,N}, collect(A))
 
@@ -481,6 +507,21 @@ function stage(ctx::Context, d::Distribute)
             end
             Dagger.@spawn compute_scope=scope identity(d.data[c])
         end
+    end
+    # MPI type propagation: ensure all ranks know the concrete chunk types
+    accel = Dagger.current_acceleration()
+    if accel isa Dagger.MPIAcceleration
+        N = Base.ndims(d.data)
+        expected_type = Array{eltype(d.data), N}
+        Dagger.mpi_propagate_chunk_types!(cs, accel, expected_type)
+        # Log chunk types per rank after array creation
+        rank = MPI.Comm_rank(accel.comm)
+        #=chunk_types = Type[chunktype(t) for t in cs]
+        if allequal(chunk_types)
+            @info "[rank $rank] Array creation (distribute): all $(length(chunk_types)) chunk types are uniform: $(first(chunk_types))"
+        else
+            @warn "[rank $rank] Array creation (distribute): chunk types are NOT uniform: $chunk_types"
+        end=#
     end
     return DArray(eltype(d.data),
                   domain(d.data),

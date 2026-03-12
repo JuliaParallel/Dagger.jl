@@ -247,6 +247,14 @@ isweak(t) = false
 Base.show(io::IO, t::WeakThunk) = (print(io, "~"); Base.show(io, t.x.value))
 Base.convert(::Type{WeakThunk}, t::Thunk) = WeakThunk(t)
 chunktype(t::WeakThunk) = chunktype(unwrap_weak_checked(t))
+# Use options.return_type when set (e.g. from mpi_propagate_chunk_types! or eager_metadata)
+# so that Thunk arguments propagate type to downstream eager_metadata/execute!
+function chunktype(t::Thunk)
+    if t.options !== nothing && t.options.return_type !== nothing && isconcretetype(t.options.return_type)
+        return t.options.return_type
+    end
+    return typeof(t)
+end
 Base.convert(::Type{ThunkSyncdep}, t::WeakThunk) = ThunkSyncdep(nothing, t)
 ThunkSyncdep(t::WeakThunk) = ThunkSyncdep(nothing, t)
 

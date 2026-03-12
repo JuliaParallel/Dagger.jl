@@ -1551,11 +1551,19 @@ Executes a single task specified by `task` on `to_proc`.
                 @invokelatest move(to_proc, value)
             end
             #end
-            if new_value !== value
-                @dagdebug thunk_id :move "Moved argument @ $position to $to_proc: $(typeof(value)) -> $(typeof(new_value))"
+            # Preserve Chunk reference when move returns nothing (placeholder on this rank). This keeps
+            # type information correct at all ranks: chunktype(Chunk) is concrete even when Chunk holds no data.
+            # So execute! sees correct arg_types. Materializing the value (for the kernel) must happen in
+            # execute! and may require lazy recv from the executor if this rank has a placeholder.
+            if new_value === nothing && (value isa Dagger.Chunk || value isa Dagger.WeakChunk)
+                arg.value = value
+            else
+                if new_value !== value
+                    @dagdebug thunk_id :move "Moved argument @ $position to $to_proc: $(typeof(value)) -> $(typeof(new_value))"
+                end
+                arg.value = new_value
             end
-            @maybelog ctx timespan_finish(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=new_value); tasks=[Base.current_task()])
-            arg.value = new_value
+            @maybelog ctx timespan_finish(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=Dagger.value(arg)); tasks=[Base.current_task()])
             return
         end
     end

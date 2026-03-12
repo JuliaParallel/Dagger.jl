@@ -93,13 +93,30 @@ function stage(ctx, A::AllocateArray)
                 scope = ExactScope(A.procgrid[CartesianIndex(mod1.(Tuple(I), size(A.procgrid))...)])
             end
 
+            N = ndims(A.domainchunks)
+            ret_type = Array{A.eltype, N}
             if A.want_index
-                task = Dagger.@spawn compute_scope=scope allocate_array(A.f, A.eltype, i, size(x))
+                task = Dagger.@spawn compute_scope=scope return_type=ret_type allocate_array(A.f, A.eltype, i, size(x))
             else
-                task = Dagger.@spawn compute_scope=scope allocate_array(A.f, A.eltype, size(x))
+                task = Dagger.@spawn compute_scope=scope return_type=ret_type allocate_array(A.f, A.eltype, size(x))
             end
             tasks[i] = task
         end
+    end
+    # MPI type propagation: ensure all ranks know the concrete chunk types
+    accel = Dagger.current_acceleration()
+    if accel isa Dagger.MPIAcceleration
+        N = ndims(A.domainchunks)
+        expected_type = Array{A.eltype, N}
+        Dagger.mpi_propagate_chunk_types!(tasks, accel, expected_type)
+        # Log chunk types per rank after array creation
+        rank = MPI.Comm_rank(accel.comm)
+        #=chunk_types = Type[chunktype(t) for t in tasks]
+        if allequal(chunk_types)
+            @info "[rank $rank] Array creation (alloc): all $(length(chunk_types)) chunk types are uniform: $(first(chunk_types))"
+        else
+            @warn "[rank $rank] Array creation (alloc): chunk types are NOT uniform: $chunk_types"
+        end=#
     end
     return DArray(A.eltype, A.domain, A.domainchunks, tasks, A.partitioning)
 end

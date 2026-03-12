@@ -70,6 +70,8 @@ Base.@kwdef mutable struct Options
     stream_max_evals::Union{Int,Nothing} = nothing
 
     acceleration::Union{Acceleration,Nothing} = nothing
+
+    return_type::Union{Type,Nothing} = nothing
 end
 Options(::Nothing) = Options()
 function Options(old_options::NamedTuple)

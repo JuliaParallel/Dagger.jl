@@ -361,13 +361,15 @@ function tochunk_pset(x, space::MPIMemorySpace; device=nothing, kwargs...)
     if local_rank != space.rank
         return MPIRef(space.comm, space.rank, 0, nothing, Mid)
     else
-        return MPIRef(space.comm, space.rank, sizeof(x), poolset(x; device, kwargs...), Mid)
+        # type= is for Chunk metadata only; MemPool.poolset does not accept it
+        pset_kw = (; (k => v for (k, v) in pairs(kwargs) if k !== :type)...)
+        return MPIRef(space.comm, space.rank, sizeof(x), poolset(x; device, pset_kw...), Mid)
     end
 end
 
 const DEADLOCK_DETECT = TaskLocalValue{Bool}(()->true)
 const DEADLOCK_WARN_PERIOD = TaskLocalValue{Float64}(()->10.0)
-const DEADLOCK_TIMEOUT_PERIOD = TaskLocalValue{Float64}(()->600.0)
+const DEADLOCK_TIMEOUT_PERIOD = TaskLocalValue{Float64}(()->120.0)
 const RECV_WAITING = Base.Lockable(Dict{Tuple{MPI.Comm, Int, Int}, Base.Event}())
 
 struct InplaceInfo
@@ -748,8 +750,9 @@ function move(src::MPIOSProc, dst::MPIProcessor, x::Chunk)
 end
 
 const MPI_UNIFORM = ScopedValue{Bool}(false)
+# When true, move(_, _, MPIRef) uses poolget(; uniform=true) so the owner bcasts and the fetcher recv (e.g. rank 0 collecting).
+const FETCH_UNIFORM = ScopedValue{Bool}(true)
 
-@warn "bcast T if return type is not concrete" maxlog=1
 function remotecall_endpoint(f, accel::Dagger.MPIAcceleration, from_proc, to_proc, from_space, to_space, data)
     loc_rank = MPI.Comm_rank(accel.comm)
     task = DATADEPS_CURRENT_TASK[]
@@ -757,46 +760,63 @@ function remotecall_endpoint(f, accel::Dagger.MPIAcceleration, from_proc, to_pro
         @assert data isa Chunk "Expected Chunk, got $(typeof(data))"
         space = memory_space(data)
         tag = to_tag()
+        type_tag = to_tag()
+        T = move_type(from_proc.innerProc, to_proc.innerProc, chunktype(data))
+        T_new = f !== identity ? Base._return_type(f, Tuple{T}) : T
+        need_bcast = !isconcretetype(T_new) || T_new === Union{} || T_new === Nothing || T_new === Any
+
         if space.rank != from_proc.rank
-            # If the data is already where it needs to be
+            # Data is already at destination (to_proc.rank)
             @assert space.rank == to_proc.rank
             if space.rank == loc_rank
                 value = poolget(data.handle)
                 data_converted = f(move(from_proc.innerProc, to_proc.innerProc, value))
-                return tochunk(data_converted, to_proc, to_space)
+                T_actual = typeof(data_converted)
+                if need_bcast
+                    bcast_send_yield(T_actual, accel.comm, to_proc.rank, type_tag)
+                end
+                return tochunk(data_converted, to_proc, to_space; type=T_actual)
             else
-                T = move_type(from_proc.innerProc, to_proc.innerProc, chunktype(data))
-                T_new = f !== identity ? Base._return_type(f, Tuple{T}) : T
-                @assert isconcretetype(T_new) "Return type inference failed, expected concrete type, got $T -> $T_new"
-                return tochunk(nothing, to_proc, to_space; type=T_new)
+                T_actual = need_bcast ? recv_yield(accel.comm, to_proc.rank, type_tag) : T_new
+                return tochunk(nothing, to_proc, to_space; type=T_actual)
             end
         end
 
-        # The data is on the source rank
+        # Data is on the source rank
         @assert space.rank == from_proc.rank
         if loc_rank == from_proc.rank == to_proc.rank
             value = poolget(data.handle)
             data_converted = f(move(from_proc.innerProc, to_proc.innerProc, value))
-            return tochunk(data_converted, to_proc, to_space)
-        else
-            if loc_rank == from_proc.rank
-                value = poolget(data.handle)
-                data_moved = move(from_proc.innerProc, to_proc.innerProc, value)
-                Dagger.send_yield(data_moved, accel.comm, to_proc.rank, tag)
-                # FIXME: This is wrong to take typeof(data_moved), because the type may change
-                return tochunk(nothing, to_proc, to_space; type=typeof(data_moved))
-            elseif loc_rank == to_proc.rank
-                data_moved = Dagger.recv_yield(accel.comm, from_space.rank, tag)
-                data_converted = f(move(from_proc.innerProc, to_proc.innerProc, data_moved))
-                return tochunk(data_converted, to_proc, to_space)
-            else
-                T = move_type(from_proc.innerProc, to_proc.innerProc, chunktype(data))
-                T_new = f !== identity ? Base._return_type(f, Tuple{T}) : T
-                @assert isconcretetype(T_new) "Return type inference failed, expected concrete type, got $T -> $T_new"
-                return tochunk(nothing, to_proc, to_space; type=T_new)
+            return tochunk(data_converted, to_proc, to_space; type=typeof(data_converted))
+        end
+
+        if loc_rank == from_proc.rank
+            value = poolget(data.handle)
+            data_moved = move(from_proc.innerProc, to_proc.innerProc, value)
+            Dagger.send_yield(data_moved, accel.comm, to_proc.rank, tag)
+            T_actual = need_bcast ? recv_yield(accel.comm, to_proc.rank, type_tag) : T_new
+            return tochunk(nothing, to_proc, to_space; type=T_actual)
+        elseif loc_rank == to_proc.rank
+            data_moved = Dagger.recv_yield(accel.comm, from_space.rank, tag)
+            data_converted = f(move(from_proc.innerProc, to_proc.innerProc, data_moved))
+            T_actual = typeof(data_converted)
+            if need_bcast
+                bcast_send_yield(T_actual, accel.comm, to_proc.rank, type_tag)
             end
+            return tochunk(data_converted, to_proc, to_space; type=T_actual)
+        else
+            T_actual = need_bcast ? recv_yield(accel.comm, to_proc.rank, type_tag) : T_new
+            return tochunk(nothing, to_proc, to_space; type=T_actual)
         end
     end
+end
+
+# Chunk may be MPI-backed (MPIRef) but labeled with OSProc; treat source as the owning rank
+function move(src::OSProc, dst::MPIProcessor, x::Chunk)
+    if x.handle isa MPIRef
+        return move(MPIOSProc(x.handle.comm, x.handle.rank), dst, x)
+    end
+    error("MPI move not supported")
 end
 
 move(src::Processor, dst::MPIProcessor, x::Chunk) = error("MPI move not supported")
@@ -842,20 +862,52 @@ function execute!(proc::MPIProcessor, f, args...; kwargs...)
     end
     if inplace_move
         space = memory_space(nothing, proc)::MPIMemorySpace
-        return tochunk(nothing, proc, space)
-    else
-        # Handle commun1ication ourselves
-        if islocal
-            T = typeof(result)
-            space = memory_space(result, proc)::MPIMemorySpace
-            T_space = (T, space.innerSpace)
+        # move!(..., to, from): result type is the destination chunk's type
+        dest_type = length(args) >= 4 && args[4] isa Chunk ? chunktype(args[4]) : Any
+        return tochunk(nothing, proc, space; type=dest_type)
+    end
+
+    # Infer return type; only bcast when inference is not concrete
+    fname = nameof(f)
+    arg_types = map(chunktype, args)
+    for (i, a) in enumerate(args)
+        if arg_types[i] === Nothing
+            if a === nothing
+                error("Argument at position $i is the value `nothing` (dependency not resolved on this rank). f=$fname arg_types=$arg_types")
+            else
+                error("Argument at position $i has chunktype Nothing. f=$fname arg_types=$arg_types")
+            end
+        end
+    end
+    inferred_type = Base.promote_op(f, arg_types...)
+    if (inferred_type === Any || !isconcretetype(inferred_type)) && f === Dagger.allocate_array && length(args) >= 2
+        T_el = args[2]
+        sz = args[end]
+        if T_el isa Type && isconcretetype(T_el) && sz isa Tuple{Vararg{Integer}}
+            inferred_type = Array{T_el, length(sz)}
+        end
+    end
+    need_bcast = !isconcretetype(inferred_type) || inferred_type === Union{} || inferred_type === Nothing || inferred_type === Any
+    if inferred_type === Nothing
+        error("execute!: inferred type is Nothing. f=$fname arg_types=$arg_types")
+    end
+
+    if islocal
+        T = typeof(result)
+        space = memory_space(result, proc)::MPIMemorySpace
+        if need_bcast
             @opcounter :execute_bcast_send_yield
-            bcast_send_yield(T_space, proc.comm, proc.rank, tag)
-            return tochunk(result, proc, space)
-        else
+            bcast_send_yield((T, space.innerSpace), proc.comm, proc.rank, tag)
+        end
+        return tochunk(result, proc, space; type=T)
+    else
+        if need_bcast
             T, innerSpace = recv_yield(proc.comm, proc.rank, tag)
             space = MPIMemorySpace(innerSpace, proc.comm, proc.rank)
             return tochunk(nothing, proc, space; type=T)
+        else
+            space = memory_space(nothing, proc)::MPIMemorySpace
+            return tochunk(nothing, proc, space; type=inferred_type)
         end
     end
 end
@@ -872,6 +924,28 @@ function initialize_acceleration!(a::MPIAcceleration)
         push!(ctx.procs, MPIOSProc(a.comm, i))
     end
     unique!(ctx.procs)
+end
+
+"""
+    mpi_propagate_chunk_types!(tasks, accel::MPIAcceleration, expected_type)
+
+Ensure all ranks use the same concrete type for the given tasks by setting
+each task's options.return_type to expected_type when it is concrete.
+This allows chunktype(task) to return the concrete type on every rank
+without an MPI allgather of actual result types.
+"""
+function mpi_propagate_chunk_types!(tasks, accel::MPIAcceleration, expected_type)
+    isconcretetype(expected_type) || return
+    for t in tasks
+        if t isa Thunk
+            if t.options !== nothing
+                t.options.return_type = expected_type
+            else
+                t.options = Options(return_type=expected_type)
+            end
+        end
+    end
+    return
 end
 
 accel_matches_proc(accel::MPIAcceleration, proc::MPIOSProc) = true
