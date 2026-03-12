@@ -430,8 +430,8 @@ function can_use_proc(state, task, gproc, proc, opts, scope)
     # Check against single
     if opts.single !== nothing
         @warn "The `single` option is deprecated, please use scopes instead\nSee https://juliaparallel.org/Dagger.jl/stable/scopes/ for details" maxlog=1
-        if gproc.pid != opts.single
-            @dagdebug task :scope "Rejected $proc: gproc.pid ($(gproc.pid)) != single ($(opts.single))"
+        if root_worker_id(gproc) != opts.single
+            @dagdebug task :scope "Rejected $proc: gproc root_worker_id ($(root_worker_id(gproc))) != single ($(opts.single))"
             return false, scope
         end
         scope = constrain(scope, Dagger.ProcessScope(opts.single))
@@ -583,19 +583,21 @@ end
 
         # Add fixed cost for cross-worker task transfer (esimated at 1ms)
         # TODO: Actually estimate/benchmark this
-        task_xfer_cost = gproc.pid != myid() ? 1_000_000 : 0 # 1ms
+        task_xfer_cost = root_worker_id(gproc) != myid() ? 1_000_000 : 0 # 1ms
 
         # Compute final cost
         costs[proc] = est_time_util + (tx_cost/tx_rate) + task_xfer_cost
     end
     chunks_cleanup()
 
-    # Shuffle procs around, so equally-costly procs are equally considered
+    # Shuffle procs around, so equally-costly procs are equally considered (skip shuffle when MPI for deterministic tie-breaking)
     np = length(procs)
     @reusable :estimate_task_costs_P Vector{Int} 0 4 np P begin
         resize!(P, np)
         copyto!(P, 1:np)
-        randperm!(P)
+        if !(Dagger.current_acceleration() isa Dagger.MPIAcceleration)
+            randperm!(P)
+        end
         for idx in 1:np
             sorted_procs[idx] = procs[P[idx]]
         end

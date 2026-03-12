@@ -111,7 +111,11 @@ function datadeps_schedule_task(sched::UltraScheduler, state::DataDepsState, all
             delete!(spaces_completed, our_space)
             continue
         end
-        our_proc = rand(our_space_procs)
+        our_proc = if Dagger.current_acceleration() isa Dagger.MPIAcceleration
+            first(sort(collect(our_space_procs), by=Dagger.short_name))
+        else
+            rand(our_space_procs)
+        end
         break
     end
 
