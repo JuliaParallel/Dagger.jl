@@ -29,7 +29,7 @@ it'll be passed as-is to the function `f` (with some exceptions).
 
 !!! note "Task / thread occupancy"
     By default, `Dagger` assumes that tasks saturate the thread they are running on and does not try to schedule other tasks on the thread.
-    This default can be controlled by specifying [`Options`](@ref) (more details can be found under [Task and Scheduler options](@ref)).
+    This default can be controlled by specifying [`Options`](@ref Dagger.Options) (more details can be found under [Task and Scheduler options](@ref)).
     The section [Changing the thread occupancy](@ref) shows a runnable example of how to achieve this.
 
 ## Options
@@ -37,7 +37,7 @@ it'll be passed as-is to the function `f` (with some exceptions).
 The [`Options`](@ref Dagger.Options) struct in the second argument position is
 optional; if provided, it is passed to the scheduler to control its
 behavior. [`Options`](@ref Dagger.Options) contains option
-key-value pairs, which can be any field in [`Options`](@ref)
+key-value pairs, which can be any field in [`Options`](@ref Dagger.Options)
 (see [Task and Scheduler options](@ref)).
 
 ## Simple example
@@ -125,7 +125,7 @@ The [`Options`](@ref Dagger.Options) struct in the second argument position is
 optional; if provided, it is passed to the scheduler to control its
 behavior. [`Options`](@ref Dagger.Options) contains a `NamedTuple` of option
 key-value pairs, which can be any of:
-- Any field in [`Options`](@ref) (see [Task and Scheduler options](@ref))
+- Any field in [`Options`](@ref Dagger.Options) (see [Task and Scheduler options](@ref))
 - `meta::Bool` -- Pass the input [`Chunk`](@ref) objects themselves to `f` and
   not the value contained in them.
 
@@ -228,7 +228,7 @@ Note that, as a legacy API, usage of the lazy API is generally discouraged for m
 
 While Dagger generally "just works", sometimes one needs to exert some more
 fine-grained control over how the scheduler allocates work. There are two
-parallel mechanisms to achieve this: Task options (from [`Options`](@ref)) and
+parallel mechanisms to achieve this: Task options (from [`Options`](@ref Dagger.Options)) and
 Scheduler options (from [`Sch.SchedulerOptions`](@ref)). Scheduler
 options operate globally across an entire DAG, and Task options operate on a
 task-by-task basis.
@@ -258,7 +258,7 @@ delayed(+; single=1)(1, 2)
 
 ## Changing the thread occupancy
 
-One of the supported [`Options`](@ref) is the `occupancy` keyword.
+One of the supported [`Options`](@ref Dagger.Options) is the `occupancy` keyword.
 This keyword can be used to communicate that a task is not expected to fully
 saturate a CPU core (e.g. due to being IO-bound).
 The basic usage looks like this:

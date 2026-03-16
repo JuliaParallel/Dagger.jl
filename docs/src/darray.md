@@ -704,7 +704,9 @@ From `LinearAlgebra`:
 - `*` (Out-of-place Matrix-(Matrix/Vector) multiply)
 - `mul!` (In-place Matrix-Matrix and Matrix-Vector multiply)
 - `cholesky`/`cholesky!` (In-place/Out-of-place Cholesky factorization)
-- `lu`/`lu!` (In-place/Out-of-place LU factorization (`NoPivot` only))
+- `lu`/`lu!` (In-place/Out-of-place LU factorization (`NoPivot` and `RowMaximum`))
+- `\`/`ldiv!` (In-place/Out-of-place Linear solving with LU and Cholesky factorizations)
+- `inv` (Out-of-place matrix inversion)
 
 From `AbstractFFTs`:
 - `fft`/`fft!`
