@@ -55,40 +55,43 @@ end
 # Combined search+reduce: searches all block columns for the pivot and
 # updates ipiv. Receives full Chunks for the diagonal block and off-diagonal
 # blocks; creates column views internally.
+# Uses allowscalar for the pivot value reads and ipiv write when chunks are GPU arrays.
 function search_and_update_ipiv!(ipiv_chunk::AbstractVector{Int}, info::Ref{Int},
                                   diag_block::AbstractMatrix{T},
                                   k::Int, p::Int, mb::Int, m::Int,
                                   n_offdiag::Int,
                                   offdiag_blocks::Vararg{AbstractMatrix{T}}) where T
-    # Search diagonal block column p (rows p:end)
-    diag_col = view(diag_block, p:min(mb, m-(k-1)*mb), p:p)
-    max_idx = move(task_processor(), LinearAlgebra.BLAS.iamax)(diag_col[:])
-    best_piv_idx = (p - 1) + max_idx
-    best_piv_val = diag_col[max_idx]
-    best_block = 1
+    GPUArraysCore.allowscalar() do
+        # Search diagonal block column p (rows p:end)
+        diag_col = view(diag_block, p:min(mb, m-(k-1)*mb), p:p)
+        max_idx = move(task_processor(), LinearAlgebra.BLAS.iamax)(diag_col[:])
+        best_piv_idx = (p - 1) + max_idx
+        best_piv_val = diag_col[max_idx]
+        best_block = 1
 
-    # Search off-diagonal block columns
-    for (bi, blk) in enumerate(offdiag_blocks)
-        col = view(blk, :, p:p)
-        idx = move(task_processor(), LinearAlgebra.BLAS.iamax)(col[:])
-        val = col[idx]
-        abs_best = best_piv_val isa Real ? abs(best_piv_val) : abs(real(best_piv_val)) + abs(imag(best_piv_val))
-        abs_val = val isa Real ? abs(val) : abs(real(val)) + abs(imag(val))
-        if abs_val > abs_best
-            best_piv_idx = idx
-            best_piv_val = val
-            best_block = bi + 1
+        # Search off-diagonal block columns
+        for (bi, blk) in enumerate(offdiag_blocks)
+            col = view(blk, :, p:p)
+            idx = move(task_processor(), LinearAlgebra.BLAS.iamax)(col[:])
+            val = col[idx]
+            abs_best = best_piv_val isa Real ? abs(best_piv_val) : abs(real(best_piv_val)) + abs(imag(best_piv_val))
+            abs_val = val isa Real ? abs(val) : abs(real(val)) + abs(imag(val))
+            if abs_val > abs_best
+                best_piv_idx = idx
+                best_piv_val = val
+                best_block = bi + 1
+            end
         end
-    end
 
-    # Singularity detection
-    abs_best = best_piv_val isa Real ? abs(best_piv_val) : abs(real(best_piv_val)) + abs(imag(best_piv_val))
-    if info[] == 0 && isapprox(abs_best, zero(T); atol=eps(real(T)))
-        info[] = (k-1)*mb + p
-    end
+        # Singularity detection
+        abs_best = best_piv_val isa Real ? abs(best_piv_val) : abs(real(best_piv_val)) + abs(imag(best_piv_val))
+        if info[] == 0 && isapprox(abs_best, zero(T); atol=eps(real(T)))
+            info[] = (k-1)*mb + p
+        end
 
-    # Update ipiv
-    ipiv_chunk[p] = (best_block+k-2)*mb + best_piv_idx
+        # Update ipiv
+        ipiv_chunk[p] = (best_block+k-2)*mb + best_piv_idx
+    end
 end
 
 # Swap rows in the panel column. Receives full Chunks.
