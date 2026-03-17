@@ -33,8 +33,10 @@ function LinearAlgebra.norm2(A::LowerTriangular{T,<:DArray{T,2}}) where T
     return sqrt(sum(lower_norms_values; init=zeroRT) + sum(diag_norms_values; init=zeroRT))
 end
 
-is_cross_hermitian(A1, A2) = A1 ≈ A2'
-is_cross_symmetric(A1, A2) = A1 ≈ LinearAlgebra.transpose(A2)
+# Use allowscalar for ≈ so that GPU array chunks (ROCArray, CuArray, etc.) can be
+# compared without triggering scalar-indexing errors in norm/isapprox.
+is_cross_hermitian(A1, A2) = GPUArraysCore.allowscalar(() -> A1 ≈ A2')
+is_cross_symmetric(A1, A2) = GPUArraysCore.allowscalar(() -> A1 ≈ LinearAlgebra.transpose(A2))
 function LinearAlgebra.issymmetric(A::DArray{T,2}) where T
     if size(A, 1) != size(A, 2)
         return false
@@ -92,10 +94,22 @@ function LinearAlgebra.ishermitian(A::DArray{T,2}) where T
     return all(fetch, to_check)
 end
 
+# Check finiteness of a single chunk. For GPU arrays uses all(isfinite, A) (GPU
+# reduction via mapreduce); for CPU arrays uses LAPACK.chkfinite. Throws
+# ArgumentError("matrix has Inf or NaN") if any element is non-finite.
+function _chkfinite_chunk(A)
+    if A isa GPUArraysCore.AbstractGPUArray
+        all(isfinite, A) || throw(ArgumentError("matrix has Inf or NaN"))
+    else
+        LinearAlgebra.LAPACK.chkfinite(A)
+    end
+    return nothing
+end
+
 function LinearAlgebra.LAPACK.chkfinite(A::DArray)
     Ac = A.chunks
     chunk_finite = [Ref(true) for _ in Ac]
-    chkfinite!(finite, A) = finite[] = LinearAlgebra.LAPACK.chkfinite(A)
+    chkfinite!(finite, A) = (_chkfinite_chunk(A); finite[] = true)
     Dagger.spawn_datadeps() do
         for idx in eachindex(Ac)
             Dagger.@spawn chkfinite!(Out(chunk_finite[idx]), In(Ac[idx]))
