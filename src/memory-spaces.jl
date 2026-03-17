@@ -314,8 +314,10 @@ memory_spans(::NoAliasing) = MemorySpan{CPURAMMemorySpace}[]
 struct UnknownAliasing <: AbstractAliasing end
 memory_spans(::UnknownAliasing) = [MemorySpan{CPURAMMemorySpace}(C_NULL, typemax(UInt))]
 
-warn_unknown_aliasing(T) =
-    @warn "Cannot resolve aliasing for object of type $T\nExecution may become sequential"
+error_unknown_aliasing(T) =
+    throw(ConcurrencyViolationError("Cannot resolve aliasing for object of type $T, execution may become sequential"))
+error_unknown_aliasing(T, x) =
+    throw(ConcurrencyViolationError("Cannot resolve aliasing for object of type $T (element of $(typeof(x))), execution may become sequential"))
 
 struct CombinedAliasing <: AbstractAliasing
     sub_ainfos::Vector{AbstractAliasing}
@@ -381,7 +383,7 @@ function aliasing(x::T) where T
         end
         return CombinedAliasing(as)
     else
-        warn_unknown_aliasing(T)
+        error_unknown_aliasing(T)
         return UnknownAliasing()
     end
 end
@@ -430,7 +432,7 @@ function aliasing(x::Array{T}) where T
     else
         # FIXME: Also ContiguousAliasing of container
         #return IteratedAliasing(x)
-        warn_unknown_aliasing(T)
+        error_unknown_aliasing(T, x)
         return UnknownAliasing()
     end
 end
@@ -484,7 +486,7 @@ function aliasing(x::SubArray{T,N}) where {T,N}
     else
         # FIXME: Also ContiguousAliasing of container
         #return IteratedAliasing(x)
-        warn_unknown_aliasing(T)
+        error_unknown_aliasing(T, x)
         return UnknownAliasing()
     end
 end
