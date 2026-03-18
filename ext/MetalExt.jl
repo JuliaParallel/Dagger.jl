@@ -197,9 +197,31 @@ function Dagger.move(from_proc::MtlArrayDeviceProc, to_proc::MtlArrayDeviceProc,
     # FIXME: elseif Dagger.root_worker_id(from_proc) == Dagger.root_worker_id(to_proc)
     else
         # Different node, use DtoH, serialization, HtoD
-        return MtlArray(remotecall_fetch(from_proc.owner, x) do x
-            Array(unwrap(x))
-        end)
+        host_copy = remotecall_fetch(from_proc.owner, from_proc, x) do from_proc, x
+            return with_context(from_proc) do
+                Array(unwrap(x))
+            end
+        end
+        return with_context(to_proc) do
+            return MtlArray(host_copy)
+        end
+    end
+end
+
+function Dagger.move(from_proc::MtlArrayDeviceProc, to_proc::MtlArrayDeviceProc, x::MtlArray)
+    if from_proc == to_proc
+        # Same process and GPU, no change
+        with_context(Metal.synchronize, from_proc)
+        return x
+    # FIXME: elseif Dagger.root_worker_id(from_proc) == Dagger.root_worker_id(to_proc)
+    else
+        # Different node, use DtoH, serialization, HtoD
+        host_copy = with_context(from_proc) do
+            return Array(x)
+        end
+        return with_context(to_proc) do
+            return MtlArray(host_copy)
+        end
     end
 end
 
