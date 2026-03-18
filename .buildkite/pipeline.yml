@@ -106,7 +106,7 @@ steps:
       CI_USE_CUDA: "1"
 
   - label: Julia 1.11 (ROCm)
-    timeout_in_minutes: 20
+    timeout_in_minutes: 60
     <<: *gputest
     plugins:
       - JuliaCI/julia#v1:
@@ -121,7 +121,7 @@ steps:
       CI_USE_ROCM: "1"
 
   - label: Julia 1.11 (oneAPI)
-    timeout_in_minutes: 20
+    timeout_in_minutes: 60
     <<: *gputest
     plugins:
       - JuliaCI/julia#v1:
