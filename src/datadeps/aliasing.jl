@@ -356,7 +356,10 @@ function aliased_object!(f, cache::AliasedObjectCache, x; ainfo=aliasing(x, iden
         @assert y isa Chunk "Didn't get a Chunk from functor"
         @assert memory_space(y) == cache.space "Space mismatch! $(memory_space(y)) != $(cache.space)"
         if memory_space(x) != cache.space
-            @assert ainfo != aliasing(y, identity) "Aliasing mismatch! $ainfo == $(aliasing(y, identity))"
+            y_ainfo = aliasing(y, identity)
+            if ainfo == y_ainfo
+                @assert false "Aliasing mismatch! $ainfo == $(y_ainfo)"
+            end
         end
         set_stored!(cache, y, ainfo)
         return y

@@ -261,6 +261,25 @@ function Dagger.move(from_proc::CuArrayDeviceProc, to_proc::CuArrayDeviceProc, x
     end
 end
 
+function Dagger.move(from_proc::CuArrayDeviceProc, to_proc::CuArrayDeviceProc, x::CuArray)
+    if from_proc == to_proc
+        with_context(CUDA.synchronize, from_proc)
+        return x
+    elseif Dagger.root_worker_id(from_proc) == Dagger.root_worker_id(to_proc)
+        with_context(CUDA.synchronize, from_proc)
+        return with_context(to_proc) do
+            to_arr = similar(x)
+            copyto!(to_arr, x)
+            CUDA.synchronize()
+            return to_arr
+        end
+    else
+        return CuArray(remotecall_fetch(from_proc.owner, x) do x
+            Array(x)
+        end)
+    end
+end
+
 # Adapt generic functions
 Dagger.move(from_proc::CPUProc, to_proc::CuArrayDeviceProc, x::Function) = x
 Dagger.move(from_proc::CPUProc, to_proc::CuArrayDeviceProc, x::Chunk{T}) where {T<:Function} =
