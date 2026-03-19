@@ -248,12 +248,16 @@ Dagger.move(from_proc::CPUProc, to_proc::oneArrayDeviceProc, x::Function) = x
 Dagger.move(from_proc::CPUProc, to_proc::oneArrayDeviceProc, x::Chunk{T}) where {T<:Function} =
     Dagger.move(from_proc, to_proc, fetch(x))
 
+# Adapt BLAS/LAPACK functions (same pattern as CUDAExt/ROCExt)
 import LinearAlgebra: BLAS, LAPACK
+_keep_blas_functions = Set(["iamax"])
 for lib in [BLAS, LAPACK]
     for name in names(lib; all=true)
         name == nameof(lib) && continue
         startswith(string(name), '#') && continue
-        endswith(string(name), '!') || continue
+        if !endswith(string(name), '!') && !(string(name) in _keep_blas_functions)
+            continue
+        end
         if name in names(oneAPI.oneMKL; all=true)
             fn = getproperty(lib, name)
             mklfn = getproperty(oneAPI.oneMKL, name)
