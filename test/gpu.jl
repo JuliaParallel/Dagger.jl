@@ -214,8 +214,10 @@ end
 
             if gpu != :all
                 local A, B
+                # ROCArray(rand(...)) not AMDGPU.rand: rocRAND RNG finalizers can error at
+                # process exit ("handle not managed by cache") when context/cache order differs.
                 AMDGPU.device!(AMDGPU.devices()[gpu]) do
-                    A = AMDGPU.rand(128)
+                    A = ROCArray(rand(Float32, 128))
                     B = AMDGPU.zeros(128)
                 end
                 Dagger.with_options(;scope=local_scope) do
