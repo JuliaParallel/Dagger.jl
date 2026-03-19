@@ -52,54 +52,60 @@ end
 # The full-Chunk approach is used here for simplicity,
 # but ChunkViews could be used for finer-grained dependencies if needed.
 
-# Combined search+reduce: searches all block columns for the pivot and
-# updates ipiv. Receives full Chunks for the diagonal block and off-diagonal
-# blocks; creates column views internally.
-# Uses allowscalar for the pivot value reads and ipiv write when chunks are GPU arrays.
+# Column pivot metric matches BLAS iamax: max abs (real) or max |Re|+|Im| (complex).
+function _lu_pivot_col_metric(col::AbstractVector{T}) where T
+    if T <: Real
+        findmax(abs.(col))
+    else
+        findmax(@. abs(real(col)) + abs(imag(col)))
+    end
+end
+
+# Combined search+reduce: pivot via findmax (GPU-friendly broadcast+reduction).
 function search_and_update_ipiv!(ipiv_chunk::AbstractVector{Int}, info::Ref{Int},
                                   diag_block::AbstractMatrix{T},
                                   k::Int, p::Int, mb::Int, m::Int,
                                   n_offdiag::Int,
                                   offdiag_blocks::Vararg{AbstractMatrix{T}}) where T
+    diag_col = view(diag_block, p:min(mb, m-(k-1)*mb), p:p)
+    isempty(diag_col) && return
+    diag_vec = vec(diag_col)
+    best_mag, rel_idx = _lu_pivot_col_metric(diag_vec)
+    best_piv_idx = (p - 1) + rel_idx
+    best_block = 1
+
+    for (bi, blk) in enumerate(offdiag_blocks)
+        col = view(blk, :, p:p)
+        colv = vec(col)
+        isempty(colv) && continue
+        mag_max, idx = _lu_pivot_col_metric(colv)
+        if mag_max > best_mag
+            best_mag = mag_max
+            best_piv_idx = idx
+            best_block = bi + 1
+        end
+    end
+
+    Tf = real(float(T))
+    if info[] == 0 && best_mag <= eps(Tf)
+        info[] = (k-1)*mb + p
+    end
+
+    # Scalar write; wrap in allowscalar when ipiv_chunk is a GPU array (e.g. ROCArray).
     GPUArraysCore.allowscalar() do
-        # Search diagonal block column p (rows p:end)
-        diag_col = view(diag_block, p:min(mb, m-(k-1)*mb), p:p)
-        max_idx = move(task_processor(), LinearAlgebra.BLAS.iamax)(diag_col[:])
-        best_piv_idx = (p - 1) + max_idx
-        best_piv_val = diag_col[max_idx]
-        best_block = 1
-
-        # Search off-diagonal block columns
-        for (bi, blk) in enumerate(offdiag_blocks)
-            col = view(blk, :, p:p)
-            idx = move(task_processor(), LinearAlgebra.BLAS.iamax)(col[:])
-            val = col[idx]
-            abs_best = best_piv_val isa Real ? abs(best_piv_val) : abs(real(best_piv_val)) + abs(imag(best_piv_val))
-            abs_val = val isa Real ? abs(val) : abs(real(val)) + abs(imag(val))
-            if abs_val > abs_best
-                best_piv_idx = idx
-                best_piv_val = val
-                best_block = bi + 1
-            end
-        end
-
-        # Singularity detection
-        abs_best = best_piv_val isa Real ? abs(best_piv_val) : abs(real(best_piv_val)) + abs(imag(best_piv_val))
-        if info[] == 0 && isapprox(abs_best, zero(T); atol=eps(real(T)))
-            info[] = (k-1)*mb + p
-        end
-
-        # Update ipiv
-        ipiv_chunk[p] = (best_block+k-2)*mb + best_piv_idx
+        ipiv_chunk[p] = (best_block + k - 2) * mb + best_piv_idx
     end
 end
 
 # Swap rows in the panel column. Receives full Chunks.
+# Uses allowscalar for ipiv read and row swap when chunks are GPU arrays.
 function swaprows_panel!(A::AbstractMatrix{T}, M::AbstractMatrix{T}, ipiv_chunk::AbstractVector{Int}, m::Int, p::Int, mb::Int) where T
-    q = div(ipiv_chunk[p]-1,mb) + 1
-    r = (ipiv_chunk[p]-1)%mb+1
-    if m == q
-        A[p,:], M[r,:] = M[r,:], A[p,:]
+    GPUArraysCore.allowscalar() do
+        q = div(ipiv_chunk[p]-1,mb) + 1
+        r = (ipiv_chunk[p]-1)%mb+1
+        if m == q
+            A[p,:], M[r,:] = M[r,:], A[p,:]
+        end
     end
 end
 
@@ -114,28 +120,40 @@ function geru!(α::T, x::AbstractVector{T}, y::AbstractVector{T}, A::AbstractMat
     return A
 end
 
+function _lu_inv_diag_el(A::AbstractMatrix{T}, p::Int) where T
+    if A isa GPUArraysCore.AbstractGPUArray
+        return one(T) / Array(@view A[p:p, p:p])[1]
+    end
+    return one(T) / A[p, p]
+end
+
 # Update panel on the diagonal block (rows p+1:end). Receives the full block.
 function update_panel_diag!(A::AbstractMatrix{T}, p::Int, row_end::Int) where T
     M = view(A, p+1:row_end, :)
-    Acinv = one(T) / A[p,p]
+    Acinv = _lu_inv_diag_el(A, p)
     view(M, :, p) .= Acinv .* view(M, :, p)
     geru!(-one(T), view(M, :, p), view(A, p, p+1:size(A,2)), view(M, :, p+1:size(M,2)))
+    return A
 end
 
 # Update panel on an off-diagonal block. Receives full Chunks.
 function update_panel_offdiag!(M::AbstractMatrix{T}, A::AbstractMatrix{T}, p::Int) where T
-    Acinv = one(T) / A[p,p]
+    Acinv = _lu_inv_diag_el(A, p)
     view(M, :, p) .= Acinv .* view(M, :, p)
     geru!(-one(T), view(M, :, p), view(A, p, p+1:size(A,2)), view(M, :, p+1:size(M,2)))
+    return M
 end
 
 # Swap rows in trailing columns. Receives full Chunks.
+# Uses allowscalar for ipiv reads and row swaps when chunks are GPU arrays.
 function swaprows_trail!(A::AbstractMatrix{T}, M::AbstractMatrix{T}, ipiv::AbstractVector{Int}, m::Int, mb::Int) where T
-    for p in eachindex(ipiv)
-        q = div(ipiv[p]-1,mb) + 1
-        r = (ipiv[p]-1)%mb+1
-        if m == q
-            A[p,:], M[r,:] = M[r,:], A[p,:]
+    GPUArraysCore.allowscalar() do
+        for p in eachindex(ipiv)
+            q = div(ipiv[p]-1,mb) + 1
+            r = (ipiv[p]-1)%mb+1
+            if m == q
+                A[p,:], M[r,:] = M[r,:], A[p,:]
+            end
         end
     end
 end
