@@ -33,10 +33,25 @@ function LinearAlgebra.norm2(A::LowerTriangular{T,<:DArray{T,2}}) where T
     return sqrt(sum(lower_norms_values; init=zeroRT) + sum(diag_norms_values; init=zeroRT))
 end
 
-# Use allowscalar for ≈ so that GPU array chunks (ROCArray, CuArray, etc.) can be
-# compared without triggering scalar-indexing errors in norm/isapprox.
-is_cross_hermitian(A1, A2) = GPUArraysCore.allowscalar(() -> A1 ≈ A2')
-is_cross_symmetric(A1, A2) = GPUArraysCore.allowscalar(() -> A1 ≈ LinearAlgebra.transpose(A2))
+# Frobenius norm via sum(abs2, ...) to avoid scalar indexing on GPU arrays (LinearAlgebra.norm
+# can dispatch to norm_recursive_check which iterates).
+function _frobenius_norm(A)
+    return sqrt(sum(abs2, A))
+end
+
+# Chunkwise equality via norms (broadcast reductions on GPU); avoids scalar ≈.
+function is_cross_hermitian(A1, A2)
+    B = A2'
+    Tf = float(real(promote_type(eltype(A1), eltype(B))))
+    rtol = sqrt(eps(Tf))
+    return _frobenius_norm(A1 - B) <= rtol * max(_frobenius_norm(A1), _frobenius_norm(B))
+end
+function is_cross_symmetric(A1, A2)
+    B = LinearAlgebra.transpose(A2)
+    Tf = float(real(promote_type(eltype(A1), eltype(B))))
+    rtol = sqrt(eps(Tf))
+    return _frobenius_norm(A1 - B) <= rtol * max(_frobenius_norm(A1), _frobenius_norm(B))
+end
 function LinearAlgebra.issymmetric(A::DArray{T,2}) where T
     if size(A, 1) != size(A, 2)
         return false
