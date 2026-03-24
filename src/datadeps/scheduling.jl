@@ -243,10 +243,16 @@ end
 
 ### JIT Schedulers ###
 
+# Default for user-defined schedulers with a zero-arg constructor. Schedulers
+# that carry mutable state should specialize `similar` to return a fresh shard
+# (used when hierarchical scheduling clones a scheduler per partition).
+Base.similar(s::DataDepsScheduler) = typeof(s)()
+
 mutable struct RoundRobinScheduler <: DataDepsScheduler
     proc_idx::Int
     RoundRobinScheduler() = new(1)
 end
+Base.similar(::RoundRobinScheduler) = RoundRobinScheduler()
 function datadeps_schedule_task_jit!(sched::RoundRobinScheduler, all_procs, all_scope, task_scope, spec::DTaskSpec, task::DTask)
     proc_idx = sched.proc_idx
     our_proc = all_procs[proc_idx]
@@ -267,6 +273,7 @@ function datadeps_schedule_task_jit!(sched::RoundRobinScheduler, all_procs, all_
 end
 
 struct NaiveScheduler <: DataDepsScheduler end
+Base.similar(::NaiveScheduler) = NaiveScheduler()
 function datadeps_schedule_task_jit!(sched::NaiveScheduler, all_procs, all_scope, task_scope, spec::DTaskSpec, task::DTask)
     raw_args = map(arg->tochunk(value(arg)), spec.fargs)
     our_proc = remotecall_fetch(1, all_procs, raw_args) do all_procs, raw_args
@@ -302,6 +309,7 @@ struct UltraScheduler <: DataDepsScheduler
                     Dict{MemorySpace,Int}())
     end
 end
+Base.similar(::UltraScheduler) = UltraScheduler()
 function datadeps_schedule_task_jit!(sched::UltraScheduler, all_procs, all_scope, task_scope, spec::DTaskSpec, task::DTask)
     args = Base.mapany(spec.fargs) do arg
         pos, data = arg

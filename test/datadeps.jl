@@ -972,7 +972,7 @@ end
 
 struct DummyErrorScheduler <: Dagger.DataDepsScheduler end
 struct DummySchedulerError <: Exception end
-function Dagger.datadeps_schedule_task(::DummyErrorScheduler, state, all_procs, all_scope, task_scope, spec, task)
+function Dagger.datadeps_schedule_task_jit!(::DummyErrorScheduler, all_procs, all_scope, task_scope, spec, task)
     throw(DummySchedulerError())
 end
 
