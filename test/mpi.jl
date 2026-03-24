@@ -550,7 +550,9 @@ read_only(X) = (sum(X); nothing)
     r1 = min(1, nranks-1)
     cross = r1 != 0 # single-rank runs degenerate to zero copies
 
-    # Read-only cross-rank arg: one copy-in, no writeback
+    # Read-only cross-rank arg: copy-in plus region-end write-back. Write-back
+    # is not elided via `arg_current`; for a pure `In` the bytes are unchanged,
+    # but planning still inserts the copy-from.
     A = ones(4, 4)
     logs = with_logs() do
         Dagger.spawn_datadeps() do

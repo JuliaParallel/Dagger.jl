@@ -114,6 +114,18 @@ processor_owner_rank(accel::Acceleration, proc::Processor) = first(fire_order_ke
 processor_order_key(accel::Acceleration, proc::Processor) =
     (fire_order_key(proc)..., short_name(proc))
 
+"""
+    partition_affinity_id(x) -> Int
+
+Logical owner identity used by hierarchical Datadeps partitioning. Defaults to
+`root_worker_id` (Distributed worker id). Accelerations with a different notion
+of ownership (e.g. MPI ranks) override for their spaces/processors so affinity
+partitioning spreads work across ranks the same way Distributed spreads across
+workers.
+"""
+partition_affinity_id(space::MemorySpace) = root_worker_id(space)
+partition_affinity_id(proc::Processor) = partition_affinity_id(only(memory_spaces(proc)))
+
 "Preferred execution rank for `task`, or `nothing` if no preference."
 task_processor_preference(accel::Acceleration, task, state) = nothing
 
