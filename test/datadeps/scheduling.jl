@@ -115,6 +115,13 @@ end
 
 # ---------- Helpers for DAG capture via the schedule cache ----------
 
+# N.B. These tests exercise the *flat* AOT DAG-scheduling/caching path
+# (`distribute_tasks!` + `datadeps_build_schedule!`), so every `spawn_datadeps`
+# call here runs with `hierarchical=false`. Hierarchical scheduling intentionally
+# computes a separate, partition-local AOT schedule on each partition's own task
+# (no global schedule cache on the calling task), so the caller-visible cache
+# these tests inspect is only populated by the flat path.
+
 """
 Run `f()` inside `spawn_datadeps` with `scheduler`, returning the resulting
 schedule cache snapshot (a Vector). The cache is cleared before the run so
@@ -123,7 +130,7 @@ each call starts from a known state.
 function run_with_fresh_cache(f, scheduler::DataDepsScheduler = LayeredScheduler())
     cache = datadeps_schedule_cache(scheduler)
     empty!(cache)
-    Base.ScopedValues.with(DATADEPS_SCHEDULER => scheduler) do
+    Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => scheduler) do
         Dagger.spawn_datadeps(f)
     end
     return cache
@@ -136,7 +143,7 @@ cache. Useful for asserting cache size after repeated runs.
 function run_n_times(f, n::Int; scheduler::DataDepsScheduler = LayeredScheduler())
     cache = datadeps_schedule_cache(scheduler)
     empty!(cache)
-    Base.ScopedValues.with(DATADEPS_SCHEDULER => scheduler) do
+    Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => scheduler) do
         for _ in 1:n
             Dagger.spawn_datadeps(f)
         end
@@ -231,7 +238,7 @@ end
     @testset "Different array sizes → cache miss" begin
         cache = datadeps_schedule_cache(LayeredScheduler())
         empty!(cache)
-        Base.ScopedValues.with(DATADEPS_SCHEDULER => LayeredScheduler()) do
+        Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LayeredScheduler()) do
             for sz in (64, 128, 256)
                 A = rand(sz); B = rand(sz)
                 Dagger.spawn_datadeps() do
@@ -245,7 +252,7 @@ end
     @testset "Different element types → cache miss" begin
         cache = datadeps_schedule_cache(LayeredScheduler())
         empty!(cache)
-        Base.ScopedValues.with(DATADEPS_SCHEDULER => LayeredScheduler()) do
+        Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LayeredScheduler()) do
             for T in (Float64, Float32, Int)
                 A = T <: AbstractFloat ? rand(T, 64) : T.(rand(1:100, 64))
                 B = T <: AbstractFloat ? rand(T, 64) : T.(rand(1:100, 64))
@@ -260,7 +267,7 @@ end
     @testset "Different task counts → cache miss" begin
         cache = datadeps_schedule_cache(LayeredScheduler())
         empty!(cache)
-        Base.ScopedValues.with(DATADEPS_SCHEDULER => LayeredScheduler()) do
+        Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LayeredScheduler()) do
             for ntasks in (1, 2, 4)
                 A = rand(64); B = rand(64)
                 Dagger.spawn_datadeps() do
@@ -278,7 +285,7 @@ end
         empty!(cache)
         scopes = [Dagger.DefaultScope(),
                   Dagger.ExactScope(Dagger.ThreadProc(1, 1))]
-        Base.ScopedValues.with(DATADEPS_SCHEDULER => LayeredScheduler()) do
+        Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LayeredScheduler()) do
             for scp in scopes
                 A = rand(64); B = rand(64)
                 Dagger.spawn_datadeps() do
@@ -296,7 +303,7 @@ end
         end
         @test length(cache) == 1
         # Repeat with the other function
-        Base.ScopedValues.with(DATADEPS_SCHEDULER => LayeredScheduler()) do
+        Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LayeredScheduler()) do
             A = rand(64)
             Dagger.spawn_datadeps() do
                 Dagger.@spawn scale!(InOut(A), 2.0)
@@ -311,7 +318,7 @@ end
 @testset "Cache partitioning between schedulers" begin
     ls_cache = datadeps_schedule_cache(LayeredScheduler())
     empty!(ls_cache)
-    Base.ScopedValues.with(DATADEPS_SCHEDULER => LayeredScheduler()) do
+    Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LayeredScheduler()) do
         A = rand(64); B = rand(64)
         Dagger.spawn_datadeps() do
             Dagger.@spawn add!(InOut(A), In(B))
@@ -323,7 +330,7 @@ end
     # cache, and it must NOT see LayeredScheduler's entry.
     rr_cache = datadeps_schedule_cache(RoundRobinScheduler())
     @test rr_cache !== ls_cache
-    Base.ScopedValues.with(DATADEPS_SCHEDULER => RoundRobinScheduler()) do
+    Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => RoundRobinScheduler()) do
         A = rand(64); B = rand(64)
         Dagger.spawn_datadeps() do
             Dagger.@spawn add!(InOut(A), In(B))
@@ -370,7 +377,7 @@ end
     @testset "Repeated runs, fresh allocations → 1 cache entry" begin
         cache = datadeps_schedule_cache(LayeredScheduler())
         empty!(cache)
-        Base.ScopedValues.with(DATADEPS_SCHEDULER => LayeredScheduler()) do
+        Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LayeredScheduler()) do
             for _ in 1:3
                 M = make_spd_blocks(64, 16)
                 Dagger.spawn_datadeps() do
@@ -389,7 +396,7 @@ end
     @testset "Different block-grid sizes → distinct cache entries" begin
         cache = datadeps_schedule_cache(LayeredScheduler())
         empty!(cache)
-        Base.ScopedValues.with(DATADEPS_SCHEDULER => LayeredScheduler()) do
+        Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LayeredScheduler()) do
             # 2x2 grid (sz=32, nb=16) vs 4x4 grid (sz=64, nb=16) → different task counts
             for (sz, nb) in ((32, 16), (64, 16))
                 M = make_spd_blocks(sz, nb)
@@ -404,7 +411,7 @@ end
     @testset "Same block-grid shape, different block size → distinct entries" begin
         cache = datadeps_schedule_cache(LayeredScheduler())
         empty!(cache)
-        Base.ScopedValues.with(DATADEPS_SCHEDULER => LayeredScheduler()) do
+        Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LayeredScheduler()) do
             # Both 2x2 grids; block size 16 vs 32 → same task count, different ContiguousAliasing length
             for (sz, nb) in ((32, 16), (64, 32))
                 M = make_spd_blocks(sz, nb)
@@ -437,7 +444,7 @@ end
     @testset "Repeated runs → 1 cache entry" begin
         cache = datadeps_schedule_cache(LayeredScheduler())
         empty!(cache)
-        Base.ScopedValues.with(DATADEPS_SCHEDULER => LayeredScheduler()) do
+        Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LayeredScheduler()) do
             for _ in 1:3
                 As = [rand(64) for _ in 1:8]
                 Dagger.spawn_datadeps() do
@@ -451,7 +458,7 @@ end
     @testset "Different reduction widths → distinct entries" begin
         cache = datadeps_schedule_cache(LayeredScheduler())
         empty!(cache)
-        Base.ScopedValues.with(DATADEPS_SCHEDULER => LayeredScheduler()) do
+        Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LayeredScheduler()) do
             for n in (4, 8, 16)
                 As = [rand(64) for _ in 1:n]
                 Dagger.spawn_datadeps() do
@@ -471,7 +478,7 @@ end
     # Build two DAGSpecs from equivalent-but-freshly-allocated workloads.
     cache = datadeps_schedule_cache(LS)
     empty!(cache)
-    Base.ScopedValues.with(DATADEPS_SCHEDULER => LS) do
+    Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LS) do
         for _ in 1:2
             A = rand(64); B = rand(64)
             Dagger.spawn_datadeps() do
@@ -486,7 +493,7 @@ end
 
     # Now build a structurally-different spec.
     empty!(cache)
-    Base.ScopedValues.with(DATADEPS_SCHEDULER => LS) do
+    Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LS) do
         A = rand(128); B = rand(128)  # different size
         Dagger.spawn_datadeps() do
             Dagger.@spawn add!(InOut(A), In(B))
@@ -519,7 +526,7 @@ Dagger.datadeps_schedule_task_jit!(::NoCacheScheduler, all_procs, all_scope, tas
         nc = NoCacheScheduler()
         cache = datadeps_schedule_cache(nc)
         empty!(cache)
-        Base.ScopedValues.with(DATADEPS_SCHEDULER => nc) do
+        Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => nc) do
             for _ in 1:3
                 A = rand(64); B = rand(64)
                 Dagger.spawn_datadeps() do
@@ -553,7 +560,7 @@ Dagger.datadeps_schedule_task_jit!(::PtrStrictScheduler, all_procs, all_scope, t
 
     # Fresh allocations each run → pointer hash differs → all miss.
     empty!(cache)
-    Base.ScopedValues.with(DATADEPS_SCHEDULER => ps) do
+    Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => ps) do
         for _ in 1:3
             A = rand(64); B = rand(64)
             Dagger.spawn_datadeps() do
@@ -566,7 +573,7 @@ Dagger.datadeps_schedule_task_jit!(::PtrStrictScheduler, all_procs, all_scope, t
     # Same allocation reused each run → pointer hash matches → cache hits.
     empty!(cache)
     A = rand(64); B = rand(64)
-    Base.ScopedValues.with(DATADEPS_SCHEDULER => ps) do
+    Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => ps) do
         for _ in 1:3
             Dagger.spawn_datadeps() do
                 Dagger.@spawn add!(InOut(A), In(B))
