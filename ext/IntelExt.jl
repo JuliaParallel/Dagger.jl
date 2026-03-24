@@ -55,6 +55,11 @@ function Dagger.aliasing(x::oneArray{T}) where T
     return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
 end
 
+function Dagger.unsafe_free!(x::oneArray)
+    oneAPI.unsafe_free!(x)
+    return
+end
+
 Dagger.memory_spaces(proc::oneArrayDeviceProc) = Set([IntelVRAMMemorySpace(proc.owner, proc.device_id)])
 Dagger.processors(space::IntelVRAMMemorySpace) = Set([oneArrayDeviceProc(space.owner, space.device_id)])
 
@@ -243,12 +248,16 @@ Dagger.move(from_proc::CPUProc, to_proc::oneArrayDeviceProc, x::Function) = x
 Dagger.move(from_proc::CPUProc, to_proc::oneArrayDeviceProc, x::Chunk{T}) where {T<:Function} =
     Dagger.move(from_proc, to_proc, fetch(x))
 
+# Adapt BLAS/LAPACK functions (same pattern as CUDAExt/ROCExt)
 import LinearAlgebra: BLAS, LAPACK
+_keep_blas_functions = Set(["iamax"])
 for lib in [BLAS, LAPACK]
     for name in names(lib; all=true)
         name == nameof(lib) && continue
         startswith(string(name), '#') && continue
-        endswith(string(name), '!') || continue
+        if !endswith(string(name), '!') && !(string(name) in _keep_blas_functions)
+            continue
+        end
         if name in names(oneAPI.oneMKL; all=true)
             fn = getproperty(lib, name)
             mklfn = getproperty(oneAPI.oneMKL, name)
@@ -278,6 +287,37 @@ function Dagger.execute!(proc::oneArrayDeviceProc, f, args...; kwargs...)
     end
 end
 
+# Adapt RefValue
+Dagger.move(from_proc::CPUProc, to_proc::oneArrayDeviceProc, x::Base.RefValue) =
+    Dagger.GPURef(Dagger.move(from_proc, to_proc, x[]), only(Dagger.memory_spaces(to_proc)))
+Dagger.move(from_proc::oneArrayDeviceProc, to_proc::CPUProc, x::Dagger.GPURef{T,IntelVRAMMemorySpace} where T) =
+    Ref(Dagger.move(from_proc, to_proc, x[]))
+function Dagger.move!(dep_mod, to_space::CPURAMMemorySpace, from_space::IntelVRAMMemorySpace, to::Base.RefValue, from::Dagger.GPURef)
+    if Dagger.type_may_alias(typeof(from[]))
+        Dagger.move!(dep_mod, to_space, from_space, to[], from[])
+    else
+        to[] = dep_mod(from[])
+    end
+    return
+end
+function Dagger.move!(dep_mod, to_space::IntelVRAMMemorySpace, from_space::CPURAMMemorySpace, to::Dagger.GPURef, from::Base.RefValue)
+    if Dagger.type_may_alias(typeof(from[]))
+        Dagger.move!(dep_mod, to_space, from_space, to[], from[])
+    else
+        to[] = dep_mod(from[])
+    end
+    return
+end
+function Dagger.move!(dep_mod, to_space::IntelVRAMMemorySpace, from_space::IntelVRAMMemorySpace, to::Dagger.GPURef, from::Dagger.GPURef)
+    if Dagger.type_may_alias(typeof(from[]))
+        Dagger.move!(dep_mod, to_space, from_space, to[], from[])
+    else
+        to[] = dep_mod(from[])
+    end
+    return
+end
+
+# Adapt HaloArray
 oneArray(H::Dagger.HaloArray) = convert(oneArray, H)
 Base.convert(::Type{C}, H::Dagger.HaloArray) where {C<:oneArray} =
     Dagger.HaloArray(C(H.center),

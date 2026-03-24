@@ -232,39 +232,49 @@ end
 const RESCHEDULE_SYNCDEPS_SEEN_CACHE = TaskLocalValue{ReusableCache{Set{Thunk},Nothing}}(()->ReusableCache(Set{Thunk}, nothing, 1))
 
 "Marks `thunk` and all dependent thunks as failed."
-function set_failed!(state, origin, thunk=origin)
+function set_failed!(state, origin::Thunk, thunk::Thunk=origin; ex=nothing)
     @assert islocked(state.lock)
     has_result(state, thunk) && return
     @dagdebug thunk :finish "Setting as failed"
-    filter!(x -> x !== thunk, state.ready)
-    # N.B. If origin === thunk, we assume that the caller has already set the error
-    if origin !== thunk && !has_result(state, thunk)
-        origin_ex = load_result(state, origin)
-        if origin_ex isa RemoteException
-            origin_ex = origin_ex.captured
-        end
-        ex = DTaskFailedException(thunk, origin, origin_ex)
+
+    if origin === thunk && ex !== nothing
         store_result!(state, thunk, ex; error=true)
     end
-    finish_failed!(state, thunk, origin)
-end
-function finish_failed!(state, thunk, origin=nothing)
-    @assert islocked(state.lock)
-    fill_registered_futures!(state, thunk, true)
-    if haskey(state.waiting_data, thunk)
-        for dep in state.waiting_data[thunk]
-            haskey(state.waiting, dep) &&
-                delete!(state.waiting, dep)
-            haskey(state.errored, dep) &&
-                continue
-            origin !== nothing && set_failed!(state, origin, dep)
+
+    seen = Set{Thunk}()
+    to_visit = Thunk[thunk]
+    while !isempty(to_visit)
+        thunk = pop!(to_visit)
+        push!(seen, thunk)
+
+        filter!(x -> x !== thunk, state.ready)
+
+        if !has_result(state, thunk) && origin !== thunk
+            origin_ex = load_result(state, origin)
+            if origin_ex isa RemoteException
+                origin_ex = origin_ex.captured
+            end
+            if origin_ex isa DTaskFailedException
+                origin_ex = origin_ex.ex
+            end
+            ex = DTaskFailedException(thunk, origin, origin_ex)
+            store_result!(state, thunk, ex; error=true)
         end
-        delete!(state.waiting_data, thunk)
-        thunk.sch_accessible = false
-        delete_unused_task!(state, thunk)
-    end
-    if haskey(state.waiting, thunk)
-        delete!(state.waiting, thunk)
+
+        fill_registered_futures!(state, thunk, true)
+        if haskey(state.waiting_data, thunk)
+            for dep in state.waiting_data[thunk]
+                haskey(state.errored, dep) && continue
+                dep in seen && continue
+                push!(to_visit, dep)
+            end
+            delete!(state.waiting_data, thunk)
+            thunk.sch_accessible = false
+            delete_unused_task!(state, thunk)
+        end
+        if haskey(state.waiting, thunk)
+            delete!(state.waiting, thunk)
+        end
     end
 end
 

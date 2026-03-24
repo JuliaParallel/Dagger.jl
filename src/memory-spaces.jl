@@ -314,8 +314,10 @@ memory_spans(::NoAliasing) = MemorySpan{CPURAMMemorySpace}[]
 struct UnknownAliasing <: AbstractAliasing end
 memory_spans(::UnknownAliasing) = [MemorySpan{CPURAMMemorySpace}(C_NULL, typemax(UInt))]
 
-warn_unknown_aliasing(T) =
-    @warn "Cannot resolve aliasing for object of type $T\nExecution may become sequential"
+error_unknown_aliasing(T) =
+    throw(ConcurrencyViolationError("Cannot resolve aliasing for object of type $T, execution may become sequential"))
+error_unknown_aliasing(T, x) =
+    throw(ConcurrencyViolationError("Cannot resolve aliasing for object of type $T (element of $(typeof(x))), execution may become sequential"))
 
 struct CombinedAliasing <: AbstractAliasing
     sub_ainfos::Vector{AbstractAliasing}
@@ -381,7 +383,7 @@ function aliasing(x::T) where T
         end
         return CombinedAliasing(as)
     else
-        warn_unknown_aliasing(T)
+        error_unknown_aliasing(T)
         return UnknownAliasing()
     end
 end
@@ -430,7 +432,7 @@ function aliasing(x::Array{T}) where T
     else
         # FIXME: Also ContiguousAliasing of container
         #return IteratedAliasing(x)
-        warn_unknown_aliasing(T)
+        error_unknown_aliasing(T, x)
         return UnknownAliasing()
     end
 end
@@ -484,7 +486,7 @@ function aliasing(x::SubArray{T,N}) where {T,N}
     else
         # FIXME: Also ContiguousAliasing of container
         #return IteratedAliasing(x)
-        warn_unknown_aliasing(T)
+        error_unknown_aliasing(T, x)
         return UnknownAliasing()
     end
 end
@@ -602,3 +604,12 @@ function will_alias(x_span::MemorySpan, y_span::MemorySpan)
     y_end = y_span.ptr + y_span.len - 1
     return x_span.ptr <= y_end && y_span.ptr <= x_end
 end
+
+### Unsafe Free
+
+unsafe_free!(x::Chunk) = remotecall_fetch(root_worker_id(x), x) do x
+    unsafe_free!(unwrap(x))
+    return
+end
+unsafe_free!(x::DTask) = unsafe_free!(fetch(x; raw=true))
+unsafe_free!(x) = nothing # Do nothing by default

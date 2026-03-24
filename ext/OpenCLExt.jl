@@ -52,6 +52,11 @@ function Dagger.aliasing(x::CLArray{T}) where T
     return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
 end
 
+function Dagger.unsafe_free!(x::CLArray)
+    OpenCL.unsafe_free!(x)
+    return
+end
+
 Dagger.memory_spaces(proc::CLArrayDeviceProc) = Set([CLMemorySpace(proc.owner, proc.device)])
 Dagger.processors(space::CLMemorySpace) = Set([CLArrayDeviceProc(space.owner, space.device)])
 
@@ -280,6 +285,37 @@ function Dagger.execute!(proc::CLArrayDeviceProc, f, args...; kwargs...)
     end
 end
 
+# Adapt RefValue
+Dagger.move(from_proc::CPUProc, to_proc::CLArrayDeviceProc, x::Base.RefValue) =
+    Dagger.GPURef(Dagger.move(from_proc, to_proc, x[]), only(Dagger.memory_spaces(to_proc)))
+Dagger.move(from_proc::CLArrayDeviceProc, to_proc::CPUProc, x::Dagger.GPURef{T,CLMemorySpace} where T) =
+    Ref(Dagger.move(from_proc, to_proc, x[]))
+function Dagger.move!(dep_mod, to_space::CPURAMMemorySpace, from_space::CLMemorySpace, to::Base.RefValue, from::Dagger.GPURef)
+    if Dagger.type_may_alias(typeof(from[]))
+        Dagger.move!(dep_mod, to_space, from_space, to[], from[])
+    else
+        to[] = dep_mod(from[])
+    end
+    return
+end
+function Dagger.move!(dep_mod, to_space::CLMemorySpace, from_space::CPURAMMemorySpace, to::Dagger.GPURef, from::Base.RefValue)
+    if Dagger.type_may_alias(typeof(from[]))
+        Dagger.move!(dep_mod, to_space, from_space, to[], from[])
+    else
+        to[] = dep_mod(from[])
+    end
+    return
+end
+function Dagger.move!(dep_mod, to_space::CLMemorySpace, from_space::CLMemorySpace, to::Dagger.GPURef, from::Dagger.GPURef)
+    if Dagger.type_may_alias(typeof(from[]))
+        Dagger.move!(dep_mod, to_space, from_space, to[], from[])
+    else
+        to[] = dep_mod(from[])
+    end
+    return
+end
+
+# Adapt HaloArray
 CLArray(H::Dagger.HaloArray) = convert(CLArray, H)
 Base.convert(::Type{C}, H::Dagger.HaloArray) where {C<:CLArray} =
     Dagger.HaloArray(C(H.center),
