@@ -98,6 +98,7 @@ include("datadeps/chunkview.jl")
 include("datadeps/remainders.jl")
 include("datadeps/scheduling.jl")
 include("datadeps/queue.jl")
+include("datadeps/hierarchical.jl")
 
 # Stencils
 include("utils/haloarray.jl")
