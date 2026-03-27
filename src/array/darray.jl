@@ -608,12 +608,31 @@ function logs_annotate!(ctx::Context, A::DArray, name::Union{String,Symbol})
     end
 end
 
-# TODO: Allow `f` to return proc
-mapchunk(f, chunk) = tochunk(f(poolget(chunk.handle)))
-function mapchunks(f, d::DArray{T,N,F}) where {T,N,F}
-    chunks = map(d.chunks) do chunk
-        owner = get_parent(chunk.processor).pid
-        remotecall_fetch(mapchunk, owner, f, chunk)
+_unwrap_type(::Type{Union{}}) = Any
+_unwrap_type(T::Union) = mapreduce(_unwrap_type, Base.promote_type, Base.uniontypes(T))
+_unwrap_type(T::Type{<:AbstractArray}) = eltype(T)
+_unwrap_type(T::Type) = T
+
+function _mapchunks_eltype(chunks, f, d::DArray{T,N}) where {T,N}
+    if isempty(chunks)
+        RT = Base._return_type(f, Tuple{AbstractArray{T,N}})
+        return RT === Any ? T : _unwrap_type(RT)
     end
-    DArray{T,N,F}(d.domain, d.subdomains, chunks, d.concat)
+
+    # promote types across all chunks
+    types = [_unwrap_type(chunktype(c)) for c in chunks]
+    return any(==(Any), types) ? Any : mapreduce(identity, Base.promote_type, types)
+end
+
+_spawn_options(::Any) = Options(meta=false)
+_spawn_options(c::Chunk) = Options(scope=ProcessScope(get_parent(c.processor).pid), meta=false)
+_spawn_options(t::Thunk) = !isnothing(t.affinity) ?
+                           Options(scope=ProcessScope(t.affinity.first), meta=false) :
+                           Options(meta=false)
+
+function mapchunks(f, d::DArray{T,N,B,F}) where {T,N,B,F}
+    new_chunks = map(c -> Dagger.spawn(f, _spawn_options(c), c), d.chunks)
+    new_eltype = _mapchunks_eltype(new_chunks, f, d)
+
+    return DArray(new_eltype, d.domain, d.subdomains, new_chunks, d.partitioning, d.concat)
 end
