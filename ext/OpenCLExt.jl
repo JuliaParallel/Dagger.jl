@@ -32,6 +32,9 @@ Base.show(io::IO, proc::CLArrayDeviceProc) =
     print(io, "CLArrayDeviceProc(worker $(proc.owner), device $(proc.device))")
 Dagger.short_name(proc::CLArrayDeviceProc) = "W: $(proc.owner), CL: $(proc.device)"
 Dagger.@gpuproc(CLArrayDeviceProc, CLArray)
+# DefaultScope() only includes processors with default_enabled==true (like ThreadProc);
+# without this, explicit GPU assignment in AllocateArray fails with "processors are not available".
+Dagger.default_enabled(::CLArrayDeviceProc) = true
 
 "Represents the memory space of a single OpenCL device's RAM."
 struct CLMemorySpace <: Dagger.MemorySpace

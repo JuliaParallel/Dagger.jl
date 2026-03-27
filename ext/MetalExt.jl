@@ -30,6 +30,7 @@ Dagger.get_parent(proc::MtlArrayDeviceProc) = Dagger.OSProc(proc.owner)
 Dagger.root_worker_id(proc::MtlArrayDeviceProc) = proc.owner
 Dagger.short_name(proc::MtlArrayDeviceProc) = "W: $(proc.owner), Metal: $(proc.device_id)"
 Dagger.@gpuproc(MtlArrayDeviceProc, MtlArray)
+Dagger.default_enabled(::MtlArrayDeviceProc) = true
 
 "Represents the memory space of a single Metal GPU's VRAM."
 struct MetalVRAMMemorySpace <: Dagger.MemorySpace

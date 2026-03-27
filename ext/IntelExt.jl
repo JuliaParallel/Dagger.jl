@@ -33,6 +33,7 @@ Base.show(io::IO, proc::oneArrayDeviceProc) =
     print(io, "oneArrayDeviceProc(worker $(proc.owner), device $(proc.device_id))")
 Dagger.short_name(proc::oneArrayDeviceProc) = "W: $(proc.owner), oneAPI: $(proc.device)"
 Dagger.@gpuproc(oneArrayDeviceProc, oneArray)
+Dagger.default_enabled(::oneArrayDeviceProc) = true
 
 "Represents the memory space of a single Intel GPU's VRAM."
 struct IntelVRAMMemorySpace <: Dagger.MemorySpace

@@ -34,6 +34,9 @@ Base.show(io::IO, proc::CuArrayDeviceProc) =
     print(io, "CuArrayDeviceProc(worker $(proc.owner), device $(proc.device), uuid $(proc.device_uuid))")
 Dagger.short_name(proc::CuArrayDeviceProc) = "W: $(proc.owner), CUDA: $(proc.device)"
 Dagger.@gpuproc(CuArrayDeviceProc, CuArray)
+# DefaultScope() only includes processors with default_enabled==true (like ThreadProc);
+# without this, explicit GPU assignment in AllocateArray fails with "processors are not available".
+Dagger.default_enabled(::CuArrayDeviceProc) = true
 
 "Represents the memory space of a single CUDA GPU's VRAM."
 struct CUDAVRAMMemorySpace <: Dagger.MemorySpace

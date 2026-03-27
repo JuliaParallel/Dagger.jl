@@ -30,6 +30,7 @@ Base.show(io::IO, proc::ROCArrayDeviceProc) =
     print(io, "ROCArrayDeviceProc(worker $(proc.owner), device $(proc.device_id))")
 Dagger.short_name(proc::ROCArrayDeviceProc) = "W: $(proc.owner), ROCm: $(proc.device_id)"
 Dagger.@gpuproc(ROCArrayDeviceProc, ROCArray)
+Dagger.default_enabled(::ROCArrayDeviceProc) = true
 
 "Represents the memory space of a single ROCm GPU's VRAM."
 struct ROCVRAMMemorySpace <: Dagger.MemorySpace

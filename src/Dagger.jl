@@ -222,4 +222,18 @@ function __init__()
     end
 end
 
+"""
+    Dagger.clear_chunk_cache!()
+
+Forcefully free all entries from the scheduler's CHUNK_CACHE and return the
+number of entries removed.  Call between benchmark runs to prevent GPU memory
+retention across Dagger invocations.
+"""
+function clear_chunk_cache!()
+    cc = Sch.CHUNK_CACHE
+    n = length(cc)
+    empty!(cc)
+    return n
+end
+
 end # module
