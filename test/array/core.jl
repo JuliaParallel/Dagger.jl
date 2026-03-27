@@ -143,6 +143,7 @@ end
     C = mapchunks(x -> x .+ 1, A_tasks)
     @test collect(C) == collect(A) .+ 1
 
+    # heterogeneous chunk types 
     domain_h = ArrayDomain(1:4)
     subdomains_h = partition(Blocks(2), domain_h)
     chunks_h = reshape(Any[Dagger.tochunk([1, 2]),Dagger.tochunk([3.0, 4.0])], size(subdomains_h))
@@ -155,4 +156,10 @@ end
     B0 = mapchunks(x -> x .+ 1, A0)
     @test size(B0) == (0,)
     @test eltype(B0) == Int
+
+    # scalar return
+    S = mapchunks(sum, A)
+    @test eltype(S) == Int
+    expected = [sum(A[1:2, 1:2])  sum(A[1:2, 3:4]); sum(A[3:4, 1:2])  sum(A[3:4, 3:4])]
+    @test collect(S) == expected
 end

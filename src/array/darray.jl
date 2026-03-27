@@ -630,7 +630,7 @@ _spawn_options(t::Thunk) = !isnothing(t.affinity) ?
                            Options(scope=ProcessScope(t.affinity.first), meta=false) :
                            Options(meta=false)
 
-function mapchunks(f, d::DArray{T,N,B,F}) where {T,N,B,F}
+function mapchunks(f, d::DArray)
     new_chunks = map(c -> Dagger.spawn(f, _spawn_options(c), c), d.chunks)
     new_eltype = _mapchunks_eltype(new_chunks, f, d)
 
