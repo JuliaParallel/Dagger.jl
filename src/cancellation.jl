@@ -72,20 +72,22 @@ alternative to Ctrl+C, as it cooperates with the scheduler and runtime and
 avoids unintended side effects.
 """
 function cancel!(task::DTask; force::Bool=false, graceful::Bool=true, halt_sch::Bool=false)
-    tid = lock(Dagger.Sch.EAGER_ID_MAP) do id_map
-        id_map[task.uid]
-    end
+    tid = task.uid
     cancel!(tid; force, graceful, halt_sch)
 end
-function cancel!(tid::Union{Int,Nothing}=nothing;
+function cancel!(tid::Union{TaskID,Nothing}=nothing;
                  force::Bool=false, graceful::Bool=true, halt_sch::Bool=false)
-    remotecall_fetch(1, tid, force, halt_sch) do tid, force, halt_sch
-        state = Sch.EAGER_STATE[]
-
-        # Check that the scheduler isn't stopping or has already stopped
-        if !isnothing(state) && !state.halt.set
-            @lock state.lock _cancel!(state, tid, force, graceful, halt_sch)
+    if tid !== nothing && tid.worker != myid()
+        remotecall_fetch(tid.worker, tid, force, graceful, halt_sch) do _tid, _force, _graceful, _halt_sch
+            return cancel!(_tid; force=_force, graceful=_graceful, halt_sch=_halt_sch)
         end
+    end
+
+    state = Sch.EAGER_STATE[]
+
+    # Check that the scheduler isn't stopping or has already stopped
+    if !isnothing(state) && !state.halt.set
+        @lock state.lock _cancel!(state, tid, force, graceful, halt_sch)
     end
 end
 function _cancel!(state, tid, force, graceful, halt_sch)
@@ -176,7 +178,7 @@ function _cancel!(state, tid, force, graceful, halt_sch)
             # Halt the scheduler
             @dagdebug nothing :cancel "Halting the scheduler"
             notify(state.halt)
-            put!(state.chan, Sch.TaskResult(1, OSProc(), 0, Sch.SchedulerHaltedException(), nothing))
+            put!(state.chan, Sch.TaskResult(1, OSProc(), TASKID_ZERO, Sch.SchedulerHaltedException(), nothing))
 
             # Wait for the scheduler to halt
             @dagdebug nothing :cancel "Waiting for scheduler to halt"

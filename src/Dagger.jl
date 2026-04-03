@@ -54,7 +54,9 @@ include("lib/util.jl")
 include("utils/dagdebug.jl")
 
 # Distributed data
+include("utils/taskid.jl")
 include("utils/locked-object.jl")
+include("utils/concurrent.jl")
 include("utils/tasks.jl")
 include("utils/reuse.jl")
 include("processor.jl")

@@ -1,26 +1,26 @@
 mutable struct PayloadOne
-    uid::UInt
+    uid::TaskID
     future::ThunkFuture
     fargs::Vector{Argument}
     options::Options
     reschedule::Bool
 
     PayloadOne() = new()
-    PayloadOne(uid::UInt, future::ThunkFuture,
+    PayloadOne(uid::TaskID, future::ThunkFuture,
                fargs::Vector{Argument}, options::Options, reschedule::Bool) =
         new(uid, future, fargs, options, reschedule)
 end
 function unset!(p::PayloadOne, _)
-    p.uid = 0
+    p.uid = TASKID_ZERO
     p.future = EMPTY_PAYLOAD_ONE.future
     p.fargs = EMPTY_PAYLOAD_ONE.fargs
     p.options = EMPTY_PAYLOAD_ONE.options
     p.reschedule = false
 end
-const EMPTY_PAYLOAD_ONE = PayloadOne(UInt(0), ThunkFuture(), Argument[], Options(), false)
+const EMPTY_PAYLOAD_ONE = PayloadOne(TASKID_ZERO, ThunkFuture(), Argument[], Options(), false)
 mutable struct PayloadMulti
     ntasks::Int
-    uid::Vector{UInt}
+    uid::Vector{TaskID}
     future::Vector{ThunkFuture}
     fargs::Vector{Vector{Argument}}
     options::Vector{Options}
@@ -51,7 +51,7 @@ function eager_submit_internal!(payload::AnyPayload)
 end
 eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
     eager_submit_internal!(ctx, state, task, tid, payload[1])
-const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}(()->ReusableCache(Dict{UInt64,Int}, nothing, 1))
+const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{TaskID,TaskID},Nothing}}(()->ReusableCache(Dict{TaskID,TaskID}, nothing, 1))
 @reuse_scope function eager_submit_internal!(ctx, state, task, tid, payload::AnyPayload; uid_to_tid=nothing)
     maybe_take_or_alloc!(UID_TO_TID_CACHE[], uid_to_tid) do uid_to_tid
         if payload isa PayloadMulti
@@ -74,7 +74,7 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
         uid, future = payload.uid, payload.future
         fargs, options, reschedule = payload.fargs, payload.options, payload.reschedule
 
-        id = Int(uid)
+        id = uid
 
         @maybelog ctx timespan_start(ctx, :add_thunk, (;thunk_id=id), (;f=fargs[1], args=fargs[2:end], options, uid))
 
@@ -89,49 +89,65 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
         end
 
         # Lookup DTask/ThunkID -> Thunk
-        # FIXME: Don't lock if no DTask args
-        lock(Sch.EAGER_ID_MAP) do id_map
-            for (idx, arg) in enumerate(fargs)
-                if valuetype(arg) <: DTask
-                    arg_uid = (value(arg)::DTask).uid
-                    arg_tid = if haskey(id_map, arg_uid)
-                        id_map[arg_uid]
-                    else
-                        uid_to_tid[arg_uid]
+        remote_thunks = Vector{Thunk}()
+        for (idx, arg) in enumerate(fargs)
+            arg_tid = if valuetype(arg) <: DTask
+                (value(arg)::DTask).uid
+            elseif valuetype(arg) <: Sch.ThunkID
+                (value(arg)::Sch.ThunkID).id
+            else
+                nothing
+            end
+
+            if arg_tid !== nothing
+                @lock state.lock begin
+                    if !haskey(state.thunk_dict, arg_tid)
+                        @assert arg_tid.worker != myid()
+                        # Remote task, use proxy thunk
+                        thunk = Thunk(()->nothing; id=arg_tid)
+                        push!(remote_thunks, thunk)
+                        state.thunk_dict[arg_tid] = WeakThunk(thunk)
+
+                        # Register watcher on remote scheduler
+                        remotecall_wait(Sch.register_completion_watcher_eager!, arg_tid.worker, arg_tid, state.chan)
                     end
-                    @lock state.lock begin
-                        @inbounds fargs[idx] = Argument(arg.pos, state.thunk_dict[arg_tid])
-                    end
-                elseif valuetype(arg) <: Sch.ThunkID
-                    arg_tid = (value(arg)::Sch.ThunkID).id
-                    @lock state.lock begin
-                        @inbounds fargs[idx] = Argument(arg.pos, state.thunk_dict[arg_tid])
-                    end
-                elseif valuetype(arg) <: Chunk
-                    # N.B. Different Chunks with the same DRef handle will hash to the same slot,
-                    # so we just pick an equivalent Chunk as our upstream
-                    chunk = value(arg)::Chunk
-                    function find_equivalent_chunk(state, chunk::C) where {C<:Chunk}
-                        @lock state.lock begin
-                            if haskey(state.equiv_chunks, chunk.handle)
-                                return state.equiv_chunks[chunk.handle]::C
-                            else
-                                state.equiv_chunks[chunk.handle] = chunk
-                                return chunk
-                            end
+                    @inbounds fargs[idx] = Argument(arg.pos, state.thunk_dict[arg_tid])
+                end
+            elseif valuetype(arg) <: Chunk
+                # N.B. Different Chunks with the same DRef handle will hash to the same slot,
+                # so we just pick an equivalent Chunk as our upstream
+                chunk = value(arg)::Chunk
+                function find_equivalent_chunk(state, chunk::C) where {C<:Chunk}
+                    lock(state.equiv_chunks) do equiv_chunks
+                        if haskey(equiv_chunks, chunk.handle)
+                            return equiv_chunks[chunk.handle]::C
+                        else
+                            equiv_chunks[chunk.handle] = chunk
+                            return chunk
                         end
                     end
-                    chunk = find_equivalent_chunk(state, chunk)
-                    #=FIXME:UNIQUE=#
-                    @inbounds fargs[idx] = Argument(arg.pos, WeakChunk(chunk))
                 end
+                chunk = find_equivalent_chunk(state, chunk)
+                #=FIXME:UNIQUE=#
+                @inbounds fargs[idx] = Argument(arg.pos, WeakChunk(chunk))
             end
-            # TODO: Iteration protocol would be faster
-            for idx in 1:length(syncdeps_vec)
-                dep = syncdeps_vec[idx]::ThunkSyncdep
-                @assert dep.id !== nothing && dep.thunk === nothing
-                thunk = @lock state.lock state.thunk_dict[dep.id.id]
-                @inbounds syncdeps_vec[idx] = ThunkSyncdep(thunk)
+        end
+        for idx in 1:length(syncdeps_vec)
+            dep = syncdeps_vec[idx]::ThunkSyncdep
+            @assert dep.id !== nothing && dep.thunk === nothing
+            arg_tid = dep.id.id
+            @lock state.lock begin
+                if !haskey(state.thunk_dict, arg_tid)
+                    @assert arg_tid.worker != myid()
+                    # Remote task, use proxy thunk
+                    thunk = Thunk(()->nothing; id=arg_tid)
+                    push!(remote_thunks, thunk)
+                    state.thunk_dict[arg_tid] = WeakThunk(thunk)
+
+                    # Register watcher on remote scheduler
+                    remotecall_wait(Sch.register_completion_watcher_eager!, arg_tid.worker, arg_tid, state.chan)
+                end
+                @inbounds syncdeps_vec[idx] = ThunkSyncdep(state.thunk_dict[arg_tid])
             end
         end
         if !isempty(syncdeps_vec) || any(arg->istask(value(arg)), fargs)
@@ -152,7 +168,7 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
         end
         syncdeps_vec_cleanup()
 
-        GC.@preserve old_fargs fargs begin
+        GC.@preserve old_fargs fargs remote_thunks begin
             # Create the `Thunk`
             thunk = take_or_alloc!(THUNK_SPEC_CACHE[]) do thunk_spec
                 thunk_spec.fargs = fargs
@@ -170,6 +186,9 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
             @lock state.lock begin
                 # Attach `thunk` within the scheduler
                 state.thunk_dict[thunk.id] = WeakThunk(thunk)
+                lock(state.thunk_state) do thunk_states
+                    thunk_states[thunk] = Sch.ThunkState()
+                end
                 #=FIXME:REALLOC=#
                 Sch.reschedule_syncdeps!(state, thunk)
                 old_fargs_cleanup() # reschedule_syncdeps! preserves all referenced tasks/chunks
@@ -181,11 +200,6 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
                     @dagdebug thunk :submit "Registered future"
                 end
                 state.valid[thunk] = nothing
-
-                # Register Eager UID -> Sch TID
-                lock(Sch.EAGER_ID_MAP) do id_map
-                    id_map[uid] = thunk.id
-                end
 
                 # Reset sch_accessible for all syncdeps
                 if options.syncdeps !== nothing
@@ -210,19 +224,13 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
     end
 end
 struct UnrefThunk
-    uid::UInt
+    uid::TaskID
     thunk::Thunk
     state
 end
 function (unref::UnrefThunk)()
-    name = unref.uid != UInt(0) ? "unref DTask $(unref.uid) => Thunk $(unref.thunk.id)" : "unref Thunk $(unref.thunk.id)"
+    name = unref.uid != TASKID_ZERO ? "unref DTask $(unref.uid) => Thunk $(unref.thunk.id)" : "unref Thunk $(unref.thunk.id)"
     Sch.errormonitor_tracked(name, Threads.@spawn begin
-        if unref.uid != UInt(0)
-            lock(Sch.EAGER_ID_MAP) do id_map
-                delete!(id_map, unref.uid)
-            end
-        end
-
         # The associated DTask is no longer referenced by the user, so mark the
         # thunk as ready to be cleaned up as eagerly as possible (or do so now)
         thunk = unref.thunk
@@ -232,7 +240,7 @@ function (unref::UnrefThunk)()
             Sch.delete_unused_task!(state, thunk)
         end
 
-        if unref.uid != UInt(0)
+        if unref.uid != TASKID_ZERO
             # Cleanup EAGER_THUNK_STREAMS if this is a streaming DTask
             lock(Dagger.EAGER_THUNK_STREAMS) do global_streams
                 if haskey(global_streams, unref.uid)
@@ -248,11 +256,6 @@ function eager_submit!(payload::AnyPayload)
     if Dagger.in_task()
         h = Dagger.sch_handle()
         return exec!(eager_submit_internal!, h, payload)
-    elseif myid() != 1
-        return remotecall_fetch(1, payload) do payload
-            Sch.init_eager()
-            eager_submit_internal!(payload)
-        end
     else
         Sch.init_eager()
         return eager_submit_internal!(payload)
@@ -260,29 +263,29 @@ function eager_submit!(payload::AnyPayload)
 end
 
 # Submission -> Local
-function eager_process_elem_submission_to_local!(id_map, arg::Argument)
+function eager_process_elem_submission_to_local!(arg::Argument)
     T = valuetype(arg)
     @assert !(T <: Thunk) "Cannot use `Thunk`s in `@spawn`/`spawn`"
-    if T <: DTask && haskey(id_map, (value(arg)::DTask).uid)
+    if T <: DTask
         #=FIXME:UNIQUE=#
-        arg.value = Sch.ThunkID(id_map[value(arg).uid], value(arg).thunk_ref)
+        arg.value = Sch.ThunkID((value(arg)::DTask).uid, (value(arg)::DTask).thunk_ref)
     end
 end
-function eager_process_elem_submission_to_local(id_map, arg::TypedArgument{T}) where T
+function eager_process_elem_submission_to_local(arg::TypedArgument{T}) where T
     @assert !(T <: Thunk) "Cannot use `Thunk`s in `@spawn`/`spawn`"
-    if T <: DTask && haskey(id_map, (value(arg)::DTask).uid)
+    if T <: DTask
         #=FIXME:UNIQUE=#
-        return Sch.ThunkID(id_map[value(arg).uid], value(arg).thunk_ref)
+        return Sch.ThunkID((value(arg)::DTask).uid, (value(arg)::DTask).thunk_ref)
     end
     return arg
 end
-function eager_process_args_submission_to_local!(id_map, spec::DTaskSpec{false})
+function eager_process_args_submission_to_local!(spec::DTaskSpec{false})
     for arg in spec.fargs
-        eager_process_elem_submission_to_local!(id_map, arg)
+        eager_process_elem_submission_to_local!(arg)
     end
 end
-function eager_process_args_submission_to_local(id_map, spec::DTaskSpec{true})
-    return ntuple(i->eager_process_elem_submission_to_local(id_map, spec.fargs[i]), length(spec.fargs))
+function eager_process_args_submission_to_local(spec::DTaskSpec{true})
+    return ntuple(i->eager_process_elem_submission_to_local(spec.fargs[i]), length(spec.fargs))
 end
 
 DTaskMetadata(spec::DTaskSpec) = DTaskMetadata(eager_metadata(spec.fargs))
@@ -295,7 +298,7 @@ end
 
 function eager_spawn(spec::DTaskSpec)
     # Generate new unlaunched DTask
-    uid = eager_next_id()
+    uid = next_id()
     future = ThunkFuture()
     metadata = DTaskMetadata(spec)
     return DTask(uid, future, metadata)
@@ -311,13 +314,11 @@ function eager_launch!(pair::DTaskPair)
     eager_assign_name!(spec, task)
 
     # Lookup DTask -> ThunkID
-    fargs = lock(Sch.EAGER_ID_MAP) do id_map
-        if is_typed(spec)
-            return Argument[map(Argument, eager_process_args_submission_to_local(id_map, spec))...]
-        else
-            eager_process_args_submission_to_local!(id_map, spec)
-            return spec.fargs
-        end
+    fargs = if is_typed(spec)
+        Argument[map(Argument, eager_process_args_submission_to_local(spec))...]
+    else
+        eager_process_args_submission_to_local!(spec)
+        spec.fargs
     end
 
     # Submit the task
@@ -341,16 +342,13 @@ function eager_launch!(pairs::Vector{DTaskPair})
 
     # Get all functions, args/kwargs, and options
     #=FIXME:REALLOC_N=#
-    all_fargs = lock(Sch.EAGER_ID_MAP) do id_map
-        # Lookup DTask -> ThunkID
-        return map(pairs) do pair
-            spec = pair.spec
-            if is_typed(spec)
-                return Argument[map(Argument, eager_process_args_submission_to_local(id_map, spec))...]
-            else
-                eager_process_args_submission_to_local!(id_map, spec)
-                return spec.fargs
-            end
+    all_fargs = map(pairs) do pair
+        spec = pair.spec
+        if is_typed(spec)
+            return Argument[map(Argument, eager_process_args_submission_to_local(spec))...]
+        else
+            eager_process_args_submission_to_local!(spec)
+            return spec.fargs
         end
     end
     all_options = Options[pair.spec.options for pair in pairs]

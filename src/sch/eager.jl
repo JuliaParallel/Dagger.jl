@@ -1,6 +1,5 @@
 const EAGER_INIT = Threads.Atomic{Bool}(false)
 const EAGER_READY = Base.Event()
-const EAGER_ID_MAP = LockedObject(Dict{UInt64,Int}())
 const EAGER_CONTEXT = Ref{Union{Context,Nothing}}(nothing)
 const EAGER_STATE = Ref{Union{ComputeState,Nothing}}(nothing)
 
@@ -12,9 +11,6 @@ function eager_context()
 end
 
 function init_eager()
-    if myid() != 1
-        throw(ConcurrencyViolationError("init_eager can only be called on worker 1"))
-    end
     if Threads.atomic_xchg!(EAGER_INIT, true)
         wait(EAGER_READY)
         if EAGER_STATE[] === nothing
@@ -29,14 +25,14 @@ function init_eager()
     # prevent work submission until it wakes up. Further testing is needed.
     errormonitor_tracked("eager compute()", @async try
         sopts = SchedulerOptions(;allow_errors=true)
-        opts = Dagger.Options((;scope=Dagger.ExactScope(Dagger.ThreadProc(1, 1)),
+        opts = Dagger.Options((;scope=Dagger.ExactScope(Dagger.ThreadProc(myid(), 1)),
                                 occupancy=Dict(Dagger.ThreadProc=>0),
                                 time_util=Dict(Dagger.ThreadProc=>0)))
         Dagger.compute(ctx, Dagger._delayed(eager_thunk, opts)();
                        options=sopts)
     catch err
         # Scheduler halting is considered normal
-        err isa SchedulerHaltedException && return
+        Sch.unwrap_nested_exception(err) isa SchedulerHaltedException && return
 
         iob = IOContext(IOBuffer(), :color=>true)
         println(iob, "Error in eager scheduler:")
@@ -50,9 +46,6 @@ function init_eager()
         EAGER_STATE[] = nothing
         notify(EAGER_READY)
         reset(EAGER_READY)
-        lock(EAGER_ID_MAP) do id_map
-            empty!(id_map)
-        end
         Threads.atomic_xchg!(EAGER_INIT, false)
     end)
     wait(EAGER_READY)
@@ -67,6 +60,12 @@ function eager_thunk()
     end
     notify(EAGER_READY)
     wait(Dagger.Sch.EAGER_STATE[].halt)
+end
+
+function register_completion_watcher_eager!(thunk_id::TaskID, chan::RemoteChannel)
+    @assert thunk_id.worker == myid()
+    init_eager()
+    register_completion_watcher!(EAGER_STATE[], thunk_id, chan)
 end
 
 """
@@ -112,13 +111,9 @@ function thunk_yield(f)
 end
 
 function _find_thunk(e::Dagger.DTask)
-    tid = lock(EAGER_ID_MAP) do id_map
-        id_map[e.uid]
-    end
+    tid = e.uid
     lock(EAGER_STATE[].lock) do
         unwrap_weak_checked(EAGER_STATE[].thunk_dict[tid])
     end
 end
-Dagger.task_id(t::Dagger.DTask) = lock(EAGER_ID_MAP) do id_map
-    id_map[t.uid]
-end
+Dagger.task_id(t::Dagger.DTask) = t.uid

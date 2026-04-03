@@ -14,7 +14,7 @@ import Random: randperm, randperm!
 import Base: @invokelatest
 
 import ..Dagger
-import ..Dagger: Context, Processor, SchedulerOptions, Options, Thunk, WeakThunk, ThunkFuture, ThunkID, DTaskFailedException, Chunk, WeakChunk, OSProc, AnyScope, DefaultScope, InvalidScope, LockedObject, Argument, Signature
+import ..Dagger: Context, Processor, SchedulerOptions, Options, Thunk, WeakThunk, ThunkFuture, ThunkID, TaskID, TASKID_ZERO, DTaskFailedException, Chunk, WeakChunk, OSProc, AnyScope, DefaultScope, InvalidScope, LockedObject, Argument, Signature, ConcurrentDict, ConcurrentSet, ConcurrentVector
 import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak_checked, wrap_weak, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, default_enabled, processor, get_processors, get_parent, execute!, rmprocs!, task_processor, constrain, cputhreadtime, maybe_take_or_alloc!
 import ..Dagger: @dagdebug, @safe_lock_spin1, @maybelog, @take_or_alloc!
 import DataStructures: PriorityQueue, enqueue!, dequeue_pair!, peek
@@ -36,12 +36,44 @@ include("dynamic.jl")
 struct TaskResult
     pid::Int
     proc::Processor
-    thunk_id::Int
+    thunk_id::TaskID
     result::Any
     metadata::Union{NamedTuple,Nothing}
 end
 
-const AnyTaskResult = Union{RescheduleSignal, TaskResult}
+"""
+    TaskCompletionNotification
+
+Sent to registered watchers when a task completes on any worker.
+Carries the thunk ID, whether the task failed, and the result, enabling
+cross-worker coordination without centralized scheduling.
+"""
+struct TaskCompletionNotification
+    thunk_id::TaskID
+    failed::Bool
+    result::Any
+end
+
+const AnyTaskResult = Union{RescheduleSignal, TaskResult, TaskCompletionNotification}
+
+@enum ThunkStateValue begin
+    THUNK_WAITING
+    THUNK_READY
+    THUNK_RUNNING
+    THUNK_FINISHED
+end
+mutable struct ThunkState
+    @atomic value::ThunkStateValue
+    ThunkState() = new(THUNK_WAITING)
+end
+Base.getindex(state::ThunkState) = state.value
+try_transition!(state::ThunkState, old_value::ThunkStateValue, new_value::ThunkStateValue) =
+    (@atomicreplace state.value old_value => new_value).success
+
+struct RunningState
+    running::Set{Thunk}
+    running_on::Dict{Thunk,OSProc}
+end
 
 """
     ComputeState
@@ -50,14 +82,13 @@ The internal state-holding struct of the scheduler.
 
 Fields:
 - `uid::UInt64` - Unique identifier for this scheduler instance
-- `waiting::OneToMany` - Map from downstream `Thunk` to upstream `Thunk`s that still need to execute
-- `waiting_data::Dict{Union{Thunk,Chunk},Set{Thunk}}` - Map from input `Chunk`/upstream `Thunk` to all unfinished downstream `Thunk`s, to retain caches
-- `ready::Vector{Thunk}` - The list of `Thunk`s that are ready to execute
-- `cache::WeakKeyDict{Thunk, Any}` - Maps from a finished `Thunk` to it's cached result, often a DRef
 - `valid::WeakKeyDict{Thunk, Nothing}` - Tracks all `Thunk`s that are in a valid scheduling state
-- `running::Set{Thunk}` - The set of currently-running `Thunk`s
-- `running_on::Dict{Thunk,OSProc}` - Map from `Thunk` to the OS process executing it
-- `thunk_dict::Dict{Int, WeakThunk}` - Maps from thunk IDs to a `Thunk`
+- `thunk_state::ConcurrentDict{Thunk, ThunkState}` - Tracks the state of each thunk
+- `waiting::ConcurrentDict{Thunk, Set{Thunk}}` - The list of `Thunk`s that are waiting for dependencies to complete
+- `waiting_data::ConcurrentDict{Union{Thunk,Chunk}, Set{Thunk}}` - The list of `Thunk`s that are waiting for dependencies to complete
+- `ready::ConcurrentVector{Thunk}` - The list of `Thunk`s that are ready to execute
+- `running_state::LockedObject{RunningState}` - State of the currently-running thunks
+- `thunk_dict::Dict{TaskID, WeakThunk}` - Maps from thunk IDs to a `Thunk`
 - `node_order::Any` - Function that returns the order of a thunk
 - `equiv_chunks::WeakKeyDict{DRef,Chunk}` - Cache mapping from `DRef` to a `Chunk` which contains it
 - `worker_time_pressure::Dict{Int,Dict{Processor,UInt64}}` - Maps from worker ID to processor pressure
@@ -73,67 +104,76 @@ Fields:
 - `futures::Dict{Thunk, Vector{ThunkFuture}}` - Futures registered for waiting on the result of a thunk.
 - `errored::WeakKeyDict{Thunk,Bool}` - Indicates if a thunk's result is an error.
 - `thunks_to_delete::Set{Thunk}` - The list of `Thunk`s ready to be deleted upon completion.
-- `chan::RemoteChannel{Channel{AnyTaskResult}}` - Channel for receiving completed thunks.
+- `chan::RemoteChannel{Channel{AnyTaskResult}}` - Channel for receiving completed thunks and other messages.
+- `completion_watchers::ConcurrentDict{Int, Vector{RemoteChannel}}` - Per-thunk-ID channels to notify on completion, enabling cross-worker coordination.
 """
 struct ComputeState
     uid::UInt64
-    waiting::OneToMany
-    waiting_data::Dict{Union{Thunk,Chunk},Set{Thunk}}
-    ready::Vector{Thunk}
-    valid::Dict{Thunk, Nothing}
-    running::Set{Thunk}
-    running_on::Dict{Thunk,OSProc}
-    thunk_dict::Dict{Int, WeakThunk}
+    valid::ConcurrentDict{Thunk, Nothing}
+    thunk_state::ConcurrentDict{Thunk, ThunkState}
+    waiting::ConcurrentDict{Thunk, Set{Thunk}}
+    waiting_data::ConcurrentDict{Union{Thunk,Chunk}, Set{Thunk}}
+    ready::ConcurrentVector{Thunk}
+    running_state::LockedObject{RunningState}
+    thunk_dict::ConcurrentDict{TaskID, WeakThunk}
     node_order::Any
-    equiv_chunks::WeakKeyDict{DRef,Chunk}
-    worker_time_pressure::Dict{Int,Dict{Processor,UInt64}}
-    worker_storage_pressure::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}
-    worker_storage_capacity::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}
-    worker_loadavg::Dict{Int,NTuple{3,Float64}}
-    worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}
-    signature_time_cost::Dict{Signature,UInt64}
-    signature_alloc_cost::Dict{Signature,UInt64}
+    equiv_chunks::LockedObject{WeakKeyDict{DRef,Chunk}}
+    worker_time_pressure::ConcurrentDict{Int,ConcurrentDict{Processor,UInt64}}
+    worker_storage_pressure::ConcurrentDict{Int,Dict{Union{StorageResource,Nothing},UInt64}}
+    worker_storage_capacity::ConcurrentDict{Int,Dict{Union{StorageResource,Nothing},UInt64}}
+    worker_loadavg::ConcurrentDict{Int,NTuple{3,Float64}}
+    worker_chans::ConcurrentDict{Int,Tuple{RemoteChannel,RemoteChannel}}
+    signature_time_cost::ConcurrentDict{Signature,UInt64}
+    signature_alloc_cost::ConcurrentDict{Signature,UInt64}
     transfer_rate::Ref{UInt64}
     halt::Base.Event
     lock::ReentrantLock
-    futures::Dict{Thunk, Vector{ThunkFuture}}
-    errored::Dict{Thunk,Bool}
-    thunks_to_delete::Set{Thunk}
+    futures::ConcurrentDict{Thunk, Vector{ThunkFuture}}
+    thunks_to_delete::ConcurrentSet{Thunk}
     chan::RemoteChannel{Channel{AnyTaskResult}}
+    completion_watchers::ConcurrentDict{Thunk, Vector{RemoteChannel}}
 end
 
 const UID_COUNTER = Threads.Atomic{UInt64}(1)
 
 function start_state(deps::Dict, node_order, chan)
+    waiting_data = ConcurrentDict{Union{Thunk,Chunk},Set{Thunk}}()
+    lock(waiting_data) do wd
+        merge!(wd, deps)
+    end
     state = ComputeState(Threads.atomic_add!(UID_COUNTER, UInt64(1)),
-                         OneToMany(),
-                         deps,
-                         Vector{Thunk}(undef, 0),
-                         Dict{Thunk, Nothing}(),
-                         Set{Thunk}(),
-                         Dict{Thunk,OSProc}(),
-                         Dict{Int, WeakThunk}(),
+                         ConcurrentDict{Thunk, Nothing}(),
+                         ConcurrentDict{Thunk, ThunkState}(),
+                         ConcurrentDict{Thunk, Set{Thunk}}(),
+                         ConcurrentDict{Union{Thunk,Chunk}, Set{Thunk}}(),
+                         ConcurrentVector{Thunk}(),
+                         LockedObject(RunningState(Set{Thunk}(), Dict{Thunk,OSProc}())),
+                         ConcurrentDict{TaskID, WeakThunk}(),
                          node_order,
-                         WeakKeyDict{DRef,Chunk}(),
-                         Dict{Int,Dict{Processor,UInt64}}(),
-                         Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}(),
-                         Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}(),
-                         Dict{Int,NTuple{3,Float64}}(),
-                         Dict{Int, Tuple{RemoteChannel,RemoteChannel}}(),
-                         Dict{Signature,UInt64}(),
-                         Dict{Signature,UInt64}(),
+                         LockedObject(WeakKeyDict{DRef,Chunk}()),
+                         ConcurrentDict{Int,ConcurrentDict{Processor,UInt64}}(),
+                         ConcurrentDict{Int,Dict{Union{StorageResource,Nothing},UInt64}}(),
+                         ConcurrentDict{Int,Dict{Union{StorageResource,Nothing},UInt64}}(),
+                         ConcurrentDict{Int,NTuple{3,Float64}}(),
+                         ConcurrentDict{Int,Tuple{RemoteChannel,RemoteChannel}}(),
+                         ConcurrentDict{Signature,UInt64}(),
+                         ConcurrentDict{Signature,UInt64}(),
                          Ref{UInt64}(1_000_000),
                          Base.Event(),
                          ReentrantLock(),
-                         Dict{Thunk, Vector{ThunkFuture}}(),
-                         Dict{Thunk,Bool}(),
-                         Set{Thunk}(),
-                         chan)
+                         ConcurrentDict{Thunk, Vector{ThunkFuture}}(),
+                         ConcurrentSet{Thunk}(),
+                         chan,
+                         ConcurrentDict{Thunk, Vector{RemoteChannel}}())
 
     for k in sort(collect(keys(deps)), by=node_order)
         if istask(k)
+            thunk_state = lock(state.thunk_state) do thunk_states
+                thunk_states[k] = ThunkState()
+            end
             waiting = Set{Thunk}(Dagger.syncdeps_iterator(k))
             if isempty(waiting)
+                @assert try_transition!(thunk_state, THUNK_WAITING, THUNK_READY)
                 push!(state.ready, k)
             else
                 state.waiting[k] = waiting
@@ -141,7 +181,7 @@ function start_state(deps::Dict, node_order, chan)
             state.valid[k] = nothing
         end
     end
-    state
+    return state
 end
 
 # Eager scheduling
@@ -156,7 +196,7 @@ function init_proc(state, p, log_sink)
     # Initialize pressure and capacity
     gproc = OSProc(p.pid)
     lock(state.lock) do
-        state.worker_time_pressure[p.pid] = Dict{Processor,UInt64}()
+        state.worker_time_pressure[p.pid] = ConcurrentDict{Processor,UInt64}()
 
         state.worker_storage_pressure[p.pid] = Dict{Union{StorageResource,Nothing},UInt64}()
         state.worker_storage_capacity[p.pid] = Dict{Union{StorageResource,Nothing},UInt64}()
@@ -189,7 +229,7 @@ function init_proc(state, p, log_sink)
                             d = WORKER_MONITOR_CHANS[wid]
                             for uid in keys(d)
                                 try
-                                    put!(d[uid], TaskResult(wid, OSProc(wid), 0, ProcessExitedException(wid), nothing))
+                                    put!(d[uid], TaskResult(wid, OSProc(wid), TASKID_ZERO, ProcessExitedException(wid), nothing))
                                 catch
                                 end
                             end
@@ -263,7 +303,7 @@ end
 const TASK_SYNC = Threads.Condition()
 
 "Process-local set of running task IDs."
-const TASKS_RUNNING = Set{Int}()
+const TASKS_RUNNING = Set{TaskID}()
 
 "Process-local dictionary tracking per-processor total time utilization."
 const PROCESSOR_TIME_UTILIZATION = Dict{UInt64,Dict{Processor,Ref{UInt64}}}()
@@ -368,100 +408,172 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options::SchedulerOpt
 
     safepoint(state)
 
-    # Loop while we still have thunks to execute
-    while !isempty(state.ready) || !isempty(state.running)
+    ntasks = Threads.nthreads()
+    in_flight = Threads.Atomic{Int}(0)
+    done = Threads.Atomic{Bool}(false)
+
+    function try_schedule!()
         if !isempty(state.ready)
-            # Nothing running, so schedule up to N thunks, 1 per N workers
+            check_workers_available(ctx, options)
             @invokelatest schedule!(ctx, state, options)
         end
+    end
 
-        check_workers_available(ctx, options)
-
-        isempty(state.running) && continue
-        @maybelog ctx timespan_start(ctx, :take, (;uid=state.uid), nothing)
-        @dagdebug nothing :take "Waiting for results"
-        tresult = take!(state.chan) # get result of completed thunk
-        @maybelog ctx timespan_finish(ctx, :take, (;uid=state.uid), nothing)
-        if tresult isa RescheduleSignal
-            continue
+    function signal_done!()
+        done[] = true
+        for _ in 1:(ntasks-1)
+            try
+                put!(state.chan, RescheduleSignal())
+            catch
+            end
         end
+    end
 
-        tresult::TaskResult
-        pid = tresult.pid
-        proc = tresult.proc
-        thunk_id = tresult.thunk_id
-        res = tresult.result
+    try_schedule!()
 
-        @dagdebug thunk_id :take "Got finished task"
-        gproc = OSProc(pid)
-        safepoint(state)
-        lock(state.lock) do
-            thunk_failed = false
-            if res isa Exception
-                if unwrap_nested_exception(res) isa ProcessExitedException
-                    @warn "Worker $(pid) died, rescheduling work"
+    worker_tasks = Vector{Task}(undef, ntasks)
+    for i in 1:ntasks
+        worker_tasks[i] = Threads.@spawn begin
+            try
+                while !done[]
+                    @maybelog ctx timespan_start(ctx, :take, (;uid=state.uid), nothing)
+                    @dagdebug nothing :take "Task $i waiting for results"
+                    tresult = try
+                        take!(state.chan)
+                    catch
+                        return
+                    end
+                    @maybelog ctx timespan_finish(ctx, :take, (;uid=state.uid), nothing)
+                    done[] && return
 
-                    # Remove dead worker from procs list
-                    @maybelog ctx timespan_start(ctx, :remove_procs, (;uid=state.uid, worker=pid), nothing)
-                    remove_dead_proc!(ctx, state, gproc, options)
-                    @maybelog ctx timespan_finish(ctx, :remove_procs, (;uid=state.uid, worker=pid), nothing)
+                    Threads.atomic_add!(in_flight, 1)
+                    try
+                        if tresult isa RescheduleSignal
+                            try_schedule!()
+                            continue
+                        elseif tresult isa TaskCompletionNotification
+                            thunk_id = tresult.thunk_id
+                            @assert !Dagger.is_task_local(thunk_id)
+                            thunk_failed = tresult.failed
 
-                    @maybelog ctx timespan_start(ctx, :handle_fault, (;uid=state.uid, worker=pid), nothing)
-                    handle_fault(ctx, state, gproc)
-                    @maybelog ctx timespan_finish(ctx, :handle_fault, (;uid=state.uid, worker=pid), nothing)
-                    return # effectively `continue`
-                else
-                    if something(options.allow_errors, false)
-                        thunk_failed = true
-                    else
-                        throw(res)
+                            @dagdebug thunk_id :take "Got task completion notification"
+                            thunk = unwrap_weak_checked(state.thunk_dict[thunk_id])::Thunk
+                            @assert !has_result(thunk)
+                            store_result!(thunk, tresult.result; error=thunk_failed)
+                            @lock state.lock finish_task!(ctx, state, thunk, thunk_failed)
+
+                            try_schedule!()
+                            continue
+                        end
+
+                        tresult::TaskResult
+                        pid = tresult.pid
+                        proc = tresult.proc
+                        thunk_id = tresult.thunk_id
+                        res = tresult.result
+
+                        @dagdebug thunk_id :take "Got finished task"
+                        gproc = OSProc(pid)
+                        safepoint(state)
+
+                        thunk_failed = false
+                        if res isa Exception
+                            if unwrap_nested_exception(res) isa ProcessExitedException
+                                @warn "Worker $(pid) died, rescheduling work"
+
+                                @lock state.lock begin
+                                    @maybelog ctx timespan_start(ctx, :remove_procs, (;uid=state.uid, worker=pid), nothing)
+                                    remove_dead_proc!(ctx, state, gproc, options)
+                                    @maybelog ctx timespan_finish(ctx, :remove_procs, (;uid=state.uid, worker=pid), nothing)
+
+                                    @maybelog ctx timespan_start(ctx, :handle_fault, (;uid=state.uid, worker=pid), nothing)
+                                    handle_fault(ctx, state, gproc)
+                                    @maybelog ctx timespan_finish(ctx, :handle_fault, (;uid=state.uid, worker=pid), nothing)
+                                end
+
+                                try_schedule!()
+                                continue
+                            else
+                                if something(options.allow_errors, false)
+                                    thunk_failed = true
+                                else
+                                    throw(res)
+                                end
+                            end
+                        end
+                        thunk = unwrap_weak_checked(state.thunk_dict[thunk_id])::Thunk
+                        metadata = tresult.metadata
+                        if metadata !== nothing
+                            state.worker_time_pressure[pid][proc] = metadata.time_pressure
+                            #to_storage = fetch(thunk.options.storage)
+                            #state.worker_storage_pressure[pid][to_storage] = metadata.storage_pressure
+                            #state.worker_storage_capacity[pid][to_storage] = metadata.storage_capacity
+                            #state.worker_loadavg[pid] = metadata.loadavg
+                            sig = signature(state, thunk)
+                            lock(state.signature_time_cost) do stc
+                                stc[sig] = (metadata.threadtime + get(stc, sig, UInt64(0))) ÷ 2
+                            end
+                            lock(state.signature_alloc_cost) do sac
+                                sac[sig] = (metadata.gc_allocd + get(sac, sig, UInt64(0))) ÷ 2
+                            end
+                            if metadata.transfer_rate !== nothing
+                                state.transfer_rate[] = (state.transfer_rate[] + metadata.transfer_rate) ÷ 2
+                            end
+                        end
+                        if res isa Chunk
+                            lock(state.equiv_chunks) do equiv_chunks
+                                handle = res.handle::DRef
+                                if !haskey(equiv_chunks, handle)
+                                    equiv_chunks[handle] = res
+                                end
+                            end
+                        end
+                        store_result!(thunk, res; error=thunk_failed)
+                        if thunk.options !== nothing && thunk.options.checkpoint !== nothing
+                            try
+                                @invokelatest thunk.options.checkpoint(thunk, res)
+                            catch err
+                                report_catch_error(err, "Thunk checkpoint failed")
+                            end
+                        end
+                        @maybelog ctx timespan_start(ctx, :finish, (;uid=state.uid, thunk_id), (;thunk_id, result=res))
+                        @lock state.lock finish_task!(ctx, state, thunk, thunk_failed)
+                        @maybelog ctx timespan_finish(ctx, :finish, (;uid=state.uid, thunk_id), (;thunk_id, result=res))
+
+                        # Allow result to be GC'd
+                        thunk = nothing
+                        tresult = nothing
+                        res = nothing
+
+                        try_schedule!()
+                    finally
+                        Threads.atomic_sub!(in_flight, 1)
+                    end
+
+                    safepoint(state)
+
+                    no_tasks = isempty(state.ready) && lock(state.running_state) do running_state
+                        isempty(running_state.running)
+                    end && in_flight[] == 0
+                    if no_tasks
+                        signal_done!()
+                        return
                     end
                 end
+            catch
+                signal_done!()
+                rethrow()
             end
-            node = unwrap_weak_checked(state.thunk_dict[thunk_id])::Thunk
-            metadata = tresult.metadata
-            if metadata !== nothing
-                state.worker_time_pressure[pid][proc] = metadata.time_pressure
-                #to_storage = fetch(node.options.storage)
-                #state.worker_storage_pressure[pid][to_storage] = metadata.storage_pressure
-                #state.worker_storage_capacity[pid][to_storage] = metadata.storage_capacity
-                #state.worker_loadavg[pid] = metadata.loadavg
-                sig = signature(state, node)
-                state.signature_time_cost[sig] = (metadata.threadtime + get(state.signature_time_cost, sig, 0)) ÷ 2
-                state.signature_alloc_cost[sig] = (metadata.gc_allocd + get(state.signature_alloc_cost, sig, 0)) ÷ 2
-                if metadata.transfer_rate !== nothing
-                    state.transfer_rate[] = (state.transfer_rate[] + metadata.transfer_rate) ÷ 2
-                end
-            end
-            if res isa Chunk
-                if !haskey(state.equiv_chunks, res)
-                    state.equiv_chunks[res.handle::DRef] = res
-                end
-            end
-            store_result!(state, node, res; error=thunk_failed)
-            if node.options !== nothing && node.options.checkpoint !== nothing
-                try
-                    @invokelatest node.options.checkpoint(node, res)
-                catch err
-                    report_catch_error(err, "Thunk checkpoint failed")
-                end
-            end
-
-            @maybelog ctx timespan_start(ctx, :finish, (;uid=state.uid, thunk_id), (;thunk_id, result=res))
-            finish_task!(ctx, state, node, thunk_failed)
-            @maybelog ctx timespan_finish(ctx, :finish, (;uid=state.uid, thunk_id), (;thunk_id, result=res))
         end
+    end
 
-        # Allow data to be GC'd
-        tresult = nothing
-        res = nothing
-
-        safepoint(state)
+    for t in worker_tasks
+        wait(t)
     end
 
     # Final value is ready
-    value = load_result(state, d)
-    errored = get(state.errored, d, false)
+    value = load_result(d)
+    errored = has_error(d)
     if !errored
         if options.checkpoint !== nothing
             try
@@ -491,6 +603,23 @@ function scheduler_exit(ctx, state::ComputeState, options::SchedulerOptions)
             end
         end
         empty!(state.futures)
+
+        # Notify and clean up all completion watchers
+        lock(state.completion_watchers) do cw
+            for (thunk, watchers) in cw
+                thunk_id = thunk.id
+                result = load_result(thunk)
+                notification = TaskCompletionNotification(thunk_id, has_error(thunk), result)
+                for chan in watchers
+                    try
+                        put!(chan, notification)
+                    catch
+                        # Not worth reporting this
+                    end
+                end
+            end
+            empty!(cw)
+        end
     end
 
     # Let the context procs handler clean itself up
@@ -533,164 +662,157 @@ struct ScheduleTaskSpec
     est_occupancy::UInt32
 end
 @reuse_scope function schedule!(ctx, state, sch_options, procs=procs_to_use(ctx, sch_options))
-    lock(state.lock) do
-        safepoint(state)
+    safepoint(state)
 
-        @assert length(procs) > 0
+    @assert length(procs) > 0
 
-        # Remove processors that aren't yet initialized
-        procs = filter(p -> haskey(state.worker_chans, Dagger.root_worker_id(p)), procs)
+    # Remove processors that aren't yet initialized
+    procs = filter(p -> haskey(state.worker_chans, Dagger.root_worker_id(p)), procs)
 
-        # Schedule tasks
-        to_fire = @reusable_dict :schedule!_to_fire ScheduleTaskLocation Vector{ScheduleTaskSpec} ScheduleTaskLocation(OSProc(), OSProc()) ScheduleTaskSpec[] 1024
-        to_fire_cleanup = @reuse_defer_cleanup empty!(to_fire)
-        failed_scheduling = @reusable_vector :schedule!_failed_scheduling Union{Thunk,Nothing} nothing 32
-        failed_scheduling_cleanup = @reuse_defer_cleanup empty!(failed_scheduling)
-        # Select a new task and get its options
-        task = nothing
-        @label pop_task
-        if task !== nothing
-            @dagdebug task :schedule "Finished scheduling task"
-            @maybelog ctx timespan_finish(ctx, :schedule, (;uid=state.uid, thunk_id=task.id), (;thunk_id=task.id))
+    # Reusable collections
+    to_fire = @reusable_dict :schedule!_to_fire ScheduleTaskLocation Vector{ScheduleTaskSpec} ScheduleTaskLocation(OSProc(), OSProc()) ScheduleTaskSpec[] 1024
+    to_fire_cleanup = @reuse_defer_cleanup empty!(to_fire)
+    failed_scheduling = @reusable_vector :schedule!_failed_scheduling Union{Thunk,Nothing} nothing 32
+    failed_scheduling_cleanup = @reuse_defer_cleanup empty!(failed_scheduling)
+
+    # Select a new task and get its options
+    task = nothing
+    @label pop_task
+    if task !== nothing
+        @dagdebug task :schedule "Finished scheduling task"
+        @maybelog ctx timespan_finish(ctx, :schedule, (;uid=state.uid, thunk_id=task.id), (;thunk_id=task.id))
+    end
+    result = Dagger.try_popfirst!(state.ready)
+    result === nothing && @goto fire_tasks
+    task = something(result)
+    Dagger.is_task_local(task) || @goto pop_task
+    thunk_state = lock(state.thunk_state) do thunk_states
+        thunk_states[task]
+    end
+    try_transition!(thunk_state, THUNK_READY, THUNK_RUNNING) || @goto pop_task
+    @dagdebug task :schedule "Scheduling task"
+    @maybelog ctx timespan_start(ctx, :schedule, (;uid=state.uid, thunk_id=task.id), (;thunk_id=task.id))
+    if has_result(task)
+        if has_error(task)
+            # An error was eagerly propagated to this task
+            @dagdebug task :schedule "Task received upstream error, finishing"
+            set_failed!(state, task)
+        else
+            # This shouldn't have happened
+            @dagdebug task :schedule "Scheduling inconsistency: Task being scheduled is already cached!"
+            iob = IOBuffer()
+            println(iob, "Scheduling inconsistency: Task being scheduled is already cached!")
+            println(iob, "  Task: $(task.id)")
+            println(iob, "  Result: $(typeof(load_result(task)))")
+            throw(SchedulingException(String(take!(iob))))
         end
-        if isempty(state.ready)
-            @goto fire_tasks
+        @goto pop_task
+    end
+
+    # Load task inputs
+    collect_task_inputs!(state, task)
+
+    # Calculate signature
+    sig = signature(state, task)
+
+    # Merge scheduler options and populate defaults
+    options = task.options
+    Dagger.options_merge!(options, sch_options)
+    Dagger.populate_defaults!(options, sig)
+
+    # Calculate scope
+    if options.exec_scope !== nothing
+        # Bypass scope calculation if it's been done for us already
+        scope = options.exec_scope
+        @goto scope_computed
+    end
+    scope = constrain(@something(options.compute_scope, options.scope, DefaultScope()),
+                      @something(options.result_scope, AnyScope()))
+    if scope isa InvalidScope
+        @assert try_transition!(thunk_state, THUNK_RUNNING, THUNK_FINISHED)
+        ex = SchedulingException("compute_scope and result_scope are not compatible: $(scope.x), $(scope.y)")
+        set_failed!(state, task; ex)
+        @goto pop_task
+    end
+    for arg in task.inputs
+        value = unwrap_weak_checked(Dagger.value(arg))
+        chunk = if istask(value)
+            load_result(task)
+        elseif value isa Chunk
+            value
+        else
+            nothing
         end
-        task = popfirst!(state.ready)
-        @dagdebug task :schedule "Scheduling task"
-        @maybelog ctx timespan_start(ctx, :schedule, (;uid=state.uid, thunk_id=task.id), (;thunk_id=task.id))
-        if has_result(state, task)
-            if haskey(state.errored, task)
-                # An error was eagerly propagated to this task
-                @dagdebug task :schedule "Task received upstream error, finishing"
-                set_failed!(state, task)
-            else
-                # This shouldn't have happened
-                @dagdebug task :schedule "Scheduling inconsistency: Task being scheduled is already cached!"
-                iob = IOBuffer()
-                println(iob, "Scheduling inconsistency: Task being scheduled is already cached!")
-                println(iob, "  Task: $(task.id)")
-                println(iob, "  Cache Entry: $(typeof(something(task.cache_ref)))")
-                ex = SchedulingException(String(take!(iob)))
-                store_result!(state, task, ex; error=true)
-            end
-            @goto pop_task
-        end
-
-        # Load task inputs
-        collect_task_inputs!(state, task)
-
-        # Calculate signature
-        sig = signature(state, task)
-
-        # Merge scheduler options and populate defaults
-        options = task.options
-        Dagger.options_merge!(options, sch_options)
-        Dagger.populate_defaults!(options, sig)
-
-        # Calculate scope
-        if options.exec_scope !== nothing
-            # Bypass scope calculation if it's been done for us already
-            scope = options.exec_scope
-            @goto scope_computed
-        end
-        scope = constrain(@something(options.compute_scope, options.scope, DefaultScope()),
-                          @something(options.result_scope, AnyScope()))
+        chunk isa Chunk || continue
+        scope = constrain(scope, chunk.scope)
         if scope isa InvalidScope
-            ex = SchedulingException("compute_scope and result_scope are not compatible: $(scope.x), $(scope.y)")
+            @assert try_transition!(thunk_state, THUNK_RUNNING, THUNK_FINISHED)
+            ex = SchedulingException("Current scope and argument Chunk scope are not compatible: $(scope.x), $(scope.y)")
             set_failed!(state, task; ex)
             @goto pop_task
         end
-        for arg in task.inputs
-            value = unwrap_weak_checked(Dagger.value(arg))
-            chunk = if istask(value)
-                load_result(state, task)
-            elseif value isa Chunk
-                value
-            else
-                nothing
-            end
-            chunk isa Chunk || continue
-            scope = constrain(scope, chunk.scope)
-            if scope isa InvalidScope
-                ex = SchedulingException("Current scope and argument Chunk scope are not compatible: $(scope.x), $(scope.y)")
-                set_failed!(state, task; ex)
+    end
+    @label scope_computed
+
+    input_procs = @reusable_vector :schedule!_input_procs Processor OSProc() 32
+    input_procs_cleanup = @reuse_defer_cleanup empty!(input_procs)
+    for proc in Dagger.compatible_processors(scope, procs)
+        if !(proc in input_procs)
+            push!(input_procs, proc)
+        end
+    end
+
+    sorted_procs = @reusable_vector :schedule!_sorted_procs Processor OSProc() 32
+    sorted_procs_cleanup = @reuse_defer_cleanup empty!(sorted_procs)
+    resize!(sorted_procs, length(input_procs))
+    costs = @reusable_dict :schedule!_costs Processor Float64 OSProc() 0.0 32
+    costs_cleanup = @reuse_defer_cleanup empty!(costs)
+    estimate_task_costs!(sorted_procs, costs, state, input_procs, task; sig)
+    input_procs_cleanup()
+    scheduled = false
+
+    for proc in sorted_procs
+        gproc = get_parent(proc)
+        can_use, scope = can_use_proc(state, task, gproc, proc, options, scope)
+        if can_use
+            has_cap, est_time_util, est_alloc_util, est_occupancy =
+                has_capacity(state, proc, gproc.pid, options.time_util, options.alloc_util, options.occupancy, sig)
+            if has_cap
+                # Schedule task onto proc
+                # FIXME: est_time_util = est_time_util isa MaxUtilization ? cap : est_time_util
+                proc_tasks = get!(to_fire, ScheduleTaskLocation(gproc, proc)) do
+                    #=FIXME:REALLOC_VEC=#
+                    Vector{ScheduleTaskSpec}()
+                end
+                push!(proc_tasks, ScheduleTaskSpec(task, scope, est_time_util, est_alloc_util, est_occupancy))
+                wtp = state.worker_time_pressure[gproc.pid]
+                lock(wtp) do inner_wtp
+                    inner_wtp[proc] = get(inner_wtp, proc, UInt64(0)) + est_time_util
+                end
+                @dagdebug task :schedule "Scheduling to $gproc -> $proc (cost: $(costs[proc]), pressure: $(get(wtp, proc, UInt64(0))))"
+                sorted_procs_cleanup()
+                costs_cleanup()
                 @goto pop_task
             end
         end
-        @label scope_computed
-
-        input_procs = @reusable_vector :schedule!_input_procs Processor OSProc() 32
-        input_procs_cleanup = @reuse_defer_cleanup empty!(input_procs)
-        for proc in Dagger.compatible_processors(scope, procs)
-            if !(proc in input_procs)
-                push!(input_procs, proc)
-            end
-        end
-
-        sorted_procs = @reusable_vector :schedule!_sorted_procs Processor OSProc() 32
-        sorted_procs_cleanup = @reuse_defer_cleanup empty!(sorted_procs)
-        resize!(sorted_procs, length(input_procs))
-        costs = @reusable_dict :schedule!_costs Processor Float64 OSProc() 0.0 32
-        costs_cleanup = @reuse_defer_cleanup empty!(costs)
-        estimate_task_costs!(sorted_procs, costs, state, input_procs, task; sig)
-        input_procs_cleanup()
-        scheduled = false
-
-        # Move our corresponding ThreadProc to be the last considered,
-        # if the task is expected to run for longer than the time it takes to
-        # schedule it onto another worker (estimated at 1ms).
-        if length(sorted_procs) > 1
-            sch_threadproc = Dagger.ThreadProc(myid(), Threads.threadid())
-            sch_thread_idx = findfirst(proc->proc==sch_threadproc, sorted_procs)
-            if sch_thread_idx !== nothing && costs[sch_threadproc] > 1_000_000 # 1ms
-                deleteat!(sorted_procs, sch_thread_idx)
-                push!(sorted_procs, sch_threadproc)
-            end
-        end
-
-        for proc in sorted_procs
-            gproc = get_parent(proc)
-            can_use, scope = can_use_proc(state, task, gproc, proc, options, scope)
-            if can_use
-                has_cap, est_time_util, est_alloc_util, est_occupancy =
-                    has_capacity(state, proc, gproc.pid, options.time_util, options.alloc_util, options.occupancy, sig)
-                if has_cap
-                    # Schedule task onto proc
-                    # FIXME: est_time_util = est_time_util isa MaxUtilization ? cap : est_time_util
-                    proc_tasks = get!(to_fire, ScheduleTaskLocation(gproc, proc)) do
-                        #=FIXME:REALLOC_VEC=#
-                        Vector{ScheduleTaskSpec}()
-                    end
-                    push!(proc_tasks, ScheduleTaskSpec(task, scope, est_time_util, est_alloc_util, est_occupancy))
-                    state.worker_time_pressure[gproc.pid][proc] =
-                        get(state.worker_time_pressure[gproc.pid], proc, 0) +
-                        est_time_util
-                    @dagdebug task :schedule "Scheduling to $gproc -> $proc (cost: $(costs[proc]), pressure: $(state.worker_time_pressure[gproc.pid][proc]))"
-                    sorted_procs_cleanup()
-                    costs_cleanup()
-                    @goto pop_task
-                end
-            end
-        end
-
-        ex = SchedulingException("No processors available, try widening scope")
-        set_failed!(state, task; ex)
-        @dagdebug task :schedule "No processors available, skipping"
-        sorted_procs_cleanup()
-        costs_cleanup()
-        @goto pop_task
-
-        # Fire all newly-scheduled tasks
-        @label fire_tasks
-        for (task_loc, task_spec) in to_fire
-            fire_tasks!(ctx, task_loc, task_spec, state)
-        end
-        to_fire_cleanup()
-
-        append!(state.ready, failed_scheduling)
-        failed_scheduling_cleanup()
     end
+
+    ex = SchedulingException("No processors available, try widening scope")
+    set_failed!(state, task; ex)
+    @dagdebug task :schedule "No processors available, skipping"
+    sorted_procs_cleanup()
+    costs_cleanup()
+    @goto pop_task
+
+    # Fire all newly-scheduled tasks
+    @label fire_tasks
+    for (task_loc, task_spec) in to_fire
+        fire_tasks!(ctx, task_loc, task_spec, state)
+    end
+    to_fire_cleanup()
+
+    append!(state.ready, failed_scheduling)
+    failed_scheduling_cleanup()
 end
 
 """
@@ -742,30 +864,42 @@ function remove_dead_proc!(ctx, state, proc, options)
     delete!(state.worker_chans, proc.pid)
 end
 
-function finish_task!(ctx, state, node, thunk_failed)
-    @dagdebug node :finish "Finishing with $(thunk_failed ? "error" : "result")"
-    pop!(state.running, node)
-    delete!(state.running_on, node)
-    if thunk_failed
-        set_failed!(state, node; ex=load_result(state, node))
+function finish_task!(ctx, state, thunk, thunk_failed)
+    @dagdebug thunk :finish "Finishing with $(thunk_failed ? "error" : "result")"
+    if Dagger.is_task_local(thunk)
+        thunk_state = lock(state.thunk_state) do thunk_states
+            thunk_states[thunk]
+        end
+        lock(state.running_state) do running_state
+            @assert try_transition!(thunk_state, THUNK_RUNNING, THUNK_FINISHED)
+            pop!(running_state.running, thunk)
+            delete!(running_state.running_on, thunk)
+        end
     end
-    schedule_dependents!(state, node, thunk_failed)
-    fill_registered_futures!(state, node, thunk_failed)
+    if thunk_failed
+        set_failed!(state, thunk; ex=load_result(thunk))
+    end
+    schedule_dependents!(state, thunk, thunk_failed)
+    fill_registered_futures!(state, thunk, thunk_failed)
+    notify_completion_watchers!(state, thunk, thunk_failed)
 
     #to_evict = cleanup_syncdeps!(state, node)
-    cleanup_syncdeps!(state, node)
-    if haskey(state.waiting_data, node) && isempty(state.waiting_data[node])
-        delete!(state.waiting_data, node)
+    cleanup_syncdeps!(state, thunk)
+    should_delete = lock(state.waiting_data) do wd
+        if haskey(wd, thunk) && isempty(wd[thunk])
+            delete!(wd, thunk)
+        end
+        return !haskey(wd, thunk)
     end
-    if !haskey(state.waiting_data, node)
-        node.sch_accessible = false
-        delete_unused_task!(state, node)
+    if should_delete
+        thunk.sch_accessible = false
+        delete_unused_task!(state, thunk)
     end
     #evict_all_chunks!(ctx, to_evict)
 end
 
 function delete_unused_task!(state, thunk)
-    if has_result(state, thunk) && !thunk.eager_accessible && !thunk.sch_accessible
+    if has_result(thunk) && !thunk.eager_accessible && !thunk.sch_accessible
         # Will not be accessed further, delete all cached data
         task_delete!(state, thunk)
         return true
@@ -774,9 +908,9 @@ function delete_unused_task!(state, thunk)
     end
 end
 function task_delete!(state, thunk)
-    clear_result!(state, thunk)
+    clear_result!(thunk)
     delete!(state.valid, thunk)
-    delete!(state.errored, thunk)
+    delete!(state.thunk_state, thunk)
     delete!(state.thunk_dict, thunk.id)
 end
 
@@ -803,7 +937,7 @@ end
 
 "A serializable description of a `Thunk` to be executed."
 struct TaskSpec
-    thunk_id::Int
+    thunk_id::TaskID
     est_time_util::UInt64
     est_alloc_util::UInt64
     est_occupancy::UInt32
@@ -823,15 +957,16 @@ Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
     to_send_cleanup = @reuse_defer_cleanup empty!(to_send)
     for task_spec in task_specs
         thunk = task_spec.task
-        push!(state.running, thunk)
-        state.running_on[thunk] = gproc
-        @assert !has_result(state, thunk)
+        lock(state.running_state) do running_state
+            push!(running_state.running, thunk)
+            running_state.running_on[thunk] = gproc
+        end
         if thunk.options.restore !== nothing
             try
                 result = @invokelatest thunk.options.restore(thunk)
                 if result isa Chunk
-                    store_result!(state, thunk, result)
-                    finish_task!(ctx, state, thunk, false)
+                    store_result!(thunk, result)
+                    @lock state.lock finish_task!(ctx, state, thunk, false)
                     continue
                 elseif result !== nothing
                     throw(ArgumentError("Invalid restore return type: $(typeof(result))"))
@@ -911,7 +1046,12 @@ function (ets::FireTaskSpec)()
         # FIXME: Catch the correct task ID
         thunk_id = first_task.thunk_id
         if isopen(chan)
-            put!(chan, TaskResult(pid, proc, thunk_id, CapturedException(err, bt), nothing))
+            if !walk_transfer_safe(err)
+                @error "Error in task $thunk_id" exception=(err, bt)
+                put!(chan, TaskResult(pid, proc, thunk_id, ErrorException("Error in task $thunk_id"), nothing))
+            else
+                put!(chan, TaskResult(pid, proc, thunk_id, CapturedException(err, bt), nothing))
+            end
         end
     finally
         @maybelog ctx timespan_finish(ctx, :fire, (;uid, worker=pid), nothing)
@@ -985,12 +1125,12 @@ struct ProcessorInternalState
     return_queue::RemoteChannel
     queue::LockedObject{PriorityQueue{TaskSpec, UInt32, Base.Order.ForwardOrdering}}
     reschedule::Doorbell
-    tasks::Dict{Int,Task}
-    task_specs::Dict{Int,TaskSpec}
+    tasks::Dict{TaskID,Task}
+    task_specs::Dict{TaskID,TaskSpec}
     proc_occupancy::Base.RefValue{UInt32}
     time_pressure::Base.RefValue{UInt64}
-    cancelled::Set{Int}
-    cancel_tokens::Dict{Int,Dagger.CancelToken}
+    cancelled::Set{TaskID}
+    cancel_tokens::Dict{TaskID,Dagger.CancelToken}
     done::Base.RefValue{Bool}
 end
 struct ProcessorState
@@ -1302,11 +1442,11 @@ function do_tasks(to_proc, return_queue, tasks)
         reschedule = Doorbell()
         istate = ProcessorInternalState(ctx, to_proc, return_queue,
                                         queue_locked, reschedule,
-                                        Dict{Int,Task}(),
-                                        Dict{Int,Vector{Any}}(),
+                                        Dict{TaskID,Task}(),
+                                        Dict{TaskID,TaskSpec}(),
                                         Ref(UInt32(0)), Ref(UInt64(0)),
-                                        Set{Int}(),
-                                        Dict{Int,Dagger.CancelToken}(),
+                                        Set{TaskID}(),
+                                        Dict{TaskID,Dagger.CancelToken}(),
                                         Ref(false))
         start_event = Base.Event()
         runner = start_processor_runner!(istate, uid, return_queue, start_event)

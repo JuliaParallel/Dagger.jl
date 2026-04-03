@@ -6,7 +6,7 @@ end
 module Events
 
 import ..Dagger
-import ..Dagger: Context, Chunk
+import ..Dagger: Context, Chunk, TaskID, TASKID_ZERO
 
 import ..TimespanLogging
 import .TimespanLogging: Event, init_similar
@@ -147,7 +147,7 @@ struct TaskArguments end
 function (ta::TaskArguments)(ev::Event{:finish})
     if ev.category == :move
         args = Pair{Union{Symbol,Int},Dagger.LoggedMutableObject}[]
-        thunk_id = ev.id.thunk_id::Int
+        thunk_id = ev.id.thunk_id::TaskID
         pos = Dagger.raw_position(ev.id.position::Dagger.ArgPosition)::Union{Symbol,Int}
         arg = ev.timeline.data
         if ismutable(arg)
@@ -164,16 +164,16 @@ end
 Records any `move`-derived copies of arguments of each task.
 """
 struct TaskArgumentMoves
-    pre_move_args::Dict{Int,Dict{Union{Int,Symbol},Dagger.LoggedMutableObject}}
+    pre_move_args::Dict{TaskID,Dict{Union{Int,Symbol},Dagger.LoggedMutableObject}}
 end
 TaskArgumentMoves() =
-    TaskArgumentMoves(Dict{Int,Dict{Union{Int,Symbol},Dagger.LoggedMutableObject}}())
+    TaskArgumentMoves(Dict{TaskID,Dict{Union{Int,Symbol},Dagger.LoggedMutableObject}}())
 init_similar(::TaskArgumentMoves) = TaskArgumentMoves()
 function (ta::TaskArgumentMoves)(ev::Event{:start})
     if ev.category == :move
         data = ev.timeline.data
-        thunk_id = ev.id.thunk_id::Int
-        if ismutable(data) && thunk_id != 0 # Ignore Datadeps moves, because we don't have TIDs for them
+        thunk_id = ev.id.thunk_id::TaskID
+        if ismutable(data) && thunk_id != TASKID_ZERO # Ignore Datadeps moves, because we don't have TIDs for them
             position = Dagger.raw_position(ev.id.position::Dagger.ArgPosition)::Union{Symbol,Int}
             d = get!(Dict{Union{Int,Symbol},Dagger.LoggedMutableObject}, ta.pre_move_args, thunk_id)
             d[position] = Dagger.objectid_or_chunkid(data)
@@ -185,7 +185,7 @@ function (ta::TaskArgumentMoves)(ev::Event{:finish})
     if ev.category == :move
         post_data = ev.timeline.data
         if ismutable(post_data)
-            thunk_id = ev.id.thunk_id::Int
+            thunk_id = ev.id.thunk_id::TaskID
             position = Dagger.raw_position(ev.id.position::Dagger.ArgPosition)::Union{Symbol,Int}
             if haskey(ta.pre_move_args, thunk_id)
                 d = ta.pre_move_args[thunk_id]
@@ -195,7 +195,7 @@ function (ta::TaskArgumentMoves)(ev::Event{:finish})
                 else
                     @warn "No TID $(thunk_id), Position $(position)"
                 end
-            elseif thunk_id != 0
+            elseif thunk_id != TASKID_ZERO
                 @warn "No TID $(thunk_id)"
             end
         end
@@ -212,7 +212,7 @@ struct TaskResult end
 (::TaskResult)(ev::Event{:start}) = nothing
 function (ta::TaskResult)(ev::Event{:finish})
     if ev.category == :compute
-        thunk_id = ev.id.thunk_id::Int
+        thunk_id = ev.id.thunk_id::TaskID
         result = ev.timeline.result
         if ismutable(result)
             return thunk_id => Dagger.objectid_or_chunkid(result)
@@ -229,7 +229,7 @@ Records the dependencies of each submitted task.
 struct TaskDependencies end
 (td::TaskDependencies)(ev::Event{:start}) = nothing
 function (::TaskDependencies)(ev::Event{:finish})
-    local deps_tids::Vector{Int}
+    local deps_tids::Vector{TaskID}
     function get_deps!(deps)
         for dep in deps
             @assert dep isa Dagger.ThunkSyncdep && dep.thunk isa Dagger.WeakThunk
@@ -239,7 +239,7 @@ function (::TaskDependencies)(ev::Event{:finish})
         end
     end
     if ev.category == :add_thunk
-        deps_tids = Int[]
+        deps_tids = TaskID[]
         get_deps!(@something(ev.timeline.options.syncdeps, Set{Dagger.ThunkSyncdep}()))
         return ev.id.thunk_id => deps_tids
     end
@@ -254,8 +254,8 @@ Maps DTask UIDs to Thunk TIDs.
 struct TaskUIDtoTID end
 function (tut::TaskUIDtoTID)(ev::Event{:start})
     if ev.category == :add_thunk
-        thunk_id = ev.id.thunk_id::Int
-        uid = ev.timeline.uid::UInt
+        thunk_id = ev.id.thunk_id::TaskID
+        uid = ev.timeline.uid::TaskID
         return uid => thunk_id
     end
     return
@@ -266,7 +266,7 @@ struct TaskToChunk end
 (td::TaskToChunk)(ev::Event{:start}) = nothing
 function (::TaskToChunk)(ev::Event{:finish})
     if ev.category == :finish
-        thunk_id = ev.id.thunk_id::Int
+        thunk_id = ev.id.thunk_id::TaskID
         result = ev.timeline.result
         if ismutable(result)
             chunk_id = Dagger.objectid_or_chunkid(result)

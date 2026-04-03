@@ -1,20 +1,25 @@
 export Thunk, delayed
 
 const ID_COUNTER = Threads.Atomic{Int}(1)
-next_id() = Threads.atomic_add!(ID_COUNTER, 1)
+
+"Allocates a globally-unique `TaskID` for the current worker."
+function next_id()
+    local_id = Threads.atomic_add!(ID_COUNTER, 1)
+    return TaskID(myid(), local_id)
+end
 
 const EMPTY_ARGS = Argument[]
 const EMPTY_SYNCDEPS = Set{ThunkSyncdep}()
 Base.@kwdef mutable struct ThunkSpec
     fargs::Vector{Argument} = EMPTY_ARGS
-    id::Int = 0
+    id::TaskID = TASKID_ZERO
     cache_ref::Any = nothing
     affinity::Union{Pair{OSProc,Int}, Nothing} = nothing
     options::Union{Options, Nothing} = nothing
 end
 function unset!(spec::ThunkSpec, _)
     spec.fargs = EMPTY_ARGS
-    spec.id = 0
+    spec.id = TASKID_ZERO
     spec.cache_ref = nothing
     spec.affinity = nothing
     spec.options = nothing
@@ -54,23 +59,24 @@ If omitted, options can also be specified by passing key-value pairs as
 """
 mutable struct Thunk
     inputs::Vector{Argument} # TODO: Use `ImmutableArray` in 1.8
-    id::Int
+    id::TaskID
     cache_ref::Any
     affinity::Union{Pair{OSProc,Int}, Nothing}
     options::Union{Options, Nothing} # stores task options
     eager_accessible::Bool
     sch_accessible::Bool
     finished::Bool
+    errored::Bool
     function Thunk(spec::ThunkSpec)
         return new(spec.fargs, spec.id,
                    spec.cache_ref, spec.affinity,
                    spec.options,
-                   true, true, false)
+                   true, true, false, false)
     end
 end
 function Thunk(f, xs...;
                syncdeps=nothing,
-               id::Int=next_id(),
+               id::TaskID=next_id(),
                cache_ref=nothing,
                affinity=nothing,
                options=nothing,
@@ -231,6 +237,7 @@ struct WeakThunk
 end
 istask(::WeakThunk) = true
 task_id(t::WeakThunk) = task_id(unwrap_weak_checked(t))
+is_task_local(t::WeakThunk) = istasklocal(unwrap_weak_checked(t))
 unwrap_weak(t::WeakThunk) = t.x.value
 unwrap_weak(t) = t
 function unwrap_weak_checked(t)
@@ -252,7 +259,7 @@ ThunkSyncdep(t::WeakThunk) = ThunkSyncdep(nothing, t)
 
 "A summary of the data contained in a Thunk, which can be safely serialized."
 struct ThunkSummary
-    id::Int
+    id::TaskID
     inputs::Vector{Argument}
 end
 inputs(t::ThunkSummary) = t.inputs
@@ -644,4 +651,5 @@ inputs(x) = ()
 
 istask(x::Thunk) = true
 task_id(x::Thunk) = x.id
+is_task_local(x::Thunk) = x.id.worker == myid()
 istask(x) = false

@@ -23,7 +23,7 @@
 
     # Halt scheduler
     notify(state.halt)
-    put!(state.chan, Sch.TaskResult(1, OSProc(), 0, Sch.SchedulerHaltedException(), nothing))
+    put!(state.chan, Sch.TaskResult(1, OSProc(), TASKID_ZERO, Sch.SchedulerHaltedException(), nothing))
     state = nothing
 
     # Wait for halt

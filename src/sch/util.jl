@@ -43,7 +43,7 @@ unwrap_nested_exception(err::RemoteException) =
 unwrap_nested_exception(err::DTaskFailedException) =
     unwrap_nested_exception(err.ex)
 unwrap_nested_exception(err::TaskFailedException) =
-    unwrap_nested_exception(err.t.exception)
+    unwrap_nested_exception(err.task.result)
 unwrap_nested_exception(err::LoadError) =
     unwrap_nested_exception(err.error)
 unwrap_nested_exception(err) = err
@@ -66,38 +66,116 @@ function get_propagated_options(options::Options)
     return nt
 end
 
-has_result(state, thunk) = thunk.cache_ref !== nothing
-function load_result(state, thunk)
+has_result(thunk) = thunk.cache_ref !== nothing
+has_error(thunk) = thunk.errored
+function load_result(thunk)
     @assert thunk.finished "Thunk[$(thunk.id)] is not yet finished"
     return something(thunk.cache_ref)
 end
-function store_result!(state, thunk, value; error::Bool=false)
-    @assert islocked(state.lock)
+function store_result!(thunk, value; error::Bool=false)
     @assert !thunk.finished "Thunk[$(thunk.id)] should not be finished yet"
-    @assert !has_result(state, thunk) "Thunk[$(thunk.id)] already contains a cached result"
+    @assert !has_result(thunk) "Thunk[$(thunk.id)] already contains a cached result"
     thunk.finished = true
     if error && value isa Exception && !(value isa DTaskFailedException)
         thunk.cache_ref = Some{Any}(DTaskFailedException(thunk, thunk, value))
     else
         thunk.cache_ref = Some{Any}(value)
     end
-    state.errored[thunk] = error
+    thunk.errored = error
 end
-function clear_result!(state, thunk)
-    @assert islocked(state.lock)
+function clear_result!(thunk)
     thunk.cache_ref = nothing
-    delete!(state.errored, thunk)
+    thunk.errored = false
+end
+function was_scheduled(state, thunk)
+    return lock(state.running_state) do running_state
+        thunk in running_state.running || thunk.finished
+    end
 end
 
 "Fills the result for all registered futures of `thunk`."
 function fill_registered_futures!(state, thunk, failed)
-    if haskey(state.futures, thunk)
-        # Notify any listening thunks
-        @dagdebug thunk :finish "Notifying $(length(state.futures[thunk])) futures"
-        for future in state.futures[thunk]
-            put!(future, load_result(state, thunk); error=failed)
+    futures_to_fill = lock(state.futures) do futures
+        if haskey(futures, thunk)
+            fs = futures[thunk]
+            delete!(futures, thunk)
+            return fs
         end
-        delete!(state.futures, thunk)
+        return nothing
+    end
+    if futures_to_fill !== nothing
+        @dagdebug thunk :finish "Notifying $(length(futures_to_fill)) futures"
+        result = load_result(thunk)
+        @assert walk_transfer_safe(result) "Result of thunk $(thunk.id) is not transfer safe: $(typeof(result))"
+        for future in futures_to_fill
+            put!(future, result; error=failed)
+        end
+    end
+end
+
+"""
+    register_completion_watcher!(state, thunk_id::TaskID, chan::RemoteChannel)
+
+Registers `chan` to receive a `TaskCompletionNotification` when the task
+identified by `thunk_id` completes. If the task has already finished, the
+notification is sent immediately.
+"""
+function register_completion_watcher!(state, thunk_id::TaskID, chan::RemoteChannel)
+    already_done = false
+    failed = false
+    lock(state.completion_watchers) do cw
+        if !haskey(state.thunk_dict, thunk_id)
+            state.thunk_dict[thunk_id] = WeakThunk(Thunk(()->nothing; id=thunk_id))
+        end
+        thunk = unwrap_weak_checked(state.thunk_dict[thunk_id])
+        if has_result(thunk)
+            already_done = true
+            failed = has_error(thunk)
+            return
+        end
+        watchers = get!(Vector{RemoteChannel}, cw, thunk)
+        push!(watchers, chan)
+    end
+    if already_done
+        try
+            thunk = unwrap_weak_checked(state.thunk_dict[thunk_id])
+            put!(chan, TaskCompletionNotification(thunk_id, failed, load_result(thunk)))
+        catch err
+            if !(unwrap_nested_exception(err) isa Union{InvalidStateException, ProcessExitedException})
+                rethrow()
+            end
+        end
+    end
+end
+
+"""
+    notify_completion_watchers!(state, thunk::Thunk, failed::Bool)
+
+Sends a `TaskCompletionNotification` to all channels registered for `thunk`
+and removes the registration. Called by `finish_task!` after a task completes.
+"""
+function notify_completion_watchers!(state, thunk::Thunk, failed::Bool)
+    thunk_id = thunk.id
+    watchers = lock(state.completion_watchers) do cw
+        if haskey(cw, thunk)
+            ws = cw[thunk]
+            delete!(cw, thunk)
+            return ws
+        end
+        return nothing
+    end
+    watchers === nothing && return
+    @assert walk_transfer_safe(load_result(thunk)) "Result of thunk $thunk_id is not transfer safe: $(typeof(load_result(thunk)))"
+    notification = TaskCompletionNotification(thunk_id, failed, load_result(thunk))
+    @dagdebug thunk_id :finish "Notifying $(length(watchers)) completion watchers"
+    for chan in watchers
+        try
+            put!(chan, notification)
+        catch err
+            if !(unwrap_nested_exception(err) isa Union{InvalidStateException, ProcessExitedException})
+                rethrow()
+            end
+        end
     end
 end
 
@@ -109,26 +187,22 @@ function cleanup_syncdeps!(state, thunk)
     for inp in thunk.options.syncdeps
         inp = unwrap_weak_checked(inp)
         @assert istask(inp)
-        if inp in keys(state.waiting_data)
-            w = state.waiting_data[inp]
-            if thunk in w
-                pop!(w, thunk)
-            end
-            if isempty(w)
-                #= FIXME: Worker-side cache is currently disabled
-                if istask(inp) && has_result(state, inp)
-                    _thunk = load_result(state, inp)
-                    if _thunk isa Chunk
-                        push!(to_evict, _thunk)
-                    end
-                elseif inp isa Chunk
-                    push!(to_evict, inp)
+        should_cleanup = lock(state.waiting_data) do wd
+            if haskey(wd, inp)
+                w = wd[inp]
+                if thunk in w
+                    pop!(w, thunk)
                 end
-                =#
-                delete!(state.waiting_data, inp)
-                inp.sch_accessible = false
-                delete_unused_task!(state, inp)
+                if isempty(w)
+                    delete!(wd, inp)
+                    return true
+                end
             end
+            return false
+        end
+        if should_cleanup
+            inp.sch_accessible = false
+            delete_unused_task!(state, inp)
         end
     end
     #return to_evict
@@ -137,27 +211,37 @@ end
 "Schedules any dependents that may be ready to execute."
 function schedule_dependents!(state, thunk, failed)
     @dagdebug thunk :finish "Checking dependents"
-    if !haskey(state.waiting_data, thunk) || isempty(state.waiting_data[thunk])
-        return
+    deps_snapshot = lock(state.waiting_data) do wd
+        haskey(wd, thunk) || return nothing
+        isempty(wd[thunk]) && return nothing
+        return collect(wd[thunk])
     end
+    deps_snapshot === nothing && return
     ctr = 0
-    for dep in state.waiting_data[thunk]
-        dep_isready = false
-        if haskey(state.waiting, dep)
-            set = state.waiting[dep]
-            thunk in set && pop!(set, thunk)
-            dep_isready = isempty(set)
-            if dep_isready
-                delete!(state.waiting, dep)
+    for dep in deps_snapshot
+        dep_isready = lock(state.waiting) do waiting
+            if haskey(waiting, dep)
+                set = waiting[dep]
+                thunk in set && pop!(set, thunk)
+                is_ready = isempty(set)
+                if is_ready
+                    delete!(waiting, dep)
+                end
+                return is_ready
+            else
+                return true
             end
-        else
-            dep_isready = true
         end
-        if dep_isready
+        if dep_isready && !was_scheduled(state, dep)
             ctr += 1
             if !failed
-                push!(state.ready, dep)
-                @dagdebug dep :schedule "Dependent is now ready"
+                thunk_state = lock(state.thunk_state) do thunk_states
+                    thunk_states[dep]
+                end
+                if try_transition!(thunk_state, THUNK_WAITING, THUNK_READY)
+                    push!(state.ready, dep)
+                    @dagdebug dep :schedule "Dependent is now ready"
+                end
             else
                 set_failed!(state, thunk, dep)
                 @dagdebug dep :schedule "Dependent has transitively failed"
@@ -181,7 +265,7 @@ function reschedule_syncdeps!(state, thunk, seen=nothing)
             if haskey(state.valid, thunk)
                 continue
             end
-            if thunk.finished || (thunk in state.ready) || (thunk in state.running)
+            if was_scheduled(state, thunk)
                 continue
             end
             for idx in 1:length(thunk.inputs)
@@ -192,37 +276,51 @@ function reschedule_syncdeps!(state, thunk, seen=nothing)
                 if input isa Chunk
                     # N.B. Different Chunks with the same DRef handle will hash to the same slot,
                     # so we just pick an equivalent Chunk as our upstream
-                    if !haskey(state.waiting_data, input)
-                        push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
+                    lock(state.waiting_data) do wd
+                        if !haskey(wd, input)
+                            push!(get!(()->Set{Thunk}(), wd, input), thunk)
+                        end
                     end
                 end
             end
-            w = get!(()->Set{Thunk}(), state.waiting, thunk)
+            w = lock(state.waiting) do waiting
+                get!(()->Set{Thunk}(), waiting, thunk)
+            end
             if thunk.options.syncdeps !== nothing
                 for input in Dagger.syncdeps_iterator(thunk)
                     input in seen && continue
 
                     # Unseen
-                    push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
+                    lock(state.waiting_data) do wd
+                        push!(get!(()->Set{Thunk}(), wd, input), thunk)
+                    end
 
                     # Unseen task
-                    if get(state.errored, input, false)
+                    if has_error(input)
                         set_failed!(state, input, thunk)
                     end
                     input.finished && continue
 
                     # Unseen and unfinished task
-                    push!(w, input)
-                    if !((input in state.running) || (input in state.ready))
+                    lock(state.waiting) do waiting
+                        push!(waiting[thunk], input)
+                    end
+                    if !was_scheduled(state, input)
                         push!(to_visit, input)
                     end
                 end
             end
-            if isempty(w)
-                # Inputs are ready
-                delete!(state.waiting, thunk)
-                if !get(state.errored, thunk, false)
-                    push!(state.ready, thunk)
+            lock(state.waiting) do waiting
+                if haskey(waiting, thunk) && isempty(waiting[thunk])
+                    delete!(waiting, thunk)
+                end
+                if !haskey(waiting, thunk) && !was_scheduled(state, thunk)
+                    thunk_state = lock(state.thunk_state) do thunk_states
+                        thunk_states[thunk]
+                    end
+                    if try_transition!(thunk_state, THUNK_WAITING, THUNK_READY)
+                        push!(state.ready, thunk)
+                    end
                 end
             end
         end
@@ -233,47 +331,51 @@ const RESCHEDULE_SYNCDEPS_SEEN_CACHE = TaskLocalValue{ReusableCache{Set{Thunk},N
 
 "Marks `thunk` and all dependent thunks as failed."
 function set_failed!(state, origin::Thunk, thunk::Thunk=origin; ex=nothing)
-    @assert islocked(state.lock)
-    has_result(state, thunk) && return
-    @dagdebug thunk :finish "Setting as failed"
-
+    has_result(thunk) && return
     if origin === thunk && ex !== nothing
-        store_result!(state, thunk, ex; error=true)
+        store_result!(thunk, ex; error=true)
     end
+    @lock state.lock begin
+        @dagdebug thunk :finish "Setting as failed"
 
-    seen = Set{Thunk}()
-    to_visit = Thunk[thunk]
-    while !isempty(to_visit)
-        thunk = pop!(to_visit)
-        push!(seen, thunk)
+        seen = Set{Thunk}()
+        to_visit = Thunk[thunk]
+        while !isempty(to_visit)
+            thunk = pop!(to_visit)
+            push!(seen, thunk)
 
-        filter!(x -> x !== thunk, state.ready)
+            filter!(x -> x !== thunk, state.ready)
 
-        if !has_result(state, thunk) && origin !== thunk
-            origin_ex = load_result(state, origin)
-            if origin_ex isa RemoteException
-                origin_ex = origin_ex.captured
+            if !has_result(thunk) && origin !== thunk
+                origin_ex = load_result(origin)
+                if origin_ex isa RemoteException
+                    origin_ex = origin_ex.captured
+                end
+                if origin_ex isa DTaskFailedException
+                    origin_ex = origin_ex.ex
+                end
+                ex = DTaskFailedException(thunk, origin, origin_ex)
+                store_result!(thunk, ex; error=true)
             end
-            if origin_ex isa DTaskFailedException
-                origin_ex = origin_ex.ex
-            end
-            ex = DTaskFailedException(thunk, origin, origin_ex)
-            store_result!(state, thunk, ex; error=true)
-        end
 
-        fill_registered_futures!(state, thunk, true)
-        if haskey(state.waiting_data, thunk)
-            for dep in state.waiting_data[thunk]
-                haskey(state.errored, dep) && continue
-                dep in seen && continue
-                push!(to_visit, dep)
+            fill_registered_futures!(state, thunk, true)
+            lock(state.waiting_data) do wd
+                if haskey(wd, thunk)
+                    for dep in wd[thunk]
+                        has_result(dep) && continue
+                        dep in seen && continue
+                        push!(to_visit, dep)
+                    end
+                    delete!(wd, thunk)
+                end
             end
-            delete!(state.waiting_data, thunk)
             thunk.sch_accessible = false
             delete_unused_task!(state, thunk)
-        end
-        if haskey(state.waiting, thunk)
-            delete!(state.waiting, thunk)
+            lock(state.waiting) do waiting
+                if haskey(waiting, thunk)
+                    delete!(waiting, thunk)
+                end
+            end
         end
     end
 end
@@ -288,14 +390,14 @@ end
 function print_sch_status(io::IO, state, thunk; offset=0, limit=5, max_inputs=3)
     function status_string(node)
         status = ""
-        if get(state.errored, node, false)
+        if has_error(node)
             status *= "E"
         end
         if node in state.ready
             status *= "r"
         elseif node in state.running
             status *= "R"
-        elseif has_result(state, node)
+        elseif has_result(node)
             status *= "C"
         else
             status *= "?"
@@ -466,7 +568,7 @@ function can_use_proc(state, task, gproc, proc, opts, scope)
     for arg in task.inputs[2:end]
         value = unwrap_weak_checked(Dagger.value(arg))
         if value isa Thunk
-            value = load_result(state, value)
+            value = load_result(value)
         end
         Targ = chunktype(value)
         if !Dagger.iscompatible_arg(proc, opts, Targ)
@@ -543,7 +645,7 @@ function collect_task_inputs!(state, inputs)
     for idx in 1:length(inputs)
         input = unwrap_weak_checked(Dagger.value(inputs[idx]))
         if istask(input)
-            inputs[idx].value = wrap_weak(load_result(state, input))
+            inputs[idx].value = wrap_weak(load_result(input))
         end
     end
     return
@@ -678,18 +780,21 @@ function walk_data_inner(f, x::Union{Array,Tuple}, seen, to_visit)
 end
 walk_data_inner(f, ::DataType, seen, to_visit) = true
 
-"Walks `x` and returns a `Bool` indicating whether `x` is safe to serialize."
-function walk_storage_safe(@nospecialize(x))
+function walk_data_bool(@specialize(f), @nospecialize(x))
     safe = Ref{Bool}(true)
     walk_data(x) do y
-        action = storage_safe(y)
+        action = f(y)
         if action === false
             safe[] = false
         end
         return action
     end
-    safe[]
+    return safe[]
 end
+
+"Walks `x` and returns a `Bool` indicating whether `x` is safe to store to disk."
+walk_storage_safe(@nospecialize(x)) =
+    walk_data_bool(storage_safe, x)
 
 storage_safe(::T) where T = storage_safe_type(T)
 
@@ -715,3 +820,32 @@ storage_safe_type(::Type{<:Chunk}) = false
 storage_safe_type(::Type{MemPool.DRef}) = false
 storage_safe_type(::Type{<:Ptr}) = false
 storage_safe_type(::Type{<:Core.LLVMPtr}) = false
+
+"Walks `x` and returns a `Bool` indicating whether `x` is safe to transfer."
+walk_transfer_safe(@nospecialize(x)) =
+    walk_data_bool(transfer_safe, x)
+
+transfer_safe(::T) where T = transfer_safe_type(T)
+
+function transfer_safe_type(::Type{T}) where T
+    isprimitivetype(T) && return true
+    isabstracttype(T) && return missing
+    if T isa Union
+        for S in Base.uniontypes(T)
+            action = transfer_safe_type(S)
+            if action !== true
+                return action
+            end
+        end
+    end
+    return true
+end
+transfer_safe_type(::Type{A}) where {A<:Array{T}} where {T} =
+    transfer_safe_type(T)
+
+transfer_safe_type(::Type{Thunk}) = false
+transfer_safe_type(::Type{Dagger.DTask}) = false
+transfer_safe_type(::Type{<:Chunk}) = true
+transfer_safe_type(::Type{MemPool.DRef}) = true
+transfer_safe_type(::Type{<:Ptr}) = false
+transfer_safe_type(::Type{<:Core.LLVMPtr}) = false

@@ -12,22 +12,23 @@ macro dagdebug(thunk, category, msg, args...)
     debug_ex_noid = :(@debug "($($(repr(cat_sym)))) $($msg)" _module=Dagger _file=$(string(__source__.file)) _line=$(__source__.line))
     append!(debug_ex_noid.args, args)
     esc(quote
-        let $id = -1
-            if $thunk isa Integer
-                $id = Int($thunk)
+        let $id = TASKID_ZERO
+            if $thunk isa TaskID
+                $id = $thunk
+            elseif $thunk isa Integer
+                $id = $TaskID(myid(), $thunk)
             elseif $istask($thunk)
                 $id = $task_id($thunk)
             elseif $thunk === nothing
-                $id = 0
+                $id = $TASKID_ZERO
             else
                 @warn "Unsupported thunk argument to @dagdebug: $(typeof($thunk))"
-                $id = -1
             end
-            if $id > 0
+            if $id != $TASKID_ZERO
                 if $(QuoteNode(cat_sym)) in $DAGDEBUG_CATEGORIES || :all in $DAGDEBUG_CATEGORIES
                     $debug_ex_id
                 end
-            elseif $id == 0
+            else
                 if $(QuoteNode(cat_sym)) in $DAGDEBUG_CATEGORIES || :all in $DAGDEBUG_CATEGORIES
                     $debug_ex_noid
                 end

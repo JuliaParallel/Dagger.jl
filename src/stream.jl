@@ -1,23 +1,23 @@
 mutable struct StreamStore{T,B}
-    uid::UInt
-    waiters::Vector{Int}
-    input_streams::Dict{UInt,Any} # FIXME: Concrete type
-    output_streams::Dict{UInt,Any} # FIXME: Concrete type
-    input_buffers::Dict{UInt,B}
-    output_buffers::Dict{UInt,B}
+    uid::TaskID
+    waiters::Vector{TaskID}
+    input_streams::Dict{TaskID,Any} # FIXME: Concrete type
+    output_streams::Dict{TaskID,Any} # FIXME: Concrete type
+    input_buffers::Dict{TaskID,B}
+    output_buffers::Dict{TaskID,B}
     input_buffer_amount::Int
     output_buffer_amount::Int
-    input_fetchers::Dict{UInt,Any}
-    output_fetchers::Dict{UInt,Any}
+    input_fetchers::Dict{TaskID,Any}
+    output_fetchers::Dict{TaskID,Any}
     open::Bool
     migrating::Bool
     lock::Threads.Condition
-    StreamStore{T,B}(uid::UInt, input_buffer_amount::Integer, output_buffer_amount::Integer) where {T,B} =
-        new{T,B}(uid, zeros(Int, 0),
-                 Dict{UInt,Any}(), Dict{UInt,Any}(),
-                 Dict{UInt,B}(), Dict{UInt,B}(),
+    StreamStore{T,B}(uid::TaskID, input_buffer_amount::Integer, output_buffer_amount::Integer) where {T,B} =
+        new{T,B}(uid, TaskID[],
+                 Dict{TaskID,Any}(), Dict{TaskID,Any}(),
+                 Dict{TaskID,B}(), Dict{TaskID,B}(),
                  input_buffer_amount, output_buffer_amount,
-                 Dict{UInt,Any}(), Dict{UInt,Any}(),
+                 Dict{TaskID,Any}(), Dict{TaskID,Any}(),
                  true, false, Threads.Condition())
 end
 
@@ -52,7 +52,7 @@ function Base.put!(store::StreamStore{T,B}, value) where {T,B}
     end
 end
 
-function Base.take!(store::StreamStore, id::UInt)
+function Base.take!(store::StreamStore, id::TaskID)
     thunk_id = STREAM_THUNK_ID[]
     @lock store.lock begin
         if !haskey(store.output_buffers, id)
@@ -93,7 +93,7 @@ Returns whether the store is actively open, or if closing, still has remaining
 messages for `id`. Only check this when deciding if existing values can be
 taken.
 """
-function Base.isopen(store::StreamStore, id::UInt)
+function Base.isopen(store::StreamStore, id::TaskID)
     @lock store.lock begin
         if !haskey(store.output_buffers, id)
             @assert haskey(store.output_streams, id)
@@ -121,7 +121,7 @@ function Base.close(store::StreamStore)
 end
 
 # FIXME: Just pass Stream directly, rather than its uid
-function add_waiters!(store::StreamStore{T,B}, waiters::Vector{Pair{UInt,Any}}) where {T,B}
+function add_waiters!(store::StreamStore{T,B}, waiters::Vector{Pair{TaskID,Any}}) where {T,B}
     our_uid = store.uid
     @lock store.lock begin
         for (output_uid, output_fetcher) in waiters
@@ -133,7 +133,7 @@ function add_waiters!(store::StreamStore{T,B}, waiters::Vector{Pair{UInt,Any}}) 
     end
 end
 
-function remove_waiters!(store::StreamStore, waiters::Vector{UInt})
+function remove_waiters!(store::StreamStore, waiters::Vector{TaskID})
     @lock store.lock begin
         for w in waiters
             delete!(store.output_buffers, w)
@@ -146,10 +146,10 @@ function remove_waiters!(store::StreamStore, waiters::Vector{UInt})
 end
 
 mutable struct Stream{T,B}
-    uid::UInt
+    uid::TaskID
     store::Union{StreamStore{T,B},Nothing}
     store_ref::Chunk
-    function Stream{T,B}(uid::UInt, input_buffer_amount::Integer, output_buffer_amount::Integer) where {T,B}
+    function Stream{T,B}(uid::TaskID, input_buffer_amount::Integer, output_buffer_amount::Integer) where {T,B}
         # Creates a new output stream
         store = StreamStore{T,B}(uid, input_buffer_amount, output_buffer_amount)
         store_ref = tochunk(store)
@@ -203,7 +203,7 @@ function initialize_input_stream!(our_store::StreamStore{OT,OB}, input_stream::S
     return StreamingValue(buffer)
 end
 initialize_input_stream!(our_store::StreamStore, arg) = arg
-function initialize_output_stream!(our_store::StreamStore{T,B}, output_uid::UInt) where {T,B}
+function initialize_output_stream!(our_store::StreamStore{T,B}, output_uid::TaskID) where {T,B}
     @assert islocked(our_store.lock)
     @dagdebug STREAM_THUNK_ID[] :stream "initializing output stream $output_uid"
     buffer = initialize_stream_buffer(B, T, our_store.output_buffer_amount)
@@ -240,7 +240,7 @@ end
 
 Base.put!(stream::Stream, @nospecialize(value)) = put!(stream.store, value)
 
-function Base.isopen(stream::Stream, id::UInt)::Bool
+function Base.isopen(stream::Stream, id::TaskID)::Bool
     return MemPool.access_ref(stream.store_ref.handle, id) do store, id
         return isopen(store::StreamStore, id)
     end
@@ -254,7 +254,7 @@ function Base.close(stream::Stream)
     return
 end
 
-function add_waiters!(stream::Stream, waiters::Vector{Pair{UInt,Any}})
+function add_waiters!(stream::Stream, waiters::Vector{Pair{TaskID,Any}})
     MemPool.access_ref(stream.store_ref.handle, waiters) do store, waiters
         add_waiters!(store::StreamStore, waiters)
         return
@@ -262,7 +262,7 @@ function add_waiters!(stream::Stream, waiters::Vector{Pair{UInt,Any}})
     return
 end
 
-function remove_waiters!(stream::Stream, waiters::Vector{UInt})
+function remove_waiters!(stream::Stream, waiters::Vector{TaskID})
     MemPool.access_ref(stream.store_ref.handle, waiters) do store, waiters
         remove_waiters!(store::StreamStore, waiters)
         return
@@ -280,7 +280,7 @@ struct StreamingFunction{F, S}
 end
 
 struct DestPostMigration
-    thunk_id::Int
+    thunk_id::TaskID
     cancel_token::CancelToken
     f
     DestPostMigration(thunk_id, tls, f) = new(thunk_id, tls.cancel_token, f)
@@ -363,9 +363,9 @@ end
 
 struct StreamingTaskQueue <: AbstractTaskQueue
     tasks::Vector{DTaskPair}
-    self_streams::Dict{UInt,Any}
+    self_streams::Dict{TaskID,Any}
     StreamingTaskQueue() = new(DTaskPair[],
-                               Dict{UInt,Any}())
+                               Dict{TaskID,Any}())
 end
 
 function enqueue!(queue::StreamingTaskQueue, pair::DTaskPair)
@@ -421,10 +421,8 @@ function initialize_streaming!(self_streams, spec, task)
     spec.options.occupancy[Any] = 0
 
     # Register Stream globally
-    remotecall_wait(1, task.uid, stream) do uid, stream
-        lock(EAGER_THUNK_STREAMS) do global_streams
-            global_streams[uid] = stream
-        end
+    lock(EAGER_THUNK_STREAMS) do global_streams
+        global_streams[task.uid] = stream
     end
 end
 
@@ -472,7 +470,7 @@ finish_stream(value::T; result::R=nothing) where {T,R} = FinishStream{T,R}(Some{
 
 finish_stream(; result::R=nothing) where R = FinishStream{Union{},R}(nothing, result)
 
-const STREAM_THUNK_ID = TaskLocalValue{Int}(()->0)
+const STREAM_THUNK_ID = TaskLocalValue{TaskID}(()->TASKID_ZERO)
 
 chunktype(sf::StreamingFunction{F}) where F = F
 
@@ -518,7 +516,7 @@ function _run_streamingfunction(tls, cancel_token, sf, args...; kwargs...)
     STREAM_THUNK_ID[] = thunk_id
 
     # FIXME: Remove when scheduler is distributed
-    uid = UInt(thunk_id)
+    uid = thunk_id
 
     try
         # TODO: This kwarg song-and-dance is required to ensure that we don't
@@ -632,12 +630,12 @@ end
 # Default for buffers, can be customized
 initialize_stream_buffer(B, T, buffer_amount) = B{T}(buffer_amount)
 
-const EAGER_THUNK_STREAMS = LockedObject(Dict{UInt,Any}())
-function task_to_stream(uid::UInt)
-    if myid() != 1
-        return remotecall_fetch(task_to_stream, 1, uid)
+const EAGER_THUNK_STREAMS = LockedObject(Dict{TaskID,Any}())
+function task_to_stream(uid::TaskID)
+    if uid.worker != myid()
+        return remotecall_fetch(task_to_stream, uid.worker, uid)
     end
-    lock(EAGER_THUNK_STREAMS) do global_streams
+    return lock(EAGER_THUNK_STREAMS) do global_streams
         if haskey(global_streams, uid)
             return global_streams[uid]
         end
@@ -646,7 +644,7 @@ function task_to_stream(uid::UInt)
 end
 
 function finalize_streaming!(tasks::Vector{DTaskPair}, self_streams)
-    stream_waiter_changes = Dict{UInt,Vector{Pair{UInt,Any}}}()
+    stream_waiter_changes = Dict{TaskID,Vector{Pair{TaskID,Any}}}()
 
     for pair in tasks
         spec = pair.spec
@@ -676,7 +674,7 @@ function finalize_streaming!(tasks::Vector{DTaskPair}, self_streams)
 
                     # Add this task as a waiter for the associated output Stream
                     changes = get!(stream_waiter_changes, arg.uid) do
-                        Pair{UInt,Any}[]
+                        Pair{TaskID,Any}[]
                     end
                     push!(changes, task.uid => input_fetcher)
                 end

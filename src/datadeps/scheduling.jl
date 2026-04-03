@@ -26,18 +26,15 @@ end
 struct NaiveScheduler <: DataDepsScheduler end
 function datadeps_schedule_task(sched::NaiveScheduler, state::DataDepsState, all_procs, all_scope, task_scope, spec::DTaskSpec, task::DTask)
     raw_args = map(arg->tochunk(value(arg)), spec.fargs)
-    our_proc = remotecall_fetch(1, all_procs, raw_args) do all_procs, raw_args
-        Sch.init_eager()
-        sch_state = Sch.EAGER_STATE[]
-
-        @lock sch_state.lock begin
-            # Calculate costs per processor and select the most optimal
-            # FIXME: This should consider any already-allocated slots,
-            # whether they are up-to-date, and if not, the cost of moving
-            # data to them
-            procs, costs = Sch.estimate_task_costs(sch_state, all_procs, nothing, raw_args)
-            return first(procs)
-        end
+    Sch.init_eager()
+    sch_state = Sch.EAGER_STATE[]
+    our_proc = @lock sch_state.lock begin
+        # Calculate costs per processor and select the most optimal
+        # FIXME: This should consider any already-allocated slots,
+        # whether they are up-to-date, and if not, the cost of moving
+        # data to them
+        procs, costs = Sch.estimate_task_costs(sch_state, all_procs, nothing, raw_args)
+        first(procs)
     end
     return our_proc
 end
@@ -69,13 +66,11 @@ function datadeps_schedule_task(sched::UltraScheduler, state::DataDepsState, all
         return pos => tochunk(data)
     end
     f_chunk = tochunk(value(spec.fargs[1]))
-    task_time = remotecall_fetch(1, f_chunk, args) do f, args
-        Sch.init_eager()
-        sch_state = Sch.EAGER_STATE[]
-        return @lock sch_state.lock begin
-            sig = Sch.signature(sch_state, f, args)
-            return get(sch_state.signature_time_cost, sig, 1000^3)
-        end
+    Sch.init_eager()
+    sch_state = Sch.EAGER_STATE[]
+    task_time = @lock sch_state.lock begin
+        sig = Sch.signature(sch_state, f_chunk, args)
+        get(sch_state.signature_time_cost, sig, 1000^3)
     end
 
     # FIXME: Copy deps are computed eagerly

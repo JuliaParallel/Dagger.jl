@@ -22,32 +22,37 @@ function handle_fault(ctx, state, deadproc)
     # Evict cache entries that were stored on the worker
     for t in values(state.thunk_dict)
         t = unwrap_weak_checked(t)
-        has_result(state, t) || continue
-        v = load_result(state, t)
+        has_result(t) || continue
+        v = load_result(t)
         if v isa Chunk && v.handle isa DRef && v.handle.owner == deadproc.pid
             push!(deadlist, t)
-            clear_result!(state, t)
         end
     end
+
     # Remove thunks that were running on the worker
-    for t in collect(keys(state.running_on))
-        pid = state.running_on[t].pid
-        if pid == deadproc.pid
-            push!(deadlist, t)
-            delete!(state.running_on, t)
-            pop!(state.running, t)
+    lock(state.running_state) do running_state
+        for t in keys(running_state.running_on)
+            pid = running_state.running_on[t].pid
+            if pid == deadproc.pid
+                push!(deadlist, t)
+                delete!(running_state.running_on, t)
+                pop!(running_state.running, t)
+            end
         end
     end
-    # Clear thunk.cache_ref
+
+    # Clear cached results
     for t in deadlist
-        t.cache_ref = nothing
+        clear_result!(t)
     end
 
     # Remove thunks from state.ready that have inputs on the deadlist
-    for idx in length(state.ready):-1:1
-        rt = state.ready[idx]
-        if any((input in deadlist) for input in map(last, rt.inputs))
-            deleteat!(state.ready, idx)
+    lock(state.ready) do ready
+        for idx in length(ready):-1:1
+            rt = ready[idx]
+            if any((unwrap_weak_checked(input) in deadlist) for input in map(last, rt.inputs))
+                deleteat!(ready, idx)
+            end
         end
     end
 

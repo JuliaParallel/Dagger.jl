@@ -45,7 +45,7 @@ executing. May be `fetch`'d or `wait`'d on at any time. See `Dagger.@spawn` for
 more details.
 """
 mutable struct DTask
-    uid::UInt
+    uid::TaskID
     future::ThunkFuture
     metadata::DTaskMetadata
     thunk_ref::DRef
@@ -110,11 +110,3 @@ function Base.convert(::Type{ThunkSyncdep}, task::Dagger.DTask)
     return ThunkSyncdep(ThunkID(task.uid, isdefined(task, :thunk_ref) ? task.thunk_ref : nothing))
 end
 ThunkSyncdep(task::DTask) = convert(ThunkSyncdep, task)
-
-function eager_next_id()
-    if myid() == 1
-        return UInt64(next_id())
-    else
-        return remotecall_fetch(eager_next_id, 1)::UInt64
-    end
-end

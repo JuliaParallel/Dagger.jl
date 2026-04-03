@@ -3,7 +3,7 @@
 module Viz
 
 import ..Dagger
-import Dagger: DTask, Chunk, Processor, LoggedMutableObject
+import Dagger: DTask, Chunk, Processor, LoggedMutableObject, TaskID, TASKID_ZERO
 import Dagger: show_logs
 import Graphs: SimpleDiGraph, add_edge!, add_vertex!, inneighbors, outneighbors, vertices, is_directed, edges, nv, src, dst
 
@@ -66,19 +66,19 @@ function logs_to_dot(logs::Dict; disconnected=false, show_data::Bool=true,
     # Lookup all relevant task/argument dependencies and values in logs
     g = SimpleDiGraph()
 
-    tid_to_vertex = Dict{Int,Int}()
-    tid_to_auto_name = Dict{Int,String}()
-    tid_to_name = Dict{Int,String}()
-    tid_to_proc = Dict{Int,Processor}()
+    tid_to_vertex = Dict{TaskID,Int}()
+    tid_to_auto_name = Dict{TaskID,String}()
+    tid_to_name = Dict{TaskID,String}()
+    tid_to_proc = Dict{TaskID,Processor}()
 
     objid_to_vertex = Dict{UInt,Int}()
     objid_to_name = Dict{UInt,String}()
 
-    task_args = Dict{Int,Vector{Pair{Union{Int,Symbol},UInt}}}()
-    task_arg_moves = Dict{Int,Vector{Pair{Union{Int,Symbol},Tuple{UInt,UInt}}}}()
-    task_result = Dict{Int,UInt}()
+    task_args = Dict{TaskID,Vector{Pair{Union{Int,Symbol},UInt}}}()
+    task_arg_moves = Dict{TaskID,Vector{Pair{Union{Int,Symbol},Tuple{UInt,UInt}}}}()
+    task_result = Dict{TaskID,UInt}()
 
-    uid_to_tid = Dict{UInt,Int}()
+    uid_to_tid = Dict{TaskID,TaskID}()
     dtasks_to_patch = Set{UInt}()
 
     for w in keys(logs)
@@ -88,7 +88,7 @@ function logs_to_dot(logs::Dict; disconnected=false, show_data::Bool=true,
             id = logs[w][:id][idx]
             if category == :add_thunk && kind == :start
                 id::NamedTuple
-                tid = id.thunk_id::Int
+                tid = id.thunk_id::TaskID
                 taskname = logs[w][:taskfuncnames][idx]::String
                 v = get!(tid_to_vertex, tid) do
                     add_vertex!(g)
@@ -99,13 +99,13 @@ function logs_to_dot(logs::Dict; disconnected=false, show_data::Bool=true,
                 if haskey(logs[w], :taskuidtotid)
                     uid_tid = logs[w][:taskuidtotid][idx]
                     if uid_tid !== nothing
-                        uid, tid = uid_tid::Pair{UInt,Int}
+                        uid, tid = uid_tid::Pair{TaskID,TaskID}
                         uid_to_tid[uid] = tid
                     end
                 end
             elseif category == :add_thunk && kind == :finish
                 id::NamedTuple
-                taskdeps = logs[w][:taskdeps][idx]::Pair{Int,Vector{Int}}
+                taskdeps = logs[w][:taskdeps][idx]::Pair{TaskID,Vector{TaskID}}
                 tid, deps = taskdeps
                 v = get!(tid_to_vertex, tid) do
                     add_vertex!(g)
@@ -129,7 +129,7 @@ function logs_to_dot(logs::Dict; disconnected=false, show_data::Bool=true,
                 if haskey(logs[w], :taskresult)
                     result_info = logs[w][:taskresult][idx]
                     result_info === nothing && continue
-                    tid, obj = result_info::Pair{Int,LoggedMutableObject}
+                    tid, obj = result_info::Pair{TaskID,LoggedMutableObject}
                     objid = obj.objid
                     task_result[tid] = objid
                     tid_v = get!(tid_to_vertex, tid) do
@@ -146,7 +146,7 @@ function logs_to_dot(logs::Dict; disconnected=false, show_data::Bool=true,
                 end
             elseif category == :move && kind == :finish
                 if haskey(logs[w], :taskargs)
-                    tid, args = logs[w][:taskargs][idx]::Pair{Int,<:Vector}
+                    tid, args = logs[w][:taskargs][idx]::Pair{TaskID,<:Vector}
                     args = map(arg->arg[1]=>arg[2].objid, args)
                     append!(get!(Vector{Pair{Union{Int,Symbol},UInt}}, task_args, tid), args)
                     for arg in args
@@ -156,7 +156,7 @@ function logs_to_dot(logs::Dict; disconnected=false, show_data::Bool=true,
                             objid_to_vertex[objid] = nv(g)
                             nv(g)
                         end
-                        if tid != 0
+                        if tid != TASKID_ZERO
                             tid_v = get!(tid_to_vertex, tid) do
                                 add_vertex!(g)
                                 tid_to_vertex[tid] = nv(g)
@@ -207,7 +207,7 @@ function logs_to_dot(logs::Dict; disconnected=false, show_data::Bool=true,
                 if haskey(logs[w], :tasktochunk)
                     tid_chunk = logs[w][:tasktochunk][idx]
                     if tid_chunk !== nothing
-                        tid, chunk_obj = tid_chunk::Pair{Int,LoggedMutableObject}
+                        tid, chunk_obj = tid_chunk::Pair{TaskID,LoggedMutableObject}
                         chunk_id = chunk_obj.objid
                         v = get!(objid_to_vertex, chunk_id) do
                             add_vertex!(g)
@@ -246,7 +246,7 @@ function logs_to_dot(logs::Dict; disconnected=false, show_data::Bool=true,
     end
 
     # Create reverse mappings
-    vertex_to_tid = Dict{Int,Int}(v=>k for (k,v) in tid_to_vertex)
+    vertex_to_tid = Dict{Int,TaskID}(v=>k for (k,v) in tid_to_vertex)
     vertex_to_objid = Dict{Int,UInt}(v=>k for (k,v) in objid_to_vertex)
 
     # Find all connected and disconnected vertices

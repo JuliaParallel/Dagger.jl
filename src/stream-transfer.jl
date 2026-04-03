@@ -5,7 +5,7 @@ end
 function stream_push_values!(fetcher::RemoteChannelFetcher, T, our_store::StreamStore, their_stream::Stream, buffer)
     our_tid = STREAM_THUNK_ID[]
     our_uid = our_store.uid
-    their_tid = Int(their_stream.uid)
+    their_tid = their_stream.uid
     @dagdebug our_tid :stream_push "taking output value: $our_tid -> $their_tid"
     value = try
         take!(buffer)
@@ -30,7 +30,7 @@ end
 function stream_pull_values!(fetcher::RemoteChannelFetcher, T, our_store::StreamStore, their_stream::Stream, buffer)
     our_tid = STREAM_THUNK_ID[]
     our_uid = our_store.uid
-    their_tid = Int(their_stream.uid)
+    their_tid = their_stream.uid
     @dagdebug our_tid :stream_pull "pulling input value: $their_tid -> $our_tid"
     value = try
         take!(fetcher.chan)

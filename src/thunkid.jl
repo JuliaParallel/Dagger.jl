@@ -1,10 +1,11 @@
 "Identifies a thunk by its ID, and preserves the thunk in the scheduler."
 struct ThunkID
-    id::Int
+    id::TaskID
     ref::Union{DRef,Nothing}
 end
-ThunkID(id::Int) = ThunkID(id, nothing)
+ThunkID(id::TaskID) = ThunkID(id, nothing)
 istask(::ThunkID) = true
+is_task_local(t::ThunkID) = t.id.worker == myid()
 
 struct ThunkSyncdep
     id::Union{ThunkID,Nothing}
@@ -17,3 +18,4 @@ Base.getindex(syncdep::ThunkSyncdep) = @something(syncdep.id, syncdep.thunk)
 Base.convert(::Type{ThunkSyncdep}, id::ThunkID) = ThunkSyncdep(id, nothing)
 unwrap_weak(t::ThunkSyncdep) = unwrap_weak(t.thunk)
 istask(::ThunkSyncdep) = true
+is_task_local(t::ThunkSyncdep) = is_task_local(t.id)

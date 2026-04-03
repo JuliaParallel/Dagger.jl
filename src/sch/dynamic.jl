@@ -121,7 +121,7 @@ end
 halt!(h::SchedulerHandle) = exec!(_halt, h, nothing)
 function _halt(ctx, state, task, tid, _)
     notify(state.halt)
-    put!(state.chan, TaskResult(1, OSProc(), 0, SchedulerHaltedException(), nothing))
+    put!(state.chan, TaskResult(1, OSProc(), TASKID_ZERO, SchedulerHaltedException(), nothing))
     Base.throwto(task, SchedulerHaltedException())
 end
 
@@ -169,11 +169,13 @@ function _register_future!(ctx, state, task, tid, (future, id, check)::Tuple{Thu
             end
         end
         # TODO: Assert that future will be fulfilled
-        if has_result(state, thunk)
-            put!(future, load_result(state, thunk); error=state.errored[thunk])
+        if has_result(thunk)
+            put!(future, load_result(thunk); error=has_error(thunk))
         else
-            futures = get!(()->ThunkFuture[], state.futures, thunk)
-            push!(futures, future)
+            lock(state.futures) do futures
+                thunk_futures = get!(()->ThunkFuture[], futures, thunk)
+                push!(thunk_futures, future)
+            end
         end
     end
     return
@@ -184,6 +186,20 @@ end
 function Base.wait(h::SchedulerHandle, id::ThunkID; future=ThunkFuture())
     register_future!(h, id, future)
     wait(future)
+end
+
+"""
+    watch_completion!(h::SchedulerHandle, thunk_id::TaskID, chan::RemoteChannel)
+
+Registers a `RemoteChannel` to receive a `TaskCompletionNotification` when the
+specified task completes. Can be called from any worker to watch tasks running
+on other workers, enabling cross-worker scheduler coordination.
+"""
+watch_completion!(h::SchedulerHandle, thunk_id::TaskID, chan::RemoteChannel) =
+    exec!(_watch_completion!, h, thunk_id, chan)
+function _watch_completion!(ctx, state, task, tid, (thunk_id, chan))
+    register_completion_watcher!(state, thunk_id, chan)
+    return nothing
 end
 
 "Returns all Thunks IDs as a Dict, mapping a Thunk to its downstream dependents."
@@ -227,6 +243,6 @@ function _add_thunk!(ctx, state, task, tid, (f, args, options, future))
             push!(fargs, Dagger.Argument(pos, arg))
         end
     end
-    payload = Dagger.PayloadOne(UInt(0), future, fargs, _options, true)
+    payload = Dagger.PayloadOne(TASKID_ZERO, future, fargs, _options, true)
     return Dagger.eager_submit_internal!(ctx, state, task, tid, payload)
 end
