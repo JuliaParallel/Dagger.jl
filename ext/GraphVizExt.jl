@@ -34,10 +34,11 @@ function Dagger.render_logs(logs::Dict, ::Val{:graphviz};
                             color_by=:fn, layout_engine="dot",
                             times::Bool=true, times_digits::Integer=3,
                             colors=Dagger.Viz.default_colors,
-                            name_to_color=Dagger.Viz.name_to_color)
+                            name_to_color=Dagger.Viz.name_to_color,
+                            edge_labels::Bool=true)
     dot = Dagger.Viz.logs_to_dot(logs; disconnected, show_data,
                                  times, times_digits,
-                                 color_by, colors, name_to_color)
+                                 color_by, colors, name_to_color, edge_labels)
     gv = GraphViz.Graph(dot)
     GraphViz.layout!(gv; engine=layout_engine)
     return gv

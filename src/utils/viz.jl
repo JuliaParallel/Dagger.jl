@@ -54,15 +54,17 @@ Options:
 function show_logs(io::IO, logs::Dict, ::Val{:graphviz};
                    disconnected=false, show_data::Bool=true,
                    color_by=:fn, times::Bool=true, times_digits::Integer=3,
-                   colors=default_colors, name_to_color=name_to_color)
+                   colors=default_colors, name_to_color=name_to_color,
+                   edge_labels::Bool=true)
     dot = logs_to_dot(logs; disconnected, show_data, times, times_digits,
-                      color_by, colors, name_to_color)
+                      color_by, colors, name_to_color, edge_labels)
     println(io, dot)
 end
 
 function logs_to_dot(logs::Dict; disconnected=false, show_data::Bool=true,
                      color_by=:fn, times::Bool=true, times_digits::Integer=3,
-                     colors=default_colors, name_to_color=name_to_color)
+                     colors=default_colors, name_to_color=name_to_color,
+                     edge_labels::Bool=true)
     # Lookup all relevant task/argument dependencies and values in logs
     g = SimpleDiGraph()
 
@@ -142,7 +144,9 @@ function logs_to_dot(logs::Dict; disconnected=false, show_data::Bool=true,
                         objid_to_vertex[objid] = nv(g)
                         nv(g)
                     end
-                    add_edge!(g, tid_v, v)
+                    if show_data
+                        add_edge!(g, tid_v, v)
+                    end
                 end
             elseif category == :move && kind == :finish
                 if haskey(logs[w], :taskargs)
@@ -162,7 +166,9 @@ function logs_to_dot(logs::Dict; disconnected=false, show_data::Bool=true,
                                 tid_to_vertex[tid] = nv(g)
                                 nv(g)
                             end
-                            add_edge!(g, arg_id, tid_v)
+                            if show_data
+                                add_edge!(g, arg_id, tid_v)
+                            end
                         end
                     end
                 end
@@ -184,7 +190,9 @@ function logs_to_dot(logs::Dict; disconnected=false, show_data::Bool=true,
                         objid_to_vertex[post_objid] = nv(g)
                         nv(g)
                     end
-                    add_edge!(g, pre_arg_id, post_arg_id)
+                    if show_data
+                        add_edge!(g, pre_arg_id, post_arg_id)
+                    end
                 end
             elseif category == :data_annotation && kind == :start
                 id::NamedTuple
@@ -214,7 +222,9 @@ function logs_to_dot(logs::Dict; disconnected=false, show_data::Bool=true,
                             objid_to_vertex[chunk_id] = nv(g)
                             nv(g)
                         end
-                        add_edge!(g, tid_to_vertex[tid], v)
+                        if show_data
+                            add_edge!(g, tid_to_vertex[tid], v)
+                        end
                     end
                 end
             end
@@ -311,6 +321,8 @@ function logs_to_dot(logs::Dict; disconnected=false, show_data::Bool=true,
 
     str = is_directed(g) ? "digraph mygraph {\n" : "graph mygraph {\n"
 
+    edge_len = 1
+
     # Add task vertices
     for tid in all_tids
         v = tid_to_vertex[tid]
@@ -331,7 +343,7 @@ function logs_to_dot(logs::Dict; disconnected=false, show_data::Bool=true,
             label_str *= "\\n[+$start_time -> +$finish_time (diff: $diff_time)]"
         end
         label_str = sanitize_label(label_str)
-        str *= "v$v [label=\"$label_str\", shape=box, color=\"$color\", penwidth=2.0]\n"
+        str *= "v$v [label=\"$label_str\", shape=oval, color=\"$color\", penwidth=5.0]\n"
     end
 
     # Add object vertices
@@ -366,7 +378,7 @@ function logs_to_dot(logs::Dict; disconnected=false, show_data::Bool=true,
                 push!(seen_moves, (pre_objid, post_objid))
                 pre_objid_v = objid_to_vertex[pre_objid]
                 post_objid_v = objid_to_vertex[post_objid]
-                move_str = "a$pre_objid_v -> a$post_objid_v [label=\"move\"]\n"
+                move_str = "a$pre_objid_v -> a$post_objid_v [$(edge_labels ? "label=\"move\", " : "")len=$edge_len]\n"
                 str *= move_str
             end
         end
@@ -382,7 +394,7 @@ function logs_to_dot(logs::Dict; disconnected=false, show_data::Bool=true,
             continue
         end
         # FIXME: Label syncdeps with associated arguments and datadeps directions
-        str *= "v$(src(edge)) $edge_sep v$(dst(edge)) [label=\"syncdep\"]\n"
+        str *= "v$(src(edge)) $edge_sep v$(dst(edge)) [$(edge_labels ? "label=\"syncdep\", " : "")len=$edge_len]\n"
     end
 
     if show_data
@@ -397,7 +409,7 @@ function logs_to_dot(logs::Dict; disconnected=false, show_data::Bool=true,
                     continue
                 end
                 arg_str = sanitize_label(pos isa Int ? "arg $pos" : "kwarg $pos")
-                str *= "a$arg_v $edge_sep v$tid_v [label=\"$arg_str\"]\n"
+                str *= "a$arg_v $edge_sep v$tid_v [$(edge_labels ? "label=\"$arg_str\", " : "")]\n"
             end
         end
 
@@ -410,7 +422,7 @@ function logs_to_dot(logs::Dict; disconnected=false, show_data::Bool=true,
             if !disconnected && !(result_v in con_vs)
                 continue
             end
-            str *= "v$tid_v $edge_sep a$result_v [label=\"result\"]\n"
+            str *= "v$tid_v $edge_sep a$result_v [$(edge_labels ? "label=\"result\", " : "")]\n"
         end
     end
 
