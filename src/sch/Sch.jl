@@ -89,7 +89,7 @@ Fields:
 - `waiting_data::ConcurrentDict{Union{Thunk,Chunk}, Set{Thunk}}` - The list of `Thunk`s that are waiting for dependencies to complete
 - `ready::ConcurrentVector{Thunk}` - The list of `Thunk`s that are ready to execute
 - `running_state::LockedObject{RunningState}` - State of the currently-running thunks
-- `thunk_dict::Dict{TaskID, WeakThunk}` - Maps from thunk IDs to a `Thunk`
+- `thunk_dict::ConcurrentDict{TaskID, WeakThunk}` - Maps from thunk IDs to a `Thunk`
 - `node_order::Any` - Function that returns the order of a thunk
 - `equiv_chunks::WeakKeyDict{DRef,Chunk}` - Cache mapping from `DRef` to a `Chunk` which contains it
 - `worker_time_pressure::Dict{Int,Dict{Processor,UInt64}}` - Maps from worker ID to processor pressure
@@ -1024,7 +1024,8 @@ Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
     if !isempty(to_send)
         if Dagger.root_worker_id(gproc) == myid()
             #@reusable_tasks :fire_tasks!_task_cache 32 _->nothing "fire_tasks!" FireTaskSpec(proc, state.chan, to_send)
-            fire_spec = FireTaskSpec(proc, state.chan, to_send)
+            # Copy to_send because it's a reusable vector that will be emptied
+            fire_spec = FireTaskSpec(proc, state.chan, copy(to_send))
             errormonitor_tracked("fire_tasks!", Threads.@spawn fire_spec())
         else
             # N.B. We don't batch these because we might get a deserialization
@@ -1067,17 +1068,16 @@ function (ets::FireTaskSpec)()
         end
     catch err
         bt = catch_backtrace()
-        # FIXME: Catch the correct task ID
-        thunk_id = first_task.thunk_id
-        if isopen(chan)
-            if !walk_transfer_safe(err)
-                @error "Error in task $thunk_id" exception=(err, bt)
-                put!(chan, TaskResult(pid, proc, thunk_id, ErrorException("Error in task $thunk_id"), nothing))
-            else
-                put!(chan, TaskResult(pid, proc, thunk_id, CapturedException(err, bt), nothing))
+        # Notify all tasks in the batch that they failed
+        for task in tasks
+            thunk_id = task.thunk_id
+            if isopen(chan)
+                if walk_transfer_safe(err)
+                    put!(chan, TaskResult(pid, proc, thunk_id, CapturedException(err, bt), nothing))
+                else
+                    put!(chan, TaskResult(pid, proc, thunk_id, ErrorException("Not-serializable error in task $thunk_id: $(err)"), nothing))
+                end
             end
-        else
-            rethrow()
         end
     finally
         @maybelog ctx timespan_finish(ctx, :fire, (;uid, worker=pid), nothing)
@@ -1121,9 +1121,9 @@ function proc_states(uid::UInt64=Dagger.get_tls().sch_uid)
     end
     if states === nothing
         states = MemPool.lock(PROCESSOR_TASK_STATE_LOCK) do
-            dict = ProcessorStateDict()
-            PROCESSOR_TASK_STATE[uid] = dict
-            return dict
+            return get!(PROCESSOR_TASK_STATE, uid) do
+                ProcessorStateDict()
+            end
         end
     end
     return states
@@ -1140,9 +1140,10 @@ function proc_state!(f, uid::UInt64, proc::Processor)
         return get(states.dict, proc, nothing)
     end
     if state === nothing
-        state = f()::ProcessorState
-        MemPool.lock(states.lock) do
-            states.dict[proc] = state
+        state = MemPool.lock(states.lock) do
+            get!(states.dict, proc) do
+                f()::ProcessorState
+            end
         end
     end
     return state
@@ -1187,9 +1188,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                 @dagdebug nothing :processor "Waiting for tasks"
                 @maybelog ctx timespan_start(ctx, :proc_run_wait, (;uid, worker=wid, processor=to_proc), nothing)
                 wait(istate.reschedule)
-                @static if VERSION >= v"1.9"
-                    reset(istate.reschedule)
-                end
+                reset(istate.reschedule)
                 @maybelog ctx timespan_finish(ctx, :proc_run_wait, (;uid, worker=wid, processor=to_proc), nothing)
                 if istate.done[]
                     return
@@ -1309,13 +1308,13 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
             else
                 t.sticky = false
             end
-            errormonitor_tracked("thunk $thunk_id", schedule(t))
 
-            # Update task accounting
+            # Update task accounting before scheduling the task, to ensure DoTaskSpec sees it
             lock(istate.queue) do _
                 tasks[thunk_id] = t
                 istate.task_specs[thunk_id] = task
             end
+            errormonitor_tracked("thunk $thunk_id", schedule(t))
         end
     end
     tid = task_tid_for_processor(to_proc)
@@ -1350,28 +1349,21 @@ function (dts::DoTaskSpec)()
         # state will be nothing if processor was removed due to scheduler exit
         if state !== nothing
             istate = state.state
-            while true
-                # Wait until the task has been recorded in the processor state
-                done = lock(istate.queue) do _
-                    if haskey(istate.tasks, tid)
-                        delete!(istate.tasks, tid)
-                        delete!(istate.task_specs, tid)
-                        if !(tid in istate.cancelled)
-                            istate.proc_occupancy[] -= task.est_occupancy
-                            istate.time_pressure[] -= task.est_time_util
-                        else
-                            # Task was cancelled, so occupancy and pressure are
-                            # already reduced
-                            pop!(istate.cancelled, tid)
-                            delete!(istate.cancel_tokens, tid)
-                            was_cancelled = true
-                        end
-                        return true
+            lock(istate.queue) do _
+                if haskey(istate.tasks, tid)
+                    delete!(istate.tasks, tid)
+                    delete!(istate.task_specs, tid)
+                    if !(tid in istate.cancelled)
+                        istate.proc_occupancy[] -= task.est_occupancy
+                        istate.time_pressure[] -= task.est_time_util
+                    else
+                        # Task was cancelled, so occupancy and pressure are
+                        # already reduced
+                        pop!(istate.cancelled, tid)
+                        delete!(istate.cancel_tokens, tid)
+                        was_cancelled = true
                     end
-                    return false
                 end
-                done && break
-                sleep(0.1)
             end
             notify(istate.reschedule)
         end
@@ -1425,9 +1417,6 @@ function do_tasks(to_proc, return_queue, tasks)
                                         Ref(false))
         start_event = Base.Event()
         runner = start_processor_runner!(istate, uid, return_queue, start_event)
-        @static if VERSION < v"1.9"
-            reschedule.waiter = runner
-        end
         return ProcessorState(istate, runner)
     end
     if start_event !== nothing

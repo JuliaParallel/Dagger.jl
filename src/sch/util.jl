@@ -122,11 +122,17 @@ notification is sent immediately.
 function register_completion_watcher!(state, thunk_id::TaskID, chan::RemoteChannel)
     already_done = false
     failed = false
-    lock(state.completion_watchers) do cw
-        if !haskey(state.thunk_dict, thunk_id)
-            state.thunk_dict[thunk_id] = WeakThunk(Thunk(()->nothing; id=thunk_id))
+    thunk = lock(state.thunk_dict) do dict
+        thunk = Thunk(()->nothing; id=thunk_id)
+        thunk_weak = get!(dict, thunk_id) do
+            WeakThunk(thunk)
         end
-        thunk = unwrap_weak_checked(state.thunk_dict[thunk_id])
+        return thunk
+    end
+    lock(state.thunk_state) do thunk_states
+        thunk_states[thunk] = ThunkState()
+    end
+    lock(state.completion_watchers) do cw
         if has_result(thunk)
             already_done = true
             failed = has_error(thunk)
