@@ -107,6 +107,9 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{TaskID,TaskID},Nothin
                         thunk = Thunk(()->nothing; id=arg_tid)
                         push!(remote_thunks, thunk)
                         state.thunk_dict[arg_tid] = WeakThunk(thunk)
+                        lock(state.thunk_state) do thunk_states
+                            thunk_states[thunk] = Sch.ThunkState()
+                        end
 
                         # Register watcher on remote scheduler
                         remotecall_wait(Sch.register_completion_watcher_eager!, arg_tid.worker, arg_tid, state.chan)
@@ -143,6 +146,9 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{TaskID,TaskID},Nothin
                     thunk = Thunk(()->nothing; id=arg_tid)
                     push!(remote_thunks, thunk)
                     state.thunk_dict[arg_tid] = WeakThunk(thunk)
+                    lock(state.thunk_state) do thunk_states
+                        thunk_states[thunk] = Sch.ThunkState()
+                    end
 
                     # Register watcher on remote scheduler
                     remotecall_wait(Sch.register_completion_watcher_eager!, arg_tid.worker, arg_tid, state.chan)

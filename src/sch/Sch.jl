@@ -67,6 +67,7 @@ mutable struct ThunkState
     ThunkState() = new(THUNK_WAITING)
 end
 Base.getindex(state::ThunkState) = state.value
+Base.setindex!(state::ThunkState, value::ThunkStateValue) = (@atomic state.value = value)
 try_transition!(state::ThunkState, old_value::ThunkStateValue, new_value::ThunkStateValue) =
     (@atomicreplace state.value old_value => new_value).success
 
@@ -145,7 +146,7 @@ function start_state(deps::Dict, node_order, chan)
                          ConcurrentDict{Thunk, Nothing}(),
                          ConcurrentDict{Thunk, ThunkState}(),
                          ConcurrentDict{Thunk, Set{Thunk}}(),
-                         ConcurrentDict{Union{Thunk,Chunk}, Set{Thunk}}(),
+                         waiting_data,
                          ConcurrentVector{Thunk}(),
                          LockedObject(RunningState(Set{Thunk}(), Dict{Thunk,OSProc}())),
                          ConcurrentDict{TaskID, WeakThunk}(),
@@ -429,7 +430,26 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options::SchedulerOpt
         end
     end
 
-    try_schedule!()
+    Threads.atomic_add!(in_flight, 1)
+    try
+        try_schedule!()
+    finally
+        Threads.atomic_sub!(in_flight, 1)
+    end
+
+    #= FIXME: REMOVE ME
+    errormonitor(Threads.@spawn begin
+        sleep(10)
+        while !done[]
+            sleep(1)
+            iob = IOBuffer()
+            println(iob, "[$(myid())] SCH STATUS")
+            print_sch_status(iob, state, d)
+            println(iob, "[$(myid())] SCH STATUS END")
+            seek(iob, 0)
+            write(stderr, iob)
+        end
+    end)=#
 
     worker_tasks = Vector{Task}(undef, ntasks)
     for i in 1:ntasks
@@ -866,12 +886,12 @@ end
 
 function finish_task!(ctx, state, thunk, thunk_failed)
     @dagdebug thunk :finish "Finishing with $(thunk_failed ? "error" : "result")"
+    thunk_state = lock(state.thunk_state) do thunk_states
+        thunk_states[thunk]
+    end
+    thunk_state[] = THUNK_FINISHED
     if Dagger.is_task_local(thunk)
-        thunk_state = lock(state.thunk_state) do thunk_states
-            thunk_states[thunk]
-        end
         lock(state.running_state) do running_state
-            @assert try_transition!(thunk_state, THUNK_RUNNING, THUNK_FINISHED)
             pop!(running_state.running, thunk)
             delete!(running_state.running_on, thunk)
         end
@@ -1003,13 +1023,17 @@ Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
 
     if !isempty(to_send)
         if Dagger.root_worker_id(gproc) == myid()
-            @reusable_tasks :fire_tasks!_task_cache 32 _->nothing "fire_tasks!" FireTaskSpec(proc, state.chan, to_send)
+            #@reusable_tasks :fire_tasks!_task_cache 32 _->nothing "fire_tasks!" FireTaskSpec(proc, state.chan, to_send)
+            fire_spec = FireTaskSpec(proc, state.chan, to_send)
+            errormonitor_tracked("fire_tasks!", Threads.@spawn fire_spec())
         else
             # N.B. We don't batch these because we might get a deserialization
             # error due to something not being defined on the worker, and then we don't
             # know which task failed.
             for task_spec in to_send
-                @reusable_tasks :fire_tasks!_task_cache 32 _->nothing "fire_tasks!" FireTaskSpec(proc, state.chan, task_spec)
+                #@reusable_tasks :fire_tasks!_task_cache 32 _->nothing "fire_tasks!" FireTaskSpec(proc, state.chan, task_spec)
+                fire_spec = FireTaskSpec(proc, state.chan, task_spec)
+                errormonitor_tracked("fire_tasks!", Threads.@spawn fire_spec())
             end
         end
     end
@@ -1052,6 +1076,8 @@ function (ets::FireTaskSpec)()
             else
                 put!(chan, TaskResult(pid, proc, thunk_id, CapturedException(err, bt), nothing))
             end
+        else
+            rethrow()
         end
     finally
         @maybelog ctx timespan_finish(ctx, :fire, (;uid, worker=pid), nothing)
@@ -1059,72 +1085,12 @@ function (ets::FireTaskSpec)()
     return
 end
 
-@static if VERSION >= v"1.9"
-const Doorbell = Base.Event
-else
-# We need a sticky, resetable signal
-mutable struct Doorbell
-    waiter::Union{Task,Nothing}
-    @atomic sleeping::Int
-    Doorbell() = new(nothing, 0)
-end
-function Base.wait(db::Doorbell)
-    db.waiter = current_task()
-    while true
-        _, succ = @atomicreplace db.sleeping 0 => 1
-        if succ
-            # No messages, wait for someone to wake us
-            wait()
-        end
-        _, succ = @atomicreplace db.sleeping 2 => 0
-        if succ
-            # We had a notification
-            return
-        end
-    end
-end
-function Base.notify(db::Doorbell)
-    while true
-        if (@atomic db.sleeping) == 2
-            # Doorbell already rung
-            return
-        end
-
-        _, succ = @atomicreplace db.sleeping 0 => 2
-        if succ
-            # Task was definitely busy, we're done
-            return
-        end
-
-        _, succ = @atomicreplace db.sleeping 1 => 2
-        if succ
-            # Task was sleeping, wake it and wait for it to awaken
-            waiter = db.waiter
-            @assert waiter !== nothing
-            waiter::Task
-            schedule(waiter)
-            while true
-                sleep_value = @atomic db.sleeping
-                if sleep_value == 0 || sleep_value == 2
-                    return
-                end
-                #if waiter._state === Base.task_state_runnable && t.queue === nothing
-                #    schedule(waiter)
-                #else
-                    yield()
-                #end
-            end
-        end
-    end
-end
-end
-
 struct ProcessorInternalState
     ctx::Context
     proc::Processor
     return_queue::RemoteChannel
     queue::LockedObject{PriorityQueue{TaskSpec, UInt32, Base.Order.ForwardOrdering}}
-    reschedule::Doorbell
+    reschedule::Base.Event
     tasks::Dict{TaskID,Task}
     task_specs::Dict{TaskID,TaskSpec}
     proc_occupancy::Base.RefValue{UInt32}
@@ -1288,7 +1254,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                         end
                         task, occupancy = peek(queue)
                         scope = task.scope
-                        if Dagger.proc_in_scope(to_proc, scope)
+                        if Dagger.proc_in_scope(to_proc, scope) &&
                            typemax(UInt32) - proc_occupancy_cached >= occupancy
                             # Compatible, steal this task
                             return dequeue_pair!(queue)
@@ -1327,14 +1293,23 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
             end
 
             # Launch the task
-            t = @reusable_tasks :start_processor_runner!_task_cache 32 t->begin
+            #=t = @reusable_tasks :start_processor_runner!_task_cache 32 t->begin
                 tid = task_tid_for_processor(to_proc)
                 if tid !== nothing
                     Dagger.set_task_tid!(t, tid)
                 else
                     t.sticky = false
                 end
-            end "thunk $thunk_id" DoTaskSpec(to_proc, return_queue, task, cancel_token)
+            end "thunk $thunk_id" DoTaskSpec(to_proc, return_queue, task, cancel_token)=#
+            do_spec = DoTaskSpec(to_proc, return_queue, task, cancel_token)
+            t = @task do_spec()
+            tid = task_tid_for_processor(to_proc)
+            if tid !== nothing
+                Dagger.set_task_tid!(t, tid)
+            else
+                t.sticky = false
+            end
+            errormonitor_tracked("thunk $thunk_id", schedule(t))
 
             # Update task accounting
             lock(istate.queue) do _
@@ -1439,7 +1414,7 @@ function do_tasks(to_proc, return_queue, tasks)
         # Initialize the processor state and runner
         queue = PriorityQueue{TaskSpec, UInt32}()
         queue_locked = LockedObject(queue)
-        reschedule = Doorbell()
+        reschedule = Base.Event()
         istate = ProcessorInternalState(ctx, to_proc, return_queue,
                                         queue_locked, reschedule,
                                         Dict{TaskID,Task}(),

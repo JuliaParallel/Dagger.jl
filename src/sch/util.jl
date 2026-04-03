@@ -1,6 +1,5 @@
 "Like `errormonitor`, but tracks how many outstanding tasks are running."
 function errormonitor_tracked(name::String, t::Task)
-    errormonitor(t)
     @safe_lock_spin1 ERRORMONITOR_TRACKED tracked begin
         push!(tracked, name => t)
     end
@@ -277,9 +276,7 @@ function reschedule_syncdeps!(state, thunk, seen=nothing)
                     # N.B. Different Chunks with the same DRef handle will hash to the same slot,
                     # so we just pick an equivalent Chunk as our upstream
                     lock(state.waiting_data) do wd
-                        if !haskey(wd, input)
-                            push!(get!(()->Set{Thunk}(), wd, input), thunk)
-                        end
+                        push!(get!(()->Set{Thunk}(), wd, input), thunk)
                     end
                 end
             end
@@ -388,25 +385,61 @@ function print_sch_status(state, thunk; kwargs...)
     write(stderr, iob)
 end
 function print_sch_status(io::IO, state, thunk; offset=0, limit=5, max_inputs=3)
-    function status_string(node)
+    function status_string(thunk)
         status = ""
-        if has_error(node)
+        if has_error(thunk)
             status *= "E"
         end
-        if node in state.ready
-            status *= "r"
-        elseif node in state.running
-            status *= "R"
-        elseif has_result(node)
+        running = lock(state.running_state) do running_state
+            thunk in running_state.running
+        end
+        if has_result(thunk)
             status *= "C"
+        elseif thunk in state.ready
+            status *= "r"
+        elseif running
+            status *= "R"
         else
             status *= "?"
         end
         status
     end
+
+    # General scheduler status
     if offset == 0
+        thunk_states = lock(copy, state.thunk_state)
         println(io, "Ready ($(length(state.ready))): $(join(map(t->t.id, state.ready), ','))")
-        println(io, "Running: ($(length(state.running))): $(join(map(t->t.id, collect(state.running)), ','))")
+        lock(state.running_state) do running_state
+            println(io, "Running: ($(length(running_state.running))): $(join(map(t->"$(t.id)($(thunk_states[t].value)[$(status_string(t))])", collect(running_state.running)), ", "))")
+        end
+        wtp = state.worker_time_pressure[myid()]
+        lock(wtp) do wtp
+            for proc in keys(wtp)
+                println(io, "  Sch Processor: $(proc) time pressure $(wtp[proc])")
+            end
+        end
+    end
+
+    # Processors status
+    if offset == 0
+        states = proc_states_values(state.uid)
+        for state in states
+            istate = state.state
+            println(io, "Processor: $(istate.proc):")
+            lock(istate.queue) do queue
+                println(io, "  Occupancy $(istate.proc_occupancy[])")
+                println(io, "  Time Pressure $(istate.time_pressure[])")
+                println(io, "  Running $(length(istate.tasks)): $(join(collect(keys(istate.tasks)), ", "))")
+                println(io, "  Queue $(length(queue)):")
+                for task in queue
+                    println(io, "    $(task.thunk_id): $(task.est_time_util) $(task.est_occupancy)")
+                end
+            end
+        end
+    end
+
+    # Thunk status
+    if offset == 0
         print(io, "($(status_string(thunk))) ")
     end
     println(io, "$(thunk.id): $(thunk.f)")
