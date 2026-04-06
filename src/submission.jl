@@ -100,22 +100,26 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{TaskID,TaskID},Nothin
             end
 
             if arg_tid !== nothing
-                @lock state.lock begin
-                    if !haskey(state.thunk_dict, arg_tid)
+                needs_watcher = false
+                thunk_weak = lock(state.thunk_dict) do thunk_dict
+                    if !haskey(thunk_dict, arg_tid)
+                        needs_watcher = true
                         @assert arg_tid.worker != myid()
                         # Remote task, use proxy thunk
                         thunk = Thunk(()->nothing; id=arg_tid)
                         push!(remote_thunks, thunk)
-                        state.thunk_dict[arg_tid] = WeakThunk(thunk)
+                        thunk_dict[arg_tid] = WeakThunk(thunk)
                         lock(state.thunk_state) do thunk_states
                             thunk_states[thunk] = Sch.ThunkState()
                         end
-
-                        # Register watcher on remote scheduler
-                        remotecall_wait(Sch.register_completion_watcher_eager!, arg_tid.worker, arg_tid, state.chan)
                     end
-                    @inbounds fargs[idx] = Argument(arg.pos, state.thunk_dict[arg_tid])
+                    return thunk_dict[arg_tid]
                 end
+                if needs_watcher
+                    # Register watcher on remote scheduler
+                    remotecall_wait(Sch.register_completion_watcher_eager!, arg_tid.worker, arg_tid, state.chan)
+                end
+                @inbounds fargs[idx] = Argument(arg.pos, thunk_weak)
             elseif valuetype(arg) <: Chunk
                 # N.B. Different Chunks with the same DRef handle will hash to the same slot,
                 # so we just pick an equivalent Chunk as our upstream
@@ -139,22 +143,26 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{TaskID,TaskID},Nothin
             dep = syncdeps_vec[idx]::ThunkSyncdep
             @assert dep.id !== nothing && dep.thunk === nothing
             arg_tid = dep.id.id
-            @lock state.lock begin
-                if !haskey(state.thunk_dict, arg_tid)
+            needs_watcher = false
+            thunk_weak = lock(state.thunk_dict) do thunk_dict
+                if !haskey(thunk_dict, arg_tid)
+                    needs_watcher = true
                     @assert arg_tid.worker != myid()
                     # Remote task, use proxy thunk
                     thunk = Thunk(()->nothing; id=arg_tid)
                     push!(remote_thunks, thunk)
-                    state.thunk_dict[arg_tid] = WeakThunk(thunk)
+                    thunk_dict[arg_tid] = WeakThunk(thunk)
                     lock(state.thunk_state) do thunk_states
                         thunk_states[thunk] = Sch.ThunkState()
                     end
-
-                    # Register watcher on remote scheduler
-                    remotecall_wait(Sch.register_completion_watcher_eager!, arg_tid.worker, arg_tid, state.chan)
                 end
-                @inbounds syncdeps_vec[idx] = ThunkSyncdep(state.thunk_dict[arg_tid])
+                return thunk_dict[arg_tid]
             end
+            if needs_watcher
+                # Register watcher on remote scheduler
+                remotecall_wait(Sch.register_completion_watcher_eager!, arg_tid.worker, arg_tid, state.chan)
+            end
+            @inbounds syncdeps_vec[idx] = ThunkSyncdep(thunk_weak)
         end
         if !isempty(syncdeps_vec) || any(arg->istask(value(arg)), fargs)
             if options.syncdeps === nothing
