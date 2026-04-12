@@ -409,7 +409,7 @@ end
 
         #pres1_1 = state.worker_time_pressure[1][tproc1_1]
         #pres2_1 = state.worker_time_pressure[first(workers())][tproc2_1]
-        tx_rate = state.transfer_rate[]
+        tx_rate = get(get(state.worker_transfer_rate, first(workers()), Dict{Dagger.Processor,UInt64}()), tproc2_1, Dagger.Sch.DEFAULT_TRANSFER_RATE)
         tx_xfer_cost = 1e6
         sig_unknown_cost = 1e9
 

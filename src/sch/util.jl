@@ -551,8 +551,8 @@ function estimate_task_costs(state, procs, task; sig=nothing)
     estimate_task_costs!(sorted_procs, costs, state, procs, task; sig)
     return sorted_procs, costs
 end
+const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
 @reuse_scope function estimate_task_costs!(sorted_procs, costs, state, procs, task; sig=nothing)
-    tx_rate = state.transfer_rate[]
 
     # Find all Chunks
     chunks = @reusable_vector :estimate_task_costs_chunks Union{Chunk,Nothing} nothing 32
@@ -585,7 +585,7 @@ end
         # TODO: Actually estimate/benchmark this
         task_xfer_cost = gproc.pid != myid() ? 1_000_000 : 0 # 1ms
 
-        # Compute final cost
+        tx_rate = get(get(state.worker_transfer_rate, gproc.pid, Dict{Processor,UInt64}()), proc, DEFAULT_TRANSFER_RATE)
         costs[proc] = est_time_util + (tx_cost/tx_rate) + task_xfer_cost
     end
     chunks_cleanup()
