@@ -143,7 +143,7 @@ mutable struct DArray{T,N,B<:AbstractBlocks{N},F} <: ArrayOp{T, N}
     end
 end
 
-const WrappedDArray{T,N} = Union{<:DArray{T,N}, Transpose{<:DArray{T,N}}, Adjoint{<:DArray{T,N}}}
+const WrappedDArray{T,N} = Union{<:DArray{T,N}, Transpose{T, <:DArray{T,N}}, Adjoint{T, <:DArray{T,N}}}
 const WrappedDMatrix{T} = WrappedDArray{T,2}
 const WrappedDVector{T} = WrappedDArray{T,1}
 const DMatrix{T} = DArray{T,2}
@@ -323,6 +323,8 @@ end
 
 Base.similar(D::DArray{T,N} where T, ::Type{S}, dims::Dims{N}) where {S,N} =
     DArray{S,N}(undef, D.partitioning, dims)
+Base.similar(D::DArray{T,N1} where T, ::Type{S}, dims::Dims{N2}) where {S,N1,N2} =
+    DArray{S,N2}(undef, auto_blocks(dims), dims)
 
 Base.copy(x::DArray{T,N,B,F}) where {T,N,B,F} =
     map(identity, x)::DArray{T,N,B,F}
@@ -592,6 +594,12 @@ DArray{T}(::UndefInitializer, dims::NTuple{N,Int}; assignment::AssignmentType{N}
     DArray{T,N}(undef, auto_blocks(dims), dims; assignment)
 DArray{T}(::UndefInitializer, dims::Vararg{Int,N}; assignment::AssignmentType{N} = :arbitrary) where {T,N} =
     DArray{T,N}(undef, auto_blocks((dims...,)), (dims...,); assignment)
+
+function DArray(A::WrappedDArray{T}; assignment::AssignmentType = :arbitrary) where T
+    B = DArray{T}(undef, size(A); assignment)
+    copyto!(B, A)
+    return B
+end
 
 function Base.:(==)(x::ArrayOp{T,N}, y::AbstractArray{S,N}) where {T,S,N}
     collect(x) == y

@@ -246,14 +246,19 @@ struct AliasedObjectCacheStore
     derived::Dict{AbstractAliasing,AbstractAliasing}
     stored::Dict{MemorySpace,Set{AbstractAliasing}}
     values::Dict{MemorySpace,Dict{AbstractAliasing,Chunk}}
+    originals::Set{AbstractAliasing}
 end
 AliasedObjectCacheStore() =
     AliasedObjectCacheStore(Vector{AbstractAliasing}(),
                             Dict{AbstractAliasing,AbstractAliasing}(),
                             Dict{MemorySpace,Set{AbstractAliasing}}(),
-                            Dict{MemorySpace,Dict{AbstractAliasing,Chunk}}())
+                            Dict{MemorySpace,Dict{AbstractAliasing,Chunk}}(),
+                            Set{AbstractAliasing}())
 
 function is_stored(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::AbstractAliasing)
+    if !(ainfo in cache.originals)
+        push!(cache.originals, ainfo)
+    end
     if !haskey(cache.stored, space)
         return false
     end

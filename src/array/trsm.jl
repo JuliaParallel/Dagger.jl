@@ -28,7 +28,7 @@ function trsv!(uplo::Char, trans::Char, diag::Char, alpha::T, A::DMatrix{T}, B::
                     lalpha = (k == 1) ? alpha : zone
                     Dagger.@spawn BLAS.trsv!('U', trans, diag, In(Ac[k, k]), InOut(Bc[k]))
                     for i in k+1:Bnt
-                        Dagger.@spawn BLAS.gemv!(trans, mzone, In(Ac[k, i]), In(Bc[i]), lalpha, InOut(Bc[k]))
+                        Dagger.@spawn BLAS.gemv!(trans, mzone, In(Ac[k, i]), In(Bc[k]), lalpha, InOut(Bc[i]))
                     end
                 end
             end
@@ -46,7 +46,7 @@ function trsv!(uplo::Char, trans::Char, diag::Char, alpha::T, A::DMatrix{T}, B::
                     lalpha = (k == Bnt) ? alpha : zone
                     Dagger.@spawn BLAS.trsv!('L', trans, diag, In(Ac[k, k]), InOut(Bc[k]))
                     for i in 1:k-1
-                        Dagger.@spawn BLAS.gemv!(trans, mzone, In(Ac[k, i]), In(Bc[i]), lalpha, InOut(Bc[k]))
+                        Dagger.@spawn BLAS.gemv!(trans, mzone, In(Ac[k, i]), In(Bc[k]), lalpha, InOut(Bc[i]))
                     end
                 end
             end

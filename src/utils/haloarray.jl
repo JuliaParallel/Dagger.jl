@@ -144,6 +144,41 @@ end
     end
 end
 
+Base.IndexStyle(::Type{<:HaloArray}) = IndexCartesian()
+
+# GPU-friendly reductions for SubArray views of HaloArray.
+# The standard reduction path uses _foldl_impl/iterate which produces Union
+# types that SPIR-V and other GPU compilers can't handle, and passes through
+# keyword-argument forwarding that triggers dynamic dispatch on GPU.
+# These overrides use CartesianIndices iteration which compiles cleanly.
+@inline function Base.mapreduce(f::F, op::OP, A::SubArray{T,N,<:HaloArray}) where {F,OP,T,N}
+    first_idx = CartesianIndex(ntuple(d -> firstindex(A, d), Val(N)))
+    result = f(@inbounds A[first_idx])
+    @inbounds for idx in CartesianIndices(A)
+        idx == first_idx && continue
+        result = op(result, f(A[idx]))
+    end
+    return result
+end
+@inline function Base.sum(A::SubArray{T,N,<:HaloArray}) where {T,N}
+    first_idx = CartesianIndex(ntuple(d -> firstindex(A, d), Val(N)))
+    result = @inbounds A[first_idx]
+    @inbounds for idx in CartesianIndices(A)
+        idx == first_idx && continue
+        result += A[idx]
+    end
+    return result
+end
+@inline function Base.sum(f::F, A::SubArray{T,N,<:HaloArray}) where {F,T,N}
+    first_idx = CartesianIndex(ntuple(d -> firstindex(A, d), Val(N)))
+    result = f(@inbounds A[first_idx])
+    @inbounds for idx in CartesianIndices(A)
+        idx == first_idx && continue
+        result += f(A[idx])
+    end
+    return result
+end
+
 Adapt.adapt_structure(to, H::Dagger.HaloArray) =
     HaloArray(Adapt.adapt(to, H.center),
               Adapt.adapt.(Ref(to), H.halos),
@@ -164,6 +199,11 @@ function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::P
         halos_new = ntuple(i -> unwrap(halo_chunks[i]), length(halo_chunks))
         return tochunk(HaloArray(center_new, halos_new, halo_width), to_proc)
     end
+end
+
+function Dagger.unsafe_free!(A::HaloArray)
+    unsafe_free!(A.center)
+    foreach(unsafe_free!, A.halos)
 end
 
 function find_object_holding_ptr(object::HaloArray, ptr::UInt64)

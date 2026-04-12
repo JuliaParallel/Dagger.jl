@@ -52,6 +52,11 @@ function Dagger.aliasing(x::MtlArray{T}) where T
     return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
 end
 
+function Dagger.unsafe_free!(x::MtlArray)
+    Metal.unsafe_free!(x)
+    return
+end
+
 Dagger.memory_spaces(proc::MtlArrayDeviceProc) = Set([MetalVRAMMemorySpace(proc.owner, proc.device_id)])
 Dagger.processors(space::MetalVRAMMemorySpace) = Set([MtlArrayDeviceProc(space.owner, space.device_id)])
 
@@ -197,9 +202,31 @@ function Dagger.move(from_proc::MtlArrayDeviceProc, to_proc::MtlArrayDeviceProc,
     # FIXME: elseif Dagger.root_worker_id(from_proc) == Dagger.root_worker_id(to_proc)
     else
         # Different node, use DtoH, serialization, HtoD
-        return MtlArray(remotecall_fetch(from_proc.owner, x) do x
-            Array(unwrap(x))
-        end)
+        host_copy = remotecall_fetch(from_proc.owner, from_proc, x) do from_proc, x
+            return with_context(from_proc) do
+                Array(unwrap(x))
+            end
+        end
+        return with_context(to_proc) do
+            return MtlArray(host_copy)
+        end
+    end
+end
+
+function Dagger.move(from_proc::MtlArrayDeviceProc, to_proc::MtlArrayDeviceProc, x::MtlArray)
+    if from_proc == to_proc
+        # Same process and GPU, no change
+        with_context(Metal.synchronize, from_proc)
+        return x
+    # FIXME: elseif Dagger.root_worker_id(from_proc) == Dagger.root_worker_id(to_proc)
+    else
+        # Different node, use DtoH, serialization, HtoD
+        host_copy = with_context(from_proc) do
+            return Array(x)
+        end
+        return with_context(to_proc) do
+            return MtlArray(host_copy)
+        end
     end
 end
 
@@ -284,6 +311,37 @@ function Dagger.execute!(proc::MtlArrayDeviceProc, f, args...; kwargs...)
     end
 end
 
+# Adapt RefValue
+Dagger.move(from_proc::CPUProc, to_proc::MtlArrayDeviceProc, x::Base.RefValue) =
+    Dagger.GPURef(Dagger.move(from_proc, to_proc, x[]), only(Dagger.memory_spaces(to_proc)))
+Dagger.move(from_proc::MtlArrayDeviceProc, to_proc::CPUProc, x::Dagger.GPURef{T,MetalVRAMMemorySpace} where T) =
+    Ref(Dagger.move(from_proc, to_proc, x[]))
+function Dagger.move!(dep_mod, to_space::CPURAMMemorySpace, from_space::MetalVRAMMemorySpace, to::Base.RefValue, from::Dagger.GPURef)
+    if Dagger.type_may_alias(typeof(from[]))
+        Dagger.move!(dep_mod, to_space, from_space, to[], from[])
+    else
+        to[] = dep_mod(from[])
+    end
+    return
+end
+function Dagger.move!(dep_mod, to_space::MetalVRAMMemorySpace, from_space::CPURAMMemorySpace, to::Dagger.GPURef, from::Base.RefValue)
+    if Dagger.type_may_alias(typeof(from[]))
+        Dagger.move!(dep_mod, to_space, from_space, to[], from[])
+    else
+        to[] = dep_mod(from[])
+    end
+    return
+end
+function Dagger.move!(dep_mod, to_space::MetalVRAMMemorySpace, from_space::MetalVRAMMemorySpace, to::Dagger.GPURef, from::Dagger.GPURef)
+    if Dagger.type_may_alias(typeof(from[]))
+        Dagger.move!(dep_mod, to_space, from_space, to[], from[])
+    else
+        to[] = dep_mod(from[])
+    end
+    return
+end
+
+# Adapt HaloArray
 MtlArray(H::Dagger.HaloArray) = convert(MtlArray, H)
 Base.convert(::Type{C}, H::Dagger.HaloArray) where {C<:MtlArray} =
     Dagger.HaloArray(C(H.center),

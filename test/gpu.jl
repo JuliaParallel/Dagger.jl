@@ -163,6 +163,20 @@ end
                 @test collect(DA * DB) ≈ collect(DA) * collect(DB)
             end
 
+            # Matrix addition / subtraction
+            Dagger.with_options(;scope=local_scope) do
+                @test collect(DA + DB) == collect(DA) + collect(DB)
+                @test collect(DA - DB) == collect(DA) - collect(DB)
+            end
+
+            # Vector addition / subtraction
+            Da = rand(Blocks(4), 8)
+            Db_vec = rand(Blocks(4), 8)
+            Dagger.with_options(;scope=local_scope) do
+                @test collect(Da + Db_vec) == collect(Da) + collect(Db_vec)
+                @test collect(Da - Db_vec) == collect(Da) - collect(Db_vec)
+            end
+
             # Out-of-place Cholesky
             A = rand(8, 8)
             A = A * A'
@@ -171,6 +185,47 @@ end
             Dagger.with_options(;scope=local_scope) do
                 @test collect(cholesky(DA).U) ≈ cholesky(collect(DA)).U
             end
+
+            # Out-of-place LU
+            A = rand(8, 8)
+            DA = DArray(A, Blocks(4, 4))
+            Dagger.with_options(;scope=local_scope) do
+                lu_DA = lu(DA, RowMaximum())
+                L_DA = collect(lu_DA.L)
+                U_DA = collect(lu_DA.U)
+                P_DA = collect(lu_DA.P)
+                @test P_DA * A ≈ L_DA * U_DA rtol=1e-5
+            end
+
+            # ldiv! with DVector RHS — LU
+            A = rand(8, 8)
+            b = rand(8)
+            b_ref = copy(b)
+            DA = DArray(A, Blocks(4, 4))
+            Db = DArray(b, Blocks(4))
+            lu_ref = lu(A, RowMaximum())
+            LinearAlgebra.ldiv!(lu_ref, b_ref)
+            Dagger.with_options(;scope=local_scope) do
+                lu_DA = lu(DA, RowMaximum())
+                LinearAlgebra.ldiv!(lu_DA, Db)
+            end
+            @test collect(Db) ≈ b_ref rtol=1e-5
+
+            # ldiv! with DVector RHS — Cholesky
+            A = rand(8, 8)
+            A = A * A'
+            A[diagind(A)] .+= size(A, 1)
+            b = rand(8)
+            b_ref = copy(b)
+            DA = DArray(A, Blocks(4, 4))
+            Db = DArray(b, Blocks(4))
+            chol_ref = cholesky(A)
+            LinearAlgebra.ldiv!(chol_ref, b_ref)
+            Dagger.with_options(;scope=local_scope) do
+                chol_DA = cholesky(DA)
+                LinearAlgebra.ldiv!(chol_DA, Db)
+            end
+            @test collect(Db) ≈ b_ref rtol=1e-5
         end
     end
 end
@@ -214,8 +269,10 @@ end
 
             if gpu != :all
                 local A, B
+                # ROCArray(rand(...)) not AMDGPU.rand: rocRAND RNG finalizers can error at
+                # process exit ("handle not managed by cache") when context/cache order differs.
                 AMDGPU.device!(AMDGPU.devices()[gpu]) do
-                    A = AMDGPU.rand(128)
+                    A = ROCArray(rand(Float32, 128))
                     B = AMDGPU.zeros(128)
                 end
                 Dagger.with_options(;scope=local_scope) do
@@ -277,6 +334,20 @@ end
                 @test collect(DA * DB) ≈ collect(DA) * collect(DB)
             end
 
+            # Matrix addition / subtraction
+            Dagger.with_options(;scope=local_scope) do
+                @test collect(DA + DB) == collect(DA) + collect(DB)
+                @test collect(DA - DB) == collect(DA) - collect(DB)
+            end
+
+            # Vector addition / subtraction
+            Da = rand(Blocks(4), 8)
+            Db_vec = rand(Blocks(4), 8)
+            Dagger.with_options(;scope=local_scope) do
+                @test collect(Da + Db_vec) == collect(Da) + collect(Db_vec)
+                @test collect(Da - Db_vec) == collect(Da) - collect(Db_vec)
+            end
+
             # Out-of-place Cholesky
             A = rand(8, 8)
             A = A * A'
@@ -285,6 +356,47 @@ end
             Dagger.with_options(;scope=local_scope) do
                 @test collect(cholesky(DA).U) ≈ cholesky(collect(DA)).U
             end
+
+            # Out-of-place LU
+            A = rand(8, 8)
+            DA = DArray(A, Blocks(4, 4))
+            Dagger.with_options(;scope=local_scope) do
+                lu_DA = lu(DA, RowMaximum())
+                L_DA = collect(lu_DA.L)
+                U_DA = collect(lu_DA.U)
+                P_DA = collect(lu_DA.P)
+                @test P_DA * A ≈ L_DA * U_DA rtol=1e-5
+            end
+
+            # ldiv! with DVector RHS — LU
+            A = rand(8, 8)
+            b = rand(8)
+            b_ref = copy(b)
+            DA = DArray(A, Blocks(4, 4))
+            Db = DArray(b, Blocks(4))
+            lu_ref = lu(A, RowMaximum())
+            LinearAlgebra.ldiv!(lu_ref, b_ref)
+            Dagger.with_options(;scope=local_scope) do
+                lu_DA = lu(DA, RowMaximum())
+                LinearAlgebra.ldiv!(lu_DA, Db)
+            end
+            @test collect(Db) ≈ b_ref rtol=1e-5
+
+            # ldiv! with DVector RHS — Cholesky
+            A = rand(8, 8)
+            A = A * A'
+            A[diagind(A)] .+= size(A, 1)
+            b = rand(8)
+            b_ref = copy(b)
+            DA = DArray(A, Blocks(4, 4))
+            Db = DArray(b, Blocks(4))
+            chol_ref = cholesky(A)
+            LinearAlgebra.ldiv!(chol_ref, b_ref)
+            Dagger.with_options(;scope=local_scope) do
+                chol_DA = cholesky(DA)
+                LinearAlgebra.ldiv!(chol_DA, Db)
+            end
+            @test collect(Db) ≈ b_ref rtol=1e-5
         end
     end
 end
@@ -375,7 +487,6 @@ end
             end
         end
 
-        #= FIXME: Requires more generic matmul, missing Cholesky methods
         @testset "Datadeps (GPU $gpu)" for gpu in gpu_configs
             local_scope = Dagger.scope(worker=1, intel_gpus=(gpu == :all ? Colon() : [gpu]))
 
@@ -394,6 +505,20 @@ end
                 @test collect(DA * DB) ≈ collect(DA) * collect(DB)
             end
 
+            # Matrix addition / subtraction
+            Dagger.with_options(;scope=local_scope) do
+                @test collect(DA + DB) == collect(DA) + collect(DB)
+                @test collect(DA - DB) == collect(DA) - collect(DB)
+            end
+
+            # Vector addition / subtraction
+            Da = rand(Blocks(4), Float32, 8)
+            Db_vec = rand(Blocks(4), Float32, 8)
+            Dagger.with_options(;scope=local_scope) do
+                @test collect(Da + Db_vec) == collect(Da) + collect(Db_vec)
+                @test collect(Da - Db_vec) == collect(Da) - collect(Db_vec)
+            end
+
             # Out-of-place Cholesky
             A = rand(Float32, 8, 8)
             A = A * A'
@@ -402,8 +527,48 @@ end
             Dagger.with_options(;scope=local_scope) do
                 @test collect(cholesky(DA).U) ≈ cholesky(collect(DA)).U
             end
+
+            # Out-of-place LU
+            A = rand(Float32, 8, 8)
+            DA = DArray(A, Blocks(4, 4))
+            Dagger.with_options(;scope=local_scope) do
+                lu_DA = lu(DA, RowMaximum())
+                L_DA = collect(lu_DA.L)
+                U_DA = collect(lu_DA.U)
+                P_DA = collect(lu_DA.P)
+                @test P_DA * A ≈ L_DA * U_DA rtol=1e-5
+            end
+
+            # ldiv! with DVector RHS — LU
+            A = rand(Float32, 8, 8)
+            b = rand(Float32, 8)
+            b_ref = copy(b)
+            DA = DArray(A, Blocks(4, 4))
+            Db = DArray(b, Blocks(4))
+            lu_ref = lu(A, RowMaximum())
+            LinearAlgebra.ldiv!(lu_ref, b_ref)
+            Dagger.with_options(;scope=local_scope) do
+                lu_DA = lu(DA, RowMaximum())
+                LinearAlgebra.ldiv!(lu_DA, Db)
+            end
+            @test collect(Db) ≈ b_ref rtol=1e-5
+
+            # ldiv! with DVector RHS — Cholesky
+            A = rand(Float32, 8, 8)
+            A = A * A'
+            A[diagind(A)] .+= size(A, 1)
+            b = rand(Float32, 8)
+            b_ref = copy(b)
+            DA = DArray(A, Blocks(4, 4))
+            Db = DArray(b, Blocks(4))
+            chol_ref = cholesky(A)
+            LinearAlgebra.ldiv!(chol_ref, b_ref)
+            Dagger.with_options(;scope=local_scope) do
+                chol_DA = cholesky(DA)
+                LinearAlgebra.ldiv!(chol_DA, Db)
+            end
+            @test collect(Db) ≈ b_ref rtol=1e-5
         end
-        =#
     end
 end
 

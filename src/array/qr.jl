@@ -26,6 +26,7 @@ function _apply_dense_qr!(side::Char, trans::Char, Q::QRCompactWYQ{T, <:DMatrix{
     end
     pormqr!(side, trans, Q.factors, Q.T, Cd)
     copyto!(M, collect(Cd))
+    unsafe_free!(Cd)
     return M
 end
 LinearAlgebra.lmul!(B::QRCompactWYQ{T, <:DMatrix{T}}, A::StridedVecOrMat{T}) where {T} = _apply_dense_qr!('L', 'N', B, A)
@@ -33,21 +34,38 @@ function LinearAlgebra.lmul!(B::AdjointQ{T, <:QRCompactWYQ{T, <:DMatrix{T}}}, A:
     trans = T <: Complex ? 'C' : 'T'
     return _apply_dense_qr!('L', trans, B.Q, A)
 end
+function LinearAlgebra.lmul!(B::AdjointQ{T, <:QRCompactWYQ{T, <:DMatrix{T}}}, A::DVector{T}) where {T}
+    trans = T <: Complex ? 'C' : 'T'
+    A_mat = similar(A, T, (size(A, 1), 1))::DMatrix
+    copyto!(A_mat, A)
+    pormqr!('L', trans, B.Q.factors, B.Q.T, A_mat)
+    copyto!(A, A_mat)
+    unsafe_free!(A_mat)
+    return A
+end
 
 LinearAlgebra.rmul!(A::DMatrix{T}, B::QRCompactWYQ{T, <:DMatrix{T}}) where {T} = pormqr!('R', 'N', B.factors, B.T, A)
-function LinearAlgebra.rmul!(A::DMatrix{T}, B::AdjointQ{T, <:QRCompactWYQ{T, <:DMatrix{T}}}) where {T} 
+function LinearAlgebra.rmul!(A::DMatrix{T}, B::AdjointQ{T, <:QRCompactWYQ{T, <:DMatrix{T}}}) where {T}
     trans = T <: Complex ? 'C' : 'T'
     pormqr!('R', trans, B.Q.factors, B.Q.T, A)
 end
-LinearAlgebra.rmul!(A::StridedVecOrMat{T}, B::QRCompactWYQ{T, <:DMatrix{T}}) where {T} = _apply_dense_qr!('R', 'N', B, A)
-function LinearAlgebra.rmul!(A::StridedVecOrMat{T}, B::AdjointQ{<:Any, <:QRCompactWYQ{T, <:DMatrix{T}, <:DMatrix{T}}}) where {T<:Union{Float32,Float64}}
-    trans = T <: Complex ? 'C' : 'T'
-    return _apply_dense_qr!('R', trans, B.Q, A)
+for AT in (Vector, Matrix)
+    LinearAlgebra.rmul!(A::AT{T}, B::QRCompactWYQ{T, <:DMatrix{T}}) where {T} = _apply_dense_qr!('R', 'N', B, A)
+    function LinearAlgebra.rmul!(A::AT{T}, B::AdjointQ{T, <:QRCompactWYQ{T, <:DMatrix{T}, <:DMatrix{T}}}) where {T}
+        trans = T <: Complex ? 'C' : 'T'
+        return _apply_dense_qr!('R', trans, B.Q, A)
+    end
 end
-function LinearAlgebra.rmul!(A::StridedVecOrMat{T}, B::AdjointQ{<:Any, <:QRCompactWYQ{T, <:DMatrix{T}, <:DMatrix{T}}}) where {T<:Union{ComplexF32,ComplexF64}}
+function LinearAlgebra.rmul!(A::DVector{T}, B::AdjointQ{T, <:QRCompactWYQ{T, <:DMatrix{T}, <:DMatrix{T}}}) where {T}
     trans = T <: Complex ? 'C' : 'T'
-    return _apply_dense_qr!('R', trans, B.Q, A)
+    A_mat = similar(A, T, (1, size(A, 2)))
+    copyto!(A_mat, A)
+    pormqr!('R', trans, B.Q.factors, B.Q.T, A_mat)
+    copyto!(A, A_mat)
+    unsafe_free!(A_mat)
+    return A
 end
+
 
 """
     _infer_caqr_p(A, Tm) -> Int
@@ -241,6 +259,8 @@ function _pormqr_irregular!(side::Char, trans::Char, A::DMatrix{T}, Tm::DMatrix{
               side == 'R' ? C * Qop :
               throw(ArgumentError("side must be 'L' or 'R', got '$side'"))
     copyto!(C, updated)
+    unsafe_free!(updated)
+    unsafe_free!(Q)
     return C
 end
 
@@ -793,4 +813,29 @@ function LinearAlgebra.qr!(A::DMatrix{T}; ib::Int=1, p::Int=1) where {T<:Number}
     end
 
     return _qr_impl!(A; ib=ib, p=1)
+end
+
+function LinearAlgebra.ldiv!(F::QRCompactWY{T, <:DMatrix{T}}, B::DVecOrMat) where T
+    m, n = size(F)
+    # Apply Q' to B in-place using the existing distributed lmul! dispatches
+    LinearAlgebra.lmul!(LinearAlgebra.adjoint(F.Q), B)
+    # Solve R*x = (Q'B) where R = UpperTriangular(F.factors)
+    if m == n
+        # Square case: F.factors is n×n, delegate to the distributed triangular ldiv!
+        LinearAlgebra.ldiv!(UpperTriangular(F.factors), B)
+    else
+        # Overdetermined (m > n): R occupies only the leading n×n block.
+        # Collect and solve the triangular system locally, then distribute back.
+        b_local = collect(B)
+        R_local = UpperTriangular(collect(F.factors)[1:n, 1:n])
+        b_view = B isa DVector ? view(b_local, 1:n) : view(b_local, 1:n, :)
+        LinearAlgebra.ldiv!(R_local, b_view)
+        copyto!(B, distribute(b_local, B.partitioning))
+    end
+    return B
+end
+
+function LinearAlgebra.ldiv!(X::DVecOrMat, F::QRCompactWY{T, <:DMatrix{T}}, B::DVecOrMat) where T
+    copyto!(X, B)
+    LinearAlgebra.ldiv!(F, X)
 end

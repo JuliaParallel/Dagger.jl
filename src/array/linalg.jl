@@ -33,8 +33,25 @@ function LinearAlgebra.norm2(A::LowerTriangular{T,<:DArray{T,2}}) where T
     return sqrt(sum(lower_norms_values; init=zeroRT) + sum(diag_norms_values; init=zeroRT))
 end
 
-is_cross_hermitian(A1, A2) = A1 ≈ A2'
-is_cross_symmetric(A1, A2) = A1 ≈ LinearAlgebra.transpose(A2)
+# Frobenius norm via sum(abs2, ...) to avoid scalar indexing on GPU arrays (LinearAlgebra.norm
+# can dispatch to norm_recursive_check which iterates).
+function _frobenius_norm(A)
+    return sqrt(sum(abs2, A))
+end
+
+# Chunkwise equality via norms (broadcast reductions on GPU); avoids scalar ≈.
+function is_cross_hermitian(A1, A2)
+    B = A2'
+    Tf = float(real(promote_type(eltype(A1), eltype(B))))
+    rtol = sqrt(eps(Tf))
+    return _frobenius_norm(A1 - B) <= rtol * max(_frobenius_norm(A1), _frobenius_norm(B))
+end
+function is_cross_symmetric(A1, A2)
+    B = LinearAlgebra.transpose(A2)
+    Tf = float(real(promote_type(eltype(A1), eltype(B))))
+    rtol = sqrt(eps(Tf))
+    return _frobenius_norm(A1 - B) <= rtol * max(_frobenius_norm(A1), _frobenius_norm(B))
+end
 function LinearAlgebra.issymmetric(A::DArray{T,2}) where T
     if size(A, 1) != size(A, 2)
         return false
@@ -92,10 +109,22 @@ function LinearAlgebra.ishermitian(A::DArray{T,2}) where T
     return all(fetch, to_check)
 end
 
+# Check finiteness of a single chunk. For GPU arrays uses all(isfinite, A) (GPU
+# reduction via mapreduce); for CPU arrays uses LAPACK.chkfinite. Throws
+# ArgumentError("matrix has Inf or NaN") if any element is non-finite.
+function _chkfinite_chunk(A)
+    if A isa GPUArraysCore.AbstractGPUArray
+        all(isfinite, A) || throw(ArgumentError("matrix has Inf or NaN"))
+    else
+        LinearAlgebra.LAPACK.chkfinite(A)
+    end
+    return nothing
+end
+
 function LinearAlgebra.LAPACK.chkfinite(A::DArray)
     Ac = A.chunks
     chunk_finite = [Ref(true) for _ in Ac]
-    chkfinite!(finite, A) = finite[] = LinearAlgebra.LAPACK.chkfinite(A)
+    chkfinite!(finite, A) = (_chkfinite_chunk(A); finite[] = true)
     Dagger.spawn_datadeps() do
         for idx in eachindex(Ac)
             Dagger.@spawn chkfinite!(Out(chunk_finite[idx]), In(Ac[idx]))
@@ -156,6 +185,8 @@ function LinearAlgebra.inv(A::DMatrix{T}) where T
     dest = DMatrix{S0}(I, n, n, A.partitioning)
     F = factorize(convert(AbstractMatrix{S}, A))
     LinearAlgebra.ldiv!(F, dest)
+    unsafe_free!(F.factors)
+    unsafe_free!(F.ipiv)
     return dest
 end
 
@@ -200,7 +231,10 @@ function LinearAlgebra.ldiv!(Y::DArray, A::DMatrix, B::DArray)
 end
 
 function LinearAlgebra.ldiv!(A::DMatrix, B::DArray)
-    LinearAlgebra.ldiv!(LinearAlgebra.lu(A), B)
+    F = LinearAlgebra.lu(A)
+    LinearAlgebra.ldiv!(F, B)
+    unsafe_free!(F.factors)
+    unsafe_free!(F.ipiv)
 end
 
 function LinearAlgebra.ldiv!(C::DVecOrMat, A::Union{LowerTriangular{<:Any,<:DMatrix},UnitLowerTriangular{<:Any,<:DMatrix},UpperTriangular{<:Any,<:DMatrix},UnitUpperTriangular{<:Any,<:DMatrix}}, B::DVecOrMat)
@@ -219,22 +253,43 @@ function LinearAlgebra.ldiv!(C::Cholesky{T,<:DMatrix}, B::DVecOrMat) where T
     parent_A = factors
     dB = B isa DVecOrMat ? B : (B isa AbstractMatrix ? view(B, factors.partitioning) : view(B, AutoBlocks()))
     min_bsa = min(parent_A.partitioning.blocksize...)
+    partB = Blocks(ntuple(_->min_bsa, ndims(B))...)
 
-    if C.uplo == 'U'
-        # A = U'U → solve U'y = B, then Ux = y
-        maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => Blocks(min_bsa, min_bsa)) do pA, pB
-            Dagger.trsm!('L', 'U', trans, 'N', alpha, pA, pB)
-        end
-        maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => Blocks(min_bsa, min_bsa)) do pA, pB
-            Dagger.trsm!('L', 'U', 'N', 'N', alpha, pA, pB)
+    if B isa DVector
+        if C.uplo == 'U'
+            # A = U'U → solve U'y = B, then Ux = y
+            maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => partB) do pA, pB
+                Dagger.trsv!('U', trans, 'N', alpha, pA, pB)
+            end
+            maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => partB) do pA, pB
+                Dagger.trsv!('U', 'N', 'N', alpha, pA, pB)
+            end
+        else
+            # A = LL' → solve Ly = B, then L'x = y
+            maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => partB) do pA, pB
+                Dagger.trsv!('L', 'N', 'N', alpha, pA, pB)
+            end
+            maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => partB) do pA, pB
+                Dagger.trsv!('L', trans, 'N', alpha, pA, pB)
+            end
         end
     else
-        # A = LL' → solve Ly = B, then L'x = y
-        maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => Blocks(min_bsa, min_bsa)) do pA, pB
-            Dagger.trsm!('L', 'L', 'N', 'N', alpha, pA, pB)
-        end
-        maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => Blocks(min_bsa, min_bsa)) do pA, pB
-            Dagger.trsm!('L', 'L', trans, 'N', alpha, pA, pB)
+        if C.uplo == 'U'
+            # A = U'U → solve U'y = B, then Ux = y
+            maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => partB) do pA, pB
+                Dagger.trsm!('L', 'U', trans, 'N', alpha, pA, pB)
+            end
+            maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => partB) do pA, pB
+                Dagger.trsm!('L', 'U', 'N', 'N', alpha, pA, pB)
+            end
+        else
+            # A = LL' → solve Ly = B, then L'x = y
+            maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => partB) do pA, pB
+                Dagger.trsm!('L', 'L', 'N', 'N', alpha, pA, pB)
+            end
+            maybe_copy_buffered(parent_A => Blocks(min_bsa, min_bsa), dB => partB) do pA, pB
+                Dagger.trsm!('L', 'L', trans, 'N', alpha, pA, pB)
+            end
         end
     end
 
