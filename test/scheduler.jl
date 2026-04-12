@@ -452,6 +452,27 @@ end
                 @test costs[tproc2_1] ≈ (tx_size/tx_rate) + tx_xfer_cost + #=pres2_1 +=# sig_unknown_cost # All chunks are remote, and this signature is unknown
             end
         end
+
+        @testset "Per-Processor Transfer Rate" begin
+            wid = first(workers())
+
+            state.worker_transfer_rate[1][tproc1_1] = UInt64(2_000_000)
+            state.worker_transfer_rate[wid][tproc2_1] = UInt64(500_000)
+
+            args = [Dagger.tochunk(1), Dagger.tochunk(2)]
+            tx_size = 2 * sizeof(Int)
+            t = delayed(mynothing)(args...)
+            Dagger.Sch.collect_task_inputs!(state, t)
+            _, costs = Dagger.Sch.estimate_task_costs(state, procs, t)
+
+            if nprocs() > 1
+                @test costs[tproc2_1] ≈ sig_unknown_cost + (tx_size / 500_000) + tx_xfer_cost
+            end
+            @test costs[tproc1_1] ≈ sig_unknown_cost
+
+            delete!(state.worker_transfer_rate[1], tproc1_1)
+            delete!(state.worker_transfer_rate[wid], tproc2_1)
+        end
     end
 end
 
