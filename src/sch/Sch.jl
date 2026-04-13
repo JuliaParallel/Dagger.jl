@@ -67,7 +67,7 @@ Fields:
 - `worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}` - Communication channels between the scheduler and each worker
 - `signature_time_cost::Dict{Signature,UInt64}` - Cache of estimated CPU time (in nanoseconds) required to compute calls with the given signature
 - `signature_alloc_cost::Dict{Signature,UInt64}` - Cache of estimated CPU RAM (in bytes) required to compute calls with the given signature
-- `transfer_rate::Ref{UInt64}` - Estimate of the network transfer rate in bytes per second
+- `worker_transfer_rate::Dict{Int,Dict{Processor,UInt64}}` - Maps from worker ID to per-processor network transfer rate estimates in bytes per second
 - `halt::Base.Event` - Event indicating that the scheduler is halting
 - `lock::ReentrantLock` - Lock around operations which modify the state
 - `futures::Dict{Thunk, Vector{ThunkFuture}}` - Futures registered for waiting on the result of a thunk.
@@ -93,7 +93,7 @@ struct ComputeState
     worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}
     signature_time_cost::Dict{Signature,UInt64}
     signature_alloc_cost::Dict{Signature,UInt64}
-    transfer_rate::Ref{UInt64}
+    worker_transfer_rate::Dict{Int,Dict{Processor,UInt64}}
     halt::Base.Event
     lock::ReentrantLock
     futures::Dict{Thunk, Vector{ThunkFuture}}
@@ -122,7 +122,7 @@ function start_state(deps::Dict, node_order, chan)
                          Dict{Int, Tuple{RemoteChannel,RemoteChannel}}(),
                          Dict{Signature,UInt64}(),
                          Dict{Signature,UInt64}(),
-                         Ref{UInt64}(1_000_000),
+                         Dict{Int,Dict{Processor,UInt64}}(),
                          Base.Event(),
                          ReentrantLock(),
                          Dict{Thunk, Vector{ThunkFuture}}(),
@@ -157,6 +157,7 @@ function init_proc(state, p, log_sink)
     gproc = OSProc(p.pid)
     lock(state.lock) do
         state.worker_time_pressure[p.pid] = Dict{Processor,UInt64}()
+        state.worker_transfer_rate[p.pid] = Dict{Processor,UInt64}()
 
         state.worker_storage_pressure[p.pid] = Dict{Union{StorageResource,Nothing},UInt64}()
         state.worker_storage_capacity[p.pid] = Dict{Union{StorageResource,Nothing},UInt64}()
@@ -430,7 +431,12 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options::SchedulerOpt
                 state.signature_time_cost[sig] = (metadata.threadtime + get(state.signature_time_cost, sig, 0)) ÷ 2
                 state.signature_alloc_cost[sig] = (metadata.gc_allocd + get(state.signature_alloc_cost, sig, 0)) ÷ 2
                 if metadata.transfer_rate !== nothing
-                    state.transfer_rate[] = (state.transfer_rate[] + metadata.transfer_rate) ÷ 2
+                    old_rate = get(state.worker_transfer_rate[pid], proc, UInt64(0))
+                    if old_rate == 0
+                        state.worker_transfer_rate[pid][proc] = metadata.transfer_rate
+                    else
+                        state.worker_transfer_rate[pid][proc] = (old_rate + metadata.transfer_rate) ÷ 2
+                    end
                 end
             end
             if res isa Chunk
@@ -736,6 +742,7 @@ function remove_dead_proc!(ctx, state, proc, options)
     @assert options.single !== proc.pid "Single worker failed, cannot continue."
     rmprocs!(ctx, [proc])
     delete!(state.worker_time_pressure, proc.pid)
+    delete!(state.worker_transfer_rate, proc.pid)
     delete!(state.worker_storage_pressure, proc.pid)
     delete!(state.worker_storage_capacity, proc.pid)
     delete!(state.worker_loadavg, proc.pid)
