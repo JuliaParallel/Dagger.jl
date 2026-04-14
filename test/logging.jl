@@ -1,6 +1,9 @@
 import TimespanLogging
 import TimespanLogging: Timespan, Event, Events, LocalEventLog, MultiEventLog
 import Colors, GraphViz, DataFrames, Plots, JSON3
+if Sys.islinux()
+    import LinuxPerf
+end
 
 @testset "Logging" begin
     @testset "LocalEventLog" begin
@@ -63,6 +66,41 @@ import Colors, GraphViz, DataFrames, Plots, JSON3
             end
 
             Dagger.disable_logging!()
+        end
+
+        @testset "enable_logging! (GC/lock/compile-time metrics)" begin
+            Dagger.enable_logging!(;gc_stats=true, lock_contend=true, compile_time=true)
+
+            t = Dagger.@spawn 1+2
+            fetch(Dagger.@spawn t*3)
+
+            logs = Dagger.fetch_logs!()
+            @test haskey(logs, 1)
+            for consumer in (:gc_stats, :lock_contend, :compile_time)
+                @test length(logs[1][consumer]) > 0
+                @test any(x->x !== nothing, logs[1][consumer])
+            end
+
+            Dagger.disable_logging!()
+        end
+
+        if Sys.islinux()
+            @testset "enable_logging! (LinuxPerf)" begin
+                Dagger.enable_logging!(;linuxperf="cpu-clock, page-faults")
+
+                t = Dagger.@spawn 1+2
+                fetch(Dagger.@spawn t*3)
+
+                logs = Dagger.fetch_logs!()
+                @test haskey(logs, 1)
+                @test haskey(logs[1], :linuxperf)
+                @test length(logs[1][:linuxperf]) > 0
+                @test any(x->x isa Dict, logs[1][:linuxperf])
+                @test any(x->x isa Dict && haskey(x, "cpu-clock") && haskey(x, "page-faults"),
+                          logs[1][:linuxperf])
+
+                Dagger.disable_logging!()
+            end
         end
 
         @testset "Manual" begin
