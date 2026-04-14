@@ -225,4 +225,23 @@ end
 
         Dagger.disable_logging!()
     end
+
+    @testset "show_logs :summary" begin
+        extra_kwargs = Sys.islinux() ? (;linuxperf="cpu-clock, page-faults") : NamedTuple()
+        Dagger.enable_logging!(;all_task_deps=true, gc_stats=true, lock_contend=true,
+                                compile_time=true, extra_kwargs...)
+
+        A = distribute(rand(4, 4), Blocks(8, 8))
+        sum(A)
+        logs = Dagger.fetch_logs!()
+        Dagger.disable_logging!()
+
+        io = IOBuffer()
+        Dagger.show_logs(io, logs, :summary)
+        seek(io, 0)
+        str = String(take!(io))
+        @test !isempty(str)
+        @test occursin("Dagger Execution Summary", str)
+        @test occursin("Run Time", str)
+    end
 end
