@@ -276,4 +276,94 @@ function (::TaskToChunk)(ev::Event{:finish})
     return
 end
 
+"""
+    GCStats
+
+Tracks GC allocations (`Base.GC_Diff.allocd`) between the start and finish of
+each event, using the `gc_num` field already captured in each `Event`.
+"""
+mutable struct GCStats
+    active_starts::Dict{Any, Base.GC_Num}
+end
+GCStats() = GCStats(Dict{Any, Base.GC_Num}())
+init_similar(::GCStats) = GCStats()
+
+function (gs::GCStats)(ev::Event{:start})
+    gs.active_starts[(ev.category, ev.id)] = ev.gc_num
+    nothing
+end
+function (gs::GCStats)(ev::Event{:finish})
+    start_gc = pop!(gs.active_starts, (ev.category, ev.id), nothing)
+    start_gc === nothing && return nothing
+    return Base.GC_Diff(ev.gc_num, start_gc).allocd
+end
+
+"""
+    LockContentionMetrics
+
+Tracks the number of lock contention events between the start and finish of
+each event. Uses a global atomic refcount to enable/disable
+`Base.Threads.lock_profiling` only while at least one event is in-flight.
+"""
+const _lock_contention_refcount = Threads.Atomic{Int}(0)
+
+mutable struct LockContentionMetrics
+    active_starts::Dict{Any, Int64}
+end
+LockContentionMetrics() = LockContentionMetrics(Dict{Any, Int64}())
+init_similar(::LockContentionMetrics) = LockContentionMetrics()
+
+function (lc::LockContentionMetrics)(ev::Event{:start})
+    old = Threads.atomic_add!(_lock_contention_refcount, 1)
+    if old == 0
+        Base.Threads.lock_profiling(true)
+    end
+    lc.active_starts[(ev.category, ev.id)] = Int64(Base.Threads.LOCK_CONFLICT_COUNT[])
+    nothing
+end
+function (lc::LockContentionMetrics)(ev::Event{:finish})
+    baseline = pop!(lc.active_starts, (ev.category, ev.id), nothing)
+    baseline === nothing && return nothing
+    current = Int64(Base.Threads.LOCK_CONFLICT_COUNT[])
+    old = Threads.atomic_sub!(_lock_contention_refcount, 1)
+    if old == 1
+        Base.Threads.lock_profiling(false)
+    end
+    return current - baseline
+end
+
+"""
+    CompileTimeMetrics
+
+Tracks cumulative Julia compile time (via `Base.cumulative_compile_time_ns`)
+between the start and finish of each event. Uses a global atomic refcount to
+enable/disable timing only while at least one event is in-flight.
+"""
+const _compile_timing_refcount = Threads.Atomic{Int}(0)
+
+mutable struct CompileTimeMetrics
+    active_starts::Dict{Any, Int64}
+end
+CompileTimeMetrics() = CompileTimeMetrics(Dict{Any, Int64}())
+init_similar(::CompileTimeMetrics) = CompileTimeMetrics()
+
+function (ct::CompileTimeMetrics)(ev::Event{:start})
+    old = Threads.atomic_add!(_compile_timing_refcount, 1)
+    if old == 0
+        Base.cumulative_compile_timing(true)
+    end
+    ct.active_starts[(ev.category, ev.id)] = Int64(Base.cumulative_compile_time_ns()[1])
+    nothing
+end
+function (ct::CompileTimeMetrics)(ev::Event{:finish})
+    baseline = pop!(ct.active_starts, (ev.category, ev.id), nothing)
+    baseline === nothing && return nothing
+    current = Int64(Base.cumulative_compile_time_ns()[1])
+    old = Threads.atomic_sub!(_compile_timing_refcount, 1)
+    if old == 1
+        Base.cumulative_compile_timing(false)
+    end
+    return current - baseline
+end
+
 end # module Events
