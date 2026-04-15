@@ -104,7 +104,7 @@ end
 
 function _sync_with_context(x::Union{Dagger.Processor,Dagger.MemorySpace})
     with_context(x) do
-        CUDA.synchronize()
+        CUDA.synchronize(stream())
     end
 end
 function sync_with_context(x::Union{Dagger.Processor,Dagger.MemorySpace})
@@ -391,7 +391,7 @@ Dagger.gpu_with_device(f, proc::CuArrayDeviceProc) =
     CUDA.device!(f, proc.device)
 function Dagger.gpu_synchronize(proc::CuArrayDeviceProc)
     with_context(proc) do
-        CUDA.synchronize()
+        CUDA.synchronize(stream())
     end
 end
 function Dagger.gpu_synchronize(::Val{:CUDA})

@@ -98,7 +98,7 @@ end
 
 function _sync_with_context(x::Union{Dagger.Processor,Dagger.MemorySpace})
     with_context(x) do
-        AMDGPU.synchronize()
+        AMDGPU.synchronize(stream())
     end
 end
 function sync_with_context(x::Union{Dagger.Processor,Dagger.MemorySpace})
@@ -364,7 +364,7 @@ Dagger.gpu_with_device(f, proc::ROCArrayDeviceProc) =
     AMDGPU.device!(f, AMDGPU.devices()[proc.device_id])
 function Dagger.gpu_synchronize(proc::ROCArrayDeviceProc)
     with_context(proc) do
-        AMDGPU.synchronize()
+        AMDGPU.synchronize(stream())
     end
 end
 function Dagger.gpu_synchronize(::Val{:ROC})
