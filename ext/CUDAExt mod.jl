@@ -116,9 +116,17 @@ end
 function _sync_with_context(x::Union{Dagger.Processor,Dagger.MemorySpace})
     caller_stream = stream()
     with_context(x) do
-        ev = CUDA.CuEvent()
-        CUDA.record(ev, stream())
-        CUDA.wait(ev, caller_stream)
+        # We don't track which round-robin stream produced this data in the
+        # move path, so make the caller wait on *every* stream of the device.
+        # Recording on `stream()` alone only ever caught STREAMS[dev][1], which
+        # is almost always idle -> the wait was a no-op and the copy raced the
+        # real producer stream.
+        for s in STREAMS[x.device]
+            s === caller_stream && continue
+            ev = CUDA.CuEvent()
+            CUDA.record(ev, s)
+            CUDA.wait(ev, caller_stream)
+        end
     end
 end
 function sync_with_context(x::Union{Dagger.Processor,Dagger.MemorySpace})
@@ -143,10 +151,10 @@ Dagger.allocate_array_func(::CuArrayDeviceProc, ::Dagger.AllocateUndef{S}) where
 # N.B. These methods assume that later operations will implicitly or
 # explicitly synchronize with their associated stream
 function Dagger.move!(to_space::Dagger.CPURAMMemorySpace, from_space::CUDAVRAMMemorySpace, to::AbstractArray{T,N}, from::AbstractArray{T,N}) where {T,N}
-    # if Dagger.root_worker_id(from_space) == myid()
-    #     sync_with_context(from_space)
-    #     with_context!(from_space)
-    # end
+    if Dagger.root_worker_id(from_space) == myid()
+        sync_with_context(from_space)
+        with_context!(from_space)
+    end
     copyto!(to, from)
     # N.B. DtoH will synchronize
     return
@@ -157,8 +165,8 @@ function Dagger.move!(to_space::CUDAVRAMMemorySpace, from_space::Dagger.CPURAMMe
     return
 end
 function Dagger.move!(to_space::CUDAVRAMMemorySpace, from_space::CUDAVRAMMemorySpace, to::AbstractArray{T,N}, from::AbstractArray{T,N}) where {T,N}
-    #sync_with_context(from_space)
-    #with_context!(to_space)
+    sync_with_context(from_space)
+    with_context!(to_space)
     copyto!(to, from)
     return
 end
@@ -356,36 +364,6 @@ Dagger.move(from_proc::CPUProc, to_proc::CuArrayDeviceProc, x::Chunk{T}) where {
     Dagger.move(from_proc, to_proc, fetch(x))
 
 const ROUNDROBIN = Dict{Int, Threads.Atomic{Int}}()
-# Per-stream count of tasks assigned but not yet finished.
-# ponytail: host-side occupancy, not true device queue depth; upgrade to
-# CuEvent polling if SDQ decisions look off in benchmarks.
-const STREAM_QUEUES = Dict{Int, Vector{Threads.Atomic{Int}}}()
-const STREAM_STRATEGY = Ref{Symbol}(:roundrobin)
-
-"""
-    stream_strategy!(s::Symbol)
-
-Set the stream distribution strategy: `:roundrobin`, `:random`, or
-`:sdq` (shortest stream queue). Also settable via the
-`DAGGER_CUDA_STREAM_STRATEGY` environment variable at load time.
-"""
-function stream_strategy!(s::Symbol)
-    s in (:roundrobin, :random, :sdq) ||
-        throw(ArgumentError("unknown stream strategy: $s (use :roundrobin, :random, or :sdq)"))
-    STREAM_STRATEGY[] = s
-end
-
-function pick_stream(dev::Int)
-    n = length(STREAMS[dev])
-    s = STREAM_STRATEGY[]
-    if s == :roundrobin
-        return mod1(Threads.atomic_add!(ROUNDROBIN[dev], 1), n)
-    elseif s == :random
-        return rand(1:n)
-    else # :sdq
-        return argmin(i -> STREAM_QUEUES[dev][i][], 1:n)
-    end
-end
 
 # Task execution
 function Dagger.execute!(proc::CuArrayDeviceProc, f, args...; kwargs...)
@@ -393,8 +371,7 @@ function Dagger.execute!(proc::CuArrayDeviceProc, f, args...; kwargs...)
     opt = Dagger.get_options()
     tls = Dagger.get_tls()
     mydev = proc.device
-    cr_str = pick_stream(mydev)
-    Threads.atomic_add!(STREAM_QUEUES[mydev][cr_str], 1)
+    cr_str = mod1(Threads.atomic_add!(ROUNDROBIN[mydev], 1), length(STREAMS[mydev]))
     mytid = Dagger.task_id()
     task = Threads.@spawn begin
         Dagger.set_tls!(tls)
@@ -413,12 +390,14 @@ function Dagger.execute!(proc::CuArrayDeviceProc, f, args...; kwargs...)
             deps[mytid] = (mydev, cr_str)
         end
         
-        result = try
-            Base.@invokelatest f(args...; kwargs...)
-        finally
-            Threads.atomic_sub!(STREAM_QUEUES[mydev][cr_str], 1)
-        end
-        # N.B. Synchronization must be done when accessing result or args
+        result = Base.@invokelatest f(args...; kwargs...)
+        # Block this task's thread until *its* stream has actually finished.
+        # This is the backpressure that bounds memory: the scheduler only
+        # treats the task as done (and frees its input chunks via unsafe_free!)
+        # once the producing kernel has completed, so freed buffers are no
+        # longer pinned on a still-running stream. Concurrency is preserved
+        # because other tasks run concurrently on their own streams/threads.
+        # CUDA.synchronize(STREAMS[mydev][cr_str])
         return result
     end
 
@@ -487,13 +466,11 @@ CuArray(H::Dagger.HaloArray) = convert(CuArray, H)
 Base.convert(::Type{C}, H::Dagger.HaloArray) where {C<:CuArray} =
     Dagger.HaloArray(C(H.center),
                      C.(H.halos),
-                     H.halo_width;
-                     own_center=H.own_center)
+                     H.halo_width)
 Adapt.adapt_structure(to::CUDA.KernelAdaptor, H::Dagger.HaloArray) =
     Dagger.HaloArray(adapt(to, H.center),
                      adapt.(Ref(to), H.halos),
-                     H.halo_width;
-                     own_center=H.own_center)
+                     H.halo_width)
 function Dagger.inner_stencil_proc!(::CuArrayDeviceProc, f, output, read_vars)
     Dagger.Kernel(_inner_stencil!)(f, output, read_vars; ndrange=size(output))
     return
@@ -510,15 +487,14 @@ Dagger.gpu_with_device(f, proc::CuArrayDeviceProc) =
     CUDA.device!(f, proc.device)
 function Dagger.gpu_synchronize(proc::CuArrayDeviceProc)
     @assert !Dagger.in_task()
-    user_stream = stream()
-
     with_context(proc) do
+        # Host-blocking sync. This is a barrier: callers (e.g. reclaim/GC paths)
+        # rely on all GPU work being *finished* on return, not merely chained on
+        # the host stream via a device-side CUDA.wait (which never blocks the
+        # host and let reclaim() run while kernels were still in flight).
         for proc_stream in STREAMS[proc.device]
-            ev = CUDA.CuEvent()
-            CUDA.record(ev, proc_stream)
-            CUDA.wait(ev, user_stream)
+            CUDA.synchronize(proc_stream)
         end
-
     end
 end
 function Dagger.gpu_synchronize(::Val{:CUDA})
@@ -561,9 +537,6 @@ const STREAMS = Dict{Int, Vector{CuStream}}()
 const SYNCDEPS = Dagger.LockedObject(Dict{Int, Tuple{Int,Int}}())
 
 function __init__()
-    if haskey(ENV, "DAGGER_CUDA_STREAM_STRATEGY")
-        stream_strategy!(Symbol(ENV["DAGGER_CUDA_STREAM_STRATEGY"]))
-    end
     if CUDA.has_cuda()
         for dev in CUDA.devices()
             ROUNDROBIN[dev.handle] = Threads.Atomic{Int}(1)
@@ -574,11 +547,10 @@ function __init__()
                 ctx = context(dev)
                 CONTEXTS[dev.handle] = ctx
                 context!(ctx) do
-                    num_sm = 8
+                    num_sm = 4
                     #Int(CUDA.attribute(dev, CUDA.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT))
                     num_streams =  num_sm
                     STREAMS[dev.handle] = [CuStream() for _ in 1:num_streams]
-                    STREAM_QUEUES[dev.handle] = [Threads.Atomic{Int}(0) for _ in 1:num_streams]
                 end
                 return proc
             end

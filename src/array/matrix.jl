@@ -13,8 +13,22 @@ Base.fetch(A::Adjoint{T, <:DArray{T, 2}}) where T = copydiag(Adjoint, parent(A))
 Base.fetch(A::Transpose{T, <:DArray{T, 2}}) where T = copydiag(Transpose, parent(A))
 Base.copy(A::Adjoint{T, <:DArray{T, 2}}) where T = fetch(A)
 Base.copy(A::Transpose{T, <:DArray{T, 2}}) where T = fetch(A)
-Base.collect(A::Adjoint{T, <:DArray{T, 2}}) where T = collect(copy(A))
-Base.collect(A::Transpose{T, <:DArray{T, 2}}) where T = collect(copy(A))
+# N.B. `copy` materializes a *new* DArray of transposed tiles. Collect it, then
+# free that intermediate: GPU chunks are only reclaimed via `unsafe_free!`, not
+# by GC/finalizers, so without this the materialized transpose leaks its VRAM on
+# every `collect(A')` until the device runs out of memory.
+function Base.collect(A::Adjoint{T, <:DArray{T, 2}}) where T
+    tmp = copy(A)
+    r = collect(tmp)
+    unsafe_free!(tmp)
+    return r
+end
+function Base.collect(A::Transpose{T, <:DArray{T, 2}}) where T
+    tmp = copy(A)
+    r = collect(tmp)
+    unsafe_free!(tmp)
+    return r
+end
 
 # Matrix-(Matrix/Vector) multiply
 

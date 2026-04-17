@@ -440,6 +440,7 @@ function move!(dep_mod::RemainderAliasing{S}, to_space::MemorySpace, from_space:
     # Copy the data into the destination object
     offset = UInt64(1)
     to_raw = unwrap(to)
+    with_context!(to_space)
     GC.@preserve copies begin
         for (_, to_span) in dep_mod.spans
             write_remainder!(copies, offset, to_raw, to_span.ptr, to_span.len)

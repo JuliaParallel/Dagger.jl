@@ -1135,9 +1135,15 @@ Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
             end
         end
 
-        # Duplicate options and clear un-serializable fields
         options = copy(thunk.options)
-        options.syncdeps = nothing
+        
+        if !isnothing(options.syncdeps)
+            # Safely extract IDs, filtering out any that are `nothing`
+            valid_ids = [Dagger.unwrap_weak_checked(s.thunk).id for s in options.syncdeps]
+            
+            # Rebuild the Set with only the valid ThunkSyncdeps
+            options.syncdeps = Set(map(id -> Dagger.ThunkSyncdep(Dagger.ThunkID(id)), valid_ids))
+        end
 
         # Unwrap any weak arguments
         args = map(copy, thunk.inputs)

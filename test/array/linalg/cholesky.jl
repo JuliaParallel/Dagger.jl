@@ -9,7 +9,7 @@
     A = A * A'
     A[diagind(A)] .+= size(A, 1)
     B = copy(A)
-    DA = view(A, Blocks(32, 32))
+    DA = DArray(A, Blocks(32, 32))
     if !(T <: Complex)
         @test issymmetric(DA)
     end
@@ -32,14 +32,14 @@
     @test chol_A.L ≈ chol_DA.L
     @test chol_A.U ≈ chol_DA.U
     # Check that changes propagated to A
-    @test UpperTriangular(collect(DA)) ≈ UpperTriangular(collect(A))
+    @test UpperTriangular(collect(DA)) ≈ UpperTriangular(collect(A_copy))
 
     # Non-PosDef matrix
     A = rand(T, 128, 128)
     A = A * A'
     A[diagind(A)] .+= size(A, 1)
     A[1, 1] = -100
-    DA = view(A, Blocks(32, 32))
+    DA = DArray(A, Blocks(32, 32))
     if !(T <: Complex)
         @test issymmetric(DA)
     end

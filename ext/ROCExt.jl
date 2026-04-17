@@ -66,27 +66,27 @@ end
 to_context(handle::Integer) = CONTEXTS[handle]
 to_context(dev::HIPDevice) = to_context(dev.device_id)
 
-function with_context!(handle::Integer)
+function with_context!(handle::Integer, stream_idx = 1)
     context!(CONTEXTS[handle])
     AMDGPU.device!(DEVICES[handle])
-    stream!(STREAMS[handle])
+    stream!(STREAMS[handle][stream_idx])
 end
-function with_context!(proc::ROCArrayDeviceProc)
+function with_context!(proc::ROCArrayDeviceProc, stream_idx = 1)
     @assert Dagger.root_worker_id(proc) == myid()
-    with_context!(proc.device_id)
+    with_context!(proc.device_id, stream_idx)
 end
-function with_context!(space::ROCVRAMMemorySpace)
+function with_context!(space::ROCVRAMMemorySpace, stream_idx = 1)
     @assert Dagger.root_worker_id(space) == myid()
-    with_context!(space.device_id)
+    with_context!(space.device_id, stream_idx)
 end
 Dagger.with_context!(proc::ROCArrayDeviceProc) = with_context!(proc)
 Dagger.with_context!(space::ROCVRAMMemorySpace) = with_context!(space)
-function with_context(f, x)
+function with_context(f, x, stream_idx = 1)
     old_ctx = context()
     old_device = AMDGPU.device()
     old_stream = stream()
 
-    with_context!(x)
+    with_context!(x, stream_idx)
     try
         f()
     finally
@@ -97,8 +97,10 @@ function with_context(f, x)
 end
 
 function _sync_with_context(x::Union{Dagger.Processor,Dagger.MemorySpace})
+    caller_stream = stream()
     with_context(x) do
-        AMDGPU.synchronize()
+        ev = record_event(stream())
+        stream_wait_event(caller_stream, ev)
     end
 end
 function sync_with_context(x::Union{Dagger.Processor,Dagger.MemorySpace})
@@ -208,20 +210,22 @@ end
 # Out-of-place DtoD
 function Dagger.move(from_proc::ROCArrayDeviceProc, to_proc::ROCArrayDeviceProc, x::Dagger.Chunk{T}) where T<:ROCArray
     if from_proc == to_proc
-        # Same process and GPU, no change
-        arr = unwrap(x)
-        with_context(AMDGPU.synchronize, from_proc)
-        return arr
+        # Same process and GPU, no change.
+        # Stream ordering (via syncdeps in execute!) guarantees safety; no sync needed.
+        return unwrap(x)
     elseif Dagger.root_worker_id(from_proc) == Dagger.root_worker_id(to_proc)
-        # Same process but different GPUs, use DtoD copy
+        # Same process but different GPUs, use DtoD copy.
+        # Chain the copy behind the producer stream via a cross-stream event
+        # instead of host-blocking, so other streams keep running.
         from_arr = unwrap(x)
-        dev = AMDGPU.device(from_arr)
-        with_context(AMDGPU.synchronize, dev.device_id)
+        ev = with_context(from_proc) do
+            record_event(stream())
+        end
         return with_context(to_proc) do
+            stream_wait_event(stream(), ev)
             to_arr = similar(from_arr)
             copyto!(to_arr, from_arr)
-            AMDGPU.synchronize()
-            to_arr
+            return to_arr
         end
     else
         # Different node, use DtoH, serialization, HtoD
@@ -238,16 +242,17 @@ end
 
 function Dagger.move(from_proc::ROCArrayDeviceProc, to_proc::ROCArrayDeviceProc, x::ROCArray)
     if from_proc == to_proc
-        with_context(AMDGPU.synchronize, from_proc)
+        # Stream ordering (via syncdeps in execute!) guarantees safety; no sync needed.
         return x
     elseif Dagger.root_worker_id(from_proc) == Dagger.root_worker_id(to_proc)
-        dev = AMDGPU.device(x)
-        with_context(AMDGPU.synchronize, dev.device_id)
+        ev = with_context(from_proc) do
+            record_event(stream())
+        end
         return with_context(to_proc) do
+            stream_wait_event(stream(), ev)
             to_arr = similar(x)
             copyto!(to_arr, x)
-            AMDGPU.synchronize()
-            to_arr
+            return to_arr
         end
     else
         host_copy = remotecall_fetch(from_proc.owner, from_proc, x) do from_proc, x
@@ -266,14 +271,77 @@ Dagger.move(from_proc::CPUProc, to_proc::ROCArrayDeviceProc, x::Function) = x
 Dagger.move(from_proc::CPUProc, to_proc::ROCArrayDeviceProc, x::Chunk{T}) where {T<:Function} =
     Dagger.move(from_proc, to_proc, fetch(x))
 
+# Cross-stream synchronization helpers (device-side, non host-blocking).
+# `record_event` marks the given stream; `stream_wait_event` makes `waiting`
+# defer until that mark completes. HIP equivalents of CUDA.record / CUDA.wait.
+record_event(s::HIPStream) = AMDGPU.HIP.HIPEvent(s)  # constructor records on `s`
+function stream_wait_event(waiting::HIPStream, ev)
+    AMDGPU.HIP.hipStreamWaitEvent(waiting, ev, 0)
+    return
+end
+
+const ROUNDROBIN = Dict{Int, Threads.Atomic{Int}}()
+# Per-stream count of tasks assigned but not yet finished.
+# ponytail: host-side occupancy, not true device queue depth; upgrade to
+# HIPEvent polling if SDQ decisions look off in benchmarks.
+const STREAM_QUEUES = Dict{Int, Vector{Threads.Atomic{Int}}}()
+const STREAM_STRATEGY = Ref{Symbol}(:roundrobin)
+
+"""
+    stream_strategy!(s::Symbol)
+
+Set the stream distribution strategy: `:roundrobin`, `:random`, or
+`:sdq` (shortest stream queue). Also settable via the
+`DAGGER_ROCM_STREAM_STRATEGY` environment variable at load time.
+"""
+function stream_strategy!(s::Symbol)
+    s in (:roundrobin, :random, :sdq) ||
+        throw(ArgumentError("unknown stream strategy: $s (use :roundrobin, :random, or :sdq)"))
+    STREAM_STRATEGY[] = s
+end
+
+function pick_stream(dev::Int)
+    n = length(STREAMS[dev])
+    s = STREAM_STRATEGY[]
+    if s == :roundrobin
+        return mod1(Threads.atomic_add!(ROUNDROBIN[dev], 1), n)
+    elseif s == :random
+        return rand(1:n)
+    else # :sdq
+        return argmin(i -> STREAM_QUEUES[dev][i][], 1:n)
+    end
+end
+
 # Task execution
 function Dagger.execute!(proc::ROCArrayDeviceProc, f, args...; kwargs...)
     @nospecialize f args kwargs
+    opt = Dagger.get_options()
     tls = Dagger.get_tls()
+    mydev = proc.device_id
+    cr_str = pick_stream(mydev)
+    Threads.atomic_add!(STREAM_QUEUES[mydev][cr_str], 1)
+    mytid = Dagger.task_id()
     task = Threads.@spawn begin
         Dagger.set_tls!(tls)
-        with_context!(proc)
-        result = Base.@invokelatest f(args...; kwargs...)
+        with_context!(proc, cr_str)
+        lock(SYNCDEPS) do deps
+            local_sync = Dagger._has_option(opt, :syncdeps) ? Dagger.get_options(:syncdeps) : nothing
+            if !isnothing(local_sync)
+                local_sync = map(syncdep -> syncdep.id.id, collect(local_sync))
+                for syncdep in local_sync
+                    (dev, stream_idx) = deps[syncdep]
+                    ev = record_event(STREAMS[dev][stream_idx])
+                    stream_wait_event(STREAMS[mydev][cr_str], ev)
+                end
+            end
+            deps[mytid] = (mydev, cr_str)
+        end
+
+        result = try
+            Base.@invokelatest f(args...; kwargs...)
+        finally
+            Threads.atomic_sub!(STREAM_QUEUES[mydev][cr_str], 1)
+        end
         # N.B. Synchronization must be done when accessing result or args
         return result
     end
@@ -365,13 +433,18 @@ Dagger.gpu_kernel_backend(proc::ROCArrayDeviceProc) = ROCBackend()
 Dagger.gpu_with_device(f, proc::ROCArrayDeviceProc) =
     AMDGPU.device!(f, AMDGPU.devices()[proc.device_id])
 function Dagger.gpu_synchronize(proc::ROCArrayDeviceProc)
+    @assert !Dagger.in_task()
+    user_stream = stream()
     with_context(proc) do
-        AMDGPU.synchronize()
+        for proc_stream in STREAMS[proc.device_id]
+            ev = record_event(proc_stream)
+            stream_wait_event(user_stream, ev)
+        end
     end
 end
 function Dagger.gpu_synchronize(::Val{:ROC})
     for dev in AMDGPU.devices()
-        _sync_with_context(ROCArrayDeviceProc(myid(), dev.device_id))
+        Dagger.gpu_synchronize(ROCArrayDeviceProc(myid(), dev.device_id))
     end
 end
 
@@ -404,12 +477,17 @@ Dagger.scope_key_precedence(::Val{:rocm_gpus}) = 1
 
 const DEVICES = Dict{Int, HIPDevice}()
 const CONTEXTS = Dict{Int, HIPContext}()
-const STREAMS = Dict{Int, HIPStream}()
+const STREAMS = Dict{Int, Vector{HIPStream}}()
+const SYNCDEPS = Dagger.LockedObject(Dict{Int, Tuple{Int,Int}}())
 
 function __init__()
+    if haskey(ENV, "DAGGER_ROCM_STREAM_STRATEGY")
+        stream_strategy!(Symbol(ENV["DAGGER_ROCM_STREAM_STRATEGY"]))
+    end
     if AMDGPU.functional()
         for device_id in 1:length(AMDGPU.devices())
             dev = AMDGPU.devices()[device_id]
+            ROUNDROBIN[dev.device_id] = Threads.Atomic{Int}(1)
             @debug "Registering ROCm GPU processor with Dagger: $dev"
             Dagger.add_processor_callback!("rocarray_device_$device_id") do
                 proc = ROCArrayDeviceProc(myid(), device_id)
@@ -417,7 +495,9 @@ function __init__()
                 ctx = HIPContext(dev)
                 CONTEXTS[dev.device_id] = ctx
                 context!(ctx) do
-                    STREAMS[dev.device_id] = HIPStream()
+                    num_streams = 8
+                    STREAMS[dev.device_id] = [HIPStream() for _ in 1:num_streams]
+                    STREAM_QUEUES[dev.device_id] = [Threads.Atomic{Int}(0) for _ in 1:num_streams]
                 end
                 return proc
             end

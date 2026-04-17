@@ -507,6 +507,7 @@ function aliasing(x::SubArray{T,N}) where {T,N}
         p = parent(x)
         space = memory_space(p)
         S = typeof(space)
+        with_context!(space)
         parent_ptr = RemotePtr{Cvoid}(UInt64(pointer(p)), space)
         ptr = RemotePtr{Cvoid}(UInt64(pointer(x)), space)
         NA = ndims(p)
