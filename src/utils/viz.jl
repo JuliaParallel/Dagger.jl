@@ -419,4 +419,182 @@ function logs_to_dot(logs::Dict; disconnected=false, show_data::Bool=true,
     return str
 end
 
+
+# ---- :summary backend ----
+
+# Override the default string-returning dispatch so :summary prints to stdout
+function show_logs(logs::Dict, ::Val{:summary}; options...)
+    show_logs(stdout, logs, Val{:summary}(); options...)
+end
+
+function pretty_bytes(n; digits=3)
+    r(x) = round(x; digits)
+    s = n < 0 ? "-" : ""
+    a = abs(n)
+    if a >= 1024^3
+        "$(s)$(r(a/1024^3)) GiB"
+    elseif a >= 1024^2
+        "$(s)$(r(a/1024^2)) MiB"
+    elseif a >= 1024
+        "$(s)$(r(a/1024)) KiB"
+    else
+        "$(s)$(r(a)) B"
+    end
+end
+
+"""
+    show_logs(io::IO, logs::Dict, ::Val{:summary})
+
+Print a text summary of event statistics to `io` (default: stdout).
+
+For every event category, shows mean/min/max of:
+- Run Time (wall-clock duration of the event)
+- Each LinuxPerf metric (if `linuxperf=true` was passed to `enable_logging!`)
+- Bytes Allocated (if `gc_stats=true`)
+- Lock Conflicts (if `lock_contend=true`)
+- Compile Time (if `compile_time=true`)
+
+For `:compute` and `:move` categories, the summary is additionally broken
+down by task function name.
+"""
+function show_logs(io::IO, logs::Dict, ::Val{:summary})
+    # Build thunk_id -> function name from :add_thunk/:start events
+    tid_to_fn = Dict{Int, String}()
+    for w in keys(logs)
+        haskey(logs[w], :taskfuncnames) || continue
+        for idx in 1:length(logs[w][:core])
+            core = logs[w][:core][idx]
+            core.category == :add_thunk && core.kind == :start || continue
+            fn = logs[w][:taskfuncnames][idx]
+            fn isa String || continue
+            id = logs[w][:id][idx]
+            id === nothing && continue
+            tid_to_fn[id.thunk_id::Int] = fn
+        end
+    end
+
+    # Channels that produce a scalar Int/Float value at the :finish event,
+    # mapped to their display name.  Linuxperf is handled separately (it
+    # returns a Dict at :finish rather than a scalar).
+    scalar_channels = (
+        (:compile_time, "Compile Time"),
+        (:lock_contend, "Lock Conflicts"),
+        (:gc_stats,     "Bytes Allocated"),
+    )
+
+    # Accumulate samples keyed by (category, fn_or_nothing).
+    # Each bucket holds runtimes plus a generic extras dict for all other metrics.
+    buckets = Dict{Tuple{Symbol,Union{Nothing,String}},
+                   @NamedTuple{runtimes::Vector{Float64},
+                               extras::Dict{String,Vector{Float64}}}}()
+
+    function get_bucket(cat, fn)
+        get!(buckets, (cat, fn)) do
+            (runtimes=Float64[], extras=Dict{String,Vector{Float64}}())
+        end
+    end
+
+    for w in keys(logs)
+        running = Dict{Any,Int}()   # event key -> start idx
+        for idx in 1:length(logs[w][:core])
+            core = logs[w][:core][idx]
+            id   = logs[w][:id][idx]
+            id === nothing && continue
+            ekey = (core.category, id)
+            if core.kind == :start
+                running[ekey] = idx
+            elseif haskey(running, ekey)
+                start_idx = pop!(running, ekey)
+                runtime = Float64(core.timestamp - logs[w][:core][start_idx].timestamp)
+
+                # Collect all extra metric values at the finish index
+                extra = Dict{String,Float64}()
+
+                # LinuxPerf Dict
+                if haskey(logs[w], :linuxperf)
+                    lp = logs[w][:linuxperf][idx]
+                    if lp isa Dict
+                        for (k, v) in lp
+                            extra[k] = Float64(v)
+                        end
+                    end
+                end
+
+                # Scalar channels
+                for (chan, dname) in scalar_channels
+                    if haskey(logs[w], chan)
+                        v = logs[w][chan][idx]
+                        if v isa Number
+                            extra[dname] = Float64(v)
+                        end
+                    end
+                end
+
+                fn = nothing
+                if core.category in (:compute, :move)
+                    try; fn = get(tid_to_fn, id.thunk_id, nothing); catch; end
+                end
+
+                for bucket_fn in (fn === nothing ? (nothing,) : (nothing, fn))
+                    b = get_bucket(core.category, bucket_fn)
+                    push!(b.runtimes, runtime)
+                    for (k, v) in extra
+                        push!(get!(Vector{Float64}, b.extras, k), v)
+                    end
+                end
+            end
+        end
+    end
+
+    isempty(buckets) && (println(io, "(no events recorded)"); return)
+
+    # Formatting helpers
+    function fmt_stats(vals::Vector{Float64}, fmt_fn)
+        isempty(vals) && return "N/A"
+        μ = sum(vals) / length(vals)
+        "mean=$(fmt_fn(μ)), min=$(fmt_fn(minimum(vals))), max=$(fmt_fn(maximum(vals)))"
+    end
+    fmt_count(x) = string(round(Int, x))
+    # Metric name -> formatter
+    time_metric_names  = Set(("cpu-clock", "task-clock", "Compile Time"))
+    bytes_metric_names = Set(("Bytes Allocated",))
+    metric_fmt(name) =
+        name in time_metric_names  ? pretty_time  :
+        name in bytes_metric_names ? pretty_bytes  :
+        fmt_count
+
+    function print_bucket_stats(b, indent::String)
+        # Target total column = 20; always leave at least 2 spaces after the name
+        target_col = max(20 - length(indent), 2)
+        all_names = ["Run Time"; collect(keys(b.extras))]
+        col = max(target_col, maximum(length, all_names; init=0) + 2)
+        println(io, "$(indent)$(rpad("Run Time", col))$(fmt_stats(b.runtimes, pretty_time))")
+        for (mname, mvals) in sort!(collect(b.extras), by=x->x[1])
+            println(io, "$(indent)$(rpad(mname, col))$(fmt_stats(mvals, metric_fmt(mname)))")
+        end
+    end
+
+    println(io, "=== Dagger Execution Summary ===")
+
+    categories = sort!(unique(k[1] for k in keys(buckets)), by=string)
+    for cat in categories
+        b_all = get(buckets, (cat, nothing), nothing)
+        b_all === nothing && continue
+        n = length(b_all.runtimes)
+
+        fn_keys = sort!([k[2] for k in keys(buckets) if k[1] == cat && k[2] !== nothing])
+        fn_suffix = isempty(fn_keys) ? "" : ", $(length(fn_keys)) unique task(s)"
+
+        println(io, "\n[$cat] $n events$fn_suffix")
+        print_bucket_stats(b_all, "  ")
+
+        cat in (:compute, :move) || continue
+        for fn in fn_keys
+            b = buckets[(cat, fn)]
+            println(io, "\n  [$cat :: $fn] $(length(b.runtimes)) events")
+            print_bucket_stats(b, "    ")
+        end
+    end
+end
+
 end # module Viz
