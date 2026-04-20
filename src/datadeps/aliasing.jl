@@ -229,7 +229,7 @@ struct ArgumentWrapper
         return new(arg, dep_mod, h)
     end
 end
-Base.hash(aw::ArgumentWrapper) = hash(ArgumentWrapper, aw.hash)
+Base.hash(aw::ArgumentWrapper, h::UInt) = hash(aw.hash, hash(ArgumentWrapper, h))
 Base.:(==)(aw1::ArgumentWrapper, aw2::ArgumentWrapper) =
     aw1.hash == aw2.hash
 Base.isequal(aw1::ArgumentWrapper, aw2::ArgumentWrapper) =
