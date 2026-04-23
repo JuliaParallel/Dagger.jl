@@ -93,7 +93,7 @@ struct ComputeState
     worker_chans::Dict{Int,Tuple{RemoteChannel,RemoteChannel}}
     signature_time_cost::Dict{Signature,UInt64}
     signature_alloc_cost::Dict{Signature,UInt64}
-    worker_transfer_rate::Dict{Int,Dict{Processor,UInt64}}
+    worker_transfer_rate::Dict{Processor,Dict{Processor,UInt64}}
     halt::Base.Event
     lock::ReentrantLock
     futures::Dict{Thunk, Vector{ThunkFuture}}
@@ -115,14 +115,14 @@ function start_state(deps::Dict, node_order, chan)
                          Dict{Int, WeakThunk}(),
                          node_order,
                          WeakKeyDict{Any,Chunk}(),
-                         Dict{Int,Dict{Processor,UInt64}}(),
-                         Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}(),
-                         Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}(),
-                         Dict{Int,NTuple{3,Float64}}(),
-                         Dict{Int, Tuple{RemoteChannel,RemoteChannel}}(),
+                         Dict{Processor,Dict{Processor,UInt64}}(),
+                         Dict{Processor,Dict{Union{StorageResource,Nothing},UInt64}}(),
+                         Dict{Processor,Dict{Union{StorageResource,Nothing},UInt64}}(),
+                         Dict{Processor,NTuple{3,Float64}}(),
+                         Dict{Processor,Tuple{RemoteChannel,RemoteChannel}}(),
                          Dict{Signature,UInt64}(),
                          Dict{Signature,UInt64}(),
-                         Dict{Int,Dict{Processor,UInt64}}(),
+                         Dict{Processor,Dict{Processor,UInt64}}(),
                          Base.Event(),
                          ReentrantLock(),
                          Dict{Thunk, Vector{ThunkFuture}}(),
@@ -1189,7 +1189,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                         end
                         task, occupancy = peek(queue)
                         scope = task.scope
-			accel = something(task.options.acceleration, Dagger.DistributedAcceleration())
+                        accel = something(task.options.acceleration, Dagger.DistributedAcceleration())
                         if Dagger.proc_in_scope(to_proc, scope) && Dagger.accel_matches_proc(accel, to_proc)
                            typemax(UInt32) - proc_occupancy_cached >= occupancy
                             # Compatible, steal this task
@@ -1400,7 +1400,7 @@ function do_tasks(to_proc, return_queue, tasks)
     end
     @dagdebug nothing :processor "Kicked processors"
 end
- 
+
 const SCHED_MOVE = ScopedValue{Bool}(false)
 
 """
