@@ -1,70 +1,58 @@
-using Dagger
-using MPI
-using LinearAlgebra
-using SparseArrays
-
+using Dagger, MPI, LinearAlgebra
 Dagger.accelerate!(:mpi)
-
 comm = MPI.COMM_WORLD
 rank = MPI.Comm_rank(comm)
-size = MPI.Comm_size(comm)
+sz = MPI.Comm_size(comm)
 
-# Use a large array (adjust size as needed for your RAM)
-N = 100
-tag = 123
+mpidagger_all_results = []
 
+# Define constants
+# You need to define the MPI workers before running the benchmark
+# Example: mpirun -n 4 julia --project benchmarks/DaggerMPI_Weak_scale.jl
+datatype = [Float32, Float64]
+datasize = 40
+try
+    for T in datatype
+        A = rand(T, datasize, datasize)
+        A = A * A'
+        A[diagind(A)] .+= size(A, 1)
+        B = copy(A)
+        @assert ishermitian(B)
+        DA = distribute(A, Blocks(20,20))
+        DB = distribute(B, Blocks(20,20))
+
+        LinearAlgebra._chol!(DA, UpperTriangular)
+        elapsed_time = @elapsed chol_DB = LinearAlgebra._chol!(DB, UpperTriangular)
+
+        # Store results
+        result = (
+            procs = sz,
+            dtype = T,
+            size = datasize,
+            time = elapsed_time,
+            gflops = (datasize^3 / 3) / (elapsed_time * 1e9)
+        )
+        push!(mpidagger_all_results, result)
+
+
+    end
+catch e
+    if rank == 0
+        showerror(stdout, e)
+    end
+end
 if rank == 0
-    arr = sprand(N, N, 0.6)
-else
-    arr = spzeros(N, N)
-end
+    #= Write results to CSV
+    mkpath("benchmarks/results")
+    if !isempty(mpidagger_all_results)
+        df = DataFrame(mpidagger_all_results)
+        CSV.write("benchmarks/results/DaggerMPI_Weak_scale_results.csv", df)
 
-# --- Out-of-place broadcast ---
-function bcast_outofplace()
-    MPI.Barrier(comm)
-    if rank == 0
-        Dagger.bcast_send_yield(arr, comm, 0, tag+1)
-    else
-        Dagger.bcast_recv_yield(comm, 0, tag+1)
     end
-    MPI.Barrier(comm)
-end
-# --- In-place broadcast ---
-
-function bcast_inplace()
-    MPI.Barrier(comm)
-    if rank == 0
-        Dagger.bcast_send_yield!(arr, comm, 0, tag)
-    else
-        Dagger.bcast_recv_yield!(arr, comm, 0, tag)
+    =#
+    # Summary statistics
+    for result in mpidagger_all_results
+        println(result.procs, ",", result.dtype, ",", result.size, ",", result.time, ",", result.gflops)
     end
-    MPI.Barrier(comm)
+    #println("\nAll Cholesky tests completed!")
 end
-
-function bcast_inplace_metadata()
-    MPI.Barrier(comm)
-    if rank == 0
-        Dagger.bcast_send_yield_metadata(arr, comm, 0)
-    end
-    MPI.Barrier(comm)
-end
-
-
-inplace = @time bcast_inplace()
-
-
-MPI.Barrier(comm)
-MPI.Finalize()
-
-
-
-
-#=
-A = rand(Blocks(2,2), 4, 4)
-Ac = collect(A)
-println(Ac)
-
-
-move!(identity, Ac[1].space , Ac[2].space, Ac[1], Ac[2])
-=#
-
