@@ -5,6 +5,7 @@ USE_ROCM = parse(Bool, get(ENV, "CI_USE_ROCM", "0"))
 USE_ONEAPI = parse(Bool, get(ENV, "CI_USE_ONEAPI", "0"))
 USE_METAL = parse(Bool, get(ENV, "CI_USE_METAL", "0"))
 USE_OPENCL = parse(Bool, get(ENV, "CI_USE_OPENCL", "0"))
+USE_MPI = parse(Bool, get(ENV, "CI_USE_MPI", "0"))
 USE_GPU = USE_CUDA || USE_ROCM || USE_ONEAPI || USE_METAL || USE_OPENCL
 
 tests = [
@@ -46,6 +47,8 @@ tests = [
     ("Reusable Data Structures", "reuse.jl"),
     ("External Languages - Python", "extlang/python.jl"),
     ("Preferences", "preferences.jl"),
+    ("MPI_test", "mpi_test.jl"),
+    #("MPI", "mpi.jl")
     #("Fault Tolerance", "fault-tolerance.jl"),
 ]
 if USE_GPU
@@ -55,6 +58,15 @@ if USE_GPU
         ("Array - Stencils", "array/stencil.jl"),
     ]
 end
+
+if USE_MPI
+    #Only run MPI tests
+    tests = [
+        #("MPI", "mpi.jl"),
+        ("MPI_test", "mpi_test.jl"),
+    ]
+end
+
 all_test_names = map(test -> replace(last(test), ".jl"=>""), tests)
 
 additional_workers::Int = 3
@@ -65,6 +77,9 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
     using Pkg
     Pkg.activate(@__DIR__)
     try
+        # If I not use Pkg.develop it returns the error "Package Dagger not found in current path.
+        #                                                Run `import Pkg; Pkg.add("Dagger")` to install the Dagger package."
+        Pkg.develop(path=joinpath(@__DIR__, ".."))
         Pkg.instantiate()
     catch
     end
@@ -183,6 +198,17 @@ using UUIDs
 GPU_SCOPES = Pair{Symbol, Dagger.AbstractScope}[]
 if USE_GPU
     include("setup_gpu.jl")
+end
+
+if USE_MPI
+    include("setup_mpi.jl")
+    @info "Running MPI tests via mpiexecjl"
+    # Construct path to mpiexecjl in the depot's bin directory
+    # I've tried to figure out another way to launch the mpi jobs but that was the only one I got today
+    cmd = `mpiexecjl -n 2 $(Base.julia_cmd()) --project=$(Base.active_project()) $(joinpath(@__DIR__, "mpi_test.jl"))`
+    @info "Executing: $cmd"
+    run(cmd)
+    exit(0)
 end
 
 try
