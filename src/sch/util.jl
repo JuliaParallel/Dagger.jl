@@ -594,8 +594,9 @@ const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
         # Add fixed cost for cross-worker task transfer (esimated at 1ms)
         # TODO: Actually estimate/benchmark this
         task_xfer_cost = root_worker_id(gproc) != myid() ? 1_000_000 : 0 # 1ms
+        pid = Dagger.root_worker_id(gproc)
 
-        tx_rate = get(get(state.worker_transfer_rate, gproc.pid, Dict{Processor,UInt64}()), proc, DEFAULT_TRANSFER_RATE)
+        tx_rate = get(get(state.worker_transfer_rate, pid, Dict{Processor,UInt64}()), proc, DEFAULT_TRANSFER_RATE)
         costs[proc] = est_time_util + (tx_cost/tx_rate) + task_xfer_cost
     end
     chunks_cleanup()
