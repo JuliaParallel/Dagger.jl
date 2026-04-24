@@ -5,6 +5,7 @@ USE_ROCM = parse(Bool, get(ENV, "CI_USE_ROCM", "0"))
 USE_ONEAPI = parse(Bool, get(ENV, "CI_USE_ONEAPI", "0"))
 USE_METAL = parse(Bool, get(ENV, "CI_USE_METAL", "0"))
 USE_OPENCL = parse(Bool, get(ENV, "CI_USE_OPENCL", "0"))
+USE_MPI = parse(Bool, get(ENV, "CI_USE_MPI", "0"))
 USE_GPU = USE_CUDA || USE_ROCM || USE_ONEAPI || USE_METAL || USE_OPENCL
 
 tests = [
@@ -46,6 +47,8 @@ tests = [
     ("Reusable Data Structures", "reuse.jl"),
     ("External Languages - Python", "extlang/python.jl"),
     ("Preferences", "preferences.jl"),
+    ("MPI_test", "mpitest.jl"),
+    #("MPI", "mpi.jl")
     #("Fault Tolerance", "fault-tolerance.jl"),
 ]
 if USE_GPU
@@ -55,6 +58,15 @@ if USE_GPU
         ("Array - Stencils", "array/stencil.jl"),
     ]
 end
+
+if USE_MPI
+    #Only run MPI tests
+    tests = [
+        #("MPI", "mpi.jl"),
+        ("MPI_test", "mpitest.jl"),
+    ]
+end
+
 all_test_names = map(test -> replace(last(test), ".jl"=>""), tests)
 
 additional_workers::Int = 3
@@ -65,6 +77,9 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
     using Pkg
     Pkg.activate(@__DIR__)
     try
+        # If I not use Pkg.develop it returns the error "Package Dagger not found in current path.
+        #                                                Run `import Pkg; Pkg.add("Dagger")` to install the Dagger package."
+        Pkg.develop(path=joinpath(@__DIR__, ".."))
         Pkg.instantiate()
     catch
     end
@@ -167,6 +182,10 @@ if additional_workers > 0
     # We put this inside a branch because addprocs() takes a minimum of 1s to
     # complete even if doing nothing, which is annoying.
     addprocs(additional_workers; exeflags="--project=$(joinpath(@__DIR__, ".."))")
+    @everywhere begin
+        using Pkg
+        Pkg.instantiate()
+    end
 end
 
 include("imports.jl")
@@ -183,6 +202,16 @@ using UUIDs
 GPU_SCOPES = Pair{Symbol, Dagger.AbstractScope}[]
 if USE_GPU
     include("setup_gpu.jl")
+end
+
+if USE_MPI
+    include("setup_mpi.jl")
+    @info "Running MPI tests via mpiexecjl"
+    mpiexecjl_path = joinpath(DEPOT_PATH[1], "bin", "mpiexecjl")
+    cmd = `$mpiexecjl_path -n 2 $(Base.julia_cmd()) --project=$(Base.active_project()) $(joinpath(@__DIR__, "mpitest.jl"))`
+    @info "Executing: $cmd"
+    run(cmd)
+    exit(0)
 end
 
 try
