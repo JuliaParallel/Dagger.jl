@@ -36,7 +36,7 @@ Base.getindex(arr::AbstractArray{T,0} where T, d::ArrayDomain{0}) = arr
 Base.getindex(arr::GPUArraysCore.AbstractGPUArray, d::ArrayDomain) = arr[indexes(d)...]
 Base.getindex(arr::GPUArraysCore.AbstractGPUArray{T,0} where T, d::ArrayDomain{0}) = arr
 
-function intersect(a::ArrayDomain, b::ArrayDomain)
+function Base.intersect(a::ArrayDomain, b::ArrayDomain)
     if a === b
         return a
     end

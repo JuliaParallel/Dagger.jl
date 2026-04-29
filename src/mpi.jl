@@ -1,3 +1,5 @@
+@warn "Move to MPIExt.jl" maxlog=1
+
 using MPI
 
 const CHECK_UNIFORMITY = Ref{Bool}(false)
@@ -5,7 +7,7 @@ function check_uniformity!(check::Bool=true)
     CHECK_UNIFORMITY[] = check
 end
 function check_uniform(value::Integer, original=value)
-    CHECK_UNIFORMITY[] || return true
+    CHECK_UNIFORMITY[] && uniform_execution() || return true
     comm = MPI.COMM_WORLD
     rank = MPI.Comm_rank(comm)
     matched = compare_all(value, comm)
@@ -13,14 +15,14 @@ function check_uniform(value::Integer, original=value)
         if rank == 0
             Core.print("[$rank] Found non-uniform value!\n")
         end
-        Core.print("[$rank] value=$value, original=$original")
+        Core.print("[$rank] value=$value, original=$original\n")
         throw(ArgumentError("Non-uniform value"))
     end
     MPI.Barrier(comm)
     return matched
 end
 function check_uniform(value, original=value)
-    CHECK_UNIFORMITY[] || return true
+    CHECK_UNIFORMITY[] && uniform_execution() || return true
     return check_uniform(hash(value), original)
 end
 
@@ -29,7 +31,7 @@ function compare_all(value, comm)
     size = MPI.Comm_size(comm)
     for i in 0:(size-1)
         if i != rank
-            send_yield(value, comm, i, UInt32(0); check_seen=false)
+            send_yield(value, comm, i, UInt32(0))
         end
     end
     match = true
@@ -56,7 +58,9 @@ function aliasing(accel::MPIAcceleration, x::Chunk, T)
     check_uniform(tag)
     rank = MPI.Comm_rank(accel.comm)
     if handle.rank == rank
-        ainfo = aliasing(x, T)
+        ainfo = _with_default_acceleration() do
+            aliasing(x, T)
+        end
         #Core.print("[$rank] aliasing: $ainfo, sending\n")
         @opcounter :aliasing_bcast_send_yield
         bcast_send_yield(ainfo, accel.comm, handle.rank, tag)
@@ -68,19 +72,21 @@ function aliasing(accel::MPIAcceleration, x::Chunk, T)
     check_uniform(ainfo)
     return ainfo
 end
+
 default_processor(accel::MPIAcceleration) = MPIOSProc(accel.comm, 0)
 default_processor(accel::MPIAcceleration, x) = MPIOSProc(accel.comm, 0)
 default_processor(accel::MPIAcceleration, x::Chunk) = MPIOSProc(x.handle.comm, x.handle.rank)
 default_processor(accel::MPIAcceleration, x::Function) = MPIOSProc(accel.comm, MPI.Comm_rank(accel.comm))
 default_processor(accel::MPIAcceleration, T::Type) = MPIOSProc(accel.comm, MPI.Comm_rank(accel.comm))
+uniform_execution(accel::MPIAcceleration) = true
 
-#TODO: Add a lock
+@warn "Add a lock to MPIClusterProcChildren" maxlog=1
 const MPIClusterProcChildren = Dict{MPI.Comm, Set{Processor}}()
 
 struct MPIClusterProc <: Processor
     comm::MPI.Comm
     function MPIClusterProc(comm::MPI.Comm)
-        populate_children(comm)
+        populate_children!(comm)
         return new(comm)
     end
 end
@@ -89,7 +95,7 @@ Sch.init_proc(state, proc::MPIClusterProc, log_sink) = Sch.init_proc(state, MPIO
 
 MPIClusterProc() = MPIClusterProc(MPI.COMM_WORLD)
 
-function populate_children(comm::MPI.Comm)
+function populate_children!(comm::MPI.Comm)
     children = get_processors(OSProc())
     MPIClusterProcChildren[comm] = children
 end
@@ -214,7 +220,7 @@ get_parent(proc::MPIProcessor) = MPIOSProc(proc.comm, proc.rank)
 short_name(proc::MPIProcessor) = "(MPI: $(proc.rank), $(short_name(proc.innerProc)))"
 
 function get_processors(mosProc::MPIOSProc)
-    populate_children(mosProc.comm)
+    populate_children!(mosProc.comm)
     children = MPIClusterProcChildren[mosProc.comm]
     mpiProcs = Set{Processor}()
     for proc in children
@@ -284,25 +290,43 @@ function processors(memSpace::MPIMemorySpace)
 end
 
 struct MPIRefID
-    tid::Int
-    uid::UInt
-    id::Int
-    function MPIRefID(tid, uid, id)
-        @assert tid > 0 || uid > 0 "Invalid MPIRefID: tid=$tid, uid=$uid, id=$id"
-        return new(tid, uid, id)
+    tid::UInt32
+    generic::Bool
+    id::UInt32
+    function MPIRefID(tid, generic, id)
+        @assert tid > 0 || generic "Invalid MPIRefID: tid=$tid, generic=$generic, id=$id"
+        return new(tid, generic, id)
     end
 end
 Base.hash(id::MPIRefID, h::UInt=UInt(0)) =
-    hash(id.tid, hash(id.uid, hash(id.id, hash(MPIRefID, h))))
+    hash(id.tid, hash(id.generic, hash(id.id, hash(MPIRefID, h))))
 
 function check_uniform(ref::MPIRefID, original=ref)
     return check_uniform(ref.tid, original) &&
-           check_uniform(ref.uid, original) &&
+           check_uniform(ref.generic, original) &&
            check_uniform(ref.id, original)
 end
 
-const MPIREF_TID = Dict{Int, Threads.Atomic{Int}}()
-const MPIREF_UID = Dict{Int, Threads.Atomic{Int}}()
+function to_tag()
+    if Dagger.in_task()
+        # Tag is already assigned
+        opts = Dagger.get_tls().task_spec.options
+        tag = opts.tag
+        return tag
+    end
+
+    # Generate a tag based on the TID
+    @assert !Sch.SCHED_MOVE[] "We should not create a tag during Sch move"
+    return to_tag(take_ref_id!())
+end
+to_tag(id::MPIRefID) = id.generic ? id.id : id.tid
+
+# Semi-public internal value for passing TID to MPIRefID generation
+const MPI_TID = ScopedValue{Int64}(0)
+# Private internal value for tracking TID-based ID generations
+#const _MPIREF_TID = Dict{Int, Threads.Atomic{Int}}()
+# Private internal value for tracking non-TID (uniform) ID generations
+#const _MPIREF_GENERIC = Threads.Atomic{Int}(1)
 
 mutable struct MPIRef
     comm::MPI.Comm
@@ -319,8 +343,15 @@ function check_uniform(ref::MPIRef, original=ref)
            check_uniform(ref.id, original)
 end
 
+function unwrap(handle::MPIRef)
+    @assert handle.rank == MPI.Comm_rank(handle.comm) "MPIRef $handle is not owned by this rank: $(handle.rank) != $(MPI.Comm_rank(handle.comm))"
+    return unwrap(handle.innerRef)
+end
+
+to_tag(ref::MPIRef) = to_tag(ref.id)
+
 move(from_proc::Processor, to_proc::Processor, x::MPIRef) =
-    move(from_proc, to_proc, poolget(x; uniform=FETCH_UNIFORM[]))
+    move(from_proc, to_proc, poolget(x; uniform=uniform_execution()))
 
 function affinity(x::MPIRef)
     if x.innerRef === nothing
@@ -332,25 +363,29 @@ end
 
 function take_ref_id!()
     tid = 0
-    uid = 0
+    generic = 0
     id = 0
     if Dagger.in_task()
         tid = sch_handle().thunk_id.id
-        uid = 0
-        counter = get!(MPIREF_TID, tid, Threads.Atomic{Int}(1))
-        id = Threads.atomic_add!(counter, 1)
+        #counter = get!(_MPIREF_TID, tid, Threads.Atomic{Int}(1))
+        #id = Threads.atomic_add!(counter, 1)
+        id = tid
     elseif MPI_TID[] != 0
         tid = MPI_TID[]
-        uid = 0
-        counter = get!(MPIREF_TID, tid, Threads.Atomic{Int}(1))
-        id = Threads.atomic_add!(counter, 1)
-    elseif MPI_UID[] != 0
-        tid = 0
-        uid = MPI_UID[]
-        counter = get!(MPIREF_UID, uid, Threads.Atomic{Int}(1))
-        id = Threads.atomic_add!(counter, 1)
+        #counter = get!(_MPIREF_TID, tid, Threads.Atomic{Int}(1))
+        #id = Threads.atomic_add!(counter, 1)
+        id = tid
+    else
+        if current_task() !== Base.roottask
+            throw(ConcurrencyViolationError("Attempted to generate generic MPIRefID in a multi-threaded context"))
+        end
+        generic = true
+        #id = Threads.atomic_add!(_MPIREF_GENERIC, 1)
+        id = next_id() # Abuse the TID counter for generic IDs
+        check_uniform(id)
     end
-    return MPIRefID(tid, uid, id)
+    @assert id < MPI.tag_ub()
+    return MPIRefID(tid, generic, id)
 end
 
 #TODO: partitioned scheduling with comm bifurcation
@@ -372,6 +407,7 @@ const DEADLOCK_WARN_PERIOD = TaskLocalValue{Float64}(()->10.0)
 const DEADLOCK_TIMEOUT_PERIOD = TaskLocalValue{Float64}(()->120.0)
 const RECV_WAITING = Base.Lockable(Dict{Tuple{MPI.Comm, Int, Int}, Base.Event}())
 
+@warn "Rename and make generic these in-place structs" maxlog=1
 struct InplaceInfo
     type::DataType
     shape::Tuple
@@ -530,19 +566,22 @@ function recv_yield_serialized(comm, my_rank, their_rank, tag)
 end
 
 const SEEN_TAGS = Dict{Int32, Type}()
-send_yield!(value, comm, dest, tag; check_seen::Bool=true) =
-    _send_yield(value, comm, dest, tag; check_seen, inplace=true)
-send_yield(value, comm, dest, tag; check_seen::Bool=true) =
-    _send_yield(value, comm, dest, tag; check_seen, inplace=false)
-function _send_yield(value, comm, dest, tag; check_seen::Bool=true, inplace::Bool)
+send_yield!(value, comm, dest, tag) =
+    _send_yield(value, comm, dest, tag; inplace=true)
+send_yield(value, comm, dest, tag) =
+    _send_yield(value, comm, dest, tag; inplace=false)
+function _send_yield(value, comm, dest, tag; inplace::Bool)
     rank = MPI.Comm_rank(comm)
 
-    if check_seen && haskey(SEEN_TAGS, tag) && SEEN_TAGS[tag] !== typeof(value)
+    #=
+    if CHECK_UNIFORMITY[] && haskey(SEEN_TAGS, tag) && SEEN_TAGS[tag] !== typeof(value)
         @error "[rank $(MPI.Comm_rank(comm))][tag $tag] Already seen tag (previous type: $(SEEN_TAGS[tag]), new type: $(typeof(value)))" exception=(InterruptException(),backtrace())
     end
-    if check_seen
+    if CHECK_UNIFORMITY[]
         SEEN_TAGS[tag] = typeof(value)
     end
+    =#
+
     #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Starting send to [$dest]: $(typeof(value)), is support inplace? $(supports_inplace_mpi(value))")
     if inplace && supports_inplace_mpi(value)
         send_yield_inplace(value, comm, rank, dest, tag)
@@ -633,15 +672,15 @@ function mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, ra
 end
 
 #discuss this with julian
+@warn "Fix this WeakChunk method" maxlog=1
 WeakChunk(c::Chunk{T,H}) where {T,H<:MPIRef} = WeakChunk(c.handle.rank, c.handle.id.id, WeakRef(c))
 
-function MemPool.poolget(ref::MPIRef; uniform::Bool=false)
+function MemPool.poolget(ref::MPIRef; uniform::Bool=uniform_execution())
     @assert uniform || ref.rank == MPI.Comm_rank(ref.comm) "MPIRef rank mismatch: $(ref.rank) != $(MPI.Comm_rank(ref.comm))"
     if uniform
         tag = to_tag()
         if ref.rank == MPI.Comm_rank(ref.comm)
             value = poolget(ref.innerRef)
-            @opcounter :poolget_bcast_send_yield
             bcast_send_yield(value, ref.comm, ref.rank, tag)
             return value
         else
@@ -651,7 +690,7 @@ function MemPool.poolget(ref::MPIRef; uniform::Bool=false)
         return poolget(ref.innerRef)
     end
 end
-fetch_handle(ref::MPIRef; uniform::Bool=false) = poolget(ref; uniform)
+fetch_handle(ref::MPIRef; uniform::Bool=uniform_execution()) = poolget(ref; uniform)
 
 function move!(dep_mod, to_space::MPIMemorySpace, from_space::MPIMemorySpace, to::Chunk, from::Chunk)
     @assert to.handle isa MPIRef && from.handle isa MPIRef "MPIRef expected"
@@ -662,7 +701,7 @@ function move!(dep_mod, to_space::MPIMemorySpace, from_space::MPIMemorySpace, to
         move!(dep_mod, to_space.innerSpace, from_space.innerSpace, to, from)
     else
         @dagdebug nothing :mpi "[$local_rank][$tag] Moving from  $(from_space.rank)  to  $(to_space.rank)\n"
-        tag = to_tag()
+        tag = to_tag(from.handle)
         if local_rank == from_space.rank
             send_yield!(poolget(from.handle; uniform=false), to_space.comm, to_space.rank, tag)
         elseif local_rank == to_space.rank
@@ -684,7 +723,7 @@ function move!(dep_mod::RemainderAliasing{<:MPIMemorySpace}, to_space::MPIMemory
     if to_space.rank == from_space.rank == local_rank
         move!(dep_mod, to_space.innerSpace, from_space.innerSpace, to, from)
     else
-        tag = to_tag()
+        tag = to_tag(from.handle)
         @dagdebug nothing :mpi "[$local_rank][$tag] Moving from  $(from_space.rank)  to  $(to_space.rank)\n"
         if local_rank == from_space.rank
             # Get the source data for each span
@@ -702,7 +741,7 @@ function move!(dep_mod::RemainderAliasing{<:MPIMemorySpace}, to_space::MPIMemory
 
             # Send the spans
             #send_yield(len, to_space.comm, to_space.rank, tag)
-            send_yield!(copies, to_space.comm, to_space.rank, tag; check_seen=false)
+            send_yield!(copies, to_space.comm, to_space.rank, tag)
             #send_yield(copies, to_space.comm, to_space.rank, tag)
         elseif local_rank == to_space.rank
             # Receive the spans
@@ -749,18 +788,35 @@ function move(src::MPIOSProc, dst::MPIProcessor, x::Chunk)
     end
 end
 
-const MPI_UNIFORM = ScopedValue{Bool}(false)
-# When true, move(_, _, MPIRef) uses poolget(; uniform=true) so the owner bcasts and the fetcher recv (e.g. rank 0 collecting).
-const FETCH_UNIFORM = ScopedValue{Bool}(true)
-
-function remotecall_endpoint(f, accel::Dagger.MPIAcceleration, from_proc, to_proc, from_space, to_space, data)
+#=
+function remotecall_endpoint(f, accel::MPIAcceleration, from_proc, to_proc, from_space, to_space, data::Chunk)
+    loc_rank = MPI.Comm_rank(accel.comm)
+    if loc_rank == from_proc.rank
+        # FIXME: Descend via move_rewrap, and send data to to_proc
+    elseif loc_rank == to_proc.rank
+        # FIXME: Listen for data from from_proc to locally wrap as Chunk
+        while true
+            value = recv_yield(accel.comm, from_proc.rank, tag)
+        end
+        bcast_recv_yield(data_new, accel.comm, to_proc.rank, tag)
+    else
+        # Wait for final Chunk
+        return recv_yield(accel.comm, to_proc.rank, tag)
+    end
+end
+function remotecall_endpoint_transfer(f, accel::MPIAcceleration, from_proc, to_proc, from_space, to_space, data)
+    loc_rank = MPI.Comm_rank(accel.comm)
+    if loc_rank == from_proc.rank
+    elseif loc_rank == to_proc.rank
+    end
+end
+=#
+function remotecall_endpoint(f, accel::MPIAcceleration, from_proc, to_proc, from_space, to_space, data::Chunk)
     loc_rank = MPI.Comm_rank(accel.comm)
     task = DATADEPS_CURRENT_TASK[]
-    return with(MPI_UID=>task.uid, MPI_UNIFORM=>true) do
-        @assert data isa Chunk "Expected Chunk, got $(typeof(data))"
+    return with(MPI_UID=>task.uid) do
         space = memory_space(data)
         tag = to_tag()
-        type_tag = to_tag()
         T = move_type(from_proc.innerProc, to_proc.innerProc, chunktype(data))
         T_new = f !== identity ? Base._return_type(f, Tuple{T}) : T
         need_bcast = !isconcretetype(T_new) || T_new === Union{} || T_new === Nothing || T_new === Any
@@ -773,11 +829,11 @@ function remotecall_endpoint(f, accel::Dagger.MPIAcceleration, from_proc, to_pro
                 data_converted = f(move(from_proc.innerProc, to_proc.innerProc, value))
                 T_actual = typeof(data_converted)
                 if need_bcast
-                    bcast_send_yield(T_actual, accel.comm, to_proc.rank, type_tag)
+                    bcast_send_yield(T_actual, accel.comm, to_proc.rank, tag)
                 end
                 return tochunk(data_converted, to_proc, to_space; type=T_actual)
             else
-                T_actual = need_bcast ? recv_yield(accel.comm, to_proc.rank, type_tag) : T_new
+                T_actual = need_bcast ? recv_yield(accel.comm, to_proc.rank, tag) : T_new
                 return tochunk(nothing, to_proc, to_space; type=T_actual)
             end
         end
@@ -832,7 +888,7 @@ move(::MPIProcessor, ::MPIProcessor, x::Chunk{<:Union{Function,Type}}) = poolget
 
 @warn "Is this uniform logic valuable to have?" maxlog=1
 function move(src::MPIProcessor, dst::MPIProcessor, x::Chunk)
-    uniform = false #uniform = MPI_UNIFORM[]
+    uniform = uniform_execution()
     @assert uniform || src.rank == dst.rank "Unwrapping not permitted"
     if Sch.SCHED_MOVE[]
         # We can either unwrap locally, or return nothing

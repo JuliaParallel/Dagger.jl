@@ -91,6 +91,7 @@ abstract type MemorySpace end
 include("utils/memory-span.jl")
 include("utils/interval_tree.jl")
 include("memory-spaces.jl")
+include("acceleration.jl")
 
 # Task scheduling
 include("compute.jl")

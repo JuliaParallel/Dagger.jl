@@ -1,5 +1,7 @@
 using Dagger, MPI, LinearAlgebra
+
 Dagger.accelerate!(:mpi)
+Dagger.check_uniformity!(true)
 comm = MPI.COMM_WORLD
 rank = MPI.Comm_rank(comm)
 sz = MPI.Comm_size(comm)
@@ -18,9 +20,16 @@ try
         A[diagind(A)] .+= size(A, 1)
         B = copy(A)
         @assert ishermitian(B)
-        DA = distribute(A, Blocks(20,20))
-        DB = distribute(B, Blocks(20,20))
-
+        DA = zeros(Blocks(20,20), T, datasize, datasize)
+        for chunk in DA.chunks
+            Dagger.check_uniform(fetch(chunk; move_value=false, unwrap=false).space)
+        end
+        copyto!(DA, A)
+        DB = zeros(Blocks(20,20), T, datasize, datasize)
+        for chunk in DB.chunks
+            Dagger.check_uniform(fetch(chunk; move_value=false, unwrap=false).space)
+        end
+        copyto!(DB, B)
         LinearAlgebra._chol!(DA, UpperTriangular)
         elapsed_time = @elapsed chol_DB = LinearAlgebra._chol!(DB, UpperTriangular)
 
@@ -33,13 +42,18 @@ try
             gflops = (datasize^3 / 3) / (elapsed_time * 1e9)
         )
         push!(mpidagger_all_results, result)
-
-
     end
-catch e
+catch
     if rank == 0
-        showerror(stdout, e)
+        Core.print("Rank 0:\n")
+        rethrow()
+    elseif rank == 1
+        Core.print("Rank 1:\n")
+        sleep(1)
+        rethrow()
     end
+finally
+    MPI.Barrier(comm)
 end
 if rank == 0
     #= Write results to CSV

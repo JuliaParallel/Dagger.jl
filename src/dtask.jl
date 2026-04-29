@@ -11,14 +11,14 @@ Base.wait(t::ThunkFuture) = Dagger.Sch.thunk_yield() do
     wait(t.future)
     return
 end
-function Base.fetch(t::ThunkFuture; proc=OSProc(), raw=false)
+function Base.fetch(t::ThunkFuture; proc=OSProc(), raw=false, move_value=!raw, unwrap=!raw, uniform=uniform_execution())
     error, value = Dagger.Sch.thunk_yield() do
         fetch(t.future)
     end
     if error
         throw(value)
     end
-    if raw
+    if !move_value
         return value
     else
         return move(proc, value)
@@ -65,13 +65,11 @@ function Base.wait(t::DTask)
     wait(t.future)
     return
 end
-function Base.fetch(t::DTask; raw=false, move_value=nothing, unwrap=nothing)
+function Base.fetch(t::DTask; raw=false, move_value=!raw, unwrap=!raw, uniform=false)
     if !istaskstarted(t)
         throw(ConcurrencyViolationError("Cannot `fetch` an unlaunched `DTask`"))
     end
-    # Datadeps/aliasing API: move_value=false => don't move => raw=true
-    raw_eff = move_value !== nothing ? !move_value : raw
-    return fetch(t.future; raw=raw_eff)
+    return fetch(t.future; move_value, unwrap, uniform)
 end
 function waitany(tasks::Vector{DTask})
     if isempty(tasks)

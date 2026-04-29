@@ -304,7 +304,7 @@ function eager_spawn(spec::DTaskSpec)
     uid = eager_next_id()
     future = ThunkFuture()
     metadata = DTaskMetadata(spec)
-    # Propagate inferred return type to options so execute! can skip MPI bcast
+    # Propagate inferred return type to options
     if isconcretetype(metadata.return_type)
         spec.options.return_type = metadata.return_type
     end

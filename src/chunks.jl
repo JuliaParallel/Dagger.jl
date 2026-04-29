@@ -28,15 +28,15 @@ collect(ctx::Context, ref::DRef; options=nothing) =
 collect(ctx::Context, ref::FileRef; options=nothing) =
     poolget(ref) # FIXME: Do move call
 @warn "Fix semantics of collect" maxlog=1
-function Base.fetch(chunk::Chunk{T}; unwrap::Bool=false, uniform::Bool=false, kwargs...) where T
+function Base.fetch(chunk::Chunk{T}; unwrap::Bool=false, uniform::Bool=uniform_execution(), kwargs...) where T
     value = fetch_handle(chunk.handle; uniform)::T
     if unwrap && unwrappable(value)
         return fetch(value; unwrap, uniform, kwargs...)
     end
     return value
 end
-fetch_handle(ref::DRef; uniform::Bool=false) = poolget(ref)
-fetch_handle(ref::FileRef; uniform::Bool=false) = poolget(ref)
+fetch_handle(ref::DRef; uniform::Bool) = poolget(ref)
+fetch_handle(ref::FileRef; uniform::Bool) = poolget(ref)
 unwrappable(x::Chunk) = true
 unwrappable(x::DRef) = true
 unwrappable(x::FileRef) = true

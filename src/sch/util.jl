@@ -383,7 +383,7 @@ function signature(f, args)
         value = Dagger.value(arg)
         if value isa Dagger.DTask
             # Only occurs via manual usage of signature
-            value = fetch(value; raw=true)
+            value = fetch(value; move_value=false, unwrap=false)
         end
         if istask(value)
             throw(ConcurrencyViolationError("Must call `collect_task_inputs!(state, task)` before calling `signature`"))
@@ -601,14 +601,12 @@ const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
     end
     chunks_cleanup()
 
-    # Shuffle procs around, so equally-costly procs are equally considered (skip shuffle when MPI for deterministic tie-breaking)
+    # Shuffle procs around, so equally-costly procs are equally considered
     np = length(procs)
     @reusable :estimate_task_costs_P Vector{Int} 0 4 np P begin
         resize!(P, np)
         copyto!(P, 1:np)
-        if !(Dagger.current_acceleration() isa Dagger.MPIAcceleration)
-            randperm!(P)
-        end
+        randperm!(P)
         for idx in 1:np
             sorted_procs[idx] = procs[P[idx]]
         end
