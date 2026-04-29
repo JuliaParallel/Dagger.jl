@@ -4,18 +4,10 @@ end
 CPURAMMemorySpace() = CPURAMMemorySpace(myid())
 root_worker_id(space::CPURAMMemorySpace) = space.owner
 
-memory_space(x) = CPURAMMemorySpace(myid())
-function memory_space(x::Chunk)
-    proc = processor(x)
-    if proc isa OSProc
-        # TODO: This should probably be programmable
-        return CPURAMMemorySpace(proc.pid)
-    else
-        return only(memory_spaces(proc))
-    end
-end
-memory_space(x::DTask) =
-    memory_space(fetch(x; raw=true))
+memory_space(x, proc::Processor=default_processor()) = first(memory_spaces(proc))
+memory_space(x::Processor) = first(memory_spaces(x))
+memory_space(x::Chunk) = x.space
+memory_space(x::DTask) = memory_space(fetch(x; move_value=false, unwrap=false))
 
 memory_spaces(::P) where {P<:Processor} =
     throw(ArgumentError("Must define `memory_spaces` for `$P`"))
@@ -28,9 +20,10 @@ processors(space::CPURAMMemorySpace) =
 
 ### In-place Data Movement
 
-function unwrap(x::Chunk)
-    @assert x.handle.owner == myid()
-    MemPool.poolget(x.handle)
+unwrap(x::Chunk) = unwrap(x.handle)
+function unwrap(handle::DRef)
+    @assert root_worker_id(handle) == myid() "DRef $handle is not owned by this process: $(root_worker_id(handle)) != $(myid())"
+    return MemPool.poolget(x.handle)
 end
 move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::T, from::F) where {T,F} =
     throw(ArgumentError("No `move!` implementation defined for $F -> $T"))
@@ -68,6 +61,16 @@ function move!(::Type{<:Tridiagonal}, to_space::MemorySpace, from_space::MemoryS
     copyto!(view(to, diagind(to, 1)), view(from, diagind(from, 1)))
     return
 end
+
+# FIXME: Take MemorySpace instead
+function move_type(from_proc::Processor, to_proc::Processor, ::Type{T}) where T
+    if from_proc == to_proc
+        return T
+    end
+    return Base._return_type(move, Tuple{typeof(from_proc), typeof(to_proc), T})
+end
+move_type(from_proc::Processor, to_proc::Processor, ::Type{<:Chunk{T}}) where T =
+    move_type(from_proc, to_proc, T)
 
 ### Aliasing and Memory Spans
 
@@ -355,6 +358,7 @@ function memory_spans(oa::ObjectAliasing{S}) where S
     return [span]
 end
 
+aliasing(accel::Acceleration, x, T) = aliasing(x, T)
 function aliasing(x, dep_mod)
     if dep_mod isa Symbol
         return aliasing(getfield(x, dep_mod))
@@ -391,19 +395,25 @@ aliasing(::String) = NoAliasing() # FIXME: Not necessarily true
 aliasing(::Symbol) = NoAliasing()
 aliasing(::Type) = NoAliasing()
 function aliasing(x::Chunk, T)
-    @assert x.handle isa DRef
     if root_worker_id(x.processor) == myid()
         return aliasing(unwrap(x), T)
     end
+    @assert x.handle isa DRef
     return remotecall_fetch(root_worker_id(x.processor), x, T) do x, T
         aliasing(unwrap(x), T)
     end
 end
-aliasing(x::Chunk) = remotecall_fetch(root_worker_id(x.processor), x) do x
-    aliasing(unwrap(x))
+function aliasing(x::Chunk)
+    if root_worker_id(x.processor) == myid()
+        return aliasing(unwrap(x))
+    end
+    @assert x.handle isa DRef
+    return remotecall_fetch(root_worker_id(x.processor), x) do x
+        aliasing(unwrap(x))
+    end
 end
-aliasing(x::DTask, T) = aliasing(fetch(x; raw=true), T)
-aliasing(x::DTask) = aliasing(fetch(x; raw=true))
+aliasing(x::DTask, T) = aliasing(fetch(x; move_value=false, unwrap=false), T)
+aliasing(x::DTask) = aliasing(fetch(x; move_value=false, unwrap=false))
 
 function aliasing(x::Base.RefValue{T}) where T
     addr = UInt(Base.pointer_from_objref(x) + fieldoffset(typeof(x), 1))
@@ -611,5 +621,5 @@ unsafe_free!(x::Chunk) = remotecall_fetch(root_worker_id(x), x) do x
     unsafe_free!(unwrap(x))
     return
 end
-unsafe_free!(x::DTask) = unsafe_free!(fetch(x; raw=true))
+unsafe_free!(x::DTask) = unsafe_free!(fetch(x; move_value=false, unwrap=false))
 unsafe_free!(x) = nothing # Do nothing by default
