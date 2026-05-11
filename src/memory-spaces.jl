@@ -125,8 +125,27 @@ mutable struct AliasingWrapper <: AbstractAliasing
     AliasingWrapper(inner::AbstractAliasing) = new(inner, hash(inner))
 end
 memory_spans(x::AliasingWrapper) = memory_spans(x.inner)
+"""
+    equivalent_structure(x::AbstractAliasing, y::AbstractAliasing) -> Bool
+
+Returns `true` if `x` and `y` describe aliasing regions of the same *structure*,
+ignoring absolute memory addresses. Two aliasings that originate from different
+allocations of identically-shaped data should compare equal.
+
+Used as the default `datadeps_ainfo_equivalent` for `DAGSpec` cache lookups,
+which lets schedulers reuse a previously-computed schedule across re-runs of
+the same algorithm with freshly-allocated inputs.
+
+Default fallback returns `false` when the two arguments are of differing
+concrete subtypes; specialized methods exist for each concrete subtype.
+"""
+equivalent_structure(x::AbstractAliasing, y::AbstractAliasing) = false
 equivalent_structure(x::AliasingWrapper, y::AliasingWrapper) =
     x.hash == y.hash || equivalent_structure(x.inner, y.inner)
+equivalent_structure(x::AliasingWrapper, y::AbstractAliasing) =
+    equivalent_structure(x.inner, y)
+equivalent_structure(x::AbstractAliasing, y::AliasingWrapper) =
+    equivalent_structure(x, y.inner)
 Base.hash(x::AliasingWrapper, h::UInt64) = hash(x.hash, h)
 Base.isequal(x::AliasingWrapper, y::AliasingWrapper) = x.hash == y.hash
 Base.:(==)(x::AliasingWrapper, y::AliasingWrapper) = x.hash == y.hash
@@ -331,8 +350,13 @@ end
 
 struct NoAliasing <: AbstractAliasing end
 memory_spans(::NoAliasing) = MemorySpan{CPURAMMemorySpace}[]
+equivalent_structure(::NoAliasing, ::NoAliasing) = true
 struct UnknownAliasing <: AbstractAliasing end
 memory_spans(::UnknownAliasing) = [MemorySpan{CPURAMMemorySpace}(C_NULL, typemax(UInt))]
+# Two UnknownAliasings have no known structure to compare; conservatively
+# treat them as equivalent so cache lookups don't permanently miss when
+# aliasing analysis falls back to UnknownAliasing.
+equivalent_structure(::UnknownAliasing, ::UnknownAliasing) = true
 
 error_unknown_aliasing(T) =
     throw(ConcurrencyViolationError("Cannot resolve aliasing for object of type $T, execution may become sequential"))
@@ -357,6 +381,13 @@ Base.:(==)(ca1::CombinedAliasing, ca2::CombinedAliasing) =
     ca1.sub_ainfos == ca2.sub_ainfos
 Base.hash(ca1::CombinedAliasing, h::UInt) =
     hash(ca1.sub_ainfos, hash(CombinedAliasing, h))
+function equivalent_structure(ca1::CombinedAliasing, ca2::CombinedAliasing)
+    length(ca1.sub_ainfos) == length(ca2.sub_ainfos) || return false
+    @inbounds for i in eachindex(ca1.sub_ainfos)
+        equivalent_structure(ca1.sub_ainfos[i], ca2.sub_ainfos[i]) || return false
+    end
+    return true
+end
 
 struct ObjectAliasing{S<:MemorySpace} <: AbstractAliasing
     ptr::RemotePtr{Cvoid,S}
@@ -374,6 +405,8 @@ function memory_spans(oa::ObjectAliasing{S}) where S
     span = MemorySpan{S}(oa.ptr, oa.sz)
     return [span]
 end
+equivalent_structure(x::ObjectAliasing{S}, y::ObjectAliasing{S}) where S =
+    x.sz == y.sz
 
 aliasing(accel::Acceleration, x, T) = aliasing(x, T)
 function aliasing(x, dep_mod)
@@ -449,6 +482,8 @@ end
 memory_spans(a::ContiguousAliasing{S}) where S = MemorySpan{S}[a.span]
 will_alias(x::ContiguousAliasing{S}, y::ContiguousAliasing{S}) where S =
     will_alias(x.span, y.span)
+equivalent_structure(x::ContiguousAliasing{S}, y::ContiguousAliasing{S}) where S =
+    x.span.len == y.span.len
 struct IteratedAliasing{T} <: AbstractAliasing
     x::T
 end
@@ -517,6 +552,14 @@ function aliasing(x::SubArray{T,N}) where {T,N}
         return UnknownAliasing()
     end
 end
+function equivalent_structure(x::StridedAliasing{T,N,S}, y::StridedAliasing{T,N,S}) where {T,N,S}
+    x.base_inds == y.base_inds || return false
+    x.lengths   == y.lengths   || return false
+    x.strides   == y.strides   || return false
+    # Compare the offset of the view into its parent, not the absolute pointers,
+    # so views into different (but identically-shaped) parents match.
+    return (x.ptr.addr - x.base_ptr.addr) == (y.ptr.addr - y.base_ptr.addr)
+end
 function will_alias(x::StridedAliasing{T1,N1,S1}, y::StridedAliasing{T2,N2,S2}) where {T1,T2,N1,N2,S1,S2}
     # Check if the base pointers are the same
     # FIXME: Conservatively incorrect via `unsafe_wrap` and friends
@@ -566,6 +609,8 @@ function memory_spans(a::TriangularAliasing{T,S}) where {T,S}
     end
     return spans
 end
+equivalent_structure(x::TriangularAliasing{T,S}, y::TriangularAliasing{T,S}) where {T,S} =
+    x.stride == y.stride && x.isupper == y.isupper && x.diagonal == y.diagonal
 function aliasing(x::UpperTriangular{T}) where T
     p = parent(x)
     space = memory_space(p)
@@ -606,6 +651,8 @@ function aliasing(x::AbstractMatrix{T}, ::Type{Diagonal}) where T
     rptr = RemotePtr{Cvoid}(ptr, S)
     return DiagonalAliasing{T,typeof(S)}(rptr, size(parent(x), 1))
 end
+equivalent_structure(x::DiagonalAliasing{T,S}, y::DiagonalAliasing{T,S}) where {T,S} =
+    x.stride == y.stride
 # FIXME: Bidiagonal
 # FIXME: Tridiagonal
 
