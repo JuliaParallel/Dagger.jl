@@ -1,5 +1,3 @@
-import Graphs: SimpleDiGraph, add_edge!, add_vertex!, inneighbors, outneighbors, nv
-
 export In, Out, InOut, Deps, spawn_datadeps
 
 #=
@@ -393,6 +391,9 @@ function aliased_object!(f, cache::AliasedObjectCache, x; ainfo=aliasing(cache.a
 end
 
 struct DataDepsState
+    # The DAG spec for the task
+    dag_spec::DAGSpec
+
     # The mapping of original raw argument to its Chunk
     # N.B. Values are Chunks, or raw remote handles (e.g. ChunkView under MPI)
     raw_arg_to_chunk::IdDict{Any,Any}
@@ -462,7 +463,7 @@ struct DataDepsState
     ainfos_owner::Dict{AliasingWrapper,Union{Pair{DTask,Int},Nothing}}
     ainfos_readers::Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}
 
-    function DataDepsState()
+    function DataDepsState(dag_spec::DAGSpec)
         arg_to_chunk = IdDict{Any,Any}()
         arg_origin = IdDict{Any,MemorySpace}()
         remote_args = Dict{MemorySpace,IdDict{Any,Any}}()
@@ -487,7 +488,7 @@ struct DataDepsState
         ainfos_owner = Dict{AliasingWrapper,Union{Pair{DTask,Int},Nothing}}()
         ainfos_readers = Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}()
 
-        return new(arg_to_chunk, arg_origin, remote_args, remote_arg_to_original, remote_arg_w, ainfo_arg, arg_history, arg_owner, arg_current, arg_overlaps, ainfo_backing_chunk,
+        return new(dag_spec, arg_to_chunk, arg_origin, remote_args, remote_arg_to_original, remote_arg_w, ainfo_arg, arg_history, arg_owner, arg_current, arg_overlaps, ainfo_backing_chunk,
                    supports_inplace_cache, ainfo_cache, ainfos_lookup, ainfos_overlaps, ainfos_owner, ainfos_readers)
     end
 end
