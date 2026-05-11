@@ -1,10 +1,143 @@
-abstract type DataDepsScheduler end
+### DAG Analysis ###
+
+Base.length(spec::DAGSpec) = nv(spec.g)
+Base.isempty(spec::DAGSpec) = length(spec) == 0
+
+function dag_add_task!(dspec::DAGSpec, state, tspec::DTaskSpec, task::DTask)
+    # Check if this task depends on any other tasks within the DAG,
+    # which we are not yet ready to handle
+    for (idx, _arg) in enumerate(tspec.fargs)
+        arg, deps = unwrap_inout(value(_arg))
+        for (dep_mod, readdep, writedep) in deps
+            if arg isa DTask
+                if arg.uid in keys(dspec.uid_to_id)
+                    # Within-DAG dependency, bail out
+                    return false
+                end
+            end
+        end
+    end
+
+    add_vertex!(dspec.g)
+    id = nv(dspec.g)
+
+    # Record function signature
+    dspec.id_to_functype[id] = chunktype(tspec.fargs[1])
+    argtypes = DatadepsArgSpec[]
+    for (idx, _arg) in enumerate(tspec.fargs)
+        arg, deps = unwrap_inout(value(_arg))
+        pos = raw_position(_arg)
+        for (dep_mod, readdep, writedep) in deps
+            if arg isa DTask
+                #= TODO: Re-enable this when we can handle within-DAG dependencies
+                if arg.uid in keys(dspec.uid_to_id)
+                    # Within-DAG dependency
+                    arg_id = dspec.uid_to_id[arg.uid]
+                    push!(dspec.id_to_argtypes[arg_id], DatadepsArgSpec(pos, DTaskDAGID{arg_id}, dep_mod, UnknownAliasing()))
+                    add_edge!(dspec.g, arg_id, id)
+                    continue
+                end
+                =#
+
+                # External DTask, so fetch this and track it as a raw value
+                arg = fetch(arg; raw=true)
+            end
+            ainfo = aliasing(arg, dep_mod)
+            # FIXME: Generate syncdeps and add edges
+            push!(argtypes, DatadepsArgSpec(pos, typeof(arg), dep_mod, ainfo))
+        end
+    end
+    dspec.id_to_argtypes[id] = argtypes
+
+    # FIXME: Also record some portion of options
+    # FIXME: Record syncdeps
+    dspec.id_to_uid[id] = task.uid
+    dspec.uid_to_id[task.uid] = id
+    dspec.id_to_spec[id] = tspec
+    dspec.id_to_task[id] = task
+
+    return true
+end
+function dag_build_edges!(dag_spec::DAGSpec)
+    # Naively build edges based on exact argument comparisons (no aliasing)
+    arg_writes = Dict{Any,Int}()
+    for idx in 1:nv(dag_spec.g)
+        task_spec = dag_spec.id_to_spec[idx]
+
+        # Get the raw arguments for this task
+        task_raw_args = Vector{Any}()
+        for arg in task_spec.fargs
+            arg, deps = unwrap_inout(arg)
+            for (dep_mod, readdep, writedep) in deps
+                # Get the raw argument
+                raw_arg = arg isa DTask ? fetch(arg; raw=true) : arg
+
+                # Did any previous task write to this argument?
+                if haskey(arg_writes, raw_arg) && arg_writes[raw_arg] != idx
+                    prev_task_id = arg_writes[raw_arg]
+                    add_edge!(dag_spec.g, prev_task_id, idx)
+                end
+
+                if writedep
+                    # Record this write
+                    arg_writes[raw_arg] = idx
+                end
+            end
+        end
+    end
+end
+function dag_has_task(dspec::DAGSpec, task::DTask)
+    return task.uid in keys(dspec.uid_to_id)
+end
+function Base.:(==)(dspec1::DAGSpec, dspec2::DAGSpec)
+    # Are the graphs the same size?
+    nv(dspec1.g) == nv(dspec2.g) || return false
+    ne(dspec1.g) == ne(dspec2.g) || return false
+
+    for id in 1:nv(dspec1.g)
+        # Are all the vertices the same?
+        id in keys(dspec2.id_to_uid) || return false
+        id in keys(dspec2.id_to_functype) || return false
+        id in keys(dspec2.id_to_argtypes) || return false
+
+        # Are all the edges the same?
+        inneighbors(dspec1.g, id) == inneighbors(dspec2.g, id) || return false
+        outneighbors(dspec1.g, id) == outneighbors(dspec2.g, id) || return false
+
+        # Are function types the same?
+        dspec1.id_to_functype[id] === dspec2.id_to_functype[id] || return false
+
+        # Are argument types/relative dependencies the same?
+        for argspec1 in dspec1.id_to_argtypes[id]
+            # Is this argument position present in both?
+            argspec2_idx = findfirst(argspec2->argspec1.pos == argspec2.pos, dspec2.id_to_argtypes[id])
+            argspec2_idx === nothing && return false
+            argspec2 = dspec2.id_to_argtypes[id][argspec2_idx]
+
+            # Are the arguments the same?
+            argspec1.value_type === argspec2.value_type || return false
+            argspec1.dep_mod === argspec2.dep_mod || return false
+            equivalent_structure(argspec1.ainfo, argspec2.ainfo) || return false
+        end
+    end
+
+    return true
+end
+
+struct DAGSpecSchedule
+    id_to_proc::Dict{Int, Processor}
+    DAGSpecSchedule() = new(Dict{Int, Processor}())
+end
+
+const DATADEPS_DAG_SPECS = TaskLocalValue{Vector{Pair{DAGSpec, DAGSpecSchedule}}}(()->Vector{Pair{DAGSpec, DAGSpecSchedule}}())
+
+### JIT Schedulers ###
 
 mutable struct RoundRobinScheduler <: DataDepsScheduler
     proc_idx::Int
     RoundRobinScheduler() = new(1)
 end
-function datadeps_schedule_task(sched::RoundRobinScheduler, state::DataDepsState, all_procs, all_scope, task_scope, spec::DTaskSpec, task::DTask)
+function datadeps_schedule_task_jit!(sched::RoundRobinScheduler, all_procs, all_scope, task_scope, spec::DTaskSpec, task::DTask)
     proc_idx = sched.proc_idx
     our_proc = all_procs[proc_idx]
     if task_scope == all_scope
@@ -24,7 +157,7 @@ function datadeps_schedule_task(sched::RoundRobinScheduler, state::DataDepsState
 end
 
 struct NaiveScheduler <: DataDepsScheduler end
-function datadeps_schedule_task(sched::NaiveScheduler, state::DataDepsState, all_procs, all_scope, task_scope, spec::DTaskSpec, task::DTask)
+function datadeps_schedule_task_jit!(sched::NaiveScheduler, all_procs, all_scope, task_scope, spec::DTaskSpec, task::DTask)
     raw_args = map(arg->tochunk(value(arg)), spec.fargs)
     our_proc = remotecall_fetch(1, all_procs, raw_args) do all_procs, raw_args
         Sch.init_eager()
@@ -59,7 +192,7 @@ struct UltraScheduler <: DataDepsScheduler
                     Dict{MemorySpace,Int}())
     end
 end
-function datadeps_schedule_task(sched::UltraScheduler, state::DataDepsState, all_procs, all_scope, task_scope, spec::DTaskSpec, task::DTask)
+function datadeps_schedule_task_jit!(sched::UltraScheduler, all_procs, all_scope, task_scope, spec::DTaskSpec, task::DTask)
     args = Base.mapany(spec.fargs) do arg
         pos, data = arg
         data, _ = unwrap_inout(data)
@@ -120,4 +253,62 @@ function datadeps_schedule_task(sched::UltraScheduler, state::DataDepsState, all
     sched.task_completions[task] = our_space_completed + move_time + task_time
 
     return our_proc
+end
+
+### AOT Schedulers ###
+
+function datadeps_schedule_dag_aot!(scheduler, schedule, dag_spec, all_procs, all_scope)
+    # Fallback to JIT scheduling (done in distribute_task!)
+    return
+end
+
+struct LayeredScheduler <: DataDepsScheduler end
+function datadeps_schedule_dag_aot!(scheduler::LayeredScheduler, schedule, dag_spec, all_procs, all_scope)
+    layer = 1
+    layer_data = Vector{Any}()
+    layers = Vector{Vector{Int}}()
+    push!(layers, Vector{Int}())
+    for idx in 1:nv(dag_spec.g)
+        spec = dag_spec.id_to_spec[idx]
+
+        # Get the raw arguments for this task
+        task_raw_args = Vector{Any}()
+        for arg in spec.fargs
+            arg, deps = unwrap_inout(arg)
+            for (dep_mod, readdep, writedep) in deps
+                # We only care about write dependencies
+                writedep || continue
+
+                # Get the raw argument
+                raw_arg = arg isa DTask ? fetch(arg; raw=true) : arg
+
+                push!(task_raw_args, raw_arg)
+            end
+        end
+
+        # Determine if this task stays in this layer
+        if any(raw_arg -> raw_arg in layer_data, task_raw_args)
+            # This argument is already written by a previous task in this layer
+            # Generate new layer
+            layer += 1
+            empty!(layer_data)
+            push!(layers, Vector{Int}())
+        end
+
+        # Add our data and this task to the current layer
+        append!(layer_data, task_raw_args)
+        push!(layers[layer], idx)
+    end
+
+    # Perform round-robin scheduling within each layer
+    for layer in layers
+        sub_scheduler = RoundRobinScheduler()
+        for idx in layer
+            spec = dag_spec.id_to_spec[idx]
+            task = dag_spec.id_to_task[idx]
+            task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
+            our_proc = datadeps_schedule_task_jit!(sub_scheduler, all_procs, all_scope, task_scope, spec, task)
+            schedule[task] = our_proc
+        end
+    end
 end

@@ -113,17 +113,52 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         @warn "Datadeps support for multi-GPU, multi-worker is currently broken\nPlease be prepared for incorrect results or errors" maxlog=1
     end
 
-    # Round-robin assign tasks to processors
     upper_queue = get_options(:task_queue)
 
+    # Compute DAG spec
+    dag_spec = DAGSpec()
+    state = DataDepsState(dag_spec)
+    for (spec, task) in queue.seen_tasks
+        if !dag_add_task!(dag_spec, state, spec, task)
+            # This task needs to be deferred
+            break
+        end
+    end
+
+    # Attempt to find any matching DAG specs and reuse their schedule
+    schedule = Dict{DTask, Processor}()
+    for (other_spec, spec_schedule) in DATADEPS_DAG_SPECS[]
+        if other_spec == dag_spec
+            @dagdebug nothing :spawn_datadeps "Found matching DAG spec!"
+            for (id, proc) in spec_schedule.id_to_proc
+                uid = dag_spec.id_to_uid[id]
+                task_idx = findfirst(spec_task -> spec_task[2].uid == uid, queue.seen_tasks)
+                task = queue.seen_tasks[task_idx][2]
+                schedule[task] = proc
+            end
+            break
+        end
+    end
+
+    if isempty(schedule)
+        # No matching DAG specs found
+        if !isempty(dag_spec)
+            # Use AOT scheduling
+            datadeps_schedule_dag_aot!(queue.scheduler, schedule, dag_spec, all_procs, all_scope)
+        else
+            # Use JIT scheduling (done in distribute_task!)
+        end
+    end
+
     # Start launching tasks and necessary copies
-    state = DataDepsState()
+    state = DataDepsState(dag_spec)
     write_num = 1
     proc_to_scope_lfu = BasicLFUCache{Processor,AbstractScope}(1024)
     for pair in queue.seen_tasks
         spec = pair.spec
         task = pair.task
-        write_num = distribute_task!(queue, state, all_procs, all_scope, spec, task, spec.fargs, proc_to_scope_lfu, write_num)
+        proc = get(schedule, task, nothing)
+        write_num = distribute_task!(queue, state, all_procs, all_scope, spec, task, spec.fargs, proc_to_scope_lfu, write_num; proc)
     end
 
     # Copy args from remote to local
@@ -190,7 +225,7 @@ struct TypedDataDepsTaskArgument{T,N}
 end
 map_or_ntuple(f, xs::Vector) = map(f, 1:length(xs))
 @inline map_or_ntuple(@specialize(f), xs::NTuple{N,T}) where {N,T} = ntuple(f, Val(N))
-function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_procs, all_scope, spec::DTaskSpec{typed}, task::DTask, fargs, proc_to_scope_lfu, write_num::Int) where typed
+function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_procs, all_scope, spec::DTaskSpec{typed}, task::DTask, fargs, proc_to_scope_lfu, write_num::Int; proc::Union{Processor,Nothing}=nothing) where typed
     @specialize spec fargs
 
     if typed
@@ -200,8 +235,14 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     end
 
     task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
-    scheduler = queue.scheduler
-    our_proc = datadeps_schedule_task(scheduler, state, all_procs, all_scope, task_scope, spec, task)
+
+    if proc === nothing
+        # Schedule and JIT assign tasks to processors
+        our_proc = datadeps_schedule_task_jit!(queue.scheduler, all_procs, all_scope, task_scope, spec, task)
+    else
+        # Use the provided processor from AOT scheduling
+        our_proc = proc
+    end
     @assert our_proc in all_procs
     our_space = only(memory_spaces(our_proc))
 
