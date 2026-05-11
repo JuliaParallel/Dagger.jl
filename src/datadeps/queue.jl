@@ -113,17 +113,61 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         @warn "Datadeps support for multi-GPU, multi-worker is currently broken\nPlease be prepared for incorrect results or errors" maxlog=1
     end
 
-    # Round-robin assign tasks to processors
     upper_queue = get_options(:task_queue)
 
+    # Compute DAG spec
+    dag_spec = DAGSpec()
+    state = DataDepsState(dag_spec)
+    for (spec, task) in queue.seen_tasks
+        if !dag_add_task!(dag_spec, state, spec, task)
+            # This task needs to be deferred
+            break
+        end
+    end
+
+    # Attempt to find any matching DAG specs and reuse their schedule
+    schedule = Dict{DTask, Processor}()
+    schedule_cache = datadeps_schedule_cache(queue.scheduler)
+    cache_hit = false
+    for (other_spec, spec_schedule) in schedule_cache
+        if datadeps_dag_equivalent(queue.scheduler, dag_spec, other_spec)
+            @dagdebug nothing :spawn_datadeps "Found matching DAG spec!"
+            for (id, proc) in spec_schedule.id_to_proc
+                uid = dag_spec.id_to_uid[id]
+                task_idx = findfirst(spec_task -> spec_task.task.uid == uid, queue.seen_tasks)
+                task = queue.seen_tasks[task_idx].task
+                schedule[task] = proc
+            end
+            cache_hit = true
+            break
+        end
+    end
+
+    if !cache_hit && !isempty(dag_spec)
+        # Compute a fresh AOT schedule (no-op for schedulers that fall back
+        # to JIT in distribute_task!)
+        datadeps_schedule_dag_aot!(queue.scheduler, schedule, dag_spec, all_procs, all_scope)
+
+        # Persist the schedule for reuse by future equivalent DAGs
+        if !isempty(schedule)
+            spec_schedule = DAGSpecSchedule()
+            for (task, proc) in schedule
+                id = dag_spec.uid_to_id[task.uid]
+                spec_schedule.id_to_proc[id] = proc
+            end
+            push!(schedule_cache, dag_spec => spec_schedule)
+        end
+    end
+
     # Start launching tasks and necessary copies
-    state = DataDepsState()
+    state = DataDepsState(dag_spec)
     write_num = 1
     proc_to_scope_lfu = BasicLFUCache{Processor,AbstractScope}(1024)
     for pair in queue.seen_tasks
         spec = pair.spec
         task = pair.task
-        write_num = distribute_task!(queue, state, all_procs, all_scope, spec, task, spec.fargs, proc_to_scope_lfu, write_num)
+        proc = get(schedule, task, nothing)
+        write_num = distribute_task!(queue, state, all_procs, all_scope, spec, task, spec.fargs, proc_to_scope_lfu, write_num; proc)
     end
 
     # Copy args from remote to local
@@ -206,7 +250,7 @@ map_or_ntuple(f, xs::Vector) = map(f, 1:length(xs))
 # N.B. Accept any `Tuple` (typed specs produce heterogeneous tuples of
 # `TypedArgument{T}`, not a homogeneous `NTuple{N,T}`).
 @inline map_or_ntuple(@specialize(f), xs::Tuple) = ntuple(f, Val(length(xs)))
-function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_procs, all_scope, spec::DTaskSpec{typed}, task::DTask, fargs, proc_to_scope_lfu, write_num::Int) where typed
+function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_procs, all_scope, spec::DTaskSpec{typed}, task::DTask, fargs, proc_to_scope_lfu, write_num::Int; proc::Union{Processor,Nothing}=nothing) where typed
     @specialize spec fargs
 
     if typed
@@ -216,8 +260,14 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     end
 
     task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
-    scheduler = queue.scheduler
-    our_proc = datadeps_schedule_task(scheduler, state, all_procs, all_scope, task_scope, spec, task)
+
+    if proc === nothing
+        # Schedule and JIT assign tasks to processors
+        our_proc = datadeps_schedule_task_jit!(queue.scheduler, all_procs, all_scope, task_scope, spec, task)
+    else
+        # Use the provided processor from AOT scheduling
+        our_proc = proc
+    end
     @assert our_proc in all_procs
     our_space = only(memory_spaces(our_proc))
 

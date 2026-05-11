@@ -20,6 +20,7 @@ tests = [
     ("Task Queues", "task-queues.jl"),
     ("Task Affinity", "task-affinity.jl"),
     ("Datadeps", "datadeps.jl"),
+    ("Datadeps - Scheduling", "datadeps/scheduling.jl"),
     ("Streaming", "streaming.jl"),
     ("Domain Utilities", "domain.jl"),
     ("Array - Allocation", "array/allocation.jl"),
