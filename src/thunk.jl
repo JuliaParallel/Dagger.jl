@@ -247,6 +247,14 @@ isweak(t) = false
 Base.show(io::IO, t::WeakThunk) = (print(io, "~"); Base.show(io, t.x.value))
 Base.convert(::Type{WeakThunk}, t::Thunk) = WeakThunk(t)
 chunktype(t::WeakThunk) = chunktype(unwrap_weak_checked(t))
+# Use options.return_type when set (e.g. from mpi_propagate_chunk_types! or eager_metadata)
+# so that Thunk arguments propagate type to downstream eager_metadata/execute!
+function chunktype(t::Thunk)
+    if t.options !== nothing && t.options.return_type !== nothing && isconcretetype(t.options.return_type)
+        return t.options.return_type
+    end
+    return typeof(t)
+end
 Base.convert(::Type{ThunkSyncdep}, t::WeakThunk) = ThunkSyncdep(nothing, t)
 ThunkSyncdep(t::WeakThunk) = ThunkSyncdep(nothing, t)
 
@@ -462,7 +470,7 @@ function _par(mod, ex::Expr; lazy=true, recur=true, opts=())
         end
         args = filter(arg->!Meta.isexpr(arg, :parameters), allargs)
         kwargs = filter(arg->Meta.isexpr(arg, :parameters), allargs)
-        if !isempty(kwargs)
+        if !Base.isempty(kwargs)
             kwargs = only(kwargs).args
         end
         if body !== nothing
@@ -530,7 +538,7 @@ function spawn(f, args...; kwargs...)
     @nospecialize f args kwargs
 
     # Merge all passed options
-    if length(args) >= 1 && first(args) isa Options
+        if length(args) >= 1 && first(args) isa Options
         # N.B. Make a defensive copy in case user aliases Options struct
         task_options = copy(first(args)::Options)
         args = args[2:end]
@@ -545,7 +553,7 @@ function spawn(f, args...; kwargs...)
 end
 function typed_spawn(f, args...; kwargs...)
     # Merge all passed options
-    if length(args) >= 1 && first(args) isa Options
+        if length(args) >= 1 && first(args) isa Options
         # N.B. Make a defensive copy in case user aliases Options struct
         task_options = copy(first(args)::Options)
         args = args[2:end]

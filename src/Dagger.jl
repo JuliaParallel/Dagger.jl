@@ -53,6 +53,13 @@ import Adapt
 include("lib/util.jl")
 include("utils/dagdebug.jl")
 
+# Type definitions (for MPI/acceleration)
+include("types/processor.jl")
+include("types/scope.jl")
+include("types/memory-space.jl")
+include("types/chunk.jl")
+include("types/acceleration.jl")
+
 # Distributed data
 include("utils/locked-object.jl")
 include("utils/tasks.jl")
@@ -77,12 +84,14 @@ include("queue.jl")
 include("thunk.jl")
 include("utils/fetch.jl")
 include("utils/chunks.jl")
+include("weakchunk.jl")
 include("utils/logging.jl")
 include("submission.jl")
 abstract type MemorySpace end
 include("utils/memory-span.jl")
 include("utils/interval_tree.jl")
 include("memory-spaces.jl")
+include("acceleration.jl")
 
 # Task scheduling
 include("compute.jl")
@@ -90,6 +99,7 @@ include("utils/clock.jl")
 include("utils/system_uuid.jl")
 include("utils/caching.jl")
 include("sch/Sch.jl"); using .Sch
+include("tochunk.jl")
 
 # Data dependency task queue
 include("datadeps/aliasing.jl")
@@ -156,6 +166,10 @@ function set_distributed_package!(value)
     @set_preferences!("distributed-package" => value)
     @info "Dagger.jl preference has been set, restart your Julia session for this change to take effect!"
 end
+
+# MPI (mpi.jl loads MPI; mpi_mempool uses it)
+include("mpi.jl")
+include("mpi_mempool.jl")
 
 # Precompilation
 import PrecompileTools: @compile_workload

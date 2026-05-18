@@ -107,6 +107,7 @@ function swaprows_panel!(A::AbstractMatrix{T}, M::AbstractMatrix{T}, ipiv_chunk:
             A[p,:], M[r,:] = M[r,:], A[p,:]
         end
     end
+    return A
 end
 
 @kernel function _geru_kernel!(alpha, x, y, A)
@@ -156,6 +157,7 @@ function swaprows_trail!(A::AbstractMatrix{T}, M::AbstractMatrix{T}, ipiv::Abstr
             end
         end
     end
+    return A
 end
 
 # Implementation of https://inria.hal.science/hal-04984070v1/file/ipdps_paper.pdf

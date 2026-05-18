@@ -125,7 +125,7 @@ function wait_all(f; check_errors::Bool=false)
     result = with_options(f; task_queue=queue)
     for task in queue.tasks
         if check_errors
-            fetch(task; raw=true)
+            fetch(task; move_value=false, unwrap=false)
         else
             wait(task)
         end
