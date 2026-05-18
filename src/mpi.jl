@@ -1,6 +1,7 @@
 @warn "Move to MPIExt.jl" maxlog=1
 
 using MPI
+import MPIRPC
 
 const CHECK_UNIFORMITY = Ref{Bool}(false)
 function check_uniformity!(check::Bool=true)
@@ -26,18 +27,24 @@ function check_uniform(value, original=value)
     return check_uniform(hash(value), original)
 end
 
+# MPI tag for `compare_all` / `check_uniform` only. Must not collide with other
+# Dagger P2P on the same `comm` (e.g. `remotecall_endpoint_toplevel` uses tag `0`
+# for broadcast metadata), or ranks can steal each other's messages and hang
+# until `mpi_deadlock_detect` fires.
+const COMPARE_ALL_MPI_TAG = UInt32(7243)
+
 function compare_all(value, comm)
     rank = MPI.Comm_rank(comm)
     size = MPI.Comm_size(comm)
     for i in 0:(size-1)
         if i != rank
-            send_yield(value, comm, i, UInt32(0))
+            send_yield(value, comm, i, COMPARE_ALL_MPI_TAG)
         end
     end
     match = true
     for i in 0:(size-1)
         if i != rank
-            other_value = recv_yield(comm, i, UInt32(0))
+            other_value = recv_yield(comm, i, COMPARE_ALL_MPI_TAG)
             if value != other_value
                 match = false
             end
@@ -61,13 +68,10 @@ function aliasing(accel::MPIAcceleration, x::Chunk, T)
         ainfo = _with_default_acceleration() do
             aliasing(x, T)
         end
-        #Core.print("[$rank] aliasing: $ainfo, sending\n")
         @opcounter :aliasing_bcast_send_yield
         bcast_send_yield(ainfo, accel.comm, handle.rank, tag)
     else
-        #Core.print("[$rank] aliasing: receiving from $(handle.rank)\n")
         ainfo = recv_yield(accel.comm, handle.rank, tag)
-        #Core.print("[$rank] aliasing: received $ainfo\n")
     end
     check_uniform(ainfo)
     return ainfo
@@ -247,6 +251,14 @@ struct MPIMemorySpace{S<:MemorySpace} <: MemorySpace
     rank::Int
 end
 
+function Base.:(==)(a::MPIMemorySpace, b::MPIMemorySpace)
+    return a.innerSpace == b.innerSpace &&
+           a.comm == b.comm &&
+           a.rank == b.rank
+end
+Base.hash(space::MPIMemorySpace, h::UInt=UInt(0)) =
+    hash(space.innerSpace, hash(space.comm.val, hash(space.rank, hash(MPIMemorySpace, h))))
+
 function check_uniform(space::MPIMemorySpace, original=space)
     return check_uniform(space.rank, original) &&
            # TODO: Not always valid (if pointer is embedded, say for GPUs)
@@ -389,11 +401,11 @@ function take_ref_id!()
 end
 
 #TODO: partitioned scheduling with comm bifurcation
-function tochunk_pset(x, space::MPIMemorySpace; device=nothing, kwargs...)
+function tochunk_pset(x, space::MPIMemorySpace; device=nothing, force_nonlocal=false, kwargs...)
     @assert space.comm == MPI.COMM_WORLD "$(space.comm) != $(MPI.COMM_WORLD)"
     local_rank = MPI.Comm_rank(space.comm)
     Mid = take_ref_id!()
-    if local_rank != space.rank
+    if local_rank != space.rank || force_nonlocal
         return MPIRef(space.comm, space.rank, 0, nothing, Mid)
     else
         # type= is for Chunk metadata only; MemPool.poolset does not accept it
@@ -770,6 +782,7 @@ function move!(dep_mod::RemainderAliasing{<:MPIMemorySpace}, to_space::MPIMemory
     return
 end
 
+const ALIASED_OBJECT_CACHE = ScopedValue{Union{AliasedObjectCache, Nothing}}(nothing)
 
 move(::MPIOSProc, ::MPIProcessor, x::Union{Function,Type}) = x
 move(::MPIOSProc, ::MPIProcessor, x::Chunk{<:Union{Function,Type}}) = poolget(x.handle)
@@ -788,6 +801,91 @@ function move(src::MPIOSProc, dst::MPIProcessor, x::Chunk)
     end
 end
 
+function is_local(accel::MPIAcceleration, target)
+    return target.rank == MPI.Comm_rank(accel.comm)
+end
+
+function remotecall_endpoint_toplevel(f, accel::MPIAcceleration, cache::AliasedObjectCache, from_proc, to_proc, from_space, to_space, data::Chunk)
+    backend = lock(MPIRC_BACKEND) do backends
+        backends[accel.comm]
+    end
+    if is_local(accel, from_proc)
+        data_raw = unwrap(data)
+        res = f(accel, cache, from_proc, to_proc, from_space, to_space, data_raw)::Chunk
+        csz = MPI.Comm_size(accel.comm)
+        for target_rank in 0:(csz-1)
+            if target_rank == from_proc.rank
+                continue
+            end
+            MPIRPC.rpc_progress_halt!(backend, target_rank)
+        end
+        @assert res.handle isa MPIRef "Expected MPIRef handle for MPI broadcast"
+        meta = (res.handle.id, res.handle.size, chunktype(res), res.space.innerSpace, res.space.rank)
+        bcast_send_yield(meta, accel.comm, from_proc.rank, 0)
+        return res
+    else
+        with(ALIASED_OBJECT_CACHE=>cache) do
+            while MPIRPC.rpc_progress!(backend)
+                yield()
+            end
+        end
+        id, size, T, inner_space, rank = recv_yield(accel.comm, from_proc.rank, 0)
+        space = MPIMemorySpace(inner_space, accel.comm, rank)
+        handle = MPIRef(accel.comm, rank, size, nothing, id)
+        return Chunk{T, typeof(handle), typeof(to_proc), AnyScope, typeof(space)}(
+            T, domain(nothing), handle, to_proc, AnyScope(), space)
+    end
+end
+
+function remotecall_endpoint_transfer(f, accel::MPIAcceleration, from_proc, to_proc, from_space, to_space, data)
+    backend = lock(MPIRC_BACKEND) do backends
+        backends[accel.comm]
+    end
+
+    return MPIRPC.remotecall_fetch(backend, to_proc.rank) do
+        ACCELERATION[] = accel
+        return f(accel, from_proc, to_proc, from_space, to_space, data)
+    end
+end
+
+function set_stored_mpi!(space::MemorySpace, value::Chunk, ainfo::AbstractAliasing)
+    cache = ALIASED_OBJECT_CACHE[]
+    ACCELERATION[] = cache.accel
+    set_stored!(unwrap(cache.chunk)::AliasedObjectCacheStore, cache.space, value, ainfo)
+    return
+end
+
+function mpi_nonlocal_chunk(value::Chunk)
+    return tochunk(nothing, value.processor, value.space, value.scope; type=chunktype(value), force_nonlocal=true)
+end
+
+function set_stored!(accel::MPIAcceleration, cache::AliasedObjectCache, value::Chunk, ainfo::AbstractAliasing)
+    cache_raw = unwrap(cache.chunk)::AliasedObjectCacheStore
+    backend = lock(MPIRC_BACKEND) do backends
+        backends[accel.comm]
+    end
+    MPIRPC.bcast_remotecall(backend, set_stored_mpi!, cache.space, mpi_nonlocal_chunk(value), ainfo)
+    set_stored!(cache_raw, cache.space, value, ainfo)
+    return
+end
+
+function set_key_stored_mpi!(space::MemorySpace, ainfo::AbstractAliasing, value::Chunk)
+    cache = unwrap(ALIASED_OBJECT_CACHE[].chunk)::AliasedObjectCacheStore
+    ACCELERATION[] = cache.accel
+    set_key_stored!(cache, space, ainfo, value)
+    return
+end
+
+function set_key_stored!(accel::MPIAcceleration, cache::AliasedObjectCache, space::MemorySpace, ainfo::AbstractAliasing, value::Chunk)
+    cache_raw = unwrap(cache.chunk)::AliasedObjectCacheStore
+    backend = lock(MPIRC_BACKEND) do backends
+        backends[accel.comm]
+    end
+    MPIRPC.bcast_remotecall(backend, set_key_stored_mpi!, space, ainfo, mpi_nonlocal_chunk(value))
+    set_key_stored!(cache_raw, space, ainfo, value)
+end
+
+
 #=
 function remotecall_endpoint(f, accel::MPIAcceleration, from_proc, to_proc, from_space, to_space, data::Chunk)
     loc_rank = MPI.Comm_rank(accel.comm)
@@ -804,13 +902,8 @@ function remotecall_endpoint(f, accel::MPIAcceleration, from_proc, to_proc, from
         return recv_yield(accel.comm, to_proc.rank, tag)
     end
 end
-function remotecall_endpoint_transfer(f, accel::MPIAcceleration, from_proc, to_proc, from_space, to_space, data)
-    loc_rank = MPI.Comm_rank(accel.comm)
-    if loc_rank == from_proc.rank
-    elseif loc_rank == to_proc.rank
-    end
-end
 =#
+#=
 function remotecall_endpoint(f, accel::MPIAcceleration, from_proc, to_proc, from_space, to_space, data::Chunk)
     loc_rank = MPI.Comm_rank(accel.comm)
     task = DATADEPS_CURRENT_TASK[]
@@ -866,6 +959,9 @@ function remotecall_endpoint(f, accel::MPIAcceleration, from_proc, to_proc, from
         end
     end
 end
+=#
+
+
 
 # Chunk may be MPI-backed (MPIRef) but labeled with OSProc; treat source as the owning rank
 function move(src::OSProc, dst::MPIProcessor, x::Chunk)
@@ -905,6 +1001,7 @@ function move(src::MPIProcessor, dst::MPIProcessor, x::Chunk)
     end
 end
 
+gpu_kernel_backend(::MPIProcessor) = KernelAbstractions.CPU()
 
 #FIXME:try to think of a better move! scheme
 function execute!(proc::MPIProcessor, f, args...; kwargs...)
@@ -933,6 +1030,9 @@ function execute!(proc::MPIProcessor, f, args...; kwargs...)
 
     if islocal
         T = typeof(result)
+        if T === Nothing
+            @warn "[rank $local_rank] Gave $T result for $fname, args types: $arg_types; treating as Any for broadcast"
+        end
         space = memory_space(result, proc)::MPIMemorySpace
         if need_bcast
             @opcounter :execute_bcast_send_yield
@@ -953,9 +1053,15 @@ end
 
 accelerate!(::Val{:mpi}) = accelerate!(MPIAcceleration())
 
+const MPIRC_BACKEND = LockedObject(Dict{MPI.Comm, MPIRPC.AbstractMPIRPCBackend}())
+
 function initialize_acceleration!(a::MPIAcceleration)
     if !MPI.Initialized()
         MPI.Init(;threadlevel=:multiple)
+    end
+    backend = MPIRPC.select_mpi_rpc_backend!(MPIRPC.UniformMPIRPCBackend(a.comm))
+    lock(MPIRC_BACKEND) do backends
+        backends[a.comm] = backend
     end
     ctx = Dagger.Sch.eager_context()
     sz = MPI.Comm_size(a.comm)

@@ -23,7 +23,7 @@ processors(space::CPURAMMemorySpace) =
 unwrap(x::Chunk) = unwrap(x.handle)
 function unwrap(handle::DRef)
     @assert root_worker_id(handle) == myid() "DRef $handle is not owned by this process: $(root_worker_id(handle)) != $(myid())"
-    return MemPool.poolget(x.handle)
+    return MemPool.poolget(handle)
 end
 move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::T, from::F) where {T,F} =
     throw(ArgumentError("No `move!` implementation defined for $F -> $T"))
