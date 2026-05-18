@@ -9,3 +9,4 @@ Manifest.toml
 *.dot
 docs/build
 .vscode
+.CondaPkg/

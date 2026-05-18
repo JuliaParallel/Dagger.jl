@@ -483,17 +483,21 @@ end
 
 function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
     T = typeof(p)
-    # FIXME: MaxUtilization
-    est_time_util = round(UInt64, if time_util !== nothing && haskey(time_util, T)
-        time_util[T] * 1000^3
+    sig_vec = sig isa Dagger.Signature ? sig.sig : sig
+    snap = MT.snapshot(MT.global_metrics_cache())
+    worker_id = gp isa Int ? gp : (gp isa OSProc ? gp.pid : myid())
+    est_time_util = if time_util !== nothing && haskey(time_util, T)
+        round(UInt64, time_util[T] * 1000^3)::UInt64
     else
-        get(state.signature_time_cost, sig, 1000^3)
-    end)::UInt64
+        runtime = metrics_lookup_runtime(snap, sig_vec, p, worker_id)
+        runtime !== nothing ? runtime : UInt64(1000^3)
+    end
     est_alloc_util = if alloc_util !== nothing && haskey(alloc_util, T)
-        alloc_util[T]
+        (alloc_util[T])::UInt64
     else
-        get(state.signature_alloc_cost, sig, UInt64(0))
-    end::UInt64
+        alloc = metrics_lookup_alloc(snap, sig_vec, p)
+        alloc !== nothing ? alloc : UInt64(0)
+    end
     est_occupancy::UInt32 = typemax(UInt32)
     if occupancy !== nothing
         occ = nothing
@@ -573,30 +577,27 @@ const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
         end
     end
 
-    # Estimate the cost of executing the task itself
     if sig === nothing
         sig = signature(task.f, task.inputs)
     end
-    est_time_util = get(state.signature_time_cost, sig, 1000^3)
+    sig_vec = sig isa Dagger.Signature ? sig.sig : sig
+    snap = MT.snapshot(MT.global_metrics_cache())
 
-    # Estimate total cost for executing this task on each candidate processor
     for proc in procs
         gproc = get_parent(proc)
         chunks_filt = Iterators.filter(c->get_parent(processor(c)) != gproc, chunks)
 
-        # Estimate network transfer costs based on data size
-        # N.B. `affinity(x)` really means "data size of `x`"
-        # N.B. We treat same-worker transfers as having zero transfer cost
-        # TODO: For non-Chunk, model cost from scheduler to worker
-        # TODO: Measure and model processor move overhead
         tx_cost = impute_sum(affinity(chunk)[2] for chunk in chunks_filt)
 
-        # Add fixed cost for cross-worker task transfer (esimated at 1ms)
-        # TODO: Actually estimate/benchmark this
-        task_xfer_cost = gproc.pid != myid() ? 1_000_000 : 0 # 1ms
+        task_xfer_cost = gproc.pid != myid() ? 1_000_000 : 0
 
-        tx_rate = get(get(state.worker_transfer_rate, gproc.pid, Dict{Processor,UInt64}()), proc, DEFAULT_TRANSFER_RATE)
-        costs[proc] = est_time_util + (tx_cost/tx_rate) + task_xfer_cost
+        runtime = metrics_lookup_runtime(snap, sig_vec, proc, gproc.pid)
+        est_time_util = runtime !== nothing ? runtime : UInt64(1000^3)
+
+        rate = metrics_lookup_transfer_rate(snap, proc, gproc.pid)
+        tx_rate = rate !== nothing ? rate : DEFAULT_TRANSFER_RATE
+
+        costs[proc] = Float64(est_time_util) + (Float64(tx_cost) / Float64(tx_rate)) + Float64(task_xfer_cost)
     end
     chunks_cleanup()
 

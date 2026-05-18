@@ -27,6 +27,12 @@ import TimespanLogging
 import TaskLocalValues: TaskLocalValue
 import ScopedValues: @with
 
+import ..Dagger: SignatureMetric, ProcessorMetric, WorkerMetric, TransferSizeMetric, TransferTimeMetric, TransferRateMetric
+import ..Dagger: TASK_SIGNATURE, TASK_PROCESSOR, TASK_WORKER, TASK_TRANSFER_SIZE, TASK_TRANSFER_TIME
+import ..Dagger: execute_metrics_spec, metrics_lookup_runtime, metrics_lookup_alloc, metrics_lookup_transfer_rate
+import ..Dagger: extract_collected_metrics, apply_collected_metrics!
+import MetricsTracker as MT
+
 const OneToMany = Dict{Thunk, Set{Thunk}}
 
 include("util.jl")
@@ -65,9 +71,6 @@ Fields:
 - `worker_storage_capacity::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}` - Maps from worker ID to storage resource capacity
 - `worker_loadavg::Dict{Int,NTuple{3,Float64}}` - Worker load average
 - `worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}` - Communication channels between the scheduler and each worker
-- `signature_time_cost::Dict{Signature,UInt64}` - Cache of estimated CPU time (in nanoseconds) required to compute calls with the given signature
-- `signature_alloc_cost::Dict{Signature,UInt64}` - Cache of estimated CPU RAM (in bytes) required to compute calls with the given signature
-- `worker_transfer_rate::Dict{Int,Dict{Processor,UInt64}}` - Maps from worker ID to per-processor network transfer rate estimates in bytes per second
 - `halt::Base.Event` - Event indicating that the scheduler is halting
 - `lock::ReentrantLock` - Lock around operations which modify the state
 - `futures::Dict{Thunk, Vector{ThunkFuture}}` - Futures registered for waiting on the result of a thunk.
@@ -91,9 +94,6 @@ struct ComputeState
     worker_storage_capacity::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}
     worker_loadavg::Dict{Int,NTuple{3,Float64}}
     worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}
-    signature_time_cost::Dict{Signature,UInt64}
-    signature_alloc_cost::Dict{Signature,UInt64}
-    worker_transfer_rate::Dict{Int,Dict{Processor,UInt64}}
     halt::Base.Event
     lock::ReentrantLock
     futures::Dict{Thunk, Vector{ThunkFuture}}
@@ -120,9 +120,6 @@ function start_state(deps::Dict, node_order, chan)
                          Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}(),
                          Dict{Int,NTuple{3,Float64}}(),
                          Dict{Int, Tuple{RemoteChannel,RemoteChannel}}(),
-                         Dict{Signature,UInt64}(),
-                         Dict{Signature,UInt64}(),
-                         Dict{Int,Dict{Processor,UInt64}}(),
                          Base.Event(),
                          ReentrantLock(),
                          Dict{Thunk, Vector{ThunkFuture}}(),
@@ -157,7 +154,6 @@ function init_proc(state, p, log_sink)
     gproc = OSProc(p.pid)
     lock(state.lock) do
         state.worker_time_pressure[p.pid] = Dict{Processor,UInt64}()
-        state.worker_transfer_rate[p.pid] = Dict{Processor,UInt64}()
 
         state.worker_storage_pressure[p.pid] = Dict{Union{StorageResource,Nothing},UInt64}()
         state.worker_storage_capacity[p.pid] = Dict{Union{StorageResource,Nothing},UInt64}()
@@ -423,20 +419,8 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options::SchedulerOpt
             metadata = tresult.metadata
             if metadata !== nothing
                 state.worker_time_pressure[pid][proc] = metadata.time_pressure
-                #to_storage = fetch(node.options.storage)
-                #state.worker_storage_pressure[pid][to_storage] = metadata.storage_pressure
-                #state.worker_storage_capacity[pid][to_storage] = metadata.storage_capacity
-                #state.worker_loadavg[pid] = metadata.loadavg
-                sig = signature(state, node)
-                state.signature_time_cost[sig] = (metadata.threadtime + get(state.signature_time_cost, sig, 0)) ÷ 2
-                state.signature_alloc_cost[sig] = (metadata.gc_allocd + get(state.signature_alloc_cost, sig, 0)) ÷ 2
-                if metadata.transfer_rate !== nothing
-                    old_rate = get(state.worker_transfer_rate[pid], proc, UInt64(0))
-                    if old_rate == 0
-                        state.worker_transfer_rate[pid][proc] = metadata.transfer_rate
-                    else
-                        state.worker_transfer_rate[pid][proc] = (old_rate + metadata.transfer_rate) ÷ 2
-                    end
+                if metadata.metrics !== nothing
+                    apply_collected_metrics!(MT.global_metrics_cache(), thunk_id, metadata.metrics)
                 end
             end
             if res isa Chunk
@@ -742,7 +726,6 @@ function remove_dead_proc!(ctx, state, proc, options)
     @assert options.single !== proc.pid "Single worker failed, cannot continue."
     rmprocs!(ctx, [proc])
     delete!(state.worker_time_pressure, proc.pid)
-    delete!(state.worker_transfer_rate, proc.pid)
     delete!(state.worker_storage_pressure, proc.pid)
     delete!(state.worker_storage_capacity, proc.pid)
     delete!(state.worker_loadavg, proc.pid)
@@ -1545,17 +1528,16 @@ Executes a single task specified by `task` on `to_proc`.
     real_time_util[] += est_time_util
     @maybelog ctx timespan_start(ctx, :compute, (;thunk_id, processor=to_proc), (;f))
 
-    # Start counting time and GC allocations
-    threadtime_start = cputhreadtime()
-    # FIXME
-    #gcnum_start = Base.gc_num()
+    task_sig = signature(first(data), @view data[2:end]).sig
+
+    local_metrics_cache = MT.MetricsCache()
+    mspec = execute_metrics_spec()
 
     @dagdebug thunk_id :execute "Executing $(typeof(f))"
 
     logging_enabled = !(ctx.log_sink isa TimespanLogging.NoOpLog)
 
     result_meta = try
-        # Set TLS variables
         Dagger.set_tls!((;
             sch_uid=task.sch_uid,
             sch_handle=task.sch_handle,
@@ -1566,8 +1548,11 @@ Executes a single task specified by `task` on `to_proc`.
         ))
 
         result = Dagger.with_options(propagated) do
-            # Execute
-            execute!(to_proc, f, fetched_args...; fetched_kwargs...)
+            @with TASK_SIGNATURE => task_sig TASK_PROCESSOR => to_proc TASK_WORKER => myid() TASK_TRANSFER_SIZE => transfer_size[] TASK_TRANSFER_TIME => transfer_time[] begin
+                MT.with_metrics(mspec, Dagger, :execute!, thunk_id, MT.SyncInto(local_metrics_cache)) do
+                    execute!(to_proc, f, fetched_args...; fetched_kwargs...)
+                end
+            end
         end
 
         # Check if result is safe to store
@@ -1602,9 +1587,6 @@ Executes a single task specified by `task` on `to_proc`.
         fetched_kwargs_cleanup()
     end
 
-    threadtime = cputhreadtime() - threadtime_start
-    # FIXME: This is not a realistic measure of max. required memory
-    #gc_allocd = min(max(UInt64(Base.gc_num().allocd) - UInt64(gcnum_start.allocd), UInt64(0)), UInt64(1024^4))
     @maybelog ctx timespan_finish(ctx, :compute, (;thunk_id, processor=to_proc), (;f, result=result_meta))
 
     lock(TASK_SYNC) do
@@ -1615,17 +1597,11 @@ Executes a single task specified by `task` on `to_proc`.
 
     @dagdebug thunk_id :execute "Returning"
 
-    # TODO: debug_storage("Releasing $to_storage_name")
+    collected_metrics = extract_collected_metrics(local_metrics_cache, thunk_id)
+
     metadata = (
         time_pressure=real_time_util[],
-        #storage_pressure=real_alloc_util,
-        #storage_capacity=storage_cap,
-        #loadavg=((Sys.loadavg()...,) ./ Sys.CPU_THREADS),
-        threadtime=threadtime,
-        # FIXME: Add runtime allocation tracking
-        #gc_allocd=(isa(result_meta, Chunk) ? result_meta.handle.size : 0),
-        gc_allocd=0,
-        transfer_rate=(transfer_size[] > 0 && transfer_time[] > 0) ? round(UInt64, transfer_size[] / (transfer_time[] / 10^9)) : nothing,
+        metrics=collected_metrics,
     )
     return (result_meta, metadata)
 end
