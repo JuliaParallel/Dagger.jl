@@ -7,6 +7,9 @@ import Dagger: sch_handle, exec!, halt!, get_dag_ids, add_thunk!
 function inc(x)
     x+1
 end
+function metrics_probe(x)
+    x + 1
+end
 function checkwid(x...)
     @assert myid() == 1
     return 1
@@ -398,9 +401,9 @@ end
 
         #pres1_1 = state.worker_time_pressure[1][tproc1_1]
         #pres2_1 = state.worker_time_pressure[first(workers())][tproc2_1]
-        tx_rate = lock(state.worker_transfer_rate) do wtr
-            get(get(wtr, first(workers()), Dict{Dagger.Processor,UInt64}()), tproc2_1, Dagger.Sch.DEFAULT_TRANSFER_RATE)
-        end
+        snap = MetricsTracker.snapshot(MetricsTracker.global_metrics_cache())
+        observed_rate = Dagger.metrics_lookup_transfer_rate(snap, tproc2_1, first(workers()))
+        tx_rate = observed_rate !== nothing ? observed_rate : Dagger.Sch.DEFAULT_TRANSFER_RATE
         tx_xfer_cost = 1e6
         sig_unknown_cost = 1e9
 
@@ -446,10 +449,21 @@ end
 
         @testset "Per-Processor Transfer Rate" begin
             wid = first(workers())
+            cache = MetricsTracker.global_metrics_cache()
+            test_local_id = 999_999_000
+            test_remote_id = 999_999_001
 
-            lock(state.worker_transfer_rate) do wtr
-                wtr[1][tproc1_1] = UInt64(2_000_000)
-                wtr[wid][tproc2_1] = UInt64(500_000)
+            MetricsTracker.bulk_update!(cache) do c
+                ctx = MetricsTracker.pending_context!(c, Dagger, :execute!, Int)
+                proc_storage = MetricsTracker.get_or_create_storage!(ctx, Dagger.ProcessorMetric())
+                worker_storage = MetricsTracker.get_or_create_storage!(ctx, Dagger.WorkerMetric())
+                rate_storage = MetricsTracker.get_or_create_storage!(ctx, Dagger.TransferRateMetric())
+                MetricsTracker.set_metric_value!(proc_storage, test_local_id, tproc1_1)
+                MetricsTracker.set_metric_value!(worker_storage, test_local_id, 1)
+                MetricsTracker.set_metric_value!(rate_storage, test_local_id, UInt64(2_000_000))
+                MetricsTracker.set_metric_value!(proc_storage, test_remote_id, tproc2_1)
+                MetricsTracker.set_metric_value!(worker_storage, test_remote_id, wid)
+                MetricsTracker.set_metric_value!(rate_storage, test_remote_id, UInt64(500_000))
             end
 
             args = [Dagger.tochunk(1), Dagger.tochunk(2)]
@@ -463,10 +477,43 @@ end
             end
             @test costs[tproc1_1] ≈ sig_unknown_cost
 
-            lock(state.worker_transfer_rate) do wtr
-                delete!(wtr[1], tproc1_1)
-                delete!(wtr[wid], tproc2_1)
+            MetricsTracker.bulk_update!(cache) do c
+                ctx = MetricsTracker.pending_context!(c, Dagger, :execute!, Int)
+                for m in (Dagger.ProcessorMetric(), Dagger.WorkerMetric(), Dagger.TransferRateMetric())
+                    storage = MetricsTracker.get_or_create_storage!(ctx, m)
+                    MetricsTracker.delete_metric_value!(storage, test_local_id)
+                    MetricsTracker.delete_metric_value!(storage, test_remote_id)
+                end
             end
+        end
+
+        @testset "Metrics Integration" begin
+            cache = MetricsTracker.global_metrics_cache()
+            pre_snap = MetricsTracker.snapshot(cache)
+            pre_count = haskey(pre_snap.contexts, (Dagger, :execute!)) ?
+                length(MetricsTracker.values_for_metric(pre_snap, Dagger, :execute!, MetricsTracker.TimeMetric())) :
+                0
+
+            for _ in 1:5
+                fetch(Dagger.@spawn metrics_probe(7))
+            end
+
+            sleep(0.1)
+            post_snap = MetricsTracker.snapshot(cache)
+            @test haskey(post_snap.contexts, (Dagger, :execute!))
+            time_values = MetricsTracker.values_for_metric(post_snap, Dagger, :execute!, MetricsTracker.TimeMetric())
+            @test length(time_values) >= pre_count + 5
+
+            time_inferred = Base.return_types(MetricsTracker.lookup_value,
+                Tuple{MetricsTracker.MetricsSnapshot, Module, Symbol, MetricsTracker.TimeMetric, Int})[1]
+            @test time_inferred === Union{UInt64, Nothing}
+
+            sig_values = MetricsTracker.values_for_metric(post_snap, Dagger, :execute!, Dagger.SignatureMetric())
+            @test !isempty(sig_values)
+            @test any(v -> v isa Vector && typeof(metrics_probe) in v, values(sig_values))
+
+            proc_values = MetricsTracker.values_for_metric(post_snap, Dagger, :execute!, Dagger.ProcessorMetric())
+            @test any(v -> v isa Dagger.Processor, values(proc_values))
         end
     end
 end
