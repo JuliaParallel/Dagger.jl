@@ -17,6 +17,14 @@ function validate_neigh_dist(neigh_dist, size)
         throw(ArgumentError("Neighborhood distance ($neigh_dist) must not be larger than the chunk size ($size)"))
     end
 end
+# Overload for checking only tuple-length compatibility, called outside @spawn where only
+# ndims is known (not actual chunk sizes). The full size check still runs inside @spawn.
+function validate_neigh_dist(neigh_dist, N::Int)
+    validate_neigh_dist(neigh_dist)
+    if neigh_dist isa Tuple && length(neigh_dist) != N
+        throw(ArgumentError("Neighborhood distance tuple length ($(length(neigh_dist))) must match array ndims ($N)"))
+    end
+end
 
 get_neigh_dist(neigh_dist::Integer, i::Int) = neigh_dist
 get_neigh_dist(neigh_dist::Tuple, i::Int) = neigh_dist[i]
@@ -48,6 +56,18 @@ function load_neighbor_region(arr, region_code::NTuple{N,Int}, neigh_dist) where
     end)
     # FIXME: Don't collect
     return move(task_processor(), collect(@view arr[start_idx:stop_idx]))
+end
+
+# In-place variant: load region directly into a pre-allocated destination buffer.
+function load_neighbor_region_into!(dest, arr, region_code::NTuple{N,Int}, neigh_dist) where N
+    validate_neigh_dist(neigh_dist, size(arr))
+    start_idx = CartesianIndex(ntuple(N) do i
+        region_code[i] == -1 ? lastindex(arr, i) - get_neigh_dist(neigh_dist, i) + 1 : firstindex(arr, i)
+    end)
+    stop_idx = CartesianIndex(ntuple(N) do i
+        region_code[i] == +1 ? firstindex(arr, i) + get_neigh_dist(neigh_dist, i) - 1 : lastindex(arr, i)
+    end)
+    copyto!(dest, @view arr[start_idx:stop_idx])
 end
 
 is_past_boundary(size, idx) = any(ntuple(i -> idx[i] < 1 || idx[i] > size[i], length(size)))
@@ -123,6 +143,9 @@ boundary_transition(::Wrap, idx, size) =
 load_boundary_region(::Wrap, arr, region_code, neigh_dist, boundary_dims) =
     load_neighbor_region(arr, region_code, neigh_dist)
 
+load_boundary_region_into!(dest, ::Wrap, arr, region_code, neigh_dist, boundary_dims) =
+    load_neighbor_region_into!(dest, arr, region_code, neigh_dist)
+
 function boundary_source_index(::Wrap, arr, rc, nd, idx_d, d)
     if rc == -1
         return lastindex(arr, d) - nd + idx_d
@@ -156,6 +179,9 @@ function load_boundary_region(pad::Pad, arr, region_code::NTuple{N,Int}, neigh_d
     # FIXME: return Fill(pad.padval, region_size)
     return move(task_processor(), fill(pad.padval, region_size))
 end
+
+load_boundary_region_into!(dest, pad::Pad, arr, region_code, neigh_dist, boundary_dims) =
+    fill!(dest, pad.padval)
 
 # Use edge as source index (value will be overridden by apply_boundary_value)
 boundary_source_index(::Pad, arr, rc, nd, idx_d, d) =
@@ -219,6 +245,10 @@ function load_boundary_region(::Clamp, arr, region_code::NTuple{N,Int}, neigh_di
     Kernel(load_boundary_region_kernel)(Clamp(), result, arr, region_code, neigh_dist, boundary_dims; ndrange=length(result))
 
     return move(task_processor(), result)
+end
+
+function load_boundary_region_into!(dest, ::Clamp, arr, region_code::NTuple{N,Int}, neigh_dist, boundary_dims::NTuple{N,Bool}) where N
+    Kernel(load_boundary_region_kernel)(Clamp(), dest, arr, region_code, neigh_dist, boundary_dims; ndrange=length(dest))
 end
 
 function boundary_source_index(::Clamp, arr, rc, nd, idx_d, d)
@@ -332,6 +362,18 @@ function load_boundary_region(::LinearExtrapolate, arr::AbstractArray{T}, region
     return move(task_processor(), result)
 end
 
+function load_boundary_region_into!(dest, ::LinearExtrapolate, arr::AbstractArray{T}, region_code::NTuple{N,Int}, neigh_dist, boundary_dims::NTuple{N,Bool}) where {T<:Real,N}
+    extrap_dim = 0
+    for d in 1:N
+        if boundary_dims[d] && region_code[d] != 0
+            extrap_dim = d
+            break
+        end
+    end
+    nd = get_neigh_dist(neigh_dist, extrap_dim)
+    Kernel(load_boundary_region_kernel)(LinearExtrapolate(), dest, arr, region_code, neigh_dist, boundary_dims, Val(extrap_dim), Val(nd); ndrange=length(dest))
+end
+
 # Use edge as source index (value will be computed by apply_boundary_value)
 boundary_source_index(::LinearExtrapolate, arr, rc, nd, idx_d, d) =
     rc == -1 ? firstindex(arr, d) : (rc == +1 ? lastindex(arr, d) : idx_d)
@@ -432,6 +474,41 @@ function load_boundary_region(::Reflect{Symm}, arr, region_code::NTuple{N,Int}, 
     end
 
     return region
+end
+
+function load_boundary_region_into!(dest, ::Reflect{Symm}, arr, region_code::NTuple{N,Int}, neigh_dist, boundary_dims::NTuple{N,Bool}) where {N, Symm}
+    flipped_code = ntuple(N) do i
+        (region_code[i] != 0 && boundary_dims[i]) ? -region_code[i] : region_code[i]
+    end
+    skip = Symm ? 0 : 1
+    start_idx = CartesianIndex(ntuple(N) do i
+        needs_skip = boundary_dims[i] && region_code[i] != 0
+        actual_skip = needs_skip ? skip : 0
+        if flipped_code[i] == -1
+            lastindex(arr, i) - get_neigh_dist(neigh_dist, i) + 1 - actual_skip
+        elseif flipped_code[i] == +1
+            firstindex(arr, i) + actual_skip
+        else
+            firstindex(arr, i)
+        end
+    end)
+    stop_idx = CartesianIndex(ntuple(N) do i
+        needs_skip = boundary_dims[i] && region_code[i] != 0
+        actual_skip = needs_skip ? skip : 0
+        if flipped_code[i] == +1
+            firstindex(arr, i) + get_neigh_dist(neigh_dist, i) - 1 + actual_skip
+        elseif flipped_code[i] == -1
+            lastindex(arr, i) - actual_skip
+        else
+            lastindex(arr, i)
+        end
+    end)
+    copyto!(dest, @view arr[start_idx:stop_idx])
+    for i in 1:N
+        GPUArraysCore.@allowscalar if region_code[i] != 0 && boundary_dims[i]
+            reverse!(dest, dims=i)
+        end
+    end
 end
 
 function boundary_source_index(::Reflect{Symm}, arr, rc, nd, idx_d, d) where Symm
@@ -564,6 +641,10 @@ function load_boundary_region(boundary::Tuple, arr, region_code::NTuple{N,Int}, 
     return move(task_processor(), result)
 end
 
+function load_boundary_region_into!(dest, boundary::Tuple, arr, region_code::NTuple{N,Int}, neigh_dist, boundary_dims::NTuple{N,Bool}) where N
+    Kernel(load_boundary_region_kernel)(boundary, dest, arr, region_code, neigh_dist, boundary_dims; ndrange=length(dest))
+end
+
 #############################################################################
 # Chunk Selection and Halo Building
 #############################################################################
@@ -615,6 +696,113 @@ function select_neighborhood_chunks(chunks, idx, neigh_dist, boundary)
     return accesses
 end
 
+# Returns (region_metadata, neighbor_chunk_dtasks) without spawning intermediate load tasks.
+# region_metadata: Vector of (region_code, is_boundary, boundary_dims).
+# neighbor_chunk_dtasks: Vector of raw chunk DTasks (resolved to arrays when build_halo_consolidated runs).
+function select_neighborhood_info(chunks, idx, neigh_dist, boundary)
+    validate_neigh_dist(neigh_dist)
+    N = ndims(chunks)
+    chunk_dist = 1
+    region_metadata = Tuple[]
+    neighbor_chunks = Any[]
+
+    for i in 0:(3^N - 1)
+        region_code = ntuple(N) do d
+            ((i ÷ 3^(d-1)) % 3) - 1
+        end
+        all(==(0), region_code) && continue
+
+        chunk_offset = CartesianIndex(ntuple(N) do d
+            region_code[d] * chunk_dist
+        end)
+        new_idx = idx + chunk_offset
+
+        if is_past_boundary(size(chunks), new_idx)
+            boundary_dims = ntuple(N) do d
+                new_idx[d] < 1 || new_idx[d] > size(chunks)[d]
+            end
+            if boundary_has_transition(boundary)
+                new_idx = boundary_transition(boundary, new_idx, size(chunks))
+            else
+                new_idx = idx
+            end
+            push!(region_metadata, (region_code, true, boundary_dims))
+        else
+            push!(region_metadata, (region_code, false, ntuple(_ -> false, N)))
+        end
+        push!(neighbor_chunks, chunks[new_idx])
+    end
+
+    @assert length(region_metadata) == 3^N - 1
+    return region_metadata, neighbor_chunks
+end
+
+# Per-thread cache: WeakKeyDict{DArray, Dict{(chunk_idx, halo_width), HaloArray}}.
+# WeakKeyDict is used for the outer level so that the cache does not hold a strong reference
+# to the source DArray — allowing its GC finalizer to fire when user code drops its last
+# reference (see below). Using chunk_idx as part of the inner key ensures that within one
+# DArray, every chunk has its own dedicated buffer — so if a single worker thread processes
+# multiple same-shaped chunks in the same iteration sequentially, each gets a distinct
+# HaloArray and there is no aliasing with a concurrently running inner-stencil task.
+# Filling a cached buffer in-place is safe because spawn_datadeps blocks until all inner
+# tasks complete before the next iteration's build_halo_consolidated calls run.
+const HALO_ARRAY_CACHE = TaskLocalValue{WeakKeyDict{Any,Dict{Any,Any}}}(()->WeakKeyDict{Any,Dict{Any,Any}}())
+
+# Called on the main task (outside any Dagger.@spawn) to get or create the per-DArray inner
+# cache dict. Keeping all WeakKeyDict operations here — rather than inside spawned tasks —
+# avoids every pitfall of passing a DArray to @spawn (Dagger resolving it to a ROCArray on
+# GPU, serialization producing a copy with a different objectid under Distributed, etc.).
+# A finalizer registered on first encounter frees all cached HaloArrays when the DArray is
+# collected; the WeakKeyDict ensures the cache itself does not prevent that collection.
+function get_halo_inner_cache(read_darray)
+    outer_cache = HALO_ARRAY_CACHE[]
+    if !haskey(outer_cache, read_darray)
+        inner_cache = Dict{Any,Any}()
+        outer_cache[read_darray] = inner_cache
+        finalizer(read_darray) do _
+            for halo in values(inner_cache)
+                unsafe_free!(halo)
+            end
+        end
+    end
+    return outer_cache[read_darray]
+end
+
+# Cache-miss path: allocate a fresh HaloArray. No cache operations — the main task stores
+# the result in the cache after spawn_datadeps completes.
+function build_halo_new(neigh_dist, boundary, center, region_metadata, neighbor_chunks...)
+    N = ndims(center)
+    expected_halos = length(region_metadata)
+    @assert length(neighbor_chunks) == expected_halos
+    validate_neigh_dist(neigh_dist, size(center))
+    halo_width = ntuple(i -> get_neigh_dist(neigh_dist, i), N)
+    halos = ntuple(expected_halos) do i
+        region_code, is_boundary, boundary_dims = region_metadata[i]
+        chunk = neighbor_chunks[i]
+        is_boundary ? load_boundary_region(boundary, chunk, region_code, neigh_dist, boundary_dims) :
+                      load_neighbor_region(chunk, region_code, neigh_dist)
+    end
+    return HaloArray(copy(center), halos, halo_width)
+end
+
+# Cache-hit path: fill an existing HaloArray in-place and return it. No cache operations —
+# the HaloArray was looked up and passed by the main task before spawning.
+function fill_halo_inplace!(halo::HaloArray, neigh_dist, boundary, center, region_metadata, neighbor_chunks...)
+    expected_halos = length(region_metadata)
+    @assert length(neighbor_chunks) == expected_halos
+    copyto!(halo.center, center)
+    for i in 1:expected_halos
+        region_code, is_boundary, boundary_dims = region_metadata[i]
+        chunk = neighbor_chunks[i]
+        if is_boundary
+            load_boundary_region_into!(halo.halos[i], boundary, chunk, region_code, neigh_dist, boundary_dims)
+        else
+            load_neighbor_region_into!(halo.halos[i], chunk, region_code, neigh_dist)
+        end
+    end
+    return halo
+end
+
 function build_halo(neigh_dist, boundary, center, all_halos...)
     N = ndims(center)
     expected_halos = 3^N - 1
@@ -631,7 +819,8 @@ end
 function inner_stencil!(f, output, read_vars)
     processor = task_processor()
     inner_stencil_proc!(processor, f, output, read_vars)
-    foreach(v -> v isa HaloArray && unsafe_free!(v), values(read_vars))
+    # HaloArray lifetime is now managed by the DArray finalizer registered in
+    # get_halo_inner_cache; do not unsafe_free! here to avoid use-after-free on cache hits.
 end
 
 # Non-KA (for CPUs)
@@ -827,17 +1016,36 @@ macro stencil(orig_ex)
         # 2a. Pre-spawn all halos for this expression outside spawn_datadeps.
         # The preceding spawn_datadeps (if any) has already completed, so the
         # source arrays reflect any writes from earlier expressions.
-        # Pass DTasks directly — no In/Read wrappers needed outside datadeps.
+        # All cache operations (WeakKeyDict lookup, hit/miss check, post-spawn population)
+        # happen on the main task here — never inside @spawn — so no DArray is ever passed
+        # as a Dagger task argument (avoiding GPU unwrapping, serialization copies, etc.).
         @gensym halo_tasks_map
         push!(final_ex.args, :($halo_tasks_map = Dict{Symbol, Any}()))
+        # Collect gensym'd variable names per read_var for use in the post-spawn update.
+        cache_sym_map = Dict{Symbol, NamedTuple}()
         for read_var in read_vars
             if read_var in keys(neighborhoods)
                 neigh_dist, boundary = neighborhoods[read_var]
-                @gensym halo_tasks
+                @gensym halo_tasks region_meta region_meta_tuple neighbor_cks halo_width_var inner_cache_var cache_key_var
+                cache_sym_map[read_var] = (; halo_tasks, halo_width_var, inner_cache_var, cache_key_var)
+                # Validate neigh_dist type/positivity/dimensions and compute halo_width before
+                # spawning anything, so errors surface immediately on the main task.
+                push!(final_ex.args, :($validate_neigh_dist($neigh_dist, ndims($read_var))))
+                push!(final_ex.args, :($halo_width_var = ntuple(i -> $get_neigh_dist($neigh_dist, i), ndims($read_var))))
+                push!(final_ex.args, :($inner_cache_var = $get_halo_inner_cache($read_var)))
                 push!(final_ex.args, :($halo_tasks = Array{$DTask}(undef, size($chunks($read_var)))))
                 push!(final_ex.args, quote
                     for $chunk_idx in $CartesianIndices($chunks($read_var))
-                        $halo_tasks[$chunk_idx] = Dagger.@spawn name="stencil_build_halo" $build_halo($neigh_dist, $boundary, $select_neighborhood_chunks($chunks($read_var), $chunk_idx, $neigh_dist, $boundary)...)
+                        ($region_meta, $neighbor_cks) = $select_neighborhood_info($chunks($read_var), $chunk_idx, $neigh_dist, $boundary)
+                        $region_meta_tuple = tuple($region_meta...)
+                        $cache_key_var = ($chunk_idx, $halo_width_var)
+                        if haskey($inner_cache_var, $cache_key_var)
+                            # Cache hit: pass the existing buffer for in-place fill.
+                            $halo_tasks[$chunk_idx] = Dagger.@spawn name="stencil_fill_halo" $fill_halo_inplace!($inner_cache_var[$cache_key_var], $neigh_dist, $boundary, $chunks($read_var)[$chunk_idx], $region_meta_tuple, $neighbor_cks...)
+                        else
+                            # Cache miss: allocate a fresh HaloArray inside the task.
+                            $halo_tasks[$chunk_idx] = Dagger.@spawn name="stencil_build_halo" $build_halo_new($neigh_dist, $boundary, $chunks($read_var)[$chunk_idx], $region_meta_tuple, $neighbor_cks...)
+                        end
                     end
                 end)
                 push!(final_ex.args, :($halo_tasks_map[$(QuoteNode(read_var))] = $halo_tasks))
@@ -870,6 +1078,27 @@ macro stencil(orig_ex)
                 $spawn_ex
             end
         end))
+
+        # 2d. After spawn_datadeps completes, populate the cache with the results of any
+        # cache-miss halo tasks. spawn_datadeps has already waited for all halo tasks
+        # (transitively, since inner stencil tasks depend on them), so fetch is instant.
+        for read_var in read_vars
+            if read_var in keys(neighborhoods)
+                syms = cache_sym_map[read_var]
+                halo_tasks      = syms.halo_tasks
+                inner_cache_var = syms.inner_cache_var
+                halo_width_var  = syms.halo_width_var
+                cache_key_var   = syms.cache_key_var
+                push!(final_ex.args, quote
+                    for $chunk_idx in $CartesianIndices($chunks($read_var))
+                        $cache_key_var = ($chunk_idx, $halo_width_var)
+                        if !haskey($inner_cache_var, $cache_key_var)
+                            $inner_cache_var[$cache_key_var] = fetch($halo_tasks[$chunk_idx]; raw=true)
+                        end
+                    end
+                end)
+            end
+        end
     end
 
     # 3. Return last allocated var if applicable
