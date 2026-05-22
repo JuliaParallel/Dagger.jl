@@ -791,8 +791,11 @@ macro stencil(orig_ex)
         end
     end
 
-    # 2. Stencil operations (inside spawn_datadeps)
-    datadeps_body = Expr(:block)
+    # 2. Stencil operations: one spawn_datadeps region per expression.
+    # Because spawn_datadeps blocks until all its tasks complete, each expression's
+    # region fully finishes before the next expression's halo tasks are spawned.
+    # This means HaloArray allocations can always live outside spawn_datadeps,
+    # avoiding Datadeps aliasing issues unconditionally.
     for (;inner_ex, accessed_vars, write_var, write_idx, read_ex, read_vars, neighborhoods, is_allocation, source_var) in inners
         # Generate a variable for chunk access
         @gensym chunk_idx
@@ -821,21 +824,23 @@ macro stencil(orig_ex)
         end
         inner_fn = Expr(:->, Expr(:tuple, Expr(:parameters, inner_write_var, actual_read_vars...)), new_inner_ex)
 
-        # 2a. Pre-spawn all halos for this expression
-        # This ensures all readers capture the "old" state before any writers start.
+        # 2a. Pre-spawn all halos for this expression outside spawn_datadeps.
+        # The preceding spawn_datadeps (if any) has already completed, so the
+        # source arrays reflect any writes from earlier expressions.
+        # Pass DTasks directly — no In/Read wrappers needed outside datadeps.
         @gensym halo_tasks_map
-        push!(datadeps_body.args, :($halo_tasks_map = Dict{Symbol, Any}()))
+        push!(final_ex.args, :($halo_tasks_map = Dict{Symbol, Any}()))
         for read_var in read_vars
             if read_var in keys(neighborhoods)
                 neigh_dist, boundary = neighborhoods[read_var]
                 @gensym halo_tasks
-                push!(datadeps_body.args, :($halo_tasks = Array{$DTask}(undef, size($chunks($read_var)))))
-                push!(datadeps_body.args, quote
+                push!(final_ex.args, :($halo_tasks = Array{$DTask}(undef, size($chunks($read_var)))))
+                push!(final_ex.args, quote
                     for $chunk_idx in $CartesianIndices($chunks($read_var))
-                        $halo_tasks[$chunk_idx] = Dagger.@spawn name="stencil_build_halo" $build_halo($neigh_dist, $boundary, map($Read, $select_neighborhood_chunks($chunks($read_var), $chunk_idx, $neigh_dist, $boundary))...)
+                        $halo_tasks[$chunk_idx] = Dagger.@spawn name="stencil_build_halo" $build_halo($neigh_dist, $boundary, $select_neighborhood_chunks($chunks($read_var), $chunk_idx, $neigh_dist, $boundary)...)
                     end
                 end)
-                push!(datadeps_body.args, :($halo_tasks_map[$(QuoteNode(read_var))] = $halo_tasks))
+                push!(final_ex.args, :($halo_tasks_map[$(QuoteNode(read_var))] = $halo_tasks))
             end
         end
 
@@ -857,17 +862,15 @@ macro stencil(orig_ex)
         end
         spawn_ex = :(Dagger.@spawn name="stencil_inner_fn" $inner_fn(;$(deps_ex...)))
 
-        # 2c. Generate loop to spawn stencil tasks
-        push!(datadeps_body.args, quote
+        # 2c. Each expression gets its own spawn_datadeps region. Because
+        # spawn_datadeps blocks on completion, the next expression's halo
+        # pre-spawns will always see fully up-to-date array data.
+        push!(final_ex.args, :(Dagger.spawn_datadeps() do
             for $chunk_idx in $CartesianIndices($chunks($write_var))
                 $spawn_ex
             end
-        end)
+        end))
     end
-
-    push!(final_ex.args, :(Dagger.spawn_datadeps() do
-        $datadeps_body
-    end))
 
     # 3. Return last allocated var if applicable
     if !isempty(inners) && inners[end].is_allocation
