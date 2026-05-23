@@ -235,7 +235,7 @@ function __init__()
         @warn "Error parsing JULIA_DAGGER_DEBUG" exception=err
     end
 
-    if reuse_metrics
+    if reuse_metrics && myid() == 1
         try
             if isfile(metrics_path * ".base") || isfile(metrics_path)
                 MT.load_metrics!(MT.global_metrics_cache(), metrics_path)
@@ -246,7 +246,7 @@ function __init__()
         end
         atexit() do
             try
-                MT.save_metrics(MT.global_metrics_cache(), metrics_path)
+                MT.save_metrics!(MT.global_metrics_cache(), metrics_path)
                 MT.detach_journal!(MT.global_metrics_cache())
             catch err
                 @warn "Failed to save Dagger metrics on exit" exception=err

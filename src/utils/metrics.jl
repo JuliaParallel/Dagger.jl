@@ -128,15 +128,15 @@ function extract_collected_metrics(local_cache::MT.MetricsCache, key)
     return pairs
 end
 
-function apply_collected_metrics!(cache::MT.MetricsCache, key, pairs)
+function apply_collected_metrics!(cache::MT.MetricsCache, key::K, pairs) where K
     pairs === nothing && return
     isempty(pairs) && return
     MT.bulk_update!(cache) do c
-        ctx = MT.pending_context!(c, Dagger, :execute!)
+        ctx = MT.pending_context!(c, Dagger, :execute!, K)
         for (metric, value) in pairs
             value === nothing && continue
             storage = MT.get_or_create_storage!(ctx, metric)
-            storage.data[key] = value
+            MT.set_metric_value!(storage, key, value)
         end
     end
     return

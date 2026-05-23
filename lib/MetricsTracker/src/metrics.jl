@@ -73,16 +73,16 @@ function commit_metric_values!(ms::MetricsSpec, mod::Module, context::Symbol,
 end
 
 function apply_values!(cache::MetricsCache, ms::MetricsSpec, mod::Module, context::Symbol,
-                       key, values::Tuple)
+                       key::K, values::Tuple) where K
     journal = get_journal(cache)
     bulk_update!(cache) do c
-        ctx = pending_context!(c, mod, context)
+        ctx = pending_context!(c, mod, context, K)
         for i in 1:length(ms.metrics)
             v = values[i]
             v === nothing && continue
             m = ms.metrics[i]
             storage = get_or_create_storage!(ctx, m)
-            storage.data[key] = v
+            set_metric_value!(storage, key, v)
             if journal !== nothing
                 append_journal!(journal, (mod, context), m, key, v)
             end

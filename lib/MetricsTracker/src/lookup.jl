@@ -56,10 +56,9 @@ function cache_lookup(snap::MetricsSnapshot, mod::Module, context::Symbol,
     ctx === nothing && return nothing
     target_storage = get(ctx.storages, target_metric, nothing)
     target_storage === nothing && return nothing
-    target_typed = target_storage::MetricStorage{M, T}
-    for key in keys(target_typed.data)
+    for key in keys(target_storage.data)
         if matches_all(ctx, key, (lookup,))
-            return target_typed.data[key]::T
+            return target_storage.data[key]::T
         end
     end
     return nothing
@@ -72,16 +71,15 @@ function cache_lookup(snap::MetricsSnapshot, mod::Module, context::Symbol,
     ctx === nothing && return nothing
     target_storage = get(ctx.storages, target_metric, nothing)
     target_storage === nothing && return nothing
-    target_typed = target_storage::MetricStorage{M, T}
-    for key in keys(target_typed.data)
+    for key in keys(target_storage.data)
         if matches_all(ctx, key, lookups)
-            return target_typed.data[key]::T
+            return target_storage.data[key]::T
         end
     end
     return nothing
 end
 
-function matches_all(ctx::ContextStorage, key, lookups)
+function matches_all(ctx::AbstractContextStorage, key, lookups)
     for lookup in lookups
         if !matches_lookup(ctx, key, lookup)
             return false
@@ -90,7 +88,7 @@ function matches_all(ctx::ContextStorage, key, lookups)
     return true
 end
 
-function matches_lookup(ctx::ContextStorage, key, lookup::AbstractLookup)
+function matches_lookup(ctx::AbstractContextStorage, key, lookup::AbstractLookup)
     for (metric, storage) in ctx.storages
         if lookup_match_metric(lookup, metric)
             if haskey(storage.data, key)
@@ -182,10 +180,24 @@ end
 function values_for_metric(snap::MetricsSnapshot, mod::Module, context::Symbol,
                            m::M) where {M<:AbstractMetric}
     T = metric_type(M)
+    result = Dict{Any, T}()
     ctx = get(snap.contexts, (mod, context), nothing)
-    ctx === nothing && return Dict{Any, T}()
+    ctx === nothing && return result
     storage = get(ctx.storages, m, nothing)
-    storage === nothing && return Dict{Any, T}()
-    typed_storage = storage::MetricStorage{M, T}
-    return typed_storage.data
+    storage === nothing && return result
+    for (k, v) in storage.data
+        result[k] = v
+    end
+    return result
+end
+
+function values_for_metric(snap::MetricsSnapshot, mod::Module, context::Symbol,
+                           m::M, ::Type{K}) where {M<:AbstractMetric, K}
+    T = metric_type(M)
+    ctx = get(snap.contexts, (mod, context), nothing)
+    ctx === nothing && return Dict{K, T}()
+    storage = get(ctx.storages, m, nothing)
+    storage === nothing && return Dict{K, T}()
+    typed_storage = storage::MetricStorage{M, K, T}
+    return typed_storage.data::Dict{K, T}
 end

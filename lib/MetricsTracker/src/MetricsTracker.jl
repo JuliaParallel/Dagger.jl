@@ -11,7 +11,8 @@ export SyncTask, SyncGlobal, SyncInto
 export LookupExact, LookupSubtype, LookupCustom
 export @with_metrics, with_metrics
 export snapshot, cache_lookup, find_keys, values_for_metric, lookup_value, metric_storage
-export load_metrics!, save_metrics, attach_journal!, detach_journal!, compact_journal!
+export load_metrics!, save_metrics!, attach_journal!, detach_journal!, compact_journal!
+export trim!, key_type, value_type, set_metric_value!, delete_metric_value!
 export metric_type, metric_applies, is_result_metric, start_metric, stop_metric, result_metric
 export merge_into!, reset_global_cache!, global_metrics_cache, local_metrics_cache
 
