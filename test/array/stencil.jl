@@ -1,6 +1,6 @@
 import Dagger: @stencil, Wrap, Pad, Reflect, Clamp, LinearExtrapolate
 
-function test_stencil()
+function test_stencil(; gpu::Bool=false)
     @testset "Simple assignment" begin
         A = zeros(Blocks(2, 2), Int, 4, 4)
         @stencil A[idx] = 1
@@ -387,6 +387,8 @@ function test_stencil()
 
     # From issue #669
     for N in 3:4
+        # Fine-grained 4D GPU stencils require too many halo copies for typical GPU memory
+        gpu && N == 4 && continue
         @testset "$(N)D array" begin
             A = ones(Blocks(ntuple(_->1, N)...), Int, ntuple(_->3, N)...)
             Dagger.allowscalar() do
@@ -497,7 +499,7 @@ end
         kind == :oneAPI && continue
         @testset "$kind" begin
             Dagger.with_options(;scope) do
-                test_stencil()
+                test_stencil(; gpu=true)
             end
         end
     end
