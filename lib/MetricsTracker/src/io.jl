@@ -92,7 +92,7 @@ end
 function load_base_snapshot(path::String)
     isfile(path) || return nothing
     try
-        return deserialize(path)::Dict{ContextKey, ContextStorage}
+        return deserialize(path)::Dict{ContextKey, AbstractContextStorage}
     catch err
         @warn "Failed to load base snapshot" exception=err
         return nothing
@@ -108,14 +108,14 @@ function atomic_write(f::Function, path::String)
     return
 end
 
-function write_base_snapshot(path::String, contexts::Dict{ContextKey, ContextStorage})
+function write_base_snapshot(path::String, contexts::Dict{ContextKey, AbstractContextStorage})
     atomic_write(path) do io
         serialize(io, contexts)
     end
     return
 end
 
-const JOURNALS = Base.Lockable(IdDict{MetricsCache, MetricsJournal}())
+const JOURNALS = Base.Lockable(WeakKeyDict{MetricsCache, MetricsJournal}())
 
 function attach_journal!(cache::MetricsCache, path::String;
                          compact_threshold::UInt64=UInt64(1024))
@@ -159,19 +159,21 @@ function load_metrics!(cache::MetricsCache, path::String)
     bulk_update!(cache) do c
         if base !== nothing
             for (ctx_key, ctx) in base
-                dest_ctx = pending_context!(c, ctx_key[1], ctx_key[2])
+                K = key_type(ctx)
+                dest_ctx = pending_context!(c, ctx_key[1], ctx_key[2], K)
                 for (metric, storage) in ctx.storages
                     dest_storage = get_or_create_storage!(dest_ctx, metric)
-                    for (k, v) in storage.data
-                        dest_storage.data[k] = v
+                    for k in storage.insertion_order
+                        set_metric_value!(dest_storage, k, storage.data[k])
                     end
                 end
             end
         end
         for entry in journal_entries
-            ctx = pending_context!(c, entry.context[1], entry.context[2])
+            K = typeof(entry.key)
+            ctx = pending_context!(c, entry.context[1], entry.context[2], K)
             storage = get_or_create_storage!(ctx, entry.metric)
-            storage.data[entry.key] = entry.value
+            set_metric_value!(storage, entry.key, entry.value)
         end
     end
     return cache
@@ -181,7 +183,7 @@ function load_metrics!(path::String)
     return load_metrics!(GLOBAL_METRICS_CACHE, path)
 end
 
-function save_metrics(cache::MetricsCache, path::String)
+function save_metrics!(cache::MetricsCache, path::String)
     snap = snapshot(cache)
     base_path = path * ".base"
     write_base_snapshot(base_path, snap.contexts)
@@ -209,15 +211,15 @@ function save_metrics(cache::MetricsCache, path::String)
     return path
 end
 
-function save_metrics(path::String)
-    return save_metrics(GLOBAL_METRICS_CACHE, path)
+function save_metrics!(path::String)
+    return save_metrics!(GLOBAL_METRICS_CACHE, path)
 end
 
 function compact_journal!(cache::MetricsCache)
     journal = get_journal(cache)
     journal === nothing && return
     if (@atomic journal.write_count) >= (@atomic journal.compact_threshold)
-        save_metrics(cache, journal.path)
+        save_metrics!(cache, journal.path)
     end
     return
 end

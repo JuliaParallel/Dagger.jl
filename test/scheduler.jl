@@ -461,18 +461,20 @@ end
         @testset "Per-Processor Transfer Rate" begin
             wid = first(workers())
             cache = MetricsTracker.global_metrics_cache()
+            test_local_id = 999_999_000
+            test_remote_id = 999_999_001
 
             MetricsTracker.bulk_update!(cache) do c
-                ctx = MetricsTracker.pending_context!(c, Dagger, :execute!)
+                ctx = MetricsTracker.pending_context!(c, Dagger, :execute!, Int)
                 proc_storage = MetricsTracker.get_or_create_storage!(ctx, Dagger.ProcessorMetric())
                 worker_storage = MetricsTracker.get_or_create_storage!(ctx, Dagger.WorkerMetric())
                 rate_storage = MetricsTracker.get_or_create_storage!(ctx, Dagger.TransferRateMetric())
-                proc_storage.data[:test_local] = tproc1_1
-                worker_storage.data[:test_local] = 1
-                rate_storage.data[:test_local] = UInt64(2_000_000)
-                proc_storage.data[:test_remote] = tproc2_1
-                worker_storage.data[:test_remote] = wid
-                rate_storage.data[:test_remote] = UInt64(500_000)
+                MetricsTracker.set_metric_value!(proc_storage, test_local_id, tproc1_1)
+                MetricsTracker.set_metric_value!(worker_storage, test_local_id, 1)
+                MetricsTracker.set_metric_value!(rate_storage, test_local_id, UInt64(2_000_000))
+                MetricsTracker.set_metric_value!(proc_storage, test_remote_id, tproc2_1)
+                MetricsTracker.set_metric_value!(worker_storage, test_remote_id, wid)
+                MetricsTracker.set_metric_value!(rate_storage, test_remote_id, UInt64(500_000))
             end
 
             args = [Dagger.tochunk(1), Dagger.tochunk(2)]
@@ -487,11 +489,11 @@ end
             @test costs[tproc1_1] ≈ sig_unknown_cost
 
             MetricsTracker.bulk_update!(cache) do c
-                ctx = MetricsTracker.pending_context!(c, Dagger, :execute!)
+                ctx = MetricsTracker.pending_context!(c, Dagger, :execute!, Int)
                 for m in (Dagger.ProcessorMetric(), Dagger.WorkerMetric(), Dagger.TransferRateMetric())
                     storage = MetricsTracker.get_or_create_storage!(ctx, m)
-                    delete!(storage.data, :test_local)
-                    delete!(storage.data, :test_remote)
+                    MetricsTracker.delete_metric_value!(storage, test_local_id)
+                    MetricsTracker.delete_metric_value!(storage, test_remote_id)
                 end
             end
         end
