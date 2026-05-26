@@ -9,6 +9,12 @@ struct HaloArray{T,N,A<:AbstractArray{T,N},H<:Tuple} <: AbstractArray{T,N}
     center::A
     halos::H  # Tuple of 3^N - 1 arrays in canonical order
     halo_width::NTuple{N,Int}
+    own_center::Bool
+end
+
+function HaloArray(center, halos::Tuple, halo_width::NTuple{N,Int}; own_center::Bool=false) where N
+    T = eltype(center)
+    return HaloArray{T,N,typeof(center),typeof(halos)}(center, halos, halo_width, own_center)
 end
 
 # Number of halo regions for N dimensions
@@ -63,7 +69,7 @@ function HaloArray{T,N}(center_size::NTuple{N,Int}, halo_width::NTuple{N,Int}) w
         Array{T,N}(undef, region_size...)
     end
 
-    return HaloArray{T,N,typeof(center),typeof(halos)}(center, halos, halo_width)
+    return HaloArray(center, halos, halo_width; own_center=true)
 end
 
 Base.size(tile::HaloArray) = size(tile.center) .+ 2 .* tile.halo_width
@@ -83,7 +89,7 @@ function Base.copy(tile::HaloArray{T,N}) where {T,N}
     center = copy(tile.center)
     halos = ntuple(i -> copy(tile.halos[i]), length(tile.halos))
     halo_width = tile.halo_width
-    return HaloArray(center, halos, halo_width)
+    return HaloArray(center, halos, halo_width; own_center=true)
 end
 
 # Compute the region code for a given index
@@ -182,7 +188,8 @@ end
 Adapt.adapt_structure(to, H::Dagger.HaloArray) =
     HaloArray(Adapt.adapt(to, H.center),
               Adapt.adapt.(Ref(to), H.halos),
-              H.halo_width)
+              H.halo_width;
+              own_center=H.own_center)
 
 function aliasing(A::HaloArray)
     return CombinedAliasing([aliasing(A.center), map(aliasing, A.halos)...])
@@ -193,16 +200,17 @@ function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::P
     center_chunk = move_rewrap(cache, from_proc, to_proc, from_space, to_space, A.center)
     halo_chunks = ntuple(i -> move_rewrap(cache, from_proc, to_proc, from_space, to_space, A.halos[i]), length(A.halos))
     halo_width = A.halo_width
+    own_center = A.own_center
     to_w = root_worker_id(to_proc)
-    return remotecall_fetch(to_w, from_proc, to_proc, from_space, to_space, center_chunk, halo_chunks, halo_width) do from_proc, to_proc, from_space, to_space, center_chunk, halo_chunks, halo_width
+    return remotecall_fetch(to_w, from_proc, to_proc, from_space, to_space, center_chunk, halo_chunks, halo_width, own_center) do from_proc, to_proc, from_space, to_space, center_chunk, halo_chunks, halo_width, own_center
         center_new = unwrap(center_chunk)
         halos_new = ntuple(i -> unwrap(halo_chunks[i]), length(halo_chunks))
-        return tochunk(HaloArray(center_new, halos_new, halo_width), to_proc)
+        return tochunk(HaloArray(center_new, halos_new, halo_width; own_center=own_center), to_proc)
     end
 end
 
 function Dagger.unsafe_free!(A::HaloArray)
-    unsafe_free!(A.center)
+    A.own_center && unsafe_free!(A.center)
     foreach(unsafe_free!, A.halos)
 end
 

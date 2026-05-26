@@ -54,8 +54,7 @@ function load_neighbor_region(arr, region_code::NTuple{N,Int}, neigh_dist) where
             lastindex(arr, i)
         end
     end)
-    # FIXME: Don't collect
-    return move(task_processor(), collect(@view arr[start_idx:stop_idx]))
+    return move(task_processor(), copy(@view arr[start_idx:stop_idx]))
 end
 
 # In-place variant: load region directly into a pre-allocated destination buffer.
@@ -176,8 +175,9 @@ function load_boundary_region(pad::Pad, arr, region_code::NTuple{N,Int}, neigh_d
     region_size = ntuple(N) do i
         region_code[i] == 0 ? size(arr, i) : get_neigh_dist(neigh_dist, i)
     end
-    # FIXME: return Fill(pad.padval, region_size)
-    return move(task_processor(), fill(pad.padval, region_size))
+    result = similar(arr, region_size...)
+    fill!(result, pad.padval)
+    return move(task_processor(), result)
 end
 
 load_boundary_region_into!(dest, pad::Pad, arr, region_code, neigh_dist, boundary_dims) =
@@ -462,7 +462,7 @@ function load_boundary_region(::Reflect{Symm}, arr, region_code::NTuple{N,Int}, 
         end
     end)
 
-    region = move(task_processor(), collect(@view arr[start_idx:stop_idx]))
+    region = move(task_processor(), copy(@view arr[start_idx:stop_idx]))
 
     # Reverse only along dimensions that are actually being reflected
     # (both non-zero in region_code AND past boundary)
@@ -649,6 +649,123 @@ end
 # Chunk Selection and Halo Building
 #############################################################################
 
+function load_neighborhood_halos(chunks, idx, neigh_dist, boundary)
+    validate_neigh_dist(neigh_dist)
+
+    N = ndims(chunks)
+    chunk_dist = 1
+    nhalos = 3^N - 1
+    halos = Vector{Any}(undef, nhalos)
+    h = 0
+
+    for i in 0:(3^N - 1)
+        region_code = ntuple(N) do d
+            ((i ÷ 3^(d-1)) % 3) - 1
+        end
+        all(==(0), region_code) && continue
+        h += 1
+
+        chunk_offset = CartesianIndex(ntuple(N) do d
+            region_code[d] * chunk_dist
+        end)
+        new_idx = idx + chunk_offset
+
+        if is_past_boundary(size(chunks), new_idx)
+            boundary_dims = ntuple(N) do d
+                new_idx[d] < 1 || new_idx[d] > size(chunks)[d]
+            end
+            if boundary_has_transition(boundary)
+                new_idx = boundary_transition(boundary, new_idx, size(chunks))
+            else
+                new_idx = idx
+            end
+            chunk = chunks[new_idx]
+            halos[h] = load_boundary_region(boundary, chunk, region_code, neigh_dist, boundary_dims)
+        else
+            chunk = chunks[new_idx]
+            halos[h] = load_neighbor_region(chunk, region_code, neigh_dist)
+        end
+    end
+
+    @assert h == nhalos
+    return Tuple(halos)
+end
+
+function load_neighborhood_halos_from_deps(deps, idx, chunk_size, neigh_dist, boundary)
+    validate_neigh_dist(neigh_dist)
+
+    N = length(chunk_size)
+    chunk_dist = 1
+    nhalos = 3^N - 1
+    halos = Vector{Any}(undef, nhalos)
+    h = 0
+
+    for i in 0:(3^N - 1)
+        region_code = ntuple(N) do d
+            ((i ÷ 3^(d-1)) % 3) - 1
+        end
+        all(==(0), region_code) && continue
+        h += 1
+
+        chunk_offset = CartesianIndex(ntuple(N) do d
+            region_code[d] * chunk_dist
+        end)
+        new_idx = idx + chunk_offset
+
+        chunk = deps[h+1]
+        if is_past_boundary(chunk_size, new_idx)
+            boundary_dims = ntuple(N) do d
+                new_idx[d] < 1 || new_idx[d] > chunk_size[d]
+            end
+            halos[h] = load_boundary_region(boundary, chunk, region_code, neigh_dist, boundary_dims)
+        else
+            halos[h] = load_neighbor_region(chunk, region_code, neigh_dist)
+        end
+    end
+
+    @assert h == nhalos
+    return Tuple(halos)
+end
+
+function select_neighborhood_chunk_deps(chunks, idx, neigh_dist, boundary)
+    validate_neigh_dist(neigh_dist)
+
+    N = ndims(chunks)
+    chunk_dist = 1
+
+    accesses = Any[chunks[idx]]
+
+    for i in 0:(3^N - 1)
+        region_code = ntuple(N) do d
+            ((i ÷ 3^(d-1)) % 3) - 1
+        end
+        all(==(0), region_code) && continue
+
+        chunk_offset = CartesianIndex(ntuple(N) do d
+            region_code[d] * chunk_dist
+        end)
+        new_idx = idx + chunk_offset
+
+        if is_past_boundary(size(chunks), new_idx)
+            if boundary_has_transition(boundary)
+                new_idx = boundary_transition(boundary, new_idx, size(chunks))
+            else
+                new_idx = idx
+            end
+        end
+        push!(accesses, chunks[new_idx])
+    end
+
+    @assert length(accesses) == 3^N
+    return accesses
+end
+
+function build_chunk_halo(neigh_dist, boundary, idx, chunk_size, own_center::Bool, read_deps...)
+    center = read_deps[1]
+    halos = load_neighborhood_halos_from_deps(read_deps, idx, chunk_size, neigh_dist, boundary)
+    return build_halo(neigh_dist, boundary, center, halos...; own_center=own_center)
+end
+
 function select_neighborhood_chunks(chunks, idx, neigh_dist, boundary)
     validate_neigh_dist(neigh_dist)
 
@@ -698,7 +815,7 @@ end
 
 # Returns (region_metadata, neighbor_chunk_dtasks) without spawning intermediate load tasks.
 # region_metadata: Vector of (region_code, is_boundary, boundary_dims).
-# neighbor_chunk_dtasks: Vector of raw chunk DTasks (resolved to arrays when build_halo_consolidated runs).
+# neighbor_chunk_dtasks: Vector of raw chunk DTasks (resolved to arrays when build_halo_new runs).
 function select_neighborhood_info(chunks, idx, neigh_dist, boundary)
     validate_neigh_dist(neigh_dist)
     N = ndims(chunks)
@@ -782,7 +899,7 @@ function build_halo_new(neigh_dist, boundary, center, region_metadata, neighbor_
         is_boundary ? load_boundary_region(boundary, chunk, region_code, neigh_dist, boundary_dims) :
                       load_neighbor_region(chunk, region_code, neigh_dist)
     end
-    return HaloArray(copy(center), halos, halo_width)
+    return HaloArray(copy(center), halos, halo_width; own_center=true)
 end
 
 # Cache-hit path: fill an existing HaloArray in-place and return it. No cache operations —
@@ -803,11 +920,12 @@ function fill_halo_inplace!(halo::HaloArray, neigh_dist, boundary, center, regio
     return halo
 end
 
-function build_halo(neigh_dist, boundary, center, all_halos...)
+function build_halo(neigh_dist, boundary, center, all_halos...; own_center::Bool=false)
     N = ndims(center)
     expected_halos = 3^N - 1
     @assert length(all_halos) == expected_halos "Halo mismatch: N=$N expected $expected_halos halos, got $(length(all_halos))"
-    return HaloArray(copy(center), (all_halos...,), ntuple(i->get_neigh_dist(neigh_dist, i), N))
+    center_data = own_center ? copy(center) : center
+    return HaloArray(center_data, (all_halos...,), ntuple(i->get_neigh_dist(neigh_dist, i), N); own_center)
 end
 
 function load_neighborhood(arr::HaloArray{T,N}, idx) where {T,N}
