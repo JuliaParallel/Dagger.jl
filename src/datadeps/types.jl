@@ -1,4 +1,4 @@
-import Graphs: SimpleDiGraph, add_edge!, add_vertex!, inneighbors, outneighbors, nv
+import Graphs: SimpleDiGraph, add_edge!, add_vertex!, inneighbors, outneighbors, nv, ne
 
 ### Scheduling ###
 
@@ -15,12 +15,14 @@ struct DAGSpec
     uid_to_id::Dict{UInt, Int}
     id_to_functype::Dict{Int, Type} # FIXME: DatadepsArgSpec
     id_to_argtypes::Dict{Int, Vector{DatadepsArgSpec}}
+    id_to_scope::Dict{Int, AbstractScope}
     id_to_spec::Dict{Int, DTaskSpec}
     id_to_task::Dict{Int, DTask}
     DAGSpec() = new(SimpleDiGraph{Int}(),
                     Dict{Int, UInt}(), Dict{UInt, Int}(),
                     Dict{Int, Type}(),
                     Dict{Int, Vector{DatadepsArgSpec}}(),
+                    Dict{Int, AbstractScope}(),
                     Dict{Int, DTaskSpec}(),
                     Dict{Int, DTask}())
 end

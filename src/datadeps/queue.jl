@@ -127,26 +127,35 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
     # Attempt to find any matching DAG specs and reuse their schedule
     schedule = Dict{DTask, Processor}()
-    for (other_spec, spec_schedule) in DATADEPS_DAG_SPECS[]
-        if other_spec == dag_spec
+    schedule_cache = datadeps_schedule_cache(queue.scheduler)
+    cache_hit = false
+    for (other_spec, spec_schedule) in schedule_cache
+        if datadeps_dag_equivalent(queue.scheduler, dag_spec, other_spec)
             @dagdebug nothing :spawn_datadeps "Found matching DAG spec!"
             for (id, proc) in spec_schedule.id_to_proc
                 uid = dag_spec.id_to_uid[id]
-                task_idx = findfirst(spec_task -> spec_task[2].uid == uid, queue.seen_tasks)
-                task = queue.seen_tasks[task_idx][2]
+                task_idx = findfirst(spec_task -> spec_task.task.uid == uid, queue.seen_tasks)
+                task = queue.seen_tasks[task_idx].task
                 schedule[task] = proc
             end
+            cache_hit = true
             break
         end
     end
 
-    if isempty(schedule)
-        # No matching DAG specs found
-        if !isempty(dag_spec)
-            # Use AOT scheduling
-            datadeps_schedule_dag_aot!(queue.scheduler, schedule, dag_spec, all_procs, all_scope)
-        else
-            # Use JIT scheduling (done in distribute_task!)
+    if !cache_hit && !isempty(dag_spec)
+        # Compute a fresh AOT schedule (no-op for schedulers that fall back
+        # to JIT in distribute_task!)
+        datadeps_schedule_dag_aot!(queue.scheduler, schedule, dag_spec, all_procs, all_scope)
+
+        # Persist the schedule for reuse by future equivalent DAGs
+        if !isempty(schedule)
+            spec_schedule = DAGSpecSchedule()
+            for (task, proc) in schedule
+                id = dag_spec.uid_to_id[task.uid]
+                spec_schedule.id_to_proc[id] = proc
+            end
+            push!(schedule_cache, dag_spec => spec_schedule)
         end
     end
 
