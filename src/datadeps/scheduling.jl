@@ -48,8 +48,10 @@ function dag_add_task!(dspec::DAGSpec, state, tspec::DTaskSpec, task::DTask)
         end
     end
     dspec.id_to_argtypes[id] = argtypes
+    dspec.id_to_scope[id] = @something(tspec.options.compute_scope,
+                                       tspec.options.scope,
+                                       DefaultScope())
 
-    # FIXME: Also record some portion of options
     # FIXME: Record syncdeps
     dspec.id_to_uid[id] = task.uid
     dspec.uid_to_id[task.uid] = id
@@ -89,47 +91,155 @@ end
 function dag_has_task(dspec::DAGSpec, task::DTask)
     return task.uid in keys(dspec.uid_to_id)
 end
-function Base.:(==)(dspec1::DAGSpec, dspec2::DAGSpec)
-    # Are the graphs the same size?
+
+### DAGSpec Equivalence (scheduler-dispatched) ###
+
+"""
+    datadeps_dag_equivalent(scheduler, dspec1::DAGSpec, dspec2::DAGSpec) -> Bool
+
+Returns `true` if a schedule cached for `dspec2` may safely be reused for
+`dspec1`, as judged by `scheduler`. This is the top-level entry point used by
+`distribute_tasks!` when looking up a cached schedule.
+
+The default implementation requires:
+- Same number of vertices and edges in the dependency graph
+- Identical edge sets (per-vertex `outneighbors`)
+- Per-vertex agreement on function type and on each task's compute scope
+- Per-vertex agreement on the multiset of argspecs, compared via
+  `datadeps_argspec_equivalent`
+
+Schedulers that want completely custom matching (or want to opt out of caching
+entirely) can override this directly. Schedulers that only want to tweak how
+individual arguments are compared should instead override
+`datadeps_argspec_equivalent` or `datadeps_ainfo_equivalent`.
+"""
+function datadeps_dag_equivalent(scheduler::DataDepsScheduler,
+                                 dspec1::DAGSpec, dspec2::DAGSpec)
+    # Graph shape
     nv(dspec1.g) == nv(dspec2.g) || return false
     ne(dspec1.g) == ne(dspec2.g) || return false
 
-    for id in 1:nv(dspec1.g)
-        # Are all the vertices the same?
-        id in keys(dspec2.id_to_uid) || return false
-        id in keys(dspec2.id_to_functype) || return false
-        id in keys(dspec2.id_to_argtypes) || return false
-
-        # Are all the edges the same?
-        inneighbors(dspec1.g, id) == inneighbors(dspec2.g, id) || return false
+    @inbounds for id in 1:nv(dspec1.g)
+        # outneighbors covers all edges; inneighbors would be redundant
         outneighbors(dspec1.g, id) == outneighbors(dspec2.g, id) || return false
 
-        # Are function types the same?
+        # Function type must match exactly
         dspec1.id_to_functype[id] === dspec2.id_to_functype[id] || return false
 
-        # Are argument types/relative dependencies the same?
-        for argspec1 in dspec1.id_to_argtypes[id]
-            # Is this argument position present in both?
-            argspec2_idx = findfirst(argspec2->argspec1.pos == argspec2.pos, dspec2.id_to_argtypes[id])
-            argspec2_idx === nothing && return false
-            argspec2 = dspec2.id_to_argtypes[id][argspec2_idx]
+        # Per-task compute scope must match (different scopes can produce
+        # different schedules and must not be aliased)
+        dspec1.id_to_scope[id] == dspec2.id_to_scope[id] || return false
 
-            # Are the arguments the same?
-            argspec1.value_type === argspec2.value_type || return false
-            argspec1.dep_mod === argspec2.dep_mod || return false
-            equivalent_structure(argspec1.ainfo, argspec2.ainfo) || return false
-        end
+        # Argspecs must match as a multiset (Deps can put multiple argspecs at
+        # the same position)
+        _argspecs_equivalent(scheduler,
+                             dspec1.id_to_argtypes[id],
+                             dspec2.id_to_argtypes[id]) || return false
     end
 
     return true
 end
+
+# Backwards-compatible default `==`: use the no-scheduler default (i.e. as if
+# all schedulers behaved like the base `DataDepsScheduler`). The runtime path
+# in `distribute_tasks!` calls `datadeps_dag_equivalent` directly.
+Base.:(==)(dspec1::DAGSpec, dspec2::DAGSpec) =
+    datadeps_dag_equivalent(_DefaultEquivalenceScheduler(), dspec1, dspec2)
+
+# A private marker scheduler used to provide a default for `Base.:(==)` on
+# `DAGSpec`. Not exported and not intended for direct use.
+struct _DefaultEquivalenceScheduler <: DataDepsScheduler end
+
+"""
+    datadeps_argspec_equivalent(scheduler,
+                                a1::DatadepsArgSpec,
+                                a2::DatadepsArgSpec) -> Bool
+
+Returns `true` if argspecs `a1` and `a2` are interchangeable for the purposes
+of `scheduler`'s cached-schedule lookup. The default requires equal positions,
+equal value types, equal dep_mods, and structurally-equivalent ainfos (per
+`datadeps_ainfo_equivalent`).
+"""
+function datadeps_argspec_equivalent(scheduler::DataDepsScheduler,
+                                     a1::DatadepsArgSpec, a2::DatadepsArgSpec)
+    a1.pos == a2.pos || return false
+    a1.value_type === a2.value_type || return false
+    a1.dep_mod === a2.dep_mod || return false
+    return datadeps_ainfo_equivalent(scheduler, a1.ainfo, a2.ainfo)
+end
+
+"""
+    datadeps_ainfo_equivalent(scheduler,
+                              a1::AbstractAliasing,
+                              a2::AbstractAliasing) -> Bool
+
+Returns `true` if aliasings `a1` and `a2` are interchangeable for the purposes
+of `scheduler`'s cached-schedule lookup. The default uses
+`equivalent_structure`, which compares shape/strides/lengths while ignoring
+absolute pointer addresses, enabling reuse across re-allocations.
+
+Schedulers can override this to choose a different equivalence strategy, e.g.
+pointer-identical (strictest), locality-only (memory-space only), or fully
+permissive.
+"""
+datadeps_ainfo_equivalent(::DataDepsScheduler,
+                          a1::AbstractAliasing, a2::AbstractAliasing) =
+    equivalent_structure(a1, a2)
+
+# Compare two argspec vectors as multisets, since `Deps` can place multiple
+# argspecs at the same position. We pair each argspec in `as1` with a not-yet-
+# matched argspec in `as2`; both lists must be exhausted simultaneously.
+function _argspecs_equivalent(scheduler::DataDepsScheduler,
+                              as1::Vector{DatadepsArgSpec},
+                              as2::Vector{DatadepsArgSpec})
+    length(as1) == length(as2) || return false
+    n = length(as1)
+    n == 0 && return true
+    matched = falses(n)
+    @inbounds for a1 in as1
+        found = false
+        for j in 1:n
+            matched[j] && continue
+            if datadeps_argspec_equivalent(scheduler, a1, as2[j])
+                matched[j] = true
+                found = true
+                break
+            end
+        end
+        found || return false
+    end
+    return true
+end
+
+### Schedule Cache (scheduler-owned) ###
 
 struct DAGSpecSchedule
     id_to_proc::Dict{Int, Processor}
     DAGSpecSchedule() = new(Dict{Int, Processor}())
 end
 
-const DATADEPS_DAG_SPECS = TaskLocalValue{Vector{Pair{DAGSpec, DAGSpecSchedule}}}(()->Vector{Pair{DAGSpec, DAGSpecSchedule}}())
+# Per-scheduler-type cache. Each entry in the inner Vector is a (DAGSpec =>
+# DAGSpecSchedule) pair recorded by a prior call. The outer Dict partitions
+# the cache by `typeof(scheduler)` so schedulers don't contaminate each other.
+const DATADEPS_DAG_SPECS =
+    TaskLocalValue{Dict{Type, Vector{Pair{DAGSpec, DAGSpecSchedule}}}}(
+        ()->Dict{Type, Vector{Pair{DAGSpec, DAGSpecSchedule}}}())
+
+"""
+    datadeps_schedule_cache(scheduler) -> Vector{Pair{DAGSpec, DAGSpecSchedule}}
+
+Returns the schedule cache that `scheduler` should consult for prior schedules
+and append newly-computed schedules to. The default implementation returns a
+task-local, per-scheduler-type cache.
+
+Override this to implement custom caching strategies (e.g., bounded LRU, no
+cache at all, cross-task shared cache).
+"""
+function datadeps_schedule_cache(scheduler::DataDepsScheduler)
+    cache_by_type = DATADEPS_DAG_SPECS[]
+    return get!(Vector{Pair{DAGSpec, DAGSpecSchedule}},
+                cache_by_type, typeof(scheduler))
+end
 
 ### JIT Schedulers ###
 
