@@ -877,29 +877,40 @@ function get_halo_inner_cache(read_darray)
         inner_cache = Dict{Any,Any}()
         outer_cache[read_darray] = inner_cache
         finalizer(read_darray) do _
-            for halo in values(inner_cache)
-                unsafe_free!(halo)
-            end
+            # GC finalizers cannot yield (no task switches allowed), but unsafe_free! on
+            # GPU/distributed Chunks calls remotecall_fetch which acquires locks and yields.
+            # Defer cleanup to a scheduled task so it runs outside the finalizer context.
+            errormonitor(Threads.@spawn begin
+                for halo in values(inner_cache)
+                    try
+                        unsafe_free!(halo)
+                    catch e
+                        # fill_halo_inplace! runs inside spawn_datadeps and may be placed
+                        # on a Distributed worker; if that worker has already exited by
+                        # cleanup time, skip the free. Use nameof to work with both
+                        # Distributed and DistributedNext backends.
+                        string(nameof(typeof(e))) == "ProcessExitedException" || rethrow(e)
+                    end
+                end
+            end)
         end
     end
     return outer_cache[read_darray]
 end
 
-# Cache-miss path: allocate a fresh HaloArray. No cache operations — the main task stores
-# the result in the cache after spawn_datadeps completes.
-function build_halo_new(neigh_dist, boundary, center, region_metadata, neighbor_chunks...)
+# Cache-miss path: allocate an empty HaloArray using similar() so the buffers are created
+# on the same device as the center chunk (GPU or CPU). No filling — that happens inside
+# spawn_datadeps via fill_halo_inplace!.
+function alloc_halo(neigh_dist, center)
     N = ndims(center)
-    expected_halos = length(region_metadata)
-    @assert length(neighbor_chunks) == expected_halos
-    validate_neigh_dist(neigh_dist, size(center))
+    center_size = size(center)
     halo_width = ntuple(i -> get_neigh_dist(neigh_dist, i), N)
-    halos = ntuple(expected_halos) do i
-        region_code, is_boundary, boundary_dims = region_metadata[i]
-        chunk = neighbor_chunks[i]
-        is_boundary ? load_boundary_region(boundary, chunk, region_code, neigh_dist, boundary_dims) :
-                      load_neighbor_region(chunk, region_code, neigh_dist)
+    codes = all_region_codes(Val(N))
+    halos = ntuple(length(codes)) do i
+        region_size = halo_region_size(center_size, halo_width, codes[i])
+        similar(center, region_size...)
     end
-    return HaloArray(copy(center), halos, halo_width; own_center=true)
+    return HaloArray(similar(center), halos, halo_width; own_center=true)
 end
 
 # Cache-hit path: fill an existing HaloArray in-place and return it. No cache operations —
@@ -1131,46 +1142,45 @@ macro stencil(orig_ex)
         end
         inner_fn = Expr(:->, Expr(:tuple, Expr(:parameters, inner_write_var, actual_read_vars...)), new_inner_ex)
 
-        # 2a. Pre-spawn all halos for this expression outside spawn_datadeps.
-        # The preceding spawn_datadeps (if any) has already completed, so the
-        # source arrays reflect any writes from earlier expressions.
-        # All cache operations (WeakKeyDict lookup, hit/miss check, post-spawn population)
-        # happen on the main task here — never inside @spawn — so no DArray is ever passed
-        # as a Dagger task argument (avoiding GPU unwrapping, serialization copies, etc.).
-        @gensym halo_tasks_map
-        push!(final_ex.args, :($halo_tasks_map = Dict{Symbol, Any}()))
-        # Collect gensym'd variable names per read_var for use in the post-spawn update.
+        # 2a. For each neighborhood read_var: pre-compute region metadata on the main task
+        # (to avoid passing DArrays into @spawn), and for cache misses spawn alloc_halo
+        # outside spawn_datadeps so that HaloArray buffers are allocated on the correct
+        # device (GPU or CPU) before filling.
+        #
+        # fill_halo_inplace! is spawned *inside* spawn_datadeps (step 2c) with explicit
+        # Read deps on the DArray chunks, so Datadeps automatically enforces the ordering
+        # between fill tasks and inner stencil tasks — including the cross-chunk case where
+        # fill_task[C] reads chunk[N] as a neighbor while inner_stencil[N] writes chunk[N].
+        # This replaces the explicit wait-barrier that was needed when fills ran outside.
         cache_sym_map = Dict{Symbol, NamedTuple}()
         for read_var in read_vars
             if read_var in keys(neighborhoods)
                 neigh_dist, boundary = neighborhoods[read_var]
-                @gensym halo_tasks region_meta region_meta_tuple neighbor_cks halo_width_var inner_cache_var cache_key_var
-                cache_sym_map[read_var] = (; halo_tasks, halo_width_var, inner_cache_var, cache_key_var)
-                # Validate neigh_dist type/positivity/dimensions and compute halo_width before
-                # spawning anything, so errors surface immediately on the main task.
+                @gensym region_info_table fill_tasks region_meta neighbor_cks halo_width_var inner_cache_var cache_key_var
+                cache_sym_map[read_var] = (; fill_tasks, halo_width_var, inner_cache_var, cache_key_var, region_info_table)
+                # Validate and compute halo_width on the main task so errors are immediate.
                 push!(final_ex.args, :($validate_neigh_dist($neigh_dist, ndims($read_var))))
                 push!(final_ex.args, :($halo_width_var = ntuple(i -> $get_neigh_dist($neigh_dist, i), ndims($read_var))))
                 push!(final_ex.args, :($inner_cache_var = $get_halo_inner_cache($read_var)))
-                push!(final_ex.args, :($halo_tasks = Array{$DTask}(undef, size($chunks($read_var)))))
+                # Pre-compute region metadata for every chunk on the main task.
+                push!(final_ex.args, :($region_info_table = Array{Any}(undef, size($chunks($read_var)))))
+                push!(final_ex.args, :($fill_tasks = Array{$DTask}(undef, size($chunks($read_var)))))
                 push!(final_ex.args, quote
                     for $chunk_idx in $CartesianIndices($chunks($read_var))
                         ($region_meta, $neighbor_cks) = $select_neighborhood_info($chunks($read_var), $chunk_idx, $neigh_dist, $boundary)
-                        $region_meta_tuple = tuple($region_meta...)
+                        $region_info_table[$chunk_idx] = (tuple($region_meta...), $neighbor_cks)
                         $cache_key_var = ($chunk_idx, $halo_width_var)
-                        if haskey($inner_cache_var, $cache_key_var)
-                            # Cache hit: pass the existing buffer for in-place fill.
-                            $halo_tasks[$chunk_idx] = Dagger.@spawn name="stencil_fill_halo" $fill_halo_inplace!($inner_cache_var[$cache_key_var], $neigh_dist, $boundary, $chunks($read_var)[$chunk_idx], $region_meta_tuple, $neighbor_cks...)
-                        else
-                            # Cache miss: allocate a fresh HaloArray inside the task.
-                            $halo_tasks[$chunk_idx] = Dagger.@spawn name="stencil_build_halo" $build_halo_new($neigh_dist, $boundary, $chunks($read_var)[$chunk_idx], $region_meta_tuple, $neighbor_cks...)
+                        if !haskey($inner_cache_var, $cache_key_var)
+                            # Cache miss: allocate empty buffers on the correct device.
+                            $inner_cache_var[$cache_key_var] = Dagger.@spawn name="stencil_alloc_halo" $alloc_halo($neigh_dist, $chunks($read_var)[$chunk_idx])
                         end
                     end
                 end)
-                push!(final_ex.args, :($halo_tasks_map[$(QuoteNode(read_var))] = $halo_tasks))
             end
         end
 
-        # 2b. Generate @spawn call with appropriate vars and deps
+        # 2b. Build the inner-stencil @spawn expression. Neighborhood deps reference
+        # fill_tasks[chunk_idx] populated by the fill loop (see 2c below).
         deps_ex = Any[]
         if write_var in read_vars
             push!(deps_ex, Expr(:kw, inner_write_var, :($ReadWrite($chunks($write_var)[$chunk_idx]))))
@@ -1179,40 +1189,65 @@ macro stencil(orig_ex)
         end
         for read_var in actual_read_vars
             if read_var in keys(neighborhoods)
-                push!(deps_ex, Expr(:kw, read_var, :($Read($halo_tasks_map[$(QuoteNode(read_var))][$chunk_idx]))))
+                syms = cache_sym_map[read_var]
+                # Reference fill_tasks[chunk_idx] — populated by the fill loop before the
+                # stencil loop runs, so it is always assigned when this expression executes.
+                push!(deps_ex, Expr(:kw, read_var, :($Read($(syms.fill_tasks)[$chunk_idx]))))
             else
                 if read_var != write_var
                     push!(deps_ex, Expr(:kw, read_var, :($Read($chunks($read_var)[$chunk_idx]))))
                 end
             end
         end
-        spawn_ex = :(Dagger.@spawn name="stencil_inner_fn" $inner_fn(;$(deps_ex...)))
+        inner_spawn_ex = :(Dagger.@spawn name="stencil_inner_fn" $inner_fn(;$(deps_ex...)))
 
-        # 2c. Each expression gets its own spawn_datadeps region. Because
-        # spawn_datadeps blocks on completion, the next expression's halo
-        # pre-spawns will always see fully up-to-date array data.
+        # Build the fill @spawn expression — one per neighborhood read_var.
+        fill_spawn_exs = Expr[]
+        for read_var in read_vars
+            if read_var in keys(neighborhoods)
+                neigh_dist, boundary = neighborhoods[read_var]
+                syms = cache_sym_map[read_var]
+                @gensym _rmt _nck _rn
+                push!(fill_spawn_exs, quote
+                    ($_rmt, $_nck) = $(syms.region_info_table)[$chunk_idx]
+                    $_rn = map($Read, $_nck)
+                    $(syms.fill_tasks)[$chunk_idx] = Dagger.@spawn name="stencil_fill_halo" $fill_halo_inplace!(
+                        $ReadWrite($(syms.inner_cache_var)[($chunk_idx, $(syms.halo_width_var))]),
+                        $neigh_dist, $boundary,
+                        $Read($chunks($read_var)[$chunk_idx]),
+                        $_rmt,
+                        $_rn...
+                    )
+                end)
+            end
+        end
+
+        # 2c. Each expression gets its own spawn_datadeps region with TWO separate loops:
+        # first all fills, then all stencils. This ordering is critical when write_var is
+        # also a neighborhood read_var: submitting all fill tasks before any stencil tasks
+        # ensures Datadeps sees fill[C]'s Read(chunk[N]) BEFORE stencil[N]'s
+        # ReadWrite(chunk[N]), so stencil[N] is correctly ordered after fill[C].
+        # (An interleaved single loop would register stencil[C]'s write to chunk[C] before
+        # fill[C+1] reads chunk[C], inverting the dependency.)
+        fill_loop_body = Expr(:block, fill_spawn_exs...)
         push!(final_ex.args, :(Dagger.spawn_datadeps() do
             for $chunk_idx in $CartesianIndices($chunks($write_var))
-                $spawn_ex
+                $fill_loop_body
+            end
+            for $chunk_idx in $CartesianIndices($chunks($write_var))
+                $inner_spawn_ex
             end
         end))
 
-        # 2d. After spawn_datadeps completes, populate the cache with the results of any
-        # cache-miss halo tasks. spawn_datadeps has already waited for all halo tasks
-        # (transitively, since inner stencil tasks depend on them), so fetch is instant.
+        # 2d. After spawn_datadeps completes all fill and stencil tasks, fetch the filled
+        # HaloArray Chunks and store them in the cache (replacing any alloc DTasks from 2a).
+        # spawn_datadeps already waited for everything, so fetch is instant.
         for read_var in read_vars
             if read_var in keys(neighborhoods)
                 syms = cache_sym_map[read_var]
-                halo_tasks      = syms.halo_tasks
-                inner_cache_var = syms.inner_cache_var
-                halo_width_var  = syms.halo_width_var
-                cache_key_var   = syms.cache_key_var
                 push!(final_ex.args, quote
                     for $chunk_idx in $CartesianIndices($chunks($read_var))
-                        $cache_key_var = ($chunk_idx, $halo_width_var)
-                        if !haskey($inner_cache_var, $cache_key_var)
-                            $inner_cache_var[$cache_key_var] = fetch($halo_tasks[$chunk_idx]; raw=true)
-                        end
+                        $(syms.inner_cache_var)[($chunk_idx, $(syms.halo_width_var))] = fetch($(syms.fill_tasks)[$chunk_idx]; raw=true)
                     end
                 end)
             end
