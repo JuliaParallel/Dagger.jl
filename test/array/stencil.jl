@@ -396,7 +396,7 @@ function test_stencil(; gpu::Bool=false)
             end
             B = zeros(Blocks(ntuple(_->1, N)...), Float32, ntuple(_->3, N)...)
 
-            @stencil B[idx] = sum(@neighbors(A[idx], 1, Wrap())) / length(A)
+            @stencil B[idx] = sum(@neighbors(A[idx], 1, Wrap())) ÷ length(A)
             @test all(==(Float64(sum(1:length(A)) / length(A))), collect(B))
         end
     end
