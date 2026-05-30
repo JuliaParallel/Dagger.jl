@@ -52,4 +52,7 @@
     @assert isempty(Sch.WORKER_MONITOR_CHANS)
     @assert isempty(Sch.WORKER_MONITOR_TASKS)
     ID_COUNTER[] = 1
+    # Clear the precompile-time UUID cache so it is not baked into the compiled
+    # image; __init__ re-populates it from the shared UUID file at load time.
+    delete!(SYSTEM_UUIDS, myid())
 end
