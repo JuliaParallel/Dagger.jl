@@ -11,13 +11,18 @@ function system_uuid_fallback()
             flush(temp_io)
             close(temp_io)
             try
-                # Try to make this the UUID file
-                mv(temp_uuid_file, uuid_file; force=false)
+                # Use hardlink (link(2)) instead of rename(2): link is atomic and
+                # fails with EEXIST when the destination already exists, whereas
+                # rename(2) silently overwrites, creating a TOCTOU race where two
+                # concurrent callers both pass the ispath check and both return
+                # different UUIDs. Only one hardlink call can succeed; the rest
+                # fall through to read the winner's UUID from the file.
+                Base.Filesystem.hardlink(temp_uuid_file, uuid_file)
+                rm(temp_uuid_file; force=true)
                 return uuid
-            catch err
-                err isa ArgumentError || rethrow(err)
-                # Failed, clean up temp file, and read existing UUID file
-                rm(temp_uuid_file)
+            catch
+                # Failed (file already exists or other error); clean up and read
+                rm(temp_uuid_file; force=true)
             end
         end
         return parse(UUID, read(uuid_file, String))
