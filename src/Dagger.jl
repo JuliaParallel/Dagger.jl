@@ -162,7 +162,12 @@ import PrecompileTools: @compile_workload
 include("precompile.jl")
 
 function __init__()
-    # Initialize system UUID
+    # Clear any precompile-cached UUID for this process: the precompile workload
+    # runs system_uuid() and the resulting SYSTEM_UUIDS entry gets baked into
+    # the compiled image. Without clearing it here, get!() would return that
+    # stale build-time UUID instead of reading the actual runtime UUID file,
+    # causing mismatches between process 1 and workers.
+    delete!(SYSTEM_UUIDS, myid())
     system_uuid()
 
     @static if !isdefined(Base, :get_extension)
