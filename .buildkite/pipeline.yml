@@ -90,6 +90,16 @@ steps:
       - JuliaCI/julia-coverage#v1:
           codecov: true
 
+  - label: Julia 1 (multithreaded)
+    timeout_in_minutes: 120
+    <<: *test
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1"
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
+    command: "julia --project -e 'using Pkg; Pkg.instantiate()'; julia -t $BUILDKITE_AGENT_META_DATA_NUM_CPUS test/runtests.jl -p 0"
+
   - label: Julia 1.11 (CUDA)
     timeout_in_minutes: 60
     <<: *gputest
