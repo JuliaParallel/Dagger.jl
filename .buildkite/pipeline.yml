@@ -90,6 +90,22 @@ steps:
       - JuliaCI/julia-coverage#v1:
           codecov: true
 
+  - label: Julia 1.11 (MPI)
+    timeout_in_minutes: 60
+    <<: *test
+    command: |
+      julia --project=test -e 'using Pkg; Pkg.instantiate(); using MPIPreferences; MPIPreferences.use_jll_binary("MPICH_jll"; export_prefs=true)'
+      julia --project -e 'using Pkg; Pkg.develop(;path="lib/TimespanLogging"); Pkg.test()'
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+      - JuliaCI/julia-test#v1:
+          julia_args: "--threads=1"
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
+    env:
+      CI_USE_MPI: "1"
+
   - label: Julia 1.11 (CUDA)
     timeout_in_minutes: 60
     <<: *gputest
