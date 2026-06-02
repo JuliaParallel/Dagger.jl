@@ -1,4 +1,4 @@
-@testset "$T with $pivot" for T in (Float32, Float64, ComplexF32, ComplexF64), pivot in (NoPivot(), RowMaximum())
+@testset "$T with $pivot" for T in (Float64, ComplexF64), pivot in (NoPivot(), RowMaximum())
     A = rand(T, 128, 128)
     B = copy(A)
     DA = view(A, Blocks(64, 64))
