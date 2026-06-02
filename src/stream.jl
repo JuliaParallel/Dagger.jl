@@ -34,10 +34,17 @@ function Base.put!(store::StreamStore{T,B}, value) where {T,B}
                 initialize_output_stream!(store, output_uid)
             end
             buffer = store.output_buffers[output_uid]
+            skip = false
             while isfull(buffer)
                 if !isopen(store)
                     @dagdebug thunk_id :stream "closed!"
                     throw(InvalidStateException("Stream is closed", :closed))
+                end
+                # Buffer may have been removed by remove_waiters! while we waited
+                if !haskey(store.output_buffers, output_uid) || !isopen(buffer)
+                    @dagdebug thunk_id :stream "output buffer removed, skipping"
+                    skip = true
+                    break
                 end
                 @dagdebug thunk_id :stream "buffer full ($(length(buffer)) values), waiting"
                 wait(store.lock)
@@ -46,7 +53,7 @@ function Base.put!(store::StreamStore{T,B}, value) where {T,B}
                 end
                 task_may_cancel!()
             end
-            put!(buffer, value)
+            skip || put!(buffer, value)
         end
         notify(store.lock)
     end
@@ -136,9 +143,15 @@ end
 function remove_waiters!(store::StreamStore, waiters::Vector{UInt})
     @lock store.lock begin
         for w in waiters
-            delete!(store.output_buffers, w)
+            # Close and remove the output buffer so the output thread can exit
+            if haskey(store.output_buffers, w)
+                close(store.output_buffers[w])
+                delete!(store.output_buffers, w)
+            end
+            delete!(store.output_streams, w)
+            delete!(store.output_fetchers, w)
             idx = findfirst(wo->wo==w, store.waiters)
-            deleteat!(store.waiters, idx)
+            idx !== nothing && deleteat!(store.waiters, idx)
             delete!(store.input_streams, w)
         end
         notify(store.lock)
@@ -197,6 +210,9 @@ function initialize_input_stream!(our_store::StreamStore{OT,OB}, input_stream::S
                 rethrow()
             end
         finally
+            # Signal stream! that no more values will arrive, so it can exit
+            # gracefully instead of blocking forever on take!(buffer)
+            close(buffer)
             @dagdebug STREAM_THUNK_ID[] :stream "input stream closed"
         end
     end)
@@ -233,12 +249,15 @@ function initialize_output_stream!(our_store::StreamStore{T,B}, output_uid::UInt
                 rethrow()
             end
         finally
+            # Close the channel so the downstream input pull thread can detect
+            # that this upstream source is exhausted and exit gracefully
+            close(output_fetcher.chan)
             @dagdebug thunk_id :stream "output stream closed"
         end
     end)
 end
 
-Base.put!(stream::Stream, @nospecialize(value)) = put!(stream.store, value)
+Base.put!(stream::Stream, value) = put!(stream.store, value)
 
 function Base.isopen(stream::Stream, id::UInt)::Bool
     return MemPool.access_ref(stream.store_ref.handle, id) do store, id
@@ -520,6 +539,9 @@ function _run_streamingfunction(tls, cancel_token, sf, args...; kwargs...)
     # FIXME: Remove when scheduler is distributed
     uid = UInt(thunk_id)
 
+    # Save original args before initialize_input_stream! rebinds them to StreamingValues,
+    # so that remove_waiters! can find the upstream Stream objects in the finally block
+    original_args = args
     try
         # TODO: This kwarg song-and-dance is required to ensure that we don't
         # allocate boxes within `stream!`, when possible
@@ -532,7 +554,7 @@ function _run_streamingfunction(tls, cancel_token, sf, args...; kwargs...)
         if !sf.stream.store.migrating
             # Remove ourself as a waiter for upstream Streams
             streams = Set{Stream}()
-            for (idx, arg) in enumerate(args)
+            for (idx, arg) in enumerate(original_args)
                 if arg isa Stream
                     push!(streams, arg)
                 end
@@ -544,7 +566,7 @@ function _run_streamingfunction(tls, cancel_token, sf, args...; kwargs...)
             end
             for stream in streams
                 @dagdebug thunk_id :stream "dropping waiter"
-                remove_waiters!(stream, uid)
+                remove_waiters!(stream, UInt[uid])
                 @dagdebug thunk_id :stream "dropped waiter"
             end
 
@@ -576,8 +598,19 @@ function stream!(sf::StreamingFunction, uid,
         end
 
         # Get values from Stream args/kwargs
-        stream_args = _stream_take_values!(args)
-        stream_kwarg_values = _stream_take_values!(kwarg_values)
+        # An InvalidStateException here means an input stream was closed because
+        # the upstream task finished; exit gracefully in that case
+        local stream_args, stream_kwarg_values
+        try
+            stream_args = _stream_take_values!(args)
+            stream_kwarg_values = _stream_take_values!(kwarg_values)
+        catch err
+            if err isa InvalidStateException
+                @dagdebug STREAM_THUNK_ID[] :stream "input stream closed, exiting"
+                return
+            end
+            rethrow()
+        end
         stream_kwargs = _stream_namedtuple(kwarg_names, stream_kwarg_values)
 
         if length(stream_args) > 0 || length(stream_kwarg_values) > 0

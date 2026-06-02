@@ -18,7 +18,8 @@ function stream_push_values!(fetcher::RemoteChannelFetcher, T, our_store::Stream
     try
         put!(fetcher.chan, value)
     catch err
-        if err isa InvalidStateException && !isopen(fetcher.chan)
+        unwrapped = Sch.unwrap_nested_exception(err)
+        if unwrapped isa InvalidStateException && !isopen(fetcher.chan)
             @dagdebug our_tid :stream_push "channel closed: $our_tid -> $their_tid"
             throw(InterruptException())
         end
@@ -35,7 +36,8 @@ function stream_pull_values!(fetcher::RemoteChannelFetcher, T, our_store::Stream
     value = try
         take!(fetcher.chan)
     catch err
-        if err isa InvalidStateException && !isopen(fetcher.chan)
+        unwrapped = Sch.unwrap_nested_exception(err)
+        if unwrapped isa InvalidStateException && !isopen(fetcher.chan)
             @dagdebug our_tid :stream_pull "channel closed: $their_tid -> $our_tid"
             throw(InterruptException())
         end
