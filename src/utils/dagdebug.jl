@@ -1,37 +1,37 @@
 function istask end
 function task_id end
 
-const DAGDEBUG_CATEGORIES = Symbol[:global, :submit, :schedule, :scope,
-                                   :take, :execute, :move, :processor, :finish,
-                                   :cancel, :stream]
+# Use a Set for O(1) membership checks (vs O(n) for Vector).
+const DAGDEBUG_CATEGORIES = Set{Symbol}([:global, :submit, :schedule, :scope,
+                                         :take, :execute, :move, :processor, :finish,
+                                         :cancel, :stream])
+
+# Out-of-line emission keeps call-site IR minimal: just one `in` check + one
+# function call per @dagdebug site, regardless of how complex the message is.
+@noinline function _dagdebug_emit(thunk, cat_sym::Symbol, msg::String)
+    id = -1
+    if thunk isa Integer
+        id = Int(thunk)
+    elseif istask(thunk)
+        id = task_id(thunk)
+    elseif thunk === nothing
+        id = 0
+    else
+        @warn "Unsupported thunk argument to @dagdebug: $(typeof(thunk))"
+        id = -1
+    end
+    if id > 0
+        @debug "[$id] ($cat_sym) $msg" _module=Dagger
+    elseif id == 0
+        @debug "($cat_sym) $msg" _module=Dagger
+    end
+end
+
 macro dagdebug(thunk, category, msg, args...)
     cat_sym = category.value
-    @gensym id
-    debug_ex_id = :(@debug "[$($id)] ($($(repr(cat_sym)))) $($msg)" _module=Dagger _file=$(string(__source__.file)) _line=$(__source__.line))
-    append!(debug_ex_id.args, args)
-    debug_ex_noid = :(@debug "($($(repr(cat_sym)))) $($msg)" _module=Dagger _file=$(string(__source__.file)) _line=$(__source__.line))
-    append!(debug_ex_noid.args, args)
     esc(quote
-        let $id = -1
-            if $thunk isa Integer
-                $id = Int($thunk)
-            elseif $istask($thunk)
-                $id = $task_id($thunk)
-            elseif $thunk === nothing
-                $id = 0
-            else
-                @warn "Unsupported thunk argument to @dagdebug: $(typeof($thunk))"
-                $id = -1
-            end
-            if $id > 0
-                if $(QuoteNode(cat_sym)) in $DAGDEBUG_CATEGORIES || :all in $DAGDEBUG_CATEGORIES
-                    $debug_ex_id
-                end
-            elseif $id == 0
-                if $(QuoteNode(cat_sym)) in $DAGDEBUG_CATEGORIES || :all in $DAGDEBUG_CATEGORIES
-                    $debug_ex_noid
-                end
-            end
+        if $(QuoteNode(cat_sym)) in $DAGDEBUG_CATEGORIES || :all in $DAGDEBUG_CATEGORIES
+            $_dagdebug_emit($thunk, $(QuoteNode(cat_sym)), string($msg))
         end
     end)
 end

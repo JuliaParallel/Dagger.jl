@@ -3,7 +3,7 @@ function task_queue_update(r, op, x, y)
     return op(x, y)
 end
 function task_queue_wait_update(w, r, op, x, y)
-    wait(w)
+    @lock w wait(w)
     r[] += 1
     return op(x, y)
 end
@@ -39,7 +39,7 @@ end
 @testset "InOrderTaskQueue" begin
     r = Ref(0)
     R = Dagger.@mutable r
-    w = Condition()
+    w = Threads.Condition()
     occ = Dict(Dagger.ThreadProc=>0)
     d = Dagger.spawn_sequential() do
         b = Dagger.@spawn occupancy=occ task_queue_wait_update(w, R, *, 2, 3)
@@ -47,16 +47,16 @@ end
         Dagger.@spawn task_queue_wait_update(w, R, /, c, b)
     end
     sleep(1); @test r[] == 0
-    notify(w); sleep(0.1); @test r[] == 1
-    sleep(0.1); notify(w); sleep(0.1); @test r[] == 2
-    sleep(0.1); notify(w); sleep(0.1); @test r[] == 3
+    @lock w notify(w); sleep(0.1); @test r[] == 1
+    sleep(0.1); @lock w notify(w); sleep(0.1); @test r[] == 2
+    sleep(0.1); @lock w notify(w); sleep(0.1); @test r[] == 3
     @test fetch(d) == (3+4) / (2*3)
 end
 
 @testset "LazyTaskQueue within InOrderTaskQueue" begin
     r = Ref(0)
     R = Dagger.@mutable r
-    w = Condition()
+    w = Threads.Condition()
     occ = Dict(Dagger.ThreadProc=>0)
     Dagger.spawn_sequential() do
         Dagger.spawn_bulk() do
@@ -65,9 +65,9 @@ end
             end
 
             # Tasks not launched until end of block
-            sleep(0.1); notify(w); sleep(0.1); @test r[] == 0
+            sleep(0.1); @lock w notify(w); sleep(0.1); @test r[] == 0
         end
-        sleep(0.1); notify(w); sleep(0.1); @test r[] == 10
+        sleep(0.1); @lock w notify(w); sleep(0.1); @test r[] == 10
 
         Dagger.spawn_bulk() do
             for i in 1:5
@@ -80,15 +80,15 @@ end
             end
         end
         # Second task group has a dependency on first task group
-        sleep(0.1); notify(w); sleep(0.1); @test r[] == 15
-        sleep(0.1); notify(w); sleep(0.1); @test r[] == 20
+        sleep(0.1); @lock w notify(w); sleep(0.1); @test r[] == 15
+        sleep(0.1); @lock w notify(w); sleep(0.1); @test r[] == 20
     end
 end
 
 @testset "InOrderTaskQueue within LazyTaskQueue" begin
     r = Ref(0)
     R = Dagger.@mutable r
-    w = Condition()
+    w = Threads.Condition()
     occ = Dict(Dagger.ThreadProc=>0)
     d = Dagger.spawn_bulk() do
         _d = Dagger.spawn_sequential() do
@@ -96,13 +96,13 @@ end
             c = Dagger.@spawn occupancy=occ task_queue_wait_update(w, R, +, 3, 4)
             Dagger.@spawn task_queue_wait_update(w, R, /, c, b)
         end
-        sleep(1); notify(w); sleep(0.1); @test r[] == 0
+        sleep(1); @lock w notify(w); sleep(0.1); @test r[] == 0
         _d
     end
     sleep(0.1); @test r[] == 0
-    notify(w); sleep(0.1); @test r[] == 1
-    notify(w); sleep(0.1); @test r[] == 2
-    notify(w); sleep(0.1); @test r[] == 3
+    @lock w notify(w); sleep(0.1); @test r[] == 1
+    @lock w notify(w); sleep(0.1); @test r[] == 2
+    @lock w notify(w); sleep(0.1); @test r[] == 3
     @test fetch(d) == (3+4) / (2*3)
 end
 
