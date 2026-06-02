@@ -144,6 +144,8 @@ function _cancel!(state, tid, force, graceful, halt_sch)
                                 @dagdebug tid :cancel "Interrupting running task ($Tf)"
                                 Threads.@spawn Base.throwto(task, InterruptException())
                             else
+                                # Skip if already cancelled to avoid duplicate results in the scheduler queue
+                                tid in istate.cancelled && continue
                                 @dagdebug tid :cancel "Cancelling running task ($Tf)"
                                 # Tell the processor to just drop this task
                                 task_occupancy = task_spec.est_occupancy
@@ -154,6 +156,19 @@ function _cancel!(state, tid, force, graceful, halt_sch)
                                 to_proc = istate.proc
                                 put!(istate.return_queue, Sch.TaskResult(myid(), to_proc, tid, InterruptException(), nothing))
                                 cancel!(istate.cancel_tokens[tid]; graceful)
+                            end
+                        end
+                        # Also cancel tokens for tasks that have been dequeued but not yet
+                        # recorded in istate.tasks (race window between token assignment and
+                        # task registration). Just cancel the token so the task sees it when
+                        # it starts; DoTaskSpec will handle posting the result normally.
+                        if !force
+                            for (tid, token) in istate.cancel_tokens
+                                _tid !== nothing && tid != _tid && continue
+                                haskey(istate.tasks, tid) && continue  # already handled above
+                                tid in istate.cancelled && continue
+                                @dagdebug tid :cancel "Cancelling pre-running task token"
+                                cancel!(token; graceful)
                             end
                         end
                     end
