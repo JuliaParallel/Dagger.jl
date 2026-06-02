@@ -1270,6 +1270,10 @@ function (dts::DoTaskSpec)()
 
         # Ensure that any spawned tasks get cleaned up
         Dagger.cancel!(dts.cancel_token)
+
+        # Reset TLS so that reusable tasks don't inherit stale Dagger context.
+        Dagger.DTASK_TLS[] = nothing
+        Dagger.DTASK_CANCEL_TOKEN[] = nothing
     end
     if was_cancelled
         # A result was already posted to the return queue
