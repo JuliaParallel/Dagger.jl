@@ -1,5 +1,7 @@
 const EAGER_INIT = Threads.Atomic{Bool}(false)
-const EAGER_READY = Base.Event()
+# Condition variable used to synchronize EAGER_STATE changes.
+# Waiters must hold this lock, check EAGER_STATE[], and wait in a loop.
+const EAGER_STATE_LOCK = Threads.Condition()
 const EAGER_ID_MAP = LockedObject(Dict{UInt64,Int}())
 const EAGER_CONTEXT = Ref{Union{Context,Nothing}}(nothing)
 const EAGER_STATE = Ref{Union{ComputeState,Nothing}}(nothing)
@@ -16,12 +18,21 @@ function init_eager()
         throw(ConcurrencyViolationError("init_eager can only be called on worker 1"))
     end
     if Threads.atomic_xchg!(EAGER_INIT, true)
-        wait(EAGER_READY)
+        # Secondary path: another caller is initializing or the scheduler is already running.
+        # Wait (under the condition lock) for EAGER_STATE to become non-nothing (ready) or
+        # for EAGER_INIT to become false (scheduler exited without becoming ready).
+        @lock EAGER_STATE_LOCK begin
+            while EAGER_STATE[] === nothing && EAGER_INIT[]
+                wait(EAGER_STATE_LOCK)
+            end
+        end
         if EAGER_STATE[] === nothing
             throw(ConcurrencyViolationError("Eager scheduler failed to start"))
         end
         return
     end
+
+    # Primary path: we won the CAS, so we're responsible for starting the scheduler.
     ctx = eager_context()
     # N.B. We use @async here to prevent the scheduler task from running on a
     # different thread than the one that is likely submitting work, as otherwise
@@ -46,26 +57,44 @@ function init_eager()
         seek(iob.io, 0)
         write(stderr, iob)
     finally
-        # N.B. Sequence order matters to ensure that observers can see that we failed to start
-        EAGER_STATE[] = nothing
-        notify(EAGER_READY)
-        reset(EAGER_READY)
+        # Clear EAGER_INIT and EAGER_STATE together under the condition lock.
+        # Doing both atomically under the lock prevents a race where a new
+        # scheduler sets EAGER_STATE between our atomic_xchg! and our lock
+        # acquisition: the new scheduler also needs the lock to set EAGER_STATE,
+        # so it is forced to wait until after our cleanup, guaranteeing that
+        # our EAGER_STATE=nothing write cannot overwrite the new state.
+        @lock EAGER_STATE_LOCK begin
+            Threads.atomic_xchg!(EAGER_INIT, false)
+            EAGER_STATE[] = nothing
+            notify(EAGER_STATE_LOCK; all=true)
+        end
         lock(EAGER_ID_MAP) do id_map
             empty!(id_map)
         end
-        Threads.atomic_xchg!(EAGER_INIT, false)
     end)
-    wait(EAGER_READY)
+
+    # Wait for eager_thunk to set EAGER_STATE[].
+    # Loop to handle spurious wakeups and wakeups from old-scheduler cleanup.
+    @lock EAGER_STATE_LOCK begin
+        while EAGER_STATE[] === nothing && EAGER_INIT[]
+            wait(EAGER_STATE_LOCK)
+        end
+    end
     if EAGER_STATE[] === nothing
         throw(ConcurrencyViolationError("Eager scheduler failed to start"))
     end
 end
+
 function eager_thunk()
     exec!(Dagger.sch_handle()) do ctx, state, task, tid, _
-        EAGER_STATE[] = state
+        # Set EAGER_STATE and notify all waiters under the condition lock so that
+        # init_eager's primary wait loop sees the new state atomically.
+        @lock EAGER_STATE_LOCK begin
+            EAGER_STATE[] = state
+            notify(EAGER_STATE_LOCK; all=true)
+        end
         return
     end
-    notify(EAGER_READY)
     wait(Dagger.Sch.EAGER_STATE[].halt)
 end
 
