@@ -170,3 +170,14 @@ function unsafe_free!(A::DArray)
         end
     end
 end
+
+# Initializers
+
+function Base.fill!(A::DArray, x)
+    spawn_datadeps() do
+        for chunk in A.chunks
+            Dagger.@spawn fill!(chunk, x)
+        end
+    end
+    return A
+end
