@@ -109,7 +109,7 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
     parsed_args = parse_args(s)
     to_test = String[]
     if isempty(parsed_args["test"])
-        to_test = copy(all_test_names)
+        to_test = filter(!in(optin_test_names), copy(all_test_names))
     else
         for _test in parsed_args["test"]
             test = only(_test)
@@ -166,7 +166,7 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
         Pkg.offline(true)
     end
 else
-    to_test = all_test_names
+    to_test = filter(!in(optin_test_names), all_test_names)
     @info "Running all tests"
 end
 
