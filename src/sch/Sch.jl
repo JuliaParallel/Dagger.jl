@@ -95,6 +95,11 @@ struct ComputeState
     signature_alloc_cost::Dict{Signature,UInt64}
     worker_transfer_rate::Dict{Int,Dict{Processor,UInt64}}
     halt::Base.Event
+    # Set when the scheduler is being halted as a result of a cancellation
+    # (`cancel!(...; halt_sch=true)`), so that teardown resolves any still-pending
+    # futures with an `InterruptException` (reflecting the cancellation) rather
+    # than the generic `SchedulingException` used for other scheduler exits.
+    halt_cancelled::Threads.Atomic{Bool}
     lock::ReentrantLock
     futures::Dict{Thunk, Vector{ThunkFuture}}
     errored::Dict{Thunk,Bool}
@@ -124,6 +129,7 @@ function start_state(deps::Dict, node_order, chan)
                          Dict{Signature,UInt64}(),
                          Dict{Int,Dict{Processor,UInt64}}(),
                          Base.Event(),
+                         Threads.Atomic{Bool}(false),
                          ReentrantLock(),
                          Dict{Thunk, Vector{ThunkFuture}}(),
                          Dict{Thunk,Bool}(),
@@ -419,7 +425,22 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options::SchedulerOpt
                     end
                 end
             end
+            if !haskey(state.thunk_dict, thunk_id)
+                # A result arrived for a task that is no longer tracked. This
+                # happens when a cancellation posts a (possibly duplicate)
+                # result for a task that has already finished and been cleaned
+                # up. Ignore it rather than crashing the scheduler.
+                @dagdebug thunk_id :take "Ignoring result for untracked task"
+                return # effectively `continue`
+            end
             node = unwrap_weak_checked(state.thunk_dict[thunk_id])::Thunk
+            if node.finished
+                # Duplicate result for an already-finished task (e.g. a
+                # cancellation racing with normal completion). Ignore it to
+                # avoid double-storing a result.
+                @dagdebug thunk_id :take "Ignoring duplicate result for finished task"
+                return # effectively `continue`
+            end
             metadata = tresult.metadata
             if metadata !== nothing
                 state.worker_time_pressure[pid][proc] = metadata.time_pressure
@@ -490,10 +511,15 @@ function scheduler_exit(ctx, state::ComputeState, options::SchedulerOptions)
         close(state.chan)
         notify(state.halt)
 
-        # Notify any waiting tasks
+        # Notify any waiting tasks. If the scheduler is halting because of a
+        # cancellation, surface that as an `InterruptException` (the result a
+        # caller expects from a cancelled task) rather than a generic
+        # `SchedulingException`.
+        teardown_ex = state.halt_cancelled[] ? InterruptException() :
+                                               SchedulingException("Scheduler exited")
         for (_, futures) in state.futures
             for future in futures
-                put!(future, SchedulingException("Scheduler exited"); error=true)
+                put!(future, teardown_ex; error=true)
             end
         end
         empty!(state.futures)
