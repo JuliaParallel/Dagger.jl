@@ -444,6 +444,7 @@ function copydiagtile!(A, uplo)
     end
     return nothing
 end
+
 function LinearAlgebra.generic_matvecmul!(
     C::DVector{T},
     transA::Char,
@@ -559,4 +560,54 @@ function gemv_dagger!(
     end
 
     return C
+end
+
+wrap_as_darray(A::DArray) = A
+wrap_as_darray(A::Array) = view(A, AutoBlocks())
+function wrap_as_darray(A::SubArray{T,Nv,Array{T,Na}}) where {T,Nv,Na}
+    Ap = parent(A)
+    part = auto_blocks(map(last, parentindices(Ap)))
+    partsize = part.blocksize
+    inds = parentindices(A)
+    inds_ranges_parent = ntuple(i->to_range(inds[i]), Val(Na))
+    inds_ranges_view = ntuple(i->to_range(inds[i]), Val(Nv))
+    subdomains = partition(part, ArrayDomain(inds_ranges_parent))
+    nparts = size(subdomains)
+    chunks = Array{Any,Na}(undef, nparts...)
+    for idx in CartesianIndices(nparts)
+        subdomain_view = subdomains[idx]
+        subdomain_parent = ArrayDomain(ntuple(i->Nv >= i ? subdomain_view.indexes[i] : inds_ranges_parent[i], Val(Na)))
+        subinds = ntuple(i->subdomain_parent.indexes[i], Val(Na))
+        subA = view(Ap, subinds...)
+        chunks[idx] = tochunk(subA)
+    end
+    return DArray(T, ArrayDomain(inds_ranges_parent), subdomains, chunks, part)
+end
+
+# Generate generic_matvecmul! methods for all combinations of DArray, Array, and SubArray
+for CT in (DVector, Vector, SubArray{<:Any,1,<:Array}),
+    AT in (DMatrix, Matrix, SubArray{<:Any,2,<:Array}),
+    BT in (DVector, Vector, SubArray{<:Any,1,<:Array})
+
+    # Don't commit type piracy
+    CT isa DArray || AT isa DArray || BT isa DArray || continue
+
+    @eval function LinearAlgebra.generic_matvecmul!(
+        C::$(CT),
+        transA::Char,
+        A::$(AT),
+        B::$(BT),
+        _add::LinearAlgebra.MulAddMul,
+    )
+        new_C = wrap_as_darray(C)
+        new_A = wrap_as_darray(A)
+        new_B = wrap_as_darray(B)
+        return LinearAlgebra.generic_matvecmul!(
+            new_C,
+            transA,
+            new_A,
+            new_B,
+            _add,
+        )
+    end
 end
