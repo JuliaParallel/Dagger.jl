@@ -2,6 +2,7 @@ module SparseArraysExt
 
 import SparseArrays
 import SparseArrays: SparseMatrixCSC
+import LinearAlgebra
 import Dagger
 import Dagger: Blocks, AutoBlocks, BlocksOrAuto, AssignmentType, DSparseMatrix
 
@@ -58,13 +59,33 @@ function Dagger.matmatmul!(
 )
     # Use fallback implementation
     # TODO: Optimize this further
-    C.mat = alpha * A * B + beta * C.mat
+    opA = _apply_trans(A, transA)
+    opB = _apply_trans(B, transB)
+    C.mat = alpha * (opA * opB) + beta * C.mat
 
     return C
 end
 
+# Off-diagonal tile copy in `copytri!`: produce the (conjugate) transpose tile.
 function Dagger.transpose_tile(B::SparseMatrixCSC)
     return SparseArrays.sparse(B')
+end
+# Diagonal tile symmetrization in `copytri!`: build the full Hermitian tile from
+# its `uplo` triangle (matching the dense `copydiagtile!` semantics).
+function Dagger.transpose_tile(B::SparseMatrixCSC, uplo::Char)
+    if uplo == 'U'
+        Bt = SparseArrays.triu(B)
+    elseif uplo == 'L'
+        Bt = SparseArrays.tril(B)
+    else
+        throw(ArgumentError("uplo must be 'U' or 'L', got $uplo"))
+    end
+    C = Bt + Bt'
+    # The shared diagonal was added twice; restore the original tile's diagonal.
+    for i in 1:LinearAlgebra.checksquare(B)
+        C[i, i] = B[i, i]
+    end
+    return C
 end
 
 end # module SparseArraysExt
