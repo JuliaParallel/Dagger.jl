@@ -8,6 +8,7 @@ Dagger.sparse_mode(::Finch.Tensor) = :finch
 Dagger._sparse_alloc(::Val{:finch}, T::Type, dims::Dims) =
     Finch.fspzeros(T, dims...)
 Dagger._sparse_collect(A::Finch.Tensor) = Array(A)
+Dagger.maybe_wrap_tile(x::Finch.Tensor) = DSparseMatrix{eltype(x)}(x)
 
 function Finch.fspzeros(p::Blocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
     d = Dagger.ArrayDomain(map(x->1:x, dims))
@@ -36,6 +37,17 @@ Finch.fsprand(p::BlocksOrAuto, dims::Dims, sparsity::AbstractFloat; assignment::
     Finch.fsprand(p, Float64, dims, sparsity; assignment)
 Finch.fsprand(::AutoBlocks, T::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary) =
     Finch.fsprand(Dagger.auto_blocks(dims), T, dims, sparsity; assignment)
+
+# Finch tensors do not define `Base.copy`; build a fresh equivalent tensor.
+Dagger._sparse_copy(mat::Finch.Tensor) = _finch_materialize(mat, eltype(mat), size(mat))
+
+# Finch tensors do not support `setindex!`, so copy-buffering writeback into a
+# Finch tile densifies, applies the (partial-range) copy, then re-sparsifies.
+function Dagger._sparse_copyto_view!(mat::Finch.Tensor, Brange, src)
+    dense = Array(mat)
+    copyto!(view(dense, Brange), src)
+    return _finch_materialize(dense, eltype(mat), size(mat))
+end
 
 function Dagger.matmatmul!(
     C::DSparseMatrix,

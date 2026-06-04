@@ -488,7 +488,7 @@ function stage(ctx::Context, d::Distribute)
             else
                 scope = ExactScope(d.procgrid[CartesianIndex(mod1.(Tuple(I), size(d.procgrid))...)])
             end
-            Dagger.@spawn compute_scope=scope identity(d.data[c])
+            Dagger.@spawn compute_scope=scope maybe_wrap_tile(d.data[c])
         end
     end
     return DArray(eltype(d.data),
