@@ -1,7 +1,12 @@
 import Preferences: load_preference, set_preferences!
 
 @testset "Preferences" begin
-    cmd = `$(Base.julia_cmd()) --startup-file=no --project -E 'using Dagger; parentmodule(Dagger.myid)'`
+    # The subprocess needs the repo root in its load path to find Dagger,
+    # since test/Project.toml only has Dagger in [extras], not [deps].
+    repo_root = joinpath(@__DIR__, "..")
+    load_path = string(repo_root, ":", @__DIR__, ":@:@v#.#:@stdlib")
+    base_cmd = `$(Base.julia_cmd()) --startup-file=no --project -E 'using Dagger; parentmodule(Dagger.myid)'`
+    cmd = addenv(base_cmd, "JULIA_LOAD_PATH" => load_path)
 
     try
         # Disabling the precompilation workload shaves off over half the time
@@ -17,5 +22,7 @@ import Preferences: load_preference, set_preferences!
         end
     finally
         set_preferences!(Dagger, "precompile_workload" => true; force=true)
+        # Reset distributed package to the default to avoid affecting subsequent runs
+        Dagger.set_distributed_package!("Distributed")
     end
 end
