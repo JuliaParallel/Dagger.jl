@@ -233,6 +233,11 @@ end
 # closures get non-uniform ArgumentWrapper hashes).
 _collect_cat(concat, dims::Int, xs...) = concat(xs...; dims)
 
+# Finalize a gathered DArray to a dense `Array{T,N}`. Sparse tile cats may yield
+# a `DSparseArray` / `SparseMatrixCSC`, and `Base.collect` does not densify those.
+_collect_dense(::Type{T}, ::Val{N}, x::Array{T,N}) where {T,N} = x
+_collect_dense(::Type{T}, ::Val{N}, x) where {T,N} = Array{T,N}(x)
+
 function Base.collect(d::DArray{T,N}; tree=true, copyto=false) where {T,N}
     a = fetch(d)
     if isempty(d.chunks)
@@ -261,13 +266,13 @@ function Base.collect(d::DArray{T,N}; tree=true, copyto=false) where {T,N}
         result = Dagger.spawn_datadeps() do
             treereduce_nd(spawn_catfuncs, a.chunks)
         end
-        return collect(fetch(result))
+        return _collect_dense(T, Val(N), fetch(result))
     end
     # Distributed: fetch chunks directly and concat in-process. This avoids
     # routing chunk data through datadeps aliasing, which requires an
     # aliasing-resolvable (e.g. isbits) element type.
     dimcatfuncs = [(x...) -> concat(x..., dims=i) for i in 1:N]
-    return collect(treereduce_nd(dimcatfuncs, asyncmap(fetch, a.chunks)))
+    return _collect_dense(T, Val(N), treereduce_nd(dimcatfuncs, asyncmap(fetch, a.chunks)))
 end
 Array{T,N}(A::DArray{S,N}) where {T,N,S} = convert(Array{T,N}, collect(A))
 
@@ -576,16 +581,7 @@ function stage(ctx::Context, d::Distribute)
         cs = emit_chunk_tasks!(d.domainchunks, d.procgrid, T,
             (scope, I, i) -> begin
             c = d.domainchunks[I]
-            # `copy`, not `identity`: under uniform execution (MPI/SPMD) this
-            # spawn runs inside a datadeps region (see `emit_chunk_tasks!`),
-            # which moves `d.data[c]` to `scope`'s space as a tracked argument
-            # and frees that moved copy once the region ends. `identity` would
-            # return that exact object as the chunk's permanent value, so it
-            # gets freed out from under the DArray the moment the region
-            # finishes (surfacing as e.g. AMDGPU's "Attempt to use a freed
-            # reference" the next time the chunk is read). `copy` returns a
-            # distinct object that isn't subject to that cleanup.
-            Dagger.@spawn compute_scope=scope copy(d.data[c])
+            Dagger.@spawn compute_scope=scope maybe_wrap_tile(d.data[c])
         end)
     end
     return DArray(eltype(d.data),
