@@ -154,3 +154,13 @@ StridedDArray{T,N} = Union{<:DArray{T,N}, SubArray{T,N,<:DArray{T,NP}} where NP}
 
 Base.copyto!(B::StridedDArray, A::StridedDArray) =
     darray_copyto!(parent(B), parent(A), parentindices(B), parentindices(A))
+function Base.copyto!(B::Array, A::StridedDArray)
+    DB = view(B, AutoBlocks())
+    darray_copyto!(DB, parent(A), parentindices(DB), parentindices(A))
+    return B
+end
+function Base.copyto!(B::SubArray, A::StridedDArray)
+    DB = view(parent(B), AutoBlocks())
+    darray_copyto!(DB, parent(A), parentindices(B), parentindices(A))
+    return B
+end
