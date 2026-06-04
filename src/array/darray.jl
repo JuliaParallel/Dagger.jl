@@ -180,6 +180,11 @@ stage(ctx, c::DArray) = c
 # closures get non-uniform ArgumentWrapper hashes).
 _collect_cat(concat, dims::Int, xs...) = concat(xs...; dims)
 
+# Finalize a gathered DArray to a dense `Array{T,N}`. Sparse tile cats may yield
+# a `DSparseArray` / `SparseMatrixCSC`, and `Base.collect` does not densify those.
+_collect_dense(::Type{T}, ::Val{N}, x::Array{T,N}) where {T,N} = x
+_collect_dense(::Type{T}, ::Val{N}, x) where {T,N} = Array{T,N}(x)
+
 function Base.collect(d::DArray{T,N}; tree=true, copyto=false) where {T,N}
     a = fetch(d)
     if isempty(d.chunks)
@@ -208,13 +213,13 @@ function Base.collect(d::DArray{T,N}; tree=true, copyto=false) where {T,N}
         result = Dagger.spawn_datadeps() do
             treereduce_nd(spawn_catfuncs, a.chunks)
         end
-        return collect(fetch(result))
+        return _collect_dense(T, Val(N), fetch(result))
     end
     # Distributed: fetch chunks directly and concat in-process. This avoids
     # routing chunk data through datadeps aliasing, which requires an
     # aliasing-resolvable (e.g. isbits) element type.
     dimcatfuncs = [(x...) -> concat(x..., dims=i) for i in 1:N]
-    return collect(treereduce_nd(dimcatfuncs, asyncmap(fetch, a.chunks)))
+    return _collect_dense(T, Val(N), treereduce_nd(dimcatfuncs, asyncmap(fetch, a.chunks)))
 end
 Array{T,N}(A::DArray{S,N}) where {T,N,S} = convert(Array{T,N}, collect(A))
 
@@ -511,7 +516,7 @@ function stage(ctx::Context, d::Distribute)
         cs = emit_chunk_tasks!(d.domainchunks, d.procgrid, T,
             (scope, I, i) -> begin
             c = d.domainchunks[I]
-            Dagger.@spawn compute_scope=scope identity(d.data[c])
+            Dagger.@spawn compute_scope=scope maybe_wrap_tile(d.data[c])
         end)
     end
     return DArray(eltype(d.data),
