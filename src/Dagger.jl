@@ -68,7 +68,6 @@ include("threadproc.jl")
 include("sch_options.jl")
 include("context.jl")
 include("utils/processors.jl")
-include("utils/metrics.jl")
 include("scopes.jl")
 include("utils/scopes.jl")
 include("chunks.jl")
@@ -90,6 +89,7 @@ abstract type MemorySpace end
 include("utils/memory-span.jl")
 include("utils/interval_tree.jl")
 include("memory-spaces.jl")
+include("utils/metrics.jl")
 
 # Task scheduling
 include("compute.jl")

@@ -1,8 +1,14 @@
+import Statistics
+
 const TASK_SIGNATURE = ScopedValue{Union{Vector{Any}, Nothing}}(nothing)
 const TASK_PROCESSOR = ScopedValue{Union{Processor, Nothing}}(nothing)
 const TASK_WORKER = ScopedValue{Union{Int, Nothing}}(nothing)
 const TASK_TRANSFER_SIZE = ScopedValue{Union{UInt64, Nothing}}(nothing)
 const TASK_TRANSFER_TIME = ScopedValue{Union{UInt64, Nothing}}(nothing)
+
+const TASK_MOVE_FROM_SPACE = ScopedValue{Union{MemorySpace, Nothing}}(nothing)
+const TASK_MOVE_TO_SPACE = ScopedValue{Union{MemorySpace, Nothing}}(nothing)
+const TASK_MOVE_SIZE = ScopedValue{Union{UInt64, Nothing}}(nothing)
 
 struct SignatureMetric <: MT.AbstractMetric end
 MT.metric_applies(::SignatureMetric, ::Val{:execute!}) = true
@@ -47,6 +53,24 @@ function MT.stop_metric(::TransferRateMetric, _)
     return round(UInt64, Float64(size) / (Float64(elapsed) / 1e9))
 end
 
+struct FromSpaceMetric <: MT.AbstractMetric end
+MT.metric_applies(::FromSpaceMetric, ::Val{:execute!}) = true
+MT.metric_type(::Type{FromSpaceMetric}) = Union{MemorySpace, Nothing}
+MT.start_metric(::FromSpaceMetric) = nothing
+MT.stop_metric(::FromSpaceMetric, _) = TASK_MOVE_FROM_SPACE[]
+
+struct ToSpaceMetric <: MT.AbstractMetric end
+MT.metric_applies(::ToSpaceMetric, ::Val{:execute!}) = true
+MT.metric_type(::Type{ToSpaceMetric}) = Union{MemorySpace, Nothing}
+MT.start_metric(::ToSpaceMetric) = nothing
+MT.stop_metric(::ToSpaceMetric, _) = TASK_MOVE_TO_SPACE[]
+
+struct MoveSizeMetric <: MT.AbstractMetric end
+MT.metric_applies(::MoveSizeMetric, ::Val{:execute!}) = true
+MT.metric_type(::Type{MoveSizeMetric}) = Union{UInt64, Nothing}
+MT.start_metric(::MoveSizeMetric) = nothing
+MT.stop_metric(::MoveSizeMetric, _) = TASK_MOVE_SIZE[]
+
 const EXECUTE_METRICS_SPEC = MT.MetricsSpec(
     MT.TimeMetric(),
     MT.ThreadTimeMetric(),
@@ -57,62 +81,107 @@ const EXECUTE_METRICS_SPEC = MT.MetricsSpec(
     TransferSizeMetric(),
     TransferTimeMetric(),
     TransferRateMetric(),
+    FromSpaceMetric(),
+    ToSpaceMetric(),
+    MoveSizeMetric(),
 )
 
 execute_metrics_spec() = EXECUTE_METRICS_SPEC
 
+function instrumented_move!(dep_mod, dest_space::MemorySpace, source_space::MemorySpace,
+                            dest::Chunk, source::Chunk)
+    raw_size = source.handle.size
+    size = raw_size === nothing ? nothing : UInt64(raw_size)
+    @with TASK_MOVE_FROM_SPACE => source_space TASK_MOVE_TO_SPACE => dest_space TASK_MOVE_SIZE => size begin
+        return move!(dep_mod, dest_space, source_space, dest, source)
+    end
+end
+
+function _reduce_uint64(reducer::Function, vals::Vector{UInt64})
+    isempty(vals) && return nothing
+    raw = reducer(vals)
+    return raw isa UInt64 ? raw : round(UInt64, raw)
+end
+
+function _runtime_lookup_chain(sig::Vector, proc::Processor, worker_id::Int)
+    return (
+        (MT.LookupExact(SignatureMetric(), sig),
+         MT.LookupExact(ProcessorMetric(), proc)),
+        (MT.LookupExact(SignatureMetric(), sig),
+         MT.LookupSubtype(ProcessorMetric(), typeof(proc)),
+         MT.LookupCustom(WorkerMetric(), w -> w == worker_id)),
+        (MT.LookupExact(SignatureMetric(), sig),
+         MT.LookupSubtype(ProcessorMetric(), typeof(proc))),
+        (MT.LookupExact(SignatureMetric(), sig),),
+    )
+end
+
 function metrics_lookup_runtime(snap::MT.MetricsSnapshot, sig::Vector,
-                                proc::Processor, worker_id::Int)
+                                proc::Processor, worker_id::Int;
+                                reducer::Function=first)
     target = MT.ThreadTimeMetric()
-    result = MT.cache_lookup(snap, Dagger, :execute!, target,
-                             (MT.LookupExact(SignatureMetric(), sig),
-                              MT.LookupExact(ProcessorMetric(), proc)))
-    if result !== nothing
-        return result::UInt64
+    for lookups in _runtime_lookup_chain(sig, proc, worker_id)
+        matched = MT.find_keys(snap, Dagger, :execute!, lookups)
+        isempty(matched) && continue
+        vals = UInt64[]
+        sizehint!(vals, length(matched))
+        for k in matched
+            v = MT.lookup_value(snap, Dagger, :execute!, target, k)
+            v !== nothing && push!(vals, v)
+        end
+        result = _reduce_uint64(reducer, vals)
+        result !== nothing && return result
     end
-
-    result = MT.cache_lookup(snap, Dagger, :execute!, target,
-                             (MT.LookupExact(SignatureMetric(), sig),
-                              MT.LookupSubtype(ProcessorMetric(), typeof(proc)),
-                              MT.LookupCustom(WorkerMetric(), w -> w == worker_id)))
-    if result !== nothing
-        return result::UInt64
-    end
-
-    result = MT.cache_lookup(snap, Dagger, :execute!, target,
-                             (MT.LookupExact(SignatureMetric(), sig),
-                              MT.LookupSubtype(ProcessorMetric(), typeof(proc))))
-    if result !== nothing
-        return result::UInt64
-    end
-
-    result = MT.cache_lookup(snap, Dagger, :execute!, target,
-                             MT.LookupExact(SignatureMetric(), sig))
-    if result !== nothing
-        return result::UInt64
-    end
-
     return nothing
+end
+
+metrics_lookup_runtime_mean(snap, sig, proc, worker_id) =
+    metrics_lookup_runtime(snap, sig, proc, worker_id; reducer=Statistics.mean)
+metrics_lookup_runtime_median(snap, sig, proc, worker_id) =
+    metrics_lookup_runtime(snap, sig, proc, worker_id; reducer=Statistics.median)
+metrics_lookup_runtime_min(snap, sig, proc, worker_id) =
+    metrics_lookup_runtime(snap, sig, proc, worker_id; reducer=minimum)
+metrics_lookup_runtime_max(snap, sig, proc, worker_id) =
+    metrics_lookup_runtime(snap, sig, proc, worker_id; reducer=maximum)
+
+function _alloc_lookup_chain(sig::Vector, proc::Processor)
+    return (
+        (MT.LookupExact(SignatureMetric(), sig),
+         MT.LookupExact(ProcessorMetric(), proc)),
+        (MT.LookupExact(SignatureMetric(), sig),),
+    )
 end
 
 function metrics_lookup_alloc(snap::MT.MetricsSnapshot, sig::Vector,
-                              proc::Processor)
+                              proc::Processor;
+                              reducer::Function=first)
     target = MT.AllocMetric()
-    diff = MT.cache_lookup(snap, Dagger, :execute!, target,
-                           (MT.LookupExact(SignatureMetric(), sig),
-                            MT.LookupExact(ProcessorMetric(), proc)))
-    if diff !== nothing
-        gc_diff = diff::Base.GC_Diff
-        return UInt64(max(gc_diff.allocd, 0))
-    end
-    diff = MT.cache_lookup(snap, Dagger, :execute!, target,
-                           MT.LookupExact(SignatureMetric(), sig))
-    if diff !== nothing
-        gc_diff = diff::Base.GC_Diff
-        return UInt64(max(gc_diff.allocd, 0))
+    for lookups in _alloc_lookup_chain(sig, proc)
+        matched = MT.find_keys(snap, Dagger, :execute!, lookups)
+        isempty(matched) && continue
+        vals = UInt64[]
+        sizehint!(vals, length(matched))
+        for k in matched
+            diff = MT.lookup_value(snap, Dagger, :execute!, target, k)
+            if diff !== nothing
+                gc_diff = diff::Base.GC_Diff
+                push!(vals, UInt64(max(gc_diff.allocd, 0)))
+            end
+        end
+        result = _reduce_uint64(reducer, vals)
+        result !== nothing && return result
     end
     return nothing
 end
+
+metrics_lookup_alloc_mean(snap, sig, proc) =
+    metrics_lookup_alloc(snap, sig, proc; reducer=Statistics.mean)
+metrics_lookup_alloc_median(snap, sig, proc) =
+    metrics_lookup_alloc(snap, sig, proc; reducer=Statistics.median)
+metrics_lookup_alloc_min(snap, sig, proc) =
+    metrics_lookup_alloc(snap, sig, proc; reducer=minimum)
+metrics_lookup_alloc_max(snap, sig, proc) =
+    metrics_lookup_alloc(snap, sig, proc; reducer=maximum)
 
 function extract_collected_metrics(local_cache::MT.MetricsCache, key)
     snap = MT.snapshot(local_cache)
@@ -140,6 +209,61 @@ function apply_collected_metrics!(cache::MT.MetricsCache, key::K, pairs) where K
         end
     end
     return
+end
+
+function _move_matching_keys(snap::MT.MetricsSnapshot,
+                             from_space::MemorySpace, to_space::MemorySpace)
+    matched = MT.find_keys(snap, Dagger, :execute!,
+                            (MT.LookupExact(FromSpaceMetric(), from_space),
+                             MT.LookupExact(ToSpaceMetric(), to_space)))
+    if isempty(matched)
+        matched = MT.find_keys(snap, Dagger, :execute!,
+                                (MT.LookupSubtype(FromSpaceMetric(), typeof(from_space)),
+                                 MT.LookupSubtype(ToSpaceMetric(), typeof(to_space))))
+    end
+    return matched
+end
+
+function metrics_lookup_move_time(snap::MT.MetricsSnapshot,
+                                   from_space::MemorySpace, to_space::MemorySpace;
+                                   reducer::Function=Statistics.mean)
+    matched = _move_matching_keys(snap, from_space, to_space)
+    isempty(matched) && return nothing
+    vals = UInt64[]
+    sizehint!(vals, length(matched))
+    for k in matched
+        t = MT.lookup_value(snap, Dagger, :execute!, MT.TimeMetric(), k)
+        if t !== nothing && t > 0
+            push!(vals, t)
+        end
+    end
+    return _reduce_uint64(reducer, vals)
+end
+
+metrics_lookup_move_time_median(snap, from_space, to_space) =
+    metrics_lookup_move_time(snap, from_space, to_space; reducer=Statistics.median)
+metrics_lookup_move_time_min(snap, from_space, to_space) =
+    metrics_lookup_move_time(snap, from_space, to_space; reducer=minimum)
+metrics_lookup_move_time_max(snap, from_space, to_space) =
+    metrics_lookup_move_time(snap, from_space, to_space; reducer=maximum)
+
+function metrics_lookup_move_rate(snap::MT.MetricsSnapshot,
+                                   from_space::MemorySpace, to_space::MemorySpace)
+    matched = _move_matching_keys(snap, from_space, to_space)
+    isempty(matched) && return nothing
+
+    total_time = UInt64(0)
+    total_size = UInt64(0)
+    for k in matched
+        t = MT.lookup_value(snap, Dagger, :execute!, MT.TimeMetric(), k)
+        s = MT.lookup_value(snap, Dagger, :execute!, MoveSizeMetric(), k)
+        if t !== nothing && s !== nothing && t > 0 && s > 0
+            total_time += t
+            total_size += s
+        end
+    end
+    (total_time == 0 || total_size == 0) && return nothing
+    return round(UInt64, Float64(total_size) / (Float64(total_time) / 1e9))
 end
 
 function metrics_lookup_transfer_rate(snap::MT.MetricsSnapshot, proc::Processor, worker_id::Int)
