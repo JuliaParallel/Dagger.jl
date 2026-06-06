@@ -39,32 +39,24 @@ Base.hash(M::DSparseMatrix, h::UInt) = hash(objectid(M), hash(DSparseMatrix, h))
 # `DSparseMatrix` to resolve to the container's stable whole-object
 # `ObjectAliasing` -- including access via views, transposes, adjoints, and
 # reshapes -- rather than e.g. a `StridedAliasing` over storage that may have
-# since moved.
+# since moved. `aliases_as_whole` opts the type into this behavior, and Datadeps'
+# `aliasing_root` resolves any wrapper of a `DSparseMatrix` back to the container
+# before computing aliasing. Note: this must return a *bare* `ObjectAliasing`, as
+# `aliases_as_whole(::ObjectAliasing)` relies on it to drive whole-object copies.
 aliasing(M::DSparseMatrix, _=identity) = ObjectAliasing(M)
+aliases_as_whole(::DSparseMatrix) = true
 
-# Resolve the root `DSparseMatrix` beneath a stack of array wrappers (returns
-# `nothing` if there is no sparse container at the root).
-sparse_alias_root(@nospecialize(x)) = nothing
-sparse_alias_root(M::DSparseMatrix) = M
-sparse_alias_root(x::SubArray) = sparse_alias_root(parent(x))
-sparse_alias_root(x::Base.ReshapedArray) = sparse_alias_root(parent(x))
-sparse_alias_root(x::LinearAlgebra.Transpose) = sparse_alias_root(parent(x))
-sparse_alias_root(x::LinearAlgebra.Adjoint) = sparse_alias_root(parent(x))
-sparse_alias_root(x::Base.PermutedDimsArray) = sparse_alias_root(parent(x))
-
-# Views/reshapes over a sparse container alias the *whole* container; any other
-# (e.g. dense `Array`-backed) parent defers to the existing handling. Transpose
-# and adjoint already forward aliasing to their parent, so the sparse-rooted case
-# is handled there (and recursively via `sparse_alias_root`).
-function aliasing(x::SubArray)
-    root = sparse_alias_root(x)
-    root === nothing && return invoke(aliasing, Tuple{Any}, x)
-    return aliasing(root)
-end
-function aliasing(x::Base.ReshapedArray)
-    root = sparse_alias_root(x)
-    root === nothing && return invoke(aliasing, Tuple{Any}, x)
-    return aliasing(root)
+# A `DSparseMatrix` has no meaningful raw data pointer (its storage may be
+# reallocated/resized). This trap ensures that if aliasing ever tries to treat a
+# wrapper of a `DSparseMatrix` as strided memory -- e.g. a new array-wrapper type
+# that `aliasing_root` failed to resolve via `Base.parent` -- it fails loudly
+# instead of silently corrupting Datadeps' aliasing tracking.
+function Base.pointer(::DSparseMatrix)
+    throw(ArgumentError("`pointer(::DSparseMatrix)` is intentionally unsupported: \
+        a DSparseMatrix may reallocate its storage, so it must be aliased as a \
+        whole object via `Dagger.aliasing`. If you reached here through Datadeps \
+        aliasing of an array wrapper, ensure that wrapper implements `Base.parent` \
+        so that `Dagger.aliasing_root` can resolve it to the DSparseMatrix."))
 end
 
 # Forward indexing to the inner matrix. Ranges/colons are supported so that
