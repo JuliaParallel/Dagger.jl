@@ -54,11 +54,24 @@ function Dagger.matmatmul!(
     alpha,
     beta
 )
-    # Use fallback implementation
-    # TODO: Optimize this further
     opA = _apply_trans(A, transA)
     opB = _apply_trans(B, transB)
-    C.mat = alpha * (opA * opB) + beta * C.mat
+    # Sparse*sparse yields a freshly-allocated sparse matrix, which we reassign
+    # into the wrapper (`DSparseMatrix` hides this reallocation from Datadeps).
+    # `SparseArrays` provides no efficient 5-arg `mul!` into a sparse `C` -- the
+    # output sparsity pattern is determined by the product -- so we form the
+    # product out-of-place and apply only the alpha/beta scaling that is actually
+    # needed. The transposed-operand products dispatch to specialized SparseArrays
+    # methods, so `opA`/`opB` are not materialized.
+    AB = opA * opB
+    prod = isone(alpha) ? AB : alpha * AB
+    if iszero(beta)
+        C.mat = prod
+    elseif isone(beta)
+        C.mat = prod + C.mat
+    else
+        C.mat = prod + beta * C.mat
+    end
 
     return C
 end
