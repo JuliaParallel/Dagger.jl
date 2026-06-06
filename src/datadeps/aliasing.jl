@@ -610,7 +610,12 @@ function aliasing!(state::DataDepsState, target_space::MemorySpace, arg_w::Argum
         return state.ainfo_cache[remote_arg_w]
     end
 
-    # Calculate the ainfo
+    # Calculate the ainfo via the current acceleration so SPMD backends (MPI)
+    # can broadcast owner-computed aliasing and keep ranks uniform. The generic
+    # `aliasing(::Acceleration, ...)` fallback uses `aliasing_unwrapped`, which
+    # resolves wrappers of whole-object containers (e.g. a view of a
+    # `DSparseArray`) to the container itself. For `Chunk`s, unwrap+aliasing
+    # happen where the data lives (remotely / on the owning rank).
     ainfo = AliasingWrapper(aliasing(current_acceleration(), remote_arg, arg_w.dep_mod))
 
     # Cache the result

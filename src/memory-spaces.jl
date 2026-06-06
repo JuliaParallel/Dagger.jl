@@ -375,7 +375,11 @@ function memory_spans(oa::ObjectAliasing{S}) where S
     return [span]
 end
 
-aliasing(accel::Acceleration, x, T) = aliasing(x, T)
+# Acceleration entry point used by Datadeps. Unwrap whole-object containers
+# (e.g. views of `DSparseArray`) before computing aliasing. SPMD backends
+# (MPI) overload this for `Chunk`/`ChunkView` to broadcast owner-computed
+# aliasing; those methods call `aliasing_unwrapped` on the owning rank.
+aliasing(accel::Acceleration, x, T) = aliasing_unwrapped(x, T)
 function aliasing(x, dep_mod)
     if dep_mod isa Symbol
         return aliasing(getfield(x, dep_mod))
@@ -411,22 +415,95 @@ end
 aliasing(::String) = NoAliasing() # FIXME: Not necessarily true
 aliasing(::Symbol) = NoAliasing()
 aliasing(::Type) = NoAliasing()
+
+"""
+    aliases_as_whole(x) -> Bool
+
+Whether `x` -- either an object, or an already-computed aliasing -- must be
+treated as a single, indivisible unit, i.e. it is never safe to alias (or to
+consider current) only *part* of it.
+
+For an object: containers whose backing storage may be reallocated or resized on
+write (such as `DSparseMatrix`) return `true`. This causes [`aliasing_root`](@ref)
+to resolve any view/wrapper of them to the whole container, so all access funnels
+through the container's own `aliasing`. By contract, such a container's `aliasing`
+must be a bare [`ObjectAliasing`](@ref).
+
+For an aliasing: a bare `ObjectAliasing` (the aliasing of a whole-object
+container) reports `true`. Datadeps uses this to copy such arguments as a whole
+(a `FullCopy`) rather than computing per-span remainders, since they can never be
+*partially* current in a memory space.
+"""
+aliases_as_whole(@nospecialize x) = false
+aliases_as_whole(ainfo::AliasingWrapper) = aliases_as_whole(ainfo.inner)
+aliases_as_whole(::ObjectAliasing) = true
+
+"""
+    aliasing_root(x)
+
+Resolve `x` down to the whole-object container it wraps: peel array wrappers
+(views, transposes, adjoints, reshapes, permutations, ...) off of `x` until
+reaching a container that must alias as a whole (see [`aliases_as_whole`](@ref)),
+and return that container. If no such container is wrapped, return `x` unchanged.
+
+This relies solely on the standard `Base.parent` interface, so it transparently
+handles *any* array wrapper without per-wrapper `aliasing` methods: a new wrapper
+type needs no special-casing here, and a new whole-object container only needs to
+define [`aliases_as_whole`](@ref) (plus its own `aliasing` method, which must
+return a bare `ObjectAliasing`). A trapping `Base.pointer` on such containers
+guards against a wrapper slipping through and being misinterpreted as strided
+memory.
+
+!!! warning
+    The resolved object's *identity* defines its aliasing, so this is only
+    meaningful in the memory space where `x` physically resides. Never return its
+    result across a worker boundary and *then* compute `aliasing` -- the transfer
+    copies the object and changes its aliasing. Use [`aliasing_unwrapped`](@ref),
+    which fuses the two operations so they always run together.
+"""
+aliasing_root(@nospecialize x) = x
+function aliasing_root(x::AbstractArray)
+    aliases_as_whole(x) && return x
+    p = parent(x)
+    # `Base.parent` returns the argument itself for non-wrapper arrays, which
+    # terminates the recursion.
+    p === x && return x
+    root = aliasing_root(p)
+    return aliases_as_whole(root) ? root : x
+end
+
+"""
+    aliasing_unwrapped(x[, dep_mod])
+
+Compute the `aliasing` of `x`, first resolving (via [`aliasing_root`](@ref)) any
+whole-object container that `x` wraps. This is the entry point Datadeps uses to
+compute the aliasing of a (possibly wrapped) argument.
+
+Unwrapping and `aliasing` are intentionally fused into a single call so they
+always execute in the same place. It MUST be evaluated where `x` physically lives
+-- e.g. *inside* a `Chunk`'s `remotecall_fetch` block -- because the unwrapped
+object's identity determines its aliasing; returning the unwrapped object across
+a worker boundary first would copy it and silently change the result.
+"""
+aliasing_unwrapped(x) = aliasing(aliasing_root(x))
+aliasing_unwrapped(x, dep_mod) = aliasing(aliasing_root(x), dep_mod)
+
 function aliasing(x::Chunk, T)
     if root_worker_id(x.processor) == myid()
-        return aliasing(unwrap(x), T)
+        return aliasing_unwrapped(unwrap(x), T)
     end
     @assert x.handle isa DRef
     return remotecall_fetch(root_worker_id(x.processor), x, T) do x, T
-        aliasing(unwrap(x), T)
+        aliasing_unwrapped(unwrap(x), T)
     end
 end
 function aliasing(x::Chunk)
     if root_worker_id(x.processor) == myid()
-        return aliasing(unwrap(x))
+        return aliasing_unwrapped(unwrap(x))
     end
     @assert x.handle isa DRef
     return remotecall_fetch(root_worker_id(x.processor), x) do x
-        aliasing(unwrap(x))
+        aliasing_unwrapped(unwrap(x))
     end
 end
 aliasing(x::DTask, T) = aliasing(fetch(x; move_value=false, unwrap=false), T)
