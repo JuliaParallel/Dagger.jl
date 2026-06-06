@@ -8,28 +8,15 @@ Datadeps algorithms.
 mutable struct DSparseMatrix{T} <: AbstractMatrix{T}
     mat
 end
-function DSparseMatrix{T}(undef, dims::NTuple{N, Int}) where {T,N}
-    M = sparse_mode()
-    return DSparseMatrix{T}(_sparse_alloc(Val(M), T, dims))
-end
 
-function _sparse_not_loaded(::Val{M}) where M
-    if M == :sparsearrays
-        throw(ArgumentError("SparseArrays must be loaded to use SparseMatrixCSC"))
-    elseif M == :finch
-        throw(ArgumentError("Finch must be loaded to use Finch.Tensor"))
-    elseif M == :none
-        throw(ArgumentError("Sparse mode not set\nSet it with `sparse_mode!(M)` where M is :sparsearrays or :finch, and load the corresponding package"))
-    else
-        throw(ArgumentError("Unknown sparse mode $M\nOptions are :sparsearrays and :finch"))
-    end
-end
-_sparse_alloc(::Val{M}, T::Type, dims::Dims) where M = _sparse_not_loaded(Val(M))
 _sparse_collect(M) = collect(M)
-const SPARSE_MODE = TaskLocalValue{Symbol}(()->:none)
-sparse_mode() = SPARSE_MODE[]
-sparse_mode(::T) where T = error("Unknown sparse mode for type $T")
-set_sparse_mode!(mode::Symbol) = SPARSE_MODE[] = mode
+# Allocate a destination tile matching the inner storage's sparse backend. The
+# default delegates to the storage type's own `similar`, which carries the
+# concrete backend (e.g. `SparseMatrixCSC`) forward to the destination -- this is
+# how `similar(::DArray)` propagates a tile's sparse type to a newly-allocated
+# result DArray. Backends whose `similar` is unsuitable (e.g. Finch, whose generic
+# `similar` yields tensor formats that destabilize later kernels) override this.
+_sparse_similar(mat, ::Type{T}, dims::Dims) where {T} = similar(mat, T, dims)
 
 Base.eltype(M::DSparseMatrix{T}) where T = T
 Base.size(M::DSparseMatrix) = size(M.mat)
@@ -37,7 +24,7 @@ Base.ndims(M::DSparseMatrix) = 2
 Base.iterate(M::DSparseMatrix) = iterate(M.mat)
 Base.iterate(M::DSparseMatrix, state) = iterate(M.mat, state)
 Base.similar(M::DSparseMatrix, ::Type{T}, dims::Tuple{Int, Int}) where T =
-    DSparseMatrix{T}(_sparse_alloc(Val(sparse_mode(M.mat)), T, dims))
+    DSparseMatrix{T}(_sparse_similar(M.mat, T, dims))
 Base.collect(M::DSparseMatrix) = _sparse_collect(M.mat)
 
 # N.B. hash and aliasing shouldn't change even if M.mat changes.
