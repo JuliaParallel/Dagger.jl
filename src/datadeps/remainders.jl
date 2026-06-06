@@ -43,6 +43,7 @@ memory_spans(mra::MultiRemainderAliasing) = vcat(memory_spans.(mra.remainders)..
 Base.hash(mra::MultiRemainderAliasing, h::UInt) = hash(mra.remainders, hash(MultiRemainderAliasing, h))
 Base.:(==)(mra1::MultiRemainderAliasing, mra2::MultiRemainderAliasing) = mra1.remainders == mra2.remainders
 
+# A whole-object copy from the argument's recorded owner space.
 struct FullCopy end
 
 """
@@ -87,9 +88,34 @@ function compute_remainder_for_arg!(state::DataDepsState,
                                     target_space::MemorySpace,
                                     arg_w::ArgumentWrapper,
                                     write_num::Int; compute_syncdeps::Bool=true)
+    owner_space = state.arg_owner[arg_w]
+
+    # Whole-object containers (e.g. `DSparseMatrix`) reallocate their entire
+    # storage on every write, so they can never be *partially* current in a
+    # memory space -- the whole object is current in exactly one space: the most
+    # recent writer (or the origin owner if never written). There is thus never a
+    # meaningful span "remainder" to compute, so we short-circuit to a whole-object
+    # `FullCopy` from the owner space (or `NoAliasing` if the target already holds
+    # it). This avoids the span-diff computation and the construction + transfer of
+    # a `RemainderAliasing` entirely. We detect this from the aliasing info, which
+    # is a bare `ObjectAliasing` for such containers (see `aliases_as_whole`).
+    #
+    # `arg_owner` is the most-recent *direct* writer of `arg_w`, while the merged
+    # `arg_history` records the latest write through *any* overlapping argument.
+    # For every path Datadeps currently exercises a whole-object container is only
+    # ever reached through a single argument, so these agree -- the assertion below
+    # guards that invariant. They could only diverge under cross-argument aliasing
+    # of a whole-object container (the same container written through one argument
+    # and read through a different, overlapping one); supporting that would require
+    # sourcing the copy from `history[end].space` instead of `arg_owner`.
+    if aliases_as_whole(aliasing!(state, target_space, arg_w))
+        history = state.arg_history[arg_w]
+        @assert isempty(history) || history[end].space == owner_space "whole-object container reached through a different overlapping argument than its owner; cross-argument aliasing of whole-object containers is unsupported"
+        return owner_space == target_space ? (NoAliasing(), 0) : (FullCopy(), 0)
+    end
+
     spaces_set = Set{MemorySpace}()
     push!(spaces_set, target_space)
-    owner_space = state.arg_owner[arg_w]
     push!(spaces_set, owner_space)
 
     @label restart
@@ -419,6 +445,9 @@ end
 # Main copy function for RemainderAliasing
 function move!(dep_mod::RemainderAliasing{S}, to_space::MemorySpace, from_space::MemorySpace, to::Chunk, from::Chunk) where S
     # TODO: Support direct copy between GPU memory spaces
+    # N.B. Whole-object containers (e.g. `DSparseMatrix`) never reach here: their
+    # storage reallocates on write, so they can't be span-copied. They are routed
+    # to a whole-object `FullCopy` in `compute_remainder_for_arg!` instead.
 
     # Copy the data from the source object
     copies = remotecall_fetch(root_worker_id(from_space), from_space, dep_mod, from) do from_space, dep_mod, from

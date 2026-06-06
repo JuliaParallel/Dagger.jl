@@ -57,25 +57,47 @@ end
 # Any *partial* or *reinterpreted* access to a sparse container (views,
 # transposes, adjoints, reshapes, and combinations thereof) must alias the
 # *entire* container, so that Datadeps never tracks stale sub-spans of storage
-# that may have been reallocated on write.
+# that may have been reallocated on write. This is enforced by `aliasing_root`,
+# which resolves any such wrapper back to the container itself (via `Base.parent`)
+# -- exposed to Datadeps through the fused `aliasing_unwrapped` -- plus a trapping
+# `Base.pointer` that fires if a wrapper ever slips through to the strided path.
 @testset "Sparse whole-container aliasing" begin
     M = Dagger.DSparseMatrix{Float64}(sprand(Float64, 6, 6, 0.4))
-    a_full = Dagger.aliasing(M)
 
-    @test Dagger.will_alias(a_full, Dagger.aliasing(view(M, 1:3, :)))
-    @test Dagger.will_alias(a_full, Dagger.aliasing(view(M, 4:6, 2:4)))
-    @test Dagger.will_alias(a_full, Dagger.aliasing(transpose(M)))
-    @test Dagger.will_alias(a_full, Dagger.aliasing(M'))
-    @test Dagger.will_alias(a_full, Dagger.aliasing(reshape(M, 36)))
-    @test Dagger.will_alias(a_full, Dagger.aliasing(view(transpose(M), 1:2, :)))
-    # Non-overlapping views of the *same* container still alias (whole-container).
-    @test Dagger.will_alias(Dagger.aliasing(view(M, 1:3, :)), Dagger.aliasing(view(M, 4:6, :)))
+    @test Dagger.aliases_as_whole(M)
+    @test !Dagger.aliases_as_whole(rand(Float64, 6, 6))
+    # The container's aliasing is a bare `ObjectAliasing`, which also reports
+    # whole-object (drives the Datadeps whole-object copy short-circuit).
+    @test Dagger.aliasing(M) isa Dagger.ObjectAliasing
+    @test Dagger.aliases_as_whole(Dagger.aliasing(M))
+    @test !Dagger.aliases_as_whole(Dagger.aliasing(rand(Float64, 6, 6)))
+
+    # `aliasing_root` peels any array wrapper back to the sparse container.
+    @test Dagger.aliasing_root(M) === M
+    @test Dagger.aliasing_root(view(M, 1:3, :)) === M
+    @test Dagger.aliasing_root(view(M, 4:6, 2:4)) === M
+    @test Dagger.aliasing_root(transpose(M)) === M
+    @test Dagger.aliasing_root(M') === M
+    @test Dagger.aliasing_root(reshape(M, 36)) === M
+    @test Dagger.aliasing_root(view(transpose(M), 1:2, :)) === M
+
+    # After unwrapping, all wrappers alias the same whole container.
+    a_full = Dagger.aliasing(M)
+    @test Dagger.will_alias(a_full, Dagger.aliasing_unwrapped(view(M, 1:3, :)))
+    @test Dagger.will_alias(Dagger.aliasing_unwrapped(view(M, 1:3, :)),
+                            Dagger.aliasing_unwrapped(view(M, 4:6, :)))
 
     # Distinct containers must not alias.
     M2 = Dagger.DSparseMatrix{Float64}(sprand(Float64, 6, 6, 0.4))
     @test !Dagger.will_alias(a_full, Dagger.aliasing(M2))
 
-    # Dense-array views are unaffected (still strided, not whole-array).
+    # Dense arrays are untouched: not whole-object, views stay strided, and
+    # `aliasing_root` returns them unchanged.
     A = rand(Float64, 6, 6)
-    @test Dagger.aliasing(view(A, 1:3, :)) isa Dagger.StridedAliasing
+    Av = view(A, 1:3, :)
+    @test Dagger.aliasing_root(Av) === Av
+    @test Dagger.aliasing_unwrapped(Av) isa Dagger.StridedAliasing
+
+    # The `pointer` trap fires if a sparse container is treated as raw memory.
+    @test_throws ArgumentError pointer(M)
 end

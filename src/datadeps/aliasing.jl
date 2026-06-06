@@ -567,8 +567,12 @@ function aliasing!(state::DataDepsState, target_space::MemorySpace, arg_w::Argum
         return state.ainfo_cache[remote_arg_w]
     end
 
-    # Calculate the ainfo
-    ainfo = AliasingWrapper(aliasing(remote_arg, arg_w.dep_mod))
+    # Calculate the ainfo. `aliasing_unwrapped` resolves any wrapper of a
+    # whole-object container (e.g. a view of a `DSparseMatrix`) to the container
+    # itself, so aliasing is computed on the container -- never on a partial view
+    # of storage that may have been reallocated. `remote_arg` is local here (for
+    # `Chunk`s the unwrap+aliasing happen remotely inside `aliasing(::Chunk, ...)`).
+    ainfo = AliasingWrapper(aliasing_unwrapped(remote_arg, arg_w.dep_mod))
 
     # Cache the result
     state.ainfo_cache[remote_arg_w] = ainfo
