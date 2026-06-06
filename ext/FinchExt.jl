@@ -5,10 +5,12 @@ import LinearAlgebra
 import Dagger
 import Dagger: Blocks, AutoBlocks, BlocksOrAuto, AssignmentType, DSparseMatrix
 
-Dagger.sparse_mode(::Finch.Tensor) = :finch
-Dagger._sparse_alloc(::Val{:finch}, T::Type, dims::Dims) =
-    Finch.fspzeros(T, dims...)
 Dagger._sparse_collect(A::Finch.Tensor) = Array(A)
+# Finch's generic `similar` produces tensor formats that destabilize later
+# `@finch`/`@einsum` kernels (observed as segfaults during tile moves), so
+# allocate an empty COO-backed tile explicitly instead.
+Dagger._sparse_similar(::Finch.Tensor, ::Type{T}, dims::Dims) where {T} =
+    Finch.fspzeros(T, dims...)
 Dagger.maybe_wrap_tile(x::Finch.Tensor) = DSparseMatrix{eltype(x)}(x)
 
 function Finch.fspzeros(p::Blocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)

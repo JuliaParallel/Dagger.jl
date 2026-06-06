@@ -6,9 +6,6 @@ import LinearAlgebra
 import Dagger
 import Dagger: Blocks, AutoBlocks, BlocksOrAuto, AssignmentType, DSparseMatrix
 
-Dagger.sparse_mode(::SparseMatrixCSC) = :sparsearrays
-Dagger._sparse_alloc(::Val{:sparsearrays}, T::Type, dims::Dims) =
-    SparseArrays.spzeros(T, dims...)
 # Keep tiles sparse through `collect`/`cat`; the outer `collect` densifies.
 Dagger._sparse_collect(M::SparseMatrixCSC) = copy(M)
 # Wrap bare sparse tiles (e.g. from `distribute`) so Datadeps sees a stable container.
