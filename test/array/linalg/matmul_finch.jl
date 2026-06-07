@@ -70,4 +70,36 @@ else
             end
         end
     end
+
+    # Sparse matrix-vector multiply (SpMV): Finch sparse matrix tiles, dense vectors.
+    function test_finch_spmv!(T, n, part)
+        bs = part.blocksize[1]
+        DSA = Finch.fsprand(part, T, (n, n), FINCH_DENSITY)
+        A = collect(DSA)
+        x = rand(T, n)
+        Dx = distribute(x, Blocks(bs))
+
+        @test collect(DSA * Dx)            ≈ A * x
+        @test collect(transpose(DSA) * Dx) ≈ transpose(A) * x
+        @test collect(DSA' * Dx)           ≈ A' * x
+
+        y = rand(T, n)
+        Dy = distribute(copy(y), Blocks(bs))
+        alpha, beta = T(2), T(3)
+        mul!(Dy, DSA, Dx, alpha, beta)
+        @test collect(Dy) ≈ alpha * (A * x) + beta * y
+    end
+
+    const FINCH_SPMV_CASES = [
+        (8, Blocks(4, 4)),
+        (8, Blocks(2, 2)),
+    ]
+
+    @testset "Finch SpMV (quick)" begin
+        @testset "n=$n part=$(part.blocksize)" for (n, part) in FINCH_SPMV_CASES
+            @testset "T=$T" for T in (Float64, ComplexF64)
+                test_finch_spmv!(T, n, part)
+            end
+        end
+    end
 end
