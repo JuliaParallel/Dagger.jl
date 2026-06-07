@@ -133,6 +133,10 @@ function matvecmul!(C, transA::Char, A::DSparseMatrix, B, alpha, beta)
     return matvecmul!(C, transA, A.mat, B, alpha, beta)
 end
 
+# Factorize the inner sparse storage (e.g. sparse LU/UMFPACK) for block-Jacobi,
+# rather than the `DSparseArray` wrapper (whose generic `lu` would densify).
+_factorize_tile(M::DSparseArray) = LinearAlgebra.lu(M.mat)
+
 function transpose_tile end
 function copytile!(A::DSparseMatrix, B::DSparseMatrix)
     A.mat = transpose_tile(B.mat)

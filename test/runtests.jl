@@ -42,6 +42,7 @@ tests = [
     ("Array - LinearAlgebra - LU", "array/linalg/lu.jl"),
     ("Array - LinearAlgebra - Solve", "array/linalg/solve.jl"),
     ("Array - LinearAlgebra - QR", "array/linalg/qr.jl"),
+    ("Array - LinearAlgebra - Iterative Solvers", "array/linalg/iterativesolvers.jl"),
     ("Array - Permute", "array/permute.jl"),
     ("Array - Random", "array/random.jl"),
     ("Array - Stencils", "array/stencil.jl"),
