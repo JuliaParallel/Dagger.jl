@@ -3,7 +3,7 @@ module FinchExt
 import Finch
 import LinearAlgebra
 import Dagger
-import Dagger: Blocks, AutoBlocks, BlocksOrAuto, AssignmentType, DSparseMatrix
+import Dagger: Blocks, AutoBlocks, BlocksOrAuto, AssignmentType, DSparseArray, DSparseMatrix
 
 Dagger._sparse_collect(A::Finch.Tensor) = Array(A)
 # Finch's generic `similar` produces tensor formats that destabilize later
@@ -11,11 +11,13 @@ Dagger._sparse_collect(A::Finch.Tensor) = Array(A)
 # allocate an empty COO-backed tile explicitly instead.
 Dagger._sparse_similar(::Finch.Tensor, ::Type{T}, dims::Dims) where {T} =
     Finch.fspzeros(T, dims...)
-Dagger.maybe_wrap_tile(x::Finch.Tensor) = DSparseMatrix{eltype(x)}(x)
+Dagger.maybe_wrap_tile(x::Finch.Tensor) = DSparseArray(x)
 
 function Finch.fspzeros(p::Blocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
     d = Dagger.ArrayDomain(map(x->1:x, dims))
-    a = Dagger.AllocateArray(T, (T, _dims) -> DSparseMatrix{T}(Finch.fspzeros(T, _dims...)), false, d, Dagger.partition(p, d), p, assignment)
+    N = length(dims)
+    a = Dagger.AllocateArray(T, (T, _dims) -> DSparseArray(Finch.fspzeros(T, _dims...)), false, d, Dagger.partition(p, d), p, assignment;
+                             return_type=DSparseArray{T,N})
     return Dagger._to_darray(a)
 end
 Finch.fspzeros(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) =
@@ -29,7 +31,9 @@ Finch.fspzeros(::AutoBlocks, T::Type, dims::Dims; assignment::AssignmentType = :
 
 function Finch.fsprand(p::Blocks, T::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary)
     d = Dagger.ArrayDomain(map(x->1:x, dims))
-    a = Dagger.AllocateArray(T, (T, _dims) -> DSparseMatrix{T}(Finch.fsprand(T, _dims..., sparsity)), false, d, Dagger.partition(p, d), p, assignment)
+    N = length(dims)
+    a = Dagger.AllocateArray(T, (T, _dims) -> DSparseArray(Finch.fsprand(T, _dims..., sparsity)), false, d, Dagger.partition(p, d), p, assignment;
+                             return_type=DSparseArray{T,N})
     return Dagger._to_darray(a)
 end
 Finch.fsprand(p::BlocksOrAuto, T::Type, dims_and_sparsity::Real...; assignment::AssignmentType = :arbitrary) =
@@ -136,6 +140,20 @@ function Dagger.matmatmul!(
     end
     C.mat = C_out
 
+    return C
+end
+
+# Sparse matrix-vector multiply tile kernel: `C = alpha*op(A)*B + beta*C` with a
+# Finch tensor `A` and dense vectors `B`/`C`. Finch's `@einsum` does not reliably
+# accumulate into a dense output, so we densify the single sparse tile and use a
+# dense BLAS-backed `mul!`; this is a per-tile densification, not the whole matrix.
+function Dagger.matvecmul!(C::AbstractVector, transA::Char, A::Finch.Tensor, B::AbstractVector, alpha, beta)
+    Ad = Array(A)
+    opA = transA == 'N' ? Ad :
+          transA == 'C' ? adjoint(Ad) :
+          transA == 'T' ? transpose(Ad) :
+          throw(ArgumentError("Invalid transA: $transA"))
+    LinearAlgebra.mul!(C, opA, B, alpha, beta)
     return C
 end
 

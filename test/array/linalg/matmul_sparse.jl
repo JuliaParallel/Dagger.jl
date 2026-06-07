@@ -54,6 +54,42 @@ const SPARSE_QUICK_CASES = [
     end
 end
 
+# Sparse matrix-vector multiply (SpMV): sparse matrix tiles, dense vectors. This
+# is the core kernel for distributed iterative (Krylov) solvers.
+function test_sparse_spmv!(T, n, part)
+    bs = part.blocksize[1]
+    SA = sprand(T, n, n, SPARSE_DENSITY)
+    x = rand(T, n)
+
+    DSA = distribute(SA, part)
+    Dx = distribute(x, Blocks(bs))
+
+    ## Out-of-place (N / T / C)
+    @test collect(DSA * Dx)            ≈ SA * x
+    @test collect(transpose(DSA) * Dx) ≈ transpose(SA) * x
+    @test collect(DSA' * Dx)           ≈ SA' * x
+
+    ## In-place 5-arg mul!: y = alpha*A*x + beta*y
+    y = rand(T, n)
+    Dy = distribute(copy(y), Blocks(bs))
+    alpha, beta = T(2), T(3)
+    mul!(Dy, DSA, Dx, alpha, beta)
+    @test collect(Dy) ≈ alpha * (SA * x) + beta * y
+end
+
+const SPARSE_SPMV_CASES = [
+    (8, Blocks(4, 4)),
+    (8, Blocks(2, 2)),
+]
+
+@testset "Sparse SpMV (quick)" begin
+    @testset "n=$n part=$(part.blocksize)" for (n, part) in SPARSE_SPMV_CASES
+        @testset "T=$T" for T in (Float64, ComplexF64)
+            test_sparse_spmv!(T, n, part)
+        end
+    end
+end
+
 # Any *partial* or *reinterpreted* access to a sparse container (views,
 # transposes, adjoints, reshapes, and combinations thereof) must alias the
 # *entire* container, so that Datadeps never tracks stale sub-spans of storage
