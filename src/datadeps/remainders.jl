@@ -90,7 +90,7 @@ function compute_remainder_for_arg!(state::DataDepsState,
                                     write_num::Int; compute_syncdeps::Bool=true)
     owner_space = state.arg_owner[arg_w]
 
-    # Whole-object containers (e.g. `DSparseMatrix`) reallocate their entire
+    # Whole-object containers (e.g. `DSparseArray`) reallocate their entire
     # storage on every write, so they can never be *partially* current in a
     # memory space -- the whole object is current in exactly one space: the most
     # recent writer (or the origin owner if never written). There is thus never a
@@ -463,7 +463,7 @@ function move!(dep_mod::RemainderAliasing{S}, to_space::MemorySpace, from_space:
         multi_span_copy!(to_s, from_s, dep_mod.spans)
         return
     end
-    # N.B. Whole-object containers (e.g. `DSparseMatrix`) never reach here: their
+    # N.B. Whole-object containers (e.g. `DSparseArray`) never reach here: their
     # storage reallocates on write, so they can't be span-copied. They are routed
     # to a whole-object `FullCopy` in `compute_remainder_for_arg!` instead.
 

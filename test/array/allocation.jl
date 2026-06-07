@@ -99,7 +99,8 @@ end
                 @test size(Xsp) == dims
                 AT = length(dims) == 2 ? SparseMatrixCSC : SparseVector
                 Ach = fetch(Xsp.chunks[1])
-                @test Ach isa AT{T}
+                @test Ach isa Dagger.DSparseArray{T,length(dims)}
+                @test Ach.mat isa AT{T}
                 AXsp = collect(Xsp)
                 @test AXsp isa Array{T,length(dims)}
                 @test AXsp == collect(Xsp)

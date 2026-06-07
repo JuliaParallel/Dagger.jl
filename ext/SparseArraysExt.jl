@@ -1,19 +1,22 @@
 module SparseArraysExt
 
 import SparseArrays
-import SparseArrays: SparseMatrixCSC
+import SparseArrays: SparseMatrixCSC, SparseVector
 import LinearAlgebra
 import Dagger
-import Dagger: Blocks, AutoBlocks, BlocksOrAuto, AssignmentType, DSparseMatrix
+import Dagger: Blocks, AutoBlocks, BlocksOrAuto, AssignmentType, DSparseArray, DSparseMatrix
 
 # Keep tiles sparse through `collect`/`cat`; the outer `collect` densifies.
 Dagger._sparse_collect(M::SparseMatrixCSC) = copy(M)
 # Wrap bare sparse tiles (e.g. from `distribute`) so Datadeps sees a stable container.
-Dagger.maybe_wrap_tile(x::SparseMatrixCSC) = DSparseMatrix{eltype(x)}(x)
+Dagger.maybe_wrap_tile(x::SparseMatrixCSC) = DSparseArray(x)
+Dagger.maybe_wrap_tile(x::SparseVector) = DSparseArray(x)
 
 function SparseArrays.spzeros(p::Blocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
     d = Dagger.ArrayDomain(map(x->1:x, dims))
-    a = Dagger.AllocateArray(T, (T, _dims) -> DSparseMatrix{T}(SparseArrays.spzeros(T, _dims...)), false, d, Dagger.partition(p, d), p, assignment)
+    N = length(dims)
+    a = Dagger.AllocateArray(T, (T, _dims) -> DSparseArray(SparseArrays.spzeros(T, _dims...)), false, d, Dagger.partition(p, d), p, assignment;
+                             return_type=DSparseArray{T,N})
     return Dagger._to_darray(a)
 end
 SparseArrays.spzeros(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) =
@@ -27,7 +30,9 @@ SparseArrays.spzeros(::AutoBlocks, T::Type, dims::Dims; assignment::AssignmentTy
 
 function SparseArrays.sprand(p::Blocks, T::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary)
     d = Dagger.ArrayDomain(map(x->1:x, dims))
-    a = Dagger.AllocateArray(T, (T, _dims) -> DSparseMatrix{T}(SparseArrays.sprand(T, _dims..., sparsity)), false, d, Dagger.partition(p, d), p, assignment)
+    N = length(dims)
+    a = Dagger.AllocateArray(T, (T, _dims) -> DSparseArray(SparseArrays.sprand(T, _dims..., sparsity)), false, d, Dagger.partition(p, d), p, assignment;
+                             return_type=DSparseArray{T,N})
     return Dagger._to_darray(a)
 end
 SparseArrays.sprand(p::BlocksOrAuto, T::Type, dims_and_sparsity::Real...; assignment::AssignmentType = :arbitrary) =
@@ -73,6 +78,15 @@ function Dagger.matmatmul!(
         C.mat = prod + beta * C.mat
     end
 
+    return C
+end
+
+# Sparse matrix-vector multiply tile kernel: `C = alpha*op(A)*B + beta*C` with a
+# `SparseMatrixCSC` `A` and dense vectors `B`/`C`. SparseArrays provides an
+# efficient 5-arg `mul!` (SpMV) into a dense output, including for transposed and
+# adjoint operands, so this updates `C` in place with no allocation.
+function Dagger.matvecmul!(C::AbstractVector, transA::Char, A::SparseMatrixCSC, B::AbstractVector, alpha, beta)
+    LinearAlgebra.mul!(C, _apply_trans(A, transA), B, alpha, beta)
     return C
 end
 
