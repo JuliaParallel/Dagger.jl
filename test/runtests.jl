@@ -7,6 +7,11 @@ USE_METAL = parse(Bool, get(ENV, "CI_USE_METAL", "0"))
 USE_OPENCL = parse(Bool, get(ENV, "CI_USE_OPENCL", "0"))
 USE_GPU = USE_CUDA || USE_ROCM || USE_ONEAPI || USE_METAL || USE_OPENCL
 
+# Finch is a heavy optional dependency (precompilation takes minutes), so it is
+# not a default test dependency. The dedicated Finch CI job signals via this
+# variable to `Pkg.add` Finch and run only the Finch-backed tests.
+USE_FINCH = parse(Bool, get(ENV, "CI_TEST_FINCH", "0"))
+
 tests = [
     ("Thunk", "thunk.jl"),
     ("Scheduler", "scheduler.jl"),
@@ -59,7 +64,21 @@ if USE_GPU
         ("Array - Stencils", "array/stencil.jl"),
     ]
 end
+if USE_FINCH
+    # Only run the Finch-backed tests in the dedicated Finch CI job.
+    tests = [
+        ("Array - LinearAlgebra - Matmul (Finch)", "array/linalg/matmul_finch.jl"),
+    ]
+end
 all_test_names = map(test -> replace(last(test), ".jl"=>""), tests)
+
+# Tests excluded from default runs; they only run when explicitly requested via
+# `--test` or enabled by an environment signal. Finch's precompilation is very
+# heavy, so its tests are opt-in (except in the dedicated Finch job, where we
+# explicitly want them to run).
+optin_test_names = USE_FINCH ? String[] : String[
+    "array/linalg/matmul_finch",
+]
 
 additional_workers::Int = 3
 worker_threads::Int = 1
@@ -72,6 +91,10 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
     try
         Pkg.instantiate()
     catch
+    end
+    if USE_FINCH
+        # Finch is not a default test dependency; add it on demand when signaled.
+        Pkg.add("Finch")
     end
 
     using ArgParse
