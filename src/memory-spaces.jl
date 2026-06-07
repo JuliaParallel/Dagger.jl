@@ -399,7 +399,7 @@ treated as a single, indivisible unit, i.e. it is never safe to alias (or to
 consider current) only *part* of it.
 
 For an object: containers whose backing storage may be reallocated or resized on
-write (such as `DSparseMatrix`) return `true`. This causes [`aliasing_root`](@ref)
+write (such as `DSparseArray`) return `true`. This causes [`aliasing_root`](@ref)
 to resolve any view/wrapper of them to the whole container, so all access funnels
 through the container's own `aliasing`. By contract, such a container's `aliasing`
 must be a bare [`ObjectAliasing`](@ref).

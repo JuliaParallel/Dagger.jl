@@ -568,7 +568,7 @@ function aliasing!(state::DataDepsState, target_space::MemorySpace, arg_w::Argum
     end
 
     # Calculate the ainfo. `aliasing_unwrapped` resolves any wrapper of a
-    # whole-object container (e.g. a view of a `DSparseMatrix`) to the container
+    # whole-object container (e.g. a view of a `DSparseArray`) to the container
     # itself, so aliasing is computed on the container -- never on a partial view
     # of storage that may have been reallocated. `remote_arg` is local here (for
     # `Chunk`s the unwrap+aliasing happen remotely inside `aliasing(::Chunk, ...)`).

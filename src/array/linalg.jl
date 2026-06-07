@@ -4,6 +4,71 @@ function LinearAlgebra.norm2(A::DArray{T,N}) where {T,N}
     zeroRT = zero(real(T))
     return sqrt(sum(map(norm->fetch(norm)::real(T), norms); init=zeroRT))
 end
+
+# --- BLAS-1 vector operations ---------------------------------------------
+# Efficient, distributed level-1 operations needed by iterative (Krylov)
+# solvers. These run one BLAS-1 kernel per chunk (avoiding the generic
+# scalar-indexing fallbacks, which are slow and trigger scalar access on GPUs).
+# Operands may be partitioned differently: we align them with
+# `maybe_copy_buffered` (a no-op when they already share a layout, and which
+# copies results back to the originals for in-place operations), so users keep
+# full control over their own (possibly sub-optimal) partitioning.
+
+function LinearAlgebra.dot(x::DArray{Tx,N}, y::DArray{Ty,N}) where {Tx,Ty,N}
+    size(x) == size(y) || throw(DimensionMismatch("dot: x has size $(size(x)), y has size $(size(y))"))
+    R = typeof(LinearAlgebra.dot(zero(Tx), zero(Ty)))
+    return maybe_copy_buffered(x => x.partitioning, y => x.partitioning) do x, y
+        xc, yc = x.chunks, y.chunks
+        parts = [Dagger.@spawn LinearAlgebra.dot(xc[i], yc[i]) for i in eachindex(xc)]
+        sum(fetch, parts; init=zero(R))
+    end
+end
+
+function LinearAlgebra.axpy!(a::Number, x::DArray{Tx,N}, y::DArray{Ty,N}) where {Tx,Ty,N}
+    size(x) == size(y) || throw(DimensionMismatch("axpy!: x has size $(size(x)), y has size $(size(y))"))
+    # Align the read-only `x` to `y`'s layout so only `x` may be buffered; `y` is
+    # updated in place (and copied back by `maybe_copy_buffered` if it was buffered).
+    maybe_copy_buffered(x => y.partitioning, y => y.partitioning) do x, y
+        xc, yc = x.chunks, y.chunks
+        Dagger.spawn_datadeps() do
+            for i in eachindex(xc)
+                Dagger.@spawn LinearAlgebra.axpy!(a, In(xc[i]), InOut(yc[i]))
+            end
+        end
+    end
+    return y
+end
+
+function LinearAlgebra.axpby!(a::Number, x::DArray{Tx,N}, b::Number, y::DArray{Ty,N}) where {Tx,Ty,N}
+    size(x) == size(y) || throw(DimensionMismatch("axpby!: x has size $(size(x)), y has size $(size(y))"))
+    maybe_copy_buffered(x => y.partitioning, y => y.partitioning) do x, y
+        xc, yc = x.chunks, y.chunks
+        Dagger.spawn_datadeps() do
+            for i in eachindex(xc)
+                Dagger.@spawn LinearAlgebra.axpby!(a, In(xc[i]), b, InOut(yc[i]))
+            end
+        end
+    end
+    return y
+end
+
+function LinearAlgebra.rmul!(x::DArray, a::Number)
+    Dagger.spawn_datadeps() do
+        for c in x.chunks
+            Dagger.@spawn LinearAlgebra.rmul!(InOut(c), a)
+        end
+    end
+    return x
+end
+
+function LinearAlgebra.lmul!(a::Number, x::DArray)
+    Dagger.spawn_datadeps() do
+        for c in x.chunks
+            Dagger.@spawn LinearAlgebra.lmul!(a, InOut(c))
+        end
+    end
+    return x
+end
 function LinearAlgebra.norm2(A::UpperTriangular{T,<:DArray{T,2}}) where T
     Ac = parent(A).chunks
     Ac_upper = []

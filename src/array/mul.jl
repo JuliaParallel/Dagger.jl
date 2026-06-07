@@ -484,6 +484,21 @@ function _repartition_matvecmul(C, A, B, transA::Char)
     partC = (dimA,)
     return Blocks(partC...), Blocks(partA...), Blocks(partB...)
 end
+"""
+    matvecmul!(C, transA::Char, A, B, alpha, beta)
+
+Tile-level matrix-vector multiply computing `C = alpha*op(A)*B + beta*C` in
+place on the (dense) output vector `C`, where `op` is determined by `transA`
+(`'N'`, `'T'`, `'C'`). Dispatches on the tile types: dense tiles use BLAS, while
+sparse tiles (e.g. `DSparseArray`) provide their own method (in a package
+extension) using a sparse matrix-vector product. This is the matvec analogue of
+[`matmatmul!`](@ref).
+"""
+function matvecmul!(C, transA::Char, A, B, alpha, beta)
+    BLAS.gemv!(transA, alpha, A, B, beta, C)
+    return C
+end
+
 function gemv_dagger!(
     C::DVector{T},
     transA::Char,
@@ -515,26 +530,26 @@ function gemv_dagger!(
                 # A: NoTrans
                 for k in range(1, Ant)
                     mzone = k == 1 ? beta : T(1.0)
-                    Dagger.@spawn BLAS.gemv!(
+                    Dagger.@spawn matvecmul!(
+                        InOut(Cc[m]),
                         transA,
-                        alpha,
                         In(Ac[m, k]),
                         In(Bc[k]),
+                        alpha,
                         mzone,
-                        InOut(Cc[m]),
                     )
                 end
             else
                 # A: [Conj]Trans
                 for k in range(1, Amt)
                     mzone = k == 1 ? beta : T(1.0)
-                    Dagger.@spawn BLAS.gemv!(
+                    Dagger.@spawn matvecmul!(
+                        InOut(Cc[m]),
                         transA,
-                        alpha,
                         In(Ac[k, m]),
                         In(Bc[k]),
+                        alpha,
                         mzone,
-                        InOut(Cc[m]),
                     )
                 end
             end
