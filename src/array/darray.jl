@@ -661,6 +661,19 @@ DArray{T}(::UndefInitializer, dims::NTuple{N,Int}; assignment::AssignmentType{N}
 DArray{T}(::UndefInitializer, dims::Vararg{Int,N}; assignment::AssignmentType{N} = :arbitrary) where {T,N} =
     DArray{T,N}(undef, auto_blocks((dims...,)), (dims...,); assignment)
 
+# Generic array code often allocates as `typeof(x)(undef, dims)` (e.g. Krylov's
+# `S = ktypeof(b)` workspaces). A `DArray`'s type parameters record only *that*
+# it is `Blocks`-partitioned, not the block size, so there is nothing to recover
+# from `S` and these fall back to `auto_blocks` -- the same choice the
+# element-type-only constructors above make. The result may therefore be
+# partitioned differently from the array `S` was taken from; that is correct but
+# costs a repartition on each op that mixes them, so prefer `similar` where the
+# prototype is in hand.
+DArray{T,N,B,F,C,D}(::UndefInitializer, dims::NTuple{N,Int}; assignment::AssignmentType{N} = :arbitrary) where {T,N,B<:Blocks{N},F,C,D} =
+    DArray{T,N}(undef, auto_blocks(dims), dims; assignment)
+DArray{T,N,B,F,C,D}(::UndefInitializer, dims::Vararg{Int,N}; assignment::AssignmentType{N} = :arbitrary) where {T,N,B<:Blocks{N},F,C,D} =
+    DArray{T,N}(undef, auto_blocks((dims...,)), (dims...,); assignment)
+
 function DArray(A::WrappedDArray{T}; assignment::AssignmentType = :arbitrary) where T
     B = DArray{T}(undef, size(A); assignment)
     copyto!(B, A)
