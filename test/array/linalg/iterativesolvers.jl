@@ -8,6 +8,8 @@
 #     julia test/runtests.jl --test array/linalg/iterativesolvers
 
 using Krylov
+using AlgebraicMultigrid
+using IncompleteLU
 
 # Strongly diagonally-dominant tridiagonal SPD matrix. The large diagonal keeps
 # the condition number small so the Krylov methods converge in a handful of
@@ -27,6 +29,21 @@ function advection_diffusion_1d(T, n)
          1 => fill(T(3) / 10, n - 1),
     )
 end
+
+# Per-tile factories for the `Dagger.BlockPreconditioner` tests below. They run
+# wherever the tile lives, so they (and `InvDiagOp`) must exist on every worker.
+#
+# `InvDiagOp` deliberately provides *only* `ldiv!` and does not subtype
+# `Factorization`, which is the shape of most third-party preconditioners; the
+# `lu` factory covers the `\` convention.
+@everywhere import LinearAlgebra
+@everywhere struct InvDiagOp{V}
+    dinv::V
+end
+@everywhere LinearAlgebra.ldiv!(y, op::InvDiagOp, x) = (y .= op.dinv .* x; y)
+@everywhere inv_diag_factory(tile) =
+    InvDiagOp(1 ./ Vector(LinearAlgebra.diag(Dagger._tile_matrix(tile))))
+@everywhere tile_lu_factory(tile) = LinearAlgebra.lu(Matrix(Dagger._tile_matrix(tile)))
 
 @testset "Iterative solvers (Krylov)" begin
     n = 64
@@ -109,9 +126,11 @@ end
             @test collect(x) ≈ xref rtol = 1e-6
         end
 
-        # Non-square block grid must be rejected with a helpful error.
+        # A non-square block grid is re-tiled, not rejected: the diagonal is the
+        # same either way, so the result must be identical to the square case.
         DA_ragged = distribute(Matrix(Asp), Blocks(k, k ÷ 2))
-        @test_throws ArgumentError Dagger.JacobiPreconditioner(DA_ragged)
+        P_ragged = Dagger.JacobiPreconditioner(DA_ragged)
+        @test collect(P_ragged.dinv) ≈ fill(1 / SPD_DIAG, n)
     end
 
     @testset "block-Jacobi preconditioner" begin
@@ -151,7 +170,119 @@ end
         @test s1.niter <= 2
         @test collect(x1) ≈ xref rtol = 1e-8
 
-        @test_throws ArgumentError Dagger.BlockJacobiPreconditioner(distribute(Adense, Blocks(k, k ÷ 2)))
+        # A non-square block grid is re-tiled to `Blocks(k÷2, k÷2)` rather than
+        # rejected, so the blocks are the *finer* ones -- check against those.
+        yref_fine = similar(b)
+        for s in 1:(k ÷ 2):n
+            r = s:min(s + (k ÷ 2) - 1, n)
+            yref_fine[r] = Adense[r, r] \ b[r]
+        end
+        DA_ragged = distribute(Adense, Blocks(k, k ÷ 2))
+        P_ragged = Dagger.BlockJacobiPreconditioner(DA_ragged)
+        Db_ragged = distribute(b, Blocks(k ÷ 2))
+        y_ragged = similar(Db_ragged)
+        mul!(y_ragged, P_ragged, Db_ragged)
+        @test collect(y_ragged) ≈ yref_fine
+
+        x_ragged, s_ragged = Dagger.cg(DA_ragged, Db_ragged; M = P_ragged,
+                                       atol = 1e-12, rtol = 1e-10, itmax = 500)
+        @test s_ragged.solved
+        @test collect(x_ragged) ≈ xref rtol = 1e-6
+    end
+
+    # `BlockPreconditioner` is the public form of the machinery every bundled
+    # block preconditioner uses: hand it a per-tile factory and nothing else.
+    # Both of Dagger's apply conventions are covered -- `tile_lu_factory`
+    # returns a `Factorization` (applied with `\`) and `inv_diag_factory` an
+    # `ldiv!`-only object, which is the shape most third-party preconditioners
+    # (KrylovPreconditioners included) have.
+    @testset "BlockPreconditioner (user-supplied per-tile factory)" begin
+        Asp = laplacian_1d(Float64, n)
+        Adense = Matrix(Asp)
+        b = rand(n)
+        xref = Adense \ b
+
+        yref_lu = similar(b)
+        for s in 1:k:n
+            r = s:min(s + k - 1, n)
+            yref_lu[r] = Adense[r, r] \ b[r]
+        end
+
+        factories = (
+            ("lu (Factorization, `\\`)", tile_lu_factory, yref_lu),
+            ("inv-diag (`ldiv!` only)", inv_diag_factory, (1 / SPD_DIAG) .* b),
+        )
+
+        @testset "$(name) ($(backend))" for (name, build, yref) in factories,
+                                            backend in (:dense, :sparse)
+            DA = backend === :dense ? distribute(Adense, A_part) : distribute(Asp, A_part)
+            Db = distribute(b, Db_part)
+
+            P = Dagger.BlockPreconditioner(DA, build)
+            @test P isa Dagger.AbstractBlockPreconditioner
+            y = similar(Db)
+            mul!(y, P, Db)
+            @test collect(y) ≈ yref
+
+            x, stats = Dagger.cg(DA, Db; M = P, atol = 1e-12, rtol = 1e-10, itmax = 500)
+            @test stats.solved
+            @test collect(x) ≈ xref rtol = 1e-6
+        end
+    end
+
+    @testset "AMG preconditioner ($(method))" for method in (:ruge_stuben, :smoothed_aggregation)
+        Asp = laplacian_1d(Float64, n)
+        Adense = Matrix(Asp)
+        b = rand(n)
+        xref = Adense \ b
+
+        @testset "$(backend)" for backend in (:dense, :sparse)
+            DA = backend === :dense ? distribute(Adense, A_part) : distribute(Asp, A_part)
+            Db = distribute(b, Db_part)
+
+            P = Dagger.AMGPreconditioner(DA; method = method)
+            # Apply is a V-cycle approximating M⁻¹ x; just check it runs + is finite
+            # (and repeatable, exercising the cached, pinned hierarchy).
+            y1 = similar(Db); mul!(y1, P, Db)
+            y2 = similar(Db); mul!(y2, P, Db)
+            @test all(isfinite, collect(y1))
+            @test collect(y1) ≈ collect(y2)
+
+            x, stats = Dagger.cg(DA, Db; M = P, atol = 1e-12, rtol = 1e-10, itmax = 500)
+            @test stats.solved
+            @test collect(x) ≈ xref rtol = 1e-6
+        end
+    end
+
+    @testset "block-ILU preconditioner" begin
+        Asp = laplacian_1d(Float64, n)
+        Adense = Matrix(Asp)
+        b = rand(n)
+        xref = Adense \ b
+
+        @testset "build + apply ($(backend))" for backend in (:dense, :sparse)
+            DA = backend === :dense ? distribute(Adense, A_part) : distribute(Asp, A_part)
+            Db = distribute(b, Db_part)
+
+            P = Dagger.BlockILUPreconditioner(DA; τ = 0.01)
+            y1 = similar(Db); mul!(y1, P, Db)
+            y2 = similar(Db); mul!(y2, P, Db)
+            @test all(isfinite, collect(y1))
+            @test collect(y1) ≈ collect(y2)
+
+            x, stats = Dagger.cg(DA, Db; M = P, atol = 1e-12, rtol = 1e-10, itmax = 500)
+            @test stats.solved
+            @test collect(x) ≈ xref rtol = 1e-6
+        end
+
+        # A non-square block grid is re-tiled rather than rejected.
+        DA_ragged = distribute(Adense, Blocks(k, k ÷ 2))
+        P_ragged = Dagger.BlockILUPreconditioner(DA_ragged; τ = 0.01)
+        Db_ragged = distribute(b, Blocks(k ÷ 2))
+        x_ragged, s_ragged = Dagger.cg(DA_ragged, Db_ragged; M = P_ragged,
+                                       atol = 1e-12, rtol = 1e-10, itmax = 500)
+        @test s_ragged.solved
+        @test collect(x_ragged) ≈ xref rtol = 1e-6
     end
 end
 
