@@ -159,29 +159,103 @@ function LinearAlgebra.mul!(y::DVector, P::JacobiPreconditioner, x::DVector)
 end
 _jacobi_apply!(y, dinv, x) = (y .= dinv .* x; return nothing)
 
+# --- Block-diagonal preconditioners ---------------------------------------
+# A family of preconditioners of the form `M⁻¹ = blockdiag(op₁, …, op_k)`, where
+# each `opⱼ` approximates the inverse of `A`'s `j`-th diagonal tile `Aⱼⱼ`. They
+# share all machinery and differ only in how a per-tile operator is *built*:
+#
+#   - BlockJacobiPreconditioner: exact tile solve via `lu` (dense or sparse).
+#   - BlockILUPreconditioner:    incomplete LU per tile (needs IncompleteLU.jl).
+#   - AMGPreconditioner:         an AMG hierarchy per tile (needs AlgebraicMultigrid.jl).
+#
+# Building per tile is embarrassingly parallel and a natural fit for the tiled
+# layout. A single tile (`Blocks(n, n)`) makes any of these a *global*
+# preconditioner over the whole matrix; many tiles make it a scalable
+# block-Jacobi / additive-Schwarz variant that trades some convergence for
+# parallelism. All require square diagonal tiles (see `JacobiPreconditioner`).
+#
+# A per-tile operator (`lu`/ILU factor, AMG hierarchy) generally cannot be moved
+# between workers (dense `LU` has no `move!`; `UmfpackLU`/AMG hold process-bound
+# resources). So each operator is built *once* and pinned (via
+# `tochunk(..., ProcessScope)`) to the worker that owns its tile, and every apply
+# for that block is scheduled there (`compute_scope`); datadeps then moves only
+# the (movable) vector chunks to the operator, never the operator itself.
+
+"""
+    AbstractBlockPreconditioner <: AbstractDaggerPreconditioner
+
+Block-diagonal preconditioner: holds one per-diagonal-tile operator `opⱼ`
+(`y ← opⱼ⁻¹ x`), pinned to its tile's worker, and applies them independently per
+block. Concrete subtypes (`BlockJacobiPreconditioner`, `BlockILUPreconditioner`,
+`AMGPreconditioner`) share these fields: `ops`, `scopes`, `part`, `n`.
+"""
+abstract type AbstractBlockPreconditioner <: AbstractDaggerPreconditioner end
+
+_tile_scope(c::Chunk) = ProcessScope(root_worker_id(c))
+_tile_scope(t::DTask) = ProcessScope(root_worker_id(fetch(t; raw=true)))
+
+# Build the per-tile operator on the current worker and pin the result there: the
+# returned `Chunk` is process-scoped, so it can never be moved off this worker.
+function _build_tile_pinned(build, tile)
+    op = build(tile)
+    proc = Dagger.task_processor()
+    return tochunk(op, proc, ProcessScope(root_worker_id(proc)))
+end
+
+# Build a block preconditioner of type `Ctor` by applying `build` to each
+# diagonal tile (pinned to the tile's worker). `build(tile) -> op` returns a
+# per-tile operator supporting the block apply below.
+function _build_block_preconditioner(Ctor, A::DMatrix, who, build)
+    n, Ac, mt, mb = _check_square_tiles(A, who)
+    ops = Vector{Any}(undef, mt)
+    scopes = Vector{ProcessScope}(undef, mt)
+    for i in 1:mt
+        tile = Ac[i, i]
+        scope = _tile_scope(tile)
+        scopes[i] = scope
+        ops[i] = Dagger.@spawn compute_scope=scope _build_tile_pinned(build, tile)
+    end
+    return Ctor(ops, scopes, Blocks(mb), n)
+end
+
+function LinearAlgebra.mul!(y::DVector, P::AbstractBlockPreconditioner, x::DVector)
+    part = P.part
+    maybe_copy_buffered(x => part, y => part) do x, y
+        xc, yc = x.chunks, y.chunks
+        length(yc) == length(P.ops) || throw(DimensionMismatch(
+            "$(nameof(typeof(P))) has $(length(P.ops)) blocks but the vector has \
+            $(length(yc)) chunks"))
+        Dagger.spawn_datadeps() do
+            for i in eachindex(yc)
+                # Pin the apply to the operator's worker; the operator is passed as
+                # an untracked arg (read-only, already-pinned) so datadeps never
+                # moves it -- only the vector chunks are moved to this worker.
+                Dagger.@spawn compute_scope=P.scopes[i] _block_apply!(Out(yc[i]), P.ops[i], In(xc[i]))
+            end
+        end
+    end
+    return y
+end
+
+# Apply one block operator: `y = op⁻¹ x`. Default uses `\`; backends override for
+# operator types where `\` is unavailable (e.g. ILU/AMG use `ldiv!`).
+_block_apply!(y, op, x) = (y .= op \ x; return nothing)
+
+# Underlying matrix of a tile (overridden for `DSparseArray` in `sparse.jl`).
+_tile_matrix(A) = A
+
 """
     BlockJacobiPreconditioner(A::DMatrix)
 
-Block-Jacobi preconditioner. The object represents the block-diagonal inverse
-operator `M⁻¹ = blockdiag(A₁₁, …, A_kk)⁻¹`, where `Aᵢᵢ` are `A`'s diagonal tiles.
-Applying it (`mul!(y, P, x)`) solves `Aᵢᵢ yᵢ = xᵢ` independently per block --
-embarrassingly parallel and a natural fit for the tiled layout. Stronger than
-`JacobiPreconditioner` (it captures intra-block coupling); a single tile recovers
-an exact solve.
-
-Requires square diagonal tiles (see the note above and `JacobiPreconditioner`).
-
-
-Each diagonal tile is factorized *once* at construction. A factorization object
-cannot be moved between workers (dense `LU` has no `move!`; sparse `UmfpackLU`
-holds external/UMFPACK resources tied to its process), so each factor is pinned
-(via `tochunk(..., ProcessScope)`) to the worker that owns its tile, and every
-apply for that block is scheduled there (`compute_scope`). Datadeps then moves
-only the (movable) vector chunks to the factor, never the factor itself.
+Block-Jacobi preconditioner: `M⁻¹ = blockdiag(A₁₁, …, A_kk)⁻¹`. Each diagonal
+tile is factorized *once* with `lu` (sparse or dense) and the apply solves
+`Aᵢᵢ yᵢ = xᵢ`. Stronger than `JacobiPreconditioner` (captures intra-block
+coupling); a single tile recovers an exact solve. See
+[`AbstractBlockPreconditioner`](@ref). Requires square diagonal tiles.
 """
-struct BlockJacobiPreconditioner{F,S} <: AbstractDaggerPreconditioner
-    factors::F        # cached per-tile factorizations (pinned to their workers)
-    scopes::S         # the `ProcessScope` each factor/apply is pinned to
+struct BlockJacobiPreconditioner{F,S} <: AbstractBlockPreconditioner
+    ops::F            # cached per-tile factorizations (pinned to their workers)
+    scopes::S         # the `ProcessScope` each operator/apply is pinned to
     part::Blocks{1}   # partitioning of the vectors it applies to
     n::Int
 end
@@ -190,48 +264,45 @@ end
 # tiles factorize the inner `SparseMatrixCSC`); the default is a dense LU factor.
 _factorize_tile(A) = LinearAlgebra.lu(A)
 
-# Factorize on the current worker and pin the result there: the returned `Chunk`
-# is process-scoped, so the factor can never be moved off this worker.
-function _factorize_tile_pinned(Aii)
-    F = _factorize_tile(Aii)
-    proc = Dagger.task_processor()
-    return tochunk(F, proc, ProcessScope(root_worker_id(proc)))
-end
+BlockJacobiPreconditioner(A::DMatrix) =
+    _build_block_preconditioner(BlockJacobiPreconditioner, A, "BlockJacobiPreconditioner", _factorize_tile)
 
-_tile_scope(c::Chunk) = ProcessScope(root_worker_id(c))
-_tile_scope(t::DTask) = ProcessScope(root_worker_id(fetch(t; raw=true)))
+"""
+    BlockILUPreconditioner(A::DMatrix; τ=0.001, kwargs...)
 
-function BlockJacobiPreconditioner(A::DMatrix)
-    n, Ac, mt, mb = _check_square_tiles(A, "BlockJacobiPreconditioner")
-    factors = Vector{Any}(undef, mt)
-    scopes = Vector{ProcessScope}(undef, mt)
-    for i in 1:mt
-        tile = Ac[i, i]
-        scope = _tile_scope(tile)
-        scopes[i] = scope
-        # Factor where the tile lives; the result is pinned to that worker.
-        factors[i] = Dagger.@spawn compute_scope=scope _factorize_tile_pinned(tile)
-    end
-    return BlockJacobiPreconditioner(factors, scopes, Blocks(mb), n)
+Block incomplete-LU preconditioner: an ILU factorization (with drop tolerance
+`τ`) of each diagonal tile, applied per block. Cheaper setup than a full block
+solve, good as a general-purpose preconditioner. Requires `IncompleteLU.jl` to
+be loaded and sparse-backed tiles. See [`AbstractBlockPreconditioner`](@ref).
+"""
+struct BlockILUPreconditioner{F,S} <: AbstractBlockPreconditioner
+    ops::F
+    scopes::S
+    part::Blocks{1}
+    n::Int
 end
+# Friendly fallback (shadowed by the `::DMatrix` method added in `ext/IncompleteLUExt.jl`).
+BlockILUPreconditioner(A; kwargs...) = throw(ArgumentError(
+    "Dagger.BlockILUPreconditioner requires IncompleteLU.jl. Run `using IncompleteLU` \
+    to enable block incomplete-LU preconditioning."))
 
-function LinearAlgebra.mul!(y::DVector, P::BlockJacobiPreconditioner, x::DVector)
-    part = P.part
-    maybe_copy_buffered(x => part, y => part) do x, y
-        xc, yc = x.chunks, y.chunks
-        length(yc) == length(P.factors) || throw(DimensionMismatch(
-            "BlockJacobiPreconditioner has $(length(P.factors)) blocks but the \
-            vector has $(length(yc)) chunks"))
-        Dagger.spawn_datadeps() do
-            for i in eachindex(yc)
-                # Pin the solve to the factor's worker; the factor is passed as an
-                # untracked arg (read-only, already-pinned) so datadeps never tries
-                # to move it -- only the vector chunks are moved to this worker.
-                Dagger.@spawn compute_scope=P.scopes[i] _blockjacobi_solve!(Out(yc[i]), P.factors[i], In(xc[i]))
-            end
-        end
-    end
-    return y
+"""
+    AMGPreconditioner(A::DMatrix; method=:ruge_stuben, kwargs...)
+
+Algebraic-multigrid preconditioner: builds an AMG hierarchy (`method` is
+`:ruge_stuben` or `:smoothed_aggregation`) for each diagonal tile and applies a
+V-cycle per block. Near mesh-independent convergence for elliptic (Poisson-like)
+operators. With one tile this is global AMG; with many tiles it is a scalable
+block/additive-Schwarz AMG. Requires `AlgebraicMultigrid.jl` to be loaded and
+sparse-backed tiles. See [`AbstractBlockPreconditioner`](@ref).
+"""
+struct AMGPreconditioner{F,S} <: AbstractBlockPreconditioner
+    ops::F
+    scopes::S
+    part::Blocks{1}
+    n::Int
 end
-# Apply the cached block factorization: solve `Aᵢᵢ yᵢ = xᵢ`.
-_blockjacobi_solve!(y, F, x) = (y .= F \ x; return nothing)
+# Friendly fallback (shadowed by the `::DMatrix` method added in `ext/AlgebraicMultigridExt.jl`).
+AMGPreconditioner(A; kwargs...) = throw(ArgumentError(
+    "Dagger.AMGPreconditioner requires AlgebraicMultigrid.jl. Run \
+    `using AlgebraicMultigrid` to enable algebraic-multigrid preconditioning."))

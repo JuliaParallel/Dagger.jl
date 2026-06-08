@@ -8,6 +8,8 @@
 #     julia test/runtests.jl --test array/linalg/iterativesolvers
 
 using Krylov
+using AlgebraicMultigrid
+using IncompleteLU
 
 # Strongly diagonally-dominant tridiagonal SPD matrix. The large diagonal keeps
 # the condition number small so the Krylov methods converge in a handful of
@@ -152,5 +154,53 @@ end
         @test collect(x1) ≈ xref rtol = 1e-8
 
         @test_throws ArgumentError Dagger.BlockJacobiPreconditioner(distribute(Adense, Blocks(k, k ÷ 2)))
+    end
+
+    @testset "AMG preconditioner ($(method))" for method in (:ruge_stuben, :smoothed_aggregation)
+        Asp = laplacian_1d(Float64, n)
+        Adense = Matrix(Asp)
+        b = rand(n)
+        xref = Adense \ b
+
+        @testset "$(backend)" for backend in (:dense, :sparse)
+            DA = backend === :dense ? distribute(Adense, A_part) : distribute(Asp, A_part)
+            Db = distribute(b, Db_part)
+
+            P = Dagger.AMGPreconditioner(DA; method = method)
+            # Apply is a V-cycle approximating M⁻¹ x; just check it runs + is finite
+            # (and repeatable, exercising the cached, pinned hierarchy).
+            y1 = similar(Db); mul!(y1, P, Db)
+            y2 = similar(Db); mul!(y2, P, Db)
+            @test all(isfinite, collect(y1))
+            @test collect(y1) ≈ collect(y2)
+
+            x, stats = Dagger.cg(DA, Db; M = P, atol = 1e-12, rtol = 1e-10, itmax = 500)
+            @test stats.solved
+            @test collect(x) ≈ xref rtol = 1e-6
+        end
+    end
+
+    @testset "block-ILU preconditioner" begin
+        Asp = laplacian_1d(Float64, n)
+        Adense = Matrix(Asp)
+        b = rand(n)
+        xref = Adense \ b
+
+        @testset "build + apply ($(backend))" for backend in (:dense, :sparse)
+            DA = backend === :dense ? distribute(Adense, A_part) : distribute(Asp, A_part)
+            Db = distribute(b, Db_part)
+
+            P = Dagger.BlockILUPreconditioner(DA; τ = 0.01)
+            y1 = similar(Db); mul!(y1, P, Db)
+            y2 = similar(Db); mul!(y2, P, Db)
+            @test all(isfinite, collect(y1))
+            @test collect(y1) ≈ collect(y2)
+
+            x, stats = Dagger.cg(DA, Db; M = P, atol = 1e-12, rtol = 1e-10, itmax = 500)
+            @test stats.solved
+            @test collect(x) ≈ xref rtol = 1e-6
+        end
+
+        @test_throws ArgumentError Dagger.BlockILUPreconditioner(distribute(Adense, Blocks(k, k ÷ 2)); τ = 0.01)
     end
 end

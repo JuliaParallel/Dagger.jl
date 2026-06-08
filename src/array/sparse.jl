@@ -137,6 +137,10 @@ end
 # rather than the `DSparseArray` wrapper (whose generic `lu` would densify).
 _factorize_tile(M::DSparseArray) = LinearAlgebra.lu(M.mat)
 
+# Expose the inner sparse storage so preconditioner backends (ILU, AMG) build on
+# the actual `SparseMatrixCSC` rather than the `DSparseArray` wrapper.
+_tile_matrix(M::DSparseArray) = M.mat
+
 function transpose_tile end
 function copytile!(A::DSparseMatrix, B::DSparseMatrix)
     A.mat = transpose_tile(B.mat)
