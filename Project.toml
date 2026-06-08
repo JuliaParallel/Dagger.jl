@@ -52,13 +52,13 @@ oneAPI = "8f75cd03-7ff8-4ecb-9b8f-daf728133b1b"
 
 [extensions]
 AbstractFFTsExt = "AbstractFFTs"
-AlgebraicMultigridExt = "AlgebraicMultigrid"
+AlgebraicMultigridExt = ["AlgebraicMultigrid", "SparseArrays"]
 CUDAExt = "CUDA"
 DistributionsExt = "Distributions"
 FinchExt = "Finch"
 GraphVizExt = "GraphViz"
 GraphVizSimpleExt = "Colors"
-IncompleteLUExt = "IncompleteLU"
+IncompleteLUExt = ["IncompleteLU", "SparseArrays"]
 IntelExt = "oneAPI"
 JSON3Ext = "JSON3"
 KrylovExt = "Krylov"
