@@ -1009,3 +1009,107 @@ end
         end
     end
 end
+
+# Memory-aware scheduling tests
+#
+# The feature is global and opt-in; every test that enables it must disable it
+# again (via try/finally) so it does not leak into later test files.
+
+@everywhere _ma_sum(x) = sum(x)
+@everywhere function _ma_incr!(x)
+    x .+= 1
+    return nothing
+end
+
+@testset "Memory-aware scheduling" begin
+    sp1 = Dagger.CPURAMMemorySpace(1)
+
+    @testset "Accounting interface" begin
+        @test Dagger.memory_capacity(sp1) > 0
+        @test Dagger.memory_available(sp1) <= Dagger.memory_capacity(sp1)
+        # Capacity is cached, so repeated queries agree
+        @test Dagger.memory_capacity(sp1) == Dagger.memory_capacity(sp1)
+
+        @test Dagger.data_size(rand(128, 128)) == UInt64(sizeof(Float64) * 128 * 128)
+        c = Dagger.tochunk(rand(64, 64))
+        @test Dagger.data_size(c) == UInt64(c.handle.size)
+
+        cfg = Dagger.MemoryAwareConfig(; mem_fraction=0.5)
+        @test Dagger.memory_limit(sp1, cfg) == floor(UInt64, 0.5 * Dagger.memory_capacity(sp1))
+        cfg2 = Dagger.MemoryAwareConfig(; limits=Dict{Dagger.MemorySpace,UInt64}(sp1 => UInt64(1234)))
+        @test Dagger.memory_limit(sp1, cfg2) == UInt64(1234)
+    end
+
+    @testset "Correctness with feature enabled" begin
+        try
+            Dagger.enable_memory_aware_scheduling!(; mem_fraction=0.8)
+
+            A = rand(8)
+            r = Dagger.spawn_datadeps() do
+                Dagger.@spawn sum(In(A))
+            end
+            @test fetch(r) ≈ sum(A)
+
+            B = rand(64, 64)
+            Borig = copy(B)
+            Dagger.spawn_datadeps() do
+                Dagger.@spawn _ma_incr!(InOut(B))
+            end
+            @test B ≈ Borig .+ 1
+        finally
+            Dagger.disable_memory_aware_scheduling!()
+        end
+        # Toggling really disables it
+        @test !Dagger.MEMORY_AWARE_CONFIG.enabled
+    end
+
+    if nprocs() >= 2
+        @testset "Bounds peak copy memory" begin
+            T = 16
+            tile = 256                       # 256x256 Float64 == 0.5 MiB per tile
+            arrs = [rand(tile, tile) for _ in 1:T]   # ~8 MiB total
+            expected = [sum(a) for a in arrs]
+            w2 = Dagger.scope(worker=2)
+            sp2 = Dagger.CPURAMMemorySpace(2)
+            budget = UInt64(2 * 2^20)
+
+            # Each task reads (In) a distinct tile on worker 2, so a distinct
+            # read-only copy is made there -- exactly what reclaim can free once
+            # the task is done. Tasks return their tile's sum for a correctness
+            # check.
+            function run_region()
+                results = Vector{Any}(undef, T)
+                Dagger.spawn_datadeps() do
+                    for i in 1:T
+                        results[i] = Dagger.@spawn compute_scope=w2 _ma_sum(In(arrs[i]))
+                    end
+                end
+                return fetch.(results)
+            end
+            peak2() = remotecall_fetch(() -> Dagger.libc_array_stats().peak_bytes, 2)
+
+            run_region()  # warmup / compilation
+
+            Dagger.disable_memory_aware_scheduling!()
+            remotecall_fetch(Dagger.reset_libc_array_stats!, 2); GC.gc()
+            sums_off = run_region(); GC.gc()
+            peak_off = peak2()
+            @test sums_off ≈ expected
+
+            try
+                Dagger.enable_memory_aware_scheduling!(;
+                    limits=Dict{Dagger.MemorySpace,UInt64}(sp2 => budget), reassign=false)
+                remotecall_fetch(Dagger.reset_libc_array_stats!, 2); GC.gc()
+                sums_on = run_region(); GC.gc()
+                peak_on = peak2()
+                @test sums_on ≈ expected
+                # Bounded near the budget (with slack), and well below the
+                # unbounded peak (where all copies accumulate until region end).
+                @test peak_on <= 3 * budget
+                @test peak_on < peak_off
+            finally
+                Dagger.disable_memory_aware_scheduling!()
+            end
+        end
+    end
+end

@@ -26,6 +26,83 @@ processors(::S) where {S<:MemorySpace} =
 processors(space::CPURAMMemorySpace) =
     Set(proc for proc in get_processors(OSProc(space.owner)) if proc isa ThreadProc)
 
+### Memory capacity and usage tracking
+
+"""
+    memory_capacity(space::MemorySpace) -> UInt64
+
+Return the total memory capacity, in bytes, of `space`. The query runs on the
+worker that owns `space` and is cached per-process (capacity is assumed static).
+
+To support a new `MemorySpace`, define [`local_memory_capacity`](@ref), which is
+always invoked on the owning worker.
+"""
+function memory_capacity(space::MemorySpace)
+    return get!(MEMORY_CAPACITY_CACHE, space) do
+        w = root_worker_id(space)
+        if w == myid()
+            return local_memory_capacity(space)
+        else
+            return remotecall_fetch(local_memory_capacity, w, space)
+        end
+    end::UInt64
+end
+const MEMORY_CAPACITY_CACHE = Dict{MemorySpace,UInt64}()
+
+"""
+    memory_available(space::MemorySpace) -> UInt64
+
+Return the currently-available (free) memory, in bytes, of `space`. The query
+runs on the worker that owns `space` and is never cached.
+
+To support a new `MemorySpace`, define [`local_memory_available`](@ref), which is
+always invoked on the owning worker.
+"""
+function memory_available(space::MemorySpace)
+    w = root_worker_id(space)
+    if w == myid()
+        return local_memory_available(space)
+    else
+        return remotecall_fetch(local_memory_available, w, space)
+    end::UInt64
+end
+
+"""
+    local_memory_capacity(space::MemorySpace) -> UInt64
+
+Worker-local implementation of [`memory_capacity`](@ref). Always called on the
+worker that owns `space`. New `MemorySpace` types must define this.
+"""
+function local_memory_capacity end
+
+"""
+    local_memory_available(space::MemorySpace) -> UInt64
+
+Worker-local implementation of [`memory_available`](@ref). Always called on the
+worker that owns `space`. New `MemorySpace` types must define this.
+"""
+function local_memory_available end
+
+# Physical RAM is the natural capacity for CPU spaces. We use the physical
+# memory (not the virtual/total) so the budget reflects what can actually be
+# resident before the OS starts swapping or the OOM-killer fires.
+local_memory_capacity(::CPURAMMemorySpace) =
+    UInt64(@static VERSION >= v"1.8-" ? Sys.total_physical_memory() : Sys.total_memory())
+local_memory_available(::CPURAMMemorySpace) = UInt64(Sys.free_memory())
+
+"""
+    data_size(x) -> UInt64
+
+Best-effort estimate of how many bytes `x` occupies in its memory space. For
+`Chunk`s this reads the backing `DRef`/`FileRef` size (exact, free); for raw
+data it falls back to `sizeof`/`summarysize`.
+"""
+data_size(c::Chunk) =
+    c.handle isa Union{DRef,FileRef} ? UInt64(c.handle.size) : data_size(poolget(c.handle))
+data_size(x::DTask) = data_size(fetch(x; raw=true))
+data_size(x::DenseArray) = UInt64(sizeof(x))
+data_size(@nospecialize x) = UInt64(Base.summarysize(x))
+
 ### In-place Data Movement
 
 function unwrap(x::Chunk)

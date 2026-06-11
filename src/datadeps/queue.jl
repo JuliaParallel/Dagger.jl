@@ -127,15 +127,29 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     # Round-robin assign tasks to processors
     upper_queue = get_options(:task_queue)
 
+    # Build the memory-aware tracker (a no-op unless enabled). The pre-pass that
+    # computes per-task slot sizes and last-use indices is scheduler-independent,
+    # so this works on top of whichever `datadeps_schedule_task` the user chose.
+    tracker = MEMORY_AWARE_CONFIG.enabled ?
+        build_memory_tracker(MEMORY_AWARE_CONFIG, queue.seen_tasks) : nothing
+
     # Start launching tasks and necessary copies
     state = DataDepsState()
+    if tracker !== nothing
+        state.mem_tracker[] = tracker
+        tracker.active[] = true
+    end
     write_num = 1
     proc_to_scope_lfu = BasicLFUCache{Processor,AbstractScope}(1024)
-    for pair in queue.seen_tasks
+    for (task_idx, pair) in enumerate(queue.seen_tasks)
         spec = pair.spec
         task = pair.task
-        write_num = distribute_task!(queue, state, all_procs, all_scope, spec, task, spec.fargs, proc_to_scope_lfu, write_num)
+        write_num = distribute_task!(queue, state, all_procs, all_scope, spec, task, spec.fargs, proc_to_scope_lfu, write_num, tracker, task_idx)
     end
+
+    # Disable mid-region reclaim: from here on, slot generation (for write-back
+    # copy sources) must not be reclaimed out from under the final copies.
+    tracker !== nothing && (tracker.active[] = false)
 
     # Copy args from remote to local
     # N.B. We sort the keys to ensure a deterministic order for uniformity
@@ -177,20 +191,35 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             push!(get!(Vector{AliasingWrapper}, chunk_to_ainfos, remote_arg_w.arg), ainfo)
         end
     end
-    freed = IdDict{Any,Nothing}()
+    # Reuse the memory-aware tracker's `freed` set when present, so buffers it
+    # already reclaimed mid-region are not freed again here.
+    freed = tracker !== nothing ? tracker.freed : IdDict{Any,Nothing}()
     for remote_space in keys(obj_cache.values)
-        remote_proc = first(processors(remote_space))
-        free_scope = ExactScope(remote_proc)
         for (ainfo, remote_arg) in obj_cache.values[remote_space]
             # Skip the user's original data; only free copies we allocated.
             is_original(obj_cache, remote_space, ainfo) && continue
-            haskey(freed, remote_arg) && continue
-            freed[remote_arg] = nothing
-            free_syncdeps = Set{ThunkSyncdep}()
-            gather_free_syncdeps!(state, remote_space, remote_arg, write_num, chunk_to_ainfos, free_syncdeps)
-            Dagger.@spawn scope=free_scope syncdeps=free_syncdeps Dagger.unsafe_free!(remote_arg)
+            emit_slot_free!(state, remote_space, remote_arg, write_num, chunk_to_ainfos, freed)
         end
     end
+end
+
+"""
+    emit_slot_free!(state, space, remote_arg, write_num, chunk_to_ainfos, freed) -> Union{DTask,Nothing}
+
+Spawn a task that frees the Datadeps-allocated buffer `remote_arg` in `space`,
+gated (via [`gather_free_syncdeps!`](@ref)) on every task that reads or writes
+it. Returns the spawned free task, or `nothing` if it was already freed (tracked
+in `freed`). Used both for the end-of-region cleanup and for mid-region
+reclamation under memory pressure.
+"""
+function emit_slot_free!(state::DataDepsState, space::MemorySpace, remote_arg, write_num::Int, chunk_to_ainfos, freed)
+    haskey(freed, remote_arg) && return nothing
+    freed[remote_arg] = nothing
+    free_proc = first(processors(space))
+    free_scope = ExactScope(free_proc)
+    free_syncdeps = Set{ThunkSyncdep}()
+    gather_free_syncdeps!(state, space, remote_arg, write_num, chunk_to_ainfos, free_syncdeps)
+    return Dagger.@spawn scope=free_scope syncdeps=free_syncdeps Dagger.unsafe_free!(remote_arg)
 end
 struct DataDepsTaskDependency
     arg_w::ArgumentWrapper
@@ -217,7 +246,7 @@ map_or_ntuple(f, xs::Vector) = map(f, 1:length(xs))
 # N.B. Accept any `Tuple` (typed specs produce heterogeneous tuples of
 # `TypedArgument{T}`, not a homogeneous `NTuple{N,T}`).
 @inline map_or_ntuple(@specialize(f), xs::Tuple) = ntuple(f, Val(length(xs)))
-function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_procs, all_scope, spec::DTaskSpec{typed}, task::DTask, fargs, proc_to_scope_lfu, write_num::Int) where typed
+function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_procs, all_scope, spec::DTaskSpec{typed}, task::DTask, fargs, proc_to_scope_lfu, write_num::Int, tracker::Union{DatadepsMemoryTracker,Nothing}=nothing, task_idx::Int=0) where typed
     @specialize spec fargs
 
     if typed
@@ -229,6 +258,18 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
     scheduler = queue.scheduler
     our_proc = datadeps_schedule_task(scheduler, state, all_procs, all_scope, task_scope, spec, task)
+
+    # Memory-aware post-scheduling adjustment: the scheduler has proposed a
+    # processor (and thus space); optionally move the task to a less-loaded
+    # in-scope space when the proposal would exceed that space's budget. The
+    # actual budget enforcement (synchronous reclaim of dead copies) happens
+    # later, inside `get_or_generate_slot!`, where slots are allocated.
+    if tracker !== nothing
+        tracker.current_idx[] = task_idx
+        candidate_procs = Processor[p for p in all_procs if proc_in_scope(p, task_scope)]
+        our_proc = memory_aware_reassign!(tracker, our_proc, candidate_procs, task_idx)
+    end
+
     @assert our_proc in all_procs
     our_space = only(memory_spaces(our_proc))
 
