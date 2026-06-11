@@ -1018,6 +1018,7 @@ end
     return nothing
 end
 @everywhere _ma_gemm_acc!(C, A, B) = (C .+= A * B; C)
+@everywhere _ma_sp_acc!(C, A, B) = (C.mat = A.mat * B.mat + C.mat; C)
 
 @testset "Memory-aware scheduling" begin
     sp1 = Dagger.CPURAMMemorySpace(1)
@@ -1234,6 +1235,58 @@ end
                 # Peak must stay under the full written footprint: written tiles
                 # are spilled rather than held resident all at once.
                 @test peak < written_footprint
+            finally
+                Dagger.disable_memory_aware_scheduling!()
+            end
+        end
+
+        @testset "Sparse tiles are Libc-backed, freeable, and spillable" begin
+            # SparseMatrixCSC / DSparseMatrix get the same low-memory treatment as
+            # dense arrays: their backing buffers can be Libc-backed and eagerly
+            # freed, so the memory-aware planner can spill sparse tiles to disk.
+            S = SparseArrays.sprand(128, 128, 0.05)
+            Sb = Dagger.libc_backed(S)
+            @test Sb == S
+            @test Dagger.is_libc_allocated(Sb.nzval)
+            @test Dagger.is_libc_allocated(Sb.colptr)
+            @test Dagger.is_libc_allocated(Sb.rowval)
+            Dagger.unsafe_free!(Sb)
+            @test !Dagger.is_libc_allocated(Sb.nzval)
+            # DSparseArray wrapper forwards both operations to its inner storage.
+            M = Dagger.DSparseArray(Dagger.libc_backed(SparseArrays.sprand(64, 64, 0.1)))
+            @test Dagger.is_libc_allocated(M.mat.nzval)
+            Dagger.unsafe_free!(M)
+            @test !Dagger.is_libc_allocated(M.mat.nzval)
+
+            # End-to-end: a sparse tiled matmul forced onto worker 2 under a tight
+            # budget must spill sparse tiles to disk and reload them, preserving
+            # results across the serialize/free/reload round-trip.
+            NT, n = 3, 128
+            w2 = Dagger.scope(worker=2)
+            sp2 = Dagger.CPURAMMemorySpace(2)
+            mk(f) = [Dagger.DSparseArray(f(i, k)) for i in 1:NT, k in 1:NT]
+            untile(Tt) = vcat([hcat([collect(Tt[i, j].mat) for j in 1:NT]...) for i in 1:NT]...)
+            At = mk((i, k) -> SparseArrays.sprand(n, n, 0.03))
+            Bt = mk((k, j) -> SparseArrays.sprand(n, n, 0.03))
+            ref = untile(At) * untile(Bt)
+
+            function run_sp()
+                Ct = mk((i, j) -> SparseArrays.spzeros(n, n))
+                Dagger.spawn_datadeps() do
+                    for i in 1:NT, j in 1:NT, k in 1:NT
+                        Dagger.@spawn compute_scope=w2 _ma_sp_acc!(InOut(Ct[i, j]), In(At[i, k]), In(Bt[k, j]))
+                    end
+                end
+                return Ct
+            end
+
+            run_sp()  # warmup
+            try
+                Dagger.enable_memory_aware_scheduling!(;
+                    limits=Dict{Dagger.MemorySpace,UInt64}(sp2 => UInt64(3 * n * n * 8)),
+                    reassign=false, spill_to_disk=true)
+                Ct = run_sp()
+                @test untile(Ct) ≈ ref
             finally
                 Dagger.disable_memory_aware_scheduling!()
             end

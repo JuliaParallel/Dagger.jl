@@ -12,6 +12,40 @@ Dagger._sparse_collect(M::SparseMatrixCSC) = copy(M)
 Dagger.maybe_wrap_tile(x::SparseMatrixCSC) = DSparseArray(x)
 Dagger.maybe_wrap_tile(x::SparseVector) = DSparseArray(x)
 
+# --- Eager freeing / Libc-backing of `SparseArrays` tile storage ------------
+#
+# A `SparseMatrixCSC`/`SparseVector` is just a handful of dense vectors, so it
+# gets the same Libc-backed-allocation + eager-free treatment as a dense `Array`
+# (see `Dagger.libc_backed`/`Dagger.unsafe_free!`). This lets the memory-aware
+# Datadeps planner reclaim and disk-spill sparse tiles, not just dense ones.
+
+# Free the backing vectors (no-op for any that are not Libc-backed). The struct
+# itself is immutable and GC-managed; we only reclaim its buffers.
+function Dagger.unsafe_free!(A::SparseMatrixCSC)
+    Dagger.unsafe_free!(A.colptr)
+    Dagger.unsafe_free!(A.rowval)
+    Dagger.unsafe_free!(A.nzval)
+    return
+end
+function Dagger.unsafe_free!(A::SparseVector)
+    Dagger.unsafe_free!(A.nzind)
+    Dagger.unsafe_free!(A.nzval)
+    return
+end
+
+# Rebuild the tile sharing its structure but with Libc-backed buffers, so it can
+# be freed eagerly and spilled to disk. The CSC/sparse-vector invariants are
+# preserved (same indices/values, just copied into Libc memory); buffers already
+# Libc-backed are returned as-is by `libc_backed`, so this is effectively a no-op
+# the second time around.
+Dagger.libc_backed(A::SparseMatrixCSC) =
+    SparseMatrixCSC(A.m, A.n,
+                    Dagger.libc_backed(A.colptr),
+                    Dagger.libc_backed(A.rowval),
+                    Dagger.libc_backed(A.nzval))
+Dagger.libc_backed(A::SparseVector) =
+    SparseVector(A.n, Dagger.libc_backed(A.nzind), Dagger.libc_backed(A.nzval))
+
 function SparseArrays.spzeros(p::Blocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
     d = Dagger.ArrayDomain(map(x->1:x, dims))
     a = Dagger.AllocateArray(T, (T, _dims) -> DSparseMatrix{T}(SparseArrays.spzeros(T, _dims...)), false, d, Dagger.partition(p, d), p, assignment)

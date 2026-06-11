@@ -86,6 +86,31 @@ end
 # `Base.copy`).
 _sparse_copy(mat) = copy(mat)
 
+# --- Eager freeing / Libc-backing / disk spilling of sparse tiles -----------
+#
+# Sparse tiles get the same low-memory-usage treatment as dense ones: their
+# backing storage can be Libc-backed (so `unsafe_free!` can reclaim it eagerly
+# instead of waiting for the GC) and, by extension, spilled to disk by the
+# memory-aware Datadeps planner (which serializes, frees, and later reloads via
+# `libc_backed`). The `DSparseArray` wrapper just forwards to its inner storage;
+# the per-backend storage methods (e.g. for `SparseMatrixCSC`) live in the
+# corresponding package extension. Backends without such methods (e.g. Finch)
+# degrade gracefully to no-ops, exactly as a plain Julia `Array` does.
+
+# Free the inner sparse storage's backing buffers. Only the (about-to-be-
+# discarded) inner storage is touched; the wrapper's identity -- and thus its
+# Datadeps aliasing -- is preserved.
+unsafe_free!(M::DSparseArray) = unsafe_free!(M.mat)
+
+# Re-back the inner sparse storage with Libc-allocated buffers (in place), so it
+# can later be freed eagerly via `unsafe_free!` and spilled to disk. Idempotent:
+# storage that is already Libc-backed (or whose backend has no `libc_backed`
+# method) is left unchanged.
+function libc_backed(M::DSparseArray)
+    M.mat = libc_backed(M.mat)
+    return M
+end
+
 # Wrapping hook used when materializing tiles (e.g. in `distribute`). Backends
 # overload this (e.g. in package extensions) to wrap freshly-created tiles in a
 # container that Datadeps can track (such as `DSparseArray` for sparse tiles);
