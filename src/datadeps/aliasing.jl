@@ -845,11 +845,17 @@ end
 function remotecall_endpoint(f, from_proc, to_proc, from_space, to_space, data)
     to_w = root_worker_id(to_proc)
     if to_w == myid()
+        # Same worker: `move` may return `data` itself (identity), so this slot
+        # can alias the user's original argument. Do not Libc-back it, else we
+        # would either copy needlessly or risk freeing user-owned memory.
         data_converted = f(move(from_proc, to_proc, data))
         return tochunk(data_converted, to_proc)
     end
     return remotecall_fetch(to_w, from_proc, to_proc, to_space, data) do from_proc, to_proc, to_space, data
-        data_converted = f(move(from_proc, to_proc, data))
+        # Cross-worker: the moved data is always a fresh, Datadeps-owned copy
+        # (deserialized here), so we can safely re-back CPU `Array`s with
+        # `Libc.malloc` to make them eagerly freeable via `unsafe_free!`.
+        data_converted = libc_backed(f(move(from_proc, to_proc, data)))
         return tochunk(data_converted, to_proc)
     end
 end

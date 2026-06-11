@@ -685,4 +685,9 @@ unsafe_free!(x::Chunk) = remotecall_fetch(root_worker_id(x), x) do x
     return
 end
 unsafe_free!(x::DTask) = unsafe_free!(fetch(x; raw=true))
+# CPU `Array`s can only be freed if we allocated their backing memory via
+# `Libc.malloc` (see `alloc_libc_array`); freeing arbitrary Julia-allocated
+# `Array`s is not possible (and would be unsafe). `_libc_finalize!` only frees
+# pointers present in our registry, so this is a no-op for plain `Array`s.
+unsafe_free!(x::Array) = _libc_finalize!(x)
 unsafe_free!(x) = nothing # Do nothing by default
