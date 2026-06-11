@@ -160,21 +160,35 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     end
     write_num += 1
 
-    # Free all allocated buffers
+    # Free all Datadeps-allocated buffers.
+    #
+    # The object cache holds, per space, one entry per `key` ainfo mapping to
+    # its backing buffer. Because related ainfos (e.g. overlapping `view`s and
+    # their shared parent) are unified under a single `key`, iterating the cache
+    # yields each distinct lowest-level buffer exactly once -- no duplication,
+    # regardless of array wrappers. A buffer is a Datadeps-allocated copy (safe
+    # to free) at every space except the `key`'s source space, where it is the
+    # user's original data (`is_original`).
     obj_cache = unwrap(state.ainfo_backing_chunk)
+    # Map each tracked slot chunk to its ainfos, to compute free syncdeps.
+    chunk_to_ainfos = IdDict{Any,Vector{AliasingWrapper}}()
+    for (ainfo, remote_arg_ws) in state.ainfo_arg
+        for remote_arg_w in remote_arg_ws
+            push!(get!(Vector{AliasingWrapper}, chunk_to_ainfos, remote_arg_w.arg), ainfo)
+        end
+    end
+    freed = IdDict{Any,Nothing}()
     for remote_space in keys(obj_cache.values)
+        remote_proc = first(processors(remote_space))
+        free_scope = ExactScope(remote_proc)
         for (ainfo, remote_arg) in obj_cache.values[remote_space]
-            if !(ainfo in obj_cache.originals)
-                # We allocated this buffer, we can free it
-                remote_proc = first(processors(remote_space))
-                free_scope = ExactScope(remote_proc)
-                free_syncdeps = Set{ThunkSyncdep}()
-                # FIXME: Send ainfo through aliasing! to calculate overlaps
-                #ainfo = AliasingWrapper(aliasing(arg, identity))
-                @assert haskey(state.ainfo_arg, ainfo)
-                get_write_deps!(state, remote_space, ainfo, write_num, free_syncdeps)
-                Dagger.@spawn scope=free_scope syncdeps=free_syncdeps Dagger.unsafe_free!(remote_arg)
-            end
+            # Skip the user's original data; only free copies we allocated.
+            is_original(obj_cache, remote_space, ainfo) && continue
+            haskey(freed, remote_arg) && continue
+            freed[remote_arg] = nothing
+            free_syncdeps = Set{ThunkSyncdep}()
+            gather_free_syncdeps!(state, remote_space, remote_arg, write_num, chunk_to_ainfos, free_syncdeps)
+            Dagger.@spawn scope=free_scope syncdeps=free_syncdeps Dagger.unsafe_free!(remote_arg)
         end
     end
 end
