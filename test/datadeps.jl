@@ -1017,6 +1017,7 @@ end
     x .+= 1
     return nothing
 end
+@everywhere _ma_gemm_acc!(C, A, B) = (C .+= A * B; C)
 
 @testset "Memory-aware scheduling" begin
     sp1 = Dagger.CPURAMMemorySpace(1)
@@ -1104,6 +1105,91 @@ end
                 # unbounded peak (where all copies accumulate until region end).
                 @test peak_on <= 3 * budget
                 @test peak_on < peak_off
+            finally
+                Dagger.disable_memory_aware_scheduling!()
+            end
+        end
+
+        @testset "Spills live copies to disk" begin
+            T = 16
+            tile = 256                       # 0.5 MiB per tile, ~8 MiB total
+            arrs = [rand(tile, tile) for _ in 1:T]
+            expected = [sum(a) for a in arrs]
+            w2 = Dagger.scope(worker=2)
+            sp2 = Dagger.CPURAMMemorySpace(2)
+            budget = UInt64(2 * 2^20)
+
+            # Two passes over the same tiles: every tile is read in pass 1 *and*
+            # pass 2, so all tiles stay live through pass 1. Reclaim cannot free
+            # live copies, so bounding the peak to the budget is only possible by
+            # spilling live read-only copies to disk and reloading them in pass 2.
+            function run_twopass()
+                r1 = Vector{Any}(undef, T)
+                r2 = Vector{Any}(undef, T)
+                Dagger.spawn_datadeps() do
+                    for i in 1:T
+                        r1[i] = Dagger.@spawn compute_scope=w2 _ma_sum(In(arrs[i]))
+                    end
+                    for i in 1:T
+                        r2[i] = Dagger.@spawn compute_scope=w2 _ma_sum(In(arrs[i]))
+                    end
+                end
+                return fetch.(r1), fetch.(r2)
+            end
+            peak2() = remotecall_fetch(() -> Dagger.libc_array_stats().peak_bytes, 2)
+
+            run_twopass()  # warmup / compilation
+
+            try
+                Dagger.enable_memory_aware_scheduling!(;
+                    limits=Dict{Dagger.MemorySpace,UInt64}(sp2 => budget),
+                    reassign=false, spill_to_disk=true)
+                remotecall_fetch(Dagger.reset_libc_array_stats!, 2); GC.gc()
+                s1, s2 = run_twopass(); GC.gc()
+                peak_on = peak2()
+                @test s1 ≈ expected
+                @test s2 ≈ expected
+                # 8 MiB of data is live across both passes; staying near the
+                # 2 MiB budget proves live copies were spilled and reloaded.
+                @test peak_on <= 3 * budget
+            finally
+                Dagger.disable_memory_aware_scheduling!()
+            end
+        end
+
+        @testset "Spilling is safe alongside written (InOut) copies" begin
+            # Regression test: a tiled matmul forced onto worker 2 mixes live
+            # read-only copies (A/B tiles, reused across the inner loop -> spill
+            # candidates) with written copies (C tiles, InOut). The read-only
+            # spill victim must never be a tile the *current* task also uses: its
+            # other args are slotted before it is registered as their reader, so
+            # freeing such a buffer is a use-after-free (previously corrupted
+            # results / crashed the worker).
+            NT, bs = 3, 128                  # 3x3 tiles of 128x128 (128 KiB each)
+            At = [rand(bs, bs) for _ in 1:NT, _ in 1:NT]
+            Bt = [rand(bs, bs) for _ in 1:NT, _ in 1:NT]
+            ref = [sum(At[i, k] * Bt[k, j] for k in 1:NT) for i in 1:NT, j in 1:NT]
+            w2 = Dagger.scope(worker=2)
+            sp2 = Dagger.CPURAMMemorySpace(2)
+            budget = UInt64(512 * 2^10)      # ~4 tiles; forces spilling of A/B
+
+            function run_matmul()
+                Ct = [zeros(bs, bs) for _ in 1:NT, _ in 1:NT]
+                Dagger.spawn_datadeps() do
+                    for i in 1:NT, j in 1:NT, k in 1:NT
+                        Dagger.@spawn compute_scope=w2 _ma_gemm_acc!(InOut(Ct[i, j]), In(At[i, k]), In(Bt[k, j]))
+                    end
+                end
+                return Ct
+            end
+
+            run_matmul()  # warmup / compilation
+            try
+                Dagger.enable_memory_aware_scheduling!(;
+                    limits=Dict{Dagger.MemorySpace,UInt64}(sp2 => budget),
+                    reassign=false, spill_to_disk=true)
+                Ct = run_matmul()
+                @test all(Ct[i, j] ≈ ref[i, j] for i in 1:NT, j in 1:NT)
             finally
                 Dagger.disable_memory_aware_scheduling!()
             end

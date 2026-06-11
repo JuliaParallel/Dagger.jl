@@ -190,6 +190,18 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             emit_slot_free!(state, remote_space, remote_arg, write_num, chunk_to_ainfos, freed)
         end
     end
+
+    # Free any memory-aware slots that bypass the object cache. Chunks reloaded
+    # from a disk spill are created directly (not via `move_rewrap`), so they are
+    # not in `obj_cache`; the tracker still holds them as resident. Already-freed
+    # buffers are skipped via `freed`.
+    if tracker !== nothing
+        for (remote_space, resident) in tracker.resident
+            for (_, (remote_arg, _)) in resident
+                emit_slot_free!(state, remote_space, remote_arg, write_num, chunk_to_ainfos, freed)
+            end
+        end
+    end
 end
 
 """

@@ -897,6 +897,10 @@ function get_or_generate_slot!(state, dest_space, data)
         tracker = state.mem_tracker[]
         if tracker !== nothing
             memory_aware_reserve!(tracker, state, dest_space, data)
+            # If this slot was spilled to disk earlier, reload it (into a fresh
+            # allocation) instead of re-copying from the origin.
+            unspilled = memory_aware_unspill!(tracker, state, dest_space, data)
+            unspilled === nothing || return unspilled
         end
         chunk = generate_slot!(state, dest_space, data)
         if tracker !== nothing
