@@ -241,6 +241,23 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             emit_slot_free!(state, remote_space, ainfo, remote_arg, write_num, chunk_to_ainfos, freed)
         end
     end
+
+    # Free any memory-aware slots that bypass the object cache. Chunks reloaded
+    # from a disk spill are created directly (not via `move_rewrap`), so they are
+    # not in `obj_cache`; the tracker still holds them as resident. Already-freed
+    # buffers are skipped via `freed`.
+    if tracker !== nothing
+        for (remote_space, resident) in tracker.resident
+            for (_, (remote_arg, _)) in resident
+                # No `AliasingWrapper` is available for a tracker-resident slot
+                # (`resident` is keyed by the pre-pass's `UInt64` slot key, not an
+                # ainfo); `nothing` is safe here since `gather_free_syncdeps!`
+                # only consults `key_ainfo` on the MPI-only non-inspectable-data
+                # fallback, which this Distributed-only spill path never hits.
+                emit_slot_free!(state, remote_space, nothing, remote_arg, write_num, chunk_to_ainfos, freed)
+            end
+        end
+    end
 end
 
 """
