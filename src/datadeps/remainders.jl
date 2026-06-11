@@ -402,6 +402,7 @@ function enqueue_copy_to!(state::DataDepsState, dest_space::MemorySpace, arg_w::
     # This copy task reads the source and writes to the target
     add_reader!(state, arg_w, source_space, source_ainfo, copy_task, write_num)
     add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num; copy_src=source_space)
+    return copy_task
 end
 function enqueue_copy_from!(state::DataDepsState, dest_space::MemorySpace, arg_w::ArgumentWrapper,
                             dest_scope, write_num::Int)
@@ -434,6 +435,7 @@ function enqueue_copy_from!(state::DataDepsState, dest_space::MemorySpace, arg_w
     # This copy task reads the source and writes to the target
     add_reader!(state, arg_w, source_space, source_ainfo, copy_task, write_num)
     add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num; copy_src=source_space)
+    return copy_task
 end
 
 # Main copy function for RemainderAliasing
