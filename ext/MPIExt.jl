@@ -1669,7 +1669,7 @@ function move_rewrap(accel::MPIAcceleration, cache::AliasedObjectCache, from_pro
     if child_types === nothing
         # Leaf: transfer to the destination, sharing via the aliased-object cache
         return aliased_object!(cache, w) do w
-            return mpi_endpoint_transfer(accel, from_proc, to_proc, from_space, to_space, w)
+            return Dagger.libc_backed(mpi_endpoint_transfer(accel, from_proc, to_proc, from_space, to_space, w))
         end
     end
 
