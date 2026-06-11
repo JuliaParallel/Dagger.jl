@@ -64,6 +64,19 @@ end
 Dagger.memory_spaces(proc::CuArrayDeviceProc) = Set([CUDAVRAMMemorySpace(proc.owner, proc.device, proc.device_uuid)])
 Dagger.processors(space::CUDAVRAMMemorySpace) = Set([CuArrayDeviceProc(space.owner, space.device, space.device_uuid)])
 
+function Dagger.local_memory_capacity(space::CUDAVRAMMemorySpace)
+    @assert Dagger.root_worker_id(space) == myid()
+    return with_context(space) do
+        UInt64(CUDA.total_memory())
+    end
+end
+function Dagger.local_memory_available(space::CUDAVRAMMemorySpace)
+    @assert Dagger.root_worker_id(space) == myid()
+    return with_context(space) do
+        UInt64(CUDA.available_memory())
+    end
+end
+
 function to_device(proc::CuArrayDeviceProc)
     @assert Dagger.root_worker_id(proc) == myid()
     return DEVICES[proc.device]

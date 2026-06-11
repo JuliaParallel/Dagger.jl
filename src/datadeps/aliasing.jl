@@ -441,6 +441,11 @@ struct DataDepsState
     ainfos_owner::Dict{AliasingWrapper,Union{Pair{DTask,Int},Nothing}}
     ainfos_readers::Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}
 
+    # The memory-aware tracker for this region, or `nothing` when disabled.
+    # Stored in a `Ref` so it can be set after construction. Typed `Any` to
+    # avoid an include-order dependency on `DatadepsMemoryTracker`.
+    mem_tracker::Base.RefValue{Any}
+
     function DataDepsState()
         arg_to_chunk = IdDict{Any,Chunk}()
         arg_origin = IdDict{Any,MemorySpace}()
@@ -462,8 +467,10 @@ struct DataDepsState
         ainfos_owner = Dict{AliasingWrapper,Union{Pair{DTask,Int},Nothing}}()
         ainfos_readers = Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}()
 
+        mem_tracker = Base.RefValue{Any}(nothing)
+
         return new(arg_to_chunk, arg_origin, remote_args, remote_arg_to_original, remote_arg_w, ainfo_arg, arg_history, arg_owner, arg_overlaps, ainfo_backing_chunk,
-                   supports_inplace_cache, ainfo_cache, ainfos_lookup, ainfos_overlaps, ainfos_owner, ainfos_readers)
+                   supports_inplace_cache, ainfo_cache, ainfos_lookup, ainfos_overlaps, ainfos_owner, ainfos_readers, mem_tracker)
     end
 end
 
@@ -524,6 +531,15 @@ function populate_task_info!(state::DataDepsState, task_args, spec::DTaskSpec, t
         origin_space = memory_space(arg_chunk)
         state.arg_origin[arg_chunk] = origin_space
         state.remote_arg_to_original[arg_chunk] = arg_chunk
+
+        # Bridge the memory-aware pre-pass keying (which sees the original,
+        # pre-`tochunk` argument) to the in-loop slot keying (which sees the
+        # generated `Chunk`). Registering this mapping here -- the one place both
+        # are in scope -- lets slot reclamation find each slot's last-use index
+        # even for plain `Array`s, which are re-wrapped via `tochunk`.
+        let tracker = state.mem_tracker[]
+            tracker === nothing || (tracker.orig_key[arg_chunk] = objectid(arg))
+        end
 
         # Populate argument info for all aliasing dependencies
         # And return the argument, dependencies, and ArgumentWrappers
@@ -632,6 +648,41 @@ function populate_ainfo!(state::DataDepsState, original_arg_w::ArgumentWrapper, 
         state.ainfos_owner[target_ainfo] = nothing
         state.ainfos_readers[target_ainfo] = Pair{DTask,Int}[]
     end
+end
+# Remove `ainfo` from the overlap oracle and its bookkeeping. Used when a slot's
+# backing buffer is freed mid-region (memory-aware reclaim): the buffer's address
+# may later be reused by a fresh allocation, and a stale ainfo left in the
+# (otherwise append-only) `AliasingLookup` would then collide with the new
+# allocation's spans, corrupting overlap/remainder analysis. Removing the ainfo's
+# bounding spans from the per-space interval trees hides it from all subsequent
+# overlap queries (`intersect`), and we drop the owner/reader/overlap/arg entries
+# so a later identical ainfo (same reused span) is treated as brand new.
+#
+# Safe only when `ainfo` overlaps nothing else still live (callers enforce this);
+# otherwise removal would also drop a span another live ainfo depends on.
+function forget_ainfo!(state::DataDepsState, ainfo::AliasingWrapper)
+    lookup = state.ainfos_lookup
+    idx = findfirst(==(ainfo), lookup.ainfos)
+    if idx !== nothing
+        bspans = lookup.bounding_spans[idx]
+        for space_idx in keys(bspans)
+            delete!(lookup.bounding_spans_tree[space_idx], LocatorMemorySpan(bspans[space_idx], idx))
+        end
+        empty!(lookup.ainfos_spaces[idx])
+    end
+    overlaps = get(state.ainfos_overlaps, ainfo, nothing)
+    if overlaps !== nothing
+        for other in overlaps
+            other === ainfo && continue
+            other_overlaps = get(state.ainfos_overlaps, other, nothing)
+            other_overlaps !== nothing && delete!(other_overlaps, ainfo)
+        end
+        delete!(state.ainfos_overlaps, ainfo)
+    end
+    delete!(state.ainfos_owner, ainfo)
+    delete!(state.ainfos_readers, ainfo)
+    delete!(state.ainfo_arg, ainfo)
+    return
 end
 function merge_history!(state::DataDepsState, arg_w::ArgumentWrapper, other_arg_w::ArgumentWrapper)
     history = state.arg_history[arg_w]
@@ -838,7 +889,20 @@ function get_or_generate_slot!(state, dest_space, data)
         state.remote_args[dest_space] = IdDict{Any,Any}()
     end
     if !haskey(state.remote_args[dest_space], data)
-        return generate_slot!(state, dest_space, data)
+        # Memory-aware plan-time throttling: a slot is allocated *eagerly* here
+        # (`generate_slot!` performs the remote copy synchronously), so this is
+        # the point at which we must enforce the space's budget. Before
+        # allocating a copy that would exceed it, synchronously reclaim dead
+        # copies (see `memory_aware_reserve!`).
+        tracker = state.mem_tracker[]
+        if tracker !== nothing
+            memory_aware_reserve!(tracker, state, dest_space, data)
+        end
+        chunk = generate_slot!(state, dest_space, data)
+        if tracker !== nothing
+            memory_aware_record!(tracker, dest_space, data, chunk)
+        end
+        return chunk
     end
     return state.remote_args[dest_space][data]
 end
