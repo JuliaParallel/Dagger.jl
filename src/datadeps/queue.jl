@@ -140,6 +140,14 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     # copy sources) must not be reclaimed out from under the final copies.
     tracker !== nothing && (tracker.active[] = false)
 
+    # Write back any *spilled written* tiles incrementally (reload -> copy to
+    # origin -> free, one at a time), so the region-end write-back does not
+    # reload the whole written footprint at once. After this, these tiles' owners
+    # are their origins, so the loop below treats them as up-to-date.
+    if tracker !== nothing
+        write_num = drain_spilled_writebacks!(state, tracker, write_num)
+    end
+
     # Copy args from remote to local
     # N.B. We sort the keys to ensure a deterministic order for uniformity
     for arg_w in sort(collect(keys(state.arg_owner)); by=arg_w->arg_w.hash)
@@ -201,6 +209,9 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 emit_slot_free!(state, remote_space, remote_arg, write_num, chunk_to_ainfos, freed)
             end
         end
+        # Remove any spill temp files left on disk (read-only copies never reused;
+        # written copies were reloaded by the write-back loop above).
+        cleanup_spilled_files!(tracker)
     end
 end
 

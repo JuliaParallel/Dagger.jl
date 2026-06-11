@@ -152,15 +152,18 @@ end
 Mutable accounting state for a memory-aware Datadeps region. Datadeps allocates
 each argument copy ("slot") *eagerly and synchronously* in `get_or_generate_slot!`,
 so the budget is enforced there: before allocating a copy that would exceed a
-space's budget, [`memory_aware_reserve!`](@ref) first frees *dead* read-only
-copies (last use passed) in place, then, if still over budget, spills *live*
-read-only copies to disk (furthest next-use first) and reloads them on demand
+space's budget, [`memory_aware_reserve!`](@ref) frees memory in three phases,
+each only if still over budget: (1) free *dead* read-only copies (last use
+passed) in place; (2) spill *live* read-only copies to disk (furthest next-use
+first); (3) spill *written* (InOut/Out) copies to disk (dead-written first,
+then live-written by furthest next-use). Spilled copies reload on demand
 ([`memory_aware_unspill!`](@ref)).
 
 Only Datadeps-allocated *copies* are tracked/bounded; the user's original data
-is out of our control and never freed here. Written copies are never reclaimed
-or spilled mid-region (their results must be preserved); they are freed at
-region end after any write-back.
+is out of our control and never freed here. A written copy's spilled disk image
+is its source of truth until reloaded: `retract_slot!` keeps its owner pointed
+at the spilling space, so the next use (reuse, cross-worker copy, or region-end
+write-back) reloads it from disk rather than reading stale origin data.
 """
 mutable struct DatadepsMemoryTracker
     cfg::MemoryAwareConfig
@@ -171,7 +174,9 @@ mutable struct DatadepsMemoryTracker
     last_use::Dict{UInt64,Int}
     # Sorted task indices that use each slot key (for Belady spill victim choice).
     uses::Dict{UInt64,Vector{Int}}
-    # Slot keys that are written somewhere in the region (never mid-reclaimed).
+    # Slot keys that are written somewhere in the region. Never freed in place
+    # mid-region (their results must be preserved), but may be spilled to disk
+    # (phase 3), with the disk image kept as the source of truth until reloaded.
     written::Set{UInt64}
     # Cached budgets per space.
     limits::Dict{MemorySpace,UInt64}
@@ -187,7 +192,7 @@ mutable struct DatadepsMemoryTracker
     freed::IdDict{Any,Nothing}
     # Spaces for which an unrecoverable over-budget warning has been emitted.
     spilled::Set{MemorySpace}
-    # Live read-only copies currently swapped to disk: (space, key) -> handle.
+    # Copies currently swapped to disk (read-only or written): (space, key) -> handle.
     spilled_data::Dict{Tuple{MemorySpace,UInt64},SpilledSlot}
     # Running total of bytes currently spilled to disk (for the soft cap).
     spilled_bytes::Base.RefValue{UInt64}
@@ -355,21 +360,110 @@ function unspill_chunk_from_disk(spill::SpilledSlot, dest_space::MemorySpace)
     end
 end
 
+# Delete any spill temp files still on disk at region end. Written copies are
+# always reloaded by the region-end write-back, so anything left here is a
+# read-only copy that was never used again -- its temp file would otherwise
+# leak. Each file lives on the worker owning its `space`.
+function cleanup_spilled_files!(tracker::DatadepsMemoryTracker)
+    isempty(tracker.spilled_data) && return
+    for ((space, _), spill) in tracker.spilled_data
+        try
+            remotecall_wait(rm, root_worker_id(space), spill.path; force=true)
+        catch err
+            @debug "Memory-aware: failed to remove spill temp file $(spill.path)" exception=err
+        end
+    end
+    empty!(tracker.spilled_data)
+    tracker.spilled_bytes[] = 0
+    return
+end
+
+"""
+    drain_spilled_writebacks!(state, tracker, write_num) -> Int
+
+Region-end write-back for *spilled written* tiles, done one tile at a time so we
+never hold more than a single reloaded result in memory at once. Reloading every
+spilled written tile up front (as the normal write-back loop would) reintroduces
+the whole written footprint and defeats the mid-region bounding; instead, for
+each such tile we reload it from disk, copy its value back to the origin, wait
+for that copy to finish, then free the reloaded buffer in place before moving on.
+
+After draining, each tile's owner is its origin space, so the normal write-back
+loop sees it as up-to-date and skips it, and the end-of-region free loop skips it
+(already freed). Returns the advanced `write_num`. Must run with the tracker
+*inactive* (no recursive reclaim): we free explicitly here, and reload via
+`get_or_generate_slot!` -> `memory_aware_unspill!` (which ignores `active`).
+"""
+function drain_spilled_writebacks!(state::DataDepsState, tracker::DatadepsMemoryTracker, write_num::Int)
+    isempty(tracker.spilled_data) && return write_num
+    # Snapshot the spilled *written* slots; draining mutates `spilled_data`.
+    pending = [(space, key) for ((space, key), _) in tracker.spilled_data if key in tracker.written]
+    for (space, key) in pending
+        haskey(tracker.spilled_data, (space, key)) || continue
+        resident = get(tracker.resident, space, nothing)
+        # Every argument wrapper whose latest value is this spilled slot.
+        arg_ws = ArgumentWrapper[]
+        for (arg_w, owner) in state.arg_owner
+            owner === space || continue
+            k = get(tracker.orig_key, arg_w.arg, objectid(arg_w.arg))
+            k == key && push!(arg_ws, arg_w)
+        end
+        isempty(arg_ws) && continue
+        tasks = DTask[]
+        incremental = true
+        for arg_w in arg_ws
+            arg = arg_w.arg
+            origin_space = state.arg_origin[arg]
+            remainder, _ = compute_remainder_for_arg!(state, origin_space, arg_w, write_num)
+            origin_scope = UnionScope(map(ExactScope, collect(processors(origin_space)))...)
+            if remainder isa FullCopy
+                push!(tasks, enqueue_copy_from!(state, origin_space, arg_w, origin_scope, write_num))
+            elseif remainder isa MultiRemainderAliasing
+                # Spilled tiles are non-overlapping, so this is unexpected; emit
+                # the copy but leave the buffer for the normal (non-incremental)
+                # free loop rather than risk an unsafe in-place free.
+                enqueue_remainder_copy_from!(state, origin_space, arg_w, remainder, origin_scope, write_num)
+                incremental = false
+            end
+            # NoAliasing => already up-to-date; nothing to do.
+        end
+        # Wait so the result is safely at the origin before freeing the reload.
+        for t in tasks
+            wait(t)
+        end
+        if incremental && resident !== nothing && haskey(resident, key)
+            _evict_resident!(tracker, state, space, key, resident; to_disk=false)
+        end
+        write_num += 1
+    end
+    return write_num
+end
+
 # Retract a slot (`chunk`, with tracked `ainfos`) from the planner's otherwise
 # append-only state, so its memory can be freed/spilled mid-region without
-# leaving dangling references. Safe only for read-only slots that overlap
-# nothing else live (callers enforce this). Specifically we:
+# leaving dangling references. Safe only for slots that overlap nothing else
+# live (callers enforce this). Specifically we:
 #   * drop the slot wrappers' own `arg_owner`/`arg_history`/`ainfo_cache`;
 #   * strip the freed ainfo from the *original* argument's history (dependency
 #     state keys on the original arg with the slot's ainfo; the region-end
-#     write-back walks it) and reset its owner to the origin space (read-only =>
-#     origin holds the current value), so write-back resolves to a no-op;
+#     write-back walks it);
 #   * clear the cached slot (`remote_args`/`remote_arg_w`/`remote_arg_to_original`)
 #     so the next use regenerates a fresh slot (from origin, or from disk on
 #     unspill); and
 #   * forget the ainfo from the overlap oracle, so a later allocation reusing
 #     this address is not aliased against the dead slot.
-function retract_slot!(state::DataDepsState, space::MemorySpace, chunk, ainfos)
+#
+# Ownership handling depends on whether the slot was *written*:
+#   * read-only (`dirty=false`): reset the original's owner to its origin space
+#     (the origin holds the current value), so the region-end write-back is a
+#     no-op.
+#   * written (`dirty=true`): keep the original's owner pointing at `space`. The
+#     latest value now lives only in the disk spill, and `get_or_generate_slot!`
+#     reloads it on demand (via `memory_aware_unspill!`) whenever the owner-space
+#     slot is next requested -- by a same-worker reuse, a cross-worker
+#     copy-from-owner, or the region-end write-back. Resetting to origin here
+#     would silently drop the computed result.
+function retract_slot!(state::DataDepsState, space::MemorySpace, chunk, ainfos; dirty::Bool=false)
     for a in ainfos
         for slot_arg_w in get(state.ainfo_arg, a, ())
             delete!(state.arg_owner, slot_arg_w)
@@ -380,7 +474,9 @@ function retract_slot!(state::DataDepsState, space::MemorySpace, chunk, ainfos)
             orig_w = ArgumentWrapper(orig, slot_arg_w.dep_mod)
             hist = get(state.arg_history, orig_w, nothing)
             hist !== nothing && filter!(e -> e.ainfo != a, hist)
-            haskey(state.arg_origin, orig) && (state.arg_owner[orig_w] = state.arg_origin[orig])
+            if !dirty && haskey(state.arg_origin, orig)
+                state.arg_owner[orig_w] = state.arg_origin[orig]
+            end
             haskey(state.remote_arg_w, orig_w) && delete!(state.remote_arg_w[orig_w], space)
             haskey(state.remote_args, space) && delete!(state.remote_args[space], orig)
         end
@@ -424,6 +520,7 @@ function _evict_resident!(tracker::DatadepsMemoryTracker, state::DataDepsState,
         end
     end
 
+    dirty = key in tracker.written
     if to_disk
         spill = spill_chunk_to_disk!(chunk)
         tracker.spilled_data[(space, key)] = spill
@@ -432,7 +529,7 @@ function _evict_resident!(tracker::DatadepsMemoryTracker, state::DataDepsState,
         unsafe_free!(chunk)
     end
     tracker.freed[chunk] = nothing
-    retract_slot!(state, space, chunk, ainfos)
+    retract_slot!(state, space, chunk, ainfos; dirty)
     delete!(resident, key)
     return sz
 end
@@ -523,10 +620,40 @@ function memory_aware_reserve!(tracker::DatadepsMemoryTracker, state::DataDepsSt
                     @debug "Memory-aware: spilled $(sz) bytes from $space to disk (task $idx)"
                 end
             end
-            disk_cap = UInt64(tracker.cfg.disk_limit_mb) * UInt64(2^20)
-            if tracker.spilled_bytes[] > disk_cap
-                @warn "Memory-aware: spilled data ($(tracker.spilled_bytes[]) bytes) exceeds disk_limit_mb=$(tracker.cfg.disk_limit_mb)" maxlog=1
+        end
+
+        # Phase 3: if still over budget, spill *written* (InOut/Out) copies too.
+        # Their disk image becomes the source of truth; `retract_slot!(dirty=true)`
+        # keeps the original's owner pointed at this space, so any later use --
+        # same-worker reuse, cross-worker copy-from-owner, or the region-end
+        # write-back -- reloads the value from disk on demand. Dead-written copies
+        # (no next use; their result only needs write-back) are spilled first,
+        # then live-written ones by furthest next-use (Belady). As in phase 2, a
+        # copy the current task uses (`next_use == idx`) is never a victim.
+        if live + size > limit && tracker.cfg.spill_to_disk && space isa CPURAMMemorySpace
+            spillable_w = Tuple{Int,UInt64}[]
+            for (key, _) in resident
+                (key in tracker.written) || continue
+                nu = next_use(tracker, key, idx)
+                nu == idx && continue
+                # Dead-written (nu === nothing) sort furthest, so they spill first.
+                push!(spillable_w, (nu === nothing ? typemax(Int) : nu, key))
             end
+            sort!(spillable_w; by=first, rev=true)
+            for (_, key) in spillable_w
+                (live + size <= limit) && break
+                sz = _evict_resident!(tracker, state, space, key, resident; to_disk=true)
+                live -= min(live, sz)
+                tracker.live[space] = live
+                if sz > 0 && tracker.cfg.verbose
+                    @debug "Memory-aware: spilled $(sz) bytes of written data from $space to disk (task $idx)"
+                end
+            end
+        end
+
+        disk_cap = UInt64(tracker.cfg.disk_limit_mb) * UInt64(2^20)
+        if tracker.spilled_bytes[] > disk_cap
+            @warn "Memory-aware: spilled data ($(tracker.spilled_bytes[]) bytes) exceeds disk_limit_mb=$(tracker.cfg.disk_limit_mb)" maxlog=1
         end
     end
 
@@ -601,7 +728,7 @@ working set, or enable `spill_to_disk` for read-only CPU copies.
 function memory_aware_spill!(tracker::DatadepsMemoryTracker, space::MemorySpace, i::Int)
     space in tracker.spilled && return
     push!(tracker.spilled, space)
-    @warn "Memory-aware: working set for $space exceeds its budget and cannot be reduced further (after reclaiming dead copies and spilling live read-only copies); proceeding anyway (risk of OOM). Consider raising the budget." maxlog=1
+    @warn "Memory-aware: working set for $space exceeds its budget and cannot be reduced further (after reclaiming dead copies and spilling read-only and written copies to disk); proceeding anyway (risk of OOM). Consider raising the budget." maxlog=1
     return
 end
 

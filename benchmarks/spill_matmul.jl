@@ -1,4 +1,4 @@
-# Benchmark: validate Datadeps disk-spilling on read-only slot copies.
+# Benchmark: validate Datadeps disk-spilling on read-only and written slot copies.
 #
 # Single-worker regions never create Datadeps-managed slot copies (data is
 # operated on in place), so the memory-aware spill/reclaim machinery only does
@@ -20,9 +20,11 @@
 #     so bounding the footprint requires spilling live read-only copies to disk
 #     and reloading them on next use.
 #
-# Note: C[i,j] tiles are written (InOut); written copies are never spilled (their
-# results must be preserved) and are freed only at region end, so they form an
-# irreducible floor. The spillable savings are on the read-only A/B copies.
+# Note: C[i,j] tiles are written (InOut). These are also spillable: a written
+# copy's disk image is kept as its source of truth, and the region-end write-back
+# reloads spilled written tiles one at a time (incrementally), so they no longer
+# form an irreducible in-memory floor. Savings thus come from both the read-only
+# A/B copies and the written C copies; the ON peak settles near the budget.
 #
 # Usage:
 #   julia --project=. -t <nthreads> benchmarks/spill_matmul.jl [N] [blocksize] [budget_MiB]
@@ -88,7 +90,7 @@ function main()
     @printf("  matrices: 3x %d x %d Float64 (%s each), %dx%d tiles of %s\n",
             N, N, humanbytes(N*N*8), NT, NT, humanbytes(BS*BS*8))
     println("  procs:    $(procs())  (compute forced on worker 2)")
-    @printf("  budget on worker 2:  %s   (read-only A+B copies: %s, written C floor: %s)\n",
+    @printf("  budget on worker 2:  %s   (read-only A+B copies: %s, written C copies: %s)\n",
             humanbytes(BUDGET), humanbytes(2*NT*NT*BS*BS*8), humanbytes(NT*NT*BS*BS*8))
     println("="^74)
 
@@ -106,7 +108,7 @@ function main()
     @printf("  time %.2f s   peak copies %s   rel.err %.2e\n",
             off.time, humanbytes(off.peak), err_off)
 
-    println("\n--- feature ON (spill live read-only copies, budget $(humanbytes(BUDGET))) ---")
+    println("\n--- feature ON (spill read-only + written copies, budget $(humanbytes(BUDGET))) ---")
     on = nothing; err_on = NaN
     try
         Dagger.enable_memory_aware_scheduling!(;
@@ -130,10 +132,10 @@ function main()
     println("correctness OFF: ", err_off < 1e-8 ? "PASS" : "FAIL (err=$err_off)")
     println("correctness ON:  ", err_on  < 1e-8 ? "PASS" : "FAIL (err=$err_on)")
     println("peak reduced:    ", on.peak < off.peak ? "PASS" : "FAIL")
-    # The ON peak settles near the written-C floor (16 InOut tiles), which by
-    # design is never spilled; the savings come from spilling the live read-only
-    # A/B copies. The over-budget warning is expected whenever that floor alone
-    # exceeds the budget.
+    # The ON peak settles near the budget: read-only A/B copies and written C
+    # copies are both spilled to disk under pressure, and spilled written tiles
+    # are reloaded incrementally at region end (one at a time) for write-back, so
+    # there is no longer an irreducible in-memory floor at the full C footprint.
 end
 
 main()

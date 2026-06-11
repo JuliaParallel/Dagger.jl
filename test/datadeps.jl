@@ -1194,5 +1194,49 @@ end
                 Dagger.disable_memory_aware_scheduling!()
             end
         end
+
+        @testset "Written (InOut) copies are spilled and bounded" begin
+            # The written C tiles alone exceed the budget, so they must be
+            # spilled to disk (phase 3) and reloaded for write-back. Verify the
+            # results are correct (spill round-trip preserves written data) and
+            # that the worker-2 peak stays well below the full written footprint
+            # (incremental region-end write-back avoids reloading it all at once).
+            NT, bs = 3, 128                  # 3x3 written tiles of 128 KiB
+            tile_bytes = bs * bs * sizeof(Float64)
+            written_footprint = NT * NT * tile_bytes
+            At = [rand(bs, bs) for _ in 1:NT, _ in 1:NT]
+            Bt = [rand(bs, bs) for _ in 1:NT, _ in 1:NT]
+            ref = [sum(At[i, k] * Bt[k, j] for k in 1:NT) for i in 1:NT, j in 1:NT]
+            w2 = Dagger.scope(worker=2)
+            sp2 = Dagger.CPURAMMemorySpace(2)
+            # ~3 tiles: below the 9-tile written footprint and the A/B working set.
+            budget = UInt64(3 * tile_bytes)
+
+            function run_matmul_w()
+                Ct = [zeros(bs, bs) for _ in 1:NT, _ in 1:NT]
+                Dagger.spawn_datadeps() do
+                    for i in 1:NT, j in 1:NT, k in 1:NT
+                        Dagger.@spawn compute_scope=w2 _ma_gemm_acc!(InOut(Ct[i, j]), In(At[i, k]), In(Bt[k, j]))
+                    end
+                end
+                return Ct
+            end
+
+            run_matmul_w()  # warmup / compilation
+            try
+                Dagger.enable_memory_aware_scheduling!(;
+                    limits=Dict{Dagger.MemorySpace,UInt64}(sp2 => budget),
+                    reassign=false, spill_to_disk=true)
+                remotecall_fetch(Dagger.reset_libc_array_stats!, 2)
+                Ct = run_matmul_w()
+                @test all(Ct[i, j] ≈ ref[i, j] for i in 1:NT, j in 1:NT)
+                peak = remotecall_fetch(() -> Dagger.libc_array_stats().peak_bytes, 2)
+                # Peak must stay under the full written footprint: written tiles
+                # are spilled rather than held resident all at once.
+                @test peak < written_footprint
+            finally
+                Dagger.disable_memory_aware_scheduling!()
+            end
+        end
     end
 end
