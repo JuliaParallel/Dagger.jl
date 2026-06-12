@@ -479,9 +479,18 @@ struct DataDepsState
         arg_owner = Dict{ArgumentWrapper,MemorySpace}()
         arg_current = Dict{ArgumentWrapper,Set{MemorySpace}}()
         arg_overlaps = Dict{ArgumentWrapper,Set{ArgumentWrapper}}()
+        # Keep the internal object cache on plain CPU RAM (never swap-managed):
+        # it holds `Chunk`s/`DRef`s, and spilling it via a swap-capable global
+        # allocator would serialize those refs through a serializer that
+        # mishandles DRef refcounting, corrupting state. It is small and must
+        # stay resident for the region regardless.
         accel = current_acceleration()
         ainfo_backing_chunk = _with_default_acceleration() do
-            tochunk(AliasedObjectCacheStore(accel))
+            # The 1-arg `tochunk(x)` form doesn't forward kwargs, so pass an
+            # explicit `proc` (matching what it would have derived anyway, now
+            # that acceleration is forced to `DistributedAcceleration`) to reach
+            # the kwarg-supporting method and pin the device.
+            tochunk(AliasedObjectCacheStore(accel), OSProc(myid()); device=MemPool.CPURAMDevice())
         end
 
         supports_inplace_cache = IdDict{Any,Bool}()
