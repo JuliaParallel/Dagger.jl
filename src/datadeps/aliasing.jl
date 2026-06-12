@@ -446,6 +446,12 @@ struct DataDepsState
     # avoid an include-order dependency on `DatadepsMemoryTracker`.
     mem_tracker::Base.RefValue{Any}
 
+    # User-provided original argument chunks pinned for the duration of the
+    # region (so MemPool's swap-to-disk machinery cannot move their in-memory
+    # data and invalidate aliasing info). Each is pinned once on first analysis
+    # and unpinned at region end. Keyed by the original `Chunk` (object identity).
+    pinned_originals::IdDict{Any,Nothing}
+
     function DataDepsState()
         arg_to_chunk = IdDict{Any,Chunk}()
         arg_origin = IdDict{Any,MemorySpace}()
@@ -473,9 +479,10 @@ struct DataDepsState
         ainfos_readers = Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}()
 
         mem_tracker = Base.RefValue{Any}(nothing)
+        pinned_originals = IdDict{Any,Nothing}()
 
         return new(arg_to_chunk, arg_origin, remote_args, remote_arg_to_original, remote_arg_w, ainfo_arg, arg_history, arg_owner, arg_overlaps, ainfo_backing_chunk,
-                   supports_inplace_cache, ainfo_cache, ainfos_lookup, ainfos_overlaps, ainfos_owner, ainfos_readers, mem_tracker)
+                   supports_inplace_cache, ainfo_cache, ainfos_lookup, ainfos_overlaps, ainfos_owner, ainfos_readers, mem_tracker, pinned_originals)
     end
 end
 
@@ -536,6 +543,15 @@ function populate_task_info!(state::DataDepsState, task_args, spec::DTaskSpec, t
         origin_space = memory_space(arg_chunk)
         state.arg_origin[arg_chunk] = origin_space
         state.remote_arg_to_original[arg_chunk] = arg_chunk
+
+        # NOTE: originals are intentionally *not* pinned for the region. A
+        # swap-managed original's aliasing is computed on synthetic, swap-stable
+        # addresses (see `aliasing(::Chunk)` in memory-spaces.jl), so MemPool may
+        # freely swap it to disk between/within tasks without invalidating the
+        # oracle -- which is what lets a region's resident footprint stay bounded
+        # below the dataset size. A task's argument data is made resident
+        # just-in-time (and held) by the per-task pin in `do_task` while it runs.
+        # Non-swap originals never move, so they need no pin either.
 
         # Bridge the memory-aware pre-pass keying (which sees the original,
         # pre-`tochunk` argument) to the in-loop slot keying (which sees the
@@ -893,6 +909,20 @@ function get_or_generate_slot!(state, dest_space, data)
     if !haskey(state.remote_args, dest_space)
         state.remote_args[dest_space] = IdDict{Any,Any}()
     end
+    # Swap-managed, same-space args: use the original Chunk directly instead of a
+    # separate slot DRef. A same-space slot is just a new DRef wrapping the
+    # original's buffer (see `remotecall_endpoint`), which is fine only while
+    # nothing swaps. Under MemPool swapping the slot and the original get
+    # independent disk images and diverge -- the slot accumulates the result
+    # while the original stays stale, so the region-end write-back is lost. Using
+    # one DRef (the original) keeps a single swap unit, mutated in place, and
+    # needs no write-back.
+    if data isa Chunk && data.handle isa MemPool.DRef && _swap_managed(data.handle) &&
+       memory_space(data) == dest_space
+        state.remote_args[dest_space][data] = data
+        state.remote_arg_to_original[data] = data
+        return data
+    end
     if !haskey(state.remote_args[dest_space], data)
         # Memory-aware plan-time throttling: a slot is allocated *eagerly* here
         # (`generate_slot!` performs the remote copy synchronously), so this is
@@ -908,6 +938,14 @@ function get_or_generate_slot!(state, dest_space, data)
             unspilled === nothing || return unspilled
         end
         chunk = generate_slot!(state, dest_space, data)
+        # Pin real (cross-space) copies so MemPool cannot swap them behind the
+        # aliasing oracle, and so a slot in active use is never spilled. Same-
+        # space slots may alias the user's original and are never freed here, so
+        # they are not pinned. The pin is released when the slot is spilled
+        # (`_evict_resident!`) or freed (`datadeps_free!`).
+        if memory_space(data) != dest_space
+            datadeps_pin!(chunk)
+        end
         if tracker !== nothing
             memory_aware_record!(tracker, dest_space, data, chunk)
         end
@@ -929,7 +967,11 @@ function remotecall_endpoint(f, from_proc, to_proc, from_space, to_space, data)
         # (deserialized here), so we can safely re-back CPU `Array`s with
         # `Libc.malloc` to make them eagerly freeable via `unsafe_free!`.
         data_converted = libc_backed(f(move(from_proc, to_proc, data)))
-        return tochunk(data_converted, to_proc)
+        # Route CPU copies through the Datadeps allocator so they can be spilled
+        # to disk under memory pressure (via MemPool) and accounted against the
+        # shared logical-memory budget. Non-CPU copies use the default device.
+        dev = to_space isa CPURAMMemorySpace ? datadeps_disk_device() : nothing
+        return tochunk(data_converted, to_proc; device=dev)
     end
 end
 function rewrap_aliased_object!(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, x)
@@ -944,6 +986,19 @@ function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::P
         return remotecall_fetch(move_rewrap, wid, cache, from_proc, to_proc, from_space, to_space, data)
     end
     data_raw = unwrap(data)
+    # For swap-managed originals, key the slot cache by the Chunk's *synthetic*
+    # (swap-stable, per-DRef) aliasing rather than the unwrapped array's real
+    # pointer. MemPool may swap a demoted original to disk and later reuse its
+    # freed buffer for a *different* original, so two distinct originals can
+    # transiently share a real address; a real-pointer cache key would then
+    # collide and hand back the wrong slot (aliasing distinct tiles). The
+    # synthetic key is derived from the DRef id, so it never collides.
+    if data.handle isa MemPool.DRef && _swap_managed(data.handle) && data_raw isa DenseArray
+        ainfo = aliasing(data, identity)
+        return aliased_object!(cache, data_raw; ainfo) do x
+            return remotecall_endpoint(identity, from_proc, to_proc, from_space, to_space, x)
+        end
+    end
     return move_rewrap(cache, from_proc, to_proc, from_space, to_space, data_raw)
 end
 function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, data)

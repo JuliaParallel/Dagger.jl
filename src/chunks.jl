@@ -129,3 +129,25 @@ is_task_or_chunk(c::WeakChunk) = true
 Serialization.serialize(io::AbstractSerializer, wc::WeakChunk) =
     error("Cannot serialize a WeakChunk")
 chunktype(c::WeakChunk) = chunktype(unwrap_weak_checked(c))
+
+@static if isdefined(MemPool, :poolpin)
+function poolpin(c::Chunk; remote::Bool=true)
+    if remote && root_worker_id(c) != myid()
+        remotecall_wait(MemPool.poolpin, root_worker_id(c), c.handle)
+    else
+        MemPool.poolpin(c.handle)
+    end
+    return
+end
+function poolunpin(c::Chunk; remote::Bool=true)
+    if remote && root_worker_id(c) != myid()
+        remotecall_wait(MemPool.poolunpin, root_worker_id(c), c.handle)
+    else
+        MemPool.poolunpin(c.handle)
+    end
+    return
+end
+else
+poolpin(c::Chunk) = nothing
+poolunpin(c::Chunk) = nothing
+end

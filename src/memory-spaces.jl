@@ -540,17 +540,80 @@ a worker boundary first would copy it and silently change the result.
 aliasing_unwrapped(x) = aliasing(aliasing_root(x))
 aliasing_unwrapped(x, dep_mod) = aliasing(aliasing_root(x), dep_mod)
 
-function aliasing(x::Chunk, T)
-    @assert x.handle isa DRef
-    if root_worker_id(x.processor) == myid()
-        return aliasing_unwrapped(unwrap(x), T)
-    end
-    return remotecall_fetch(root_worker_id(x.processor), x, T) do x, T
-        aliasing_unwrapped(unwrap(x), T)
+# --- Swap-tolerant (synthetic-address) aliasing for swap-managed Chunks ------
+#
+# The aliasing oracle keys overlaps on raw memory addresses (`pointer(...)`),
+# which is exact but assumes a datum never moves. When a `Chunk`'s `DRef` is
+# managed by a swap-capable allocator (`MemPool.SimpleRecencyAllocator`), the
+# user has explicitly opted into the data being relocated to/from disk, so its
+# live pointer is not stable and must not key the oracle. For such chunks we
+# rebase the computed spans onto a *synthetic, per-DRef* address range that is
+# stable across swaps and disjoint from every other DRef's range (and from real
+# heap addresses), so overlap analysis stays correct and stable regardless of
+# residency, and the data may be freely swapped between/within tasks (bounding
+# RAM) without invalidating the dependency graph. Chunks whose `DRef` is *not*
+# swap-managed keep the exact real-pointer analysis unchanged.
+
+# Synthetic addresses sit far above real heap addresses (< ~2^48), so a synthetic
+# span never collides with a real one in a space that mixes both; each DRef gets
+# a 2^40-byte slot (>> any single allocation), so distinct DRefs never overlap.
+const _SYNTH_ALIAS_BASE = UInt(1) << 60
+const _SYNTH_ALIAS_STRIDE = UInt(1) << 40
+const _synth_alias_lock = Base.Threads.SpinLock()
+const _synth_alias_slots = Dict{Int,UInt}()
+const _synth_alias_next = Ref{UInt}(0)
+
+# A stable synthetic base address for `ref`, assigned once per DRef id on this
+# worker. Different ids get disjoint, non-overlapping ranges.
+function _synthetic_base(ref::DRef)
+    Base.@lock _synth_alias_lock begin
+        return get!(_synth_alias_slots, ref.id) do
+            slot = _synth_alias_next[]
+            _synth_alias_next[] = slot + 1
+            return _SYNTH_ALIAS_BASE + slot * _SYNTH_ALIAS_STRIDE
+        end
     end
 end
-aliasing(x::Chunk) = remotecall_fetch(root_worker_id(x.processor), x) do x
-    aliasing_unwrapped(unwrap(x))
+
+# Whether `ref`'s data is managed by a swap-capable allocator (so its location
+# may change and real pointers must not key the oracle). Queried on the owner.
+function _swap_managed(ref::DRef)
+    ref.owner == myid() || return false
+    state = MemPool.with_lock(()->get(MemPool.datastore, ref.id, nothing), MemPool.datastore_lock)
+    state === nothing && return false
+    return MemPool.storage_read(state).root isa MemPool.SimpleRecencyAllocator
+end
+
+# If `x`'s DRef is swap-managed, rebase `ainfo`'s addresses (computed against the
+# live buffer `root`) onto `x`'s stable synthetic range; otherwise return as-is.
+function _maybe_synthetic_aliasing(x::Chunk, root, ainfo)
+    (x.handle isa DRef && _swap_managed(x.handle)) || return ainfo
+    delta = _synthetic_base(x.handle) - _buffer_base(root)
+    return _rebase_aliasing(ainfo, delta)
+end
+
+function aliasing(x::Chunk, T)
+    @assert x.handle isa DRef
+    compute = function (x, T)
+        obj = unwrap(x)
+        root = aliasing_root(obj)
+        return _maybe_synthetic_aliasing(x, root, aliasing(root, T))
+    end
+    if root_worker_id(x.processor) == myid()
+        return compute(x, T)
+    end
+    return remotecall_fetch(compute, root_worker_id(x.processor), x, T)
+end
+function aliasing(x::Chunk)
+    compute = function (x)
+        obj = unwrap(x)
+        root = aliasing_root(obj)
+        return _maybe_synthetic_aliasing(x, root, aliasing(root))
+    end
+    if root_worker_id(x.processor) == myid()
+        return compute(x)
+    end
+    return remotecall_fetch(compute, root_worker_id(x.processor), x)
 end
 aliasing(x::DTask, T) = aliasing(fetch(x; raw=true), T)
 aliasing(x::DTask) = aliasing(fetch(x; raw=true))
@@ -719,6 +782,44 @@ function aliasing(x::AbstractMatrix{T}, ::Type{Diagonal}) where T
 end
 # FIXME: Bidiagonal
 # FIXME: Tridiagonal
+
+# --- Synthetic-address rebasing (see swap-tolerant aliasing above) -----------
+#
+# `_buffer_base(root)` is the reference real address that the synthetic base maps
+# to: the start of the DRef's underlying buffer, so every span derived from it
+# (whole-array, strided view, triangular, ...) keeps a consistent relative
+# offset after rebasing. `_rebase_aliasing(ainfo, delta)` shifts every address in
+# `ainfo` by `delta = synthetic_base - buffer_base` (a large positive `UInt`,
+# since synthetic addresses sit far above real ones), preserving the concrete
+# ainfo type so all existing `will_alias`/`memory_spans` dispatch is unchanged.
+_buffer_base(x::DenseArray) = UInt(pointer(x))
+# Whole-object containers (e.g. `DSparseArray`) alias via `ObjectAliasing`, whose
+# address basis is the object's heap address (`pointer_from_objref`, see
+# `ObjectAliasing(x)`). Use the same basis here so rebasing shifts that span onto
+# the DRef's stable synthetic range -- this is what makes swap-managed *sparse*
+# tiles' aliasing swap-stable (a reloaded tile is a new object at a new address,
+# but its synthetic base is fixed per DRef id).
+function _buffer_base(@nospecialize x)
+    aliases_as_whole(x) && return UInt(pointer_from_objref(x))
+    throw(ConcurrencyViolationError("Swap-tolerant aliasing needs a stable buffer base, unsupported for $(typeof(x)); only DenseArray-backed or whole-object (`aliases_as_whole`) swap-managed Chunks are supported"))
+end
+
+_rebase_aliasing(a::ContiguousAliasing, delta::UInt) =
+    ContiguousAliasing(MemorySpan(a.span.ptr + delta, a.span.len))
+_rebase_aliasing(a::StridedAliasing{T,N,S}, delta::UInt) where {T,N,S} =
+    StridedAliasing{T,N,S}(a.base_ptr + delta, a.ptr + delta, a.base_inds, a.lengths, a.strides)
+_rebase_aliasing(a::TriangularAliasing{T,S}, delta::UInt) where {T,S} =
+    TriangularAliasing{T,S}(a.ptr + delta, a.stride, a.isupper, a.diagonal)
+_rebase_aliasing(a::DiagonalAliasing{T,S}, delta::UInt) where {T,S} =
+    DiagonalAliasing{T,S}(a.ptr + delta, a.stride)
+_rebase_aliasing(a::ObjectAliasing{S}, delta::UInt) where S =
+    ObjectAliasing{S}(a.ptr + delta, a.sz)
+_rebase_aliasing(a::CombinedAliasing, delta::UInt) =
+    CombinedAliasing(AbstractAliasing[_rebase_aliasing(s, delta) for s in a.sub_ainfos])
+_rebase_aliasing(a::NoAliasing, ::UInt) = a
+_rebase_aliasing(a::UnknownAliasing, ::UInt) = a
+_rebase_aliasing(a::AbstractAliasing, ::UInt) =
+    throw(ConcurrencyViolationError("Swap-tolerant aliasing not supported for ainfo of type $(typeof(a))"))
 
 function will_alias(x, y)
     x isa NoAliasing || y isa NoAliasing && return false

@@ -96,6 +96,7 @@ include("datadeps/aliasing.jl")
 include("datadeps/chunkview.jl")
 include("datadeps/remainders.jl")
 include("datadeps/scheduling.jl")
+include("datadeps/allocator.jl")
 include("datadeps/memory-aware.jl")
 include("datadeps/queue.jl")
 

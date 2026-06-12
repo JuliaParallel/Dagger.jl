@@ -68,21 +68,29 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
     if !aliasing
         throw(ArgumentError("Aliasing analysis is no longer optional"))
     end
-    wait_all(; check_errors=true) do
-        scheduler = something(scheduler, DATADEPS_SCHEDULER[], RoundRobinScheduler())
-        launch_wait = something(launch_wait, DATADEPS_LAUNCH_WAIT[], false)::Bool
-        if launch_wait
-            result = spawn_bulk() do
+    # Save/restore the pin-budget throttle around the whole region: it is
+    # installed by `distribute_tasks!` and must stay live until `wait_all` has
+    # observed every task finish (tasks consult it from `Sch.do_task`).
+    prev_throttle = DATADEPS_PIN_THROTTLE[]
+    try
+        wait_all(; check_errors=true) do
+            scheduler = something(scheduler, DATADEPS_SCHEDULER[], RoundRobinScheduler())
+            launch_wait = something(launch_wait, DATADEPS_LAUNCH_WAIT[], false)::Bool
+            if launch_wait
+                result = spawn_bulk() do
+                    queue = DataDepsTaskQueue(get_options(:task_queue); scheduler)
+                    with_options(f; task_queue=queue)
+                    distribute_tasks!(queue)
+                end
+            else
                 queue = DataDepsTaskQueue(get_options(:task_queue); scheduler)
-                with_options(f; task_queue=queue)
+                result = with_options(f; task_queue=queue)
                 distribute_tasks!(queue)
             end
-        else
-            queue = DataDepsTaskQueue(get_options(:task_queue); scheduler)
-            result = with_options(f; task_queue=queue)
-            distribute_tasks!(queue)
+            return result
         end
-        return result
+    finally
+        DATADEPS_PIN_THROTTLE[] = prev_throttle
     end
 end
 const DATADEPS_SCHEDULER = ScopedValue{Union{DataDepsScheduler,Nothing}}(nothing)
@@ -127,6 +135,17 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     if tracker !== nothing
         state.mem_tracker[] = tracker
         tracker.active[] = true
+        # Establish the shared per-worker logical-memory budget so the Datadeps
+        # allocator and MemPool's own allocator can't both claim all of RAM.
+        apply_shared_mem_limits!(exec_spaces, tracker)
+    end
+    # Install the region's pin-budget throttle (concurrency cap) when swapping is
+    # enabled: it bounds the simultaneously-pinned footprint of in-flight tasks
+    # to the resident budget so MemPool can always evict to swap in the next
+    # task. Cleared by `spawn_datadeps` once all tasks complete (it must outlive
+    # this function, which only *launches* tasks). See `PinThrottle`.
+    let budget = datadeps_pin_budget()
+        DATADEPS_PIN_THROTTLE[] = budget === nothing ? nothing : PinThrottle(budget)
     end
     write_num = 1
     proc_to_scope_lfu = BasicLFUCache{Processor,AbstractScope}(1024)
@@ -213,6 +232,13 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         # written copies were reloaded by the write-back loop above).
         cleanup_spilled_files!(tracker)
     end
+
+    # NOTE: originals are no longer pinned for the region (see
+    # `populate_task_info!`), so there is nothing to unpin here.
+
+    # Restore the shared logical-memory budget to unbounded now that the region
+    # has been fully planned (all slot allocations/spills are scheduled).
+    tracker !== nothing && restore_shared_mem_limits!(exec_spaces)
 end
 
 """
@@ -231,7 +257,11 @@ function emit_slot_free!(state::DataDepsState, space::MemorySpace, remote_arg, w
     free_scope = ExactScope(free_proc)
     free_syncdeps = Set{ThunkSyncdep}()
     gather_free_syncdeps!(state, space, remote_arg, write_num, chunk_to_ainfos, free_syncdeps)
-    return Dagger.@spawn scope=free_scope syncdeps=free_syncdeps Dagger.unsafe_free!(remote_arg)
+    # Capture the slot in the task closure rather than passing it as a dependency
+    # argument: as an argument Dagger would `move` it (for a `ChunkView` this
+    # resolves to a *different* `DRef` than the one we pinned/track), breaking the
+    # free + unpin. Captured, the exact `Chunk` is freed on its owning worker.
+    return Dagger.@spawn scope=free_scope syncdeps=free_syncdeps (()->(Dagger.datadeps_free!(remote_arg); nothing))()
 end
 struct DataDepsTaskDependency
     arg_w::ArgumentWrapper

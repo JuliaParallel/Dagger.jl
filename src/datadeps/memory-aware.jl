@@ -138,11 +138,13 @@ struct DatadepsSlotInfo
     origin::MemorySpace
 end
 
-# Handle for a read-only slot whose in-memory buffer has been spilled to disk.
-# `path` is a local temp file on the owning worker holding the serialized data;
-# `size` is the in-memory byte size (used for budget accounting on reload).
+# Handle for a slot whose in-memory buffer has been spilled to disk via MemPool.
+# `chunk` is the (still-live) slot `Chunk` whose backing `DRef` -- managed by a
+# `DatadepsDevice` -- currently holds its data on disk; `poolpin`ning it swaps
+# the data back into a fresh in-memory buffer. `size` is the in-memory byte size
+# (used for tracker budget accounting on reload).
 struct SpilledSlot
-    path::String
+    chunk::Any
     size::UInt64
 end
 
@@ -326,51 +328,43 @@ function ainfos_for_chunk(state::DataDepsState, chunk)
     return ainfos
 end
 
-# Serialize `chunk`'s in-memory data to a local temp file on its owning worker,
-# then free the in-memory buffer. Runs synchronously during planning. Returns a
-# `SpilledSlot` handle. We use plain serialization (not MemPool's storage
-# devices) so the swap is fully under our control and `SimpleRecencyAllocator`
-# never relocates a live buffer behind the aliasing oracle.
+# Spill `chunk`'s in-memory data to disk via MemPool, eagerly freeing its
+# in-memory buffer and releasing its share of the shared logical-memory budget.
+# `chunk` must already be unpinned (its lifecycle pin released). Runs
+# synchronously during planning. Because the slot is managed by a
+# `DatadepsDevice` (not `SimpleRecencyAllocator`), Datadeps decides exactly when
+# this happens, so nothing relocates a live buffer behind the aliasing oracle.
 function spill_chunk_to_disk!(chunk)
-    w = root_worker_id(chunk)
-    path, sz = remotecall_fetch(w, chunk) do c
-        arr = unwrap(c)
-        p = tempname()
-        open(p, "w") do io
-            serialize(io, arr)
-        end
-        s = UInt64(filesize(p))
-        unsafe_free!(arr)
-        return (p, s)
-    end
-    return SpilledSlot(path, sz)
+    datadeps_spill!(chunk)
+    return
 end
 
-# Reload a spilled slot into a *fresh* in-memory allocation on `dest_space`'s
-# worker, returning a new `Chunk` (new address => new ainfo, registered normally
-# when the consuming task is processed). Deletes the temp file.
+# Reload a spilled slot by `poolpin`ning it: MemPool swaps the data back into a
+# fresh in-memory buffer (and re-pins it for the lifetime it is resident). The
+# slot's `DRef` is preserved; the fresh buffer has a new address, so the slot's
+# stale ainfo (forgotten on spill via `retract_slot!`) is recomputed on next
+# use. Returns the (now-resident, pinned) slot `Chunk`.
 function unspill_chunk_from_disk(spill::SpilledSlot, dest_space::MemorySpace)
-    w = root_worker_id(dest_space)
-    to_proc = first(processors(dest_space))
-    return remotecall_fetch(w, spill.path, to_proc) do path, to_proc
-        arr = open(deserialize, path)
-        arr = libc_backed(arr)
-        rm(path; force=true)
-        return tochunk(arr, to_proc)
-    end
+    datadeps_pin!(spill.chunk)
+    return spill.chunk
 end
 
-# Delete any spill temp files still on disk at region end. Written copies are
-# always reloaded by the region-end write-back, so anything left here is a
-# read-only copy that was never used again -- its temp file would otherwise
-# leak. Each file lives on the worker owning its `space`.
+# Delete any slots still spilled to disk at region end. Written copies are
+# reloaded and written back earlier (`drain_spilled_writebacks!`), so anything
+# left here is a read-only copy that was never used again; freeing its `DRef`
+# (via `DatadepsDevice`) removes the on-disk data. Each slot lives on the worker
+# owning its `space`.
 function cleanup_spilled_files!(tracker::DatadepsMemoryTracker)
     isempty(tracker.spilled_data) && return
-    for ((space, _), spill) in tracker.spilled_data
+    for ((_, _), spill) in tracker.spilled_data
+        # A spilled slot may also have been freed by the obj-cache/resident free
+        # loops (it is still in those structures); skip if already handled.
+        haskey(tracker.freed, spill.chunk) && continue
         try
-            remotecall_wait(rm, root_worker_id(space), spill.path; force=true)
+            datadeps_free!(spill.chunk)
+            tracker.freed[spill.chunk] = nothing
         catch err
-            @debug "Memory-aware: failed to remove spill temp file $(spill.path)" exception=err
+            @debug "Memory-aware: failed to free spilled slot" exception=err
         end
     end
     empty!(tracker.spilled_data)
@@ -522,13 +516,17 @@ function _evict_resident!(tracker::DatadepsMemoryTracker, state::DataDepsState,
 
     dirty = key in tracker.written
     if to_disk
-        spill = spill_chunk_to_disk!(chunk)
-        tracker.spilled_data[(space, key)] = spill
-        tracker.spilled_bytes[] += spill.size
+        # Release the lifecycle pin, then swap the buffer to disk via MemPool.
+        # The slot's `DRef` stays alive (spilled); it is reloaded on next use.
+        datadeps_unpin!(chunk)
+        spill_chunk_to_disk!(chunk)
+        tracker.spilled_data[(space, key)] = SpilledSlot(chunk, sz)
+        tracker.spilled_bytes[] += sz
     else
-        unsafe_free!(chunk)
+        # Eagerly free the buffer in place (unpins if needed + releases budget).
+        datadeps_free!(chunk)
+        tracker.freed[chunk] = nothing
     end
-    tracker.freed[chunk] = nothing
     retract_slot!(state, space, chunk, ainfos; dirty)
     delete!(resident, key)
     return sz
@@ -684,6 +682,8 @@ function memory_aware_unspill!(tracker::DatadepsMemoryTracker, state::DataDepsSt
     chunk = unspill_chunk_from_disk(spill, dest_space)
     state.remote_args[dest_space][data] = chunk
     state.remote_arg_to_original[chunk] = data
+    # Free the old freed-marker if any: the reloaded slot is live again.
+    delete!(tracker.freed, chunk)
     memory_aware_record!(tracker, dest_space, data, chunk)
     if tracker.cfg.verbose
         @debug "Memory-aware: unspilled $(spill.size) bytes into $dest_space (task $(tracker.current_idx[]))"
@@ -814,6 +814,36 @@ function datadeps_task_slots!(written::Set{UInt64}, spec::DTaskSpec)
     return slots
 end
 
+# Push each CPU space's per-space byte budget down into MemPool's shared
+# logical-memory accounting on the owning worker, so the Datadeps allocator and
+# any `SimpleRecencyAllocator` reserve from a single budget (rather than each
+# assuming it owns all of RAM). Restored to unbounded at region end.
+function apply_shared_mem_limits!(spaces, tracker::DatadepsMemoryTracker)
+    for space in spaces
+        space isa CPURAMMemorySpace || continue
+        lim = memory_limit(space, tracker.cfg)
+        w = root_worker_id(space)
+        if w == myid()
+            MemPool.set_mem_limit!(lim)
+        else
+            remotecall_wait(MemPool.set_mem_limit!, w, lim)
+        end
+    end
+    return
+end
+function restore_shared_mem_limits!(spaces)
+    for space in spaces
+        space isa CPURAMMemorySpace || continue
+        w = root_worker_id(space)
+        if w == myid()
+            MemPool.set_mem_limit!(typemax(UInt64))
+        else
+            remotecall_wait(MemPool.set_mem_limit!, w, typemax(UInt64))
+        end
+    end
+    return
+end
+
 # Build the tracker for an entire region by running the pre-pass over every task.
 function build_memory_tracker(cfg::MemoryAwareConfig, seen_tasks)
     task_slots = Vector{Vector{DatadepsSlotInfo}}(undef, length(seen_tasks))
@@ -822,4 +852,85 @@ function build_memory_tracker(cfg::MemoryAwareConfig, seen_tasks)
         task_slots[i] = datadeps_task_slots!(written, pair.spec)
     end
     return DatadepsMemoryTracker(cfg, task_slots, written)
+end
+
+# --- Runtime pin-budget throttle (concurrency cap) --------------------------
+#
+# When a region's arguments are swap-managed (their data lives under a
+# `SimpleRecencyAllocator`, so MemPool may demote it to disk), Datadeps keeps a
+# task's argument tiles *pinned* (resident) for the duration of that task's
+# execution (see the pin/unpin in `Sch.do_task`). The static planner, however,
+# launches the whole task graph at once, and the eager scheduler will start as
+# many independent (non-syncdep-ordered) tasks as it has processor occupancy
+# for. Each running task pins its tiles, so a wide graph can pin far more than
+# the resident budget simultaneously -- at which point MemPool has nothing left
+# to evict to make room for the next swap-in and migration fails.
+#
+# `PinThrottle` bounds the *simultaneously pinned* footprint of in-flight tasks
+# to a byte budget (the allocator's resident `mem_limit`). Before pinning, a
+# task atomically reserves the total size of its swap-managed tiles, blocking
+# until that many bytes are free; it releases them after unpinning. Because a
+# task is only dispatched to `do_task` once its syncdeps have completed, the
+# tasks contending for the budget are mutually independent, so there is no
+# acquire-ordering cycle and thus no deadlock. A single task whose footprint
+# exceeds the whole budget is let through unthrottled (it cannot be made to fit
+# by waiting); MemPool then does its best for that one task.
+#
+# The throttle is region-scoped: `distribute_tasks!` installs one in
+# `DATADEPS_PIN_THROTTLE` for the duration of a swap-managed region (cleared by
+# `spawn_datadeps`). Outside such a region the ref holds `nothing` and the pin
+# path is unaffected.
+mutable struct PinThrottle
+    cond::Threads.Condition
+    limit::UInt64
+    available::UInt64
+end
+PinThrottle(limit::Integer) =
+    PinThrottle(Threads.Condition(), UInt64(limit), UInt64(limit))
+
+const DATADEPS_PIN_THROTTLE = Ref{Union{PinThrottle,Nothing}}(nothing)
+
+# Reserve `bytes` of pin budget, blocking until that much is free. Oversized
+# requests (>= the whole budget) proceed immediately to avoid deadlock.
+function pin_throttle_acquire!(t::PinThrottle, bytes::Integer)
+    nbytes = UInt64(bytes)
+    nbytes == 0 && return
+    lock(t.cond)
+    try
+        if nbytes < t.limit
+            while t.available < nbytes
+                wait(t.cond)
+            end
+        end
+        t.available = t.available >= nbytes ? t.available - nbytes : UInt64(0)
+    finally
+        unlock(t.cond)
+    end
+    return
+end
+
+# Release `bytes` of pin budget previously reserved by `pin_throttle_acquire!`.
+function pin_throttle_release!(t::PinThrottle, bytes::Integer)
+    nbytes = UInt64(bytes)
+    nbytes == 0 && return
+    lock(t.cond)
+    try
+        t.available = min(t.limit, t.available + nbytes)
+        notify(t.cond)
+    finally
+        unlock(t.cond)
+    end
+    return
+end
+
+# Determine the per-(local-worker) resident pin budget for a region, or
+# `nothing` if no throttle is needed. We engage the throttle only when the
+# local `GLOBAL_DEVICE` is a `SimpleRecencyAllocator` (i.e. swapping is enabled
+# and tiles can be demoted); the budget is that allocator's resident
+# `mem_limit`. When no swap-managed arguments are present, the per-task
+# footprint computed in `do_task` is zero, so an installed throttle is a no-op.
+function datadeps_pin_budget()
+    dev = MemPool.GLOBAL_DEVICE[]
+    dev isa MemPool.SimpleRecencyAllocator || return nothing
+    return UInt64(dev.mem_limit)
 end

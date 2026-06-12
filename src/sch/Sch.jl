@@ -22,6 +22,8 @@ import DataStructures: PriorityQueue, enqueue!, dequeue_pair!, peek
 import ..Dagger: ReusableCache, ReusableLinkedList, ReusableDict
 import ..Dagger: @reusable, @reusable_dict, @reusable_vector, @reusable_tasks, @reuse_scope, @reuse_defer_cleanup
 
+import ..Dagger: poolpin, poolunpin
+
 import TimespanLogging
 
 import TaskLocalValues: TaskLocalValue
@@ -1449,6 +1451,37 @@ Executes a single task specified by `task` on `to_proc`.
 
     @dagdebug thunk_id :execute "Moving data"
 
+    # Pin Chunk argument sources by their DRef for the duration of this task, so
+    # MemPool cannot swap-out/relocate/demote their in-memory data while we read
+    # it (or, for an InOut arg, while we write it). Pinned here (pre-`move`, while
+    # args are still Chunks) and balanced by the unpin in the `finally` below.
+    pinned_chunks = @reusable_vector :do_task_pinned_chunks Any nothing 32
+    pinned_chunks_cleanup = @reuse_defer_cleanup empty!(pinned_chunks)
+    # Concurrency cap: in a swap-managed datadeps region, reserve this task's
+    # swap-managed pinned footprint against the region's pin budget *before*
+    # pinning, blocking until it fits. This bounds the simultaneously-pinned
+    # working set of in-flight tasks so MemPool can always evict unpinned tiles
+    # to swap in the next task. Released after unpinning in the `finally` below.
+    # `pin_throttle` is `nothing` outside a swap-managed region (no-op).
+    pin_throttle = Dagger.DATADEPS_PIN_THROTTLE[]
+    pin_footprint = UInt64(0)
+    if pin_throttle !== nothing
+        for arg in data
+            v = Dagger.value(arg)
+            if v isa Chunk && v.handle isa MemPool.DRef && Dagger._swap_managed(v.handle)
+                pin_footprint += v.handle.size
+            end
+        end
+        Dagger.pin_throttle_acquire!(pin_throttle, pin_footprint)
+    end
+    for arg in data
+        v = Dagger.value(arg)
+        if v isa Chunk && v.handle isa MemPool.DRef
+            poolpin(v; remote=false)
+            push!(pinned_chunks, v)
+        end
+    end
+
     # Initiate data transfers for function and arguments
     transfer_time = Threads.Atomic{UInt64}(0)
     transfer_size = Threads.Atomic{UInt64}(0)
@@ -1598,6 +1631,13 @@ Executes a single task specified by `task` on `to_proc`.
         bt = catch_backtrace()
         RemoteException(myid(), CapturedException(ex, bt))
     finally
+        for c in pinned_chunks
+            poolunpin(c; remote=false)
+        end
+        if pin_throttle !== nothing
+            Dagger.pin_throttle_release!(pin_throttle, pin_footprint)
+        end
+        pinned_chunks_cleanup()
         fetched_args_cleanup()
         fetched_kwargs_cleanup()
     end
