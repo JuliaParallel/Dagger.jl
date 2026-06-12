@@ -456,7 +456,12 @@ struct DataDepsState
         arg_history = Dict{ArgumentWrapper,Vector{HistoryEntry}}()
         arg_owner = Dict{ArgumentWrapper,MemorySpace}()
         arg_overlaps = Dict{ArgumentWrapper,Set{ArgumentWrapper}}()
-        ainfo_backing_chunk = tochunk(AliasedObjectCacheStore())
+        # Keep the internal object cache on plain CPU RAM (never swap-managed):
+        # it holds `Chunk`s/`DRef`s, and spilling it via a swap-capable global
+        # allocator would serialize those refs through a serializer that
+        # mishandles DRef refcounting, corrupting state. It is small and must
+        # stay resident for the region regardless.
+        ainfo_backing_chunk = tochunk(AliasedObjectCacheStore(); device=MemPool.CPURAMDevice())
 
         supports_inplace_cache = IdDict{Any,Bool}()
         ainfo_cache = Dict{ArgumentWrapper,AliasingWrapper}()
