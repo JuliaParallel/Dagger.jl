@@ -91,3 +91,25 @@ move(to_proc::Processor, d::DRef) =
     move(OSProc(d.owner), to_proc, d)
 move(to_proc::Processor, x) =
     move(OSProc(), to_proc, x)
+
+@static if isdefined(MemPool, :poolpin)
+function poolpin(c::Chunk; remote::Bool=true)
+    if remote && root_worker_id(c) != myid()
+        remotecall_wait(MemPool.poolpin, root_worker_id(c), c.handle)
+    else
+        MemPool.poolpin(c.handle)
+    end
+    return
+end
+function poolunpin(c::Chunk; remote::Bool=true)
+    if remote && root_worker_id(c) != myid()
+        remotecall_wait(MemPool.poolunpin, root_worker_id(c), c.handle)
+    else
+        MemPool.poolunpin(c.handle)
+    end
+    return
+end
+else
+poolpin(c::Chunk) = nothing
+poolunpin(c::Chunk) = nothing
+end

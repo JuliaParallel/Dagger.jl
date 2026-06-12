@@ -488,34 +488,166 @@ end
 aliasing(::String) = NoAliasing() # FIXME: Not necessarily true
 aliasing(::Symbol) = NoAliasing()
 aliasing(::Type) = NoAliasing()
+
+"""
+    aliases_as_whole(x) -> Bool
+
+Whether `x` -- either an object, or an already-computed aliasing -- must be
+treated as a single, indivisible unit, i.e. it is never safe to alias (or to
+consider current) only *part* of it.
+
+For an object: containers whose backing storage may be reallocated or resized on
+write (such as `DSparseArray`) return `true`. This causes [`aliasing_root`](@ref)
+to resolve any view/wrapper of them to the whole container, so all access funnels
+through the container's own `aliasing`. By contract, such a container's `aliasing`
+must be a bare [`ObjectAliasing`](@ref).
+
+For an aliasing: a bare `ObjectAliasing` (the aliasing of a whole-object
+container) reports `true`. Datadeps uses this to copy such arguments as a whole
+(a `FullCopy`) rather than computing per-span remainders, since they can never be
+*partially* current in a memory space.
+"""
+aliases_as_whole(@nospecialize x) = false
+aliases_as_whole(ainfo::AliasingWrapper) = aliases_as_whole(ainfo.inner)
+aliases_as_whole(::ObjectAliasing) = true
+
+"""
+    aliasing_root(x)
+
+Resolve `x` down to the whole-object container it wraps: peel array wrappers
+(views, transposes, adjoints, reshapes, permutations, ...) off of `x` until
+reaching a container that must alias as a whole (see [`aliases_as_whole`](@ref)),
+and return that container. If no such container is wrapped, return `x` unchanged.
+
+This relies solely on the standard `Base.parent` interface, so it transparently
+handles *any* array wrapper without per-wrapper `aliasing` methods: a new wrapper
+type needs no special-casing here, and a new whole-object container only needs to
+define [`aliases_as_whole`](@ref) (plus its own `aliasing` method, which must
+return a bare `ObjectAliasing`). A trapping `Base.pointer` on such containers
+guards against a wrapper slipping through and being misinterpreted as strided
+memory.
+
+!!! warning
+    The resolved object's *identity* defines its aliasing, so this is only
+    meaningful in the memory space where `x` physically resides. Never return its
+    result across a worker boundary and *then* compute `aliasing` -- the transfer
+    copies the object and changes its aliasing. Use [`aliasing_unwrapped`](@ref),
+    which fuses the two operations so they always run together.
+"""
+aliasing_root(@nospecialize x) = x
+function aliasing_root(x::AbstractArray)
+    aliases_as_whole(x) && return x
+    p = parent(x)
+    # `Base.parent` returns the argument itself for non-wrapper arrays, which
+    # terminates the recursion.
+    p === x && return x
+    root = aliasing_root(p)
+    return aliases_as_whole(root) ? root : x
+end
+
+"""
+    aliasing_unwrapped(x[, dep_mod])
+
+Compute the `aliasing` of `x`, first resolving (via [`aliasing_root`](@ref)) any
+whole-object container that `x` wraps. This is the entry point Datadeps uses to
+compute the aliasing of a (possibly wrapped) argument.
+
+Unwrapping and `aliasing` are intentionally fused into a single call so they
+always execute in the same place. It MUST be evaluated where `x` physically lives
+-- e.g. *inside* a `Chunk`'s `remotecall_fetch` block -- because the unwrapped
+object's identity determines its aliasing; returning the unwrapped object across
+a worker boundary first would copy it and silently change the result.
+"""
+aliasing_unwrapped(x) = aliasing(aliasing_root(x))
+aliasing_unwrapped(x, dep_mod) = aliasing(aliasing_root(x), dep_mod)
+
+# --- Swap-tolerant (synthetic-address) aliasing for swap-managed Chunks ------
+#
+# The aliasing oracle keys overlaps on raw memory addresses (`pointer(...)`),
+# which is exact but assumes a datum never moves. When a `Chunk`'s `DRef` is
+# managed by a swap-capable allocator (`MemPool.SimpleRecencyAllocator`), the
+# user has explicitly opted into the data being relocated to/from disk, so its
+# live pointer is not stable and must not key the oracle. For such chunks we
+# rebase the computed spans onto a *synthetic, per-DRef* address range that is
+# stable across swaps and disjoint from every other DRef's range (and from real
+# heap addresses), so overlap analysis stays correct and stable regardless of
+# residency, and the data may be freely swapped between/within tasks (bounding
+# RAM) without invalidating the dependency graph. Chunks whose `DRef` is *not*
+# swap-managed keep the exact real-pointer analysis unchanged.
+
+# Synthetic addresses sit far above real heap addresses (< ~2^48), so a synthetic
+# span never collides with a real one in a space that mixes both; each DRef gets
+# a 2^40-byte slot (>> any single allocation), so distinct DRefs never overlap.
+const _SYNTH_ALIAS_BASE = UInt(1) << 60
+const _SYNTH_ALIAS_STRIDE = UInt(1) << 40
+const _synth_alias_lock = Base.Threads.SpinLock()
+const _synth_alias_slots = Dict{Int,UInt}()
+const _synth_alias_next = Ref{UInt}(0)
+
+# A stable synthetic base address for `ref`, assigned once per DRef id on this
+# worker. Different ids get disjoint, non-overlapping ranges.
+function _synthetic_base(ref::DRef)
+    Base.@lock _synth_alias_lock begin
+        return get!(_synth_alias_slots, ref.id) do
+            slot = _synth_alias_next[]
+            _synth_alias_next[] = slot + 1
+            return _SYNTH_ALIAS_BASE + slot * _SYNTH_ALIAS_STRIDE
+        end
+    end
+end
+
+# Whether `ref`'s data is managed by a swap-capable allocator (so its location
+# may change and real pointers must not key the oracle). Queried on the owner.
+function _swap_managed(ref::DRef)
+    ref.owner == myid() || return false
+    state = MemPool.with_lock(()->get(MemPool.datastore, ref.id, nothing), MemPool.datastore_lock)
+    state === nothing && return false
+    return MemPool.storage_read(state).root isa MemPool.SimpleRecencyAllocator
+end
+
+# If `x`'s DRef is swap-managed, rebase `ainfo`'s addresses (computed against the
+# live buffer `root`) onto `x`'s stable synthetic range; otherwise return as-is.
+function _maybe_synthetic_aliasing(x::Chunk, root, ainfo)
+    (x.handle isa DRef && _swap_managed(x.handle)) || return ainfo
+    delta = _synthetic_base(x.handle) - _buffer_base(root)
+    return _rebase_aliasing(ainfo, delta)
+end
+
 function aliasing(x::Chunk, T)
     # Under uniform execution (MPI), `root_worker_id` is always `myid()` and is
     # not a valid owner key -- defer to the acceleration so non-owning ranks
-    # take the owner-broadcast path instead of a local unwrap.
+    # take the owner-broadcast path instead of a local unwrap. Swap-managed
+    # synthetic aliasing (below) is Distributed-only.
     accel = current_acceleration()
     if uniform_execution(accel)
         return aliasing(accel, x, T)
     end
-    if root_worker_id(x.processor) == myid()
-        return aliasing(unwrap(x), T)
-    end
     @assert x.handle isa DRef
-    return remotecall_fetch(root_worker_id(x.processor), x, T) do x, T
-        aliasing(unwrap(x), T)
+    compute = function (x, T)
+        obj = unwrap(x)
+        root = aliasing_root(obj)
+        return _maybe_synthetic_aliasing(x, root, aliasing(root, T))
     end
+    if root_worker_id(x.processor) == myid()
+        return compute(x, T)
+    end
+    return remotecall_fetch(compute, root_worker_id(x.processor), x, T)
 end
 function aliasing(x::Chunk)
     accel = current_acceleration()
     if uniform_execution(accel)
         return aliasing(accel, x, identity)
     end
-    if root_worker_id(x.processor) == myid()
-        return aliasing(unwrap(x))
-    end
     @assert x.handle isa DRef
-    return remotecall_fetch(root_worker_id(x.processor), x) do x
-        aliasing(unwrap(x))
+    compute = function (x)
+        obj = unwrap(x)
+        root = aliasing_root(obj)
+        return _maybe_synthetic_aliasing(x, root, aliasing(root))
     end
+    if root_worker_id(x.processor) == myid()
+        return compute(x)
+    end
+    return remotecall_fetch(compute, root_worker_id(x.processor), x)
 end
 aliasing(x::DTask, T) = aliasing(fetch(x; move_value=false, unwrap=false), T)
 aliasing(x::DTask) = aliasing(fetch(x; move_value=false, unwrap=false))
@@ -696,6 +828,44 @@ function aliasing(x::AbstractMatrix{T}, ::Type{Diagonal}) where T
 end
 # FIXME: Bidiagonal
 # FIXME: Tridiagonal
+
+# --- Synthetic-address rebasing (see swap-tolerant aliasing above) -----------
+#
+# `_buffer_base(root)` is the reference real address that the synthetic base maps
+# to: the start of the DRef's underlying buffer, so every span derived from it
+# (whole-array, strided view, triangular, ...) keeps a consistent relative
+# offset after rebasing. `_rebase_aliasing(ainfo, delta)` shifts every address in
+# `ainfo` by `delta = synthetic_base - buffer_base` (a large positive `UInt`,
+# since synthetic addresses sit far above real ones), preserving the concrete
+# ainfo type so all existing `will_alias`/`memory_spans` dispatch is unchanged.
+_buffer_base(x::DenseArray) = UInt(pointer(x))
+# Whole-object containers (e.g. `DSparseArray`) alias via `ObjectAliasing`, whose
+# address basis is the object's heap address (`pointer_from_objref`, see
+# `ObjectAliasing(x)`). Use the same basis here so rebasing shifts that span onto
+# the DRef's stable synthetic range -- this is what makes swap-managed *sparse*
+# tiles' aliasing swap-stable (a reloaded tile is a new object at a new address,
+# but its synthetic base is fixed per DRef id).
+function _buffer_base(@nospecialize x)
+    aliases_as_whole(x) && return UInt(pointer_from_objref(x))
+    throw(ConcurrencyViolationError("Swap-tolerant aliasing needs a stable buffer base, unsupported for $(typeof(x)); only DenseArray-backed or whole-object (`aliases_as_whole`) swap-managed Chunks are supported"))
+end
+
+_rebase_aliasing(a::ContiguousAliasing, delta::UInt) =
+    ContiguousAliasing(MemorySpan(a.span.ptr + delta, a.span.len))
+_rebase_aliasing(a::StridedAliasing{T,N,S}, delta::UInt) where {T,N,S} =
+    StridedAliasing{T,N,S}(a.base_ptr + delta, a.ptr + delta, a.base_inds, a.lengths, a.strides)
+_rebase_aliasing(a::TriangularAliasing{T,S}, delta::UInt) where {T,S} =
+    TriangularAliasing{T,S}(a.ptr + delta, a.stride, a.isupper, a.diagonal)
+_rebase_aliasing(a::DiagonalAliasing{T,S}, delta::UInt) where {T,S} =
+    DiagonalAliasing{T,S}(a.ptr + delta, a.stride)
+_rebase_aliasing(a::ObjectAliasing{S}, delta::UInt) where S =
+    ObjectAliasing{S}(a.ptr + delta, a.sz)
+_rebase_aliasing(a::CombinedAliasing, delta::UInt) =
+    CombinedAliasing(AbstractAliasing[_rebase_aliasing(s, delta) for s in a.sub_ainfos])
+_rebase_aliasing(a::NoAliasing, ::UInt) = a
+_rebase_aliasing(a::UnknownAliasing, ::UInt) = a
+_rebase_aliasing(a::AbstractAliasing, ::UInt) =
+    throw(ConcurrencyViolationError("Swap-tolerant aliasing not supported for ainfo of type $(typeof(a))"))
 
 function will_alias(x, y)
     x isa NoAliasing || y isa NoAliasing && return false
