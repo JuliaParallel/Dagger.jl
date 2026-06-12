@@ -42,5 +42,19 @@ steps:
     env:
       CI_USE_ONEAPI: "1"
 
+  - label: Julia 1.11 (Metal)
+    timeout_in_minutes: 20
+    <<: *gputest
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+      - JuliaCI/julia-test#v1: ~
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
+    agents:
+      queue: "metal"
+    env:
+      CI_USE_METAL: "1"
+
 # env:
 #   SECRET_CODECOV_TOKEN: ""
