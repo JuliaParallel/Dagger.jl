@@ -585,10 +585,17 @@ function _swap_managed(ref::DRef)
 end
 
 # If `x`'s DRef is swap-managed, rebase `ainfo`'s addresses (computed against the
-# live buffer `root`) onto `x`'s stable synthetic range; otherwise return as-is.
-function _maybe_synthetic_aliasing(x::Chunk, root, ainfo)
+# live backing buffer) onto `x`'s stable synthetic range; otherwise return as-is.
+# The rebase anchor is taken from `ainfo` itself (`_ainfo_anchor`), i.e. the base
+# of the buffer the spans are built on -- *not* from the wrapper object -- so any
+# array wrapper (views, reshapes, ...) is handled uniformly: its aliasing already
+# resolves to addresses relative to its parent buffer, and we rebase that parent
+# base onto the synthetic range.
+function _maybe_synthetic_aliasing(x::Chunk, ainfo)
     (x.handle isa DRef && _swap_managed(x.handle)) || return ainfo
-    delta = _synthetic_base(x.handle) - _buffer_base(root)
+    # No addresses to rebase; the result is residency-independent already.
+    (ainfo isa NoAliasing || ainfo isa UnknownAliasing) && return ainfo
+    delta = _synthetic_base(x.handle) - _ainfo_anchor(ainfo)
     return _rebase_aliasing(ainfo, delta)
 end
 
@@ -597,7 +604,7 @@ function aliasing(x::Chunk, T)
     compute = function (x, T)
         obj = unwrap(x)
         root = aliasing_root(obj)
-        return _maybe_synthetic_aliasing(x, root, aliasing(root, T))
+        return _maybe_synthetic_aliasing(x, aliasing(root, T))
     end
     if root_worker_id(x.processor) == myid()
         return compute(x, T)
@@ -608,7 +615,7 @@ function aliasing(x::Chunk)
     compute = function (x)
         obj = unwrap(x)
         root = aliasing_root(obj)
-        return _maybe_synthetic_aliasing(x, root, aliasing(root))
+        return _maybe_synthetic_aliasing(x, aliasing(root))
     end
     if root_worker_id(x.processor) == myid()
         return compute(x)
@@ -785,24 +792,31 @@ end
 
 # --- Synthetic-address rebasing (see swap-tolerant aliasing above) -----------
 #
-# `_buffer_base(root)` is the reference real address that the synthetic base maps
-# to: the start of the DRef's underlying buffer, so every span derived from it
-# (whole-array, strided view, triangular, ...) keeps a consistent relative
-# offset after rebasing. `_rebase_aliasing(ainfo, delta)` shifts every address in
-# `ainfo` by `delta = synthetic_base - buffer_base` (a large positive `UInt`,
-# since synthetic addresses sit far above real ones), preserving the concrete
-# ainfo type so all existing `will_alias`/`memory_spans` dispatch is unchanged.
-_buffer_base(x::DenseArray) = UInt(pointer(x))
-# Whole-object containers (e.g. `DSparseArray`) alias via `ObjectAliasing`, whose
-# address basis is the object's heap address (`pointer_from_objref`, see
-# `ObjectAliasing(x)`). Use the same basis here so rebasing shifts that span onto
-# the DRef's stable synthetic range -- this is what makes swap-managed *sparse*
-# tiles' aliasing swap-stable (a reloaded tile is a new object at a new address,
-# but its synthetic base is fixed per DRef id).
-function _buffer_base(@nospecialize x)
-    aliases_as_whole(x) && return UInt(pointer_from_objref(x))
-    throw(ConcurrencyViolationError("Swap-tolerant aliasing needs a stable buffer base, unsupported for $(typeof(x)); only DenseArray-backed or whole-object (`aliases_as_whole`) swap-managed Chunks are supported"))
+# `_ainfo_anchor(ainfo)` is the reference real address that the synthetic base
+# maps to: the base of the single backing buffer `ainfo`'s spans are built on. We
+# read it from the computed `ainfo` rather than from the wrapper object, so a
+# view/wrapper anchors on its *parent* buffer's base (e.g. a `StridedAliasing`'s
+# `base_ptr`) -- the whole point of being able to handle generic array wrappers.
+# `_rebase_aliasing(ainfo, delta)` then shifts every address in `ainfo` by
+# `delta = synthetic_base - anchor` (a large positive `UInt`, since synthetic
+# addresses sit far above real ones), which is valid because MemPool relocates
+# the whole buffer as one unit, so every span moves by the same amount and only
+# their relative offsets (preserved here) matter. The concrete ainfo type is kept
+# so all existing `will_alias`/`memory_spans` dispatch is unchanged.
+#
+# The anchor is the *minimum* address the ainfo references, so all rebased
+# addresses land at or above the synthetic base (within the DRef's slot).
+_ainfo_anchor(a::ContiguousAliasing) = a.span.ptr.addr
+_ainfo_anchor(a::StridedAliasing) = a.base_ptr.addr
+_ainfo_anchor(a::TriangularAliasing) = a.ptr.addr
+_ainfo_anchor(a::DiagonalAliasing) = a.ptr.addr
+_ainfo_anchor(a::ObjectAliasing) = a.ptr.addr
+function _ainfo_anchor(a::CombinedAliasing)
+    isempty(a.sub_ainfos) && return UInt(0)
+    return minimum(_ainfo_anchor, a.sub_ainfos)
 end
+_ainfo_anchor(a::AbstractAliasing) =
+    throw(ConcurrencyViolationError("Swap-tolerant aliasing not supported for ainfo of type $(typeof(a)); only address-based aliasings (contiguous/strided/triangular/diagonal/object) over a single backing buffer are supported"))
 
 _rebase_aliasing(a::ContiguousAliasing, delta::UInt) =
     ContiguousAliasing(MemorySpan(a.span.ptr + delta, a.span.len))
