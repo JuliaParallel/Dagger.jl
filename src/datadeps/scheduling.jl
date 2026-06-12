@@ -380,6 +380,140 @@ function datadeps_schedule_dag_aot!(scheduler, schedule, dag_spec, all_procs, al
     return
 end
 
+const GREEDY_DEFAULT_RUNTIME_NS = UInt64(1_000_000_000)
+const GREEDY_DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
+const GREEDY_DEFAULT_OUTPUT_SIZE = UInt64(1_048_576)
+
+struct GreedyScheduler <: DataDepsScheduler end
+
+mutable struct ScheduleState
+    task_finish_ns::Dict{Int, Float64}
+    task_proc::Dict{Int, Processor}
+    proc_ready_ns::Dict{Processor, Float64}
+end
+
+ScheduleState() = ScheduleState(Dict{Int, Float64}(), Dict{Int, Processor}(), Dict{Processor, Float64}())
+
+function Base.copy(s::ScheduleState)
+    return ScheduleState(copy(s.task_finish_ns), copy(s.task_proc), copy(s.proc_ready_ns))
+end
+
+function Base.empty!(s::ScheduleState)
+    empty!(s.task_finish_ns)
+    empty!(s.task_proc)
+    empty!(s.proc_ready_ns)
+    return s
+end
+
+Base.isempty(s::ScheduleState) = isempty(s.task_proc)
+Base.length(s::ScheduleState) = length(s.task_proc)
+
+function cost_of_schedule(state::ScheduleState)
+    isempty(state.task_finish_ns) && return 0.0
+    return maximum(values(state.task_finish_ns))
+end
+
+function greedy_assign_task!(state::ScheduleState, snap::MT.MetricsSnapshot,
+                              dag_spec::DAGSpec, all_procs::Vector{Processor}, idx::Int)
+    spec = dag_spec.id_to_spec[idx]
+    task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
+
+    compatible = filter(p -> proc_in_scope(p, task_scope), all_procs)
+    if isempty(compatible)
+        throw(Sch.SchedulingException("GreedyScheduler: no compatible processor for task $idx (scope: $task_scope)"))
+    end
+
+    sig = Sch.signature(spec.fargs[1], @view spec.fargs[2:end]).sig
+
+    best_proc = first(compatible)
+    best_finish = Inf
+    for proc in compatible
+        target_space = only(memory_spaces(proc))
+        data_ready_ns = _greedy_earliest_data_ready_ns(snap, dag_spec, spec, target_space, state)
+        proc_avail = get(state.proc_ready_ns, proc, 0.0)
+        start_ns = max(data_ready_ns, proc_avail)
+
+        worker_id = root_worker_id(proc)
+        runtime_lookup = metrics_lookup_runtime_median(snap, sig, proc, worker_id)
+        runtime_ns = runtime_lookup === nothing ? Float64(GREEDY_DEFAULT_RUNTIME_NS) : Float64(runtime_lookup)
+
+        finish = start_ns + runtime_ns
+        if finish < best_finish
+            best_finish = finish
+            best_proc = proc
+        end
+    end
+
+    state.task_proc[idx] = best_proc
+    state.task_finish_ns[idx] = best_finish
+    state.proc_ready_ns[best_proc] = best_finish
+    return best_proc
+end
+
+function greedy_schedule!(state::ScheduleState, snap::MT.MetricsSnapshot,
+                          dag_spec::DAGSpec, all_procs::Vector{Processor};
+                          task_order::Union{Nothing, AbstractVector{Int}}=nothing)
+    order = task_order === nothing ? (1:nv(dag_spec.g)) : task_order
+    for idx in order
+        greedy_assign_task!(state, snap, dag_spec, all_procs, idx)
+    end
+    return state
+end
+
+function datadeps_schedule_dag_aot!(scheduler::GreedyScheduler, schedule, dag_spec, all_procs, all_scope)
+    snap = MT.snapshot(MT.global_metrics_cache())
+    state = ScheduleState()
+    greedy_schedule!(state, snap, dag_spec, all_procs)
+    for idx in 1:nv(dag_spec.g)
+        task = dag_spec.id_to_task[idx]
+        schedule[task] = state.task_proc[idx]
+    end
+    return
+end
+
+function _greedy_earliest_data_ready_ns(snap, dag_spec::DAGSpec, spec,
+                                          target_space::MemorySpace, state::ScheduleState)
+    earliest_ns = 0.0
+    for arg in spec.fargs
+        raw_val, _ = unwrap_inout(value(arg))
+        ready_ns = _greedy_arg_ready_time_ns(raw_val, snap, dag_spec, target_space, state)
+        if ready_ns > earliest_ns
+            earliest_ns = ready_ns
+        end
+    end
+    return earliest_ns
+end
+
+function _greedy_arg_ready_time_ns(val::Chunk, snap::MT.MetricsSnapshot, ::DAGSpec,
+                                    target_space::MemorySpace, ::ScheduleState)
+    source_space = memory_space(val)
+    source_space == target_space && return 0.0
+    size_bytes = val.handle.size === nothing ? GREEDY_DEFAULT_OUTPUT_SIZE : UInt64(val.handle.size)
+    rate_lookup = metrics_lookup_move_rate(snap, source_space, target_space)
+    rate = rate_lookup === nothing ? GREEDY_DEFAULT_TRANSFER_RATE : rate_lookup
+    return Float64(size_bytes) / Float64(rate) * 1e9
+end
+
+function _greedy_arg_ready_time_ns(val::DTask, snap::MT.MetricsSnapshot, dag_spec::DAGSpec,
+                                    target_space::MemorySpace, state::ScheduleState)
+    dep_id = get(dag_spec.uid_to_id, val.uid, nothing)
+    dep_id === nothing && return 0.0
+    dep_proc = get(state.task_proc, dep_id, nothing)
+    dep_proc === nothing && return 0.0
+    dep_finish = get(state.task_finish_ns, dep_id, 0.0)
+    source_space = only(memory_spaces(dep_proc))
+    source_space == target_space && return dep_finish
+    rate_lookup = metrics_lookup_move_rate(snap, source_space, target_space)
+    rate = rate_lookup === nothing ? GREEDY_DEFAULT_TRANSFER_RATE : rate_lookup
+    transfer_ns = Float64(GREEDY_DEFAULT_OUTPUT_SIZE) / Float64(rate) * 1e9
+    return dep_finish + transfer_ns
+end
+
+function _greedy_arg_ready_time_ns(::Any, ::MT.MetricsSnapshot, ::DAGSpec,
+                                    ::MemorySpace, ::ScheduleState)
+    return 0.0
+end
+
 struct LayeredScheduler <: DataDepsScheduler end
 function datadeps_schedule_dag_aot!(scheduler::LayeredScheduler, schedule, dag_spec, all_procs, all_scope)
     layer = 1
