@@ -17,7 +17,7 @@
     sandbox_capable: "true"
     os: linux
     arch: x86_64
-    num_cpus: 16
+    num_cpus: 8
 
 steps:
   - label: Julia 1.10
