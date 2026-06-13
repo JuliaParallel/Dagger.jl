@@ -75,6 +75,21 @@ steps:
       - JuliaCI/julia-coverage#v1:
           codecov: true
 
+  - label: Julia 1 (Windows)
+    timeout_in_minutes: 120
+    <<: *test
+    agents:
+      queue: "juliaecosystem"
+      os: windows
+      arch: x86_64
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1"
+      - JuliaCI/julia-test#v1:
+          julia_args: "--threads=1"
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
+
   - label: Julia 1 (macOS)
     timeout_in_minutes: 120
     <<: *test
