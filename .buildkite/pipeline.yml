@@ -1,4 +1,5 @@
 .test: &test
+  timeout_in_minutes: 120
   if: build.message !~ /\[skip tests\]/
   agents:
     queue: "juliaecosystem"
@@ -8,6 +9,7 @@
   command: "julia --project -e 'using Pkg; Pkg.develop(;path=\"lib/TimespanLogging\")'"
 
 .gputest: &gputest
+  timeout_in_minutes: 60
   if: build.message !~ /\[skip tests\]/
 
 .bench: &bench
@@ -21,7 +23,6 @@
 
 steps:
   - label: Julia 1.10
-    timeout_in_minutes: 120
     <<: *test
     plugins:
       - JuliaCI/julia#v1:
@@ -32,7 +33,6 @@ steps:
           codecov: true
 
   - label: Julia 1.11
-    timeout_in_minutes: 120
     <<: *test
     plugins:
       - JuliaCI/julia#v1:
@@ -43,7 +43,6 @@ steps:
           codecov: true
 
   - label: Julia 1.12
-    timeout_in_minutes: 120
     <<: *test
     plugins:
       - JuliaCI/julia#v1:
@@ -54,7 +53,6 @@ steps:
           codecov: true
 
   - label: Julia 1
-    timeout_in_minutes: 120
     <<: *test
     plugins:
       - JuliaCI/julia#v1:
@@ -65,7 +63,6 @@ steps:
           codecov: true
 
   - label: Julia nightly
-    timeout_in_minutes: 120
     <<: *test
     plugins:
       - JuliaCI/julia#v1:
@@ -76,7 +73,6 @@ steps:
           codecov: true
 
   - label: Julia 1 (Windows)
-    timeout_in_minutes: 120
     <<: *test
     agents:
       queue: "juliaecosystem"
@@ -91,7 +87,6 @@ steps:
           codecov: true
 
   - label: Julia 1 (macOS)
-    timeout_in_minutes: 120
     <<: *test
     agents:
       queue: "juliaecosystem"
@@ -106,7 +101,6 @@ steps:
           codecov: true
 
   - label: Julia 1 (multithreaded)
-    timeout_in_minutes: 120
     <<: *test
     plugins:
       - JuliaCI/julia#v1:
@@ -116,7 +110,6 @@ steps:
     command: "julia --project -e 'using Pkg; Pkg.instantiate()'; julia -t $BUILDKITE_AGENT_META_DATA_NUM_CPUS test/runtests.jl -p 0"
 
   - label: Julia 1.11 (CUDA)
-    timeout_in_minutes: 60
     <<: *gputest
     plugins:
       - JuliaCI/julia#v1:
@@ -131,7 +124,6 @@ steps:
       CI_USE_CUDA: "1"
 
   - label: Julia 1.11 (ROCm)
-    timeout_in_minutes: 60
     <<: *gputest
     plugins:
       - JuliaCI/julia#v1:
@@ -146,7 +138,6 @@ steps:
       CI_USE_ROCM: "1"
 
   - label: Julia 1.11 (oneAPI)
-    timeout_in_minutes: 60
     <<: *gputest
     plugins:
       - JuliaCI/julia#v1:
@@ -161,8 +152,8 @@ steps:
       CI_USE_ONEAPI: "1"
 
   - label: Julia 1.11 (Metal)
-    timeout_in_minutes: 20
     <<: *gputest
+    timeout_in_minutes: 20
     plugins:
       - JuliaCI/julia#v1:
           version: "1.11"
@@ -177,8 +168,8 @@ steps:
       CI_USE_METAL: "1"
 
   - label: Julia 1.11 (OpenCL)
-    timeout_in_minutes: 20
     <<: *gputest
+    timeout_in_minutes: 20
     plugins:
       - JuliaCI/julia#v1:
           version: "1.11"
@@ -193,8 +184,8 @@ steps:
       CI_USE_OPENCL: "1"
 
   - label: Julia 1 - TimespanLogging
-    timeout_in_minutes: 20
     <<: *test
+    timeout_in_minutes: 20
     plugins:
       - JuliaCI/julia#v1:
           version: "1"
@@ -203,8 +194,8 @@ steps:
     command: "julia --project -e 'using Pkg; Pkg.instantiate(); Pkg.develop(;path=\"lib/TimespanLogging\"); Pkg.test(\"TimespanLogging\")'"
 
   - label: Julia 1 - DaggerWebDash
-    timeout_in_minutes: 20
     <<: *test
+    timeout_in_minutes: 20
     plugins:
       - JuliaCI/julia#v1:
           version: "1"
