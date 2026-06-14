@@ -9,3 +9,6 @@ Manifest.toml
 *.dot
 docs/build
 .vscode
+.CondaPkg
+CondaPkg.toml
+LocalPreferences.toml
