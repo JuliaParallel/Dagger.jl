@@ -1,6 +1,15 @@
 LinearAlgebra.cholcopy(A::DArray{T,2}) where T = copy(A)
 function potrf_checked!(uplo, A, info_arr)
-    _A, info = move(task_processor(), LAPACK.potrf!)(uplo, A)
+    result = move(task_processor(), LAPACK.potrf!)(uplo, A)
+    # Most LAPACK backends (OpenBLAS, CUBLAS, rocBLAS, ...) return an
+    # `(A, info)` tuple, but some (e.g. oneMKL via oneAPI) return only the
+    # factorized matrix and signal a non-positive-definite matrix by throwing
+    # instead of returning a non-zero `info`. Handle both conventions here.
+    if result isa Tuple
+        _A, info = result
+    else
+        _A, info = result, 0
+    end
     if info != 0
         fill!(info_arr, info)
         throw(PosDefException(info))
