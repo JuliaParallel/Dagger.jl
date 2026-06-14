@@ -17,7 +17,7 @@ import ..Dagger
 import ..Dagger: Context, Processor, SchedulerOptions, Options, Thunk, WeakThunk, ThunkFuture, ThunkID, DTaskFailedException, Chunk, WeakChunk, OSProc, AnyScope, DefaultScope, InvalidScope, LockedObject, Argument, Signature
 import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak_checked, wrap_weak, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, default_enabled, processor, get_processors, get_parent, execute!, rmprocs!, task_processor, constrain, cputhreadtime, maybe_take_or_alloc!
 import ..Dagger: @dagdebug, @safe_lock_spin1, @maybelog, @take_or_alloc!
-import DataStructures: PriorityQueue, enqueue!, dequeue_pair!, peek
+import DataStructures: PriorityQueue
 
 import ..Dagger: ReusableCache, ReusableLinkedList, ReusableDict
 import ..Dagger: @reusable, @reusable_dict, @reusable_vector, @reusable_tasks, @reuse_scope, @reuse_defer_cleanup
@@ -1134,12 +1134,12 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                     @dagdebug nothing :processor "Nothing to dequeue"
                     return nothing
                 end
-                _, occupancy = peek(queue)
+                _, occupancy = first(queue)
                 if !proc_has_occupancy(proc_occupancy[], occupancy)
                     @dagdebug nothing :processor "Insufficient occupancy" proc_occupancy=proc_occupancy[] task_occupancy=occupancy
                     return nothing
                 end
-                queue_result = dequeue_pair!(queue)
+                queue_result = popfirst!(queue)
                 work_to_do = length(queue) > 0
                 return queue_result
             end
@@ -1179,12 +1179,12 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                         if length(queue) == 0
                             return nothing
                         end
-                        task, occupancy = peek(queue)
+                        task, occupancy = first(queue)
                         scope = task.scope
                         if Dagger.proc_in_scope(to_proc, scope)
                            typemax(UInt32) - proc_occupancy_cached >= occupancy
                             # Compatible, steal this task
-                            return dequeue_pair!(queue)
+                            return popfirst!(queue)
                         end
                         return nothing
                     end
@@ -1371,7 +1371,7 @@ function do_tasks(to_proc, return_queue, tasks)
                 end
             end
             should_launch || continue
-            enqueue!(queue, task, occupancy)
+            push!(queue, task => occupancy)
             @maybelog ctx timespan_finish(ctx, :enqueue, (;uid, processor=to_proc, thunk_id), nothing)
             @dagdebug thunk_id :processor "Enqueued task"
         end
