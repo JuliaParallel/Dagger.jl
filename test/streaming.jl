@@ -26,7 +26,11 @@ end
 function merge_testset!(inner::Test.DefaultTestSet)
     outer = Test.get_testset()
     append!(outer.results, inner.results)
-    outer.n_passed += inner.n_passed
+    @static if VERSION >= v"1.13-"
+        @atomic outer.n_passed += inner.n_passed
+    else
+        outer.n_passed += inner.n_passed
+    end
 end
 
 function test_finishes(f, message::String; timeout=10, ignore_timeout=false, max_evals=10)
