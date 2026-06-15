@@ -6,8 +6,8 @@ import Preferences: load_preference, set_preferences!
     repo_root = joinpath(@__DIR__, "..")
     load_path = string(repo_root, ":", @__DIR__, ":@:@v#.#:@stdlib")
     base_cmd = `$(Base.julia_cmd()) --startup-file=no --project -E 'using Dagger; parentmodule(Dagger.myid)'`
-    cmd = addenv(base_cmd, "JULIA_LOAD_PATH" => load_path)
-
+    #cmd = addenv(base_cmd, "JULIA_LOAD_PATH" => load_path)
+    cmd = base_cmd
     try
         # Disabling the precompilation workload shaves off over half the time
         # this test takes.
