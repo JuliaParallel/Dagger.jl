@@ -5,7 +5,14 @@ mutable struct CancelToken
     @atomic graceful::Bool
     event::Base.Event
 end
-CancelToken() = CancelToken(false, false, Base.Event())
+# N.B. `graceful` starts `true`: an as-yet-uncancelled token is considered
+# graceful, and `cancel!(; graceful=true)` (the default, e.g. the cleanup
+# cancellation issued when a task completes normally) leaves it that way. Only
+# an explicit `cancel!(; graceful=false)` flips it to a forced cancellation.
+# If this started `false`, every cancellation (including normal task-completion
+# cleanup) would be seen as forced by `is_cancelled(; must_force=true)`,
+# interrupting streaming drain threads mid-flight and dropping buffered values.
+CancelToken() = CancelToken(false, true, Base.Event())
 function cancel!(token::CancelToken; graceful::Bool=true)
     if !graceful
         @atomic token.graceful = false
