@@ -1,3 +1,18 @@
+# Tolerance for the P*A ≈ L*U reconstruction check. NoPivot LU is numerically
+# unstable (its error scales with the element growth factor, which can spike for
+# random matrices), so it needs a much looser tolerance than pivoted LU. The
+# value is chosen with headroom over the default `≈` tolerance (~sqrt(eps)),
+# which the non-square NoPivot cases below already rely on.
+function factorization_rtol(T, pivot)
+    if T in (Float32, ComplexF32)
+        return 1e-2
+    elseif pivot == NoPivot()
+        return 1e-7
+    else
+        return 1e-12
+    end
+end
+
 @testset "$T with $pivot" for T in (Float64, ComplexF64), pivot in (NoPivot(), RowMaximum())
     A = rand(T, 128, 128)
     B = copy(A)
@@ -13,7 +28,7 @@
     U_DA = Array(lu_DA.U)
     P_DA = Array(lu_DA.P)
     if !(T in (Float32, ComplexF32) && pivot == NoPivot()) # FIXME: NoPivot is unstable for FP32
-        tol_fact = T in (Float32, ComplexF32) ? 1e-2 : 1e-12
+        tol_fact = factorization_rtol(T, pivot)
         @test P_DA * B ≈ L_DA * U_DA rtol=tol_fact
     end
     @test istriu(U_DA)
@@ -43,7 +58,7 @@
     U_DA = Array(lu_DA.U)
     P_DA = Array(lu_DA.P)
     if !(T in (Float32, ComplexF32) && pivot == NoPivot()) # FIXME: NoPivot is unstable for FP32
-        tol_fact = T in (Float32, ComplexF32) ? 1e-2 : 1e-12
+        tol_fact = factorization_rtol(T, pivot)
         @test P_DA * B ≈ L_DA * U_DA rtol=tol_fact
     end
     @test istriu(U_DA)
