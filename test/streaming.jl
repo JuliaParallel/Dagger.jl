@@ -1,11 +1,21 @@
 const ACCUMULATOR = Dict{Int,Vector{Real}}()
+const ACCUMULATOR_LOCK = ReentrantLock()
 @everywhere function accumulator(x=0)
     tid = Dagger.task_id()
     remotecall_wait(1, tid, x) do tid, x
-        acc = get!(Vector{Real}, ACCUMULATOR, tid)
-        push!(acc, x)
+        lock(ACCUMULATOR_LOCK) do
+            acc = get!(Vector{Real}, ACCUMULATOR, tid)
+            push!(acc, x)
+        end
     end
     return
+end
+function take_accumulator!()
+    lock(ACCUMULATOR_LOCK) do
+        values = copy(ACCUMULATOR)
+        empty!(ACCUMULATOR)
+        return values
+    end
 end
 @everywhere accumulator(xs...) = accumulator(sum(xs))
 @everywhere accumulator(::Nothing) = accumulator(0)
@@ -124,7 +134,7 @@ for idx in 1:5
                 A = Dagger.@spawn scope=rand(scopes) accumulator()
             end
             @test fetch(A) === nothing
-            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            values = take_accumulator!()
             A_tid = Dagger.task_id(A)
             @test length(values[A_tid]) == 10
             @test all(==(0), values[A_tid])
@@ -135,7 +145,7 @@ for idx in 1:5
                 A = Dagger.@spawn scope=rand(scopes) accumulator(42)
             end
             @test fetch(A) === nothing
-            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            values = take_accumulator!()
             A_tid = Dagger.task_id(A)
             @test length(values[A_tid]) == 10
             @test all(==(42), values[A_tid])
@@ -146,7 +156,7 @@ for idx in 1:5
                 A = Dagger.@spawn scope=rand(scopes) accumulator(42, 43)
             end
             @test fetch(A) === nothing
-            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            values = take_accumulator!()
             A_tid = Dagger.task_id(A)
             @test length(values[A_tid]) == 10
             @test all(==(42 + 43), values[A_tid])
@@ -164,7 +174,7 @@ for idx in 1:5
             end
             @test fetch(x) === nothing
             @test fetch(A) === nothing
-            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            values = take_accumulator!()
             A_tid = Dagger.task_id(A)
             @test length(values[A_tid]) == 1
             @test all(v -> 0 <= v <= 10, values[A_tid])
@@ -182,7 +192,7 @@ for idx in 1:5
             @test fetch(x) === nothing
             @test fetch(A) === nothing
             @test fetch(B) === nothing
-            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            values = take_accumulator!()
             A_tid = Dagger.task_id(A)
             @test length(values[A_tid]) == 1
             @test all(v -> 0 <= v <= 10, values[A_tid])
@@ -236,7 +246,7 @@ for idx in 1:5
             end
             @test fetch(x) === nothing
             @test fetch(A) === nothing
-            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            values = take_accumulator!()
             A_tid = Dagger.task_id(A)
             @test length(values[A_tid]) == 10
             @test all(v -> 0 <= v <= 1, values[A_tid])
@@ -250,7 +260,7 @@ for idx in 1:5
             end
             @test fetch(x) === nothing
             @test fetch(A) === nothing
-            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            values = take_accumulator!()
             A_tid = Dagger.task_id(A)
             @test length(values[A_tid]) == 10
             @test all(v -> v == 1, values[A_tid])
@@ -266,7 +276,7 @@ for idx in 1:5
             @test fetch(x) === nothing
             @test fetch(y) === nothing
             @test fetch(A) === nothing
-            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            values = take_accumulator!()
             A_tid = Dagger.task_id(A)
             @test length(values[A_tid]) == 10
             @test all(v -> 1 <= v <= 2, values[A_tid])
@@ -282,7 +292,7 @@ for idx in 1:5
             @test fetch(x) === nothing
             @test fetch(y) === nothing
             @test fetch(A) === nothing
-            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            values = take_accumulator!()
             A_tid = Dagger.task_id(A)
             @test length(values[A_tid]) == 10
             @test all(v -> 0 <= v <= 1, values[A_tid])
@@ -298,7 +308,7 @@ for idx in 1:5
             @test fetch(x) === nothing
             @test fetch(y) === nothing
             @test fetch(A) === nothing
-            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            values = take_accumulator!()
             A_tid = Dagger.task_id(A)
             @test length(values[A_tid]) == 10
             @test all(v -> 0 <= v <= 2, values[A_tid])
@@ -316,7 +326,7 @@ for idx in 1:5
             @test fetch(y) === nothing
             @test fetch(z) === nothing
             @test fetch(A) === nothing
-            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            values = take_accumulator!()
             A_tid = Dagger.task_id(A)
             @test length(values[A_tid]) == 10
             @test all(v -> 0 <= v <= 2, values[A_tid])
@@ -334,7 +344,7 @@ for idx in 1:5
             @test fetch(y) === nothing
             @test fetch(z) === nothing
             @test fetch(A) === nothing
-            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            values = take_accumulator!()
             A_tid = Dagger.task_id(A)
             @test length(values[A_tid]) == 10
             @test all(v -> 3 <= v <= 5, values[A_tid])
@@ -355,7 +365,7 @@ for idx in 1:5
             @test fetch(A) === nothing
             @test fetch(B) === nothing
 
-            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            values = take_accumulator!()
             A_tid = Dagger.task_id(A)
             @test length(values[A_tid]) == 10
             @test all(v -> 0 <= v <= 2, values[A_tid])
@@ -373,7 +383,7 @@ for idx in 1:5
                 end
                 @test fetch(x) === nothing
                 @test fetch(A) === nothing
-                values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+                values = take_accumulator!()
                 A_tid = Dagger.task_id(A)
                 @test length(values[A_tid]) == 10
                 @test all(v -> v isa T, values[A_tid])
@@ -393,7 +403,7 @@ for idx in 1:5
                 A = Dagger.@spawn scope=rand(scopes) accumulator()
             end
             @test fetch(A) === nothing
-            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            values = take_accumulator!()
             A_tid = Dagger.task_id(A)
             @test length(values[A_tid]) == 1
         end
@@ -403,7 +413,7 @@ for idx in 1:5
                 A = Dagger.@spawn scope=rand(scopes) accumulator()
             end
             @test fetch(A) === nothing
-            values = copy(ACCUMULATOR); empty!(ACCUMULATOR)
+            values = take_accumulator!()
             A_tid = Dagger.task_id(A)
             @test length(values[A_tid]) == 100
         end
