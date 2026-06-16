@@ -34,7 +34,18 @@ Dagger.move(::CPUProc, ::PythonProcessor, x::PyArray) = x
 
 function Dagger.execute!(::PythonProcessor, f, args...; kwargs...)
     @assert f isa Py "Function must be a Python object"
-    return f(args...; kwargs...)
+    # Dagger may run this task on any thread (the task is not pinned), but
+    # CPython requires that the GIL is held by the calling thread. By default
+    # the GIL is held by the thread that initialized Python (the main thread),
+    # so calling into Python from a Dagger worker thread without the GIL
+    # segfaults. Mirror PythonCall's own approach (see `Base.propertynames`):
+    # if the current thread holds the GIL, call directly; otherwise hand the
+    # call off to the GIL-holding main thread.
+    if PythonCall.C.PyGILState_Check() == 1
+        return f(args...; kwargs...)
+    else
+        return PythonCall.C.on_main_thread(() -> f(args...; kwargs...))
+    end
 end
 
 function __init__()
