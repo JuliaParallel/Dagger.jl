@@ -101,7 +101,10 @@
 
                 @test get_compute_scope(task1) == get_compute_scope(task2) == get_compute_scope(task3) == compute_scope_intersect
                 @test get_result_scope(task1)  == get_result_scope(task2)  == get_result_scope(task3)  == result_scope_intersect
-                @test get_final_result_scope(task1) == get_final_result_scope(task2) == get_final_result_scope(task3) == all_scope_intersect
+                # The result is accessible across the entire result_scope (not
+                # just the compute ∩ result intersection); execution is what's
+                # restricted to the intersection (checked below).
+                @test get_final_result_scope(task1) == get_final_result_scope(task2) == get_final_result_scope(task3) == result_scope_intersect
                 @test issubset(get_execution_scope(task1), all_scope_intersect) &&
                       issubset(get_execution_scope(task2), all_scope_intersect) &&
                       issubset(get_execution_scope(task3), all_scope_intersect)
