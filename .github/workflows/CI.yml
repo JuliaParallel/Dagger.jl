@@ -19,7 +19,7 @@ jobs:
   test:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }} (${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    timeout-minutes: 150
     if: ${{ !contains(github.event.head_commit.message, '[skip tests]') }}
     env:
       JULIA_NUM_THREADS: '1'
@@ -31,9 +31,9 @@ jobs:
           - {version: '1.11', os: ubuntu-latest, arch: x64}
           - {version: '1.12', os: ubuntu-latest, arch: x64}
           - {version: '1', os: ubuntu-latest, arch: x64}
-          - {version: 'nightly', os: ubuntu-latest, arch: x64}
           - {version: '1', os: windows-latest, arch: x64}
           - {version: '1', os: macos-15, arch: x64}
+          - {version: 'nightly', os: ubuntu-latest, arch: x64}
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
@@ -53,17 +53,30 @@ jobs:
           fail_ci_if_error: false
 
   test-multithreaded:
-    name: Julia 1 (multithreaded)
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
+    name: Julia ${{ matrix.version }} - ${{ matrix.os }} (${{ matrix.arch }}) (multithreaded)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     if: ${{ !contains(github.event.head_commit.message, '[skip tests]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {version: '1.10', os: ubuntu-latest, arch: x64}
+          - {version: '1.11', os: ubuntu-latest, arch: x64}
+          - {version: '1.12', os: ubuntu-latest, arch: x64}
+          - {version: '1', os: ubuntu-latest, arch: x64}
+          - {version: '1', os: windows-latest, arch: x64}
+          - {version: '1', os: macos-15, arch: x64}
+          - {version: 'nightly', os: ubuntu-latest, arch: x64}
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
         with:
-          version: '1'
-          arch: x64
+          version: ${{ matrix.version }}
+          arch: ${{ matrix.arch }}
       - uses: julia-actions/cache@v2
+      - name: Develop local TimespanLogging
+        run: julia --project=. -e 'using Pkg; Pkg.develop(path="lib/TimespanLogging")'
       - name: Instantiate
         run: julia --project=. -e 'using Pkg; Pkg.instantiate()'
       - name: Run tests (multithreaded, no extra workers)
