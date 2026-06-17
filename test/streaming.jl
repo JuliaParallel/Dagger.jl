@@ -43,7 +43,14 @@ function merge_testset!(inner::Test.DefaultTestSet)
     end
 end
 
-function test_finishes(f, message::String; timeout=10, ignore_timeout=false, max_evals=10)
+# `ignore_timeout=true` is used for tests that are *supposed* to run forever and
+# be stopped by the timeout, so those want a short budget. Tests that are
+# expected to finish only use the timeout as a hang detector; there a tight
+# budget is fragile, because the first cold run of a given streaming topology
+# pays for compilation, which can blow past 10s on a slow/loaded CI runner even
+# though the work itself completes in well under a second. Give finishing tests
+# plenty of headroom so cold-compile latency isn't misreported as a hang.
+function test_finishes(f, message::String; ignore_timeout=false, timeout=(ignore_timeout ? 10 : 120), max_evals=10)
     t = @eval Threads.@spawn begin
         tset = nothing
         try
