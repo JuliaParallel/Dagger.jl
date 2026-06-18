@@ -384,6 +384,23 @@ const GREEDY_DEFAULT_RUNTIME_NS = UInt64(1_000_000_000)
 const GREEDY_DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
 const GREEDY_DEFAULT_OUTPUT_SIZE = UInt64(1_048_576)
 
+"""
+    GreedyScheduler <: DataDepsScheduler
+
+A list-scheduling heuristic that assigns each task in topological order to the
+processor minimizing its estimated finish time. The cost model uses
+`metrics_lookup_runtime_median` for compute and per-input data-ready times built
+from chunk sizes and per-(source, destination) transfer rates from
+`metrics_lookup_move_rate`. Start time is taken as the maximum across inputs of
+`(dep_finish + transfer_time)` rather than the latest dep finish plus aggregated
+transfers, matching the standard HEFT semantics.
+
+Decisions are local and never revisited, so the scheduler is fast and scales to
+large DAGs but cannot recover from poor early choices. Suitable as a
+low-overhead default or as the construction step inside iterative schedulers;
+the primitives `greedy_assign_task!`, `greedy_schedule!`, `cost_of_schedule`,
+and `ScheduleState` are exposed for that reuse.
+"""
 struct GreedyScheduler <: DataDepsScheduler end
 
 mutable struct ScheduleState

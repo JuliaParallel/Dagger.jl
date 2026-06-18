@@ -590,12 +590,27 @@ end
         @test fieldcount(GreedyScheduler) == 0
     end
 
-    @testset "Empty datadeps block does not crash" begin
+    @testset "Empty DAGSpec yields empty ScheduleState (direct primitive)" begin
+        empty_dag = DAGSpec()
+        all_procs = collect(Dagger.all_processors())
+        snap = Dagger.MT.snapshot(Dagger.MT.global_metrics_cache())
+
+        state = ScheduleState()
+        greedy_schedule!(state, snap, empty_dag, all_procs)
+
+        @test isempty(state)
+        @test length(state) == 0
+        @test isempty(state.task_proc)
+        @test isempty(state.task_finish_ns)
+        @test cost_of_schedule(state) == 0.0
+
         Base.ScopedValues.with(DATADEPS_SCHEDULER => GreedyScheduler()) do
+            cache = datadeps_schedule_cache(GreedyScheduler())
+            empty!(cache)
             Dagger.spawn_datadeps() do
             end
+            @test isempty(cache)
         end
-        @test true
     end
 
     @testset "Single task schedules and completes" begin
@@ -611,16 +626,59 @@ end
         @test A ≈ A_copy .+ B_copy
     end
 
-    @testset "Respects per-task scope" begin
-        A = rand(64)
-        B = rand(64)
-        proc = Dagger.ThreadProc(1, 1)
+    @testset "Respects per-task scope (direct primitive, scope is the only constraint)" begin
+        A = rand(64); B = rand(64)
+        target_proc = Dagger.ThreadProc(1, 1)
+
+        spec_pair = nothing
         Base.ScopedValues.with(DATADEPS_SCHEDULER => GreedyScheduler()) do
+            cache = datadeps_schedule_cache(GreedyScheduler())
+            empty!(cache)
             Dagger.spawn_datadeps() do
-                Dagger.@spawn scope=Dagger.ExactScope(proc) add!(InOut(A), In(B))
+                Dagger.@spawn scope=Dagger.ExactScope(target_proc) add!(InOut(A), In(B))
             end
+            spec_pair = first(cache)
         end
-        @test true
+        dag_spec = spec_pair.first
+
+        candidate_procs = Dagger.Processor[
+            Dagger.ThreadProc(1, 2),
+            Dagger.ThreadProc(1, 3),
+            target_proc,
+            Dagger.ThreadProc(1, 4),
+            Dagger.ThreadProc(1, 5),
+        ]
+        snap = Dagger.MT.snapshot(Dagger.MT.global_metrics_cache())
+
+        for trial in 1:5
+            state = ScheduleState()
+            greedy_schedule!(state, snap, dag_spec, candidate_procs)
+            @test state.task_proc[1] === target_proc
+        end
+    end
+
+    @testset "Throws SchedulingException when no compatible processor exists" begin
+        A = rand(64); B = rand(64)
+        target_proc = Dagger.ThreadProc(1, 1)
+
+        spec_pair = nothing
+        Base.ScopedValues.with(DATADEPS_SCHEDULER => GreedyScheduler()) do
+            cache = datadeps_schedule_cache(GreedyScheduler())
+            empty!(cache)
+            Dagger.spawn_datadeps() do
+                Dagger.@spawn scope=Dagger.ExactScope(target_proc) add!(InOut(A), In(B))
+            end
+            spec_pair = first(cache)
+        end
+        dag_spec = spec_pair.first
+
+        incompatible_procs = Dagger.Processor[
+            Dagger.ThreadProc(1, 2),
+            Dagger.ThreadProc(2, 1),
+        ]
+        snap = Dagger.MT.snapshot(Dagger.MT.global_metrics_cache())
+        state = ScheduleState()
+        @test_throws Dagger.Sch.SchedulingException greedy_schedule!(state, snap, dag_spec, incompatible_procs)
     end
 
     @testset "Schedule output is complete (every task assigned)" begin
