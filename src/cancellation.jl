@@ -5,7 +5,14 @@ mutable struct CancelToken
     @atomic graceful::Bool
     event::Base.Event
 end
-CancelToken() = CancelToken(false, false, Base.Event())
+# N.B. `graceful` starts `true`: an as-yet-uncancelled token is considered
+# graceful, and `cancel!(; graceful=true)` (the default, e.g. the cleanup
+# cancellation issued when a task completes normally) leaves it that way. Only
+# an explicit `cancel!(; graceful=false)` flips it to a forced cancellation.
+# If this started `false`, every cancellation (including normal task-completion
+# cleanup) would be seen as forced by `is_cancelled(; must_force=true)`,
+# interrupting streaming drain threads mid-flight and dropping buffered values.
+CancelToken() = CancelToken(false, true, Base.Event())
 function cancel!(token::CancelToken; graceful::Bool=true)
     if !graceful
         @atomic token.graceful = false
@@ -82,12 +89,42 @@ function cancel!(tid::Union{Int,Nothing}=nothing;
     remotecall_fetch(1, tid, force, halt_sch) do tid, force, halt_sch
         state = Sch.EAGER_STATE[]
 
+        # The eager scheduler may still be starting up, in which case
+        # `EAGER_STATE` has not been published yet even though a scheduler is
+        # (about to be) running. This is common under multithreading or high
+        # load, where scheduler startup can take longer than the caller's
+        # timeout. If we returned here we would silently drop the cancellation
+        # request, leaving the to-be-cancelled task running forever (and any
+        # `fetch` on it hanging). Instead, wait for the scheduler to finish
+        # initializing (bounded by `EAGER_INIT`, the same condition that
+        # `init_eager` waits on) so the cancellation is reliably delivered.
+        if isnothing(state) && Sch.EAGER_INIT[]
+            state = @lock Sch.EAGER_STATE_LOCK begin
+                while Sch.EAGER_STATE[] === nothing && Sch.EAGER_INIT[]
+                    wait(Sch.EAGER_STATE_LOCK)
+                end
+                Sch.EAGER_STATE[]
+            end
+        end
+
         # Check that the scheduler isn't stopping or has already stopped
         if !isnothing(state) && !state.halt.set
             @lock state.lock _cancel!(state, tid, force, graceful, halt_sch)
         end
     end
 end
+# Put a signal onto the scheduler's channel, tolerating the case where the
+# scheduler has already exited and closed the channel.
+function _put_sched_signal!(chan, signal)
+    try
+        put!(chan, signal)
+    catch err
+        err isa InvalidStateException && !isopen(chan) && return
+        rethrow()
+    end
+    return
+end
+
 function _cancel!(state, tid, force, graceful, halt_sch)
     @assert islocked(state.lock)
 
@@ -142,8 +179,14 @@ function _cancel!(state, tid, force, graceful, halt_sch)
                             any_cancelled = true
                             if force
                                 @dagdebug tid :cancel "Interrupting running task ($Tf)"
-                                Threads.@spawn Base.throwto(task, InterruptException())
+                                # Guard against the task finishing before the
+                                # deferred throwto runs: throwing into an exited
+                                # task is a fatal "attempt to switch to exited
+                                # task" error.
+                                Threads.@spawn istaskdone(task) || Base.throwto(task, InterruptException())
                             else
+                                # Skip if already cancelled to avoid duplicate results in the scheduler queue
+                                tid in istate.cancelled && continue
                                 @dagdebug tid :cancel "Cancelling running task ($Tf)"
                                 # Tell the processor to just drop this task
                                 task_occupancy = task_spec.est_occupancy
@@ -156,6 +199,24 @@ function _cancel!(state, tid, force, graceful, halt_sch)
                                 cancel!(istate.cancel_tokens[tid]; graceful)
                             end
                         end
+                        # Also cancel tokens for tasks that have been dequeued but not yet
+                        # recorded in istate.tasks (race window between token assignment and
+                        # task registration). Post a pre-emptive result so the scheduler
+                        # sees the cancellation immediately (critical when halt_sch=true,
+                        # otherwise the scheduler may exit before DoTaskSpec posts its result).
+                        if !force
+                            for (tid, token) in istate.cancel_tokens
+                                _tid !== nothing && tid != _tid && continue
+                                haskey(istate.tasks, tid) && continue  # already handled above
+                                tid in istate.cancelled && continue
+                                @dagdebug tid :cancel "Cancelling pre-running task token"
+                                any_cancelled = true
+                                push!(istate.cancelled, tid)
+                                to_proc = istate.proc
+                                put!(istate.return_queue, Sch.TaskResult(myid(), to_proc, tid, InterruptException(), nothing))
+                                cancel!(token; graceful)
+                            end
+                        end
                     end
                     if any_cancelled
                         notify(istate.reschedule)
@@ -165,18 +226,46 @@ function _cancel!(state, tid, force, graceful, halt_sch)
             return
         end
     end
-    put!(state.chan, Sch.RescheduleSignal())
+    # The scheduler may already be exiting (and have closed its channel) by the
+    # time we get here, so tolerate a closed channel when signaling it.
+    _put_sched_signal!(state.chan, Sch.RescheduleSignal())
 
     if halt_sch
         unlock(state.lock)
         try
-            # Give tasks a moment to be processed
-            sleep(0.5)
+            # Wait (bounded) for the cancellation results to actually be
+            # processed by the scheduler before halting it.
+            #
+            # Cancellation of a *running* task is asynchronous: we post an
+            # `InterruptException` result to the processor's return queue and
+            # rely on the scheduler loop to pick it up, store the result, and
+            # finish the task. If we halt before that happens, `scheduler_exit`
+            # resolves the still-pending futures with a generic
+            # `SchedulingException` instead, so callers `fetch`ing a cancelled
+            # task would observe the wrong exception.
+            #
+            # We wait until the running tasks have drained (their results
+            # stored) rather than waiting on `state.futures`: the caller's
+            # `fetch` may not have registered its future yet when we get here,
+            # but once a task's result is stored, a later `fetch` picks it up
+            # immediately (see `_register_future!`). We cap the wait so a task
+            # that refuses to cancel cannot block the halt indefinitely.
+            deadline = time() + 5.0
+            while time() < deadline
+                drained = @lock state.lock begin
+                    isempty(state.running_on) && isempty(state.futures)
+                end
+                drained && break
+                sleep(0.05)
+            end
 
-            # Halt the scheduler
+            # Halt the scheduler. Mark the halt as cancellation-induced so that
+            # teardown resolves any futures we didn't manage to resolve above
+            # with an `InterruptException` rather than a `SchedulingException`.
             @dagdebug nothing :cancel "Halting the scheduler"
+            state.halt_cancelled[] = true
             notify(state.halt)
-            put!(state.chan, Sch.TaskResult(1, OSProc(), 0, Sch.SchedulerHaltedException(), nothing))
+            _put_sched_signal!(state.chan, Sch.TaskResult(1, OSProc(), 0, Sch.SchedulerHaltedException(), nothing))
 
             # Wait for the scheduler to halt
             @dagdebug nothing :cancel "Waiting for scheduler to halt"

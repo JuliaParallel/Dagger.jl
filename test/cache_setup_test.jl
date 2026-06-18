@@ -1,6 +1,6 @@
 using Distributed
 @everywhere using Pkg
-@everywhere Pkg.activate("..")
+@everywhere Pkg.activate(joinpath(@__DIR__, ".."))
 using Dagger
 @assert Dagger.enable_disk_caching!()
 total_mem = @static VERSION >= v"1.8-" ? Sys.total_physical_memory : Sys.total_memory

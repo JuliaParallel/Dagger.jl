@@ -76,13 +76,21 @@ function waitany(tasks::Vector{DTask})
         return
     end
     cond = Threads.Condition()
+    done = Ref(false)
     for task in tasks
         Sch.errormonitor_tracked("waitany listener", Threads.@spawn begin
             wait(task)
-            @lock cond notify(cond)
+            @lock cond begin
+                done[] = true
+                notify(cond)
+            end
         end)
     end
-    @lock cond wait(cond)
+    @lock cond begin
+        while !done[]
+            wait(cond)
+        end
+    end
     return
 end
 function waitall(tasks::Vector{DTask})

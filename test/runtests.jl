@@ -107,9 +107,9 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
         for _test in parsed_args["test"]
             test = only(_test)
             if isdir(joinpath(@__DIR__, test))
-                for (_, other_test) in tests
-                    if startswith(other_test, test)
-                        push!(to_test, other_test)
+                for (_, other_test_path) in tests
+                    if startswith(other_test_path, test)
+                        push!(to_test, replace(other_test_path, ".jl"=>""))
                     end
                 end
             elseif test in all_test_names
@@ -127,9 +127,9 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
     for _test in parsed_args["no-test"]
         test = only(_test)
         if isdir(joinpath(@__DIR__, test))
-            for (_, other_test) in tests
-                if startswith(other_test, test)
-                    filter!(x -> x != other_test, to_test)
+            for (_, other_test_path) in tests
+                if startswith(other_test_path, test)
+                    filter!(x -> x != replace(other_test_path, ".jl"=>""), to_test)
                 end
             end
         elseif test in all_test_names

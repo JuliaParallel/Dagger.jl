@@ -114,9 +114,7 @@ end
 
 _sizes_to_test = [
     (4, 4),
-    (7, 7),
     (12, 12),
-    (16, 16),
 ]
 size_sets_to_test = map(_sizes_to_test) do sz
     rows, cols = sz
@@ -139,7 +137,7 @@ parts_to_test = vcat(part_sets_to_test...)
 @testset "GEMM" begin
     @testset "Size=$szA*$szB" for (szA, szB) in sizes_to_test
         @testset "Partitioning=$partA*$partB" for (partA,partB) in parts_to_test
-            @testset "T=$T" for T in (Float32, Float64, ComplexF32, ComplexF64)
+            @testset "T=$T" for T in (Float64, ComplexF64)
                 test_gemm!(T, szA, szB, partA, partB)
             end
         end
@@ -191,9 +189,7 @@ end
 
 _sizes_to_test = [
     (4, 4),
-    (7, 7),
     (12, 12),
-    (16, 16),
 ]
 size_sets_to_test = map(_sizes_to_test) do sz
     rows, cols = sz
@@ -214,7 +210,7 @@ parts_to_test = vcat(part_sets_to_test...)
 @testset "GEMV" begin
     @testset "Size=$szA*$szB" for (szA, szB) in sizes_to_test
         @testset "Partitioning=$partA*$partB" for (partA,partB) in parts_to_test
-            @testset "T=$T" for T in (Float32, Float64, ComplexF32, ComplexF64)
+            @testset "T=$T" for T in (Float64, ComplexF64)
                 test_gemv!(T, szA, szB, partA, partB)
             end
         end

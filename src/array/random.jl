@@ -9,7 +9,15 @@ function Random.rand!(rng::AbstractRNG, A::DArray{T}) where T
     Dagger.spawn_datadeps() do
         for Ac in chunks(A)
             rng = randfork(rng, part_sz)
-            Dagger.@spawn imap!(InOut(_->rand(rng, T)), InOut(Ac))
+            # N.B. Bind the forked RNG in a fresh `let` scope so each spawned
+            # task captures its own RNG object. Otherwise the closure captures
+            # the loop-reassigned (and thus boxed, shared) `rng` variable, so
+            # all block tasks would run against a single RNG concurrently --
+            # racing on its non-thread-safe mutable state (which can corrupt it
+            # and throw, e.g. a `BoundsError`) and using identical seeds.
+            let rng = rng
+                Dagger.@spawn imap!(InOut(_->rand(rng, T)), InOut(Ac))
+            end
         end
     end
     return A
@@ -19,7 +27,11 @@ function Random.randn!(rng::AbstractRNG, A::DArray{T}) where T
     Dagger.spawn_datadeps() do
         for Ac in chunks(A)
             rng = randfork(rng, part_sz)
-            Dagger.@spawn imap!(InOut(_->randn(rng, T)), InOut(Ac))
+            # See `rand!` above: a per-iteration `let` gives each task its own
+            # RNG, avoiding a data race on a shared RNG under multithreading.
+            let rng = rng
+                Dagger.@spawn imap!(InOut(_->randn(rng, T)), InOut(Ac))
+            end
         end
     end
     return A

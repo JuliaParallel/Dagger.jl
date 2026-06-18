@@ -235,7 +235,11 @@ function stage(ctx::Context, c::Concat)
     inp = Any[stage(ctx, x) for x in c.inputs]
 
     dmns = map(domain, inp)
-    dims = [[i == c.axis ? 0 : i for i in size(d)] for d in dmns]
+    # Zero out the concat axis so only the *other* dimensions are compared: inputs
+    # are compatible iff they agree on every dimension except the one we cat along.
+    # (`enumerate` is required here; iterating `size(d)` directly compares dimension
+    # sizes against the axis number, which spuriously fails for unequal block sizes.)
+    dims = [[i == c.axis ? 0 : s for (i, s) in enumerate(size(d))] for d in dmns]
     if !all(map(x -> x == dims[1], dims[2:end]))
         error("Inputs to cat do not have compatible dimensions.")
     end

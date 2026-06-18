@@ -1,0 +1,145 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+    tags: '*'
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  test:
+    name: Julia ${{ matrix.version }} - ${{ matrix.os }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    if: ${{ !contains(github.event.head_commit.message, '[skip tests]') }}
+    env:
+      JULIA_NUM_THREADS: '1'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {version: '1.10', os: ubuntu-latest, arch: x64}
+          - {version: '1.11', os: ubuntu-latest, arch: x64}
+          - {version: '1.12', os: ubuntu-latest, arch: x64}
+          - {version: '1', os: ubuntu-latest, arch: x64}
+          - {version: '1', os: windows-latest, arch: x64}
+          - {version: '1', os: macos-15, arch: x64}
+          - {version: 'nightly', os: ubuntu-latest, arch: x64}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.version }}
+          arch: ${{ matrix.arch }}
+      - uses: julia-actions/cache@v2
+      - name: Develop local TimespanLogging
+        run: julia --project=. -e 'using Pkg; Pkg.develop(path="lib/TimespanLogging")'
+      - uses: julia-actions/julia-buildpkg@v1
+      - uses: julia-actions/julia-runtest@v1
+      - uses: julia-actions/julia-processcoverage@v1
+      - uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  test-multithreaded:
+    name: Julia ${{ matrix.version }} - ${{ matrix.os }} (${{ matrix.arch }}) (multithreaded)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    if: ${{ !contains(github.event.head_commit.message, '[skip tests]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {version: '1.10', os: ubuntu-latest, arch: x64}
+          - {version: '1.11', os: ubuntu-latest, arch: x64}
+          - {version: '1.12', os: ubuntu-latest, arch: x64}
+          - {version: '1', os: ubuntu-latest, arch: x64}
+          - {version: '1', os: windows-latest, arch: x64}
+          - {version: '1', os: macos-15, arch: x64}
+          - {version: 'nightly', os: ubuntu-latest, arch: x64}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.version }}
+          arch: ${{ matrix.arch }}
+      - uses: julia-actions/cache@v2
+      - name: Develop local TimespanLogging
+        run: julia --project=. -e 'using Pkg; Pkg.develop(path="lib/TimespanLogging")'
+      - name: Instantiate
+        run: julia --project=. -e 'using Pkg; Pkg.instantiate()'
+      - name: Run tests (multithreaded, no extra workers)
+        run: julia --code-coverage=user -t auto test/runtests.jl -p 0
+      - uses: julia-actions/julia-processcoverage@v1
+      - uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  opencl:
+    name: Julia 1.11 (OpenCL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: ${{ !contains(github.event.head_commit.message, '[skip tests]') }}
+    env:
+      JULIA_NUM_THREADS: '1'
+      CI_USE_OPENCL: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.11'
+          arch: x64
+      - uses: julia-actions/cache@v2
+      - name: Develop local TimespanLogging
+        run: julia --project=. -e 'using Pkg; Pkg.develop(path="lib/TimespanLogging")'
+      - uses: julia-actions/julia-buildpkg@v1
+      - uses: julia-actions/julia-runtest@v1
+      - uses: julia-actions/julia-processcoverage@v1
+      - uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  timespanlogging:
+    name: Julia 1 - TimespanLogging
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: ${{ !contains(github.event.head_commit.message, '[skip tests]') }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+          arch: x64
+      - uses: julia-actions/cache@v2
+      - name: Test TimespanLogging
+        run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.develop(;path="lib/TimespanLogging"); Pkg.test("TimespanLogging")'
+
+  daggerwebdash:
+    name: Julia 1 - DaggerWebDash
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: ${{ !contains(github.event.head_commit.message, '[skip tests]') }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+          arch: x64
+      - uses: julia-actions/cache@v2
+      - name: Test DaggerWebDash
+        run: julia -e 'using Pkg; Pkg.develop(;path=pwd()); Pkg.develop(;path="lib/TimespanLogging"); Pkg.develop(;path="lib/DaggerWebDash"); include("lib/DaggerWebDash/test/runtests.jl")'
