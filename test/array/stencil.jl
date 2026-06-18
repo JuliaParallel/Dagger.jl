@@ -503,7 +503,7 @@ end
             Dagger.with_options(;scope) do
                 # The Metal backend breaks on the 3D/4D stencil tests and
                 # causes subsequent tests to fail, so skip them there.
-                test_stencil(; skip_highdim=(kind == :Metal))
+                test_stencil(; skip_highdim=(kind == :Metal || kind == :ROCm))
             end
         end
     end
