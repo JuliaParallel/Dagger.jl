@@ -1,6 +1,6 @@
 import Dagger: @stencil, Wrap, Pad, Reflect, Clamp, LinearExtrapolate
 
-function test_stencil()
+function test_stencil(; skip_highdim::Bool=false)
     @testset "Simple assignment" begin
         A = zeros(Blocks(2, 2), Int, 4, 4)
         @stencil A[idx] = 1
@@ -386,16 +386,20 @@ function test_stencil()
     end
 
     # From issue #669
-    for N in 3:4
-        @testset "$(N)D array" begin
-            A = ones(Blocks(ntuple(_->1, N)...), Int, ntuple(_->3, N)...)
-            Dagger.allowscalar() do
-                A[:] = 1:length(A)
-            end
-            B = zeros(Blocks(ntuple(_->1, N)...), Float32, ntuple(_->3, N)...)
+    # N.B. The Metal backend currently breaks on these higher-dimensional
+    # stencils and corrupts subsequent tests, so they can be skipped there.
+    if !skip_highdim
+        for N in 3:4
+            @testset "$(N)D array" begin
+                A = ones(Blocks(ntuple(_->1, N)...), Int, ntuple(_->3, N)...)
+                Dagger.allowscalar() do
+                    A[:] = 1:length(A)
+                end
+                B = zeros(Blocks(ntuple(_->1, N)...), Float32, ntuple(_->3, N)...)
 
-            @stencil B[idx] = sum(@neighbors(A[idx], 1, Wrap())) / length(A)
-            @test all(==(Float64(sum(1:length(A)) / length(A))), collect(B))
+                @stencil B[idx] = sum(@neighbors(A[idx], 1, Wrap())) / length(A)
+                @test all(==(Float64(sum(1:length(A)) / length(A))), collect(B))
+            end
         end
     end
 
@@ -497,7 +501,9 @@ end
         kind == :oneAPI && continue
         @testset "$kind" begin
             Dagger.with_options(;scope) do
-                test_stencil()
+                # The Metal backend breaks on the 3D/4D stencil tests and
+                # causes subsequent tests to fail, so skip them there.
+                test_stencil(; skip_highdim=(kind == :Metal))
             end
         end
     end

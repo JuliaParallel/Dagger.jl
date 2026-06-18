@@ -93,13 +93,15 @@ function span_diff(span1::ManyMemorySpan{N}, span2::ManyMemorySpan{N}) where N
     span = ManyMemorySpan(ntuple(i -> span_diff(span1.spans[i], span2.spans[i]), N))
     matches = ntuple(i->span1.spans[i].ptr == span2.spans[i].ptr, Val(N))
     @assert !(any(matches) && !all(matches)) "Spans only partially match:\n  Span1: $span1\n  Span2: $span2\n  Result: $span\nWhile processing $(typeof(VERIFY_SPAN_CURRENT_OBJECT[]))"
-    @assert allequal(span_len, span.spans) "Uneven span_diff result:\n  Span1: $span1\n  Span2: $span2\n  Result: $span\nWhile processing $(typeof(VERIFY_SPAN_CURRENT_OBJECT[]))"
+    # N.B. `allequal(f, itr)` requires Julia 1.11+, so map first to stay
+    # compatible with Julia 1.10.
+    @assert allequal(Iterators.map(span_len, span.spans)) "Uneven span_diff result:\n  Span1: $span1\n  Span2: $span2\n  Result: $span\nWhile processing $(typeof(VERIFY_SPAN_CURRENT_OBJECT[]))"
     verify_span(span)
     return span
 end
 const VERIFY_SPAN_CURRENT_OBJECT = TaskLocalValue{Any}(()->nothing)
 function verify_span(span::ManyMemorySpan{N}) where N
-    @assert allequal(span_len, span.spans) "All spans must be the same: $(map(span_len, span.spans))\nWhile processing $(typeof(VERIFY_SPAN_CURRENT_OBJECT[]))"
+    @assert allequal(Iterators.map(span_len, span.spans)) "All spans must be the same: $(Iterators.map(span_len, span.spans))\nWhile processing $(typeof(VERIFY_SPAN_CURRENT_OBJECT[]))"
 end
 
 struct ManyPair{N} <: Unsigned

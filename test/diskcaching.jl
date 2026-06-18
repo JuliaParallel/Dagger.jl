@@ -11,7 +11,7 @@
                 "JULIA_MEMPOOL_EXPERIMENTAL_DISK_CACHE"=>nothing,
                 "JULIA_MEMPOOL_EXPERIMENTAL_DISK_BOUND"=>nothing,
                 "JULIA_MEMPOOL_EXPERIMENTAL_ALLOCATOR_KIND"=>nothing) do
-            push!(runs, run(`$j cache_setup_test.jl`; wait=true))
+            push!(runs, run(`$j $(joinpath(@__DIR__, "cache_setup_test.jl"))`; wait=true))
         end
     end
     wait.(runs)

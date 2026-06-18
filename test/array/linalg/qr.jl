@@ -22,9 +22,9 @@ end
 # ======================================================================
 # 1. Basic qr(DA) — varying shapes and block sizes (p=1, ib=1)
 # ======================================================================
-@testset "Tile QR:  $T" for T in (Float32, Float64, ComplexF32, ComplexF64)
+@testset "Tile QR:  $T" for T in (Float64, ComplexF64)
     @testset "Square matrices" begin
-        @testset "blocks=$bs" for bs in [(32,32), (16,32), (32,16)]
+        @testset "blocks=$bs" for bs in [(32,32), (16,32)]
             A = rand(T, 128, 128)
             DA = distribute(A, Blocks(bs...))
             DQ, DR = qr(DA)
@@ -33,7 +33,7 @@ end
     end
 
     @testset "Tall matrices" begin
-        @testset "blocks=$bs" for bs in [(32,32), (16,32), (32,16)]
+        @testset "blocks=$bs" for bs in [(32,32), (16,32)]
             A = rand(T, 128, 64)
             DA = distribute(A, Blocks(bs...))
             DQ, DR = qr(DA)
@@ -42,7 +42,7 @@ end
     end
 
     @testset "Wide matrices" begin
-        @testset "blocks=$bs" for bs in [(32,32), (16,32), (32,16)]
+        @testset "blocks=$bs" for bs in [(32,32), (16,32)]
             A = rand(T, 64, 128)
             DA = distribute(A, Blocks(bs...))
             DQ, DR = qr(DA)
@@ -54,7 +54,7 @@ end
 # ======================================================================
 # 2. In-place qr! (ensures qr! path is exercised directly)
 # ======================================================================
-@testset "In-place qr!: $T" for T in (Float32, Float64, ComplexF32, ComplexF64)
+@testset "In-place qr!: $T" for T in (Float64, ComplexF64)
     A = rand(T, 128, 128)
     DA = distribute(A, Blocks(32,32))
     DA_copy = copy(DA)

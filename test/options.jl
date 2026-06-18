@@ -74,9 +74,11 @@ end
     # Test processor/meta is applied
     sf = SpecialFunc(0)
     obj = Dagger.tochunk(42)
-    Dagger.with_options(;scope=Dagger.ExactScope(Dagger.ThreadProc(first_wid,1))) do
-        @test fetch(Dagger.@spawn sf(obj)) == 0
-        @test fetch(Dagger.@spawn sf(obj)) == 0
+    if nprocs() > 1
+        Dagger.with_options(;scope=Dagger.ExactScope(Dagger.ThreadProc(first_wid,1))) do
+            @test fetch(Dagger.@spawn sf(obj)) == 0
+            @test fetch(Dagger.@spawn sf(obj)) == 0
+        end
     end
     Dagger.with_options(;scope=Dagger.ExactScope(Dagger.ThreadProc(1,1)), meta=true) do
         @test fetch(Dagger.@spawn sf(obj)) == 43

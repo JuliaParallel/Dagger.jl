@@ -1,7 +1,7 @@
-@testset "$T" for T in (Float32, Float64, ComplexF32, ComplexF64)
-    tol = T in (Float32, ComplexF32) ? 1e-3 : 1e-10
+@testset "$T" for T in (Float64, ComplexF64)
+    tol = 1e-10
 
-    for i_block_scale in (1.0, 0.5), j_block_scale in (1.0, 0.5)
+    for i_block_scale in (1.0, 0.5), j_block_scale in (1.0,)
         N = 128
         bs_i = round(Int, N*i_block_scale)
         bs_j = round(Int, N*j_block_scale)

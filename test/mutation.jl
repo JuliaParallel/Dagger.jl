@@ -44,13 +44,14 @@ end
 @testset "Mutation" begin
 
 @testset "@mutable" begin
-    w1 = first(workers())
-    @assert w1 != 1 "Not enough workers to test mutability"
-    for (w, wo) in [(1, w1), (w1, 1)]
-        x = Dagger.@mutable worker=w Ref{Int}()
-        @test fetch(Dagger.@spawn mutable_update!(x)) == w
-        wo_scope = Dagger.ProcessScope(wo)
-        @test_throws_unwrap (Dagger.DTaskFailedException, SchedulingException) fetch(Dagger.@spawn scope=wo_scope mutable_update!(x))
+    if nprocs() > 1
+        w1 = first(workers())
+        for (w, wo) in [(1, w1), (w1, 1)]
+            x = Dagger.@mutable worker=w Ref{Int}()
+            @test fetch(Dagger.@spawn mutable_update!(x)) == w
+            wo_scope = Dagger.ProcessScope(wo)
+            @test_throws_unwrap (Dagger.DTaskFailedException, SchedulingException) fetch(Dagger.@spawn scope=wo_scope mutable_update!(x))
+        end
     end
 end # @testset "@mutable"
 

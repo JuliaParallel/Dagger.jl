@@ -91,13 +91,25 @@ function dynamic_listener!(ctx, state, wid)
         return
     end
     errormonitor_tracked("dynamic_listener! $wid", listener_task)
-    errormonitor_tracked("dynamic_listener! (halt+throw) $wid", Threads.@spawn begin
+    errormonitor_tracked("dynamic_listener! (halt) $wid", Threads.@spawn begin
         wait(state.halt)
-        # TODO: Not sure why we need the Threads.@spawn here, but otherwise we
-        # don't stop all the listener tasks
-        Threads.@spawn begin
-            Base.throwto(listener_task, SchedulerHaltedException())
-            return
+        # Stop the listener by closing its channels, which unblocks its
+        # `take!(inp_chan)` and lets it exit cleanly (the listener tolerates
+        # `InvalidStateException`/`SchedulerHaltedException` from a closed
+        # channel). We intentionally avoid `Base.throwto` here: throwing into a
+        # task that is merely runnable (rather than blocked) forces an
+        # out-of-band context switch that corrupts Julia's task run-queue,
+        # leading to a later fatal "attempt to switch to exited task" crash
+        # during scheduler teardown. Closing the channels is idempotent and
+        # safe even if `safepoint` already closed them.
+        for chan in (inp_chan, out_chan)
+            try
+                close(chan)
+            catch err
+                unwrap_nested_exception(err) isa Union{InvalidStateException,
+                                                        ProcessExitedException} ||
+                    rethrow()
+            end
         end
         return
     end)

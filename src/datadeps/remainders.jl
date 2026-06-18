@@ -449,7 +449,12 @@ function move!(dep_mod::RemainderAliasing{S}, to_space::MemorySpace, from_space:
     end
 
     # Ensure that the data is visible
-    Core.Intrinsics.atomic_fence(:release)
+    # N.B. Use the public API instead of calling the intrinsic directly, since
+    # the `atomic_fence` intrinsic's arity changed (it now also takes a sync
+    # scope argument) on newer Julia versions. `Threads.atomic_fence()` is a
+    # sequentially-consistent fence (stronger than `:release`) and is available
+    # across all supported Julia versions.
+    Base.Threads.atomic_fence()
 
     return
 end

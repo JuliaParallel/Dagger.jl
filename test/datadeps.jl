@@ -149,9 +149,12 @@ function test_move_rewrap_aliasing(obj, dest_space)
     @test isempty(tree)
 end
 @testset "Aliased Object Copying" begin
-    spaces = [Dagger.CPURAMMemorySpace(w) for w in 1:3]
+    nw = nprocs()
+    spaces = [Dagger.CPURAMMemorySpace(w) for w in 1:nw]
+    test_pairs = filter(((ws, wd),) -> ws <= nw && wd <= nw,
+                        [(1, 2), (2, 1), (2, 3)])
 
-    for (w_src, w_dst) in [(1, 2), (2, 1), (2, 3)]
+    for (w_src, w_dst) in test_pairs
         @testset "Worker $w_src -> $w_dst" begin
             # Array
             @testset "Array" begin
