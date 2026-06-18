@@ -6,10 +6,6 @@ const TASK_WORKER = ScopedValue{Union{Int, Nothing}}(nothing)
 const TASK_TRANSFER_SIZE = ScopedValue{Union{UInt64, Nothing}}(nothing)
 const TASK_TRANSFER_TIME = ScopedValue{Union{UInt64, Nothing}}(nothing)
 
-const TASK_MOVE_FROM_SPACE = ScopedValue{Union{MemorySpace, Nothing}}(nothing)
-const TASK_MOVE_TO_SPACE = ScopedValue{Union{MemorySpace, Nothing}}(nothing)
-const TASK_MOVE_SIZE = ScopedValue{Union{UInt64, Nothing}}(nothing)
-
 struct SignatureMetric <: MT.AbstractMetric end
 MT.metric_applies(::SignatureMetric, ::Val{:execute!}) = true
 MT.metric_type(::Type{SignatureMetric}) = Union{Vector{Any}, Nothing}
@@ -56,20 +52,14 @@ end
 struct FromSpaceMetric <: MT.AbstractMetric end
 MT.metric_applies(::FromSpaceMetric, ::Val{:execute!}) = true
 MT.metric_type(::Type{FromSpaceMetric}) = Union{MemorySpace, Nothing}
-MT.start_metric(::FromSpaceMetric) = nothing
-MT.stop_metric(::FromSpaceMetric, _) = TASK_MOVE_FROM_SPACE[]
 
 struct ToSpaceMetric <: MT.AbstractMetric end
 MT.metric_applies(::ToSpaceMetric, ::Val{:execute!}) = true
 MT.metric_type(::Type{ToSpaceMetric}) = Union{MemorySpace, Nothing}
-MT.start_metric(::ToSpaceMetric) = nothing
-MT.stop_metric(::ToSpaceMetric, _) = TASK_MOVE_TO_SPACE[]
 
 struct MoveSizeMetric <: MT.AbstractMetric end
 MT.metric_applies(::MoveSizeMetric, ::Val{:execute!}) = true
 MT.metric_type(::Type{MoveSizeMetric}) = Union{UInt64, Nothing}
-MT.start_metric(::MoveSizeMetric) = nothing
-MT.stop_metric(::MoveSizeMetric, _) = TASK_MOVE_SIZE[]
 
 const EXECUTE_METRICS_SPEC = MT.MetricsSpec(
     MT.TimeMetric(),
@@ -81,20 +71,38 @@ const EXECUTE_METRICS_SPEC = MT.MetricsSpec(
     TransferSizeMetric(),
     TransferTimeMetric(),
     TransferRateMetric(),
-    FromSpaceMetric(),
-    ToSpaceMetric(),
-    MoveSizeMetric(),
 )
 
 execute_metrics_spec() = EXECUTE_METRICS_SPEC
 
+function _record_move_metrics!(cache::MT.MetricsCache, thunk_id::Int,
+                                source_space::MemorySpace, dest_space::MemorySpace,
+                                size::Union{UInt64, Nothing})
+    MT.bulk_update!(cache) do c
+        ctx = MT.pending_context!(c, Dagger, :execute!, Int)
+        from_storage = MT.get_or_create_storage!(ctx, FromSpaceMetric())
+        to_storage = MT.get_or_create_storage!(ctx, ToSpaceMetric())
+        MT.set_metric_value!(from_storage, thunk_id, source_space)
+        MT.set_metric_value!(to_storage, thunk_id, dest_space)
+        if size !== nothing
+            size_storage = MT.get_or_create_storage!(ctx, MoveSizeMetric())
+            MT.set_metric_value!(size_storage, thunk_id, size)
+        end
+    end
+    return
+end
+
 function instrumented_move!(dep_mod, dest_space::MemorySpace, source_space::MemorySpace,
                             dest::Chunk, source::Chunk)
-    raw_size = source.handle.size
-    size = raw_size === nothing ? nothing : UInt64(raw_size)
-    @with TASK_MOVE_FROM_SPACE => source_space TASK_MOVE_TO_SPACE => dest_space TASK_MOVE_SIZE => size begin
-        return move!(dep_mod, dest_space, source_space, dest, source)
+    result = move!(dep_mod, dest_space, source_space, dest, source)
+    tls = DTASK_TLS[]
+    if tls !== nothing && tls.metrics_cache !== nothing
+        thunk_id = tls.sch_handle.thunk_id.id
+        raw_size = source.handle.size
+        size = raw_size === nothing ? nothing : UInt64(raw_size)
+        _record_move_metrics!(tls.metrics_cache, thunk_id, source_space, dest_space, size)
     end
+    return result
 end
 
 function _reduce_uint64(reducer::Function, vals::Vector{UInt64})

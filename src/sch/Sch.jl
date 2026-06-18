@@ -1940,6 +1940,7 @@ Executes a single task specified by `task` on `to_proc`.
             task_spec=task,
             cancel_token=Dagger.DTASK_CANCEL_TOKEN[],
             logging_enabled,
+            metrics_cache=local_metrics_cache,
         ))
 
         result = Dagger.with_options(propagated) do

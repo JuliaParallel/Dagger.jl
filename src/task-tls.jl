@@ -7,6 +7,7 @@ mutable struct DTaskTLS
     task_spec::Any # FIXME: TaskSpec
     cancel_token::CancelToken
     logging_enabled::Bool
+    metrics_cache::Union{MT.MetricsCache, Nothing}
 end
 
 const DTASK_TLS = TaskLocalValue{Union{DTaskTLS,Nothing}}(()->nothing)
@@ -17,7 +18,8 @@ Base.copy(tls::DTaskTLS) =
              tls.sch_handle,
              tls.task_spec,
              tls.cancel_token,
-             tls.logging_enabled)
+             tls.logging_enabled,
+             tls.metrics_cache)
 
 """
     get_tls() -> DTaskTLS
@@ -32,12 +34,14 @@ get_tls() = DTASK_TLS[]::DTaskTLS
 Sets all Dagger TLS variables from `tls`, which may be a `DTaskTLS` or a `NamedTuple`.
 """
 function set_tls!(tls)
+    metrics_cache = hasproperty(tls, :metrics_cache) ? tls.metrics_cache : nothing
     DTASK_TLS[] = DTaskTLS(tls.processor,
                            tls.sch_uid,
                            tls.sch_handle,
                            tls.task_spec,
                            tls.cancel_token,
-                           tls.logging_enabled)
+                           tls.logging_enabled,
+                           metrics_cache)
 end
 
 """

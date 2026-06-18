@@ -525,42 +525,41 @@ end
             @test MetricsTracker.metric_applies(Dagger.MoveSizeMetric(), Val{:execute!}())
         end
 
-        @testset "Move Metric Scoped Value Capture" begin
+        @testset "_record_move_metrics! writes From/To/Size to cache" begin
             cache = MetricsTracker.MetricsCache()
-            spec = MetricsTracker.MetricsSpec(Dagger.FromSpaceMetric(),
-                                              Dagger.ToSpaceMetric(),
-                                              Dagger.MoveSizeMetric(),
-                                              MetricsTracker.TimeMetric())
             src_space = Dagger.memory_space(1)
             dst_space = Dagger.memory_space(1)
-
-            ScopedValues.@with Dagger.TASK_MOVE_FROM_SPACE => src_space Dagger.TASK_MOVE_TO_SPACE => dst_space Dagger.TASK_MOVE_SIZE => UInt64(4096) begin
-                MetricsTracker.with_metrics(spec, Dagger, :execute!, 1234, MetricsTracker.SyncInto(cache)) do
-                    sleep(0.001)
-                    return nothing
-                end
-            end
-
+            test_key = 1234
+            Dagger._record_move_metrics!(cache, test_key, src_space, dst_space, UInt64(4096))
             snap = MetricsTracker.snapshot(cache)
-            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.FromSpaceMetric(), 1234) === src_space
-            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.ToSpaceMetric(), 1234) === dst_space
-            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.MoveSizeMetric(), 1234) == UInt64(4096)
-            time_val = MetricsTracker.lookup_value(snap, Dagger, :execute!, MetricsTracker.TimeMetric(), 1234)
-            @test time_val isa UInt64 && time_val > 0
+            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.FromSpaceMetric(), test_key) === src_space
+            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.ToSpaceMetric(), test_key) === dst_space
+            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.MoveSizeMetric(), test_key) == UInt64(4096)
         end
 
-        @testset "Move Metric Skipped Without Scoped Values" begin
+        @testset "_record_move_metrics! skips MoveSizeMetric when size is nothing" begin
             cache = MetricsTracker.MetricsCache()
-            spec = MetricsTracker.MetricsSpec(Dagger.FromSpaceMetric(),
-                                              Dagger.ToSpaceMetric(),
-                                              Dagger.MoveSizeMetric())
-            MetricsTracker.with_metrics(spec, Dagger, :execute!, 4321, MetricsTracker.SyncInto(cache)) do
-                return nothing
-            end
+            src_space = Dagger.memory_space(1)
+            dst_space = Dagger.memory_space(1)
+            test_key = 1235
+            Dagger._record_move_metrics!(cache, test_key, src_space, dst_space, nothing)
             snap = MetricsTracker.snapshot(cache)
-            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.FromSpaceMetric(), 4321) === nothing
-            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.ToSpaceMetric(), 4321) === nothing
-            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.MoveSizeMetric(), 4321) === nothing
+            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.FromSpaceMetric(), test_key) === src_space
+            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.ToSpaceMetric(), test_key) === dst_space
+            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.MoveSizeMetric(), test_key) === nothing
+        end
+
+        @testset "EXECUTE_METRICS_SPEC excludes move metrics" begin
+            spec_metrics = Dagger.execute_metrics_spec().metrics
+            @test !any(m -> m isa Dagger.FromSpaceMetric, spec_metrics)
+            @test !any(m -> m isa Dagger.ToSpaceMetric, spec_metrics)
+            @test !any(m -> m isa Dagger.MoveSizeMetric, spec_metrics)
+            @test any(m -> m isa Dagger.SignatureMetric, spec_metrics)
+            @test any(m -> m isa MetricsTracker.TimeMetric, spec_metrics)
+        end
+
+        @testset "DTaskTLS carries metrics_cache field" begin
+            @test :metrics_cache in fieldnames(Dagger.DTaskTLS)
         end
 
         @testset "Move Lookups" begin
@@ -739,6 +738,37 @@ end
                     end
                 end
             end
+        end
+
+        @testset "instrumented_move! records via TLS in real Dagger task" begin
+            cache = MetricsTracker.global_metrics_cache()
+            pre_snap = MetricsTracker.snapshot(cache)
+            pre_count = if haskey(pre_snap.contexts, (Dagger, :execute!))
+                length(MetricsTracker.values_for_metric(pre_snap, Dagger, :execute!, Dagger.FromSpaceMetric()))
+            else
+                0
+            end
+
+            src_data = rand(64)
+            dst_data = zeros(64)
+            src_chunk = Dagger.tochunk(src_data)
+            dst_chunk = Dagger.tochunk(dst_data)
+            src_space = Dagger.memory_space(src_chunk)
+            dst_space = Dagger.memory_space(dst_chunk)
+
+            move_task = Dagger.@spawn meta=true Dagger.instrumented_move!(identity, dst_space, src_space, dst_chunk, src_chunk)
+            fetch(move_task)
+            sleep(0.1)
+
+            post_snap = MetricsTracker.snapshot(cache)
+            from_values = MetricsTracker.values_for_metric(post_snap, Dagger, :execute!, Dagger.FromSpaceMetric())
+            to_values = MetricsTracker.values_for_metric(post_snap, Dagger, :execute!, Dagger.ToSpaceMetric())
+            size_values = MetricsTracker.values_for_metric(post_snap, Dagger, :execute!, Dagger.MoveSizeMetric())
+
+            @test length(from_values) > pre_count
+            @test any(v -> v === src_space, values(from_values))
+            @test any(v -> v === dst_space, values(to_values))
+            @test any(v -> v isa UInt64 && v > 0, values(size_values))
         end
     end
 end
