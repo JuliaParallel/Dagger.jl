@@ -39,6 +39,28 @@ function sparse_suite(ctx; method, accels)
     # the nonzero count stays ~O(N).
     nnz_per_row = 16
 
+    # Capability probes (run once, at a tiny size). Distributed sparse linear
+    # algebra is a relatively new Dagger feature: a baseline revision in an
+    # AirspeedVelocity comparison may lack it entirely, in which case running the
+    # kernel would abort the whole benchmark run. We instead probe each operation
+    # and only include the ones the running Dagger can actually execute; an
+    # operation present on one revision but not the other simply won't be
+    # compared. This self-heals once the baseline gains the feature.
+    spmv_ok = supported("sparse/spmv (S*x)") do
+        S = distribute(sprand(T, 8, 8, 0.5), Blocks(4, 4))
+        x = distribute(rand(T, 8), Blocks(4))
+        wait(S * x)
+    end
+    spgemm_ok = supported("sparse/spgemm (S*S)") do
+        S = distribute(sprand(T, 8, 8, 0.5), Blocks(4, 4))
+        wait(S * S)
+    end
+    cg_ok = KRYLOV_AVAILABLE && isdefined(Dagger, :cg) && supported("sparse/cg solve") do
+        A = distribute(laplacian_1d(T, 8), Blocks(4, 4))
+        rhs = distribute(rand(T, 8), Blocks(4))
+        wait(first(Dagger.cg(A, rhs; atol=1e-8, rtol=1e-6, itmax=50)))
+    end
+
     suite = BenchmarkGroup()
 
     for N in scales
@@ -47,7 +69,7 @@ function sparse_suite(ctx; method, accels)
         sub = BenchmarkGroup()
 
         # SpMV: sparse matrix tiles, dense vectors.
-        if fits_budget(sparse_bytes(N; nmats=2, density=density, T=T))
+        if spmv_ok && fits_budget(sparse_bytes(N; nmats=2, density=density, T=T))
             sub["spmv (S*x)"] = @benchmarkable(wait(S * x),
                 setup = (S = distribute(sprand($T, $N, $N, $density), Blocks($b, $b));
                          x = distribute(rand($T, $N), Blocks($b)); wait(S)),
@@ -55,14 +77,14 @@ function sparse_suite(ctx; method, accels)
         end
 
         # SpGEMM: the result fills in, so budget generously.
-        if fits_budget(sparse_bytes(N; nmats=6, density=density, T=T))
+        if spgemm_ok && fits_budget(sparse_bytes(N; nmats=6, density=density, T=T))
             sub["spgemm (S*S)"] = @benchmarkable(wait(S * S),
                 setup = (S = distribute(sprand($T, $N, $N, $density), Blocks($b, $b)); wait(S)),
                 teardown = (S = nothing; @everywhere GC.gc()))
         end
 
         # Iterative solve of an SPD system via conjugate gradients.
-        if KRYLOV_AVAILABLE && fits_budget(sparse_bytes(N; nmats=2, density=3 / N, T=T))
+        if cg_ok && fits_budget(sparse_bytes(N; nmats=2, density=3 / N, T=T))
             sub["cg solve (laplacian)"] = @benchmarkable(wait(first(Dagger.cg(A, rhs; atol=1e-8, rtol=1e-6, itmax=200))),
                 setup = (A = distribute(laplacian_1d($T, $N), Blocks($b, $b));
                          rhs = distribute(rand($T, $N), Blocks($b)); wait(A)),

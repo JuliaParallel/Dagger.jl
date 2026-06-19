@@ -10,6 +10,22 @@
 # revisions, all configuration is done through environment variables (which stay
 # constant across the compared revisions).
 #
+# Out-of-process execution & OOM robustness
+# -----------------------------------------
+# This file acts as an *orchestrator*: it never loads Dagger or runs any
+# computation itself. Instead it spawns a child `julia` worker process (see
+# `worker.jl`) -- a plain OS subprocess, NOT a Distributed worker, so Dagger
+# does not co-opt the orchestrator as a compute process -- and drives it one
+# benchmark at a time. All benchmarks run in a single worker (to amortize
+# compilation) until one is killed by the OS OOM-killer or raises
+# `OutOfMemoryError`. When that happens the orchestrator: records the failure,
+# *skips that scale and all larger scales of the same suite/method*, starts a
+# fresh worker, and resumes with the remaining benchmarks. Each benchmark's
+# `BenchmarkTools.Trial` (timings, GC time, memory, allocations) is serialized
+# back and injected into `SUITE`, so AirspeedVelocity sees normal results even
+# though they were measured out-of-process. Benchmarks that never ran (skipped)
+# are simply absent from the results.
+#
 # Compare a tagged release against the current working tree, pointing
 # AirspeedVelocity at this working-tree script (used for both revisions). The
 # sparse suite's Krylov solvers need `Krylov`, so add it with `-a`:
@@ -59,14 +75,19 @@
 # - BENCHMARK_SPARSE_BLOCKS: Number of blocks per dimension for sparse/banded
 #   operators (keeps tile counts bounded at large N). Defaults to "16".
 # - BENCHMARK_PROCS: Worker/thread topology, as "numprocs:numthreads". This
-#   starts `numprocs` Distributed workers, each with `numthreads` threads.
-#   Defaults to no extra workers (everything runs on the driver process). Note
-#   that the driver process's own thread count is controlled by Julia's `-t`
-#   flag (pass it via `benchpkg -e "-t N"`).
+#   starts `numprocs` Distributed workers *inside the benchmark worker process*,
+#   each with `numthreads` threads. Defaults to no extra workers (everything
+#   runs on the worker process, which uses the orchestrator's thread count).
 # - BENCHMARK_REMOTES: Remote hosts on which to start workers, in the format
 #   accepted by `Distributed.addprocs` (colon-separated). Optional.
 # - BENCHMARK_SECONDS: Time budget (seconds) per benchmark. Defaults to "30".
 # - BENCHMARK_SAMPLES: Max samples per benchmark. Defaults to "5".
+# - BENCHMARK_PROC_TIMEOUT: Wall-clock seconds to wait for a single benchmark
+#   before assuming the worker is wedged, killing it, and treating it like an
+#   OOM (skip this and larger scales, restart). Defaults to "3600".
+# - BENCHMARK_WORKDIR: Directory for the orchestrator<->worker control files and
+#   per-benchmark raw result JSONs. Defaults to a fresh temp dir; set it to keep
+#   the intermediates around for debugging.
 # - BENCHMARK_DTABLE_ROWS: Row count for the legacy "dtable" suite only.
 #   Defaults to "1000000".
 #
@@ -81,173 +102,163 @@
 #             --script benchmark/benchmarks.jl -a DaggerGPU,CUDA
 
 using BenchmarkTools
-using Distributed
-using Dates, Random, Statistics, LinearAlgebra, InteractiveUtils
+import JSON3
 
-# --- Parse the benchmark specification -------------------------------------
+# --- AirspeedVelocity integration ------------------------------------------
+# AirspeedVelocity calls `run(SUITE)` and serializes whatever it returns. We run
+# everything out-of-process at include time and wrap each measured `Trial` in a
+# `PrecomputedTrial` leaf whose `run` just returns it, so AirspeedVelocity's
+# `run(SUITE)`/`tune!(SUITE)` become no-ops that hand back the precomputed data.
 
-const benches = Dict{String,Vector}()
-const suites = Set{String}()
-const accelerations = Set{String}()
-for bench_spec in split(get(ENV, "BENCHMARK", "array:dagger;linalg:dagger;sparse:dagger"), ';')
-    suite, bench_spec_methods = split(bench_spec, ':')
-    if !isfile(joinpath(@__DIR__, "suites", suite * ".jl"))
-        error("Unknown benchmark suite: $suite")
+struct PrecomputedTrial
+    trial::BenchmarkTools.Trial
+end
+Base.run(b::PrecomputedTrial, args...; kwargs...) = b.trial
+BenchmarkTools.tune!(b::PrecomputedTrial, args...; kwargs...) = b
+
+# --- Orchestration ---------------------------------------------------------
+
+const WORKDIR = let d = get(ENV, "BENCHMARK_WORKDIR", "")
+    isempty(d) ? mktempdir() : (mkpath(d); abspath(d))
+end
+const WORKER_SCRIPT = get(ENV, "BENCHMARK_WORKER_SCRIPT", joinpath(@__DIR__, "worker.jl"))
+const JULIA_BIN = first(Base.julia_cmd().exec)
+const NTHREADS = Threads.nthreads()
+const PROC_TIMEOUT = parse(Float64, get(ENV, "BENCHMARK_PROC_TIMEOUT", "3600"))
+const POLL = 0.05
+
+worker_cmd() =
+    `$JULIA_BIN --project=$(Base.active_project()) --startup-file=no -t$NTHREADS $WORKER_SCRIPT $WORKDIR`
+
+function _atomic_write(path, data)
+    tmp = path * ".tmp"
+    open(io -> write(io, data), tmp, "w")
+    mv(tmp, path; force=true)
+    return nothing
+end
+
+# Spawn a fresh worker, clearing the stale control files first. Inherits the
+# orchestrator's stdout/stderr (so worker logs are visible) and environment.
+function spawn_worker()
+    rm(joinpath(WORKDIR, "ready"); force=true)
+    rm(joinpath(WORKDIR, "request.json"); force=true)
+    rm(joinpath(WORKDIR, "request.json.tmp"); force=true)
+    return run(worker_cmd(); wait=false)
+end
+
+function wait_ready(proc; timeout=600)
+    readypath = joinpath(WORKDIR, "ready")
+    t0 = time()
+    while !isfile(readypath)
+        process_running(proc) || return false
+        time() - t0 > timeout && return false
+        sleep(POLL)
     end
-    push!(suites, suite)
-    for method_spec in split(bench_spec_methods, ',')
-        method, accels... = split(method_spec, '+')
-        for accel in accels
-            push!(accelerations, accel)
+    return true
+end
+
+send_request(id, action, keypath) =
+    _atomic_write(joinpath(WORKDIR, "request.json"),
+                  JSON3.write((; id=id, action=action, keypath=keypath)))
+
+# Wait for a response to request `id`, or for the worker to die / time out.
+# Returns the status string ("ok"/"error"/"missing"/"oom"/"died"/"timeout").
+function await_response(proc, id)
+    resppath = joinpath(WORKDIR, "response_$(id).json")
+    t0 = time()
+    while true
+        if isfile(resppath)
+            resp = try
+                JSON3.read(read(resppath, String))
+            catch
+                nothing  # caught mid-write; retry
+            end
+            resp === nothing || return String(resp.status)
         end
-        accels = String.(accels)
-        _benches = get!(benches, suite, [])
-        push!(_benches, (; method, accels))
+        process_running(proc) || return "died"
+        time() - t0 > PROC_TIMEOUT && return "timeout"
+        sleep(POLL)
     end
 end
 
-# --- Set up the Distributed topology ---------------------------------------
+function run_all_external()
+    results = Dict{Vector{String},BenchmarkTools.Trial}()
 
-if haskey(ENV, "BENCHMARK_PROCS")
-    const np, nt = parse.(Ref(Int), split(ENV["BENCHMARK_PROCS"], ":"))
-else
-    const np = 0
-    const nt = 1
-end
-
-# Workers must share the active (AirspeedVelocity-provided) project so that
-# Dagger and the suite dependencies are available on them.
-const worker_exeflags = `--project=$(Base.active_project()) -t $nt`
-if np > 0
-    addprocs(np; exeflags=worker_exeflags)
-end
-if haskey(ENV, "BENCHMARK_REMOTES")
-    const remotes = split(ENV["BENCHMARK_REMOTES"], ":")
-    if !isempty(remotes)
-        addprocs(remotes; exeflags=worker_exeflags)
+    proc = spawn_worker()
+    if !wait_ready(proc)
+        @error "Benchmark worker failed to start; producing empty SUITE."
+        return results
     end
-end
 
-@everywhere using Dagger
+    plan = JSON3.read(read(joinpath(WORKDIR, "plan.json"), String))
+    # Process in ascending-N order within each (suite, method) so that, after an
+    # OOM at some N, every remaining same-group item is at N >= the failing N and
+    # can be skipped.
+    items = [(; keypath=String[string(k) for k in p.keypath],
+               suite=String(p.suite), method=String(p.method), N=Int(p.N))
+             for p in plan]
+    sort!(items; by=it -> (it.suite, it.method, it.N))
 
-# --- Load acceleration backends (only if requested) ------------------------
+    # (suite, method) => smallest N known to OOM; that N and anything larger is skipped.
+    skip_at = Dict{Tuple{String,String},Int}()
+    req_id = 0
 
-for accel in accelerations
-    if accel == "cuda"
-        try
-            @everywhere using DaggerGPU, CUDA
-        catch err
-            error("Failed to load CUDA acceleration; ensure DaggerGPU and CUDA " *
-                  "are available (e.g. `benchpkg ... -a DaggerGPU,CUDA`)\n$err")
+    for it in items
+        thr = get(skip_at, (it.suite, it.method), typemax(Int))
+        if it.N >= 0 && it.N >= thr
+            @info "Skipping (>= OOM scale): $(join(it.keypath, " / "))"
+            continue
         end
-    elseif accel == "amdgpu"
-        try
-            @everywhere using DaggerGPU, AMDGPU
-        catch err
-            error("Failed to load AMDGPU acceleration; ensure DaggerGPU and " *
-                  "AMDGPU are available (e.g. `benchpkg ... -a DaggerGPU,AMDGPU`)\n$err")
+
+        req_id += 1
+        send_request(req_id, "run", it.keypath)
+        status = await_response(proc, req_id)
+
+        if status == "ok"
+            results[it.keypath] =
+                BenchmarkTools.load(joinpath(WORKDIR, "result_$(req_id).json"))[1]
+        elseif status == "missing"
+            @warn "Worker has no such benchmark (capability probe differs?): $(join(it.keypath, " / "))"
+        elseif status == "error"
+            @warn "Benchmark errored (skipped): $(join(it.keypath, " / "))"
+        else  # "oom" / "died" / "timeout"
+            @warn "Benchmark $(status); skipping this and larger scales of $(it.suite)/$(it.method)" benchmark = join(it.keypath, " / ")
+            if it.N >= 0
+                skip_at[(it.suite, it.method)] = min(get(skip_at, (it.suite, it.method), typemax(Int)), it.N)
+            end
+            if process_running(proc)
+                kill(proc)
+                try; wait(proc); catch; end
+            end
+            proc = spawn_worker()
+            if !wait_ready(proc)
+                @error "Worker failed to restart; returning partial results."
+                return results
+            end
         end
-    else
-        error("Unknown acceleration: $accel")
     end
-end
 
-# --- Shared configuration consumed by the suite files ----------------------
-
-# Problem sizes (matrix dimension N). Default: a log-spaced ladder from 100 to
-# 100_000. Suites individually skip sizes that don't fit the memory budget, so
-# the effective set adapts to the machine (see `fits_budget`).
-const scales = let s = get(ENV, "BENCHMARK_SCALE", "")
-    if isempty(s)
-        [100, 316, 1_000, 3_162, 10_000, 31_623, 100_000]
-    else
-        parsed = eval(Meta.parse(s))
-        parsed isa Integer ? [parsed] : collect(parsed)
+    req_id += 1
+    send_request(req_id, "exit", String[])
+    if process_running(proc)
+        try; wait(proc); catch; end
     end
+    return results
 end
 
-# Conservative memory budget: a single benchmark's estimated peak allocation may
-# use at most this many bytes. We size it from *total* system RAM rather than
-# `Sys.free_memory()`, which on macOS (and with filesystem cache on Linux)
-# reports only truly-free pages and would spuriously skip almost everything.
-const MEM_FRACTION = parse(Float64, get(ENV, "BENCHMARK_MEM_FRACTION", "0.2"))
-const MEM_BUDGET = floor(Int, MEM_FRACTION * Sys.total_memory())
-
-"""Estimated bytes for `nmats` dense N×N matrices of element type `T`."""
-dense_bytes(N; nmats=1, T=Float64) = nmats * Int(N)^2 * sizeof(T)
-
-"""Estimated bytes for `nmats` sparse N×N matrices with the given `density`
-(plus the dense N-vectors a typical kernel keeps live)."""
-sparse_bytes(N; nmats=1, density=0.0, T=Float64, nvecs=2) =
-    nmats * (round(Int, density * Int(N)^2) * (sizeof(T) + sizeof(Int)) + Int(N) * sizeof(Int)) +
-    nvecs * Int(N) * sizeof(T)
-
-"""Whether an estimated allocation of `bytes` fits the conservative budget."""
-fits_budget(bytes) = bytes <= MEM_BUDGET
-
-"""Square tile size (elements per side) for a dense N×N matrix, targeting
-`tile` elements per side but never exceeding N."""
-function square_block(N; tile=parse(Int, get(ENV, "BENCHMARK_BLOCKSIZE", "512")))
-    N <= tile && return N
-    return cld(N, cld(N, tile))
-end
-
-"""Block size for sparse/banded N×N operators, keeping the per-dimension block
-count bounded (so we don't create an enormous number of mostly-empty tiles)."""
-function banded_block(N; maxblocks=parse(Int, get(ENV, "BENCHMARK_SPARSE_BLOCKS", "16")))
-    return cld(N, min(N, maxblocks))
-end
-
-const bench_seconds = parse(Float64, get(ENV, "BENCHMARK_SECONDS", "30"))
-const bench_samples = parse(Int, get(ENV, "BENCHMARK_SAMPLES", "5"))
-
-# Rendering/logging are not used under AirspeedVelocity; these globals are kept
-# defined because the suite files reference them.
-const render = ""
-const live = false
-const profile = false
-const savelogs = false
-const RENDERS = Dict{Int,Dict}()
-
-# --- Build the benchmark suites --------------------------------------------
-
-const suite_setup = Dict{String,Function}()
-for suite in suites
-    suite_setup[suite] = include(joinpath(@__DIR__, "suites", suite * ".jl"))
-end
-
-const ctx = Context()  # enumerates all live processes (driver + workers)
-Dagger.Sch.EAGER_CONTEXT[] = ctx
+# --- Assemble SUITE from the externally-measured trials ---------------------
 
 const SUITE = BenchmarkGroup()
-for (suite_name, bench_list) in benches
-    suite_group = BenchmarkGroup()
-    for bench in bench_list
-        method_key = isempty(bench.accels) ? bench.method :
-                     "$(bench.method)+$(join(bench.accels, "+"))"
-        @info "Creating benchmarks for suite=$suite_name method=$method_key"
-        suite_group[method_key] =
-            suite_setup[suite_name](ctx; method=bench.method, accels=bench.accels)
-    end
-    SUITE[suite_name] = suite_group
-end
-
-# Apply consistent run parameters to every benchmark in the tree. `evals=1` is
-# required because the suites use `setup`/`teardown`.
-for (_, b) in BenchmarkTools.leaves(SUITE)
-    b.params.seconds = bench_seconds
-    b.params.samples = bench_samples
-    b.params.evals = 1
-    b.params.gcsample = true
+for (keypath, trial) in run_all_external()
+    SUITE[keypath] = PrecomputedTrial(trial)
 end
 
 # --- Standalone execution (skipped when run under AirspeedVelocity) ---------
 # AirspeedVelocity includes this file inside a module and runs SUITE itself, so
 # the block below only triggers when the script is executed directly.
 if abspath(PROGRAM_FILE) == @__FILE__
-    results = BenchmarkTools.run(SUITE; verbose=true)
     println()
-    foreach(BenchmarkTools.leaves(results)) do (keys, trial)
+    foreach(BenchmarkTools.leaves(run(SUITE))) do (keys, trial)
         println(join(keys, " / "), " => ", minimum(trial))
     end
 end
