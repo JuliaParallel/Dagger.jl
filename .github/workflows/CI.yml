@@ -36,7 +36,7 @@ jobs:
           - {version: 'nightly', os: ubuntu-latest, arch: x64}
     steps:
       - uses: actions/checkout@v4
-      - uses: julia-actions/setup-julia@v2
+      - uses: julia-actions/setup-julia@v3
         with:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
@@ -70,7 +70,7 @@ jobs:
           - {version: 'nightly', os: ubuntu-latest, arch: x64}
     steps:
       - uses: actions/checkout@v4
-      - uses: julia-actions/setup-julia@v2
+      - uses: julia-actions/setup-julia@v3
         with:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
@@ -98,7 +98,7 @@ jobs:
       CI_USE_OPENCL: '1'
     steps:
       - uses: actions/checkout@v4
-      - uses: julia-actions/setup-julia@v2
+      - uses: julia-actions/setup-julia@v3
         with:
           version: '1.11'
           arch: x64
@@ -121,7 +121,7 @@ jobs:
     if: ${{ !contains(github.event.head_commit.message, '[skip tests]') }}
     steps:
       - uses: actions/checkout@v4
-      - uses: julia-actions/setup-julia@v2
+      - uses: julia-actions/setup-julia@v3
         with:
           version: '1'
           arch: x64
@@ -136,7 +136,7 @@ jobs:
     if: ${{ !contains(github.event.head_commit.message, '[skip tests]') }}
     steps:
       - uses: actions/checkout@v4
-      - uses: julia-actions/setup-julia@v2
+      - uses: julia-actions/setup-julia@v3
         with:
           version: '1'
           arch: x64
@@ -173,7 +173,7 @@ jobs:
           fetch-depth: 0
       - name: Fetch base revision
         run: git fetch -f origin "$BENCHMARK_BASE_REV:$BENCHMARK_BASE_REV" || git fetch origin "$BENCHMARK_BASE_REV" || true
-      - uses: julia-actions/setup-julia@v2
+      - uses: julia-actions/setup-julia@v3
         with:
           version: '1'
           arch: x64
