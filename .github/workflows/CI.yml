@@ -40,7 +40,7 @@ jobs:
         with:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
-      - uses: julia-actions/cache@v2
+      - uses: julia-actions/cache@v3
       - name: Develop local TimespanLogging
         run: julia --project=. -e 'using Pkg; Pkg.develop(path="lib/TimespanLogging")'
       - uses: julia-actions/julia-buildpkg@v1
@@ -74,7 +74,7 @@ jobs:
         with:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
-      - uses: julia-actions/cache@v2
+      - uses: julia-actions/cache@v3
       - name: Develop local TimespanLogging
         run: julia --project=. -e 'using Pkg; Pkg.develop(path="lib/TimespanLogging")'
       - name: Instantiate
@@ -102,7 +102,7 @@ jobs:
         with:
           version: '1.11'
           arch: x64
-      - uses: julia-actions/cache@v2
+      - uses: julia-actions/cache@v3
       - name: Develop local TimespanLogging
         run: julia --project=. -e 'using Pkg; Pkg.develop(path="lib/TimespanLogging")'
       - uses: julia-actions/julia-buildpkg@v1
@@ -125,7 +125,7 @@ jobs:
         with:
           version: '1'
           arch: x64
-      - uses: julia-actions/cache@v2
+      - uses: julia-actions/cache@v3
       - name: Test TimespanLogging
         run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.develop(;path="lib/TimespanLogging"); Pkg.test("TimespanLogging")'
 
@@ -140,7 +140,7 @@ jobs:
         with:
           version: '1'
           arch: x64
-      - uses: julia-actions/cache@v2
+      - uses: julia-actions/cache@v3
       - name: Test DaggerWebDash
         run: julia -e 'using Pkg; Pkg.develop(;path=pwd()); Pkg.develop(;path="lib/TimespanLogging"); Pkg.develop(;path="lib/DaggerWebDash"); include("lib/DaggerWebDash/test/runtests.jl")'
 
@@ -177,7 +177,7 @@ jobs:
         with:
           version: '1'
           arch: x64
-      - uses: julia-actions/cache@v2
+      - uses: julia-actions/cache@v3
       - name: Run benchmarks (current vs master)
         run: julia --color=yes benchmark/ci.jl
       - name: Write job summary
