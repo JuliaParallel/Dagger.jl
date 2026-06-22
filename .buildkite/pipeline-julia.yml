@@ -13,13 +13,16 @@
   if: build.message !~ /\[skip tests\]/
 
 .bench: &bench
-  if: build.message =~ /\[run benchmarks\]/
+  # Run on every pull request (gating against >25% regressions vs master), and
+  # on demand elsewhere via a "[run benchmarks]" commit message. Use
+  # "[skip benchmarks]" to opt a PR out.
+  if: (build.pull_request.id != null && build.message !~ /\[skip benchmarks\]/) || build.message =~ /\[run benchmarks\]/
   agents:
     queue: "juliaecosystem"
     sandbox_capable: "true"
     os: linux
     arch: x86_64
-    num_cpus: 8
+    num_cpus: 16
 
 steps:
   - label: Julia 1 (multithreaded)
@@ -145,22 +148,25 @@ steps:
           codecov: true
     command: "julia -e 'using Pkg; Pkg.develop(;path=pwd()); Pkg.develop(;path=\"lib/TimespanLogging\"); Pkg.develop(;path=\"lib/DaggerWebDash\"); include(\"lib/DaggerWebDash/test/runtests.jl\")'"
 
-  - label: Benchmarks
+  - label: "Benchmarks (vs master)"
     timeout_in_minutes: 120
     <<: *bench
     plugins:
       - JuliaCI/julia#v1:
           version: "1"
-      - JuliaCI/julia-test#v1:
-          run_tests: false
-    command: "julia -e 'using Pkg; Pkg.add(\"BenchmarkTools\"); Pkg.develop(;path=pwd())'; JULIA_PROJECT=\"$PWD\" julia --project benchmarks/benchmark.jl"
+    command: "bash .buildkite/run_benchmarks.sh"
     env:
-      JULIA_NUM_THREADS: "4"
-      BENCHMARK: "nmf:raw,dagger"
-      BENCHMARK_PROCS: "4:4"
-      BENCHMARK_SCALE: "5:5:50"
+      JULIA_NUM_THREADS: "8"
+      BENCHMARK_BASE_REV: "master"
+      BENCHMARK_REGRESSION_THRESHOLD: "0.25"
+      BENCHMARK_CI_THREADS: "8"
+      # Keep CI runs bounded; tune as needed (see benchmark/benchmarks.jl).
+      BENCHMARK_SCALE: "[1024, 4096]"
+      BENCHMARK_SECONDS: "5"
+      BENCHMARK_SAMPLES: "20"
+      BENCHMARK_OUTPUT_DIR: "benchmark_results"
     artifacts:
-      - benchmarks/result*
+      - "benchmark_results/**/*"
 
 # env:
 #   SECRET_CODECOV_TOKEN: ""

@@ -15,8 +15,11 @@ function dtable_suite(ctx; method, accels)
     @assert method == "dagger" "DTable suite does not support non-Dagger execution"
     @assert isempty(accels) "DTable suite does not support acceleration"
 
-    n = Int(2e8)
-    max_chunksize = Int(1e8)
+    # Decoupled from the (matrix-dimension) `scales` used by the array/linalg
+    # suites; sized via BENCHMARK_DTABLE_ROWS. Defaults are modest so the suite
+    # is runnable on laptops/CI.
+    n = parse(Int, get(ENV, "BENCHMARK_DTABLE_ROWS", "1000000"))
+    max_chunksize = max(1, n ÷ 4)
     unique_values = Int(1e3)
     ncolumns = 4
     nchunks = (n+max_chunksize-1) ÷ max_chunksize

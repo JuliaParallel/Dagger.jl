@@ -124,7 +124,12 @@ function gemm_dagger!(
     alpha = T(_alpha)
     beta = T(_beta)
 
-    if Ant != Bmt
+    # The contracted ("inner") block dimension depends on whether each operand is
+    # transposed: for `op(A)*op(B)`, A contributes its column-blocks when not
+    # transposed and its row-blocks when transposed (and vice versa for B).
+    A_inner = transA == 'N' ? Ant : Amt
+    B_inner = transB == 'N' ? Bmt : Bnt
+    if A_inner != B_inner
         throw(DimensionMismatch(lazy"A has number of blocks ($Amt,$Ant) but B has number of blocks ($Bmt,$Bnt)"))
     end
 
