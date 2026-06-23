@@ -531,6 +531,206 @@ function _greedy_arg_ready_time_ns(::Any, ::MT.MetricsSnapshot, ::DAGSpec,
     return 0.0
 end
 
+### Iterated Greedy ###
+
+const IG_DEFAULT_N_ITERS = 32
+const IG_DEFAULT_DESTROY_FRAC = 0.30
+
+"""
+    IteratedGreedyScheduler{S<:DataDepsScheduler} <: DataDepsScheduler
+
+Iterated Greedy (Ruiz & Stützle 2007) on top of an inner DAG-AOT scheduler.
+
+Starts from the inner scheduler's full schedule, then repeats: destroy a
+random fraction of task assignments, reinsert them in topological order via
+`greedy_assign_task!`, and keep the new schedule iff its `cost_of_schedule`
+improves on the best-so-far. The inner scheduler is consulted only to build
+the seed schedule; per-iteration reinsertion always uses the greedy primitive
+so the iteration cost is `O(K · W)`.
+
+The acceptance rule is strict-improvement (hill-climbing); probabilistic
+acceptance of worsening neighbors is left to `SimulatedAnnealingScheduler`.
+
+Fields:
+- `inner::S`            — initial-solution provider (default `GreedyScheduler`).
+- `n_iters::Int`        — destroy/reinsert cycles per call.
+- `destroy_frac::Float64` — fraction of tasks destroyed per cycle, in (0, 1].
+- `rng::Random.AbstractRNG` — RNG used for destroy-set sampling.
+
+The schedule cache is delegated to `inner` so entries are partitioned by
+inner-scheduler type, matching the `TimedScheduler` wrapper convention used
+elsewhere in this file.
+"""
+struct IteratedGreedyScheduler{S<:DataDepsScheduler, R<:Random.AbstractRNG} <: DataDepsScheduler
+    inner::S
+    n_iters::Int
+    destroy_frac::Float64
+    rng::R
+
+    function IteratedGreedyScheduler(inner::S;
+                                     n_iters::Integer=IG_DEFAULT_N_ITERS,
+                                     destroy_frac::Real=IG_DEFAULT_DESTROY_FRAC,
+                                     rng::R=Random.default_rng()) where {S<:DataDepsScheduler, R<:Random.AbstractRNG}
+        n_iters >= 0 || throw(ArgumentError("IteratedGreedyScheduler: n_iters must be ≥ 0, got $n_iters"))
+        (destroy_frac > 0 && destroy_frac <= 1) ||
+            throw(ArgumentError("IteratedGreedyScheduler: destroy_frac must be in (0, 1], got $destroy_frac"))
+        return new{S, R}(inner, Int(n_iters), Float64(destroy_frac), rng)
+    end
+end
+
+IteratedGreedyScheduler(; kwargs...) = IteratedGreedyScheduler(GreedyScheduler(); kwargs...)
+
+# Forward equivalence / cache / argspec hooks so cache reuse is partitioned by
+# the inner scheduler's type, not by IG's own wrapper type. Same idea as the
+# bench's TimedScheduler wrapper.
+datadeps_schedule_cache(sched::IteratedGreedyScheduler) =
+    datadeps_schedule_cache(sched.inner)
+datadeps_dag_equivalent(sched::IteratedGreedyScheduler, dspec1::DAGSpec, dspec2::DAGSpec) =
+    datadeps_dag_equivalent(sched.inner, dspec1, dspec2)
+datadeps_argspec_equivalent(sched::IteratedGreedyScheduler, a1::DatadepsArgSpec, a2::DatadepsArgSpec) =
+    datadeps_argspec_equivalent(sched.inner, a1, a2)
+datadeps_ainfo_equivalent(sched::IteratedGreedyScheduler, a1::AbstractAliasing, a2::AbstractAliasing) =
+    datadeps_ainfo_equivalent(sched.inner, a1, a2)
+
+"""
+    iterated_greedy_step!(state, snap, dag_spec, all_procs, destroyed)
+
+Reconstruct `state` by replaying every task index not in `destroyed` at its
+existing `task_proc` assignment, then assigning each destroyed task via
+`greedy_assign_task!`. Both passes walk task IDs in increasing order, which
+is a valid topological order since `dag_add_task!` appends parents before
+children.
+
+Mutates and returns `state`. The caller is responsible for providing a
+freshly-`copy(prev_state)` if the previous state must be preserved on
+rejection.
+"""
+function iterated_greedy_step!(state::ScheduleState, snap::MT.MetricsSnapshot,
+                                dag_spec::DAGSpec, all_procs::Vector{Processor},
+                                destroyed::AbstractSet{Int})
+    # Snapshot per-task assignments BEFORE we start mutating `state`. The
+    # destroy/replay rewrites task_proc/task_finish_ns/proc_ready_ns
+    # incrementally, so we need a stable record of what to keep.
+    prev_task_proc = copy(state.task_proc)
+    prev_task_finish = copy(state.task_finish_ns)
+
+    empty!(state)
+
+    @inbounds for idx in 1:nv(dag_spec.g)
+        if idx in destroyed
+            # Reassigned via the greedy primitive. greedy_assign_task! reads
+            # data-ready times from already-scheduled deps in `state`, so
+            # walking in increasing-id order keeps every dependency present
+            # before its dependents (parents are added before children).
+            greedy_assign_task!(state, snap, dag_spec, all_procs, idx)
+        else
+            # Preserve the prior assignment. We still need to maintain the
+            # ScheduleState invariants so downstream tasks see correct
+            # finish times and proc-ready times.
+            proc = prev_task_proc[idx]
+            finish_ns = prev_task_finish[idx]
+            state.task_proc[idx] = proc
+            state.task_finish_ns[idx] = finish_ns
+            cur = get(state.proc_ready_ns, proc, 0.0)
+            state.proc_ready_ns[proc] = max(cur, finish_ns)
+        end
+    end
+    return state
+end
+
+"""
+    iterated_greedy_schedule!(state, snap, dag_spec, all_procs;
+                              n_iters, destroy_frac, rng) -> ScheduleState
+
+Run IG on top of an already-initialized `state` (typically produced by the
+inner scheduler's pass). Returns the best `ScheduleState` found across
+`n_iters` destroy/reinsert cycles, judged by `cost_of_schedule`.
+
+Exposed as a primitive (alongside `greedy_schedule!`) so future schedulers
+(SA, hybrid IG+SA pipelines) can drive it directly without instantiating an
+`IteratedGreedyScheduler`.
+"""
+function iterated_greedy_schedule!(state::ScheduleState, snap::MT.MetricsSnapshot,
+                                    dag_spec::DAGSpec, all_procs::Vector{Processor};
+                                    n_iters::Integer=IG_DEFAULT_N_ITERS,
+                                    destroy_frac::Real=IG_DEFAULT_DESTROY_FRAC,
+                                    rng::Random.AbstractRNG=Random.default_rng())
+    n_iters >= 0 || throw(ArgumentError("iterated_greedy_schedule!: n_iters must be ≥ 0"))
+    (destroy_frac > 0 && destroy_frac <= 1) ||
+        throw(ArgumentError("iterated_greedy_schedule!: destroy_frac must be in (0, 1]"))
+    n_tasks = nv(dag_spec.g)
+    (n_tasks == 0 || n_iters == 0) && return state
+
+    best_state = copy(state)
+    best_cost = cost_of_schedule(best_state)
+
+    # Pre-allocate the candidate state once and reuse it across iterations;
+    # we only `copy` the accepted `best_state` when we adopt the candidate.
+    candidate = copy(best_state)
+    n_destroy = max(1, ceil(Int, destroy_frac * n_tasks))
+    n_destroy = min(n_destroy, n_tasks)
+    # Shared buffer for randperm — reused per iter to avoid allocations.
+    perm_buf = collect(1:n_tasks)
+
+    for _ in 1:n_iters
+        # Sample `n_destroy` distinct task IDs uniformly at random. Doing a
+        # partial Fisher–Yates on perm_buf is O(n_destroy) and avoids
+        # allocating a fresh randperm vector each iter.
+        @inbounds for i in 1:n_destroy
+            j = rand(rng, i:n_tasks)
+            perm_buf[i], perm_buf[j] = perm_buf[j], perm_buf[i]
+        end
+        destroyed = Set{Int}(view(perm_buf, 1:n_destroy))
+
+        # Reset candidate to the current best, then perturb.
+        candidate.task_proc      = copy(best_state.task_proc)
+        candidate.task_finish_ns = copy(best_state.task_finish_ns)
+        candidate.proc_ready_ns  = copy(best_state.proc_ready_ns)
+
+        iterated_greedy_step!(candidate, snap, dag_spec, all_procs, destroyed)
+        new_cost = cost_of_schedule(candidate)
+        if new_cost < best_cost
+            # Adopt the candidate as the new best; copy so subsequent
+            # mutations of `candidate` don't disturb `best_state`.
+            best_state = copy(candidate)
+            best_cost = new_cost
+        end
+    end
+    return best_state
+end
+
+function datadeps_schedule_dag_aot!(scheduler::IteratedGreedyScheduler,
+                                    schedule, dag_spec, all_procs, all_scope)
+    n_tasks = nv(dag_spec.g)
+    n_tasks == 0 && return
+
+    snap = MT.snapshot(MT.global_metrics_cache())
+
+    # Build the seed schedule directly via the greedy primitive. We do not
+    # call back into the inner scheduler's `datadeps_schedule_dag_aot!`
+    # because that would write into `schedule` immediately, before we have
+    # the chance to improve it; the inner scheduler's role is just to
+    # define the cost-model defaults via `GreedyScheduler` primitives.
+    #
+    # Schedulers other than `GreedyScheduler` as `inner` are accommodated
+    # by populating an initial `ScheduleState` from a one-shot greedy pass
+    # — this matches Ruiz & Stützle's framing where the construction
+    # heuristic is fixed (greedy) regardless of the seed.
+    state = ScheduleState()
+    greedy_schedule!(state, snap, dag_spec, all_procs)
+
+    state = iterated_greedy_schedule!(state, snap, dag_spec, all_procs;
+                                       n_iters=scheduler.n_iters,
+                                       destroy_frac=scheduler.destroy_frac,
+                                       rng=scheduler.rng)
+
+    @inbounds for idx in 1:n_tasks
+        task = dag_spec.id_to_task[idx]
+        schedule[task] = state.task_proc[idx]
+    end
+    return
+end
+
 struct LayeredScheduler <: DataDepsScheduler end
 function datadeps_schedule_dag_aot!(scheduler::LayeredScheduler, schedule, dag_spec, all_procs, all_scope)
     layer = 1
