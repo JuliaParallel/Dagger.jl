@@ -6,12 +6,6 @@ include("workloads.jl")
 include("log_analysis.jl")
 include("summarize.jl")
 
-# A timing wrapper around any DataDepsScheduler. Records the wall-clock cost
-# of `datadeps_schedule_dag_aot!` into a mutable `Ref` so the driver can read
-# back the AOT cost after `spawn_datadeps` returns.
-#
-# JIT calls and equivalence/cache lookups are delegated to the inner scheduler,
-# so wrapping does not change scheduling decisions.
 mutable struct TimedScheduler{S<:Dagger.DataDepsScheduler} <: Dagger.DataDepsScheduler
     inner::S
     last_aot_ns::Base.RefValue{UInt64}
@@ -30,8 +24,8 @@ function Dagger.datadeps_schedule_task_jit!(sched::TimedScheduler, all_procs, al
     return Dagger.datadeps_schedule_task_jit!(sched.inner, all_procs, all_scope, task_scope, spec, task)
 end
 
-# Forward cache-key and equivalence so cached schedules remain partitioned per
-# *inner* type (TimedScheduler{Greedy} reuses Greedy entries, not its own).
+# Forward equivalence/cache hooks so cached schedules stay partitioned by the
+# inner scheduler's type (TimedScheduler{Greedy} reuses Greedy entries).
 Dagger.datadeps_schedule_cache(sched::TimedScheduler) =
     Dagger.datadeps_schedule_cache(sched.inner)
 Dagger.datadeps_dag_equivalent(sched::TimedScheduler, dspec1, dspec2) =
@@ -41,23 +35,16 @@ Dagger.datadeps_argspec_equivalent(sched::TimedScheduler, a1, a2) =
 Dagger.datadeps_ainfo_equivalent(sched::TimedScheduler, a1, a2) =
     Dagger.datadeps_ainfo_equivalent(sched.inner, a1, a2)
 
-# Names a scheduler instance for output rows. Falls back to its type name.
 scheduler_name(s::TimedScheduler) = scheduler_name(s.inner)
 scheduler_name(s::Dagger.DataDepsScheduler) = string(nameof(typeof(s)))
 
-# Per-DAG-spec schedule cache is task-local and partitioned by scheduler type.
-# Clear before each measured run so cached schedules from prior cells do not
-# bias the next. Leaves the *global* MetricsTracker cache alone — that's the
-# data Greedy actually consults at decision time.
+# Clear the per-spec schedule cache only — leave MT.GLOBAL_METRICS_CACHE
+# alone since Greedy consults it for cost-model lookups.
 function reset_scheduler!(inner::Dagger.DataDepsScheduler)
     empty!(Dagger.datadeps_schedule_cache(inner))
     return
 end
 
-# ---------- Workload-side helpers (run, warm, verify) ----------
-
-# Build inputs for a workload. Returned tuple is passed to `run_workload!` and
-# (optionally) `verify_workload`.
 function build_inputs(workload::Symbol, nt::Int, bs::Int)
     sz = nt * bs
     if workload === :cholesky
@@ -73,7 +60,6 @@ function build_inputs(workload::Symbol, nt::Int, bs::Int)
     end
 end
 
-# Run the workload under the given scheduler. Mutates inputs in place.
 function run_workload!(workload::Symbol, inputs, sched::Dagger.DataDepsScheduler)
     if workload === :cholesky
         Dagger.spawn_datadeps(; scheduler=sched) do
@@ -87,7 +73,6 @@ function run_workload!(workload::Symbol, inputs, sched::Dagger.DataDepsScheduler
     return
 end
 
-# Reassemble a tile-grid back into a dense matrix for verification.
 function _assemble_dense(tiles::Matrix{<:Matrix})
     nt = size(tiles, 1)
     bs = size(tiles[1, 1], 1)
@@ -98,22 +83,18 @@ function _assemble_dense(tiles::Matrix{<:Matrix})
     return out
 end
 
-# Check the workload result against a dense reference. Returns
-# (passed::Bool, max_relative_error::Float64).
 function verify_workload(workload::Symbol, inputs)
     if workload === :cholesky
-        # Tiled Cholesky writes the lower triangle. Reassemble L from tiles,
-        # zero the strict upper, then compare L * L' to the original SPD.
-        result_tiles = inputs.M
-        L = _assemble_dense(result_tiles)
+        # Tiled Cholesky writes the lower triangle; zero strict-upper before
+        # comparing L*L' to the original SPD.
+        L = _assemble_dense(inputs.M)
         rows, cols = axes(L)
         for i in rows, j in cols
             j > i && (L[i, j] = 0.0)
         end
-        reconstructed = L * L'
         ref = inputs.dense_reference
         denom = max(norm(ref), eps(Float64))
-        rel = norm(reconstructed - ref) / denom
+        rel = norm(L * L' - ref) / denom
         return (rel < 1e-8, rel)
     elseif workload === :matmul
         C = _assemble_dense(inputs.C)
@@ -126,13 +107,11 @@ function verify_workload(workload::Symbol, inputs)
     end
 end
 
-# ---------- Single measurement ----------
-
 struct RunResult
-    workload::Symbol           # :cholesky or :matmul
+    workload::Symbol
     scheduler::String
-    tile_count::Int            # nt (matrix is nt × nt blocks of size bs × bs)
-    block_size::Int            # bs
+    tile_count::Int
+    block_size::Int
     trial::Int
     total_wallclock_ns::UInt64
     sched_phase_ns::UInt64
@@ -154,8 +133,8 @@ function run_once(workload::Symbol, inner::Dagger.DataDepsScheduler, nt::Int, bs
         Dagger.enable_logging!(all_task_deps=false, tasknames=false)
     end
 
-    # Build inputs OUTSIDE the timed region so we measure scheduling +
-    # execution, not allocation of the input tiles.
+    # Inputs built outside the timed region so allocation does not pollute
+    # the measured wall-clock.
     inputs = build_inputs(workload, nt, bs)
     t0 = time_ns()
     run_workload!(workload, inputs, timed)
@@ -179,15 +158,11 @@ function run_once(workload::Symbol, inner::Dagger.DataDepsScheduler, nt::Int, bs
     end
 end
 
-# Run an unmeasured workload purely to populate the *global* MetricsTracker
-# cache with per-signature runtime and per-(src,dst) move-rate samples. Greedy
-# then has real data to consult on the next call instead of falling back to
-# `GREEDY_DEFAULT_RUNTIME_NS` constants.
-#
-# Uses a fresh RoundRobin so the warm pass behaviour is deterministic across
-# scheduler cells (we are populating ground-truth metrics, not Greedy's
-# self-prediction). Schedule cache for the warm scheduler is cleared
-# immediately afterward so it does not affect later cells.
+# Unmeasured RoundRobin pass to populate MT.GLOBAL_METRICS_CACHE so Greedy's
+# subsequent cost lookups see real samples instead of GREEDY_DEFAULT_* fallbacks.
+# RoundRobin is intentional: warm-pass behaviour stays deterministic across
+# scheduler cells because we're recording ground-truth metrics, not the
+# scheduler-under-test's self-prediction.
 function warm_metrics_for!(workload::Symbol, nt::Int, bs::Int)
     inputs = build_inputs(workload, nt, bs)
     warm_sched = Dagger.RoundRobinScheduler()
@@ -196,15 +171,13 @@ function warm_metrics_for!(workload::Symbol, nt::Int, bs::Int)
     return
 end
 
-# ---------- Sweep ----------
-
-const DEFAULT_TILE_COUNTS = [2, 4, 8]   # nt values; total side = nt * bs
+const DEFAULT_TILE_COUNTS = [2, 4, 8]
 const DEFAULT_BLOCK_SIZE = 128
 const DEFAULT_TRIALS = 3
 const DEFAULT_WARMUP = 1
 
-# Returns a Vector{Pair{String, ()->DataDepsScheduler}} so each trial gets a
-# fresh scheduler instance (RoundRobin holds mutable state).
+# Factories — not instances — because RoundRobin holds mutable state and each
+# trial needs a fresh copy.
 function default_scheduler_factories()
     return [
         "RoundRobinScheduler"    => () -> Dagger.RoundRobinScheduler(),
@@ -224,26 +197,20 @@ function run_sweep(; workloads = (:cholesky, :matmul),
                      check_correctness = false,
                      verbose = true)
     results = RunResult[]
-    correctness = NamedTuple[]   # (workload, scheduler, nt, passed, rel_err)
+    correctness = NamedTuple[]
     for workload in workloads
         for nt in tile_counts
             for (name, factory) in scheduler_factories
-                # Per (workload, nt, scheduler) cell. If metrics_warm is on,
-                # do one unmeasured RoundRobin pass to populate the global
-                # metrics cache so Greedy has real data to consult.
                 verbose && println("→ $workload nt=$nt $name  (warmup×$warmup, trials×$trials, metrics_warm=$metrics_warm)")
                 if metrics_warm
                     warm_metrics_for!(workload, nt, block_size)
                 end
-                # Warmup mirrors the measured-trial code path (same logging
-                # state) so JIT compilation is amortized on the same dispatch
-                # specializations the measured trials will hit.
+                # Warmup mirrors the measured-trial logging state so JIT
+                # compilation amortizes on the same specializations.
                 for _ in 1:warmup
                     run_once(workload, factory(), nt, block_size, 0;
                              collect_logs, metrics_warm)
                 end
-                # Optional correctness check (uses one fresh run per cell;
-                # does not contribute to timing).
                 if check_correctness
                     inputs = build_inputs(workload, nt, block_size)
                     run_workload!(workload, inputs, factory())
@@ -277,8 +244,6 @@ function run_sweep(; workloads = (:cholesky, :matmul),
     end
     return (; results, correctness)
 end
-
-# ---------- CSV emit ----------
 
 const CSV_HEADER = [
     "workload", "scheduler", "tile_count", "block_size", "trial",
@@ -321,8 +286,6 @@ function write_correctness_csv(path::AbstractString, rows::Vector{NamedTuple})
     end
     return path
 end
-
-# ---------- CLI entry ----------
 
 function main(args = ARGS)
     workloads = (:cholesky, :matmul)

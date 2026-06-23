@@ -1,9 +1,3 @@
-# Aggregate the per-trial CSV emitted by `driver.jl` into a Markdown table
-# suitable for pasting into the Overleaf paper or a meeting note.
-#
-# Median across trials per (workload, tile_count, scheduler) cell, so the
-# warmup-trial JIT spike does not dominate.
-
 using Statistics
 using Printf
 
@@ -35,8 +29,7 @@ function read_csv(path::AbstractString)
     rows = CSVRow[]
     open(path, "r") do io
         header = readline(io)
-        # Expect the header from driver.jl; we tolerate metrics_warm absence
-        # so older CSVs (without that column) still parse.
+        # Tolerate CSVs predating the metrics_warm column.
         cols = split(header, ',')
         has_warm = "metrics_warm" in cols
         for line in eachline(io)
@@ -70,7 +63,6 @@ function summarize_to_markdown(csv_path::AbstractString, md_path::AbstractString
     isempty(rows) && error("No rows in $csv_path")
 
     groups = _group_by(rows)
-    # Sort by (workload, tile_count, scheduler, metrics_warm) for a stable table.
     keys_sorted = sort(collect(keys(groups));
                        by = k -> (k[1], k[2], k[3], k[4]))
 
@@ -83,7 +75,6 @@ function summarize_to_markdown(csv_path::AbstractString, md_path::AbstractString
         any_warm && println(io, "\n_Some rows use a pre-warmed `MetricsTracker` cache (column `warm`)._")
         println(io)
 
-        # Median table
         println(io, "| workload | nt | scheduler | warm | total (ms) | sched (ms) | exec (ms) | tasks | copies |")
         println(io, "|----------|----|-----------|------|-----------:|-----------:|----------:|------:|-------:|")
         for k in keys_sorted
@@ -100,8 +91,7 @@ function summarize_to_markdown(csv_path::AbstractString, md_path::AbstractString
         end
         println(io)
 
-        # Total-wallclock ratio vs RoundRobinScheduler baseline.
-        # One column per non-baseline scheduler. Ratio < 1.0 ⇒ faster than RR.
+        # Ratio table vs RoundRobinScheduler baseline; one column per other scheduler.
         baseline = "RoundRobinScheduler"
         all_schedulers = sort(unique(r.scheduler for r in rows))
         others = filter(!=(baseline), all_schedulers)

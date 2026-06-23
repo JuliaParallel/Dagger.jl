@@ -1,15 +1,6 @@
-# Utilities for parsing Dagger logs into per-phase timings.
-#
-# Dagger emits :core events per worker; each entry is a NamedTuple
-# (; timestamp, category, kind) where timestamp is `time_ns()` and kind is
-# :start or :finish. Datadeps-specific categories are :datadeps_execute,
-# :datadeps_copy, :datadeps_copy_skip. Compute is :compute.
-#
-# Julian asked us to break runtime down by "datadeps scheduling time versus
-# runtime" — the harness measures the scheduling phase explicitly (wall-clock
-# around `datadeps_schedule_dag_aot!`, in `driver.jl`) and uses these log
-# parsers to compute the *actual-execution* portion of the wall-clock for
-# verification and breakdown.
+# Dagger has no `:datadeps_schedule` timespan, so the driver wall-clocks the
+# AOT pass externally; these parsers compute the execution-side breakdown
+# from `:datadeps_execute`, `:datadeps_copy`, `:compute`, and `:move` events.
 
 using Statistics
 
@@ -24,8 +15,6 @@ struct PhaseStats
 end
 PhaseStats() = PhaseStats(0, UInt64(0))
 
-# Walk one worker's log and pair :start/:finish events by (category, id),
-# invoking `f(category, start_ns, finish_ns)` for each closed pair.
 function _foreach_pair(f, core::Vector, ids::Vector)
     open_starts = Dict{Tuple{Symbol, Any}, UInt64}()
     n = length(core)
@@ -40,16 +29,15 @@ function _foreach_pair(f, core::Vector, ids::Vector)
             open_starts[key] = UInt64(entry.timestamp)
         elseif kind === :finish
             start_ns = pop!(open_starts, key, UInt64(0))
-            start_ns == 0 && continue   # unmatched finish — skip
+            start_ns == 0 && continue   # unmatched finish
             finish_ns = UInt64(entry.timestamp)
-            finish_ns < start_ns && continue   # corrupt — skip
+            finish_ns < start_ns && continue   # corrupt
             f(cat, start_ns, finish_ns)
         end
     end
     return
 end
 
-# Accumulate per-category total time and event count across all workers.
 function category_totals(logs::Dict)
     totals = Dict{Symbol, PhaseStats}()
     for worker_id in keys(logs)
@@ -64,11 +52,8 @@ function category_totals(logs::Dict)
     return totals
 end
 
-# Wall-clock span of the datadeps execution phase: earliest :start to latest
-# :finish across :datadeps_execute, :datadeps_copy, :datadeps_copy_skip events.
-# This is the portion of `spawn_datadeps` after AOT scheduling completes; the
-# difference (spawn_datadeps wall-clock − this span) approximates AOT-sched
-# overhead plus orchestration that does not appear as a logged timespan.
+# Earliest :start to latest :finish across datadeps_execute / copy events;
+# approximates the post-AOT portion of `spawn_datadeps`.
 function datadeps_execution_span_ns(logs::Dict)
     earliest = typemax(UInt64)
     latest = UInt64(0)
@@ -91,9 +76,6 @@ function datadeps_execution_span_ns(logs::Dict)
     return latest - earliest
 end
 
-# Return a NamedTuple summary of (sched_time_ns, exec_time_ns, n_tasks,
-# n_copies, compute_total_ns, move_total_ns) from a wall-clock total and the
-# parsed logs.
 function summarize_phases(total_wallclock_ns::UInt64,
                           sched_phase_ns::UInt64,
                           logs::Dict)
