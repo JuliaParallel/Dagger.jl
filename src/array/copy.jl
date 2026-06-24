@@ -10,21 +10,34 @@ function maybe_copy_buffered(f, args...)
 end
 function copy_buffered(f, args...)
     real_args = map(arg_part->arg_part[1], args)
-    buffered_args = map(arg_part->allocate_copy_buffer(arg_part[2], arg_part[1]), args)
-    for (buf_arg, arg) in zip(buffered_args, real_args)
-        copyto!(buf_arg, arg)
+    # Only buffer the arguments whose partitioning actually differs from the
+    # requested layout; pass the already-correctly-partitioned ones through
+    # untouched. Buffering an already-matching argument would needlessly
+    # allocate (and copy) a full second copy of it -- ruinous out-of-core when
+    # that argument is a large matrix (e.g. an LU factor) and only a small
+    # co-argument (e.g. the RHS vector) actually needed re-partitioning, which
+    # would otherwise double the on-disk footprint and exhaust the disk bound.
+    needs_buf = map(arg_part->arg_part[1].partitioning != arg_part[2], args)
+    buffered_args = map(args, needs_buf) do arg_part, nb
+        nb ? allocate_copy_buffer(arg_part[2], arg_part[1]) : arg_part[1]
+    end
+    for (nb, buf_arg, arg) in zip(needs_buf, buffered_args, real_args)
+        nb && copyto!(buf_arg, arg)
     end
     result = f(buffered_args...)
-    for (buf_arg, arg) in zip(buffered_args, real_args)
-        copyto!(arg, buf_arg)
+    for (nb, buf_arg, arg) in zip(needs_buf, buffered_args, real_args)
+        nb && copyto!(arg, buf_arg)
     end
 
-    # Free the buffers
-    foreach(unsafe_free!, buffered_args)
+    # Free only the buffers we actually allocated.
+    for (nb, buf_arg) in zip(needs_buf, buffered_args)
+        nb && unsafe_free!(buf_arg)
+    end
 
     # If the result is one of the buffered args, return the corresponding
     # original arg instead (since we've already copied data back to it,
-    # and the buffer has been freed)
+    # and the buffer has been freed). Passed-through args are already the real
+    # arg, so this mapping is correct for them too.
     result_idx = findfirst(buf_arg -> buf_arg === result, buffered_args)
     if result_idx !== nothing
         return real_args[result_idx]
