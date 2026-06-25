@@ -73,6 +73,7 @@ function enable_logging!(;metrics::Bool=false,
     if profile
         ml[:profile] = DaggerWebDash.ProfileMetrics()
     end
+    TimespanLogging.PROFILE_TASKS[] = profile
     if metrics
         ml[:wsat] = Dagger.Events.WorkerSaturation()
         ml[:loadavg] = TimespanLogging.Events.CPULoadAverages()
