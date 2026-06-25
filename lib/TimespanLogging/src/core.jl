@@ -299,16 +299,30 @@ end
 
 empty_prof() = ProfilerResult(UInt[], Dict{UInt64, Vector{Base.StackTraces.StackFrame}}(), UInt[])
 
+# Shared, immutable-in-practice empty profiler result. Every non-profiled event
+# carries *this* object instead of allocating a fresh `ProfilerResult` (2 vectors
+# + a dict) per event. It is only ever read (e.g. `mix_samples` does a read-only
+# `vcat`), never mutated, on the non-profiling path.
+const EMPTY_PROF = empty_prof()
+const _NO_TASKS = Task[]
+
+# Profiling is opt-in and rare; this flag lets the (very hot) `timespan_finish`
+# and per-compute-task `prof_task_put!` paths skip `prof_lock` entirely when
+# profiling is off. `Dagger.enable_logging!(profile=true)` sets it.
+const PROFILE_TASKS = Ref{Bool}(false)
+
 const prof_refcount = Ref{Threads.Atomic{Int}}(Threads.Atomic{Int}(0))
 const prof_lock = Threads.ReentrantLock()
 const prof_tasks = IdDict{Any, Vector{Task}}()
 
 function prof_task_put!(id, task::Task=Base.current_task())
+    PROFILE_TASKS[] || return
     lock(prof_lock) do
         push!(get!(()->Task[], prof_tasks, id), task)
     end
 end
 function prof_tasks_take!(id)
+    PROFILE_TASKS[] || return _NO_TASKS
     lock(prof_lock) do
         if haskey(prof_tasks, id)
             pop!(prof_tasks, id)
@@ -338,7 +352,9 @@ function timespan_start(ctx, category::Symbol, @nospecialize(id), @nospecialize(
             Profile.start_timer()
         end
     end
-    ev = Event(:start, category, id, tl, time_ns(), gc_num(), empty_prof())
+    # Start events never carry profiler samples (those are gathered at finish),
+    # so always reuse the shared empty result rather than allocating.
+    ev = Event(:start, category, id, tl, time_ns(), gc_num(), EMPTY_PROF)
     write_event(sink, ev)
     nothing
 end
@@ -351,12 +367,22 @@ categorized by `category`, and uniquely identified by `id`; these two must be
 the same as previously passed to `timespan_start`. `tl` is the "timeline" of
 the event, which is just an arbitrary payload attached to the event.
 """
-function timespan_finish(ctx, category::Symbol, @nospecialize(id), @nospecialize(tl); tasks=prof_tasks_take!(id))
+function timespan_finish(ctx, category::Symbol, @nospecialize(id), @nospecialize(tl); tasks=nothing)
     sink = log_sink(ctx)
     isa(sink, NoOpLog) && return
     do_profile = profile(ctx, category, id, tl)
     time = time_ns()
     gcn = gc_num()
+    if !do_profile
+        # Hot path: no profiling. Skip `prof_lock`, `Profile.fetch`, and the
+        # per-event `ProfilerResult` allocation by reusing the shared empty one.
+        ev = Event(:finish, category, id, tl, time, gcn, EMPTY_PROF)
+        write_event(sink, ev)
+        return nothing
+    end
+    if tasks === nothing
+        tasks = prof_tasks_take!(id)
+    end
     prof = UInt[]
     lidict = Dict{UInt64, Vector{Base.StackTraces.StackFrame}}()
     GC.@preserve tasks begin
