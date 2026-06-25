@@ -219,7 +219,9 @@ function _get_state_locked(ml::MultiEventLog)
         max_length = 0
         for v in values(mls.consumer_logs)
             l = length(v)
-            l > max_length && (max_length = l)
+            if l > max_length
+                max_length = l
+            end
         end
         for name in keys(ml.consumers)
             if !haskey(mls.consumers, name)
