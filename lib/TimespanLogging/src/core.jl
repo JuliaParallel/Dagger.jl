@@ -206,23 +206,42 @@ function Base.setindex!(ml::MultiEventLog, c, name::Symbol)
     ml.consumers[name] = c
 end
 
-function get_state(ml::MultiEventLog)
-    lock(event_log_lock) do
-        mls = get!(()->MultiEventLogState(), MultiEventLogState_PLS, ml.uid)
-        max_length = reduce(max, map(length, values(mls.consumer_logs)); init=0)
+# Resolve (and lazily initialize) the process-local state for `ml`. The caller
+# MUST already hold `event_log_lock`. Split out from `get_state` so the hot
+# `write_event` path takes the lock exactly once (was twice: get_state + write).
+function _get_state_locked(ml::MultiEventLog)
+    mls = get!(()->MultiEventLogState(), MultiEventLogState_PLS, ml.uid)
+    # Fast path: the consumer set is stable, so there is nothing to initialize.
+    # Consumers are only ever added (never removed -- see FIXME), so a length
+    # mismatch is a sufficient and cheap "needs init" test, and it lets us skip
+    # the per-event `map(length, ...)` allocation in steady state.
+    if length(mls.consumers) != length(ml.consumers)
+        max_length = 0
+        for v in values(mls.consumer_logs)
+            l = length(v)
+            l > max_length && (max_length = l)
+        end
         for name in keys(ml.consumers)
             if !haskey(mls.consumers, name)
                 mls.consumers[name] = init_similar(ml.consumers[name])
                 mls.consumer_logs[name] = Vector{Any}(fill(nothing, max_length))
             end
         end
+    end
+    if length(mls.aggregators) != length(ml.aggregators)
         for name in keys(ml.aggregators)
             if !haskey(mls.aggregators, name)
                 mls.aggregators[name] = init_similar(ml.aggregators[name])
             end
         end
-        # FIXME: Remove deleted consumers and aggregators
-        mls
+    end
+    # FIXME: Remove deleted consumers and aggregators
+    return mls
+end
+
+function get_state(ml::MultiEventLog)
+    lock(event_log_lock) do
+        _get_state_locked(ml)
     end
 end
 
@@ -230,8 +249,8 @@ end
 init_similar(x) = x
 
 function write_event(ml::MultiEventLog, event::Event)
-    mls = get_state(ml)
     lock(event_log_lock) do
+        mls = _get_state_locked(ml)
         for name in keys(mls.consumers)
             cevent = try
                 mls.consumers[name](event)
