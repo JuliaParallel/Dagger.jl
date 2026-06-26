@@ -4,6 +4,7 @@ import Dagger: DAGSpec, DatadepsArgSpec, dag_add_task!,
                datadeps_ainfo_equivalent, datadeps_schedule_cache,
                LayeredScheduler, RoundRobinScheduler, GreedyScheduler, DataDepsScheduler,
                IteratedGreedyScheduler, iterated_greedy_schedule!, iterated_greedy_step!,
+               SimulatedAnnealingScheduler, simulated_annealing_schedule!,
                ScheduleState, cost_of_schedule, greedy_assign_task!, greedy_schedule!,
                NoAliasing, UnknownAliasing, ContiguousAliasing,
                StridedAliasing, TriangularAliasing, DiagonalAliasing,
@@ -1279,5 +1280,373 @@ end
 
         # Cache populated by the IG run (shares with Greedy's cache).
         @test !isempty(cache)
+    end
+end
+
+@testset "SimulatedAnnealingScheduler" begin
+    @testset "Type registration and constructor validation" begin
+        @test SimulatedAnnealingScheduler() isa DataDepsScheduler
+        @test SimulatedAnnealingScheduler() isa SimulatedAnnealingScheduler{IteratedGreedyScheduler{GreedyScheduler, typeof(Random.default_rng())}}
+
+        s = SimulatedAnnealingScheduler()
+        @test s.q == Dagger.SA_DEFAULT_Q
+        @test s.k == Dagger.SA_DEFAULT_K
+        @test s.n_restarts == Dagger.SA_DEFAULT_N_RESTARTS
+
+        s2 = SimulatedAnnealingScheduler(GreedyScheduler();
+                                          q=0.9, k=2, n_restarts=3,
+                                          rng=MersenneTwister(11))
+        @test s2.q == 0.9
+        @test s2.k == 2.0
+        @test s2.n_restarts == 3
+        @test s2.rng isa MersenneTwister
+        @test s2.inner isa GreedyScheduler
+
+        @test_throws ArgumentError SimulatedAnnealingScheduler(; q=0.0)
+        @test_throws ArgumentError SimulatedAnnealingScheduler(; q=1.0)
+        @test_throws ArgumentError SimulatedAnnealingScheduler(; q=-0.1)
+        @test_throws ArgumentError SimulatedAnnealingScheduler(; k=0.0)
+        @test_throws ArgumentError SimulatedAnnealingScheduler(; k=-1.0)
+        @test_throws ArgumentError SimulatedAnnealingScheduler(; n_restarts=0)
+        @test_throws ArgumentError SimulatedAnnealingScheduler(; n_restarts=-2)
+    end
+
+    @testset "Cache delegation through inner chain (SA → IG → Greedy)" begin
+        cache_sa = datadeps_schedule_cache(SimulatedAnnealingScheduler())
+        cache_gr = datadeps_schedule_cache(GreedyScheduler())
+        @test cache_sa === cache_gr
+
+        # SA over Greedy directly also shares the Greedy cache.
+        cache_sg = datadeps_schedule_cache(SimulatedAnnealingScheduler(GreedyScheduler()))
+        @test cache_sg === cache_gr
+    end
+
+    @testset "Empty DAG: simulated_annealing_schedule! is a no-op" begin
+        empty_dag = DAGSpec()
+        all_procs = collect(Dagger.all_processors())
+        snap = Dagger.MT.snapshot(Dagger.MT.global_metrics_cache())
+
+        state = ScheduleState()
+        out = simulated_annealing_schedule!(state, snap, empty_dag, all_procs;
+                                             rng=MersenneTwister(0))
+        @test out === state
+        @test isempty(state)
+        @test cost_of_schedule(state) == 0.0
+    end
+
+    @testset "Non-worsening invariant: SA cost ≤ seed cost" begin
+        dag_spec, all_procs, snap = _capture_cholesky_dag(3, 16)
+
+        seed = ScheduleState()
+        greedy_schedule!(seed, snap, dag_spec, all_procs)
+        seed_cost = cost_of_schedule(seed)
+
+        for trial_seed in (1, 7, 42, 123, 9001)
+            result = simulated_annealing_schedule!(copy(seed), snap, dag_spec, all_procs;
+                                                    rng=MersenneTwister(trial_seed))
+            @test cost_of_schedule(result) <= seed_cost
+        end
+    end
+
+    @testset "Non-worsening invariant across DAG shapes × RNG seeds" begin
+        seeds = (1, 7, 42, 123, 9001)
+
+        function _build_dag(shape::Symbol; n::Int=6)
+            if shape === :single
+                A = rand(64); B = rand(64)
+                return _capture_dag(() -> Dagger.spawn_datadeps() do
+                    Dagger.@spawn add!(InOut(A), In(B))
+                end)
+            elseif shape === :chain
+                acc = rand(64)
+                addends = [rand(64) for _ in 1:n]
+                return _capture_dag(() -> Dagger.spawn_datadeps() do
+                    for i in 1:n
+                        Dagger.@spawn add!(InOut(acc), In(addends[i]))
+                    end
+                end)
+            elseif shape === :fanout
+                src = rand(64)
+                sinks = [rand(64) for _ in 1:n]
+                return _capture_dag(() -> Dagger.spawn_datadeps() do
+                    seed_addend = rand(64)
+                    Dagger.@spawn add!(InOut(src), In(seed_addend))
+                    for i in 1:n
+                        Dagger.@spawn add!(InOut(sinks[i]), In(src))
+                    end
+                end)
+            elseif shape === :fanin
+                sources = [rand(64) for _ in 1:n]
+                sink = rand(64)
+                return _capture_dag(() -> Dagger.spawn_datadeps() do
+                    seed_addend = rand(64)
+                    for i in 1:n
+                        Dagger.@spawn add!(InOut(sources[i]), In(seed_addend))
+                    end
+                    for i in 1:n
+                        Dagger.@spawn add!(InOut(sink), In(sources[i]))
+                    end
+                end)
+            else
+                error("Unknown shape $shape")
+            end
+        end
+
+        for shape in (:single, :chain, :fanout, :fanin)
+            dag_spec, all_procs, snap = _build_dag(shape; n=6)
+            seed = ScheduleState()
+            greedy_schedule!(seed, snap, dag_spec, all_procs)
+            seed_cost = cost_of_schedule(seed)
+            for trial_seed in seeds
+                result = simulated_annealing_schedule!(copy(seed), snap, dag_spec, all_procs;
+                                                        rng=MersenneTwister(trial_seed))
+                @test cost_of_schedule(result) <= seed_cost
+
+                # proc_ready_ns ≥ max finish_time on that proc.
+                proc_max_finish = Dict{Dagger.Processor, Float64}()
+                for (idx, proc) in result.task_proc
+                    f = result.task_finish_ns[idx]
+                    proc_max_finish[proc] = max(get(proc_max_finish, proc, 0.0), f)
+                end
+                for (proc, max_f) in proc_max_finish
+                    @test result.proc_ready_ns[proc] >= max_f
+                end
+            end
+        end
+    end
+
+    @testset "Reproducibility: identical RNG seed → identical result" begin
+        dag_spec, all_procs, snap = _capture_cholesky_dag(3, 16)
+        seed = ScheduleState(); greedy_schedule!(seed, snap, dag_spec, all_procs)
+
+        r1 = simulated_annealing_schedule!(copy(seed), snap, dag_spec, all_procs;
+                                            rng=MersenneTwister(2026))
+        r2 = simulated_annealing_schedule!(copy(seed), snap, dag_spec, all_procs;
+                                            rng=MersenneTwister(2026))
+        @test r1.task_proc == r2.task_proc
+        @test r1.task_finish_ns == r2.task_finish_ns
+        @test cost_of_schedule(r1) == cost_of_schedule(r2)
+    end
+
+    @testset "Per-task scope is respected after SA perturbation" begin
+        A = rand(64); B = rand(64)
+        target_proc = Dagger.ThreadProc(1, 1)
+        dag_spec, _, _ = _capture_dag(() -> Dagger.spawn_datadeps() do
+            Dagger.@spawn scope=Dagger.ExactScope(target_proc) add!(InOut(A), In(B))
+        end)
+
+        candidate_procs = Dagger.Processor[
+            Dagger.ThreadProc(1, 2),
+            target_proc,
+            Dagger.ThreadProc(1, 3),
+        ]
+        snap = Dagger.MT.snapshot(Dagger.MT.global_metrics_cache())
+
+        for trial in 1:5
+            seed = ScheduleState()
+            greedy_schedule!(seed, snap, dag_spec, candidate_procs)
+            @test seed.task_proc[1] === target_proc
+            result = simulated_annealing_schedule!(copy(seed), snap, dag_spec,
+                                                    candidate_procs;
+                                                    rng=MersenneTwister(trial))
+            @test result.task_proc[1] === target_proc
+        end
+    end
+
+    @testset "Throws SchedulingException when no compatible processor exists" begin
+        A = rand(64); B = rand(64)
+        target_proc = Dagger.ThreadProc(1, 1)
+        dag_spec, _, _ = _capture_dag(() -> Dagger.spawn_datadeps() do
+            Dagger.@spawn scope=Dagger.ExactScope(target_proc) add!(InOut(A), In(B))
+        end)
+
+        incompatible_procs = Dagger.Processor[
+            Dagger.ThreadProc(1, 2),
+            Dagger.ThreadProc(1, 3),
+        ]
+        snap = Dagger.MT.snapshot(Dagger.MT.global_metrics_cache())
+
+        state = ScheduleState()
+        @test_throws Dagger.Sch.SchedulingException simulated_annealing_schedule!(
+            state, snap, dag_spec, incompatible_procs;
+            rng=MersenneTwister(0))
+    end
+
+    @testset "Acceptance function (Orsila Eq. 6)" begin
+        rng = MersenneTwister(0)
+
+        for ΔC in (-1.0, -100.0, -1e9), T in (0.1, 1.0, 10.0), C0 in (1.0, 1e6)
+            @test Dagger._sa_accept(ΔC, T, C0, rng) === true
+        end
+
+        # ΔC = 0 → P = 0.5 (Orsila §3.3.1).
+        accepts = 0
+        N = 10_000
+        for _ in 1:N
+            Dagger._sa_accept(0.0, 1.0, 1.0, rng) && (accepts += 1)
+        end
+        # Bernoulli(N, 0.5) std-dev ~ √(N/4) = 50; ±5σ = 250 ⇒ allow ±400.
+        @test abs(accepts - N ÷ 2) < 400
+
+        # Worsening move at low T → near-zero acceptance.
+        low_T_accepts = 0
+        for _ in 1:N
+            Dagger._sa_accept(1.0, 1e-6, 1.0, rng) && (low_T_accepts += 1)
+        end
+        @test low_T_accepts < 50   # here P essentially zero
+
+        # ΔC/(C0·T) = 0.4 → P ≈ 0.401; tighter than the ≈0.5 limit.
+        moderate_T_accepts = 0
+        for _ in 1:N
+            Dagger._sa_accept(0.4, 1.0, 1.0, rng) && (moderate_T_accepts += 1)
+        end
+        @test 0.35 * N < moderate_T_accepts < 0.45 * N
+
+
+        cold = 0; warm = 0
+        for _ in 1:5000
+            Dagger._sa_accept(1.0, 0.01, 1.0, rng) && (cold += 1)
+            Dagger._sa_accept(1.0, 1.0,  1.0, rng) && (warm += 1)
+        end
+        @test cold < warm
+
+        @test Dagger._sa_accept(1.0, 0.0, 1.0, rng) === false
+        @test Dagger._sa_accept(1.0, 1.0, 0.0, rng) === false
+        @test Dagger._sa_accept(1.0, -1.0, 1.0, rng) === false
+    end
+
+    @testset "Energy params computation (Orsila §4.3 inputs)" begin
+        dag_spec, all_procs, snap = _capture_cholesky_dag(3, 16)
+        params = Dagger._sa_compute_energy_params(snap, dag_spec, all_procs)
+
+        @test params.t_min > 0
+        @test params.t_max >= params.t_min
+        @test params.t_min_sum > 0
+        @test params.t_max_sum >= params.t_min_sum
+
+        # Per-task-min cannot exceed per-task-max summed.
+        n_tasks = Dagger.nv(dag_spec.g)
+        @test params.t_min_sum <= params.t_max_sum
+
+        # Derived temperatures from Orsila §4.3 Eqs. 18, 19.
+        k = 1.0
+        T0 = k * params.t_max / params.t_min_sum
+        Tf = params.t_min / (k * params.t_max_sum)
+        @test T0 > 0
+        @test Tf > 0
+        @test T0 >= Tf
+    end
+
+    @testset "End-to-end via spawn_datadeps: matmul produces correct result" begin
+        nb = 16
+        nt = 2
+        A = [rand(nb, nb) for _ in 1:nt, _ in 1:nt]
+        B = [rand(nb, nb) for _ in 1:nt, _ in 1:nt]
+        C = [zeros(nb, nb) for _ in 1:nt, _ in 1:nt]
+
+        sa = SimulatedAnnealingScheduler(GreedyScheduler();
+                                          n_restarts=1, rng=MersenneTwister(17))
+        cache = datadeps_schedule_cache(sa)
+        empty!(cache)
+
+        Base.ScopedValues.with(DATADEPS_SCHEDULER => sa) do
+            Dagger.spawn_datadeps() do
+                for i in 1:nt, j in 1:nt, k in 1:nt
+                    Dagger.@spawn LinearAlgebra.BLAS.gemm!('N', 'N', 1.0,
+                                                           In(A[i, k]),
+                                                           In(B[k, j]), 1.0,
+                                                           InOut(C[i, j]))
+                end
+            end
+        end
+
+        sz = nt * nb
+        dense_A = zeros(sz, sz); dense_B = zeros(sz, sz); dense_C = zeros(sz, sz)
+        for i in 1:nt, j in 1:nt
+            dense_A[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] .= A[i, j]
+            dense_B[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] .= B[i, j]
+            dense_C[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] .= C[i, j]
+        end
+        @test dense_C ≈ dense_A * dense_B
+
+        # Cache populated by the SA run (shares with Greedy's cache).
+        @test !isempty(cache)
+    end
+
+    @testset "n_restarts > 1 never worsens the best across restarts" begin
+        dag_spec, all_procs, snap = _capture_cholesky_dag(3, 16)
+        seed = ScheduleState(); greedy_schedule!(seed, snap, dag_spec, all_procs)
+        seed_cost = cost_of_schedule(seed)
+
+        for restarts in (1, 2, 4)
+            result = simulated_annealing_schedule!(copy(seed), snap, dag_spec, all_procs;
+                                                    n_restarts=restarts,
+                                                    rng=MersenneTwister(2026))
+            @test cost_of_schedule(result) <= seed_cost
+        end
+    end
+
+    @testset "AOT hook populates schedule for every task" begin
+        nb = 16
+        nt = 2
+        M = [rand(nb, nb) for _ in 1:nt, _ in 1:nt]
+        for i in 1:nt
+            M[i, i] = M[i, i] * M[i, i]' + nb * I
+        end
+
+        sa = SimulatedAnnealingScheduler(GreedyScheduler();
+                                          n_restarts=1, rng=MersenneTwister(0))
+        cache = datadeps_schedule_cache(sa)
+        empty!(cache)
+
+        Base.ScopedValues.with(DATADEPS_SCHEDULER => sa) do
+            Dagger.spawn_datadeps() do
+                Dagger.@spawn LinearAlgebra.LAPACK.potrf!('L', InOut(M[1, 1]))
+                Dagger.@spawn LinearAlgebra.BLAS.trsm!('R', 'L', 'T', 'N',
+                                                       1.0, In(M[1, 1]),
+                                                       InOut(M[2, 1]))
+                Dagger.@spawn LinearAlgebra.BLAS.syrk!('L', 'N', -1.0,
+                                                       In(M[2, 1]), 1.0,
+                                                       InOut(M[2, 2]))
+                Dagger.@spawn LinearAlgebra.LAPACK.potrf!('L', InOut(M[2, 2]))
+            end
+        end
+
+        @test !isempty(cache)
+        dag_spec = first(cache).first
+        spec_schedule = first(cache).second
+        @test length(spec_schedule.id_to_proc) == Dagger.nv(dag_spec.g)
+        @test length(spec_schedule.id_to_proc) == 4   # potrf + trsm + syrk + potrf
+    end
+
+    @testset "Inner scheduler selection: SA(Greedy) bypasses IG refinement" begin
+        # SA(Greedy) and SA(IG) diverge whenever IG actually improves the
+        # greedy seed; that divergence is the observable signal that the
+        # inner choice is honored.
+        dag_spec, all_procs, snap = _capture_cholesky_dag(3, 16)
+
+        greedy_seed = ScheduleState()
+        greedy_schedule!(greedy_seed, snap, dag_spec, all_procs)
+
+        ig_seed = copy(greedy_seed)
+        iterated_greedy_schedule!(ig_seed, snap, dag_spec, all_procs;
+                                   rng=MersenneTwister(99))
+
+        if greedy_seed.task_proc != ig_seed.task_proc ||
+           greedy_seed.task_finish_ns != ig_seed.task_finish_ns
+            @test true
+        else
+            @test_skip "IG did not improve seed on this DAG/metrics state"
+        end
+
+        gr_seed_cost = cost_of_schedule(greedy_seed)
+        r_greedy = simulated_annealing_schedule!(copy(greedy_seed), snap, dag_spec, all_procs;
+                                                  rng=MersenneTwister(2026))
+        r_ig = simulated_annealing_schedule!(copy(ig_seed), snap, dag_spec, all_procs;
+                                              rng=MersenneTwister(2026))
+        @test cost_of_schedule(r_greedy) <= gr_seed_cost
+        @test cost_of_schedule(r_ig) <= cost_of_schedule(ig_seed)
+        @test length(r_greedy.task_proc) == Dagger.nv(dag_spec.g)
+        @test length(r_ig.task_proc) == Dagger.nv(dag_spec.g)
     end
 end

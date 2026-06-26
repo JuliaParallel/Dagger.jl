@@ -605,37 +605,50 @@ Mutates and returns `state`. The caller is responsible for providing a
 freshly-`copy(prev_state)` if the previous state must be preserved on
 rejection.
 """
-function iterated_greedy_step!(state::ScheduleState, snap::MT.MetricsSnapshot,
-                                dag_spec::DAGSpec, all_procs::Vector{Processor},
-                                destroyed::AbstractSet{Int})
-    # Snapshot per-task assignments BEFORE we start mutating `state`. The
-    # destroy/replay rewrites task_proc/task_finish_ns/proc_ready_ns
-    # incrementally, so we need a stable record of what to keep.
-    prev_task_proc = copy(state.task_proc)
-    prev_task_finish = copy(state.task_finish_ns)
+function _eft_runtime_ns(snap::MT.MetricsSnapshot, spec, proc::Processor)
+    sig = Sch.signature(spec.fargs[1], @view spec.fargs[2:end]).sig
+    worker_id = root_worker_id(proc)
+    runtime_lookup = metrics_lookup_runtime_median(snap, sig, proc, worker_id)
+    return runtime_lookup === nothing ? Float64(GREEDY_DEFAULT_RUNTIME_NS) : Float64(runtime_lookup)
+end
 
+# Replays the schedule in increasing task-index order: destroyed tasks are
+# reassigned via `greedy_assign_task!`; preserved tasks keep their proc but
+# their finish times are recomputed fresh from the now-current state. The
+# recompute (rather than preserving stale finish times) is required for SA
+# to evaluate ΔC against the schedule's true makespan.
+function _replay_schedule!(state::ScheduleState, snap::MT.MetricsSnapshot,
+                            dag_spec::DAGSpec, all_procs::Vector{Processor},
+                            destroyed::AbstractSet{Int})
+    prev_task_proc = copy(state.task_proc)
     empty!(state)
 
     @inbounds for idx in 1:nv(dag_spec.g)
         if idx in destroyed
-            # Reassigned via the greedy primitive. greedy_assign_task! reads
-            # data-ready times from already-scheduled deps in `state`, so
-            # walking in increasing-id order keeps every dependency present
-            # before its dependents (parents are added before children).
             greedy_assign_task!(state, snap, dag_spec, all_procs, idx)
         else
-            # Preserve the prior assignment. We still need to maintain the
-            # ScheduleState invariants so downstream tasks see correct
-            # finish times and proc-ready times.
             proc = prev_task_proc[idx]
-            finish_ns = prev_task_finish[idx]
+            spec = dag_spec.id_to_spec[idx]
+            target_space = only(memory_spaces(proc))
+            data_ready_ns = _greedy_earliest_data_ready_ns(snap, dag_spec, spec, target_space, state)
+            proc_avail = get(state.proc_ready_ns, proc, 0.0)
+            start_ns = max(data_ready_ns, proc_avail)
+
+            runtime_ns = _eft_runtime_ns(snap, spec, proc)
+            finish = start_ns + runtime_ns
+
             state.task_proc[idx] = proc
-            state.task_finish_ns[idx] = finish_ns
-            cur = get(state.proc_ready_ns, proc, 0.0)
-            state.proc_ready_ns[proc] = max(cur, finish_ns)
+            state.task_finish_ns[idx] = finish
+            state.proc_ready_ns[proc] = max(get(state.proc_ready_ns, proc, 0.0), finish)
         end
     end
     return state
+end
+
+function iterated_greedy_step!(state::ScheduleState, snap::MT.MetricsSnapshot,
+                                dag_spec::DAGSpec, all_procs::Vector{Processor},
+                                destroyed::AbstractSet{Int})
+    return _replay_schedule!(state, snap, dag_spec, all_procs, destroyed)
 end
 
 """
@@ -731,6 +744,295 @@ function datadeps_schedule_dag_aot!(scheduler::IteratedGreedyScheduler,
     return
 end
 
+### Simulated Annealing ###
+
+# Defaults follow Orsila, Salminen, Hämäläinen 2008 §4.3 and §5.3.
+const SA_DEFAULT_Q = 0.95
+const SA_DEFAULT_K = 1.0
+const SA_DEFAULT_N_RESTARTS = 1
+const SA_TF_FLOOR = 1e-12
+
+"""
+    SimulatedAnnealingScheduler{S<:DataDepsScheduler, R<:Random.AbstractRNG} <: DataDepsScheduler
+
+Simulated annealing (Kirkpatrick et al. 1983) over the same EFT cost model
+used by `GreedyScheduler` and `IteratedGreedyScheduler`. The algorithm
+follows the best-practice parameterization of Orsila et al. (2008):
+geometric cooling, normalized inverse exponential acceptance, coupled
+temperature-and-rejection termination, and the closed-form temperature
+range of their §4.3 derived from the per-(task, processor) runtime
+distribution.
+
+Fields:
+- `inner::S`            — initial-solution provider. Default
+                          `IteratedGreedyScheduler()` so SA refines an
+                          already-improved seed (proposal §2.3). Only
+                          `GreedyScheduler` and `IteratedGreedyScheduler`
+                          inners are honored as seed sources; any other
+                          subtype is treated as a Greedy seed.
+- `q::Float64`          — geometric cooling factor in (0, 1).
+- `k::Float64`          — coefficient `k > 0` in Orsila §4.3 Eqs. 18, 19.
+- `n_restarts::Int`     — independent SA runs, each seeded from the
+                          best-known solution so far (Orsila §5.3 rule 7).
+- `rng::R`              — RNG used for moves and acceptance sampling.
+                          The `rng` is mutated during scheduling, so a
+                          single `SimulatedAnnealingScheduler` instance
+                          must not be shared across concurrent
+                          `spawn_datadeps` blocks.
+
+The schedule cache and DAG-equivalence hooks are delegated to `inner`, so
+cached schedules remain partitioned per inner-scheduler type.
+"""
+struct SimulatedAnnealingScheduler{S<:DataDepsScheduler, R<:Random.AbstractRNG} <: DataDepsScheduler
+    inner::S
+    q::Float64
+    k::Float64
+    n_restarts::Int
+    rng::R
+
+    function SimulatedAnnealingScheduler(inner::S;
+                                          q::Real=SA_DEFAULT_Q,
+                                          k::Real=SA_DEFAULT_K,
+                                          n_restarts::Integer=SA_DEFAULT_N_RESTARTS,
+                                          rng::R=Random.default_rng()) where {S<:DataDepsScheduler, R<:Random.AbstractRNG}
+        (0 < q < 1) || throw(ArgumentError("SimulatedAnnealingScheduler: q must be in (0, 1), got $q"))
+        k > 0 || throw(ArgumentError("SimulatedAnnealingScheduler: k must be > 0, got $k"))
+        n_restarts >= 1 || throw(ArgumentError("SimulatedAnnealingScheduler: n_restarts must be ≥ 1, got $n_restarts"))
+        return new{S, R}(inner, Float64(q), Float64(k), Int(n_restarts), rng)
+    end
+end
+
+SimulatedAnnealingScheduler(; kwargs...) =
+    SimulatedAnnealingScheduler(IteratedGreedyScheduler(); kwargs...)
+
+datadeps_schedule_cache(sched::SimulatedAnnealingScheduler) =
+    datadeps_schedule_cache(sched.inner)
+datadeps_dag_equivalent(sched::SimulatedAnnealingScheduler, dspec1::DAGSpec, dspec2::DAGSpec) =
+    datadeps_dag_equivalent(sched.inner, dspec1, dspec2)
+datadeps_argspec_equivalent(sched::SimulatedAnnealingScheduler, a1::DatadepsArgSpec, a2::DatadepsArgSpec) =
+    datadeps_argspec_equivalent(sched.inner, a1, a2)
+datadeps_ainfo_equivalent(sched::SimulatedAnnealingScheduler, a1::AbstractAliasing, a2::AbstractAliasing) =
+    datadeps_ainfo_equivalent(sched.inner, a1, a2)
+
+# Cost-matrix aggregates for the Orsila §4.3 closed-form T0/Tf.
+struct SAEnergyParams
+    t_min::Float64
+    t_max::Float64
+    t_min_sum::Float64
+    t_max_sum::Float64
+end
+
+function _sa_compatible_procs(spec, all_procs::Vector{Processor})
+    task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
+    return filter(p -> proc_in_scope(p, task_scope), all_procs)
+end
+
+function _sa_compute_energy_params(snap::MT.MetricsSnapshot, dag_spec::DAGSpec,
+                                    all_procs::Vector{Processor})
+    n_tasks = nv(dag_spec.g)
+    n_tasks == 0 && return SAEnergyParams(0.0, 0.0, 0.0, 0.0)
+
+    t_min = Inf
+    t_max = 0.0
+    t_min_sum = 0.0
+    t_max_sum = 0.0
+
+    @inbounds for idx in 1:n_tasks
+        spec = dag_spec.id_to_spec[idx]
+        compatible = _sa_compatible_procs(spec, all_procs)
+        if isempty(compatible)
+            throw(Sch.SchedulingException("SimulatedAnnealingScheduler: no compatible processor for task $idx"))
+        end
+
+        task_min = Inf
+        task_max = 0.0
+        for proc in compatible
+            r = _eft_runtime_ns(snap, spec, proc)
+            r < task_min && (task_min = r)
+            r > task_max && (task_max = r)
+        end
+
+        t_min = min(t_min, task_min)
+        t_max = max(t_max, task_max)
+        t_min_sum += task_min
+        t_max_sum += task_max
+    end
+
+    return SAEnergyParams(t_min, t_max, t_min_sum, t_max_sum)
+end
+
+# Normalized inverse exponential acceptance (Orsila Eq. 6). ΔC = 0 yields
+# P = 0.5 by design (Orsila §3.3.1), letting SA drift between equally-good
+# solutions.
+function _sa_accept(ΔC::Float64, T::Float64, C0::Float64, rng::Random.AbstractRNG)
+    ΔC < 0 && return true
+    denom = C0 * T
+    denom <= 0 && return false
+    arg = ΔC / denom
+    arg > 700.0 && return false   # exp(arg) overflows; P ≈ 0
+    return rand(rng) < 1.0 / (1.0 + exp(arg))
+end
+
+# Single-task move per Orsila §3.6.1. The current proc is excluded from
+# the alternative set (Orsila §3.6) so the move is never a no-op when the
+# task has at least one other compatible proc.
+function _sa_propose_neighbor!(candidate::ScheduleState, snap::MT.MetricsSnapshot,
+                                dag_spec::DAGSpec, all_procs::Vector{Processor},
+                                rng::Random.AbstractRNG)
+    n_tasks = nv(dag_spec.g)
+    n_tasks == 0 && return candidate
+
+    task_idx = rand(rng, 1:n_tasks)
+    spec = dag_spec.id_to_spec[task_idx]
+    compatible = _sa_compatible_procs(spec, all_procs)
+    current_proc = candidate.task_proc[task_idx]
+    alternatives = filter(p -> p !== current_proc, compatible)
+    isempty(alternatives) && return candidate   # forced assignment; no-op move
+
+    new_proc = rand(rng, alternatives)
+    candidate.task_proc[task_idx] = new_proc
+
+    _replay_schedule!(candidate, snap, dag_spec, all_procs, Set{Int}())
+    return candidate
+end
+
+"""
+    simulated_annealing_schedule!(state, snap, dag_spec, all_procs;
+                                  q, k, n_restarts, rng) -> ScheduleState
+
+SA refinement on top of an already-initialized `state`. Returns the best
+`ScheduleState` found across `n_restarts` independent runs, each judged by
+`cost_of_schedule` and accepted via Orsila's normalized inverse exponential
+rule. The initial and final temperatures are derived in closed form from
+the snapshot's EFT cost matrix per Orsila §4.3:
+
+    T0 = k * t_max / t_min_sum         (Eq. 18)
+    Tf = t_min / (k * t_max_sum)       (Eq. 19)
+
+Inner-loop length is `L = K · max(W − 1, 1)` (§5.3 rule 1), termination is
+the coupled `Temp(i) ≤ Tf ∧ R ≥ Rmax` with `Rmax = L` (§3.9.6, §5.3
+rule 4), and the best-known solution is preserved across restarts so SA
+never returns a state worse than `state`.
+
+Exposed as a primitive (alongside `greedy_schedule!` and
+`iterated_greedy_schedule!`) for reuse by hybrid pipelines.
+"""
+function simulated_annealing_schedule!(state::ScheduleState, snap::MT.MetricsSnapshot,
+                                        dag_spec::DAGSpec, all_procs::Vector{Processor};
+                                        q::Real=SA_DEFAULT_Q, k::Real=SA_DEFAULT_K,
+                                        n_restarts::Integer=SA_DEFAULT_N_RESTARTS,
+                                        rng::Random.AbstractRNG=Random.default_rng())
+    (0 < q < 1) || throw(ArgumentError("simulated_annealing_schedule!: q must be in (0, 1)"))
+    k > 0 || throw(ArgumentError("simulated_annealing_schedule!: k must be > 0"))
+    n_restarts >= 1 || throw(ArgumentError("simulated_annealing_schedule!: n_restarts must be ≥ 1"))
+
+    n_tasks = nv(dag_spec.g)
+    n_tasks == 0 && return state
+
+    params = _sa_compute_energy_params(snap, dag_spec, all_procs)
+
+    # Guarding the closed-form against divide-by-zero / degenerate ranges.
+    (params.t_min_sum <= 0 || params.t_max_sum <= 0) && return state
+
+    T0 = Float64(k) * params.t_max / params.t_min_sum
+    Tf = max(params.t_min / (Float64(k) * params.t_max_sum), SA_TF_FLOOR)
+    T0 <= Tf && return state
+
+    W = length(all_procs)
+    L = max(1, n_tasks * max(W - 1, 1))   # Orsila §5.3 rule 1
+    Rmax = L                              # Orsila §5.3 rule 4
+    C0 = max(cost_of_schedule(state), 1.0)   # Orsila §3.5.4
+
+    overall_best = copy(state)
+    overall_best_cost = cost_of_schedule(overall_best)
+
+    # Safety cap on iterations per restart (16× the expected count).
+    expected_levels = max(1, ceil(Int, log(Tf / T0) / log(Float64(q))))
+    max_iters_per_restart = 16 * L * expected_levels
+
+    for _ in 1:n_restarts
+        current = copy(overall_best)
+        current_cost = overall_best_cost
+        best_in_run = copy(current)
+        best_in_run_cost = current_cost
+
+        T = T0
+        R = 0
+        iters_at_level = 0
+        total_iters = 0
+
+        while true
+            (T <= Tf && R >= Rmax) && break
+            total_iters >= max_iters_per_restart && break
+
+            candidate = copy(current)
+            _sa_propose_neighbor!(candidate, snap, dag_spec, all_procs, rng)
+            new_cost = cost_of_schedule(candidate)
+            ΔC = new_cost - current_cost
+
+            if _sa_accept(ΔC, T, C0, rng)
+                current = candidate
+                current_cost = new_cost
+                if current_cost < best_in_run_cost
+                    best_in_run = copy(current)
+                    best_in_run_cost = current_cost
+                end
+                R = 0
+            else
+                R += 1
+            end
+
+            iters_at_level += 1
+            total_iters += 1
+            if iters_at_level >= L
+                T *= Float64(q)
+                iters_at_level = 0
+            end
+        end
+
+        if best_in_run_cost < overall_best_cost
+            overall_best = best_in_run
+            overall_best_cost = best_in_run_cost
+        end
+    end
+
+    state.task_proc      = copy(overall_best.task_proc)
+    state.task_finish_ns = copy(overall_best.task_finish_ns)
+    state.proc_ready_ns  = copy(overall_best.proc_ready_ns)
+    return state
+end
+
+function datadeps_schedule_dag_aot!(scheduler::SimulatedAnnealingScheduler,
+                                    schedule, dag_spec, all_procs, all_scope)
+    n_tasks = nv(dag_spec.g)
+    n_tasks == 0 && return
+
+    snap = MT.snapshot(MT.global_metrics_cache())
+
+    # Seed: greedy, then IG refinement when inner is IG (proposal §2.3).
+    seed_state = ScheduleState()
+    greedy_schedule!(seed_state, snap, dag_spec, all_procs)
+
+    if scheduler.inner isa IteratedGreedyScheduler
+        ig = scheduler.inner
+        seed_state = iterated_greedy_schedule!(seed_state, snap, dag_spec, all_procs;
+                                                n_iters=ig.n_iters,
+                                                destroy_frac=ig.destroy_frac,
+                                                rng=ig.rng)
+    end
+
+    final_state = simulated_annealing_schedule!(seed_state, snap, dag_spec, all_procs;
+                                                 q=scheduler.q, k=scheduler.k,
+                                                 n_restarts=scheduler.n_restarts,
+                                                 rng=scheduler.rng)
+
+    @inbounds for idx in 1:n_tasks
+        task = dag_spec.id_to_task[idx]
+        schedule[task] = final_state.task_proc[idx]
+    end
+    return
+end
+
 struct LayeredScheduler <: DataDepsScheduler end
 function datadeps_schedule_dag_aot!(scheduler::LayeredScheduler, schedule, dag_spec, all_procs, all_scope)
     layer = 1
@@ -748,7 +1050,6 @@ function datadeps_schedule_dag_aot!(scheduler::LayeredScheduler, schedule, dag_s
                 # We only care about write dependencies
                 writedep || continue
 
-                # Get the raw argument
                 raw_arg = arg isa DTask ? fetch(arg; raw=true) : arg
 
                 push!(task_raw_args, raw_arg)
@@ -757,7 +1058,6 @@ function datadeps_schedule_dag_aot!(scheduler::LayeredScheduler, schedule, dag_s
 
         # Determine if this task stays in this layer
         if any(raw_arg -> raw_arg in layer_data, task_raw_args)
-            # This argument is already written by a previous task in this layer
             # Generate new layer
             layer += 1
             empty!(layer_data)
