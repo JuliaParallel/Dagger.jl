@@ -180,9 +180,10 @@ const DEFAULT_WARMUP = 1
 # trial needs a fresh copy.
 function default_scheduler_factories()
     return [
-        "RoundRobinScheduler"    => () -> Dagger.RoundRobinScheduler(),
-        "GreedyScheduler"        => () -> Dagger.GreedyScheduler(),
-        "IteratedGreedyScheduler" => () -> Dagger.IteratedGreedyScheduler(),
+        "RoundRobinScheduler"        => () -> Dagger.RoundRobinScheduler(),
+        "GreedyScheduler"            => () -> Dagger.GreedyScheduler(),
+        "IteratedGreedyScheduler"    => () -> Dagger.IteratedGreedyScheduler(),
+        "SimulatedAnnealingScheduler" => () -> Dagger.SimulatedAnnealingScheduler(),
     ]
 end
 
