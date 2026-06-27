@@ -31,11 +31,12 @@ end
 
 Base.view(c::DTask, slices...) = view(fetch(c; raw=true), slices...)
 
-function aliasing(x::ChunkView{N}) where N
+function aliasing(accel::Acceleration, x::ChunkView{N}, dep_mod) where N
+    @assert dep_mod === identity "Dependency modifiers not yet supported for ChunkView: $dep_mod"
     return remotecall_fetch(root_worker_id(x.chunk.processor), x.chunk, x.slices) do x, slices
         x = unwrap(x)
         v = view(x, slices...)
-        return aliasing(v)
+        return aliasing(accel, v, dep_mod)
     end
 end
 memory_space(x::ChunkView) = memory_space(x.chunk)
