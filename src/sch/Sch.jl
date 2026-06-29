@@ -15,7 +15,7 @@ import Base: @invokelatest
 
 import ..Dagger
 import ..Dagger: Context, Processor, SchedulerOptions, Options, Thunk, WeakThunk, ThunkFuture, ThunkID, DTaskFailedException, Chunk, WeakChunk, OSProc, AnyScope, DefaultScope, InvalidScope, LockedObject, Argument, Signature
-import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak_checked, wrap_weak, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, default_enabled, processor, get_processors, get_parent, execute!, rmprocs!, task_processor, constrain, cputhreadtime, maybe_take_or_alloc!
+import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak, unwrap_weak_checked, wrap_weak, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, default_enabled, processor, get_processors, get_parent, execute!, rmprocs!, task_processor, constrain, cputhreadtime, maybe_take_or_alloc!
 import ..Dagger: @dagdebug, @safe_lock_spin1, @maybelog, @take_or_alloc!
 import DataStructures: PriorityQueue
 
@@ -53,10 +53,7 @@ Fields:
 - `waiting::OneToMany` - Map from downstream `Thunk` to upstream `Thunk`s that still need to execute
 - `waiting_data::Dict{Union{Thunk,Chunk},Set{Thunk}}` - Map from input `Chunk`/upstream `Thunk` to all unfinished downstream `Thunk`s, to retain caches
 - `ready::Vector{Thunk}` - The list of `Thunk`s that are ready to execute
-- `cache::WeakKeyDict{Thunk, Any}` - Maps from a finished `Thunk` to it's cached result, often a DRef
-- `valid::WeakKeyDict{Thunk, Nothing}` - Tracks all `Thunk`s that are in a valid scheduling state
-- `running::Set{Thunk}` - The set of currently-running `Thunk`s
-- `running_on::Dict{Thunk,OSProc}` - Map from `Thunk` to the OS process executing it
+- `running_count::Threads.Atomic{Int}` - Number of currently-running `Thunk`s (replaces `running::Set{Thunk}`; per-thunk state lives on `thunk.running` and `thunk.running_on`)
 - `thunk_dict::Dict{Int, WeakThunk}` - Maps from thunk IDs to a `Thunk`
 - `node_order::Any` - Function that returns the order of a thunk
 - `equiv_chunks::WeakKeyDict{DRef,Chunk}` - Cache mapping from `DRef` to a `Chunk` which contains it
@@ -71,18 +68,18 @@ Fields:
 - `halt::Base.Event` - Event indicating that the scheduler is halting
 - `lock::ReentrantLock` - Lock around operations which modify the state
 - `futures::Dict{Thunk, Vector{ThunkFuture}}` - Futures registered for waiting on the result of a thunk.
-- `errored::WeakKeyDict{Thunk,Bool}` - Indicates if a thunk's result is an error.
 - `thunks_to_delete::Set{Thunk}` - The list of `Thunk`s ready to be deleted upon completion.
 - `chan::RemoteChannel{Channel{AnyTaskResult}}` - Channel for receiving completed thunks.
+
+Note: `errored`, `valid`, `running`, and `running_on` per-thunk state now live directly on
+`Thunk` fields (`thunk.errored`, `thunk.valid`, `thunk.running`, `thunk.running_on`).
 """
 struct ComputeState
     uid::UInt64
     waiting::OneToMany
     waiting_data::Dict{Union{Thunk,Chunk},Set{Thunk}}
     ready::Vector{Thunk}
-    valid::Dict{Thunk, Nothing}
-    running::Set{Thunk}
-    running_on::Dict{Thunk,OSProc}
+    running_count::Threads.Atomic{Int}
     thunk_dict::Dict{Int, WeakThunk}
     node_order::Any
     equiv_chunks::WeakKeyDict{DRef,Chunk}
@@ -102,7 +99,6 @@ struct ComputeState
     halt_cancelled::Threads.Atomic{Bool}
     lock::ReentrantLock
     futures::Dict{Thunk, Vector{ThunkFuture}}
-    errored::Dict{Thunk,Bool}
     thunks_to_delete::Set{Thunk}
     chan::RemoteChannel{Channel{AnyTaskResult}}
 end
@@ -114,9 +110,7 @@ function start_state(deps::Dict, node_order, chan)
                          OneToMany(),
                          deps,
                          Vector{Thunk}(undef, 0),
-                         Dict{Thunk, Nothing}(),
-                         Set{Thunk}(),
-                         Dict{Thunk,OSProc}(),
+                         Threads.Atomic{Int}(0),
                          Dict{Int, WeakThunk}(),
                          node_order,
                          WeakKeyDict{DRef,Chunk}(),
@@ -132,7 +126,6 @@ function start_state(deps::Dict, node_order, chan)
                          Threads.Atomic{Bool}(false),
                          ReentrantLock(),
                          Dict{Thunk, Vector{ThunkFuture}}(),
-                         Dict{Thunk,Bool}(),
                          Set{Thunk}(),
                          chan)
 
@@ -144,7 +137,7 @@ function start_state(deps::Dict, node_order, chan)
             else
                 state.waiting[k] = waiting
             end
-            state.valid[k] = nothing
+            @atomic k.valid = true
         end
     end
     state
@@ -376,7 +369,7 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options::SchedulerOpt
     safepoint(state)
 
     # Loop while we still have thunks to execute
-    while !isempty(state.ready) || !isempty(state.running)
+    while !isempty(state.ready) || state.running_count[] > 0
         if !isempty(state.ready)
             # Nothing running, so schedule up to N thunks, 1 per N workers
             @invokelatest schedule!(ctx, state, options)
@@ -384,7 +377,7 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options::SchedulerOpt
 
         check_workers_available(ctx, options)
 
-        isempty(state.running) && continue
+        state.running_count[] == 0 && continue
         @maybelog ctx timespan_start(ctx, :take, (;uid=state.uid), nothing)
         @dagdebug nothing :take "Waiting for results"
         tresult = take!(state.chan) # get result of completed thunk
@@ -488,7 +481,7 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options::SchedulerOpt
 
     # Final value is ready
     value = load_result(state, d)
-    errored = get(state.errored, d, false)
+    errored = (@atomic d.errored)
     if !errored
         if options.checkpoint !== nothing
             try
@@ -592,7 +585,7 @@ end
         @dagdebug task :schedule "Scheduling task"
         @maybelog ctx timespan_start(ctx, :schedule, (;uid=state.uid, thunk_id=task.id), (;thunk_id=task.id))
         if has_result(state, task)
-            if haskey(state.errored, task)
+            if (@atomic task.errored)
                 # An error was eagerly propagated to this task
                 @dagdebug task :schedule "Task received upstream error, finishing"
                 set_failed!(state, task)
@@ -777,8 +770,9 @@ end
 
 function finish_task!(ctx, state, node, thunk_failed)
     @dagdebug node :finish "Finishing with $(thunk_failed ? "error" : "result")"
-    pop!(state.running, node)
-    delete!(state.running_on, node)
+    @atomic node.running = false
+    node.running_on = nothing
+    Threads.atomic_sub!(state.running_count, 1)
     if thunk_failed
         set_failed!(state, node; ex=load_result(state, node))
     end
@@ -808,8 +802,8 @@ function delete_unused_task!(state, thunk)
 end
 function task_delete!(state, thunk)
     clear_result!(state, thunk)
-    delete!(state.valid, thunk)
-    delete!(state.errored, thunk)
+    @atomic thunk.valid = false
+    @atomic thunk.errored = false
     delete!(state.thunk_dict, thunk.id)
 end
 
@@ -856,8 +850,9 @@ Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
     to_send_cleanup = @reuse_defer_cleanup empty!(to_send)
     for task_spec in task_specs
         thunk = task_spec.task
-        push!(state.running, thunk)
-        state.running_on[thunk] = gproc
+        @atomic thunk.running = true
+        thunk.running_on = gproc
+        Threads.atomic_add!(state.running_count, 1)
         @assert !has_result(state, thunk)
         if thunk.options.restore !== nothing
             try

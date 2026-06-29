@@ -81,12 +81,12 @@ function store_result!(state, thunk, value; error::Bool=false)
     else
         thunk.cache_ref = Some{Any}(value)
     end
-    state.errored[thunk] = error
+    @atomic thunk.errored = error
 end
 function clear_result!(state, thunk)
     @assert islocked(state.lock)
     thunk.cache_ref = nothing
-    delete!(state.errored, thunk)
+    @atomic thunk.errored = false
 end
 
 "Fills the result for all registered futures of `thunk`."
@@ -178,10 +178,10 @@ function reschedule_syncdeps!(state, thunk, seen=nothing)
         while !isempty(to_visit)
             thunk = pop!(to_visit)
             push!(seen, thunk)
-            if haskey(state.valid, thunk)
+            if (@atomic thunk.valid)
                 continue
             end
-            if thunk.finished || (thunk in state.ready) || (thunk in state.running)
+            if thunk.finished || (thunk in state.ready) || (@atomic thunk.running)
                 continue
             end
             for idx in 1:length(thunk.inputs)
@@ -206,14 +206,14 @@ function reschedule_syncdeps!(state, thunk, seen=nothing)
                     push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
 
                     # Unseen task
-                    if get(state.errored, input, false)
+                    if (@atomic input.errored)
                         set_failed!(state, input, thunk)
                     end
                     input.finished && continue
 
                     # Unseen and unfinished task
                     push!(w, input)
-                    if !((input in state.running) || (input in state.ready))
+                    if !((@atomic input.running) || (input in state.ready))
                         push!(to_visit, input)
                     end
                 end
@@ -221,7 +221,7 @@ function reschedule_syncdeps!(state, thunk, seen=nothing)
             if isempty(w)
                 # Inputs are ready
                 delete!(state.waiting, thunk)
-                if !get(state.errored, thunk, false)
+                if !(@atomic thunk.errored)
                     push!(state.ready, thunk)
                 end
             end
@@ -264,7 +264,7 @@ function set_failed!(state, origin::Thunk, thunk::Thunk=origin; ex=nothing)
         fill_registered_futures!(state, thunk, true)
         if haskey(state.waiting_data, thunk)
             for dep in state.waiting_data[thunk]
-                haskey(state.errored, dep) && continue
+                (@atomic dep.errored) && continue
                 dep in seen && continue
                 push!(to_visit, dep)
             end
@@ -288,12 +288,12 @@ end
 function print_sch_status(io::IO, state, thunk; offset=0, limit=5, max_inputs=3)
     function status_string(node)
         status = ""
-        if get(state.errored, node, false)
+        if (@atomic node.errored)
             status *= "E"
         end
         if node in state.ready
             status *= "r"
-        elseif node in state.running
+        elseif (@atomic node.running)
             status *= "R"
         elseif has_result(state, node)
             status *= "C"
@@ -304,7 +304,7 @@ function print_sch_status(io::IO, state, thunk; offset=0, limit=5, max_inputs=3)
     end
     if offset == 0
         println(io, "Ready ($(length(state.ready))): $(join(map(t->t.id, state.ready), ','))")
-        println(io, "Running: ($(length(state.running))): $(join(map(t->t.id, collect(state.running)), ','))")
+        println(io, "Running ($(state.running_count[])): (use thunk.running to inspect individual tasks)")
         print(io, "($(status_string(thunk))) ")
     end
     println(io, "$(thunk.id): $(thunk.f)")

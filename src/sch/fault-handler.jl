@@ -30,13 +30,16 @@ function handle_fault(ctx, state, deadproc)
         end
     end
     # Remove thunks that were running on the worker
-    for t in collect(keys(state.running_on))
-        pid = state.running_on[t].pid
-        if pid == deadproc.pid
-            push!(deadlist, t)
-            delete!(state.running_on, t)
-            pop!(state.running, t)
-        end
+    for (_, wt) in state.thunk_dict
+        t = unwrap_weak(wt)
+        t === nothing && continue
+        ron = t.running_on
+        ron === nothing && continue
+        ron.pid == deadproc.pid || continue
+        push!(deadlist, t)
+        t.running_on = nothing
+        @atomic t.running = false
+        Threads.atomic_sub!(state.running_count, 1)
     end
     # Clear thunk.cache_ref
     for t in deadlist

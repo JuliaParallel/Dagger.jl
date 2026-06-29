@@ -180,7 +180,7 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
                     Sch._register_future!(ctx, state, task, tid, (future, thunk_id, false))
                     @dagdebug thunk :submit "Registered future"
                 end
-                state.valid[thunk] = nothing
+                @atomic thunk.valid = true
 
                 # Register Eager UID -> Sch TID
                 lock(Sch.EAGER_ID_MAP) do id_map

@@ -161,7 +161,18 @@ function _cancel!(state, tid, force, graceful, halt_sch)
     end
 
     # Cancel running tasks at the processor level
-    wids = unique(map(root_worker_id, values(state.running_on)))
+    wids = begin
+        _wids = Int[]
+        for (_, wt) in state.thunk_dict
+            t = Dagger.unwrap_weak(wt)
+            t === nothing && continue
+            ron = t.running_on
+            ron === nothing && continue
+            push!(_wids, Dagger.root_worker_id(ron))
+        end
+        unique!(_wids)
+        _wids
+    end
     for wid in wids
         remotecall_fetch(wid, tid, sch_uid, force) do _tid, sch_uid, force
             states = Dagger.Sch.proc_states(sch_uid)
@@ -253,7 +264,7 @@ function _cancel!(state, tid, force, graceful, halt_sch)
             deadline = time() + 5.0
             while time() < deadline
                 drained = @lock state.lock begin
-                    isempty(state.running_on) && isempty(state.futures)
+                    state.running_count[] == 0 && isempty(state.futures)
                 end
                 drained && break
                 sleep(0.05)

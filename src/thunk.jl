@@ -61,11 +61,16 @@ mutable struct Thunk
     eager_accessible::Bool
     sch_accessible::Bool
     finished::Bool
+    @atomic errored::Bool          # true if finished with an error result
+    @atomic valid::Bool            # true while registered with the scheduler
+    @atomic running::Bool          # true while a worker is executing this thunk
+    running_on::Union{OSProc,Nothing}  # which OSProc is running this thunk
     function Thunk(spec::ThunkSpec)
         return new(spec.fargs, spec.id,
                    spec.cache_ref, spec.affinity,
                    spec.options,
-                   true, true, false)
+                   true, true, false,
+                   false, false, false, nothing)
     end
 end
 function Thunk(f, xs...;
