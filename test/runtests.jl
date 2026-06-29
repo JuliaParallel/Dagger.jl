@@ -11,6 +11,11 @@ USE_GPU = USE_CUDA || USE_ROCM || USE_ONEAPI || USE_METAL || USE_OPENCL
 # is only a weak dependency, and is `Pkg.add`ed on demand by that job.
 USE_ENZYME = parse(Bool, get(ENV, "CI_ENZYME", "0"))
 
+# Exploratory autodiff tests for non-Enzyme DifferentiationInterface backends
+# (ForwardDiff/ReverseDiff/FiniteDiff/FiniteDifferences). These run in a
+# dedicated, non-blocking job and are not expected to all pass yet.
+USE_DI_BACKENDS = parse(Bool, get(ENV, "CI_DI_BACKENDS", "0"))
+
 tests = [
     ("Thunk", "thunk.jl"),
     ("Scheduler", "scheduler.jl"),
@@ -63,6 +68,12 @@ if USE_ENZYME
     # Only run the autodiff tests in the Enzyme job.
     tests = [
         ("Autodiff - Enzyme", "enzyme.jl"),
+    ]
+end
+if USE_DI_BACKENDS
+    # Only run the exploratory DI-backend autodiff tests in their own job.
+    tests = [
+        ("Autodiff - DI Backends", "di_backends.jl"),
     ]
 end
 all_test_names = map(test -> replace(last(test), ".jl"=>""), tests)

@@ -161,6 +161,40 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
+  di-backends:
+    name: Julia ${{ matrix.version }} - Autodiff (DI backends, exploratory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    # Exploratory: these non-Enzyme DifferentiationInterface backends are not
+    # expected to all pass yet, so this job is allowed to fail without blocking.
+    continue-on-error: true
+    if: ${{ !contains(github.event.head_commit.message, '[skip tests]') }}
+    env:
+      JULIA_NUM_THREADS: '1'
+      CI_DI_BACKENDS: '1'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {version: '1', arch: x64}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.version }}
+          arch: ${{ matrix.arch }}
+      - uses: julia-actions/cache@v2
+      - name: Develop local TimespanLogging
+        run: julia --project=. -e 'using Pkg; Pkg.develop(path="lib/TimespanLogging")'
+      - name: Instantiate main project
+        run: julia --project=. -e 'using Pkg; Pkg.instantiate()'
+      # Add DifferentiationInterface and the candidate backends to the test
+      # environment on demand.
+      - name: Add DI backends to test environment
+        run: julia --project=test -e 'using Pkg; Pkg.develop(path="lib/TimespanLogging"); Pkg.add(["DifferentiationInterface", "ForwardDiff", "ReverseDiff", "FiniteDiff", "FiniteDifferences"]); Pkg.instantiate()'
+      - name: Run DI-backend autodiff tests
+        run: julia test/runtests.jl -p 0
+
   opencl:
     name: Julia 1.11 (OpenCL)
     runs-on: ubuntu-latest

@@ -31,6 +31,7 @@ makedocs(;
             "Basics" => "datadeps.md",
             "Stencils" => "stencils.md",
         ],
+        "Automatic Differentiation" => "autodiff.md",
         "GPUs" => "gpu.md",
         "Option Propagation" => "propagation.md",
         "Logging and Visualization" => [
