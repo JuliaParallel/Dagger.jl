@@ -64,7 +64,7 @@ import Dagger: DTaskPair, DTaskSpec, AbstractTaskQueue, enqueue!, Options
 import Dagger: value, ispositional, iskw, pos_kw, raw_position, istask
 import Dagger: arg_deps_from_options, arg_alias_from_options
 import DifferentiationInterface as DI
-using LinearAlgebra: LinearAlgebra, UnitLowerTriangular, UpperTriangular, tril, triu, LU
+using LinearAlgebra: LinearAlgebra, UnitLowerTriangular, LowerTriangular, UpperTriangular, Diagonal, tril, triu, LU
 
 const DArrayLike = Dagger.DArray
 
@@ -107,6 +107,57 @@ function EnzymeRules.reverse(config::EnzymeRules.RevConfig,
     Fbar = tril(L' * Lbar, -1) + triu(Ubar * U')
     Abar .= (L') \ (Fbar / (U'))   # Ā = L⁻ᴴ F̄ U⁻ᴴ
     return (nothing, nothing)
+end
+
+# -----------------------------------------------------------------------------
+# Custom Enzyme rule: reverse-mode VJP of the Cholesky panel kernel
+# -----------------------------------------------------------------------------
+# Dagger's tiled `cholesky` factors each diagonal block with `potrf_checked!`
+# (wrapping `LAPACK.potrf!`) and updates the rest with BLAS `trsm!`/`syrk!`/
+# `herk!`/`gemm!`. Enzyme differentiates the BLAS kernels natively but cannot
+# differentiate `potrf!` (LAPACK), so we supply the standard symmetric Cholesky
+# pullback (Murray 2016 / ChainRules) for the in-place panel:
+#
+#   uplo='U': A = UᴴU, factor U upper      uplo='L': A = LLᴴ, factor L lower
+#   Φ(M) = tril(M) with halved diagonal
+#   S = U⁻¹ Φ(U Ūᴴ) U⁻ᴴ                    S = L⁻ᴴ Φ(Lᴴ L̄) L⁻¹
+#
+# `potrf!` references only the `uplo` triangle of `A`, so the adjoint w.r.t. the
+# (independently-perturbed) stored entries is the relevant triangle of the
+# symmetric sensitivity `S` with off-diagonals doubled.
+function EnzymeRules.augmented_primal(config::EnzymeRules.RevConfig,
+        func::Const{typeof(Dagger.potrf_checked!)},
+        ::Type{RT}, uplo::Const, A::Duplicated, info::Const; kwargs...) where {RT}
+    res = func.val(uplo.val, A.val, info.val)
+    tape = (copy(A.val), uplo.val)   # the factored block + uplo for the reverse
+    primal = EnzymeRules.needs_primal(config) ? res : nothing
+    return EnzymeRules.AugmentedReturn(primal, nothing, tape)
+end
+
+function EnzymeRules.reverse(config::EnzymeRules.RevConfig,
+        func::Const{typeof(Dagger.potrf_checked!)},
+        ::Type{RT}, tape, uplo::Const, A::Duplicated, info::Const; kwargs...) where {RT}
+    F, ul = tape
+    Abar = A.dval
+    upper = ul == 'U' || ul == 'u'
+    if upper
+        U = UpperTriangular(F)
+        Ubar = triu(Abar)
+        M = U * Ubar'
+        P = tril(M) - Diagonal(M) ./ 2          # Φ(U Ūᴴ)
+        S = U \ (P / U')                         # U⁻¹ Φ U⁻ᴴ
+        S = (S + S') ./ 2                         # symmetric sensitivity
+        Abar .= triu(2 .* S) .- Diagonal(S)       # double off-diagonals, drop lower
+    else
+        L = LowerTriangular(F)
+        Lbar = tril(Abar)
+        M = L' * Lbar
+        P = tril(M) - Diagonal(M) ./ 2          # Φ(Lᴴ L̄)
+        S = (L') \ (P / L)                       # L⁻ᴴ Φ L⁻¹
+        S = (S + S') ./ 2
+        Abar .= tril(2 .* S) .- Diagonal(S)
+    end
+    return (nothing, nothing, nothing)
 end
 
 # -----------------------------------------------------------------------------

@@ -119,15 +119,22 @@ end
     A = rand(8, 8)
     SPD = Matrix(A'A + 8I)
     fref(x) = (F = copy(x); LinearAlgebra._chol!(F, UpperTriangular); sum(UpperTriangular(F)))
-    # TODO: needs an Enzyme reverse rule for the per-block `potrf!` kernel (and
-    # differentiable `syrk!`/`herk!`), analogous to the `generic_lufact!` rule.
+    # The per-block `potrf_checked!` kernel now has a custom Enzyme reverse rule
+    # (the symmetric-Cholesky pullback, see `EnzymeExt.jl`), analogous to the
+    # `generic_lufact!` rule, and the `trsm!`/`syrk!`/`gemm!` updates differentiate
+    # natively. The remaining blocker is upstream of those kernels: a functional
+    # task in the `cholesky`/`cholcopy` graph raises an Enzyme activity error
+    # ("Return type `Bool` not marked Const, but type is guaranteed to be
+    # constant") that escapes as a plain `ErrorException` and produces a wrong
+    # adjoint. TODO: identify/annotate that task as Const-returning.
     @test_broken grad_matches_fd(x -> cholesky(x), fref, SPD, Blocks(4, 4); rtol=1e-3)
 end
 
 @testset "QR factorization" begin
     A = rand(8, 8)
-    # TODO: Householder-based QR kernels currently differentiate to an incorrect
-    # adjoint; needs dedicated reverse rules.
+    # The Householder-based QR kernels run without error but differentiate to an
+    # incorrect adjoint (the reverse pass through the reflector kernels does not
+    # match the true QR pullback); needs dedicated reverse rules.
     @test_broken grad_matches_fd(x -> qr(x), x -> sum(qr(x).R), A, Blocks(4, 4); rtol=1e-3)
 end
 
@@ -136,9 +143,10 @@ end
     SPD = Matrix(A'A + 8I)
     bm = rand(8)
     bd = distribute(bm, Blocks(4))
-    # TODO: the triangular-solve / factorization kernels backing `\` don't yet
-    # have working reverse rules (fails in the reverse VJP); needs dedicated
-    # rules like the `generic_lufact!` one.
+    # TODO: `\` fails in the reverse VJP with `EnzymeNoDerivativeError: No
+    # augmented forward pass found for ijl_eqtable_pop` -- the solve's
+    # scalar-indexing path hits an `IdDict` op Enzyme can't differentiate.
+    # Needs dedicated reverse rules for the triangular-solve kernels.
     @test_broken grad_matches_fd(x -> x \ bd, x -> sum(x \ bm), SPD, Blocks(4, 4); rtol=1e-3)
 end
 
