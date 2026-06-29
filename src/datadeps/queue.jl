@@ -340,6 +340,16 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
         end
     end
     new_spec = DTaskSpec(new_fargs, spec.options)
+    # Stamp the logical buffer identity (the original argument datadeps tracks
+    # for aliasing) into options, so a lower queue can recover stable identity
+    # across regions despite the physical relocation in `remote_args`.
+    aliases = Tuple{Any,Any}[]
+    map_or_ntuple(task_arg_ws) do idx
+        arg_ws = task_arg_ws[idx]
+        push!(aliases, (raw_position(arg_ws.pos), arg_ws.arg))
+        return
+    end
+    new_spec.options.arg_aliases = aliases
     new_spec.options.scope = our_scope
     new_spec.options.exec_scope = our_scope
     new_spec.options.occupancy = Dict(Any=>0)

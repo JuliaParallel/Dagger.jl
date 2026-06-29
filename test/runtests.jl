@@ -7,6 +7,10 @@ USE_METAL = parse(Bool, get(ENV, "CI_USE_METAL", "0"))
 USE_OPENCL = parse(Bool, get(ENV, "CI_USE_OPENCL", "0"))
 USE_GPU = USE_CUDA || USE_ROCM || USE_ONEAPI || USE_METAL || USE_OPENCL
 
+# Enzyme-based autodiff tests run in a dedicated job: Enzyme is heavy to load,
+# is only a weak dependency, and is `Pkg.add`ed on demand by that job.
+USE_ENZYME = parse(Bool, get(ENV, "CI_ENZYME", "0"))
+
 tests = [
     ("Thunk", "thunk.jl"),
     ("Scheduler", "scheduler.jl"),
@@ -53,6 +57,12 @@ if USE_GPU
     tests = [
         ("GPU", "gpu.jl"),
         ("Array - Stencils", "array/stencil.jl"),
+    ]
+end
+if USE_ENZYME
+    # Only run the autodiff tests in the Enzyme job.
+    tests = [
+        ("Autodiff - Enzyme", "enzyme.jl"),
     ]
 end
 all_test_names = map(test -> replace(last(test), ".jl"=>""), tests)

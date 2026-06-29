@@ -213,6 +213,88 @@ function unwrap_inout(arg)
     return arg, Tuple[(identity, readdep, writedep)]
 end
 
+"Normalizes the output of [`unwrap_inout`](@ref) into a concrete dep vector."
+_normalize_deps(deps) = Tuple{Any,Bool,Bool}[(d[1], d[2], d[3]) for d in deps]
+
+"""
+    extract_arg_accesses!(fargs) -> (fargs, accesses)
+
+Scans a task's arguments for `In`/`Out`/`InOut`/`Deps` wrappers, strips the
+wrappers in-place (replacing each argument's value with the unwrapped inner
+value), and returns the (possibly rebuilt) arguments alongside a
+`Vector{ArgumentAccess}` (or `nothing` if no argument was annotated). This is
+called by `Dagger.spawn` so that access metadata is captured into the task's
+[`Options`](@ref) and survives any later transformation of the task graph (e.g.
+by `DataDepsTaskQueue`), regardless of where in the queue stack a consumer sits.
+"""
+function extract_arg_accesses!(fargs::Vector{Argument})
+    accesses = ArgumentAccess[]
+    for arg in fargs
+        raw = arg.value
+        if raw isa In || raw isa Out || raw isa InOut || raw isa Deps
+            inner, deps = unwrap_inout(raw)
+            arg.value = inner
+            push!(accesses, ArgumentAccess(raw_position(arg), _normalize_deps(deps)))
+        end
+    end
+    return fargs, (isempty(accesses) ? nothing : accesses)
+end
+function extract_arg_accesses!(fargs::Tuple)
+    accesses = ArgumentAccess[]
+    new_fargs = map(fargs) do arg
+        raw = value(arg)
+        if raw isa In || raw isa Out || raw isa InOut || raw isa Deps
+            inner, deps = unwrap_inout(raw)
+            push!(accesses, ArgumentAccess(raw_position(arg), _normalize_deps(deps)))
+            return TypedArgument{typeof(inner)}(arg.pos, inner)
+        end
+        return arg
+    end
+    return new_fargs, (isempty(accesses) ? nothing : accesses)
+end
+
+"""
+    arg_deps_from_options(options::Options, pos) -> Vector{Tuple{Any,Bool,Bool}}
+
+Looks up the recorded access metadata for the argument at position `pos` (an
+`ArgPosition`, `Int`, or `Symbol`) from `options.arg_accesses`. Returns the
+list of `(dep_mod, readdep, writedep)` tuples, defaulting to a single read-only
+dependency `[(identity, true, false)]` when no metadata was recorded (i.e. the
+argument was unannotated).
+"""
+arg_deps_from_options(options::Options, pos::ArgPosition) =
+    arg_deps_from_options(options, raw_position(pos))
+function arg_deps_from_options(options::Options, pos::Union{Int,Symbol})
+    accesses = options.arg_accesses
+    if accesses !== nothing
+        for acc in accesses
+            acc.pos == pos && return acc.deps
+        end
+    end
+    return DEFAULT_ARG_DEPS
+end
+const DEFAULT_ARG_DEPS = Tuple{Any,Bool,Bool}[(identity, true, false)]
+
+"""
+    arg_alias_from_options(options::Options, pos, default) -> Any
+
+Looks up the *logical* buffer identity recorded for the argument at position
+`pos` from `options.arg_aliases` (stamped by `DataDepsTaskQueue`). Returns
+`default` (typically the argument's current/physical value) when no alias was
+recorded, e.g. for tasks that never passed through a datadeps region.
+"""
+arg_alias_from_options(options::Options, pos::ArgPosition, default) =
+    arg_alias_from_options(options, raw_position(pos), default)
+function arg_alias_from_options(options::Options, pos::Union{Int,Symbol}, default)
+    aliases = options.arg_aliases
+    if aliases !== nothing
+        for (apos, aval) in aliases
+            apos == pos && return aval
+        end
+    end
+    return default
+end
+
 _identity_hash(arg, h::UInt=UInt(0)) = ismutable(arg) ? objectid(arg) : hash(arg, h)
 _identity_hash(arg::Chunk, h::UInt=UInt(0)) = hash(arg.handle, hash(Chunk, h))
 _identity_hash(arg::SubArray, h::UInt=UInt(0)) = hash(arg.indices, hash(arg.offset1, hash(arg.stride1, _identity_hash(arg.parent, h))))
@@ -470,12 +552,13 @@ function populate_task_info!(state::DataDepsState, task_args, spec::DTaskSpec, t
     return map_or_ntuple(task_args) do idx
         _arg = task_args[idx]
 
-        # Unwrap the argument
-        _arg_with_deps = value(_arg)
+        # Unwrap the argument. In/Out/InOut/Deps wrappers were already stripped
+        # at `spawn` time and the access metadata recorded into `spec.options`.
+        arg_pre_unwrap = value(_arg)
         pos = _arg.pos
 
-        # Unwrap In/InOut/Out wrappers and record dependencies
-        arg_pre_unwrap, deps = unwrap_inout(_arg_with_deps)
+        # Read this argument's data dependencies from the captured options
+        deps = arg_deps_from_options(spec.options, pos)
 
         # Unwrap the Chunk underlying any DTask arguments
         arg = arg_pre_unwrap isa DTask ? fetch(arg_pre_unwrap; raw=true) : arg_pre_unwrap

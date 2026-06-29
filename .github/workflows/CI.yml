@@ -88,6 +88,79 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
+  enzyme:
+    name: Julia ${{ matrix.version }} - Autodiff (Enzyme, multiprocessing)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: ${{ !contains(github.event.head_commit.message, '[skip tests]') }}
+    env:
+      JULIA_NUM_THREADS: '1'
+      CI_ENZYME: '1'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {version: '1', arch: x64}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.version }}
+          arch: ${{ matrix.arch }}
+      - uses: julia-actions/cache@v2
+      - name: Develop local TimespanLogging
+        run: julia --project=. -e 'using Pkg; Pkg.develop(path="lib/TimespanLogging")'
+      # Instantiate the main project so workers (which run with this project) have
+      # the Enzyme/DifferentiationInterface weak dependencies installed.
+      - name: Instantiate main project
+        run: julia --project=. -e 'using Pkg; Pkg.instantiate()'
+      # Add Enzyme + DifferentiationInterface to the test environment on demand;
+      # they are heavy to load and only needed for these autodiff jobs.
+      - name: Add Enzyme to test environment
+        run: julia --project=test -e 'using Pkg; Pkg.develop(path="lib/TimespanLogging"); Pkg.add(["Enzyme", "DifferentiationInterface"]); Pkg.instantiate()'
+      - name: Run autodiff tests (multiprocessing)
+        run: julia --code-coverage=user test/runtests.jl -p 3
+      - uses: julia-actions/julia-processcoverage@v1
+      - uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  enzyme-multithreaded:
+    name: Julia ${{ matrix.version }} - Autodiff (Enzyme, multithreaded)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: ${{ !contains(github.event.head_commit.message, '[skip tests]') }}
+    env:
+      CI_ENZYME: '1'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {version: '1', arch: x64}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.version }}
+          arch: ${{ matrix.arch }}
+      - uses: julia-actions/cache@v2
+      - name: Develop local TimespanLogging
+        run: julia --project=. -e 'using Pkg; Pkg.develop(path="lib/TimespanLogging")'
+      - name: Instantiate main project
+        run: julia --project=. -e 'using Pkg; Pkg.instantiate()'
+      - name: Add Enzyme to test environment
+        run: julia --project=test -e 'using Pkg; Pkg.develop(path="lib/TimespanLogging"); Pkg.add(["Enzyme", "DifferentiationInterface"]); Pkg.instantiate()'
+      - name: Run autodiff tests (multithreaded, no extra workers)
+        run: julia --code-coverage=user -t auto test/runtests.jl -p 0
+      - uses: julia-actions/julia-processcoverage@v1
+      - uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
   opencl:
     name: Julia 1.11 (OpenCL)
     runs-on: ubuntu-latest

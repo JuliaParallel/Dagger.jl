@@ -585,6 +585,15 @@ function _spawn(args_kwargs, task_options)
     end
     unique!(task_options.propagates)
 
+    # Capture In/Out/InOut/Deps access metadata into the task options, stripping
+    # the wrappers from the arguments. This makes the metadata available to every
+    # task queue in the stack (and at runtime), independent of who later consumes
+    # or rewrites the task graph.
+    args_kwargs, arg_accesses = extract_arg_accesses!(args_kwargs)
+    if arg_accesses !== nothing
+        task_options.arg_accesses = arg_accesses
+    end
+
     # Construct task spec and handle
     spec = DTaskSpec(args_kwargs, task_options)
     task = eager_spawn(spec)

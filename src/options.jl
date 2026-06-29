@@ -1,6 +1,37 @@
 # Task options
 
 """
+    ArgumentAccess
+
+Captures the data-access metadata (`In`/`Out`/`InOut`/`Deps`) for a single
+argument of a task, recorded at `spawn` time and stored in the task's
+[`Options`](@ref). This makes access information available to any task queue in
+the queue stack (e.g. `DataDepsTaskQueue`, `EnzymeTaskQueue`), as well as during
+late worker-side scheduling and task runtime, regardless of whether the original
+`In`/`Out`/`InOut`/`Deps` wrappers have already been stripped from the arguments.
+
+Fields:
+- `pos`: the argument's position, either a positional index (`Int`) or a keyword
+  name (`Symbol`).
+- `deps`: a vector of `(dep_mod, readdep, writedep)` tuples mirroring the output
+  of [`unwrap_inout`](@ref). A plain (unannotated) argument is read-only, i.e.
+  `[(identity, true, false)]`.
+"""
+struct ArgumentAccess
+    pos::Union{Int,Symbol}
+    deps::Vector{Tuple{Any,Bool,Bool}}
+end
+
+# `Options.arg_aliases` (stamped by `DataDepsTaskQueue` in `distribute_task!`)
+# records, per task argument, the *logical* buffer identity that datadeps uses
+# for aliasing/dependency tracking -- i.e. the original argument value (the raw
+# `Chunk` behind a `DTask`), keyed by its `DRef` -- as opposed to the physical,
+# relocated buffer that is actually forwarded to the queue below. This lets a
+# lower queue (e.g. `EnzymeTaskQueue`) recover stable buffer identity across
+# datadeps regions even though datadeps relocates/copies the physical data.
+# Entries are `(raw_position, logical_value)` pairs.
+
+"""
     Options
 
 Stores per-task options to be passed to the scheduler.
@@ -16,6 +47,8 @@ Stores per-task options to be passed to the scheduler.
 - `get_result::Bool=false`: Whether the worker should store the result directly (`true`) or as a `Chunk` (`false`)
 - `meta::Bool=false`: When `true`, values are not `move`d, and are passed directly as `Chunk`, if they are not immediate values
 - `syncdeps::Set{Any}`: Contains any additional tasks to synchronize with
+- `arg_accesses::Union{Vector{ArgumentAccess},Nothing}=nothing`: Per-argument data-access metadata (`In`/`Out`/`InOut`/`Deps`) recorded at `spawn` time (see [`ArgumentAccess`](@ref)). Makes access information available to any task queue in the stack (e.g. `DataDepsTaskQueue`, `EnzymeTaskQueue`) and during scheduling/runtime, even after the access wrappers have been stripped from the arguments. `nothing` when not yet populated.
+- `arg_aliases::Union{Vector{Tuple{Any,Any}},Nothing}=nothing`: Per-argument *logical* buffer identity, stamped by `DataDepsTaskQueue` when it forwards a task. Each entry is a `(raw_position, logical_value)` pair recording the original argument value (the raw `Chunk` behind a `DTask`) that datadeps uses for aliasing/dependency tracking, as opposed to the relocated physical buffer actually forwarded. Lets a lower queue (e.g. `EnzymeTaskQueue`) recover stable buffer identity across datadeps regions. `nothing` when not applicable.
 - `time_util::Dict{Type,Any}`: Indicates the maximum expected time utilization for this task. Each keypair maps a processor type to the utilization, where the value can be a real (approximately the number of nanoseconds taken), or `MaxUtilization()` (utilizes all processors of this type). By default, the scheduler assumes that this task only uses one processor.
 - `alloc_util::Dict{Type,UInt64}`: Indicates the maximum expected memory utilization for this task. Each keypair maps a processor type to the utilization, where the value is an integer representing approximately the maximum number of bytes allocated at any one time.
 - `occupancy::Dict{Type,Real}`: Indicates the maximum expected processor occupancy for this task. Each keypair maps a processor type to the utilization, where the value can be a real between 0 and 1 (the occupancy ratio, where 1 is full occupancy). By default, the scheduler assumes that this task has full occupancy.
@@ -46,6 +79,10 @@ Base.@kwdef mutable struct Options
     meta::Union{Bool,Nothing} = nothing
 
     syncdeps::Union{Set{ThunkSyncdep},Nothing} = nothing
+
+    arg_accesses::Union{Vector{ArgumentAccess},Nothing} = nothing
+
+    arg_aliases::Union{Vector{Tuple{Any,Any}},Nothing} = nothing
 
     time_util::Union{Dict{Type,Any},Nothing} = nothing
     alloc_util::Union{Dict{Type,UInt64},Nothing} = nothing
@@ -130,6 +167,8 @@ function populate_defaults!(opts::Options, sig)
     maybe_default!(opts, Val{:get_result}(), sig)
     maybe_default!(opts, Val{:meta}(), sig)
     maybe_default!(opts, Val{:syncdeps}(), sig)
+    maybe_default!(opts, Val{:arg_accesses}(), sig)
+    maybe_default!(opts, Val{:arg_aliases}(), sig)
     maybe_default!(opts, Val{:time_util}(), sig)
     maybe_default!(opts, Val{:alloc_util}(), sig)
     maybe_default!(opts, Val{:occupancy}(), sig)
