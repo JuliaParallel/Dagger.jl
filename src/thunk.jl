@@ -32,6 +32,13 @@ mutable struct FutureNode
     @atomic next::Union{FutureNode,Nothing}
 end
 
+# A node in the lock-free dependents Treiber list stored on each `Thunk`.
+# Holds a strong ref to one downstream `Thunk` and an atomic link to the next node.
+mutable struct DepNode
+    const thunk::Any                      # downstream Thunk (typed Any to break the mutual-ref cycle)
+    @atomic next::Union{DepNode,Nothing}
+end
+
 """
     Thunk
 
@@ -78,13 +85,16 @@ mutable struct Thunk
     @atomic running::Bool          # true while a worker is executing this thunk
     running_on::Union{OSProc,Nothing}  # which OSProc is running this thunk
     @atomic futures_head::Union{FutureNode,Nothing,Sealed}  # Treiber list of waiting futures
+    @atomic pending_deps::Int      # count of unresolved upstream dependencies (dataflow counter)
+    @atomic dependents_head::Union{DepNode,Nothing,Sealed}  # Treiber list of downstream dependents
     function Thunk(spec::ThunkSpec)
         return new(spec.fargs, spec.id,
                    spec.cache_ref, spec.affinity,
                    spec.options,
                    true, true, false,
                    false, false, false, nothing,
-                   nothing)
+                   nothing,
+                   0, nothing)
     end
 end
 
@@ -118,6 +128,39 @@ guard — callers should treat this as a no-op).
 """
 function futures_seal!(t::Thunk)
     old = @atomicswap t.futures_head = SEALED
+    return old isa Sealed ? nothing : old
+end
+
+"""
+    deps_push!(t::Thunk, dep::Thunk) -> Bool
+
+Prepend `dep` (a downstream dependent) to the lock-free dependents Treiber list on `t`.
+Returns `true` if registered, `false` if the list was already sealed (meaning
+`t` has already finished — the caller should decrement `dep.pending_deps` and
+handle `dep` becoming ready/failed directly).
+"""
+function deps_push!(t::Thunk, dep::Thunk)
+    node = DepNode(dep, nothing)
+    while true
+        old = @atomic t.dependents_head
+        old isa Sealed && return false
+        @atomic node.next = old::Union{DepNode,Nothing}
+        _, ok = @atomicreplace t.dependents_head old => node
+        ok && return true
+        # CAS lost to another pusher; re-read and retry
+    end
+end
+
+"""
+    deps_seal!(t::Thunk) -> Union{DepNode,Nothing}
+
+Atomically close the dependents list on `t` to further pushes and return the
+captured head of the list (a `DepNode` chain or `nothing` if no dependents were
+ever registered). Returns `nothing` if the list was already sealed (double-seal
+guard — callers should treat this as a no-op).
+"""
+function deps_seal!(t::Thunk)
+    old = @atomicswap t.dependents_head = SEALED
     return old isa Sealed ? nothing : old
 end
 

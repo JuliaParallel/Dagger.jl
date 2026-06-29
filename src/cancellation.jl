@@ -145,19 +145,22 @@ function _cancel!(state, tid, force, graceful, halt_sch)
         idx !== nothing && deleteat!(state.ready, idx)
     end
 
-    # Cancel waiting tasks
-    for task in keys(state.waiting)
-        tid !== nothing && task.id != tid && continue
+    # Cancel waiting tasks (pending_deps > 0, not yet running or finished).
+    # Collect first to avoid mutating thunk_dict while iterating.
+    waiting_tasks = Thunk[]
+    for (_, wt) in state.thunk_dict
+        t = Dagger.unwrap_weak(wt)
+        t === nothing && continue
+        tid !== nothing && t.id != tid && continue
+        t.finished && continue
+        (@atomic t.running) && continue
+        (t in state.ready) && continue
+        push!(waiting_tasks, t)
+    end
+    for task in waiting_tasks
         @dagdebug tid :cancel "Cancelling waiting task"
         ex = DTaskFailedException(task, task, InterruptException())
         Sch.set_failed!(state, task; ex)
-    end
-    if tid === nothing
-        empty!(state.waiting)
-    else
-        if haskey(state.waiting, tid)
-            delete!(state.waiting, tid)
-        end
     end
 
     # Cancel running tasks at the processor level

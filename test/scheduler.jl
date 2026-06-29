@@ -614,6 +614,32 @@ end
     @test fetch(t) == 99  # third call — always works via has_result fast path
 end
 
+@testset "NG Phase 3 validate: dataflow counter invariants" begin
+    # Enable the :validate dagdebug category to turn on the pending_deps
+    # underflow and ready-push consistency assertions in schedule_dependents!.
+    push!(Dagger.DAGDEBUG_CATEGORIES, :validate)
+    try
+        # Diamond DAG: source → (left, right) → sink
+        # The dataflow counter on sink must reach exactly 0 (not go negative)
+        # when both left and right finish.
+        source = Dagger.spawn(identity, 7)
+        left   = Dagger.spawn(+, source, 1)   # 8
+        right  = Dagger.spawn(*, source, 2)   # 14
+        sink   = Dagger.spawn(+, left, right) # 22
+        @test fetch(sink) == 22
+
+        # Fan-in with 4 upstreams — counter must decrement 4 times to 0.
+        a = Dagger.spawn(identity, 1)
+        b = Dagger.spawn(identity, 2)
+        c = Dagger.spawn(identity, 3)
+        d = Dagger.spawn(identity, 4)
+        e = Dagger.spawn((w,x,y,z)->w+x+y+z, a, b, c, d)
+        @test fetch(e) == 10
+    finally
+        delete!(Dagger.DAGDEBUG_CATEGORIES, :validate)
+    end
+end
+
 @testset "Cancellation" begin
     # Ready task cancellation
     start_time = time_ns()

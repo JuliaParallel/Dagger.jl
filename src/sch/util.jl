@@ -102,68 +102,36 @@ function fill_registered_futures!(state, thunk, failed)
     end
 end
 
-"Cleans up any syncdeps that aren't needed any longer, and returns a
-`Set{Chunk}` of all chunks that can now be evicted from workers."
-function cleanup_syncdeps!(state, thunk)
-    #to_evict = Set{Chunk}()
-    thunk.options.syncdeps === nothing && return
-    for inp in thunk.options.syncdeps
-        inp = unwrap_weak_checked(inp)
-        @assert istask(inp)
-        if inp in keys(state.waiting_data)
-            w = state.waiting_data[inp]
-            if thunk in w
-                pop!(w, thunk)
-            end
-            if isempty(w)
-                #= FIXME: Worker-side cache is currently disabled
-                if istask(inp) && has_result(state, inp)
-                    _thunk = load_result(state, inp)
-                    if _thunk isa Chunk
-                        push!(to_evict, _thunk)
-                    end
-                elseif inp isa Chunk
-                    push!(to_evict, inp)
-                end
-                =#
-                delete!(state.waiting_data, inp)
-                inp.sch_accessible = false
-                delete_unused_task!(state, inp)
-            end
-        end
-    end
-    #return to_evict
-end
 
-"Schedules any dependents that may be ready to execute."
+"""
+Seal the dependents Treiber list on `thunk` and, for each captured downstream:
+- Atomically decrement its `pending_deps` counter.
+- If the counter just hit zero and `failed` is false, push it to `state.ready`.
+- If `failed` is true or the dependent is already errored, propagate failure
+  immediately (regardless of how many other upstreams remain).
+"""
 function schedule_dependents!(state, thunk, failed)
     @dagdebug thunk :finish "Checking dependents"
-    if !haskey(state.waiting_data, thunk) || isempty(state.waiting_data[thunk])
-        return
-    end
+    head = deps_seal!(thunk)
+    head === nothing && return
     ctr = 0
-    for dep in state.waiting_data[thunk]
-        dep_isready = false
-        if haskey(state.waiting, dep)
-            set = state.waiting[dep]
-            thunk in set && pop!(set, thunk)
-            dep_isready = isempty(set)
-            if dep_isready
-                delete!(state.waiting, dep)
-            end
-        else
-            dep_isready = true
-        end
-        if dep_isready
+    node = head
+    while node !== nothing
+        dep = node.thunk::Thunk
+        n = @atomic dep.pending_deps -= 1   # n = new value after decrement
+        if failed || (@atomic dep.errored)
+            # Propagate failure immediately — don't wait for the counter to
+            # reach zero (mirrors the old DFS semantics in set_failed!).
             ctr += 1
-            if !failed
-                push!(state.ready, dep)
-                @dagdebug dep :schedule "Dependent is now ready"
-            else
-                set_failed!(state, thunk, dep)
-                @dagdebug dep :schedule "Dependent has transitively failed"
-            end
+            @dagdebug dep :schedule "Dependent has transitively failed"
+            dep.finished || set_failed!(state, thunk, dep)
+        elseif n == 0
+            # This was the last pending upstream; the dependent is now ready.
+            ctr += 1
+            @dagdebug dep :schedule "Dependent is now ready"
+            dep.finished || push!(state.ready, dep)
         end
+        node = @atomic node.next
     end
     @dagdebug thunk :finish "Marked $ctr dependents as $(failed ? "failed" : "ready")"
 end
@@ -177,54 +145,64 @@ function reschedule_syncdeps!(state, thunk, seen=nothing)
         #=FIXME:REALLOC=#
         to_visit = Thunk[thunk]
         while !isempty(to_visit)
-            thunk = pop!(to_visit)
-            push!(seen, thunk)
-            if (@atomic thunk.valid)
+            cur = pop!(to_visit)
+            push!(seen, cur)
+
+            # Skip thunks that are already registered, running, or done.
+            if (@atomic cur.valid)
                 continue
             end
-            if thunk.finished || (thunk in state.ready) || (@atomic thunk.running)
+            if cur.finished || (cur in state.ready) || (@atomic cur.running)
                 continue
             end
-            for idx in 1:length(thunk.inputs)
-                input = Dagger.value(thunk.inputs[idx])
-                if input isa WeakChunk
-                    input = unwrap_weak_checked(input)
-                end
-                if input isa Chunk
-                    # N.B. Different Chunks with the same DRef handle will hash to the same slot,
-                    # so we just pick an equivalent Chunk as our upstream
-                    if !haskey(state.waiting_data, input)
-                        push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
-                    end
-                end
-            end
-            w = get!(()->Set{Thunk}(), state.waiting, thunk)
-            if thunk.options.syncdeps !== nothing
-                for input in Dagger.syncdeps_iterator(thunk)
-                    input in seen && continue
 
-                    # Unseen
-                    push!(get!(()->Set{Thunk}(), state.waiting_data, input), thunk)
+            # Submission-guard: hold pending_deps at ≥1 while we wire edges
+            # so that no upstream can drive it to zero prematurely.
+            @atomic cur.pending_deps = 1
 
-                    # Unseen task
+            errored_input = nothing
+            if cur.options !== nothing && cur.options.syncdeps !== nothing
+                for input in Dagger.syncdeps_iterator(cur)
                     if (@atomic input.errored)
-                        set_failed!(state, input, thunk)
+                        # Record the first errored upstream; process remaining
+                        # edges so we don't skip incrementing for others (they
+                        # will be undone by set_failed! if needed).
+                        errored_input = input
+                        continue
                     end
-                    input.finished && continue
 
-                    # Unseen and unfinished task
-                    push!(w, input)
-                    if !((@atomic input.running) || (input in state.ready))
-                        push!(to_visit, input)
+                    if !input.finished
+                        # Register cur as a downstream dependent of input.
+                        @atomic cur.pending_deps += 1
+                        pushed = deps_push!(input, cur)
+                        if !pushed
+                            # input finished between our check and the push;
+                            # undo the +1 (the seal-swap already happened).
+                            @atomic cur.pending_deps -= 1
+                        end
+
+                        # DFS into input only if we haven't visited it yet and
+                        # it is not already being scheduled elsewhere.
+                        if !(input in seen) &&
+                                !((@atomic input.running) || (input in state.ready))
+                            push!(to_visit, input)
+                        end
                     end
+                    # Finished (non-errored) input contributes no pending dep.
                 end
             end
-            if isempty(w)
-                # Inputs are ready
-                delete!(state.waiting, thunk)
-                if !(@atomic thunk.errored)
-                    push!(state.ready, thunk)
-                end
+
+            # Release the guard reference.
+            n = @atomic cur.pending_deps -= 1   # n = new value after decrement
+
+            if errored_input !== nothing
+                # At least one upstream was already errored: fail this thunk.
+                # set_failed! calls schedule_dependents!(cur, true) which seals
+                # cur.dependents_head, so the ready-push below is skipped.
+                set_failed!(state, errored_input, cur)
+            elseif n == 0 && !(@atomic cur.errored) && !cur.finished
+                # All upstream edges satisfied and no error: cur is ready.
+                push!(state.ready, cur)
             end
         end
     end
@@ -232,7 +210,7 @@ end
 # N.B. Vector is faster than Set for small collections (which are probably most common)
 const RESCHEDULE_SYNCDEPS_SEEN_CACHE = TaskLocalValue{ReusableCache{Set{Thunk},Nothing}}(()->ReusableCache(Set{Thunk}, nothing, 1))
 
-"Marks `thunk` and all dependent thunks as failed."
+"Marks `thunk` (and all transitive dependents) as failed, then propagates."
 function set_failed!(state, origin::Thunk, thunk::Thunk=origin; ex=nothing)
     @assert islocked(state.lock)
     has_result(state, thunk) && return
@@ -240,43 +218,27 @@ function set_failed!(state, origin::Thunk, thunk::Thunk=origin; ex=nothing)
 
     if origin === thunk && ex !== nothing
         store_result!(state, thunk, ex; error=true)
+    elseif !has_result(state, thunk)
+        origin_ex = load_result(state, origin)
+        if origin_ex isa RemoteException
+            origin_ex = origin_ex.captured
+        end
+        if origin_ex isa DTaskFailedException
+            origin_ex = origin_ex.ex
+        end
+        store_result!(state, thunk, DTaskFailedException(thunk, origin, origin_ex); error=true)
     end
 
-    seen = Set{Thunk}()
-    to_visit = Thunk[thunk]
-    while !isempty(to_visit)
-        thunk = pop!(to_visit)
-        push!(seen, thunk)
+    filter!(x -> x !== thunk, state.ready)
+    fill_registered_futures!(state, thunk, true)
+    thunk.sch_accessible = false
+    delete_unused_task!(state, thunk)
 
-        filter!(x -> x !== thunk, state.ready)
-
-        if !has_result(state, thunk) && origin !== thunk
-            origin_ex = load_result(state, origin)
-            if origin_ex isa RemoteException
-                origin_ex = origin_ex.captured
-            end
-            if origin_ex isa DTaskFailedException
-                origin_ex = origin_ex.ex
-            end
-            ex = DTaskFailedException(thunk, origin, origin_ex)
-            store_result!(state, thunk, ex; error=true)
-        end
-
-        fill_registered_futures!(state, thunk, true)
-        if haskey(state.waiting_data, thunk)
-            for dep in state.waiting_data[thunk]
-                (@atomic dep.errored) && continue
-                dep in seen && continue
-                push!(to_visit, dep)
-            end
-            delete!(state.waiting_data, thunk)
-            thunk.sch_accessible = false
-            delete_unused_task!(state, thunk)
-        end
-        if haskey(state.waiting, thunk)
-            delete!(state.waiting, thunk)
-        end
-    end
+    # Seal the dependents list and propagate failure transitively.
+    # schedule_dependents! with failed=true immediately calls set_failed! for
+    # each captured dependent, regardless of their pending_deps counter value,
+    # mirroring the DFS semantics of the old waiting_data traversal.
+    schedule_dependents!(state, thunk, true)
 end
 
 "Internal utility, useful for debugging scheduler state."
@@ -323,11 +285,13 @@ function print_sch_status(io::IO, state, thunk; offset=0, limit=5, max_inputs=3)
             break
         end
         status = status_string(input)
-        if haskey(state.waiting, thunk) && input in state.waiting[thunk]
-            status *= "W"
+        let pd = @atomic thunk.pending_deps
+            pd > 0 && (status *= "W")  # thunk still has unresolved upstreams
         end
-        if haskey(state.waiting_data, input) && thunk in state.waiting_data[input]
-            status *= "w"
+        let dh = @atomic input.dependents_head
+            if !(dh isa Sealed) && dh !== nothing
+                status *= "w"  # input has registered (not-yet-notified) dependents
+            end
         end
         let fh = @atomic input.futures_head
             if !(fh isa Sealed) && fh !== nothing

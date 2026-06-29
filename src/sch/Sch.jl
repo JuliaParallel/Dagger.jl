@@ -16,6 +16,7 @@ import Base: @invokelatest
 import ..Dagger
 import ..Dagger: Context, Processor, SchedulerOptions, Options, Thunk, WeakThunk, ThunkFuture, ThunkID, DTaskFailedException, Chunk, WeakChunk, OSProc, AnyScope, DefaultScope, InvalidScope, LockedObject, Argument, Signature
 import ..Dagger: Sealed, SEALED, FutureNode, futures_push!, futures_seal!
+import ..Dagger: DepNode, deps_push!, deps_seal!
 import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak, unwrap_weak_checked, wrap_weak, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, default_enabled, processor, get_processors, get_parent, execute!, rmprocs!, task_processor, constrain, cputhreadtime, maybe_take_or_alloc!
 import ..Dagger: @dagdebug, @safe_lock_spin1, @maybelog, @take_or_alloc!
 import DataStructures: PriorityQueue
@@ -28,7 +29,6 @@ import TimespanLogging
 import TaskLocalValues: TaskLocalValue
 import ScopedValues: @with
 
-const OneToMany = Dict{Thunk, Set{Thunk}}
 
 include("util.jl")
 include("fault-handler.jl")
@@ -51,8 +51,6 @@ The internal state-holding struct of the scheduler.
 
 Fields:
 - `uid::UInt64` - Unique identifier for this scheduler instance
-- `waiting::OneToMany` - Map from downstream `Thunk` to upstream `Thunk`s that still need to execute
-- `waiting_data::Dict{Union{Thunk,Chunk},Set{Thunk}}` - Map from input `Chunk`/upstream `Thunk` to all unfinished downstream `Thunk`s, to retain caches
 - `ready::Vector{Thunk}` - The list of `Thunk`s that are ready to execute
 - `running_count::Threads.Atomic{Int}` - Number of currently-running `Thunk`s (replaces `running::Set{Thunk}`; per-thunk state lives on `thunk.running` and `thunk.running_on`)
 - `thunk_dict::Dict{Int, WeakThunk}` - Maps from thunk IDs to a `Thunk`
@@ -73,13 +71,12 @@ Fields:
 
 Note: `errored`, `valid`, `running`, and `running_on` per-thunk state now live directly on
 `Thunk` fields (`thunk.errored`, `thunk.valid`, `thunk.running`, `thunk.running_on`).
-Per-thunk futures are stored in the lock-free Treiber list `thunk.futures_head`; use
-`futures_push!`/`futures_seal!` to interact with it.
+Per-thunk futures use the Treiber list `thunk.futures_head` (`futures_push!`/`futures_seal!`).
+Per-thunk dependency tracking uses `thunk.pending_deps` (dataflow counter) and
+`thunk.dependents_head` (downstream Treiber list, `deps_push!`/`deps_seal!`).
 """
 struct ComputeState
     uid::UInt64
-    waiting::OneToMany
-    waiting_data::Dict{Union{Thunk,Chunk},Set{Thunk}}
     ready::Vector{Thunk}
     running_count::Threads.Atomic{Int}
     thunk_dict::Dict{Int, WeakThunk}
@@ -108,8 +105,6 @@ const UID_COUNTER = Threads.Atomic{UInt64}(1)
 
 function start_state(deps::Dict, node_order, chan)
     state = ComputeState(Threads.atomic_add!(UID_COUNTER, UInt64(1)),
-                         OneToMany(),
-                         deps,
                          Vector{Thunk}(undef, 0),
                          Threads.Atomic{Int}(0),
                          Dict{Int, WeakThunk}(),
@@ -129,16 +124,26 @@ function start_state(deps::Dict, node_order, chan)
                          Set{Thunk}(),
                          chan)
 
+    # Initialize per-thunk dataflow counters and dependents lists.
+    # Process in node_order so upstreams are seen before downstreams (allowing
+    # deps_push! to always succeed since nothing has run yet).
     for k in sort(collect(keys(deps)), by=node_order)
-        if istask(k)
-            waiting = Set{Thunk}(Dagger.syncdeps_iterator(k))
-            if isempty(waiting)
-                push!(state.ready, k)
-            else
-                state.waiting[k] = waiting
+        istask(k) || continue
+        # Submission-guard: start pending_deps at 1 so no upstream can drive it
+        # to zero while we are still wiring edges.
+        @atomic k.pending_deps = 1
+        if k.options !== nothing && k.options.syncdeps !== nothing
+            for upstream in Dagger.syncdeps_iterator(k)
+                @atomic k.pending_deps += 1
+                deps_push!(upstream, k)   # always true at init (nothing finished yet)
             end
-            @atomic k.valid = true
         end
+        # Release the guard; if no upstreams remain, k is immediately ready.
+        n = @atomic k.pending_deps -= 1   # n = new value after decrement
+        if n == 0
+            push!(state.ready, k)
+        end
+        @atomic k.valid = true
     end
     state
 end
@@ -781,17 +786,21 @@ function finish_task!(ctx, state, node, thunk_failed)
     node.running_on = nothing
     Threads.atomic_sub!(state.running_count, 1)
     if thunk_failed
-        set_failed!(state, node; ex=load_result(state, node))
-    end
-    schedule_dependents!(state, node, thunk_failed)
-    fill_registered_futures!(state, node, thunk_failed)
-
-    #to_evict = cleanup_syncdeps!(state, node)
-    cleanup_syncdeps!(state, node)
-    if haskey(state.waiting_data, node) && isempty(state.waiting_data[node])
-        delete!(state.waiting_data, node)
-    end
-    if !haskey(state.waiting_data, node)
+        # The result (error) was already stored by the scheduler loop via
+        # store_result! before this function was called.  We cannot delegate to
+        # set_failed! here because set_failed! guards against double-processing
+        # with `has_result(state, thunk) && return`, which would be true at this
+        # point and would skip fill_registered_futures!, leaving DTask futures
+        # permanently unresolved.  Handle the three steps directly instead.
+        filter!(x -> x !== node, state.ready)
+        fill_registered_futures!(state, node, true)
+        node.sch_accessible = false
+        delete_unused_task!(state, node)
+        schedule_dependents!(state, node, true)
+    else
+        # Success path: seal dependents, fulfill futures, mark no longer needed.
+        schedule_dependents!(state, node, false)
+        fill_registered_futures!(state, node, false)
         node.sch_accessible = false
         delete_unused_task!(state, node)
     end
