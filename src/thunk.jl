@@ -20,6 +20,18 @@ function unset!(spec::ThunkSpec, _)
     spec.options = nothing
 end
 
+# Sentinel value marking a sealed (closed) Treiber list. A single shared
+# instance `SEALED` is used for pointer-identity comparison.
+struct Sealed end
+const SEALED = Sealed()
+
+# A node in the lock-free futures Treiber list stored on each `Thunk`.
+# Holds one `ThunkFuture` and an atomic link to the next node in the chain.
+mutable struct FutureNode
+    const future::ThunkFuture
+    @atomic next::Union{FutureNode,Nothing}
+end
+
 """
     Thunk
 
@@ -65,14 +77,50 @@ mutable struct Thunk
     @atomic valid::Bool            # true while registered with the scheduler
     @atomic running::Bool          # true while a worker is executing this thunk
     running_on::Union{OSProc,Nothing}  # which OSProc is running this thunk
+    @atomic futures_head::Union{FutureNode,Nothing,Sealed}  # Treiber list of waiting futures
     function Thunk(spec::ThunkSpec)
         return new(spec.fargs, spec.id,
                    spec.cache_ref, spec.affinity,
                    spec.options,
                    true, true, false,
-                   false, false, false, nothing)
+                   false, false, false, nothing,
+                   nothing)
     end
 end
+
+"""
+    futures_push!(t::Thunk, future::ThunkFuture) -> Bool
+
+Prepend `future` to the lock-free futures Treiber list on `t`.
+Returns `true` if the future was registered, `false` if the list was already
+sealed (the thunk finished before the push completed — the caller must then
+fulfill `future` directly using the stored result).
+"""
+function futures_push!(t::Thunk, future::ThunkFuture)
+    node = FutureNode(future, nothing)
+    while true
+        old = @atomic t.futures_head
+        old isa Sealed && return false
+        @atomic node.next = old::Union{FutureNode,Nothing}
+        _, ok = @atomicreplace t.futures_head old => node
+        ok && return true
+        # CAS lost to another pusher; re-read and retry
+    end
+end
+
+"""
+    futures_seal!(t::Thunk) -> Union{FutureNode,Nothing}
+
+Atomically close the futures list on `t` to further pushes and return the
+captured head of the list (a `FutureNode` chain or `nothing` if no futures were
+ever registered). Returns `nothing` if the list was already sealed (double-seal
+guard — callers should treat this as a no-op).
+"""
+function futures_seal!(t::Thunk)
+    old = @atomicswap t.futures_head = SEALED
+    return old isa Sealed ? nothing : old
+end
+
 function Thunk(f, xs...;
                syncdeps=nothing,
                id::Int=next_id(),

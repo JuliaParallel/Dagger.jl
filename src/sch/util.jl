@@ -89,15 +89,16 @@ function clear_result!(state, thunk)
     @atomic thunk.errored = false
 end
 
-"Fills the result for all registered futures of `thunk`."
+"Seals the futures Treiber list on `thunk` and fulfills all registered futures with its result."
 function fill_registered_futures!(state, thunk, failed)
-    if haskey(state.futures, thunk)
-        # Notify any listening thunks
-        @dagdebug thunk :finish "Notifying $(length(state.futures[thunk])) futures"
-        for future in state.futures[thunk]
-            put!(future, load_result(state, thunk); error=failed)
-        end
-        delete!(state.futures, thunk)
+    head = futures_seal!(thunk)
+    head === nothing && return
+    result = load_result(state, thunk)
+    @dagdebug thunk :finish "Notifying futures"
+    node = head
+    while node !== nothing
+        put!(node.future, result; error=failed)
+        node = @atomic node.next
     end
 end
 
@@ -328,8 +329,10 @@ function print_sch_status(io::IO, state, thunk; offset=0, limit=5, max_inputs=3)
         if haskey(state.waiting_data, input) && thunk in state.waiting_data[input]
             status *= "w"
         end
-        if haskey(state.futures, input)
-            status *= "f($(length(state.futures[input])))"
+        let fh = @atomic input.futures_head
+            if !(fh isa Sealed) && fh !== nothing
+                status *= "f(?)"  # Treiber list — count not tracked; just signal presence
+            end
         end
         print(io, repeat(' ', offset+2), "($status) ")
         if limit > 0

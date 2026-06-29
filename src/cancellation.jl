@@ -256,15 +256,16 @@ function _cancel!(state, tid, force, graceful, halt_sch)
             # task would observe the wrong exception.
             #
             # We wait until the running tasks have drained (their results
-            # stored) rather than waiting on `state.futures`: the caller's
-            # `fetch` may not have registered its future yet when we get here,
-            # but once a task's result is stored, a later `fetch` picks it up
-            # immediately (see `_register_future!`). We cap the wait so a task
-            # that refuses to cancel cannot block the halt indefinitely.
+            # stored and per-thunk future lists sealed). Once a task finishes,
+            # `fill_registered_futures!` seals its list and fulfills all
+            # registered futures; any future registered after that is fulfilled
+            # immediately in `_register_future!`. So `running_count == 0` is
+            # the right termination signal. We cap the wait so a task that
+            # refuses to cancel cannot block the halt indefinitely.
             deadline = time() + 5.0
             while time() < deadline
                 drained = @lock state.lock begin
-                    state.running_count[] == 0 && isempty(state.futures)
+                    state.running_count[] == 0
                 end
                 drained && break
                 sleep(0.05)

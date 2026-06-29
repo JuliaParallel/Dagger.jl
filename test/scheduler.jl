@@ -589,6 +589,31 @@ end
     end
 end
 
+@testset "NG Phase 2: concurrent future registration" begin
+    # Register futures on the same DTask from many concurrent Julia tasks.
+    # This exercises the futures_push! + has_result recheck in _register_future!:
+    # some fetchers may race with the scheduler sealing the futures list on
+    # finish, so they fall back to load_result directly.
+    for _ in 1:20
+        t = Dagger.spawn(identity, 42)
+        vals = Vector{Any}(undef, 16)
+        @sync for j in 1:16
+            local j = j
+            Threads.@spawn begin
+                vals[j] = fetch(t)
+            end
+        end
+        @test all(==(42), vals)
+    end
+
+    # Also confirm a future registered *after* the thunk has already finished
+    # is fulfilled immediately (the has_result fast path in _register_future!).
+    t = Dagger.spawn(identity, 99)
+    wait(t)  # ensure finished
+    @test fetch(t) == 99
+    @test fetch(t) == 99  # third call — always works via has_result fast path
+end
+
 @testset "Cancellation" begin
     # Ready task cancellation
     start_time = time_ns()

@@ -15,6 +15,7 @@ import Base: @invokelatest
 
 import ..Dagger
 import ..Dagger: Context, Processor, SchedulerOptions, Options, Thunk, WeakThunk, ThunkFuture, ThunkID, DTaskFailedException, Chunk, WeakChunk, OSProc, AnyScope, DefaultScope, InvalidScope, LockedObject, Argument, Signature
+import ..Dagger: Sealed, SEALED, FutureNode, futures_push!, futures_seal!
 import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak, unwrap_weak_checked, wrap_weak, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, default_enabled, processor, get_processors, get_parent, execute!, rmprocs!, task_processor, constrain, cputhreadtime, maybe_take_or_alloc!
 import ..Dagger: @dagdebug, @safe_lock_spin1, @maybelog, @take_or_alloc!
 import DataStructures: PriorityQueue
@@ -67,12 +68,13 @@ Fields:
 - `worker_transfer_rate::Dict{Int,Dict{Processor,UInt64}}` - Maps from worker ID to per-processor network transfer rate estimates in bytes per second
 - `halt::Base.Event` - Event indicating that the scheduler is halting
 - `lock::ReentrantLock` - Lock around operations which modify the state
-- `futures::Dict{Thunk, Vector{ThunkFuture}}` - Futures registered for waiting on the result of a thunk.
 - `thunks_to_delete::Set{Thunk}` - The list of `Thunk`s ready to be deleted upon completion.
 - `chan::RemoteChannel{Channel{AnyTaskResult}}` - Channel for receiving completed thunks.
 
 Note: `errored`, `valid`, `running`, and `running_on` per-thunk state now live directly on
 `Thunk` fields (`thunk.errored`, `thunk.valid`, `thunk.running`, `thunk.running_on`).
+Per-thunk futures are stored in the lock-free Treiber list `thunk.futures_head`; use
+`futures_push!`/`futures_seal!` to interact with it.
 """
 struct ComputeState
     uid::UInt64
@@ -98,7 +100,6 @@ struct ComputeState
     # than the generic `SchedulingException` used for other scheduler exits.
     halt_cancelled::Threads.Atomic{Bool}
     lock::ReentrantLock
-    futures::Dict{Thunk, Vector{ThunkFuture}}
     thunks_to_delete::Set{Thunk}
     chan::RemoteChannel{Channel{AnyTaskResult}}
 end
@@ -125,7 +126,6 @@ function start_state(deps::Dict, node_order, chan)
                          Base.Event(),
                          Threads.Atomic{Bool}(false),
                          ReentrantLock(),
-                         Dict{Thunk, Vector{ThunkFuture}}(),
                          Set{Thunk}(),
                          chan)
 
@@ -510,12 +510,19 @@ function scheduler_exit(ctx, state::ComputeState, options::SchedulerOptions)
         # `SchedulingException`.
         teardown_ex = state.halt_cancelled[] ? InterruptException() :
                                                SchedulingException("Scheduler exited")
-        for (_, futures) in state.futures
-            for future in futures
-                put!(future, teardown_ex; error=true)
+        for (_, wt) in state.thunk_dict
+            t = unwrap_weak(wt)
+            t === nothing && continue
+            # Seal this thunk's futures list (no-op if already sealed by finish_task!).
+            # Any futures remaining in the captured list were never fulfilled normally.
+            head = futures_seal!(t)
+            head === nothing && continue
+            node = head
+            while node !== nothing
+                put!(node.future, teardown_ex; error=true)
+                node = @atomic node.next
             end
         end
-        empty!(state.futures)
     end
 
     # Let the context procs handler clean itself up

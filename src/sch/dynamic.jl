@@ -180,12 +180,13 @@ function _register_future!(ctx, state, task, tid, (future, id, check)::Tuple{Thu
                 throw(DynamicThunkException("Cannot fetch result of dominated thunk"))
             end
         end
-        # TODO: Assert that future will be fulfilled
-        if has_result(state, thunk)
+        # Fast path: thunk already has a result; fulfill immediately.
+        # Slow path: register in the Treiber futures list. If the list was
+        # already sealed (thunk finished between the has_result check and the
+        # push), futures_push! returns false and we fulfill directly, so the future
+        # is always fulfilled exactly once.
+        if has_result(state, thunk) || !futures_push!(thunk, future)
             put!(future, load_result(state, thunk); error=(@atomic thunk.errored))
-        else
-            futures = get!(()->ThunkFuture[], state.futures, thunk)
-            push!(futures, future)
         end
     end
     return
