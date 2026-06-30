@@ -56,14 +56,15 @@ Fields:
 - `thunk_dict::LockedObject{Dict{Int, WeakThunk}}` - Maps from thunk IDs to a `Thunk`; has its own lock so it can be accessed independently of `state.lock`
 - `node_order::Any` - Function that returns the order of a thunk
 - `equiv_chunks::LockedObject{WeakKeyDict{DRef,Chunk}}` - Cache mapping from `DRef` to a `Chunk` which contains it; has its own lock
-- `worker_time_pressure::Dict{Int,Dict{Processor,UInt64}}` - Maps from worker ID to processor pressure
-- `worker_storage_pressure::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}` - Maps from worker ID to storage resource pressure
-- `worker_storage_capacity::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}` - Maps from worker ID to storage resource capacity
-- `worker_loadavg::Dict{Int,NTuple{3,Float64}}` - Worker load average
+- `worker_time_pressure::LockedObject{Dict{Int,Dict{Processor,Threads.Atomic{UInt64}}}}` - Maps from worker ID to per-processor pressure counters (atomic leaves, own lock for membership changes; capture-the-ref invariant: hold the Atomic object across reserve→release)
+- `worker_storage_pressure::LockedObject{Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}}` - Maps from worker ID to storage resource pressure (own lock)
+- `worker_storage_capacity::LockedObject{Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}}` - Maps from worker ID to storage resource capacity (own lock)
+- `worker_loadavg::LockedObject{Dict{Int,NTuple{3,Float64}}}` - Worker load average (own lock)
 - `worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}` - Communication channels between the scheduler and each worker
-- `signature_time_cost::Dict{Signature,UInt64}` - Cache of estimated CPU time (in nanoseconds) required to compute calls with the given signature
-- `signature_alloc_cost::Dict{Signature,UInt64}` - Cache of estimated CPU RAM (in bytes) required to compute calls with the given signature
-- `worker_transfer_rate::Dict{Int,Dict{Processor,UInt64}}` - Maps from worker ID to per-processor network transfer rate estimates in bytes per second
+- `signature_time_cost::LockedObject{Dict{Signature,UInt64}}` - Cache of estimated CPU time (in nanoseconds) required to compute calls with the given signature; own lock so reads/writes are independent of `state.lock`
+- `signature_alloc_cost::LockedObject{Dict{Signature,UInt64}}` - Cache of estimated CPU RAM (in bytes); own lock
+- `worker_transfer_rate::LockedObject{Dict{Int,Dict{Processor,UInt64}}}` - Maps from worker ID to per-processor network transfer rate estimates in bytes per second; own lock
+- `running_pressure_refs::Dict{Int,Tuple{Threads.Atomic{UInt64},UInt64}}` - Maps running thunk IDs to their captured pressure counter ref and reserved estimate; used for symmetric atomic release on completion
 - `halt::Base.Event` - Event indicating that the scheduler is halting
 - `lock::ReentrantLock` - Lock around operations which modify the state
 - `thunks_to_delete::Set{Thunk}` - The list of `Thunk`s ready to be deleted upon completion.
@@ -82,14 +83,15 @@ struct ComputeState
     thunk_dict::LockedObject{Dict{Int, WeakThunk}}
     node_order::Any
     equiv_chunks::LockedObject{WeakKeyDict{DRef,Chunk}}
-    worker_time_pressure::Dict{Int,Dict{Processor,UInt64}}
-    worker_storage_pressure::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}
-    worker_storage_capacity::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}
-    worker_loadavg::Dict{Int,NTuple{3,Float64}}
+    worker_time_pressure::LockedObject{Dict{Int,Dict{Processor,Threads.Atomic{UInt64}}}}
+    worker_storage_pressure::LockedObject{Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}}
+    worker_storage_capacity::LockedObject{Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}}
+    worker_loadavg::LockedObject{Dict{Int,NTuple{3,Float64}}}
     worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}
-    signature_time_cost::Dict{Signature,UInt64}
-    signature_alloc_cost::Dict{Signature,UInt64}
-    worker_transfer_rate::Dict{Int,Dict{Processor,UInt64}}
+    signature_time_cost::LockedObject{Dict{Signature,UInt64}}
+    signature_alloc_cost::LockedObject{Dict{Signature,UInt64}}
+    worker_transfer_rate::LockedObject{Dict{Int,Dict{Processor,UInt64}}}
+    running_pressure_refs::Dict{Int,Tuple{Threads.Atomic{UInt64},UInt64}}
     halt::Base.Event
     # Set when the scheduler is being halted as a result of a cancellation
     # (`cancel!(...; halt_sch=true)`), so that teardown resolves any still-pending
@@ -110,14 +112,15 @@ function start_state(deps::Dict, node_order, chan)
                          LockedObject(Dict{Int, WeakThunk}()),
                          node_order,
                          LockedObject(WeakKeyDict{DRef,Chunk}()),
-                         Dict{Int,Dict{Processor,UInt64}}(),
-                         Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}(),
-                         Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}(),
-                         Dict{Int,NTuple{3,Float64}}(),
+                         LockedObject(Dict{Int,Dict{Processor,Threads.Atomic{UInt64}}}()),
+                         LockedObject(Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}()),
+                         LockedObject(Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}()),
+                         LockedObject(Dict{Int,NTuple{3,Float64}}()),
                          Dict{Int, Tuple{RemoteChannel,RemoteChannel}}(),
-                         Dict{Signature,UInt64}(),
-                         Dict{Signature,UInt64}(),
-                         Dict{Int,Dict{Processor,UInt64}}(),
+                         LockedObject(Dict{Signature,UInt64}()),
+                         LockedObject(Dict{Signature,UInt64}()),
+                         LockedObject(Dict{Int,Dict{Processor,UInt64}}()),
+                         Dict{Int,Tuple{Threads.Atomic{UInt64},UInt64}}(),
                          Base.Event(),
                          Threads.Atomic{Bool}(false),
                          ReentrantLock(),
@@ -159,23 +162,20 @@ function init_proc(state, p, log_sink)
     @maybelog ctx timespan_start(ctx, :init_proc, (;uid=state.uid, worker=p.pid), nothing)
     # Initialize pressure and capacity
     gproc = OSProc(p.pid)
-    lock(state.lock) do
-        state.worker_time_pressure[p.pid] = Dict{Processor,UInt64}()
-        state.worker_transfer_rate[p.pid] = Dict{Processor,UInt64}()
-
-        state.worker_storage_pressure[p.pid] = Dict{Union{StorageResource,Nothing},UInt64}()
-        state.worker_storage_capacity[p.pid] = Dict{Union{StorageResource,Nothing},UInt64}()
-        #= FIXME
-        for storage in get_storage_resources(gproc)
-            pressure, capacity = remotecall_fetch(gproc.pid, storage) do storage
-                storage_pressure(storage), storage_capacity(storage)
-            end
-            state.worker_storage_pressure[p.pid][storage] = pressure
-            state.worker_storage_capacity[p.pid][storage] = capacity
-        end
-        =#
-
-        state.worker_loadavg[p.pid] = (0.0, 0.0, 0.0)
+    lock(state.worker_time_pressure) do wtp
+        wtp[p.pid] = Dict{Processor,Threads.Atomic{UInt64}}()
+    end
+    lock(state.worker_transfer_rate) do wtr
+        wtr[p.pid] = Dict{Processor,UInt64}()
+    end
+    lock(state.worker_storage_pressure) do wsp
+        wsp[p.pid] = Dict{Union{StorageResource,Nothing},UInt64}()
+    end
+    lock(state.worker_storage_capacity) do wsc
+        wsc[p.pid] = Dict{Union{StorageResource,Nothing},UInt64}()
+    end
+    lock(state.worker_loadavg) do wla
+        wla[p.pid] = (0.0, 0.0, 0.0)
     end
     if p.pid != 1
         lock(WORKER_MONITOR_LOCK) do
@@ -439,21 +439,33 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options::SchedulerOpt
                 return # effectively `continue`
             end
             metadata = tresult.metadata
+            # Release the reserved pressure via the captured counter ref
+            # (capture-the-ref invariant: same Atomic object as was atomic_add!'d
+            # at schedule time, stable even if the worker was removed between
+            # reserve and release).
+            entry = pop!(state.running_pressure_refs, thunk_id, nothing)
+            if entry !== nothing
+                counter_ref, est = entry
+                Threads.atomic_sub!(counter_ref, est)
+            end
             if metadata !== nothing
-                state.worker_time_pressure[pid][proc] = metadata.time_pressure
                 #to_storage = fetch(node.options.storage)
                 #state.worker_storage_pressure[pid][to_storage] = metadata.storage_pressure
                 #state.worker_storage_capacity[pid][to_storage] = metadata.storage_capacity
                 #state.worker_loadavg[pid] = metadata.loadavg
                 sig = signature(state, node)
-                state.signature_time_cost[sig] = (metadata.threadtime + get(state.signature_time_cost, sig, 0)) ÷ 2
-                state.signature_alloc_cost[sig] = (metadata.gc_allocd + get(state.signature_alloc_cost, sig, 0)) ÷ 2
+                lock(state.signature_time_cost) do stc
+                    stc[sig] = (metadata.threadtime + get(stc, sig, 0)) ÷ 2
+                end
+                lock(state.signature_alloc_cost) do sac
+                    sac[sig] = (metadata.gc_allocd + get(sac, sig, 0)) ÷ 2
+                end
                 if metadata.transfer_rate !== nothing
-                    old_rate = get(state.worker_transfer_rate[pid], proc, UInt64(0))
-                    if old_rate == 0
-                        state.worker_transfer_rate[pid][proc] = metadata.transfer_rate
-                    else
-                        state.worker_transfer_rate[pid][proc] = (old_rate + metadata.transfer_rate) ÷ 2
+                    lock(state.worker_transfer_rate) do wtr
+                        old_rate = get(get(wtr, pid, Dict{Processor,UInt64}()), proc, UInt64(0))
+                        proc_map = get!(wtr, pid) do; Dict{Processor,UInt64}(); end
+                        proc_map[proc] = old_rate == 0 ? metadata.transfer_rate :
+                                                         (old_rate + metadata.transfer_rate) ÷ 2
                     end
                 end
             end
@@ -709,10 +721,20 @@ end
                         Vector{ScheduleTaskSpec}()
                     end
                     push!(proc_tasks, ScheduleTaskSpec(task, scope, est_time_util, est_alloc_util, est_occupancy))
-                    state.worker_time_pressure[gproc.pid][proc] =
-                        get(state.worker_time_pressure[gproc.pid], proc, 0) +
-                        est_time_util
-                    @dagdebug task :schedule "Scheduling to $gproc -> $proc (cost: $(costs[proc]), pressure: $(state.worker_time_pressure[gproc.pid][proc]))"
+                    # Capture-the-ref: resolve the Atomic{UInt64} counter for
+                    # this (pid, proc) pair once and hold it across reserve and
+                    # the later release (capture-the-ref invariant, §4.3).
+                    counter_ref = lock(state.worker_time_pressure) do wtp
+                        proc_map = get!(wtp, gproc.pid) do
+                            Dict{Processor,Threads.Atomic{UInt64}}()
+                        end
+                        get!(proc_map, proc) do
+                            Threads.Atomic{UInt64}(UInt64(0))
+                        end
+                    end
+                    Threads.atomic_add!(counter_ref, est_time_util)
+                    state.running_pressure_refs[task.id] = (counter_ref, est_time_util)
+                    @dagdebug task :schedule "Scheduling to $gproc -> $proc (cost: $(costs[proc]), pressure: $(counter_ref[]))"
                     sorted_procs_cleanup()
                     costs_cleanup()
                     @goto pop_task
@@ -781,11 +803,14 @@ end
 function remove_dead_proc!(ctx, state, proc, options)
     @assert options.single !== proc.pid "Single worker failed, cannot continue."
     rmprocs!(ctx, [proc])
-    delete!(state.worker_time_pressure, proc.pid)
-    delete!(state.worker_transfer_rate, proc.pid)
-    delete!(state.worker_storage_pressure, proc.pid)
-    delete!(state.worker_storage_capacity, proc.pid)
-    delete!(state.worker_loadavg, proc.pid)
+    # COW-style membership removal: lock each map and delete the worker's entry.
+    # Any in-flight tasks that captured a counter ref from this worker will still
+    # release via atomic_sub! on the (now-orphaned) Atomic object — harmless.
+    lock(state.worker_time_pressure) do wtp; delete!(wtp, proc.pid); end
+    lock(state.worker_transfer_rate) do wtr; delete!(wtr, proc.pid); end
+    lock(state.worker_storage_pressure) do wsp; delete!(wsp, proc.pid); end
+    lock(state.worker_storage_capacity) do wsc; delete!(wsc, proc.pid); end
+    lock(state.worker_loadavg) do wla; delete!(wla, proc.pid); end
     delete!(state.worker_chans, proc.pid)
 end
 
@@ -887,6 +912,14 @@ Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
                 if result isa Chunk
                     store_result!(state, thunk, result)
                     finish_task!(ctx, state, thunk, false)
+                    # The task finished via restore — release the pressure
+                    # that was reserved in schedule! without a TaskResult
+                    # ever arriving from the worker.
+                    entry = pop!(state.running_pressure_refs, thunk.id, nothing)
+                    if entry !== nothing
+                        counter_ref, est = entry
+                        Threads.atomic_sub!(counter_ref, est)
+                    end
                     continue
                 elseif result !== nothing
                     throw(ArgumentError("Invalid restore return type: $(typeof(result))"))

@@ -473,12 +473,12 @@ function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
     est_time_util = round(UInt64, if time_util !== nothing && haskey(time_util, T)
         time_util[T] * 1000^3
     else
-        get(state.signature_time_cost, sig, 1000^3)
+        lock(state.signature_time_cost) do stc; get(stc, sig, 1000^3); end
     end)::UInt64
     est_alloc_util = if alloc_util !== nothing && haskey(alloc_util, T)
         alloc_util[T]
     else
-        get(state.signature_alloc_cost, sig, UInt64(0))
+        lock(state.signature_alloc_cost) do sac; get(sac, sig, UInt64(0)); end
     end::UInt64
     est_occupancy::UInt32 = typemax(UInt32)
     if occupancy !== nothing
@@ -563,7 +563,7 @@ const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
     if sig === nothing
         sig = signature(task.f, task.inputs)
     end
-    est_time_util = get(state.signature_time_cost, sig, 1000^3)
+    est_time_util = lock(state.signature_time_cost) do stc; get(stc, sig, 1000^3); end
 
     # Estimate total cost for executing this task on each candidate processor
     for proc in procs
@@ -581,7 +581,9 @@ const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
         # TODO: Actually estimate/benchmark this
         task_xfer_cost = gproc.pid != myid() ? 1_000_000 : 0 # 1ms
 
-        tx_rate = get(get(state.worker_transfer_rate, gproc.pid, Dict{Processor,UInt64}()), proc, DEFAULT_TRANSFER_RATE)
+        tx_rate = lock(state.worker_transfer_rate) do wtr
+            get(get(wtr, gproc.pid, Dict{Processor,UInt64}()), proc, DEFAULT_TRANSFER_RATE)
+        end
         costs[proc] = est_time_util + (tx_cost/tx_rate) + task_xfer_cost
     end
     chunks_cleanup()

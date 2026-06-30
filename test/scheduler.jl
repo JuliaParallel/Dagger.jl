@@ -409,7 +409,9 @@ end
 
         #pres1_1 = state.worker_time_pressure[1][tproc1_1]
         #pres2_1 = state.worker_time_pressure[first(workers())][tproc2_1]
-        tx_rate = get(get(state.worker_transfer_rate, first(workers()), Dict{Dagger.Processor,UInt64}()), tproc2_1, Dagger.Sch.DEFAULT_TRANSFER_RATE)
+        tx_rate = lock(state.worker_transfer_rate) do wtr
+            get(get(wtr, first(workers()), Dict{Dagger.Processor,UInt64}()), tproc2_1, Dagger.Sch.DEFAULT_TRANSFER_RATE)
+        end
         tx_xfer_cost = 1e6
         sig_unknown_cost = 1e9
 
@@ -456,8 +458,10 @@ end
         @testset "Per-Processor Transfer Rate" begin
             wid = first(workers())
 
-            state.worker_transfer_rate[1][tproc1_1] = UInt64(2_000_000)
-            state.worker_transfer_rate[wid][tproc2_1] = UInt64(500_000)
+            lock(state.worker_transfer_rate) do wtr
+                wtr[1][tproc1_1] = UInt64(2_000_000)
+                wtr[wid][tproc2_1] = UInt64(500_000)
+            end
 
             args = [Dagger.tochunk(1), Dagger.tochunk(2)]
             tx_size = 2 * sizeof(Int)
@@ -470,8 +474,10 @@ end
             end
             @test costs[tproc1_1] ≈ sig_unknown_cost
 
-            delete!(state.worker_transfer_rate[1], tproc1_1)
-            delete!(state.worker_transfer_rate[wid], tproc2_1)
+            lock(state.worker_transfer_rate) do wtr
+                delete!(wtr[1], tproc1_1)
+                delete!(wtr[wid], tproc2_1)
+            end
         end
     end
 end
