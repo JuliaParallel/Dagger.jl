@@ -229,6 +229,15 @@ function _cancel!(state, tid, force, graceful, halt_sch)
                                 tid in istate.cancelled && continue
                                 @dagdebug tid :cancel "Cancelling pre-running task token"
                                 any_cancelled = true
+                                # task_specs is now populated in the same lock as
+                                # cancel_tokens and proc_occupancy (see Sch.jl step 3),
+                                # so we can safely look up occupancy here and undo the
+                                # increment that was done before istate.tasks was set.
+                                if haskey(istate.task_specs, tid)
+                                    task_spec = istate.task_specs[tid]
+                                    istate.proc_occupancy[] -= task_spec.est_occupancy
+                                    istate.time_pressure[] -= task_spec.est_time_util
+                                end
                                 push!(istate.cancelled, tid)
                                 to_proc = istate.proc
                                 put!(istate.return_queue, Sch.TaskResult(myid(), to_proc, tid, InterruptException(), nothing))
