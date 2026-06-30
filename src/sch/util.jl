@@ -116,15 +116,21 @@ end
 """
 Seal the dependents Treiber list on `thunk` and, for each captured downstream:
 - Atomically decrement its `pending_deps` counter.
-- If the counter just hit zero and `failed` is false, push it to `state.ready`.
+- If the counter just hit zero and `failed` is false, call `schedule_one!`
 - If `failed` is true or the dependent is already errored, propagate failure
   immediately (regardless of how many other upstreams remain).
+
+Fan-out policy: the first `INLINE_SCHEDULE_FANOUT_THRESHOLD` newly-ready
+dependents are scheduled inline on the calling thread; additional ones are
+dispatched via `Threads.@spawn` to avoid holding `state.lock` on very wide
+fan-outs.
 """
 function schedule_dependents!(state, thunk, failed)
     @dagdebug thunk :finish "Checking dependents"
     head = deps_seal!(thunk)
     head === nothing && return
     ctr = 0
+    inline_count = 0
     node = head
     while node !== nothing
         dep = node.thunk::Thunk
@@ -143,12 +149,22 @@ function schedule_dependents!(state, thunk, failed)
             # This was the last pending upstream; the dependent is now ready.
             ctr += 1
             @dagdebug dep :schedule "Dependent is now ready"
-            # Invariant: if we reached n==0 and are about to push to
-            # ready, the counter should still be 0 (not driven negative by
-            # another concurrent decrement, which would be a protocol error).
+            # Invariant: if we reached n==0 and are about to schedule,
+            # the counter should still be 0 (not driven negative by another
+            # concurrent decrement, which would be a protocol error).
             n_now = @atomic dep.pending_deps
-            @assert n_now == 0 "Thunk[$(dep.id)] pending_deps drifted from 0 to $n_now between ready decision and push"
-            (@atomic dep.finished) || push!(state.ready, dep)
+            @assert n_now == 0 "Thunk[$(dep.id)] pending_deps drifted from 0 to $n_now between ready decision and schedule_one!"
+            if !(@atomic dep.finished)
+                # Schedule inline up to the fan-out threshold;
+                # spawn the rest to avoid monopolizing state.lock.
+                if inline_count < Sch.INLINE_SCHEDULE_FANOUT_THRESHOLD
+                    Sch.schedule_one!(state, dep)
+                    inline_count += 1
+                else
+                    _dep = dep
+                    Threads.@spawn Sch.schedule_one!(state, _dep)
+                end
+            end
         end
         node = @atomic node.next
     end
@@ -156,8 +172,8 @@ function schedule_dependents!(state, thunk, failed)
 end
 
 """
-Prepares the scheduler to schedule `thunk`. Will mark `thunk` as ready if
-its inputs are satisfied.
+Prepares the scheduler to schedule `thunk`. Wires dataflow edges and calls
+`schedule_one!` directly for any task that becomes immediately ready
 """
 function reschedule_syncdeps!(state, thunk, seen=nothing)
     Dagger.maybe_take_or_alloc!(RESCHEDULE_SYNCDEPS_SEEN_CACHE[], seen) do seen
@@ -171,7 +187,7 @@ function reschedule_syncdeps!(state, thunk, seen=nothing)
             if (@atomic cur.valid)
                 continue
             end
-            if (@atomic cur.finished) || (cur in state.ready) || (@atomic cur.running)
+            if (@atomic cur.finished) || (@atomic cur.running)
                 continue
             end
 
@@ -201,9 +217,9 @@ function reschedule_syncdeps!(state, thunk, seen=nothing)
                         end
 
                         # DFS into input only if we haven't visited it yet and
-                        # it is not already being scheduled elsewhere.
+                        # it is not already registered or running.
                         if !(input in seen) &&
-                                !((@atomic input.running) || (input in state.ready))
+                                !(@atomic input.running) && !(@atomic input.valid)
                             push!(to_visit, input)
                         end
                     end
@@ -217,11 +233,11 @@ function reschedule_syncdeps!(state, thunk, seen=nothing)
             if errored_input !== nothing
                 # At least one upstream was already errored: fail this thunk.
                 # set_failed! calls schedule_dependents!(cur, true) which seals
-                # cur.dependents_head, so the ready-push below is skipped.
+                # cur.dependents_head, so the schedule_one! below is skipped.
                 set_failed!(state, errored_input, cur)
             elseif n == 0 && !(@atomic cur.errored) && !(@atomic cur.finished)
-                # All upstream edges satisfied and no error: cur is ready.
-                push!(state.ready, cur)
+                # All upstream edges satisfied and no error: schedule directly.
+                Sch.schedule_one!(state, cur)
             end
         end
     end
@@ -248,7 +264,6 @@ function set_failed!(state, origin::Thunk, thunk::Thunk=origin; ex=nothing)
         store_result!(state, thunk, DTaskFailedException(thunk, origin, origin_ex); error=true)
     end
 
-    filter!(x -> x !== thunk, state.ready)
     fill_registered_futures!(state, thunk, true)
     thunk.sch_accessible = false
     delete_unused_task!(state, thunk)
@@ -273,19 +288,18 @@ function print_sch_status(io::IO, state, thunk; offset=0, limit=5, max_inputs=3)
         if (@atomic node.errored)
             status *= "E"
         end
-        if node in state.ready
-            status *= "r"
-        elseif (@atomic node.running)
+        if (@atomic node.running)
             status *= "R"
         elseif has_result(state, node)
             status *= "C"
+        elseif (@atomic node.valid) && !(@atomic node.finished)
+            status *= "w"  # waiting (pending_deps > 0 or in proc queue)
         else
             status *= "?"
         end
         status
     end
     if offset == 0
-        println(io, "Ready ($(length(state.ready))): $(join(map(t->t.id, state.ready), ','))")
         println(io, "Running ($(state.running_count[])): (use thunk.running to inspect individual tasks)")
         print(io, "($(status_string(thunk))) ")
     end

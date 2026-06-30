@@ -50,13 +50,9 @@ function handle_fault(ctx, state, deadproc)
         t.cache_ref = nothing
     end
 
-    # Remove thunks from state.ready that have inputs on the deadlist
-    for idx in length(state.ready):-1:1
-        rt = state.ready[idx]
-        if any((input in deadlist) for input in map(last, rt.inputs))
-            deleteat!(state.ready, idx)
-        end
-    end
+    # Tasks that were in processor
+    # queues on the dead worker had their results lost with the worker.
+    # reschedule_syncdeps! will re-wire their edges and re-schedule them.
 
     # Reschedule inputs from deadlist
     seen = Set{Thunk}()

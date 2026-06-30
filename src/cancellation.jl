@@ -131,23 +131,13 @@ function _cancel!(state, tid, force, graceful, halt_sch)
     # Get the scheduler uid
     sch_uid = state.uid
 
-    # Cancel ready tasks
-    for task in state.ready
-        tid !== nothing && task.id != tid && continue
-        @dagdebug tid :cancel "Cancelling ready task"
-        ex = DTaskFailedException(task, task, InterruptException())
-        Sch.set_failed!(state, task; ex)
-    end
-    if tid === nothing
-        empty!(state.ready)
-    else
-        idx = findfirst(t->t.id == tid, state.ready)
-        idx !== nothing && deleteat!(state.ready, idx)
-    end
-
-    # Cancel waiting tasks (pending_deps > 0, not yet running or finished).
-    # Snapshot thunk_dict to avoid holding its lock while iterating.
-    waiting_tasks = Thunk[]
+    # No central ready queue — tasks either have pending_deps > 0
+    # (waiting), are in a processor queue (not yet running), or are running.
+    # Cancelling "in-queue" tasks: set_failed! stores the error; when the
+    # processor picks them up and sends back a result, the single-finisher CAS
+    # in store_result! will lose and the duplicate result is discarded.
+    # Cancel all non-running, non-finished tasks (waiting + in processor queues).
+    cancel_tasks = Thunk[]
     lock(state.thunk_dict) do d
         for (_, wt) in d
             t = Dagger.unwrap_weak(wt)
@@ -155,12 +145,11 @@ function _cancel!(state, tid, force, graceful, halt_sch)
             tid !== nothing && t.id != tid && continue
             (@atomic t.finished) && continue
             (@atomic t.running) && continue
-            (t in state.ready) && continue
-            push!(waiting_tasks, t)
+            push!(cancel_tasks, t)
         end
     end
-    for task in waiting_tasks
-        @dagdebug tid :cancel "Cancelling waiting task"
+    for task in cancel_tasks
+        @dagdebug tid :cancel "Cancelling non-running task"
         ex = DTaskFailedException(task, task, InterruptException())
         Sch.set_failed!(state, task; ex)
     end
@@ -244,6 +233,33 @@ function _cancel!(state, tid, force, graceful, halt_sch)
                                 cancel!(token; graceful)
                             end
                         end
+
+                        # Cancel tasks that are still in the processor queue (not yet dequeued
+                        # by the proc runner). These tasks have thunk.running=true (set by
+                        # fire_tasks!) but haven't incremented proc_occupancy yet. We remove
+                        # them from the queue so the proc runner never starts them, and post
+                        # a cancel result so the scheduler can decrement running_count.
+                        raw_queue = Dagger.payload(istate.queue)
+                        queued_to_cancel = Dagger.Sch.TaskSpec[]
+                        for (task_spec, _) in raw_queue
+                            tid_q = task_spec.thunk_id
+                            _tid !== nothing && tid_q != _tid && continue
+                            tid_q in istate.cancelled && continue
+                            push!(queued_to_cancel, task_spec)
+                        end
+                        for task_spec in queued_to_cancel
+                            tid_q = task_spec.thunk_id
+                            @dagdebug tid_q :cancel "Cancelling queued (not-yet-running) task"
+                            any_cancelled = true
+                            push!(istate.cancelled, tid_q)
+                            delete!(raw_queue, task_spec)
+                            # Clean up TASKS_RUNNING so re-submission works if needed
+                            lock(Dagger.Sch.TASK_SYNC) do
+                                pop!(Dagger.Sch.TASKS_RUNNING, tid_q, nothing)
+                            end
+                            to_proc = istate.proc
+                            put!(istate.return_queue, Dagger.Sch.TaskResult(myid(), to_proc, tid_q, InterruptException(), nothing))
+                        end
                     end
                     if any_cancelled
                         notify(istate.reschedule)
@@ -253,6 +269,42 @@ function _cancel!(state, tid, force, graceful, halt_sch)
             return
         end
     end
+    # Fallback: tasks are fired immediately via schedule_one!, so a task
+    # may have thunk.running=true but not yet be registered in the proc's
+    # cancel_tokens (tiny window between @reusable_tasks dispatch and do_tasks
+    # registration). If the proc-level cancel above didn't reach the task, post
+    # a cancel result directly to state.chan. The single-finisher CAS in
+    # store_result! discards any duplicate result (proc-level or this one).
+    fallback_cancelled = Thunk[]
+    lock(state.thunk_dict) do d
+        for (_, wt) in d
+            t = Dagger.unwrap_weak(wt)
+            t === nothing && continue
+            tid !== nothing && t.id != tid && continue
+            (@atomic t.finished) && continue
+            (@atomic t.running) || continue
+            t.running_on === nothing && continue
+            push!(fallback_cancelled, t)
+        end
+    end
+    for task in fallback_cancelled
+        ron = task.running_on
+        ron === nothing && continue
+        @dagdebug task.id :cancel "Fallback: posting cancel result for in-flight task"
+        # Mark as pre-cancelled in the ProcessorStateDict so that if FireTaskSpec
+        # hasn't run yet, do_tasks and the proc runner will skip the task without
+        # incrementing proc_occupancy (which would block subsequent tasks).
+        wid = Dagger.root_worker_id(ron)
+        if wid == myid()
+            states = Sch.proc_states(sch_uid)
+            lock(states.pre_cancelled_lock) do
+                push!(states.pre_cancelled, task.id)
+            end
+        end
+        _put_sched_signal!(state.chan, Sch.TaskResult(
+            wid, ron, task.id, InterruptException(), nothing))
+    end
+
     # The scheduler may already be exiting (and have closed its channel) by the
     # time we get here, so tolerate a closed channel when signaling it.
     _put_sched_signal!(state.chan, Sch.RescheduleSignal())
