@@ -173,9 +173,9 @@ function _register_future!(ctx, state, task, tid, (future, id, check)::Tuple{Thu
             end
             return false
         end
-        thunk = unwrap_weak_checked(state.thunk_dict[id.id])
+        thunk = lock(state.thunk_dict) do d; unwrap_weak_checked(d[id.id]); end
         if check
-            ownthunk = unwrap_weak_checked(state.thunk_dict[tid])
+            ownthunk = lock(state.thunk_dict) do d; unwrap_weak_checked(d[tid]); end
             if dominates(ownthunk, thunk)
                 throw(DynamicThunkException("Cannot fetch result of dominated thunk"))
             end
@@ -204,8 +204,10 @@ get_dag_ids(h::SchedulerHandle) =
     exec!(_get_dag_ids, h, nothing)::Dict{ThunkID,Set{ThunkID}}
 function _get_dag_ids(ctx, state, task, tid, _)
     deps = Dict{ThunkID,Set{ThunkID}}()
+    # Snapshot the thunk_dict to avoid holding its lock across the entire loop.
+    thunk_dict_snapshot = lock(state.thunk_dict) do d; collect(d); end
     # Initialize empty sets for all known thunks.
-    for (id, thunk) in state.thunk_dict
+    for (id, thunk) in thunk_dict_snapshot
         thunk = unwrap_weak_checked(thunk)
         deps[ThunkID(id, nothing)] = Set{ThunkID}()
     end
@@ -218,9 +220,9 @@ function _get_dag_ids(ctx, state, task, tid, _)
     # We use `options.syncdeps` (not `inputs`) because `collect_task_inputs!`
     # replaces Thunk-typed values in `inputs` with their Chunk results before
     # firing the task, making `inputs` unreliable as a dependency source.
-    for (id, thunk) in state.thunk_dict
+    for (id, thunk) in thunk_dict_snapshot
         thunk = unwrap_weak_checked(thunk)
-        thunk.finished && continue
+        (@atomic thunk.finished) && continue
         thunk.options === nothing && continue
         thunk.options.syncdeps === nothing && continue
         thunk_id = ThunkID(id, nothing)

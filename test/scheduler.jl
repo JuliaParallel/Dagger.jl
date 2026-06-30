@@ -640,6 +640,35 @@ end
     end
 end
 
+@testset "NG Phase 4 stress: concurrent independent diamonds" begin
+    # Spawn N independent diamond DAGs at the same time.
+    #
+    # Each diamond has the shape:
+    #   source → left, source → right, (left, right) → sink
+    #
+    # Running many concurrently exercises the single-finisher CAS in
+    # store_result!, the LockedObject wrapping of thunk_dict/equiv_chunks,
+    # and the Treiber-list dependents seal under concurrent pressure.
+    N = 64
+    results = Vector{Any}(undef, N)
+    @sync for i in 1:N
+        local i = i  # capture loop variable
+        Threads.@spawn begin
+            # Use Dagger.spawn (function form) so we can pass a plain Int
+            # as the starting value without wrapping it in a thunk.
+            source = Dagger.spawn(identity, i)
+            left   = Dagger.spawn(+, source, 1)
+            right  = Dagger.spawn(*, source, 2)
+            sink   = Dagger.spawn(+, left, right)
+            results[i] = fetch(sink)
+        end
+    end
+    for i in 1:N
+        # source=i, left=i+1, right=2*i, sink=(i+1)+2*i = 3i+1
+        @test results[i] == 3i + 1
+    end
+end
+
 @testset "Cancellation" begin
     # Ready task cancellation
     start_time = time_ns()

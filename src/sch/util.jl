@@ -68,24 +68,34 @@ end
 
 has_result(state, thunk) = thunk.cache_ref !== nothing
 function load_result(state, thunk)
-    @assert thunk.finished "Thunk[$(thunk.id)] is not yet finished"
+    @assert (@atomic thunk.finished) "Thunk[$(thunk.id)] is not yet finished"
     return something(thunk.cache_ref)
 end
+"""
+    store_result!(state, thunk, value; error=false)
+
+Store `value` as the result of `thunk` and mark it finished. Uses a
+single-finisher CAS on `thunk.finished` so that duplicate or racing
+completions (cancellation, worker fault) are silently dropped — only the
+first caller proceeds. Returns `true` if this call won the race, `false`
+if another finisher already stored a result.
+"""
 function store_result!(state, thunk, value; error::Bool=false)
-    @assert islocked(state.lock)
-    @assert !thunk.finished "Thunk[$(thunk.id)] should not be finished yet"
-    @assert !has_result(state, thunk) "Thunk[$(thunk.id)] already contains a cached result"
-    thunk.finished = true
+    # CAS: exactly one finisher proceeds. `@atomicreplace` returns (old, success).
+    _, won = @atomicreplace thunk.finished false => true
+    won || return false
     if error && value isa Exception && !(value isa DTaskFailedException)
         thunk.cache_ref = Some{Any}(DTaskFailedException(thunk, thunk, value))
     else
         thunk.cache_ref = Some{Any}(value)
     end
     @atomic thunk.errored = error
+    return true
 end
 function clear_result!(state, thunk)
     @assert islocked(state.lock)
     thunk.cache_ref = nothing
+    @atomic thunk.finished = false
     @atomic thunk.errored = false
 end
 
@@ -119,17 +129,26 @@ function schedule_dependents!(state, thunk, failed)
     while node !== nothing
         dep = node.thunk::Thunk
         n = @atomic dep.pending_deps -= 1   # n = new value after decrement
+        # Dataflow invariant check: the counter must never go negative.
+        # A negative value means more decrements than increments were issued,
+        # which would indicate a bug in the submission-guard protocol.
+        @assert n >= 0 "BUG: pending_deps underflow on Thunk[$(dep.id)]: n=$n after decrement by $(thunk.id)"
         if failed || (@atomic dep.errored)
             # Propagate failure immediately — don't wait for the counter to
             # reach zero (mirrors the old DFS semantics in set_failed!).
             ctr += 1
             @dagdebug dep :schedule "Dependent has transitively failed"
-            dep.finished || set_failed!(state, thunk, dep)
+            (@atomic dep.finished) || set_failed!(state, thunk, dep)
         elseif n == 0
             # This was the last pending upstream; the dependent is now ready.
             ctr += 1
             @dagdebug dep :schedule "Dependent is now ready"
-            dep.finished || push!(state.ready, dep)
+            # Invariant: if we reached n==0 and are about to push to
+            # ready, the counter should still be 0 (not driven negative by
+            # another concurrent decrement, which would be a protocol error).
+            n_now = @atomic dep.pending_deps
+            @assert n_now == 0 "Thunk[$(dep.id)] pending_deps drifted from 0 to $n_now between ready decision and push"
+            (@atomic dep.finished) || push!(state.ready, dep)
         end
         node = @atomic node.next
     end
@@ -152,7 +171,7 @@ function reschedule_syncdeps!(state, thunk, seen=nothing)
             if (@atomic cur.valid)
                 continue
             end
-            if cur.finished || (cur in state.ready) || (@atomic cur.running)
+            if (@atomic cur.finished) || (cur in state.ready) || (@atomic cur.running)
                 continue
             end
 
@@ -171,7 +190,7 @@ function reschedule_syncdeps!(state, thunk, seen=nothing)
                         continue
                     end
 
-                    if !input.finished
+                    if !(@atomic input.finished)
                         # Register cur as a downstream dependent of input.
                         @atomic cur.pending_deps += 1
                         pushed = deps_push!(input, cur)
@@ -200,7 +219,7 @@ function reschedule_syncdeps!(state, thunk, seen=nothing)
                 # set_failed! calls schedule_dependents!(cur, true) which seals
                 # cur.dependents_head, so the ready-push below is skipped.
                 set_failed!(state, errored_input, cur)
-            elseif n == 0 && !(@atomic cur.errored) && !cur.finished
+            elseif n == 0 && !(@atomic cur.errored) && !(@atomic cur.finished)
                 # All upstream edges satisfied and no error: cur is ready.
                 push!(state.ready, cur)
             end

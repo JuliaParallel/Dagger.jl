@@ -53,9 +53,9 @@ Fields:
 - `uid::UInt64` - Unique identifier for this scheduler instance
 - `ready::Vector{Thunk}` - The list of `Thunk`s that are ready to execute
 - `running_count::Threads.Atomic{Int}` - Number of currently-running `Thunk`s (replaces `running::Set{Thunk}`; per-thunk state lives on `thunk.running` and `thunk.running_on`)
-- `thunk_dict::Dict{Int, WeakThunk}` - Maps from thunk IDs to a `Thunk`
+- `thunk_dict::LockedObject{Dict{Int, WeakThunk}}` - Maps from thunk IDs to a `Thunk`; has its own lock so it can be accessed independently of `state.lock`
 - `node_order::Any` - Function that returns the order of a thunk
-- `equiv_chunks::WeakKeyDict{DRef,Chunk}` - Cache mapping from `DRef` to a `Chunk` which contains it
+- `equiv_chunks::LockedObject{WeakKeyDict{DRef,Chunk}}` - Cache mapping from `DRef` to a `Chunk` which contains it; has its own lock
 - `worker_time_pressure::Dict{Int,Dict{Processor,UInt64}}` - Maps from worker ID to processor pressure
 - `worker_storage_pressure::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}` - Maps from worker ID to storage resource pressure
 - `worker_storage_capacity::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}` - Maps from worker ID to storage resource capacity
@@ -79,9 +79,9 @@ struct ComputeState
     uid::UInt64
     ready::Vector{Thunk}
     running_count::Threads.Atomic{Int}
-    thunk_dict::Dict{Int, WeakThunk}
+    thunk_dict::LockedObject{Dict{Int, WeakThunk}}
     node_order::Any
-    equiv_chunks::WeakKeyDict{DRef,Chunk}
+    equiv_chunks::LockedObject{WeakKeyDict{DRef,Chunk}}
     worker_time_pressure::Dict{Int,Dict{Processor,UInt64}}
     worker_storage_pressure::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}
     worker_storage_capacity::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}
@@ -107,9 +107,9 @@ function start_state(deps::Dict, node_order, chan)
     state = ComputeState(Threads.atomic_add!(UID_COUNTER, UInt64(1)),
                          Vector{Thunk}(undef, 0),
                          Threads.Atomic{Int}(0),
-                         Dict{Int, WeakThunk}(),
+                         LockedObject(Dict{Int, WeakThunk}()),
                          node_order,
-                         WeakKeyDict{DRef,Chunk}(),
+                         LockedObject(WeakKeyDict{DRef,Chunk}()),
                          Dict{Int,Dict{Processor,UInt64}}(),
                          Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}(),
                          Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}(),
@@ -334,10 +334,12 @@ end
 
 function scheduler_init(ctx, state::ComputeState, d::Thunk, options::SchedulerOptions, deps)
     # setup thunk_dict mappings
-    for node in filter(istask, keys(deps))
-        state.thunk_dict[node.id] = WeakThunk(node)
-        for dep in deps[node]
-            state.thunk_dict[dep.id] = WeakThunk(dep)
+    lock(state.thunk_dict) do d
+        for node in filter(istask, keys(deps))
+            d[node.id] = WeakThunk(node)
+            for dep in deps[node]
+                d[dep.id] = WeakThunk(dep)
+            end
         end
     end
 
@@ -423,20 +425,17 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options::SchedulerOpt
                     end
                 end
             end
-            if !haskey(state.thunk_dict, thunk_id)
-                # A result arrived for a task that is no longer tracked. This
-                # happens when a cancellation posts a (possibly duplicate)
-                # result for a task that has already finished and been cleaned
-                # up. Ignore it rather than crashing the scheduler.
-                @dagdebug thunk_id :take "Ignoring result for untracked task"
-                return # effectively `continue`
+            node = lock(state.thunk_dict) do d
+                haskey(d, thunk_id) ? unwrap_weak(d[thunk_id]) : nothing
             end
-            node = unwrap_weak_checked(state.thunk_dict[thunk_id])::Thunk
-            if node.finished
-                # Duplicate result for an already-finished task (e.g. a
-                # cancellation racing with normal completion). Ignore it to
-                # avoid double-storing a result.
-                @dagdebug thunk_id :take "Ignoring duplicate result for finished task"
+            if node === nothing
+                # A result arrived for a task that is no longer tracked.
+                # Two known-safe reasons:
+                #   1. Cancellation posted a duplicate result after finish_task! ran.
+                #   2. The user dropped their DTask reference (fire-and-forget), the
+                #      Thunk was GC'd, and the result arrived just after.
+                # Ignore it rather than crashing the scheduler.
+                @dagdebug thunk_id :take "Ignoring result for untracked or GC'd task"
                 return # effectively `continue`
             end
             metadata = tresult.metadata
@@ -459,11 +458,19 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options::SchedulerOpt
                 end
             end
             if res isa Chunk
-                if !haskey(state.equiv_chunks, res)
-                    state.equiv_chunks[res.handle::DRef] = res
+                lock(state.equiv_chunks) do ec
+                    if !haskey(ec, res.handle::DRef)
+                        ec[res.handle::DRef] = res
+                    end
                 end
             end
-            store_result!(state, node, res; error=thunk_failed)
+            won = store_result!(state, node, res; error=thunk_failed)
+            if !won
+                # The single-finisher CAS lost: another path (cancellation,
+                # fault recovery) already stored a result. Discard this one.
+                @dagdebug thunk_id :take "Ignoring duplicate result for already-finished task"
+                return # effectively `continue`
+            end
             if node.options !== nothing && node.options.checkpoint !== nothing
                 try
                     @invokelatest node.options.checkpoint(node, res)
@@ -515,17 +522,19 @@ function scheduler_exit(ctx, state::ComputeState, options::SchedulerOptions)
         # `SchedulingException`.
         teardown_ex = state.halt_cancelled[] ? InterruptException() :
                                                SchedulingException("Scheduler exited")
-        for (_, wt) in state.thunk_dict
-            t = unwrap_weak(wt)
-            t === nothing && continue
-            # Seal this thunk's futures list (no-op if already sealed by finish_task!).
-            # Any futures remaining in the captured list were never fulfilled normally.
-            head = futures_seal!(t)
-            head === nothing && continue
-            node = head
-            while node !== nothing
-                put!(node.future, teardown_ex; error=true)
-                node = @atomic node.next
+        lock(state.thunk_dict) do d
+            for (_, wt) in d
+                t = unwrap_weak(wt)
+                t === nothing && continue
+                # Seal this thunk's futures list (no-op if already sealed by finish_task!).
+                # Any futures remaining in the captured list were never fulfilled normally.
+                head = futures_seal!(t)
+                head === nothing && continue
+                node = head
+                while node !== nothing
+                    put!(node.future, teardown_ex; error=true)
+                    node = @atomic node.next
+                end
             end
         end
     end
@@ -820,7 +829,9 @@ function task_delete!(state, thunk)
     clear_result!(state, thunk)
     @atomic thunk.valid = false
     @atomic thunk.errored = false
-    delete!(state.thunk_dict, thunk.id)
+    lock(state.thunk_dict) do d
+        delete!(d, thunk.id)
+    end
 end
 
 function evict_all_chunks!(ctx, options, to_evict)

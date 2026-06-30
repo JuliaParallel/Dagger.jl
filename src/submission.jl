@@ -99,24 +99,24 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
                     else
                         uid_to_tid[arg_uid]
                     end
-                    @lock state.lock begin
-                        @inbounds fargs[idx] = Argument(arg.pos, state.thunk_dict[arg_tid])
+                    lock(state.thunk_dict) do d
+                        @inbounds fargs[idx] = Argument(arg.pos, d[arg_tid])
                     end
                 elseif valuetype(arg) <: Sch.ThunkID
                     arg_tid = (value(arg)::Sch.ThunkID).id
-                    @lock state.lock begin
-                        @inbounds fargs[idx] = Argument(arg.pos, state.thunk_dict[arg_tid])
+                    lock(state.thunk_dict) do d
+                        @inbounds fargs[idx] = Argument(arg.pos, d[arg_tid])
                     end
                 elseif valuetype(arg) <: Chunk
                     # N.B. Different Chunks with the same DRef handle will hash to the same slot,
                     # so we just pick an equivalent Chunk as our upstream
                     chunk = value(arg)::Chunk
                     function find_equivalent_chunk(state, chunk::C) where {C<:Chunk}
-                        @lock state.lock begin
-                            if haskey(state.equiv_chunks, chunk.handle)
-                                return state.equiv_chunks[chunk.handle]::C
+                        lock(state.equiv_chunks) do ec
+                            if haskey(ec, chunk.handle)
+                                return ec[chunk.handle]::C
                             else
-                                state.equiv_chunks[chunk.handle] = chunk
+                                ec[chunk.handle] = chunk
                                 return chunk
                             end
                         end
@@ -130,7 +130,7 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
             for idx in 1:length(syncdeps_vec)
                 dep = syncdeps_vec[idx]::ThunkSyncdep
                 @assert dep.id !== nothing && dep.thunk === nothing
-                thunk = @lock state.lock state.thunk_dict[dep.id.id]
+                thunk = lock(state.thunk_dict) do d; d[dep.id.id]; end
                 @inbounds syncdeps_vec[idx] = ThunkSyncdep(thunk)
             end
         end
@@ -169,7 +169,9 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
 
             @lock state.lock begin
                 # Attach `thunk` within the scheduler
-                state.thunk_dict[thunk.id] = WeakThunk(thunk)
+                lock(state.thunk_dict) do d
+                    d[thunk.id] = WeakThunk(thunk)
+                end
                 #=FIXME:REALLOC=#
                 Sch.reschedule_syncdeps!(state, thunk)
                 old_fargs_cleanup() # reschedule_syncdeps! preserves all referenced tasks/chunks

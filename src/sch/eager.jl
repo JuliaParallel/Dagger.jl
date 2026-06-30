@@ -145,7 +145,9 @@ function _find_thunk(e::Dagger.DTask)
         id_map[e.uid]
     end
     lock(EAGER_STATE[].lock) do
-        unwrap_weak_checked(EAGER_STATE[].thunk_dict[tid])
+        lock(EAGER_STATE[].thunk_dict) do d
+            unwrap_weak_checked(d[tid])
+        end
     end
 end
 Dagger.task_id(t::Dagger.DTask) = lock(EAGER_ID_MAP) do id_map

@@ -79,7 +79,7 @@ mutable struct Thunk
     options::Union{Options, Nothing} # stores task options
     eager_accessible::Bool
     sch_accessible::Bool
-    finished::Bool
+    @atomic finished::Bool         # true once a result (success or error) has been stored
     @atomic errored::Bool          # true if finished with an error result
     @atomic valid::Bool            # true while registered with the scheduler
     @atomic running::Bool          # true while a worker is executing this thunk

@@ -146,16 +146,18 @@ function _cancel!(state, tid, force, graceful, halt_sch)
     end
 
     # Cancel waiting tasks (pending_deps > 0, not yet running or finished).
-    # Collect first to avoid mutating thunk_dict while iterating.
+    # Snapshot thunk_dict to avoid holding its lock while iterating.
     waiting_tasks = Thunk[]
-    for (_, wt) in state.thunk_dict
-        t = Dagger.unwrap_weak(wt)
-        t === nothing && continue
-        tid !== nothing && t.id != tid && continue
-        t.finished && continue
-        (@atomic t.running) && continue
-        (t in state.ready) && continue
-        push!(waiting_tasks, t)
+    lock(state.thunk_dict) do d
+        for (_, wt) in d
+            t = Dagger.unwrap_weak(wt)
+            t === nothing && continue
+            tid !== nothing && t.id != tid && continue
+            (@atomic t.finished) && continue
+            (@atomic t.running) && continue
+            (t in state.ready) && continue
+            push!(waiting_tasks, t)
+        end
     end
     for task in waiting_tasks
         @dagdebug tid :cancel "Cancelling waiting task"
@@ -166,12 +168,14 @@ function _cancel!(state, tid, force, graceful, halt_sch)
     # Cancel running tasks at the processor level
     wids = begin
         _wids = Int[]
-        for (_, wt) in state.thunk_dict
-            t = Dagger.unwrap_weak(wt)
-            t === nothing && continue
-            ron = t.running_on
-            ron === nothing && continue
-            push!(_wids, Dagger.root_worker_id(ron))
+        lock(state.thunk_dict) do d
+            for (_, wt) in d
+                t = Dagger.unwrap_weak(wt)
+                t === nothing && continue
+                ron = t.running_on
+                ron === nothing && continue
+                push!(_wids, Dagger.root_worker_id(ron))
+            end
         end
         unique!(_wids)
         _wids
