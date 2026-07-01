@@ -2,9 +2,20 @@ function istask end
 function task_id end
 
 # Use a Set for O(1) membership checks (vs O(n) for Vector).
-const DAGDEBUG_CATEGORIES = Set{Symbol}([:global, :submit, :schedule, :scope,
-                                         :take, :execute, :move, :processor, :finish,
-                                         :cancel, :stream])
+#
+# N.B. This is empty by default (debug tracing is opt-in only, via the
+# `JULIA_DAGGER_DEBUG` environment variable or by `push!`-ing a category
+# directly), because `@dagdebug` eagerly formats its message string (see
+# `_dagdebug_emit` below) whenever its category is in this set, *before*
+# Julia's own `@debug`/logger level check gets a chance to skip printing it.
+# For hot-path categories like `:execute`, `:move`, `:schedule`, and
+# `:processor`, that formatting (which often stringifies types and values)
+# is prohibitively expensive to pay on every task, so it must not run unless
+# a user has explicitly asked for tracing.
+const DAGDEBUG_VALID_CATEGORIES = (:all, :global, :submit, :schedule, :scope,
+                                   :take, :execute, :move, :processor, :finish,
+                                   :cancel, :stream, :validate)
+const DAGDEBUG_CATEGORIES = Set{Symbol}()
 
 # Out-of-line emission keeps call-site IR minimal: just one `in` check + one
 # function call per @dagdebug site, regardless of how complex the message is.
