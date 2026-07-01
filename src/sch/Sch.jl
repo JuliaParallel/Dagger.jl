@@ -889,18 +889,6 @@ concurrently across threads.
     estimate_task_costs!(sorted_procs, costs, state, input_procs, task; sig)
     input_procs_cleanup()
 
-    # Move our corresponding ThreadProc to be the last considered,
-    # if the task is expected to run for longer than the time it takes to
-    # schedule it onto another worker (estimated at 1ms).
-    if length(sorted_procs) > 1
-        sch_threadproc = Dagger.ThreadProc(myid(), Threads.threadid())
-        sch_thread_idx = findfirst(proc->proc==sch_threadproc, sorted_procs)
-        if sch_thread_idx !== nothing && costs[sch_threadproc] > 1_000_000 # 1ms
-            deleteat!(sorted_procs, sch_thread_idx)
-            push!(sorted_procs, sch_threadproc)
-        end
-    end
-
     # Select the best available processor and reserve time pressure optimistically.
     # These operations use their own fine-grained locks — no state.lock needed.
     scheduled = false
