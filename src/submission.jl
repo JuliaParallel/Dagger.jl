@@ -176,6 +176,12 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
                 lock(state.thunk_dict) do d
                     d[thunk.id] = WeakThunk(thunk)
                 end
+                # Hold a strong reference until the thunk reaches a terminal state
+                # (released in `task_delete!`). The weak `thunk_dict` entry alone
+                # cannot keep an unfinished thunk alive once the user drops its
+                # `DTask`, which would let GC collect a thunk that still has
+                # pending dependents and deadlock the scheduler.
+                push!(state.strong_thunks, thunk)
                 #=FIXME:REALLOC=#
                 Sch.reschedule_syncdeps!(state, thunk, ready)
                 old_fargs_cleanup() # reschedule_syncdeps! preserves all referenced tasks/chunks

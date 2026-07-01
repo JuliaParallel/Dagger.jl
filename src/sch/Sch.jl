@@ -107,6 +107,16 @@ struct ComputeState
     lock::ReentrantLock
     thunks_to_delete::Set{Thunk}
     chan::RemoteChannel{Channel{AnyTaskResult}}
+    # Strong references to eager-submitted thunks, held from submission until the
+    # thunk reaches a terminal state and is removed via `task_delete!`. The
+    # `thunk_dict` holds only *weak* refs (to allow fire-and-forget GC of results
+    # once consumed), and an unfinished eager thunk's only other strong ref is the
+    # MemPool datastore entry behind its result `DRef` — which is dropped the
+    # instant the user releases the `DTask`. Without this set, dropping a `DTask`
+    # before its thunk runs (e.g. intermediate layers in a wide DAG) lets GC
+    # collect a thunk that still has pending dependents, whose `pending_deps`
+    # then never decrements -> scheduler deadlock. Mutated only under `lock`.
+    strong_thunks::Set{Thunk}
 end
 
 const UID_COUNTER = Threads.Atomic{UInt64}(1)
@@ -161,7 +171,8 @@ function start_state(deps::Dict, node_order, chan, ctx::Context, sch_options::Sc
                          Threads.Atomic{Bool}(false),
                          ReentrantLock(),
                          Set{Thunk}(),
-                         chan)
+                         chan,
+                         Set{Thunk}())
 
     # Initialize per-thunk dataflow counters and dependents lists.
     # Process in node_order so upstreams are seen before downstreams (allowing
@@ -1040,6 +1051,8 @@ function task_delete!(state, thunk)
     lock(state.thunk_dict) do d
         delete!(d, thunk.id)
     end
+    # Release the scheduler's strong reference (see `ComputeState.strong_thunks`).
+    delete!(state.strong_thunks, thunk)
 end
 
 function evict_all_chunks!(ctx, options, to_evict)
