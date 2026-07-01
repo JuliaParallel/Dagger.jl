@@ -612,7 +612,7 @@ function _setindex!_return_value(A, value, idxs...)
     return value
 end
 
-const TASK_TYPED = ScopedValue{Bool}(false)
+const TASK_TYPED = ScopedValue{Bool}(true)
 get_task_typed() = TASK_TYPED[]
 
 """
