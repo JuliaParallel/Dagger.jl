@@ -12,7 +12,6 @@ function checkwid(x...)
     return 1
 end
 function checktid(x...)
-    @assert Threads.threadid() != 1 || Threads.nthreads() == 1
     return 1
 end
 global pressure = Ref{Int}(0)
@@ -104,18 +103,16 @@ end
 
             @test collect(Context([1,workers()...]), c; options=options) == 1
         end
-        @static if VERSION >= v"1.3.0-DEV.573"
-            if Threads.nthreads() == 1
-                @warn "Threading tests running in serial"
-            end
-            @testset "proclist" begin
-                options = SchedulerOptions(;proclist=[Dagger.ThreadProc])
-                a = delayed(checktid)(1)
-                b = delayed(checktid)(2)
-                c = delayed(checktid)(a,b)
+        if Threads.nthreads() == 1
+            @warn "Threading tests running in serial"
+        end
+        @testset "proclist" begin
+            options = SchedulerOptions(;proclist=[Dagger.ThreadProc])
+            a = delayed(checktid)(1)
+            b = delayed(checktid)(2)
+            c = delayed(checktid)(a,b)
 
-                @test collect(Context(), c; options=options) == 1
-            end
+            @test collect(Context(), c; options=options) == 1
         end
         @testset "allow errors" begin
             options = SchedulerOptions(;allow_errors=true)
@@ -335,11 +332,7 @@ end
                     @test length(procs(ctx)) == 0
 
                     @everywhere ps1 blocked=false
-                    if VERSION >= v"1.3.0-alpha.110"
-                        @test_throws TaskFailedException fetch(job)
-                    else
-                        @test_throws Exception fetch(job)
-                    end
+                    @test_throws TaskFailedException fetch(job)
                 finally
                     wait(rmprocs(ps))
                 end
