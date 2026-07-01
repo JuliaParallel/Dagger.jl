@@ -20,6 +20,45 @@ function Base.getproperty(spec::DTaskSpec{typed}, field::Symbol) where typed
     end
 end
 
+"""
+    with_fargs(spec::DTaskSpec, replacements) -> fargs
+    with_fargs(spec::DTaskSpec, idx::Integer, new_value) -> fargs
+
+Returns a new `fargs` collection (matching `spec`'s typed-ness, i.e. a
+`Vector{Argument}` or a `Tuple` of `TypedArgument`s) with the value at each
+index in `replacements` (an iterable of `idx=>new_value` pairs, or just a
+single `idx`/`new_value` pair) swapped out for the paired new value, and all
+other arguments left untouched. Necessary because a typed `DTaskSpec`'s
+`fargs` are stored as an immutable `Tuple` of (write-protected)
+`TypedArgument`s, so individual arguments cannot be mutated in-place; a whole
+new `fargs` collection (and typically a new `DTaskSpec` wrapping it) must be
+constructed instead.
+
+`replacements` is only ever iterated linearly (never hashed), so callers
+should pass a small `Vector`/`Tuple` of pairs rather than a `Dict`, to avoid
+an unnecessary hash-table allocation for what is typically a handful of
+replaced arguments (often just one).
+"""
+function with_fargs(spec::DTaskSpec, replacements)
+    fargs = spec.fargs
+    if is_typed(spec)
+        return ntuple(length(fargs)) do idx
+            for (ridx, new_value) in replacements
+                ridx == idx && return with_value(fargs[idx], new_value)
+            end
+            return fargs[idx]
+        end
+    else
+        new_fargs = copy(fargs)
+        for (idx, new_value) in replacements
+            new_fargs[idx] = with_value(new_fargs[idx], new_value)
+        end
+        return new_fargs
+    end
+end
+with_fargs(spec::DTaskSpec, idx::Integer, new_value) =
+    with_fargs(spec, (idx=>new_value,))
+
 struct DTaskPair
     spec::DTaskSpec
     task::DTask
