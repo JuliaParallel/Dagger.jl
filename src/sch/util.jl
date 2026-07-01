@@ -4,19 +4,46 @@ function errormonitor_tracked(name::String, t::Task)
     @safe_lock_spin1 ERRORMONITOR_TRACKED tracked begin
         push!(tracked, name => t)
     end
-    errormonitor(Threads.@spawn begin
-        try
-            wait(t)
-        finally
-            lock(ERRORMONITOR_TRACKED) do tracked
-                idx = findfirst(o->o[2]===t, tracked)
-                # N.B. This may be nothing if precompile emptied these
-                if idx !== nothing
-                    deleteat!(tracked, idx)
-                end
+    ensure_errormonitor_reaper!()
+    return t
+end
+
+# Finished entries are swept out of `ERRORMONITOR_TRACKED` by a single shared
+# reaper task, rather than spawning one dedicated monitor task per tracked task
+# purely to delete its entry on completion. That per-call spawn fired for every
+# Dagger task's lifecycle and was a top per-task allocation source; this lazy
+# reaper removes it. `ERRORMONITOR_TRACKED` is only consulted by
+# precompile for cleanliness, and that check tolerates finished entries
+# lingering between sweeps, so eventual (not immediate) removal is sufficient.
+const ERRORMONITOR_REAPER_INTERVAL = Ref{Float64}(1.0)
+const ERRORMONITOR_REAPER_RUNNING = Threads.Atomic{Bool}(false)
+
+function ensure_errormonitor_reaper!()
+    ERRORMONITOR_REAPER_RUNNING[] && return
+    # Win the start race exactly once; concurrent losers no-op. The reaper sets
+    # this back to `false` (under the list lock) only after observing an empty
+    # list, and a subsequent push restarts it — so a live reaper always covers
+    # any not-yet-finished entry.
+    if !Threads.atomic_or!(ERRORMONITOR_REAPER_RUNNING, true)
+        errormonitor(Threads.@spawn errormonitor_reaper_loop())
+    end
+    return
+end
+
+function errormonitor_reaper_loop()
+    while true
+        sleep(ERRORMONITOR_REAPER_INTERVAL[])
+        stood_down = lock(ERRORMONITOR_TRACKED) do tracked
+            filter!(o -> !istaskdone(last(o)), tracked)
+            if isempty(tracked)
+                ERRORMONITOR_REAPER_RUNNING[] = false
+                return true
             end
+            return false
         end
-    end)
+        stood_down && break
+    end
+    return
 end
 function errormonitor_tracked_set!(name::String, t::Task)
     lock(ERRORMONITOR_TRACKED) do tracked
