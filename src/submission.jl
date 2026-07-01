@@ -289,7 +289,11 @@ function eager_process_elem_submission_to_local(id_map, arg::TypedArgument{T}) w
     @assert !(T <: Thunk) "Cannot use `Thunk`s in `@spawn`/`spawn`"
     if T <: DTask && haskey(id_map, (value(arg)::DTask).uid)
         #=FIXME:UNIQUE=#
-        return Sch.ThunkID(id_map[value(arg).uid], value(arg).thunk_ref)
+        tid = Sch.ThunkID(id_map[value(arg).uid], value(arg).thunk_ref)
+        # Preserve the argument position by re-wrapping in a TypedArgument;
+        # returning a bare ThunkID drops the position and breaks the later
+        # `map(Argument, ...)` conversion in `eager_launch!`.
+        return TypedArgument(arg.pos, tid)
     end
     return arg
 end

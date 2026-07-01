@@ -189,7 +189,9 @@ struct TypedDataDepsTaskArgument{T,N}
     deps::NTuple{N,DataDepsTaskDependency}
 end
 map_or_ntuple(f, xs::Vector) = map(f, 1:length(xs))
-@inline map_or_ntuple(@specialize(f), xs::NTuple{N,T}) where {N,T} = ntuple(f, Val(N))
+# N.B. Accept any `Tuple` (typed specs produce heterogeneous tuples of
+# `TypedArgument{T}`, not a homogeneous `NTuple{N,T}`).
+@inline map_or_ntuple(@specialize(f), xs::Tuple) = ntuple(f, Val(length(xs)))
 function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_procs, all_scope, spec::DTaskSpec{typed}, task::DTask, fargs, proc_to_scope_lfu, write_num::Int) where typed
     @specialize spec fargs
 
