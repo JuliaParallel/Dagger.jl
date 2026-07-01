@@ -116,24 +116,32 @@ end
 """
 Seal the dependents Treiber list on `thunk` and, for each captured downstream:
 - Atomically decrement its `pending_deps` counter.
-- If the counter just hit zero and `failed` is false, call `schedule_one!`
+- If the counter just hit zero and `failed` is false, append the dependent to
+  `ready_out` (the caller schedules it *after* releasing `state.lock`; see
+  `schedule_ready!`).
 - If `failed` is true or the dependent is already errored, propagate failure
   immediately (regardless of how many other upstreams remain).
 
-Fan-out policy: the first `INLINE_SCHEDULE_FANOUT_THRESHOLD` newly-ready
-dependents are scheduled inline on the calling thread; additional ones are
-dispatched via `Threads.@spawn` to avoid holding `state.lock` on very wide
-fan-outs.
+This function only *collects* newly-ready dependents; it never calls
+`schedule_one!` itself. This is what keeps `state.lock` from being held across
+`schedule_one!` (Fix A): the lock-protected finish bookkeeping collects ready
+thunks into `ready_out`, and the caller drains that buffer outside the lock so
+placement runs lock-free and concurrently across threads.
 """
-function schedule_dependents!(state, thunk, failed)
+function schedule_dependents!(state, thunk, failed, ready_out::Vector{Thunk})
     @dagdebug thunk :finish "Checking dependents"
     head = deps_seal!(thunk)
     head === nothing && return
     ctr = 0
-    inline_count = 0
     node = head
     while node !== nothing
         dep = node.thunk::Thunk
+        if !failed
+            # Push our result into `dep`'s input slots now, while it is still
+            # alive, so deferred scheduling of `dep` (Fix A) does not race with
+            # delete_unused_task! clearing this thunk's result below.
+            resolve_finished_input!(state, dep, thunk)
+        end
         n = @atomic dep.pending_deps -= 1   # n = new value after decrement
         # Dataflow invariant check: the counter must never go negative.
         # A negative value means more decrements than increments were issued,
@@ -154,17 +162,7 @@ function schedule_dependents!(state, thunk, failed)
             # concurrent decrement, which would be a protocol error).
             n_now = @atomic dep.pending_deps
             @assert n_now == 0 "Thunk[$(dep.id)] pending_deps drifted from 0 to $n_now between ready decision and schedule_one!"
-            if !(@atomic dep.finished)
-                # Schedule inline up to the fan-out threshold;
-                # spawn the rest to avoid monopolizing state.lock.
-                if inline_count < Sch.INLINE_SCHEDULE_FANOUT_THRESHOLD
-                    Sch.schedule_one!(state, dep)
-                    inline_count += 1
-                else
-                    _dep = dep
-                    Threads.@spawn Sch.schedule_one!(state, _dep)
-                end
-            end
+            (@atomic dep.finished) || push!(ready_out, dep)
         end
         node = @atomic node.next
     end
@@ -172,10 +170,12 @@ function schedule_dependents!(state, thunk, failed)
 end
 
 """
-Prepares the scheduler to schedule `thunk`. Wires dataflow edges and calls
-`schedule_one!` directly for any task that becomes immediately ready
+Prepares the scheduler to schedule `thunk`. Wires dataflow edges and appends any
+task that becomes immediately ready to `ready_out`. The caller schedules the
+collected thunks *after* releasing `state.lock` (see `schedule_ready!`), so that
+`schedule_one!` never runs under the caller's lock.
 """
-function reschedule_syncdeps!(state, thunk, seen=nothing)
+function reschedule_syncdeps!(state, thunk, ready_out::Vector{Thunk}, seen=nothing)
     Dagger.maybe_take_or_alloc!(RESCHEDULE_SYNCDEPS_SEEN_CACHE[], seen) do seen
         #=FIXME:REALLOC=#
         to_visit = Thunk[thunk]
@@ -236,8 +236,9 @@ function reschedule_syncdeps!(state, thunk, seen=nothing)
                 # cur.dependents_head, so the schedule_one! below is skipped.
                 set_failed!(state, errored_input, cur)
             elseif n == 0 && !(@atomic cur.errored) && !(@atomic cur.finished)
-                # All upstream edges satisfied and no error: schedule directly.
-                Sch.schedule_one!(state, cur)
+                # All upstream edges satisfied and no error: collect for the
+                # caller to schedule outside state.lock.
+                push!(ready_out, cur)
             end
         end
     end
@@ -272,7 +273,12 @@ function set_failed!(state, origin::Thunk, thunk::Thunk=origin; ex=nothing)
     # schedule_dependents! with failed=true immediately calls set_failed! for
     # each captured dependent, regardless of their pending_deps counter value,
     # mirroring the DFS semantics of the old waiting_data traversal.
-    schedule_dependents!(state, thunk, true)
+    # The failure path never produces newly-*ready* thunks (failed dependents
+    # are propagated, not scheduled), so `failed_ready` stays empty; it exists
+    # only to satisfy schedule_dependents!'s out-parameter contract.
+    failed_ready = Thunk[]
+    schedule_dependents!(state, thunk, true, failed_ready)
+    @assert isempty(failed_ready) "set_failed! produced ready thunks on the failure path"
 end
 
 "Internal utility, useful for debugging scheduler state."
@@ -544,6 +550,36 @@ function collect_task_inputs!(state, inputs)
         input = unwrap_weak_checked(Dagger.value(inputs[idx]))
         if istask(input)
             inputs[idx].value = wrap_weak(load_result(state, input))
+        end
+    end
+    return
+end
+
+"""
+Push the (already-available) result of a just-finished upstream `up` into every
+input slot of `dep` that references it, replacing the `Thunk` reference with the
+resolved `Chunk`/value.
+
+This is the dataflow "result push" that makes deferred scheduling safe:
+because `schedule_one!`/`collect_task_inputs!` for a freed dependent runs
+*after* the finishing node's `finish_task!` (which may `delete_unused_task!` the
+node and clear its `cache_ref`), the dependent can not rely on the
+upstream surviving until it is scheduled. By resolving the slot here — under
+`state.lock`, while `up`'s result is still present — the dependent's later
+`collect_task_inputs!` sees a `Chunk` (not a `Thunk`) and never calls
+`load_result` on the (possibly deleted) upstream.
+"""
+function resolve_finished_input!(state, dep::Thunk, up::Thunk)
+    inputs = dep.inputs
+    for idx in 1:length(inputs)
+        # N.B. Use the non-asserting `unwrap_weak`: we only act on the slot that
+        # references `up` (which is alive — it just finished). A *sibling* slot's
+        # weak `Thunk` ref may already have been collected (returns `nothing`),
+        # and that's fine: it can't be `up`, so we skip it. `unwrap_weak_checked`
+        # would instead assert and crash the completion worker.
+        input = unwrap_weak(Dagger.value(inputs[idx]))
+        if input === up
+            inputs[idx].value = wrap_weak(load_result(state, up))
         end
     end
     return

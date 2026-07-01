@@ -675,6 +675,84 @@ end
     end
 end
 
+@testset "NG corrections: deferred scheduling & decentralized completion" begin
+    # Regression for the deferred-scheduling/delete ordering bug:
+    # schedule_one! (and thus collect_task_inputs!) for a freed dependent runs
+    # *after* the upstream's finish_task!, which may delete the upstream and
+    # clear its result. A dependency chain whose intermediate DTasks are NOT
+    # retained by the caller (so they become eligible for deletion) must still
+    # complete: the upstream's result is pushed into the dependent's input slot
+    # at finish time (resolve_finished_input!) before deletion.
+    @testset "long chain with unreferenced intermediates" begin
+        function build_unref_chain(n)
+            t = Dagger.spawn(identity, 0)
+            for _ in 1:n
+                t = Dagger.spawn(+, t, 1)  # previous DTask becomes unreferenced
+            end
+            return t
+        end
+        for n in (100, 500)
+            @test fetch(build_unref_chain(n)) == n
+        end
+    end
+
+    # Wide reduction tree: many completions fan in concurrently, exercising
+    # concurrent finishers (local fast-path) placing freed dependents in
+    # parallel via schedule_ready! outside state.lock.
+    @testset "wide reduction tree" begin
+        function reduce_tree(vals)
+            level = Any[Dagger.spawn(identity, v) for v in vals]
+            while length(level) > 1
+                nxt = Any[]
+                for j in 1:2:length(level)
+                    if j < length(level)
+                        a = level[j]; b = level[j+1]
+                        push!(nxt, Dagger.spawn(+, a, b))
+                    else
+                        push!(nxt, level[j])
+                    end
+                end
+                level = nxt
+            end
+            return level[1]
+        end
+        n = 1000
+        @test fetch(reduce_tree(ones(Int, n))) == n
+    end
+
+    # Wide fan-out beyond INLINE_SCHEDULE_FANOUT_THRESHOLD: one source feeds
+    # many dependents, so schedule_ready! must both inline-schedule and
+    # @spawn-schedule freed dependents. resolve_finished_input! must make each
+    # dependent's read of the (possibly deleted) source safe.
+    @testset "wide fan-out" begin
+        w = 4 * Dagger.Sch.INLINE_SCHEDULE_FANOUT_THRESHOLD
+        source = Dagger.spawn(identity, 10)
+        deps = [Dagger.spawn(+, source, i) for i in 1:w]
+        for i in 1:w
+            @test fetch(deps[i]) == 10 + i
+        end
+    end
+
+    # Batch-mode (compute_dag) termination edge case: the final task of a
+    # batch DAG finishes in-process via the local fast-path, driving
+    # running_count to 0 on a worker thread while scheduler_run blocks on
+    # take!(state.chan). handle_result! must wake the master so it exits rather
+    # than hanging forever.
+    @testset "batch-mode in-process termination" begin
+        for _ in 1:5
+            c = delayed(+)(delayed(+)(delayed(identity)(1), 2), 3)
+            res = fetch(Threads.@spawn collect(c))  # bounded by the test harness
+            @test res == 6
+        end
+        # A deeper batch chain that also finishes locally.
+        chain = delayed(identity)(0)
+        for _ in 1:50
+            chain = delayed(+)(chain, 1)
+        end
+        @test collect(chain) == 50
+    end
+end
+
 @testset "Cancellation" begin
     # Ready task cancellation
     start_time = time_ns()

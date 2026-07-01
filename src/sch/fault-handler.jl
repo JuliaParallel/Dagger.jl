@@ -14,7 +14,7 @@ of DAGs, it *may* cause a `KeyError` or other failures in the scheduler due to
 the complexity of getting the internal state back to a consistent and proper
 state.
 """
-function handle_fault(ctx, state, deadproc)
+function handle_fault(ctx, state, deadproc, ready_out::Vector{Thunk})
     @assert !isempty(procs(ctx)) "No workers left for fault handling!"
 
     deadlist = Thunk[]
@@ -54,9 +54,11 @@ function handle_fault(ctx, state, deadproc)
     # queues on the dead worker had their results lost with the worker.
     # reschedule_syncdeps! will re-wire their edges and re-schedule them.
 
-    # Reschedule inputs from deadlist
+    # Reschedule inputs from deadlist. reschedule_syncdeps! collects any newly-
+    # ready thunks into `ready_out`; the caller (scheduler_run) schedules them
+    # outside state.lock.
     seen = Set{Thunk}()
     for t in deadlist
-        reschedule_syncdeps!(state, t, seen)
+        reschedule_syncdeps!(state, t, ready_out, seen)
     end
 end

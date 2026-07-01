@@ -111,6 +111,34 @@ end
 
 const UID_COUNTER = Threads.Atomic{UInt64}(1)
 
+"""
+    SCHEDULER_STATES
+
+Process-local registry mapping a scheduler `uid` to its `ComputeState`. Used by
+the in-process completion fast-path (`DoTaskSpec`) to reach the owning
+`ComputeState` and run `handle_result!` locally instead of round-tripping the
+result through `state.chan`. Only ever populated on the process that runs the
+scheduler (which is the same process as any in-process worker thread), so a
+lookup succeeds exactly when the local fast-path is applicable.
+"""
+const SCHEDULER_STATES = LockedObject(Dict{UInt64,ComputeState}())
+
+function register_scheduler_state!(state::ComputeState)
+    lock(SCHEDULER_STATES) do d
+        d[state.uid] = state
+    end
+end
+function deregister_scheduler_state!(state::ComputeState)
+    lock(SCHEDULER_STATES) do d
+        delete!(d, state.uid)
+    end
+end
+function lookup_scheduler_state(uid::UInt64)
+    lock(SCHEDULER_STATES) do d
+        get(d, uid, nothing)
+    end
+end
+
 function start_state(deps::Dict, node_order, chan, ctx::Context, sch_options::SchedulerOptions)
     state = ComputeState(Threads.atomic_add!(UID_COUNTER, UInt64(1)),
                          Vector{Thunk}(undef, 0),
@@ -314,6 +342,9 @@ function compute_dag(ctx::Context, d::Thunk, options=SchedulerOptions())
 
     master = OSProc(myid())
 
+    # Register so in-process completions can find this state
+    register_scheduler_state!(state)
+
     @maybelog ctx timespan_start(ctx, :scheduler_init, (;uid=state.uid), master)
     try
         scheduler_init(ctx, state, d, options, deps)
@@ -331,6 +362,7 @@ function compute_dag(ctx::Context, d::Thunk, options=SchedulerOptions())
         catch err
             @error "Error when tearing down scheduler" exception=(err,catch_backtrace())
         finally
+            deregister_scheduler_state!(state)
             @maybelog ctx timespan_finish(ctx, :scheduler_exit, (;uid=state.uid), master)
         end
     end
@@ -388,6 +420,136 @@ function scheduler_init(ctx, state::ComputeState, d::Thunk, options::SchedulerOp
     end
 end
 
+"""
+    handle_result!(ctx, state, pid, proc, thunk_id, res, metadata)
+
+Handle one completed task end-to-end: release its reserved pressure, fold its
+cost-model metadata back in, store its result (single-finisher CAS), run its
+checkpoint, finish it (`finish_task!`), and schedule any newly-ready dependents
+**outside** `state.lock` (via `schedule_ready!`).
+
+This is the runner-callable finish entry point. It is invoked both:
+- from `scheduler_run` for results that travel over `state.chan` (cross-worker
+  results, cancellation signals), and
+- directly on the producing worker thread for in-process results (the local
+  fast-path in `DoTaskSpec`), so N worker threads can finish N tasks
+  concurrently.
+
+The only serialized region is the brief `state.lock` critical section; the
+dependent placement runs lock-free and in parallel. `ProcessExitedException`
+(worker death) is *not* handled here — it arrives only over the channel and is
+handled by `scheduler_run`.
+"""
+function handle_result!(ctx, state::ComputeState, pid, proc, thunk_id, res, metadata)
+    ready = Thunk[]
+    proceed = lock(state.lock) do
+        thunk_failed = false
+        if res isa Exception
+            # A non-fault task error. In allow-errors mode we propagate it to the
+            # task's dependents/futures; otherwise we abort the (batch) scheduler.
+            # Note: the local fast-path never routes exceptions here (it forwards
+            # them over the channel), so this throw always unwinds on the master's
+            # scheduler_run task, preserving batch-mode error semantics.
+            if something(state.sch_options.allow_errors, false)
+                thunk_failed = true
+            else
+                throw(res)
+            end
+        end
+        node = lock(state.thunk_dict) do d
+            haskey(d, thunk_id) ? unwrap_weak(d[thunk_id]) : nothing
+        end
+        if node === nothing
+            # A result arrived for a task that is no longer tracked.
+            # Two known-safe reasons:
+            #   1. Cancellation posted a duplicate result after finish_task! ran.
+            #   2. The user dropped their DTask reference (fire-and-forget), the
+            #      Thunk was GC'd, and the result arrived just after.
+            # Ignore it rather than crashing the scheduler.
+            @dagdebug thunk_id :take "Ignoring result for untracked or GC'd task"
+            return false
+        end
+        # Release the reserved pressure via the captured counter ref
+        # (capture-the-ref invariant: same Atomic object as was atomic_add!'d
+        # at schedule time, stable even if the worker was removed between
+        # reserve and release).
+        entry = lock(state.running_pressure_refs) do rpr
+            pop!(rpr, thunk_id, nothing)
+        end
+        if entry !== nothing
+            counter_ref, est = entry
+            Threads.atomic_sub!(counter_ref, est)
+        end
+        if metadata !== nothing
+            #to_storage = fetch(node.options.storage)
+            #state.worker_storage_pressure[pid][to_storage] = metadata.storage_pressure
+            #state.worker_storage_capacity[pid][to_storage] = metadata.storage_capacity
+            #state.worker_loadavg[pid] = metadata.loadavg
+            sig = signature(state, node)
+            lock(state.signature_time_cost) do stc
+                stc[sig] = (metadata.threadtime + get(stc, sig, 0)) ÷ 2
+            end
+            lock(state.signature_alloc_cost) do sac
+                sac[sig] = (metadata.gc_allocd + get(sac, sig, 0)) ÷ 2
+            end
+            if metadata.transfer_rate !== nothing
+                lock(state.worker_transfer_rate) do wtr
+                    old_rate = get(get(wtr, pid, Dict{Processor,UInt64}()), proc, UInt64(0))
+                    proc_map = get!(wtr, pid) do; Dict{Processor,UInt64}(); end
+                    proc_map[proc] = old_rate == 0 ? metadata.transfer_rate :
+                                                     (old_rate + metadata.transfer_rate) ÷ 2
+                end
+            end
+        end
+        if res isa Chunk
+            lock(state.equiv_chunks) do ec
+                if !haskey(ec, res.handle::DRef)
+                    ec[res.handle::DRef] = res
+                end
+            end
+        end
+        won = store_result!(state, node, res; error=thunk_failed)
+        if !won
+            # The single-finisher CAS lost: another path (cancellation,
+            # fault recovery) already stored a result. Discard this one.
+            @dagdebug thunk_id :take "Ignoring duplicate result for already-finished task"
+            return false
+        end
+        if node.options !== nothing && node.options.checkpoint !== nothing
+            try
+                @invokelatest node.options.checkpoint(node, res)
+            catch err
+                report_catch_error(err, "Thunk checkpoint failed")
+            end
+        end
+
+        @maybelog ctx timespan_start(ctx, :finish, (;uid=state.uid, thunk_id), (;thunk_id, result=res))
+        finish_task!(ctx, state, node, thunk_failed, ready)
+        @maybelog ctx timespan_finish(ctx, :finish, (;uid=state.uid, thunk_id), (;thunk_id, result=res))
+        return true
+    end
+    proceed || return
+
+    # Schedule newly-ready dependents with NO state.lock held — concurrent
+    # finishers place their freed dependents in parallel.
+    schedule_ready!(state, ready)
+
+    # Termination wake (B.5): in batch `compute_dag` mode the master's
+    # scheduler_run blocks on `take!(state.chan)`. When the final task finishes
+    # in-process (local fast-path) and drives `running_count` to 0, no further
+    # channel traffic would arrive, so nudge the master to re-check its loop
+    # condition and exit. (In eager mode the long-lived eager root thunk keeps
+    # running_count >= 1, so this never fires spuriously.)
+    if state.running_count[] == 0
+        try
+            put!(state.chan, RescheduleSignal())
+        catch
+            # Channel may already be closed during teardown; ignore.
+        end
+    end
+    return
+end
+
 function scheduler_run(ctx, state::ComputeState, d::Thunk, options::SchedulerOptions)
     @dagdebug nothing :global "Initializing scheduler" uid=state.uid
 
@@ -415,103 +577,37 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options::SchedulerOpt
         res = tresult.result
 
         @dagdebug thunk_id :take "Got finished task"
-        gproc = OSProc(pid)
         safepoint(state)
-        lock(state.lock) do
-            thunk_failed = false
-            if res isa Exception
-                if unwrap_nested_exception(res) isa ProcessExitedException
-                    @warn "Worker $(pid) died, rescheduling work"
 
-                    # Remove dead worker from procs list
-                    @maybelog ctx timespan_start(ctx, :remove_procs, (;uid=state.uid, worker=pid), nothing)
-                    remove_dead_proc!(ctx, state, gproc, options)
-                    @maybelog ctx timespan_finish(ctx, :remove_procs, (;uid=state.uid, worker=pid), nothing)
+        # Fault path: a worker death (ProcessExitedException) is reported only
+        # over the channel — local, in-process completions never produce it — so
+        # it is handled here on the master, not in handle_result!.
+        if res isa Exception && unwrap_nested_exception(res) isa ProcessExitedException
+            gproc = OSProc(pid)
+            fault_ready = Thunk[]
+            lock(state.lock) do
+                @warn "Worker $(pid) died, rescheduling work"
 
-                    @maybelog ctx timespan_start(ctx, :handle_fault, (;uid=state.uid, worker=pid), nothing)
-                    handle_fault(ctx, state, gproc)
-                    @maybelog ctx timespan_finish(ctx, :handle_fault, (;uid=state.uid, worker=pid), nothing)
-                    return # effectively `continue`
-                else
-                    if something(options.allow_errors, false)
-                        thunk_failed = true
-                    else
-                        throw(res)
-                    end
-                end
-            end
-            node = lock(state.thunk_dict) do d
-                haskey(d, thunk_id) ? unwrap_weak(d[thunk_id]) : nothing
-            end
-            if node === nothing
-                # A result arrived for a task that is no longer tracked.
-                # Two known-safe reasons:
-                #   1. Cancellation posted a duplicate result after finish_task! ran.
-                #   2. The user dropped their DTask reference (fire-and-forget), the
-                #      Thunk was GC'd, and the result arrived just after.
-                # Ignore it rather than crashing the scheduler.
-                @dagdebug thunk_id :take "Ignoring result for untracked or GC'd task"
-                return # effectively `continue`
-            end
-            metadata = tresult.metadata
-            # Release the reserved pressure via the captured counter ref
-            # (capture-the-ref invariant: same Atomic object as was atomic_add!'d
-            # at schedule time, stable even if the worker was removed between
-            # reserve and release).
-            entry = lock(state.running_pressure_refs) do rpr
-                pop!(rpr, thunk_id, nothing)
-            end
-            if entry !== nothing
-                counter_ref, est = entry
-                Threads.atomic_sub!(counter_ref, est)
-            end
-            if metadata !== nothing
-                #to_storage = fetch(node.options.storage)
-                #state.worker_storage_pressure[pid][to_storage] = metadata.storage_pressure
-                #state.worker_storage_capacity[pid][to_storage] = metadata.storage_capacity
-                #state.worker_loadavg[pid] = metadata.loadavg
-                sig = signature(state, node)
-                lock(state.signature_time_cost) do stc
-                    stc[sig] = (metadata.threadtime + get(stc, sig, 0)) ÷ 2
-                end
-                lock(state.signature_alloc_cost) do sac
-                    sac[sig] = (metadata.gc_allocd + get(sac, sig, 0)) ÷ 2
-                end
-                if metadata.transfer_rate !== nothing
-                    lock(state.worker_transfer_rate) do wtr
-                        old_rate = get(get(wtr, pid, Dict{Processor,UInt64}()), proc, UInt64(0))
-                        proc_map = get!(wtr, pid) do; Dict{Processor,UInt64}(); end
-                        proc_map[proc] = old_rate == 0 ? metadata.transfer_rate :
-                                                         (old_rate + metadata.transfer_rate) ÷ 2
-                    end
-                end
-            end
-            if res isa Chunk
-                lock(state.equiv_chunks) do ec
-                    if !haskey(ec, res.handle::DRef)
-                        ec[res.handle::DRef] = res
-                    end
-                end
-            end
-            won = store_result!(state, node, res; error=thunk_failed)
-            if !won
-                # The single-finisher CAS lost: another path (cancellation,
-                # fault recovery) already stored a result. Discard this one.
-                @dagdebug thunk_id :take "Ignoring duplicate result for already-finished task"
-                return # effectively `continue`
-            end
-            if node.options !== nothing && node.options.checkpoint !== nothing
-                try
-                    @invokelatest node.options.checkpoint(node, res)
-                catch err
-                    report_catch_error(err, "Thunk checkpoint failed")
-                end
-            end
+                # Remove dead worker from procs list
+                @maybelog ctx timespan_start(ctx, :remove_procs, (;uid=state.uid, worker=pid), nothing)
+                remove_dead_proc!(ctx, state, gproc, options)
+                @maybelog ctx timespan_finish(ctx, :remove_procs, (;uid=state.uid, worker=pid), nothing)
 
-            @maybelog ctx timespan_start(ctx, :finish, (;uid=state.uid, thunk_id), (;thunk_id, result=res))
-            finish_task!(ctx, state, node, thunk_failed)
-            @maybelog ctx timespan_finish(ctx, :finish, (;uid=state.uid, thunk_id), (;thunk_id, result=res))
+                @maybelog ctx timespan_start(ctx, :handle_fault, (;uid=state.uid, worker=pid), nothing)
+                handle_fault(ctx, state, gproc, fault_ready)
+                @maybelog ctx timespan_finish(ctx, :handle_fault, (;uid=state.uid, worker=pid), nothing)
+            end
+            # Reschedule the dead worker's orphaned thunks outside state.lock.
+            schedule_ready!(state, fault_ready)
+            tresult = nothing
+            res = nothing
+            safepoint(state)
+            continue
         end
+
+        # Normal completion (or a non-fault task error). Handle it end-to-end,
+        # including scheduling newly-ready dependents outside state.lock.
+        handle_result!(ctx, state, pid, proc, thunk_id, res, tresult.metadata)
 
         # Allow data to be GC'd
         tresult = nothing
@@ -610,13 +706,42 @@ end
 """
     INLINE_SCHEDULE_FANOUT_THRESHOLD
 
-Maximum number of newly-ready dependents to schedule inline (on the finishing
-task's thread, under `state.lock`) when sealing a thunk's dependents list in
-`schedule_dependents!`. When more than this many dependents become ready at
-once, additional ones are dispatched via `Threads.@spawn` to avoid holding
-`state.lock` for too long on wide fan-out DAGs.
+Maximum number of newly-ready dependents to schedule inline (on the calling
+thread) in `schedule_ready!`. When more than this many dependents become ready
+at once, additional ones are dispatched via `Threads.@spawn` so that a single
+wide fan-out does not serialize all of its placements on one thread.
 """
 const INLINE_SCHEDULE_FANOUT_THRESHOLD = 8
+
+"""
+    schedule_ready!(state, ready[, procs])
+
+Drain a buffer of newly-ready thunks (collected under `state.lock` by
+`schedule_dependents!` / `reschedule_syncdeps!`) by placing each onto a
+processor via `schedule_one!`. **The caller must NOT hold `state.lock`** —
+placement (cost estimation, optimistic pressure
+reservation, queue insertion) runs lock-free and concurrently across threads.
+
+The first `INLINE_SCHEDULE_FANOUT_THRESHOLD` thunks are scheduled inline on the
+calling thread; any beyond that are dispatched via `Threads.@spawn` so a single
+wide fan-out doesn't serialize all placements on one thread. `ready` is emptied
+on return.
+"""
+function schedule_ready!(state, ready::Vector{Thunk}, procs=procs_to_use(state.ctx, state.sch_options))
+    n = length(ready)
+    n == 0 && return
+    @inbounds for i in 1:n
+        t = ready[i]
+        if i <= INLINE_SCHEDULE_FANOUT_THRESHOLD
+            schedule_one!(state, t, procs)
+        else
+            tt = t
+            Threads.@spawn schedule_one!(state, tt, procs)
+        end
+    end
+    empty!(ready)
+    return
+end
 
 """
     schedule_one!(state, task[, procs])
@@ -627,10 +752,12 @@ scope, estimates costs, performs an optimistic pressure reservation
 (`atomic_add!` + recheck), and calls `fire_tasks!` to push the `TaskSpec`
 into the chosen processor's queue.
 
-Called inline from `schedule_dependents!`,
-from `reschedule_syncdeps!`, and from `scheduler_init` for the bootstrap-ready
-set. Acquires `state.lock` internally, so it is safe to call from both locked
-and unlocked contexts (the lock is reentrant).
+Called from `schedule_ready!` (which drains the ready buffers collected by
+`schedule_dependents!` / `reschedule_syncdeps!`) and from `scheduler_init` for
+the bootstrap-ready set. It acquires `state.lock` internally for its brief
+Phase 1 / Phase 3 critical sections; **callers must not already hold
+`state.lock`**, so that Phase 2 runs genuinely lock-free and
+concurrently across threads.
 """
 @reuse_scope function schedule_one!(state, task, procs=procs_to_use(state.ctx, state.sch_options))
     # Phase 1 — brief state.lock hold: resolve inputs and bail early if already done.
@@ -799,9 +926,13 @@ and unlocked contexts (the lock is reentrant).
     costs_cleanup()
 
     # Phase 3 — brief state.lock hold: fire or fail the task.
+    # `restore_ready` only becomes non-empty if a task completes synchronously
+    # via its `restore` callback inside fire_tasks!; those dependents are
+    # scheduled after the lock is released.
+    restore_ready = Thunk[]
     lock(state.lock) do
         if scheduled
-            fire_tasks!(ctx, best_loc, [best_spec], state)
+            fire_tasks!(ctx, best_loc, [best_spec], state, restore_ready)
         else
             ex = SchedulingException("No processors available, try widening scope")
             set_failed!(state, task; ex)
@@ -809,6 +940,7 @@ and unlocked contexts (the lock is reentrant).
         end
         @maybelog ctx timespan_finish(ctx, :schedule, (;uid=state.uid, thunk_id=task.id), (;thunk_id=task.id))
     end
+    schedule_ready!(state, restore_ready, procs)
 end
 
 """
@@ -864,7 +996,7 @@ function remove_dead_proc!(ctx, state, proc, options)
     delete!(state.worker_chans, proc.pid)
 end
 
-function finish_task!(ctx, state, node, thunk_failed)
+function finish_task!(ctx, state, node, thunk_failed, ready::Vector{Thunk})
     @dagdebug node :finish "Finishing with $(thunk_failed ? "error" : "result")"
     @atomic node.running = false
     node.running_on = nothing
@@ -879,10 +1011,12 @@ function finish_task!(ctx, state, node, thunk_failed)
         fill_registered_futures!(state, node, true)
         node.sch_accessible = false
         delete_unused_task!(state, node)
-        schedule_dependents!(state, node, true)
+        schedule_dependents!(state, node, true, ready)
     else
-        # Success path: seal dependents, fulfill futures, mark no longer needed.
-        schedule_dependents!(state, node, false)
+        # Success path: seal dependents (collecting newly-ready ones into
+        # `ready` for the caller to schedule outside state.lock), fulfill
+        # futures, mark no longer needed.
+        schedule_dependents!(state, node, false, ready)
         fill_registered_futures!(state, node, false)
         node.sch_accessible = false
         delete_unused_task!(state, node)
@@ -945,7 +1079,7 @@ struct TaskSpec
 end
 Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
 
-@reuse_scope function fire_tasks!(ctx, task_loc::ScheduleTaskLocation, task_specs::Vector{ScheduleTaskSpec}, state)
+@reuse_scope function fire_tasks!(ctx, task_loc::ScheduleTaskLocation, task_specs::Vector{ScheduleTaskSpec}, state, ready::Vector{Thunk})
     gproc, proc = task_loc.gproc, task_loc.proc
     to_send = @reusable_vector :fire_tasks!_to_send Union{TaskSpec,Nothing} nothing 1024
     to_send_cleanup = @reuse_defer_cleanup empty!(to_send)
@@ -960,7 +1094,10 @@ Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
                 result = @invokelatest thunk.options.restore(thunk)
                 if result isa Chunk
                     store_result!(state, thunk, result)
-                    finish_task!(ctx, state, thunk, false)
+                    # Restore completed the task immediately; collect any newly-
+                    # ready dependents into `ready` for the caller to schedule
+                    # outside state.lock.
+                    finish_task!(ctx, state, thunk, false, ready)
                     # The task finished via restore — release the pressure
                     # that was reserved in schedule_one! without a TaskResult
                     # ever arriving from the worker.
@@ -1447,6 +1584,29 @@ function (dts::DoTaskSpec)()
     if was_cancelled
         # A result was already posted to the return queue
         return
+    end
+
+    # Local fast-path: if this result was produced in-process (the
+    # common multithreaded case), finish it directly on this worker thread via
+    # handle_result! instead of round-tripping through state.chan and
+    # serializing on the single scheduler_run task. This lets N worker threads
+    # finish N tasks (and schedule their freed dependents) concurrently.
+    #
+    # We only take the fast-path for *successful* results: task errors and
+    # worker-death signals must travel over the channel so the master's
+    # scheduler_run can apply batch-mode error/fault semantics centrally.
+    if Dagger.root_worker_id(to_proc) == myid() && !(result isa Exception)
+        state = lookup_scheduler_state(task.sch_uid)
+        if state !== nothing
+            try
+                handle_result!(state.ctx, state, myid(), to_proc, tid, result, metadata)
+            catch err
+                @dagdebug tid :execute "Local result handling failed" exception=(err, catch_backtrace())
+                rethrow()
+            end
+            return
+        end
+        # No registered state (scheduler torn down): fall through to the channel.
     end
 
     return_queue = dts.chan

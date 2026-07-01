@@ -64,9 +64,9 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
                 push!(thunk_ids, tid)
                 uid_to_tid[payload.uid[i]] = tid.id
             end
-            @lock state.lock begin
-                put!(state.chan, Sch.RescheduleSignal())
-            end
+            # Each sub-thunk was submitted (and self-scheduled) by the recursive
+            # eager_submit_internal! call above, so there is nothing central to
+            # wake here.
             return thunk_ids
         end
         payload::PayloadOne
@@ -167,13 +167,17 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
             #=FIXME:UNIQUE=#
             thunk_id = Sch.ThunkID(thunk.id, thunk_ref)
 
+            # Thunks that become immediately ready during edge-wiring are
+            # collected here and scheduled *after* releasing state.lock, so that
+            # schedule_one! never runs under the submission lock.
+            ready = Sch.Thunk[]
             @lock state.lock begin
                 # Attach `thunk` within the scheduler
                 lock(state.thunk_dict) do d
                     d[thunk.id] = WeakThunk(thunk)
                 end
                 #=FIXME:REALLOC=#
-                Sch.reschedule_syncdeps!(state, thunk)
+                Sch.reschedule_syncdeps!(state, thunk, ready)
                 old_fargs_cleanup() # reschedule_syncdeps! preserves all referenced tasks/chunks
                 n_upstreams = @atomic thunk.pending_deps
                 @dagdebug thunk :submit "Added to scheduler with $n_upstreams unresolved upstreams"
@@ -197,12 +201,12 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
                         dep.sch_accessible = true
                     end
                 end
-
-                # Tell the scheduler that it has new tasks to schedule
-                if reschedule
-                    put!(state.chan, Sch.RescheduleSignal())
-                end
+                # N.B. No RescheduleSignal: scheduling is driven inline by
+                # schedule_ready! below and by completion handlers, so there is
+                # no central schedule! pass to wake.
             end
+            # Place any immediately-ready thunk(s) with state.lock released.
+            Sch.schedule_ready!(state, ready)
 
             @assert options.syncdeps === nothing || all(dep->dep isa Dagger.ThunkSyncdep && dep.thunk isa Dagger.WeakThunk, options.syncdeps)
             @maybelog ctx timespan_finish(ctx, :add_thunk, (;thunk_id=id), (;f=fargs[1], args=fargs[2:end], options, uid))
@@ -217,8 +221,13 @@ struct UnrefThunk
     state
 end
 function (unref::UnrefThunk)()
-    name = unref.uid != UInt(0) ? "unref DTask $(unref.uid) => Thunk $(unref.thunk.id)" : "unref Thunk $(unref.thunk.id)"
-    Sch.errormonitor_tracked(name, Threads.@spawn begin
+    # Best-effort GC cleanup invoked once per task on DRef finalization. Use a
+    # plain `errormonitor` rather than `errormonitor_tracked`: the tracked list
+    # is only consulted by precompile for cleanliness, not for halt/runtime
+    # correctness, so tracking this high-frequency cleanup task only adds a
+    # name-string interpolation, a locked push, and an extra monitor-task spawn
+    # to every task's teardown.
+    errormonitor(Threads.@spawn begin
         if unref.uid != UInt(0)
             lock(Sch.EAGER_ID_MAP) do id_map
                 delete!(id_map, unref.uid)
