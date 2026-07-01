@@ -289,7 +289,8 @@ function args_kwargs_to_typedarguments(f, args, kwargs)
             arg = args[idx-1]
             return TypedArgument(idx, arg)
         else
-            kw, value = kwargs[idx-length(args)-1]
+            kw = keys(kwargs)[idx-length(args)-1]
+            value = kwargs[idx-length(args)-1]
             return TypedArgument(kw, value)
         end
     end
