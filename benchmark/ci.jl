@@ -1,6 +1,6 @@
 # Benchmark CI driver: compares the current checkout against `master` using
 # AirspeedVelocity, prints a results table, renders comparison plots, and exits
-# non-zero if any benchmark regresses by more than a threshold (default 25%).
+# non-zero if any benchmark regresses by more than a threshold (default 10%).
 #
 # Intended to be invoked from `.buildkite/run_benchmarks.sh`, but can also be run
 # locally:
@@ -11,7 +11,7 @@
 # of the BENCHMARK_* knobs which are forwarded to the benchmark runs):
 # - BENCHMARK_BASE_REV: revision to compare against (default "master").
 # - BENCHMARK_REGRESSION_THRESHOLD: fractional slowdown that fails CI
-#   (default "0.25", i.e. 25%).
+#   (default "0.10", i.e. 10%).
 # - BENCHMARK_CI_THREADS: Julia threads for each benchmark run (default "4").
 # - BENCHMARK_OUTPUT_DIR: where JSON/plots/report are written
 #   (default "benchmark_results").
@@ -30,7 +30,7 @@ const PROJECT_DIR = abspath(joinpath(@__DIR__, ".."))
 const SCRIPT = joinpath(@__DIR__, "benchmarks.jl")
 const BASE_REV = get(ENV, "BENCHMARK_BASE_REV", "master")
 const CUR_REV = "dirty"  # the working-tree checkout (this PR/commit)
-const THRESHOLD = parse(Float64, get(ENV, "BENCHMARK_REGRESSION_THRESHOLD", "0.25"))
+const THRESHOLD = parse(Float64, get(ENV, "BENCHMARK_REGRESSION_THRESHOLD", "0.10"))
 const CI_THREADS = get(ENV, "BENCHMARK_CI_THREADS", "4")
 const OUTPUT_DIR = abspath(get(ENV, "BENCHMARK_OUTPUT_DIR", "benchmark_results"))
 
