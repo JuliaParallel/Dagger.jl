@@ -306,12 +306,38 @@ function eager_process_args_submission_to_local(id_map, spec::DTaskSpec{true})
     return ntuple(i->eager_process_elem_submission_to_local(id_map, spec.fargs[i]), length(spec.fargs))
 end
 
+# Memoizes `Base.promote_op` return-type inference for eager task metadata.
+# `promote_op` depends only on `typeof(f)` and the argument types (it forwards to
+# `Core.Compiler.return_type` on the call signature), so the result is a pure
+# function of the call-signature `Type` and can be cached across spawns. This
+# avoids re-running the compiler's inference (~1.5KB allocated/spawn) for every
+# repeated `(f, arg-types)` shape on the submission hot path.
+const RETURN_TYPE_CACHE = LockedObject(Dict{Type,Type}())
+
+function cached_return_type(@nospecialize(f), @nospecialize(arg_types::Tuple))
+    # `Union{}` (the bottom type) is a legal inferred arg type — it arises when an
+    # upstream task is inferred never to return — but it cannot appear as a tuple
+    # field, so we can't form a `Tuple{...}` cache key for it. Such calls are rare,
+    # so infer them directly rather than caching.
+    for T in arg_types
+        T === Union{} && return Base.promote_op(f, arg_types...)
+    end
+    key = Tuple{typeof(f), arg_types...}
+    return lock(RETURN_TYPE_CACHE) do cache
+        rt = get(cache, key, nothing)
+        rt === nothing || return rt
+        rt = Base.promote_op(f, arg_types...)
+        cache[key] = rt
+        return rt
+    end
+end
+
 DTaskMetadata(spec::DTaskSpec) = DTaskMetadata(eager_metadata(spec.fargs))
 function eager_metadata(fargs)
     f = value(fargs[1])
     f = f isa StreamingFunction ? f.f : f
     arg_types = ntuple(i->chunktype(value(fargs[i+1])), length(fargs)-1)
-    return Base.promote_op(f, arg_types...)
+    return cached_return_type(f, arg_types)
 end
 
 function eager_spawn(spec::DTaskSpec)
