@@ -2,6 +2,14 @@ using Dagger
 using Printf
 using LinearAlgebra
 
+# MILP scheduler wires in only when both JuMP and HiGHS are installed.
+const HAS_MILP = Base.find_package("JuMP") !== nothing &&
+                 Base.find_package("HiGHS") !== nothing
+if HAS_MILP
+    @eval using JuMP
+    @eval using HiGHS
+end
+
 include("workloads.jl")
 include("log_analysis.jl")
 include("summarize.jl")
@@ -177,14 +185,21 @@ const DEFAULT_TRIALS = 3
 const DEFAULT_WARMUP = 1
 
 # Factories — not instances — because RoundRobin holds mutable state and each
-# trial needs a fresh copy.
-function default_scheduler_factories()
-    return [
-        "RoundRobinScheduler"        => () -> Dagger.RoundRobinScheduler(),
-        "GreedyScheduler"            => () -> Dagger.GreedyScheduler(),
-        "IteratedGreedyScheduler"    => () -> Dagger.IteratedGreedyScheduler(),
+# trial needs a fresh copy. Default MILP budget is set generously since a
+# K~64 solve can exceed a minute; callers override as needed.
+function default_scheduler_factories(; milp_time_limit_sec::Real=120.0)
+    factories = [
+        "RoundRobinScheduler"         => () -> Dagger.RoundRobinScheduler(),
+        "GreedyScheduler"             => () -> Dagger.GreedyScheduler(),
+        "IteratedGreedyScheduler"     => () -> Dagger.IteratedGreedyScheduler(),
         "SimulatedAnnealingScheduler" => () -> Dagger.SimulatedAnnealingScheduler(),
     ]
+    if HAS_MILP
+        push!(factories,
+              "JuMPScheduler" => () -> Dagger.JuMPScheduler(HiGHS.Optimizer;
+                                                            time_limit_sec=milp_time_limit_sec))
+    end
+    return factories
 end
 
 function run_sweep(; workloads = (:cholesky, :matmul),
