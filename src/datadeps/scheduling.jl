@@ -1033,6 +1033,71 @@ function datadeps_schedule_dag_aot!(scheduler::SimulatedAnnealingScheduler,
     return
 end
 
+### MILP ###
+
+# Constant fallback matching the heuristics' per-edge transfer model.
+# `dag_add_task!` defers within-DAG DTask args so per-edge chunk sizes are
+# not recoverable from the `DAGSpec`; kept as a hook for future MILP
+# variants that plug in an affinity-based size estimate.
+_milp_edge_size_bytes(::DAGSpec, ::Int, ::Int) = GREEDY_DEFAULT_OUTPUT_SIZE
+
+function _milp_transfer_time_ns(snap::MT.MetricsSnapshot,
+                                 source_space::MemorySpace, dest_space::MemorySpace,
+                                 size_bytes::UInt64)
+    source_space == dest_space && return 0.0
+    rate = metrics_lookup_move_rate(snap, source_space, dest_space)
+    rate === nothing && (rate = GREEDY_DEFAULT_TRANSFER_RATE)
+    return Float64(size_bytes) / Float64(rate) * 1e9
+end
+
+"""
+    JuMPScheduler(optimizer; Z=10.0, time_limit_sec=60.0) <: DataDepsScheduler
+
+Exact MILP scheduler that solves the basic formulation in §Mathematical
+programming specification of the paper (also DagScheduler.jl README): bi-linear
+penalty linearisation, sequential big-M execution constraint, makespan
+objective. Provides provably optimal schedules for small instances and
+ground-truth reference for measuring the optimality gap of `GreedyScheduler`,
+`IteratedGreedyScheduler` and `SimulatedAnnealingScheduler`.
+
+This scheduler is implemented as a package extension that loads only when
+`JuMP` is available. A separate solver package (e.g. `HiGHS`, `Gurobi`) must
+also be loaded and its `Optimizer` passed as the first argument.
+
+Fields:
+- `optimizer`         — solver constructor passed to `JuMP.Model`.
+- `Z::Float64`        — weight on `t_last_end` in the objective (default `10.0`,
+                        matches DagScheduler.jl).
+- `time_limit_sec`    — solver wall-clock budget in seconds (default `60.0`).
+
+Usage:
+```julia
+using Dagger, JuMP, HiGHS
+Dagger.with_options(scheduler=Dagger.JuMPScheduler(HiGHS.Optimizer)) do
+    ...
+end
+```
+
+Loading order is enforced at construction time; without `JuMP` loaded the
+constructor raises an informative `ArgumentError`.
+"""
+struct JuMPScheduler <: DataDepsScheduler
+    optimizer::Any
+    Z::Float64
+    time_limit_sec::Float64
+
+    function JuMPScheduler(optimizer; Z::Real=10.0, time_limit_sec::Real=60.0)
+        if Base.get_extension(@__MODULE__, :JuMPExt) === nothing
+            throw(ArgumentError("JuMPScheduler requires JuMP to be loaded. Run `using JuMP` (and a solver package such as HiGHS) before constructing this scheduler."))
+        end
+        time_limit_sec > 0 || throw(ArgumentError("JuMPScheduler: time_limit_sec must be > 0, got $time_limit_sec"))
+        return new(optimizer, Float64(Z), Float64(time_limit_sec))
+    end
+end
+
+# `datadeps_schedule_dag_aot!(::JuMPScheduler, ...)` lives in ext/JuMPExt.jl;
+# the constructor prevents instantiation without the extension.
+
 struct LayeredScheduler <: DataDepsScheduler end
 function datadeps_schedule_dag_aot!(scheduler::LayeredScheduler, schedule, dag_spec, all_procs, all_scope)
     layer = 1

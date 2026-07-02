@@ -1650,3 +1650,288 @@ end
         @test length(r_ig.task_proc) == Dagger.nv(dag_spec.g)
     end
 end
+
+@static if Base.find_package("JuMP") !== nothing &&
+            Base.find_package("HiGHS") !== nothing
+    using JuMP
+    using HiGHS
+
+    @testset "JuMPScheduler" begin
+        @testset "Constructor and validation" begin
+            sched = Dagger.JuMPScheduler(HiGHS.Optimizer)
+            @test sched isa DataDepsScheduler
+            @test sched.optimizer === HiGHS.Optimizer
+            @test sched.Z == 10.0
+            @test sched.time_limit_sec == 60.0
+
+            sched2 = Dagger.JuMPScheduler(HiGHS.Optimizer; Z=5.0, time_limit_sec=30.0)
+            @test sched2.Z == 5.0
+            @test sched2.time_limit_sec == 30.0
+
+            @test_throws ArgumentError Dagger.JuMPScheduler(HiGHS.Optimizer; time_limit_sec=0)
+            @test_throws ArgumentError Dagger.JuMPScheduler(HiGHS.Optimizer; time_limit_sec=-1)
+        end
+
+        @testset "Cache partition: JuMPScheduler has its own cache" begin
+            jump_cache = datadeps_schedule_cache(Dagger.JuMPScheduler(HiGHS.Optimizer))
+            greedy_cache = datadeps_schedule_cache(GreedyScheduler())
+            @test jump_cache !== greedy_cache   # distinct partitions
+        end
+
+        @testset "Empty DAG: AOT hook is a no-op" begin
+            empty_dag = DAGSpec()
+            all_procs = collect(Dagger.all_processors())
+            schedule = Dict{Dagger.DTask, Dagger.Processor}()
+            sched = Dagger.JuMPScheduler(HiGHS.Optimizer; time_limit_sec=5.0)
+            Dagger.datadeps_schedule_dag_aot!(sched, schedule, empty_dag, all_procs,
+                                              Dagger.UnionScope(map(Dagger.ExactScope, all_procs)))
+            @test isempty(schedule)
+        end
+
+        @testset "Throws SchedulingException when no compatible processor exists" begin
+            A = rand(64); B = rand(64)
+            target_proc = Dagger.ThreadProc(1, 1)
+            dag_spec, _, _ = _capture_dag(() -> Dagger.spawn_datadeps() do
+                Dagger.@spawn scope=Dagger.ExactScope(target_proc) add!(InOut(A), In(B))
+            end)
+
+            incompatible_procs = Dagger.Processor[
+                Dagger.ThreadProc(1, 2),
+                Dagger.ThreadProc(1, 3),
+            ]
+            sched = Dagger.JuMPScheduler(HiGHS.Optimizer; time_limit_sec=5.0)
+            schedule = Dict{Dagger.DTask, Dagger.Processor}()
+            @test_throws Dagger.Sch.SchedulingException Dagger.datadeps_schedule_dag_aot!(
+                sched, schedule, dag_spec, incompatible_procs,
+                Dagger.UnionScope(map(Dagger.ExactScope, incompatible_procs)))
+        end
+
+        @testset "Per-task scope is respected by the solver" begin
+            A = rand(64); B = rand(64)
+            target_proc = Dagger.ThreadProc(1, 1)
+            sched = Dagger.JuMPScheduler(HiGHS.Optimizer; time_limit_sec=10.0)
+            cache = datadeps_schedule_cache(sched); empty!(cache)
+            Base.ScopedValues.with(DATADEPS_SCHEDULER => sched) do
+                Dagger.spawn_datadeps() do
+                    Dagger.@spawn scope=Dagger.ExactScope(target_proc) add!(InOut(A), In(B))
+                end
+            end
+            @test !isempty(cache)
+            spec_schedule = first(cache).second
+            assigned = first(values(spec_schedule.id_to_proc))
+            @test assigned === target_proc
+        end
+
+        @testset "End-to-end via spawn_datadeps: matmul produces correct result" begin
+            nb = 16
+            nt = 2
+            A = [rand(nb, nb) for _ in 1:nt, _ in 1:nt]
+            B = [rand(nb, nb) for _ in 1:nt, _ in 1:nt]
+            C = [zeros(nb, nb) for _ in 1:nt, _ in 1:nt]
+
+            sched = Dagger.JuMPScheduler(HiGHS.Optimizer; time_limit_sec=60.0)
+            cache = datadeps_schedule_cache(sched); empty!(cache)
+
+            Base.ScopedValues.with(DATADEPS_SCHEDULER => sched) do
+                Dagger.spawn_datadeps() do
+                    for i in 1:nt, j in 1:nt, k in 1:nt
+                        Dagger.@spawn LinearAlgebra.BLAS.gemm!('N', 'N', 1.0,
+                                                               In(A[i, k]),
+                                                               In(B[k, j]), 1.0,
+                                                               InOut(C[i, j]))
+                    end
+                end
+            end
+
+            sz = nt * nb
+            dense_A = zeros(sz, sz); dense_B = zeros(sz, sz); dense_C = zeros(sz, sz)
+            for i in 1:nt, j in 1:nt
+                dense_A[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] .= A[i, j]
+                dense_B[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] .= B[i, j]
+                dense_C[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] .= C[i, j]
+            end
+            @test dense_C ≈ dense_A * dense_B
+
+            @test !isempty(cache)
+        end
+
+        @testset "End-to-end via spawn_datadeps: mock Cholesky produces L*L' ≈ A" begin
+            nb = 16
+            nt = 2
+            M = make_spd_blocks(nt * nb, nb)
+            A_ref = vcat([hcat([M[i, j] for j in 1:nt]...) for i in 1:nt]...)
+
+            sched = Dagger.JuMPScheduler(HiGHS.Optimizer; time_limit_sec=60.0)
+            cache = datadeps_schedule_cache(sched); empty!(cache)
+
+            Base.ScopedValues.with(DATADEPS_SCHEDULER => sched) do
+                Dagger.spawn_datadeps() do
+                    mock_cholesky!(M)
+                end
+            end
+
+            L = zeros(nt * nb, nt * nb)
+            for i in 1:nt, j in 1:nt
+                L[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] .= M[i, j]
+            end
+            for i in 1:size(L, 1), j in 1:size(L, 2)
+                j > i && (L[i, j] = 0.0)
+            end
+            @test isapprox(L * L', A_ref; rtol=1e-8)
+            @test !isempty(cache)
+        end
+
+        @testset "AOT hook populates schedule for every task" begin
+            nb = 16
+            nt = 2
+            M = [rand(nb, nb) for _ in 1:nt, _ in 1:nt]
+            for i in 1:nt
+                M[i, i] = M[i, i] * M[i, i]' + nb * LinearAlgebra.I
+            end
+
+            sched = Dagger.JuMPScheduler(HiGHS.Optimizer; time_limit_sec=30.0)
+            cache = datadeps_schedule_cache(sched); empty!(cache)
+
+            Base.ScopedValues.with(DATADEPS_SCHEDULER => sched) do
+                Dagger.spawn_datadeps() do
+                    Dagger.@spawn LinearAlgebra.LAPACK.potrf!('L', InOut(M[1, 1]))
+                    Dagger.@spawn LinearAlgebra.BLAS.trsm!('R', 'L', 'T', 'N',
+                                                           1.0, In(M[1, 1]),
+                                                           InOut(M[2, 1]))
+                    Dagger.@spawn LinearAlgebra.BLAS.syrk!('L', 'N', -1.0,
+                                                           In(M[2, 1]), 1.0,
+                                                           InOut(M[2, 2]))
+                    Dagger.@spawn LinearAlgebra.LAPACK.potrf!('L', InOut(M[2, 2]))
+                end
+            end
+
+            @test !isempty(cache)
+            dag_spec = first(cache).first
+            spec_schedule = first(cache).second
+            @test length(spec_schedule.id_to_proc) == Dagger.nv(dag_spec.g)
+            @test length(spec_schedule.id_to_proc) == 4
+        end
+
+        @testset "Optimality: MILP cost ≤ Greedy cost on a small DAG" begin
+            dag_spec, all_procs, snap = _capture_cholesky_dag(3, 16)
+
+            greedy_state = ScheduleState()
+            greedy_schedule!(greedy_state, snap, dag_spec, all_procs)
+            greedy_cost = cost_of_schedule(greedy_state)
+
+            sched = Dagger.JuMPScheduler(HiGHS.Optimizer; time_limit_sec=60.0)
+            schedule = Dict{Dagger.DTask, Dagger.Processor}()
+            all_scope = Dagger.UnionScope(map(Dagger.ExactScope, all_procs))
+            Dagger.datadeps_schedule_dag_aot!(sched, schedule, dag_spec, all_procs, all_scope)
+
+            # Replay MILP assignments through `_replay_schedule!` under the
+            # same snapshot so costs are directly comparable.
+            milp_state = ScheduleState()
+            n_tasks = Dagger.nv(dag_spec.g)
+            for idx in 1:n_tasks
+                task = dag_spec.id_to_task[idx]
+                milp_state.task_proc[idx] = schedule[task]
+                milp_state.task_finish_ns[idx] = 0.0
+            end
+            Dagger._replay_schedule!(milp_state, snap, dag_spec, all_procs, Set{Int}())
+            milp_cost = cost_of_schedule(milp_state)
+
+            @test milp_cost <= greedy_cost
+        end
+
+        @testset "Optimality chain: MILP ≤ IG ≤ Greedy on a small DAG" begin
+            dag_spec, all_procs, snap = _capture_cholesky_dag(3, 16)
+
+            greedy_state = ScheduleState()
+            greedy_schedule!(greedy_state, snap, dag_spec, all_procs)
+            greedy_cost = cost_of_schedule(greedy_state)
+
+            ig_state = copy(greedy_state)
+            iterated_greedy_schedule!(ig_state, snap, dag_spec, all_procs;
+                                       n_iters=16, destroy_frac=0.3,
+                                       rng=MersenneTwister(2026))
+            ig_cost = cost_of_schedule(ig_state)
+
+            sched = Dagger.JuMPScheduler(HiGHS.Optimizer; time_limit_sec=60.0)
+            schedule = Dict{Dagger.DTask, Dagger.Processor}()
+            all_scope = Dagger.UnionScope(map(Dagger.ExactScope, all_procs))
+            Dagger.datadeps_schedule_dag_aot!(sched, schedule, dag_spec, all_procs, all_scope)
+
+            milp_state = ScheduleState()
+            n_tasks = Dagger.nv(dag_spec.g)
+            for idx in 1:n_tasks
+                task = dag_spec.id_to_task[idx]
+                milp_state.task_proc[idx] = schedule[task]
+                milp_state.task_finish_ns[idx] = 0.0
+            end
+            Dagger._replay_schedule!(milp_state, snap, dag_spec, all_procs, Set{Int}())
+            milp_cost = cost_of_schedule(milp_state)
+
+            @test milp_cost <= ig_cost
+            @test ig_cost <= greedy_cost
+            @test milp_cost <= greedy_cost
+        end
+
+        @testset "Parallelism: MILP uses parallel processors when no precedence" begin
+            # Two independent tasks on ≥2 procs must land on distinct procs
+            # (makespan = single-task cost, not 2×). Regression guard.
+            A1 = rand(64); B1 = rand(64)
+            A2 = rand(64); B2 = rand(64)
+
+            sched = Dagger.JuMPScheduler(HiGHS.Optimizer; time_limit_sec=30.0)
+            cache = datadeps_schedule_cache(sched); empty!(cache)
+
+            Base.ScopedValues.with(DATADEPS_SCHEDULER => sched) do
+                Dagger.spawn_datadeps() do
+                    Dagger.@spawn add!(InOut(A1), In(B1))
+                    Dagger.@spawn add!(InOut(A2), In(B2))
+                end
+            end
+
+            @test !isempty(cache)
+            spec_schedule = first(cache).second
+            assigned_procs = collect(values(spec_schedule.id_to_proc))
+            @test length(assigned_procs) == 2
+            # Multi-proc machines: distinct procs; single-proc: sharing is fine.
+            n_distinct_procs = length(unique(assigned_procs))
+            n_available_procs = length(Dagger.all_processors())
+            if n_available_procs >= 2
+                @test n_distinct_procs == 2
+            end
+        end
+
+        @testset "Single-task DAG: trivially optimal" begin
+            A = rand(64); B = rand(64)
+            sched = Dagger.JuMPScheduler(HiGHS.Optimizer; time_limit_sec=10.0)
+            cache = datadeps_schedule_cache(sched); empty!(cache)
+            Base.ScopedValues.with(DATADEPS_SCHEDULER => sched) do
+                Dagger.spawn_datadeps() do
+                    Dagger.@spawn add!(InOut(A), In(B))
+                end
+            end
+            @test !isempty(cache)
+            spec_schedule = first(cache).second
+            @test length(spec_schedule.id_to_proc) == 1
+        end
+
+        @testset "Time limit: warm-start guarantees a populated schedule on timeout" begin
+            # Tight budget cannot prove optimality; warm-start guarantees at
+            # least the greedy schedule is returned, never SchedulingException.
+            dag_spec, all_procs, _ = _capture_cholesky_dag(4, 16)
+            n_tasks = Dagger.nv(dag_spec.g)
+            @test n_tasks == 20
+
+            sched = Dagger.JuMPScheduler(HiGHS.Optimizer; time_limit_sec=0.01)
+            schedule = Dict{Dagger.DTask, Dagger.Processor}()
+            all_scope = Dagger.UnionScope(map(Dagger.ExactScope, all_procs))
+
+            Dagger.datadeps_schedule_dag_aot!(sched, schedule, dag_spec, all_procs, all_scope)
+
+            @test length(schedule) == n_tasks
+            for idx in 1:n_tasks
+                @test haskey(schedule, dag_spec.id_to_task[idx])
+                @test schedule[dag_spec.id_to_task[idx]] in all_procs
+            end
+        end
+    end
+end
