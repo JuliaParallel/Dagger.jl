@@ -121,6 +121,8 @@ include("file-io.jl")
 
 # Array computations
 include("array/darray.jl")
+include("autotune/Autotune.jl"); using .Autotune
+const benchmark = Autotune.benchmark
 include("array/alloc.jl")
 include("array/map-reduce.jl")
 include("array/copy.jl")
@@ -236,6 +238,7 @@ function __init__()
         @warn "Error parsing JULIA_DAGGER_DEBUG" exception=err
     end
 
+    # Load metrics from disk
     if reuse_metrics && myid() == 1
         try
             if isfile(metrics_path * ".base") || isfile(metrics_path)
@@ -254,6 +257,14 @@ function __init__()
             end
         end
     end
+
+    # Setup Autotune pure-Dagger DArray methods
+    Autotune.set_raw_impl!(:dagger_lu,       A -> LinearAlgebra.lu!(A))
+    Autotune.set_raw_impl!(:dagger_cholesky, A -> LinearAlgebra.cholesky!(A))
+    Autotune.set_raw_impl!(:dagger_qr,       A -> LinearAlgebra.qr!(A))
+    Autotune.set_raw_impl!(:dagger_gemm,     (A, B) -> A * B)
+    Autotune.set_raw_impl!(:dagger_solve,    (A, b) -> A \ b)
+    Autotune.install_darray_locality_hook!()
 end
 
 """
