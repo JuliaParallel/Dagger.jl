@@ -14,28 +14,35 @@ of DAGs, it *may* cause a `KeyError` or other failures in the scheduler due to
 the complexity of getting the internal state back to a consistent and proper
 state.
 """
-function handle_fault(ctx, state, deadproc)
+function handle_fault(ctx, state, deadproc, ready_out::Vector{Thunk})
     @assert !isempty(procs(ctx)) "No workers left for fault handling!"
 
     deadlist = Thunk[]
 
     # Evict cache entries that were stored on the worker
-    for t in values(state.thunk_dict)
-        t = unwrap_weak_checked(t)
-        has_result(state, t) || continue
-        v = load_result(state, t)
-        if v isa Chunk && v.handle isa DRef && v.handle.owner == deadproc.pid
-            push!(deadlist, t)
-            clear_result!(state, t)
+    lock(state.thunk_dict) do d
+        for t in values(d)
+            t = unwrap_weak_checked(t)
+            has_result(state, t) || continue
+            v = load_result(state, t)
+            if v isa Chunk && v.handle isa DRef && v.handle.owner == deadproc.pid
+                push!(deadlist, t)
+                clear_result!(state, t)
+            end
         end
     end
     # Remove thunks that were running on the worker
-    for t in collect(keys(state.running_on))
-        pid = state.running_on[t].pid
-        if pid == deadproc.pid
+    lock(state.thunk_dict) do d
+        for (_, wt) in d
+            t = unwrap_weak(wt)
+            t === nothing && continue
+            ron = t.running_on
+            ron === nothing && continue
+            ron.pid == deadproc.pid || continue
             push!(deadlist, t)
-            delete!(state.running_on, t)
-            pop!(state.running, t)
+            t.running_on = nothing
+            @atomic t.running = false
+            Threads.atomic_sub!(state.running_count, 1)
         end
     end
     # Clear thunk.cache_ref
@@ -43,17 +50,15 @@ function handle_fault(ctx, state, deadproc)
         t.cache_ref = nothing
     end
 
-    # Remove thunks from state.ready that have inputs on the deadlist
-    for idx in length(state.ready):-1:1
-        rt = state.ready[idx]
-        if any((input in deadlist) for input in map(last, rt.inputs))
-            deleteat!(state.ready, idx)
-        end
-    end
+    # Tasks that were in processor
+    # queues on the dead worker had their results lost with the worker.
+    # reschedule_syncdeps! will re-wire their edges and re-schedule them.
 
-    # Reschedule inputs from deadlist
+    # Reschedule inputs from deadlist. reschedule_syncdeps! collects any newly-
+    # ready thunks into `ready_out`; the caller (scheduler_run) schedules them
+    # outside state.lock.
     seen = Set{Thunk}()
     for t in deadlist
-        reschedule_syncdeps!(state, t, seen)
+        reschedule_syncdeps!(state, t, ready_out, seen)
     end
 end

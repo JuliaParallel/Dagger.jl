@@ -44,6 +44,7 @@ function Base.iterate(arg::Argument, state::Bool)
 end
 Base.copy(arg::Argument) = Argument(ArgPosition(arg.pos), arg.value)
 chunktype(arg::Argument) = chunktype(value(arg))
+with_value(arg::Argument, value) = Argument(ArgPosition(arg.pos), value)
 
 mutable struct TypedArgument{T}
     pos::ArgPosition
@@ -70,6 +71,9 @@ function Base.iterate(arg::TypedArgument, state::Bool)
 end
 Base.copy(arg::TypedArgument{T}) where T = TypedArgument{T}(ArgPosition(arg.pos), arg.value)
 chunktype(arg::TypedArgument) = chunktype(value(arg))
+# N.B. `TypedArgument` disallows `setproperty!`, so a new argument (of a
+# possibly different `T`) must be constructed to change its value.
+with_value(arg::TypedArgument, value) = TypedArgument(ArgPosition(arg.pos), value)
 
 Argument(arg::TypedArgument) = Argument(arg.pos, arg.value)
 

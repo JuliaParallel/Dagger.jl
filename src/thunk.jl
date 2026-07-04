@@ -20,6 +20,25 @@ function unset!(spec::ThunkSpec, _)
     spec.options = nothing
 end
 
+# Sentinel value marking a sealed (closed) Treiber list. A single shared
+# instance `SEALED` is used for pointer-identity comparison.
+struct Sealed end
+const SEALED = Sealed()
+
+# A node in the lock-free futures Treiber list stored on each `Thunk`.
+# Holds one `ThunkFuture` and an atomic link to the next node in the chain.
+mutable struct FutureNode
+    const future::ThunkFuture
+    @atomic next::Union{FutureNode,Nothing}
+end
+
+# A node in the lock-free dependents Treiber list stored on each `Thunk`.
+# Holds a strong ref to one downstream `Thunk` and an atomic link to the next node.
+mutable struct DepNode
+    const thunk::Any                      # downstream Thunk (typed Any to break the mutual-ref cycle)
+    @atomic next::Union{DepNode,Nothing}
+end
+
 """
     Thunk
 
@@ -60,14 +79,91 @@ mutable struct Thunk
     options::Union{Options, Nothing} # stores task options
     eager_accessible::Bool
     sch_accessible::Bool
-    finished::Bool
+    @atomic finished::Bool         # true once a result (success or error) has been stored
+    @atomic errored::Bool          # true if finished with an error result
+    @atomic valid::Bool            # true while registered with the scheduler
+    @atomic running::Bool          # true while a worker is executing this thunk
+    running_on::Union{OSProc,Nothing}  # which OSProc is running this thunk
+    @atomic futures_head::Union{FutureNode,Nothing,Sealed}  # Treiber list of waiting futures
+    @atomic pending_deps::Int      # count of unresolved upstream dependencies (dataflow counter)
+    @atomic dependents_head::Union{DepNode,Nothing,Sealed}  # Treiber list of downstream dependents
     function Thunk(spec::ThunkSpec)
         return new(spec.fargs, spec.id,
                    spec.cache_ref, spec.affinity,
                    spec.options,
-                   true, true, false)
+                   true, true, false,
+                   false, false, false, nothing,
+                   nothing,
+                   0, nothing)
     end
 end
+
+"""
+    futures_push!(t::Thunk, future::ThunkFuture) -> Bool
+
+Prepend `future` to the lock-free futures Treiber list on `t`.
+Returns `true` if the future was registered, `false` if the list was already
+sealed (the thunk finished before the push completed — the caller must then
+fulfill `future` directly using the stored result).
+"""
+function futures_push!(t::Thunk, future::ThunkFuture)
+    node = FutureNode(future, nothing)
+    while true
+        old = @atomic t.futures_head
+        old isa Sealed && return false
+        @atomic node.next = old::Union{FutureNode,Nothing}
+        _, ok = @atomicreplace t.futures_head old => node
+        ok && return true
+        # CAS lost to another pusher; re-read and retry
+    end
+end
+
+"""
+    futures_seal!(t::Thunk) -> Union{FutureNode,Nothing}
+
+Atomically close the futures list on `t` to further pushes and return the
+captured head of the list (a `FutureNode` chain or `nothing` if no futures were
+ever registered). Returns `nothing` if the list was already sealed (double-seal
+guard — callers should treat this as a no-op).
+"""
+function futures_seal!(t::Thunk)
+    old = @atomicswap t.futures_head = SEALED
+    return old isa Sealed ? nothing : old
+end
+
+"""
+    deps_push!(t::Thunk, dep::Thunk) -> Bool
+
+Prepend `dep` (a downstream dependent) to the lock-free dependents Treiber list on `t`.
+Returns `true` if registered, `false` if the list was already sealed (meaning
+`t` has already finished — the caller should decrement `dep.pending_deps` and
+handle `dep` becoming ready/failed directly).
+"""
+function deps_push!(t::Thunk, dep::Thunk)
+    node = DepNode(dep, nothing)
+    while true
+        old = @atomic t.dependents_head
+        old isa Sealed && return false
+        @atomic node.next = old::Union{DepNode,Nothing}
+        _, ok = @atomicreplace t.dependents_head old => node
+        ok && return true
+        # CAS lost to another pusher; re-read and retry
+    end
+end
+
+"""
+    deps_seal!(t::Thunk) -> Union{DepNode,Nothing}
+
+Atomically close the dependents list on `t` to further pushes and return the
+captured head of the list (a `DepNode` chain or `nothing` if no dependents were
+ever registered). Returns `nothing` if the list was already sealed (double-seal
+guard — callers should treat this as a no-op).
+"""
+function deps_seal!(t::Thunk)
+    old = @atomicswap t.dependents_head = SEALED
+    return old isa Sealed ? nothing : old
+end
+
 function Thunk(f, xs...;
                syncdeps=nothing,
                id::Int=next_id(),
@@ -193,7 +289,8 @@ function args_kwargs_to_typedarguments(f, args, kwargs)
             arg = args[idx-1]
             return TypedArgument(idx, arg)
         else
-            kw, value = kwargs[idx-length(args)-1]
+            kw = keys(kwargs)[idx-length(args)-1]
+            value = kwargs[idx-length(args)-1]
             return TypedArgument(kw, value)
         end
     end
@@ -516,7 +613,7 @@ function _setindex!_return_value(A, value, idxs...)
     return value
 end
 
-const TASK_TYPED = ScopedValue{Bool}(false)
+const TASK_TYPED = ScopedValue{Bool}(true)
 get_task_typed() = TASK_TYPED[]
 
 """

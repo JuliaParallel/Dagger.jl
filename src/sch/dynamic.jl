@@ -173,19 +173,20 @@ function _register_future!(ctx, state, task, tid, (future, id, check)::Tuple{Thu
             end
             return false
         end
-        thunk = unwrap_weak_checked(state.thunk_dict[id.id])
+        thunk = lock(state.thunk_dict) do d; unwrap_weak_checked(d[id.id]); end
         if check
-            ownthunk = unwrap_weak_checked(state.thunk_dict[tid])
+            ownthunk = lock(state.thunk_dict) do d; unwrap_weak_checked(d[tid]); end
             if dominates(ownthunk, thunk)
                 throw(DynamicThunkException("Cannot fetch result of dominated thunk"))
             end
         end
-        # TODO: Assert that future will be fulfilled
-        if has_result(state, thunk)
-            put!(future, load_result(state, thunk); error=state.errored[thunk])
-        else
-            futures = get!(()->ThunkFuture[], state.futures, thunk)
-            push!(futures, future)
+        # Fast path: thunk already has a result; fulfill immediately.
+        # Slow path: register in the Treiber futures list. If the list was
+        # already sealed (thunk finished between the has_result check and the
+        # push), futures_push! returns false and we fulfill directly, so the future
+        # is always fulfilled exactly once.
+        if has_result(state, thunk) || !futures_push!(thunk, future)
+            put!(future, load_result(state, thunk); error=(@atomic thunk.errored))
         end
     end
     return
@@ -203,14 +204,32 @@ get_dag_ids(h::SchedulerHandle) =
     exec!(_get_dag_ids, h, nothing)::Dict{ThunkID,Set{ThunkID}}
 function _get_dag_ids(ctx, state, task, tid, _)
     deps = Dict{ThunkID,Set{ThunkID}}()
-    for (id,thunk) in state.thunk_dict
+    # Snapshot the thunk_dict to avoid holding its lock across the entire loop.
+    thunk_dict_snapshot = lock(state.thunk_dict) do d; collect(d); end
+    # Initialize empty sets for all known thunks.
+    for (id, thunk) in thunk_dict_snapshot
         thunk = unwrap_weak_checked(thunk)
-        # TODO: Get at `thunk_ref` for `thunk_id.ref`
+        deps[ThunkID(id, nothing)] = Set{ThunkID}()
+    end
+    # Reconstruct the downstream map from syncdeps of non-finished thunks.
+    # A finished thunk's dependents list has already been sealed and drained, so
+    # we can no longer read it from `dependents_head`. Instead we derive the
+    # "who is still waiting on me" relationship from the inverse direction:
+    # for every thunk T that is not yet finished, each of its syncdep upstreams
+    # is an upstream whose result T is still consuming (or will consume).
+    # We use `options.syncdeps` (not `inputs`) because `collect_task_inputs!`
+    # replaces Thunk-typed values in `inputs` with their Chunk results before
+    # firing the task, making `inputs` unreliable as a dependency source.
+    for (id, thunk) in thunk_dict_snapshot
+        thunk = unwrap_weak_checked(thunk)
+        (@atomic thunk.finished) && continue
+        thunk.options === nothing && continue
+        thunk.options.syncdeps === nothing && continue
         thunk_id = ThunkID(id, nothing)
-        if haskey(state.waiting_data, thunk)
-            deps[thunk_id] = Set(map(t->ThunkID(t.id, nothing), collect(state.waiting_data[thunk])))
-        else
-            deps[thunk_id] = Set{ThunkID}()
+        for input in Dagger.syncdeps_iterator(thunk)
+            input_id = ThunkID(input.id, nothing)
+            haskey(deps, input_id) || continue
+            push!(deps[input_id], thunk_id)
         end
     end
     deps

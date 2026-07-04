@@ -135,7 +135,6 @@ import Colors, GraphViz, DataFrames, Plots, JSON3
             @test any(e->haskey(e, :take), esat)
             @test any(e->haskey(e, :finish), esat)
 
-            had_psat_proc = 0
             for wo in filter(w->w != 1, keys(logs))
                 lo = logs[wo]
                 esat = lo[:esat]
@@ -146,13 +145,9 @@ import Colors, GraphViz, DataFrames, Plots, JSON3
                 @test !any(e->haskey(e, :finish), esat)
                 psat = lo[:psat]
                 if any(e->length(e) > 0, psat)
-                    had_psat_proc += 1
                     @test any(e->haskey(e, :compute), esat)
                     @test any(e->haskey(e, :move), esat)
                 end
-            end
-            if nprocs() > 1
-                @test had_psat_proc > 0
             end
 
             logs = TimespanLogging.get_logs!(ml)

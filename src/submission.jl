@@ -64,9 +64,9 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
                 push!(thunk_ids, tid)
                 uid_to_tid[payload.uid[i]] = tid.id
             end
-            @lock state.lock begin
-                put!(state.chan, Sch.RescheduleSignal())
-            end
+            # Each sub-thunk was submitted (and self-scheduled) by the recursive
+            # eager_submit_internal! call above, so there is nothing central to
+            # wake here.
             return thunk_ids
         end
         payload::PayloadOne
@@ -99,24 +99,24 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
                     else
                         uid_to_tid[arg_uid]
                     end
-                    @lock state.lock begin
-                        @inbounds fargs[idx] = Argument(arg.pos, state.thunk_dict[arg_tid])
+                    lock(state.thunk_dict) do d
+                        @inbounds fargs[idx] = Argument(arg.pos, d[arg_tid])
                     end
                 elseif valuetype(arg) <: Sch.ThunkID
                     arg_tid = (value(arg)::Sch.ThunkID).id
-                    @lock state.lock begin
-                        @inbounds fargs[idx] = Argument(arg.pos, state.thunk_dict[arg_tid])
+                    lock(state.thunk_dict) do d
+                        @inbounds fargs[idx] = Argument(arg.pos, d[arg_tid])
                     end
                 elseif valuetype(arg) <: Chunk
                     # N.B. Different Chunks with the same DRef handle will hash to the same slot,
                     # so we just pick an equivalent Chunk as our upstream
                     chunk = value(arg)::Chunk
                     function find_equivalent_chunk(state, chunk::C) where {C<:Chunk}
-                        @lock state.lock begin
-                            if haskey(state.equiv_chunks, chunk.handle)
-                                return state.equiv_chunks[chunk.handle]::C
+                        lock(state.equiv_chunks) do ec
+                            if haskey(ec, chunk.handle)
+                                return ec[chunk.handle]::C
                             else
-                                state.equiv_chunks[chunk.handle] = chunk
+                                ec[chunk.handle] = chunk
                                 return chunk
                             end
                         end
@@ -130,7 +130,7 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
             for idx in 1:length(syncdeps_vec)
                 dep = syncdeps_vec[idx]::ThunkSyncdep
                 @assert dep.id !== nothing && dep.thunk === nothing
-                thunk = @lock state.lock state.thunk_dict[dep.id.id]
+                thunk = lock(state.thunk_dict) do d; d[dep.id.id]; end
                 @inbounds syncdeps_vec[idx] = ThunkSyncdep(thunk)
             end
         end
@@ -167,20 +167,32 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
             #=FIXME:UNIQUE=#
             thunk_id = Sch.ThunkID(thunk.id, thunk_ref)
 
+            # Thunks that become immediately ready during edge-wiring are
+            # collected here and scheduled *after* releasing state.lock, so that
+            # schedule_one! never runs under the submission lock.
+            ready = Sch.Thunk[]
             @lock state.lock begin
                 # Attach `thunk` within the scheduler
-                state.thunk_dict[thunk.id] = WeakThunk(thunk)
+                lock(state.thunk_dict) do d
+                    d[thunk.id] = WeakThunk(thunk)
+                end
+                # Hold a strong reference until the thunk reaches a terminal state
+                # (released in `task_delete!`). The weak `thunk_dict` entry alone
+                # cannot keep an unfinished thunk alive once the user drops its
+                # `DTask`, which would let GC collect a thunk that still has
+                # pending dependents and deadlock the scheduler.
+                push!(state.strong_thunks, thunk)
                 #=FIXME:REALLOC=#
-                Sch.reschedule_syncdeps!(state, thunk)
+                Sch.reschedule_syncdeps!(state, thunk, ready)
                 old_fargs_cleanup() # reschedule_syncdeps! preserves all referenced tasks/chunks
-                n_upstreams = haskey(state.waiting, thunk) ? length(state.waiting[thunk]) : 0
-                @dagdebug thunk :submit "Added to scheduler with $n_upstreams upstreams"
+                n_upstreams = @atomic thunk.pending_deps
+                @dagdebug thunk :submit "Added to scheduler with $n_upstreams unresolved upstreams"
                 if future !== nothing
                     # Ensure we attach a future before the thunk is scheduled
                     Sch._register_future!(ctx, state, task, tid, (future, thunk_id, false))
                     @dagdebug thunk :submit "Registered future"
                 end
-                state.valid[thunk] = nothing
+                @atomic thunk.valid = true
 
                 # Register Eager UID -> Sch TID
                 lock(Sch.EAGER_ID_MAP) do id_map
@@ -195,12 +207,12 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
                         dep.sch_accessible = true
                     end
                 end
-
-                # Tell the scheduler that it has new tasks to schedule
-                if reschedule
-                    put!(state.chan, Sch.RescheduleSignal())
-                end
+                # N.B. No RescheduleSignal: scheduling is driven inline by
+                # schedule_ready! below and by completion handlers, so there is
+                # no central schedule! pass to wake.
             end
+            # Place any immediately-ready thunk(s) with state.lock released.
+            Sch.schedule_ready!(state, ready)
 
             @assert options.syncdeps === nothing || all(dep->dep isa Dagger.ThunkSyncdep && dep.thunk isa Dagger.WeakThunk, options.syncdeps)
             @maybelog ctx timespan_finish(ctx, :add_thunk, (;thunk_id=id), (;f=fargs[1], args=fargs[2:end], options, uid))
@@ -215,8 +227,13 @@ struct UnrefThunk
     state
 end
 function (unref::UnrefThunk)()
-    name = unref.uid != UInt(0) ? "unref DTask $(unref.uid) => Thunk $(unref.thunk.id)" : "unref Thunk $(unref.thunk.id)"
-    Sch.errormonitor_tracked(name, Threads.@spawn begin
+    # Best-effort GC cleanup invoked once per task on DRef finalization. Use a
+    # plain `errormonitor` rather than `errormonitor_tracked`: the tracked list
+    # is only consulted by precompile for cleanliness, not for halt/runtime
+    # correctness, so tracking this high-frequency cleanup task only adds a
+    # name-string interpolation, a locked push, and an extra monitor-task spawn
+    # to every task's teardown.
+    errormonitor(Threads.@spawn begin
         if unref.uid != UInt(0)
             lock(Sch.EAGER_ID_MAP) do id_map
                 delete!(id_map, unref.uid)
@@ -272,7 +289,11 @@ function eager_process_elem_submission_to_local(id_map, arg::TypedArgument{T}) w
     @assert !(T <: Thunk) "Cannot use `Thunk`s in `@spawn`/`spawn`"
     if T <: DTask && haskey(id_map, (value(arg)::DTask).uid)
         #=FIXME:UNIQUE=#
-        return Sch.ThunkID(id_map[value(arg).uid], value(arg).thunk_ref)
+        tid = Sch.ThunkID(id_map[value(arg).uid], value(arg).thunk_ref)
+        # Preserve the argument position by re-wrapping in a TypedArgument;
+        # returning a bare ThunkID drops the position and breaks the later
+        # `map(Argument, ...)` conversion in `eager_launch!`.
+        return TypedArgument(arg.pos, tid)
     end
     return arg
 end
@@ -285,12 +306,38 @@ function eager_process_args_submission_to_local(id_map, spec::DTaskSpec{true})
     return ntuple(i->eager_process_elem_submission_to_local(id_map, spec.fargs[i]), length(spec.fargs))
 end
 
+# Memoizes `Base.promote_op` return-type inference for eager task metadata.
+# `promote_op` depends only on `typeof(f)` and the argument types (it forwards to
+# `Core.Compiler.return_type` on the call signature), so the result is a pure
+# function of the call-signature `Type` and can be cached across spawns. This
+# avoids re-running the compiler's inference (~1.5KB allocated/spawn) for every
+# repeated `(f, arg-types)` shape on the submission hot path.
+const RETURN_TYPE_CACHE = LockedObject(Dict{Type,Type}())
+
+function cached_return_type(@nospecialize(f), @nospecialize(arg_types::Tuple))
+    # `Union{}` (the bottom type) is a legal inferred arg type — it arises when an
+    # upstream task is inferred never to return — but it cannot appear as a tuple
+    # field, so we can't form a `Tuple{...}` cache key for it. Such calls are rare,
+    # so infer them directly rather than caching.
+    for T in arg_types
+        T === Union{} && return Base.promote_op(f, arg_types...)
+    end
+    key = Tuple{typeof(f), arg_types...}
+    return lock(RETURN_TYPE_CACHE) do cache
+        rt = get(cache, key, nothing)
+        rt === nothing || return rt
+        rt = Base.promote_op(f, arg_types...)
+        cache[key] = rt
+        return rt
+    end
+end
+
 DTaskMetadata(spec::DTaskSpec) = DTaskMetadata(eager_metadata(spec.fargs))
 function eager_metadata(fargs)
     f = value(fargs[1])
     f = f isa StreamingFunction ? f.f : f
     arg_types = ntuple(i->chunktype(value(fargs[i+1])), length(fargs)-1)
-    return Base.promote_op(f, arg_types...)
+    return cached_return_type(f, arg_types)
 end
 
 function eager_spawn(spec::DTaskSpec)

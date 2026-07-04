@@ -74,7 +74,7 @@ function datadeps_schedule_task(sched::UltraScheduler, state::DataDepsState, all
         sch_state = Sch.EAGER_STATE[]
         return @lock sch_state.lock begin
             sig = Sch.signature(sch_state, f, args)
-            return get(sch_state.signature_time_cost, sig, 1000^3)
+            return lock(sch_state.signature_time_cost) do stc; get(stc, sig, 1000^3); end
         end
     end
 

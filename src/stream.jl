@@ -388,18 +388,19 @@ struct StreamingTaskQueue <: AbstractTaskQueue
 end
 
 function enqueue!(queue::StreamingTaskQueue, pair::DTaskPair)
+    pair = initialize_streaming!(queue.self_streams, pair)
     push!(queue.tasks, pair)
-    initialize_streaming!(queue.self_streams, pair.spec, pair.task)
 end
 
 function enqueue!(queue::StreamingTaskQueue, pairs::Vector{DTaskPair})
-    append!(queue.tasks, pairs)
     for pair in pairs
-        initialize_streaming!(queue.self_streams, pair.spec, pair.task)
+        push!(queue.tasks, initialize_streaming!(queue.self_streams, pair))
     end
 end
 
-function initialize_streaming!(self_streams, spec, task)
+function initialize_streaming!(self_streams, pair::DTaskPair)
+    spec = pair.spec
+    task = pair.task
     @assert !isa(value(spec.fargs[1]), StreamingFunction) "Task is already in streaming form"
 
     # Calculate the return type of the called function
@@ -433,7 +434,8 @@ function initialize_streaming!(self_streams, spec, task)
     end
 
     # Wrap the function in a StreamingFunction
-    spec.fargs[1].value = StreamingFunction(value(spec.fargs[1]), stream, max_evals)
+    sf = StreamingFunction(value(spec.fargs[1]), stream, max_evals)
+    new_fargs = with_fargs(spec, 1, sf)
 
     # Mark the task as non-blocking
     spec.options.occupancy = @something(spec.options.occupancy, Dict())
@@ -445,6 +447,8 @@ function initialize_streaming!(self_streams, spec, task)
             global_streams[uid] = stream
         end
     end
+
+    return DTaskPair(DTaskSpec(new_fargs, spec.options), task)
 end
 
 """
@@ -681,13 +685,19 @@ end
 function finalize_streaming!(tasks::Vector{DTaskPair}, self_streams)
     stream_waiter_changes = Dict{UInt,Vector{Pair{UInt,Any}}}()
 
-    for pair in tasks
+    for (task_idx, pair) in enumerate(tasks)
         spec = pair.spec
         task = pair.task
         @assert haskey(self_streams, task.uid)
         our_stream = self_streams[task.uid]
 
         # Adapt args to accept Stream output of other streaming tasks
+        # N.B. `spec.fargs` may be an immutable `Tuple` (for a typed
+        # `DTaskSpec`), so replacement arguments are collected here and
+        # applied all at once afterwards, producing a new `fargs`/`DTaskSpec`.
+        # Allocated lazily (and as a plain `Vector`, not a `Dict`), since most
+        # tasks replace zero or one argument.
+        replacements = nothing
         for (idx, pos_arg) in enumerate(spec.fargs)
             arg = value(pos_arg)
             if arg isa DTask
@@ -703,7 +713,10 @@ function finalize_streaming!(tasks::Vector{DTaskPair}, self_streams)
                     # FIXME: Be configurable
                     input_fetcher = RemoteChannelFetcher()
                     other_stream_handle = Stream(other_stream)
-                    pos_arg.value = other_stream_handle
+                    if replacements === nothing
+                        replacements = Pair{Int,Any}[]
+                    end
+                    push!(replacements, idx=>other_stream_handle)
                     our_stream.store.input_streams[arg.uid] = other_stream_handle
                     our_stream.store.input_fetchers[arg.uid] = input_fetcher
 
@@ -714,6 +727,11 @@ function finalize_streaming!(tasks::Vector{DTaskPair}, self_streams)
                     push!(changes, task.uid => input_fetcher)
                 end
             end
+        end
+
+        if replacements !== nothing
+            new_fargs = with_fargs(spec, replacements)
+            tasks[task_idx] = DTaskPair(DTaskSpec(new_fargs, spec.options), task)
         end
     end
 

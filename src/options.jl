@@ -103,14 +103,28 @@ _set_option!(options::Base.Pairs, field, value) = error("Cannot set option in Ba
     end
     return ex
 end
-function Base.setproperty!(options::Options, field::Symbol, value)
-    if field == :scope || field == :compute_scope || field == :result_scope
-        # If the scope is changed, we need to clear the exec_scope as it is no longer valid
-        setfield!(options, :exec_scope, nothing)
+@generated function Base.setproperty!(options::Options, field::Symbol, value)
+    # Build a chain of compile-time known field dispatches to avoid the
+    # O(n) findfirst(==(field), fieldnames(Options)) at runtime.
+    ex = Expr(:block)
+    for (fname, ftype) in zip(fieldnames(Options), fieldtypes(Options))
+        if fname in (:scope, :compute_scope, :result_scope)
+            push!(ex.args, quote
+                if field === $(QuoteNode(fname))
+                    setfield!(options, :exec_scope, nothing)
+                    return setfield!(options, $(QuoteNode(fname)), convert($ftype, value))
+                end
+            end)
+        else
+            push!(ex.args, quote
+                if field === $(QuoteNode(fname))
+                    return setfield!(options, $(QuoteNode(fname)), convert($ftype, value))
+                end
+            end)
+        end
     end
-    fidx = findfirst(==(field), fieldnames(Options))
-    ftype = fieldtypes(Options)[fidx]
-    return setfield!(options, field, convert(ftype, value))
+    push!(ex.args, :(throw(ArgumentError("Options has no field $field"))))
+    return ex
 end
 
 """

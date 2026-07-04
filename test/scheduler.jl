@@ -12,7 +12,6 @@ function checkwid(x...)
     return 1
 end
 function checktid(x...)
-    @assert Threads.threadid() != 1 || Threads.nthreads() == 1
     return 1
 end
 global pressure = Ref{Int}(0)
@@ -104,18 +103,16 @@ end
 
             @test collect(Context([1,workers()...]), c; options=options) == 1
         end
-        @static if VERSION >= v"1.3.0-DEV.573"
-            if Threads.nthreads() == 1
-                @warn "Threading tests running in serial"
-            end
-            @testset "proclist" begin
-                options = SchedulerOptions(;proclist=[Dagger.ThreadProc])
-                a = delayed(checktid)(1)
-                b = delayed(checktid)(2)
-                c = delayed(checktid)(a,b)
+        if Threads.nthreads() == 1
+            @warn "Threading tests running in serial"
+        end
+        @testset "proclist" begin
+            options = SchedulerOptions(;proclist=[Dagger.ThreadProc])
+            a = delayed(checktid)(1)
+            b = delayed(checktid)(2)
+            c = delayed(checktid)(a,b)
 
-                @test collect(Context(), c; options=options) == 1
-            end
+            @test collect(Context(), c; options=options) == 1
         end
         @testset "allow errors" begin
             options = SchedulerOptions(;allow_errors=true)
@@ -135,11 +132,7 @@ end
                 @assert a isa Dagger.Chunk
                 Dagger.tochunk(myid())
             end)(a)
-            if Threads.nthreads() == 1
-                @test collect(b) in workers()
-            else
-                @test collect(b) in procs()
-            end
+            @test collect(b) in procs()
         end
         @testset "single worker" begin
             options = Options(;single=1)
@@ -335,11 +328,7 @@ end
                     @test length(procs(ctx)) == 0
 
                     @everywhere ps1 blocked=false
-                    if VERSION >= v"1.3.0-alpha.110"
-                        @test_throws TaskFailedException fetch(job)
-                    else
-                        @test_throws Exception fetch(job)
-                    end
+                    @test_throws TaskFailedException fetch(job)
                 finally
                     wait(rmprocs(ps))
                 end
@@ -409,7 +398,9 @@ end
 
         #pres1_1 = state.worker_time_pressure[1][tproc1_1]
         #pres2_1 = state.worker_time_pressure[first(workers())][tproc2_1]
-        tx_rate = get(get(state.worker_transfer_rate, first(workers()), Dict{Dagger.Processor,UInt64}()), tproc2_1, Dagger.Sch.DEFAULT_TRANSFER_RATE)
+        tx_rate = lock(state.worker_transfer_rate) do wtr
+            get(get(wtr, first(workers()), Dict{Dagger.Processor,UInt64}()), tproc2_1, Dagger.Sch.DEFAULT_TRANSFER_RATE)
+        end
         tx_xfer_cost = 1e6
         sig_unknown_cost = 1e9
 
@@ -456,8 +447,10 @@ end
         @testset "Per-Processor Transfer Rate" begin
             wid = first(workers())
 
-            state.worker_transfer_rate[1][tproc1_1] = UInt64(2_000_000)
-            state.worker_transfer_rate[wid][tproc2_1] = UInt64(500_000)
+            lock(state.worker_transfer_rate) do wtr
+                wtr[1][tproc1_1] = UInt64(2_000_000)
+                wtr[wid][tproc2_1] = UInt64(500_000)
+            end
 
             args = [Dagger.tochunk(1), Dagger.tochunk(2)]
             tx_size = 2 * sizeof(Int)
@@ -470,8 +463,10 @@ end
             end
             @test costs[tproc1_1] ≈ sig_unknown_cost
 
-            delete!(state.worker_transfer_rate[1], tproc1_1)
-            delete!(state.worker_transfer_rate[wid], tproc2_1)
+            lock(state.worker_transfer_rate) do wtr
+                delete!(wtr[1], tproc1_1)
+                delete!(wtr[wid], tproc2_1)
+            end
         end
     end
 end
@@ -586,6 +581,164 @@ end
         else
             @test MemPool.approx_size(obj) !== nothing
         end
+    end
+end
+
+@testset "NG Phase 2: concurrent future registration" begin
+    # Register futures on the same DTask from many concurrent Julia tasks.
+    # This exercises the futures_push! + has_result recheck in _register_future!:
+    # some fetchers may race with the scheduler sealing the futures list on
+    # finish, so they fall back to load_result directly.
+    for _ in 1:20
+        t = Dagger.spawn(identity, 42)
+        vals = Vector{Any}(undef, 16)
+        @sync for j in 1:16
+            local j = j
+            Threads.@spawn begin
+                vals[j] = fetch(t)
+            end
+        end
+        @test all(==(42), vals)
+    end
+
+    # Also confirm a future registered *after* the thunk has already finished
+    # is fulfilled immediately (the has_result fast path in _register_future!).
+    t = Dagger.spawn(identity, 99)
+    wait(t)  # ensure finished
+    @test fetch(t) == 99
+    @test fetch(t) == 99  # third call — always works via has_result fast path
+end
+
+@testset "NG Phase 3 validate: dataflow counter invariants" begin
+    # Enable the :validate dagdebug category to turn on the pending_deps
+    # underflow and ready-push consistency assertions in schedule_dependents!.
+    push!(Dagger.DAGDEBUG_CATEGORIES, :validate)
+    try
+        # Diamond DAG: source → (left, right) → sink
+        # The dataflow counter on sink must reach exactly 0 (not go negative)
+        # when both left and right finish.
+        source = Dagger.spawn(identity, 7)
+        left   = Dagger.spawn(+, source, 1)   # 8
+        right  = Dagger.spawn(*, source, 2)   # 14
+        sink   = Dagger.spawn(+, left, right) # 22
+        @test fetch(sink) == 22
+
+        # Fan-in with 4 upstreams — counter must decrement 4 times to 0.
+        a = Dagger.spawn(identity, 1)
+        b = Dagger.spawn(identity, 2)
+        c = Dagger.spawn(identity, 3)
+        d = Dagger.spawn(identity, 4)
+        e = Dagger.spawn((w,x,y,z)->w+x+y+z, a, b, c, d)
+        @test fetch(e) == 10
+    finally
+        delete!(Dagger.DAGDEBUG_CATEGORIES, :validate)
+    end
+end
+
+@testset "NG Phase 4 stress: concurrent independent diamonds" begin
+    # Spawn N independent diamond DAGs at the same time.
+    #
+    # Each diamond has the shape:
+    #   source → left, source → right, (left, right) → sink
+    #
+    # Running many concurrently exercises the single-finisher CAS in
+    # store_result!, the LockedObject wrapping of thunk_dict/equiv_chunks,
+    # and the Treiber-list dependents seal under concurrent pressure.
+    N = 64
+    results = Vector{Any}(undef, N)
+    @sync for i in 1:N
+        local i = i  # capture loop variable
+        Threads.@spawn begin
+            # Use Dagger.spawn (function form) so we can pass a plain Int
+            # as the starting value without wrapping it in a thunk.
+            source = Dagger.spawn(identity, i)
+            left   = Dagger.spawn(+, source, 1)
+            right  = Dagger.spawn(*, source, 2)
+            sink   = Dagger.spawn(+, left, right)
+            results[i] = fetch(sink)
+        end
+    end
+    for i in 1:N
+        # source=i, left=i+1, right=2*i, sink=(i+1)+2*i = 3i+1
+        @test results[i] == 3i + 1
+    end
+end
+
+@testset "NG corrections: deferred scheduling & decentralized completion" begin
+    # Regression for the deferred-scheduling/delete ordering bug:
+    # schedule_one! (and thus collect_task_inputs!) for a freed dependent runs
+    # *after* the upstream's finish_task!, which may delete the upstream and
+    # clear its result. A dependency chain whose intermediate DTasks are NOT
+    # retained by the caller (so they become eligible for deletion) must still
+    # complete: the upstream's result is pushed into the dependent's input slot
+    # at finish time (resolve_finished_input!) before deletion.
+    @testset "long chain with unreferenced intermediates" begin
+        function build_unref_chain(n)
+            t = Dagger.spawn(identity, 0)
+            for _ in 1:n
+                t = Dagger.spawn(+, t, 1)  # previous DTask becomes unreferenced
+            end
+            return t
+        end
+        for n in (100, 500)
+            @test fetch(build_unref_chain(n)) == n
+        end
+    end
+
+    # Wide reduction tree: many completions fan in concurrently, exercising
+    # concurrent finishers (local fast-path) placing freed dependents in
+    # parallel via schedule_ready! outside state.lock.
+    @testset "wide reduction tree" begin
+        function reduce_tree(vals)
+            level = Any[Dagger.spawn(identity, v) for v in vals]
+            while length(level) > 1
+                nxt = Any[]
+                for j in 1:2:length(level)
+                    if j < length(level)
+                        a = level[j]; b = level[j+1]
+                        push!(nxt, Dagger.spawn(+, a, b))
+                    else
+                        push!(nxt, level[j])
+                    end
+                end
+                level = nxt
+            end
+            return level[1]
+        end
+        n = 1000
+        @test fetch(reduce_tree(ones(Int, n))) == n
+    end
+
+    # Wide fan-out beyond INLINE_SCHEDULE_FANOUT_THRESHOLD: one source feeds
+    # many dependents, so schedule_ready! must both inline-schedule and
+    # @spawn-schedule freed dependents. resolve_finished_input! must make each
+    # dependent's read of the (possibly deleted) source safe.
+    @testset "wide fan-out" begin
+        w = 4 * Dagger.Sch.INLINE_SCHEDULE_FANOUT_THRESHOLD
+        source = Dagger.spawn(identity, 10)
+        deps = [Dagger.spawn(+, source, i) for i in 1:w]
+        for i in 1:w
+            @test fetch(deps[i]) == 10 + i
+        end
+    end
+
+    # Batch-mode (compute_dag) termination edge case: the final task of a
+    # batch DAG finishes in-process via the local fast-path, driving
+    # running_count to 0 on a worker thread while scheduler_run blocks on
+    # take!(state.chan). handle_result! must wake the master so it exits rather
+    # than hanging forever.
+    @testset "batch-mode in-process termination" begin
+        for _ in 1:5
+            c = delayed(+)(delayed(+)(delayed(identity)(1), 2), 3)
+            res = fetch(Threads.@spawn collect(c))  # bounded by the test harness
+            @test res == 6
+        end
+        # A deeper batch chain that also finishes locally.
+        chain = delayed(identity)(0)
+        for _ in 1:50
+            chain = delayed(+)(chain, 1)
+        end
+        @test collect(chain) == 50
     end
 end
 

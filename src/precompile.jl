@@ -13,11 +13,11 @@
     t1 = nothing; t2 = nothing
     state = Sch.EAGER_STATE[]
     for i in 1:5
-        length(state.thunk_dict) == 1 && break
+        lock(state.thunk_dict) do d; length(d); end == 1 && break
         GC.gc()
         yield()
     end
-    if length(state.thunk_dict) > 1
+    if lock(state.thunk_dict) do d; length(d); end > 1
         @warn "Precompile failed to clean up all tasks"
     end
 

@@ -116,8 +116,13 @@ struct OSProc <: Processor
     end
 end
 get_parent(proc::OSProc) = proc
-get_processors(proc::OSProc) = @safe_lock1 OSPROC_PROCESSOR_CACHE cache begin
-    get(cache, proc.pid, Set{Processor}())
+function get_processors(proc::OSProc)
+    @safe_lock1 OSPROC_PROCESSOR_CACHE cache begin
+        if !haskey(cache, proc.pid)
+            cache[proc.pid] = remotecall_fetch(get_processor_hierarchy, proc.pid)
+        end
+        cache[proc.pid]
+    end
 end
 children(proc::OSProc) = get_processors(proc)
 function get_processor_hierarchy()
