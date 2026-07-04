@@ -655,7 +655,14 @@ function _run_one_trial(td::Dict{String,Any}, limits::Dict{String,Any})
 
     return try
         with_configurables(changes) do
-            _timed_trial(opspec, alg, op, algname, features, config, limits)
+            # `invokelatest`: the packages above were `Base.require`d *inside*
+            # this call stack, so any algorithm that dispatches into a
+            # freshly-loaded module (e.g. `ctx.mod.lu` for RecursiveFactorization,
+            # `ctx.mod.klu`, Krylov, LinearSolve) would otherwise hit a
+            # "method too new to be called from this world context" error. Running
+            # the trial at the latest world age makes those methods visible.
+            Base.invokelatest(_timed_trial, opspec, alg, op, algname,
+                              features, config, limits)
         end
     catch err
         fail("failed", sprint(showerror, err))
@@ -667,6 +674,16 @@ function _timed_trial(opspec::OperationSpec, alg::AlgorithmSpec, op, algname,
                       limits::Dict{String,Any})
     base_inputs = opspec.generate_inputs(features)
     inputs = Any[base_inputs...]
+    # Decouple mutated positional args from `base_inputs` *before* any
+    # conversion or invocation: `opspec.check` below validates against
+    # `base_inputs`, and when an algorithm needs no container conversion
+    # `inputs[idx]` would otherwise be the *same object* as `base_inputs[idx]`
+    # - letting `alg.invoke` mutate it (e.g. `lu!`-ing it into factors) would
+    # silently corrupt the very reference the check compares against.
+    for idx in opspec.mutated_args
+        (idx <= length(inputs) && inputs[idx] isa AbstractArray) || continue
+        inputs[idx] = copy(inputs[idx])
+    end
     for (i, x) in enumerate(inputs)
         x isa AbstractArray || continue
         cur = array_form(x)
@@ -682,7 +699,25 @@ function _timed_trial(opspec::OperationSpec, alg::AlgorithmSpec, op, algname,
     prepared = alg.prepare(ctx, inputs...)
     form = alg.input_form
 
+    # For in-place operations, `alg.invoke` mutates the (possibly
+    # container-converted) inputs. Re-prime them from a pristine copy before
+    # every timed call (including the warmup) so every sample measures the
+    # same work - otherwise e.g. re-running `lu!` on an already-factored
+    # matrix would measure garbage after the first call. Relies on `prepare`
+    # returning the same array objects as `inputs` by default (true for
+    # every registered `!` algorithm; only the :transfer op, which has no
+    # mutated_args, overrides `prepare`).
+    pristine = Dict{Int,Any}()
+    for idx in opspec.mutated_args
+        (idx <= length(inputs) && inputs[idx] isa AbstractArray) || continue
+        pristine[idx] = copy(inputs[idx])
+    end
+    reprime!() = for (idx, p) in pristine
+        copyto!(inputs[idx], p)
+    end
+
     run1 = () -> begin
+        reprime!()
         r = alg.invoke(ctx, prepared...)
         sync_form(form)
         r
