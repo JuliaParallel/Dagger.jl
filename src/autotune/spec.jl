@@ -91,6 +91,33 @@ function is_all_local(x)
     end
 end
 
+# ---------------------------------------------------------------------------
+# View-backed container unwrapping
+#
+# A `Dagger.DArray` produced by `view(A, Blocks(...))` merely *tiles* an
+# existing dense array `A` (its chunks are `SubArray`s of `A`); no data was
+# copied. When such a `DArray` has to be converted to the `:Array` form for a
+# dense algorithm, materializing it with `collect` would allocate and copy a
+# whole second array for nothing -- we can just hand back the parent `A`
+# directly. This hook lets Autotune recognize that case without depending on
+# Dagger: Dagger installs a precise implementation in its `__init__`; the
+# default treats nothing as unwrappable.
+const VIEW_PARENT_HOOK = Ref{Function}(_ -> nothing)
+
+"""
+    view_parent(x) -> Union{AbstractArray,Nothing}
+
+The dense parent array a distributed container is a non-copying view over, or
+`nothing` if `x` isn't such a whole-array view (so it must be materialized).
+"""
+view_parent(x) = try
+    VIEW_PARENT_HOOK[](x)
+catch
+    nothing
+end
+
+set_view_parent_hook!(f::Function) = (VIEW_PARENT_HOOK[] = f; nothing)
+
 """
     install_darray_locality_hook!()
 

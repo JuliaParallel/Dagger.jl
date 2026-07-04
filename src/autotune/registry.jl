@@ -72,6 +72,22 @@ Describes an autotunable operation.
                           acceptable, else an error string (e.g. residual
                           tolerance not met). Receives the CPU-collected
                           result.
+  * `mutated_args`       - positional input indices (1-based) that an
+                          algorithm's `invoke` mutates in place rather than
+                          returning a freshly-allocated result (e.g. `[1]`
+                          for `:lu!`'s `A`, `[1]` for `:gemm!`'s `C`, `[1,2]`
+                          for `:solve!`'s `A` and `b`). Empty for ordinary
+                          out-of-place operations. Two consequences:
+                            - `Autotune.benchmark` re-primes these arguments
+                              from a pristine copy before every timed sample
+                              (repeatedly re-invoking an in-place algorithm on
+                              its own output would otherwise measure garbage,
+                              e.g. re-factoring an already-factored matrix).
+                            - `invoke_best`/`execute_plan` copy the algorithm's
+                              (possibly container-converted) result back into
+                              the caller's original array(s) after invoking,
+                              so the `!` in-place contract holds regardless of
+                              which container form ended up being fastest.
 """
 Base.@kwdef struct OperationSpec
     name::Symbol
@@ -86,6 +102,7 @@ Base.@kwdef struct OperationSpec
     enumerate_features::Function
     default_axes::Dict{String,Vector} = Dict{String,Vector}()
     check::Function = (features, base_inputs, result) -> nothing
+    mutated_args::Vector{Int} = Int[]
 end
 
 const OPERATIONS = Dict{Symbol,OperationSpec}()
@@ -122,6 +139,12 @@ accuracy_or(ctx::InvokeContext, default) = ctx.accuracy === nothing ? default : 
 A candidate implementation of an operation. `prepare` runs untimed before
 benchmarking (e.g. staging data onto a device for `:transfer/:d2h`);
 `invoke` is the timed/selected call.
+
+  * `in_place` - documents that `invoke` mutates its arguments (per the
+                owning `OperationSpec.mutated_args`) rather than allocating a
+                fresh result; purely informational (used by `report`), the
+                actual re-priming/copy-back behavior is driven by
+                `OperationSpec.mutated_args`.
 """
 Base.@kwdef struct AlgorithmSpec
     name::Symbol
@@ -132,6 +155,7 @@ Base.@kwdef struct AlgorithmSpec
     prepare::Function = (ctx, inputs...) -> inputs
     invoke::Function
     free_config::Dict{String,Vector} = Dict{String,Vector}()
+    in_place::Bool = false
 end
 
 # op => (name => spec)
@@ -364,6 +388,49 @@ function _solve_check(features, base_inputs, result)
     return r <= limit ? nothing : "residual $r exceeds limit $limit (accuracy=$tol)"
 end
 
+# ---------------------------------------------------------------------------
+# Benchmark input generation for the in-place (`!`) operations. Dense-only;
+# see the registration comment below for why sparse is excluded.
+
+_lu_dense_generate_inputs(f) = (_gen_dd(_trial_rng(f), _feat_T(f), f["n"]),)
+_cholesky_dense_generate_inputs(f) = (_gen_spd_dense(_trial_rng(f), _feat_T(f), f["n"]),)
+_qr_dense_generate_inputs(f) = (_gen_dense(_trial_rng(f), _feat_T(f), f["m"], f["n"]),)
+
+function _solve_dense_generate_inputs(f)
+    rng = _trial_rng(f); T = _feat_T(f); n = f["n"]
+    A = Bool(get(f, "spd", false)) ? _gen_spd_dense(rng, T, n) : _gen_dd(rng, T, n)
+    return (A, rand(rng, T, n))
+end
+
+function _gemm_inplace_features(C, A, B; accuracy=nothing)
+    d = common_features(A)
+    d["k"] = size(A, 2)
+    d["n"] = size(B, 2)
+    return d
+end
+
+function _gemm_inplace_generate_inputs(f)
+    rng = _trial_rng(f); T = _feat_T(f)
+    C = zeros(T, f["m"], f["n"])
+    A = _gen_dense(rng, T, f["m"], f["k"])
+    B = _gen_dense(rng, T, f["k"], f["n"])
+    return (C, A, B)
+end
+
+function _gemm_inplace_check(features, base_inputs, result)
+    _, A, B = base_inputs
+    expected = A * B
+    actual = result
+    Tf = real(float(eltype(expected)))
+    tol = 100 * sqrt(eps(Tf)) * max(one(Tf), Float64(LinearAlgebra.norm(expected)))
+    err = try
+        Float64(LinearAlgebra.norm(actual - expected))
+    catch err
+        return "gemm! check failed: $(sprint(showerror, err))"
+    end
+    return err <= tol ? nothing : "gemm! result mismatch: ||C - A*B|| = $err exceeds tolerance $tol"
+end
+
 function register_default_operations!()
     common_dense_axes = Dict{String,Vector}(
         "size"        => Any[256, 1024, 4096, 16384],
@@ -471,6 +538,81 @@ function register_default_operations!()
                              Dict{String,Vector}("size" => Any[256, 1024, 4096, 8192])),
     ))
 
+    # -----------------------------------------------------------------
+    # In-place counterparts (`:lu!`, `:cholesky!`, `:qr!`, `:solve!`,
+    # `:gemm!`). Out-of-place algorithms above are written with an
+    # allocating caller in mind (`lu(A)`, `A \ b`, `A * B`, ...); when the
+    # caller instead already owns the output container (`lu!(A)`,
+    # `mul!(C, A, B)`, `ldiv!(A, b)`), skipping the internal allocation/copy
+    # every out-of-place algorithm otherwise performs is a real win. There is
+    # no meaningful in-place *sparse* factorization -- UMFPACK/KLU/CHOLMOD
+    # always allocate a fresh opaque factor object regardless of whether `A`
+    # is reused -- so only dense BLAS/LAPACK/CUDA/Dagger algorithms are
+    # registered here.
+    register_operation!(OperationSpec(;
+        name = :lu!, nargs = 1,
+        scale = f -> Float64(f["m"]) * Float64(f["n"]) * min(Float64(f["m"]), Float64(f["n"])),
+        input_bytes = _dense_mat_bytes,
+        extract_features = _factor_features,
+        generate_inputs = _lu_dense_generate_inputs,
+        enumerate_features = matrix_feature_enumerator(; sparse_ok=false),
+        default_axes = common_dense_axes,
+        mutated_args = [1],
+    ))
+
+    register_operation!(OperationSpec(;
+        name = :cholesky!, nargs = 1,
+        scale = f -> Float64(f["n"])^3 / 3,
+        input_bytes = _dense_mat_bytes,
+        extract_features = _factor_features,
+        generate_inputs = _cholesky_dense_generate_inputs,
+        enumerate_features = matrix_feature_enumerator(; sparse_ok=false),
+        default_axes = common_dense_axes,
+        mutated_args = [1],
+    ))
+
+    register_operation!(OperationSpec(;
+        name = :qr!, nargs = 1,
+        scale = f -> Float64(f["m"]) * Float64(f["n"])^2,
+        input_bytes = _dense_mat_bytes,
+        extract_features = _factor_features,
+        generate_inputs = _qr_dense_generate_inputs,
+        enumerate_features = matrix_feature_enumerator(; sparse_ok=false),
+        default_axes = common_dense_axes,
+        mutated_args = [1],
+    ))
+
+    register_operation!(OperationSpec(;
+        name = :solve!, nargs = 2,
+        scale = f -> (2 / 3) * Float64(f["n"])^3 + 2 * Float64(f["n"])^2,
+        input_bytes = f -> _dense_mat_bytes(f) + Float64(f["n"]) * sizeof(_feat_T(f)),
+        extract_features = _solve_features,
+        generate_inputs = _solve_dense_generate_inputs,
+        enumerate_features = matrix_feature_enumerator(; sparse_ok=false,
+                                                         accuracy_axis=true, spd_axis=true),
+        default_axes = merge(common_dense_axes, Dict{String,Vector}(
+            "accuracy" => Any[1.0e-8],
+            "spd"      => Any[false, true],
+        )),
+        check = _solve_check,
+        mutated_args = [1, 2],
+    ))
+
+    register_operation!(OperationSpec(;
+        name = :gemm!, nargs = 3,
+        scale = f -> 2 * Float64(f["m"]) * Float64(f["k"]) * Float64(f["n"]),
+        input_bytes = f -> (Float64(f["m"]) * Float64(f["k"]) +
+                            Float64(f["k"]) * Float64(f["n"]) +
+                            Float64(f["m"]) * Float64(f["n"])) * sizeof(_feat_T(f)),
+        extract_features = _gemm_inplace_features,
+        generate_inputs = _gemm_inplace_generate_inputs,
+        enumerate_features = matrix_feature_enumerator(; dims=3, sparse_ok=false),
+        default_axes = merge(common_dense_axes,
+                             Dict{String,Vector}("size" => Any[256, 1024, 4096, 8192])),
+        check = _gemm_inplace_check,
+        mutated_args = [1],
+    ))
+
     # Pseudo-operation measuring data-movement bandwidth per channel. Results
     # feed `movement_cost` in model.jl.
     register_operation!(OperationSpec(;
@@ -507,6 +649,11 @@ _dense_only(form) = f -> f["array_type"] == String(form) &&
                          get(f, "structure", "dense") == "dense"
 _sparse_only(form) = f -> f["array_type"] == String(form) &&
                           get(f, "structure", "dense") == "sparse"
+# Dense + a BLAS/LAPACK-supported element type. The vendor LU backends (MKL,
+# OpenBLAS, BLIS) only have `getrf` for the four `BlasFloat`s; likewise
+# RecursiveFactorization targets those.
+_blas_dense_only(form) = f -> _dense_only(form)(f) &&
+                              (eltype_from_string(f["eltype"]) <: LinearAlgebra.BlasFloat)
 
 const DAGGER_BLOCKSIZES = Any[256, 512, 1024, 2048]
 
@@ -532,7 +679,30 @@ function register_default_algorithms!()
     register_algorithm!(AlgorithmSpec(; name = :dagger_lu, op = :lu,
         package = "Dagger", input_form = :DArray, supports = _dense_only(:DArray),
         free_config = Dict{String,Vector}("blocksize" => DAGGER_BLOCKSIZES),
-        invoke = (ctx, A) -> raw_impl(:dagger_lu)(A)))
+        # `raw_impl(:dagger_lu)` mutates its argument in place; :lu is
+        # out-of-place, so copy first (the genuine in-place algorithm lives
+        # under :lu! below, sharing the same raw impl without the copy).
+        invoke = (ctx, A) -> raw_impl(:dagger_lu)(copy(A))))
+
+    # Vendor dense-LU backends. These `getrf!` in place, so the out-of-place
+    # `:lu` must hand them a private copy (see `_external_getrf_lu!` in
+    # lu_backends.jl). RecursiveFactorization is a pure-Julia recursive LU.
+    register_algorithm!(AlgorithmSpec(; name = :mkl_lu, op = :lu,
+        package = "MKL_jll", input_form = :Array, supports = _blas_dense_only(:Array),
+        invoke = (ctx, A) -> _external_lu_invoke(_mkl_getrf_lib, copy(A))))
+
+    register_algorithm!(AlgorithmSpec(; name = :openblas_lu, op = :lu,
+        package = "OpenBLAS_jll", input_form = :Array, supports = _blas_dense_only(:Array),
+        invoke = (ctx, A) -> _external_lu_invoke(_openblas_getrf_lib, copy(A))))
+
+    register_algorithm!(AlgorithmSpec(; name = :blis_lu, op = :lu,
+        package = "blis_jll", input_form = :Array, supports = _blas_dense_only(:Array),
+        invoke = (ctx, A) -> _external_lu_invoke(_blis_getrf_lib, copy(A))))
+
+    register_algorithm!(AlgorithmSpec(; name = :recursive_lu, op = :lu,
+        package = "RecursiveFactorization", input_form = :Array,
+        supports = _blas_dense_only(:Array),
+        invoke = (ctx, A) -> ctx.mod.lu(A)))
 
     # ------------------------------------------------------------ :cholesky
     register_algorithm!(AlgorithmSpec(; name = :blas_cholesky, op = :cholesky,
@@ -550,7 +720,8 @@ function register_default_algorithms!()
     register_algorithm!(AlgorithmSpec(; name = :dagger_cholesky, op = :cholesky,
         package = "Dagger", input_form = :DArray, supports = _dense_only(:DArray),
         free_config = Dict{String,Vector}("blocksize" => DAGGER_BLOCKSIZES),
-        invoke = (ctx, A) -> raw_impl(:dagger_cholesky)(A)))
+        # See the :dagger_lu comment above: copy first for the out-of-place op.
+        invoke = (ctx, A) -> raw_impl(:dagger_cholesky)(copy(A))))
 
     # ------------------------------------------------------------------ :qr
     register_algorithm!(AlgorithmSpec(; name = :blas_qr, op = :qr,
@@ -564,7 +735,8 @@ function register_default_algorithms!()
     register_algorithm!(AlgorithmSpec(; name = :dagger_qr, op = :qr,
         package = "Dagger", input_form = :DArray, supports = _dense_only(:DArray),
         free_config = Dict{String,Vector}("blocksize" => DAGGER_BLOCKSIZES),
-        invoke = (ctx, A) -> raw_impl(:dagger_qr)(A)))
+        # See the :dagger_lu comment above: copy first for the out-of-place op.
+        invoke = (ctx, A) -> raw_impl(:dagger_qr)(copy(A))))
 
     # --------------------------------------------------------------- :solve
     register_algorithm!(AlgorithmSpec(; name = :dense_backslash, op = :solve,
@@ -633,6 +805,98 @@ function register_default_algorithms!()
         free_config = Dict{String,Vector}("blocksize" => DAGGER_BLOCKSIZES),
         invoke = (ctx, A, B) -> raw_impl(:dagger_gemm)(A, B)))
 
+    # ----------------------------------------------------------------- :lu!
+    register_algorithm!(AlgorithmSpec(; name = :blas_lu!, op = :lu!,
+        input_form = :Array, supports = _dense_only(:Array), in_place = true,
+        invoke = (ctx, A) -> LinearAlgebra.lu!(A)))
+
+    register_algorithm!(AlgorithmSpec(; name = :cuda_lu!, op = :lu!,
+        package = "CUDA", input_form = :CuArray, supports = _dense_only(:CuArray),
+        in_place = true, invoke = (ctx, A) -> LinearAlgebra.lu!(A)))
+
+    register_algorithm!(AlgorithmSpec(; name = :dagger_lu!, op = :lu!,
+        package = "Dagger", input_form = :DArray, supports = _dense_only(:DArray),
+        free_config = Dict{String,Vector}("blocksize" => DAGGER_BLOCKSIZES),
+        in_place = true, invoke = (ctx, A) -> raw_impl(:dagger_lu)(A)))
+
+    # Vendor dense-LU backends, in-place: `getrf!` overwrites `A` directly.
+    register_algorithm!(AlgorithmSpec(; name = :mkl_lu!, op = :lu!,
+        package = "MKL_jll", input_form = :Array, supports = _blas_dense_only(:Array),
+        in_place = true, invoke = (ctx, A) -> _external_lu_invoke(_mkl_getrf_lib, A)))
+
+    register_algorithm!(AlgorithmSpec(; name = :openblas_lu!, op = :lu!,
+        package = "OpenBLAS_jll", input_form = :Array, supports = _blas_dense_only(:Array),
+        in_place = true, invoke = (ctx, A) -> _external_lu_invoke(_openblas_getrf_lib, A)))
+
+    register_algorithm!(AlgorithmSpec(; name = :blis_lu!, op = :lu!,
+        package = "blis_jll", input_form = :Array, supports = _blas_dense_only(:Array),
+        in_place = true, invoke = (ctx, A) -> _external_lu_invoke(_blis_getrf_lib, A)))
+
+    register_algorithm!(AlgorithmSpec(; name = :recursive_lu!, op = :lu!,
+        package = "RecursiveFactorization", input_form = :Array,
+        supports = _blas_dense_only(:Array),
+        in_place = true, invoke = (ctx, A) -> ctx.mod.lu!(A)))
+
+    # ----------------------------------------------------------- :cholesky!
+    register_algorithm!(AlgorithmSpec(; name = :blas_cholesky!, op = :cholesky!,
+        input_form = :Array, supports = _dense_only(:Array), in_place = true,
+        invoke = (ctx, A) -> LinearAlgebra.cholesky!(LinearAlgebra.Hermitian(A))))
+
+    register_algorithm!(AlgorithmSpec(; name = :cuda_cholesky!, op = :cholesky!,
+        package = "CUDA", input_form = :CuArray, supports = _dense_only(:CuArray),
+        in_place = true,
+        invoke = (ctx, A) -> LinearAlgebra.cholesky!(LinearAlgebra.Hermitian(A))))
+
+    register_algorithm!(AlgorithmSpec(; name = :dagger_cholesky!, op = :cholesky!,
+        package = "Dagger", input_form = :DArray, supports = _dense_only(:DArray),
+        free_config = Dict{String,Vector}("blocksize" => DAGGER_BLOCKSIZES),
+        in_place = true, invoke = (ctx, A) -> raw_impl(:dagger_cholesky)(A)))
+
+    # ----------------------------------------------------------------- :qr!
+    register_algorithm!(AlgorithmSpec(; name = :blas_qr!, op = :qr!,
+        input_form = :Array, supports = _dense_only(:Array), in_place = true,
+        invoke = (ctx, A) -> LinearAlgebra.qr!(A)))
+
+    register_algorithm!(AlgorithmSpec(; name = :cuda_qr!, op = :qr!,
+        package = "CUDA", input_form = :CuArray, supports = _dense_only(:CuArray),
+        in_place = true, invoke = (ctx, A) -> LinearAlgebra.qr!(A)))
+
+    register_algorithm!(AlgorithmSpec(; name = :dagger_qr!, op = :qr!,
+        package = "Dagger", input_form = :DArray, supports = _dense_only(:DArray),
+        free_config = Dict{String,Vector}("blocksize" => DAGGER_BLOCKSIZES),
+        in_place = true, invoke = (ctx, A) -> raw_impl(:dagger_qr)(A)))
+
+    # -------------------------------------------------------------- :solve!
+    register_algorithm!(AlgorithmSpec(; name = :dense_ldiv!, op = :solve!,
+        input_form = :Array, supports = _dense_only(:Array), in_place = true,
+        invoke = (ctx, A, b) -> LinearAlgebra.ldiv!(LinearAlgebra.lu!(A), b)))
+
+    register_algorithm!(AlgorithmSpec(; name = :cuda_ldiv!, op = :solve!,
+        package = "CUDA", input_form = :CuArray, supports = _dense_only(:CuArray),
+        in_place = true,
+        invoke = (ctx, A, b) -> LinearAlgebra.ldiv!(LinearAlgebra.lu!(A), b)))
+
+    register_algorithm!(AlgorithmSpec(; name = :dagger_solve!, op = :solve!,
+        package = "Dagger", input_form = :DArray, supports = _dense_only(:DArray),
+        free_config = Dict{String,Vector}("blocksize" => DAGGER_BLOCKSIZES),
+        # The algorithm name must match its raw impl key (`algorithm_available`
+        # looks up `has_raw_impl(alg.name)` for any `dagger_`-prefixed algorithm).
+        in_place = true, invoke = (ctx, A, b) -> raw_impl(:dagger_solve!)(A, b)))
+
+    # -------------------------------------------------------------- :gemm!
+    register_algorithm!(AlgorithmSpec(; name = :blas_gemm!, op = :gemm!,
+        input_form = :Array, supports = _dense_only(:Array), in_place = true,
+        invoke = (ctx, C, A, B) -> LinearAlgebra.mul!(C, A, B)))
+
+    register_algorithm!(AlgorithmSpec(; name = :cuda_gemm!, op = :gemm!,
+        package = "CUDA", input_form = :CuArray, supports = _dense_only(:CuArray),
+        in_place = true, invoke = (ctx, C, A, B) -> LinearAlgebra.mul!(C, A, B)))
+
+    register_algorithm!(AlgorithmSpec(; name = :dagger_gemm!, op = :gemm!,
+        package = "Dagger", input_form = :DArray, supports = _dense_only(:DArray),
+        free_config = Dict{String,Vector}("blocksize" => DAGGER_BLOCKSIZES),
+        in_place = true, invoke = (ctx, C, A, B) -> raw_impl(:dagger_gemm!)(C, A, B)))
+
     # ------------------------------------------------------------ :transfer
     # Bandwidth microbenchmarks; algorithm names double as channel names.
     register_algorithm!(AlgorithmSpec(; name = :memcpy, op = :transfer,
@@ -687,8 +951,14 @@ function register_default_converters!()
 
     register_converter!(Converter(:Array, :DArray, "Dagger", :distribute,
         _distribute_array, payload_bytes))
+    # `DArray -> Array`: if the `DArray` is just a non-copying `view` over a
+    # dense parent (`view(A, Blocks(...))`), hand back the parent directly
+    # instead of collecting a fresh copy -- and price the movement at zero
+    # bytes so the cost model doesn't penalize dense algorithms for a copy
+    # that never happens.
     register_converter!(Converter(:DArray, :Array, "Dagger", :collect,
-        (x, cfg) -> collect(x), payload_bytes))
+        (x, cfg) -> (p = view_parent(x); p === nothing ? collect(x) : p),
+        x -> view_parent(x) === nothing ? payload_bytes(x) : 0.0))
 
     # Sparse <-> dense conversion is intentionally *not* auto-registered:
     # densifying a large sparse matrix can be a semantic/memory catastrophe,
