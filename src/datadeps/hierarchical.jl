@@ -19,6 +19,29 @@ struct HierarchicalTaskMeta
     deps::Vector{HierarchicalTaskInfo}
 end
 
+# Below this many tasks, the fixed costs of spawning threads and merging
+# per-thread results outweigh the benefit of parallelizing the pre-scan.
+const COLLECT_ALIASED_ARGS_MIN_CHUNK = 256
+
+# Thread-safe "get or compute" against a shared `IdDict` cache. The
+# expensive computation (`f`) is performed outside of the lock so that
+# multiple threads can make progress on distinct keys concurrently; if two
+# threads race on the same key, the loser's result is simply discarded (the
+# corresponding `Chunk`/Bool is cheap to let the GC reclaim) so that every
+# thread agrees on a single canonical value (e.g. `Chunk`) per raw argument.
+@inline function _cached_get!(f, cache::IdDict{Any,V}, cache_lock::Union{ReentrantLock,Nothing}, key) where V
+    if cache_lock === nothing
+        return get!(f, cache, key)
+    end
+    @lock cache_lock begin
+        haskey(cache, key) && return cache[key]::V
+    end
+    result = f()::V
+    @lock cache_lock begin
+        return get!(cache, key, result)::V
+    end
+end
+
 """
     collect_aliased_args(seen_tasks) -> (task_metas, unique_arg_ws)
 
@@ -26,14 +49,67 @@ Pre-scans all tasks to collect per-task dependency metadata and the set of
 unique `ArgumentWrapper`s that need aliasing analysis. This mirrors the logic
 in `populate_task_info!` but only inspects arguments without modifying any
 scheduling state.
+
+For large batches of tasks (the common case for e.g. panel-factorization
+algorithms which submit many small tasks per `spawn_datadeps` region), the
+pre-scan itself (not just the aliasing computation in
+`build_aliasing_parallel`) can dominate scheduling time, since it touches
+every argument of every task. This is parallelized across threads: each
+thread scans a contiguous range of `seen_tasks` into its own disjoint slice
+of `task_metas` and its own local `unique_arg_ws` map (merged at the end),
+while sharing (lock-protected) caches for `Chunk`-wrapping and
+`supports_inplace_move`, ensuring a single canonical `Chunk` identity per
+raw argument regardless of which thread first observes it.
 """
 function collect_aliased_args(seen_tasks::Vector{DTaskPair})
+    n = length(seen_tasks)
+    task_metas = Vector{HierarchicalTaskMeta}(undef, n)
+    n == 0 && return task_metas, Dict{ArgumentWrapper,ArgumentWrapper}()
+
     supports_cache = IdDict{Any,Bool}()
     raw_arg_cache = IdDict{Any,Chunk}()
-    unique_arg_ws = Dict{ArgumentWrapper, ArgumentWrapper}()
-    task_metas = Vector{HierarchicalTaskMeta}(undef, length(seen_tasks))
 
-    for (task_idx, pair) in enumerate(seen_tasks)
+    nchunks = Threads.nthreads() <= 1 ? 1 : min(Threads.nthreads(), cld(n, COLLECT_ALIASED_ARGS_MIN_CHUNK))
+
+    if nchunks <= 1
+        unique_arg_ws = Dict{ArgumentWrapper, ArgumentWrapper}()
+        _collect_aliased_args_range!(task_metas, unique_arg_ws, seen_tasks, 1:n,
+                                      supports_cache, raw_arg_cache, nothing)
+        return task_metas, unique_arg_ws
+    end
+
+    cache_lock = ReentrantLock()
+    chunk_size = cld(n, nchunks)
+    starts = collect(1:chunk_size:n)
+    per_chunk_arg_ws = Vector{Dict{ArgumentWrapper,ArgumentWrapper}}(undef, length(starts))
+
+    @sync for (ci, start) in enumerate(starts)
+        range = start:min(start+chunk_size-1, n)
+        Threads.@spawn begin
+            local_arg_ws = Dict{ArgumentWrapper,ArgumentWrapper}()
+            _collect_aliased_args_range!(task_metas, local_arg_ws, seen_tasks, range,
+                                          supports_cache, raw_arg_cache, cache_lock)
+            per_chunk_arg_ws[ci] = local_arg_ws
+        end
+    end
+
+    unique_arg_ws = per_chunk_arg_ws[1]
+    for ci in 2:length(per_chunk_arg_ws)
+        merge!(unique_arg_ws, per_chunk_arg_ws[ci])
+    end
+
+    return task_metas, unique_arg_ws
+end
+
+function _collect_aliased_args_range!(task_metas::Vector{HierarchicalTaskMeta},
+                                      unique_arg_ws::Dict{ArgumentWrapper,ArgumentWrapper},
+                                      seen_tasks::Vector{DTaskPair},
+                                      range::UnitRange{Int},
+                                      supports_cache::IdDict{Any,Bool},
+                                      raw_arg_cache::IdDict{Any,Chunk},
+                                      cache_lock::Union{ReentrantLock,Nothing})
+    for task_idx in range
+        pair = seen_tasks[task_idx]
         spec = pair.spec
         task = pair.task
         fargs = spec.fargs
@@ -51,7 +127,7 @@ function collect_aliased_args(seen_tasks::Vector{DTaskPair})
             arg = arg_pre_unwrap isa DTask ? fetch(arg_pre_unwrap; raw=true) : arg_pre_unwrap
 
             may_alias = type_may_alias(typeof(arg))
-            inplace_move = may_alias && get!(supports_cache, arg) do
+            inplace_move = may_alias && _cached_get!(supports_cache, cache_lock, arg) do
                 supports_inplace_move(arg)
             end
 
@@ -59,11 +135,8 @@ function collect_aliased_args(seen_tasks::Vector{DTaskPair})
                 continue
             end
 
-            if haskey(raw_arg_cache, arg)
-                arg_chunk = raw_arg_cache[arg]
-            else
-                arg_chunk = arg isa Chunk ? arg : tochunk(arg)
-                raw_arg_cache[arg] = arg_chunk
+            arg_chunk = _cached_get!(raw_arg_cache, cache_lock, arg) do
+                arg isa Chunk ? arg : tochunk(arg)
             end
 
             if first_chunk === nothing
@@ -83,8 +156,6 @@ function collect_aliased_args(seen_tasks::Vector{DTaskPair})
             pair, first_chunk, task_may_alias, task_inplace, all_deps
         )
     end
-
-    return task_metas, unique_arg_ws
 end
 
 """
@@ -106,18 +177,31 @@ function build_aliasing_parallel(unique_arg_ws::Dict{ArgumentWrapper, ArgumentWr
     end
 
     arg_to_ainfo = Dict{ArgumentWrapper, AliasingWrapper}()
-    all_results_lock = ReentrantLock()
 
-    @sync for (wid, worker_args) in by_worker
-        Threads.@spawn begin
-            results = if wid == myid()
-                _compute_aliasing_batch(worker_args)
-            else
-                remotecall_fetch(_compute_aliasing_batch, wid, worker_args)
-            end
-            @lock all_results_lock begin
-                for (arg_w, ainfo) in results
-                    arg_to_ainfo[arg_w] = ainfo
+    if length(by_worker) == 1
+        # Common single-worker case: avoid the `@sync`/`Threads.@spawn`/lock
+        # overhead entirely, since there's nothing to run concurrently with.
+        # `_compute_aliasing_batch` still uses threads internally when there
+        # are enough args to make it worthwhile.
+        wid, worker_args = only(by_worker)
+        results = wid == myid() ? _compute_aliasing_batch(worker_args) :
+                                   remotecall_fetch(_compute_aliasing_batch, wid, worker_args)
+        for (arg_w, ainfo) in results
+            arg_to_ainfo[arg_w] = ainfo
+        end
+    else
+        all_results_lock = ReentrantLock()
+        @sync for (wid, worker_args) in by_worker
+            Threads.@spawn begin
+                results = if wid == myid()
+                    _compute_aliasing_batch(worker_args)
+                else
+                    remotecall_fetch(_compute_aliasing_batch, wid, worker_args)
+                end
+                @lock all_results_lock begin
+                    for (arg_w, ainfo) in results
+                        arg_to_ainfo[arg_w] = ainfo
+                    end
                 end
             end
         end
@@ -146,10 +230,14 @@ function build_aliasing_parallel(unique_arg_ws::Dict{ArgumentWrapper, ArgumentWr
     return lookup, ainfos_overlaps, arg_to_ainfo
 end
 
+# Below this many args, the fixed cost of forking/joining `Threads.@threads`
+# outweighs the benefit of parallelizing the (typically cheap) `aliasing()` calls.
+const COMPUTE_ALIASING_BATCH_MIN_PARALLEL = 8
+
 function _compute_aliasing_batch(arg_ws::Vector{ArgumentWrapper})
     n = length(arg_ws)
     results = Vector{Pair{ArgumentWrapper, AliasingWrapper}}(undef, n)
-    if n > 1 && Threads.nthreads() > 1
+    if n >= COMPUTE_ALIASING_BATCH_MIN_PARALLEL && Threads.nthreads() > 1
         Threads.@threads for i in 1:n
             arg_w = arg_ws[i]
             ainfo = AliasingWrapper(aliasing(arg_w.arg, arg_w.dep_mod))
@@ -415,34 +503,68 @@ function schedule_partition_full!(queue::DataDepsTaskQueue,
     ordered_verts = filter(v -> v in vert_set, topo)
 
     locked_queue = LockedEnqueueQueue(get_options(:task_queue), queue_lock)
-    temp_queue = DataDepsTaskQueue(locked_queue; scheduler=queue.scheduler)
+    # N.B. Each partition gets its own fresh scheduler instance (of the same
+    # type/configuration the caller requested) rather than sharing
+    # `queue.scheduler` across all partitions. Two independent problems
+    # would arise from sharing a single scheduler instance here:
+    #  1) Data race: e.g. `RoundRobinScheduler.proc_idx` would be
+    #     concurrently read/written by every partition's `Threads.@spawn`
+    #     task with no synchronization.
+    #  2) Semantic bug (worse than the race, and *not* fixed by adding a
+    #     lock): each partition schedules only onto its own worker's
+    #     `local_procs`, which generally has a *different length* than
+    #     other partitions' (or the global) processor list. A `proc_idx`
+    #     counter advanced by one partition's `local_procs` is meaningless
+    #     -- and can be out-of-bounds -- when applied to another
+    #     partition's differently-sized `local_procs`. This reliably
+    #     crashes with a `BoundsError` under multi-worker hierarchical
+    #     scheduling. Giving each partition its own scheduler instance,
+    #     scoped to its own `local_procs`, fixes both issues at once.
+    temp_queue = DataDepsTaskQueue(locked_queue; scheduler=typeof(queue.scheduler)())
 
-    for v in ordered_verts
-        for pred_v in inneighbors(dag, v)
-            if vertex_to_partition[pred_v] != partition_id
-                wait(task_submitted[pred_v])
+    # N.B. If this partition throws partway through (e.g. from
+    # `distribute_task!`), any of our vertices that haven't yet been
+    # `notify`'d will never be, which would leave other partitions blocked
+    # forever in `wait(task_submitted[pred_v])` below -- turning a normal,
+    # reportable exception into a silent, permanent hang (since the
+    # enclosing `@sync` in `distribute_tasks_hierarchical!` can't finish,
+    # and thus can't propagate our exception, until *every* spawned
+    # partition task completes, including the ones stuck waiting on us).
+    # The `finally` ensures every one of our events gets notified no matter
+    # how we exit, so that sibling partitions can unblock (and themselves
+    # fail/finish) and our real exception can actually surface.
+    try
+        for v in ordered_verts
+            for pred_v in inneighbors(dag, v)
+                if vertex_to_partition[pred_v] != partition_id
+                    wait(task_submitted[pred_v])
+                end
             end
-        end
 
-        pair = seen_tasks[v]
-        spec = pair.spec
-        task = pair.task
+            pair = seen_tasks[v]
+            spec = pair.spec
+            task = pair.task
 
-        if spec.options.syncdeps === nothing
-            spec.options.syncdeps = Set{ThunkSyncdep}()
-        end
-        for pred_v in inneighbors(dag, v)
-            if vertex_to_partition[pred_v] != partition_id
-                pred_task = seen_tasks[pred_v].task
-                push!(spec.options.syncdeps, ThunkSyncdep(pred_task))
+            if spec.options.syncdeps === nothing
+                spec.options.syncdeps = Set{ThunkSyncdep}()
             end
+            for pred_v in inneighbors(dag, v)
+                if vertex_to_partition[pred_v] != partition_id
+                    pred_task = seen_tasks[pred_v].task
+                    push!(spec.options.syncdeps, ThunkSyncdep(pred_task))
+                end
+            end
+
+            write_num = distribute_task!(temp_queue, state, local_procs, local_scope,
+                                         spec, task, spec.fargs,
+                                         proc_to_scope_lfu, write_num)
+
+            notify(task_submitted[v])
         end
-
-        write_num = distribute_task!(temp_queue, state, local_procs, local_scope,
-                                     spec, task, spec.fargs,
-                                     proc_to_scope_lfu, write_num)
-
-        notify(task_submitted[v])
+    finally
+        for v in ordered_verts
+            notify(task_submitted[v])
+        end
     end
 
     return state
