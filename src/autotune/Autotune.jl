@@ -64,6 +64,7 @@ export benchmark, BenchmarkConfig, invoke_best, report
 include("configurables.jl")
 include("spec.jl")
 include("registry.jl")
+include("lu_backends.jl")
 include("database.jl")
 include("model.jl")
 include("benchmark.jl")

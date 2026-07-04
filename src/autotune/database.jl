@@ -182,7 +182,12 @@ Insert results, replacing existing entries with identical
 (op, algorithm, features, config) keys.
 """
 function merge_results!(db::ResultDB, new::Vector{TrialResult})
-    index = Dict(trial_key(r) => i for (i, r) in enumerate(db.results))
+    # `trial_key` bakes the (variable-length) canonicalized feature/config
+    # tuples into the key, so keys for different ops/algorithms have different
+    # concrete tuple types. Force an abstract key type; a concretely-typed
+    # `Dict` would try (and fail) to `convert` a longer/shorter key tuple to
+    # the type inferred from the first entry.
+    index = Dict{Any,Int}(trial_key(r) => i for (i, r) in enumerate(db.results))
     for r in new
         k = trial_key(r)
         if haskey(index, k)

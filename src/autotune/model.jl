@@ -444,6 +444,35 @@ function execute_plan(plan::Plan, inputs...; kwargs...)
        array_form(result) === plan.convert_back.from
         result = plan.convert_back.convert(result, plan.config)
     end
+    # In-place operations (`OperationSpec.mutated_args`) must honor their `!`
+    # contract regardless of which container form ended up fastest: if the
+    # winning algorithm needed a converted copy of a mutated argument, copy
+    # the (now-mutated) data back into the caller's original array. No-op
+    # when that argument needed no conversion (already mutated in place).
+    opspec = operation(plan.op)
+    for idx in opspec.mutated_args
+        idx > length(inputs) && continue
+        orig = inputs[idx]
+        conv = converted[idx]
+        conv === orig && continue
+        if view_parent(orig) === conv
+            # `conv` is `orig`'s own dense backing store, handed over by the
+            # zero-copy `DArray`-view unwrap: the in-place algorithm already
+            # mutated it, so copying back would be a redundant (and aliasing)
+            # self-copy. Just remap the returned reference.
+            result === conv && (result = orig)
+            continue
+        end
+        orig isa AbstractArray && conv isa AbstractArray && copyto!(orig, conv)
+        # Base's `!` convention returns the same container that was mutated
+        # (e.g. `mul!(C,A,B)` returns `C`, `ldiv!(A,b)` returns `b`): when the
+        # algorithm's result *is* the converted array by reference, hand back
+        # the caller's original instead. Factorization objects (`LU`,
+        # `Cholesky`, ...) wrap rather than equal the converted array, so
+        # this is a no-op for them; they're returned wrapping the converted
+        # form (documented above).
+        result === conv && (result = orig)
+    end
     return result
 end
 
