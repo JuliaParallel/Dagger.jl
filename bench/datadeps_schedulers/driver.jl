@@ -198,6 +198,13 @@ function default_scheduler_factories(; milp_time_limit_sec::Real=120.0)
         push!(factories,
               "JuMPScheduler" => () -> Dagger.JuMPScheduler(HiGHS.Optimizer;
                                                             time_limit_sec=milp_time_limit_sec))
+        push!(factories,
+              "OptimizingScheduler" => () -> Dagger.OptimizingScheduler(;
+                                                optimizer=HiGHS.Optimizer,
+                                                milp_time_limit_sec=milp_time_limit_sec))
+    else
+        push!(factories,
+              "OptimizingScheduler" => () -> Dagger.OptimizingScheduler())
     end
     return factories
 end
