@@ -796,6 +796,27 @@ function _qr_impl!(A::DMatrix{T}; ib::Int=1, p::Int=1) where {T<:Number}
 end
 
 function LinearAlgebra.qr!(A::DMatrix{T}; ib::Int=1, p::Int=1) where {T<:Number}
+    if Autotune.enabled()
+        return Autotune.invoke_best(:qr!, A)
+    end
+    return _qr_tiled!(A; ib=ib, p=p)
+end
+
+function LinearAlgebra.qr(A::DMatrix{T}, ::LinearAlgebra.NoPivot=LinearAlgebra.NoPivot(); kwargs...) where {T<:Number}
+    if Autotune.enabled()
+        return Autotune.invoke_best(:qr, A)
+    end
+    # Dagger's `qr!` (unlike Base's) has no positional pivot argument, so we
+    # can't `invoke` through Base's generic `qr` composition here (it would
+    # re-inject a `NoPivot()` positional arg that only matches Base's slow
+    # generic `qrfactUnblocked!` fallback, not our tiled `_qr_tiled!`).
+    # Copy explicitly and call the tiled implementation directly instead.
+    return _qr_tiled!(copy(A); kwargs...)
+end
+
+# The direct (non-autotuned) tiled implementation; see `_lu_nopivot_tiled!`
+# in lu.jl for the recursion-firewall rationale.
+function _qr_tiled!(A::DMatrix{T}; ib::Int=1, p::Int=1) where {T<:Number}
     p >= 1 || throw(ArgumentError("p must be >= 1, got $p"))
 
     if !_use_irregular_qr_tiling(A)

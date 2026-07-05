@@ -41,6 +41,27 @@ function LinearAlgebra.generic_matmatmul!(
         return gemm_dagger!(C, transA, transB, A, B, alpha, beta)
     end
 end
+
+# `mul!(C, A, B)` (out-of-place from the caller's perspective on `A`/`B`, but
+# `C` is a *caller-provided* output container) and `*` (fully out-of-place,
+# allocates `C`) are the entrypoints Autotune hooks into for `:gemm!`/`:gemm`.
+# `generic_matmatmul!` above remains the direct, unguarded raw implementation
+# (Autotune's `:dagger_gemm!`/`:dagger_gemm` algorithms call it directly, so
+# neither of these guards ever recurses).
+function LinearAlgebra.mul!(C::DMatrix{T}, A::DMatrix{T}, B::DMatrix{T}, alpha::Number, beta::Number) where {T}
+    if Autotune.enabled()
+        return Autotune.invoke_best(:gemm!, C, A, B)
+    end
+    return LinearAlgebra.generic_matmatmul!(C, 'N', 'N', A, B, alpha, beta)
+end
+
+function Base.:(*)(A::DMatrix{T}, B::DMatrix{T}) where {T}
+    if Autotune.enabled()
+        return Autotune.invoke_best(:gemm, A, B)
+    end
+    return invoke(Base.:(*), Tuple{AbstractMatrix,AbstractMatrix}, A, B)
+end
+
 function _repartition_matmatmul(C, A, B, transA::Char, transB::Char)
     partA = A.partitioning.blocksize
     partB = B.partitioning.blocksize
