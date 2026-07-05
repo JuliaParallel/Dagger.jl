@@ -183,7 +183,7 @@ function LinearAlgebra.inv(A::DMatrix{T}) where T
     S = typeof(zero(T)/one(T))      # dimensionful
     S0 = typeof(zero(T)/oneunit(T)) # dimensionless
     dest = DMatrix{S0}(I, n, n, A.partitioning)
-    F = factorize(convert(AbstractMatrix{S}, A))
+    F = LinearAlgebra.factorize(convert(AbstractMatrix{S}, A))
     LinearAlgebra.ldiv!(F, dest)
     unsafe_free!(F.factors)
     unsafe_free!(F.ipiv)
@@ -191,12 +191,106 @@ function LinearAlgebra.inv(A::DMatrix{T}) where T
 end
 
 
-function LinearAlgebra.ldiv!(A::LU{<:Any,<:DMatrix}, B::AbstractVecOrMat)
-    allowscalar(true) do
-        LinearAlgebra._apply_ipiv_rows!(A, B)
+# Base's generic `ldiv(F::Factorization, B)` (used by `\`) stages the
+# right-hand side into a plain `zeros(...)`-allocated `Vector`/`Matrix`
+# (via `_zeros`), discarding any block structure `B` might have had -- even
+# when `B` was already a `DVector`/`DMatrix`. Our `ldiv!` methods below then
+# have no choice but to wrap that plain array with `AutoBlocks()`, which
+# picks a block size based on the number of processors (e.g. 683 for 6
+# threads on a 4096-long vector) that's essentially never going to match
+# `F.factors`' actual block size (e.g. 1024). That mismatch forces
+# `maybe_copy_buffered` to silently re-block (copy!) the *entire* `L`/`U`
+# factor matrices on every triangular solve, which for a large matrix costs
+# far more than the solve itself. Overriding `ldiv` here lets us stage `B`
+# into a `DVector`/`DMatrix` that already matches `F.factors`' blocking, so
+# no re-blocking copy is ever needed.
+function LinearAlgebra.ldiv(F::LU{T,<:DMatrix}, B::AbstractVecOrMat) where T
+    LinearAlgebra.require_one_based_indexing(B)
+    m, n = size(F)
+    if m != size(B, 1)
+        throw(DimensionMismatch("arguments must have the same number of rows"))
     end
+    if m != n
+        # Non-square (under/overdetermined) systems aren't handled by the
+        # fast path below; fall back to the generic implementation.
+        return invoke(LinearAlgebra.ldiv, Tuple{Factorization,AbstractVecOrMat}, F, B)
+    end
+
+    TFB = typeof(oneunit(eltype(B)) / oneunit(T))
+    mb = F.factors.partitioning.blocksize[1]
+
+    BB = if B isa AbstractVector
+        DVector(zeros(TFB, n), Blocks(mb))
+    else
+        DMatrix(zeros(TFB, n, size(B,2)), Blocks(mb, mb))
+    end
+    copyto!(BB, B)
+
+    FF = TFB === T ? F : LinearAlgebra.LU(convert(AbstractArray{TFB}, F.factors), F.ipiv, F.info)
+    LinearAlgebra.ldiv!(FF, BB)
+    return BB
+end
+
+function LinearAlgebra.ldiv!(A::LU{<:Any,<:DMatrix}, B::AbstractVecOrMat)
+    LinearAlgebra._apply_ipiv_rows!(A, B)
     LinearAlgebra.ldiv!(UnitLowerTriangular(A.factors), B)
     LinearAlgebra.ldiv!(UpperTriangular(A.factors), B)
+end
+
+# The generic (Base) `_apply_ipiv_rows!` swaps rows one at a time via scalar
+# `getindex`/`setindex!`, which for a `DVecOrMat` means thousands of
+# individual, separately-scheduled Dagger operations for even
+# moderately-sized systems -- each of these swaps costs far more in
+# scheduling overhead than the actual data movement. Since `A.ipiv` is
+# already block-partitioned the same way as `A.factors`' rows, we can apply
+# the whole permutation with one task per (source block, destination block)
+# pair instead, reusing the same `swaprows_trail!` kernel that `lu!` uses
+# internally to permute trailing columns.
+function LinearAlgebra._apply_ipiv_rows!(A::LU{<:Any,<:DMatrix}, B::AbstractVecOrMat)
+    mb = A.factors.partitioning.blocksize[1]
+
+    dB = B isa DVecOrMat ? B : (B isa AbstractMatrix ? view(B, A.factors.partitioning) : view(B, AutoBlocks()))
+
+    if isa(B, AbstractVector)
+        Dagger.maybe_copy_buffered(dB => Blocks(mb)) do dB
+            _dagger_apply_ipiv_rows!(A.ipiv, dB, mb)
+        end
+    else
+        nb_col = dB.partitioning.blocksize[2]
+        Dagger.maybe_copy_buffered(dB => Blocks(mb, nb_col)) do dB
+            _dagger_apply_ipiv_rows!(A.ipiv, dB, mb)
+        end
+    end
+
+    return B
+end
+function _dagger_apply_ipiv_rows!(ipiv::DVector, B::DVector, mb::Int)
+    ipivc = ipiv.chunks
+    Bc = B.chunks
+    mt = length(Bc)
+    Dagger.spawn_datadeps() do
+        for k in 1:length(ipivc)
+            for i in k:mt
+                Dagger.@spawn swaprows_trail!(InOut(Bc[k]), InOut(Bc[i]), In(ipivc[k]), i, mb)
+            end
+        end
+    end
+    return B
+end
+function _dagger_apply_ipiv_rows!(ipiv::DVector, B::DMatrix, mb::Int)
+    ipivc = ipiv.chunks
+    Bc = B.chunks
+    mt, nt = size(Bc)
+    Dagger.spawn_datadeps() do
+        for k in 1:length(ipivc)
+            for i in k:mt
+                for j in 1:nt
+                    Dagger.@spawn swaprows_trail!(InOut(Bc[k,j]), InOut(Bc[i,j]), In(ipivc[k]), i, mb)
+                end
+            end
+        end
+    end
+    return B
 end
 
 function LinearAlgebra.ldiv!(A::Union{LowerTriangular{<:Any,<:DMatrix},UnitLowerTriangular{<:Any,<:DMatrix},UpperTriangular{<:Any,<:DMatrix},UnitUpperTriangular{<:Any,<:DMatrix}}, B::AbstractVecOrMat)
