@@ -1,12 +1,24 @@
 LinearAlgebra.lu(A::DMatrix{T}, pivot::Union{LinearAlgebra.RowMaximum,LinearAlgebra.NoPivot} = LinearAlgebra.RowMaximum(); check::Bool=true, allowsingular::Bool=false) where {T<:LinearAlgebra.BlasFloat} = LinearAlgebra.lu(A, pivot; check=check, allowsingular=allowsingular)
 
-LinearAlgebra.lu!(A::DMatrix{T}, pivot::Union{LinearAlgebra.RowMaximum,LinearAlgebra.NoPivot} = LinearAlgebra.RowMaximum(); check::Bool=true, allowsingular::Bool=false) where {T<:LinearAlgebra.BlasFloat} = LinearAlgebra.lu(A, pivot; check=check, allowsingular=allowsingular)
+LinearAlgebra.lu!(A::DMatrix{T}, pivot::Union{LinearAlgebra.RowMaximum,LinearAlgebra.NoPivot} = LinearAlgebra.RowMaximum(); check::Bool=true, allowsingular::Bool=false) where {T<:LinearAlgebra.BlasFloat} = LinearAlgebra.lu!(A, pivot; check=check, allowsingular=allowsingular)
 
 function LinearAlgebra.lu(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
+    if Autotune.enabled()
+        return Autotune.invoke_best(:lu, A)
+    end
     A_copy = LinearAlgebra._lucopy(A, LinearAlgebra.lutype(T))
     return LinearAlgebra.lu!(A_copy, LinearAlgebra.NoPivot(); check)
 end
-function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
+function LinearAlgebra.lu!(A::DMatrix{T}, pivot::LinearAlgebra.NoPivot; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
+    if Autotune.enabled()
+        return Autotune.invoke_best(:lu!, A)
+    end
+    return _lu_nopivot_tiled!(A; check, allowsingular)
+end
+# The direct (non-autotuned) tiled implementation. This is what Autotune's
+# `:dagger_lu`/`:dagger_lu!` algorithms invoke via the raw-impl hook, so it
+# must never itself check `Autotune.enabled()` (that would recurse).
+function _lu_nopivot_tiled!(A::DMatrix{T}; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
     check && LinearAlgebra.LAPACK.chkfinite(A)
 
     zone = one(T)
@@ -160,10 +172,20 @@ end
 
 # Implementation of https://inria.hal.science/hal-04984070v1/file/ipdps_paper.pdf
 function LinearAlgebra.lu(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
+    if Autotune.enabled()
+        return Autotune.invoke_best(:lu, A)
+    end
     A_copy = LinearAlgebra._lucopy(A, LinearAlgebra.lutype(T))
     return LinearAlgebra.lu!(A_copy, LinearAlgebra.RowMaximum(); check, allowsingular)
 end
-function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
+function LinearAlgebra.lu!(A::DMatrix{T}, pivot::LinearAlgebra.RowMaximum; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
+    if Autotune.enabled()
+        return Autotune.invoke_best(:lu!, A)
+    end
+    return _lu_rowmax_tiled!(A; check, allowsingular)
+end
+# The direct (non-autotuned) tiled implementation; see `_lu_nopivot_tiled!`.
+function _lu_rowmax_tiled!(A::DMatrix{T}; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
     check && LinearAlgebra.LAPACK.chkfinite(A)
 
     zone = one(T)

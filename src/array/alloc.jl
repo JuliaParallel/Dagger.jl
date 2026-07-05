@@ -207,6 +207,49 @@ end
 Base.view(A::AbstractArray, ::AutoBlocks) =
     view(A, auto_blocks(size(A)))
 
+# If `A` is a `DArray` that merely *views* a single dense parent array (as
+# produced by `view(parent, Blocks(...))`, whose tiles are `SubArray`s of
+# `parent` with no data copied), return that parent; otherwise return
+# `nothing`. Used by Autotune to skip a pointless `collect` copy when a dense
+# algorithm needs the `:Array` form of such a view (see
+# `Autotune.set_view_parent_hook!`).
+#
+# The parent is only returned when every tile lives on this process and maps
+# onto the parent exactly at its subdomain, so the parent is byte-for-byte the
+# logical array (same shape, fully and non-overlappingly tiled). Distributed
+# arrays built by `distribute` (tiles are owned copies, not `SubArray`s) and
+# any partially-remote array return `nothing`.
+_darray_view_parent(::Any) = nothing
+function _darray_view_parent(A::DArray)
+    isempty(A.chunks) && return nothing
+    me = Distributed.myid()
+    parent_arr = nothing
+    for idx in CartesianIndices(A.chunks)
+        c = A.chunks[idx]
+        c isa Chunk || return nothing
+        chunktype(c) <: SubArray || return nothing
+        owner = c.handle isa DRef ? c.handle.owner : me
+        owner == me || return nothing
+        data = try
+            poolget(c.handle)
+        catch
+            return nothing
+        end
+        data isa SubArray || return nothing
+        p = parent(data)
+        p isa DenseArray || return nothing
+        if parent_arr === nothing
+            parent_arr = p
+        elseif p !== parent_arr
+            return nothing
+        end
+        parentindices(data) == A.subdomains[idx].indexes || return nothing
+    end
+    parent_arr === nothing && return nothing
+    size(parent_arr) == size(A) || return nothing
+    return parent_arr
+end
+
 function unsafe_free!(A::DArray)
     spawn_datadeps() do
         for chunk in A.chunks

@@ -1,4 +1,29 @@
 LinearAlgebra.cholcopy(A::DArray{T,2}) where T = copy(A)
+
+# The direct (non-autotuned) implementation, reached via Base's generic
+# `cholesky!(A::AbstractMatrix, ::NoPivot; check)` -> `cholesky!(Hermitian(A), ...)`
+# -> `_chol!` machinery. `invoke`-ing straight into the `AbstractMatrix` method
+# skips our own (more specific) guarded method below, so this is safe to call
+# from Autotune's raw-impl hook (`:dagger_cholesky`) without recursing.
+_dagger_cholesky!(A::DArray{T,2}; check::Bool=true) where T =
+    invoke(LinearAlgebra.cholesky!, Tuple{AbstractMatrix,LinearAlgebra.NoPivot}, A,
+           LinearAlgebra.NoPivot(); check)
+
+function LinearAlgebra.cholesky!(A::DArray{T,2}, ::LinearAlgebra.NoPivot=LinearAlgebra.NoPivot(); check::Bool=true) where T
+    if Autotune.enabled()
+        return Autotune.invoke_best(:cholesky!, A)
+    end
+    return _dagger_cholesky!(A; check)
+end
+
+function LinearAlgebra.cholesky(A::DArray{T,2}, ::LinearAlgebra.NoPivot=LinearAlgebra.NoPivot(); check::Bool=true) where T
+    if Autotune.enabled()
+        return Autotune.invoke_best(:cholesky, A)
+    end
+    return invoke(LinearAlgebra.cholesky, Tuple{AbstractMatrix,LinearAlgebra.NoPivot}, A,
+                  LinearAlgebra.NoPivot(); check)
+end
+
 function potrf_checked!(uplo, A, info_arr)
     result = move(task_processor(), LAPACK.potrf!)(uplo, A)
     # Most LAPACK backends (OpenBLAS, CUBLAS, rocBLAS, ...) return an
