@@ -64,6 +64,9 @@ end
 
 @everywhere using Dagger
 
+# Don't use the autotuner, we want to measure Dagger's algorithms specifically
+@everywhere Dagger.Autotune.disable!()
+
 # --- Load acceleration backends (only if requested) ------------------------
 
 for accel in accelerations
