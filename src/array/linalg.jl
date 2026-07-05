@@ -230,11 +230,29 @@ function LinearAlgebra.ldiv!(Y::DArray, A::DMatrix, B::DArray)
     LinearAlgebra.ldiv!(A, copyto!(Y, B))
 end
 
+function Base.:(\)(A::DMatrix{T}, B::AbstractVecOrMat) where T
+    if Autotune.enabled()
+        return Autotune.invoke_best(:solve, A, B)
+    end
+    return invoke(Base.:(\), Tuple{AbstractMatrix,AbstractVecOrMat}, A, B)
+end
+
 function LinearAlgebra.ldiv!(A::DMatrix, B::DArray)
-    F = LinearAlgebra.lu(A)
+    if Autotune.enabled()
+        return Autotune.invoke_best(:solve!, A, B)
+    end
+    return _dagger_ldiv!(A, B)
+end
+# Direct (non-autotuned) in-place solve: factorizes `A` in place (no copy,
+# unlike `lu(A)`) and solves `B` in place (it becomes the solution `x`).
+# Used by Autotune's `:dagger_solve!` raw-impl hook; must not itself check
+# `Autotune.enabled()` (see `_lu_nopivot_tiled!` in lu.jl).
+function _dagger_ldiv!(A::DMatrix, B::DArray)
+    F = _lu_rowmax_tiled!(A)
     LinearAlgebra.ldiv!(F, B)
     unsafe_free!(F.factors)
     unsafe_free!(F.ipiv)
+    return B
 end
 
 function LinearAlgebra.ldiv!(C::DVecOrMat, A::Union{LowerTriangular{<:Any,<:DMatrix},UnitLowerTriangular{<:Any,<:DMatrix},UpperTriangular{<:Any,<:DMatrix},UnitUpperTriangular{<:Any,<:DMatrix}}, B::DVecOrMat)

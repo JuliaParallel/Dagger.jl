@@ -229,12 +229,35 @@ function __init__()
     end
 
     # Setup Autotune
-    Autotune.set_raw_impl!(:dagger_lu,       A -> LinearAlgebra.lu!(A))   # DArray method
-    Autotune.set_raw_impl!(:dagger_cholesky, A -> LinearAlgebra.cholesky!(A))
-    Autotune.set_raw_impl!(:dagger_qr,       A -> LinearAlgebra.qr!(A))
-    Autotune.set_raw_impl!(:dagger_gemm,     (A, B) -> A * B)
-    Autotune.set_raw_impl!(:dagger_solve,    (A, b) -> A \ b)
+    #
+    # Every hook below must point at Dagger's *direct*, non-autotuned tiled
+    # implementation (never at a guarded public entrypoint like `lu!`,
+    # `cholesky!`, `qr!`, `mul!`, `\`, or `*`), otherwise selecting the
+    # corresponding `dagger_*` algorithm would recurse back into Autotune.
+    # The `:lu`/`:cholesky`/`:qr`/`:gemm`/`:solve` (out-of-place) algorithms
+    # and their `:lu!`/`:cholesky!`/`:qr!`/`:gemm!`/`:solve!` (in-place)
+    # counterparts share these same hooks; the registry copies inputs first
+    # for the out-of-place variants (see `src/autotune/registry.jl`).
+    Autotune.set_raw_impl!(:dagger_lu,       A -> _lu_rowmax_tiled!(A))
+    Autotune.set_raw_impl!(:dagger_cholesky, A -> _dagger_cholesky!(A))
+    Autotune.set_raw_impl!(:dagger_qr,       A -> _qr_tiled!(A))
+    Autotune.set_raw_impl!(:dagger_gemm,     (A, B) -> invoke(Base.:(*), Tuple{AbstractMatrix,AbstractMatrix}, A, B))
+    # NOT `invoke(Base.:(\), Tuple{AbstractMatrix,AbstractVecOrMat}, A, b)`:
+    # Base's generic `\(A::AbstractMatrix, B)` calls `factorize(A)`, whose
+    # generic (non-`StridedMatrix`) fallback probes triangularity/symmetry
+    # via `getstructure` doing full scalar `getindex` scans over `A` - for a
+    # `DMatrix` that's ~n^2 individually-scheduled Dagger fetches, turning a
+    # millisecond-scale solve into a many-second one. `lu!` on a `DMatrix`
+    # never needs that probe, so factor directly and let the existing fast
+    # `ldiv(F::LU{<:Any,<:DMatrix}, b)` path (src/array/linalg.jl) do the rest.
+    Autotune.set_raw_impl!(:dagger_solve,    (A, b) -> _lu_rowmax_tiled!(copy(A)) \ b)
+    Autotune.set_raw_impl!(:dagger_gemm!,    (C, A, B) -> LinearAlgebra.generic_matmatmul!(C, 'N', 'N', A, B, one(eltype(C)), zero(eltype(C))))
+    Autotune.set_raw_impl!(:dagger_solve!,   (A, b) -> _dagger_ldiv!(A, b))
     Autotune.install_darray_locality_hook!()
+    # Let Autotune unwrap `view(parent, Blocks(...))` DArrays to their dense
+    # parent (zero-copy) instead of `collect`ing when a dense algorithm is
+    # chosen for such a view.
+    Autotune.set_view_parent_hook!(_darray_view_parent)
 end
 
 end # module
