@@ -1,6 +1,11 @@
 import TimespanLogging
 import TimespanLogging: Timespan, Event, Events, LocalEventLog, MultiEventLog
 import Colors, GraphViz, DataFrames, Plots, JSON3
+#=
+if Sys.islinux()
+    import LinuxPerf
+end
+=#
 
 @testset "Logging" begin
     @testset "LocalEventLog" begin
@@ -64,6 +69,49 @@ import Colors, GraphViz, DataFrames, Plots, JSON3
 
             Dagger.disable_logging!()
         end
+
+        @testset "enable_logging! (GC/lock/compile-time metrics)" begin
+            lock_contend_supported = VERSION >= v"1.11-"
+            Dagger.enable_logging!(;gc_stats=true, lock_contend=lock_contend_supported, compile_time=true)
+
+            t = Dagger.@spawn 1+2
+            fetch(Dagger.@spawn t*3)
+
+            logs = Dagger.fetch_logs!()
+            @test haskey(logs, 1)
+            consumers = [:gc_stats]
+            if lock_contend_supported
+                push!(consumers, :lock_contend)
+            end
+            push!(consumers, :compile_time)
+            for consumer in consumers
+                @test length(logs[1][consumer]) > 0
+                @test any(x->x !== nothing, logs[1][consumer])
+            end
+
+            Dagger.disable_logging!()
+        end
+
+        #= Perf events aren't reliably enabled on CI
+        if Sys.islinux()
+            @testset "enable_logging! (LinuxPerf)" begin
+                Dagger.enable_logging!(;linuxperf="cpu-clock, page-faults")
+
+                t = Dagger.@spawn 1+2
+                fetch(Dagger.@spawn t*3)
+
+                logs = Dagger.fetch_logs!()
+                @test haskey(logs, 1)
+                @test haskey(logs[1], :linuxperf)
+                @test length(logs[1][:linuxperf]) > 0
+                @test any(x->x isa Dict, logs[1][:linuxperf])
+                @test any(x->x isa Dict && haskey(x, "cpu-clock") && haskey(x, "page-faults"),
+                          logs[1][:linuxperf])
+
+                Dagger.disable_logging!()
+            end
+        end
+        =#
 
         @testset "Manual" begin
             ctx = Context()
@@ -186,5 +234,25 @@ import Colors, GraphViz, DataFrames, Plots, JSON3
         @test Dagger.show_logs(logs, :chrome_trace) !== nothing
 
         Dagger.disable_logging!()
+    end
+
+    @testset "show_logs :summary" begin
+        #extra_kwargs = Sys.islinux() ? (;linuxperf="cpu-clock, page-faults") : NamedTuple()
+        lock_contend_supported = VERSION >= v"1.11-"
+        Dagger.enable_logging!(;all_task_deps=true, gc_stats=true, lock_contend=lock_contend_supported,
+                                compile_time=true)#, extra_kwargs...)
+
+        A = distribute(rand(4, 4), Blocks(8, 8))
+        sum(A)
+        logs = Dagger.fetch_logs!()
+        Dagger.disable_logging!()
+
+        io = IOBuffer()
+        Dagger.show_logs(io, logs, :summary)
+        seek(io, 0)
+        str = String(take!(io))
+        @test !isempty(str)
+        @test occursin("Dagger Execution Summary", str)
+        @test occursin("Run Time", str)
     end
 end

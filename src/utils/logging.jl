@@ -18,6 +18,10 @@ Extra events:
 - `taskuidtotid::Bool`: Enables reporting of task UID-to-TID mappings
 - `tasktochunk::Bool`: Enables reporting of DTask-to-Chunk mappings
 - `profile::Bool`: Enables profiling of task execution; not currently recommended, as it adds significant overhead
+- `linuxperf::String`: Enables Linux perf event collection of the specified events (requires LinuxPerf.jl to be loaded)
+- `gc_stats::Bool`: Enables GC allocation tracking per event
+- `lock_contend::Bool`: Enables lock contention counting per event
+- `compile_time::Bool`: Enables Julia compile-time tracking per event
 """
 function enable_logging!(;metrics::Bool=false,
                           timeline::Bool=false,
@@ -30,7 +34,11 @@ function enable_logging!(;metrics::Bool=false,
                           taskresult::Bool=false,
                           taskuidtotid::Bool=false,
                           tasktochunk::Bool=false,
-                          profile::Bool=false)
+                          profile::Bool=false,
+                          linuxperf::String="",
+                          gc_stats::Bool=false,
+                          lock_contend::Bool=false,
+                          compile_time::Bool=false)
     ml = TimespanLogging.MultiEventLog()
     ml[:core] = TimespanLogging.Events.CoreMetrics()
     ml[:id] = TimespanLogging.Events.IDMetrics()
@@ -81,8 +89,32 @@ function enable_logging!(;metrics::Bool=false,
         ml[:esat] = TimespanLogging.Events.EventSaturation()
         ml[:psat] = Dagger.Events.ProcessorSaturation()
     end
+    if !isempty(linuxperf)
+        lp = _make_linuxperf_metrics(linuxperf)
+        if lp !== nothing
+            ml[:linuxperf] = lp
+        end
+    end
+    if gc_stats
+        ml[:gc_stats] = Dagger.Events.GCStats()
+    end
+    if lock_contend
+        if VERSION < v"1.11-"
+            throw(ArgumentError("Lock contention metrics are only supported on Julia 1.11+"))
+        end
+        ml[:lock_contend] = Dagger.Events.LockContentionMetrics()
+    end
+    if compile_time
+        ml[:compile_time] = Dagger.Events.CompileTimeMetrics()
+    end
     Dagger.Sch.eager_context().log_sink = ml
     return
+end
+
+function _make_linuxperf_metrics(metrics::String)
+    ext = Base.get_extension(Dagger, :LinuxPerfExt)
+    ext === nothing && throw(ErrorException("LinuxPerf.jl is not loaded"))
+    return ext.LinuxPerfMetrics(metrics)
 end
 
 """

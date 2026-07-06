@@ -69,4 +69,7 @@ UnitDomain
 Events.BytesAllocd
 Events.ProcessorSaturation
 Events.WorkerSaturation
+Events.GCStats
+Events.LockContentionMetrics
+Events.CompileTimeMetrics
 ```
