@@ -99,6 +99,9 @@ function enable_logging!(;metrics::Bool=false,
         ml[:gc_stats] = Dagger.Events.GCStats()
     end
     if lock_contend
+        if VERSION < v"1.11-"
+            throw(ArgumentError("Lock contention metrics are only supported on Julia 1.11+"))
+        end
         ml[:lock_contend] = Dagger.Events.LockContentionMetrics()
     end
     if compile_time

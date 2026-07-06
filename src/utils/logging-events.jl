@@ -306,6 +306,8 @@ const _lock_contention_refcount = Threads.Atomic{Int}(0)
 Tracks the number of lock contention events between the start and finish of
 each event. Uses a global atomic refcount to enable/disable
 `Base.Threads.lock_profiling` only while at least one event is in-flight.
+
+Only supported on Julia 1.11+
 """
 mutable struct LockContentionMetrics
     active_starts::Dict{Any, Int64}

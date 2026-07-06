@@ -71,14 +71,20 @@ end
         end
 
         @testset "enable_logging! (GC/lock/compile-time metrics)" begin
-            Dagger.enable_logging!(;gc_stats=true, lock_contend=true, compile_time=true)
+            lock_contend_supported = VERSION >= v"1.11-"
+            Dagger.enable_logging!(;gc_stats=true, lock_contend=lock_contend_supported, compile_time=true)
 
             t = Dagger.@spawn 1+2
             fetch(Dagger.@spawn t*3)
 
             logs = Dagger.fetch_logs!()
             @test haskey(logs, 1)
-            for consumer in (:gc_stats, :lock_contend, :compile_time)
+            consumers = [:gc_stats]
+            if lock_contend_supported
+                push!(consumers, :lock_contend)
+            end
+            push!(consumers, :compile_time)
+            for consumer in consumers
                 @test length(logs[1][consumer]) > 0
                 @test any(x->x !== nothing, logs[1][consumer])
             end
@@ -232,7 +238,8 @@ end
 
     @testset "show_logs :summary" begin
         #extra_kwargs = Sys.islinux() ? (;linuxperf="cpu-clock, page-faults") : NamedTuple()
-        Dagger.enable_logging!(;all_task_deps=true, gc_stats=true, lock_contend=true,
+        lock_contend_supported = VERSION >= v"1.11-"
+        Dagger.enable_logging!(;all_task_deps=true, gc_stats=true, lock_contend=lock_contend_supported,
                                 compile_time=true)#, extra_kwargs...)
 
         A = distribute(rand(4, 4), Blocks(8, 8))
