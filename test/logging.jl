@@ -1,9 +1,11 @@
 import TimespanLogging
 import TimespanLogging: Timespan, Event, Events, LocalEventLog, MultiEventLog
 import Colors, GraphViz, DataFrames, Plots, JSON3
+#=
 if Sys.islinux()
     import LinuxPerf
 end
+=#
 
 @testset "Logging" begin
     @testset "LocalEventLog" begin
@@ -84,6 +86,7 @@ end
             Dagger.disable_logging!()
         end
 
+        #= Perf events aren't reliably enabled on CI
         if Sys.islinux()
             @testset "enable_logging! (LinuxPerf)" begin
                 Dagger.enable_logging!(;linuxperf="cpu-clock, page-faults")
@@ -102,6 +105,7 @@ end
                 Dagger.disable_logging!()
             end
         end
+        =#
 
         @testset "Manual" begin
             ctx = Context()
@@ -227,9 +231,9 @@ end
     end
 
     @testset "show_logs :summary" begin
-        extra_kwargs = Sys.islinux() ? (;linuxperf="cpu-clock, page-faults") : NamedTuple()
+        #extra_kwargs = Sys.islinux() ? (;linuxperf="cpu-clock, page-faults") : NamedTuple()
         Dagger.enable_logging!(;all_task_deps=true, gc_stats=true, lock_contend=true,
-                                compile_time=true, extra_kwargs...)
+                                compile_time=true)#, extra_kwargs...)
 
         A = distribute(rand(4, 4), Blocks(8, 8))
         sum(A)
