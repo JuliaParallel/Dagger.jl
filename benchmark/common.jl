@@ -12,8 +12,10 @@
 const benches = Dict{String,Vector}()
 const suites = Set{String}()
 const accelerations = Set{String}()
-for bench_spec in split(get(ENV, "BENCHMARK", "array:dagger;linalg:dagger;sparse:dagger"), ';')
-    suite, bench_spec_methods = split(bench_spec, ':')
+for bench_spec in split(get(ENV, "BENCHMARK", "array:dagger;linalg:dagger;sparse:dagger;stencil:dagger"), ';')
+    parts = split(bench_spec, ':')
+    suite = parts[1]
+    bench_spec_methods = length(parts) >= 2 ? parts[2] : "dagger"
     if !isfile(joinpath(@__DIR__, "suites", suite * ".jl"))
         error("Unknown benchmark suite: $suite")
     end

@@ -246,19 +246,31 @@ struct AliasedObjectCacheStore
     derived::Dict{AbstractAliasing,AbstractAliasing}
     stored::Dict{MemorySpace,Set{AbstractAliasing}}
     values::Dict{MemorySpace,Dict{AbstractAliasing,Chunk}}
-    originals::Set{AbstractAliasing}
+    # The `(space, key)` pairs identifying the user's original data, as opposed
+    # to Datadeps-allocated copies. A `key` ainfo is recorded here at the space
+    # where it is first registered (its source space, see `set_key_stored!`),
+    # which is exactly where its value is the user's own object. Every *other*
+    # space holding that key is a copy we allocated and may free.
+    originals::Set{Tuple{MemorySpace,AbstractAliasing}}
 end
 AliasedObjectCacheStore() =
     AliasedObjectCacheStore(Vector{AbstractAliasing}(),
                             Dict{AbstractAliasing,AbstractAliasing}(),
                             Dict{MemorySpace,Set{AbstractAliasing}}(),
                             Dict{MemorySpace,Dict{AbstractAliasing,Chunk}}(),
-                            Set{AbstractAliasing}())
+                            Set{Tuple{MemorySpace,AbstractAliasing}}())
+
+"""
+    is_original(cache, space, ainfo) -> Bool
+
+Whether `cache.values[space][ainfo]` holds the user's original data (which must
+never be freed) rather than a Datadeps-allocated copy. True only at the `key`
+ainfo's source space (recorded by `set_key_stored!`).
+"""
+is_original(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::AbstractAliasing) =
+    (space, ainfo) in cache.originals
 
 function is_stored(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::AbstractAliasing)
-    if !(ainfo in cache.originals)
-        push!(cache.originals, ainfo)
-    end
     if !haskey(cache.stored, space)
         return false
     end
@@ -289,6 +301,9 @@ end
 function set_key_stored!(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::AbstractAliasing, value::Chunk)
     push!(cache.keys, ainfo)
     cache.derived[ainfo] = ainfo
+    # A key is first registered at the space where the original object lives, so
+    # `value` here is the user's own data; record it so it's never freed.
+    push!(cache.originals, (space, ainfo))
     push!(get!(Set{AbstractAliasing}, cache.stored, space), ainfo)
     values_dict = get!(Dict{AbstractAliasing,Chunk}, cache.values, space)
     values_dict[ainfo] = value
@@ -716,6 +731,51 @@ function _get_read_deps!(state::DataDepsState, dest_space::MemorySpace, ainfo::A
             push!(syncdeps, ThunkSyncdep(other_task))
         end
     end
+end
+"""
+    gather_free_syncdeps!(state, space, remote_arg, write_num, chunk_to_ainfos, syncdeps)
+
+Collect into `syncdeps` every task that must complete before the backing buffer
+`remote_arg` (a Datadeps-allocated copy in `space`) can be freed.
+
+If `remote_arg` is itself a tracked slot (the common case -- whole-object
+arguments), its ainfos are in `chunk_to_ainfos` and we reuse their precomputed
+overlap sets. Otherwise the buffer only underlies wrapper arguments (e.g. it is
+the parent array shared by several `view`s, whose tracked slots are the views
+rather than this buffer); in that case we compute the buffer's own aliasing and
+sync with every tracked ainfo that overlaps its memory.
+"""
+function gather_free_syncdeps!(state::DataDepsState, space::MemorySpace, remote_arg, write_num::Int, chunk_to_ainfos, syncdeps)
+    ainfos = get(chunk_to_ainfos, remote_arg, nothing)
+    if ainfos !== nothing
+        for ainfo in ainfos
+            get_write_deps!(state, space, ainfo, write_num, syncdeps)
+        end
+        return
+    end
+
+    # Buffer underlies wrapper arguments: find all tracked ainfos overlapping
+    # it. We reuse the lookup's interval-tree overlap search (which prunes most
+    # `will_alias` comparisons via bounding spans) rather than scanning every
+    # tracked ainfo. `intersect` requires its query ainfo to be registered, so
+    # we `push!` the buffer's aliasing in first; this is safe because the free
+    # loop is the final step of `distribute_tasks!`, after which the lookup is
+    # no longer consulted for scheduling.
+    buf_ainfo = AliasingWrapper(aliasing(remote_arg))
+    buf_ainfo.inner isa NoAliasing && return
+    ainfo_idx = push!(state.ainfos_lookup, buf_ainfo)
+    for other_ainfo in intersect(state.ainfos_lookup, buf_ainfo; ainfo_idx)
+        other_ainfo === buf_ainfo && continue
+        owner = get(state.ainfos_owner, other_ainfo, nothing)
+        if owner !== nothing
+            owner_task, owner_write_num = owner
+            owner_write_num != write_num && push!(syncdeps, ThunkSyncdep(owner_task))
+        end
+        for (reader_task, reader_write_num) in get(state.ainfos_readers, other_ainfo, ())
+            reader_write_num != write_num && push!(syncdeps, ThunkSyncdep(reader_task))
+        end
+    end
+    return
 end
 function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::MemorySpace, ainfo::AbstractAliasing, task, write_num)
     state.ainfos_owner[ainfo] = task=>write_num

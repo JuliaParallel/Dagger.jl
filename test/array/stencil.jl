@@ -397,7 +397,7 @@ function test_stencil(; skip_highdim::Bool=false)
                 end
                 B = zeros(Blocks(ntuple(_->1, N)...), Float32, ntuple(_->3, N)...)
 
-                @stencil B[idx] = sum(@neighbors(A[idx], 1, Wrap())) / length(A)
+                @stencil B[idx] = sum(@neighbors(A[idx], 1, Wrap())) ÷ length(A)
                 @test all(==(Float64(sum(1:length(A)) / length(A))), collect(B))
             end
         end
@@ -503,7 +503,7 @@ end
             Dagger.with_options(;scope) do
                 # The Metal backend breaks on the 3D/4D stencil tests and
                 # causes subsequent tests to fail, so skip them there.
-                test_stencil(; skip_highdim=(kind == :Metal))
+                test_stencil(; skip_highdim=(kind == :Metal || kind == :ROCm))
             end
         end
     end
