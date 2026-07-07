@@ -32,7 +32,7 @@ jobs:
           - {version: '1.12', os: ubuntu-latest, arch: x64}
           - {version: '1', os: ubuntu-latest, arch: x64}
           - {version: '1', os: windows-latest, arch: x64}
-          - {version: '1', os: macos-15, arch: x64}
+          - {version: '1', os: macos-26, arch: arm64}
           - {version: 'nightly', os: ubuntu-latest, arch: x64}
     steps:
       - uses: actions/checkout@v4
@@ -66,7 +66,7 @@ jobs:
           - {version: '1.12', os: ubuntu-latest, arch: x64}
           - {version: '1', os: ubuntu-latest, arch: x64}
           - {version: '1', os: windows-latest, arch: x64}
-          - {version: '1', os: macos-15, arch: x64}
+          - {version: '1', os: macos-26, arch: arm64}
           - {version: 'nightly', os: ubuntu-latest, arch: x64}
     steps:
       - uses: actions/checkout@v4
