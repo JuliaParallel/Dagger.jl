@@ -82,6 +82,13 @@ end
     end
 end
 
+@testset "DArray" begin
+    A = rand(Blocks(2), 4)
+    @test_throws ConcurrencyViolationError Dagger.spawn_datadeps() do
+        Dagger.@spawn sum(A)
+    end
+end
+
 function test_move_rewrap_aliasing(obj, dest_space)
     src_space = Dagger.memory_space(obj)
     from_proc = first(Dagger.processors(src_space))

@@ -321,6 +321,11 @@ function Base.isequal(x::ArrayOp, y::ArrayOp)
     x === y
 end
 
+aliasing(x::DArray) =
+    throw(ConcurrencyViolationError("DArray aliasing may be mixed and unstable"))
+memory_space(x::DArray) =
+    throw(ConcurrencyViolationError("DArray memory spaces may be mixed and unstable"))
+
 Base.similar(D::DArray{T,N} where T, ::Type{S}, dims::Dims{N}) where {S,N} =
     DArray{S,N}(undef, D.partitioning, dims)
 Base.similar(D::DArray{T,N1} where T, ::Type{S}, dims::Dims{N2}) where {S,N1,N2} =
