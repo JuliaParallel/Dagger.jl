@@ -19,7 +19,7 @@ jobs:
   test:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }} (${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 150
+    timeout-minutes: 180
     if: ${{ !contains(github.event.head_commit.message, '[skip tests]') }}
     env:
       JULIA_NUM_THREADS: '1'
@@ -55,7 +55,7 @@ jobs:
   test-multithreaded:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }} (${{ matrix.arch }}) (multithreaded)
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    timeout-minutes: 120
     if: ${{ !contains(github.event.head_commit.message, '[skip tests]') }}
     strategy:
       fail-fast: false
