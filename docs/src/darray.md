@@ -705,8 +705,10 @@ From `LinearAlgebra`:
 - `mul!` (In-place Matrix-Matrix and Matrix-Vector multiply)
 - `cholesky`/`cholesky!` (In-place/Out-of-place Cholesky factorization)
 - `lu`/`lu!` (In-place/Out-of-place LU factorization (`NoPivot` and `RowMaximum`))
-- `\`/`ldiv!` (In-place/Out-of-place Linear solving with LU and Cholesky factorizations)
-- `inv` (Out-of-place matrix inversion)
+- `qr`/`qr!` (In-place/Out-of-place QR factorization)
+- `\`/`ldiv!` (In-place/Out-of-place Linear solving with LU, Cholesky, QR, and SVD factorizations)
+- `inv` (Out-of-place matrix inversion, including via SVD)
+- `svd`/`svd!`/`svdvals!` (In-place/Out-of-place Singular Value Decomposition)
 
 From `AbstractFFTs`:
 - `fft`/`fft!`
