@@ -1,3 +1,5 @@
+export OSProc, Context, addprocs!, rmprocs!
+
 """
     Context(xs::Vector{OSProc}) -> Context
     Context(xs::Vector{Int}) -> Context
@@ -13,17 +15,19 @@ Special fields include:
 - `profile::Bool`: Whether or not to perform profiling with Profile stdlib.
 """
 mutable struct Context
-    procs::Vector{Processor}
+    # Always OSProc: Context tracks Distributed workers, not leaf processors.
+    # Leaf processors (ThreadProc, GPU, …) are discovered via get_processors.
+    procs::Vector{OSProc}
     proc_lock::ReentrantLock
     proc_notify::Threads.Condition
     log_sink::Any
     profile::Bool
 end
 
-function Context(procs::Vector{P}=Processor[OSProc(w) for w in procs()];
+function Context(procs::Vector{OSProc}=OSProc[OSProc(w) for w in procs()];
         proc_lock=ReentrantLock(), proc_notify=Threads.Condition(),
         log_sink=TimespanLogging.NoOpLog(), log_file=nothing, profile=false,
-        options=nothing) where {P<:Processor}
+        options=nothing)
     if log_file !== nothing
         @warn "`log_file` is no longer supported\nPlease instead load `GraphViz.jl` and use `render_logs(logs, :graphviz)`."
     end
@@ -33,7 +37,20 @@ function Context(procs::Vector{P}=Processor[OSProc(w) for w in procs()];
     return Context(procs, proc_lock, proc_notify,
                    log_sink, profile)
 end
-Context(xs::Vector{Int}; kwargs...) = Context(map(OSProc, xs); kwargs...)
+# Accept Vector{<:Processor} for API compatibility; only OSProc is valid.
+# Dispatch on Vector{OSProc} above; this catches other Processor subtypes and
+# abstract Vector{Processor}.
+function Context(procs::Vector{P}; kwargs...) where {P<:Processor}
+    if P === OSProc
+        # Ambiguous with the Vector{OSProc} method when P is inferred as OSProc;
+        # forward explicitly.
+        return Context(procs::Vector{OSProc}; kwargs...)
+    end
+    return Context(OSProc[p isa OSProc ? p :
+                          throw(ArgumentError("Context procs must be OSProc, got $(typeof(p))"))
+                          for p in procs]; kwargs...)
+end
+Context(xs::Vector{Int}; kwargs...) = Context(OSProc[OSProc(w) for w in xs]; kwargs...)
 Context(ctx::Context, xs::Vector=copy(procs(ctx))) = # make a copy
     Context(xs; log_sink=ctx.log_sink, profile=ctx.profile)
 

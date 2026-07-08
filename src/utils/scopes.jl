@@ -26,7 +26,9 @@ compatible with the given scope.
 """
 compatible_processors(scope::AbstractScope=get_compute_scope(), ctx::Context=Sch.eager_context()) =
     compatible_processors(scope, procs(ctx))
-function compatible_processors(scope::AbstractScope, procs::Vector{<:Processor})
+# Prefer the OSProc specialization (Context.procs / procs_to_use); the
+# Vector{<:Processor} method remains for callers that pass a mixed list.
+function compatible_processors(scope::AbstractScope, procs::Vector{OSProc})
     compat_procs = Set{Processor}()
     for gproc in procs
         # Fast-path in case entire process is incompatible
@@ -40,6 +42,10 @@ function compatible_processors(scope::AbstractScope, procs::Vector{<:Processor})
         end
     end
     return compat_procs
+end
+function compatible_processors(scope::AbstractScope, procs::Vector{<:Processor})
+    # Fall back: coerce to OSProc list (throws if non-OSProc present)
+    return compatible_processors(scope, OSProc[p::OSProc for p in procs])
 end
 
 """

@@ -1169,7 +1169,7 @@ function (ets::FireTaskSpec)()
     tasks = ets.tasks
     first_task = first(tasks)
     ctx_vars = first_task.ctx_vars
-    ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
+    ctx = Context(OSProc[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
     uid = first_task.sch_uid
 
     proc = ets.init_proc
@@ -1633,7 +1633,7 @@ function do_tasks(to_proc, return_queue, tasks)
     @dagdebug nothing :processor "Enqueuing task batch" batch_size=length(tasks)
 
     ctx_vars = first(tasks).ctx_vars
-    ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
+    ctx = Context(OSProc[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
     uid = first(tasks).sch_uid
     start_event = nothing
     state = proc_state!(uid, to_proc) do
@@ -1723,7 +1723,7 @@ Executes a single task specified by `task` on `to_proc`.
     thunk_id = task.thunk_id
 
     ctx_vars = task.ctx_vars
-    ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
+    ctx = Context(OSProc[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
 
     from_proc = OSProc()
     data = task.data
