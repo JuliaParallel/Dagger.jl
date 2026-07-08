@@ -163,10 +163,19 @@ function test_gemv!(T, szA, szB, partA, partB)
     @test collect(DC) ≈ C
 
     if szA[1] == szB[1]
-        # transA
+        # transA (square / matching inner dim for A')
         DC = DA' * DB
         C = A' * B
         @test collect(DC) ≈ C
+    end
+
+    # Tall/wide A': b matches A's row count, result matches A's column count
+    if szA[1] != szA[2]
+        B2 = rand(T, szA[1])
+        DB2 = distribute(B2, Blocks(partA.blocksize[1]))
+        DC2 = DA' * DB2
+        C2 = A' * B2
+        @test collect(DC2) ≈ C2
     end
 
     ## In-place gemm
