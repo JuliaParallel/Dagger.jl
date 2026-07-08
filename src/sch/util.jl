@@ -77,20 +77,21 @@ unwrap_nested_exception(err) = err
 
 "Gets a `NamedTuple` of options propagated from `options`."
 function get_propagated_options(options::Options)
-    # FIXME: Just use an Options as output?
-    nt = NamedTuple()
-    if options.propagates === nothing
-        return nt
+    # Build a single NamedTuple from pairs instead of repeatedly merging
+    # (each merge allocated a new NT). Empty propagates stays allocation-free.
+    props = options.propagates
+    if props === nothing || isempty(props)
+        return NamedTuple()
     end
-    for key in options.propagates
-        value = if hasfield(Options, key)
-            getfield(options, key)
-        else
-            throw(ArgumentError("Can't propagate unknown key: $key"))
-        end
-        nt = merge(nt, (key=>value,))
+    # Collect as a Vector of pairs, then splat once into (; ...).
+    # Length is typically small (a handful of scoped options).
+    pairs = Vector{Pair{Symbol,Any}}(undef, length(props))
+    for i in eachindex(props)
+        key = props[i]
+        hasfield(Options, key) || throw(ArgumentError("Can't propagate unknown key: $key"))
+        pairs[i] = key => getfield(options, key)
     end
-    return nt
+    return (; pairs...)
 end
 
 has_result(state, thunk) = thunk.cache_ref !== nothing
@@ -406,11 +407,11 @@ function signature(f, args)
     n_pos = count(Dagger.ispositional, args)
     any_kw = any(!Dagger.ispositional, args)
     kw_extra = any_kw ? 2 : 0
-    sig = Vector{Any}(undef, 1+n_pos+kw_extra)
-    sig[1+kw_extra] = chunktype(f)
+    sig = Vector{DataType}(undef, 1+n_pos+kw_extra)
+    sig[1+kw_extra] = chunktype(f)::DataType
     #=FIXME:REALLOC_N=#
     sig_kwarg_names = Symbol[]
-    sig_kwarg_types = []
+    sig_kwarg_types = DataType[]
     for idx in 1:length(args)
         arg = args[idx]
         value = Dagger.value(arg)
@@ -421,7 +422,7 @@ function signature(f, args)
         if istask(value)
             throw(ConcurrencyViolationError("Must call `collect_task_inputs!(state, task)` before calling `signature`"))
         end
-        T = chunktype(value)
+        T = chunktype(value)::DataType
         if Dagger.ispositional(arg)
             sig[1+idx+kw_extra] = T
         else

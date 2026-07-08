@@ -1,9 +1,9 @@
 struct Signature
-    sig::Vector{Any}#DataType}
+    sig::Vector{DataType}
     hash::UInt
-    sig_nokw::SubArray{Any,1,Vector{Any},Tuple{UnitRange{Int}},true}
+    sig_nokw::SubArray{DataType,1,Vector{DataType},Tuple{UnitRange{Int}},true}
     hash_nokw::UInt
-    function Signature(sig::Vector{Any})#DataType})
+    function Signature(sig::Vector{DataType})
         # Hash full signature
         h = hash(Signature)
         for T in sig
@@ -27,5 +27,7 @@ struct Signature
         return new(sig, h, sig_nokw, h_nokw)
     end
 end
+# Accept Vector{Any} for callers that still build untyped vectors; convert once.
+Signature(sig::Vector{Any}) = Signature(DataType[T::DataType for T in sig])
 Base.hash(sig::Signature, h::UInt) = hash(sig.hash, h)
 Base.isequal(sig1::Signature, sig2::Signature) = sig1.hash == sig2.hash
