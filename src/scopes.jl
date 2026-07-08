@@ -13,38 +13,52 @@ proc_in_scope(proc::Processor, scope::AbstractScope) =
 "Taints a scope for later evaluation."
 struct TaintScope <: AbstractScope
     scope::AbstractScope
-    taints::Set{AbstractScopeTaint}
+    # Tuple (not Set): taints are never mutated after construction, and
+    # iterating a Set allocates. A small tuple keeps proc_in_scope alloc-free.
+    taints::Tuple{Vararg{AbstractScopeTaint}}
 end
 Base.:(==)(ts1::TaintScope, ts2::TaintScope) =
     ts1.scope == ts2.scope &&
     length(ts1.taints) == length(ts2.taints) &&
-    all(collect(ts1.taints) .== collect(ts2.taints))
+    all(t -> t in ts2.taints, ts1.taints)
+
+struct DefaultEnabledTaint <: AbstractScopeTaint end
+
+# Singleton: DefaultScope() is called on every schedule_one! that lacks an
+# explicit compute_scope. The taint tuple is never mutated after construction.
+const DEFAULT_SCOPE = TaintScope(AnyScope(), (DefaultEnabledTaint(),))
+
+"Default scope that contains the set of `default_enabled` processors."
+DefaultScope() = DEFAULT_SCOPE
 
 # Fast path: evaluate taints + recurse into the inner scope without allocating
 # an ExactScope and walking the full constrain lattice (the AbstractScope
 # fallback). This is the hot path in compatible_processors / can_use_proc.
 function proc_in_scope(proc::Processor, scope::TaintScope)
+    # Identity check for the DefaultScope singleton: avoids iterating the
+    # abstract Vararg taint tuple (which boxes) and directly asks
+    # default_enabled — the only taint DefaultScope carries.
+    scope === DEFAULT_SCOPE && return default_enabled(proc)
     for taint in scope.taints
         taint_match(taint, proc) || return false
     end
     return proc_in_scope(proc, scope.scope)
 end
 
-struct DefaultEnabledTaint <: AbstractScopeTaint end
-
-# Singleton: DefaultScope() is called on every schedule_one! that lacks an
-# explicit compute_scope, and previously allocated a fresh Set + TaintScope
-# each time. The taint set is never mutated after construction.
-const DEFAULT_SCOPE = TaintScope(AnyScope(),
-                                 Set{AbstractScopeTaint}([DefaultEnabledTaint()]))
-
-"Default scope that contains the set of `default_enabled` processors."
-DefaultScope() = DEFAULT_SCOPE
-
 "Union of two or more scopes."
 struct UnionScope <: AbstractScope
     scopes::Tuple
     function UnionScope(scopes::Tuple)
+        # Fast path: single non-UnionScope element — no Set / collect needed.
+        # Common for ExactScope wrapping and datadeps single-proc scopes.
+        if length(scopes) == 1
+            only_scope = scopes[1]
+            if only_scope isa UnionScope
+                return only_scope
+            elseif only_scope isa AbstractScope
+                return new(scopes)
+            end
+        end
         scope_set = Set{AbstractScope}()
         for scope in scopes
             if scope isa UnionScope
@@ -69,16 +83,9 @@ proc_in_scope(proc::Processor, scope::UnionScope) =
     any(subscope->proc_in_scope(proc, subscope), scope.scopes)
 
 function Base.:(==)(us1::UnionScope, us2::UnionScope)
-    if length(us1.scopes) != length(us2.scopes)
-        return false
-    end
-    scopes = Set{AbstractScope}()
-    for scope in us2.scopes
-        if !(scope in us2.scopes)
-            return false
-        end
-    end
-    return true
+    length(us1.scopes) == length(us2.scopes) || return false
+    # Order-independent equality (construction may reorder via Set).
+    return all(s -> s in us2.scopes, us1.scopes)
 end
 
 "Scoped to the same physical node."
@@ -108,8 +115,7 @@ struct ProcessorTypeTaint{T} <: AbstractScopeTaint end
 
 "Scoped to any processor with a given supertype."
 ProcessorTypeScope(T, inner_scope=AnyScope()) =
-    TaintScope(inner_scope,
-               Set{AbstractScopeTaint}([ProcessorTypeTaint{T}()]))
+    TaintScope(inner_scope, (ProcessorTypeTaint{T}(),))
 
 "Scoped to a specific processor."
 struct ExactScope <: AbstractScope
@@ -203,12 +209,12 @@ function constrain(x::TaintScope, y::TaintScope)
     if scope isa InvalidScope
         return scope
     end
-    taints = Set{AbstractScopeTaint}()
-    for tx in x.taints
-        push!(taints, tx)
-    end
+    # Dedup into a small tuple (taint counts are typically 1–2).
+    taints = x.taints
     for ty in y.taints
-        push!(taints, ty)
+        if !(ty in taints)
+            taints = (taints..., ty)
+        end
     end
     return TaintScope(scope, taints)
 end

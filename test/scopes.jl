@@ -169,8 +169,11 @@
 
         @test Dagger.scope(worker=wid1) ==
               Dagger.scope(workers=[wid1])
-        @test Dagger.scope(workers=[wid1,wid2]) == UnionScope([ProcessScope(wid1),
-                                                               ProcessScope(wid2)])
+        # workers= without threads= constrains each ProcessScope with
+        # ProcessorTypeScope(ThreadProc) (all_threads default).
+        @test Dagger.scope(workers=[wid1,wid2]) ==
+              UnionScope([ProcessorTypeScope(Dagger.ThreadProc, ProcessScope(wid1)),
+                          ProcessorTypeScope(Dagger.ThreadProc, ProcessScope(wid2))])
         @test_throws ArgumentError Dagger.scope(workers=[])
 
         @test Dagger.scope(thread=1) ==
