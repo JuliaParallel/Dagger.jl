@@ -20,11 +20,26 @@ Base.:(==)(ts1::TaintScope, ts2::TaintScope) =
     length(ts1.taints) == length(ts2.taints) &&
     all(collect(ts1.taints) .== collect(ts2.taints))
 
+# Fast path: evaluate taints + recurse into the inner scope without allocating
+# an ExactScope and walking the full constrain lattice (the AbstractScope
+# fallback). This is the hot path in compatible_processors / can_use_proc.
+function proc_in_scope(proc::Processor, scope::TaintScope)
+    for taint in scope.taints
+        taint_match(taint, proc) || return false
+    end
+    return proc_in_scope(proc, scope.scope)
+end
+
 struct DefaultEnabledTaint <: AbstractScopeTaint end
 
+# Singleton: DefaultScope() is called on every schedule_one! that lacks an
+# explicit compute_scope, and previously allocated a fresh Set + TaintScope
+# each time. The taint set is never mutated after construction.
+const DEFAULT_SCOPE = TaintScope(AnyScope(),
+                                 Set{AbstractScopeTaint}([DefaultEnabledTaint()]))
+
 "Default scope that contains the set of `default_enabled` processors."
-DefaultScope() = TaintScope(AnyScope(),
-                            Set{AbstractScopeTaint}([DefaultEnabledTaint()]))
+DefaultScope() = DEFAULT_SCOPE
 
 "Union of two or more scopes."
 struct UnionScope <: AbstractScope
