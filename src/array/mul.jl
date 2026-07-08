@@ -487,11 +487,22 @@ function gemv_dagger!(
     alpha = T(_alpha)
     beta = T(_beta)
 
-    if Ant != Bmt
-        throw(DimensionMismatch(lazy"A has number of blocks ($Amt,$Ant) but B has number of blocks ($Bmt)"))
-    end
-    if Amt != Cmt
-        throw(DimensionMismatch(lazy"A has number of blocks ($Amt,$Ant) but C has number of blocks ($Cmt)"))
+    # For op(A)*x: when A is not transposed, x matches A's column-blocks and
+    # C matches A's row-blocks; when A is [conj-]transposed the roles swap.
+    if transA == 'N'
+        if Ant != Bmt
+            throw(DimensionMismatch(lazy"A has number of blocks ($Amt,$Ant) but B has number of blocks ($Bmt)"))
+        end
+        if Amt != Cmt
+            throw(DimensionMismatch(lazy"A has number of blocks ($Amt,$Ant) but C has number of blocks ($Cmt)"))
+        end
+    else
+        if Amt != Bmt
+            throw(DimensionMismatch(lazy"A' has number of blocks ($Ant,$Amt) but B has number of blocks ($Bmt)"))
+        end
+        if Ant != Cmt
+            throw(DimensionMismatch(lazy"A' has number of blocks ($Ant,$Amt) but C has number of blocks ($Cmt)"))
+        end
     end
 
     Dagger.spawn_datadeps() do
@@ -510,7 +521,7 @@ function gemv_dagger!(
                     )
                 end
             else
-                # A: [Conj]Trans
+                # A: [Conj]Trans — C's blocks index A's column-blocks
                 for k in range(1, Amt)
                     mzone = k == 1 ? beta : T(1.0)
                     Dagger.@spawn BLAS.gemv!(
