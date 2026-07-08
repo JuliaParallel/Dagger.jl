@@ -28,7 +28,29 @@ compatible_processors(scope::AbstractScope=get_compute_scope(), ctx::Context=Sch
     compatible_processors(scope, procs(ctx))
 # Prefer the OSProc specialization (Context.procs / procs_to_use); the
 # Vector{<:Processor} method remains for callers that pass a mixed list.
+#
+# Cache keyed by (objectid(scope), procs identity). Scopes and the worker
+# list change rarely relative to task rate; rebuilding the Set{Processor}
+# on every schedule_one! was a major allocation source.
+const COMPAT_PROCS_CACHE = LockedObject(Dict{Tuple{UInt,UInt},Set{Processor}}())
+const COMPAT_PROCS_CACHE_GEN = Threads.Atomic{UInt}(UInt(0))
+
+"Invalidate the compatible_processors cache (call after addprocs!/rmprocs!)."
+function invalidate_compatible_processors_cache!()
+    Threads.atomic_add!(COMPAT_PROCS_CACHE_GEN, UInt(1))
+    lock(COMPAT_PROCS_CACHE) do cache
+        empty!(cache)
+    end
+    return
+end
+
 function compatible_processors(scope::AbstractScope, procs::Vector{OSProc})
+    gen = COMPAT_PROCS_CACHE_GEN[]
+    key = (objectid(scope), hash(procs, gen))
+    cached = lock(COMPAT_PROCS_CACHE) do cache
+        get(cache, key, nothing)
+    end
+    cached !== nothing && return cached
     compat_procs = Set{Processor}()
     for gproc in procs
         # Fast-path in case entire process is incompatible
@@ -40,6 +62,13 @@ function compatible_processors(scope::AbstractScope, procs::Vector{OSProc})
                 end
             end
         end
+    end
+    lock(COMPAT_PROCS_CACHE) do cache
+        # Bound cache size to avoid unbounded growth with unique scopes
+        if length(cache) >= 256
+            empty!(cache)
+        end
+        cache[key] = compat_procs
     end
     return compat_procs
 end

@@ -825,8 +825,12 @@ concurrently across threads.
     # - scope calculation only needs task.inputs (now Chunks/values), not state.cache
     # - estimate_task_costs! / has_capacity acquire their own fine-grained locks
 
-    # Calculate signature
-    sig = signature(state, task)
+    # Calculate signature (cache on the thunk after inputs are resolved)
+    sig = if task.sig !== nothing
+        task.sig
+    else
+        task.sig = signature(state, task)
+    end
 
     # Merge scheduler options and populate defaults
     options = task.options

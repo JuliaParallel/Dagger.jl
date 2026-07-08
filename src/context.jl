@@ -94,6 +94,7 @@ function addprocs!(ctx::Context, xs::AbstractVector{<:OSProc})
     lock(ctx) do
         append!(ctx.procs, xs)
     end
+    invalidate_compatible_processors_cache!()
     lock(ctx.proc_notify) do
         notify(ctx.proc_notify)
     end
@@ -114,6 +115,7 @@ function rmprocs!(ctx::Context, xs::AbstractVector{<:OSProc})
     lock(ctx) do
         filter!(p -> (p ∉ xs), ctx.procs)
     end
+    invalidate_compatible_processors_cache!()
     lock(ctx.proc_notify) do
         notify(ctx.proc_notify)
     end

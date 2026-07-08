@@ -81,6 +81,10 @@ mutable struct Thunk
     # chunktype(task.f) (which unwraps WeakChunk and dynamically dispatches)
     # on every can_use_proc / fire_tasks! call.
     Tf::Type
+    # Cached call signature, filled in by schedule_one! after inputs are
+    # resolved to Chunks/values. Reused across reschedule attempts and by
+    # estimate_task_costs! / populate_defaults!.
+    sig::Union{Signature,Nothing}
     eager_accessible::Bool
     sch_accessible::Bool
     @atomic finished::Bool         # true once a result (success or error) has been stored
@@ -96,7 +100,7 @@ mutable struct Thunk
         Tf = isempty(fargs) ? Any : chunktype(value(first(fargs)))
         return new(fargs, spec.id,
                    spec.cache_ref, spec.affinity,
-                   spec.options, Tf,
+                   spec.options, Tf, nothing,
                    true, true, false,
                    false, false, false, nothing,
                    nothing,
