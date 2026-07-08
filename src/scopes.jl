@@ -126,6 +126,14 @@ struct InvalidScope <: AbstractScope
 end
 proc_in_scope(::Processor, ::InvalidScope) = false
 
+# Concrete union of every scope type Dagger itself constructs. Used to type
+# Options / TaskSpec fields so Julia can specialize on the common ExactScope /
+# ProcessScope / TaintScope (DefaultScope) cases instead of seeing AbstractScope.
+# Custom AbstractScope subtypes are not supported in Options; wrap them in a
+# UnionScope or ExactScope if needed.
+const KnownScope = Union{AnyScope,TaintScope,UnionScope,NodeScope,
+                         ProcessScope,ExactScope,InvalidScope}
+
 # Show methods
 
 function Base.show(io::IO, scope::UnionScope)

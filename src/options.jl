@@ -35,10 +35,13 @@ Base.@kwdef mutable struct Options
     propagates::Union{Vector{Symbol},Nothing} = nothing
 
     processor::Union{Processor,Nothing} = nothing
-    scope::Union{AbstractScope,Nothing} = nothing
-    compute_scope::Union{AbstractScope,Nothing} = scope
-    result_scope::Union{AbstractScope,Nothing} = nothing
-    exec_scope::Union{AbstractScope,Nothing} = nothing
+    # KnownScope (not AbstractScope) so field loads specialize on ExactScope /
+    # ProcessScope / TaintScope / etc. `nothing` remains the "unset" sentinel
+    # for options_merge! / populate_defaults! — do not default to DefaultScope().
+    scope::Union{KnownScope,Nothing} = nothing
+    compute_scope::Union{KnownScope,Nothing} = scope
+    result_scope::Union{KnownScope,Nothing} = nothing
+    exec_scope::Union{KnownScope,Nothing} = nothing
     single::Union{Int,Nothing} = nothing
     proclist = nothing
 

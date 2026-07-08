@@ -709,7 +709,7 @@ struct ScheduleTaskLocation
 end
 struct ScheduleTaskSpec
     task::Thunk
-    scope::Dagger.AbstractScope
+    scope::Dagger.KnownScope
     est_time_util::UInt64
     est_alloc_util::UInt64
     est_occupancy::UInt32
@@ -1070,7 +1070,7 @@ struct TaskSpec
     est_time_util::UInt64
     est_alloc_util::UInt64
     est_occupancy::UInt32
-    scope::Dagger.AbstractScope
+    scope::Dagger.KnownScope
     Tf::Type
     data::Vector{Argument}
     options::Options
