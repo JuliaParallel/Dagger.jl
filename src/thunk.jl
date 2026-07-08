@@ -77,6 +77,10 @@ mutable struct Thunk
     cache_ref::Any
     affinity::Union{Pair{OSProc,Int}, Nothing}
     options::Union{Options, Nothing} # stores task options
+    # Cached typeof(f) / chunktype(f) at construction. Avoids re-deriving
+    # chunktype(task.f) (which unwraps WeakChunk and dynamically dispatches)
+    # on every can_use_proc / fire_tasks! call.
+    Tf::Type
     eager_accessible::Bool
     sch_accessible::Bool
     @atomic finished::Bool         # true once a result (success or error) has been stored
@@ -88,9 +92,11 @@ mutable struct Thunk
     @atomic pending_deps::Int      # count of unresolved upstream dependencies (dataflow counter)
     @atomic dependents_head::Union{DepNode,Nothing,Sealed}  # Treiber list of downstream dependents
     function Thunk(spec::ThunkSpec)
-        return new(spec.fargs, spec.id,
+        fargs = spec.fargs
+        Tf = isempty(fargs) ? Any : chunktype(value(first(fargs)))
+        return new(fargs, spec.id,
                    spec.cache_ref, spec.affinity,
-                   spec.options,
+                   spec.options, Tf,
                    true, true, false,
                    false, false, false, nothing,
                    nothing,

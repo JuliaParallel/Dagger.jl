@@ -18,6 +18,7 @@ import ..Dagger: Context, Processor, SchedulerOptions, Options, Thunk, WeakThunk
 import ..Dagger: Sealed, SEALED, FutureNode, futures_push!, futures_seal!
 import ..Dagger: DepNode, deps_push!, deps_seal!
 import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak, unwrap_weak_checked, wrap_weak, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, default_enabled, processor, get_processors, get_parent, execute!, rmprocs!, task_processor, constrain, cputhreadtime, maybe_take_or_alloc!
+import ..Dagger: ThreadProc
 import ..Dagger: @dagdebug, @safe_lock_spin1, @maybelog, @take_or_alloc!
 import DataStructures: PriorityQueue
 
@@ -1128,7 +1129,9 @@ Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
             # TODO: Only for non-delayed: @assert Dagger.isweak(Dagger.value(arg)) "Non-weak argument: $(arg)"
             arg.value = unwrap_weak_checked(Dagger.value(arg))
         end
-        Tf = chunktype(first(args))
+        # Prefer the Tf cached at Thunk construction; fall back if the function
+        # argument was replaced (e.g. restore path) with a different type.
+        Tf = thunk.Tf
 
         @assert (options.single === nothing) || (gproc.pid == options.single)
         # TODO: Set `sch_handle.tid.ref` to the right `DRef`
@@ -1719,6 +1722,12 @@ end
 
 Executes a single task specified by `task` on `to_proc`.
 """
+# Move an argument onto `to_proc`. ThreadProc/OSProc use direct `move` (no
+# @invokelatest) so the common CPU path can specialize; other processors
+# (GPU extensions, etc.) keep @invokelatest so late-loaded methods are found.
+move_arg!(to_proc::Union{ThreadProc,OSProc}, value) = move(to_proc, value)
+move_arg!(to_proc::Processor, value) = @invokelatest move(to_proc, value)
+
 @reuse_scope function do_task(to_proc, task::TaskSpec)
     thunk_id = task.thunk_id
 
@@ -1857,7 +1866,7 @@ Executes a single task specified by `task` on `to_proc`.
                 end
             else
             =#
-            new_value = @invokelatest move(to_proc, value)
+            new_value = move_arg!(to_proc, value)
             #end
             if new_value !== value
                 @dagdebug thunk_id :move "Moved argument @ $position to $to_proc: $(typeof(value)) -> $(typeof(new_value))"

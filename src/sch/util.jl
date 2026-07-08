@@ -492,7 +492,7 @@ function can_use_proc(state, task, gproc, proc, opts, scope)
     end
 
     # Check against function and arguments
-    Tf = chunktype(task.f)
+    Tf = task.Tf
     if !Dagger.iscompatible_func(proc, opts, Tf)
         @dagdebug task :scope "Rejected $proc: Not compatible with function type ($Tf)"
         return false, scope
