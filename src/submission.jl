@@ -4,11 +4,15 @@ mutable struct PayloadOne
     fargs::Vector{Argument}
     options::Options
     reschedule::Bool
+    # Spawn-time Signature from typed args (before Argument erasure), or
+    # `nothing` when it could not be computed (e.g. unresolved ThunkID deps).
+    spawn_sig::Union{Signature,Nothing}
 
     PayloadOne() = new()
     PayloadOne(uid::UInt, future::ThunkFuture,
-               fargs::Vector{Argument}, options::Options, reschedule::Bool) =
-        new(uid, future, fargs, options, reschedule)
+               fargs::Vector{Argument}, options::Options, reschedule::Bool,
+               spawn_sig::Union{Signature,Nothing}=nothing) =
+        new(uid, future, fargs, options, reschedule, spawn_sig)
 end
 function unset!(p::PayloadOne, _)
     p.uid = 0
@@ -16,8 +20,9 @@ function unset!(p::PayloadOne, _)
     p.fargs = EMPTY_PAYLOAD_ONE.fargs
     p.options = EMPTY_PAYLOAD_ONE.options
     p.reschedule = false
+    p.spawn_sig = nothing
 end
-const EMPTY_PAYLOAD_ONE = PayloadOne(UInt(0), ThunkFuture(), Argument[], Options(), false)
+const EMPTY_PAYLOAD_ONE = PayloadOne(UInt(0), ThunkFuture(), Argument[], Options(), false, nothing)
 mutable struct PayloadMulti
     ntasks::Int
     uid::Vector{UInt}
@@ -25,6 +30,7 @@ mutable struct PayloadMulti
     fargs::Vector{Vector{Argument}}
     options::Vector{Options}
     reschedule::Bool
+    spawn_sigs::Vector{Union{Signature,Nothing}}
 end
 const AnyPayload = Union{PayloadOne, PayloadMulti}
 function payload_extract(f, payload::PayloadMulti, i::Integer)
@@ -34,6 +40,7 @@ function payload_extract(f, payload::PayloadMulti, i::Integer)
         p1.fargs = payload.fargs[i]
         p1.options = payload.options[i]
         p1.reschedule = true
+        p1.spawn_sig = payload.spawn_sigs[i]
         return f(p1)
     end
 end
@@ -73,6 +80,7 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
 
         uid, future = payload.uid, payload.future
         fargs, options, reschedule = payload.fargs, payload.options, payload.reschedule
+        spawn_sig = payload.spawn_sig
 
         id = Int(uid)
 
@@ -158,6 +166,7 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
                 thunk_spec.fargs = fargs
                 thunk_spec.id = id
                 thunk_spec.options = options
+                thunk_spec.spawn_sig = spawn_sig
                 return Thunk(thunk_spec)
             end
 
@@ -340,6 +349,91 @@ function eager_metadata(fargs)
     return cached_return_type(f, arg_types)
 end
 
+# Spawn-time chunktype for signature construction. `DTask` advertises its
+# inferred return type (usable before the task finishes); unresolved scheduler
+# task refs (`Thunk`, `ThunkID`, …) cannot contribute a type yet.
+# `Union{}` (bottom) is a legal inferred return for never-returning / erroring
+# tasks but is not a `DataType`, so we refuse to seed and let schedule rebuild.
+function _spawn_chunktype(@nospecialize(v))
+    if v isa DTask
+        T = chunktype(v)
+        return T isa DataType ? T : nothing
+    elseif istask(v)
+        return nothing
+    else
+        T = chunktype(v)
+        return T isa DataType ? T : nothing
+    end
+end
+
+# Cache spawn-time Signatures by call-signature Type. Repeated spawns of the
+# same (f, arg-types) shape (e.g. Datadeps tile kernels, spawn chains) reuse
+# one Signature instead of reallocating Vector{DataType} + hashing each time.
+const SPAWN_SIG_CACHE = LockedObject(Dict{DataType,Signature}())
+
+"""
+    signature_from_fargs(fargs) -> Union{Signature,Nothing}
+
+Build a `Signature` from spawn-time arguments (`Tuple` of `TypedArgument` or
+`AbstractVector` of `Argument`) before they are erased to `Vector{Argument}`.
+
+Returns `nothing` if any argument is an unresolved task ref other than
+`DTask` (whose `return_type` is used). Leaf tasks and graphs of `DTask`s can
+therefore seed `Thunk.sig` at submit time and skip rebuilding the signature
+during `schedule_one!`. Results are memoized in `SPAWN_SIG_CACHE`.
+"""
+function signature_from_fargs(fargs)
+    n = length(fargs)
+    n == 0 && return nothing
+
+    # Collect chunktypes; refuse if any slot is unresolvable
+    types = Vector{DataType}(undef, n)
+    any_kw = false
+    for i in 1:n
+        T = _spawn_chunktype(value(fargs[i]))
+        T === nothing && return nothing
+        types[i] = T
+        if i >= 2 && !ispositional(fargs[i])
+            any_kw = true
+        end
+    end
+
+    # Cache key: for the common no-kw path this is just Tuple{Tf,Targs...}
+    # (same layout as Signature.sig). For kwargs, include kwcall + NamedTuple.
+    key::DataType = if !any_kw
+        Tuple{types...}
+    else
+        sig_kwarg_names = Symbol[]
+        sig_kwarg_types = DataType[]
+        pos_types = DataType[types[1]]
+        for i in 2:n
+            if ispositional(fargs[i])
+                push!(pos_types, types[i])
+            else
+                push!(sig_kwarg_names, pos_kw(fargs[i]))
+                push!(sig_kwarg_types, types[i])
+            end
+        end
+        NT = NamedTuple{(sig_kwarg_names...,), Tuple{sig_kwarg_types...}}
+        @static if isdefined(Core, :kwcall)
+            Tuple{typeof(Core.kwcall), NT, pos_types...}
+        else
+            f_instance = types[1].instance
+            Tuple{typeof(Core.kwfunc(f_instance)), NT, pos_types...}
+        end
+    end
+
+    return lock(SPAWN_SIG_CACHE) do cache
+        get!(cache, key) do
+            # Build Signature.sig Vector only on cache miss
+            if !any_kw
+                return Signature(copy(types))
+            end
+            return Signature(DataType[key.parameters...])
+        end
+    end
+end
+
 function eager_spawn(spec::DTaskSpec)
     # Generate new unlaunched DTask
     uid = eager_next_id()
@@ -357,6 +451,10 @@ function eager_launch!(pair::DTaskPair)
     # Assign a name, if specified
     eager_assign_name!(spec, task)
 
+    # Build spawn-time Signature from typed args *before* Argument erasure so
+    # Thunk.sig can be seeded and schedule_one! can skip rebuilding it.
+    spawn_sig = signature_from_fargs(spec.fargs)
+
     # Lookup DTask -> ThunkID
     fargs = lock(Sch.EAGER_ID_MAP) do id_map
         if is_typed(spec)
@@ -370,7 +468,7 @@ function eager_launch!(pair::DTaskPair)
     # Submit the task
     #=FIXME:REALLOC=#
     thunk_id = eager_submit!(PayloadOne(task.uid, task.future,
-                                        fargs, spec.options, true))
+                                        fargs, spec.options, true, spawn_sig))
     task.thunk_ref = thunk_id.ref
 end
 # FIXME: Don't convert Tuple to Vector{Argument}
@@ -388,15 +486,19 @@ function eager_launch!(pairs::Vector{DTaskPair})
 
     # Get all functions, args/kwargs, and options
     #=FIXME:REALLOC_N=#
-    all_fargs = lock(Sch.EAGER_ID_MAP) do id_map
-        # Lookup DTask -> ThunkID
-        return map(pairs) do pair
-            spec = pair.spec
+    all_fargs = Vector{Vector{Argument}}(undef, ntasks)
+    all_spawn_sigs = Vector{Union{Signature,Nothing}}(undef, ntasks)
+    lock(Sch.EAGER_ID_MAP) do id_map
+        for i in 1:ntasks
+            spec = pairs[i].spec
+            # Signature from typed args before Argument erasure
+            all_spawn_sigs[i] = signature_from_fargs(spec.fargs)
+            # Lookup DTask -> ThunkID
             if is_typed(spec)
-                return Argument[map(Argument, eager_process_args_submission_to_local(id_map, spec))...]
+                all_fargs[i] = Argument[map(Argument, eager_process_args_submission_to_local(id_map, spec))...]
             else
                 eager_process_args_submission_to_local!(id_map, spec)
-                return spec.fargs
+                all_fargs[i] = spec.fargs
             end
         end
     end
@@ -405,7 +507,7 @@ function eager_launch!(pairs::Vector{DTaskPair})
     # Submit the tasks
     #=FIXME:REALLOC=#
     thunk_ids = eager_submit!(PayloadMulti(ntasks, uids, futures,
-                                           all_fargs, all_options, true))
+                                           all_fargs, all_options, true, all_spawn_sigs))
     for i in 1:ntasks
         task = pairs[i].task
         task.thunk_ref = thunk_ids[i].ref

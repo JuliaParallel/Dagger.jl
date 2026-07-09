@@ -11,6 +11,8 @@ Base.@kwdef mutable struct ThunkSpec
     cache_ref::Any = nothing
     affinity::Union{Pair{OSProc,Int}, Nothing} = nothing
     options::Union{Options, Nothing} = nothing
+    # Optional spawn-time Signature (from typed args before Argument erasure).
+    spawn_sig::Union{Signature,Nothing} = nothing
 end
 function unset!(spec::ThunkSpec, _)
     spec.fargs = EMPTY_ARGS
@@ -18,6 +20,7 @@ function unset!(spec::ThunkSpec, _)
     spec.cache_ref = nothing
     spec.affinity = nothing
     spec.options = nothing
+    spec.spawn_sig = nothing
 end
 
 # Sentinel value marking a sealed (closed) Treiber list. A single shared
@@ -81,9 +84,10 @@ mutable struct Thunk
     # chunktype(task.f) (which unwraps WeakChunk and dynamically dispatches)
     # on every can_use_proc / fire_tasks! call.
     Tf::Type
-    # Cached call signature, filled in by schedule_one! after inputs are
-    # resolved to Chunks/values. Reused across reschedule attempts and by
-    # estimate_task_costs! / populate_defaults!.
+    # Cached call signature. Preferentially seeded at construction from
+    # spawn-time typed args (`ThunkSpec.spawn_sig`); otherwise filled in by
+    # schedule_one! after inputs are resolved to Chunks/values. Reused across
+    # reschedule attempts and by estimate_task_costs! / populate_defaults!.
     sig::Union{Signature,Nothing}
     eager_accessible::Bool
     sch_accessible::Bool
@@ -100,7 +104,7 @@ mutable struct Thunk
         Tf = isempty(fargs) ? Any : chunktype(value(first(fargs)))
         return new(fargs, spec.id,
                    spec.cache_ref, spec.affinity,
-                   spec.options, Tf, nothing,
+                   spec.options, Tf, spec.spawn_sig,
                    true, true, false,
                    false, false, false, nothing,
                    nothing,

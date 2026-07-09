@@ -14,20 +14,22 @@ Commits on `jps/type-stable` (cherry-pickable individually).
 | `signature: Use Vector{DataType}; build propagated options in one shot` | P1.6 / P1.4 | Concrete signature vector; one-shot NamedTuple for propagates |
 | `sch: Cache Tf on Thunk; specialize CPU move without invokelatest` | P0.1 partial / P1.5 | Avoid re-deriving `chunktype(f)` each schedule; CPU `move` without `@invokelatest` (GPU keeps it) |
 | `sch/scopes: Cache Signature on Thunk; cache compatible_processors` | P1.6 / P0.3 | Reuse Signature after first schedule; cache Set{Processor} rebuilds |
+| `submission: Seed Thunk.sig from typed spawn args; cache by call Type` | P0.1 partial / P1.6 | Build `Signature` from typed fargs / `DTask` return types *before* `Argument` erasure; carry via `Payload.spawn_sig` → `ThunkSpec` → `Thunk.sig`; `SPAWN_SIG_CACHE` reuses one Signature per `(f, arg-types)` shape |
 
 ## Intentionally deferred (with rationale)
 
 | Finding | Why deferred |
 |---------|--------------|
-| **P0.1 full typed args through Thunk** | Large API surface (`PayloadOne`, `Thunk.inputs`, serialization). Partial win via `Tf` + cached `Signature`. Full typed `Vector{Argument}` erasure fix needs a dedicated design pass. |
+| **P0.1 full typed `FA<:Tuple` through Thunk** | Values still travel as `Vector{Argument}` (needed for mutation + Distributed). Spawn-time `Signature` seeding recovers schedule-path types for leaf/`DTask` graphs. Full dual-rep or parametric `Thunk{FA}` needs a dedicated design pass. |
 | **P1.5 full execute! specialization** | User `f` must stay dynamic. CPU move specialized; GPU correctly keeps `@invokelatest`. |
 | **P2 result `Some{Any}` / TLS / ReuseCleanup** | Lower ROI; TLS circular-include issue; result boxing needed for error union. |
 | **Parametric ExactScope{P}** | Touches all GPU extensions; risk of method ambiguities. KnownScope union covers Options storage. |
 
 ## Validation
 
-- `scopes`, `scheduler`, `processors`, `options`, `thunk` (alone), `datadeps`: pass
-- Thunk `@spawn` `EAGER_CONTEXT[] === nothing` fails only when run after datadeps in same process (pre-existing test-order coupling, not a regression from these commits)
+- `thunk`, `scheduler`, `scopes`, `options`: pass after spawn-sig seeding
+- Datadeps: core aliasing/ChunkView/DArray paths pass; remaining Raw Data / DummyErrorScheduler failures are pre-existing (`TimespanLogging.PROFILE_TASKS` missing; hierarchical wraps `DummySchedulerError` in `CompositeException`) — unrelated to spawn-sig
+- Thunk `@spawn` `EAGER_CONTEXT[] === nothing` fails only when run after datadeps in same process (pre-existing test-order coupling)
 - GPU: not run in this environment; `move_arg!` keeps `@invokelatest` for non-CPU processors so CUDA/ROC/Metal/OpenCL/Intel extensions remain correct
 
 ## Suggested cherry-pick / bench order
@@ -39,5 +41,6 @@ Commits on `jps/type-stable` (cherry-pickable individually).
 5. Signature DataType + propagates
 6. Tf + move_arg!
 7. Signature/compatible_processors caches
+8. Spawn-time Signature seeding + `SPAWN_SIG_CACHE`
 
-Benchmark against Datadeps linalg (cholesky/lu/matmul) and stencil suites.
+Benchmark against Datadeps linalg (cholesky/lu/matmul) and stencil suites; high-granularity (many small tiles) vs hierarchical-only for task-overhead signal.
