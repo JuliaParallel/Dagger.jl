@@ -1814,7 +1814,13 @@ move_arg!(to_proc::Processor, value) = @invokelatest move(to_proc, value)
 
     @dagdebug thunk_id :execute "Moving data"
 
-    # Initiate data transfers for function and arguments
+    # Initiate data transfers for function and arguments.
+    # CPU processors (ThreadProc/OSProc): move synchronously — spawning one
+    # Task per argument dominated overhead for small/high-granularity work.
+    # Other processors (GPU extensions, etc.): keep async @spawn so device
+    # transfers can overlap.
+    # transfer_* atomics are retained for metadata (historically filled by the
+    # Chunk-cache path); currently unused by the simplified move path.
     transfer_time = Threads.Atomic{UInt64}(0)
     transfer_size = Threads.Atomic{UInt64}(0)
     _data = if something(options.meta, false)
@@ -1822,66 +1828,37 @@ move_arg!(to_proc::Processor, value) = @invokelatest move(to_proc, value)
     else
         data
     end
-    fetch_tasks = map(_data) do arg
-        #=FIXME:REALLOC_TASKS=#
-        Threads.@spawn begin
+    if to_proc isa Union{ThreadProc,OSProc}
+        for arg in _data
             value = Dagger.value(arg)
             position = arg.pos
             @maybelog ctx timespan_start(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=value))
-            #= FIXME: This isn't valid if x is written to
-            x = if x isa Chunk
-                value = lock(TASK_SYNC) do
-                    if haskey(CHUNK_CACHE, x)
-                        Some{Any}(get!(CHUNK_CACHE[x], to_proc) do
-                            # Convert from cached value
-                            # TODO: Choose "closest" processor of same type first
-                            some_proc = first(keys(CHUNK_CACHE[x]))
-                            some_x = CHUNK_CACHE[x][some_proc]
-                            @dagdebug thunk_id :move "Cache hit for argument $id at $some_proc: $some_x"
-                            @invokelatest move(some_proc, to_proc, some_x)
-                        end)
-                    else
-                        nothing
-                    end
-                end
-
-                if value !== nothing
-                    something(value)
-                else
-                    # Fetch it
-                    time_start = time_ns()
-                    from_proc = processor(x)
-                    _x = @invokelatest move(from_proc, to_proc, x)
-                    time_finish = time_ns()
-                    if x.handle.size !== nothing
-                        Threads.atomic_add!(transfer_time, time_finish - time_start)
-                        Threads.atomic_add!(transfer_size, x.handle.size)
-                    end
-
-                    @dagdebug thunk_id :move "Cache miss for argument $id at $from_proc"
-
-                    # Update cache
-                    lock(TASK_SYNC) do
-                        CHUNK_CACHE[x] = Dict{Processor,Any}()
-                        CHUNK_CACHE[x][to_proc] = _x
-                    end
-
-                    _x
-                end
-            else
-            =#
             new_value = move_arg!(to_proc, value)
-            #end
             if new_value !== value
                 @dagdebug thunk_id :move "Moved argument @ $position to $to_proc: $(typeof(value)) -> $(typeof(new_value))"
             end
-            @maybelog ctx timespan_finish(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=new_value); tasks=[Base.current_task()])
+            @maybelog ctx timespan_finish(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=new_value))
             arg.value = new_value
-            return
         end
-    end
-    for task in fetch_tasks
-        fetch_report(task)
+    else
+        fetch_tasks = map(_data) do arg
+            #=FIXME:REALLOC_TASKS=#
+            Threads.@spawn begin
+                value = Dagger.value(arg)
+                position = arg.pos
+                @maybelog ctx timespan_start(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=value))
+                new_value = move_arg!(to_proc, value)
+                if new_value !== value
+                    @dagdebug thunk_id :move "Moved argument @ $position to $to_proc: $(typeof(value)) -> $(typeof(new_value))"
+                end
+                @maybelog ctx timespan_finish(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=new_value); tasks=[Base.current_task()])
+                arg.value = new_value
+                return
+            end
+        end
+        for task in fetch_tasks
+            fetch_report(task)
+        end
     end
 
     f = Dagger.value(first(data))

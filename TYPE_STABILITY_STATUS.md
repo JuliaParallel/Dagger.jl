@@ -15,6 +15,7 @@ Commits on `jps/type-stable` (cherry-pickable individually).
 | `sch: Cache Tf on Thunk; specialize CPU move without invokelatest` | P0.1 partial / P1.5 | Avoid re-deriving `chunktype(f)` each schedule; CPU `move` without `@invokelatest` (GPU keeps it) |
 | `sch/scopes: Cache Signature on Thunk; cache compatible_processors` | P1.6 / P0.3 | Reuse Signature after first schedule; cache Set{Processor} rebuilds |
 | `submission: Seed Thunk.sig from typed spawn args; cache by call Type` | P0.1 partial / P1.6 | Build `Signature` from typed fargs / `DTask` return types *before* `Argument` erasure; carry via `Payload.spawn_sig` → `ThunkSpec` → `Thunk.sig`; `SPAWN_SIG_CACHE` reuses one Signature per `(f, arg-types)` shape |
+| `sch: Sync CPU moves in do_task` | P1.5 | `ThreadProc`/`OSProc` move args inline instead of per-arg `Threads.@spawn`; GPU/other procs keep async overlap |
 
 ## Intentionally deferred (with rationale)
 
@@ -42,5 +43,23 @@ Commits on `jps/type-stable` (cherry-pickable individually).
 6. Tf + move_arg!
 7. Signature/compatible_processors caches
 8. Spawn-time Signature seeding + `SPAWN_SIG_CACHE`
+9. Sync CPU moves in `do_task` (CPU only; GPU stays async)
 
 Benchmark against Datadeps linalg (cholesky/lu/matmul) and stencil suites; high-granularity (many small tiles) vs hierarchical-only for task-overhead signal.
+
+## Latest A/B (spawn-sig + sync CPU moves vs prior HEAD)
+
+`benchmark_results/opt2_ab/` — with = both commits; without = stashed back to prior HEAD.
+
+| benchmark | without | with | ratio | allocs |
+|-----------|---------|------|-------|--------|
+| spawn_chain_64 | 12.67ms | 13.12ms | 1.036 | ~flat |
+| spawn_fanout_128 | 13.11ms | 12.24ms | 0.934 | ~flat |
+| gemm_128_8 | 4776ms | 4626ms | 0.968 | 4.6M→3.9M |
+| gemm_256_16 | 8012ms | 5797ms | 0.724 | 6.1M→3.7M |
+| cholesky_128_8 | 1264ms | 996ms | 0.788 | ~flat |
+| cholesky_256_16 | 1822ms | 1081ms | 0.594 | ~flat |
+
+Geometric mean ratio **0.826** (<1 = with faster). Datadeps wins dominate; spawn micro ~flat (cache offsets spawn-sig submit cost).
+
+Vs hierarchical-only is noisy under low free RAM (~1–3 GiB): spawn micros favor type-stable (~3–7% / fewer allocs), but GEMM/Cholesky medians swing with run order. Prefer the within-tree A/B above for attributing these edits.
