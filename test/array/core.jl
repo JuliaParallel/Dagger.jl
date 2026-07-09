@@ -128,3 +128,38 @@ using MemPool
     @test (aff[1]).pid in procs()
     @test aff[2] == sizeof(Int)*10
 end
+
+@testset "mapchunks" begin
+    A = DArray(reshape(1:16, 4, 4), Blocks(2, 2))
+    B = mapchunks(x -> Float32.(x), A)
+    @test B isa DArray{Float32,2}
+    @test collect(B) == Float32.(collect(A))
+
+    D = mapchunks(x -> (x isa AbstractArray ? fill(true, size(x)) : fill(false, size(x))), A)
+    @test all(collect(D))
+
+    task_chunks = map(c -> Dagger.spawn(identity, c), chunks(A))
+    A_tasks = DArray(eltype(A), domain(A), domainchunks(A), task_chunks, A.partitioning, A.concat)
+    C = mapchunks(x -> x .+ 1, A_tasks)
+    @test collect(C) == collect(A) .+ 1
+
+    # heterogeneous chunk types 
+    domain_h = ArrayDomain(1:4)
+    subdomains_h = partition(Blocks(2), domain_h)
+    chunks_h = reshape(Any[Dagger.tochunk([1, 2]),Dagger.tochunk([3.0, 4.0])], size(subdomains_h))
+    A_hetero = DArray(Any, domain_h, subdomains_h, chunks_h, Blocks(2), cat)
+    B_hetero = mapchunks(identity, A_hetero)
+    @test eltype(B_hetero) == Float64
+    @test collect(B_hetero) == Float64.([1, 2, 3, 4])
+
+    A0 = DArray{Int}(undef, Blocks(1), (0,))
+    B0 = mapchunks(x -> x .+ 1, A0)
+    @test size(B0) == (0,)
+    @test eltype(B0) == Int
+
+    # scalar return
+    S = mapchunks(sum, A)
+    @test eltype(S) == Int
+    expected = [sum(A[1:2, 1:2])  sum(A[1:2, 3:4]); sum(A[3:4, 1:2])  sum(A[3:4, 3:4])]
+    @test collect(S) == expected
+end
