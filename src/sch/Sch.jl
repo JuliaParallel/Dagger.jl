@@ -1317,9 +1317,12 @@ function proc_state!(f, uid::UInt64, proc::Processor)
         return get(states.dict, proc, nothing)
     end
     if state === nothing
-        state = f()::ProcessorState
-        MemPool.lock(states.lock) do
-            states.dict[proc] = state
+        state = MemPool.lock(states.lock) do
+            existing = get(states.dict, proc, nothing)
+            existing !== nothing && return existing
+            new_state = f()::ProcessorState
+            states.dict[proc] = new_state
+            return new_state
         end
     end
     return state
