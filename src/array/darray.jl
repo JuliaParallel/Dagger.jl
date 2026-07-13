@@ -426,31 +426,21 @@ end
 """
     Base.fetch(c::DArray)
 
-If a `DArray` tree has a `Thunk` in it, make the whole thing a big thunk.
+If a `DArray` tree has a `DTask` in it, `fetch` each one (as a `Chunk`,
+without moving its data) and return a new `DArray` with all partitions
+resolved to `Chunk`s.
 """
 function Base.fetch(c::DArray{T}) where T
-    if any(istask, chunks(c))
-        if uniform_execution()
-            # SPMD (MPI): every rank holds every task locally, and chunk
-            # records are rank-local views (placeholders for non-owned data).
-            # Resolve them locally instead of assembling on one rank and
-            # broadcasting (which would clobber the local records with the
-            # assembling rank's placeholders).
-            thunks = chunks(c)
-            new_chunks = Any[istask(t) ? fetch(t; raw=true) : t for t in thunks]
-            return DArray(T, domain(c), domainchunks(c),
-                          reshape(new_chunks, size(thunks)),
-                          c.partitioning, c.concat)
-        end
-        thunks = chunks(c)
-        sz = size(thunks)
+    thunks = chunks(c)
+    if any(istask, thunks)
         dmn = domain(c)
         dmnchunks = domainchunks(c)
-        return fetch(Dagger.spawn(Options(meta=true), thunks...) do results...
-            t = eltype(fetch(results[1]))
-            DArray(t, dmn, dmnchunks, reshape(Any[results...], sz),
-                   c.partitioning, c.concat)
-        end)
+        new_chunks = similar(thunks, Any)
+        for idx in eachindex(thunks)
+            part = thunks[idx]
+            new_chunks[idx] = istask(part) ? fetch(part; raw=true) : part
+        end
+        return DArray(T, dmn, dmnchunks, new_chunks, c.partitioning, c.concat)
     else
         return c
     end
