@@ -189,7 +189,15 @@ function schedule_dependents!(state, thunk, failed, ready_out::Vector{Thunk})
             # concurrent decrement, which would be a protocol error).
             n_now = @atomic dep.pending_deps
             @assert n_now == 0 "Thunk[$(dep.id)] pending_deps drifted from 0 to $n_now between ready decision and schedule_one!"
-            (@atomic dep.finished) || push!(ready_out, dep)
+            if !(@atomic dep.finished)
+                # Count `dep` as running *before* the caller decrements
+                # `running_count` for the thunk that just freed it (see
+                # `finish_task!`), so that no lock-free reader of
+                # `running_count` can ever observe a transient 0 while `dep`
+                # is still waiting to be fired.
+                Threads.atomic_add!(state.running_count, 1)
+                push!(ready_out, dep)
+            end
         end
         node = @atomic node.next
     end
@@ -264,7 +272,11 @@ function reschedule_syncdeps!(state, thunk, ready_out::Vector{Thunk}, seen=nothi
                 set_failed!(state, errored_input, cur)
             elseif n == 0 && !(@atomic cur.errored) && !(@atomic cur.finished)
                 # All upstream edges satisfied and no error: collect for the
-                # caller to schedule outside state.lock.
+                # caller to schedule outside state.lock. Count it as running
+                # immediately (see the matching comment in
+                # `schedule_dependents!`) so `running_count` never has a
+                # window where it looks like 0 while `cur` awaits firing.
+                Threads.atomic_add!(state.running_count, 1)
                 push!(ready_out, cur)
             end
         end

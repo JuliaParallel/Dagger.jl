@@ -54,7 +54,7 @@ Fields:
 - `initial_ready::Vector{Thunk}` - Bootstrap buffer: thunks that became ready during `start_state` wiring (before workers are online). Drained once in `scheduler_init` via `schedule_one!`; empty for the lifetime of the scheduler loop.
 - `ctx::Context` - The scheduler context; stored here so `schedule_one!` and friends can access it without threading `ctx` through every call site.
 - `sch_options::SchedulerOptions` - Scheduler-wide options; stored for the same reason as `ctx`.
-- `running_count::Threads.Atomic{Int}` - Number of currently-running `Thunk`s (replaces `running::Set{Thunk}`; per-thunk state lives on `thunk.running` and `thunk.running_on`)
+- `running_count::Threads.Atomic{Int}` - Number of `Thunk`s that are running *or* have become ready but are not yet fired (replaces `running::Set{Thunk}`; per-thunk state lives on `thunk.running` and `thunk.running_on`). A thunk is credited here the moment it's placed into a `ready_out` buffer (`schedule_dependents!`/`reschedule_syncdeps!`/`start_state`), not when `fire_tasks!` actually dispatches it — this way, whenever a finishing thunk's decrement frees up a new ready dependent, the corresponding increment always happens first, so the counter never has a transient window where it looks like 0 while replacement work is still pending. Every code path that removes a thunk from a `ready_out` buffer without ultimately running it through `finish_task!` (the scheduling-inconsistency and no-processors-available/invalid-scope branches in `schedule_one!`) must release its credit with a matching decrement.
 - `thunk_dict::LockedObject{Dict{Int, WeakThunk}}` - Maps from thunk IDs to a `Thunk`; has its own lock so it can be accessed independently of `state.lock`
 - `node_order::Any` - Function that returns the order of a thunk
 - `equiv_chunks::LockedObject{WeakKeyDict{DRef,Chunk}}` - Cache mapping from `DRef` to a `Chunk` which contains it; has its own lock
@@ -191,7 +191,11 @@ function start_state(deps::Dict, node_order, chan, ctx::Context, sch_options::Sc
         # Release the guard; if no upstreams remain, k is immediately ready.
         n = @atomic k.pending_deps -= 1   # n = new value after decrement
         if n == 0
-            # Workers aren't online yet; buffer in initial_ready for scheduler_init
+            # Workers aren't online yet; buffer in initial_ready for scheduler_init.
+            # Count it as running now (this runs single-threaded, before
+            # scheduler_run's loop starts reading `running_count`, so there's
+            # no race here) so `fire_tasks!` doesn't need to increment it later.
+            Threads.atomic_add!(state.running_count, 1)
             push!(state.initial_ready, k)
         end
         @atomic k.valid = true
@@ -550,7 +554,11 @@ function handle_result!(ctx, state::ComputeState, pid, proc, thunk_id, res, meta
     # in-process (local fast-path) and drives `running_count` to 0, no further
     # channel traffic would arrive, so nudge the master to re-check its loop
     # condition and exit. (In eager mode the long-lived eager root thunk keeps
-    # running_count >= 1, so this never fires spuriously.)
+    # running_count >= 1, so this never fires spuriously.) `schedule_ready!`
+    # above has already run synchronously (inline for the common case; see
+    # `INLINE_SCHEDULE_FANOUT_THRESHOLD`), and any dependent it discovered was
+    # already credited to `running_count` before this thunk's own decrement
+    # in `finish_task!`, so a read of 0 here is never a false negative.
     if state.running_count[] == 0
         try
             put!(state.chan, RescheduleSignal())
@@ -806,6 +814,11 @@ concurrently across threads.
                 ex = SchedulingException(String(take!(iob)))
                 store_result!(state, task, ex; error=true)
             end
+            # `task` was already credited to `running_count` when it was placed
+            # into a `ready_out` buffer, but it neither reaches `fire_tasks!`
+            # nor `finish_task!` on this path — release that credit now so the
+            # counter doesn't leak (which would otherwise hang the scheduler).
+            Threads.atomic_sub!(state.running_count, 1)
             @maybelog ctx timespan_finish(ctx, :schedule, (;uid=state.uid, thunk_id=task.id), (;thunk_id=task.id))
             p1_resolved = true
             return
@@ -867,6 +880,10 @@ concurrently across threads.
         # scope is invalid — fail the task under state.lock (set_failed! requires it)
         lock(state.lock) do
             set_failed!(state, task; ex=scope_ex)
+            # Release the `running_count` credit `task` received when it
+            # entered `ready_out` (see comment at the other `set_failed!`
+            # call sites in this function for why this is necessary).
+            Threads.atomic_sub!(state.running_count, 1)
             @maybelog ctx timespan_finish(ctx, :schedule, (;uid=state.uid, thunk_id=task.id), (;thunk_id=task.id))
         end
         return
@@ -936,6 +953,10 @@ concurrently across threads.
             ex = SchedulingException("No processors available, try widening scope")
             set_failed!(state, task; ex)
             @dagdebug task :schedule "No processors available, skipping"
+            # `task` was already credited to `running_count` when it entered
+            # `ready_out`, but `set_failed!` here never routes it through
+            # `finish_task!` — release that credit now to avoid leaking it.
+            Threads.atomic_sub!(state.running_count, 1)
         end
         @maybelog ctx timespan_finish(ctx, :schedule, (;uid=state.uid, thunk_id=task.id), (;thunk_id=task.id))
     end
@@ -999,7 +1020,6 @@ function finish_task!(ctx, state, node, thunk_failed, ready::Vector{Thunk})
     @dagdebug node :finish "Finishing with $(thunk_failed ? "error" : "result")"
     @atomic node.running = false
     node.running_on = nothing
-    Threads.atomic_sub!(state.running_count, 1)
     if thunk_failed
         # The result (error) was already stored by the scheduler loop via
         # store_result! before this function was called.  We cannot delegate to
@@ -1020,6 +1040,14 @@ function finish_task!(ctx, state, node, thunk_failed, ready::Vector{Thunk})
         node.sch_accessible = false
         delete_unused_task!(state, node)
     end
+    # Decrement `running_count` for `node` *last*, only after
+    # `schedule_dependents!` has already credited any newly-freed dependents
+    # (see the comments there). Since increments for freed dependents always
+    # happen first (while `node` itself is still counted), this final
+    # decrement is the only operation that can bring the counter to its true
+    # new value, and it does so in one atomic step — no lock-free reader can
+    # ever observe an intermediate (spuriously low) count.
+    Threads.atomic_sub!(state.running_count, 1)
     #evict_all_chunks!(ctx, to_evict)
 end
 
@@ -1088,7 +1116,12 @@ Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
         thunk = task_spec.task
         @atomic thunk.running = true
         thunk.running_on = gproc
-        Threads.atomic_add!(state.running_count, 1)
+        # N.B. `running_count` was already incremented for `thunk` when it was
+        # placed into a `ready_out` buffer (see `schedule_dependents!` /
+        # `reschedule_syncdeps!` / `start_state`) — not here — so that the
+        # increment always happens-before the decrement of whatever finishing
+        # thunk made `thunk` ready, closing a race where `running_count` could
+        # transiently read as 0 while `thunk` was still awaiting firing.
         @assert !has_result(state, thunk)
         if thunk.options.restore !== nothing
             try
