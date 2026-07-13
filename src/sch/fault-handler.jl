@@ -32,6 +32,7 @@ function handle_fault(ctx, state, deadproc, ready_out::Vector{Thunk})
         end
     end
     # Remove thunks that were running on the worker
+    running_deadlist = Thunk[]
     lock(state.thunk_dict) do d
         for (_, wt) in d
             t = unwrap_weak(wt)
@@ -40,9 +41,9 @@ function handle_fault(ctx, state, deadproc, ready_out::Vector{Thunk})
             ron === nothing && continue
             ron.pid == deadproc.pid || continue
             push!(deadlist, t)
+            push!(running_deadlist, t)
             t.running_on = nothing
             @atomic t.running = false
-            Threads.atomic_sub!(state.running_count, 1)
         end
     end
     # Clear thunk.cache_ref
@@ -55,10 +56,18 @@ function handle_fault(ctx, state, deadproc, ready_out::Vector{Thunk})
     # reschedule_syncdeps! will re-wire their edges and re-schedule them.
 
     # Reschedule inputs from deadlist. reschedule_syncdeps! collects any newly-
-    # ready thunks into `ready_out`; the caller (scheduler_run) schedules them
-    # outside state.lock.
+    # ready thunks into `ready_out`, incrementing `running_count` for each one
+    # as it's found (see the comments in `reschedule_syncdeps!`); the caller
+    # (scheduler_run) schedules them outside state.lock.
     seen = Set{Thunk}()
     for t in deadlist
         reschedule_syncdeps!(state, t, ready_out, seen)
     end
+
+    # Release the "running" slots for the tasks that were actually in-flight
+    # on the dead worker only *after* any replacement work above has already
+    # been counted, so `running_count` never has a window where it looks like
+    # 0 while replacement work is about to be scheduled.
+    isempty(running_deadlist) ||
+        Threads.atomic_sub!(state.running_count, length(running_deadlist))
 end
