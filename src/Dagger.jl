@@ -129,6 +129,7 @@ include("array/cholesky.jl")
 include("array/trsm.jl")
 include("array/lu.jl")
 include("array/qr.jl")
+include("array/svd.jl")
 
 # GPU
 include("gpu.jl")
