@@ -137,13 +137,62 @@ function _atomic_write(path, data)
     return nothing
 end
 
-# Spawn a fresh worker, clearing the stale control files first. Inherits the
-# orchestrator's stdout/stderr (so worker logs are visible) and environment.
+# --- Worker output capture --------------------------------------------------
+# `run(cmd; wait=false)` does NOT automatically connect the child to our own
+# stdout/stderr unless we ask it to (despite appearances, silently swallowing
+# the worker's output otherwise). We mirror the worker's combined
+# stdout/stderr to our own streams (so logs are visible live) *and* to
+# `WORKER_LOG`, so that if the worker fails to start (or dies unexpectedly) we
+# can print exactly what it said, including any error and stacktrace.
+struct _Tee <: IO
+    ios::Vector{IO}
+end
+Base.write(t::_Tee, x::UInt8) = (foreach(io -> (write(io, x); flush(io)), t.ios); 1)
+function Base.unsafe_write(t::_Tee, p::Ptr{UInt8}, n::UInt)
+    foreach(t.ios) do io
+        unsafe_write(io, p, n)
+        flush(io)
+    end
+    return n
+end
+Base.flush(t::_Tee) = foreach(flush, t.ios)
+
+const WORKER_LOG = joinpath(WORKDIR, "worker.log")
+const _worker_logio = Ref{Union{Nothing,IOStream}}(nothing)
+
+# Spawn a fresh worker, clearing the stale control files first.
 function spawn_worker()
     rm(joinpath(WORKDIR, "ready"); force=true)
     rm(joinpath(WORKDIR, "request.json"); force=true)
     rm(joinpath(WORKDIR, "request.json.tmp"); force=true)
-    return run(worker_cmd(); wait=false)
+    old = _worker_logio[]
+    old === nothing || close(old)
+    logio = open(WORKER_LOG, "w")
+    _worker_logio[] = logio
+    out = _Tee(IO[stdout, logio])
+    err = _Tee(IO[stderr, logio])
+    return run(pipeline(worker_cmd(); stdout=out, stderr=err); wait=false)
+end
+
+# Print the current worker's captured output (if any), clearly delineated, so
+# a startup failure or crash is impossible to miss even if it scrolled off the
+# terminal or was otherwise not visible live.
+function print_worker_log(header)
+    logio = _worker_logio[]
+    logio === nothing && return
+    flush(logio)
+    contents = try
+        read(WORKER_LOG, String)
+    catch
+        ""
+    end
+    println(stderr)
+    println(stderr, "="^80)
+    println(stderr, header)
+    println(stderr, "="^80)
+    print(stderr, isempty(contents) ? "(no output captured from worker)\n" : contents)
+    println(stderr, "="^80)
+    println(stderr)
 end
 
 function wait_ready(proc; timeout=600)
@@ -186,7 +235,12 @@ function run_all_external()
 
     proc = spawn_worker()
     if !wait_ready(proc)
-        @error "Benchmark worker failed to start; producing empty SUITE."
+        still_running = process_running(proc)
+        still_running && (kill(proc); try; wait(proc); catch; end)
+        print_worker_log("Benchmark worker failed to start" *
+                          (still_running ? " (timed out waiting for readiness)" :
+                           " (exited with code $(proc.exitcode))"))
+        @error "Benchmark worker failed to start; producing empty SUITE. See worker output above."
         return results
     end
 
@@ -223,6 +277,9 @@ function run_all_external()
             @warn "Benchmark errored (skipped): $(join(it.keypath, " / "))"
         else  # "oom" / "died" / "timeout"
             @warn "Benchmark $(status); skipping this and larger scales of $(it.suite)/$(it.method)" benchmark = join(it.keypath, " / ")
+            if status == "died"
+                print_worker_log("Benchmark worker died unexpectedly while running: $(join(it.keypath, " / "))")
+            end
             if it.N >= 0
                 skip_at[(it.suite, it.method)] = min(get(skip_at, (it.suite, it.method), typemax(Int)), it.N)
             end
@@ -232,7 +289,12 @@ function run_all_external()
             end
             proc = spawn_worker()
             if !wait_ready(proc)
-                @error "Worker failed to restart; returning partial results."
+                still_running = process_running(proc)
+                still_running && (kill(proc); try; wait(proc); catch; end)
+                print_worker_log("Benchmark worker failed to restart" *
+                                  (still_running ? " (timed out waiting for readiness)" :
+                                   " (exited with code $(proc.exitcode))"))
+                @error "Worker failed to restart; returning partial results. See worker output above."
                 return results
             end
         end
