@@ -33,7 +33,7 @@ import ..Dagger: SignatureMetric, ProcessorMetric, WorkerMetric, TransferSizeMet
 import ..Dagger: TASK_SIGNATURE, TASK_PROCESSOR, TASK_WORKER, TASK_TRANSFER_SIZE, TASK_TRANSFER_TIME
 import ..Dagger: execute_metrics_spec, metrics_lookup_runtime, metrics_lookup_alloc, metrics_lookup_transfer_rate
 import ..Dagger: extract_collected_metrics, apply_collected_metrics!
-import MetricsTracker as MT
+import ..Dagger.MetricsTracker as MT
 
 include("util.jl")
 include("fault-handler.jl")

@@ -36,7 +36,8 @@ import GPUArraysCore
 
 import Preferences: @load_preference, @set_preferences!
 
-import MetricsTracker as MT
+include(joinpath(@__DIR__, "../lib/MetricsTracker/src/MetricsTracker.jl"))
+import .MetricsTracker as MT
 
 const reuse_metrics = @load_preference("reuse-metrics", false)
 const metrics_path = @load_preference("metrics-path", "dagger-metrics.dat")
