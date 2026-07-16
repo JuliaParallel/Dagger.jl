@@ -90,6 +90,11 @@
 #   the intermediates around for debugging.
 # - BENCHMARK_DTABLE_ROWS: Row count for the legacy "dtable" suite only.
 #   Defaults to "1000000".
+# - BENCHMARK_JSON_OUTPUT: Only consulted for standalone execution (see below;
+#   ignored under AirspeedVelocity). Path to write a JSON summary of results
+#   to. Defaults to "benchmark_results/results_standalone.json" (both are
+#   already `.gitignore`d). See `benchmark/plot.jl` for a quick way to render
+#   these as plots.
 #
 # GPU acceleration
 # ----------------
@@ -320,7 +325,30 @@ end
 # the block below only triggers when the script is executed directly.
 if abspath(PROGRAM_FILE) == @__FILE__
     println()
-    foreach(BenchmarkTools.leaves(run(SUITE))) do (keys, trial)
+    leaves = collect(BenchmarkTools.leaves(run(SUITE)))
+    foreach(leaves) do (keys, trial)
         println(join(keys, " / "), " => ", minimum(trial))
     end
+
+    # Also dump a JSON summary so results can be inspected/plotted later
+    # without re-running anything (see `benchmark/plot.jl`).
+    json_path = let p = get(ENV, "BENCHMARK_JSON_OUTPUT", "")
+        isempty(p) ? joinpath("benchmark_results", "results_standalone.json") : p
+    end
+    let d = dirname(json_path)
+        isempty(d) || mkpath(d)
+    end
+    entries = [
+        (; keypath = String[string(k) for k in keys],
+           min_time_ns = minimum(trial).time,
+           mean_time_ns = BenchmarkTools.mean(trial).time,
+           memory = minimum(trial).memory,
+           allocs = minimum(trial).allocs,
+           samples = length(trial.times))
+        for (keys, trial) in leaves
+    ]
+    open(json_path, "w") do io
+        JSON3.write(io, (; results = entries))
+    end
+    println("\nWrote JSON results to $(abspath(json_path))")
 end
