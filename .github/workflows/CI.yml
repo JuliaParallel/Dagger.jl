@@ -35,7 +35,7 @@ jobs:
           - {version: '1', os: macos-26, arch: arm64}
           - {version: 'nightly', os: ubuntu-latest, arch: x64}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: julia-actions/setup-julia@v3
         with:
           version: ${{ matrix.version }}
@@ -69,7 +69,7 @@ jobs:
           - {version: '1', os: macos-26, arch: arm64}
           - {version: 'nightly', os: ubuntu-latest, arch: x64}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: julia-actions/setup-julia@v3
         with:
           version: ${{ matrix.version }}
@@ -97,7 +97,7 @@ jobs:
       JULIA_NUM_THREADS: '1'
       CI_USE_OPENCL: '1'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: julia-actions/setup-julia@v3
         with:
           version: '1.11'
@@ -120,7 +120,7 @@ jobs:
     timeout-minutes: 20
     if: ${{ !contains(github.event.head_commit.message, '[skip tests]') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: julia-actions/setup-julia@v3
         with:
           version: '1'
@@ -135,7 +135,7 @@ jobs:
     timeout-minutes: 20
     if: ${{ !contains(github.event.head_commit.message, '[skip tests]') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: julia-actions/setup-julia@v3
         with:
           version: '1'
@@ -166,7 +166,7 @@ jobs:
       BENCHMARK_SECONDS: '3'
       BENCHMARK_SAMPLES: '5'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Full history so the base revision (`master`) is resolvable by
           # AirspeedVelocity when it checks out the comparison revision.
