@@ -129,7 +129,18 @@ function treereducedim(op, xs::Array, dim::Int)
 end
 
 function treereducedim(op, xs::Array, dim::Tuple)
-    reduce((prev, d) -> treereducedim(op, prev, d), dim, init=xs)
+    # NOTE: Deliberately a plain loop, not `reduce((prev, d) -> treereducedim(op,
+    # prev, d), dim; init=xs)`. That formulation routes through Base's generic
+    # `reduce`/`mapfoldl`/`afoldl` machinery with a *recursive* closure operating
+    # on `Any`-typed arrays, which is prone to catastrophic type-inference blowup
+    # (minutes-long or effectively unbounded compile times, observed e.g. for
+    # `sum(::DArray)`) since the compiler's constant-propagation tries to unroll
+    # through the self-recursion. A plain loop is behaviorally identical but
+    # trivial to infer.
+    for d in dim
+        xs = treereducedim(op, xs, d)
+    end
+    return xs
 end
 
 function allslices(xs, n)
