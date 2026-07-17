@@ -740,8 +740,16 @@ Mutates and returns `state`. The caller is responsible for providing a
 freshly-`copy(prev_state)` if the previous state must be preserved on
 rejection.
 """
+# Take all arguments after the function. `spec.fargs` is a `Tuple` for typed
+# tasks (`DTaskSpec{true}`) and a `Vector{Argument}` otherwise. `Base.view`
+# is not defined for `Tuple`, so `@view fargs[2:end]` breaks under typed
+# tasks; use `Base.tail` for the tuple case (zero allocation) and a view
+# for the vector case.
+_eft_tail_args(fargs::Tuple) = Base.tail(fargs)
+_eft_tail_args(fargs::AbstractVector) = @view fargs[2:end]
+
 function _eft_runtime_ns(snap::MT.MetricsSnapshot, spec, proc::Processor)
-    sig = Sch.signature(spec.fargs[1], @view spec.fargs[2:end]).sig
+    sig = Sch.signature(spec.fargs[1], _eft_tail_args(spec.fargs)).sig
     worker_id = root_worker_id(proc)
     runtime_lookup = metrics_lookup_runtime_median(snap, sig, proc, worker_id)
     return runtime_lookup === nothing ? Float64(GREEDY_DEFAULT_RUNTIME_NS) : Float64(runtime_lookup)
