@@ -1,11 +1,24 @@
 export DTask
 
+# N.B. Backed by `MemPool.DFuture` rather than `Distributed.Future`, when available.
+# The latter is unsafe under concurrent multithreaded access within a single process (every
+# `put!`/`fetch`/`wait` mutates process-global Distributed tables and `fetch`
+# auto-deletes the backing ref, which races and can block a waiter forever).
+# `DFuture` signals readiness via a thread-safe `Base.Event` on the owner and
+# manages lifetime via MemPool's `DRef` refcounting. See `MemPool/src/devent.jl`.
+
+const DFuture = @static if isdefined(MemPool, :DFuture)
+    MemPool.DFuture
+else
+    Distributed.Future
+end
+
 "A future holding the result of a `Thunk`."
 struct ThunkFuture
-    future::Future
+    future::DFuture
 end
-ThunkFuture(x::Integer) = ThunkFuture(Future(x))
-ThunkFuture() = ThunkFuture(Future())
+ThunkFuture(x::Integer) = ThunkFuture(DFuture(x))
+ThunkFuture() = ThunkFuture(DFuture())
 Base.isready(t::ThunkFuture) = isready(t.future)
 Base.wait(t::ThunkFuture) = Dagger.Sch.thunk_yield() do
     wait(t.future)
