@@ -59,6 +59,7 @@ end
 all_test_names = map(test -> replace(last(test), ".jl"=>""), tests)
 
 additional_workers::Int = 3
+worker_threads::Int = 1
 
 if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
     pushfirst!(LOAD_PATH, @__DIR__)
@@ -91,6 +92,10 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
                 arg_type = Int
                 default = additional_workers
                 help = "How many additional workers to launch"
+            "-t", "--threads"
+                arg_type = Int
+                default = 1
+                help = "How many threads to give each additional worker"
             "-v", "--verbose"
                 action = :store_true
                 help = "Run the tests with debug logs from Dagger"
@@ -149,6 +154,7 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
     parsed_args["simulate"] && exit(0)
 
     additional_workers = parsed_args["procs"]
+    worker_threads = parsed_args["threads"]
 
     if parsed_args["verbose"]
         ENV["JULIA_DEBUG"] = "Dagger"
@@ -167,7 +173,7 @@ using Distributed
 if additional_workers > 0
     # We put this inside a branch because addprocs() takes a minimum of 1s to
     # complete even if doing nothing, which is annoying.
-    addprocs(additional_workers; exeflags="--project=$(joinpath(@__DIR__, ".."))")
+    addprocs(additional_workers; exeflags=`--project=$(joinpath(@__DIR__, "..")) -t $worker_threads`)
 end
 
 include("imports.jl")
