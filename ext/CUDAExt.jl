@@ -94,8 +94,13 @@ function  with_context!(array::CuArray, stream_idx = 1)
 end
 Dagger.with_context!(proc::CuArrayDeviceProc) = with_context!(proc)
 Dagger.with_context!(space::CUDAVRAMMemorySpace) = with_context!(space)
+const _cuda_tls = @static if isdefined(CUDA, :task_local_state)
+    CUDA.task_local_state
+else
+    CUDA.CUDACore.task_local_state
+end
 function with_context(f, x, stream_idx = 1)
-    exist = CUDA.task_local_state() !== nothing
+    exist = _cuda_tls() !== nothing
 
     if exist
         old_ctx = context()
