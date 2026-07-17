@@ -1,5 +1,4 @@
 import Base.Sort: Forward, Ordering, lt
-import SharedArrays: SharedArray
 
 import StatsBase: fit!, sample
 
@@ -140,15 +139,9 @@ function transpose_vecvec(xs)
     end
 end
 
-const use_shared_array = Ref(true)
 function _promote_array(x::AbstractArray{T}, y::AbstractArray{S}) where {T,S}
     Q = promote_type(T,S)
-    ok = (isa(x, Array) || isa(x, SharedArray)) && (isa(y, Array) || isa(y, SharedArray))
-    if ok && isbitstype(Q) && use_shared_array[] && check_same_host([workers()..., 1])
-        return SharedArray{Q}(length(x)+length(y), pids=procs())
-    else
-        return similar(x, Q, length(x)+length(y))
-    end
+    similar(x, Q, length(x)+length(y))
 end
 
 function merge_sorted(ord::Ordering, x::AbstractArray, y::AbstractArray)
