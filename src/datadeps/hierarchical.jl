@@ -754,19 +754,32 @@ end
     schedule_partition_full!(queue, queue_lock, partition_id, partition_verts,
                              dag, seen_tasks, local_procs,
                              vertex_to_partition, task_submitted,
-                             region_uids) -> DataDepsState
+                             region_uids, registry;
+                             precomputed_schedule=nothing)
+        -> (DataDepsState, Dict{DTask,Processor})
 
 Per-partition scheduling for both single-worker and multi-worker hierarchical
 paths. Uses existing `distribute_task!` logic with per-partition
 `DataDepsState`, `all_procs` limited to this partition's processors, and
-cross-partition syncdeps from the precomputed DAG.
+cross-partition syncdeps from the precomputed DAG. Returns this partition's
+`DataDepsState` along with the task-to-processor assignments it computed (or
+reused), so the top-level `distribute_tasks_hierarchical!` can persist the
+combined per-region schedule to `queue.scheduler`'s cache.
 
-AOT scheduling is run *locally per partition*: a partition-local `DAGSpec` is
-built from just this partition's tasks and scheduled over just `local_procs` via
-`datadeps_build_schedule!`. `region_uids` (all in-region task uids) lets that
-builder bail cleanly when a task depends on a same-region producer in another
-partition (which it must not `fetch`). Tasks without an AOT assignment fall back
-to JIT scheduling in `distribute_task!`.
+AOT scheduling defaults to running *locally per partition*: a partition-local
+`DAGSpec` is built from just this partition's tasks and scheduled over just
+`local_procs` via `datadeps_build_schedule!`. `region_uids` (all in-region task
+uids) lets that builder bail cleanly when a task depends on a same-region
+producer in another partition (which it must not `fetch`). Tasks without an AOT
+assignment fall back to JIT scheduling in `distribute_task!`.
+
+When `precomputed_schedule` is supplied (cache hit at the top of
+`distribute_tasks_hierarchical!`), the per-partition AOT step is skipped: this
+partition's task-to-processor assignments are filtered from
+`precomputed_schedule` directly. Tasks whose cached processor is not in
+`local_procs` (possible if `all_procs` changed since the schedule was cached)
+fall back to JIT scheduling in `distribute_task!` via the guard in
+`_schedule_vertex!`.
 """
 function schedule_partition_full!(queue::DataDepsTaskQueue,
                                   queue_lock::ReentrantLock,
@@ -778,9 +791,10 @@ function schedule_partition_full!(queue::DataDepsTaskQueue,
                                   vertex_to_partition::Vector{Int},
                                   task_submitted::Vector{Base.Event},
                                   region_uids::Set{UInt},
-                                  registry::Union{SharedChunkRegistry,Nothing})
+                                  registry::Union{SharedChunkRegistry,Nothing};
+                                  precomputed_schedule::Union{Dict{DTask,Processor},Nothing}=nothing)
     if isempty(partition_verts) || isempty(local_procs)
-        return DataDepsState(DAGSpec())
+        return DataDepsState(DAGSpec()), Dict{DTask,Processor}()
     end
 
     local_scope = UnionScope(map(ExactScope, local_procs))
@@ -824,8 +838,27 @@ function schedule_partition_full!(queue::DataDepsTaskQueue,
     # Per-partition (local) AOT scheduling over just this partition's procs.
     # `partition_verts` is in ascending vertex (= submission) order.
     partition_pairs = DTaskPair[seen_tasks[v] for v in partition_verts]
-    _pdag, schedule = datadeps_build_schedule!(temp_queue.scheduler, partition_pairs,
-                                               local_procs, local_scope; region_uids)
+
+    if precomputed_schedule === nothing
+        # Cache miss: run the per-partition AOT scheduler over just this
+        # partition's tasks and processors.
+        _pdag, schedule = datadeps_build_schedule!(temp_queue.scheduler, partition_pairs,
+                                                   local_procs, local_scope; region_uids)
+    else
+        # Cache hit: `distribute_tasks_hierarchical!` already resolved the whole
+        # region's task-to-processor mapping from `queue.scheduler.cache`. Filter
+        # it to just this partition's tasks. Tasks that fell through the
+        # top-level `dag_add_task!` bail (missing from `precomputed_schedule`)
+        # still get JIT-scheduled inside `distribute_task!` via
+        # `temp_queue.scheduler`, matching the miss-path semantics.
+        schedule = Dict{DTask,Processor}()
+        for pair in partition_pairs
+            proc = get(precomputed_schedule, pair.task, nothing)
+            if proc !== nothing
+                schedule[pair.task] = proc
+            end
+        end
+    end
 
     # N.B. If this partition throws partway through (e.g. from
     # `distribute_task!`), any of our vertices that haven't yet been
@@ -866,7 +899,7 @@ function schedule_partition_full!(queue::DataDepsTaskQueue,
         end
     end
 
-    return state
+    return state, schedule
 end
 
 struct LockedEnqueueQueue <: AbstractTaskQueue
@@ -878,6 +911,92 @@ function enqueue!(leq::LockedEnqueueQueue, pair::DTaskPair)
 end
 function enqueue!(leq::LockedEnqueueQueue, pairs::Vector{DTaskPair})
     @lock leq.lock enqueue!(leq.inner, pairs)
+end
+
+"""
+    _hierarchical_dag_spec_and_cache_lookup(scheduler, seen_tasks)
+        -> (dag_spec::DAGSpec, precomputed::Union{Dict{DTask,Processor},Nothing})
+
+Build a full-region `DAGSpec` by walking `seen_tasks` in submission order, then
+look it up in `scheduler`'s task-local schedule cache. When a structurally
+equivalent DAG is found (per `datadeps_dag_equivalent`), return the recovered
+task-to-processor mapping in the second slot; otherwise return `nothing`.
+
+Mirrors the DAGSpec-building and cache-matching logic of the flat path's
+`datadeps_build_schedule!` in `queue.jl`, but stops before running the AOT
+scheduler so that `distribute_tasks_hierarchical!` retains its parallel
+per-partition scheduling pipeline on a cache miss. The DAGSpec built here is
+also returned so the miss path can persist a freshly-computed schedule at the
+end of the hierarchical run using the same key.
+
+`dag_add_task!` may return `false` (bail) on tasks whose arguments include a
+within-DAG `DTask` -- the returned `DAGSpec` then only covers the prefix that
+was successfully added, matching the flat path's behaviour. Tasks past the
+bail point are not in the cache key; on a hit they simply won't be in
+`precomputed`, and per-partition JIT scheduling handles them exactly as in the
+miss path.
+"""
+function _hierarchical_dag_spec_and_cache_lookup(scheduler::DataDepsScheduler,
+                                                   seen_tasks::Vector{DTaskPair})
+    dag_spec = DAGSpec()
+    dummy_state = DataDepsState(dag_spec)
+    for (spec, task) in seen_tasks
+        if !dag_add_task!(dag_spec, dummy_state, spec, task)
+            break
+        end
+    end
+    isempty(dag_spec) && return dag_spec, nothing
+
+    for (other_spec, spec_schedule) in datadeps_schedule_cache(scheduler)
+        if datadeps_dag_equivalent(scheduler, dag_spec, other_spec)
+            @dagdebug nothing :spawn_datadeps "Hierarchical DAG cache hit"
+            schedule = Dict{DTask,Processor}()
+            uid_to_task = Dict{UInt,DTask}()
+            for pair in seen_tasks
+                uid_to_task[pair.task.uid] = pair.task
+            end
+            for (id, proc) in spec_schedule.id_to_proc
+                uid = dag_spec.id_to_uid[id]
+                task = get(uid_to_task, uid, nothing)
+                task === nothing && continue
+                schedule[task] = proc
+            end
+            return dag_spec, schedule
+        end
+    end
+    return dag_spec, nothing
+end
+
+"""
+    _hierarchical_persist_schedule!(scheduler, dag_spec, partition_schedules)
+
+After a cache-miss hierarchical run, collect the per-partition
+task-to-processor assignments produced by `schedule_partition_full!` and store
+them in `scheduler`'s schedule cache keyed by `dag_spec`. This allows a later
+`distribute_tasks_hierarchical!` call with a structurally equivalent DAG to
+reuse the schedule via `_hierarchical_dag_spec_and_cache_lookup`.
+
+No-op when `dag_spec` is empty (the top-level DAG build bailed on the first
+task) or when no partition produced any assignments (every task fell back to
+JIT scheduling). Only tasks captured in `dag_spec` are cached, so partial-DAG
+cases match flat-path semantics: tasks past the bail point are re-JIT'd on
+subsequent runs.
+"""
+function _hierarchical_persist_schedule!(scheduler::DataDepsScheduler,
+                                          dag_spec::DAGSpec,
+                                          partition_schedules::Vector{Dict{DTask,Processor}})
+    isempty(dag_spec) && return
+    spec_schedule = DAGSpecSchedule()
+    for pschedule in partition_schedules
+        for (task, proc) in pschedule
+            haskey(dag_spec.uid_to_id, task.uid) || continue
+            id = dag_spec.uid_to_id[task.uid]
+            spec_schedule.id_to_proc[id] = proc
+        end
+    end
+    isempty(spec_schedule.id_to_proc) && return
+    push!(datadeps_schedule_cache(scheduler), dag_spec => spec_schedule)
+    return
 end
 
 # Parallel partition scheduling wraps errors in TaskFailedException /
@@ -918,6 +1037,19 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
     if isempty(seen_tasks)
         return
     end
+
+    # Top-level schedule cache lookup. Build a full-region DAGSpec and consult
+    # `queue.scheduler`'s task-local cache before spinning up any partitioning
+    # or per-partition scheduling. Under hierarchical, each partition otherwise
+    # runs with its own `similar(queue.scheduler)` shard (see
+    # `schedule_partition_full!`) whose cache is discarded after the call, so
+    # this top-level lookup is the only place where cross-`spawn_datadeps`
+    # amortisation of AOT scheduling cost can occur. On a hit
+    # (`precomputed_schedule !== nothing`) the per-partition scheduler is
+    # skipped; on a miss we run the normal pipeline and persist the collected
+    # schedule at the end for the next call to reuse.
+    dag_spec, precomputed_schedule =
+        _hierarchical_dag_spec_and_cache_lookup(queue.scheduler, seen_tasks)
 
     # Get the set of all processors
     all_procs = Processor[]
@@ -966,21 +1098,26 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
 
     # Phase 4: parallel per-partition scheduling. Each partition runs on its own
     # task, prepares its tasks concurrently, computes its own partition-local
-    # AOT schedule, and coordinates cross-partition dependencies via the
-    # `task_submitted` events. Concurrent submission is safe now that task
-    # futures are backed by `MemPool.DFuture` (see the header note).
+    # AOT schedule (or reuses `precomputed_schedule` on a cache hit, in which
+    # case the AOT step is skipped and only the task submission side runs), and
+    # coordinates cross-partition dependencies via the `task_submitted` events.
+    # Concurrent submission is safe now that task futures are backed by
+    # `MemPool.DFuture` (see the header note).
     partition_states = Vector{DataDepsState}(undef, n_partitions)
+    partition_schedules = Vector{Dict{DTask,Processor}}(undef, n_partitions)
     try
         @sync for pid in 1:n_partitions
             Threads.@spawn begin
                 locked_queue = LockedEnqueueQueue(wait_all_queue, queue_lock)
                 with_options(; task_queue=locked_queue) do
-                        partition_states[pid] = schedule_partition_full!(
-                            queue, queue_lock, pid, partitions[pid],
-                            dag, seen_tasks,
-                            partition_procs[pid], vertex_to_partition,
-                            task_submitted, region_uids, registry
-                        )
+                        partition_states[pid], partition_schedules[pid] =
+                            schedule_partition_full!(
+                                queue, queue_lock, pid, partitions[pid],
+                                dag, seen_tasks,
+                                partition_procs[pid], vertex_to_partition,
+                                task_submitted, region_uids, registry;
+                                precomputed_schedule
+                            )
                 end
             end
         end
@@ -989,6 +1126,16 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
     end
 
     _hierarchical_copy_from_and_free!(partition_states, n_partitions, registry)
+
+    # Persist the freshly-computed schedule for reuse by a later
+    # `distribute_tasks_hierarchical!` call on a structurally equivalent DAG.
+    # Only runs on a cache miss (`precomputed_schedule === nothing`) to avoid
+    # both duplicating the cache entry we just consumed and appending it under
+    # a potentially different DAGSpec key that would fail subsequent
+    # `datadeps_dag_equivalent` matches.
+    if precomputed_schedule === nothing
+        _hierarchical_persist_schedule!(queue.scheduler, dag_spec, partition_schedules)
+    end
 end
 
 function _hierarchical_max_write_num(state::DataDepsState, arg_w::ArgumentWrapper)

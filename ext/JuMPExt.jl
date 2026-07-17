@@ -13,7 +13,10 @@ import Dagger: JuMPScheduler, DAGSpec, datadeps_schedule_dag_aot!,
                GREEDY_DEFAULT_RUNTIME_NS,
                ScheduleState, greedy_schedule!
 import Dagger.Sch
-import MetricsTracker as MT
+# `jps/riteshsc26` folds `MetricsTracker` into the `Dagger` module via a
+# direct `include` (see `src/Dagger.jl`), so it is `Dagger.MetricsTracker`
+# rather than a top-level package the extension can `import` directly.
+import Dagger.MetricsTracker as MT
 import Graphs: nv, outdegree, edges, src, dst
 
 function _milp_compatible_procs(spec, all_procs::Vector{Dagger.Processor})

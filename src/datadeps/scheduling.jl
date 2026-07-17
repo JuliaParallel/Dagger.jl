@@ -715,6 +715,18 @@ end
 
 IteratedGreedyScheduler(; kwargs...) = IteratedGreedyScheduler(GreedyScheduler(); kwargs...)
 
+# Hierarchical scheduling calls `similar` per partition to avoid sharing mutable
+# state (esp. the RNG) across the parallel per-partition scheduling tasks. Deep-
+# copy the RNG so each partition-shard produces independent, race-free samples;
+# recursively call `similar` on the inner scheduler so its own mutable state is
+# refreshed too. Static configuration (n_iters, destroy_frac) carries through
+# unchanged so the shard's behaviour matches the original's.
+Base.similar(s::IteratedGreedyScheduler) =
+    IteratedGreedyScheduler(similar(s.inner);
+                            n_iters=s.n_iters,
+                            destroy_frac=s.destroy_frac,
+                            rng=copy(s.rng))
+
 # Forward equivalence / cache / argspec hooks so cache reuse is partitioned by
 # the inner scheduler's type, not by IG's own wrapper type. Same idea as the
 # bench's TimedScheduler wrapper.
@@ -976,6 +988,15 @@ end
 
 SimulatedAnnealingScheduler(; kwargs...) =
     SimulatedAnnealingScheduler(IteratedGreedyScheduler(); kwargs...)
+
+# See the note on `similar(::IteratedGreedyScheduler)`: hierarchical scheduling
+# hands each partition its own scheduler shard, so we deep-copy the RNG and
+# recursively refresh the inner scheduler, while preserving the parameterisation
+# (q, k, n_restarts).
+Base.similar(s::SimulatedAnnealingScheduler) =
+    SimulatedAnnealingScheduler(similar(s.inner);
+                                 q=s.q, k=s.k, n_restarts=s.n_restarts,
+                                 rng=copy(s.rng))
 
 datadeps_schedule_cache(sched::SimulatedAnnealingScheduler) =
     datadeps_schedule_cache(sched.inner)
@@ -1308,6 +1329,13 @@ struct JuMPScheduler <: DataDepsScheduler
     end
 end
 
+# See the note on `similar(::IteratedGreedyScheduler)`. `JuMPScheduler` has no
+# mutable state and only immutable config fields; return a fresh instance with
+# the same configuration so hierarchical partition shards behave identically
+# to the original.
+Base.similar(s::JuMPScheduler) =
+    JuMPScheduler(s.optimizer; Z=s.Z, time_limit_sec=s.time_limit_sec)
+
 # `datadeps_schedule_dag_aot!(::JuMPScheduler, ...)` lives in ext/JuMPExt.jl;
 # the constructor prevents instantiation without the extension.
 const OPT_DEFAULT_MILP_THRESHOLD = 12
@@ -1387,6 +1415,23 @@ struct OptimizingScheduler{R<:Random.AbstractRNG} <: DataDepsScheduler
         )
     end
 end
+
+# See the note on `similar(::IteratedGreedyScheduler)`. `OptimizingScheduler`
+# doesn't own an inner scheduler instance (it constructs the underlying
+# JuMP/SA/IG/Greedy pipeline fresh per invocation), so only the RNG needs a
+# deep copy; every other field is immutable configuration and is forwarded
+# verbatim.
+Base.similar(s::OptimizingScheduler) =
+    OptimizingScheduler(; optimizer=s.optimizer,
+                          milp_threshold=s.milp_threshold,
+                          milp_time_limit_sec=s.milp_time_limit_sec,
+                          milp_Z=s.milp_Z,
+                          ig_n_iters=s.ig_n_iters,
+                          ig_destroy_frac=s.ig_destroy_frac,
+                          sa_q=s.sa_q,
+                          sa_k=s.sa_k,
+                          sa_n_restarts=s.sa_n_restarts,
+                          rng=copy(s.rng))
 
 """
     opt_uses_milp(sched::OptimizingScheduler, n_tasks::Integer) -> Bool
