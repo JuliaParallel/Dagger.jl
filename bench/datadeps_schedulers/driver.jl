@@ -186,13 +186,20 @@ const DEFAULT_WARMUP = 1
 
 # Factories — not instances — because RoundRobin holds mutable state and each
 # trial needs a fresh copy. Default MILP budget is set generously since a
-# K~64 solve can exceed a minute; callers override as needed.
-function default_scheduler_factories(; milp_time_limit_sec::Real=120.0)
+# K~64 solve can exceed a minute; callers override as needed. Heuristic
+# (IG, SA) wall-clock budgets default to 60 s per Przemek's & Julian's ask:
+# "quick-and-dirty 1 minute timeout" so metaheuristic runs stay within a
+# reasonable everyday-user budget instead of exhausting the full iteration
+# schedule at K~10000. Pass `Inf` to reproduce the pre-budget behaviour.
+function default_scheduler_factories(; milp_time_limit_sec::Real=120.0,
+                                       heuristic_time_limit_sec::Real=60.0)
     factories = [
         "RoundRobinScheduler"         => () -> Dagger.RoundRobinScheduler(),
         "GreedyScheduler"             => () -> Dagger.GreedyScheduler(),
-        "IteratedGreedyScheduler"     => () -> Dagger.IteratedGreedyScheduler(),
-        "SimulatedAnnealingScheduler" => () -> Dagger.SimulatedAnnealingScheduler(),
+        "IteratedGreedyScheduler"     => () -> Dagger.IteratedGreedyScheduler(;
+                                                    time_limit_sec=heuristic_time_limit_sec),
+        "SimulatedAnnealingScheduler" => () -> Dagger.SimulatedAnnealingScheduler(;
+                                                    time_limit_sec=heuristic_time_limit_sec),
     ]
     if HAS_MILP
         push!(factories,
@@ -201,10 +208,14 @@ function default_scheduler_factories(; milp_time_limit_sec::Real=120.0)
         push!(factories,
               "OptimizingScheduler" => () -> Dagger.OptimizingScheduler(;
                                                 optimizer=HiGHS.Optimizer,
-                                                milp_time_limit_sec=milp_time_limit_sec))
+                                                milp_time_limit_sec=milp_time_limit_sec,
+                                                ig_time_limit_sec=heuristic_time_limit_sec,
+                                                sa_time_limit_sec=heuristic_time_limit_sec))
     else
         push!(factories,
-              "OptimizingScheduler" => () -> Dagger.OptimizingScheduler())
+              "OptimizingScheduler" => () -> Dagger.OptimizingScheduler(;
+                                                ig_time_limit_sec=heuristic_time_limit_sec,
+                                                sa_time_limit_sec=heuristic_time_limit_sec))
     end
     return factories
 end

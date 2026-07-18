@@ -670,6 +670,10 @@ _greedy_arg_ready_time_ns_cached(::Any, ::MT.MetricsSnapshot, ::DAGSpec,
 
 const IG_DEFAULT_N_ITERS = 32
 const IG_DEFAULT_DESTROY_FRAC = 0.30
+# `Inf` disables the wall-clock stop; callers (e.g. benchmarks) opt in by
+# passing a finite budget. Requested by Przemek & Julian: enable "1-minute
+# metaheuristic budget" as the operational default for the paper.
+const IG_DEFAULT_TIME_LIMIT_SEC = Inf
 
 """
     IteratedGreedyScheduler{S<:DataDepsScheduler} <: DataDepsScheduler
@@ -691,6 +695,11 @@ Fields:
 - `n_iters::Int`        — destroy/reinsert cycles per call.
 - `destroy_frac::Float64` — fraction of tasks destroyed per cycle, in (0, 1].
 - `rng::Random.AbstractRNG` — RNG used for destroy-set sampling.
+- `time_limit_sec::Float64` — wall-clock stop, checked between iterations.
+                              `Inf` (default) disables the stop; a finite
+                              value returns the best-so-far the moment the
+                              budget is exceeded, so the scheduler always
+                              terminates within one iteration of the limit.
 
 The schedule cache is delegated to `inner` so entries are partitioned by
 inner-scheduler type, matching the `TimedScheduler` wrapper convention used
@@ -701,15 +710,18 @@ struct IteratedGreedyScheduler{S<:DataDepsScheduler, R<:Random.AbstractRNG} <: D
     n_iters::Int
     destroy_frac::Float64
     rng::R
+    time_limit_sec::Float64
 
     function IteratedGreedyScheduler(inner::S;
                                      n_iters::Integer=IG_DEFAULT_N_ITERS,
                                      destroy_frac::Real=IG_DEFAULT_DESTROY_FRAC,
-                                     rng::R=Random.default_rng()) where {S<:DataDepsScheduler, R<:Random.AbstractRNG}
+                                     rng::R=Random.default_rng(),
+                                     time_limit_sec::Real=IG_DEFAULT_TIME_LIMIT_SEC) where {S<:DataDepsScheduler, R<:Random.AbstractRNG}
         n_iters >= 0 || throw(ArgumentError("IteratedGreedyScheduler: n_iters must be ≥ 0, got $n_iters"))
         (destroy_frac > 0 && destroy_frac <= 1) ||
             throw(ArgumentError("IteratedGreedyScheduler: destroy_frac must be in (0, 1], got $destroy_frac"))
-        return new{S, R}(inner, Int(n_iters), Float64(destroy_frac), rng)
+        time_limit_sec > 0 || throw(ArgumentError("IteratedGreedyScheduler: time_limit_sec must be > 0, got $time_limit_sec"))
+        return new{S, R}(inner, Int(n_iters), Float64(destroy_frac), rng, Float64(time_limit_sec))
     end
 end
 
@@ -725,7 +737,8 @@ Base.similar(s::IteratedGreedyScheduler) =
     IteratedGreedyScheduler(similar(s.inner);
                             n_iters=s.n_iters,
                             destroy_frac=s.destroy_frac,
-                            rng=copy(s.rng))
+                            rng=copy(s.rng),
+                            time_limit_sec=s.time_limit_sec)
 
 # Forward equivalence / cache / argspec hooks so cache reuse is partitioned by
 # the inner scheduler's type, not by IG's own wrapper type. Same idea as the
@@ -851,10 +864,12 @@ function iterated_greedy_schedule!(state::ScheduleState, snap::MT.MetricsSnapsho
                                     n_iters::Integer=IG_DEFAULT_N_ITERS,
                                     destroy_frac::Real=IG_DEFAULT_DESTROY_FRAC,
                                     rng::Random.AbstractRNG=Random.default_rng(),
-                                    cache::Union{EFTCostCache, Nothing}=nothing)
+                                    cache::Union{EFTCostCache, Nothing}=nothing,
+                                    time_limit_sec::Real=IG_DEFAULT_TIME_LIMIT_SEC)
     n_iters >= 0 || throw(ArgumentError("iterated_greedy_schedule!: n_iters must be ≥ 0"))
     (destroy_frac > 0 && destroy_frac <= 1) ||
         throw(ArgumentError("iterated_greedy_schedule!: destroy_frac must be in (0, 1]"))
+    time_limit_sec > 0 || throw(ArgumentError("iterated_greedy_schedule!: time_limit_sec must be > 0"))
     n_tasks = nv(dag_spec.g)
     (n_tasks == 0 || n_iters == 0) && return state
     if cache === nothing
@@ -874,7 +889,17 @@ function iterated_greedy_schedule!(state::ScheduleState, snap::MT.MetricsSnapsho
     destroyed = Set{Int}()
     sizehint!(destroyed, n_destroy)
 
+    # Wall-clock guard checked once per outer iteration. Elapsed nanoseconds
+    # are computed as `time_ns() - start_ns` (unsigned subtraction, so no
+    # overflow arithmetic on the deadline itself). `Inf` disables the guard
+    # by setting `budget_ns` to the maximum representable `UInt64`, ensuring
+    # the comparison never trips.
+    start_ns = time_ns()
+    budget_ns = isinf(time_limit_sec) ? typemax(UInt64) :
+                round(UInt64, time_limit_sec * 1e9)
+
     for _ in 1:n_iters
+        (time_ns() - start_ns) >= budget_ns && break
         # Sample `n_destroy` distinct task IDs uniformly at random. Doing a
         # partial Fisher–Yates on perm_buf is O(n_destroy) and avoids
         # allocating a fresh randperm vector each iter.
@@ -916,6 +941,7 @@ function datadeps_schedule_dag_aot!(scheduler::IteratedGreedyScheduler,
     greedy_schedule!(state, snap, dag_spec, all_procs; cache=cache)
 
     state = iterated_greedy_schedule!(state, snap, dag_spec, all_procs;
+                                      time_limit_sec=scheduler.time_limit_sec,
                                        n_iters=scheduler.n_iters,
                                        destroy_frac=scheduler.destroy_frac,
                                        rng=scheduler.rng,
@@ -935,6 +961,12 @@ const SA_DEFAULT_Q = 0.95
 const SA_DEFAULT_K = 1.0
 const SA_DEFAULT_N_RESTARTS = 1
 const SA_TF_FLOOR = 1e-12
+# See `IG_DEFAULT_TIME_LIMIT_SEC`. When SA wraps an IG seed inside
+# `datadeps_schedule_dag_aot!(::SimulatedAnnealingScheduler, ...)`, both the
+# seed and the SA refinement share the same clock but are governed by their
+# own `time_limit_sec` fields, so setting both to 60 s does NOT double the
+# effective budget of the SA pipeline. See the docstring for details.
+const SA_DEFAULT_TIME_LIMIT_SEC = Inf
 
 """
     SimulatedAnnealingScheduler{S<:DataDepsScheduler, R<:Random.AbstractRNG} <: DataDepsScheduler
@@ -958,6 +990,16 @@ Fields:
 - `k::Float64`          — coefficient `k > 0` in Orsila §4.3 Eqs. 18, 19.
 - `n_restarts::Int`     — independent SA runs, each seeded from the
                           best-known solution so far (Orsila §5.3 rule 7).
+- `time_limit_sec::Float64` — wall-clock stop for the SA pipeline in
+                          `datadeps_schedule_dag_aot!`, checked between
+                          restarts and once per cooling level. `Inf`
+                          (default) disables the stop; a finite value
+                          returns the best-so-far state once the budget
+                          is exceeded. When an `IteratedGreedyScheduler`
+                          seed is used, the seed observes its own
+                          `time_limit_sec`; the two budgets are summed
+                          (worst-case), matching Julian's requested
+                          "quick-and-dirty" semantics.
 - `rng::R`              — RNG used for moves and acceptance sampling.
                           The `rng` is mutated during scheduling, so a
                           single `SimulatedAnnealingScheduler` instance
@@ -973,16 +1015,19 @@ struct SimulatedAnnealingScheduler{S<:DataDepsScheduler, R<:Random.AbstractRNG} 
     k::Float64
     n_restarts::Int
     rng::R
+    time_limit_sec::Float64
 
     function SimulatedAnnealingScheduler(inner::S;
                                           q::Real=SA_DEFAULT_Q,
                                           k::Real=SA_DEFAULT_K,
                                           n_restarts::Integer=SA_DEFAULT_N_RESTARTS,
-                                          rng::R=Random.default_rng()) where {S<:DataDepsScheduler, R<:Random.AbstractRNG}
+                                          rng::R=Random.default_rng(),
+                                          time_limit_sec::Real=SA_DEFAULT_TIME_LIMIT_SEC) where {S<:DataDepsScheduler, R<:Random.AbstractRNG}
         (0 < q < 1) || throw(ArgumentError("SimulatedAnnealingScheduler: q must be in (0, 1), got $q"))
         k > 0 || throw(ArgumentError("SimulatedAnnealingScheduler: k must be > 0, got $k"))
         n_restarts >= 1 || throw(ArgumentError("SimulatedAnnealingScheduler: n_restarts must be ≥ 1, got $n_restarts"))
-        return new{S, R}(inner, Float64(q), Float64(k), Int(n_restarts), rng)
+        time_limit_sec > 0 || throw(ArgumentError("SimulatedAnnealingScheduler: time_limit_sec must be > 0, got $time_limit_sec"))
+        return new{S, R}(inner, Float64(q), Float64(k), Int(n_restarts), rng, Float64(time_limit_sec))
     end
 end
 
@@ -996,7 +1041,8 @@ SimulatedAnnealingScheduler(; kwargs...) =
 Base.similar(s::SimulatedAnnealingScheduler) =
     SimulatedAnnealingScheduler(similar(s.inner);
                                  q=s.q, k=s.k, n_restarts=s.n_restarts,
-                                 rng=copy(s.rng))
+                                 rng=copy(s.rng),
+                                 time_limit_sec=s.time_limit_sec)
 
 datadeps_schedule_cache(sched::SimulatedAnnealingScheduler) =
     datadeps_schedule_cache(sched.inner)
@@ -1143,10 +1189,12 @@ function simulated_annealing_schedule!(state::ScheduleState, snap::MT.MetricsSna
                                         q::Real=SA_DEFAULT_Q, k::Real=SA_DEFAULT_K,
                                         n_restarts::Integer=SA_DEFAULT_N_RESTARTS,
                                         rng::Random.AbstractRNG=Random.default_rng(),
-                                        cache::Union{EFTCostCache, Nothing}=nothing)
+                                        cache::Union{EFTCostCache, Nothing}=nothing,
+                                        time_limit_sec::Real=SA_DEFAULT_TIME_LIMIT_SEC)
     (0 < q < 1) || throw(ArgumentError("simulated_annealing_schedule!: q must be in (0, 1)"))
     k > 0 || throw(ArgumentError("simulated_annealing_schedule!: k must be > 0"))
     n_restarts >= 1 || throw(ArgumentError("simulated_annealing_schedule!: n_restarts must be ≥ 1"))
+    time_limit_sec > 0 || throw(ArgumentError("simulated_annealing_schedule!: time_limit_sec must be > 0"))
 
     n_tasks = nv(dag_spec.g)
     n_tasks == 0 && return state
@@ -1180,7 +1228,17 @@ function simulated_annealing_schedule!(state::ScheduleState, snap::MT.MetricsSna
     expected_levels = max(1, ceil(Int, log(Tf / T0) / log(Float64(q))))
     max_iters_per_restart = 16 * L * expected_levels
 
+    # See the note on the same construction in `iterated_greedy_schedule!`:
+    # single `time_ns()` origin, unsigned elapsed subtraction, `Inf` disables
+    # via `typemax(UInt64)` so the check never trips. Inner check is placed
+    # at the top of the SA loop so a hit returns the current best-so-far
+    # without spending another neighbour proposal.
+    start_ns = time_ns()
+    budget_ns = isinf(time_limit_sec) ? typemax(UInt64) :
+                round(UInt64, time_limit_sec * 1e9)
+
     for _ in 1:n_restarts
+        (time_ns() - start_ns) >= budget_ns && break
         _copy_state!(current, overall_best)
         current_cost = overall_best_cost
         _copy_state!(best_in_run, current)
@@ -1194,6 +1252,7 @@ function simulated_annealing_schedule!(state::ScheduleState, snap::MT.MetricsSna
         while true
             (T <= Tf && R >= Rmax) && break
             total_iters >= max_iters_per_restart && break
+            (time_ns() - start_ns) >= budget_ns && break
 
             _copy_state!(candidate, current)
             _sa_propose_neighbor!(candidate, snap, dag_spec, all_procs, rng, cache)
@@ -1251,14 +1310,16 @@ function datadeps_schedule_dag_aot!(scheduler::SimulatedAnnealingScheduler,
                                                 n_iters=ig.n_iters,
                                                 destroy_frac=ig.destroy_frac,
                                                 rng=ig.rng,
-                                                cache=cache)
+                                                cache=cache,
+                                                time_limit_sec=ig.time_limit_sec)
     end
 
     final_state = simulated_annealing_schedule!(seed_state, snap, dag_spec, all_procs;
                                                  q=scheduler.q, k=scheduler.k,
                                                  n_restarts=scheduler.n_restarts,
                                                  rng=scheduler.rng,
-                                                 cache=cache)
+                                                 cache=cache,
+                                                 time_limit_sec=scheduler.time_limit_sec)
 
     @inbounds for idx in 1:n_tasks
         task = dag_spec.id_to_task[idx]
@@ -1362,9 +1423,13 @@ Fields:
 - `milp_Z`                  — forwarded to `JuMPScheduler`.
 - `ig_n_iters`              — forwarded to `IteratedGreedyScheduler`.
 - `ig_destroy_frac`         — forwarded to `IteratedGreedyScheduler`.
+- `ig_time_limit_sec`       — forwarded to `IteratedGreedyScheduler`
+                              (heuristic path). `Inf` disables the stop.
 - `sa_q`                    — forwarded to `SimulatedAnnealingScheduler`.
 - `sa_k`                    — forwarded to `SimulatedAnnealingScheduler`.
 - `sa_n_restarts`           — forwarded to `SimulatedAnnealingScheduler`.
+- `sa_time_limit_sec`       — forwarded to `SimulatedAnnealingScheduler`
+                              (heuristic path). `Inf` disables the stop.
 - `rng::R`                  — RNG shared by IG and SA on the heuristic
                               path; unused on the MILP path.
 """
@@ -1375,9 +1440,11 @@ struct OptimizingScheduler{R<:Random.AbstractRNG} <: DataDepsScheduler
     milp_Z::Float64
     ig_n_iters::Int
     ig_destroy_frac::Float64
+    ig_time_limit_sec::Float64
     sa_q::Float64
     sa_k::Float64
     sa_n_restarts::Int
+    sa_time_limit_sec::Float64
     rng::R
 
     function OptimizingScheduler(;
@@ -1387,9 +1454,11 @@ struct OptimizingScheduler{R<:Random.AbstractRNG} <: DataDepsScheduler
         milp_Z::Real=10.0,
         ig_n_iters::Integer=IG_DEFAULT_N_ITERS,
         ig_destroy_frac::Real=IG_DEFAULT_DESTROY_FRAC,
+        ig_time_limit_sec::Real=IG_DEFAULT_TIME_LIMIT_SEC,
         sa_q::Real=SA_DEFAULT_Q,
         sa_k::Real=SA_DEFAULT_K,
         sa_n_restarts::Integer=SA_DEFAULT_N_RESTARTS,
+        sa_time_limit_sec::Real=SA_DEFAULT_TIME_LIMIT_SEC,
         rng::R=Random.default_rng(),
     ) where {R<:Random.AbstractRNG}
         milp_threshold >= 0 || throw(ArgumentError("OptimizingScheduler: milp_threshold must be ≥ 0, got $milp_threshold"))
@@ -1397,9 +1466,11 @@ struct OptimizingScheduler{R<:Random.AbstractRNG} <: DataDepsScheduler
         ig_n_iters >= 0 || throw(ArgumentError("OptimizingScheduler: ig_n_iters must be ≥ 0, got $ig_n_iters"))
         (0 < ig_destroy_frac && ig_destroy_frac <= 1) ||
             throw(ArgumentError("OptimizingScheduler: ig_destroy_frac must be in (0, 1], got $ig_destroy_frac"))
+        ig_time_limit_sec > 0 || throw(ArgumentError("OptimizingScheduler: ig_time_limit_sec must be > 0, got $ig_time_limit_sec"))
         (0 < sa_q && sa_q < 1) || throw(ArgumentError("OptimizingScheduler: sa_q must be in (0, 1), got $sa_q"))
         sa_k > 0 || throw(ArgumentError("OptimizingScheduler: sa_k must be > 0, got $sa_k"))
         sa_n_restarts >= 1 || throw(ArgumentError("OptimizingScheduler: sa_n_restarts must be ≥ 1, got $sa_n_restarts"))
+        sa_time_limit_sec > 0 || throw(ArgumentError("OptimizingScheduler: sa_time_limit_sec must be > 0, got $sa_time_limit_sec"))
 
         return new{R}(
             optimizer,
@@ -1408,9 +1479,11 @@ struct OptimizingScheduler{R<:Random.AbstractRNG} <: DataDepsScheduler
             Float64(milp_Z),
             Int(ig_n_iters),
             Float64(ig_destroy_frac),
+            Float64(ig_time_limit_sec),
             Float64(sa_q),
             Float64(sa_k),
             Int(sa_n_restarts),
+            Float64(sa_time_limit_sec),
             rng,
         )
     end
@@ -1428,9 +1501,11 @@ Base.similar(s::OptimizingScheduler) =
                           milp_Z=s.milp_Z,
                           ig_n_iters=s.ig_n_iters,
                           ig_destroy_frac=s.ig_destroy_frac,
+                          ig_time_limit_sec=s.ig_time_limit_sec,
                           sa_q=s.sa_q,
                           sa_k=s.sa_k,
                           sa_n_restarts=s.sa_n_restarts,
+                          sa_time_limit_sec=s.sa_time_limit_sec,
                           rng=copy(s.rng))
 
 """
@@ -1466,12 +1541,14 @@ function datadeps_schedule_dag_aot!(sched::OptimizingScheduler, schedule, dag_sp
         ig = IteratedGreedyScheduler(GreedyScheduler();
                                      n_iters=sched.ig_n_iters,
                                      destroy_frac=sched.ig_destroy_frac,
-                                     rng=sched.rng)
+                                     rng=sched.rng,
+                                     time_limit_sec=sched.ig_time_limit_sec)
         sub = SimulatedAnnealingScheduler(ig;
                                           q=sched.sa_q,
                                           k=sched.sa_k,
                                           n_restarts=sched.sa_n_restarts,
-                                          rng=sched.rng)
+                                          rng=sched.rng,
+                                          time_limit_sec=sched.sa_time_limit_sec)
     end
 
     datadeps_schedule_dag_aot!(sub, schedule, dag_spec, all_procs, all_scope)
