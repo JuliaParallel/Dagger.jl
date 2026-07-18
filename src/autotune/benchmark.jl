@@ -33,9 +33,21 @@ Base.@kwdef struct BenchmarkConfig
     # Per-op axis overrides, e.g. Dict(:lu => Dict("size" => [512, 8192],
     # "eltype" => ["Float64"])). Only the mentioned axes are replaced.
     axes::Dict{Symbol,Dict{String,Vector}} = Dict{Symbol,Dict{String,Vector}}()
+    # Optional per-op allow-list of algorithm names. `nothing` (the default)
+    # benchmarks every registered candidate; a front-end that reuses shared
+    # runtime operations but only wants a subset (e.g. the regression suite
+    # timing Dagger's implementation, not every BLAS/GPU baseline) passes e.g.
+    # Dict(:lu => [:dagger_lu]). Ops absent from the dict keep all candidates.
+    algorithms::Union{Nothing,Dict{Symbol,Vector{Symbol}}} = nothing
     # Process-level FIXED knobs (each combination = its own worker process).
     nthreads::Vector{Int} = default_thread_domain()
     nprocs::Vector{Int} = Int[0]
+    # Extra top-level code spliced into every worker script *after* the process
+    # topology is established but *before* trials run. Front-ends use it to load
+    # Dagger on all workers (`@everywhere using Dagger`), pull in acceleration
+    # packages, and register any front-end-specific operations/algorithms into
+    # the worker's registry. Runs at the latest world age.
+    worker_preamble::String = ""
     # Global replacement for every op's "array_type" axis (`nothing` = per-op
     # defaults, auto-extended with "CuArray"/"ROCArray"/"DArray" when the
     # probe finds them usable).
@@ -45,6 +57,7 @@ Base.@kwdef struct BenchmarkConfig
     trial_time_limit::Float64 = 120.0   # hard wall per trial (watchdog)
     sample_time::Float64 = 1.0          # accumulate at least this much timing
     max_samples::Int = 7
+    gcsample::Bool = false              # run a full GC before every timed sample
     memory_fraction::Float64 = 0.5      # of Sys.total_memory(), per trial
     total_time_limit::Float64 = Inf     # overall budget; leftovers skipped
     # Environment.
@@ -260,7 +273,9 @@ function expand_trials(cfg::BenchmarkConfig, caps)
         opspec = operation(op)
         axes = _op_axes(cfg, opspec, caps)
         feats = opspec.enumerate_features(axes)
+        allowed = cfg.algorithms === nothing ? nothing : get(cfg.algorithms, op, nothing)
         for f0 in feats, alg in algorithms_for(op)
+            (allowed === nothing || alg.name in allowed) || continue
             alg.supports(f0) || continue
             f = copy(f0)
             fconfigs = _cross_config(alg.free_config)
@@ -280,7 +295,10 @@ function expand_trials(cfg::BenchmarkConfig, caps)
                 base = _base_form(f)
                 tgt = Symbol(f["array_type"])
                 usable = _pkg_usable(caps, alg.package)
-                if usable && tgt !== base
+                # `benchmark_only` operations synthesize their inputs directly
+                # in the target form (see `_timed_trial`), so they need no
+                # container converter for input staging.
+                if usable && !opspec.benchmark_only && tgt !== base
                     c = converter(base, tgt)
                     if c === nothing
                         usable = false
@@ -328,6 +346,7 @@ function _write_trials_file(path::String, trials::Vector{Trial}, cfg::BenchmarkC
             "trial_time_limit" => cfg.trial_time_limit,
             "sample_time"      => cfg.sample_time,
             "max_samples"      => cfg.max_samples,
+            "gcsample"         => cfg.gcsample,
             "memory_fraction"  => cfg.memory_fraction),
         "trials" => Any[_trial_to_dict(t) for t in trials])
     open(path, "w") do io
@@ -339,7 +358,10 @@ end
 # ---------------------------------------------------------------------------
 # Worker process management
 
-const WORKER_SCRIPT = raw"""
+# Fixed preamble that resolves the Autotune module before the front-end
+# preamble (which typically loads Dagger on all workers and establishes any
+# process topology) runs.
+const _WORKER_SCRIPT_HEAD = raw"""
 srcdir = get(ENV, "DAGGER_AUTOTUNE_SRC", @__DIR__)
 autotune = try
     Base.require(Main, :Dagger).Autotune
@@ -347,8 +369,16 @@ catch
     include(joinpath(srcdir, "Autotune.jl"))
     Main.Autotune
 end
-autotune.run_worker(ARGS[1], ARGS[2])
+import Distributed
 """
+
+# Build the worker script for this run, splicing in the front-end preamble
+# (e.g. `@everywhere using Dagger` and any suite-op registrations).
+function _worker_script(cfg::BenchmarkConfig)
+    return string(_WORKER_SCRIPT_HEAD, "\n",
+                  cfg.worker_preamble, "\n",
+                  "autotune.run_worker(ARGS[1], ARGS[2])\n")
+end
 
 function _worker_cmd(cfg::BenchmarkConfig, proj, script::String,
                      trialsfile::String, outdir::String, nt::Int, np::Int)
@@ -362,6 +392,55 @@ end
 
 _count_done(outdir, trials) = count(t -> isfile(_trial_path(outdir, t.id)), trials)
 
+# Keys that carry an operation's problem size; everything else identifies the
+# "series" a trial belongs to (same algorithm/config/categorical-features,
+# varying only in scale).
+const _SIZE_FEATURE_KEYS = ("m", "n", "k", "bytes", "sparse_size", "size")
+
+_nonsize_features(f::Dict{String,Any}) =
+    Dict{String,Any}(k => v for (k, v) in f if !(k in _SIZE_FEATURE_KEYS))
+
+# Identifies the monotonic-scale "series" of a trial: after a crash/OOM at some
+# scale, every not-yet-run trial in the same series at a larger-or-equal scale
+# is skipped (it would almost certainly OOM/crash too). Mirrors benchmark/'s
+# "skip this and all larger scales of the same suite/method" behavior.
+_series_key(t::Trial) = (t.op, t.algorithm, _canonical(t.config),
+                         _canonical(_nonsize_features(t.features)))
+
+function _trial_scale(t::Trial)
+    try
+        return Float64(operation(t.op).scale(t.features))
+    catch
+        return NaN
+    end
+end
+
+# Compact, fixed-width descriptor for one trial's live progress line, e.g.
+# "  [ 3/21] :linalg_lu/dagger  1000×1000 [DArray,rocm]". The trailing time is
+# appended by `_finish_progress_line` once the trial completes.
+function _progress_prefix(t::Trial, i::Int, n::Int)
+    f = t.features
+    tags = String[]
+    at = get(f, "array_type", "")
+    at == "" || push!(tags, String(at))
+    b = get(f, "backend", "cpu")
+    b == "cpu" || push!(tags, String(b))
+    tag = isempty(tags) ? "" : " [" * join(tags, ",") * "]"
+    desc = string(":", t.op, "/", t.algorithm, "  ", _size_label(f), tag)
+    return string("  [", lpad(i, length(string(n))), "/", n, "] ", rpad(desc, 44))
+end
+
+_read_trial_status(path::String) =
+    try
+        String(get(TOML.parsefile(path), "status", "ok"))
+    catch
+        "ok"
+    end
+
+# Close an open progress line with the elapsed wall time (and status if not ok).
+_finish_progress_line(io, t0::Float64, status::AbstractString) =
+    @printf(io, " %8.2f s%s\n", time() - t0, status == "ok" ? "" : "  <$status>")
+
 """
     _run_group(cfg, proj, script, trials, outdir, logdir, deadline) -> Bool
 
@@ -373,14 +452,33 @@ expired.
 """
 function _run_group(cfg::BenchmarkConfig, proj, script::String, trials::Vector{Trial},
                     outdir::String, logdir::String, deadline::Float64)
-    order = sort(trials; by = t -> t.id)
+    # Order by ascending scale (then id) so the smallest size of every series
+    # runs first: if it OOMs/crashes, the larger sizes are skipped before they
+    # ever spawn.
+    order = sort(trials; by = t -> (isnan(_trial_scale(t)) ? Inf : _trial_scale(t), t.id))
     nt = order[1].config["nthreads"]
     np = get(order[1].config, "nprocs", 0)
     startup_grace = 600.0                       # package load + precompile
     trial_grace = 2 * cfg.trial_time_limit + 60.0
     attempt = 0
+    # series key => smallest scale known to crash/timeout; that scale and any
+    # larger one in the same series is skipped.
+    vetoed = Dict{Any,Float64}()
     while true
-        remaining = [t for t in order if !isfile(_trial_path(outdir, t.id))]
+        remaining = Trial[]
+        for t in order
+            isfile(_trial_path(outdir, t.id)) && continue
+            thr = get(vetoed, _series_key(t), Inf)
+            sc = _trial_scale(t)
+            if isfinite(thr) && isfinite(sc) && sc >= thr
+                _write_result(_trial_path(outdir, t.id),
+                    TrialResult(t.op, t.algorithm, t.features, t.config;
+                                status="skipped_larger",
+                                error="a smaller scale of this series crashed/timed out"))
+                continue
+            end
+            push!(remaining, t)
+        end
         isempty(remaining) && return true
         if time() > deadline
             for t in remaining
@@ -410,17 +508,41 @@ function _run_group(cfg::BenchmarkConfig, proj, script::String, trials::Vector{T
                        "$(length(remaining)) trials, log at $log")
         proc = run(pipeline(cmd; stdout=log, stderr=log); wait=false)
 
+        # Live progress: the worker runs `remaining` in order and writes one
+        # result file per finished trial, so the count of result files tells us
+        # which trial is in flight. We leave the current trial's descriptor on an
+        # open line and close it with the elapsed wall time when its result
+        # appears (so growth with scale, and any hang, is visible at a glance).
+        # The first line's time also covers worker startup/compilation.
+        n = length(remaining)
         killed = false
-        done0 = _count_done(outdir, remaining)
-        last_done = done0
+        next_idx = 1
+        cur_start = time()
+        line_open = false
+        if cfg.verbose
+            print(stdout, _progress_prefix(remaining[1], 1, n)); flush(stdout)
+            line_open = true
+        end
+        last_done = 0
         watchdog = time() + startup_grace
         while process_running(proc)
-            sleep(1.0)
+            sleep(0.25)
             d = _count_done(outdir, remaining)
+            while cfg.verbose && next_idx <= d && next_idx <= n
+                st = _read_trial_status(_trial_path(outdir, remaining[next_idx].id))
+                _finish_progress_line(stdout, cur_start, st)
+                line_open = false
+                next_idx += 1
+                cur_start = time()
+                if next_idx <= n
+                    print(stdout, _progress_prefix(remaining[next_idx], next_idx, n))
+                    flush(stdout)
+                    line_open = true
+                end
+            end
             if d > last_done
                 last_done = d
                 watchdog = time() + trial_grace
-                _vprintln(cfg, "Autotune:   progress $(d)/$(length(remaining))")
             end
             if time() > watchdog || time() > deadline
                 killed = true
@@ -435,6 +557,9 @@ function _run_group(cfg::BenchmarkConfig, proj, script::String, trials::Vector{T
             end
         end
         wait(proc)
+        # A trial still in flight when the worker died/was killed leaves an open
+        # line; close it so the next message starts cleanly.
+        line_open && _finish_progress_line(stdout, cur_start, killed ? "killed" : "died")
 
         still = [t for t in remaining if !isfile(_trial_path(outdir, t.id))]
         isempty(still) && return true
@@ -455,6 +580,12 @@ function _run_group(cfg::BenchmarkConfig, proj, script::String, trials::Vector{T
         _write_result(_trial_path(outdir, victim.id),
             TrialResult(victim.op, victim.algorithm, victim.features, victim.config;
                         status=status, error="worker $(status); see $(log)"))
+        # Skip this and all larger scales of the same series on subsequent passes.
+        vsc = _trial_scale(victim)
+        if isfinite(vsc)
+            k = _series_key(victim)
+            vetoed[k] = min(get(vetoed, k, Inf), vsc)
+        end
     end
 end
 
@@ -478,7 +609,18 @@ Run the benchmark sweep and merge results into the on-disk database. See
 """
 benchmark(; kwargs...) = benchmark(BenchmarkConfig(; kwargs...))
 
-function benchmark(cfg::BenchmarkConfig)
+"""
+    run_sweep(cfg::BenchmarkConfig) -> Union{Nothing,Vector{TrialResult}}
+
+Execute the full benchmark sweep (project setup, trial expansion, subprocess
+workers with OOM-robust respawn) and return every `TrialResult` (both the
+pre-skipped configurations and the measured trials). Performs **no** database
+I/O and prints no report, so front-ends that manage their own persistence and
+reporting (e.g. the regression suite) can consume the raw results directly.
+Returns `nothing` for a `dry_run`. `benchmark(cfg)` is `run_sweep` plus a merge
+into the on-disk database.
+"""
+function run_sweep(cfg::BenchmarkConfig)
     t_start = time()
     mkpath(cfg.workdir)
     proj, caps = ensure_project(cfg)
@@ -494,7 +636,7 @@ function benchmark(cfg::BenchmarkConfig)
     logdir = joinpath(rundir, "logs")
     mkpath(outdir); mkpath(logdir)
     script = joinpath(rundir, "worker.jl")
-    write(script, WORKER_SCRIPT)
+    write(script, _worker_script(cfg))
 
     groups = Dict{Tuple{Int,Int},Vector{Trial}}()
     for t in trials
@@ -520,6 +662,13 @@ function benchmark(cfg::BenchmarkConfig)
             @warn "Autotune: unreadable result file $p" exception=err
         end
     end
+    return results
+end
+
+function benchmark(cfg::BenchmarkConfig)
+    t_start = time()
+    results = run_sweep(cfg)
+    results === nothing && return nothing   # dry run
 
     db = load_db(cfg.db_path)
     merge_results!(db, results)
@@ -598,7 +747,17 @@ function run_worker(trialsfile::AbstractString, outdir::AbstractString)
         isfile(path) && continue
         r = _run_one_trial(td, limits)
         _write_result(path, r)
-        GC.gc()
+        # Reclaim between trials on every process (distributed benchmarks leave
+        # garbage on the added workers too).
+        if nprocs() > 1
+            try
+                @everywhere GC.gc()
+            catch
+                GC.gc()
+            end
+        else
+            GC.gc()
+        end
     end
     return nothing
 end
@@ -684,15 +843,18 @@ function _timed_trial(opspec::OperationSpec, alg::AlgorithmSpec, op, algname,
         (idx <= length(inputs) && inputs[idx] isa AbstractArray) || continue
         inputs[idx] = copy(inputs[idx])
     end
-    for (i, x) in enumerate(inputs)
-        x isa AbstractArray || continue
-        cur = array_form(x)
-        tgt = target_form_for(alg, x)
-        cur === tgt && continue
-        c = converter(cur, tgt)
-        c === nothing && return TrialResult(op, algname, features, config;
-            status="failed", error="no converter $cur -> $tgt for input staging")
-        inputs[i] = c.convert(x, config)
+    # `benchmark_only` ops build inputs already in the target form.
+    if !opspec.benchmark_only
+        for (i, x) in enumerate(inputs)
+            x isa AbstractArray || continue
+            cur = array_form(x)
+            tgt = target_form_for(alg, x)
+            cur === tgt && continue
+            c = converter(cur, tgt)
+            c === nothing && return TrialResult(op, algname, features, config;
+                status="failed", error="no converter $cur -> $tgt for input staging")
+            inputs[i] = c.convert(x, config)
+        end
     end
     acc = haskey(features, "accuracy") ? Float64(features["accuracy"]) : nothing
     ctx = InvokeContext(algorithm_module(alg), features, config, acc)
@@ -726,27 +888,50 @@ function _timed_trial(opspec::OperationSpec, alg::AlgorithmSpec, op, algname,
     tlimit = Float64(get(limits, "trial_time_limit", 120.0))
     tsample = Float64(get(limits, "sample_time", 1.0))
     smax = Int(get(limits, "max_samples", 7))
+    gcsample = Bool(get(limits, "gcsample", false))
+    finalize = opspec.finalize_sample
 
     t0 = time()
     result = run1()                       # warmup (includes compilation)
+    finalize()
     twarm = time() - t0
 
-    err = opspec.check(features, base_inputs,
-                       result isa AbstractArray ? collect(result) : result)
-    err === nothing || return TrialResult(op, algname, features, config;
-                                          status="check_failed", error=String(err))
+    # `benchmark_only` ops skip validation: they carry no `check`, and
+    # `collect`ing a large distributed result purely to validate it could OOM
+    # the worker on a result the distributed op itself handled fine.
+    if !opspec.benchmark_only
+        err = opspec.check(features, base_inputs,
+                           result isa AbstractArray ? collect(result) : result)
+        err === nothing || return TrialResult(op, algname, features, config;
+                                              status="check_failed", error=String(err))
+    end
     result = nothing
 
+    # Per-sample wall time, allocated bytes, and allocation count (via `@timed`,
+    # so we avoid a BenchmarkTools dependency yet still capture what a front-end
+    # needs to build a full `Trial`). `finalize()` runs *outside* the timed
+    # region so per-sample GC/teardown never counts against the measurement.
     times = Float64[]
+    mems = Int[]
+    nallocs = Int[]
     budget_end = t0 + tlimit
     while (sum(times; init=0.0) < tsample || length(times) < 2) &&
           length(times) < smax && time() + twarm * 0.9 < budget_end
-        push!(times, @elapsed run1())
+        gcsample && GC.gc()
+        st = @timed run1()
+        finalize()
+        push!(times, st.time)
+        push!(mems, Int(st.bytes))
+        push!(nallocs, Int(Base.gc_alloc_count(st.gcstats)))
     end
-    isempty(times) && push!(times, twarm)  # compile-polluted, but better than nothing
+    if isempty(times)                     # compile-polluted, but better than nothing
+        push!(times, twarm); push!(mems, 0); push!(nallocs, 0)
+    end
 
+    imin = argmin(times)
     return TrialResult(op, algname, features, config;
-                       status="ok", time_s=minimum(times), samples=length(times))
+                       status="ok", time_s=times[imin], times_s=times,
+                       memory=mems[imin], allocs=nallocs[imin], samples=length(times))
 end
 
 # ---------------------------------------------------------------------------

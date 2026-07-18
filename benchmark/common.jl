@@ -1,13 +1,15 @@
 # Shared configuration for the Dagger benchmark suites.
 #
-# Included by BOTH the orchestrator (benchmarks.jl) and each per-run worker
-# (worker.jl). This file must NOT load Dagger or start any Distributed/Dagger
-# processes: keeping it Dagger-free is what lets the orchestrator coordinate
-# benchmarks without itself becoming a Dagger compute process, so an
-# out-of-memory benchmark can only take down a worker, never the orchestrator
-# that holds the collected results.
+# Included by BOTH the orchestrator (benchmarks.jl) and each engine worker
+# subprocess (via the worker preamble), before `suite_ops.jl`. It is kept
+# Dagger-free so it can be loaded anywhere; the Dagger-dependent benchmark
+# operation definitions live in `suite_ops.jl`.
 
 # --- Parse the benchmark specification -------------------------------------
+
+# Suites are registered as Autotune operations in `suite_ops.jl`. `dtable` is a
+# legacy opt-in suite that has not been ported to the Autotune engine.
+const KNOWN_SUITES = Set{String}(["array", "linalg", "sparse", "stencil"])
 
 const benches = Dict{String,Vector}()
 const suites = Set{String}()
@@ -16,8 +18,8 @@ for bench_spec in split(get(ENV, "BENCHMARK", "array:dagger;linalg:dagger;sparse
     parts = split(bench_spec, ':')
     suite = parts[1]
     bench_spec_methods = length(parts) >= 2 ? parts[2] : "dagger"
-    if !isfile(joinpath(@__DIR__, "suites", suite * ".jl"))
-        error("Unknown benchmark suite: $suite")
+    if !(suite in KNOWN_SUITES)
+        error("Unknown benchmark suite: $suite (known: $(join(sort(collect(KNOWN_SUITES)), ", ")))")
     end
     push!(suites, suite)
     for method_spec in split(bench_spec_methods, ',')
@@ -99,7 +101,7 @@ const bench_seconds = parse(Float64, get(ENV, "BENCHMARK_SECONDS", "30"))
 const bench_samples = parse(Int, get(ENV, "BENCHMARK_SAMPLES", "5"))
 
 # Rendering/logging are not used under AirspeedVelocity; these globals are kept
-# defined because the suite files reference them.
+# defined only because the legacy (unported) `suites/dtable.jl` references them.
 const render = ""
 const live = false
 const profile = false

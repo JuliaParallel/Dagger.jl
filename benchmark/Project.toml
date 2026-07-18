@@ -1,7 +1,9 @@
 # Dependencies for the Dagger benchmark suites, consumed by AirspeedVelocity.
 # Dagger itself is added automatically by AirspeedVelocity (at the revision under
-# test), so it must NOT be listed here. GPU backends (DaggerGPU/CUDA/AMDGPU) are
-# optional and should be supplied at run time via `benchpkg ... -a DaggerGPU,CUDA`.
+# test), so it must NOT be listed here. GPU backends are built into Dagger via
+# extensions; the accelerator's package (AMDGPU/CUDA/OpenCL/Metal/oneAPI) is
+# optional and supplied at run time via `benchpkg ... -a AMDGPU` (see the GPU
+# section of benchmarks.jl).
 [deps]
 Arrow = "69666777-d1a9-59fb-9406-91d4454c9d45"
 BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"

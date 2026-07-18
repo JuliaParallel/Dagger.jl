@@ -10,21 +10,32 @@
 # revisions, all configuration is done through environment variables (which stay
 # constant across the compared revisions).
 #
-# Out-of-process execution & OOM robustness
-# -----------------------------------------
-# This file acts as an *orchestrator*: it never loads Dagger or runs any
-# computation itself. Instead it spawns a child `julia` worker process (see
-# `worker.jl`) -- a plain OS subprocess, NOT a Distributed worker, so Dagger
-# does not co-opt the orchestrator as a compute process -- and drives it one
-# benchmark at a time. All benchmarks run in a single worker (to amortize
-# compilation) until one is killed by the OS OOM-killer or raises
-# `OutOfMemoryError`. When that happens the orchestrator: records the failure,
-# *skips that scale and all larger scales of the same suite/method*, starts a
-# fresh worker, and resumes with the remaining benchmarks. Each benchmark's
-# `BenchmarkTools.Trial` (timings, GC time, memory, allocations) is serialized
-# back and injected into `SUITE`, so AirspeedVelocity sees normal results even
-# though they were measured out-of-process. Benchmarks that never ran (skipped)
-# are simply absent from the results.
+# Architecture: shared engine + thin adapter
+# -------------------------------------------
+# The heavy lifting (the timing loop, per-sample measurement, subprocess/OOM
+# orchestration, memory-budget skipping, and result storage) lives in Dagger's
+# built-in autotuner, `Dagger.Autotune`. This script is a thin front-end over
+# that engine:
+#
+#   1. `suite_ops.jl` registers every regression case as a `benchmark_only`
+#      Autotune `OperationSpec` + a single `:dagger` `AlgorithmSpec` running the
+#      exact Dagger call the old suite ran. `benchmark_only` guarantees these
+#      ops are never chosen by runtime `invoke_best`/`select_plan`.
+#   2. `Autotune.run_sweep(cfg)` expands the trials and runs them out-of-process
+#      in restartable worker subprocesses, returning raw `TrialResult`s. This is
+#      the OOM-avoidance core: a benchmark that OOMs/wedges only takes down its
+#      worker, never this orchestrator, and its scale (plus every larger scale of
+#      the same series) is skipped before a fresh worker resumes.
+#   3. We adapt each `TrialResult` back into a `BenchmarkTools.Trial` (times, GC
+#      time, memory, allocations) wrapped in a `PrecomputedTrial` leaf, so
+#      AirspeedVelocity's `run(SUITE)`/`tune!(SUITE)` just hand back the
+#      already-measured data.
+#
+# Unlike the previous bespoke orchestrator, this front-end *does* load Dagger:
+# it needs the registry to enumerate trials, and the capability probes in
+# `suite_ops.jl` run tiny (8×8) Dagger ops to decide which cases a given
+# revision supports. Actual benchmark computation still happens only in the
+# worker subprocesses.
 #
 # Compare a tagged release against the current working tree, pointing
 # AirspeedVelocity at this working-tree script (used for both revisions). The
@@ -36,7 +47,7 @@
 #
 # When you pass `--script`, AirspeedVelocity does not read `benchmark/Project.toml`,
 # so suites that need extra packages must list them via `-a` (e.g. `Krylov` for
-# `sparse`, or `DTables,CSV,Arrow,OnlineStats,MemPool` for the legacy `dtable`).
+# `sparse`).
 #
 # In CI against published versions you can instead let AirspeedVelocity fetch
 # the script and `benchmark/Project.toml` automatically (omit `--script`):
@@ -53,13 +64,14 @@
 #                  cholesky, lu, qr, solve)
 #     - "sparse" : sparse distributed linear algebra (spmv, spgemm, and
 #                  iterative Krylov solve)
-#     - "dtable" : DTables data operations (legacy; opt-in, see below)
-#   Available methods: "raw" (non-Dagger), "dagger" (Dagger).
-#   Available accelerations: "cuda", "amdgpu" (require the relevant packages,
-#   see below). Defaults to "array:dagger;linalg:dagger;sparse:dagger".
-#
-#   "dtable" is intentionally NOT part of the default set (DTables is not
-#   actively developed). It remains available when explicitly requested.
+#     - "stencil": @stencil kernels
+#   Available methods: "dagger" (Dagger DArray) and "raw" (native array, no
+#   Dagger; only for the dense array/linalg cases). Combine with an accelerator
+#   as "method+accel", e.g. "dagger+amdgpu" (GPU-backed DArray) or "raw+amdgpu"
+#   (native GPU array).
+#   Available accelerations: "cuda", "amdgpu", "opencl", "metal", "oneapi"
+#   (require the relevant package, see below; a backend with no usable device is
+#   skipped). Defaults to "array:dagger;linalg:dagger;sparse:dagger;stencil:dagger".
 # - BENCHMARK_SCALE: Problem sizes, interpreted as the matrix dimension N. Given
 #   as a Julia expression evaluating to an integer or an iterable of integers
 #   (e.g. "1000", "[100, 1000, 10000]", or "100:100:1000"). When unset, a
@@ -78,18 +90,15 @@
 #   starts `numprocs` Distributed workers *inside the benchmark worker process*,
 #   each with `numthreads` threads. Defaults to no extra workers (everything
 #   runs on the worker process, which uses the orchestrator's thread count).
-# - BENCHMARK_REMOTES: Remote hosts on which to start workers, in the format
-#   accepted by `Distributed.addprocs` (colon-separated). Optional.
+#   All workers are local; distributed/remote execution is out of scope.
 # - BENCHMARK_SECONDS: Time budget (seconds) per benchmark. Defaults to "30".
 # - BENCHMARK_SAMPLES: Max samples per benchmark. Defaults to "5".
 # - BENCHMARK_PROC_TIMEOUT: Wall-clock seconds to wait for a single benchmark
 #   before assuming the worker is wedged, killing it, and treating it like an
 #   OOM (skip this and larger scales, restart). Defaults to "3600".
-# - BENCHMARK_WORKDIR: Directory for the orchestrator<->worker control files and
-#   per-benchmark raw result JSONs. Defaults to a fresh temp dir; set it to keep
-#   the intermediates around for debugging.
-# - BENCHMARK_DTABLE_ROWS: Row count for the legacy "dtable" suite only.
-#   Defaults to "1000000".
+# - BENCHMARK_WORKDIR: Directory for the engine's per-trial files and worker
+#   logs. Defaults to a fresh temp dir; set it to keep the intermediates around
+#   for debugging.
 # - BENCHMARK_JSON_OUTPUT: Only consulted for standalone execution (see below;
 #   ignored under AirspeedVelocity). Path to write a JSON summary of results
 #   to. Defaults to "benchmark_results/results_standalone.json" (both are
@@ -98,16 +107,37 @@
 #
 # GPU acceleration
 # ----------------
-# The "cuda"/"amdgpu" accelerations require `DaggerGPU` plus `CUDA`/`AMDGPU`.
-# These are intentionally not hard dependencies of the benchmark environment.
-# Make them available to AirspeedVelocity with the `--add` flag, e.g.:
+# GPU support is built into Dagger via package extensions: an accelerator just
+# needs its backend package loaded ("amdgpu" -> AMDGPU, "cuda" -> CUDA,
+# "opencl" -> OpenCL, "metal" -> Metal, "oneapi" -> oneAPI), which activates the
+# extension and registers that backend's GPU processors. These packages are
+# intentionally not hard dependencies of the benchmark environment; make the one
+# you need available to AirspeedVelocity with the `--add` flag, e.g.:
 #
-#     BENCHMARK=linalg:dagger+cuda \
+#     BENCHMARK="linalg:dagger+amdgpu,raw+amdgpu" \
 #         benchpkg Dagger --rev dirty --path . \
-#             --script benchmark/benchmarks.jl -a DaggerGPU,CUDA
+#             --script benchmark/benchmarks.jl -a AMDGPU
+#
+# (OpenCL additionally needs an ICD/driver, e.g. `-a OpenCL,pocl_jll` for a CPU
+# device, or a system-installed GPU driver.)
 
+using Dagger
 using BenchmarkTools
-import JSON3
+
+# `common.jl` (Dagger-free config: scales, block sizes, memory helpers) is
+# always safe to load; it holds no Dagger/engine dependencies.
+include(joinpath(@__DIR__, "common.jl"))
+
+# The shared benchmark engine (`Dagger.Autotune`) is a relatively new Dagger
+# feature. Because AirspeedVelocity runs *this* working-tree script against each
+# compared revision's *own* Dagger, a baseline revision predating the engine
+# won't have it. Rather than crash the whole comparison, such a revision yields
+# an empty SUITE (only benchmarks present on *both* revisions are compared) --
+# the same graceful-degradation contract the op-level capability probes provide.
+const HAS_ENGINE = isdefined(Dagger, :Autotune) &&
+    isdefined(Dagger.Autotune, :run_sweep) &&
+    isdefined(Dagger.Autotune, :BenchmarkConfig) &&
+    :benchmark_only in fieldnames(Dagger.Autotune.OperationSpec)
 
 # --- AirspeedVelocity integration ------------------------------------------
 # AirspeedVelocity calls `run(SUITE)` and serializes whatever it returns. We run
@@ -121,209 +151,172 @@ end
 Base.run(b::PrecomputedTrial, args...; kwargs...) = b.trial
 BenchmarkTools.tune!(b::PrecomputedTrial, args...; kwargs...) = b
 
-# --- Orchestration ---------------------------------------------------------
+# --- Engine configuration from the BENCHMARK_* environment -----------------
 
 const WORKDIR = let d = get(ENV, "BENCHMARK_WORKDIR", "")
     isempty(d) ? mktempdir() : (mkpath(d); abspath(d))
 end
-const WORKER_SCRIPT = get(ENV, "BENCHMARK_WORKER_SCRIPT", joinpath(@__DIR__, "worker.jl"))
-const JULIA_BIN = first(Base.julia_cmd().exec)
 const NTHREADS = Threads.nthreads()
 const PROC_TIMEOUT = parse(Float64, get(ENV, "BENCHMARK_PROC_TIMEOUT", "3600"))
-const POLL = 0.05
 
-worker_cmd() =
-    `$JULIA_BIN --project=$(Base.active_project()) --startup-file=no -t$NTHREADS $WORKER_SCRIPT $WORKDIR`
+# Build `SUITE` by registering the regression suite ops (via `suite_ops.jl`) and
+# running the shared engine over them. Kept in a function so it can be skipped
+# wholesale on a revision whose Dagger predates the engine (see `HAS_ENGINE`);
+# everything that touches `Dagger.Autotune` lives in here.
+function build_suite()
+    Autotune = Dagger.Autotune
 
-function _atomic_write(path, data)
-    tmp = path * ".tmp"
-    open(io -> write(io, data), tmp, "w")
-    mv(tmp, path; force=true)
-    return nothing
-end
-
-# --- Worker output capture --------------------------------------------------
-# `run(cmd; wait=false)` does NOT automatically connect the child to our own
-# stdout/stderr unless we ask it to (despite appearances, silently swallowing
-# the worker's output otherwise). We mirror the worker's combined
-# stdout/stderr to our own streams (so logs are visible live) *and* to
-# `WORKER_LOG`, so that if the worker fails to start (or dies unexpectedly) we
-# can print exactly what it said, including any error and stacktrace.
-struct _Tee <: IO
-    ios::Vector{IO}
-end
-Base.write(t::_Tee, x::UInt8) = (foreach(io -> (write(io, x); flush(io)), t.ios); 1)
-function Base.unsafe_write(t::_Tee, p::Ptr{UInt8}, n::UInt)
-    foreach(t.ios) do io
-        unsafe_write(io, p, n)
-        flush(io)
-    end
-    return n
-end
-Base.flush(t::_Tee) = foreach(flush, t.ios)
-
-const WORKER_LOG = joinpath(WORKDIR, "worker.log")
-const _worker_logio = Ref{Union{Nothing,IOStream}}(nothing)
-
-# Spawn a fresh worker, clearing the stale control files first.
-function spawn_worker()
-    rm(joinpath(WORKDIR, "ready"); force=true)
-    rm(joinpath(WORKDIR, "request.json"); force=true)
-    rm(joinpath(WORKDIR, "request.json.tmp"); force=true)
-    old = _worker_logio[]
-    old === nothing || close(old)
-    logio = open(WORKER_LOG, "w")
-    _worker_logio[] = logio
-    out = _Tee(IO[stdout, logio])
-    err = _Tee(IO[stderr, logio])
-    return run(pipeline(worker_cmd(); stdout=out, stderr=err); wait=false)
-end
-
-# Print the current worker's captured output (if any), clearly delineated, so
-# a startup failure or crash is impossible to miss even if it scrolled off the
-# terminal or was otherwise not visible live.
-function print_worker_log(header)
-    logio = _worker_logio[]
-    logio === nothing && return
-    flush(logio)
-    contents = try
-        read(WORKER_LOG, String)
-    catch
-        ""
-    end
-    println(stderr)
-    println(stderr, "="^80)
-    println(stderr, header)
-    println(stderr, "="^80)
-    print(stderr, isempty(contents) ? "(no output captured from worker)\n" : contents)
-    println(stderr, "="^80)
-    println(stderr)
-end
-
-function wait_ready(proc; timeout=600)
-    readypath = joinpath(WORKDIR, "ready")
-    t0 = time()
-    while !isfile(readypath)
-        process_running(proc) || return false
-        time() - t0 > timeout && return false
-        sleep(POLL)
-    end
-    return true
-end
-
-send_request(id, action, keypath) =
-    _atomic_write(joinpath(WORKDIR, "request.json"),
-                  JSON3.write((; id=id, action=action, keypath=keypath)))
-
-# Wait for a response to request `id`, or for the worker to die / time out.
-# Returns the status string ("ok"/"error"/"missing"/"oom"/"died"/"timeout").
-function await_response(proc, id)
-    resppath = joinpath(WORKDIR, "response_$(id).json")
-    t0 = time()
-    while true
-        if isfile(resppath)
-            resp = try
-                JSON3.read(read(resppath, String))
-            catch
-                nothing  # caught mid-write; retry
-            end
-            resp === nothing || return String(resp.status)
-        end
-        process_running(proc) || return "died"
-        time() - t0 > PROC_TIMEOUT && return "timeout"
-        sleep(POLL)
-    end
-end
-
-function run_all_external()
-    results = Dict{Vector{String},BenchmarkTools.Trial}()
-
-    proc = spawn_worker()
-    if !wait_ready(proc)
-        still_running = process_running(proc)
-        still_running && (kill(proc); try; wait(proc); catch; end)
-        print_worker_log("Benchmark worker failed to start" *
-                          (still_running ? " (timed out waiting for readiness)" :
-                           " (exited with code $(proc.exitcode))"))
-        @error "Benchmark worker failed to start; producing empty SUITE. See worker output above."
-        return results
+    # Ops to sweep: the registered ops for each requested suite (capability
+    # probes may leave a suite empty on a revision lacking a feature). These
+    # globals were populated by including `suite_ops.jl` (a *separate* top-level
+    # statement below, so the world age advances before this runs and the
+    # enumeration/generation closures it defines are callable from here).
+    selected_ops = Symbol[]
+    for s in sort(collect(suites))
+        append!(selected_ops, get(SUITE_OPS_BY_SUITE, s, Symbol[]))
     end
 
-    plan = JSON3.read(read(joinpath(WORKDIR, "plan.json"), String))
-    # Process in ascending-N order within each (suite, method) so that, after an
-    # OOM at some N, every remaining same-group item is at N >= the failing N and
-    # can be skipped.
-    items = [(; keypath=String[string(k) for k in p.keypath],
-               suite=String(p.suite), method=String(p.method), N=Int(p.N))
-             for p in plan]
-    sort!(items; by=it -> (it.suite, it.method, it.N))
-
-    # (suite, method) => smallest N known to OOM; that N and anything larger is skipped.
-    skip_at = Dict{Tuple{String,String},Int}()
-    req_id = 0
-
-    for it in items
-        thr = get(skip_at, (it.suite, it.method), typemax(Int))
-        if it.N >= 0 && it.N >= thr
-            @info "Skipping (>= OOM scale): $(join(it.keypath, " / "))"
-            continue
-        end
-
-        req_id += 1
-        send_request(req_id, "run", it.keypath)
-        status = await_response(proc, req_id)
-
-        if status == "ok"
-            results[it.keypath] =
-                BenchmarkTools.load(joinpath(WORKDIR, "result_$(req_id).json"))[1]
-        elseif status == "missing"
-            @warn "Worker has no such benchmark (capability probe differs?): $(join(it.keypath, " / "))"
-        elseif status == "error"
-            @warn "Benchmark errored (skipped): $(join(it.keypath, " / "))"
-        else  # "oom" / "died" / "timeout"
-            @warn "Benchmark $(status); skipping this and larger scales of $(it.suite)/$(it.method)" benchmark = join(it.keypath, " / ")
-            if status == "died"
-                print_worker_log("Benchmark worker died unexpectedly while running: $(join(it.keypath, " / "))")
-            end
-            if it.N >= 0
-                skip_at[(it.suite, it.method)] = min(get(skip_at, (it.suite, it.method), typemax(Int)), it.N)
-            end
-            if process_running(proc)
-                kill(proc)
-                try; wait(proc); catch; end
-            end
-            proc = spawn_worker()
-            if !wait_ready(proc)
-                still_running = process_running(proc)
-                still_running && (kill(proc); try; wait(proc); catch; end)
-                print_worker_log("Benchmark worker failed to restart" *
-                                  (still_running ? " (timed out waiting for readiness)" :
-                                   " (exited with code $(proc.exitcode))"))
-                @error "Worker failed to restart; returning partial results. See worker output above."
-                return results
-            end
+    # `@everywhere using <backend>` lines for the worker. The orchestrator itself
+    # loads these accelerator packages at top level (see `load_accelerators!`
+    # below) so the enumeration/`supports` gate can query each backend. Drivers
+    # are best-effort so a missing optional driver doesn't abort the worker.
+    accel_block = ""
+    for accel in accelerations
+        a = BENCH_ACCELS[accel]  # validated by `load_accelerators!`
+        accel_block *= "Distributed.@everywhere using $(a.pkg)\n"
+        for drv in a.drivers
+            accel_block *= "try; Distributed.@everywhere using $(drv); catch; end\n"
         end
     end
 
-    req_id += 1
-    send_request(req_id, "exit", String[])
-    if process_running(proc)
-        try; wait(proc); catch; end
+    common_path = abspath(joinpath(@__DIR__, "common.jl"))
+    ops_path = abspath(joinpath(@__DIR__, "suite_ops.jl"))
+
+    # Code spliced into every worker subprocess after `Dagger.Autotune` is
+    # resolved (see `Autotune._WORKER_SCRIPT_HEAD`) but before any trial runs. It
+    # establishes the (local) Distributed topology inside the worker (honoring
+    # BENCHMARK_PROCS), loads Dagger and any accelerator package everywhere,
+    # disables runtime autotuning so the native Dagger paths are measured, and
+    # registers the suite ops into the worker's registry. `\$`-escaped
+    # interpolations are evaluated in the worker; the paths/accel block are
+    # interpolated here.
+    worker_preamble = """
+    if haskey(ENV, "BENCHMARK_PROCS")
+        local npnt = parse.(Int, split(ENV["BENCHMARK_PROCS"], ":"))
+        npnt[1] > 0 && Distributed.addprocs(npnt[1];
+            exeflags=`--project=\$(Base.active_project()) -t \$(npnt[2])`)
     end
-    return results
+    Distributed.@everywhere using Dagger
+    $(accel_block)# Measure the native Dagger paths, never a tuned redirection.
+    try; Distributed.@everywhere Dagger.Autotune.disable!(); catch; end
+    # Make Dagger's eager scheduler enumerate every process in this worker.
+    try; Dagger.Sch.EAGER_CONTEXT[] = Dagger.Context(); catch; end
+    include(raw"$(common_path)")
+    include(raw"$(ops_path)")
+    """
+
+    cfg = Autotune.BenchmarkConfig(;
+        ops = selected_ops,
+        # One worker process, `NTHREADS` threads (the orchestrator's thread
+        # count, matching the old worker). BENCHMARK_PROCS adds Distributed
+        # procs *inside* that worker via the preamble, so `nprocs=[0]` (no `-p`).
+        nthreads = [NTHREADS],
+        nprocs = [0],
+        worker_preamble = worker_preamble,
+        project = :current,
+        trial_time_limit = PROC_TIMEOUT,
+        sample_time = bench_seconds,
+        max_samples = bench_samples,
+        gcsample = true,
+        memory_fraction = MEM_FRACTION,
+        workdir = WORKDIR,
+        # `run_sweep` performs no database I/O; this path is never written.
+        db_path = joinpath(WORKDIR, "autotune_db_unused.toml"),
+        verbose = true,
+    )
+
+    # Convert one `TrialResult` into a `BenchmarkTools.Trial`, preserving every
+    # per-sample wall time plus the fastest sample's memory/allocs (the engine
+    # doesn't capture GC time, so it's zeroed).
+    to_trial = function (r)
+        params = BenchmarkTools.Parameters(; samples=max(1, length(r.times_s)),
+                                           seconds=Float64(bench_seconds), evals=1,
+                                           gcsample=true)
+        times = isempty(r.times_s) ? Float64[Float64(r.time_s) * 1e9] :
+                Float64[t * 1e9 for t in r.times_s]
+        gctimes = zeros(Float64, length(times))
+        return BenchmarkTools.Trial(params, times, gctimes, Int(r.memory), Int(r.allocs))
+    end
+
+    suite = BenchmarkGroup()
+    results = isempty(selected_ops) ? Autotune.TrialResult[] : Autotune.run_sweep(cfg)
+    results === nothing && (results = Autotune.TrialResult[])
+    for r in results
+        r.status == "ok" || continue
+        haskey(SUITE_OP_META, r.op) || continue
+        meta = SUITE_OP_META[r.op]
+        N = Int(r.features["n"])
+        # `block` mirrors what the suite op used (a function of N/structure); it
+        # is not stored as a feature (see `suite_ops.jl`).
+        b = get(r.features, "structure", "dense") == "sparse" ?
+            banded_block(N) : square_block(N)
+        # Method label encodes the execution variant: "dagger"/"raw" for CPU,
+        # "dagger+amdgpu"/"raw+cuda"/... for an accelerator backend (matching the
+        # BENCHMARK spec's `method[+accel]`).
+        exec = get(r.features, "exec", String(r.algorithm))
+        backend = get(r.features, "backend", "cpu")
+        method = backend == "cpu" ? exec : "$(exec)+$(backend)"
+        suite[String[meta.suite, method, "N=$N (block $b)", meta.case]] =
+            PrecomputedTrial(to_trial(r))
+    end
+    return suite
 end
 
-# --- Assemble SUITE from the externally-measured trials ---------------------
+# Register the suite ops (populating the globals `build_suite` reads) as its own
+# top-level statement, so the world age advances before `build_suite` runs and
+# can call the enumeration/generation closures `suite_ops.jl` defines.
+HAS_ENGINE && include(joinpath(@__DIR__, "suite_ops.jl"))
 
-const SUITE = BenchmarkGroup()
-for (keypath, trial) in run_all_external()
-    SUITE[keypath] = PrecomputedTrial(trial)
+# Load each requested accelerator's package (which activates the corresponding
+# built-in Dagger GPU extension: GPU processors, `Dagger.scope` keywords, etc.).
+# This MUST run at top level -- not inside `build_suite` -- so the freshly
+# loaded backend's methods (`functional`, `to_scope`, ...) are in a world age
+# visible to the `supports`/functional gate that `build_suite`'s enumeration
+# runs; loading them mid-function would make those calls "too new" and every GPU
+# trial would be silently gated out. A backend that fails to load (or has no
+# usable device) simply contributes no trials.
+function load_accelerators!()
+    for accel in accelerations
+        a = get(BENCH_ACCELS, accel, nothing)
+        a === nothing && error("Unknown acceleration: $accel " *
+            "(known: $(join(sort(collect(keys(BENCH_ACCELS))), ", ")))")
+        for pkg in vcat(a.pkg, a.drivers)
+            try
+                Base.require(Main, Symbol(pkg))
+            catch err
+                pkg == a.pkg &&
+                    @warn "Could not load $pkg for accel '$accel'; its trials will be skipped." exception=err
+            end
+        end
+    end
+end
+HAS_ENGINE && load_accelerators!()
+
+const SUITE = if HAS_ENGINE
+    build_suite()
+else
+    @warn "Dagger.Autotune benchmark engine not present in this Dagger revision; " *
+          "producing an empty SUITE (only benchmarks available on both compared " *
+          "revisions are reported)."
+    BenchmarkGroup()
 end
 
 # --- Standalone execution (skipped when run under AirspeedVelocity) ---------
 # AirspeedVelocity includes this file inside a module and runs SUITE itself, so
 # the block below only triggers when the script is executed directly.
 if abspath(PROGRAM_FILE) == @__FILE__
+    import JSON3
+
     println()
     leaves = collect(BenchmarkTools.leaves(run(SUITE)))
     foreach(leaves) do (keys, trial)

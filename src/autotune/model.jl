@@ -276,6 +276,9 @@ package isn't loaded.
 """
 function select_plan(op::Symbol, inputs...; accuracy=nothing, db::ResultDB=current_db())
     opspec = operation(op)
+    # Benchmark-only operations (regression-suite kernels) are never runtime-
+    # selectable: they carry no runtime dispatch meaning.
+    opspec.benchmark_only && return nothing
     rf = opspec.extract_features(inputs...; accuracy=accuracy)
     scale = Float64(opspec.scale(rf))
     cur_nthreads = Threads.nthreads()

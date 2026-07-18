@@ -103,6 +103,21 @@ Base.@kwdef struct OperationSpec
     default_axes::Dict{String,Vector} = Dict{String,Vector}()
     check::Function = (features, base_inputs, result) -> nothing
     mutated_args::Vector{Int} = Int[]
+    # Called (with no arguments) after every timed sample and after the warmup,
+    # inside the worker. Its runtime is *not* counted toward the sample. Use it
+    # to release per-sample garbage that would otherwise accumulate across
+    # samples - e.g. an operation that allocates a fresh distributed result each
+    # call can trigger `Distributed.@everywhere GC.gc()` here. The default is a
+    # no-op; keeping it a plain closure avoids any dependency on Dagger or
+    # Distributed at the operation-spec level.
+    finalize_sample::Function = () -> nothing
+    # When true, this operation exists purely for offline benchmarking (e.g. a
+    # regression-suite kernel such as a DArray elementwise op or a stencil) and
+    # must never be chosen by runtime `invoke_best`/`select_plan`. Such ops are
+    # registered only inside the benchmark parent/worker processes (never at
+    # Dagger package load), so they don't ship in or pollute the runtime
+    # registry; this flag is a defensive guard on top of that.
+    benchmark_only::Bool = false
 end
 
 const OPERATIONS = Dict{Symbol,OperationSpec}()

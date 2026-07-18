@@ -21,12 +21,23 @@ One benchmarked (or failed) configuration.
   "timeout"             - the parent killed the worker while running this trial
   "crashed"             - the worker process died on this trial (OOM, segfault)
   "skipped_mem"         - estimated footprint exceeded the memory budget
+  "skipped_larger"      - not run because a smaller scale of the same series
+                          (same op/algorithm/config, larger size) already
+                          crashed/timed out
   "skipped_unavailable" - required package missing/non-functional in the
                           benchmark environment
 
 Only "ok" entries feed predictions. "failed"/"check_failed"/"timeout"/
 "crashed" entries actively veto the algorithm near and above that scale
 (see model.jl). "skipped_*" entries are neutral.
+
+Timing detail. `time_s` is the minimum wall time over samples (the statistic
+the cost model uses). `times_s` retains every per-sample wall time so that
+variance/median/mean can be recovered after the fact (empty for pre-Phase-1
+databases and for non-"ok" results). `memory`/`allocs` record the allocated
+bytes and allocation count of the fastest sample (BenchmarkTools-style
+`minimum(trial)` semantics), so a benchmark front-end can reconstruct a full
+picture without depending on BenchmarkTools.
 """
 struct TrialResult
     op::Symbol
@@ -34,17 +45,25 @@ struct TrialResult
     features::Dict{String,Any}
     config::Dict{String,Any}
     status::String
-    time_s::Float64          # NaN unless status == "ok"
+    time_s::Float64          # NaN unless status == "ok"; min over samples
     samples::Int
+    times_s::Vector{Float64} # per-sample wall times (empty unless timed)
+    memory::Int              # allocated bytes of the fastest sample
+    allocs::Int              # allocation count of the fastest sample
     error::String
     timestamp::String
 end
 
 function TrialResult(op, algorithm, features, config; status="ok", time_s=NaN,
-                     samples=0, error="", timestamp=string(Dates.now()))
+                     samples=0, times_s=Float64[], memory=0, allocs=0,
+                     error="", timestamp=string(Dates.now()))
+    times = Float64[Float64(t) for t in times_s]
+    isnan(time_s) && !isempty(times) && (time_s = minimum(times))
+    samples == 0 && !isempty(times) && (samples = length(times))
     return TrialResult(Symbol(op), Symbol(algorithm),
                        Dict{String,Any}(features), Dict{String,Any}(config),
                        String(status), Float64(time_s), Int(samples),
+                       times, Int(memory), Int(allocs),
                        String(error), String(timestamp))
 end
 
@@ -102,6 +121,9 @@ function _result_to_dict(r::TrialResult)
         "timestamp" => r.timestamp,
     )
     isfinite(r.time_s) && (d["time_s"] = r.time_s)
+    isempty(r.times_s) || (d["times_s"] = Any[Float64(t) for t in r.times_s])
+    r.memory == 0 || (d["memory"] = r.memory)
+    r.allocs == 0 || (d["allocs"] = r.allocs)
     isempty(r.error) || (d["error"] = r.error)
     return d
 end
@@ -113,6 +135,9 @@ function _result_from_dict(d::Dict{String,Any})
                        status = get(d, "status", "ok"),
                        time_s = Float64(get(d, "time_s", NaN)),
                        samples = Int(get(d, "samples", 0)),
+                       times_s = Float64[Float64(t) for t in get(d, "times_s", Any[])],
+                       memory = Int(get(d, "memory", 0)),
+                       allocs = Int(get(d, "allocs", 0)),
                        error = get(d, "error", ""),
                        timestamp = get(d, "timestamp", ""))
 end
