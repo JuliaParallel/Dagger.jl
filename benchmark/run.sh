@@ -44,4 +44,5 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export JULIA_LOAD_PATH="${REPO_ROOT}:@:@stdlib"
 export BENCHMARK="${BENCHMARK:-array:dagger,raw;linalg:dagger,raw;stencil:dagger}"
 
-exec julia --project="${REPO_ROOT}/benchmark" "${REPO_ROOT}/benchmark/benchmarks.jl" "$@"
+julia --project="${REPO_ROOT}/benchmark" "${REPO_ROOT}/benchmark/benchmarks.jl" "$@"
+julia --project="${REPO_ROOT}/benchmark" "${REPO_ROOT}/benchmark/plot.jl"
