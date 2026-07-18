@@ -2372,3 +2372,68 @@ end
         end
     end
 end
+
+# Regression test for the bench harness's `TimedScheduler` wrapper. Coupled
+# to the bench file only via `include`; the wrapper lives in bench-side code
+# because it exists to measure the AOT scheduling phase for paper figures.
+#
+# Why this test is here: under Dagger's default hierarchical partitioning,
+# `distribute_tasks_hierarchical!` calls `similar(queue.scheduler)` per
+# partition. A wrapper scheduler without an explicit `Base.similar` falls
+# through to `typeof(s)()` and errors out because `TimedScheduler` requires
+# an inner argument. Additionally, even after adding `similar`, a naive
+# implementation with a per-shard `Ref{UInt64}` counter would zero the
+# `sched_phase_ns` reading since shards write to their own private Refs.
+# Both are fixed in `bench/datadeps_schedulers/driver.jl` and this test
+# guards against regressions.
+@testset "TimedScheduler bench wrapper" begin
+    include(joinpath(@__DIR__, "..", "..", "bench", "datadeps_schedulers", "driver.jl"))
+
+    @testset "Base.similar shares atomic across partition shards" begin
+        inner = Dagger.OptimizingScheduler(; rng=MersenneTwister(0))
+        timed = TimedScheduler(inner)
+        @test timed.last_aot_ns isa Threads.Atomic{UInt64}
+        @test timed.last_aot_ns[] == 0
+
+        shard = similar(timed)
+        @test shard isa TimedScheduler
+        @test shard.inner !== timed.inner   # inner is `similar`-cloned per shard
+        @test shard.last_aot_ns === timed.last_aot_ns   # atomic is *shared*
+
+        # Shard-side writes are visible to the parent-side reader.
+        Threads.atomic_add!(shard.last_aot_ns, UInt64(42_000))
+        @test timed.last_aot_ns[] == 42_000
+
+        # Multiple shard writes accumulate (this is the hierarchical case).
+        shard2 = similar(timed)
+        Threads.atomic_add!(shard2.last_aot_ns, UInt64(8_000))
+        @test timed.last_aot_ns[] == 50_000
+    end
+
+    @testset "sched_phase_ns is non-zero under hierarchical run" begin
+        # Runs a small Cholesky through the actual harness pipeline under
+        # Dagger's default (hierarchical) mode. Before the fix this either
+        # crashed (`similar` missing) or reported `sched_phase_ns == 0`
+        # (shard-private Refs). Non-zero here proves both bugs are gone.
+        res = run_once(:cholesky, Dagger.GreedyScheduler(), 3, 16, 0;
+                       collect_logs=true, metrics_warm=false)
+        @test res.sched_phase_ns > 0
+        @test res.n_tasks > 0
+
+        # Fresh instance starts at zero (no state carryover across trials).
+        fresh = TimedScheduler(Dagger.GreedyScheduler())
+        @test fresh.last_aot_ns[] == 0
+    end
+
+    @testset "Cache and equivalence hooks forward to inner" begin
+        # Regression: TimedScheduler must not accidentally partition the
+        # cache under its own type — the whole point of forwarding is that
+        # a `TimedScheduler{Greedy}` sweep reuses `GreedyScheduler`'s
+        # cached DAG schedules. Verify both cache identity and dag/argspec
+        # equivalence forwarding.
+        inner = Dagger.GreedyScheduler()
+        timed = TimedScheduler(inner)
+        @test Dagger.datadeps_schedule_cache(timed) ===
+              Dagger.datadeps_schedule_cache(inner)
+    end
+end

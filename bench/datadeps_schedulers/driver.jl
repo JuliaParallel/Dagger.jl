@@ -16,21 +16,43 @@ include("summarize.jl")
 
 mutable struct TimedScheduler{S<:Dagger.DataDepsScheduler} <: Dagger.DataDepsScheduler
     inner::S
-    last_aot_ns::Base.RefValue{UInt64}
+    # Atomic accumulator so under Dagger's default hierarchical scheduling —
+    # which shards the scheduler via `similar` and runs partitions in
+    # parallel — every shard's AOT time is summed into a single counter
+    # without races. Under single-instance scheduling (no partitioning),
+    # exactly one `datadeps_schedule_dag_aot!` fires and the atomic holds
+    # the sole scheduling time. Under hierarchical, the value is the sum
+    # of scheduler CPU time across partition shards, which is the honest
+    # "total scheduler work per DAG" metric for Fig 3 / sched_phase_ms.
+    last_aot_ns::Threads.Atomic{UInt64}
+    # Primary ctor: fresh atomic per top-level wrapper.
     TimedScheduler(inner::S) where {S<:Dagger.DataDepsScheduler} =
-        new{S}(inner, Ref(UInt64(0)))
+        new{S}(inner, Threads.Atomic{UInt64}(0))
+    # Shard ctor: reuse the parent's atomic so shard-writes accumulate
+    # into the parent-visible counter. Called only from `Base.similar` below.
+    TimedScheduler(inner::S, shared::Threads.Atomic{UInt64}) where {S<:Dagger.DataDepsScheduler} =
+        new{S}(inner, shared)
 end
 
 function Dagger.datadeps_schedule_dag_aot!(sched::TimedScheduler, schedule, dag_spec, all_procs, all_scope)
     t0 = time_ns()
     Dagger.datadeps_schedule_dag_aot!(sched.inner, schedule, dag_spec, all_procs, all_scope)
-    sched.last_aot_ns[] = time_ns() - t0
+    Threads.atomic_add!(sched.last_aot_ns, time_ns() - t0)
     return
 end
 
 function Dagger.datadeps_schedule_task_jit!(sched::TimedScheduler, all_procs, all_scope, task_scope, spec, task)
     return Dagger.datadeps_schedule_task_jit!(sched.inner, all_procs, all_scope, task_scope, spec, task)
 end
+
+# Hierarchical scheduling calls `similar` per partition to obtain a fresh
+# scheduler shard. The default `Base.similar(::DataDepsScheduler) = typeof(s)()`
+# fails on `TimedScheduler` since the primary ctor requires an inner arg.
+# We provide an explicit `similar` that (1) recursively `similar`s the inner
+# scheduler so its own mutable state (RNG etc.) is refreshed per shard, and
+# (2) shares the parent's atomic accumulator so all shard-recorded AOT times
+# sum into the counter the driver reads after the run.
+Base.similar(s::TimedScheduler) = TimedScheduler(similar(s.inner), s.last_aot_ns)
 
 # Forward equivalence/cache hooks so cached schedules stay partitioned by the
 # inner scheduler's type (TimedScheduler{Greedy} reuses Greedy entries).
