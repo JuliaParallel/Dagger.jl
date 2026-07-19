@@ -380,6 +380,38 @@ function datadeps_schedule_dag_aot!(scheduler, schedule, dag_spec, all_procs, al
     return
 end
 
+"""
+    _propagate_aot_time_util!(spec::DTaskSpec, proc::Processor, task_time_ns::Real)
+
+Attach the AOT-computed per-task runtime estimate to `spec.options.time_util`
+so that `Sch.has_capacity` (via `schedule_one!`) can bypass its
+`metrics_lookup_runtime` scan of the MetricsTracker snapshot and use our
+estimate directly. `has_capacity` reads the value via
+`round(UInt64, time_util[T] * 1000^3)`, so `time_util` is stored keyed by
+`typeof(proc)` with the runtime expressed in seconds (Float64).
+
+Called by every AOT scheduler after it finalises a task's `(task, proc)`
+assignment. Non-finite / non-positive estimates are ignored (the
+`options.time_util === nothing` path is preserved for those, matching the
+pre-existing behaviour where `has_capacity` falls back to metrics lookup).
+"""
+function _propagate_aot_time_util!(spec::DTaskSpec, proc::Processor, task_time_ns::Real)
+    task_time_ns > 0 || return
+    isfinite(task_time_ns) || return
+    time_util_secs = Float64(task_time_ns) / 1e9
+    T = typeof(proc)
+    if spec.options.time_util === nothing
+        spec.options.time_util = Dict{Type,Any}(T => time_util_secs)
+    else
+        spec.options.time_util[T] = time_util_secs
+    end
+    return
+end
+
+## `_propagate_aot_time_util_from_cache!` — the `EFTCostCache`-aware wrapper —
+## is defined below, immediately after `EFTCostCache`, so its signature can
+## reference the type.
+
 const GREEDY_DEFAULT_RUNTIME_NS = UInt64(1_000_000_000)
 const GREEDY_DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
 const GREEDY_DEFAULT_OUTPUT_SIZE = UInt64(1_048_576)
@@ -391,11 +423,30 @@ const GREEDY_DEFAULT_OUTPUT_SIZE = UInt64(1_048_576)
 # to what the uncached path would compute, so cost-model claims and every
 # non-worsening / determinism / correctness invariant are preserved.
 struct EFTCostCache
-    task_times::Matrix{Float64}        
-    proc_compatible::Matrix{Bool}      
-    proc_spaces::Vector{MemorySpace}   
-    proc_to_idx::Dict{Processor, Int}  
-    move_rates::Matrix{Float64}        
+    task_times::Matrix{Float64}
+    proc_compatible::Matrix{Bool}
+    proc_spaces::Vector{MemorySpace}
+    proc_to_idx::Dict{Processor, Int}
+    move_rates::Matrix{Float64}
+end
+
+"""
+    _propagate_aot_time_util_from_cache!(dag_spec, cache, task_idx, proc)
+
+Convenience wrapper that pulls the AOT-computed runtime from an
+`EFTCostCache` (already built by the caller for its own cost-model use)
+and forwards it to `_propagate_aot_time_util!`. If the cache does not
+contain an entry for `proc`, or the entry is not a positive finite value,
+the propagation is a no-op — `has_capacity` will then take its usual
+fallback path.
+"""
+function _propagate_aot_time_util_from_cache!(dag_spec::DAGSpec, cache::EFTCostCache,
+                                                task_idx::Int, proc::Processor)
+    proc_idx = get(cache.proc_to_idx, proc, nothing)
+    proc_idx === nothing && return
+    task_time_ns = cache.task_times[task_idx, proc_idx]
+    _propagate_aot_time_util!(dag_spec.id_to_spec[task_idx], proc, task_time_ns)
+    return
 end
 
 function _build_eft_cost_cache(snap::MT.MetricsSnapshot, dag_spec::DAGSpec,
@@ -570,7 +621,10 @@ function datadeps_schedule_dag_aot!(scheduler::GreedyScheduler, schedule, dag_sp
     greedy_schedule!(state, snap, dag_spec, all_procs; cache=cache)
     for idx in 1:nv(dag_spec.g)
         task = dag_spec.id_to_task[idx]
-        schedule[task] = state.task_proc[idx]
+        proc = state.task_proc[idx]
+        schedule[task] = proc
+        # Propagate our AOT-computed per-task runtime to Sch's fast path.
+        _propagate_aot_time_util_from_cache!(dag_spec, cache, idx, proc)
     end
     return
 end
@@ -949,7 +1003,9 @@ function datadeps_schedule_dag_aot!(scheduler::IteratedGreedyScheduler,
 
     @inbounds for idx in 1:n_tasks
         task = dag_spec.id_to_task[idx]
-        schedule[task] = state.task_proc[idx]
+        proc = state.task_proc[idx]
+        schedule[task] = proc
+        _propagate_aot_time_util_from_cache!(dag_spec, cache, idx, proc)
     end
     return
 end
@@ -1323,7 +1379,9 @@ function datadeps_schedule_dag_aot!(scheduler::SimulatedAnnealingScheduler,
 
     @inbounds for idx in 1:n_tasks
         task = dag_spec.id_to_task[idx]
-        schedule[task] = final_state.task_proc[idx]
+        proc = final_state.task_proc[idx]
+        schedule[task] = proc
+        _propagate_aot_time_util_from_cache!(dag_spec, cache, idx, proc)
     end
     return
 end

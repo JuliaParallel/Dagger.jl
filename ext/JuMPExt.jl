@@ -11,7 +11,8 @@ import Dagger: JuMPScheduler, DAGSpec, datadeps_schedule_dag_aot!,
                proc_in_scope, DefaultScope,
                _eft_runtime_ns, _milp_edge_size_bytes, _milp_transfer_time_ns,
                GREEDY_DEFAULT_RUNTIME_NS,
-               ScheduleState, greedy_schedule!
+               ScheduleState, greedy_schedule!,
+               _propagate_aot_time_util!
 import Dagger.Sch
 # `jps/riteshsc26` folds `MetricsTracker` into the `Dagger` module via a
 # direct `include` (see `src/Dagger.jl`), so it is `Dagger.MetricsTracker`
@@ -161,7 +162,14 @@ function Dagger.datadeps_schedule_dag_aot!(sched::JuMPScheduler, schedule, dag_s
             throw(Sch.SchedulingException("JuMPScheduler: solver returned no processor assignment for task $k"))
         end
         task = dag_spec.id_to_task[k]
-        schedule[task] = all_procs[proc_idx]
+        proc = all_procs[proc_idx]
+        schedule[task] = proc
+        # Propagate our AOT-computed per-task runtime to Sch's fast path.
+        # `task_times[k, proc_idx]` is the same nanosecond estimate the MILP
+        # objective minimised for; using it as `options.time_util` means
+        # `Sch.has_capacity` skips its `metrics_lookup_runtime` snapshot scan
+        # for MILP-scheduled tasks.
+        _propagate_aot_time_util!(dag_spec.id_to_spec[k], proc, task_times[k, proc_idx])
     end
     return
 end
