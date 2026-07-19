@@ -54,18 +54,52 @@ end
 """
     _placement_procs() -> Vector{Dagger.Processor}
 
-Sorted list of processors across which tiles are distributed by
+Interleaved list of processors across which tiles are distributed by
 `make_spd_tiles` / `make_matmul_tiles`. Uses `Dagger.all_processors()`
 so multi-worker sessions (e.g. `julia -p 7 -t 12`) distribute tiles
 across every worker's `ThreadProc`s, while single-process sessions
-distribute across master's `ThreadProc`s only. Sort keys are `(pid,
-string(proc))`, deterministic across identical sessions so tile→proc
-placement is reproducible run-to-run.
+distribute across master's `ThreadProc`s only.
+
+Consecutive indices in the returned vector round-robin across worker
+pids: `[pid₁_t₁, pid₂_t₁, …, pidₙ_t₁, pid₁_t₂, pid₂_t₂, …]`. That
+guarantees small tile counts (e.g. `nt=2` → 4 tiles) are spread across
+multiple workers rather than concentrated on the first-listed pid.
+A naive `sort!(procs; by = pid)` would place all of master's
+ThreadProcs first and small `nt` would land only on master, silently
+underdistributing at small `nt` and confounding the tile-count axis
+with a hidden "how many workers happened to be hit" axis.
+
+Within each pid, the per-thread ordering is stable-sorted by
+`string(proc)` so tile→proc mapping is reproducible run-to-run for
+identical sessions.
 """
 function _placement_procs()
     procs = collect(Dagger.all_processors())
-    sort!(procs; by = p -> (Dagger.root_worker_id(p), string(p)))
-    return procs
+    # Group by owning worker pid so we can interleave across pids.
+    by_pid = Dict{Int, Vector{eltype(procs)}}()
+    for p in procs
+        pid = Dagger.root_worker_id(p)
+        push!(get!(by_pid, pid, eltype(procs)[]), p)
+    end
+    # Deterministic within-pid ordering for reproducibility.
+    for slice in values(by_pid)
+        sort!(slice, by = string)
+    end
+    # Interleave: take the k-th processor from each pid in pid order,
+    # then move to k+1. Yields [pid₁_t₁, pid₂_t₁, …, pid₁_t₂, …].
+    pids = sort!(collect(keys(by_pid)))
+    max_slice = maximum(length(v) for v in values(by_pid))
+    interleaved = eltype(procs)[]
+    sizehint!(interleaved, sum(length(v) for v in values(by_pid)))
+    for tid_idx in 1:max_slice
+        for pid in pids
+            slice = by_pid[pid]
+            if tid_idx <= length(slice)
+                push!(interleaved, slice[tid_idx])
+            end
+        end
+    end
+    return interleaved
 end
 
 """
