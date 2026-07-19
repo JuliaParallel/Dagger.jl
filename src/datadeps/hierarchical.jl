@@ -389,6 +389,12 @@ function build_aliasing_parallel(unique_arg_ws::Dict{ArgumentWrapper, ArgumentWr
         # identity/hash-equal to the entry in `arg_ws_vec` we later look up
         # (which would raise a `KeyError`). `_compute_aliasing_batch` preserves
         # input order, so pair by index.
+        @assert length(results) == length(worker_args) """build_aliasing_parallel: \
+_compute_aliasing_batch input/output length mismatch (single-worker branch). \
+wid=$wid myid=$(myid()) length(worker_args)=$(length(worker_args)) \
+length(results)=$(length(results)) \
+worker_args_hashes=$([w.hash for w in worker_args]) \
+result_first_hashes=$([r.first.hash for r in results])"""
         for i in eachindex(worker_args)
             arg_to_ainfo[worker_args[i]] = results[i].second
         end
@@ -404,6 +410,12 @@ function build_aliasing_parallel(unique_arg_ws::Dict{ArgumentWrapper, ArgumentWr
                 # Key by the *local* `arg_w` (see single-worker note above): a
                 # remote worker returns deserialized `ArgumentWrapper` copies
                 # that may not compare equal to our `arg_ws_vec` lookup keys.
+                @assert length(results) == length(worker_args) """build_aliasing_parallel: \
+_compute_aliasing_batch input/output length mismatch (multi-worker branch). \
+wid=$wid myid=$(myid()) length(worker_args)=$(length(worker_args)) \
+length(results)=$(length(results)) \
+worker_args_hashes=$([w.hash for w in worker_args]) \
+result_first_hashes=$([r.first.hash for r in results])"""
                 @lock all_results_lock begin
                     for i in eachindex(worker_args)
                         arg_to_ainfo[worker_args[i]] = results[i].second
