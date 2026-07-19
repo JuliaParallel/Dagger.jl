@@ -25,12 +25,35 @@ function _milp_compatible_procs(spec, all_procs::Vector{Dagger.Processor})
     return filter(p -> proc_in_scope(p, task_scope), all_procs)
 end
 
+# Practical ceiling on the assignment variable count before the underlying
+# solver's model-setup phase becomes unreliable. HiGHS's
+# `HFactor::setupGeneral` overflows an internal `std::vector` sizing at
+# roughly 5e4 assignment variables (empirically, matmul K=512 × 96 procs
+# ≈ 4.9e4 binaries aborts the process via `std::terminate` before any
+# Julia handler fires). Raising `SchedulingException` here converts a
+# process-abort into a clean, catchable Julia error so the driver's
+# per-cell exception handler can mark the cell "MILP intractable" and
+# continue the sweep. This is the same K-vs-tractability boundary that
+# motivates `OptimizingScheduler`'s adaptive dispatch — surfacing it as
+# an explicit precondition rather than a solver crash makes the
+# tractability story a design decision rather than a fragility artifact.
+const JUMP_MAX_ASSIGNMENT_VARS = 10_000
+
 function Dagger.datadeps_schedule_dag_aot!(sched::JuMPScheduler, schedule, dag_spec, all_procs, all_scope)
     n_tasks = nv(dag_spec.g)
     n_tasks == 0 && return
 
-    snap = MT.snapshot(MT.global_metrics_cache())
     nprocs = length(all_procs)
+    n_assignment_vars = n_tasks * nprocs
+    if n_assignment_vars > JUMP_MAX_ASSIGNMENT_VARS
+        throw(Sch.SchedulingException(
+            "JuMPScheduler: MILP model too large ($n_tasks tasks × $nprocs processors = " *
+            "$n_assignment_vars assignment variables > $JUMP_MAX_ASSIGNMENT_VARS practical ceiling). " *
+            "Above this ceiling HiGHS's model-setup overflows an internal sizing computation. " *
+            "OptimizingScheduler routes above its milp_threshold to a heuristic pipeline to avoid this bound."))
+    end
+
+    snap = MT.snapshot(MT.global_metrics_cache())
 
     # Cost matrix uses the same EFT fallback as the heuristics so MILP
     # optimises against an identical cost model.
