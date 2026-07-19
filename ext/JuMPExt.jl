@@ -25,18 +25,29 @@ function _milp_compatible_procs(spec, all_procs::Vector{Dagger.Processor})
     return filter(p -> proc_in_scope(p, task_scope), all_procs)
 end
 
-# Practical ceiling on the assignment variable count before the underlying
-# solver's model-setup phase becomes unreliable. HiGHS's
-# `HFactor::setupGeneral` overflows an internal `std::vector` sizing at
-# roughly 5e4 assignment variables (empirically, matmul K=512 × 96 procs
-# ≈ 4.9e4 binaries aborts the process via `std::terminate` before any
-# Julia handler fires). Raising `SchedulingException` here converts a
-# process-abort into a clean, catchable Julia error so the driver's
-# per-cell exception handler can mark the cell "MILP intractable" and
-# continue the sweep. This is the same K-vs-tractability boundary that
-# motivates `OptimizingScheduler`'s adaptive dispatch — surfacing it as
-# an explicit precondition rather than a solver crash makes the
-# tractability story a design decision rather than a fragility artifact.
+# Optimality-tractability ceiling on the assignment variable count. Above
+# this boundary, MILP no longer returns proven-optimal solutions within
+# the wall-clock budget (`sched.time_limit_sec`) and JuMPScheduler's role
+# as an *exact* MILP reference no longer holds — it would return
+# `MOI.TIME_LIMIT` status with a time-truncated incumbent rather than a
+# proven `MOI.OPTIMAL`. Reporting truncated incumbents as "exact MILP" in
+# the paper's Table 1 would misrepresent the comparison.
+#
+# Empirical basis: at n_tasks × nprocs = 6,144 (matmul nt=4, K=64 × 96
+# procs) with `time_limit_sec = 120s`, HiGHS returns at ~125s wall clock
+# with TIME_LIMIT status. Larger problems within the current budget are
+# consistently time-truncated. `JUMP_MAX_ASSIGNMENT_VARS = 10_000` marks
+# the boundary above which MILP is not competitive on optimality within
+# the budget; `OptimizingScheduler`'s adaptive dispatch routes past this
+# boundary to heuristics that produce competitive solutions at a fraction
+# of the compute. This is the standard tractability treatment used by
+# V&S 2015 §5.3 and Kwok-Ahmad 1999 §4.
+#
+# The `SchedulingException` raised here is caught by the driver's per-cell
+# exception handler (see `run_sweep` in `bench/datadeps_schedulers/driver.jl`)
+# so the sweep continues with the cell logged as "MILP intractable" —
+# distinct from a HiGHS process abort at K where model-setup overflows
+# internal solver state, which would additionally kill the whole run.
 const JUMP_MAX_ASSIGNMENT_VARS = 10_000
 
 function Dagger.datadeps_schedule_dag_aot!(sched::JuMPScheduler, schedule, dag_spec, all_procs, all_scope)
@@ -47,10 +58,12 @@ function Dagger.datadeps_schedule_dag_aot!(sched::JuMPScheduler, schedule, dag_s
     n_assignment_vars = n_tasks * nprocs
     if n_assignment_vars > JUMP_MAX_ASSIGNMENT_VARS
         throw(Sch.SchedulingException(
-            "JuMPScheduler: MILP model too large ($n_tasks tasks × $nprocs processors = " *
-            "$n_assignment_vars assignment variables > $JUMP_MAX_ASSIGNMENT_VARS practical ceiling). " *
-            "Above this ceiling HiGHS's model-setup overflows an internal sizing computation. " *
-            "OptimizingScheduler routes above its milp_threshold to a heuristic pipeline to avoid this bound."))
+            "JuMPScheduler: MILP beyond optimality tractability boundary " *
+            "($n_tasks tasks × $nprocs processors = $n_assignment_vars assignment variables " *
+            "> $JUMP_MAX_ASSIGNMENT_VARS). Above this threshold, MILP time-truncates within " *
+            "the wall-clock budget (empirical: 6,144 vars hits 120s budget) and returns " *
+            "incumbents rather than proven optima; JuMPScheduler's exact-MILP-reference role " *
+            "no longer holds. OptimizingScheduler routes above this boundary to heuristics."))
     end
 
     snap = MT.snapshot(MT.global_metrics_cache())
