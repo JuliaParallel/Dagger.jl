@@ -402,6 +402,15 @@ result_first_hashes=$([r.first.hash for r in results])"""
         all_results_lock = ReentrantLock()
         @sync for (wid, worker_args) in by_worker
             Threads.@spawn begin
+                # `local` is REQUIRED here: the single-worker branch above
+                # binds `results` in the enclosing function scope, so without
+                # `local` every `Threads.@spawn` closure below would assign to
+                # (and read from) that same shared variable, racing with sibling
+                # partitions. The observed symptom is a `BoundsError` where
+                # `results[i]` accesses a Vector whose length matches a *different*
+                # partition's `worker_args`, hitting index-out-of-bounds when the
+                # winning writer's partition happens to have fewer args than ours.
+                local results
                 results = if wid == myid()
                     _compute_aliasing_batch(worker_args)
                 else
