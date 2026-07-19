@@ -16,9 +16,26 @@ function stage(ctx::Context, node::Map)
     partitioning = primary.partitioning
     concat = primary.concat
     f = node.f
-    for i=eachindex(domains)
-        inps = map(x->chunks(x)[i], inputs)
-        thunks[i] = Dagger.@spawn map(f, inps...)
+    if uniform_execution()
+        # Under uniform (MPI) execution, spawn per-chunk datadeps tasks: wrap
+        # each chunk in In(...), not the whole chunks(::DArray) array. The plain
+        # `@spawn` path below issues a concurrent `execute!` status-broadcast wave
+        # that deadlocks under MPI. Datadeps serializes those moves safely.
+        Dagger.spawn_datadeps() do
+            for i in eachindex(domains)
+                inps = ntuple(j -> In(chunks(inputs[j])[i]), length(inputs))
+                thunks[i] = Dagger.spawn(map, f, inps...)
+            end
+        end
+    else
+        # Non-uniform (e.g. Distributed) execution: spawn directly, without
+        # datadeps. This avoids forcing datadeps aliasing analysis on the chunk
+        # element type, which is unsupported for non-isbits eltypes (e.g. the
+        # `OnlineStats` accumulators produced by `mean`/`var`/`std`).
+        for i in eachindex(domains)
+            inps = map(x->chunks(x)[i], inputs)
+            thunks[i] = Dagger.@spawn map(f, inps...)
+        end
     end
     RT = Base.promote_op(node.f, map(eltype, node.inputs)...)
     return DArray(RT, domain(primary), domainchunks(primary), thunks, partitioning, concat)

@@ -59,7 +59,7 @@ macro opcounter(category, count=1)
     @gensym old
     opcounter_sym = Symbol(:OPCOUNTER_, cat_sym)
     if !isdefined(__module__, opcounter_sym)
-        __module__.eval(:(#=const=# $opcounter_sym = OpCounter()))
+        __module__.eval(:(#=const=# $opcounter_sym = $OpCounter()))
     end
     esc(quote
         if $(QuoteNode(cat_sym)) in $OPCOUNTER_CATEGORIES
@@ -71,3 +71,6 @@ macro opcounter(category, count=1)
     end)
 end
 opcounter(mod::Module, category::Symbol) = getfield(mod, Symbol(:OPCOUNTER_, category)).value[]
+
+# No-op debug helper for tracking largest values (used alongside @opcounter)
+largest_value_update!(::Any) = nothing

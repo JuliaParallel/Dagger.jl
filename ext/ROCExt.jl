@@ -47,6 +47,30 @@ function Dagger.aliasing(x::ROCArray{T}) where T
     return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
 end
 
+# MPI (SPMD) integration: aliasing spans broadcast from an owner rank must be
+# stamped with that rank so same-device addresses on different ranks never
+# falsely alias (every rank has myid() == 1 under SPMD)
+Dagger.mpi_remap_space(space::ROCVRAMMemorySpace, owner::Int) =
+    ROCVRAMMemorySpace(owner, space.device_id)
+Dagger.value_memory_space(x::ROCArray) = Dagger.memory_space(x)
+
+# Page-lock host staging buffers (~2x DtoH/HtoD bandwidth); AMDGPU.Mem.pin
+# does not register a finalizer, so we unpin on GC
+Dagger.gpu_memory_kind(::ROCArray) = :ROC
+Dagger.gpu_memory_kind(::ROCVRAMMemorySpace) = :ROC
+function Dagger.pin_buffer!(::Val{:ROC}, buf::DenseArray)
+    ptr = Ptr{Cvoid}(pointer(buf))
+    sz = sizeof(buf)
+    # Avoid double-registering a finalizer if already page-locked
+    if !AMDGPU.Mem.is_pinned(ptr)
+        AMDGPU.Mem.pin(ptr, sz)
+        finalizer(buf) do b
+            AMDGPU.Mem.unpin(Ptr{Cvoid}(pointer(b)))
+        end
+    end
+    return nothing
+end
+
 function Dagger.unsafe_free!(x::ROCArray)
     AMDGPU.unsafe_free!(x)
     return
@@ -142,13 +166,20 @@ end
 function Dagger.move!(to_space::ROCVRAMMemorySpace, from_space::ROCVRAMMemorySpace, to::AbstractArray{T,N}, from::AbstractArray{T,N}) where {T,N}
     sync_with_context(from_space)
     with_context!(to_space)
-    copyto!(to, from)
+    if Dagger.needs_multi_span_copy(to_space, from_space, to, from)
+        Dagger.multi_span_move!(to, from)
+    else
+        copyto!(to, from)
+    end
     return
 end
 
 # Out-of-place HtoD
 function Dagger.move(from_proc::CPUProc, to_proc::ROCArrayDeviceProc, x)
     with_context(to_proc) do
+        if x isa DenseArray && isbitstype(eltype(x))
+            Dagger.pin_buffer!(:ROC, x)
+        end
         arr = adapt(ROCArray, x)
         AMDGPU.synchronize()
         return arr
@@ -160,6 +191,9 @@ function Dagger.move(from_proc::CPUProc, to_proc::ROCArrayDeviceProc, x::Chunk)
     @assert myid() == to_w
     cpu_data = remotecall_fetch(unwrap, from_w, x)
     with_context(to_proc) do
+        if cpu_data isa DenseArray && isbitstype(eltype(cpu_data))
+            Dagger.pin_buffer!(:ROC, cpu_data)
+        end
         arr = adapt(ROCArray, cpu_data)
         AMDGPU.synchronize()
         return arr
@@ -181,7 +215,8 @@ end
 function Dagger.move(from_proc::ROCArrayDeviceProc, to_proc::CPUProc, x)
     with_context(from_proc) do
         AMDGPU.synchronize()
-        _x = adapt(Array, x)
+        _x = x isa DenseArray && isbitstype(eltype(x)) ?
+             Dagger.pinned_host_array(x) : adapt(Array, x)
         AMDGPU.synchronize()
         return _x
     end
@@ -198,8 +233,7 @@ end
 function Dagger.move(from_proc::ROCArrayDeviceProc, to_proc::CPUProc, x::ROCArray{T,N}) where {T,N}
     with_context(AMDGPU.device(x).device_id) do
         AMDGPU.synchronize()
-        _x = Array{T,N}(undef, size(x))
-        copyto!(_x, x)
+        _x = Dagger.pinned_host_array(x)
         AMDGPU.synchronize()
         return _x
     end
@@ -224,13 +258,14 @@ function Dagger.move(from_proc::ROCArrayDeviceProc, to_proc::ROCArrayDeviceProc,
             to_arr
         end
     else
-        # Different node, use DtoH, serialization, HtoD
+        # Different node, use DtoH, serialization, HtoD (pinned host staging)
         host_copy = remotecall_fetch(from_proc.owner, from_proc, x) do from_proc, x
             return with_context(from_proc) do
-                Array(unwrap(x))
+                Dagger.pinned_host_array(unwrap(x))
             end
         end
         return with_context(to_proc) do
+            Dagger.pin_buffer!(:ROC, host_copy)
             return ROCArray(host_copy)
         end
     end
@@ -252,10 +287,11 @@ function Dagger.move(from_proc::ROCArrayDeviceProc, to_proc::ROCArrayDeviceProc,
     else
         host_copy = remotecall_fetch(from_proc.owner, from_proc, x) do from_proc, x
             return with_context(from_proc) do
-                Array(unwrap(x))
+                Dagger.pinned_host_array(x)
             end
         end
         return with_context(to_proc) do
+            Dagger.pin_buffer!(:ROC, host_copy)
             return ROCArray(host_copy)
         end
     end
@@ -401,6 +437,89 @@ function Dagger.to_scope(::Val{:rocm_gpus}, sc::NamedTuple)
 end
 Dagger.scope_key_precedence(::Val{:rocm_gpu}) = 2
 Dagger.scope_key_precedence(::Val{:rocm_gpus}) = 1
+
+# MPI data plane: pass ROCArrays to MPI directly when the library is ROCm-aware
+# (DAGGER_MPI_GPU_DIRECT=0/1 forces the decision; detection is best-effort)
+const MPI_GPU_DIRECT = Ref{Union{Nothing,Bool}}(nothing)
+function mpi_gpu_direct_enabled()
+    v = MPI_GPU_DIRECT[]
+    v !== nothing && return v
+    env = get(ENV, "DAGGER_MPI_GPU_DIRECT", "")
+    v = if !isempty(env)
+        something(tryparse(Bool, env), false)
+    else
+        Dagger.mpi_library_gpu_aware(:ROC)
+    end
+    MPI_GPU_DIRECT[] = v
+    return v
+end
+Dagger.mpi_device_direct(x::AMDGPU.StridedROCArray) = mpi_gpu_direct_enabled()
+Dagger.mpi_device_sync(x::ROCArray) = AMDGPU.HIP.device_synchronize()
+Dagger.mpi_device_sync(::ROCVRAMMemorySpace) = AMDGPU.HIP.device_synchronize()
+
+# Same-node device IPC via hipIpc*: pool-backed ROCArrays may not be
+# exportable, so the sender stages into a hipMalloc allocation and ships its
+# 64-byte handle; the receiver maps it and copies device-to-device.
+# DAGGER_IPC=0 disables the path.
+const GPU_IPC = Ref{Union{Nothing,Bool}}(nothing)
+function ipc_enabled()
+    v = GPU_IPC[]
+    v !== nothing && return v
+    v = something(tryparse(Bool, get(ENV, "DAGGER_IPC", "true")), true)
+    GPU_IPC[] = v
+    return v
+end
+Dagger.ipc_eligible(::ROCVRAMMemorySpace, ::ROCVRAMMemorySpace) = ipc_enabled()
+
+struct HIPIpcInfo{T,N}
+    handle::AMDGPU.HIP.hipIpcMemHandle_t
+    shape::Dims{N}
+end
+# Token keeps a hipMalloc'd staging allocation alive until ipc_release!
+struct HIPIpcToken
+    ptr::Ptr{Cvoid}
+    bytesize::Int
+end
+function Dagger.ipc_export(value::AMDGPU.StridedROCArray{T,N}) where {T,N}
+    with_context!(Dagger.memory_space(value))
+    nbytes = sizeof(value)
+    ptr_ref = Ref{Ptr{Cvoid}}()
+    AMDGPU.HIP.hipMalloc(ptr_ref, nbytes)
+    staged = unsafe_wrap(ROCArray, Ptr{T}(ptr_ref[]), size(value); own=false)
+    copyto!(staged, value)
+    AMDGPU.HIP.device_synchronize()
+    handle_ref = Ref{AMDGPU.HIP.hipIpcMemHandle_t}()
+    AMDGPU.HIP.hipIpcGetMemHandle(handle_ref, ptr_ref[])
+    return HIPIpcInfo{T,N}(handle_ref[], size(value)), HIPIpcToken(ptr_ref[], nbytes)
+end
+function Dagger.ipc_release!(token::HIPIpcToken)
+    token.ptr == C_NULL && return
+    AMDGPU.HIP.hipFree(token.ptr)
+    return
+end
+function _ipc_open(info::HIPIpcInfo{T,N}) where {T,N}
+    ptr_ref = Ref{Ptr{Cvoid}}()
+    AMDGPU.HIP.hipIpcOpenMemHandle(ptr_ref, info.handle,
+                                   AMDGPU.HIP.hipIpcMemLazyEnablePeerAccess)
+    src = unsafe_wrap(ROCArray, Ptr{T}(ptr_ref[]), info.shape; own=false)
+    return src, ptr_ref[]
+end
+function Dagger.ipc_copyto!(dest::AMDGPU.StridedROCArray{T,N}, info::HIPIpcInfo{T,N}) where {T,N}
+    @assert size(dest) == info.shape "IPC shape mismatch: $(size(dest)) != $(info.shape)"
+    with_context!(Dagger.memory_space(dest))
+    src, raw = _ipc_open(info)
+    try
+        copyto!(dest, src)
+        AMDGPU.HIP.device_synchronize()
+    finally
+        AMDGPU.HIP.hipIpcCloseMemHandle(raw)
+    end
+    return dest
+end
+function Dagger.ipc_materialize(info::HIPIpcInfo{T,N}) where {T,N}
+    dest = ROCArray{T,N}(undef, info.shape)
+    return Dagger.ipc_copyto!(dest, info)
+end
 
 const DEVICES = Dict{Int, HIPDevice}()
 const CONTEXTS = Dict{Int, HIPContext}()

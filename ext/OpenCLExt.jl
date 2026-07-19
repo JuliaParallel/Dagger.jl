@@ -52,6 +52,16 @@ function Dagger.aliasing(x::CLArray{T}) where T
     return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
 end
 
+# MPI (SPMD) integration: stamp owning rank on CL memory spaces
+Dagger.mpi_remap_space(space::CLMemorySpace, owner::Int) =
+    CLMemorySpace(owner, space.device)
+Dagger.value_memory_space(x::CLArray) = Dagger.memory_space(x)
+
+# Staging-pool key; no portable OpenCL pin of arbitrary host buffers
+Dagger.gpu_memory_kind(::CLArray) = :OpenCL
+Dagger.gpu_memory_kind(::CLMemorySpace) = :OpenCL
+Dagger.pin_buffer!(::Val{:OpenCL}, buf::DenseArray) = nothing
+
 function Dagger.unsafe_free!(x::CLArray)
     OpenCL.unsafe_free!(x)
     return
@@ -112,6 +122,17 @@ function sync_with_context(x::Union{Dagger.Processor,Dagger.MemorySpace})
     end
 end
 
+# No OpenCL-aware MPI / CUDA-style IPC in Julia; always host-stage
+Dagger.mpi_device_direct(::CLArray) = false
+function Dagger.mpi_device_sync(x::CLArray)
+    space = Dagger.memory_space(x)
+    if Dagger.root_worker_id(space) == myid()
+        _sync_with_context(space)
+    end
+    return
+end
+Dagger.mpi_device_sync(space::CLMemorySpace) = sync_with_context(space)
+
 # Allocations
 Dagger.allocate_array_func(::CLArrayDeviceProc, ::typeof(rand)) = OpenCL.rand
 Dagger.allocate_array_func(::CLArrayDeviceProc, ::typeof(randn)) = OpenCL.randn
@@ -141,13 +162,20 @@ end
 function Dagger.move!(to_space::CLMemorySpace, from_space::CLMemorySpace, to::AbstractArray{T,N}, from::AbstractArray{T,N}) where {T,N}
     sync_with_context(from_space)
     with_context!(to_space)
-    copyto!(to, from)
+    if Dagger.needs_multi_span_copy(to_space, from_space, to, from)
+        Dagger.multi_span_move!(to, from)
+    else
+        copyto!(to, from)
+    end
     return
 end
 
 # Out-of-place HtoD
 function Dagger.move(from_proc::CPUProc, to_proc::CLArrayDeviceProc, x)
     with_context(to_proc) do
+        if x isa DenseArray && isbitstype(eltype(x))
+            Dagger.pin_buffer!(:OpenCL, x)
+        end
         arr = adapt(CLArray, x)
         cl.finish(cl.queue())
         return arr
@@ -159,6 +187,9 @@ function Dagger.move(from_proc::CPUProc, to_proc::CLArrayDeviceProc, x::Chunk)
     @assert myid() == to_w
     cpu_data = remotecall_fetch(unwrap, from_w, x)
     with_context(to_proc) do
+        if cpu_data isa DenseArray && isbitstype(eltype(cpu_data))
+            Dagger.pin_buffer!(:OpenCL, cpu_data)
+        end
         arr = adapt(CLArray, cpu_data)
         cl.finish(cl.queue())
         return arr
@@ -181,7 +212,8 @@ end
 function Dagger.move(from_proc::CLArrayDeviceProc, to_proc::CPUProc, x)
     with_context(from_proc) do
         cl.finish(cl.queue())
-        _x = adapt(Array, x)
+        _x = x isa DenseArray && isbitstype(eltype(x)) ?
+             Dagger.pinned_host_array(x) : adapt(Array, x)
         cl.finish(cl.queue())
         return _x
     end
@@ -198,8 +230,7 @@ end
 function Dagger.move(from_proc::CLArrayDeviceProc, to_proc::CPUProc, x::CLArray{T,N}) where {T,N}
     with_context(from_proc) do
         cl.finish(cl.queue())
-        _x = Array{T,N}(undef, size(x))
-        copyto!(_x, x)
+        _x = Dagger.pinned_host_array(x)
         cl.finish(cl.queue())
         return _x
     end
@@ -223,18 +254,19 @@ function Dagger.move(from_proc::CLArrayDeviceProc, to_proc::CLArrayDeviceProc, x
             return to_arr
         end
     else
-        # Different node, use DtoH, serialization, HtoD
+        # Different node, use DtoH, serialization, HtoD (pinned host staging)
         host_copy = remotecall_fetch(from_proc.owner, from_proc, x) do from_proc, x
             return with_context(from_proc) do
-                Array(unwrap(x))
+                Dagger.pinned_host_array(unwrap(x))
             end
         end
         return with_context(to_proc) do
+            Dagger.pin_buffer!(:OpenCL, host_copy)
             return CLArray(host_copy)
         end
     end
 end
-function Dagger.move(from_proc::CLArrayDeviceProc, to_proc::CLArrayDeviceProc, x::CLArray) where T<:CLArray
+function Dagger.move(from_proc::CLArrayDeviceProc, to_proc::CLArrayDeviceProc, x::CLArray)
     if from_proc == to_proc
         # Same process and GPU, no change
         _sync_with_context(from_proc)
@@ -249,11 +281,12 @@ function Dagger.move(from_proc::CLArrayDeviceProc, to_proc::CLArrayDeviceProc, x
             return to_arr
         end
     else
-        # Different node, use DtoH, serialization, HtoD
+        # Different node, use DtoH, serialization, HtoD (pinned host staging)
         host_copy = with_context(from_proc) do
-            return Array(x)
+            return Dagger.pinned_host_array(x)
         end
         return with_context(to_proc) do
+            Dagger.pin_buffer!(:OpenCL, host_copy)
             return CLArray(host_copy)
         end
     end

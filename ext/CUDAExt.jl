@@ -145,13 +145,20 @@ end
 function Dagger.move!(to_space::CUDAVRAMMemorySpace, from_space::CUDAVRAMMemorySpace, to::AbstractArray{T,N}, from::AbstractArray{T,N}) where {T,N}
     sync_with_context(from_space)
     with_context!(to_space)
-    copyto!(to, from)
+    if Dagger.needs_multi_span_copy(to_space, from_space, to, from)
+        Dagger.multi_span_move!(to, from)
+    else
+        copyto!(to, from)
+    end
     return
 end
 
 # Out-of-place HtoD
 function Dagger.move(from_proc::CPUProc, to_proc::CuArrayDeviceProc, x)
     with_context(to_proc) do
+        if x isa DenseArray && isbitstype(eltype(x))
+            Dagger.pin_buffer!(:CUDA, x)
+        end
         arr = adapt(CuArray, x)
         CUDA.synchronize()
         return arr
@@ -163,6 +170,9 @@ function Dagger.move(from_proc::CPUProc, to_proc::CuArrayDeviceProc, x::Chunk)
     @assert myid() == to_w
     cpu_data = remotecall_fetch(unwrap, from_w, x)
     with_context(to_proc) do
+        if cpu_data isa DenseArray && isbitstype(eltype(cpu_data))
+            Dagger.pin_buffer!(:CUDA, cpu_data)
+        end
         arr = adapt(CuArray, cpu_data)
         CUDA.synchronize()
         return arr
@@ -184,7 +194,8 @@ end
 function Dagger.move(from_proc::CuArrayDeviceProc, to_proc::CPUProc, x)
     with_context(from_proc) do
         CUDA.synchronize()
-        _x = adapt(Array, x)
+        _x = x isa DenseArray && isbitstype(eltype(x)) ?
+             Dagger.pinned_host_array(x) : adapt(Array, x)
         CUDA.synchronize()
         return _x
     end
@@ -201,8 +212,7 @@ end
 function Dagger.move(from_proc::CuArrayDeviceProc, to_proc::CPUProc, x::CuArray{T,N}) where {T,N}
     with_context(from_proc) do
         CUDA.synchronize()
-        _x = Array{T,N}(undef, size(x))
-        copyto!(_x, x)
+        _x = Dagger.pinned_host_array(x)
         CUDA.synchronize()
         return _x
     end
@@ -225,7 +235,7 @@ function Dagger.move(from_proc::CuArrayDeviceProc, to_proc::CuArrayDeviceProc, x
             CUDA.synchronize()
             return to_arr
         end
-    elseif Dagger.system_uuid(from_proc.owner) == Dagger.system_uuid(to_proc.owner) && from_proc.device_uuid == to_proc.device_uuid
+    elseif Dagger.same_node(Dagger.current_acceleration(), from_proc.owner, to_proc.owner) && from_proc.device_uuid == to_proc.device_uuid
         # Same node, we can use IPC
         ipc_handle, eT, shape = remotecall_fetch(from_proc.owner, x) do x
             arr = unwrap(x)
@@ -254,13 +264,14 @@ function Dagger.move(from_proc::CuArrayDeviceProc, to_proc::CuArrayDeviceProc, x
             return arr
         end
     else
-        # Different node, use DtoH, serialization, HtoD
+        # Different node, use DtoH, serialization, HtoD (pinned host staging)
         host_copy = remotecall_fetch(from_proc.owner, from_proc, x) do from_proc, x
             return with_context(from_proc) do
-                Array(unwrap(x))
+                Dagger.pinned_host_array(unwrap(x))
             end
         end
         return with_context(to_proc) do
+            Dagger.pin_buffer!(:CUDA, host_copy)
             return CuArray(host_copy)
         end
     end
@@ -280,9 +291,10 @@ function Dagger.move(from_proc::CuArrayDeviceProc, to_proc::CuArrayDeviceProc, x
         end
     else
         host_copy = with_context(from_proc) do
-            return Array(x)
+            return Dagger.pinned_host_array(x)
         end
         return with_context(to_proc) do
+            Dagger.pin_buffer!(:CUDA, host_copy)
             return CuArray(host_copy)
         end
     end
@@ -428,6 +440,105 @@ function Dagger.to_scope(::Val{:cuda_gpus}, sc::NamedTuple)
     return Dagger.UnionScope(scopes)
 end
 Dagger.scope_key_precedence(::Val{:cuda_gpus}) = 1
+
+# MPI (SPMD) integration: aliasing spans broadcast from an owner rank must be
+# stamped with that rank so same-device addresses on different ranks never
+# falsely alias (every rank has myid() == 1 under SPMD)
+Dagger.mpi_remap_space(space::CUDAVRAMMemorySpace, owner::Int) =
+    CUDAVRAMMemorySpace(owner, space.device, space.device_uuid)
+# Acceleration-free memory space of a raw value, for chunk record labeling
+Dagger.value_memory_space(x::CuArray) = Dagger.memory_space(x)
+
+# MPI data plane: pass CuArrays to MPI directly when the library is CUDA-aware
+# (DAGGER_MPI_GPU_DIRECT=0/1 forces the decision; detection is best-effort)
+const MPI_GPU_DIRECT = Ref{Union{Nothing,Bool}}(nothing)
+function mpi_gpu_direct_enabled()
+    v = MPI_GPU_DIRECT[]
+    v !== nothing && return v
+    env = get(ENV, "DAGGER_MPI_GPU_DIRECT", "")
+    v = if !isempty(env)
+        something(tryparse(Bool, env), false)
+    else
+        Dagger.mpi_library_gpu_aware(:CUDA)
+    end
+    MPI_GPU_DIRECT[] = v
+    return v
+end
+Dagger.mpi_device_direct(x::CUDA.StridedCuArray) = mpi_gpu_direct_enabled()
+# Device-wide sync: producers/consumers run on other tasks' streams, so a
+# current-stream synchronize is not enough at the communication boundary
+# (device_synchronize yields to the Julia scheduler while waiting)
+Dagger.mpi_device_sync(x::CuArray) = CUDA.device_synchronize()
+Dagger.mpi_device_sync(::CUDAVRAMMemorySpace) = CUDA.device_synchronize()
+
+# Page-lock host staging buffers (~2x DtoH/HtoD bandwidth); CUDA.pin
+# registers a GC finalizer that unregisters the memory
+Dagger.gpu_memory_kind(::CuArray) = :CUDA
+Dagger.gpu_memory_kind(::CUDAVRAMMemorySpace) = :CUDA
+Dagger.pin_buffer!(::Val{:CUDA}, buf::DenseArray) = (CUDA.pin(buf); nothing)
+
+# Same-node device IPC: pool-backed CuArrays are not cuIpc-exportable, so the
+# sender stages into a direct (cuMemAlloc) allocation and ships its 64-byte
+# handle; the receiver maps it and copies device-to-device.
+# DAGGER_IPC=0 disables the path.
+const GPU_IPC = Ref{Union{Nothing,Bool}}(nothing)
+function ipc_enabled()
+    v = GPU_IPC[]
+    v !== nothing && return v
+    v = something(tryparse(Bool, get(ENV, "DAGGER_IPC", "true")), true)
+    GPU_IPC[] = v
+    return v
+end
+Dagger.ipc_eligible(::CUDAVRAMMemorySpace, ::CUDAVRAMMemorySpace) = ipc_enabled()
+
+# The driver API wrappers live in CUDA itself on 5.x and in CUDACore
+# (DeviceMemory's home module) on 6.x
+const CUDADRV = isdefined(CUDA, :cuIpcGetMemHandle) ? CUDA :
+                parentmodule(CUDA.DeviceMemory)
+
+struct CuIpcInfo{T,N}
+    handle::CUDADRV.CUipcMemHandle
+    shape::Dims{N}
+end
+function Dagger.ipc_export(value::CUDA.StridedCuArray{T,N}) where {T,N}
+    # Activate the source device — MPI execute! may have bound the dest context
+    with_context!(Dagger.memory_space(value))
+    buf = CUDADRV.alloc(CUDA.DeviceMemory, sizeof(value))
+    staged = unsafe_wrap(CuArray, convert(CUDA.CuPtr{T}, buf.ptr), size(value))
+    copyto!(staged, value)
+    CUDA.device_synchronize()
+    handle_ref = Ref{CUDADRV.CUipcMemHandle}()
+    CUDADRV.cuIpcGetMemHandle(handle_ref, convert(CUDA.CuPtr{Nothing}, buf.ptr))
+    return CuIpcInfo{T,N}(handle_ref[], size(value)), buf
+end
+Dagger.ipc_release!(buf::CUDA.DeviceMemory) = CUDADRV.free(buf)
+function _ipc_open(info::CuIpcInfo{T,N}) where {T,N}
+    ptr_ref = Ref{CUDA.CuPtr{Cvoid}}()
+    if isdefined(CUDADRV, :cuIpcOpenMemHandle_v2)
+        CUDADRV.cuIpcOpenMemHandle_v2(ptr_ref, info.handle, CUDADRV.CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS)
+    else
+        CUDADRV.cuIpcOpenMemHandle(ptr_ref, info.handle, CUDADRV.CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS)
+    end
+    src = unsafe_wrap(CuArray, convert(CUDA.CuPtr{T}, ptr_ref[]), info.shape)
+    return src, ptr_ref[]
+end
+function Dagger.ipc_copyto!(dest::CUDA.StridedCuArray{T,N}, info::CuIpcInfo{T,N}) where {T,N}
+    @assert size(dest) == info.shape "IPC shape mismatch: $(size(dest)) != $(info.shape)"
+    with_context!(Dagger.memory_space(dest))
+    src, raw = _ipc_open(info)
+    try
+        copyto!(dest, src)
+        CUDA.device_synchronize()
+    finally
+        CUDA.cuIpcCloseMemHandle(raw)
+    end
+    return dest
+end
+function Dagger.ipc_materialize(info::CuIpcInfo{T,N}) where {T,N}
+    # Caller must have set the destination device context (ipc_copyto! does)
+    dest = CuArray{T,N}(undef, info.shape)
+    return Dagger.ipc_copyto!(dest, info)
+end
 
 const DEVICES = Dict{Int, CuDevice}()
 const CONTEXTS = Dict{Int, CuContext}()

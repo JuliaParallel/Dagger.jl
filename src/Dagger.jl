@@ -53,6 +53,13 @@ import Adapt
 include("lib/util.jl")
 include("utils/dagdebug.jl")
 
+# Type definitions (for MPI/acceleration)
+include("types/processor.jl")
+include("types/scope.jl")
+include("types/memory-space.jl")
+include("types/chunk.jl")
+include("types/acceleration.jl")
+
 # Distributed data
 include("utils/locked-object.jl")
 include("utils/tasks.jl")
@@ -77,12 +84,14 @@ include("queue.jl")
 include("thunk.jl")
 include("utils/fetch.jl")
 include("utils/chunks.jl")
+include("weakchunk.jl")
 include("utils/logging.jl")
 include("submission.jl")
 abstract type MemorySpace end
 include("utils/memory-span.jl")
 include("utils/interval_tree.jl")
 include("memory-spaces.jl")
+include("acceleration.jl")
 
 # Task scheduling
 include("compute.jl")
@@ -90,6 +99,7 @@ include("utils/clock.jl")
 include("utils/system_uuid.jl")
 include("utils/caching.jl")
 include("sch/Sch.jl"); using .Sch
+include("tochunk.jl")
 
 # Data dependency task queue
 include("datadeps/aliasing.jl")
@@ -111,6 +121,7 @@ include("stream-transfer.jl")
 include("file-io.jl")
 
 # Array computations
+include("procgrid.jl")
 include("array/darray.jl")
 include("array/alloc.jl")
 include("array/map-reduce.jl")
@@ -133,6 +144,7 @@ include("array/svd.jl")
 
 # GPU
 include("gpu.jl")
+include("utils/span_copy.jl")
 
 # Logging
 include("utils/logging-events.jl")

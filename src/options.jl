@@ -26,10 +26,13 @@ Stores per-task options to be passed to the scheduler.
 - `storage_leaf_tag::Union{MemPool.Tag,Nothing}=nothing`: If not `nothing`, specifies the MemPool storage leaf tag to associate with the task's result. This tag can be used by MemPool's storage devices to manipulate their behavior, such as the file name used to store data on disk."
 - `storage_retain::Union{Bool,Nothing}=nothing`: The value of `retain` to pass to `MemPool.poolset` when constructing the result `Chunk`. `nothing` defaults to `false`.
 - `name::Union{String,Nothing}=nothing`: If not `nothing`, annotates the task with a name for logging purposes.
+- `tag::Union{UInt32,Nothing}=nothing`: (Datadeps/MPI) MPI message tag for this task; assigned automatically if `nothing`.
 - `stream_input_buffer_amount::Union{Int,Nothing}=nothing`: (Streaming only) Specifies the amount of slots to allocate for the input buffer of the task. Defaults to 1.
 - `stream_output_buffer_amount::Union{Int,Nothing}=nothing`: (Streaming only) Specifies the amount of slots to allocate for the output buffer of the task. Defaults to 1.
 - `stream_buffer_type::Union{Type,Nothing}=nothing`: (Streaming only) Specifies the type of buffer to use for the input and output buffers of the task. Defaults to `Dagger.ProcessRingBuffer`.
 - `stream_max_evals::Union{Int,Nothing}=nothing`: (Streaming only) Specifies the maximum number of times the task will be evaluated before returning a result. Defaults to infinite evaluations.
+- `acceleration::Union{Acceleration,Nothing}=nothing`: The acceleration backend used to plan and execute this task (e.g. `DistributedAcceleration`, `MPIAcceleration`). When `nothing`, the current acceleration (`Dagger.current_acceleration()`) is used.
+- `return_type::Union{Type,Nothing}=nothing`: The expected return type of the task's function. When set to a concrete type, it is used as the task's `chunktype` before the task has run (e.g. so downstream metadata and, under MPI, cross-rank type uniformity are known ahead of execution). When `nothing`, the type is left unknown until the result is available.
 """
 Base.@kwdef mutable struct Options
     propagates::Union{Vector{Symbol},Nothing} = nothing
@@ -61,10 +64,16 @@ Base.@kwdef mutable struct Options
 
     name::Union{String,Nothing} = nothing
 
+    tag::Union{UInt32,Nothing} = nothing
+
     stream_input_buffer_amount::Union{Int,Nothing} = nothing
     stream_output_buffer_amount::Union{Int,Nothing} = nothing
     stream_buffer_type::Union{Type, Nothing} = nothing
     stream_max_evals::Union{Int,Nothing} = nothing
+
+    acceleration::Union{Acceleration,Nothing} = nothing
+
+    return_type::Union{Type,Nothing} = nothing
 end
 Options(::Nothing) = Options()
 function Options(old_options::NamedTuple)

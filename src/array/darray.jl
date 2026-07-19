@@ -1,4 +1,4 @@
-import Base: ==, fetch
+import Base: ==, fetch, length, isempty, size
 
 export DArray, DVector, DMatrix, DVecOrMat, Blocks, AutoBlocks
 export distribute
@@ -36,7 +36,7 @@ Base.getindex(arr::AbstractArray{T,0} where T, d::ArrayDomain{0}) = arr
 Base.getindex(arr::GPUArraysCore.AbstractGPUArray, d::ArrayDomain) = arr[indexes(d)...]
 Base.getindex(arr::GPUArraysCore.AbstractGPUArray{T,0} where T, d::ArrayDomain{0}) = arr
 
-function intersect(a::ArrayDomain, b::ArrayDomain)
+function Base.intersect(a::ArrayDomain, b::ArrayDomain)
     if a === b
         return a
     end
@@ -73,7 +73,7 @@ function size(a::ArrayDomain, dim)
 end
 size(a::ArrayDomain) = map(length, indexes(a))
 length(a::ArrayDomain) = prod(size(a))
-ndims(a::ArrayDomain) = length(size(a))
+Base.ndims(a::ArrayDomain) = length(size(a))
 isempty(a::ArrayDomain) = length(a) == 0
 
 
@@ -83,7 +83,6 @@ isempty(a::ArrayDomain) = length(a) == 0
 The domain of an array is an ArrayDomain.
 """
 domain(x::AbstractArray) = ArrayDomain([1:l for l in size(x)])
-
 
 abstract type ArrayOp{T, N} <: AbstractArray{T, N} end
 Base.IndexStyle(::Type{<:ArrayOp}) = IndexCartesian()
@@ -174,9 +173,14 @@ domain(d::DArray) = d.domain
 chunks(d::DArray) = d.chunks
 domainchunks(d::DArray) = d.subdomains
 size(x::DArray) = size(domain(x))
+Base.ndims(d::DArray{T,N}) where {T,N} = N
 stage(ctx, c::DArray) = c
 
-function Base.collect(d::DArray{T,N}; tree=false, copyto=false) where {T,N}
+# Named so the spawned function is rank-uniform under MPI (anonymous
+# closures get non-uniform ArgumentWrapper hashes).
+_collect_cat(concat, dims::Int, xs...) = concat(xs...; dims)
+
+function Base.collect(d::DArray{T,N}; tree=true, copyto=false) where {T,N}
     a = fetch(d)
     if isempty(d.chunks)
         return Array{eltype(d)}(undef, size(d)...)
@@ -193,12 +197,24 @@ function Base.collect(d::DArray{T,N}; tree=false, copyto=false) where {T,N}
         return C
     end
 
-    dimcatfuncs = [(x...) -> d.concat(x..., dims=i) for i in 1:ndims(d)]
-    if tree
-        collect(fetch(treereduce_nd(map(x -> ((args...,) -> Dagger.@spawn x(args...)) , dimcatfuncs), a.chunks)))
-    else
-        collect(treereduce_nd(dimcatfuncs, asyncmap(fetch, a.chunks)))
+    concat = d.concat
+    if uniform_execution()
+        # Under SPMD/MPI, gather chunks via a datadeps concat tree so chunk
+        # movement is scheduled uniformly across ranks (rather than a direct
+        # per-chunk `fetch`, which isn't well-defined for rank-owned data).
+        spawn_catfuncs = ntuple(Val(N)) do i
+            (args...) -> Dagger.@spawn _collect_cat(concat, i, map(In, args)...)
+        end
+        result = Dagger.spawn_datadeps() do
+            treereduce_nd(spawn_catfuncs, a.chunks)
+        end
+        return collect(fetch(result))
     end
+    # Distributed: fetch chunks directly and concat in-process. This avoids
+    # routing chunk data through datadeps aliasing, which requires an
+    # aliasing-resolvable (e.g. isbits) element type.
+    dimcatfuncs = [(x...) -> concat(x..., dims=i) for i in 1:N]
+    return collect(treereduce_nd(dimcatfuncs, asyncmap(fetch, a.chunks)))
 end
 Array{T,N}(A::DArray{S,N}) where {T,N,S} = convert(Array{T,N}, collect(A))
 
@@ -401,6 +417,18 @@ If a `DArray` tree has a `Thunk` in it, make the whole thing a big thunk.
 """
 function Base.fetch(c::DArray{T}) where T
     if any(istask, chunks(c))
+        if uniform_execution()
+            # SPMD (MPI): every rank holds every task locally, and chunk
+            # records are rank-local views (placeholders for non-owned data).
+            # Resolve them locally instead of assembling on one rank and
+            # broadcasting (which would clobber the local records with the
+            # assembling rank's placeholders).
+            thunks = chunks(c)
+            new_chunks = Any[istask(t) ? fetch(t; raw=true) : t for t in thunks]
+            return DArray(T, domain(c), domainchunks(c),
+                          reshape(new_chunks, size(thunks)),
+                          c.partitioning, c.concat)
+        end
         thunks = chunks(c)
         sz = size(thunks)
         dmn = domain(c)
@@ -422,7 +450,7 @@ struct Distribute{T,N,B<:AbstractBlocks} <: ArrayOp{T, N}
     domainchunks
     partitioning::B
     data::AbstractArray{T,N}
-    procgrid::Union{AbstractArray{<:Processor, N}, Nothing}
+    procgrid::Union{AbstractProcGrid{N}, Nothing}
 end
 
 size(x::Distribute) = size(domain(x.data))
@@ -430,18 +458,18 @@ size(x::Distribute) = size(domain(x.data))
 Base.@deprecate BlockPartition Blocks
 
 
-Distribute(p::Blocks, data::AbstractArray, procgrid::Union{AbstractArray{<:Processor},Nothing} = nothing) =
-    Distribute(partition(p, domain(data)), p, data, procgrid)
+Distribute(p::Blocks, data::AbstractArray, procgrid::Union{AbstractProcGrid,AbstractArray{<:Processor},Nothing} = nothing) =
+    Distribute(partition(p, domain(data)), p, data, normalize_procgrid(procgrid))
 
-function Distribute(domainchunks::DomainBlocks{N}, data::AbstractArray{T,N}, procgrid::Union{AbstractArray{<:Processor, N},Nothing} = nothing) where {T,N}
+function Distribute(domainchunks::DomainBlocks{N}, data::AbstractArray{T,N}, procgrid::Union{AbstractProcGrid{N},AbstractArray{<:Processor, N},Nothing} = nothing) where {T,N}
     p = Blocks(ntuple(i->first(domainchunks.cumlength[i]), N))
-    Distribute(domainchunks, p, data, procgrid)
+    Distribute(domainchunks, p, data, normalize_procgrid(procgrid))
 end
 
-function Distribute(data::AbstractArray{T,N}, procgrid::Union{AbstractArray{<:Processor, N},Nothing} = nothing) where {T,N}
+function Distribute(data::AbstractArray{T,N}, procgrid::Union{AbstractProcGrid{N},AbstractArray{<:Processor, N},Nothing} = nothing) where {T,N}
     nprocs = sum(w->length(get_processors(OSProc(w))),procs())
     p = Blocks(ntuple(i->max(cld(size(data, i), nprocs), 1), N))
-    return Distribute(partition(p, domain(data)), p, data, procgrid)
+    return Distribute(partition(p, domain(data)), p, data, normalize_procgrid(procgrid))
 end
 
 function stage(ctx::Context, d::Distribute)
@@ -458,13 +486,7 @@ function stage(ctx::Context, d::Distribute)
             idx = d.domainchunks[I]
             chunks = stage(ctx, x[idx]).chunks
             shape = size(chunks)
-            # TODO: fix hashing
-            #hash = uhash(idx, Base.hash(Distribute, Base.hash(d.data)))
-            if isnothing(d.procgrid)
-                scope = get_compute_scope()
-            else
-                scope = ExactScope(d.procgrid[CartesianIndex(mod1.(Tuple(I), size(d.procgrid))...)])
-            end
+            scope = procgrid_scope(d.procgrid, I)
             options = Options(compute_scope=scope)
             Dagger.spawn(options, shape, chunks...) do shape, parts...
                 if prod(shape) == 0
@@ -475,18 +497,14 @@ function stage(ctx::Context, d::Distribute)
                 collect(treereduce_nd(dimcatfuncs, ps))
             end
         end
+        cs = post_stage_array_chunks!(current_acceleration(), cs, T, Nd)
     else
-        cs = map(CartesianIndices(d.domainchunks)) do I
-            # TODO: fix hashing
-            #hash = uhash(c, Base.hash(Distribute, Base.hash(d.data)))
+        T = eltype(d.data)
+        cs = emit_chunk_tasks!(d.domainchunks, d.procgrid, T,
+            (scope, I, i) -> begin
             c = d.domainchunks[I]
-            if isnothing(d.procgrid)
-                scope = get_compute_scope()
-            else
-                scope = ExactScope(d.procgrid[CartesianIndex(mod1.(Tuple(I), size(d.procgrid))...)])
-            end
             Dagger.@spawn compute_scope=scope identity(d.data[c])
-        end
+        end)
     end
     return DArray(eltype(d.data),
                   domain(d.data),
@@ -510,49 +528,9 @@ function auto_blocks(dims::Dims{N}) where N
 end
 auto_blocks(A::AbstractArray{T,N}) where {T,N} = auto_blocks(size(A))
 
-const AssignmentType{N} = Union{Symbol, AbstractArray{<:Int, N}, AbstractArray{<:Processor, N}}
-
 distribute(A::AbstractArray, assignment::AssignmentType = :arbitrary) = distribute(A, AutoBlocks(), assignment)
 function distribute(A::AbstractArray{T,N}, dist::Blocks{N}, assignment::AssignmentType{N} = :arbitrary) where {T,N}
-    procgrid = nothing
-    availprocs = collect(Dagger.compatible_processors())
-    if !(assignment isa AbstractArray{<:Processor, N})
-        filter!(p -> p isa ThreadProc, availprocs)
-        sort!(availprocs, by = x -> (x.owner, x.tid))
-    end
-    np = length(availprocs)
-    if assignment isa Symbol
-        if assignment == :arbitrary
-            procgrid = nothing
-        elseif assignment == :blockrow
-            p = ntuple(i -> i == 1 ? Int(ceil(size(A,1) / dist.blocksize[1])) : 1, N)
-            rows_per_proc, extra = divrem(Int(ceil(size(A,1) / dist.blocksize[1])), np)
-            counts = [rows_per_proc + (i <= extra ? 1 : 0) for i in 1:np]
-            procgrid = reshape(vcat(fill.(availprocs, counts)...), p)
-        elseif assignment == :blockcol
-            p = ntuple(i -> i == N ? Int(ceil(size(A,N) / dist.blocksize[N])) : 1, N)
-            cols_per_proc, extra = divrem(Int(ceil(size(A,N) / dist.blocksize[N])), np)
-            counts = [cols_per_proc + (i <= extra ? 1 : 0) for i in 1:np]
-            procgrid = reshape(vcat(fill.(availprocs, counts)...), p)
-        elseif assignment == :cyclicrow
-            p = ntuple(i -> i == 1 ? np : 1, N)
-            procgrid = reshape(availprocs, p)
-        elseif assignment == :cycliccol
-            p = ntuple(i -> i == N ? np : 1, N)
-            procgrid = reshape(availprocs, p)
-        else
-            error("Unsupported assignment symbol: $assignment, use :arbitrary, :blockrow, :blockcol, :cyclicrow or :cycliccol")
-        end
-    elseif assignment isa AbstractArray{<:Int, N}
-        missingprocs = filter(p -> p ∉ procs(), assignment)
-        isempty(missingprocs) || error("Specified workers are not available: $missingprocs")
-        procgrid = [ThreadProc(proc, 1) for proc in assignment]
-    elseif assignment isa AbstractArray{<:Processor, N}
-        missingprocs = filter(p -> p ∉ availprocs, assignment)
-        isempty(missingprocs) || error("Specified processors are not available: $missingprocs")
-        procgrid = assignment
-    end
-
+    procgrid = build_procgrid(assignment, size(A), dist.blocksize, current_acceleration())
     return _to_darray(Distribute(dist, A, procgrid))
 end
 
@@ -625,7 +603,7 @@ end
 mapchunk(f, chunk) = tochunk(f(poolget(chunk.handle)))
 function mapchunks(f, d::DArray{T,N,F}) where {T,N,F}
     chunks = map(d.chunks) do chunk
-        owner = get_parent(chunk.processor).pid
+        owner = root_worker_id(chunk.processor)
         remotecall_fetch(mapchunk, owner, f, chunk)
     end
     DArray{T,N,F}(d.domain, d.subdomains, chunks, d.concat)

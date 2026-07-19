@@ -52,6 +52,16 @@ function Dagger.aliasing(x::MtlArray{T}) where T
     return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
 end
 
+# MPI (SPMD) integration: stamp owning rank on VRAM spaces
+Dagger.mpi_remap_space(space::MetalVRAMMemorySpace, owner::Int) =
+    MetalVRAMMemorySpace(owner, space.device_id)
+Dagger.value_memory_space(x::MtlArray) = Dagger.memory_space(x)
+
+# Staging-pool key; Metal has no CUDA-style pin of arbitrary host buffers
+Dagger.gpu_memory_kind(::MtlArray) = :Metal
+Dagger.gpu_memory_kind(::MetalVRAMMemorySpace) = :Metal
+Dagger.pin_buffer!(::Val{:Metal}, buf::DenseArray) = nothing
+
 function Dagger.unsafe_free!(x::MtlArray)
     Metal.unsafe_free!(x)
     return
@@ -66,24 +76,32 @@ function to_device(proc::MtlArrayDeviceProc)
 end
 function to_context(proc::MtlArrayDeviceProc)
     @assert Dagger.root_worker_id(proc) == myid()
-    return Metal.global_queue() #CONTEXTS[proc.device]
+    return Metal.global_queue(DEVICES[proc.device_id])
 end
 to_context(device_id::Integer) = Metal.global_queue(DEVICES[device_id])
 to_context(dev::MtlDevice) = to_context(_device_id(dev))
 
 function with_context!(device_id::Integer)
+    Metal.device!(DEVICES[device_id])
 end
 function with_context!(proc::MtlArrayDeviceProc)
     @assert Dagger.root_worker_id(proc) == myid()
+    with_context!(proc.device_id)
 end
 function with_context!(space::MetalVRAMMemorySpace)
     @assert Dagger.root_worker_id(space) == myid()
+    with_context!(space.device_id)
 end
 Dagger.with_context!(proc::MtlArrayDeviceProc) = with_context!(proc)
 Dagger.with_context!(space::MetalVRAMMemorySpace) = with_context!(space)
 function with_context(f, x)
+    old_dev = Metal.device()
     with_context!(x)
-    return f()
+    try
+        return f()
+    finally
+        Metal.device!(old_dev)
+    end
 end
 
 function _sync_with_context(x::Union{Dagger.Processor,Dagger.MemorySpace})
@@ -99,6 +117,17 @@ function sync_with_context(x::Union{Dagger.Processor,Dagger.MemorySpace})
         # boundary, which should synchronize for us
     end
 end
+
+# No Metal-aware MPI / CUDA-style IPC; always host-stage
+Dagger.mpi_device_direct(::MtlArray) = false
+function Dagger.mpi_device_sync(x::MtlArray)
+    space = Dagger.memory_space(x)
+    if Dagger.root_worker_id(space) == myid()
+        _sync_with_context(space)
+    end
+    return
+end
+Dagger.mpi_device_sync(space::MetalVRAMMemorySpace) = sync_with_context(space)
 
 # Allocations
 Dagger.allocate_array_func(::MtlArrayDeviceProc, ::typeof(rand)) = Metal.rand
@@ -129,13 +158,20 @@ end
 function Dagger.move!(to_space::MetalVRAMMemorySpace, from_space::MetalVRAMMemorySpace, to::AbstractArray{T,N}, from::AbstractArray{T,N}) where {T,N}
     sync_with_context(from_space)
     with_context!(to_space)
-    copyto!(to, from)
+    if Dagger.needs_multi_span_copy(to_space, from_space, to, from)
+        Dagger.multi_span_move!(to, from)
+    else
+        copyto!(to, from)
+    end
     return
 end
 
 # Out-of-place HtoD
 function Dagger.move(from_proc::CPUProc, to_proc::MtlArrayDeviceProc, x)
     with_context(to_proc) do
+        if x isa DenseArray && isbitstype(eltype(x))
+            Dagger.pin_buffer!(:Metal, x)
+        end
         arr = adapt(MtlArray, x)
         Metal.synchronize()
         return arr
@@ -147,6 +183,9 @@ function Dagger.move(from_proc::CPUProc, to_proc::MtlArrayDeviceProc, x::Chunk)
     @assert myid() == to_w
     cpu_data = remotecall_fetch(unwrap, from_w, x)
     with_context(to_proc) do
+        if cpu_data isa DenseArray && isbitstype(eltype(cpu_data))
+            Dagger.pin_buffer!(:Metal, cpu_data)
+        end
         arr = adapt(MtlArray, cpu_data)
         Metal.synchronize()
         return arr
@@ -168,7 +207,8 @@ end
 function Dagger.move(from_proc::MtlArrayDeviceProc, to_proc::CPUProc, x)
     with_context(from_proc) do
         Metal.synchronize()
-        _x = adapt(Array, x)
+        _x = x isa DenseArray && isbitstype(eltype(x)) ?
+             Dagger.pinned_host_array(x) : adapt(Array, x)
         Metal.synchronize()
         return _x
     end
@@ -185,8 +225,7 @@ end
 function Dagger.move(from_proc::MtlArrayDeviceProc, to_proc::CPUProc, x::MtlArray{T,N}) where {T,N}
     with_context(from_proc) do
         Metal.synchronize()
-        _x = Array{T,N}(undef, size(x))
-        copyto!(_x, x)
+        _x = Dagger.pinned_host_array(x)
         Metal.synchronize()
         return _x
     end
@@ -199,15 +238,25 @@ function Dagger.move(from_proc::MtlArrayDeviceProc, to_proc::MtlArrayDeviceProc,
         arr = unwrap(x)
         with_context(Metal.synchronize, from_proc)
         return arr
-    # FIXME: elseif Dagger.root_worker_id(from_proc) == Dagger.root_worker_id(to_proc)
+    elseif Dagger.root_worker_id(from_proc) == Dagger.root_worker_id(to_proc)
+        # Same process but different GPUs, use DtoD copy
+        from_arr = unwrap(x)
+        with_context(Metal.synchronize, from_proc)
+        return with_context(to_proc) do
+            to_arr = similar(from_arr)
+            copyto!(to_arr, from_arr)
+            Metal.synchronize()
+            return to_arr
+        end
     else
-        # Different node, use DtoH, serialization, HtoD
+        # Different node, use DtoH, serialization, HtoD (pinned host staging)
         host_copy = remotecall_fetch(from_proc.owner, from_proc, x) do from_proc, x
             return with_context(from_proc) do
-                Array(unwrap(x))
+                Dagger.pinned_host_array(unwrap(x))
             end
         end
         return with_context(to_proc) do
+            Dagger.pin_buffer!(:Metal, host_copy)
             return MtlArray(host_copy)
         end
     end
@@ -218,13 +267,21 @@ function Dagger.move(from_proc::MtlArrayDeviceProc, to_proc::MtlArrayDeviceProc,
         # Same process and GPU, no change
         with_context(Metal.synchronize, from_proc)
         return x
-    # FIXME: elseif Dagger.root_worker_id(from_proc) == Dagger.root_worker_id(to_proc)
+    elseif Dagger.root_worker_id(from_proc) == Dagger.root_worker_id(to_proc)
+        with_context(Metal.synchronize, from_proc)
+        return with_context(to_proc) do
+            to_arr = similar(x)
+            copyto!(to_arr, x)
+            Metal.synchronize()
+            return to_arr
+        end
     else
-        # Different node, use DtoH, serialization, HtoD
+        # Different node, use DtoH, serialization, HtoD (pinned host staging)
         host_copy = with_context(from_proc) do
-            return Array(x)
+            return Dagger.pinned_host_array(x)
         end
         return with_context(to_proc) do
+            Dagger.pin_buffer!(:Metal, host_copy)
             return MtlArray(host_copy)
         end
     end
@@ -369,8 +426,15 @@ end
 Dagger.gpu_processor(::Val{:Metal}) = MtlArrayDeviceProc
 Dagger.gpu_can_compute(::Val{:Metal}) = Metal.functional()
 Dagger.gpu_kernel_backend(proc::MtlArrayDeviceProc) = MetalBackend()
-# TODO: Switch devices
-Dagger.gpu_with_device(f, proc::MtlArrayDeviceProc) = f()
+function Dagger.gpu_with_device(f, proc::MtlArrayDeviceProc)
+    old = Metal.device()
+    try
+        Metal.device!(DEVICES[proc.device_id])
+        return f()
+    finally
+        Metal.device!(old)
+    end
+end
 
 function Dagger.gpu_synchronize(proc::MtlArrayDeviceProc)
     with_context(proc) do

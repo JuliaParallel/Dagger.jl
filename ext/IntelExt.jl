@@ -31,7 +31,7 @@ Dagger.get_parent(proc::oneArrayDeviceProc) = Dagger.OSProc(proc.owner)
 Dagger.root_worker_id(proc::oneArrayDeviceProc) = proc.owner
 Base.show(io::IO, proc::oneArrayDeviceProc) =
     print(io, "oneArrayDeviceProc(worker $(proc.owner), device $(proc.device_id))")
-Dagger.short_name(proc::oneArrayDeviceProc) = "W: $(proc.owner), oneAPI: $(proc.device)"
+Dagger.short_name(proc::oneArrayDeviceProc) = "W: $(proc.owner), oneAPI: $(proc.device_id)"
 Dagger.@gpuproc(oneArrayDeviceProc, oneArray)
 
 "Represents the memory space of a single Intel GPU's VRAM."
@@ -54,6 +54,16 @@ function Dagger.aliasing(x::oneArray{T}) where T
     rptr = Dagger.RemotePtr{Cvoid}(UInt64(gpu_ptr), space)
     return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
 end
+
+# MPI (SPMD) integration: stamp owning rank on VRAM spaces
+Dagger.mpi_remap_space(space::IntelVRAMMemorySpace, owner::Int) =
+    IntelVRAMMemorySpace(owner, space.device_id)
+Dagger.value_memory_space(x::oneArray) = Dagger.memory_space(x)
+
+# Staging-pool key; Level Zero has no CUDA-style pin of arbitrary host buffers
+Dagger.gpu_memory_kind(::oneArray) = :oneAPI
+Dagger.gpu_memory_kind(::IntelVRAMMemorySpace) = :oneAPI
+Dagger.pin_buffer!(::Val{:oneAPI}, buf::DenseArray) = nothing
 
 function Dagger.unsafe_free!(x::oneArray)
     oneAPI.unsafe_free!(x)
@@ -161,13 +171,20 @@ end
 function Dagger.move!(to_space::IntelVRAMMemorySpace, from_space::IntelVRAMMemorySpace, to::AbstractArray{T,N}, from::AbstractArray{T,N}) where {T,N}
     sync_with_context(from_space)
     with_context!(to_space)
-    copyto!(to, from)
+    if Dagger.needs_multi_span_copy(to_space, from_space, to, from)
+        Dagger.multi_span_move!(to, from)
+    else
+        copyto!(to, from)
+    end
     return
 end
 
 # Out-of-place HtoD
 function Dagger.move(from_proc::CPUProc, to_proc::oneArrayDeviceProc, x)
     with_context(to_proc) do
+        if x isa DenseArray && isbitstype(eltype(x))
+            Dagger.pin_buffer!(:oneAPI, x)
+        end
         arr = adapt(oneArray, x)
         oneAPI.synchronize()
         return arr
@@ -179,6 +196,9 @@ function Dagger.move(from_proc::CPUProc, to_proc::oneArrayDeviceProc, x::Chunk)
     @assert myid() == to_w
     cpu_data = remotecall_fetch(unwrap, from_w, x)
     with_context(to_proc) do
+        if cpu_data isa DenseArray && isbitstype(eltype(cpu_data))
+            Dagger.pin_buffer!(:oneAPI, cpu_data)
+        end
         arr = adapt(oneArray, cpu_data)
         oneAPI.synchronize()
         return arr
@@ -192,7 +212,8 @@ end
 function Dagger.move(from_proc::oneArrayDeviceProc, to_proc::CPUProc, x)
     with_context(from_proc) do
         oneAPI.synchronize()
-        _x = adapt(Array, x)
+        _x = x isa DenseArray && isbitstype(eltype(x)) ?
+             Dagger.pinned_host_array(x) : adapt(Array, x)
         oneAPI.synchronize()
         return _x
     end
@@ -209,8 +230,7 @@ end
 function Dagger.move(from_proc::oneArrayDeviceProc, to_proc::CPUProc, x::oneArray{T,N}) where {T,N}
     with_context(from_proc) do
         oneAPI.synchronize()
-        _x = Array{T,N}(undef, size(x))
-        copyto!(_x, x)
+        _x = Dagger.pinned_host_array(x)
         oneAPI.synchronize()
         return _x
     end
@@ -229,18 +249,34 @@ function Dagger.move(from_proc::oneArrayDeviceProc, to_proc::oneArrayDeviceProc,
         with_context(oneAPI.synchronize, from_proc)
         return _ensure_device(from_arr, to_proc.device_id)
     else
-        # Different node, use DtoH, serialization, HtoD
-        host_copy = remotecall_fetch(from_proc.owner, x) do x
-            Array(unwrap(x))
+        # Different node, use DtoH, serialization, HtoD (pinned host staging)
+        host_copy = remotecall_fetch(from_proc.owner, from_proc, x) do from_proc, x
+            return with_context(from_proc) do
+                Dagger.pinned_host_array(unwrap(x))
+            end
         end
         return with_context(to_proc) do
-            oneArray(host_copy)
+            Dagger.pin_buffer!(:oneAPI, host_copy)
+            return oneArray(host_copy)
         end
     end
 end
 
 function Dagger.move(from_proc::oneArrayDeviceProc, to_proc::oneArrayDeviceProc, x::oneArray)
-    return _ensure_device(x, to_proc.device_id)
+    if from_proc == to_proc
+        with_context(oneAPI.synchronize, from_proc)
+        return x
+    elseif Dagger.root_worker_id(from_proc) == Dagger.root_worker_id(to_proc)
+        return _ensure_device(x, to_proc.device_id)
+    else
+        host_copy = with_context(from_proc) do
+            return Dagger.pinned_host_array(x)
+        end
+        return with_context(to_proc) do
+            Dagger.pin_buffer!(:oneAPI, host_copy)
+            return oneArray(host_copy)
+        end
+    end
 end
 
 # Adapt generic functions
@@ -381,6 +417,77 @@ function Dagger.to_scope(::Val{:intel_gpus}, sc::NamedTuple)
     return Dagger.UnionScope(scopes)
 end
 Dagger.scope_key_precedence(::Val{:intel_gpus}) = 1
+
+# MPI data plane: pass oneArrays to MPI directly when the library is Level Zero /
+# Intel-MPI aware (DAGGER_MPI_GPU_DIRECT=0/1 forces; else mpi_library_gpu_aware)
+const MPI_GPU_DIRECT = Ref{Union{Nothing,Bool}}(nothing)
+function mpi_gpu_direct_enabled()
+    v = MPI_GPU_DIRECT[]
+    v !== nothing && return v
+    env = get(ENV, "DAGGER_MPI_GPU_DIRECT", "")
+    v = if !isempty(env)
+        something(tryparse(Bool, env), false)
+    else
+        Dagger.mpi_library_gpu_aware(:oneAPI)
+    end
+    MPI_GPU_DIRECT[] = v
+    return v
+end
+Dagger.mpi_device_direct(x::oneAPI.oneStridedArray) = mpi_gpu_direct_enabled()
+Dagger.mpi_device_sync(x::oneArray) = oneAPI.synchronize()
+Dagger.mpi_device_sync(::IntelVRAMMemorySpace) = oneAPI.synchronize()
+
+# Same-node device IPC via Level Zero zeMem*IpcHandle. Stage into a dedicated
+# device_alloc (not the array pool) so the handle stays valid across processes.
+# DAGGER_IPC=0 disables the path.
+const GPU_IPC = Ref{Union{Nothing,Bool}}(nothing)
+function ipc_enabled()
+    v = GPU_IPC[]
+    v !== nothing && return v
+    v = something(tryparse(Bool, get(ENV, "DAGGER_IPC", "true")), true)
+    GPU_IPC[] = v
+    return v
+end
+Dagger.ipc_eligible(::IntelVRAMMemorySpace, ::IntelVRAMMemorySpace) = ipc_enabled()
+
+const oneL0 = oneAPI.oneL0
+
+struct ZeIpcInfo{T,N}
+    handle::oneL0.ze_ipc_mem_handle_t
+    shape::Dims{N}
+    bytesize::Int
+end
+function Dagger.ipc_export(value::oneAPI.oneStridedArray{T,N}) where {T,N}
+    # Stage into a fresh device allocation so the IPC handle outlives the source
+    with_context!(Dagger.memory_space(value))
+    staged = oneArray{T,N}(undef, size(value))
+    copyto!(staged, value)
+    oneAPI.synchronize()
+    handle_ref = Ref{oneL0.ze_ipc_mem_handle_t}()
+    oneL0.zeMemGetIpcHandle(oneAPI.context(), pointer(staged), handle_ref)
+    return ZeIpcInfo{T,N}(handle_ref[], size(value), sizeof(value)), staged
+end
+Dagger.ipc_release!(staged::oneArray) = oneAPI.unsafe_free!(staged)
+function Dagger.ipc_copyto!(dest::oneAPI.oneStridedArray{T,N}, info::ZeIpcInfo{T,N}) where {T,N}
+    @assert size(dest) == info.shape "IPC shape mismatch: $(size(dest)) != $(info.shape)"
+    with_context!(Dagger.memory_space(dest))
+    ctx = oneAPI.context()
+    dev = oneAPI.device()
+    ptr_ref = Ref{Ptr{Cvoid}}()
+    oneL0.zeMemOpenIpcHandle(ctx, dev, info.handle, UInt32(0), ptr_ref)
+    try
+        src_ptr = reinterpret(oneL0.ZePtr{T}, ptr_ref[])
+        Base.unsafe_copyto!(ctx, dev, pointer(dest), src_ptr, length(dest))
+        oneAPI.synchronize()
+    finally
+        oneL0.zeMemCloseIpcHandle(ctx, ptr_ref[])
+    end
+    return dest
+end
+function Dagger.ipc_materialize(info::ZeIpcInfo{T,N}) where {T,N}
+    dest = oneArray{T,N}(undef, info.shape)
+    return Dagger.ipc_copyto!(dest, info)
+end
 
 const DEVICES = Dict{Int, ZeDevice}()
 const DRIVERS = Dict{Int, ZeDriver}()

@@ -71,10 +71,17 @@ function LinearAlgebra.issymmetric(A::DArray{T,2}) where T
     Ac = A.chunks
     mt = size(Ac, 1)
 
-    to_check = [Dagger.@spawn issymmetric(Ac[i, i]) for i in 1:mt]
-    for i in 2:mt
-        for j in 1:i-1
-            push!(to_check, Dagger.@spawn is_cross_symmetric(Ac[i, j], Ac[j, i]))
+    # The cross-block checks read pairs of blocks that may live in different
+    # memory spaces (e.g. different MPI ranks); datadeps handles the transfers
+    to_check = DTask[]
+    Dagger.spawn_datadeps() do
+        for i in 1:mt
+            push!(to_check, Dagger.@spawn issymmetric(In(Ac[i, i])))
+        end
+        for i in 2:mt
+            for j in 1:i-1
+                push!(to_check, Dagger.@spawn is_cross_symmetric(In(Ac[i, j]), In(Ac[j, i])))
+            end
         end
     end
 
@@ -99,10 +106,17 @@ function LinearAlgebra.ishermitian(A::DArray{T,2}) where T
     Ac = A.chunks
     mt = size(Ac, 1)
 
-    to_check = [Dagger.@spawn ishermitian(Ac[i, i]) for i in 1:mt]
-    for i in 2:mt
-        for j in 1:i-1
-            push!(to_check, Dagger.@spawn is_cross_hermitian(Ac[i, j], Ac[j, i]))
+    # The cross-block checks read pairs of blocks that may live in different
+    # memory spaces (e.g. different MPI ranks); datadeps handles the transfers
+    to_check = DTask[]
+    Dagger.spawn_datadeps() do
+        for i in 1:mt
+            push!(to_check, Dagger.@spawn ishermitian(In(Ac[i, i])))
+        end
+        for i in 2:mt
+            for j in 1:i-1
+                push!(to_check, Dagger.@spawn is_cross_hermitian(In(Ac[i, j]), In(Ac[j, i])))
+            end
         end
     end
 

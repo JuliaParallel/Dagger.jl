@@ -9,49 +9,11 @@ mutable struct AllocateArray{T,N} <: ArrayOp{T,N}
     domain::ArrayDomain{N}
     domainchunks
     partitioning::AbstractBlocks{N}
-    procgrid::Union{AbstractArray{<:Processor, N}, Nothing}
+    procgrid::Union{AbstractProcGrid{N}, Nothing}
 
     function AllocateArray(eltype::Type{T}, f, want_index::Bool, d::ArrayDomain{N}, domainchunks, p::AbstractBlocks{N}, assignment::Union{AssignmentType{N},Nothing} = nothing) where {T,N}
         sizeA = map(length, d.indexes)
-        procgrid = nothing
-        availprocs = collect(Dagger.compatible_processors())
-        if !(assignment isa AbstractArray{<:Processor, N})
-            filter!(p -> p isa ThreadProc, availprocs)
-            sort!(availprocs, by = x -> (x.owner, x.tid))
-        end
-        np = length(availprocs)
-        if assignment isa Symbol
-            if assignment == :arbitrary
-                procgrid = nothing
-            elseif assignment == :blockrow
-                q = ntuple(i -> i == 1 ? Int(ceil(sizeA[1] / p.blocksize[1])) : 1, N)
-                rows_per_proc, extra = divrem(Int(ceil(sizeA[1] / p.blocksize[1])), np)
-                counts = [rows_per_proc + (i <= extra ? 1 : 0) for i in 1:np]
-                procgrid = reshape(vcat(fill.(availprocs, counts)...), q)
-            elseif assignment == :blockcol
-                q = ntuple(i -> i == N ? Int(ceil(sizeA[N] / p.blocksize[N])) : 1, N)
-                cols_per_proc, extra = divrem(Int(ceil(sizeA[N] / p.blocksize[N])), np)
-                counts = [cols_per_proc + (i <= extra ? 1 : 0) for i in 1:np]
-                procgrid = reshape(vcat(fill.(availprocs, counts)...), q)
-            elseif assignment == :cyclicrow
-                q = ntuple(i -> i == 1 ? np : 1, N)
-                procgrid = reshape(availprocs, q)
-            elseif assignment == :cycliccol
-                q = ntuple(i -> i == N ? np : 1, N)
-                procgrid = reshape(availprocs, q)
-            else
-                error("Unsupported assignment symbol: $assignment, use :arbitrary, :blockrow, :blockcol, :cyclicrow or :cycliccol")
-            end
-        elseif assignment isa AbstractArray{<:Int, N}
-            missingprocs = filter(q -> q ∉ procs(), assignment)
-            isempty(missingprocs) || error("Specified workers are not available: $missingprocs")
-            procgrid = [ThreadProc(proc, 1) for proc in assignment]
-        elseif assignment isa AbstractArray{<:Processor, N}
-            missingprocs = filter(q -> q ∉ availprocs, assignment)
-            isempty(missingprocs) || error("Specified processors are not available: $missingprocs")
-            procgrid = assignment
-        end
-
+        procgrid = build_procgrid(something(assignment, :arbitrary), Tuple(sizeA), p.blocksize, current_acceleration())
         return new{T,N}(eltype, f, want_index, d, domainchunks, p, procgrid)
     end
 
@@ -80,27 +42,17 @@ function allocate_array(f, T, sz)
 end
 allocate_array_func(::Processor, f) = f
 function stage(ctx, A::AllocateArray)
-    tasks = Array{DTask,ndims(A.domainchunks)}(undef, size(A.domainchunks)...)
-    Dagger.spawn_datadeps() do
-        default_scope = get_compute_scope()
-        for I in CartesianIndices(A.domainchunks)
-            x = A.domainchunks[I]
-            i = LinearIndices(A.domainchunks)[I]
-
-            if isnothing(A.procgrid)
-                scope = default_scope
-            else
-                scope = ExactScope(A.procgrid[CartesianIndex(mod1.(Tuple(I), size(A.procgrid))...)])
-            end
-
-            if A.want_index
-                task = Dagger.@spawn compute_scope=scope allocate_array(A.f, A.eltype, i, size(x))
-            else
-                task = Dagger.@spawn compute_scope=scope allocate_array(A.f, A.eltype, size(x))
-            end
-            tasks[i] = task
+    tasks = emit_chunk_tasks!(A.domainchunks, A.procgrid, A.eltype,
+        (scope, I, i) -> begin
+        x = A.domainchunks[I]
+        N = ndims(A.domainchunks)
+        ret_type = Array{A.eltype, N}
+        if A.want_index
+            Dagger.@spawn compute_scope=scope return_type=ret_type allocate_array(A.f, A.eltype, i, size(x))
+        else
+            Dagger.@spawn compute_scope=scope return_type=ret_type allocate_array(A.f, A.eltype, size(x))
         end
-    end
+    end)
     return DArray(A.eltype, A.domain, A.domainchunks, tasks, A.partitioning)
 end
 

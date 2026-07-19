@@ -155,3 +155,9 @@ iscompatible_arg(proc::OSProc, opts, args...) =
 "Returns a very brief `String` representation of `proc`."
 short_name(proc::Processor) = string(proc)
 short_name(p::OSProc) = "W: $(p.pid)"
+
+"Returns true if the processor is on the local worker (for MPI/ordering)."
+is_local_processor(proc::Processor) = (root_worker_id(proc) == myid())
+
+"Ordering key for task firing (used by MPI to avoid deadlock)."
+fire_order_key(proc::Processor) = (root_worker_id(proc), 0)

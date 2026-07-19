@@ -107,6 +107,7 @@ function swaprows_panel!(A::AbstractMatrix{T}, M::AbstractMatrix{T}, ipiv_chunk:
             A[p,:], M[r,:] = M[r,:], A[p,:]
         end
     end
+    return A
 end
 
 @kernel function _geru_kernel!(alpha, x, y, A)
@@ -173,6 +174,7 @@ end
             end
         end
     end
+    return A
 end
 
 # Same as above, but for a vector (e.g. a right-hand-side `DVector` in

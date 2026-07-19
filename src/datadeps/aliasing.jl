@@ -226,6 +226,7 @@ struct ArgumentWrapper
     function ArgumentWrapper(arg, dep_mod)
         h = hash(dep_mod)
         h = _identity_hash(arg, h)
+        check_uniform(h, arg)
         return new(arg, dep_mod, h)
     end
 end
@@ -242,6 +243,7 @@ struct HistoryEntry
 end
 
 struct AliasedObjectCacheStore
+    accel::Acceleration
     keys::Vector{AbstractAliasing}
     derived::Dict{AbstractAliasing,AbstractAliasing}
     stored::Dict{MemorySpace,Set{AbstractAliasing}}
@@ -253,8 +255,9 @@ struct AliasedObjectCacheStore
     # space holding that key is a copy we allocated and may free.
     originals::Set{Tuple{MemorySpace,AbstractAliasing}}
 end
-AliasedObjectCacheStore() =
-    AliasedObjectCacheStore(Vector{AbstractAliasing}(),
+AliasedObjectCacheStore(accel::Acceleration) =
+    AliasedObjectCacheStore(accel,
+                            Vector{AbstractAliasing}(),
                             Dict{AbstractAliasing,AbstractAliasing}(),
                             Dict{MemorySpace,Set{AbstractAliasing}}(),
                             Dict{MemorySpace,Dict{AbstractAliasing,Chunk}}(),
@@ -290,8 +293,9 @@ function get_stored(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::A
 end
 function set_stored!(cache::AliasedObjectCacheStore, dest_space::MemorySpace, value::Chunk, ainfo::AbstractAliasing)
     @assert !is_stored(cache, dest_space, ainfo) "Cache already has derived ainfo $ainfo"
+    check_uniform(value)
     key = cache.derived[ainfo]
-    value_ainfo = aliasing(value, identity)
+    value_ainfo = aliasing(cache.accel, value, identity)
     cache.derived[value_ainfo] = key
     push!(get!(Set{AbstractAliasing}, cache.stored, dest_space), key)
     values_dict = get!(Dict{AbstractAliasing,Chunk}, cache.values, dest_space)
@@ -299,6 +303,7 @@ function set_stored!(cache::AliasedObjectCacheStore, dest_space::MemorySpace, va
     return
 end
 function set_key_stored!(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::AbstractAliasing, value::Chunk)
+    check_uniform(value)
     push!(cache.keys, ainfo)
     cache.derived[ainfo] = ainfo
     # A key is first registered at the space where the original object lives, so
@@ -311,6 +316,7 @@ function set_key_stored!(cache::AliasedObjectCacheStore, space::MemorySpace, ain
 end
 
 struct AliasedObjectCache
+    accel::Acceleration
     space::MemorySpace
     chunk::Chunk
 end
@@ -338,31 +344,34 @@ function get_stored(cache::AliasedObjectCache, ainfo::AbstractAliasing)
     cache_raw = unwrap(cache.chunk)::AliasedObjectCacheStore
     return get_stored(cache_raw, cache.space, ainfo)
 end
-function set_stored!(cache::AliasedObjectCache, value::Chunk, ainfo::AbstractAliasing)
+
+function set_stored!(accel::DistributedAcceleration, cache::AliasedObjectCache, value::Chunk, ainfo::AbstractAliasing)
     wid = root_worker_id(cache.chunk)
     if wid != myid()
-        return remotecall_fetch(set_stored!, wid, cache, value, ainfo)
+        return remotecall_fetch(set_stored!, wid, accel, cache, value, ainfo)
     end
     cache_raw = unwrap(cache.chunk)::AliasedObjectCacheStore
     set_stored!(cache_raw, cache.space, value, ainfo)
     return
 end
-function set_key_stored!(cache::AliasedObjectCache, space::MemorySpace, ainfo::AbstractAliasing, value::Chunk)
+
+function set_key_stored!(accel::DistributedAcceleration, cache::AliasedObjectCache, space::MemorySpace, ainfo::AbstractAliasing, value::Chunk)
     wid = root_worker_id(cache.chunk)
     if wid != myid()
-        return remotecall_fetch(set_key_stored!, wid, cache, space, ainfo, value)
+        return remotecall_fetch(set_key_stored!, wid, accel, cache, space, ainfo, value)
     end
     cache_raw = unwrap(cache.chunk)::AliasedObjectCacheStore
     set_key_stored!(cache_raw, space, ainfo, value)
 end
-function aliased_object!(f, cache::AliasedObjectCache, x; ainfo=aliasing(x, identity))
+
+function aliased_object!(f, cache::AliasedObjectCache, x; ainfo=aliasing(cache.accel, x, identity))
     x_space = memory_space(x)
     if !is_key_present(cache, x_space, ainfo)
         # Preserve the object's memory-space/processor pairing when inserting
         # the source key. Using bare `tochunk(x)` defaults to OSProc, which can
         # incorrectly wrap GPU-backed objects as CPU chunks.
         x_chunk = x isa Chunk ? x : tochunk(x, first(processors(x_space)))
-        set_key_stored!(cache, x_space, ainfo, x_chunk)
+        set_key_stored!(cache.accel, cache, x_space, ainfo, x_chunk)
     end
     if is_stored(cache, ainfo)
         return get_stored(cache, ainfo)
@@ -371,16 +380,17 @@ function aliased_object!(f, cache::AliasedObjectCache, x; ainfo=aliasing(x, iden
         @assert y isa Chunk "Didn't get a Chunk from functor"
         @assert memory_space(y) == cache.space "Space mismatch! $(memory_space(y)) != $(cache.space)"
         if memory_space(x) != cache.space
-            @assert ainfo != aliasing(y, identity) "Aliasing mismatch! $ainfo == $(aliasing(y, identity))"
+            @assert ainfo != aliasing(cache.accel, y, identity) "Aliasing mismatch! $ainfo == $(aliasing(cache.accel, y, identity))"
         end
-        set_stored!(cache, y, ainfo)
+        set_stored!(cache.accel, cache, y, ainfo)
         return y
     end
 end
 
 struct DataDepsState
     # The mapping of original raw argument to its Chunk
-    raw_arg_to_chunk::IdDict{Any,Chunk}
+    # N.B. Values are Chunks, or raw remote handles (e.g. ChunkView under MPI)
+    raw_arg_to_chunk::IdDict{Any,Any}
 
     # The origin memory space of each argument
     # Used to track the original location of an argument, for final copy-from
@@ -409,6 +419,12 @@ struct DataDepsState
     # The mapping of memory space and argument to the memory space of the last direct write
     # Used by remainder copies to lookup the "backstop" if any portion of the target ainfo is not updated by the remainder
     arg_owner::Dict{ArgumentWrapper,MemorySpace}
+
+    # The set of memory spaces holding a fully-current replica of each argument
+    # and dep_mod: a task write resets it to the written space, while a copy
+    # extends it (the copy's source remains current)
+    # Used to elide copies, notably the final copy-from of read-only arguments
+    arg_current::Dict{ArgumentWrapper,Set{MemorySpace}}
 
     # The overlap of each argument with every other argument, based on the ainfo overlaps
     # Incrementally updated as new ainfos are created
@@ -442,7 +458,7 @@ struct DataDepsState
     ainfos_readers::Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}
 
     function DataDepsState()
-        arg_to_chunk = IdDict{Any,Chunk}()
+        arg_to_chunk = IdDict{Any,Any}()
         arg_origin = IdDict{Any,MemorySpace}()
         remote_args = Dict{MemorySpace,IdDict{Any,Any}}()
         remote_arg_to_original = IdDict{Any,Any}()
@@ -450,8 +466,12 @@ struct DataDepsState
         ainfo_arg = Dict{AliasingWrapper,Set{ArgumentWrapper}}()
         arg_history = Dict{ArgumentWrapper,Vector{HistoryEntry}}()
         arg_owner = Dict{ArgumentWrapper,MemorySpace}()
+        arg_current = Dict{ArgumentWrapper,Set{MemorySpace}}()
         arg_overlaps = Dict{ArgumentWrapper,Set{ArgumentWrapper}}()
-        ainfo_backing_chunk = tochunk(AliasedObjectCacheStore())
+        accel = current_acceleration()
+        ainfo_backing_chunk = _with_default_acceleration() do
+            tochunk(AliasedObjectCacheStore(accel))
+        end
 
         supports_inplace_cache = IdDict{Any,Bool}()
         ainfo_cache = Dict{ArgumentWrapper,AliasingWrapper}()
@@ -462,7 +482,7 @@ struct DataDepsState
         ainfos_owner = Dict{AliasingWrapper,Union{Pair{DTask,Int},Nothing}}()
         ainfos_readers = Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}()
 
-        return new(arg_to_chunk, arg_origin, remote_args, remote_arg_to_original, remote_arg_w, ainfo_arg, arg_history, arg_owner, arg_overlaps, ainfo_backing_chunk,
+        return new(arg_to_chunk, arg_origin, remote_args, remote_arg_to_original, remote_arg_w, ainfo_arg, arg_history, arg_owner, arg_current, arg_overlaps, ainfo_backing_chunk,
                    supports_inplace_cache, ainfo_cache, ainfos_lookup, ainfos_overlaps, ainfos_owner, ainfos_readers)
     end
 end
@@ -478,6 +498,11 @@ end
 function is_writedep(arg, deps, task::DTask)
     return any(dep->dep[3], deps)
 end
+
+# Wrap a non-Chunk argument for datadeps tracking. Most values become local
+# Chunks; remote handles that are already rank-replicated metadata under SPMD
+# (e.g. ChunkView under MPI) override this to stay raw.
+datadeps_arg_wrap(arg) = tochunk(arg)
 
 # Aliasing state setup
 function populate_task_info!(state::DataDepsState, task_args, spec::DTaskSpec, task::DTask)
@@ -512,7 +537,9 @@ function populate_task_info!(state::DataDepsState, task_args, spec::DTaskSpec, t
             arg_chunk = state.raw_arg_to_chunk[arg]
         else
             if !(arg isa Chunk)
-                arg_chunk = tochunk(arg)
+                arg_chunk = with(DATADEPS_THUNK_ID=>task.uid) do
+                    datadeps_arg_wrap(arg)
+                end
                 state.raw_arg_to_chunk[arg] = arg_chunk
             else
                 state.raw_arg_to_chunk[arg] = arg
@@ -522,6 +549,7 @@ function populate_task_info!(state::DataDepsState, task_args, spec::DTaskSpec, t
 
         # Track the origin space of the argument
         origin_space = memory_space(arg_chunk)
+        check_uniform(origin_space)
         state.arg_origin[arg_chunk] = origin_space
         state.remote_arg_to_original[arg_chunk] = arg_chunk
 
@@ -583,7 +611,7 @@ function aliasing!(state::DataDepsState, target_space::MemorySpace, arg_w::Argum
     end
 
     # Calculate the ainfo
-    ainfo = AliasingWrapper(aliasing(remote_arg, arg_w.dep_mod))
+    ainfo = AliasingWrapper(aliasing(current_acceleration(), remote_arg, arg_w.dep_mod))
 
     # Cache the result
     state.ainfo_cache[remote_arg_w] = ainfo
@@ -683,19 +711,25 @@ implemented `move!` and want to skip in-place copies. When this returns
 `false`, datadeps will instead perform out-of-place copies for each non-local
 use of `x`, and the data in `x` will not be updated when the `spawn_datadeps`
 region returns.
+
+This is deliberately a *type-level* query: it excludes values that
+`type_may_alias` reports as aliasing but which cannot actually be mutated in
+place (a `Function` closure that captures arrays is the canonical example —
+it aliases its captures, but there is no `move!` that writes into a closure).
+Deciding from the type alone (rather than inspecting the value) is what makes
+this usable under SPMD/MPI execution, where a `Chunk`'s payload is not
+materialized on every rank but its `chunktype` is known everywhere.
+
+Note this is distinct from whether a backend can perform a *zero-copy*
+in-place transfer of the payload (e.g. MPIExt's `supports_inplace_mpi`, which
+additionally requires a bits-eltype `DenseArray`); that is a transport-layer
+optimization applied only once an in-place move has been scheduled.
 """
-supports_inplace_move(x) = true
-supports_inplace_move(t::DTask) = supports_inplace_move(fetch(t; raw=true))
-function supports_inplace_move(c::Chunk)
-    # FIXME: Use MemPool.access_ref
-    pid = root_worker_id(c.processor)
-    if pid == myid()
-        return supports_inplace_move(poolget(c.handle))
-    else
-        return remotecall_fetch(supports_inplace_move, pid, c)
-    end
-end
-supports_inplace_move(::Function) = false
+supports_inplace_move(x) = supports_inplace_move(typeof(x))
+supports_inplace_move(t::DTask) = supports_inplace_move(chunktype(t))
+supports_inplace_move(c::Chunk) = supports_inplace_move(chunktype(c))
+supports_inplace_move(::Type) = true
+supports_inplace_move(::Type{<:Function}) = false
 
 # Read/write dependency management
 function get_write_deps!(state::DataDepsState, dest_space::MemorySpace, ainfo::AbstractAliasing, write_num, syncdeps)
@@ -732,8 +766,14 @@ function _get_read_deps!(state::DataDepsState, dest_space::MemorySpace, ainfo::A
         end
     end
 end
+# Whether the raw data backing `x` can be inspected on the current process to
+# compute its aliasing. Distributed `Chunk`s are always inspectable (locally or
+# via `remotecall`); the MPI extension overrides this for refs owned by a
+# different rank, where the data is not present on this rank.
+aliasing_available(@nospecialize(x)) = true
+
 """
-    gather_free_syncdeps!(state, space, remote_arg, write_num, chunk_to_ainfos, syncdeps)
+    gather_free_syncdeps!(state, space, key_ainfo, remote_arg, write_num, chunk_to_ainfos, syncdeps)
 
 Collect into `syncdeps` every task that must complete before the backing buffer
 `remote_arg` (a Datadeps-allocated copy in `space`) can be freed.
@@ -743,14 +783,28 @@ arguments), its ainfos are in `chunk_to_ainfos` and we reuse their precomputed
 overlap sets. Otherwise the buffer only underlies wrapper arguments (e.g. it is
 the parent array shared by several `view`s, whose tracked slots are the views
 rather than this buffer); in that case we compute the buffer's own aliasing and
-sync with every tracked ainfo that overlaps its memory.
+sync with every tracked ainfo that overlaps its memory. When the buffer's data
+is not inspectable here (`aliasing_available` is `false`, e.g. an `MPIRef` owned
+by another rank), we fall back to the rank-uniform cache key ainfo `key_ainfo`.
 """
-function gather_free_syncdeps!(state::DataDepsState, space::MemorySpace, remote_arg, write_num::Int, chunk_to_ainfos, syncdeps)
+function gather_free_syncdeps!(state::DataDepsState, space::MemorySpace, key_ainfo, remote_arg, write_num::Int, chunk_to_ainfos, syncdeps)
     ainfos = get(chunk_to_ainfos, remote_arg, nothing)
     if ainfos !== nothing
         for ainfo in ainfos
             get_write_deps!(state, space, ainfo, write_num, syncdeps)
         end
+        return
+    end
+
+    # If the buffer's raw data isn't inspectable here (e.g. an `MPIRef` owned by
+    # another rank under uniform execution), we cannot compute its aliasing.
+    # Fall back to the rank-uniform cache key ainfo, which is metadata available
+    # identically on every rank. The cache stores raw ainfos, so wrap it to match
+    # the `AliasingWrapper` keys used by the overlap tracking.
+    if !aliasing_available(remote_arg)
+        wrapped = key_ainfo isa AliasingWrapper ? key_ainfo : AliasingWrapper(key_ainfo)
+        haskey(state.ainfos_overlaps, wrapped) &&
+            get_write_deps!(state, space, wrapped, write_num, syncdeps)
         return
     end
 
@@ -777,7 +831,7 @@ function gather_free_syncdeps!(state::DataDepsState, space::MemorySpace, remote_
     end
     return
 end
-function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::MemorySpace, ainfo::AbstractAliasing, task, write_num)
+function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::MemorySpace, ainfo::AbstractAliasing, task, write_num; copy_src::Union{MemorySpace,Nothing}=nothing)
     state.ainfos_owner[ainfo] = task=>write_num
     empty!(state.ainfos_readers[ainfo])
 
@@ -791,6 +845,33 @@ function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::M
     for other_arg_w in state.arg_overlaps[arg_w]
         other_arg_w == arg_w && continue
         push!(state.arg_history[other_arg_w], HistoryEntry(ainfo, dest_space, write_num))
+    end
+
+    # Track which spaces hold a fully-current replica of this region
+    if copy_src === nothing
+        # Task write: only the written space is current, and other spaces'
+        # replicas of overlapping regions become stale
+        state.arg_current[arg_w] = Set{MemorySpace}((dest_space,))
+        for other_arg_w in state.arg_overlaps[arg_w]
+            other_arg_w == arg_w && continue
+            other_current = get(state.arg_current, other_arg_w, nothing)
+            if other_current !== nothing
+                intersect!(other_current, (dest_space,))
+            else
+                # Lazily-tracked args are current only at their origin
+                other_origin = state.arg_origin[other_arg_w.arg]
+                state.arg_current[other_arg_w] = other_origin == dest_space ?
+                    Set{MemorySpace}((dest_space,)) : Set{MemorySpace}()
+            end
+        end
+    else
+        # Copy: the destination joins the current set; the source (and any
+        # other current replica) stays current, and since a copy only moves
+        # already-canonical bytes, overlapping arguments are unaffected
+        current = get!(state.arg_current, arg_w) do
+            Set{MemorySpace}((state.arg_origin[arg_w.arg],))
+        end
+        push!(current, dest_space)
     end
 
     # Record the last place we were fully written to
@@ -813,18 +894,29 @@ function generate_slot!(state::DataDepsState, dest_space, data)
     # because all we want here is to make a copy of some version of the data,
     # even if the data is not up to date.
     orig_space = memory_space(data)
+    check_uniform(orig_space)
     to_proc = first(processors(dest_space))
+    check_uniform(to_proc)
     from_proc = first(processors(orig_space))
+    check_uniform(from_proc)
+    check_uniform(typeof(data))
     dest_space_args = get!(IdDict{Any,Any}, state.remote_args, dest_space)
-    aliased_object_cache = AliasedObjectCache(dest_space, state.ainfo_backing_chunk)
+    aliased_object_cache = AliasedObjectCache(current_acceleration(), dest_space, state.ainfo_backing_chunk)
     ctx = Sch.eager_context()
     id = rand(Int)
     @maybelog ctx timespan_start(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data))
-    data_chunk = move_rewrap(aliased_object_cache, from_proc, to_proc, orig_space, dest_space, data)
+    tid = something(DATADEPS_CURRENT_TASK[], (;uid=0)).uid
+    data_chunk = with(DATADEPS_THUNK_ID=>tid) do
+        remotecall_endpoint_toplevel(move_rewrap, current_acceleration(), aliased_object_cache, from_proc, to_proc, orig_space, dest_space, data)
+    end
     @maybelog ctx timespan_finish(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data=data_chunk))
     @assert memory_space(data_chunk) == dest_space "space mismatch! $dest_space (dest) != $(memory_space(data_chunk)) (actual) ($(typeof(data)) (data) vs. $(typeof(data_chunk)) (chunk)), spaces ($orig_space -> $dest_space)"
     dest_space_args[data] = data_chunk
     state.remote_arg_to_original[data_chunk] = data
+
+    check_uniform(memory_space(dest_space_args[data]))
+    check_uniform(processor(dest_space_args[data]))
+    check_uniform(dest_space_args[data].handle)
 
     return dest_space_args[data]
 end
@@ -838,82 +930,93 @@ function get_or_generate_slot!(state, dest_space, data)
     end
     return state.remote_args[dest_space][data]
 end
-function remotecall_endpoint(f, from_proc, to_proc, from_space, to_space, data)
-    to_w = root_worker_id(to_proc)
-    if to_w == myid()
-        data_converted = f(move(from_proc, to_proc, data))
-        return tochunk(data_converted, to_proc)
+
+function is_local(accel::DistributedAcceleration, target)
+    return root_worker_id(target) == myid()
+end
+
+function remotecall_endpoint_toplevel(f, accel::DistributedAcceleration, cache::AliasedObjectCache, from_proc, to_proc, from_space, to_space, data::Chunk)
+    wid = root_worker_id(from_proc)
+    if wid == myid()
+        return f(accel, cache, from_proc, to_proc, from_space, to_space, unwrap(data))::Chunk
     end
-    return remotecall_fetch(to_w, from_proc, to_proc, to_space, data) do from_proc, to_proc, to_space, data
-        data_converted = f(move(from_proc, to_proc, data))
-        return tochunk(data_converted, to_proc)
+    return remotecall_fetch(wid, f, accel, cache, from_proc, to_proc, from_space, to_space, data) do f, accel, cache, from_proc, to_proc, from_space, to_space, data
+        return f(accel, cache, from_proc, to_proc, from_space, to_space, unwrap(data))::Chunk
     end
 end
-function rewrap_aliased_object!(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, x)
-    return aliased_object!(cache, x) do x
-        return remotecall_endpoint(identity, from_proc, to_proc, from_space, to_space, x)
+function remotecall_endpoint_transfer(f, accel::DistributedAcceleration, from_proc, to_proc, from_space, to_space, data)
+    wid = root_worker_id(to_proc)
+    if wid == myid()
+        return f(accel, from_proc, to_proc, from_space, to_space, data)
+    end
+    return remotecall_fetch(wid, f, accel, from_proc, to_proc, from_space, to_space, data) do f, accel, from_proc, to_proc, from_space, to_space, data
+        return f(accel, from_proc, to_proc, from_space, to_space, data)
     end
 end
-function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, data::Chunk)
-    # Unwrap so that we hit the right dispatch
-    wid = root_worker_id(data)
-    if wid != myid()
-        return remotecall_fetch(move_rewrap, wid, cache, from_proc, to_proc, from_space, to_space, data)
-    end
-    data_raw = unwrap(data)
-    return move_rewrap(cache, from_proc, to_proc, from_space, to_space, data_raw)
-end
-function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, data)
-    # For generic data
-    return aliased_object!(cache, data) do data
-        return remotecall_endpoint(identity, from_proc, to_proc, from_space, to_space, data)
-    end
-end
-function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, v::SubArray)
-    to_w = root_worker_id(to_proc)
-    p_chunk = rewrap_aliased_object!(cache, from_proc, to_proc, from_space, to_space, parent(v))
-    inds = parentindices(v)
-    return remotecall_fetch(to_w, from_proc, to_proc, from_space, to_space, p_chunk, inds) do from_proc, to_proc, from_space, to_space, p_chunk, inds
-        p_new = move(from_proc, to_proc, p_chunk)
-        v_new = view(p_new, inds...)
-        return tochunk(v_new, to_proc)
-    end
-end
-# FIXME: Do this programmatically via recursive dispatch
+
+#==============================================================================
+  move_rewrap header + children protocol
+
+  Wrappers that share underlying storage (SubArray, triangular, ChunkView,
+  HaloArray, ...) register:
+    move_rewrap_parts(x) -> (children::Tuple, header) | nothing (leaf)
+    move_rewrap_build(T, children, header) -> reconstructed value
+    move_rewrap_child_types(T) -> Tuple of child types | nothing (leaf)
+    move_rewrap_header_mode(T) -> :none | :broadcast | :replicated
+    move_rewrap_result_type(T, child_chunktypes, header) -> result DataType
+
+  Distributed and MPI accelerations share one generic move_rewrap that
+  transfers/shares children, carries or broadcasts the header, then rebuilds.
+==============================================================================#
+
+# Leaf defaults
+move_rewrap_parts(x) = nothing
+move_rewrap_child_types(::Type) = nothing
+move_rewrap_header_mode(::Type) = :none
+
+# SubArray: parent payload + indices header
+move_rewrap_parts(x::SubArray) = ((parent(x),), parentindices(x))
+move_rewrap_build(::Type{<:SubArray}, (p,), inds) = view(p, inds...)
+move_rewrap_child_types(::Type{T}) where {T<:SubArray} = (T.parameters[3],)
+move_rewrap_header_mode(::Type{<:SubArray}) = :broadcast
+move_rewrap_result_type(::Type{<:SubArray}, (PT,), inds) =
+    Base.promote_op(view, PT, typeof.(inds)...)
+
+# Triangular wrappers: parent payload, empty header
 for wrapper in (UpperTriangular, LowerTriangular, UnitUpperTriangular, UnitLowerTriangular)
-    @eval function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, v::$(wrapper))
-        to_w = root_worker_id(to_proc)
-        p_chunk = rewrap_aliased_object!(cache, from_proc, to_proc, from_space, to_space, parent(v))
-        return remotecall_fetch(to_w, from_proc, to_proc, from_space, to_space, p_chunk) do from_proc, to_proc, from_space, to_space, p_chunk
-            p_new = move(from_proc, to_proc, p_chunk)
-            v_new = $(wrapper)(p_new)
-            return tochunk(v_new, to_proc)
-        end
+    @eval begin
+        move_rewrap_parts(x::$wrapper) = ((parent(x),), nothing)
+        move_rewrap_build(::Type{<:$wrapper}, (p,), ::Nothing) = $wrapper(p)
+        move_rewrap_child_types(::Type{T}) where {T<:$wrapper} = (T.parameters[2],)
+        move_rewrap_result_type(::Type{<:$wrapper}, (PT,), ::Nothing) =
+            $wrapper{eltype(PT),PT}
     end
 end
-function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, v::Base.RefValue)
-    return aliased_object!(cache, v) do v
-        return remotecall_endpoint(identity, from_proc, to_proc, from_space, to_space, v)
-    end
-end
-#= FIXME: Make this work so we can automatically move-rewrap recursive objects
-function move_rewrap_recursive(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, x::T) where T
-    if isstructtype(T)
-        # Check all object fields (recursive)
-        for field in fieldnames(T)
-            value = getfield(x, field)
-            new_value = aliased_object!(cache, value) do value
-                return move_rewrap_recursive(cache, from_proc, to_proc, from_space, to_space, value)
+
+# Nested Chunk: unwrap on the owner and recurse
+move_rewrap(accel, cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, data::Chunk) =
+    remotecall_endpoint_toplevel(move_rewrap, accel, cache, from_proc, to_proc, from_space, to_space, data)
+
+function move_rewrap(accel, cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, data)
+    parts = move_rewrap_parts(data)
+    if parts === nothing
+        # Leaf: transfer the value, sharing via the aliased-object cache
+        return aliased_object!(cache, data) do data
+            return remotecall_endpoint_transfer(accel, from_proc, to_proc, from_space, to_space, data) do accel, from_proc, to_proc, from_space, to_space, data
+                return tochunk(move(from_proc, to_proc, data), to_proc, to_space)
             end
-            setfield!(x, field, new_value)
         end
-        return x
-    else
-        @warn "Cannot move-rewrap object of type $T"
-        return x
+    end
+    # Wrapper: recurse on children, then rebuild with header on the destination
+    children, header = parts
+    T = typeof(data)
+    child_chunks = map(c -> move_rewrap(accel, cache, from_proc, to_proc, from_space, to_space, c), children)
+    for cc in child_chunks
+        check_uniform(cc.handle)
+    end
+    return remotecall_endpoint_transfer(accel, from_proc, to_proc, from_space, to_space, child_chunks) do accel, from_proc, to_proc, from_space, to_space, child_chunks
+        children_local = map(c -> move(from_proc, to_proc, c), child_chunks)
+        v_new = move_rewrap_build(T, children_local, header)
+        return tochunk(v_new, to_proc, to_space)
     end
 end
-move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, x::String) = x # FIXME: Not necessarily true
-move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, x::Symbol) = x
-move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, x::Type) = x
-=#
