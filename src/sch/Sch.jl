@@ -890,16 +890,9 @@ concurrently across threads.
     costs = @reusable_dict :schedule_one!_costs Processor Float64 OSProc() 0.0 32
     costs_cleanup = @reuse_defer_cleanup empty!(costs)
 
-    # Build the per-signature runtime index once, here, and thread it through
-    # to both `estimate_task_costs!` and `has_capacity`. Both functions look
-    # up the same `est_time_util` for the same `(sig, proc, worker_id)` triples
-    # for this task; without a shared index each does an independent
-    # `metrics_lookup_runtime` call that scans the MetricsTracker snapshot end-
-    # to-end via `MT.find_keys`. On the AOT path (`options.exec_scope !== nothing`,
-    # `W == 1`), that meant two `O(N)` scans per submitted task — one in
-    # `estimate_task_costs!` and one in the `has_capacity` call inside the
-    # reservation loop below. Building the index once and passing it through
-    # makes both callers `O(1)` per proc after the single `O(N)` build.
+    # Build the per-signature index once and share it with both callers, so
+    # each is O(1) per proc after a single O(N) build (vs two independent
+    # end-to-end MetricsTracker scans per task on the AOT path).
     sig_vec_for_index = sig isa Dagger.Signature ? sig.sig : sig
     runtime_index = build_signature_runtime_index(
         MT.snapshot(MT.global_metrics_cache()), sig_vec_for_index)

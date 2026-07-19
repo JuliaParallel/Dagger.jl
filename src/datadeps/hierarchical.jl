@@ -1,21 +1,6 @@
-# Hierarchical scheduling for datadeps
-# Spreads scheduling work across multiple threads/workers via a 4-phase pipeline:
-# Phase 1: Parallel aliasing info construction
-# Phase 2: Sequential DAG construction from aliasing overlaps
-# Phase 3: Data-affinity DAG partitioning
-# Phase 4: Parallel local scheduling per partition -- each partition runs on its
-#          own task, prepares/submits its tasks concurrently with the others,
-#          and computes its *own* (partition-local) AOT schedule over just its
-#          processors. This maximizes scheduling parallelism and scalability;
-#          no global synchronization or global AOT pass is imposed.
-#
-# N.B. Concurrent task submission from many partition tasks used to intermittently
-# hang in the core eager scheduler. The root cause was `Distributed.Future`,
-# which is unsafe under concurrent same-process access; Dagger now backs task
-# futures with `MemPool.DFuture` (a thread-safe, `DEvent`-based future), so
-# parallel Phase 4 is safe. The actual task submission (`enqueue!`) is still
-# serialized via `LockedEnqueueQueue`, but the (expensive) per-task
-# `distribute_task!` preparation runs concurrently across partitions.
+# Concurrent per-partition task submission requires MemPool.DFuture-backed
+# task futures; the older Distributed.Future was not safe for concurrent
+# same-process access.
 
 struct HierarchicalTaskInfo
     arg_w::ArgumentWrapper
@@ -29,40 +14,26 @@ struct HierarchicalTaskMeta
     may_alias::Bool
     inplace_move::Bool
     deps::Vector{HierarchicalTaskInfo}
-    # Indices of same-region producer tasks whose results are passed as
-    # arguments (e.g. `In(t1)`). These cannot be `fetch`'d during the
-    # pre-scan because they are not launched yet; they become hard DAG edges.
+    # Same-region unlaunched DTask arguments -- cannot fetch during pre-scan;
+    # become hard DAG edges.
     value_deps::Vector{Int}
 end
 
-### Cross-partition chunk ownership ###
-#
-# Each partition schedules with its own `DataDepsState`, so `arg_owner` /
-# `arg_history` / physical slots are per-partition. When a backing chunk is
-# written by tasks in >=2 partitions that live in *different* memory spaces,
-# each partition would otherwise copy that chunk from its origin, write its own
-# sub-range, and record itself as owner -- the physical copies then diverge and
-# the final copy-back keeps only one, silently losing the others' writes.
-#
-# The registry below carries the single authoritative version ("ownership") of
-# each such shared chunk across partition boundaries. It is deadlock-free by
-# construction: a single lock (never per-argument locks acquired in different
-# orders) plus the global DAG ordering -- a consumer partition always `wait`s on
-# its cross-partition predecessor's `task_submitted` event before scheduling, so
-# the producer's ownership commit is always visible before the consumer reads it.
-# The lock only provides memory-safety for concurrent access to *different*
-# chunks; per-chunk correctness comes from the DAG order.
-"Authoritative, cross-partition ownership state for a single shared backing chunk."
+# Cross-partition ownership registry for chunks written from >=2 partitions in
+# distinct memory spaces. Without this, per-partition copies diverge and the
+# final copy-back silently loses all but one. Deadlock-free: one lock plus the
+# DAG's `task_submitted` handshake orders the reads against the ownership
+# commit; the lock only guards memory-safety across different chunks.
 mutable struct ChunkOwnership
-    owner_space::MemorySpace              # space holding the current version
-    owner_slot::Any                       # physical slot chunk in `owner_space`
-    owner_task::Union{DTask,Nothing}      # producer of the current version (nothing => origin data)
-    owner_state::Union{DataDepsState,Nothing} # owning partition's state (for copy-back)
-    const origin_space::MemorySpace       # the chunk's home space
+    owner_space::MemorySpace
+    owner_slot::Any
+    owner_task::Union{DTask,Nothing}
+    owner_state::Union{DataDepsState,Nothing}
+    const origin_space::MemorySpace
 end
 
 struct SharedChunkRegistry
-    entries::IdDict{Any,ChunkOwnership}   # backing chunk (identity) => ownership
+    entries::IdDict{Any,ChunkOwnership}
     lock::ReentrantLock
 end
 SharedChunkRegistry() = SharedChunkRegistry(IdDict{Any,ChunkOwnership}(), ReentrantLock())
@@ -71,12 +42,11 @@ is_shared_chunk(::Nothing, @nospecialize(chunk)) = false
 is_shared_chunk(reg::SharedChunkRegistry, @nospecialize(chunk)) = haskey(reg.entries, chunk)
 
 """
-    build_shared_chunk_registry(task_metas, vertex_to_partition, partition_space) -> SharedChunkRegistry or nothing
+    build_shared_chunk_registry(task_metas, vertex_to_partition, partition_space)
+        -> SharedChunkRegistry or nothing
 
-Detects backing chunks accessed by partitions spanning >=2 distinct memory
-spaces (the only case that can split-brain) and returns a registry seeded with
-origin ownership for each. Returns `nothing` when all partitions share a single
-space (e.g. single-worker), so the fast path is entirely unchanged there.
+Registry of chunks accessed from >=2 distinct memory spaces. Returns
+`nothing` when all partitions share one space.
 """
 function build_shared_chunk_registry(task_metas::Vector{HierarchicalTaskMeta},
                                      vertex_to_partition::Vector{Int},
@@ -107,11 +77,9 @@ end
 """
     _sync_incoming_ownership!(state, registry, our_space, task_arg_ws, write_num)
 
-Before a task's copy-to phase, for each shared backing-chunk argument whose
-globally-current owner (per `registry`) lives in a space other than `our_space`,
-seed this partition's `state` so the existing copy-to machinery pulls a fresh
-whole-chunk copy from the true owner (with a syncdep on the producing task). A
-no-op for private chunks or when we already hold the authoritative version.
+Seed `state` so the copy-to phase pulls a fresh whole-chunk copy from the
+true cross-partition owner (with a syncdep on the producing task). No-op for
+private chunks or when we already own.
 """
 function _sync_incoming_ownership!(state::DataDepsState, registry::SharedChunkRegistry,
                                    our_space::MemorySpace, task_arg_ws, write_num::Int)
@@ -125,10 +93,8 @@ function _sync_incoming_ownership!(state::DataDepsState, registry::SharedChunkRe
         owner_space, owner_slot, owner_task = @lock registry.lock begin
             (entry.owner_space, entry.owner_slot, entry.owner_task)
         end
-        owner_space == our_space && return # we already hold the authoritative copy
+        owner_space == our_space && return
 
-        # Register the owner's physical slot so slot/aliasing lookups in this
-        # partition reuse it (rather than generating a fresh, stale copy).
         dest_args = get!(IdDict{Any,Any}, state.remote_args, owner_space)
         if !haskey(dest_args, chunk)
             dest_args[chunk] = owner_slot
@@ -138,15 +104,12 @@ function _sync_incoming_ownership!(state::DataDepsState, registry::SharedChunkRe
         map_or_ntuple(arg_ws.deps) do dep_idx
             dep = arg_ws.deps[dep_idx]
             arg_w = dep.arg_w
-            # Point ownership at the owner space and clear any locally-merged
-            # history, so `compute_remainder_for_arg!` takes the `FullCopy`
-            # (whole-chunk) path from the owner rather than a partial remainder.
+            # Clear local history so compute_remainder_for_arg! takes the
+            # FullCopy path from the owner instead of a partial remainder.
             state.arg_owner[arg_w] = owner_space
             haskey(state.arg_history, arg_w) && empty!(state.arg_history[arg_w])
             src_ainfo = aliasing!(state, owner_space, arg_w)
             if owner_task !== nothing
-                # Make the ensuing copy-to (via `get_read_deps!`) wait on the
-                # producer, so we never copy the owner slot before it is written.
                 state.ainfos_owner[src_ainfo] = owner_task => (write_num - 1)
             end
             return
@@ -159,11 +122,9 @@ end
 """
     _commit_ownership!(state, registry, our_space, task, task_arg_ws)
 
-After a task is recorded as a writer, publish it as the new authoritative owner
-of each shared backing chunk it writes, so subsequent cross-partition consumers
-pull from here. Ordering (and thus visibility) is guaranteed by the DAG's
-`task_submitted` handshake; the lock only guards concurrent commits for other
-chunks.
+Publish `task` as the new authoritative owner of each shared chunk it writes.
+Visibility is guaranteed by the DAG's `task_submitted` handshake; the lock
+only guards concurrent commits for other chunks.
 """
 function _commit_ownership!(state::DataDepsState, registry::SharedChunkRegistry,
                             our_space::MemorySpace, task::DTask, task_arg_ws)
@@ -194,16 +155,11 @@ function _commit_ownership!(state::DataDepsState, registry::SharedChunkRegistry,
     return
 end
 
-# Below this many tasks, the fixed costs of spawning threads and merging
-# per-thread results outweigh the benefit of parallelizing the pre-scan.
+# Fewer tasks than this: sequential pre-scan wins over the thread-spawn cost.
 const COLLECT_ALIASED_ARGS_MIN_CHUNK = 256
 
-# Thread-safe "get or compute" against a shared `IdDict` cache. The
-# expensive computation (`f`) is performed outside of the lock so that
-# multiple threads can make progress on distinct keys concurrently; if two
-# threads race on the same key, the loser's result is simply discarded (the
-# corresponding `Chunk`/Bool is cheap to let the GC reclaim) so that every
-# thread agrees on a single canonical value (e.g. `Chunk`) per raw argument.
+# f() runs outside the lock so distinct keys make concurrent progress; racers
+# on the same key drop their result and adopt whichever value landed first.
 @inline function _cached_get!(f, cache::IdDict{Any,V}, cache_lock::Union{ReentrantLock,Nothing}, key) where V
     if cache_lock === nothing
         return get!(f, cache, key)
@@ -220,29 +176,16 @@ end
 """
     collect_aliased_args(seen_tasks) -> (task_metas, unique_arg_ws)
 
-Pre-scans all tasks to collect per-task dependency metadata and the set of
-unique `ArgumentWrapper`s that need aliasing analysis. This mirrors the logic
-in `populate_task_info!` but only inspects arguments without modifying any
-scheduling state.
-
-For large batches of tasks (the common case for e.g. panel-factorization
-algorithms which submit many small tasks per `spawn_datadeps` region), the
-pre-scan itself (not just the aliasing computation in
-`build_aliasing_parallel`) can dominate scheduling time, since it touches
-every argument of every task. This is parallelized across threads: each
-thread scans a contiguous range of `seen_tasks` into its own disjoint slice
-of `task_metas` and its own local `unique_arg_ws` map (merged at the end),
-while sharing (lock-protected) caches for `Chunk`-wrapping and
-`supports_inplace_move`, ensuring a single canonical `Chunk` identity per
-raw argument regardless of which thread first observes it.
+Pre-scan every task's arguments to build `task_metas` and the unique
+`ArgumentWrapper` set for aliasing analysis. Parallelized across threads
+with shared, lock-protected caches for `Chunk`-wrapping and
+`supports_inplace_move` so every raw argument has one canonical `Chunk`.
 """
 function collect_aliased_args(seen_tasks::Vector{DTaskPair})
     n = length(seen_tasks)
     task_metas = Vector{HierarchicalTaskMeta}(undef, n)
     n == 0 && return task_metas, Dict{ArgumentWrapper,ArgumentWrapper}()
 
-    # Map in-region tasks to vertex indices so we can record value deps
-    # without fetching unlaunched DTasks during the pre-scan.
     task_to_idx = IdDict{DTask,Int}()
     for (i, pair) in enumerate(seen_tasks)
         task_to_idx[pair.task] = i
@@ -309,11 +252,8 @@ function _collect_aliased_args_range!(task_metas::Vector{HierarchicalTaskMeta},
 
             arg_pre_unwrap, deps = unwrap_inout(_arg_with_deps)
 
-            # Same-region DTask arguments are not launched yet, so we cannot
-            # `fetch` them here (that is what the sequential `distribute_task!`
-            # path does *after* launching the producer). Record a value
-            # dependency instead; aliasing of the result is handled later in
-            # `distribute_task!` once the producer has been submitted.
+            # Unlaunched same-region DTask: record a value dep; aliasing is
+            # deferred to `distribute_task!` after the producer submits.
             if arg_pre_unwrap isa DTask && !istaskstarted(arg_pre_unwrap)
                 pred_idx = get(task_to_idx, arg_pre_unwrap, 0)
                 if pred_idx != 0 && pred_idx != task_idx
@@ -357,12 +297,11 @@ function _collect_aliased_args_range!(task_metas::Vector{HierarchicalTaskMeta},
 end
 
 """
-    build_aliasing_parallel(unique_arg_ws) -> (lookup, ainfos_overlaps, arg_to_ainfo)
+    build_aliasing_parallel(unique_arg_ws)
+        -> (lookup, ainfos_overlaps, arg_to_ainfo)
 
-Phase 1: Computes `AliasingWrapper` for every unique `ArgumentWrapper` in
-parallel. On each worker, threads are used to compute aliasing info for local
-data. Results are gathered and reduced into a single `AliasingLookup` with
-overlap information.
+Compute `AliasingWrapper` for every unique `ArgumentWrapper` in parallel and
+reduce into a single `AliasingLookup` with overlap information.
 """
 function build_aliasing_parallel(unique_arg_ws::Dict{ArgumentWrapper, ArgumentWrapper})
     arg_ws_vec = collect(values(unique_arg_ws))
@@ -377,18 +316,11 @@ function build_aliasing_parallel(unique_arg_ws::Dict{ArgumentWrapper, ArgumentWr
     arg_to_ainfo = Dict{ArgumentWrapper, AliasingWrapper}()
 
     if length(by_worker) == 1
-        # Common single-worker case: avoid the `@sync`/`Threads.@spawn`/lock
-        # overhead entirely, since there's nothing to run concurrently with.
-        # `_compute_aliasing_batch` still uses threads internally when there
-        # are enough args to make it worthwhile.
         wid, worker_args = only(by_worker)
         results = wid == myid() ? _compute_aliasing_batch(worker_args) :
                                    remotecall_fetch(_compute_aliasing_batch, wid, worker_args)
-        # Key by the *local* `arg_w`, not the pair's: for a remote worker the
-        # returned `ArgumentWrapper` is a deserialized copy that need not be
-        # identity/hash-equal to the entry in `arg_ws_vec` we later look up
-        # (which would raise a `KeyError`). `_compute_aliasing_batch` preserves
-        # input order, so pair by index.
+        # Key by the local arg_w: remote-returned ArgumentWrappers are
+        # deserialized copies. _compute_aliasing_batch preserves input order.
         @assert length(results) == length(worker_args) """build_aliasing_parallel: \
 _compute_aliasing_batch input/output length mismatch (single-worker branch). \
 wid=$wid myid=$(myid()) length(worker_args)=$(length(worker_args)) \
@@ -402,23 +334,15 @@ result_first_hashes=$([r.first.hash for r in results])"""
         all_results_lock = ReentrantLock()
         @sync for (wid, worker_args) in by_worker
             Threads.@spawn begin
-                # `local` is REQUIRED here: the single-worker branch above
-                # binds `results` in the enclosing function scope, so without
-                # `local` every `Threads.@spawn` closure below would assign to
-                # (and read from) that same shared variable, racing with sibling
-                # partitions. The observed symptom is a `BoundsError` where
-                # `results[i]` accesses a Vector whose length matches a *different*
-                # partition's `worker_args`, hitting index-out-of-bounds when the
-                # winning writer's partition happens to have fewer args than ours.
+                # `local` is REQUIRED: the single-worker branch above binds
+                # `results` in the enclosing scope, and without this every
+                # spawned closure would race on that shared cell.
                 local results
                 results = if wid == myid()
                     _compute_aliasing_batch(worker_args)
                 else
                     remotecall_fetch(_compute_aliasing_batch, wid, worker_args)
                 end
-                # Key by the *local* `arg_w` (see single-worker note above): a
-                # remote worker returns deserialized `ArgumentWrapper` copies
-                # that may not compare equal to our `arg_ws_vec` lookup keys.
                 @assert length(results) == length(worker_args) """build_aliasing_parallel: \
 _compute_aliasing_batch input/output length mismatch (multi-worker branch). \
 wid=$wid myid=$(myid()) length(worker_args)=$(length(worker_args)) \
@@ -457,8 +381,8 @@ result_first_hashes=$([r.first.hash for r in results])"""
     return lookup, ainfos_overlaps, arg_to_ainfo
 end
 
-# Below this many args, the fixed cost of forking/joining `Threads.@threads`
-# outweighs the benefit of parallelizing the (typically cheap) `aliasing()` calls.
+# Fewer args than this: `Threads.@threads` overhead exceeds the aliasing()
+# cost.
 const COMPUTE_ALIASING_BATCH_MIN_PARALLEL = 8
 
 function _compute_aliasing_batch(arg_ws::Vector{ArgumentWrapper})
@@ -484,9 +408,8 @@ end
     build_dependency_dag(task_metas, arg_to_ainfo, ainfos_overlaps)
         -> SimpleDiGraph
 
-Phase 2: Walks tasks in submission order and builds a `SimpleDiGraph` encoding
-data dependencies based on the pre-computed aliasing overlaps. Uses the same
-WAW / RAW / WAR rules as `get_write_deps!` / `get_read_deps!`.
+Build the data-dependency DAG from pre-computed aliasing overlaps. Same
+WAW/RAW/WAR rules as `get_write_deps!` / `get_read_deps!`.
 """
 function build_dependency_dag(task_metas::Vector{HierarchicalTaskMeta},
                               arg_to_ainfo::Dict{ArgumentWrapper, AliasingWrapper},
@@ -574,12 +497,11 @@ function build_dependency_dag(task_metas::Vector{HierarchicalTaskMeta},
 end
 
 """
-    partition_dag(dag, task_metas, all_procs) -> (vertex_to_partition, n_partitions, partition_procs)
+    partition_dag(dag, task_metas, all_procs)
+        -> (vertex_to_partition, n_partitions, partition_procs, multi_worker)
 
-Phase 3: Assigns each task vertex to a partition using data-affinity. For
-multi-worker setups, tasks are assigned to the worker owning the most argument
-data. For single-worker multi-threaded setups, tasks are balanced across
-available processors in topological order.
+Data-affinity partitioning. Multi-worker: bin by the worker owning the most
+arg data. Single-worker: load-balance across procs in topological order.
 """
 function partition_dag(dag::SimpleDiGraph, task_metas::Vector{HierarchicalTaskMeta},
                        all_procs::Vector{<:Processor})
@@ -611,11 +533,8 @@ function partition_dag(dag::SimpleDiGraph, task_metas::Vector{HierarchicalTaskMe
             meta = task_metas[v]
             task_scope = @something(meta.pair.spec.options.compute_scope, meta.pair.spec.options.scope, default_scope)
 
-            # Workers whose processors are eligible under this task's scope.
-            # A non-default scope that spans multiple workers must still spread
-            # work across those workers (via affinity / round-robin) -- picking
-            # only the first match pins everything to worker 1 and breaks
-            # multi-worker execution.
+            # Non-default scopes spanning multiple workers must spread work
+            # (via affinity / round-robin); first-match would pin to worker 1.
             if task_scope == default_scope
                 matching = collect(1:n_partitions)
             else
@@ -716,24 +635,11 @@ end
     partition_by_assigned_worker(seen_tasks, schedule, task_metas, all_procs)
         -> (vertex_to_partition, n_partitions, partition_procs, multi_worker)
 
-Scheduler-first partitioning: bin each task into the partition whose worker its
-AOT-scheduled processor lives on, rather than the worker owning the most of its
-argument data (which is what `partition_dag` does). Used by
-`distribute_tasks_hierarchical!` when the scheduler is AOT (produced a non-empty
-`schedule`) or a cached full-region schedule was recovered. Preserves the
-scheduler's whole-DAG placement decisions across the hierarchical partition
-boundary, which is otherwise where those decisions get silently overridden by
-data-affinity binning.
-
-Tasks with no entry in `schedule` (only possible past a `dag_add_task!` bail
-point -- rare in practice for datadeps regions whose args are `Chunk`s rather
-than same-region `DTask` fetches) fall back to the affinity rule: bin by the
-worker owning the most of their arg data, breaking ties toward the first-listed
-matching worker. This matches `partition_dag`'s behaviour for those tasks and
-keeps them local to the data they need.
-
-Only creates a partition for workers with >=1 assigned task, in ascending worker
-id order (for deterministic partition numbering across runs).
+Scheduler-first partitioning: bin each task by its AOT-chosen processor's
+worker, preserving the scheduler's whole-DAG placement across the partition
+boundary. Unscheduled tasks (past a `dag_add_task!` bail point) fall back to
+data-affinity. Only workers with >=1 task get a partition; ordered ascending
+by worker id.
 """
 function partition_by_assigned_worker(seen_tasks::Vector{DTaskPair},
                                       schedule::Dict{DTask,Processor},
@@ -748,9 +654,6 @@ function partition_by_assigned_worker(seen_tasks::Vector{DTaskPair},
     end
     known_workers = Set{Int}(keys(procs_by_worker))
 
-    # First pass: assign a worker id to every task. Scheduled tasks use their
-    # AOT-chosen proc's worker; unscheduled tasks fall back to affinity (worker
-    # owning the most of their arg data), else to the first-listed worker.
     task_worker = Vector{Int}(undef, n)
     for v in 1:n
         task = seen_tasks[v].task
@@ -762,8 +665,7 @@ function partition_by_assigned_worker(seen_tasks::Vector{DTaskPair},
                 continue
             end
         end
-        # Fallback: affinity by arg data ownership. Tie-break toward the first
-        # worker with the max affinity in `known_workers` iteration order.
+        # Fallback: affinity by arg data ownership.
         affinity = Dict{Int,Int}()
         for dep in task_metas[v].deps
             arg_wid = root_worker_id(memory_space(dep.arg_w.arg))
@@ -786,8 +688,6 @@ function partition_by_assigned_worker(seen_tasks::Vector{DTaskPair},
         end
     end
 
-    # Second pass: reduce to only-workers-with-tasks and assign partition ids in
-    # ascending worker order for determinism.
     used_workers = Int[]
     seen_wids = Set{Int}()
     for wid in task_worker
@@ -820,16 +720,11 @@ end
                       local_scope, dag, seen_tasks, vertex_to_partition,
                       schedule, proc_to_scope_lfu, write_num) -> write_num
 
-Schedules a single (already topologically-ordered) task vertex `v` into its
-partition's `state` via `distribute_task!`, returning the updated `write_num`.
-
-Records cross-partition predecessors as explicit `ThunkSyncdep`s (same-partition
-deps are derived from `state` by `distribute_task!`), and passes the
-partition-local AOT-assigned processor when one is available and usable for this
-partition (else falls back to JIT scheduling).
-
-Callers must guarantee that every predecessor of `v` (in any partition) has
-already been submitted before calling this, so the `ThunkSyncdep`s are valid.
+Schedule a topologically-ordered vertex into its partition via
+`distribute_task!`. Cross-partition predecessors become explicit
+`ThunkSyncdep`s; AOT proc is passed through when it lies in `local_procs`,
+else JIT. Callers must ensure every predecessor (any partition) has already
+been submitted.
 """
 function _schedule_vertex!(v::Int, partition_id::Int,
                            temp_queue::DataDepsTaskQueue,
@@ -857,13 +752,7 @@ function _schedule_vertex!(v::Int, partition_id::Int,
         end
     end
 
-    # Use the AOT-assigned processor when one is available and it lies within
-    # this partition's processors; otherwise fall back to JIT scheduling
-    # (`proc === nothing`) via `temp_queue`'s scheduler. (An AOT proc can lie
-    # outside `local_procs` only in the multi-worker case, where partitioning
-    # restricts each partition to one worker's processors; single-worker
-    # partitions always span all procs, so the AOT assignment is always usable
-    # there.)
+    # AOT-assigned proc, or JIT fallback if it's outside this partition.
     proc = get(schedule, task, nothing)
     if proc !== nothing && !(proc in local_procs)
         proc = nothing
@@ -882,28 +771,10 @@ end
                              precomputed_schedule=nothing)
         -> (DataDepsState, Dict{DTask,Processor})
 
-Per-partition scheduling for both single-worker and multi-worker hierarchical
-paths. Uses existing `distribute_task!` logic with per-partition
-`DataDepsState`, `all_procs` limited to this partition's processors, and
-cross-partition syncdeps from the precomputed DAG. Returns this partition's
-`DataDepsState` along with the task-to-processor assignments it computed (or
-reused), so the top-level `distribute_tasks_hierarchical!` can persist the
-combined per-region schedule to `queue.scheduler`'s cache.
-
-AOT scheduling defaults to running *locally per partition*: a partition-local
-`DAGSpec` is built from just this partition's tasks and scheduled over just
-`local_procs` via `datadeps_build_schedule!`. `region_uids` (all in-region task
-uids) lets that builder bail cleanly when a task depends on a same-region
-producer in another partition (which it must not `fetch`). Tasks without an AOT
-assignment fall back to JIT scheduling in `distribute_task!`.
-
-When `precomputed_schedule` is supplied (cache hit at the top of
-`distribute_tasks_hierarchical!`), the per-partition AOT step is skipped: this
-partition's task-to-processor assignments are filtered from
-`precomputed_schedule` directly. Tasks whose cached processor is not in
-`local_procs` (possible if `all_procs` changed since the schedule was cached)
-fall back to JIT scheduling in `distribute_task!` via the guard in
-`_schedule_vertex!`.
+Per-partition scheduling. Runs partition-local AOT on `local_procs` (with
+`region_uids` for the cross-partition bail), or filters
+`precomputed_schedule` when supplied. Returns state and this partition's
+task-to-processor mapping.
 """
 function schedule_partition_full!(queue::DataDepsTaskQueue,
                                   queue_lock::ReentrantLock,
@@ -923,9 +794,7 @@ function schedule_partition_full!(queue::DataDepsTaskQueue,
 
     local_scope = UnionScope(map(ExactScope, local_procs))
 
-    # N.B. Hierarchical scheduling doesn't build a global `DAGSpec` (that's
-    # only used by the AOT DAG-caching path in `distribute_tasks!`), so each
-    # partition just gets an empty one; `distribute_task!` never reads
+    # No global `DAGSpec` under hierarchical; `distribute_task!` never reads
     # `state.dag_spec` directly.
     state = DataDepsState(DAGSpec())
     write_num = 1
@@ -940,41 +809,18 @@ function schedule_partition_full!(queue::DataDepsTaskQueue,
     ordered_verts = filter(v -> v in vert_set, topo)
 
     locked_queue = LockedEnqueueQueue(get_options(:task_queue), queue_lock)
-    # N.B. Each partition gets its own fresh scheduler shard via `similar`
-    # rather than sharing `queue.scheduler` across all partitions. Two
-    # independent problems would arise from sharing a single scheduler
-    # instance here:
-    #  1) Data race: e.g. `RoundRobinScheduler.proc_idx` would be
-    #     concurrently read/written by every partition's `Threads.@spawn`
-    #     task with no synchronization.
-    #  2) Semantic bug (worse than the race, and *not* fixed by adding a
-    #     lock): each partition schedules only onto its own worker's
-    #     `local_procs`, which generally has a *different length* than
-    #     other partitions' (or the global) processor list. A `proc_idx`
-    #     counter advanced by one partition's `local_procs` is meaningless
-    #     -- and can be out-of-bounds -- when applied to another
-    #     partition's differently-sized `local_procs`. This reliably
-    #     crashes with a `BoundsError` under multi-worker hierarchical
-    #     scheduling. Giving each partition its own scheduler instance,
-    #     scoped to its own `local_procs`, fixes both issues at once.
+    # Fresh scheduler shard per partition: sharing `queue.scheduler` would
+    # race on mutable state (e.g. `RoundRobinScheduler.proc_idx`) and, worse,
+    # advance a counter meant for one `local_procs` against another's --
+    # BoundsError under multi-worker.
     temp_queue = DataDepsTaskQueue(locked_queue; scheduler=similar(queue.scheduler))
 
-    # Per-partition (local) AOT scheduling over just this partition's procs.
-    # `partition_verts` is in ascending vertex (= submission) order.
     partition_pairs = DTaskPair[seen_tasks[v] for v in partition_verts]
 
     if precomputed_schedule === nothing
-        # Cache miss: run the per-partition AOT scheduler over just this
-        # partition's tasks and processors.
         _pdag, schedule = datadeps_build_schedule!(temp_queue.scheduler, partition_pairs,
                                                    local_procs, local_scope; region_uids)
     else
-        # Cache hit: `distribute_tasks_hierarchical!` already resolved the whole
-        # region's task-to-processor mapping from `queue.scheduler.cache`. Filter
-        # it to just this partition's tasks. Tasks that fell through the
-        # top-level `dag_add_task!` bail (missing from `precomputed_schedule`)
-        # still get JIT-scheduled inside `distribute_task!` via
-        # `temp_queue.scheduler`, matching the miss-path semantics.
         schedule = Dict{DTask,Processor}()
         for pair in partition_pairs
             proc = get(precomputed_schedule, pair.task, nothing)
@@ -984,17 +830,9 @@ function schedule_partition_full!(queue::DataDepsTaskQueue,
         end
     end
 
-    # N.B. If this partition throws partway through (e.g. from
-    # `distribute_task!`), any of our vertices that haven't yet been
-    # `notify`'d will never be, which would leave other partitions blocked
-    # forever in `wait(task_submitted[pred_v])` below -- turning a normal,
-    # reportable exception into a silent, permanent hang (since the
-    # enclosing `@sync` in `distribute_tasks_hierarchical!` can't finish,
-    # and thus can't propagate our exception, until *every* spawned
-    # partition task completes, including the ones stuck waiting on us).
-    # The `finally` ensures every one of our events gets notified no matter
-    # how we exit, so that sibling partitions can unblock (and themselves
-    # fail/finish) and our real exception can actually surface.
+    # `finally` notifies all our events even on exception: without it,
+    # sibling partitions can wedge on `wait(task_submitted[pred_v])`
+    # forever, and the enclosing `@sync` never surfaces our exception.
     try
         for v in ordered_verts
             for pred_v in inneighbors(dag, v)
@@ -1003,13 +841,6 @@ function schedule_partition_full!(queue::DataDepsTaskQueue,
                 end
             end
 
-            # N.B. The per-task `distribute_task!` preparation runs concurrently
-            # across partitions; only the final task submission is serialized
-            # (via `LockedEnqueueQueue`, `temp_queue`'s upper queue). This is
-            # safe now that task futures are backed by `MemPool.DFuture` rather
-            # than the concurrency-unsafe `Distributed.Future`. The
-            # cross-partition `wait`s above happen before scheduling `v`, so the
-            # `ThunkSyncdep`s recorded for `v` are valid.
             write_num = _schedule_vertex!(
                 v, partition_id, temp_queue, state, local_procs, local_scope,
                 dag, seen_tasks, vertex_to_partition, schedule,
@@ -1041,24 +872,10 @@ end
     _hierarchical_dag_spec_and_cache_lookup(scheduler, seen_tasks)
         -> (dag_spec::DAGSpec, precomputed::Union{Dict{DTask,Processor},Nothing})
 
-Build a full-region `DAGSpec` by walking `seen_tasks` in submission order, then
-look it up in `scheduler`'s task-local schedule cache. When a structurally
-equivalent DAG is found (per `datadeps_dag_equivalent`), return the recovered
-task-to-processor mapping in the second slot; otherwise return `nothing`.
-
-Mirrors the DAGSpec-building and cache-matching logic of the flat path's
-`datadeps_build_schedule!` in `queue.jl`, but stops before running the AOT
-scheduler so that `distribute_tasks_hierarchical!` retains its parallel
-per-partition scheduling pipeline on a cache miss. The DAGSpec built here is
-also returned so the miss path can persist a freshly-computed schedule at the
-end of the hierarchical run using the same key.
-
-`dag_add_task!` may return `false` (bail) on tasks whose arguments include a
-within-DAG `DTask` -- the returned `DAGSpec` then only covers the prefix that
-was successfully added, matching the flat path's behaviour. Tasks past the
-bail point are not in the cache key; on a hit they simply won't be in
-`precomputed`, and per-partition JIT scheduling handles them exactly as in the
-miss path.
+Build the full-region `DAGSpec` and check `scheduler`'s cache. On a hit,
+return the recovered task-to-processor mapping; on miss, return `nothing`.
+`dag_add_task!` may bail on within-DAG `DTask` args, in which case the
+returned `DAGSpec` covers only the prefix that succeeded.
 """
 function _hierarchical_dag_spec_and_cache_lookup(scheduler::DataDepsScheduler,
                                                    seen_tasks::Vector{DTaskPair})
@@ -1094,17 +911,8 @@ end
 """
     _hierarchical_persist_schedule!(scheduler, dag_spec, partition_schedules)
 
-After a cache-miss hierarchical run, collect the per-partition
-task-to-processor assignments produced by `schedule_partition_full!` and store
-them in `scheduler`'s schedule cache keyed by `dag_spec`. This allows a later
-`distribute_tasks_hierarchical!` call with a structurally equivalent DAG to
-reuse the schedule via `_hierarchical_dag_spec_and_cache_lookup`.
-
-No-op when `dag_spec` is empty (the top-level DAG build bailed on the first
-task) or when no partition produced any assignments (every task fell back to
-JIT scheduling). Only tasks captured in `dag_spec` are cached, so partial-DAG
-cases match flat-path semantics: tasks past the bail point are re-JIT'd on
-subsequent runs.
+Merge the per-partition schedules and cache them keyed by `dag_spec`.
+No-op on empty spec or empty schedules.
 """
 function _hierarchical_persist_schedule!(scheduler::DataDepsScheduler,
                                           dag_spec::DAGSpec,
@@ -1123,9 +931,8 @@ function _hierarchical_persist_schedule!(scheduler::DataDepsScheduler,
     return
 end
 
-# Parallel partition scheduling wraps errors in TaskFailedException /
-# CompositeException via `@sync`/`Threads.@spawn`. Unwrap so callers and tests
-# see the root `SchedulingException` / scheduler error.
+# Unwrap TaskFailedException/CompositeException so callers see the root
+# scheduling error rather than the @sync/@spawn envelope.
 function _unwrap_partition_exception(e)
     while true
         if e isa CompositeException && !isempty(e.exceptions)
@@ -1141,20 +948,9 @@ end
 """
     distribute_tasks_hierarchical!(queue)
 
-Main entry point for hierarchical scheduling. Runs the 4-phase pipeline:
-1. Parallel aliasing construction
-2. DAG construction
-3. Partitioning (by worker affinity, or across local procs on one worker)
-4. Parallel per-partition scheduling via `distribute_task!`
-
-Each partition runs on its own task and computes its *own* partition-local AOT
-schedule over just its processors (see `schedule_partition_full!`); there is no
-global AOT pass or global synchronization, which is what allows this to scale.
-AOT scheduling here therefore need not match the flat `distribute_tasks!` path
-exactly. Both drivers use `distribute_task!` for argument preparation and
-`DataDepsScheduler` dispatch; the old single-worker "batch enqueue with DAG
-syncdeps only" path is intentionally not used (it skipped `distribute_task!` and
-broke `ChunkView` / custom schedulers).
+Hierarchical scheduling entry point: parallel aliasing construction, DAG
+build, partitioning, then parallel per-partition scheduling via
+`distribute_task!`.
 """
 function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
     seen_tasks = queue.seen_tasks
@@ -1162,20 +958,9 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
         return
     end
 
-    # Top-level schedule cache lookup. Build a full-region DAGSpec and consult
-    # `queue.scheduler`'s task-local cache before spinning up any partitioning
-    # or per-partition scheduling. Under hierarchical, each partition otherwise
-    # runs with its own `similar(queue.scheduler)` shard (see
-    # `schedule_partition_full!`) whose cache is discarded after the call, so
-    # this top-level lookup is the only place where cross-`spawn_datadeps`
-    # amortisation of AOT scheduling cost can occur. On a hit
-    # (`precomputed_schedule !== nothing`) the per-partition scheduler is
-    # skipped; on a miss we run the normal pipeline and persist the collected
-    # schedule at the end for the next call to reuse.
     dag_spec, precomputed_schedule =
         _hierarchical_dag_spec_and_cache_lookup(queue.scheduler, seen_tasks)
 
-    # Get the set of all processors
     all_procs = Processor[]
     scope = get_compute_scope()
     for w in procs()
@@ -1187,29 +972,17 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
     end
     all_scope = UnionScope(map(ExactScope, all_procs))
 
-    # All in-region task uids, so each partition's local AOT-schedule builder
-    # can tell same-region producers (which it must not `fetch`) apart from
-    # already-materialized external values.
+    # In-region task uids let each partition's AOT builder skip same-region
+    # producers rather than `fetch` them.
     region_uids = Set{UInt}(pair.task.uid for pair in seen_tasks)
 
-    # Phase 1: Collect arguments and compute aliasing in parallel
     task_metas, unique_arg_ws = collect_aliased_args(seen_tasks)
     _lookup, ainfos_overlaps, arg_to_ainfo = build_aliasing_parallel(unique_arg_ws)
 
-    # Phase 2: Build dependency DAG
     dag = build_dependency_dag(task_metas, arg_to_ainfo, ainfos_overlaps)
 
-    # Phase 3a: Decide whether to route through scheduler-first partitioning.
-    # Only useful when the argument data itself is already distributed across
-    # >=2 workers -- otherwise, the affinity partitioner (which bins tasks near
-    # their data) already picks the best worker set, and forcing a whole-DAG
-    # AOT pass would either (a) agree with affinity or (b) spread computation
-    # away from data at the cost of extra cross-space transfers that don't buy
-    # a better schedule. For workloads that distribute their tiles across
-    # workers (e.g. our benchmark's `_distribute_tile`), this gate lets AOT
-    # scheduler decisions drive worker-level task placement, so different
-    # schedulers produce different n_copies -- which the affinity partitioner
-    # otherwise silently overrides.
+    # Scheduler-first partitioning is only meaningful when arg data spans
+    # multiple workers; otherwise affinity already picks the right worker.
     data_workers = Set{Int}()
     for meta in task_metas
         for dep in meta.deps
@@ -1218,20 +991,9 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
     end
     data_is_distributed = length(data_workers) >= 2
 
-    # Phase 3b: If we haven't already got a full-region schedule from the cache
-    # and the DAG has anything to schedule, ask the scheduler for an AOT
-    # placement over the *whole* region and *all* processors -- but only when
-    # data-distribution warrants it (see the gate above). JIT schedulers (which
-    # don't specialize `datadeps_schedule_dag_aot!`) fall through to the no-op
-    # fallback in `scheduling.jl:378`, leaving `trial` empty; we then take the
-    # affinity-partitioning branch below with unchanged semantics.
-    #
-    # We call `datadeps_schedule_dag_aot!` directly rather than
-    # `datadeps_build_schedule!` because the latter *also* writes the schedule
-    # into `queue.scheduler`'s cache internally. Under hierarchical, the cache
-    # is owned by `_hierarchical_persist_schedule!` below (keyed by the
-    # top-level `dag_spec`); routing through `datadeps_build_schedule!` would
-    # double-write and the two entries could diverge for the same key.
+    # Call `datadeps_schedule_dag_aot!` directly, not `datadeps_build_schedule!`:
+    # the latter also writes the scheduler's per-type cache, which under
+    # hierarchical is owned by `_hierarchical_persist_schedule!` below.
     cache_hit = precomputed_schedule !== nothing
     if !cache_hit && !isempty(dag_spec) && data_is_distributed
         trial = Dict{DTask,Processor}()
@@ -1241,10 +1003,6 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
         end
     end
 
-    # Phase 3c: Partition the DAG. Scheduler-first when we have a whole-region
-    # schedule (cache hit *or* freshly-computed AOT) *and* the data warrants
-    # cross-worker computation. Affinity-based otherwise (JIT schedulers,
-    # non-distributed data, or empty DAG spec) -- unchanged behaviour.
     if precomputed_schedule !== nothing && data_is_distributed
         vertex_to_partition, n_partitions, partition_procs, _multi_worker =
             partition_by_assigned_worker(seen_tasks, precomputed_schedule, task_metas, all_procs)
@@ -1253,13 +1011,9 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
             partition_dag(dag, task_metas, all_procs)
     end
 
-    # Detect backing chunks shared across partitions in different memory spaces.
-    # These need runtime ownership transfer to avoid split-brain concurrent
-    # writes; `nothing` when all partitions share one space (single-worker).
     partition_space = MemorySpace[only(memory_spaces(first(pp))) for pp in partition_procs]
     registry = build_shared_chunk_registry(task_metas, vertex_to_partition, partition_space)
 
-    # Group vertices by partition
     partitions = [Int[] for _ in 1:n_partitions]
     for v in 1:length(seen_tasks)
         pid = vertex_to_partition[v]
@@ -1270,13 +1024,6 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
     task_submitted = [Base.Event() for _ in 1:length(seen_tasks)]
     wait_all_queue = get_options(:task_queue)
 
-    # Phase 4: parallel per-partition scheduling. Each partition runs on its own
-    # task, prepares its tasks concurrently, computes its own partition-local
-    # AOT schedule (or reuses `precomputed_schedule` on a cache hit, in which
-    # case the AOT step is skipped and only the task submission side runs), and
-    # coordinates cross-partition dependencies via the `task_submitted` events.
-    # Concurrent submission is safe now that task futures are backed by
-    # `MemPool.DFuture` (see the header note).
     partition_states = Vector{DataDepsState}(undef, n_partitions)
     partition_schedules = Vector{Dict{DTask,Processor}}(undef, n_partitions)
     try
@@ -1301,14 +1048,6 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
 
     _hierarchical_copy_from_and_free!(partition_states, n_partitions, registry)
 
-    # Persist the freshly-computed schedule for reuse by a later
-    # `distribute_tasks_hierarchical!` call on a structurally equivalent DAG.
-    # Runs on a cache miss regardless of whether the fresh schedule came from
-    # the whole-DAG AOT above or from the per-partition AOT inside
-    # `schedule_partition_full!`; skipping only on a genuine cache *hit* avoids
-    # both duplicating the cache entry we just consumed and appending it under
-    # a potentially different DAGSpec key that would fail subsequent
-    # `datadeps_dag_equivalent` matches.
     if !cache_hit
         _hierarchical_persist_schedule!(queue.scheduler, dag_spec, partition_schedules)
     end
@@ -1340,15 +1079,13 @@ end
 
 function _hierarchical_copy_from_and_free!(partition_states::Vector{DataDepsState}, n_partitions::Int,
                                            registry::Union{SharedChunkRegistry,Nothing})
-    # 1. Shared chunks: write back from the registry's authoritative owner state
-    #    (whose per-partition history is coherent), not the cross-partition
-    #    max-`write_num` heuristic below (per-partition write_nums are not
-    #    comparable across partitions).
+    # Shared chunks: use the registry's authoritative owner. Per-partition
+    # write_nums are not comparable across partitions.
     if registry !== nothing
         for (chunk, entry) in registry.entries
             state = entry.owner_state
-            state === nothing && continue                       # never written
-            entry.owner_space == entry.origin_space && continue # already in-place at origin
+            state === nothing && continue
+            entry.owner_space == entry.origin_space && continue
             for (arg_w, _space) in state.arg_owner
                 arg_w.arg === chunk || continue
                 _hierarchical_copy_from!(state, arg_w, _hierarchical_max_write_num(state, arg_w) + 1)
@@ -1356,8 +1093,7 @@ function _hierarchical_copy_from_and_free!(partition_states::Vector{DataDepsStat
         end
     end
 
-    # 2. Private chunks: the last writer across partitions is the authoritative
-    #    owner (shared chunks are skipped here, handled above).
+    # Private chunks: last-writer-wins.
     merged_arg_owner = Dict{ArgumentWrapper, Tuple{MemorySpace, Int, DataDepsState}}()
     for pid in 1:n_partitions
         state = partition_states[pid]
@@ -1375,10 +1111,9 @@ function _hierarchical_copy_from_and_free!(partition_states::Vector{DataDepsStat
         _hierarchical_copy_from!(state, arg_w, wn + 1)
     end
 
-    # 3. Free Datadeps-allocated slots. For shared chunks, also sync on the final
-    #    global writer: an intermediate owner's slot may still be read by a
-    #    cross-partition boundary copy recorded in *another* partition's state,
-    #    and the final writer transitively depends on all such copies.
+    # Free datadeps slots. For shared chunks, sync on the final global writer:
+    # a stale owner slot may still be read via boundary copies recorded in
+    # another partition's state.
     for pid in 1:n_partitions
         state = partition_states[pid]
         obj_cache = unwrap(state.ainfo_backing_chunk)

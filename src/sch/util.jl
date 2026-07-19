@@ -535,12 +535,8 @@ function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig;
     est_time_util = if time_util !== nothing && haskey(time_util, T)
         round(UInt64, time_util[T] * 1000^3)::UInt64
     else
-        # Prefer the shared `runtime_index` when provided — it is populated
-        # for this exact signature by `estimate_task_costs!` upstream, so
-        # the per-proc lookup here is O(1) and does not re-scan the
-        # snapshot. Fall back to the original `metrics_lookup_runtime`
-        # when the caller has not built an index (backwards compatibility
-        # for `has_capacity` callers outside `schedule_one!`).
+        # Prefer the shared index (O(1)); fall back to the full scan for
+        # callers outside schedule_one!.
         runtime = if runtime_index !== nothing
             metrics_lookup_runtime_from_index(runtime_index, p, worker_id)
         else

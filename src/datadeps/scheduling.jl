@@ -383,17 +383,9 @@ end
 """
     _propagate_aot_time_util!(spec::DTaskSpec, proc::Processor, task_time_ns::Real)
 
-Attach the AOT-computed per-task runtime estimate to `spec.options.time_util`
-so that `Sch.has_capacity` (via `schedule_one!`) can bypass its
-`metrics_lookup_runtime` scan of the MetricsTracker snapshot and use our
-estimate directly. `has_capacity` reads the value via
-`round(UInt64, time_util[T] * 1000^3)`, so `time_util` is stored keyed by
-`typeof(proc)` with the runtime expressed in seconds (Float64).
-
-Called by every AOT scheduler after it finalises a task's `(task, proc)`
-assignment. Non-finite / non-positive estimates are ignored (the
-`options.time_util === nothing` path is preserved for those, matching the
-pre-existing behaviour where `has_capacity` falls back to metrics lookup).
+Attach the AOT-computed per-task runtime to `spec.options.time_util` so
+`Sch.has_capacity` bypasses its metrics-snapshot scan. Keyed by
+`typeof(proc)`; value in seconds. No-op on non-finite / non-positive input.
 """
 function _propagate_aot_time_util!(spec::DTaskSpec, proc::Processor, task_time_ns::Real)
     task_time_ns > 0 || return
@@ -408,9 +400,7 @@ function _propagate_aot_time_util!(spec::DTaskSpec, proc::Processor, task_time_n
     return
 end
 
-## `_propagate_aot_time_util_from_cache!` — the `EFTCostCache`-aware wrapper —
-## is defined below, immediately after `EFTCostCache`, so its signature can
-## reference the type.
+# EFTCostCache-aware wrapper is below, after the struct.
 
 const GREEDY_DEFAULT_RUNTIME_NS = UInt64(1_000_000_000)
 const GREEDY_DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
@@ -433,12 +423,8 @@ end
 """
     _propagate_aot_time_util_from_cache!(dag_spec, cache, task_idx, proc)
 
-Convenience wrapper that pulls the AOT-computed runtime from an
-`EFTCostCache` (already built by the caller for its own cost-model use)
-and forwards it to `_propagate_aot_time_util!`. If the cache does not
-contain an entry for `proc`, or the entry is not a positive finite value,
-the propagation is a no-op — `has_capacity` will then take its usual
-fallback path.
+Pull the AOT runtime for `(task_idx, proc)` from `cache` and forward to
+`_propagate_aot_time_util!`. No-op if `proc` isn't cached.
 """
 function _propagate_aot_time_util_from_cache!(dag_spec::DAGSpec, cache::EFTCostCache,
                                                 task_idx::Int, proc::Processor)
@@ -724,9 +710,7 @@ _greedy_arg_ready_time_ns_cached(::Any, ::MT.MetricsSnapshot, ::DAGSpec,
 
 const IG_DEFAULT_N_ITERS = 32
 const IG_DEFAULT_DESTROY_FRAC = 0.30
-# `Inf` disables the wall-clock stop; callers (e.g. benchmarks) opt in by
-# passing a finite budget. Requested by Przemek & Julian: enable "1-minute
-# metaheuristic budget" as the operational default for the paper.
+# `Inf` disables the wall-clock stop.
 const IG_DEFAULT_TIME_LIMIT_SEC = Inf
 
 """
@@ -781,12 +765,7 @@ end
 
 IteratedGreedyScheduler(; kwargs...) = IteratedGreedyScheduler(GreedyScheduler(); kwargs...)
 
-# Hierarchical scheduling calls `similar` per partition to avoid sharing mutable
-# state (esp. the RNG) across the parallel per-partition scheduling tasks. Deep-
-# copy the RNG so each partition-shard produces independent, race-free samples;
-# recursively call `similar` on the inner scheduler so its own mutable state is
-# refreshed too. Static configuration (n_iters, destroy_frac) carries through
-# unchanged so the shard's behaviour matches the original's.
+# Hierarchical partitions need independent RNGs; deep-copy so shards don't race.
 Base.similar(s::IteratedGreedyScheduler) =
     IteratedGreedyScheduler(similar(s.inner);
                             n_iters=s.n_iters,
@@ -794,9 +773,7 @@ Base.similar(s::IteratedGreedyScheduler) =
                             rng=copy(s.rng),
                             time_limit_sec=s.time_limit_sec)
 
-# Forward equivalence / cache / argspec hooks so cache reuse is partitioned by
-# the inner scheduler's type, not by IG's own wrapper type. Same idea as the
-# bench's TimedScheduler wrapper.
+# Delegate cache/equivalence to the inner scheduler so its type owns cache keys.
 datadeps_schedule_cache(sched::IteratedGreedyScheduler) =
     datadeps_schedule_cache(sched.inner)
 datadeps_dag_equivalent(sched::IteratedGreedyScheduler, dspec1::DAGSpec, dspec2::DAGSpec) =
@@ -819,11 +796,8 @@ Mutates and returns `state`. The caller is responsible for providing a
 freshly-`copy(prev_state)` if the previous state must be preserved on
 rejection.
 """
-# Take all arguments after the function. `spec.fargs` is a `Tuple` for typed
-# tasks (`DTaskSpec{true}`) and a `Vector{Argument}` otherwise. `Base.view`
-# is not defined for `Tuple`, so `@view fargs[2:end]` breaks under typed
-# tasks; use `Base.tail` for the tuple case (zero allocation) and a view
-# for the vector case.
+# `spec.fargs` is a `Tuple` for typed tasks; `@view fargs[2:end]` doesn't work
+# on tuples.
 _eft_tail_args(fargs::Tuple) = Base.tail(fargs)
 _eft_tail_args(fargs::AbstractVector) = @view fargs[2:end]
 
@@ -834,11 +808,9 @@ function _eft_runtime_ns(snap::MT.MetricsSnapshot, spec, proc::Processor)
     return runtime_lookup === nothing ? Float64(GREEDY_DEFAULT_RUNTIME_NS) : Float64(runtime_lookup)
 end
 
-# Replays the schedule in increasing task-index order: destroyed tasks are
-# reassigned via `greedy_assign_task!`; preserved tasks keep their proc but
-# their finish times are recomputed fresh from the now-current state. The
-# recompute (rather than preserving stale finish times) is required for SA
-# to evaluate ΔC against the schedule's true makespan.
+# Replay in task-index order; destroyed tasks reassign via
+# `greedy_assign_task!`, preserved tasks recompute finish times fresh (SA needs
+# true makespan to evaluate ΔC).
 function _replay_schedule!(state::ScheduleState, snap::MT.MetricsSnapshot,
                             dag_spec::DAGSpec, all_procs::Vector{Processor},
                             destroyed::AbstractSet{Int},
@@ -943,20 +915,14 @@ function iterated_greedy_schedule!(state::ScheduleState, snap::MT.MetricsSnapsho
     destroyed = Set{Int}()
     sizehint!(destroyed, n_destroy)
 
-    # Wall-clock guard checked once per outer iteration. Elapsed nanoseconds
-    # are computed as `time_ns() - start_ns` (unsigned subtraction, so no
-    # overflow arithmetic on the deadline itself). `Inf` disables the guard
-    # by setting `budget_ns` to the maximum representable `UInt64`, ensuring
-    # the comparison never trips.
+    # `Inf` disables the guard via typemax(UInt64); unsigned elapsed subtraction.
     start_ns = time_ns()
     budget_ns = isinf(time_limit_sec) ? typemax(UInt64) :
                 round(UInt64, time_limit_sec * 1e9)
 
     for _ in 1:n_iters
         (time_ns() - start_ns) >= budget_ns && break
-        # Sample `n_destroy` distinct task IDs uniformly at random. Doing a
-        # partial Fisher–Yates on perm_buf is O(n_destroy) and avoids
-        # allocating a fresh randperm vector each iter.
+        # Partial Fisher-Yates on perm_buf: O(n_destroy), no fresh allocations.
         @inbounds for i in 1:n_destroy
             j = rand(rng, i:n_tasks)
             perm_buf[i], perm_buf[j] = perm_buf[j], perm_buf[i]
@@ -966,15 +932,12 @@ function iterated_greedy_schedule!(state::ScheduleState, snap::MT.MetricsSnapsho
             push!(destroyed, perm_buf[i])
         end
 
-        # Reset candidate to the current best in place, then perturb.
         _copy_state!(candidate, best_state)
 
         iterated_greedy_step!(candidate, snap, dag_spec, all_procs, destroyed, cache)
         new_cost = cost_of_schedule(candidate)
         if new_cost < best_cost
-            # Adopt the candidate as the new best by swapping references.
-            # After the swap, `candidate` holds the previous best_state's
-            # buffers (stale data, overwritten by _copy_state! next iter).
+            # Swap; ex-best buffers get overwritten next iter.
             best_state, candidate = candidate, best_state
             best_cost = new_cost
         end
@@ -1017,11 +980,6 @@ const SA_DEFAULT_Q = 0.95
 const SA_DEFAULT_K = 1.0
 const SA_DEFAULT_N_RESTARTS = 1
 const SA_TF_FLOOR = 1e-12
-# See `IG_DEFAULT_TIME_LIMIT_SEC`. When SA wraps an IG seed inside
-# `datadeps_schedule_dag_aot!(::SimulatedAnnealingScheduler, ...)`, both the
-# seed and the SA refinement share the same clock but are governed by their
-# own `time_limit_sec` fields, so setting both to 60 s does NOT double the
-# effective budget of the SA pipeline. See the docstring for details.
 const SA_DEFAULT_TIME_LIMIT_SEC = Inf
 
 """
@@ -1046,16 +1004,10 @@ Fields:
 - `k::Float64`          — coefficient `k > 0` in Orsila §4.3 Eqs. 18, 19.
 - `n_restarts::Int`     — independent SA runs, each seeded from the
                           best-known solution so far (Orsila §5.3 rule 7).
-- `time_limit_sec::Float64` — wall-clock stop for the SA pipeline in
-                          `datadeps_schedule_dag_aot!`, checked between
-                          restarts and once per cooling level. `Inf`
-                          (default) disables the stop; a finite value
-                          returns the best-so-far state once the budget
-                          is exceeded. When an `IteratedGreedyScheduler`
-                          seed is used, the seed observes its own
-                          `time_limit_sec`; the two budgets are summed
-                          (worst-case), matching Julian's requested
-                          "quick-and-dirty" semantics.
+- `time_limit_sec::Float64` — wall-clock stop, checked between restarts and
+                          per cooling level. `Inf` disables. When an IG
+                          seed is used, seed and SA each observe their own
+                          budget; the pipeline sums them worst-case.
 - `rng::R`              — RNG used for moves and acceptance sampling.
                           The `rng` is mutated during scheduling, so a
                           single `SimulatedAnnealingScheduler` instance
@@ -1090,10 +1042,6 @@ end
 SimulatedAnnealingScheduler(; kwargs...) =
     SimulatedAnnealingScheduler(IteratedGreedyScheduler(); kwargs...)
 
-# See the note on `similar(::IteratedGreedyScheduler)`: hierarchical scheduling
-# hands each partition its own scheduler shard, so we deep-copy the RNG and
-# recursively refresh the inner scheduler, while preserving the parameterisation
-# (q, k, n_restarts).
 Base.similar(s::SimulatedAnnealingScheduler) =
     SimulatedAnnealingScheduler(similar(s.inner);
                                  q=s.q, k=s.k, n_restarts=s.n_restarts,
@@ -1284,11 +1232,7 @@ function simulated_annealing_schedule!(state::ScheduleState, snap::MT.MetricsSna
     expected_levels = max(1, ceil(Int, log(Tf / T0) / log(Float64(q))))
     max_iters_per_restart = 16 * L * expected_levels
 
-    # See the note on the same construction in `iterated_greedy_schedule!`:
-    # single `time_ns()` origin, unsigned elapsed subtraction, `Inf` disables
-    # via `typemax(UInt64)` so the check never trips. Inner check is placed
-    # at the top of the SA loop so a hit returns the current best-so-far
-    # without spending another neighbour proposal.
+    # Same clock/`Inf`-disable pattern as `iterated_greedy_schedule!`.
     start_ns = time_ns()
     budget_ns = isinf(time_limit_sec) ? typemax(UInt64) :
                 round(UInt64, time_limit_sec * 1e9)
@@ -1448,10 +1392,6 @@ struct JuMPScheduler <: DataDepsScheduler
     end
 end
 
-# See the note on `similar(::IteratedGreedyScheduler)`. `JuMPScheduler` has no
-# mutable state and only immutable config fields; return a fresh instance with
-# the same configuration so hierarchical partition shards behave identically
-# to the original.
 Base.similar(s::JuMPScheduler) =
     JuMPScheduler(s.optimizer; Z=s.Z, time_limit_sec=s.time_limit_sec)
 
@@ -1479,17 +1419,9 @@ Fields:
                               path.
 - `milp_time_limit_sec`     — forwarded to `JuMPScheduler`.
 - `milp_Z`                  — forwarded to `JuMPScheduler`.
-- `ig_n_iters`              — forwarded to `IteratedGreedyScheduler`.
-- `ig_destroy_frac`         — forwarded to `IteratedGreedyScheduler`.
-- `ig_time_limit_sec`       — forwarded to `IteratedGreedyScheduler`
-                              (heuristic path). `Inf` disables the stop.
-- `sa_q`                    — forwarded to `SimulatedAnnealingScheduler`.
-- `sa_k`                    — forwarded to `SimulatedAnnealingScheduler`.
-- `sa_n_restarts`           — forwarded to `SimulatedAnnealingScheduler`.
-- `sa_time_limit_sec`       — forwarded to `SimulatedAnnealingScheduler`
-                              (heuristic path). `Inf` disables the stop.
-- `rng::R`                  — RNG shared by IG and SA on the heuristic
-                              path; unused on the MILP path.
+- `ig_n_iters`, `ig_destroy_frac`, `ig_time_limit_sec` — forwarded to IG.
+- `sa_q`, `sa_k`, `sa_n_restarts`, `sa_time_limit_sec` — forwarded to SA.
+- `rng::R`                  — used by IG/SA; unused on the MILP path.
 """
 struct OptimizingScheduler{R<:Random.AbstractRNG} <: DataDepsScheduler
     optimizer::Any
@@ -1547,11 +1479,6 @@ struct OptimizingScheduler{R<:Random.AbstractRNG} <: DataDepsScheduler
     end
 end
 
-# See the note on `similar(::IteratedGreedyScheduler)`. `OptimizingScheduler`
-# doesn't own an inner scheduler instance (it constructs the underlying
-# JuMP/SA/IG/Greedy pipeline fresh per invocation), so only the RNG needs a
-# deep copy; every other field is immutable configuration and is forwarded
-# verbatim.
 Base.similar(s::OptimizingScheduler) =
     OptimizingScheduler(; optimizer=s.optimizer,
                           milp_threshold=s.milp_threshold,
