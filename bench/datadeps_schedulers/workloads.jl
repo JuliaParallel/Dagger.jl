@@ -107,23 +107,42 @@ end
         -> Dagger.Chunk
 
 Ships `tile` (currently master-resident) to `target_proc`'s worker via
-`remotecall_fetch`, then wraps it as a `Chunk` pinned to that processor
-via `ExactScope(target_proc)`. `MemPool.poolset` runs on the target
-worker inside the closure, so the resulting DRef lives in that worker's
-memory space — subsequent datadeps tasks that touch only this tile
-incur zero cross-worker transfer.
+`remotecall_fetch`, then wraps it as a `Chunk` that LIVES on that
+processor without pinning task placement to it. `MemPool.poolset` runs
+on the target worker inside the closure, so the resulting DRef lives in
+that worker's memory space — subsequent datadeps tasks that touch only
+this tile can either (a) run on `target_proc` for zero-cost local access,
+or (b) run elsewhere and incur the measured transfer cost γ. That
+trade-off is exactly what the schedulers are meant to weigh.
+
+Historical note (this is why NO ExactScope): the earlier revision of
+this function pinned tiles via `ExactScope(target_proc)`. That worked to
+distribute tiles across workers, but Dagger's ExactScope is a HARD
+constraint on task placement, not just a data-location hint. Under it,
+every scheduler is forced onto the tile's owning processor — RR, Greedy,
+IG, SA, JuMP, OptimizingScheduler all converged to byte-identical
+n_copies counts because none of them had any placement choice to make.
+Hudson's matmul sweep at bs=1024 confirmed the collapse: n_copies
+identical to the single-integer across all six schedulers at every tile
+count, and per-trial CV up to 34% because the residual variation was
+scheduler-independent system noise. Removing ExactScope restores the
+paper's core mechanism: schedulers see distributed data (γ > 0) and
+DECIDE placement rather than having it forced on them.
 
 The scope-and-proc metadata on the returned `Chunk` is what
 `spawn_datadeps` inspects when computing per-task placement. Without
-this distribution step every tile would be master-resident, and
+the initial distribution step every tile would be master-resident, and
 `spawn_datadeps` would (correctly) place every task on master to avoid
-shipping 8-MB tiles out and back — which is the exact master-only
-concentration Hudson reproduced.
+shipping 8-MB tiles out and back — which was the pre-distribution
+master-only concentration Hudson previously reproduced.
 """
 function _distribute_tile(tile::AbstractMatrix, target_proc::Dagger.Processor)
     target_pid = Dagger.root_worker_id(target_proc)
     return remotecall_fetch(target_pid) do
-        Dagger.tochunk(tile, target_proc, Dagger.ExactScope(target_proc))
+        # No explicit scope: chunk lives on `target_proc` but scheduler
+        # is free to route tasks touching this tile anywhere, weighing
+        # γ transfer cost against compute-vs-parallelism trade-offs.
+        Dagger.tochunk(tile, target_proc)
     end
 end
 
