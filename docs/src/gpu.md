@@ -360,3 +360,24 @@ results = map(workers_with_gpus) do scope
     end
 end
 ```
+
+## MPI, staging, and same-node IPC
+
+All GPU backends expose the same Dagger hooks used by the MPI acceleration and
+host staging pools:
+
+| Hook | Purpose |
+|------|---------|
+| `mpi_remap_space` / `value_memory_space` | Stamp owning MPI rank on VRAM spaces |
+| `gpu_memory_kind` / `pin_buffer!` | Key and page-lock host staging buffers |
+| `mpi_device_sync` / `mpi_device_direct` | Sync and optional GPU-aware MPI sends |
+| `ipc_eligible` / `ipc_export` / `ipc_copyto!` | Same-node on-device IPC (when available) |
+
+### Per-backend capabilities
+
+- **CUDA**: Full stack — pinned staging, `cuIpc*` same-node IPC, GPU-direct when `MPI.has_cuda()` (override with `DAGGER_MPI_GPU_DIRECT=0/1`).
+- **ROCm (AMD)**: Pinned staging, `hipIpc*` same-node IPC, GPU-direct when `MPI.has_rocm()` (same env override).
+- **oneAPI (Intel)**: Level Zero `zeMem*IpcHandle` same-node IPC. GPU-direct is **opt-in** because MPI.jl has no `has_ze`: set `DAGGER_MPI_GPU_DIRECT=1`, or use Intel MPI with `I_MPI_OFFLOAD≥1` (optional `JULIA_MPI_HAS_ONEAPI=true`).
+- **Metal / OpenCL**: Same remap / sync / staging-pool hooks; **no** CUDA-style process IPC and **no** GPU-aware MPI path in Julia — transfers host-stage. `DAGGER_IPC=0` disables IPC on backends that support it.
+
+Dedicated MPI smoke suites live under `test/mpi_{cuda,rocm,oneapi,opencl,metal}.jl` with matching `test/*env` projects.
