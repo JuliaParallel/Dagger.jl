@@ -664,15 +664,33 @@ const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
 
         tx_cost = impute_sum(affinity(chunk)[2] for chunk in chunks_filt)
 
-        task_xfer_cost = gproc.pid != myid() ? 1_000_000 : 0
-
         runtime = metrics_lookup_runtime(snap, sig_vec, proc, gproc.pid)
         est_time_util = runtime !== nothing ? runtime : UInt64(1000^3)
 
         rate = metrics_lookup_transfer_rate(snap, proc, gproc.pid)
         tx_rate = rate !== nothing ? rate : DEFAULT_TRANSFER_RATE
 
-        costs[proc] = Float64(est_time_util) + (Float64(tx_cost) / Float64(tx_rate)) + Float64(task_xfer_cost)
+        # Cost = compute time + data-transfer cost. A previous pre-MetricsTracker
+        # implementation added a hardcoded 1_000_000 ns cross-worker `task_xfer_cost`
+        # penalty here (with a TODO to actually measure it), intended as a small
+        # tiebreaker in favor of master. Under the current MetricsTracker cost model
+        # this heuristic collapses processor selection to master-only:
+        #
+        #   - cold state (no metrics for any proc): master cost = 1e9; worker cost
+        #     = 1e9 + 1e6. Sort is deterministic in favor of master's 12 ThreadProcs;
+        #     the `randperm!` above only randomizes among equally-costly procs, and
+        #     they are NOT equally costly under this penalty.
+        #   - after master runs the first task: master's real per-task runtime (e.g.
+        #     100us) replaces its 1e9 default, while workers stay at 1e9 because they
+        #     never ran a task. Master's cost drops to ~1e5 vs workers' ~1e9 — master
+        #     preference becomes locked in and self-reinforcing.
+        #
+        # Any real cross-process dispatch overhead is already captured, per-signature,
+        # in the `est_time_util` lookup once workers accumulate metrics; and per-chunk
+        # transfer cost is captured by `tx_cost / tx_rate` above. The fixed 1ms penalty
+        # is therefore redundant when metrics are warm and actively harmful when they
+        # aren't.
+        costs[proc] = Float64(est_time_util) + (Float64(tx_cost) / Float64(tx_rate))
     end
     chunks_cleanup()
 
