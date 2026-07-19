@@ -889,7 +889,22 @@ concurrently across threads.
     resize!(sorted_procs, length(input_procs))
     costs = @reusable_dict :schedule_one!_costs Processor Float64 OSProc() 0.0 32
     costs_cleanup = @reuse_defer_cleanup empty!(costs)
-    estimate_task_costs!(sorted_procs, costs, state, input_procs, task; sig)
+
+    # Build the per-signature runtime index once, here, and thread it through
+    # to both `estimate_task_costs!` and `has_capacity`. Both functions look
+    # up the same `est_time_util` for the same `(sig, proc, worker_id)` triples
+    # for this task; without a shared index each does an independent
+    # `metrics_lookup_runtime` call that scans the MetricsTracker snapshot end-
+    # to-end via `MT.find_keys`. On the AOT path (`options.exec_scope !== nothing`,
+    # `W == 1`), that meant two `O(N)` scans per submitted task — one in
+    # `estimate_task_costs!` and one in the `has_capacity` call inside the
+    # reservation loop below. Building the index once and passing it through
+    # makes both callers `O(1)` per proc after the single `O(N)` build.
+    sig_vec_for_index = sig isa Dagger.Signature ? sig.sig : sig
+    runtime_index = build_signature_runtime_index(
+        MT.snapshot(MT.global_metrics_cache()), sig_vec_for_index)
+    estimate_task_costs!(sorted_procs, costs, state, input_procs, task;
+                         sig, runtime_index)
     input_procs_cleanup()
 
     # Select the best available processor and reserve time pressure optimistically.
@@ -901,7 +916,8 @@ concurrently across threads.
         can_use, scope = can_use_proc(state, task, gproc, proc, options, scope)
         if can_use
             has_cap, est_time_util, est_alloc_util, est_occupancy =
-                has_capacity(state, proc, gproc.pid, options.time_util, options.alloc_util, options.occupancy, sig)
+                has_capacity(state, proc, gproc.pid, options.time_util, options.alloc_util, options.occupancy, sig;
+                             runtime_index)
             if has_cap
                 # Optimistic reservation: capture-the-ref, atomic_add!
                 counter_ref = lock(state.worker_time_pressure) do wtp

@@ -526,7 +526,8 @@ function can_use_proc(state, task, gproc, proc, opts, scope)
     return true, scope
 end
 
-function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
+function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig;
+                     runtime_index::Union{Dagger.SignatureRuntimeIndex,Nothing}=nothing)
     T = typeof(p)
     sig_vec = sig isa Dagger.Signature ? sig.sig : sig
     snap = MT.snapshot(MT.global_metrics_cache())
@@ -534,7 +535,17 @@ function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
     est_time_util = if time_util !== nothing && haskey(time_util, T)
         round(UInt64, time_util[T] * 1000^3)::UInt64
     else
-        runtime = metrics_lookup_runtime(snap, sig_vec, p, worker_id)
+        # Prefer the shared `runtime_index` when provided — it is populated
+        # for this exact signature by `estimate_task_costs!` upstream, so
+        # the per-proc lookup here is O(1) and does not re-scan the
+        # snapshot. Fall back to the original `metrics_lookup_runtime`
+        # when the caller has not built an index (backwards compatibility
+        # for `has_capacity` callers outside `schedule_one!`).
+        runtime = if runtime_index !== nothing
+            metrics_lookup_runtime_from_index(runtime_index, p, worker_id)
+        else
+            metrics_lookup_runtime(snap, sig_vec, p, worker_id)
+        end
         runtime !== nothing ? runtime : UInt64(1000^3)
     end
     est_alloc_util = if alloc_util !== nothing && haskey(alloc_util, T)
@@ -641,7 +652,9 @@ function estimate_task_costs(state, procs, task; sig=nothing)
     return sorted_procs, costs
 end
 const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
-@reuse_scope function estimate_task_costs!(sorted_procs, costs, state, procs, task; sig=nothing)
+@reuse_scope function estimate_task_costs!(sorted_procs, costs, state, procs, task;
+                                            sig=nothing,
+                                            runtime_index::Union{Dagger.SignatureRuntimeIndex,Nothing}=nothing)
 
     # Find all Chunks
     chunks = @reusable_vector :estimate_task_costs_chunks Union{Chunk,Nothing} nothing 32
@@ -665,7 +678,13 @@ const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
     # re-scan the entire snapshot (via `MT.find_keys`) up to four times per
     # proc, i.e. `O(W × N)` scanning work per submitted task. See
     # `SignatureRuntimeIndex` for the fallback-chain semantics preserved.
-    runtime_index = build_signature_runtime_index(snap, sig_vec)
+    #
+    # Callers that also invoke `has_capacity` (schedule_one!) may pass a
+    # pre-built index so the same object is shared across both functions,
+    # avoiding a second O(N) snapshot scan in `has_capacity`.
+    if runtime_index === nothing
+        runtime_index = build_signature_runtime_index(snap, sig_vec)
+    end
 
     for proc in procs
         gproc = get_parent(proc)
