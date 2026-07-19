@@ -103,12 +103,24 @@ function run_workload!(workload::Symbol, inputs, sched::Dagger.DataDepsScheduler
     return
 end
 
-function _assemble_dense(tiles::Matrix{<:Matrix})
+# Materialise a `tiles[i,j]` element into a plain matrix regardless of
+# whether it's a locally-resident `Matrix` (single-process paths) or a
+# distributed `Dagger.Chunk` (multi-process paths — see
+# `make_spd_tiles` / `make_matmul_tiles`). For a `Chunk`, `fetch` is a
+# `collect` / `move` from the chunk's owning worker back to master,
+# which is exactly what we need to reassemble the tiles into a dense
+# reference on master for `verify_workload` to compare against.
+_fetch_tile(t::AbstractMatrix) = t
+_fetch_tile(t::Dagger.Chunk) = fetch(t)::AbstractMatrix
+
+function _assemble_dense(tiles::AbstractMatrix)
     nt = size(tiles, 1)
-    bs = size(tiles[1, 1], 1)
-    out = zeros(eltype(tiles[1, 1]), nt * bs, nt * bs)
-    for i in 1:nt, j in 1:nt
-        out[(i-1)*bs+1:i*bs, (j-1)*bs+1:j*bs] .= tiles[i, j]
+    first_tile = _fetch_tile(tiles[1, 1])
+    bs = size(first_tile, 1)
+    out = zeros(eltype(first_tile), nt * bs, nt * bs)
+    @inbounds for i in 1:nt, j in 1:nt
+        tile = _fetch_tile(tiles[i, j])
+        out[(i-1)*bs+1:i*bs, (j-1)*bs+1:j*bs] .= tile
     end
     return out
 end
