@@ -254,6 +254,21 @@ function default_scheduler_factories(; milp_time_limit_sec::Real=120.0,
     return factories
 end
 
+# Serialize a RunResult row to a CSV line (shared by streaming + batch writers).
+function _run_result_csv_row(r::RunResult)
+    return (
+        r.workload, r.scheduler, r.tile_count, r.block_size, r.trial,
+        ns_to_ms(r.total_wallclock_ns),
+        ns_to_ms(r.sched_phase_ns),
+        ns_to_ms(r.exec_span_ns),
+        r.n_tasks, r.n_copies,
+        ns_to_ms(r.copy_total_ns),
+        ns_to_ms(r.compute_total_ns),
+        ns_to_ms(r.move_total_ns),
+        r.metrics_warm,
+    )
+end
+
 function run_sweep(; workloads = (:cholesky, :matmul),
                      tile_counts = DEFAULT_TILE_COUNTS,
                      block_size = DEFAULT_BLOCK_SIZE,
@@ -263,52 +278,119 @@ function run_sweep(; workloads = (:cholesky, :matmul),
                      collect_logs = true,
                      metrics_warm = false,
                      check_correctness = false,
-                     verbose = true)
+                     verbose = true,
+                     # Incremental CSV output — if provided, rows are appended
+                     # and flushed after each trial completes, so a mid-sweep
+                     # crash (Dagger, HiGHS abort, segfault, OOM) preserves
+                     # data up to the crash. The batch `write_csv` at end of
+                     # `main` is skipped when these are set. Correctness rows
+                     # stream to `correctness_output`; per-cell correctness
+                     # crashes are also caught and logged, not fatal.
+                     output::Union{Nothing, AbstractString} = nothing,
+                     correctness_output::Union{Nothing, AbstractString} = nothing)
     results = RunResult[]
     correctness = NamedTuple[]
-    for workload in workloads
-        for nt in tile_counts
-            for (name, factory) in scheduler_factories
-                verbose && println("→ $workload nt=$nt $name  (warmup×$warmup, trials×$trials, metrics_warm=$metrics_warm)")
-                if metrics_warm
-                    warm_metrics_for!(workload, nt, block_size)
-                end
-                # Warmup mirrors the measured-trial logging state so JIT
-                # compilation amortizes on the same specializations.
-                for _ in 1:warmup
-                    run_once(workload, factory(), nt, block_size, 0;
-                             collect_logs, metrics_warm)
-                end
-                if check_correctness
-                    inputs = build_inputs(workload, nt, block_size)
-                    run_workload!(workload, inputs, factory())
-                    passed, rel = verify_workload(workload, inputs)
-                    push!(correctness,
-                          (; workload, scheduler=name, tile_count=nt,
-                             passed, rel_err=rel))
-                    if verbose
-                        status = passed ? "PASS" : "FAIL"
-                        @printf("    correctness: %s (rel_err=%.2e)\n", status, rel)
+
+    # Open output files immediately and write headers so crash-time state on
+    # disk always has valid CSV. `open ... "w"` truncates; if the caller wants
+    # to preserve prior partial data they should rename it first (matches the
+    # previous end-of-run write_csv semantics — truncate on start).
+    output_io = output === nothing ? nothing : open(output, "w")
+    if output_io !== nothing
+        println(output_io, join(CSV_HEADER, ","))
+        flush(output_io)
+    end
+    correctness_io = correctness_output === nothing ? nothing : open(correctness_output, "w")
+    if correctness_io !== nothing
+        println(correctness_io, "workload,scheduler,tile_count,passed,rel_err")
+        flush(correctness_io)
+    end
+
+    try
+        for workload in workloads
+            for nt in tile_counts
+                for (name, factory) in scheduler_factories
+                    verbose && println("→ $workload nt=$nt $name  (warmup×$warmup, trials×$trials, metrics_warm=$metrics_warm)")
+                    if metrics_warm
+                        try
+                            warm_metrics_for!(workload, nt, block_size)
+                        catch e
+                            @warn "metrics-warm crashed, skipping cell" workload=workload tile_count=nt scheduler=name exception=(e, catch_backtrace())
+                            continue
+                        end
                     end
-                    if !passed
-                        @warn "Correctness check FAILED" workload scheduler=name tile_count=nt rel_err=rel
+                    # Warmup mirrors the measured-trial logging state so JIT
+                    # compilation amortizes on the same specializations. Wrap
+                    # so a scheduler that consistently crashes (e.g. HiGHS
+                    # `std::length_error` at K=512) skips the cell instead of
+                    # aborting the whole sweep.
+                    warmup_ok = true
+                    for _ in 1:warmup
+                        try
+                            run_once(workload, factory(), nt, block_size, 0;
+                                     collect_logs, metrics_warm)
+                        catch e
+                            @warn "warmup crashed, skipping cell" workload=workload tile_count=nt scheduler=name exception=(e, catch_backtrace())
+                            warmup_ok = false
+                            break
+                        end
                     end
-                end
-                for trial in 1:trials
-                    r = run_once(workload, factory(), nt, block_size, trial;
-                                 collect_logs, metrics_warm)
-                    push!(results, r)
-                    if verbose
-                        @printf("    trial %d: total=%.3f ms  sched=%.3f ms  exec=%.3f ms  tasks=%d\n",
-                                trial,
-                                r.total_wallclock_ns / 1e6,
-                                r.sched_phase_ns / 1e6,
-                                r.exec_span_ns / 1e6,
-                                r.n_tasks)
+                    warmup_ok || continue
+
+                    if check_correctness
+                        try
+                            inputs = build_inputs(workload, nt, block_size)
+                            run_workload!(workload, inputs, factory())
+                            passed, rel = verify_workload(workload, inputs)
+                            row = (; workload, scheduler=name, tile_count=nt,
+                                     passed, rel_err=rel)
+                            push!(correctness, row)
+                            if correctness_io !== nothing
+                                println(correctness_io,
+                                        "$(row.workload),$(row.scheduler),$(row.tile_count),$(row.passed),$(row.rel_err)")
+                                flush(correctness_io)
+                            end
+                            if verbose
+                                status = passed ? "PASS" : "FAIL"
+                                @printf("    correctness: %s (rel_err=%.2e)\n", status, rel)
+                            end
+                            if !passed
+                                @warn "Correctness check FAILED" workload scheduler=name tile_count=nt rel_err=rel
+                            end
+                        catch e
+                            @warn "correctness crashed, continuing" workload=workload tile_count=nt scheduler=name exception=(e, catch_backtrace())
+                        end
+                    end
+                    for trial in 1:trials
+                        try
+                            r = run_once(workload, factory(), nt, block_size, trial;
+                                         collect_logs, metrics_warm)
+                            push!(results, r)
+                            # Streaming CSV write — flush after each row so a
+                            # subsequent crash (this trial or later) doesn't
+                            # lose the trials that have already succeeded.
+                            if output_io !== nothing
+                                println(output_io, join(_run_result_csv_row(r), ","))
+                                flush(output_io)
+                            end
+                            if verbose
+                                @printf("    trial %d: total=%.3f ms  sched=%.3f ms  exec=%.3f ms  tasks=%d\n",
+                                        trial,
+                                        r.total_wallclock_ns / 1e6,
+                                        r.sched_phase_ns / 1e6,
+                                        r.exec_span_ns / 1e6,
+                                        r.n_tasks)
+                            end
+                        catch e
+                            @warn "trial crashed, continuing sweep" workload=workload tile_count=nt scheduler=name trial=trial exception=(e, catch_backtrace())
+                        end
                     end
                 end
             end
         end
+    finally
+        output_io === nothing || close(output_io)
+        correctness_io === nothing || close(correctness_io)
     end
     return (; results, correctness)
 end
@@ -410,15 +492,18 @@ Options:
         end
     end
 
+    # Stream rows to disk during the sweep so a mid-run crash (Dagger
+    # aborts, HiGHS `std::length_error`, segfault, OOM) preserves data
+    # up to the crash rather than losing an entire ~10h sweep.
+    correctness_output = check_correctness ?
+        replace(output, r"\.csv$" => "_correctness.csv") : nothing
     out = run_sweep(; workloads, tile_counts, block_size, trials, warmup,
-                      metrics_warm, check_correctness)
-    write_csv(output, out.results)
-    println("Wrote $(length(out.results)) rows to $output")
+                      metrics_warm, check_correctness,
+                      output=output, correctness_output=correctness_output)
+    println("Wrote $(length(out.results)) rows to $output (streamed incrementally)")
 
-    if !isempty(out.correctness)
-        cpath = replace(output, r"\.csv$" => "_correctness.csv")
-        write_correctness_csv(cpath, out.correctness)
-        println("Wrote $(length(out.correctness)) correctness rows to $cpath")
+    if !isempty(out.correctness) && correctness_output !== nothing
+        println("Wrote $(length(out.correctness)) correctness rows to $correctness_output (streamed incrementally)")
     end
 
     if !isempty(summary_path)
