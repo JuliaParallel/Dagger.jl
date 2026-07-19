@@ -31,7 +31,8 @@ import ScopedValues: @with
 
 import ..Dagger: SignatureMetric, ProcessorMetric, WorkerMetric, TransferSizeMetric, TransferTimeMetric, TransferRateMetric
 import ..Dagger: TASK_SIGNATURE, TASK_PROCESSOR, TASK_WORKER, TASK_TRANSFER_SIZE, TASK_TRANSFER_TIME
-import ..Dagger: execute_metrics_spec, metrics_lookup_runtime, metrics_lookup_alloc, metrics_lookup_transfer_rate
+import ..Dagger: execute_metrics_spec, metrics_lookup_runtime, metrics_lookup_alloc, metrics_lookup_transfer_rate,
+                 build_signature_runtime_index, metrics_lookup_runtime_from_index
 import ..Dagger: extract_collected_metrics, apply_collected_metrics!
 import ..Dagger.MetricsTracker as MT
 

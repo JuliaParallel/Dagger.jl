@@ -658,13 +658,22 @@ const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
     sig_vec = sig isa Dagger.Signature ? sig.sig : sig
     snap = MT.snapshot(MT.global_metrics_cache())
 
+    # Build the per-signature runtime index once. Every candidate `proc` in
+    # this call shares `sig_vec`, so `metrics_lookup_runtime_from_index`
+    # below can resolve each per-proc runtime with O(1) hash lookups against
+    # this index — a full `metrics_lookup_runtime` call would otherwise
+    # re-scan the entire snapshot (via `MT.find_keys`) up to four times per
+    # proc, i.e. `O(W × N)` scanning work per submitted task. See
+    # `SignatureRuntimeIndex` for the fallback-chain semantics preserved.
+    runtime_index = build_signature_runtime_index(snap, sig_vec)
+
     for proc in procs
         gproc = get_parent(proc)
         chunks_filt = Iterators.filter(c->get_parent(processor(c)) != gproc, chunks)
 
         tx_cost = impute_sum(affinity(chunk)[2] for chunk in chunks_filt)
 
-        runtime = metrics_lookup_runtime(snap, sig_vec, proc, gproc.pid)
+        runtime = metrics_lookup_runtime_from_index(runtime_index, proc, gproc.pid)
         est_time_util = runtime !== nothing ? runtime : UInt64(1000^3)
 
         rate = metrics_lookup_transfer_rate(snap, proc, gproc.pid)
