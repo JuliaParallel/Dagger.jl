@@ -61,6 +61,33 @@ end
         end
     end
 
+    @testset "View of View" begin
+        outer = view(chunk1, 2:5, 3:6)
+        nested = view(outer, 1:2, 2:3)
+        direct = view(chunk1, 2:3, 4:5)
+        @test nested isa ChunkView
+        @test nested.chunk === chunk1
+        @test nested.slices == direct.slices
+        @test fetch(nested) == fetch(direct)
+
+        # Colon parent dims pass sub-slices through
+        outer_colon = view(chunk1, :, 2:5)
+        nested_colon = view(outer_colon, 3:4, 1:2)
+        @test nested_colon.slices == view(chunk1, 3:4, 2:3).slices
+
+        # Int parent dim is dropped; nested view indexes remaining dims only
+        outer_drop = view(chunk1, 3, 1:8)
+        nested_drop = view(outer_drop, 2:5)
+        @test nested_drop.slices == view(chunk1, 3, 2:5).slices
+        @test fetch(nested_drop) == fetch(view(chunk1, 3, 2:5))
+
+        @test_throws DimensionMismatch view(outer, :)
+        @test_throws DimensionMismatch view(outer, :, :, :)
+        @test_throws ArgumentError view(outer, 1:5, 1:2)  # out of outer range → composed OOB
+        @test_throws ArgumentError view(outer_drop, 0)
+        @test_throws ArgumentError view(outer_drop, 9)
+    end
+
     @test fetch(v1) == fetch(chunk1)
 
     @test Dagger.memory_space(v1) == Dagger.memory_space(chunk1)
@@ -90,15 +117,16 @@ end
 end
 
 function test_move_rewrap_aliasing(obj, dest_space)
+    accel = Dagger.current_acceleration()
     src_space = Dagger.memory_space(obj)
     from_proc = first(Dagger.processors(src_space))
     to_proc = first(Dagger.processors(dest_space))
 
     # move_rewrap like generate_slot!
-    dummy_backing = Dagger.tochunk(Dagger.AliasedObjectCacheStore())
-    cache = Dagger.AliasedObjectCache(dest_space, dummy_backing)
+    dummy_backing = Dagger.tochunk(Dagger.AliasedObjectCacheStore(accel))
+    cache = Dagger.AliasedObjectCache(accel, dest_space, dummy_backing)
 
-    dest_obj_chunk = Dagger.move_rewrap(cache, from_proc, to_proc, src_space, dest_space, obj)
+    dest_obj_chunk = Dagger.remotecall_endpoint_toplevel(Dagger.move_rewrap, accel, cache, from_proc, to_proc, src_space, dest_space, obj)
 
     # VERIFICATION: Check that source and destination have compatible memory spans
     # Use the chunk directly for aliasing so it handles remote workers correctly

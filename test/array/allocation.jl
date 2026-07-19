@@ -235,6 +235,9 @@ end
 function chunk_processors(Ad::DArray)
     [Dagger.processor(fetch(Ad.chunks[idx]; raw=true)) for idx in CartesianIndices(size(domainchunks(Ad)))]
 end
+function tile_processors(proc_grid::Dagger.AbstractProcGrid{N}, block_grid::Tuple{Vararg{Int,N}}) where N
+    return [Dagger.procgrid_processor(proc_grid, I) for I in CartesianIndices(block_grid)]
+end
 function tile_processors(proc_grid::AbstractArray{<:Dagger.Processor,N}, block_grid::Tuple{Vararg{Int,N}}) where N
     reps       = Int.(ceil.(block_grid ./ size(proc_grid)))
     tiled      = repeat(proc_grid, reps...)

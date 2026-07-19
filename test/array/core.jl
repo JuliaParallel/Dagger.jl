@@ -116,15 +116,10 @@ end
 
 using MemPool
 
-@testset "affinity" begin
+@testset "datasize" begin
     x = Dagger.tochunk([1:10;])
-    aff = Dagger.affinity(x)
-    @test aff[1] == Dagger.OSProc(myid())
-    @test aff[2] == sizeof(Int)*10
+    @test Dagger.datasize(x) == sizeof(Int)*10
     @test Dagger.tochunk(x) === x
-    f = MemPool.FileRef("/tmp/d", aff[2])
-    aff = Dagger.affinity(f)
-    #@test length(aff) == 3
-    @test (aff[1]).pid in procs()
-    @test aff[2] == sizeof(Int)*10
+    f = MemPool.FileRef("/tmp/d", Dagger.datasize(x))
+    @test Dagger.datasize(f) == sizeof(Int)*10
 end
