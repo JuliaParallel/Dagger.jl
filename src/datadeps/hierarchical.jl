@@ -692,6 +692,109 @@ end
 
 
 """
+    partition_by_assigned_worker(seen_tasks, schedule, task_metas, all_procs)
+        -> (vertex_to_partition, n_partitions, partition_procs, multi_worker)
+
+Scheduler-first partitioning: bin each task into the partition whose worker its
+AOT-scheduled processor lives on, rather than the worker owning the most of its
+argument data (which is what `partition_dag` does). Used by
+`distribute_tasks_hierarchical!` when the scheduler is AOT (produced a non-empty
+`schedule`) or a cached full-region schedule was recovered. Preserves the
+scheduler's whole-DAG placement decisions across the hierarchical partition
+boundary, which is otherwise where those decisions get silently overridden by
+data-affinity binning.
+
+Tasks with no entry in `schedule` (only possible past a `dag_add_task!` bail
+point -- rare in practice for datadeps regions whose args are `Chunk`s rather
+than same-region `DTask` fetches) fall back to the affinity rule: bin by the
+worker owning the most of their arg data, breaking ties toward the first-listed
+matching worker. This matches `partition_dag`'s behaviour for those tasks and
+keeps them local to the data they need.
+
+Only creates a partition for workers with >=1 assigned task, in ascending worker
+id order (for deterministic partition numbering across runs).
+"""
+function partition_by_assigned_worker(seen_tasks::Vector{DTaskPair},
+                                      schedule::Dict{DTask,Processor},
+                                      task_metas::Vector{HierarchicalTaskMeta},
+                                      all_procs::Vector{<:Processor})
+    n = length(seen_tasks)
+
+    procs_by_worker = Dict{Int, Vector{Processor}}()
+    for proc in all_procs
+        wid = root_worker_id(only(memory_spaces(proc)))
+        push!(get!(Vector{Processor}, procs_by_worker, wid), proc)
+    end
+    known_workers = Set{Int}(keys(procs_by_worker))
+
+    # First pass: assign a worker id to every task. Scheduled tasks use their
+    # AOT-chosen proc's worker; unscheduled tasks fall back to affinity (worker
+    # owning the most of their arg data), else to the first-listed worker.
+    task_worker = Vector{Int}(undef, n)
+    for v in 1:n
+        task = seen_tasks[v].task
+        proc = get(schedule, task, nothing)
+        if proc !== nothing
+            wid = root_worker_id(only(memory_spaces(proc)))
+            if wid in known_workers
+                task_worker[v] = wid
+                continue
+            end
+        end
+        # Fallback: affinity by arg data ownership. Tie-break toward the first
+        # worker with the max affinity in `known_workers` iteration order.
+        affinity = Dict{Int,Int}()
+        for dep in task_metas[v].deps
+            arg_wid = root_worker_id(memory_space(dep.arg_w.arg))
+            arg_wid in known_workers || continue
+            affinity[arg_wid] = get(affinity, arg_wid, 0) + 1
+        end
+        if isempty(affinity)
+            task_worker[v] = first(sort!(collect(known_workers)))
+        else
+            best_wid = 0
+            best_aff = -1
+            for wid in sort!(collect(keys(affinity)))
+                aff = affinity[wid]
+                if aff > best_aff
+                    best_aff = aff
+                    best_wid = wid
+                end
+            end
+            task_worker[v] = best_wid
+        end
+    end
+
+    # Second pass: reduce to only-workers-with-tasks and assign partition ids in
+    # ascending worker order for determinism.
+    used_workers = Int[]
+    seen_wids = Set{Int}()
+    for wid in task_worker
+        if !(wid in seen_wids)
+            push!(used_workers, wid)
+            push!(seen_wids, wid)
+        end
+    end
+    sort!(used_workers)
+    worker_to_partition = Dict(wid => i for (i, wid) in enumerate(used_workers))
+    n_partitions = length(used_workers)
+
+    vertex_to_partition = Vector{Int}(undef, n)
+    for v in 1:n
+        vertex_to_partition[v] = worker_to_partition[task_worker[v]]
+    end
+
+    partition_procs = Vector{Vector{Processor}}(undef, n_partitions)
+    for (pid, wid) in enumerate(used_workers)
+        partition_procs[pid] = procs_by_worker[wid]
+    end
+
+    multi_worker = n_partitions > 1
+    return vertex_to_partition, n_partitions, partition_procs, multi_worker
+end
+
+
+"""
     _schedule_vertex!(v, partition_id, temp_queue, state, local_procs,
                       local_scope, dag, seen_tasks, vertex_to_partition,
                       schedule, proc_to_scope_lfu, write_num) -> write_num
@@ -1075,9 +1178,59 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
     # Phase 2: Build dependency DAG
     dag = build_dependency_dag(task_metas, arg_to_ainfo, ainfos_overlaps)
 
-    # Phase 3: Partition the DAG
-    vertex_to_partition, n_partitions, partition_procs, _multi_worker =
-        partition_dag(dag, task_metas, all_procs)
+    # Phase 3a: Decide whether to route through scheduler-first partitioning.
+    # Only useful when the argument data itself is already distributed across
+    # >=2 workers -- otherwise, the affinity partitioner (which bins tasks near
+    # their data) already picks the best worker set, and forcing a whole-DAG
+    # AOT pass would either (a) agree with affinity or (b) spread computation
+    # away from data at the cost of extra cross-space transfers that don't buy
+    # a better schedule. For workloads that distribute their tiles across
+    # workers (e.g. our benchmark's `_distribute_tile`), this gate lets AOT
+    # scheduler decisions drive worker-level task placement, so different
+    # schedulers produce different n_copies -- which the affinity partitioner
+    # otherwise silently overrides.
+    data_workers = Set{Int}()
+    for meta in task_metas
+        for dep in meta.deps
+            push!(data_workers, root_worker_id(memory_space(dep.arg_w.arg)))
+        end
+    end
+    data_is_distributed = length(data_workers) >= 2
+
+    # Phase 3b: If we haven't already got a full-region schedule from the cache
+    # and the DAG has anything to schedule, ask the scheduler for an AOT
+    # placement over the *whole* region and *all* processors -- but only when
+    # data-distribution warrants it (see the gate above). JIT schedulers (which
+    # don't specialize `datadeps_schedule_dag_aot!`) fall through to the no-op
+    # fallback in `scheduling.jl:378`, leaving `trial` empty; we then take the
+    # affinity-partitioning branch below with unchanged semantics.
+    #
+    # We call `datadeps_schedule_dag_aot!` directly rather than
+    # `datadeps_build_schedule!` because the latter *also* writes the schedule
+    # into `queue.scheduler`'s cache internally. Under hierarchical, the cache
+    # is owned by `_hierarchical_persist_schedule!` below (keyed by the
+    # top-level `dag_spec`); routing through `datadeps_build_schedule!` would
+    # double-write and the two entries could diverge for the same key.
+    cache_hit = precomputed_schedule !== nothing
+    if !cache_hit && !isempty(dag_spec) && data_is_distributed
+        trial = Dict{DTask,Processor}()
+        datadeps_schedule_dag_aot!(queue.scheduler, trial, dag_spec, all_procs, all_scope)
+        if !isempty(trial)
+            precomputed_schedule = trial
+        end
+    end
+
+    # Phase 3c: Partition the DAG. Scheduler-first when we have a whole-region
+    # schedule (cache hit *or* freshly-computed AOT) *and* the data warrants
+    # cross-worker computation. Affinity-based otherwise (JIT schedulers,
+    # non-distributed data, or empty DAG spec) -- unchanged behaviour.
+    if precomputed_schedule !== nothing && data_is_distributed
+        vertex_to_partition, n_partitions, partition_procs, _multi_worker =
+            partition_by_assigned_worker(seen_tasks, precomputed_schedule, task_metas, all_procs)
+    else
+        vertex_to_partition, n_partitions, partition_procs, _multi_worker =
+            partition_dag(dag, task_metas, all_procs)
+    end
 
     # Detect backing chunks shared across partitions in different memory spaces.
     # These need runtime ownership transfer to avoid split-brain concurrent
@@ -1129,11 +1282,13 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
 
     # Persist the freshly-computed schedule for reuse by a later
     # `distribute_tasks_hierarchical!` call on a structurally equivalent DAG.
-    # Only runs on a cache miss (`precomputed_schedule === nothing`) to avoid
+    # Runs on a cache miss regardless of whether the fresh schedule came from
+    # the whole-DAG AOT above or from the per-partition AOT inside
+    # `schedule_partition_full!`; skipping only on a genuine cache *hit* avoids
     # both duplicating the cache entry we just consumed and appending it under
     # a potentially different DAGSpec key that would fail subsequent
     # `datadeps_dag_equivalent` matches.
-    if precomputed_schedule === nothing
+    if !cache_hit
         _hierarchical_persist_schedule!(queue.scheduler, dag_spec, partition_schedules)
     end
 end
