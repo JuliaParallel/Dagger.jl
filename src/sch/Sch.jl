@@ -1796,6 +1796,85 @@ end
 # (see `DoTaskSpec`/`@reusable_tasks`), so the same task services many tasks and
 # the cache is genuinely reused.
 const DO_TASK_LOCAL_METRICS = TaskLocalValue{MT.MetricsCache}(() -> MT.MetricsCache())
+
+struct _DoTaskCtxMemo
+    key::Tuple{UInt64,Bool}
+    ctx::Context
+end
+mutable struct _DoTaskCtxMemoBox
+    @atomic memo::Union{Nothing,_DoTaskCtxMemo}
+end
+const DO_TASK_CTX = _DoTaskCtxMemoBox(nothing)
+function do_task_context(log_sink, profile::Bool)
+    key = (objectid(log_sink), profile)
+    memo = @atomic DO_TASK_CTX.memo
+    if memo !== nothing && memo.key === key
+        return memo.ctx
+    end
+    ctx = Context(Processor[]; log_sink, profile)
+    @atomic DO_TASK_CTX.memo = _DoTaskCtxMemo(key, ctx)
+    return ctx
+end
+
+# Move one argument onto `to_proc`. Factored out of `do_task` so both the inline
+# (cheap local move) and spawned (potential real data movement) paths call it
+# without allocating a per-argument closure.
+function _move_task_arg!(ctx, thunk_id, to_proc, @nospecialize(f), arg)
+    value = Dagger.value(arg)
+    position = arg.pos
+    @maybelog ctx timespan_start(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=value))
+    #= FIXME: This isn't valid if x is written to
+    x = if x isa Chunk
+        value = lock(TASK_SYNC) do
+            if haskey(CHUNK_CACHE, x)
+                Some{Any}(get!(CHUNK_CACHE[x], to_proc) do
+                    # Convert from cached value
+                    # TODO: Choose "closest" processor of same type first
+                    some_proc = first(keys(CHUNK_CACHE[x]))
+                    some_x = CHUNK_CACHE[x][some_proc]
+                    @dagdebug thunk_id :move "Cache hit for argument $id at $some_proc: $some_x"
+                    @invokelatest move(some_proc, to_proc, some_x)
+                end)
+            else
+                nothing
+            end
+        end
+
+        if value !== nothing
+            something(value)
+        else
+            # Fetch it
+            time_start = time_ns()
+            from_proc = processor(x)
+            _x = @invokelatest move(from_proc, to_proc, x)
+            time_finish = time_ns()
+            if x.handle.size !== nothing
+                Threads.atomic_add!(transfer_time, time_finish - time_start)
+                Threads.atomic_add!(transfer_size, x.handle.size)
+            end
+
+            @dagdebug thunk_id :move "Cache miss for argument $id at $from_proc"
+
+            # Update cache
+            lock(TASK_SYNC) do
+                CHUNK_CACHE[x] = Dict{Processor,Any}()
+                CHUNK_CACHE[x][to_proc] = _x
+            end
+
+            _x
+        end
+    else
+    =#
+    new_value = @invokelatest move(to_proc, value)
+    #end
+    if new_value !== value
+        @dagdebug thunk_id :move "Moved argument @ $position to $to_proc: $(typeof(value)) -> $(typeof(new_value))"
+    end
+    @maybelog ctx timespan_finish(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=new_value); tasks=[Base.current_task()])
+    arg.value = new_value
+    return
+end
+
 """
     do_task(to_proc, task::TaskSpec) -> Any
 
@@ -1805,7 +1884,7 @@ Executes a single task specified by `task` on `to_proc`.
     thunk_id = task.thunk_id
 
     ctx_vars = task.ctx_vars
-    ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
+    ctx = do_task_context(ctx_vars.log_sink, ctx_vars.profile)
 
     from_proc = OSProc()
     data = task.data
@@ -1891,67 +1970,28 @@ Executes a single task specified by `task` on `to_proc`.
     else
         data
     end
-    fetch_tasks = map(_data) do arg
-        #=FIXME:REALLOC_TASKS=#
-        Threads.@spawn begin
-            value = Dagger.value(arg)
-            position = arg.pos
-            @maybelog ctx timespan_start(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=value))
-            #= FIXME: This isn't valid if x is written to
-            x = if x isa Chunk
-                value = lock(TASK_SYNC) do
-                    if haskey(CHUNK_CACHE, x)
-                        Some{Any}(get!(CHUNK_CACHE[x], to_proc) do
-                            # Convert from cached value
-                            # TODO: Choose "closest" processor of same type first
-                            some_proc = first(keys(CHUNK_CACHE[x]))
-                            some_x = CHUNK_CACHE[x][some_proc]
-                            @dagdebug thunk_id :move "Cache hit for argument $id at $some_proc: $some_x"
-                            @invokelatest move(some_proc, to_proc, some_x)
-                        end)
-                    else
-                        nothing
-                    end
-                end
-
-                if value !== nothing
-                    something(value)
-                else
-                    # Fetch it
-                    time_start = time_ns()
-                    from_proc = processor(x)
-                    _x = @invokelatest move(from_proc, to_proc, x)
-                    time_finish = time_ns()
-                    if x.handle.size !== nothing
-                        Threads.atomic_add!(transfer_time, time_finish - time_start)
-                        Threads.atomic_add!(transfer_size, x.handle.size)
-                    end
-
-                    @dagdebug thunk_id :move "Cache miss for argument $id at $from_proc"
-
-                    # Update cache
-                    lock(TASK_SYNC) do
-                        CHUNK_CACHE[x] = Dict{Processor,Any}()
-                        CHUNK_CACHE[x][to_proc] = _x
-                    end
-
-                    _x
-                end
-            else
-            =#
-            new_value = @invokelatest move(to_proc, value)
-            #end
-            if new_value !== value
-                @dagdebug thunk_id :move "Moved argument @ $position to $to_proc: $(typeof(value)) -> $(typeof(new_value))"
-            end
-            @maybelog ctx timespan_finish(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=new_value); tasks=[Base.current_task()])
-            arg.value = new_value
-            return
+    # Move the function and arguments onto `to_proc`. Only arguments that may
+    # require real (possibly remote, blocking) data movement -- Chunks /
+    # WeakChunks -- are fetched concurrently on a spawned task; plain inline
+    # values (the common case for leaf tasks) just need a cheap local `move`, so
+    # they are moved synchronously here. This avoids spawning (and immediately
+    # joining) a Task per argument, which was a per-task allocation source
+    # (FIXME:REALLOC_TASKS). The task list itself is a reused buffer, so leaf
+    # tasks with no movable arguments allocate nothing here.
+    fetch_tasks = @reusable_vector :do_task_fetch_tasks Union{Task,Nothing} nothing 32
+    fetch_tasks_cleanup = @reuse_defer_cleanup empty!(fetch_tasks)
+    for arg in _data
+        value = Dagger.value(arg)
+        if value isa Chunk || value isa WeakChunk
+            push!(fetch_tasks, Threads.@spawn _move_task_arg!(ctx, thunk_id, to_proc, f, arg))
+        else
+            _move_task_arg!(ctx, thunk_id, to_proc, f, arg)
         end
     end
     for task in fetch_tasks
-        fetch_report(task)
+        task === nothing || fetch_report(task::Task)
     end
+    fetch_tasks_cleanup()
 
     f = Dagger.value(first(data))
     @assert !(f isa Chunk) "Failed to unwrap thunk function"
