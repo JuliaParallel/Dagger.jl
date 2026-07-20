@@ -15,7 +15,8 @@
 
 set -euo pipefail
 
-DAGGER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Repo root is two levels up from this script (contrib/mpi/).
+DAGGER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 N="${N:-4}"
 N_GPU="${N_GPU:-2}"
 THREADS="${THREADS:-2}"
