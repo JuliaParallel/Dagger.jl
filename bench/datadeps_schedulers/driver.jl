@@ -393,6 +393,18 @@ const DEFAULT_WARMUP = 1
 # by volume -- at 100 they crowded out ~60% of the cache.
 const METRICS_KEEP_PER_METRIC = 10000
 
+# Dagger's default rolling window (100 tasks) is tuned for steady-state
+# scheduling and is far too small for a harness that warms the cost model on
+# purpose: a GPU warmup writes ~60 entries, then CPU warmup plus measured
+# trials push past 100 and evict them, so GPU cost lookups silently fall back
+# to CPU-derived estimates -- and *which* GPU signatures survive is
+# nondeterministic, making scheduling decisions irreproducible across reruns.
+# Measured demand for a full warm+trials cycle is ~235 entries at cholesky
+# nt=4 and ~835 at nt=8; 5000 clears the largest config by ~6x while staying
+# ~200x below the unbounded regime that degraded a run from 14.8s to 48.0s.
+const METRICS_CACHE_MAX_TASKS = 5000
+Dagger.metrics_cache_max_tasks!(METRICS_CACHE_MAX_TASKS)
+
 # Factories — not instances — because RoundRobin holds mutable state and each
 # trial needs a fresh copy. Default MILP budget is set generously since a
 # K~64 solve can exceed a minute; callers override as needed. Heuristic

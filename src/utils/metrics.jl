@@ -342,7 +342,28 @@ end
 # per metric per task forever, which dominates scheduler allocations (Dict
 # rehash churn) on long-running workloads. The cost model only needs recent
 # samples, so we keep a rolling window.
-const METRICS_CACHE_MAX_TASKS = 100
+const METRICS_CACHE_MAX_TASKS = Ref(100)
+
+"""
+    metrics_cache_max_tasks!(n::Integer)
+
+Set the rolling-window bound described above, returning the previous value.
+
+The default of 100 is tuned for steady-state scheduling, where only recent
+samples matter. It is too small for benchmark harnesses that warm the cost
+model deliberately: a GPU warmup writes ~60 entries, after which CPU warmup and
+measured trials push past 100 and evict the GPU samples, so heterogeneous cost
+lookups silently fall back to CPU-derived estimates. Measured demand for a full
+warm+trials cycle is ~235 entries at cholesky nt=4 and ~835 at nt=8.
+
+Note this is process-local; multi-worker runs must set it on each worker.
+"""
+function metrics_cache_max_tasks!(n::Integer)
+    n > 0 || throw(ArgumentError("metrics cache bound must be positive, got $n"))
+    old = METRICS_CACHE_MAX_TASKS[]
+    METRICS_CACHE_MAX_TASKS[] = Int(n)
+    return old
+end
 
 function apply_collected_metrics!(cache::MT.MetricsCache, key::K, pairs) where K
     pairs === nothing && return
@@ -354,7 +375,7 @@ function apply_collected_metrics!(cache::MT.MetricsCache, key::K, pairs) where K
             storage = MT.get_or_create_storage!(ctx, metric)
             MT.set_metric_value!(storage, key, value)
         end
-        MT.trim_context!(ctx, METRICS_CACHE_MAX_TASKS)
+        MT.trim_context!(ctx, METRICS_CACHE_MAX_TASKS[])
     end
     return
 end
