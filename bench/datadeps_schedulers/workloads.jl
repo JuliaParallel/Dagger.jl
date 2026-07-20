@@ -214,6 +214,69 @@ end
     return procs[mod1((i - 1) * nt + j, length(procs))]
 end
 
+"""
+    tiled_lu!(A::AbstractMatrix)
+
+Right-looking tiled LU without pivoting, mirroring the tile-BLAS structure
+Dagger uses internally in `LinearAlgebra.lu!(::DMatrix, ::NoPivot)`
+(src/array/lu.jl): GETRF on the diagonal tile, TRSM down the column panel and
+across the row panel, GEMM on the trailing submatrix.
+
+Pivoting is omitted so the DAG shape is static and comparable to
+`tiled_cholesky!` -- partial pivoting would add a reduction over the column
+panel per step and a data-dependent row-swap, changing the task graph between
+runs. `make_lu_tiles` builds a diagonally dominant matrix so the unpivoted
+factorization is numerically sound.
+
+The two TRSM calls are asymmetric and follow Dagger's internal version:
+  - column panel `A[m,k]` solves against U: side='R', uplo='U', non-unit diag
+  - row panel    `A[k,n]` solves against L: side='L', uplo='L', UNIT diag
+"""
+function tiled_lu!(A::AbstractMatrix)
+    mt, nt = size(A)
+    for k in 1:min(mt, nt)
+        Dagger.@spawn LinearAlgebra.generic_lufact!(InOut(A[k, k]),
+                                                    LinearAlgebra.NoPivot();
+                                                    check=false)
+        for m in (k+1):mt
+            Dagger.@spawn LinearAlgebra.BLAS.trsm!('R', 'U', 'N', 'N',
+                                                   1.0, In(A[k, k]),
+                                                   InOut(A[m, k]))
+        end
+        for n in (k+1):nt
+            Dagger.@spawn LinearAlgebra.BLAS.trsm!('L', 'L', 'N', 'U',
+                                                   1.0, In(A[k, k]),
+                                                   InOut(A[k, n]))
+            for m in (k+1):mt
+                Dagger.@spawn LinearAlgebra.BLAS.gemm!('N', 'N', -1.0,
+                                                       In(A[m, k]),
+                                                       In(A[k, n]), 1.0,
+                                                       InOut(A[m, n]))
+            end
+        end
+    end
+    return A
+end
+
+"""
+    make_lu_tiles(sz, nb) -> Matrix{Chunk}
+
+Diagonally dominant tiles for unpivoted LU. Adding `sz` to the diagonal makes
+every pivot dominant over its row, so `generic_lufact!(.., NoPivot())` is
+stable without row interchanges -- the same conditioning trick
+`make_spd_tiles` uses.
+"""
+function make_lu_tiles(sz::Int, nb::Int)
+    @assert sz % nb == 0
+    nt = sz ÷ nb
+    A = rand(sz, sz)
+    A[diagind(A)] .+= sz
+    procs = _placement_procs()
+    return [_distribute_tile(copy(A[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb]),
+                             _tile_proc(procs, nt, i, j))
+            for i in 1:nt, j in 1:nt]
+end
+
 function make_spd_tiles(sz::Int, nb::Int)
     @assert sz % nb == 0
     nt = sz ÷ nb

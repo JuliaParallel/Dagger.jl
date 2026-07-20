@@ -85,6 +85,9 @@ function build_inputs(workload::Symbol, nt::Int, bs::Int)
         return (; A, B, C,
                   dense_A = _assemble_dense(A),
                   dense_B = _assemble_dense(B))
+    elseif workload === :lu
+        A = make_lu_tiles(sz, bs)
+        return (; A, dense_reference = _assemble_dense(A))
     elseif workload === :random_dag
         # For random_dag, `nt` is reinterpreted as `n_tasks` (total DAG
         # nodes), not a tile-grid dimension — structured BLAS workloads
@@ -160,6 +163,10 @@ function _run_workload_inner!(workload::Symbol, inputs, sched::Dagger.DataDepsSc
         Dagger.spawn_datadeps(; scheduler=sched) do
             tiled_matmul!(inputs.C, inputs.A, inputs.B)
         end
+    elseif workload === :lu
+        Dagger.spawn_datadeps(; scheduler=sched) do
+            tiled_lu!(inputs.A)
+        end
     elseif workload === :random_dag
         Dagger.spawn_datadeps(; scheduler=sched) do
             tiled_random_dag!(inputs.tiles, inputs.parents,
@@ -203,6 +210,17 @@ function verify_workload(workload::Symbol, inputs)
         ref = inputs.dense_reference
         denom = max(norm(ref), eps(Float64))
         rel = norm(L * L' - ref) / denom
+        return (rel < 1e-8, rel)
+    elseif workload === :lu
+        # Unpivoted LU overwrites A in place: unit-lower L in the strict
+        # lower triangle, U in the upper triangle including the diagonal.
+        # Reconstruct and compare L*U against the original matrix.
+        F = _assemble_dense(inputs.A)
+        L = tril(F, -1) + LinearAlgebra.I
+        U = triu(F)
+        ref = inputs.dense_reference
+        denom = max(norm(ref), eps(Float64))
+        rel = norm(L * U - ref) / denom
         return (rel < 1e-8, rel)
     elseif workload === :matmul
         C = _assemble_dense(inputs.C)
