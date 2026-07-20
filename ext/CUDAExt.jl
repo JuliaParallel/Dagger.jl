@@ -59,20 +59,60 @@ function Dagger.aliasing(x::CuArray{T}) where T
 end
 
 function Dagger.unsafe_free!(x::CuArray)
-    # Env-gated stacktrace instrumentation: when
+    # Env-gated stacktrace instrumentation. When
     # `DAGGER_TRACE_UNSAFE_FREE=1` is set, log every `unsafe_free!`
-    # call with its stacktrace so we can identify who explicitly frees
-    # a `CuArray` during a pending `RemainderAliasing move!` (site of
-    # the "Attempt to use a freed reference" bug hudson caught in
-    # cholesky CPU+GPU sweeps). Zero overhead in production — the
-    # `ENV` check is a single dict lookup that gets branch-predicted
-    # away when the key is absent. Kept env-gated rather than always-on
-    # because `unsafe_free!` fires thousands of times per sweep in the
-    # normal chunk-lifecycle path; unconditional stacktrace capture
-    # would drown the log.
+    # call with its stacktrace — used to identify racing callers.
+    # Zero overhead when unset (single ENV dict lookup that
+    # branch-predicts away).
     if get(ENV, "DAGGER_TRACE_UNSAFE_FREE", "0") == "1"
         st = stacktrace(backtrace())
         @info "Dagger.unsafe_free!(::CuArray)" array_type=typeof(x) array_size=size(x) stacktrace=st
+    end
+    # Synchronize the device context before releasing the buffer.
+    # Guards against a class of correctness bugs where a scheduled
+    # `unsafe_free!` task races with a concurrent `move!` copy-task on
+    # the same buffer. The datadeps aliasing machinery emits
+    # `unsafe_free!` tasks at region end with syncdeps gathered via
+    # `gather_free_syncdeps!` in `src/datadeps/aliasing.jl:752`; that
+    # gather is intended to include every `enqueue_remainder_copy_to!`
+    # / `enqueue_remainder_copy_from!` task (spawned in
+    # `src/datadeps/remainders.jl:289` / `:343`, which register as
+    # readers/writers of the buffer's ainfos in `add_reader!` /
+    # `add_writer!` at `aliasing.jl:806` / `:784`). On CPU-only
+    # sessions this chain works — even if a copy-task were missed,
+    # `unsafe_free!` on `Array{T}` is a Julia refcount decrement and
+    # freeing while another reader holds it is harmless. On GPU
+    # sessions any missed edge is catastrophic: `CUDA.unsafe_free!`
+    # invalidates the buffer immediately and any in-flight `move!`
+    # dereferencing `pointer(::CuArray)` throws
+    # `ArgumentError: Attempt to use a freed reference` from
+    # GPUArrays.abstractarray.jl:73 (the explicit-freed sentinel,
+    # NOT the GC use-after-free sentinel — verified by hudson's Cell A
+    # v3 tracing: caller stack is 2 frames deep ending at the
+    # `Dagger.@spawn` closure that dispatches this `unsafe_free!` as
+    # a scheduled task).
+    #
+    # The correct long-term fix belongs in Dagger core's aliasing
+    # machinery: either audit `gather_free_syncdeps!` for missing
+    # edges in the datadeps-allocated-slot code path, or restructure
+    # so free-tasks are gated on a per-buffer reference counter
+    # incremented by every task that touches the buffer. Both are
+    # non-trivial and deferred to a dedicated upstream PR.
+    #
+    # For the immediate correctness need, this synchronize is the
+    # right place to defend: CUDA best practice dictates syncing the
+    # device context before `unsafe_free!` on any buffer that might
+    # have pending operations, regardless of scheduler-level
+    # guarantees. `CUDA.synchronize()` waits for the current context's
+    # stream queue to drain — fast no-op when nothing is pending
+    # (common case, since the syncdep chain usually IS correct), and
+    # a bounded wait (bounded by the longest concurrent transfer's
+    # remaining time — milliseconds at worst on H100) in the racy
+    # cases the syncdep bug exposes. `with_context(x)` picks the
+    # array's device before syncing so we drain the right stream when
+    # the caller's context is on a different device.
+    with_context(x) do
+        CUDA.synchronize()
     end
     CUDA.unsafe_free!(x)
     return

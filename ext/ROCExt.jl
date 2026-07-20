@@ -48,6 +48,20 @@ function Dagger.aliasing(x::ROCArray{T}) where T
 end
 
 function Dagger.unsafe_free!(x::ROCArray)
+    # Synchronize the device before releasing the buffer to guard
+    # against `unsafe_free!` racing with a concurrent `move!` copy-task
+    # on the same buffer. See detailed rationale in the matching CUDA
+    # implementation at `ext/CUDAExt.jl` — same class of Dagger
+    # aliasing-machinery edge case, same defense at the correctness
+    # boundary. `AMDGPU.synchronize()` waits for the current device's
+    # queue to drain; fast no-op when nothing is pending.
+    #
+    # ROCExt does not define `with_context!(::ROCArray)` (CUDAExt does,
+    # ext/CUDAExt.jl:92), so hop through the array's `MemorySpace` to
+    # pick the correct device context before syncing.
+    with_context(Dagger.memory_space(x)) do
+        AMDGPU.synchronize()
+    end
     AMDGPU.unsafe_free!(x)
     return
 end
