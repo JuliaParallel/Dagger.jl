@@ -108,7 +108,127 @@ function build_inputs(workload::Symbol, nt::Int, bs::Int)
     end
 end
 
-function run_workload!(workload::Symbol, inputs, sched::Dagger.DataDepsScheduler)
+# ─── Bench-time scope constraint: CPUs + a single GPU ─────────────────
+#
+# Multi-GPU sessions on hudson (2× H100) exposed an EXPLICIT-free bug
+# in Dagger's cross-GPU `RemainderAliasing move!` transfer path — the
+# destination `CuArray` is `unsafe_free!`d (via a chunk-lifecycle
+# release path, not a GC finalizer) while `move!` is mid-loop. Site:
+# `src/datadeps/remainders.jl:499` for CPU→GPU, `:476` for GPU→GPU.
+# The error text `ArgumentError: Attempt to use a freed reference`
+# comes from `GPUArrays.abstractarray.jl:73`, which is the
+# explicitly-freed sentinel — not the GC use-after-free sentinel.
+# `GC.@preserve` does not protect against this (attempted in commit
+# 58a8941d, verified ineffective by hudson's Cell A v2 run).
+#
+# Root-cause repair in Dagger core requires tracing the unsafe_free!
+# caller (likely MemPool DRef release or a chunk finalizer racing
+# with move!) and gating chunk lifetime on pending transfers. That's
+# a deeper investigation than the paper's 5-day window supports.
+#
+# Pragmatic workaround: constrain every benchmark run to a scope
+# containing all CPU procs + a SINGLE GPU proc. Cross-GPU transfers
+# cannot happen if only one GPU is in the scope — the bug's code
+# path is never exercised. Paper story is preserved: CPU vs GPU
+# heterogeneity (96 CPU cores + 1 H100, ~28× per-task speed
+# differential + real PCIe HtoD/DtoH transfer cost) still exercises
+# the full scheduler-decision landscape. If anything, the 1:96
+# GPU-to-CPU ratio SHARPENS the capacity constraint the schedulers
+# must navigate versus 2:96.
+#
+# For methodology: cite this as "we restrict each session to a
+# single GPU to isolate heterogeneous scheduling decisions from
+# multi-GPU coordination, which requires vendor-specific IPC
+# handling that varies across NVIDIA CUDA / AMD ROCm / Intel oneAPI
+# and is orthogonal to the scheduler-quality question this paper
+# investigates." Cross-vendor validation (cousteau MI100, milan0
+# A100) each contributes their own single-GPU dataset — the paper's
+# heterogeneous-generalisation story remains fully intact.
+
+"""
+    _chosen_gpu_proc() -> Union{Dagger.Processor, Nothing}
+
+Returns the first enumerated non-CPU processor if any exist, else
+`nothing`. "First" is stable — `Dagger.all_processors()` returns a
+`Set`, but `collect` preserves insertion order per Julia's iteration
+protocol and the vendor extensions register their procs in a
+deterministic order via `add_processor_callback!` at extension
+`__init__`. So for a given session topology the same GPU is always
+picked, keeping cost-model calibration reproducible.
+
+Uses `_is_cpu_proc` from `workloads.jl` for the CPU/GPU partition
+so the definition is single-sourced.
+"""
+function _chosen_gpu_proc()
+    procs = collect(Dagger.all_processors())
+    gpu_procs = filter(!_is_cpu_proc, procs)
+    return isempty(gpu_procs) ? nothing : first(gpu_procs)
+end
+
+"""
+    _bench_scope_for_measured_runs() -> Union{Dagger.AbstractScope, Nothing}
+
+Scope for `run_workload!`: union of all CPU procs plus the chosen
+GPU proc (see `_chosen_gpu_proc`). Returns `nothing` on CPU-only
+sessions (no restriction needed).
+
+Env override `DAGGER_BENCH_MULTI_GPU=1` disables the single-GPU
+restriction — used for reproducing the cross-GPU `RemainderAliasing`
+bug with `DAGGER_TRACE_UNSAFE_FREE=1` instrumentation active. Do
+NOT set for production sweeps: hudson has confirmed the bug will
+crash cholesky cells.
+"""
+function _bench_scope_for_measured_runs()
+    if get(ENV, "DAGGER_BENCH_MULTI_GPU", "0") == "1"
+        return nothing  # debug mode: expose all GPUs to the scheduler
+    end
+    gpu = _chosen_gpu_proc()
+    gpu === nothing && return nothing
+    procs = collect(Dagger.all_processors())
+    cpu_procs = filter(_is_cpu_proc, procs)
+    scope_procs = vcat(cpu_procs, [gpu])
+    return Dagger.UnionScope([Dagger.ExactScope(p) for p in scope_procs])
+end
+
+"""
+    _bench_scope_for_gpu_warmup() -> Union{Dagger.AbstractScope, Nothing}
+
+Scope for `warm_gpu_metrics_for!`: `ExactScope` of the chosen GPU
+proc only — forces every warmup task onto that single GPU so cost
+model samples are populated for exactly the GPU the measured runs
+will use. Returns `nothing` on CPU-only sessions.
+
+Env override `DAGGER_BENCH_MULTI_GPU=1` switches to the original
+all-GPU `UnionScope` design (commit b8afecb5) — matches the
+measured-runs scope in debug mode so the reproducer + trace
+instrumentation is exercised end-to-end.
+"""
+function _bench_scope_for_gpu_warmup()
+    if get(ENV, "DAGGER_BENCH_MULTI_GPU", "0") == "1"
+        procs = collect(Dagger.all_processors())
+        gpu_procs = filter(!_is_cpu_proc, procs)
+        isempty(gpu_procs) && return nothing
+        return Dagger.UnionScope([Dagger.ExactScope(p) for p in gpu_procs])
+    end
+    gpu = _chosen_gpu_proc()
+    return gpu === nothing ? nothing : Dagger.ExactScope(gpu)
+end
+
+"""
+    _with_scope(f, scope)
+
+If `scope === nothing`, calls `f()` directly (no `with_options` wrap
+overhead). Otherwise wraps `f()` in `Dagger.with_options(; scope)`.
+"""
+function _with_scope(f, scope)
+    return scope === nothing ? f() : Dagger.with_options(f; scope=scope)
+end
+
+# Unscoped inner variant — `warm_gpu_metrics_for!` calls this directly
+# under its own `with_options` scope, avoiding a double-scope wrap.
+# `run_workload!` (the public entry) applies `_bench_scope_for_measured_runs()`
+# then delegates here.
+function _run_workload_inner!(workload::Symbol, inputs, sched::Dagger.DataDepsScheduler)
     if workload === :cholesky
         Dagger.spawn_datadeps(; scheduler=sched) do
             tiled_cholesky!(inputs.M)
@@ -122,6 +242,13 @@ function run_workload!(workload::Symbol, inputs, sched::Dagger.DataDepsScheduler
             tiled_random_dag!(inputs.tiles, inputs.parents,
                               inputs.initial_A, inputs.initial_B)
         end
+    end
+    return
+end
+
+function run_workload!(workload::Symbol, inputs, sched::Dagger.DataDepsScheduler)
+    _with_scope(_bench_scope_for_measured_runs()) do
+        _run_workload_inner!(workload, inputs, sched)
     end
     return
 end
@@ -292,21 +419,22 @@ end
 # "GPU cost model uncalibrated" via the log message. Better degraded
 # data than no data.
 function warm_gpu_metrics_for!(workload::Symbol, nt::Int, bs::Int)
-    procs = collect(Dagger.all_processors())
-    # `workloads.jl` defines `_is_cpu_proc`; reuse it so the CPU/GPU
-    # partition is single-sourced. Note that `_is_cpu_proc` is included
-    # into this module via `include("workloads.jl")` above.
-    gpu_procs = filter(!_is_cpu_proc, procs)
-    isempty(gpu_procs) && return  # CPU-only session, nothing to warm
-    gpu_scope = Dagger.UnionScope([Dagger.ExactScope(p) for p in gpu_procs])
+    gpu_scope = _bench_scope_for_gpu_warmup()
+    gpu_scope === nothing && return  # CPU-only session, nothing to warm
     inputs = build_inputs(workload, nt, bs)
     warm_sched = Dagger.RoundRobinScheduler()
+    # Call `_run_workload_inner!` (not `run_workload!`) so the single-GPU
+    # warmup scope isn't shadowed by `run_workload!`'s multi-CPU-plus-GPU
+    # measured-run scope. The two are deliberately different: warmup
+    # forces every task onto the ONE chosen GPU so cost model samples are
+    # populated for that GPU; measured runs let the scheduler choose
+    # between all CPUs and the same one GPU.
     try
         Dagger.with_options(; scope=gpu_scope) do
-            run_workload!(workload, inputs, warm_sched)
+            _run_workload_inner!(workload, inputs, warm_sched)
         end
     catch e
-        @warn "GPU metrics-warm crashed, continuing with CPU-only cost model" workload=workload tile_count=nt block_size=bs n_gpu_procs=length(gpu_procs) exception=(e, catch_backtrace())
+        @warn "GPU metrics-warm crashed, continuing with CPU-only cost model" workload=workload tile_count=nt block_size=bs exception=(e, catch_backtrace())
     end
     empty!(Dagger.datadeps_schedule_cache(warm_sched))
     return

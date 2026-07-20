@@ -427,17 +427,7 @@ function move!(dep_mod::RemainderAliasing{S}, to_space::MemorySpace, from_space:
         from_raw = unwrap(from)
         offset = UInt64(1)
         with_context!(from_space)
-        # `from_raw` must be preserved alongside `copies`: for device-backed
-        # arrays (`CuArray`, `ROCArray`, …) whose finalizer calls
-        # `unsafe_free!` on the underlying device memory, an intermediate
-        # allocation inside `read_remainder!` — e.g. CUDA temporaries the
-        # `copyto!`/`unsafe_wrap` path emits — can trip GC and free
-        # `from_raw`'s device memory mid-loop. The next iteration's
-        # `pointer(from_raw)` then throws `ArgumentError: Attempt to use a
-        # freed reference`. `GC.@preserve` on `CPU`-backed `Array` is a
-        # no-op (refcount-managed anyway), so this fix is zero-cost on the
-        # already-tested CPU→CPU path.
-        GC.@preserve copies from_raw begin
+        GC.@preserve copies begin
             for (from_span, _) in dep_mod.spans
                 read_remainder!(copies, offset, from_raw, from_span.ptr, from_span.len)
                 offset += from_span.len
@@ -451,9 +441,7 @@ function move!(dep_mod::RemainderAliasing{S}, to_space::MemorySpace, from_space:
     offset = UInt64(1)
     to_raw = unwrap(to)
     with_context!(to_space)
-    # See comment above `GC.@preserve` on the read side — same lifetime
-    # invariant applies to `to_raw` on the write side.
-    GC.@preserve copies to_raw begin
+    GC.@preserve copies begin
         for (_, to_span) in dep_mod.spans
             write_remainder!(copies, offset, to_raw, to_span.ptr, to_span.len)
             offset += to_span.len

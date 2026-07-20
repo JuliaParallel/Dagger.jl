@@ -59,6 +59,21 @@ function Dagger.aliasing(x::CuArray{T}) where T
 end
 
 function Dagger.unsafe_free!(x::CuArray)
+    # Env-gated stacktrace instrumentation: when
+    # `DAGGER_TRACE_UNSAFE_FREE=1` is set, log every `unsafe_free!`
+    # call with its stacktrace so we can identify who explicitly frees
+    # a `CuArray` during a pending `RemainderAliasing move!` (site of
+    # the "Attempt to use a freed reference" bug hudson caught in
+    # cholesky CPU+GPU sweeps). Zero overhead in production — the
+    # `ENV` check is a single dict lookup that gets branch-predicted
+    # away when the key is absent. Kept env-gated rather than always-on
+    # because `unsafe_free!` fires thousands of times per sweep in the
+    # normal chunk-lifecycle path; unconditional stacktrace capture
+    # would drown the log.
+    if get(ENV, "DAGGER_TRACE_UNSAFE_FREE", "0") == "1"
+        st = stacktrace(backtrace())
+        @info "Dagger.unsafe_free!(::CuArray)" array_type=typeof(x) array_size=size(x) stacktrace=st
+    end
     CUDA.unsafe_free!(x)
     return
 end
