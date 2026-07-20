@@ -1777,16 +1777,24 @@ function do_tasks(to_proc, return_queue, tasks)
     end
     notify(istate.reschedule)
 
-    # Kick other processors to make them steal
+    # Kick other processors to make them steal.
     # TODO: Alternatively, automatically balance work instead of blindly enqueueing
-    states = proc_states_values(uid)
-    P = randperm(length(states))
-    for other_state in getindex.(Ref(states), P)
-        other_istate = other_state.state
-        if other_istate.proc === to_proc
-            continue
+    #
+    # Iterate the processor-state dict in place under a read lock and ring each
+    # other processor's doorbell, instead of the previous
+    # collect(values)+randperm+broadcast, which allocated a fresh Vector, a
+    # permutation Vector, and a Memory on every task fire. Notification order is
+    # irrelevant for work-stealing (each idle processor independently decides
+    # whether to steal), so no shuffle is needed, and `notify(::Doorbell)` is a
+    # lock-free atomic signal that is safe to call while holding the read lock.
+    let states = proc_states(uid)
+        MemPool.lock_read(states.lock) do
+            for (_, other_state) in states.dict
+                other_istate = other_state.state
+                other_istate.proc === to_proc && continue
+                notify(other_istate.reschedule)
+            end
         end
-        notify(other_istate.reschedule)
     end
     @dagdebug nothing :processor "Kicked processors"
 end
