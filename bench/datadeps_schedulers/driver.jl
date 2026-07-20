@@ -387,7 +387,11 @@ const DEFAULT_BLOCK_SIZE = 128
 const DEFAULT_TRIALS = 3
 const DEFAULT_WARMUP = 1
 
-const METRICS_KEEP_PER_METRIC = 100
+# Bounded to keep the metrics cache from degrading the write path (unbounded
+# growth took a run from 14.8s to 48.0s), but large enough that compute-task
+# samples are not evicted by the `unsafe_free!`/`move!` entries that dominate
+# by volume -- at 100 they crowded out ~60% of the cache.
+const METRICS_KEEP_PER_METRIC = 10000
 
 # Factories — not instances — because RoundRobin holds mutable state and each
 # trial needs a fresh copy. Default MILP budget is set generously since a

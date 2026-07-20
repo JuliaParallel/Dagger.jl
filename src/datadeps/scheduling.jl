@@ -867,10 +867,48 @@ rejection.
 _eft_tail_args(fargs::Tuple) = Base.tail(fargs)
 _eft_tail_args(fargs::AbstractVector) = @view fargs[2:end]
 
+# Diagnostics for the signature lookup: set `DAGGER_TRACE_EFT_LOOKUP=1` to
+# count hits/misses and dump the first few missed signatures. Gated behind a
+# `Ref{Bool}` load because `_eft_runtime_ns` runs O(tasks x procs) times.
+const TRACE_EFT_LOOKUP = Ref{Union{Nothing,Bool}}(nothing)
+const EFT_LOOKUP_HITS = Threads.Atomic{Int}(0)
+const EFT_LOOKUP_MISSES = Threads.Atomic{Int}(0)
+function trace_eft_lookup()
+    tr = TRACE_EFT_LOOKUP[]
+    tr === nothing || return tr
+    tr = get(ENV, "DAGGER_TRACE_EFT_LOOKUP", "0") != "0"
+    TRACE_EFT_LOOKUP[] = tr
+    return tr
+end
+
+# `spec.fargs` carry datadeps annotations (`In`/`Out`/`InOut`/`Deps`), which are
+# stripped before the task executes. `Sch.signature` resolves an annotated arg
+# through `chunktype(::InOut{T}) where T = T` -- a *type-level* unwrap that
+# yields the `Chunk{...}` type parameter and cannot recurse further. The
+# recorded signature, built at execution time, sees a bare `Chunk` instance and
+# so resolves through `chunktype(c::Chunk) = c.chunktype` to the materialized
+# type (e.g. `Matrix{Float64}`). Unwrapping the annotation here hands
+# `Sch.signature` the same bare `Chunk` the write side saw, so both sides
+# construct an identical signature and `LookupExact(SignatureMetric(), sig)` can
+# match. Without this every lookup misses all four tiers of
+# `_runtime_lookup_chain` and every task falls back to
+# `GREEDY_DEFAULT_RUNTIME_NS`, flattening the cost model.
+_eft_unwrap_arg(arg) = with_value(arg, first(unwrap_inout(value(arg))))
+
 function _eft_runtime_ns(snap::MT.MetricsSnapshot, spec, proc::Processor)
-    sig = Sch.signature(spec.fargs[1], _eft_tail_args(spec.fargs)).sig
+    f = _eft_unwrap_arg(spec.fargs[1])
+    tail = map(_eft_unwrap_arg, _eft_tail_args(spec.fargs))
+    sig = Sch.signature(f, tail).sig
     worker_id = root_worker_id(proc)
     runtime_lookup = metrics_lookup_runtime_median(snap, sig, proc, worker_id)
+    if trace_eft_lookup()
+        if runtime_lookup === nothing
+            n = Threads.atomic_add!(EFT_LOOKUP_MISSES, 1)
+            n < 5 && @warn "EFT lookup MISS" sig proc
+        else
+            Threads.atomic_add!(EFT_LOOKUP_HITS, 1)
+        end
+    end
     return runtime_lookup === nothing ? Float64(GREEDY_DEFAULT_RUNTIME_NS) : Float64(runtime_lookup)
 end
 
