@@ -108,7 +108,50 @@ function build_inputs(workload::Symbol, nt::Int, bs::Int)
     end
 end
 
+"""
+    _bench_scope_all_procs() -> Union{Nothing, Dagger.UnionScope}
+
+Scope admitting every enumerated processor, or `nothing` on a CPU-only
+session.
+
+`spawn_datadeps` derives its candidate set from `get_compute_scope()`, whose
+default carries `DefaultEnabledTaint` and therefore admits only processors
+with `default_enabled(proc) == true`. `CuArrayDeviceProc` (and the ROCm
+equivalent) return `false` there by design, so GPUs are dropped from
+`all_procs` before any scheduler sees them -- see the `filter!` in
+`distribute_tasks_hierarchical!` (src/datadeps/hierarchical.jl) and its twin
+in `distribute_tasks!` (src/datadeps/queue.jl). The effect is that a datadeps
+region under the default scope is CPU-only regardless of scheduler, cost
+model, or available hardware.
+
+Passing an explicit `UnionScope` of `ExactScope`s bypasses the taint, which
+is the same mechanism `warm_gpu_metrics_for!` already relies on to force its
+warmup onto GPUs. Returns `nothing` when no accelerator is present so
+CPU-only runs take the untouched default path.
+"""
+function _bench_scope_all_procs()
+    procs = collect(Dagger.all_processors())
+    isempty(procs) && return nothing
+    any(!_is_cpu_proc, procs) || return nothing   # CPU-only: no wrap needed
+    return Dagger.UnionScope([Dagger.ExactScope(p) for p in procs])
+end
+
+# Outer entry point: wraps the region in an all-processor scope when
+# accelerators are present. `warm_gpu_metrics_for!` calls the inner form
+# directly under its own GPU-only scope to avoid nesting two scopes.
 function run_workload!(workload::Symbol, inputs, sched::Dagger.DataDepsScheduler)
+    scope = _bench_scope_all_procs()
+    if scope === nothing
+        _run_workload_inner!(workload, inputs, sched)
+    else
+        Dagger.with_options(; scope=scope) do
+            _run_workload_inner!(workload, inputs, sched)
+        end
+    end
+    return
+end
+
+function _run_workload_inner!(workload::Symbol, inputs, sched::Dagger.DataDepsScheduler)
     if workload === :cholesky
         Dagger.spawn_datadeps(; scheduler=sched) do
             tiled_cholesky!(inputs.M)
@@ -312,7 +355,7 @@ function warm_gpu_metrics_for!(workload::Symbol, nt::Int, bs::Int)
     warm_sched = Dagger.RoundRobinScheduler()
     try
         Dagger.with_options(; scope=gpu_scope) do
-            run_workload!(workload, inputs, warm_sched)
+            _run_workload_inner!(workload, inputs, warm_sched)
         end
     catch e
         @warn "GPU metrics-warm crashed, continuing with CPU-only cost model" workload=workload tile_count=nt block_size=bs n_gpu_procs=length(gpu_procs) exception=(e, catch_backtrace())
