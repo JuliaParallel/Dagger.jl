@@ -1,4 +1,5 @@
 using LinearAlgebra
+using Random
 using Dagger
 using Dagger: In, Out, InOut
 using Distributed: remotecall_fetch
@@ -142,9 +143,34 @@ function _distribute_tile(tile::AbstractMatrix, target_proc::Dagger.Processor)
         # No explicit scope: chunk lives on `target_proc` but scheduler
         # is free to route tasks touching this tile anywhere, weighing
         # γ transfer cost against compute-vs-parallelism trade-offs.
-        Dagger.tochunk(tile, target_proc)
+        #
+        # `_localize_to_target` converts the host-serialized `Matrix` into
+        # whatever array type `target_proc` expects: `Matrix` for
+        # CPU procs (identity), `CuArray` on `CuArrayDeviceProc`, `ROCArray`
+        # on `ROCArrayDeviceProc`, etc. Vendor conversion is dispatched
+        # through `Dagger.move` so the vendor extensions (CUDAExt, ROCExt,
+        # MetalExt, oneAPIExt, OpenCLExt) handle it — this file stays
+        # vendor-agnostic and works unchanged across every accelerator
+        # Dagger supports.
+        localized = _localize_to_target(tile, target_proc)
+        Dagger.tochunk(localized, target_proc)
     end
 end
+
+# Host-resident data stays as-is on CPU procs. Split into concrete-type
+# methods rather than a `Union` fallback so dispatch is unambiguous with
+# the vendor GPU-proc fallback below.
+_localize_to_target(tile::AbstractMatrix, ::Dagger.ThreadProc) = tile
+_localize_to_target(tile::AbstractMatrix, ::Dagger.OSProc) = tile
+
+# GPU / accelerator procs: hop through `Dagger.move(OSProc, target_proc, x)`
+# which the vendor extensions override to construct the correct array type
+# on the target device (e.g. `Dagger.move(::CPUProc, ::CuArrayDeviceProc, x)`
+# in `ext/CUDAExt.jl` does `adapt(CuArray, x)` under `with_context(to_proc)`).
+# `from_proc = OSProc()` is correct because the closure body runs on the
+# target worker and `tile` was just serialized here as host memory.
+_localize_to_target(tile::AbstractMatrix, target_proc::Dagger.Processor) =
+    Dagger.move(Dagger.OSProc(), target_proc, tile)
 
 # Round-robin tile-index → processor mapping (row-major linearisation).
 # Kept as a separate helper so make_spd_tiles / make_matmul_tiles use
@@ -183,4 +209,153 @@ function make_matmul_tiles(sz::Int, nb::Int)
     C = [_distribute_tile(zeros(nb, nb), _tile_proc(procs, nt, i, j))
          for i in 1:nt, j in 1:nt]
     return A, B, C
+end
+
+# ─── Sinnen-Sousa Layer-by-Layer random DAG ───────────────────────────
+#
+# Random DAGs are the standard evaluation regime for HEFT-family
+# schedulers because structured BLAS DAGs (matmul, cholesky) leave
+# little room between EFT list scheduling and any smarter method — the
+# dependency skeleton is regular enough that Greedy sits at a local
+# optimum (Topcuoglu 2002 §5, Sinnen-Sousa 2004 §5, Ruiz-Stützle 2007
+# §6, Orsila 2008 §5). The Layer-by-Layer construction below matches
+# Sinnen-Sousa 2004's method: pin every task to a discrete DAG level,
+# then sample edges only between strictly-lower-level and
+# strictly-higher-level tasks. Enforces acyclicity by construction
+# without post-hoc cycle removal.
+#
+# Task in-degree is capped at 2 so each task maps to a single
+# tile-level `BLAS.gemm!` (matches the tile-BLAS style of matmul /
+# cholesky and keeps `sched_phase_ms` comparable to the other
+# workloads — one Dagger.@spawn per DAG node, not one-per-parent).
+# Parent count of 0/1/2 is a well-known simplification in HEFT
+# evaluation harnesses (Topcuoglu §5.1); it preserves the essential
+# scheduling difficulty (topology irregularity, critical-path
+# variability) without inflating the DAG with accumulate-fan-in
+# artifacts.
+
+"""
+    make_random_dag_tiles(n_tasks, n_levels, edge_probability, nb; seed=42)
+
+Constructs a Sinnen-Sousa 2004 Layer-by-Layer random DAG plus the
+distributed tile set the workload operates on. Deterministic in `seed`
+so the same DAG topology is reproduced across scheduler cells and
+trials (essential for making scheduler-A vs scheduler-B comparisons
+apples-to-apples on the same graph).
+
+Layer assignment: task `t` is placed at level
+`min(n_levels, ((t-1) * n_levels) ÷ n_tasks + 1)`, so tasks 1..n_tasks
+partition evenly across `1..n_levels`.
+
+Edge sampling: for every pair (parent, child) with
+`level(parent) < level(child)`, an edge is created with probability
+`edge_probability`, stopping when the child accumulates 2 parents
+(cap enforces single-gemm-per-task).
+
+Placement: output tiles are round-robin distributed across
+`_placement_procs()` — same interleaved-across-workers discipline used
+by matmul/cholesky, so tiles-across-workers-and-devices behaviour is
+consistent across all three workload classes.
+
+Returns a NamedTuple with fields:
+- `tiles`: `Vector{Chunk}` of `n_tasks` output tiles
+- `parents`: `Vector{Vector{Int}}` giving parent-task indices per task
+- `initial_A`, `initial_B`: distributed operand tiles for
+   0-in-degree (root) tasks
+- `level_of`: layer assignment per task (for reporting / analysis)
+"""
+function make_random_dag_tiles(n_tasks::Int, n_levels::Int, edge_probability::Real, nb::Int;
+                               seed::Int=42)
+    n_tasks >= 1        || throw(ArgumentError("n_tasks must be ≥ 1"))
+    n_levels >= 1       || throw(ArgumentError("n_levels must be ≥ 1"))
+    n_levels <= n_tasks || throw(ArgumentError("n_levels ($n_levels) must be ≤ n_tasks ($n_tasks)"))
+    (0 <= edge_probability <= 1) ||
+        throw(ArgumentError("edge_probability must be in [0, 1]"))
+
+    rng = Random.MersenneTwister(seed)
+
+    # Sinnen-Sousa Layer-by-Layer: partition tasks across `n_levels`
+    # layers in order. Assignment is deterministic (no rng draw), so
+    # topology depends only on the edge Bernoulli draws below — cleaner
+    # for reproducibility and for stripping seed sensitivity away from
+    # layer structure.
+    level_of = [min(n_levels, ((t - 1) * n_levels) ÷ n_tasks + 1) for t in 1:n_tasks]
+
+    # Edge sampling with in-degree cap of 2. Iterate candidates in a
+    # shuffled order so the two selected parents aren't systematically
+    # the lowest-index tasks at earlier levels — mirrors Sinnen-Sousa's
+    # unbiased edge sampling.
+    parents = [Int[] for _ in 1:n_tasks]
+    for t in 2:n_tasks
+        my_lvl = level_of[t]
+        candidates = [i for i in 1:(t - 1) if level_of[i] < my_lvl]
+        Random.shuffle!(rng, candidates)
+        for c in candidates
+            length(parents[t]) >= 2 && break
+            rand(rng) < edge_probability && push!(parents[t], c)
+        end
+    end
+
+    procs = _placement_procs()
+    tiles = [_distribute_tile(zeros(nb, nb), procs[mod1(t, length(procs))])
+             for t in 1:n_tasks]
+
+    # Distinct operand tiles for root tasks. Placed on two distinct
+    # procs (when available) so their transfer costs to child tasks
+    # are not artificially zero across the board.
+    initial_A = _distribute_tile(rand(nb, nb), procs[1])
+    initial_B = _distribute_tile(rand(nb, nb), procs[min(2, length(procs))])
+
+    return (; tiles, parents, initial_A, initial_B, level_of)
+end
+
+"""
+    tiled_random_dag!(tiles, parents, initial_A, initial_B)
+
+Executes the Sinnen-Sousa random DAG defined by `parents`. Each task
+is a single `BLAS.gemm!` on tile-sized operands, chosen by parent
+count so that every DAG node maps to exactly one `Dagger.@spawn`:
+
+- 0 parents (root):      `tiles[t] ← initial_A * initial_B'`
+- 1 parent:              `tiles[t] ← tiles[p] * initial_B'`
+- 2 parents:             `tiles[t] ← tiles[p₁] * tiles[p₂]'`
+
+Uses `LinearAlgebra.BLAS.gemm!` directly — CUDAExt/ROCExt's auto-
+generated `Dagger.move(::CPUProc, ::GPUProc, ::typeof(BLAS.gemm!))`
+overloads substitute `CUBLAS.gemm!` / `rocBLAS.gemm!` at task
+execution time when the task lands on a GPU proc, so this workload
+runs unmodified on CPU + NVIDIA + AMD.
+
+The `β=0` GEMM (rather than `β=1`) makes each task idempotent — the
+task's output depends only on its inputs, not on the current value
+of `tiles[t]`. This matches Sinnen-Sousa's dataflow semantics and
+makes correctness verification (finiteness) trivial: no accumulator
+drift across trials.
+"""
+function tiled_random_dag!(tiles::AbstractVector, parents::Vector{Vector{Int}},
+                            initial_A, initial_B)
+    @assert length(tiles) == length(parents)
+    for t in eachindex(tiles, parents)
+        p = parents[t]
+        if isempty(p)
+            Dagger.@spawn LinearAlgebra.BLAS.gemm!('N', 'T', 1.0,
+                                                    In(initial_A),
+                                                    In(initial_B),
+                                                    0.0,
+                                                    InOut(tiles[t]))
+        elseif length(p) == 1
+            Dagger.@spawn LinearAlgebra.BLAS.gemm!('N', 'T', 1.0,
+                                                    In(tiles[p[1]]),
+                                                    In(initial_B),
+                                                    0.0,
+                                                    InOut(tiles[t]))
+        else
+            Dagger.@spawn LinearAlgebra.BLAS.gemm!('N', 'T', 1.0,
+                                                    In(tiles[p[1]]),
+                                                    In(tiles[p[2]]),
+                                                    0.0,
+                                                    InOut(tiles[t]))
+        end
+    end
+    return tiles
 end

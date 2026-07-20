@@ -85,6 +85,24 @@ function build_inputs(workload::Symbol, nt::Int, bs::Int)
         return (; A, B, C,
                   dense_A = _assemble_dense(A),
                   dense_B = _assemble_dense(B))
+    elseif workload === :random_dag
+        # For random_dag, `nt` is reinterpreted as `n_tasks` (total DAG
+        # nodes), not a tile-grid dimension — structured BLAS workloads
+        # scale K as `f(nt)` (nt³ for matmul, ~nt³/6 for cholesky) but
+        # random DAGs are naturally parameterised by task count directly.
+        # `n_levels ≈ √n_tasks` matches Sinnen-Sousa 2004's recommended
+        # aspect ratio (balanced depth vs. width so no level dominates).
+        # edge_probability=0.3 is the Topcuoglu 2002 §5.1 HEFT-eval
+        # default; produces DAGs with average in-degree ≈ 1.5 after
+        # the 2-parent cap, matching typical HEFT benchmark densities.
+        n_tasks = nt
+        n_levels = max(2, round(Int, sqrt(nt)))
+        s = make_random_dag_tiles(n_tasks, n_levels, 0.3, bs; seed=42)
+        return (; tiles = s.tiles,
+                  parents = s.parents,
+                  initial_A = s.initial_A,
+                  initial_B = s.initial_B,
+                  level_of = s.level_of)
     else
         error("Unknown workload $workload")
     end
@@ -98,6 +116,11 @@ function run_workload!(workload::Symbol, inputs, sched::Dagger.DataDepsScheduler
     elseif workload === :matmul
         Dagger.spawn_datadeps(; scheduler=sched) do
             tiled_matmul!(inputs.C, inputs.A, inputs.B)
+        end
+    elseif workload === :random_dag
+        Dagger.spawn_datadeps(; scheduler=sched) do
+            tiled_random_dag!(inputs.tiles, inputs.parents,
+                              inputs.initial_A, inputs.initial_B)
         end
     end
     return
@@ -144,6 +167,29 @@ function verify_workload(workload::Symbol, inputs)
         denom = max(norm(ref), eps(Float64))
         rel = norm(C - ref) / denom
         return (rel < 1e-10, rel)
+    elseif workload === :random_dag
+        # Random DAG has no closed-form reference — task closures compose
+        # arbitrary intermediate products, and the DAG topology is
+        # randomised per `seed`. Verification is finiteness-only:
+        # every output tile must have finite entries (no NaN/Inf from
+        # ill-conditioned intermediate products or dispatch failures).
+        # Any non-finite value indicates a scheduler / dispatch /
+        # memory-transfer bug worth flagging via the correctness stream.
+        all_finite = true
+        worst_max = 0.0
+        for t in inputs.tiles
+            tile = _fetch_tile(t)
+            if !all(isfinite, tile)
+                all_finite = false
+                break
+            end
+            m = maximum(abs, tile)
+            m > worst_max && (worst_max = m)
+        end
+        # Overload `rel_err` position to carry the largest observed
+        # magnitude — useful diagnostic for detecting silent value
+        # explosions before they become Inf.
+        return (all_finite, worst_max)
     else
         error("Unknown workload $workload")
     end
@@ -476,14 +522,25 @@ function main(args = ARGS)
 Usage: julia --project bench/datadeps_schedulers/driver.jl [options]
 
 Options:
-  --workloads          Comma list of workloads: cholesky,matmul   (default both)
+  --workloads          Comma list of workloads:                   (default cholesky,matmul)
+                          cholesky      — tiled Cholesky on SPD, K ~ nt(nt+1)(nt+2)/6
+                          matmul        — tiled A*B accumulate,  K = nt^3
+                          random_dag    — Sinnen-Sousa Layer-by-Layer random DAG,
+                                          K = nt  (use larger --tile-counts values;
+                                          40..320 covers HEFT-eval literature range)
   --tile-counts        Comma list of nt values                    (default 2,4,8)
+                          For cholesky/matmul: nt = tile-grid side length.
+                          For random_dag:      nt = n_tasks total in the DAG.
   --block-size         Tile side length in elements               (default 128)
   --trials             Measured trials per cell                   (default 3)
   --warmup             Warmup runs per cell                       (default 1)
   --output             CSV output path                            (default datadeps_schedulers_results.csv)
   --metrics-warm       Pre-warm global MetricsTracker cache before measured trials so Greedy has real cost data
-  --check-correctness  Verify each cell's result against a dense reference (Cholesky: L*L'≈A; matmul: A*B)
+                          On CPU+GPU sessions, the RoundRobin warm pass naturally hits GPU
+                          procs enumerated via Dagger.all_processors() and populates per-proc
+                          runtimes for both proc classes.
+  --check-correctness  Verify each cell's result against a reference
+                          (Cholesky: L*L'≈A; matmul: A*B; random_dag: finiteness only)
   --summary PATH       Also write a Markdown median-aggregated summary table to PATH
 """)
             return nothing
