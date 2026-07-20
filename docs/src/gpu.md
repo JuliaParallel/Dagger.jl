@@ -4,6 +4,10 @@ Dagger supports GPU acceleration for CUDA, ROCm (AMD), Intel oneAPI, Metal (Appl
 
 Dagger's GPU support is built on top of the [KernelAbstractions.jl](https://github.com/JuliaGPU/KernelAbstractions.jl) package, as well as the specific GPU-specific packages for each backend (e.g. [CUDA.jl](https://github.com/JuliaGPU/CUDA.jl), [AMDGPU.jl](https://github.com/JuliaGPU/AMDGPU.jl), [oneAPI.jl](https://github.com/JuliaGPU/oneAPI.jl), [Metal.jl](https://github.com/JuliaGPU/Metal.jl), and [OpenCL.jl](https://github.com/JuliaGPU/OpenCL.jl)). Dagger's GPU support is designed to be fully interoperable with the Julia GPU ecosystem, allowing you to use Dagger to distribute your GPU computations across multiple devices.
 
+GPU computing also composes with Dagger's MPI backend for multi-node,
+distributed-memory GPU execution; see the [MPI](mpi.md) page (in particular the
+GPUs-with-MPI section) for details.
+
 There are a few ways to use Dagger's GPU support:
 
 1. **KernelAbstractions**: Use the `KernelAbstractions.jl` interface to write GPU kernels, and then use `Dagger.Kernel` and `Dagger.@spawn` to execute them.
