@@ -507,9 +507,40 @@ for lib in [BLAS, LAPACK]
                 fn = getproperty(lib, name)
                 cufn = getproperty(culib, name)
                 @eval Dagger.move(from_proc::CPUProc, to_proc::CuArrayDeviceProc, ::$(typeof(fn))) = $cufn
+                # Companion to the `move` above: the scheduler's cost lookup
+                # needs the same CPU->GPU function mapping, but at the type
+                # level and without a value to dispatch on.
+                @eval Dagger._translate_fn_for(::Type{$(typeof(fn))}, ::CuArrayDeviceProc) = $(typeof(cufn))
             end
         end
     end
+end
+
+# Array-type half of the signature translation. Hardcoded rather than
+# reflective: there are only a handful of array types to map, and the
+# `DeviceMemory` parameter has no CPU-side counterpart to derive it from.
+_translate_type_for(::Type{Matrix{T}}) where T = CuArray{T,2,CUDA.DeviceMemory}
+_translate_type_for(::Type{Vector{T}}) where T = CuArray{T,1,CUDA.DeviceMemory}
+_translate_type_for(::Type{Array{T,N}}) where {T,N} = CuArray{T,N,CUDA.DeviceMemory}
+# Scalars and other non-array arguments cross unchanged.
+_translate_type_for(::Type{T}) where {T<:Union{Number,Char,Symbol,Function}} = T
+_translate_type_for(::Type) = nothing
+
+function Dagger._translate_sig_for(sig::Vector, proc::CuArrayDeviceProc)
+    isempty(sig) && return nothing
+    out = Vector{Any}(undef, length(sig))
+    # Element 1 is the function type; the rest are argument types.
+    fn = Dagger._translate_fn_for(sig[1], proc)
+    fn === nothing && return nothing
+    out[1] = fn
+    for i in 2:length(sig)
+        t = sig[i]
+        t isa Type || return nothing
+        mapped = _translate_type_for(t)
+        mapped === nothing && return nothing
+        out[i] = mapped
+    end
+    return out
 end
 
 # Adapt RefValue

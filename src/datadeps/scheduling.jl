@@ -873,6 +873,7 @@ _eft_tail_args(fargs::AbstractVector) = @view fargs[2:end]
 const TRACE_EFT_LOOKUP = Ref{Union{Nothing,Bool}}(nothing)
 const EFT_LOOKUP_HITS = Threads.Atomic{Int}(0)
 const EFT_LOOKUP_MISSES = Threads.Atomic{Int}(0)
+const EFT_LOOKUP_TRANSLATED = Threads.Atomic{Int}(0)
 function trace_eft_lookup()
     tr = TRACE_EFT_LOOKUP[]
     tr === nothing || return tr
@@ -900,13 +901,30 @@ function _eft_runtime_ns(snap::MT.MetricsSnapshot, spec, proc::Processor)
     tail = map(_eft_unwrap_arg, _eft_tail_args(spec.fargs))
     sig = Sch.signature(f, tail).sig
     worker_id = root_worker_id(proc)
-    runtime_lookup = metrics_lookup_runtime_median(snap, sig, proc, worker_id)
+    # Try the accelerator-side signature *first* on procs that have a
+    # translation. The untranslated lookup cannot be used as the gate: the last
+    # tier of `_runtime_lookup_chain` drops the processor constraint entirely,
+    # so on a GPU it matches the CPU-recorded entries and returns a CPU runtime
+    # instead of missing. Translating only after a miss would therefore be dead
+    # code. Falling back to the untranslated lookup keeps a CPU-derived estimate
+    # (still better than the 1s default) when a signature has no mapping.
+    translated_sig = _translate_sig_for(sig, proc)
+    runtime_lookup = nothing
+    via_translation = false
+    if translated_sig !== nothing
+        runtime_lookup = metrics_lookup_runtime_median(snap, translated_sig, proc, worker_id)
+        via_translation = runtime_lookup !== nothing
+    end
+    if runtime_lookup === nothing
+        runtime_lookup = metrics_lookup_runtime_median(snap, sig, proc, worker_id)
+    end
     if trace_eft_lookup()
         if runtime_lookup === nothing
             n = Threads.atomic_add!(EFT_LOOKUP_MISSES, 1)
             n < 5 && @warn "EFT lookup MISS" sig proc
         else
             Threads.atomic_add!(EFT_LOOKUP_HITS, 1)
+            via_translation && Threads.atomic_add!(EFT_LOOKUP_TRANSLATED, 1)
         end
     end
     return runtime_lookup === nothing ? Float64(GREEDY_DEFAULT_RUNTIME_NS) : Float64(runtime_lookup)

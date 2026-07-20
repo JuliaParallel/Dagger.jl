@@ -156,3 +156,34 @@ See `_slots_for` in `src/datadeps/scheduling.jl` for the K-slot readiness
 tracking that consumes this.
 """
 proc_concurrency(::Processor) = 1
+
+"""
+    _translate_fn_for(::Type{F}, proc::Processor) -> Type or nothing
+
+Map a CPU-side function type to the accelerator-side function type that will
+actually execute on `proc`. Returns `nothing` when no mapping exists.
+
+Generated in lockstep with the `Dagger.move(::CPUProc, ::GPUProc, ::typeof(fn))`
+overloads in the vendor extensions -- the two are inherently paired, since that
+`move` is precisely what performs the substitution at dispatch time.
+"""
+_translate_fn_for(::Type, ::Processor) = nothing
+
+"""
+    _translate_sig_for(sig::Vector, proc::Processor) -> Vector or nothing
+
+Rewrite a CPU-side metrics signature into the form that `proc` would record
+after dispatch, or `nothing` if any element has no mapping.
+
+Needed because `MetricsTracker` keys runtime samples on the *post-dispatch*
+signature: a task submitted as `BLAS.gemm!(::Matrix{Float64}, ...)` is recorded
+on a GPU as `CUBLAS.gemm!(::CuArray{Float64,2,DeviceMemory}, ...)`. The
+scheduler only ever sees the pre-dispatch form, so without translation no GPU
+sample is reachable and `_runtime_lookup_chain` falls through to its
+processor-agnostic tier, handing back a CPU runtime for a GPU.
+
+This is a stopgap. The general fix is a processor-independent task identity
+recorded alongside the physical signature, which would make translation
+unnecessary for every backend at once.
+"""
+_translate_sig_for(::Vector, ::Processor) = nothing

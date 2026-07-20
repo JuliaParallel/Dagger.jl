@@ -385,9 +385,37 @@ for lib in [BLAS, LAPACK]
                 fn = getproperty(lib, name)
                 rocfn = getproperty(roclib, name)
                 @eval Dagger.move(from_proc::CPUProc, to_proc::ROCArrayDeviceProc, ::$(typeof(fn))) = $rocfn
+                # Companion to the `move` above: the scheduler's cost lookup
+                # needs the same CPU->GPU function mapping, but at the type
+                # level and without a value to dispatch on.
+                @eval Dagger._translate_fn_for(::Type{$(typeof(fn))}, ::ROCArrayDeviceProc) = $(typeof(rocfn))
             end
         end
     end
+end
+
+# Array-type half of the signature translation; mirrors CUDAExt.
+_translate_type_for(::Type{Matrix{T}}) where T = ROCArray{T,2}
+_translate_type_for(::Type{Vector{T}}) where T = ROCArray{T,1}
+_translate_type_for(::Type{Array{T,N}}) where {T,N} = ROCArray{T,N}
+# Scalars and other non-array arguments cross unchanged.
+_translate_type_for(::Type{T}) where {T<:Union{Number,Char,Symbol,Function}} = T
+_translate_type_for(::Type) = nothing
+
+function Dagger._translate_sig_for(sig::Vector, proc::ROCArrayDeviceProc)
+    isempty(sig) && return nothing
+    out = Vector{Any}(undef, length(sig))
+    fn = Dagger._translate_fn_for(sig[1], proc)
+    fn === nothing && return nothing
+    out[1] = fn
+    for i in 2:length(sig)
+        t = sig[i]
+        t isa Type || return nothing
+        mapped = _translate_type_for(t)
+        mapped === nothing && return nothing
+        out[i] = mapped
+    end
+    return out
 end
 
 # Adapt RefValue
