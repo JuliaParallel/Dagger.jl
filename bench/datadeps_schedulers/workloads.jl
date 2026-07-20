@@ -55,11 +55,11 @@ end
 """
     _placement_procs() -> Vector{Dagger.Processor}
 
-Interleaved list of processors across which tiles are distributed by
-`make_spd_tiles` / `make_matmul_tiles`. Uses `Dagger.all_processors()`
-so multi-worker sessions (e.g. `julia -p 7 -t 12`) distribute tiles
-across every worker's `ThreadProc`s, while single-process sessions
-distribute across master's `ThreadProc`s only.
+Interleaved list of CPU processors across which tiles are distributed
+by `make_spd_tiles` / `make_matmul_tiles` / `make_random_dag_tiles`.
+Uses `Dagger.all_processors()` (which enumerates every worker's procs
+including any registered GPU procs when CUDAExt/ROCExt are loaded)
+then **filters to CPU procs only** for tile ownership.
 
 Consecutive indices in the returned vector round-robin across worker
 pids: `[pid₁_t₁, pid₂_t₁, …, pidₙ_t₁, pid₁_t₂, pid₂_t₂, …]`. That
@@ -73,14 +73,52 @@ with a hidden "how many workers happened to be hit" axis.
 Within each pid, the per-thread ordering is stable-sorted by
 `string(proc)` so tile→proc mapping is reproducible run-to-run for
 identical sessions.
+
+## Why tiles are only distributed to CPU procs (not GPU procs)
+
+Distributing a tile *onto* a GPU proc means creating a
+`Chunk{CuArray}` / `Chunk{ROCArray}` at benchmark-setup time. Dagger
+core supports this shape, but the cross-space aliasing path in
+`src/datadeps/remainders.jl` (specifically `move!` for
+`RemainderAliasing{CPURAMMemorySpace}` between `Chunk{CuArray}` and
+`Chunk{Matrix}`) assumes both sides are CPU-native memory and does
+pointer arithmetic that fails on `pointer(::CuArray)` — an untested
+combination. Ritesh's harness previously hit this as
+`ArgumentError: Attempt to use a freed reference` during the
+metrics-warm RoundRobin pass.
+
+Filtering GPU procs out of tile *ownership* preserves the entire
+heterogeneous-scheduling story we want to measure:
+
+- `Dagger.all_processors()` (used by `datadeps_schedule_dag_aot!`)
+  still returns GPU procs, so schedulers see them as valid task
+  targets and can choose to place tasks there.
+- Tiles live as `Chunk{Matrix}` in CPU RAM; when a task lands on a
+  GPU proc, Dagger's `move(::CPUProc, ::CuArrayDeviceProc, x)`
+  (CUDAExt line 172) triggers the standard HtoD transfer via
+  `adapt(CuArray, x)` under the target device's context — the tested
+  data-transfer path.
+- GPU tasks pay realistic HtoD-input + compute + DtoH-output costs;
+  metrics-warm records these per-proc runtimes; schedulers correctly
+  route small tasks to CPU (transfer overhead dominates), large
+  tasks to GPU (compute dominates transfer). That's exactly the
+  regime literature validates in — see [[project_paper_...]].
+
+If a future Dagger release fixes the `RemainderAliasing` cross-space
+path, we can revisit distributing tiles across GPU procs to expose
+tile-locality gains as an additional scheduling axis. For now,
+task-placement heterogeneity alone is sufficient for the paper's
+central claim.
 """
 function _placement_procs()
     procs = collect(Dagger.all_processors())
-    # Group by owning worker pid so we can interleave across pids.
-    by_pid = Dict{Int, Vector{eltype(procs)}}()
-    for p in procs
+    cpu_procs = filter(_is_cpu_proc, procs)
+    isempty(cpu_procs) &&
+        error("_placement_procs: no CPU procs available; tile distribution requires at least one ThreadProc or OSProc")
+    by_pid = Dict{Int, Vector{eltype(cpu_procs)}}()
+    for p in cpu_procs
         pid = Dagger.root_worker_id(p)
-        push!(get!(by_pid, pid, eltype(procs)[]), p)
+        push!(get!(by_pid, pid, eltype(cpu_procs)[]), p)
     end
     # Deterministic within-pid ordering for reproducibility.
     for slice in values(by_pid)
@@ -90,7 +128,7 @@ function _placement_procs()
     # then move to k+1. Yields [pid₁_t₁, pid₂_t₁, …, pid₁_t₂, …].
     pids = sort!(collect(keys(by_pid)))
     max_slice = maximum(length(v) for v in values(by_pid))
-    interleaved = eltype(procs)[]
+    interleaved = eltype(cpu_procs)[]
     sizehint!(interleaved, sum(length(v) for v in values(by_pid)))
     for tid_idx in 1:max_slice
         for pid in pids
@@ -102,6 +140,13 @@ function _placement_procs()
     end
     return interleaved
 end
+
+# CPU-proc predicate for tile-placement filtering. Concrete-type
+# methods (rather than a `Union`) keep dispatch unambiguous when new
+# proc types are added by future Dagger extensions.
+_is_cpu_proc(::Dagger.ThreadProc) = true
+_is_cpu_proc(::Dagger.OSProc)     = true
+_is_cpu_proc(::Dagger.Processor)  = false
 
 """
     _distribute_tile(tile::AbstractMatrix, target_proc::Dagger.Processor)
@@ -138,39 +183,26 @@ shipping 8-MB tiles out and back — which was the pre-distribution
 master-only concentration Hudson previously reproduced.
 """
 function _distribute_tile(tile::AbstractMatrix, target_proc::Dagger.Processor)
+    # Precondition: `_placement_procs()` only returns CPU procs, so
+    # `target_proc` is always a `ThreadProc` or `OSProc`. This assertion
+    # documents that invariant and would fire immediately if a future
+    # change routes GPU procs here without first fixing the cross-space
+    # `RemainderAliasing` transfer path in `src/datadeps/remainders.jl`.
+    _is_cpu_proc(target_proc) || error(
+        "_distribute_tile: tile ownership on non-CPU procs is unsupported " *
+        "(see `_placement_procs` docstring). Got: $target_proc")
     target_pid = Dagger.root_worker_id(target_proc)
     return remotecall_fetch(target_pid) do
         # No explicit scope: chunk lives on `target_proc` but scheduler
-        # is free to route tasks touching this tile anywhere, weighing
-        # γ transfer cost against compute-vs-parallelism trade-offs.
-        #
-        # `_localize_to_target` converts the host-serialized `Matrix` into
-        # whatever array type `target_proc` expects: `Matrix` for
-        # CPU procs (identity), `CuArray` on `CuArrayDeviceProc`, `ROCArray`
-        # on `ROCArrayDeviceProc`, etc. Vendor conversion is dispatched
-        # through `Dagger.move` so the vendor extensions (CUDAExt, ROCExt,
-        # MetalExt, oneAPIExt, OpenCLExt) handle it — this file stays
-        # vendor-agnostic and works unchanged across every accelerator
-        # Dagger supports.
-        localized = _localize_to_target(tile, target_proc)
-        Dagger.tochunk(localized, target_proc)
+        # is free to route tasks touching this tile anywhere (including
+        # onto GPU procs, in which case Dagger's
+        # `move(::CPUProc, ::CuArrayDeviceProc, x)` — CUDAExt line 172 —
+        # transfers the tile HtoD at task-start time). Tile data stays
+        # `Matrix` in CPU RAM; only the ownership metadata differs
+        # per target worker.
+        Dagger.tochunk(tile, target_proc)
     end
 end
-
-# Host-resident data stays as-is on CPU procs. Split into concrete-type
-# methods rather than a `Union` fallback so dispatch is unambiguous with
-# the vendor GPU-proc fallback below.
-_localize_to_target(tile::AbstractMatrix, ::Dagger.ThreadProc) = tile
-_localize_to_target(tile::AbstractMatrix, ::Dagger.OSProc) = tile
-
-# GPU / accelerator procs: hop through `Dagger.move(OSProc, target_proc, x)`
-# which the vendor extensions override to construct the correct array type
-# on the target device (e.g. `Dagger.move(::CPUProc, ::CuArrayDeviceProc, x)`
-# in `ext/CUDAExt.jl` does `adapt(CuArray, x)` under `with_context(to_proc)`).
-# `from_proc = OSProc()` is correct because the closure body runs on the
-# target worker and `tile` was just serialized here as host memory.
-_localize_to_target(tile::AbstractMatrix, target_proc::Dagger.Processor) =
-    Dagger.move(Dagger.OSProc(), target_proc, tile)
 
 # Round-robin tile-index → processor mapping (row-major linearisation).
 # Kept as a separate helper so make_spd_tiles / make_matmul_tiles use
