@@ -496,20 +496,70 @@ struct GreedyScheduler <: DataDepsScheduler end
 mutable struct ScheduleState
     task_finish_ns::Dict{Int, Float64}
     task_proc::Dict{Int, Processor}
+    # Aggregate readiness: when the processor is *fully* drained, i.e.
+    # `maximum(proc_slots[proc])`. Retained as the schedule-level summary and
+    # as the makespan input; equals `proc_slots[proc][1]` when concurrency is 1.
     proc_ready_ns::Dict{Processor, Float64}
+    # Per-execution-unit readiness: one completion timestamp per concurrent
+    # slot (`Dagger.proc_concurrency(proc)` of them). A `ThreadProc` has one
+    # slot and behaves exactly as the single-timestamp model did; a multi-stream
+    # GPU proc has one slot per stream, so K queued tasks finish in
+    # ceil(K/slots) rounds rather than being charged K serial task times.
+    # Capacity-aware processor allocation per Sinnen & Sousa 2005 §4.3.
+    proc_slots::Dict{Processor, Vector{Float64}}
 end
 
-ScheduleState() = ScheduleState(Dict{Int, Float64}(), Dict{Int, Processor}(), Dict{Processor, Float64}())
+ScheduleState() = ScheduleState(Dict{Int, Float64}(), Dict{Int, Processor}(),
+                                Dict{Processor, Float64}(), Dict{Processor, Vector{Float64}}())
 
 function Base.copy(s::ScheduleState)
-    return ScheduleState(copy(s.task_finish_ns), copy(s.task_proc), copy(s.proc_ready_ns))
+    return ScheduleState(copy(s.task_finish_ns), copy(s.task_proc), copy(s.proc_ready_ns),
+                         Dict{Processor, Vector{Float64}}(k => copy(v) for (k, v) in s.proc_slots))
 end
 
 function Base.empty!(s::ScheduleState)
     empty!(s.task_finish_ns)
     empty!(s.task_proc)
     empty!(s.proc_ready_ns)
+    empty!(s.proc_slots)
     return s
+end
+
+"""
+    _slots_for(state, proc) -> Vector{Float64}
+
+Per-slot completion timestamps for `proc`, allocated on first use with one
+entry per concurrent execution unit. Entries start at `0.0` (idle).
+"""
+function _slots_for(state::ScheduleState, proc::Processor)
+    slots = get(state.proc_slots, proc, nothing)
+    if slots === nothing
+        slots = zeros(Float64, max(1, Dagger.proc_concurrency(proc)))
+        state.proc_slots[proc] = slots
+    end
+    return slots
+end
+
+# Claim the earliest-free slot on `proc` for a task that cannot start before
+# `data_ready_ns`, returning the finish time. Mutates both the slot vector and
+# the aggregate `proc_ready_ns`. With one slot this is exactly
+# `max(data_ready, proc_ready) + runtime`, i.e. the pre-existing behaviour.
+function _claim_slot!(state::ScheduleState, proc::Processor, data_ready_ns::Float64,
+                      runtime_ns::Float64)
+    slots = _slots_for(state, proc)
+    idx = argmin(slots)
+    finish = max(data_ready_ns, slots[idx]) + runtime_ns
+    slots[idx] = finish
+    state.proc_ready_ns[proc] = maximum(slots)
+    return finish
+end
+
+# Finish time a task would have on `proc` without committing to it.
+function _peek_slot(state::ScheduleState, proc::Processor, data_ready_ns::Float64,
+                    runtime_ns::Float64)
+    slots = get(state.proc_slots, proc, nothing)
+    earliest = slots === nothing ? 0.0 : slots[argmin(slots)]
+    return max(data_ready_ns, earliest) + runtime_ns
 end
 
 # In-place copy: reuse `dst`'s dict buffers instead of allocating fresh ones.
@@ -524,6 +574,20 @@ function _copy_state!(dst::ScheduleState, src::ScheduleState)
     empty!(dst.task_proc)
     for (k, v) in src.task_proc
         dst.task_proc[k] = v
+    end
+    # Reuse slot vectors in place so the SA/IG hot loop stays allocation-free.
+    for (k, v) in src.proc_slots
+        dv = get(dst.proc_slots, k, nothing)
+        if dv === nothing || length(dv) != length(v)
+            dst.proc_slots[k] = copy(v)
+        else
+            copyto!(dv, v)
+        end
+    end
+    if length(dst.proc_slots) != length(src.proc_slots)
+        for k in collect(keys(dst.proc_slots))
+            haskey(src.proc_slots, k) || delete!(dst.proc_slots, k)
+        end
     end
     empty!(dst.proc_ready_ns)
     for (k, v) in src.proc_ready_ns
@@ -553,19 +617,20 @@ function greedy_assign_task!(state::ScheduleState, snap::MT.MetricsSnapshot,
 
     best_proc = nothing
     best_finish = Inf
+    best_data_ready = 0.0
+    best_runtime = 0.0
     @inbounds for w in 1:n_procs
         cache.proc_compatible[idx, w] || continue
         proc = all_procs[w]
         target_space = cache.proc_spaces[w]
         data_ready_ns = _greedy_earliest_data_ready_ns_cached(snap, dag_spec, spec, target_space, state, cache, w)
-        proc_avail = get(state.proc_ready_ns, proc, 0.0)
-        start_ns = max(data_ready_ns, proc_avail)
-
         runtime_ns = cache.task_times[idx, w]
-        finish = start_ns + runtime_ns
+        finish = _peek_slot(state, proc, data_ready_ns, runtime_ns)
         if finish < best_finish
             best_finish = finish
             best_proc = proc
+            best_data_ready = data_ready_ns
+            best_runtime = runtime_ns
         end
     end
 
@@ -575,8 +640,9 @@ function greedy_assign_task!(state::ScheduleState, snap::MT.MetricsSnapshot,
     end
 
     state.task_proc[idx] = best_proc
-    state.task_finish_ns[idx] = best_finish
-    state.proc_ready_ns[best_proc] = best_finish
+    # Commit to the slot that produced `best_finish`; `_claim_slot!` recomputes
+    # the same value from the same earliest-free slot.
+    state.task_finish_ns[idx] = _claim_slot!(state, best_proc, best_data_ready, best_runtime)
     return best_proc
 end
 
@@ -823,6 +889,7 @@ function _replay_schedule!(state::ScheduleState, snap::MT.MetricsSnapshot,
     # hazard from skipping the copy.
     empty!(state.task_finish_ns)
     empty!(state.proc_ready_ns)
+    empty!(state.proc_slots)
 
     @inbounds for idx in 1:nv(dag_spec.g)
         if idx in destroyed
@@ -840,12 +907,7 @@ function _replay_schedule!(state::ScheduleState, snap::MT.MetricsSnapshot,
                 data_ready_ns = _greedy_earliest_data_ready_ns_cached(snap, dag_spec, spec, target_space, state, cache, w)
                 runtime_ns = cache.task_times[idx, w]
             end
-            proc_avail = get(state.proc_ready_ns, proc, 0.0)
-            start_ns = max(data_ready_ns, proc_avail)
-            finish = start_ns + runtime_ns
-
-            state.task_finish_ns[idx] = finish
-            state.proc_ready_ns[proc] = max(get(state.proc_ready_ns, proc, 0.0), finish)
+            state.task_finish_ns[idx] = _claim_slot!(state, proc, data_ready_ns, runtime_ns)
         end
     end
     return state

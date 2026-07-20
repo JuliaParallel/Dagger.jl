@@ -618,6 +618,14 @@ Dagger.scope_key_precedence(::Val{:cuda_gpus}) = 1
 const DEVICES = Dict{Int, CuDevice}()
 const CONTEXTS = Dict{Int, CuContext}()
 const STREAMS = Dict{Int, Vector{CuStream}}()
+
+# Each `CuArrayDeviceProc` multiplexes `length(STREAMS[device])` independent
+# CUDA streams, so it can have that many kernels in flight concurrently.
+# Reported to the cost model so EFT does not serialise queued GPU tasks.
+function Dagger.proc_concurrency(proc::CuArrayDeviceProc)
+    streams = get(STREAMS, proc.device, nothing)
+    return streams === nothing ? 1 : max(1, length(streams))
+end
 const SYNCDEPS = Dagger.LockedObject(Dict{Int, Tuple{Int,Int}}())
 
 function __init__()

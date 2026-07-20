@@ -492,6 +492,12 @@ Dagger.scope_key_precedence(::Val{:rocm_gpus}) = 1
 const DEVICES = Dict{Int, HIPDevice}()
 const CONTEXTS = Dict{Int, HIPContext}()
 const STREAMS = Dict{Int, Vector{HIPStream}}()
+
+# See `Dagger.proc_concurrency` — ROCm equivalent of the CUDA stream count.
+function Dagger.proc_concurrency(proc::ROCArrayDeviceProc)
+    streams = get(STREAMS, proc.device_id, nothing)
+    return streams === nothing ? 1 : max(1, length(streams))
+end
 const SYNCDEPS = Dagger.LockedObject(Dict{Int, Tuple{Int,Int}}())
 
 function __init__()
