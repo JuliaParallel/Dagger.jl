@@ -416,23 +416,48 @@ metrics_lookup_move_time_min(snap, from_space, to_space) =
 metrics_lookup_move_time_max(snap, from_space, to_space) =
     metrics_lookup_move_time(snap, from_space, to_space; reducer=maximum)
 
+# Transfers below this are dominated by fixed per-task overhead rather than
+# bandwidth, so their implied rate is numeric noise. Excluded from the sample.
+const MOVE_RATE_MIN_SIZE_BYTES = UInt64(4096)
+
+"""
+    metrics_lookup_move_rate(snap, from_space, to_space; reducer=Statistics.median)
+
+Estimated bytes/second between two memory spaces, or `nothing` if no usable
+samples exist.
+
+Reduces over *per-move* rates rather than `sum(size) / sum(time)`. The sum form
+is not robust: a `move!` sample records end-to-end task time, so the first few
+moves carry compilation and device-context setup. Measured on cholesky nt=4
+bs=1024 CPU+GPU, 5 cold-start samples out of 36 (405-1072ms, against a 0.57ms
+steady-state minimum) contributed ~96% of total elapsed time and dragged the
+aggregate to ~90MB/s, roughly 100x below the 14.8GB/s observed at steady state.
+That understates PCIe so severely that no compute advantage can offset it and
+GPU placement is effectively banned.
+
+Taking a median over per-move rates matches how the compute side already
+reduces its samples (`metrics_lookup_runtime_median`), so both halves of the
+cost model use the same estimator.
+"""
 function metrics_lookup_move_rate(snap::MT.MetricsSnapshot,
-                                   from_space::MemorySpace, to_space::MemorySpace)
+                                   from_space::MemorySpace, to_space::MemorySpace;
+                                   reducer::Function=Statistics.median)
     matched = _move_matching_keys(snap, from_space, to_space)
     isempty(matched) && return nothing
 
-    total_time = UInt64(0)
-    total_size = UInt64(0)
+    rates = Float64[]
+    sizehint!(rates, length(matched))
     for k in matched
         t = MT.lookup_value(snap, Dagger, :execute!, MT.TimeMetric(), k)
         s = MT.lookup_value(snap, Dagger, :execute!, MoveSizeMetric(), k)
-        if t !== nothing && s !== nothing && t > 0 && s > 0
-            total_time += t
-            total_size += s
-        end
+        (t === nothing || s === nothing) && continue
+        (t == 0 || s < MOVE_RATE_MIN_SIZE_BYTES) && continue
+        push!(rates, Float64(s) / (Float64(t) / 1e9))
     end
-    (total_time == 0 || total_size == 0) && return nothing
-    return round(UInt64, Float64(total_size) / (Float64(total_time) / 1e9))
+    isempty(rates) && return nothing
+    rate = reducer(rates)
+    (isfinite(rate) && rate > 0) || return nothing
+    return round(UInt64, rate)
 end
 
 function metrics_lookup_transfer_rate(snap::MT.MetricsSnapshot, proc::Processor, worker_id::Int)
