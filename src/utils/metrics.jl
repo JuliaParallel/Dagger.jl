@@ -115,8 +115,10 @@ function metrics_lookup_alloc(snap::MT.MetricsSnapshot, sig::Vector,
 end
 
 function extract_collected_metrics(local_cache::MT.MetricsCache, key)
-    snap = MT.snapshot(local_cache)
-    ctx = get(snap.contexts, (Dagger, :execute!), nothing)
+    # `local_cache` is task-local and already fully written by `with_metrics`
+    # (on this same task) before we drain it, so read its pending storages
+    # directly instead of taking a defensive deep-copy snapshot.
+    ctx = MT.pending_context(local_cache, Dagger, :execute!)
     ctx === nothing && return nothing
     pairs = Tuple{MT.AbstractMetric, Any}[]
     for (metric, storage) in ctx.storages
@@ -128,6 +130,13 @@ function extract_collected_metrics(local_cache::MT.MetricsCache, key)
     return pairs
 end
 
+# Bound the global metrics cache to the most-recent this-many tasks (distinct
+# thunk_id keys) per `(mod, context)`. Without a bound the cache grows one entry
+# per metric per task forever, which dominates scheduler allocations (Dict
+# rehash churn) on long-running workloads. The cost model only needs recent
+# samples, so we keep a rolling window.
+const METRICS_CACHE_MAX_TASKS = 100
+
 function apply_collected_metrics!(cache::MT.MetricsCache, key::K, pairs) where K
     pairs === nothing && return
     isempty(pairs) && return
@@ -138,6 +147,7 @@ function apply_collected_metrics!(cache::MT.MetricsCache, key::K, pairs) where K
             storage = MT.get_or_create_storage!(ctx, metric)
             MT.set_metric_value!(storage, key, value)
         end
+        MT.trim_context!(ctx, METRICS_CACHE_MAX_TASKS)
     end
     return
 end
