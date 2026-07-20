@@ -890,14 +890,22 @@ concurrently across threads.
     costs = @reusable_dict :schedule_one!_costs Processor Float64 OSProc() 0.0 32
     costs_cleanup = @reuse_defer_cleanup empty!(costs)
 
+    # Take a single global metrics snapshot for this whole scheduling pass and
+    # reuse it for cost estimation and every per-proc has_capacity check below.
+    # Previously estimate_task_costs! and each has_capacity call snapshotted the
+    # global metrics cache independently; since other threads bump the cache's
+    # generation on every task completion, each of those calls rebuilt (deep-
+    # copied) the entire snapshot. One snapshot per pass collapses that to at
+    # most a single rebuild.
+    snap = MT.snapshot(MT.global_metrics_cache())
+
     # Build the per-signature index once and share it with both callers, so
     # each is O(1) per proc after a single O(N) build (vs two independent
     # end-to-end MetricsTracker scans per task on the AOT path).
     sig_vec_for_index = sig isa Dagger.Signature ? sig.sig : sig
-    runtime_index = build_signature_runtime_index(
-        MT.snapshot(MT.global_metrics_cache()), sig_vec_for_index)
+    runtime_index = build_signature_runtime_index(snap, sig_vec_for_index)
     estimate_task_costs!(sorted_procs, costs, state, input_procs, task;
-                         sig, runtime_index)
+                         sig, runtime_index, snap)
     input_procs_cleanup()
 
     # Select the best available processor and reserve time pressure optimistically.
@@ -910,7 +918,7 @@ concurrently across threads.
         if can_use
             has_cap, est_time_util, est_alloc_util, est_occupancy =
                 has_capacity(state, proc, gproc.pid, options.time_util, options.alloc_util, options.occupancy, sig;
-                             runtime_index)
+                             runtime_index, snap)
             if has_cap
                 # Optimistic reservation: capture-the-ref, atomic_add!
                 counter_ref = lock(state.worker_time_pressure) do wtp
@@ -1750,6 +1758,19 @@ function do_tasks(to_proc, return_queue, tasks)
     @dagdebug nothing :processor "Kicked processors"
 end
 
+# do_task only needs a Context to satisfy logging (`@maybelog` reads `log_sink`
+# and `profile`); the proc-management machinery it carries (a ReentrantLock and a
+# Condition) is never used on this path. Since `(log_sink, profile)` are constant
+# for a scheduler, memoize the last-built Context instead of allocating a fresh
+# one -- plus its lock and condition -- on every task. Lock-free: the hot path is
+# an atomic load + key compare (a Context is only built on a config change).
+# Reusable per-task scratch cache for the metrics collected during `execute!`.
+# Kept task-local (each pooled scheduler worker task owns one) and reset before
+# each use, so its per-metric storage Dicts/Vectors are allocated once and reused
+# rather than rebuilt for every task. `do_task` runs on a pool of reusable tasks
+# (see `DoTaskSpec`/`@reusable_tasks`), so the same task services many tasks and
+# the cache is genuinely reused.
+const DO_TASK_LOCAL_METRICS = TaskLocalValue{MT.MetricsCache}(() -> MT.MetricsCache())
 """
     do_task(to_proc, task::TaskSpec) -> Any
 
@@ -1935,7 +1956,8 @@ Executes a single task specified by `task` on `to_proc`.
 
     task_sig = signature(first(data), @view data[2:end]).sig
 
-    local_metrics_cache = MT.MetricsCache()
+    local_metrics_cache = DO_TASK_LOCAL_METRICS[]
+    MT.reset_pending!(local_metrics_cache)
     mspec = execute_metrics_spec()
 
     @dagdebug thunk_id :execute "Executing $(typeof(f))"

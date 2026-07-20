@@ -527,10 +527,15 @@ function can_use_proc(state, task, gproc, proc, opts, scope)
 end
 
 function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig;
-                     runtime_index::Union{Dagger.SignatureRuntimeIndex,Nothing}=nothing)
+                     runtime_index::Union{Dagger.SignatureRuntimeIndex,Nothing}=nothing,
+                     snap=nothing)
     T = typeof(p)
     sig_vec = sig isa Dagger.Signature ? sig.sig : sig
-    snap = MT.snapshot(MT.global_metrics_cache())
+    # Reuse a caller-provided per-pass snapshot when available (see
+    # schedule_one!); otherwise take our own. Avoiding a fresh snapshot per
+    # candidate processor is what keeps the global metrics cache from being
+    # deep-copied once per proc on every scheduling decision.
+    snap = snap === nothing ? MT.snapshot(MT.global_metrics_cache()) : snap
     worker_id = gp isa Int ? gp : (gp isa OSProc ? gp.pid : myid())
     est_time_util = if time_util !== nothing && haskey(time_util, T)
         round(UInt64, time_util[T] * 1000^3)::UInt64
@@ -650,7 +655,8 @@ end
 const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
 @reuse_scope function estimate_task_costs!(sorted_procs, costs, state, procs, task;
                                             sig=nothing,
-                                            runtime_index::Union{Dagger.SignatureRuntimeIndex,Nothing}=nothing)
+                                            runtime_index::Union{Dagger.SignatureRuntimeIndex,Nothing}=nothing,
+                                            snap=nothing)
 
     # Find all Chunks
     chunks = @reusable_vector :estimate_task_costs_chunks Union{Chunk,Nothing} nothing 32
@@ -665,7 +671,8 @@ const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
         sig = signature(task.f, task.inputs)
     end
     sig_vec = sig isa Dagger.Signature ? sig.sig : sig
-    snap = MT.snapshot(MT.global_metrics_cache())
+    # Reuse the caller's per-pass snapshot (schedule_one!) when provided.
+    snap = snap === nothing ? MT.snapshot(MT.global_metrics_cache()) : snap
 
     # Build the per-signature runtime index once. Every candidate `proc` in
     # this call shares `sig_vec`, so `metrics_lookup_runtime_from_index`
