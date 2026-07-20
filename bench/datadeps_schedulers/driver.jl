@@ -259,6 +259,59 @@ function warm_metrics_for!(workload::Symbol, nt::Int, bs::Int)
     return
 end
 
+# GPU-scoped warmup — dedicated cost-model priming for non-CPU procs.
+#
+# Why this is needed: `_eft_runtime_ns` at `src/datadeps/scheduling.jl:807`
+# falls back to `GREEDY_DEFAULT_RUNTIME_NS = 1_000_000_000` (1 second) when
+# MetricsTracker has no `(signature, proc)` sample. On a CPU-only cache,
+# the regular `warm_metrics_for!` RoundRobin pass eventually cycles through
+# GPU procs and would populate them — but under any Greedy-driven cell that
+# follows, Greedy compares CPU (~20 ms observed) vs GPU (~1000 ms fallback)
+# and never picks GPU. GPU thus never gets any samples in the subsequent
+# measured trials either. Result on hudson H100: 0% GPU utilisation across
+# a full sweep despite the CPU+GPU code path being wired up correctly.
+#
+# Fix: before the CPU RR warmup, run a small workload with scope forced to
+# the union of every discovered GPU proc. Every task in the forced pass
+# lands on a GPU proc; `MT.GLOBAL_METRICS_CACHE` gets primed with real GPU
+# `(signature, proc) -> runtime_ns` samples. Greedy's subsequent EFT
+# calculation then compares real CPU vs real GPU runtimes and picks GPU
+# for tasks where it's actually faster.
+#
+# Vendor-agnostic: enumerates non-CPU procs via `Dagger.all_processors()`
+# and constructs a `UnionScope(ExactScope(p) for p in gpu_procs)`. Works
+# unchanged across CUDAExt, ROCExt, MetalExt, oneAPIExt, OpenCLExt — the
+# scope machinery is proc-type-agnostic and every extension registers its
+# proc type via `add_processor_callback!`, so `all_processors()` naturally
+# includes whatever accelerator the session loaded.
+#
+# Wrapped in try/catch: any GPU warmup failure (e.g. an untested
+# cross-space transfer path or a driver hiccup) is logged and swallowed
+# rather than killing the sweep. The subsequent CPU warmup + measured
+# trials continue on CPU-only cost data; the cell is honestly labelled
+# "GPU cost model uncalibrated" via the log message. Better degraded
+# data than no data.
+function warm_gpu_metrics_for!(workload::Symbol, nt::Int, bs::Int)
+    procs = collect(Dagger.all_processors())
+    # `workloads.jl` defines `_is_cpu_proc`; reuse it so the CPU/GPU
+    # partition is single-sourced. Note that `_is_cpu_proc` is included
+    # into this module via `include("workloads.jl")` above.
+    gpu_procs = filter(!_is_cpu_proc, procs)
+    isempty(gpu_procs) && return  # CPU-only session, nothing to warm
+    gpu_scope = Dagger.UnionScope([Dagger.ExactScope(p) for p in gpu_procs])
+    inputs = build_inputs(workload, nt, bs)
+    warm_sched = Dagger.RoundRobinScheduler()
+    try
+        Dagger.with_options(; scope=gpu_scope) do
+            run_workload!(workload, inputs, warm_sched)
+        end
+    catch e
+        @warn "GPU metrics-warm crashed, continuing with CPU-only cost model" workload=workload tile_count=nt block_size=bs n_gpu_procs=length(gpu_procs) exception=(e, catch_backtrace())
+    end
+    empty!(Dagger.datadeps_schedule_cache(warm_sched))
+    return
+end
+
 const DEFAULT_TILE_COUNTS = [2, 4, 8]
 const DEFAULT_BLOCK_SIZE = 128
 const DEFAULT_TRIALS = 3
@@ -358,6 +411,17 @@ function run_sweep(; workloads = (:cholesky, :matmul),
                 for (name, factory) in scheduler_factories
                     verbose && println("→ $workload nt=$nt $name  (warmup×$warmup, trials×$trials, metrics_warm=$metrics_warm)")
                     if metrics_warm
+                        # GPU-scoped warmup FIRST so cost model has real GPU
+                        # samples before CPU-RR warmup or measured trials.
+                        # Without this, GPU procs stay at the 1s fallback in
+                        # `_eft_runtime_ns` and Greedy never picks them --
+                        # the chicken-and-egg documented on `warm_gpu_metrics_for!`.
+                        # GPU warmup is a no-op on CPU-only sessions.
+                        try
+                            warm_gpu_metrics_for!(workload, nt, block_size)
+                        catch e
+                            @warn "GPU metrics-warm outer crashed, continuing with CPU-only warmup" workload=workload tile_count=nt scheduler=name exception=(e, catch_backtrace())
+                        end
                         try
                             warm_metrics_for!(workload, nt, block_size)
                         catch e
