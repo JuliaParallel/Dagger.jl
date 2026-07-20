@@ -217,6 +217,9 @@ function run_once(workload::Symbol, inner::Dagger.DataDepsScheduler, nt::Int, bs
     timed = TimedScheduler(inner)
     reset_scheduler!(inner)
 
+    Dagger.MetricsTracker.trim!(Dagger.MetricsTracker.global_metrics_cache();
+                                keep_per_metric=METRICS_KEEP_PER_METRIC)
+
     if collect_logs
         Dagger.enable_logging!(all_task_deps=false, tasknames=false)
     end
@@ -322,6 +325,8 @@ const DEFAULT_TILE_COUNTS = [2, 4, 8]
 const DEFAULT_BLOCK_SIZE = 128
 const DEFAULT_TRIALS = 3
 const DEFAULT_WARMUP = 1
+
+const METRICS_KEEP_PER_METRIC = 100
 
 # Factories — not instances — because RoundRobin holds mutable state and each
 # trial needs a fresh copy. Default MILP budget is set generously since a
