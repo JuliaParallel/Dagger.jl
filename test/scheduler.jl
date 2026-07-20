@@ -502,7 +502,10 @@ end
             post_snap = MetricsTracker.snapshot(cache)
             @test haskey(post_snap.contexts, (Dagger, :execute!))
             time_values = MetricsTracker.values_for_metric(post_snap, Dagger, :execute!, MetricsTracker.TimeMetric())
-            @test length(time_values) >= pre_count + 5
+            # The global cache is bounded to the most-recent METRICS_CACHE_MAX_TASKS
+            # tasks, so the count grows by the 5 new tasks only up to that cap.
+            @test length(time_values) >= min(pre_count + 5, Dagger.METRICS_CACHE_MAX_TASKS)
+            @test length(time_values) <= Dagger.METRICS_CACHE_MAX_TASKS
 
             time_inferred = Base.return_types(MetricsTracker.lookup_value,
                 Tuple{MetricsTracker.MetricsSnapshot, Module, Symbol, MetricsTracker.TimeMetric, Int})[1]
