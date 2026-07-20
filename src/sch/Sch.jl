@@ -1352,6 +1352,25 @@ function proc_states_values(uid::UInt64=Dagger.get_tls().sch_uid)
         return collect(values(states.dict))
     end
 end
+"""
+    proc_states_values!(buf::Vector{ProcessorState}, uid) -> buf
+
+Refill `buf` (in place) with the current `ProcessorState`s for scheduler `uid`.
+Like `proc_states_values` but reuses the caller's buffer instead of allocating a
+fresh `Vector` on every call, for hot paths (e.g. the per-attempt work-stealing
+scan) that would otherwise churn a short-lived list. `buf`'s concrete element
+type also keeps downstream field accesses from boxing.
+"""
+function proc_states_values!(buf::Vector{ProcessorState}, uid::UInt64=Dagger.get_tls().sch_uid)
+    states = proc_states(uid)
+    MemPool.lock_read(states.lock) do
+        empty!(buf)
+        for (_, state) in states.dict
+            push!(buf, state)
+        end
+    end
+    return buf
+end
 function proc_state!(f, uid::UInt64, proc::Processor)
     states = proc_states(uid)
     state = MemPool.lock_read(states.lock) do
@@ -1402,6 +1421,12 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
 
         wid = get_parent(to_proc).pid
         work_to_do = false
+        # Reused across steal attempts so the work-stealing scan below doesn't
+        # allocate a fresh state list + shuffle permutation on every attempt.
+        # Allocated once per processor runner; grows at most to the processor
+        # count. Concretely typed so the field accesses in the scan don't box.
+        steal_states = ProcessorState[]
+        steal_perm = Int[]
         while isopen(return_queue)
             # Wait for new tasks
             if !work_to_do
@@ -1457,10 +1482,18 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
 
                 # Try to steal from local queues randomly
                 # TODO: Prioritize stealing from busiest processors
-                states = proc_states_values(uid)
-                # TODO: Try to pre-allocate this
-                P = randperm(length(states))
-                for state in getindex.(Ref(states), P)
+                #
+                # Refill the reusable state buffer from the live dict, then
+                # shuffle indices in place with randperm! to keep steal targets
+                # random. This avoids the per-attempt allocation of a fresh
+                # state Vector, a permutation Vector, and a broadcast Memory
+                # (and the boxing that the old broadcast/iterate incurred on the
+                # ProcessorState/ProcessorInternalState field reads).
+                proc_states_values!(steal_states, uid)
+                resize!(steal_perm, length(steal_states))
+                randperm!(steal_perm)
+                for pidx in steal_perm
+                    state = steal_states[pidx]
                     other_istate = state.state
                     if other_istate.proc === to_proc
                         continue
