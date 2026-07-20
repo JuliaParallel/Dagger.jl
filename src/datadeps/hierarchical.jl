@@ -1114,19 +1114,46 @@ function _hierarchical_copy_from_and_free!(partition_states::Vector{DataDepsStat
     # Free datadeps slots. For shared chunks, sync on the final global writer:
     # a stale owner slot may still be read via boundary copies recorded in
     # another partition's state.
+    # N.B. Syncdep gathering must match `distribute_tasks!`'s free loop exactly
+    # (see `src/datadeps/queue.jl`). Previously this loop only consulted the
+    # single cache-key `ainfo`, guarded by `haskey(state.ainfo_arg, ainfo)`;
+    # when that key was absent -- the "buffer only underlies wrapper arguments"
+    # case, e.g. a parent array whose tracked slots are `view`s over it -- the
+    # free task was spawned with an *empty* syncdep set and could run
+    # concurrently with an in-flight `move!` on the same buffer. On CPU that is
+    # benign (`unsafe_free!(::Array)` is a refcount decrement, and a concurrent
+    # reader keeps the memory alive), which is why it went unnoticed. On GPU it
+    # is fatal: `CUDA.unsafe_free!` invalidates device memory immediately and
+    # the racing `move!` throws `ArgumentError: Attempt to use a freed
+    # reference` from `pointer(::CuArray)`.
+    #
+    # `gather_free_syncdeps!` handles both cases: it syncs against *every*
+    # ainfo backed by the buffer (via `chunk_to_ainfos`), and falls back to an
+    # interval-tree overlap search when the buffer has no tracked slot of its
+    # own. The `freed` set mirrors the flat path's dedup so a buffer reachable
+    # from several ainfos (or several partitions) is freed exactly once.
+    freed = IdDict{Any,Nothing}()
     for pid in 1:n_partitions
         state = partition_states[pid]
         obj_cache = unwrap(state.ainfo_backing_chunk)
         write_num = typemax(Int) - 1
+        # Map each tracked slot chunk to its ainfos, as the flat path does.
+        chunk_to_ainfos = IdDict{Any,Vector{AliasingWrapper}}()
+        for (ainfo, remote_arg_ws) in state.ainfo_arg
+            for remote_arg_w in remote_arg_ws
+                push!(get!(Vector{AliasingWrapper}, chunk_to_ainfos, remote_arg_w.arg), ainfo)
+            end
+        end
         for remote_space in keys(obj_cache.values)
             for (ainfo, remote_arg) in obj_cache.values[remote_space]
                 if !(ainfo in obj_cache.originals)
+                    haskey(freed, remote_arg) && continue
+                    freed[remote_arg] = nothing
                     remote_proc = first(processors(remote_space))
                     free_scope = ExactScope(remote_proc)
                     free_syncdeps = Set{ThunkSyncdep}()
-                    if haskey(state.ainfo_arg, ainfo)
-                        get_write_deps!(state, remote_space, ainfo, write_num, free_syncdeps)
-                    end
+                    gather_free_syncdeps!(state, remote_space, remote_arg, write_num,
+                                          chunk_to_ainfos, free_syncdeps)
                     if registry !== nothing
                         orig = get(state.remote_arg_to_original, remote_arg, nothing)
                         if orig !== nothing
