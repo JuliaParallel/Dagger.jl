@@ -1248,9 +1248,19 @@ end
 
 # Defaults follow Orsila, Salminen, Hämäläinen 2008 §4.3 and §5.3.
 const SA_DEFAULT_Q = 0.95
-const SA_DEFAULT_K = 1.0
+# Orsila §4.3: k widens the closed-form temperature range [Tf, T0] (Eq. 18/19).
+# Suitable values are [1, 9]; k=1 gives ~27% final-level worsening acceptance,
+# k=2 ~12%. Orsila et al. (2007) use k=2 -- "reaches a local minimum more
+# likely in the end, but is more expensive than k=1" -- so k=2 is the paper's
+# own thoroughness/cost tradeoff and is adopted here. (Note: k does not help
+# cross the GPU cost cliff; a 250x off-GPU move is rejected at any in-range T.)
+const SA_DEFAULT_K = 2.0
 const SA_DEFAULT_N_RESTARTS = 1
 const SA_TF_FLOOR = 1e-12
+# Probability that a proposed SA move targets a critical-path task rather than
+# a uniformly-random one (Orsila §3.7.1 ECP move; Wild et al. 2003 report it
+# "significantly better than single move with directed acyclic graphs").
+const SA_ECP_BIAS_PROB = 0.5
 const SA_DEFAULT_TIME_LIMIT_SEC = Inf
 
 """
@@ -1398,6 +1408,37 @@ end
 # Single-task move per Orsila §3.6.1. The current proc is excluded from
 # the alternative set (Orsila §3.6) so the move is never a no-op when the
 # task has at least one other compatible proc.
+# Orsila §3.7.1 ECP (Enhanced Critical Path) move: bias task selection toward
+# the critical path -- the chain of largest cumulative compute+communication,
+# which determines the makespan. `task_finish_ns` is the exact per-task finish
+# under the current schedule, so a task's finish time is a direct proxy for how
+# close it is to the critical-path tail (the sink has the maximum finish).
+#
+# Rather than always taking the single max-finish task (which would retry the
+# same sink on every biased move, wasting diversity), we roulette-select with
+# probability proportional to finish time: every task on or near the critical
+# path is a likely target, the sink most likely, off-path tasks rarely. With
+# probability `1 - SA_ECP_BIAS_PROB` we fall back to a uniform pick to keep the
+# neighborhood ergodic.
+function _sa_select_task_ecp(candidate::ScheduleState, n_tasks::Int,
+                             rng::Random.AbstractRNG)
+    if rand(rng) < SA_ECP_BIAS_PROB
+        total = 0.0
+        @inbounds for idx in 1:n_tasks
+            total += get(candidate.task_finish_ns, idx, 0.0)
+        end
+        if total > 0.0
+            threshold = rand(rng) * total
+            acc = 0.0
+            @inbounds for idx in 1:n_tasks
+                acc += get(candidate.task_finish_ns, idx, 0.0)
+                acc >= threshold && return idx
+            end
+        end
+    end
+    return rand(rng, 1:n_tasks)
+end
+
 function _sa_propose_neighbor!(candidate::ScheduleState, snap::MT.MetricsSnapshot,
                                 dag_spec::DAGSpec, all_procs::Vector{Processor},
                                 rng::Random.AbstractRNG,
@@ -1405,7 +1446,7 @@ function _sa_propose_neighbor!(candidate::ScheduleState, snap::MT.MetricsSnapsho
     n_tasks = nv(dag_spec.g)
     n_tasks == 0 && return candidate
 
-    task_idx = rand(rng, 1:n_tasks)
+    task_idx = _sa_select_task_ecp(candidate, n_tasks, rng)
     current_proc = candidate.task_proc[task_idx]
     n_procs = length(all_procs)
 
