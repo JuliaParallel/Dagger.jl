@@ -611,7 +611,8 @@ end
 
 function greedy_assign_task!(state::ScheduleState, snap::MT.MetricsSnapshot,
                               dag_spec::DAGSpec, all_procs::Vector{Processor}, idx::Int,
-                              cache::EFTCostCache)
+                              cache::EFTCostCache;
+                              last_writer::Union{Nothing,IdDict{Any,Int}}=nothing)
     spec = dag_spec.id_to_spec[idx]
     n_procs = length(all_procs)
 
@@ -623,7 +624,7 @@ function greedy_assign_task!(state::ScheduleState, snap::MT.MetricsSnapshot,
         cache.proc_compatible[idx, w] || continue
         proc = all_procs[w]
         target_space = cache.proc_spaces[w]
-        data_ready_ns = _greedy_earliest_data_ready_ns_cached(snap, dag_spec, spec, target_space, state, cache, w)
+        data_ready_ns = _greedy_earliest_data_ready_ns_cached(snap, dag_spec, spec, target_space, state, cache, w; last_writer=last_writer)
         runtime_ns = cache.task_times[idx, w]
         finish = _peek_slot(state, proc, data_ready_ns, runtime_ns)
         if finish < best_finish
@@ -726,13 +727,32 @@ end
 function greedy_schedule!(state::ScheduleState, snap::MT.MetricsSnapshot,
                           dag_spec::DAGSpec, all_procs::Vector{Processor};
                           task_order::Union{Nothing, AbstractVector{Int}}=nothing,
-                          cache::Union{EFTCostCache, Nothing}=nothing)
+                          cache::Union{EFTCostCache, Nothing}=nothing,
+                          producer_finish::Bool=false)
     if cache === nothing
         cache = _build_eft_cost_cache(snap, dag_spec, all_procs)
     end
     order = task_order === nothing ? (1:nv(dag_spec.g)) : task_order
+    # When `producer_finish` is on, track the most recent task that wrote each
+    # Chunk (by object identity) so a consumer's data-ready time includes the
+    # producer's finish (see `_greedy_earliest_data_ready_ns_cached`). Populated
+    # as we walk tasks in index order (a valid topological order), so every
+    # producer is registered before its consumers are scheduled. Off by default,
+    # so IG/SA seeds (which drive an untouched, producer-finish-free replay) are
+    # unchanged.
+    last_writer = producer_finish ? IdDict{Any,Int}() : nothing
     for idx in order
-        greedy_assign_task!(state, snap, dag_spec, all_procs, idx, cache)
+        greedy_assign_task!(state, snap, dag_spec, all_procs, idx, cache; last_writer=last_writer)
+        if last_writer !== nothing
+            spec = dag_spec.id_to_spec[idx]
+            for arg in spec.fargs
+                raw, deps = unwrap_inout(value(arg))
+                raw isa Chunk || continue
+                for (_dep_mod, _readdep, writedep) in deps
+                    writedep && (last_writer[raw] = idx)
+                end
+            end
+        end
     end
     return state
 end
@@ -741,7 +761,7 @@ function datadeps_schedule_dag_aot!(scheduler::GreedyScheduler, schedule, dag_sp
     snap = MT.snapshot(MT.global_metrics_cache())
     cache = _build_eft_cost_cache(snap, dag_spec, all_procs)
     state = ScheduleState()
-    greedy_schedule!(state, snap, dag_spec, all_procs; cache=cache)
+    greedy_schedule!(state, snap, dag_spec, all_procs; cache=cache, producer_finish=true)
     for idx in 1:nv(dag_spec.g)
         task = dag_spec.id_to_task[idx]
         proc = state.task_proc[idx]
@@ -801,11 +821,44 @@ end
 
 function _greedy_earliest_data_ready_ns_cached(snap, dag_spec::DAGSpec, spec,
                                                  target_space::MemorySpace, state::ScheduleState,
-                                                 cache::EFTCostCache, target_w::Int)
+                                                 cache::EFTCostCache, target_w::Int;
+                                                 last_writer::Union{Nothing,IdDict{Any,Int}}=nothing)
     earliest_ns = 0.0
     for arg in spec.fargs
         raw_val, _ = unwrap_inout(value(arg))
         ready_ns = _greedy_arg_ready_time_ns_cached(raw_val, snap, dag_spec, target_space, state, cache, target_w)
+        # Producer-finish term. For a `Chunk` argument, the base helper above
+        # accounts only for moving the tile from its *initial* materialized
+        # location -- it has no notion of a producer task. So greedy is blind to
+        # the DAG's critical path: a consumer looks ready at t=0 even though its
+        # input is still being computed. When `last_writer` is supplied (built
+        # by `greedy_schedule!` as it walks tasks in index order), look up the
+        # most recent task that wrote this exact Chunk and require the consumer
+        # to wait for that producer to finish AND for its output to reach the
+        # target proc. Additive: if there is no prior writer (root/materialized
+        # data) the term is skipped and behavior is unchanged. `last_writer` is
+        # only threaded from the standalone GreedyScheduler; IG/SA seeds pass
+        # `nothing`, keeping them consistent with their (untouched) replay.
+        if last_writer !== nothing && raw_val isa Chunk
+            wid = get(last_writer, raw_val, nothing)
+            if wid !== nothing
+                wfinish = get(state.task_finish_ns, wid, 0.0)
+                wproc = get(state.task_proc, wid, nothing)
+                if wproc !== nothing
+                    prod_ready = wfinish
+                    dep_w = get(cache.proc_to_idx, wproc, 0)
+                    if dep_w != 0 && cache.proc_spaces[dep_w] != target_space
+                        rate = cache.move_rates[dep_w, target_w]
+                        if rate > 0.0
+                            sz = raw_val.handle.size === nothing ?
+                                 GREEDY_DEFAULT_OUTPUT_SIZE : UInt64(raw_val.handle.size)
+                            prod_ready += Float64(sz) / rate * 1e9
+                        end
+                    end
+                    ready_ns = max(ready_ns, prod_ready)
+                end
+            end
+        end
         if ready_ns > earliest_ns
             earliest_ns = ready_ns
         end
