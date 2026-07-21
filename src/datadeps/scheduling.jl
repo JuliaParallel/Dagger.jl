@@ -847,13 +847,49 @@ _greedy_arg_ready_time_ns_cached(::Any, ::MT.MetricsSnapshot, ::DAGSpec,
 
 const IG_DEFAULT_N_ITERS = 32
 const IG_DEFAULT_DESTROY_FRAC = 0.30
+# Ruiz & Stützle (2005/2007) §3.4 tune the destruction size to a *fixed count*
+# d, with d=4 the best-performing level (not statistically different from 3 or
+# 5; very low and very high d are significantly worse). Our DAGs are small
+# (K=10..64), so we keep `destroy_frac` as an escape hatch but cap the actual
+# count at `IG_DEFAULT_DESTROY_COUNT`, which yields d=4 for K>=14 and d=3 at
+# K=10 -- both within the paper's tuned-optimal band.
+const IG_DEFAULT_DESTROY_COUNT = 4
+# Ruiz & Stützle §3.2 use an SA-like acceptance criterion with a *constant*
+# temperature (eq. 1, after Osman & Potts 1989):
+#   Temperature = T * (sum_ij p_ij) / (n * m * 10) = T * mean(p_ij) / 10
+# with T the only acceptance parameter. Their §3.4 DOE finds T=0.5 best (0.0 =
+# strict/greedy acceptance stagnates). We compute the mean over compatible
+# (task, proc) runtimes; see `_ig_acceptance_temperature`.
+const IG_DEFAULT_TEMPERATURE = 0.5
 # Restricted-candidate-list width for IG's stochastic reconstruction: a
 # destroyed task is placed uniformly at random among processors whose EFT is
 # within `(1+IG_DEFAULT_ALPHA)` of the best. `alpha=0` collapses to
-# deterministic greedy. See `greedy_assign_task_randomized!`.
+# deterministic greedy. NOTE: Ruiz & Stützle's construction is deterministic
+# NEH best-insertion; the sequence-position neighborhood of the flowshop makes
+# that construction non-trivial. Task->processor assignment has no such
+# neighborhood (a re-derived task returns to the same proc under pinned
+# predecessors), so we randomize the construction GRASP-style to give IG a real
+# search space. This is a deliberate adaptation, not the paper's mechanism.
 const IG_DEFAULT_ALPHA = 0.10
 # `Inf` disables the wall-clock stop.
 const IG_DEFAULT_TIME_LIMIT_SEC = Inf
+
+# Ruiz & Stützle §3.2 eq. (1): constant acceptance temperature proportional to
+# the mean per-task work. Averaged over compatible (task, proc) pairs only, so
+# the `GREEDY_DEFAULT_RUNTIME_NS` placeholders written for incompatible pairs
+# in the cost cache do not inflate the scale.
+function _ig_acceptance_temperature(cache::EFTCostCache, temperature::Float64)
+    total = 0.0
+    count = 0
+    n_tasks, n_procs = size(cache.task_times)
+    @inbounds for k in 1:n_tasks, w in 1:n_procs
+        cache.proc_compatible[k, w] || continue
+        total += cache.task_times[k, w]
+        count += 1
+    end
+    count == 0 && return 0.0
+    return temperature * (total / count) / 10.0
+end
 
 """
     IteratedGreedyScheduler{S<:DataDepsScheduler} <: DataDepsScheduler
@@ -1111,14 +1147,31 @@ function iterated_greedy_schedule!(state::ScheduleState, snap::MT.MetricsSnapsho
         cache = _build_eft_cost_cache(snap, dag_spec, all_procs)
     end
 
+    # Two tracked solutions, per Ruiz & Stützle §3.2 (and standard SA/ILS):
+    #   `best_*`      — best found so far; only ever improves; returned.
+    #   `incumbent_*` — the current solution the search walks from; the SA-like
+    #                   acceptance criterion may move it *uphill* to escape
+    #                   local optima. Destruction always operates on the
+    #                   incumbent, not on best. Conflating the two (accepting a
+    #                   worse solution *into* best) would forfeit the guarantee
+    #                   that IG never returns worse than its greedy seed.
     best_state = copy(state)
     best_cost = cost_of_schedule(best_state)
+    incumbent = copy(state)
+    incumbent_cost = best_cost
 
-    # Pre-allocate candidate once; reset in place via `_copy_state!` and swap
-    # references on accept to avoid Dict allocations in the hot loop.
-    candidate = copy(best_state)
+    # Reset in place via `_copy_state!` to avoid Dict allocations in the loop.
+    candidate = copy(state)
+
+    # Ruiz & Stützle §3.4: fixed destruction count d=4, capped at K. See
+    # `IG_DEFAULT_DESTROY_COUNT`. `destroy_frac` is retained as an escape hatch.
     n_destroy = max(1, ceil(Int, destroy_frac * n_tasks))
-    n_destroy = min(n_destroy, n_tasks)
+    n_destroy = min(n_destroy, IG_DEFAULT_DESTROY_COUNT, n_tasks)
+
+    # Constant acceptance temperature, eq. (1). Zero temperature recovers strict
+    # (greedy) acceptance.
+    temperature = _ig_acceptance_temperature(cache, IG_DEFAULT_TEMPERATURE)
+
     # Shared buffers reused across iters to avoid allocations.
     perm_buf = collect(1:n_tasks)
     destroyed = Set{Int}()
@@ -1141,14 +1194,23 @@ function iterated_greedy_schedule!(state::ScheduleState, snap::MT.MetricsSnapsho
             push!(destroyed, perm_buf[i])
         end
 
-        _copy_state!(candidate, best_state)
-
+        # Destruct + (randomized) reconstruct from the *incumbent*.
+        _copy_state!(candidate, incumbent)
         iterated_greedy_step!(candidate, snap, dag_spec, all_procs, destroyed, cache; rng=rng)
         new_cost = cost_of_schedule(candidate)
+
+        # Track best-so-far (monotone).
         if new_cost < best_cost
-            # Swap; ex-best buffers get overwritten next iter.
-            best_state, candidate = candidate, best_state
+            _copy_state!(best_state, candidate)
             best_cost = new_cost
+        end
+
+        # SA-like acceptance into the incumbent, eq. (1). Better always accepted;
+        # worse accepted with probability exp(-ΔC / temperature).
+        ΔC = new_cost - incumbent_cost
+        if ΔC < 0 || (temperature > 0 && rand(rng) < exp(-ΔC / temperature))
+            _copy_state!(incumbent, candidate)
+            incumbent_cost = new_cost
         end
     end
     return best_state
