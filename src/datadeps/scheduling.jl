@@ -646,6 +646,77 @@ function greedy_assign_task!(state::ScheduleState, snap::MT.MetricsSnapshot,
     return best_proc
 end
 
+"""
+    greedy_assign_task_randomized!(state, snap, dag_spec, all_procs, idx, cache, rng; alpha)
+
+Stochastic variant of [`greedy_assign_task!`](@ref) used only by IG's
+reconstruction path. Instead of always taking the single lowest-EFT processor
+(strict `<`, fully deterministic), it builds a restricted candidate list of
+every compatible processor whose peeked finish time is within `(1+alpha)` of
+the best, then picks one uniformly at random.
+
+This is what gives Iterated Greedy a real search neighborhood. With the
+deterministic `greedy_assign_task!`, `_replay_schedule!` provably reproduces
+the greedy seed exactly on every iteration (preserved tasks stay at their
+original procs, destroyed tasks are re-derived identically), so IG could never
+improve on Greedy — its neighborhood was a single point. Randomized
+reconstruction is the stochastic-construction step of Ruiz & Stützle (2007);
+`alpha=0` recovers the deterministic behavior.
+
+Uses the same K-slot peek/claim helpers as `greedy_assign_task!`, so capacity
+accounting is identical; only the choice among near-best procs differs.
+"""
+function greedy_assign_task_randomized!(state::ScheduleState, snap::MT.MetricsSnapshot,
+                                        dag_spec::DAGSpec, all_procs::Vector{Processor},
+                                        idx::Int, cache::EFTCostCache,
+                                        rng::Random.AbstractRNG;
+                                        alpha::Float64=IG_DEFAULT_ALPHA)
+    spec = dag_spec.id_to_spec[idx]
+    n_procs = length(all_procs)
+
+    # Single pass: peek every compatible proc, remember what `_claim_slot!`
+    # will need (data_ready, runtime), and track the best finish. Peeking does
+    # not mutate slot state, so all candidates are evaluated against the same
+    # partial schedule — exactly as the deterministic variant does.
+    cand = Tuple{Processor,Float64,Float64,Float64}[]
+    best_finish = Inf
+    @inbounds for w in 1:n_procs
+        cache.proc_compatible[idx, w] || continue
+        proc = all_procs[w]
+        target_space = cache.proc_spaces[w]
+        data_ready_ns = _greedy_earliest_data_ready_ns_cached(snap, dag_spec, spec, target_space, state, cache, w)
+        runtime_ns = cache.task_times[idx, w]
+        finish = _peek_slot(state, proc, data_ready_ns, runtime_ns)
+        push!(cand, (proc, data_ready_ns, runtime_ns, finish))
+        finish < best_finish && (best_finish = finish)
+    end
+
+    if isempty(cand)
+        task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
+        throw(Sch.SchedulingException("IteratedGreedyScheduler: no compatible processor for task $idx (scope: $task_scope)"))
+    end
+
+    # Uniform choice among candidates within the RCL threshold, via reservoir
+    # sampling so no second allocation is needed. `best_finish` is always
+    # in-threshold, so at least one candidate is always selectable.
+    threshold = best_finish * (1.0 + alpha)
+    chosen = cand[1]
+    n_in = 0
+    @inbounds for c in cand
+        if c[4] <= threshold
+            n_in += 1
+            if rand(rng) * n_in < 1.0   # replace with probability 1/n_in
+                chosen = c
+            end
+        end
+    end
+
+    proc, dr, rt, _ = chosen
+    state.task_proc[idx] = proc
+    state.task_finish_ns[idx] = _claim_slot!(state, proc, dr, rt)
+    return proc
+end
+
 function greedy_assign_task!(state::ScheduleState, snap::MT.MetricsSnapshot,
                               dag_spec::DAGSpec, all_procs::Vector{Processor}, idx::Int)
     cache = _build_eft_cost_cache(snap, dag_spec, all_procs)
@@ -776,6 +847,11 @@ _greedy_arg_ready_time_ns_cached(::Any, ::MT.MetricsSnapshot, ::DAGSpec,
 
 const IG_DEFAULT_N_ITERS = 32
 const IG_DEFAULT_DESTROY_FRAC = 0.30
+# Restricted-candidate-list width for IG's stochastic reconstruction: a
+# destroyed task is placed uniformly at random among processors whose EFT is
+# within `(1+IG_DEFAULT_ALPHA)` of the best. `alpha=0` collapses to
+# deterministic greedy. See `greedy_assign_task_randomized!`.
+const IG_DEFAULT_ALPHA = 0.10
 # `Inf` disables the wall-clock stop.
 const IG_DEFAULT_TIME_LIMIT_SEC = Inf
 
@@ -936,20 +1012,33 @@ end
 function _replay_schedule!(state::ScheduleState, snap::MT.MetricsSnapshot,
                             dag_spec::DAGSpec, all_procs::Vector{Processor},
                             destroyed::AbstractSet{Int},
-                            cache::EFTCostCache)
+                            cache::EFTCostCache;
+                            rng::Union{Nothing,Random.AbstractRNG}=nothing,
+                            alpha::Float64=IG_DEFAULT_ALPHA)
     # Only the finish-time and proc-ready-time dicts need to be cleared for a
     # fresh replay; `task_proc` is either overwritten by `greedy_assign_task!`
     # (destroyed tasks) or read as the previous assignment (preserved tasks).
     # Since the loop walks task ids in increasing order and each iteration
     # only reads/writes `task_proc[idx]` for its own idx, there is no aliasing
     # hazard from skipping the copy.
+    #
+    # `rng === nothing` (the default) reconstructs destroyed tasks with the
+    # deterministic `greedy_assign_task!` — used by every non-IG caller,
+    # including SA (which always passes an empty `destroyed` set). When an rng
+    # is supplied (IG only), destroyed tasks use the randomized variant so IG
+    # actually searches. Greedy is untouched: `greedy_schedule!` never routes
+    # through here.
     empty!(state.task_finish_ns)
     empty!(state.proc_ready_ns)
     empty!(state.proc_slots)
 
     @inbounds for idx in 1:nv(dag_spec.g)
         if idx in destroyed
-            greedy_assign_task!(state, snap, dag_spec, all_procs, idx, cache)
+            if rng === nothing
+                greedy_assign_task!(state, snap, dag_spec, all_procs, idx, cache)
+            else
+                greedy_assign_task_randomized!(state, snap, dag_spec, all_procs, idx, cache, rng; alpha=alpha)
+            end
         else
             proc = state.task_proc[idx]
             w = get(cache.proc_to_idx, proc, 0)
@@ -981,8 +1070,10 @@ end
 function iterated_greedy_step!(state::ScheduleState, snap::MT.MetricsSnapshot,
                                 dag_spec::DAGSpec, all_procs::Vector{Processor},
                                 destroyed::AbstractSet{Int},
-                                cache::EFTCostCache)
-    return _replay_schedule!(state, snap, dag_spec, all_procs, destroyed, cache)
+                                cache::EFTCostCache;
+                                rng::Union{Nothing,Random.AbstractRNG}=nothing,
+                                alpha::Float64=IG_DEFAULT_ALPHA)
+    return _replay_schedule!(state, snap, dag_spec, all_procs, destroyed, cache; rng=rng, alpha=alpha)
 end
 
 function iterated_greedy_step!(state::ScheduleState, snap::MT.MetricsSnapshot,
@@ -1052,7 +1143,7 @@ function iterated_greedy_schedule!(state::ScheduleState, snap::MT.MetricsSnapsho
 
         _copy_state!(candidate, best_state)
 
-        iterated_greedy_step!(candidate, snap, dag_spec, all_procs, destroyed, cache)
+        iterated_greedy_step!(candidate, snap, dag_spec, all_procs, destroyed, cache; rng=rng)
         new_cost = cost_of_schedule(candidate)
         if new_cost < best_cost
             # Swap; ex-best buffers get overwritten next iter.
