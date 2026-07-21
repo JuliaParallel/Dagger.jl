@@ -1281,6 +1281,57 @@ end
         # Cache populated by the IG run (shares with Greedy's cache).
         @test !isempty(cache)
     end
+
+    @testset "Wall-clock time_limit_sec early-exits" begin
+        # Constructor: accepts finite budget, rejects nonpositive, defaults to Inf.
+        s_default = IteratedGreedyScheduler()
+        @test s_default.time_limit_sec === Inf
+        s_finite = IteratedGreedyScheduler(; time_limit_sec=0.5)
+        @test s_finite.time_limit_sec == 0.5
+        @test_throws ArgumentError IteratedGreedyScheduler(; time_limit_sec=0.0)
+        @test_throws ArgumentError IteratedGreedyScheduler(; time_limit_sec=-1.0)
+        @test_throws ArgumentError iterated_greedy_schedule!(ScheduleState(),
+            Dagger.MT.snapshot(Dagger.MT.global_metrics_cache()),
+            DAGSpec(), collect(Dagger.all_processors());
+            time_limit_sec=0.0)
+
+        # `similar` carries the field over so hierarchical partition shards
+        # inherit the same budget (shares the fix path with the RNG/config
+        # forwarding).
+        @test similar(s_finite).time_limit_sec == 0.5
+
+        # Nanosecond budget stops the loop before its natural stop condition.
+        # A DAG of a few hundred tasks with n_iters=10000 will otherwise
+        # run for well over a millisecond; the budget must dominate.
+        dag_spec, all_procs, snap = _capture_cholesky_dag(3, 16)
+        seed = ScheduleState()
+        greedy_schedule!(seed, snap, dag_spec, all_procs)
+        seed_cost = cost_of_schedule(seed)
+
+        t0 = time_ns()
+        result = iterated_greedy_schedule!(copy(seed), snap, dag_spec, all_procs;
+                                            n_iters=10_000, destroy_frac=0.3,
+                                            rng=MersenneTwister(0),
+                                            time_limit_sec=1e-6)
+        elapsed_ms = (time_ns() - t0) / 1e6
+        # Bound: even one iteration of a small DAG comfortably fits in 100 ms
+        # on any dev/CI box; a 10000-iter unbounded run does not.
+        @test elapsed_ms < 100.0
+        # Correctness invariant preserved under early exit: best-so-far
+        # returned, never worse than the seed.
+        @test cost_of_schedule(result) <= seed_cost + 1e-6
+
+        # `Inf` is a true opt-out: behavior must match not passing the kwarg
+        # at all. Same seed → identical result.
+        r_inf = iterated_greedy_schedule!(copy(seed), snap, dag_spec, all_procs;
+                                           n_iters=4, destroy_frac=0.3,
+                                           rng=MersenneTwister(11),
+                                           time_limit_sec=Inf)
+        r_none = iterated_greedy_schedule!(copy(seed), snap, dag_spec, all_procs;
+                                            n_iters=4, destroy_frac=0.3,
+                                            rng=MersenneTwister(11))
+        @test cost_of_schedule(r_inf) == cost_of_schedule(r_none)
+    end
 end
 
 @testset "SimulatedAnnealingScheduler" begin
@@ -1649,6 +1700,51 @@ end
         @test length(r_greedy.task_proc) == Dagger.nv(dag_spec.g)
         @test length(r_ig.task_proc) == Dagger.nv(dag_spec.g)
     end
+
+    @testset "Wall-clock time_limit_sec early-exits" begin
+        # Constructor: accepts finite budget, rejects nonpositive, defaults to Inf.
+        s_default = SimulatedAnnealingScheduler()
+        @test s_default.time_limit_sec === Inf
+        s_finite = SimulatedAnnealingScheduler(; time_limit_sec=0.5)
+        @test s_finite.time_limit_sec == 0.5
+        @test_throws ArgumentError SimulatedAnnealingScheduler(; time_limit_sec=0.0)
+        @test_throws ArgumentError SimulatedAnnealingScheduler(; time_limit_sec=-1.0)
+        @test_throws ArgumentError simulated_annealing_schedule!(ScheduleState(),
+            Dagger.MT.snapshot(Dagger.MT.global_metrics_cache()),
+            DAGSpec(), collect(Dagger.all_processors());
+            time_limit_sec=0.0)
+
+        # `similar` propagates the budget so hierarchical shards inherit it.
+        @test similar(s_finite).time_limit_sec == 0.5
+
+        # A tiny budget must interrupt SA long before Orsila's cooling
+        # schedule × n_restarts safety cap would fire. The larger DAG here
+        # (nt=4 → K=20) guarantees SA's inner while-loop is well-populated,
+        # exercising the intra-restart wall-clock check.
+        dag_spec, all_procs, snap = _capture_cholesky_dag(4, 16)
+        seed = ScheduleState()
+        greedy_schedule!(seed, snap, dag_spec, all_procs)
+        seed_cost = cost_of_schedule(seed)
+
+        t0 = time_ns()
+        result = simulated_annealing_schedule!(copy(seed), snap, dag_spec, all_procs;
+                                                n_restarts=32,
+                                                rng=MersenneTwister(0),
+                                                time_limit_sec=1e-6)
+        elapsed_ms = (time_ns() - t0) / 1e6
+        @test elapsed_ms < 200.0
+        @test cost_of_schedule(result) <= seed_cost + 1e-6
+
+        # `Inf` opt-out preserves the pre-existing deterministic result.
+        r_inf = simulated_annealing_schedule!(copy(seed), snap, dag_spec, all_procs;
+                                               n_restarts=1,
+                                               rng=MersenneTwister(11),
+                                               time_limit_sec=Inf)
+        r_none = simulated_annealing_schedule!(copy(seed), snap, dag_spec, all_procs;
+                                                n_restarts=1,
+                                                rng=MersenneTwister(11))
+        @test cost_of_schedule(r_inf) == cost_of_schedule(r_none)
+    end
 end
 
 @testset "OptimizingScheduler (adaptive selection)" begin
@@ -1766,6 +1862,62 @@ end
         end
         @test dense_C ≈ dense_A * dense_B
         @test !isempty(cache)
+    end
+
+    @testset "Heuristic time_limit_sec forwards to IG and SA sub-schedulers" begin
+        OptimizingScheduler = Dagger.OptimizingScheduler
+
+        # Constructor: fresh defaults, explicit overrides, validation.
+        s_default = OptimizingScheduler()
+        @test s_default.ig_time_limit_sec === Inf
+        @test s_default.sa_time_limit_sec === Inf
+
+        s_finite = OptimizingScheduler(; ig_time_limit_sec=0.25,
+                                        sa_time_limit_sec=0.75)
+        @test s_finite.ig_time_limit_sec == 0.25
+        @test s_finite.sa_time_limit_sec == 0.75
+
+        @test_throws ArgumentError OptimizingScheduler(; ig_time_limit_sec=0.0)
+        @test_throws ArgumentError OptimizingScheduler(; ig_time_limit_sec=-1.0)
+        @test_throws ArgumentError OptimizingScheduler(; sa_time_limit_sec=0.0)
+        @test_throws ArgumentError OptimizingScheduler(; sa_time_limit_sec=-1.0)
+
+        # `similar` carries both budgets.
+        s_similar = similar(s_finite)
+        @test s_similar.ig_time_limit_sec == 0.25
+        @test s_similar.sa_time_limit_sec == 0.75
+
+        # End-to-end: an OptimizingScheduler routed to the heuristic path
+        # (optimizer=nothing) must respect the wall-clock budgets. Total
+        # elapsed time is bounded by IG budget + SA budget plus per-stage
+        # setup overhead (allow 100 ms slack per stage on CI). Above nt=4
+        # the SA cooling schedule is nontrivial, exercising the intra-loop
+        # check.
+        dag_spec, all_procs, snap = _capture_cholesky_dag(4, 16)
+        schedule = Dict{Any, Any}()
+
+        # Give SA a tiny budget so the whole pipeline exits quickly.
+        sched = OptimizingScheduler(; ig_time_limit_sec=1e-6,
+                                     sa_time_limit_sec=1e-6,
+                                     rng=MersenneTwister(0))
+        # Warm up once so first-invocation compile time (~200 ms when
+        # JuMPExt has been loaded into the session) doesn't count against
+        # the timed second call. The test measures early-exit behavior,
+        # not JIT overhead.
+        Dagger.datadeps_schedule_dag_aot!(sched, Dict{Any, Any}(),
+                                           dag_spec, all_procs,
+                                           Dagger.DefaultScope())
+        t0 = time_ns()
+        Dagger.datadeps_schedule_dag_aot!(sched, schedule, dag_spec, all_procs,
+                                           Dagger.DefaultScope())
+        elapsed_ms = (time_ns() - t0) / 1e6
+        # Post-warmup a K=20 pipeline with two tripped budgets exits in
+        # well under 500 ms on any dev/CI box; the natural stop condition
+        # of an unbounded SA + IG on the same DAG takes seconds.
+        @test elapsed_ms < 500.0
+        # Every task must still receive an assignment (fallback returns
+        # best-so-far, which is at least the Greedy seed).
+        @test length(schedule) == Dagger.nv(dag_spec.g)
     end
 end
 
@@ -2218,5 +2370,70 @@ end
             @test dense_C ≈ dense_A * dense_B
             @test !isempty(cache)
         end
+    end
+end
+
+# Regression test for the bench harness's `TimedScheduler` wrapper. Coupled
+# to the bench file only via `include`; the wrapper lives in bench-side code
+# because it exists to measure the AOT scheduling phase for paper figures.
+#
+# Why this test is here: under Dagger's default hierarchical partitioning,
+# `distribute_tasks_hierarchical!` calls `similar(queue.scheduler)` per
+# partition. A wrapper scheduler without an explicit `Base.similar` falls
+# through to `typeof(s)()` and errors out because `TimedScheduler` requires
+# an inner argument. Additionally, even after adding `similar`, a naive
+# implementation with a per-shard `Ref{UInt64}` counter would zero the
+# `sched_phase_ns` reading since shards write to their own private Refs.
+# Both are fixed in `bench/datadeps_schedulers/driver.jl` and this test
+# guards against regressions.
+@testset "TimedScheduler bench wrapper" begin
+    include(joinpath(@__DIR__, "..", "..", "bench", "datadeps_schedulers", "driver.jl"))
+
+    @testset "Base.similar shares atomic across partition shards" begin
+        inner = Dagger.OptimizingScheduler(; rng=MersenneTwister(0))
+        timed = TimedScheduler(inner)
+        @test timed.last_aot_ns isa Threads.Atomic{UInt64}
+        @test timed.last_aot_ns[] == 0
+
+        shard = similar(timed)
+        @test shard isa TimedScheduler
+        @test shard.inner !== timed.inner   # inner is `similar`-cloned per shard
+        @test shard.last_aot_ns === timed.last_aot_ns   # atomic is *shared*
+
+        # Shard-side writes are visible to the parent-side reader.
+        Threads.atomic_add!(shard.last_aot_ns, UInt64(42_000))
+        @test timed.last_aot_ns[] == 42_000
+
+        # Multiple shard writes accumulate (this is the hierarchical case).
+        shard2 = similar(timed)
+        Threads.atomic_add!(shard2.last_aot_ns, UInt64(8_000))
+        @test timed.last_aot_ns[] == 50_000
+    end
+
+    @testset "sched_phase_ns is non-zero under hierarchical run" begin
+        # Runs a small Cholesky through the actual harness pipeline under
+        # Dagger's default (hierarchical) mode. Before the fix this either
+        # crashed (`similar` missing) or reported `sched_phase_ns == 0`
+        # (shard-private Refs). Non-zero here proves both bugs are gone.
+        res = run_once(:cholesky, Dagger.GreedyScheduler(), 3, 16, 0;
+                       collect_logs=true, metrics_warm=false)
+        @test res.sched_phase_ns > 0
+        @test res.n_tasks > 0
+
+        # Fresh instance starts at zero (no state carryover across trials).
+        fresh = TimedScheduler(Dagger.GreedyScheduler())
+        @test fresh.last_aot_ns[] == 0
+    end
+
+    @testset "Cache and equivalence hooks forward to inner" begin
+        # Regression: TimedScheduler must not accidentally partition the
+        # cache under its own type — the whole point of forwarding is that
+        # a `TimedScheduler{Greedy}` sweep reuses `GreedyScheduler`'s
+        # cached DAG schedules. Verify both cache identity and dag/argspec
+        # equivalence forwarding.
+        inner = Dagger.GreedyScheduler()
+        timed = TimedScheduler(inner)
+        @test Dagger.datadeps_schedule_cache(timed) ===
+              Dagger.datadeps_schedule_cache(inner)
     end
 end

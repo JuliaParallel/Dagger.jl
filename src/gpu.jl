@@ -134,3 +134,56 @@ function write_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, to::GPUR
         write_remainder!(copies, copies_offset, to[], to_ptr, n)
     end
 end
+"""
+    proc_concurrency(proc::Processor) -> Int
+
+Number of tasks a processor can execute concurrently.
+
+Defaults to `1`: one Dagger processor maps to one execution unit (e.g. a
+`ThreadProc` is a single Julia thread running one task at a time). GPU
+processor types whose backends multiplex several independent streams over one
+device override this with their stream count, so cost-model schedulers account
+for K-way in-processor parallelism when computing earliest-finish-time.
+
+This matters because EFT with an implicit capacity of 1 charges each queued
+task the full serial `proc_ready + task_time`, which on a multi-stream GPU
+overstates completion time by up to a factor of K and distorts placement
+decisions relative to single-slot CPU processors. Capacity-aware processor
+allocation is the model assumed by the task-scheduling literature these
+schedulers implement (Sinnen & Sousa 2005, §4.3).
+
+See `_slots_for` in `src/datadeps/scheduling.jl` for the K-slot readiness
+tracking that consumes this.
+"""
+proc_concurrency(::Processor) = 1
+
+"""
+    _translate_fn_for(::Type{F}, proc::Processor) -> Type or nothing
+
+Map a CPU-side function type to the accelerator-side function type that will
+actually execute on `proc`. Returns `nothing` when no mapping exists.
+
+Generated in lockstep with the `Dagger.move(::CPUProc, ::GPUProc, ::typeof(fn))`
+overloads in the vendor extensions -- the two are inherently paired, since that
+`move` is precisely what performs the substitution at dispatch time.
+"""
+_translate_fn_for(::Type, ::Processor) = nothing
+
+"""
+    _translate_sig_for(sig::Vector, proc::Processor) -> Vector or nothing
+
+Rewrite a CPU-side metrics signature into the form that `proc` would record
+after dispatch, or `nothing` if any element has no mapping.
+
+Needed because `MetricsTracker` keys runtime samples on the *post-dispatch*
+signature: a task submitted as `BLAS.gemm!(::Matrix{Float64}, ...)` is recorded
+on a GPU as `CUBLAS.gemm!(::CuArray{Float64,2,DeviceMemory}, ...)`. The
+scheduler only ever sees the pre-dispatch form, so without translation no GPU
+sample is reachable and `_runtime_lookup_chain` falls through to its
+processor-agnostic tier, handing back a CPU runtime for a GPU.
+
+This is a stopgap. The general fix is a processor-independent task identity
+recorded alongside the physical signature, which would make translation
+unnecessary for every backend at once.
+"""
+_translate_sig_for(::Vector, ::Processor) = nothing

@@ -1,0 +1,17 @@
+# Self-contained env for the Tuolumne MI300a one-shot benchmark.
+# Dagger is added by the script via Pkg.develop(path=<repo root>) so it runs the
+# paper's in-tree branch, not a registry release. AMDGPU replaces CUDA (the
+# hudson bench env) as the GPU backend for AMD APUs.
+#
+# First-time setup, on a LOGIN node with network access (see TUOLUMNE_README.md):
+#   julia --project=bench/datadeps_schedulers/tuolumne_env \
+#         -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
+[deps]
+AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
+HiGHS = "87dc4568-4c63-4d18-b0c0-bb2238e4078b"
+JuMP = "4076af6c-e467-56ae-b986-b466b2749572"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"

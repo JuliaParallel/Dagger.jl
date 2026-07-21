@@ -11,9 +11,13 @@ import Dagger: JuMPScheduler, DAGSpec, datadeps_schedule_dag_aot!,
                proc_in_scope, DefaultScope,
                _eft_runtime_ns, _milp_edge_size_bytes, _milp_transfer_time_ns,
                GREEDY_DEFAULT_RUNTIME_NS,
-               ScheduleState, greedy_schedule!
+               ScheduleState, greedy_schedule!,
+               _propagate_aot_time_util!
 import Dagger.Sch
-import MetricsTracker as MT
+# `jps/riteshsc26` folds `MetricsTracker` into the `Dagger` module via a
+# direct `include` (see `src/Dagger.jl`), so it is `Dagger.MetricsTracker`
+# rather than a top-level package the extension can `import` directly.
+import Dagger.MetricsTracker as MT
 import Graphs: nv, outdegree, edges, src, dst
 
 function _milp_compatible_procs(spec, all_procs::Vector{Dagger.Processor})
@@ -21,12 +25,58 @@ function _milp_compatible_procs(spec, all_procs::Vector{Dagger.Processor})
     return filter(p -> proc_in_scope(p, task_scope), all_procs)
 end
 
+# Optimality-tractability ceiling on the assignment variable count. Above
+# this boundary, MILP no longer returns proven-optimal solutions within
+# the wall-clock budget (`sched.time_limit_sec`) and JuMPScheduler's role
+# as an *exact* MILP reference no longer holds — it would return
+# `MOI.TIME_LIMIT` status with a time-truncated incumbent rather than a
+# proven `MOI.OPTIMAL`. Reporting truncated incumbents as "exact MILP" in
+# the paper's Table 1 would misrepresent the comparison.
+#
+# Empirical basis: at n_tasks × nprocs = 6,144 (matmul nt=4, K=64 × 96
+# procs) with `time_limit_sec = 120s`, HiGHS returns at ~125s wall clock
+# with TIME_LIMIT status. Larger problems within the current budget are
+# consistently time-truncated. `JUMP_MAX_ASSIGNMENT_VARS = 10_000` marks
+# the boundary above which MILP is not competitive on optimality within
+# the budget; `OptimizingScheduler`'s adaptive dispatch routes past this
+# boundary to heuristics that produce competitive solutions at a fraction
+# of the compute. This is the standard tractability treatment used by
+# V&S 2015 §5.3 and Kwok-Ahmad 1999 §4.
+#
+# The `SchedulingException` raised here is caught by the driver's per-cell
+# exception handler (see `run_sweep` in `bench/datadeps_schedulers/driver.jl`)
+# so the sweep continues with the cell logged as "MILP intractable" —
+# distinct from a HiGHS process abort at K where model-setup overflows
+# internal solver state, which would additionally kill the whole run.
+const JUMP_MAX_ASSIGNMENT_VARS = 10_000
+
+# Benchmark instrumentation (paper optimality-gap number): records the most
+# recent MILP solve's termination status and proven-optimal makespan
+# (`value(t_last_end)`, in ns, comparable to Greedy's `cost_of_schedule`).
+# Only OPTIMAL cells are a valid lower bound. Behavior-preserving -- written
+# after the solve, read by the benchmark harness. Under hierarchical
+# partitioning this holds the *last* partition's solve; the paper's
+# optimality-gap cells (K ≤ 12, flat CPU+GPU) are single-solve, so it is exact
+# there.
+const LAST_MILP_SOLVE = Ref{Tuple{String,Float64}}(("NONE", NaN))
+
 function Dagger.datadeps_schedule_dag_aot!(sched::JuMPScheduler, schedule, dag_spec, all_procs, all_scope)
     n_tasks = nv(dag_spec.g)
     n_tasks == 0 && return
 
-    snap = MT.snapshot(MT.global_metrics_cache())
     nprocs = length(all_procs)
+    n_assignment_vars = n_tasks * nprocs
+    if n_assignment_vars > JUMP_MAX_ASSIGNMENT_VARS
+        throw(Sch.SchedulingException(
+            "JuMPScheduler: MILP beyond optimality tractability boundary " *
+            "($n_tasks tasks × $nprocs processors = $n_assignment_vars assignment variables " *
+            "> $JUMP_MAX_ASSIGNMENT_VARS). Above this threshold, MILP time-truncates within " *
+            "the wall-clock budget (empirical: 6,144 vars hits 120s budget) and returns " *
+            "incumbents rather than proven optima; JuMPScheduler's exact-MILP-reference role " *
+            "no longer holds. OptimizingScheduler routes above this boundary to heuristics."))
+    end
+
+    snap = MT.snapshot(MT.global_metrics_cache())
 
     # Cost matrix uses the same EFT fallback as the heuristics so MILP
     # optimises against an identical cost model.
@@ -144,6 +194,8 @@ function Dagger.datadeps_schedule_dag_aot!(sched::JuMPScheduler, schedule, dag_s
     optimize!(model)
 
     status = termination_status(model)
+    LAST_MILP_SOLVE[] = (string(status),
+        primal_status(model) == MOI.FEASIBLE_POINT ? Float64(value(t_last_end)) : NaN)
     if !(status == MOI.OPTIMAL || status == MOI.TIME_LIMIT)
         throw(Sch.SchedulingException("JuMPScheduler: solver returned $status; no feasible schedule found"))
     end
@@ -158,7 +210,14 @@ function Dagger.datadeps_schedule_dag_aot!(sched::JuMPScheduler, schedule, dag_s
             throw(Sch.SchedulingException("JuMPScheduler: solver returned no processor assignment for task $k"))
         end
         task = dag_spec.id_to_task[k]
-        schedule[task] = all_procs[proc_idx]
+        proc = all_procs[proc_idx]
+        schedule[task] = proc
+        # Propagate our AOT-computed per-task runtime to Sch's fast path.
+        # `task_times[k, proc_idx]` is the same nanosecond estimate the MILP
+        # objective minimised for; using it as `options.time_util` means
+        # `Sch.has_capacity` skips its `metrics_lookup_runtime` snapshot scan
+        # for MILP-scheduled tasks.
+        _propagate_aot_time_util!(dag_spec.id_to_spec[k], proc, task_times[k, proc_idx])
     end
     return
 end

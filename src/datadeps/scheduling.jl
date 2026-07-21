@@ -380,6 +380,28 @@ function datadeps_schedule_dag_aot!(scheduler, schedule, dag_spec, all_procs, al
     return
 end
 
+"""
+    _propagate_aot_time_util!(spec::DTaskSpec, proc::Processor, task_time_ns::Real)
+
+Attach the AOT-computed per-task runtime to `spec.options.time_util` so
+`Sch.has_capacity` bypasses its metrics-snapshot scan. Keyed by
+`typeof(proc)`; value in seconds. No-op on non-finite / non-positive input.
+"""
+function _propagate_aot_time_util!(spec::DTaskSpec, proc::Processor, task_time_ns::Real)
+    task_time_ns > 0 || return
+    isfinite(task_time_ns) || return
+    time_util_secs = Float64(task_time_ns) / 1e9
+    T = typeof(proc)
+    if spec.options.time_util === nothing
+        spec.options.time_util = Dict{Type,Any}(T => time_util_secs)
+    else
+        spec.options.time_util[T] = time_util_secs
+    end
+    return
+end
+
+# EFTCostCache-aware wrapper is below, after the struct.
+
 const GREEDY_DEFAULT_RUNTIME_NS = UInt64(1_000_000_000)
 const GREEDY_DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
 const GREEDY_DEFAULT_OUTPUT_SIZE = UInt64(1_048_576)
@@ -391,11 +413,26 @@ const GREEDY_DEFAULT_OUTPUT_SIZE = UInt64(1_048_576)
 # to what the uncached path would compute, so cost-model claims and every
 # non-worsening / determinism / correctness invariant are preserved.
 struct EFTCostCache
-    task_times::Matrix{Float64}        
-    proc_compatible::Matrix{Bool}      
-    proc_spaces::Vector{MemorySpace}   
-    proc_to_idx::Dict{Processor, Int}  
-    move_rates::Matrix{Float64}        
+    task_times::Matrix{Float64}
+    proc_compatible::Matrix{Bool}
+    proc_spaces::Vector{MemorySpace}
+    proc_to_idx::Dict{Processor, Int}
+    move_rates::Matrix{Float64}
+end
+
+"""
+    _propagate_aot_time_util_from_cache!(dag_spec, cache, task_idx, proc)
+
+Pull the AOT runtime for `(task_idx, proc)` from `cache` and forward to
+`_propagate_aot_time_util!`. No-op if `proc` isn't cached.
+"""
+function _propagate_aot_time_util_from_cache!(dag_spec::DAGSpec, cache::EFTCostCache,
+                                                task_idx::Int, proc::Processor)
+    proc_idx = get(cache.proc_to_idx, proc, nothing)
+    proc_idx === nothing && return
+    task_time_ns = cache.task_times[task_idx, proc_idx]
+    _propagate_aot_time_util!(dag_spec.id_to_spec[task_idx], proc, task_time_ns)
+    return
 end
 
 function _build_eft_cost_cache(snap::MT.MetricsSnapshot, dag_spec::DAGSpec,
@@ -459,20 +496,70 @@ struct GreedyScheduler <: DataDepsScheduler end
 mutable struct ScheduleState
     task_finish_ns::Dict{Int, Float64}
     task_proc::Dict{Int, Processor}
+    # Aggregate readiness: when the processor is *fully* drained, i.e.
+    # `maximum(proc_slots[proc])`. Retained as the schedule-level summary and
+    # as the makespan input; equals `proc_slots[proc][1]` when concurrency is 1.
     proc_ready_ns::Dict{Processor, Float64}
+    # Per-execution-unit readiness: one completion timestamp per concurrent
+    # slot (`Dagger.proc_concurrency(proc)` of them). A `ThreadProc` has one
+    # slot and behaves exactly as the single-timestamp model did; a multi-stream
+    # GPU proc has one slot per stream, so K queued tasks finish in
+    # ceil(K/slots) rounds rather than being charged K serial task times.
+    # Capacity-aware processor allocation per Sinnen & Sousa 2005 §4.3.
+    proc_slots::Dict{Processor, Vector{Float64}}
 end
 
-ScheduleState() = ScheduleState(Dict{Int, Float64}(), Dict{Int, Processor}(), Dict{Processor, Float64}())
+ScheduleState() = ScheduleState(Dict{Int, Float64}(), Dict{Int, Processor}(),
+                                Dict{Processor, Float64}(), Dict{Processor, Vector{Float64}}())
 
 function Base.copy(s::ScheduleState)
-    return ScheduleState(copy(s.task_finish_ns), copy(s.task_proc), copy(s.proc_ready_ns))
+    return ScheduleState(copy(s.task_finish_ns), copy(s.task_proc), copy(s.proc_ready_ns),
+                         Dict{Processor, Vector{Float64}}(k => copy(v) for (k, v) in s.proc_slots))
 end
 
 function Base.empty!(s::ScheduleState)
     empty!(s.task_finish_ns)
     empty!(s.task_proc)
     empty!(s.proc_ready_ns)
+    empty!(s.proc_slots)
     return s
+end
+
+"""
+    _slots_for(state, proc) -> Vector{Float64}
+
+Per-slot completion timestamps for `proc`, allocated on first use with one
+entry per concurrent execution unit. Entries start at `0.0` (idle).
+"""
+function _slots_for(state::ScheduleState, proc::Processor)
+    slots = get(state.proc_slots, proc, nothing)
+    if slots === nothing
+        slots = zeros(Float64, max(1, Dagger.proc_concurrency(proc)))
+        state.proc_slots[proc] = slots
+    end
+    return slots
+end
+
+# Claim the earliest-free slot on `proc` for a task that cannot start before
+# `data_ready_ns`, returning the finish time. Mutates both the slot vector and
+# the aggregate `proc_ready_ns`. With one slot this is exactly
+# `max(data_ready, proc_ready) + runtime`, i.e. the pre-existing behaviour.
+function _claim_slot!(state::ScheduleState, proc::Processor, data_ready_ns::Float64,
+                      runtime_ns::Float64)
+    slots = _slots_for(state, proc)
+    idx = argmin(slots)
+    finish = max(data_ready_ns, slots[idx]) + runtime_ns
+    slots[idx] = finish
+    state.proc_ready_ns[proc] = maximum(slots)
+    return finish
+end
+
+# Finish time a task would have on `proc` without committing to it.
+function _peek_slot(state::ScheduleState, proc::Processor, data_ready_ns::Float64,
+                    runtime_ns::Float64)
+    slots = get(state.proc_slots, proc, nothing)
+    earliest = slots === nothing ? 0.0 : slots[argmin(slots)]
+    return max(data_ready_ns, earliest) + runtime_ns
 end
 
 # In-place copy: reuse `dst`'s dict buffers instead of allocating fresh ones.
@@ -487,6 +574,20 @@ function _copy_state!(dst::ScheduleState, src::ScheduleState)
     empty!(dst.task_proc)
     for (k, v) in src.task_proc
         dst.task_proc[k] = v
+    end
+    # Reuse slot vectors in place so the SA/IG hot loop stays allocation-free.
+    for (k, v) in src.proc_slots
+        dv = get(dst.proc_slots, k, nothing)
+        if dv === nothing || length(dv) != length(v)
+            dst.proc_slots[k] = copy(v)
+        else
+            copyto!(dv, v)
+        end
+    end
+    if length(dst.proc_slots) != length(src.proc_slots)
+        for k in collect(keys(dst.proc_slots))
+            haskey(src.proc_slots, k) || delete!(dst.proc_slots, k)
+        end
     end
     empty!(dst.proc_ready_ns)
     for (k, v) in src.proc_ready_ns
@@ -510,25 +611,27 @@ end
 
 function greedy_assign_task!(state::ScheduleState, snap::MT.MetricsSnapshot,
                               dag_spec::DAGSpec, all_procs::Vector{Processor}, idx::Int,
-                              cache::EFTCostCache)
+                              cache::EFTCostCache;
+                              last_writer::Union{Nothing,IdDict{Any,Int}}=nothing)
     spec = dag_spec.id_to_spec[idx]
     n_procs = length(all_procs)
 
     best_proc = nothing
     best_finish = Inf
+    best_data_ready = 0.0
+    best_runtime = 0.0
     @inbounds for w in 1:n_procs
         cache.proc_compatible[idx, w] || continue
         proc = all_procs[w]
         target_space = cache.proc_spaces[w]
-        data_ready_ns = _greedy_earliest_data_ready_ns_cached(snap, dag_spec, spec, target_space, state, cache, w)
-        proc_avail = get(state.proc_ready_ns, proc, 0.0)
-        start_ns = max(data_ready_ns, proc_avail)
-
+        data_ready_ns = _greedy_earliest_data_ready_ns_cached(snap, dag_spec, spec, target_space, state, cache, w; last_writer=last_writer)
         runtime_ns = cache.task_times[idx, w]
-        finish = start_ns + runtime_ns
+        finish = _peek_slot(state, proc, data_ready_ns, runtime_ns)
         if finish < best_finish
             best_finish = finish
             best_proc = proc
+            best_data_ready = data_ready_ns
+            best_runtime = runtime_ns
         end
     end
 
@@ -538,9 +641,81 @@ function greedy_assign_task!(state::ScheduleState, snap::MT.MetricsSnapshot,
     end
 
     state.task_proc[idx] = best_proc
-    state.task_finish_ns[idx] = best_finish
-    state.proc_ready_ns[best_proc] = best_finish
+    # Commit to the slot that produced `best_finish`; `_claim_slot!` recomputes
+    # the same value from the same earliest-free slot.
+    state.task_finish_ns[idx] = _claim_slot!(state, best_proc, best_data_ready, best_runtime)
     return best_proc
+end
+
+"""
+    greedy_assign_task_randomized!(state, snap, dag_spec, all_procs, idx, cache, rng; alpha)
+
+Stochastic variant of [`greedy_assign_task!`](@ref) used only by IG's
+reconstruction path. Instead of always taking the single lowest-EFT processor
+(strict `<`, fully deterministic), it builds a restricted candidate list of
+every compatible processor whose peeked finish time is within `(1+alpha)` of
+the best, then picks one uniformly at random.
+
+This is what gives Iterated Greedy a real search neighborhood. With the
+deterministic `greedy_assign_task!`, `_replay_schedule!` provably reproduces
+the greedy seed exactly on every iteration (preserved tasks stay at their
+original procs, destroyed tasks are re-derived identically), so IG could never
+improve on Greedy — its neighborhood was a single point. Randomized
+reconstruction is the stochastic-construction step of Ruiz & Stützle (2007);
+`alpha=0` recovers the deterministic behavior.
+
+Uses the same K-slot peek/claim helpers as `greedy_assign_task!`, so capacity
+accounting is identical; only the choice among near-best procs differs.
+"""
+function greedy_assign_task_randomized!(state::ScheduleState, snap::MT.MetricsSnapshot,
+                                        dag_spec::DAGSpec, all_procs::Vector{Processor},
+                                        idx::Int, cache::EFTCostCache,
+                                        rng::Random.AbstractRNG;
+                                        alpha::Float64=IG_DEFAULT_ALPHA)
+    spec = dag_spec.id_to_spec[idx]
+    n_procs = length(all_procs)
+
+    # Single pass: peek every compatible proc, remember what `_claim_slot!`
+    # will need (data_ready, runtime), and track the best finish. Peeking does
+    # not mutate slot state, so all candidates are evaluated against the same
+    # partial schedule — exactly as the deterministic variant does.
+    cand = Tuple{Processor,Float64,Float64,Float64}[]
+    best_finish = Inf
+    @inbounds for w in 1:n_procs
+        cache.proc_compatible[idx, w] || continue
+        proc = all_procs[w]
+        target_space = cache.proc_spaces[w]
+        data_ready_ns = _greedy_earliest_data_ready_ns_cached(snap, dag_spec, spec, target_space, state, cache, w)
+        runtime_ns = cache.task_times[idx, w]
+        finish = _peek_slot(state, proc, data_ready_ns, runtime_ns)
+        push!(cand, (proc, data_ready_ns, runtime_ns, finish))
+        finish < best_finish && (best_finish = finish)
+    end
+
+    if isempty(cand)
+        task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
+        throw(Sch.SchedulingException("IteratedGreedyScheduler: no compatible processor for task $idx (scope: $task_scope)"))
+    end
+
+    # Uniform choice among candidates within the RCL threshold, via reservoir
+    # sampling so no second allocation is needed. `best_finish` is always
+    # in-threshold, so at least one candidate is always selectable.
+    threshold = best_finish * (1.0 + alpha)
+    chosen = cand[1]
+    n_in = 0
+    @inbounds for c in cand
+        if c[4] <= threshold
+            n_in += 1
+            if rand(rng) * n_in < 1.0   # replace with probability 1/n_in
+                chosen = c
+            end
+        end
+    end
+
+    proc, dr, rt, _ = chosen
+    state.task_proc[idx] = proc
+    state.task_finish_ns[idx] = _claim_slot!(state, proc, dr, rt)
+    return proc
 end
 
 function greedy_assign_task!(state::ScheduleState, snap::MT.MetricsSnapshot,
@@ -552,13 +727,32 @@ end
 function greedy_schedule!(state::ScheduleState, snap::MT.MetricsSnapshot,
                           dag_spec::DAGSpec, all_procs::Vector{Processor};
                           task_order::Union{Nothing, AbstractVector{Int}}=nothing,
-                          cache::Union{EFTCostCache, Nothing}=nothing)
+                          cache::Union{EFTCostCache, Nothing}=nothing,
+                          producer_finish::Bool=false)
     if cache === nothing
         cache = _build_eft_cost_cache(snap, dag_spec, all_procs)
     end
     order = task_order === nothing ? (1:nv(dag_spec.g)) : task_order
+    # When `producer_finish` is on, track the most recent task that wrote each
+    # Chunk (by object identity) so a consumer's data-ready time includes the
+    # producer's finish (see `_greedy_earliest_data_ready_ns_cached`). Populated
+    # as we walk tasks in index order (a valid topological order), so every
+    # producer is registered before its consumers are scheduled. Off by default,
+    # so IG/SA seeds (which drive an untouched, producer-finish-free replay) are
+    # unchanged.
+    last_writer = producer_finish ? IdDict{Any,Int}() : nothing
     for idx in order
-        greedy_assign_task!(state, snap, dag_spec, all_procs, idx, cache)
+        greedy_assign_task!(state, snap, dag_spec, all_procs, idx, cache; last_writer=last_writer)
+        if last_writer !== nothing
+            spec = dag_spec.id_to_spec[idx]
+            for arg in spec.fargs
+                raw, deps = unwrap_inout(value(arg))
+                raw isa Chunk || continue
+                for (_dep_mod, _readdep, writedep) in deps
+                    writedep && (last_writer[raw] = idx)
+                end
+            end
+        end
     end
     return state
 end
@@ -567,10 +761,13 @@ function datadeps_schedule_dag_aot!(scheduler::GreedyScheduler, schedule, dag_sp
     snap = MT.snapshot(MT.global_metrics_cache())
     cache = _build_eft_cost_cache(snap, dag_spec, all_procs)
     state = ScheduleState()
-    greedy_schedule!(state, snap, dag_spec, all_procs; cache=cache)
+    greedy_schedule!(state, snap, dag_spec, all_procs; cache=cache, producer_finish=true)
     for idx in 1:nv(dag_spec.g)
         task = dag_spec.id_to_task[idx]
-        schedule[task] = state.task_proc[idx]
+        proc = state.task_proc[idx]
+        schedule[task] = proc
+        # Propagate our AOT-computed per-task runtime to Sch's fast path.
+        _propagate_aot_time_util_from_cache!(dag_spec, cache, idx, proc)
     end
     return
 end
@@ -624,11 +821,44 @@ end
 
 function _greedy_earliest_data_ready_ns_cached(snap, dag_spec::DAGSpec, spec,
                                                  target_space::MemorySpace, state::ScheduleState,
-                                                 cache::EFTCostCache, target_w::Int)
+                                                 cache::EFTCostCache, target_w::Int;
+                                                 last_writer::Union{Nothing,IdDict{Any,Int}}=nothing)
     earliest_ns = 0.0
     for arg in spec.fargs
         raw_val, _ = unwrap_inout(value(arg))
         ready_ns = _greedy_arg_ready_time_ns_cached(raw_val, snap, dag_spec, target_space, state, cache, target_w)
+        # Producer-finish term. For a `Chunk` argument, the base helper above
+        # accounts only for moving the tile from its *initial* materialized
+        # location -- it has no notion of a producer task. So greedy is blind to
+        # the DAG's critical path: a consumer looks ready at t=0 even though its
+        # input is still being computed. When `last_writer` is supplied (built
+        # by `greedy_schedule!` as it walks tasks in index order), look up the
+        # most recent task that wrote this exact Chunk and require the consumer
+        # to wait for that producer to finish AND for its output to reach the
+        # target proc. Additive: if there is no prior writer (root/materialized
+        # data) the term is skipped and behavior is unchanged. `last_writer` is
+        # only threaded from the standalone GreedyScheduler; IG/SA seeds pass
+        # `nothing`, keeping them consistent with their (untouched) replay.
+        if last_writer !== nothing && raw_val isa Chunk
+            wid = get(last_writer, raw_val, nothing)
+            if wid !== nothing
+                wfinish = get(state.task_finish_ns, wid, 0.0)
+                wproc = get(state.task_proc, wid, nothing)
+                if wproc !== nothing
+                    prod_ready = wfinish
+                    dep_w = get(cache.proc_to_idx, wproc, 0)
+                    if dep_w != 0 && cache.proc_spaces[dep_w] != target_space
+                        rate = cache.move_rates[dep_w, target_w]
+                        if rate > 0.0
+                            sz = raw_val.handle.size === nothing ?
+                                 GREEDY_DEFAULT_OUTPUT_SIZE : UInt64(raw_val.handle.size)
+                            prod_ready += Float64(sz) / rate * 1e9
+                        end
+                    end
+                    ready_ns = max(ready_ns, prod_ready)
+                end
+            end
+        end
         if ready_ns > earliest_ns
             earliest_ns = ready_ns
         end
@@ -670,6 +900,49 @@ _greedy_arg_ready_time_ns_cached(::Any, ::MT.MetricsSnapshot, ::DAGSpec,
 
 const IG_DEFAULT_N_ITERS = 32
 const IG_DEFAULT_DESTROY_FRAC = 0.30
+# Ruiz & Stützle (2005/2007) §3.4 tune the destruction size to a *fixed count*
+# d, with d=4 the best-performing level (not statistically different from 3 or
+# 5; very low and very high d are significantly worse). Our DAGs are small
+# (K=10..64), so we keep `destroy_frac` as an escape hatch but cap the actual
+# count at `IG_DEFAULT_DESTROY_COUNT`, which yields d=4 for K>=14 and d=3 at
+# K=10 -- both within the paper's tuned-optimal band.
+const IG_DEFAULT_DESTROY_COUNT = 4
+# Ruiz & Stützle §3.2 use an SA-like acceptance criterion with a *constant*
+# temperature (eq. 1, after Osman & Potts 1989):
+#   Temperature = T * (sum_ij p_ij) / (n * m * 10) = T * mean(p_ij) / 10
+# with T the only acceptance parameter. Their §3.4 DOE finds T=0.5 best (0.0 =
+# strict/greedy acceptance stagnates). We compute the mean over compatible
+# (task, proc) runtimes; see `_ig_acceptance_temperature`.
+const IG_DEFAULT_TEMPERATURE = 0.5
+# Restricted-candidate-list width for IG's stochastic reconstruction: a
+# destroyed task is placed uniformly at random among processors whose EFT is
+# within `(1+IG_DEFAULT_ALPHA)` of the best. `alpha=0` collapses to
+# deterministic greedy. NOTE: Ruiz & Stützle's construction is deterministic
+# NEH best-insertion; the sequence-position neighborhood of the flowshop makes
+# that construction non-trivial. Task->processor assignment has no such
+# neighborhood (a re-derived task returns to the same proc under pinned
+# predecessors), so we randomize the construction GRASP-style to give IG a real
+# search space. This is a deliberate adaptation, not the paper's mechanism.
+const IG_DEFAULT_ALPHA = 0.10
+# `Inf` disables the wall-clock stop.
+const IG_DEFAULT_TIME_LIMIT_SEC = Inf
+
+# Ruiz & Stützle §3.2 eq. (1): constant acceptance temperature proportional to
+# the mean per-task work. Averaged over compatible (task, proc) pairs only, so
+# the `GREEDY_DEFAULT_RUNTIME_NS` placeholders written for incompatible pairs
+# in the cost cache do not inflate the scale.
+function _ig_acceptance_temperature(cache::EFTCostCache, temperature::Float64)
+    total = 0.0
+    count = 0
+    n_tasks, n_procs = size(cache.task_times)
+    @inbounds for k in 1:n_tasks, w in 1:n_procs
+        cache.proc_compatible[k, w] || continue
+        total += cache.task_times[k, w]
+        count += 1
+    end
+    count == 0 && return 0.0
+    return temperature * (total / count) / 10.0
+end
 
 """
     IteratedGreedyScheduler{S<:DataDepsScheduler} <: DataDepsScheduler
@@ -691,6 +964,11 @@ Fields:
 - `n_iters::Int`        — destroy/reinsert cycles per call.
 - `destroy_frac::Float64` — fraction of tasks destroyed per cycle, in (0, 1].
 - `rng::Random.AbstractRNG` — RNG used for destroy-set sampling.
+- `time_limit_sec::Float64` — wall-clock stop, checked between iterations.
+                              `Inf` (default) disables the stop; a finite
+                              value returns the best-so-far the moment the
+                              budget is exceeded, so the scheduler always
+                              terminates within one iteration of the limit.
 
 The schedule cache is delegated to `inner` so entries are partitioned by
 inner-scheduler type, matching the `TimedScheduler` wrapper convention used
@@ -701,23 +979,32 @@ struct IteratedGreedyScheduler{S<:DataDepsScheduler, R<:Random.AbstractRNG} <: D
     n_iters::Int
     destroy_frac::Float64
     rng::R
+    time_limit_sec::Float64
 
     function IteratedGreedyScheduler(inner::S;
                                      n_iters::Integer=IG_DEFAULT_N_ITERS,
                                      destroy_frac::Real=IG_DEFAULT_DESTROY_FRAC,
-                                     rng::R=Random.default_rng()) where {S<:DataDepsScheduler, R<:Random.AbstractRNG}
+                                     rng::R=Random.default_rng(),
+                                     time_limit_sec::Real=IG_DEFAULT_TIME_LIMIT_SEC) where {S<:DataDepsScheduler, R<:Random.AbstractRNG}
         n_iters >= 0 || throw(ArgumentError("IteratedGreedyScheduler: n_iters must be ≥ 0, got $n_iters"))
         (destroy_frac > 0 && destroy_frac <= 1) ||
             throw(ArgumentError("IteratedGreedyScheduler: destroy_frac must be in (0, 1], got $destroy_frac"))
-        return new{S, R}(inner, Int(n_iters), Float64(destroy_frac), rng)
+        time_limit_sec > 0 || throw(ArgumentError("IteratedGreedyScheduler: time_limit_sec must be > 0, got $time_limit_sec"))
+        return new{S, R}(inner, Int(n_iters), Float64(destroy_frac), rng, Float64(time_limit_sec))
     end
 end
 
 IteratedGreedyScheduler(; kwargs...) = IteratedGreedyScheduler(GreedyScheduler(); kwargs...)
 
-# Forward equivalence / cache / argspec hooks so cache reuse is partitioned by
-# the inner scheduler's type, not by IG's own wrapper type. Same idea as the
-# bench's TimedScheduler wrapper.
+# Hierarchical partitions need independent RNGs; deep-copy so shards don't race.
+Base.similar(s::IteratedGreedyScheduler) =
+    IteratedGreedyScheduler(similar(s.inner);
+                            n_iters=s.n_iters,
+                            destroy_frac=s.destroy_frac,
+                            rng=copy(s.rng),
+                            time_limit_sec=s.time_limit_sec)
+
+# Delegate cache/equivalence to the inner scheduler so its type owns cache keys.
 datadeps_schedule_cache(sched::IteratedGreedyScheduler) =
     datadeps_schedule_cache(sched.inner)
 datadeps_dag_equivalent(sched::IteratedGreedyScheduler, dspec1::DAGSpec, dspec2::DAGSpec) =
@@ -740,34 +1027,107 @@ Mutates and returns `state`. The caller is responsible for providing a
 freshly-`copy(prev_state)` if the previous state must be preserved on
 rejection.
 """
+# `spec.fargs` is a `Tuple` for typed tasks; `@view fargs[2:end]` doesn't work
+# on tuples.
+_eft_tail_args(fargs::Tuple) = Base.tail(fargs)
+_eft_tail_args(fargs::AbstractVector) = @view fargs[2:end]
+
+# Diagnostics for the signature lookup: set `DAGGER_TRACE_EFT_LOOKUP=1` to
+# count hits/misses and dump the first few missed signatures. Gated behind a
+# `Ref{Bool}` load because `_eft_runtime_ns` runs O(tasks x procs) times.
+const TRACE_EFT_LOOKUP = Ref{Union{Nothing,Bool}}(nothing)
+const EFT_LOOKUP_HITS = Threads.Atomic{Int}(0)
+const EFT_LOOKUP_MISSES = Threads.Atomic{Int}(0)
+const EFT_LOOKUP_TRANSLATED = Threads.Atomic{Int}(0)
+function trace_eft_lookup()
+    tr = TRACE_EFT_LOOKUP[]
+    tr === nothing || return tr
+    tr = get(ENV, "DAGGER_TRACE_EFT_LOOKUP", "0") != "0"
+    TRACE_EFT_LOOKUP[] = tr
+    return tr
+end
+
+# `spec.fargs` carry datadeps annotations (`In`/`Out`/`InOut`/`Deps`), which are
+# stripped before the task executes. `Sch.signature` resolves an annotated arg
+# through `chunktype(::InOut{T}) where T = T` -- a *type-level* unwrap that
+# yields the `Chunk{...}` type parameter and cannot recurse further. The
+# recorded signature, built at execution time, sees a bare `Chunk` instance and
+# so resolves through `chunktype(c::Chunk) = c.chunktype` to the materialized
+# type (e.g. `Matrix{Float64}`). Unwrapping the annotation here hands
+# `Sch.signature` the same bare `Chunk` the write side saw, so both sides
+# construct an identical signature and `LookupExact(SignatureMetric(), sig)` can
+# match. Without this every lookup misses all four tiers of
+# `_runtime_lookup_chain` and every task falls back to
+# `GREEDY_DEFAULT_RUNTIME_NS`, flattening the cost model.
+_eft_unwrap_arg(arg) = with_value(arg, first(unwrap_inout(value(arg))))
+
 function _eft_runtime_ns(snap::MT.MetricsSnapshot, spec, proc::Processor)
-    sig = Sch.signature(spec.fargs[1], @view spec.fargs[2:end]).sig
+    f = _eft_unwrap_arg(spec.fargs[1])
+    tail = map(_eft_unwrap_arg, _eft_tail_args(spec.fargs))
+    sig = Sch.signature(f, tail).sig
     worker_id = root_worker_id(proc)
-    runtime_lookup = metrics_lookup_runtime_median(snap, sig, proc, worker_id)
+    # Try the accelerator-side signature *first* on procs that have a
+    # translation. The untranslated lookup cannot be used as the gate: the last
+    # tier of `_runtime_lookup_chain` drops the processor constraint entirely,
+    # so on a GPU it matches the CPU-recorded entries and returns a CPU runtime
+    # instead of missing. Translating only after a miss would therefore be dead
+    # code. Falling back to the untranslated lookup keeps a CPU-derived estimate
+    # (still better than the 1s default) when a signature has no mapping.
+    translated_sig = _translate_sig_for(sig, proc)
+    runtime_lookup = nothing
+    via_translation = false
+    if translated_sig !== nothing
+        runtime_lookup = metrics_lookup_runtime_median(snap, translated_sig, proc, worker_id)
+        via_translation = runtime_lookup !== nothing
+    end
+    if runtime_lookup === nothing
+        runtime_lookup = metrics_lookup_runtime_median(snap, sig, proc, worker_id)
+    end
+    if trace_eft_lookup()
+        if runtime_lookup === nothing
+            n = Threads.atomic_add!(EFT_LOOKUP_MISSES, 1)
+            n < 5 && @warn "EFT lookup MISS" sig proc
+        else
+            Threads.atomic_add!(EFT_LOOKUP_HITS, 1)
+            via_translation && Threads.atomic_add!(EFT_LOOKUP_TRANSLATED, 1)
+        end
+    end
     return runtime_lookup === nothing ? Float64(GREEDY_DEFAULT_RUNTIME_NS) : Float64(runtime_lookup)
 end
 
-# Replays the schedule in increasing task-index order: destroyed tasks are
-# reassigned via `greedy_assign_task!`; preserved tasks keep their proc but
-# their finish times are recomputed fresh from the now-current state. The
-# recompute (rather than preserving stale finish times) is required for SA
-# to evaluate ΔC against the schedule's true makespan.
+# Replay in task-index order; destroyed tasks reassign via
+# `greedy_assign_task!`, preserved tasks recompute finish times fresh (SA needs
+# true makespan to evaluate ΔC).
 function _replay_schedule!(state::ScheduleState, snap::MT.MetricsSnapshot,
                             dag_spec::DAGSpec, all_procs::Vector{Processor},
                             destroyed::AbstractSet{Int},
-                            cache::EFTCostCache)
+                            cache::EFTCostCache;
+                            rng::Union{Nothing,Random.AbstractRNG}=nothing,
+                            alpha::Float64=IG_DEFAULT_ALPHA)
     # Only the finish-time and proc-ready-time dicts need to be cleared for a
     # fresh replay; `task_proc` is either overwritten by `greedy_assign_task!`
     # (destroyed tasks) or read as the previous assignment (preserved tasks).
     # Since the loop walks task ids in increasing order and each iteration
     # only reads/writes `task_proc[idx]` for its own idx, there is no aliasing
     # hazard from skipping the copy.
+    #
+    # `rng === nothing` (the default) reconstructs destroyed tasks with the
+    # deterministic `greedy_assign_task!` — used by every non-IG caller,
+    # including SA (which always passes an empty `destroyed` set). When an rng
+    # is supplied (IG only), destroyed tasks use the randomized variant so IG
+    # actually searches. Greedy is untouched: `greedy_schedule!` never routes
+    # through here.
     empty!(state.task_finish_ns)
     empty!(state.proc_ready_ns)
+    empty!(state.proc_slots)
 
     @inbounds for idx in 1:nv(dag_spec.g)
         if idx in destroyed
-            greedy_assign_task!(state, snap, dag_spec, all_procs, idx, cache)
+            if rng === nothing
+                greedy_assign_task!(state, snap, dag_spec, all_procs, idx, cache)
+            else
+                greedy_assign_task_randomized!(state, snap, dag_spec, all_procs, idx, cache, rng; alpha=alpha)
+            end
         else
             proc = state.task_proc[idx]
             w = get(cache.proc_to_idx, proc, 0)
@@ -781,12 +1141,7 @@ function _replay_schedule!(state::ScheduleState, snap::MT.MetricsSnapshot,
                 data_ready_ns = _greedy_earliest_data_ready_ns_cached(snap, dag_spec, spec, target_space, state, cache, w)
                 runtime_ns = cache.task_times[idx, w]
             end
-            proc_avail = get(state.proc_ready_ns, proc, 0.0)
-            start_ns = max(data_ready_ns, proc_avail)
-            finish = start_ns + runtime_ns
-
-            state.task_finish_ns[idx] = finish
-            state.proc_ready_ns[proc] = max(get(state.proc_ready_ns, proc, 0.0), finish)
+            state.task_finish_ns[idx] = _claim_slot!(state, proc, data_ready_ns, runtime_ns)
         end
     end
     return state
@@ -804,8 +1159,10 @@ end
 function iterated_greedy_step!(state::ScheduleState, snap::MT.MetricsSnapshot,
                                 dag_spec::DAGSpec, all_procs::Vector{Processor},
                                 destroyed::AbstractSet{Int},
-                                cache::EFTCostCache)
-    return _replay_schedule!(state, snap, dag_spec, all_procs, destroyed, cache)
+                                cache::EFTCostCache;
+                                rng::Union{Nothing,Random.AbstractRNG}=nothing,
+                                alpha::Float64=IG_DEFAULT_ALPHA)
+    return _replay_schedule!(state, snap, dag_spec, all_procs, destroyed, cache; rng=rng, alpha=alpha)
 end
 
 function iterated_greedy_step!(state::ScheduleState, snap::MT.MetricsSnapshot,
@@ -831,33 +1188,56 @@ function iterated_greedy_schedule!(state::ScheduleState, snap::MT.MetricsSnapsho
                                     n_iters::Integer=IG_DEFAULT_N_ITERS,
                                     destroy_frac::Real=IG_DEFAULT_DESTROY_FRAC,
                                     rng::Random.AbstractRNG=Random.default_rng(),
-                                    cache::Union{EFTCostCache, Nothing}=nothing)
+                                    cache::Union{EFTCostCache, Nothing}=nothing,
+                                    time_limit_sec::Real=IG_DEFAULT_TIME_LIMIT_SEC)
     n_iters >= 0 || throw(ArgumentError("iterated_greedy_schedule!: n_iters must be ≥ 0"))
     (destroy_frac > 0 && destroy_frac <= 1) ||
         throw(ArgumentError("iterated_greedy_schedule!: destroy_frac must be in (0, 1]"))
+    time_limit_sec > 0 || throw(ArgumentError("iterated_greedy_schedule!: time_limit_sec must be > 0"))
     n_tasks = nv(dag_spec.g)
     (n_tasks == 0 || n_iters == 0) && return state
     if cache === nothing
         cache = _build_eft_cost_cache(snap, dag_spec, all_procs)
     end
 
+    # Two tracked solutions, per Ruiz & Stützle §3.2 (and standard SA/ILS):
+    #   `best_*`      — best found so far; only ever improves; returned.
+    #   `incumbent_*` — the current solution the search walks from; the SA-like
+    #                   acceptance criterion may move it *uphill* to escape
+    #                   local optima. Destruction always operates on the
+    #                   incumbent, not on best. Conflating the two (accepting a
+    #                   worse solution *into* best) would forfeit the guarantee
+    #                   that IG never returns worse than its greedy seed.
     best_state = copy(state)
     best_cost = cost_of_schedule(best_state)
+    incumbent = copy(state)
+    incumbent_cost = best_cost
 
-    # Pre-allocate candidate once; reset in place via `_copy_state!` and swap
-    # references on accept to avoid Dict allocations in the hot loop.
-    candidate = copy(best_state)
+    # Reset in place via `_copy_state!` to avoid Dict allocations in the loop.
+    candidate = copy(state)
+
+    # Ruiz & Stützle §3.4: fixed destruction count d=4, capped at K. See
+    # `IG_DEFAULT_DESTROY_COUNT`. `destroy_frac` is retained as an escape hatch.
     n_destroy = max(1, ceil(Int, destroy_frac * n_tasks))
-    n_destroy = min(n_destroy, n_tasks)
+    n_destroy = min(n_destroy, IG_DEFAULT_DESTROY_COUNT, n_tasks)
+
+    # Constant acceptance temperature, eq. (1). Zero temperature recovers strict
+    # (greedy) acceptance.
+    temperature = _ig_acceptance_temperature(cache, IG_DEFAULT_TEMPERATURE)
+
     # Shared buffers reused across iters to avoid allocations.
     perm_buf = collect(1:n_tasks)
     destroyed = Set{Int}()
     sizehint!(destroyed, n_destroy)
 
+    # `Inf` disables the guard via typemax(UInt64); unsigned elapsed subtraction.
+    start_ns = time_ns()
+    budget_ns = isinf(time_limit_sec) ? typemax(UInt64) :
+                round(UInt64, time_limit_sec * 1e9)
+
     for _ in 1:n_iters
-        # Sample `n_destroy` distinct task IDs uniformly at random. Doing a
-        # partial Fisher–Yates on perm_buf is O(n_destroy) and avoids
-        # allocating a fresh randperm vector each iter.
+        (time_ns() - start_ns) >= budget_ns && break
+        # Partial Fisher-Yates on perm_buf: O(n_destroy), no fresh allocations.
         @inbounds for i in 1:n_destroy
             j = rand(rng, i:n_tasks)
             perm_buf[i], perm_buf[j] = perm_buf[j], perm_buf[i]
@@ -867,17 +1247,23 @@ function iterated_greedy_schedule!(state::ScheduleState, snap::MT.MetricsSnapsho
             push!(destroyed, perm_buf[i])
         end
 
-        # Reset candidate to the current best in place, then perturb.
-        _copy_state!(candidate, best_state)
-
-        iterated_greedy_step!(candidate, snap, dag_spec, all_procs, destroyed, cache)
+        # Destruct + (randomized) reconstruct from the *incumbent*.
+        _copy_state!(candidate, incumbent)
+        iterated_greedy_step!(candidate, snap, dag_spec, all_procs, destroyed, cache; rng=rng)
         new_cost = cost_of_schedule(candidate)
+
+        # Track best-so-far (monotone).
         if new_cost < best_cost
-            # Adopt the candidate as the new best by swapping references.
-            # After the swap, `candidate` holds the previous best_state's
-            # buffers (stale data, overwritten by _copy_state! next iter).
-            best_state, candidate = candidate, best_state
+            _copy_state!(best_state, candidate)
             best_cost = new_cost
+        end
+
+        # SA-like acceptance into the incumbent, eq. (1). Better always accepted;
+        # worse accepted with probability exp(-ΔC / temperature).
+        ΔC = new_cost - incumbent_cost
+        if ΔC < 0 || (temperature > 0 && rand(rng) < exp(-ΔC / temperature))
+            _copy_state!(incumbent, candidate)
+            incumbent_cost = new_cost
         end
     end
     return best_state
@@ -896,6 +1282,7 @@ function datadeps_schedule_dag_aot!(scheduler::IteratedGreedyScheduler,
     greedy_schedule!(state, snap, dag_spec, all_procs; cache=cache)
 
     state = iterated_greedy_schedule!(state, snap, dag_spec, all_procs;
+                                      time_limit_sec=scheduler.time_limit_sec,
                                        n_iters=scheduler.n_iters,
                                        destroy_frac=scheduler.destroy_frac,
                                        rng=scheduler.rng,
@@ -903,7 +1290,9 @@ function datadeps_schedule_dag_aot!(scheduler::IteratedGreedyScheduler,
 
     @inbounds for idx in 1:n_tasks
         task = dag_spec.id_to_task[idx]
-        schedule[task] = state.task_proc[idx]
+        proc = state.task_proc[idx]
+        schedule[task] = proc
+        _propagate_aot_time_util_from_cache!(dag_spec, cache, idx, proc)
     end
     return
 end
@@ -912,9 +1301,20 @@ end
 
 # Defaults follow Orsila, Salminen, Hämäläinen 2008 §4.3 and §5.3.
 const SA_DEFAULT_Q = 0.95
-const SA_DEFAULT_K = 1.0
+# Orsila §4.3: k widens the closed-form temperature range [Tf, T0] (Eq. 18/19).
+# Suitable values are [1, 9]; k=1 gives ~27% final-level worsening acceptance,
+# k=2 ~12%. Orsila et al. (2007) use k=2 -- "reaches a local minimum more
+# likely in the end, but is more expensive than k=1" -- so k=2 is the paper's
+# own thoroughness/cost tradeoff and is adopted here. (Note: k does not help
+# cross the GPU cost cliff; a 250x off-GPU move is rejected at any in-range T.)
+const SA_DEFAULT_K = 2.0
 const SA_DEFAULT_N_RESTARTS = 1
 const SA_TF_FLOOR = 1e-12
+# Probability that a proposed SA move targets a critical-path task rather than
+# a uniformly-random one (Orsila §3.7.1 ECP move; Wild et al. 2003 report it
+# "significantly better than single move with directed acyclic graphs").
+const SA_ECP_BIAS_PROB = 0.5
+const SA_DEFAULT_TIME_LIMIT_SEC = Inf
 
 """
     SimulatedAnnealingScheduler{S<:DataDepsScheduler, R<:Random.AbstractRNG} <: DataDepsScheduler
@@ -938,6 +1338,10 @@ Fields:
 - `k::Float64`          — coefficient `k > 0` in Orsila §4.3 Eqs. 18, 19.
 - `n_restarts::Int`     — independent SA runs, each seeded from the
                           best-known solution so far (Orsila §5.3 rule 7).
+- `time_limit_sec::Float64` — wall-clock stop, checked between restarts and
+                          per cooling level. `Inf` disables. When an IG
+                          seed is used, seed and SA each observe their own
+                          budget; the pipeline sums them worst-case.
 - `rng::R`              — RNG used for moves and acceptance sampling.
                           The `rng` is mutated during scheduling, so a
                           single `SimulatedAnnealingScheduler` instance
@@ -953,21 +1357,30 @@ struct SimulatedAnnealingScheduler{S<:DataDepsScheduler, R<:Random.AbstractRNG} 
     k::Float64
     n_restarts::Int
     rng::R
+    time_limit_sec::Float64
 
     function SimulatedAnnealingScheduler(inner::S;
                                           q::Real=SA_DEFAULT_Q,
                                           k::Real=SA_DEFAULT_K,
                                           n_restarts::Integer=SA_DEFAULT_N_RESTARTS,
-                                          rng::R=Random.default_rng()) where {S<:DataDepsScheduler, R<:Random.AbstractRNG}
+                                          rng::R=Random.default_rng(),
+                                          time_limit_sec::Real=SA_DEFAULT_TIME_LIMIT_SEC) where {S<:DataDepsScheduler, R<:Random.AbstractRNG}
         (0 < q < 1) || throw(ArgumentError("SimulatedAnnealingScheduler: q must be in (0, 1), got $q"))
         k > 0 || throw(ArgumentError("SimulatedAnnealingScheduler: k must be > 0, got $k"))
         n_restarts >= 1 || throw(ArgumentError("SimulatedAnnealingScheduler: n_restarts must be ≥ 1, got $n_restarts"))
-        return new{S, R}(inner, Float64(q), Float64(k), Int(n_restarts), rng)
+        time_limit_sec > 0 || throw(ArgumentError("SimulatedAnnealingScheduler: time_limit_sec must be > 0, got $time_limit_sec"))
+        return new{S, R}(inner, Float64(q), Float64(k), Int(n_restarts), rng, Float64(time_limit_sec))
     end
 end
 
 SimulatedAnnealingScheduler(; kwargs...) =
     SimulatedAnnealingScheduler(IteratedGreedyScheduler(); kwargs...)
+
+Base.similar(s::SimulatedAnnealingScheduler) =
+    SimulatedAnnealingScheduler(similar(s.inner);
+                                 q=s.q, k=s.k, n_restarts=s.n_restarts,
+                                 rng=copy(s.rng),
+                                 time_limit_sec=s.time_limit_sec)
 
 datadeps_schedule_cache(sched::SimulatedAnnealingScheduler) =
     datadeps_schedule_cache(sched.inner)
@@ -1048,6 +1461,37 @@ end
 # Single-task move per Orsila §3.6.1. The current proc is excluded from
 # the alternative set (Orsila §3.6) so the move is never a no-op when the
 # task has at least one other compatible proc.
+# Orsila §3.7.1 ECP (Enhanced Critical Path) move: bias task selection toward
+# the critical path -- the chain of largest cumulative compute+communication,
+# which determines the makespan. `task_finish_ns` is the exact per-task finish
+# under the current schedule, so a task's finish time is a direct proxy for how
+# close it is to the critical-path tail (the sink has the maximum finish).
+#
+# Rather than always taking the single max-finish task (which would retry the
+# same sink on every biased move, wasting diversity), we roulette-select with
+# probability proportional to finish time: every task on or near the critical
+# path is a likely target, the sink most likely, off-path tasks rarely. With
+# probability `1 - SA_ECP_BIAS_PROB` we fall back to a uniform pick to keep the
+# neighborhood ergodic.
+function _sa_select_task_ecp(candidate::ScheduleState, n_tasks::Int,
+                             rng::Random.AbstractRNG)
+    if rand(rng) < SA_ECP_BIAS_PROB
+        total = 0.0
+        @inbounds for idx in 1:n_tasks
+            total += get(candidate.task_finish_ns, idx, 0.0)
+        end
+        if total > 0.0
+            threshold = rand(rng) * total
+            acc = 0.0
+            @inbounds for idx in 1:n_tasks
+                acc += get(candidate.task_finish_ns, idx, 0.0)
+                acc >= threshold && return idx
+            end
+        end
+    end
+    return rand(rng, 1:n_tasks)
+end
+
 function _sa_propose_neighbor!(candidate::ScheduleState, snap::MT.MetricsSnapshot,
                                 dag_spec::DAGSpec, all_procs::Vector{Processor},
                                 rng::Random.AbstractRNG,
@@ -1055,7 +1499,7 @@ function _sa_propose_neighbor!(candidate::ScheduleState, snap::MT.MetricsSnapsho
     n_tasks = nv(dag_spec.g)
     n_tasks == 0 && return candidate
 
-    task_idx = rand(rng, 1:n_tasks)
+    task_idx = _sa_select_task_ecp(candidate, n_tasks, rng)
     current_proc = candidate.task_proc[task_idx]
     n_procs = length(all_procs)
 
@@ -1114,10 +1558,12 @@ function simulated_annealing_schedule!(state::ScheduleState, snap::MT.MetricsSna
                                         q::Real=SA_DEFAULT_Q, k::Real=SA_DEFAULT_K,
                                         n_restarts::Integer=SA_DEFAULT_N_RESTARTS,
                                         rng::Random.AbstractRNG=Random.default_rng(),
-                                        cache::Union{EFTCostCache, Nothing}=nothing)
+                                        cache::Union{EFTCostCache, Nothing}=nothing,
+                                        time_limit_sec::Real=SA_DEFAULT_TIME_LIMIT_SEC)
     (0 < q < 1) || throw(ArgumentError("simulated_annealing_schedule!: q must be in (0, 1)"))
     k > 0 || throw(ArgumentError("simulated_annealing_schedule!: k must be > 0"))
     n_restarts >= 1 || throw(ArgumentError("simulated_annealing_schedule!: n_restarts must be ≥ 1"))
+    time_limit_sec > 0 || throw(ArgumentError("simulated_annealing_schedule!: time_limit_sec must be > 0"))
 
     n_tasks = nv(dag_spec.g)
     n_tasks == 0 && return state
@@ -1151,7 +1597,13 @@ function simulated_annealing_schedule!(state::ScheduleState, snap::MT.MetricsSna
     expected_levels = max(1, ceil(Int, log(Tf / T0) / log(Float64(q))))
     max_iters_per_restart = 16 * L * expected_levels
 
+    # Same clock/`Inf`-disable pattern as `iterated_greedy_schedule!`.
+    start_ns = time_ns()
+    budget_ns = isinf(time_limit_sec) ? typemax(UInt64) :
+                round(UInt64, time_limit_sec * 1e9)
+
     for _ in 1:n_restarts
+        (time_ns() - start_ns) >= budget_ns && break
         _copy_state!(current, overall_best)
         current_cost = overall_best_cost
         _copy_state!(best_in_run, current)
@@ -1165,6 +1617,7 @@ function simulated_annealing_schedule!(state::ScheduleState, snap::MT.MetricsSna
         while true
             (T <= Tf && R >= Rmax) && break
             total_iters >= max_iters_per_restart && break
+            (time_ns() - start_ns) >= budget_ns && break
 
             _copy_state!(candidate, current)
             _sa_propose_neighbor!(candidate, snap, dag_spec, all_procs, rng, cache)
@@ -1222,18 +1675,22 @@ function datadeps_schedule_dag_aot!(scheduler::SimulatedAnnealingScheduler,
                                                 n_iters=ig.n_iters,
                                                 destroy_frac=ig.destroy_frac,
                                                 rng=ig.rng,
-                                                cache=cache)
+                                                cache=cache,
+                                                time_limit_sec=ig.time_limit_sec)
     end
 
     final_state = simulated_annealing_schedule!(seed_state, snap, dag_spec, all_procs;
                                                  q=scheduler.q, k=scheduler.k,
                                                  n_restarts=scheduler.n_restarts,
                                                  rng=scheduler.rng,
-                                                 cache=cache)
+                                                 cache=cache,
+                                                 time_limit_sec=scheduler.time_limit_sec)
 
     @inbounds for idx in 1:n_tasks
         task = dag_spec.id_to_task[idx]
-        schedule[task] = final_state.task_proc[idx]
+        proc = final_state.task_proc[idx]
+        schedule[task] = proc
+        _propagate_aot_time_util_from_cache!(dag_spec, cache, idx, proc)
     end
     return
 end
@@ -1300,6 +1757,9 @@ struct JuMPScheduler <: DataDepsScheduler
     end
 end
 
+Base.similar(s::JuMPScheduler) =
+    JuMPScheduler(s.optimizer; Z=s.Z, time_limit_sec=s.time_limit_sec)
+
 # `datadeps_schedule_dag_aot!(::JuMPScheduler, ...)` lives in ext/JuMPExt.jl;
 # the constructor prevents instantiation without the extension.
 const OPT_DEFAULT_MILP_THRESHOLD = 12
@@ -1324,13 +1784,9 @@ Fields:
                               path.
 - `milp_time_limit_sec`     — forwarded to `JuMPScheduler`.
 - `milp_Z`                  — forwarded to `JuMPScheduler`.
-- `ig_n_iters`              — forwarded to `IteratedGreedyScheduler`.
-- `ig_destroy_frac`         — forwarded to `IteratedGreedyScheduler`.
-- `sa_q`                    — forwarded to `SimulatedAnnealingScheduler`.
-- `sa_k`                    — forwarded to `SimulatedAnnealingScheduler`.
-- `sa_n_restarts`           — forwarded to `SimulatedAnnealingScheduler`.
-- `rng::R`                  — RNG shared by IG and SA on the heuristic
-                              path; unused on the MILP path.
+- `ig_n_iters`, `ig_destroy_frac`, `ig_time_limit_sec` — forwarded to IG.
+- `sa_q`, `sa_k`, `sa_n_restarts`, `sa_time_limit_sec` — forwarded to SA.
+- `rng::R`                  — used by IG/SA; unused on the MILP path.
 """
 struct OptimizingScheduler{R<:Random.AbstractRNG} <: DataDepsScheduler
     optimizer::Any
@@ -1339,9 +1795,11 @@ struct OptimizingScheduler{R<:Random.AbstractRNG} <: DataDepsScheduler
     milp_Z::Float64
     ig_n_iters::Int
     ig_destroy_frac::Float64
+    ig_time_limit_sec::Float64
     sa_q::Float64
     sa_k::Float64
     sa_n_restarts::Int
+    sa_time_limit_sec::Float64
     rng::R
 
     function OptimizingScheduler(;
@@ -1351,9 +1809,11 @@ struct OptimizingScheduler{R<:Random.AbstractRNG} <: DataDepsScheduler
         milp_Z::Real=10.0,
         ig_n_iters::Integer=IG_DEFAULT_N_ITERS,
         ig_destroy_frac::Real=IG_DEFAULT_DESTROY_FRAC,
+        ig_time_limit_sec::Real=IG_DEFAULT_TIME_LIMIT_SEC,
         sa_q::Real=SA_DEFAULT_Q,
         sa_k::Real=SA_DEFAULT_K,
         sa_n_restarts::Integer=SA_DEFAULT_N_RESTARTS,
+        sa_time_limit_sec::Real=SA_DEFAULT_TIME_LIMIT_SEC,
         rng::R=Random.default_rng(),
     ) where {R<:Random.AbstractRNG}
         milp_threshold >= 0 || throw(ArgumentError("OptimizingScheduler: milp_threshold must be ≥ 0, got $milp_threshold"))
@@ -1361,9 +1821,11 @@ struct OptimizingScheduler{R<:Random.AbstractRNG} <: DataDepsScheduler
         ig_n_iters >= 0 || throw(ArgumentError("OptimizingScheduler: ig_n_iters must be ≥ 0, got $ig_n_iters"))
         (0 < ig_destroy_frac && ig_destroy_frac <= 1) ||
             throw(ArgumentError("OptimizingScheduler: ig_destroy_frac must be in (0, 1], got $ig_destroy_frac"))
+        ig_time_limit_sec > 0 || throw(ArgumentError("OptimizingScheduler: ig_time_limit_sec must be > 0, got $ig_time_limit_sec"))
         (0 < sa_q && sa_q < 1) || throw(ArgumentError("OptimizingScheduler: sa_q must be in (0, 1), got $sa_q"))
         sa_k > 0 || throw(ArgumentError("OptimizingScheduler: sa_k must be > 0, got $sa_k"))
         sa_n_restarts >= 1 || throw(ArgumentError("OptimizingScheduler: sa_n_restarts must be ≥ 1, got $sa_n_restarts"))
+        sa_time_limit_sec > 0 || throw(ArgumentError("OptimizingScheduler: sa_time_limit_sec must be > 0, got $sa_time_limit_sec"))
 
         return new{R}(
             optimizer,
@@ -1372,13 +1834,29 @@ struct OptimizingScheduler{R<:Random.AbstractRNG} <: DataDepsScheduler
             Float64(milp_Z),
             Int(ig_n_iters),
             Float64(ig_destroy_frac),
+            Float64(ig_time_limit_sec),
             Float64(sa_q),
             Float64(sa_k),
             Int(sa_n_restarts),
+            Float64(sa_time_limit_sec),
             rng,
         )
     end
 end
+
+Base.similar(s::OptimizingScheduler) =
+    OptimizingScheduler(; optimizer=s.optimizer,
+                          milp_threshold=s.milp_threshold,
+                          milp_time_limit_sec=s.milp_time_limit_sec,
+                          milp_Z=s.milp_Z,
+                          ig_n_iters=s.ig_n_iters,
+                          ig_destroy_frac=s.ig_destroy_frac,
+                          ig_time_limit_sec=s.ig_time_limit_sec,
+                          sa_q=s.sa_q,
+                          sa_k=s.sa_k,
+                          sa_n_restarts=s.sa_n_restarts,
+                          sa_time_limit_sec=s.sa_time_limit_sec,
+                          rng=copy(s.rng))
 
 """
     opt_uses_milp(sched::OptimizingScheduler, n_tasks::Integer) -> Bool
@@ -1413,12 +1891,14 @@ function datadeps_schedule_dag_aot!(sched::OptimizingScheduler, schedule, dag_sp
         ig = IteratedGreedyScheduler(GreedyScheduler();
                                      n_iters=sched.ig_n_iters,
                                      destroy_frac=sched.ig_destroy_frac,
-                                     rng=sched.rng)
+                                     rng=sched.rng,
+                                     time_limit_sec=sched.ig_time_limit_sec)
         sub = SimulatedAnnealingScheduler(ig;
                                           q=sched.sa_q,
                                           k=sched.sa_k,
                                           n_restarts=sched.sa_n_restarts,
-                                          rng=sched.rng)
+                                          rng=sched.rng,
+                                          time_limit_sec=sched.sa_time_limit_sec)
     end
 
     datadeps_schedule_dag_aot!(sub, schedule, dag_spec, all_procs, all_scope)

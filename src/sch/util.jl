@@ -526,15 +526,27 @@ function can_use_proc(state, task, gproc, proc, opts, scope)
     return true, scope
 end
 
-function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
+function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig;
+                     runtime_index::Union{Dagger.SignatureRuntimeIndex,Nothing}=nothing,
+                     snap=nothing)
     T = typeof(p)
     sig_vec = sig isa Dagger.Signature ? sig.sig : sig
-    snap = MT.snapshot(MT.global_metrics_cache())
+    # Reuse a caller-provided per-pass snapshot when available (see
+    # schedule_one!); otherwise take our own. Avoiding a fresh snapshot per
+    # candidate processor is what keeps the global metrics cache from being
+    # deep-copied once per proc on every scheduling decision.
+    snap = snap === nothing ? MT.snapshot(MT.global_metrics_cache()) : snap
     worker_id = gp isa Int ? gp : (gp isa OSProc ? gp.pid : myid())
     est_time_util = if time_util !== nothing && haskey(time_util, T)
         round(UInt64, time_util[T] * 1000^3)::UInt64
     else
-        runtime = metrics_lookup_runtime(snap, sig_vec, p, worker_id)
+        # Prefer the shared index (O(1)); fall back to the full scan for
+        # callers outside schedule_one!.
+        runtime = if runtime_index !== nothing
+            metrics_lookup_runtime_from_index(runtime_index, p, worker_id)
+        else
+            metrics_lookup_runtime(snap, sig_vec, p, worker_id)
+        end
         runtime !== nothing ? runtime : UInt64(1000^3)
     end
     est_alloc_util = if alloc_util !== nothing && haskey(alloc_util, T)
@@ -641,7 +653,10 @@ function estimate_task_costs(state, procs, task; sig=nothing)
     return sorted_procs, costs
 end
 const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
-@reuse_scope function estimate_task_costs!(sorted_procs, costs, state, procs, task; sig=nothing)
+@reuse_scope function estimate_task_costs!(sorted_procs, costs, state, procs, task;
+                                            sig=nothing,
+                                            runtime_index::Union{Dagger.SignatureRuntimeIndex,Nothing}=nothing,
+                                            snap=nothing)
 
     # Find all Chunks
     chunks = @reusable_vector :estimate_task_costs_chunks Union{Chunk,Nothing} nothing 32
@@ -656,7 +671,23 @@ const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
         sig = signature(task.f, task.inputs)
     end
     sig_vec = sig isa Dagger.Signature ? sig.sig : sig
-    snap = MT.snapshot(MT.global_metrics_cache())
+    # Reuse the caller's per-pass snapshot (schedule_one!) when provided.
+    snap = snap === nothing ? MT.snapshot(MT.global_metrics_cache()) : snap
+
+    # Build the per-signature runtime index once. Every candidate `proc` in
+    # this call shares `sig_vec`, so `metrics_lookup_runtime_from_index`
+    # below can resolve each per-proc runtime with O(1) hash lookups against
+    # this index — a full `metrics_lookup_runtime` call would otherwise
+    # re-scan the entire snapshot (via `MT.find_keys`) up to four times per
+    # proc, i.e. `O(W × N)` scanning work per submitted task. See
+    # `SignatureRuntimeIndex` for the fallback-chain semantics preserved.
+    #
+    # Callers that also invoke `has_capacity` (schedule_one!) may pass a
+    # pre-built index so the same object is shared across both functions,
+    # avoiding a second O(N) snapshot scan in `has_capacity`.
+    if runtime_index === nothing
+        runtime_index = build_signature_runtime_index(snap, sig_vec)
+    end
 
     for proc in procs
         gproc = get_parent(proc)
@@ -664,15 +695,33 @@ const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
 
         tx_cost = impute_sum(affinity(chunk)[2] for chunk in chunks_filt)
 
-        task_xfer_cost = gproc.pid != myid() ? 1_000_000 : 0
-
-        runtime = metrics_lookup_runtime(snap, sig_vec, proc, gproc.pid)
+        runtime = metrics_lookup_runtime_from_index(runtime_index, proc, gproc.pid)
         est_time_util = runtime !== nothing ? runtime : UInt64(1000^3)
 
         rate = metrics_lookup_transfer_rate(snap, proc, gproc.pid)
         tx_rate = rate !== nothing ? rate : DEFAULT_TRANSFER_RATE
 
-        costs[proc] = Float64(est_time_util) + (Float64(tx_cost) / Float64(tx_rate)) + Float64(task_xfer_cost)
+        # Cost = compute time + data-transfer cost. A previous pre-MetricsTracker
+        # implementation added a hardcoded 1_000_000 ns cross-worker `task_xfer_cost`
+        # penalty here (with a TODO to actually measure it), intended as a small
+        # tiebreaker in favor of master. Under the current MetricsTracker cost model
+        # this heuristic collapses processor selection to master-only:
+        #
+        #   - cold state (no metrics for any proc): master cost = 1e9; worker cost
+        #     = 1e9 + 1e6. Sort is deterministic in favor of master's 12 ThreadProcs;
+        #     the `randperm!` above only randomizes among equally-costly procs, and
+        #     they are NOT equally costly under this penalty.
+        #   - after master runs the first task: master's real per-task runtime (e.g.
+        #     100us) replaces its 1e9 default, while workers stay at 1e9 because they
+        #     never ran a task. Master's cost drops to ~1e5 vs workers' ~1e9 — master
+        #     preference becomes locked in and self-reinforcing.
+        #
+        # Any real cross-process dispatch overhead is already captured, per-signature,
+        # in the `est_time_util` lookup once workers accumulate metrics; and per-chunk
+        # transfer cost is captured by `tx_cost / tx_rate` above. The fixed 1ms penalty
+        # is therefore redundant when metrics are warm and actively harmful when they
+        # aren't.
+        costs[proc] = Float64(est_time_util) + (Float64(tx_cost) / Float64(tx_rate))
     end
     chunks_cleanup()
 
