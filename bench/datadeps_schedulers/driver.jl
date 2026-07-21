@@ -58,7 +58,12 @@ Base.similar(s::TimedScheduler) = TimedScheduler(similar(s.inner), s.last_aot_ns
 # inner scheduler's type (TimedScheduler{Greedy} reuses Greedy entries).
 Dagger.datadeps_schedule_cache(sched::TimedScheduler) =
     Dagger.datadeps_schedule_cache(sched.inner)
-Dagger.datadeps_dag_equivalent(sched::TimedScheduler, dspec1, dspec2) =
+# Args typed as ::DAGSpec so this override is strictly more specific than
+# Dagger's `datadeps_dag_equivalent(::DataDepsScheduler, ::DAGSpec, ::DAGSpec)`;
+# with untyped args the two are ambiguous (only the scheduler arg is more
+# specific), which surfaces as a MethodError the moment a non-empty cache
+# triggers an equivalence lookup on the hierarchical path.
+Dagger.datadeps_dag_equivalent(sched::TimedScheduler, dspec1::Dagger.DAGSpec, dspec2::Dagger.DAGSpec) =
     Dagger.datadeps_dag_equivalent(sched.inner, dspec1, dspec2)
 Dagger.datadeps_argspec_equivalent(sched::TimedScheduler, a1, a2) =
     Dagger.datadeps_argspec_equivalent(sched.inner, a1, a2)

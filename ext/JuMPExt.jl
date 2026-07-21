@@ -50,6 +50,16 @@ end
 # internal solver state, which would additionally kill the whole run.
 const JUMP_MAX_ASSIGNMENT_VARS = 10_000
 
+# Benchmark instrumentation (paper optimality-gap number): records the most
+# recent MILP solve's termination status and proven-optimal makespan
+# (`value(t_last_end)`, in ns, comparable to Greedy's `cost_of_schedule`).
+# Only OPTIMAL cells are a valid lower bound. Behavior-preserving -- written
+# after the solve, read by the benchmark harness. Under hierarchical
+# partitioning this holds the *last* partition's solve; the paper's
+# optimality-gap cells (K ≤ 12, flat CPU+GPU) are single-solve, so it is exact
+# there.
+const LAST_MILP_SOLVE = Ref{Tuple{String,Float64}}(("NONE", NaN))
+
 function Dagger.datadeps_schedule_dag_aot!(sched::JuMPScheduler, schedule, dag_spec, all_procs, all_scope)
     n_tasks = nv(dag_spec.g)
     n_tasks == 0 && return
@@ -184,6 +194,8 @@ function Dagger.datadeps_schedule_dag_aot!(sched::JuMPScheduler, schedule, dag_s
     optimize!(model)
 
     status = termination_status(model)
+    LAST_MILP_SOLVE[] = (string(status),
+        primal_status(model) == MOI.FEASIBLE_POINT ? Float64(value(t_last_end)) : NaN)
     if !(status == MOI.OPTIMAL || status == MOI.TIME_LIMIT)
         throw(Sch.SchedulingException("JuMPScheduler: solver returned $status; no feasible schedule found"))
     end
