@@ -178,6 +178,7 @@ function compute_remainder_for_arg!(state::DataDepsState,
             break
         end
 
+        other_entry = nothing
         if idx > 0
             other_entry = state.arg_history[arg_w][idx]
             other_ainfo = other_entry.ainfo
@@ -225,7 +226,17 @@ function compute_remainder_for_arg!(state::DataDepsState,
         has_overlap = schedule_remainder!(tracker_other_space[1], other_space_idx, target_space_idx, remainder, other_many_spans)
         if compute_syncdeps && has_overlap
             @assert haskey(state.ainfos_owner, other_ainfo) "[idx $idx] ainfo $(typeof(other_ainfo)) has no owner"
-            get_read_deps!(state, other_space, other_ainfo, write_num, tracker_other_space[3])
+            if other_entry !== nothing
+                # Wait on the producer recorded in history. Re-resolving via
+                # live `ainfos_owner`/`get_read_deps!` is not equivalent:
+                # ownership of `other_ainfo` may have moved to a later copy, or
+                # the producer may only be registered on an overlapping ainfo
+                # missing from `ainfos_overlaps[other_ainfo]`.
+                push!(tracker_other_space[3], ThunkSyncdep(other_entry.task))
+            else
+                # idx==0 owner fallback: no HistoryEntry, use live writer set.
+                get_read_deps!(state, other_space, other_ainfo, write_num, tracker_other_space[3])
+            end
             push!(tracker_other_space[2], other_ainfo)
         end
     end
