@@ -23,6 +23,8 @@ makedocs(;
         "Task Affinity" => "task-affinity.md",
         "Data Management" => "data-management.md",
         "Distributed Arrays" => "darray.md",
+        "Sparse Arrays" => "sparse-arrays.md",
+        "Iterative Solvers" => "iterative-solving.md",
         "Streaming Tasks" => "streaming.md",
         "Scopes" => "scopes.md",
         "Processors" => "processors.md",
