@@ -1,13 +1,15 @@
 # Hierarchical scheduling for datadeps
-# Spreads scheduling work across multiple threads/workers via a 4-phase pipeline:
+# Spreads scheduling work across multiple threads/workers/MPI ranks via a
+# 4-phase pipeline:
 # Phase 1: Parallel aliasing info construction
 # Phase 2: Sequential DAG construction from aliasing overlaps
-# Phase 3: Data-affinity DAG partitioning
-# Phase 4: Parallel local scheduling per partition -- each partition runs on its
-#          own task, prepares/submits its tasks concurrently with the others,
-#          and computes its *own* (partition-local) AOT schedule over just its
-#          processors. This maximizes scheduling parallelism and scalability;
-#          no global synchronization or global AOT pass is imposed.
+# Phase 3: Data-affinity DAG partitioning (by Distributed worker or MPI rank
+#          via `partition_affinity_id`)
+# Phase 4: Per-partition scheduling -- under Distributed each partition runs on
+#          its own task concurrently; under MPI (uniform execution) partitions
+#          are scheduled sequentially in global topological order for SPMD
+#          safety. Each partition computes its *own* (partition-local) AOT
+#          schedule over just its processors.
 #
 # N.B. Concurrent task submission from many partition tasks used to intermittently
 # hang in the core eager scheduler. The root cause was `Distributed.Future`,
@@ -25,7 +27,9 @@ end
 
 struct HierarchicalTaskMeta
     pair::DTaskPair
-    arg_chunk::Union{Chunk, Nothing}
+    # Wrapped argument identity for the task's first aliasing arg. Under MPI
+    # this may be a raw `ChunkView` (kept unwrapped by `datadeps_arg_wrap`).
+    arg_chunk::Any
     may_alias::Bool
     inplace_move::Bool
     deps::Vector{HierarchicalTaskInfo}
@@ -249,9 +253,18 @@ function collect_aliased_args(seen_tasks::Vector{DTaskPair})
     end
 
     supports_cache = IdDict{Any,Bool}()
-    raw_arg_cache = IdDict{Any,Chunk}()
+    # Values are Chunks, or raw remote handles kept by `datadeps_arg_wrap`
+    # (e.g. ChunkView under MPI).
+    raw_arg_cache = IdDict{Any,Any}()
 
-    nchunks = Threads.nthreads() <= 1 ? 1 : min(Threads.nthreads(), cld(n, COLLECT_ALIASED_ARGS_MIN_CHUNK))
+    # Under uniform execution (MPI), `tochunk` / `MPIRefID` allocation must stay
+    # sequential on the root task, and spawned threads would not inherit the
+    # TaskLocalValue acceleration (falling back to Distributed → DRef chunks).
+    nchunks = if uniform_execution() || Threads.nthreads() <= 1
+        1
+    else
+        min(Threads.nthreads(), cld(n, COLLECT_ALIASED_ARGS_MIN_CHUNK))
+    end
 
     if nchunks <= 1
         unique_arg_ws = Dict{ArgumentWrapper, ArgumentWrapper}()
@@ -264,10 +277,14 @@ function collect_aliased_args(seen_tasks::Vector{DTaskPair})
     chunk_size = cld(n, nchunks)
     starts = collect(1:chunk_size:n)
     per_chunk_arg_ws = Vector{Dict{ArgumentWrapper,ArgumentWrapper}}(undef, length(starts))
+    # Propagate the caller's acceleration into each worker thread; TaskLocalValue
+    # does not inherit across `Threads.@spawn`.
+    parent_accel = current_acceleration()
 
     @sync for (ci, start) in enumerate(starts)
         range = start:min(start+chunk_size-1, n)
         Threads.@spawn begin
+            set_task_acceleration!(parent_accel)
             local_arg_ws = Dict{ArgumentWrapper,ArgumentWrapper}()
             _collect_aliased_args_range!(task_metas, local_arg_ws, seen_tasks, range,
                                           supports_cache, raw_arg_cache, cache_lock, task_to_idx)
@@ -288,7 +305,7 @@ function _collect_aliased_args_range!(task_metas::Vector{HierarchicalTaskMeta},
                                       seen_tasks::Vector{DTaskPair},
                                       range::UnitRange{Int},
                                       supports_cache::IdDict{Any,Bool},
-                                      raw_arg_cache::IdDict{Any,Chunk},
+                                      raw_arg_cache::IdDict{Any,Any},
                                       cache_lock::Union{ReentrantLock,Nothing},
                                       task_to_idx::IdDict{DTask,Int})
     for task_idx in range
@@ -334,7 +351,10 @@ function _collect_aliased_args_range!(task_metas::Vector{HierarchicalTaskMeta},
             end
 
             arg_chunk = _cached_get!(raw_arg_cache, cache_lock, arg) do
-                arg isa Chunk ? arg : tochunk(arg)
+                # Match `populate_task_info!`: acceleration-aware wrap (MPIRef
+                # under MPI) rather than a bare `tochunk` that can produce a
+                # rank-local DRef when TLS acceleration is unset.
+                arg isa Chunk ? arg : datadeps_arg_wrap(arg)
             end
 
             if first_chunk === nothing
@@ -443,16 +463,24 @@ const COMPUTE_ALIASING_BATCH_MIN_PARALLEL = 8
 function _compute_aliasing_batch(arg_ws::Vector{ArgumentWrapper})
     n = length(arg_ws)
     results = Vector{Pair{ArgumentWrapper, AliasingWrapper}}(undef, n)
-    if n >= COMPUTE_ALIASING_BATCH_MIN_PARALLEL && Threads.nthreads() > 1
+    accel = current_acceleration()
+    # Under uniform execution (MPI), aliasing may perform collectives that must
+    # run in the same sequential order on every rank -- never Threads.@threads.
+    # Also dispatch through `aliasing(accel, ...)` so MPI Chunks go through the
+    # owner-broadcast path rather than a local unwrap.
+    can_parallel = !uniform_execution(accel) &&
+                   n >= COMPUTE_ALIASING_BATCH_MIN_PARALLEL &&
+                   Threads.nthreads() > 1
+    if can_parallel
         Threads.@threads for i in 1:n
             arg_w = arg_ws[i]
-            ainfo = AliasingWrapper(aliasing(arg_w.arg, arg_w.dep_mod))
+            ainfo = AliasingWrapper(aliasing(accel, arg_w.arg, arg_w.dep_mod))
             results[i] = arg_w => ainfo
         end
     else
         for i in 1:n
             arg_w = arg_ws[i]
-            ainfo = AliasingWrapper(aliasing(arg_w.arg, arg_w.dep_mod))
+            ainfo = AliasingWrapper(aliasing(accel, arg_w.arg, arg_w.dep_mod))
             results[i] = arg_w => ainfo
         end
     end
@@ -556,52 +584,55 @@ end
     partition_dag(dag, task_metas, all_procs) -> (vertex_to_partition, n_partitions, partition_procs)
 
 Phase 3: Assigns each task vertex to a partition using data-affinity. For
-multi-worker setups, tasks are assigned to the worker owning the most argument
-data. For single-worker multi-threaded setups, tasks are balanced across
-available processors in topological order.
+multi-owner setups (Distributed workers, or MPI ranks via
+`partition_affinity_id`), tasks are assigned to the owner holding the most
+argument data. For single-owner multi-threaded setups, tasks are balanced
+across available processors in topological order.
 """
 function partition_dag(dag::SimpleDiGraph, task_metas::Vector{HierarchicalTaskMeta},
                        all_procs::Vector{<:Processor})
     n = length(task_metas)
-    workers = unique(root_worker_id.(only.(memory_spaces.(all_procs))))
-    n_workers = length(workers)
+    # Stable order so SPMD ranks (and Distributed workers) agree on partition
+    # indexing when affinity ids are collected from an unordered processor set.
+    owners = sort!(unique(partition_affinity_id.(all_procs)))
+    n_owners = length(owners)
 
-    procs_by_worker = Dict{Int, Vector{Processor}}()
+    procs_by_owner = Dict{Int, Vector{Processor}}()
     for proc in all_procs
-        wid = root_worker_id(only(memory_spaces(proc)))
-        push!(get!(Vector{Processor}, procs_by_worker, wid), proc)
+        oid = partition_affinity_id(proc)
+        push!(get!(Vector{Processor}, procs_by_owner, oid), proc)
     end
 
-    multi_worker = n_workers > 1
-    if multi_worker
-        n_partitions = n_workers
-        partition_worker = workers
+    multi_owner = n_owners > 1
+    if multi_owner
+        n_partitions = n_owners
+        partition_owner = owners
     else
         n_partitions = min(length(all_procs), n)
-        partition_worker = fill(first(workers), n_partitions)
+        partition_owner = fill(first(owners), n_partitions)
     end
 
     vertex_to_partition = Vector{Int}(undef, n)
 
-    if multi_worker
-        worker_to_partition = Dict(w => i for (i, w) in enumerate(workers))
+    if multi_owner
+        owner_to_partition = Dict(o => i for (i, o) in enumerate(owners))
         default_scope = DefaultScope()
         for v in 1:n
             meta = task_metas[v]
             task_scope = @something(meta.pair.spec.options.compute_scope, meta.pair.spec.options.scope, default_scope)
 
-            # Workers whose processors are eligible under this task's scope.
-            # A non-default scope that spans multiple workers must still spread
-            # work across those workers (via affinity / round-robin) -- picking
-            # only the first match pins everything to worker 1 and breaks
-            # multi-worker execution.
+            # Owners whose processors are eligible under this task's scope.
+            # A non-default scope that spans multiple owners must still spread
+            # work across those owners (via affinity / round-robin) -- picking
+            # only the first match pins everything to owner 1 and breaks
+            # multi-owner execution.
             if task_scope == default_scope
                 matching = collect(1:n_partitions)
             else
                 matching = Int[]
-                for (pid, wid) in enumerate(workers)
-                    wprocs = procs_by_worker[wid]
-                    if any(proc -> proc_in_scope(proc, task_scope), wprocs)
+                for (pid, oid) in enumerate(owners)
+                    oprocs = procs_by_owner[oid]
+                    if any(proc -> proc_in_scope(proc, task_scope), oprocs)
                         push!(matching, pid)
                     end
                 end
@@ -615,11 +646,11 @@ function partition_dag(dag::SimpleDiGraph, task_metas::Vector{HierarchicalTaskMe
                 continue
             end
 
-            affinity = zeros(Int, n_workers)
+            affinity = zeros(Int, n_owners)
             for dep in meta.deps
                 arg_space = memory_space(dep.arg_w.arg)
-                arg_wid = root_worker_id(arg_space)
-                idx = get(worker_to_partition, arg_wid, 0)
+                arg_oid = partition_affinity_id(arg_space)
+                idx = get(owner_to_partition, arg_oid, 0)
                 if idx > 0 && idx in matching
                     affinity[idx] += 1
                 end
@@ -676,10 +707,10 @@ function partition_dag(dag::SimpleDiGraph, task_metas::Vector{HierarchicalTaskMe
     end
 
     partition_procs = Vector{Vector{Processor}}(undef, n_partitions)
-    if multi_worker
+    if multi_owner
         for pid in 1:n_partitions
-            wid = partition_worker[pid]
-            partition_procs[pid] = procs_by_worker[wid]
+            oid = partition_owner[pid]
+            partition_procs[pid] = procs_by_owner[oid]
         end
     else
         for pid in 1:n_partitions
@@ -687,7 +718,7 @@ function partition_dag(dag::SimpleDiGraph, task_metas::Vector{HierarchicalTaskMe
         end
     end
 
-    return vertex_to_partition, n_partitions, partition_procs, multi_worker
+    return vertex_to_partition, n_partitions, partition_procs, multi_owner
 end
 
 
@@ -869,6 +900,81 @@ function schedule_partition_full!(queue::DataDepsTaskQueue,
     return state
 end
 
+"""
+    schedule_partitions_sequential!(...) -> Vector{DataDepsState}
+
+SPMD-safe Phase 4: schedule every partition's tasks on the root task in global
+topological order. Processor assignment remains partition-local (MPI-rank /
+worker affinity), but a *single* shared `DataDepsState` is used so argument
+history, remainders, and final copy-back stay coherent across ranks -- the same
+model as flat `distribute_tasks!`. Per-partition states would otherwise
+split-brain overlapping writes (e.g. whole-array + view + triangular dep_mods).
+
+Returns a one-element vector containing the shared state (for the hierarchical
+copy-from/free epilogue).
+"""
+function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
+                                         queue_lock::ReentrantLock,
+                                         partitions::Vector{Vector{Int}},
+                                         dag::SimpleDiGraph,
+                                         seen_tasks::Vector{DTaskPair},
+                                         partition_procs::Vector{<:Vector{<:Processor}},
+                                         vertex_to_partition::Vector{Int},
+                                         region_uids::Set{UInt},
+                                         registry::Union{SharedChunkRegistry,Nothing},
+                                         wait_all_queue)
+    n_partitions = length(partitions)
+    temp_queues = Vector{DataDepsTaskQueue}(undef, n_partitions)
+    local_scopes = Vector{AbstractScope}(undef, n_partitions)
+    schedules = Vector{Dict{DTask,Processor}}(undef, n_partitions)
+    proc_to_scope_lfus = [BasicLFUCache{Processor,AbstractScope}(1024) for _ in 1:n_partitions]
+    shared_state = DataDepsState(DAGSpec())
+    write_num = 1
+    # Shared state already tracks global ownership/history like flat
+    # `distribute_tasks!`. Do not pass `registry` as `ownership`: sync/commit
+    # would fight the single-state history, and the epilogue must then ignore
+    # the registry too (see `distribute_tasks_hierarchical!`).
+    ownership = nothing
+
+    for pid in 1:n_partitions
+        local_procs = partition_procs[pid]
+        if isempty(partitions[pid]) || isempty(local_procs)
+            temp_queues[pid] = DataDepsTaskQueue(wait_all_queue; scheduler=similar(queue.scheduler))
+            local_scopes[pid] = DefaultScope()
+            schedules[pid] = Dict{DTask,Processor}()
+            continue
+        end
+        local_scope = UnionScope(map(ExactScope, local_procs))
+        local_scopes[pid] = local_scope
+        locked_queue = LockedEnqueueQueue(wait_all_queue, queue_lock)
+        temp_queues[pid] = DataDepsTaskQueue(locked_queue; scheduler=similar(queue.scheduler))
+        partition_pairs = DTaskPair[seen_tasks[v] for v in partitions[pid]]
+        _pdag, schedule = datadeps_build_schedule!(temp_queues[pid].scheduler, partition_pairs,
+                                                   local_procs, local_scope; region_uids)
+        schedules[pid] = schedule
+    end
+
+    topo = try
+        topological_sort_by_dfs(dag)
+    catch
+        collect(vertices(dag))
+    end
+
+    with_options(; task_queue=LockedEnqueueQueue(wait_all_queue, queue_lock)) do
+        for v in topo
+            pid = vertex_to_partition[v]
+            local_procs = partition_procs[pid]
+            isempty(local_procs) && continue
+            write_num = _schedule_vertex!(
+                v, pid, temp_queues[pid], shared_state, local_procs,
+                local_scopes[pid], dag, seen_tasks, vertex_to_partition,
+                schedules[pid], proc_to_scope_lfus[pid], write_num, ownership)
+        end
+    end
+
+    return DataDepsState[shared_state]
+end
+
 struct LockedEnqueueQueue <: AbstractTaskQueue
     inner::AbstractTaskQueue
     lock::ReentrantLock
@@ -901,17 +1007,21 @@ end
 Main entry point for hierarchical scheduling. Runs the 4-phase pipeline:
 1. Parallel aliasing construction
 2. DAG construction
-3. Partitioning (by worker affinity, or across local procs on one worker)
-4. Parallel per-partition scheduling via `distribute_task!`
+3. Partitioning (by Distributed-worker / MPI-rank affinity, or across local
+   procs on one owner)
+4. Per-partition scheduling via `distribute_task!`
 
-Each partition runs on its own task and computes its *own* partition-local AOT
-schedule over just its processors (see `schedule_partition_full!`); there is no
-global AOT pass or global synchronization, which is what allows this to scale.
+Each partition computes its *own* partition-local AOT schedule over just its
+processors (see `schedule_partition_full!`); there is no global AOT pass or
+global synchronization, which is what allows this to scale under Distributed.
 AOT scheduling here therefore need not match the flat `distribute_tasks!` path
 exactly. Both drivers use `distribute_task!` for argument preparation and
 `DataDepsScheduler` dispatch; the old single-worker "batch enqueue with DAG
 syncdeps only" path is intentionally not used (it skipped `distribute_task!` and
 broke `ChunkView` / custom schedulers).
+
+Under uniform execution (MPI), Phase 4 runs sequentially on the root task so
+SPMD tag / `MPIRefID` allocation stays deterministic across ranks.
 """
 function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
     seen_tasks = queue.seen_tasks
@@ -919,17 +1029,24 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
         return
     end
 
-    # Get the set of all processors
-    all_procs = Processor[]
-    scope = get_compute_scope()
-    for w in procs()
-        append!(all_procs, get_processors(OSProc(w)))
+    # Match flat `distribute_tasks!`: acceleration-aware processor enumeration
+    # (Distributed `OSProc`s, or MPI `MPIOSProc`s → `MPIProcessor`s).
+    accel = current_acceleration()
+    accel_procs = filter(procs(Sch.eager_context())) do proc
+        accel_matches_proc(accel, proc)
     end
+    all_procs = unique(vcat([collect(get_processors(gp)) for gp in accel_procs]...))
+    select_processors_uniform!(all_procs, accel)
+    scope = get_compute_scope()
     filter!(proc->proc_in_scope(proc, scope), all_procs)
     if isempty(all_procs)
         throw(Sch.SchedulingException("No processors available, try widening scope"))
     end
-    all_scope = UnionScope(map(ExactScope, all_procs))
+    if uniform_execution(accel)
+        for proc in all_procs
+            check_uniform(proc)
+        end
+    end
 
     # All in-region task uids, so each partition's local AOT-schedule builder
     # can tell same-region producers (which it must not `fetch`) apart from
@@ -944,12 +1061,12 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
     dag = build_dependency_dag(task_metas, arg_to_ainfo, ainfos_overlaps)
 
     # Phase 3: Partition the DAG
-    vertex_to_partition, n_partitions, partition_procs, _multi_worker =
+    vertex_to_partition, n_partitions, partition_procs, _multi_owner =
         partition_dag(dag, task_metas, all_procs)
 
     # Detect backing chunks shared across partitions in different memory spaces.
     # These need runtime ownership transfer to avoid split-brain concurrent
-    # writes; `nothing` when all partitions share one space (single-worker).
+    # writes; `nothing` when all partitions share one space (single-owner).
     partition_space = MemorySpace[only(memory_spaces(first(pp))) for pp in partition_procs]
     registry = build_shared_chunk_registry(task_metas, vertex_to_partition, partition_space)
 
@@ -964,31 +1081,48 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
     task_submitted = [Base.Event() for _ in 1:length(seen_tasks)]
     wait_all_queue = get_options(:task_queue)
 
-    # Phase 4: parallel per-partition scheduling. Each partition runs on its own
-    # task, prepares its tasks concurrently, computes its own partition-local
-    # AOT schedule, and coordinates cross-partition dependencies via the
-    # `task_submitted` events. Concurrent submission is safe now that task
-    # futures are backed by `MemPool.DFuture` (see the header note).
-    partition_states = Vector{DataDepsState}(undef, n_partitions)
-    try
-        @sync for pid in 1:n_partitions
-            Threads.@spawn begin
-                locked_queue = LockedEnqueueQueue(wait_all_queue, queue_lock)
-                with_options(; task_queue=locked_queue) do
-                        partition_states[pid] = schedule_partition_full!(
-                            queue, queue_lock, pid, partitions[pid],
-                            dag, seen_tasks,
-                            partition_procs[pid], vertex_to_partition,
-                            task_submitted, region_uids, registry
-                        )
+    # Phase 4: per-partition scheduling. Under Distributed, each partition runs
+    # on its own task concurrently (see the header note). Under uniform
+    # execution (MPI), planning stays sequential on the root task in global
+    # topological order so `to_tag` / generic `MPIRefID` allocation is
+    # SPMD-deterministic and cross-partition deps cannot deadlock.
+    mpi_shared_state = uniform_execution(accel)
+    partition_states = try
+        if mpi_shared_state
+            schedule_partitions_sequential!(
+                queue, queue_lock, partitions, dag, seen_tasks,
+                partition_procs, vertex_to_partition, region_uids, registry,
+                wait_all_queue)
+        else
+            states = Vector{DataDepsState}(undef, n_partitions)
+            @sync for pid in 1:n_partitions
+                Threads.@spawn begin
+                    locked_queue = LockedEnqueueQueue(wait_all_queue, queue_lock)
+                    with_options(; task_queue=locked_queue) do
+                            states[pid] = schedule_partition_full!(
+                                queue, queue_lock, pid, partitions[pid],
+                                dag, seen_tasks,
+                                partition_procs[pid], vertex_to_partition,
+                                task_submitted, region_uids, registry
+                            )
+                    end
                 end
             end
+            states
         end
     catch e
         rethrow(_unwrap_partition_exception(e))
     end
 
-    _hierarchical_copy_from_and_free!(partition_states, n_partitions, registry)
+    # Sequential MPI path returns a one-element shared-state vector and does not
+    # commit into `registry` (`ownership=nothing` there); copy-back must therefore
+    # ignore the registry and use the shared state's full history (same as flat).
+    # Passing the registry would skip every multi-partition chunk: the registry
+    # path needs `owner_state` (never set), and the private path skips shared keys.
+    # Distributed keeps per-partition states and needs the registry for coherent
+    # cross-partition write-back.
+    epilogue_registry = mpi_shared_state ? nothing : registry
+    _hierarchical_copy_from_and_free!(partition_states, length(partition_states), epilogue_registry)
 end
 
 function _hierarchical_max_write_num(state::DataDepsState, arg_w::ArgumentWrapper)
@@ -1015,6 +1149,11 @@ function _hierarchical_copy_from!(state::DataDepsState, arg_w::ArgumentWrapper, 
     return
 end
 
+# Deterministic sort key for shared-chunk registry / free-list iteration so
+# SPMD ranks enqueue copy-back and free tasks in the same order.
+_hierarchical_chunk_sort_key(chunk::Chunk) = (short_name(chunk.space), hash(chunk.handle))
+_hierarchical_chunk_sort_key(chunk) = ("", _identity_hash(chunk))
+
 function _hierarchical_copy_from_and_free!(partition_states::Vector{DataDepsState}, n_partitions::Int,
                                            registry::Union{SharedChunkRegistry,Nothing})
     # 1. Shared chunks: write back from the registry's authoritative owner state
@@ -1022,12 +1161,15 @@ function _hierarchical_copy_from_and_free!(partition_states::Vector{DataDepsStat
     #    max-`write_num` heuristic below (per-partition write_nums are not
     #    comparable across partitions).
     if registry !== nothing
-        for (chunk, entry) in registry.entries
+        shared_chunks = sort!(collect(keys(registry.entries)); by=_hierarchical_chunk_sort_key)
+        for chunk in shared_chunks
+            entry = registry.entries[chunk]
             state = entry.owner_state
             state === nothing && continue                       # never written
             entry.owner_space == entry.origin_space && continue # already in-place at origin
-            for (arg_w, _space) in state.arg_owner
-                arg_w.arg === chunk || continue
+            arg_ws = sort!(ArgumentWrapper[arg_w for (arg_w, _) in state.arg_owner if arg_w.arg === chunk];
+                           by=arg_w->arg_w.hash)
+            for arg_w in arg_ws
                 _hierarchical_copy_from!(state, arg_w, _hierarchical_max_write_num(state, arg_w) + 1)
             end
         end
@@ -1056,12 +1198,15 @@ function _hierarchical_copy_from_and_free!(partition_states::Vector{DataDepsStat
     #    global writer: an intermediate owner's slot may still be read by a
     #    cross-partition boundary copy recorded in *another* partition's state,
     #    and the final writer transitively depends on all such copies.
+    #    Iteration is sorted for SPMD-uniform free-task tagging/enqueue order.
     for pid in 1:n_partitions
         state = partition_states[pid]
         obj_cache = unwrap(state.ainfo_backing_chunk)
         write_num = typemax(Int) - 1
-        for remote_space in keys(obj_cache.values)
-            for (ainfo, remote_arg) in obj_cache.values[remote_space]
+        remote_spaces = sort!(collect(keys(obj_cache.values)); by=short_name)
+        for remote_space in remote_spaces
+            space_entries = sort!(collect(obj_cache.values[remote_space]); by=p->hash(p.first))
+            for (ainfo, remote_arg) in space_entries
                 if !(ainfo in obj_cache.originals)
                     remote_proc = first(processors(remote_space))
                     free_scope = ExactScope(remote_proc)
@@ -1078,7 +1223,7 @@ function _hierarchical_copy_from_and_free!(partition_states::Vector{DataDepsStat
                             end
                         end
                     end
-                    Dagger.@spawn scope=free_scope syncdeps=free_syncdeps Dagger.unsafe_free!(remote_arg)
+                    Dagger.@spawn scope=free_scope syncdeps=free_syncdeps tag=datadeps_task_tag() Dagger.unsafe_free!(remote_arg)
                 end
             end
         end
