@@ -128,6 +128,23 @@ steps:
     env:
       CI_USE_OPENCL: "1"
 
+  # MPI × OpenCL SPMD datadeps suite. Runs on the same macOS/aarch64 agent as the
+  # non-MPI OpenCL job, but drives test/mpi_opencl.jl under MPI.jl's bundled
+  # `mpiexec` via test/run_mpi.jl (no `julia-test` plugin, no system MPI).
+  - label: Julia 1.11 (OpenCL, MPI)
+    <<: *gputest
+    timeout_in_minutes: 20
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+    agents:
+      queue: "juliaecosystem"
+      os: macos
+      arch: aarch64
+    command: |
+      julia --project=test/openclenv -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
+      julia --project=test/openclenv test/run_mpi.jl 2 2 test/mpi_opencl.jl
+
   - label: Julia 1 - TimespanLogging
     <<: *test
     timeout_in_minutes: 20

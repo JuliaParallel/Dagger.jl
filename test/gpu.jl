@@ -808,5 +808,17 @@ end
                 end
             end
         end
+
+        @testset "Datadeps" begin
+            local_scope = Dagger.scope(worker=1, cl_device=1)
+            A = rand(Float32, 8, 8)
+            ref = copy(A)
+            Dagger.with_options(;scope=local_scope) do
+                Dagger.spawn_datadeps() do
+                    Dagger.@spawn addarray!(Dagger.InOut(A))
+                end
+            end
+            @test A ≈ ref .+ 1
+        end
     end
 end

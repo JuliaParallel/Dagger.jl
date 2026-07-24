@@ -25,6 +25,13 @@ function enqueue!(queue::DataDepsTaskQueue, pairs::Vector{DTaskPair})
     append!(queue.seen_tasks, pairs)
 end
 
+const DATADEPS_CURRENT_TASK = TaskLocalValue{Union{DTask,Nothing}}(Returns(nothing))
+
+# Tag for datadeps-internal tasks (copies, frees) launched outside the user
+# task queue. Under uniform (MPI) execution every task needs a unique,
+# rank-uniform tag for its P2P transfers; under Distributed this is unused.
+datadeps_task_tag() = uniform_execution() ? UInt32(to_tag()) : nothing
+
 """
     spawn_datadeps(f::Base.Callable)
 
@@ -88,6 +95,15 @@ end
 const DATADEPS_SCHEDULER = ScopedValue{Union{DataDepsScheduler,Nothing}}(nothing)
 const DATADEPS_LAUNCH_WAIT = ScopedValue{Union{Bool,Nothing}}(nothing)
 
+# Current task uid, propagated into `tochunk` so uniform-execution backends
+# (MPIExt) can derive deterministic, rank-agreed handle IDs. Core datadeps sets
+# this during planning/execution; MPIExt reads it. 0 means "no task in scope".
+const DATADEPS_THUNK_ID = ScopedValue{Int64}(0)
+
+# Deterministic, rank-agreed task tag for uniform execution. Only invoked when
+# `uniform_execution()` holds (i.e. under MPIExt), which provides the method.
+function to_tag end
+
 function distribute_tasks!(queue::DataDepsTaskQueue)
     #= TODO: Improvements to be made:
     # - Support for copying non-AbstractArray arguments
@@ -98,20 +114,24 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     =#
 
     # Get the set of all processors to be scheduled on
-    all_procs = Processor[]
-    scope = get_compute_scope()
-    for w in procs()
-        append!(all_procs, get_processors(OSProc(w)))
+    accel = current_acceleration()
+    accel_procs = filter(procs(Dagger.Sch.eager_context())) do proc
+        Dagger.accel_matches_proc(accel, proc)
     end
+    all_procs = unique(vcat([collect(Dagger.get_processors(gp)) for gp in accel_procs]...))
+    select_processors_uniform!(all_procs, accel)
+    scope = get_compute_scope()
     filter!(proc->proc_in_scope(proc, scope), all_procs)
     if isempty(all_procs)
         throw(Sch.SchedulingException("No processors available, try widening scope"))
     end
+    if uniform_execution(accel)
+        for proc in all_procs
+            check_uniform(proc)
+        end
+    end
     all_scope = UnionScope(map(ExactScope, all_procs))
     exec_spaces = unique(vcat(map(proc->collect(memory_spaces(proc)), all_procs)...))
-    if !all(space->space isa CPURAMMemorySpace, exec_spaces) && !all(space->root_worker_id(space) == myid(), exec_spaces)
-        @warn "Datadeps support for multi-GPU, multi-worker is currently broken\nPlease be prepared for incorrect results or errors" maxlog=1
-    end
 
     # Round-robin assign tasks to processors
     upper_queue = get_options(:task_queue)
@@ -128,10 +148,21 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
     # Copy args from remote to local
     # N.B. We sort the keys to ensure a deterministic order for uniformity
+    check_uniform(length(state.arg_owner))
     for arg_w in sort(collect(keys(state.arg_owner)); by=arg_w->arg_w.hash)
+        check_uniform(arg_w)
         arg = arg_w.arg
         origin_space = state.arg_origin[arg]
-        remainder, _ = compute_remainder_for_arg!(state, origin_space, arg_w, write_num)
+        # When the origin still holds a fully-current replica (the argument was
+        # only read, or copies merely propagated it), the write-back is elided.
+        # This is only safe here at region end: mid-region, the copy tasks also
+        # serialize readers against later writers, so they must not be skipped.
+        current = get(state.arg_current, arg_w, nothing)
+        if current !== nothing && origin_space in current
+            remainder = NoAliasing()
+        else
+            remainder, _ = compute_remainder_for_arg!(state, origin_space, arg_w, write_num)
+        end
         if remainder isa MultiRemainderAliasing
             origin_scope = UnionScope(map(ExactScope, collect(processors(origin_space)))...)
             enqueue_remainder_copy_from!(state, origin_space, arg_w, remainder, origin_scope, write_num)
@@ -158,6 +189,13 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     # regardless of array wrappers. A buffer is a Datadeps-allocated copy (safe
     # to free) at every space except the `key`'s source space, where it is the
     # user's original data (`is_original`).
+    #
+    # N.B. Do not mpi_cleanup_tid the planning-time uid keys here. Eager uid ==
+    # Sch thunk id, so planning (DATADEPS_THUNK_ID=>uid) and later in-task tochunk share
+    # the same next_ref_sub_id! counter. Resetting it before execution would
+    # reissue (tid, sub_id) pairs while planning-time MPIRefs are still live,
+    # colliding ArgumentWrapper / Chunk identity hashes. Counters are reclaimed
+    # in wait_all after the region finishes (thunks generate no further IDs).
     obj_cache = unwrap(state.ainfo_backing_chunk)
     # Map each tracked slot chunk to its ainfos, to compute free syncdeps.
     chunk_to_ainfos = IdDict{Any,Vector{AliasingWrapper}}()
@@ -176,8 +214,9 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             haskey(freed, remote_arg) && continue
             freed[remote_arg] = nothing
             free_syncdeps = Set{ThunkSyncdep}()
-            gather_free_syncdeps!(state, remote_space, remote_arg, write_num, chunk_to_ainfos, free_syncdeps)
-            Dagger.@spawn scope=free_scope syncdeps=free_syncdeps Dagger.unsafe_free!(remote_arg)
+            gather_free_syncdeps!(state, remote_space, ainfo, remote_arg, write_num, chunk_to_ainfos, free_syncdeps)
+            # `tag` keeps the free task rank-uniform under MPI/uniform execution.
+            Dagger.@spawn scope=free_scope syncdeps=free_syncdeps tag=datadeps_task_tag() Dagger.unsafe_free!(remote_arg)
         end
     end
 end
@@ -215,11 +254,15 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
         fargs::Vector{Argument}
     end
 
+    DATADEPS_CURRENT_TASK[] = task
+
     task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
     scheduler = queue.scheduler
     our_proc = datadeps_schedule_task(scheduler, state, all_procs, all_scope, task_scope, spec, task)
     @assert our_proc in all_procs
     our_space = only(memory_spaces(our_proc))
+    check_uniform(our_proc)
+    check_uniform(our_space)
 
     # Find the scope for this task (and its copies)
     task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
@@ -238,15 +281,16 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
         throw(Sch.SchedulingException("Scopes are not compatible: $(our_scope.x), $(our_scope.y)"))
     end
 
-    f = spec.fargs[1]
     tid = task.uid
-    # FIXME: May not be correct to move this under uniformity
-    #f.value = move(default_processor(), our_proc, value(f))
+    # N.B. `with_value` returns a fresh argument rather than mutating; this is
+    # required for typed specs, whose `TypedArgument`s disallow `setproperty!`.
+    f = with_value(spec.fargs[1], move(default_processor(), our_proc, value(spec.fargs[1])))
     @dagdebug tid :spawn_datadeps "($(repr(value(f)))) Scheduling: $our_proc ($our_space)"
 
     # Copy raw task arguments for analysis
-    # N.B. Used later for checking dependencies
-    task_args = map_or_ntuple(idx->copy(spec.fargs[idx]), spec.fargs)
+    # N.B. Used later for checking dependencies. The moved function argument
+    # (`f`) replaces the original at position 1.
+    task_args = map_or_ntuple(idx->copy(idx == 1 ? f : spec.fargs[idx]), spec.fargs)
 
     # Populate all task dependencies
     task_arg_ws = populate_task_info!(state, task_args, spec, task)
@@ -324,6 +368,9 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     if spec.options.syncdeps === nothing
         spec.options.syncdeps = Set{ThunkSyncdep}()
     end
+    if spec.options.tag === nothing && uniform_execution()
+       spec.options.tag = to_tag()
+    end
     syncdeps = spec.options.syncdeps
     map_or_ntuple(task_arg_ws) do idx
         arg_ws = task_arg_ws[idx]
@@ -358,7 +405,9 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     new_spec = DTaskSpec(new_fargs, spec.options)
     new_spec.options.scope = our_scope
     new_spec.options.exec_scope = our_scope
-    new_spec.options.occupancy = Dict(Any=>0)
+    if uniform_execution()
+        new_spec.options.occupancy = Dict(Any=>0)
+    end
     ctx = Sch.eager_context()
     @maybelog ctx timespan_start(ctx, :datadeps_execute, (;thunk_id=task.uid), (;))
     enqueue!(queue.upper_queue, DTaskPair(new_spec, task))
@@ -385,6 +434,8 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     end
 
     write_num += 1
+
+    DATADEPS_CURRENT_TASK[] = nothing
 
     return write_num
 end

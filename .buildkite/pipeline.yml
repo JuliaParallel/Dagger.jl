@@ -2,6 +2,16 @@
   timeout_in_minutes: 60
   if: build.message !~ /\[skip tests\]/
 
+# MPI × GPU jobs launch the SPMD datadeps suite (test/mpi_<backend>.jl) under
+# `mpiexec`. They use only the `julia` plugin (not `julia-test`, which would run
+# the non-MPI `test/runtests.jl`), then instantiate the backend's MPI test env
+# and drive it with `test/run_mpi.jl`, which uses MPI.jl's bundled `mpiexec`
+# (no system MPI required). 2 ranks share whatever GPU(s) the agent exposes;
+# the data plane is host-staged P2P, so a single device is sufficient.
+.mpigputest: &mpigputest
+  timeout_in_minutes: 60
+  if: build.message !~ /\[skip tests\]/
+
 steps:
   - label: Julia 1.11 (CUDA)
     <<: *gputest
@@ -55,6 +65,51 @@ steps:
       queue: "metal"
     env:
       CI_USE_METAL: "1"
+
+  - label: Julia 1.11 (CUDA, MPI)
+    <<: *mpigputest
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+    agents:
+      queue: "cuda"
+    command: |
+      julia --project=test/cudaenv -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
+      julia --project=test/cudaenv test/run_mpi.jl 2 2 test/mpi_cuda.jl
+
+  - label: Julia 1.11 (ROCm, MPI)
+    <<: *mpigputest
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+    agents:
+      queue: "rocm"
+    command: |
+      julia --project=test/rocmenv -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
+      julia --project=test/rocmenv test/run_mpi.jl 2 2 test/mpi_rocm.jl
+
+  - label: Julia 1.11 (oneAPI, MPI)
+    <<: *mpigputest
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+    agents:
+      queue: "oneapi"
+    command: |
+      julia --project=test/oneapienv -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
+      julia --project=test/oneapienv test/run_mpi.jl 2 2 test/mpi_oneapi.jl
+
+  - label: Julia 1.11 (Metal, MPI)
+    <<: *mpigputest
+    timeout_in_minutes: 20
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+    agents:
+      queue: "metal"
+    command: |
+      julia --project=test/metalenv -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
+      julia --project=test/metalenv test/run_mpi.jl 2 2 test/mpi_metal.jl
 
 # env:
 #   SECRET_CODECOV_TOKEN: ""

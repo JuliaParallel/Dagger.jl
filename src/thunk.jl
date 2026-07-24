@@ -9,14 +9,12 @@ Base.@kwdef mutable struct ThunkSpec
     fargs::Vector{Argument} = EMPTY_ARGS
     id::Int = 0
     cache_ref::Any = nothing
-    affinity::Union{Pair{OSProc,Int}, Nothing} = nothing
     options::Union{Options, Nothing} = nothing
 end
 function unset!(spec::ThunkSpec, _)
     spec.fargs = EMPTY_ARGS
     spec.id = 0
     spec.cache_ref = nothing
-    spec.affinity = nothing
     spec.options = nothing
 end
 
@@ -75,7 +73,6 @@ mutable struct Thunk
     inputs::Vector{Argument} # TODO: Use `ImmutableArray` in 1.8
     id::Int
     cache_ref::Any
-    affinity::Union{Pair{OSProc,Int}, Nothing}
     options::Union{Options, Nothing} # stores task options
     eager_accessible::Bool
     sch_accessible::Bool
@@ -83,13 +80,13 @@ mutable struct Thunk
     @atomic errored::Bool          # true if finished with an error result
     @atomic valid::Bool            # true while registered with the scheduler
     @atomic running::Bool          # true while a worker is executing this thunk
-    running_on::Union{OSProc,Nothing}  # which OSProc is running this thunk
+    running_on::Union{Processor,Nothing}  # which (gproc) Processor is running this thunk (an OSProc, or e.g. MPIOSProc under MPI)
     @atomic futures_head::Union{FutureNode,Nothing,Sealed}  # Treiber list of waiting futures
     @atomic pending_deps::Int      # count of unresolved upstream dependencies (dataflow counter)
     @atomic dependents_head::Union{DepNode,Nothing,Sealed}  # Treiber list of downstream dependents
     function Thunk(spec::ThunkSpec)
         return new(spec.fargs, spec.id,
-                   spec.cache_ref, spec.affinity,
+                   spec.cache_ref,
                    spec.options,
                    true, true, false,
                    false, false, false, nothing,
@@ -168,7 +165,6 @@ function Thunk(f, xs...;
                syncdeps=nothing,
                id::Int=next_id(),
                cache_ref=nothing,
-               affinity=nothing,
                options=nothing,
                propagates=(),
                kwargs...
@@ -216,7 +212,6 @@ function Thunk(f, xs...;
         @warn "The cache argument is deprecated, as it is now always true" maxlog=1
     end
     spec.cache_ref = cache_ref
-    spec.affinity = affinity
     return Thunk(spec)
 end
 Serialization.serialize(io::AbstractSerializer, t::Thunk) =
@@ -230,40 +225,6 @@ function Base.getproperty(thunk::Thunk, field::Symbol)
 end
 Base.convert(::Type{ThunkSyncdep}, thunk::Thunk) =
     ThunkSyncdep(nothing, thunk)
-
-function affinity(t::Thunk)
-    if t.affinity !== nothing
-        return t.affinity
-    end
-
-    if t.cache_ref !== nothing
-        aff_vec = affinity(t.cache_ref)
-    else
-        aff = Dict{OSProc,Int}()
-        for (_, inp) in t.inputs
-           #if haskey(state.cache, inp)
-           #    as = affinity(state.cache[inp])
-           #    for a in as
-           #        proc, sz = a
-           #        aff[proc] = get(aff, proc, 0) + sz
-           #    end
-           #else
-                if isa(inp, Union{Chunk, Thunk})
-                    # TODO if inp is a FileRef, affinity[1] will always be OSProc(1)
-                    proc, sz = affinity(inp)
-                    aff[proc] = get(aff, proc, 0) + sz
-                end
-           #end
-        end
-        aff_vec = collect(aff)
-    end
-    aff_vec
-   #if length(aff) > 1
-   #    return sort!(aff_vec, by=last,rev=true)
-   #else
-   #    return aff_vec
-   #end
-end
 
 is_task_or_chunk(x) = istask(x)
 
@@ -344,6 +305,18 @@ isweak(t) = false
 Base.show(io::IO, t::WeakThunk) = (print(io, "~"); Base.show(io, t.x.value))
 Base.convert(::Type{WeakThunk}, t::Thunk) = WeakThunk(t)
 chunktype(t::WeakThunk) = chunktype(unwrap_weak_checked(t))
+# Use options.return_type when set (e.g. from mpi_propagate_chunk_types! or eager_metadata)
+# so that Thunk arguments propagate type to downstream eager_metadata/execute!
+function chunktype(t::Thunk)
+    if t.options !== nothing && t.options.return_type !== nothing && isconcretetype(t.options.return_type)
+        return t.options.return_type
+    end
+    # Fall back to `Any` (unknown result type) rather than `typeof(t)`: a
+    # `Thunk` is an internal placeholder for a not-yet-computed result, never
+    # the actual value type, so reporting `Thunk` as the chunk type would
+    # mislabel a downstream task's argument signature.
+    return Any
+end
 Base.convert(::Type{ThunkSyncdep}, t::WeakThunk) = ThunkSyncdep(nothing, t)
 ThunkSyncdep(t::WeakThunk) = ThunkSyncdep(nothing, t)
 
@@ -559,7 +532,7 @@ function _par(mod, ex::Expr; lazy=true, recur=true, opts=())
         end
         args = filter(arg->!Meta.isexpr(arg, :parameters), allargs)
         kwargs = filter(arg->Meta.isexpr(arg, :parameters), allargs)
-        if !isempty(kwargs)
+        if !Base.isempty(kwargs)
             kwargs = only(kwargs).args
         end
         if body !== nothing
@@ -671,6 +644,12 @@ function _spawn(args_kwargs, task_options)
 
     # N.B. Merges into task_options
     options_merge!(task_options, scoped_options; override=false)
+
+    # Capture the spawning context's acceleration so the scheduler restricts
+    # processor selection appropriately (e.g. MPI-only procs under MPI)
+    if task_options.acceleration === nothing
+        task_options.acceleration = current_acceleration()
+    end
 
     # Get task queue, and don't let it propagate
     task_queue = get(scoped_options, :task_queue, DefaultTaskQueue())::AbstractTaskQueue

@@ -152,7 +152,9 @@ new `Chunk`.
 
 All other kwargs are passed directly to `MemPool.poolset`.
 """
-function tochunk(x::X, proc::P=OSProc(), scope::S=AnyScope(); device=nothing, rewrap=false, kwargs...) where {X,P,S}
+# N.B. No default for `proc` here: the 1-arg `tochunk(x)` is defined in
+# tochunk.jl and routes through the current acceleration.
+function tochunk(x::X, proc::P, scope::S=AnyScope(); device=nothing, rewrap=false, kwargs...) where {X,P,S}
     if device === nothing
         device = if Sch.walk_storage_safe(x)
             MemPool.GLOBAL_DEVICE[]
@@ -161,7 +163,8 @@ function tochunk(x::X, proc::P=OSProc(), scope::S=AnyScope(); device=nothing, re
         end
     end
     ref = poolset(x; device, kwargs...)
-    Chunk{X,typeof(ref),P,S}(X, domain(x), ref, proc, scope)
+    space = memory_space(proc)
+    Chunk{X,typeof(ref),P,S,typeof(space)}(X, domain(x), ref, proc, scope, space)
 end
 function tochunk(x::Chunk, proc=nothing, scope=nothing; rewrap=false, kwargs...)
     if rewrap
@@ -185,5 +188,6 @@ function savechunk(data, dir, f)
     fr = FileRef(f, sz)
     proc = OSProc()
     scope = AnyScope() # FIXME: Scoped to this node
-    Chunk{typeof(data),typeof(fr),typeof(proc),typeof(scope)}(typeof(data), domain(data), fr, proc, scope, true)
+    space = memory_space(proc)
+    Chunk{typeof(data),typeof(fr),typeof(proc),typeof(scope),typeof(space)}(typeof(data), domain(data), fr, proc, scope, space)
 end

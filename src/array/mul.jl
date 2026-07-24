@@ -41,7 +41,7 @@ function LinearAlgebra.generic_matmatmul!(
         return gemm_dagger!(C, transA, transB, A, B, alpha, beta)
     end
 end
-function _repartition_matmatmul(C, A, B, transA::Char, transB::Char)
+function _repartition_matmatmul(C, A, B, transA::Char, transB::Char)::Tuple{Blocks{2}, Blocks{2}, Blocks{2}}
     partA = A.partitioning.blocksize
     partB = B.partitioning.blocksize
     istransA = transA == 'T' || transA == 'C'
@@ -398,16 +398,17 @@ end
     return A
 end
 
-@inline function copytile!(A, B)
+@inline function copytile!(A::AbstractMatrix{T}, B::AbstractMatrix{T})::Nothing where {T}
     m, n = size(A)
     C = B'
 
     for i = 1:m, j = 1:n
         A[i, j] = C[i, j]
     end
+    return nothing
 end
 
-@inline function copydiagtile!(A, uplo)
+@inline function copydiagtile!(A::AbstractMatrix{T}, uplo::AbstractChar)::Nothing where {T}
     m, n = size(A)
     Acpy = copy(A)
 
@@ -422,6 +423,7 @@ end
     for i = 1:m, j = 1:n
         A[i, j] = C[i, j]
     end
+    return nothing
 end
 function LinearAlgebra.generic_matvecmul!(
     C::DVector{T},
@@ -445,7 +447,7 @@ function LinearAlgebra.generic_matvecmul!(
         return gemv_dagger!(C, transA, A, B, _alpha, _beta)
     end
 end
-function _repartition_matvecmul(C, A, B, transA::Char)
+function _repartition_matvecmul(C, A, B, transA::Char)::Tuple{Blocks{1}, Blocks{2}, Blocks{1}}
     partA = A.partitioning.blocksize
     partB = B.partitioning.blocksize
     istransA = transA == 'T' || transA == 'C'

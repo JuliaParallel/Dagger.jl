@@ -32,6 +32,7 @@ makedocs(;
             "Stencils" => "stencils.md",
         ],
         "GPUs" => "gpu.md",
+        "MPI" => "mpi.md",
         "Option Propagation" => "propagation.md",
         "Logging and Visualization" => [
             "Logging: Basics" => "logging.md",

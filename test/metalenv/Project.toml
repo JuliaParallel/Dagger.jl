@@ -1,0 +1,10 @@
+[deps]
+Dagger = "d58978e5-989f-55fb-8d15-ea34adc7bf54"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+MPI = "da04e1cc-30fd-572f-bb4f-1f8673147195"
+Metal = "dde4c033-4e86-420c-a63e-0dd931031962"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[sources]
+Dagger = {path = "../.."}

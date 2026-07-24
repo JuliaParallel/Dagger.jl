@@ -22,6 +22,10 @@ Dagger.spawn_datadeps() do
 end
 ```
 
+Datadeps also runs across distributed memory on top of MPI, using the same API
+shown here; see the [MPI](mpi.md) page for how to launch and scope datadeps
+regions across cluster ranks.
+
 In this example, we have two Dagger tasks being launched, one adding `A` into
 `B`, and the other copying `B` into `C`. The `add!` task is specifying that
 `A` is being only read from (`In` for "input"), and that `B` is being read

@@ -1,0 +1,33 @@
+# Tuolumne (LLNL) environment for Dagger MPI testing.
+# Copy to $HOME/tuolumne_dagger.profile and edit FLUX_BANK / module versions.
+#
+#   cp scripts/tuolumne/tuolumne_dagger.profile.example ~/tuolumne_dagger.profile
+#   vi ~/tuolumne_dagger.profile   # set FLUX_BANK, JULIA_BIN, DAGGER_DIR
+#   source ~/tuolumne_dagger.profile
+
+# --- Required: set your Flux bank (flux banks) ---
+export FLUX_BANK=YOUR_BANK
+
+# --- ROCm (check: module avail rocm) ---
+module load rocm/6.4.1
+
+# MI300A compilation / runtime arch hint
+export AMREX_AMD_ARCH=gfx942
+
+# --- Julia (install to Lustre; do not use NFS $HOME for depots) ---
+export JULIA_BIN=/p/lustre5/${USER}/julia/bin/julia
+export PATH="$(dirname "${JULIA_BIN}"):${PATH}"
+
+# Keep Julia depot on Lustre for compute jobs
+export JULIA_DEPOT_PATH=/p/lustre5/${USER}/.julia_depot:${JULIA_DEPOT_PATH:-}
+
+# --- Dagger checkout (Lustre) ---
+export DAGGER_DIR=/p/lustre5/${USER}/dagger-mpi/Dagger.jl
+
+# --- Test runner defaults (Tuolumne is ROCm-only) ---
+export SKIP_CUDA=1
+export ROCM_GPU_PROJECT=${DAGGER_DIR}/test/rocmenv
+
+# Optional: GPU-aware MPI (not required for current host-staged MPI GPU tests)
+# export MPICH_GPU_SUPPORT_ENABLED=1
+# export MPICH_OFI_NIC_POLICY=GPU

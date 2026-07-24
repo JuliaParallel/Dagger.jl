@@ -415,9 +415,7 @@ end
         ]
             for arg in args
                 if arg isa Dagger.Chunk
-                    aff = Dagger.affinity(arg)
-                    @test aff[1] == OSProc(1)
-                    @test aff[2] == MemPool.approx_size(MemPool.poolget(arg.handle))
+                    @test Dagger.datasize(arg) == MemPool.approx_size(MemPool.poolget(arg.handle))
                 end
             end
 

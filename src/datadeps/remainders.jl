@@ -98,7 +98,7 @@ function compute_remainder_for_arg!(state::DataDepsState,
     for entry in state.arg_history[arg_w]
         push!(spaces_set, entry.space)
     end
-    spaces = collect(spaces_set)
+    spaces = sort(collect(spaces_set), by=short_name)
     N = length(spaces)
 
     # Lookup all memory spans for arg_w in these spaces
@@ -118,6 +118,8 @@ function compute_remainder_for_arg!(state::DataDepsState,
             @goto restart
         end
     end
+    check_uniform(spaces)
+    check_uniform(target_ainfos)
 
     # We may only need to schedule a full copy from the origin space to the
     # target space if this is the first time we've written to `arg_w`
@@ -159,6 +161,8 @@ function compute_remainder_for_arg!(state::DataDepsState,
             other_ainfo = aliasing!(state, owner_space, arg_w)
             other_space = owner_space
         end
+        check_uniform(other_ainfo)
+        check_uniform(other_space)
 
         # Lookup all memory spans for arg_w in these spaces
         other_remote_arg_w = first(collect(state.ainfo_arg[other_ainfo]))
@@ -174,6 +178,7 @@ function compute_remainder_for_arg!(state::DataDepsState,
         foreach(other_many_spans) do span
             verify_span(span)
         end
+        check_uniform(other_many_spans)
 
         if other_space == target_space
             # Only subtract, this data is already up-to-date in target_space
@@ -250,7 +255,9 @@ Enqueues a copy operation to update the remainder regions of an object before a 
 function enqueue_remainder_copy_to!(state::DataDepsState, dest_space::MemorySpace, arg_w::ArgumentWrapper, remainder_aliasing::MultiRemainderAliasing,
                                     f, idx, dest_scope, task, write_num::Int)
     for remainder in remainder_aliasing.remainders
+        check_uniform(remainder.space)
         @assert !isempty(remainder.spans)
+        check_uniform(remainder.spans)
         enqueue_remainder_copy_to!(state, dest_space, arg_w, remainder, f, idx, dest_scope, task, write_num)
     end
 end
@@ -286,14 +293,14 @@ function enqueue_remainder_copy_to!(state::DataDepsState, dest_space::MemorySpac
     ctx = Sch.eager_context()
     id = rand(UInt)
     @maybelog ctx timespan_start(ctx, :datadeps_copy, (;id), (;))
-    copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=remainder_syncdeps meta=true Dagger.move!(remainder_aliasing, dest_space, source_space, arg_dest, arg_source)
+    copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=remainder_syncdeps meta=true tag=datadeps_task_tag() Dagger.move!(remainder_aliasing, dest_space, source_space, arg_dest, arg_source)
     @maybelog ctx timespan_finish(ctx, :datadeps_copy, (;id), (;thunk_id=copy_task.uid, from_space=source_space, to_space=dest_space, arg_w, from_arg=arg_source, to_arg=arg_dest))
 
     # This copy task reads the sources and writes to the target
     for ainfo in source_ainfos
         add_reader!(state, arg_w, source_space, ainfo, copy_task, write_num)
     end
-    add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num)
+    add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num; copy_src=source_space)
 end
 """
     enqueue_remainder_copy_from!(state::DataDepsState, target_ainfo::AliasingWrapper, arg, remainder_aliasing,
@@ -304,7 +311,9 @@ Enqueues a copy operation to update the remainder regions of an object back to t
 function enqueue_remainder_copy_from!(state::DataDepsState, dest_space::MemorySpace, arg_w::ArgumentWrapper, remainder_aliasing::MultiRemainderAliasing,
                                       dest_scope, write_num::Int)
     for remainder in remainder_aliasing.remainders
+        check_uniform(remainder.space)
         @assert !isempty(remainder.spans)
+        check_uniform(remainder.spans)
         enqueue_remainder_copy_from!(state, dest_space, arg_w, remainder, dest_scope, write_num)
     end
 end
@@ -340,14 +349,14 @@ function enqueue_remainder_copy_from!(state::DataDepsState, dest_space::MemorySp
     ctx = Sch.eager_context()
     id = rand(UInt)
     @maybelog ctx timespan_start(ctx, :datadeps_copy, (;id), (;))
-    copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=remainder_syncdeps meta=true Dagger.move!(remainder_aliasing, dest_space, source_space, arg_dest, arg_source)
+    copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=remainder_syncdeps meta=true tag=datadeps_task_tag() Dagger.move!(remainder_aliasing, dest_space, source_space, arg_dest, arg_source)
     @maybelog ctx timespan_finish(ctx, :datadeps_copy, (;id), (;thunk_id=copy_task.uid, from_space=source_space, to_space=dest_space, arg_w, from_arg=arg_source, to_arg=arg_dest))
 
     # This copy task reads the sources and writes to the target
     for ainfo in source_ainfos
         add_reader!(state, arg_w, source_space, ainfo, copy_task, write_num)
     end
-    add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num)
+    add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num; copy_src=source_space)
 end
 
 # FIXME: Document me
@@ -376,12 +385,12 @@ function enqueue_copy_to!(state::DataDepsState, dest_space::MemorySpace, arg_w::
     ctx = Sch.eager_context()
     id = rand(UInt)
     @maybelog ctx timespan_start(ctx, :datadeps_copy, (;id), (;))
-    copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=copy_syncdeps meta=true Dagger.move!(dep_mod, dest_space, source_space, arg_dest, arg_source)
+    copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=copy_syncdeps meta=true tag=datadeps_task_tag() Dagger.move!(dep_mod, dest_space, source_space, arg_dest, arg_source)
     @maybelog ctx timespan_finish(ctx, :datadeps_copy, (;id), (;thunk_id=copy_task.uid, from_space=source_space, to_space=dest_space, arg_w, from_arg=arg_source, to_arg=arg_dest))
 
     # This copy task reads the source and writes to the target
     add_reader!(state, arg_w, source_space, source_ainfo, copy_task, write_num)
-    add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num)
+    add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num; copy_src=source_space)
 end
 function enqueue_copy_from!(state::DataDepsState, dest_space::MemorySpace, arg_w::ArgumentWrapper,
                             dest_scope, write_num::Int)
@@ -408,44 +417,50 @@ function enqueue_copy_from!(state::DataDepsState, dest_space::MemorySpace, arg_w
     ctx = Sch.eager_context()
     id = rand(UInt)
     @maybelog ctx timespan_start(ctx, :datadeps_copy, (;id), (;))
-    copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=copy_syncdeps meta=true Dagger.move!(dep_mod, dest_space, source_space, arg_dest, arg_source)
+    copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=copy_syncdeps meta=true tag=datadeps_task_tag() Dagger.move!(dep_mod, dest_space, source_space, arg_dest, arg_source)
     @maybelog ctx timespan_finish(ctx, :datadeps_copy, (;id), (;thunk_id=copy_task.uid, from_space=source_space, to_space=dest_space, arg_w, from_arg=arg_source, to_arg=arg_dest))
 
     # This copy task reads the source and writes to the target
     add_reader!(state, arg_w, source_space, source_ainfo, copy_task, write_num)
-    add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num)
+    add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num; copy_src=source_space)
 end
 
 # Main copy function for RemainderAliasing
 function move!(dep_mod::RemainderAliasing{S}, to_space::MemorySpace, from_space::MemorySpace, to::Chunk, from::Chunk) where S
-    # TODO: Support direct copy between GPU memory spaces
+    # Same-worker device-to-device: copy spans directly with one KA launch
+    if root_worker_id(from_space) == myid() && root_worker_id(to_space) == myid() &&
+       is_device_space(from_space) && is_device_space(to_space)
+        from_s = storage_array(unwrap(from))
+        to_s = storage_array(unwrap(to))
+        with_context!(from_space)
+        with_context!(to_space)
+        multi_span_copy!(to_s, from_s, dep_mod.spans)
+        return
+    end
 
-    # Copy the data from the source object
+    # Gather source spans into a host buffer (device arrays pack via KA first).
+    # Pin when the source is device memory so DtoH hits page-locked host RAM.
     copies = remotecall_fetch(root_worker_id(from_space), from_space, dep_mod, from) do from_space, dep_mod, from
         len = sum(span_tuple->span_len(span_tuple[1]), dep_mod.spans)
         copies = Vector{UInt8}(undef, len)
+        pin_buffer!(gpu_memory_kind(from_space), copies)
         from_raw = unwrap(from)
-        offset = UInt64(1)
         with_context!(from_space)
         GC.@preserve copies begin
-            for (from_span, _) in dep_mod.spans
-                read_remainder!(copies, offset, from_raw, from_span.ptr, from_span.len)
-                offset += from_span.len
-            end
+            # Lazily view the source (first) span of each pair — avoid
+            # materializing a whole second span vector for large span sets
+            multi_span_gather!(copies, from_raw, Iterators.map(first, dep_mod.spans))
         end
-        @assert offset == len+UInt64(1)
         return copies
     end
 
-    # Copy the data into the destination object
-    offset = UInt64(1)
+    # Scatter into the destination spans (pin again after remotecall deserialize)
     to_raw = unwrap(to)
+    with_context!(to_space)
+    pin_buffer!(gpu_memory_kind(to_space), copies)
     GC.@preserve copies begin
-        for (_, to_span) in dep_mod.spans
-            write_remainder!(copies, offset, to_raw, to_span.ptr, to_span.len)
-            offset += to_span.len
-        end
-        @assert offset == length(copies)+UInt64(1)
+        # Lazily view the dest (last) span of each pair (see gather above)
+        multi_span_scatter!(to_raw, copies, Iterators.map(last, dep_mod.spans))
     end
 
     # Ensure that the data is visible
@@ -469,6 +484,8 @@ function read_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, from::Arr
     unsafe_copyto!(Ptr{eltype(from)}(pointer(copies, copies_offset)), pointer(from_vec, from_offset_n), n)
 end
 function read_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, from::DenseArray, from_ptr::UInt64, len::UInt64)
+    # Device arrays (e.g. CuArray) need their VRAM context for pointer/copyto!
+    with_context!(memory_space(from))
     elsize = sizeof(eltype(from))
     @assert len / elsize == round(UInt64, len / elsize) "Span length is not an integer multiple of the element size: $(len) / $(elsize) = $(len / elsize) (elsize: $elsize)"
     n = UInt64(len / elsize)
@@ -492,6 +509,8 @@ function write_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, to::Arra
     unsafe_copyto!(pointer(to_vec, to_offset_n), Ptr{eltype(to)}(pointer(copies, copies_offset)), n)
 end
 function write_remainder!(copies::Vector{UInt8}, copies_offset::UInt64, to::DenseArray, to_ptr::UInt64, len::UInt64)
+    # Device arrays (e.g. CuArray) need their VRAM context for pointer/copyto!
+    with_context!(memory_space(to))
     elsize = sizeof(eltype(to))
     @assert len / elsize == round(UInt64, len / elsize) "Span length is not an integer multiple of the element size: $(len) / $(elsize) = $(len / elsize) (elsize: $elsize)"
     n = UInt64(len / elsize)

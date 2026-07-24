@@ -195,18 +195,30 @@ function aliasing(A::HaloArray)
     return CombinedAliasing([aliasing(A.center), map(aliasing, A.halos)...])
 end
 memory_space(A::HaloArray) = memory_space(A.center)
+# A HaloArray's chunk record must be labeled with the memory space of its backing
+# storage. `value_memory_space` is what `tochunk` uses to label a task result, and
+# GPU extensions only define it for device array types (CuArray, CLArray, ...); a
+# GPU-backed HaloArray would otherwise fall back to the generic CPU space, so its
+# chunk would be mislabeled `CPURAMMemorySpace` while wrapping GPU arrays. That
+# mislabeling breaks datadeps aliasing/move tracking on every GPU backend (the
+# "Aliasing mismatch!" assertion in the stencil suite). Delegate to the center.
+value_memory_space(A::HaloArray) = value_memory_space(A.center)
 
-function move_rewrap(cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, A::HaloArray)
-    center_chunk = move_rewrap(cache, from_proc, to_proc, from_space, to_space, A.center)
-    halo_chunks = ntuple(i -> move_rewrap(cache, from_proc, to_proc, from_space, to_space, A.halos[i]), length(A.halos))
-    halo_width = A.halo_width
-    own_center = A.own_center
-    to_w = root_worker_id(to_proc)
-    return remotecall_fetch(to_w, from_proc, to_proc, from_space, to_space, center_chunk, halo_chunks, halo_width, own_center) do from_proc, to_proc, from_space, to_space, center_chunk, halo_chunks, halo_width, own_center
-        center_new = unwrap(center_chunk)
-        halos_new = ntuple(i -> unwrap(halo_chunks[i]), length(halo_chunks))
-        return tochunk(HaloArray(center_new, halos_new, halo_width; own_center=own_center), to_proc)
-    end
+# Header+children: transfer center and each halo, rebuild with halo_width
+move_rewrap_parts(A::HaloArray) = ((A.center, A.halos...), A.halo_width)
+function move_rewrap_build(::Type{<:HaloArray}, children, halo_width)
+    return HaloArray(children[1], children[2:end], halo_width)
+end
+function move_rewrap_child_types(::Type{HA}) where {HA<:HaloArray}
+    A = HA.parameters[3]
+    H = HA.parameters[4]
+    return (A, H.parameters...)
+end
+move_rewrap_header_mode(::Type{<:HaloArray}) = :broadcast
+function move_rewrap_result_type(::Type{<:HaloArray}, child_cts, halo_width)
+    A = child_cts[1]
+    H = Tuple{child_cts[2:end]...}
+    return HaloArray{eltype(A),ndims(A),A,H}
 end
 
 function Dagger.unsafe_free!(A::HaloArray)

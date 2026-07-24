@@ -4,23 +4,26 @@ end
 CPURAMMemorySpace() = CPURAMMemorySpace(myid())
 root_worker_id(space::CPURAMMemorySpace) = space.owner
 
-memory_space(x) = CPURAMMemorySpace(myid())
-function memory_space(x::Chunk)
-    proc = processor(x)
-    if proc isa OSProc
-        # TODO: This should probably be programmable
-        return CPURAMMemorySpace(proc.pid)
-    else
-        return only(memory_spaces(proc))
-    end
-end
-memory_space(x::DTask) =
-    memory_space(fetch(x; raw=true))
+# Stable textual key for deterministic space ordering
+short_name(space::MemorySpace) = string(space)
+short_name(space::CPURAMMemorySpace) = "CPU: $(space.owner)"
+
+memory_space(x, proc::Processor=default_processor()) = first(memory_spaces(proc))
+
+# Acceleration-free memory space of a raw value, used to label chunk records;
+# GPU package extensions add methods for device array types (e.g.
+# CuArray -> CUDAVRAMMemorySpace)
+value_memory_space(x) = CPURAMMemorySpace(myid())
+memory_space(x::Processor) = first(memory_spaces(x))
+memory_space(x::Chunk) = x.space
+memory_space(x::DTask) = memory_space(fetch(x; move_value=false, unwrap=false))
 
 memory_spaces(::P) where {P<:Processor} =
     throw(ArgumentError("Must define `memory_spaces` for `$P`"))
 memory_spaces(proc::ThreadProc) =
     Set([CPURAMMemorySpace(proc.owner)])
+memory_spaces(proc::OSProc) =
+    Set([CPURAMMemorySpace(proc.pid)])
 processors(::S) where {S<:MemorySpace} =
     throw(ArgumentError("Must define `processors` for `$S`"))
 processors(space::CPURAMMemorySpace) =
@@ -28,9 +31,10 @@ processors(space::CPURAMMemorySpace) =
 
 ### In-place Data Movement
 
-function unwrap(x::Chunk)
-    @assert x.handle.owner == myid()
-    MemPool.poolget(x.handle)
+unwrap(x::Chunk) = unwrap(x.handle)
+function unwrap(handle::DRef)
+    @assert root_worker_id(handle) == myid() "DRef $handle is not owned by this process: $(root_worker_id(handle)) != $(myid())"
+    return MemPool.poolget(handle)
 end
 move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::T, from::F) where {T,F} =
     throw(ArgumentError("No `move!` implementation defined for $F -> $T"))
@@ -49,18 +53,24 @@ function move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::Base
     to[] = from[]
     return
 end
+function move!(dep_mod::Symbol, to_space::MemorySpace, from_space::MemorySpace, to::Base.RefValue{T}, from::Base.RefValue{T}) where {T}
+    to_f = getfield(to, dep_mod)
+    from_f = getfield(from, dep_mod)
+    if to_f isa AbstractArray && from_f isa AbstractArray && axes(to_f) == axes(from_f)
+        # Update the field's storage in place: aliasing spans computed when the
+        # destination slot was created point into that storage, and rebinding
+        # the field would silently disconnect them
+        move!(to_space, from_space, to_f, from_f)
+    else
+        setfield!(to, dep_mod, from_f)
+    end
+    return
+end
 function move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::AbstractArray{T,N}, from::AbstractArray{T,N}) where {T,N}
     move!(to_space, from_space, dep_mod(to), dep_mod(from))
 end
-function move!(to_space::MemorySpace, from_space::MemorySpace, to::AbstractArray{T,N}, from::AbstractArray{T,N}) where {T,N}
-    copyto!(to, from)
-    return
-end
-
-function move!(::Type{<:Diagonal}, to_space::MemorySpace, from_space::MemorySpace, to::AbstractArray{T,N}, from::AbstractArray{T,N}) where {T,N}
-    copyto!(view(to, diagind(to)), view(from, diagind(from)))
-    return
-end
+# AbstractArray and Diagonal move! are defined in utils/span_copy.jl (after
+# multi-span helpers) so GPU views can share one KA path without method overwrite.
 # FIXME: Bidiagonal (need direction specified in type)
 function move!(::Type{<:Tridiagonal}, to_space::MemorySpace, from_space::MemorySpace, to::AbstractArray{T,N}, from::AbstractArray{T,N}) where {T,N}
     copyto!(view(to, diagind(to, -1)), view(from, diagind(from, -1)))
@@ -68,6 +78,16 @@ function move!(::Type{<:Tridiagonal}, to_space::MemorySpace, from_space::MemoryS
     copyto!(view(to, diagind(to, 1)), view(from, diagind(from, 1)))
     return
 end
+
+# FIXME: Take MemorySpace instead
+function move_type(from_proc::Processor, to_proc::Processor, ::Type{T}) where T
+    if from_proc == to_proc
+        return T
+    end
+    return Base._return_type(move, Tuple{typeof(from_proc), typeof(to_proc), T})
+end
+move_type(from_proc::Processor, to_proc::Processor, ::Type{<:Chunk{T}}) where T =
+    move_type(from_proc, to_proc, T)
 
 ### Aliasing and Memory Spans
 
@@ -355,6 +375,7 @@ function memory_spans(oa::ObjectAliasing{S}) where S
     return [span]
 end
 
+aliasing(accel::Acceleration, x, T) = aliasing(x, T)
 function aliasing(x, dep_mod)
     if dep_mod isa Symbol
         return aliasing(getfield(x, dep_mod))
@@ -391,19 +412,25 @@ aliasing(::String) = NoAliasing() # FIXME: Not necessarily true
 aliasing(::Symbol) = NoAliasing()
 aliasing(::Type) = NoAliasing()
 function aliasing(x::Chunk, T)
-    @assert x.handle isa DRef
     if root_worker_id(x.processor) == myid()
         return aliasing(unwrap(x), T)
     end
+    @assert x.handle isa DRef
     return remotecall_fetch(root_worker_id(x.processor), x, T) do x, T
         aliasing(unwrap(x), T)
     end
 end
-aliasing(x::Chunk) = remotecall_fetch(root_worker_id(x.processor), x) do x
-    aliasing(unwrap(x))
+function aliasing(x::Chunk)
+    if root_worker_id(x.processor) == myid()
+        return aliasing(unwrap(x))
+    end
+    @assert x.handle isa DRef
+    return remotecall_fetch(root_worker_id(x.processor), x) do x
+        aliasing(unwrap(x))
+    end
 end
-aliasing(x::DTask, T) = aliasing(fetch(x; raw=true), T)
-aliasing(x::DTask) = aliasing(fetch(x; raw=true))
+aliasing(x::DTask, T) = aliasing(fetch(x; move_value=false, unwrap=false), T)
+aliasing(x::DTask) = aliasing(fetch(x; move_value=false, unwrap=false))
 
 function aliasing(x::Base.RefValue{T}) where T
     addr = UInt(Base.pointer_from_objref(x) + fieldoffset(typeof(x), 1))
@@ -539,14 +566,26 @@ function memory_spans(a::TriangularAliasing{T,S}) where {T,S}
     end
     return spans
 end
-aliasing(x::UpperTriangular{T}) where T =
-    TriangularAliasing{T,CPURAMMemorySpace}(pointer(parent(x)), size(parent(x), 1), true, true)
-aliasing(x::LowerTriangular{T}) where T =
-    TriangularAliasing{T,CPURAMMemorySpace}(pointer(parent(x)), size(parent(x), 1), false, true)
-aliasing(x::UnitUpperTriangular{T}) where T =
-    TriangularAliasing{T,CPURAMMemorySpace}(pointer(parent(x)), size(parent(x), 1), true, false)
-aliasing(x::UnitLowerTriangular{T}) where T =
-    TriangularAliasing{T,CPURAMMemorySpace}(pointer(parent(x)), size(parent(x), 1), false, false)
+function aliasing(x::UpperTriangular{T}) where T
+    p = parent(x)
+    space = memory_space(p)
+    TriangularAliasing{T,typeof(space)}(RemotePtr{Cvoid}(UInt(pointer(p)), space), size(p, 1), true, true)
+end
+function aliasing(x::LowerTriangular{T}) where T
+    p = parent(x)
+    space = memory_space(p)
+    TriangularAliasing{T,typeof(space)}(RemotePtr{Cvoid}(UInt(pointer(p)), space), size(p, 1), false, true)
+end
+function aliasing(x::UnitUpperTriangular{T}) where T
+    p = parent(x)
+    space = memory_space(p)
+    TriangularAliasing{T,typeof(space)}(RemotePtr{Cvoid}(UInt(pointer(p)), space), size(p, 1), true, false)
+end
+function aliasing(x::UnitLowerTriangular{T}) where T
+    p = parent(x)
+    space = memory_space(p)
+    TriangularAliasing{T,typeof(space)}(RemotePtr{Cvoid}(UInt(pointer(p)), space), size(p, 1), false, false)
+end
 
 struct DiagonalAliasing{T,S} <: AbstractAliasing
     ptr::RemotePtr{Cvoid,S}
@@ -611,5 +650,5 @@ unsafe_free!(x::Chunk) = remotecall_fetch(root_worker_id(x), x) do x
     unsafe_free!(unwrap(x))
     return
 end
-unsafe_free!(x::DTask) = unsafe_free!(fetch(x; raw=true))
+unsafe_free!(x::DTask) = unsafe_free!(fetch(x; move_value=false, unwrap=false))
 unsafe_free!(x) = nothing # Do nothing by default

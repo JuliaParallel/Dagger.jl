@@ -231,3 +231,35 @@ jobs:
             } else {
               await github.rest.issues.createComment({ owner, repo, issue_number, body });
             }
+
+  mpi-cpu:
+    name: MPI CPU - Julia ${{ matrix.version }} / ${{ matrix.ranks }} ranks
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: ${{ !contains(github.event.head_commit.message, '[skip tests]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+          - '1.10'   # LTS
+          - '1.11'
+          - '1'      # latest stable
+        ranks:
+          - 2
+          - 4
+    steps:
+      - uses: actions/checkout@v7
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: ${{ matrix.version }}
+          arch: x64
+      - uses: julia-actions/cache@v3
+      # test/mpienv pulls MPI (MPICH_jll by default) plus the checked-out Dagger;
+      # no system MPI installation is required. We `develop` the checkout rather
+      # than relying on the `[sources]` entry because `[sources]` is a Julia 1.11+
+      # feature and is silently ignored on 1.10 (LTS), which would otherwise
+      # resolve a stale registered Dagger lacking the MPI API (`accelerate!`).
+      - name: Instantiate CPU MPI environment
+        run: julia --project=test/mpienv -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
+      - name: Run CPU MPI tests
+        run: julia --project=test/mpienv test/run_mpi.jl ${{ matrix.ranks }} 2 test/mpi.jl

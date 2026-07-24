@@ -17,7 +17,8 @@ import ..Dagger
 import ..Dagger: Context, Processor, SchedulerOptions, Options, Thunk, WeakThunk, ThunkFuture, ThunkID, DTaskFailedException, Chunk, WeakChunk, OSProc, AnyScope, DefaultScope, InvalidScope, LockedObject, Argument, Signature
 import ..Dagger: Sealed, SEALED, FutureNode, futures_push!, futures_seal!
 import ..Dagger: DepNode, deps_push!, deps_seal!
-import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak, unwrap_weak_checked, wrap_weak, affinity, tochunk, timespan_start, timespan_finish, procs, move, chunktype, default_enabled, processor, get_processors, get_parent, execute!, rmprocs!, task_processor, constrain, cputhreadtime, maybe_take_or_alloc!
+import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak, unwrap_weak_checked, wrap_weak, tochunk, timespan_start, timespan_finish, procs, move, chunktype, default_enabled, processor, get_processors, get_parent, execute!, rmprocs!, task_processor, constrain, cputhreadtime, maybe_take_or_alloc!
+import ..Dagger: datasize, root_worker_id, is_local_processor, fire_order_key, short_name, select_processors_uniform!, processor_order_key, current_acceleration, set_task_acceleration!, scheduling_ignore_capacity, scheduling_task_occupancy, schedule_argument_move, bind_moved_argument
 import ..Dagger: @dagdebug, @safe_lock_spin1, @maybelog, @take_or_alloc!
 import DataStructures: PriorityQueue
 
@@ -27,7 +28,7 @@ import ..Dagger: @reusable, @reusable_dict, @reusable_vector, @reusable_tasks, @
 import TimespanLogging
 
 import TaskLocalValues: TaskLocalValue
-import ScopedValues: @with
+import ScopedValues: ScopedValue, @with, with
 
 
 include("util.jl")
@@ -211,27 +212,30 @@ const WORKER_MONITOR_TASKS = Dict{Int,Task}()
 const WORKER_MONITOR_CHANS = Dict{Int,Dict{UInt64,RemoteChannel}}()
 function init_proc(state, p, log_sink)
     ctx = Context(Int[]; log_sink)
-    @maybelog ctx timespan_start(ctx, :init_proc, (;uid=state.uid, worker=p.pid), nothing)
-    # Initialize pressure and capacity
-    gproc = OSProc(p.pid)
+    pid = Dagger.root_worker_id(p)
+    @maybelog ctx timespan_start(ctx, :init_proc, (;uid=state.uid, worker=pid), nothing)
+    # Initialize pressure and capacity.
+    # N.B. Key by `root_worker_id(p)` (== `pid`) rather than `p.pid`; MPI
+    # processors carry no `pid` field but report a root worker id.
+    gproc = OSProc(pid)
     lock(state.worker_time_pressure) do wtp
-        wtp[p.pid] = Dict{Processor,Threads.Atomic{UInt64}}()
+        wtp[pid] = Dict{Processor,Threads.Atomic{UInt64}}()
     end
     lock(state.worker_transfer_rate) do wtr
-        wtr[p.pid] = Dict{Processor,UInt64}()
+        wtr[pid] = Dict{Processor,UInt64}()
     end
     lock(state.worker_storage_pressure) do wsp
-        wsp[p.pid] = Dict{Union{StorageResource,Nothing},UInt64}()
+        wsp[pid] = Dict{Union{StorageResource,Nothing},UInt64}()
     end
     lock(state.worker_storage_capacity) do wsc
-        wsc[p.pid] = Dict{Union{StorageResource,Nothing},UInt64}()
+        wsc[pid] = Dict{Union{StorageResource,Nothing},UInt64}()
     end
     lock(state.worker_loadavg) do wla
-        wla[p.pid] = (0.0, 0.0, 0.0)
+        wla[pid] = (0.0, 0.0, 0.0)
     end
-    if p.pid != 1
+    if pid != 1
         lock(WORKER_MONITOR_LOCK) do
-            wid = p.pid
+            wid = pid
             if !haskey(WORKER_MONITOR_TASKS, wid)
                 t = Threads.@spawn begin
                     try
@@ -265,16 +269,16 @@ function init_proc(state, p, log_sink)
     end
 
     # Setup worker-to-scheduler channels
-    inp_chan = RemoteChannel(p.pid)
-    out_chan = RemoteChannel(p.pid)
+    inp_chan = RemoteChannel(pid)
+    out_chan = RemoteChannel(pid)
     lock(state.lock) do
-        state.worker_chans[p.pid] = (inp_chan, out_chan)
+        state.worker_chans[pid] = (inp_chan, out_chan)
     end
 
     # Setup dynamic listener
-    dynamic_listener!(ctx, state, p.pid)
+    dynamic_listener!(ctx, state, pid)
 
-    @maybelog ctx timespan_finish(ctx, :init_proc, (;uid=state.uid, worker=p.pid), nothing)
+    @maybelog ctx timespan_finish(ctx, :init_proc, (;uid=state.uid, worker=pid), nothing)
 end
 function _cleanup_proc(uid, log_sink)
     empty!(CHUNK_CACHE) # FIXME: Should be keyed on uid!
@@ -292,7 +296,7 @@ function _cleanup_proc(uid, log_sink)
 end
 function cleanup_proc(state, p, log_sink)
     ctx = Context(Int[]; log_sink)
-    wid = p.pid
+    wid = root_worker_id(p)
     @maybelog ctx timespan_start(ctx, :cleanup_proc, (;uid=state.uid, worker=wid), nothing)
     lock(WORKER_MONITOR_LOCK) do
         if haskey(WORKER_MONITOR_CHANS, wid)
@@ -355,7 +359,7 @@ function compute_dag(ctx::Context, d::Thunk, options=SchedulerOptions())
     node_order = x -> -get(ord, x, 0)
     state = start_state(deps, node_order, chan, ctx, options)
 
-    master = OSProc(myid())
+    master = Dagger.default_processor()
 
     # Register so in-process completions can find this state
     register_scheduler_state!(state)
@@ -516,10 +520,10 @@ function handle_result!(ctx, state::ComputeState, pid, proc, thunk_id, res, meta
                 end
             end
         end
-        if res isa Chunk
+        if res isa Chunk && res.handle isa DRef
             lock(state.equiv_chunks) do ec
-                if !haskey(ec, res.handle::DRef)
-                    ec[res.handle::DRef] = res
+                if !haskey(ec, res.handle)
+                    ec[res.handle] = res
                 end
             end
         end
@@ -712,7 +716,7 @@ end
 const CHUNK_CACHE = Dict{Chunk,Dict{Processor,Any}}()
 
 struct ScheduleTaskLocation
-    gproc::OSProc
+    gproc::Processor
     proc::Processor
 end
 struct ScheduleTaskSpec
@@ -889,9 +893,15 @@ concurrently across threads.
         return
     end
 
+    # `accel` drives uniform (e.g. MPI) scheduling: it filters compatible
+    # processors, imposes a deterministic processor order, and (under uniform
+    # execution) makes selection ignore rank-local capacity/occupancy so every
+    # rank picks the same processor for this task.
+    accel = something(options.acceleration, current_acceleration())
+
     input_procs = @reusable_vector :schedule_one!_input_procs Processor OSProc() 32
     input_procs_cleanup = @reuse_defer_cleanup empty!(input_procs)
-    compat = Dagger.compatible_processors(scope, procs_filt)
+    compat = Dagger.compatible_processors(accel, scope, procs_filt)
     for proc in compat
         if !(proc in input_procs)
             push!(input_procs, proc)
@@ -906,6 +916,10 @@ concurrently across threads.
     estimate_task_costs!(sorted_procs, costs, state, input_procs, task; sig)
     input_procs_cleanup()
 
+    # Under uniform execution, measured costs are rank-local, so re-order by a
+    # deterministic, acceleration-dispatched key instead (no-op otherwise).
+    select_processors_uniform!(sorted_procs, accel, task, state)
+
     # Select the best available processor and reserve time pressure optimistically.
     # These operations use their own fine-grained locks — no state.lock needed.
     scheduled = false
@@ -915,11 +929,13 @@ concurrently across threads.
         can_use, scope = can_use_proc(state, task, gproc, proc, options, scope)
         if can_use
             has_cap, est_time_util, est_alloc_util, est_occupancy =
-                has_capacity(state, proc, gproc.pid, options.time_util, options.alloc_util, options.occupancy, sig)
-            if has_cap
+                has_capacity(state, proc, root_worker_id(gproc), options.time_util, options.alloc_util, options.occupancy, sig)
+            # Under uniform execution capacity is rank-local; every rank must
+            # take the first usable processor in the deterministic order.
+            if has_cap || scheduling_ignore_capacity(accel)
                 # Optimistic reservation: capture-the-ref, atomic_add!
                 counter_ref = lock(state.worker_time_pressure) do wtp
-                    proc_map = get!(wtp, gproc.pid) do
+                    proc_map = get!(wtp, root_worker_id(gproc)) do
                         Dict{Processor,Threads.Atomic{UInt64}}()
                     end
                     get!(proc_map, proc) do
@@ -931,6 +947,9 @@ concurrently across threads.
                     rpr[task.id] = (counter_ref, est_time_util)
                 end
                 @dagdebug task :schedule "Scheduling to $gproc -> $proc (cost: $(costs[proc]), pressure: $(counter_ref[]))"
+                # Uniform execution overlaps communicating tasks on a processor
+                # (rank-local shares); avoid serializing them into wait cycles.
+                est_occupancy = scheduling_task_occupancy(accel, est_occupancy)
                 best_loc = ScheduleTaskLocation(gproc, proc)
                 best_spec = ScheduleTaskSpec(task, scope, est_time_util, est_alloc_util, est_occupancy)
                 scheduled = true
@@ -1003,17 +1022,19 @@ function monitor_procs_changed!(ctx, state, options)
 end
 
 function remove_dead_proc!(ctx, state, proc, options)
-    @assert options.single !== proc.pid "Single worker failed, cannot continue."
-    rmprocs!(ctx, [proc])
+    pid = root_worker_id(proc)
+    @assert options.single !== pid "Single worker failed, cannot continue."
+    rmprocs!(ctx, [pid])
     # COW-style membership removal: lock each map and delete the worker's entry.
     # Any in-flight tasks that captured a counter ref from this worker will still
     # release via atomic_sub! on the (now-orphaned) Atomic object — harmless.
-    lock(state.worker_time_pressure) do wtp; delete!(wtp, proc.pid); end
-    lock(state.worker_transfer_rate) do wtr; delete!(wtr, proc.pid); end
-    lock(state.worker_storage_pressure) do wsp; delete!(wsp, proc.pid); end
-    lock(state.worker_storage_capacity) do wsc; delete!(wsc, proc.pid); end
-    lock(state.worker_loadavg) do wla; delete!(wla, proc.pid); end
-    delete!(state.worker_chans, proc.pid)
+    # N.B. Key by `root_worker_id` (MPI processors have no `pid` field).
+    lock(state.worker_time_pressure) do wtp; delete!(wtp, pid); end
+    lock(state.worker_transfer_rate) do wtr; delete!(wtr, pid); end
+    lock(state.worker_storage_pressure) do wsp; delete!(wsp, pid); end
+    lock(state.worker_storage_capacity) do wsc; delete!(wsc, pid); end
+    lock(state.worker_loadavg) do wla; delete!(wla, pid); end
+    delete!(state.worker_chans, pid)
 end
 
 function finish_task!(ctx, state, node, thunk_failed, ready::Vector{Thunk})
@@ -1073,7 +1094,7 @@ end
 
 function evict_all_chunks!(ctx, options, to_evict)
     if !isempty(to_evict)
-        @sync for w in map(p->p.pid, procs_to_use(ctx, options))
+        @sync for w in map(p->root_worker_id(p), procs_to_use(ctx, options))
             Threads.@spawn remote_do(evict_chunks!, w, ctx.log_sink, to_evict)
         end
     end
@@ -1163,9 +1184,10 @@ Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
         end
         Tf = chunktype(first(args))
 
-        @assert (options.single === nothing) || (gproc.pid == options.single)
+        pid = root_worker_id(gproc)
+        @assert (options.single === nothing) || (pid == options.single)
         # TODO: Set `sch_handle.tid.ref` to the right `DRef`
-        sch_handle = SchedulerHandle(ThunkID(thunk.id, nothing), state.worker_chans[gproc.pid]...)
+        sch_handle = SchedulerHandle(ThunkID(thunk.id, nothing), state.worker_chans[pid]...)
 
         # TODO: De-dup common fields (log_sink, uid, etc.)
         push!(to_send, TaskSpec(
@@ -1177,7 +1199,7 @@ Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
     end
 
     if !isempty(to_send)
-        if Dagger.root_worker_id(gproc) == myid()
+        if root_worker_id(gproc) == myid()
             @reusable_tasks :fire_tasks!_task_cache 32 _->nothing "fire_tasks!" FireTaskSpec(proc, state.chan, to_send)
         else
             # N.B. We don't batch these because we might get a deserialization
@@ -1392,7 +1414,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
         proc_occupancy = istate.proc_occupancy
         time_pressure = istate.time_pressure
 
-        wid = get_parent(to_proc).pid
+        wid = root_worker_id(to_proc)
         work_to_do = false
         while isopen(return_queue)
             # Wait for new tasks
@@ -1450,7 +1472,6 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                 # Try to steal from local queues randomly
                 # TODO: Prioritize stealing from busiest processors
                 states = proc_states_values(uid)
-                # TODO: Try to pre-allocate this
                 P = randperm(length(states))
                 for state in getindex.(Ref(states), P)
                     other_istate = state.state
@@ -1467,7 +1488,8 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                         end
                         task, occupancy = first(queue)
                         scope = task.scope
-                        if Dagger.proc_in_scope(to_proc, scope)
+                        accel = something(task.options.acceleration, Dagger.DistributedAcceleration())
+                        if Dagger.proc_in_scope(to_proc, scope) && Dagger.accel_matches_proc(accel, to_proc) &&
                            typemax(UInt32) - proc_occupancy_cached >= occupancy
                             # Compatible, steal this task
                             return popfirst!(queue)
@@ -1750,6 +1772,8 @@ function do_tasks(to_proc, return_queue, tasks)
     @dagdebug nothing :processor "Kicked processors"
 end
 
+const SCHED_MOVE = ScopedValue{Bool}(false)
+
 """
     do_task(to_proc, task::TaskSpec) -> Any
 
@@ -1761,13 +1785,15 @@ Executes a single task specified by `task` on `to_proc`.
     ctx_vars = task.ctx_vars
     ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
 
-    from_proc = OSProc()
+    options = task.options
+    Dagger.set_task_acceleration!(options.acceleration)
+
+    from_proc = Dagger.default_processor()
     data = task.data
     Tf = task.Tf
     f = isdefined(Tf, :instance) ? Tf.instance : nothing
 
     # Wait for required resources to become available
-    options = task.options
     propagated = get_propagated_options(options)
     to_storage = options.storage !== nothing ? fetch(options.storage) : MemPool.GLOBAL_DEVICE[]
     #to_storage_name = nameof(typeof(to_storage))
@@ -1835,7 +1861,7 @@ Executes a single task specified by `task` on `to_proc`.
     @maybelog ctx timespan_finish(ctx, :storage_wait, (;thunk_id, processor=to_proc), (;f, device=typeof(to_storage)))
     =#
 
-    @dagdebug thunk_id :execute "Moving data"
+    @dagdebug thunk_id :execute "Moving data for $Tf"
 
     # Initiate data transfers for function and arguments
     transfer_time = Threads.Atomic{UInt64}(0)
@@ -1845,9 +1871,13 @@ Executes a single task specified by `task` on `to_proc`.
     else
         data
     end
+    # Under uniform execution, argument moves may communicate between ranks on
+    # rank-uniform tags derived from the thunk ID; they must run sequentially
+    # in argument order (FIFO tag matching), with the thunk's TID in scope
+    accel = something(options.acceleration, current_acceleration())
     fetch_tasks = map(_data) do arg
         #=FIXME:REALLOC_TASKS=#
-        Threads.@spawn begin
+        move_one = () -> begin
             value = Dagger.value(arg)
             position = arg.pos
             @maybelog ctx timespan_start(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=value))
@@ -1858,7 +1888,9 @@ Executes a single task specified by `task` on `to_proc`.
                         Some{Any}(get!(CHUNK_CACHE[x], to_proc) do
                             # Convert from cached value
                             # TODO: Choose "closest" processor of same type first
-                            some_proc = first(keys(CHUNK_CACHE[x]))
+                            cache_procs = keys(CHUNK_CACHE[x])
+                            accel = something(options.acceleration, current_acceleration())
+                            some_proc = minimum(cache_procs, by=p -> processor_order_key(accel, p))
                             some_x = CHUNK_CACHE[x][some_proc]
                             @dagdebug thunk_id :move "Cache hit for argument $id at $some_proc: $some_x"
                             @invokelatest move(some_proc, to_proc, some_x)
@@ -1893,17 +1925,26 @@ Executes a single task specified by `task` on `to_proc`.
                 end
             else
             =#
-            new_value = @invokelatest move(to_proc, value)
-            #end
-            if new_value !== value
-                @dagdebug thunk_id :move "Moved argument @ $position to $to_proc: $(typeof(value)) -> $(typeof(new_value))"
+            new_value = with(SCHED_MOVE=>true) do
+                @invokelatest move(to_proc, value)
             end
-            @maybelog ctx timespan_finish(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=new_value); tasks=[Base.current_task()])
-            arg.value = new_value
+            #end
+            # Acceleration decides how to bind the moved value (e.g. keep a
+            # Chunk placeholder, or wrap an owner unwrap so chunktype stays
+            # SPMD-uniform). Materializing for the kernel may still happen in
+            # execute! when this rank only holds a placeholder.
+            bound = bind_moved_argument(accel, value, new_value)
+            if bound !== value
+                @dagdebug thunk_id :move "Moved argument @ $position to $to_proc: $(typeof(value)) -> $(typeof(bound))"
+            end
+            arg.value = bound
+            @maybelog ctx timespan_finish(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=Dagger.value(arg)); tasks=[Base.current_task()])
             return
         end
+        return schedule_argument_move(accel, thunk_id, move_one)
     end
     for task in fetch_tasks
+        task === nothing && continue
         fetch_report(task)
     end
 
@@ -1938,7 +1979,7 @@ Executes a single task specified by `task` on `to_proc`.
     # FIXME
     #gcnum_start = Base.gc_num()
 
-    @dagdebug thunk_id :execute "Executing $(typeof(f))"
+    @dagdebug thunk_id :execute "Executing $Tf"
 
     logging_enabled = !(ctx.log_sink isa TimespanLogging.NoOpLog)
 
@@ -2001,7 +2042,7 @@ Executes a single task specified by `task` on `to_proc`.
         notify(TASK_SYNC)
     end
 
-    @dagdebug thunk_id :execute "Returning"
+    @dagdebug thunk_id :execute "Returning $Tf with $(typeof(result_meta))"
 
     # TODO: debug_storage("Releasing $to_storage_name")
     metadata = (

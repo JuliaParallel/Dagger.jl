@@ -290,26 +290,6 @@ function dsort_chunks(cs, nchunks=length(cs), nsamples=2000;
                       splitters,
                       batchsize;
         merge=merge, by=by, sub=sub, order=order)
-    #=
-    for (w, c) in zip(Iterators.cycle(affinities), cs)
-        propagate_affinity!(c, Dagger.OSProc(w) => 1)
-    end
-    =#
-end
-
-function propagate_affinity!(c, aff)
-    if !isa(c, DTask)
-        return
-    end
-    if c.affinity !== nothing
-        push!(c.affinity, aff)
-    else
-        c.affinity = [aff]
-    end
-
-    for t in c.inputs
-        propagate_affinity!(t, aff)
-    end
 end
 
 function Base.sort(v::ArrayOp;

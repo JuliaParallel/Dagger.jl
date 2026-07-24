@@ -112,6 +112,11 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
                     # so we just pick an equivalent Chunk as our upstream
                     chunk = value(arg)::Chunk
                     function find_equivalent_chunk(state, chunk::C) where {C<:Chunk}
+                        # `equiv_chunks` is a `WeakKeyDict{DRef,Chunk}`; only
+                        # DRef-backed chunks participate. Other handles (e.g.
+                        # `MPIRef` under MPI) are not valid keys and manage their
+                        # own identity, so pass them through unchanged.
+                        chunk.handle isa DRef || return chunk
                         lock(state.equiv_chunks) do ec
                             if haskey(ec, chunk.handle)
                                 return ec[chunk.handle]::C
@@ -123,7 +128,19 @@ const UID_TO_TID_CACHE = TaskLocalValue{ReusableCache{Dict{UInt64,Int},Nothing}}
                     end
                     chunk = find_equivalent_chunk(state, chunk)
                     #=FIXME:UNIQUE=#
-                    @inbounds fargs[idx] = Argument(arg.pos, WeakChunk(chunk))
+                    if chunk.handle isa DRef
+                        @inbounds fargs[idx] = Argument(arg.pos, WeakChunk(chunk))
+                    else
+                        # Non-DRef chunks (e.g. `MPIRef` under MPI) are not kept
+                        # alive by `equiv_chunks` (a `WeakKeyDict{DRef,Chunk}`, so
+                        # only DRef-backed wrappers get a strong keeper there).
+                        # Weakening such a chunk here would let its `Chunk` wrapper
+                        # be GC'd before the consuming task runs, expiring the
+                        # `WeakChunk` (observed on Julia 1.10, whose GC is more
+                        # eager). Keep a strong reference; it is released when the
+                        # task's `Thunk` is cleaned up.
+                        @inbounds fargs[idx] = Argument(arg.pos, chunk)
+                    end
                 end
             end
             # TODO: Iteration protocol would be faster
@@ -332,7 +349,13 @@ function cached_return_type(@nospecialize(f), @nospecialize(arg_types::Tuple))
     end
 end
 
-DTaskMetadata(spec::DTaskSpec) = DTaskMetadata(eager_metadata(spec.fargs))
+function DTaskMetadata(spec::DTaskSpec)
+    rt = spec.options.return_type
+    if rt !== nothing && isconcretetype(rt) && rt !== Any
+        return DTaskMetadata(rt)
+    end
+    return DTaskMetadata(eager_metadata(spec.fargs))
+end
 function eager_metadata(fargs)
     f = value(fargs[1])
     f = f isa StreamingFunction ? f.f : f
@@ -345,6 +368,10 @@ function eager_spawn(spec::DTaskSpec)
     uid = eager_next_id()
     future = ThunkFuture()
     metadata = DTaskMetadata(spec)
+    # Propagate inferred return type to options
+    if isconcretetype(metadata.return_type)
+        spec.options.return_type = metadata.return_type
+    end
     return DTask(uid, future, metadata)
 end
 
@@ -367,10 +394,16 @@ function eager_launch!(pair::DTaskPair)
         end
     end
 
+    # Propagate DTask return_type into options so the created Thunk has chunktype for downstream inference
+    options = spec.options
+    if isconcretetype(task.metadata.return_type)
+        options = copy(options)
+        options.return_type = task.metadata.return_type
+    end
     # Submit the task
     #=FIXME:REALLOC=#
     thunk_id = eager_submit!(PayloadOne(task.uid, task.future,
-                                        fargs, spec.options, true))
+                                        fargs, options, true))
     task.thunk_ref = thunk_id.ref
 end
 # FIXME: Don't convert Tuple to Vector{Argument}
@@ -400,7 +433,13 @@ function eager_launch!(pairs::Vector{DTaskPair})
             end
         end
     end
-    all_options = Options[pair.spec.options for pair in pairs]
+    # Propagate DTask return_type into options so created Thunks have chunktype for downstream inference
+    all_options = Options[
+        let opts = pair.spec.options
+            isconcretetype(pair.task.metadata.return_type) ? (o = copy(opts); o.return_type = pair.task.metadata.return_type; o) : opts
+        end
+        for pair in pairs
+    ]
 
     # Submit the tasks
     #=FIXME:REALLOC=#
