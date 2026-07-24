@@ -2107,7 +2107,11 @@ function mpi_propagate_chunk_types!(tasks, accel::MPIAcceleration, expected_type
     for t in tasks
         if t isa Thunk
             if t.options !== nothing
-                t.options.return_type = expected_type
+                # Respect a more specific tile type already set by the spawner
+                # (e.g. `DSparseArray` from sparse allocators).
+                if t.options.return_type === nothing
+                    t.options.return_type = expected_type
+                end
             else
                 t.options = Options(return_type=expected_type)
             end
