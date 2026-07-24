@@ -2,7 +2,6 @@ module Dagger
 
 import Serialization
 import Serialization: AbstractSerializer, serialize, deserialize
-import SparseArrays: sprand, SparseMatrixCSC
 
 import MemPool
 import MemPool: DRef, FileRef, poolget, poolset
@@ -131,7 +130,7 @@ include("array/operators.jl")
 include("array/indexing.jl")
 include("array/setindex.jl")
 include("array/matrix.jl")
-include("array/sparse_partition.jl")
+include("array/sparse.jl")
 include("array/sort.jl")
 include("array/permute.jl")
 include("array/linalg.jl")
@@ -141,6 +140,8 @@ include("array/trsm.jl")
 include("array/lu.jl")
 include("array/qr.jl")
 include("array/svd.jl")
+include("array/iterativesolvers.jl")
+include("array/sparsedirect.jl")
 
 # GPU
 include("gpu.jl")

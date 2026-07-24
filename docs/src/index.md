@@ -363,6 +363,76 @@ collect(DA) # returns a `Matrix{Float64}`
 
 -----
 
+## Quickstart: Sparse Arrays
+
+A `DArray` can hold sparse tiles, giving a distributed, tiled sparse matrix.
+Load a sparse backend (`SparseArrays`) to enable it.
+
+For more details: [Sparse Distributed Arrays](@ref)
+
+### Distribute or allocate a sparse `DArray`
+
+```julia
+using SparseArrays
+
+# Partition an existing sparse matrix into sparse tiles
+DA = distribute(sprand(1000, 1000, 0.01), Blocks(250, 250))
+
+# Or allocate sparse DArrays directly
+Z = spzeros(Blocks(250, 250), Float64, 1000, 1000)
+R = sprand(Blocks(250, 250), Float64, (1000, 1000), 0.01)
+```
+
+### Multiply sparse arrays
+
+```julia
+using LinearAlgebra
+x = distribute(rand(1000), Blocks(250))
+y = DA * x        # distributed sparse matrix-vector multiply (dense result)
+C = DA * DA       # distributed sparse-sparse matmul (sparse result)
+```
+
+`collect(DA)` returns a dense `Array`; operate on the `DArray` to stay sparse.
+
+-----
+
+## Quickstart: Iterative Solvers
+
+Dagger provides distributed, matrix-free Krylov solvers (`cg`, `minres`,
+`gmres`, `bicgstab`) for `A x = b`. Load `Krylov` to enable them.
+
+For more details: [Iterative Solvers](@ref)
+
+### Solve a sparse system
+
+```julia
+using SparseArrays, Krylov, LinearAlgebra
+
+n = 1000
+A = spdiagm(-1 => fill(-1.0, n-1), 0 => fill(2.0, n), 1 => fill(-1.0, n-1))
+DA = distribute(A, Blocks(250, 250))   # square tiles
+b  = distribute(rand(n), Blocks(250))
+
+x, stats = Dagger.cg(DA, b)
+@show stats.solved, stats.niter
+```
+
+### Add a preconditioner
+
+```julia
+using AlgebraicMultigrid   # enables Dagger.AMGPreconditioner
+
+P = Dagger.AMGPreconditioner(DA)        # build once
+x, stats = Dagger.cg(DA, b; M = P)      # pass as `M`
+```
+
+Other preconditioners: `Dagger.JacobiPreconditioner`,
+`Dagger.BlockJacobiPreconditioner` (core), and `Dagger.BlockILUPreconditioner`
+(load `IncompleteLU`). Any object implementing `mul!(y, A, x)` over `DVector`s
+can be used as a matrix-free operator `A`.
+
+-----
+
 ## Quickstart: Stencil Operations
 
 Dagger's `@stencil` macro allows for easy specification of stencil operations on `DArray`s, often used in simulations and image processing. These operations typically involve updating an element based on the values of its neighbors.

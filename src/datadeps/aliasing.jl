@@ -240,6 +240,11 @@ struct HistoryEntry
     ainfo::AliasingWrapper
     space::MemorySpace
     write_num::Int
+    # Producer of this write/copy. Remainder syncdeps wait on this task
+    # directly instead of re-resolving through live `ainfos_owner`, which may
+    # later name a different task for the same ainfo or miss the producer when
+    # only an overlapping ainfo is consulted.
+    task::DTask
 end
 
 struct AliasedObjectCacheStore
@@ -610,7 +615,12 @@ function aliasing!(state::DataDepsState, target_space::MemorySpace, arg_w::Argum
         return state.ainfo_cache[remote_arg_w]
     end
 
-    # Calculate the ainfo
+    # Calculate the ainfo via the current acceleration so SPMD backends (MPI)
+    # can broadcast owner-computed aliasing and keep ranks uniform. The generic
+    # `aliasing(::Acceleration, ...)` fallback uses `aliasing_unwrapped`, which
+    # resolves wrappers of whole-object containers (e.g. a view of a
+    # `DSparseArray`) to the container itself. For `Chunk`s, unwrap+aliasing
+    # happen where the data lives (remotely / on the owning rank).
     ainfo = AliasingWrapper(aliasing(current_acceleration(), remote_arg, arg_w.dep_mod))
 
     # Cache the result
@@ -661,10 +671,8 @@ function merge_history!(state::DataDepsState, arg_w::ArgumentWrapper, other_arg_
     history = state.arg_history[arg_w]
     @opcounter :merge_history
     @opcounter :merge_history_complexity length(history)
-    origin_space = state.arg_origin[other_arg_w.arg]
     for other_entry in state.arg_history[other_arg_w]
-        write_num_tuple = HistoryEntry(AliasingWrapper(NoAliasing()), origin_space, other_entry.write_num)
-        range = searchsorted(history, write_num_tuple; by=x->x.write_num)
+        range = searchsorted(history, other_entry; by=x->x.write_num)
         if !isempty(range)
             # Find and skip duplicates
             match = false
@@ -672,7 +680,8 @@ function merge_history!(state::DataDepsState, arg_w::ArgumentWrapper, other_arg_
                 source_entry = history[source_idx]
                 if source_entry.ainfo == other_entry.ainfo &&
                     source_entry.space == other_entry.space &&
-                    source_entry.write_num == other_entry.write_num
+                    source_entry.write_num == other_entry.write_num &&
+                    source_entry.task == other_entry.task
                     match = true
                     break
                 end
@@ -839,12 +848,12 @@ function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::M
     empty!(state.arg_history[arg_w])
 
     # Add our own history
-    push!(state.arg_history[arg_w], HistoryEntry(ainfo, dest_space, write_num))
+    push!(state.arg_history[arg_w], HistoryEntry(ainfo, dest_space, write_num, task))
 
     # Find overlapping arguments and update their history
     for other_arg_w in state.arg_overlaps[arg_w]
         other_arg_w == arg_w && continue
-        push!(state.arg_history[other_arg_w], HistoryEntry(ainfo, dest_space, write_num))
+        push!(state.arg_history[other_arg_w], HistoryEntry(ainfo, dest_space, write_num, task))
     end
 
     # Track which spaces hold a fully-current replica of this region

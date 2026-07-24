@@ -8,7 +8,8 @@ import Dagger: @dagdebug, @opcounter
 # extends with new methods (for MPI-specific types) or calls directly.
 import Dagger:
     AbstractAliasing, accelerate!, accel_matches_proc, aliased_object!,
-    AliasedObjectCache, AliasedObjectCacheStore, aliasing, bind_moved_argument,
+    AliasedObjectCache, AliasedObjectCacheStore, aliasing, aliasing_unwrapped,
+    bind_moved_argument,
     chunktype, ChunkView, check_uniform, check_uniformity!, CHECK_UNIFORMITY,
     cleanup_tasks_accel!, constrain, CPURAMMemorySpace,
     current_acceleration, CyclicProcGrid, datasize, default_enabled,
@@ -1757,7 +1758,9 @@ function aliasing(accel::MPIAcceleration, x::ChunkView, dep_mod)
     if handle.rank == rank
         ainfo = _with_default_acceleration() do
             v = view(unwrap(x.chunk), x.slices...)
-            aliasing(v, dep_mod)
+            # Resolve whole-object containers (e.g. `DSparseArray`) where `v`
+            # lives; see `aliasing_unwrapped`.
+            aliasing_unwrapped(v, dep_mod)
         end
         ainfo = mpi_remap_ainfo(ainfo, handle.rank)
         @opcounter :aliasing_bcast_send_yield
@@ -2104,7 +2107,11 @@ function mpi_propagate_chunk_types!(tasks, accel::MPIAcceleration, expected_type
     for t in tasks
         if t isa Thunk
             if t.options !== nothing
-                t.options.return_type = expected_type
+                # Respect a more specific tile type already set by the spawner
+                # (e.g. `DSparseArray` from sparse allocators).
+                if t.options.return_type === nothing
+                    t.options.return_type = expected_type
+                end
             else
                 t.options = Options(return_type=expected_type)
             end

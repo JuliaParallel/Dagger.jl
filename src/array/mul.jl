@@ -1,3 +1,74 @@
+"""
+    matmatmul!(C, transA::Char, transB::Char, A, B, alpha, beta)
+
+A general-purpose matrix-matrix multiply, like `LinearAlgebra.generic_matmatmul!`,
+but with extra functionality. May internally convert `A` and `B` to a type that
+better matches `C` and provides optimal portability and, when possible,
+better performance. The actual matrix multiply operation should happen in
+`LinearAlgebra.generic_matmatmul!` or an equivalent call.
+
+The following automatic conversions are performed:
+- If no `LinearAlgebra.generic_matmatmul!` method is available, convert `A` and `B` to dense Array-like
+- If `C` is a `DSparseMatrix`, perform the operation out-of-place and then update `C` in-place
+"""
+function matmatmul!(
+    C,
+    transA::Char,
+    transB::Char,
+    A,
+    B,
+    alpha,
+    beta
+)
+    EC = eltype(C)
+    EA = eltype(A)
+    EB = eltype(B)
+
+    TC = typeof(C)
+    TA = typeof(A)
+    TB = typeof(B)
+
+    mam = LinearAlgebra.MulAddMul(alpha, beta)
+
+    # Check if C doesn't support in-place operations (e.g. DSparseMatrix)
+    # We'll get here if A and B don't have equivalent types
+    if isa(C, DSparseMatrix)
+        C.mat = alpha * A * B + beta * C.mat
+        return C
+    end
+
+    # Check if the call will fail due to MethodError
+    sig = Tuple{TC, Char, Char, TA, TB, typeof(mam)}
+    if !hasmethod(LinearAlgebra.generic_matmatmul!, sig)
+        # Convert to Array-like
+        # FIXME: GPU support
+        C_new = C
+        A_new = collect(A)
+        B_new = collect(B)
+        alpha_new = alpha
+        beta_new = beta
+        # FIXME: Re-check hasmethod, and if no method, then convert and bounce C
+        @goto ready
+    end
+
+    C_new = C
+    A_new = A
+    B_new = B
+    alpha_new = alpha
+    beta_new = beta
+
+    @label ready
+    mam_new = LinearAlgebra.MulAddMul(alpha_new, beta_new)
+    return LinearAlgebra.generic_matmatmul!(
+        C_new,
+        transA,
+        transB,
+        A_new,
+        B_new,
+        mam_new
+    )
+end
+
 function LinearAlgebra.generic_matmatmul!(
     C::DMatrix{T},
     transA::Char,
@@ -41,7 +112,8 @@ function LinearAlgebra.generic_matmatmul!(
         return gemm_dagger!(C, transA, transB, A, B, alpha, beta)
     end
 end
-function _repartition_matmatmul(C, A, B, transA::Char, transB::Char)::Tuple{Blocks{2}, Blocks{2}, Blocks{2}}
+# FIXME: Mixed-precision methods
+function _repartition_matmatmul(C, A, B, transA::Char, transB::Char)
     partA = A.partitioning.blocksize
     partB = B.partitioning.blocksize
     istransA = transA == 'T' || transA == 'C'
@@ -141,28 +213,28 @@ function gemm_dagger!(
                         # A: NoTrans / B: NoTrans
                         for k in range(1, Ant)
                             mzone = k == 1 ? beta : T(1.0)
-                            Dagger.@spawn BLAS.gemm!(
+                            Dagger.@spawn matmatmul!(
+                                InOut(Cc[m, n]),
                                 transA,
                                 transB,
-                                alpha,
                                 In(Ac[m, k]),
                                 In(Bc[k, n]),
+                                alpha,
                                 mzone,
-                                InOut(Cc[m, n]),
                             )
                         end
                     else
                         # A: NoTrans / B: [Conj]Trans
                         for k in range(1, Ant)
                             mzone = k == 1 ? beta : T(1.0)
-                            Dagger.@spawn BLAS.gemm!(
+                            Dagger.@spawn matmatmul!(
+                                InOut(Cc[m, n]),
                                 transA,
                                 transB,
-                                alpha,
                                 In(Ac[m, k]),
                                 In(Bc[n, k]),
+                                alpha,
                                 mzone,
-                                InOut(Cc[m, n]),
                             )
                         end
                     end
@@ -171,28 +243,28 @@ function gemm_dagger!(
                         # A: [Conj]Trans / B: NoTrans
                         for k in range(1, Amt)
                             mzone = k == 1 ? beta : T(1.0)
-                            Dagger.@spawn BLAS.gemm!(
+                            Dagger.@spawn matmatmul!(
+                                InOut(Cc[m, n]),
                                 transA,
                                 transB,
-                                alpha,
                                 In(Ac[k, m]),
                                 In(Bc[k, n]),
+                                alpha,
                                 mzone,
-                                InOut(Cc[m, n]),
                             )
                         end
                     else
                         # A: [Conj]Trans / B: [Conj]Trans
                         for k in range(1, Amt)
                             mzone = k == 1 ? beta : T(1.0)
-                            Dagger.@spawn BLAS.gemm!(
+                            Dagger.@spawn matmatmul!(
+                                InOut(Cc[m, n]),
                                 transA,
                                 transB,
-                                alpha,
                                 In(Ac[k, m]),
                                 In(Bc[n, k]),
+                                alpha,
                                 mzone,
-                                InOut(Cc[m, n]),
                             )
                         end
                     end
@@ -240,6 +312,7 @@ function syrk_dagger!(
 
     iscomplex = T <: Complex
     transs = iscomplex ? 'C' : 'T'
+    anti_transs = trans == 'N' ? transs : 'N'
 
     Dagger.spawn_datadeps() do
         for n in range(1, Cnt)
@@ -247,114 +320,61 @@ function syrk_dagger!(
                 # NoTrans
                 for k in range(1, Ant)
                     mzone = k == 1 ? real(beta) : one(real(T))
-                    if iscomplex
-                        Dagger.@spawn BLAS.herk!(
-                            uplo,
-                            trans,
-                            real(alpha),
-                            In(Ac[n, k]),
-                            mzone,
-                            InOut(Cc[n, n]),
-                        )
-                    else
-                        Dagger.@spawn BLAS.syrk!(
-                            uplo,
-                            trans,
-                            alpha,
-                            In(Ac[n, k]),
-                            mzone,
-                            InOut(Cc[n, n]),
-                        )
-                    end
+                    _alpha = iscomplex ? real(alpha) : alpha
+                    Dagger.@spawn matmatmul!(
+                        InOut(Cc[n, n]),
+                        trans,
+                        anti_transs,
+                        In(Ac[n, k]),
+                        In(Ac[n, k]),
+                        _alpha,
+                        mzone,
+                    )
                 end
-                if uplo == 'L'
-                    # NoTrans / Lower
-                    for m in range(n + 1, Cmt)
-                        for k in range(1, Ant)
-                            mzone = k == 1 ? beta : one(T)
-                            Dagger.@spawn BLAS.gemm!(
-                                trans,
-                                transs,
-                                alpha,
-                                In(Ac[m, k]),
-                                In(Ac[n, k]),
-                                mzone,
-                                InOut(Cc[m, n]),
-                            )
-                        end
-                    end
-                else
-                    # NoTrans / Upper
-                    for m in range(n + 1, Cmt)
-                        for k in range(1, Ant)
-                            mzone = k == 1 ? beta : one(T)
-                            Dagger.@spawn BLAS.gemm!(
-                                trans,
-                                transs,
-                                alpha,
-                                In(Ac[n, k]),
-                                In(Ac[m, k]),
-                                mzone,
-                                InOut(Cc[n, m]),
-                            )
-                        end
+                # NoTrans / Upper
+                for m in range(n + 1, Cmt)
+                    for k in range(1, Ant)
+                        mzone = k == 1 ? beta : one(T)
+                        Dagger.@spawn matmatmul!(
+                            InOut(Cc[n, m]),
+                            trans,
+                            transs,
+                            In(Ac[n, k]),
+                            In(Ac[m, k]),
+                            alpha,
+                            mzone,
+                        )
                     end
                 end
             else
                 # [Conj]Trans
                 for k in range(1, Amt)
                     mzone = k == 1 ? real(beta) : one(real(T))
-                    if iscomplex
-                        Dagger.@spawn BLAS.herk!(
-                            uplo,
-                            transs,
-                            real(alpha),
-                            In(Ac[k, n]),
-                            mzone,
-                            InOut(Cc[n, n]),
-                        )
-                    else
-                        Dagger.@spawn BLAS.syrk!(
-                            uplo,
-                            trans,
-                            alpha,
-                            In(Ac[k, n]),
-                            mzone,
-                            InOut(Cc[n, n]),
-                        )
-                    end
+                    _alpha = iscomplex ? real(alpha) : alpha
+                    _trans = iscomplex ? transs : trans
+                    Dagger.@spawn matmatmul!(
+                        InOut(Cc[n, n]),
+                        _trans,
+                        anti_transs,
+                        In(Ac[k, n]),
+                        In(Ac[k, n]),
+                        _alpha,
+                        mzone,
+                    )
                 end
-                if uplo == 'L'
-                    # [Conj]Trans / Lower
-                    for m in range(n + 1, Cmt)
-                        for k in range(1, Amt)
-                            mzone = k == 1 ? beta : one(T)
-                            Dagger.@spawn BLAS.gemm!(
-                                transs,
-                                'N',
-                                alpha,
-                                In(Ac[k, m]),
-                                In(Ac[k, n]),
-                                mzone,
-                                InOut(Cc[m, n]),
-                            )
-                        end
-                    end
-                else
-                    # [Conj]Trans / Upper
-                    for m in range(n + 1, Cmt)
-                        for k in range(1, Amt)
-                            mzone = k == 1 ? beta : one(T)
-                            Dagger.@spawn BLAS.gemm!(
-                                transs,
-                                'N',
-                                alpha,
-                                In(Ac[k, n]),
-                                In(Ac[k, m]),
-                                mzone,
-                                InOut(Cc[n, m]),
-                            )
-                        end
+                # [Conj]Trans / Upper
+                for m in range(n + 1, Cmt)
+                    for k in range(1, Amt)
+                        mzone = k == 1 ? beta : one(T)
+                        Dagger.@spawn matmatmul!(
+                            InOut(Cc[n, m]),
+                            transs,
+                            'N',
+                            In(Ac[k, n]),
+                            In(Ac[k, m]),
+                            alpha,
+                            mzone,
+                        )
                     end
                 end
             end
@@ -398,7 +418,7 @@ end
     return A
 end
 
-@inline function copytile!(A::AbstractMatrix{T}, B::AbstractMatrix{T})::Nothing where {T}
+function copytile!(A, B)
     m, n = size(A)
     C = B'
 
@@ -408,15 +428,14 @@ end
     return nothing
 end
 
-@inline function copydiagtile!(A::AbstractMatrix{T}, uplo::AbstractChar)::Nothing where {T}
+function copydiagtile!(A, uplo)
     m, n = size(A)
-    Acpy = copy(A)
 
     if uplo == 'U'
-        C = UpperTriangular(Acpy)' + UpperTriangular(Acpy)
+        C = UpperTriangular(A)' + UpperTriangular(A)
         C[diagind(C)] .= A[diagind(A)]
     elseif uplo == 'L'
-        C = LowerTriangular(Acpy)' + Acpy - UpperTriangular(Acpy)
+        C = LowerTriangular(A)' + A - UpperTriangular(A)
         C[diagind(C)] .= A[diagind(A)]
     end
 
@@ -425,6 +444,7 @@ end
     end
     return nothing
 end
+
 function LinearAlgebra.generic_matvecmul!(
     C::DVector{T},
     transA::Char,
@@ -471,6 +491,21 @@ function _repartition_matvecmul(C, A, B, transA::Char)::Tuple{Blocks{1}, Blocks{
     partC = (dimA,)
     return Blocks(partC...), Blocks(partA...), Blocks(partB...)
 end
+"""
+    matvecmul!(C, transA::Char, A, B, alpha, beta)
+
+Tile-level matrix-vector multiply computing `C = alpha*op(A)*B + beta*C` in
+place on the (dense) output vector `C`, where `op` is determined by `transA`
+(`'N'`, `'T'`, `'C'`). Dispatches on the tile types: dense tiles use BLAS, while
+sparse tiles (e.g. `DSparseArray`) provide their own method (in a package
+extension) using a sparse matrix-vector product. This is the matvec analogue of
+[`matmatmul!`](@ref).
+"""
+function matvecmul!(C, transA::Char, A, B, alpha, beta)
+    BLAS.gemv!(transA, alpha, A, B, beta, C)
+    return C
+end
+
 function gemv_dagger!(
     C::DVector{T},
     transA::Char,
@@ -513,26 +548,26 @@ function gemv_dagger!(
                 # A: NoTrans
                 for k in range(1, Ant)
                     mzone = k == 1 ? beta : T(1.0)
-                    Dagger.@spawn BLAS.gemv!(
+                    Dagger.@spawn matvecmul!(
+                        InOut(Cc[m]),
                         transA,
-                        alpha,
                         In(Ac[m, k]),
                         In(Bc[k]),
+                        alpha,
                         mzone,
-                        InOut(Cc[m]),
                     )
                 end
             else
                 # A: [Conj]Trans — C's blocks index A's column-blocks
                 for k in range(1, Amt)
                     mzone = k == 1 ? beta : T(1.0)
-                    Dagger.@spawn BLAS.gemv!(
+                    Dagger.@spawn matvecmul!(
+                        InOut(Cc[m]),
                         transA,
-                        alpha,
                         In(Ac[k, m]),
                         In(Bc[k]),
+                        alpha,
                         mzone,
-                        InOut(Cc[m]),
                     )
                 end
             end
@@ -540,4 +575,54 @@ function gemv_dagger!(
     end
 
     return C
+end
+
+wrap_as_darray(A::DArray) = A
+wrap_as_darray(A::Array) = view(A, AutoBlocks())
+function wrap_as_darray(A::SubArray{T,Nv,Array{T,Na}}) where {T,Nv,Na}
+    Ap = parent(A)
+    part = auto_blocks(map(last, parentindices(Ap)))
+    partsize = part.blocksize
+    inds = parentindices(A)
+    inds_ranges_parent = ntuple(i->to_range(inds[i]), Val(Na))
+    inds_ranges_view = ntuple(i->to_range(inds[i]), Val(Nv))
+    subdomains = partition(part, ArrayDomain(inds_ranges_parent))
+    nparts = size(subdomains)
+    chunks = Array{Any,Na}(undef, nparts...)
+    for idx in CartesianIndices(nparts)
+        subdomain_view = subdomains[idx]
+        subdomain_parent = ArrayDomain(ntuple(i->Nv >= i ? subdomain_view.indexes[i] : inds_ranges_parent[i], Val(Na)))
+        subinds = ntuple(i->subdomain_parent.indexes[i], Val(Na))
+        subA = view(Ap, subinds...)
+        chunks[idx] = tochunk(subA)
+    end
+    return DArray(T, ArrayDomain(inds_ranges_parent), subdomains, chunks, part)
+end
+
+# Generate generic_matvecmul! methods for all combinations of DArray, Array, and SubArray
+for CT in (DVector, Vector, SubArray{<:Any,1,<:Array}),
+    AT in (DMatrix, Matrix, SubArray{<:Any,2,<:Array}),
+    BT in (DVector, Vector, SubArray{<:Any,1,<:Array})
+
+    # Don't commit type piracy
+    CT isa DArray || AT isa DArray || BT isa DArray || continue
+
+    @eval function LinearAlgebra.generic_matvecmul!(
+        C::$(CT),
+        transA::Char,
+        A::$(AT),
+        B::$(BT),
+        _add::LinearAlgebra.MulAddMul,
+    )
+        new_C = wrap_as_darray(C)
+        new_A = wrap_as_darray(A)
+        new_B = wrap_as_darray(B)
+        return LinearAlgebra.generic_matvecmul!(
+            new_C,
+            transA,
+            new_A,
+            new_B,
+            _add,
+        )
+    end
 end
