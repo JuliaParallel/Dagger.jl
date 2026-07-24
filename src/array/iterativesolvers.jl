@@ -306,3 +306,44 @@ end
 AMGPreconditioner(A; kwargs...) = throw(ArgumentError(
     "Dagger.AMGPreconditioner requires AlgebraicMultigrid.jl. Run \
     `using AlgebraicMultigrid` to enable algebraic-multigrid preconditioning."))
+
+"""
+    BlockKLUPreconditioner(A::DMatrix; kwargs...)
+
+Block direct preconditioner using KLU: an exact (pure-Julia) KLU factorization of
+each diagonal tile, applied per block. With a single tile this is an exact direct
+solve; with many tiles it is an exact-block-Jacobi preconditioner. Requires
+`PureKLU.jl` to be loaded and sparse-backed tiles. See also
+[`AbstractBlockPreconditioner`](@ref) and the whole-matrix solver
+[`Dagger.klu`](@ref).
+"""
+struct BlockKLUPreconditioner{F,S} <: AbstractBlockPreconditioner
+    ops::F
+    scopes::S
+    part::Blocks{1}
+    n::Int
+end
+# Friendly fallback (shadowed by the `::DMatrix` method added in `ext/PureKLUExt.jl`).
+BlockKLUPreconditioner(A; kwargs...) = throw(ArgumentError(
+    "Dagger.BlockKLUPreconditioner requires PureKLU.jl. Run `using PureKLU` to \
+    enable block KLU preconditioning."))
+
+"""
+    BlockUMFPACKPreconditioner(A::DMatrix; kwargs...)
+
+Block direct preconditioner using a pure-Julia UMFPACK-style LU of each diagonal
+tile, applied per block. With a single tile this is an exact direct solve; with
+many tiles it is an exact-block-Jacobi preconditioner. Requires `PureUMFPACK.jl`
+to be loaded and sparse-backed tiles. See also [`AbstractBlockPreconditioner`](@ref)
+and the whole-matrix solver [`Dagger.splu`](@ref).
+"""
+struct BlockUMFPACKPreconditioner{F,S} <: AbstractBlockPreconditioner
+    ops::F
+    scopes::S
+    part::Blocks{1}
+    n::Int
+end
+# Friendly fallback (shadowed by the `::DMatrix` method added in `ext/PureUMFPACKExt.jl`).
+BlockUMFPACKPreconditioner(A; kwargs...) = throw(ArgumentError(
+    "Dagger.BlockUMFPACKPreconditioner requires PureUMFPACK.jl. Run \
+    `using PureUMFPACK` to enable block UMFPACK preconditioning."))

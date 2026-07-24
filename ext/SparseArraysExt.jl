@@ -8,6 +8,27 @@ import Dagger: Blocks, AutoBlocks, BlocksOrAuto, AssignmentType, DSparseArray, D
 
 # Keep tiles sparse through `collect`/`cat`; the outer `collect` densifies.
 Dagger._sparse_collect(M::SparseMatrixCSC) = copy(M)
+
+# Assemble already-local tiles into one global `SparseMatrixCSC` without
+# densifying: unwrap each tile, offset its (i,j) by the precomputed subdomain
+# offsets, and build from triplets. Intended to run inside a worker-scoped task
+# (the scheduler moves the tile chunks there); used by `Dagger.klu` / `Dagger.splu`.
+function Dagger._gather_sparse(::Type{T}, tiles, row_offsets, col_offsets, m, n) where T
+    Is = Int[]; Js = Int[]; Vs = T[]
+    for k in 1:length(tiles)
+        tile = SparseMatrixCSC(Dagger._tile_matrix(tiles[k]))
+        ti, tj, tv = SparseArrays.findnz(tile)
+        append!(Is, ti .+ row_offsets[k])
+        append!(Js, tj .+ col_offsets[k])
+        append!(Vs, tv)
+    end
+    return SparseArrays.sparse(Is, Js, Vs, m, n)
+end
+
+# Dense → sparse for Stage-4c Schur complements (fill-in is expected).
+Dagger._sparse_copy_of(S::AbstractMatrix) = SparseArrays.sparse(S)
+Dagger._sparse_copy_of(S::SparseMatrixCSC) = S
+
 # Wrap bare sparse tiles (e.g. from `distribute`) so Datadeps sees a stable container.
 Dagger.maybe_wrap_tile(x::SparseMatrixCSC) = DSparseArray(x)
 Dagger.maybe_wrap_tile(x::SparseVector) = DSparseArray(x)
