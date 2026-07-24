@@ -65,7 +65,8 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
                         traversal::Symbol=:inorder,
                         scheduler::Union{DataDepsScheduler,Nothing}=nothing,
                         aliasing::Bool=true,
-                        launch_wait::Union{Bool,Nothing}=nothing)
+                        launch_wait::Union{Bool,Nothing}=nothing,
+                        hierarchical::Union{Bool,Nothing}=nothing)
     if !static
         throw(ArgumentError("Dynamic scheduling is no longer available"))
     end
@@ -78,22 +79,32 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
     wait_all(; check_errors=true) do
         scheduler = something(scheduler, DATADEPS_SCHEDULER[], RoundRobinScheduler())
         launch_wait = something(launch_wait, DATADEPS_LAUNCH_WAIT[], false)::Bool
+        hierarchical = something(hierarchical, DATADEPS_HIERARCHICAL[], true)::Bool
         if launch_wait
             result = spawn_bulk() do
                 queue = DataDepsTaskQueue(get_options(:task_queue); scheduler)
                 with_options(f; task_queue=queue)
-                distribute_tasks!(queue)
+                if hierarchical
+                    distribute_tasks_hierarchical!(queue)
+                else
+                    distribute_tasks!(queue)
+                end
             end
         else
             queue = DataDepsTaskQueue(get_options(:task_queue); scheduler)
             result = with_options(f; task_queue=queue)
-            distribute_tasks!(queue)
+            if hierarchical
+                distribute_tasks_hierarchical!(queue)
+            else
+                distribute_tasks!(queue)
+            end
         end
         return result
     end
 end
 const DATADEPS_SCHEDULER = ScopedValue{Union{DataDepsScheduler,Nothing}}(nothing)
 const DATADEPS_LAUNCH_WAIT = ScopedValue{Union{Bool,Nothing}}(nothing)
+const DATADEPS_HIERARCHICAL = ScopedValue{Union{Bool,Nothing}}(nothing)
 
 # Current task uid, propagated into `tochunk` so uniform-execution backends
 # (MPIExt) can derive deterministic, rank-agreed handle IDs. Core datadeps sets

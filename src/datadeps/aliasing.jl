@@ -1,4 +1,5 @@
-import Graphs: SimpleDiGraph, add_edge!, add_vertex!, inneighbors, outneighbors, nv
+import Graphs: SimpleDiGraph, add_edge!, add_vertex!, inneighbors, outneighbors, nv,
+               weakly_connected_components, topological_sort_by_dfs, vertices
 
 export In, Out, InOut, Deps, spawn_datadeps
 
