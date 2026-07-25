@@ -705,7 +705,7 @@ From `LinearAlgebra`:
 - `mul!` (In-place Matrix-Matrix and Matrix-Vector multiply)
 - `cholesky`/`cholesky!` (In-place/Out-of-place Cholesky factorization)
 - `lu`/`lu!` (In-place/Out-of-place LU factorization (`NoPivot` and `RowMaximum`))
-- `qr`/`qr!` (In-place/Out-of-place QR factorization)
+- `qr`/`qr!` (In-place/Out-of-place tiled Compact-WY QR; keywords `ib` and `p` for inner block size and CAQR domains)
 - `\`/`ldiv!` (In-place/Out-of-place Linear solving with LU, Cholesky, QR, and SVD factorizations)
 - `inv` (Out-of-place matrix inversion, including via SVD)
 - `svd`/`svd!`/`svdvals!` (In-place/Out-of-place Singular Value Decomposition)

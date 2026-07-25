@@ -774,14 +774,38 @@ function qr_measure_workspace(A::DMatrix{T}, ib::Int) where {T<: Number}
     lm, ln
 end
 
-function _qr_impl!(A::DMatrix{T}; ib::Int=1, p::Int=1) where {T<:Number}
+"""
+    _default_qr_ib(A; p=1) -> Int
+
+Choose a Compact-WY inner block size for tiled QR.
+
+`ib == 1` is numerically fine but runs NextLA's unblocked kernels and scales
+poorly. A modest inner block (capped at the tile width) restores BLAS-3
+intensity inside `geqrt!`/`tsmqr!` without lengthening the panel critical path.
+
+CAQR (`p > 1`) currently only produces correct results for `ib == 1`, so that
+path keeps the unblocked default until the tree kernels are fixed for `ib > 1`.
+"""
+function _default_qr_ib(A::DMatrix; p::Int=1)
+    p > 1 && return 1
+    nb = Int(A.partitioning.blocksize[2])
+    nb <= 0 && return 1
+    return min(32, nb)
+end
+
+function _qr_impl!(A::DMatrix{T}; ib::Union{Int,Nothing}=nothing, p::Int=1) where {T<:Number}
     p >= 1 || throw(ArgumentError("p must be >= 1, got $p"))
-    lm, ln = qr_measure_workspace(A, ib)
+    ib_eff = something(ib, _default_qr_ib(A; p=p))
+    ib_eff >= 1 || throw(ArgumentError("ib must be >= 1, got $ib_eff"))
+    if p > 1 && ib_eff > 1
+        throw(ArgumentError("CAQR (p > 1) currently requires ib=1, got ib=$ib_eff"))
+    end
+    lm, ln = qr_measure_workspace(A, ib_eff)
     nb = A.partitioning.blocksize[2]
     irregular = _use_irregular_qr_tiling(A)
 
     Tm_cols = p > 1 ? 2 * ln : ln
-    Tm = DArray{T}(undef, Blocks(ib, nb), (lm, Tm_cols))
+    Tm = DArray{T}(undef, Blocks(ib_eff, nb), (lm, Tm_cols))
 
     if irregular
         # Hierarchical irregular path (no CAQR tree metadata).
@@ -795,8 +819,22 @@ function _qr_impl!(A::DMatrix{T}; ib::Int=1, p::Int=1) where {T<:Number}
     return QRCompactWY(A, Tm)
 end
 
-function LinearAlgebra.qr!(A::DMatrix{T}; ib::Int=1, p::Int=1) where {T<:Number}
+"""
+    qr!(A::DMatrix; ib=nothing, p=1) -> QRCompactWY
+
+In-place tiled Compact-WY QR factorization of a distributed matrix.
+
+# Keywords
+- `ib`: Compact-WY inner block size. For flat tile QR (`p=1`), defaults to
+  `min(32, tilewidth)` — much faster than `ib=1` for multi-threaded runs.
+  CAQR (`p>1`) currently requires `ib=1`.
+- `p`: CAQR domain count (`p=1` is flat tile QR). `p>1` needs uniform square
+  tiling with `mt % p == 0`; on shared-memory multi-threading it is rarely faster
+  than `p=1`.
+"""
+function LinearAlgebra.qr!(A::DMatrix{T}; ib::Union{Int,Nothing}=nothing, p::Int=1) where {T<:Number}
     p >= 1 || throw(ArgumentError("p must be >= 1, got $p"))
+    ib === nothing || ib >= 1 || throw(ArgumentError("ib must be >= 1, got $ib"))
 
     if !_use_irregular_qr_tiling(A)
         return _qr_impl!(A; ib=ib, p=p)

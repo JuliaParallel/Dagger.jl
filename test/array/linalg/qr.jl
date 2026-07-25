@@ -20,7 +20,7 @@ function check_qr_residuals(A_col, DQ, DR; tol=2.0)
 end
 
 # ======================================================================
-# 1. Basic qr(DA) — varying shapes and block sizes (p=1, ib=1)
+# 1. Basic qr(DA) — varying shapes and block sizes (p=1, default ib)
 # ======================================================================
 @testset "Tile QR:  $T" for T in (Float64, ComplexF64)
     @testset "Square matrices" begin
@@ -508,6 +508,15 @@ end
     Tm = DArray{Float64}(undef, Blocks(ib, nb), (lm, 2 * ln))
 
     @test_throws ArgumentError cageqrf!(DA_copy, Tm; p=2)
+end
+
+# ======================================================================
+# 18b. CAQR currently requires ib=1
+# ======================================================================
+@testset "CAQR rejects ib>1" begin
+    A = rand(Float64, 128, 64)
+    DA = distribute(A, Blocks(32, 32))
+    @test_throws ArgumentError qr!(copy(DA); ib=32, p=2)
 end
 
 # ======================================================================
