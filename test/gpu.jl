@@ -1,6 +1,7 @@
 using Random
 using LinearAlgebra
 using SparseArrays
+using Krylov
 
 @everywhere begin
     using Distributed, Dagger
@@ -8,38 +9,10 @@ using SparseArrays
     using KernelAbstractions
 end
 
-# Sparse DArray SpGEMM / SpMV under a GPU compute scope. `check_tile(chunk)`
-# verifies a distributed tile is device-resident (backend-specific).
-function test_gpu_sparse_darray(scope; check_tile)
-    SA = sprand(Float32, 8, 8, 0.35)
-    SB = sprand(Float32, 8, 8, 0.35)
-    x = rand(Float32, 8)
-    Dagger.with_options(;scope) do
-        DSA = distribute(SA, Blocks(4, 4))
-        DSB = distribute(SB, Blocks(4, 4))
-        for chunk in DSA.chunks
-            @test check_tile(fetch(chunk; raw=true))
-        end
+# Sparse test bodies are shared with the CPU and MPI suites; see the file
+# header for the acceleration/backend matrix they cover.
+include(joinpath(@__DIR__, "array", "sparse_defs.jl"))
 
-        @test collect(DSA * DSB) ≈ SA * SB
-        @test collect(DSA * DSB') ≈ SA * SB'
-        @test collect(DSA' * DSB) ≈ SA' * SB
-
-        DSC = similar(DSA)
-        mul!(DSC, DSA, DSB)
-        @test collect(DSC) ≈ SA * SB
-
-        Dx = distribute(x, Blocks(4))
-        @test collect(DSA * Dx) ≈ SA * x
-
-        Z = SparseArrays.spzeros(Blocks(4, 4), Float32, 8, 8)
-        # `collect` densifies; check emptiness on device tiles / dense gather.
-        @test iszero(sum(abs, collect(Z)))
-        for chunk in Z.chunks
-            @test check_tile(fetch(chunk; raw=true))
-        end
-    end
-end
 @everywhere begin
     function isongpu(X)
         return !(X isa Array)
@@ -265,12 +238,15 @@ end
         @testset "Sparse DArray (GPU $gpu)" for gpu in single_gpu_configs
             scope = Dagger.scope(worker=1, cuda_gpu=gpu)
             CUDAExt = Base.get_extension(Dagger, :CUDAExt)
-            test_gpu_sparse_darray(scope; check_tile=chunk -> begin
+            check_tile = chunk -> begin
                 v = Dagger.MemPool.poolget(chunk.handle)
                 return v isa Dagger.DSparseArray &&
                        v.mat isa CUDA.CUSPARSE.CuSparseMatrixCSC &&
                        chunk.space isa CUDAExt.CUDAVRAMMemorySpace
-            end)
+            end
+            test_sparse_darray(; scope, check_tile)
+            test_sparse_solvers(; scope, check_tile)
+            test_sparse_bare_args(; scope, T=Float32)
         end
     end
 end
@@ -447,12 +423,15 @@ end
         @testset "Sparse DArray (GPU $gpu)" for gpu in single_gpu_configs
             scope = Dagger.scope(worker=1, rocm_gpu=gpu)
             ROCExt = Base.get_extension(Dagger, :ROCExt)
-            test_gpu_sparse_darray(scope; check_tile=chunk -> begin
+            check_tile = chunk -> begin
                 v = Dagger.MemPool.poolget(chunk.handle)
                 return v isa Dagger.DSparseArray &&
                        v.mat isa AMDGPU.rocSPARSE.ROCSparseMatrixCSC &&
                        chunk.space isa ROCExt.ROCVRAMMemorySpace
-            end)
+            end
+            test_sparse_darray(; scope, check_tile)
+            test_sparse_solvers(; scope, check_tile)
+            test_sparse_bare_args(; scope, T=Float32)
         end
     end
 end
@@ -629,12 +608,15 @@ end
         @testset "Sparse DArray (GPU $gpu)" for gpu in single_gpu_configs
             scope = Dagger.scope(worker=1, intel_gpu=gpu)
             IntelExt = Base.get_extension(Dagger, :IntelExt)
-            test_gpu_sparse_darray(scope; check_tile=chunk -> begin
+            check_tile = chunk -> begin
                 v = Dagger.MemPool.poolget(chunk.handle)
                 return v isa Dagger.DSparseArray &&
                        v.mat isa Dagger.DeviceSparseMatrixCSC &&
                        chunk.space isa IntelExt.IntelVRAMMemorySpace
-            end)
+            end
+            test_sparse_darray(; scope, check_tile)
+            test_sparse_solvers(; scope, check_tile)
+            test_sparse_bare_args(; scope, T=Float32)
         end
     end
 end
@@ -785,12 +767,15 @@ end
         @testset "Sparse DArray" begin
             scope = Dagger.scope(worker=1, metal_gpu=1)
             MetalExt = Base.get_extension(Dagger, :MetalExt)
-            test_gpu_sparse_darray(scope; check_tile=chunk -> begin
+            check_tile = chunk -> begin
                 v = Dagger.MemPool.poolget(chunk.handle)
                 return v isa Dagger.DSparseArray &&
                        v.mat isa Dagger.DeviceSparseMatrixCSC &&
                        chunk.space isa MetalExt.MetalVRAMMemorySpace
-            end)
+            end
+            test_sparse_darray(; scope, check_tile)
+            test_sparse_solvers(; scope, check_tile)
+            test_sparse_bare_args(; scope, T=Float32)
         end
     end
 end
@@ -902,12 +887,15 @@ end
         @testset "Sparse DArray (GPU $gpu)" for gpu in single_gpu_configs
             scope = Dagger.scope(worker=1, cl_device=gpu)
             OpenCLExt = Base.get_extension(Dagger, :OpenCLExt)
-            test_gpu_sparse_darray(scope; check_tile=chunk -> begin
+            check_tile = chunk -> begin
                 v = Dagger.MemPool.poolget(chunk.handle)
                 return v isa Dagger.DSparseArray &&
                        v.mat isa Dagger.DeviceSparseMatrixCSC &&
                        chunk.space isa OpenCLExt.CLMemorySpace
-            end)
+            end
+            test_sparse_darray(; scope, check_tile)
+            test_sparse_solvers(; scope, check_tile)
+            test_sparse_bare_args(; scope, T=Float32)
         end
     end
 end

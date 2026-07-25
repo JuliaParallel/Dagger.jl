@@ -1,5 +1,6 @@
 [deps]
 Dagger = "d58978e5-989f-55fb-8d15-ea34adc7bf54"
+Krylov = "ba0b0d4f-ebba-5204-a429-3ac8c609bfb7"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 MPI = "da04e1cc-30fd-572f-bb4f-1f8673147195"
 Metal = "dde4c033-4e86-420c-a63e-0dd931031962"

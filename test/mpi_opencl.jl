@@ -20,6 +20,7 @@ run_mpi_gpu_suite((;
     gpu_key = :cl_device,
     elt = Float32,
     stencil = true,
+    sparse = true,
     remap = (;
         make_space = () -> OpenCLExt.CLMemorySpace(1, 1),
         device_field = :device,

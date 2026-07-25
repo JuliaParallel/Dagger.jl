@@ -23,4 +23,5 @@ run_mpi_gpu_suite((;
     matmul = true,
     cholesky = true,
     stencil = true,
+    sparse = true,
 ))
