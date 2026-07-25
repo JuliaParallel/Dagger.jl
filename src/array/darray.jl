@@ -231,7 +231,28 @@ end
 
 # Named so the spawned function is rank-uniform under MPI (anonymous
 # closures get non-uniform ArgumentWrapper hashes).
-_collect_cat(concat, dims::Int, xs...) = concat(xs...; dims)
+#
+# Sparse tiles are densified before the `cat` (`_collect_cat_tile` is overloaded
+# for `DSparseArray` in array/sparse.jl). Generic `cat` fills its output element
+# by element, which is scalar indexing -- illegal on a device sparse tile, and
+# these gather tasks do run on the device when the caller is under a GPU compute
+# scope. `collect` densifies its result anyway (`_collect_dense`), so this only
+# moves that step earlier.
+#
+# For the same reason every operand is brought to the host, not just the sparse
+# ones. Densifying on the host makes the tree *mixed*: the level's host result
+# is a task result, so the next level's task -- on a device processor -- has
+# Datadeps move it back to the device, while its sibling operand arrives as a
+# fresh host densification. `cat` then takes its output type from the first
+# operand and fills it element by element from the other, so a host/device pair
+# is exactly the scalar-indexing error the densification was meant to avoid,
+# just one level up. It only appears with enough tiles to need a second cat
+# level. The host round trip this costs is bounded by `collect`'s own transfer
+# (which moves every tile to the host regardless).
+_collect_cat_tile(x) = x
+_collect_cat_tile(x::AbstractArray) =
+    value_memory_space(x) isa CPURAMMemorySpace ? x : Adapt.adapt(Array, x)
+_collect_cat(concat, dims::Int, xs...) = concat(map(_collect_cat_tile, xs)...; dims)
 
 # Finalize a gathered DArray to a dense `Array{T,N}`. Sparse tile cats may yield
 # a `DSparseArray` / `SparseMatrixCSC`, and `Base.collect` does not densify those.
@@ -276,8 +297,16 @@ function Base.collect(d::DArray{T,N}; tree=true, copyto=false) where {T,N}
     # Distributed: fetch chunks directly and concat in-process. This avoids
     # routing chunk data through datadeps aliasing, which requires an
     # aliasing-resolvable (e.g. isbits) element type.
+    #
+    # Sparse tiles (`DSparseArray`) are unwrapped to host storage before `cat`:
+    # GPU sparse types (CuSparse/ROCSparse/DeviceSparseMatrixCSC) disallow the
+    # scalar indexing that generic `cat` would use.
     dimcatfuncs = [(x...) -> concat(x..., dims=i) for i in 1:N]
-    return _collect_dense(T, Val(N), treereduce_nd(dimcatfuncs, asyncmap(fetch, a.chunks)))
+    tiles = asyncmap(a.chunks) do c
+        x = fetch(c)
+        x isa DSparseArray ? _sparse_collect(x.mat) : x
+    end
+    return _collect_dense(T, Val(N), treereduce_nd(dimcatfuncs, tiles))
 end
 Array{T,N}(A::DArray{S,N}) where {T,N,S} = convert(Array{T,N}, collect(A))
 

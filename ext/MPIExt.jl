@@ -1920,6 +1920,19 @@ Dagger.allocate_array_func(proc::MPIProcessor, f) = Dagger.allocate_array_func(p
 # otherwise never fire under MPI.
 Dagger.gpu_kernel_lock(f, proc::MPIProcessor) = Dagger.gpu_kernel_lock(f, proc.innerProc)
 
+# And again for the sparse tile allocators, which each GPU × SparseArrays
+# extension overrides on its raw device proc. Falling through to the host
+# default here is worse than a slow path: the tile is built as a host CSC, but
+# the chunk is still recorded on the device, so nothing ever moves it and the
+# host operand reaches a device `mul!` — which fails on scalar indexing of the
+# device vector. Only a re-tiling allocation (`repartition`, `spzeros`) takes
+# this path, so it stayed hidden while every sparse tile came from `distribute`
+# (whose `move` does dispatch on the unwrapped proc).
+Dagger.allocate_sparse_zeros(proc::MPIProcessor, ::Type{T}, dims::Dims) where T =
+    Dagger.allocate_sparse_zeros(proc.innerProc, T, dims)
+Dagger.allocate_sparse_rand(proc::MPIProcessor, ::Type{T}, dims::Dims, sparsity::AbstractFloat) where T =
+    Dagger.allocate_sparse_rand(proc.innerProc, T, dims, sparsity)
+
 # Owner-local payload that preserves the Chunk's SPMD-uniform chunktype after
 # Sch unwraps a Chunk to a device value (e.g. Matrix chunktype + CuArray value).
 # Without this, promote_op/chunktype diverge across ranks (CuArray vs Matrix).

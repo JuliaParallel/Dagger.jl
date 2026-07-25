@@ -72,6 +72,25 @@ function test_sparse_darray(; scope=nothing, check_tile=nothing, T=Float32)
                 @test check_tile(fetch(chunk; raw=true))
             end
         end
+
+        # Re-tiling must keep the tiles sparse: allocating dense tiles here
+        # would silently densify the operator (an out-of-memory multiplier for a
+        # real problem, not just a slowdown). This is the allocation every
+        # partitioning-mismatched `mul!` and every block preconditioner over a
+        # non-square-tiled operator goes through.
+        DSA_fine = Dagger.repartition(DSA, Blocks(2, 2))
+        @test DSA_fine.partitioning == Blocks(2, 2)
+        @test collect(DSA_fine) ≈ SA
+        for chunk in DSA_fine.chunks
+            tile = fetch(chunk; raw=true)
+            @test Dagger.chunktype(tile) <: Dagger.DSparseArray
+            check_tile === nothing || @test check_tile(tile)
+        end
+
+        # A partitioning mismatch between operator and vector: `mul!` aligns
+        # them itself rather than requiring the caller to match up front.
+        Dx_coarse = distribute(x, Blocks(8))
+        @test collect(DSA_fine * Dx_coarse) ≈ SA * x
     end
 end
 

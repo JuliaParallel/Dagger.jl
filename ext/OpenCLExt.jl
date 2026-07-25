@@ -39,9 +39,18 @@ struct CLMemorySpace <: Dagger.MemorySpace
     device::Int
 end
 Dagger.root_worker_id(space::CLMemorySpace) = space.owner
+# N.B. Keyed on the *device*, not on the command queue that `Managed` currently
+# records. That field is OpenCL.jl's ownership tracking, not provenance: any
+# access from a task whose `cl.queue()` differs synchronizes and then re-stamps
+# the buffer with that task's queue. `cl.queue()` is task-local and created
+# lazily, so a task that never ran `with_context!` re-stamps the buffer with a
+# queue Dagger never registered -- after which a queue-keyed lookup finds no
+# space at all and `CLMemorySpace(myid(), nothing)` fails to even construct.
+# The device is what actually owns the memory, and it does not change.
 function Dagger.memory_space(x::CLArray)
-    queue = x.data[].queue
-    idx = findfirst(==(queue), QUEUES)
+    dev = x.data[].queue.device
+    idx = findfirst(==(dev), DEVICES)
+    idx === nothing && throw(ArgumentError("CLArray on an OpenCL device unknown to Dagger: $dev"))
     return CLMemorySpace(myid(), idx)
 end
 function Dagger.aliasing(x::CLArray{T}) where T
