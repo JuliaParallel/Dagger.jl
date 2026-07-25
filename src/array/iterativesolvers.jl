@@ -239,7 +239,16 @@ end
 
 # Apply one block operator: `y = op⁻¹ x`. Default uses `\`; backends override for
 # operator types where `\` is unavailable (e.g. ILU/AMG use `ldiv!`).
-_block_apply!(y, op, x) = (y .= op \ x; return nothing)
+# Host factorizations (UMFPACK/`lu` of gathered CSC) need a host RHS; GPU vector
+# chunks are gathered, solved, and written back. CPU `Array` short-circuits.
+function _block_apply!(y, op, x)
+    if x isa Array
+        y .= op \ x
+    else
+        copyto!(y, op \ Adapt.adapt(Array, x))
+    end
+    return nothing
+end
 
 # Underlying matrix of a tile (overridden for `DSparseArray` in `sparse.jl`).
 _tile_matrix(A) = A

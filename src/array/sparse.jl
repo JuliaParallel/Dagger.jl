@@ -170,13 +170,22 @@ function matvecmul!(C, transA::Char, A::DSparseMatrix, B, alpha, beta)
     return matvecmul!(C, transA, A.mat, B, alpha, beta)
 end
 
-# Factorize the inner sparse storage (e.g. sparse LU/UMFPACK) for block-Jacobi,
-# rather than the `DSparseArray` wrapper (whose generic `lu` would densify).
-_factorize_tile(M::DSparseArray) = LinearAlgebra.lu(M.mat)
+# Factorize via host CSC so GPU sparse tiles (rocSPARSE / DeviceSparseMatrixCSC)
+# can still feed block-Jacobi; CPU SparseMatrixCSC is a no-op collect.
+_factorize_tile(M::DSparseArray) = LinearAlgebra.lu(_sparse_collect(M.mat))
 
 # Expose the inner sparse storage so preconditioner backends (ILU, AMG) build on
-# the actual `SparseMatrixCSC` rather than the `DSparseArray` wrapper.
-_tile_matrix(M::DSparseArray) = M.mat
+# the actual `SparseMatrixCSC` rather than the `DSparseArray` wrapper. GPU mats
+# are gathered to host CSC (those backends are host-only).
+_tile_matrix(M::DSparseArray) = _sparse_collect(M.mat)
+
+# Jacobi diagonal extract without GPU scalar indexing. `diag(::SparseMatrixCSC)`
+# returns a `SparseVector`; densify before `copyto!` into a device vector.
+function _set_inv_diag!(out, tile::DSparseArray)
+    d = Vector(LinearAlgebra.diag(_sparse_collect(tile.mat)))
+    copyto!(out, inv.(d))
+    return nothing
+end
 
 function transpose_tile end
 function copytile!(A::DSparseMatrix, B::DSparseMatrix)
