@@ -218,8 +218,16 @@ function Base.collect(d::DArray{T,N}; tree=true, copyto=false) where {T,N}
     # Distributed: fetch chunks directly and concat in-process. This avoids
     # routing chunk data through datadeps aliasing, which requires an
     # aliasing-resolvable (e.g. isbits) element type.
+    #
+    # Sparse tiles (`DSparseArray`) are unwrapped to host storage before `cat`:
+    # GPU sparse types (CuSparse/ROCSparse/DeviceSparseMatrixCSC) disallow the
+    # scalar indexing that generic `cat` would use.
     dimcatfuncs = [(x...) -> concat(x..., dims=i) for i in 1:N]
-    return _collect_dense(T, Val(N), treereduce_nd(dimcatfuncs, asyncmap(fetch, a.chunks)))
+    tiles = asyncmap(a.chunks) do c
+        x = fetch(c)
+        x isa DSparseArray ? _sparse_collect(x.mat) : x
+    end
+    return _collect_dense(T, Val(N), treereduce_nd(dimcatfuncs, tiles))
 end
 Array{T,N}(A::DArray{S,N}) where {T,N,S} = convert(Array{T,N}, collect(A))
 

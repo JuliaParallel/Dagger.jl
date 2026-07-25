@@ -53,8 +53,25 @@ Base.hash(M::DSparseArray, h::UInt) = hash(objectid(M), hash(DSparseArray, h))
 # `aliasing_root` resolves any wrapper of a `DSparseArray` back to the container
 # before computing aliasing. Note: this must return a *bare* `ObjectAliasing`, as
 # `aliases_as_whole(::ObjectAliasing)` relies on it to drive whole-object copies.
-aliasing(M::DSparseArray, _=identity) = ObjectAliasing(M)
+#
+# The ObjectAliasing is stamped with the inner storage's memory space so GPU-
+# resident sparse tiles (e.g. CuSparseMatrixCSC / ROCSparseMatrixCSC, or
+# DeviceSparseMatrixCSC) are tracked in VRAM rather than host RAM. The pointer
+# itself is still the host wrapper's `pointer_from_objref` (identity only);
+# Datadeps never span-copies these objects (see `aliases_as_whole` / `FullCopy`).
+function aliasing(M::DSparseArray, _=identity)
+    space = value_memory_space(M.mat)
+    ptr = RemotePtr{Cvoid}(UInt(pointer_from_objref(M)), space)
+    return ObjectAliasing(ptr, sizeof(typeof(M)))
+end
 aliases_as_whole(::DSparseArray) = true
+# Chunk space follows the inner sparse storage (host CSC → CPURAM, GPU sparse → VRAM).
+# `memory_space` (not only `value_memory_space`) must resolve correctly: Datadeps'
+# `aliased_object!` uses `memory_space(x)` when deciding whether a same-space
+# slot can share the original object. The generic fallback labels unknown values
+# as CPURAM, which would force a discarded GPU copy and drop SpGEMM writes.
+value_memory_space(M::DSparseArray) = value_memory_space(M.mat)
+memory_space(M::DSparseArray) = value_memory_space(M)
 
 # A `DSparseArray` has no meaningful raw data pointer (its storage may be
 # reallocated/resized). This trap ensures that if aliasing ever tries to treat a
@@ -85,6 +102,26 @@ end
 # Backend-overridable deep copy of the inner storage (Finch tensors don't define
 # `Base.copy`).
 _sparse_copy(mat) = copy(mat)
+
+# Adapt preserves the `DSparseArray` wrapper while adapting the inner storage
+# (e.g. SparseMatrixCSC → CuSparseMatrixCSC under `adapt(CuArray, …)`). GPU
+# package extensions override `move` for sparse types so OpenCL/Metal/oneAPI do
+# not densify via the generic `adapt(DeviceArray, SparseMatrixCSC)` path.
+Adapt.adapt_structure(to, M::DSparseArray) = DSparseArray(Adapt.adapt(to, M.mat))
+
+# Whole-object in-place move for Datadeps `FullCopy`. Reassigns `to.mat` from a
+# space-converted copy of `from.mat` rather than span-copying storage.
+function move!(to_space::MemorySpace, from_space::MemorySpace, to::DSparseArray, from::DSparseArray)
+    if to_space == from_space
+        to.mat = _sparse_copy(from.mat)
+    else
+        to_proc = first(processors(to_space))
+        from_proc = first(processors(from_space))
+        moved = move(from_proc, to_proc, from)
+        to.mat = moved.mat
+    end
+    return
+end
 
 # Wrapping hook used when materializing tiles (e.g. in `distribute`). Backends
 # overload this (e.g. in package extensions) to wrap freshly-created tiles in a
@@ -150,3 +187,64 @@ function copydiagtile!(A::DSparseMatrix, uplo)
     A.mat = transpose_tile(A.mat, uplo)
     return
 end
+
+#==============================================================================
+  Device-resident CSC for GPU backends without a vendor sparse library
+  (OpenCL / Metal / oneAPI). Storage vectors live in device memory; SpGEMM/SpMV
+  kernels fall back to host SparseArrays (see SparseArraysExt). CUDA/ROCm use
+  their native CuSparse/ROCSparse types instead.
+==============================================================================#
+
+"""
+    DeviceSparseMatrixCSC{Tv,Ti,V,I}
+
+A CSC sparse matrix whose `colptr`/`rowval`/`nzval` live in device arrays
+(`CLArray`, `MtlArray`, `oneArray`, …). Used as the inner storage of a
+[`DSparseArray`](@ref) on GPU backends that lack a vendor sparse library.
+"""
+struct DeviceSparseMatrixCSC{Tv,Ti,V<:AbstractVector{Tv},I<:AbstractVector{Ti}} <: AbstractMatrix{Tv}
+    m::Int
+    n::Int
+    colptr::I
+    rowval::I
+    nzval::V
+end
+Base.size(A::DeviceSparseMatrixCSC) = (A.m, A.n)
+Base.eltype(::DeviceSparseMatrixCSC{Tv}) where Tv = Tv
+Base.IndexStyle(::Type{<:DeviceSparseMatrixCSC}) = IndexCartesian()
+function Base.getindex(A::DeviceSparseMatrixCSC{Tv}, i::Integer, j::Integer) where Tv
+    @boundscheck checkbounds(A, i, j)
+    # Scalar device indexing; acceptable for rare host-side inspection.
+    col_start = Int(A.colptr[j])
+    col_end = Int(A.colptr[j + 1]) - 1
+    for p in col_start:col_end
+        Int(A.rowval[p]) == i && return A.nzval[p]
+    end
+    return zero(Tv)
+end
+# Memory space follows the nonzero values buffer.
+value_memory_space(A::DeviceSparseMatrixCSC) = value_memory_space(A.nzval)
+memory_space(A::DeviceSparseMatrixCSC) = value_memory_space(A)
+# Whole-object aliasing (storage may be replaced on write); stamp with device space.
+function aliasing(A::DeviceSparseMatrixCSC, _=identity)
+    space = value_memory_space(A)
+    ptr = RemotePtr{Cvoid}(UInt(pointer_from_objref(A)), space)
+    return ObjectAliasing(ptr, sizeof(typeof(A)))
+end
+aliases_as_whole(::DeviceSparseMatrixCSC) = true
+function Base.pointer(::DeviceSparseMatrixCSC)
+    throw(ArgumentError("`pointer(::DeviceSparseMatrixCSC)` is unsupported; \
+        alias as a whole object via `Dagger.aliasing`."))
+end
+
+# Allocation hooks used by `spzeros`/`sprand` under a GPU compute scope.
+# GPU Exts override these for their processor type.
+allocate_sparse_zeros(proc::Processor, ::Type{T}, dims::Dims) where T =
+    allocate_sparse_zeros_default(proc, T, dims)
+allocate_sparse_rand(proc::Processor, ::Type{T}, dims::Dims, sparsity::AbstractFloat) where T =
+    allocate_sparse_rand_default(proc, T, dims, sparsity)
+# Defaults are filled in by SparseArraysExt (host SparseMatrixCSC / SparseVector).
+function allocate_sparse_zeros_default end
+function allocate_sparse_rand_default end
+# Upload host CSC onto device vectors of type `Arr` (filled in by SparseArraysExt).
+function device_sparse_from_host end
