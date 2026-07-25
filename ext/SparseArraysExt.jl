@@ -32,11 +32,64 @@ Dagger._sparse_copy_of(S::SparseMatrixCSC) = S
 # Wrap bare sparse tiles (e.g. from `distribute`) so Datadeps sees a stable container.
 Dagger.maybe_wrap_tile(x::SparseMatrixCSC) = DSparseArray(x)
 Dagger.maybe_wrap_tile(x::SparseVector) = DSparseArray(x)
+Dagger.maybe_wrap_tile(x::Dagger.DeviceSparseMatrixCSC) = DSparseArray(x)
+
+# Host defaults for scoped sparse allocation (GPU Exts override per-processor).
+Dagger.allocate_sparse_zeros_default(::Dagger.Processor, ::Type{T}, dims::Dims{2}) where T =
+    SparseArrays.spzeros(T, dims...)
+Dagger.allocate_sparse_zeros_default(::Dagger.Processor, ::Type{T}, dims::Dims{1}) where T =
+    SparseArrays.spzeros(T, dims...)
+Dagger.allocate_sparse_rand_default(::Dagger.Processor, ::Type{T}, dims::Dims{2}, sparsity::AbstractFloat) where T =
+    SparseArrays.sprand(T, dims..., sparsity)
+Dagger.allocate_sparse_rand_default(::Dagger.Processor, ::Type{T}, dims::Dims{1}, sparsity::AbstractFloat) where T =
+    SparseArrays.sprand(T, dims..., sparsity)
+
+# DeviceSparseMatrixCSC ↔ SparseMatrixCSC
+function SparseArrays.SparseMatrixCSC(A::Dagger.DeviceSparseMatrixCSC{Tv,Ti}) where {Tv,Ti}
+    return SparseMatrixCSC{Tv,Ti}(A.m, A.n, Array(A.colptr), Array(A.rowval), Array(A.nzval))
+end
+"""
+    device_sparse_from_host(Arr, S::SparseMatrixCSC) -> DeviceSparseMatrixCSC
+
+Upload a host CSC onto device vectors of type `Arr` (e.g. `CLArray`, `MtlArray`,
+`oneArray`). Indices are converted to `Int32` for device friendliness.
+"""
+function Dagger.device_sparse_from_host(::Type{Arr}, S::SparseMatrixCSC{Tv}) where {Tv,Arr}
+    colptr = Arr(Int32.(S.colptr))
+    rowval = Arr(Int32.(S.rowval))
+    nzval = Arr(Array(S.nzval))
+    return Dagger.DeviceSparseMatrixCSC(S.m, S.n, colptr, rowval, nzval)
+end
+Base.copy(A::Dagger.DeviceSparseMatrixCSC) =
+    Dagger.DeviceSparseMatrixCSC(A.m, A.n, copy(A.colptr), copy(A.rowval), copy(A.nzval))
+Dagger._sparse_copy(A::Dagger.DeviceSparseMatrixCSC) = copy(A)
+Dagger._sparse_collect(A::Dagger.DeviceSparseMatrixCSC) = SparseMatrixCSC(A)
+function Dagger._sparse_similar(A::Dagger.DeviceSparseMatrixCSC{Tv,Ti}, ::Type{T}, dims::Dims{2}) where {Tv,Ti,T}
+    n = dims[2]
+    colptr = similar(A.colptr, Ti, n + 1)
+    fill!(colptr, one(Ti))
+    rowval = similar(A.rowval, Ti, 0)
+    nzval = similar(A.nzval, T, 0)
+    return Dagger.DeviceSparseMatrixCSC(dims[1], n, colptr, rowval, nzval)
+end
+
+# Rebuild a DeviceSparseMatrixCSC on the same device array type as `like`.
+function _to_device_sparse(like::Dagger.DeviceSparseMatrixCSC, S::SparseMatrixCSC)
+    colptr = similar(like.colptr, eltype(like.colptr), length(S.colptr))
+    rowval = similar(like.rowval, eltype(like.rowval), length(S.rowval))
+    nzval = similar(like.nzval, eltype(S), length(S.nzval))
+    copyto!(colptr, eltype(colptr).(S.colptr))
+    copyto!(rowval, eltype(rowval).(S.rowval))
+    copyto!(nzval, S.nzval)
+    return Dagger.DeviceSparseMatrixCSC(S.m, S.n, colptr, rowval, nzval)
+end
 
 function SparseArrays.spzeros(p::Blocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
     d = Dagger.ArrayDomain(map(x->1:x, dims))
     N = length(dims)
-    a = Dagger.AllocateArray(T, (T, _dims) -> DSparseArray(SparseArrays.spzeros(T, _dims...)), false, d, Dagger.partition(p, d), p, assignment;
+    # Route through `allocate_sparse_zeros` so a GPU compute scope yields
+    # device-resident sparse tiles (vendor sparse or DeviceSparseMatrixCSC).
+    a = Dagger.AllocateArray(T, (T, _dims) -> DSparseArray(Dagger.allocate_sparse_zeros(Dagger.task_processor(), T, _dims)), false, d, Dagger.partition(p, d), p, assignment;
                              return_type=DSparseArray{T,N})
     return Dagger._to_darray(a)
 end
@@ -52,7 +105,7 @@ SparseArrays.spzeros(::AutoBlocks, T::Type, dims::Dims; assignment::AssignmentTy
 function SparseArrays.sprand(p::Blocks, T::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary)
     d = Dagger.ArrayDomain(map(x->1:x, dims))
     N = length(dims)
-    a = Dagger.AllocateArray(T, (T, _dims) -> DSparseArray(SparseArrays.sprand(T, _dims..., sparsity)), false, d, Dagger.partition(p, d), p, assignment;
+    a = Dagger.AllocateArray(T, (T, _dims) -> DSparseArray(Dagger.allocate_sparse_rand(Dagger.task_processor(), T, _dims, sparsity)), false, d, Dagger.partition(p, d), p, assignment;
                              return_type=DSparseArray{T,N})
     return Dagger._to_darray(a)
 end
@@ -70,6 +123,17 @@ _apply_trans(X, t::Char) =
     t == 'T' ? transpose(X) :
     t == 'C' ? adjoint(X) :
     throw(ArgumentError("Invalid trans char: $t"))
+
+function _sparse_gemm_assign!(C::DSparseMatrix, prod, beta)
+    if iszero(beta)
+        C.mat = prod
+    elseif isone(beta)
+        C.mat = prod + C.mat
+    else
+        C.mat = prod + beta * C.mat
+    end
+    return C
+end
 
 function Dagger.matmatmul!(
     C::DSparseMatrix,
@@ -91,14 +155,35 @@ function Dagger.matmatmul!(
     # methods, so `opA`/`opB` are not materialized.
     AB = opA * opB
     prod = isone(alpha) ? AB : alpha * AB
-    if iszero(beta)
-        C.mat = prod
-    elseif isone(beta)
-        C.mat = prod + C.mat
-    else
-        C.mat = prod + beta * C.mat
-    end
+    return _sparse_gemm_assign!(C, prod, beta)
+end
 
+# DeviceSparseMatrixCSC SpGEMM: gather to host, multiply, scatter back.
+function Dagger.matmatmul!(
+    C::DSparseMatrix,
+    transA::Char,
+    transB::Char,
+    A::Dagger.DeviceSparseMatrixCSC,
+    B::Dagger.DeviceSparseMatrixCSC,
+    alpha,
+    beta
+)
+    Ah = SparseMatrixCSC(A)
+    Bh = SparseMatrixCSC(B)
+    Ch = C.mat isa Dagger.DeviceSparseMatrixCSC ? SparseMatrixCSC(C.mat) :
+         C.mat isa SparseMatrixCSC ? C.mat : SparseMatrixCSC(C.mat)
+    opA = _apply_trans(Ah, transA)
+    opB = _apply_trans(Bh, transB)
+    AB = opA * opB
+    prod = isone(alpha) ? AB : alpha * AB
+    if iszero(beta)
+        result = prod
+    elseif isone(beta)
+        result = prod + Ch
+    else
+        result = prod + beta * Ch
+    end
+    C.mat = _to_device_sparse(A, SparseMatrixCSC(result))
     return C
 end
 
@@ -111,9 +196,23 @@ function Dagger.matvecmul!(C::AbstractVector, transA::Char, A::SparseMatrixCSC, 
     return C
 end
 
+# DeviceSparseMatrixCSC SpMV: host fallback (works for any dense vector type
+# that supports Array(::)/copyto!).
+function Dagger.matvecmul!(C::AbstractVector, transA::Char, A::Dagger.DeviceSparseMatrixCSC, B::AbstractVector, alpha, beta)
+    Ah = SparseMatrixCSC(A)
+    Bh = Array(B)
+    Ch = Array(C)
+    LinearAlgebra.mul!(Ch, _apply_trans(Ah, transA), Bh, alpha, beta)
+    copyto!(C, Ch)
+    return C
+end
+
 # Off-diagonal tile copy in `copytri!`: produce the (conjugate) transpose tile.
 function Dagger.transpose_tile(B::SparseMatrixCSC)
     return SparseArrays.sparse(B')
+end
+function Dagger.transpose_tile(B::Dagger.DeviceSparseMatrixCSC)
+    return _to_device_sparse(B, SparseArrays.sparse(SparseMatrixCSC(B)'))
 end
 # Diagonal tile symmetrization in `copytri!`: build the full Hermitian tile from
 # its `uplo` triangle (matching the dense `copydiagtile!` semantics).
@@ -131,6 +230,9 @@ function Dagger.transpose_tile(B::SparseMatrixCSC, uplo::Char)
         C[i, i] = B[i, i]
     end
     return C
+end
+function Dagger.transpose_tile(B::Dagger.DeviceSparseMatrixCSC, uplo::Char)
+    return _to_device_sparse(B, Dagger.transpose_tile(SparseMatrixCSC(B), uplo))
 end
 
 end # module SparseArraysExt

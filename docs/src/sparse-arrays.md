@@ -10,9 +10,14 @@ Sparse support is provided through package extensions, so you opt in by loading 
 sparse backend:
 
 - **`SparseArrays`** (the standard library) — tiles are `SparseMatrixCSC` /
-  `SparseVector`. This is the default, well-supported backend.
+  `SparseVector` on the CPU. This is the default, well-supported backend.
+- **GPU + `SparseArrays`** — under a GPU compute scope (`cuda_gpu`, `rocm_gpu`,
+  `cl_device`, `metal_gpu`, `intel_gpu`), tiles use the vendor sparse type when
+  available (CUDA cuSPARSE / AMDGPU rocSPARSE) or else
+  `Dagger.DeviceSparseMatrixCSC` (OpenCL / Metal / oneAPI) with host SpGEMM/SpMV
+  fallbacks. Load the GPU package together with `SparseArrays`.
 - **`Finch`** — tiles are `Finch.Tensor`s, enabling a wider range of sparse
-  formats. This backend is more experimental.
+  formats. This backend is more experimental (CPU only for now).
 
 ```julia
 using Distributed
