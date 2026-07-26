@@ -36,6 +36,32 @@ B = zeros(Blocks(2, 2), Int, 4, 4)
 
 In these examples, the stencil operation is executed for each chunk of the target array. The `idx` variable corresponds to the indices within each chunk.
 
+## Choosing a Block Size
+
+`@stencil` spawns one task per chunk per expression, so the array's block size sets
+both the available parallelism and the number of tasks. Scheduling a task is not
+free -- it costs on the order of a hundred microseconds -- so blocks want to be
+large enough that the work in a chunk dwarfs that, and numerous enough to keep the
+processors busy. Roughly one chunk per processor is a good starting point, which is
+what `AutoBlocks` picks:
+
+```julia
+A = rand(AutoBlocks(), Float64, 4096, 4096)
+```
+
+Partitioning far more finely than the processor count is the common mistake, and it
+is expensive: a 4096x4096 Jacobi sweep over 12 threads runs about 1.7x slower with
+`Blocks(512, 512)` (64 chunks) than with `AutoBlocks()` (12 chunks), because the
+per-task cost is paid 64 times per sweep instead of 12 while the arithmetic is
+unchanged. Coarsening past one chunk per processor is bounded by the other side:
+chunks are the unit of parallelism, so fewer chunks than processors leaves
+processors idle.
+
+Note that this argues only against *needlessly* fine partitioning. Smaller chunks
+still pay for themselves when they buy something else: load balance across uneven
+processors, overlap of communication with computation, or fitting a working set
+into cache or device memory.
+
 ## Allocation and Return Syntax
 
 The `@stencil` macro also supports a functional syntax that automatically allocates an output `DArray` and returns it. This is triggered when the stencil expression (or the last expression in a block) is a "naked" expression (not an assignment).
