@@ -893,6 +893,29 @@ end
 isremotehandle(x) = false
 isremotehandle(x::DTask) = true
 isremotehandle(x::Chunk) = true
+"""
+    slot_is_already_in_place(data, orig_space, dest_space) -> Bool
+
+Whether `data` can serve as its own Datadeps slot in `dest_space`.
+
+Only a `Chunk` that already lives in `dest_space` and wraps a `move_rewrap`
+*leaf* qualifies. `move_rewrap` does more than move bytes: it rebuilds wrappers
+and resolves handles (a `ChunkView` becomes a `Chunk` over a real `SubArray`, a
+nested `Chunk` is flattened) so that what reaches the task is a plain
+destination-space value. Those results differ from the input even when nothing
+moves, so only leaves may be passed through untouched.
+
+Restricted to locally-owned chunks under non-uniform execution because deciding
+this requires unwrapping `data`, and because MPI chunk handles are rank-relative.
+"""
+function slot_is_already_in_place(data, orig_space, dest_space)
+    data isa Chunk || return false
+    orig_space == dest_space || return false
+    uniform_execution() && return false
+    root_worker_id(data.processor) == myid() || return false
+    return move_rewrap_parts(unwrap(data)) === nothing
+end
+
 function generate_slot!(state::DataDepsState, dest_space, data)
     # N.B. We do not perform any sync/copy with the current owner of the data,
     # because all we want here is to make a copy of some version of the data,
@@ -910,8 +933,18 @@ function generate_slot!(state::DataDepsState, dest_space, data)
     id = rand(Int)
     @maybelog ctx timespan_start(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data))
     tid = something(DATADEPS_CURRENT_TASK[], (;uid=0)).uid
-    data_chunk = with(DATADEPS_THUNK_ID=>tid) do
-        remotecall_endpoint_toplevel(move_rewrap, current_acceleration(), aliased_object_cache, from_proc, to_proc, orig_space, dest_space, data)
+    data_chunk = if slot_is_already_in_place(data, orig_space, dest_space)
+        # Nothing to move: the slot for data already in `dest_space` is the data
+        # itself. Going through `move_rewrap` here would allocate a second Chunk
+        # (and DRef) over the very same memory, which costs a MemPool round-trip
+        # per argument per region and buys nothing. Still route through
+        # `aliased_object!` so the cache records this object as the (never-freed)
+        # original for its aliasing key, exactly as the general path does.
+        aliased_object!(Returns(data), aliased_object_cache, data)::Chunk
+    else
+        with(DATADEPS_THUNK_ID=>tid) do
+            remotecall_endpoint_toplevel(move_rewrap, current_acceleration(), aliased_object_cache, from_proc, to_proc, orig_space, dest_space, data)
+        end
     end
     @maybelog ctx timespan_finish(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data=data_chunk))
     @assert memory_space(data_chunk) == dest_space "space mismatch! $dest_space (dest) != $(memory_space(data_chunk)) (actual) ($(typeof(data)) (data) vs. $(typeof(data_chunk)) (chunk)), spaces ($orig_space -> $dest_space)"
