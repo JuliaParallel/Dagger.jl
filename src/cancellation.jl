@@ -79,10 +79,8 @@ alternative to Ctrl+C, as it cooperates with the scheduler and runtime and
 avoids unintended side effects.
 """
 function cancel!(task::DTask; force::Bool=false, graceful::Bool=true, halt_sch::Bool=false)
-    tid = lock(Dagger.Sch.EAGER_ID_MAP) do id_map
-        id_map[task.uid]
-    end
-    cancel!(tid; force, graceful, halt_sch)
+    # Eager DTask uid and Sch thunk id are the same value.
+    cancel!(Int(task.uid); force, graceful, halt_sch)
 end
 function cancel!(tid::Union{Int,Nothing}=nothing;
                  force::Bool=false, graceful::Bool=true, halt_sch::Bool=false)

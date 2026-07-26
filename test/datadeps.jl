@@ -239,9 +239,7 @@ function with_logs(f)
         Dagger.disable_logging!()
     end
 end
-task_id(t::Dagger.DTask) = lock(Dagger.Sch.EAGER_ID_MAP) do id_map
-    id_map[t.uid]
-end
+task_id(t::Dagger.DTask) = Int(t.uid)
 function taskdeps_for_task(logs::Dict{Int,<:Dict}, tid::Int)
     for w in keys(logs)
         _logs = logs[w]
