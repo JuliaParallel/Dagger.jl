@@ -304,6 +304,9 @@ Adapt.adapt_structure(to, H::Dagger.HaloArray) =
               H.halo_width;
               own_center=H.own_center)
 
+Adapt.adapt_structure(to, A::Dagger.HaloInterior) =
+    HaloInterior(Adapt.adapt(to, A.parent), A.halo_width)
+
 function aliasing(A::HaloArray)
     return CombinedAliasing([aliasing(A.center), map(aliasing, A.halos)...])
 end
