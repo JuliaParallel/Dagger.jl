@@ -1239,15 +1239,23 @@ macro stencil(orig_ex)
             end
         end))
 
-        # 2d. After spawn_datadeps completes all fill and stencil tasks, fetch the filled
-        # HaloArray Chunks and store them in the cache (replacing any alloc DTasks from 2a).
-        # spawn_datadeps already waited for everything, so fetch is instant.
+        # 2d. After spawn_datadeps completes, resolve any alloc DTasks in the cache to
+        # their origin Chunks. Do *not* store `fetch(fill_task)`: Datadeps may have run
+        # fill on a libc-backed remote slot copy and then `unsafe_free!`'d that copy at
+        # region end, so the fill task's return value can dangle. The origin Chunk (from
+        # alloc_halo / a prior iteration) receives the updated data via remainder sync
+        # and is what must stay in the cache for the next iteration.
         for read_var in read_vars
             if read_var in keys(neighborhoods)
                 syms = cache_sym_map[read_var]
+                @gensym cache_entry
                 push!(final_ex.args, quote
                     for $chunk_idx in $CartesianIndices($chunks($read_var))
-                        $(syms.inner_cache_var)[($chunk_idx, $(syms.halo_width_var))] = fetch($(syms.fill_tasks)[$chunk_idx]; raw=true)
+                        $(syms.cache_key_var) = ($chunk_idx, $(syms.halo_width_var))
+                        $cache_entry = $(syms.inner_cache_var)[$(syms.cache_key_var)]
+                        if $cache_entry isa $DTask
+                            $(syms.inner_cache_var)[$(syms.cache_key_var)] = fetch($cache_entry; raw=true)
+                        end
                     end
                 end)
             end
