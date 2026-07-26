@@ -183,7 +183,8 @@ _collect_cat(concat, dims::Int, xs...) = concat(xs...; dims)
 # Finalize a gathered DArray to a dense `Array{T,N}`. Sparse tile cats may yield
 # a `DSparseArray` / `SparseMatrixCSC`, and `Base.collect` does not densify those.
 _collect_dense(::Type{T}, ::Val{N}, x::Array{T,N}) where {T,N} = x
-_collect_dense(::Type{T}, ::Val{N}, x) where {T,N} = Array{T,N}(x)
+_collect_dense(::Type{T}, ::Val{N}, x::AbstractArray) where {T,N} = Array{T,N}(x)
+_collect_dense(::Type, ::Val, x) = x
 
 function Base.collect(d::DArray{T,N}; tree=true, copyto=false) where {T,N}
     a = fetch(d)
