@@ -25,6 +25,56 @@ struct HierarchicalTaskInfo
     writedep::Bool
 end
 
+"""
+    BatchedEnqueueQueue(inner, lock; limit=DATADEPS_BATCH_LIMIT[])
+
+Buffers tasks locally and submits them to `inner` in batches of at most `limit`.
+
+Submitting one task at a time costs a scheduler round-trip each; batching pays
+that once per group. It also collapses the lock traffic, which matters because
+every partition of the hierarchical path shares a single lock over the region's
+queue -- with one acquisition per task the partitions spend most of their time
+convoyed behind each other rather than preparing tasks in parallel.
+
+`limit` trades that amortization against latency: buffered tasks cannot start
+executing, so an unbounded batch would keep a partition's whole workload idle
+until it finished planning, serializing planning against execution. A small
+limit keeps the pipeline fed while still amortizing most of the per-submission
+cost.
+
+`flush_batch!` must additionally be called before anything outside this
+partition can observe the buffered tasks (see `schedule_partition_full!`), since
+a task's syncdeps must already be submitted when a dependent task is prepared.
+"""
+struct BatchedEnqueueQueue <: AbstractTaskQueue
+    inner::AbstractTaskQueue
+    lock::ReentrantLock
+    pending::Vector{DTaskPair}
+    limit::Int
+end
+BatchedEnqueueQueue(inner::AbstractTaskQueue, lock::ReentrantLock;
+                    limit::Int=DATADEPS_BATCH_LIMIT[]) =
+    BatchedEnqueueQueue(inner, lock, DTaskPair[], limit)
+function enqueue!(beq::BatchedEnqueueQueue, pair::DTaskPair)
+    push!(beq.pending, pair)
+    length(beq.pending) >= beq.limit && flush_batch!(beq)
+    return
+end
+function enqueue!(beq::BatchedEnqueueQueue, pairs::Vector{DTaskPair})
+    append!(beq.pending, pairs)
+    length(beq.pending) >= beq.limit && flush_batch!(beq)
+    return
+end
+function flush_batch!(beq::BatchedEnqueueQueue)
+    isempty(beq.pending) && return
+    @lock beq.lock enqueue!(beq.inner, beq.pending)
+    empty!(beq.pending)
+    return
+end
+
+"Maximum number of tasks a hierarchical partition buffers before submitting."
+const DATADEPS_BATCH_LIMIT = Ref(4)
+
 struct HierarchicalTaskMeta
     pair::DTaskPair
     # Wrapped argument identity for the task's first aliasing arg. Under MPI
@@ -581,6 +631,31 @@ function build_dependency_dag(task_metas::Vector{HierarchicalTaskMeta},
 end
 
 """
+Target number of tasks per partition when partitioning across the local
+processors of a single owner.
+
+Partitioning a single owner parallelizes *planning* only -- every partition
+still places work on the same processors -- so it has to earn back what it
+duplicates. Each partition builds its own `DataDepsState`, so an argument shared
+between partitions has its aliasing and slot bookkeeping redone once per
+partition; with neighbour-sharing workloads (stencils) that duplication grows
+quickly with the partition count.
+"""
+const HIER_TASKS_PER_PARTITION = 16
+
+"""
+    single_owner_partition_count(ntasks, nprocs) -> Int
+
+How many partitions to split `ntasks` into when all processors share an owner.
+
+Capped at half of `nprocs` because partition planning tasks and the processor
+runners execute on the same threads: one partition per processor leaves nothing
+to run the work being planned, and measures slower than not partitioning at all.
+"""
+single_owner_partition_count(ntasks::Int, nprocs::Int) =
+    clamp(ntasks ÷ HIER_TASKS_PER_PARTITION, 1, max(1, nprocs ÷ 2))
+
+"""
     partition_dag(dag, task_metas, all_procs) -> (vertex_to_partition, n_partitions, partition_procs)
 
 Phase 3: Assigns each task vertex to a partition using data-affinity. For
@@ -608,7 +683,7 @@ function partition_dag(dag::SimpleDiGraph, task_metas::Vector{HierarchicalTaskMe
         n_partitions = n_owners
         partition_owner = owners
     else
-        n_partitions = min(length(all_procs), n)
+        n_partitions = single_owner_partition_count(n, length(all_procs))
         partition_owner = fill(first(owners), n_partitions)
     end
 
@@ -782,10 +857,10 @@ function _schedule_vertex!(v::Int, partition_id::Int,
 end
 
 """
-    schedule_partition_full!(queue, queue_lock, partition_id, partition_verts,
+    schedule_partition_full!(queue, batch_queue, partition_id, partition_verts,
                              dag, seen_tasks, local_procs,
                              vertex_to_partition, task_submitted,
-                             region_uids) -> DataDepsState
+                             region_uids, value_dep_verts, registry) -> DataDepsState
 
 Per-partition scheduling for both single-worker and multi-worker hierarchical
 paths. Uses existing `distribute_task!` logic with per-partition
@@ -800,7 +875,7 @@ partition (which it must not `fetch`). Tasks without an AOT assignment fall back
 to JIT scheduling in `distribute_task!`.
 """
 function schedule_partition_full!(queue::DataDepsTaskQueue,
-                                  queue_lock::ReentrantLock,
+                                  batch_queue::BatchedEnqueueQueue,
                                   partition_id::Int,
                                   partition_verts::Vector{Int},
                                   dag::SimpleDiGraph,
@@ -809,6 +884,7 @@ function schedule_partition_full!(queue::DataDepsTaskQueue,
                                   vertex_to_partition::Vector{Int},
                                   task_submitted::Vector{Base.Event},
                                   region_uids::Set{UInt},
+                                  value_dep_verts::Set{Int},
                                   registry::Union{SharedChunkRegistry,Nothing})
     if isempty(partition_verts) || isempty(local_procs)
         return DataDepsState(DAGSpec())
@@ -832,7 +908,6 @@ function schedule_partition_full!(queue::DataDepsTaskQueue,
     end
     ordered_verts = filter(v -> v in vert_set, topo)
 
-    locked_queue = LockedEnqueueQueue(get_options(:task_queue), queue_lock)
     # N.B. Each partition gets its own fresh scheduler shard via `similar`
     # rather than sharing `queue.scheduler` across all partitions. Two
     # independent problems would arise from sharing a single scheduler
@@ -850,7 +925,7 @@ function schedule_partition_full!(queue::DataDepsTaskQueue,
     #     crashes with a `BoundsError` under multi-worker hierarchical
     #     scheduling. Giving each partition its own scheduler instance,
     #     scoped to its own `local_procs`, fixes both issues at once.
-    temp_queue = DataDepsTaskQueue(locked_queue; scheduler=similar(queue.scheduler))
+    temp_queue = DataDepsTaskQueue(batch_queue; scheduler=similar(queue.scheduler))
 
     # Per-partition (local) AOT scheduling over just this partition's procs.
     # `partition_verts` is in ascending vertex (= submission) order.
@@ -869,17 +944,42 @@ function schedule_partition_full!(queue::DataDepsTaskQueue,
     # The `finally` ensures every one of our events gets notified no matter
     # how we exit, so that sibling partitions can unblock (and themselves
     # fail/finish) and our real exception can actually surface.
+    # A vertex whose successors all live in this partition is only ever observed
+    # by us, so its submission can stay buffered; one with a successor elsewhere
+    # must be submitted before we notify, because that successor will record it
+    # as a syncdep.
+    has_external_successor = Set{Int}()
+    for v in ordered_verts
+        for succ_v in outneighbors(dag, v)
+            if vertex_to_partition[succ_v] != partition_id
+                push!(has_external_successor, v)
+                break
+            end
+        end
+    end
+
     try
         for v in ordered_verts
             for pred_v in inneighbors(dag, v)
                 if vertex_to_partition[pred_v] != partition_id
+                    # Anything we have buffered may be a dependency of tasks the
+                    # producing partition is about to prepare; get it submitted
+                    # before we block, or two partitions can deadlock waiting on
+                    # each other's unflushed tasks.
+                    flush_batch!(batch_queue)
                     wait(task_submitted[pred_v])
                 end
             end
 
+            # A task taking another in-region task's *value* as an argument has
+            # `distribute_task!` `fetch` that producer, which requires it to have
+            # actually been launched. A same-partition producer is topologically
+            # earlier, so it is prepared but possibly still sitting in our batch.
+            v in value_dep_verts && flush_batch!(batch_queue)
+
             # N.B. The per-task `distribute_task!` preparation runs concurrently
             # across partitions; only the final task submission is serialized
-            # (via `LockedEnqueueQueue`, `temp_queue`'s upper queue). This is
+            # (via `BatchedEnqueueQueue`, `temp_queue`'s upper queue). This is
             # safe now that task futures are backed by `MemPool.DFuture` rather
             # than the concurrency-unsafe `Distributed.Future`. The
             # cross-partition `wait`s above happen before scheduling `v`, so the
@@ -889,9 +989,12 @@ function schedule_partition_full!(queue::DataDepsTaskQueue,
                 dag, seen_tasks, vertex_to_partition, schedule,
                 proc_to_scope_lfu, write_num, registry)
 
+            v in has_external_successor && flush_batch!(batch_queue)
             notify(task_submitted[v])
         end
+        flush_batch!(batch_queue)
     finally
+        flush_batch!(batch_queue)
         for v in ordered_verts
             notify(task_submitted[v])
         end
@@ -1048,6 +1151,18 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
         end
     end
 
+    # With a single owner, partitioning buys parallel planning and nothing else
+    # (see `HIER_TASKS_PER_PARTITION`). A region too small to fill more than one
+    # partition would pay for the extra prescan/DAG/partition phases and the
+    # per-partition state without ever running two planners at once, so plan it
+    # flat instead. Multi-owner regions always partition: there the split is by
+    # data ownership, not a throughput heuristic.
+    if !uniform_execution(accel) &&
+       allequal(partition_affinity_id(proc) for proc in all_procs) &&
+       single_owner_partition_count(length(seen_tasks), length(all_procs)) == 1
+        return distribute_tasks!(queue)
+    end
+
     # All in-region task uids, so each partition's local AOT-schedule builder
     # can tell same-region producers (which it must not `fetch`) apart from
     # already-materialized external values.
@@ -1069,6 +1184,11 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
     # writes; `nothing` when all partitions share one space (single-owner).
     partition_space = MemorySpace[only(memory_spaces(first(pp))) for pp in partition_procs]
     registry = build_shared_chunk_registry(task_metas, vertex_to_partition, partition_space)
+
+    # Vertices whose `distribute_task!` will `fetch` an in-region producer's
+    # value, and so cannot run until that producer has actually been submitted.
+    value_dep_verts = Set{Int}(v for v in 1:length(task_metas)
+                                 if !isempty(task_metas[v].value_deps))
 
     # Group vertices by partition
     partitions = [Int[] for _ in 1:n_partitions]
@@ -1097,14 +1217,21 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
             states = Vector{DataDepsState}(undef, n_partitions)
             @sync for pid in 1:n_partitions
                 Threads.@spawn begin
-                    locked_queue = LockedEnqueueQueue(wait_all_queue, queue_lock)
-                    with_options(; task_queue=locked_queue) do
+                    batch_queue = BatchedEnqueueQueue(wait_all_queue, queue_lock)
+                    # Copy tasks spawned from within `distribute_task!` pick the
+                    # queue up from options, so they batch alongside their task.
+                    with_options(; task_queue=batch_queue) do
+                        try
                             states[pid] = schedule_partition_full!(
-                                queue, queue_lock, pid, partitions[pid],
+                                queue, batch_queue, pid, partitions[pid],
                                 dag, seen_tasks,
                                 partition_procs[pid], vertex_to_partition,
-                                task_submitted, region_uids, registry
+                                task_submitted, region_uids, value_dep_verts,
+                                registry
                             )
+                        finally
+                            flush_batch!(batch_queue)
+                        end
                     end
                 end
             end
@@ -1207,7 +1334,7 @@ function _hierarchical_copy_from_and_free!(partition_states::Vector{DataDepsStat
         for remote_space in remote_spaces
             space_entries = sort!(collect(obj_cache.values[remote_space]); by=p->hash(p.first))
             for (ainfo, remote_arg) in space_entries
-                if !(ainfo in obj_cache.originals)
+                if !is_original(obj_cache, remote_space, ainfo)
                     remote_proc = first(processors(remote_space))
                     free_scope = ExactScope(remote_proc)
                     free_syncdeps = Set{ThunkSyncdep}()
