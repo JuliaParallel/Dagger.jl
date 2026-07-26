@@ -118,6 +118,54 @@ end
     end
 end
 
+"""
+    halo_load(halos, idx, I)
+    halo_store!(halos, idx, I, value)
+
+Read or write element `I` of the `idx`-th halo region.
+
+`halos` is not necessarily homogeneous. GPU backends return a plain device array
+for a `view` that happens to be contiguous and a `SubArray` for one that is not,
+so a halo tuple built from views of neighboring chunks can hold both. Indexing
+such a tuple with a runtime `idx` infers to a union wide enough that the load
+that follows becomes a dynamic dispatch, which GPU backends cannot compile at
+all. Selecting the region with an unrolled comparison chain instead gives every
+branch one concrete array type.
+
+Homogeneous tuples -- what the CPU path always produces -- keep the plain
+indexed load, so they pay nothing for this.
+"""
+@generated function halo_load(halos::Tuple, idx::Int, I::NTuple{N,Int}) where N
+    Ts = fieldtypes(halos)
+    body = if allequal(Ts)
+        :(@inbounds halos[idx][I...])
+    else
+        # Last region is the fallback: `region_index` never returns out of range,
+        # and a trailing `throw` would only add unreachable code the GPU backend
+        # still has to compile.
+        ex = :(@inbounds halos[$(length(Ts))][I...])
+        for i in (length(Ts) - 1):-1:1
+            ex = :(idx === $i ? @inbounds(halos[$i][I...]) : $ex)
+        end
+        ex
+    end
+    return Expr(:block, Expr(:meta, :inline), body)
+end
+
+@generated function halo_store!(halos::Tuple, idx::Int, I::NTuple{N,Int}, value) where N
+    Ts = fieldtypes(halos)
+    body = if allequal(Ts)
+        :(@inbounds halos[idx][I...] = value)
+    else
+        ex = :(@inbounds halos[$(length(Ts))][I...] = value)
+        for i in (length(Ts) - 1):-1:1
+            ex = :(idx === $i ? @inbounds(halos[$i][I...] = value) : $ex)
+        end
+        ex
+    end
+    return Expr(:block, Expr(:meta, :inline), body)
+end
+
 # Define getindex for HaloArray
 @inline function Base.getindex(tile::HaloArray{T,N}, I::Vararg{Int,N}) where {T,N}
     Base.@boundscheck checkbounds(tile, I...)
@@ -130,7 +178,7 @@ end
         # Halo region
         idx = region_index(code)
         local_idx = compute_local_index(tile, I, code)
-        return @inbounds tile.halos[idx][local_idx...]
+        return halo_load(tile.halos, idx, local_idx)
     end
 end
 
@@ -146,18 +194,83 @@ end
         # Halo region
         idx = region_index(code)
         local_idx = compute_local_index(tile, I, code)
-        return @inbounds tile.halos[idx][local_idx...] = value
+        return halo_store!(tile.halos, idx, local_idx, value)
     end
 end
 
 Base.IndexStyle(::Type{<:HaloArray}) = IndexCartesian()
 
-# GPU-friendly reductions for SubArray views of HaloArray.
+#############################################################################
+# HaloInterior
+#############################################################################
+
+"""
+    HaloInterior(parent, halo_width)
+
+A stand-in for a `HaloArray` used while sweeping the region of a chunk whose
+whole neighborhood lies inside the center. Indexing goes straight to `parent`,
+skipping the region-code dispatch that `HaloArray` must perform, which is what
+lets the interior sweep vectorize.
+"""
+struct HaloInterior{T,N,A<:AbstractArray{T,N}} <: AbstractArray{T,N}
+    parent::A
+    halo_width::NTuple{N,Int}
+end
+
+Base.size(A::HaloInterior) = size(A.parent)
+Base.axes(A::HaloInterior) = axes(A.parent)
+Base.IndexStyle(::Type{<:HaloInterior}) = IndexCartesian()
+@inline function Base.getindex(A::HaloInterior{T,N}, I::Vararg{Int,N}) where {T,N}
+    Base.@boundscheck checkbounds(A.parent, I...)
+    return @inbounds A.parent[I...]
+end
+@inline function Base.setindex!(A::HaloInterior{T,N}, value, I::Vararg{Int,N}) where {T,N}
+    Base.@boundscheck checkbounds(A.parent, I...)
+    return @inbounds A.parent[I...] = value
+end
+
+#############################################################################
+# StencilNeighborhood
+#############################################################################
+
+"""
+    StencilNeighborhood(parent, center, halo_width)
+
+The value produced by `@neighbors`: a `(2w+1)^N` window of `parent` centered on
+`center`, with 1-based indices. This is a plain offset-index wrapper rather than
+a `SubArray` because the latter's index translation blocks vectorization of the
+sweep loop (roughly a 5x difference on the interior).
+"""
+struct StencilNeighborhood{T,N,A<:AbstractArray{T,N}} <: AbstractArray{T,N}
+    parent::A
+    center::CartesianIndex{N}
+    halo_width::NTuple{N,Int}
+end
+
+Base.size(nb::StencilNeighborhood{T,N}) where {T,N} =
+    ntuple(i -> 2 * nb.halo_width[i] + 1, Val(N))
+Base.axes(nb::StencilNeighborhood{T,N}) where {T,N} =
+    ntuple(i -> Base.OneTo(2 * nb.halo_width[i] + 1), Val(N))
+Base.IndexStyle(::Type{<:StencilNeighborhood}) = IndexCartesian()
+
+@inline function _neighborhood_index(nb::StencilNeighborhood{T,N}, I::NTuple{N,Int}) where {T,N}
+    return nb.center + CartesianIndex(ntuple(i -> I[i] - nb.halo_width[i] - 1, Val(N)))
+end
+@inline function Base.getindex(nb::StencilNeighborhood{T,N}, I::Vararg{Int,N}) where {T,N}
+    Base.@boundscheck checkbounds(nb, I...)
+    return @inbounds nb.parent[_neighborhood_index(nb, I)]
+end
+@inline function Base.setindex!(nb::StencilNeighborhood{T,N}, value, I::Vararg{Int,N}) where {T,N}
+    Base.@boundscheck checkbounds(nb, I...)
+    return @inbounds nb.parent[_neighborhood_index(nb, I)] = value
+end
+
+# GPU-friendly reductions over neighborhoods.
 # The standard reduction path uses _foldl_impl/iterate which produces Union
 # types that SPIR-V and other GPU compilers can't handle, and passes through
 # keyword-argument forwarding that triggers dynamic dispatch on GPU.
 # These overrides use CartesianIndices iteration which compiles cleanly.
-@inline function Base.mapreduce(f::F, op::OP, A::SubArray{T,N,<:HaloArray}) where {F,OP,T,N}
+@inline function Base.mapreduce(f::F, op::OP, A::StencilNeighborhood{T,N}) where {F,OP,T,N}
     first_idx = CartesianIndex(ntuple(d -> firstindex(A, d), Val(N)))
     result = f(@inbounds A[first_idx])
     @inbounds for idx in CartesianIndices(A)
@@ -166,7 +279,7 @@ Base.IndexStyle(::Type{<:HaloArray}) = IndexCartesian()
     end
     return result
 end
-@inline function Base.sum(A::SubArray{T,N,<:HaloArray}) where {T,N}
+@inline function Base.sum(A::StencilNeighborhood{T,N}) where {T,N}
     first_idx = CartesianIndex(ntuple(d -> firstindex(A, d), Val(N)))
     result = @inbounds A[first_idx]
     @inbounds for idx in CartesianIndices(A)
@@ -175,7 +288,7 @@ end
     end
     return result
 end
-@inline function Base.sum(f::F, A::SubArray{T,N,<:HaloArray}) where {F,T,N}
+@inline function Base.sum(f::F, A::StencilNeighborhood{T,N}) where {F,T,N}
     first_idx = CartesianIndex(ntuple(d -> firstindex(A, d), Val(N)))
     result = f(@inbounds A[first_idx])
     @inbounds for idx in CartesianIndices(A)
