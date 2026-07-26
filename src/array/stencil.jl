@@ -966,6 +966,69 @@ function cpu_stencil_sweep!(f::F, output::AbstractArray{T,N}, read_vars::NamedTu
     return
 end
 
+@kernel function _stencil_box_kernel!(f, output, read_vars, offset)
+    idx = @index(Global, Cartesian)
+    @inline f(idx + offset, output, read_vars)
+end
+
+# Sweep `f` over one box of `output`. KernelAbstractions indexes an `ndrange`
+# from 1, so a sub-box is expressed as a shifted full launch.
+@inline function _stencil_box!(f, output, read_vars, ranges::NTuple{N,AbstractUnitRange}) where N
+    nd = map(length, ranges)
+    any(iszero, nd) && return
+    offset = CartesianIndex(ntuple(i -> first(ranges[i]) - 1, Val(N)))
+    Kernel(_stencil_box_kernel!)(f, output, read_vars, offset; ndrange=nd)
+    return
+end
+
+"""
+    gpu_stencil_sweep!(f, output, read_vars)
+
+Applies `f` at every index of `output` using KernelAbstractions, with the same
+interior/boundary split as [`cpu_stencil_sweep!`](@ref).
+
+The split matters more here than on the CPU. Every `@neighbors` access on the
+general path recomputes a region code, branches on it, and remaps the index; a
+GPU runs that scalar bookkeeping for all `(2w+1)^N` accesses of every element.
+Sweeping the interior against `HaloInterior` stand-ins reduces it to a direct
+load from the center array, leaving the general path to the `2N` boundary slabs.
+"""
+function gpu_stencil_sweep!(f::F, output::AbstractArray{T,N}, read_vars::NamedTuple) where {F,T,N}
+    w = _max_halo_width(values(read_vars), ntuple(_ -> 0, Val(N)))
+    ax = axes(output)
+    full_ax = ntuple(i -> first(ax[i]):last(ax[i]), Val(N))
+
+    interior_ax = ntuple(Val(N)) do i
+        (first(ax[i]) + w[i]):(last(ax[i]) - w[i])
+    end
+    if any(isempty, interior_ax)
+        # Halos are as wide as the chunk itself; there is no interior to split off.
+        _stencil_box!(f, output, read_vars, full_ax)
+        return
+    end
+
+    _stencil_box!(f, output, map(_interior_var, read_vars), interior_ax)
+
+    all(iszero, w) && return
+
+    for d in 1:N
+        for low_side in (true, false)
+            slab_ax = ntuple(Val(N)) do i
+                if i < d
+                    interior_ax[i]
+                elseif i == d
+                    low_side ? (first(ax[i]):(first(ax[i]) + w[i] - 1)) :
+                               ((last(ax[i]) - w[i] + 1):last(ax[i]))
+                else
+                    full_ax[i]
+                end
+            end
+            _stencil_box!(f, output, read_vars, slab_ax)
+        end
+    end
+    return
+end
+
 #############################################################################
 # @stencil Macro
 #############################################################################
