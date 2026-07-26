@@ -1198,15 +1198,21 @@ Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
             sch_handle, state.uid))
     end
 
+    # N.B. These must be migratable. Otherwise they pile up on whichever thread
+    # is submitting work: a submitter that runs a long stretch of
+    # `schedule_one!` without yielding (e.g. Datadeps planning a whole region)
+    # holds off every fire task it just created, so nothing starts executing
+    # until planning finishes. Letting them migrate is what allows execution to
+    # overlap submission.
     if !isempty(to_send)
         if root_worker_id(gproc) == myid()
-            @reusable_tasks :fire_tasks!_task_cache 32 _->nothing "fire_tasks!" FireTaskSpec(proc, state.chan, to_send)
+            @reusable_tasks :fire_tasks!_task_cache 32 Dagger.set_task_migratable! "fire_tasks!" FireTaskSpec(proc, state.chan, to_send)
         else
             # N.B. We don't batch these because we might get a deserialization
             # error due to something not being defined on the worker, and then we don't
             # know which task failed.
             for task_spec in to_send
-                @reusable_tasks :fire_tasks!_task_cache 32 _->nothing "fire_tasks!" FireTaskSpec(proc, state.chan, task_spec)
+                @reusable_tasks :fire_tasks!_task_cache 32 Dagger.set_task_migratable! "fire_tasks!" FireTaskSpec(proc, state.chan, task_spec)
             end
         end
     end
@@ -1565,7 +1571,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                 if tid !== nothing
                     Dagger.set_task_tid!(t, tid)
                 else
-                    t.sticky = false
+                    Dagger.set_task_migratable!(t)
                 end
             end "thunk $thunk_id" DoTaskSpec(to_proc, return_queue, task, cancel_token)
 
@@ -1579,7 +1585,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
     if tid !== nothing
         Dagger.set_task_tid!(proc_run_task, tid)
     else
-        proc_run_task.sticky = false
+        Dagger.set_task_migratable!(proc_run_task)
     end
     return errormonitor_tracked("processor $to_proc", schedule(proc_run_task))
 end
