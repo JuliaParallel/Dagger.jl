@@ -18,7 +18,13 @@ else
 end
 import Metal: MtlArray, MetalBackend
 # FIXME: import Metal: MTLBLAS, MTLSOLVER
-const MtlDevice = Metal.MTL.MTLDeviceInstance
+# Metal <1.10 (ObjectiveC <6): concrete devices are `MTLDeviceInstance <: MTLDevice`.
+# Metal ≥1.10: ObjectiveC's type model was reworked and `MTLDevice` is concrete.
+const MtlDevice = if isdefined(Metal.MTL, :MTLDeviceInstance)
+    Metal.MTL.MTLDeviceInstance
+else
+    Metal.MTL.MTLDevice
+end
 const MtlStream = Metal.MTL.MTLCommandQueue
 
 struct MtlArrayDeviceProc <: Dagger.Processor
@@ -47,8 +53,15 @@ function Dagger.aliasing(x::MtlArray{T}) where T
     space = Dagger.memory_space(x)
     S = typeof(space)
     mtl_ptr = pointer(x)
-    gpu_ptr = Metal.contents(mtl_ptr.buffer) + mtl_ptr.offset
-    rptr = Dagger.RemotePtr{Cvoid}(UInt64(gpu_ptr), space)
+    # Metal ≥1.10 defines `UInt(::MtlPtr)` as the GPU virtual address, which
+    # `span_copy` uses via `UInt64(pointer(x))`. Metal <1.10 has no such method;
+    # keep the historical CPU contents+offset derivation there.
+    addr = if applicable(Base.UInt, mtl_ptr)
+        UInt(mtl_ptr)
+    else
+        Metal.contents(mtl_ptr.buffer) + mtl_ptr.offset
+    end
+    rptr = Dagger.RemotePtr{Cvoid}(UInt64(addr), space)
     return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
 end
 
@@ -106,7 +119,9 @@ end
 
 function _sync_with_context(x::Union{Dagger.Processor,Dagger.MemorySpace})
     with_context(x) do
-        Metal.synchronize()
+        # Metal ≥1.10 batches commands into task-local queues; Dagger executes on
+        # Threads.@spawn, so queue-local synchronize() can miss in-flight work.
+        Metal.device_synchronize()
     end
 end
 function sync_with_context(x::Union{Dagger.Processor,Dagger.MemorySpace})
@@ -173,7 +188,7 @@ function Dagger.move(from_proc::CPUProc, to_proc::MtlArrayDeviceProc, x)
             Dagger.pin_buffer!(:Metal, x)
         end
         arr = adapt(MtlArray, x)
-        Metal.synchronize()
+        Metal.device_synchronize()
         return arr
     end
 end
@@ -187,7 +202,7 @@ function Dagger.move(from_proc::CPUProc, to_proc::MtlArrayDeviceProc, x::Chunk)
             Dagger.pin_buffer!(:Metal, cpu_data)
         end
         arr = adapt(MtlArray, cpu_data)
-        Metal.synchronize()
+        Metal.device_synchronize()
         return arr
     end
 end
@@ -198,7 +213,7 @@ function Dagger.move(from_proc::CPUProc, to_proc::MtlArrayDeviceProc, x::MtlArra
     with_context(to_proc) do
         _x = similar(x)
         copyto!(_x, x)
-        Metal.synchronize()
+        Metal.device_synchronize()
         return _x
     end
 end
@@ -206,10 +221,10 @@ end
 # Out-of-place DtoH
 function Dagger.move(from_proc::MtlArrayDeviceProc, to_proc::CPUProc, x)
     with_context(from_proc) do
-        Metal.synchronize()
+        Metal.device_synchronize()
         _x = x isa DenseArray && isbitstype(eltype(x)) ?
              Dagger.pinned_host_array(x) : adapt(Array, x)
-        Metal.synchronize()
+        Metal.device_synchronize()
         return _x
     end
 end
@@ -224,9 +239,9 @@ function Dagger.move(from_proc::MtlArrayDeviceProc, to_proc::CPUProc, x::Chunk)
 end
 function Dagger.move(from_proc::MtlArrayDeviceProc, to_proc::CPUProc, x::MtlArray{T,N}) where {T,N}
     with_context(from_proc) do
-        Metal.synchronize()
+        Metal.device_synchronize()
         _x = Dagger.pinned_host_array(x)
-        Metal.synchronize()
+        Metal.device_synchronize()
         return _x
     end
 end
@@ -236,16 +251,16 @@ function Dagger.move(from_proc::MtlArrayDeviceProc, to_proc::MtlArrayDeviceProc,
     if from_proc == to_proc
         # Same process and GPU, no change
         arr = unwrap(x)
-        with_context(Metal.synchronize, from_proc)
+        with_context(Metal.device_synchronize, from_proc)
         return arr
     elseif Dagger.root_worker_id(from_proc) == Dagger.root_worker_id(to_proc)
         # Same process but different GPUs, use DtoD copy
         from_arr = unwrap(x)
-        with_context(Metal.synchronize, from_proc)
+        with_context(Metal.device_synchronize, from_proc)
         return with_context(to_proc) do
             to_arr = similar(from_arr)
             copyto!(to_arr, from_arr)
-            Metal.synchronize()
+            Metal.device_synchronize()
             return to_arr
         end
     else
@@ -265,14 +280,14 @@ end
 function Dagger.move(from_proc::MtlArrayDeviceProc, to_proc::MtlArrayDeviceProc, x::MtlArray)
     if from_proc == to_proc
         # Same process and GPU, no change
-        with_context(Metal.synchronize, from_proc)
+        with_context(Metal.device_synchronize, from_proc)
         return x
     elseif Dagger.root_worker_id(from_proc) == Dagger.root_worker_id(to_proc)
-        with_context(Metal.synchronize, from_proc)
+        with_context(Metal.device_synchronize, from_proc)
         return with_context(to_proc) do
             to_arr = similar(x)
             copyto!(to_arr, x)
-            Metal.synchronize()
+            Metal.device_synchronize()
             return to_arr
         end
     else
@@ -354,9 +369,15 @@ function Dagger.execute!(proc::MtlArrayDeviceProc, f, args...; kwargs...)
     task = Threads.@spawn begin
         Dagger.set_tls!(tls)
         with_context!(proc)
-        result = Base.@invokelatest f(args...; kwargs...)
-        # N.B. Synchronization must be done when accessing result or args
-        return result
+        try
+            return Base.@invokelatest f(args...; kwargs...)
+        finally
+            # Metal ≥1.10 batches commands into a task-local queue. Flush and
+            # wait before this task ends so later moves/syncs on other tasks
+            # observe the committed work (queue-local synchronize is enough
+            # here because we are still on the producing task).
+            Metal.synchronize()
+        end
     end
 
     try
@@ -438,7 +459,7 @@ end
 
 function Dagger.gpu_synchronize(proc::MtlArrayDeviceProc)
     with_context(proc) do
-        Metal.synchronize()
+        Metal.device_synchronize()
     end
 end
 function Dagger.gpu_synchronize(::Val{:Metal})
