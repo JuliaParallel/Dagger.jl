@@ -18,7 +18,13 @@ else
 end
 import Metal: MtlArray, MetalBackend
 # FIXME: import Metal: MTLBLAS, MTLSOLVER
-const MtlDevice = Metal.MTL.MTLDeviceInstance
+# Metal <1.10 (ObjectiveC <6): concrete devices are `MTLDeviceInstance <: MTLDevice`.
+# Metal ≥1.10: ObjectiveC's type model was reworked and `MTLDevice` is concrete.
+const MtlDevice = if isdefined(Metal.MTL, :MTLDeviceInstance)
+    Metal.MTL.MTLDeviceInstance
+else
+    Metal.MTL.MTLDevice
+end
 const MtlStream = Metal.MTL.MTLCommandQueue
 
 struct MtlArrayDeviceProc <: Dagger.Processor
@@ -47,8 +53,15 @@ function Dagger.aliasing(x::MtlArray{T}) where T
     space = Dagger.memory_space(x)
     S = typeof(space)
     mtl_ptr = pointer(x)
-    gpu_ptr = Metal.contents(mtl_ptr.buffer) + mtl_ptr.offset
-    rptr = Dagger.RemotePtr{Cvoid}(UInt64(gpu_ptr), space)
+    # Metal ≥1.10 defines `UInt(::MtlPtr)` as the GPU virtual address, which
+    # `span_copy` uses via `UInt64(pointer(x))`. Metal <1.10 has no such method;
+    # keep the historical CPU contents+offset derivation there.
+    addr = if applicable(Base.UInt, mtl_ptr)
+        UInt(mtl_ptr)
+    else
+        Metal.contents(mtl_ptr.buffer) + mtl_ptr.offset
+    end
+    rptr = Dagger.RemotePtr{Cvoid}(UInt64(addr), space)
     return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
 end
 
