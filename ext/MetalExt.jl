@@ -369,9 +369,15 @@ function Dagger.execute!(proc::MtlArrayDeviceProc, f, args...; kwargs...)
     task = Threads.@spawn begin
         Dagger.set_tls!(tls)
         with_context!(proc)
-        result = Base.@invokelatest f(args...; kwargs...)
-        # N.B. Synchronization must be done when accessing result or args
-        return result
+        try
+            return Base.@invokelatest f(args...; kwargs...)
+        finally
+            # Metal ≥1.10 batches commands into a task-local queue. Flush and
+            # wait before this task ends so later moves/syncs on other tasks
+            # observe the committed work (queue-local synchronize is enough
+            # here because we are still on the producing task).
+            Metal.synchronize()
+        end
     end
 
     try
