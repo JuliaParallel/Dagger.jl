@@ -119,7 +119,9 @@ end
 
 function _sync_with_context(x::Union{Dagger.Processor,Dagger.MemorySpace})
     with_context(x) do
-        Metal.synchronize()
+        # Metal ≥1.10 batches commands into task-local queues; Dagger executes on
+        # Threads.@spawn, so queue-local synchronize() can miss in-flight work.
+        Metal.device_synchronize()
     end
 end
 function sync_with_context(x::Union{Dagger.Processor,Dagger.MemorySpace})
@@ -186,7 +188,7 @@ function Dagger.move(from_proc::CPUProc, to_proc::MtlArrayDeviceProc, x)
             Dagger.pin_buffer!(:Metal, x)
         end
         arr = adapt(MtlArray, x)
-        Metal.synchronize()
+        Metal.device_synchronize()
         return arr
     end
 end
@@ -200,7 +202,7 @@ function Dagger.move(from_proc::CPUProc, to_proc::MtlArrayDeviceProc, x::Chunk)
             Dagger.pin_buffer!(:Metal, cpu_data)
         end
         arr = adapt(MtlArray, cpu_data)
-        Metal.synchronize()
+        Metal.device_synchronize()
         return arr
     end
 end
@@ -211,7 +213,7 @@ function Dagger.move(from_proc::CPUProc, to_proc::MtlArrayDeviceProc, x::MtlArra
     with_context(to_proc) do
         _x = similar(x)
         copyto!(_x, x)
-        Metal.synchronize()
+        Metal.device_synchronize()
         return _x
     end
 end
@@ -219,10 +221,10 @@ end
 # Out-of-place DtoH
 function Dagger.move(from_proc::MtlArrayDeviceProc, to_proc::CPUProc, x)
     with_context(from_proc) do
-        Metal.synchronize()
+        Metal.device_synchronize()
         _x = x isa DenseArray && isbitstype(eltype(x)) ?
              Dagger.pinned_host_array(x) : adapt(Array, x)
-        Metal.synchronize()
+        Metal.device_synchronize()
         return _x
     end
 end
@@ -237,9 +239,9 @@ function Dagger.move(from_proc::MtlArrayDeviceProc, to_proc::CPUProc, x::Chunk)
 end
 function Dagger.move(from_proc::MtlArrayDeviceProc, to_proc::CPUProc, x::MtlArray{T,N}) where {T,N}
     with_context(from_proc) do
-        Metal.synchronize()
+        Metal.device_synchronize()
         _x = Dagger.pinned_host_array(x)
-        Metal.synchronize()
+        Metal.device_synchronize()
         return _x
     end
 end
@@ -249,16 +251,16 @@ function Dagger.move(from_proc::MtlArrayDeviceProc, to_proc::MtlArrayDeviceProc,
     if from_proc == to_proc
         # Same process and GPU, no change
         arr = unwrap(x)
-        with_context(Metal.synchronize, from_proc)
+        with_context(Metal.device_synchronize, from_proc)
         return arr
     elseif Dagger.root_worker_id(from_proc) == Dagger.root_worker_id(to_proc)
         # Same process but different GPUs, use DtoD copy
         from_arr = unwrap(x)
-        with_context(Metal.synchronize, from_proc)
+        with_context(Metal.device_synchronize, from_proc)
         return with_context(to_proc) do
             to_arr = similar(from_arr)
             copyto!(to_arr, from_arr)
-            Metal.synchronize()
+            Metal.device_synchronize()
             return to_arr
         end
     else
@@ -278,14 +280,14 @@ end
 function Dagger.move(from_proc::MtlArrayDeviceProc, to_proc::MtlArrayDeviceProc, x::MtlArray)
     if from_proc == to_proc
         # Same process and GPU, no change
-        with_context(Metal.synchronize, from_proc)
+        with_context(Metal.device_synchronize, from_proc)
         return x
     elseif Dagger.root_worker_id(from_proc) == Dagger.root_worker_id(to_proc)
-        with_context(Metal.synchronize, from_proc)
+        with_context(Metal.device_synchronize, from_proc)
         return with_context(to_proc) do
             to_arr = similar(x)
             copyto!(to_arr, x)
-            Metal.synchronize()
+            Metal.device_synchronize()
             return to_arr
         end
     else
@@ -451,7 +453,7 @@ end
 
 function Dagger.gpu_synchronize(proc::MtlArrayDeviceProc)
     with_context(proc) do
-        Metal.synchronize()
+        Metal.device_synchronize()
     end
 end
 function Dagger.gpu_synchronize(::Val{:Metal})
