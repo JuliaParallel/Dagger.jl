@@ -2,7 +2,6 @@ const EAGER_INIT = Threads.Atomic{Bool}(false)
 # Condition variable used to synchronize EAGER_STATE changes.
 # Waiters must hold this lock, check EAGER_STATE[], and wait in a loop.
 const EAGER_STATE_LOCK = Threads.Condition()
-const EAGER_ID_MAP = LockedObject(Dict{UInt64,Int}())
 const EAGER_CONTEXT = Ref{Union{Context,Nothing}}(nothing)
 const EAGER_STATE = Ref{Union{ComputeState,Nothing}}(nothing)
 
@@ -67,9 +66,6 @@ function init_eager()
             Threads.atomic_xchg!(EAGER_INIT, false)
             EAGER_STATE[] = nothing
             notify(EAGER_STATE_LOCK; all=true)
-        end
-        lock(EAGER_ID_MAP) do id_map
-            empty!(id_map)
         end
     end)
 
@@ -141,15 +137,13 @@ function thunk_yield(f)
 end
 
 function _find_thunk(e::Dagger.DTask)
-    tid = lock(EAGER_ID_MAP) do id_map
-        id_map[e.uid]
-    end
+    # Eager DTask uids share the Sch thunk id counter (`thunk.id = Int(uid)`).
+    tid = Int(e.uid)
     lock(EAGER_STATE[].lock) do
         lock(EAGER_STATE[].thunk_dict) do d
             unwrap_weak_checked(d[tid])
         end
     end
 end
-Dagger.task_id(t::Dagger.DTask) = lock(EAGER_ID_MAP) do id_map
-    id_map[t.uid]
-end
+# Eager DTask uid and Sch thunk id are the same value.
+Dagger.task_id(t::Dagger.DTask) = Int(t.uid)
