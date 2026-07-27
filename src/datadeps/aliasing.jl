@@ -1003,7 +1003,7 @@ function move_rewrap(accel, cache::AliasedObjectCache, from_proc::Processor, to_
         # Leaf: transfer the value, sharing via the aliased-object cache
         return aliased_object!(cache, data) do data
             return remotecall_endpoint_transfer(accel, from_proc, to_proc, from_space, to_space, data) do accel, from_proc, to_proc, from_space, to_space, data
-                return tochunk(move(from_proc, to_proc, data), to_proc, to_space)
+                return tochunk(libc_backed(move(from_proc, to_proc, data)), to_proc, to_space)
             end
         end
     end

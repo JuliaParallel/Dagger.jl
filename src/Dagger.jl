@@ -90,6 +90,7 @@ include("submission.jl")
 abstract type MemorySpace end
 include("utils/memory-span.jl")
 include("utils/interval_tree.jl")
+include("utils/libc-array.jl")
 include("memory-spaces.jl")
 include("acceleration.jl")
 
