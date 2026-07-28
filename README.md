@@ -16,7 +16,7 @@
 ## What is Dagger?
 Dagger.jl automatically speeds up your Julia code by running tasks in parallel across all your CPU cores, GPUs, and even multiple computers, without you having to manage the complex coordination yourself. Just wrap your function calls with `Dagger.@spawn` (similar to `@async`), and Dagger figures out the optimal way to distribute the work and move data around, making it especially powerful for nested loops, large datasets, and GPU acceleration that would otherwise require extensive manual parallelization.
 
-At the core of Dagger.jl is a scheduler heavily inspired by [Dask](https://docs.dask.org/en/latest/). It can run computations represented as [directed-acyclic-graphs](https://en.wikipedia.org/wiki/Directed_acyclic_graph) (DAGs) efficiently on many Julia worker processes and threads, as well as GPUs via [DaggerGPU.jl](https://github.com/JuliaGPU/DaggerGPU.jl).
+At the core of Dagger.jl is a scheduler heavily inspired by [Dask](https://docs.dask.org/en/latest/). It can run computations represented as [directed-acyclic-graphs](https://en.wikipedia.org/wiki/Directed_acyclic_graph) (DAGs) efficiently on many Julia worker processes (via Distributed.jl or MPI) and threads, as well as GPUs.
 
 *The **DTable** has been moved out of this repository. You can now find it [here](https://github.com/JuliaParallel/DTables.jl).*
 
