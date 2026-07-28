@@ -125,6 +125,7 @@ include("file-io.jl")
 # Array computations
 include("procgrid.jl")
 include("array/darray.jl")
+include("tapes/Tapes.jl"); using .Tapes
 include("array/alloc.jl")
 include("array/map-reduce.jl")
 include("array/copy.jl")
