@@ -243,6 +243,10 @@ function __init__()
     catch err
         @warn "Error parsing JULIA_DAGGER_DEBUG" exception=err
     end
+
+    # Enable tapes
+    Tapes.clear!()
+    Tapes.enable!()
 end
 
 end # module

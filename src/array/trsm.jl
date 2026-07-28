@@ -1,4 +1,5 @@
 function trsv!(uplo::Char, trans::Char, diag::Char, alpha::T, A::DMatrix{T}, B::DVector{T}) where T
+    Dagger.@record_op :trsv! A B
     zone = one(T)
     mzone = -one(T)
 
@@ -57,6 +58,7 @@ function trsv!(uplo::Char, trans::Char, diag::Char, alpha::T, A::DMatrix{T}, B::
 end
 
 function trsm!(side::Char, uplo::Char, trans::Char, diag::Char, alpha::T, A::DMatrix{T}, B::DVecOrMat{T}) where T
+    Dagger.@record_op :trsm! A B
     zone = one(T)
     mzone = -one(T)
 

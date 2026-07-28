@@ -6,9 +6,6 @@
 # models, planner) with synthetic specs, so they run without a cluster and in
 # milliseconds. The end-to-end group at the bottom needs real DArrays.
 
-using Test
-using LinearAlgebra
-using Dagger
 using Dagger: Tapes
 using Dagger.Tapes: SiteKey, OpKey, ArgSpec, ArgView, LayoutChoice, PredictedOp,
                     TapeNode, TapeRoot, MachineModel,
@@ -23,7 +20,8 @@ const TESTMACHINE = MachineModel(nprocs = 16,
                                  bandwidth = 1.0e10,
                                  latency = 1.0e-5,
                                  task_overhead = 1.0e-4,
-                                 mem_per_proc = 8.0e9)
+                                 mem_per_proc = 8.0e9,
+                                 calibrated = true)
 
 spec(T, dims, bs; assign = :arbitrary) = ArgSpec(T, dims, bs, assign)
 
@@ -33,7 +31,7 @@ function fresh!()
     return nothing
 end
 
-@testset "Tapes" begin
+was_enabled = Tapes.is_enabled()
 
 @testset "site keys" begin
     fresh!()
@@ -325,4 +323,6 @@ end
     end
 end
 
-end # @testset "Tapes"
+if was_enabled
+    Tapes.enable!()
+end

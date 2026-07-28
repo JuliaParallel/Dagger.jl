@@ -221,7 +221,11 @@ function backtrace_hash()
     hi = min(lo + CONFIG.backtrace_depth - 1, n)
     h = UInt64(0xcbf29ce484222325)
     @inbounds for i in lo:hi
-        h = (h ⊻ (reinterpret(UInt64, bt[i]) % UInt64)) * UInt64(0x100000001b3)
+        # Julia 1.12+ backtraces can mix `Ptr` frames with non-isbits
+        # `Base.InterpreterIP` entries; only pointers can be reinterpreted.
+        frame = bt[i]
+        ip = frame isa Ptr ? (UInt(frame) % UInt64) : (hash(frame) % UInt64)
+        h = (h ⊻ ip) * UInt64(0x100000001b3)
     end
     return h
 end

@@ -41,7 +41,10 @@ function stage(ctx::Context, node::Map)
     return DArray(RT, domain(primary), domainchunks(primary), thunks, partitioning, concat)
 end
 
-Base.map(f, x::DArray, xs::DArray...) = _to_darray(Map(f, (x, xs...)))
+function Base.map(f, x::DArray, xs::DArray...)
+    Dagger.@record_op :map x
+    return _to_darray(Map(f, (x, xs...)))
+end
 
 #### MapReduce
 
@@ -139,8 +142,15 @@ end
 import Statistics: mean, var, std
 import OnlineStats
 
-Base.mapreduce(f::Function, op::Function, x::DArray; dims=nothing, init=Base._InitialValue()) =
-    _mapreduce_maybesync(f, nothing, op, x, dims, init)
+function Base.mapreduce(f::Function, op::Function, x::DArray; dims=nothing, init=Base._InitialValue())
+    Dagger.@record_op :mapreduce x
+    return _mapreduce_maybesync(f, nothing, op, x, dims, init)
+end
+
+function Base.reduce(op::Function, x::DArray; dims=nothing, init=Base._InitialValue())
+    Dagger.@record_op :reduce x
+    return _mapreduce_maybesync(identity, nothing, op, x, dims, init)
+end
 
 Base.sum(x::DArray; dims=nothing, init=Base._InitialValue()) =
     sum(identity, x; dims, init)

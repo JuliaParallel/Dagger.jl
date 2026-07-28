@@ -88,6 +88,7 @@ function LinearAlgebra.generic_matmatmul!(
     alpha::Number,
     beta::Number,
 ) where {T}
+    Dagger.@record_op :mul! C A B
     partC, partA, partB = _repartition_matmatmul(C, A, B, transA, transB)
 
     if all(in(('N', 'T', 'C')), (transA, transB))
@@ -296,6 +297,7 @@ function syrk_dagger!(
     _alpha,
     _beta,
 ) where {T}
+    Dagger.@record_op :syrk! C A
 
     Ac = A.chunks
     Cc = C.chunks
@@ -462,6 +464,7 @@ function LinearAlgebra.generic_matvecmul!(
     _alpha::Number,
     _beta::Number,
 ) where {T}
+    Dagger.@record_op :mul! C A B
     partC, partA, partB = _repartition_matvecmul(C, A, B, transA)
     return maybe_copy_buffered(C=>partC, A=>partA, B=>partB) do C, A, B
         return gemv_dagger!(C, transA, A, B, _alpha, _beta)

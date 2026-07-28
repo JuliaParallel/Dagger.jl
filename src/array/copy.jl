@@ -143,17 +143,23 @@ function copyto_view!(Bpart, Brange, Apart, Arange)
     return
 end
 
-Base.copyto!(B::DArray{T,N}, A::DArray{T,N}) where {T,N} =
-    darray_copyto!(B, A)
-Base.copyto!(B::DArray{T,N}, A::Array{T,N}) where {T,N} =
-    darray_copyto!(B, view(A, B.partitioning))
+function Base.copyto!(B::DArray{T,N}, A::DArray{T,N}) where {T,N}
+    Dagger.@record_op :copyto! B
+    return darray_copyto!(B, A)
+end
+function Base.copyto!(B::DArray{T,N}, A::Array{T,N}) where {T,N}
+    Dagger.@record_op :copyto! B
+    return darray_copyto!(B, view(A, B.partitioning))
+end
 Base.copyto!(B::Array{T,N}, A::DArray{T,N}) where {T,N} =
     darray_copyto!(view(B, A.partitioning), A)
 
 StridedDArray{T,N} = Union{<:DArray{T,N}, SubArray{T,N,<:DArray{T,NP}} where NP}
 
-Base.copyto!(B::StridedDArray, A::StridedDArray) =
-    darray_copyto!(parent(B), parent(A), parentindices(B), parentindices(A))
+function Base.copyto!(B::StridedDArray, A::StridedDArray)
+    Dagger.@record_op :copyto! parent(B)
+    return darray_copyto!(parent(B), parent(A), parentindices(B), parentindices(A))
+end
 function Base.copyto!(B::Array, A::StridedDArray)
     DB = view(B, AutoBlocks())
     darray_copyto!(DB, parent(A), parentindices(DB), parentindices(A))

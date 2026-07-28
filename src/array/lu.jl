@@ -3,10 +3,12 @@ LinearAlgebra.lu(A::DMatrix{T}, pivot::Union{LinearAlgebra.RowMaximum,LinearAlge
 LinearAlgebra.lu!(A::DMatrix{T}, pivot::Union{LinearAlgebra.RowMaximum,LinearAlgebra.NoPivot} = LinearAlgebra.RowMaximum(); check::Bool=true, allowsingular::Bool=false) where {T<:LinearAlgebra.BlasFloat} = LinearAlgebra.lu(A, pivot; check=check, allowsingular=allowsingular)
 
 function LinearAlgebra.lu(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
+    Dagger.@record_op :lu! A
     A_copy = LinearAlgebra._lucopy(A, LinearAlgebra.lutype(T))
     return LinearAlgebra.lu!(A_copy, LinearAlgebra.NoPivot(); check)
 end
 function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
+    Dagger.@record_op :lu! A
     check && LinearAlgebra.LAPACK.chkfinite(A)
 
     zone = one(T)
@@ -260,10 +262,12 @@ end
 
 # Implementation of https://inria.hal.science/hal-04984070v1/file/ipdps_paper.pdf
 function LinearAlgebra.lu(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
+    Dagger.@record_op :lu! A
     A_copy = LinearAlgebra._lucopy(A, LinearAlgebra.lutype(T))
     return LinearAlgebra.lu!(A_copy, LinearAlgebra.RowMaximum(); check, allowsingular)
 end
 function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Bool = true, allowsingular::Bool = false) where {T<:LinearAlgebra.BlasFloat}
+    Dagger.@record_op :lu! A
     check && LinearAlgebra.LAPACK.chkfinite(A)
 
     zone = one(T)

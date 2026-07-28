@@ -1304,6 +1304,7 @@ macro stencil(orig_ex)
         # region blocks until all of its tasks finish, the next expression's tasks are
         # only submitted once this expression has been applied everywhere, which is what
         # gives `@stencil` its "all at once" semantics.
+        push!(final_ex.args, :(Dagger.@record_op :stencil $write_var))
         push!(final_ex.args, :(Dagger.spawn_datadeps() do
             for $chunk_idx in $CartesianIndices($chunks($write_var))
                 $inner_spawn_ex

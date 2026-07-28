@@ -367,6 +367,7 @@ function clear!()
         TOTAL_NODES[] = 0
     end
     empty!(TRACES)
+    reset_machine!()
     return nothing
 end
 

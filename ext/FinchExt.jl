@@ -13,12 +13,13 @@ Dagger._sparse_similar(::Finch.Tensor, ::Type{T}, dims::Dims) where {T} =
     Finch.fspzeros(T, dims...)
 Dagger.maybe_wrap_tile(x::Finch.Tensor) = DSparseArray(x)
 
-function Finch.fspzeros(p::Blocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
+function Finch.fspzeros(p::BlocksOrAuto, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
+    part, assign, plan = Dagger.Tapes.resolve_partitioning(T, dims, p, assignment)
     d = Dagger.ArrayDomain(map(x->1:x, dims))
     N = length(dims)
-    a = Dagger.AllocateArray(T, (T, _dims) -> DSparseArray(Finch.fspzeros(T, _dims...)), false, d, Dagger.partition(p, d), p, assignment;
+    a = Dagger.AllocateArray(T, (T, _dims) -> DSparseArray(Finch.fspzeros(T, _dims...)), false, d, Dagger.partition(part, d), part, assign;
                              return_type=DSparseArray{T,N})
-    return Dagger._to_darray(a)
+    return Dagger.Tapes.track!(Dagger._to_darray(a), plan)
 end
 Finch.fspzeros(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) =
     Finch.fspzeros(p, T, dims; assignment)
@@ -26,15 +27,14 @@ Finch.fspzeros(p::BlocksOrAuto, dims::Integer...; assignment::AssignmentType = :
     Finch.fspzeros(p, Float64, dims; assignment)
 Finch.fspzeros(p::BlocksOrAuto, dims::Dims; assignment::AssignmentType = :arbitrary) =
     Finch.fspzeros(p, Float64, dims; assignment)
-Finch.fspzeros(::AutoBlocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary) =
-    Finch.fspzeros(Dagger.auto_blocks(dims), T, dims; assignment)
 
-function Finch.fsprand(p::Blocks, T::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary)
+function Finch.fsprand(p::BlocksOrAuto, T::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary)
+    part, assign, plan = Dagger.Tapes.resolve_partitioning(T, dims, p, assignment)
     d = Dagger.ArrayDomain(map(x->1:x, dims))
     N = length(dims)
-    a = Dagger.AllocateArray(T, (T, _dims) -> DSparseArray(Finch.fsprand(T, _dims..., sparsity)), false, d, Dagger.partition(p, d), p, assignment;
+    a = Dagger.AllocateArray(T, (T, _dims) -> DSparseArray(Finch.fsprand(T, _dims..., sparsity)), false, d, Dagger.partition(part, d), part, assign;
                              return_type=DSparseArray{T,N})
-    return Dagger._to_darray(a)
+    return Dagger.Tapes.track!(Dagger._to_darray(a), plan)
 end
 Finch.fsprand(p::BlocksOrAuto, T::Type, dims_and_sparsity::Real...; assignment::AssignmentType = :arbitrary) =
     Finch.fsprand(p, T, dims_and_sparsity[1:end-1], dims_and_sparsity[end]; assignment)
@@ -42,8 +42,6 @@ Finch.fsprand(p::BlocksOrAuto, dims_and_sparsity::Real...; assignment::Assignmen
     Finch.fsprand(p, Float64, dims_and_sparsity[1:end-1], dims_and_sparsity[end]; assignment)
 Finch.fsprand(p::BlocksOrAuto, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary) =
     Finch.fsprand(p, Float64, dims, sparsity; assignment)
-Finch.fsprand(::AutoBlocks, T::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary) =
-    Finch.fsprand(Dagger.auto_blocks(dims), T, dims, sparsity; assignment)
 
 # Materialize a (possibly lazy/`SwizzleArray`) result into a concrete sparse
 # `Tensor`. `@einsum` returns a lazy `SwizzleArray` for transposed-output

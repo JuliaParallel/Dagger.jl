@@ -47,7 +47,7 @@ split trailing dim, near-cubic) but untested against real workloads. Tensor
 contractions in particular want layouts derived from the contraction indices,
 which the tape does not currently record.
 """
-function candidate_layouts(::Type{T}, dims::Tuple, m::MachineModel = current_machine())
+function candidate_layouts(::Type{T}, dims::Tuple, m::MachineModel = current_machine()) where {T}
     N = length(dims)
     N == 0 && return LayoutChoice[]
     esz = max(1, _elsize(T))

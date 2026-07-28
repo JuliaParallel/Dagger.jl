@@ -177,6 +177,7 @@ function imap!(f, A)
 end
 
 function Base.map!(f, a::DArray{T}) where T
+    Dagger.@record_op :map! a
     Dagger.spawn_datadeps() do
         for ca in chunks(a)
             Dagger.@spawn imap!(f, InOut(ca))
@@ -186,6 +187,7 @@ function Base.map!(f, a::DArray{T}) where T
 end
 
 function Base.map!(f, a::DArray{T}, b::AbstractArray{U}) where {T, U}
+    Dagger.@record_op :map! a
     b2 = view(b, a.partitioning)
     Dagger.spawn_datadeps() do
         for (c_a, c_b2) in zip(chunks(a), chunks(b2))

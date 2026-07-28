@@ -84,14 +84,15 @@ function _to_device_sparse(like::Dagger.DeviceSparseMatrixCSC, S::SparseMatrixCS
     return Dagger.DeviceSparseMatrixCSC(S.m, S.n, colptr, rowval, nzval)
 end
 
-function SparseArrays.spzeros(p::Blocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
+function SparseArrays.spzeros(p::BlocksOrAuto, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
+    part, assign, plan = Dagger.Tapes.resolve_partitioning(T, dims, p, assignment)
     d = Dagger.ArrayDomain(map(x->1:x, dims))
     N = length(dims)
     # Route through `allocate_sparse_zeros` so a GPU compute scope yields
     # device-resident sparse tiles (vendor sparse or DeviceSparseMatrixCSC).
-    a = Dagger.AllocateArray(T, (T, _dims) -> DSparseArray(Dagger.allocate_sparse_zeros(Dagger.task_processor(), T, _dims)), false, d, Dagger.partition(p, d), p, assignment;
+    a = Dagger.AllocateArray(T, (T, _dims) -> DSparseArray(Dagger.allocate_sparse_zeros(Dagger.task_processor(), T, _dims)), false, d, Dagger.partition(part, d), part, assign;
                              return_type=DSparseArray{T,N})
-    return Dagger._to_darray(a)
+    return Dagger.Tapes.track!(Dagger._to_darray(a), plan)
 end
 SparseArrays.spzeros(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) =
     SparseArrays.spzeros(p, T, dims; assignment)
@@ -99,15 +100,14 @@ SparseArrays.spzeros(p::BlocksOrAuto, dims::Integer...; assignment::AssignmentTy
     SparseArrays.spzeros(p, Float64, dims; assignment)
 SparseArrays.spzeros(p::BlocksOrAuto, dims::Dims; assignment::AssignmentType = :arbitrary) =
     SparseArrays.spzeros(p, Float64, dims; assignment)
-SparseArrays.spzeros(::AutoBlocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary) =
-    SparseArrays.spzeros(Dagger.auto_blocks(dims), T, dims; assignment)
 
-function SparseArrays.sprand(p::Blocks, T::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary)
+function SparseArrays.sprand(p::BlocksOrAuto, T::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary)
+    part, assign, plan = Dagger.Tapes.resolve_partitioning(T, dims, p, assignment)
     d = Dagger.ArrayDomain(map(x->1:x, dims))
     N = length(dims)
-    a = Dagger.AllocateArray(T, (T, _dims) -> DSparseArray(Dagger.allocate_sparse_rand(Dagger.task_processor(), T, _dims, sparsity)), false, d, Dagger.partition(p, d), p, assignment;
+    a = Dagger.AllocateArray(T, (T, _dims) -> DSparseArray(Dagger.allocate_sparse_rand(Dagger.task_processor(), T, _dims, sparsity)), false, d, Dagger.partition(part, d), part, assign;
                              return_type=DSparseArray{T,N})
-    return Dagger._to_darray(a)
+    return Dagger.Tapes.track!(Dagger._to_darray(a), plan)
 end
 SparseArrays.sprand(p::BlocksOrAuto, T::Type, dims_and_sparsity::Real...; assignment::AssignmentType = :arbitrary) =
     SparseArrays.sprand(p, T, dims_and_sparsity[1:end-1], dims_and_sparsity[end]; assignment)
@@ -115,8 +115,6 @@ SparseArrays.sprand(p::BlocksOrAuto, dims_and_sparsity::Real...; assignment::Ass
     SparseArrays.sprand(p, Float64, dims_and_sparsity[1:end-1], dims_and_sparsity[end]; assignment)
 SparseArrays.sprand(p::BlocksOrAuto, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary) =
     SparseArrays.sprand(p, Float64, dims, sparsity; assignment)
-SparseArrays.sprand(::AutoBlocks, T::Type, dims::Dims, sparsity::AbstractFloat; assignment::AssignmentType = :arbitrary) =
-    SparseArrays.sprand(Dagger.auto_blocks(dims), T, dims, sparsity; assignment)
 
 _apply_trans(X, t::Char) =
     t == 'N' ? X :

@@ -546,7 +546,11 @@ function distribute(A::AbstractArray{T,N}, dist::Blocks{N}, assignment::Assignme
     return _to_darray(Distribute(dist, A, procgrid))
 end
 
-distribute(A::AbstractArray, ::AutoBlocks, assignment::AssignmentType = :arbitrary) = distribute(A, auto_blocks(A), assignment)
+function distribute(A::AbstractArray{T,N}, ::AutoBlocks,
+                    assignment::AssignmentType = :arbitrary) where {T,N}
+    part, assign, plan = Tapes.resolve_partitioning(T, size(A), AutoBlocks(), assignment)
+    return Tapes.track!(distribute(A, part, assign), plan)
+end
 function distribute(x::AbstractArray{T,N}, n::NTuple{N}, assignment::AssignmentType{N} = :arbitrary) where {T,N}
     p = map((d, dn)->ceil(Int, d / dn), size(x), n)
     distribute(x, Blocks(p), assignment)
@@ -562,33 +566,39 @@ DVector(A::AbstractVector{T}, assignment::AssignmentType{1} = :arbitrary) where 
 DMatrix(A::AbstractMatrix{T}, assignment::AssignmentType{2} = :arbitrary) where T = DMatrix(A, AutoBlocks(), assignment)
 DArray(A::AbstractArray, assignment::AssignmentType = :arbitrary) = DArray(A, AutoBlocks(), assignment)
 
-DVector(A::AbstractVector{T}, ::AutoBlocks, assignment::AssignmentType{1} = :arbitrary) where T = DVector(A, auto_blocks(A), assignment)
-DMatrix(A::AbstractMatrix{T}, ::AutoBlocks, assignment::AssignmentType{2} = :arbitrary) where T = DMatrix(A, auto_blocks(A), assignment)
-DArray(A::AbstractArray, ::AutoBlocks, assignment::AssignmentType = :arbitrary) = DArray(A, auto_blocks(A), assignment)
+DVector(A::AbstractVector{T}, ::AutoBlocks, assignment::AssignmentType{1} = :arbitrary) where T =
+    distribute(A, AutoBlocks(), assignment)
+DMatrix(A::AbstractMatrix{T}, ::AutoBlocks, assignment::AssignmentType{2} = :arbitrary) where T =
+    distribute(A, AutoBlocks(), assignment)
+DArray(A::AbstractArray, ::AutoBlocks, assignment::AssignmentType = :arbitrary) =
+    distribute(A, AutoBlocks(), assignment)
 
 struct AllocateUndef{S} end
 (::AllocateUndef{S})(T, dims::Dims{N}) where {S,N} = Array{S,N}(undef, dims)
-function DArray{T,N}(::UndefInitializer, dist::Blocks{N}, dims::NTuple{N,Int}; assignment::AssignmentType{N} = :arbitrary) where {T,N}
+function DArray{T,N}(::UndefInitializer, dist::Union{Blocks{N},AutoBlocks}, dims::NTuple{N,Int};
+                    assignment::AssignmentType = :arbitrary) where {T,N}
+    part, assign, plan = Tapes.resolve_partitioning(T, dims, dist, assignment)
     domain = ArrayDomain(map(x->1:x, dims))
-    subdomains = partition(dist, domain)
-    a = AllocateArray(T, AllocateUndef{T}(), false, domain, subdomains, dist, assignment)
-    return _to_darray(a)
+    subdomains = partition(part, domain)
+    a = AllocateArray(T, AllocateUndef{T}(), false, domain, subdomains, part, assign)
+    return Tapes.track!(_to_darray(a), plan)
 end
 DArray{T,N}(::UndefInitializer, dist::Blocks{N}, dims::Vararg{Int,N}; assignment::AssignmentType{N} = :arbitrary) where {T,N} =
     DArray{T,N}(undef, dist, (dims...,); assignment)
 DArray{T,N}(::UndefInitializer, dims::NTuple{N,Int}; assignment::AssignmentType{N} = :arbitrary) where {T,N}  =
-    DArray{T,N}(undef, auto_blocks(dims), dims; assignment)
+    DArray{T,N}(undef, AutoBlocks(), dims; assignment)
 DArray{T,N}(::UndefInitializer, dims::Vararg{Int,N}; assignment::AssignmentType{N} = :arbitrary) where {T,N} =
-    DArray{T,N}(undef, auto_blocks((dims...,)), (dims...,); assignment)
+    DArray{T,N}(undef, AutoBlocks(), (dims...,); assignment)
 
-DArray{T}(::UndefInitializer, dist::Blocks{N}, dims::NTuple{N,Int}; assignment::AssignmentType{N} = :arbitrary) where {T,N} =
+DArray{T}(::UndefInitializer, dist::Union{Blocks{N},AutoBlocks}, dims::NTuple{N,Int};
+          assignment::AssignmentType = :arbitrary) where {T,N} =
     DArray{T,N}(undef, dist, dims; assignment)
 DArray{T}(::UndefInitializer, dist::Blocks{N}, dims::Vararg{Int,N}; assignment::AssignmentType{N} = :arbitrary) where {T,N} =
     DArray{T,N}(undef, dist, (dims...,); assignment)
 DArray{T}(::UndefInitializer, dims::NTuple{N,Int}; assignment::AssignmentType{N} = :arbitrary) where {T,N}  =
-    DArray{T,N}(undef, auto_blocks(dims), dims; assignment)
+    DArray{T,N}(undef, AutoBlocks(), dims; assignment)
 DArray{T}(::UndefInitializer, dims::Vararg{Int,N}; assignment::AssignmentType{N} = :arbitrary) where {T,N} =
-    DArray{T,N}(undef, auto_blocks((dims...,)), (dims...,); assignment)
+    DArray{T,N}(undef, AutoBlocks(), (dims...,); assignment)
 
 function DArray(A::WrappedDArray{T}; assignment::AssignmentType = :arbitrary) where T
     B = DArray{T}(undef, size(A); assignment)

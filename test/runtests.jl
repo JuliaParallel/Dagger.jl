@@ -29,6 +29,7 @@ tests = [
     ("Datadeps - Scheduling", "datadeps/scheduling.jl"),
     ("Streaming", "streaming.jl"),
     ("Domain Utilities", "domain.jl"),
+    ("Tapes", "tapes.jl"),
     ("Array - Allocation", "array/allocation.jl"),
     ("Array - Indexing", "array/indexing.jl"),
     ("Array - Core", "array/core.jl"),

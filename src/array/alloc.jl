@@ -75,10 +75,11 @@ end
 
 const BlocksOrAuto = Union{Blocks{N} where N, AutoBlocks}
 
-function Base.rand(p::Blocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
+function Base.rand(p::BlocksOrAuto, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
+    part, assign, plan = Tapes.resolve_partitioning(T, dims, p, assignment)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(T, rand, false, d, partition(p, d), p, assignment)
-    return _to_darray(a)
+    a = AllocateArray(T, rand, false, d, partition(part, d), part, assign)
+    return Tapes.track!(_to_darray(a), plan)
 end
 Base.rand(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) =
     rand(p, T, dims; assignment)
@@ -86,13 +87,12 @@ Base.rand(p::BlocksOrAuto, dims::Integer...; assignment::AssignmentType = :arbit
     rand(p, Float64, dims; assignment)
 Base.rand(p::BlocksOrAuto, dims::Dims; assignment::AssignmentType = :arbitrary) =
     rand(p, Float64, dims; assignment)
-Base.rand(::AutoBlocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary) =
-    rand(auto_blocks(dims), T, dims; assignment)
 
-function Base.randn(p::Blocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
+function Base.randn(p::BlocksOrAuto, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
+    part, assign, plan = Tapes.resolve_partitioning(T, dims, p, assignment)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(T, randn, false, d, partition(p, d), p, assignment)
-    return _to_darray(a)
+    a = AllocateArray(T, randn, false, d, partition(part, d), part, assign)
+    return Tapes.track!(_to_darray(a), plan)
 end
 Base.randn(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) =
     randn(p, T, dims; assignment)
@@ -100,13 +100,12 @@ Base.randn(p::BlocksOrAuto, dims::Integer...; assignment::AssignmentType = :arbi
     randn(p, Float64, dims; assignment)
 Base.randn(p::BlocksOrAuto, dims::Dims; assignment::AssignmentType = :arbitrary) =
     randn(p, Float64, dims; assignment)
-Base.randn(::AutoBlocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary) =
-    randn(auto_blocks(dims), T, dims; assignment)
 
-function Base.ones(p::Blocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
+function Base.ones(p::BlocksOrAuto, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
+    part, assign, plan = Tapes.resolve_partitioning(T, dims, p, assignment)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(T, ones, false, d, partition(p, d), p, assignment)
-    return _to_darray(a)
+    a = AllocateArray(T, ones, false, d, partition(part, d), part, assign)
+    return Tapes.track!(_to_darray(a), plan)
 end
 Base.ones(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) =
     ones(p, T, dims; assignment)
@@ -114,13 +113,12 @@ Base.ones(p::BlocksOrAuto, dims::Integer...; assignment::AssignmentType = :arbit
     ones(p, Float64, dims; assignment)
 Base.ones(p::BlocksOrAuto, dims::Dims; assignment::AssignmentType = :arbitrary) =
     ones(p, Float64, dims; assignment)
-Base.ones(::AutoBlocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary) =
-    ones(auto_blocks(dims), T, dims; assignment)
 
-function Base.zeros(p::Blocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
+function Base.zeros(p::BlocksOrAuto, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary)
+    part, assign, plan = Tapes.resolve_partitioning(T, dims, p, assignment)
     d = ArrayDomain(map(x->1:x, dims))
-    a = AllocateArray(T, zeros, false, d, partition(p, d), p, assignment)
-    return _to_darray(a)
+    a = AllocateArray(T, zeros, false, d, partition(part, d), part, assign)
+    return Tapes.track!(_to_darray(a), plan)
 end
 Base.zeros(p::BlocksOrAuto, T::Type, dims::Integer...; assignment::AssignmentType = :arbitrary) =
     zeros(p, T, dims; assignment)
@@ -128,8 +126,6 @@ Base.zeros(p::BlocksOrAuto, dims::Integer...; assignment::AssignmentType = :arbi
     zeros(p, Float64, dims; assignment)
 Base.zeros(p::BlocksOrAuto, dims::Dims; assignment::AssignmentType = :arbitrary) =
     zeros(p, Float64, dims; assignment)
-Base.zeros(::AutoBlocks, T::Type, dims::Dims; assignment::AssignmentType = :arbitrary) =
-    zeros(auto_blocks(dims), T, dims; assignment)
 
 function Base.zero(x::DArray{T,N}) where {T,N}
     dims = ntuple(i->x.domain.indexes[i].stop, N)
@@ -143,12 +139,12 @@ end
 function LinearAlgebra._zeros(::Type{T}, B::DVector, n::Integer) where T
     m = max(size(B, 1), n)
     sz = (m,)
-    return zeros(auto_blocks(sz), T, sz)
+    return zeros(AutoBlocks(), T, sz)
 end
 function LinearAlgebra._zeros(::Type{T}, B::DMatrix, n::Integer) where T
     m = max(size(B, 1), n)
     sz = (m, size(B, 2))
-    return zeros(auto_blocks(sz), T, sz)
+    return zeros(AutoBlocks(), T, sz)
 end
 
 function Base.view(A::AbstractArray{T,N}, p::Blocks{N}) where {T,N}
