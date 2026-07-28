@@ -16,7 +16,9 @@
     # Avoid allocating real DArrays here — that would spawn tasks the cleanup
     # below is not sized to drain.
     let old_site_id = Tapes.CONFIG.site_id
-        Tapes.enable!(site_id=:lexical)
+        # `calibrate=false`: do not bake build-host FLOP/bandwidth rates into
+        # the image; runtime `enable!` will measure on first use.
+        Tapes.enable!(site_id=:lexical, calibrate=false)
         try
             Tapes.backtrace_hash()
             Tapes.explain(devnull, Float64, (128, 128))

@@ -188,16 +188,21 @@ is cheap and predictable in the disabled case.
 @inline is_enabled() = CONFIG.enabled
 
 """
-    enable!(; kwargs...)
+    enable!(; calibrate=true, kwargs...)
 
 Turn the tape subsystem on. Keyword arguments set the matching
 [`TapeConfig`](@ref) fields.
+
+By default this also runs [`calibrate_machine!`](@ref) once, so layout ranking
+uses measured FLOP/s and memory bandwidth rather than the pessimistic
+placeholders. Pass `calibrate=false` to skip (e.g. after an explicit
+[`set_machine!`](@ref), or in tests that need a fixed model).
 
 ```julia
 Dagger.Tapes.enable!(site_id=:lexical, horizon=8, verbose=true)
 ```
 """
-function enable!(; kwargs...)
+function enable!(; calibrate::Bool = true, kwargs...)
     for (k, v) in kwargs
         hasfield(TapeConfig, k) || throw(ArgumentError("unknown Tapes config option: $k"))
         setfield!(CONFIG, k, convert(fieldtype(TapeConfig, k), v))
@@ -205,6 +210,12 @@ function enable!(; kwargs...)
     CONFIG.site_id in (:backtrace, :context, :lexical) ||
         throw(ArgumentError("site_id must be :backtrace, :context or :lexical, got $(CONFIG.site_id)"))
     CONFIG.enabled = true
+    # Calibrate once per session unless the user already installed rates via
+    # `set_machine!` (or passed `calibrate=false` to skip, e.g. in tests).
+    if calibrate
+        m = _ensure_machine()
+        m.calibrated || calibrate_machine!(m)
+    end
     return CONFIG
 end
 

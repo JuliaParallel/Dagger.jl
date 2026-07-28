@@ -55,7 +55,10 @@ function candidate_layouts(::Type{T}, dims::Tuple, m::MachineModel = current_mac
     out = LayoutChoice[]
 
     # Smallest tile worth scheduling, and largest that leaves >= 2 tiles/proc.
-    min_tile_bytes = m.task_overhead * m.bandwidth / np
+    # `task_overhead` is serialized wall-clock, so it is *not* divided by `np`
+    # here: a tile has to be big enough to hide the whole submission cost, not
+    # `1/np` of it.
+    min_tile_bytes = m.task_overhead * m.bandwidth
     min_edge = max(32, ceil(Int, (min_tile_bytes / esz)^(1 / N)))
     total_bytes = Float64(prod(dims; init = 1)) * esz
     max_tile_bytes = max(min_tile_bytes, total_bytes / (2 * np))
@@ -75,6 +78,11 @@ function candidate_layouts(::Type{T}, dims::Tuple, m::MachineModel = current_mac
     end
     # Also the edge that yields exactly one tile per processor per dimension.
     push!(edges, max(1, cld(maximum(dims), max(1, round(Int, np^(1 / N))))))
+    # And the square form of the blind default's block size. Powers of two miss
+    # it (it is `cld(dims[end], np)`, e.g. 683 for 4096 over 6 procs) and it is
+    # the layout Dagger's own `maybe_copy_buffered` re-blocks `AutoBlocks` to,
+    # so it is both a strong candidate and the honest baseline for comparison.
+    push!(edges, max(1, minimum(blocksize(fallback_layout(T, dims)))))
     for edge in unique!(sort!(edges))
         bs = ntuple(i -> clamp(edge, 1, max(1, Int(dims[i]))), N)
         for a in (N >= 2 ? (:cyclicrow, :cycliccol, :arbitrary) : (:arbitrary,))
