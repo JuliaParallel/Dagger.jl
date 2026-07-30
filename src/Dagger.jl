@@ -246,7 +246,7 @@ function __init__()
 
     # Enable tapes
     Tapes.clear!()
-    Tapes.enable!()
+    #Tapes.enable!()
 end
 
 end # module
