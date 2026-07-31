@@ -77,6 +77,42 @@ const REGIMES = [("m1", 1, "tuolumne_regime_m1_1node.csv"),
                  ("m4", 4, "tuolumne_regime_m4_4node.csv")]
 const FLUSH_INTERVAL_S = 300.0   # periodic partial-CSV flush (feature 3)
 
+# ---- 1b. Optional partition filters ----------------------------------------
+# Set via env vars to run a SUBSET of the grid in one job, so a walltime kill
+# on any partition loses only that partition rather than the whole run. Leave
+# unset (default) to reproduce the original single-session behaviour.
+#
+#   TUOLUMNE_REGIME_FILTER    comma list of regime tags to run ("m1", "m2", "m4")
+#                             e.g. "m1"        → only single-node
+#                             e.g. "m1,m2"     → m1 and m2, skip m4
+#                             (empty/unset)    → all regimes the topology allows
+#   TUOLUMNE_WORKLOAD_FILTER  comma list of workload symbols
+#                             e.g. "cholesky"  → only cholesky tile counts
+#                             e.g. "matmul"    → only matmul
+#                             (empty/unset)    → both
+#   TUOLUMNE_OUTPUT_TAG       string appended to every output CSV/TXT so that
+#                             parallel partition jobs don't clobber each other
+#                             e.g. "m1_cholesky" → tuolumne_regime_m1_1node_m1_cholesky.csv
+#                             (empty/unset)      → original filenames unchanged
+#
+# The medians, cache-demo, and optimality-gap AOT passes at end of main() are
+# scoped to whatever the filter admitted, so each partition produces a
+# self-contained set of CSVs that can be concatenated post-hoc.
+const REGIME_FILTER   = split(get(ENV, "TUOLUMNE_REGIME_FILTER",   ""), ",", keepempty=false)
+const WORKLOAD_FILTER = Symbol.(split(get(ENV, "TUOLUMNE_WORKLOAD_FILTER", ""), ",", keepempty=false))
+const OUTPUT_TAG      = get(ENV, "TUOLUMNE_OUTPUT_TAG", "")
+
+# Filename helper: appends "_$OUTPUT_TAG" before the extension when set.
+function _tag(path::String)
+    isempty(OUTPUT_TAG) && return path
+    base, ext = splitext(path)
+    return string(base, "_", OUTPUT_TAG, ext)
+end
+
+# Regime / workload filter application. Empty filter list → no filter.
+_regime_admits(rtag) = isempty(REGIME_FILTER) || (rtag in REGIME_FILTER)
+_workload_admits(wl) = isempty(WORKLOAD_FILTER) || (wl in WORKLOAD_FILTER)
+
 # The four scheduler-science commits that MUST be in HEAD (matched by subject so
 # a rebase/re-hash doesn't break the check). Plus the MILP-objective
 # instrumentation the optimality-gap number depends on.
@@ -294,6 +330,7 @@ function cache_demo!(io, topo, log)
     wl, nt, bs, seed = :cholesky, 4, 4096, 1
     for (rtag, nnodes, _) in REGIMES
         topo.n_nodes < nnodes && continue
+        _regime_admits(rtag) || continue
         rprocs = regime_procs(topo, nnodes); scope = regime_scope(rprocs)
         try
             warm_config!(wl, nt, bs, rprocs)
@@ -384,7 +421,7 @@ function main()
     log(@sprintf("topology: %d node(s), %d procs, %d APU GPU(s): %s",
                  topo.n_nodes, topo.total_procs, topo.total_gpus, join(topo.hostnames, ", ")))
 
-    optgap_io = open("tuolumne_optgap.csv", "w"); println(optgap_io, OPTGAP_HDR); flush(optgap_io)
+    optgap_io = open(_tag("tuolumne_optgap.csv"), "w"); println(optgap_io, OPTGAP_HDR); flush(optgap_io)
     optimal_configs = Dict{Any,Float64}()
     all_rows = Vector{Any}()
     fail_count = 0
@@ -395,13 +432,21 @@ function main()
             log("SKIP regime $rtag ($nnodes nodes) -- only $(topo.n_nodes) node(s) allocated")
             continue
         end
+        if !_regime_admits(rtag)
+            log("SKIP regime $rtag -- excluded by TUOLUMNE_REGIME_FILTER=$(REGIME_FILTER)")
+            continue
+        end
         rprocs = regime_procs(topo, nnodes); scope = regime_scope(rprocs)
         rgpu = count(!_is_cpu_proc, rprocs)
+        outcsv_tagged = _tag(outcsv)
         log(@sprintf("REGIME %s: %d node(s), %d procs (%d APU GPU) -> %s",
-                     uppercase(rtag), nnodes, length(rprocs), rgpu, outcsv))
+                     uppercase(rtag), nnodes, length(rprocs), rgpu, outcsv_tagged))
         rstart = time()
-        io = open(outcsv, "w"); println(io, MAIN_HDR); flush(io)
+        io = open(outcsv_tagged, "w"); println(io, MAIN_HDR); flush(io)
         for wl in WORKLOADS, nt in NTS
+            if !_workload_admits(wl)
+                continue
+            end
             # pick bs (nt=8 tries 4096 then 2048) via the warmup
             bs = 0
             for cand in bs_candidates(nt)
@@ -439,10 +484,16 @@ function main()
         log(@sprintf("REGIME %s done in %.1f min", uppercase(rtag), (time()-rstart)/60))
     end
 
-    log("schedule-cache demonstration (Contribution 4)")
-    open("tuolumne_cache.csv", "w") do cio
-        println(cio, "regime,workload,nt,bs,scheduler,seed,aot_ms_first_call,aot_ms_cache_hit")
-        cache_demo!(cio, topo, log)
+    # Cache demo runs only if this partition includes cholesky (the demo config)
+    # AND at least one admitted regime. Otherwise skip: another partition covers it.
+    if _workload_admits(:cholesky) && any(r -> _regime_admits(r[1]) && topo.n_nodes >= r[2], REGIMES)
+        log("schedule-cache demonstration (Contribution 4)")
+        open(_tag("tuolumne_cache.csv"), "w") do cio
+            println(cio, "regime,workload,nt,bs,scheduler,seed,aot_ms_first_call,aot_ms_cache_hit")
+            cache_demo!(cio, topo, log)
+        end
+    else
+        log("SKIP schedule-cache demonstration -- partition excludes cholesky or all regimes")
     end
 
     log("optimality-gap AOT pass over $(length(optimal_configs)) OPTIMAL config(s)")
@@ -456,7 +507,7 @@ end
 
 # ---- 12. Aggregates ---------------------------------------------------------
 function write_medians(rows)
-    open("tuolumne_medians.csv", "w") do io
+    open(_tag("tuolumne_medians.csv"), "w") do io
         println(io, "regime,n_nodes,workload,nt,bs,scheduler,wall_ms_median,wall_ms_stddev,",
                     "aot_ms_median,aot_ms_stddev,residual_max,n_tasks,milp_status,milp_obj")
         groups = Dict{Any,Vector{Any}}()
@@ -479,7 +530,7 @@ function write_medians(rows)
 end
 
 function write_summary(summary, sha, started, fail_count)
-    open("tuolumne_run_summary.txt", "w") do io
+    open(_tag("tuolumne_run_summary.txt"), "w") do io
         println(io, "Tuolumne one-shot benchmark -- run summary")
         println(io, "git SHA (HEAD): ", sha)
         println(io, "launch time:    ", started)

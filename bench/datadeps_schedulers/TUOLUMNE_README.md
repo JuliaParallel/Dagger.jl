@@ -49,7 +49,7 @@ You run it **once**. There are no re-runs — validate with `--smoke` first.
 
 ---
 
-## 3. Run — two commands, in order
+## 3. Run — three steps in order
 
 **a) Smoke test (~30–60 s) — validate the stack before committing the full run:**
 ```bash
@@ -60,18 +60,48 @@ nt=2 cell with RR and Greedy end-to-end, and ends with a single line:
 `SMOKE: PASS` or `SMOKE: FAIL`. **Do not proceed unless it PASSes and reports at
 least one APU GPU.**
 
-**b) Full grid (~6–8 h):**
+**b) Full grid — RECOMMENDED: partitioned into six Flux jobs.**
+
+The previous single-session run hit the Flux 24 h walltime cap and lost the
+matmul cells. The partitioned launcher splits the grid into six independent
+Flux jobs, one per (regime × workload), so any single walltime kill loses only
+that partition and every other partition keeps going:
+```bash
+bash bench/datadeps_schedulers/tuolumne_partition_run.sh
+```
+Monitor with `flux jobs -a`. Each job allocates 4 nodes and 24 h and calls
+`tuolumne_oneshot.jl` with `TUOLUMNE_REGIME_FILTER` + `TUOLUMNE_WORKLOAD_FILTER`
+env vars set so it only covers that partition's cells. Output CSVs are tagged
+with the partition name (e.g. `tuolumne_regime_m1_1node_m1_cholesky.csv`) so
+parallel jobs never clobber each other. Post-processing concatenates the
+same-schema CSVs across partitions.
+
+Overrides via env vars (all optional):
+```bash
+NODES=4 TIME_LIMIT=24h FLUX_QUEUE=pbatch \
+    bash bench/datadeps_schedulers/tuolumne_partition_run.sh
+```
+
+**b-alt) Full grid — single session (fallback, if you have a big walltime slot):**
 ```bash
 julia bench/datadeps_schedulers/tuolumne_oneshot.jl
 ```
-Progress prints per config/cell so you can see forward motion. Partial CSVs are
-flushed every 5 minutes, so a wall-time expiry won't lose completed work. Any
-single cell that fails (correctness residual over threshold, MILP exception,
-worker crash) is caught, logged, marked in the CSV, and the run continues.
+This is what the previous run tried. Progress prints per config/cell so you can
+see forward motion. Partial CSVs are flushed every 5 minutes, so a wall-time
+expiry won't lose completed work. Any single cell that fails (correctness
+residual over threshold, MILP exception, worker crash) is caught, logged, marked
+in the CSV, and the run continues. Only use this if you have a 24 h+ Flux
+allocation confirmed — otherwise use (b) above.
 
 ---
 
 ## 4. Output (lands in your invocation directory)
+
+Under the single-session run (b-alt) the CSV / TXT filenames are exactly the
+ones below. Under the partitioned run (b, RECOMMENDED) each file is suffixed
+with the partition tag (`_m1_cholesky`, `_m1_matmul`, `_m2_cholesky`, …)
+so parallel jobs don't clobber each other; concatenate same-schema files
+post-hoc.
 
 | File | Contents |
 |---|---|
