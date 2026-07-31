@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Dagger Dashboard</title>
+<script type="text/javascript" src="/assets/d3.v7.min.js"></script>
+</head>
+<body>
+<div style="border: 2px solid black">
+<div>Status: <em class="connection-status" style="color: red">Disconnected</em></div>
+<div><label>Online? </label><input type="checkbox" id="online-enable" checked="true"></div>
+<div><label>Update? </label><input type="checkbox" id="update-enable" checked="true"></div>
+<div><label>Draw Interval: </label><input type="text" id="draw-interval" value="1"></div>
+<div><label>Worker: </label><select id="worker-select"></select></div>
+<div><label>Zoom: </label><button type="button" id="zoom-in">Zoom In</button><button type="button" id="zoom-out">Zoom Out</button></div>
+<div><label>Seek: </label><button type="button" id="seek-prev">Prev</button><button type="button" id="seek-next">Next</button><button type="button" id="seek-full">Full</button></div>
+<div><label>Seek Window: </label><input type="text" id="seek-length" value="20"></div>
+</select></div>
+</div>
+<div class="svg-container" style="border: 2px solid black"></div>
+<script type="text/javascript">
+var status_em = d3.select("em");
+var online = true;
+var online_input = d3.select("input#online-enable");
+var updating = true;
+var update_input = d3.select("input#update-enable");
+var draw_interval = d3.select("input#draw-interval");
+var worker_select = d3.select("select#worker-select");
+var zoom_in = d3.select("button#zoom-in");
+var zoom_out = d3.select("button#zoom-out");
+var seek_prev = d3.select("button#seek-prev");
+var seek_next = d3.select("button#seek-next");
+var seek_full = d3.select("button#seek-full");
+var seek_length = 20*(10**9);
+var seek_length_input = d3.select("input#seek-length");
+
+function linePlot(container, core_key, data_key, title, ylabel) {
+    var dsvg = container.append("svg")
+                        .attr("style", "border: 1px solid black");
+    dsvg.attr("width", 900).attr("height", 400);
+    var margin = 250,
+        width = dsvg.attr("width") - margin,
+        height = dsvg.attr("height") - margin;
+
+    var xScale = d3.scaleLinear().range([0, width]);
+    var yScale = d3.scaleLinear().range([height, 0]);
+    var g = dsvg.append("g")
+                .attr("transform", "translate(" + (margin/2) + "," + (margin/2) + ")");
+    var xg = g.append("g");
+    var yg = g.append("g");
+
+    // Draw title
+    dsvg.append("text")
+        .attr("x", width/2)
+        .attr("y", 50)
+        .attr("font-size", "24px")
+        .style("fill", "blue")
+        .text(title);
+
+    // Draw x-axis label
+    xg.append("text")
+      .attr("x", width / 2)
+      .attr("y", height + 50)
+      .attr("text-anchor", "end")
+      .attr("font-size", "16px")
+      .attr("fill", "blue")
+      .text("Time");
+
+    // Draw y-axis label
+    yg.append("text")
+      .attr("transform", "rotate(-90)")
+      .attr("dy", "-5.1em")
+      .attr("text-anchor", "end")
+      .attr("font-size", "16px")
+      .attr("fill", "blue")
+      .text(ylabel);
+
+    return function(values) {
+        var core = values[core_key],
+            data = values[data_key];
+
+        // Set axis domains
+        //var time_min = d3.min(core, function(d){return d.timestamp;});
+        //var time_max = d3.max(core, function(d){return d.timestamp;});
+        var time_min = seek_ts_start;
+        var time_max = seek_ts_stop;
+        xScale.domain([time_min, time_max]);
+        yScale.domain([0, d3.max(data)]);
+
+        // Draw x-axis
+        xg.attr("transform", "translate(0," + height + ")")
+          .call(d3.axisBottom(xScale).tickFormat(function(d) {
+              return "T-" + ((time_max - d) / (10 ** 9)).toPrecision(2) + " s";
+          }).ticks(10));
+
+        // Draw y-axis
+        yg.call(d3.axisLeft(yScale).tickFormat(function(d){
+              return d + "";
+          }).ticks(2));
+
+        // Draw line
+        g.selectAll("path").remove();
+        g.append("path")
+         .datum(d3.zip(core, data))
+         .attr("fill", "none")
+         .attr("stroke", "steelblue")
+         .attr("stroke-width", 1.5)
+         .attr("d", d3.line()
+           .x(function(d) { return xScale(d[0].timestamp); })
+           .y(function(d) { return yScale(d[1]); })
+           );
+    };
+};
+function ganttPlot(container, core_key, id_key, esat_key, psat_key,
+                   title, x_label,
+                   x_key,
+                   to_color) {
+    var dsvg = container.append("svg")
+                        .attr("style", "border: 1px solid black");
+    dsvg.attr("width", screen.width-50).attr("height", 600);
+    var width_margin = 300,
+        height_margin = 250,
+        width = dsvg.attr("width") - width_margin,
+        height = dsvg.attr("height") - height_margin;
+
+    var xScale = d3.scaleLinear().range([0, width]);
+    var yScale = d3.scaleOrdinal();
+    var yScaleInverted = d3.scaleLinear();
+    var g = dsvg.append("g")
+                .attr("transform", "translate(" + (width_margin-50) + "," + (height_margin-50) + ")");
+    var xg = g.append("g");
+    var yg = g.append("g");
+    var fo = g.append("foreignObject")
+              .attr("width", width)
+              .attr("height", height);
+    var foBody = fo.append("xhtml:body")
+                   .style("margin", "0px")
+                   .style("padding", "0px")
+                   .style("background-color", "none")
+                   .style("width", width + "px")
+                   .style("height", height + "px")
+                   .style("border", "1px solid lightgray");
+    var canvas = foBody.append("canvas")
+                       .attr("x", 0)
+                       .attr("y", 0)
+                       .attr("width", width)
+                       .attr("height", height)
+                       .style("cursor", "crosshair");
+    var ctx = canvas.node().getContext("2d");
+    ctx.clearRect(0, 0, width, height);
+    /* TODO: Vertical line on mouse hover
+    canvas.on("mousemove", function(evt) {
+        var rect = canvas.node().getBoundingClientRect();
+        var x = Math.round(evt.clientX - rect.left);
+        ctx.beginPath();
+        ctx.globalAlpha = 1.0;
+        ctx.strokeStyle = "black";
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, canvas.attr("height"));
+        ctx.stroke();
+    });
+    */
+    var tooltip = container.append("div")
+                           .attr("class", "tooltip")
+                           .style("visibility", "hidden")
+                           .style("position", "absolute")
+                           .style("z-index", 1)
+                           .text("My tooltip");
+    canvas.on("mouseover", function(evt) {
+        tooltip.style("visibility", "visible");
+    });
+    canvas.on("mouseout", function(evt) {
+        tooltip.style("visibility", "hidden");
+    });
+
+    // Draw title
+    dsvg.append("text")
+        .attr("x", width/2)
+        .attr("y", 50)
+        .attr("font-size", "24px")
+        .style("fill", "blue")
+        .text(title);
+
+    // Draw x-axis label
+    xg.append("text")
+      .attr("x", width / 2)
+      .attr("y", height + 50)
+      .attr("text-anchor", "end")
+      .attr("font-size", "16px")
+      .attr("fill", "blue")
+      .text(x_label);
+
+    return function(values) {
+        var core = values[core_key],
+            ids = values[id_key],
+            esat = values[esat_key],
+            psat = values[psat_key];
+
+        // Set axis domains
+        var time_min = seek_ts_start;
+        var time_max = seek_ts_stop;
+        xScale.domain([time_min, time_max]);
+        var key_is_event = new Map();
+
+        // Collect esat keys
+        var ekeys = new Set();
+        for (i = 0; i < core.length; i++) {
+            for (key in esat[i]) {
+                ekeys.add(key);
+                key_is_event.set(key, true);
+            }
+        }
+        var ekeys_array = new Array();
+        for (value of ekeys.values()) {
+            ekeys_array.push(value);
+        }
+        ekeys_array = ekeys_array.sort().reverse();
+
+        // Collect psat keys
+        var pkeys = new Set();
+        if (psat !== undefined) {
+            for (i = 0; i < core.length; i++) {
+                // FIXME: for (key of Object.keys(psat[i])) {
+                for (key of psat[i]) {
+                    key = key[0].toString()
+                    pkeys.add(key);
+                    key_is_event.set(key, false);
+                }
+            }
+        }
+        var pkeys_array = new Array();
+        for (value of pkeys.values()) {
+            pkeys_array.push(value);
+        }
+        pkeys_array = pkeys_array.sort();
+
+        var allkeys_array = new Array();
+        for (key of pkeys_array) {
+            allkeys_array.push(key);
+        }
+        for (key of ekeys_array) {
+            allkeys_array.push(key);
+        }
+
+        var stepsize = height / allkeys_array.length;
+        yScale.domain(allkeys_array)
+              .range(d3.range(height, 0, -stepsize));
+        yScaleInverted.domain([height, 0])
+                      .range([0, allkeys_array.length-1]);
+
+        // Register tooltip handler
+        canvas.on("mousemove", function(evt) {
+            var key_idx = yScaleInverted(event.layerY);
+            var key = allkeys_array[Math.ceil(key_idx)];
+            tooltip.style("top", event.pageY+"px")
+                   .style("left", event.pageX+20+"px")
+                   .text(key);
+        });
+
+        // Draw x-axis
+        xg.attr("transform", "translate(0," + height + ")")
+          .call(d3.axisBottom(xScale).tickFormat(function(d) {
+              return "T-" + ((time_max - d) / (10 ** 9)).toPrecision(2) + " s";
+          }).ticks(10));
+
+        // Draw y-axis
+        yg.call(d3.axisLeft(yScale))
+          .call(function(d) {
+              d.selectAll("line")
+               .attr("transform", "translate(0," + -(stepsize/2) + ")");
+              d.selectAll("text")
+               .attr("transform", "translate(0," + -(stepsize/2) + ")");
+          });
+
+        // Draw data
+        ctx.clearRect(0, 0, width, height);
+        //g.selectAll("rect").remove();
+        //g.selectAll("path").remove();
+        for (let key of allkeys_array) {
+            // Generate regular and entering blocks
+            var blocks = new Array();
+            var id_map = new Map();
+            var y = yScale(key)-stepsize;
+            var y_bot = y+stepsize;
+            var is_event = key_is_event.get(key);
+
+            // Configure color and opacity
+            var color = "lightgrey";
+            var opacity = 0.4;
+            var draw_line = true;
+            for (c = 0; c < to_color.length; c++) {
+                if ((to_color[c][0] == key) || (!is_event && (to_color[c][0] === null))) {
+                    color = to_color[c][1];
+                    opacity = to_color[c][2];
+                    draw_line = to_color[c][3];
+                }
+            }
+            for (i = 0; i < core.length; i++) {
+                var category = core[i].category;
+                var id = ids[i].toString();
+
+                // Skip irrelevant events
+                if ((is_event == true) && (key != category)) {continue;}
+                if ((is_event == false) && (key != id)) {continue;}
+
+                // Event matched, create the block
+                if (core[i].kind == "start") {
+                    id_map.set(id, i);
+                } else {
+                    if (id_map.has(id)) {
+                        var start_i = id_map.get(id);
+                        var start_ts = core[start_i].timestamp;
+                        id_map.delete(id);
+                    } else {
+                        var start_ts = time_min;
+                    }
+                    var finish_ts = core[i].timestamp;
+                    blocks.push({
+                        x: xScale(start_ts),
+                        y: y,
+                        width: xScale(finish_ts) - xScale(start_ts),
+                        color: color,
+                        opacity: opacity,
+                    });
+                }
+            }
+
+            // Generate exiting blocks
+            for (id in id_map.keys()) {
+                var i = id_map.get(id);
+                var x = xScale(core[i].timestamp);
+                var category = core[i].category;
+                blocks.push({
+                    x: x,
+                    y: y,
+                    width: width - x,
+                    color: color,
+                    opacity: opacity,
+                });
+            }
+
+            // Calculate value min and max
+            var subsat = d3.map(is_event ? esat : psat, function(d) {
+                var value = 0;
+                if (is_event) {
+                    value = d[key];
+                } else {
+                    for (pkey of d) {
+                        if (pkey[0].toString() == key) {
+                            value = pkey[1];
+                        }
+                    }
+                }
+                return value === undefined ? 0 : value;
+            });
+            var sat_min = d3.min(subsat);
+            var sat_max = d3.max(subsat);
+            var satScale = d3.scaleLinear()
+                             .domain([sat_min, sat_max])
+                             .range([y_bot-5, y+5]);
+            for (i = 0; i < blocks.length; i++) {
+                var block = blocks[i];
+
+                // Draw block
+                ctx.globalAlpha = block.opacity; // FIXME
+                ctx.fillStyle = block.color;
+                ctx.fillRect(block.x,
+                             block.y,
+                             block.width,
+                             stepsize);
+                //ctx.globalAlpha = 1.0;
+                ctx.strokeStyle = "grey";
+                ctx.strokeRect(block.x,
+                               block.y,
+                               block.width,
+                               stepsize);
+            }
+
+            if (draw_line) {
+                // Draw saturation line over block
+                ctx.beginPath();
+                ctx.globalAlpha = 1.0;
+                ctx.strokeStyle = "steelblue";
+                var last_y = satScale(subsat[0]);
+                ctx.moveTo(0, last_y);
+                for (i = 0; i < core.length; i++) {
+                    var sat_x = xScale(core[i].timestamp),
+                        sat_y = satScale(subsat[i]);
+                    ctx.lineTo(sat_x,
+                               last_y);
+                    ctx.lineTo(sat_x,
+                               sat_y);
+                    last_y = sat_y;
+                }
+                ctx.stroke();
+            }
+        }
+    };
+};
+function graphPlot(container, core_key, id_key, timeline_key, profile_key, title) {
+    var svg = container.append("svg")
+                       .attr("class", "graph-plot");
+    svg.attr("width", screen.width-50).attr("height", screen.height);
+    var width = svg.attr("width"),
+        height = svg.attr("height");
+    var sim = d3.forceSimulation([])
+                .force("charge", d3.forceManyBody().strength(-10))
+                .force("center", d3.forceCenter(width/2, height/2).strength(1))
+                .force("links", d3.forceLink().links([]))
+                .on("tick", function() {
+                    sim.force("links").distance(100);
+
+                    var as = svg.selectAll("line")
+                                .data(sim.force("links").links());
+                    as.enter().append("line");
+                    as.exit().remove();
+                    as.attr("x1", function(d) { return d.source.x; })
+                      .attr("y1", function(d) { return d.source.y; })
+                      .attr("x2", function(d) { return d.target.x; })
+                      .attr("y2", function(d) { return d.target.y; })
+                      .attr("stroke", "blue")
+                      .attr("stroke-width", 5);
+
+                    var nodes = sim.nodes();
+                    var cs = svg.selectAll("circle")
+                                .data(nodes);
+                    cs.enter().append("circle");
+                    cs.exit().remove();
+                    cs.attr("r", 40)
+                      .attr("cx", function(d) { return d.x; })
+                      .attr("cy", function(d) { return d.y; })
+                      .attr("fill", function(d) { return d.color; })
+                      .attr("stroke", "black")
+                      .attr("stroke-width", 5);
+                    cs.filter(function(d) {
+                          var url = d.profile_url;
+                          return url != "" && url != "undefined";
+                      })
+                      .on("click", function(d) {
+                          var url = d3.select(d.target).datum().profile_url;
+                          window.open("/fs/" + url);
+                      })
+                      .attr("cursor", "pointer")
+                      .attr("stroke", "red");
+
+                    var ts = svg.selectAll("text")
+                                .data(nodes);
+                    ts.enter().append("text");
+                    ts.exit().remove();
+                    ts.attr("x", function(d) { return d.x; })
+                      .attr("y", function(d) { return d.y; })
+                      .attr("text-anchor", "middle")
+                      .attr("fill", "white")
+                      .text(function(d) { return d.f; });
+                });
+    return function(values) {
+        var core = values[core_key];
+        var id_data = values[id_key];
+        var timeline_data = values[timeline_key];
+        var old_nodes = sim.nodes();
+        var new_nodes = [];
+        var old_tid_map = new Map();
+        var new_tid_map = new Map();
+        var links = [];
+        for (var i = 0; i < old_nodes.length; i++) {
+            old_tid_map.set(old_nodes[i].tid, i);
+        }
+        for (var i = 0; i < core.length; i++) {
+            var c = core[i];
+            if (c.category == "compute") {
+                var tid = id_data[i];
+                var timeline = timeline_data[i];
+                if (c.kind == "start") {
+                    if (old_tid_map.has(tid)) {
+                        new_nodes.push(old_nodes[old_tid_map.get(tid)]);
+                    } else {
+                        new_nodes.push({
+                            tid: tid,
+                            x: screen.width/2,
+                            y: screen.height/2,
+                            color: "red",
+                            f: timeline.f,
+                            profile_url: "",
+                        });
+                    }
+                    new_tid_map.set(tid, new_nodes.length-1);
+                } else if (c.kind == "finish") {
+                    if (new_tid_map.has(tid)) {
+                        var node = new_nodes[new_tid_map.get(tid)];
+                        node.color = "blue";
+                        if (profile_key != "" && profile_key != undefined) {
+                            var profile_data = values[profile_key];
+                            if (profile_data != undefined) {
+                                node.profile_url = profile_data[i];
+                            }
+                        }
+                    }
+                }
+            } else if (c.category == "move") {
+                var id = id_data[i];
+                var timeline = timeline_data[i];
+                var src_tid = id.id;
+                var dest_tid = id.thunk_id;
+                if (id.id > 0) {
+                    links.push({
+                        source: src_tid,
+                        target: dest_tid,
+                    });
+                }
+            }
+        }
+        sim.nodes(new_nodes)
+           .force("links", d3.forceLink(links).id(function(d) { return d.tid; }))
+           .alpha(1)
+           .restart();
+    };
+};
+function rawSVG(container, core_key, data_key) {
+    return function(values) {
+        var data = values[data_key];
+        for (var i = 0; i < data.length; i++) {
+            var prof_svg_path = data[i];
+            if (prof_svg_path != "") {
+                d3.html("/fs/" + prof_svg_path).then(function(prof_svg) {
+                    container.selectAll(".raw-svg").remove()
+                    var div = container.append("div")
+                                       .attr("class", "raw-svg");
+                    div.node().appendChild(prof_svg.activeElement);
+                    div.select("svg")
+                       .attr("width", screen.width);
+                });
+                break;
+            }
+        }
+    };
+};
+function profileViewer(container, core_key, profile_key, title) {
+    var profile_container = container.append("div");
+    profile_container.attr("width", 900)
+                     .attr("height", 400)
+                     .attr("style", "border: 1px solid black");
+    profile_container.append("label")
+                     .text("Profiler: ");
+    var profile_toggle = profile_container.append("button")
+                                          .attr("type", "button")
+                                          .text("Start");
+    var profiling = false;
+    var profile_urls = new Set();
+    profile_toggle.on("click", function(input) {
+        if (profiling) {
+            profile_toggle.text("Start");
+            profiling = false;
+        } else {
+            profile_urls = new Set();
+            profile_container.selectAll("iframe").remove();
+            profile_toggle.text("Stop");
+            profiling = true;
+        }
+    });
+    return function(values) {
+        var core = values[core_key],
+            profiles = values[profile_key];
+        if (profiling) {
+            for (i = 0; i < core.length; i++) {
+                profile_urls.add(profiles[i]);
+            }
+        }
+    };
+}
+
+var values = 0;
+var ctxs = new Array();
+
+function drawCtxs() {
+    // Draw contexts
+    if (values != 0) {
+        var filtered_values = new Object();
+        for (key in values) {
+            filtered_values[key] = new Array();
+        }
+        for (i = 0; i < values.core.length; i++) {
+            var value = values.core[i].timestamp;
+            if ((seek_ts_start <= value) && (value <= seek_ts_stop)) {
+                for (key in values) {
+                    filtered_values[key].push(values[key][i]);
+                }
+            }
+        }
+        ctxs.forEach((ctx) => {
+            try {
+                ctx(filtered_values);
+            } catch (ex) {
+                console.error(ex);
+            }
+        });
+    }
+
+    // Ask for more data
+    var interval = Number(draw_interval.node().value)*1000;
+    if (!(interval > 0)) {
+        interval = 1000;
+    }
+    setTimeout(function() {
+        drawCtxs();
+    }, interval);
+}
+
+var waiting = false;
+var myid = 0;
+var worker_id = 1;
+
+var seek_ts_start = 10**100,
+    seek_ts_stop  = 0;
+
+function wsStart() {
+    var loc = window.location;
+    var port = loc.port ? ":"+loc.port : ""
+    if (worker_id == myid || myid == 0) {
+        var feed_path = "ws://" + loc.hostname + port + "/data_feed";
+    } else {
+        var feed_path = "ws://" + loc.hostname + port + "/worker/" + worker_id + "/data_feed";
+    }
+    var ws = new WebSocket(feed_path);
+    status_em.attr("style", "color: yellow")
+             .text("Connecting...");
+    online_input.on("change", function(input) {
+        online = input.target.checked;
+        if (online) {
+            wsStart();
+        } else {
+            ws.close();
+        }
+    });
+    update_input.on("change", function(input) {
+        updating = input.target.checked;
+        if (updating) {
+            // We're probably out of sync with server, grab new data
+            values = 0;
+            ws.send("data");
+        }
+    });
+    zoom_in.on("click", function(input) {
+        seek_ts_middle = seek_ts_start + (seek_length / 2);
+        seek_length *= 0.5;
+        seek_ts_start = seek_ts_middle - (seek_length / 2);
+        seek_ts_stop  = seek_ts_middle + (seek_length / 2);
+        console.log("Zooming in to (" + seek_ts_start + ", " + seek_ts_stop + ")");
+        values = 0;
+        ws.send("seek(" + seek_ts_start + "," + seek_ts_stop + ")");
+    });
+    zoom_out.on("click", function(input) {
+        seek_ts_middle = seek_ts_start + (seek_length / 2);
+        seek_length *= 2;
+        seek_ts_start = seek_ts_middle - (seek_length / 2);
+        seek_ts_stop  = seek_ts_middle + (seek_length / 2);
+        console.log("Zooming out to (" + seek_ts_start + ", " + seek_ts_stop + ")");
+        values = 0;
+        ws.send("seek(" + seek_ts_start + "," + seek_ts_stop + ")");
+    });
+    seek_prev.on("click", function(input) {
+        seek_ts_start = seek_ts_start - seek_length;
+        seek_ts_stop  = seek_ts_stop  - seek_length;
+        console.log("Seeking prev to (" + seek_ts_start + ", " + seek_ts_stop + ")");
+        values = 0;
+        ws.send("seek(" + seek_ts_start + "," + seek_ts_stop + ")");
+    });
+    seek_next.on("click", function(input) {
+        seek_ts_start = seek_ts_start + seek_length;
+        seek_ts_stop  = seek_ts_stop  + seek_length;
+        console.log("Seeking next to (" + seek_ts_start + ", " + seek_ts_stop + ")");
+        values = 0;
+        ws.send("seek(" + seek_ts_start + "," + seek_ts_stop + ")");
+    });
+    seek_full.on("click", function(input) {
+        values = 0;
+        ws.send("fulldata");
+    });
+    seek_length_input.on("change", function(input) {
+        seek_length = Number(input.target.value) * (10**9);
+        if (!(seek_length > 0)) {
+            seek_length = 10**9;
+        }
+        seek_ts_start = seek_ts_stop - seek_length;
+        console.log("Seek to (" + seek_ts_start + ", " + seek_ts_stop + ")");
+        values = 0;
+        ws.send("seek(" + seek_ts_start + "," + seek_ts_stop + ")");
+        // TODO: Initiate purge if necessary
+    });
+    worker_select.on("change", function(input) {
+        worker_id = Number(input.target.value);
+        console.log("Selecting worker " + worker_id);
+        values = 0;
+        ws.close();
+    });
+    ws.onopen = function(evt) {
+        status_em.attr("style", "color: green")
+                 .text("Connected");
+        console.info("Connected to " + feed_path);
+        waiting = true;
+        ws.send("start");
+    };
+    ws.onclose = function(evt) {
+        status_em.attr("style", "color: red")
+                 .text("Disconnected");
+
+        if (online) {
+            console.error("Lost connection to server, reconnect in 5 seconds...");
+            setTimeout(function(){
+                console.warn("Reconnecting to " + feed_path + "...");
+                wsStart();
+            }, 5000);
+        }
+    }
+    ws.onmessage = function(evt) {
+        waiting = false;
+        var raw_data = JSON.parse(evt.data);
+        var cmd = raw_data.cmd;
+        var payload = raw_data.payload;
+
+        if (values == 0 && cmd != "data") { return; }
+        if (cmd == "data") {
+            // Full dataset, ensure it's sorted
+            // FIXME: Ensure that "core" exists
+            var sorted = false;
+            var core = payload.core;
+            while (!sorted) {
+                sorted = true;
+                for (i = 0; i < core.length-1; i++) {
+                    if (core[i].timestamp > core[i+1].timestamp) {
+                        sorted = false;
+                        for (key in payload) {
+                            var tmp = payload[key][i+1];
+                            payload[key][i+1] = payload[key][i];
+                            payload[key][i] = tmp;
+                        }
+                    }
+                }
+            }
+            values = payload;
+
+            // Reset seek to end
+            seek_ts_stop = core[core.length-1].timestamp;
+            seek_ts_start = seek_ts_stop - seek_length;
+        } else if (cmd == "add") {
+            if (!updating) { return; }
+            // New item
+            // TODO: Account for added/deleted keys
+            var core = values.core;
+            var idx = 0;
+
+            for (i = core.length-1; i >= 0; i--) {
+                if (core[i].timestamp < payload.core.timestamp) {
+                    idx = i+1;
+                    break;
+                }
+            }
+            for (key in values) {
+                values[key].splice(idx, 0, payload[key]);
+            }
+
+            // Include new events
+            seek_ts_stop = payload.core.timestamp;
+            seek_ts_start = seek_ts_stop - seek_length;
+        } else if (cmd == "delete") {
+            if (!updating) { return; }
+            // Deleted items
+            for (key in values) {
+                values[key] = values[key].slice(payload);
+            }
+        } else if (cmd == "config") {
+            // Set our local ID
+            // FIXME: Don't set this ID unless from real server
+            if (myid == 0) {
+                myid = payload.myid;
+                worker_id = myid;
+
+                // Set ctxs
+                // TODO: Delete unused ctxs
+                for (i = 0; i < payload.ctxs.length; i++) {
+                    ctx = payload.ctxs[i];
+                    ctxfn = eval(ctx);
+                    ctxs.push(ctxfn);
+                }
+                setTimeout(function(){drawCtxs()}, 1000);
+            }
+
+            // Add/remove workers
+            var wso = worker_select.selectAll("option")
+                                   .data(payload.workers);
+            wso.enter().append("option")
+                       .attr("value", function(d){return d;})
+                       .text(function(d){return d;});
+            wso.exit().remove();
+            worker_select.node().value = worker_id;
+        } else {
+            console.error("Unknown command: " + cmd);
+        }
+    };
+};
+
+// Run dashboard!
+var svg_container = d3.select(".svg-container");
+wsStart();
+</script>
+</body>
+</html>

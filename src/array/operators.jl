@@ -1,0 +1,196 @@
+import Base: broadcast
+import Base: Broadcast
+import Base.Broadcast: Broadcasted, BroadcastStyle, combine_eltypes
+
+"""
+This is a way of suggesting that stage should call
+stage_operand with the operation and other arguments.
+"""
+struct PromotePartition{T,N} <: ArrayOp{T,N}
+    data::AbstractArray{T,N}
+end
+
+size(p::PromotePartition) = size(domain(p.data))
+
+struct BCast{B, T, Nd, D} <: ArrayOp{T, Nd}
+    bcasted::B
+    dest::D
+end
+
+BCast(b::Broadcasted) = BCast{typeof(b), combine_eltypes(b.f, b.args), length(axes(b)), Nothing}(b, nothing)
+BCast(dest::DArray, b::Broadcasted) = BCast{typeof(b), eltype(dest), ndims(dest), typeof(dest)}(b, dest)
+
+size(x::BCast) = map(length, axes(x.bcasted))
+
+function stage_operands(ctx::Context, ::BCast, xs::ArrayOp...)
+    map(x->stage(ctx, x), xs)
+end
+
+function stage_operands(ctx::Context, ::BCast, x::ArrayOp, y::PromotePartition)
+    stg_x = stage(ctx, x)
+    y1 = Distribute(domain(stg_x), y.data)
+    stg_x, stage(ctx, y1)
+end
+
+function stage_operands(ctx::Context, ::BCast, x::PromotePartition, y::ArrayOp)
+    stg_y = stage(ctx, y)
+    x1 = Distribute(domain(stg_y), x.data)
+    stage(ctx, x1), stg_y
+end
+
+struct DaggerBroadcastStyle <: BroadcastStyle end
+
+BroadcastStyle(::Type{<:ArrayOp}) = DaggerBroadcastStyle()
+BroadcastStyle(::DaggerBroadcastStyle, ::BroadcastStyle) = DaggerBroadcastStyle()
+BroadcastStyle(::BroadcastStyle, ::DaggerBroadcastStyle) = DaggerBroadcastStyle()
+
+function Base.copy(b::Broadcast.Broadcasted{<:DaggerBroadcastStyle})
+    return _to_darray(BCast(b))
+end
+
+function Base.copyto!(dest::DArray, b::Broadcast.Broadcasted{<:DaggerBroadcastStyle})
+    _to_darray(BCast(dest, b))
+    return dest
+end
+
+function stage(ctx::Context, node::BCast{B,T,N,D}) where {B,T,N,D}
+    bc = Broadcast.flatten(node.bcasted)
+    args = bc.args
+    args1 = map(args) do x
+        x isa ArrayOp ? stage(ctx, x) : x
+    end
+    ds = map(x->x isa DArray ? domainchunks(x) : nothing, args1)
+    sz = size(node)
+    dss = filter(x->x !== nothing, collect(ds))
+    if node.dest !== nothing
+        part = node.dest.partitioning
+        cumlengths = domainchunks(node.dest).cumlength
+    else
+        # TODO: Use a more intelligent scheme
+        part = args1[findfirst(arg->arg isa DArray && ndims(arg) == N, args1)].partitioning
+        cumlengths = ntuple(ndims(node)) do i
+            idx = findfirst(d -> i <= length(d.cumlength), dss)
+            if idx === nothing
+                [sz[i]] # just one slice
+            else
+                dss[idx].cumlength[i]
+            end
+        end
+    end
+
+    args2 = map(args1) do arg
+        if arg isa AbstractArray
+            s = size(arg)
+            splits = map(enumerate(s)) do dim
+                i, n = dim
+                if n == 1
+                    return [1]
+                else
+                    cumlengths[i]
+                end
+            end |> Tuple
+            dmn = DomainBlocks(ntuple(_->1, length(s)), splits)
+            stage(ctx, Distribute(dmn, part, arg, nothing)).chunks
+        else
+            arg
+        end
+    end
+    blcks = DomainBlocks(map(_->1, size(node)), cumlengths)
+
+    if node.dest !== nothing
+        Dagger.spawn_datadeps() do
+            broadcast(node.dest.chunks, args2...) do d, args3...
+                Dagger.@spawn broadcast!(bc.f, InOut(d), args3...)
+            end
+        end
+        return node.dest
+    else
+        thunks = broadcast((args3...)->Dagger.spawn((args...)->broadcast(bc.f, args...), args3...), args2...)
+        return DArray(eltype(node), domain(node), blcks, thunks, part)
+    end
+end
+
+export mappart, mapchunk
+
+struct MapChunk{F, Ni, T, Nd} <: ArrayOp{T, Nd}
+    f::F
+    input::NTuple{Ni, ArrayOp{T,Nd}}
+end
+
+mapchunk(f::Function, xs::ArrayOp...) = MapChunk(f, xs)
+Base.@deprecate mappart(args...) mapchunk(args...)
+function stage(ctx::Context, node::MapChunk)
+    inputs = map(x->stage(ctx, x), node.input)
+    thunks = map(map(chunks, inputs)...) do ps...
+        Dagger.spawn(node.f, map(p->nothing=>p, ps)...)
+    end
+
+    # TODO: Concrete type
+    DArray(Any, domain(inputs[1]), domainchunks(inputs[1]), thunks)
+end
+
+# Basic indexing helpers
+
+Base.first(A::DArray) = A[begin]
+Base.last(A::DArray) = A[end]
+
+# Addition and subtraction
+
+function elementwise_op!(f, C, A, B)
+    @assert size(C) == size(A) == size(B)
+    C .= f.(A, B)
+    return
+end
+function elementwise_op(f, A::DArray, B::DArray)
+    if size(A) != size(B)
+        throw(DimensionMismatch("Sizes of A and B must match"))
+    end
+    A_part = A.partitioning
+    B_part = B.partitioning
+    if A.partitioning != B.partitioning
+        B_part = A_part
+    end
+    C = similar(A)
+    maybe_copy_buffered(B=>B_part, A=>A_part) do B, A
+        Ac = A.chunks
+        Bc = B.chunks
+        Cc = C.chunks
+        Dagger.spawn_datadeps() do
+            for idx in eachindex(Cc)
+                Dagger.@spawn elementwise_op!(f, Out(Cc[idx]), In(Ac[idx]), In(Bc[idx]))
+            end
+        end
+        return
+    end
+    return C
+end
+Base.:(+)(A::DArray, B::DArray) = elementwise_op(+, A, B)
+Base.:(-)(A::DArray, B::DArray) = elementwise_op(-, A, B)
+
+# In-place operations
+
+function imap!(f, A)
+    for idx in eachindex(A)
+        A[idx] = f(A[idx])
+    end
+    return A
+end
+
+function Base.map!(f, a::DArray{T}) where T
+    Dagger.spawn_datadeps() do
+        for ca in chunks(a)
+            Dagger.@spawn imap!(f, InOut(ca))
+        end
+    end
+    return a
+end
+
+function Base.map!(f, a::DArray{T}, b::AbstractArray{U}) where {T, U}
+    b2 = view(b, a.partitioning)
+    Dagger.spawn_datadeps() do
+        for (c_a, c_b2) in zip(chunks(a), chunks(b2))
+            Dagger.@spawn map!(f, InOut(c_a), c_b2)
+        end
+    end
+    return a
+end

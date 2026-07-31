@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+- family-names: "Samaroo"
+  given-names: "Julian"
+  orcid: "https://orcid.org/0009-0003-9623-0512"
+- family-names: "Alomairy"
+  given-names: "Rabab"
+  orcid: "https://orcid.org/0000-0001-9911-6094"
+- family-names: "de Alcântara Tomé"
+  given-names: "Felipe"
+  orcid: "https://orcid.org/0000-0002-1448-9340"
+- family-names: "Wrigley"
+  given-names: "James"
+  orcid: "https://orcid.org/0009-0003-6525-7413"
+title: "Dagger.jl"
+version: 0.18.12
+date-released: 2024-06-25
+url: "https://github.com/JuliaParallel/Dagger.jl"
