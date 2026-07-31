@@ -59,6 +59,61 @@ function Dagger.aliasing(x::CuArray{T}) where T
 end
 
 function Dagger.unsafe_free!(x::CuArray)
+    # Env-gated stacktrace instrumentation. When
+    # `DAGGER_TRACE_UNSAFE_FREE=1` is set, log every `unsafe_free!`
+    # call with its stacktrace — used to identify racing callers.
+    # Zero overhead when unset (single ENV dict lookup that
+    # branch-predicts away).
+    if get(ENV, "DAGGER_TRACE_UNSAFE_FREE", "0") == "1"
+        st = stacktrace(backtrace())
+        @info "Dagger.unsafe_free!(::CuArray)" array_type=typeof(x) array_size=size(x) stacktrace=st
+    end
+    # Synchronize the device context before releasing the buffer.
+    # Guards against a class of correctness bugs where a scheduled
+    # `unsafe_free!` task races with a concurrent `move!` copy-task on
+    # the same buffer. The datadeps aliasing machinery emits
+    # `unsafe_free!` tasks at region end with syncdeps gathered via
+    # `gather_free_syncdeps!` in `src/datadeps/aliasing.jl:752`; that
+    # gather is intended to include every `enqueue_remainder_copy_to!`
+    # / `enqueue_remainder_copy_from!` task (spawned in
+    # `src/datadeps/remainders.jl:289` / `:343`, which register as
+    # readers/writers of the buffer's ainfos in `add_reader!` /
+    # `add_writer!` at `aliasing.jl:806` / `:784`). On CPU-only
+    # sessions this chain works — even if a copy-task were missed,
+    # `unsafe_free!` on `Array{T}` is a Julia refcount decrement and
+    # freeing while another reader holds it is harmless. On GPU
+    # sessions any missed edge is catastrophic: `CUDA.unsafe_free!`
+    # invalidates the buffer immediately and any in-flight `move!`
+    # dereferencing `pointer(::CuArray)` throws
+    # `ArgumentError: Attempt to use a freed reference` from
+    # GPUArrays.abstractarray.jl:73 (the explicit-freed sentinel,
+    # NOT the GC use-after-free sentinel — verified by hudson's Cell A
+    # v3 tracing: caller stack is 2 frames deep ending at the
+    # `Dagger.@spawn` closure that dispatches this `unsafe_free!` as
+    # a scheduled task).
+    #
+    # The correct long-term fix belongs in Dagger core's aliasing
+    # machinery: either audit `gather_free_syncdeps!` for missing
+    # edges in the datadeps-allocated-slot code path, or restructure
+    # so free-tasks are gated on a per-buffer reference counter
+    # incremented by every task that touches the buffer. Both are
+    # non-trivial and deferred to a dedicated upstream PR.
+    #
+    # For the immediate correctness need, this synchronize is the
+    # right place to defend: CUDA best practice dictates syncing the
+    # device context before `unsafe_free!` on any buffer that might
+    # have pending operations, regardless of scheduler-level
+    # guarantees. `CUDA.synchronize()` waits for the current context's
+    # stream queue to drain — fast no-op when nothing is pending
+    # (common case, since the syncdep chain usually IS correct), and
+    # a bounded wait (bounded by the longest concurrent transfer's
+    # remaining time — milliseconds at worst on H100) in the racy
+    # cases the syncdep bug exposes. `with_context(x)` picks the
+    # array's device before syncing so we drain the right stream when
+    # the caller's context is on a different device.
+    with_context(x) do
+        CUDA.synchronize()
+    end
     CUDA.unsafe_free!(x)
     return
 end
@@ -452,9 +507,40 @@ for lib in [BLAS, LAPACK]
                 fn = getproperty(lib, name)
                 cufn = getproperty(culib, name)
                 @eval Dagger.move(from_proc::CPUProc, to_proc::CuArrayDeviceProc, ::$(typeof(fn))) = $cufn
+                # Companion to the `move` above: the scheduler's cost lookup
+                # needs the same CPU->GPU function mapping, but at the type
+                # level and without a value to dispatch on.
+                @eval Dagger._translate_fn_for(::Type{$(typeof(fn))}, ::CuArrayDeviceProc) = $(typeof(cufn))
             end
         end
     end
+end
+
+# Array-type half of the signature translation. Hardcoded rather than
+# reflective: there are only a handful of array types to map, and the
+# `DeviceMemory` parameter has no CPU-side counterpart to derive it from.
+_translate_type_for(::Type{Matrix{T}}) where T = CuArray{T,2,CUDA.DeviceMemory}
+_translate_type_for(::Type{Vector{T}}) where T = CuArray{T,1,CUDA.DeviceMemory}
+_translate_type_for(::Type{Array{T,N}}) where {T,N} = CuArray{T,N,CUDA.DeviceMemory}
+# Scalars and other non-array arguments cross unchanged.
+_translate_type_for(::Type{T}) where {T<:Union{Number,Char,Symbol,Function}} = T
+_translate_type_for(::Type) = nothing
+
+function Dagger._translate_sig_for(sig::Vector, proc::CuArrayDeviceProc)
+    isempty(sig) && return nothing
+    out = Vector{Any}(undef, length(sig))
+    # Element 1 is the function type; the rest are argument types.
+    fn = Dagger._translate_fn_for(sig[1], proc)
+    fn === nothing && return nothing
+    out[1] = fn
+    for i in 2:length(sig)
+        t = sig[i]
+        t isa Type || return nothing
+        mapped = _translate_type_for(t)
+        mapped === nothing && return nothing
+        out[i] = mapped
+    end
+    return out
 end
 
 # Adapt RefValue
@@ -563,6 +649,14 @@ Dagger.scope_key_precedence(::Val{:cuda_gpus}) = 1
 const DEVICES = Dict{Int, CuDevice}()
 const CONTEXTS = Dict{Int, CuContext}()
 const STREAMS = Dict{Int, Vector{CuStream}}()
+
+# Each `CuArrayDeviceProc` multiplexes `length(STREAMS[device])` independent
+# CUDA streams, so it can have that many kernels in flight concurrently.
+# Reported to the cost model so EFT does not serialise queued GPU tasks.
+function Dagger.proc_concurrency(proc::CuArrayDeviceProc)
+    streams = get(STREAMS, proc.device, nothing)
+    return streams === nothing ? 1 : max(1, length(streams))
+end
 const SYNCDEPS = Dagger.LockedObject(Dict{Int, Tuple{Int,Int}}())
 
 function __init__()

@@ -31,7 +31,8 @@ import ScopedValues: @with
 
 import ..Dagger: SignatureMetric, ProcessorMetric, WorkerMetric, TransferSizeMetric, TransferTimeMetric, TransferRateMetric
 import ..Dagger: TASK_SIGNATURE, TASK_PROCESSOR, TASK_WORKER, TASK_TRANSFER_SIZE, TASK_TRANSFER_TIME
-import ..Dagger: execute_metrics_spec, metrics_lookup_runtime, metrics_lookup_alloc, metrics_lookup_transfer_rate
+import ..Dagger: execute_metrics_spec, metrics_lookup_runtime, metrics_lookup_alloc, metrics_lookup_transfer_rate,
+                 build_signature_runtime_index, metrics_lookup_runtime_from_index
 import ..Dagger: extract_collected_metrics, apply_collected_metrics!
 import ..Dagger.MetricsTracker as MT
 
@@ -888,7 +889,23 @@ concurrently across threads.
     resize!(sorted_procs, length(input_procs))
     costs = @reusable_dict :schedule_one!_costs Processor Float64 OSProc() 0.0 32
     costs_cleanup = @reuse_defer_cleanup empty!(costs)
-    estimate_task_costs!(sorted_procs, costs, state, input_procs, task; sig)
+
+    # Take a single global metrics snapshot for this whole scheduling pass and
+    # reuse it for cost estimation and every per-proc has_capacity check below.
+    # Previously estimate_task_costs! and each has_capacity call snapshotted the
+    # global metrics cache independently; since other threads bump the cache's
+    # generation on every task completion, each of those calls rebuilt (deep-
+    # copied) the entire snapshot. One snapshot per pass collapses that to at
+    # most a single rebuild.
+    snap = MT.snapshot(MT.global_metrics_cache())
+
+    # Build the per-signature index once and share it with both callers, so
+    # each is O(1) per proc after a single O(N) build (vs two independent
+    # end-to-end MetricsTracker scans per task on the AOT path).
+    sig_vec_for_index = sig isa Dagger.Signature ? sig.sig : sig
+    runtime_index = build_signature_runtime_index(snap, sig_vec_for_index)
+    estimate_task_costs!(sorted_procs, costs, state, input_procs, task;
+                         sig, runtime_index, snap)
     input_procs_cleanup()
 
     # Select the best available processor and reserve time pressure optimistically.
@@ -900,7 +917,8 @@ concurrently across threads.
         can_use, scope = can_use_proc(state, task, gproc, proc, options, scope)
         if can_use
             has_cap, est_time_util, est_alloc_util, est_occupancy =
-                has_capacity(state, proc, gproc.pid, options.time_util, options.alloc_util, options.occupancy, sig)
+                has_capacity(state, proc, gproc.pid, options.time_util, options.alloc_util, options.occupancy, sig;
+                             runtime_index, snap)
             if has_cap
                 # Optimistic reservation: capture-the-ref, atomic_add!
                 counter_ref = lock(state.worker_time_pressure) do wtp
@@ -1334,6 +1352,25 @@ function proc_states_values(uid::UInt64=Dagger.get_tls().sch_uid)
         return collect(values(states.dict))
     end
 end
+"""
+    proc_states_values!(buf::Vector{ProcessorState}, uid) -> buf
+
+Refill `buf` (in place) with the current `ProcessorState`s for scheduler `uid`.
+Like `proc_states_values` but reuses the caller's buffer instead of allocating a
+fresh `Vector` on every call, for hot paths (e.g. the per-attempt work-stealing
+scan) that would otherwise churn a short-lived list. `buf`'s concrete element
+type also keeps downstream field accesses from boxing.
+"""
+function proc_states_values!(buf::Vector{ProcessorState}, uid::UInt64=Dagger.get_tls().sch_uid)
+    states = proc_states(uid)
+    MemPool.lock_read(states.lock) do
+        empty!(buf)
+        for (_, state) in states.dict
+            push!(buf, state)
+        end
+    end
+    return buf
+end
 function proc_state!(f, uid::UInt64, proc::Processor)
     states = proc_states(uid)
     state = MemPool.lock_read(states.lock) do
@@ -1384,6 +1421,12 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
 
         wid = get_parent(to_proc).pid
         work_to_do = false
+        # Reused across steal attempts so the work-stealing scan below doesn't
+        # allocate a fresh state list + shuffle permutation on every attempt.
+        # Allocated once per processor runner; grows at most to the processor
+        # count. Concretely typed so the field accesses in the scan don't box.
+        steal_states = ProcessorState[]
+        steal_perm = Int[]
         while isopen(return_queue)
             # Wait for new tasks
             if !work_to_do
@@ -1439,10 +1482,18 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
 
                 # Try to steal from local queues randomly
                 # TODO: Prioritize stealing from busiest processors
-                states = proc_states_values(uid)
-                # TODO: Try to pre-allocate this
-                P = randperm(length(states))
-                for state in getindex.(Ref(states), P)
+                #
+                # Refill the reusable state buffer from the live dict, then
+                # shuffle indices in place with randperm! to keep steal targets
+                # random. This avoids the per-attempt allocation of a fresh
+                # state Vector, a permutation Vector, and a broadcast Memory
+                # (and the boxing that the old broadcast/iterate incurred on the
+                # ProcessorState/ProcessorInternalState field reads).
+                proc_states_values!(steal_states, uid)
+                resize!(steal_perm, length(steal_states))
+                randperm!(steal_perm)
+                for pidx in steal_perm
+                    state = steal_states[pidx]
                     other_istate = state.state
                     if other_istate.proc === to_proc
                         continue
@@ -1726,18 +1777,118 @@ function do_tasks(to_proc, return_queue, tasks)
     end
     notify(istate.reschedule)
 
-    # Kick other processors to make them steal
+    # Kick other processors to make them steal.
     # TODO: Alternatively, automatically balance work instead of blindly enqueueing
-    states = proc_states_values(uid)
-    P = randperm(length(states))
-    for other_state in getindex.(Ref(states), P)
-        other_istate = other_state.state
-        if other_istate.proc === to_proc
-            continue
+    #
+    # Iterate the processor-state dict in place under a read lock and ring each
+    # other processor's doorbell, instead of the previous
+    # collect(values)+randperm+broadcast, which allocated a fresh Vector, a
+    # permutation Vector, and a Memory on every task fire. Notification order is
+    # irrelevant for work-stealing (each idle processor independently decides
+    # whether to steal), so no shuffle is needed, and `notify(::Doorbell)` is a
+    # lock-free atomic signal that is safe to call while holding the read lock.
+    let states = proc_states(uid)
+        MemPool.lock_read(states.lock) do
+            for (_, other_state) in states.dict
+                other_istate = other_state.state
+                other_istate.proc === to_proc && continue
+                notify(other_istate.reschedule)
+            end
         end
-        notify(other_istate.reschedule)
     end
     @dagdebug nothing :processor "Kicked processors"
+end
+
+# do_task only needs a Context to satisfy logging (`@maybelog` reads `log_sink`
+# and `profile`); the proc-management machinery it carries (a ReentrantLock and a
+# Condition) is never used on this path. Since `(log_sink, profile)` are constant
+# for a scheduler, memoize the last-built Context instead of allocating a fresh
+# one -- plus its lock and condition -- on every task. Lock-free: the hot path is
+# an atomic load + key compare (a Context is only built on a config change).
+# Reusable per-task scratch cache for the metrics collected during `execute!`.
+# Kept task-local (each pooled scheduler worker task owns one) and reset before
+# each use, so its per-metric storage Dicts/Vectors are allocated once and reused
+# rather than rebuilt for every task. `do_task` runs on a pool of reusable tasks
+# (see `DoTaskSpec`/`@reusable_tasks`), so the same task services many tasks and
+# the cache is genuinely reused.
+const DO_TASK_LOCAL_METRICS = TaskLocalValue{MT.MetricsCache}(() -> MT.MetricsCache())
+
+struct _DoTaskCtxMemo
+    key::Tuple{UInt64,Bool}
+    ctx::Context
+end
+mutable struct _DoTaskCtxMemoBox
+    @atomic memo::Union{Nothing,_DoTaskCtxMemo}
+end
+const DO_TASK_CTX = _DoTaskCtxMemoBox(nothing)
+function do_task_context(log_sink, profile::Bool)
+    key = (objectid(log_sink), profile)
+    memo = @atomic DO_TASK_CTX.memo
+    if memo !== nothing && memo.key === key
+        return memo.ctx
+    end
+    ctx = Context(Processor[]; log_sink, profile)
+    @atomic DO_TASK_CTX.memo = _DoTaskCtxMemo(key, ctx)
+    return ctx
+end
+
+# Move one argument onto `to_proc`. Factored out of `do_task` so both the inline
+# (cheap local move) and spawned (potential real data movement) paths call it
+# without allocating a per-argument closure.
+function _move_task_arg!(ctx, thunk_id, to_proc, @nospecialize(f), arg)
+    value = Dagger.value(arg)
+    position = arg.pos
+    @maybelog ctx timespan_start(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=value))
+    #= FIXME: This isn't valid if x is written to
+    x = if x isa Chunk
+        value = lock(TASK_SYNC) do
+            if haskey(CHUNK_CACHE, x)
+                Some{Any}(get!(CHUNK_CACHE[x], to_proc) do
+                    # Convert from cached value
+                    # TODO: Choose "closest" processor of same type first
+                    some_proc = first(keys(CHUNK_CACHE[x]))
+                    some_x = CHUNK_CACHE[x][some_proc]
+                    @dagdebug thunk_id :move "Cache hit for argument $id at $some_proc: $some_x"
+                    @invokelatest move(some_proc, to_proc, some_x)
+                end)
+            else
+                nothing
+            end
+        end
+
+        if value !== nothing
+            something(value)
+        else
+            # Fetch it
+            time_start = time_ns()
+            from_proc = processor(x)
+            _x = @invokelatest move(from_proc, to_proc, x)
+            time_finish = time_ns()
+            if x.handle.size !== nothing
+                Threads.atomic_add!(transfer_time, time_finish - time_start)
+                Threads.atomic_add!(transfer_size, x.handle.size)
+            end
+
+            @dagdebug thunk_id :move "Cache miss for argument $id at $from_proc"
+
+            # Update cache
+            lock(TASK_SYNC) do
+                CHUNK_CACHE[x] = Dict{Processor,Any}()
+                CHUNK_CACHE[x][to_proc] = _x
+            end
+
+            _x
+        end
+    else
+    =#
+    new_value = @invokelatest move(to_proc, value)
+    #end
+    if new_value !== value
+        @dagdebug thunk_id :move "Moved argument @ $position to $to_proc: $(typeof(value)) -> $(typeof(new_value))"
+    end
+    @maybelog ctx timespan_finish(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=new_value); tasks=[Base.current_task()])
+    arg.value = new_value
+    return
 end
 
 """
@@ -1749,7 +1900,7 @@ Executes a single task specified by `task` on `to_proc`.
     thunk_id = task.thunk_id
 
     ctx_vars = task.ctx_vars
-    ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
+    ctx = do_task_context(ctx_vars.log_sink, ctx_vars.profile)
 
     from_proc = OSProc()
     data = task.data
@@ -1835,67 +1986,28 @@ Executes a single task specified by `task` on `to_proc`.
     else
         data
     end
-    fetch_tasks = map(_data) do arg
-        #=FIXME:REALLOC_TASKS=#
-        Threads.@spawn begin
-            value = Dagger.value(arg)
-            position = arg.pos
-            @maybelog ctx timespan_start(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=value))
-            #= FIXME: This isn't valid if x is written to
-            x = if x isa Chunk
-                value = lock(TASK_SYNC) do
-                    if haskey(CHUNK_CACHE, x)
-                        Some{Any}(get!(CHUNK_CACHE[x], to_proc) do
-                            # Convert from cached value
-                            # TODO: Choose "closest" processor of same type first
-                            some_proc = first(keys(CHUNK_CACHE[x]))
-                            some_x = CHUNK_CACHE[x][some_proc]
-                            @dagdebug thunk_id :move "Cache hit for argument $id at $some_proc: $some_x"
-                            @invokelatest move(some_proc, to_proc, some_x)
-                        end)
-                    else
-                        nothing
-                    end
-                end
-
-                if value !== nothing
-                    something(value)
-                else
-                    # Fetch it
-                    time_start = time_ns()
-                    from_proc = processor(x)
-                    _x = @invokelatest move(from_proc, to_proc, x)
-                    time_finish = time_ns()
-                    if x.handle.size !== nothing
-                        Threads.atomic_add!(transfer_time, time_finish - time_start)
-                        Threads.atomic_add!(transfer_size, x.handle.size)
-                    end
-
-                    @dagdebug thunk_id :move "Cache miss for argument $id at $from_proc"
-
-                    # Update cache
-                    lock(TASK_SYNC) do
-                        CHUNK_CACHE[x] = Dict{Processor,Any}()
-                        CHUNK_CACHE[x][to_proc] = _x
-                    end
-
-                    _x
-                end
-            else
-            =#
-            new_value = @invokelatest move(to_proc, value)
-            #end
-            if new_value !== value
-                @dagdebug thunk_id :move "Moved argument @ $position to $to_proc: $(typeof(value)) -> $(typeof(new_value))"
-            end
-            @maybelog ctx timespan_finish(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=new_value); tasks=[Base.current_task()])
-            arg.value = new_value
-            return
+    # Move the function and arguments onto `to_proc`. Only arguments that may
+    # require real (possibly remote, blocking) data movement -- Chunks /
+    # WeakChunks -- are fetched concurrently on a spawned task; plain inline
+    # values (the common case for leaf tasks) just need a cheap local `move`, so
+    # they are moved synchronously here. This avoids spawning (and immediately
+    # joining) a Task per argument, which was a per-task allocation source
+    # (FIXME:REALLOC_TASKS). The task list itself is a reused buffer, so leaf
+    # tasks with no movable arguments allocate nothing here.
+    fetch_tasks = @reusable_vector :do_task_fetch_tasks Union{Task,Nothing} nothing 32
+    fetch_tasks_cleanup = @reuse_defer_cleanup empty!(fetch_tasks)
+    for arg in _data
+        value = Dagger.value(arg)
+        if value isa Chunk || value isa WeakChunk
+            push!(fetch_tasks, Threads.@spawn _move_task_arg!(ctx, thunk_id, to_proc, f, arg))
+        else
+            _move_task_arg!(ctx, thunk_id, to_proc, f, arg)
         end
     end
     for task in fetch_tasks
-        fetch_report(task)
+        task === nothing || fetch_report(task::Task)
     end
+    fetch_tasks_cleanup()
 
     f = Dagger.value(first(data))
     @assert !(f isa Chunk) "Failed to unwrap thunk function"
@@ -1925,7 +2037,8 @@ Executes a single task specified by `task` on `to_proc`.
 
     task_sig = signature(first(data), @view data[2:end]).sig
 
-    local_metrics_cache = MT.MetricsCache()
+    local_metrics_cache = DO_TASK_LOCAL_METRICS[]
+    MT.reset_pending!(local_metrics_cache)
     mspec = execute_metrics_spec()
 
     @dagdebug thunk_id :execute "Executing $(typeof(f))"

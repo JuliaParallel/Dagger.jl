@@ -120,6 +120,18 @@ function snapshot_view(cache::MetricsCache)
     return snapshot(cache)
 end
 
+"""
+    pending_context(cache::MetricsCache, mod::Module, context::Symbol)
+
+Return the live (pending) `AbstractContextStorage` for `(mod, context)`, or
+`nothing` if none exists, *without* building a snapshot. Reads the cache's
+mutable state directly, so it is only safe when there are no concurrent writers
+(e.g. a task-local cache being drained by its own task). For that case it avoids
+the full deep-copy a `snapshot` would perform purely to read values back out.
+"""
+pending_context(cache::MetricsCache, mod::Module, context::Symbol) =
+    get(cache.pending, (mod, context), nothing)
+
 const GLOBAL_METRICS_CACHE = MetricsCache()
 global_metrics_cache() = GLOBAL_METRICS_CACHE
 
@@ -135,6 +147,31 @@ function reset_global_cache!()
         return
     end
     return
+end
+
+_reset_storage!(s::MetricStorage) = (empty!(s.data); empty!(s.insertion_order); nothing)
+
+"""
+    reset_pending!(cache::MetricsCache) -> cache
+
+Clear a cache's pending values for reuse while *retaining* its allocated storage
+objects: each per-metric `Dict` and insertion-order `Vector` is `empty!`'d but
+keeps its capacity. This makes a `MetricsCache` cheaply reusable across many uses
+(e.g. a task-local scratch cache drained after every task) without reallocating
+its per-metric storage each time. Only safe when there are no concurrent
+readers/writers of `cache` (as with a task-local cache owned by one task).
+"""
+function reset_pending!(cache::MetricsCache)
+    with_write_lock(cache) do
+        for (_, ctx) in cache.pending
+            for (_, s) in ctx.storages
+                _reset_storage!(s)
+            end
+        end
+        @atomic cache.generation = UInt64(0)
+        return
+    end
+    return cache
 end
 
 function copy_context(c::AbstractContextStorage)
@@ -187,4 +224,43 @@ function _trim_storage!(s::MetricStorage{M, K, T}, keep::Int) where {M, K, T}
     end
     deleteat!(s.insertion_order, 1:drop)
     return
+end
+
+"""
+    trim_context!(ctx::AbstractContextStorage, max_keys::Integer)
+
+Bound the number of distinct keys retained in `ctx` to the most-recent
+`max_keys`, evicting the oldest keys (by first-seen insertion order) from *every*
+storage in the context together.
+
+Unlike per-storage trimming, this keeps a key present-or-absent consistently
+across all of a context's metrics, which is required by multi-metric lookups
+(e.g. matching a `SignatureMetric` *and* a `ProcessorMetric` on the same key).
+The longest per-metric insertion order is used as the canonical key ordering: a
+metric that is recorded for every key (e.g. an always-present timing metric) is a
+superset of the others and captures the true global oldest->newest order.
+"""
+function trim_context!(ctx::AbstractContextStorage, max_keys::Integer)
+    max_keys < 0 && return ctx
+    keep = Int(max_keys)
+    canonical = nothing
+    canonical_len = -1
+    for (_, s) in ctx.storages
+        sync_insertion_order!(s)
+        len = length(s.insertion_order)
+        if len > canonical_len
+            canonical_len = len
+            canonical = s.insertion_order
+        end
+    end
+    (canonical === nothing || canonical_len <= keep) && return ctx
+    drop = canonical_len - keep
+    # Snapshot the keys to evict before mutating any insertion order.
+    evict = canonical[1:drop]
+    for k in evict
+        for (_, s) in ctx.storages
+            delete_metric_value!(s, k)
+        end
+    end
+    return ctx
 end

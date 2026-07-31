@@ -152,6 +152,136 @@ metrics_lookup_runtime_min(snap, sig, proc, worker_id) =
 metrics_lookup_runtime_max(snap, sig, proc, worker_id) =
     metrics_lookup_runtime(snap, sig, proc, worker_id; reducer=maximum)
 
+"""
+    SignatureRuntimeIndex
+
+Precomputed per-signature runtime index built by
+`build_signature_runtime_index`. Groups measured `ThreadTimeMetric`
+runtimes for a fixed signature `sig` by `(processor, worker_id)`,
+`(processor_type, worker_id)`, `(processor_type)`, and all-matching so
+that per-processor lookups via
+`metrics_lookup_runtime_from_index` can traverse the fallback chain in
+O(1) hash lookups instead of re-scanning the snapshot per call.
+
+The scheduler's per-task cost estimator (`estimate_task_costs!`)
+evaluates every candidate processor with the same signature, so building
+this index once amortises what would otherwise be `O(W × N)` snapshot
+scans (where `W` is candidate-processor count and `N` is total metric
+keys) into a single `O(N)` scan plus `O(W)` amortized dict lookups.
+"""
+struct SignatureRuntimeIndex
+    by_proc_worker::Dict{Tuple{Processor,Int},Vector{UInt64}}
+    by_type_worker::Dict{Tuple{DataType,Int},Vector{UInt64}}
+    by_type::Dict{DataType,Vector{UInt64}}
+    any_matching::Vector{UInt64}
+end
+
+"""
+    build_signature_runtime_index(snap::MT.MetricsSnapshot, sig::Vector)
+        -> SignatureRuntimeIndex
+
+Single-pass build: scan the SignatureMetric storage once, keep only keys
+matching `sig`, then for each such key materialise its
+(processor, worker_id, ThreadTimeMetric) tuple and index into the four
+buckets used by the fallback chain in `metrics_lookup_runtime`. The
+result is safe to reuse across many `metrics_lookup_runtime_from_index`
+calls for different processors as long as `sig` and `snap` are
+unchanged.
+"""
+function build_signature_runtime_index(snap::MT.MetricsSnapshot, sig::Vector)
+    ctx = get(snap.contexts, (Dagger, :execute!), nothing)
+    if ctx === nothing
+        return SignatureRuntimeIndex(
+            Dict{Tuple{Processor,Int},Vector{UInt64}}(),
+            Dict{Tuple{DataType,Int},Vector{UInt64}}(),
+            Dict{DataType,Vector{UInt64}}(),
+            UInt64[],
+        )
+    end
+
+    sig_storage = get(ctx.storages, SignatureMetric(), nothing)
+    proc_storage = get(ctx.storages, ProcessorMetric(), nothing)
+    worker_storage = get(ctx.storages, WorkerMetric(), nothing)
+    time_storage = get(ctx.storages, MT.ThreadTimeMetric(), nothing)
+
+    by_proc_worker = Dict{Tuple{Processor,Int},Vector{UInt64}}()
+    by_type_worker = Dict{Tuple{DataType,Int},Vector{UInt64}}()
+    by_type        = Dict{DataType,Vector{UInt64}}()
+    any_matching   = UInt64[]
+
+    # Missing any of the storages means no runtime data has been recorded
+    # yet — return the empty index (all buckets empty), which mirrors what
+    # the original `metrics_lookup_runtime` would produce (returns `nothing`
+    # via `_reduce_uint64` on empty vectors).
+    if sig_storage === nothing || proc_storage === nothing ||
+       worker_storage === nothing || time_storage === nothing
+        return SignatureRuntimeIndex(by_proc_worker, by_type_worker, by_type, any_matching)
+    end
+
+    # One O(N) scan across sig-matching keys; each bucket insertion is O(1)
+    # amortised. `sig` is a `Vector{Any}` and the stored value is the same
+    # type, so `==` compares element-wise — matching the semantics of
+    # `LookupExact(SignatureMetric(), sig)` in `_runtime_lookup_chain`.
+    for (k, s) in sig_storage.data
+        s == sig || continue
+        v = get(time_storage.data, k, nothing)
+        v === nothing && continue
+        rt = v::UInt64
+        p = get(proc_storage.data, k, nothing)
+        w = get(worker_storage.data, k, nothing)
+        push!(any_matching, rt)
+        if p !== nothing
+            proc_v = p::Processor
+            proc_type = typeof(proc_v)
+            push!(get!(() -> UInt64[], by_type, proc_type), rt)
+            if w !== nothing
+                worker_v = w::Int
+                push!(get!(() -> UInt64[], by_proc_worker,
+                          (proc_v, worker_v)), rt)
+                push!(get!(() -> UInt64[], by_type_worker,
+                          (proc_type, worker_v)), rt)
+            end
+        end
+    end
+
+    return SignatureRuntimeIndex(by_proc_worker, by_type_worker, by_type, any_matching)
+end
+
+"""
+    metrics_lookup_runtime_from_index(idx::SignatureRuntimeIndex,
+                                      proc::Processor, worker_id::Int;
+                                      reducer=first) -> Union{UInt64,Nothing}
+
+Fast per-processor runtime lookup using the precomputed
+`SignatureRuntimeIndex`. Traverses the same fallback chain as
+`metrics_lookup_runtime`:
+
+  1. Exact `(proc, worker_id)`
+  2. `(typeof(proc), worker_id)`
+  3. `typeof(proc)` on any worker
+  4. Any measurement for the signature
+
+Returns the reduced runtime for the first non-empty bucket, or `nothing`
+if the signature has no measurements at all.
+"""
+function metrics_lookup_runtime_from_index(idx::SignatureRuntimeIndex,
+                                            proc::Processor, worker_id::Int;
+                                            reducer::Function=first)
+    proc_type = typeof(proc)
+    vals = get(idx.by_proc_worker, (proc, worker_id), nothing)
+    if vals === nothing || isempty(vals)
+        vals = get(idx.by_type_worker, (proc_type, worker_id), nothing)
+    end
+    if vals === nothing || isempty(vals)
+        vals = get(idx.by_type, proc_type, nothing)
+    end
+    if vals === nothing || isempty(vals)
+        vals = idx.any_matching
+    end
+    (vals === nothing || isempty(vals)) && return nothing
+    return _reduce_uint64(reducer, vals)
+end
+
 function _alloc_lookup_chain(sig::Vector, proc::Processor)
     return (
         (MT.LookupExact(SignatureMetric(), sig),
@@ -192,8 +322,10 @@ metrics_lookup_alloc_max(snap, sig, proc) =
     metrics_lookup_alloc(snap, sig, proc; reducer=maximum)
 
 function extract_collected_metrics(local_cache::MT.MetricsCache, key)
-    snap = MT.snapshot(local_cache)
-    ctx = get(snap.contexts, (Dagger, :execute!), nothing)
+    # `local_cache` is task-local and already fully written by `with_metrics`
+    # (on this same task) before we drain it, so read its pending storages
+    # directly instead of taking a defensive deep-copy snapshot.
+    ctx = MT.pending_context(local_cache, Dagger, :execute!)
     ctx === nothing && return nothing
     pairs = Tuple{MT.AbstractMetric, Any}[]
     for (metric, storage) in ctx.storages
@@ -203,6 +335,34 @@ function extract_collected_metrics(local_cache::MT.MetricsCache, key)
     end
     isempty(pairs) && return nothing
     return pairs
+end
+
+# Bound the global metrics cache to the most-recent this-many tasks (distinct
+# thunk_id keys) per `(mod, context)`. Without a bound the cache grows one entry
+# per metric per task forever, which dominates scheduler allocations (Dict
+# rehash churn) on long-running workloads. The cost model only needs recent
+# samples, so we keep a rolling window.
+const METRICS_CACHE_MAX_TASKS = Ref(100)
+
+"""
+    metrics_cache_max_tasks!(n::Integer)
+
+Set the rolling-window bound described above, returning the previous value.
+
+The default of 100 is tuned for steady-state scheduling, where only recent
+samples matter. It is too small for benchmark harnesses that warm the cost
+model deliberately: a GPU warmup writes ~60 entries, after which CPU warmup and
+measured trials push past 100 and evict the GPU samples, so heterogeneous cost
+lookups silently fall back to CPU-derived estimates. Measured demand for a full
+warm+trials cycle is ~235 entries at cholesky nt=4 and ~835 at nt=8.
+
+Note this is process-local; multi-worker runs must set it on each worker.
+"""
+function metrics_cache_max_tasks!(n::Integer)
+    n > 0 || throw(ArgumentError("metrics cache bound must be positive, got $n"))
+    old = METRICS_CACHE_MAX_TASKS[]
+    METRICS_CACHE_MAX_TASKS[] = Int(n)
+    return old
 end
 
 function apply_collected_metrics!(cache::MT.MetricsCache, key::K, pairs) where K
@@ -215,6 +375,7 @@ function apply_collected_metrics!(cache::MT.MetricsCache, key::K, pairs) where K
             storage = MT.get_or_create_storage!(ctx, metric)
             MT.set_metric_value!(storage, key, value)
         end
+        MT.trim_context!(ctx, METRICS_CACHE_MAX_TASKS[])
     end
     return
 end
@@ -255,23 +416,48 @@ metrics_lookup_move_time_min(snap, from_space, to_space) =
 metrics_lookup_move_time_max(snap, from_space, to_space) =
     metrics_lookup_move_time(snap, from_space, to_space; reducer=maximum)
 
+# Transfers below this are dominated by fixed per-task overhead rather than
+# bandwidth, so their implied rate is numeric noise. Excluded from the sample.
+const MOVE_RATE_MIN_SIZE_BYTES = UInt64(4096)
+
+"""
+    metrics_lookup_move_rate(snap, from_space, to_space; reducer=Statistics.median)
+
+Estimated bytes/second between two memory spaces, or `nothing` if no usable
+samples exist.
+
+Reduces over *per-move* rates rather than `sum(size) / sum(time)`. The sum form
+is not robust: a `move!` sample records end-to-end task time, so the first few
+moves carry compilation and device-context setup. Measured on cholesky nt=4
+bs=1024 CPU+GPU, 5 cold-start samples out of 36 (405-1072ms, against a 0.57ms
+steady-state minimum) contributed ~96% of total elapsed time and dragged the
+aggregate to ~90MB/s, roughly 100x below the 14.8GB/s observed at steady state.
+That understates PCIe so severely that no compute advantage can offset it and
+GPU placement is effectively banned.
+
+Taking a median over per-move rates matches how the compute side already
+reduces its samples (`metrics_lookup_runtime_median`), so both halves of the
+cost model use the same estimator.
+"""
 function metrics_lookup_move_rate(snap::MT.MetricsSnapshot,
-                                   from_space::MemorySpace, to_space::MemorySpace)
+                                   from_space::MemorySpace, to_space::MemorySpace;
+                                   reducer::Function=Statistics.median)
     matched = _move_matching_keys(snap, from_space, to_space)
     isempty(matched) && return nothing
 
-    total_time = UInt64(0)
-    total_size = UInt64(0)
+    rates = Float64[]
+    sizehint!(rates, length(matched))
     for k in matched
         t = MT.lookup_value(snap, Dagger, :execute!, MT.TimeMetric(), k)
         s = MT.lookup_value(snap, Dagger, :execute!, MoveSizeMetric(), k)
-        if t !== nothing && s !== nothing && t > 0 && s > 0
-            total_time += t
-            total_size += s
-        end
+        (t === nothing || s === nothing) && continue
+        (t == 0 || s < MOVE_RATE_MIN_SIZE_BYTES) && continue
+        push!(rates, Float64(s) / (Float64(t) / 1e9))
     end
-    (total_time == 0 || total_size == 0) && return nothing
-    return round(UInt64, Float64(total_size) / (Float64(total_time) / 1e9))
+    isempty(rates) && return nothing
+    rate = reducer(rates)
+    (isfinite(rate) && rate > 0) || return nothing
+    return round(UInt64, rate)
 end
 
 function metrics_lookup_transfer_rate(snap::MT.MetricsSnapshot, proc::Processor, worker_id::Int)
