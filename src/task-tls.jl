@@ -7,6 +7,7 @@ mutable struct DTaskTLS
     task_spec::Any # FIXME: TaskSpec
     cancel_token::CancelToken
     logging_enabled::Bool
+    acceleration::Acceleration
 end
 
 const DTASK_TLS = TaskLocalValue{Union{DTaskTLS,Nothing}}(()->nothing)
@@ -17,7 +18,8 @@ Base.copy(tls::DTaskTLS) =
              tls.sch_handle,
              tls.task_spec,
              tls.cancel_token,
-             tls.logging_enabled)
+             tls.logging_enabled,
+             tls.acceleration)
 
 """
     get_tls() -> DTaskTLS
@@ -37,7 +39,9 @@ function set_tls!(tls)
                            tls.sch_handle,
                            tls.task_spec,
                            tls.cancel_token,
-                           tls.logging_enabled)
+                           tls.logging_enabled,
+                           tls.acceleration)
+    set_task_acceleration!(tls.acceleration)
 end
 
 """
