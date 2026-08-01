@@ -1326,21 +1326,45 @@ function _hierarchical_copy_from_and_free!(partition_states::Vector{DataDepsStat
     #    cross-partition boundary copy recorded in *another* partition's state,
     #    and the final writer transitively depends on all such copies.
     #    Iteration is sorted for SPMD-uniform free-task tagging/enqueue order.
+    # Identity-dedupe across every partition: a slot must be freed exactly once,
+    # and `remote_arg` identity is rank-uniform, so (with the sorted iteration
+    # below) the skip decisions stay SPMD-uniform.
+    freed = IdDict{Any,Nothing}()
     for pid in 1:n_partitions
         state = partition_states[pid]
         obj_cache = unwrap(state.ainfo_backing_chunk)
         write_num = typemax(Int) - 1
+        # Map each tracked slot chunk to its ainfos, so the free task can sync on
+        # *every* ainfo aliasing the buffer rather than only the cache key's.
+        chunk_to_ainfos = IdDict{Any,Vector{AliasingWrapper}}()
+        for (ainfo, remote_arg_ws) in state.ainfo_arg
+            for remote_arg_w in remote_arg_ws
+                push!(get!(Vector{AliasingWrapper}, chunk_to_ainfos, remote_arg_w.arg), ainfo)
+            end
+        end
         remote_spaces = sort!(collect(keys(obj_cache.values)); by=short_name)
         for remote_space in remote_spaces
             space_entries = sort!(collect(obj_cache.values[remote_space]); by=p->hash(p.first))
             for (ainfo, remote_arg) in space_entries
                 if !is_original(obj_cache, remote_space, ainfo)
+                    haskey(freed, remote_arg) && continue
+                    freed[remote_arg] = nothing
                     remote_proc = first(processors(remote_space))
                     free_scope = ExactScope(remote_proc)
                     free_syncdeps = Set{ThunkSyncdep}()
-                    if haskey(state.ainfo_arg, ainfo)
-                        get_write_deps!(state, remote_space, ainfo, write_num, free_syncdeps)
-                    end
+                    # Mirror the flat path (`distribute_tasks!`): a bare
+                    # `get_write_deps!` on the cache-key ainfo alone misses both
+                    # the buffer's other aliasing ainfos and — critically under
+                    # MPI — the `!aliasing_available` case. A `Chunk{<:MPIRef}`
+                    # is inspectable only on its owning rank, so on every other
+                    # rank the `state.ainfo_arg` lookup finds nothing, the free
+                    # task is spawned with an empty syncdep set, and it can run
+                    # ahead of the tasks still reading the buffer (use-after-free
+                    # in e.g. cuBLAS: "Attempt to use a freed reference").
+                    # `gather_free_syncdeps!` handles that via the rank-uniform
+                    # key-ainfo overlap fallback.
+                    gather_free_syncdeps!(state, remote_space, ainfo, remote_arg,
+                                          write_num, chunk_to_ainfos, free_syncdeps)
                     if registry !== nothing
                         orig = get(state.remote_arg_to_original, remote_arg, nothing)
                         if orig !== nothing
