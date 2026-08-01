@@ -1888,6 +1888,15 @@ end
 
 gpu_kernel_backend(proc::MPIProcessor) = gpu_kernel_backend(proc.innerProc)
 
+# Without this, `task_processor()` inside a spawned allocation task returns the
+# `MPIProcessor` wrapper (that's what the scheduler assigns), which has no
+# matching backend-specific `allocate_array_func` method (those are all
+# defined on the raw device proc, e.g. `CuArrayDeviceProc`). It then silently
+# falls through to the generic identity fallback and allocates a plain CPU
+# array instead of a device array, even though the chunk is (correctly, after
+# the scope fix above) recorded as living on that GPU.
+Dagger.allocate_array_func(proc::MPIProcessor, f) = Dagger.allocate_array_func(proc.innerProc, f)
+
 # Owner-local payload that preserves the Chunk's SPMD-uniform chunktype after
 # Sch unwraps a Chunk to a device value (e.g. Matrix chunktype + CuArray value).
 # Without this, promote_op/chunktype diverge across ranks (CuArray vs Matrix).
