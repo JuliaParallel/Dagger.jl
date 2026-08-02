@@ -391,6 +391,12 @@ Dagger.Sch.stealing_permitted(::MPIProcessor) = false
 
 default_enabled(proc::MPIProcessor) = default_enabled(proc.innerProc)
 
+# `@stencil`'s inner kernel dispatches on concrete processor types (ThreadProc,
+# GPU procs); MPIProcessor is a rank-local wrapper around one of those, so
+# forward to whatever it wraps rather than adding an MPI-specific sweep.
+Dagger.inner_stencil_proc!(proc::MPIProcessor, f, output, read_vars) =
+    Dagger.inner_stencil_proc!(proc.innerProc, f, output, read_vars)
+
 root_worker_id(proc::MPIProcessor) = myid()
 root_worker_id(proc::MPIOSProc) = myid()
 root_worker_id(proc::MPIClusterProc) = myid()
