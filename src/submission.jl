@@ -200,12 +200,46 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
             end
             @atomic thunk.valid = true
 
-            # Reset sch_accessible for all syncdeps
+            # Reset sch_accessible for all syncdeps that can still finish.
+            #
+            # `sch_accessible` is a submission-window guard: it marks a syncdep
+            # as undeletable from here until that syncdep's own `finish_task!`
+            # clears it. Flagging an *already-finished* dep is therefore
+            # unrecoverable -- its `finish_task!` has been and gone, so nothing
+            # will ever clear the flag, and `delete_unused_task!` (which
+            # requires `!sch_accessible`) can never fire again. The dep, and
+            # every `Chunk` it holds as an argument, stays pinned in
+            # `state.strong_thunks` for the life of the process.
+            #
+            # That is a real, unbounded leak whenever completed producers are
+            # named as syncdeps, which Datadeps does routinely: its end-of-region
+            # `unsafe_free!` tasks take syncdeps (`gather_free_syncdeps!`) on
+            # compute tasks that have long since finished. It only bites when
+            # Datadeps actually allocates copies -- i.e. when tasks read data
+            # from another memory space -- so plain threaded runs (one shared
+            # `CPURAMMemorySpace`, no copies, no free-tasks) never show it while
+            # MPI leaks a full set of chunks per region.
+            #
+            # Skipping finished deps is safe, and is what the rest of the
+            # scheduler already assumes: `reschedule_syncdeps!` (sch/util.jl)
+            # tests the same `@atomic finished` and creates no edge, no
+            # `pending_deps` increment, and no dependents entry for a finished
+            # syncdep -- it is already satisfied and contributes nothing to
+            # dataflow, so there is nothing to protect. Both this block and
+            # `finish_task!` (via `handle_result!`) run under `state.lock`, so
+            # the check cannot race with completion.
+            #
+            # A finished dep whose *value* is still needed downstream is kept
+            # alive by the other flag instead: a consumer holding it as an
+            # argument holds its `DTask`, so `eager_accessible` stays true, and
+            # deletion requires both flags clear.
             if options.syncdeps !== nothing
                 for dep_weak in options.syncdeps
                     dep = unwrap_weak_checked(dep_weak)
                     @assert dep.eager_accessible "GC bug: lost eager reference to syncdep"
-                    dep.sch_accessible = true
+                    if !(@atomic dep.finished)
+                        dep.sch_accessible = true
+                    end
                 end
             end
             # N.B. No RescheduleSignal: scheduling is driven inline by
