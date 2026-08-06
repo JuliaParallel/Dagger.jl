@@ -543,14 +543,17 @@ read_only(X) = (sum(X); nothing)
     r1 = min(1, nranks-1)
     cross = r1 != 0 # single-rank runs degenerate to zero copies
 
-    # Read-only cross-rank arg: one copy-in, no writeback
+    # Read-only cross-rank arg: copy-in plus region-end write-back. The
+    # write-back is redundant (origin still holds the bytes) but is retained
+    # so write-back planning can stay history-based; `arg_current` elision is
+    # unsound for Krylov `similar` workspaces under Distributed.
     A = ones(4, 4)
     logs = with_logs() do
         Dagger.spawn_datadeps() do
             Dagger.@spawn scope=rank_scope(r1) read_only(In(A))
         end
     end
-    @test count_move_tasks(logs) == (cross ? 1 : 0)
+    @test count_move_tasks(logs) == (cross ? 2 : 0)
     @test Dagger.check_uniform(count_move_tasks(logs))
 
     # Same-rank InOut: the origin slot aliases the original, zero copies

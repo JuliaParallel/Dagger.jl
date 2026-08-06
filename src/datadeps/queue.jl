@@ -153,16 +153,13 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         check_uniform(arg_w)
         arg = arg_w.arg
         origin_space = state.arg_origin[arg]
-        # When the origin still holds a fully-current replica (the argument was
-        # only read, or copies merely propagated it), the write-back is elided.
-        # This is only safe here at region end: mid-region, the copy tasks also
-        # serialize readers against later writers, so they must not be skipped.
-        current = get(state.arg_current, arg_w, nothing)
-        if current !== nothing && origin_space in current
-            remainder = NoAliasing()
-        else
-            remainder, _ = compute_remainder_for_arg!(state, origin_space, arg_w, write_num)
-        end
+        # Always compute write-back from history. Eliding via `arg_current`
+        # (`origin in arg_current` ⇒ skip) is unsound under multi-worker
+        # Distributed: Krylov `similar` workspaces can leave origin marked
+        # current while a remote true write holds the only initialized bytes.
+        # Read-only copy-ins may therefore schedule a redundant write-back
+        # (copy history advances `arg_owner`); that is intentional and harmless.
+        remainder, _ = compute_remainder_for_arg!(state, origin_space, arg_w, write_num)
         if remainder isa MultiRemainderAliasing
             origin_scope = UnionScope(map(ExactScope, collect(processors(origin_space)))...)
             enqueue_remainder_copy_from!(state, origin_space, arg_w, remainder, origin_scope, write_num)
