@@ -1,10 +1,10 @@
 # MPI × GPU datadeps suite for OpenCL. See test/mpi_gpu_suite.jl for the shared
 # logic; this file only supplies the OpenCL-specific config.
 #
-# Run (env must provide Dagger, MPI, OpenCL; see test/openclenv):
+# Run (env must provide Dagger, MPI, OpenCL, pocl_jll; see test/openclenv):
 #   mpiexec -n 2 julia --project=test/openclenv --threads=2 test/mpi_opencl.jl
 
-using Dagger, MPI, OpenCL, LinearAlgebra, Random, Test
+using Dagger, MPI, pocl_jll, OpenCL, LinearAlgebra, Random, Test
 using Dagger: In, Out, InOut, Deps
 
 using Distributed
