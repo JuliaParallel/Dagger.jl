@@ -111,5 +111,17 @@ steps:
       julia --project=test/metalenv -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
       julia --project=test/metalenv test/run_mpi.jl 2 2 test/mpi_metal.jl
 
+  - label: Julia 1.11 (Finch)
+    timeout_in_minutes: 90
+    if: build.message !~ /\[skip tests\]/
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+      - JuliaCI/julia-test#v1: ~
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
+    env:
+      CI_TEST_FINCH: "1"
+
 # env:
 #   SECRET_CODECOV_TOKEN: ""

@@ -65,7 +65,8 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
                         traversal::Symbol=:inorder,
                         scheduler::Union{DataDepsScheduler,Nothing}=nothing,
                         aliasing::Bool=true,
-                        launch_wait::Union{Bool,Nothing}=nothing)
+                        launch_wait::Union{Bool,Nothing}=nothing,
+                        hierarchical::Union{Bool,Nothing}=nothing)
     if !static
         throw(ArgumentError("Dynamic scheduling is no longer available"))
     end
@@ -78,22 +79,127 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
     wait_all(; check_errors=true) do
         scheduler = something(scheduler, DATADEPS_SCHEDULER[], RoundRobinScheduler())
         launch_wait = something(launch_wait, DATADEPS_LAUNCH_WAIT[], false)::Bool
+        hierarchical = something(hierarchical, DATADEPS_HIERARCHICAL[], true)::Bool
+        run_distribute = queue -> begin
+            if hierarchical
+                distribute_tasks_hierarchical!(queue)
+            else
+                distribute_tasks!(queue)
+            end
+        end
         if launch_wait
             result = spawn_bulk() do
                 queue = DataDepsTaskQueue(get_options(:task_queue); scheduler)
                 with_options(f; task_queue=queue)
-                distribute_tasks!(queue)
+                run_distribute(queue)
             end
         else
             queue = DataDepsTaskQueue(get_options(:task_queue); scheduler)
             result = with_options(f; task_queue=queue)
-            distribute_tasks!(queue)
+            run_distribute(queue)
         end
         return result
     end
 end
 const DATADEPS_SCHEDULER = ScopedValue{Union{DataDepsScheduler,Nothing}}(nothing)
 const DATADEPS_LAUNCH_WAIT = ScopedValue{Union{Bool,Nothing}}(nothing)
+const DATADEPS_HIERARCHICAL = ScopedValue{Union{Bool,Nothing}}(nothing)
+
+"Returns `true` if any argument of `spec` is a same-region (`region_uids`) `DTask`."
+function _spec_has_region_dtask_arg(spec::DTaskSpec, region_uids::Set{UInt})
+    for _arg in spec.fargs
+        arg, _ = unwrap_inout(value(_arg))
+        if arg isa DTask && arg.uid in region_uids
+            return true
+        end
+    end
+    return false
+end
+
+"""
+    datadeps_build_schedule!(scheduler, pairs, all_procs, all_scope;
+                             region_uids=nothing) -> (dag_spec, schedule)
+
+Builds a DAG spec from `pairs` (in submission order) and computes an AOT
+processor assignment (`schedule::Dict{DTask,Processor}`) over `all_procs` /
+`all_scope`, reusing a cached schedule when an equivalent DAG has been seen
+before (and otherwise caching the freshly-computed one for future reuse).
+
+The schedule cache is task-local per scheduler type, so callers running on
+distinct tasks (e.g. the per-partition scheduling tasks of the hierarchical
+path) each maintain an independent cache. Schedulers that don't implement
+`datadeps_schedule_dag_aot!` leave the schedule empty, in which case tasks fall
+back to JIT scheduling in `distribute_task!`.
+
+`region_uids`, when provided, is the set of *all* in-region task uids. It lets
+this function bail (fall back to JIT for the remaining tasks) before
+`dag_add_task!` would try to `fetch` an unlaunched same-region producer that is
+absent from this (sub)set of `pairs` -- which is essential when `pairs` covers
+only one partition of the region, since a producer in another partition would
+otherwise be treated as an external value and block forever. For the flat path
+(where `pairs` is the whole region), `dag_add_task!`'s own in-DAG check already
+handles this and `region_uids` can be omitted.
+
+Used by both the flat (`distribute_tasks!`, whole region) and hierarchical
+(`distribute_tasks_hierarchical!`, per partition) paths.
+"""
+function datadeps_build_schedule!(scheduler::DataDepsScheduler,
+                                  pairs::Vector{DTaskPair},
+                                  all_procs, all_scope;
+                                  region_uids::Union{Set{UInt},Nothing}=nothing)
+    # Compute the DAG spec. `dag_add_task!` ignores the state argument (it only
+    # inspects the task spec), so a throwaway state is fine here.
+    dag_spec = DAGSpec()
+    dummy_state = DataDepsState(dag_spec)
+    for (spec, task) in pairs
+        if region_uids !== nothing && _spec_has_region_dtask_arg(spec, region_uids)
+            # Depends on an in-region producer that may live outside `pairs`;
+            # defer the rest to JIT scheduling.
+            break
+        end
+        if !dag_add_task!(dag_spec, dummy_state, spec, task)
+            # This task depends on an in-region task's result; defer the rest
+            # to JIT scheduling (they won't appear in `schedule`).
+            break
+        end
+    end
+
+    # Attempt to find any matching DAG specs and reuse their schedule
+    schedule = Dict{DTask, Processor}()
+    schedule_cache = datadeps_schedule_cache(scheduler)
+    cache_hit = false
+    for (other_spec, spec_schedule) in schedule_cache
+        if datadeps_dag_equivalent(scheduler, dag_spec, other_spec)
+            @dagdebug nothing :spawn_datadeps "Found matching DAG spec!"
+            for (id, proc) in spec_schedule.id_to_proc
+                uid = dag_spec.id_to_uid[id]
+                task_idx = findfirst(spec_task -> spec_task.task.uid == uid, pairs)
+                task = pairs[task_idx].task
+                schedule[task] = proc
+            end
+            cache_hit = true
+            break
+        end
+    end
+
+    if !cache_hit && !isempty(dag_spec)
+        # Compute a fresh AOT schedule (no-op for schedulers that fall back
+        # to JIT in distribute_task!)
+        datadeps_schedule_dag_aot!(scheduler, schedule, dag_spec, all_procs, all_scope)
+
+        # Persist the schedule for reuse by future equivalent DAGs
+        if !isempty(schedule)
+            spec_schedule = DAGSpecSchedule()
+            for (task, proc) in schedule
+                id = dag_spec.uid_to_id[task.uid]
+                spec_schedule.id_to_proc[id] = proc
+            end
+            push!(schedule_cache, dag_spec => spec_schedule)
+        end
+    end
+
+    return dag_spec, schedule
+end
 
 # Current task uid, propagated into `tochunk` so uniform-execution backends
 # (MPIExt) can derive deterministic, rank-agreed handle IDs. Core datadeps sets
@@ -133,17 +239,21 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     all_scope = UnionScope(map(ExactScope, all_procs))
     exec_spaces = unique(vcat(map(proc->collect(memory_spaces(proc)), all_procs)...))
 
-    # Round-robin assign tasks to processors
     upper_queue = get_options(:task_queue)
 
+    # Compute the DAG spec and an AOT processor assignment (reused from cache
+    # when an equivalent DAG has been seen before).
+    dag_spec, schedule = datadeps_build_schedule!(queue.scheduler, queue.seen_tasks, all_procs, all_scope)
+
     # Start launching tasks and necessary copies
-    state = DataDepsState()
+    state = DataDepsState(dag_spec)
     write_num = 1
     proc_to_scope_lfu = BasicLFUCache{Processor,AbstractScope}(1024)
     for pair in queue.seen_tasks
         spec = pair.spec
         task = pair.task
-        write_num = distribute_task!(queue, state, all_procs, all_scope, spec, task, spec.fargs, proc_to_scope_lfu, write_num)
+        proc = get(schedule, task, nothing)
+        write_num = distribute_task!(queue, state, all_procs, all_scope, spec, task, spec.fargs, proc_to_scope_lfu, write_num; proc)
     end
 
     # Copy args from remote to local
@@ -153,16 +263,13 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         check_uniform(arg_w)
         arg = arg_w.arg
         origin_space = state.arg_origin[arg]
-        # When the origin still holds a fully-current replica (the argument was
-        # only read, or copies merely propagated it), the write-back is elided.
-        # This is only safe here at region end: mid-region, the copy tasks also
-        # serialize readers against later writers, so they must not be skipped.
-        current = get(state.arg_current, arg_w, nothing)
-        if current !== nothing && origin_space in current
-            remainder = NoAliasing()
-        else
-            remainder, _ = compute_remainder_for_arg!(state, origin_space, arg_w, write_num)
-        end
+        # Always compute write-back from history. Eliding via `arg_current`
+        # (`origin in arg_current` ⇒ skip) is unsound under multi-worker
+        # Distributed: Krylov `similar` workspaces can leave origin marked
+        # current while a remote true write holds the only initialized bytes.
+        # Read-only copy-ins may therefore schedule a redundant write-back
+        # (copy history advances `arg_owner`); that is intentional and harmless.
+        remainder, _ = compute_remainder_for_arg!(state, origin_space, arg_w, write_num)
         if remainder isa MultiRemainderAliasing
             origin_scope = UnionScope(map(ExactScope, collect(processors(origin_space)))...)
             enqueue_remainder_copy_from!(state, origin_space, arg_w, remainder, origin_scope, write_num)
@@ -245,7 +352,7 @@ map_or_ntuple(f, xs::Vector) = map(f, 1:length(xs))
 # N.B. Accept any `Tuple` (typed specs produce heterogeneous tuples of
 # `TypedArgument{T}`, not a homogeneous `NTuple{N,T}`).
 @inline map_or_ntuple(@specialize(f), xs::Tuple) = ntuple(f, Val(length(xs)))
-function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_procs, all_scope, spec::DTaskSpec{typed}, task::DTask, fargs, proc_to_scope_lfu, write_num::Int) where typed
+function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_procs, all_scope, spec::DTaskSpec{typed}, task::DTask, fargs, proc_to_scope_lfu, write_num::Int; proc::Union{Processor,Nothing}=nothing, ownership=nothing) where typed
     @specialize spec fargs
 
     if typed
@@ -257,8 +364,14 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     DATADEPS_CURRENT_TASK[] = task
 
     task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
-    scheduler = queue.scheduler
-    our_proc = datadeps_schedule_task(scheduler, state, all_procs, all_scope, task_scope, spec, task)
+
+    if proc === nothing
+        # Schedule and JIT assign tasks to processors
+        our_proc = datadeps_schedule_task_jit!(queue.scheduler, all_procs, all_scope, task_scope, spec, task)
+    else
+        # Use the provided processor from AOT scheduling
+        our_proc = proc
+    end
     @assert our_proc in all_procs
     our_space = only(memory_spaces(our_proc))
     check_uniform(our_proc)
@@ -303,6 +416,14 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
             truncate_history!(state, dep.arg_w)
         end
         return
+    end
+
+    # Hierarchical scheduling only: for shared backing chunks whose current
+    # version was produced by another partition, seed this partition's state so
+    # the copy-to below pulls a fresh whole-chunk copy from the true owner (and
+    # syncs on its producer). No-op on the flat path (`ownership === nothing`).
+    if ownership !== nothing
+        _sync_incoming_ownership!(state, ownership, our_space, task_arg_ws, write_num)
     end
 
     # Copy args from local to remote
@@ -431,6 +552,13 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
             end
         end
         return
+    end
+
+    # Hierarchical scheduling only: publish this task as the new authoritative
+    # owner of each shared backing chunk it writes, so later cross-partition
+    # consumers pull the up-to-date version from here.
+    if ownership !== nothing
+        _commit_ownership!(state, ownership, our_space, task, task_arg_ws)
     end
 
     write_num += 1

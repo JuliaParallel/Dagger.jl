@@ -1,6 +1,7 @@
 # Transpose/Adjoint
 
 function copydiag(f, A::DArray{T, 2}) where T
+    Dagger.@record_op (f === Transpose ? :transpose : :adjoint) A
     Ac = A.chunks
     Ac_copy = Matrix{Any}(undef, size(Ac, 2), size(Ac, 1))
     _copytile(f, Ac) = copy(f(Ac))

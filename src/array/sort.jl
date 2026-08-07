@@ -301,6 +301,7 @@ function Base.sort(v::ArrayOp;
                nsamples=2000,
                order::Ordering=default_ord)
     v1 = fetch(v)
+    Dagger.@record_op :sort! v1
     ord = Base.Sort.ord(lt,by,rev,order)
     nchunks = nchunks === nothing ? length(v1.chunks) : nchunks
     cs = dsort_chunks(v1.chunks, nchunks, nsamples,

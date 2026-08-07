@@ -1,4 +1,5 @@
 function Base.permutedims(A::DArray{T,N}, perm) where {T,N}
+    Dagger.@record_op :permutedims A
     dc = domainchunks(A)
     new_dc = DomainBlocks(
         ntuple(i -> dc.start[perm[i]], N),

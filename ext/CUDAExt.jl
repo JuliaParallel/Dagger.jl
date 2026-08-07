@@ -390,12 +390,8 @@ Adapt.adapt_structure(to::CUDA.KernelAdaptor, H::Dagger.HaloArray) =
                      H.halo_width;
                      own_center=H.own_center)
 function Dagger.inner_stencil_proc!(::CuArrayDeviceProc, f, output, read_vars)
-    Dagger.Kernel(_inner_stencil!)(f, output, read_vars; ndrange=size(output))
+    Dagger.gpu_stencil_sweep!(f, output, read_vars)
     return
-end
-@kernel function _inner_stencil!(f, output, read_vars)
-    idx = @index(Global, Cartesian)
-    f(idx, output, read_vars)
 end
 
 Dagger.gpu_processor(::Val{:CUDA}) = CuArrayDeviceProc

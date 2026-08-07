@@ -637,6 +637,7 @@ function estimate_task_costs(state, procs, task; sig=nothing)
     return sorted_procs, costs
 end
 const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
+const EMPTY_TRANSFER_RATES = Dict{Processor,UInt64}()
 @reuse_scope function estimate_task_costs!(sorted_procs, costs, state, procs, task; sig=nothing)
 
     # Find all Chunks
@@ -654,28 +655,47 @@ const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
     end
     est_time_util = lock(state.signature_time_cost) do stc; get(stc, sig, 1000^3); end
 
-    # Estimate total cost for executing this task on each candidate processor
+    # Estimate network transfer cost per *parent* processor. Chunks are located
+    # per worker, so this depends only on `get_parent(proc)`, and `procs` is
+    # commonly every thread of a single worker -- computing it per processor
+    # would redo identical work (a scan of every chunk) once per thread.
+    # N.B. We treat same-worker transfers as having zero transfer cost
+    # TODO: For non-Chunk, model cost from scheduler to worker
+    # TODO: Measure and model processor move overhead
+    tx_costs = @reusable_dict :estimate_task_costs_tx_costs Processor Float64 OSProc() 0.0 8
+    tx_costs_cleanup = @reuse_defer_cleanup empty!(tx_costs)
     for proc in procs
         gproc = get_parent(proc)
+        haskey(tx_costs, gproc) && continue
         chunks_filt = Iterators.filter(c->get_parent(processor(c)) != gproc, chunks)
-
-        # Estimate network transfer costs based on data size
-        # N.B. We treat same-worker transfers as having zero transfer cost
-        # TODO: For non-Chunk, model cost from scheduler to worker
-        # TODO: Measure and model processor move overhead
-        tx_cost = impute_sum(datasize(chunk) for chunk in chunks_filt)
-
-        # Add fixed cost for cross-worker task transfer (esimated at 1ms)
-        # TODO: Actually estimate/benchmark this
-        task_xfer_cost = root_worker_id(gproc) != myid() ? 1_000_000 : 0 # 1ms
-        pid = Dagger.root_worker_id(gproc)
-
-        tx_rate = lock(state.worker_transfer_rate) do wtr
-            get(get(wtr, pid, Dict{Processor,UInt64}()), proc, DEFAULT_TRANSFER_RATE)
-        end
-        costs[proc] = est_time_util + (tx_cost/tx_rate) + task_xfer_cost
+        tx_costs[gproc] = impute_sum(datasize(chunk) for chunk in chunks_filt)
     end
     chunks_cleanup()
+
+    # Estimate total cost for executing this task on each candidate processor.
+    # The transfer-rate table is taken once rather than once per processor.
+    all_equal = true
+    lock(state.worker_transfer_rate) do wtr
+        local first_cost = 0.0
+        for (idx, proc) in enumerate(procs)
+            gproc = get_parent(proc)
+            pid = Dagger.root_worker_id(gproc)
+
+            # Add fixed cost for cross-worker task transfer (esimated at 1ms)
+            # TODO: Actually estimate/benchmark this
+            task_xfer_cost = pid != myid() ? 1_000_000 : 0 # 1ms
+
+            tx_rate = get(get(wtr, pid, EMPTY_TRANSFER_RATES), proc, DEFAULT_TRANSFER_RATE)
+            cost = est_time_util + (tx_costs[gproc]/tx_rate) + task_xfer_cost
+            costs[proc] = cost
+            if idx == 1
+                first_cost = cost
+            elseif cost != first_cost
+                all_equal = false
+            end
+        end
+    end
+    tx_costs_cleanup()
 
     # Shuffle procs around, so equally-costly procs are equally considered
     np = length(procs)
@@ -688,8 +708,10 @@ const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
         end
     end
 
-    # Sort by lowest cost first
-    sort!(sorted_procs, by=p->costs[p])
+    # Sort by lowest cost first. Skipped when every processor costs the same
+    # (the usual single-worker case), where the shuffle above already gives the
+    # arbitrary-but-fair order that sorting would leave us with anyway.
+    all_equal || sort!(sorted_procs, by=p->costs[p])
 end
 
 """

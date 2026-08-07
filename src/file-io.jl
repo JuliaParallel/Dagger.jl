@@ -1,5 +1,4 @@
 export save, load
-using SparseArrays
 import MemPool: GenericFileDevice, FileRef
 
 struct File

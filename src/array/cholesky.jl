@@ -17,6 +17,7 @@ function potrf_checked!(uplo, A, info_arr)
     return _A, info
 end
 function LinearAlgebra._chol!(A::DArray{T,2}, ::Type{UpperTriangular}) where T
+    Dagger.@record_op :cholesky! A
     LinearAlgebra.checksquare(A)
 
     zone = one(T)
@@ -62,6 +63,7 @@ function LinearAlgebra._chol!(A::DArray{T,2}, ::Type{UpperTriangular}) where T
     return UpperTriangular(A), info[1]
 end
 function LinearAlgebra._chol!(A::DArray{T,2}, ::Type{LowerTriangular}) where T
+    Dagger.@record_op :cholesky! A
     LinearAlgebra.checksquare(A)
 
     zone = one(T)

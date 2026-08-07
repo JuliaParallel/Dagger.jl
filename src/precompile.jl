@@ -9,6 +9,28 @@
     t2 = spawn(+, 1, t1)
     fetch(t2)
 
+    # Exercise the tape planner and default cost models while enabled, so the
+    # first user-facing enabled allocation does not pay a cold-compile spike.
+    # Use `:lexical` here: `:backtrace` site IDs are session-local and the
+    # precompile process's stack is not a useful key to bake into the image.
+    # Avoid allocating real DArrays here — that would spawn tasks the cleanup
+    # below is not sized to drain.
+    let old_site_id = Tapes.CONFIG.site_id
+        # `calibrate=false`: do not bake build-host FLOP/bandwidth rates into
+        # the image; runtime `enable!` will measure on first use.
+        Tapes.enable!(site_id=:lexical, calibrate=false)
+        try
+            Tapes.backtrace_hash()
+            Tapes.explain(devnull, Float64, (128, 128))
+            Tapes.plan_allocation(Float64, (64, 64); requested = AutoBlocks())
+            Tapes.resolve_partitioning(Float64, (64, 64), AutoBlocks(), :arbitrary)
+        finally
+            Tapes.disable!()
+            Tapes.clear!()
+            Tapes.CONFIG.site_id = old_site_id
+        end
+    end
+
     # Clean up refs
     t1 = nothing; t2 = nothing
     state = Sch.EAGER_STATE[]

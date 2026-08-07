@@ -36,6 +36,13 @@ function allocate_copy_buffer(part::Blocks{N}, A::DArray{T,N}) where {T,N}
     return DArray{T}(undef, part, size(A))
 end
 
+to_range(x::UnitRange) = x
+to_range(x::Integer) = x:x
+to_range(x::Base.OneTo{Int}) = UnitRange(x)
+to_range(x::Base.Slice{Base.OneTo{Int}}) = UnitRange(x)
+to_range(::StepRange) = throw(ArgumentError("Cannot convert StepRange to UnitRange"))
+to_range(x) = throw(ArgumentError("Cannot convert $(typeof(x)) to UnitRange"))
+
 function darray_copyto!(B::DArray{TB,NB}, A::DArray{TA,NA}, Binds=parentindices(B), Ainds=parentindices(A)) where {TB,NB,TA,NA}
     Nmax = max(NA, NB)
 
@@ -44,13 +51,6 @@ function darray_copyto!(B::DArray{TB,NB}, A::DArray{TA,NA}, Binds=parentindices(
     pad1range(x::ArrayDomain, i) = length(x.indexes) < i ? (1:1) : x.indexes[i]
     padNmax(x) = ntuple(i->pad1range(x, i), Nmax)
     padNmax(x::ArrayDomain) = padNmax(x.indexes)
-
-    to_range(x::UnitRange) = x
-    to_range(x::Integer) = x:x
-    to_range(x::Base.OneTo{Int}) = UnitRange(x)
-    to_range(x::Base.Slice{Base.OneTo{Int}}) = UnitRange(x)
-    to_range(::StepRange) = throw(ArgumentError("Non-continuous ranges are not yet supported for DArray copy"))
-    to_range(x) = throw(ArgumentError("Unsupported range type for DArray copy: $(typeof(x))"))
 
     if any(x->x isa Vector, Binds) || any(x->x isa Vector, Ainds)
         # Split the copy into multiple copies
@@ -143,14 +143,30 @@ function copyto_view!(Bpart, Brange, Apart, Arange)
     return
 end
 
-Base.copyto!(B::DArray{T,N}, A::DArray{T,N}) where {T,N} =
-    darray_copyto!(B, A)
-Base.copyto!(B::DArray{T,N}, A::Array{T,N}) where {T,N} =
-    darray_copyto!(B, view(A, B.partitioning))
+function Base.copyto!(B::DArray{T,N}, A::DArray{T,N}) where {T,N}
+    Dagger.@record_op :copyto! B
+    return darray_copyto!(B, A)
+end
+function Base.copyto!(B::DArray{T,N}, A::Array{T,N}) where {T,N}
+    Dagger.@record_op :copyto! B
+    return darray_copyto!(B, view(A, B.partitioning))
+end
 Base.copyto!(B::Array{T,N}, A::DArray{T,N}) where {T,N} =
     darray_copyto!(view(B, A.partitioning), A)
 
 StridedDArray{T,N} = Union{<:DArray{T,N}, SubArray{T,N,<:DArray{T,NP}} where NP}
 
-Base.copyto!(B::StridedDArray, A::StridedDArray) =
-    darray_copyto!(parent(B), parent(A), parentindices(B), parentindices(A))
+function Base.copyto!(B::StridedDArray, A::StridedDArray)
+    Dagger.@record_op :copyto! parent(B)
+    return darray_copyto!(parent(B), parent(A), parentindices(B), parentindices(A))
+end
+function Base.copyto!(B::Array, A::StridedDArray)
+    DB = view(B, AutoBlocks())
+    darray_copyto!(DB, parent(A), parentindices(DB), parentindices(A))
+    return B
+end
+function Base.copyto!(B::SubArray, A::StridedDArray)
+    DB = view(parent(B), AutoBlocks())
+    darray_copyto!(DB, parent(A), parentindices(B), parentindices(A))
+    return B
+end

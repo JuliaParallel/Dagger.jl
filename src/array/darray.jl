@@ -180,6 +180,12 @@ stage(ctx, c::DArray) = c
 # closures get non-uniform ArgumentWrapper hashes).
 _collect_cat(concat, dims::Int, xs...) = concat(xs...; dims)
 
+# Finalize a gathered DArray to a dense `Array{T,N}`. Sparse tile cats may yield
+# a `DSparseArray` / `SparseMatrixCSC`, and `Base.collect` does not densify those.
+_collect_dense(::Type{T}, ::Val{N}, x::Array{T,N}) where {T,N} = x
+_collect_dense(::Type{T}, ::Val{N}, x::AbstractArray) where {T,N} = Array{T,N}(x)
+_collect_dense(::Type, ::Val, x) = x
+
 function Base.collect(d::DArray{T,N}; tree=true, copyto=false) where {T,N}
     a = fetch(d)
     if isempty(d.chunks)
@@ -208,13 +214,21 @@ function Base.collect(d::DArray{T,N}; tree=true, copyto=false) where {T,N}
         result = Dagger.spawn_datadeps() do
             treereduce_nd(spawn_catfuncs, a.chunks)
         end
-        return collect(fetch(result))
+        return _collect_dense(T, Val(N), fetch(result))
     end
     # Distributed: fetch chunks directly and concat in-process. This avoids
     # routing chunk data through datadeps aliasing, which requires an
     # aliasing-resolvable (e.g. isbits) element type.
+    #
+    # Sparse tiles (`DSparseArray`) are unwrapped to host storage before `cat`:
+    # GPU sparse types (CuSparse/ROCSparse/DeviceSparseMatrixCSC) disallow the
+    # scalar indexing that generic `cat` would use.
     dimcatfuncs = [(x...) -> concat(x..., dims=i) for i in 1:N]
-    return collect(treereduce_nd(dimcatfuncs, asyncmap(fetch, a.chunks)))
+    tiles = asyncmap(a.chunks) do c
+        x = fetch(c)
+        x isa DSparseArray ? _sparse_collect(x.mat) : x
+    end
+    return _collect_dense(T, Val(N), treereduce_nd(dimcatfuncs, tiles))
 end
 Array{T,N}(A::DArray{S,N}) where {T,N,S} = convert(Array{T,N}, collect(A))
 
@@ -342,8 +356,16 @@ aliasing(x::DArray) =
 memory_space(x::DArray) =
     throw(ConcurrencyViolationError("DArray memory spaces may be mixed and unstable"))
 
-Base.similar(D::DArray{T,N} where T, ::Type{S}, dims::Dims{N}) where {S,N} =
-    DArray{S,N}(undef, D.partitioning, dims)
+function Base.similar(D::DArray{T,N} where T, ::Type{S}, dims::Dims{N}) where {S,N}
+    if dims == size(D)
+        domain = ArrayDomain(map(x->1:x, dims))
+        subdomains = partition(D.partitioning, domain)
+        a = AllocateArray(S, D, false, domain, subdomains, D.partitioning, nothing)
+        return _to_darray(a)
+    else
+        return DArray{S,N}(undef, D.partitioning, dims)
+    end
+end
 Base.similar(D::DArray{T,N1} where T, ::Type{S}, dims::Dims{N2}) where {S,N1,N2} =
     DArray{S,N2}(undef, auto_blocks(dims), dims)
 
@@ -413,31 +435,21 @@ end
 """
     Base.fetch(c::DArray)
 
-If a `DArray` tree has a `Thunk` in it, make the whole thing a big thunk.
+If a `DArray` tree has a `DTask` in it, `fetch` each one (as a `Chunk`,
+without moving its data) and return a new `DArray` with all partitions
+resolved to `Chunk`s.
 """
 function Base.fetch(c::DArray{T}) where T
-    if any(istask, chunks(c))
-        if uniform_execution()
-            # SPMD (MPI): every rank holds every task locally, and chunk
-            # records are rank-local views (placeholders for non-owned data).
-            # Resolve them locally instead of assembling on one rank and
-            # broadcasting (which would clobber the local records with the
-            # assembling rank's placeholders).
-            thunks = chunks(c)
-            new_chunks = Any[istask(t) ? fetch(t; raw=true) : t for t in thunks]
-            return DArray(T, domain(c), domainchunks(c),
-                          reshape(new_chunks, size(thunks)),
-                          c.partitioning, c.concat)
-        end
-        thunks = chunks(c)
-        sz = size(thunks)
+    thunks = chunks(c)
+    if any(istask, thunks)
         dmn = domain(c)
         dmnchunks = domainchunks(c)
-        return fetch(Dagger.spawn(Options(meta=true), thunks...) do results...
-            t = eltype(fetch(results[1]))
-            DArray(t, dmn, dmnchunks, reshape(Any[results...], sz),
-                   c.partitioning, c.concat)
-        end)
+        new_chunks = similar(thunks, Any)
+        for idx in eachindex(thunks)
+            part = thunks[idx]
+            new_chunks[idx] = istask(part) ? fetch(part; raw=true) : part
+        end
+        return DArray(T, dmn, dmnchunks, new_chunks, c.partitioning, c.concat)
     else
         return c
     end
@@ -503,7 +515,7 @@ function stage(ctx::Context, d::Distribute)
         cs = emit_chunk_tasks!(d.domainchunks, d.procgrid, T,
             (scope, I, i) -> begin
             c = d.domainchunks[I]
-            Dagger.@spawn compute_scope=scope identity(d.data[c])
+            Dagger.@spawn compute_scope=scope maybe_wrap_tile(d.data[c])
         end)
     end
     return DArray(eltype(d.data),
@@ -534,7 +546,11 @@ function distribute(A::AbstractArray{T,N}, dist::Blocks{N}, assignment::Assignme
     return _to_darray(Distribute(dist, A, procgrid))
 end
 
-distribute(A::AbstractArray, ::AutoBlocks, assignment::AssignmentType = :arbitrary) = distribute(A, auto_blocks(A), assignment)
+function distribute(A::AbstractArray{T,N}, ::AutoBlocks,
+                    assignment::AssignmentType = :arbitrary) where {T,N}
+    part, assign, plan = Tapes.resolve_partitioning(T, size(A), AutoBlocks(), assignment)
+    return Tapes.track!(distribute(A, part, assign), plan)
+end
 function distribute(x::AbstractArray{T,N}, n::NTuple{N}, assignment::AssignmentType{N} = :arbitrary) where {T,N}
     p = map((d, dn)->ceil(Int, d / dn), size(x), n)
     distribute(x, Blocks(p), assignment)
@@ -550,33 +566,39 @@ DVector(A::AbstractVector{T}, assignment::AssignmentType{1} = :arbitrary) where 
 DMatrix(A::AbstractMatrix{T}, assignment::AssignmentType{2} = :arbitrary) where T = DMatrix(A, AutoBlocks(), assignment)
 DArray(A::AbstractArray, assignment::AssignmentType = :arbitrary) = DArray(A, AutoBlocks(), assignment)
 
-DVector(A::AbstractVector{T}, ::AutoBlocks, assignment::AssignmentType{1} = :arbitrary) where T = DVector(A, auto_blocks(A), assignment)
-DMatrix(A::AbstractMatrix{T}, ::AutoBlocks, assignment::AssignmentType{2} = :arbitrary) where T = DMatrix(A, auto_blocks(A), assignment)
-DArray(A::AbstractArray, ::AutoBlocks, assignment::AssignmentType = :arbitrary) = DArray(A, auto_blocks(A), assignment)
+DVector(A::AbstractVector{T}, ::AutoBlocks, assignment::AssignmentType{1} = :arbitrary) where T =
+    distribute(A, AutoBlocks(), assignment)
+DMatrix(A::AbstractMatrix{T}, ::AutoBlocks, assignment::AssignmentType{2} = :arbitrary) where T =
+    distribute(A, AutoBlocks(), assignment)
+DArray(A::AbstractArray, ::AutoBlocks, assignment::AssignmentType = :arbitrary) =
+    distribute(A, AutoBlocks(), assignment)
 
 struct AllocateUndef{S} end
 (::AllocateUndef{S})(T, dims::Dims{N}) where {S,N} = Array{S,N}(undef, dims)
-function DArray{T,N}(::UndefInitializer, dist::Blocks{N}, dims::NTuple{N,Int}; assignment::AssignmentType{N} = :arbitrary) where {T,N}
+function DArray{T,N}(::UndefInitializer, dist::Union{Blocks{N},AutoBlocks}, dims::NTuple{N,Int};
+                    assignment::AssignmentType = :arbitrary) where {T,N}
+    part, assign, plan = Tapes.resolve_partitioning(T, dims, dist, assignment)
     domain = ArrayDomain(map(x->1:x, dims))
-    subdomains = partition(dist, domain)
-    a = AllocateArray(T, AllocateUndef{T}(), false, domain, subdomains, dist, assignment)
-    return _to_darray(a)
+    subdomains = partition(part, domain)
+    a = AllocateArray(T, AllocateUndef{T}(), false, domain, subdomains, part, assign)
+    return Tapes.track!(_to_darray(a), plan)
 end
 DArray{T,N}(::UndefInitializer, dist::Blocks{N}, dims::Vararg{Int,N}; assignment::AssignmentType{N} = :arbitrary) where {T,N} =
     DArray{T,N}(undef, dist, (dims...,); assignment)
 DArray{T,N}(::UndefInitializer, dims::NTuple{N,Int}; assignment::AssignmentType{N} = :arbitrary) where {T,N}  =
-    DArray{T,N}(undef, auto_blocks(dims), dims; assignment)
+    DArray{T,N}(undef, AutoBlocks(), dims; assignment)
 DArray{T,N}(::UndefInitializer, dims::Vararg{Int,N}; assignment::AssignmentType{N} = :arbitrary) where {T,N} =
-    DArray{T,N}(undef, auto_blocks((dims...,)), (dims...,); assignment)
+    DArray{T,N}(undef, AutoBlocks(), (dims...,); assignment)
 
-DArray{T}(::UndefInitializer, dist::Blocks{N}, dims::NTuple{N,Int}; assignment::AssignmentType{N} = :arbitrary) where {T,N} =
+DArray{T}(::UndefInitializer, dist::Union{Blocks{N},AutoBlocks}, dims::NTuple{N,Int};
+          assignment::AssignmentType = :arbitrary) where {T,N} =
     DArray{T,N}(undef, dist, dims; assignment)
 DArray{T}(::UndefInitializer, dist::Blocks{N}, dims::Vararg{Int,N}; assignment::AssignmentType{N} = :arbitrary) where {T,N} =
     DArray{T,N}(undef, dist, (dims...,); assignment)
 DArray{T}(::UndefInitializer, dims::NTuple{N,Int}; assignment::AssignmentType{N} = :arbitrary) where {T,N}  =
-    DArray{T,N}(undef, auto_blocks(dims), dims; assignment)
+    DArray{T,N}(undef, AutoBlocks(), dims; assignment)
 DArray{T}(::UndefInitializer, dims::Vararg{Int,N}; assignment::AssignmentType{N} = :arbitrary) where {T,N} =
-    DArray{T,N}(undef, auto_blocks((dims...,)), (dims...,); assignment)
+    DArray{T,N}(undef, AutoBlocks(), (dims...,); assignment)
 
 function DArray(A::WrappedDArray{T}; assignment::AssignmentType = :arbitrary) where T
     B = DArray{T}(undef, size(A); assignment)

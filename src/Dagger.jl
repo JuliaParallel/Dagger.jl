@@ -2,7 +2,6 @@ module Dagger
 
 import Serialization
 import Serialization: AbstractSerializer, serialize, deserialize
-import SparseArrays: sprand, SparseMatrixCSC
 
 import MemPool
 import MemPool: DRef, FileRef, poolget, poolset
@@ -103,11 +102,13 @@ include("sch/Sch.jl"); using .Sch
 include("tochunk.jl")
 
 # Data dependency task queue
+include("datadeps/types.jl")
 include("datadeps/aliasing.jl")
 include("datadeps/chunkview.jl")
 include("datadeps/remainders.jl")
 include("datadeps/scheduling.jl")
 include("datadeps/queue.jl")
+include("datadeps/hierarchical.jl")
 
 # Stencils
 include("utils/haloarray.jl")
@@ -124,6 +125,7 @@ include("file-io.jl")
 # Array computations
 include("procgrid.jl")
 include("array/darray.jl")
+include("tapes/Tapes.jl"); using .Tapes
 include("array/alloc.jl")
 include("array/map-reduce.jl")
 include("array/copy.jl")
@@ -132,7 +134,7 @@ include("array/operators.jl")
 include("array/indexing.jl")
 include("array/setindex.jl")
 include("array/matrix.jl")
-include("array/sparse_partition.jl")
+include("array/sparse.jl")
 include("array/sort.jl")
 include("array/permute.jl")
 include("array/linalg.jl")
@@ -142,6 +144,8 @@ include("array/trsm.jl")
 include("array/lu.jl")
 include("array/qr.jl")
 include("array/svd.jl")
+include("array/iterativesolvers.jl")
+include("array/sparsedirect.jl")
 
 # GPU
 include("gpu.jl")
@@ -239,6 +243,10 @@ function __init__()
     catch err
         @warn "Error parsing JULIA_DAGGER_DEBUG" exception=err
     end
+
+    # Enable tapes
+    Tapes.clear!()
+    #Tapes.enable!()
 end
 
 end # module

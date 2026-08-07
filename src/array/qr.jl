@@ -833,6 +833,7 @@ In-place tiled Compact-WY QR factorization of a distributed matrix.
   than `p=1`.
 """
 function LinearAlgebra.qr!(A::DMatrix{T}; ib::Union{Int,Nothing}=nothing, p::Int=1) where {T<:Number}
+    Dagger.@record_op :qr! A
     p >= 1 || throw(ArgumentError("p must be >= 1, got $p"))
     ib === nothing || ib >= 1 || throw(ArgumentError("ib must be >= 1, got $ib"))
 

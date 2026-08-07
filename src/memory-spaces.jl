@@ -125,8 +125,27 @@ mutable struct AliasingWrapper <: AbstractAliasing
     AliasingWrapper(inner::AbstractAliasing) = new(inner, hash(inner))
 end
 memory_spans(x::AliasingWrapper) = memory_spans(x.inner)
+"""
+    equivalent_structure(x::AbstractAliasing, y::AbstractAliasing) -> Bool
+
+Returns `true` if `x` and `y` describe aliasing regions of the same *structure*,
+ignoring absolute memory addresses. Two aliasings that originate from different
+allocations of identically-shaped data should compare equal.
+
+Used as the default `datadeps_ainfo_equivalent` for `DAGSpec` cache lookups,
+which lets schedulers reuse a previously-computed schedule across re-runs of
+the same algorithm with freshly-allocated inputs.
+
+Default fallback returns `false` when the two arguments are of differing
+concrete subtypes; specialized methods exist for each concrete subtype.
+"""
+equivalent_structure(x::AbstractAliasing, y::AbstractAliasing) = false
 equivalent_structure(x::AliasingWrapper, y::AliasingWrapper) =
     x.hash == y.hash || equivalent_structure(x.inner, y.inner)
+equivalent_structure(x::AliasingWrapper, y::AbstractAliasing) =
+    equivalent_structure(x.inner, y)
+equivalent_structure(x::AbstractAliasing, y::AliasingWrapper) =
+    equivalent_structure(x, y.inner)
 Base.hash(x::AliasingWrapper, h::UInt64) = hash(x.hash, h)
 Base.isequal(x::AliasingWrapper, y::AliasingWrapper) = x.hash == y.hash
 Base.:(==)(x::AliasingWrapper, y::AliasingWrapper) = x.hash == y.hash
@@ -331,8 +350,13 @@ end
 
 struct NoAliasing <: AbstractAliasing end
 memory_spans(::NoAliasing) = MemorySpan{CPURAMMemorySpace}[]
+equivalent_structure(::NoAliasing, ::NoAliasing) = true
 struct UnknownAliasing <: AbstractAliasing end
 memory_spans(::UnknownAliasing) = [MemorySpan{CPURAMMemorySpace}(C_NULL, typemax(UInt))]
+# Two UnknownAliasings have no known structure to compare; conservatively
+# treat them as equivalent so cache lookups don't permanently miss when
+# aliasing analysis falls back to UnknownAliasing.
+equivalent_structure(::UnknownAliasing, ::UnknownAliasing) = true
 
 error_unknown_aliasing(T) =
     throw(ConcurrencyViolationError("Cannot resolve aliasing for object of type $T, execution may become sequential"))
@@ -357,6 +381,13 @@ Base.:(==)(ca1::CombinedAliasing, ca2::CombinedAliasing) =
     ca1.sub_ainfos == ca2.sub_ainfos
 Base.hash(ca1::CombinedAliasing, h::UInt) =
     hash(ca1.sub_ainfos, hash(CombinedAliasing, h))
+function equivalent_structure(ca1::CombinedAliasing, ca2::CombinedAliasing)
+    length(ca1.sub_ainfos) == length(ca2.sub_ainfos) || return false
+    @inbounds for i in eachindex(ca1.sub_ainfos)
+        equivalent_structure(ca1.sub_ainfos[i], ca2.sub_ainfos[i]) || return false
+    end
+    return true
+end
 
 struct ObjectAliasing{S<:MemorySpace} <: AbstractAliasing
     ptr::RemotePtr{Cvoid,S}
@@ -374,8 +405,14 @@ function memory_spans(oa::ObjectAliasing{S}) where S
     span = MemorySpan{S}(oa.ptr, oa.sz)
     return [span]
 end
+equivalent_structure(x::ObjectAliasing{S}, y::ObjectAliasing{S}) where S =
+    x.sz == y.sz
 
-aliasing(accel::Acceleration, x, T) = aliasing(x, T)
+# Acceleration entry point used by Datadeps. Unwrap whole-object containers
+# (e.g. views of `DSparseArray`) before computing aliasing. SPMD backends
+# (MPI) overload this for `Chunk`/`ChunkView` to broadcast owner-computed
+# aliasing; those methods call `aliasing_unwrapped` on the owning rank.
+aliasing(accel::Acceleration, x, T) = aliasing_unwrapped(x, T)
 function aliasing(x, dep_mod)
     if dep_mod isa Symbol
         return aliasing(getfield(x, dep_mod))
@@ -411,22 +448,106 @@ end
 aliasing(::String) = NoAliasing() # FIXME: Not necessarily true
 aliasing(::Symbol) = NoAliasing()
 aliasing(::Type) = NoAliasing()
+
+"""
+    aliases_as_whole(x) -> Bool
+
+Whether `x` -- either an object, or an already-computed aliasing -- must be
+treated as a single, indivisible unit, i.e. it is never safe to alias (or to
+consider current) only *part* of it.
+
+For an object: containers whose backing storage may be reallocated or resized on
+write (such as `DSparseArray`) return `true`. This causes [`aliasing_root`](@ref)
+to resolve any view/wrapper of them to the whole container, so all access funnels
+through the container's own `aliasing`. By contract, such a container's `aliasing`
+must be a bare [`ObjectAliasing`](@ref).
+
+For an aliasing: a bare `ObjectAliasing` (the aliasing of a whole-object
+container) reports `true`. Datadeps uses this to copy such arguments as a whole
+(a `FullCopy`) rather than computing per-span remainders, since they can never be
+*partially* current in a memory space.
+"""
+aliases_as_whole(@nospecialize x) = false
+aliases_as_whole(ainfo::AliasingWrapper) = aliases_as_whole(ainfo.inner)
+aliases_as_whole(::ObjectAliasing) = true
+
+"""
+    aliasing_root(x)
+
+Resolve `x` down to the whole-object container it wraps: peel array wrappers
+(views, transposes, adjoints, reshapes, permutations, ...) off of `x` until
+reaching a container that must alias as a whole (see [`aliases_as_whole`](@ref)),
+and return that container. If no such container is wrapped, return `x` unchanged.
+
+This relies solely on the standard `Base.parent` interface, so it transparently
+handles *any* array wrapper without per-wrapper `aliasing` methods: a new wrapper
+type needs no special-casing here, and a new whole-object container only needs to
+define [`aliases_as_whole`](@ref) (plus its own `aliasing` method, which must
+return a bare `ObjectAliasing`). A trapping `Base.pointer` on such containers
+guards against a wrapper slipping through and being misinterpreted as strided
+memory.
+
+!!! warning
+    The resolved object's *identity* defines its aliasing, so this is only
+    meaningful in the memory space where `x` physically resides. Never return its
+    result across a worker boundary and *then* compute `aliasing` -- the transfer
+    copies the object and changes its aliasing. Use [`aliasing_unwrapped`](@ref),
+    which fuses the two operations so they always run together.
+"""
+aliasing_root(@nospecialize x) = x
+function aliasing_root(x::AbstractArray)
+    aliases_as_whole(x) && return x
+    p = parent(x)
+    # `Base.parent` returns the argument itself for non-wrapper arrays, which
+    # terminates the recursion.
+    p === x && return x
+    root = aliasing_root(p)
+    return aliases_as_whole(root) ? root : x
+end
+
+"""
+    aliasing_unwrapped(x[, dep_mod])
+
+Compute the `aliasing` of `x`, first resolving (via [`aliasing_root`](@ref)) any
+whole-object container that `x` wraps. This is the entry point Datadeps uses to
+compute the aliasing of a (possibly wrapped) argument.
+
+Unwrapping and `aliasing` are intentionally fused into a single call so they
+always execute in the same place. It MUST be evaluated where `x` physically lives
+-- e.g. *inside* a `Chunk`'s `remotecall_fetch` block -- because the unwrapped
+object's identity determines its aliasing; returning the unwrapped object across
+a worker boundary first would copy it and silently change the result.
+"""
+aliasing_unwrapped(x) = aliasing(aliasing_root(x))
+aliasing_unwrapped(x, dep_mod) = aliasing(aliasing_root(x), dep_mod)
+
 function aliasing(x::Chunk, T)
+    # Under uniform execution (MPI), `root_worker_id` is always `myid()` and is
+    # not a valid owner key -- defer to the acceleration so non-owning ranks
+    # take the owner-broadcast path instead of a local unwrap.
+    accel = current_acceleration()
+    if uniform_execution(accel)
+        return aliasing(accel, x, T)
+    end
     if root_worker_id(x.processor) == myid()
-        return aliasing(unwrap(x), T)
+        return aliasing_unwrapped(unwrap(x), T)
     end
     @assert x.handle isa DRef
     return remotecall_fetch(root_worker_id(x.processor), x, T) do x, T
-        aliasing(unwrap(x), T)
+        aliasing_unwrapped(unwrap(x), T)
     end
 end
 function aliasing(x::Chunk)
+    accel = current_acceleration()
+    if uniform_execution(accel)
+        return aliasing(accel, x, identity)
+    end
     if root_worker_id(x.processor) == myid()
-        return aliasing(unwrap(x))
+        return aliasing_unwrapped(unwrap(x))
     end
     @assert x.handle isa DRef
     return remotecall_fetch(root_worker_id(x.processor), x) do x
-        aliasing(unwrap(x))
+        aliasing_unwrapped(unwrap(x))
     end
 end
 aliasing(x::DTask, T) = aliasing(fetch(x; move_value=false, unwrap=false), T)
@@ -449,6 +570,8 @@ end
 memory_spans(a::ContiguousAliasing{S}) where S = MemorySpan{S}[a.span]
 will_alias(x::ContiguousAliasing{S}, y::ContiguousAliasing{S}) where S =
     will_alias(x.span, y.span)
+equivalent_structure(x::ContiguousAliasing{S}, y::ContiguousAliasing{S}) where S =
+    x.span.len == y.span.len
 struct IteratedAliasing{T} <: AbstractAliasing
     x::T
 end
@@ -517,6 +640,14 @@ function aliasing(x::SubArray{T,N}) where {T,N}
         return UnknownAliasing()
     end
 end
+function equivalent_structure(x::StridedAliasing{T,N,S}, y::StridedAliasing{T,N,S}) where {T,N,S}
+    x.base_inds == y.base_inds || return false
+    x.lengths   == y.lengths   || return false
+    x.strides   == y.strides   || return false
+    # Compare the offset of the view into its parent, not the absolute pointers,
+    # so views into different (but identically-shaped) parents match.
+    return (x.ptr.addr - x.base_ptr.addr) == (y.ptr.addr - y.base_ptr.addr)
+end
 function will_alias(x::StridedAliasing{T1,N1,S1}, y::StridedAliasing{T2,N2,S2}) where {T1,T2,N1,N2,S1,S2}
     # Check if the base pointers are the same
     # FIXME: Conservatively incorrect via `unsafe_wrap` and friends
@@ -566,6 +697,8 @@ function memory_spans(a::TriangularAliasing{T,S}) where {T,S}
     end
     return spans
 end
+equivalent_structure(x::TriangularAliasing{T,S}, y::TriangularAliasing{T,S}) where {T,S} =
+    x.stride == y.stride && x.isupper == y.isupper && x.diagonal == y.diagonal
 function aliasing(x::UpperTriangular{T}) where T
     p = parent(x)
     space = memory_space(p)
@@ -606,6 +739,8 @@ function aliasing(x::AbstractMatrix{T}, ::Type{Diagonal}) where T
     rptr = RemotePtr{Cvoid}(ptr, S)
     return DiagonalAliasing{T,typeof(S)}(rptr, size(parent(x), 1))
 end
+equivalent_structure(x::DiagonalAliasing{T,S}, y::DiagonalAliasing{T,S}) where {T,S} =
+    x.stride == y.stride
 # FIXME: Bidiagonal
 # FIXME: Tridiagonal
 
