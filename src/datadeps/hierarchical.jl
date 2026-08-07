@@ -451,32 +451,42 @@ function build_aliasing_parallel(unique_arg_ws::Dict{ArgumentWrapper, ArgumentWr
         # overhead entirely, since there's nothing to run concurrently with.
         # `_compute_aliasing_batch` still uses threads internally when there
         # are enough args to make it worthwhile.
-        wid, worker_args = only(by_worker)
-        results = wid == myid() ? _compute_aliasing_batch(worker_args) :
-                                   remotecall_fetch(_compute_aliasing_batch, wid, worker_args)
+        #
+        # Use distinct names from the multi-worker branch below: `if`/`else`
+        # do not introduce scope, so a shared `results` binding would be boxed
+        # (`Core.Box`) and raced across `@spawn` tasks — causing BoundsError
+        # when one task's shorter result vector overwrites another's.
+        only_wid, only_worker_args = only(by_worker)
+        only_results = only_wid == myid() ? _compute_aliasing_batch(only_worker_args) :
+                                   remotecall_fetch(_compute_aliasing_batch, only_wid, only_worker_args)
         # Key by the *local* `arg_w`, not the pair's: for a remote worker the
         # returned `ArgumentWrapper` is a deserialized copy that need not be
         # identity/hash-equal to the entry in `arg_ws_vec` we later look up
         # (which would raise a `KeyError`). `_compute_aliasing_batch` preserves
         # input order, so pair by index.
-        for i in eachindex(worker_args)
-            arg_to_ainfo[worker_args[i]] = results[i].second
+        for i in eachindex(only_worker_args)
+            arg_to_ainfo[only_worker_args[i]] = only_results[i].second
         end
     else
         all_results_lock = ReentrantLock()
         @sync for (wid, worker_args) in by_worker
-            Threads.@spawn begin
-                results = if wid == myid()
-                    _compute_aliasing_batch(worker_args)
-                else
-                    remotecall_fetch(_compute_aliasing_batch, wid, worker_args)
-                end
-                # Key by the *local* `arg_w` (see single-worker note above): a
-                # remote worker returns deserialized `ArgumentWrapper` copies
-                # that may not compare equal to our `arg_ws_vec` lookup keys.
-                @lock all_results_lock begin
-                    for i in eachindex(worker_args)
-                        arg_to_ainfo[worker_args[i]] = results[i].second
+            # `let` snapshots loop vars into the closure. Do not use `$`
+            # interpolation inside `@lock` — that macro does not preserve
+            # `$` and yields `syntax: "$" expression outside quote`.
+            let wid = wid, worker_args = worker_args
+                Threads.@spawn begin
+                    batch_results = if wid == myid()
+                        _compute_aliasing_batch(worker_args)
+                    else
+                        remotecall_fetch(_compute_aliasing_batch, wid, worker_args)
+                    end
+                    # Key by the *local* `arg_w` (see single-worker note above): a
+                    # remote worker returns deserialized `ArgumentWrapper` copies
+                    # that may not compare equal to our `arg_ws_vec` lookup keys.
+                    @lock all_results_lock begin
+                        for i in eachindex(worker_args)
+                            arg_to_ainfo[worker_args[i]] = batch_results[i].second
+                        end
                     end
                 end
             end
