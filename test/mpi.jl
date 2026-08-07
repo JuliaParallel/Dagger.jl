@@ -31,6 +31,8 @@
 using Dagger, MPI, LinearAlgebra, Random, Test
 using Dagger: In, Out, InOut, Deps
 
+using Distributed
+
 # MPI-specific types live in the MPIExt extension (loaded via `using MPI`),
 # not in Dagger core. Reference them through the extension module.
 const MPIExt = Base.get_extension(Dagger, :MPIExt)

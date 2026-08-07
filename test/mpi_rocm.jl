@@ -7,6 +7,8 @@
 using Dagger, MPI, AMDGPU, LinearAlgebra, Random, Test
 using Dagger: In, Out, InOut, Deps
 
+using Distributed
+
 include(joinpath(@__DIR__, "mpi_gpu_suite.jl"))
 
 const ROCExt = Base.get_extension(Dagger, :ROCExt)

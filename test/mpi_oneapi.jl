@@ -10,6 +10,8 @@
 using Dagger, MPI, oneAPI, LinearAlgebra, Random, Test
 using Dagger: In, Out, InOut, Deps
 
+using Distributed
+
 include(joinpath(@__DIR__, "mpi_gpu_suite.jl"))
 
 const IntelExt = Base.get_extension(Dagger, :IntelExt)
