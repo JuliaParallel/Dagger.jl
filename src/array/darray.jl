@@ -503,7 +503,16 @@ function stage(ctx::Context, d::Distribute)
         cs = emit_chunk_tasks!(d.domainchunks, d.procgrid, T,
             (scope, I, i) -> begin
             c = d.domainchunks[I]
-            Dagger.@spawn compute_scope=scope identity(d.data[c])
+            # `copy`, not `identity`: under uniform execution (MPI/SPMD) this
+            # spawn runs inside a datadeps region (see `emit_chunk_tasks!`),
+            # which moves `d.data[c]` to `scope`'s space as a tracked argument
+            # and frees that moved copy once the region ends. `identity` would
+            # return that exact object as the chunk's permanent value, so it
+            # gets freed out from under the DArray the moment the region
+            # finishes (surfacing as e.g. AMDGPU's "Attempt to use a freed
+            # reference" the next time the chunk is read). `copy` returns a
+            # distinct object that isn't subject to that cleanup.
+            Dagger.@spawn compute_scope=scope copy(d.data[c])
         end)
     end
     return DArray(eltype(d.data),
