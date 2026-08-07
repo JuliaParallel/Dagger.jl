@@ -19,4 +19,5 @@ run_mpi_gpu_suite((;
     subarray_depmod = true,
     matmul = true,
     cholesky = true,
+    stencil = true,
 ))

@@ -36,6 +36,10 @@ run_mpi_gpu_suite((;
     elt = Float64,
     matmul = true,
     cholesky = true,
+    stencil = true,
+    # The 3D/4D stencil tests break the ROCm backend and corrupt subsequent
+    # tests (mirrors the single-process skip in test/array/stencil.jl).
+    stencil_skip_highdim = true,
     remap = (;
         make_space = () -> ROCExt.ROCVRAMMemorySpace(1, 1),
         device_field = :device_id,

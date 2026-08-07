@@ -20,6 +20,8 @@ run_mpi_gpu_suite((;
     DeviceProc = IntelExt.oneArrayDeviceProc,
     elt = Float32,
     matmul = true,
+    # stencil left off: the oneAPI backend has a known @stencil issue tracked
+    # by the same FIXME skip in test/array/stencil.jl's single-process suite.
     remap = (;
         make_space = () -> IntelExt.IntelVRAMMemorySpace(1, 1),
         device_field = :device_id,
