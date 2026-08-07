@@ -105,10 +105,42 @@ function with_context!(space::ROCVRAMMemorySpace)
 end
 Dagger.with_context!(proc::ROCArrayDeviceProc) = with_context!(proc)
 Dagger.with_context!(space::ROCVRAMMemorySpace) = with_context!(space)
+
+"""
+    task_stream_slot()
+    restore_stream_slot!(old_stream)
+
+Save and restore the running task's default HIP stream.
+
+`AMDGPU.stream()` creates a stream when the current task doesn't have one yet,
+so using it to record what to restore would allocate a HIP stream for every
+Dagger task that touches a ROC processor. Those streams live until they are
+finalized, and a run goes through enough tasks that stream creation itself
+eventually stalls inside the driver. Reading the task-local slot directly
+reports "no stream" as `nothing` instead of manufacturing one.
+"""
+function task_stream_slot()
+    state = AMDGPU.task_local_state()
+    state === nothing && return nothing
+    return state.streams[AMDGPU.device_id(state.device)]
+end
+function restore_stream_slot!(old_stream)
+    if old_stream !== nothing
+        stream!(old_stream)
+        return
+    end
+    # The task had no stream of its own; put the slot back the way we found it
+    # rather than leaving it pointing at Dagger's per-device stream.
+    state = AMDGPU.task_local_state()
+    state === nothing && return
+    state.streams[AMDGPU.device_id(state.device)] = nothing
+    return
+end
+
 function with_context(f, x)
     old_ctx = context()
     old_device = AMDGPU.device()
-    old_stream = stream()
+    old_stream = task_stream_slot()
 
     with_context!(x)
     try
@@ -116,7 +148,7 @@ function with_context(f, x)
     finally
         context!(old_ctx)
         AMDGPU.device!(old_device)
-        stream!(old_stream)
+        restore_stream_slot!(old_stream)
     end
 end
 
@@ -387,12 +419,8 @@ Adapt.adapt_structure(to::AMDGPU.Runtime.Adaptor, H::Dagger.HaloArray) =
                      H.halo_width;
                      own_center=H.own_center)
 function Dagger.inner_stencil_proc!(::ROCArrayDeviceProc, f, output, read_vars)
-    Dagger.Kernel(_inner_stencil!)(f, output, read_vars; ndrange=size(output))
+    Dagger.gpu_stencil_sweep!(f, output, read_vars)
     return
-end
-@kernel function _inner_stencil!(f, output, read_vars)
-    idx = @index(Global, Cartesian)
-    f(idx, output, read_vars)
 end
 
 Dagger.gpu_processor(::Val{:ROC}) = ROCArrayDeviceProc

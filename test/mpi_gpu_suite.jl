@@ -15,6 +15,12 @@
 #   subarray_depmod   :: Bool     run SubArray + dep_mod / dep-mod coverage
 #   matmul            :: Bool     run the DArray matmul smoke
 #   cholesky          :: Bool     run the DArray cholesky smoke
+#   stencil           :: Bool     run the @stencil DArray smoke (shared with
+#                                  test/array/stencil.jl via
+#                                  test/array/stencil_defs.jl)
+#   stencil_skip_highdim :: Bool  skip the 3D/4D stencil cases (mirrors the
+#                                  single-process ROCm/Metal skip in
+#                                  test/array/stencil.jl)
 #   remap             :: NamedTuple or absent — MPI remap / memory-kind hooks:
 #       make_space    :: Function () -> a VRAM memory space (device 1)
 #       device_field  :: Symbol   field naming the device index (:device/:device_id)
@@ -26,6 +32,9 @@ using Dagger, MPI, LinearAlgebra, Random, Test
 using Dagger: In, Out, InOut, Deps
 
 const MPIExt = Base.get_extension(Dagger, :MPIExt)
+
+include(joinpath(@__DIR__, "util.jl"))
+include(joinpath(@__DIR__, "array", "stencil_defs.jl"))
 
 # Broadcast-only mutation helpers (scalar indexing is illegal on GPU arrays)
 add1!(X) = (X .+= 1; nothing)
@@ -222,6 +231,19 @@ if get(cfg, :cholesky, false)
         DA = DArray(A, Blocks(4, 4))
         Dagger.with_options(;scope=all_gpu_scope()) do
             @test collect(cholesky(DA).U) ≈ cholesky(A).U
+        end
+    end
+end
+
+if get(cfg, :stencil, false)
+    @testset "GPU stencil (DArray)" begin
+        # Allocation happens inside the scope (mirrors the single-process GPU
+        # stencil testset in test/array/stencil.jl), so chunks are placed
+        # across every rank's GPU processor, exercising cross-rank halo
+        # exchange (including the stencil_source_chunks pre-sweep snapshot
+        # for self-referencing Wrap stencils) on the GPU.
+        Dagger.with_options(;scope=all_gpu_scope()) do
+            test_stencil(; skip_highdim=get(cfg, :stencil_skip_highdim, false))
         end
     end
 end

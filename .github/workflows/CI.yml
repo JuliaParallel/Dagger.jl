@@ -263,3 +263,28 @@ jobs:
         run: julia --project=test/mpienv -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
       - name: Run CPU MPI tests
         run: julia --project=test/mpienv test/run_mpi.jl ${{ matrix.ranks }} 2 test/mpi.jl
+
+  mpi-opencl:
+    # OpenCL runs against a CPU-backed ICD (no physical GPU required), unlike
+    # the other MPI x GPU backends (test/mpi_{cuda,rocm,oneapi,metal}.jl),
+    # which need real hardware and only run on the Buildkite GPU queues (see
+    # .buildkite/pipeline.yml). This mirrors those Buildkite jobs' structure
+    # (Julia 1.11, 2 ranks, 2 threads) but runs here since GitHub-hosted
+    # runners are sufficient.
+    name: Julia 1.11 (OpenCL, MPI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: ${{ !contains(github.event.head_commit.message, '[skip tests]') }}
+    env:
+      CI_USE_OPENCL: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: '1.11'
+          arch: x64
+      - uses: julia-actions/cache@v3
+      - name: Instantiate OpenCL MPI environment
+        run: julia --project=test/openclenv -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
+      - name: Run OpenCL MPI tests
+        run: julia --project=test/openclenv test/run_mpi.jl 2 2 test/mpi_opencl.jl

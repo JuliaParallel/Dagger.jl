@@ -361,6 +361,12 @@ Dagger.Sch.stealing_permitted(::MPIProcessor) = false
 
 default_enabled(proc::MPIProcessor) = default_enabled(proc.innerProc)
 
+# `@stencil`'s inner kernel dispatches on concrete processor types (ThreadProc,
+# GPU procs); MPIProcessor is a rank-local wrapper around one of those, so
+# forward to whatever it wraps rather than adding an MPI-specific sweep.
+Dagger.inner_stencil_proc!(proc::MPIProcessor, f, output, read_vars) =
+    Dagger.inner_stencil_proc!(proc.innerProc, f, output, read_vars)
+
 root_worker_id(proc::MPIProcessor) = myid()
 root_worker_id(proc::MPIOSProc) = myid()
 root_worker_id(proc::MPIClusterProc) = myid()
@@ -1850,6 +1856,15 @@ end
 
 gpu_kernel_backend(proc::MPIProcessor) = gpu_kernel_backend(proc.innerProc)
 
+# Without this, `task_processor()` inside a spawned allocation task returns the
+# `MPIProcessor` wrapper (that's what the scheduler assigns), which has no
+# matching backend-specific `allocate_array_func` method (those are all
+# defined on the raw device proc, e.g. `CuArrayDeviceProc`). It then silently
+# falls through to the generic identity fallback and allocates a plain CPU
+# array instead of a device array, even though the chunk is (correctly, after
+# the scope fix above) recorded as living on that GPU.
+Dagger.allocate_array_func(proc::MPIProcessor, f) = Dagger.allocate_array_func(proc.innerProc, f)
+
 # Owner-local payload that preserves the Chunk's SPMD-uniform chunktype after
 # Sch unwraps a Chunk to a device value (e.g. Matrix chunktype + CuArray value).
 # Without this, promote_op/chunktype diverge across ranks (CuArray vs Matrix).
@@ -2117,7 +2132,20 @@ end
 # every rank computes the same grid, so block ownership is uniform by
 # construction (the scheduler's measured costs are rank-local and cannot be
 # used for placement decisions under SPMD).
+#
+# This CPU-only grid only applies when the ambient scope is unrestricted
+# (`DefaultScope()`). When the caller has narrowed the scope explicitly (e.g.
+# `with_options(;scope=<gpu scope>)` around a GPU-targeted allocation, as the
+# MPI x GPU stencil suite does), defer to the ambient scope instead by
+# returning `nothing`, mirroring the base (non-MPI) Acceleration's
+# `default_procgrid`: `procgrid_scope` then falls back to `get_compute_scope()`
+# per chunk, so every allocation task's compute_scope matches the datadeps
+# region's `all_scope` and round-robins across the caller's chosen processors.
+# Hard-coding the CPU-only grid unconditionally would otherwise place every
+# chunk on a `ThreadProc`, which conflicts with a GPU-only ambient scope and
+# raises a `SchedulingException`.
 function default_procgrid(accel::MPIAcceleration, nblocks::NTuple{N,Int}) where N
+    Dagger.get_compute_scope() == Dagger.DefaultScope() || return nothing
     return CyclicProcGrid(uniform_mpi_processors(accel), nblocks)
 end
 

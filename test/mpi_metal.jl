@@ -7,6 +7,8 @@
 using Dagger, MPI, Metal, LinearAlgebra, Random, Test
 using Dagger: In, Out, InOut, Deps
 
+using Distributed
+
 include(joinpath(@__DIR__, "mpi_gpu_suite.jl"))
 
 const MetalExt = Base.get_extension(Dagger, :MetalExt)
@@ -16,6 +18,10 @@ run_mpi_gpu_suite((;
     name = "Metal",
     DeviceProc = MetalExt.MtlArrayDeviceProc,
     elt = Float32,
+    stencil = true,
+    # The 3D/4D stencil tests break the Metal backend and corrupt subsequent
+    # tests (mirrors the single-process skip in test/array/stencil.jl).
+    stencil_skip_highdim = true,
     remap = (;
         make_space = () -> MetalExt.MetalVRAMMemorySpace(1, 1),
         device_field = :device_id,

@@ -16,6 +16,10 @@
 #   - collect/fetch under uniform execution
 #   - result-type broadcast for untyped task results
 #   - Cholesky / LU DArray smokes
+#   - @stencil DArray smoke (full boundary-condition suite, shared with
+#     test/array/stencil.jl via test/array/stencil_defs.jl), exercising
+#     halo exchange (including the stencil_source_chunks pre-sweep snapshot
+#     for self-referencing Wrap stencils) across MPI ranks
 #
 # GPU coverage lives in test/mpi_cuda.jl (CUDA) and test/mpi_rocm.jl (ROCm).
 #
@@ -27,11 +31,14 @@
 using Dagger, MPI, LinearAlgebra, Random, Test
 using Dagger: In, Out, InOut, Deps
 
+using Distributed
+
 # MPI-specific types live in the MPIExt extension (loaded via `using MPI`),
 # not in Dagger core. Reference them through the extension module.
 const MPIExt = Base.get_extension(Dagger, :MPIExt)
 
 include(joinpath(@__DIR__, "util.jl"))
+include(joinpath(@__DIR__, "array", "stencil_defs.jl"))
 
 Dagger.accelerate!(:mpi)
 Dagger.check_uniformity!(true)
@@ -709,6 +716,15 @@ end
     p = LinearAlgebra.ipiv2perm(collect(F.ipiv), size(DAc, 1))
     LtU = UnitLowerTriangular(DAc) * UpperTriangular(DAc)
     @test norm(LtU - orig_A[p, :]) / norm(orig_A) < 1e-12
+end
+
+@testset "Stencils" begin
+    # Chunks are placed round-robin across ranks (see "Uniform chunk
+    # creation" above), so this exercises cross-rank halo exchange for every
+    # boundary condition, including the stencil_source_chunks pre-sweep
+    # snapshot used by self-referencing Wrap stencils (@stencil A[idx] =
+    # f(@neighbors(A[idx]))).
+    test_stencil()
 end
 
 end # @testset "MPI"

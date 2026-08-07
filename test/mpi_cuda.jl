@@ -7,6 +7,8 @@
 using Dagger, MPI, CUDA, LinearAlgebra, Random, Test
 using Dagger: In, Out, InOut, Deps
 
+using Distributed
+
 include(joinpath(@__DIR__, "mpi_gpu_suite.jl"))
 
 const CUDAExt = Base.get_extension(Dagger, :CUDAExt)
@@ -19,4 +21,5 @@ run_mpi_gpu_suite((;
     subarray_depmod = true,
     matmul = true,
     cholesky = true,
+    stencil = true,
 ))
