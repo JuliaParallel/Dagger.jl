@@ -894,6 +894,47 @@ function LinearAlgebra.ldiv!(X::DVecOrMat,
     return X
 end
 
+# Base's generic `ldiv(F::Factorization, B)` — which `\` calls — stages the RHS
+# into a plain `zeros(...)` host `Vector`/`Matrix`, discarding `B`'s block
+# structure.  `ldiv!(F::SVD{<:DMatrix}, ·)` above then never sees a `DVecOrMat`,
+# so the solve falls through to dense `LinearAlgebra` operating on a mix of
+# `DMatrix` factors and a host array.  That path resolves to element-at-a-time
+# access across process boundaries: measured on two workers, a single
+# `F \ (64×3 DMatrix)` took over six minutes, essentially none of it
+# compilation.  Mirror the LU override in `linalg.jl` and stage the RHS as a
+# `DMatrix` with U's row blocking so the distributed `ldiv!` is used.
+function LinearAlgebra.ldiv(F::LinearAlgebra.SVD{T,<:Any,<:DMatrix{T}},
+                            B::AbstractVecOrMat) where {T}
+    LinearAlgebra.require_one_based_indexing(B)
+    m, n = size(F)
+    size(B, 1) == m || throw(DimensionMismatch(
+        "B has $(size(B, 1)) rows but SVD has $m rows"))
+    TFB = typeof(oneunit(eltype(B)) / oneunit(T))
+    mb = F.U.partitioning.blocksize[1]
+    X = if B isa AbstractVector
+        zeros(Blocks(mb), TFB, n)
+    else
+        # Keep a `DMatrix` RHS's own column tiling; for a host RHS fall back to
+        # U's row blocking rather than one tile spanning every column, so a
+        # wide RHS still gets partitioned.
+        col_bs = B isa DMatrix ? B.partitioning.blocksize[2] : min(size(B, 2), mb)
+        zeros(Blocks(mb, col_bs), TFB, n, size(B, 2))
+    end
+    # A distributed RHS whose row blocking disagrees with U's would reintroduce
+    # the misalignment this override exists to avoid, so restage it too.
+    B_dist = if B isa DVecOrMat && B.partitioning.blocksize[1] == mb
+        B
+    elseif B isa AbstractVector
+        distribute(B isa DVector ? collect(B) : B, Blocks(mb))
+    else
+        distribute(B isa DMatrix ? collect(B) : B,
+                   Blocks(mb, B isa DMatrix ? B.partitioning.blocksize[2] : min(size(B, 2), mb)))
+    end
+    LinearAlgebra.ldiv!(X, F, B_dist)
+    B_dist !== B && unsafe_free!(B_dist)
+    return X
+end
+
 """
     inv(F::SVD{<:Any,<:Any,<:DMatrix}) -> DMatrix
 
