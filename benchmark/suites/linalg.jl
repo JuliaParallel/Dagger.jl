@@ -1,8 +1,8 @@
 # Dense distributed linear algebra (DArray) benchmark suite.
 #
 # Covers the BLAS-3 / LAPACK-style operations Dagger implements over `DMatrix`:
-# matrix-matrix and matrix-vector products, symmetric rank-k, and the Cholesky,
-# LU and QR factorizations plus a full linear solve.
+# matrix-matrix and matrix-vector products, symmetric rank-k, the Cholesky,
+# LU, QR and (Jacobi) SVD factorizations, plus a full linear solve.
 #
 # Square matrices with a square block grid are used throughout so that
 # transposed products (`A' * A`) and the tile factorizations are well-formed.
@@ -54,6 +54,15 @@ function linalg_suite(ctx; method, accels)
         if fits_budget(dense_bytes(N; nmats=4, T=T))
             sub["cholesky"] = @benchmarkable(wait(cholesky(A).factors),
                 setup = (A = _spd($T, $N, $b)),
+                teardown = (A = nothing; @everywhere GC.gc()))
+        end
+
+        # SVD (tiled one-sided Jacobi) additionally holds the internally-copied
+        # scratch matrix, the accumulated V factor, and (across multiple
+        # workers) a restaged copy of A, on top of the resident input.
+        if fits_budget(dense_bytes(N; nmats=5, T=T))
+            sub["svd"] = @benchmarkable(wait(svd(A).U),
+                setup = (A = rand(Blocks($b, $b), $T, $N, $N); wait(A)),
                 teardown = (A = nothing; @everywhere GC.gc()))
         end
 

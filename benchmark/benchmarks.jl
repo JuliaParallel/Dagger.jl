@@ -50,7 +50,7 @@
 #   Available suites:
 #     - "array"  : distributed elementwise/reduction DArray ops
 #     - "linalg" : dense distributed linear algebra (gemm, gemv, syrk,
-#                  cholesky, lu, qr, solve)
+#                  cholesky, lu, qr, svd, solve)
 #     - "sparse" : sparse distributed linear algebra (spmv, spgemm, and
 #                  iterative Krylov solve)
 #     - "dtable" : DTables data operations (legacy; opt-in, see below)

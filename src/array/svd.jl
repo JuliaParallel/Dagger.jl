@@ -13,11 +13,29 @@
 # convergence the columns of `A` are mutually orthogonal: their norms are the
 # singular values, and the normalized columns are the left singular vectors.
 #
-# The design mirrors the other tiled factorizations in this directory: each
-# `spawn_datadeps` region emits tile-granular tasks whose `In`/`Out`/`InOut`
-# annotations let the scheduler recover parallelism.  Independent block-column
-# pairs within a sweep run concurrently; pairs sharing a block-column are
-# serialized automatically through the aliasing analysis.
+# The design mirrors the other tiled factorizations in this directory — each
+# `spawn_datadeps` region emits tasks whose `In`/`Out`/`InOut` annotations let
+# the scheduler recover parallelism — with two additions that one-sided Jacobi
+# needs to run well across processes:
+#
+#  1. Row-band pinning.  A rotation only ever mixes *columns*, so a row tile is
+#     self-contained under it: if row-tile `k` of every block-column lives on
+#     one worker, that worker can compute its share of any pair's Gram matrix
+#     and apply any rotation without reading another worker's memory.  `A` and
+#     `V` are laid out `:cyclicrow` and the sweep tasks carry a `compute_scope`
+#     pinning them to the band they touch, so tile data never moves during the
+#     sweeps.  All that crosses the wire is the `(wᵢ+wⱼ)²` Gram/rotation pair —
+#     a cost independent of how many rows `A` has.
+#
+#  2. Tournament pair ordering.  The natural cyclic order `(1,2), (1,3), …`
+#     shares a block-column between consecutive pairs, so the aliasing analysis
+#     serializes almost the whole sweep.  `_svd_tournament_rounds` reorders a
+#     sweep into rounds of mutually disjoint pairs, which datadeps then runs
+#     concurrently.
+#
+# Without the pinning, Dagger's default round-robin datadeps scheduler places
+# successive tasks on unrelated workers and each pair re-gathers both of its
+# block-columns from wherever the last task left them.
 #
 # Only the thin SVD is produced (U is m×min(m,n), Vᵀ is min(m,n)×n).  This
 # variant forms Gram matrices of pairs of block-columns, so its accuracy is that
@@ -42,15 +60,14 @@ function _svd_gram_acc!(G::AbstractMatrix{T}, Ai::AbstractMatrix{T}, Aj::Abstrac
     return G
 end
 
-# Reduce the relative off-diagonal coupling ‖G₁₂‖ / √(‖G₁₁‖‖G₂₂‖) into `off[1]`
-# with `max`.  This drives the sweep convergence test.
-function _svd_offdiag_acc!(off::AbstractVector{R}, G::AbstractMatrix{T}, wi::Int) where {R,T}
+# The relative off-diagonal coupling ‖G₁₂‖ / √(‖G₁₁‖‖G₂₂‖) of one pair.  The
+# largest value over a sweep drives the convergence test.
+function _svd_offdiag(G::AbstractMatrix{T}, wi::Int) where {T}
+    R = real(float(T))
     n = size(G, 1)
     @views num = LinearAlgebra.norm(G[1:wi, wi+1:n])
     @views den = sqrt(LinearAlgebra.norm(G[1:wi, 1:wi]) * LinearAlgebra.norm(G[wi+1:n, wi+1:n]))
-    val = den == 0 ? zero(R) : R(num / den)
-    off[1] = max(off[1], val)
-    return off
+    return den == 0 ? zero(R) : R(num / den)
 end
 
 # Classical cyclic (two-sided) Jacobi eigenvalue algorithm for a small dense
@@ -180,12 +197,177 @@ _svd_gram_self_acc!(G::AbstractMatrix{T}, A::AbstractMatrix{T}) where {T} =
 _svd_apply_self!(A::AbstractMatrix{T}, W::AbstractMatrix{T}) where {T} =
     (Tmp = A * W; copyto!(A, Tmp); nothing)
 
+# ────────────────────────────────────────────────────────────────────────────
+# Worker-granular sweep kernels
+# ────────────────────────────────────────────────────────────────────────────
+#
+# Each of these handles *all* the row tiles one worker owns, rather than one
+# tile per task.  Two reasons, both measured:
+#
+#  - Task count.  A tile-granular sweep emits `O(sweeps · nt² · mt)` tasks; at
+#    the tilings the testsuite uses that is tens of thousands of tasks, and
+#    Dagger's per-task planning cost (chiefly compiling a fresh specialization
+#    of the datadeps planner per argument-tuple shape) dominated everything
+#    else.  Folding a worker's tiles into one task divides that by `mt/P`.
+#  - Data movement.  A per-worker task reads only tiles that worker already
+#    owns, so with the pinning below nothing has to be copied at all.
+#
+# These take their tiles as a vararg and are deliberately *not* marked
+# `@nospecialize`.  The obvious worry is that a fresh specialization per tile
+# count would trade runtime for compile time, but the arity only ever varies
+# with `mt/P` — a handful of values across a whole session — so the trade never
+# materializes: measured against a `@nospecialize`d version, specializing was
+# both ~10% faster at runtime *and* slightly cheaper to compile, because
+# `@nospecialize` forces a dynamic dispatch per tile without removing any
+# specialization of the concretely-typed inner kernels it calls.
+
+# This worker's contribution to the pair Gram matrix.  `tiles` is the row tiles
+# of block-column `i` this worker owns, followed by the matching tiles of `j`.
+function _svd_gram_partial!(G::AbstractMatrix, nij::Int, tiles::Vararg{Any})
+    nk = length(tiles) >> 1
+    Gv = @view G[1:nij, 1:nij]
+    fill!(Gv, zero(eltype(G)))
+    @inbounds for k in 1:nk
+        _svd_gram_acc!(Gv, tiles[k], tiles[nk+k])
+    end
+    return nothing
+end
+
+# Sum the per-worker Gram contributions, record the pair's off-diagonal
+# coupling, and diagonalize.  Runs on one worker over `O(nb²)` data, so this is
+# the only part of a sweep that communicates — and its cost is independent of
+# the number of rows in `A`.
+function _svd_reduce_rot!(W::AbstractMatrix, off::AbstractVector, nij::Int, wi::Int,
+                          Gs::Vararg{Any})
+    G = Matrix(@view (Gs[1]::AbstractMatrix)[1:nij, 1:nij])
+    @inbounds for idx in 2:length(Gs)
+        G .+= @view (Gs[idx]::AbstractMatrix)[1:nij, 1:nij]
+    end
+    off[1] = max(off[1], _svd_offdiag(G, wi))
+    _svd_rot!(@view(W[1:nij, 1:nij]), G)
+    return nothing
+end
+
+# Apply the block rotation to every row tile of the pair this worker owns.
+function _svd_apply_rot_block!(W::AbstractMatrix, nij::Int, wi::Int, tiles::Vararg{Any})
+    nk = length(tiles) >> 1
+    Wv = @view W[1:nij, 1:nij]
+    @inbounds for k in 1:nk
+        _svd_apply_rot!(tiles[k], tiles[nk+k], Wv, wi)
+    end
+    return nothing
+end
+
+# Squared column norms of a whole block-column, one task per worker.
+function _svd_colnorms_block!(s::AbstractVector, tiles::Vararg{Any})
+    @inbounds for A in tiles
+        _svd_colnorm_acc!(s, A)
+    end
+    return nothing
+end
+
+# Accumulate A'A over a whole block-column, one task per worker.
+function _svd_gram_self_block!(G::AbstractMatrix, tiles::Vararg{Any})
+    @inbounds for A in tiles
+        _svd_gram_self_acc!(G, A)
+    end
+    return nothing
+end
+
 _svd_adjoint_tile!(dst, src) = (copyto!(dst, adjoint(src)); dst)
 _svd_set_identity_diag!(B) = (@inbounds B[LinearAlgebra.diagind(B)] .= one(eltype(B)); B)
 
 # ────────────────────────────────────────────────────────────────────────────
 # Small distributed helpers
 # ────────────────────────────────────────────────────────────────────────────
+
+# ────────────────────────────────────────────────────────────────────────────
+# Sweep ordering and data placement
+# ────────────────────────────────────────────────────────────────────────────
+
+# Split one sweep into rounds of mutually disjoint block-column pairs.
+#
+# A sweep must visit every unordered pair exactly once, but the order is free —
+# and the obvious cyclic order `(1,2), (1,3), …, (1,nt), (2,3), …` is the worst
+# available one, because consecutive pairs share a block-column and the
+# aliasing analysis therefore serializes nearly the whole sweep.
+#
+# The classical round-robin *tournament* (or "circle") ordering instead groups
+# the pairs into `nt-1` rounds of `nt/2` pairs each, exactly as one schedules a
+# round-robin sports tournament: column 1 stays put while the rest rotate
+# around it.  No two pairs in a round share a block-column, so datadeps sees no
+# dependency between them and runs the entire round concurrently.
+#
+# An odd `nt` gets a phantom column ("bye"); pairs drawn against it are
+# dropped, which is what leaves one column idle per round.
+function _svd_tournament_rounds(nt::Int)
+    npad = isodd(nt) ? nt + 1 : nt
+    nrounds = npad - 1
+    half = npad ÷ 2
+    rounds = Vector{Vector{Tuple{Int,Int}}}(undef, nrounds)
+    ring = collect(2:npad)          # every column but the pinned first one
+    for r in 1:nrounds
+        order = vcat(1, ring)
+        pairs = Tuple{Int,Int}[]
+        for k in 1:half
+            i, j = minmax(order[k], order[npad+1-k])
+            j <= nt && push!(pairs, (i, j))  # drop the bye
+        end
+        rounds[r] = pairs
+        pushfirst!(ring, pop!(ring))         # rotate for the next round
+    end
+    return rounds
+end
+
+# Group a factor's row-tile indices by the worker that owns them.
+#
+# One-sided Jacobi only ever mixes *columns*, so a row tile is complete with
+# respect to every rotation: if row-tile `k` of every block-column sits on the
+# same worker, that worker can compute its share of any pair's Gram matrix and
+# apply any rotation without ever touching another worker's memory.  Pinning
+# the sweep tasks to these groups (via `compute_scope`) is what makes the
+# sweeps movement-free; see `_svd_rowcyclic` for how that layout is arranged.
+#
+# The grouping is derived from the same `:cyclicrow` processor grid the array
+# was allocated with, so it agrees with the real placement by construction —
+# `DArray.chunks` holds `DTask`s, whose location can't be read back directly.
+# Grouping by *worker* rather than by processor is deliberate: several threads
+# of one worker share an address space, so any of them can use the band
+# without a copy.
+#
+# Returns `worker_scope => row_tile_indices` pairs, in worker order.
+function _svd_row_groups(sizeA::Dims{2}, blocksize::Dims{2}, mt::Int)
+    pg = build_procgrid(:cyclicrow, sizeA, blocksize, current_acceleration())
+    byworker = Dict{Int,Vector{Int}}()
+    for k in 1:mt
+        w = root_worker_id(procgrid_processor(pg, CartesianIndex(k, 1)))
+        push!(get!(Vector{Int}, byworker, w), k)
+    end
+    return [ProcessScope(w) => byworker[w] for w in sort!(collect(keys(byworker)))]
+end
+_svd_row_groups(A::DMatrix) =
+    _svd_row_groups(size(A), A.partitioning.blocksize, size(A.chunks, 1))
+
+# Restage `A` so that each row-tile band lives entirely on one worker.
+#
+# Dagger's default (`:arbitrary`) chunk assignment spreads tiles over workers
+# by linear index, so row-tile `k` of block-column 1 and of block-column 2
+# generally land on different workers — and then no pinning can avoid moving
+# tiles during a sweep.  `:cyclicrow` maps tile `(k, i)` to worker `mod1(k, P)`
+# for every `i`, which is exactly the layout the sweeps want.
+#
+# The restage costs one copy of `A`.  The sweeps it enables would otherwise
+# copy all of `A` in and back out *per sweep*, because a datadeps region always
+# returns written data to the space it came from — so this trades `O(sweeps)`
+# copies of the matrix for one.  With a single worker there is nothing to
+# arrange and `A` is used as-is.
+function _svd_rowcyclic(A::DMatrix{T}) where {T}
+    length(_svd_row_groups(A)) > 1 || return A, false
+    mb, nb = A.partitioning.blocksize
+    B = DArray{T,2}(undef, Blocks(mb, nb), size(A); assignment=:cyclicrow)
+    copyto!(B, A)
+    return B, true
+end
 
 # Widths of each block-column from a cumulative-length vector.
 function _svd_tilewidths(cum::AbstractVector{<:Integer})
@@ -222,8 +404,11 @@ function _svd_adjoint(A::DMatrix{T}) where {T}
 end
 
 # n×n distributed identity with uniform `nb` column/row tiling.
+#
+# `:cyclicrow` matches the placement the sweeps pin to (see `_svd_row_groups`),
+# so `V`'s tiles never move once created.
 function _svd_identity(::Type{T}, n::Int, nb::Int) where {T}
-    V = zeros(Blocks(nb, nb), T, n, n)
+    V = zeros(Blocks(nb, nb), T, n, n; assignment=:cyclicrow)
     Vc = V.chunks
     nt = size(Vc, 1)
     Dagger.spawn_datadeps() do
@@ -313,11 +498,17 @@ function _svd_jacobi!(A::DMatrix{T}; tol::Real=_svd_default_tol(T),
     m, n = size(A)
     m >= n || throw(ArgumentError("_svd_jacobi! requires m ≥ n (got $m×$n)"))
     R = real(float(T))
+    # Put each row-tile band on a single worker so the sweeps can be pinned to
+    # the data instead of chasing it (see `_svd_rowcyclic`).  `A` is scratch
+    # here — the caller's factors are built fresh by `_svd_permute_columns` —
+    # so restaging it is safe.
+    A, restaged = _svd_rowcyclic(A)
     Ac = A.chunks
     mt, nt = size(Ac)
     cum = A.subdomains.cumlength[2]
     widths = _svd_tilewidths(cum)
     nb = A.partitioning.blocksize[2]
+    a_groups = _svd_row_groups(A)
     local V::DMatrix{T}
 
     if nt == 1
@@ -325,8 +516,12 @@ function _svd_jacobi!(A::DMatrix{T}; tol::Real=_svd_default_tol(T),
         # exactly in one shot, so no sweeps are needed.
         G = zeros(T, n, n)
         Dagger.spawn_datadeps() do
-            for k in 1:mt
-                Dagger.@spawn _svd_gram_self_acc!(InOut(G), In(Ac[k, 1]))
+            for (scope, ks) in a_groups
+                args = Any[_svd_gram_self_block!, Options(; compute_scope=scope), InOut(G)]
+                for k in ks
+                    push!(args, In(Ac[k, 1]))
+                end
+                Dagger.spawn(args...)
             end
         end
         vals, vecs = _svd_hermitian_jacobi_eigen(LinearAlgebra.Hermitian((G .+ G') ./ 2))
@@ -337,11 +532,11 @@ function _svd_jacobi!(A::DMatrix{T}; tol::Real=_svd_default_tol(T),
         V = _svd_identity(T, n, nb)
         Vc = V.chunks
         Dagger.spawn_datadeps() do
-            for k in 1:mt
-                Dagger.@spawn _svd_apply_self!(InOut(Ac[k, 1]), In(W))
+            for (scope, ks) in a_groups, k in ks
+                Dagger.@spawn compute_scope=scope _svd_apply_self!(InOut(Ac[k, 1]), In(W))
             end
-            for k in 1:size(Vc, 1)
-                Dagger.@spawn _svd_apply_self!(InOut(Vc[k, 1]), In(W))
+            for (scope, ks) in _svd_row_groups(V), k in ks
+                Dagger.@spawn compute_scope=scope _svd_apply_self!(InOut(Vc[k, 1]), In(W))
             end
         end
     else
@@ -349,7 +544,26 @@ function _svd_jacobi!(A::DMatrix{T}; tol::Real=_svd_default_tol(T),
             V = _svd_identity(T, n, nb)
             Vc = V.chunks
             vt = size(Vc, 1)
+            v_groups = _svd_row_groups(V)
         end
+        rounds = _svd_tournament_rounds(nt)
+        nslots = maximum(length, rounds)
+        np = length(a_groups)
+
+        # Scratch for the sweeps, allocated once and reused by every round of
+        # every sweep.  There is one set per *pair slot* — the slots within a
+        # round run concurrently, so they need separate buffers, but slot `s`
+        # of consecutive rounds is already ordered by the block-column
+        # dependencies between them and can share.
+        #
+        # Everything is sized for the widest possible pair (`2nb`) and used
+        # through a `1:nij` view, so a short trailing block-column doesn't
+        # force a second set of buffers (or a second compiled specialization).
+        maxn = 2 * nb
+        slot_G = [[zeros(T, maxn, maxn) for _ in 1:np] for _ in 1:nslots]
+        slot_W = [Matrix{T}(undef, maxn, maxn) for _ in 1:nslots]
+        slot_off = [R[zero(R)] for _ in 1:nslots]
+
         # Cyclic Jacobi's off-diagonal coupling converges quadratically at
         # first, but — once it nears the floor imposed by the working
         # precision — can plateau at a value that never quite dips below a
@@ -365,31 +579,52 @@ function _svd_jacobi!(A::DMatrix{T}; tol::Real=_svd_default_tol(T),
         prev_offv = R(Inf)
         stall_count = 0
         for _ in 1:maxsweeps
-            offv = R[zero(R)]
+            foreach(o -> o[1] = zero(R), slot_off)
             Dagger.spawn_datadeps() do
-                for i in 1:nt-1, j in i+1:nt
+                for round in rounds, (s, (i, j)) in enumerate(round)
                     wi = widths[i]
-                    wj = widths[j]
-                    G = zeros(T, wi + wj, wi + wj)
-                    W = Matrix{T}(undef, wi + wj, wi + wj)
-                    for k in 1:mt
-                        Dagger.@spawn _svd_gram_acc!(InOut(G), In(Ac[k, i]), In(Ac[k, j]))
+                    nij = wi + widths[j]
+                    Gs = slot_G[s]
+                    W = slot_W[s]
+                    # Gram: each worker reduces over the row tiles it owns.
+                    for (g, (scope, ks)) in enumerate(a_groups)
+                        args = Any[_svd_gram_partial!, Options(; compute_scope=scope),
+                                   Out(Gs[g]), nij]
+                        for k in ks; push!(args, In(Ac[k, i])); end
+                        for k in ks; push!(args, In(Ac[k, j])); end
+                        Dagger.spawn(args...)
                     end
-                    Dagger.@spawn _svd_offdiag_acc!(InOut(offv), In(G), wi)
-                    Dagger.@spawn _svd_rot!(Out(W), In(G))
-                    for k in 1:mt
-                        Dagger.@spawn _svd_apply_rot!(InOut(Ac[k, i]), InOut(Ac[k, j]), In(W), wi)
+                    # Combine and diagonalize on one worker.  This is the only
+                    # communication in a sweep, and it moves `np+1` matrices of
+                    # `nij²` elements — a cost independent of `m`.
+                    rot_scope = first(a_groups[mod1(s, np)])
+                    rot_args = Any[_svd_reduce_rot!, Options(; compute_scope=rot_scope),
+                                   Out(W), InOut(slot_off[s]), nij, wi]
+                    for G in Gs; push!(rot_args, In(G)); end
+                    Dagger.spawn(rot_args...)
+                    # Apply: again, each worker touches only its own tiles.
+                    for (scope, ks) in a_groups
+                        args = Any[_svd_apply_rot_block!, Options(; compute_scope=scope),
+                                   In(W), nij, wi]
+                        for k in ks; push!(args, InOut(Ac[k, i])); end
+                        for k in ks; push!(args, InOut(Ac[k, j])); end
+                        Dagger.spawn(args...)
                     end
                     if vectors
-                        for k in 1:vt
-                            Dagger.@spawn _svd_apply_rot!(InOut(Vc[k, i]), InOut(Vc[k, j]), In(W), wi)
+                        for (scope, ks) in v_groups
+                            args = Any[_svd_apply_rot_block!, Options(; compute_scope=scope),
+                                       In(W), nij, wi]
+                            for k in ks; push!(args, InOut(Vc[k, i])); end
+                            for k in ks; push!(args, InOut(Vc[k, j])); end
+                            Dagger.spawn(args...)
                         end
                     end
                 end
             end
-            offv[1] <= tol && break
-            stall_count = offv[1] > prev_offv * R(0.9) ? stall_count + 1 : 0
-            prev_offv = offv[1]
+            offv = maximum(o -> o[1], slot_off)
+            offv <= tol && break
+            stall_count = offv > prev_offv * R(0.9) ? stall_count + 1 : 0
+            prev_offv = offv
             stall_count >= 2 && break
         end
     end
@@ -397,8 +632,12 @@ function _svd_jacobi!(A::DMatrix{T}; tol::Real=_svd_default_tol(T),
     # Singular values from converged column norms.
     svbuf = [zeros(R, widths[i]) for i in 1:nt]
     Dagger.spawn_datadeps() do
-        for i in 1:nt, k in 1:mt
-            Dagger.@spawn _svd_colnorm_acc!(InOut(svbuf[i]), In(Ac[k, i]))
+        for i in 1:nt, (scope, ks) in a_groups
+            args = Any[_svd_colnorms_block!, Options(; compute_scope=scope), InOut(svbuf[i])]
+            for k in ks
+                push!(args, In(Ac[k, i]))
+            end
+            Dagger.spawn(args...)
         end
     end
     for i in 1:nt
@@ -407,19 +646,23 @@ function _svd_jacobi!(A::DMatrix{T}; tol::Real=_svd_default_tol(T),
     σ = reduce(vcat, svbuf)
 
     if !vectors
+        restaged && unsafe_free!(A)
         return nothing, sort(σ; rev=true), nothing
     end
 
     # Normalize columns of A in place → left singular vectors, then sort.
     Dagger.spawn_datadeps() do
-        for i in 1:nt, k in 1:mt
-            Dagger.@spawn _svd_scale_cols!(InOut(Ac[k, i]), In(svbuf[i]))
+        for i in 1:nt, (scope, ks) in a_groups
+            for k in ks
+                Dagger.@spawn compute_scope=scope _svd_scale_cols!(InOut(Ac[k, i]), In(svbuf[i]))
+            end
         end
     end
     p = sortperm(σ; rev=true)
     U = _svd_permute_columns(A, p)
     Vsorted = _svd_permute_columns(V, p)
     unsafe_free!(V)
+    restaged && unsafe_free!(A)
     return U, σ[p], Vsorted
 end
 
@@ -431,9 +674,11 @@ end
     svd!(A::DMatrix; tol, maxsweeps, full=false) -> SVD
 
 In-place thin singular value decomposition of a distributed matrix using a
-tiled block one-sided Jacobi algorithm (see `src/array/svd.jl`).  Overwrites
-`A`.  Returns a `LinearAlgebra.SVD` holding distributed `U` and `Vt` factors and
-a host `Vector` of singular values in descending order.
+tiled block one-sided Jacobi algorithm (see `src/array/svd.jl`).  `A` is used as
+scratch and its contents afterwards are unspecified — with more than one worker
+the sweeps run on an internally restaged copy, so `A` may be left untouched
+instead of overwritten.  Returns a `LinearAlgebra.SVD` holding distributed `U`
+and `Vt` factors and a host `Vector` of singular values in descending order.
 
 `tol` is the relative off-diagonal threshold for sweep convergence and
 `maxsweeps` bounds the number of Jacobi sweeps.  Only the thin factorization is
@@ -646,6 +891,47 @@ function LinearAlgebra.ldiv!(X::DVecOrMat,
         end
         LinearAlgebra.ldiv!(F, X)
     end
+    return X
+end
+
+# Base's generic `ldiv(F::Factorization, B)` — which `\` calls — stages the RHS
+# into a plain `zeros(...)` host `Vector`/`Matrix`, discarding `B`'s block
+# structure.  `ldiv!(F::SVD{<:DMatrix}, ·)` above then never sees a `DVecOrMat`,
+# so the solve falls through to dense `LinearAlgebra` operating on a mix of
+# `DMatrix` factors and a host array.  That path resolves to element-at-a-time
+# access across process boundaries: measured on two workers, a single
+# `F \ (64×3 DMatrix)` took over six minutes, essentially none of it
+# compilation.  Mirror the LU override in `linalg.jl` and stage the RHS as a
+# `DMatrix` with U's row blocking so the distributed `ldiv!` is used.
+function LinearAlgebra.ldiv(F::LinearAlgebra.SVD{T,<:Any,<:DMatrix{T}},
+                            B::AbstractVecOrMat) where {T}
+    LinearAlgebra.require_one_based_indexing(B)
+    m, n = size(F)
+    size(B, 1) == m || throw(DimensionMismatch(
+        "B has $(size(B, 1)) rows but SVD has $m rows"))
+    TFB = typeof(oneunit(eltype(B)) / oneunit(T))
+    mb = F.U.partitioning.blocksize[1]
+    X = if B isa AbstractVector
+        zeros(Blocks(mb), TFB, n)
+    else
+        # Keep a `DMatrix` RHS's own column tiling; for a host RHS fall back to
+        # U's row blocking rather than one tile spanning every column, so a
+        # wide RHS still gets partitioned.
+        col_bs = B isa DMatrix ? B.partitioning.blocksize[2] : min(size(B, 2), mb)
+        zeros(Blocks(mb, col_bs), TFB, n, size(B, 2))
+    end
+    # A distributed RHS whose row blocking disagrees with U's would reintroduce
+    # the misalignment this override exists to avoid, so restage it too.
+    B_dist = if B isa DVecOrMat && B.partitioning.blocksize[1] == mb
+        B
+    elseif B isa AbstractVector
+        distribute(B isa DVector ? collect(B) : B, Blocks(mb))
+    else
+        distribute(B isa DMatrix ? collect(B) : B,
+                   Blocks(mb, B isa DMatrix ? B.partitioning.blocksize[2] : min(size(B, 2), mb)))
+    end
+    LinearAlgebra.ldiv!(X, F, B_dist)
+    B_dist !== B && unsafe_free!(B_dist)
     return X
 end
 
