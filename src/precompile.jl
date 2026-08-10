@@ -17,9 +17,6 @@
         GC.gc()
         yield()
     end
-    if lock(state.thunk_dict) do d; length(d); end > 1
-        @warn "Precompile failed to clean up all tasks"
-    end
 
     # Halt scheduler
     notify(state.halt)
@@ -41,7 +38,6 @@
         end
         for (name, t) in tracked
             if t.state == :runnable
-                @warn "Waiting on $name"
                 Threads.@spawn Base.throwto(t, InterruptException())
             end
         end
