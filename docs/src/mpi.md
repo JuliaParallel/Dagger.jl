@@ -237,6 +237,10 @@ end
 Pass an optional `mpi_comm` in the scope specifier to use a communicator other
 than `COMM_WORLD`.
 
+`mpi_rank`/`mpi_ranks` compose with the GPU keyword specifiers (`cuda_gpu`,
+`rocm_gpu`, etc.) — see "GPUs with MPI" below — to target a specific rank's
+device, e.g. `Dagger.scope(mpi_rank=1, cuda_gpu=1)`.
+
 ## Processor grids
 
 When Dagger constructs a distributed array, it must decide which rank owns each
@@ -285,8 +289,40 @@ Dagger.accelerate!(:mpi)
 
 By default, GPU processors are **not** part of the default scope — tasks run on
 CPU processors unless you opt in with a scope that includes GPU processors.
-The most explicit way to target a specific rank's GPU is to build an
-`ExactScope` for that processor:
+
+The GPU keyword specifiers ([Scopes](scopes.md) — `cuda_gpu(s)`, `rocm_gpu(s)`,
+`metal_gpu(s)`, `intel_gpu(s)`, `cl_device(s)`) are MPI-aware: combine one with
+`mpi_rank`/`mpi_ranks` to target a specific rank's device, or — once
+`Dagger.accelerate!(:mpi)` is active — omit the rank entirely to span every
+rank:
+
+```julia
+# Rank 1's first CUDA device
+rank1_gpu = Dagger.scope(mpi_rank=1, cuda_gpu=1)
+
+# Every rank's first CUDA device (accelerate!(:mpi) is already active, so no
+# `mpi_rank`/`mpi_ranks` is needed)
+all_gpus = Dagger.scope(cuda_gpu=1)
+
+A = rand(Float32, 8, 8)
+add1!(X) = (X .+= 1; nothing)   # broadcast; scalar indexing is illegal on GPU arrays
+
+nranks = MPI.Comm_size(MPI.COMM_WORLD)
+Dagger.with_options(scope=all_gpus) do
+    Dagger.spawn_datadeps() do
+        Dagger.@spawn scope=Dagger.scope(mpi_rank=0, cuda_gpu=1) add1!(InOut(A))
+        Dagger.@spawn scope=Dagger.scope(mpi_rank=min(1, nranks-1), cuda_gpu=1) add1!(InOut(A))
+    end
+end
+```
+
+To mix CPU and GPU tasks in one region, make the outer scope a `UnionScope` of
+both the CPU and GPU processors the region will use (e.g.
+`Dagger.UnionScope(Dagger.scope(mpi_ranks=:), Dagger.scope(cuda_gpu=1))`).
+
+If you need finer control than the keyword specifiers give you (e.g. selecting
+by device UUID), you can still enumerate processors and build an `ExactScope`
+by hand:
 
 ```julia
 MPIExt = Base.get_extension(Dagger, :MPIExt)
@@ -296,24 +332,7 @@ mpi_procs() = collect(Dagger.get_processors(MPIExt.MPIClusterProc(MPI.COMM_WORLD
 gpu_proc(r) = first(p for p in mpi_procs()
                     if p.rank == r && p.innerProc isa CUDAExt.CuArrayDeviceProc)
 gpu_scope(r) = Dagger.ExactScope(gpu_proc(r))
-
-nranks = MPI.Comm_size(MPI.COMM_WORLD)
-# Outer scope must include every GPU processor a region's tasks may use.
-all_gpus = Dagger.UnionScope([gpu_scope(r) for r in 0:nranks-1]...)
-
-A = rand(Float32, 8, 8)
-add1!(X) = (X .+= 1; nothing)   # broadcast; scalar indexing is illegal on GPU arrays
-
-Dagger.with_options(scope=all_gpus) do
-    Dagger.spawn_datadeps() do
-        Dagger.@spawn scope=gpu_scope(0) add1!(InOut(A))
-        Dagger.@spawn scope=gpu_scope(min(1, nranks-1)) add1!(InOut(A))
-    end
-end
 ```
-
-To mix CPU and GPU tasks in one region, make the outer scope a `UnionScope` of
-both the CPU and GPU processors the region will use.
 
 ### GPU-aware MPI
 

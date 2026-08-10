@@ -92,6 +92,22 @@ function run_mpi_gpu_suite(cfg)
     mixed_scope() = Dagger.UnionScope(vcat([cpu_scope(r) for r in 0:nranks-1],
                                            [gpu_scope(r) for r in 0:nranks-1])...)
 
+    # `Dagger.scope(; <gpu_key>=1)` composed with `mpi_rank`/`worker` (or, with
+    # neither, dispatched via the active `:mpi` acceleration) should reproduce
+    # the scopes built manually above.
+    #
+    # `compatible_processors`/`issetequal` walk `procs(Sch.eager_context())`
+    # (the plain Distributed worker list), which never reaches
+    # `MPIProcessor`-wrapped devices — comparing MPI scopes that way would
+    # silently compare two empty sets. Extract and compare the underlying
+    # processors directly instead.
+    gpu_key = get(cfg, :gpu_key, nothing)
+    gpu_kw(extra::NamedTuple=(;)) =
+        gpu_key === nothing ? extra : merge(extra, NamedTuple{(gpu_key,)}((1,)))
+    scope_procs(s::Dagger.ExactScope) = Set{Dagger.Processor}([s.processor])
+    scope_procs(s::Dagger.UnionScope) =
+        reduce(union, (scope_procs(sub) for sub in s.scopes); init=Set{Dagger.Processor}())
+
 @testset "MPI $(cfg.name) Datadeps" begin
 
 @testset "GPU processors visible per rank" begin
@@ -99,6 +115,36 @@ function run_mpi_gpu_suite(cfg)
         p = gpu_proc_for_rank(r)
         @test p.innerProc isa DeviceProc
         @test Dagger.check_uniform(p)
+    end
+end
+
+if gpu_key !== nothing
+    @testset "scope(mpi_rank/worker, $gpu_key=...) dispatches correctly" begin
+        # `mpi_rank=r` alongside a GPU key targets exactly that rank's device,
+        # matching the manually-constructed single-rank scope.
+        for r in 0:nranks-1
+            combo = Dagger.scope(; gpu_kw((; mpi_rank=r))...)
+            @test scope_procs(combo) == scope_procs(gpu_scope(r))
+        end
+
+        # `mpi_ranks=[...]` alongside a GPU key targets exactly those ranks.
+        ranks_subset = nranks == 1 ? [0] : [0, nranks-1]
+        combo_subset = Dagger.scope(; gpu_kw((; mpi_ranks=ranks_subset))...)
+        @test scope_procs(combo_subset) ==
+              scope_procs(Dagger.UnionScope([gpu_scope(r) for r in ranks_subset]...))
+
+        # No `mpi_rank`/`mpi_ranks`/`worker`: since `accelerate!(:mpi)` is
+        # active, the GPU key alone spans every rank's device, matching
+        # `all_gpu_scope()`.
+        @test scope_procs(Dagger.scope(; gpu_kw()...)) == scope_procs(all_gpu_scope())
+
+        # An explicit `worker=` forces a genuinely Distributed-specific scope
+        # (a bare `DeviceProc`, not an `MPIProcessor`-wrapped one) even though
+        # MPI acceleration is active.
+        local_gpu_proc = first(filter(p->p isa DeviceProc,
+                                       collect(Dagger.get_processors(Dagger.OSProc(1)))))
+        @test scope_procs(Dagger.scope(; gpu_kw((; worker=1))...)) ==
+              Set{Dagger.Processor}([local_gpu_proc])
     end
 end
 

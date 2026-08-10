@@ -35,6 +35,7 @@ end
 run_mpi_gpu_suite((;
     name = "ROCm",
     DeviceProc = ROCExt.ROCArrayDeviceProc,
+    gpu_key = :rocm_gpu,
     elt = Float64,
     matmul = true,
     cholesky = true,

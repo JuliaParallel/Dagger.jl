@@ -389,30 +389,10 @@ end
 
 Dagger.to_scope(::Val{:intel_gpu}, sc::NamedTuple) =
     Dagger.to_scope(Val{:intel_gpus}(), merge(sc, (;intel_gpus=[sc.intel_gpu])))
-Dagger.scope_key_precedence(::Val{:intel_gpu}) = 1
-function Dagger.to_scope(::Val{:intel_gpus}, sc::NamedTuple)
-    if haskey(sc, :worker)
-        workers = Int[sc.worker]
-    elseif haskey(sc, :workers) && sc.workers != Colon()
-        workers = sc.workers
-    else
-        workers = map(gproc->gproc.pid, Dagger.procs(Dagger.Sch.eager_context()))
-    end
-    scopes = Dagger.ExactScope[]
-    dev_ids = sc.intel_gpus
-    for worker in workers
-        procs = Dagger.get_processors(Dagger.OSProc(worker))
-        for proc in procs
-            proc isa oneArrayDeviceProc || continue
-            if dev_ids == Colon() || proc.device_id in dev_ids
-                scope = Dagger.ExactScope(proc)
-                push!(scopes, scope)
-            end
-        end
-    end
-    return Dagger.UnionScope(scopes)
-end
-Dagger.scope_key_precedence(::Val{:intel_gpus}) = 1
+Dagger.scope_key_precedence(::Val{:intel_gpu}) = 3
+Dagger.to_scope(::Val{:intel_gpus}, sc::NamedTuple) =
+    Dagger.gpu_scope(oneArrayDeviceProc, proc->proc.device_id, sc.intel_gpus, sc)
+Dagger.scope_key_precedence(::Val{:intel_gpus}) = 3
 
 # MPI data plane: pass oneArrays to MPI directly when the library is Level Zero /
 # Intel-MPI aware (DAGGER_MPI_GPU_DIRECT=0/1 forces; else mpi_library_gpu_aware)

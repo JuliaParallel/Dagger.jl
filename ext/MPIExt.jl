@@ -7,7 +7,7 @@ import Dagger: @dagdebug, @opcounter
 # Types and generic functions from Dagger that this extension either
 # extends with new methods (for MPI-specific types) or calls directly.
 import Dagger:
-    AbstractAliasing, accelerate!, accel_matches_proc, aliased_object!,
+    AbstractAliasing, accelerate!, accel_matches_proc, accel_kind, aliased_object!,
     AliasedObjectCache, AliasedObjectCacheStore, aliasing, bind_moved_argument,
     chunktype, ChunkView, check_uniform, check_uniformity!, CHECK_UNIFORMITY,
     cleanup_tasks_accel!, constrain, CPURAMMemorySpace,
@@ -166,6 +166,7 @@ default_processor(accel::MPIAcceleration, x::Chunk) = MPIOSProc(x.handle.comm, x
 default_processor(accel::MPIAcceleration, x::Function) = MPIOSProc(accel.comm, MPI.Comm_rank(accel.comm))
 default_processor(accel::MPIAcceleration, T::Type) = MPIOSProc(accel.comm, MPI.Comm_rank(accel.comm))
 uniform_execution(accel::MPIAcceleration) = true
+accel_kind(::MPIAcceleration) = :mpi
 
 # Children / uniform-processor caches are shared across reusable scheduler
 # tasks. Protect both with one lock; never mutate them unlocked.
@@ -355,6 +356,37 @@ function Dagger.to_scope(::Val{:mpi_ranks}, sc::NamedTuple)
     return Dagger.UnionScope(scopes)
 end
 Dagger.scope_key_precedence(::Val{:mpi_ranks}) = 2
+
+"""
+    Dagger.gpu_scope(DeviceProc::Type{<:Processor}, dev_id::Function, dev_ids, sc::NamedTuple, ::Val{:mpi}) -> AbstractScope
+
+MPI-specific method of `Dagger.gpu_scope` (dispatched via `Val{:mpi}`, either
+because `sc` has `mpi_rank`/`mpi_ranks`, or because `accel_kind(current_acceleration())
+== :mpi`). Restricts to `sc.mpi_rank`/`sc.mpi_ranks` when present (GPU key +
+`mpi_rank`/`mpi_ranks` combined in one `scope()` call), otherwise every rank
+of `sc.mpi_comm`/`MPI.COMM_WORLD` (GPU key alone, under MPI acceleration).
+"""
+function Dagger.gpu_scope(DeviceProc::Type{<:Processor}, dev_id::Function, dev_ids, sc::NamedTuple, ::Val{:mpi})
+    comm = get(sc, :mpi_comm, MPI.COMM_WORLD)
+    ranks = if haskey(sc, :mpi_rank)
+        [sc.mpi_rank]
+    elseif haskey(sc, :mpi_ranks)
+        sc.mpi_ranks == Colon() ? (0:(MPI.Comm_size(comm)-1)) : sc.mpi_ranks
+    else
+        0:(MPI.Comm_size(comm)-1)
+    end
+    scopes = Dagger.ExactScope[]
+    for rank in ranks
+        for proc in Dagger.get_processors(MPIOSProc(comm, rank))
+            proc isa MPIProcessor || continue
+            proc.innerProc isa DeviceProc || continue
+            if dev_ids == Colon() || dev_id(proc.innerProc) in dev_ids
+                push!(scopes, Dagger.ExactScope(proc))
+            end
+        end
+    end
+    return Dagger.UnionScope(scopes)
+end
 
 struct MPIProcessor{P<:Processor} <: Processor
     innerProc::P

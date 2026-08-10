@@ -466,30 +466,10 @@ end
 
 Dagger.to_scope(::Val{:metal_gpu}, sc::NamedTuple) =
     Dagger.to_scope(Val{:metal_gpus}(), merge(sc, (;metal_gpus=[sc.metal_gpu])))
-Dagger.scope_key_precedence(::Val{:metal_gpu}) = 1
-function Dagger.to_scope(::Val{:metal_gpus}, sc::NamedTuple)
-    if haskey(sc, :worker)
-        workers = Int[sc.worker]
-    elseif haskey(sc, :workers) && sc.workers != Colon()
-        workers = sc.workers
-    else
-        workers = map(gproc->gproc.pid, Dagger.procs(Dagger.Sch.eager_context()))
-    end
-    scopes = Dagger.ExactScope[]
-    dev_ids = sc.metal_gpus
-    for worker in workers
-        procs = Dagger.get_processors(Dagger.OSProc(worker))
-        for proc in procs
-            proc isa MtlArrayDeviceProc || continue
-            if dev_ids == Colon() || proc.device_id in dev_ids
-                scope = Dagger.ExactScope(proc)
-                push!(scopes, scope)
-            end
-        end
-    end
-    return Dagger.UnionScope(scopes)
-end
-Dagger.scope_key_precedence(::Val{:metal_gpus}) = 1
+Dagger.scope_key_precedence(::Val{:metal_gpu}) = 3
+Dagger.to_scope(::Val{:metal_gpus}, sc::NamedTuple) =
+    Dagger.gpu_scope(MtlArrayDeviceProc, proc->proc.device_id, sc.metal_gpus, sc)
+Dagger.scope_key_precedence(::Val{:metal_gpus}) = 3
 
 const DEVICES = Dict{Int, MtlDevice}()
 #const CONTEXTS = Dict{Int, MtlContext}()

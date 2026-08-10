@@ -436,6 +436,62 @@ to_scope(::Val{key}, sc::NamedTuple) where key =
 # Base case for all Dagger-owned keys
 scope_key_precedence(::Val) = 0
 
+### GPU scope helpers
+#
+# Shared by each GPU extension's `to_scope(::Val{:xxx_gpus}, sc)` handler (e.g.
+# `cuda_gpus`, `rocm_gpus`, ...). A single `gpu_scope` name is extended per
+# acceleration kind (multiple dispatch on a trailing `Val{kind}` argument,
+# `kind` being whatever `accel_kind`/`accelerate!` use, e.g. `:distributed`/
+# `:mpi`), so adding a new SPMD-style backend (UCX, LCI, ...) just means
+# adding one more `gpu_scope(..., ::Val{:their_kind})` method — no new
+# per-backend function name, and no reaching into extensions, required here.
+
+"""
+    gpu_scope(DeviceProc::Type{<:Processor}, dev_id::Function, dev_ids, sc::NamedTuple) -> AbstractScope
+
+Constructs a scope containing every `DeviceProc` processor whose device index
+(`dev_id(proc)`) is in `dev_ids` (or all of them, if `dev_ids == Colon()`).
+
+- If `worker`/`workers` is present in `sc`, always constructs a Distributed-specific scope
+  (restricted to those workers).
+- Else if `mpi_rank`/`mpi_ranks` is present in `sc`, always constructs an MPI-specific scope
+  (restricted to those ranks), even if `current_acceleration()` hasn't been
+  switched to MPI yet.
+- Otherwise, dispatches on `accel_kind(current_acceleration())`.
+"""
+function gpu_scope(DeviceProc::Type{<:Processor}, dev_id::Function, dev_ids, sc::NamedTuple)
+    if haskey(sc, :worker) || haskey(sc, :workers)
+        return gpu_scope(DeviceProc, dev_id, dev_ids, sc, Val(:distributed))
+    elseif haskey(sc, :mpi_rank) || haskey(sc, :mpi_ranks)
+        return gpu_scope(DeviceProc, dev_id, dev_ids, sc, Val(:mpi))
+    else
+        return gpu_scope(DeviceProc, dev_id, dev_ids, sc, Val(accel_kind(current_acceleration())))
+    end
+end
+
+function gpu_scope(DeviceProc::Type{<:Processor}, dev_id::Function, dev_ids, sc::NamedTuple, ::Val{:distributed})
+    workers = if haskey(sc, :worker)
+        Int[sc.worker]
+    elseif haskey(sc, :workers) && sc.workers != Colon()
+        Int[sc.workers...]
+    else
+        map(gproc->gproc.pid, procs(Dagger.Sch.eager_context()))
+    end
+    scopes = ExactScope[]
+    for worker in workers
+        for proc in get_processors(OSProc(worker))
+            proc isa DeviceProc || continue
+            if dev_ids == Colon() || dev_id(proc) in dev_ids
+                push!(scopes, ExactScope(proc))
+            end
+        end
+    end
+    return UnionScope(scopes)
+end
+
+gpu_scope(::Type{<:Processor}, ::Function, dev_ids, ::NamedTuple, ::Val{kind}) where kind =
+    throw(ArgumentError("No GPU scope construction registered for acceleration kind: $(repr(kind)) (is the relevant package loaded?)"))
+
 ### Scope comparison helpers
 
 function Base.issetequal(scopes::AbstractScope...)
