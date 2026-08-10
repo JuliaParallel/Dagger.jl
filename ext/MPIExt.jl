@@ -1886,6 +1886,12 @@ gpu_kernel_backend(proc::MPIProcessor) = gpu_kernel_backend(proc.innerProc)
 # the scope fix above) recorded as living on that GPU.
 Dagger.allocate_array_func(proc::MPIProcessor, f) = Dagger.allocate_array_func(proc.innerProc, f)
 
+# Same forwarding as above: `task_processor()` inside `multi_span_copy!`'s
+# `gpu_kernel_lock` call sees the `MPIProcessor` wrapper, so a backend's
+# override (keyed on its raw device proc type, e.g. `CLArrayDeviceProc`) would
+# otherwise never fire under MPI.
+Dagger.gpu_kernel_lock(f, proc::MPIProcessor) = Dagger.gpu_kernel_lock(f, proc.innerProc)
+
 # Owner-local payload that preserves the Chunk's SPMD-uniform chunktype after
 # Sch unwraps a Chunk to a device value (e.g. Matrix chunktype + CuArray value).
 # Without this, promote_op/chunktype diverge across ranks (CuArray vs Matrix).

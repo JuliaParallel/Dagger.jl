@@ -19,6 +19,20 @@ function (::Kernel{F})(args...; ndrange) where F
     kern(args...; ndrange)
 end
 
+"""
+    gpu_kernel_lock(f, proc::Processor)
+
+Run `f()` while holding whatever lock `proc`'s backend needs around a native
+GPU call (kernel launch, buffer copy, ...). Defaults to no locking; backends
+whose native calls aren't safe under concurrent use from multiple Julia
+threads override this for their processor type. Used at call sites (like
+`multi_span_copy!`) that can run from inside a task the backend has chosen not
+to cover with a broader lock -- e.g. because that task can block for a long
+time on non-GPU work first, and a broad lock would risk deadlocking against
+another local task that needs it to produce the data being waited on.
+"""
+gpu_kernel_lock(f, ::Processor) = f()
+
 macro gpuproc(PROC, T)
     PROC = esc(PROC)
     T = esc(T)
