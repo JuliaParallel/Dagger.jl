@@ -1992,6 +1992,7 @@ Executes a single task specified by `task` on `to_proc`.
             task_spec=task,
             cancel_token=Dagger.DTASK_CANCEL_TOKEN[],
             logging_enabled,
+            acceleration=Dagger.current_acceleration(),
         ))
 
         result = Dagger.with_options(propagated) do

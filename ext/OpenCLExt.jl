@@ -304,7 +304,19 @@ function Dagger.execute!(proc::CLArrayDeviceProc, f, args...; kwargs...)
     task = Threads.@spawn begin
         Dagger.set_tls!(tls)
         with_context!(proc)
-        result = Base.@invokelatest f(args...; kwargs...)
+        # `CL_EXECUTE_LOCK`d, except for `move!`: `move!` (the MPI in-place
+        # move task) can begin with a long-blocking cross-rank recv before any
+        # GPU work, so holding this lock for the whole call would risk
+        # deadlocking against another local task that needs the lock to
+        # produce the data being waited on. Its own GPU-side step (scattering
+        # the received host buffer into device memory) takes the same lock
+        # narrowly, around just that step -- see `multi_span_copy!`'s
+        # `gpu_kernel_lock` call.
+        result = if f === Dagger.move!
+            Base.@invokelatest f(args...; kwargs...)
+        else
+            Base.@lock CL_EXECUTE_LOCK Base.@invokelatest f(args...; kwargs...)
+        end
         # N.B. Synchronization must be done when accessing result or args
         return result
     end
@@ -411,6 +423,22 @@ Dagger.scope_key_precedence(::Val{:cl_devices}) = 1
 const DEVICES = Dict{Int, Device}()
 const CONTEXTS = Dict{Int, Context}()
 const QUEUES = Dict{Int, CmdQueue}()
+
+# Dagger dispatches concurrent tasks targeting the same device from separate
+# Julia threads (each via its own `Threads.@spawn` in `execute!` below), relying
+# on the backend to serialize concurrent native calls as needed. Unlike the
+# vendor GPU runtimes (CUDA/ROCm/Metal), at least pocl (the CPU OpenCL driver
+# used for CI/local testing) is not safe under concurrent native calls (kernel
+# launches, buffer copies, ...) issued from multiple threads at once against
+# the same device: without serializing them, concurrent chunk-level work (e.g.
+# each chunk of a DArray broadcast, or a stencil sweep, running as a separate
+# task) produces wrong results or aborts inside `clSetKernelArg`.
+#
+# `execute!` below takes this lock around most task bodies. `move!` is the one
+# exception (see there); its own GPU-side step takes this same lock narrowly
+# via `gpu_kernel_lock` in `multi_span_copy!` instead.
+const CL_EXECUTE_LOCK = ReentrantLock()
+Dagger.gpu_kernel_lock(f, ::CLArrayDeviceProc) = Base.@lock CL_EXECUTE_LOCK f()
 
 function __init__()
     # FIXME: Support multiple platforms

@@ -240,6 +240,11 @@ struct HistoryEntry
     ainfo::AliasingWrapper
     space::MemorySpace
     write_num::Int
+    # Producer of this write/copy. Remainder syncdeps wait on this task
+    # directly instead of re-resolving through live `ainfos_owner`, which may
+    # later name a different task for the same ainfo or miss the producer when
+    # only an overlapping ainfo is consulted.
+    task::DTask
 end
 
 struct AliasedObjectCacheStore
@@ -661,10 +666,8 @@ function merge_history!(state::DataDepsState, arg_w::ArgumentWrapper, other_arg_
     history = state.arg_history[arg_w]
     @opcounter :merge_history
     @opcounter :merge_history_complexity length(history)
-    origin_space = state.arg_origin[other_arg_w.arg]
     for other_entry in state.arg_history[other_arg_w]
-        write_num_tuple = HistoryEntry(AliasingWrapper(NoAliasing()), origin_space, other_entry.write_num)
-        range = searchsorted(history, write_num_tuple; by=x->x.write_num)
+        range = searchsorted(history, other_entry; by=x->x.write_num)
         if !isempty(range)
             # Find and skip duplicates
             match = false
@@ -672,7 +675,8 @@ function merge_history!(state::DataDepsState, arg_w::ArgumentWrapper, other_arg_
                 source_entry = history[source_idx]
                 if source_entry.ainfo == other_entry.ainfo &&
                     source_entry.space == other_entry.space &&
-                    source_entry.write_num == other_entry.write_num
+                    source_entry.write_num == other_entry.write_num &&
+                    source_entry.task == other_entry.task
                     match = true
                     break
                 end
@@ -839,12 +843,12 @@ function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::M
     empty!(state.arg_history[arg_w])
 
     # Add our own history
-    push!(state.arg_history[arg_w], HistoryEntry(ainfo, dest_space, write_num))
+    push!(state.arg_history[arg_w], HistoryEntry(ainfo, dest_space, write_num, task))
 
     # Find overlapping arguments and update their history
     for other_arg_w in state.arg_overlaps[arg_w]
         other_arg_w == arg_w && continue
-        push!(state.arg_history[other_arg_w], HistoryEntry(ainfo, dest_space, write_num))
+        push!(state.arg_history[other_arg_w], HistoryEntry(ainfo, dest_space, write_num, task))
     end
 
     # Track which spaces hold a fully-current replica of this region
@@ -889,6 +893,29 @@ end
 isremotehandle(x) = false
 isremotehandle(x::DTask) = true
 isremotehandle(x::Chunk) = true
+"""
+    slot_is_already_in_place(data, orig_space, dest_space) -> Bool
+
+Whether `data` can serve as its own Datadeps slot in `dest_space`.
+
+Only a `Chunk` that already lives in `dest_space` and wraps a `move_rewrap`
+*leaf* qualifies. `move_rewrap` does more than move bytes: it rebuilds wrappers
+and resolves handles (a `ChunkView` becomes a `Chunk` over a real `SubArray`, a
+nested `Chunk` is flattened) so that what reaches the task is a plain
+destination-space value. Those results differ from the input even when nothing
+moves, so only leaves may be passed through untouched.
+
+Restricted to locally-owned chunks under non-uniform execution because deciding
+this requires unwrapping `data`, and because MPI chunk handles are rank-relative.
+"""
+function slot_is_already_in_place(data, orig_space, dest_space)
+    data isa Chunk || return false
+    orig_space == dest_space || return false
+    uniform_execution() && return false
+    root_worker_id(data.processor) == myid() || return false
+    return move_rewrap_parts(unwrap(data)) === nothing
+end
+
 function generate_slot!(state::DataDepsState, dest_space, data)
     # N.B. We do not perform any sync/copy with the current owner of the data,
     # because all we want here is to make a copy of some version of the data,
@@ -906,8 +933,18 @@ function generate_slot!(state::DataDepsState, dest_space, data)
     id = rand(Int)
     @maybelog ctx timespan_start(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data))
     tid = something(DATADEPS_CURRENT_TASK[], (;uid=0)).uid
-    data_chunk = with(DATADEPS_THUNK_ID=>tid) do
-        remotecall_endpoint_toplevel(move_rewrap, current_acceleration(), aliased_object_cache, from_proc, to_proc, orig_space, dest_space, data)
+    data_chunk = if slot_is_already_in_place(data, orig_space, dest_space)
+        # Nothing to move: the slot for data already in `dest_space` is the data
+        # itself. Going through `move_rewrap` here would allocate a second Chunk
+        # (and DRef) over the very same memory, which costs a MemPool round-trip
+        # per argument per region and buys nothing. Still route through
+        # `aliased_object!` so the cache records this object as the (never-freed)
+        # original for its aliasing key, exactly as the general path does.
+        aliased_object!(Returns(data), aliased_object_cache, data)::Chunk
+    else
+        with(DATADEPS_THUNK_ID=>tid) do
+            remotecall_endpoint_toplevel(move_rewrap, current_acceleration(), aliased_object_cache, from_proc, to_proc, orig_space, dest_space, data)
+        end
     end
     @maybelog ctx timespan_finish(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data=data_chunk))
     @assert memory_space(data_chunk) == dest_space "space mismatch! $dest_space (dest) != $(memory_space(data_chunk)) (actual) ($(typeof(data)) (data) vs. $(typeof(data_chunk)) (chunk)), spaces ($orig_space -> $dest_space)"

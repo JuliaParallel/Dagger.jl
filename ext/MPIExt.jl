@@ -171,7 +171,17 @@ uniform_execution(accel::MPIAcceleration) = true
 # tasks. Protect both with one lock; never mutate them unlocked.
 const MPI_PROC_CACHE_LOCK = Threads.ReentrantLock()
 const MPIClusterProcChildren = Dict{MPI.Comm, Set{Processor}}()
-const MPIUniformProcsCache = Dict{MPI.Comm, Vector{Processor}}()
+# Keyed by (comm, ambient compute scope): the uniform listing depends on which
+# processors the current scope admits (see `uniform_mpi_processors`), not just
+# on the communicator.
+const MPIUniformProcsCache = Dict{Tuple{MPI.Comm, Dagger.AbstractScope}, Vector{Processor}}()
+
+# Drop every cached uniform listing for `comm`, across all scopes.
+function invalidate_uniform_cache!(comm::MPI.Comm)
+    for key in collect(keys(MPIUniformProcsCache))
+        key[1] == comm && delete!(MPIUniformProcsCache, key)
+    end
+end
 
 struct MPIClusterProc <: Processor
     comm::MPI.Comm
@@ -201,7 +211,7 @@ function ensure_children!(comm::MPI.Comm)
         if !haskey(MPIClusterProcChildren, comm)
             MPIClusterProcChildren[comm] = children
             # Invalidate only this communicator's uniform listing
-            delete!(MPIUniformProcsCache, comm)
+            invalidate_uniform_cache!(comm)
         end
         return MPIClusterProcChildren[comm]
     end
@@ -212,7 +222,7 @@ function populate_children!(comm::MPI.Comm)
     children = get_processors(OSProc())
     lock(MPI_PROC_CACHE_LOCK) do
         MPIClusterProcChildren[comm] = children
-        delete!(MPIUniformProcsCache, comm)
+        invalidate_uniform_cache!(comm)
     end
     return children
 end
@@ -221,8 +231,12 @@ function uniform_mpi_processors(accel::MPIAcceleration)
     # Ensure children first so the `get!` callback never mutates this Dict
     # mid-insertion (via MPIClusterProc / ensure_children!).
     ensure_children!(accel.comm)
+    # `get_compute_scope()` reflects the ambient `with_options(scope=...)` at
+    # the call site (e.g. inside `stage(::AllocateArray)`), so it must be read
+    # outside the cache lookup closure, not memoized away with the comm alone.
+    scope = Dagger.get_compute_scope()
     lock(MPI_PROC_CACHE_LOCK) do
-        get!(MPIUniformProcsCache, accel.comm) do
+        get!(MPIUniformProcsCache, (accel.comm, scope)) do
             children = MPIClusterProcChildren[accel.comm]
             procs = Processor[]
             for i in 0:(MPI.Comm_size(accel.comm)-1)
@@ -230,9 +244,16 @@ function uniform_mpi_processors(accel::MPIAcceleration)
                     push!(procs, MPIProcessor(innerProc, accel.comm, i))
                 end
             end
-            # Default placement only targets default-enabled (CPU) processors; GPU
-            # processors are opt-in via explicit scopes
-            filter!(default_enabled, procs)
+            # Default placement only targets processors the ambient scope
+            # admits. With no explicit scope this is `DefaultScope()`, which
+            # (via its `DefaultEnabledTaint`) keeps today's CPU-only behavior;
+            # GPU processors remain opt-in, but now via *either* an explicit
+            # `assignment` array or a GPU-restricting `with_options(scope=...)`
+            # (e.g. `all_gpu_scope`) — previously only the former worked, so
+            # allocations made without an explicit assignment (bare `rand`,
+            # `similar` on an operation's result, ...) silently fell back to
+            # CPU even inside a GPU-only scope.
+            filter!(p -> Dagger.proc_in_scope(p, scope), procs)
             select_processors_uniform!(procs, accel)
             procs
         end
@@ -1865,6 +1886,12 @@ gpu_kernel_backend(proc::MPIProcessor) = gpu_kernel_backend(proc.innerProc)
 # the scope fix above) recorded as living on that GPU.
 Dagger.allocate_array_func(proc::MPIProcessor, f) = Dagger.allocate_array_func(proc.innerProc, f)
 
+# Same forwarding as above: `task_processor()` inside `multi_span_copy!`'s
+# `gpu_kernel_lock` call sees the `MPIProcessor` wrapper, so a backend's
+# override (keyed on its raw device proc type, e.g. `CLArrayDeviceProc`) would
+# otherwise never fire under MPI.
+Dagger.gpu_kernel_lock(f, proc::MPIProcessor) = Dagger.gpu_kernel_lock(f, proc.innerProc)
+
 # Owner-local payload that preserves the Chunk's SPMD-uniform chunktype after
 # Sch unwraps a Chunk to a device value (e.g. Matrix chunktype + CuArray value).
 # Without this, promote_op/chunktype diverge across ranks (CuArray vs Matrix).
@@ -2119,7 +2146,11 @@ function mpi_propagate_chunk_types!(tasks, accel::MPIAcceleration, expected_type
     for t in tasks
         if t isa Thunk
             if t.options !== nothing
-                t.options.return_type = expected_type
+                # Respect a more specific tile type already set by the spawner
+                # (e.g. `DSparseArray` from sparse allocators).
+                if t.options.return_type === nothing
+                    t.options.return_type = expected_type
+                end
             else
                 t.options = Options(return_type=expected_type)
             end

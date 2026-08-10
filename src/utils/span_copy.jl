@@ -124,7 +124,14 @@ function multi_span_copy!(dst::AbstractArray{T}, src::AbstractArray{T},
     src_offs_d = _device_u32(backend, src_offs)
     prefix_d = _device_u32(backend, prefix)
     kern = _multi_span_copy_kernel!(backend)
-    kern(dst_vec, src_vec, dst_offs_d, src_offs_d, prefix_d; ndrange=total)
+    # This can run inside `move!` (the MPI in-place move task), which some
+    # backends' `execute!` deliberately leave outside their broader
+    # kernel-launch lock (see e.g. OpenCLExt) to avoid deadlocking a blocking
+    # recv that precedes this call against that lock; take the narrower
+    # per-launch lock here instead.
+    gpu_kernel_lock(task_processor()) do
+        kern(dst_vec, src_vec, dst_offs_d, src_offs_d, prefix_d; ndrange=total)
+    end
     # This synchronize is required (independent of any following DtoH): the
     # kernel reads the device-resident descriptor arrays allocated just above
     # (`dst_offs_d`/`src_offs_d`/`prefix_d`), which become GC-eligible on return.
