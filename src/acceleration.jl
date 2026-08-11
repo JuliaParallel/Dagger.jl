@@ -48,6 +48,14 @@ end
 accel_matches_proc(accel::DistributedAcceleration, proc::OSProc) = true
 accel_matches_proc(accel::DistributedAcceleration, proc) = true
 
+"""
+    accel_kind(accel::Acceleration) -> Symbol
+
+Maps an `Acceleration` instance back to the `Symbol` that `accelerate!` accepts
+for it (e.g. `accelerate!(:mpi)` <-> `accel_kind(::MPIAcceleration) == :mpi`).
+"""
+accel_kind(::DistributedAcceleration) = :distributed
+
 function compatible_processors(accel::Union{Acceleration,Nothing}, scope::AbstractScope, procs::Vector{<:Processor})
     comp = compatible_processors(scope, procs)
     accel === nothing && return comp

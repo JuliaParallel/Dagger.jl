@@ -441,30 +441,10 @@ end
 
 Dagger.to_scope(::Val{:rocm_gpu}, sc::NamedTuple) =
     Dagger.to_scope(Val{:rocm_gpus}(), merge(sc, (;rocm_gpus=[sc.rocm_gpu])))
-function Dagger.to_scope(::Val{:rocm_gpus}, sc::NamedTuple)
-    if haskey(sc, :worker)
-        workers = Int[sc.worker]
-    elseif haskey(sc, :workers) && sc.workers != Colon()
-        workers = sc.workers
-    else
-        workers = map(gproc->gproc.pid, Dagger.procs(Dagger.Sch.eager_context()))
-    end
-    scopes = Dagger.ExactScope[]
-    dev_ids = sc.rocm_gpus
-    for worker in workers
-        procs = Dagger.get_processors(Dagger.OSProc(worker))
-        for proc in procs
-            proc isa ROCArrayDeviceProc || continue
-            if dev_ids == Colon() || proc.device_id in dev_ids
-                scope = Dagger.ExactScope(proc)
-                push!(scopes, scope)
-            end
-        end
-    end
-    return Dagger.UnionScope(scopes)
-end
-Dagger.scope_key_precedence(::Val{:rocm_gpu}) = 2
-Dagger.scope_key_precedence(::Val{:rocm_gpus}) = 1
+Dagger.to_scope(::Val{:rocm_gpus}, sc::NamedTuple) =
+    Dagger.gpu_scope(ROCArrayDeviceProc, proc->proc.device_id, sc.rocm_gpus, sc)
+Dagger.scope_key_precedence(::Val{:rocm_gpu}) = 3
+Dagger.scope_key_precedence(::Val{:rocm_gpus}) = 3
 
 # MPI data plane: pass ROCArrays to MPI directly when the library is ROCm-aware
 # (DAGGER_MPI_GPU_DIRECT=0/1 forces the decision; detection is best-effort)

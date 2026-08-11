@@ -412,30 +412,10 @@ end
 
 Dagger.to_scope(::Val{:cuda_gpu}, sc::NamedTuple) =
     Dagger.to_scope(Val{:cuda_gpus}(), merge(sc, (;cuda_gpus=[sc.cuda_gpu])))
-Dagger.scope_key_precedence(::Val{:cuda_gpu}) = 1
-function Dagger.to_scope(::Val{:cuda_gpus}, sc::NamedTuple)
-    if haskey(sc, :worker)
-        workers = Int[sc.worker]
-    elseif haskey(sc, :workers) && sc.workers != Colon()
-        workers = sc.workers
-    else
-        workers = map(gproc->gproc.pid, Dagger.procs(Dagger.Sch.eager_context()))
-    end
-    scopes = Dagger.ExactScope[]
-    dev_ids = sc.cuda_gpus
-    for worker in workers
-        procs = Dagger.get_processors(Dagger.OSProc(worker))
-        for proc in procs
-            proc isa CuArrayDeviceProc || continue
-            if dev_ids == Colon() || proc.device+1 in dev_ids
-                scope = Dagger.ExactScope(proc)
-                push!(scopes, scope)
-            end
-        end
-    end
-    return Dagger.UnionScope(scopes)
-end
-Dagger.scope_key_precedence(::Val{:cuda_gpus}) = 1
+Dagger.scope_key_precedence(::Val{:cuda_gpu}) = 3
+Dagger.to_scope(::Val{:cuda_gpus}, sc::NamedTuple) =
+    Dagger.gpu_scope(CuArrayDeviceProc, proc->proc.device+1, sc.cuda_gpus, sc)
+Dagger.scope_key_precedence(::Val{:cuda_gpus}) = 3
 
 # MPI (SPMD) integration: aliasing spans broadcast from an owner rank must be
 # stamped with that rank so same-device addresses on different ranks never

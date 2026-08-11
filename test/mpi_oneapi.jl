@@ -20,6 +20,7 @@ const IntelExt = Base.get_extension(Dagger, :IntelExt)
 run_mpi_gpu_suite((;
     name = "oneAPI",
     DeviceProc = IntelExt.oneArrayDeviceProc,
+    gpu_key = :intel_gpu,
     elt = Float32,
     matmul = true,
     # stencil left off: the oneAPI backend has a known @stencil issue tracked
