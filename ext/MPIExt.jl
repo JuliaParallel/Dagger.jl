@@ -24,7 +24,7 @@ import Dagger:
     move_rewrap_child_types, move_rewrap_header_mode, move_rewrap_parts,
     move_rewrap_result_type, move_type, multi_span_gather!,
     multi_span_scatter!, next_id, NoAliasing, Options, OSProc,
-    post_stage_array_chunks!, processors, ProcessScope, proc_in_scope,
+    partition_affinity_id, post_stage_array_chunks!, processors, ProcessScope, proc_in_scope,
     remotecall_endpoint_toplevel, RemotePtr, root_worker_id, same_node,
     schedule_argument_move, sch_handle, select_processors_uniform!, set_key_stored!,
     set_stored!, short_name, span_len, stage_acquire!, stage_release!,
@@ -141,7 +141,15 @@ end
 MPIAcceleration() = MPIAcceleration(MPI.COMM_WORLD)
 
 function aliasing(accel::MPIAcceleration, x::Chunk, T)
-    handle = x.handle::MPIRef
+    handle = x.handle
+    # Chunks created under a temporary DistributedAcceleration (or a worker
+    # thread that did not inherit MPI TLS) carry a DRef; fall back to the
+    # Distributed unwrap path rather than hard-failing the typeassert.
+    if !(handle isa MPIRef)
+        return _with_default_acceleration() do
+            aliasing(x, T)
+        end
+    end
     @assert accel.comm == handle.comm "MPIAcceleration comm mismatch"
     tag = to_tag()
     check_uniform(tag)
@@ -531,6 +539,12 @@ function memory_spaces(proc::MPIProcessor)
 end
 
 root_worker_id(mem_space::MPIMemorySpace) = myid()
+# Hierarchical Datadeps partitions by this id (analogous to Distributed worker
+# id). MPI always reports `root_worker_id == myid()`, so affinity must key on
+# the owning rank instead.
+partition_affinity_id(space::MPIMemorySpace) = space.rank
+partition_affinity_id(proc::MPIProcessor) = proc.rank
+partition_affinity_id(proc::MPIOSProc) = proc.rank
 
 function processors(memSpace::MPIMemorySpace)
     rawProc = Processor[]

@@ -65,7 +65,8 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
                         traversal::Symbol=:inorder,
                         scheduler::Union{DataDepsScheduler,Nothing}=nothing,
                         aliasing::Bool=true,
-                        launch_wait::Union{Bool,Nothing}=nothing)
+                        launch_wait::Union{Bool,Nothing}=nothing,
+                        hierarchical::Union{Bool,Nothing}=nothing)
     if !static
         throw(ArgumentError("Dynamic scheduling is no longer available"))
     end
@@ -78,22 +79,34 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
     wait_all(; check_errors=true) do
         scheduler = something(scheduler, DATADEPS_SCHEDULER[], RoundRobinScheduler())
         launch_wait = something(launch_wait, DATADEPS_LAUNCH_WAIT[], false)::Bool
+        hierarchical = something(hierarchical, DATADEPS_HIERARCHICAL[], true)::Bool
+        # N.B. Declared as a named function (rather than a closure bound to a
+        # local) so it shows up by name in stacktraces and profiles, which is
+        # the boundary between region setup and the whole planning pipeline.
+        function run_distribute(queue)
+            if hierarchical
+                distribute_tasks_hierarchical!(queue)
+            else
+                distribute_tasks!(queue)
+            end
+        end
         if launch_wait
             result = spawn_bulk() do
                 queue = DataDepsTaskQueue(get_options(:task_queue); scheduler)
                 with_options(f; task_queue=queue)
-                distribute_tasks!(queue)
+                run_distribute(queue)
             end
         else
             queue = DataDepsTaskQueue(get_options(:task_queue); scheduler)
             result = with_options(f; task_queue=queue)
-            distribute_tasks!(queue)
+            run_distribute(queue)
         end
         return result
     end
 end
 const DATADEPS_SCHEDULER = ScopedValue{Union{DataDepsScheduler,Nothing}}(nothing)
 const DATADEPS_LAUNCH_WAIT = ScopedValue{Union{Bool,Nothing}}(nothing)
+const DATADEPS_HIERARCHICAL = ScopedValue{Union{Bool,Nothing}}(nothing)
 
 # Current task uid, propagated into `tochunk` so uniform-execution backends
 # (MPIExt) can derive deterministic, rank-agreed handle IDs. Core datadeps sets
@@ -245,7 +258,7 @@ map_or_ntuple(f, xs::Vector) = map(f, 1:length(xs))
 # N.B. Accept any `Tuple` (typed specs produce heterogeneous tuples of
 # `TypedArgument{T}`, not a homogeneous `NTuple{N,T}`).
 @inline map_or_ntuple(@specialize(f), xs::Tuple) = ntuple(f, Val(length(xs)))
-function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_procs, all_scope, spec::DTaskSpec{typed}, task::DTask, fargs, proc_to_scope_lfu, write_num::Int) where typed
+function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_procs, all_scope, spec::DTaskSpec{typed}, task::DTask, fargs, proc_to_scope_lfu, write_num::Int; ownership=nothing) where typed
     @specialize spec fargs
 
     if typed
@@ -303,6 +316,16 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
             truncate_history!(state, dep.arg_w)
         end
         return
+    end
+
+    # Hierarchical scheduling only: for shared backing chunks whose current
+    # version was produced by another partition, seed this partition's state so
+    # the copy-to below pulls a fresh whole-chunk copy from the true owner (and
+    # syncs on its producer). No-op on the flat path (`ownership === nothing`).
+    # N.B. Currently always `nothing` -- see the dead-code note on
+    # "Cross-partition chunk ownership" in `datadeps/hierarchical.jl`.
+    if ownership !== nothing
+        _sync_incoming_ownership!(state, ownership, our_space, task_arg_ws, write_num)
     end
 
     # Copy args from local to remote
@@ -431,6 +454,13 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
             end
         end
         return
+    end
+
+    # Hierarchical scheduling only: publish this task as the new authoritative
+    # owner of each shared backing chunk it writes, so later cross-partition
+    # consumers pull the up-to-date version from here.
+    if ownership !== nothing
+        _commit_ownership!(state, ownership, our_space, task, task_arg_ws)
     end
 
     write_num += 1
