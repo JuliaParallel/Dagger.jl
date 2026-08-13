@@ -811,24 +811,42 @@ function partition_dag(dag::SimpleDiGraph, task_metas::Vector{HierarchicalTaskMe
                 continue
             end
 
-            affinity = zeros(Int, n_owners)
+            # Owners are ranked by (written args, read args) rather than by one
+            # combined count, because a written argument is worth strictly more
+            # than any number of read ones: running away from it copies it in
+            # *and* back out again at region end, while a read argument only
+            # copies in. Counting them together lets a task with many small
+            # read-only arguments (a stencil's halo neighbors, say) be dragged
+            # away from the chunk it writes, so every sweep ships the output
+            # chunk both ways.
+            #
+            # N.B. Argument *counts*, not byte counts: `datasize` of a chunk is
+            # only known on its owning rank (see `datasize(::MPIRef)`), and this
+            # decision must come out identical on every rank under SPMD.
+            write_affinity = zeros(Int, n_owners)
+            read_affinity = zeros(Int, n_owners)
             for dep in meta.deps
                 arg_space = memory_space(dep.arg_w.arg)
                 arg_oid = partition_affinity_id(arg_space)
                 idx = get(owner_to_partition, arg_oid, 0)
                 if idx > 0 && idx in matching
-                    affinity[idx] += 1
+                    if dep.writedep
+                        write_affinity[idx] += 1
+                    else
+                        read_affinity[idx] += 1
+                    end
                 end
             end
             best_pid = matching[1]
-            best_aff = -1
+            best_aff = (-1, -1)
             for pid in matching
-                if affinity[pid] > best_aff
-                    best_aff = affinity[pid]
+                aff = (write_affinity[pid], read_affinity[pid])
+                if aff > best_aff
+                    best_aff = aff
                     best_pid = pid
                 end
             end
-            if best_aff <= 0
+            if best_aff == (0, 0)
                 vertex_to_partition[v] = matching[mod1(v, length(matching))]
             else
                 vertex_to_partition[v] = best_pid
