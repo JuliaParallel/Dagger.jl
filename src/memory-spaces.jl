@@ -53,6 +53,35 @@ function processors(space::CPURAMMemorySpace)
     end
 end
 
+"""
+    memory_space_scope(space::MemorySpace) -> AbstractScope
+
+A scope restricting execution to `space`, for tasks that must run where their data
+already lives. Picks a single processor, like Datadeps does for its copy and free
+tasks: under uniform (SPMD) execution every rank must pick the same one, and
+`processors` is ordered deterministically while a `UnionScope` of all of them
+would not be.
+
+Memoized per space so the returned scope is *identity*-stable, not merely equal.
+`Sch.compatible_processors_cached` keys on `objectid(scope)` and only takes a hit
+when the stored scope is `===` the query, so handing out a fresh `ExactScope` per
+call would miss that cache on every spawn, pay a full `compatible_processors`
+scan, and evict live entries from its fixed-size LFU. Datadeps' exec scopes are
+identity-stable for exactly this reason; callers here (e.g. `stencil_halo`
+spawns) need the same property.
+"""
+const MEMORY_SPACE_SCOPE_CACHE = LockedObject(Dict{MemorySpace,ExactScope}())
+function memory_space_scope(space::MemorySpace)
+    @safe_lock1 MEMORY_SPACE_SCOPE_CACHE cache begin
+        value = get(cache, space, nothing)
+        if value === nothing
+            value = ExactScope(first(processors(space)))
+            cache[space] = value
+        end
+        return value
+    end
+end
+
 ### In-place Data Movement
 
 unwrap(x::Chunk) = unwrap(x.handle)
