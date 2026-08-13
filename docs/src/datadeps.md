@@ -130,6 +130,54 @@ end
 
 If you need to synchronize or fetch results, these operations should be performed outside the `spawn_datadeps` block. The primary purpose of `spawn_datadeps` is to define a region where data dependencies for mutable operations are automatically managed.
 
+### Known correctness issues
+
+Two open bugs are worth knowing about before you rely on `view` arguments across
+multiple workers. Both are in the core (non-hierarchical) machinery and predate
+hierarchical scheduling; both are covered by `test/datadeps/differential.jl`,
+which is run by the `datadeps-differential` CI job.
+
+**1. `view` of a chunk homed on another worker fails outright.** Taking a `view`
+of a `Chunk` that lives on a different worker than the one entering the region
+throws from `unwrap` during data movement:
+
+```julia
+t = remotecall_fetch(Dagger.tochunk, 2, collect(1.0:8.0))   # homed on worker 2
+Dagger.spawn_datadeps() do                                  # entered from worker 1
+    Dagger.@spawn add!(InOut(view(t, 1:4)), 1.0)
+end
+# ERROR: AssertionError: DRef ... is not owned by this process: 2 != 1
+```
+
+This affects both schedulers identically. Keep `view` arguments on chunks homed
+where the region runs until it is fixed.
+
+**2. Flat scheduling can silently produce wrong results for `view` workloads
+spread across several workers.** When a region mixes whole-array writes,
+`view`-based partial writes, and copies between arrays, and there are enough
+workers for tasks to be placed across several memory spaces, `distribute_tasks!`
+intermittently returns results that differ from running the same tasks
+sequentially. It is *silent* — no error is raised.
+
+The failure is a property of accumulated remainder/currency state rather than of
+any single pair of operations: a whole set of small candidate patterns (partial
+write followed by a whole-array read, partial write of a copy destination,
+cross-copies between two partially-written tiles, and so on) were each checked 25
+times over 3 workers without ever failing, and delta-debugging a failing 30-task
+workload stalls at 18 tasks. The reliable reproducer is therefore the generated
+workload itself:
+
+```julia
+# 3+ workers, tiles homed on the driver
+ops = dd_gen_ops(4, 8, 30; views=true, valuedeps=false)   # test/datadeps/differential.jl
+ref = dd_run_sequential(ops, 8)
+dd_run_datadeps(ops, 8, false, i -> 1) != ref   # flat:         wrong ~40% of runs
+dd_run_datadeps(ops, 8, true,  i -> 1) == ref   # hierarchical: correct every run
+```
+
+Seed 8 reproduces at roughly 25%. Hierarchical scheduling is correct on the
+identical workloads, so preferring it (the default) avoids this one.
+
 ## Aliasing Support
 
 Datadeps is smart enough to detect when two arguments from different tasks

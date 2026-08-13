@@ -232,6 +232,45 @@ jobs:
               await github.rest.issues.createComment({ owner, repo, issue_number, body });
             }
 
+  datadeps-differential:
+    # Differential testing of the datadeps schedulers against a plain-Julia
+    # sequential reference (test/datadeps/differential.jl). Kept as its own job,
+    # opted into with CI_DATADEPS_DIFFERENTIAL, so it cannot perturb the timing
+    # or worker layout of the regular suite -- and so a failure here points
+    # straight at scheduling rather than at whichever test happened to run next.
+    #
+    # The worker matrix matters: 0 additional workers exercises the single-owner
+    # (parallel-planning) hierarchical path, while 3 exercises the multi-owner
+    # path, cross-worker copies, and the shared-state planner.
+    name: Datadeps differential - Julia ${{ matrix.version }} / ${{ matrix.workers }} workers
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: ${{ !contains(github.event.head_commit.message, '[skip tests]') }}
+    env:
+      CI_DATADEPS_DIFFERENTIAL: '1'
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+          - '1.10'   # LTS
+          - '1'      # latest stable
+        workers:
+          - 0
+          - 3
+    steps:
+      - uses: actions/checkout@v7
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: ${{ matrix.version }}
+          arch: x64
+      - uses: julia-actions/cache@v3
+      - name: Develop local TimespanLogging
+        run: julia --project=. -e 'using Pkg; Pkg.develop(path="lib/TimespanLogging")'
+      - name: Instantiate
+        run: julia --project=. -e 'using Pkg; Pkg.instantiate()'
+      - name: Run datadeps differential tests
+        run: julia --project=test test/runtests.jl -p ${{ matrix.workers }} -t 4
+
   mpi-cpu:
     name: MPI CPU - Julia ${{ matrix.version }} / ${{ matrix.ranks }} ranks
     runs-on: ubuntu-latest
