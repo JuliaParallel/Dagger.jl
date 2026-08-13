@@ -457,7 +457,14 @@ function move!(dep_mod::RemainderAliasing{S}, to_space::MemorySpace, from_space:
         pin_buffer!(gpu_memory_kind(from_space), copies)
         from_raw = unwrap(from)
         with_context!(from_space)
-        GC.@preserve copies begin
+        # `from_raw` is preserved alongside `copies`. For device-backed arrays
+        # (`CuArray`, `ROCArray`, `CLArray`, …) the underlying device memory is
+        # released by the wrapper's finalizer, so if GC runs while the gather is
+        # in flight -- which it can, since the gather path allocates -- the
+        # source buffer can be freed out from under us and the next `pointer`
+        # throws `ArgumentError: Attempt to use a freed reference`. Preserving a
+        # CPU `Array` is a no-op, so this costs nothing on the CPU path.
+        GC.@preserve copies from_raw begin
             # Lazily view the source (first) span of each pair — avoid
             # materializing a whole second span vector for large span sets
             multi_span_gather!(copies, from_raw, Iterators.map(first, dep_mod.spans))
@@ -469,7 +476,9 @@ function move!(dep_mod::RemainderAliasing{S}, to_space::MemorySpace, from_space:
     to_raw = unwrap(to)
     with_context!(to_space)
     pin_buffer!(gpu_memory_kind(to_space), copies)
-    GC.@preserve copies begin
+    # See the gather above -- the same finalizer lifetime hazard applies to
+    # `to_raw` on the scatter side.
+    GC.@preserve copies to_raw begin
         # Lazily view the dest (last) span of each pair (see gather above)
         multi_span_scatter!(to_raw, copies, Iterators.map(last, dep_mod.spans))
     end

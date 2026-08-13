@@ -1,3 +1,23 @@
+"""
+    set_task_migratable!(task) -> task
+
+Allow `task` to run on any thread of the default pool.
+
+Clearing `sticky` is not sufficient on its own. A hand-built `@task` has no
+thread pool assigned, and `Base.enq_work` routes such a task onto the *current*
+thread's work queue rather than the shared multi-queue, so it cannot be picked
+up until the thread that scheduled it yields. `Threads.@spawn` sets both; task
+pools built with `@task` must do the same or every task they spawn is pinned,
+in effect, to whichever thread happened to schedule it.
+"""
+function set_task_migratable!(task::Task)
+    task.sticky = false
+    @static if isdefined(Base.Threads, :_spawn_set_thrpool)
+        Base.Threads._spawn_set_thrpool(task, :default)
+    end
+    return task
+end
+
 function set_task_tid!(task::Task, tid::Integer)
     task.sticky = true
     ctr = 0

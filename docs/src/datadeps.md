@@ -285,6 +285,43 @@ The `datadeps_schedule_task` function receives:
 
 The function must return a processor from `all_procs` that is compatible with `task_scope`.
 
+If your scheduler carries mutable state, also implement `Base.similar` for it. Hierarchical scheduling (below) clones the scheduler once per partition so that partitions do not share mutable state; the default `similar` calls your scheduler's zero-argument constructor.
+
+## Hierarchical Scheduling
+
+Planning a datadeps region is itself work: every argument's aliasing must be computed, a dependency DAG built, and each task's copies planned. For large regions this planning can dominate. Hierarchical scheduling spreads that work out, and is **enabled by default**.
+
+It runs as a four-phase pipeline:
+
+1. Collect per-task argument metadata and compute aliasing information.
+2. Build the dependency DAG from the aliasing overlaps.
+3. Partition the DAG by data affinity — by Distributed worker or MPI rank, or across local processors when there is only one owner.
+4. Plan each partition's tasks, with each partition assigning processors via its own scheduler shard restricted to its own processors.
+
+You can disable it per-region, which falls back to the flat single-threaded planner:
+
+```julia
+Dagger.spawn_datadeps(; hierarchical=false) do
+    Dagger.@spawn my_task!(InOut(A))
+end
+```
+
+or for a dynamic extent via the `Dagger.DATADEPS_HIERARCHICAL` scoped value.
+
+Both paths produce the same results; they differ only in how planning is distributed. Small regions short-circuit to the flat path automatically, since partitioning does not pay for itself there.
+
+### Current Limitations
+
+Hierarchical scheduling does not yet parallelize everything it could. These are performance limitations only — correctness and results are unaffected.
+
+- **Parallel planning currently applies only to single-owner (multi-threaded) regions.** When work spans multiple Distributed workers or MPI ranks, Phase 4 plans partitions sequentially, in global topological order, over one shared state. Partitions still carry worker/rank affinity — tasks are placed where their data lives — but the planning itself does not run concurrently. The per-partition parallel path is unsafe across owners because the datadeps bookkeeping is keyed by memory *space* and cannot represent two partitions holding distinct slots for the same chunk; tracking slot identity instead is the follow-up that would re-enable it.
+
+- **Under MPI this is additionally required.** Uniform (SPMD) execution needs every rank to allocate tags and `MPIRefID`s in the same order, and aliasing may perform collectives that must be ordered identically across ranks, so Phase 1 is serial there too.
+
+- **Planning is centralized on the calling process.** Aliasing computation (phase 1) is genuinely distributed via `remotecall`, but per-task copy planning (phase 4) runs on the process that entered the region, using threads only. Workers do not plan their own partitions.
+
+- **Phases 2 and 3 are single-threaded.** Building the DAG and computing aliasing overlaps are incremental, order-dependent algorithms. They are cheap relative to phases 1 and 4 today, but will become the bottleneck as those scale.
+
 ## Chunk and DTask slicing with `view`
 
 The `view` function allows you to efficiently create a "view" of a `Chunk` or `DTask` that contains an array. This enables operations on specific parts of your distributed data using standard Julia array slicing, without needing to materialize the entire array.
