@@ -53,6 +53,17 @@ function processors(space::CPURAMMemorySpace)
     end
 end
 
+"""
+    memory_space_scope(space::MemorySpace) -> AbstractScope
+
+A scope restricting execution to `space`, for tasks that must run where their data
+already lives. Picks a single processor, like Datadeps does for its copy and free
+tasks: under uniform (SPMD) execution every rank must pick the same one, and
+`processors` is ordered deterministically while a `UnionScope` of all of them
+would not be.
+"""
+memory_space_scope(space::MemorySpace) = ExactScope(first(processors(space)))
+
 ### In-place Data Movement
 
 unwrap(x::Chunk) = unwrap(x.handle)
