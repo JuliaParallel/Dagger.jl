@@ -456,6 +456,63 @@ function boundary_source_index(::Reflect{Symm}, arr, rc, nd, idx_d, d) where Sym
 end
 
 #############################################################################
+# AntiReflect Boundary Condition
+#############################################################################
+
+"""
+AntiReflect boundary condition. Non-local accesses are reflected back into the
+array exactly as with `Reflect`, but each reflected value has its sign flipped
+(an antisymmetric, or "odd", reflection).
+
+If `symm` is true (the default), the reflected values include the nearest center
+elements; if `symm` is false, they do not — matching `Reflect(true)` and
+`Reflect(false)` respectively. For an array `[1, 2, 3, 4]`, `AntiReflect(true)`
+extends it as `[..., -3, -2, -1, 1, 2, 3, 4, -4, -3, ...]`, while
+`AntiReflect(false)` extends it as `[..., -4, -3, -2, 1, 2, 3, 4, -3, -2, ...]`.
+
+This is the boundary condition for a quantity that must vanish at the edge of
+the domain, the classic case being the velocity (or momentum) component normal
+to a solid wall: the negated ghost value cancels the interior value, so the
+field interpolates to zero at the boundary and nothing flows through it.
+Reflecting such a quantity with `Reflect` instead leaves a non-zero normal flow
+at the wall, which quietly behaves like an outflow rather than a wall.
+
+Typically only one dimension is antireflected, via a mixed boundary condition:
+a wall-normal momentum in a channel that is periodic along dimension 1 and
+walled along dimension 2 uses `(Wrap(), AntiReflect())`, while the scalar
+fields and the wall-tangential momentum use `(Wrap(), Reflect(true))`.
+
+When `AntiReflect` is applied to several dimensions at once, the sign is
+flipped once per reflected dimension, so a corner region reflected in two
+dimensions keeps its original sign.
+
+Requires an element type that supports negation.
+"""
+struct AntiReflect{Symmetric} end
+AntiReflect(symm::Bool=true) = AntiReflect{symm}()
+
+boundary_has_transition(::AntiReflect) = true
+
+# Clamp to valid chunk indices - we stay at the boundary chunk
+boundary_transition(::AntiReflect, idx, size) =
+    CartesianIndex(ntuple(i -> clamp(idx[i], 1, size[i]), length(size)))
+
+function load_boundary_region(::AntiReflect{Symm}, arr, region_code::NTuple{N,Int}, neigh_dist, boundary_dims::NTuple{N,Bool}) where {N, Symm}
+    region = load_boundary_region(Reflect{Symm}(), arr, region_code, neigh_dist, boundary_dims)
+
+    # Flip the sign once per dimension that was actually reflected, so that this
+    # agrees with the per-dimension folding done for mixed boundary conditions
+    # (a region reflected in two dimensions is negated twice, i.e. unchanged).
+    nreflected = count(ntuple(i -> region_code[i] != 0 && boundary_dims[i], N))
+    return isodd(nreflected) ? -region : region
+end
+
+boundary_source_index(::AntiReflect{Symm}, arr, rc, nd, idx_d, d) where Symm =
+    boundary_source_index(Reflect{Symm}(), arr, rc, nd, idx_d, d)
+
+apply_boundary_value(::AntiReflect, value, arr, rc, nd, idx_d, src_idx, d) = -value
+
+#############################################################################
 # Mixed Boundary Conditions (Tuple of Boundary Conditions)
 #############################################################################
 
