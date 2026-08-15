@@ -797,7 +797,7 @@ function build_aliasing_parallel(unique_arg_ws::Dict{ArgumentWrapper, ArgumentWr
         # `_compute_aliasing_batch` still uses threads internally when there
         # are enough args to make it worthwhile.
         wid, worker_args = only(by_worker)
-        results = wid == myid() ? _compute_aliasing_batch(worker_args) :
+        results = wid == myid() ? batch_aliasing(current_acceleration(), worker_args) :
                                    remotecall_fetch(_compute_aliasing_batch, wid, worker_args)
         # Key by the *local* `arg_w`, not the pair's: for a remote worker the
         # returned `ArgumentWrapper` is a deserialized copy that need not be
@@ -823,7 +823,7 @@ function build_aliasing_parallel(unique_arg_ws::Dict{ArgumentWrapper, ArgumentWr
                 # insidiously, as silently wrong aliasing when it is longer).
                 local results
                 results = if wid == myid()
-                    _compute_aliasing_batch(worker_args)
+                    batch_aliasing(current_acceleration(), worker_args)
                 else
                     remotecall_fetch(_compute_aliasing_batch, wid, worker_args)
                 end
@@ -863,13 +863,56 @@ function build_aliasing_parallel(unique_arg_ws::Dict{ArgumentWrapper, ArgumentWr
     return lookup, ainfos_overlaps, arg_to_ainfo
 end
 
+"""
+    batch_aliasing(accel, arg_ws) -> Vector{Pair{ArgumentWrapper,AliasingWrapper}}
+
+Phase 1's aliasing computation for a whole batch of arguments, in input order.
+
+The default walks the batch one argument at a time. An acceleration that has to
+*communicate* to answer (MPI, where the answer is the owner's and every rank
+needs it) should override this to exchange the batch in one go: per-argument
+collectives make a region's planning a chain of `nargs` rendezvous, which is
+latency the batch shape can pay once instead.
+
+Distributed does not need its own override for this reason: `aliasing` there
+is a plain `remotecall_fetch` to one owning worker rather than a collective, so
+there is no per-argument rendezvous *chain* to collapse in the first place --
+only a rendezvous *count*, and `build_aliasing_parallel` already collapses that
+by grouping `arg_ws` by owning worker before calling this function once per
+worker (see its `by_worker` grouping). Overriding this function too would just
+re-batch already-grouped, single-worker input; the default's own
+`Threads.@threads` split (`_compute_aliasing_batch`) is what actually
+parallelizes each worker's share once its data has landed.
+"""
+batch_aliasing(::Acceleration, arg_ws::Vector{ArgumentWrapper}) =
+    _compute_aliasing_batch(arg_ws)
+
+"""
+    batch_ainfos(accel, objs, dep_mods) -> Vector{AbstractAliasing}
+
+`aliasing(accel, objs[i], dep_mods[i])` for a whole uniform list at once, in
+input order.
+
+The list is what `batch_aliasing` exchanges underneath, exposed separately for
+the other places that end up holding a batch of objects needing ainfos --
+notably `resolve_pending!`, which is resolving copies rather than the region's
+arguments. Same reasoning: an acceleration that must communicate to answer
+should override this and pay one rendezvous rather than `length(objs)`.
+"""
+batch_ainfos(accel::Acceleration, objs::Vector, dep_mods::Vector) =
+    AbstractAliasing[aliasing(accel, objs[i], dep_mods[i]) for i in eachindex(objs)]
+
 # Below this many args, the fixed cost of forking/joining `Threads.@threads`
 # outweighs the benefit of parallelizing the (typically cheap) `aliasing()` calls.
 const COMPUTE_ALIASING_BATCH_MIN_PARALLEL = 8
 
 function _compute_aliasing_batch(arg_ws::Vector{ArgumentWrapper})
     n = length(arg_ws)
-    results = Vector{Pair{ArgumentWrapper, AliasingWrapper}}(undef, n)
+    # Task-local: safe to reuse across calls because the result is fully
+    # consumed by the caller (copied into `arg_to_ainfo`) before this task
+    # could re-enter this function for another region.
+    results = @reusable_vector :compute_aliasing_batch_results Pair{ArgumentWrapper,AliasingWrapper} nothing 32
+    resize!(results, n)
     accel = current_acceleration()
     # Under uniform execution (MPI), aliasing may perform collectives that must
     # run in the same sequential order on every rank -- never Threads.@threads.
