@@ -76,6 +76,9 @@ aliasing(x::ChunkView) = aliasing(current_acceleration(), x, identity)
 aliasing(x::ChunkView, dep_mod) = aliasing(current_acceleration(), x, dep_mod)
 memory_space(x::ChunkView) = memory_space(x.chunk)
 isremotehandle(x::ChunkView) = true
+# A view over a chunk resolves to a real `SubArray` only via `move_rewrap`, so it
+# can never pass through as its own slot (`slot_rewrap_is_identity`).
+isremotehandle_type(::Type{<:ChunkView}) = true
 
 # Under uniform (SPMD) execution, a ChunkView is replicated metadata on every
 # rank (inner chunk record + slices); wrapping it in a rank-0-owned Chunk

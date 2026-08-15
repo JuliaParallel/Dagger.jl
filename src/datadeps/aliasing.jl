@@ -895,26 +895,57 @@ isremotehandle(x) = false
 isremotehandle(x::DTask) = true
 isremotehandle(x::Chunk) = true
 """
+    slot_rewrap_is_identity(::Type{T}) -> Bool
+
+Whether `move_rewrap` of a `T` that already sits in the destination space would
+rebuild a structurally identical value, making the rewrap pure overhead.
+
+`move_rewrap` does more than move bytes: it also *resolves handles*, turning a
+`ChunkView` into a `Chunk` over a real `SubArray` and flattening a nested
+`Chunk`, so that what reaches the task is a plain destination-space value. A type
+containing such a handle therefore always has to go through it. Anything else --
+a leaf, or a wrapper (`SubArray`, `HaloArray`, triangular, ...) whose payload is
+plain data -- is reproduced unchanged when no space transition is involved.
+
+Only concrete types can be judged: an abstract `chunktype` may be hiding a handle
+in a field this cannot see.
+"""
+function slot_rewrap_is_identity(::Type{T}) where T
+    isconcretetype(T) || return false
+    isremotehandle_type(T) && return false
+    child_types = move_rewrap_child_types(T)
+    child_types === nothing && return true
+    return all(slot_rewrap_is_identity, child_types)
+end
+
+# Handle types, whose resolution is the reason `move_rewrap` cannot be skipped.
+isremotehandle_type(::Type{<:Chunk}) = true
+isremotehandle_type(::Type{<:DTask}) = true
+isremotehandle_type(::Type) = false
+
+"""
     slot_is_already_in_place(data, orig_space, dest_space) -> Bool
 
-Whether `data` can serve as its own Datadeps slot in `dest_space`.
+Whether `data` can serve as its own Datadeps slot in `dest_space`, so that no
+copy of it need be allocated.
 
-Only a `Chunk` that already lives in `dest_space` and wraps a `move_rewrap`
-*leaf* qualifies. `move_rewrap` does more than move bytes: it rebuilds wrappers
-and resolves handles (a `ChunkView` becomes a `Chunk` over a real `SubArray`, a
-nested `Chunk` is flattened) so that what reaches the task is a plain
-destination-space value. Those results differ from the input even when nothing
-moves, so only leaves may be passed through untouched.
+Requires a `Chunk` that already lives in `dest_space` and whose rewrap would be
+the identity (see `slot_rewrap_is_identity`).
 
-Restricted to locally-owned chunks under non-uniform execution because deciding
-this requires unwrapping `data`, and because MPI chunk handles are rank-relative.
+The test is deliberately type-based rather than value-based, which is what lets
+it fire for data the planning process cannot touch: under uniform execution (MPI)
+every rank plans every task, and under Distributed the chunk may be homed on
+another worker. In both cases the alternative is a `move_rewrap` that reproduces,
+message by message, data already sitting where it is needed -- for a wrapper like
+`HaloArray` that is a broadcast of the header plus one transfer per child, per
+argument, per region. `chunktype` is uniform across ranks, so the decision is
+too, and the resulting slot is the caller's own `Chunk`, whose handle is uniform
+as well.
 """
 function slot_is_already_in_place(data, orig_space, dest_space)
     data isa Chunk || return false
     orig_space == dest_space || return false
-    uniform_execution() && return false
-    root_worker_id(data.processor) == myid() || return false
-    return move_rewrap_parts(unwrap(data)) === nothing
+    return slot_rewrap_is_identity(chunktype(data))
 end
 
 function generate_slot!(state::DataDepsState, dest_space, data)
