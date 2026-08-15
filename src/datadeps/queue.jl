@@ -76,6 +76,19 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
     if !aliasing
         throw(ArgumentError("Aliasing analysis is no longer optional"))
     end
+    # The slot cache spans the whole region, not just planning: the copies and
+    # frees that touch a slot are tasks, so entries stay checked out until
+    # `wait_all` has drained them. Phase 1 fills in which arguments qualify.
+    slot_region = SlotReuseRegion(Set{UInt}())
+    return with(SLOT_REUSE_REGION => slot_region) do
+        try
+            _spawn_datadeps(f, scheduler, launch_wait, hierarchical)
+        finally
+            release_slot_reuse_region!(slot_region)
+        end
+    end
+end
+function _spawn_datadeps(f::Base.Callable, scheduler, launch_wait, hierarchical)
     wait_all(; check_errors=true) do
         scheduler = something(scheduler, DATADEPS_SCHEDULER[], RoundRobinScheduler())
         launch_wait = something(launch_wait, DATADEPS_LAUNCH_WAIT[], false)::Bool

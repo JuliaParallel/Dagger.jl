@@ -43,7 +43,9 @@
 #   destination chunk's aliasing info to every rank (needed because the object
 #   cache is replicated and keyed by pointer spans, which only the destination
 #   rank can compute). So MPI planning cost tracks the number of *new slot
-#   chunks* a region creates, at ~2 rendezvous each.
+#   chunks* a region creates, at ~2 rendezvous each -- which is why an iterative
+#   region's second and later sweeps are so much cheaper once the slot cache
+#   (`datadeps/slotcache.jl`) makes those chunks not new.
 #
 # ### Not-yet-parallelized work (performance only; results are unaffected)
 #
@@ -1787,6 +1789,10 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
                                          all_procs::Vector{<:Processor})
     # Phase 1: Collect arguments and compute aliasing in parallel
     task_metas, unique_arg_ws = @hier_phase prescan collect_aliased_args(seen_tasks)
+    slot_region = SLOT_REUSE_REGION[]
+    if slot_region !== nothing
+        union!(slot_region.eligible, slot_reuse_eligible_args(keys(unique_arg_ws)))
+    end
     _lookup, ainfos_overlaps, arg_to_ainfo =
         @hier_phase aliasing build_aliasing_parallel(unique_arg_ws)
 
@@ -2119,6 +2125,8 @@ function _hierarchical_copy_from_and_free!(partition_states::Vector{DataDepsStat
     freed = IdDict{Any,Nothing}()
     for pid in 1:n_partitions
         state = partition_states[pid]
+        # Claim what the next region can reuse before deciding what to free.
+        retain_reusable_slots!(state)
         obj_cache = unwrap(state.ainfo_backing_chunk)
         write_num = typemax(Int) - 1
 
@@ -2146,6 +2154,9 @@ function _hierarchical_copy_from_and_free!(partition_states::Vector{DataDepsStat
             for (ainfo, remote_arg) in space_entries
                 # Skip the user's original data; only free copies we allocated.
                 is_original(obj_cache, remote_space, ainfo) && continue
+                # Skip buffers handed to the slot cache: the next region over
+                # this data expects to find them intact.
+                slot_is_retained(remote_arg) && continue
                 haskey(freed, remote_arg) && continue
                 freed[remote_arg] = nothing
                 free_syncdeps = Set{ThunkSyncdep}()

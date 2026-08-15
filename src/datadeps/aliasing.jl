@@ -1428,7 +1428,11 @@ function generate_slot!(state::DataDepsState, dest_space, data)
     tid = something(DATADEPS_CURRENT_TASK[], (;uid=0)).uid
     timing = HIER_TIMING[]
     t0 = timing ? time_ns() : UInt64(0)
-    data_chunk = if slot_is_already_in_place(data, orig_space, dest_space)
+    reused = reusable_slot(data, orig_space, dest_space)
+    data_chunk = if reused !== nothing
+        timing && hier_log!(LogHierSlot, 0x01, LogHierSlotId(:reused), time_ns() - t0)
+        aliased_object!(Returns(reused), aliased_object_cache, data)::Chunk
+    elseif slot_is_already_in_place(data, orig_space, dest_space)
         # Nothing to move: the slot for data already in `dest_space` is the data
         # itself. Going through `move_rewrap` here would allocate a second Chunk
         # (and DRef) over the very same memory, which costs a MemPool round-trip
