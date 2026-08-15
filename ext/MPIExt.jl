@@ -722,6 +722,7 @@ function tochunk_pset(x, space::MPIMemorySpace; device=nothing, force_nonlocal=f
 end
 
 const DEADLOCK_DETECT = TaskLocalValue{Bool}(()->true)
+
 const DEADLOCK_WARN_PERIOD = TaskLocalValue{Float64}(()->10.0)
 const DEADLOCK_TIMEOUT_PERIOD = TaskLocalValue{Float64}(()->120.0)
 const RECV_WAITING = LockedObject(Dict{Tuple{MPI.Comm, Int, Int}, Base.Event}())
@@ -1124,7 +1125,9 @@ end
 function mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, rank, tag, kind, srcdest)
     time_elapsed = (time_ns() - time_start)
     if detect && time_elapsed > warn_period
-        @warn "[rank $rank][tag $tag] Hit probable hang on $kind (dest: $srcdest)"
+        # A hang here is a wait cycle across ranks, so which call site is waiting
+        # (and on whose behalf) is the whole diagnosis; a bare tag is not enough.
+        @warn "[rank $rank][tag $tag] Hit probable hang on $kind (dest: $srcdest)" stacktrace=sprint(Base.show_backtrace, stacktrace())
         return typemax(UInt64)
     end
     if detect && time_elapsed > timeout_period

@@ -965,6 +965,7 @@ function generate_slot!(state::DataDepsState, dest_space, data)
     id = rand(Int)
     @maybelog ctx timespan_start(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data))
     tid = something(DATADEPS_CURRENT_TASK[], (;uid=0)).uid
+    t0 = time_ns()
     data_chunk = if slot_is_already_in_place(data, orig_space, dest_space)
         # Nothing to move: the slot for data already in `dest_space` is the data
         # itself. Going through `move_rewrap` here would allocate a second Chunk
@@ -974,10 +975,14 @@ function generate_slot!(state::DataDepsState, dest_space, data)
         # original for its aliasing key, exactly as the general path does.
         aliased_object!(Returns(data), aliased_object_cache, data)::Chunk
     else
-        with(DATADEPS_THUNK_ID=>tid) do
+        moved = with(DATADEPS_THUNK_ID=>tid) do
             remotecall_endpoint_toplevel(move_rewrap, current_acceleration(), aliased_object_cache, from_proc, to_proc, orig_space, dest_space, data)
         end
+        hier_stat_add!(:slot_moved_ns, time_ns() - t0)
+        orig_space == dest_space && hier_stat_add!(:slot_samespace_ns, time_ns() - t0)
+        moved
     end
+    hier_stat_add!(:slot_ns, time_ns() - t0)
     @maybelog ctx timespan_finish(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data=data_chunk))
     @assert memory_space(data_chunk) == dest_space "space mismatch! $dest_space (dest) != $(memory_space(data_chunk)) (actual) ($(typeof(data)) (data) vs. $(typeof(data_chunk)) (chunk)), spaces ($orig_space -> $dest_space)"
     dest_space_args[data] = data_chunk
