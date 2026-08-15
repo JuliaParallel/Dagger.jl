@@ -743,8 +743,13 @@ function tochunk_pset(x, space::MPIMemorySpace; device=nothing, force_nonlocal=f
 end
 
 const DEADLOCK_DETECT = TaskLocalValue{Bool}(()->true)
+
 const DEADLOCK_WARN_PERIOD = TaskLocalValue{Float64}(()->10.0)
 const DEADLOCK_TIMEOUT_PERIOD = TaskLocalValue{Float64}(()->120.0)
+# Off by default: a full stacktrace buries the one-line diagnosis (which call
+# site is waiting) in noise. Opt in with JULIA_DAGGER_MPI_WARN_BACKTRACE=1 when
+# that call site itself is the thing in question.
+const DEADLOCK_WARN_BACKTRACE = TaskLocalValue{Bool}(()->parse(Bool, get(ENV, "JULIA_DAGGER_MPI_WARN_BACKTRACE", "0")))
 const RECV_WAITING = LockedObject(Dict{Tuple{MPI.Comm, Int, Int}, Base.Event}())
 
 # Envelope for the out-of-place raw-bytes MPI path: serialize a small
@@ -1120,7 +1125,15 @@ end
 function mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, rank, tag, kind, srcdest)
     time_elapsed = (time_ns() - time_start)
     if detect && time_elapsed > warn_period
-        @warn "[rank $rank][tag $tag] Hit probable hang on $kind (dest: $srcdest)"
+        # A hang here is a wait cycle across ranks, so which call site is waiting
+        # (and on whose behalf) is the whole diagnosis; a bare tag is not enough.
+        # The backtrace that pins down the call site is off by default, though --
+        # see DEADLOCK_WARN_BACKTRACE.
+        if DEADLOCK_WARN_BACKTRACE[]
+            @warn "[rank $rank][tag $tag] Hit probable hang on $kind (dest: $srcdest)" stacktrace=sprint(Base.show_backtrace, stacktrace())
+        else
+            @warn "[rank $rank][tag $tag] Hit probable hang on $kind (dest: $srcdest)"
+        end
         return typemax(UInt64)
     end
     if detect && time_elapsed > timeout_period
