@@ -1119,7 +1119,15 @@ function generate_slot!(state::DataDepsState, dest_space, data)
     @maybelog ctx timespan_start(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data))
     tid = something(DATADEPS_CURRENT_TASK[], (;uid=0)).uid
     t0 = time_ns()
-    data_chunk = if slot_is_already_in_place(data, orig_space, dest_space)
+    reused = reusable_slot(data, orig_space, dest_space)
+    data_chunk = if reused !== nothing
+        # A buffer an earlier region built for exactly this data and space. Route
+        # it through `aliased_object!` like the other paths, so the object cache
+        # records it as this key's storage in `dest_space` and the rest of
+        # planning cannot tell it apart from one made here.
+        hier_stat_add!(:slot_reused_ns, time_ns() - t0)
+        aliased_object!(Returns(reused), aliased_object_cache, data)::Chunk
+    elseif slot_is_already_in_place(data, orig_space, dest_space)
         # Nothing to move: the slot for data already in `dest_space` is the data
         # itself. Going through `move_rewrap` here would allocate a second Chunk
         # (and DRef) over the very same memory, which costs a MemPool round-trip
