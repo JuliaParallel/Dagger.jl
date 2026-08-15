@@ -66,13 +66,15 @@ Base.view(c::DTask, slices...) = view(fetch(c; raw=true), slices...)
 
 function aliasing(accel::Acceleration, x::ChunkView{N}, dep_mod) where N
     @assert dep_mod === identity "Dependency modifiers not yet supported for ChunkView: $dep_mod"
-    return remotecall_fetch(root_worker_id(x.chunk.processor), x.chunk, x.slices) do x, slices
-        x = unwrap(x)
-        v = view(x, slices...)
-        # A view of a whole-object container (e.g. `DSparseArray`) must alias the
-        # entire container; `aliasing_unwrapped` resolves that (otherwise it just
-        # aliases the view), and crucially does so here where `v` lives.
-        return aliasing_unwrapped(v)
+    return memoized_chunk_aliasing(x, dep_mod) do
+        remotecall_fetch(root_worker_id(x.chunk.processor), x.chunk, x.slices) do x, slices
+            x = unwrap(x)
+            v = view(x, slices...)
+            # A view of a whole-object container (e.g. `DSparseArray`) must alias the
+            # entire container; `aliasing_unwrapped` resolves that (otherwise it just
+            # aliases the view), and crucially does so here where `v` lives.
+            return aliasing_unwrapped(v)
+        end
     end
 end
 aliasing(x::ChunkView) = aliasing(current_acceleration(), x, identity)
