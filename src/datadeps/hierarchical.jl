@@ -43,7 +43,9 @@
 #   destination chunk's aliasing info to every rank (needed because the object
 #   cache is replicated and keyed by pointer spans, which only the destination
 #   rank can compute). So MPI planning cost tracks the number of *new slot
-#   chunks* a region creates, at ~2 rendezvous each.
+#   chunks* a region creates, at ~2 rendezvous each -- which is why an iterative
+#   region's second and later sweeps are so much cheaper once the slot cache
+#   (`datadeps/slotcache.jl`) makes those chunks not new.
 #
 # ### Not-yet-parallelized work (performance only; results are unaffected)
 #
@@ -304,6 +306,9 @@ mutable struct HierPlanStats
     # space: pure overhead, and the reason `slot_is_already_in_place` exists.
     slot_samespace_ns::Threads.Atomic{UInt64}
     slot_samespace_count::Threads.Atomic{Int}
+    # Slots taken from the cross-region slot cache rather than built here.
+    slot_reused_ns::Threads.Atomic{UInt64}
+    slot_reused_count::Threads.Atomic{Int}
     ainfo_ns::Threads.Atomic{UInt64}
     ainfo_count::Threads.Atomic{Int}
     # Per-event durations (ns), for distribution rather than just totals.
@@ -311,6 +316,7 @@ mutable struct HierPlanStats
     samples_lock::ReentrantLock
 end
 HierPlanStats() = HierPlanStats(0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                Threads.Atomic{UInt64}(0), Threads.Atomic{Int}(0),
                                 Threads.Atomic{UInt64}(0), Threads.Atomic{Int}(0),
                                 Threads.Atomic{UInt64}(0), Threads.Atomic{Int}(0),
                                 Threads.Atomic{UInt64}(0), Threads.Atomic{Int}(0),
@@ -363,7 +369,7 @@ function report_hier_stats(stats::HierPlanStats)
       phase 1 aliasing  $(ms(stats.aliasing_ns)) ms  ($(stats.ainfo_count[]) ainfos, $(ms(stats.ainfo_ns[])) ms in aliasing())
       phase 2 dag       $(ms(stats.dag_ns)) ms
       phase 3 partition $(ms(stats.partition_ns)) ms
-      phase 4 schedule  $(ms(stats.schedule_ns)) ms  ($(stats.slot_count[]) slots, $(ms(stats.slot_ns[])) ms, of which $(stats.slot_moved_count[]) moved data in $(ms(stats.slot_moved_ns[])) ms, $(stats.slot_samespace_count[]) of those within one space in $(ms(stats.slot_samespace_ns[])) ms)
+      phase 4 schedule  $(ms(stats.schedule_ns)) ms  ($(stats.slot_count[]) slots, $(ms(stats.slot_ns[])) ms, of which $(stats.slot_moved_count[]) moved data in $(ms(stats.slot_moved_ns[])) ms, $(stats.slot_samespace_count[]) of those within one space in $(ms(stats.slot_samespace_ns[])) ms, and $(stats.slot_reused_count[]) reused from the slot cache in $(ms(stats.slot_reused_ns[])) ms)
       epilogue          $(ms(stats.epilogue_ns)) ms"""
     return
 end
@@ -1587,6 +1593,16 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
                                          stats::Union{HierPlanStats,Nothing})
     # Phase 1: Collect arguments and compute aliasing in parallel
     task_metas, unique_arg_ws = @hier_phase stats prescan_ns collect_aliased_args(seen_tasks)
+
+    # Knowing every argument and modifier the region uses before any slot is
+    # generated is what lets slots be reused across regions: the safety rule is a
+    # property of the region as a whole (see `slot_reuse_eligible_args`), and the
+    # flat path, which discovers arguments task by task, cannot establish it.
+    slot_region = SLOT_REUSE_REGION[]
+    if slot_region !== nothing
+        union!(slot_region.eligible, slot_reuse_eligible_args(keys(unique_arg_ws)))
+    end
+
     _lookup, ainfos_overlaps, arg_to_ainfo =
         @hier_phase stats aliasing_ns build_aliasing_parallel(unique_arg_ws)
 
@@ -1841,6 +1857,8 @@ function _hierarchical_copy_from_and_free!(partition_states::Vector{DataDepsStat
     freed = IdDict{Any,Nothing}()
     for pid in 1:n_partitions
         state = partition_states[pid]
+        # Claim what the next region can reuse before deciding what to free.
+        retain_reusable_slots!(state)
         obj_cache = unwrap(state.ainfo_backing_chunk)
         write_num = typemax(Int) - 1
 
@@ -1867,6 +1885,9 @@ function _hierarchical_copy_from_and_free!(partition_states::Vector{DataDepsStat
             for (ainfo, remote_arg) in space_entries
                 # Skip the user's original data; only free copies we allocated.
                 is_original(obj_cache, remote_space, ainfo) && continue
+                # Skip buffers handed to the slot cache: the next region over
+                # this data expects to find them intact.
+                slot_is_retained(remote_arg) && continue
                 haskey(freed, remote_arg) && continue
                 freed[remote_arg] = nothing
                 free_syncdeps = Set{ThunkSyncdep}()

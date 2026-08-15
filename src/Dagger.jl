@@ -104,6 +104,7 @@ include("tochunk.jl")
 
 # Data dependency task queue
 include("datadeps/aliasing.jl")
+include("datadeps/slotcache.jl")
 include("datadeps/chunkview.jl")
 include("datadeps/remainders.jl")
 include("datadeps/scheduling.jl")
@@ -242,6 +243,7 @@ function __init__()
     end
 
     HIER_TIMING[] = parse(Bool, get(ENV, "JULIA_DAGGER_HIER_TIMING", "0"))
+    DATADEPS_SLOT_REUSE[] = parse(Bool, get(ENV, "JULIA_DAGGER_SLOT_REUSE", "1"))
 end
 
 end # module
