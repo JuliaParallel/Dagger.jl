@@ -225,6 +225,106 @@ _identity_hash(arg::Chunk, h::UInt=UInt(0)) = hash(arg.handle, hash(Chunk, h))
 _identity_hash(arg::SubArray, h::UInt=UInt(0)) = hash(arg.indices, hash(arg.offset1, hash(arg.stride1, _identity_hash(arg.parent, h))))
 _identity_hash(arg::CartesianIndices, h::UInt=UInt(0)) = hash(arg.indices, hash(typeof(arg), h))
 
+"""
+    ChunkAinfoMemo
+
+Per-region memo for the aliasing info of a `Chunk` / `ChunkView`.
+
+A chunk's aliasing info cannot be computed locally: under Distributed it takes a
+`remotecall_fetch` to the owner, and under MPI a broadcast from the owner that
+every rank has to join. Datadeps asks the same question repeatedly while planning
+one region -- once per unique argument to build the dependency DAG, again for
+every slot (`aliased_object!`, `aliasing!`), and again for the write-back
+epilogue -- so left unmemoized a single region spends hundreds of round-trips
+re-deriving a handful of distinct answers. Under MPI each of those is a
+*global synchronization point*, which is what makes replicated planning scale
+poorly with rank count.
+
+Memoization is per-region because aliasing info describes where a value's memory
+currently is: stable while one region plans (datadeps copies into existing
+buffers, it never relocates a live argument), but a chunk allocated by a later
+region may well reuse a freed address.
+
+Keys (`ainfo_memo_key`) combine the argument's identity, the dependency modifier
+and the acceleration, and are identical on every rank (chunk handles hash by rank
++ id). Uniform keys are what makes the memo safe under SPMD replay: every rank
+hits and misses on exactly the same calls, so the broadcasts that remain are
+still reached collectively by all ranks.
+"""
+struct ChunkAinfoMemo
+    entries::Dict{UInt,AbstractAliasing}
+    lock::ReentrantLock
+end
+ChunkAinfoMemo() = ChunkAinfoMemo(Dict{UInt,AbstractAliasing}(), ReentrantLock())
+
+const CHUNK_AINFO_MEMO = ScopedValue{Union{ChunkAinfoMemo,Nothing}}(nothing)
+
+"The memo key for `arg`'s aliasing info under `dep_mod`; see `ChunkAinfoMemo`."
+ainfo_memo_key(arg, dep_mod) = ainfo_memo_key(_identity_hash(arg), dep_mod)
+
+"""
+    ainfo_memo_key(idhash::UInt, dep_mod) -> UInt
+
+The memo key for an argument whose identity hash is already known (an indirect
+handle, e.g. an MPI wire value, keys on the chunk it stands in for).
+
+The current acceleration is part of the key because the memo answers "what does
+*this* acceleration say the aliasing is". Under MPI the acceleration-level answer
+is the owner's local answer rank-stamped and broadcast, and it is derived by
+re-asking the *default* acceleration for the raw local one -- a nested query with
+the same argument. Keying both alike lets the outer, uniform answer be displaced
+by the inner, rank-local one: the owner then returns an unstamped span while
+every other rank holds the stamped one, and the region fails its uniformity check
+(or, with checks off, mistakes two ranks' buffers for the same memory).
+"""
+ainfo_memo_key(idhash::UInt, dep_mod) =
+    hash(accel_kind(current_acceleration()), hash(dep_mod, idhash))
+
+"Run `f` (a chunk-aliasing computation) at most once per region per `(arg, dep_mod)`."
+memoized_chunk_aliasing(f, arg, dep_mod) =
+    memoized_ainfo(f, ainfo_memo_key(arg, dep_mod))
+
+"""
+    memoized_ainfo(f, key::UInt)
+
+`memoized_chunk_aliasing` for callers that hold a key rather than the argument
+itself, which is how an indirect handle (e.g. an MPI wire value standing in for a
+chunk) reuses the entry already computed for the chunk it came from.
+"""
+function memoized_ainfo(f, key::UInt)
+    memo = CHUNK_AINFO_MEMO[]
+    memo === nothing && return f()
+    @lock memo.lock begin
+        cached = get(memo.entries, key, nothing)
+        cached === nothing || return cached
+    end
+    # Computed outside the lock: it blocks on the owner, and under parallel
+    # partition planning holding the lock across that would serialize planners.
+    # Two planners racing on one key both compute; the loser's result is dropped.
+    ainfo = f()
+    @lock memo.lock begin
+        return get!(memo.entries, key, ainfo)
+    end
+end
+
+"""
+    memoize_ainfo!(key::UInt, ainfo) -> AbstractAliasing
+
+Record `ainfo` as the region's answer for `key`, for a caller that obtained it
+some other way than by asking `memoized_ainfo` -- a batch exchange
+(`batch_aliasing`) resolves many arguments at once, and seeding its results here
+is what keeps the rest of planning from re-deriving them one collective at a
+time. Returns the entry in force, which is the existing one if any (a batch never
+contradicts what has already been computed).
+"""
+function memoize_ainfo!(key::UInt, ainfo::AbstractAliasing)
+    memo = CHUNK_AINFO_MEMO[]
+    memo === nothing && return ainfo
+    @lock memo.lock begin
+        return get!(memo.entries, key, ainfo)
+    end
+end
+
 struct ArgumentWrapper
     arg
     dep_mod
@@ -308,6 +408,9 @@ struct AliasedObjectCacheStore
     # which is exactly where its value is the user's own object. Every *other*
     # space holding that key is a copy we allocated and may free.
     originals::Set{Tuple{MemorySpace,AbstractAliasing}}
+    # Copies whose own (destination-side) ainfo has not been computed yet, as
+    # `key => copy`. See `resolve_pending!`.
+    pending::Vector{Pair{AbstractAliasing,Chunk}}
 end
 AliasedObjectCacheStore(accel::Acceleration) =
     AliasedObjectCacheStore(accel,
@@ -315,7 +418,52 @@ AliasedObjectCacheStore(accel::Acceleration) =
                             Dict{AbstractAliasing,AbstractAliasing}(),
                             Dict{MemorySpace,Set{AbstractAliasing}}(),
                             Dict{MemorySpace,Dict{AbstractAliasing,Chunk}}(),
-                            Set{Tuple{MemorySpace,AbstractAliasing}}())
+                            Set{Tuple{MemorySpace,AbstractAliasing}}(),
+                            Vector{Pair{AbstractAliasing,Chunk}}())
+
+"""
+    resolve_pending!(cache) -> Bool
+
+Give every copy recorded by `set_stored!` its `derived` entry, returning whether
+there was anything to do.
+
+`set_stored!` defers this because obtaining a copy's own ainfo is expensive
+exactly where it is least likely to be needed. The ainfo describes pointer spans
+in the destination space, so under MPI only the destination rank can compute it
+and it has to be broadcast to every other rank -- a second rendezvous per slot,
+on top of the transfer, which measured as about a quarter of `distribute_task!`
+for a 2-rank stencil sweep. What it buys is the ability to recognize a copy when
+that copy is itself the *source* of a later move, so that both hops share one
+cache key. Regions that never take a second hop -- the common case -- never need
+it at all.
+
+Deferring is safe under SPMD because the trigger is uniform: `derived` and the
+ainfo being looked up are rank-uniform, so every rank misses, and resolves, at
+the same point and in the same order.
+"""
+function resolve_pending!(cache::AliasedObjectCacheStore)
+    isempty(cache.pending) && return false
+    entries = copy(cache.pending)
+    empty!(cache.pending)
+    @opcounter :aliasing_resolve_pending
+    @opcounter :aliasing_resolve_pending_entries length(entries)
+    # Resolved as a batch: the whole point of deferring was to not pay a
+    # rendezvous per copy, which asking one at a time here would reintroduce.
+    values = Chunk[value for (_, value) in entries]
+    dep_mods = Any[identity for _ in entries]
+    for (i, ainfo) in enumerate(batch_ainfos(cache.accel, values, dep_mods))
+        cache.derived[ainfo] = first(entries[i])
+    end
+    return true
+end
+
+"`cache.derived[ainfo]`, resolving deferred copies first, or `nothing` if absent."
+function derived_key(cache::AliasedObjectCacheStore, ainfo::AbstractAliasing)
+    key = get(cache.derived, ainfo, nothing)
+    key === nothing || return key
+    resolve_pending!(cache) || return nothing
+    return get(cache.derived, ainfo, nothing)
+end
 
 """
     is_original(cache, space, ainfo) -> Bool
@@ -331,26 +479,23 @@ function is_stored(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::Ab
     if !haskey(cache.stored, space)
         return false
     end
-    if !haskey(cache.derived, ainfo)
-        return false
-    end
-    key = cache.derived[ainfo]
+    key = derived_key(cache, ainfo)
+    key === nothing && return false
     return key in cache.stored[space]
 end
 function is_key_present(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::AbstractAliasing)
-    return haskey(cache.derived, ainfo)
+    return derived_key(cache, ainfo) !== nothing
 end
 function get_stored(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::AbstractAliasing)
-    @assert is_stored(cache, space, ainfo) "Cache does not have derived ainfo $ainfo"
-    key = cache.derived[ainfo]
+    key = derived_key(cache, ainfo)
+    @assert key !== nothing "Cache does not have derived ainfo $ainfo"
     return cache.values[space][key]
 end
 function set_stored!(cache::AliasedObjectCacheStore, dest_space::MemorySpace, value::Chunk, ainfo::AbstractAliasing)
     @assert !is_stored(cache, dest_space, ainfo) "Cache already has derived ainfo $ainfo"
     @check_uniform(value)
     key = cache.derived[ainfo]
-    value_ainfo = aliasing(cache.accel, value, identity)
-    cache.derived[value_ainfo] = key
+    push!(cache.pending, key => value)
     push!(get!(Set{AbstractAliasing}, cache.stored, dest_space), key)
     values_dict = get!(Dict{AbstractAliasing,Chunk}, cache.values, dest_space)
     values_dict[key] = value
@@ -432,10 +577,11 @@ function aliased_object!(f, cache::AliasedObjectCache, x; ainfo=aliasing(cache.a
     else
         y = f(x)
         @assert y isa Chunk "Didn't get a Chunk from functor"
+        # N.B. Deliberately not also checking that `y`'s ainfo differs from `x`'s
+        # when the spaces differ: distinct memory spaces hold distinct memory, so
+        # the space assertion above already implies it, and asking for `y`'s ainfo
+        # here would cost a collective per slot (see `resolve_pending!`).
         @assert memory_space(y) == cache.space "Space mismatch! $(memory_space(y)) != $(cache.space)"
-        if memory_space(x) != cache.space
-            @assert ainfo != aliasing(cache.accel, y, identity) "Aliasing mismatch! $ainfo == $(aliasing(cache.accel, y, identity))"
-        end
         set_stored!(cache.accel, cache, y, ainfo)
         return y
     end
@@ -861,6 +1007,14 @@ end
 # different rank, where the data is not present on this rank.
 aliasing_available(@nospecialize(x)) = true
 
+# Whether `aliasing(x)` may be called here. Under uniform (SPMD) execution
+# `aliasing` is a collective -- the owner computes and broadcasts, every other
+# rank receives -- so availability must be answered identically on every rank:
+# branching on the rank-local `aliasing_available` sends the owner alone into
+# the broadcast and hangs the region (or mismatches tags with whatever
+# collective the other ranks reached instead).
+aliasing_obtainable(@nospecialize(x)) = uniform_execution() || aliasing_available(x)
+
 """
     gather_free_syncdeps!(state, space, key_ainfo, remote_arg, write_num, chunk_to_ainfos, syncdeps)
 
@@ -872,9 +1026,9 @@ arguments), its ainfos are in `chunk_to_ainfos` and we reuse their precomputed
 overlap sets. Otherwise the buffer only underlies wrapper arguments (e.g. it is
 the parent array shared by several `view`s, whose tracked slots are the views
 rather than this buffer); in that case we compute the buffer's own aliasing and
-sync with every tracked ainfo that overlaps its memory. When the buffer's data
-is not inspectable here (`aliasing_available` is `false`, e.g. an `MPIRef` owned
-by another rank), we fall back to the rank-uniform cache key ainfo `key_ainfo`.
+sync with every tracked ainfo that overlaps its memory. When the buffer's
+aliasing cannot be obtained here (`aliasing_obtainable` is `false`), we fall back
+to the rank-uniform cache key ainfo `key_ainfo`.
 """
 function gather_free_syncdeps!(state::DataDepsState, space::MemorySpace, key_ainfo, remote_arg, write_num::Int, chunk_to_ainfos, syncdeps)
     ainfos = get(chunk_to_ainfos, remote_arg, nothing)
@@ -885,12 +1039,11 @@ function gather_free_syncdeps!(state::DataDepsState, space::MemorySpace, key_ain
         return
     end
 
-    # If the buffer's raw data isn't inspectable here (e.g. an `MPIRef` owned by
-    # another rank under uniform execution), we cannot compute its aliasing.
-    # Fall back to the rank-uniform cache key ainfo, which is metadata available
-    # identically on every rank. The cache stores raw ainfos, so wrap it to match
-    # the `AliasingWrapper` keys used by the overlap tracking.
-    if !aliasing_available(remote_arg)
+    # If the buffer's aliasing cannot be obtained here, fall back to the cache
+    # key ainfo, which is metadata available identically on every rank. The
+    # cache stores raw ainfos, so wrap it to match the `AliasingWrapper` keys
+    # used by the overlap tracking.
+    if !aliasing_obtainable(remote_arg)
         wrapped = key_ainfo isa AliasingWrapper ? key_ainfo : AliasingWrapper(key_ainfo)
         haskey(state.ainfos_overlaps, wrapped) &&
             get_write_deps!(state, space, wrapped, write_num, syncdeps)
