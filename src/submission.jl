@@ -368,6 +368,34 @@ function cached_return_type(@nospecialize(f), @nospecialize(arg_types::Tuple))
     end
 end
 
+# Memoizes whether a call is proven non-throwing, with the same rationale and the
+# same staleness caveat as `cached_return_type` above: `infer_effects` is a pure
+# function of the call signature, but answering it runs the compiler.
+#
+# Uniform-execution backends ask this per task per rank, to decide whether the
+# result needs a status broadcast. Uncached, each task dispatch allocated
+# megabytes of inference state on *every* rank; because ranks advance through the
+# task graph in lock-step, the resulting GC pauses do not overlap with anything,
+# and the cost per task is independent of how much work the task does -- so it
+# grew to dominate exactly as chunks got smaller with more ranks.
+const NOTHROW_CACHE = LockedObject(Dict{Type,Bool}())
+
+function cached_nothrow(@nospecialize(f), @nospecialize(arg_types::Tuple))
+    # `Union{}` cannot appear as a tuple field, so no cache key can be formed
+    # (see `cached_return_type`); assume the worst rather than infer.
+    for T in arg_types
+        T === Union{} && return false
+    end
+    key = Tuple{typeof(f), arg_types...}
+    return lock(NOTHROW_CACHE) do cache
+        nothrow = get(cache, key, nothing)
+        nothrow === nothing || return nothrow
+        nothrow = Core.Compiler.is_nothrow(Base.infer_effects(f, arg_types))
+        cache[key] = nothrow
+        return nothrow
+    end
+end
+
 function DTaskMetadata(spec::DTaskSpec)
     rt = spec.options.return_type
     if rt !== nothing && isconcretetype(rt) && rt !== Any
