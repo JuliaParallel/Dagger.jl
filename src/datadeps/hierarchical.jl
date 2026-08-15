@@ -20,28 +20,59 @@
 # serialized via `LockedEnqueueQueue`, but the (expensive) per-task
 # `distribute_task!` preparation runs concurrently across partitions.
 #
+# ### Where planning time actually goes
+#
+# Measured with `HIER_TIMING`; Phase 4 dominates in every configuration, so the
+# notes below are about it. Two configurations behave quite differently:
+#
+# * Distributed. Per-task planning is pure local CPU work on the calling
+#   process: ~55 us/task for a trivial region (256 independent `InOut` tasks over
+#   4 workers). Roughly 40% of that was the scheduler round-trip of submitting
+#   the task, which `AsyncEnqueueQueue` now overlaps with planning; the rest is
+#   `distribute_task!`'s own bookkeeping, of which `populate_task_info!` (its
+#   aliasing lookups and slot generation) is the largest part. Slot *transfers*
+#   are usually free here -- `slot_is_already_in_place` keeps them at zero for a
+#   stencil sweep -- so there is little latency left to hide, and the remaining
+#   cost is CPU that a coarse lock would simply re-serialize (see 2).
+#
+# * MPI. Per-task planning is an order of magnitude more expensive (~1 ms/task
+#   for a 2-rank stencil sweep, 8 args and 14 slots per task) and it is dominated
+#   by *collectives*, not CPU: about 70% of `distribute_task!` is slot
+#   generation, and that splits roughly evenly between the point-to-point
+#   transfer of the data and a second collective that broadcasts the resulting
+#   destination chunk's aliasing info to every rank (needed because the object
+#   cache is replicated and keyed by pointer spans, which only the destination
+#   rank can compute). So MPI planning cost tracks the number of *new slot
+#   chunks* a region creates, at ~2 rendezvous each.
+#
 # ### Not-yet-parallelized work (performance only; results are unaffected)
 #
 # These are the known gaps between what this pipeline does and what it could do.
 # Each is marked with a `# PERF(hier-N)` comment at the relevant site.
 #
-# 1. MPI plans entirely sequentially. Uniform execution needs rank-identical
-#    ordering for tag / `MPIRefID` allocation, and aliasing may run collectives
-#    that must be ordered identically everywhere, so Phase 1 uses `nchunks == 1`,
-#    `_compute_aliasing_batch` refuses to thread, and Phase 4 uses
-#    `schedule_partitions_sequential!`. Under MPI this pipeline therefore buys
-#    rank affinity but *not* parallel planning. Lifting this needs a
-#    deterministic parallel order (e.g. pre-allocating tag ranges per partition)
-#    rather than simply enabling the threaded paths.
+# 1. MPI plans entirely sequentially, and every rank plans every task. Uniform
+#    execution needs rank-identical ordering for tag / `MPIRefID` allocation, and
+#    aliasing may run collectives that must be ordered identically everywhere, so
+#    Phase 1 uses `nchunks == 1`, `_compute_aliasing_batch` refuses to thread,
+#    and Phase 4 uses `schedule_partitions_sequential!`. Replication makes
+#    per-rank planning O(all tasks) while execution is O(tasks/rank), so planning
+#    grows linearly with rank count: a 4096^2 stencil sweep plans in 0.4 ms at 1
+#    rank, 2.5 ms at 2, and 5.6 ms at 4. Lifting this needs tags every rank can
+#    compute independently and deterministically (e.g. hashed from the region id
+#    plus the vertex and argument index) instead of a shared counter; only then
+#    can a rank skip preparing a task it neither runs nor sources data for.
 # 2. Multi-owner regions plan Phase 4 sequentially, not just MPI ones. Partitions
 #    still carry worker/rank affinity, but they are planned in global topological
 #    order on one shared `DataDepsState` (`use_shared_state` below). The parallel
 #    per-partition path is correct only when every partition shares one memory
 #    space, because `DataDepsState` keys its slot / ownership / currency
 #    bookkeeping by memory *space* and cannot represent two partitions' distinct
-#    slots for one chunk. Fixing that -- tracking slot identity rather than space
-#    -- is what would re-enable parallel planning across workers, and is the
-#    single highest-value follow-up here.
+#    slots for one chunk. Note that simply sharing one state behind one lock
+#    would fix the correctness half and buy almost nothing: the measurements
+#    above show this path's per-task cost is state bookkeeping, so a coarse lock
+#    re-serializes exactly what it was meant to spread. Making it pay needs
+#    either per-argument striped locking of the state, or the transfers to be the
+#    thing being overlapped (which is the case for regions that do move data).
 # 3. Planning is centralized on the calling process. Phase 1's aliasing is
 #    genuinely distributed (`remotecall` per worker), but Phase 4 runs every
 #    partition's `distribute_task!` locally. Workers never plan their own
@@ -50,6 +81,16 @@
 #    order-dependent (interval-tree insertion; sequential owner/reader state),
 #    so they resist naive parallelization. Cheap relative to Phases 1 and 4
 #    today, but they become the ceiling once those scale.
+# 5. A region's slots are allocated and freed every time it runs. An iterative
+#    workload (a stencil loop, a solver) re-creates the same per-space buffers
+#    each sweep, paying allocation, a populating transfer, an aliasing collective
+#    under MPI, and a free task per buffer -- all for data whose contents the
+#    region overwrites anyway (`generate_slot!` deliberately does not sync with
+#    the owner). Reusing a slot across regions is safe for that reason, and would
+#    remove most of MPI's planning cost for iterative code. It needs a cache
+#    keyed on (origin chunk identity, destination space) whose entries die with
+#    the origin chunk, plus an epilogue that does not free what it did not
+#    allocate this time round.
 
 struct HierarchicalTaskInfo
     arg_w::ArgumentWrapper
@@ -104,8 +145,228 @@ function flush_batch!(beq::BatchedEnqueueQueue)
     return
 end
 
-"Maximum number of tasks a hierarchical partition buffers before submitting."
-const DATADEPS_BATCH_LIMIT = Ref(4)
+"""
+    AsyncEnqueueQueue(inner, lock; limit=DATADEPS_BATCH_LIMIT[])
+
+`BatchedEnqueueQueue` that hands each full batch to a submitter task rather than
+submitting it on the caller's thread.
+
+Submission is about 40% of a region's per-task planning cost, and none of it
+touches the planning state: it turns already-prepared specs into scheduler
+thunks. Running it inline makes planning stop dead every `limit` tasks for work
+that has nothing left to learn from the planner. Handing the batch off lets the
+next batch be prepared while the previous one is submitted, which is worth
+roughly that 40% whenever the caller has a spare thread.
+
+Ordering is preserved (one submitter, FIFO channel), which the syncdeps
+recorded during planning rely on. `flush_batch!` is a *synchronous* drain, so
+the points that genuinely need a task to exist -- a value dependency's `fetch`,
+and the end of the region -- still get it.
+
+Not used under uniform execution: an MPI rank's submission runs collectives, and
+overlapping those with planning's own collectives makes the message order
+rank-dependent.
+"""
+mutable struct AsyncEnqueueQueue <: AbstractTaskQueue
+    const inner::AbstractTaskQueue
+    const lock::ReentrantLock
+    const pending::Vector{DTaskPair}
+    const limit::Int
+    # `Event`s are drain barriers: the submitter notifies one once everything
+    # queued ahead of it has been submitted.
+    const chan::Channel{Union{Vector{DTaskPair},Base.Event}}
+    submitter::Union{Task,Nothing}
+    # Set by the submitter, re-thrown on the planning task so a submission
+    # failure surfaces as the region's error rather than a silent hang.
+    failure::Any
+end
+function AsyncEnqueueQueue(inner::AbstractTaskQueue, lock::ReentrantLock;
+                           limit::Int=DATADEPS_BATCH_LIMIT[])
+    chan = Channel{Union{Vector{DTaskPair},Base.Event}}(Inf)
+    queue = AsyncEnqueueQueue(inner, lock, DTaskPair[], limit, chan, nothing, nothing)
+    queue.submitter = Threads.@spawn _async_submit_loop(queue)
+    return queue
+end
+function _async_submit_loop(queue::AsyncEnqueueQueue)
+    for item in queue.chan
+        # Nothing in here may escape: this task is the only thing that notifies
+        # the drain barriers, so dying on an error would hang the planner instead
+        # of reporting to it. Record the failure and keep draining; whoever waits
+        # next re-throws it.
+        try
+            if item isa Base.Event
+                notify(item)
+            else
+                @lock queue.lock enqueue!(queue.inner, item)
+            end
+        catch err
+            queue.failure === nothing && (queue.failure = err)
+            item isa Base.Event && notify(item)
+        end
+    end
+    return
+end
+_async_check_failure(queue::AsyncEnqueueQueue) =
+    queue.failure === nothing || throw(queue.failure)
+function enqueue!(aeq::AsyncEnqueueQueue, pair::DTaskPair)
+    push!(aeq.pending, pair)
+    length(aeq.pending) >= aeq.limit && _async_hand_off!(aeq)
+    return
+end
+function enqueue!(aeq::AsyncEnqueueQueue, pairs::Vector{DTaskPair})
+    append!(aeq.pending, pairs)
+    length(aeq.pending) >= aeq.limit && _async_hand_off!(aeq)
+    return
+end
+function _async_hand_off!(aeq::AsyncEnqueueQueue)
+    _async_check_failure(aeq)
+    isempty(aeq.pending) && return
+    # A fresh vector, since the submitter reads this one after we return.
+    put!(aeq.chan, copy(aeq.pending))
+    empty!(aeq.pending)
+    return
+end
+function flush_batch!(aeq::AsyncEnqueueQueue)
+    _async_hand_off!(aeq)
+    drained = Base.Event()
+    put!(aeq.chan, drained)
+    wait(drained)
+    _async_check_failure(aeq)
+    return
+end
+"Stop the submitter task and wait for it to finish draining."
+function close_submitter!(aeq::AsyncEnqueueQueue)
+    try
+        flush_batch!(aeq)
+    finally
+        close(aeq.chan)
+        wait(aeq.submitter)
+    end
+    _async_check_failure(aeq)
+    return
+end
+close_submitter!(::AbstractTaskQueue) = nothing
+
+"`flush_batch!` for queues that may or may not batch."
+maybe_flush_batch!(beq::BatchedEnqueueQueue) = flush_batch!(beq)
+maybe_flush_batch!(aeq::AsyncEnqueueQueue) = flush_batch!(aeq)
+maybe_flush_batch!(::AbstractTaskQueue) = nothing
+
+"""
+Maximum number of tasks a hierarchical partition buffers before submitting.
+
+Sized from the two costs it trades off. Submitting one task at a time makes the
+scheduler round-trip about 40% of this path's per-task planning cost; batching
+amortizes it down, and measurably stops paying off past ~16 (a 256-task region
+over 4 workers plans at 69 us/task unbatched, 55 at 16, 53.5 unbounded). Against
+that, buffered tasks cannot start running, so the batch is what planning gets
+ahead of execution -- bounded here at 16 tasks' worth of planning.
+"""
+const DATADEPS_BATCH_LIMIT = Ref(16)
+
+"""
+Whether uniform (SPMD) planning withholds a region's tasks until it has finished
+planning them (see `schedule_partitions_sequential!`). For A/B measurement; the
+unbuffered behaviour serializes execution across ranks.
+"""
+const DATADEPS_UNIFORM_DEFER = Ref(true)
+
+### Planning instrumentation ###
+#
+# Where a region's planning time went, per phase, printed once per region when
+# `JULIA_DAGGER_HIER_TIMING=1` (or `Dagger.HIER_TIMING[] = true`). Planning cost
+# is the thing that limits datadeps at scale -- especially under MPI, where every
+# rank replays the whole plan -- and it is hard to attribute from a profile,
+# because the expensive parts are blocking waits inside communication rather than
+# hot loops. Off by default and costs one `Ref` read per phase.
+
+const HIER_TIMING = Ref(false)
+"Whether `HIER_TIMING` also logs each region's report (vs. only recording it)."
+const HIER_TIMING_REPORT = Ref(true)
+
+mutable struct HierPlanStats
+    ntasks::Int
+    nargs::Int
+    npartitions::Int
+    prescan_ns::UInt64
+    aliasing_ns::UInt64
+    dag_ns::UInt64
+    partition_ns::UInt64
+    schedule_ns::UInt64
+    epilogue_ns::UInt64
+    # Touched from `generate_slot!` / `aliasing`, which run under parallel
+    # partition planning, so these are atomic while the phase fields are not.
+    slot_ns::Threads.Atomic{UInt64}
+    slot_count::Threads.Atomic{Int}
+    slot_moved_ns::Threads.Atomic{UInt64}
+    slot_moved_count::Threads.Atomic{Int}
+    # Slots whose data was moved even though it was already in the destination
+    # space: pure overhead, and the reason `slot_is_already_in_place` exists.
+    slot_samespace_ns::Threads.Atomic{UInt64}
+    slot_samespace_count::Threads.Atomic{Int}
+    ainfo_ns::Threads.Atomic{UInt64}
+    ainfo_count::Threads.Atomic{Int}
+    # Per-event durations (ns), for distribution rather than just totals.
+    samples::Dict{Symbol,Vector{UInt64}}
+    samples_lock::ReentrantLock
+end
+HierPlanStats() = HierPlanStats(0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                Threads.Atomic{UInt64}(0), Threads.Atomic{Int}(0),
+                                Threads.Atomic{UInt64}(0), Threads.Atomic{Int}(0),
+                                Threads.Atomic{UInt64}(0), Threads.Atomic{Int}(0),
+                                Threads.Atomic{UInt64}(0), Threads.Atomic{Int}(0),
+                                Dict{Symbol,Vector{UInt64}}(), ReentrantLock())
+
+# A `ScopedValue`, not a task-local: the parallel partition path calls
+# `generate_slot!` from tasks spawned inside the region, which inherit scoped
+# values but not task-locals.
+const HIER_STATS = ScopedValue{Union{HierPlanStats,Nothing}}(nothing)
+
+"Stats for the most recently planned region, for programmatic inspection."
+const LAST_HIER_STATS = Ref{Union{HierPlanStats,Nothing}}(nothing)
+
+"Accumulate `ns` (and one event) into field `f` of the enclosing region's stats, if enabled."
+@inline function hier_stat_add!(f::Symbol, ns::Integer, count::Integer=1)
+    HIER_TIMING[] || return
+    stats = HIER_STATS[]
+    stats === nothing && return
+    Threads.atomic_add!(getfield(stats, f), UInt64(ns))
+    Threads.atomic_add!(getfield(stats, Symbol(String(f)[1:end-3] * "_count")), Int(count))
+    @lock stats.samples_lock push!(get!(Vector{UInt64}, stats.samples, f), UInt64(ns))
+    return
+end
+
+macro hier_phase(stats, field, ex)
+    quote
+        local _stats = $(esc(stats))
+        if _stats === nothing
+            $(esc(ex))
+        else
+            local _t0 = time_ns()
+            local _res = $(esc(ex))
+            setfield!(_stats, $(QuoteNode(field)), getfield(_stats, $(QuoteNode(field))) + (time_ns() - _t0))
+            _res
+        end
+    end
+end
+
+hier_stats_total_ns(stats::HierPlanStats) =
+    stats.prescan_ns + stats.aliasing_ns + stats.dag_ns + stats.partition_ns +
+    stats.schedule_ns + stats.epilogue_ns
+
+function report_hier_stats(stats::HierPlanStats)
+    total = hier_stats_total_ns(stats)
+    ms(x) = round(x / 1e6; digits=2)
+    @info """
+    datadeps plan: $(stats.ntasks) tasks, $(stats.nargs) args, $(stats.npartitions) partitions, $(ms(total)) ms total
+      phase 1 prescan   $(ms(stats.prescan_ns)) ms
+      phase 1 aliasing  $(ms(stats.aliasing_ns)) ms  ($(stats.ainfo_count[]) ainfos, $(ms(stats.ainfo_ns[])) ms in aliasing())
+      phase 2 dag       $(ms(stats.dag_ns)) ms
+      phase 3 partition $(ms(stats.partition_ns)) ms
+      phase 4 schedule  $(ms(stats.schedule_ns)) ms  ($(stats.slot_count[]) slots, $(ms(stats.slot_ns[])) ms, of which $(stats.slot_moved_count[]) moved data in $(ms(stats.slot_moved_ns[])) ms, $(stats.slot_samespace_count[]) of those within one space in $(ms(stats.slot_samespace_ns[])) ms)
+      epilogue          $(ms(stats.epilogue_ns)) ms"""
+    return
+end
 
 struct HierarchicalTaskMeta
     pair::DTaskPair
@@ -602,7 +863,9 @@ function _compute_aliasing_batch(arg_ws::Vector{ArgumentWrapper})
     else
         for i in 1:n
             arg_w = arg_ws[i]
+            t0 = time_ns()
             ainfo = AliasingWrapper(aliasing(accel, arg_w.arg, arg_w.dep_mod))
+            hier_stat_add!(:ainfo_ns, time_ns() - t0)
             results[i] = arg_w => ainfo
         end
     end
@@ -1107,13 +1370,47 @@ function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
                                          partition_procs::Vector{<:Vector{<:Processor}},
                                          vertex_to_partition::Vector{Int},
                                          registry::Union{SharedChunkRegistry,Nothing},
-                                         wait_all_queue)
+                                         wait_all_queue,
+                                         value_dep_verts::Set{Int})
     n_partitions = length(partitions)
     temp_queues = Vector{DataDepsTaskQueue}(undef, n_partitions)
     local_scopes = Vector{AbstractScope}(undef, n_partitions)
     proc_to_scope_lfus = [BasicLFUCache{Processor,AbstractScope}(1024) for _ in 1:n_partitions]
     shared_state = DataDepsState()
     write_num = 1
+
+    # Uniform execution inverts `BatchedEnqueueQueue`'s latency/throughput
+    # tradeoff, so there we buffer the whole region rather than a few tasks.
+    #
+    # Planning is SPMD: every rank replays it, and its slot transfers are
+    # rendezvous points that all ranks must reach. Letting a task start as soon
+    # as it is submitted means a rank that picks one up stops planning for the
+    # length of that task (planning and execution share the thread), and every
+    # other rank waits in the next slot transfer for it. The ranks then advance
+    # in lockstep through one task at a time, and the region costs the *sum* of
+    # its tasks instead of the maximum -- measurably so: a 4-rank stencil sweep
+    # spent 66 of 74 ms of planning parked in slot transfers, exactly the time
+    # its peers were computing.
+    #
+    # Withholding submission until planning is done keeps every rank computing
+    # nothing while it plans, so the rendezvous chain runs at metadata speed and
+    # the tasks then execute concurrently across ranks.
+    submit_queue = if uniform_execution() && DATADEPS_UNIFORM_DEFER[]
+        BatchedEnqueueQueue(wait_all_queue, queue_lock; limit=typemax(Int))
+    else
+        # Non-uniform (Distributed) still wants its tasks running while the rest
+        # of the region is planned, so it keeps a small batch rather than
+        # withholding everything, and submits each batch off the planning thread
+        # when there is a thread to submit on (submission is otherwise the single
+        # largest item in this path's per-task cost, and it needs nothing from the
+        # planner). With one thread the handoff has nowhere to run and only adds
+        # a reschedule per batch, so batch in place instead.
+        if Threads.nthreads() > 1
+            AsyncEnqueueQueue(wait_all_queue, queue_lock)
+        else
+            BatchedEnqueueQueue(wait_all_queue, queue_lock)
+        end
+    end
     # Shared state already tracks global ownership/history like flat
     # `distribute_tasks!`. Do not pass `registry` as `ownership`: sync/commit
     # would fight the single-state history, and the epilogue must then ignore
@@ -1129,8 +1426,7 @@ function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
         end
         local_scope = UnionScope(map(ExactScope, local_procs))
         local_scopes[pid] = local_scope
-        locked_queue = LockedEnqueueQueue(wait_all_queue, queue_lock)
-        temp_queues[pid] = DataDepsTaskQueue(locked_queue; scheduler=similar(queue.scheduler))
+        temp_queues[pid] = DataDepsTaskQueue(submit_queue; scheduler=similar(queue.scheduler))
     end
 
     topo = try
@@ -1139,15 +1435,26 @@ function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
         collect(vertices(dag))
     end
 
-    with_options(; task_queue=LockedEnqueueQueue(wait_all_queue, queue_lock)) do
-        for v in topo
-            pid = vertex_to_partition[v]
-            local_procs = partition_procs[pid]
-            isempty(local_procs) && continue
-            write_num = _schedule_vertex!(
-                v, pid, temp_queues[pid], shared_state, local_procs,
-                local_scopes[pid], dag, seen_tasks, vertex_to_partition,
-                proc_to_scope_lfus[pid], write_num, ownership)
+    # Copy tasks spawned from within `distribute_task!` go through the same queue
+    # as the tasks they serve, so that they are held (or not) alongside them.
+    with_options(; task_queue=submit_queue) do
+        try
+            for v in topo
+                pid = vertex_to_partition[v]
+                local_procs = partition_procs[pid]
+                isempty(local_procs) && continue
+                # A task taking an in-region task's *value* as an argument has
+                # `distribute_task!` `fetch` that producer, so it must really
+                # have been submitted; its own turn is topologically earlier.
+                v in value_dep_verts && maybe_flush_batch!(submit_queue)
+                write_num = _schedule_vertex!(
+                    v, pid, temp_queues[pid], shared_state, local_procs,
+                    local_scopes[pid], dag, seen_tasks, vertex_to_partition,
+                    proc_to_scope_lfus[pid], write_num, ownership)
+            end
+        finally
+            maybe_flush_batch!(submit_queue)
+            close_submitter!(submit_queue)
         end
     end
 
@@ -1238,16 +1545,28 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
         return distribute_tasks!(queue)
     end
 
+    stats = HIER_TIMING[] ? HierPlanStats() : nothing
+    return with(HIER_STATS => stats) do
+        _distribute_tasks_hierarchical!(queue, seen_tasks, accel, all_procs, stats)
+    end
+end
+
+function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
+                                         seen_tasks::Vector{DTaskPair},
+                                         accel::Acceleration,
+                                         all_procs::Vector{<:Processor},
+                                         stats::Union{HierPlanStats,Nothing})
     # Phase 1: Collect arguments and compute aliasing in parallel
-    task_metas, unique_arg_ws = collect_aliased_args(seen_tasks)
-    _lookup, ainfos_overlaps, arg_to_ainfo = build_aliasing_parallel(unique_arg_ws)
+    task_metas, unique_arg_ws = @hier_phase stats prescan_ns collect_aliased_args(seen_tasks)
+    _lookup, ainfos_overlaps, arg_to_ainfo =
+        @hier_phase stats aliasing_ns build_aliasing_parallel(unique_arg_ws)
 
     # Phase 2: Build dependency DAG
-    dag = build_dependency_dag(task_metas, arg_to_ainfo, ainfos_overlaps)
+    dag = @hier_phase stats dag_ns build_dependency_dag(task_metas, arg_to_ainfo, ainfos_overlaps)
 
     # Phase 3: Partition the DAG
     vertex_to_partition, n_partitions, partition_procs, multi_owner =
-        partition_dag(dag, task_metas, all_procs)
+        @hier_phase stats partition_ns partition_dag(dag, task_metas, all_procs)
 
     # Detect backing chunks shared across partitions in different memory spaces.
     # These need runtime ownership transfer to avoid split-brain concurrent
@@ -1319,12 +1638,12 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
     # See PERF(hier-2)/(hier-3).
     exec_spaces = unique(Iterators.flatten(memory_spaces(proc) for proc in all_procs))
     use_shared_state = uniform_execution(accel) || length(exec_spaces) > 1
-    partition_states = try
+    partition_states = @hier_phase stats schedule_ns try
         if use_shared_state
             schedule_partitions_sequential!(
                 queue, queue_lock, partitions, dag, seen_tasks,
                 partition_procs, vertex_to_partition, registry,
-                wait_all_queue)
+                wait_all_queue, value_dep_verts)
         else
             states = Vector{DataDepsState}(undef, n_partitions)
             @sync for pid in 1:n_partitions
@@ -1361,7 +1680,16 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
     # Distributed keeps per-partition states and needs the registry for coherent
     # cross-partition write-back.
     epilogue_registry = use_shared_state ? nothing : registry
-    _hierarchical_copy_from_and_free!(partition_states, length(partition_states), epilogue_registry)
+    @hier_phase stats epilogue_ns _hierarchical_copy_from_and_free!(
+        partition_states, length(partition_states), epilogue_registry)
+    if stats !== nothing
+        stats.ntasks = length(seen_tasks)
+        stats.nargs = length(unique_arg_ws)
+        stats.npartitions = n_partitions
+        LAST_HIER_STATS[] = stats
+        HIER_TIMING_REPORT[] && report_hier_stats(stats)
+    end
+    return
 end
 
 function _hierarchical_max_write_num(state::DataDepsState, arg_w::ArgumentWrapper)

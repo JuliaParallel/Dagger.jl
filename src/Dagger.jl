@@ -240,6 +240,8 @@ function __init__()
     catch err
         @warn "Error parsing JULIA_DAGGER_DEBUG" exception=err
     end
+
+    HIER_TIMING[] = parse(Bool, get(ENV, "JULIA_DAGGER_HIER_TIMING", "0"))
 end
 
 end # module
