@@ -23,58 +23,59 @@ function linalg_suite(ctx; method, accels)
     suite = BenchmarkGroup()
 
     for N in scales
-        b = square_block(N)
-        sub = BenchmarkGroup()
+        for b in blocks_for(N)
+            sub = BenchmarkGroup()
 
-        # gemm needs A and the result resident; factorizations copy internally.
-        if fits_budget(dense_bytes(N; nmats=3, T=T))
-            sub["matmul (A*A)"] = @benchmarkable(wait(A * A),
-                setup = (A = rand(Blocks($b, $b), $T, $N, $N); wait(A)),
-                teardown = (A = nothing; @everywhere GC.gc()))
+            # gemm needs A and the result resident; factorizations copy internally.
+            if fits_budget(dense_bytes(N; nmats=3, T=T))
+                sub["matmul (A*A)"] = @benchmarkable(wait(A * A),
+                    setup = (A = rand(Blocks($b, $b), $T, $N, $N); wait(A)),
+                    teardown = (A = nothing; @everywhere GC.gc()))
 
-            sub["syrk (A'*A)"] = @benchmarkable(wait(A' * A),
-                setup = (A = rand(Blocks($b, $b), $T, $N, $N); wait(A)),
-                teardown = (A = nothing; @everywhere GC.gc()))
+                sub["syrk (A'*A)"] = @benchmarkable(wait(A' * A),
+                    setup = (A = rand(Blocks($b, $b), $T, $N, $N); wait(A)),
+                    teardown = (A = nothing; @everywhere GC.gc()))
 
-            sub["lu"] = @benchmarkable(wait(lu(A, RowMaximum()).factors),
-                setup = (A = rand(Blocks($b, $b), $T, $N, $N); wait(A)),
-                teardown = (A = nothing; @everywhere GC.gc()))
+                sub["lu"] = @benchmarkable(wait(lu(A, RowMaximum()).factors),
+                    setup = (A = rand(Blocks($b, $b), $T, $N, $N); wait(A)),
+                    teardown = (A = nothing; @everywhere GC.gc()))
 
-            sub["qr"] = @benchmarkable(wait(qr(A).factors),
-                setup = (A = rand(Blocks($b, $b), $T, $N, $N); wait(A)),
-                teardown = (A = nothing; @everywhere GC.gc()))
+                sub["qr"] = @benchmarkable(wait(qr(A).factors),
+                    setup = (A = rand(Blocks($b, $b), $T, $N, $N); wait(A)),
+                    teardown = (A = nothing; @everywhere GC.gc()))
 
-            sub["solve (A\\b via lu)"] = @benchmarkable(wait(lu(A, RowMaximum()) \ b),
-                setup = (A = rand(Blocks($b, $b), $T, $N, $N);
-                         b = rand(Blocks($b), $T, $N); wait(A)),
-                teardown = (A = nothing; b = nothing; @everywhere GC.gc()))
+                sub["solve (A\\b via lu)"] = @benchmarkable(wait(lu(A, RowMaximum()) \ b),
+                    setup = (A = rand(Blocks($b, $b), $T, $N, $N);
+                             b = rand(Blocks($b), $T, $N); wait(A)),
+                    teardown = (A = nothing; b = nothing; @everywhere GC.gc()))
+            end
+
+            # Cholesky additionally holds the SPD-construction temporary.
+            if fits_budget(dense_bytes(N; nmats=4, T=T))
+                sub["cholesky"] = @benchmarkable(wait(cholesky(A).factors),
+                    setup = (A = _spd($T, $N, $b)),
+                    teardown = (A = nothing; @everywhere GC.gc()))
+            end
+
+            # SVD (tiled one-sided Jacobi) additionally holds the internally-copied
+            # scratch matrix, the accumulated V factor, and (across multiple
+            # workers) a restaged copy of A, on top of the resident input.
+            if fits_budget(dense_bytes(N; nmats=5, T=T))
+                sub["svd"] = @benchmarkable(wait(svd(A).U),
+                    setup = (A = rand(Blocks($b, $b), $T, $N, $N); wait(A)),
+                    teardown = (A = nothing; @everywhere GC.gc()))
+            end
+
+            # gemv is cheap (one matrix + two vectors).
+            if fits_budget(dense_bytes(N; nmats=1, T=T))
+                sub["matvec (A*x)"] = @benchmarkable(wait(A * x),
+                    setup = (A = rand(Blocks($b, $b), $T, $N, $N);
+                             x = rand(Blocks($b), $T, $N); wait(A)),
+                    teardown = (A = nothing; x = nothing; @everywhere GC.gc()))
+            end
+
+            isempty(sub) || (suite["N=$N (block $b)"] = sub)
         end
-
-        # Cholesky additionally holds the SPD-construction temporary.
-        if fits_budget(dense_bytes(N; nmats=4, T=T))
-            sub["cholesky"] = @benchmarkable(wait(cholesky(A).factors),
-                setup = (A = _spd($T, $N, $b)),
-                teardown = (A = nothing; @everywhere GC.gc()))
-        end
-
-        # SVD (tiled one-sided Jacobi) additionally holds the internally-copied
-        # scratch matrix, the accumulated V factor, and (across multiple
-        # workers) a restaged copy of A, on top of the resident input.
-        if fits_budget(dense_bytes(N; nmats=5, T=T))
-            sub["svd"] = @benchmarkable(wait(svd(A).U),
-                setup = (A = rand(Blocks($b, $b), $T, $N, $N); wait(A)),
-                teardown = (A = nothing; @everywhere GC.gc()))
-        end
-
-        # gemv is cheap (one matrix + two vectors).
-        if fits_budget(dense_bytes(N; nmats=1, T=T))
-            sub["matvec (A*x)"] = @benchmarkable(wait(A * x),
-                setup = (A = rand(Blocks($b, $b), $T, $N, $N);
-                         x = rand(Blocks($b), $T, $N); wait(A)),
-                teardown = (A = nothing; x = nothing; @everywhere GC.gc()))
-        end
-
-        isempty(sub) || (suite["N=$N (block $b)"] = sub)
     end
 
     suite
