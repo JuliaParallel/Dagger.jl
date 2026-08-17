@@ -64,11 +64,42 @@ sparse_bytes(N; nmats=1, density=0.0, T=Float64, nvecs=2) =
 """Whether an estimated allocation of `bytes` fits the conservative budget."""
 fits_budget(bytes) = bytes <= MEM_BUDGET
 
+"""Target square tile sizes (elements per side) for the dense suites. Given as a
+Julia expression evaluating to an integer or an iterable of integers, exactly
+like `BENCHMARK_SCALE`.
+
+Tile size is not a detail that can be pinned to one value and forgotten: it sets
+the ratio between per-tile task overhead and bytes moved per transfer, and a
+change to data movement can be a large win at one tile size and a regression at
+another. Sweeping it is what lets a comparison tell those two regimes apart."""
+const blocksizes = let s = get(ENV, "BENCHMARK_BLOCKSIZE", "")
+    if isempty(s)
+        [512]
+    else
+        parsed = eval(Meta.parse(s))
+        parsed isa Integer ? [parsed] : collect(parsed)
+    end
+end
+
 """Square tile size (elements per side) for a dense N×N matrix, targeting
 `tile` elements per side but never exceeding N."""
-function square_block(N; tile=parse(Int, get(ENV, "BENCHMARK_BLOCKSIZE", "512")))
+function square_block(N; tile=first(blocksizes))
     N <= tile && return N
     return cld(N, cld(N, tile))
+end
+
+"""The distinct tile sizes `square_block` actually yields at dimension `N`.
+
+Different requested tiles collapse to the same block once clamped to `N` (at
+N=256 both 512 and 256 give 256), and the suites key their benchmark groups by
+the resulting block, so emitting a group per *requested* tile would collide."""
+function blocks_for(N)
+    seen = Int[]
+    for tile in blocksizes
+        b = square_block(N; tile)
+        b in seen || push!(seen, b)
+    end
+    return seen
 end
 
 """Block size for sparse/banded N×N operators, keeping the per-dimension block
