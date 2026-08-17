@@ -151,9 +151,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     if: ${{ !contains(github.event.head_commit.message, '[skip tests]') && !contains(github.event.head_commit.message, '[skip benchmarks]') }}
-    permissions:
-      contents: read
-      pull-requests: write
     env:
       # `benchmark/ci.jl` compares the working tree ("dirty") against this base
       # revision and fails the job if any benchmark regresses past the threshold.
@@ -196,30 +193,186 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: benchmark-results
+          name: benchmark-results-default
           path: ${{ env.BENCHMARK_OUTPUT_DIR }}/
           if-no-files-found: ignore
-      - name: Comment results on PR
+      # PR comment posting is handled by the `benchmarks-report` job below,
+      # once this job and its Distributed/MPI siblings have all finished --
+      # a single writer avoids three jobs racing to read-modify-write the
+      # same PR comment.
+
+  benchmarks-distributed:
+    name: Benchmarks (Distributed, vs master)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: ${{ !contains(github.event.head_commit.message, '[skip tests]') && !contains(github.event.head_commit.message, '[skip benchmarks]') }}
+    env:
+      BENCHMARK_BASE_REV: master
+      # Multiple OS processes on a shared runner are noisier than the
+      # single-process default job, so allow more slack before flagging a
+      # regression.
+      BENCHMARK_REGRESSION_THRESHOLD: '0.35'
+      # Parallelism comes from BENCHMARK_PROCS (processes), not threads: 3
+      # extra Distributed workers + the driver = 4 processes x 1 thread,
+      # matching the 4 vCPUs on ubuntu-latest.
+      BENCHMARK_CI_THREADS: '1'
+      BENCHMARK_PROCS: '3:1'
+      BENCHMARK_OUTPUT_DIR: benchmark_results_distributed
+      BENCHMARK_SCALE: '[256, 1024]'
+      BENCHMARK_SECONDS: '3'
+      BENCHMARK_SAMPLES: '5'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Fetch base revision
+        run: git fetch -f origin "$BENCHMARK_BASE_REV:$BENCHMARK_BASE_REV" || git fetch origin "$BENCHMARK_BASE_REV" || true
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: '1'
+          arch: x64
+      - uses: julia-actions/cache@v3
+      - name: Run benchmarks (current vs master, Distributed)
+        run: julia --color=yes benchmark/ci.jl
+      - name: Write job summary
+        if: always()
+        run: |
+          if [ -f "${BENCHMARK_OUTPUT_DIR}/report.md" ]; then
+            grep -v 'artifact://' "${BENCHMARK_OUTPUT_DIR}/report.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No benchmark report was produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: benchmark-results-distributed
+          path: ${{ env.BENCHMARK_OUTPUT_DIR }}/
+          if-no-files-found: ignore
+
+  benchmarks-mpi:
+    name: Benchmarks (MPI, vs master)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: ${{ !contains(github.event.head_commit.message, '[skip tests]') && !contains(github.event.head_commit.message, '[skip benchmarks]') }}
+    env:
+      BENCHMARK_BASE_REV: master
+      # See benchmarks-distributed: shared-runner multi-process noise.
+      BENCHMARK_REGRESSION_THRESHOLD: '0.35'
+      # 4 MPI ranks x 1 thread, matching the 4 vCPUs on ubuntu-latest.
+      # BENCHMARK_MPI_RANKS switches benchmark/benchmarks.jl to spawn the
+      # worker under mpiexec and use worker_mpi.jl (SPMD) automatically.
+      BENCHMARK_CI_THREADS: '1'
+      BENCHMARK_MPI_RANKS: '4'
+      BENCHMARK_OUTPUT_DIR: benchmark_results_mpi
+      BENCHMARK_SCALE: '[256, 1024]'
+      BENCHMARK_SECONDS: '3'
+      BENCHMARK_SAMPLES: '5'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Fetch base revision
+        run: git fetch -f origin "$BENCHMARK_BASE_REV:$BENCHMARK_BASE_REV" || git fetch origin "$BENCHMARK_BASE_REV" || true
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: '1'
+          arch: x64
+      - uses: julia-actions/cache@v3
+      - name: Run benchmarks (current vs master, MPI)
+        run: julia --color=yes benchmark/ci.jl
+      - name: Write job summary
+        if: always()
+        run: |
+          if [ -f "${BENCHMARK_OUTPUT_DIR}/report.md" ]; then
+            grep -v 'artifact://' "${BENCHMARK_OUTPUT_DIR}/report.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No benchmark report was produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: benchmark-results-mpi
+          path: ${{ env.BENCHMARK_OUTPUT_DIR }}/
+          if-no-files-found: ignore
+
+  benchmarks-report:
+    name: Benchmarks (PR comment)
+    needs: [benchmarks, benchmarks-distributed, benchmarks-mpi]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Download default benchmark results
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          name: benchmark-results-default
+          path: results-default
+      - name: Download Distributed benchmark results
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          name: benchmark-results-distributed
+          path: results-distributed
+      - name: Download MPI benchmark results
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          name: benchmark-results-mpi
+          path: results-mpi
+      - name: Comment combined results on PR
         # Best-effort: fork PRs get a read-only token, so the comment will 403;
         # don't fail the job over it.
-        if: ${{ always() && github.event_name == 'pull_request' }}
+        if: always()
         continue-on-error: true
         uses: actions/github-script@v9
         with:
           script: |
             const fs = require('fs');
-            const reportPath = `${process.env.BENCHMARK_OUTPUT_DIR}/report.md`;
-            if (!fs.existsSync(reportPath)) {
-              core.info('No report.md found; skipping PR comment.');
-              return;
+
+            function section(dir) {
+              const reportPath = `${dir}/report.md`;
+              if (!fs.existsSync(reportPath)) {
+                return null;
+              }
+              return fs.readFileSync(reportPath, 'utf8')
+                .split('\n')
+                .filter(line => !line.includes('artifact://'))
+                .join('\n');
             }
+
+            function collapsible(summary, content) {
+              const body = content === null
+                ? '_Results unavailable (job did not produce a report)._'
+                : content;
+              return `<details>\n<summary>${summary}</summary>\n\n${body}\n\n</details>`;
+            }
+
             const marker = '<!-- dagger-benchmarks -->';
-            let body = fs.readFileSync(reportPath, 'utf8')
-              .split('\n')
-              .filter(line => !line.includes('artifact://'))
-              .join('\n');
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
-            body = `${marker}\n${body}\n\n[Full results and plots](${runUrl}) (download the \`benchmark-results\` artifact).`;
+
+            const parts = [
+              marker,
+              '## Dagger benchmarks: `dirty` vs `master`',
+              '',
+              collapsible('Multi-threaded benchmarks (4 threads)', section('results-default')),
+              '',
+              collapsible('Distributed benchmarks (4 processes)', section('results-distributed')),
+              '',
+              collapsible('MPI benchmarks (4 ranks)', section('results-mpi')),
+              '',
+              `[Full results and plots](${runUrl}) (download the \`benchmark-results-*\` artifacts).`,
+            ];
+            const body = parts.join('\n');
+
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;
             const comments = await github.paginate(github.rest.issues.listComments, {
