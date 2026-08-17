@@ -144,14 +144,8 @@ const NTHREADS = Threads.nthreads()
 const PROC_TIMEOUT = parse(Float64, get(ENV, "BENCHMARK_PROC_TIMEOUT", "3600"))
 const POLL = 0.05
 
-function worker_cmd()
-    base = `$JULIA_BIN --project=$(Base.active_project()) --startup-file=no -t$NTHREADS $WORKER_SCRIPT $WORKDIR`
-    MPI_RANKS > 0 || return base
-    # MPI.jl's bundled mpiexec (MPICH_jll by default), so no system MPI
-    # install is required -- mirrors test/run_mpi.jl.
-    mpiexec = MPI.mpiexec(identity)
-    return `$mpiexec -n $MPI_RANKS $base`
-end
+worker_cmd() =
+    `$JULIA_BIN --project=$(Base.active_project()) --startup-file=no -t$NTHREADS $WORKER_SCRIPT $WORKDIR`
 
 function _atomic_write(path, data)
     tmp = path * ".tmp"
@@ -168,7 +162,21 @@ function spawn_worker()
     rm(joinpath(WORKDIR, "request.json.tmp"); force=true)
     rm(joinpath(WORKDIR, "done"); force=true)
     rm(joinpath(WORKDIR, "results_mpi_manifest.json"); force=true)
-    return run(worker_cmd(); wait=false)
+    if MPI_RANKS > 0
+        # `MPI.mpiexec` only sets up the environment mpiexec needs (library
+        # paths for the bundled MPICH_jll, etc.) for the dynamic extent of the
+        # callback (mirrors test/run_mpi.jl) -- so the actual `run` call must
+        # happen *inside* the `do` block. Extracting the bare executable via
+        # e.g. `MPI.mpiexec(identity)` and running it afterwards drops that
+        # environment and the spawned process dies immediately.
+        local proc
+        MPI.mpiexec() do mpiexec
+            proc = run(`$mpiexec -n $MPI_RANKS $(worker_cmd())`; wait=false)
+        end
+        return proc
+    else
+        return run(worker_cmd(); wait=false)
+    end
 end
 
 function wait_ready(proc; timeout=600)
