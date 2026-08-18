@@ -33,6 +33,7 @@ Stores per-task options to be passed to the scheduler.
 - `stream_max_evals::Union{Int,Nothing}=nothing`: (Streaming only) Specifies the maximum number of times the task will be evaluated before returning a result. Defaults to infinite evaluations.
 - `acceleration::Union{Acceleration,Nothing}=nothing`: The acceleration backend used to plan and execute this task (e.g. `DistributedAcceleration`, `MPIAcceleration`). When `nothing`, the current acceleration (`Dagger.current_acceleration()`) is used.
 - `return_type::Union{Type,Nothing}=nothing`: The expected return type of the task's function. When set to a concrete type, it is used as the task's `chunktype` before the task has run (e.g. so downstream metadata and, under MPI, cross-rank type uniformity are known ahead of execution). When `nothing`, the type is left unknown until the result is available.
+- `reactant::Union{ReactantMode,Nothing}=nothing`: If not `nothing`, requests that this task (and, as this option propagates, the tasks it spawns) be executed through Reactant.jl in the given mode. Usually set via [`Dagger.@reactant`](@ref) rather than directly.
 """
 Base.@kwdef mutable struct Options
     propagates::Union{Vector{Symbol},Nothing} = nothing
@@ -74,6 +75,8 @@ Base.@kwdef mutable struct Options
     acceleration::Union{Acceleration,Nothing} = nothing
 
     return_type::Union{Type,Nothing} = nothing
+
+    reactant::Union{ReactantMode,Nothing} = nothing
 end
 Options(::Nothing) = Options()
 function Options(old_options::NamedTuple)

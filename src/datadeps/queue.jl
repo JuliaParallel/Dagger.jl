@@ -76,6 +76,40 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
     if !aliasing
         throw(ArgumentError("Aliasing analysis is no longer optional"))
     end
+
+    # Under `Dagger.@reactant mode=:full`, the region's raw algorithm is handed
+    # to Reactant instead of being planned and scheduled by Datadeps
+    reactant_mode = get_options(:reactant, nothing)
+    if reactant_mode isa ReactantFull
+        return reactant_spawn_datadeps(reactant_mode, f)
+    end
+
+    return _spawn_datadeps(f; scheduler, launch_wait, hierarchical)
+end
+_spawn_datadeps(f::Base.Callable; kwargs...) =
+    _datadeps_region(queue -> with_options(f; task_queue=queue); kwargs...)
+
+"""
+    launch_datadeps_tasks!(pairs::Vector{DTaskPair}) -> nothing
+
+Plans and launches `pairs`, waiting for them to finish, as if they had been
+submitted to a Datadeps region directly. This is for tasks which were captured
+from a region without being launched: [`Dagger.@reactant`](@ref)'s `:full` mode
+does that in order to hand the region to Reactant, and needs to fall back to
+Datadeps for the regions that Reactant turns out to be unable to run.
+"""
+function launch_datadeps_tasks!(pairs::Vector{DTaskPair}; kwargs...)
+    _datadeps_region(queue -> enqueue!(queue, pairs); kwargs...)
+    return
+end
+
+# Runs one Datadeps region: `fill_queue!` submits the region's tasks to the
+# queue it is given (and its return value becomes the region's result), then the
+# whole set is planned, launched, and waited on.
+function _datadeps_region(fill_queue!;
+                          scheduler::Union{DataDepsScheduler,Nothing}=nothing,
+                          launch_wait::Union{Bool,Nothing}=nothing,
+                          hierarchical::Union{Bool,Nothing}=nothing)
     wait_all(; check_errors=true) do
         scheduler = something(scheduler, DATADEPS_SCHEDULER[], RoundRobinScheduler())
         launch_wait = something(launch_wait, DATADEPS_LAUNCH_WAIT[], false)::Bool
@@ -93,12 +127,12 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
         if launch_wait
             result = spawn_bulk() do
                 queue = DataDepsTaskQueue(get_options(:task_queue); scheduler)
-                with_options(f; task_queue=queue)
+                fill_queue!(queue)
                 run_distribute(queue)
             end
         else
             queue = DataDepsTaskQueue(get_options(:task_queue); scheduler)
-            result = with_options(f; task_queue=queue)
+            result = fill_queue!(queue)
             run_distribute(queue)
         end
         return result

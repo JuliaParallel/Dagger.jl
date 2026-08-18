@@ -33,6 +33,7 @@ makedocs(;
         ],
         "GPUs" => "gpu.md",
         "MPI" => "mpi.md",
+        "Reactant" => "reactant.md",
         "Option Propagation" => "propagation.md",
         "Logging and Visualization" => [
             "Logging: Basics" => "logging.md",

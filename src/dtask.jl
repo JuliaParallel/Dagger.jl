@@ -127,6 +127,45 @@ function Base.show(io::IO, t::DTask)
     print(io, "DTask ($status)")
 end
 istask(t::DTask) = true
+
+# Stands in for the `Thunk` of a task completed by `complete_unlaunched!`, which
+# has none. Allocated once, on first use, and shared by all such tasks.
+const UNLAUNCHED_THUNK_REF = Ref{Union{DRef,Nothing}}(nothing)
+const UNLAUNCHED_THUNK_REF_LOCK = Threads.ReentrantLock()
+function unlaunched_thunk_ref()
+    Base.@lock UNLAUNCHED_THUNK_REF_LOCK begin
+        ref = UNLAUNCHED_THUNK_REF[]
+        ref === nothing || return ref
+        ref = poolset(nothing; size=0, device=MemPool.CPURAMDevice())
+        UNLAUNCHED_THUNK_REF[] = ref
+        return ref
+    end
+end
+
+"""
+    Dagger.complete_unlaunched!(task::DTask, value; error::Bool=false) -> DTask
+
+Completes `task` with `value`, making it behave like a finished task: it may be
+`fetch`ed and `wait`ed on, and reports itself as done.
+
+This exists for `task`s which were taken from a task queue and executed outside
+of Dagger's scheduler, as [`Dagger.@reactant`](@ref)'s `:full` mode does with the
+tasks of a Datadeps region. Because such a task has no `Thunk` behind it, it may
+not be passed as an argument to a task which *is* run by the scheduler.
+
+`value` should be a `Chunk` (as produced by [`Dagger.tochunk`](@ref)), matching
+what the scheduler would have stored; `error=true` marks `value` as the
+exception that the task failed with.
+"""
+function complete_unlaunched!(task::DTask, value; error::Bool=false)
+    if istaskstarted(task)
+        throw(ConcurrencyViolationError("Cannot complete a launched `DTask`"))
+    end
+    task.thunk_ref = unlaunched_thunk_ref()
+    put!(task.future, value; error)
+    return task
+end
+
 function Base.convert(::Type{ThunkSyncdep}, task::Dagger.DTask)
     return ThunkSyncdep(ThunkID(task.uid, isdefined(task, :thunk_ref) ? task.thunk_ref : nothing))
 end
