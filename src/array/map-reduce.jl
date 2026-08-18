@@ -12,7 +12,7 @@ function stage(ctx::Context, node::Map)
     inputs = Any[stage(ctx, n) for n in node.inputs]
     primary = inputs[1] # all others will align to this
     domains = domainchunks(primary)
-    thunks = similar(domains, Any)
+    thunks = similar(domains, DTask)
     partitioning = primary.partitioning
     concat = primary.concat
     f = node.f

@@ -12,7 +12,7 @@ function Base.permutedims(A::DArray{T,N}, perm) where {T,N}
 
     old_chunk_size = size(A.chunks)
     new_chunk_size = ntuple(i -> old_chunk_size[perm[i]], N)
-    new_chunks = Array{Any,N}(undef, new_chunk_size)
+    new_chunks = Array{DTask,N}(undef, new_chunk_size)
 
     Dagger.spawn_datadeps() do
         for idx in CartesianIndices(A.chunks)

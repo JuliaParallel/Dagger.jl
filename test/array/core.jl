@@ -32,7 +32,11 @@ end
         @test Base.promote_op(/, typeof(X), T) === DT
         y = T(2)
         Xd = X / y
-        @test typeof(Xd) === DT
+        # `DT` only names the first 4 of `DArray`'s 6 type params (T,N,B,F);
+        # the chunks/subdomains container params (C,D) are inferred from the
+        # concrete arrays underlying `Xd`, so `typeof(Xd)` is necessarily a
+        # more specific (subtype) type than the partially-applied `DT`.
+        @test typeof(Xd) <: DT
         @test collect(Xd) == collect(X) ./ y
     end
 end

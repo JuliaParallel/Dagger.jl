@@ -2,7 +2,7 @@
 
 function copydiag(f, A::DArray{T, 2}) where T
     Ac = A.chunks
-    Ac_copy = Matrix{Any}(undef, size(Ac, 2), size(Ac, 1))
+    Ac_copy = Matrix{DTask}(undef, size(Ac, 2), size(Ac, 1))
     _copytile(f, Ac) = copy(f(Ac))
     for i in 1:size(Ac, 1), j in 1:size(Ac, 2)
         Ac_copy[j, i] = Dagger.@spawn _copytile(f, Ac[i, j])
@@ -157,7 +157,7 @@ function stage(ctx::Context, mul::MatMul{T,N}) where {T,N}
     # TODO: Pick a better partitioning
     p = ndims(a) == N ? a.partitioning : b.partitioning
     DArray(ET, d, domainchunks(a)*domainchunks(b),
-           _mul(chunks(a), chunks(b); T=Any), p)
+           _mul(chunks(a), chunks(b); T=DTask), p)
 end
 
 Base.power_by_squaring(x::DArray, i::Int) = foldl(*, ntuple(idx->x, i))
@@ -190,7 +190,7 @@ function stage_operand(ctx::Context, ::Scale, a, b)
 end
 
 function _scale(l, r)
-    res = similar(r, Any)
+    res = similar(r, DTask)
     for i=1:length(l)
         res[i,:] = map(x->Dagger.spawn((a,b) -> Diagonal(a)*b, l[i], x), r[i,:])
     end
