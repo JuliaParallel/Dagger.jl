@@ -771,12 +771,6 @@ function _get_read_deps!(state::DataDepsState, dest_space::MemorySpace, ainfo::A
         end
     end
 end
-# Whether the raw data backing `x` can be inspected on the current process to
-# compute its aliasing. Distributed `Chunk`s are always inspectable (locally or
-# via `remotecall`); the MPI extension overrides this for refs owned by a
-# different rank, where the data is not present on this rank.
-aliasing_available(@nospecialize(x)) = true
-
 """
     gather_free_syncdeps!(state, space, key_ainfo, remote_arg, write_num, chunk_to_ainfos, syncdeps)
 
@@ -788,9 +782,9 @@ arguments), its ainfos are in `chunk_to_ainfos` and we reuse their precomputed
 overlap sets. Otherwise the buffer only underlies wrapper arguments (e.g. it is
 the parent array shared by several `view`s, whose tracked slots are the views
 rather than this buffer); in that case we compute the buffer's own aliasing and
-sync with every tracked ainfo that overlaps its memory. When the buffer's data
-is not inspectable here (`aliasing_available` is `false`, e.g. an `MPIRef` owned
-by another rank), we fall back to the rank-uniform cache key ainfo `key_ainfo`.
+sync with every tracked ainfo that overlaps its memory. Under uniform (SPMD)
+execution that computation is unavailable, and we fall back to the rank-uniform
+cache key ainfo `key_ainfo`.
 """
 function gather_free_syncdeps!(state::DataDepsState, space::MemorySpace, key_ainfo, remote_arg, write_num::Int, chunk_to_ainfos, syncdeps)
     ainfos = get(chunk_to_ainfos, remote_arg, nothing)
@@ -801,12 +795,15 @@ function gather_free_syncdeps!(state::DataDepsState, space::MemorySpace, key_ain
         return
     end
 
-    # If the buffer's raw data isn't inspectable here (e.g. an `MPIRef` owned by
-    # another rank under uniform execution), we cannot compute its aliasing.
-    # Fall back to the rank-uniform cache key ainfo, which is metadata available
-    # identically on every rank. The cache stores raw ainfos, so wrap it to match
-    # the `AliasingWrapper` keys used by the overlap tracking.
-    if !aliasing_available(remote_arg)
+    # Under uniform (SPMD) execution we cannot compute the buffer's aliasing here:
+    # `aliasing` is collective (the owner computes and broadcasts), and only the
+    # owning rank holds the data, so having it alone reach the call below would
+    # broadcast into a collective no other rank enters -- consuming a tag on one
+    # rank (desyncing every subsequent `to_tag`) and then deadlocking. Fall back
+    # to the rank-uniform cache key ainfo, which is metadata available identically
+    # on every rank. The cache stores raw ainfos, so wrap it to match the
+    # `AliasingWrapper` keys used by the overlap tracking.
+    if uniform_execution()
         wrapped = key_ainfo isa AliasingWrapper ? key_ainfo : AliasingWrapper(key_ainfo)
         haskey(state.ainfos_overlaps, wrapped) &&
             get_write_deps!(state, space, wrapped, write_num, syncdeps)

@@ -631,9 +631,6 @@ end
 
 # An MPIRef's data is only inspectable on the rank that owns it; other ranks
 # must not attempt to `unwrap`/`aliasing` it during (rank-uniform) planning.
-Dagger.aliasing_available(x::Chunk{<:Any,<:MPIRef}) =
-    x.handle.rank == MPI.Comm_rank(x.handle.comm)
-
 to_tag(ref::MPIRef) = to_tag(ref.id)
 
 move(from_proc::Processor, to_proc::Processor, x::MPIRef) =
