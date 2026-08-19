@@ -771,6 +771,29 @@ function _get_read_deps!(state::DataDepsState, dest_space::MemorySpace, ainfo::A
         end
     end
 end
+
+"""
+    all_free_syncdeps_for_space(state, space, write_num, memo) -> Set{ThunkSyncdep}
+
+Every task that read or wrote *any* tracked ainfo in `space`. Used as the
+conservative syncdep set for freeing a buffer whose own aliasing cannot be
+computed here (see `gather_free_syncdeps!`). Memoized in `memo` when one is
+supplied, since the scan is over all tracked ainfos and the free loop would
+otherwise repeat it per buffer.
+"""
+function all_free_syncdeps_for_space(state::DataDepsState, space::MemorySpace,
+                                     write_num::Int, memo)
+    if memo !== nothing && haskey(memo, space)
+        return memo[space]
+    end
+    deps = Set{ThunkSyncdep}()
+    for other_ainfo in keys(state.ainfo_arg)
+        get_write_deps!(state, space, other_ainfo, write_num, deps)
+    end
+    memo !== nothing && (memo[space] = deps)
+    return deps
+end
+
 """
     gather_free_syncdeps!(state, space, key_ainfo, remote_arg, write_num, chunk_to_ainfos, syncdeps)
 
@@ -786,7 +809,7 @@ sync with every tracked ainfo that overlaps its memory. Under uniform (SPMD)
 execution that computation is unavailable, and we fall back to the rank-uniform
 cache key ainfo `key_ainfo`.
 """
-function gather_free_syncdeps!(state::DataDepsState, space::MemorySpace, key_ainfo, remote_arg, write_num::Int, chunk_to_ainfos, syncdeps)
+function gather_free_syncdeps!(state::DataDepsState, space::MemorySpace, key_ainfo, remote_arg, write_num::Int, chunk_to_ainfos, syncdeps, all_space_syncdeps=nothing)
     ainfos = get(chunk_to_ainfos, remote_arg, nothing)
     if ainfos !== nothing
         for ainfo in ainfos
@@ -815,12 +838,14 @@ function gather_free_syncdeps!(state::DataDepsState, space::MemorySpace, key_ain
             # `unsafe_free!` with *no* syncdeps at all, racing every task still
             # reading the buffer; the freed block is then recycled by the next
             # `alloc_libc_array`. Sync against every tracked ainfo in this space
-            # instead: a strict over-approximation of what can overlap, and cheap
-            # because frees happen once per buffer at region end and this branch
-            # is only reached for untracked keys.
-            for other_ainfo in keys(state.ainfo_arg)
-                get_write_deps!(state, space, other_ainfo, write_num, syncdeps)
-            end
+            # instead: a strict over-approximation of what can overlap it.
+            #
+            # The scan is over *every* tracked ainfo, so it is memoized per space
+            # by the caller: without that, a region with many untracked keys pays
+            # O(frees x ainfos x overlaps) here, which is enough to turn a large
+            # MPI region into a timeout.
+            union!(syncdeps, all_free_syncdeps_for_space(state, space, write_num,
+                                                         all_space_syncdeps))
         end
         return
     end

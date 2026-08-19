@@ -1501,6 +1501,7 @@ function _hierarchical_copy_from_and_free!(partition_states::Vector{DataDepsStat
         end
 
         remote_spaces = sort!(collect(keys(obj_cache.values)); by=short_name)
+        all_space_syncdeps = Dict{MemorySpace,Set{ThunkSyncdep}}()
         for remote_space in remote_spaces
             remote_proc = first(processors(remote_space))
             free_scope = ExactScope(remote_proc)
@@ -1512,7 +1513,8 @@ function _hierarchical_copy_from_and_free!(partition_states::Vector{DataDepsStat
                 freed[remote_arg] = nothing
                 free_syncdeps = Set{ThunkSyncdep}()
                 gather_free_syncdeps!(state, remote_space, ainfo, remote_arg,
-                                      write_num, chunk_to_ainfos, free_syncdeps)
+                                      write_num, chunk_to_ainfos, free_syncdeps,
+                                      all_space_syncdeps)
                 if registry !== nothing
                     orig = get(state.remote_arg_to_original, remote_arg, nothing)
                     if orig !== nothing
