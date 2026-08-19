@@ -110,6 +110,6 @@ function poolunpin(c::Chunk; remote::Bool=true)
     return
 end
 else
-poolpin(c::Chunk) = nothing
-poolunpin(c::Chunk) = nothing
+poolpin(c::Chunk; remote::Bool=true) = nothing
+poolunpin(c::Chunk; remote::Bool=true) = nothing
 end

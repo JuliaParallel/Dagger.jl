@@ -155,8 +155,15 @@ function aliasing(accel::MPIAcceleration, x::Chunk, T)
     check_uniform(tag)
     rank = MPI.Comm_rank(accel.comm)
     if handle.rank == rank
+        # `x.handle` is still an `MPIRef` here; the default-acceleration
+        # `aliasing(::Chunk, T)` fallback asserts a plain `DRef` handle. Swap
+        # in the local `DRef` (guaranteed non-nothing since we own this ref)
+        # so that fallback sees the local chunk it expects, rather than
+        # asserting before this rank can send its half of the broadcast below
+        # (which would leave the non-owning ranks blocked forever on recv).
+        local_x = Chunk(x.chunktype, x.domain, handle.innerRef::DRef, x.processor, x.scope, x.space)
         ainfo = _with_default_acceleration() do
-            aliasing(x, T)
+            aliasing(local_x, T)
         end
         ainfo = mpi_remap_ainfo(ainfo, handle.rank)
         @opcounter :aliasing_bcast_send_yield
