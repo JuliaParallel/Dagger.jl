@@ -2,6 +2,7 @@ import Base: ==, fetch, length, isempty, size
 
 export DArray, DVector, DMatrix, DVecOrMat, Blocks, AutoBlocks
 export distribute
+export relax_chunks
 
 
 ###### Array Domains ######
@@ -130,15 +131,23 @@ An N-dimensional distributed array of element type T, with a concatenation funct
 - `chunks::AbstractArray{Union{Chunk,Thunk}, N}`: an array of chunks of dimension N
 - `concat::F`: a function of type `F`. `concat(x, y; dims=d)` takes two chunks `x` and `y`
   and concatenates them along dimension `d`. `cat` is used by default.
+
+`chunks` and `subdomains` are stored using their concrete container types, `C`
+and `D` respectively, which are inferred from whatever is passed to the
+constructor. This allows e.g. `A.chunks[i,j]` to infer concretely when
+`chunks` was constructed with a concrete eltype (such as `Array{DTask,N}`),
+instead of always falling back to `Array{Any,N}`.
 """
-mutable struct DArray{T,N,B<:AbstractBlocks{N},F} <: ArrayOp{T, N}
+mutable struct DArray{T,N,B<:AbstractBlocks{N},F,
+                       C<:AbstractArray{<:Any,N},
+                       D<:AbstractArray{DArrayDomain{N},N}} <: ArrayOp{T, N}
     domain::DArrayDomain{N}
-    subdomains::AbstractArray{DArrayDomain{N}, N}
-    chunks::AbstractArray{Any, N}
+    subdomains::D
+    chunks::C
     partitioning::B
     concat::F
-    function DArray{T,N,B,F}(domain, subdomains, chunks, partitioning::B, concat::Function) where {T,N,B,F}
-        new{T,N,B,F}(domain, subdomains, chunks, partitioning, concat)
+    function DArray{T,N,B,F,C,D}(domain, subdomains::D, chunks::C, partitioning::B, concat::Function) where {T,N,B,F,C,D}
+        new{T,N,B,F,C,D}(domain, subdomains, chunks, partitioning, concat)
     end
 end
 
@@ -153,10 +162,37 @@ const DVecOrMat{T} = Union{DVector{T}, DMatrix{T}}
 DArray{T, N}(domain, subdomains, chunks, partitioning, concat=cat) where {T,N} =
     DArray(T, domain, subdomains, chunks, partitioning, concat)
 
+"""
+    narrow_chunks(chunks::AbstractArray) -> AbstractArray
+
+If `chunks` has an abstract element type — usually `Any`, the result of code
+that allocated a chunk-holding array without declaring a tighter element type
+— rebuild it with the tightest type (a concrete type, or a small `Union`) that
+actually covers its contents. If the element type is already concrete, return
+`chunks` unchanged. This keeps "honest" producers (which already declare e.g.
+`DTask` or `Chunk{...}`) free of any scanning cost, while still recovering a
+narrow element type for genuinely mixed producers (e.g. `setindex.jl`,
+`Concat`).
+"""
+function narrow_chunks(chunks::AbstractArray{<:Any,N}) where N
+    isconcretetype(eltype(chunks)) && return chunks
+    isempty(chunks) && return chunks
+    types = Set{Any}()
+    for c in chunks
+        push!(types, typeof(c))
+    end
+    U = length(types) == 1 ? first(types) : Union{types...}
+    U === Any && return chunks
+    narrowed = Array{U,N}(undef, size(chunks))
+    copyto!(narrowed, chunks)
+    return narrowed
+end
+
 function DArray(T, domain::DArrayDomain{N},
                 subdomains::AbstractArray{DArrayDomain{N}, N},
                 chunks::AbstractArray{<:Any, N}, partitioning::B, concat=cat) where {N,B<:AbstractBlocks{N}}
-    DArray{T,N,B,typeof(concat)}(domain, subdomains, chunks, partitioning, concat)
+    chunks = narrow_chunks(chunks)
+    DArray{T,N,B,typeof(concat),typeof(chunks),typeof(subdomains)}(domain, subdomains, chunks, partitioning, concat)
 end
 
 function DArray(T, domain::DArrayDomain{N},
@@ -164,9 +200,9 @@ function DArray(T, domain::DArrayDomain{N},
                 chunks::Any, partitioning::B, concat=cat) where {N,B<:AbstractSingleBlocks{N}}
     _subdomains = Array{DArrayDomain{N}, N}(undef, ntuple(i->1, N)...)
     _subdomains[1] = subdomains
-    _chunks = Array{Any, N}(undef, ntuple(i->1, N)...)
+    _chunks = Array{typeof(chunks), N}(undef, ntuple(i->1, N)...)
     _chunks[1] = chunks
-    DArray{T,N,B,typeof(concat)}(domain, _subdomains, _chunks, partitioning, concat)
+    DArray(T, domain, _subdomains, _chunks, partitioning, concat)
 end
 
 domain(d::DArray) = d.domain
@@ -175,6 +211,23 @@ domainchunks(d::DArray) = d.subdomains
 size(x::DArray) = size(domain(x))
 Base.ndims(d::DArray{T,N}) where {T,N} = N
 stage(ctx, c::DArray) = c
+
+"""
+    relax_chunks(A::DArray) -> DArray
+
+Return a copy of `A` whose `chunks` field is stored as a plain `Array{Any,N}`,
+undoing the automatic element-type narrowing normally performed by the
+`DArray` constructor. Useful when you need to store a chunk whose type isn't
+a member of `A`'s current (possibly narrow) chunks element type — e.g.
+replacing a single element in-place with something of a different concrete
+type than every other chunk.
+"""
+function relax_chunks(A::DArray{T,N}) where {T,N}
+    chunks = Array{Any,N}(undef, size(A.chunks))
+    copyto!(chunks, A.chunks)
+    return DArray{T,N,typeof(A.partitioning),typeof(A.concat),typeof(chunks),typeof(A.subdomains)}(
+        A.domain, A.subdomains, chunks, A.partitioning, A.concat)
+end
 
 # Named so the spawned function is rank-uniform under MPI (anonymous
 # closures get non-uniform ArgumentWrapper hashes).
@@ -221,6 +274,18 @@ Array{T,N}(A::DArray{S,N}) where {T,N,S} = convert(Array{T,N}, collect(A))
 Base.wait(A::DArray) = foreach(wait, A.chunks)
 
 ### show
+
+# Keep compact output (array summaries, etc.) readable by eliding the chunks
+# and subdomains container params, which are long and rarely what the reader
+# wants. Non-compact output prints every param, so `DArray` types remain fully
+# introspectable at the REPL and in error messages.
+function Base.show(io::IO, TT::Type{<:DArray{T,N,B,F}}) where {T,N,B,F}
+    if get(io, :compact, false)
+        print(io, "DArray{$T,$N,$B,$F,…}")
+    else
+        invoke(show, Tuple{IO,Type}, io, TT)
+    end
+end
 
 #= FIXME
 @static if isdefined(Base, :AnnotatedString)

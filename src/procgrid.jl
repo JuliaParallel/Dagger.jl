@@ -114,7 +114,7 @@ end
 
 function emit_chunk_tasks!(domainchunks, procgrid, eltype::Type{T}, spawn_chunk::Function) where {T}
     N = ndims(domainchunks)
-    tasks = Array{Any,N}(undef, size(domainchunks)...)
+    tasks = Array{DTask,N}(undef, size(domainchunks)...)
     default_scope = get_compute_scope()
     function emit!()
         for I in CartesianIndices(domainchunks)
