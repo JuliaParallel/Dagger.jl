@@ -90,6 +90,28 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
+  reactant:
+    name: Julia 1.12 (Reactant)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    if: ${{ !contains(github.event.head_commit.message, '[skip tests]') }}
+    env:
+      JULIA_NUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: '1.12'
+          arch: x64
+      - uses: julia-actions/cache@v3
+      # test/reactantenv pulls Reactant (which brings MLIR and XLA with it) plus
+      # the checked-out Dagger. It has its own environment, and thus its own job,
+      # because that is far too heavy to ask of the main testsuite.
+      - name: Instantiate Reactant environment
+        run: julia --project=test/reactantenv -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
+      - name: Run Reactant tests
+        run: julia --project=test/reactantenv test/reactantenv/runtests.jl
+
   opencl:
     name: Julia 1.11 (OpenCL)
     runs-on: ubuntu-latest

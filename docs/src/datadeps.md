@@ -322,6 +322,25 @@ Hierarchical scheduling does not yet parallelize everything it could. These are 
 
 - **Phases 2 and 3 are single-threaded.** Building the DAG and computing aliasing overlaps are incremental, order-dependent algorithms. They are cheap relative to phases 1 and 4 today, but will become the bottleneck as those scale.
 
+## Executing a Region with Reactant
+
+A region's tasks are normally planned and scheduled by datadeps, as described
+above. Alternatively, the whole region can be handed to Reactant.jl, which
+compiles it as a single program and is therefore able to optimize across task
+boundaries:
+
+```julia
+Dagger.@reactant mode=:full begin
+    Dagger.spawn_datadeps() do
+        Dagger.@spawn my_task!(InOut(A))
+        Dagger.@spawn another_task!(In(A), Out(B))
+    end
+end
+```
+
+See [Reactant](reactant.md) for what this involves, and for the alternative of
+compiling each task on its own.
+
 ## Chunk and DTask slicing with `view`
 
 The `view` function allows you to efficiently create a "view" of a `Chunk` or `DTask` that contains an array. This enables operations on specific parts of your distributed data using standard Julia array slicing, without needing to materialize the entire array.

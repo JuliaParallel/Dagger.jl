@@ -14,7 +14,7 @@ function task_id end
 # a user has explicitly asked for tracing.
 const DAGDEBUG_VALID_CATEGORIES = (:all, :global, :submit, :schedule, :scope,
                                    :take, :execute, :move, :processor, :finish,
-                                   :cancel, :stream, :validate)
+                                   :cancel, :stream, :validate, :reactant)
 const DAGDEBUG_CATEGORIES = Set{Symbol}()
 
 # Out-of-line emission keeps call-site IR minimal: just one `in` check + one

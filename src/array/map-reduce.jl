@@ -83,7 +83,10 @@ function stage(ctx::Context, r::MapReduce{T,N}) where {T,N}
         A[1] = x
         return A
     end
-    to_array(x::Array, N) = x
+    # Any array is already the array that this needs to produce, whether or not it
+    # is a `Base.Array`: a partial reduction computed by Reactant, for instance,
+    # comes back as one of its own array types
+    to_array(x::AbstractArray, N) = x
     function treered_f(op, x, y, N)
         value = op.(x, y)
         return to_array(value, N)
