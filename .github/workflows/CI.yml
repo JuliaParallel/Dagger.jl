@@ -162,6 +162,14 @@ jobs:
       # 4 vCPU / ~16 GB, and noisier than dedicated benchmarking hardware. The
       # orchestrator is OOM-robust, but smaller scales keep wall-clock bounded.
       BENCHMARK_SCALE: '[256, 1024]'
+      # Tile size matters as much as N here, and one tile is not enough. At 512
+      # alone, N=256 is a *single* chunk (`square_block` returns N when N <= tile)
+      # and N=1024 is only 2x2, so anything touching data distribution or halo
+      # exchange is barely exercised. But small tiles are not simply "better":
+      # tile size sets the ratio of per-tile task overhead to bytes moved per
+      # transfer, and a data-movement change can be a large win at one tile size
+      # and a regression at the other. Measure both regimes.
+      BENCHMARK_BLOCKSIZE: '[128, 512]'
       BENCHMARK_SECONDS: '3'
       BENCHMARK_SAMPLES: '5'
     steps:
@@ -219,6 +227,9 @@ jobs:
       BENCHMARK_PROCS: '3:1'
       BENCHMARK_OUTPUT_DIR: benchmark_results_distributed
       BENCHMARK_SCALE: '[256, 1024]'
+      # See the `benchmarks` job: both tiles, so neither the many-small-chunks
+      # nor the few-large-chunks regime goes unmeasured.
+      BENCHMARK_BLOCKSIZE: '[128, 512]'
       BENCHMARK_SECONDS: '3'
       BENCHMARK_SAMPLES: '5'
     steps:
@@ -266,6 +277,9 @@ jobs:
       BENCHMARK_MPI_RANKS: '4'
       BENCHMARK_OUTPUT_DIR: benchmark_results_mpi
       BENCHMARK_SCALE: '[256, 1024]'
+      # See the `benchmarks` job: both tiles, so neither the many-small-chunks
+      # nor the few-large-chunks regime goes unmeasured.
+      BENCHMARK_BLOCKSIZE: '[128, 512]'
       BENCHMARK_SECONDS: '3'
       BENCHMARK_SAMPLES: '5'
     steps:

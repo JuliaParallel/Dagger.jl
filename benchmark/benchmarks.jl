@@ -70,8 +70,17 @@
 #   estimated peak allocation may use before a size is skipped. Defaults to
 #   "0.2" (conservative). Raise it to allow larger sizes, lower it for more
 #   headroom.
-# - BENCHMARK_BLOCKSIZE: Target square tile size (elements per side) for dense
-#   suites. Defaults to "512".
+# - BENCHMARK_BLOCKSIZE: Target square tile size(s) (elements per side) for dense
+#   suites, given like BENCHMARK_SCALE: an integer or an iterable of integers
+#   (e.g. "512", "[128, 512]"). Each requested tile produces its own benchmark
+#   group per N, keyed by the resulting block; tiles that collapse to the same
+#   block at a given N (both 512 and 256 give 256 at N=256) are emitted once.
+#   Defaults to "512".
+#
+#   Sweeping this matters more than it looks: tile size sets the ratio between
+#   per-tile task overhead and bytes moved per transfer, so a change to data
+#   movement can be a large win at one tile size and a regression at another.
+#   A single tile can only ever see one of those regimes.
 # - BENCHMARK_SPARSE_BLOCKS: Number of blocks per dimension for sparse/banded
 #   operators (keeps tile counts bounded at large N). Defaults to "16".
 # - BENCHMARK_PROCS: Worker/thread topology, as "numprocs:numthreads". This
