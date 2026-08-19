@@ -994,6 +994,19 @@ function remotecall_endpoint_toplevel(f, accel::DistributedAcceleration, cache::
         return f(accel, cache, from_proc, to_proc, from_space, to_space, unwrap(data))::Chunk
     end
 end
+# Allocate the slot directly on the destination worker. Only the element type
+# and dimensions cross the wire; `data` deliberately does not, which is the
+# whole point (a `remotecall_fetch` closing over it would serialize the payload).
+function remotecall_endpoint_alloc(accel::DistributedAcceleration, to_proc, to_space, ::Type{T}, dims::Dims) where T
+    wid = root_worker_id(to_proc)
+    if wid == myid()
+        return tochunk(alloc_uninit(to_space, T, dims), to_proc, to_space)
+    end
+    return remotecall_fetch(wid, to_proc, to_space, T, dims) do to_proc, to_space, T, dims
+        return tochunk(alloc_uninit(to_space, T, dims), to_proc, to_space)
+    end
+end
+
 function remotecall_endpoint_transfer(f, accel::DistributedAcceleration, from_proc, to_proc, from_space, to_space, data)
     wid = root_worker_id(to_proc)
     if wid == myid()
@@ -1050,7 +1063,18 @@ move_rewrap(accel, cache::AliasedObjectCache, from_proc::Processor, to_proc::Pro
 function move_rewrap(accel, cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, data)
     parts = move_rewrap_parts(data)
     if parts === nothing
-        # Leaf: transfer the value, sharing via the aliased-object cache
+        # Leaf: materialize the slot in the destination space, sharing via the
+        # aliased-object cache. For a dense isbits payload crossing a space
+        # boundary the bytes need not travel at all -- Datadeps' copy-to phase
+        # establishes the contents, and for a wrapper (a view, say) it copies
+        # only the wrapper's own spans rather than the whole backing array.
+        # See `slot_may_be_uninit` for why this is safe.
+        T_dest = move_type(from_proc, to_proc, typeof(data))
+        if slot_may_be_uninit(from_space, to_space, T_dest)
+            return aliased_object!(cache, data) do data
+                return remotecall_endpoint_alloc(accel, to_proc, to_space, T_dest, size(data))
+            end
+        end
         return aliased_object!(cache, data) do data
             return remotecall_endpoint_transfer(accel, from_proc, to_proc, from_space, to_space, data) do accel, from_proc, to_proc, from_space, to_space, data
                 return tochunk(libc_backed(move(from_proc, to_proc, data)), to_proc, to_space)

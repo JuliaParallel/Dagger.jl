@@ -40,6 +40,59 @@ would not be.
 """
 memory_space_scope(space::MemorySpace) = ExactScope(first(processors(space)))
 
+### Uninitialized slot allocation
+
+"""
+    can_alloc_uninit(space::MemorySpace, ::Type{T}) -> Bool
+
+Whether a value of type `T` can be conjured in `space` without moving any bytes
+into it. Only dense, `isbits`-element arrays qualify: a pointer-ful element type
+would leave the buffer holding garbage references rather than merely garbage
+numbers, and a non-dense type is not described by its dimensions alone.
+
+Must depend only on `space` and `T`, both of which are rank-uniform under SPMD
+execution, because the decision is taken before any collective (see
+`slot_may_be_uninit`).
+"""
+can_alloc_uninit(::MemorySpace, ::Type) = false
+can_alloc_uninit(::CPURAMMemorySpace, ::Type{<:Array{T}}) where {T} = isbitstype(T)
+
+"""
+    alloc_uninit(space::MemorySpace, ::Type{T}, dims::Dims) -> T
+
+Allocate an uninitialized `T` of shape `dims` in `space`. Only called when
+[`can_alloc_uninit`](@ref) returned `true` for the same `space`/`T`.
+
+The CPU allocation is Libc-backed from the start rather than allocated and then
+copied into Libc memory (what `libc_backed` would do), since there is nothing to
+copy: the buffer's contents are established later by Datadeps' copy-to phase.
+"""
+alloc_uninit(::CPURAMMemorySpace, ::Type{<:Array{T,N}}, dims::Dims{N}) where {T,N} =
+    alloc_libc_array(T, dims)
+
+"""
+    slot_may_be_uninit(from_space, to_space, ::Type{T}) -> Bool
+
+Whether a Datadeps slot of type `T` being created in `to_space` for data living
+in `from_space` may be left uninitialized, skipping the transfer entirely.
+
+This is sound because a slot's contents are never assumed to be current.
+`generate_slot!` explicitly does not sync with the owner, and
+`compute_remainder_for_arg!` decides what to copy purely from `arg_history` /
+`arg_owner` — never from the buffer. A slot in a space that does not yet appear
+in the argument's history is therefore always filled by a copy-to (`FullCopy`,
+or a span-exact `MultiRemainderAliasing` once part of it is current) before any
+task can read it.
+
+`from_space != to_space` is the load-bearing guard. When the two coincide,
+`move_rewrap`'s leaf transfer is the identity, so the "slot" *is* the original
+data, and `compute_remainder_for_arg!` returns `NoAliasing()` (owner space ==
+target space, empty history) — no copy is scheduled, and handing back a fresh
+buffer there would silently discard the argument's contents.
+"""
+slot_may_be_uninit(from_space::MemorySpace, to_space::MemorySpace, ::Type{T}) where {T} =
+    from_space != to_space && T <: DenseArray && can_alloc_uninit(to_space, T)
+
 ### In-place Data Movement
 
 unwrap(x::Chunk) = unwrap(x.handle)
