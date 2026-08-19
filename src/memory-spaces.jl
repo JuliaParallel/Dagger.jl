@@ -82,6 +82,89 @@ function memory_space_scope(space::MemorySpace)
     end
 end
 
+### Uninitialized slot allocation
+
+"""
+    can_alloc_uninit(space::MemorySpace, ::Type{T}) -> Bool
+
+Whether a value of type `T` can be conjured in `space` without moving any bytes
+into it. Only dense, `isbits`-element arrays qualify: a pointer-ful element type
+would leave the buffer holding garbage references rather than merely garbage
+numbers, and a non-dense type is not described by its dimensions alone.
+
+Must depend only on `space` and `T`, both of which are rank-uniform under SPMD
+execution, because the decision is taken before any collective (see
+`slot_may_be_uninit`).
+"""
+can_alloc_uninit(::MemorySpace, ::Type) = false
+can_alloc_uninit(::CPURAMMemorySpace, ::Type{<:Array{T}}) where {T} = isbitstype(T)
+
+"""
+    alloc_header(x) -> header
+
+The value-derived metadata [`alloc_uninit`](@ref) needs in order to conjure an
+uninitialized stand-in for `x`. For a dense array that is its `size`; a type
+whose shape is not described by dimensions alone supplies whatever its own
+`alloc_uninit` method consumes.
+
+Kept distinct from `alloc_uninit` because the two run in different places: the
+header is derived where the *value* lives, while the allocation happens in the
+destination space. Under SPMD execution that separation is the point -- the
+header is exactly what crosses the wire, so it should be as small as the type
+allows (see `mpi_endpoint_alloc` in `ext/MPIExt.jl`).
+"""
+alloc_header(x::DenseArray) = size(x)
+
+"""
+    alloc_header_type(::Type{T}) -> Type
+
+The type of `alloc_header(::T)`. Needed wherever the header is obtained before
+any value of `T` exists locally -- the MPI slot path types its `recv` with it --
+so it must follow from `T` alone, which also makes it rank-uniform.
+"""
+alloc_header_type(::Type{<:DenseArray{T,N}}) where {T,N} = Dims{N}
+
+"""
+    alloc_uninit(space::MemorySpace, ::Type{T}, header) -> T
+
+Allocate an uninitialized `T` in `space`, shaped by `header` (see
+[`alloc_header`](@ref)). Only called when [`can_alloc_uninit`](@ref) returned
+`true` for the same `space`/`T`.
+
+The CPU allocation is Libc-backed from the start rather than allocated and then
+copied into Libc memory (what `libc_backed` would do), since there is nothing to
+copy: the buffer's contents are established later by Datadeps' copy-to phase.
+"""
+alloc_uninit(::CPURAMMemorySpace, ::Type{<:Array{T,N}}, dims::Dims{N}) where {T,N} =
+    alloc_libc_array(T, dims)
+
+"""
+    slot_may_be_uninit(from_space, to_space, ::Type{T}) -> Bool
+
+Whether a Datadeps slot of type `T` being created in `to_space` for data living
+in `from_space` may be left uninitialized, skipping the transfer entirely.
+
+This is sound because a slot's contents are never assumed to be current.
+`generate_slot!` explicitly does not sync with the owner, and
+`compute_remainder_for_arg!` decides what to copy purely from `arg_history` /
+`arg_owner` — never from the buffer. A slot in a space that does not yet appear
+in the argument's history is therefore always filled by a copy-to (`FullCopy`,
+or a span-exact `MultiRemainderAliasing` once part of it is current) before any
+task can read it.
+
+`from_space != to_space` is the load-bearing guard. When the two coincide,
+`move_rewrap`'s leaf transfer is the identity, so the "slot" *is* the original
+data, and `compute_remainder_for_arg!` returns `NoAliasing()` (owner space ==
+target space, empty history) — no copy is scheduled, and handing back a fresh
+buffer there would silently discard the argument's contents.
+
+What may be conjured is decided entirely by `can_alloc_uninit`, so a type opts
+in by defining that plus [`alloc_header`](@ref) / [`alloc_uninit`](@ref) — there
+is deliberately no `DenseArray` bound here to be extended around.
+"""
+slot_may_be_uninit(from_space::MemorySpace, to_space::MemorySpace, ::Type{T}) where {T} =
+    from_space != to_space && can_alloc_uninit(to_space, T)
+
 ### In-place Data Movement
 
 unwrap(x::Chunk) = unwrap(x.handle)
