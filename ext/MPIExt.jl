@@ -1714,11 +1714,70 @@ function mpi_endpoint_transfer(accel::MPIAcceleration, from_proc, to_proc, from_
     end
 end
 
+# Uninitialized slot allocation is a property of the rank-local storage, so
+# defer to the inner space. Rank identity is already handled by `!=` on the
+# spaces themselves (`MPIMemorySpace` compares innerSpace/comm/rank).
+Dagger.can_alloc_uninit(space::MPIMemorySpace, ::Type{T}) where {T} =
+    Dagger.can_alloc_uninit(space.innerSpace, T)
+Dagger.alloc_uninit(space::MPIMemorySpace, ::Type{T}, dims::Dims) where {T} =
+    Dagger.alloc_uninit(space.innerSpace, T, dims)
+
+# Allocate the slot on the destination rank without shipping the payload. Only
+# the dimensions travel, which is the entire saving: the buffer's contents are
+# established later by Datadeps' copy-to phase.
+#
+# N.B. Point-to-point, deliberately *not* `bcast_yield`, even though the payload
+# is header-sized. Only the destination rank needs the dimensions, so this keeps
+# exactly the communication pattern of the `mpi_endpoint_transfer` it replaces:
+# one message between the same two ranks. Broadcasting instead makes every rank
+# a participant, and an intermediate rank cannot forward while it is blocked
+# inside a task awaiting dispatch -- the cross-rank wait cycle described above
+# `bcast_tree_children`, seen as a hang on Julia 1.10/1.11.
+function mpi_endpoint_alloc(accel::MPIAcceleration, to_proc, to_space, ::Type{T_dest}, w::MPIWireValue) where T_dest
+    local_rank = MPI.Comm_rank(accel.comm)
+    from_rank = w.space.rank
+    if from_rank == to_space.rank
+        # Same rank (e.g. CPU -> GPU on one rank): nothing to communicate
+        if local_rank == to_space.rank
+            value = Dagger.alloc_uninit(to_space, T_dest, size(wire_value(w)))
+            return tochunk(value, to_proc, to_space; type=T_dest)
+        end
+        return tochunk(nothing, to_proc, to_space; type=T_dest)
+    end
+    # Every rank takes a tag so the sequence stays rank-uniform, exactly as
+    # `mpi_endpoint_transfer` does before its own send/recv.
+    tag = to_tag()
+    if local_rank == from_rank
+        send_yield(size(wire_value(w)), accel.comm, to_space.rank, tag)
+        return tochunk(nothing, to_proc, to_space; type=T_dest)
+    elseif local_rank == to_space.rank
+        dims = recv_yield(accel.comm, from_rank, tag)::Dims
+        return tochunk(Dagger.alloc_uninit(to_space, T_dest, dims), to_proc, to_space; type=T_dest)
+    else
+        return tochunk(nothing, to_proc, to_space; type=T_dest)
+    end
+end
+
 # Generic / wrapper MPIWireValue: leaf transfer, or header+children rebuild
 function move_rewrap(accel::MPIAcceleration, cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, w::MPIWireValue{T}) where T
     child_types = move_rewrap_child_types(T)
     if child_types === nothing
-        # Leaf: transfer to the destination, sharing via the aliased-object cache
+        # Leaf: materialize the slot on the destination rank, sharing via the
+        # aliased-object cache. A dense isbits payload crossing a rank boundary
+        # need not be sent at all -- Datadeps' copy-to phase fills the slot, and
+        # for a wrapper (e.g. a ChunkView) it sends only the wrapper's own spans
+        # instead of the entire backing array. See `slot_may_be_uninit`.
+        #
+        # N.B. The predicate depends only on the two spaces and the destination
+        # type, all rank-uniform, so every rank takes the same branch and the
+        # collectives below stay matched.
+        T_dest = move_type(mpi_inner_proc(as_mpi_proc(from_proc, from_space)),
+                           mpi_inner_proc(as_mpi_proc(to_proc, to_space)), T)
+        if Dagger.slot_may_be_uninit(from_space, to_space, T_dest)
+            return aliased_object!(cache, w) do w
+                return mpi_endpoint_alloc(accel, to_proc, to_space, T_dest, w)
+            end
+        end
         return aliased_object!(cache, w) do w
             return Dagger.libc_backed(mpi_endpoint_transfer(accel, from_proc, to_proc, from_space, to_space, w))
         end
