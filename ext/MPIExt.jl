@@ -1742,18 +1742,35 @@ Dagger.alloc_uninit(space::MPIMemorySpace, ::Type{T}, dims::Dims) where {T} =
     Dagger.alloc_uninit(space.innerSpace, T, dims)
 
 # Allocate the slot on the destination rank without shipping the payload. Only
-# the dimensions travel (broadcast like a header), which is the entire saving:
-# the buffer's contents are established later by Datadeps' copy-to phase.
+# the dimensions travel, which is the entire saving: the buffer's contents are
+# established later by Datadeps' copy-to phase.
+#
+# N.B. Point-to-point, deliberately *not* `bcast_yield`, even though the payload
+# is header-sized. Only the destination rank needs the dimensions, so this keeps
+# exactly the communication pattern of the `mpi_endpoint_transfer` it replaces:
+# one message between the same two ranks. Broadcasting instead makes every rank
+# a participant, and an intermediate rank cannot forward while it is blocked
+# inside a task awaiting dispatch -- the cross-rank wait cycle described above
+# `bcast_tree_children`, seen as a hang on Julia 1.10/1.11.
 function mpi_endpoint_alloc(accel::MPIAcceleration, to_proc, to_space, ::Type{T_dest}, w::MPIWireValue) where T_dest
     local_rank = MPI.Comm_rank(accel.comm)
-    tag = to_tag()
-    dims = if local_rank == w.space.rank
-        bcast_yield(accel.comm, w.space.rank, tag, size(wire_value(w)))
-    else
-        bcast_yield(accel.comm, w.space.rank, tag)
+    from_rank = w.space.rank
+    if from_rank == to_space.rank
+        # Same rank (e.g. CPU -> GPU on one rank): nothing to communicate
+        if local_rank == to_space.rank
+            value = Dagger.alloc_uninit(to_space, T_dest, size(wire_value(w)))
+            return tochunk(value, to_proc, to_space; type=T_dest)
+        end
+        return tochunk(nothing, to_proc, to_space; type=T_dest)
     end
-    check_uniform(dims)
-    if local_rank == to_space.rank
+    # Every rank takes a tag so the sequence stays rank-uniform, exactly as
+    # `mpi_endpoint_transfer` does before its own send/recv.
+    tag = to_tag()
+    if local_rank == from_rank
+        send_yield(size(wire_value(w)), accel.comm, to_space.rank, tag)
+        return tochunk(nothing, to_proc, to_space; type=T_dest)
+    elseif local_rank == to_space.rank
+        dims = recv_yield(accel.comm, from_rank, tag)::Dims
         return tochunk(Dagger.alloc_uninit(to_space, T_dest, dims), to_proc, to_space; type=T_dest)
     else
         return tochunk(nothing, to_proc, to_space; type=T_dest)
