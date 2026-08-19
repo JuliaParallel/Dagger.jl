@@ -805,8 +805,23 @@ function gather_free_syncdeps!(state::DataDepsState, space::MemorySpace, key_ain
     # `AliasingWrapper` keys used by the overlap tracking.
     if uniform_execution()
         wrapped = key_ainfo isa AliasingWrapper ? key_ainfo : AliasingWrapper(key_ainfo)
-        haskey(state.ainfos_overlaps, wrapped) &&
+        if haskey(state.ainfos_overlaps, wrapped)
             get_write_deps!(state, space, wrapped, write_num, syncdeps)
+        else
+            # The key ainfo describes the original object in its *source* space,
+            # so it is often not one of the tracked (destination-space) ainfos --
+            # rank-stamped spans mean it cannot overlap them, and the interval
+            # tree cannot be queried with it either. Returning here would emit an
+            # `unsafe_free!` with *no* syncdeps at all, racing every task still
+            # reading the buffer; the freed block is then recycled by the next
+            # `alloc_libc_array`. Sync against every tracked ainfo in this space
+            # instead: a strict over-approximation of what can overlap, and cheap
+            # because frees happen once per buffer at region end and this branch
+            # is only reached for untracked keys.
+            for other_ainfo in keys(state.ainfo_arg)
+                get_write_deps!(state, space, other_ainfo, write_num, syncdeps)
+            end
+        end
         return
     end
 
