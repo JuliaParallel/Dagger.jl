@@ -76,6 +76,19 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
     if !aliasing
         throw(ArgumentError("Aliasing analysis is no longer optional"))
     end
+    # The slot cache spans the whole region, not just planning: the copies and
+    # frees that touch a slot are tasks, so entries stay checked out until
+    # `wait_all` has drained them. Phase 1 fills in which arguments qualify.
+    slot_region = SlotReuseRegion(Set{UInt}())
+    return with(SLOT_REUSE_REGION => slot_region) do
+        try
+            _spawn_datadeps(f, scheduler, launch_wait, hierarchical)
+        finally
+            release_slot_reuse_region!(slot_region)
+        end
+    end
+end
+function _spawn_datadeps(f::Base.Callable, scheduler, launch_wait, hierarchical)
     wait_all(; check_errors=true) do
         scheduler = something(scheduler, DATADEPS_SCHEDULER[], RoundRobinScheduler())
         launch_wait = something(launch_wait, DATADEPS_LAUNCH_WAIT[], false)::Bool
@@ -84,10 +97,15 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
         # local) so it shows up by name in stacktraces and profiles, which is
         # the boundary between region setup and the whole planning pipeline.
         function run_distribute(queue)
-            if hierarchical
-                distribute_tasks_hierarchical!(queue)
-            else
-                distribute_tasks!(queue)
+            # One aliasing memo per region: planning asks for the same chunks'
+            # aliasing info from Phase 1, from every slot, and from the write-back
+            # epilogue, and each answer costs a round-trip to the owner.
+            with(CHUNK_AINFO_MEMO => ChunkAinfoMemo()) do
+                if hierarchical
+                    distribute_tasks_hierarchical!(queue)
+                else
+                    distribute_tasks!(queue)
+                end
             end
         end
         if launch_wait

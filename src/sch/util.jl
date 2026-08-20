@@ -639,6 +639,15 @@ end
 const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
 const EMPTY_TRANSFER_RATES = Dict{Processor,UInt64}()
 @reuse_scope function estimate_task_costs!(sorted_procs, costs, state, procs, task; sig=nothing)
+    if length(procs) == 1
+        # Nothing to rank: the costs only exist to order the candidates, and a
+        # scan of the task's chunks to order one of them is pure overhead. This
+        # is the common shape for Datadeps, which pins every task to one space.
+        proc = procs[1]
+        sorted_procs[1] = proc
+        costs[proc] = 0.0
+        return
+    end
 
     # Find all Chunks
     chunks = @reusable_vector :estimate_task_costs_chunks Union{Chunk,Nothing} nothing 32

@@ -66,16 +66,21 @@ Base.view(c::DTask, slices...) = view(fetch(c; raw=true), slices...)
 
 function aliasing(accel::Acceleration, x::ChunkView{N}, dep_mod) where N
     @assert dep_mod === identity "Dependency modifiers not yet supported for ChunkView: $dep_mod"
-    return remotecall_fetch(root_worker_id(x.chunk.processor), x.chunk, x.slices) do x, slices
-        x = unwrap(x)
-        v = view(x, slices...)
-        return aliasing(accel, v, dep_mod)
+    return memoized_chunk_aliasing(x, dep_mod) do
+        remotecall_fetch(root_worker_id(x.chunk.processor), x.chunk, x.slices) do x, slices
+            x = unwrap(x)
+            v = view(x, slices...)
+            return aliasing(accel, v, dep_mod)
+        end
     end
 end
 aliasing(x::ChunkView) = aliasing(current_acceleration(), x, identity)
 aliasing(x::ChunkView, dep_mod) = aliasing(current_acceleration(), x, dep_mod)
 memory_space(x::ChunkView) = memory_space(x.chunk)
 isremotehandle(x::ChunkView) = true
+# A view over a chunk resolves to a real `SubArray` only via `move_rewrap`, so it
+# can never pass through as its own slot (`slot_rewrap_is_identity`).
+isremotehandle_type(::Type{<:ChunkView}) = true
 
 # Under uniform (SPMD) execution, a ChunkView is replicated metadata on every
 # rank (inner chunk record + slices); wrapping it in a rank-0-owned Chunk
