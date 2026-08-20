@@ -12,7 +12,7 @@ Multiple stencil operations can be performed within a `begin...end` block:
 
 ```julia
 using Dagger
-import Dagger: @stencil, Wrap, Pad, Reflect, Clamp, LinearExtrapolate
+import Dagger: @stencil, Wrap, Pad, Reflect, AntiReflect, Clamp, LinearExtrapolate
 
 # Initialize a DArray
 A = zeros(Blocks(2, 2), Int, 4, 4)
@@ -114,6 +114,7 @@ The true power of stencils comes from accessing neighboring elements. The `@neig
     - `Reflect(symmetric)`: Reflects values back into the array at boundaries. The `symmetric` boolean controls whether the edge element is included in the reflection:
         - `Reflect(true)` (symmetric): Edge element IS repeated. For array `[a,b,c,d]`, extends as `[...,c,b,a,a,b,c,d,d,c,b,...]`.
         - `Reflect(false)` (mirror): Edge element NOT repeated. For array `[a,b,c,d]`, extends as `[...,d,c,b,a,b,c,d,c,b,a,...]`.
+    - `AntiReflect(symmetric)`: Reflects values as `Reflect(symmetric)` does, but negates them (an antisymmetric, or "odd", reflection). `AntiReflect()` defaults to the symmetric variant. For array `[a,b,c,d]`, `AntiReflect(true)` extends as `[...,-c,-b,-a,a,b,c,d,-d,-c,...]`. Use this for a quantity that must vanish at the boundary, such as the velocity component normal to a solid wall. Requires an element type that supports negation.
     - `Clamp()`: Clamps to the boundary value (repeats edge elements). For array `[a,b,c,d]`, extends as `[...,a,a,a,a,b,c,d,d,d,d,...]`.
     - `LinearExtrapolate()`: Linearly extrapolates using the slope at the boundary. Only works with `Real` element types. For array `[2,4,6,8]`, the slope at the low boundary is `4-2=2`, so index 0 would be `2-2=0`.
     - **Mixed BCs (Tuple)**: You can specify different boundary conditions per dimension using a tuple. For example, `(Wrap(), Pad(0))` uses `Wrap` for dimension 1 and `Pad(0)` for dimension 2.
@@ -219,6 +220,47 @@ end
 # B[4]: indices 3,4,5 -> 5 reflects to 3, so [3,4,3] = 10
 @assert collect(B) == [5, 6, 9, 10]
 ```
+
+### Example: Solid Walls with `AntiReflect`
+
+`Reflect` mirrors values, which is what a scalar field wants at a wall, but not what the velocity (or momentum) component *normal* to that wall wants. A mirrored ghost cell carries the same normal flow as the cell it mirrors, so the "wall" quietly behaves like an outflow. `AntiReflect` reflects the same indices and negates the values, so the field interpolates to zero at the wall and nothing passes through it:
+
+```julia
+import Dagger: AntiReflect
+
+# Array [1, 2, 3, 4] extends as [..., -3, -2, -1, 1, 2, 3, 4, -4, -3, ...]
+A = DArray([1, 2, 3, 4], Blocks(2))
+B = zeros(Blocks(2), Int, 4)
+
+@stencil begin
+    B[idx] = sum(@neighbors(A[idx], 1, AntiReflect(true)))
+end
+
+# B[1]: indices 0,1,2 -> 0 reflects to 1 and is negated, so [-1,1,2] = 2
+# B[2]: indices 1,2,3 -> all in bounds, [1,2,3] = 6
+# B[3]: indices 2,3,4 -> all in bounds, [2,3,4] = 9
+# B[4]: indices 3,4,5 -> 5 reflects to 4 and is negated, so [3,4,-4] = 3
+@assert collect(B) == [2, 6, 9, 3]
+```
+
+`AntiReflect()` is shorthand for `AntiReflect(true)`, and `AntiReflect(false)` skips the edge element just as `Reflect(false)` does. When several dimensions are antireflected at once, the sign flips once per reflected dimension, so a corner region reflected in two dimensions keeps its original sign.
+
+In practice this is used as part of a mixed boundary condition, because only the wall-normal component flips. For 2D shallow water in a channel that is periodic in *x* and walled in *y*, the height `h` and the wall-tangential momentum `hu` reflect as usual, while the wall-normal momentum `hv` antireflects:
+
+```julia
+const BC    = (Wrap(), Reflect(true))   # h, hu -- scalar and wall-tangential
+const BC_HV = (Wrap(), AntiReflect())   # hv    -- wall-normal, so it flips sign
+
+# Sketch, with the flux computation elided:
+@stencil begin
+    h2[idx] = update_h(@neighbors(h[idx],  1, BC),
+                       @neighbors(hu[idx], 1, BC),
+                       @neighbors(hv[idx], 1, BC_HV))
+    # ... and likewise for hu2 and hv2
+end
+```
+
+Using `Reflect(true)` for all three fields here looks plausible and even animates plausibly, but the walls leak: the conserved quantity (total mass) drifts steadily. Switching `hv` to `AntiReflect()` conserves it to roundoff, which makes a conservation check the cheapest way to catch a mistaken boundary condition.
 
 ### Example: Edge Detection with `Clamp`
 

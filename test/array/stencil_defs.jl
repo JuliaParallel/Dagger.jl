@@ -2,7 +2,7 @@
 # reused both for the single-process CPU/GPU testsets below and for the
 # MPI(+GPU) suites in test/mpi.jl / test/mpi_gpu_suite.jl.
 
-@everywhere import Dagger: @stencil, Wrap, Pad, Reflect, Clamp, LinearExtrapolate
+@everywhere import Dagger: @stencil, Wrap, Pad, Reflect, AntiReflect, Clamp, LinearExtrapolate
 
 function test_stencil(; skip_highdim::Bool=false)
     @testset "Simple assignment" begin
@@ -292,6 +292,138 @@ function test_stencil(; skip_highdim::Bool=false)
             expected_B_mirror[i, j] = sum_val
         end
         @test collect(B) == expected_B_mirror
+    end
+
+    @testset "AntiReflect constructor" begin
+        # AntiReflect() is the symmetric variant, matching Reflect(true)'s indexing
+        @test AntiReflect() === AntiReflect(true)
+        @test AntiReflect(false) !== AntiReflect(true)
+    end
+
+    @testset "AntiReflect ghost values" begin
+        # The defining property: an out-of-domain neighbor is the *negated*
+        # reflected value, so the field interpolates to zero at the boundary.
+        A = DArray([1, 2, 3, 4], Blocks(2))
+        lo = zeros(Blocks(2), Int, 4)
+        hi = zeros(Blocks(2), Int, 4)
+        @stencil begin
+            lo[idx] = @neighbors(A[idx], 1, AntiReflect(true))[1]
+            hi[idx] = @neighbors(A[idx], 1, AntiReflect(true))[3]
+        end
+        # lo[1] and hi[4] are the ghosts: -A[1] and -A[4]
+        @test collect(lo) == [-1, 1, 2, 3]
+        @test collect(hi) == [2, 3, 4, -4]
+    end
+
+    @testset "AntiReflect boundary (symmetric)" begin
+        # For A = [1, 2, 3, 4] with AntiReflect(true):
+        # idx=0 → -A[1] = -1, idx=5 → -A[4] = -4 (Reflect(true) indexing, negated)
+        A = DArray([1, 2, 3, 4], Blocks(2))
+        B = zeros(Blocks(2), Int, 4)
+        @stencil B[idx] = sum(@neighbors(A[idx], 1, AntiReflect(true)))
+        # B[1]: indices 0, 1, 2 -> [-1, 1, 2] = 2
+        # B[2]: indices 1, 2, 3 -> [1, 2, 3] = 6
+        # B[3]: indices 2, 3, 4 -> [2, 3, 4] = 9
+        # B[4]: indices 3, 4, 5 -> [3, 4, -4] = 3
+        @test collect(B) == [2, 6, 9, 3]
+    end
+
+    @testset "AntiReflect boundary (mirror)" begin
+        # For A = [1, 2, 3, 4] with AntiReflect(false):
+        # idx=0 → -A[2] = -2, idx=5 → -A[3] = -3 (Reflect(false) indexing, negated)
+        A = DArray([1, 2, 3, 4], Blocks(2))
+        B = zeros(Blocks(2), Int, 4)
+        @stencil B[idx] = sum(@neighbors(A[idx], 1, AntiReflect(false)))
+        # B[1]: indices 0, 1, 2 -> [-2, 1, 2] = 1
+        # B[2]: indices 1, 2, 3 -> [1, 2, 3] = 6
+        # B[3]: indices 2, 3, 4 -> [2, 3, 4] = 9
+        # B[4]: indices 3, 4, 5 -> [3, 4, -3] = 4
+        @test collect(B) == [1, 6, 9, 4]
+    end
+
+    @testset "AntiReflect boundary 2D (symmetric)" begin
+        # Applied to every dimension, the sign flips once per reflected
+        # dimension, so corner regions (reflected twice) keep their sign.
+        A = DArray(reshape(1:16, 4, 4), Blocks(2, 2))
+        B = zeros(Blocks(2, 2), Int, 4, 4)
+        @stencil B[idx] = sum(@neighbors(A[idx], 1, AntiReflect(true)))
+        A_collected = collect(A)
+        expected_B = zeros(Int, 4, 4)
+        for i in 1:4, j in 1:4
+            sum_val = 0
+            for di in -1:1, dj in -1:1
+                ni, nj = i + di, j + dj
+                sgn = 1
+                if ni < 1
+                    ni = 1 - ni; sgn = -sgn
+                elseif ni > 4
+                    ni = 2*4 + 1 - ni; sgn = -sgn
+                end
+                if nj < 1
+                    nj = 1 - nj; sgn = -sgn
+                elseif nj > 4
+                    nj = 2*4 + 1 - nj; sgn = -sgn
+                end
+                sum_val += sgn * A_collected[ni, nj]
+            end
+            expected_B[i, j] = sum_val
+        end
+        @test collect(B) == expected_B
+    end
+
+    @testset "Mixed boundary conditions (Wrap, AntiReflect)" begin
+        # The solid-wall case: periodic along dimension 1, walled along
+        # dimension 2, for a quantity normal to that wall.
+        A = DArray(reshape(1:16, 4, 4), Blocks(2, 2))
+        B = zeros(Blocks(2, 2), Int, 4, 4)
+        @stencil B[idx] = sum(@neighbors(A[idx], 1, (Wrap(), AntiReflect(true))))
+        A_collected = collect(A)
+        expected_B = zeros(Int, 4, 4)
+        for i in 1:4, j in 1:4
+            sum_val = 0
+            for di in -1:1, dj in -1:1
+                # Dim 1: Wrap
+                ni = mod1(i + di, 4)
+                # Dim 2: AntiReflect(true) - symmetric indices, negated values
+                nj = j + dj
+                sgn = 1
+                if nj < 1
+                    nj = 1 - nj; sgn = -1
+                elseif nj > 4
+                    nj = 2*4 + 1 - nj; sgn = -1
+                end
+                sum_val += sgn * A_collected[ni, nj]
+            end
+            expected_B[i, j] = sum_val
+        end
+        @test collect(B) == expected_B
+    end
+
+    @testset "AntiReflect zeroes the flux through a wall" begin
+        # Why this boundary condition exists: for a field normal to a solid
+        # wall, the centered difference across the wall must see a ghost that
+        # cancels the edge value. With a uniform field the wall-adjacent
+        # centered difference is therefore non-zero (the flow is stopped),
+        # while Reflect leaves it at zero (the flow passes straight through).
+        A = ones(Blocks(2), Float32, 4)
+        anti = zeros(Blocks(2), Float32, 4)
+        refl = zeros(Blocks(2), Float32, 4)
+        @stencil begin
+            anti[idx] = begin
+                n = @neighbors(A[idx], 1, AntiReflect())
+                n[3] - n[1]
+            end
+            refl[idx] = begin
+                n = @neighbors(A[idx], 1, Reflect(true))
+                n[3] - n[1]
+            end
+        end
+        # Interior cells see 1 - 1 == 0 under both conditions
+        @test collect(anti)[2:3] == [0.0f0, 0.0f0]
+        @test collect(refl) == zeros(4)
+        # At the edges the antireflected ghost is -1, so the difference is ±2
+        @test collect(anti)[1] == 2.0f0
+        @test collect(anti)[4] == -2.0f0
     end
 
     @testset "Multiple expressions" begin
