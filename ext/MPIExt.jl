@@ -1805,11 +1805,20 @@ function move_rewrap(accel::MPIAcceleration, cache::AliasedObjectCache, from_pro
     mode = move_rewrap_header_mode(T)
     header = if mode === :broadcast
         tag = to_tag()
+        # `move_rewrap` is reached from `generate_slot!` inside the per-task
+        # planning loop, and each task is handed to `eager_launch!` (and so
+        # begins executing, concurrently, on this same rank) before the loop
+        # moves on to plan the next task. That means this broadcast is NOT at
+        # a "sequential, non-overlapping point" the way the doc comment above
+        # `bcast_meta_yield` assumes -- it can race an already-dispatched
+        # task's own `execute!`/`poolget` activity on this or another rank.
+        # Use the dispatch-decoupled relay so a rank busy running a task's
+        # `execute!` still forwards this header on message arrival.
         if local_rank == w.space.rank
             _, hdr = move_rewrap_parts(wire_value(w))
-            bcast_yield(accel.comm, w.space.rank, tag, hdr)
+            bcast_meta_yield(accel.comm, w.space.rank, tag, hdr)
         else
-            bcast_yield(accel.comm, w.space.rank, tag)
+            bcast_meta_yield(accel.comm, w.space.rank, tag)
         end
     elseif mode === :none
         nothing
