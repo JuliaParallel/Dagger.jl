@@ -402,7 +402,14 @@ jobs:
   mpi-cpu:
     name: MPI CPU - Julia ${{ matrix.version }} / ${{ matrix.ranks }} ranks
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 4 ranks has less headroom than 2: a clean local run of test/mpi.jl at 4
+    # ranks takes ~12-13 minutes on an idle 12-core workstation (matching the
+    # ~12m historical benchmark in c13465a8's commit message, with all 398
+    # tests passing and no hang), but shared/oversubscribed `ubuntu-latest`
+    # runners reportedly take ~40 minutes and occasionally exceed 60 -- a
+    # timeout-margin problem on slower CI hardware, not a reproducible
+    # deadlock. Give the 4-rank job more slack than 2-rank needs.
+    timeout-minutes: ${{ matrix.ranks == 4 && 90 || 60 }}
     if: ${{ !contains(github.event.head_commit.message, '[skip tests]') }}
     strategy:
       fail-fast: false
