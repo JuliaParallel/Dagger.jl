@@ -927,7 +927,6 @@ concurrently across threads.
     accel = something(options.acceleration, current_acceleration())
 
     input_procs = @reusable_vector :schedule_one!_input_procs Processor OSProc() 32
-    input_procs_cleanup = @reuse_defer_cleanup empty!(input_procs)
     compat = compatible_processors_cached(accel, scope, procs_filt)
     for proc in compat
         if !(proc in input_procs)
@@ -936,12 +935,10 @@ concurrently across threads.
     end
 
     sorted_procs = @reusable_vector :schedule_one!_sorted_procs Processor OSProc() 32
-    sorted_procs_cleanup = @reuse_defer_cleanup empty!(sorted_procs)
     resize!(sorted_procs, length(input_procs))
     costs = @reusable_dict :schedule_one!_costs Processor Float64 OSProc() 0.0 32
-    costs_cleanup = @reuse_defer_cleanup empty!(costs)
     estimate_task_costs!(sorted_procs, costs, state, input_procs, task; sig)
-    input_procs_cleanup()
+    empty!(input_procs)
 
     # Under uniform execution, measured costs are rank-local, so re-order by a
     # deterministic, acceleration-dispatched key instead (no-op otherwise).
@@ -984,8 +981,8 @@ concurrently across threads.
             end
         end
     end
-    sorted_procs_cleanup()
-    costs_cleanup()
+    empty!(sorted_procs)
+    empty!(costs)
 
     # Phase 3 — brief state.lock hold: fire or fail the task.
     # `restore_ready` only becomes non-empty if a task completes synchronously
@@ -1165,7 +1162,6 @@ Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
 @reuse_scope function fire_tasks!(ctx, task_loc::ScheduleTaskLocation, task_specs::Vector{ScheduleTaskSpec}, state, ready::Vector{Thunk})
     gproc, proc = task_loc.gproc, task_loc.proc
     to_send = @reusable_vector :fire_tasks!_to_send Union{TaskSpec,Nothing} nothing 1024
-    to_send_cleanup = @reuse_defer_cleanup empty!(to_send)
     for task_spec in task_specs
         thunk = task_spec.task
         @atomic thunk.running = true
@@ -1249,7 +1245,7 @@ Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
             end
         end
     end
-    to_send_cleanup()
+    empty!(to_send)
 end
 
 struct FireTaskSpec
@@ -2014,9 +2010,7 @@ Executes a single task specified by `task` on `to_proc`.
     f = Dagger.value(first(data))
     @assert !(f isa Chunk) "Failed to unwrap thunk function"
     fetched_args = @reusable_vector :do_task_fetched_args Any nothing 32
-    fetched_args_cleanup = @reuse_defer_cleanup empty!(fetched_args)
     fetched_kwargs = @reusable_vector :do_task_fetched_kwargs Pair{Symbol,Any} :NULL=>nothing 32
-    fetched_kwargs_cleanup = @reuse_defer_cleanup empty!(fetched_kwargs)
     for idx in 2:length(data)
         arg = data[idx]
         if Dagger.ispositional(arg)
@@ -2091,8 +2085,8 @@ Executes a single task specified by `task` on `to_proc`.
         bt = catch_backtrace()
         RemoteException(myid(), CapturedException(ex, bt))
     finally
-        fetched_args_cleanup()
-        fetched_kwargs_cleanup()
+        empty!(fetched_args)
+        empty!(fetched_kwargs)
     end
 
     threadtime = cputhreadtime() - threadtime_start

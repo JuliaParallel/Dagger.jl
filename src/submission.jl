@@ -110,14 +110,12 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
     # tasks/chunks). Only GC-rooting is needed here -- the `Argument`/
     # `ArgPosition` wrappers themselves are never read back -- so push the bare
     # values instead of copying 2 objects per argument.
-    old_values = @reusable_vector :eager_submit_internal!_old_values Any nothing 32
-    old_fargs_cleanup = @reuse_defer_cleanup empty!(old_values)
+    old_fargs = @reusable_vector :eager_submit_internal!_old_fargs Any nothing 32
     for arg in fargs
-        push!(old_values, value(arg))
+        push!(old_fargs, value(arg))
     end
 
     syncdeps_vec = @reusable_vector :eager_submit_interal!_syncdeps_vec ThunkSyncdep ThunkSyncdep() 32
-    syncdeps_vec_cleanup = @reuse_defer_cleanup empty!(syncdeps_vec)
     if options.syncdeps !== nothing
         append!(syncdeps_vec, options.syncdeps)
     end
@@ -197,9 +195,9 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
             end
         end
     end
-    syncdeps_vec_cleanup()
+    empty!(syncdeps_vec)
 
-    GC.@preserve old_values fargs begin
+    GC.@preserve old_fargs fargs begin
         # Create the `Thunk`
         thunk = take_or_alloc!(THUNK_SPEC_CACHE[]) do thunk_spec
             thunk_spec.fargs = fargs
@@ -236,7 +234,7 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
             push!(state.strong_thunks, thunk)
             #=FIXME:REALLOC=#
             Sch.reschedule_syncdeps!(state, thunk, ready)
-            old_fargs_cleanup() # reschedule_syncdeps! preserves all referenced tasks/chunks
+            empty!(old_fargs) # reschedule_syncdeps! preserves all referenced tasks/chunks
             n_upstreams = @atomic thunk.pending_deps
             @dagdebug thunk :submit "Added to scheduler with $n_upstreams unresolved upstreams"
             if future !== nothing

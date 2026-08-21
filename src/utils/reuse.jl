@@ -562,19 +562,22 @@ function Base.empty!(dict::ReusableDict{K,V}) where {K,V}
     return dict
 end
 
+# N.B. Emptied on take (cheap when already empty), so users need no cleanup
+# registration for correctness — explicit `empty!` at the end of use remains
+# good hygiene to release references promptly.
 macro reusable_vector(name, T, null, N)
     vec_name = Symbol("__$(name)_TLV_ReusableVector")
     if !hasproperty(__module__, vec_name)
         __module__.eval(:(#=const=# $vec_name = $TaskLocalValue{$Vector{$T}}(()->$Vector{$T}())))
     end
-    return :($(esc(vec_name))[])
+    return :(empty!($(esc(vec_name))[]))
 end
 macro reusable_dict(name, K, V, null_key, null_value, N)
     dict_name = Symbol("__$(name)_TLV_ReusableDict")
     if !hasproperty(__module__, dict_name)
         __module__.eval(:(#=const=# $dict_name = $TaskLocalValue{$Dict{$K,$V}}(()->$Dict{$K,$V}())))
     end
-    return :($(esc(dict_name))[])
+    return :(empty!($(esc(dict_name))[]))
 end
 
 mutable struct ReusableTaskCache

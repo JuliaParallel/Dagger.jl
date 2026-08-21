@@ -655,7 +655,6 @@ const EMPTY_TRANSFER_RATES = Dict{Processor,UInt64}()
 
     # Find all Chunks
     chunks = @reusable_vector :estimate_task_costs_chunks Union{Chunk,Nothing} nothing 32
-    chunks_cleanup = @reuse_defer_cleanup empty!(chunks)
     for input in task.inputs
         if Dagger.valuetype(input) <: Chunk
             push!(chunks, Dagger.value(input)::Chunk)
@@ -676,14 +675,13 @@ const EMPTY_TRANSFER_RATES = Dict{Processor,UInt64}()
     # TODO: For non-Chunk, model cost from scheduler to worker
     # TODO: Measure and model processor move overhead
     tx_costs = @reusable_dict :estimate_task_costs_tx_costs Processor Float64 OSProc() 0.0 8
-    tx_costs_cleanup = @reuse_defer_cleanup empty!(tx_costs)
     for proc in procs
         gproc = get_parent(proc)
         haskey(tx_costs, gproc) && continue
         chunks_filt = Iterators.filter(c->get_parent(processor(c)) != gproc, chunks)
         tx_costs[gproc] = impute_sum(datasize(chunk) for chunk in chunks_filt)
     end
-    chunks_cleanup()
+    empty!(chunks)
 
     # Estimate total cost for executing this task on each candidate processor.
     # The transfer-rate table is taken once rather than once per processor.
@@ -711,7 +709,7 @@ const EMPTY_TRANSFER_RATES = Dict{Processor,UInt64}()
         end
         return all_equal
     end
-    tx_costs_cleanup()
+    empty!(tx_costs)
 
     # Shuffle procs around, so equally-costly procs are equally considered
     np = length(procs)
