@@ -147,4 +147,29 @@ tochunk_pset(x, space::MemorySpace; device=nothing, type=nothing, retain=false,
              tag=nothing, leaf_tag=MemPool.Tag(), kwargs...) =
     poolset(x; retain, device, tag, leaf_tag, kwargs...)
 
+"""
+    tochunk_result(x, proc, scope, device, tag, leaf_tag, retain) -> Chunk
+
+Fully positional `tochunk` for the task-result hot path. Equivalent to
+`tochunk(x, proc, scope; device, tag, leaf_tag, retain)`, but the common
+CPU-space case reaches `MemPool.poolset_positional` without constructing a
+keyword NamedTuple at any layer; other memory spaces (e.g. MPI) fall back to
+the keyword `tochunk_pset` so acceleration overrides still apply.
+"""
+function tochunk_result(x::X, proc::P, scope::S, device, tag, leaf_tag, retain::Bool) where {X,P<:Processor,S}
+    x isa Chunk && return x
+    if device === nothing
+        device = Sch.walk_storage_safe(x) ? MemPool.GLOBAL_DEVICE[] : MemPool.CPURAMDevice()
+    end
+    space = default_memory_space(current_acceleration(), x)
+    ref = if space isa CPURAMMemorySpace
+        MemPool.poolset_positional(x, myid(), MemPool.approx_size(x), retain, false,
+                                   device, MemPool.initial_leaf_device(device),
+                                   tag, leaf_tag, nothing)
+    else
+        tochunk_pset(x, space; device, type=X, retain, tag, leaf_tag)
+    end
+    return Chunk{X,typeof(ref),P,S,typeof(space)}(X, domain(x), ref, proc, scope, space)
+end
+
 # savechunk: defined in utils/chunks.jl (fork Chunk has space field; do not duplicate here)
