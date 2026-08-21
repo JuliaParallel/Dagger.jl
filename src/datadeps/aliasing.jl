@@ -185,33 +185,39 @@ chunktype(::Out{T}) where T = T
 chunktype(::InOut{T}) where T = T
 chunktype(::Deps{T,DT}) where {T,DT} = T
 
+"""
+    unwrap_inout(arg) -> (arg, deps)
+
+Strips any `In`/`Out`/`InOut`/`Deps` wrapper from `arg`, returning the bare
+value together with its dependencies as a *tuple* of `(dep_mod, readdep,
+writedep)` triples. A bare (unwrapped) value is a read dependency with
+`identity` as its `dep_mod`.
+
+N.B. The dependencies are a tuple, not a `Vector{Tuple}`: `Deps` stores its
+sub-dependencies as a `Tuple` already, and every consumer only iterates the
+result, so keeping it a tuple makes the whole thing inferrable and keeps the
+common single-dependency case off the heap.
+"""
 function unwrap_inout(arg)
-    readdep = false
-    writedep = false
     if arg isa In
-        readdep = true
-        arg = arg.x
+        return arg.x, ((identity, true, false),)
     elseif arg isa Out
-        writedep = true
-        arg = arg.x
+        return arg.x, ((identity, false, true),)
     elseif arg isa InOut
-        readdep = true
-        writedep = true
-        arg = arg.x
+        return arg.x, ((identity, true, true),)
     elseif arg isa Deps
-        alldeps = Tuple[]
-        for dep in arg.deps
-            dep_mod, inner_deps = unwrap_inout(dep)
-            for (_, readdep, writedep) in inner_deps
-                push!(alldeps, (dep_mod, readdep, writedep))
-            end
-        end
-        arg = arg.x
-        return arg, alldeps
+        return arg.x, _unwrap_deps(arg.deps)
     else
-        readdep = true
+        return arg, ((identity, true, false),)
     end
-    return arg, Tuple[(identity, readdep, writedep)]
+end
+# Flatten `Deps`' sub-dependencies: each sub-dependency contributes its own
+# unwrapped value as the `dep_mod` for every triple it produces.
+_unwrap_deps(::Tuple{}) = ()
+@inline function _unwrap_deps(deps::Tuple)
+    dep_mod, inner_deps = unwrap_inout(first(deps))
+    head = map(d->(dep_mod, d[2], d[3]), inner_deps)
+    return (head..., _unwrap_deps(Base.tail(deps))...)
 end
 
 _identity_hash(arg, h::UInt=UInt(0)) = ismutable(arg) ? objectid(arg) : hash(arg, h)
@@ -521,6 +527,31 @@ end
 # (e.g. ChunkView under MPI) override this to stay raw.
 datadeps_arg_wrap(arg) = tochunk(arg)
 
+"""
+    get_or_make_arg_chunk!(state, arg, task) -> chunk
+
+Returns the `Chunk` (or raw remote handle) tracking `arg`, generating and
+recording it on first sight.
+
+N.B. Split out of `populate_task_info!`'s per-argument closure deliberately: as
+an inline `if`/`else` the result was assigned in three branches and then
+captured by the closures below it, which forced Julia to box it. A single
+assignment from a call keeps it unboxed.
+"""
+function get_or_make_arg_chunk!(state::DataDepsState, arg, task::DTask)
+    existing = get(state.raw_arg_to_chunk, arg, nothing)
+    existing === nothing || return existing
+    if arg isa Chunk
+        state.raw_arg_to_chunk[arg] = arg
+        return arg
+    end
+    arg_chunk = with(DATADEPS_THUNK_ID=>task.uid) do
+        datadeps_arg_wrap(arg)
+    end
+    state.raw_arg_to_chunk[arg] = arg_chunk
+    return arg_chunk
+end
+
 # Aliasing state setup
 function populate_task_info!(state::DataDepsState, task_args, spec::DTaskSpec, task::DTask)
     # Track the task's arguments and access patterns
@@ -532,7 +563,11 @@ function populate_task_info!(state::DataDepsState, task_args, spec::DTaskSpec, t
         pos = _arg.pos
 
         # Unwrap In/InOut/Out wrappers and record dependencies
-        arg_pre_unwrap, deps = unwrap_inout(_arg_with_deps)
+        # N.B. `raw_deps` (the `(dep_mod, readdep, writedep)` triples) and the
+        # wrapped `DataDepsTaskDependency`s below are kept as distinct,
+        # single-assignment names: reusing one name for both made the variable
+        # captured-and-reassigned, which Julia must then box.
+        arg_pre_unwrap, raw_deps = unwrap_inout(_arg_with_deps)
 
         # Unwrap the Chunk underlying any DTask arguments
         arg = arg_pre_unwrap isa DTask ? fetch(arg_pre_unwrap; raw=true) : arg_pre_unwrap
@@ -550,40 +585,28 @@ function populate_task_info!(state::DataDepsState, task_args, spec::DTaskSpec, t
         end
 
         # Generate a Chunk for the argument if necessary
-        if haskey(state.raw_arg_to_chunk, arg)
-            arg_chunk = state.raw_arg_to_chunk[arg]
-        else
-            if !(arg isa Chunk)
-                arg_chunk = with(DATADEPS_THUNK_ID=>task.uid) do
-                    datadeps_arg_wrap(arg)
-                end
-                state.raw_arg_to_chunk[arg] = arg_chunk
-            else
-                state.raw_arg_to_chunk[arg] = arg
-                arg_chunk = arg
-            end
-        end
+        arg_chunk = get_or_make_arg_chunk!(state, arg, task)
 
         # Track the origin space of the argument
         origin_space = memory_space(arg_chunk)
-        check_uniform(origin_space)
+        @check_uniform(origin_space)
         state.arg_origin[arg_chunk] = origin_space
         state.remote_arg_to_original[arg_chunk] = arg_chunk
 
         # Populate argument info for all aliasing dependencies
         # And return the argument, dependencies, and ArgumentWrappers
         if is_typed(spec)
-            deps = Tuple(DataDepsTaskDependency(arg_chunk, dep) for dep in deps)
-            map_or_ntuple(deps) do dep_idx
-                dep = deps[dep_idx]
+            typed_deps = map(dep->DataDepsTaskDependency(arg_chunk, dep), raw_deps)
+            map_or_ntuple(typed_deps) do dep_idx
+                dep = typed_deps[dep_idx]
                 # Populate argument info
                 populate_argument_info!(state, dep.arg_w, origin_space)
             end
-            return TypedDataDepsTaskArgument(arg_chunk, pos, may_alias, inplace_move, deps)
+            return TypedDataDepsTaskArgument(arg_chunk, pos, may_alias, inplace_move, typed_deps)
         else
-            deps = [DataDepsTaskDependency(arg_chunk, dep) for dep in deps]
-            map_or_ntuple(deps) do dep_idx
-                dep = deps[dep_idx]
+            untyped_deps = DataDepsTaskDependency[DataDepsTaskDependency(arg_chunk, dep) for dep in raw_deps]
+            map_or_ntuple(untyped_deps) do dep_idx
+                dep = untyped_deps[dep_idx]
                 # Populate argument info
                 populate_argument_info!(state, dep.arg_w, origin_space)
             end
