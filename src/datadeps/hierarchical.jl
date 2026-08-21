@@ -1723,7 +1723,7 @@ function _hierarchical_persist_schedule!(scheduler::DataDepsScheduler,
 end
 
 """
-    distribute_tasks_hierarchical!(queue)
+    distribute_tasks_hierarchical!(queue, ddctx)
 
 Main entry point for hierarchical scheduling. Runs the 4-phase pipeline:
 1. Parallel aliasing construction
@@ -1743,7 +1743,7 @@ broke `ChunkView` / custom schedulers).
 Under uniform execution (MPI), Phase 4 runs sequentially on the root task so
 SPMD tag / `MPIRefID` allocation stays deterministic across ranks.
 """
-function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
+function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue, ddctx::DataDepsContext)
     seen_tasks = queue.seen_tasks
     if isempty(seen_tasks)
         return
@@ -1777,7 +1777,7 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
     if !uniform_execution(accel) &&
        allequal(partition_affinity_id(proc) for proc in all_procs) &&
        single_owner_partition_count(length(seen_tasks), length(all_procs)) == 1
-        return distribute_tasks!(queue)
+        return distribute_tasks!(queue, ddctx)
     end
 
     return _distribute_tasks_hierarchical!(queue, seen_tasks, accel, all_procs)

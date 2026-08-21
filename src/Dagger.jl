@@ -115,6 +115,7 @@ include("datadeps/slotcache.jl")
 include("datadeps/chunkview.jl")
 include("datadeps/remainders.jl")
 include("datadeps/scheduling.jl")
+include("datadeps/context.jl")
 include("datadeps/queue.jl")
 include("datadeps/hierarchical.jl")
 
