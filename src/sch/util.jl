@@ -428,9 +428,14 @@ function signature(f, args)
     kw_extra = any_kw ? 2 : 0
     sig = Vector{Any}(undef, 1+n_pos+kw_extra)
     sig[1+kw_extra] = chunktype(f)
-    #=FIXME:REALLOC_N=#
-    sig_kwarg_names = Symbol[]
-    sig_kwarg_types = []
+    # N.B. The kwarg accumulators are only allocated when there actually are
+    # kwargs (the common case has none), so the loop is split on `any_kw`.
+    local sig_kwarg_names, sig_kwarg_types
+    if any_kw
+        #=FIXME:REALLOC_N=#
+        sig_kwarg_names = Symbol[]
+        sig_kwarg_types = []
+    end
     for idx in 1:length(args)
         arg = args[idx]
         value = Dagger.value(arg)
