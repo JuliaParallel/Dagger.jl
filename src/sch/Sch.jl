@@ -1898,8 +1898,10 @@ Executes a single task specified by `task` on `to_proc`.
     @dagdebug thunk_id :execute "Moving data for $Tf"
 
     # Initiate data transfers for function and arguments
-    transfer_time = Threads.Atomic{UInt64}(0)
-    transfer_size = Threads.Atomic{UInt64}(0)
+    # N.B. Only written by the commented-out CHUNK_CACHE block below; plain
+    # zeros until that returns (was two Threads.Atomic allocations per task)
+    transfer_time = UInt64(0)
+    transfer_size = UInt64(0)
     _data = if something(options.meta, false)
         Argument[first(data)] # always fetch function
     else
@@ -2093,7 +2095,7 @@ Executes a single task specified by `task` on `to_proc`.
         # FIXME: Add runtime allocation tracking
         #gc_allocd=(isa(result_meta, Chunk) ? result_meta.handle.size : 0),
         gc_allocd=0,
-        transfer_rate=(transfer_size[] > 0 && transfer_time[] > 0) ? round(UInt64, transfer_size[] / (transfer_time[] / 10^9)) : nothing,
+        transfer_rate=(transfer_size > 0 && transfer_time > 0) ? round(UInt64, transfer_size / (transfer_time / 10^9)) : nothing,
     )
     return (result_meta, metadata)
 end
