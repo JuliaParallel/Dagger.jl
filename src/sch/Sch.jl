@@ -1380,11 +1380,8 @@ end
 const PROCESSOR_TASK_STATE = Dict{UInt64,ProcessorStateDict}()
 
 function proc_states(uid::UInt64=Dagger.get_tls().sch_uid)
-    states = MemPool.lock_read(PROCESSOR_TASK_STATE_LOCK) do
-        if haskey(PROCESSOR_TASK_STATE, uid)
-            return PROCESSOR_TASK_STATE[uid]
-        end
-        return nothing
+    states = MemPool.@lock_read PROCESSOR_TASK_STATE_LOCK begin
+        get(PROCESSOR_TASK_STATE, uid, nothing)
     end
     if states === nothing
         states = MemPool.lock(PROCESSOR_TASK_STATE_LOCK) do
