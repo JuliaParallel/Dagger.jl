@@ -50,7 +50,7 @@ const OUTPUT_DIR = abspath(get(ENV, "BENCHMARK_OUTPUT_DIR", "benchmark_results")
 # listed explicitly because we pass an explicit `--script`).
 const EXTRA_PKGS = String[
     "Krylov", "SparseArrays", "LinearAlgebra", "Statistics",
-    "Dates", "Random", "Distributed", "InteractiveUtils",
+    "Dates", "Random", "Distributed", "InteractiveUtils", "FFTW",
     # JSON3 is only a *weakdep* of Dagger, so it is not installed automatically
     # with Dagger; the orchestrator/worker need it for their file-based IPC.
     #"JSON3",

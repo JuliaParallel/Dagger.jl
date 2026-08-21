@@ -53,6 +53,9 @@
 #                  cholesky, lu, qr, svd, solve)
 #     - "sparse" : sparse distributed linear algebra (spmv, spgemm, and
 #                  iterative Krylov solve)
+#     - "stencil" : `@stencil`-based nearest-neighbor sweeps over DArrays
+#     - "fft"    : 3D pencil-decomposed FFT/IFFT over DArrays (needs FFTW,
+#                  see benchmark/Project.toml)
 #     - "dtable" : DTables data operations (legacy; opt-in, see below)
 #   Available methods: "raw" (non-Dagger), "dagger" (Dagger).
 #   Available accelerations: "cuda", "amdgpu" (require the relevant packages,
