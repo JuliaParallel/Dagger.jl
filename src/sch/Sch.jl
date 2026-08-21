@@ -1809,6 +1809,79 @@ end
 const SCHED_MOVE = ScopedValue{Bool}(false)
 
 """
+    move_one_argument!(arg, ctx, accel, to_proc, thunk_id, f)
+
+Moves one task argument to `to_proc` and stores the bound value on `arg`.
+Runs inline for local arguments (see `argument_move_may_inline`) or on a
+scheduled move task otherwise; a top-level function so the inline path
+allocates no closure.
+"""
+function move_one_argument!(arg, ctx, accel, to_proc, thunk_id, @nospecialize(f))
+    value = Dagger.value(arg)
+    position = arg.pos
+    @maybelog ctx timespan_start(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=value))
+            #= FIXME: This isn't valid if x is written to (formerly used transfer_time/transfer_size stats)
+            x = if x isa Chunk
+                value = lock(TASK_SYNC) do
+                    if haskey(CHUNK_CACHE, x)
+                        Some{Any}(get!(CHUNK_CACHE[x], to_proc) do
+                            # Convert from cached value
+                            # TODO: Choose "closest" processor of same type first
+                            cache_procs = keys(CHUNK_CACHE[x])
+                            accel = something(options.acceleration, current_acceleration())
+                            some_proc = minimum(cache_procs, by=p -> processor_order_key(accel, p))
+                            some_x = CHUNK_CACHE[x][some_proc]
+                            @dagdebug thunk_id :move "Cache hit for argument $id at $some_proc: $some_x"
+                            @invokelatest move(some_proc, to_proc, some_x)
+                        end)
+                    else
+                        nothing
+                    end
+                end
+
+                if value !== nothing
+                    something(value)
+                else
+                    # Fetch it
+                    time_start = time_ns()
+                    from_proc = processor(x)
+                    _x = @invokelatest move(from_proc, to_proc, x)
+                    time_finish = time_ns()
+                    if x.handle.size !== nothing
+                        Threads.atomic_add!(transfer_time, time_finish - time_start)
+                        Threads.atomic_add!(transfer_size, x.handle.size)
+                    end
+
+                    @dagdebug thunk_id :move "Cache miss for argument $id at $from_proc"
+
+                    # Update cache
+                    lock(TASK_SYNC) do
+                        CHUNK_CACHE[x] = Dict{Processor,Any}()
+                        CHUNK_CACHE[x][to_proc] = _x
+                    end
+
+                    _x
+                end
+            else
+            =#
+    new_value = with_sched_move(accel) do
+        @invokelatest move(to_proc, value)
+    end
+    #end
+    # Acceleration decides how to bind the moved value (e.g. keep a
+    # Chunk placeholder, or wrap an owner unwrap so chunktype stays
+    # SPMD-uniform). Materializing for the kernel may still happen in
+    # execute! when this rank only holds a placeholder.
+    bound = bind_moved_argument(accel, value, new_value)
+    if bound !== value
+        @dagdebug thunk_id :move "Moved argument @ $position to $to_proc: $(typeof(value)) -> $(typeof(bound))"
+    end
+    arg.value = bound
+    @maybelog ctx timespan_finish(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=Dagger.value(arg)); tasks=[Base.current_task()])
+    return
+end
+
+"""
     do_task(to_proc, task::TaskSpec) -> Any
 
 Executes a single task specified by `task` on `to_proc`.
@@ -1911,81 +1984,27 @@ Executes a single task specified by `task` on `to_proc`.
     # rank-uniform tags derived from the thunk ID; they must run sequentially
     # in argument order (FIFO tag matching), with the thunk's TID in scope
     accel = something(options.acceleration, current_acceleration())
-    fetch_tasks = map(_data) do arg
-        #=FIXME:REALLOC_TASKS=#
-        move_one = () -> begin
-            value = Dagger.value(arg)
-            position = arg.pos
-            @maybelog ctx timespan_start(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=value))
-            #= FIXME: This isn't valid if x is written to
-            x = if x isa Chunk
-                value = lock(TASK_SYNC) do
-                    if haskey(CHUNK_CACHE, x)
-                        Some{Any}(get!(CHUNK_CACHE[x], to_proc) do
-                            # Convert from cached value
-                            # TODO: Choose "closest" processor of same type first
-                            cache_procs = keys(CHUNK_CACHE[x])
-                            accel = something(options.acceleration, current_acceleration())
-                            some_proc = minimum(cache_procs, by=p -> processor_order_key(accel, p))
-                            some_x = CHUNK_CACHE[x][some_proc]
-                            @dagdebug thunk_id :move "Cache hit for argument $id at $some_proc: $some_x"
-                            @invokelatest move(some_proc, to_proc, some_x)
-                        end)
-                    else
-                        nothing
-                    end
-                end
-
-                if value !== nothing
-                    something(value)
-                else
-                    # Fetch it
-                    time_start = time_ns()
-                    from_proc = processor(x)
-                    _x = @invokelatest move(from_proc, to_proc, x)
-                    time_finish = time_ns()
-                    if x.handle.size !== nothing
-                        Threads.atomic_add!(transfer_time, time_finish - time_start)
-                        Threads.atomic_add!(transfer_size, x.handle.size)
-                    end
-
-                    @dagdebug thunk_id :move "Cache miss for argument $id at $from_proc"
-
-                    # Update cache
-                    lock(TASK_SYNC) do
-                        CHUNK_CACHE[x] = Dict{Processor,Any}()
-                        CHUNK_CACHE[x][to_proc] = _x
-                    end
-
-                    _x
-                end
-            else
-            =#
-            new_value = with_sched_move(accel) do
-                @invokelatest move(to_proc, value)
-            end
-            #end
-            # Acceleration decides how to bind the moved value (e.g. keep a
-            # Chunk placeholder, or wrap an owner unwrap so chunktype stays
-            # SPMD-uniform). Materializing for the kernel may still happen in
-            # execute! when this rank only holds a placeholder.
-            bound = bind_moved_argument(accel, value, new_value)
-            if bound !== value
-                @dagdebug thunk_id :move "Moved argument @ $position to $to_proc: $(typeof(value)) -> $(typeof(bound))"
-            end
-            arg.value = bound
-            @maybelog ctx timespan_finish(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=Dagger.value(arg)); tasks=[Base.current_task()])
-            return
-        end
+    fetch_tasks = nothing
+    for arg in _data
         if argument_move_may_inline(accel, to_proc, Dagger.value(arg))
-            move_one()
-            return nothing
+            # Common local case: run the move inline — no closure, no Task,
+            # no fetch_tasks vector
+            move_one_argument!(arg, ctx, accel, to_proc, thunk_id, f)
+            continue
         end
-        return schedule_argument_move(accel, thunk_id, move_one)
+        #=FIXME:REALLOC_TASKS=#
+        t = schedule_argument_move(accel, thunk_id,
+                                   () -> move_one_argument!(arg, ctx, accel, to_proc, thunk_id, f))
+        t === nothing && continue
+        if fetch_tasks === nothing
+            fetch_tasks = Task[]
+        end
+        push!(fetch_tasks, t)
     end
-    for task in fetch_tasks
-        task === nothing && continue
-        fetch_report(task)
+    if fetch_tasks !== nothing
+        for task in fetch_tasks
+            fetch_report(task)
+        end
     end
 
     f = Dagger.value(first(data))
@@ -2058,11 +2077,11 @@ Executes a single task specified by `task` on `to_proc`.
             result
         else
             # TODO: Cache this Chunk locally in CHUNK_CACHE right now
-            tochunk(result, to_proc, @something(options.result_scope, AnyScope());
-                    device,
-                    tag=options.storage_root_tag,
-                    leaf_tag=something(options.storage_leaf_tag, MemPool.Tag()),
-                    retain=something(options.storage_retain, false))
+            Dagger.tochunk_result(result, to_proc, @something(options.result_scope, AnyScope()),
+                                  device,
+                                  options.storage_root_tag,
+                                  something(options.storage_leaf_tag, MemPool.Tag()),
+                                  something(options.storage_retain, false))
         end
     catch ex
         bt = catch_backtrace()
