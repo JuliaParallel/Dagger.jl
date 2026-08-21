@@ -615,46 +615,54 @@ function populate_task_info!(state::DataDepsState, f_arg, fargs, spec::DTaskSpec
     empty!(deps_vec)
     for idx in 1:length(fargs)
         _arg = idx == 1 ? f_arg : fargs[idx]
-
-        # Unwrap the argument
-        _arg_with_deps = value(_arg)
-        pos = _arg.pos
-
-        # Unwrap In/InOut/Out wrappers and record dependencies
-        arg_pre_unwrap, raw_deps = unwrap_inout(_arg_with_deps)
-
-        # Unwrap the Chunk underlying any DTask arguments
-        arg = arg_pre_unwrap isa DTask ? fetch(arg_pre_unwrap; raw=true) : arg_pre_unwrap
-
-        # Skip non-aliasing arguments or arguments that don't support in-place move
-        may_alias = type_may_alias(typeof(arg))
-        inplace_move = may_alias && supports_inplace_move(state, arg)
-        dep_start = length(deps_vec) + 1
-        if !may_alias || !inplace_move
-            arg_w = ArgumentWrapper(arg, identity)
-            push!(deps_vec, DataDepsTaskDependency(arg_w, false, false))
-            push!(infos, TaskArgInfo(arg, pos, may_alias, inplace_move, dep_start, length(deps_vec)))
-            continue
-        end
-
-        # Generate a Chunk for the argument if necessary
-        arg_chunk = get_or_make_arg_chunk!(state, arg, task)
-
-        # Track the origin space of the argument
-        origin_space = memory_space(arg_chunk)
-        @check_uniform(origin_space)
-        state.arg_origin[arg_chunk] = origin_space
-        state.remote_arg_to_original[arg_chunk] = arg_chunk
-
-        # Record and populate argument info for all aliasing dependencies
-        for dep in raw_deps
-            dep_full = DataDepsTaskDependency(arg_chunk, dep)
-            push!(deps_vec, dep_full)
-            populate_argument_info!(state, dep_full.arg_w, origin_space)
-        end
-        push!(infos, TaskArgInfo(arg_chunk, pos, may_alias, inplace_move, dep_start, length(deps_vec)))
+        # N.B. Function barrier: `_arg` is abstract here (heterogeneous tuple /
+        # Vector{Argument} element), so processing it inline boxes every field
+        # read and destructure; one dynamic dispatch specializes the body on
+        # the concrete argument type instead.
+        _populate_one_arg!(state, infos, deps_vec, _arg, task)
     end
     return infos
+end
+function _populate_one_arg!(state::DataDepsState, infos::Vector{TaskArgInfo},
+                            deps_vec::Vector{DataDepsTaskDependency}, _arg, task::DTask)
+    # Unwrap the argument
+    _arg_with_deps = value(_arg)
+    pos = _arg.pos
+
+    # Unwrap In/InOut/Out wrappers and record dependencies
+    arg_pre_unwrap, raw_deps = unwrap_inout(_arg_with_deps)
+
+    # Unwrap the Chunk underlying any DTask arguments
+    arg = arg_pre_unwrap isa DTask ? fetch(arg_pre_unwrap; raw=true) : arg_pre_unwrap
+
+    # Skip non-aliasing arguments or arguments that don't support in-place move
+    may_alias = type_may_alias(typeof(arg))
+    inplace_move = may_alias && supports_inplace_move(state, arg)
+    dep_start = length(deps_vec) + 1
+    if !may_alias || !inplace_move
+        arg_w = ArgumentWrapper(arg, identity)
+        push!(deps_vec, DataDepsTaskDependency(arg_w, false, false))
+        push!(infos, TaskArgInfo(arg, pos, may_alias, inplace_move, dep_start, length(deps_vec)))
+        return
+    end
+
+    # Generate a Chunk for the argument if necessary
+    arg_chunk = get_or_make_arg_chunk!(state, arg, task)
+
+    # Track the origin space of the argument
+    origin_space = memory_space(arg_chunk)
+    @check_uniform(origin_space)
+    state.arg_origin[arg_chunk] = origin_space
+    state.remote_arg_to_original[arg_chunk] = arg_chunk
+
+    # Record and populate argument info for all aliasing dependencies
+    for dep in raw_deps
+        dep_full = DataDepsTaskDependency(arg_chunk, dep)
+        push!(deps_vec, dep_full)
+        populate_argument_info!(state, dep_full.arg_w, origin_space)
+    end
+    push!(infos, TaskArgInfo(arg_chunk, pos, may_alias, inplace_move, dep_start, length(deps_vec)))
+    return
 end
 function populate_argument_info!(state::DataDepsState, arg_w::ArgumentWrapper, origin_space::MemorySpace)
     # Initialize ownership and history
