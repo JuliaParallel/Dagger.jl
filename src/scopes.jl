@@ -23,8 +23,11 @@ Base.:(==)(ts1::TaintScope, ts2::TaintScope) =
 struct DefaultEnabledTaint <: AbstractScopeTaint end
 
 "Default scope that contains the set of `default_enabled` processors."
-DefaultScope() = TaintScope(AnyScope(),
-                            Set{AbstractScopeTaint}([DefaultEnabledTaint()]))
+# Singleton: `TaintScope` and its taint set are never mutated, so all callers
+# can share one instance instead of allocating a fresh Set per call.
+const DEFAULT_SCOPE_INSTANCE = TaintScope(AnyScope(),
+                                          Set{AbstractScopeTaint}([DefaultEnabledTaint()]))
+DefaultScope() = DEFAULT_SCOPE_INSTANCE
 
 "Union of two or more scopes."
 struct UnionScope <: AbstractScope
