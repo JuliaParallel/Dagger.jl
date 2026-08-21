@@ -1,22 +1,56 @@
-struct ReuseCleanup
-    done::Base.RefValue{Bool}
-    f::Function
+mutable struct ReuseCleanup
+    done::Bool
+    const f::Function
 end
-const REUSE_SCOPE_DEFERRED = ScopedValue{Union{Vector{ReuseCleanup},Nothing}}(nothing)
+
+# Per-task stack of cleanup frames. A task-local stack (rather than a
+# ScopedValue) avoids allocating a Scope + HAMT + fresh Vector per
+# `@reuse_scope` entry: frame vectors are pooled and reused. Cleanups are
+# always registered lexically within the scope's own body (never from a
+# spawned child task), so task-local storage is sufficient.
+mutable struct ReuseScopeStack
+    depth::Int
+    frames::Vector{Vector{ReuseCleanup}}
+end
+const REUSE_SCOPE_STACK = TaskLocalValue{ReuseScopeStack}(()->ReuseScopeStack(0, Vector{ReuseCleanup}[]))
+
+@inline function reuse_scope_push!(stack::ReuseScopeStack)
+    depth = stack.depth + 1
+    stack.depth = depth
+    if depth > length(stack.frames)
+        push!(stack.frames, ReuseCleanup[])
+    end
+    return @inbounds stack.frames[depth]
+end
+function reuse_scope_pop!(stack::ReuseScopeStack, frame::Vector{ReuseCleanup})
+    @assert stack.depth > 0 && stack.frames[stack.depth] === frame
+    stack.depth -= 1
+    try
+        for cleanup in frame
+            cleanup.done || cleanup()
+        end
+    finally
+        empty!(frame)
+    end
+    return
+end
+@inline function reuse_current_frame()
+    stack = REUSE_SCOPE_STACK[]
+    @assert stack.depth > 0 "@reuse_defer_cleanup used outside of a @reuse_scope function"
+    return @inbounds stack.frames[stack.depth]
+end
+
 macro reuse_scope(ex)
     @assert @capture(ex, function f_(args__) body_ end)
+    @gensym reuse_stack reuse_frame
     esc(quote
         function $f($(args...))
-            @with $REUSE_SCOPE_DEFERRED=>Vector{$ReuseCleanup}() begin
-                try
-                    $body
-                finally
-                    deferred = $REUSE_SCOPE_DEFERRED[]
-                    @assert deferred !== nothing
-                    for cleanup in deferred
-                        cleanup.done[] || cleanup()
-                    end
-                end
+            $reuse_stack = $REUSE_SCOPE_STACK[]
+            $reuse_frame = $reuse_scope_push!($reuse_stack)
+            try
+                $body
+            finally
+                $reuse_scope_pop!($reuse_stack, $reuse_frame)
             end
         end
     end)
@@ -24,14 +58,14 @@ end
 macro reuse_defer_cleanup(ex)
     @gensym cleanup
     quote
-        let $cleanup = $ReuseCleanup(Base.RefValue(false), ()->$(esc(ex)))
-            push!($REUSE_SCOPE_DEFERRED[], $cleanup)
+        let $cleanup = $ReuseCleanup(false, ()->$(esc(ex)))
+            push!($reuse_current_frame(), $cleanup)
             $cleanup
         end
     end
 end
 function (cleanup::ReuseCleanup)()
-    cleanup.done[] = true
+    cleanup.done = true
     cleanup.f()
 end
 
