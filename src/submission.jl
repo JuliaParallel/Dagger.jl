@@ -195,7 +195,7 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
             @dagdebug thunk :submit "Added to scheduler with $n_upstreams unresolved upstreams"
             if future !== nothing
                 # Ensure we attach a future before the thunk is scheduled
-                Sch._register_future!(ctx, state, task, tid, (future, thunk_id, false))
+                Sch._register_future!(ctx, state, task, tid, future, thunk_id, false)
                 @dagdebug thunk :submit "Registered future"
             end
             @atomic thunk.valid = true

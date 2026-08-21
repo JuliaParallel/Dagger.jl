@@ -150,33 +150,44 @@ future isn't being registered on a thunk dominated by the calling thunk.
 """
 register_future!(h::SchedulerHandle, id::ThunkID, future::ThunkFuture, check::Bool=true) =
         exec!(_register_future!, h, future, id, check)
-function _register_future!(ctx, state, task, tid, (future, id, check)::Tuple{ThunkFuture,ThunkID,Bool})
+# Hoisted out of `_register_future!` (where it was a local named function, and so
+# forced a `Core.Box` per call): it captures nothing and is only needed when
+# `check=true`.
+function thunk_dominates(target, t)
+    t == target && return true
+    seen = Set{Thunk}()
+    to_visit = Thunk[t]
+    while !isempty(to_visit)
+        t = pop!(to_visit)
+        if t == target
+            return true
+        end
+        for (_, input) in t.inputs
+            # N.B. Skips expired tasks
+            input = Dagger.unwrap_weak(input)
+            istask(input) || continue
+            input in seen && continue
+            push!(seen, input)
+            push!(to_visit, input)
+        end
+    end
+    return false
+end
+# N.B. Takes `future`/`id`/`check` as separate positional arguments rather than a
+# tuple, so that callers (which pass all three as compile-time-known values) need
+# not heap-allocate a boxed `Tuple` per registration.
+# The dynamic-message protocol (`exec!` -> `dynamic_listener!`) delivers all
+# arguments as a single tuple, so keep a forwarding method for that path; direct
+# (in-scheduler) callers use the positional form and allocate no tuple.
+_register_future!(ctx, state, task, tid, (future, id, check)::Tuple{ThunkFuture,ThunkID,Bool}) =
+    _register_future!(ctx, state, task, tid, future, id, check)
+function _register_future!(ctx, state, task, tid, future::ThunkFuture, id::ThunkID, check::Bool)
     tid != id.id || throw(DynamicThunkException("Cannot fetch own result"))
     GC.@preserve id begin
-        function dominates(target, t)
-            t == target && return true
-            seen = Set{Thunk}()
-            to_visit = Thunk[t]
-            while !isempty(to_visit)
-                t = pop!(to_visit)
-                if t == target
-                    return true
-                end
-                for (_, input) in t.inputs
-                    # N.B. Skips expired tasks
-                    input = Dagger.unwrap_weak(input)
-                    istask(input) || continue
-                    input in seen && continue
-                    push!(seen, input)
-                    push!(to_visit, input)
-                end
-            end
-            return false
-        end
         thunk = lock(state.thunk_dict) do d; unwrap_weak_checked(d[id.id]); end
         if check
             ownthunk = lock(state.thunk_dict) do d; unwrap_weak_checked(d[tid]); end
-            if dominates(ownthunk, thunk)
+            if thunk_dominates(ownthunk, thunk)
                 throw(DynamicThunkException("Cannot fetch result of dominated thunk"))
             end
         end
