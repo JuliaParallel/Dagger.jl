@@ -1399,6 +1399,10 @@ function proc_states_values(uid::UInt64=Dagger.get_tls().sch_uid)
         return collect(values(states.dict))
     end
 end
+# Random visit order for stealing/kicking; skips the permutation (and its
+# allocations) when there are 0-1 states, the common single-processor case.
+shuffled_states(states::Vector) =
+    length(states) <= 1 ? states : states[randperm(length(states))]
 function proc_state!(f, uid::UInt64, proc::Processor)
     states = proc_states(uid)
     state = MemPool.lock_read(states.lock) do
@@ -1504,9 +1508,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
 
                 # Try to steal from local queues randomly
                 # TODO: Prioritize stealing from busiest processors
-                states = proc_states_values(uid)
-                P = randperm(length(states))
-                for state in getindex.(Ref(states), P)
+                for state in shuffled_states(proc_states_values(uid))
                     other_istate = state.state
                     if other_istate.proc === to_proc
                         continue
@@ -1794,8 +1796,7 @@ function do_tasks(to_proc, return_queue, tasks)
     # Kick other processors to make them steal
     # TODO: Alternatively, automatically balance work instead of blindly enqueueing
     states = proc_states_values(uid)
-    P = randperm(length(states))
-    for other_state in getindex.(Ref(states), P)
+    for other_state in shuffled_states(states)
         other_istate = other_state.state
         if other_istate.proc === to_proc
             continue
