@@ -3,7 +3,9 @@
 mutable struct CancelToken
     @atomic cancelled::Bool
     @atomic graceful::Bool
-    event::Base.Event
+    # Lazily created on first `wait` — most tokens are never waited on, and a
+    # `Base.Event` costs ~5 allocations (Event + condition + lock chain)
+    @atomic event::Union{Base.Event,Nothing}
 end
 # N.B. `graceful` starts `true`: an as-yet-uncancelled token is considered
 # graceful, and `cancel!(; graceful=true)` (the default, e.g. the cleanup
@@ -12,13 +14,17 @@ end
 # If this started `false`, every cancellation (including normal task-completion
 # cleanup) would be seen as forced by `is_cancelled(; must_force=true)`,
 # interrupting streaming drain threads mid-flight and dropping buffered values.
-CancelToken() = CancelToken(false, true, Base.Event())
+CancelToken() = CancelToken(false, true, nothing)
 function cancel!(token::CancelToken; graceful::Bool=true)
     if !graceful
         @atomic token.graceful = false
     end
     @atomic token.cancelled = true
-    notify(token.event)
+    # `cancelled` is set before the event is read; a concurrent waiter either
+    # sees `cancelled` after installing its event, or its installed event is
+    # visible here and gets notified
+    event = @atomic token.event
+    event !== nothing && notify(event)
     return
 end
 function is_cancelled(token::CancelToken; must_force::Bool=false)
@@ -31,7 +37,19 @@ function is_cancelled(token::CancelToken; must_force::Bool=false)
     end
     return false
 end
-Base.wait(token::CancelToken) = wait(token.event)
+function Base.wait(token::CancelToken)
+    event = @atomic token.event
+    if event === nothing
+        new_event = Base.Event()
+        _, installed = @atomicreplace token.event nothing => new_event
+        event = installed ? new_event : (@atomic token.event)::Base.Event
+    end
+    # Re-check after installing: a cancel! that raced ahead of the install
+    # has already set `cancelled` and may have missed our event
+    is_cancelled(token) && return
+    wait(event)
+    return
+end
 # TODO: Enable this for safety
 #Serialization.serialize(io::AbstractSerializer, ::CancelToken) =
 #    throw(ConcurrencyViolationError("Cannot serialize a CancelToken"))
