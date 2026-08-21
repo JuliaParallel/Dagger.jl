@@ -28,15 +28,18 @@ end
 # `move` is actually performed: constructing an `OSProc` takes a lock and toggles
 # finalizers (see `OSProc(pid)`), which is pure overhead for the common
 # `move_value=false` fetches. `unwrap` is accepted (callers pass it) but unused.
-function Base.fetch(t::ThunkFuture; proc=nothing, raw=false, move_value=!raw, unwrap=!raw, uniform=uniform_execution())
+# N.B. `uniform` is accepted (callers pass it) but unused; its default must not
+# be `uniform_execution()`, which costs a task-local lookup + dynamic dispatch
+# per fetch.
+function Base.fetch(t::ThunkFuture; proc=nothing, raw=false, move_value=!raw, unwrap=!raw, uniform=false)
     # N.B. `thunk_yield(f)` is exactly `f()` outside of a Dagger task, so skip it
     # (and the closure it would heap-allocate) when not running in one.
     error, value = if Dagger.in_task()
         Dagger.Sch.thunk_yield() do
             fetch(t.future)
-        end
+        end::Tuple{Bool,Any}
     else
-        fetch(t.future)
+        fetch(t.future)::Tuple{Bool,Any}
     end
     if error
         throw(value)
