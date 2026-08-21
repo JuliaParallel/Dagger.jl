@@ -398,7 +398,11 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     if spec.options.syncdeps === nothing
         spec.options.syncdeps = Set{ThunkSyncdep}()
     end
-    if spec.options.tag === nothing && uniform_execution()
+    # N.B. Queried once per task and reused below: each call is a task-local
+    # acceleration lookup plus a dynamic dispatch, and it cannot change while
+    # planning a single task.
+    uniform = uniform_execution()
+    if spec.options.tag === nothing && uniform
        spec.options.tag = to_tag()
     end
     syncdeps = spec.options.syncdeps
@@ -435,7 +439,7 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     new_spec = DTaskSpec(new_fargs, spec.options)
     new_spec.options.scope = our_scope
     new_spec.options.exec_scope = our_scope
-    if uniform_execution()
+    if uniform
         new_spec.options.occupancy = Dict(Any=>0)
     end
     ctx = Sch.eager_context()
