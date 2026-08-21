@@ -2041,20 +2041,20 @@ Executes a single task specified by `task` on `to_proc`.
     logging_enabled = !(ctx.log_sink isa TimespanLogging.NoOpLog)
 
     result_meta = try
-        # Set TLS variables
-        Dagger.set_tls!((;
-            sch_uid=task.sch_uid,
-            sch_handle=task.sch_handle,
-            processor=to_proc,
-            task_spec=task,
-            cancel_token=Dagger.DTASK_CANCEL_TOKEN[],
-            logging_enabled,
-            acceleration=Dagger.current_acceleration(),
-        ))
+        # Set TLS variables (positional form: no NamedTuple per task)
+        Dagger.set_tls!(to_proc, task.sch_uid, task.sch_handle, task,
+                        Dagger.DTASK_CANCEL_TOKEN[], logging_enabled,
+                        Dagger.current_acceleration())
 
         result = Dagger.with_options(propagated) do
             # Execute
-            execute!(to_proc, f, fetched_args...; fetched_kwargs...)
+            # N.B. Splatting an empty kwargs Vector still materializes a
+            # NamedTuple via merge; skip it in the common no-kwargs case
+            if isempty(fetched_kwargs)
+                execute!(to_proc, f, fetched_args...)
+            else
+                execute!(to_proc, f, fetched_args...; fetched_kwargs...)
+            end
         end
 
         # Check if result is safe to store
