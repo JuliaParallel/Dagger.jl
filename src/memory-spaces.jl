@@ -758,8 +758,20 @@ end
 # FIXME: Tridiagonal
 
 function will_alias(x, y)
-    x isa NoAliasing || y isa NoAliasing && return false
-    x isa UnknownAliasing || y isa UnknownAliasing && return true
+    # N.B. The parentheses are load-bearing: `&&` binds tighter than `||`, so
+    # `x isa NoAliasing || y isa NoAliasing && return false` parses as
+    # `x isa NoAliasing || (y isa NoAliasing && return false)` and falls
+    # through without returning whenever `x` is the special ainfo. Today that
+    # still yields the right answer for `NoAliasing` (its `memory_spans` is
+    # empty, so the span loop below is vacuous) and `UnknownAliasing` is
+    # unreachable (every site that would return it throws
+    # `error_unknown_aliasing` first) -- but the `UnknownAliasing` fallthrough
+    # would answer `false` for operands in different memory spaces, since
+    # `may_alias` rejects those, and "cannot determine aliasing" must be
+    # conservative (`true`), never an under-approximation that drops a
+    # dependency.
+    (x isa NoAliasing || y isa NoAliasing) && return false
+    (x isa UnknownAliasing || y isa UnknownAliasing) && return true
     # FIXME: Support mixed-space span sets (for nested data structures)
     x_spans = memory_spans(x)::Vector{<:MemorySpan}
     y_spans = memory_spans(y)::Vector{<:MemorySpan}
