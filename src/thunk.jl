@@ -687,13 +687,17 @@ function _spawn(args_kwargs, task_options)
 
     # Get task queue, and don't let it propagate
     task_queue = get(scoped_options, :task_queue, DefaultTaskQueue())::AbstractTaskQueue
-    filter!(prop -> prop != :task_queue, propagates)
-    if task_options.propagates !== nothing
-        append!(task_options.propagates, propagates)
-    else
-        task_options.propagates = propagates
+    if propagates !== nothing
+        filter!(prop -> prop != :task_queue, propagates)
+        if task_options.propagates !== nothing
+            append!(task_options.propagates, propagates)
+        else
+            task_options.propagates = propagates
+        end
     end
-    unique!(task_options.propagates)
+    if task_options.propagates !== nothing
+        unique!(task_options.propagates)
+    end
 
     # Construct task spec and handle
     spec = DTaskSpec(args_kwargs, task_options)
