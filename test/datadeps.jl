@@ -231,7 +231,7 @@ end
 end
 
 function with_logs(f)
-    Dagger.enable_logging!(;taskdeps=true, taskargs=true, timeline=true)
+    Dagger.enable_logging!(;taskdeps=true, taskargs=true, timeline=true, taskfuncnames=true)
     try
         f()
         return Dagger.fetch_logs!()
@@ -1039,6 +1039,107 @@ end
                 Dagger.@spawn sum(In(A))
             end
             fetch(result) ≈ sum(A)
+        end
+    end
+end
+
+# Regression tests for the free-syncdeps hole: `gather_free_syncdeps!`
+# (src/datadeps/aliasing.jl) must never hand back an empty syncdep set while
+# some task could still be reading or writing the buffer about to be freed.
+# Previously, the region barrier at the end of `spawn_datadeps` hid this --
+# every task had already retired by the time the free loop ran -- but that
+# cover disappears once frees can be deferred, so it needs to be correct on
+# its own merits.
+
+# A leaf type whose own `aliasing` we pretend is unavailable to inspect
+# locally, mimicking the MPI situation this branch exists for (an `MPIRef`
+# owned by a different rank -- see `ext/MPIExt.jl`'s override of the same
+# name). This lets us exercise `gather_free_syncdeps!`'s
+# `!aliasing_obtainable` fallback without needing an actual MPI session.
+struct FreeSyncdepsUnavailableLeaf
+    data::Vector{Float64}
+end
+Dagger.aliasing_available(::Dagger.Chunk{FreeSyncdepsUnavailableLeaf}) = false
+
+@testset "gather_free_syncdeps!" begin
+    @testset "aliasing-unavailable fallback finds overlapping writers" begin
+        # Before the fix, this fallback only synced when the buffer's
+        # rank-uniform cache key ainfo happened to *already* be a registered
+        # key of `state.ainfos_overlaps` -- which only holds ainfos that were
+        # directly tracked as a task dependency. A buffer standing in for
+        # memory that's only tracked *through* an overlapping (but distinct)
+        # ainfo -- exactly the situation set up below -- hit `haskey(...) ==
+        # false` and silently produced zero syncdeps, so `unsafe_free!` could
+        # race the still-running writer.
+        state = Dagger.DataDepsState()
+
+        # A directly-tracked ainfo (as if some task took `In`/`Out` of a view
+        # over part of `A`) with a live writer recorded against it.
+        A = zeros(8)
+        view_ainfo = Dagger.AliasingWrapper(Dagger.aliasing(view(A, 1:4)))
+        push!(state.ainfos_lookup, view_ainfo)
+        state.ainfos_readers[view_ainfo] = Pair{Dagger.DTask,Int}[]
+        writer_task = Dagger.@spawn 1 + 1
+        fetch(writer_task)
+        state.ainfos_owner[view_ainfo] = writer_task => 1
+
+        # The buffer being freed represents *all* of `A` (as the shared parent
+        # backing a view would), so it overlaps `view_ainfo` but is not
+        # content-identical to it -- `state.ainfos_overlaps` has no entry for
+        # it, matching the case that was silently mishandled.
+        key_ainfo = Dagger.AliasingWrapper(Dagger.aliasing(A))
+        @test !haskey(state.ainfos_overlaps, key_ainfo)
+
+        remote_arg = Dagger.tochunk(FreeSyncdepsUnavailableLeaf(A))
+        @test !Dagger.aliasing_obtainable(remote_arg)
+        space = Dagger.memory_space(remote_arg)
+        chunk_to_ainfos = IdDict{Any,Vector{Dagger.AliasingWrapper}}()
+        syncdeps = Set{Dagger.ThunkSyncdep}()
+        Dagger.gather_free_syncdeps!(state, space, key_ainfo, remote_arg, 2,
+                                     chunk_to_ainfos, syncdeps)
+
+        @test !isempty(syncdeps)
+        @test Dagger.ThunkSyncdep(writer_task) in syncdeps
+    end
+
+    @testset "buffer underlying shared views" begin
+        # End-to-end version of the same hole: two views into disjoint slices
+        # of one parent array, each written by a task on the same remote
+        # worker. The parent array is moved there exactly once (`move_rewrap`
+        # dedups children of both views onto the same object-cache entry), and
+        # that shared parent buffer is never itself a direct task argument --
+        # it only "underlies" the two view arguments -- so its free syncdeps
+        # must be computed via the aliasing-overlap search, not a direct
+        # `chunk_to_ainfos` hit. Confirm every `unsafe_free!` task the region
+        # emits has a non-empty syncdep set.
+        if nprocs() >= 2
+            w = workers()[1]
+            A = rand(4, 4)
+            v1 = view(A, 1:2, :)
+            v2 = view(A, 3:4, :)
+            logs = with_logs() do
+                Dagger.spawn_datadeps() do
+                    Dagger.@spawn scope=Dagger.scope(worker=w) mut_V!(Out(v1))
+                    Dagger.@spawn scope=Dagger.scope(worker=w) mut_V!(Out(v2))
+                end
+            end
+            @test all(==(1), A)
+
+            free_tids = Int[]
+            for wl in keys(logs)
+                _logs = logs[wl]
+                for idx in 1:length(_logs[:core])
+                    core_log = _logs[:core][idx]
+                    if core_log.category == :add_thunk && core_log.kind == :start &&
+                       _logs[:taskfuncnames][idx] == "unsafe_free!"
+                        push!(free_tids, _logs[:id][idx].thunk_id::Int)
+                    end
+                end
+            end
+            @test !isempty(free_tids)
+            for tid in free_tids
+                @test !isempty(taskdeps_for_task(logs, tid))
+            end
         end
     end
 end

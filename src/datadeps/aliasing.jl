@@ -1016,6 +1016,78 @@ aliasing_available(@nospecialize(x)) = true
 aliasing_obtainable(@nospecialize(x)) = uniform_execution() || aliasing_available(x)
 
 """
+    gather_overlap_syncdeps!(state, ainfo, write_num, syncdeps)
+
+Register `ainfo` into `state.ainfos_lookup` and add to `syncdeps` the owner and
+readers of every *other* tracked ainfo overlapping it. Used by
+`gather_free_syncdeps!` for buffers that are not themselves a directly-tracked
+task dependency, so their overlaps are not already precomputed in
+`state.ainfos_overlaps`.
+
+We reuse the lookup's interval-tree overlap search (which prunes most
+`will_alias` comparisons via bounding spans) rather than scanning every tracked
+ainfo. `intersect` requires its query ainfo to be registered, so we `push!` it
+in first; this is safe because the free loop is the final step of
+`distribute_tasks!`, after which the lookup is no longer consulted for
+scheduling.
+
+Safe to call with an `ainfo` that has a content-equal (same `.hash`) entry
+already registered elsewhere in the lookup: `AliasingWrapper` equality (and
+`Dict` lookups keyed by it) are by content hash, not object identity, so a
+redundant push here costs only a duplicate interval-tree entry, never a missed
+or double-counted syncdep -- `syncdeps` is a `Set`, and the `other_ainfo ===
+ainfo` self-skip below excludes only the literal instance just pushed (which,
+being brand new, was never itself recorded as anyone's owner or reader).
+"""
+function gather_overlap_syncdeps!(state::DataDepsState, ainfo::AliasingWrapper, write_num::Int, syncdeps)
+    ainfo.inner isa NoAliasing && return
+    ainfo_idx = push!(state.ainfos_lookup, ainfo)
+    for other_ainfo in intersect(state.ainfos_lookup, ainfo; ainfo_idx)
+        other_ainfo === ainfo && continue
+        owner = get(state.ainfos_owner, other_ainfo, nothing)
+        if owner !== nothing
+            owner_task, owner_write_num = owner
+            owner_write_num != write_num && push!(syncdeps, ThunkSyncdep(owner_task))
+        end
+        for (reader_task, reader_write_num) in get(state.ainfos_readers, other_ainfo, ())
+            reader_write_num != write_num && push!(syncdeps, ThunkSyncdep(reader_task))
+        end
+    end
+end
+
+# Debug-only invariant: freeing a buffer must never produce an empty syncdep
+# set while the state still records a writer or readers overlapping it. Gated
+# behind this `Ref` (following the same pattern as `CHECK_UNIFORMITY`,
+# acceleration.jl:75) so it costs nothing -- not even a function call, since
+# `assert_free_syncdeps!` itself is only ever invoked from within
+# `gather_free_syncdeps!`, which is already off the hot path -- in normal
+# operation. Flip it on in tests that want this checked.
+#
+# Deliberately re-derives the answer independently of `gather_free_syncdeps!`
+# / `gather_overlap_syncdeps!` (a linear scan over every tracked ainfo plus
+# `will_alias`, instead of the interval-tree search they use) so that a bug in
+# the fast path can't also hide from the assertion meant to catch it.
+const DATADEPS_ASSERT_FREE_SYNCDEPS = Ref(false)
+function assert_free_syncdeps!(state::DataDepsState, ainfo::AliasingWrapper, write_num::Int, syncdeps)
+    DATADEPS_ASSERT_FREE_SYNCDEPS[] || return
+    ainfo.inner isa NoAliasing && return
+    for (other_ainfo, owner) in state.ainfos_owner
+        owner === nothing && continue
+        owner_task, owner_write_num = owner
+        owner_write_num == write_num && continue
+        will_alias(ainfo, other_ainfo) || continue
+        @assert ThunkSyncdep(owner_task) in syncdeps "gather_free_syncdeps! omitted a live writer $owner_task ($other_ainfo) for buffer overlapping $ainfo"
+    end
+    for (other_ainfo, readers) in state.ainfos_readers
+        for (reader_task, reader_write_num) in readers
+            reader_write_num == write_num && continue
+            will_alias(ainfo, other_ainfo) || continue
+            @assert ThunkSyncdep(reader_task) in syncdeps "gather_free_syncdeps! omitted a live reader $reader_task ($other_ainfo) for buffer overlapping $ainfo"
+        end
+    end
+end
+
+"""
     gather_free_syncdeps!(state, space, key_ainfo, remote_arg, write_num, chunk_to_ainfos, syncdeps)
 
 Collect into `syncdeps` every task that must complete before the backing buffer
@@ -1028,49 +1100,51 @@ the parent array shared by several `view`s, whose tracked slots are the views
 rather than this buffer); in that case we compute the buffer's own aliasing and
 sync with every tracked ainfo that overlaps its memory. When the buffer's
 aliasing cannot be obtained here (`aliasing_obtainable` is `false`), we fall back
-to the rank-uniform cache key ainfo `key_ainfo`.
+to the rank-uniform cache key ainfo `key_ainfo`, run through the same overlap
+search (`gather_overlap_syncdeps!`) as the wrapper-argument case.
 """
 function gather_free_syncdeps!(state::DataDepsState, space::MemorySpace, key_ainfo, remote_arg, write_num::Int, chunk_to_ainfos, syncdeps)
     ainfos = get(chunk_to_ainfos, remote_arg, nothing)
     if ainfos !== nothing
         for ainfo in ainfos
             get_write_deps!(state, space, ainfo, write_num, syncdeps)
+            assert_free_syncdeps!(state, ainfo, write_num, syncdeps)
         end
         return
     end
 
     # If the buffer's aliasing cannot be obtained here, fall back to the cache
-    # key ainfo, which is metadata available identically on every rank. The
-    # cache stores raw ainfos, so wrap it to match the `AliasingWrapper` keys
-    # used by the overlap tracking.
+    # key ainfo, which is metadata available identically on every rank (it was
+    # already computed, as a concrete value, when the buffer was first inserted
+    # into the object cache -- no remote inspection is needed to use it here).
+    # The cache stores raw ainfos, so wrap it to match the `AliasingWrapper`
+    # keys used by the overlap tracking.
+    #
+    # N.B. `key_ainfo` is frequently *not* itself a key of `ainfos_overlaps`:
+    # that dict is only populated by `populate_ainfo!`, for ainfos that were
+    # directly tracked as a task dependency via `aliasing!`. The buffers this
+    # branch exists for -- their own aliasing unavailable locally, which today
+    # only happens for an MPI `Chunk{<:Any,<:MPIRef}` owned by a different rank
+    # (see `aliasing_available` overload in `ext/MPIExt.jl`) -- are exactly the
+    # ones that are *not* directly tracked; they only underlie wrapper
+    # arguments (the same situation as the fallthrough case below). A previous
+    # version of this fallback only synced when `key_ainfo` happened to already
+    # be a registered ainfo (`haskey(state.ainfos_overlaps, ...)`), which was
+    # close to never true, silently producing zero syncdeps and freeing a
+    # buffer still in use. Route through the same interval-tree overlap search
+    # used below instead.
     if !aliasing_obtainable(remote_arg)
         wrapped = key_ainfo isa AliasingWrapper ? key_ainfo : AliasingWrapper(key_ainfo)
-        haskey(state.ainfos_overlaps, wrapped) &&
-            get_write_deps!(state, space, wrapped, write_num, syncdeps)
+        gather_overlap_syncdeps!(state, wrapped, write_num, syncdeps)
+        assert_free_syncdeps!(state, wrapped, write_num, syncdeps)
         return
     end
 
     # Buffer underlies wrapper arguments: find all tracked ainfos overlapping
-    # it. We reuse the lookup's interval-tree overlap search (which prunes most
-    # `will_alias` comparisons via bounding spans) rather than scanning every
-    # tracked ainfo. `intersect` requires its query ainfo to be registered, so
-    # we `push!` the buffer's aliasing in first; this is safe because the free
-    # loop is the final step of `distribute_tasks!`, after which the lookup is
-    # no longer consulted for scheduling.
+    # it and sync with their owners/readers.
     buf_ainfo = AliasingWrapper(aliasing(remote_arg))
-    buf_ainfo.inner isa NoAliasing && return
-    ainfo_idx = push!(state.ainfos_lookup, buf_ainfo)
-    for other_ainfo in intersect(state.ainfos_lookup, buf_ainfo; ainfo_idx)
-        other_ainfo === buf_ainfo && continue
-        owner = get(state.ainfos_owner, other_ainfo, nothing)
-        if owner !== nothing
-            owner_task, owner_write_num = owner
-            owner_write_num != write_num && push!(syncdeps, ThunkSyncdep(owner_task))
-        end
-        for (reader_task, reader_write_num) in get(state.ainfos_readers, other_ainfo, ())
-            reader_write_num != write_num && push!(syncdeps, ThunkSyncdep(reader_task))
-        end
-    end
+    gather_overlap_syncdeps!(state, buf_ainfo, write_num, syncdeps)
+    assert_free_syncdeps!(state, buf_ainfo, write_num, syncdeps)
     return
 end
 function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::MemorySpace, ainfo::AbstractAliasing, task, write_num; copy_src::Union{MemorySpace,Nothing}=nothing)
