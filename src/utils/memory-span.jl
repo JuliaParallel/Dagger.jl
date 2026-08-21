@@ -100,6 +100,20 @@ function span_diff(span1::ManyMemorySpan{N}, span2::ManyMemorySpan{N}) where N
     return span
 end
 const VERIFY_SPAN_CURRENT_OBJECT = TaskLocalValue{Any}(()->nothing)
+
+"""
+    VERIFY_SPANS
+
+Enables the *extra* span-verification sweeps in remainder computation (see
+`datadeps/remainders.jl`), plus the `VERIFY_SPAN_CURRENT_OBJECT` bookkeeping
+that only serves those sweeps' (and `span_diff`'s) assertion messages.
+
+`verify_span` is a pure assertion with no side effects, and the sweeps it is
+called from re-check spans that `IntervalTree`'s constructor and `span_diff`
+already verify, so they are off by default; flip this to `true` to restore them
+(and the `While processing ...` detail in assertion messages).
+"""
+const VERIFY_SPANS = Ref{Bool}(false)
 function verify_span(span::ManyMemorySpan{N}) where N
     @assert allequal(Iterators.map(span_len, span.spans)) "All spans must be the same: $(Iterators.map(span_len, span.spans))\nWhile processing $(typeof(VERIFY_SPAN_CURRENT_OBJECT[]))"
 end
