@@ -57,8 +57,7 @@ function Base.:(==)(us1::UnionScope, us2::UnionScope)
     if length(us1.scopes) != length(us2.scopes)
         return false
     end
-    scopes = Set{AbstractScope}()
-    for scope in us2.scopes
+    for scope in us1.scopes
         if !(scope in us2.scopes)
             return false
         end
