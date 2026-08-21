@@ -687,9 +687,11 @@ const EMPTY_TRANSFER_RATES = Dict{Processor,UInt64}()
 
     # Estimate total cost for executing this task on each candidate processor.
     # The transfer-rate table is taken once rather than once per processor.
-    all_equal = true
-    lock(state.worker_transfer_rate) do wtr
+    # N.B. `all_equal` is returned from the locked block rather than assigned
+    # to a captured outer local, which would Core.Box it.
+    all_equal = lock(state.worker_transfer_rate) do wtr
         local first_cost = 0.0
+        local all_equal = true
         for (idx, proc) in enumerate(procs)
             gproc = get_parent(proc)
             pid = Dagger.root_worker_id(gproc)
@@ -707,17 +709,23 @@ const EMPTY_TRANSFER_RATES = Dict{Processor,UInt64}()
                 all_equal = false
             end
         end
+        return all_equal
     end
     tx_costs_cleanup()
 
     # Shuffle procs around, so equally-costly procs are equally considered
     np = length(procs)
-    @reusable :estimate_task_costs_P Vector{Int} 0 4 np P begin
-        resize!(P, np)
-        copyto!(P, 1:np)
-        randperm!(P)
-        for idx in 1:np
-            sorted_procs[idx] = procs[P[idx]]
+    if np == 1
+        # Nothing to shuffle
+        sorted_procs[1] = procs[1]
+    else
+        @reusable :estimate_task_costs_P Vector{Int} 0 4 np P begin
+            resize!(P, np)
+            copyto!(P, 1:np)
+            randperm!(P)
+            for idx in 1:np
+                sorted_procs[idx] = procs[P[idx]]
+            end
         end
     end
 
