@@ -105,7 +105,10 @@ function compatible_processors_cached(accel, scope, procs::Vector{<:Processor})
     return compat
 end
 
-struct ComputeState
+# N.B. `mutable` (with no field ever assigned) so the 23-field struct has a
+# stable heap identity and is passed by pointer; as an immutable struct it was
+# stored inline in closures and re-boxed (~200B) on every dynamic call.
+mutable struct ComputeState
     uid::UInt64
     initial_ready::Vector{Thunk}
     ctx::Context
