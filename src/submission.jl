@@ -400,7 +400,12 @@ function eager_process_args_submission_to_local!(spec::DTaskSpec{false})
     end
 end
 function eager_process_args_submission_to_local(spec::DTaskSpec{true})
-    return ntuple(i->eager_process_elem_submission_to_local(spec.fargs[i]), length(spec.fargs))
+    # N.B. `map_or_ntuple` uses `ntuple(f, Val(length(xs)))` for tuples: with a
+    # plain `Int` length, `ntuple` over a heterogeneous tuple is type-unstable
+    # and boxes every element, while `Val` (which const-folds for a concrete
+    # tuple type) unrolls and keeps each element's type.
+    fargs = spec.fargs
+    return map_or_ntuple(i->eager_process_elem_submission_to_local(fargs[i]), fargs)
 end
 
 # Memoizes `Base.promote_op` return-type inference for eager task metadata.
@@ -439,9 +444,17 @@ end
 function eager_metadata(fargs)
     f = value(fargs[1])
     f = f isa StreamingFunction ? f.f : f
-    arg_types = ntuple(i->chunktype(value(fargs[i+1])), length(fargs)-1)
+    arg_types = arg_chunktypes(fargs)
     return cached_return_type(f, arg_types)
 end
+# N.B. As in `eager_process_args_submission_to_local`, a `Val` length is used for
+# tuple `fargs` (typed specs) so that `ntuple` unrolls over the heterogeneous
+# tuple instead of boxing each element; `Vector` `fargs` (untyped specs) are
+# dynamically-sized and keep the plain `Int` length.
+@inline arg_chunktypes(fargs::Tuple) =
+    ntuple(i->chunktype(value(fargs[i+1])), Val(length(fargs)-1))
+arg_chunktypes(fargs::Vector) =
+    ntuple(i->chunktype(value(fargs[i+1])), length(fargs)-1)
 
 function eager_spawn(spec::DTaskSpec)
     # Generate new unlaunched DTask
