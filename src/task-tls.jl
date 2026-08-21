@@ -34,13 +34,27 @@ get_tls() = DTASK_TLS[]::DTaskTLS
 Sets all Dagger TLS variables from `tls`, which may be a `DTaskTLS` or a `NamedTuple`.
 """
 function set_tls!(tls)
-    DTASK_TLS[] = DTaskTLS(tls.processor,
-                           tls.sch_uid,
-                           tls.sch_handle,
-                           tls.task_spec,
-                           tls.cancel_token,
-                           tls.logging_enabled,
-                           tls.acceleration)
+    # Reuse the existing DTaskTLS in place: pooled scheduler tasks call this
+    # once per executed thunk, and nothing retains the old TLS across thunks
+    # (`get_tls()` callers copy it if they need to keep it).
+    dtls = DTASK_TLS[]
+    if dtls isa DTaskTLS
+        dtls.processor = tls.processor
+        dtls.sch_uid = tls.sch_uid
+        dtls.sch_handle = tls.sch_handle
+        dtls.task_spec = tls.task_spec
+        dtls.cancel_token = tls.cancel_token
+        dtls.logging_enabled = tls.logging_enabled
+        dtls.acceleration = tls.acceleration
+    else
+        DTASK_TLS[] = DTaskTLS(tls.processor,
+                               tls.sch_uid,
+                               tls.sch_handle,
+                               tls.task_spec,
+                               tls.cancel_token,
+                               tls.logging_enabled,
+                               tls.acceleration)
+    end
     set_task_acceleration!(tls.acceleration)
 end
 
