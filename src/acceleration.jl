@@ -59,8 +59,16 @@ accel_kind(::DistributedAcceleration) = :distributed
 function compatible_processors(accel::Union{Acceleration,Nothing}, scope::AbstractScope, procs::Vector{<:Processor})
     comp = compatible_processors(scope, procs)
     accel === nothing && return comp
-    return Set(p for p in comp if accel_matches_proc(accel, p))
+    # N.B. Explicitly Set{Processor}: `Set(gen)` infers a concrete element
+    # type (e.g. Set{MPIProcessor{ThreadProc}} under MPI), which fails the
+    # Set{Processor} typeassert in Sch's compatible-processor cache — and this
+    # function's contract is `-> Set{Processor}`.
+    return Set{Processor}(p for p in comp if accel_matches_proc(accel, p))
 end
+# accel_matches_proc is identically true for DistributedAcceleration; skip the
+# second Set construction
+compatible_processors(accel::DistributedAcceleration, scope::AbstractScope, procs::Vector{<:Processor}) =
+    compatible_processors(scope, procs)
 compatible_processors(accel::Union{Acceleration,Nothing}, scope::AbstractScope=get_compute_scope(), ctx::Context=Sch.eager_context()) =
     compatible_processors(accel, scope, procs(ctx))
 

@@ -81,6 +81,30 @@ Per-thunk dependency tracking uses `thunk.pending_deps` (dataflow counter) and
 `initial_ready` replaces `ready`; `schedule_one!` is called inline from the
 completion handler (via `schedule_dependents!`) so there is no central ready queue.
 """
+# Cache of compatible-processor sets keyed by (accel, scope, procs).
+# `compatible_processors` rebuilds ProcessScopes/ExactScopes and a Set per
+# call, but its inputs are steady across tasks (datadeps exec scopes are
+# LFU-cached per processor), so a bounded LFU makes it a lookup. The cached
+# Sets are shared and must not be mutated by callers.
+const COMPAT_PROCS_CACHE = LockedObject(Dagger.BasicLFUCache{Tuple{Any,Dagger.AbstractScope,Vector{Processor}},Set{Processor}}(256))
+function compatible_processors_cached(accel, scope, procs::Vector{<:Processor})
+    key = (accel, scope, procs)
+    cached = @safe_lock_spin1 COMPAT_PROCS_CACHE cache begin
+        if haskey(cache.cache, key)
+            cache.freq[key] += 1
+            cache.cache[key]
+        else
+            nothing
+        end
+    end
+    cached !== nothing && return cached::Set{Processor}
+    compat = Dagger.compatible_processors(accel, scope, procs)
+    @safe_lock_spin1 COMPAT_PROCS_CACHE cache begin
+        get!(()->compat, cache, key)
+    end
+    return compat
+end
+
 struct ComputeState
     uid::UInt64
     initial_ready::Vector{Thunk}
@@ -901,7 +925,7 @@ concurrently across threads.
 
     input_procs = @reusable_vector :schedule_one!_input_procs Processor OSProc() 32
     input_procs_cleanup = @reuse_defer_cleanup empty!(input_procs)
-    compat = Dagger.compatible_processors(accel, scope, procs_filt)
+    compat = compatible_processors_cached(accel, scope, procs_filt)
     for proc in compat
         if !(proc in input_procs)
             push!(input_procs, proc)
