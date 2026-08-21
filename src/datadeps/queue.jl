@@ -140,11 +140,10 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     end
     if uniform_execution(accel)
         for proc in all_procs
-            check_uniform(proc)
+            @check_uniform(proc)
         end
     end
     all_scope = UnionScope(map(ExactScope, all_procs))
-    exec_spaces = unique(vcat(map(proc->collect(memory_spaces(proc)), all_procs)...))
 
     # Round-robin assign tasks to processors
     upper_queue = get_options(:task_queue)
