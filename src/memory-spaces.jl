@@ -146,9 +146,20 @@ memory_spans(x, T) = memory_spans(aliasing(x, T))
 mutable struct AliasingWrapper <: AbstractAliasing
     inner::AbstractAliasing
     hash::UInt64
-    AliasingWrapper(inner::AbstractAliasing) = new(inner, hash(inner))
+    # Lazily memoized memory_spans(inner): most implementations build a fresh
+    # Vector per call, and the wrapper's spans are queried repeatedly on the
+    # datadeps remainder path. `inner` is never rebound, so the cache is valid
+    # for the wrapper's lifetime. Callers must not mutate the returned Vector.
+    spans::Union{Vector,Nothing}
+    AliasingWrapper(inner::AbstractAliasing) = new(inner, hash(inner), nothing)
 end
-memory_spans(x::AliasingWrapper) = memory_spans(x.inner)
+function memory_spans(x::AliasingWrapper)
+    spans = x.spans
+    spans === nothing || return spans
+    spans = memory_spans(x.inner)
+    x.spans = spans
+    return spans
+end
 equivalent_structure(x::AliasingWrapper, y::AliasingWrapper) =
     x.hash == y.hash || equivalent_structure(x.inner, y.inner)
 Base.hash(x::AliasingWrapper, h::UInt64) = hash(x.hash, h)
