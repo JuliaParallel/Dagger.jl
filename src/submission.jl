@@ -485,16 +485,27 @@ function eager_launch!(pair::DTaskPair)
         spec.fargs
     end
 
-    # Propagate DTask return_type into options so the created Thunk has chunktype for downstream inference
+    # N.B. `spec.options.return_type` was already set to
+    # `task.metadata.return_type` by `eager_spawn` (under the very same
+    # `isconcretetype` guard, and `task.metadata` is the same object), so the
+    # copy+assignment that used to live here was a no-op that allocated a fresh
+    # `Options` per task. `spec.options` is likewise what the non-concrete branch
+    # passed through unmodified, so submitting it directly is unchanged behavior.
     options = spec.options
-    if isconcretetype(task.metadata.return_type)
-        options = copy(options)
-        options.return_type = task.metadata.return_type
-    end
+
     # Submit the task
-    #=FIXME:REALLOC=#
-    thunk_id = eager_submit!(PayloadOne(task.uid, task.future,
-                                        fargs, options, true))
+    # N.B. `PayloadOne` is only read by `eager_submit_internal!`, which runs to
+    # completion before `eager_submit!` returns (whether inline, via `exec!`, or
+    # via `remotecall_fetch`), so it can be borrowed from the reusable cache
+    # rather than freshly allocated (mirroring `payload_extract`).
+    thunk_id = @take_or_alloc! PAYLOAD_ONE_CACHE[] PayloadOne p1 begin
+        p1.uid = task.uid
+        p1.future = task.future
+        p1.fargs = fargs
+        p1.options = options
+        p1.reschedule = true
+        eager_submit!(p1)
+    end
     task.thunk_ref = thunk_id.ref
 end
 # FIXME: Don't convert Tuple to Vector{Argument}
