@@ -87,6 +87,13 @@ function Dagger.processors(space::CUDAVRAMMemorySpace)
     end
 end
 
+# A Chunk already resident on this exact GPU unwraps via a local `poolget`
+# with no GPU API calls, so its scheduler move may run inline (like a local
+# CPU move). Everything else — host values, CPU or other-device Chunks —
+# stays async so uploads/transfers can overlap.
+Dagger.argument_move_may_inline(to_proc::CuArrayDeviceProc, @nospecialize(value)) =
+    value isa Chunk && Dagger.processor(value) == to_proc
+
 function to_device(proc::CuArrayDeviceProc)
     @assert Dagger.root_worker_id(proc) == myid()
     return DEVICES[proc.device]

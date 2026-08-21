@@ -18,7 +18,7 @@ import ..Dagger: Context, Processor, SchedulerOptions, Options, Thunk, WeakThunk
 import ..Dagger: Sealed, SEALED, FutureNode, futures_push!, futures_seal!
 import ..Dagger: DepNode, deps_push!, deps_seal!
 import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak, unwrap_weak_checked, wrap_weak, tochunk, timespan_start, timespan_finish, procs, move, chunktype, default_enabled, processor, get_processors, get_parent, execute!, rmprocs!, task_processor, constrain, cputhreadtime, maybe_take_or_alloc!
-import ..Dagger: datasize, root_worker_id, is_local_processor, fire_order_key, short_name, select_processors_uniform!, processor_order_key, current_acceleration, set_task_acceleration!, scheduling_ignore_capacity, scheduling_task_occupancy, schedule_argument_move, bind_moved_argument
+import ..Dagger: datasize, root_worker_id, is_local_processor, fire_order_key, short_name, select_processors_uniform!, processor_order_key, current_acceleration, set_task_acceleration!, scheduling_ignore_capacity, scheduling_task_occupancy, schedule_argument_move, argument_move_may_inline, with_sched_move, bind_moved_argument
 import ..Dagger: @dagdebug, @safe_lock_spin1, @maybelog, @take_or_alloc!
 import DataStructures: PriorityQueue
 
@@ -1931,7 +1931,7 @@ Executes a single task specified by `task` on `to_proc`.
                 end
             else
             =#
-            new_value = with(SCHED_MOVE=>true) do
+            new_value = with_sched_move(accel) do
                 @invokelatest move(to_proc, value)
             end
             #end
@@ -1946,6 +1946,10 @@ Executes a single task specified by `task` on `to_proc`.
             arg.value = bound
             @maybelog ctx timespan_finish(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=Dagger.value(arg)); tasks=[Base.current_task()])
             return
+        end
+        if argument_move_may_inline(accel, to_proc, Dagger.value(arg))
+            move_one()
+            return nothing
         end
         return schedule_argument_move(accel, thunk_id, move_one)
     end

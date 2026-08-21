@@ -100,6 +100,36 @@ cleanup_tasks_accel!(accel::Acceleration, tasks) =
 schedule_argument_move(::Acceleration, ::Integer, f::Function) = Threads.@spawn f()
 
 """
+    with_sched_move(f, accel) -> Any
+
+Runs the argument-move body `f`. Only MPI needs the `Sch.SCHED_MOVE` scoped
+value observed inside moves (to suppress tag creation); constructing a
+ScopedValues scope per argument is pure cost for every other acceleration, so
+the default is a plain call and MPIExt overrides this to install the scope.
+"""
+with_sched_move(f, ::Acceleration) = f()
+
+"""
+    argument_move_may_inline(accel, to_proc, value) -> Bool
+    argument_move_may_inline(to_proc::Processor, value) -> Bool
+
+Whether an argument move may run inline on the current task rather than being
+spawned as a separate Task. The acceleration-level entry gates on
+`uniform_execution` (MPI keeps its rank-ordered scheduling) and defers to the
+2-argument, per-`Processor` form, which processor backends extend. Cheap local
+moves — non-`Chunk` values moving to a CPU processor, `Chunk`s resident on
+this worker moving to a CPU processor, or `Chunk`s already resident on the
+destination GPU — gain nothing from concurrency, and spawning a Task per
+argument dominates their cost. Remote `Chunk`s and cross-device copies stay
+async so multiple transfers overlap; unknown processors default to async.
+"""
+argument_move_may_inline(accel::Acceleration, to_proc, @nospecialize(value)) =
+    !uniform_execution(accel) && argument_move_may_inline(to_proc, value)
+argument_move_may_inline(::Processor, @nospecialize(value)) = false
+argument_move_may_inline(to_proc::ThreadProc, @nospecialize(value)) =
+    !(value isa Chunk) || root_worker_id(value.handle) == myid()
+
+"""
     bind_moved_argument(accel, original, moved) -> bound
 
 After a scheduler argument move, choose the value stored on the Argument. The
