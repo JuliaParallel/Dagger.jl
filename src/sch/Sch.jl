@@ -1397,8 +1397,8 @@ function proc_states(uid::UInt64=Dagger.get_tls().sch_uid)
 end
 function proc_states_values(uid::UInt64=Dagger.get_tls().sch_uid)
     states = proc_states(uid)
-    return MemPool.lock_read(states.lock) do
-        return collect(values(states.dict))
+    return MemPool.@lock_read states.lock begin
+        collect(values(states.dict))
     end
 end
 # Random visit order for stealing/kicking; skips the permutation (and its
@@ -1407,8 +1407,8 @@ shuffled_states(states::Vector) =
     length(states) <= 1 ? states : states[randperm(length(states))]
 function proc_state!(f, uid::UInt64, proc::Processor)
     states = proc_states(uid)
-    state = MemPool.lock_read(states.lock) do
-        return get(states.dict, proc, nothing)
+    state = MemPool.@lock_read states.lock begin
+        get(states.dict, proc, nothing)
     end
     if state === nothing
         state = MemPool.lock(states.lock) do
