@@ -103,9 +103,18 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
 
     @maybelog ctx timespan_start(ctx, :add_thunk, (;thunk_id=id), (;f=fargs[1], args=fargs[2:end], options, uid))
 
-    old_fargs = @reusable_vector :eager_submit_internal!_old_fargs Argument Argument(ArgPosition(), nothing) 32
-    old_fargs_cleanup = @reuse_defer_cleanup empty!(old_fargs)
-    append!(old_fargs, Iterators.map(copy, fargs))
+    # Keep the *values* of the original arguments alive across edge-wiring: the
+    # loop below replaces `fargs` entries holding a `DTask`/`ThunkID`/`Chunk`
+    # with a `Thunk`/`WeakChunk`, and nothing else roots the originals until
+    # `reschedule_syncdeps!` has wired the edges (which preserves all referenced
+    # tasks/chunks). Only GC-rooting is needed here -- the `Argument`/
+    # `ArgPosition` wrappers themselves are never read back -- so push the bare
+    # values instead of copying 2 objects per argument.
+    old_values = @reusable_vector :eager_submit_internal!_old_values Any nothing 32
+    old_fargs_cleanup = @reuse_defer_cleanup empty!(old_values)
+    for arg in fargs
+        push!(old_values, value(arg))
+    end
 
     syncdeps_vec = @reusable_vector :eager_submit_interal!_syncdeps_vec ThunkSyncdep ThunkSyncdep() 32
     syncdeps_vec_cleanup = @reuse_defer_cleanup empty!(syncdeps_vec)
@@ -190,7 +199,7 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
     end
     syncdeps_vec_cleanup()
 
-    GC.@preserve old_fargs fargs begin
+    GC.@preserve old_values fargs begin
         # Create the `Thunk`
         thunk = take_or_alloc!(THUNK_SPEC_CACHE[]) do thunk_spec
             thunk_spec.fargs = fargs
