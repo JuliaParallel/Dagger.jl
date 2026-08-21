@@ -41,6 +41,34 @@ const PAYLOAD_ONE_CACHE = TaskLocalValue{ReusableCache{PayloadOne,Nothing}}(()->
 
 const THUNK_SPEC_CACHE = TaskLocalValue{ReusableCache{ThunkSpec,Nothing}}(()->ReusableCache(ThunkSpec, nothing, 1))
 
+# N.B. Different Chunks with the same DRef handle will hash to the same slot,
+# so we just pick an equivalent Chunk as our upstream.
+# Kept at top-level (rather than as a local function within the argument loop of
+# `eager_submit_internal!`) so that it captures nothing: a local named function
+# defined inside that loop forces a `Core.Box` allocation per iteration.
+function find_equivalent_chunk(state, chunk::C) where {C<:Chunk}
+    # `equiv_chunks` is a `WeakKeyDict{DRef,Chunk}`; only
+    # DRef-backed chunks participate. Other handles (e.g.
+    # `MPIRef` under MPI) are not valid keys and manage their
+    # own identity, so pass them through unchanged.
+    chunk.handle isa DRef || return chunk
+    # N.B. Explicit lock/unlock rather than `lock(f, state.equiv_chunks)`: the
+    # closure would capture `chunk` and allocate on every call. The critical
+    # section is identical.
+    lock(state.equiv_chunks)
+    try
+        ec = payload(state.equiv_chunks)
+        if haskey(ec, chunk.handle)
+            return ec[chunk.handle]::C
+        else
+            ec[chunk.handle] = chunk
+            return chunk
+        end
+    finally
+        unlock(state.equiv_chunks)
+    end
+end
+
 # Remote
 function eager_submit_internal!(payload::AnyPayload)
     ctx = Dagger.Sch.eager_context()
@@ -86,37 +114,33 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
     end
 
     # Lookup DTask/ThunkID -> Thunk
+    # N.B. The `state.thunk_dict` critical sections below use explicit
+    # lock/try/finally instead of `lock(f, state.thunk_dict)`: the `do` closures
+    # capture `fargs`/`idx`/`arg` and so allocate once per argument. The locked
+    # regions are unchanged (one acquisition per lookup), preserving both the
+    # locking discipline and the lock ordering with `state.equiv_chunks` (which
+    # is only ever taken with `thunk_dict` unheld).
     for (idx, arg) in enumerate(fargs)
         if valuetype(arg) <: DTask
             arg_tid = Int((value(arg)::DTask).uid)
-            lock(state.thunk_dict) do d
+            lock(state.thunk_dict)
+            try
+                d = Dagger.payload(state.thunk_dict)
                 @inbounds fargs[idx] = Argument(arg.pos, d[arg_tid])
+            finally
+                unlock(state.thunk_dict)
             end
         elseif valuetype(arg) <: Sch.ThunkID
             arg_tid = (value(arg)::Sch.ThunkID).id
-            lock(state.thunk_dict) do d
+            lock(state.thunk_dict)
+            try
+                d = Dagger.payload(state.thunk_dict)
                 @inbounds fargs[idx] = Argument(arg.pos, d[arg_tid])
+            finally
+                unlock(state.thunk_dict)
             end
         elseif valuetype(arg) <: Chunk
-            # N.B. Different Chunks with the same DRef handle will hash to the same slot,
-            # so we just pick an equivalent Chunk as our upstream
-            chunk = value(arg)::Chunk
-            function find_equivalent_chunk(state, chunk::C) where {C<:Chunk}
-                # `equiv_chunks` is a `WeakKeyDict{DRef,Chunk}`; only
-                # DRef-backed chunks participate. Other handles (e.g.
-                # `MPIRef` under MPI) are not valid keys and manage their
-                # own identity, so pass them through unchanged.
-                chunk.handle isa DRef || return chunk
-                lock(state.equiv_chunks) do ec
-                    if haskey(ec, chunk.handle)
-                        return ec[chunk.handle]::C
-                    else
-                        ec[chunk.handle] = chunk
-                        return chunk
-                    end
-                end
-            end
-            chunk = find_equivalent_chunk(state, chunk)
+            chunk = find_equivalent_chunk(state, value(arg)::Chunk)
             #=FIXME:UNIQUE=#
             if chunk.handle isa DRef
                 @inbounds fargs[idx] = Argument(arg.pos, WeakChunk(chunk))
@@ -137,7 +161,15 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
     for idx in 1:length(syncdeps_vec)
         dep = syncdeps_vec[idx]::ThunkSyncdep
         @assert dep.id !== nothing && dep.thunk === nothing
-        thunk = lock(state.thunk_dict) do d; d[dep.id.id]; end
+        # N.B. Explicit lock/unlock (see above): a `do` closure here would
+        # capture `dep` and allocate per syncdep.
+        lock(state.thunk_dict)
+        local thunk
+        try
+            thunk = Dagger.payload(state.thunk_dict)[dep.id.id]
+        finally
+            unlock(state.thunk_dict)
+        end
         @inbounds syncdeps_vec[idx] = ThunkSyncdep(thunk)
     end
     if !isempty(syncdeps_vec) || any(arg->istask(value(arg)), fargs)
@@ -179,8 +211,13 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
         ready = Sch.Thunk[]
         @lock state.lock begin
             # Attach `thunk` within the scheduler
-            lock(state.thunk_dict) do d
-                d[thunk.id] = WeakThunk(thunk)
+            # N.B. Explicit lock/unlock (see above) to avoid a closure capturing
+            # `thunk`; the critical section is unchanged.
+            lock(state.thunk_dict)
+            try
+                Dagger.payload(state.thunk_dict)[thunk.id] = WeakThunk(thunk)
+            finally
+                unlock(state.thunk_dict)
             end
             # Hold a strong reference until the thunk reaches a terminal state
             # (released in `task_delete!`). The weak `thunk_dict` entry alone
