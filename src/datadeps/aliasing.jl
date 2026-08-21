@@ -243,6 +243,48 @@ Base.:(==)(aw1::ArgumentWrapper, aw2::ArgumentWrapper) =
 Base.isequal(aw1::ArgumentWrapper, aw2::ArgumentWrapper) =
     aw1.hash == aw2.hash
 
+struct DataDepsTaskDependency
+    arg_w::ArgumentWrapper
+    readdep::Bool
+    writedep::Bool
+end
+DataDepsTaskDependency(arg, dep) =
+    DataDepsTaskDependency(ArgumentWrapper(arg, dep[1]), dep[2], dep[3])
+
+"""
+    TaskArgInfo
+
+Flat, concrete per-argument record produced by `populate_task_info!` into
+`DataDepsState`'s per-task scratch vectors. The argument's dependencies live in
+`state.scratch_deps[dep_start:dep_stop]`. Replaces the former heterogeneous
+tuple of `TypedDataDepsTaskArgument{T,N}`s, which forced every planning
+traversal to re-box tuple elements and copy the whole tuple across each
+dynamic closure boundary.
+"""
+struct TaskArgInfo
+    arg::Any        # unwrapped argument, or its tracking Chunk when aliasing
+    pos::ArgPosition
+    may_alias::Bool
+    inplace_move::Bool
+    dep_start::Int
+    dep_stop::Int
+end
+arg_deps_range(info::TaskArgInfo) = info.dep_start:info.dep_stop
+
+# Self-contained per-argument record for logging payloads: the scratch
+# `TaskArgInfo`s reference `state.scratch_deps` by index and are recycled per
+# task, so log consumers get a snapshot with the deps materialized inline.
+struct LoggedTaskArg
+    arg::Any
+    pos::ArgPosition
+    may_alias::Bool
+    inplace_move::Bool
+    deps::Vector{DataDepsTaskDependency}
+end
+logged_task_args(deps_vec::Vector{DataDepsTaskDependency}, infos::Vector{TaskArgInfo}) =
+    [LoggedTaskArg(i.arg, i.pos, i.may_alias, i.inplace_move,
+                   deps_vec[arg_deps_range(i)]) for i in infos]
+
 struct HistoryEntry
     ainfo::AliasingWrapper
     space::MemorySpace
@@ -480,6 +522,13 @@ mutable struct DataDepsState
     ainfos_owner::Dict{AliasingWrapper,Union{Pair{DTask,Int},Nothing}}
     ainfos_readers::Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}
 
+    # Per-task scratch buffers filled by `populate_task_info!` and consumed by
+    # `distribute_task!` (which plans one task at a time per state; parallel
+    # hierarchical partitions each own a private state). Reused across tasks.
+    scratch_args::Vector{TaskArgInfo}
+    scratch_deps::Vector{DataDepsTaskDependency}
+    scratch_remote::Vector{Any}
+
     function DataDepsState()
         arg_to_chunk = IdDict{Any,Any}()
         arg_origin = IdDict{Any,MemorySpace}()
@@ -506,7 +555,8 @@ mutable struct DataDepsState
         ainfos_readers = Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}()
 
         return new(arg_to_chunk, arg_origin, remote_args, remote_arg_to_original, remote_arg_w, ainfo_arg, arg_history, arg_owner, arg_current, arg_overlaps, ainfo_backing_chunk,
-                   supports_inplace_cache, ainfo_cache, ainfos_lookup, ainfos_overlaps, ainfos_owner, ainfos_readers)
+                   supports_inplace_cache, ainfo_cache, ainfos_lookup, ainfos_overlaps, ainfos_owner, ainfos_readers,
+                   TaskArgInfo[], DataDepsTaskDependency[], Any[])
     end
 end
 
@@ -553,20 +603,24 @@ function get_or_make_arg_chunk!(state::DataDepsState, arg, task::DTask)
 end
 
 # Aliasing state setup
-function populate_task_info!(state::DataDepsState, task_args, spec::DTaskSpec, task::DTask)
-    # Track the task's arguments and access patterns
-    return map_or_ntuple(task_args) do idx
-        _arg = task_args[idx]
+#
+# Fills `state.scratch_args`/`state.scratch_deps` with one flat, concrete
+# `TaskArgInfo` per task argument (position 1 is `f_arg`, the already-moved
+# function argument), and returns `state.scratch_args`. The buffers are valid
+# until the next `populate_task_info!` call on this state.
+function populate_task_info!(state::DataDepsState, f_arg, fargs, spec::DTaskSpec, task::DTask)
+    infos = state.scratch_args
+    deps_vec = state.scratch_deps
+    empty!(infos)
+    empty!(deps_vec)
+    for idx in 1:length(fargs)
+        _arg = idx == 1 ? f_arg : fargs[idx]
 
         # Unwrap the argument
         _arg_with_deps = value(_arg)
         pos = _arg.pos
 
         # Unwrap In/InOut/Out wrappers and record dependencies
-        # N.B. `raw_deps` (the `(dep_mod, readdep, writedep)` triples) and the
-        # wrapped `DataDepsTaskDependency`s below are kept as distinct,
-        # single-assignment names: reusing one name for both made the variable
-        # captured-and-reassigned, which Julia must then box.
         arg_pre_unwrap, raw_deps = unwrap_inout(_arg_with_deps)
 
         # Unwrap the Chunk underlying any DTask arguments
@@ -575,13 +629,12 @@ function populate_task_info!(state::DataDepsState, task_args, spec::DTaskSpec, t
         # Skip non-aliasing arguments or arguments that don't support in-place move
         may_alias = type_may_alias(typeof(arg))
         inplace_move = may_alias && supports_inplace_move(state, arg)
+        dep_start = length(deps_vec) + 1
         if !may_alias || !inplace_move
             arg_w = ArgumentWrapper(arg, identity)
-            if is_typed(spec)
-                return TypedDataDepsTaskArgument(arg, pos, may_alias, inplace_move, (DataDepsTaskDependency(arg_w, false, false),))
-            else
-                return DataDepsTaskArgument(arg, pos, may_alias, inplace_move, [DataDepsTaskDependency(arg_w, false, false)])
-            end
+            push!(deps_vec, DataDepsTaskDependency(arg_w, false, false))
+            push!(infos, TaskArgInfo(arg, pos, may_alias, inplace_move, dep_start, length(deps_vec)))
+            continue
         end
 
         # Generate a Chunk for the argument if necessary
@@ -593,26 +646,15 @@ function populate_task_info!(state::DataDepsState, task_args, spec::DTaskSpec, t
         state.arg_origin[arg_chunk] = origin_space
         state.remote_arg_to_original[arg_chunk] = arg_chunk
 
-        # Populate argument info for all aliasing dependencies
-        # And return the argument, dependencies, and ArgumentWrappers
-        if is_typed(spec)
-            typed_deps = map(dep->DataDepsTaskDependency(arg_chunk, dep), raw_deps)
-            map_or_ntuple(typed_deps) do dep_idx
-                dep = typed_deps[dep_idx]
-                # Populate argument info
-                populate_argument_info!(state, dep.arg_w, origin_space)
-            end
-            return TypedDataDepsTaskArgument(arg_chunk, pos, may_alias, inplace_move, typed_deps)
-        else
-            untyped_deps = DataDepsTaskDependency[DataDepsTaskDependency(arg_chunk, dep) for dep in raw_deps]
-            map_or_ntuple(untyped_deps) do dep_idx
-                dep = untyped_deps[dep_idx]
-                # Populate argument info
-                populate_argument_info!(state, dep.arg_w, origin_space)
-            end
-            return DataDepsTaskArgument(arg_chunk, pos, may_alias, inplace_move, deps)
+        # Record and populate argument info for all aliasing dependencies
+        for dep in raw_deps
+            dep_full = DataDepsTaskDependency(arg_chunk, dep)
+            push!(deps_vec, dep_full)
+            populate_argument_info!(state, dep_full.arg_w, origin_space)
         end
+        push!(infos, TaskArgInfo(arg_chunk, pos, may_alias, inplace_move, dep_start, length(deps_vec)))
     end
+    return infos
 end
 function populate_argument_info!(state::DataDepsState, arg_w::ArgumentWrapper, origin_space::MemorySpace)
     # Initialize ownership and history
