@@ -399,11 +399,12 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     @dagdebug tid :spawn_datadeps "($(repr(value(f)))) Task has $(length(syncdeps)) syncdeps"
 
     # Launch user's task
-    new_fargs = if is_typed(spec)
-        map_or_ntuple(idx->TypedArgument(task_arg_ws[idx].pos, remote_args[idx]), spec.fargs)
-    else
-        Argument[Argument(task_arg_ws[idx].pos, remote_args[idx]) for idx in 1:length(task_arg_ws)]
-    end
+    # N.B. Always as an untyped Vector{Argument} spec: the task's return type
+    # was already inferred (and stored in options) at the original eager_spawn,
+    # and eager_launch! would only convert a typed tuple straight back to
+    # Vector{Argument} — building the heterogeneous TypedArgument tuple here
+    # cost ~50 allocations per task for nothing.
+    new_fargs = Argument[Argument(task_arg_ws[idx].pos, remote_args[idx]) for idx in 1:length(task_arg_ws)]
     new_spec = DTaskSpec(new_fargs, spec.options)
     new_spec.options.scope = our_scope
     new_spec.options.exec_scope = our_scope
