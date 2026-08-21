@@ -641,13 +641,15 @@ function (cache::ReusableTaskCache)(f, name::String)
     if idx !== nothing
         @assert Threads.atomic_xchg!(cache.ready[idx], false)
         put!(cache.chans[idx], f)
-        Sch.errormonitor_tracked_set!(name, cache.tasks[idx])
+        # N.B. No errormonitor_tracked_set! here: pooled tasks are registered
+        # once at init, and renaming the tracked entry per dispatch was an
+        # O(n) locked scan on the hot path for a debugging-only list
         return cache.tasks[idx]
     else
         t = @task try
             @invokelatest f()
         catch err
-            @error "[$r] Error in non-reusable task" exception=(err, catch_backtrace())
+            @error "[$name] Error in non-reusable task" exception=(err, catch_backtrace())
         end
         cache.setup_f(t)
         schedule(t)
