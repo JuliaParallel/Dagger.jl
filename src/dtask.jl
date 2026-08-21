@@ -24,8 +24,18 @@ Base.wait(t::ThunkFuture) = Dagger.Sch.thunk_yield() do
     wait(t.future)
     return
 end
-function Base.fetch(t::ThunkFuture; proc=OSProc(), raw=false, move_value=!raw, unwrap=!raw, uniform=uniform_execution())
-    error, value = Dagger.Sch.thunk_yield() do
+# N.B. `proc` defaults to `nothing` and is only materialized as `OSProc()` when a
+# `move` is actually performed: constructing an `OSProc` takes a lock and toggles
+# finalizers (see `OSProc(pid)`), which is pure overhead for the common
+# `move_value=false` fetches. `unwrap` is accepted (callers pass it) but unused.
+function Base.fetch(t::ThunkFuture; proc=nothing, raw=false, move_value=!raw, unwrap=!raw, uniform=uniform_execution())
+    # N.B. `thunk_yield(f)` is exactly `f()` outside of a Dagger task, so skip it
+    # (and the closure it would heap-allocate) when not running in one.
+    error, value = if Dagger.in_task()
+        Dagger.Sch.thunk_yield() do
+            fetch(t.future)
+        end
+    else
         fetch(t.future)
     end
     if error
@@ -34,7 +44,7 @@ function Base.fetch(t::ThunkFuture; proc=OSProc(), raw=false, move_value=!raw, u
     if !move_value
         return value
     else
-        return move(proc, value)
+        return move(@something(proc, OSProc()), value)
     end
 end
 Base.put!(t::ThunkFuture, x; error=false) = put!(t.future, (error, x))
