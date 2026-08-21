@@ -777,9 +777,11 @@ calling thread; any beyond that are dispatched via `Threads.@spawn` so a single
 wide fan-out doesn't serialize all placements on one thread. `ready` is emptied
 on return.
 """
-function schedule_ready!(state, ready::Vector{Thunk}, procs=procs_to_use(state.ctx, state.sch_options))
+function schedule_ready!(state, ready::Vector{Thunk}, procs=nothing)
     n = length(ready)
     n == 0 && return
+    # Computed lazily (copies ctx.procs) so empty completions stay free
+    procs = @something(procs, procs_to_use(state.ctx, state.sch_options))
     @inbounds for i in 1:n
         t = ready[i]
         if i <= INLINE_SCHEDULE_FANOUT_THRESHOLD
