@@ -815,20 +815,18 @@ concurrently across threads.
     # Phase 1 — brief state.lock hold: resolve inputs and bail early if already done.
     # The expensive work (cost estimation, processor selection, pressure reservation)
     # is deferred to Phase 2 so that concurrent submissions don't serialize through it.
-    local ctx, procs_filt
-    local p1_resolved = false
+    # N.B. Phase 1 results are returned from the locked block rather than
+    # assigned to captured outer locals, which would Core.Box them.
+    ctx = state.ctx
 
-    lock(state.lock) do
+    p1_resolved, procs_filt = lock(state.lock) do
         safepoint(state)
 
         # Remove processors that aren't yet initialized
         procs_filt = filter(p -> haskey(state.worker_chans, Dagger.root_worker_id(p)), procs)
         if isempty(procs_filt)
-            p1_resolved = true
-            return
+            return (true, procs_filt)
         end
-
-        ctx = state.ctx
         @dagdebug task :schedule "Scheduling task"
         @maybelog ctx timespan_start(ctx, :schedule, (;uid=state.uid, thunk_id=task.id), (;thunk_id=task.id))
 
@@ -853,13 +851,13 @@ concurrently across threads.
             # counter doesn't leak (which would otherwise hang the scheduler).
             Threads.atomic_sub!(state.running_count, 1)
             @maybelog ctx timespan_finish(ctx, :schedule, (;uid=state.uid, thunk_id=task.id), (;thunk_id=task.id))
-            p1_resolved = true
-            return
+            return (true, procs_filt)
         end
 
         # Resolve Thunk-typed inputs to their cached Chunk results.
         # After this call all values in task.inputs are Chunks or plain values.
         collect_task_inputs!(state, task)
+        return (false, procs_filt)
     end
 
     p1_resolved && return
