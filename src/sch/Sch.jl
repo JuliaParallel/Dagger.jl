@@ -18,7 +18,7 @@ import ..Dagger: Context, Processor, SchedulerOptions, Options, Thunk, WeakThunk
 import ..Dagger: Sealed, SEALED, FutureNode, futures_push!, futures_seal!
 import ..Dagger: DepNode, deps_push!, deps_seal!
 import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak, unwrap_weak_checked, wrap_weak, tochunk, timespan_start, timespan_finish, procs, move, chunktype, default_enabled, processor, get_processors, get_parent, execute!, rmprocs!, task_processor, constrain, cputhreadtime, maybe_take_or_alloc!
-import ..Dagger: datasize, root_worker_id, is_local_processor, fire_order_key, short_name, select_processors_uniform!, processor_order_key, current_acceleration, set_task_acceleration!, scheduling_ignore_capacity, scheduling_task_occupancy, schedule_argument_move, argument_move_may_inline, with_sched_move, bind_moved_argument
+import ..Dagger: datasize, root_worker_id, is_local_processor, fire_order_key, short_name, select_processors_uniform!, processor_order_key, current_acceleration, set_task_acceleration!, scheduling_ignore_capacity, scheduling_task_occupancy, schedule_argument_move, argument_move_may_inline, sched_move, bind_moved_argument
 import ..Dagger: @dagdebug, @safe_lock_spin1, @maybelog, @take_or_alloc!
 import DataStructures: PriorityQueue
 
@@ -1864,9 +1864,7 @@ function move_one_argument!(arg, ctx, accel, to_proc, thunk_id, @nospecialize(f)
                 end
             else
             =#
-    new_value = with_sched_move(accel) do
-        @invokelatest move(to_proc, value)
-    end
+    new_value = sched_move(accel, to_proc, value)
     #end
     # Acceleration decides how to bind the moved value (e.g. keep a
     # Chunk placeholder, or wrap an owner unwrap so chunktype stays

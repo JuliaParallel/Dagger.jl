@@ -126,14 +126,19 @@ cleanup_tasks_accel!(accel::Acceleration, tasks) =
 schedule_argument_move(::Acceleration, ::Integer, f::Function) = Threads.@spawn f()
 
 """
-    with_sched_move(f, accel) -> Any
+    sched_move(accel, to_proc, value) -> Any
 
-Runs the argument-move body `f`. Only MPI needs the `Sch.SCHED_MOVE` scoped
-value observed inside moves (to suppress tag creation); constructing a
-ScopedValues scope per argument is pure cost for every other acceleration, so
-the default is a plain call and MPIExt overrides this to install the scope.
+Performs a scheduler argument move of `value` to `to_proc`. Only MPI needs the
+`Sch.SCHED_MOVE` scoped value observed inside moves (to suppress tag creation);
+constructing a ScopedValues scope (and the closure to enter it) per argument is
+pure cost for every other acceleration, so the default is a direct `move` call
+and MPIExt overrides this to install the scope.
+
+N.B. No `invokelatest` needed: the executing task was itself entered via
+`invokelatest`, so its dynamic calls already see every `move` method defined
+before the task dispatched.
 """
-with_sched_move(f, ::Acceleration) = f()
+sched_move(::Acceleration, to_proc, @nospecialize(value)) = move(to_proc, value)
 
 """
     argument_move_may_inline(accel, to_proc, value) -> Bool
