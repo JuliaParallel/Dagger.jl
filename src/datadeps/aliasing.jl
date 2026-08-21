@@ -962,17 +962,20 @@ function generate_slot!(state::DataDepsState, dest_space, data)
     # because all we want here is to make a copy of some version of the data,
     # even if the data is not up to date.
     orig_space = memory_space(data)
-    check_uniform(orig_space)
+    @check_uniform(orig_space)
     to_proc = first(processors(dest_space))
-    check_uniform(to_proc)
+    @check_uniform(to_proc)
     from_proc = first(processors(orig_space))
-    check_uniform(from_proc)
-    check_uniform(typeof(data))
+    @check_uniform(from_proc)
+    @check_uniform(typeof(data))
     dest_space_args = get!(IdDict{Any,Any}, state.remote_args, dest_space)
     aliased_object_cache = AliasedObjectCache(current_acceleration(), dest_space, state.ainfo_backing_chunk)
+    # N.B. Same gate as `@maybelog`, written out so the event `id` (a `rand`
+    # call, plus the boxing it feeds) is only generated when logging is enabled.
     ctx = Sch.eager_context()
-    id = rand(Int)
-    @maybelog ctx timespan_start(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data))
+    logging = !(ctx.log_sink isa TimespanLogging.NoOpLog)
+    id = logging ? rand(Int) : 0
+    logging && timespan_start(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data))
     tid = something(DATADEPS_CURRENT_TASK[], (;uid=0)).uid
     data_chunk = if slot_is_already_in_place(data, orig_space, dest_space)
         # Nothing to move: the slot for data already in `dest_space` is the data
@@ -987,14 +990,14 @@ function generate_slot!(state::DataDepsState, dest_space, data)
             remotecall_endpoint_toplevel(move_rewrap, current_acceleration(), aliased_object_cache, from_proc, to_proc, orig_space, dest_space, data)
         end
     end
-    @maybelog ctx timespan_finish(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data=data_chunk))
+    logging && timespan_finish(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data=data_chunk))
     @assert memory_space(data_chunk) == dest_space "space mismatch! $dest_space (dest) != $(memory_space(data_chunk)) (actual) ($(typeof(data)) (data) vs. $(typeof(data_chunk)) (chunk)), spaces ($orig_space -> $dest_space)"
     dest_space_args[data] = data_chunk
     state.remote_arg_to_original[data_chunk] = data
 
-    check_uniform(memory_space(dest_space_args[data]))
-    check_uniform(processor(dest_space_args[data]))
-    check_uniform(dest_space_args[data].handle)
+    @check_uniform(memory_space(dest_space_args[data]))
+    @check_uniform(processor(dest_space_args[data]))
+    @check_uniform(dest_space_args[data].handle)
 
     return dest_space_args[data]
 end
