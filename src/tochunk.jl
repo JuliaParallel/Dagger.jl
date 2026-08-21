@@ -140,6 +140,11 @@ function maybe_rewrap(x, proc, space, scope; type, rewrap)
     end
 end
 
-tochunk_pset(x, space::MemorySpace; device=nothing, type=nothing, kwargs...) = poolset(x; device, kwargs...)
+# N.B. Explicit keywords (ordered to match `poolset`'s signature) instead of a
+# `kwargs...` relay: each slurp-and-splat layer rebuilds a NamedTuple + Pairs
+# per call, which is pure allocation churn on the task-result hot path.
+tochunk_pset(x, space::MemorySpace; device=nothing, type=nothing, retain=false,
+             tag=nothing, leaf_tag=MemPool.Tag(), kwargs...) =
+    poolset(x; retain, device, tag, leaf_tag, kwargs...)
 
 # savechunk: defined in utils/chunks.jl (fork Chunk has space field; do not duplicate here)
