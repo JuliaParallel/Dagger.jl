@@ -76,50 +76,98 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
     if !aliasing
         throw(ArgumentError("Aliasing analysis is no longer optional"))
     end
-    # The slot cache spans the whole region, not just planning: the copies and
-    # frees that touch a slot are tasks, so entries stay checked out until
-    # `wait_all` has drained them. Phase 1 fills in which arguments qualify.
-    slot_region = SlotReuseRegion(Set{UInt}())
-    return with(SLOT_REUSE_REGION => slot_region) do
+    # Phase 3 (DataDepsContext, context.jl): the context is task-local, and in
+    # this phase is created fresh and dropped again by the time this call
+    # returns (see `maybe_drop_context!`) -- so this behaves exactly like the
+    # bare `SlotReuseRegion(Set{UInt}())` it replaces. `ctx.slots` still spans
+    # the whole region, not just planning: the copies and frees that touch a
+    # slot are tasks, so entries stay checked out until they've all drained.
+    ctx = get_context!()
+    ctx.region_id += 1
+    # N.B. Store the *raw* backtrace, not `stacktrace(backtrace())`. Resolving
+    # frames to symbols eagerly costs ~119us against ~4.6us for the raw
+    # capture -- 26x -- because it walks debug info for every frame. That is
+    # invisible next to a large region's planning cost but not next to a small
+    # one: `@stencil` emits one region per expression per iteration, ~8ms each,
+    # where it measured as a several-percent regression across every stencil
+    # baseline. Resolution is deferred to `stacktrace(bt)` at the point an
+    # error is actually reported, which is rare and already slow.
+    ctx.region_bt[ctx.region_id] = backtrace()
+    ctx.slots = SlotReuseRegion(Set{UInt}())
+    return with(SLOT_REUSE_REGION => ctx.slots) do
         try
-            _spawn_datadeps(f, scheduler, launch_wait, hierarchical)
+            _spawn_datadeps(ctx, f, scheduler, launch_wait, hierarchical)
         finally
-            release_slot_reuse_region!(slot_region)
+            release_slot_reuse_region!(ctx.slots)
+            maybe_drop_context!()
         end
     end
 end
-function _spawn_datadeps(f::Base.Callable, scheduler, launch_wait, hierarchical)
-    wait_all(; check_errors=true) do
-        scheduler = something(scheduler, DATADEPS_SCHEDULER[], RoundRobinScheduler())
-        launch_wait = something(launch_wait, DATADEPS_LAUNCH_WAIT[], false)::Bool
-        hierarchical = something(hierarchical, DATADEPS_HIERARCHICAL[], true)::Bool
-        # N.B. Declared as a named function (rather than a closure bound to a
-        # local) so it shows up by name in stacktraces and profiles, which is
-        # the boundary between region setup and the whole planning pipeline.
-        function run_distribute(queue)
-            # One aliasing memo per region: planning asks for the same chunks'
-            # aliasing info from Phase 1, from every slot, and from the write-back
-            # epilogue, and each answer costs a round-trip to the owner.
-            with(CHUNK_AINFO_MEMO => ChunkAinfoMemo()) do
-                if hierarchical
-                    distribute_tasks_hierarchical!(queue)
-                else
-                    distribute_tasks!(queue)
+function _spawn_datadeps(ctx::DataDepsContext, f::Base.Callable, scheduler, launch_wait, hierarchical)
+    # Phase 3: `ContextQueue` replaces `WaitAllQueue` as the region's
+    # `:task_queue`, collecting into `ctx.inflight` instead of a queue-local
+    # `Vector{DTask}`. The wait loop below is otherwise identical to
+    # `wait_all(; check_errors=true)`, which this used to delegate to -- it's
+    # inlined here because `wait_all` always builds its own fresh
+    # `WaitAllQueue` and has nowhere to plumb `ctx` through.
+    queue_outer = ContextQueue(get_options(:task_queue, DefaultTaskQueue()), ctx)
+    # N.B. On any error -- planning throws (a bad scheduler, a scheduling
+    # exception), or a launched task itself fails during the wait loop below
+    # -- `wait_all` historically just let its freshly-allocated, queue-local
+    # `.tasks` go out of scope: any tasks already launched (including ones
+    # the wait loop hadn't reached yet) keep running unawaited, but nobody
+    # ever looks at that queue again. `ctx.inflight` has no such luck: it's
+    # task-local and outlives this call, so on any error it must be cleared
+    # here, or the *next*, unrelated `spawn_datadeps` call on this task would
+    # inherit these orphaned entries and wait on (or double-free) them at its
+    # own region's end. `maybe_drop_context!` also depends on this: it only
+    # drops a context with empty `inflight`.
+    try
+        result = with_options(; task_queue=queue_outer) do
+            scheduler = something(scheduler, DATADEPS_SCHEDULER[], RoundRobinScheduler())
+            launch_wait = something(launch_wait, DATADEPS_LAUNCH_WAIT[], false)::Bool
+            hierarchical = something(hierarchical, DATADEPS_HIERARCHICAL[], true)::Bool
+            # N.B. Declared as a named function (rather than a closure bound to a
+            # local) so it shows up by name in stacktraces and profiles, which is
+            # the boundary between region setup and the whole planning pipeline.
+            function run_distribute(queue)
+                # One aliasing memo per region: planning asks for the same chunks'
+                # aliasing info from Phase 1, from every slot, and from the write-back
+                # epilogue, and each answer costs a round-trip to the owner.
+                ctx.memo = ChunkAinfoMemo()
+                with(CHUNK_AINFO_MEMO => ctx.memo) do
+                    if hierarchical
+                        distribute_tasks_hierarchical!(queue, ctx)
+                    else
+                        distribute_tasks!(queue, ctx)
+                    end
                 end
             end
-        end
-        if launch_wait
-            result = spawn_bulk() do
+            if launch_wait
+                result = spawn_bulk() do
+                    queue = DataDepsTaskQueue(get_options(:task_queue); scheduler)
+                    with_options(f; task_queue=queue)
+                    run_distribute(queue)
+                end
+            else
                 queue = DataDepsTaskQueue(get_options(:task_queue); scheduler)
-                with_options(f; task_queue=queue)
+                result = with_options(f; task_queue=queue)
                 run_distribute(queue)
             end
-        else
-            queue = DataDepsTaskQueue(get_options(:task_queue); scheduler)
-            result = with_options(f; task_queue=queue)
-            run_distribute(queue)
+            return result
         end
+        # Region end still does the full wait, exactly as `wait_all(;
+        # check_errors=true)` did: Phase 3 is a synchronous no-op refactor,
+        # not the deferred epilogue that starts in Phase 4.
+        for task in ctx.inflight
+            fetch(task; move_value=false, unwrap=false)
+        end
+        cleanup_tasks_accel!(current_acceleration(), ctx.inflight)
+        empty!(ctx.inflight)
         return result
+    catch
+        empty!(ctx.inflight)
+        rethrow()
     end
 end
 const DATADEPS_SCHEDULER = ScopedValue{Union{DataDepsScheduler,Nothing}}(nothing)
@@ -135,7 +183,15 @@ const DATADEPS_THUNK_ID = ScopedValue{Int64}(0)
 # `uniform_execution()` holds (i.e. under MPIExt), which provides the method.
 function to_tag end
 
-function distribute_tasks!(queue::DataDepsTaskQueue)
+function distribute_tasks!(queue::DataDepsTaskQueue, ddctx::DataDepsContext)
+    # N.B. Named `ddctx`, not `ctx`: this function (and only this function)
+    # locally rebinds `ctx = Sch.eager_context()` below, in the copy-from
+    # loop's skip branch. Since a `for` loop is a nested (not shadowing) scope
+    # within a function, that assignment would silently clobber a parameter
+    # named `ctx` for the remainder of this call, including the `write_num`
+    # persist at the end -- rebind is used elsewhere in this codebase to mean
+    # "the eager scheduling `Context`", so this function picks a different
+    # name rather than fight that convention.
     #= TODO: Improvements to be made:
     # - Support for copying non-AbstractArray arguments
     # - Parallelize read copies
@@ -167,8 +223,20 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     upper_queue = get_options(:task_queue)
 
     # Start launching tasks and necessary copies
-    state = DataDepsState()
-    write_num = 1
+    # N.B. `state` is rebuilt fresh every region (assigned into `ddctx.state`
+    # rather than merely a local, so the container exists for later phases to
+    # stop doing this): its dictionaries record which chunks the free loop
+    # below has already freed, and a state that survived into the next
+    # region would report those as still live. `write_num`, in contrast, is
+    # seeded from `ddctx.write_num` and is monotonic for the owning task's
+    # entire lifetime, never reset back to 1 -- but since `state` itself
+    # never survives past this call, nothing here actually compares a
+    # `write_num` from one region against another; every `==`/`!=` check in
+    # `_get_write_deps!`/`_get_read_deps!`/`gather_overlap_syncdeps!` only
+    # ever sees entries this same region recorded. Monotonicity is purely
+    # preparatory for the phase where `state` does survive.
+    state = ddctx.state = DataDepsState()
+    write_num = ddctx.write_num
     proc_to_scope_lfu = BasicLFUCache{Processor,AbstractScope}(1024)
     for pair in queue.seen_tasks
         spec = pair.spec
@@ -254,6 +322,13 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             Dagger.@spawn scope=free_scope syncdeps=free_syncdeps tag=datadeps_task_tag() Dagger.unsafe_free!(remote_arg)
         end
     end
+
+    # Persist the counter past this region's `state` (which is about to be
+    # dropped): the next region's `write_num` must never repeat a value this
+    # one already used, even though nothing in this phase actually compares
+    # across regions (see the N.B. above `state = ddctx.state = ...`).
+    ddctx.write_num = write_num + 1
+    return
 end
 map_or_ntuple(f, xs::Vector) = map(f, 1:length(xs))
 # N.B. Accept any `Tuple` (typed specs produce heterogeneous tuples of

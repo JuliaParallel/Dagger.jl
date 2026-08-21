@@ -1018,32 +1018,45 @@ aliasing_obtainable(@nospecialize(x)) = uniform_execution() || aliasing_availabl
 """
     gather_overlap_syncdeps!(state, ainfo, write_num, syncdeps)
 
-Register `ainfo` into `state.ainfos_lookup` and add to `syncdeps` the owner and
-readers of every *other* tracked ainfo overlapping it. Used by
-`gather_free_syncdeps!` for buffers that are not themselves a directly-tracked
-task dependency, so their overlaps are not already precomputed in
-`state.ainfos_overlaps`.
+Add to `syncdeps` the owner and readers of every tracked ainfo in
+`state.ainfos_lookup` overlapping `ainfo`. Used by `gather_free_syncdeps!` for
+buffers that are not themselves a directly-tracked task dependency, so their
+overlaps are not already precomputed in `state.ainfos_overlaps`.
 
 We reuse the lookup's interval-tree overlap search (which prunes most
 `will_alias` comparisons via bounding spans) rather than scanning every tracked
-ainfo. `intersect` requires its query ainfo to be registered, so we `push!` it
-in first; this is safe because the free loop is the final step of
-`distribute_tasks!`, after which the lookup is no longer consulted for
-scheduling.
+ainfo, via `intersect_ad_hoc` -- a variant of `intersect` for a query `ainfo`
+that is not registered in the lookup and never will be.
 
-Safe to call with an `ainfo` that has a content-equal (same `.hash`) entry
-already registered elsewhere in the lookup: `AliasingWrapper` equality (and
-`Dict` lookups keyed by it) are by content hash, not object identity, so a
-redundant push here costs only a duplicate interval-tree entry, never a missed
-or double-counted syncdep -- `syncdeps` is a `Set`, and the `other_ainfo ===
-ainfo` self-skip below excludes only the literal instance just pushed (which,
-being brand new, was never itself recorded as anyone's owner or reader).
+# N.B. Why not just `push!` and `intersect`, like a normal query
+
+An earlier version of this function `push!`ed `ainfo` into `state.ainfos_lookup`
+to satisfy `intersect`'s requirement that its query be a registered entry,
+reasoning that this was safe because the free loop was the final step of
+`distribute_tasks!`, after which the lookup was never consulted again -- the
+whole `state` was dropped at the end of the region.
+
+`DataDepsContext` (`context.jl`) now exists to eventually give `state` a
+longer lifetime than one region; as of this phase `distribute_tasks!` still
+rebuilds `state` fresh every region (see the N.B. there), so that assumption
+happens to still hold today. But it is exactly the assumption a later phase
+removes on purpose, and it was already shakier than it looked even within one
+region: the free loop calls this function once per freed buffer, all against
+the *same* `state`, so every earlier buffer's throwaway push was still sitting
+in the lookup -- and being walked as a candidate, then rejected -- for every
+later buffer's query in that same loop. Once `state` does outlive a region,
+"walked and rejected" becomes "unbounded growth of the interval tree, and
+query results that have to filter out entries naming no tracked argument", for
+the next region's planning and (Phase 6) `AliasingLookupFinder` interop queries
+alike. Fixing it now, alongside the container that will eventually make it a
+real bug rather than a wasted comparison, means it ships as a pure improvement
+today instead of a fire drill later. `intersect_ad_hoc` computes the query's
+bounding spans on the fly instead of registering them, so there is nothing to
+walk past and nothing to undo.
 """
 function gather_overlap_syncdeps!(state::DataDepsState, ainfo::AliasingWrapper, write_num::Int, syncdeps)
     ainfo.inner isa NoAliasing && return
-    ainfo_idx = push!(state.ainfos_lookup, ainfo)
-    for other_ainfo in intersect(state.ainfos_lookup, ainfo; ainfo_idx)
-        other_ainfo === ainfo && continue
+    for other_ainfo in intersect_ad_hoc(state.ainfos_lookup, ainfo)
         owner = get(state.ainfos_owner, other_ainfo, nothing)
         if owner !== nothing
             owner_task, owner_write_num = owner

@@ -280,7 +280,12 @@ end
 struct AliasingLookupFinder
     lookup::AliasingLookup
     ainfo::AliasingWrapper
-    ainfo_idx::Int
+    # The query's own bounding span in each space it occupies, keyed by the
+    # same `space_idx` used everywhere else in `lookup`. Stored directly
+    # (rather than as an index to look up in `lookup.bounding_spans`) so that
+    # `intersect_ad_hoc` can supply one for a query `ainfo` that is not, and
+    # will not be, registered in `lookup` at all -- see its docstring.
+    self_bounding_spans::SmallDict{Int,LocalMemorySpan}
     spaces_idx::Vector{Int}
     to_consider::Vector{Int}
 end
@@ -292,15 +297,64 @@ function Base.intersect(lookup::AliasingLookup, ainfo::AliasingWrapper; ainfo_id
         ainfo_idx = something(findfirst(==(ainfo), lookup.ainfos))
     end
     spaces_idx = lookup.ainfos_spaces[ainfo_idx]
+    self_bounding_spans = lookup.bounding_spans[ainfo_idx]
     to_consider_spans = LocatorMemorySpan{Int}[]
     for space_idx in spaces_idx
         bounding_spans_tree = lookup.bounding_spans_tree[space_idx]
-        self_bounding_span = LocatorMemorySpan(lookup.bounding_spans[ainfo_idx][space_idx], 0)
+        self_bounding_span = LocatorMemorySpan(self_bounding_spans[space_idx], 0)
         find_overlapping!(bounding_spans_tree, self_bounding_span, to_consider_spans; exact=false)
     end
     to_consider = Int[locator.owner for locator in to_consider_spans]
     @assert all(to_consider .> 0)
-    return AliasingLookupFinder(lookup, ainfo, ainfo_idx, spaces_idx, to_consider)
+    return AliasingLookupFinder(lookup, ainfo, self_bounding_spans, spaces_idx, to_consider)
+end
+
+"""
+    intersect_ad_hoc(lookup::AliasingLookup, ainfo::AliasingWrapper) -> AliasingLookupFinder
+
+Like `intersect(lookup, ainfo)`, but for a throwaway query `ainfo` that must
+never be registered in `lookup`: computes `ainfo`'s own bounding spans directly
+from `memory_spans(ainfo)`, the same computation `push!` does, instead of
+looking them up by index -- and consequently never mutates `lookup` at all.
+
+A space that no tracked ainfo currently occupies is skipped: nothing in
+`lookup` could overlap there regardless, and (unlike `push!`) this must not
+grow `lookup.spaces`/`lookup.bounding_spans_tree` to accommodate a query that
+isn't being kept.
+
+Used by the free path (`gather_overlap_syncdeps!`, aliasing.jl) to search for
+overlaps of a Datadeps-allocated buffer that has no `ArgumentWrapper` of its
+own -- see that function's docstring for why registering it, even
+temporarily, is no longer safe once the state that owns `lookup` can outlive
+one region.
+"""
+function intersect_ad_hoc(lookup::AliasingLookup, ainfo::AliasingWrapper)
+    spans_by_space = SmallDict{Int,Vector{LocalMemorySpan}}()
+    for span in memory_spans(ainfo)
+        space_idx = findfirst(==(span.ptr.space), lookup.spaces)
+        space_idx === nothing && continue
+        spans_in_space = get!(Vector{LocalMemorySpan}, spans_by_space, space_idx)
+        push!(spans_in_space, LocalMemorySpan(span))
+    end
+
+    self_bounding_spans = SmallDict{Int,LocalMemorySpan}()
+    for space_idx in keys(spans_by_space)
+        space_spans = spans_by_space[space_idx]
+        bound_start = minimum(span_start, space_spans)
+        bound_end = maximum(span_end, space_spans)
+        self_bounding_spans[space_idx] = LocalMemorySpan(bound_start, bound_end - bound_start)
+    end
+
+    spaces_idx = collect(keys(self_bounding_spans))
+    to_consider_spans = LocatorMemorySpan{Int}[]
+    for space_idx in spaces_idx
+        bounding_spans_tree = lookup.bounding_spans_tree[space_idx]
+        self_bounding_span = LocatorMemorySpan(self_bounding_spans[space_idx], 0)
+        find_overlapping!(bounding_spans_tree, self_bounding_span, to_consider_spans; exact=false)
+    end
+    to_consider = Int[locator.owner for locator in to_consider_spans]
+    @assert all(to_consider .> 0)
+    return AliasingLookupFinder(lookup, ainfo, self_bounding_spans, spaces_idx, to_consider)
 end
 Base.iterate(finder::AliasingLookupFinder) = iterate(finder, 1)
 function Base.iterate(finder::AliasingLookupFinder, cursor_ainfo_idx)
@@ -343,7 +397,7 @@ function Base.iterate(finder::AliasingLookupFinder, cursor_ainfo_idx)
 
     # Check if this ainfo's bounding span is part of our target ainfo's bounding span in this memory space
     other_ainfo_bounding_span = finder.lookup.bounding_spans[ainfo_idx][space_idx]
-    self_bounding_span = finder.lookup.bounding_spans[finder.ainfo_idx][space_idx]
+    self_bounding_span = finder.self_bounding_spans[space_idx]
     if !spans_overlap(other_ainfo_bounding_span, self_bounding_span)
         cursor_space_idx += 1
         @goto space_restart
