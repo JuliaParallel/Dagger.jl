@@ -412,8 +412,16 @@ function report_catch_error(err, desc=nothing)
 end
 
 chunktype(x) = typeof(x)
-signature(state, task::Thunk) =
-    signature(task.inputs[1], @view task.inputs[2:end])
+function signature(state, task::Thunk)
+    # Memoized: only valid once inputs are resolved (signature() throws
+    # otherwise, so we never cache a premature result). A benign write race
+    # can only store equal values.
+    sig = task.sig
+    sig === nothing || return sig
+    sig = signature(task.inputs[1], @view task.inputs[2:end])
+    task.sig = sig
+    return sig
+end
 function signature(f, args)
     n_pos = count(Dagger.ispositional, args)
     any_kw = any(!Dagger.ispositional, args)

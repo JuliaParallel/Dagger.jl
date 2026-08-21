@@ -84,6 +84,7 @@ mutable struct Thunk
     @atomic futures_head::Union{FutureNode,Nothing,Sealed}  # Treiber list of waiting futures
     @atomic pending_deps::Int      # count of unresolved upstream dependencies (dataflow counter)
     @atomic dependents_head::Union{DepNode,Nothing,Sealed}  # Treiber list of downstream dependents
+    sig::Union{Signature,Nothing}  # memoized signature (valid only once inputs are resolved)
     function Thunk(spec::ThunkSpec)
         return new(spec.fargs, spec.id,
                    spec.cache_ref,
@@ -91,7 +92,7 @@ mutable struct Thunk
                    true, true, false,
                    false, false, false, nothing,
                    nothing,
-                   0, nothing)
+                   0, nothing, nothing)
     end
 end
 
