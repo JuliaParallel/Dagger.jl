@@ -80,8 +80,31 @@ function Dagger.unsafe_free!(x::MtlArray)
     return
 end
 
-Dagger.memory_spaces(proc::MtlArrayDeviceProc) = Set([MetalVRAMMemorySpace(proc.owner, proc.device_id)])
-Dagger.processors(space::MetalVRAMMemorySpace) = Set([MtlArrayDeviceProc(space.owner, space.device_id)])
+# N.B. The returned `Set`s are cached and shared (mirroring the CPU caches in
+# `src/memory-spaces.jl`); callers must not mutate them. No invalidation
+# needed: a worker's device topology is fixed for the process lifetime.
+const MEMORY_SPACES_CACHE = Dagger.LockedObject(Dict{MtlArrayDeviceProc,Set{MetalVRAMMemorySpace}}())
+function Dagger.memory_spaces(proc::MtlArrayDeviceProc)
+    Dagger.@safe_lock1 MEMORY_SPACES_CACHE cache begin
+        value = get(cache, proc, nothing)
+        if value === nothing
+            value = Set([MetalVRAMMemorySpace(proc.owner, proc.device_id)])
+            cache[proc] = value
+        end
+        return value
+    end
+end
+const SPACE_PROCESSORS_CACHE = Dagger.LockedObject(Dict{MetalVRAMMemorySpace,Set{MtlArrayDeviceProc}}())
+function Dagger.processors(space::MetalVRAMMemorySpace)
+    Dagger.@safe_lock1 SPACE_PROCESSORS_CACHE cache begin
+        value = get(cache, space, nothing)
+        if value === nothing
+            value = Set([MtlArrayDeviceProc(space.owner, space.device_id)])
+            cache[space] = value
+        end
+        return value
+    end
+end
 
 function to_device(proc::MtlArrayDeviceProc)
     @assert Dagger.root_worker_id(proc) == myid()

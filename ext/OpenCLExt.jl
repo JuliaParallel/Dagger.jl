@@ -67,8 +67,31 @@ function Dagger.unsafe_free!(x::CLArray)
     return
 end
 
-Dagger.memory_spaces(proc::CLArrayDeviceProc) = Set([CLMemorySpace(proc.owner, proc.device)])
-Dagger.processors(space::CLMemorySpace) = Set([CLArrayDeviceProc(space.owner, space.device)])
+# N.B. The returned `Set`s are cached and shared (mirroring the CPU caches in
+# `src/memory-spaces.jl`); callers must not mutate them. No invalidation
+# needed: a worker's device topology is fixed for the process lifetime.
+const MEMORY_SPACES_CACHE = Dagger.LockedObject(Dict{CLArrayDeviceProc,Set{CLMemorySpace}}())
+function Dagger.memory_spaces(proc::CLArrayDeviceProc)
+    Dagger.@safe_lock1 MEMORY_SPACES_CACHE cache begin
+        value = get(cache, proc, nothing)
+        if value === nothing
+            value = Set([CLMemorySpace(proc.owner, proc.device)])
+            cache[proc] = value
+        end
+        return value
+    end
+end
+const SPACE_PROCESSORS_CACHE = Dagger.LockedObject(Dict{CLMemorySpace,Set{CLArrayDeviceProc}}())
+function Dagger.processors(space::CLMemorySpace)
+    Dagger.@safe_lock1 SPACE_PROCESSORS_CACHE cache begin
+        value = get(cache, space, nothing)
+        if value === nothing
+            value = Set([CLArrayDeviceProc(space.owner, space.device)])
+            cache[space] = value
+        end
+        return value
+    end
+end
 
 function to_device(proc::CLArrayDeviceProc)
     @assert Dagger.root_worker_id(proc) == myid()

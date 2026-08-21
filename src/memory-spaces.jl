@@ -20,14 +20,34 @@ memory_space(x::DTask) = memory_space(fetch(x; move_value=false, unwrap=false))
 
 memory_spaces(::P) where {P<:Processor} =
     throw(ArgumentError("Must define `memory_spaces` for `$P`"))
-memory_spaces(proc::ThreadProc) =
-    Set([CPURAMMemorySpace(proc.owner)])
-memory_spaces(proc::OSProc) =
-    Set([CPURAMMemorySpace(proc.pid)])
+# N.B. The returned `Set`s are cached and shared; callers must not mutate them.
+const CPU_MEMORY_SPACES_CACHE = LockedObject(Dict{Int,Set{CPURAMMemorySpace}}())
+function _cached_cpu_memory_spaces(owner::Int)
+    @safe_lock1 CPU_MEMORY_SPACES_CACHE cache begin
+        value = get(cache, owner, nothing)
+        if value === nothing
+            value = Set([CPURAMMemorySpace(owner)])
+            cache[owner] = value
+        end
+        return value
+    end
+end
+memory_spaces(proc::ThreadProc) = _cached_cpu_memory_spaces(proc.owner)
+memory_spaces(proc::OSProc) = _cached_cpu_memory_spaces(proc.pid)
 processors(::S) where {S<:MemorySpace} =
     throw(ArgumentError("Must define `processors` for `$S`"))
-processors(space::CPURAMMemorySpace) =
-    Set(proc for proc in get_processors(OSProc(space.owner)) if proc isa ThreadProc)
+# Invalidated alongside OSPROC_PROCESSOR_CACHE when processor callbacks change
+const CPU_SPACE_PROCESSORS_CACHE = LockedObject(Dict{Int,Set{ThreadProc}}())
+function processors(space::CPURAMMemorySpace)
+    @safe_lock1 CPU_SPACE_PROCESSORS_CACHE cache begin
+        value = get(cache, space.owner, nothing)
+        if value === nothing
+            value = Set{ThreadProc}(proc for proc in get_processors(OSProc(space.owner)) if proc isa ThreadProc)
+            cache[space.owner] = value
+        end
+        return value
+    end
+end
 
 ### In-place Data Movement
 

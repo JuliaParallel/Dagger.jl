@@ -22,12 +22,14 @@ add_processor_callback!(func, name::String) =
 function add_processor_callback!(func, name::Symbol)
     Dagger.PROCESSOR_CALLBACKS[name] = func
     @safe_lock1 OSPROC_PROCESSOR_CACHE cache delete!(cache, myid())
+    @safe_lock1 CPU_SPACE_PROCESSORS_CACHE cache delete!(cache, myid())
 end
 delete_processor_callback!(name::String) =
     delete_processor_callback!(Symbol(name))
 function delete_processor_callback!(name::Symbol)
     delete!(Dagger.PROCESSOR_CALLBACKS, name)
     @safe_lock1 OSPROC_PROCESSOR_CACHE cache delete!(cache, myid())
+    @safe_lock1 CPU_SPACE_PROCESSORS_CACHE cache delete!(cache, myid())
 end
 
 """
