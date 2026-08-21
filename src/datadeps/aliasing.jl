@@ -393,7 +393,13 @@ function aliased_object!(f, cache::AliasedObjectCache, x; ainfo=aliasing(cache.a
     end
 end
 
-struct DataDepsState
+# N.B. Declared `mutable` (despite no field ever being rebound) purely for
+# identity: an immutable struct this large is re-boxed on every dynamic call
+# that passes it, and planning threads it through hundreds of such calls per
+# task. A mutable struct has a stable heap identity and is passed by pointer
+# instead, so those boxes disappear. It is never used as a `Dict` key, so the
+# resulting identity-based `hash`/`==` are not observed.
+mutable struct DataDepsState
     # The mapping of original raw argument to its Chunk
     # N.B. Values are Chunks, or raw remote handles (e.g. ChunkView under MPI)
     raw_arg_to_chunk::IdDict{Any,Any}
