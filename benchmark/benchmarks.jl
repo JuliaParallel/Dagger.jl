@@ -70,8 +70,17 @@
 #   estimated peak allocation may use before a size is skipped. Defaults to
 #   "0.2" (conservative). Raise it to allow larger sizes, lower it for more
 #   headroom.
-# - BENCHMARK_BLOCKSIZE: Target square tile size (elements per side) for dense
-#   suites. Defaults to "512".
+# - BENCHMARK_BLOCKSIZE: Target square tile size(s) (elements per side) for dense
+#   suites, given like BENCHMARK_SCALE: an integer or an iterable of integers
+#   (e.g. "512", "[128, 512]"). Each requested tile produces its own benchmark
+#   group per N, keyed by the resulting block; tiles that collapse to the same
+#   block at a given N (both 512 and 256 give 256 at N=256) are emitted once.
+#   Defaults to "512".
+#
+#   Sweeping this matters more than it looks: tile size sets the ratio between
+#   per-tile task overhead and bytes moved per transfer, so a change to data
+#   movement can be a large win at one tile size and a regression at another.
+#   A single tile can only ever see one of those regimes.
 # - BENCHMARK_SPARSE_BLOCKS: Number of blocks per dimension for sparse/banded
 #   operators (keeps tile counts bounded at large N). Defaults to "16".
 # - BENCHMARK_PROCS: Worker/thread topology, as "numprocs:numthreads". This
@@ -80,6 +89,15 @@
 #   runs on the worker process, which uses the orchestrator's thread count).
 # - BENCHMARK_REMOTES: Remote hosts on which to start workers, in the format
 #   accepted by `Distributed.addprocs` (colon-separated). Optional.
+# - BENCHMARK_MPI_RANKS: When set to a positive integer, runs the benchmark
+#   worker under `mpiexec -n <ranks>` (via MPI.jl's bundled mpiexec, so no
+#   system MPI install is required) instead of as a plain subprocess, and the
+#   worker calls `Dagger.accelerate!(:mpi)`. Because MPI ranks are SPMD, this
+#   also switches the default worker script from `worker.jl` to
+#   `worker_mpi.jl` (a single flat pass over every benchmark, run identically
+#   on every rank, instead of `worker.jl`'s incremental per-benchmark
+#   request/response protocol -- see `run_all_mpi` vs `run_all_external`).
+#   Defaults to "0" (disabled; plain subprocess, worker.jl).
 # - BENCHMARK_SECONDS: Time budget (seconds) per benchmark. Defaults to "30".
 # - BENCHMARK_SAMPLES: Max samples per benchmark. Defaults to "5".
 # - BENCHMARK_PROC_TIMEOUT: Wall-clock seconds to wait for a single benchmark
@@ -121,7 +139,15 @@ BenchmarkTools.tune!(b::PrecomputedTrial, args...; kwargs...) = b
 const WORKDIR = let d = get(ENV, "BENCHMARK_WORKDIR", "")
     isempty(d) ? mktempdir() : (mkpath(d); abspath(d))
 end
-const WORKER_SCRIPT = get(ENV, "BENCHMARK_WORKER_SCRIPT", joinpath(@__DIR__, "worker.jl"))
+const MPI_RANKS = parse(Int, get(ENV, "BENCHMARK_MPI_RANKS", "0"))
+if MPI_RANKS > 0
+    using MPI
+end
+# Defaults to worker_mpi.jl (the SPMD worker) when BENCHMARK_MPI_RANKS is set,
+# otherwise worker.jl (the incremental request/response worker); overridable
+# either way via BENCHMARK_WORKER_SCRIPT.
+const WORKER_SCRIPT = get(ENV, "BENCHMARK_WORKER_SCRIPT",
+    joinpath(@__DIR__, MPI_RANKS > 0 ? "worker_mpi.jl" : "worker.jl"))
 const JULIA_BIN = first(Base.julia_cmd().exec)
 const NTHREADS = Threads.nthreads()
 const PROC_TIMEOUT = parse(Float64, get(ENV, "BENCHMARK_PROC_TIMEOUT", "3600"))
@@ -143,7 +169,23 @@ function spawn_worker()
     rm(joinpath(WORKDIR, "ready"); force=true)
     rm(joinpath(WORKDIR, "request.json"); force=true)
     rm(joinpath(WORKDIR, "request.json.tmp"); force=true)
-    return run(worker_cmd(); wait=false)
+    rm(joinpath(WORKDIR, "done"); force=true)
+    rm(joinpath(WORKDIR, "results_mpi_manifest.json"); force=true)
+    if MPI_RANKS > 0
+        # `MPI.mpiexec` only sets up the environment mpiexec needs (library
+        # paths for the bundled MPICH_jll, etc.) for the dynamic extent of the
+        # callback (mirrors test/run_mpi.jl) -- so the actual `run` call must
+        # happen *inside* the `do` block. Extracting the bare executable via
+        # e.g. `MPI.mpiexec(identity)` and running it afterwards drops that
+        # environment and the spawned process dies immediately.
+        local proc
+        MPI.mpiexec() do mpiexec
+            proc = run(`$mpiexec -n $MPI_RANKS $(worker_cmd())`; wait=false)
+        end
+        return proc
+    else
+        return run(worker_cmd(); wait=false)
+    end
 end
 
 function wait_ready(proc; timeout=600)
@@ -246,10 +288,50 @@ function run_all_external()
     return results
 end
 
+# MPI counterpart to `run_all_external`: worker_mpi.jl is SPMD (every rank
+# must run the identical benchmark at the same time), so there is no
+# per-benchmark request/response round trip here -- the worker runs its
+# entire flat pass unattended and signals completion via a `done` sentinel,
+# which this just waits for (bounded by `PROC_TIMEOUT`, same as a single
+# `await_response` would be) before loading whatever it produced.
+function run_all_mpi()
+    results = Dict{Vector{String},BenchmarkTools.Trial}()
+
+    proc = spawn_worker()
+    donepath = joinpath(WORKDIR, "done")
+    t0 = time()
+    while !isfile(donepath)
+        if !process_running(proc)
+            @error "MPI benchmark worker exited before signaling completion; producing partial results."
+            break
+        end
+        if time() - t0 > PROC_TIMEOUT
+            @warn "MPI benchmark run exceeded $(PROC_TIMEOUT)s; killing and returning partial results."
+            kill(proc)
+            break
+        end
+        sleep(POLL)
+    end
+    if process_running(proc)
+        try; wait(proc); catch; end
+    end
+
+    manifestpath = joinpath(WORKDIR, "results_mpi_manifest.json")
+    isfile(manifestpath) || return results
+    manifest = JSON3.read(read(manifestpath, String))
+    for entry in manifest
+        kp = String[string(k) for k in entry.keypath]
+        resultpath = joinpath(WORKDIR, String(entry.file))
+        isfile(resultpath) || continue
+        results[kp] = BenchmarkTools.load(resultpath)[1]
+    end
+    return results
+end
+
 # --- Assemble SUITE from the externally-measured trials ---------------------
 
 const SUITE = BenchmarkGroup()
-for (keypath, trial) in run_all_external()
+for (keypath, trial) in (MPI_RANKS > 0 ? run_all_mpi() : run_all_external())
     SUITE[keypath] = PrecomputedTrial(trial)
 end
 

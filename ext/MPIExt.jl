@@ -65,7 +65,26 @@ function check_uniform(value::Integer, original=value)
         Core.print("[$rank] value=$value, original=$original\n")
         throw(ArgumentError("Non-uniform value"))
     end
-    MPI.Barrier(comm)
+    # N.B. No `MPI.Barrier` here. `compare_all` above already *is* an arrival
+    # barrier -- it cannot return until every other rank has entered it and
+    # sent -- so a barrier afterwards synchronizes nothing extra, while a
+    # blocking one is actively harmful under Dagger's multithreaded runtime:
+    #
+    #  * `MPI.Barrier` is a blocking `ccall`, so it parks the calling OS thread
+    #    inside MPI until every rank arrives. That thread runs no other Julia
+    #    task meanwhile -- in particular not `bcast_relay_loop`, the progress
+    #    engine other ranks depend on to have a broadcast forwarded.
+    #  * Julia cannot see into a plain `ccall`, so the parked thread never
+    #    reaches a GC safepoint: any other thread that requests a collection
+    #    stalls there until the barrier returns, which takes the relay down with
+    #    it even when a second thread was free to run it.
+    #
+    #    Those two close a real cross-rank cycle. Rank r parks here waiting for
+    #    rank s; rank s is waiting on a broadcast whose next hop is r's relay,
+    #    which cannot run; so s never reaches this barrier and r never leaves
+    #    it. `MPI.Barrier` has no deadlock detection either, so it surfaces as a
+    #    CI job silently exhausting its timeout. The P2P inside `compare_all` is
+    #    covered by `mpi_deadlock_detect` and yields, so it has neither problem.
     return matched
 end
 
@@ -631,9 +650,6 @@ end
 
 # An MPIRef's data is only inspectable on the rank that owns it; other ranks
 # must not attempt to `unwrap`/`aliasing` it during (rank-uniform) planning.
-Dagger.aliasing_available(x::Chunk{<:Any,<:MPIRef}) =
-    x.handle.rank == MPI.Comm_rank(x.handle.comm)
-
 to_tag(ref::MPIRef) = to_tag(ref.id)
 
 move(from_proc::Processor, to_proc::Processor, x::MPIRef) =
@@ -1175,18 +1191,37 @@ function bcast_tree_children(rank::Int, root::Int, sz::Int)
     return children
 end
 
-# One-shot promise for a delivered broadcast payload (one per tag).
+# Delivered broadcast payloads for one (root, tag) pair, in arrival order.
+#
+# N.B. A FIFO, not a one-shot promise, because a tag does NOT identify a single
+# broadcast. `to_tag()` returns the planning task's thunk id, so every
+# `move_rewrap` header broadcast issued while generating that task's slots
+# shares one tag -- including one per level of a nested wrapper, and one per
+# argument. A one-shot slot keeps only the last of those: the earlier payload is
+# overwritten before its consumer reads it, the consumer then takes the wrong
+# value and the next consumer waits forever on a delivery that already happened.
+# That is a silent hang, since nothing downstream of the relay is covered by
+# `mpi_deadlock_detect`.
+#
+# Queue order matches sender intent: MPI's non-overtaking guarantee delivers
+# same-(source, tag) messages in send order, each relay forwards in that same
+# order, and SPMD planning issues and consumes them in one rank-uniform order.
+# Keying on the root as well as the tag keeps two roots that happen to share a
+# tag from interleaving into a single queue, where no ordering rule applies.
 mutable struct BcastSlot
-    ev::Base.Event
-    value::Any
-    done::Bool
-    BcastSlot() = new(Base.Event(), nothing, false)
+    values::Vector{Any}
+    BcastSlot() = new(Any[])
 end
 
 mutable struct BcastState
     bcast_comm::MPI.Comm
-    slots::Dict{UInt32,BcastSlot}
-    lock::Threads.ReentrantLock
+    slots::Dict{Tuple{Int,UInt32},BcastSlot}
+    # Guards `slots` and wakes consumers. A condition rather than a plain lock
+    # so a consumer waiting on an undelivered payload sleeps instead of
+    # spinning: a datadeps region can have hundreds of tasks blocked on a
+    # broadcast at once, and polling them all would burn exactly the CPU the
+    # ranks need to *produce* those broadcasts.
+    cond::Threads.Condition
     running::Threads.Atomic{Bool}
     relay::Union{Task,Nothing}
 end
@@ -1204,29 +1239,78 @@ bcast_state_for(comm::MPI.Comm) =
 
 bcast_serialize(x) = (io = IOBuffer(); Serialization.serialize(io, x); take!(io))
 
-function bcast_deliver!(state::BcastState, tag::UInt32, value)
-    slot = lock(state.lock) do
-        get!(BcastSlot, state.slots, tag)
+function bcast_deliver!(state::BcastState, root::Int, tag::UInt32, value)
+    lock(state.cond) do
+        push!(get!(BcastSlot, state.slots, (root, tag)).values, value)
+        notify(state.cond)
     end
-    slot.value = value
-    slot.done = true
-    notify(slot.ev)
     return
 end
 
-function bcast_slot_wait(state::BcastState, tag::UInt32)
-    slot = lock(state.lock) do
-        get!(BcastSlot, state.slots, tag)
+# Wake every consumer so each can re-check its own elapsed time. Called by the
+# relay while it is idle, which makes the relay the heartbeat that drives
+# deadlock detection -- no `Timer` involved, and so nothing that depends on a
+# thread reaching the scheduler's idle loop to service libuv.
+function bcast_heartbeat!(state::BcastState)
+    lock(state.cond) do
+        notify(state.cond)
     end
-    # `Base.Event` latches: a `notify` that already fired makes `wait` return
-    # immediately, so relay-before-consumer and consumer-before-relay both work.
-    wait(slot.ev)
-    value = slot.value
-    lock(state.lock) do
-        delete!(state.slots, tag)
-    end
-    return value
+    return
 end
+
+function bcast_slot_wait(state::BcastState, root::Int, tag::UInt32)
+    key = (root, tag)
+    # Enqueueing under the same lock means relay-before-consumer and
+    # consumer-before-relay both work: a payload that arrived first is simply
+    # already queued when we first look.
+    #
+    # The wait is routed through `mpi_deadlock_detect` like every other
+    # cross-rank wait in this extension. Before, this was a bare `wait` on a
+    # one-shot `Event`, so a delivery that was lost (see `BcastSlot`) stalled
+    # here forever with nothing to report -- a CI job exhausting its timeout
+    # with no error to point at. Re-checks are driven by `bcast_heartbeat!`
+    # rather than by polling, so a blocked consumer costs no CPU.
+    time_start = time_ns()
+    detect = DEADLOCK_DETECT[]
+    warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
+    timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
+    rank = MPI.Comm_rank(state.bcast_comm)
+    return lock(state.cond) do
+        while true
+            slot = get(state.slots, key, nothing)
+            if slot !== nothing && !isempty(slot.values)
+                value = popfirst!(slot.values)
+                isempty(slot.values) && delete!(state.slots, key)
+                return value
+            end
+            warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period,
+                                              rank, tag, "bcast_meta delivery", root)
+            wait(state.cond)
+        end
+    end
+end
+
+# How many consecutive empty probes to spin through before the relay starts
+# sleeping between them, and how long it then sleeps.
+#
+# A bare `Improbe`/`yield()` loop never blocks, so it keeps a whole OS thread at
+# 100% forever: a profile of a 4-rank run spent 107 of one thread's 127 samples
+# inside `MPI_Improbe`. With one relay per rank that burns one core per rank,
+# which is survivable on a workstation but not on a 4-vCPU CI runner hosting 4
+# ranks -- there the relays alone claim the entire machine and the threads doing
+# real work are left to fight over what is left. The cost scales with rank
+# count, so it hits the 4-rank job far harder than the 2-rank one.
+#
+# Broadcast traffic is bursty -- planning issues them in clusters -- so spin hot
+# first and only back off once the burst is clearly over. That keeps the added
+# latency off the messages inside a burst and pays it at most once, on the first
+# message of the next one.
+const BCAST_RELAY_SPIN_ITERS = 4096
+const BCAST_RELAY_IDLE_SLEEP = 1e-4
+# Heartbeat cadence once idle, counted in backoff iterations: at ~150us apiece
+# this wakes blocked consumers roughly every 150ms, which is fine granularity
+# for a 10s warn / 120s error timer and costs nothing when nobody is waiting.
+const BCAST_RELAY_HEARTBEAT_ITERS = 1000
 
 # Always-running per-rank progress engine: receive a broadcast on `bcast_comm`,
 # forward the raw bytes to this rank's tree children, then deliver the payload.
@@ -1236,14 +1320,41 @@ function bcast_relay_loop(state::BcastState)
     comm = state.bcast_comm
     rank = MPI.Comm_rank(comm)
     sz = MPI.Comm_size(comm)
+    idle = 0
+    # Backing off means blocking the OS thread, which only gives time back to
+    # anyone else if this rank has another thread to run them on. On a
+    # single-threaded rank it would instead starve the very tasks the relay
+    # exists to serve, so there we keep the pure `yield()` loop.
+    may_backoff = Threads.nthreads() > 1
     while state.running[]
         try
             MPI.Finalized() && break
             got, msg, stat = MPI.Improbe(MPI.ANY_SOURCE, MPI.ANY_TAG, comm, MPI.Status)
             if !got
-                yield()
+                idle += 1
+                if idle <= BCAST_RELAY_SPIN_ITERS || !may_backoff
+                    yield()
+                else
+                    # N.B. `Libc.systemsleep`, not `sleep`: `sleep` parks the
+                    # task on a libuv timer, which only fires when some thread
+                    # reaches the scheduler's idle loop. A rank whose other
+                    # thread is inside a blocking `ccall` has no such thread, so
+                    # the relay could stay asleep exactly when it is needed
+                    # most. Sleeping the thread outright cannot be starved that
+                    # way, and 100us is short enough that the GC-unsafe window
+                    # it opens is irrelevant.
+                    Libc.systemsleep(BCAST_RELAY_IDLE_SLEEP)
+                    yield()
+                end
+                # Nothing is arriving, which is exactly when a stalled consumer
+                # needs its deadlock timer re-checked -- and the relay is the
+                # one thing guaranteed to still be running to do it.
+                if idle % BCAST_RELAY_HEARTBEAT_ITERS == 0
+                    bcast_heartbeat!(state)
+                end
                 continue
             end
+            idle = 0
             src = MPI.Get_source(stat)
             tag = UInt32(MPI.Get_tag(stat))
             count = MPI.Get_count(stat, UInt8)
@@ -1255,7 +1366,7 @@ function bcast_relay_loop(state::BcastState)
                 sreq = MPI.Isend(buf, comm; dest=child, tag=tag)
                 __wait_for_request(sreq, comm, rank, child, tag, "bcast_relay", "send")
             end
-            bcast_deliver!(state, tag, value)
+            bcast_deliver!(state, Int(root), tag, value)
         catch err
             # Comm torn down (disable/finalize) races the loop: stop quietly.
             # A genuine mid-session fault surfaces via errormonitor.
@@ -1268,8 +1379,8 @@ end
 
 function start_bcast_relay!(accel_comm::MPI.Comm)
     bcast_comm = MPI.Comm_dup(accel_comm)
-    state = BcastState(bcast_comm, Dict{UInt32,BcastSlot}(),
-                       Threads.ReentrantLock(), Threads.Atomic{Bool}(true), nothing)
+    state = BcastState(bcast_comm, Dict{Tuple{Int,UInt32},BcastSlot}(),
+                       Threads.Condition(), Threads.Atomic{Bool}(true), nothing)
     lock(BCAST_STATES) do states
         states[accel_comm] = state
     end
@@ -1303,6 +1414,15 @@ function stop_bcast_relay!(accel_comm::MPI.Comm)
         catch
         end
     end
+    # The relay is the heartbeat that lets a blocked consumer re-check its
+    # deadlock timer, so once it is gone nothing would ever wake a consumer
+    # still waiting on a payload that is now never coming. Fail them instead of
+    # letting teardown hang.
+    lock(state.cond) do
+        notify(state.cond,
+               ConcurrencyViolationError("MPI broadcast relay stopped while a consumer was waiting");
+               error=true)
+    end
     return nothing
 end
 
@@ -1324,7 +1444,7 @@ function bcast_meta_yield(comm::MPI.Comm, root::Integer, tag, value=nothing)
         end
         return value
     else
-        return bcast_slot_wait(state, utag)
+        return bcast_slot_wait(state, Int(root), utag)
     end
 end
 
@@ -1736,11 +1856,70 @@ function mpi_endpoint_transfer(accel::MPIAcceleration, from_proc, to_proc, from_
     end
 end
 
+# Uninitialized slot allocation is a property of the rank-local storage, so
+# defer to the inner space. Rank identity is already handled by `!=` on the
+# spaces themselves (`MPIMemorySpace` compares innerSpace/comm/rank).
+Dagger.can_alloc_uninit(space::MPIMemorySpace, ::Type{T}) where {T} =
+    Dagger.can_alloc_uninit(space.innerSpace, T)
+Dagger.alloc_uninit(space::MPIMemorySpace, ::Type{T}, dims::Dims) where {T} =
+    Dagger.alloc_uninit(space.innerSpace, T, dims)
+
+# Allocate the slot on the destination rank without shipping the payload. Only
+# the dimensions travel, which is the entire saving: the buffer's contents are
+# established later by Datadeps' copy-to phase.
+#
+# N.B. Point-to-point, deliberately *not* `bcast_yield`, even though the payload
+# is header-sized. Only the destination rank needs the dimensions, so this keeps
+# exactly the communication pattern of the `mpi_endpoint_transfer` it replaces:
+# one message between the same two ranks. Broadcasting instead makes every rank
+# a participant, and an intermediate rank cannot forward while it is blocked
+# inside a task awaiting dispatch -- the cross-rank wait cycle described above
+# `bcast_tree_children`, seen as a hang on Julia 1.10/1.11.
+function mpi_endpoint_alloc(accel::MPIAcceleration, to_proc, to_space, ::Type{T_dest}, w::MPIWireValue) where T_dest
+    local_rank = MPI.Comm_rank(accel.comm)
+    from_rank = w.space.rank
+    if from_rank == to_space.rank
+        # Same rank (e.g. CPU -> GPU on one rank): nothing to communicate
+        if local_rank == to_space.rank
+            value = Dagger.alloc_uninit(to_space, T_dest, size(wire_value(w)))
+            return tochunk(value, to_proc, to_space; type=T_dest)
+        end
+        return tochunk(nothing, to_proc, to_space; type=T_dest)
+    end
+    # Every rank takes a tag so the sequence stays rank-uniform, exactly as
+    # `mpi_endpoint_transfer` does before its own send/recv.
+    tag = to_tag()
+    if local_rank == from_rank
+        send_yield(size(wire_value(w)), accel.comm, to_space.rank, tag)
+        return tochunk(nothing, to_proc, to_space; type=T_dest)
+    elseif local_rank == to_space.rank
+        dims = recv_yield(accel.comm, from_rank, tag)::Dims
+        return tochunk(Dagger.alloc_uninit(to_space, T_dest, dims), to_proc, to_space; type=T_dest)
+    else
+        return tochunk(nothing, to_proc, to_space; type=T_dest)
+    end
+end
+
 # Generic / wrapper MPIWireValue: leaf transfer, or header+children rebuild
 function move_rewrap(accel::MPIAcceleration, cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, w::MPIWireValue{T}) where T
     child_types = move_rewrap_child_types(T)
     if child_types === nothing
-        # Leaf: transfer to the destination, sharing via the aliased-object cache
+        # Leaf: materialize the slot on the destination rank, sharing via the
+        # aliased-object cache. A dense isbits payload crossing a rank boundary
+        # need not be sent at all -- Datadeps' copy-to phase fills the slot, and
+        # for a wrapper (e.g. a ChunkView) it sends only the wrapper's own spans
+        # instead of the entire backing array. See `slot_may_be_uninit`.
+        #
+        # N.B. The predicate depends only on the two spaces and the destination
+        # type, all rank-uniform, so every rank takes the same branch and the
+        # collectives below stay matched.
+        T_dest = move_type(mpi_inner_proc(as_mpi_proc(from_proc, from_space)),
+                           mpi_inner_proc(as_mpi_proc(to_proc, to_space)), T)
+        if Dagger.slot_may_be_uninit(from_space, to_space, T_dest)
+            return aliased_object!(cache, w) do w
+                return mpi_endpoint_alloc(accel, to_proc, to_space, T_dest, w)
+            end
+        end
         return aliased_object!(cache, w) do w
             return Dagger.libc_backed(mpi_endpoint_transfer(accel, from_proc, to_proc, from_space, to_space, w))
         end
@@ -1768,11 +1947,20 @@ function move_rewrap(accel::MPIAcceleration, cache::AliasedObjectCache, from_pro
     mode = move_rewrap_header_mode(T)
     header = if mode === :broadcast
         tag = to_tag()
+        # `move_rewrap` is reached from `generate_slot!` inside the per-task
+        # planning loop, and each task is handed to `eager_launch!` (and so
+        # begins executing, concurrently, on this same rank) before the loop
+        # moves on to plan the next task. That means this broadcast is NOT at
+        # a "sequential, non-overlapping point" the way the doc comment above
+        # `bcast_meta_yield` assumes -- it can race an already-dispatched
+        # task's own `execute!`/`poolget` activity on this or another rank.
+        # Use the dispatch-decoupled relay so a rank busy running a task's
+        # `execute!` still forwards this header on message arrival.
         if local_rank == w.space.rank
             _, hdr = move_rewrap_parts(wire_value(w))
-            bcast_yield(accel.comm, w.space.rank, tag, hdr)
+            bcast_meta_yield(accel.comm, w.space.rank, tag, hdr)
         else
-            bcast_yield(accel.comm, w.space.rank, tag)
+            bcast_meta_yield(accel.comm, w.space.rank, tag)
         end
     elseif mode === :none
         nothing

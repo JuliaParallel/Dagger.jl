@@ -771,11 +771,28 @@ function _get_read_deps!(state::DataDepsState, dest_space::MemorySpace, ainfo::A
         end
     end
 end
-# Whether the raw data backing `x` can be inspected on the current process to
-# compute its aliasing. Distributed `Chunk`s are always inspectable (locally or
-# via `remotecall`); the MPI extension overrides this for refs owned by a
-# different rank, where the data is not present on this rank.
-aliasing_available(@nospecialize(x)) = true
+
+"""
+    all_free_syncdeps_for_space(state, space, write_num, memo) -> Set{ThunkSyncdep}
+
+Every task that read or wrote *any* tracked ainfo in `space`. Used as the
+conservative syncdep set for freeing a buffer whose own aliasing cannot be
+computed here (see `gather_free_syncdeps!`). Memoized in `memo` when one is
+supplied, since the scan is over all tracked ainfos and the free loop would
+otherwise repeat it per buffer.
+"""
+function all_free_syncdeps_for_space(state::DataDepsState, space::MemorySpace,
+                                     write_num::Int, memo)
+    if memo !== nothing && haskey(memo, space)
+        return memo[space]
+    end
+    deps = Set{ThunkSyncdep}()
+    for other_ainfo in keys(state.ainfo_arg)
+        get_write_deps!(state, space, other_ainfo, write_num, deps)
+    end
+    memo !== nothing && (memo[space] = deps)
+    return deps
+end
 
 """
     gather_free_syncdeps!(state, space, key_ainfo, remote_arg, write_num, chunk_to_ainfos, syncdeps)
@@ -788,11 +805,11 @@ arguments), its ainfos are in `chunk_to_ainfos` and we reuse their precomputed
 overlap sets. Otherwise the buffer only underlies wrapper arguments (e.g. it is
 the parent array shared by several `view`s, whose tracked slots are the views
 rather than this buffer); in that case we compute the buffer's own aliasing and
-sync with every tracked ainfo that overlaps its memory. When the buffer's data
-is not inspectable here (`aliasing_available` is `false`, e.g. an `MPIRef` owned
-by another rank), we fall back to the rank-uniform cache key ainfo `key_ainfo`.
+sync with every tracked ainfo that overlaps its memory. Under uniform (SPMD)
+execution that computation is unavailable, and we fall back to the rank-uniform
+cache key ainfo `key_ainfo`.
 """
-function gather_free_syncdeps!(state::DataDepsState, space::MemorySpace, key_ainfo, remote_arg, write_num::Int, chunk_to_ainfos, syncdeps)
+function gather_free_syncdeps!(state::DataDepsState, space::MemorySpace, key_ainfo, remote_arg, write_num::Int, chunk_to_ainfos, syncdeps, all_space_syncdeps=nothing)
     ainfos = get(chunk_to_ainfos, remote_arg, nothing)
     if ainfos !== nothing
         for ainfo in ainfos
@@ -801,15 +818,35 @@ function gather_free_syncdeps!(state::DataDepsState, space::MemorySpace, key_ain
         return
     end
 
-    # If the buffer's raw data isn't inspectable here (e.g. an `MPIRef` owned by
-    # another rank under uniform execution), we cannot compute its aliasing.
-    # Fall back to the rank-uniform cache key ainfo, which is metadata available
-    # identically on every rank. The cache stores raw ainfos, so wrap it to match
-    # the `AliasingWrapper` keys used by the overlap tracking.
-    if !aliasing_available(remote_arg)
+    # Under uniform (SPMD) execution we cannot compute the buffer's aliasing here:
+    # `aliasing` is collective (the owner computes and broadcasts), and only the
+    # owning rank holds the data, so having it alone reach the call below would
+    # broadcast into a collective no other rank enters -- consuming a tag on one
+    # rank (desyncing every subsequent `to_tag`) and then deadlocking. Fall back
+    # to the rank-uniform cache key ainfo, which is metadata available identically
+    # on every rank. The cache stores raw ainfos, so wrap it to match the
+    # `AliasingWrapper` keys used by the overlap tracking.
+    if uniform_execution()
         wrapped = key_ainfo isa AliasingWrapper ? key_ainfo : AliasingWrapper(key_ainfo)
-        haskey(state.ainfos_overlaps, wrapped) &&
+        if haskey(state.ainfos_overlaps, wrapped)
             get_write_deps!(state, space, wrapped, write_num, syncdeps)
+        else
+            # The key ainfo describes the original object in its *source* space,
+            # so it is often not one of the tracked (destination-space) ainfos --
+            # rank-stamped spans mean it cannot overlap them, and the interval
+            # tree cannot be queried with it either. Returning here would emit an
+            # `unsafe_free!` with *no* syncdeps at all, racing every task still
+            # reading the buffer; the freed block is then recycled by the next
+            # `alloc_libc_array`. Sync against every tracked ainfo in this space
+            # instead: a strict over-approximation of what can overlap it.
+            #
+            # The scan is over *every* tracked ainfo, so it is memoized per space
+            # by the caller: without that, a region with many untracked keys pays
+            # O(frees x ainfos x overlaps) here, which is enough to turn a large
+            # MPI region into a timeout.
+            union!(syncdeps, all_free_syncdeps_for_space(state, space, write_num,
+                                                         all_space_syncdeps))
+        end
         return
     end
 
@@ -982,6 +1019,19 @@ function remotecall_endpoint_toplevel(f, accel::DistributedAcceleration, cache::
         return f(accel, cache, from_proc, to_proc, from_space, to_space, unwrap(data))::Chunk
     end
 end
+# Allocate the slot directly on the destination worker. Only the element type
+# and dimensions cross the wire; `data` deliberately does not, which is the
+# whole point (a `remotecall_fetch` closing over it would serialize the payload).
+function remotecall_endpoint_alloc(accel::DistributedAcceleration, to_proc, to_space, ::Type{T}, dims::Dims) where T
+    wid = root_worker_id(to_proc)
+    if wid == myid()
+        return tochunk(alloc_uninit(to_space, T, dims), to_proc, to_space)
+    end
+    return remotecall_fetch(wid, to_proc, to_space, T, dims) do to_proc, to_space, T, dims
+        return tochunk(alloc_uninit(to_space, T, dims), to_proc, to_space)
+    end
+end
+
 function remotecall_endpoint_transfer(f, accel::DistributedAcceleration, from_proc, to_proc, from_space, to_space, data)
     wid = root_worker_id(to_proc)
     if wid == myid()
@@ -1038,7 +1088,18 @@ move_rewrap(accel, cache::AliasedObjectCache, from_proc::Processor, to_proc::Pro
 function move_rewrap(accel, cache::AliasedObjectCache, from_proc::Processor, to_proc::Processor, from_space::MemorySpace, to_space::MemorySpace, data)
     parts = move_rewrap_parts(data)
     if parts === nothing
-        # Leaf: transfer the value, sharing via the aliased-object cache
+        # Leaf: materialize the slot in the destination space, sharing via the
+        # aliased-object cache. For a dense isbits payload crossing a space
+        # boundary the bytes need not travel at all -- Datadeps' copy-to phase
+        # establishes the contents, and for a wrapper (a view, say) it copies
+        # only the wrapper's own spans rather than the whole backing array.
+        # See `slot_may_be_uninit` for why this is safe.
+        T_dest = move_type(from_proc, to_proc, typeof(data))
+        if slot_may_be_uninit(from_space, to_space, T_dest)
+            return aliased_object!(cache, data) do data
+                return remotecall_endpoint_alloc(accel, to_proc, to_space, T_dest, size(data))
+            end
+        end
         return aliased_object!(cache, data) do data
             return remotecall_endpoint_transfer(accel, from_proc, to_proc, from_space, to_space, data) do accel, from_proc, to_proc, from_space, to_space, data
                 return tochunk(libc_backed(move(from_proc, to_proc, data)), to_proc, to_space)

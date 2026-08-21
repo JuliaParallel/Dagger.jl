@@ -65,6 +65,7 @@ inc!(X) = (X .+= 1; nothing)
 add1!(X) = (X .+= 1; nothing)
 scale2!(X) = (X .*= 2; nothing)
 sum_into!(r, X) = (r[] = Int(sum(X)); nothing)
+sum_into_f!(r, X) = (r[] = Float64(sum(X)); nothing)
 function upper_double!(X)
     for j in axes(X, 2), i in 1:j
         X[i, j] *= 2
@@ -226,9 +227,16 @@ end
                     # must never alias, even with coinciding SPMD addresses
                     @test !Dagger.will_alias(src_ainfo, dst_ainfo)
                 end
-                # The slot holds a copy of the source data on the destination
+                # A same-space slot wraps (aliases) the original data. A
+                # cross-rank slot is deliberately left *uninitialized*: nothing
+                # is sent, and Datadeps' copy-to phase establishes the contents
+                # later (see `slot_may_be_uninit`). Only shape/type is promised.
                 if rank == dst
-                    @test Dagger.unwrap(slot) == A
+                    if src == dst
+                        @test Dagger.unwrap(slot) == A
+                    else
+                        @test size(Dagger.unwrap(slot)) == size(A)
+                    end
                 end
             end
 
@@ -256,9 +264,16 @@ end
                 # ... while the views themselves remain disjoint
                 @test !Dagger.will_alias(aA, aB)
                 if rank == dst
-                    @test Dagger.unwrap(slotA) == vA
-                    @test Dagger.unwrap(slotB) == vB
+                    # Parent sharing holds regardless: both views must resolve
+                    # to one destination allocation, initialized or not.
                     @test parent(Dagger.unwrap(slotA)) === parent(Dagger.unwrap(slotB))
+                    if src == dst
+                        @test Dagger.unwrap(slotA) == vA
+                        @test Dagger.unwrap(slotB) == vB
+                    else
+                        @test size(Dagger.unwrap(slotA)) == size(vA)
+                        @test size(Dagger.unwrap(slotB)) == size(vB)
+                    end
                 end
             end
 
@@ -272,7 +287,11 @@ end
                 @test Dagger.check_uniform(slot.handle)
                 @test Dagger.chunktype(slot) <: UpperTriangular
                 if rank == dst
-                    @test Dagger.unwrap(slot) == U
+                    if src == dst
+                        @test Dagger.unwrap(slot) == U
+                    else
+                        @test size(Dagger.unwrap(slot)) == size(U)
+                    end
                 end
             end
 
@@ -310,9 +329,14 @@ end
                 @test aA.base_ptr == aB.base_ptr
                 @test !Dagger.will_alias(aA, aB)
                 if rank == dst
-                    @test Dagger.unwrap(slotA) == view(A, 1:4, 1:8)
-                    @test Dagger.unwrap(slotB) == view(A, 5:8, 1:8)
                     @test parent(Dagger.unwrap(slotA)) === parent(Dagger.unwrap(slotB))
+                    if src == dst
+                        @test Dagger.unwrap(slotA) == view(A, 1:4, 1:8)
+                        @test Dagger.unwrap(slotB) == view(A, 5:8, 1:8)
+                    else
+                        @test size(Dagger.unwrap(slotA)) == (4, 8)
+                        @test size(Dagger.unwrap(slotB)) == (4, 8)
+                    end
                 end
 
                 # Nested ChunkView flattens to the same slices as a direct view
@@ -325,8 +349,10 @@ end
                 slot_direct = make_slot(fresh_cache(space_for_rank(dst)), src, dst, cv_direct)
                 @test Dagger.chunktype(slot_nested) <: SubArray
                 if rank == dst
-                    @test Dagger.unwrap(slot_nested) == Dagger.unwrap(slot_direct)
-                    @test Dagger.unwrap(slot_nested) == view(A, 2:3, 1:4)
+                    @test size(Dagger.unwrap(slot_nested)) == size(Dagger.unwrap(slot_direct))
+                    if src == dst
+                        @test Dagger.unwrap(slot_nested) == view(A, 2:3, 1:4)
+                    end
                 end
             end
 
@@ -350,8 +376,12 @@ end
                 end
                 if rank == dst
                     H2 = Dagger.unwrap(slot)
-                    @test H2.center == H.center
-                    @test all(h2 == h for (h2, h) in zip(H2.halos, H.halos))
+                    @test size(H2.center) == size(H.center)
+                    @test all(size(h2) == size(h) for (h2, h) in zip(H2.halos, H.halos))
+                    if src == dst
+                        @test H2.center == H.center
+                        @test all(h2 == h for (h2, h) in zip(H2.halos, H.halos))
+                    end
                 end
             end
         end
@@ -429,6 +459,74 @@ end
     # Collective uniform fetches: identical on every rank
     @test fetch(c) ≈ ref_blk
     @test fetch(cv_top) ≈ ref_blk[1:2, :]
+end
+
+@testset "Uninitialized cross-rank slots" begin
+    # Cross-space slots for dense isbits payloads are allocated on the
+    # destination rather than transferred (`slot_may_be_uninit`), and are
+    # Libc-backed straight from the allocator so Datadeps can free them eagerly
+    # without the allocate-then-copy that `libc_backed` would otherwise do.
+    A = rand(4, 4)
+    for (src, dst) in rank_pairs
+        obj = Dagger.tochunk(A, proc_for_rank(src), space_for_rank(src))
+        slot = make_slot(fresh_cache(space_for_rank(dst)), src, dst, obj)
+        if rank == dst
+            val = Dagger.unwrap(slot)
+            if src == dst
+                # No copy-to is scheduled when owner space == target space, so
+                # the slot must still be the real data
+                @test val == A
+            else
+                @test Dagger.is_libc_allocated(val)
+            end
+        end
+    end
+
+    # The predicate itself, including the guard that makes it safe
+    s0, s1 = space_for_rank(0), space_for_rank(min(1, nranks-1))
+    @test !Dagger.slot_may_be_uninit(s0, s0, Matrix{Float64})
+    @test !Dagger.slot_may_be_uninit(s0, s1, Matrix{String})
+    if nranks > 1
+        @test Dagger.slot_may_be_uninit(s0, s1, Matrix{Float64})
+    end
+end
+
+@testset "Partial slot currency" begin
+    # The load-bearing invariant behind uninitialized slots: a task may read
+    # spans that were never written in its own space, and those must be copied
+    # in rather than read out of the untransferred backing buffer.
+    #
+    # Make *part* of a chunk current on a non-owner rank by writing through a
+    # view there, then read the whole parent on that same rank. Rows 3:8 have
+    # never travelled to it, so the remainder copy is the only thing standing
+    # between this test and garbage.
+    Random.seed!(11)
+    A = rand(8, 8)
+
+    # N.B. Snapshot the expectation *before* the region. `A` is a non-Chunk
+    # argument, so rank 0 owns it and Datadeps writes the result back into it in
+    # place; deriving `ref` afterwards would fold the update into the baseline
+    # and then add it a second time. It would also disagree across ranks, since
+    # only rank 0's copy of `A` is written back.
+    ref = copy(A); ref[1:2, :] .+= 1
+
+    c = Dagger.tochunk(A)  # rank-0 owned
+    cv = view(c, 1:2, 1:8)
+    r = Ref(0.0)
+
+    exec_rank = min(1, nranks-1)
+    Dagger.spawn_datadeps() do
+        Dagger.@spawn scope=rank_scope(exec_rank) add1!(InOut(cv))
+        Dagger.@spawn scope=rank_scope(exec_rank) sum_into_f!(InOut(r), In(c))
+    end
+
+    # Uniform on every rank: the view's write is visible to the whole-parent
+    # read, and the remainder (rows 3:8) is pulled from the owner
+    @test fetch(c) ≈ ref
+    if rank == 0
+        @test A ≈ ref                # written back into the user's array
+        @test r[] ≈ sum(ref)         # `r` is likewise rank-0 owned
+    end
 end
 
 @testset "DTask arguments" begin
