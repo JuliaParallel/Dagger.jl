@@ -890,7 +890,13 @@ function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::M
     if copy_src === nothing
         # Task write: only the written space is current, and other spaces'
         # replicas of overlapping regions become stale
-        state.arg_current[arg_w] = Set{MemorySpace}((dest_space,))
+        # N.B. The `Set` is reused in place rather than replaced; nothing ever
+        # holds a reference to it past the call that reads it (see
+        # `distribute_tasks!`'s copy-from elision and `arg_current` reads in
+        # `hierarchical.jl`), so mutating is equivalent to rebinding.
+        current = get!(Set{MemorySpace}, state.arg_current, arg_w)
+        empty!(current)
+        push!(current, dest_space)
         for other_arg_w in state.arg_overlaps[arg_w]
             other_arg_w == arg_w && continue
             other_current = get(state.arg_current, other_arg_w, nothing)
