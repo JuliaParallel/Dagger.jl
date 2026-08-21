@@ -161,9 +161,9 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
     # Copy args from remote to local
     # N.B. We sort the keys to ensure a deterministic order for uniformity
-    check_uniform(length(state.arg_owner))
+    @check_uniform(length(state.arg_owner))
     for arg_w in sort(collect(keys(state.arg_owner)); by=arg_w->arg_w.hash)
-        check_uniform(arg_w)
+        @check_uniform(arg_w)
         arg = arg_w.arg
         origin_space = state.arg_origin[arg]
         # When the origin still holds a fully-current replica (the argument was

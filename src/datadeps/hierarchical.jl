@@ -1202,7 +1202,7 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
     end
     if uniform_execution(accel)
         for proc in all_procs
-            check_uniform(proc)
+            @check_uniform(proc)
         end
     end
 

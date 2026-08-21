@@ -90,6 +90,24 @@ check_uniformity!(check::Bool=true) = (CHECK_UNIFORMITY[] = check)
 check_uniform(value, original=value) =
     CHECK_UNIFORMITY[] && uniform_execution() ? check_uniform(hash(value), original) : true
 
+"""
+    @check_uniform(args...)
+
+Hot-path wrapper for [`check_uniform`](@ref). Every `check_uniform` method (the
+core fallback above, and every `check_uniform` MPIExt adds) short-circuits to
+`true` when `CHECK_UNIFORMITY[]` is `false`, so testing that flag inline is
+exactly equivalent to making the call -- but it avoids a dynamic call that would
+box its (usually isbits) arguments on every invocation, and avoids evaluating
+the argument expressions at all. `CHECK_UNIFORMITY[]` is set by
+`check_uniformity!`, which is the only way any of those checks become active.
+"""
+macro check_uniform(args...)
+    call = Expr(:call, GlobalRef(@__MODULE__, :check_uniform), map(esc, args)...)
+    return quote
+        $(GlobalRef(@__MODULE__, :CHECK_UNIFORMITY))[] ? $call : true
+    end
+end
+
 # Scheduler hooks: Sch.jl calls these instead of MPI-specific symbols.
 # Uniform-execution accelerations (e.g. MPI) inherit capacity/occupancy
 # behavior via `uniform_execution`; move/cleanup hooks default to no-ops /

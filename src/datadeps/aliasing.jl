@@ -233,7 +233,7 @@ struct ArgumentWrapper
     function ArgumentWrapper(arg, dep_mod)
         h = hash(dep_mod)
         h = _identity_hash(arg, h)
-        check_uniform(h, arg)
+        @check_uniform(h, arg)
         return new(arg, dep_mod, h)
     end
 end
@@ -305,7 +305,7 @@ function get_stored(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::A
 end
 function set_stored!(cache::AliasedObjectCacheStore, dest_space::MemorySpace, value::Chunk, ainfo::AbstractAliasing)
     @assert !is_stored(cache, dest_space, ainfo) "Cache already has derived ainfo $ainfo"
-    check_uniform(value)
+    @check_uniform(value)
     key = cache.derived[ainfo]
     value_ainfo = aliasing(cache.accel, value, identity)
     cache.derived[value_ainfo] = key
@@ -315,7 +315,7 @@ function set_stored!(cache::AliasedObjectCacheStore, dest_space::MemorySpace, va
     return
 end
 function set_key_stored!(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::AbstractAliasing, value::Chunk)
-    check_uniform(value)
+    @check_uniform(value)
     push!(cache.keys, ainfo)
     cache.derived[ainfo] = ainfo
     # A key is first registered at the space where the original object lives, so
@@ -1090,7 +1090,7 @@ function move_rewrap(accel, cache::AliasedObjectCache, from_proc::Processor, to_
     T = typeof(data)
     child_chunks = map(c -> move_rewrap(accel, cache, from_proc, to_proc, from_space, to_space, c), children)
     for cc in child_chunks
-        check_uniform(cc.handle)
+        @check_uniform(cc.handle)
     end
     return remotecall_endpoint_transfer(accel, from_proc, to_proc, from_space, to_space, child_chunks) do accel, from_proc, to_proc, from_space, to_space, child_chunks
         children_local = map(c -> move(from_proc, to_proc, c), child_chunks)

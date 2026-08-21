@@ -118,8 +118,8 @@ function compute_remainder_for_arg!(state::DataDepsState,
             @goto restart
         end
     end
-    check_uniform(spaces)
-    check_uniform(target_ainfos)
+    @check_uniform(spaces)
+    @check_uniform(target_ainfos)
 
     # We may only need to schedule a full copy from the origin space to the
     # target space if this is the first time we've written to `arg_w`
@@ -162,11 +162,11 @@ function compute_remainder_for_arg!(state::DataDepsState,
             other_ainfo = aliasing!(state, owner_space, arg_w)
             other_space = owner_space
         end
-        check_uniform(other_ainfo)
-        check_uniform(other_space)
+        @check_uniform(other_ainfo)
+        @check_uniform(other_space)
 
         # Lookup all memory spans for arg_w in these spaces
-        other_remote_arg_w = first(collect(state.ainfo_arg[other_ainfo]))
+        other_remote_arg_w = first(state.ainfo_arg[other_ainfo])
         other_arg_w = ArgumentWrapper(state.remote_arg_to_original[other_remote_arg_w.arg], other_remote_arg_w.dep_mod)
         other_ainfos = Vector{Vector{LocalMemorySpan}}()
         for space in spaces
@@ -266,9 +266,9 @@ Enqueues a copy operation to update the remainder regions of an object before a 
 function enqueue_remainder_copy_to!(state::DataDepsState, dest_space::MemorySpace, arg_w::ArgumentWrapper, remainder_aliasing::MultiRemainderAliasing,
                                     f, idx, dest_scope, task, write_num::Int)
     for remainder in remainder_aliasing.remainders
-        check_uniform(remainder.space)
+        @check_uniform(remainder.space)
         @assert !isempty(remainder.spans)
-        check_uniform(remainder.spans)
+        @check_uniform(remainder.spans)
         enqueue_remainder_copy_to!(state, dest_space, arg_w, remainder, f, idx, dest_scope, task, write_num)
     end
 end
@@ -322,9 +322,9 @@ Enqueues a copy operation to update the remainder regions of an object back to t
 function enqueue_remainder_copy_from!(state::DataDepsState, dest_space::MemorySpace, arg_w::ArgumentWrapper, remainder_aliasing::MultiRemainderAliasing,
                                       dest_scope, write_num::Int)
     for remainder in remainder_aliasing.remainders
-        check_uniform(remainder.space)
+        @check_uniform(remainder.space)
         @assert !isempty(remainder.spans)
-        check_uniform(remainder.spans)
+        @check_uniform(remainder.spans)
         enqueue_remainder_copy_from!(state, dest_space, arg_w, remainder, dest_scope, write_num)
     end
 end
