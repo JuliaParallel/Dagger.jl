@@ -242,8 +242,11 @@ function args_kwargs_to_arguments(f, args, kwargs)
     end
     return args_kwargs
 end
-function args_kwargs_to_typedarguments(f, args, kwargs)
-    nargs = 1 + length(args) + length(kwargs)
+function args_kwargs_to_typedarguments(f, args::Tuple, kwargs)
+    # N.B. Val-based ntuple: `length` of concrete tuples constant-folds, so the
+    # per-element getindex stays statically typed instead of boxing each
+    # heterogeneous element through a runtime-length ntuple
+    nargs = Val(1 + length(args) + length(kwargs))
     return ntuple(nargs) do idx
         if idx == 1
             return TypedArgument(ArgPosition(true, 0, :NULL), f)
