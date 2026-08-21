@@ -306,32 +306,47 @@ struct UnrefThunk
     thunk::Thunk
     state
 end
-function (unref::UnrefThunk)()
-    # Best-effort GC cleanup invoked once per task on DRef finalization. Use a
-    # plain `errormonitor` rather than `errormonitor_tracked`: the tracked list
-    # is only consulted by precompile for cleanliness, not for halt/runtime
-    # correctness, so tracking this high-frequency cleanup task only adds a
-    # name-string interpolation, a locked push, and an extra monitor-task spawn
-    # to every task's teardown.
-    errormonitor(Threads.@spawn begin
-        # The associated DTask is no longer referenced by the user, so mark the
-        # thunk as ready to be cleaned up as eagerly as possible (or do so now)
-        thunk = unref.thunk
-        state = unref.state
-        @lock state.lock begin
-            thunk.eager_accessible = false
-            Sch.delete_unused_task!(state, thunk)
-        end
+function unref_thunk!(unref::UnrefThunk)
+    # The associated DTask is no longer referenced by the user, so mark the
+    # thunk as ready to be cleaned up as eagerly as possible (or do so now)
+    thunk = unref.thunk
+    state = unref.state
+    @lock state.lock begin
+        thunk.eager_accessible = false
+        Sch.delete_unused_task!(state, thunk)
+    end
 
-        if unref.uid != UInt(0)
-            # Cleanup EAGER_THUNK_STREAMS if this is a streaming DTask
-            lock(Dagger.EAGER_THUNK_STREAMS) do global_streams
-                if haskey(global_streams, unref.uid)
-                    delete!(global_streams, unref.uid)
-                end
+    if unref.uid != UInt(0)
+        # Cleanup EAGER_THUNK_STREAMS if this is a streaming DTask
+        lock(Dagger.EAGER_THUNK_STREAMS) do global_streams
+            if haskey(global_streams, unref.uid)
+                delete!(global_streams, unref.uid)
             end
         end
-    end)
+    end
+    return
+end
+function (unref::UnrefThunk)()
+    # Best-effort GC cleanup invoked once per `DTask` teardown, as the MemPool
+    # destructor of the thunk's `DRef`. It is called from `datastore_delete`,
+    # which frequently runs in a GC/finalizer context where task switches (and
+    # therefore blocking locks) are illegal -- which is why this used to spawn a
+    # fresh task per teardown (2 `Task`s + closures per `DTask`).
+    #
+    # Instead, hand the work to MemPool's existing long-lived `SEND_QUEUE`
+    # reaper: `_enqueue_work(...; gc_context=true)` is finalizer-safe (it spins
+    # on `trylock` of an unbounded channel with `GC.safepoint()`, never
+    # blocking/yielding), reuses one task for all deferred teardown work, and is
+    # already how MemPool defers its own device deletions from this same call
+    # path. The work itself still runs on a regular task, so it may block on
+    # `state.lock` as before.
+    #
+    # N.B. Cannot be a Dagger-owned reaper task+channel pair: a channel held in
+    # a Dagger global with the reaper parked in its wait queue is reachable from
+    # module state during `@compile_workload`, and Julia cannot serialize a live
+    # `Task` into the package image.
+    MemPool._enqueue_work(unref_thunk!, unref; gc_context=true)
+    return
 end
 
 # Local -> Remote
