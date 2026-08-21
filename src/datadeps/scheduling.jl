@@ -13,8 +13,19 @@ Base.similar(::RoundRobinScheduler) = RoundRobinScheduler()
 function datadeps_schedule_task(sched::RoundRobinScheduler, state::DataDepsState, all_procs, all_scope, task_scope, spec::DTaskSpec, task::DTask)
     proc_idx = sched.proc_idx
     our_proc = all_procs[proc_idx]
-    if task_scope == all_scope
+    if task_scope === all_scope
         # all_procs is already limited to scope
+    elseif task_scope === DefaultScope()
+        # Common case: no user-specified scope. `DefaultScope()` is a shared
+        # singleton, so `===` identifies it exactly. Its inner scope is
+        # `AnyScope`, so `constrain(task_scope, all_scope)` can never be an
+        # `InvalidScope` and the compatibility check is skippable; all that
+        # remains of `proc_in_scope(proc, DefaultScope())` is its lone
+        # `DefaultEnabledTaint`, i.e. `default_enabled(proc)`.
+        while !default_enabled(our_proc)
+            proc_idx = mod1(proc_idx + 1, length(all_procs))
+            our_proc = all_procs[proc_idx]
+        end
     else
         if isa(constrain(task_scope, all_scope), InvalidScope)
             throw(Sch.SchedulingException("Scopes are not compatible: $(all_scope), $(task_scope)"))

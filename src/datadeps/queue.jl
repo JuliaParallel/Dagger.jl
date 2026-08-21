@@ -278,16 +278,22 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     our_proc = datadeps_schedule_task(scheduler, state, all_procs, all_scope, task_scope, spec, task)
     @assert our_proc in all_procs
     our_space = only(memory_spaces(our_proc))
-    check_uniform(our_proc)
-    check_uniform(our_space)
+    @check_uniform(our_proc)
+    @check_uniform(our_space)
 
     # Find the scope for this task (and its copies)
-    task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
-    if task_scope == all_scope
-        # Optimize for the common case, cache the proc=>scope mapping
+    # N.B. `task_scope` was already computed above for scheduling; the scope a
+    # task is scheduled under and the scope its copies run under are the same.
+    if task_scope === DefaultScope()
+        # Optimize for the common case (no user-specified scope), and cache the
+        # proc=>scope mapping. `DefaultScope()` is a shared singleton, so `===`
+        # identifies it exactly; the cached value is the same
+        # `constrain(<our procs>, task_scope)` the general branch computes, and
+        # it depends only on `our_proc` (via `our_space`) and the region-wide
+        # `all_procs`, both of which are fixed for this cache's lifetime.
         our_scope = get!(proc_to_scope_lfu, our_proc) do
             our_procs = filter(proc->proc in all_procs, collect(processors(our_space)))
-            return constrain(UnionScope(map(ExactScope, our_procs)...), all_scope)
+            return constrain(UnionScope(map(ExactScope, our_procs)...), DefaultScope())
         end
     else
         # Use the provided scope and constrain it to the available processors
