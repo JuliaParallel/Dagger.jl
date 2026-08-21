@@ -32,6 +32,7 @@ tests = [
     ("Task Affinity", "task-affinity.jl"),
     ("Datadeps", "datadeps.jl"),
     ("Datadeps - Scheduling", "datadeps/scheduling.jl"),
+    ("Datadeps - Locality Scheduling", "datadeps_locality.jl"),
     ("Streaming", "streaming.jl"),
     ("Domain Utilities", "domain.jl"),
     ("Array - Allocation", "array/allocation.jl"),
