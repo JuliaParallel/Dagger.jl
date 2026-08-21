@@ -410,7 +410,12 @@ mutable struct DataDepsState
 
     # The mapping of memory space to argument to remote argument copies
     # Used to replace an argument with its remote copy
-    remote_args::Dict{MemorySpace,IdDict{Any,Chunk}}
+    # N.B. Values are Chunks, or raw remote handles (e.g. ChunkView under MPI),
+    # matching `raw_arg_to_chunk` above -- hence `IdDict{Any,Any}`. Every
+    # construction site (`generate_slot!`, `get_or_generate_slot!`,
+    # hierarchical's ownership sync) builds `IdDict{Any,Any}`; declaring a
+    # narrower value type here only forced a convert+copy on each of them.
+    remote_args::Dict{MemorySpace,IdDict{Any,Any}}
 
     # The mapping of remote argument to original argument
     remote_arg_to_original::IdDict{Any,Any}
