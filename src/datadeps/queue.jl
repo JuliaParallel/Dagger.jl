@@ -381,17 +381,14 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
         arg_ws = task_arg_ws[idx]
         arg = remote_args[idx]
 
-        # Get the dependencies again as (dep_mod, readdep, writedep)
-        deps = map_or_ntuple(arg_ws.deps) do dep_idx
-            dep = arg_ws.deps[dep_idx]
-            (dep.arg_w.dep_mod, dep.readdep, dep.writedep)
-        end
-
         # Check that any mutable and written arguments are already in the correct space
         # N.B. We only do this check when the argument supports in-place
         # moves, because for the moment, we are not guaranteeing updates or
         # write-back of results
-        if is_writedep(arg, deps, task) && arg_ws.may_alias && arg_ws.inplace_move
+        # N.B. `is_writedep(arg, deps, task)` is `any(dep->dep[3], deps)` over
+        # `(dep_mod, readdep, writedep)` triples, i.e. exactly the check below;
+        # asking `arg_ws.deps` directly avoids rebuilding those triples.
+        if any(dep->dep.writedep, arg_ws.deps) && arg_ws.may_alias && arg_ws.inplace_move
             arg_space = memory_space(arg)
             @assert arg_space == our_space "($(repr(value(f))))[$(idx-1)] Tried to pass $(typeof(arg)) from $arg_space to $our_space"
         end
