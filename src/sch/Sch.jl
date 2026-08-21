@@ -992,7 +992,11 @@ concurrently across threads.
     # via its `restore` callback inside fire_tasks!; those dependents are
     # scheduled after the lock is released.
     restore_ready = Thunk[]
-    lock(state.lock) do
+    # N.B. Explicit lock/try/finally rather than a `do`-closure: the closure
+    # captured `scheduled`/`best_loc`/`best_spec` (all assigned in the loop
+    # above), which forced a Core.Box for each per call.
+    lock(state.lock)
+    try
         if scheduled
             fire_tasks!(ctx, best_loc, [best_spec], state, restore_ready)
         else
@@ -1005,6 +1009,8 @@ concurrently across threads.
             Threads.atomic_sub!(state.running_count, 1)
         end
         @maybelog ctx timespan_finish(ctx, :schedule, (;uid=state.uid, thunk_id=task.id), (;thunk_id=task.id))
+    finally
+        unlock(state.lock)
     end
     schedule_ready!(state, restore_ready, procs)
 end
