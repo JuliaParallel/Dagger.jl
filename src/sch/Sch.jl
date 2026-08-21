@@ -1602,7 +1602,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                 else
                     Dagger.set_task_migratable!(t)
                 end
-            end "thunk $thunk_id" DoTaskSpec(to_proc, return_queue, task, cancel_token)
+            end "thunk" DoTaskSpec(to_proc, return_queue, task, cancel_token)
 
             # Record the launched task
             lock(istate.queue) do _
