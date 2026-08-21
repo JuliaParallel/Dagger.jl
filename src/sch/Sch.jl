@@ -1808,14 +1808,27 @@ end
 const SCHED_MOVE = ScopedValue{Bool}(false)
 
 """
-    move_one_argument!(arg, ctx, accel, to_proc, thunk_id, f)
+    move_one_argument!(arg, mctx::MoveCtx)
 
-Moves one task argument to `to_proc` and stores the bound value on `arg`.
+Moves one task argument to `mctx.to_proc` and stores the bound value on `arg`.
 Runs inline for local arguments (see `argument_move_may_inline`) or on a
 scheduled move task otherwise; a top-level function so the inline path
-allocates no closure.
+allocates no closure, taking its per-task invariants bundled in one `MoveCtx`
+(a dynamic call with several isbits arguments would box each per argument).
 """
-function move_one_argument!(arg, ctx, accel, to_proc, thunk_id, @nospecialize(f))
+struct MoveCtx
+    ctx::Context
+    accel::Dagger.Acceleration
+    to_proc::Processor
+    thunk_id::Int
+    f::Any
+end
+function move_one_argument!(arg, mctx::MoveCtx)
+    ctx = mctx.ctx
+    accel = mctx.accel
+    to_proc = mctx.to_proc
+    thunk_id = mctx.thunk_id
+    f = mctx.f
     value = Dagger.value(arg)
     position = arg.pos
     @maybelog ctx timespan_start(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=value))
@@ -1981,17 +1994,18 @@ Executes a single task specified by `task` on `to_proc`.
     # rank-uniform tags derived from the thunk ID; they must run sequentially
     # in argument order (FIFO tag matching), with the thunk's TID in scope
     accel = something(options.acceleration, current_acceleration())
+    mctx = MoveCtx(ctx, accel, to_proc, thunk_id, f)
     fetch_tasks = nothing
     for arg in _data
         if argument_move_may_inline(accel, to_proc, Dagger.value(arg))
             # Common local case: run the move inline — no closure, no Task,
             # no fetch_tasks vector
-            move_one_argument!(arg, ctx, accel, to_proc, thunk_id, f)
+            move_one_argument!(arg, mctx)
             continue
         end
         #=FIXME:REALLOC_TASKS=#
         t = schedule_argument_move(accel, thunk_id,
-                                   () -> move_one_argument!(arg, ctx, accel, to_proc, thunk_id, f))
+                                   () -> move_one_argument!(arg, mctx))
         t === nothing && continue
         if fetch_tasks === nothing
             fetch_tasks = Task[]
