@@ -214,6 +214,12 @@ Julia or Dagger tasks spawned by `f()` or its callees (i.e. the options
 propagate).
 """
 function with_options(f, options::NamedTuple)
+    # N.B. `merge(prev, ())` is the identity, so an empty `options` would install
+    # a scope whose `options_context` value equals the enclosing one -- observably
+    # a no-op (nothing else is bound). Returning `f()` directly avoids building a
+    # `ScopedValues` Scope/HAMT per call, which matters because Datadeps regions
+    # spawn with an empty propagated `NamedTuple` for nearly every task.
+    isempty(options) && return f()
     prev_options = options_context[]
     with(options_context => merge(prev_options, options)) do
         f()
