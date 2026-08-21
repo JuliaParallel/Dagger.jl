@@ -9,6 +9,10 @@ short_name(space::MemorySpace) = string(space)
 short_name(space::CPURAMMemorySpace) = "CPU: $(space.owner)"
 
 memory_space(x, proc::Processor=default_processor()) = first(memory_spaces(proc))
+# Non-allocating direct accessors for the common CPU processors (avoids Set
+# iteration + boxing tuple getindex in dynamic contexts)
+memory_space(proc::ThreadProc) = CPURAMMemorySpace(proc.owner)
+memory_space(proc::OSProc) = CPURAMMemorySpace(proc.pid)
 
 # Acceleration-free memory space of a raw value, used to label chunk records;
 # GPU package extensions add methods for device array types (e.g.
