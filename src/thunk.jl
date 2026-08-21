@@ -559,9 +559,12 @@ function _par(mod, ex::Expr; lazy=true, recur=true, opts=())
             return quote
                 let
                     $result = if $get_task_typed()
-                        $typed_spawn($f, $Options(;$(opts...)), $(args...); $(kwargs...))
+                        # N.B. `*_macro` entry points skip the defensive
+                        # `Options` copy: the `Options` below is freshly built
+                        # here and cannot be aliased by the user.
+                        $typed_spawn_macro($f, $Options(;$(opts...)), $(args...); $(kwargs...))
                     else
-                        $spawn($f, $Options(;$(opts...)), $(args...); $(kwargs...))
+                        $spawn_macro($f, $Options(;$(opts...)), $(args...); $(kwargs...))
                     end
                     if $(Expr(:islocal, sync_var))
                         put!($sync_var, schedule(Task(()->fetch($result; raw=true))))
@@ -609,10 +612,7 @@ function spawn(f, args...; kwargs...)
         task_options = Options()
     end
 
-    # Process the args and kwargs into Argument form
-    args_kwargs = args_kwargs_to_arguments(f, args, kwargs)
-
-    return _spawn(args_kwargs, task_options)
+    return _spawn_owned(f, task_options, args, kwargs)
 end
 function typed_spawn(f, args...; kwargs...)
     # Merge all passed options
@@ -624,24 +624,57 @@ function typed_spawn(f, args...; kwargs...)
         task_options = Options()
     end
 
-    # Process the args and kwargs into Tuple of TypedArgument form
-    args_kwargs = args_kwargs_to_typedarguments(f, args, kwargs)
+    return _typed_spawn_owned(f, task_options, args, kwargs)
+end
 
+# Internal entry points taking ownership of `task_options`.
+#
+# `@spawn`'s expansion constructs a fresh `Options(; ...)` for every call, which
+# is provably unaliased, so the defensive `copy` that `spawn`/`typed_spawn` must
+# perform for user-supplied `Options` is pure overhead there. The macro therefore
+# routes through these instead; `Dagger.spawn`/`Dagger.typed_spawn` (which may be
+# handed an `Options` the caller keeps a reference to) still copy first.
+function _spawn_owned(f, task_options::Options, args::Tuple, kwargs)
+    @nospecialize f args kwargs
+    # Process the args and kwargs into Argument form
+    args_kwargs = args_kwargs_to_arguments(f, args, kwargs)
     return _spawn(args_kwargs, task_options)
 end
+function _typed_spawn_owned(f, task_options::Options, args::Tuple, kwargs)
+    # Process the args and kwargs into Tuple of TypedArgument form
+    args_kwargs = args_kwargs_to_typedarguments(f, args, kwargs)
+    return _spawn(args_kwargs, task_options)
+end
+function spawn_macro(f, task_options::Options, args...; kwargs...)
+    # N.B. `@nospecialize` as in `spawn`, which this replaces on the macro path
+    @nospecialize f args kwargs
+    return _spawn_owned(f, task_options, args, kwargs)
+end
+typed_spawn_macro(f, task_options::Options, args...; kwargs...) =
+    _typed_spawn_owned(f, task_options, args, kwargs)
 function _spawn(args_kwargs, task_options)
     # Get all scoped options and determine which propagate beyond this task
     scoped_options = get_options()::NamedTuple
-    if haskey(scoped_options, :propagates)
+    # N.B. With no scoped options there is nothing to propagate, and a
+    # `propagates` of `nothing` is observably identical to an empty
+    # `Symbol[]` (see `get_propagated_options`, which returns an empty
+    # `NamedTuple` for both, and `maybe_default!(:propagates)`, whose default is
+    # `nothing`). So skip building the vector entirely in that (very common)
+    # case; `propagates === nothing` below means "nothing to add".
+    propagates = if haskey(scoped_options, :propagates)
         if scoped_options.propagates isa Tuple
-            propagates = Symbol[scoped_options.propagates...]
+            Symbol[scoped_options.propagates...]
         else
-            propagates = scoped_options.propagates::Vector{Symbol}
+            scoped_options.propagates::Vector{Symbol}
         end
+    elseif isempty(scoped_options)
+        nothing
     else
-        propagates = Symbol[]
+        Symbol[]
     end
-    append!(propagates, keys(scoped_options)::NTuple{N,Symbol} where N)
+    if propagates !== nothing
+        append!(propagates, keys(scoped_options)::NTuple{N,Symbol} where N)
+    end
 
     # N.B. Merges into task_options
     options_merge!(task_options, scoped_options; override=false)
