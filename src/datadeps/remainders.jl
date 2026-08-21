@@ -87,9 +87,30 @@ function compute_remainder_for_arg!(state::DataDepsState,
                                     target_space::MemorySpace,
                                     arg_w::ArgumentWrapper,
                                     write_num::Int; compute_syncdeps::Bool=true)
+    owner_space = state.arg_owner[arg_w]
+
+    # Fast path: when the owner is the target and every recorded write lives
+    # in the target space, there is nothing to pull from elsewhere — the
+    # general machinery below provably reduces to `NoAliasing(), 0` (every
+    # history entry takes the subtract-only branch, so the tracker stays
+    # empty), and the `aliasing!` calls it would make for the target space
+    # either already happened (populate_argument_info!/add_writer!) or are
+    # re-performed by the caller's syncdeps pass. This is the common case for
+    # single-space (shared-memory) regions and skips the span/interval-tree
+    # machinery entirely.
+    if owner_space == target_space
+        all_local = true
+        for entry in state.arg_history[arg_w]
+            if entry.space != target_space
+                all_local = false
+                break
+            end
+        end
+        all_local && return NoAliasing(), 0
+    end
+
     spaces_set = Set{MemorySpace}()
     push!(spaces_set, target_space)
-    owner_space = state.arg_owner[arg_w]
     push!(spaces_set, owner_space)
 
     @label restart
