@@ -272,6 +272,9 @@ function slot_is_retained(slot)
     slot isa Chunk || return false
     return @lock region.lock slot.handle in region.retained
 end
+# See the `slot_is_retained(ddctx::DataDepsContext, slot)` overload in
+# context.jl (included after this file, which is where `DataDepsContext` is
+# defined) for the cross-region-safe version `flush_pending_frees!` uses.
 
 """
     release_slot_reuse_region!(region)

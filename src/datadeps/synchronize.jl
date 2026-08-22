@@ -168,6 +168,15 @@ function flush_pending_frees!(ddctx::DataDepsContext)
         free_scope = ExactScope(remote_proc)
         for (ainfo, remote_arg) in obj_cache.values[remote_space]
             is_original(obj_cache, remote_space, ainfo) && continue
+            # Skip buffers handed to the slot cache: the next region over this
+            # data expects to find them intact. Uses `ddctx.pending_retained_slots`,
+            # not the scoped `SLOT_REUSE_REGION[]`/`slot_is_retained(slot)` that
+            # hierarchical's own (never-deferred) free loop uses -- this flush can
+            # run long after, and even outside of, the `spawn_datadeps` call whose
+            # `retain_reusable_slots!` populated that scoped region, so the scoped
+            # value is not reliably bound here. See `pending_retained_slots`'s
+            # field comment (context.jl).
+            slot_is_retained(ddctx, remote_arg) && continue
             haskey(freed, remote_arg) && continue
             freed[remote_arg] = nothing
             free_syncdeps = Set{ThunkSyncdep}()
@@ -309,6 +318,7 @@ function _do_synchronize!(ddctx::DataDepsContext;
             ddctx.state = DataDepsState()
         end
         empty!(ddctx.pending_free)
+        empty!(ddctx.pending_retained_slots)
         # `pending_writeback` is already empty when `write_back` was true
         # (the flush above cleared it); if the caller asked to skip
         # write-back, leave it for the next flush to pick up.
