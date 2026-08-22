@@ -370,7 +370,7 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
 
     # Calculate this task's syncdeps
     if spec.options.syncdeps === nothing
-        spec.options.syncdeps = Set{ThunkSyncdep}()
+        spec.options.syncdeps = take_syncdeps_set!()
     end
     # N.B. Queried once per task and reused below: each call is a task-local
     # acceleration lookup plus a dynamic dispatch, and it cannot change while
@@ -417,6 +417,17 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     # N.B. `task_arg_ws`/`remote_args` are per-task scratch buffers, so the
     # logged payload snapshots them (only evaluated when logging is enabled)
     @maybelog ctx timespan_finish(ctx, :datadeps_execute, (;thunk_id=task.uid), (;space=our_space, deps=logged_task_args(deps_vec, task_arg_ws), args=copy(remote_args)))
+
+    # Reclaim the syncdeps set when the (synchronous) submission above has
+    # already consumed it — see `syncdeps_consumed` for the guard rationale.
+    # Under deferred submission (launch_wait / batched hierarchical enqueue)
+    # the guard fails and the set stays with the spec.
+    let sd = new_spec.options.syncdeps
+        if sd !== nothing && syncdeps_consumed(sd)
+            new_spec.options.syncdeps = nothing
+            return_syncdeps_set!(sd)
+        end
+    end
 
     # Update read/write tracking for arguments
     for (idx, arg_ws) in enumerate(task_arg_ws)

@@ -234,10 +234,29 @@ function _get_dag_ids(ctx, state, task, tid, _)
     for (id, thunk) in thunk_dict_snapshot
         thunk = unwrap_weak_checked(thunk)
         (@atomic thunk.finished) && continue
-        thunk.options === nothing && continue
-        thunk.options.syncdeps === nothing && continue
+        options = thunk.options
+        options === nothing && continue
+        # Load the syncdeps set exactly once: under datadeps, a task's pooled
+        # syncdeps set is detached (the field reset to `nothing`) and recycled
+        # right after eager submission consumes it, concurrently with this
+        # introspection. A single load plus per-entry validation below keeps
+        # this a best-effort snapshot rather than a race (a re-read could see
+        # `nothing`, and a recycled set may briefly hold another task's
+        # planner-form entries).
+        syncdeps = options.syncdeps
+        syncdeps === nothing && continue
         thunk_id = ThunkID(id, nothing)
-        for input in Dagger.syncdeps_iterator(thunk)
+        for syncdep in syncdeps
+            local input
+            inner = syncdep.thunk
+            if inner isa Dagger.WeakThunk
+                input = Dagger.unwrap_weak(inner)
+                input === nothing && continue # upstream collected/recycled
+            elseif inner isa Thunk # non-eager (`compute()`) syncdeps form
+                input = inner
+            else
+                continue # planner-form (`ThunkID`) entry
+            end
             input_id = ThunkID(input.id, nothing)
             haskey(deps, input_id) || continue
             push!(deps[input_id], thunk_id)

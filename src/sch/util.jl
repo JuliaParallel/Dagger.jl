@@ -349,7 +349,15 @@ function print_sch_status(io::IO, state, thunk; offset=0, limit=5, max_inputs=3)
         print(io, "($(status_string(thunk))) ")
     end
     println(io, "$(thunk.id): $(thunk.f)")
-    for (idx, input) in enumerate(thunk.options.syncdeps)
+    # Load the syncdeps set exactly once: datadeps detaches and recycles the
+    # pooled set (resetting the field to `nothing`) concurrently with this
+    # debug printer, so a re-read between the check and the loop could see
+    # `nothing`. Entries are `ThunkSyncdep`s — unwrap the `WeakThunk` form and
+    # skip planner-form (`ThunkID`) entries.
+    syncdeps = thunk.options.syncdeps
+    syncdeps === nothing && return
+    for (idx, syncdep) in enumerate(syncdeps)
+        input = syncdep.thunk
         if input isa WeakThunk
             input = Dagger.unwrap_weak(input)
             if input === nothing
