@@ -724,12 +724,22 @@ const HIER_TASKS_PER_PARTITION = 16
 
 How many partitions to split `ntasks` into when all processors share an owner.
 
+Currently always 1 (plan flat): with the flat planner's per-task cost now in
+the tens of microseconds, measurements on 8 threads show partitioned planning
+losing to flat at every tested single-owner scale — 576 tasks: 26 ms flat vs
+84 ms partitioned; 4096 tasks: 187 ms flat vs 384 ms partitioned — because the
+partition machinery (aliasing prescan, DAG build, per-partition states,
+cross-partition syncdeps) costs more than the planning it parallelizes.
+Multi-owner regions are unaffected (they partition by data ownership, not by
+this throughput heuristic). Revisit if per-partition overheads shrink or a
+scale is found where serial planning dominates.
+
 Capped at half of `nprocs` because partition planning tasks and the processor
 runners execute on the same threads: one partition per processor leaves nothing
 to run the work being planned, and measures slower than not partitioning at all.
 """
 single_owner_partition_count(ntasks::Int, nprocs::Int) =
-    clamp(ntasks ÷ HIER_TASKS_PER_PARTITION, 1, max(1, nprocs ÷ 2))
+    1
 
 """
     partition_dag(dag, task_metas, all_procs) -> (vertex_to_partition, n_partitions, partition_procs)
