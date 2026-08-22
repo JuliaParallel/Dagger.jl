@@ -436,6 +436,8 @@ jobs:
         run: julia --project=test/mpi/env -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()), PackageSpec(path="lib/TimespanLogging")]); Pkg.instantiate()'
       - name: Run CPU MPI tests
         run: julia --project=test/mpi/env test/mpi/run.jl ${{ matrix.ranks }} 2 test/mpi/cpu.jl
+      - name: Run CPU MPI async pipelining tests
+        run: julia --project=test/mpi/env test/mpi/run.jl ${{ matrix.ranks }} 2 test/mpi_async.jl
 
   mpi-opencl:
     # OpenCL runs against a CPU-backed ICD (no physical GPU required), unlike

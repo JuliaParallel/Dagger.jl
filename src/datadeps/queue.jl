@@ -66,8 +66,11 @@ write-back/free) to a later [`Dagger.synchronize`](@ref) call -- this is what
 lets consecutive regions pipeline instead of each one being a full barrier.
 `sync` defaults to `Dagger.DATADEPS_SYNC[]`, itself defaulting to `true`, so
 every existing caller is unaffected unless it opts in. `hierarchical=true`
-(the default) and MPI/SPMD execution both force `sync=true` regardless of what
-is requested; see the N.B. below. The result of `f` will be returned from
+(the default) forces `sync=true` regardless of what is requested; see the
+N.B. below. MPI/SPMD execution (`uniform_execution()`) no longer forces
+`sync=true` -- deferred planning/flushing is rank-uniform, protected by
+[`with_datadeps_planning_token`](@ref) so only one Julia Task per rank ever
+performs it at a time. The result of `f` will be returned from
 `spawn_datadeps`.
 """
 function spawn_datadeps(f::Base.Callable; static::Bool=true,
@@ -108,14 +111,23 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
     # N.B. Hierarchical keeps its own region-scoped `DataDepsState`s,
     # reconciled at the end of every region exactly as before (`ctx.state`
     # stays `#undef`; see context.jl) -- persisting *that* path's state across
-    # regions is out of scope here. Uniform (MPI/SPMD) execution is excluded
-    # for a different reason: a deferred epilogue spanning multiple regions
-    # means tags / `MPIRefID`s get allocated by code running arbitrarily long
-    # after the region that requested them returned, and that hasn't been
-    # vetted for rank-uniformity yet. Both force a synchronous trailing drain
-    # regardless of what the caller asked for, so nothing is ever left
-    # pending across either boundary in this phase.
-    sync = if hierarchical || uniform_execution()
+    # regions is out of scope here, so it still forces a synchronous trailing
+    # drain regardless of what the caller asked for. Integrating hierarchical
+    # with the context (carry-in/publish-back) is later work; see PLAN.md
+    # Phase 7b.
+    #
+    # Uniform (MPI/SPMD) execution is NOT forced anymore (Phase 7a): a
+    # deferred epilogue spanning multiple regions does mean tags/`MPIRefID`s
+    # get allocated by code running arbitrarily long after the region that
+    # requested them returned, but that's rank-uniform as long as every rank
+    # performs those allocations in the same relative order -- which is true
+    # of the deferred write-back/free emission (still sorted by `arg_w.hash`,
+    # still driven purely by `ddctx.state`, itself built identically on every
+    # rank) and is now further guarded by `with_datadeps_planning_token`
+    # (context.jl) so a second Julia Task racing to plan or flush on the same
+    # rank gets a clear error instead of silently reordering the allocation
+    # sequence relative to another rank's.
+    sync = if hierarchical
         true
     else
         something(sync, DATADEPS_SYNC[], true)::Bool
@@ -173,10 +185,16 @@ function _spawn_datadeps(ddctx::DataDepsContext, f::Base.Callable, scheduler, la
                 # epilogue, and each answer costs a round-trip to the owner.
                 ddctx.memo = ChunkAinfoMemo()
                 with(CHUNK_AINFO_MEMO => ddctx.memo) do
-                    if hierarchical
-                        distribute_tasks_hierarchical!(queue, ddctx)
-                    else
-                        distribute_tasks!(queue, ddctx)
+                    # Under uniform (MPI/SPMD) execution, only one Julia Task
+                    # per rank may be inside here at a time -- see
+                    # `with_datadeps_planning_token` (context.jl). A no-op
+                    # wrapper otherwise.
+                    with_datadeps_planning_token() do
+                        if hierarchical
+                            distribute_tasks_hierarchical!(queue, ddctx)
+                        else
+                            distribute_tasks!(queue, ddctx)
+                        end
                     end
                 end
             end
