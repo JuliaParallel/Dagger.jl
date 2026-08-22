@@ -1816,13 +1816,32 @@ scheduled move task otherwise; a top-level function so the inline path
 allocates no closure, taking its per-task invariants bundled in one `MoveCtx`
 (a dynamic call with several isbits arguments would box each per argument).
 """
-struct MoveCtx
+struct MoveCtx{A<:Dagger.Acceleration,P<:Processor}
     ctx::Context
-    accel::Dagger.Acceleration
-    to_proc::Processor
+    accel::A
+    to_proc::P
     thunk_id::Int
     f::Any
 end
+
+"""
+    maybe_async_move!(arg, mctx::MoveCtx) -> Union{Task,Nothing}
+
+Decides inline-vs-async for one argument move and performs (or schedules) it.
+Lives behind the `MoveCtx{A,P}` barrier so the decision and the move dispatch
+on concrete acceleration/processor types (no per-argument boxing).
+"""
+function maybe_async_move!(arg, mctx::MoveCtx)
+    if argument_move_may_inline(mctx.accel, mctx.to_proc, Dagger.value(arg))
+        # Common local case: run the move inline — no closure, no Task
+        move_one_argument!(arg, mctx)
+        return nothing
+    end
+    #=FIXME:REALLOC_TASKS=#
+    return schedule_argument_move(mctx.accel, mctx.thunk_id,
+                                  () -> move_one_argument!(arg, mctx))
+end
+
 function move_one_argument!(arg, mctx::MoveCtx)
     ctx = mctx.ctx
     accel = mctx.accel
@@ -1997,15 +2016,7 @@ Executes a single task specified by `task` on `to_proc`.
     mctx = MoveCtx(ctx, accel, to_proc, thunk_id, f)
     fetch_tasks = nothing
     for arg in _data
-        if argument_move_may_inline(accel, to_proc, Dagger.value(arg))
-            # Common local case: run the move inline — no closure, no Task,
-            # no fetch_tasks vector
-            move_one_argument!(arg, mctx)
-            continue
-        end
-        #=FIXME:REALLOC_TASKS=#
-        t = schedule_argument_move(accel, thunk_id,
-                                   () -> move_one_argument!(arg, mctx))
+        t = maybe_async_move!(arg, mctx)
         t === nothing && continue
         if fetch_tasks === nothing
             fetch_tasks = Task[]
