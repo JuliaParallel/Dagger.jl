@@ -211,6 +211,57 @@ function deps_seal!(t::Thunk)
     return old isa Sealed ? nothing : old
 end
 
+# Global pool of recycled Thunks. The recycle point is `Sch.task_delete!`,
+# where a Thunk is provably unreachable from every root except the caller's
+# frame (see that function for the guard set); `take_pooled_thunk!` is the
+# submission-side take. Locked: submitters and finishers are arbitrary tasks.
+const THUNK_POOL = LockedObject(Vector{Thunk}())
+const THUNK_POOL_CAP = 4096
+
+function take_pooled_thunk!(spec::ThunkSpec)
+    t = @safe_lock_spin1 THUNK_POOL pool begin
+        isempty(pool) ? nothing : pop!(pool)
+    end
+    t === nothing && return Thunk(spec)
+    t = t::Thunk
+    # Reinitialize exactly as the inner constructor does
+    t.inputs = spec.fargs
+    t.id = spec.id
+    t.cache_ref = spec.cache_ref
+    t.options = spec.options
+    t.eager_accessible = true
+    t.sch_accessible = true
+    @atomic t.finished = false
+    @atomic t.errored = false
+    @atomic t.valid = false
+    @atomic t.running = false
+    t.running_on = nothing
+    @atomic t.futures_head = nothing
+    @atomic t.pending_deps = 0
+    @atomic t.dependents_head = nothing
+    t.sig = nothing
+    return t
+end
+
+function recycle_thunk!(t::Thunk)
+    # Strip references so a pooled Thunk pins nothing, and zero the id so any
+    # stale WeakThunk (which validates the id) resolves to `nothing` instead
+    # of a recycled task. The Treiber heads stay SEALED while pooled so a
+    # racing late push observes a closed list.
+    t.inputs = EMPTY_ARGS
+    t.id = 0
+    t.cache_ref = nothing
+    t.options = nothing
+    t.running_on = nothing
+    t.sig = nothing
+    @atomic t.futures_head = SEALED
+    @atomic t.dependents_head = SEALED
+    @safe_lock_spin1 THUNK_POOL pool begin
+        length(pool) < THUNK_POOL_CAP && push!(pool, t)
+    end
+    return
+end
+
 function Thunk(f, xs...;
                syncdeps=nothing,
                id::Int=next_id(),

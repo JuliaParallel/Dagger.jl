@@ -201,7 +201,7 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
             thunk_spec.fargs = fargs
             thunk_spec.id = id
             thunk_spec.options = options
-            return Thunk(thunk_spec)
+            return take_pooled_thunk!(thunk_spec)
         end
 
         # Create a `DRef` to `thunk` so that the caller can preserve it
@@ -316,7 +316,9 @@ function unref_thunk!(unref::UnrefThunk)
     state = unref.state
     @lock state.lock begin
         thunk.eager_accessible = false
-        Sch.delete_unused_task!(state, thunk)
+        # A thunk deletable here finished long ago: its Treiber lists are
+        # sealed and drained, so it may be recycled
+        Sch.delete_unused_task!(state, thunk; recycle=true)
     end
 
     if unref.uid != UInt(0)

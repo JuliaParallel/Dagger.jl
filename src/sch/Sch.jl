@@ -1124,7 +1124,9 @@ function finish_task!(ctx, state, node, thunk_failed, ready::Vector{Thunk})
         schedule_dependents!(state, node, false, ready)
         fill_registered_futures!(state, node, false)
         node.sch_accessible = false
-        delete_unused_task!(state, node)
+        # Both Treiber lists were sealed and drained just above, so the thunk
+        # may be recycled if this deletes it
+        delete_unused_task!(state, node; recycle=true)
     end
     # Decrement `running_count` for `node` *last*, only after
     # `schedule_dependents!` has already credited any newly-freed dependents
@@ -1137,16 +1139,21 @@ function finish_task!(ctx, state, node, thunk_failed, ready::Vector{Thunk})
     #evict_all_chunks!(ctx, to_evict)
 end
 
-function delete_unused_task!(state, thunk)
+function delete_unused_task!(state, thunk; recycle::Bool=false)
     if has_result(state, thunk) && !thunk.eager_accessible && !thunk.sch_accessible
         # Will not be accessed further, delete all cached data
-        task_delete!(state, thunk)
+        task_delete!(state, thunk; recycle)
         return true
     else
         return false
     end
 end
-function task_delete!(state, thunk)
+# `recycle=true` returns the Thunk to the global pool. Only callers for whom
+# the futures AND dependents Treiber lists are already sealed-and-drained may
+# pass it (success-path finish_task! and unref_thunk!): the failure paths run
+# schedule_dependents! AFTER deletion, and a recycled thunk's re-SEALED
+# dependents head would silently skip failure propagation.
+function task_delete!(state, thunk; recycle::Bool=false)
     clear_result!(state, thunk)
     @atomic thunk.valid = false
     @atomic thunk.errored = false
@@ -1155,6 +1162,8 @@ function task_delete!(state, thunk)
     end
     # Release the scheduler's strong reference (see `ComputeState.strong_thunks`).
     delete!(state.strong_thunks, thunk)
+    recycle && Dagger.recycle_thunk!(thunk)
+    return
 end
 
 function evict_all_chunks!(ctx, options, to_evict)
