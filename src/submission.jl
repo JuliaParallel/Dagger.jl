@@ -47,10 +47,13 @@ const THUNK_SPEC_CACHE = TaskLocalValue{ReusableCache{ThunkSpec,Nothing}}(()->Re
 # `eager_submit_internal!`) so that it captures nothing: a local named function
 # defined inside that loop forces a `Core.Box` allocation per iteration.
 function find_equivalent_chunk(state, chunk::C) where {C<:Chunk}
-    # `equiv_chunks` is a `WeakKeyDict{DRef,Chunk}`; only
+    # `equiv_chunks` is a `WeakKeyDict{DRef,WeakRef}`; only
     # DRef-backed chunks participate. Other handles (e.g.
     # `MPIRef` under MPI) are not valid keys and manage their
     # own identity, so pass them through unchanged.
+    # N.B. Values are WeakRefs: a strong Chunk value would root its own key
+    # (chunk.handle === key), making every entry — and the data behind the
+    # DRef — immortal.
     chunk.handle isa DRef || return chunk
     # N.B. Explicit lock/unlock rather than `lock(f, state.equiv_chunks)`: the
     # closure would capture `chunk` and allocate on every call. The critical
@@ -58,12 +61,13 @@ function find_equivalent_chunk(state, chunk::C) where {C<:Chunk}
     lock(state.equiv_chunks)
     try
         ec = payload(state.equiv_chunks)
-        if haskey(ec, chunk.handle)
-            return ec[chunk.handle]::C
-        else
-            ec[chunk.handle] = chunk
-            return chunk
+        existing = get(ec, chunk.handle, nothing)
+        if existing !== nothing
+            value = existing.value
+            value === nothing || return value::C
         end
+        ec[chunk.handle] = WeakRef(chunk)
+        return chunk
     finally
         unlock(state.equiv_chunks)
     end

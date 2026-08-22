@@ -58,7 +58,7 @@ Fields:
 - `running_count::Threads.Atomic{Int}` - Number of `Thunk`s that are running *or* have become ready but are not yet fired (replaces `running::Set{Thunk}`; per-thunk state lives on `thunk.running` and `thunk.running_on`). A thunk is credited here the moment it's placed into a `ready_out` buffer (`schedule_dependents!`/`reschedule_syncdeps!`/`start_state`), not when `fire_tasks!` actually dispatches it — this way, whenever a finishing thunk's decrement frees up a new ready dependent, the corresponding increment always happens first, so the counter never has a transient window where it looks like 0 while replacement work is still pending. Every code path that removes a thunk from a `ready_out` buffer without ultimately running it through `finish_task!` (the scheduling-inconsistency and no-processors-available/invalid-scope branches in `schedule_one!`) must release its credit with a matching decrement.
 - `thunk_dict::LockedObject{Dict{Int, WeakThunk}}` - Maps from thunk IDs to a `Thunk`; has its own lock so it can be accessed independently of `state.lock`
 - `node_order::Any` - Function that returns the order of a thunk
-- `equiv_chunks::LockedObject{WeakKeyDict{DRef,Chunk}}` - Cache mapping from `DRef` to a `Chunk` which contains it; has its own lock
+- `equiv_chunks::LockedObject{WeakKeyDict{DRef,WeakRef}}` - Cache mapping from `DRef` to a `Chunk` which contains it (held weakly; a strong `Chunk` value would root its own key and leak every entry); has its own lock
 - `worker_time_pressure::LockedObject{Dict{Int,Dict{Processor,Threads.Atomic{UInt64}}}}` - Maps from worker ID to per-processor pressure counters (atomic leaves, own lock for membership changes; capture-the-ref invariant: hold the Atomic object across reserve→release)
 - `worker_storage_pressure::LockedObject{Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}}` - Maps from worker ID to storage resource pressure (own lock)
 - `worker_storage_capacity::LockedObject{Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}}` - Maps from worker ID to storage resource capacity (own lock)
@@ -145,7 +145,7 @@ mutable struct ComputeState
     running_count::Threads.Atomic{Int}
     thunk_dict::LockedObject{Dict{Int, WeakThunk}}
     node_order::Any
-    equiv_chunks::LockedObject{WeakKeyDict{DRef,Chunk}}
+    equiv_chunks::LockedObject{WeakKeyDict{DRef,WeakRef}}
     worker_time_pressure::LockedObject{Dict{Int,Dict{Processor,Threads.Atomic{UInt64}}}}
     worker_storage_pressure::LockedObject{Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}}
     worker_storage_capacity::LockedObject{Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}}
@@ -214,7 +214,7 @@ function start_state(deps::Dict, node_order, chan, ctx::Context, sch_options::Sc
                          Threads.Atomic{Int}(0),
                          LockedObject(Dict{Int, WeakThunk}()),
                          node_order,
-                         LockedObject(WeakKeyDict{DRef,Chunk}()),
+                         LockedObject(WeakKeyDict{DRef,WeakRef}()),
                          LockedObject(Dict{Int,Dict{Processor,Threads.Atomic{UInt64}}}()),
                          LockedObject(Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}()),
                          LockedObject(Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}()),
@@ -579,8 +579,13 @@ function handle_result!(ctx, state::ComputeState, pid, proc, thunk_id, res, meta
         end
         if res isa Chunk && res.handle isa DRef
             lock(state.equiv_chunks) do ec
-                if !haskey(ec, res.handle)
-                    ec[res.handle] = res
+                existing = get(ec, res.handle, nothing)
+                if existing === nothing || existing.value === nothing
+                    # N.B. The value is a WeakRef: a strong Chunk value would
+                    # root its own key (chunk.handle === key), making the
+                    # WeakKeyDict entry — and the result data behind the DRef —
+                    # immortal
+                    ec[res.handle] = WeakRef(res)
                 end
             end
         end

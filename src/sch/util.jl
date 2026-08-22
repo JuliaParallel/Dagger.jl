@@ -601,7 +601,13 @@ function collect_task_inputs!(state, inputs)
     for idx in 1:length(inputs)
         input = unwrap_weak_checked(Dagger.value(inputs[idx]))
         if istask(input)
-            inputs[idx].value = wrap_weak(load_result(state, input))
+            # N.B. The resolved result is stored STRONGLY: the consumer is now
+            # the owner keeping it alive until its own teardown. (It was
+            # previously wrap_weak'd, which relied on `equiv_chunks` pinning
+            # every result — but that pin was immortal, leaking all results;
+            # with weak equiv_chunks values, a weak slot could expire between
+            # the producer's teardown and this task firing.)
+            inputs[idx].value = load_result(state, input)
         end
     end
     return
@@ -631,7 +637,8 @@ function resolve_finished_input!(state, dep::Thunk, up::Thunk)
         # would instead assert and crash the completion worker.
         input = unwrap_weak(Dagger.value(inputs[idx]))
         if input === up
-            inputs[idx].value = wrap_weak(load_result(state, up))
+            # Stored strongly — see collect_task_inputs! for rationale
+            inputs[idx].value = load_result(state, up)
         end
     end
     return
