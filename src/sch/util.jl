@@ -135,7 +135,11 @@ function fill_registered_futures!(state, thunk, failed)
     node = head
     while node !== nothing
         put!(node.future, result; error=failed)
-        node = @atomic node.next
+        # The walk owns the chain exclusively after the seal (double-seal
+        # returns nothing), so the drained node can be recycled
+        next = @atomic node.next
+        Dagger.recycle_future_node!(node)
+        node = next
     end
 end
 
@@ -163,6 +167,11 @@ function schedule_dependents!(state, thunk, failed, ready_out::Vector{Thunk})
     node = head
     while node !== nothing
         dep = node.thunk::Thunk
+        # The walk owns the chain exclusively after the seal; take next and
+        # recycle the drained node before processing the dependent
+        next_node = @atomic node.next
+        Dagger.recycle_dep_node!(node)
+        node = next_node
         if !failed
             # Push our result into `dep`'s input slots now, while it is still
             # alive, so deferred scheduling of `dep` (Fix A) does not race with
@@ -199,7 +208,6 @@ function schedule_dependents!(state, thunk, failed, ready_out::Vector{Thunk})
                 push!(ready_out, dep)
             end
         end
-        node = @atomic node.next
     end
     @dagdebug thunk :finish "Marked $ctr dependents as $(failed ? "failed" : "ready")"
 end

@@ -25,16 +25,59 @@ const SEALED = Sealed()
 
 # A node in the lock-free futures Treiber list stored on each `Thunk`.
 # Holds one `ThunkFuture` and an atomic link to the next node in the chain.
+# N.B. Fields are non-const so drained nodes can be reset and pooled (the
+# walks in fill_registered_futures!/schedule_dependents! own their chain
+# exclusively after the seal, so recycling there is race-free).
 mutable struct FutureNode
-    const future::ThunkFuture
+    future::Union{ThunkFuture,Nothing}
     @atomic next::Union{FutureNode,Nothing}
 end
 
 # A node in the lock-free dependents Treiber list stored on each `Thunk`.
 # Holds a strong ref to one downstream `Thunk` and an atomic link to the next node.
 mutable struct DepNode
-    const thunk::Any                      # downstream Thunk (typed Any to break the mutual-ref cycle)
+    thunk::Any                      # downstream Thunk (typed Any to break the mutual-ref cycle)
     @atomic next::Union{DepNode,Nothing}
+end
+
+const FUTURE_NODE_POOL = LockedObject(Vector{FutureNode}())
+const DEP_NODE_POOL = LockedObject(Vector{DepNode}())
+const NODE_POOL_CAP = 4096
+function take_future_node!(future::ThunkFuture)
+    node = @safe_lock_spin1 FUTURE_NODE_POOL pool begin
+        isempty(pool) ? nothing : pop!(pool)
+    end
+    node === nothing && return FutureNode(future, nothing)
+    node = node::FutureNode
+    node.future = future
+    @atomic node.next = nothing
+    return node
+end
+function recycle_future_node!(node::FutureNode)
+    node.future = nothing
+    @atomic node.next = nothing
+    @safe_lock_spin1 FUTURE_NODE_POOL pool begin
+        length(pool) < NODE_POOL_CAP && push!(pool, node)
+    end
+    return
+end
+function take_dep_node!(@nospecialize(thunk))
+    node = @safe_lock_spin1 DEP_NODE_POOL pool begin
+        isempty(pool) ? nothing : pop!(pool)
+    end
+    node === nothing && return DepNode(thunk, nothing)
+    node = node::DepNode
+    node.thunk = thunk
+    @atomic node.next = nothing
+    return node
+end
+function recycle_dep_node!(node::DepNode)
+    node.thunk = nothing
+    @atomic node.next = nothing
+    @safe_lock_spin1 DEP_NODE_POOL pool begin
+        length(pool) < NODE_POOL_CAP && push!(pool, node)
+    end
+    return
 end
 
 """
@@ -105,10 +148,13 @@ sealed (the thunk finished before the push completed — the caller must then
 fulfill `future` directly using the stored result).
 """
 function futures_push!(t::Thunk, future::ThunkFuture)
-    node = FutureNode(future, nothing)
+    node = take_future_node!(future)
     while true
         old = @atomic t.futures_head
-        old isa Sealed && return false
+        if old isa Sealed
+            recycle_future_node!(node)
+            return false
+        end
         @atomic node.next = old::Union{FutureNode,Nothing}
         _, ok = @atomicreplace t.futures_head old => node
         ok && return true
@@ -138,10 +184,13 @@ Returns `true` if registered, `false` if the list was already sealed (meaning
 handle `dep` becoming ready/failed directly).
 """
 function deps_push!(t::Thunk, dep::Thunk)
-    node = DepNode(dep, nothing)
+    node = take_dep_node!(dep)
     while true
         old = @atomic t.dependents_head
-        old isa Sealed && return false
+        if old isa Sealed
+            recycle_dep_node!(node)
+            return false
+        end
         @atomic node.next = old::Union{DepNode,Nothing}
         _, ok = @atomicreplace t.dependents_head old => node
         ok && return true
