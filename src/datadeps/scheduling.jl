@@ -97,6 +97,29 @@ at all; see `datadeps_single_space`.
 """
 function datadeps_tracked_args(state::DataDepsState, spec::DTaskSpec)
     out = Tuple{ArgumentWrapper,Float64}[]
+    # N.B. Locality weighting is disabled entirely under uniform (SPMD/MPI)
+    # execution, because the weights are derived from `datasize`, which is
+    # deliberately NOT rank-uniform: `datasize(x::MPIRef) = x.size`, and
+    # `ext/MPIExt.jl` documents that non-owning ranks carry a size-0
+    # placeholder, calling that "harmless because `datasize` only feeds
+    # cost-based placement, which uniform execution overrides".
+    #
+    # Feeding it into placement here breaks that invariant. `distribute_tasks!`
+    # calls `select_processors_uniform!` to give every rank the *same ordered*
+    # `all_procs`, and round-robin then advances the same index everywhere --
+    # but a locality scan picking `best_idx` from rank-dependent weights picks a
+    # *different* processor per rank. That diverges task placement, hence the
+    # emitted transfers, hence the tag sequence: ranks deadlock on mismatched
+    # tags rather than failing visibly. Measured: the pencil FFT on the flat
+    # path at 4 ranks hangs with "Hit probable hang on recv".
+    #
+    # Re-enabling this needs a size that is metadata, known identically on every
+    # rank (chunk domain extents x eltype size, say) rather than a property only
+    # the owning rank can answer. Until then MPI keeps pre-locality placement,
+    # which costs little in practice since locality is already inert under the
+    # default hierarchical path (`partition_dag` fixes cross-worker placement
+    # before any scheduler runs).
+    uniform_execution() && return out
     for _arg in spec.fargs
         arg_pre_unwrap, deps = unwrap_inout(value(_arg))
         arg = arg_pre_unwrap isa DTask ? fetch(arg_pre_unwrap; raw=true) : arg_pre_unwrap
@@ -363,6 +386,11 @@ non-`Set` value, so checking whether *it* is current is rank-uniform by
 construction, where `first(a_set)` would not obviously be.
 """
 function datadeps_current_chunk(state::DataDepsState, raw_value)
+    # Disabled under uniform execution for the same reason as
+    # `datadeps_tracked_args`: substituting the resident chunk changes what
+    # `estimate_task_costs` sizes, and chunk sizes are not rank-uniform under
+    # MPI, so the chosen processor could differ per rank and desync tags.
+    uniform_execution() && return nothing
     arg_pre_unwrap, deps = unwrap_inout(raw_value)
     length(deps) == 1 || return nothing
     arg = arg_pre_unwrap isa DTask ? fetch(arg_pre_unwrap; raw=true) : arg_pre_unwrap
