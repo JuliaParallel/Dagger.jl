@@ -110,6 +110,7 @@ include("datadeps/remainders.jl")
 include("datadeps/scheduling.jl")
 include("datadeps/context.jl")
 include("datadeps/queue.jl")
+include("datadeps/synchronize.jl")
 include("datadeps/hierarchical.jl")
 
 # Stencils

@@ -1143,3 +1143,443 @@ Dagger.aliasing_available(::Dagger.Chunk{FreeSyncdepsUnavailableLeaf}) = false
         end
     end
 end
+
+@testset "Dagger.synchronize" begin
+    # `sync=false` is only allowed to genuinely defer on the flat,
+    # non-uniform-execution path -- `hierarchical=true` (the default) and
+    # MPI/SPMD both force a synchronous trailing drain regardless (see the
+    # N.B. in `spawn_datadeps`). Every test below is written against that
+    # flat path explicitly.
+
+    @testset "Pipelining across regions" begin
+        # Three consecutive regions, none synchronized in between: region N+1's
+        # planning must see region N's writes without an intervening flush,
+        # and a single trailing `synchronize()` must produce the same result
+        # as three fully-synchronous regions would.
+        A = rand(64)
+        B = zeros(64)
+        C = zeros(64)
+        Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+            Dagger.@spawn copyto!(Out(B), In(A))
+        end
+        @test !Dagger.issynchronized()
+        Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+            Dagger.@spawn (x -> x .+= 1)(InOut(B))
+        end
+        Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+            Dagger.@spawn copyto!(Out(C), In(B))
+        end
+        @test !Dagger.issynchronized()
+        Dagger.synchronize()
+        @test Dagger.issynchronized()
+        @test C == A .+ 1
+    end
+
+    @testset "Error locality" begin
+        # A throwing task in region 1, with regions 2 and 3 already queued
+        # before anyone observes region 1's failure: the eventual report
+        # names region 1 specifically (not region 2 or 3, which are perfectly
+        # healthy), its backtrace contains region 1's `spawn_datadeps` call
+        # site, and -- once the failure has been discovered but deliberately
+        # not "handled" (`check_errors=false`) -- the context refuses to plan
+        # further work.
+        good1 = rand(4)
+        good2 = zeros(4)
+        region1_line = (@__LINE__) + 1
+        Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+            Dagger.@spawn error("region 1 boom")
+        end
+        Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+            Dagger.@spawn identity(In(good1))
+        end
+        Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+            Dagger.@spawn copyto!(Out(good2), In(good1))
+        end
+
+        # Force discovery without "handling" it (`check_errors=false`): the
+        # drain completes (nothing is left in flight, buffers are freed), but
+        # the poison stays in place because nobody has actually been shown
+        # the error yet -- see `_do_synchronize!`'s docstring.
+        Dagger.synchronize(; check_errors=false)
+        # Still considered "not synchronized": the drain itself completed
+        # (nothing is left in flight, buffers are freed), but `issynchronized`
+        # also requires no *unreported* error, and this one deliberately
+        # wasn't reported (`check_errors=false`).
+        @test !Dagger.issynchronized()
+
+        # A *new* region must now be refused outright.
+        threw_poisoned = false
+        local poisoned_err
+        try
+            Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+                Dagger.@spawn identity(In(good1))
+            end
+        catch err
+            threw_poisoned = true
+            poisoned_err = err
+        end
+        @test threw_poisoned
+        @test poisoned_err isa Dagger.DataDepsPoisonedError
+        @test poisoned_err.region == 1
+        @test poisoned_err.bt !== nothing
+        @test any(frame -> frame.line == region1_line, poisoned_err.bt)
+
+        # Now actually observe it: the region-1 failure is reported, named,
+        # and the poison clears so work can proceed again.
+        threw_reported = false
+        local reported_err
+        try
+            Dagger.synchronize()
+        catch err
+            threw_reported = true
+            reported_err = err
+        end
+        @test threw_reported
+        @test reported_err isa Dagger.DataDepsRegionError
+        @test reported_err.region == 1
+        @test occursin("region 1 boom", sprint(showerror, Dagger.Sch.unwrap_nested_exception(reported_err)))
+        @test reported_err.bt !== nothing
+        @test any(frame -> frame.line == region1_line, reported_err.bt)
+
+        # Poison cleared: planning works again.
+        Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+            Dagger.@spawn identity(In(good1))
+        end
+        Dagger.synchronize()
+        @test Dagger.issynchronized()
+    end
+
+    @testset "Task-exit drain" begin
+        # A task runs a failing async region and returns without
+        # synchronizing -- the error must surface (loudly, via `@error`,
+        # since there's nobody left to rethrow into) rather than vanish.
+        mktemp() do path, io
+            t = redirect_stderr(io) do
+                inner = Threads.@spawn begin
+                    D = rand(4)
+                    Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+                        Dagger.@spawn error("task-exit-drain boom")
+                    end
+                    nothing
+                end
+                wait(inner)
+                # Give the watcher a chance to notice `inner` is done and drain.
+                for _ in 1:200
+                    sleep(0.02)
+                end
+                inner
+            end
+            flush(io)
+            captured = read(path, String)
+            @test occursin("task-exit-drain boom", captured)
+        end
+    end
+
+    @testset "Finalizer backstop" begin
+        # Drop the task (and its context) reference entirely without ever
+        # waiting on it, force GC, and confirm the finalizer reports loudly
+        # rather than the process hanging or the failure vanishing silently.
+        function make_orphan()
+            t = Threads.@spawn begin
+                D = rand(4)
+                Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+                    Dagger.@spawn error("finalizer boom")
+                end
+                nothing
+            end
+            wait(t)
+            return nothing
+        end
+        mktemp() do path, io
+            redirect_stderr(io) do
+                make_orphan()
+                GC.gc(true)
+                GC.gc(true)
+                sleep(0.5)
+            end
+            flush(io)
+            captured = read(path, String)
+            # Either the task-exit watcher or the finalizer backstop (whichever
+            # gets there first) reports; both are acceptable, the point is that
+            # *something* reports and the process doesn't hang.
+            @test occursin("finalizer boom", captured) ||
+                  occursin("garbage-collected with unresolved work", captured)
+        end
+    end
+
+    @testset "Multi-task isolation" begin
+        # Two tasks, independent async pipelines, disjoint data:
+        # `synchronize_task!(t)` on one must not disturb the other.
+        A1, B1 = rand(16), zeros(16)
+        A2, B2 = rand(16), zeros(16)
+        queued1 = Base.Event()
+        release1 = Base.Event()
+        t1 = Threads.@spawn begin
+            Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+                Dagger.@spawn copyto!(Out(B1), In(A1))
+            end
+            notify(queued1)
+            wait(release1)
+        end
+        wait(queued1)
+        @test !istaskdone(t1)
+
+        # A completely independent pipeline on *this* task must not be
+        # affected by, or drain, t1's context.
+        Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+            Dagger.@spawn copyto!(Out(B2), In(A2))
+        end
+        Dagger.synchronize()
+        @test B2 == A2
+        @test !istaskdone(t1) # t1 untouched by our own bare `synchronize`
+
+        Dagger.synchronize_task!(t1)
+        notify(release1)
+        wait(t1)
+        @test B1 == A1
+
+        # Shared argument: `synchronize(A)` must not drain a *different*
+        # task's context even when they happen to reference the same data;
+        # `synchronize_all!(A)` must drain every registered context.
+        Ashared = rand(16)
+        Bshared_other = zeros(16)
+        Bshared_here = zeros(16)
+        queued2 = Base.Event()
+        release2 = Base.Event()
+        t2 = Threads.@spawn begin
+            Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+                Dagger.@spawn copyto!(Out(Bshared_other), In(Ashared))
+            end
+            notify(queued2)
+            wait(release2)
+        end
+        wait(queued2)
+        @test !istaskdone(t2)
+
+        Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+            Dagger.@spawn copyto!(Out(Bshared_here), In(Ashared))
+        end
+        Dagger.synchronize(Ashared)
+        @test Bshared_here == Ashared
+        @test !istaskdone(t2) # a same-named-argument sync on *our* task doesn't touch t2
+
+        Dagger.synchronize_all!(Ashared)
+        notify(release2)
+        wait(t2)
+        @test Bshared_other == Ashared
+    end
+
+    @testset "inflight_limit backpressure" begin
+        # A tiny watermark forces `apply_inflight_backpressure!` to actually
+        # wait mid-planning; correctness (not just that it doesn't hang)
+        # is what's being checked here.
+        old_limit = Dagger.DATADEPS_INFLIGHT_LIMIT[]
+        Dagger.DATADEPS_INFLIGHT_LIMIT[] = 2
+        try
+            arrs = [zeros(8) for _ in 1:8]
+            src = rand(8)
+            for arr in arrs
+                Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+                    Dagger.@spawn copyto!(Out(arr), In(src))
+                end
+            end
+            Dagger.synchronize()
+            @test all(arr -> arr == src, arrs)
+        finally
+            Dagger.DATADEPS_INFLIGHT_LIMIT[] = old_limit
+        end
+    end
+
+    @testset "Cross-region per-tile syncdeps" begin
+        # Two disjoint tiles, each written by region A and read by region B
+        # (a *separate*, unsynchronized `spawn_datadeps` call). Since `state`
+        # persists across the region boundary, region B's syncdeps must be
+        # per-tile: the reader of tile 1 depends on the writer of tile 1
+        # only, not on the writer of tile 2 as well. A whole-region barrier
+        # could not distinguish this -- it would simply make *everything* in
+        # B depend on *everything* in A, and a bug that regressed to
+        # per-region granularity would still produce the right answer (the
+        # ordering would just be needlessly serialized), so this checks the
+        # logged dependency edges directly rather than only the result.
+        T1 = zeros(4)
+        T2 = zeros(4)
+        local tA1, tA2, tB1, tB2
+        logs = with_logs() do
+            Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+                tA1 = Dagger.@spawn do_nothing(Out(T1))
+                tA2 = Dagger.@spawn do_nothing(Out(T2))
+            end
+            Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+                tB1 = Dagger.@spawn do_nothing(In(T1))
+                tB2 = Dagger.@spawn do_nothing(In(T2))
+            end
+            Dagger.synchronize() # flush both regions before logs are fetched
+        end
+        tid_A1, tid_A2, tid_B1, tid_B2 = task_id.([tA1, tA2, tB1, tB2])
+        deps_B1 = taskdeps_for_task(logs, tid_B1)
+        deps_B2 = taskdeps_for_task(logs, tid_B2)
+        @test tid_A1 in deps_B1
+        @test !(tid_A2 in deps_B1)
+        @test tid_A2 in deps_B2
+        @test !(tid_A1 in deps_B2)
+    end
+
+    @testset "Write-back elision across regions" begin
+        # Same argument, used by two consecutive regions on a remote worker.
+        # Synchronous (`sync=true`) regions write back to origin at the end
+        # of *each* region and then copy to the worker again at the start of
+        # the next, so this touches `move!` twice. Deferred (`sync=false`)
+        # regions share one persisted `state`: region 2 sees the worker
+        # already holds the current replica (`arg_current`) and never emits
+        # a copy-to at all, so this exercises `move!` only *once* for the
+        # (deferred) final write-back. A correct final result doesn't prove
+        # this happened -- either path produces the same numbers -- so this
+        # asserts the move-task *count* dropped, which is the mechanism that
+        # actually makes cross-region pipelining cheaper.
+        if nprocs() >= 2
+            count_moves(logs) = count(
+                logs[w][:core][idx].category == :add_thunk &&
+                logs[w][:core][idx].kind == :start &&
+                logs[w][:taskfuncnames][idx] == "move!"
+                for w in keys(logs) for idx in 1:length(logs[w][:core])
+            )
+
+            w = workers()[1]
+            A_sync = rand(8)
+            logs_sync = with_logs() do
+                Dagger.spawn_datadeps(; hierarchical=false) do
+                    Dagger.@spawn scope=Dagger.scope(worker=w) do_nothing(InOut(A_sync))
+                end
+                Dagger.spawn_datadeps(; hierarchical=false) do
+                    Dagger.@spawn scope=Dagger.scope(worker=w) do_nothing(InOut(A_sync))
+                end
+            end
+            moves_sync = count_moves(logs_sync)
+
+            A_async = rand(8)
+            logs_async = with_logs() do
+                Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+                    Dagger.@spawn scope=Dagger.scope(worker=w) do_nothing(InOut(A_async))
+                end
+                Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+                    Dagger.@spawn scope=Dagger.scope(worker=w) do_nothing(InOut(A_async))
+                end
+                Dagger.synchronize()
+            end
+            moves_async = count_moves(logs_async)
+
+            @test moves_async < moves_sync
+        end
+    end
+
+    @testset "Deferred free racing an in-flight reader" begin
+        # The Phase 1 free-syncdeps hole (`gather_free_syncdeps!` emitting an
+        # empty syncdep set for a buffer still in use) was masked by the old
+        # region barrier: every task had already retired by the time the
+        # free loop ran. Under deferral the free for a buffer region 1
+        # touched can be computed (and submitted, with syncdeps) *before*
+        # region 1's own reader task has necessarily finished -- a real race
+        # the barrier used to hide. Run with the debug-mode invariant
+        # (`DATADEPS_ASSERT_FREE_SYNCDEPS`) on, which independently re-derives
+        # each free's required syncdeps via a linear scan + `will_alias` and
+        # `@assert`s the fast path didn't omit one; this would fail loudly
+        # (as a task exception surfaced through `synchronize()`) if the hole
+        # were still reachable here.
+        old_assert = Dagger.DATADEPS_ASSERT_FREE_SYNCDEPS[]
+        Dagger.DATADEPS_ASSERT_FREE_SYNCDEPS[] = true
+        try
+            if nprocs() >= 2
+                w = workers()[1]
+                A = rand(4, 4)
+                v1 = view(A, 1:2, :)
+                v2 = view(A, 3:4, :)
+                # Two views sharing one parent buffer (per the existing
+                # "buffer underlying shared views" test above), but now each
+                # view's writer is in its *own*, separately-synchronized
+                # region -- so the shared parent's free (computed once both
+                # regions' writes are known, via `flush_pending_frees!`) must
+                # still find both writers' syncdeps correctly, even though
+                # they were queued by two different `spawn_datadeps` calls.
+                Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+                    Dagger.@spawn scope=Dagger.scope(worker=w) mut_V!(Out(v1))
+                end
+                Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+                    Dagger.@spawn scope=Dagger.scope(worker=w) mut_V!(Out(v2))
+                end
+                Dagger.synchronize()
+                @test all(==(1), A)
+            end
+        finally
+            Dagger.DATADEPS_ASSERT_FREE_SYNCDEPS[] = old_assert
+        end
+    end
+
+    @testset "Slot reuse plumbing under deferred release" begin
+        # `retiring_slots` (context.jl) exists because a region's
+        # `SlotReuseRegion` can no longer be released the moment its
+        # *planning* finishes: the copy/free tasks that actually touch a
+        # checked-out slot can now outlive the region under `sync=false`,
+        # and releasing early would let a concurrently-planning later region
+        # take a slot those tasks are still writing into. This exercises
+        # that plumbing directly against the slot cache.
+        #
+        # N.B. End-to-end slot reuse (`retain_reusable_slots!`/`reusable_slot`)
+        # is currently wired into the *hierarchical* scheduling path only --
+        # the flat path this phase's deferral lives on has never called it,
+        # independent of this phase -- and hierarchical forces `sync=true`
+        # here. So there is not yet a full user-level async program where
+        # slot reuse and deferred frees interact; this test covers the
+        # mechanism (`retiring_slots` + `release_slot_reuse_region!`) that
+        # will matter the moment either gap closes (slot reuse reaching the
+        # flat path, or hierarchical planning outliving a region in a later
+        # phase).
+        data = Dagger.tochunk(rand(4))
+        slot = Dagger.tochunk(rand(4))
+        space = Dagger.memory_space(data)
+        key = (Dagger._identity_hash(data), space)
+        try
+            region = Dagger.SlotReuseRegion(Set{UInt}([Dagger._identity_hash(data)]))
+            Dagger.retain_slot!(region, data, space, slot)
+
+            # Checked out: a fresh region asking for the same key is refused.
+            probe() = Dagger.SlotReuseRegion(Set{UInt}([Dagger._identity_hash(data)]))
+            @test Dagger.slot_cache_take!(probe(), data, space) === nothing
+
+            ddctx = Dagger.get_context!()
+            push!(ddctx.retiring_slots, region)
+            # Still not released: nothing has drained it yet.
+            @test Dagger.slot_cache_take!(probe(), data, space) === nothing
+
+            Dagger.synchronize()
+
+            # A full drain must have released it: `slot_cache_take!` now
+            # succeeds (and immediately re-checks it out).
+            @test Dagger.slot_cache_take!(probe(), data, space) === slot
+        finally
+            Dagger.empty_slot_cache!()
+        end
+    end
+
+    @testset "Plain @spawn interleaved between async regions" begin
+        # A plain (non-Datadeps) `Dagger.@spawn` between two async regions,
+        # over the *same* argument. Interop boundary hooks (making a plain
+        # task automatically sync against tracked data) are future work
+        # (Phase 6); today this only works because the plain task is on the
+        # *same* underlying array object and Dagger's normal scheduler
+        # dependency tracking (via the shared `DTask`/value handle) still
+        # applies -- this documents that today's behavior is correct for
+        # that case, not that interop hooks exist yet.
+        A = zeros(4)
+        Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+            Dagger.@spawn (x -> x .+= 1)(InOut(A))
+        end
+        Dagger.synchronize() # `A`'s write-back must land before the plain task below touches it directly
+        t = Dagger.@spawn (x -> x .+= 1)(A)
+        fetch(t)
+        Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+            Dagger.@spawn (x -> x .+= 1)(InOut(A))
+        end
+        Dagger.synchronize()
+        @test A == fill(3.0, 4)
+    end
+end

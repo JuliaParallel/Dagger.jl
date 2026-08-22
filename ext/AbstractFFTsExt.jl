@@ -94,29 +94,88 @@ function _to_decomp(decomp::Symbol)
     end
 end
 
+## 2D/3D shared plumbing
+#
+# `_fft!`/`_ifft!` request `sync=false` for their own internal regions
+# unconditionally -- see `_datadeps_sync_override`'s docstring for the one
+# exception (an explicit, ambient `DATADEPS_SYNC => true`, e.g. while
+# debugging, is honored rather than clobbered) -- so `__fft!`'s regions and
+# the `copyto!`s between/around them (`copyto!` is itself a `spawn_datadeps`
+# region, `src/array/copy.jl`) pipeline instead of each acting as a full
+# barrier. This is still coerced back to `sync=true` under the default
+# `hierarchical=true` (see the N.B. in `Dagger.spawn_datadeps`) and activates
+# for real once a later phase lifts that restriction; until then it is a
+# documented no-op under default settings.
+#
+# The public contract is unchanged regardless: every `_fft!`/`_ifft!` method
+# fully synchronizes (a trailing `Dagger.synchronize()`) before returning
+# `output`, exactly as a plain, unqualified `copyto!` does today.
+#
+# N.B. That trailing call is the *bare*, whole-context `Dagger.synchronize()`,
+# not the targeted `Dagger.synchronize(output)` form. Targeting would be the
+# better citizen -- draining only what `output` depends on, not any unrelated
+# work a caller who is itself mid-`sync=false`-pipeline still has in flight --
+# but `synchronize(args...)` does not yet actually narrow anything (see its
+# docstring in `synchronize.jl`: today it validates `args` and then runs the
+# exact same full drain as the bare form). Two problems block using it here
+# honestly: first, `output`/`input`/the intermediate pencils are `DArray`s,
+# while Datadeps tracks their individual `.chunks` -- `synchronize(output)`
+# would need to resolve a `DArray` to its chunks before it could find
+# anything to target at all, which isn't implemented. Second, actually
+# narrowing the *free* step (not just the wait) needs care this file
+# shouldn't have to reason about. Reaching for the not-yet-real targeted form
+# here would look like a fix while silently remaining exactly as broad as
+# the bare call -- worse than being honest that this still over-synchronizes.
+# Swap this for `Dagger.synchronize(output)` once that form genuinely narrows
+# the wait to `output`'s own dependency closure (transitively -- Dagger's own
+# scheduler already enforces that a task doesn't start before its syncdeps
+# finish, so waiting on just the tasks that write `output`'s chunks is
+# sufficient once `synchronize` can find them; the intermediate `A`/`B`/`C`
+# pencils do not need to be named separately).
+"""
+Whether `_fft!`/`_ifft!` should request `sync=false` for their own internal
+regions. Always `false` (request async) *unless* the caller has explicitly
+bound `Dagger.DATADEPS_SYNC[] === true` (e.g. while debugging a `sync`-related
+issue) -- that ambient choice is honored rather than overridden, since
+observable behavior is identical either way (the trailing `Dagger.synchronize()`
+makes `_fft!`/`_ifft!` fully synchronous from the caller's perspective
+regardless), so there's no reason to fight a caller who deliberately asked to
+see it run synchronously.
+"""
+_datadeps_sync_override() = Dagger.DATADEPS_SYNC[] === true ? true : false
+
 ## 2D
 function _fft!(output::DMatrix{T}, input::DMatrix{T}, dims=(1, 2)) where T
     N = size(input, 1)
     np = length(Dagger.compatible_processors())
     A = zeros(Blocks(N, cld(N, np)), T, size(input))
-    copyto!(A, input)
     B = zeros(Blocks(cld(N, np), N), T, size(input))
-    __fft!(A, B, dims)
-    copyto!(output, B)
+    Dagger.with(Dagger.DATADEPS_SYNC => _datadeps_sync_override()) do
+        copyto!(A, input)
+        __fft!(A, B, dims)
+        copyto!(output, B)
+    end
+    Dagger.synchronize()
     return output
 end
 function _ifft!(output::DMatrix{T}, input::DMatrix{T}, dims=(1, 2)) where T
     N = size(input, 1)
     np = length(Dagger.compatible_processors())
     A = zeros(Blocks(N, cld(N, np)), T, size(input))
-    copyto!(A, input)
     B = zeros(Blocks(cld(N, np), N), T, size(input))
-    __ifft!(A, B, dims)
-    copyto!(output, B)
+    Dagger.with(Dagger.DATADEPS_SYNC => _datadeps_sync_override()) do
+        copyto!(A, input)
+        __ifft!(A, B, dims)
+        copyto!(output, B)
+    end
+    Dagger.synchronize()
     return output
 end
 
 ## 3D
+# See the N.B. above: same reasoning, now over three or four consecutive
+# regions (Pencil: copy-in, dim-1, dim-2, dim-3; Slab: copy-in, dims-1&2,
+# dim-3) instead of two.
 function _fft!(output::DArray{T,3}, input::DArray{T,3}, dims=(1, 2, 3); decomp::Decomposition=Pencil()) where T
     N = size(input, 1)
     np = length(Dagger.compatible_processors())
@@ -124,16 +183,22 @@ function _fft!(output::DArray{T,3}, input::DArray{T,3}, dims=(1, 2, 3); decomp::
         A = zeros(Blocks(N, cld(N, np), cld(N, np)), T, size(input))
         B = zeros(Blocks(cld(N, np), N, cld(N, np)), T, size(input))
         C = zeros(Blocks(cld(N, np), cld(N, np), N), T, size(input))
-        copyto!(A, input)
-        __fft!(decomp, A, B, C, dims)
-        copyto!(output, C)
+        Dagger.with(Dagger.DATADEPS_SYNC => _datadeps_sync_override()) do
+            copyto!(A, input)
+            __fft!(decomp, A, B, C, dims)
+            copyto!(output, C)
+        end
+        Dagger.synchronize()
         return output
     elseif decomp isa Slab
         A = zeros(Blocks(N, N, cld(N, np)), T, size(input))
         B = zeros(Blocks(cld(N, np), cld(N, np), N), T, size(input))
-        copyto!(A, input)
-        __fft!(decomp, A, B, dims)
-        copyto!(output, B)
+        Dagger.with(Dagger.DATADEPS_SYNC => _datadeps_sync_override()) do
+            copyto!(A, input)
+            __fft!(decomp, A, B, dims)
+            copyto!(output, B)
+        end
+        Dagger.synchronize()
         return output
     else
         throw(ArgumentError("Unknown decomposition type: $decomp"))
@@ -146,16 +211,22 @@ function _ifft!(output::DArray{T,3}, input::DArray{T,3}, dims=(1, 2, 3); decomp:
         A = zeros(Blocks(cld(N, np), cld(N, np), N), T, size(input))
         B = zeros(Blocks(cld(N, np), N, cld(N, np)), T, size(input))
         C = zeros(Blocks(N, cld(N, np), cld(N, np)), T, size(input))
-        copyto!(A, input)
-        __ifft!(decomp, A, B, C, dims)
-        copyto!(output, C)
+        Dagger.with(Dagger.DATADEPS_SYNC => _datadeps_sync_override()) do
+            copyto!(A, input)
+            __ifft!(decomp, A, B, C, dims)
+            copyto!(output, C)
+        end
+        Dagger.synchronize()
         return output
     elseif decomp isa Slab
         A = zeros(Blocks(cld(N, np), cld(N, np), N), T, size(input))
         B = zeros(Blocks(N, N, cld(N, np)), T, size(input))
-        copyto!(A, input)
-        __ifft!(decomp, A, B, dims)
-        copyto!(output, B)
+        Dagger.with(Dagger.DATADEPS_SYNC => _datadeps_sync_override()) do
+            copyto!(A, input)
+            __ifft!(decomp, A, B, dims)
+            copyto!(output, B)
+        end
+        Dagger.synchronize()
         return output
     end
 end

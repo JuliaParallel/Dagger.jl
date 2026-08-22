@@ -57,16 +57,26 @@ Unlike other Dagger tasks, tasks executed within a datadeps region are allowed
 to write to their arguments when annotated with `Out` or `InOut`
 appropriately.
 
-At the end of executing `f`, `spawn_datadeps` will wait for all launched tasks
-to complete, rethrowing the first error, if any. The result of `f` will be
-returned from `spawn_datadeps`.
+At the end of executing `f`, `spawn_datadeps` will, by default
+(`sync=true`), wait for all launched tasks to complete (including deferred
+write-back and free tasks from this and any earlier un-synchronized region on
+this task), rethrowing the first error, if any. Passing `sync=false` instead
+returns as soon as `f` has been planned, leaving execution (and the eventual
+write-back/free) to a later [`Dagger.synchronize`](@ref) call -- this is what
+lets consecutive regions pipeline instead of each one being a full barrier.
+`sync` defaults to `Dagger.DATADEPS_SYNC[]`, itself defaulting to `true`, so
+every existing caller is unaffected unless it opts in. `hierarchical=true`
+(the default) and MPI/SPMD execution both force `sync=true` regardless of what
+is requested; see the N.B. below. The result of `f` will be returned from
+`spawn_datadeps`.
 """
 function spawn_datadeps(f::Base.Callable; static::Bool=true,
                         traversal::Symbol=:inorder,
                         scheduler::Union{DataDepsScheduler,Nothing}=nothing,
                         aliasing::Bool=true,
                         launch_wait::Union{Bool,Nothing}=nothing,
-                        hierarchical::Union{Bool,Nothing}=nothing)
+                        hierarchical::Union{Bool,Nothing}=nothing,
+                        sync::Union{Bool,Nothing}=nothing)
     if !static
         throw(ArgumentError("Dynamic scheduling is no longer available"))
     end
@@ -76,14 +86,41 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
     if !aliasing
         throw(ArgumentError("Aliasing analysis is no longer optional"))
     end
-    # Phase 3 (DataDepsContext, context.jl): the context is task-local, and in
-    # this phase is created fresh and dropped again by the time this call
-    # returns (see `maybe_drop_context!`) -- so this behaves exactly like the
-    # bare `SlotReuseRegion(Set{UInt}())` it replaces. `ctx.slots` still spans
-    # the whole region, not just planning: the copies and frees that touch a
-    # slot are tasks, so entries stay checked out until they've all drained.
-    ctx = get_context!()
-    ctx.region_id += 1
+    # The context is task-local and, starting this phase, genuinely persists
+    # across regions when `sync=false`: `ddctx.slots` still spans the whole
+    # region, not just planning (the copies and frees that touch a slot are
+    # tasks, so entries stay checked out until they've all drained -- see
+    # `retiring_slots`).
+    ddctx = get_context!()
+
+    # Refuse to plan on top of a region that failed without anyone having
+    # observed it yet. Only reachable under `sync=false`: default settings
+    # always drain (and thereby observe-and-clear) trailing every region, so
+    # a caller using defaults never sees this -- see `_do_synchronize!`'s N.B.
+    # on when `err`/`err_region` clears.
+    poisoned = @lock ddctx.lock begin
+        ddctx.err === nothing ? nothing :
+            DataDepsPoisonedError(ddctx.err_region, ddctx.err, _resolve_region_bt(ddctx, ddctx.err_region))
+    end
+    poisoned === nothing || throw(poisoned)
+
+    hierarchical = something(hierarchical, DATADEPS_HIERARCHICAL[], true)::Bool
+    # N.B. Hierarchical keeps its own region-scoped `DataDepsState`s,
+    # reconciled at the end of every region exactly as before (`ctx.state`
+    # stays `#undef`; see context.jl) -- persisting *that* path's state across
+    # regions is out of scope here. Uniform (MPI/SPMD) execution is excluded
+    # for a different reason: a deferred epilogue spanning multiple regions
+    # means tags / `MPIRefID`s get allocated by code running arbitrarily long
+    # after the region that requested them returned, and that hasn't been
+    # vetted for rank-uniformity yet. Both force a synchronous trailing drain
+    # regardless of what the caller asked for, so nothing is ever left
+    # pending across either boundary in this phase.
+    sync = if hierarchical || uniform_execution()
+        true
+    else
+        something(sync, DATADEPS_SYNC[], true)::Bool
+    end
+
     # N.B. Store the *raw* backtrace, not `stacktrace(backtrace())`. Resolving
     # frames to symbols eagerly costs ~119us against ~4.6us for the raw
     # capture -- 26x -- because it walks debug info for every frame. That is
@@ -92,41 +129,41 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
     # where it measured as a several-percent regression across every stencil
     # baseline. Resolution is deferred to `stacktrace(bt)` at the point an
     # error is actually reported, which is rare and already slow.
-    ctx.region_bt[ctx.region_id] = backtrace()
-    ctx.slots = SlotReuseRegion(Set{UInt}())
-    return with(SLOT_REUSE_REGION => ctx.slots) do
+    #
+    # `region_id`/`region_bt` are mutated under `ddctx.lock`: `_do_synchronize!`
+    # (possibly running on a foreign task, via `synchronize_task!`/
+    # `synchronize_all!`) reads and evicts `region_bt` entries under the same
+    # lock, and `ContextQueue.enqueue!` reads `region_id` under it too.
+    bt = backtrace()
+    @lock ddctx.lock begin
+        ddctx.region_id += 1
+        ddctx.region_bt[ddctx.region_id] = bt
+    end
+    ddctx.slots = SlotReuseRegion(Set{UInt}())
+    return with(SLOT_REUSE_REGION => ddctx.slots) do
         try
-            _spawn_datadeps(ctx, f, scheduler, launch_wait, hierarchical)
+            _spawn_datadeps(ddctx, f, scheduler, launch_wait, hierarchical, sync)
         finally
-            release_slot_reuse_region!(ctx.slots)
             maybe_drop_context!()
+            # If the context is still this task's live, registered one at
+            # this point, it just survived past a `spawn_datadeps` call
+            # (`sync=false`, or a planning failure that left tasks retained
+            # -- see `_spawn_datadeps`'s N.B.) and needs a drain watcher armed
+            # so it isn't silently forgotten if nothing ever synchronizes it.
+            # See `maybe_arm_drain_watcher!` for why this isn't done eagerly
+            # in `get_context!` instead.
+            DATADEPS_CONTEXT[] === ddctx && maybe_arm_drain_watcher!(ddctx)
         end
     end
 end
-function _spawn_datadeps(ctx::DataDepsContext, f::Base.Callable, scheduler, launch_wait, hierarchical)
-    # Phase 3: `ContextQueue` replaces `WaitAllQueue` as the region's
-    # `:task_queue`, collecting into `ctx.inflight` instead of a queue-local
-    # `Vector{DTask}`. The wait loop below is otherwise identical to
-    # `wait_all(; check_errors=true)`, which this used to delegate to -- it's
-    # inlined here because `wait_all` always builds its own fresh
-    # `WaitAllQueue` and has nowhere to plumb `ctx` through.
-    queue_outer = ContextQueue(get_options(:task_queue, DefaultTaskQueue()), ctx)
-    # N.B. On any error -- planning throws (a bad scheduler, a scheduling
-    # exception), or a launched task itself fails during the wait loop below
-    # -- `wait_all` historically just let its freshly-allocated, queue-local
-    # `.tasks` go out of scope: any tasks already launched (including ones
-    # the wait loop hadn't reached yet) keep running unawaited, but nobody
-    # ever looks at that queue again. `ctx.inflight` has no such luck: it's
-    # task-local and outlives this call, so on any error it must be cleared
-    # here, or the *next*, unrelated `spawn_datadeps` call on this task would
-    # inherit these orphaned entries and wait on (or double-free) them at its
-    # own region's end. `maybe_drop_context!` also depends on this: it only
-    # drops a context with empty `inflight`.
-    try
-        result = with_options(; task_queue=queue_outer) do
+function _spawn_datadeps(ddctx::DataDepsContext, f::Base.Callable, scheduler, launch_wait, hierarchical, sync::Bool)
+    # `ContextQueue` replaces `WaitAllQueue` as the region's `:task_queue`,
+    # collecting into `ddctx.inflight` instead of a queue-local `Vector{DTask}`.
+    queue_outer = ContextQueue(get_options(:task_queue, DefaultTaskQueue()), ddctx)
+    result = try
+        with_options(; task_queue=queue_outer) do
             scheduler = something(scheduler, DATADEPS_SCHEDULER[], RoundRobinScheduler())
             launch_wait = something(launch_wait, DATADEPS_LAUNCH_WAIT[], false)::Bool
-            hierarchical = something(hierarchical, DATADEPS_HIERARCHICAL[], true)::Bool
             # N.B. Declared as a named function (rather than a closure bound to a
             # local) so it shows up by name in stacktraces and profiles, which is
             # the boundary between region setup and the whole planning pipeline.
@@ -134,12 +171,12 @@ function _spawn_datadeps(ctx::DataDepsContext, f::Base.Callable, scheduler, laun
                 # One aliasing memo per region: planning asks for the same chunks'
                 # aliasing info from Phase 1, from every slot, and from the write-back
                 # epilogue, and each answer costs a round-trip to the owner.
-                ctx.memo = ChunkAinfoMemo()
-                with(CHUNK_AINFO_MEMO => ctx.memo) do
+                ddctx.memo = ChunkAinfoMemo()
+                with(CHUNK_AINFO_MEMO => ddctx.memo) do
                     if hierarchical
-                        distribute_tasks_hierarchical!(queue, ctx)
+                        distribute_tasks_hierarchical!(queue, ddctx)
                     else
-                        distribute_tasks!(queue, ctx)
+                        distribute_tasks!(queue, ddctx)
                     end
                 end
             end
@@ -156,23 +193,46 @@ function _spawn_datadeps(ctx::DataDepsContext, f::Base.Callable, scheduler, laun
             end
             return result
         end
-        # Region end still does the full wait, exactly as `wait_all(;
-        # check_errors=true)` did: Phase 3 is a synchronous no-op refactor,
-        # not the deferred epilogue that starts in Phase 4.
-        for task in ctx.inflight
-            fetch(task; move_value=false, unwrap=false)
-        end
-        cleanup_tasks_accel!(current_acceleration(), ctx.inflight)
-        empty!(ctx.inflight)
-        return result
-    catch
-        empty!(ctx.inflight)
-        rethrow()
+    finally
+        # This region's `SlotReuseRegion` cannot be released until its
+        # (possibly still in-flight, under `sync=false`) copy/free tasks are
+        # known done -- see `retiring_slots`'s field comment in context.jl --
+        # so it is handed off for later release rather than released inline.
+        # Done unconditionally, including on a planning failure below.
+        #
+        # N.B. Unlike the old `wait_all`-based epilogue (and Phase 3, which
+        # matched it), a planning failure here does *not* `empty!(ddctx.inflight)`.
+        # Whatever this region -- or an earlier, healthy one sharing this
+        # context -- already launched is doing real work the user's data
+        # depends on; it stays tracked and gets drained by whichever
+        # `synchronize`-family call runs next (including the task-exit drain
+        # / finalizer backstop, if nothing else ever does). A pure planning
+        # failure (a bad scheduler, an invalid scope) does not poison the
+        # context for *future* regions either: any tasks it already launched
+        # remain individually consistent, and the exception below propagates
+        # to the caller immediately, exactly as it always has -- nothing is
+        # silently lost, and nothing is silently blocked either.
+        @lock ddctx.lock push!(ddctx.retiring_slots, ddctx.slots)
     end
+    if sync
+        _do_synchronize!(ddctx; write_back=true, free=true, gpu_sync=:fence,
+                          check_errors=true, wrap_errors=false, from_owner=true)
+    end
+    return result
 end
 const DATADEPS_SCHEDULER = ScopedValue{Union{DataDepsScheduler,Nothing}}(nothing)
 const DATADEPS_LAUNCH_WAIT = ScopedValue{Union{Bool,Nothing}}(nothing)
 const DATADEPS_HIERARCHICAL = ScopedValue{Union{Bool,Nothing}}(nothing)
+
+"""
+Default for `spawn_datadeps`'s `sync` keyword: `true` reproduces today's full
+per-region barrier; `false` lets consecutive regions pipeline, deferring
+write-back, frees, and waiting to a later `Dagger.synchronize`-family call.
+Overridable per-call via the `sync` keyword; both are overridden to `true`
+under `hierarchical=true` or MPI/SPMD execution regardless (see
+`spawn_datadeps`).
+"""
+const DATADEPS_SYNC = ScopedValue{Union{Bool,Nothing}}(nothing)
 
 # Current task uid, propagated into `tochunk` so uniform-execution backends
 # (MPIExt) can derive deterministic, rank-agreed handle IDs. Core datadeps sets
@@ -184,14 +244,14 @@ const DATADEPS_THUNK_ID = ScopedValue{Int64}(0)
 function to_tag end
 
 function distribute_tasks!(queue::DataDepsTaskQueue, ddctx::DataDepsContext)
-    # N.B. Named `ddctx`, not `ctx`: this function (and only this function)
-    # locally rebinds `ctx = Sch.eager_context()` below, in the copy-from
-    # loop's skip branch. Since a `for` loop is a nested (not shadowing) scope
-    # within a function, that assignment would silently clobber a parameter
-    # named `ctx` for the remainder of this call, including the `write_num`
-    # persist at the end -- rebind is used elsewhere in this codebase to mean
-    # "the eager scheduling `Context`", so this function picks a different
-    # name rather than fight that convention.
+    # N.B. Named `ddctx`, not `ctx`: this file's `flush_pending_writeback!`
+    # (synchronize.jl), which shares this function's former copy-from-skip
+    # branch, locally rebinds `ctx = Sch.eager_context()`. `distribute_tasks!`
+    # no longer does that itself, but keeps the same naming discipline as
+    # every other function in this directory that takes a `DataDepsContext` --
+    # see the Phase 3/4 history for why this bit once before: a `for` loop is
+    # a nested (not shadowing) scope, so a same-named local rebind silently
+    # clobbers a parameter for the rest of the call, no ambiguity error.
     #= TODO: Improvements to be made:
     # - Support for copying non-AbstractArray arguments
     # - Parallelize read copies
@@ -199,6 +259,11 @@ function distribute_tasks!(queue::DataDepsTaskQueue, ddctx::DataDepsContext)
     # - Reuse memory when possible
     # - Account for differently-sized data
     =#
+
+    # Backpressure: a planner running under `sync=false` outruns execution
+    # arbitrarily otherwise, queuing up thousands of regions' worth of work
+    # (and their slots/buffers) ahead of whatever's actually retiring them.
+    apply_inflight_backpressure!(ddctx)
 
     # Get the set of all processors to be scheduled on
     accel = current_acceleration()
@@ -223,19 +288,20 @@ function distribute_tasks!(queue::DataDepsTaskQueue, ddctx::DataDepsContext)
     upper_queue = get_options(:task_queue)
 
     # Start launching tasks and necessary copies
-    # N.B. `state` is rebuilt fresh every region (assigned into `ddctx.state`
-    # rather than merely a local, so the container exists for later phases to
-    # stop doing this): its dictionaries record which chunks the free loop
-    # below has already freed, and a state that survived into the next
-    # region would report those as still live. `write_num`, in contrast, is
-    # seeded from `ddctx.write_num` and is monotonic for the owning task's
-    # entire lifetime, never reset back to 1 -- but since `state` itself
-    # never survives past this call, nothing here actually compares a
-    # `write_num` from one region against another; every `==`/`!=` check in
-    # `_get_write_deps!`/`_get_read_deps!`/`gather_overlap_syncdeps!` only
-    # ever sees entries this same region recorded. Monotonicity is purely
-    # preparatory for the phase where `state` does survive.
-    state = ddctx.state = DataDepsState()
+    # N.B. `state` now genuinely persists across regions on this (flat) path:
+    # region N+1's planning consults region N's `ainfos_owner`/`ainfos_readers`/
+    # `arg_current` directly. It is only rebuilt when there is none yet (the
+    # first region since context creation, or the first since the last full
+    # drain reset it -- see `_do_synchronize!`, step 7): `distribute_tasks!`
+    # itself must never overwrite a `state` that earlier, still-undrained
+    # regions' pending write-backs/frees and in-flight tasks refer to. This is
+    # inseparable from deferring the free loop below: freeing every region
+    # would `unsafe_free!` buffers a *later* region's `arg_current` still
+    # points at.
+    if !isdefined(ddctx, :state)
+        ddctx.state = DataDepsState()
+    end
+    state = ddctx.state
     write_num = ddctx.write_num
     proc_to_scope_lfu = BasicLFUCache{Processor,AbstractScope}(1024)
     for pair in queue.seen_tasks
@@ -244,90 +310,88 @@ function distribute_tasks!(queue::DataDepsTaskQueue, ddctx::DataDepsContext)
         write_num = distribute_task!(queue, state, all_procs, all_scope, spec, task, spec.fargs, proc_to_scope_lfu, write_num)
     end
 
-    # Copy args from remote to local
-    # N.B. We sort the keys to ensure a deterministic order for uniformity
+    # Record which arguments may need writing back to their origin, instead of
+    # emitting the copy now. Deferred to flush time (`flush_pending_writeback!`,
+    # synchronize.jl) because the skip condition below (`origin_space in
+    # arg_current[arg_w]`) can only be answered against the state as it stands
+    # when execution actually catches up to this point -- an intervening,
+    # not-yet-planned region may still make this write-back unnecessary. The
+    # `queue.jl:188-190`-style rule (mid-region copies serialize readers
+    # against later writers and must not be skipped) is unaffected: this is
+    # only ever the *final* write-back, and "final" now means "at the flush
+    # point" rather than "at this region's end".
     @check_uniform(length(state.arg_owner))
-    for arg_w in sort(collect(keys(state.arg_owner)); by=arg_w->arg_w.hash)
+    @lock ddctx.lock for arg_w in sort(collect(keys(state.arg_owner)); by=arg_w->arg_w.hash)
         @check_uniform(arg_w)
-        arg = arg_w.arg
-        origin_space = state.arg_origin[arg]
-        # When the origin still holds a fully-current replica (the argument was
-        # only read, or copies merely propagated it), the write-back is elided.
-        # This is only safe here at region end: mid-region, the copy tasks also
-        # serialize readers against later writers, so they must not be skipped.
-        current = get(state.arg_current, arg_w, nothing)
-        if current !== nothing && origin_space in current
-            remainder = NoAliasing()
-        else
-            remainder, _ = compute_remainder_for_arg!(state, origin_space, arg_w, write_num)
+        push!(ddctx.pending_writeback, arg_w)
+    end
+
+    # Mark that the flat path's object cache may hold freeable buffers; see
+    # `pending_free`'s field comment (context.jl) for why this is a marker,
+    # not a worklist -- the actual free loop (`flush_pending_frees!`,
+    # synchronize.jl, formerly inlined here) always re-scans the *current*
+    # object cache at flush time, since eligibility depends on every region's
+    # reads/writes up to that point, not just this one's.
+    #
+    # N.B. Freeing (like the write-back above) is deferred rather than run
+    # here: the free loop `unsafe_free!`s buffers that this same `state`'s
+    # cache lists as live, so running it every region would free slots a
+    # later, already-planned region's `arg_current` still points at. Deferral
+    # also means the old N.B. about not `mpi_cleanup_tid`-ing planning-time uid
+    # keys here still applies, but "reclaim at wait_all after the region
+    # finishes" now means "reclaim at synchronize" -- see `_do_synchronize!`.
+    @lock ddctx.lock ddctx.pending_free[ddctx.state] = nothing
+
+    # Persist the counter: the next region's `write_num` must never repeat a
+    # value this one already used. This is now load-bearing across regions,
+    # not just monotonic bookkeeping in preparation for it -- see the N.B.
+    # above `state = ddctx.state`.
+    ddctx.write_num = write_num + 1
+    return
+end
+
+"""
+    apply_inflight_backpressure!(ddctx::DataDepsContext)
+
+Block the calling (planning) task until `length(ddctx.inflight) <=
+ddctx.inflight_limit`, by waiting on the oldest in-flight tasks first (FIFO).
+
+Only meaningful under `sync=false`: `inflight` is always empty on entry
+otherwise, since the previous region's trailing `_do_synchronize!` drained it.
+A failure discovered here is recorded (see `_do_synchronize!`'s wait loop for
+the same pattern) and, once draining stops, causes this call -- and hence the
+region currently being planned -- to fail immediately via
+[`DataDepsPoisonedError`](@ref), rather than let a planner outrun a broken
+pipeline in silence.
+"""
+function apply_inflight_backpressure!(ddctx::DataDepsContext)
+    while length(ddctx.inflight) > ddctx.inflight_limit
+        # `popfirst!`/`delete!` (mutations `_do_synchronize!` also performs
+        # under `ddctx.lock`) are taken under the lock; the potentially-slow
+        # `fetch` below deliberately is not, so a foreign
+        # `synchronize_task!`/`synchronize_all!` drain isn't blocked behind
+        # this planner waiting on one task.
+        task, region = @lock ddctx.lock begin
+            t = popfirst!(ddctx.inflight)
+            r = get(ddctx.task_region, t, ddctx.region_id)
+            delete!(ddctx.task_region, t)
+            (t, r)
         end
-        if remainder isa MultiRemainderAliasing
-            origin_scope = UnionScope(map(ExactScope, collect(processors(origin_space)))...)
-            enqueue_remainder_copy_from!(state, origin_space, arg_w, remainder, origin_scope, write_num)
-        elseif remainder isa FullCopy
-            origin_scope = UnionScope(map(ExactScope, collect(processors(origin_space)))...)
-            enqueue_copy_from!(state, origin_space, arg_w, origin_scope, write_num)
-        else
-            @assert remainder isa NoAliasing "Expected NoAliasing, got $(typeof(remainder))"
-            @dagdebug nothing :spawn_datadeps "Skipped copy-from (up-to-date): $origin_space"
-            # N.B. Same gate as `@maybelog`, written out so the event `id`
-            # (a `rand` call, plus the boxing it feeds) is only generated when
-            # logging is actually enabled.
-            ctx = Sch.eager_context()
-            if !(ctx.log_sink isa TimespanLogging.NoOpLog)
-                id = rand(UInt)
-                timespan_start(ctx, :datadeps_copy_skip, (;id), (;))
-                timespan_finish(ctx, :datadeps_copy_skip, (;id), (;thunk_id=0, from_space=origin_space, to_space=origin_space, arg_w, from_arg=arg, to_arg=arg))
+        try
+            fetch(task; move_value=false, unwrap=false)
+        catch err
+            @lock ddctx.lock begin
+                if ddctx.err === nothing
+                    ddctx.err = err
+                    ddctx.err_region = region
+                end
             end
         end
     end
-    write_num += 1
-
-    # Free all Datadeps-allocated buffers.
-    #
-    # The object cache holds, per space, one entry per `key` ainfo mapping to
-    # its backing buffer. Because related ainfos (e.g. overlapping `view`s and
-    # their shared parent) are unified under a single `key`, iterating the cache
-    # yields each distinct lowest-level buffer exactly once -- no duplication,
-    # regardless of array wrappers. A buffer is a Datadeps-allocated copy (safe
-    # to free) at every space except the `key`'s source space, where it is the
-    # user's original data (`is_original`).
-    #
-    # N.B. Do not mpi_cleanup_tid the planning-time uid keys here. Eager uid ==
-    # Sch thunk id, so planning (DATADEPS_THUNK_ID=>uid) and later in-task tochunk share
-    # the same next_ref_sub_id! counter. Resetting it before execution would
-    # reissue (tid, sub_id) pairs while planning-time MPIRefs are still live,
-    # colliding ArgumentWrapper / Chunk identity hashes. Counters are reclaimed
-    # in wait_all after the region finishes (thunks generate no further IDs).
-    obj_cache = unwrap(state.ainfo_backing_chunk)
-    # Map each tracked slot chunk to its ainfos, to compute free syncdeps.
-    chunk_to_ainfos = IdDict{Any,Vector{AliasingWrapper}}()
-    for (ainfo, remote_arg_ws) in state.ainfo_arg
-        for remote_arg_w in remote_arg_ws
-            push!(get!(Vector{AliasingWrapper}, chunk_to_ainfos, remote_arg_w.arg), ainfo)
-        end
+    if ddctx.err !== nothing
+        throw(DataDepsPoisonedError(ddctx.err_region, ddctx.err,
+                                    _resolve_region_bt(ddctx, ddctx.err_region)))
     end
-    freed = IdDict{Any,Nothing}()
-    for remote_space in keys(obj_cache.values)
-        remote_proc = first(processors(remote_space))
-        free_scope = ExactScope(remote_proc)
-        for (ainfo, remote_arg) in obj_cache.values[remote_space]
-            # Skip the user's original data; only free copies we allocated.
-            is_original(obj_cache, remote_space, ainfo) && continue
-            haskey(freed, remote_arg) && continue
-            freed[remote_arg] = nothing
-            free_syncdeps = Set{ThunkSyncdep}()
-            gather_free_syncdeps!(state, remote_space, ainfo, remote_arg, write_num, chunk_to_ainfos, free_syncdeps)
-            # `tag` keeps the free task rank-uniform under MPI/uniform execution.
-            Dagger.@spawn scope=free_scope syncdeps=free_syncdeps tag=datadeps_task_tag() Dagger.unsafe_free!(remote_arg)
-        end
-    end
-
-    # Persist the counter past this region's `state` (which is about to be
-    # dropped): the next region's `write_num` must never repeat a value this
-    # one already used, even though nothing in this phase actually compares
-    # across regions (see the N.B. above `state = ddctx.state = ...`).
-    ddctx.write_num = write_num + 1
     return
 end
 map_or_ntuple(f, xs::Vector) = map(f, 1:length(xs))
