@@ -289,11 +289,21 @@ end
 "A weak reference to a `Thunk`."
 struct WeakThunk
     x::WeakRef
-    WeakThunk(t::Thunk) = new(WeakRef(t))
+    # The referent's id at wrap time: with Thunk pooling, a stale WeakThunk
+    # could otherwise resolve to a *recycled* Thunk now representing a
+    # different task (silent corruption). Pool reset zeroes `thunk.id` and
+    # reuse assigns a fresh id, so the compare turns any stale reference into
+    # a loud `nothing`/assertion instead.
+    id::Int
+    WeakThunk(t::Thunk) = new(WeakRef(t), t.id)
 end
 istask(::WeakThunk) = true
 task_id(t::WeakThunk) = task_id(unwrap_weak_checked(t))
-unwrap_weak(t::WeakThunk) = t.x.value
+function unwrap_weak(t::WeakThunk)
+    v = t.x.value
+    (v isa Thunk && v.id == t.id) || return nothing
+    return v
+end
 unwrap_weak(t) = t
 function unwrap_weak_checked(t)
     t_val = unwrap_weak(t)
