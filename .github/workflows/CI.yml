@@ -265,6 +265,8 @@ jobs:
         run: julia --project=test/mpienv test/run_mpi.jl ${{ matrix.ranks }} 2 test/mpi.jl
       - name: Run CPU MPI async pipelining tests
         run: julia --project=test/mpienv test/run_mpi.jl ${{ matrix.ranks }} 2 test/mpi_async.jl
+      - name: Run CPU MPI hierarchical async pipelining tests
+        run: julia --project=test/mpienv test/run_mpi.jl ${{ matrix.ranks }} 2 test/mpi_hierarchical_async.jl
 
   mpi-opencl:
     # OpenCL runs against a CPU-backed ICD (no physical GPU required), unlike

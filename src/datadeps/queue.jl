@@ -65,10 +65,10 @@ returns as soon as `f` has been planned, leaving execution (and the eventual
 write-back/free) to a later [`Dagger.synchronize`](@ref) call -- this is what
 lets consecutive regions pipeline instead of each one being a full barrier.
 `sync` defaults to `Dagger.DATADEPS_SYNC[]`, itself defaulting to `true`, so
-every existing caller is unaffected unless it opts in. `hierarchical=true`
-(the default) forces `sync=true` regardless of what is requested; see the
-N.B. below. MPI/SPMD execution (`uniform_execution()`) no longer forces
-`sync=true` -- deferred planning/flushing is rank-uniform, protected by
+every existing caller is unaffected unless it opts in. Neither
+`hierarchical=true` (the default) nor MPI/SPMD execution
+(`uniform_execution()`) forces `sync=true` anymore; see the N.B. below.
+Deferred planning/flushing is rank-uniform, protected by
 [`with_datadeps_planning_token`](@ref) so only one Julia Task per rank ever
 performs it at a time. The result of `f` will be returned from
 `spawn_datadeps`.
@@ -108,30 +108,28 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
     poisoned === nothing || throw(poisoned)
 
     hierarchical = something(hierarchical, DATADEPS_HIERARCHICAL[], true)::Bool
-    # N.B. Hierarchical keeps its own region-scoped `DataDepsState`s,
-    # reconciled at the end of every region exactly as before (`ctx.state`
-    # stays `#undef`; see context.jl) -- persisting *that* path's state across
-    # regions is out of scope here, so it still forces a synchronous trailing
-    # drain regardless of what the caller asked for. Integrating hierarchical
-    # with the context (carry-in/publish-back) is later work; see PLAN.md
-    # Phase 7b.
+    # N.B. Neither `hierarchical=true` (the default) nor uniform (MPI/SPMD)
+    # execution forces `sync=true` anymore. Uniform execution stopped forcing
+    # it in Phase 7a: a deferred epilogue spanning multiple regions does mean
+    # tags/`MPIRefID`s get allocated by code running arbitrarily long after
+    # the region that requested them returned, but that's rank-uniform as
+    # long as every rank performs those allocations in the same relative
+    # order -- which is true of the deferred write-back/free emission (still
+    # sorted by `arg_w.hash`, still driven purely by `ddctx.state`, itself
+    # built identically on every rank) and is guarded by
+    # `with_datadeps_planning_token` (context.jl) so a second Julia Task
+    # racing to plan or flush on the same rank gets a clear error instead of
+    # silently reordering the allocation sequence relative to another rank's.
     #
-    # Uniform (MPI/SPMD) execution is NOT forced anymore (Phase 7a): a
-    # deferred epilogue spanning multiple regions does mean tags/`MPIRefID`s
-    # get allocated by code running arbitrarily long after the region that
-    # requested them returned, but that's rank-uniform as long as every rank
-    # performs those allocations in the same relative order -- which is true
-    # of the deferred write-back/free emission (still sorted by `arg_w.hash`,
-    # still driven purely by `ddctx.state`, itself built identically on every
-    # rank) and is now further guarded by `with_datadeps_planning_token`
-    # (context.jl) so a second Julia Task racing to plan or flush on the same
-    # rank gets a clear error instead of silently reordering the allocation
-    # sequence relative to another rank's.
-    sync = if hierarchical
-        true
-    else
-        something(sync, DATADEPS_SYNC[], true)::Bool
-    end
+    # Hierarchical stopped forcing it in Phase 7b: `distribute_tasks_hierarchical!`
+    # now seeds its shared-state path directly from `ddctx.state`/`ddctx.write_num`
+    # (carry-in) and defers that path's write-back/free into `ddctx.pending_writeback`/
+    # `ddctx.pending_free` instead of copying-from-and-freeing immediately
+    # (publish-back) -- see `hierarchical.jl`'s `_distribute_tasks_hierarchical!`
+    # for the carry-in/publish-back mechanics and for why the *other*
+    # (single-memory-space, parallel-per-partition) scheduling strategy there
+    # still forces a synchronous drain around itself rather than participating.
+    sync = something(sync, DATADEPS_SYNC[], true)::Bool
 
     # N.B. Store the *raw* backtrace, not `stacktrace(backtrace())`. Resolving
     # frames to symbols eagerly costs ~119us against ~4.6us for the raw
@@ -328,42 +326,48 @@ function distribute_tasks!(queue::DataDepsTaskQueue, ddctx::DataDepsContext)
         write_num = distribute_task!(queue, state, all_procs, all_scope, spec, task, spec.fargs, proc_to_scope_lfu, write_num)
     end
 
-    # Record which arguments may need writing back to their origin, instead of
-    # emitting the copy now. Deferred to flush time (`flush_pending_writeback!`,
-    # synchronize.jl) because the skip condition below (`origin_space in
-    # arg_current[arg_w]`) can only be answered against the state as it stands
-    # when execution actually catches up to this point -- an intervening,
-    # not-yet-planned region may still make this write-back unnecessary. The
-    # `queue.jl:188-190`-style rule (mid-region copies serialize readers
-    # against later writers and must not be skipped) is unaffected: this is
-    # only ever the *final* write-back, and "final" now means "at the flush
-    # point" rather than "at this region's end".
+    defer_writeback_and_free!(ddctx, state, write_num)
+    return
+end
+
+"""
+    defer_writeback_and_free!(ddctx::DataDepsContext, state::DataDepsState, write_num::Int)
+
+Record `state`'s writers as pending write-back and mark its object cache as
+worth re-examining for frees, instead of emitting either now, then persist
+`write_num` into `ddctx`. Shared by flat `distribute_tasks!` and hierarchical's
+shared-state scheduling path (`_distribute_tasks_hierarchical!`'s
+`use_shared_state` branch) -- both plan directly against `ddctx.state`, so
+both need the identical publish-back: nothing here is specific to how `state`
+was populated, only that it *is* `ddctx.state`.
+
+Deferred to flush time (`flush_pending_writeback!`/`flush_pending_frees!`,
+synchronize.jl) rather than emitted here, because:
+- The write-back skip condition (`origin_space in arg_current[arg_w]`) can
+  only be answered against the state as it stands when execution actually
+  catches up to this point -- an intervening, not-yet-planned region may
+  still make this write-back unnecessary. The `queue.jl:188-190`-style rule
+  (mid-region copies serialize readers against later writers and must not be
+  skipped) is unaffected: this is only ever the *final* write-back, and
+  "final" now means "at the flush point" rather than "at this region's end".
+- The free loop `unsafe_free!`s buffers that this same `state`'s cache lists
+  as live, so running it every region would free slots a later,
+  already-planned region's `arg_current` still points at. Deferral also
+  means the old N.B. about not `mpi_cleanup_tid`-ing planning-time uid keys
+  here still applies, but "reclaim at wait_all after the region finishes"
+  now means "reclaim at synchronize" -- see `_do_synchronize!`.
+
+Persisting `write_num` here is load-bearing across regions, not just
+monotonic bookkeeping in preparation for it: the next region's `write_num`
+must never repeat a value this one already used.
+"""
+function defer_writeback_and_free!(ddctx::DataDepsContext, state::DataDepsState, write_num::Int)
     @check_uniform(length(state.arg_owner))
     @lock ddctx.lock for arg_w in sort(collect(keys(state.arg_owner)); by=arg_w->arg_w.hash)
         @check_uniform(arg_w)
         push!(ddctx.pending_writeback, arg_w)
     end
-
-    # Mark that the flat path's object cache may hold freeable buffers; see
-    # `pending_free`'s field comment (context.jl) for why this is a marker,
-    # not a worklist -- the actual free loop (`flush_pending_frees!`,
-    # synchronize.jl, formerly inlined here) always re-scans the *current*
-    # object cache at flush time, since eligibility depends on every region's
-    # reads/writes up to that point, not just this one's.
-    #
-    # N.B. Freeing (like the write-back above) is deferred rather than run
-    # here: the free loop `unsafe_free!`s buffers that this same `state`'s
-    # cache lists as live, so running it every region would free slots a
-    # later, already-planned region's `arg_current` still points at. Deferral
-    # also means the old N.B. about not `mpi_cleanup_tid`-ing planning-time uid
-    # keys here still applies, but "reclaim at wait_all after the region
-    # finishes" now means "reclaim at synchronize" -- see `_do_synchronize!`.
-    @lock ddctx.lock ddctx.pending_free[ddctx.state] = nothing
-
-    # Persist the counter: the next region's `write_num` must never repeat a
-    # value this one already used. This is now load-bearing across regions,
-    # not just monotonic bookkeeping in preparation for it -- see the N.B.
-    # above `state = ddctx.state`.
+    @lock ddctx.lock ddctx.pending_free[state] = nothing
     ddctx.write_num = write_num + 1
     return
 end

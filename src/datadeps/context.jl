@@ -18,10 +18,18 @@
 # `flush_pending_writeback!`/`flush_pending_frees!` (this file) for how the two
 # halves land together.
 #
-# The hierarchical path is explicitly out of scope for this phase (it keeps
-# its own region-scoped `DataDepsState`s, reconciled at the end of every
-# region as before) and forces `sync=true` -- see `spawn_datadeps`. `ctx.state`
-# stays `#undef` there, exactly as in Phase 3.
+# Phase 7b extends this to (most of) the hierarchical path: its shared-state
+# scheduling strategy (`schedule_partitions_sequential!`, used whenever every
+# processor does not share one memory space, or under MPI/SPMD -- i.e. the
+# common multi-process/MPI case) now plans directly against this same `state`
+# and defers into the same `pending_writeback`/`pending_free`, instead of
+# reconciling its own region-scoped `DataDepsState`s and copying-from-and-
+# freeing at every region's end. See the carry-in/publish-back N.B. in
+# `_distribute_tasks_hierarchical!` (hierarchical.jl). Its *other* scheduling
+# strategy (parallel per-partition planning, reachable only for a single
+# memory space) still does not participate -- see that N.B. for why -- so
+# `ctx.state` can still be left `#undef` for the lifetime of a context that
+# never takes any other path.
 
 """
     DataDepsContext
@@ -44,10 +52,13 @@ mutable struct DataDepsContext
     # "epoch" (one span between drains) rather than the process lifetime;
     # trimming a *single* long-running epoch's state is Phase 5's job.
     #
-    # Left `#undef` by the constructor and never assigned on the hierarchical
-    # path (an optimization to avoid an unused `tochunk` per region there,
-    # since hierarchical plans against its own per-partition states and never
-    # reads this field). Guard any access with `isdefined(ctx, :state)`.
+    # Left `#undef` by the constructor. Initialized lazily -- by flat
+    # `distribute_tasks!` (queue.jl) or by hierarchical's shared-state
+    # scheduling strategy (`_distribute_tasks_hierarchical!`, hierarchical.jl)
+    # -- the first time either actually needs it, so a context that only ever
+    # takes hierarchical's other (single-memory-space, parallel-per-partition)
+    # strategy never pays for an unused `tochunk` per region. Guard any access
+    # with `isdefined(ctx, :state)`.
     state::DataDepsState
 
     # Rebuilt fresh every region (both flat and hierarchical): `SlotReuseRegion`
@@ -66,6 +77,27 @@ mutable struct DataDepsContext
     slots::SlotReuseRegion
     memo::ChunkAinfoMemo
     retiring_slots::Vector{SlotReuseRegion}
+
+    # Durable (not scoped-value-based) record of every slot handle any region
+    # on this context has ever handed to the slot cache via `retain_slot!`.
+    # `flush_pending_frees!` (synchronize.jl) consults this -- not the scoped
+    # `SLOT_REUSE_REGION[]`/`slot_is_retained(slot)` that hierarchical's own
+    # (never-deferred) free loop uses -- because a deferred free can run long
+    # after, or entirely outside, the `spawn_datadeps` call whose
+    # `retain_reusable_slots!` made the retention decision: by then
+    # `SLOT_REUSE_REGION[]` is bound to a *later* region's `SlotReuseRegion` (or
+    # not bound at all, for a bare `Dagger.synchronize()`), so the original
+    # decision would otherwise be invisible and the buffer would be freed out
+    # from under the slot cache's entry for it. Only ever added to (never
+    # removed from) while an epoch is open -- retained slots are never meant to
+    # be explicitly freed at all, by design (see `retain_slot!`'s field
+    # comment: eviction from `SLOT_CACHE` just drops the reference and leaves
+    # reclamation to refcounting/the GC) -- so accumulating here costs nothing
+    # beyond what `SLOT_CACHE`'s own FIFO eviction already bounds. Reset at the
+    # same point as `state` (`_do_synchronize!`, step 7): once a full drain
+    # confirms every region up to here has retired, none of these entries can
+    # still be pending a free decision.
+    pending_retained_slots::Set{Any}
 
     # Monotonic across the owner's entire lifetime, never reset per region.
     # See the N.B. in `distribute_tasks!` (queue.jl). Now load-bearing across
@@ -145,6 +177,7 @@ mutable struct DataDepsContext
         ctx.slots = SlotReuseRegion(Set{UInt}())
         ctx.memo = ChunkAinfoMemo()
         ctx.retiring_slots = SlotReuseRegion[]
+        ctx.pending_retained_slots = Set{Any}()
         ctx.write_num = 1
         ctx.region_id = 0
         ctx.inflight = DTask[]
@@ -289,6 +322,19 @@ function deregister_context!(t::Task)
         delete!(reg, t)
     end
     return nothing
+end
+
+"""
+    slot_is_retained(ddctx::DataDepsContext, slot) -> Bool
+
+Same question as `slot_is_retained(slot)` (slotcache.jl), answered from
+`ddctx`'s durable `pending_retained_slots` rather than the scoped
+`SLOT_REUSE_REGION[]`. See that field's comment above for why a deferred free
+needs this version.
+"""
+function slot_is_retained(ddctx::DataDepsContext, slot)
+    slot isa Chunk || return false
+    return slot.handle in ddctx.pending_retained_slots
 end
 
 """

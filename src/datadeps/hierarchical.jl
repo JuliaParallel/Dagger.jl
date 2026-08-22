@@ -1385,7 +1385,7 @@ function schedule_partition_full!(queue::DataDepsTaskQueue,
 end
 
 """
-    schedule_partitions_sequential!(...) -> Vector{DataDepsState}
+    schedule_partitions_sequential!(...) -> (Vector{DataDepsState}, Int)
 
 SPMD-safe Phase 4: schedule every partition's tasks on the root task in global
 topological order. Processor assignment remains partition-local (MPI-rank /
@@ -1394,8 +1394,19 @@ history, remainders, and final copy-back stay coherent across ranks -- the same
 model as flat `distribute_tasks!`. Per-partition states would otherwise
 split-brain overlapping writes (e.g. whole-array + view + triangular dep_mods).
 
+The shared state *is* `ddctx.state` and the starting `write_num` *is*
+`ddctx.write_num` (both already initialized by the caller) -- not fresh, region
+-scoped values -- so this plans directly on top of everything earlier regions
+on this context have recorded, exactly like flat `distribute_tasks!` does. See
+the carry-in/publish-back N.B. in `_distribute_tasks_hierarchical!`.
+
 Returns a one-element vector containing the shared state (for the hierarchical
-copy-from/free epilogue).
+epilogue) and the `write_num` after the last scheduled task, for the caller to
+publish back into `ddctx.write_num` (via `defer_writeback_and_free!`) once it
+has also decided what to do with the state -- this function does not persist
+either itself, since publish-back also needs to run `retain_reusable_slots!`
+against the *final* state first, and doing that here would split the "what
+this function does" story across two unrelated concerns.
 """
 function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
                                          queue_lock::ReentrantLock,
@@ -1406,13 +1417,14 @@ function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
                                          vertex_to_partition::Vector{Int},
                                          registry::Union{SharedChunkRegistry,Nothing},
                                          wait_all_queue,
-                                         value_dep_verts::Set{Int})
+                                         value_dep_verts::Set{Int},
+                                         ddctx::DataDepsContext)
     n_partitions = length(partitions)
     temp_queues = Vector{DataDepsTaskQueue}(undef, n_partitions)
     local_scopes = Vector{AbstractScope}(undef, n_partitions)
     proc_to_scope_lfus = [BasicLFUCache{Processor,AbstractScope}(1024) for _ in 1:n_partitions]
-    shared_state = DataDepsState()
-    write_num = 1
+    shared_state = ddctx.state
+    write_num = ddctx.write_num
 
     # Uniform execution inverts `BatchedEnqueueQueue`'s latency/throughput
     # tradeoff, so there we buffer the whole region rather than a few tasks.
@@ -1493,7 +1505,7 @@ function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
         end
     end
 
-    return DataDepsState[shared_state]
+    return (DataDepsState[shared_state], write_num)
 end
 
 struct LockedEnqueueQueue <: AbstractTaskQueue
@@ -1582,7 +1594,7 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue, ddctx::DataDep
 
     stats = HIER_TIMING[] ? HierPlanStats() : nothing
     return with(HIER_STATS => stats) do
-        _distribute_tasks_hierarchical!(queue, seen_tasks, accel, all_procs, stats)
+        _distribute_tasks_hierarchical!(queue, seen_tasks, accel, all_procs, stats, ddctx)
     end
 end
 
@@ -1590,7 +1602,8 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
                                          seen_tasks::Vector{DTaskPair},
                                          accel::Acceleration,
                                          all_procs::Vector{<:Processor},
-                                         stats::Union{HierPlanStats,Nothing})
+                                         stats::Union{HierPlanStats,Nothing},
+                                         ddctx::DataDepsContext)
     # Phase 1: Collect arguments and compute aliasing in parallel
     task_metas, unique_arg_ws = @hier_phase stats prescan_ns collect_aliased_args(seen_tasks)
 
@@ -1683,12 +1696,68 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
     # See PERF(hier-2)/(hier-3).
     exec_spaces = unique(Iterators.flatten(memory_spaces(proc) for proc in all_procs))
     use_shared_state = uniform_execution(accel) || length(exec_spaces) > 1
-    partition_states = @hier_phase stats schedule_ns try
+
+    # Carry-in / publish-back (Phase 7b). The shared-state branch below plans
+    # directly against `ddctx.state`/`ddctx.write_num` instead of a fresh,
+    # region-scoped `DataDepsState()`, exactly like flat `distribute_tasks!`
+    # (queue.jl) does: region N+1's planning sees region N's
+    # `arg_owner`/`arg_current`/`ainfos_owner`/`ainfos_readers` directly (carry-in,
+    # for free -- it's literally the same `Dict`s), and its epilogue defers
+    # write-back/free into `ddctx.pending_writeback`/`ddctx.pending_free`
+    # (`defer_writeback_and_free!`, queue.jl) instead of copying-from-and-freeing
+    # immediately (publish-back). This is what lets
+    # `spawn_datadeps(hierarchical=true (the default), sync=false)` pipeline at
+    # all -- see `spawn_datadeps`'s N.B. on why it no longer forces `sync=true`.
+    #
+    # The *other* strategy (parallel per-partition planning, `schedule_partition_full!`,
+    # only reachable when every processor shares one memory space -- see the
+    # N.B. above `exec_spaces`) does not participate. Its `n_partitions`
+    # independent, from-scratch `DataDepsState`s each number their own writes
+    # from 1, and those numbers are not comparable across partitions (see
+    # `_hierarchical_max_write_num` and the cross-partition merge in
+    # `_hierarchical_copy_from_and_free!` below) -- let alone to
+    # `ddctx.write_num`. That merge is already the reconciliation this strategy
+    # needs, and it is deliberately kept entirely internal to one region rather
+    # than extended to survive across regions: doing so would need either
+    # giving every partition a disjoint slice of `ddctx.write_num` up front
+    # (moot, since rank-uniformity is not a concern here -- this strategy only
+    # runs when `!uniform_execution()` -- but partition sizes also are not
+    # known before scheduling starts) or a truly shared, lockable state
+    # (PERF(hier-2) already found not worth it: this strategy's reason to exist
+    # is spreading *planning* CPU cost across partitions, which a shared lock
+    # would simply re-serialize). And this strategy only ever runs for a
+    # single memory space, where this phase's own measurements found
+    # cross-region pipelining delivers ~zero benefit anyway (nothing to elide
+    # a copy to). So it isn't worth the risk here; it keeps exactly its
+    # pre-Phase-7b behavior instead, a synchronous island:
+    #  * A full drain *before* planning, of anything an earlier region (of
+    #    either strategy, or flat) left outstanding on this context. Its
+    #    from-scratch states have no way to discover a still in-flight
+    #    producer for an argument they're about to touch (they never consult
+    #    `ddctx.state`), so without this, a race -- not just stale data, an
+    #    actual missing syncdep -- is possible.
+    #  * A full drain *after* its own (still eager) copy-from-and-free
+    #    epilogue, so it never *leaves* untracked in-flight work of its own for
+    #    a later region (of either strategy) to race against either.
+    # Both drains are full, not partial: partial tracking is exactly the
+    # machinery this strategy is opting out of participating in.
+    if !use_shared_state
+        _do_synchronize!(ddctx; write_back=true, free=true, gpu_sync=:fence,
+                         check_errors=true, wrap_errors=false, from_owner=true)
+        # The drain just evicted this region's own backtrace entry (it keeps
+        # only a failing region's); restore it so a failure discovered later
+        # in *this* region can still be attributed to its call site.
+        @lock ddctx.lock ddctx.region_bt[ddctx.region_id] = backtrace()
+    elseif !isdefined(ddctx, :state)
+        ddctx.state = DataDepsState()
+    end
+
+    partition_states, shared_write_num = @hier_phase stats schedule_ns try
         if use_shared_state
             schedule_partitions_sequential!(
                 queue, queue_lock, partitions, dag, seen_tasks,
                 partition_procs, vertex_to_partition, registry,
-                wait_all_queue, value_dep_verts)
+                wait_all_queue, value_dep_verts, ddctx)
         else
             states = Vector{DataDepsState}(undef, n_partitions)
             @sync for pid in 1:n_partitions
@@ -1711,22 +1780,38 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
                     end
                 end
             end
-            states
+            (states, nothing)
         end
     catch e
         rethrow(_unwrap_partition_exception(e))
     end
 
-    # The shared-state path returns a one-element state vector and does not
-    # commit into `registry` (`ownership=nothing` there); copy-back must therefore
-    # ignore the registry and use the shared state's full history (same as flat).
-    # Passing the registry would skip every multi-partition chunk: the registry
-    # path needs `owner_state` (never set), and the private path skips shared keys.
-    # Distributed keeps per-partition states and needs the registry for coherent
-    # cross-partition write-back.
-    epilogue_registry = use_shared_state ? nothing : registry
-    @hier_phase stats epilogue_ns _hierarchical_copy_from_and_free!(
-        partition_states, length(partition_states), epilogue_registry)
+    if use_shared_state
+        # Publish-back: defer instead of copying-from-and-freeing now. `only`
+        # is always valid -- `schedule_partitions_sequential!` always returns a
+        # one-element vector -- and it *is* `ddctx.state` (the carry-in
+        # above), not a region-scoped copy, so there is nothing left to merge:
+        # the next region that also takes this branch sees these facts
+        # directly, the same way two consecutive flat regions do.
+        state = only(partition_states)
+        @assert state === ddctx.state "Shared-state hierarchical scheduling must plan directly against ddctx.state"
+        @hier_phase stats epilogue_ns begin
+            retain_reusable_slots!(state)
+            @lock ddctx.lock union!(ddctx.pending_retained_slots, ddctx.slots.retained)
+            defer_writeback_and_free!(ddctx, state, shared_write_num)
+        end
+    else
+        # Does not commit into `registry` from this branch either
+        # (`ownership=nothing` was passed to `schedule_partition_full!` above);
+        # copy-back therefore uses each partition's own full history (same as
+        # flat), which is why `registry` is always `nothing` here in practice
+        # (single memory space; see `build_shared_chunk_registry`) -- see the
+        # "Cross-partition chunk ownership" dead-code note above.
+        @hier_phase stats epilogue_ns _hierarchical_copy_from_and_free!(
+            partition_states, length(partition_states), registry)
+        _do_synchronize!(ddctx; write_back=true, free=true, gpu_sync=:fence,
+                         check_errors=true, wrap_errors=false, from_owner=true)
+    end
     if stats !== nothing
         stats.ntasks = length(seen_tasks)
         stats.nargs = length(unique_arg_ws)
