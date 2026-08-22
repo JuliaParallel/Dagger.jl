@@ -195,6 +195,66 @@ function _context_finalizer(ctx::DataDepsContext)
 end
 
 """
+    DataDepsConcurrentPlanningError <: Exception
+
+Thrown when a second Julia Task on this rank attempts to plan (`distribute_tasks!`/
+`distribute_tasks_hierarchical!`) or flush (`flush_pending_writeback!`/
+`flush_pending_frees!`, inside `_do_synchronize!`) a Datadeps region while
+another Task on the same rank is already doing so, under `uniform_execution()`
+(MPI/SPMD). See [`DATADEPS_PLANNING_TOKEN`](@ref) for why this is required and
+why it errors instead of blocking.
+"""
+struct DataDepsConcurrentPlanningError <: Exception end
+function Base.showerror(io::IO, ::DataDepsConcurrentPlanningError)
+    print(io, "DataDepsConcurrentPlanningError: another Julia Task is already planning or flushing a Datadeps region on this rank under MPI/SPMD (uniform_execution()). Two Tasks doing so concurrently would allocate tags/MPIRefIDs (to_tag, next_ref_sub_id!) and issue check_uniform collectives in an order that depends on this rank's local thread scheduling -- which need not match the order on any other rank -- desyncing the SPMD program instead of merely raising here. Serialize planning across Tasks on this rank (e.g. by calling `Dagger.synchronize()` before starting the next region on another Task).")
+end
+
+"""
+    DATADEPS_PLANNING_TOKEN
+
+Process-global (i.e. per-rank, since each MPI rank is its own process) token
+serializing the parts of Datadeps that allocate tags/`MPIRefID`s or issue
+`check_uniform` collectives -- planning (`distribute_tasks!`/
+`distribute_tasks_hierarchical!`, via [`with_datadeps_planning_token`](@ref) in
+`queue.jl`) and flushing (`flush_pending_writeback!`/`flush_pending_frees!`
+inside `_do_synchronize!`, via the same helper in `synchronize.jl`). These
+calls are only rank-uniform if every rank performs them in the same relative
+order; two Julia Tasks on one rank racing to do so (a live possibility now
+that `spawn_datadeps(...; sync=false)` lets planning and flushing outlive a
+single region and interleave with other Tasks' regions) would let this rank's
+OS thread scheduler pick an order another rank's scheduler has no reason to
+agree with -- a rank-dependent branch in spirit, just produced by scheduling
+instead of by data. `uniform_execution()` is false for plain
+Distributed/CPU/GPU execution, so ordinary multi-task use (independent async
+pipelines on separate Tasks, per the "Multi-task" scenario) is unrestricted;
+this only ever applies under MPI/SPMD.
+
+Acquired with `trylock`, never blocking `lock`: a second Task finding the
+token held gets [`DataDepsConcurrentPlanningError`](@ref) immediately, not a
+hang that looks like every other MPI deadlock. See
+[`with_datadeps_planning_token`](@ref).
+"""
+const DATADEPS_PLANNING_TOKEN = ReentrantLock()
+
+"""
+    with_datadeps_planning_token(f)
+
+Run `f()` while holding [`DATADEPS_PLANNING_TOKEN`](@ref), but only under
+`uniform_execution()` -- a no-op wrapper otherwise. Throws
+[`DataDepsConcurrentPlanningError`](@ref) instead of blocking if another Task
+already holds it.
+"""
+function with_datadeps_planning_token(f)
+    uniform_execution() || return f()
+    trylock(DATADEPS_PLANNING_TOKEN) || throw(DataDepsConcurrentPlanningError())
+    try
+        return f()
+    finally
+        unlock(DATADEPS_PLANNING_TOKEN)
+    end
+end
+
+"""
 Backpressure watermark for `DataDepsContext.inflight`: planning blocks once
 this many launched tasks are outstanding, so a planner that outruns execution
 under `sync=false` doesn't queue up thousands of regions' worth of work ahead

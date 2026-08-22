@@ -221,12 +221,23 @@ function _do_synchronize!(ddctx::DataDepsContext;
         # its own write-back/free epilogue synchronously before
         # `spawn_datadeps` returns (it forces `sync=true`), so there is
         # nothing deferred to flush on that path.
+        #
+        # `flush_pending_writeback!`/`flush_pending_frees!` allocate tags
+        # (`datadeps_task_tag()` -> `to_tag()`) and issue `check_uniform`
+        # collectives under uniform (MPI/SPMD) execution, exactly like
+        # planning does -- so they're guarded by the same process-global
+        # token (`with_datadeps_planning_token`, context.jl), preventing a
+        # concurrent planner (or another drain) on this rank from
+        # interleaving its own tag/collective calls with these. A no-op
+        # wrapper outside uniform execution.
         if isdefined(ddctx, :state)
             upper_queue = get_options(:task_queue, DefaultTaskQueue())
             flush_queue = ContextQueue(upper_queue, ddctx)
             with_options(; task_queue=flush_queue) do
-                write_back && flush_pending_writeback!(ddctx)
-                free && flush_pending_frees!(ddctx)
+                with_datadeps_planning_token() do
+                    write_back && flush_pending_writeback!(ddctx)
+                    free && flush_pending_frees!(ddctx)
+                end
             end
         end
 
@@ -260,9 +271,25 @@ function _do_synchronize!(ddctx::DataDepsContext;
         # Step 5: release this epoch's retained per-region slot caches (safe
         # now that every task that could still be touching a checked-out slot
         # has been waited on above), and reclaim accel-specific per-task
-        # state (under MPI, `mpi_cleanup_tid`'s sub-id counters -- see the
-        # N.B. in `distribute_tasks!`: "reclaim at wait_all" now means
-        # "reclaim at synchronize").
+        # state (under MPI, `mpi_cleanup_tids!`'s `_MPIREF_TID` sub-id
+        # counters -- see the N.B. in `distribute_tasks!`: "reclaim at
+        # wait_all" now means "reclaim at synchronize").
+        #
+        # This is safe even though `drained_tasks` can now span every region
+        # planned on `ddctx` since the last full drain (not just "the" region,
+        # now that regions pipeline): each tid's sub-counter is only ever
+        # touched from two places, both keyed by that *task's own* uid --
+        # `populate_task_info!`/`get_or_generate_slot!` during planning
+        # (before the task is even enqueued for execution) and
+        # `schedule_argument_move` during the task's own execution (before
+        # `fetch` on it, just above, can return). So by the time a task
+        # appears in `drained_tasks` and has been fetched, nothing can still
+        # be generating sub-ids under its tid, regardless of how many other
+        # (earlier or later) regions share this context. Copy/free tasks
+        # never populate `_MPIREF_TID` at all -- `datadeps_task_tag()` runs
+        # before they exist as tasks, so it always takes `take_ref_id!`'s
+        # "generic" branch (the global, never-reclaimed `next_id()` counter),
+        # not `next_ref_sub_id!`.
         for slots in ddctx.retiring_slots
             release_slot_reuse_region!(slots)
         end
