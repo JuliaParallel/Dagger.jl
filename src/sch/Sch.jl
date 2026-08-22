@@ -1668,18 +1668,23 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
             end
 
             # Launch the task
-            t = @reusable_tasks :start_processor_runner!_task_cache 32 t->begin
+            # N.B. The task is recorded in `istate.tasks` via the register
+            # hook, which runs BEFORE the payload is dispatched. With
+            # dispatch-then-record, a short task running on another thread
+            # completes before the record exists, and DoTaskSpec's cleanup
+            # loop then burned a sleep(0.1) per lost race — the dominant
+            # multithreaded wall-time cost for small tasks.
+            @reusable_tasks :start_processor_runner!_task_cache 32 t->begin
                 tid = task_tid_for_processor(to_proc)
                 if tid !== nothing
                     Dagger.set_task_tid!(t, tid)
                 else
                     Dagger.set_task_migratable!(t)
                 end
-            end "thunk" DoTaskSpec(to_proc, return_queue, task, cancel_token)
-
-            # Record the launched task
-            lock(istate.queue) do _
-                tasks[thunk_id] = t
+            end "thunk" DoTaskSpec(to_proc, return_queue, task, cancel_token) t->begin
+                lock(istate.queue) do _
+                    tasks[thunk_id] = t
+                end
             end
         end
     end
@@ -1715,6 +1720,7 @@ function (dts::DoTaskSpec)()
         # state will be nothing if processor was removed due to scheduler exit
         if state !== nothing
             istate = state.state
+            sleep_backoff = 0
             while true
                 # Wait until the task has been recorded in the processor state
                 done = lock(istate.queue) do _
@@ -1736,7 +1742,13 @@ function (dts::DoTaskSpec)()
                     return false
                 end
                 done && break
-                sleep(0.1)
+                # Should be unreachable now that the runner records the task
+                # in `istate.tasks` before dispatching it (see the register
+                # hook at the dispatch site); back off gently rather than
+                # stalling 100ms if some path still races.
+                yield()
+                sleep_backoff += 1
+                sleep_backoff > 100 && sleep(0.001)
             end
             notify(istate.reschedule)
         end

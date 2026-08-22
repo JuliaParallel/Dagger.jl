@@ -639,15 +639,23 @@ function reusable_task_loop(chan::Channel{Any}, ready::Threads.Atomic{Bool})
         Threads.atomic_xchg!(ready, true)
     end
 end
-function (cache::ReusableTaskCache)(f, name::String)
+# `register` (if non-nothing) is called with the Task BEFORE the payload is
+# dispatched onto it. Callers that record the Task in bookkeeping the payload
+# itself consults on completion (e.g. `istate.tasks`) need this
+# happens-before: with tiny payloads on other threads, dispatch-then-record
+# loses the race and the payload's completion path spins/sleeps waiting for
+# the record to appear.
+function (cache::ReusableTaskCache)(f, name::String, register=nothing)
     idx = findfirst(getindex, cache.ready)
     if idx !== nothing
         @assert Threads.atomic_xchg!(cache.ready[idx], false)
+        t = cache.tasks[idx]
+        register === nothing || register(t)
         put!(cache.chans[idx], f)
         # N.B. No errormonitor_tracked_set! here: pooled tasks are registered
         # once at init, and renaming the tracked entry per dispatch was an
         # O(n) locked scan on the hot path for a debugging-only list
-        return cache.tasks[idx]
+        return t
     else
         t = @task try
             @invokelatest f()
@@ -655,6 +663,7 @@ function (cache::ReusableTaskCache)(f, name::String)
             @error "[$name] Error in non-reusable task" exception=(err, catch_backtrace())
         end
         cache.setup_f(t)
+        register === nothing || register(t)
         schedule(t)
         Sch.errormonitor_tracked(name, t)
         return t
@@ -662,13 +671,13 @@ function (cache::ReusableTaskCache)(f, name::String)
     return
 end
 
-macro reusable_tasks(name, N, setup_ex, task_name, task_ex)
+macro reusable_tasks(name, N, setup_ex, task_name, task_ex, register_ex=nothing)
     cache_name = Symbol("__$(name)_TLV_ReusableTaskCache")
     if !hasproperty(__module__, cache_name)
         __module__.eval(:(#=const=# $cache_name = $TaskLocalValue{$ReusableTaskCache}(()->$ReusableTaskCache($N))))
     end
     return esc(quote
         $reusable_task_cache_init!($setup_ex, $cache_name[])
-        $cache_name[]($task_ex, $task_name)
+        $cache_name[]($task_ex, $task_name, $register_ex)
     end)
 end
