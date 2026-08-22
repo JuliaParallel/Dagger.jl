@@ -319,6 +319,7 @@ function _cleanup_proc(uid, log_sink)
     end
     MemPool.lock(states.lock) do
         empty!(states.dict)
+        Threads.atomic_add!(states.version, 1)
     end
 end
 function cleanup_proc(state, p, log_sink)
@@ -1369,13 +1370,16 @@ const PROCESSOR_TASK_STATE_LOCK = MemPool.ReadWriteLock()
 struct ProcessorStateDict
     lock::MemPool.ReadWriteLock
     dict::Dict{Processor,ProcessorState}
+    # Bumped on every insert into `dict`; lets hot paths (steal/kick loops)
+    # cache a values snapshot and re-collect only when membership changed
+    version::Threads.Atomic{Int}
     # Thunk IDs cancelled by the fallback before do_tasks ran.
     # do_tasks and the proc runner check this set and skip the task
     # (without incrementing proc_occupancy) if the ID is present.
     pre_cancelled::Set{Int}
     pre_cancelled_lock::ReentrantLock
     ProcessorStateDict() = new(MemPool.ReadWriteLock(), Dict{Processor,ProcessorState}(),
-                               Set{Int}(), ReentrantLock())
+                               Threads.Atomic{Int}(0), Set{Int}(), ReentrantLock())
 end
 const PROCESSOR_TASK_STATE = Dict{UInt64,ProcessorStateDict}()
 
@@ -1398,10 +1402,35 @@ function proc_states_values(uid::UInt64=Dagger.get_tls().sch_uid)
         collect(values(states.dict))
     end
 end
-# Random visit order for stealing/kicking; skips the permutation (and its
-# allocations) when there are 0-1 states, the common single-processor case.
-shuffled_states(states::Vector) =
-    length(states) <= 1 ? states : states[randperm(length(states))]
+
+"""
+    StatesCache
+
+Steal/kick-loop snapshot of a `ProcessorStateDict`'s values, re-collected only
+when the dict's version changes. Hot wakeup paths previously collected a fresh
+Vector (plus a `randperm` copy) on every attempt, which dominated allocations
+under multithreaded execution.
+"""
+mutable struct StatesCache
+    version::Int
+    values::Vector{ProcessorState}
+end
+StatesCache() = StatesCache(-1, ProcessorState[])
+function states_snapshot!(cache::StatesCache, states::ProcessorStateDict)
+    version = states.version[]
+    if cache.version != version
+        cache.values = MemPool.@lock_read states.lock begin
+            collect(values(states.dict))
+        end
+        cache.version = version
+    end
+    return cache.values
+end
+
+# Task-local snapshot cache for the steal/kick paths (do_tasks runs on pooled
+# tasks, and each processor runner is one long-lived task, so the cache
+# amortizes across wakeups)
+const STATES_CACHE_TLV = Dagger.TaskLocalValue{StatesCache}(()->StatesCache())
 function proc_state!(f, uid::UInt64, proc::Processor)
     states = proc_states(uid)
     state = MemPool.@lock_read states.lock begin
@@ -1413,6 +1442,7 @@ function proc_state!(f, uid::UInt64, proc::Processor)
             existing !== nothing && return existing
             new_state = f()::ProcessorState
             states.dict[proc] = new_state
+            Threads.atomic_add!(states.version, 1)
             return new_state
         end
     end
@@ -1470,22 +1500,23 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
             # Fetch a new task to execute
             @dagdebug nothing :processor "Trying to dequeue"
             @maybelog ctx timespan_start(ctx, :proc_run_fetch, (;uid, worker=wid, processor=to_proc), nothing)
-            work_to_do = false
-            task_and_occupancy = lock(istate.queue) do queue
+            # N.B. Results are returned from the locked block rather than
+            # assigned to captured outer locals (which would Core.Box them on
+            # every wakeup)
+            task_and_occupancy, work_to_do = lock(istate.queue) do queue
                 # Only steal if there are multiple queued tasks, to prevent
                 # ping-pong of tasks between empty queues
                 if length(queue) == 0
                     @dagdebug nothing :processor "Nothing to dequeue"
-                    return nothing
+                    return (nothing, false)
                 end
                 _, occupancy = first(queue)
                 if !proc_has_occupancy(proc_occupancy[], occupancy)
                     @dagdebug nothing :processor "Insufficient occupancy" proc_occupancy=proc_occupancy[] task_occupancy=occupancy
-                    return nothing
+                    return (nothing, false)
                 end
                 queue_result = popfirst!(queue)
-                work_to_do = length(queue) > 0
-                return queue_result
+                return (queue_result, length(queue) > 0)
             end
             if task_and_occupancy === nothing
                 @maybelog ctx timespan_finish(ctx, :proc_run_fetch, (;uid, worker=wid, processor=to_proc), nothing)
@@ -1505,9 +1536,17 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                 # Try to steal a task
                 @maybelog ctx timespan_start(ctx, :proc_steal_local, (;uid, worker=wid, processor=to_proc), nothing)
 
-                # Try to steal from local queues randomly
+                # Try to steal from local queues randomly (circular iteration
+                # from a random start over a version-cached snapshot: fair
+                # enough, and allocation-free per attempt)
                 # TODO: Prioritize stealing from busiest processors
-                for state in shuffled_states(proc_states_values(uid))
+                states_vec = states_snapshot!(STATES_CACHE_TLV[], proc_states(uid))
+                nstates = length(states_vec)
+                start_idx = nstates <= 1 ? 1 : rand(1:nstates)
+                for state_offset in 0:(nstates-1)
+                    state_idx = start_idx + state_offset
+                    state_idx > nstates && (state_idx -= nstates)
+                    state = @inbounds states_vec[state_idx]
                     other_istate = state.state
                     if other_istate.proc === to_proc
                         continue
@@ -1794,8 +1833,7 @@ function do_tasks(to_proc, return_queue, tasks)
 
     # Kick other processors to make them steal
     # TODO: Alternatively, automatically balance work instead of blindly enqueueing
-    states = proc_states_values(uid)
-    for other_state in shuffled_states(states)
+    for other_state in states_snapshot!(STATES_CACHE_TLV[], proc_states(uid))
         other_istate = other_state.state
         if other_istate.proc === to_proc
             continue
