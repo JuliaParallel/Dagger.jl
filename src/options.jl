@@ -86,6 +86,42 @@ function Base.copy(old_options::Options)
     options_merge!(new_options, old_options)
     return new_options
 end
+# Pool of recycled Options (every field is Union{...,Nothing}). Taken by the
+# @spawn macro path (whose Options is provably unaliased) and recycled with
+# the owning Thunk in `recycle_thunk!`; reset uses setfield! directly to skip
+# `setproperty!`'s scope-coupling side effects.
+const OPTIONS_POOL = LockedObject(Vector{Options}())
+const OPTIONS_POOL_CAP = 4096
+@generated function unset_options!(o::Options)
+    exprs = [:(setfield!(o, $(QuoteNode(f)), nothing)) for f in fieldnames(Options)]
+    return quote
+        $(exprs...)
+        return o
+    end
+end
+function take_options!(; kwargs...)
+    o = @safe_lock_spin1 OPTIONS_POOL pool begin
+        isempty(pool) ? nothing : pop!(pool)
+    end
+    o === nothing && return Options(; kwargs...)
+    o = o::Options
+    if !isempty(kwargs)
+        options_merge!(o, values(kwargs))
+        # Mirror the @kwdef constructor's `compute_scope = scope` default
+        if haskey(kwargs, :scope) && !haskey(kwargs, :compute_scope)
+            setfield!(o, :compute_scope, getfield(o, :scope))
+        end
+    end
+    return o
+end
+function recycle_options!(o::Options)
+    unset_options!(o)
+    @safe_lock_spin1 OPTIONS_POOL pool begin
+        length(pool) < OPTIONS_POOL_CAP && push!(pool, o)
+    end
+    return
+end
+
 # Merge b -> a, where b takes precedence
 function options_merge!(options::Options, source; override=true)
     _options_merge!(options, source, override)

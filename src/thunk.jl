@@ -251,6 +251,8 @@ function recycle_thunk!(t::Thunk)
     t.inputs = EMPTY_ARGS
     t.id = 0
     t.cache_ref = nothing
+    opts = t.options
+    opts === nothing || recycle_options!(opts)
     t.options = nothing
     t.running_on = nothing
     t.sig = nothing
@@ -674,10 +676,11 @@ function _par(mod, ex::Expr; lazy=true, recur=true, opts=())
                     $result = if $get_task_typed()
                         # N.B. `*_macro` entry points skip the defensive
                         # `Options` copy: the `Options` below is freshly built
-                        # here and cannot be aliased by the user.
-                        $typed_spawn_macro($f, $Options(;$(opts...)), $(args...); $(kwargs...))
+                        # (or taken from the pool) here and cannot be aliased
+                        # by the user.
+                        $typed_spawn_macro($f, $take_options!(;$(opts...)), $(args...); $(kwargs...))
                     else
-                        $spawn_macro($f, $Options(;$(opts...)), $(args...); $(kwargs...))
+                        $spawn_macro($f, $take_options!(;$(opts...)), $(args...); $(kwargs...))
                     end
                     if $(Expr(:islocal, sync_var))
                         put!($sync_var, schedule(Task(()->fetch($result; raw=true))))
