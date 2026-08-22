@@ -57,6 +57,7 @@ tests = [
     ("Array - Random", "array/random.jl"),
     ("Array - Stencils", "array/stencil.jl"),
     ("Array - FFT", "array/fft.jl"),
+    ("Array - FFT (async, hierarchical=false)", "array/fft_async.jl"),
     ("GPU", "gpu.jl"),
     #("Caching", "cache.jl"),
     ("Disk Caching", "diskcaching.jl"),
