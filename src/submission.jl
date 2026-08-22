@@ -297,12 +297,19 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
         return thunk_id
     end
 end
-struct UnrefThunk
-    uid::UInt
-    thunk::Thunk
-    state
+mutable struct UnrefThunk
+    const uid::UInt
+    const thunk::Thunk
+    const state
+    # One-shot guard: with Thunk pooling, a second invocation (e.g. an
+    # explicit early release followed by the GC-driven DRef destructor) would
+    # tear down a *recycled* Thunk now representing someone else's task
+    @atomic done::Bool
 end
+UnrefThunk(uid, thunk, state) = UnrefThunk(uid, thunk, state, false)
 function unref_thunk!(unref::UnrefThunk)
+    _, won = @atomicreplace unref.done false => true
+    won || return
     # The associated DTask is no longer referenced by the user, so mark the
     # thunk as ready to be cleaned up as eagerly as possible (or do so now)
     thunk = unref.thunk
