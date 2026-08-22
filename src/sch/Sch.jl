@@ -86,21 +86,50 @@ completion handler (via `schedule_dependents!`) so there is no central ready que
 # call, but its inputs are steady across tasks (datadeps exec scopes are
 # LFU-cached per processor), so a bounded LFU makes it a lookup. The cached
 # Sets are shared and must not be mutated by callers.
-const COMPAT_PROCS_CACHE = LockedObject(Dagger.BasicLFUCache{Tuple{Any,Dagger.AbstractScope,Vector{Processor}},Set{Processor}}(256))
+# N.B. The scope is keyed by objectid — content-equal but distinct scope
+# instances just recompute — because structural UnionScope hashing/equality
+# box tuple elements on every Dict probe, which was hot. Datadeps exec scopes
+# come from a per-processor LFU cache and are identity-stable. The procs
+# vector is fresh per call, so it is verified by contents on a hit.
+# The entry retains the scope object itself: hits require `===`, which both
+# guards against objectid reuse after GC and keeps the scope alive so its id
+# cannot be recycled while the entry lives.
+const COMPAT_PROCS_CACHE = LockedObject(Dagger.BasicLFUCache{Tuple{UInt,UInt},Tuple{Any,Vector{Processor},Set{Processor}}}(256))
+# Drop all cached compatible-processor sets. Called whenever the processor
+# hierarchy changes (add/delete_processor_callback!) — a callback change alters
+# `get_processors(::OSProc)` without changing the (accel, scope, procs) key, so
+# existing entries would otherwise serve stale sets (e.g. missing a processor
+# type registered by a just-loaded extension, like PythonExt's
+# PythonProcessor). This also flushes entries baked into the pkgimage by the
+# precompile workload (both cache-key objectids are content-stable across
+# sessions): `__init__`'s per-thread callback registrations trigger it.
+function invalidate_compat_procs_cache!()
+    @safe_lock_spin1 COMPAT_PROCS_CACHE cache empty!(cache)
+    return
+end
 function compatible_processors_cached(accel, scope, procs::Vector{<:Processor})
-    key = (accel, scope, procs)
+    key = (objectid(accel), objectid(scope))
     cached = @safe_lock_spin1 COMPAT_PROCS_CACHE cache begin
-        if haskey(cache.cache, key)
+        entry = get(cache.cache, key, nothing)
+        if entry !== nothing && entry[1] === scope && entry[2] == procs
             cache.freq[key] += 1
-            cache.cache[key]
+            entry[3]
         else
             nothing
         end
     end
     cached !== nothing && return cached::Set{Processor}
     compat = Dagger.compatible_processors(accel, scope, procs)
+    # N.B. `Vector{Processor}`, not `copy(procs)`: the cache's value type is
+    # `Tuple{Any,Vector{Processor},Set{Processor}}`, and `copy` preserves the
+    # caller's concrete element type (`Vector{OSProc}` from a `Context`'s procs,
+    # `Vector{MPIProcessor{...}}` under MPI), which fails `get!`'s typeassert.
+    # Only on a *miss*, so it stays hidden until some run happens not to have
+    # this (accel, scope) pair cached already -- see the sibling fix in generic
+    # `compatible_processors`, which had the same defect with `Set(gen)`.
+    entry = (scope, Vector{Processor}(procs), compat)
     @safe_lock_spin1 COMPAT_PROCS_CACHE cache begin
-        get!(()->compat, cache, key)
+        get!(()->entry, cache, key)
     end
     return compat
 end
@@ -1203,9 +1232,6 @@ Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
         end
 
         # Duplicate options and clear un-serializable fields
-        options = copy(thunk.options)
-        options.syncdeps = nothing
-
         # Unwrap any weak arguments
         args = map(copy, thunk.inputs)
         for arg in args
@@ -1215,6 +1241,15 @@ Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
         Tf = chunktype(first(args))
 
         pid = root_worker_id(gproc)
+        # N.B. The Options copy exists to strip syncdeps before serialization;
+        # locally, nothing on the execution path reads or mutates syncdeps
+        # (populate_defaults! already ran in place during scheduling), so the
+        # spec can share the thunk's Options.
+        options = thunk.options
+        if pid != myid()
+            options = copy(options)
+            options.syncdeps = nothing
+        end
         @assert (options.single === nothing) || (pid == options.single)
         # TODO: Set `sch_handle.tid.ref` to the right `DRef`
         sch_handle = SchedulerHandle(ThunkID(thunk.id, nothing), state.worker_chans[pid]...)

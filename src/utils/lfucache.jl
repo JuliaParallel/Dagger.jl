@@ -5,6 +5,11 @@ struct BasicLFUCache{K,V}
 
     BasicLFUCache{K,V}(max_size::Int) where {K,V} = new(Dict{K,V}(), Dict{K,Int}(), max_size)
 end
+function Base.empty!(cache::BasicLFUCache)
+    empty!(cache.cache)
+    empty!(cache.freq)
+    return cache
+end
 function Base.get!(f, cache::BasicLFUCache{K,V}, key::K) where {K,V}
     if haskey(cache.cache, key)
         cache.freq[key] += 1
