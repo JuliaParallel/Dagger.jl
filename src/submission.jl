@@ -153,19 +153,13 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
         elseif valuetype(arg) <: Chunk
             chunk = find_equivalent_chunk(state, value(arg)::Chunk)
             #=FIXME:UNIQUE=#
-            if chunk.handle isa DRef
-                @inbounds fargs[idx] = Argument(arg.pos, WeakChunk(chunk))
-            else
-                # Non-DRef chunks (e.g. `MPIRef` under MPI) are not kept
-                # alive by `equiv_chunks` (a `WeakKeyDict{DRef,Chunk}`, so
-                # only DRef-backed wrappers get a strong keeper there).
-                # Weakening such a chunk here would let its `Chunk` wrapper
-                # be GC'd before the consuming task runs, expiring the
-                # `WeakChunk` (observed on Julia 1.10, whose GC is more
-                # eager). Keep a strong reference; it is released when the
-                # task's `Thunk` is cleaned up.
-                @inbounds fargs[idx] = Argument(arg.pos, chunk)
-            end
+            # N.B. Stored STRONGLY: the consuming task owns its inputs until
+            # its own teardown. Argument chunks were previously weakened here
+            # (WeakChunk) on the assumption that `equiv_chunks` pinned the
+            # wrapper — but that pin was an immortal leak and is now a weak
+            # dedupe cache, so a weak slot could expire before the consumer
+            # fires (e.g. the caller drops the chunk right after @spawn).
+            @inbounds fargs[idx] = Argument(arg.pos, chunk)
         end
     end
     # TODO: Iteration protocol would be faster
