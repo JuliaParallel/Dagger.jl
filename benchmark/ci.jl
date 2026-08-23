@@ -12,6 +12,11 @@
 # - BENCHMARK_BASE_REV: revision to compare against (default "master").
 # - BENCHMARK_REGRESSION_THRESHOLD: fractional slowdown that fails CI
 #   (default "0.10", i.e. 10%).
+# - BENCHMARK_ALLOC_REGRESSION_THRESHOLD: fractional increase in allocation
+#   count or allocated bytes that fails CI (default "0.25", i.e. 25%).
+#   Allocation counts are near-deterministic, but Dagger's steady state has
+#   some scheduling-dependent variance, so this is looser than the time gate
+#   while still catching any real allocation regression.
 # - BENCHMARK_CI_THREADS: Julia threads for each benchmark run (default "4").
 # - BENCHMARK_OUTPUT_DIR: where JSON/plots/report are written
 #   (default "benchmark_results").
@@ -31,6 +36,7 @@ const SCRIPT = joinpath(@__DIR__, "benchmarks.jl")
 const BASE_REV = get(ENV, "BENCHMARK_BASE_REV", "master")
 const CUR_REV = "dirty"  # the working-tree checkout (this PR/commit)
 const THRESHOLD = parse(Float64, get(ENV, "BENCHMARK_REGRESSION_THRESHOLD", "0.10"))
+const ALLOC_THRESHOLD = parse(Float64, get(ENV, "BENCHMARK_ALLOC_REGRESSION_THRESHOLD", "0.25"))
 const CI_THREADS = get(ENV, "BENCHMARK_CI_THREADS", "4")
 const OUTPUT_DIR = abspath(get(ENV, "BENCHMARK_OUTPUT_DIR", "benchmark_results"))
 
@@ -68,6 +74,13 @@ table = create_table(combined; key = "median", add_ratio_col = true)
 println("\nBenchmark results (median time):\n")
 println(table)
 
+# Allocations/memory table (the ratio column compares allocated bytes). Each
+# BenchmarkTools trial records the allocation count and bytes of a single
+# post-warmup evaluation, so these are near-deterministic per revision.
+alloc_table = create_table(combined; key = "memory", add_ratio_col = true)
+println("\nBenchmark results (allocations / memory):\n")
+println(alloc_table)
+
 # --- Comparison plots (best effort) ----------------------------------------
 
 plot_files = String[]
@@ -91,19 +104,29 @@ end
 base = combined[BASE_REV]
 cur = combined[CUR_REV]
 
-regressions = Tuple{String,Float64}[]
-improvements = Tuple{String,Float64}[]
+# Each benchmark is gated on three metrics: median time, allocation count, and
+# allocated bytes. Entries are (name, metric label, current/base ratio).
+const METRICS = [
+    ("time", "median", THRESHOLD),
+    ("allocs", "allocs", ALLOC_THRESHOLD),
+    ("memory", "memory", ALLOC_THRESHOLD),
+]
+
+regressions = Tuple{String,String,Float64}[]
+improvements = Tuple{String,String,Float64}[]
 for (name, stats) in cur
     name == "time_to_load" && continue  # too noisy to gate on
     haskey(base, name) || continue
-    bm = get(base[name], "median", nothing)
-    cm = get(stats, "median", nothing)
-    (bm === nothing || cm === nothing || bm == 0) && continue
-    ratio = cm / bm
-    if ratio > 1 + THRESHOLD
-        push!(regressions, (name, ratio))
-    elseif ratio < 1 - THRESHOLD
-        push!(improvements, (name, ratio))
+    for (label, key, threshold) in METRICS
+        bm = get(base[name], key, nothing)
+        cm = get(stats, key, nothing)
+        (bm === nothing || cm === nothing || bm == 0) && continue
+        ratio = cm / bm
+        if ratio > 1 + threshold
+            push!(regressions, (name, label, ratio))
+        elseif ratio < 1 - threshold
+            push!(improvements, (name, label, ratio))
+        end
     end
 end
 sort!(regressions; by = last, rev = true)
@@ -116,7 +139,13 @@ pct(r) = string(round((r - 1) * 100; digits = 1), "%")
 open(joinpath(OUTPUT_DIR, "report.md"), "w") do io
     println(io, "### Dagger benchmarks: `$CUR_REV` vs `$BASE_REV`")
     println(io)
+    println(io, "#### Median time")
+    println(io)
     println(io, table)
+    println(io)
+    println(io, "#### Allocations / memory")
+    println(io)
+    println(io, alloc_table)
     println(io)
     if !isempty(plot_files)
         println(io, "#### Plots")
@@ -128,20 +157,22 @@ open(joinpath(OUTPUT_DIR, "report.md"), "w") do io
         println(io)
     end
     if isempty(regressions)
-        println(io, "No regressions beyond ", pct(1 + THRESHOLD), " 🎉")
+        println(io, "No time regressions beyond ", pct(1 + THRESHOLD),
+                " or allocation regressions beyond ", pct(1 + ALLOC_THRESHOLD), " 🎉")
     else
-        println(io, "#### ⚠️ Regressions (> ", pct(1 + THRESHOLD), ")")
+        println(io, "#### ⚠️ Regressions (time > ", pct(1 + THRESHOLD),
+                ", allocs/memory > ", pct(1 + ALLOC_THRESHOLD), ")")
         println(io)
-        for (name, r) in regressions
-            println(io, "- `", name, "`: +", pct(r))
+        for (name, metric, r) in regressions
+            println(io, "- `", name, "` (", metric, "): +", pct(r))
         end
     end
     if !isempty(improvements)
         println(io)
-        println(io, "#### Improvements (> ", pct(1 + THRESHOLD), " faster)")
+        println(io, "#### Improvements")
         println(io)
-        for (name, r) in improvements
-            println(io, "- `", name, "`: ", pct(r))
+        for (name, metric, r) in improvements
+            println(io, "- `", name, "` (", metric, "): ", pct(r))
         end
     end
 end
@@ -149,12 +180,12 @@ end
 # --- Summary + exit status -------------------------------------------------
 
 if isempty(regressions)
-    println("\nNo benchmarks regressed by more than $(round(THRESHOLD * 100))%.")
+    println("\nNo benchmarks regressed (time > $(round(THRESHOLD * 100))%, allocs/memory > $(round(ALLOC_THRESHOLD * 100))%).")
     exit(0)
 else
-    println("\n$(length(regressions)) benchmark(s) regressed by more than $(round(THRESHOLD * 100))%:")
-    for (name, r) in regressions
-        println("  - $name: +$(pct(r))")
+    println("\n$(length(regressions)) benchmark metric(s) regressed:")
+    for (name, metric, r) in regressions
+        println("  - $name ($metric): +$(pct(r))")
     end
     exit(1)
 end

@@ -2,7 +2,8 @@
 # Buildkite entrypoint for the benchmark regression job.
 #
 # Runs benchmark/ci.jl (which compares the current checkout against `master`,
-# prints a table, renders plots, and exits non-zero on a >25% regression), then
+# prints time and allocation tables, renders plots, and exits non-zero on a
+# median-time or allocation regression beyond the configured thresholds), then
 # uploads the results as artifacts, posts a Buildkite annotation with the table
 # and inline plots, and optionally comments the table on the GitHub PR.
 #
