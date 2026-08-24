@@ -1532,7 +1532,10 @@ function Base.notify(db::Doorbell)
 end
 end
 
-struct ProcessorInternalState
+mutable struct ProcessorInternalState
+    # Refreshed by `do_tasks` on every batch so the long-lived runner observes
+    # log-sink toggles (`enable_logging!`/`disable_logging!`); all other fields
+    # are set once at construction.
     ctx::Context
     proc::Processor
     return_queue::RemoteChannel
@@ -1662,8 +1665,6 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
         # Wait for our ProcessorState to be configured
         wait(start_event)
 
-        # FIXME: Context changes aren't noticed over time
-        ctx = istate.ctx
         tasks = istate.tasks
         proc_occupancy = istate.proc_occupancy
         time_pressure = istate.time_pressure
@@ -1671,6 +1672,12 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
         wid = root_worker_id(to_proc)
         work_to_do = false
         while isopen(return_queue)
+            # Re-read each iteration: `do_tasks` refreshes `istate.ctx` when
+            # the log sink changes, so runner-level events follow
+            # `enable_logging!`/`disable_logging!` instead of being frozen at
+            # runner creation
+            ctx = istate.ctx
+
             # Wait for new tasks
             if !work_to_do
                 @dagdebug nothing :processor "Waiting for tasks"
@@ -2033,6 +2040,13 @@ function do_tasks(to_proc, return_queue, tasks)
         notify(start_event)
     end
     istate = state.state
+    # Refresh the runner's logging Context: the runner re-reads `istate.ctx`
+    # every loop iteration, so log-sink toggles take effect at the next
+    # enqueued batch. Plain (non-atomic) store: a racing runner iteration
+    # simply uses the previous Context once more.
+    if istate.ctx !== ctx
+        istate.ctx = ctx
+    end
     states = proc_states(uid)
     lock(istate.queue) do queue
         for task in tasks
