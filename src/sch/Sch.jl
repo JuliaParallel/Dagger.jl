@@ -2001,9 +2001,14 @@ Executes a single task specified by `task` on `to_proc`.
             acceleration=Dagger.current_acceleration(),
         ))
 
+        reactant_mode = options.reactant
         result = Dagger.with_options(propagated) do
             # Execute
-            execute!(to_proc, f, fetched_args...; fetched_kwargs...)
+            if reactant_mode isa Dagger.ReactantInner
+                Dagger.reactant_execute!(reactant_mode, to_proc, f, fetched_args...; fetched_kwargs...)
+            else
+                execute!(to_proc, f, fetched_args...; fetched_kwargs...)
+            end
         end
 
         # Check if result is safe to store
