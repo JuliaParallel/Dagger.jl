@@ -148,6 +148,96 @@ function flush_batch!(beq::BatchedEnqueueQueue)
 end
 
 """
+    ConcurrentEnqueueQueue(inner, lock)
+
+Submits each task as soon as it is prepared, holding `lock` only across
+`inner`'s own shared bookkeeping rather than across submission itself.
+
+This is what parallel per-partition planning (`schedule_partition_full!`) uses
+instead of `BatchedEnqueueQueue`. Batching was there to collapse lock traffic,
+because that path's partitions share one lock over the region's queue -- but the
+lock was held across `enqueue!(inner, batch)`, i.e. across the actual scheduler
+submission, so partitions still submitted strictly one at a time. Measured on a
+3-D pencil FFT, `add_thunk` had `union == sum` (no two submissions ever
+overlapping) in every configuration, at ~50% of wall; hierarchical planning
+parallelized its own `datadeps_execute` 2.5x and then convoyed here.
+
+Almost none of that lock is needed. Cross-partition ordering is enforced by the
+`task_submitted` events in `schedule_partition_full!`, not by mutual exclusion,
+and Dagger's eager submission path is already safe to call concurrently -- it is
+what any user spawning from several threads does. The only genuinely shared
+state is `WaitAllQueue`'s `tasks` vector, so that is all this locks.
+
+Submitting 4000 independent tasks measures 14.9k tasks/s from one submitter
+against 26.3k from four (saturating there), so this is worth ~1.76x on the
+submission path. Dropping the batch also lets tasks start executing as soon as
+they are prepared, rather than waiting for a batch of 16 to fill, and removes
+the flush-before-`notify`/`fetch` obligations that batching imposed.
+
+`BatchedEnqueueQueue` is still used by `schedule_partitions_sequential!`, where
+a single planning thread submits and there is no concurrency to recover -- and
+where, under uniform (MPI) execution, withholding submission until planning
+finishes is a rank-uniformity requirement rather than an optimization.
+"""
+struct ConcurrentEnqueueQueue <: AbstractTaskQueue
+    inner::AbstractTaskQueue
+    lock::ReentrantLock
+end
+enqueue!(ceq::ConcurrentEnqueueQueue, pair::DTaskPair) =
+    _enqueue_concurrent!(ceq.inner, ceq.lock, pair)
+enqueue!(ceq::ConcurrentEnqueueQueue, pairs::Vector{DTaskPair}) =
+    _enqueue_concurrent!(ceq.inner, ceq.lock, pairs)
+# Nothing is ever buffered, so a flush has nothing to do.
+flush_batch!(::ConcurrentEnqueueQueue) = nothing
+
+# Whether `enqueue!` on this queue may be called from several threads at once.
+#
+# This is a whitelist, not a default: an unrecognized queue keeps the wide lock,
+# since it may hold arbitrary shared state behind `enqueue!`. Getting this wrong
+# in the permissive direction is a silent data race, so new queue types opt in
+# deliberately.
+#
+# N.B. The queue reached here is whatever was ambient at `spawn_datadeps`
+# (`wait_all_queue = get_options(:task_queue)`), which in practice is a
+# `ContextQueue` -- *not* a `WaitAllQueue`, despite the variable's name. Both are
+# handled below; dispatching on only one of them silently falls back to the wide
+# lock and reintroduces exactly the serialization this queue exists to remove.
+enqueue_concurrent_safe(::AbstractTaskQueue) = false
+# Locks `ctx.lock` around its own `inflight`/`task_region` bookkeeping and then
+# delegates outside it -- already precisely the discipline we want.
+enqueue_concurrent_safe(::ContextQueue) = true
+# Submits straight to the eager scheduler, which is what any user spawning from
+# several threads already does.
+enqueue_concurrent_safe(::DefaultTaskQueue) = true
+# Safe exactly when whatever it wraps is; its own `tasks` vector is handled by
+# the method below.
+enqueue_concurrent_safe(q::WaitAllQueue) = enqueue_concurrent_safe(q.upper_queue)
+
+function _enqueue_concurrent!(inner::AbstractTaskQueue, lk::ReentrantLock, pair)
+    if enqueue_concurrent_safe(inner)
+        enqueue!(inner, pair)
+    else
+        @lock lk enqueue!(inner, pair)
+    end
+    return
+end
+# `WaitAllQueue`'s `tasks` is a plain `Vector` shared by every partition, so that
+# push needs the lock; the submission it wraps does not, and is the part worth
+# overlapping.
+function _enqueue_concurrent!(inner::WaitAllQueue, lk::ReentrantLock, pair::DTaskPair)
+    @lock lk push!(inner.tasks, pair.task)
+    _enqueue_concurrent!(inner.upper_queue, lk, pair)
+    return
+end
+function _enqueue_concurrent!(inner::WaitAllQueue, lk::ReentrantLock, pairs::Vector{DTaskPair})
+    @lock lk for pair in pairs
+        push!(inner.tasks, pair.task)
+    end
+    _enqueue_concurrent!(inner.upper_queue, lk, pairs)
+    return
+end
+
+"""
     AsyncEnqueueQueue(inner, lock; limit=DATADEPS_BATCH_LIMIT[])
 
 `BatchedEnqueueQueue` that hands each full batch to a submitter task rather than
@@ -1267,7 +1357,7 @@ Processor assignment is performed by a partition-local scheduler shard (see
 `similar` below) over just `local_procs`.
 """
 function schedule_partition_full!(queue::DataDepsTaskQueue,
-                                  batch_queue::BatchedEnqueueQueue,
+                                  batch_queue::AbstractTaskQueue,
                                   partition_id::Int,
                                   partition_verts::Vector{Int},
                                   dag::SimpleDiGraph,
@@ -1762,7 +1852,7 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
             states = Vector{DataDepsState}(undef, n_partitions)
             @sync for pid in 1:n_partitions
                 Threads.@spawn begin
-                    batch_queue = BatchedEnqueueQueue(wait_all_queue, queue_lock)
+                    batch_queue = ConcurrentEnqueueQueue(wait_all_queue, queue_lock)
                     # Copy tasks spawned from within `distribute_task!` pick the
                     # queue up from options, so they batch alongside their task.
                     with_options(; task_queue=batch_queue) do
