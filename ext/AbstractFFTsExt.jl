@@ -144,10 +144,41 @@ see it run synchronously.
 """
 _datadeps_sync_override() = Dagger.DATADEPS_SYNC[] === true ? true : false
 
+"""
+    _split_divisor(nprocs::Int, nsplit::Int) -> Int
+
+Per-dimension block divisor for an intermediate array that is split across
+`nsplit` of its dimensions, chosen so the array ends up with roughly `nprocs`
+chunks in total -- enough to occupy every processor, and no more.
+
+The divisor applies to each split dimension independently, so an array split in
+`nsplit` dimensions has `divisor^nsplit` chunks. Using `nprocs` itself as the
+divisor (as this file did until 2026-08-24) is therefore only correct for
+`nsplit == 1`; at `nsplit == 2` it yields `nprocs^2` chunks, i.e. `nprocs`-fold
+over-decomposition, and the transposes between two such arrays cost
+`divisor^3` copy tasks. At 12 threads that made one 3-D `fft()` submit ~5000
+tasks, of which the transform proper was a fifth of the work: measured 0.767 s
+against 0.113 s for the same transform at `divisor == 3`, a 6.8x penalty that
+grew with the thread count (9.4x at 24 threads) because the divisor tracked it.
+
+Dagger's per-task submission cost is ~70 us and is largely serial, so task
+count -- not FLOP count -- sets the floor for a decomposition this fine. Wall
+time tracked task count almost exactly across the measured sweep.
+
+Measured optima at N=192/256/384 (12 threads) all sat at 9-16 chunks, and were
+insensitive to `N`; `ceil(sqrt(nprocs))` reproduces that (within 0% at 12
+threads, 2% at 8, 9% at 4). It is deliberately the *smallest* divisor that
+still fills the machine, since transpose cost grows as its cube.
+"""
+_split_divisor(nprocs::Int, nsplit::Int) =
+    max(1, ceil(Int, nprocs^(1/nsplit)))
+
 ## 2D
 function _fft!(output::DMatrix{T}, input::DMatrix{T}, dims=(1, 2)) where T
     N = size(input, 1)
-    np = length(Dagger.compatible_processors())
+    # Each array here is split in exactly one dimension, so the divisor is the
+    # processor count itself (`_split_divisor(nprocs, 1) == nprocs`).
+    np = _split_divisor(length(Dagger.compatible_processors()), 1)
     A = zeros(Blocks(N, cld(N, np)), T, size(input))
     B = zeros(Blocks(cld(N, np), N), T, size(input))
     Dagger.with(Dagger.DATADEPS_SYNC => _datadeps_sync_override()) do
@@ -160,7 +191,9 @@ function _fft!(output::DMatrix{T}, input::DMatrix{T}, dims=(1, 2)) where T
 end
 function _ifft!(output::DMatrix{T}, input::DMatrix{T}, dims=(1, 2)) where T
     N = size(input, 1)
-    np = length(Dagger.compatible_processors())
+    # Each array here is split in exactly one dimension, so the divisor is the
+    # processor count itself (`_split_divisor(nprocs, 1) == nprocs`).
+    np = _split_divisor(length(Dagger.compatible_processors()), 1)
     A = zeros(Blocks(N, cld(N, np)), T, size(input))
     B = zeros(Blocks(cld(N, np), N), T, size(input))
     Dagger.with(Dagger.DATADEPS_SYNC => _datadeps_sync_override()) do
@@ -178,8 +211,10 @@ end
 # dim-3) instead of two.
 function _fft!(output::DArray{T,3}, input::DArray{T,3}, dims=(1, 2, 3); decomp::Decomposition=Pencil()) where T
     N = size(input, 1)
-    np = length(Dagger.compatible_processors())
+    nprocs = length(Dagger.compatible_processors())
     if decomp isa Pencil
+        # Each pencil array is split in two of its three dimensions.
+        np = _split_divisor(nprocs, 2)
         A = zeros(Blocks(N, cld(N, np), cld(N, np)), T, size(input))
         B = zeros(Blocks(cld(N, np), N, cld(N, np)), T, size(input))
         C = zeros(Blocks(cld(N, np), cld(N, np), N), T, size(input))
@@ -191,7 +226,11 @@ function _fft!(output::DArray{T,3}, input::DArray{T,3}, dims=(1, 2, 3); decomp::
         Dagger.synchronize()
         return output
     elseif decomp isa Slab
-        A = zeros(Blocks(N, N, cld(N, np)), T, size(input))
+        # `A` is slabs (split in one dimension), `B` is z-pencils (split in two),
+        # so they need different divisors to land on a comparable chunk count.
+        npa = _split_divisor(nprocs, 1)
+        np = _split_divisor(nprocs, 2)
+        A = zeros(Blocks(N, N, cld(N, npa)), T, size(input))
         B = zeros(Blocks(cld(N, np), cld(N, np), N), T, size(input))
         Dagger.with(Dagger.DATADEPS_SYNC => _datadeps_sync_override()) do
             copyto!(A, input)
@@ -206,8 +245,9 @@ function _fft!(output::DArray{T,3}, input::DArray{T,3}, dims=(1, 2, 3); decomp::
 end
 function _ifft!(output::DArray{T,3}, input::DArray{T,3}, dims=(1, 2, 3); decomp::Decomposition=Pencil()) where T
     N = size(input, 1)
-    np = length(Dagger.compatible_processors())
+    nprocs = length(Dagger.compatible_processors())
     if decomp isa Pencil
+        np = _split_divisor(nprocs, 2)
         A = zeros(Blocks(cld(N, np), cld(N, np), N), T, size(input))
         B = zeros(Blocks(cld(N, np), N, cld(N, np)), T, size(input))
         C = zeros(Blocks(N, cld(N, np), cld(N, np)), T, size(input))
@@ -219,8 +259,10 @@ function _ifft!(output::DArray{T,3}, input::DArray{T,3}, dims=(1, 2, 3); decomp:
         Dagger.synchronize()
         return output
     elseif decomp isa Slab
+        npa = _split_divisor(nprocs, 1)
+        np = _split_divisor(nprocs, 2)
         A = zeros(Blocks(cld(N, np), cld(N, np), N), T, size(input))
-        B = zeros(Blocks(N, N, cld(N, np)), T, size(input))
+        B = zeros(Blocks(N, N, cld(N, npa)), T, size(input))
         Dagger.with(Dagger.DATADEPS_SYNC => _datadeps_sync_override()) do
             copyto!(A, input)
             __ifft!(decomp, A, B, dims)
