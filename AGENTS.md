@@ -54,7 +54,32 @@ lesson.
    writing the field directly. The same reasoning applies to any other
    creation-time-captured state (e.g. `TaskLocalValue`s) on a reused task.
 
-8. **Keep type-stable and type-unstable paths at the right stability level.**
+8. **A `Thunk`'s input slots hold *weak* references, so every path that skips
+   creating a dependents edge must resolve the slot itself.** Input slots are
+   normally resolved by walking the dependents edges
+   (`schedule_dependents!` → `resolve_finished_input!`) when an upstream
+   finishes. An upstream that is *already* finished gets no edge — there is
+   nothing left to wait on — so nothing will ever resolve its slot, and the
+   consumer keeps only a `WeakThunk`. With Thunk pooling that reference dies
+   deterministically and immediately: the upstream is recycled and handed back
+   out with a fresh id, so `unwrap_weak` returns `nothing` and
+   `unwrap_weak_checked` asserts. Resolve eagerly, while the upstream is still
+   alive and holding its result. The same applies to any future lifecycle
+   shortcut: if you stop registering an edge, you have taken on the job that
+   edge was doing.
+
+9. **An exception on a pooled or detached task is a hang, not a crash.**
+   Scheduler work runs on `ReusableTaskCache` tasks (whose loop only `@error`s
+   a failed payload and moves on) and on bare `Threads.@spawn` (whose exception
+   nobody fetches). Anything that has already been credited to
+   `running_count` — or that some `fetch` is waiting on — is lost silently if
+   an error escapes there, and the symptom is a session that hangs with one
+   logged error, which is far harder to diagnose than a crash. Wrap such work
+   so a failure becomes a *failed thunk* (`set_failed!` plus the matching
+   `running_count` release), and attach the backtrace with `CapturedException`
+   so the waiter sees where it actually broke.
+
+10. **Keep type-stable and type-unstable paths at the right stability level.**
    If both kinds of path exist for an operation (e.g. typed kernel execution
    vs. dynamically-typed planning), consider whether they need to be
    *separate* paths: don't force the dynamic path to specialize per signature
