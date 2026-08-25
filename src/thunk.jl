@@ -777,11 +777,19 @@ function _spawn(args_kwargs, task_options)
     # `NamedTuple` for both, and `maybe_default!(:propagates)`, whose default is
     # `nothing`). So skip building the vector entirely in that (very common)
     # case; `propagates === nothing` below means "nothing to add".
+    # N.B. The vector built here is mutated below (`append!`, `filter!`,
+    # `unique!`) and then handed to `task_options`, so it must be one we own.
+    # `scoped_options.propagates` belongs to the caller's `with_options` block
+    # and is shared by every task spawned under it, so it is copied, never
+    # aliased: aliasing it would make each spawn permanently append that
+    # spawn's option names to the user's own vector (and delete `:task_queue`
+    # from it), racily so when several tasks are spawned concurrently under
+    # one `with_options(propagates=[...])`.
     propagates = if haskey(scoped_options, :propagates)
         if scoped_options.propagates isa Tuple
             Symbol[scoped_options.propagates...]
         else
-            scoped_options.propagates::Vector{Symbol}
+            copy(scoped_options.propagates::Vector{Symbol})
         end
     elseif isempty(scoped_options)
         nothing
@@ -806,13 +814,15 @@ function _spawn(args_kwargs, task_options)
     if propagates !== nothing
         filter!(prop -> prop != :task_queue, propagates)
         if task_options.propagates !== nothing
-            append!(task_options.propagates, propagates)
-        else
-            task_options.propagates = propagates
+            # N.B. Merge into our own vector rather than into
+            # `task_options.propagates`, which may be a vector the caller
+            # passed to `@spawn`/`spawn` and still holds a reference to.
+            append!(propagates, task_options.propagates)
         end
-    end
-    if task_options.propagates !== nothing
-        unique!(task_options.propagates)
+        task_options.propagates = unique!(propagates)
+    elseif task_options.propagates !== nothing
+        # Same reason: `unique!` would otherwise rewrite the caller's vector.
+        task_options.propagates = unique(task_options.propagates)
     end
 
     # Construct task spec and handle

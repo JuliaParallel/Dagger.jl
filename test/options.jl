@@ -85,3 +85,20 @@ end
         @test fetch(Dagger.@spawn sf(obj)) == 43
     end
 end
+
+@testset "Propagation list ownership" begin
+    # `propagates` vectors belong to the caller: spawning must not append to,
+    # filter, or reorder them, however many tasks are spawned.
+    scoped_props = Symbol[:scope]
+    Dagger.with_options(; propagates=scoped_props,
+                          scope=Dagger.ExactScope(Dagger.ThreadProc(1,1))) do
+        @test fetch(Dagger.@spawn 1+1) == 2
+        @test fetch(Dagger.@spawn 1+1) == 2
+    end
+    @test scoped_props == Symbol[:scope]
+
+    # Likewise for a `propagates` passed directly to a task.
+    task_props = Symbol[:meta]
+    @test fetch(Dagger.@spawn propagates=task_props meta=false 1+1) == 2
+    @test task_props == Symbol[:meta]
+end
