@@ -255,8 +255,11 @@ function reschedule_syncdeps!(state, thunk, ready_out::Vector{Thunk}, seen=nothi
                         pushed = deps_push!(input, cur)
                         if !pushed
                             # input finished between our check and the push;
-                            # undo the +1 (the seal-swap already happened).
+                            # undo the +1 (the seal-swap already happened) and
+                            # resolve the slots ourselves, exactly as for an
+                            # input that was already finished on entry.
                             @atomic cur.pending_deps -= 1
+                            resolve_finished_input!(state, cur, input)
                         end
 
                         # DFS into input only if we haven't visited it yet and
@@ -265,8 +268,28 @@ function reschedule_syncdeps!(state, thunk, ready_out::Vector{Thunk}, seen=nothi
                                 !(@atomic input.running) && !(@atomic input.valid)
                             push!(to_visit, input)
                         end
+                    else
+                        # A finished (non-errored) input contributes no pending
+                        # dep -- and gets no dependents entry either, so
+                        # `input`'s own `schedule_dependents!` has been and gone
+                        # and will never push its result into `cur`'s input
+                        # slots. Resolve them here instead, while `input` is
+                        # still alive and holding its result.
+                        #
+                        # This is not an optimization: from here on `cur`
+                        # references `input` only *weakly*, and a finished dep
+                        # is deliberately never marked `sch_accessible` (see
+                        # `eager_submit_internal!`), so dropping the user's
+                        # `DTask` lets `unref_thunk!` delete and recycle the
+                        # Thunk. The recycled object is handed back out with a
+                        # fresh id, `unwrap_weak` starts returning `nothing`,
+                        # and the next `collect_task_inputs!` for `cur` trips
+                        # the `unwrap_weak_checked` assertion -- inside a
+                        # completion handler, on a pooled task whose error
+                        # handler only logs, so the dependent is never
+                        # scheduled and the scheduler hangs.
+                        resolve_finished_input!(state, cur, input)
                     end
-                    # Finished (non-errored) input contributes no pending dep.
                 end
             end
 
