@@ -32,7 +32,16 @@ end
 
 function errormonitor_reaper_loop()
     while true
-        sleep(ERRORMONITOR_REAPER_INTERVAL[])
+        try
+            sleep(ERRORMONITOR_REAPER_INTERVAL[])
+        catch err
+            # The timer is closed out from under us when the process tears
+            # down. That's a normal exit for this loop, not a failure — but
+            # `errormonitor` would print it as an unhandled task error after
+            # the testsuite has already reported success.
+            err isa EOFError && break
+            rethrow()
+        end
         stood_down = lock(ERRORMONITOR_TRACKED) do tracked
             filter!(o -> !istaskdone(last(o)), tracked)
             if isempty(tracked)
