@@ -92,7 +92,20 @@ lesson.
    Test such a structure by driving it from two real threads with a
    deliberately tiny capacity and checking the *sequence*, not the counts.
 
-11. **Keep type-stable and type-unstable paths at the right stability level.**
+11. **Never iterate a shared collection across a point where you drop the
+   lock.** Blocking calls in this codebase release and reacquire their lock
+   (`wait(store.lock)`, `@lock`-guarded condition waits), and anything else may
+   mutate the collection in that gap. Julia will not warn you: `Dict` iteration
+   has no modification check, so an insert that triggers a rehash mid-iteration
+   silently *revisits* some entries and *skips* others — measured, not
+   theoretical. The revisit is the dangerous half, because re-processing an
+   entry you already handled can block you on a resource you just consumed and
+   hang the loop forever. Snapshot the keys into a `@reusable_vector` before
+   the loop (steady-state allocation-free) and re-check membership per
+   iteration; the resulting "entries added while we waited are picked up next
+   round" semantics is well-defined, which the accidental version was not.
+
+12. **Keep type-stable and type-unstable paths at the right stability level.**
    If both kinds of path exist for an operation (e.g. typed kernel execution
    vs. dynamically-typed planning), consider whether they need to be
    *separate* paths: don't force the dynamic path to specialize per signature
