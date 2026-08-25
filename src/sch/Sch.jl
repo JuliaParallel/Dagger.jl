@@ -820,13 +820,56 @@ function schedule_ready!(state, ready::Vector{Thunk}, procs=nothing)
     @inbounds for i in 1:n
         t = ready[i]
         if i <= INLINE_SCHEDULE_FANOUT_THRESHOLD
-            schedule_one!(state, t, procs)
+            schedule_one_guarded!(state, t, procs)
         else
             tt = t
-            Threads.@spawn schedule_one!(state, tt, procs)
+            Threads.@spawn schedule_one_guarded!(state, tt, procs)
         end
     end
     empty!(ready)
+    return
+end
+
+"""
+    schedule_one_guarded!(state, task, procs)
+
+Run `schedule_one!`, converting an escaping error into a *failure of `task`*.
+
+Placement runs on whatever thread completed an upstream: usually a pooled
+completion task, whose error handler only logs (`reusable_task_loop`), or — past
+the fan-out threshold above — a detached `Threads.@spawn` whose exception nobody
+ever fetches. `task` has already been credited to `running_count` by the time it
+reaches here, so an error that escapes loses the thunk *silently*: it is never
+fired, never finished, its credit is never released, and every `fetch` on it —
+plus `compute_dag`'s termination check, which waits for `running_count` to reach
+zero — blocks forever. A scheduler bug should surface as a failed task, not as a
+hung session.
+
+Only a thunk that was never dispatched is failed here. If `schedule_one!` threw
+after `fire_tasks!` handed the task off, the task is already running and will
+finish (or fail) through the usual path, which owns both its result and its
+`running_count` credit — releasing it again here would corrupt the counter.
+"""
+function schedule_one_guarded!(state, task::Thunk, procs)
+    try
+        schedule_one!(state, task, procs)
+    catch err
+        bt = catch_backtrace()
+        @lock state.lock begin
+            if (@atomic task.running) || (@atomic task.finished)
+                @error "Scheduling failed after task was dispatched" thunk_id=task.id exception=(err, bt)
+            else
+                # `CapturedException` keeps the backtrace attached, so the
+                # `DTaskFailedException` a `fetch`er sees shows where the
+                # scheduling actually broke.
+                set_failed!(state, task; ex=CapturedException(err, bt))
+                # Release the `running_count` credit `task` received when it
+                # entered `ready_out` (see the `set_failed!` call sites in
+                # `schedule_one!` for why this is necessary).
+                Threads.atomic_sub!(state.running_count, 1)
+            end
+        end
+    end
     return
 end
 
