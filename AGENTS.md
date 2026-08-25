@@ -79,7 +79,20 @@ lesson.
    `running_count` release), and attach the backtrace with `CapturedException`
    so the waiter sees where it actually broke.
 
-10. **Keep type-stable and type-unstable paths at the right stability level.**
+10. **In a lock-free handshake, publish last and release last.** Where two
+   sides coordinate through a single atomic counter (`ProcessRingBuffer`'s
+   `count`), that counter is a *permission grant*, not a bookkeeping detail.
+   The producer must fill the slot before incrementing (an incremented count
+   entitles the consumer to read it) and the consumer must read the value out
+   before decrementing (a decremented count entitles the producer to overwrite
+   it). Getting the order wrong is invisible to assertions that only check
+   counts and ranges — both sides stay perfectly self-consistent while values
+   are silently lost or duplicated — and it only bites when the buffer is at a
+   boundary, i.e. exactly under the backpressure the buffer exists to provide.
+   Test such a structure by driving it from two real threads with a
+   deliberately tiny capacity and checking the *sequence*, not the counts.
+
+11. **Keep type-stable and type-unstable paths at the right stability level.**
    If both kinds of path exist for an operation (e.g. typed kernel execution
    vs. dynamically-typed planning), consider whether they need to be
    *separate* paths: don't force the dynamic path to specialize per signature
