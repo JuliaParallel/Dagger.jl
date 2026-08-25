@@ -39,7 +39,22 @@ lesson.
    inference of the value's type feeds later dispatch or arithmetic — that
    just moves the dynamic dispatch somewhere less visible.
 
-7. **Keep type-stable and type-unstable paths at the right stability level.**
+7. **Long-lived and pooled tasks must not inherit their creator's dynamic
+   scope.** Julia copies `current_task().scope` (the `ScopedValues` chain) into
+   every new `Task`. A task pool, a processor runner, or the eager scheduler
+   task is created lazily by whichever call first needed it — often inside a
+   `Dagger.with_options(...)` block — and then serves *every* later caller, so
+   an inherited scope silently applies those options to unrelated work for the
+   rest of the session. Clear it with `clear_task_scope!` before starting such
+   a task (it can only be set before the task starts). Per-task option
+   propagation is explicit (`get_propagated_options`), so these tasks want no
+   ambient scope at all. Note that `task.scope` only exists on Julia 1.11+; on
+   1.10 the `ScopedValues.jl` compat package hides the scope in `task.logstate`,
+   so `clear_task_scope!` is version-split — always go through it rather than
+   writing the field directly. The same reasoning applies to any other
+   creation-time-captured state (e.g. `TaskLocalValue`s) on a reused task.
+
+8. **Keep type-stable and type-unstable paths at the right stability level.**
    If both kinds of path exist for an operation (e.g. typed kernel execution
    vs. dynamically-typed planning), consider whether they need to be
    *separate* paths: don't force the dynamic path to specialize per signature

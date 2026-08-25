@@ -198,6 +198,18 @@ end
     print_alloc_report()
 end
 
+# Everything above ran inside `Dagger.with_options(scope=ALLOC_TEST_SCOPE)`,
+# and (running first) it is what creates Dagger's long-lived and pooled tasks:
+# the eager scheduler task, the processor runners, and the reusable task
+# pools. Julia copies the creating task's `ScopedValues` scope into every new
+# `Task`, so without `clear_task_scope!` those permanently observe the pinned
+# scope and leak it into every task they later run -- which is invisible here
+# but breaks unrelated suites much later (test/options.jl asserts that a plain
+# `@spawn` sees no scoped options).
+@testset "No scoped-option leak into pooled tasks" begin
+    @test fetch(Dagger.@spawn Dagger.get_options(:scope, Dagger.AnyScope())) == Dagger.AnyScope()
+end
+
 # Return the process to a virgin eager-scheduler state: this suite runs first
 # in the canonical order (its measurements need a pristine process — see
 # runtests.jl), and later suites assert lazy scheduler initialization

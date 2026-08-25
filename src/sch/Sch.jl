@@ -1854,6 +1854,10 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
     else
         Dagger.set_task_migratable!(proc_run_task)
     end
+    # This runner outlives whatever call created it (an `init_proc` during
+    # scheduler startup, or a later `monitor_procs_changed!`) and every task it
+    # executes descends from it, so it must not carry that call's dynamic scope
+    Dagger.clear_task_scope!(proc_run_task)
     return errormonitor_tracked("processor $to_proc", schedule(proc_run_task))
 end
 struct DoTaskSpec

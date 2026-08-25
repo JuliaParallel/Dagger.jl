@@ -594,7 +594,11 @@ mutable struct ReusableTaskCache
         for idx in 1:N
             chans[idx] = Channel{Any}(1)
             chan, r = chans[idx], ready[idx]
-            tasks[idx] = @task reusable_task_loop(chan, r)
+            # N.B. These tasks are created on whichever call first touches this
+            # (task-local) cache and then serve every later payload, so they
+            # must not inherit that call's dynamic scope (see
+            # `clear_task_scope!`).
+            tasks[idx] = clear_task_scope!(@task reusable_task_loop(chan, r))
         end
         cache = new(tasks, chans, ready, t->nothing, N, false)
         finalizer(cache) do cache
@@ -663,6 +667,8 @@ function (cache::ReusableTaskCache)(f, name::String, register=nothing)
             @error "[$name] Error in non-reusable task" exception=(err, catch_backtrace())
         end
         cache.setup_f(t)
+        # Matches the pooled path: payloads run with no ambient dynamic scope
+        clear_task_scope!(t)
         register === nothing || register(t)
         schedule(t)
         Sch.errormonitor_tracked(name, t)
