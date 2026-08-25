@@ -174,6 +174,94 @@ end
     end
 end
 
+# A buffer that announces when `StreamStore.put!` has parked on it. Reaching
+# the wait loop proves `put!` has already snapshotted its output list, which is
+# the moment the test needs to mutate that list.
+mutable struct ParkSignalBuffer{T}
+    inner::Dagger.ProcessRingBuffer{T}
+    parked::Threads.Atomic{Bool}
+    ParkSignalBuffer{T}(len::Int) where T =
+        new{T}(Dagger.ProcessRingBuffer{T}(len), Threads.Atomic{Bool}(false))
+end
+function Dagger.isfull(b::ParkSignalBuffer)
+    full = Dagger.isfull(b.inner)
+    full && (b.parked[] = true)
+    return full
+end
+Base.isempty(b::ParkSignalBuffer) = isempty(b.inner)
+Base.length(b::ParkSignalBuffer) = length(b.inner)
+Base.isopen(b::ParkSignalBuffer) = isopen(b.inner)
+Base.close(b::ParkSignalBuffer) = close(b.inner)
+Base.put!(b::ParkSignalBuffer, x) = put!(b.inner, x)
+Base.take!(b::ParkSignalBuffer) = take!(b.inner)
+
+@testset "StreamStore.put! snapshots its outputs" begin
+    # `put!` blocks on a full output buffer, dropping `store.lock` while it
+    # waits, and waiters can be added under that lock meanwhile. Iterating the
+    # live `output_streams` Dict across that gap is unsafe: Julia's Dict
+    # iteration does not detect a concurrent insert, so a rehash silently
+    # revisits some entries and skips others. Wire the outputs up by hand so
+    # `initialize_output_stream!` (which spawns real drain tasks) stays out of
+    # it, and drive the mutation directly the way `add_waiters!` would.
+    store = Dagger.StreamStore{Int,ParkSignalBuffer{Int}}(UInt(1), 1, 1)
+    original_uids = UInt[10, 11]
+    for uid in original_uids
+        store.output_streams[uid] = nothing
+        # Capacity 1 and pre-filled below, so `put!` must wait on both.
+        store.output_buffers[uid] = ParkSignalBuffer{Int}(1)
+        push!(store.waiters, Int(uid))
+    end
+    fetch(in_fake_task() do
+        for uid in original_uids
+            put!(store.output_buffers[uid], -1)
+        end
+    end)
+
+    putter = in_fake_task() do
+        put!(store, 42)
+    end
+
+    # Once any buffer reports a park, `put!` holds a snapshot and is on its way
+    # into `wait`. Taking the lock here cannot succeed until it gets there, so
+    # the insertions below are guaranteed to land mid-iteration. 100 of them is
+    # far more than enough to force the Dict to rehash.
+    parked = ()->any(uid->store.output_buffers[uid].parked[], original_uids)
+    @test timedwait(parked, 30) == :ok
+    added_uids = UInt[]
+    @lock store.lock begin
+        for uid in UInt(100):UInt(199)
+            store.output_streams[uid] = nothing
+            store.output_buffers[uid] = ParkSignalBuffer{Int}(4)
+            push!(store.waiters, Int(uid))
+            push!(added_uids, uid)
+        end
+    end
+
+    # Drain the pre-filled values so `put!` can make progress. Notify on every
+    # poll rather than once: `put!` waits on each output in turn, so it needs
+    # waking more than once, and a notify sent before it parks is simply lost.
+    drained = fetch(in_fake_task() do
+        [take!(store.output_buffers[uid]) for uid in original_uids]
+    end)
+    @test drained == [-1, -1]
+    @test timedwait(60) do
+        @lock store.lock notify(store.lock)
+        istaskdone(putter)
+    end == :ok
+
+    if istaskdone(putter)
+        @test !istaskfailed(putter)
+        # Every output present when `put!` started gets the value exactly once.
+        @test all(uid->length(store.output_buffers[uid]) == 1, original_uids)
+        got = fetch(in_fake_task() do
+            [take!(store.output_buffers[uid]) for uid in original_uids]
+        end)
+        @test got == [42, 42]
+        # Outputs added mid-`put!` start at the *next* value, deterministically.
+        @test all(uid->isempty(store.output_buffers[uid]), added_uids)
+    end
+end
+
 all_scopes = [Dagger.ExactScope(proc) for proc in Dagger.all_processors()]
 for idx in 1:5
     if idx == 1

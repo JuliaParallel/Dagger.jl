@@ -29,7 +29,22 @@ function Base.put!(store::StreamStore{T,B}, value) where {T,B}
             throw(InvalidStateException("Stream is closed", :closed))
         end
         @dagdebug thunk_id :stream "adding $value ($(length(store.output_streams)) outputs)"
-        for output_uid in keys(store.output_streams)
+        # Snapshot the output uids before iterating. The `wait` below drops
+        # `store.lock`, and `add_waiters!`/`remove_waiters!` mutate
+        # `output_streams` under that same lock. Julia's `Dict` iteration does
+        # not detect concurrent insertion: an insert that rehashes mid-iteration
+        # silently revisits some entries and skips others, so a value would be
+        # delivered twice to one output or never to another, with no error --
+        # and revisiting an output we already filled parks us on a full buffer
+        # that nobody will drain, hanging the producer for good.
+        # A waiter added while we wait therefore starts at the *next* value,
+        # which is both well-defined and what the old code did by accident
+        # whenever the Dict happened not to rehash.
+        output_uids = @reusable_vector :stream_store_put!_output_uids UInt UInt(0) 32
+        append!(output_uids, keys(store.output_streams))
+        for output_uid in output_uids
+            # An earlier output's wait may have outlived this one.
+            haskey(store.output_streams, output_uid) || continue
             if !haskey(store.output_buffers, output_uid)
                 initialize_output_stream!(store, output_uid)
             end
