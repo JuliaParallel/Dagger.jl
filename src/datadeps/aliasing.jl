@@ -185,33 +185,39 @@ chunktype(::Out{T}) where T = T
 chunktype(::InOut{T}) where T = T
 chunktype(::Deps{T,DT}) where {T,DT} = T
 
+"""
+    unwrap_inout(arg) -> (arg, deps)
+
+Strips any `In`/`Out`/`InOut`/`Deps` wrapper from `arg`, returning the bare
+value together with its dependencies as a *tuple* of `(dep_mod, readdep,
+writedep)` triples. A bare (unwrapped) value is a read dependency with
+`identity` as its `dep_mod`.
+
+N.B. The dependencies are a tuple, not a `Vector{Tuple}`: `Deps` stores its
+sub-dependencies as a `Tuple` already, and every consumer only iterates the
+result, so keeping it a tuple makes the whole thing inferrable and keeps the
+common single-dependency case off the heap.
+"""
 function unwrap_inout(arg)
-    readdep = false
-    writedep = false
     if arg isa In
-        readdep = true
-        arg = arg.x
+        return arg.x, ((identity, true, false),)
     elseif arg isa Out
-        writedep = true
-        arg = arg.x
+        return arg.x, ((identity, false, true),)
     elseif arg isa InOut
-        readdep = true
-        writedep = true
-        arg = arg.x
+        return arg.x, ((identity, true, true),)
     elseif arg isa Deps
-        alldeps = Tuple[]
-        for dep in arg.deps
-            dep_mod, inner_deps = unwrap_inout(dep)
-            for (_, readdep, writedep) in inner_deps
-                push!(alldeps, (dep_mod, readdep, writedep))
-            end
-        end
-        arg = arg.x
-        return arg, alldeps
+        return arg.x, _unwrap_deps(arg.deps)
     else
-        readdep = true
+        return arg, ((identity, true, false),)
     end
-    return arg, Tuple[(identity, readdep, writedep)]
+end
+# Flatten `Deps`' sub-dependencies: each sub-dependency contributes its own
+# unwrapped value as the `dep_mod` for every triple it produces.
+_unwrap_deps(::Tuple{}) = ()
+@inline function _unwrap_deps(deps::Tuple)
+    dep_mod, inner_deps = unwrap_inout(first(deps))
+    head = map(d->(dep_mod, d[2], d[3]), inner_deps)
+    return (head..., _unwrap_deps(Base.tail(deps))...)
 end
 
 _identity_hash(arg, h::UInt=UInt(0)) = ismutable(arg) ? objectid(arg) : hash(arg, h)
@@ -227,7 +233,7 @@ struct ArgumentWrapper
     function ArgumentWrapper(arg, dep_mod)
         h = hash(dep_mod)
         h = _identity_hash(arg, h)
-        check_uniform(h, arg)
+        @check_uniform(h, arg)
         return new(arg, dep_mod, h)
     end
 end
@@ -236,6 +242,48 @@ Base.:(==)(aw1::ArgumentWrapper, aw2::ArgumentWrapper) =
     aw1.hash == aw2.hash
 Base.isequal(aw1::ArgumentWrapper, aw2::ArgumentWrapper) =
     aw1.hash == aw2.hash
+
+struct DataDepsTaskDependency
+    arg_w::ArgumentWrapper
+    readdep::Bool
+    writedep::Bool
+end
+DataDepsTaskDependency(arg, dep) =
+    DataDepsTaskDependency(ArgumentWrapper(arg, dep[1]), dep[2], dep[3])
+
+"""
+    TaskArgInfo
+
+Flat, concrete per-argument record produced by `populate_task_info!` into
+`DataDepsState`'s per-task scratch vectors. The argument's dependencies live in
+`state.scratch_deps[dep_start:dep_stop]`. Replaces the former heterogeneous
+tuple of `TypedDataDepsTaskArgument{T,N}`s, which forced every planning
+traversal to re-box tuple elements and copy the whole tuple across each
+dynamic closure boundary.
+"""
+struct TaskArgInfo
+    arg::Any        # unwrapped argument, or its tracking Chunk when aliasing
+    pos::ArgPosition
+    may_alias::Bool
+    inplace_move::Bool
+    dep_start::Int
+    dep_stop::Int
+end
+arg_deps_range(info::TaskArgInfo) = info.dep_start:info.dep_stop
+
+# Self-contained per-argument record for logging payloads: the scratch
+# `TaskArgInfo`s reference `state.scratch_deps` by index and are recycled per
+# task, so log consumers get a snapshot with the deps materialized inline.
+struct LoggedTaskArg
+    arg::Any
+    pos::ArgPosition
+    may_alias::Bool
+    inplace_move::Bool
+    deps::Vector{DataDepsTaskDependency}
+end
+logged_task_args(deps_vec::Vector{DataDepsTaskDependency}, infos::Vector{TaskArgInfo}) =
+    [LoggedTaskArg(i.arg, i.pos, i.may_alias, i.inplace_move,
+                   deps_vec[arg_deps_range(i)]) for i in infos]
 
 struct HistoryEntry
     ainfo::AliasingWrapper
@@ -299,7 +347,7 @@ function get_stored(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::A
 end
 function set_stored!(cache::AliasedObjectCacheStore, dest_space::MemorySpace, value::Chunk, ainfo::AbstractAliasing)
     @assert !is_stored(cache, dest_space, ainfo) "Cache already has derived ainfo $ainfo"
-    check_uniform(value)
+    @check_uniform(value)
     key = cache.derived[ainfo]
     value_ainfo = aliasing(cache.accel, value, identity)
     cache.derived[value_ainfo] = key
@@ -309,7 +357,7 @@ function set_stored!(cache::AliasedObjectCacheStore, dest_space::MemorySpace, va
     return
 end
 function set_key_stored!(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::AbstractAliasing, value::Chunk)
-    check_uniform(value)
+    @check_uniform(value)
     push!(cache.keys, ainfo)
     cache.derived[ainfo] = ainfo
     # A key is first registered at the space where the original object lives, so
@@ -393,7 +441,13 @@ function aliased_object!(f, cache::AliasedObjectCache, x; ainfo=aliasing(cache.a
     end
 end
 
-struct DataDepsState
+# N.B. Declared `mutable` (despite no field ever being rebound) purely for
+# identity: an immutable struct this large is re-boxed on every dynamic call
+# that passes it, and planning threads it through hundreds of such calls per
+# task. A mutable struct has a stable heap identity and is passed by pointer
+# instead, so those boxes disappear. It is never used as a `Dict` key, so the
+# resulting identity-based `hash`/`==` are not observed.
+mutable struct DataDepsState
     # The mapping of original raw argument to its Chunk
     # N.B. Values are Chunks, or raw remote handles (e.g. ChunkView under MPI)
     raw_arg_to_chunk::IdDict{Any,Any}
@@ -404,7 +458,12 @@ struct DataDepsState
 
     # The mapping of memory space to argument to remote argument copies
     # Used to replace an argument with its remote copy
-    remote_args::Dict{MemorySpace,IdDict{Any,Chunk}}
+    # N.B. Values are Chunks, or raw remote handles (e.g. ChunkView under MPI),
+    # matching `raw_arg_to_chunk` above -- hence `IdDict{Any,Any}`. Every
+    # construction site (`generate_slot!`, `get_or_generate_slot!`,
+    # hierarchical's ownership sync) builds `IdDict{Any,Any}`; declaring a
+    # narrower value type here only forced a convert+copy on each of them.
+    remote_args::Dict{MemorySpace,IdDict{Any,Any}}
 
     # The mapping of remote argument to original argument
     remote_arg_to_original::IdDict{Any,Any}
@@ -463,6 +522,13 @@ struct DataDepsState
     ainfos_owner::Dict{AliasingWrapper,Union{Pair{DTask,Int},Nothing}}
     ainfos_readers::Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}
 
+    # Per-task scratch buffers filled by `populate_task_info!` and consumed by
+    # `distribute_task!` (which plans one task at a time per state; parallel
+    # hierarchical partitions each own a private state). Reused across tasks.
+    scratch_args::Vector{TaskArgInfo}
+    scratch_deps::Vector{DataDepsTaskDependency}
+    scratch_remote::Vector{Any}
+
     function DataDepsState()
         arg_to_chunk = IdDict{Any,Any}()
         arg_origin = IdDict{Any,MemorySpace}()
@@ -489,7 +555,8 @@ struct DataDepsState
         ainfos_readers = Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}()
 
         return new(arg_to_chunk, arg_origin, remote_args, remote_arg_to_original, remote_arg_w, ainfo_arg, arg_history, arg_owner, arg_current, arg_overlaps, ainfo_backing_chunk,
-                   supports_inplace_cache, ainfo_cache, ainfos_lookup, ainfos_overlaps, ainfos_owner, ainfos_readers)
+                   supports_inplace_cache, ainfo_cache, ainfos_lookup, ainfos_overlaps, ainfos_owner, ainfos_readers,
+                   TaskArgInfo[], DataDepsTaskDependency[], Any[])
     end
 end
 
@@ -510,75 +577,92 @@ end
 # (e.g. ChunkView under MPI) override this to stay raw.
 datadeps_arg_wrap(arg) = tochunk(arg)
 
-# Aliasing state setup
-function populate_task_info!(state::DataDepsState, task_args, spec::DTaskSpec, task::DTask)
-    # Track the task's arguments and access patterns
-    return map_or_ntuple(task_args) do idx
-        _arg = task_args[idx]
+"""
+    get_or_make_arg_chunk!(state, arg, task) -> chunk
 
-        # Unwrap the argument
-        _arg_with_deps = value(_arg)
-        pos = _arg.pos
+Returns the `Chunk` (or raw remote handle) tracking `arg`, generating and
+recording it on first sight.
 
-        # Unwrap In/InOut/Out wrappers and record dependencies
-        arg_pre_unwrap, deps = unwrap_inout(_arg_with_deps)
-
-        # Unwrap the Chunk underlying any DTask arguments
-        arg = arg_pre_unwrap isa DTask ? fetch(arg_pre_unwrap; raw=true) : arg_pre_unwrap
-
-        # Skip non-aliasing arguments or arguments that don't support in-place move
-        may_alias = type_may_alias(typeof(arg))
-        inplace_move = may_alias && supports_inplace_move(state, arg)
-        if !may_alias || !inplace_move
-            arg_w = ArgumentWrapper(arg, identity)
-            if is_typed(spec)
-                return TypedDataDepsTaskArgument(arg, pos, may_alias, inplace_move, (DataDepsTaskDependency(arg_w, false, false),))
-            else
-                return DataDepsTaskArgument(arg, pos, may_alias, inplace_move, [DataDepsTaskDependency(arg_w, false, false)])
-            end
-        end
-
-        # Generate a Chunk for the argument if necessary
-        if haskey(state.raw_arg_to_chunk, arg)
-            arg_chunk = state.raw_arg_to_chunk[arg]
-        else
-            if !(arg isa Chunk)
-                arg_chunk = with(DATADEPS_THUNK_ID=>task.uid) do
-                    datadeps_arg_wrap(arg)
-                end
-                state.raw_arg_to_chunk[arg] = arg_chunk
-            else
-                state.raw_arg_to_chunk[arg] = arg
-                arg_chunk = arg
-            end
-        end
-
-        # Track the origin space of the argument
-        origin_space = memory_space(arg_chunk)
-        check_uniform(origin_space)
-        state.arg_origin[arg_chunk] = origin_space
-        state.remote_arg_to_original[arg_chunk] = arg_chunk
-
-        # Populate argument info for all aliasing dependencies
-        # And return the argument, dependencies, and ArgumentWrappers
-        if is_typed(spec)
-            deps = Tuple(DataDepsTaskDependency(arg_chunk, dep) for dep in deps)
-            map_or_ntuple(deps) do dep_idx
-                dep = deps[dep_idx]
-                # Populate argument info
-                populate_argument_info!(state, dep.arg_w, origin_space)
-            end
-            return TypedDataDepsTaskArgument(arg_chunk, pos, may_alias, inplace_move, deps)
-        else
-            deps = [DataDepsTaskDependency(arg_chunk, dep) for dep in deps]
-            map_or_ntuple(deps) do dep_idx
-                dep = deps[dep_idx]
-                # Populate argument info
-                populate_argument_info!(state, dep.arg_w, origin_space)
-            end
-            return DataDepsTaskArgument(arg_chunk, pos, may_alias, inplace_move, deps)
-        end
+N.B. Split out of `populate_task_info!`'s per-argument closure deliberately: as
+an inline `if`/`else` the result was assigned in three branches and then
+captured by the closures below it, which forced Julia to box it. A single
+assignment from a call keeps it unboxed.
+"""
+function get_or_make_arg_chunk!(state::DataDepsState, arg, task::DTask)
+    existing = get(state.raw_arg_to_chunk, arg, nothing)
+    existing === nothing || return existing
+    if arg isa Chunk
+        state.raw_arg_to_chunk[arg] = arg
+        return arg
     end
+    arg_chunk = with(DATADEPS_THUNK_ID=>task.uid) do
+        datadeps_arg_wrap(arg)
+    end
+    state.raw_arg_to_chunk[arg] = arg_chunk
+    return arg_chunk
+end
+
+# Aliasing state setup
+#
+# Fills `state.scratch_args`/`state.scratch_deps` with one flat, concrete
+# `TaskArgInfo` per task argument (position 1 is `f_arg`, the already-moved
+# function argument), and returns `state.scratch_args`. The buffers are valid
+# until the next `populate_task_info!` call on this state.
+function populate_task_info!(state::DataDepsState, f_arg, fargs, spec::DTaskSpec, task::DTask)
+    infos = state.scratch_args
+    deps_vec = state.scratch_deps
+    empty!(infos)
+    empty!(deps_vec)
+    for idx in 1:length(fargs)
+        _arg = idx == 1 ? f_arg : fargs[idx]
+        # N.B. Function barrier: `_arg` is abstract here (heterogeneous tuple /
+        # Vector{Argument} element), so processing it inline boxes every field
+        # read and destructure; one dynamic dispatch specializes the body on
+        # the concrete argument type instead.
+        _populate_one_arg!(state, infos, deps_vec, _arg, task)
+    end
+    return infos
+end
+function _populate_one_arg!(state::DataDepsState, infos::Vector{TaskArgInfo},
+                            deps_vec::Vector{DataDepsTaskDependency}, _arg, task::DTask)
+    # Unwrap the argument
+    _arg_with_deps = value(_arg)
+    pos = _arg.pos
+
+    # Unwrap In/InOut/Out wrappers and record dependencies
+    arg_pre_unwrap, raw_deps = unwrap_inout(_arg_with_deps)
+
+    # Unwrap the Chunk underlying any DTask arguments
+    arg = arg_pre_unwrap isa DTask ? fetch(arg_pre_unwrap; raw=true) : arg_pre_unwrap
+
+    # Skip non-aliasing arguments or arguments that don't support in-place move
+    may_alias = type_may_alias(typeof(arg))
+    inplace_move = may_alias && supports_inplace_move(state, arg)
+    dep_start = length(deps_vec) + 1
+    if !may_alias || !inplace_move
+        arg_w = ArgumentWrapper(arg, identity)
+        push!(deps_vec, DataDepsTaskDependency(arg_w, false, false))
+        push!(infos, TaskArgInfo(arg, pos, may_alias, inplace_move, dep_start, length(deps_vec)))
+        return
+    end
+
+    # Generate a Chunk for the argument if necessary
+    arg_chunk = get_or_make_arg_chunk!(state, arg, task)
+
+    # Track the origin space of the argument
+    origin_space = memory_space(arg_chunk)
+    @check_uniform(origin_space)
+    state.arg_origin[arg_chunk] = origin_space
+    state.remote_arg_to_original[arg_chunk] = arg_chunk
+
+    # Record and populate argument info for all aliasing dependencies
+    for dep in raw_deps
+        dep_full = DataDepsTaskDependency(arg_chunk, dep)
+        push!(deps_vec, dep_full)
+        populate_argument_info!(state, dep_full.arg_w, origin_space)
+    end
+    push!(infos, TaskArgInfo(arg_chunk, pos, may_alias, inplace_move, dep_start, length(deps_vec)))
+    return
 end
 function populate_argument_info!(state::DataDepsState, arg_w::ArgumentWrapper, origin_space::MemorySpace)
     # Initialize ownership and history
@@ -856,7 +940,13 @@ function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::M
     if copy_src === nothing
         # Task write: only the written space is current, and other spaces'
         # replicas of overlapping regions become stale
-        state.arg_current[arg_w] = Set{MemorySpace}((dest_space,))
+        # N.B. The `Set` is reused in place rather than replaced; nothing ever
+        # holds a reference to it past the call that reads it (see
+        # `distribute_tasks!`'s copy-from elision and `arg_current` reads in
+        # `hierarchical.jl`), so mutating is equivalent to rebinding.
+        current = get!(Set{MemorySpace}, state.arg_current, arg_w)
+        empty!(current)
+        push!(current, dest_space)
         for other_arg_w in state.arg_overlaps[arg_w]
             other_arg_w == arg_w && continue
             other_current = get(state.arg_current, other_arg_w, nothing)
@@ -922,17 +1012,20 @@ function generate_slot!(state::DataDepsState, dest_space, data)
     # because all we want here is to make a copy of some version of the data,
     # even if the data is not up to date.
     orig_space = memory_space(data)
-    check_uniform(orig_space)
+    @check_uniform(orig_space)
     to_proc = first(processors(dest_space))
-    check_uniform(to_proc)
+    @check_uniform(to_proc)
     from_proc = first(processors(orig_space))
-    check_uniform(from_proc)
-    check_uniform(typeof(data))
+    @check_uniform(from_proc)
+    @check_uniform(typeof(data))
     dest_space_args = get!(IdDict{Any,Any}, state.remote_args, dest_space)
     aliased_object_cache = AliasedObjectCache(current_acceleration(), dest_space, state.ainfo_backing_chunk)
+    # N.B. Same gate as `@maybelog`, written out so the event `id` (a `rand`
+    # call, plus the boxing it feeds) is only generated when logging is enabled.
     ctx = Sch.eager_context()
-    id = rand(Int)
-    @maybelog ctx timespan_start(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data))
+    logging = !(ctx.log_sink isa TimespanLogging.NoOpLog)
+    id = logging ? rand(Int) : 0
+    logging && timespan_start(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data))
     tid = something(DATADEPS_CURRENT_TASK[], (;uid=0)).uid
     data_chunk = if slot_is_already_in_place(data, orig_space, dest_space)
         # Nothing to move: the slot for data already in `dest_space` is the data
@@ -947,14 +1040,14 @@ function generate_slot!(state::DataDepsState, dest_space, data)
             remotecall_endpoint_toplevel(move_rewrap, current_acceleration(), aliased_object_cache, from_proc, to_proc, orig_space, dest_space, data)
         end
     end
-    @maybelog ctx timespan_finish(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data=data_chunk))
+    logging && timespan_finish(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data=data_chunk))
     @assert memory_space(data_chunk) == dest_space "space mismatch! $dest_space (dest) != $(memory_space(data_chunk)) (actual) ($(typeof(data)) (data) vs. $(typeof(data_chunk)) (chunk)), spaces ($orig_space -> $dest_space)"
     dest_space_args[data] = data_chunk
     state.remote_arg_to_original[data_chunk] = data
 
-    check_uniform(memory_space(dest_space_args[data]))
-    check_uniform(processor(dest_space_args[data]))
-    check_uniform(dest_space_args[data].handle)
+    @check_uniform(memory_space(dest_space_args[data]))
+    @check_uniform(processor(dest_space_args[data]))
+    @check_uniform(dest_space_args[data].handle)
 
     return dest_space_args[data]
 end
@@ -1050,7 +1143,7 @@ function move_rewrap(accel, cache::AliasedObjectCache, from_proc::Processor, to_
     T = typeof(data)
     child_chunks = map(c -> move_rewrap(accel, cache, from_proc, to_proc, from_space, to_space, c), children)
     for cc in child_chunks
-        check_uniform(cc.handle)
+        @check_uniform(cc.handle)
     end
     return remotecall_endpoint_transfer(accel, from_proc, to_proc, from_space, to_space, child_chunks) do accel, from_proc, to_proc, from_space, to_space, child_chunks
         children_local = map(c -> move(from_proc, to_proc, c), child_chunks)

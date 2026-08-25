@@ -1,10 +1,15 @@
-mutable struct ArgPosition
+# N.B. Immutable: no field of an `ArgPosition` is ever assigned, and being
+# immutable lets it be stored inline in `Argument`/`TypedArgument` (and copied by
+# value), removing one heap allocation per argument.
+struct ArgPosition
     positional::Bool
     idx::Int
     kw::Symbol
 end
 ArgPosition() = ArgPosition(true, 0, :NULL)
-ArgPosition(pos::ArgPosition) = ArgPosition(pos.positional, pos.idx, pos.kw)
+# Copying an immutable is the identity
+ArgPosition(pos::ArgPosition) = pos
+Base.copy(pos::ArgPosition) = pos
 ispositional(pos::ArgPosition) = pos.positional
 iskw(pos::ArgPosition) = !pos.positional
 raw_position(pos::ArgPosition) = ispositional(pos) ? pos.idx : pos.kw

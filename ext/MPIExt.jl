@@ -683,6 +683,11 @@ function schedule_argument_move(::MPIAcceleration, thunk_id::Integer, f::Functio
     return nothing
 end
 
+# MPI is the only backend that observes SCHED_MOVE inside moves (to suppress
+# tag creation); the default acceleration performs the move with no scope.
+Dagger.sched_move(::MPIAcceleration, to_proc, @nospecialize(value)) =
+    with(() -> Dagger.move(to_proc, value), Dagger.Sch.SCHED_MOVE => true)
+
 function take_ref_id!()
     tid = 0
     generic = 0

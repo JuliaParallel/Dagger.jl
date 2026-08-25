@@ -8,6 +8,11 @@ USE_OPENCL = parse(Bool, get(ENV, "CI_USE_OPENCL", "0"))
 USE_GPU = USE_CUDA || USE_ROCM || USE_ONEAPI || USE_METAL || USE_OPENCL
 
 tests = [
+    # Runs first deliberately: its steady-state allocation measurements need a
+    # pristine process — suites leave per-process residue (grown scheduler
+    # state, logging side effects) that inflates per-call counts, and the
+    # bounds are calibrated against a fresh process.
+    ("Allocations", "allocations.jl"),
     ("Thunk", "thunk.jl"),
     ("Scheduler", "scheduler.jl"),
     ("Processors", "processors.jl"),

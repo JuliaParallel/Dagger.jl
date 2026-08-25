@@ -59,8 +59,16 @@ accel_kind(::DistributedAcceleration) = :distributed
 function compatible_processors(accel::Union{Acceleration,Nothing}, scope::AbstractScope, procs::Vector{<:Processor})
     comp = compatible_processors(scope, procs)
     accel === nothing && return comp
-    return Set(p for p in comp if accel_matches_proc(accel, p))
+    # N.B. Explicitly Set{Processor}: `Set(gen)` infers a concrete element
+    # type (e.g. Set{MPIProcessor{ThreadProc}} under MPI), which fails the
+    # Set{Processor} typeassert in Sch's compatible-processor cache — and this
+    # function's contract is `-> Set{Processor}`.
+    return Set{Processor}(p for p in comp if accel_matches_proc(accel, p))
 end
+# accel_matches_proc is identically true for DistributedAcceleration; skip the
+# second Set construction
+compatible_processors(accel::DistributedAcceleration, scope::AbstractScope, procs::Vector{<:Processor}) =
+    compatible_processors(scope, procs)
 compatible_processors(accel::Union{Acceleration,Nothing}, scope::AbstractScope=get_compute_scope(), ctx::Context=Sch.eager_context()) =
     compatible_processors(accel, scope, procs(ctx))
 
@@ -82,6 +90,24 @@ check_uniformity!(check::Bool=true) = (CHECK_UNIFORMITY[] = check)
 check_uniform(value, original=value) =
     CHECK_UNIFORMITY[] && uniform_execution() ? check_uniform(hash(value), original) : true
 
+"""
+    @check_uniform(args...)
+
+Hot-path wrapper for [`check_uniform`](@ref). Every `check_uniform` method (the
+core fallback above, and every `check_uniform` MPIExt adds) short-circuits to
+`true` when `CHECK_UNIFORMITY[]` is `false`, so testing that flag inline is
+exactly equivalent to making the call -- but it avoids a dynamic call that would
+box its (usually isbits) arguments on every invocation, and avoids evaluating
+the argument expressions at all. `CHECK_UNIFORMITY[]` is set by
+`check_uniformity!`, which is the only way any of those checks become active.
+"""
+macro check_uniform(args...)
+    call = Expr(:call, GlobalRef(@__MODULE__, :check_uniform), map(esc, args)...)
+    return quote
+        $(GlobalRef(@__MODULE__, :CHECK_UNIFORMITY))[] ? $call : true
+    end
+end
+
 # Scheduler hooks: Sch.jl calls these instead of MPI-specific symbols.
 # Uniform-execution accelerations (e.g. MPI) inherit capacity/occupancy
 # behavior via `uniform_execution`; move/cleanup hooks default to no-ops /
@@ -98,6 +124,41 @@ cleanup_tasks_accel!(accel::Acceleration, tasks) =
     foreach(t -> cleanup_task_accel!(accel, t), tasks)
 
 schedule_argument_move(::Acceleration, ::Integer, f::Function) = Threads.@spawn f()
+
+"""
+    sched_move(accel, to_proc, value) -> Any
+
+Performs a scheduler argument move of `value` to `to_proc`. Only MPI needs the
+`Sch.SCHED_MOVE` scoped value observed inside moves (to suppress tag creation);
+constructing a ScopedValues scope (and the closure to enter it) per argument is
+pure cost for every other acceleration, so the default is a direct `move` call
+and MPIExt overrides this to install the scope.
+
+N.B. No `invokelatest` needed: the executing task was itself entered via
+`invokelatest`, so its dynamic calls already see every `move` method defined
+before the task dispatched.
+"""
+sched_move(::Acceleration, to_proc, @nospecialize(value)) = move(to_proc, value)
+
+"""
+    argument_move_may_inline(accel, to_proc, value) -> Bool
+    argument_move_may_inline(to_proc::Processor, value) -> Bool
+
+Whether an argument move may run inline on the current task rather than being
+spawned as a separate Task. The acceleration-level entry gates on
+`uniform_execution` (MPI keeps its rank-ordered scheduling) and defers to the
+2-argument, per-`Processor` form, which processor backends extend. Cheap local
+moves — non-`Chunk` values moving to a CPU processor, `Chunk`s resident on
+this worker moving to a CPU processor, or `Chunk`s already resident on the
+destination GPU — gain nothing from concurrency, and spawning a Task per
+argument dominates their cost. Remote `Chunk`s and cross-device copies stay
+async so multiple transfers overlap; unknown processors default to async.
+"""
+argument_move_may_inline(accel::Acceleration, to_proc, @nospecialize(value)) =
+    !uniform_execution(accel) && argument_move_may_inline(to_proc, value)
+argument_move_may_inline(::Processor, @nospecialize(value)) = false
+argument_move_may_inline(to_proc::ThreadProc, @nospecialize(value)) =
+    !(value isa Chunk) || root_worker_id(value.handle) == myid()
 
 """
     bind_moved_argument(accel, original, moved) -> bound

@@ -37,6 +37,22 @@ Context(xs::Vector{Int}; kwargs...) = Context(map(OSProc, xs); kwargs...)
 Context(ctx::Context, xs::Vector=copy(procs(ctx))) = # make a copy
     Context(xs; log_sink=ctx.log_sink, profile=ctx.profile)
 
+# Worker-side Contexts exist only to carry (log_sink, profile) into logging
+# calls; cache them to avoid constructing a lock and condition per task.
+# N.B. The cached Contexts have no procs and must not be used for scheduling.
+const LOG_CONTEXT_CACHE = LockedObject(Dict{Tuple{Any,Bool},Context}())
+function log_context(log_sink, profile::Bool)
+    @safe_lock1 LOG_CONTEXT_CACHE cache begin
+        key = (log_sink, profile)
+        value = get(cache, key, nothing)
+        if value === nothing
+            value = Context(Processor[]; log_sink, profile)
+            cache[key] = value
+        end
+        return value
+    end
+end
+
 const GLOBAL_CONTEXT = Ref{Context}()
 function global_context()
     if !isassigned(GLOBAL_CONTEXT)

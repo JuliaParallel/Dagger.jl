@@ -33,11 +33,17 @@ function init_eager()
 
     # Primary path: we won the CAS, so we're responsible for starting the scheduler.
     ctx = eager_context()
-    # N.B. We use @async here to prevent the scheduler task from running on a
-    # different thread than the one that is likely submitting work, as otherwise
-    # the scheduler task might sleep while holding the scheduler lock and
-    # prevent work submission until it wakes up. Further testing is needed.
-    errormonitor_tracked("eager compute()", @async try
+    # N.B. Built as a `@task` (rather than `@async`) so that its dynamic scope
+    # can be cleared before it starts: `init_eager` runs on whichever task
+    # happened to submit first, which may well be inside a
+    # `Dagger.with_options(...)` block, and this task -- plus every processor
+    # runner, task-executor and helper descending from it -- lives for the rest
+    # of the session. It is kept sticky, exactly as `@async` had it, to prevent
+    # the scheduler task from running on a different thread than the one that
+    # is likely submitting work, as otherwise the scheduler task might sleep
+    # while holding the scheduler lock and prevent work submission until it
+    # wakes up. Further testing is needed.
+    sched_task = @task try
         sopts = SchedulerOptions(;allow_errors=true)
         opts = Dagger.Options((;scope=Dagger.ExactScope(Dagger.ThreadProc(1, 1)),
                                 occupancy=Dict(Dagger.ThreadProc=>0),
@@ -67,7 +73,10 @@ function init_eager()
             EAGER_STATE[] = nothing
             notify(EAGER_STATE_LOCK; all=true)
         end
-    end)
+    end
+    sched_task.sticky = true
+    Dagger.clear_task_scope!(sched_task)
+    errormonitor_tracked("eager compute()", schedule(sched_task))
 
     # Wait for eager_thunk to set EAGER_STATE[].
     # Loop to handle spurious wakeups and wakeups from old-scheduler cleanup.

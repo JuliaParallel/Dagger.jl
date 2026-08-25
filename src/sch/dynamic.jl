@@ -150,33 +150,44 @@ future isn't being registered on a thunk dominated by the calling thunk.
 """
 register_future!(h::SchedulerHandle, id::ThunkID, future::ThunkFuture, check::Bool=true) =
         exec!(_register_future!, h, future, id, check)
-function _register_future!(ctx, state, task, tid, (future, id, check)::Tuple{ThunkFuture,ThunkID,Bool})
+# Hoisted out of `_register_future!` (where it was a local named function, and so
+# forced a `Core.Box` per call): it captures nothing and is only needed when
+# `check=true`.
+function thunk_dominates(target, t)
+    t == target && return true
+    seen = Set{Thunk}()
+    to_visit = Thunk[t]
+    while !isempty(to_visit)
+        t = pop!(to_visit)
+        if t == target
+            return true
+        end
+        for (_, input) in t.inputs
+            # N.B. Skips expired tasks
+            input = Dagger.unwrap_weak(input)
+            istask(input) || continue
+            input in seen && continue
+            push!(seen, input)
+            push!(to_visit, input)
+        end
+    end
+    return false
+end
+# N.B. Takes `future`/`id`/`check` as separate positional arguments rather than a
+# tuple, so that callers (which pass all three as compile-time-known values) need
+# not heap-allocate a boxed `Tuple` per registration.
+# The dynamic-message protocol (`exec!` -> `dynamic_listener!`) delivers all
+# arguments as a single tuple, so keep a forwarding method for that path; direct
+# (in-scheduler) callers use the positional form and allocate no tuple.
+_register_future!(ctx, state, task, tid, (future, id, check)::Tuple{ThunkFuture,ThunkID,Bool}) =
+    _register_future!(ctx, state, task, tid, future, id, check)
+function _register_future!(ctx, state, task, tid, future::ThunkFuture, id::ThunkID, check::Bool)
     tid != id.id || throw(DynamicThunkException("Cannot fetch own result"))
     GC.@preserve id begin
-        function dominates(target, t)
-            t == target && return true
-            seen = Set{Thunk}()
-            to_visit = Thunk[t]
-            while !isempty(to_visit)
-                t = pop!(to_visit)
-                if t == target
-                    return true
-                end
-                for (_, input) in t.inputs
-                    # N.B. Skips expired tasks
-                    input = Dagger.unwrap_weak(input)
-                    istask(input) || continue
-                    input in seen && continue
-                    push!(seen, input)
-                    push!(to_visit, input)
-                end
-            end
-            return false
-        end
         thunk = lock(state.thunk_dict) do d; unwrap_weak_checked(d[id.id]); end
         if check
             ownthunk = lock(state.thunk_dict) do d; unwrap_weak_checked(d[tid]); end
-            if dominates(ownthunk, thunk)
+            if thunk_dominates(ownthunk, thunk)
                 throw(DynamicThunkException("Cannot fetch result of dominated thunk"))
             end
         end
@@ -223,10 +234,29 @@ function _get_dag_ids(ctx, state, task, tid, _)
     for (id, thunk) in thunk_dict_snapshot
         thunk = unwrap_weak_checked(thunk)
         (@atomic thunk.finished) && continue
-        thunk.options === nothing && continue
-        thunk.options.syncdeps === nothing && continue
+        options = thunk.options
+        options === nothing && continue
+        # Load the syncdeps set exactly once: under datadeps, a task's pooled
+        # syncdeps set is detached (the field reset to `nothing`) and recycled
+        # right after eager submission consumes it, concurrently with this
+        # introspection. A single load plus per-entry validation below keeps
+        # this a best-effort snapshot rather than a race (a re-read could see
+        # `nothing`, and a recycled set may briefly hold another task's
+        # planner-form entries).
+        syncdeps = options.syncdeps
+        syncdeps === nothing && continue
         thunk_id = ThunkID(id, nothing)
-        for input in Dagger.syncdeps_iterator(thunk)
+        for syncdep in syncdeps
+            local input
+            inner = syncdep.thunk
+            if inner isa Dagger.WeakThunk
+                input = Dagger.unwrap_weak(inner)
+                input === nothing && continue # upstream collected/recycled
+            elseif inner isa Thunk # non-eager (`compute()`) syncdeps form
+                input = inner
+            else
+                continue # planner-form (`ThunkID`) entry
+            end
             input_id = ThunkID(input.id, nothing)
             haskey(deps, input_id) || continue
             push!(deps[input_id], thunk_id)

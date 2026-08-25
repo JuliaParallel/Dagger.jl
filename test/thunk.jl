@@ -54,7 +54,16 @@ end
             Dagger.Sch.init_eager()
         end
     end
+    # The eager scheduler is started lazily, on the first `@spawn`. Return to a
+    # virgin state first (as test/allocations.jl does at its end) so this holds
+    # whichever suites ran before us in this process -- otherwise the assertion
+    # is only valid when this file happens to run first, and any subset run
+    # (e.g. `--test options --test thunk`) fails here for no real reason.
+    Dagger.cancel!(;halt_sch=true)
+    Dagger.Sch.EAGER_CONTEXT[] = nothing
     @test Dagger.Sch.EAGER_CONTEXT[] === nothing
+    @test fetch(Dagger.@spawn 1+1) == 2
+    @test Dagger.Sch.EAGER_CONTEXT[] !== nothing
     @testset "per-call" begin
         x = 2
         a = @spawn x + x

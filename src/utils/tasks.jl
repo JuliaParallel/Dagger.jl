@@ -18,6 +18,46 @@ function set_task_migratable!(task::Task)
     return task
 end
 
+"""
+    clear_task_scope!(task) -> task
+
+Drops the dynamic (`ScopedValues`) scope that `task` inherited from whichever
+task happened to create it. Must be called before `task` is started.
+
+Julia copies the creating task's scope into every new `Task`, which is right
+for a task doing work on behalf of its creator, but wrong for Dagger's
+long-lived and pooled tasks: those are created lazily, on whatever call first
+needs them, and then serve every later caller for the rest of the session. A
+task created inside e.g. `Dagger.with_options(scope=...)` would otherwise keep
+observing those options forever -- and since `with_options` merges into the
+ambient scoped options, that leaks into the options of every task it later
+runs. Per-task option propagation is explicit (see `get_propagated_options`),
+so these tasks want no ambient scope at all.
+
+Where the scope lives depends on the Julia version. On 1.11+ it is a first-class
+`Task` field (`task.scope`). On 1.10 there is no such field, so the
+`ScopedValues.jl` compat package smuggles the scope through `task.logstate`
+instead, wrapping the task's logger in a `ScopePayloadLogger` that carries the
+scope alongside it (see `ScopedValues/src/payloadlogger.jl`); clearing
+`logstate` is how you drop the scope there.
+
+Either way the task also loses any logger it inherited and falls back to the
+global one -- on 1.10 because the logger is the vehicle for the scope, and on
+1.11+ because Base stores the current logger in a `ScopedValue` of its own
+(`Base.CoreLogging.CURRENT_LOGSTATE`). That is deliberate: an inherited logger
+is wrong on these tasks for exactly the same reason an inherited scope is -- a
+pooled task would otherwise keep whichever `with_logger` block happened to
+create it for the rest of the session.
+"""
+function clear_task_scope!(task::Task)
+    @static if VERSION >= v"1.11-"
+        task.scope = nothing
+    else
+        task.logstate = nothing
+    end
+    return task
+end
+
 function set_task_tid!(task::Task, tid::Integer)
     task.sticky = true
     ctr = 0

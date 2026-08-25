@@ -29,6 +29,9 @@ function Base.put!(rb::ProcessRingBuffer{T}, x) where T
     to_write_idx = mod1(rb.write_idx, length(rb.buffer))
     rb.buffer[to_write_idx] = convert(T, x)
     rb.write_idx += 1
+    # Publish the slot only once it holds the value: `count` is the sole
+    # handshake with the consumer, and a consumer that sees the increment is
+    # entitled to read this slot immediately.
     @atomic rb.count += 1
 end
 function Base.take!(rb::ProcessRingBuffer)
@@ -44,19 +47,26 @@ function Base.take!(rb::ProcessRingBuffer)
         end
         task_may_cancel!(; must_force=true)
     end
-    to_read_idx = rb.read_idx
+    to_read_idx = mod1(rb.read_idx, length(rb.buffer))
+    value = rb.buffer[to_read_idx]
     rb.read_idx += 1
+    # Release the slot only once the value is safely in hand: the producer
+    # treats a decremented `count` as free space, and when the buffer was full
+    # the slot it writes next is exactly this one.
     @atomic rb.count -= 1
-    to_read_idx = mod1(to_read_idx, length(rb.buffer))
-    return rb.buffer[to_read_idx]
+    return value
 end
 
 """
 `take!()` all the elements from a buffer and put them in a `Vector`.
 """
 function collect!(rb::ProcessRingBuffer{T}) where T
-    output = Vector{T}(undef, rb.count)
-    for i in 1:rb.count
+    # Snapshot the count once: a concurrent producer can only grow it, and
+    # re-reading it per iteration could ask for more values than are available
+    # (blocking in `take!`) or silently skip values that arrived meanwhile.
+    n = length(rb)
+    output = Vector{T}(undef, n)
+    for i in 1:n
         output[i] = take!(rb)
     end
 

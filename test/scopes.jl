@@ -169,8 +169,13 @@
 
         @test Dagger.scope(worker=wid1) ==
               Dagger.scope(workers=[wid1])
-        @test Dagger.scope(workers=[wid1,wid2]) == UnionScope([ProcessScope(wid1),
-                                                               ProcessScope(wid2)])
+        # N.B. `workers=` scopes are tainted to ThreadProcs; the old expected
+        # literal (plain ProcessScopes) only matched via a broken UnionScope ==
+        # that considered any equal-length UnionScopes equal
+        thread_taint = Set{Dagger.AbstractScopeTaint}([Dagger.ProcessorTypeTaint{Dagger.ThreadProc}()])
+        @test Dagger.scope(workers=[wid1,wid2]) ==
+              UnionScope([Dagger.TaintScope(ProcessScope(wid1), thread_taint),
+                          Dagger.TaintScope(ProcessScope(wid2), thread_taint)])
         @test_throws ArgumentError Dagger.scope(workers=[])
 
         @test Dagger.scope(thread=1) ==

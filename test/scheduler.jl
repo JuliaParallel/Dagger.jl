@@ -770,3 +770,48 @@ end
         @test (time_ns() - start_time) * 1e-9 < 100
     end
 end
+
+@everywhere wait_for_go(ch) = (take!(ch); 40)
+
+@testset "Finished-upstream inputs are resolved at submission" begin
+    # Regression: a task submitted with an already-finished upstream got no
+    # dependents edge for it (there is nothing left to wait on), so nothing
+    # ever pushed that upstream's result into the consumer's input slot --
+    # the slot kept a *weak* `Thunk` reference. A finished dep is deliberately
+    # never marked `sch_accessible`, so as soon as its `DTask` was dropped,
+    # `unref_thunk!` deleted and recycled the `Thunk`; the recycled object was
+    # handed back out with a fresh id, the `WeakThunk` went dead, and the
+    # consumer's later `collect_task_inputs!` tripped an assertion *inside a
+    # completion handler* -- which only logged it, leaving the consumer
+    # forever unscheduled and the scheduler hung.
+    #
+    # The invariant is checked directly rather than by forcing a GC: after
+    # submission, no input slot may still weakly reference a finished upstream.
+    ch = RemoteChannel(()->Channel{Int}(1))
+    a = Dagger.@spawn 1 + 1
+    fetch(a)                            # `a` is finished
+    c = Dagger.@spawn wait_for_go(ch)   # blocks until we say so
+    b = Dagger.@spawn +(a, c)           # one finished, one unfinished upstream
+
+    state = Dagger.Sch.EAGER_STATE[]
+    b_thunk = lock(state.thunk_dict) do d
+        Dagger.unwrap_weak(d[Int(b.uid)])
+    end
+    @test b_thunk !== nothing
+    if b_thunk !== nothing
+        a_id = Int(a.uid)
+        unresolved = count(b_thunk.inputs) do inp
+            v = Dagger.value(inp)
+            v isa Dagger.WeakThunk || return false
+            t = Dagger.unwrap_weak(v)
+            return t !== nothing && t.id == a_id
+        end
+        @test unresolved == 0
+    end
+
+    put!(ch, 1)
+    # `timedwait` rather than a bare `fetch`: a regression here hangs forever,
+    # and a hung CI run is far worse than a failing one.
+    @test timedwait(()->istaskdone(b), 60) == :ok
+    istaskdone(b) && @test fetch(b) == 42
+end

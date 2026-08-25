@@ -18,7 +18,7 @@ import ..Dagger: Context, Processor, SchedulerOptions, Options, Thunk, WeakThunk
 import ..Dagger: Sealed, SEALED, FutureNode, futures_push!, futures_seal!
 import ..Dagger: DepNode, deps_push!, deps_seal!
 import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak, unwrap_weak_checked, wrap_weak, tochunk, timespan_start, timespan_finish, procs, move, chunktype, default_enabled, processor, get_processors, get_parent, execute!, rmprocs!, task_processor, constrain, cputhreadtime, maybe_take_or_alloc!
-import ..Dagger: datasize, root_worker_id, is_local_processor, fire_order_key, short_name, select_processors_uniform!, processor_order_key, current_acceleration, set_task_acceleration!, scheduling_ignore_capacity, scheduling_task_occupancy, schedule_argument_move, bind_moved_argument
+import ..Dagger: datasize, root_worker_id, is_local_processor, fire_order_key, short_name, select_processors_uniform!, processor_order_key, current_acceleration, set_task_acceleration!, scheduling_ignore_capacity, scheduling_task_occupancy, schedule_argument_move, argument_move_may_inline, sched_move, bind_moved_argument
 import ..Dagger: @dagdebug, @safe_lock_spin1, @maybelog, @take_or_alloc!
 import DataStructures: PriorityQueue
 
@@ -58,7 +58,7 @@ Fields:
 - `running_count::Threads.Atomic{Int}` - Number of `Thunk`s that are running *or* have become ready but are not yet fired (replaces `running::Set{Thunk}`; per-thunk state lives on `thunk.running` and `thunk.running_on`). A thunk is credited here the moment it's placed into a `ready_out` buffer (`schedule_dependents!`/`reschedule_syncdeps!`/`start_state`), not when `fire_tasks!` actually dispatches it — this way, whenever a finishing thunk's decrement frees up a new ready dependent, the corresponding increment always happens first, so the counter never has a transient window where it looks like 0 while replacement work is still pending. Every code path that removes a thunk from a `ready_out` buffer without ultimately running it through `finish_task!` (the scheduling-inconsistency and no-processors-available/invalid-scope branches in `schedule_one!`) must release its credit with a matching decrement.
 - `thunk_dict::LockedObject{Dict{Int, WeakThunk}}` - Maps from thunk IDs to a `Thunk`; has its own lock so it can be accessed independently of `state.lock`
 - `node_order::Any` - Function that returns the order of a thunk
-- `equiv_chunks::LockedObject{WeakKeyDict{DRef,Chunk}}` - Cache mapping from `DRef` to a `Chunk` which contains it; has its own lock
+- `equiv_chunks::LockedObject{WeakKeyDict{DRef,WeakRef}}` - Cache mapping from `DRef` to a `Chunk` which contains it (held weakly; a strong `Chunk` value would root its own key and leak every entry); has its own lock
 - `worker_time_pressure::LockedObject{Dict{Int,Dict{Processor,Threads.Atomic{UInt64}}}}` - Maps from worker ID to per-processor pressure counters (atomic leaves, own lock for membership changes; capture-the-ref invariant: hold the Atomic object across reserve→release)
 - `worker_storage_pressure::LockedObject{Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}}` - Maps from worker ID to storage resource pressure (own lock)
 - `worker_storage_capacity::LockedObject{Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}}` - Maps from worker ID to storage resource capacity (own lock)
@@ -81,7 +81,63 @@ Per-thunk dependency tracking uses `thunk.pending_deps` (dataflow counter) and
 `initial_ready` replaces `ready`; `schedule_one!` is called inline from the
 completion handler (via `schedule_dependents!`) so there is no central ready queue.
 """
-struct ComputeState
+# Cache of compatible-processor sets keyed by (accel, scope, procs).
+# `compatible_processors` rebuilds ProcessScopes/ExactScopes and a Set per
+# call, but its inputs are steady across tasks (datadeps exec scopes are
+# LFU-cached per processor), so a bounded LFU makes it a lookup. The cached
+# Sets are shared and must not be mutated by callers.
+# N.B. The scope is keyed by objectid — content-equal but distinct scope
+# instances just recompute — because structural UnionScope hashing/equality
+# box tuple elements on every Dict probe, which was hot. Datadeps exec scopes
+# come from a per-processor LFU cache and are identity-stable. The procs
+# vector is fresh per call, so it is verified by contents on a hit.
+# The entry retains the scope object itself: hits require `===`, which both
+# guards against objectid reuse after GC and keeps the scope alive so its id
+# cannot be recycled while the entry lives.
+const COMPAT_PROCS_CACHE = LockedObject(Dagger.BasicLFUCache{Tuple{UInt,UInt},Tuple{Any,Vector{Processor},Set{Processor}}}(256))
+# Drop all cached compatible-processor sets. Called whenever the processor
+# hierarchy changes (add/delete_processor_callback!) — a callback change alters
+# `get_processors(::OSProc)` without changing the (accel, scope, procs) key, so
+# existing entries would otherwise serve stale sets (e.g. missing a processor
+# type registered by a just-loaded extension, like PythonExt's
+# PythonProcessor). This also flushes entries baked into the pkgimage by the
+# precompile workload (both cache-key objectids are content-stable across
+# sessions): `__init__`'s per-thread callback registrations trigger it.
+function invalidate_compat_procs_cache!()
+    @safe_lock_spin1 COMPAT_PROCS_CACHE cache empty!(cache)
+    return
+end
+function compatible_processors_cached(accel, scope, procs::Vector{<:Processor})
+    key = (objectid(accel), objectid(scope))
+    cached = @safe_lock_spin1 COMPAT_PROCS_CACHE cache begin
+        entry = get(cache.cache, key, nothing)
+        if entry !== nothing && entry[1] === scope && entry[2] == procs
+            cache.freq[key] += 1
+            entry[3]
+        else
+            nothing
+        end
+    end
+    cached !== nothing && return cached::Set{Processor}
+    compat = Dagger.compatible_processors(accel, scope, procs)
+    # N.B. `Vector{Processor}`, not `copy(procs)`: the cache's value type is
+    # `Tuple{Any,Vector{Processor},Set{Processor}}`, and `copy` preserves the
+    # caller's concrete element type (`Vector{OSProc}` from a `Context`'s procs,
+    # `Vector{MPIProcessor{...}}` under MPI), which fails `get!`'s typeassert.
+    # Only on a *miss*, so it stays hidden until some run happens not to have
+    # this (accel, scope) pair cached already -- see the sibling fix in generic
+    # `compatible_processors`, which had the same defect with `Set(gen)`.
+    entry = (scope, Vector{Processor}(procs), compat)
+    @safe_lock_spin1 COMPAT_PROCS_CACHE cache begin
+        get!(()->entry, cache, key)
+    end
+    return compat
+end
+
+# N.B. `mutable` (with no field ever assigned) so the 23-field struct has a
+# stable heap identity and is passed by pointer; as an immutable struct it was
+# stored inline in closures and re-boxed (~200B) on every dynamic call.
+mutable struct ComputeState
     uid::UInt64
     initial_ready::Vector{Thunk}
     ctx::Context
@@ -89,7 +145,7 @@ struct ComputeState
     running_count::Threads.Atomic{Int}
     thunk_dict::LockedObject{Dict{Int, WeakThunk}}
     node_order::Any
-    equiv_chunks::LockedObject{WeakKeyDict{DRef,Chunk}}
+    equiv_chunks::LockedObject{WeakKeyDict{DRef,WeakRef}}
     worker_time_pressure::LockedObject{Dict{Int,Dict{Processor,Threads.Atomic{UInt64}}}}
     worker_storage_pressure::LockedObject{Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}}
     worker_storage_capacity::LockedObject{Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}}
@@ -158,7 +214,7 @@ function start_state(deps::Dict, node_order, chan, ctx::Context, sch_options::Sc
                          Threads.Atomic{Int}(0),
                          LockedObject(Dict{Int, WeakThunk}()),
                          node_order,
-                         LockedObject(WeakKeyDict{DRef,Chunk}()),
+                         LockedObject(WeakKeyDict{DRef,WeakRef}()),
                          LockedObject(Dict{Int,Dict{Processor,Threads.Atomic{UInt64}}}()),
                          LockedObject(Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}()),
                          LockedObject(Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}()),
@@ -292,6 +348,7 @@ function _cleanup_proc(uid, log_sink)
     end
     MemPool.lock(states.lock) do
         empty!(states.dict)
+        Threads.atomic_add!(states.version, 1)
     end
 end
 function cleanup_proc(state, p, log_sink)
@@ -522,8 +579,13 @@ function handle_result!(ctx, state::ComputeState, pid, proc, thunk_id, res, meta
         end
         if res isa Chunk && res.handle isa DRef
             lock(state.equiv_chunks) do ec
-                if !haskey(ec, res.handle)
-                    ec[res.handle] = res
+                existing = get(ec, res.handle, nothing)
+                if existing === nothing || existing.value === nothing
+                    # N.B. The value is a WeakRef: a strong Chunk value would
+                    # root its own key (chunk.handle === key), making the
+                    # WeakKeyDict entry — and the result data behind the DRef —
+                    # immortal
+                    ec[res.handle] = WeakRef(res)
                 end
             end
         end
@@ -750,19 +812,64 @@ calling thread; any beyond that are dispatched via `Threads.@spawn` so a single
 wide fan-out doesn't serialize all placements on one thread. `ready` is emptied
 on return.
 """
-function schedule_ready!(state, ready::Vector{Thunk}, procs=procs_to_use(state.ctx, state.sch_options))
+function schedule_ready!(state, ready::Vector{Thunk}, procs=nothing)
     n = length(ready)
     n == 0 && return
+    # Computed lazily (copies ctx.procs) so empty completions stay free
+    procs = @something(procs, procs_to_use(state.ctx, state.sch_options))
     @inbounds for i in 1:n
         t = ready[i]
         if i <= INLINE_SCHEDULE_FANOUT_THRESHOLD
-            schedule_one!(state, t, procs)
+            schedule_one_guarded!(state, t, procs)
         else
             tt = t
-            Threads.@spawn schedule_one!(state, tt, procs)
+            Threads.@spawn schedule_one_guarded!(state, tt, procs)
         end
     end
     empty!(ready)
+    return
+end
+
+"""
+    schedule_one_guarded!(state, task, procs)
+
+Run `schedule_one!`, converting an escaping error into a *failure of `task`*.
+
+Placement runs on whatever thread completed an upstream: usually a pooled
+completion task, whose error handler only logs (`reusable_task_loop`), or — past
+the fan-out threshold above — a detached `Threads.@spawn` whose exception nobody
+ever fetches. `task` has already been credited to `running_count` by the time it
+reaches here, so an error that escapes loses the thunk *silently*: it is never
+fired, never finished, its credit is never released, and every `fetch` on it —
+plus `compute_dag`'s termination check, which waits for `running_count` to reach
+zero — blocks forever. A scheduler bug should surface as a failed task, not as a
+hung session.
+
+Only a thunk that was never dispatched is failed here. If `schedule_one!` threw
+after `fire_tasks!` handed the task off, the task is already running and will
+finish (or fail) through the usual path, which owns both its result and its
+`running_count` credit — releasing it again here would corrupt the counter.
+"""
+function schedule_one_guarded!(state, task::Thunk, procs)
+    try
+        schedule_one!(state, task, procs)
+    catch err
+        bt = catch_backtrace()
+        @lock state.lock begin
+            if (@atomic task.running) || (@atomic task.finished)
+                @error "Scheduling failed after task was dispatched" thunk_id=task.id exception=(err, bt)
+            else
+                # `CapturedException` keeps the backtrace attached, so the
+                # `DTaskFailedException` a `fetch`er sees shows where the
+                # scheduling actually broke.
+                set_failed!(state, task; ex=CapturedException(err, bt))
+                # Release the `running_count` credit `task` received when it
+                # entered `ready_out` (see the `set_failed!` call sites in
+                # `schedule_one!` for why this is necessary).
+                Threads.atomic_sub!(state.running_count, 1)
+            end
+        end
+    end
     return
 end
 
@@ -786,20 +893,18 @@ concurrently across threads.
     # Phase 1 — brief state.lock hold: resolve inputs and bail early if already done.
     # The expensive work (cost estimation, processor selection, pressure reservation)
     # is deferred to Phase 2 so that concurrent submissions don't serialize through it.
-    local ctx, procs_filt
-    local p1_resolved = false
+    # N.B. Phase 1 results are returned from the locked block rather than
+    # assigned to captured outer locals, which would Core.Box them.
+    ctx = state.ctx
 
-    lock(state.lock) do
+    p1_resolved, procs_filt = lock(state.lock) do
         safepoint(state)
 
         # Remove processors that aren't yet initialized
         procs_filt = filter(p -> haskey(state.worker_chans, Dagger.root_worker_id(p)), procs)
         if isempty(procs_filt)
-            p1_resolved = true
-            return
+            return (true, procs_filt)
         end
-
-        ctx = state.ctx
         @dagdebug task :schedule "Scheduling task"
         @maybelog ctx timespan_start(ctx, :schedule, (;uid=state.uid, thunk_id=task.id), (;thunk_id=task.id))
 
@@ -824,13 +929,13 @@ concurrently across threads.
             # counter doesn't leak (which would otherwise hang the scheduler).
             Threads.atomic_sub!(state.running_count, 1)
             @maybelog ctx timespan_finish(ctx, :schedule, (;uid=state.uid, thunk_id=task.id), (;thunk_id=task.id))
-            p1_resolved = true
-            return
+            return (true, procs_filt)
         end
 
         # Resolve Thunk-typed inputs to their cached Chunk results.
         # After this call all values in task.inputs are Chunks or plain values.
         collect_task_inputs!(state, task)
+        return (false, procs_filt)
     end
 
     p1_resolved && return
@@ -900,8 +1005,7 @@ concurrently across threads.
     accel = something(options.acceleration, current_acceleration())
 
     input_procs = @reusable_vector :schedule_one!_input_procs Processor OSProc() 32
-    input_procs_cleanup = @reuse_defer_cleanup empty!(input_procs)
-    compat = Dagger.compatible_processors(accel, scope, procs_filt)
+    compat = compatible_processors_cached(accel, scope, procs_filt)
     for proc in compat
         if !(proc in input_procs)
             push!(input_procs, proc)
@@ -909,12 +1013,10 @@ concurrently across threads.
     end
 
     sorted_procs = @reusable_vector :schedule_one!_sorted_procs Processor OSProc() 32
-    sorted_procs_cleanup = @reuse_defer_cleanup empty!(sorted_procs)
     resize!(sorted_procs, length(input_procs))
     costs = @reusable_dict :schedule_one!_costs Processor Float64 OSProc() 0.0 32
-    costs_cleanup = @reuse_defer_cleanup empty!(costs)
     estimate_task_costs!(sorted_procs, costs, state, input_procs, task; sig)
-    input_procs_cleanup()
+    empty!(input_procs)
 
     # Under uniform execution, measured costs are rank-local, so re-order by a
     # deterministic, acceleration-dispatched key instead (no-op otherwise).
@@ -957,15 +1059,19 @@ concurrently across threads.
             end
         end
     end
-    sorted_procs_cleanup()
-    costs_cleanup()
+    empty!(sorted_procs)
+    empty!(costs)
 
     # Phase 3 — brief state.lock hold: fire or fail the task.
     # `restore_ready` only becomes non-empty if a task completes synchronously
     # via its `restore` callback inside fire_tasks!; those dependents are
     # scheduled after the lock is released.
     restore_ready = Thunk[]
-    lock(state.lock) do
+    # N.B. Explicit lock/try/finally rather than a `do`-closure: the closure
+    # captured `scheduled`/`best_loc`/`best_spec` (all assigned in the loop
+    # above), which forced a Core.Box for each per call.
+    lock(state.lock)
+    try
         if scheduled
             fire_tasks!(ctx, best_loc, [best_spec], state, restore_ready)
         else
@@ -978,6 +1084,8 @@ concurrently across threads.
             Threads.atomic_sub!(state.running_count, 1)
         end
         @maybelog ctx timespan_finish(ctx, :schedule, (;uid=state.uid, thunk_id=task.id), (;thunk_id=task.id))
+    finally
+        unlock(state.lock)
     end
     schedule_ready!(state, restore_ready, procs)
 end
@@ -1059,7 +1167,9 @@ function finish_task!(ctx, state, node, thunk_failed, ready::Vector{Thunk})
         schedule_dependents!(state, node, false, ready)
         fill_registered_futures!(state, node, false)
         node.sch_accessible = false
-        delete_unused_task!(state, node)
+        # Both Treiber lists were sealed and drained just above, so the thunk
+        # may be recycled if this deletes it
+        delete_unused_task!(state, node; recycle=true)
     end
     # Decrement `running_count` for `node` *last*, only after
     # `schedule_dependents!` has already credited any newly-freed dependents
@@ -1072,16 +1182,21 @@ function finish_task!(ctx, state, node, thunk_failed, ready::Vector{Thunk})
     #evict_all_chunks!(ctx, to_evict)
 end
 
-function delete_unused_task!(state, thunk)
+function delete_unused_task!(state, thunk; recycle::Bool=false)
     if has_result(state, thunk) && !thunk.eager_accessible && !thunk.sch_accessible
         # Will not be accessed further, delete all cached data
-        task_delete!(state, thunk)
+        task_delete!(state, thunk; recycle)
         return true
     else
         return false
     end
 end
-function task_delete!(state, thunk)
+# `recycle=true` returns the Thunk to the global pool. Only callers for whom
+# the futures AND dependents Treiber lists are already sealed-and-drained may
+# pass it (success-path finish_task! and unref_thunk!): the failure paths run
+# schedule_dependents! AFTER deletion, and a recycled thunk's re-SEALED
+# dependents head would silently skip failure propagation.
+function task_delete!(state, thunk; recycle::Bool=false)
     clear_result!(state, thunk)
     @atomic thunk.valid = false
     @atomic thunk.errored = false
@@ -1090,6 +1205,8 @@ function task_delete!(state, thunk)
     end
     # Release the scheduler's strong reference (see `ComputeState.strong_thunks`).
     delete!(state.strong_thunks, thunk)
+    recycle && Dagger.recycle_thunk!(thunk)
+    return
 end
 
 function evict_all_chunks!(ctx, options, to_evict)
@@ -1113,26 +1230,102 @@ function evict_chunks!(log_sink, chunks::Set{Chunk})
     nothing
 end
 
-"A serializable description of a `Thunk` to be executed."
-struct TaskSpec
+"""
+A serializable description of a `Thunk` to be executed.
+
+N.B. Mutable so that these can be pooled per-processor (see
+`ProcessorInternalState.spec_pool`): one `TaskSpec` + its `data` vector + the
+`Argument` cells within it are allocated per fired task, and all of them die
+deterministically at the end of `DoTaskSpec()`. The reference-holding fields are
+`Union{...,Nothing}` so that a pooled (at-rest) spec pins nothing; they are only
+`nothing` while sitting in a pool, never while a spec is in flight, so use sites
+type-assert to keep inference.
+"""
+mutable struct TaskSpec
     thunk_id::Int
     est_time_util::UInt64
     est_alloc_util::UInt64
     est_occupancy::UInt32
-    scope::Dagger.AbstractScope
+    scope::Union{Dagger.AbstractScope,Nothing}
     Tf::Type
     data::Vector{Argument}
-    options::Options
-    ctx_vars::NamedTuple
-    sch_handle::SchedulerHandle
+    options::Union{Options,Nothing}
+    ctx_vars::Union{NamedTuple,Nothing}
+    sch_handle::Union{SchedulerHandle,Nothing}
     sch_uid::UInt64
+    # Conservative opt-out from pooling for specs whose function may outlive
+    # `DoTaskSpec` (currently: streaming functions)
+    may_recycle::Bool
 end
+TaskSpec() = TaskSpec(0, UInt64(0), UInt64(0), UInt32(0),
+                      nothing, Nothing, Argument[], nothing, nothing, nothing,
+                      UInt64(0), true)
 Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
+
+"Maximum number of `TaskSpec`s retained per processor for reuse."
+const TASKSPEC_POOL_MAX = 32
+
+"""
+    reset_task_spec!(task::TaskSpec)
+
+Drops every reference held by `task` (including the values in its `data`
+`Argument` cells, which are themselves kept for reuse) so that a pooled spec
+pins no user data or scheduler state.
+"""
+function reset_task_spec!(task::TaskSpec)
+    data = task.data
+    for idx in 1:length(data)
+        if isassigned(data, idx)
+            @inbounds data[idx].value = nothing
+        end
+    end
+    task.thunk_id = 0
+    task.est_time_util = UInt64(0)
+    task.est_alloc_util = UInt64(0)
+    task.est_occupancy = UInt32(0)
+    task.scope = nothing
+    task.Tf = Nothing
+    task.options = nothing
+    task.ctx_vars = nothing
+    task.sch_handle = nothing
+    task.sch_uid = UInt64(0)
+    task.may_recycle = true
+    return task
+end
 
 @reuse_scope function fire_tasks!(ctx, task_loc::ScheduleTaskLocation, task_specs::Vector{ScheduleTaskSpec}, state, ready::Vector{Thunk})
     gproc, proc = task_loc.gproc, task_loc.proc
     to_send = @reusable_vector :fire_tasks!_to_send Union{TaskSpec,Nothing} nothing 1024
-    to_send_cleanup = @reuse_defer_cleanup empty!(to_send)
+
+    # Borrow recycled `TaskSpec`s from the destination processor's pool.
+    # N.B. Only for local fires: remote fires serialize the spec, and we'd have
+    # to keep the local copy alive/untouched for the duration of the send.
+    # The pool lives under `istate.queue`'s lock, and the whole batch is
+    # borrowed in a single acquisition (rather than one per task).
+    #
+    # N.B. The `::Vector{TaskSpec}` assertion matters: `@reusable_vector`
+    # expands to a *non-const* global, so without it `spec` infers as `Any` and
+    # every field store below becomes a boxing dynamic `setproperty!` (which
+    # cost more than the pooling saved).
+    pooled = (@reusable_vector :fire_tasks!_spec_pool TaskSpec nothing 32)::Vector{TaskSpec}
+    fire_istate = nothing
+    if root_worker_id(gproc) == myid()
+        pstate = maybe_proc_state(state.uid, proc)
+        # N.B. `nothing` when this is the first task fired at `proc` (the
+        # `ProcessorState` is created by `do_tasks`) — just allocate fresh
+        if pstate !== nothing
+            let istate = pstate.state
+                fire_istate = istate
+                lock(istate.queue) do _
+                    pool = istate.spec_pool
+                    for _ in 1:min(length(pool), length(task_specs))
+                        push!(pooled, pop!(pool))
+                    end
+                end
+            end
+        end
+    end
+
     for task_spec in task_specs
         thunk = task_spec.task
         @atomic thunk.running = true
@@ -1173,29 +1366,80 @@ Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
         end
 
         # Duplicate options and clear un-serializable fields
-        options = copy(thunk.options)
-        options.syncdeps = nothing
-
         # Unwrap any weak arguments
-        args = map(copy, thunk.inputs)
-        for arg in args
-            # TODO: Only for non-delayed: @assert Dagger.isweak(Dagger.value(arg)) "Non-weak argument: $(arg)"
-            arg.value = unwrap_weak_checked(Dagger.value(arg))
+        # N.B. The copy exists because `do_task` mutates `arg.value` in place
+        # (argument moves); when reusing a pooled spec we reuse its `data`
+        # vector and its `Argument` cells rather than allocating them.
+        spec = isempty(pooled) ? nothing : pop!(pooled)::TaskSpec
+        inputs = thunk.inputs::Vector{Argument}
+        ninputs = length(inputs)
+        args = (spec === nothing ? Vector{Argument}(undef, ninputs) : spec.data)::Vector{Argument}
+        if spec !== nothing
+            # Null any cells we're about to drop: `resize!` may keep them
+            # physically alive (and thus `isassigned`) past the new length,
+            # where `reset_task_spec!` would no longer reach them
+            for idx in (ninputs+1):length(args)
+                if isassigned(args, idx)
+                    @inbounds args[idx].value = nothing
+                end
+            end
+            resize!(args, ninputs)
+        end
+        for idx in 1:ninputs
+            src = @inbounds inputs[idx]
+            # TODO: Only for non-delayed: @assert Dagger.isweak(Dagger.value(src)) "Non-weak argument: $(src)"
+            new_value = unwrap_weak_checked(Dagger.value(src))
+            if isassigned(args, idx)
+                arg = @inbounds args[idx]
+                arg.pos = src.pos
+                arg.value = new_value
+            else
+                @inbounds args[idx] = Argument(src.pos, new_value)
+            end
         end
         Tf = chunktype(first(args))
+        # Conservative: streaming functions may hand this spec (via TLS) to
+        # longer-lived consumers, so never recycle those
+        may_recycle = !(Dagger.value(first(args)) isa Dagger.StreamingFunction)
 
         pid = root_worker_id(gproc)
+        # N.B. The Options copy exists to strip syncdeps before serialization;
+        # locally, nothing on the execution path reads or mutates syncdeps
+        # (populate_defaults! already ran in place during scheduling), so the
+        # spec can share the thunk's Options.
+        options = thunk.options
+        if pid != myid()
+            options = copy(options)
+            options.syncdeps = nothing
+        end
         @assert (options.single === nothing) || (pid == options.single)
         # TODO: Set `sch_handle.tid.ref` to the right `DRef`
         sch_handle = SchedulerHandle(ThunkID(thunk.id, nothing), state.worker_chans[pid]...)
 
         # TODO: De-dup common fields (log_sink, uid, etc.)
-        push!(to_send, TaskSpec(
-            thunk.id,
-            task_spec.est_time_util, task_spec.est_alloc_util, task_spec.est_occupancy,
-            task_spec.scope, Tf, args, options,
-            (log_sink=ctx.log_sink, profile=ctx.profile),
-            sch_handle, state.uid))
+        ctx_vars = (log_sink=ctx.log_sink, profile=ctx.profile)
+        if spec === nothing
+            push!(to_send, TaskSpec(
+                thunk.id,
+                task_spec.est_time_util, task_spec.est_alloc_util, task_spec.est_occupancy,
+                task_spec.scope, Tf, args, options,
+                ctx_vars,
+                sch_handle, state.uid, may_recycle))
+        else
+            # `spec.data === args` already
+            spec.thunk_id = thunk.id
+            spec.est_time_util = task_spec.est_time_util
+            spec.est_alloc_util = task_spec.est_alloc_util
+            spec.est_occupancy = task_spec.est_occupancy
+            spec.scope = task_spec.scope
+            spec.Tf = Tf
+            spec.options = options
+            spec.ctx_vars = ctx_vars
+            spec.sch_handle = sch_handle
+            spec.sch_uid = state.uid
+            spec.may_recycle = may_recycle
+            push!(to_send, spec)
+        end
     end
 
     # N.B. These must be migratable. Otherwise they pile up on whichever thread
@@ -1216,7 +1460,21 @@ Base.hash(task::TaskSpec, h::UInt) = hash(task.thunk_id, hash(TaskSpec, h))
             end
         end
     end
-    to_send_cleanup()
+
+    # Return any specs we borrowed but didn't use (e.g. restored thunks)
+    if !isempty(pooled) && fire_istate !== nothing
+        let istate = fire_istate::ProcessorInternalState
+            lock(istate.queue) do _
+                pool = istate.spec_pool
+                for spec in pooled
+                    length(pool) >= TASKSPEC_POOL_MAX && break
+                    push!(pool, spec)
+                end
+            end
+        end
+    end
+    empty!(pooled)
+    empty!(to_send)
 end
 
 struct FireTaskSpec
@@ -1229,8 +1487,8 @@ FireTaskSpec(init_proc::Processor, return_chan::RemoteChannel, task::TaskSpec) =
 function (ets::FireTaskSpec)()
     tasks = ets.tasks
     first_task = first(tasks)
-    ctx_vars = first_task.ctx_vars
-    ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
+    ctx_vars = first_task.ctx_vars::NamedTuple
+    ctx = Dagger.log_context(ctx_vars.log_sink, ctx_vars.profile)
     uid = first_task.sch_uid
 
     proc = ets.init_proc
@@ -1317,7 +1575,10 @@ function Base.notify(db::Doorbell)
 end
 end
 
-struct ProcessorInternalState
+mutable struct ProcessorInternalState
+    # Refreshed by `do_tasks` on every batch so the long-lived runner observes
+    # log-sink toggles (`enable_logging!`/`disable_logging!`); all other fields
+    # are set once at construction.
     ctx::Context
     proc::Processor
     return_queue::RemoteChannel
@@ -1330,6 +1591,9 @@ struct ProcessorInternalState
     cancelled::Set{Int}
     cancel_tokens::Dict{Int,Dagger.CancelToken}
     done::Base.RefValue{Bool}
+    # Free-list of reset `TaskSpec`s (with their `data` vectors and `Argument`
+    # cells) for reuse by `fire_tasks!`. Guarded by `queue`'s lock.
+    spec_pool::Vector{TaskSpec}
 end
 struct ProcessorState
     state::ProcessorInternalState
@@ -1340,22 +1604,22 @@ const PROCESSOR_TASK_STATE_LOCK = MemPool.ReadWriteLock()
 struct ProcessorStateDict
     lock::MemPool.ReadWriteLock
     dict::Dict{Processor,ProcessorState}
+    # Bumped on every insert into `dict`; lets hot paths (steal/kick loops)
+    # cache a values snapshot and re-collect only when membership changed
+    version::Threads.Atomic{Int}
     # Thunk IDs cancelled by the fallback before do_tasks ran.
     # do_tasks and the proc runner check this set and skip the task
     # (without incrementing proc_occupancy) if the ID is present.
     pre_cancelled::Set{Int}
     pre_cancelled_lock::ReentrantLock
     ProcessorStateDict() = new(MemPool.ReadWriteLock(), Dict{Processor,ProcessorState}(),
-                               Set{Int}(), ReentrantLock())
+                               Threads.Atomic{Int}(0), Set{Int}(), ReentrantLock())
 end
 const PROCESSOR_TASK_STATE = Dict{UInt64,ProcessorStateDict}()
 
 function proc_states(uid::UInt64=Dagger.get_tls().sch_uid)
-    states = MemPool.lock_read(PROCESSOR_TASK_STATE_LOCK) do
-        if haskey(PROCESSOR_TASK_STATE, uid)
-            return PROCESSOR_TASK_STATE[uid]
-        end
-        return nothing
+    states = MemPool.@lock_read PROCESSOR_TASK_STATE_LOCK begin
+        get(PROCESSOR_TASK_STATE, uid, nothing)
     end
     if states === nothing
         states = MemPool.lock(PROCESSOR_TASK_STATE_LOCK) do
@@ -1368,14 +1632,43 @@ function proc_states(uid::UInt64=Dagger.get_tls().sch_uid)
 end
 function proc_states_values(uid::UInt64=Dagger.get_tls().sch_uid)
     states = proc_states(uid)
-    return MemPool.lock_read(states.lock) do
-        return collect(values(states.dict))
+    return MemPool.@lock_read states.lock begin
+        collect(values(states.dict))
     end
 end
+
+"""
+    StatesCache
+
+Steal/kick-loop snapshot of a `ProcessorStateDict`'s values, re-collected only
+when the dict's version changes. Hot wakeup paths previously collected a fresh
+Vector (plus a `randperm` copy) on every attempt, which dominated allocations
+under multithreaded execution.
+"""
+mutable struct StatesCache
+    version::Int
+    values::Vector{ProcessorState}
+end
+StatesCache() = StatesCache(-1, ProcessorState[])
+function states_snapshot!(cache::StatesCache, states::ProcessorStateDict)
+    version = states.version[]
+    if cache.version != version
+        cache.values = MemPool.@lock_read states.lock begin
+            collect(values(states.dict))
+        end
+        cache.version = version
+    end
+    return cache.values
+end
+
+# Task-local snapshot cache for the steal/kick paths (do_tasks runs on pooled
+# tasks, and each processor runner is one long-lived task, so the cache
+# amortizes across wakeups)
+const STATES_CACHE_TLV = Dagger.TaskLocalValue{StatesCache}(()->StatesCache())
 function proc_state!(f, uid::UInt64, proc::Processor)
     states = proc_states(uid)
-    state = MemPool.lock_read(states.lock) do
-        return get(states.dict, proc, nothing)
+    state = MemPool.@lock_read states.lock begin
+        get(states.dict, proc, nothing)
     end
     if state === nothing
         state = MemPool.lock(states.lock) do
@@ -1383,6 +1676,7 @@ function proc_state!(f, uid::UInt64, proc::Processor)
             existing !== nothing && return existing
             new_state = f()::ProcessorState
             states.dict[proc] = new_state
+            Threads.atomic_add!(states.version, 1)
             return new_state
         end
     end
@@ -1414,8 +1708,6 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
         # Wait for our ProcessorState to be configured
         wait(start_event)
 
-        # FIXME: Context changes aren't noticed over time
-        ctx = istate.ctx
         tasks = istate.tasks
         proc_occupancy = istate.proc_occupancy
         time_pressure = istate.time_pressure
@@ -1423,6 +1715,12 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
         wid = root_worker_id(to_proc)
         work_to_do = false
         while isopen(return_queue)
+            # Re-read each iteration: `do_tasks` refreshes `istate.ctx` when
+            # the log sink changes, so runner-level events follow
+            # `enable_logging!`/`disable_logging!` instead of being frozen at
+            # runner creation
+            ctx = istate.ctx
+
             # Wait for new tasks
             if !work_to_do
                 @dagdebug nothing :processor "Waiting for tasks"
@@ -1440,22 +1738,23 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
             # Fetch a new task to execute
             @dagdebug nothing :processor "Trying to dequeue"
             @maybelog ctx timespan_start(ctx, :proc_run_fetch, (;uid, worker=wid, processor=to_proc), nothing)
-            work_to_do = false
-            task_and_occupancy = lock(istate.queue) do queue
+            # N.B. Results are returned from the locked block rather than
+            # assigned to captured outer locals (which would Core.Box them on
+            # every wakeup)
+            task_and_occupancy, work_to_do = lock(istate.queue) do queue
                 # Only steal if there are multiple queued tasks, to prevent
                 # ping-pong of tasks between empty queues
                 if length(queue) == 0
                     @dagdebug nothing :processor "Nothing to dequeue"
-                    return nothing
+                    return (nothing, false)
                 end
                 _, occupancy = first(queue)
                 if !proc_has_occupancy(proc_occupancy[], occupancy)
                     @dagdebug nothing :processor "Insufficient occupancy" proc_occupancy=proc_occupancy[] task_occupancy=occupancy
-                    return nothing
+                    return (nothing, false)
                 end
                 queue_result = popfirst!(queue)
-                work_to_do = length(queue) > 0
-                return queue_result
+                return (queue_result, length(queue) > 0)
             end
             if task_and_occupancy === nothing
                 @maybelog ctx timespan_finish(ctx, :proc_run_fetch, (;uid, worker=wid, processor=to_proc), nothing)
@@ -1475,11 +1774,17 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                 # Try to steal a task
                 @maybelog ctx timespan_start(ctx, :proc_steal_local, (;uid, worker=wid, processor=to_proc), nothing)
 
-                # Try to steal from local queues randomly
+                # Try to steal from local queues randomly (circular iteration
+                # from a random start over a version-cached snapshot: fair
+                # enough, and allocation-free per attempt)
                 # TODO: Prioritize stealing from busiest processors
-                states = proc_states_values(uid)
-                P = randperm(length(states))
-                for state in getindex.(Ref(states), P)
+                states_vec = states_snapshot!(STATES_CACHE_TLV[], proc_states(uid))
+                nstates = length(states_vec)
+                start_idx = nstates <= 1 ? 1 : rand(1:nstates)
+                for state_offset in 0:(nstates-1)
+                    state_idx = start_idx + state_offset
+                    state_idx > nstates && (state_idx -= nstates)
+                    state = @inbounds states_vec[state_idx]
                     other_istate = state.state
                     if other_istate.proc === to_proc
                         continue
@@ -1493,8 +1798,8 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                             return nothing
                         end
                         task, occupancy = first(queue)
-                        scope = task.scope
-                        accel = something(task.options.acceleration, Dagger.DistributedAcceleration())
+                        scope = task.scope::Dagger.AbstractScope
+                        accel = something((task.options::Options).acceleration, Dagger.DistributedAcceleration())
                         if Dagger.proc_in_scope(to_proc, scope) && Dagger.accel_matches_proc(accel, to_proc) &&
                            typemax(UInt32) - proc_occupancy_cached >= occupancy
                             # Compatible, steal this task
@@ -1566,18 +1871,23 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
             end
 
             # Launch the task
-            t = @reusable_tasks :start_processor_runner!_task_cache 32 t->begin
+            # N.B. The task is recorded in `istate.tasks` via the register
+            # hook, which runs BEFORE the payload is dispatched. With
+            # dispatch-then-record, a short task running on another thread
+            # completes before the record exists, and DoTaskSpec's cleanup
+            # loop then burned a sleep(0.1) per lost race — the dominant
+            # multithreaded wall-time cost for small tasks.
+            @reusable_tasks :start_processor_runner!_task_cache 32 t->begin
                 tid = task_tid_for_processor(to_proc)
                 if tid !== nothing
                     Dagger.set_task_tid!(t, tid)
                 else
                     Dagger.set_task_migratable!(t)
                 end
-            end "thunk $thunk_id" DoTaskSpec(to_proc, return_queue, task, cancel_token)
-
-            # Record the launched task
-            lock(istate.queue) do _
-                tasks[thunk_id] = t
+            end "thunk" DoTaskSpec(to_proc, return_queue, task, cancel_token) t->begin
+                lock(istate.queue) do _
+                    tasks[thunk_id] = t
+                end
             end
         end
     end
@@ -1587,6 +1897,10 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
     else
         Dagger.set_task_migratable!(proc_run_task)
     end
+    # This runner outlives whatever call created it (an `init_proc` during
+    # scheduler startup, or a later `monitor_procs_changed!`) and every task it
+    # executes descends from it, so it must not carry that call's dynamic scope
+    Dagger.clear_task_scope!(proc_run_task)
     return errormonitor_tracked("processor $to_proc", schedule(proc_run_task))
 end
 struct DoTaskSpec
@@ -1594,6 +1908,39 @@ struct DoTaskSpec
     chan::RemoteChannel
     task::TaskSpec
     cancel_token::Dagger.CancelToken
+end
+
+"""
+    recycle_task_spec!(istate::Union{ProcessorInternalState,Nothing}, task::TaskSpec)
+
+Returns `task` (and its `data` vector and `Argument` cells) to the executing
+processor's `TaskSpec` pool, for reuse by a later `fire_tasks!` targeting that
+processor. Must only be called once
+`task` is provably dead: at the very end of `DoTaskSpec()`, after the cleanup
+`finally` block (which removes it from `istate.tasks`/`istate.task_specs` and
+nulls `DTASK_TLS`) and after the trailing local-fastpath result handling.
+
+Fails open (drops the spec on the floor for the GC) whenever anything looks
+off — the processor state is gone, the spec is still recorded in the processor
+state, or the pool is full.
+"""
+function recycle_task_spec!(istate::Union{ProcessorInternalState,Nothing}, task::TaskSpec)
+    # `nothing` if the processor was removed due to scheduler exit
+    istate === nothing && return
+    task.may_recycle || return
+    tid = task.thunk_id
+    lock(istate.queue) do _
+        # Must be fully deregistered by now (DoTaskSpec's `finally`); if not,
+        # something still holds this spec, so don't recycle it
+        if haskey(istate.tasks, tid) || haskey(istate.task_specs, tid)
+            @dagdebug tid :processor "Not recycling still-registered TaskSpec"
+            return
+        end
+        length(istate.spec_pool) >= TASKSPEC_POOL_MAX && return
+        push!(istate.spec_pool, reset_task_spec!(task))
+        return
+    end
+    return
 end
 function (dts::DoTaskSpec)()
     to_proc = dts.to_proc
@@ -1603,6 +1950,9 @@ function (dts::DoTaskSpec)()
 
     # Execute the task and return its result
     was_cancelled = false
+    # Captured for the end-of-life `recycle_task_spec!` below, so that the
+    # recycle path doesn't need a second `maybe_proc_state` lookup
+    recycle_istate = nothing
     result, metadata = try
         do_task(to_proc, task)
     catch err
@@ -1613,6 +1963,8 @@ function (dts::DoTaskSpec)()
         # state will be nothing if processor was removed due to scheduler exit
         if state !== nothing
             istate = state.state
+            recycle_istate = istate
+            sleep_backoff = 0
             while true
                 # Wait until the task has been recorded in the processor state
                 done = lock(istate.queue) do _
@@ -1634,7 +1986,13 @@ function (dts::DoTaskSpec)()
                     return false
                 end
                 done && break
-                sleep(0.1)
+                # Should be unreachable now that the runner records the task
+                # in `istate.tasks` before dispatching it (see the register
+                # hook at the dispatch site); back off gently rather than
+                # stalling 100ms if some path still races.
+                yield()
+                sleep_backoff += 1
+                sleep_backoff > 100 && sleep(0.001)
             end
             notify(istate.reschedule)
         end
@@ -1669,6 +2027,9 @@ function (dts::DoTaskSpec)()
                 @dagdebug tid :execute "Local result handling failed" exception=(err, catch_backtrace())
                 rethrow()
             end
+            # N.B. `task` is dead from here on — recycle it for reuse by
+            # `fire_tasks!` (see `recycle_task_spec!`)
+            recycle_task_spec!(recycle_istate, task)
             return
         end
         # No registered state (scheduler torn down): fall through to the channel.
@@ -1684,6 +2045,7 @@ function (dts::DoTaskSpec)()
             rethrow()
         end
     end
+    recycle_task_spec!(recycle_istate, task)
     return
 end
 
@@ -1696,8 +2058,8 @@ Executes a batch of tasks on `to_proc`, returning their results through
 function do_tasks(to_proc, return_queue, tasks)
     @dagdebug nothing :processor "Enqueuing task batch" batch_size=length(tasks)
 
-    ctx_vars = first(tasks).ctx_vars
-    ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
+    ctx_vars = first(tasks).ctx_vars::NamedTuple
+    ctx = Dagger.log_context(ctx_vars.log_sink, ctx_vars.profile)
     uid = first(tasks).sch_uid
     start_event = nothing
     state = proc_state!(uid, to_proc) do
@@ -1712,7 +2074,8 @@ function do_tasks(to_proc, return_queue, tasks)
                                         Ref(UInt32(0)), Ref(UInt64(0)),
                                         Set{Int}(),
                                         Dict{Int,Dagger.CancelToken}(),
-                                        Ref(false))
+                                        Ref(false),
+                                        TaskSpec[])
         start_event = Base.Event()
         runner = start_processor_runner!(istate, uid, return_queue, start_event)
         @static if VERSION < v"1.9"
@@ -1724,6 +2087,13 @@ function do_tasks(to_proc, return_queue, tasks)
         notify(start_event)
     end
     istate = state.state
+    # Refresh the runner's logging Context: the runner re-reads `istate.ctx`
+    # every loop iteration, so log-sink toggles take effect at the next
+    # enqueued batch. Plain (non-atomic) store: a racing runner iteration
+    # simply uses the previous Context once more.
+    if istate.ctx !== ctx
+        istate.ctx = ctx
+    end
     states = proc_states(uid)
     lock(istate.queue) do queue
         for task in tasks
@@ -1766,9 +2136,7 @@ function do_tasks(to_proc, return_queue, tasks)
 
     # Kick other processors to make them steal
     # TODO: Alternatively, automatically balance work instead of blindly enqueueing
-    states = proc_states_values(uid)
-    P = randperm(length(states))
-    for other_state in getindex.(Ref(states), P)
+    for other_state in states_snapshot!(STATES_CACHE_TLV[], proc_states(uid))
         other_istate = other_state.state
         if other_istate.proc === to_proc
             continue
@@ -1781,6 +2149,109 @@ end
 const SCHED_MOVE = ScopedValue{Bool}(false)
 
 """
+    move_one_argument!(arg, mctx::MoveCtx)
+
+Moves one task argument to `mctx.to_proc` and stores the bound value on `arg`.
+Runs inline for local arguments (see `argument_move_may_inline`) or on a
+scheduled move task otherwise; a top-level function so the inline path
+allocates no closure, taking its per-task invariants bundled in one `MoveCtx`
+(a dynamic call with several isbits arguments would box each per argument).
+"""
+struct MoveCtx{A<:Dagger.Acceleration,P<:Processor}
+    ctx::Context
+    accel::A
+    to_proc::P
+    thunk_id::Int
+    f::Any
+end
+
+"""
+    maybe_async_move!(arg, mctx::MoveCtx) -> Union{Task,Nothing}
+
+Decides inline-vs-async for one argument move and performs (or schedules) it.
+Lives behind the `MoveCtx{A,P}` barrier so the decision and the move dispatch
+on concrete acceleration/processor types (no per-argument boxing).
+"""
+function maybe_async_move!(arg, mctx::MoveCtx)
+    if argument_move_may_inline(mctx.accel, mctx.to_proc, Dagger.value(arg))
+        # Common local case: run the move inline — no closure, no Task
+        move_one_argument!(arg, mctx)
+        return nothing
+    end
+    #=FIXME:REALLOC_TASKS=#
+    return schedule_argument_move(mctx.accel, mctx.thunk_id,
+                                  () -> move_one_argument!(arg, mctx))
+end
+
+function move_one_argument!(arg, mctx::MoveCtx)
+    ctx = mctx.ctx
+    accel = mctx.accel
+    to_proc = mctx.to_proc
+    thunk_id = mctx.thunk_id
+    f = mctx.f
+    value = Dagger.value(arg)
+    position = arg.pos
+    @maybelog ctx timespan_start(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=value))
+            #= FIXME: This isn't valid if x is written to (formerly used transfer_time/transfer_size stats)
+            x = if x isa Chunk
+                value = lock(TASK_SYNC) do
+                    if haskey(CHUNK_CACHE, x)
+                        Some{Any}(get!(CHUNK_CACHE[x], to_proc) do
+                            # Convert from cached value
+                            # TODO: Choose "closest" processor of same type first
+                            cache_procs = keys(CHUNK_CACHE[x])
+                            accel = something(options.acceleration, current_acceleration())
+                            some_proc = minimum(cache_procs, by=p -> processor_order_key(accel, p))
+                            some_x = CHUNK_CACHE[x][some_proc]
+                            @dagdebug thunk_id :move "Cache hit for argument $id at $some_proc: $some_x"
+                            @invokelatest move(some_proc, to_proc, some_x)
+                        end)
+                    else
+                        nothing
+                    end
+                end
+
+                if value !== nothing
+                    something(value)
+                else
+                    # Fetch it
+                    time_start = time_ns()
+                    from_proc = processor(x)
+                    _x = @invokelatest move(from_proc, to_proc, x)
+                    time_finish = time_ns()
+                    if x.handle.size !== nothing
+                        Threads.atomic_add!(transfer_time, time_finish - time_start)
+                        Threads.atomic_add!(transfer_size, x.handle.size)
+                    end
+
+                    @dagdebug thunk_id :move "Cache miss for argument $id at $from_proc"
+
+                    # Update cache
+                    lock(TASK_SYNC) do
+                        CHUNK_CACHE[x] = Dict{Processor,Any}()
+                        CHUNK_CACHE[x][to_proc] = _x
+                    end
+
+                    _x
+                end
+            else
+            =#
+    new_value = sched_move(accel, to_proc, value)
+    #end
+    # Acceleration decides how to bind the moved value (e.g. keep a
+    # Chunk placeholder, or wrap an owner unwrap so chunktype stays
+    # SPMD-uniform). Materializing for the kernel may still happen in
+    # execute! when this rank only holds a placeholder.
+    bound = bind_moved_argument(accel, value, new_value)
+    if bound !== value
+        @dagdebug thunk_id :move "Moved argument @ $position to $to_proc: $(typeof(value)) -> $(typeof(bound))"
+    end
+    arg.value = bound
+    @maybelog ctx timespan_finish(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=Dagger.value(arg)); tasks=[Base.current_task()])
+    return
+end
+
+"""
     do_task(to_proc, task::TaskSpec) -> Any
 
 Executes a single task specified by `task` on `to_proc`.
@@ -1788,10 +2259,10 @@ Executes a single task specified by `task` on `to_proc`.
 @reuse_scope function do_task(to_proc, task::TaskSpec)
     thunk_id = task.thunk_id
 
-    ctx_vars = task.ctx_vars
-    ctx = Context(Processor[]; log_sink=ctx_vars.log_sink, profile=ctx_vars.profile)
+    ctx_vars = task.ctx_vars::NamedTuple
+    ctx = Dagger.log_context(ctx_vars.log_sink, ctx_vars.profile)
 
-    options = task.options
+    options = task.options::Options
     Dagger.set_task_acceleration!(options.acceleration)
 
     from_proc = Dagger.default_processor()
@@ -1870,8 +2341,10 @@ Executes a single task specified by `task` on `to_proc`.
     @dagdebug thunk_id :execute "Moving data for $Tf"
 
     # Initiate data transfers for function and arguments
-    transfer_time = Threads.Atomic{UInt64}(0)
-    transfer_size = Threads.Atomic{UInt64}(0)
+    # N.B. Only written by the commented-out CHUNK_CACHE block below; plain
+    # zeros until that returns (was two Threads.Atomic allocations per task)
+    transfer_time = UInt64(0)
+    transfer_size = UInt64(0)
     _data = if something(options.meta, false)
         Argument[first(data)] # always fetch function
     else
@@ -1881,85 +2354,26 @@ Executes a single task specified by `task` on `to_proc`.
     # rank-uniform tags derived from the thunk ID; they must run sequentially
     # in argument order (FIFO tag matching), with the thunk's TID in scope
     accel = something(options.acceleration, current_acceleration())
-    fetch_tasks = map(_data) do arg
-        #=FIXME:REALLOC_TASKS=#
-        move_one = () -> begin
-            value = Dagger.value(arg)
-            position = arg.pos
-            @maybelog ctx timespan_start(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=value))
-            #= FIXME: This isn't valid if x is written to
-            x = if x isa Chunk
-                value = lock(TASK_SYNC) do
-                    if haskey(CHUNK_CACHE, x)
-                        Some{Any}(get!(CHUNK_CACHE[x], to_proc) do
-                            # Convert from cached value
-                            # TODO: Choose "closest" processor of same type first
-                            cache_procs = keys(CHUNK_CACHE[x])
-                            accel = something(options.acceleration, current_acceleration())
-                            some_proc = minimum(cache_procs, by=p -> processor_order_key(accel, p))
-                            some_x = CHUNK_CACHE[x][some_proc]
-                            @dagdebug thunk_id :move "Cache hit for argument $id at $some_proc: $some_x"
-                            @invokelatest move(some_proc, to_proc, some_x)
-                        end)
-                    else
-                        nothing
-                    end
-                end
-
-                if value !== nothing
-                    something(value)
-                else
-                    # Fetch it
-                    time_start = time_ns()
-                    from_proc = processor(x)
-                    _x = @invokelatest move(from_proc, to_proc, x)
-                    time_finish = time_ns()
-                    if x.handle.size !== nothing
-                        Threads.atomic_add!(transfer_time, time_finish - time_start)
-                        Threads.atomic_add!(transfer_size, x.handle.size)
-                    end
-
-                    @dagdebug thunk_id :move "Cache miss for argument $id at $from_proc"
-
-                    # Update cache
-                    lock(TASK_SYNC) do
-                        CHUNK_CACHE[x] = Dict{Processor,Any}()
-                        CHUNK_CACHE[x][to_proc] = _x
-                    end
-
-                    _x
-                end
-            else
-            =#
-            new_value = with(SCHED_MOVE=>true) do
-                @invokelatest move(to_proc, value)
-            end
-            #end
-            # Acceleration decides how to bind the moved value (e.g. keep a
-            # Chunk placeholder, or wrap an owner unwrap so chunktype stays
-            # SPMD-uniform). Materializing for the kernel may still happen in
-            # execute! when this rank only holds a placeholder.
-            bound = bind_moved_argument(accel, value, new_value)
-            if bound !== value
-                @dagdebug thunk_id :move "Moved argument @ $position to $to_proc: $(typeof(value)) -> $(typeof(bound))"
-            end
-            arg.value = bound
-            @maybelog ctx timespan_finish(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=Dagger.value(arg)); tasks=[Base.current_task()])
-            return
+    mctx = MoveCtx(ctx, accel, to_proc, thunk_id, f)
+    fetch_tasks = nothing
+    for arg in _data
+        t = maybe_async_move!(arg, mctx)
+        t === nothing && continue
+        if fetch_tasks === nothing
+            fetch_tasks = Task[]
         end
-        return schedule_argument_move(accel, thunk_id, move_one)
+        push!(fetch_tasks, t)
     end
-    for task in fetch_tasks
-        task === nothing && continue
-        fetch_report(task)
+    if fetch_tasks !== nothing
+        for task in fetch_tasks
+            fetch_report(task)
+        end
     end
 
     f = Dagger.value(first(data))
     @assert !(f isa Chunk) "Failed to unwrap thunk function"
     fetched_args = @reusable_vector :do_task_fetched_args Any nothing 32
-    fetched_args_cleanup = @reuse_defer_cleanup empty!(fetched_args)
     fetched_kwargs = @reusable_vector :do_task_fetched_kwargs Pair{Symbol,Any} :NULL=>nothing 32
-    fetched_kwargs_cleanup = @reuse_defer_cleanup empty!(fetched_kwargs)
     for idx in 2:length(data)
         arg = data[idx]
         if Dagger.ispositional(arg)
@@ -1990,20 +2404,20 @@ Executes a single task specified by `task` on `to_proc`.
     logging_enabled = !(ctx.log_sink isa TimespanLogging.NoOpLog)
 
     result_meta = try
-        # Set TLS variables
-        Dagger.set_tls!((;
-            sch_uid=task.sch_uid,
-            sch_handle=task.sch_handle,
-            processor=to_proc,
-            task_spec=task,
-            cancel_token=Dagger.DTASK_CANCEL_TOKEN[],
-            logging_enabled,
-            acceleration=Dagger.current_acceleration(),
-        ))
+        # Set TLS variables (positional form: no NamedTuple per task)
+        Dagger.set_tls!(to_proc, task.sch_uid, task.sch_handle::SchedulerHandle, task,
+                        Dagger.DTASK_CANCEL_TOKEN[], logging_enabled,
+                        Dagger.current_acceleration())
 
         result = Dagger.with_options(propagated) do
             # Execute
-            execute!(to_proc, f, fetched_args...; fetched_kwargs...)
+            # N.B. Splatting an empty kwargs Vector still materializes a
+            # NamedTuple via merge; skip it in the common no-kwargs case
+            if isempty(fetched_kwargs)
+                execute!(to_proc, f, fetched_args...)
+            else
+                execute!(to_proc, f, fetched_args...; fetched_kwargs...)
+            end
         end
 
         # Check if result is safe to store
@@ -2024,18 +2438,18 @@ Executes a single task specified by `task` on `to_proc`.
             result
         else
             # TODO: Cache this Chunk locally in CHUNK_CACHE right now
-            tochunk(result, to_proc, @something(options.result_scope, AnyScope());
-                    device,
-                    tag=options.storage_root_tag,
-                    leaf_tag=something(options.storage_leaf_tag, MemPool.Tag()),
-                    retain=something(options.storage_retain, false))
+            Dagger.tochunk_result(result, to_proc, @something(options.result_scope, AnyScope()),
+                                  device,
+                                  options.storage_root_tag,
+                                  something(options.storage_leaf_tag, MemPool.Tag()),
+                                  something(options.storage_retain, false))
         end
     catch ex
         bt = catch_backtrace()
         RemoteException(myid(), CapturedException(ex, bt))
     finally
-        fetched_args_cleanup()
-        fetched_kwargs_cleanup()
+        empty!(fetched_args)
+        empty!(fetched_kwargs)
     end
 
     threadtime = cputhreadtime() - threadtime_start
@@ -2061,7 +2475,7 @@ Executes a single task specified by `task` on `to_proc`.
         # FIXME: Add runtime allocation tracking
         #gc_allocd=(isa(result_meta, Chunk) ? result_meta.handle.size : 0),
         gc_allocd=0,
-        transfer_rate=(transfer_size[] > 0 && transfer_time[] > 0) ? round(UInt64, transfer_size[] / (transfer_time[] / 10^9)) : nothing,
+        transfer_rate=(transfer_size > 0 && transfer_time > 0) ? round(UInt64, transfer_size / (transfer_time / 10^9)) : nothing,
     )
     return (result_meta, metadata)
 end

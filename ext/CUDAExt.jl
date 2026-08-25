@@ -61,8 +61,38 @@ function Dagger.unsafe_free!(x::CuArray)
     return
 end
 
-Dagger.memory_spaces(proc::CuArrayDeviceProc) = Set([CUDAVRAMMemorySpace(proc.owner, proc.device, proc.device_uuid)])
-Dagger.processors(space::CUDAVRAMMemorySpace) = Set([CuArrayDeviceProc(space.owner, space.device, space.device_uuid)])
+# N.B. The returned `Set`s are cached and shared (mirroring the CPU caches in
+# `src/memory-spaces.jl`); callers must not mutate them. No invalidation
+# needed: a worker's device topology is fixed for the process lifetime.
+const MEMORY_SPACES_CACHE = Dagger.LockedObject(Dict{CuArrayDeviceProc,Set{CUDAVRAMMemorySpace}}())
+function Dagger.memory_spaces(proc::CuArrayDeviceProc)
+    Dagger.@safe_lock1 MEMORY_SPACES_CACHE cache begin
+        value = get(cache, proc, nothing)
+        if value === nothing
+            value = Set([CUDAVRAMMemorySpace(proc.owner, proc.device, proc.device_uuid)])
+            cache[proc] = value
+        end
+        return value
+    end
+end
+const SPACE_PROCESSORS_CACHE = Dagger.LockedObject(Dict{CUDAVRAMMemorySpace,Set{CuArrayDeviceProc}}())
+function Dagger.processors(space::CUDAVRAMMemorySpace)
+    Dagger.@safe_lock1 SPACE_PROCESSORS_CACHE cache begin
+        value = get(cache, space, nothing)
+        if value === nothing
+            value = Set([CuArrayDeviceProc(space.owner, space.device, space.device_uuid)])
+            cache[space] = value
+        end
+        return value
+    end
+end
+
+# A Chunk already resident on this exact GPU unwraps via a local `poolget`
+# with no GPU API calls, so its scheduler move may run inline (like a local
+# CPU move). Everything else — host values, CPU or other-device Chunks —
+# stays async so uploads/transfers can overlap.
+Dagger.argument_move_may_inline(to_proc::CuArrayDeviceProc, @nospecialize(value)) =
+    value isa Chunk && Dagger.processor(value) == to_proc
 
 function to_device(proc::CuArrayDeviceProc)
     @assert Dagger.root_worker_id(proc) == myid()

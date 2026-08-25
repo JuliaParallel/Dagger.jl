@@ -140,11 +140,10 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     end
     if uniform_execution(accel)
         for proc in all_procs
-            check_uniform(proc)
+            @check_uniform(proc)
         end
     end
     all_scope = UnionScope(map(ExactScope, all_procs))
-    exec_spaces = unique(vcat(map(proc->collect(memory_spaces(proc)), all_procs)...))
 
     # Round-robin assign tasks to processors
     upper_queue = get_options(:task_queue)
@@ -161,9 +160,9 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
     # Copy args from remote to local
     # N.B. We sort the keys to ensure a deterministic order for uniformity
-    check_uniform(length(state.arg_owner))
+    @check_uniform(length(state.arg_owner))
     for arg_w in sort(collect(keys(state.arg_owner)); by=arg_w->arg_w.hash)
-        check_uniform(arg_w)
+        @check_uniform(arg_w)
         arg = arg_w.arg
         origin_space = state.arg_origin[arg]
         # When the origin still holds a fully-current replica (the argument was
@@ -185,10 +184,15 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         else
             @assert remainder isa NoAliasing "Expected NoAliasing, got $(typeof(remainder))"
             @dagdebug nothing :spawn_datadeps "Skipped copy-from (up-to-date): $origin_space"
+            # N.B. Same gate as `@maybelog`, written out so the event `id`
+            # (a `rand` call, plus the boxing it feeds) is only generated when
+            # logging is actually enabled.
             ctx = Sch.eager_context()
-            id = rand(UInt)
-            @maybelog ctx timespan_start(ctx, :datadeps_copy_skip, (;id), (;))
-            @maybelog ctx timespan_finish(ctx, :datadeps_copy_skip, (;id), (;thunk_id=0, from_space=origin_space, to_space=origin_space, arg_w, from_arg=arg, to_arg=arg))
+            if !(ctx.log_sink isa TimespanLogging.NoOpLog)
+                id = rand(UInt)
+                timespan_start(ctx, :datadeps_copy_skip, (;id), (;))
+                timespan_finish(ctx, :datadeps_copy_skip, (;id), (;thunk_id=0, from_space=origin_space, to_space=origin_space, arg_w, from_arg=arg, to_arg=arg))
+            end
         end
     end
     write_num += 1
@@ -233,27 +237,6 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         end
     end
 end
-struct DataDepsTaskDependency
-    arg_w::ArgumentWrapper
-    readdep::Bool
-    writedep::Bool
-end
-DataDepsTaskDependency(arg, dep) =
-    DataDepsTaskDependency(ArgumentWrapper(arg, dep[1]), dep[2], dep[3])
-struct DataDepsTaskArgument
-    arg
-    pos::ArgPosition
-    may_alias::Bool
-    inplace_move::Bool
-    deps::Vector{DataDepsTaskDependency}
-end
-struct TypedDataDepsTaskArgument{T,N}
-    arg::T
-    pos::ArgPosition
-    may_alias::Bool
-    inplace_move::Bool
-    deps::NTuple{N,DataDepsTaskDependency}
-end
 map_or_ntuple(f, xs::Vector) = map(f, 1:length(xs))
 # N.B. Accept any `Tuple` (typed specs produce heterogeneous tuples of
 # `TypedArgument{T}`, not a homogeneous `NTuple{N,T}`).
@@ -274,16 +257,22 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     our_proc = datadeps_schedule_task(scheduler, state, all_procs, all_scope, task_scope, spec, task)
     @assert our_proc in all_procs
     our_space = only(memory_spaces(our_proc))
-    check_uniform(our_proc)
-    check_uniform(our_space)
+    @check_uniform(our_proc)
+    @check_uniform(our_space)
 
     # Find the scope for this task (and its copies)
-    task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
-    if task_scope == all_scope
-        # Optimize for the common case, cache the proc=>scope mapping
+    # N.B. `task_scope` was already computed above for scheduling; the scope a
+    # task is scheduled under and the scope its copies run under are the same.
+    if task_scope === DefaultScope()
+        # Optimize for the common case (no user-specified scope), and cache the
+        # proc=>scope mapping. `DefaultScope()` is a shared singleton, so `===`
+        # identifies it exactly; the cached value is the same
+        # `constrain(<our procs>, task_scope)` the general branch computes, and
+        # it depends only on `our_proc` (via `our_space`) and the region-wide
+        # `all_procs`, both of which are fixed for this cache's lifetime.
         our_scope = get!(proc_to_scope_lfu, our_proc) do
             our_procs = filter(proc->proc in all_procs, collect(processors(our_space)))
-            return constrain(UnionScope(map(ExactScope, our_procs)...), all_scope)
+            return constrain(UnionScope(map(ExactScope, our_procs)...), DefaultScope())
         end
     else
         # Use the provided scope and constrain it to the available processors
@@ -300,22 +289,18 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     f = with_value(spec.fargs[1], move(default_processor(), our_proc, value(spec.fargs[1])))
     @dagdebug tid :spawn_datadeps "($(repr(value(f)))) Scheduling: $our_proc ($our_space)"
 
-    # Copy raw task arguments for analysis
-    # N.B. Used later for checking dependencies. The moved function argument
-    # (`f`) replaces the original at position 1.
-    task_args = map_or_ntuple(idx->copy(idx == 1 ? f : spec.fargs[idx]), spec.fargs)
-
-    # Populate all task dependencies
-    task_arg_ws = populate_task_info!(state, task_args, spec, task)
+    # Populate all task dependencies into the state's flat per-task scratch
+    # buffers (one concrete `TaskArgInfo` per argument, dependencies in
+    # `deps_vec`). The moved function argument (`f`) replaces the original at
+    # position 1.
+    task_arg_ws = populate_task_info!(state, f, spec.fargs, spec, task)
+    deps_vec = state.scratch_deps
 
     # Truncate the history for each argument
-    map_or_ntuple(task_arg_ws) do idx
-        arg_ws = task_arg_ws[idx]
-        map_or_ntuple(arg_ws.deps) do dep_idx
-            dep = arg_ws.deps[dep_idx]
-            truncate_history!(state, dep.arg_w)
+    for arg_ws in task_arg_ws
+        for di in arg_deps_range(arg_ws)
+            truncate_history!(state, deps_vec[di].arg_w)
         end
-        return
     end
 
     # Hierarchical scheduling only: for shared backing chunks whose current
@@ -329,27 +314,29 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     end
 
     # Copy args from local to remote
-    remote_args = map_or_ntuple(task_arg_ws) do idx
-        arg_ws = task_arg_ws[idx]
+    remote_args = state.scratch_remote
+    resize!(remote_args, length(task_arg_ws))
+    for (idx, arg_ws) in enumerate(task_arg_ws)
         arg = arg_ws.arg
-        pos = raw_position(arg_ws.pos)
 
         # Is the data written previously or now?
         if !arg_ws.may_alias
             @dagdebug tid :spawn_datadeps "($(repr(value(f))))[$(idx-1)] Skipped copy-to (immutable)"
-            return arg
+            remote_args[idx] = arg
+            continue
         end
 
         # Is the data writeable?
         if !arg_ws.inplace_move
             @dagdebug tid :spawn_datadeps "($(repr(value(f))))[$(idx-1)] Skipped copy-to (non-writeable)"
-            return arg
+            remote_args[idx] = arg
+            continue
         end
 
         # Is the source of truth elsewhere?
         arg_remote = get_or_generate_slot!(state, our_space, arg)
-        map_or_ntuple(arg_ws.deps) do dep_idx
-            dep = arg_ws.deps[dep_idx]
+        for di in arg_deps_range(arg_ws)
+            dep = deps_vec[di]
             arg_w = dep.arg_w
             dep_mod = arg_w.dep_mod
             remainder, _ = compute_remainder_for_arg!(state, our_space, arg_w, write_num)
@@ -362,26 +349,20 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
                 @dagdebug tid :spawn_datadeps "($(repr(value(f))))[$(idx-1)][$dep_mod] Skipped copy-to (up-to-date): $our_space"
             end
         end
-        return arg_remote
+        remote_args[idx] = arg_remote
     end
     write_num += 1
 
     # Validate that we're not accidentally performing a copy
-    map_or_ntuple(task_arg_ws) do idx
-        arg_ws = task_arg_ws[idx]
+    for (idx, arg_ws) in enumerate(task_arg_ws)
         arg = remote_args[idx]
-
-        # Get the dependencies again as (dep_mod, readdep, writedep)
-        deps = map_or_ntuple(arg_ws.deps) do dep_idx
-            dep = arg_ws.deps[dep_idx]
-            (dep.arg_w.dep_mod, dep.readdep, dep.writedep)
-        end
 
         # Check that any mutable and written arguments are already in the correct space
         # N.B. We only do this check when the argument supports in-place
         # moves, because for the moment, we are not guaranteeing updates or
         # write-back of results
-        if is_writedep(arg, deps, task) && arg_ws.may_alias && arg_ws.inplace_move
+        if arg_ws.may_alias && arg_ws.inplace_move &&
+           any(di->deps_vec[di].writedep, arg_deps_range(arg_ws))
             arg_space = memory_space(arg)
             @assert arg_space == our_space "($(repr(value(f))))[$(idx-1)] Tried to pass $(typeof(arg)) from $arg_space to $our_space"
         end
@@ -389,19 +370,20 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
 
     # Calculate this task's syncdeps
     if spec.options.syncdeps === nothing
-        spec.options.syncdeps = Set{ThunkSyncdep}()
+        spec.options.syncdeps = take_syncdeps_set!()
     end
-    if spec.options.tag === nothing && uniform_execution()
+    # N.B. Queried once per task and reused below: each call is a task-local
+    # acceleration lookup plus a dynamic dispatch, and it cannot change while
+    # planning a single task.
+    uniform = uniform_execution()
+    if spec.options.tag === nothing && uniform
        spec.options.tag = to_tag()
     end
     syncdeps = spec.options.syncdeps
-    map_or_ntuple(task_arg_ws) do idx
-        arg_ws = task_arg_ws[idx]
-        arg = arg_ws.arg
-        arg_ws.may_alias || return
-        arg_ws.inplace_move || return
-        map_or_ntuple(arg_ws.deps) do dep_idx
-            dep = arg_ws.deps[dep_idx]
+    for (idx, arg_ws) in enumerate(task_arg_ws)
+        (arg_ws.may_alias && arg_ws.inplace_move) || continue
+        for di in arg_deps_range(arg_ws)
+            dep = deps_vec[di]
             arg_w = dep.arg_w
             ainfo = aliasing!(state, our_space, arg_w)
             dep_mod = arg_w.dep_mod
@@ -413,36 +395,45 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
                 get_read_deps!(state, our_space, ainfo, write_num, syncdeps)
             end
         end
-        return
     end
     @dagdebug tid :spawn_datadeps "($(repr(value(f)))) Task has $(length(syncdeps)) syncdeps"
 
     # Launch user's task
-    new_fargs = map_or_ntuple(task_arg_ws) do idx
-        if is_typed(spec)
-            return TypedArgument(task_arg_ws[idx].pos, remote_args[idx])
-        else
-            return Argument(task_arg_ws[idx].pos, remote_args[idx])
-        end
-    end
+    # N.B. Always as an untyped Vector{Argument} spec: the task's return type
+    # was already inferred (and stored in options) at the original eager_spawn,
+    # and eager_launch! would only convert a typed tuple straight back to
+    # Vector{Argument} — building the heterogeneous TypedArgument tuple here
+    # cost ~50 allocations per task for nothing.
+    new_fargs = Argument[Argument(task_arg_ws[idx].pos, remote_args[idx]) for idx in 1:length(task_arg_ws)]
     new_spec = DTaskSpec(new_fargs, spec.options)
     new_spec.options.scope = our_scope
     new_spec.options.exec_scope = our_scope
-    if uniform_execution()
+    if uniform
         new_spec.options.occupancy = Dict(Any=>0)
     end
     ctx = Sch.eager_context()
     @maybelog ctx timespan_start(ctx, :datadeps_execute, (;thunk_id=task.uid), (;))
     enqueue!(queue.upper_queue, DTaskPair(new_spec, task))
-    @maybelog ctx timespan_finish(ctx, :datadeps_execute, (;thunk_id=task.uid), (;space=our_space, deps=task_arg_ws, args=remote_args))
+    # N.B. `task_arg_ws`/`remote_args` are per-task scratch buffers, so the
+    # logged payload snapshots them (only evaluated when logging is enabled)
+    @maybelog ctx timespan_finish(ctx, :datadeps_execute, (;thunk_id=task.uid), (;space=our_space, deps=logged_task_args(deps_vec, task_arg_ws), args=copy(remote_args)))
+
+    # Reclaim the syncdeps set when the (synchronous) submission above has
+    # already consumed it — see `syncdeps_consumed` for the guard rationale.
+    # Under deferred submission (launch_wait / batched hierarchical enqueue)
+    # the guard fails and the set stays with the spec.
+    let sd = new_spec.options.syncdeps
+        if sd !== nothing && syncdeps_consumed(sd)
+            new_spec.options.syncdeps = nothing
+            return_syncdeps_set!(sd)
+        end
+    end
 
     # Update read/write tracking for arguments
-    map_or_ntuple(task_arg_ws) do idx
-        arg_ws = task_arg_ws[idx]
-        arg = arg_ws.arg
-        arg_ws.may_alias || return
-        arg_ws.inplace_move || return
-        for dep in arg_ws.deps
+    for (idx, arg_ws) in enumerate(task_arg_ws)
+        (arg_ws.may_alias && arg_ws.inplace_move) || continue
+        for di in arg_deps_range(arg_ws)
+            dep = deps_vec[di]
             arg_w = dep.arg_w
             ainfo = aliasing!(state, our_space, arg_w)
             dep_mod = arg_w.dep_mod
@@ -453,7 +444,6 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
                 add_reader!(state, arg_w, our_space, ainfo, task, write_num)
             end
         end
-        return
     end
 
     # Hierarchical scheduling only: publish this task as the new authoritative

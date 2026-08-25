@@ -25,16 +25,59 @@ const SEALED = Sealed()
 
 # A node in the lock-free futures Treiber list stored on each `Thunk`.
 # Holds one `ThunkFuture` and an atomic link to the next node in the chain.
+# N.B. Fields are non-const so drained nodes can be reset and pooled (the
+# walks in fill_registered_futures!/schedule_dependents! own their chain
+# exclusively after the seal, so recycling there is race-free).
 mutable struct FutureNode
-    const future::ThunkFuture
+    future::Union{ThunkFuture,Nothing}
     @atomic next::Union{FutureNode,Nothing}
 end
 
 # A node in the lock-free dependents Treiber list stored on each `Thunk`.
 # Holds a strong ref to one downstream `Thunk` and an atomic link to the next node.
 mutable struct DepNode
-    const thunk::Any                      # downstream Thunk (typed Any to break the mutual-ref cycle)
+    thunk::Any                      # downstream Thunk (typed Any to break the mutual-ref cycle)
     @atomic next::Union{DepNode,Nothing}
+end
+
+const FUTURE_NODE_POOL = LockedObject(Vector{FutureNode}())
+const DEP_NODE_POOL = LockedObject(Vector{DepNode}())
+const NODE_POOL_CAP = 4096
+function take_future_node!(future::ThunkFuture)
+    node = @safe_lock_spin1 FUTURE_NODE_POOL pool begin
+        isempty(pool) ? nothing : pop!(pool)
+    end
+    node === nothing && return FutureNode(future, nothing)
+    node = node::FutureNode
+    node.future = future
+    @atomic node.next = nothing
+    return node
+end
+function recycle_future_node!(node::FutureNode)
+    node.future = nothing
+    @atomic node.next = nothing
+    @safe_lock_spin1 FUTURE_NODE_POOL pool begin
+        length(pool) < NODE_POOL_CAP && push!(pool, node)
+    end
+    return
+end
+function take_dep_node!(@nospecialize(thunk))
+    node = @safe_lock_spin1 DEP_NODE_POOL pool begin
+        isempty(pool) ? nothing : pop!(pool)
+    end
+    node === nothing && return DepNode(thunk, nothing)
+    node = node::DepNode
+    node.thunk = thunk
+    @atomic node.next = nothing
+    return node
+end
+function recycle_dep_node!(node::DepNode)
+    node.thunk = nothing
+    @atomic node.next = nothing
+    @safe_lock_spin1 DEP_NODE_POOL pool begin
+        length(pool) < NODE_POOL_CAP && push!(pool, node)
+    end
+    return
 end
 
 """
@@ -84,6 +127,7 @@ mutable struct Thunk
     @atomic futures_head::Union{FutureNode,Nothing,Sealed}  # Treiber list of waiting futures
     @atomic pending_deps::Int      # count of unresolved upstream dependencies (dataflow counter)
     @atomic dependents_head::Union{DepNode,Nothing,Sealed}  # Treiber list of downstream dependents
+    sig::Union{Signature,Nothing}  # memoized signature (valid only once inputs are resolved)
     function Thunk(spec::ThunkSpec)
         return new(spec.fargs, spec.id,
                    spec.cache_ref,
@@ -91,7 +135,7 @@ mutable struct Thunk
                    true, true, false,
                    false, false, false, nothing,
                    nothing,
-                   0, nothing)
+                   0, nothing, nothing)
     end
 end
 
@@ -104,10 +148,13 @@ sealed (the thunk finished before the push completed — the caller must then
 fulfill `future` directly using the stored result).
 """
 function futures_push!(t::Thunk, future::ThunkFuture)
-    node = FutureNode(future, nothing)
+    node = take_future_node!(future)
     while true
         old = @atomic t.futures_head
-        old isa Sealed && return false
+        if old isa Sealed
+            recycle_future_node!(node)
+            return false
+        end
         @atomic node.next = old::Union{FutureNode,Nothing}
         _, ok = @atomicreplace t.futures_head old => node
         ok && return true
@@ -137,10 +184,13 @@ Returns `true` if registered, `false` if the list was already sealed (meaning
 handle `dep` becoming ready/failed directly).
 """
 function deps_push!(t::Thunk, dep::Thunk)
-    node = DepNode(dep, nothing)
+    node = take_dep_node!(dep)
     while true
         old = @atomic t.dependents_head
-        old isa Sealed && return false
+        if old isa Sealed
+            recycle_dep_node!(node)
+            return false
+        end
         @atomic node.next = old::Union{DepNode,Nothing}
         _, ok = @atomicreplace t.dependents_head old => node
         ok && return true
@@ -159,6 +209,59 @@ guard — callers should treat this as a no-op).
 function deps_seal!(t::Thunk)
     old = @atomicswap t.dependents_head = SEALED
     return old isa Sealed ? nothing : old
+end
+
+# Global pool of recycled Thunks. The recycle point is `Sch.task_delete!`,
+# where a Thunk is provably unreachable from every root except the caller's
+# frame (see that function for the guard set); `take_pooled_thunk!` is the
+# submission-side take. Locked: submitters and finishers are arbitrary tasks.
+const THUNK_POOL = LockedObject(Vector{Thunk}())
+const THUNK_POOL_CAP = 4096
+
+function take_pooled_thunk!(spec::ThunkSpec)
+    t = @safe_lock_spin1 THUNK_POOL pool begin
+        isempty(pool) ? nothing : pop!(pool)
+    end
+    t === nothing && return Thunk(spec)
+    t = t::Thunk
+    # Reinitialize exactly as the inner constructor does
+    t.inputs = spec.fargs
+    t.id = spec.id
+    t.cache_ref = spec.cache_ref
+    t.options = spec.options
+    t.eager_accessible = true
+    t.sch_accessible = true
+    @atomic t.finished = false
+    @atomic t.errored = false
+    @atomic t.valid = false
+    @atomic t.running = false
+    t.running_on = nothing
+    @atomic t.futures_head = nothing
+    @atomic t.pending_deps = 0
+    @atomic t.dependents_head = nothing
+    t.sig = nothing
+    return t
+end
+
+function recycle_thunk!(t::Thunk)
+    # Strip references so a pooled Thunk pins nothing, and zero the id so any
+    # stale WeakThunk (which validates the id) resolves to `nothing` instead
+    # of a recycled task. The Treiber heads stay SEALED while pooled so a
+    # racing late push observes a closed list.
+    t.inputs = EMPTY_ARGS
+    t.id = 0
+    t.cache_ref = nothing
+    opts = t.options
+    opts === nothing || recycle_options!(opts)
+    t.options = nothing
+    t.running_on = nothing
+    t.sig = nothing
+    @atomic t.futures_head = SEALED
+    @atomic t.dependents_head = SEALED
+    @safe_lock_spin1 THUNK_POOL pool begin
+        length(pool) < THUNK_POOL_CAP && push!(pool, t)
+    end
+    return
 end
 
 function Thunk(f, xs...;
@@ -241,8 +344,11 @@ function args_kwargs_to_arguments(f, args, kwargs)
     end
     return args_kwargs
 end
-function args_kwargs_to_typedarguments(f, args, kwargs)
-    nargs = 1 + length(args) + length(kwargs)
+function args_kwargs_to_typedarguments(f, args::Tuple, kwargs)
+    # N.B. Val-based ntuple: `length` of concrete tuples constant-folds, so the
+    # per-element getindex stays statically typed instead of boxing each
+    # heterogeneous element through a runtime-length ntuple
+    nargs = Val(1 + length(args) + length(kwargs))
     return ntuple(nargs) do idx
         if idx == 1
             return TypedArgument(ArgPosition(true, 0, :NULL), f)
@@ -285,11 +391,21 @@ end
 "A weak reference to a `Thunk`."
 struct WeakThunk
     x::WeakRef
-    WeakThunk(t::Thunk) = new(WeakRef(t))
+    # The referent's id at wrap time: with Thunk pooling, a stale WeakThunk
+    # could otherwise resolve to a *recycled* Thunk now representing a
+    # different task (silent corruption). Pool reset zeroes `thunk.id` and
+    # reuse assigns a fresh id, so the compare turns any stale reference into
+    # a loud `nothing`/assertion instead.
+    id::Int
+    WeakThunk(t::Thunk) = new(WeakRef(t), t.id)
 end
 istask(::WeakThunk) = true
 task_id(t::WeakThunk) = task_id(unwrap_weak_checked(t))
-unwrap_weak(t::WeakThunk) = t.x.value
+function unwrap_weak(t::WeakThunk)
+    v = t.x.value
+    (v isa Thunk && v.id == t.id) || return nothing
+    return v
+end
 unwrap_weak(t) = t
 function unwrap_weak_checked(t)
     t_val = unwrap_weak(t)
@@ -558,9 +674,13 @@ function _par(mod, ex::Expr; lazy=true, recur=true, opts=())
             return quote
                 let
                     $result = if $get_task_typed()
-                        $typed_spawn($f, $Options(;$(opts...)), $(args...); $(kwargs...))
+                        # N.B. `*_macro` entry points skip the defensive
+                        # `Options` copy: the `Options` below is freshly built
+                        # (or taken from the pool) here and cannot be aliased
+                        # by the user.
+                        $typed_spawn_macro($f, $take_options!(;$(opts...)), $(args...); $(kwargs...))
                     else
-                        $spawn($f, $Options(;$(opts...)), $(args...); $(kwargs...))
+                        $spawn_macro($f, $take_options!(;$(opts...)), $(args...); $(kwargs...))
                     end
                     if $(Expr(:islocal, sync_var))
                         put!($sync_var, schedule(Task(()->fetch($result; raw=true))))
@@ -608,10 +728,7 @@ function spawn(f, args...; kwargs...)
         task_options = Options()
     end
 
-    # Process the args and kwargs into Argument form
-    args_kwargs = args_kwargs_to_arguments(f, args, kwargs)
-
-    return _spawn(args_kwargs, task_options)
+    return _spawn_owned(f, task_options, args, kwargs)
 end
 function typed_spawn(f, args...; kwargs...)
     # Merge all passed options
@@ -623,24 +740,65 @@ function typed_spawn(f, args...; kwargs...)
         task_options = Options()
     end
 
-    # Process the args and kwargs into Tuple of TypedArgument form
-    args_kwargs = args_kwargs_to_typedarguments(f, args, kwargs)
+    return _typed_spawn_owned(f, task_options, args, kwargs)
+end
 
+# Internal entry points taking ownership of `task_options`.
+#
+# `@spawn`'s expansion constructs a fresh `Options(; ...)` for every call, which
+# is provably unaliased, so the defensive `copy` that `spawn`/`typed_spawn` must
+# perform for user-supplied `Options` is pure overhead there. The macro therefore
+# routes through these instead; `Dagger.spawn`/`Dagger.typed_spawn` (which may be
+# handed an `Options` the caller keeps a reference to) still copy first.
+function _spawn_owned(f, task_options::Options, args::Tuple, kwargs)
+    @nospecialize f args kwargs
+    # Process the args and kwargs into Argument form
+    args_kwargs = args_kwargs_to_arguments(f, args, kwargs)
     return _spawn(args_kwargs, task_options)
 end
+function _typed_spawn_owned(f, task_options::Options, args::Tuple, kwargs)
+    # Process the args and kwargs into Tuple of TypedArgument form
+    args_kwargs = args_kwargs_to_typedarguments(f, args, kwargs)
+    return _spawn(args_kwargs, task_options)
+end
+function spawn_macro(f, task_options::Options, args...; kwargs...)
+    # N.B. `@nospecialize` as in `spawn`, which this replaces on the macro path
+    @nospecialize f args kwargs
+    return _spawn_owned(f, task_options, args, kwargs)
+end
+typed_spawn_macro(f, task_options::Options, args...; kwargs...) =
+    _typed_spawn_owned(f, task_options, args, kwargs)
 function _spawn(args_kwargs, task_options)
     # Get all scoped options and determine which propagate beyond this task
     scoped_options = get_options()::NamedTuple
-    if haskey(scoped_options, :propagates)
+    # N.B. With no scoped options there is nothing to propagate, and a
+    # `propagates` of `nothing` is observably identical to an empty
+    # `Symbol[]` (see `get_propagated_options`, which returns an empty
+    # `NamedTuple` for both, and `maybe_default!(:propagates)`, whose default is
+    # `nothing`). So skip building the vector entirely in that (very common)
+    # case; `propagates === nothing` below means "nothing to add".
+    # N.B. The vector built here is mutated below (`append!`, `filter!`,
+    # `unique!`) and then handed to `task_options`, so it must be one we own.
+    # `scoped_options.propagates` belongs to the caller's `with_options` block
+    # and is shared by every task spawned under it, so it is copied, never
+    # aliased: aliasing it would make each spawn permanently append that
+    # spawn's option names to the user's own vector (and delete `:task_queue`
+    # from it), racily so when several tasks are spawned concurrently under
+    # one `with_options(propagates=[...])`.
+    propagates = if haskey(scoped_options, :propagates)
         if scoped_options.propagates isa Tuple
-            propagates = Symbol[scoped_options.propagates...]
+            Symbol[scoped_options.propagates...]
         else
-            propagates = scoped_options.propagates::Vector{Symbol}
+            copy(scoped_options.propagates::Vector{Symbol})
         end
+    elseif isempty(scoped_options)
+        nothing
     else
-        propagates = Symbol[]
+        Symbol[]
     end
-    append!(propagates, keys(scoped_options)::NTuple{N,Symbol} where N)
+    if propagates !== nothing
+        append!(propagates, keys(scoped_options)::NTuple{N,Symbol} where N)
+    end
 
     # N.B. Merges into task_options
     options_merge!(task_options, scoped_options; override=false)
@@ -653,13 +811,19 @@ function _spawn(args_kwargs, task_options)
 
     # Get task queue, and don't let it propagate
     task_queue = get(scoped_options, :task_queue, DefaultTaskQueue())::AbstractTaskQueue
-    filter!(prop -> prop != :task_queue, propagates)
-    if task_options.propagates !== nothing
-        append!(task_options.propagates, propagates)
-    else
-        task_options.propagates = propagates
+    if propagates !== nothing
+        filter!(prop -> prop != :task_queue, propagates)
+        if task_options.propagates !== nothing
+            # N.B. Merge into our own vector rather than into
+            # `task_options.propagates`, which may be a vector the caller
+            # passed to `@spawn`/`spawn` and still holds a reference to.
+            append!(propagates, task_options.propagates)
+        end
+        task_options.propagates = unique!(propagates)
+    elseif task_options.propagates !== nothing
+        # Same reason: `unique!` would otherwise rewrite the caller's vector.
+        task_options.propagates = unique(task_options.propagates)
     end
-    unique!(task_options.propagates)
 
     # Construct task spec and handle
     spec = DTaskSpec(args_kwargs, task_options)

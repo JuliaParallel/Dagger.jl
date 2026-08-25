@@ -41,6 +41,38 @@ const PAYLOAD_ONE_CACHE = TaskLocalValue{ReusableCache{PayloadOne,Nothing}}(()->
 
 const THUNK_SPEC_CACHE = TaskLocalValue{ReusableCache{ThunkSpec,Nothing}}(()->ReusableCache(ThunkSpec, nothing, 1))
 
+# N.B. Different Chunks with the same DRef handle will hash to the same slot,
+# so we just pick an equivalent Chunk as our upstream.
+# Kept at top-level (rather than as a local function within the argument loop of
+# `eager_submit_internal!`) so that it captures nothing: a local named function
+# defined inside that loop forces a `Core.Box` allocation per iteration.
+function find_equivalent_chunk(state, chunk::C) where {C<:Chunk}
+    # `equiv_chunks` is a `WeakKeyDict{DRef,WeakRef}`; only
+    # DRef-backed chunks participate. Other handles (e.g.
+    # `MPIRef` under MPI) are not valid keys and manage their
+    # own identity, so pass them through unchanged.
+    # N.B. Values are WeakRefs: a strong Chunk value would root its own key
+    # (chunk.handle === key), making every entry — and the data behind the
+    # DRef — immortal.
+    chunk.handle isa DRef || return chunk
+    # N.B. Explicit lock/unlock rather than `lock(f, state.equiv_chunks)`: the
+    # closure would capture `chunk` and allocate on every call. The critical
+    # section is identical.
+    lock(state.equiv_chunks)
+    try
+        ec = payload(state.equiv_chunks)
+        existing = get(ec, chunk.handle, nothing)
+        if existing !== nothing
+            value = existing.value
+            value === nothing || return value::C
+        end
+        ec[chunk.handle] = WeakRef(chunk)
+        return chunk
+    finally
+        unlock(state.equiv_chunks)
+    end
+end
+
 # Remote
 function eager_submit_internal!(payload::AnyPayload)
     ctx = Dagger.Sch.eager_context()
@@ -75,69 +107,74 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
 
     @maybelog ctx timespan_start(ctx, :add_thunk, (;thunk_id=id), (;f=fargs[1], args=fargs[2:end], options, uid))
 
-    old_fargs = @reusable_vector :eager_submit_internal!_old_fargs Argument Argument(ArgPosition(), nothing) 32
-    old_fargs_cleanup = @reuse_defer_cleanup empty!(old_fargs)
-    append!(old_fargs, Iterators.map(copy, fargs))
+    # Keep the *values* of the original arguments alive across edge-wiring: the
+    # loop below replaces `fargs` entries holding a `DTask`/`ThunkID`/`Chunk`
+    # with a `Thunk`/`WeakChunk`, and nothing else roots the originals until
+    # `reschedule_syncdeps!` has wired the edges (which preserves all referenced
+    # tasks/chunks). Only GC-rooting is needed here -- the `Argument`/
+    # `ArgPosition` wrappers themselves are never read back -- so push the bare
+    # values instead of copying 2 objects per argument.
+    old_fargs = @reusable_vector :eager_submit_internal!_old_fargs Any nothing 32
+    for arg in fargs
+        push!(old_fargs, value(arg))
+    end
 
     syncdeps_vec = @reusable_vector :eager_submit_interal!_syncdeps_vec ThunkSyncdep ThunkSyncdep() 32
-    syncdeps_vec_cleanup = @reuse_defer_cleanup empty!(syncdeps_vec)
     if options.syncdeps !== nothing
         append!(syncdeps_vec, options.syncdeps)
     end
 
     # Lookup DTask/ThunkID -> Thunk
+    # N.B. The `state.thunk_dict` critical sections below use explicit
+    # lock/try/finally instead of `lock(f, state.thunk_dict)`: the `do` closures
+    # capture `fargs`/`idx`/`arg` and so allocate once per argument. The locked
+    # regions are unchanged (one acquisition per lookup), preserving both the
+    # locking discipline and the lock ordering with `state.equiv_chunks` (which
+    # is only ever taken with `thunk_dict` unheld).
     for (idx, arg) in enumerate(fargs)
         if valuetype(arg) <: DTask
             arg_tid = Int((value(arg)::DTask).uid)
-            lock(state.thunk_dict) do d
+            lock(state.thunk_dict)
+            try
+                d = Dagger.payload(state.thunk_dict)
                 @inbounds fargs[idx] = Argument(arg.pos, d[arg_tid])
+            finally
+                unlock(state.thunk_dict)
             end
         elseif valuetype(arg) <: Sch.ThunkID
             arg_tid = (value(arg)::Sch.ThunkID).id
-            lock(state.thunk_dict) do d
+            lock(state.thunk_dict)
+            try
+                d = Dagger.payload(state.thunk_dict)
                 @inbounds fargs[idx] = Argument(arg.pos, d[arg_tid])
+            finally
+                unlock(state.thunk_dict)
             end
         elseif valuetype(arg) <: Chunk
-            # N.B. Different Chunks with the same DRef handle will hash to the same slot,
-            # so we just pick an equivalent Chunk as our upstream
-            chunk = value(arg)::Chunk
-            function find_equivalent_chunk(state, chunk::C) where {C<:Chunk}
-                # `equiv_chunks` is a `WeakKeyDict{DRef,Chunk}`; only
-                # DRef-backed chunks participate. Other handles (e.g.
-                # `MPIRef` under MPI) are not valid keys and manage their
-                # own identity, so pass them through unchanged.
-                chunk.handle isa DRef || return chunk
-                lock(state.equiv_chunks) do ec
-                    if haskey(ec, chunk.handle)
-                        return ec[chunk.handle]::C
-                    else
-                        ec[chunk.handle] = chunk
-                        return chunk
-                    end
-                end
-            end
-            chunk = find_equivalent_chunk(state, chunk)
+            chunk = find_equivalent_chunk(state, value(arg)::Chunk)
             #=FIXME:UNIQUE=#
-            if chunk.handle isa DRef
-                @inbounds fargs[idx] = Argument(arg.pos, WeakChunk(chunk))
-            else
-                # Non-DRef chunks (e.g. `MPIRef` under MPI) are not kept
-                # alive by `equiv_chunks` (a `WeakKeyDict{DRef,Chunk}`, so
-                # only DRef-backed wrappers get a strong keeper there).
-                # Weakening such a chunk here would let its `Chunk` wrapper
-                # be GC'd before the consuming task runs, expiring the
-                # `WeakChunk` (observed on Julia 1.10, whose GC is more
-                # eager). Keep a strong reference; it is released when the
-                # task's `Thunk` is cleaned up.
-                @inbounds fargs[idx] = Argument(arg.pos, chunk)
-            end
+            # N.B. Stored STRONGLY: the consuming task owns its inputs until
+            # its own teardown. Argument chunks were previously weakened here
+            # (WeakChunk) on the assumption that `equiv_chunks` pinned the
+            # wrapper — but that pin was an immortal leak and is now a weak
+            # dedupe cache, so a weak slot could expire before the consumer
+            # fires (e.g. the caller drops the chunk right after @spawn).
+            @inbounds fargs[idx] = Argument(arg.pos, chunk)
         end
     end
     # TODO: Iteration protocol would be faster
     for idx in 1:length(syncdeps_vec)
         dep = syncdeps_vec[idx]::ThunkSyncdep
         @assert dep.id !== nothing && dep.thunk === nothing
-        thunk = lock(state.thunk_dict) do d; d[dep.id.id]; end
+        # N.B. Explicit lock/unlock (see above): a `do` closure here would
+        # capture `dep` and allocate per syncdep.
+        lock(state.thunk_dict)
+        local thunk
+        try
+            thunk = Dagger.payload(state.thunk_dict)[dep.id.id]
+        finally
+            unlock(state.thunk_dict)
+        end
         @inbounds syncdeps_vec[idx] = ThunkSyncdep(thunk)
     end
     if !isempty(syncdeps_vec) || any(arg->istask(value(arg)), fargs)
@@ -156,7 +193,7 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
             end
         end
     end
-    syncdeps_vec_cleanup()
+    empty!(syncdeps_vec)
 
     GC.@preserve old_fargs fargs begin
         # Create the `Thunk`
@@ -164,7 +201,7 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
             thunk_spec.fargs = fargs
             thunk_spec.id = id
             thunk_spec.options = options
-            return Thunk(thunk_spec)
+            return take_pooled_thunk!(thunk_spec)
         end
 
         # Create a `DRef` to `thunk` so that the caller can preserve it
@@ -179,8 +216,13 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
         ready = Sch.Thunk[]
         @lock state.lock begin
             # Attach `thunk` within the scheduler
-            lock(state.thunk_dict) do d
-                d[thunk.id] = WeakThunk(thunk)
+            # N.B. Explicit lock/unlock (see above) to avoid a closure capturing
+            # `thunk`; the critical section is unchanged.
+            lock(state.thunk_dict)
+            try
+                Dagger.payload(state.thunk_dict)[thunk.id] = WeakThunk(thunk)
+            finally
+                unlock(state.thunk_dict)
             end
             # Hold a strong reference until the thunk reaches a terminal state
             # (released in `task_delete!`). The weak `thunk_dict` entry alone
@@ -190,12 +232,12 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
             push!(state.strong_thunks, thunk)
             #=FIXME:REALLOC=#
             Sch.reschedule_syncdeps!(state, thunk, ready)
-            old_fargs_cleanup() # reschedule_syncdeps! preserves all referenced tasks/chunks
+            empty!(old_fargs) # reschedule_syncdeps! preserves all referenced tasks/chunks
             n_upstreams = @atomic thunk.pending_deps
             @dagdebug thunk :submit "Added to scheduler with $n_upstreams unresolved upstreams"
             if future !== nothing
                 # Ensure we attach a future before the thunk is scheduled
-                Sch._register_future!(ctx, state, task, tid, (future, thunk_id, false))
+                Sch._register_future!(ctx, state, task, tid, future, thunk_id, false)
                 @dagdebug thunk :submit "Registered future"
             end
             @atomic thunk.valid = true
@@ -255,37 +297,61 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
         return thunk_id
     end
 end
-struct UnrefThunk
-    uid::UInt
-    thunk::Thunk
-    state
+mutable struct UnrefThunk
+    const uid::UInt
+    const thunk::Thunk
+    const state
+    # One-shot guard: with Thunk pooling, a second invocation (e.g. an
+    # explicit early release followed by the GC-driven DRef destructor) would
+    # tear down a *recycled* Thunk now representing someone else's task
+    @atomic done::Bool
 end
-function (unref::UnrefThunk)()
-    # Best-effort GC cleanup invoked once per task on DRef finalization. Use a
-    # plain `errormonitor` rather than `errormonitor_tracked`: the tracked list
-    # is only consulted by precompile for cleanliness, not for halt/runtime
-    # correctness, so tracking this high-frequency cleanup task only adds a
-    # name-string interpolation, a locked push, and an extra monitor-task spawn
-    # to every task's teardown.
-    errormonitor(Threads.@spawn begin
-        # The associated DTask is no longer referenced by the user, so mark the
-        # thunk as ready to be cleaned up as eagerly as possible (or do so now)
-        thunk = unref.thunk
-        state = unref.state
-        @lock state.lock begin
-            thunk.eager_accessible = false
-            Sch.delete_unused_task!(state, thunk)
-        end
+UnrefThunk(uid, thunk, state) = UnrefThunk(uid, thunk, state, false)
+function unref_thunk!(unref::UnrefThunk)
+    _, won = @atomicreplace unref.done false => true
+    won || return
+    # The associated DTask is no longer referenced by the user, so mark the
+    # thunk as ready to be cleaned up as eagerly as possible (or do so now)
+    thunk = unref.thunk
+    state = unref.state
+    @lock state.lock begin
+        thunk.eager_accessible = false
+        # A thunk deletable here finished long ago: its Treiber lists are
+        # sealed and drained, so it may be recycled
+        Sch.delete_unused_task!(state, thunk; recycle=true)
+    end
 
-        if unref.uid != UInt(0)
-            # Cleanup EAGER_THUNK_STREAMS if this is a streaming DTask
-            lock(Dagger.EAGER_THUNK_STREAMS) do global_streams
-                if haskey(global_streams, unref.uid)
-                    delete!(global_streams, unref.uid)
-                end
+    if unref.uid != UInt(0)
+        # Cleanup EAGER_THUNK_STREAMS if this is a streaming DTask
+        lock(Dagger.EAGER_THUNK_STREAMS) do global_streams
+            if haskey(global_streams, unref.uid)
+                delete!(global_streams, unref.uid)
             end
         end
-    end)
+    end
+    return
+end
+function (unref::UnrefThunk)()
+    # Best-effort GC cleanup invoked once per `DTask` teardown, as the MemPool
+    # destructor of the thunk's `DRef`. It is called from `datastore_delete`,
+    # which frequently runs in a GC/finalizer context where task switches (and
+    # therefore blocking locks) are illegal -- which is why this used to spawn a
+    # fresh task per teardown (2 `Task`s + closures per `DTask`).
+    #
+    # Instead, hand the work to MemPool's existing long-lived `SEND_QUEUE`
+    # reaper: `_enqueue_work(...; gc_context=true)` is finalizer-safe (it spins
+    # on `trylock` of an unbounded channel with `GC.safepoint()`, never
+    # blocking/yielding), reuses one task for all deferred teardown work, and is
+    # already how MemPool defers its own device deletions from this same call
+    # path. The work itself still runs on a regular task, so it may block on
+    # `state.lock` as before.
+    #
+    # N.B. Cannot be a Dagger-owned reaper task+channel pair: a channel held in
+    # a Dagger global with the reaper parked in its wait queue is reachable from
+    # module state during `@compile_workload`, and Julia cannot serialize a live
+    # `Task` into the package image.
+    MemPool._enqueue_work(unref_thunk!, unref; gc_context=true)
+    return
 end
 
 # Local -> Remote
@@ -339,7 +405,12 @@ function eager_process_args_submission_to_local!(spec::DTaskSpec{false})
     end
 end
 function eager_process_args_submission_to_local(spec::DTaskSpec{true})
-    return ntuple(i->eager_process_elem_submission_to_local(spec.fargs[i]), length(spec.fargs))
+    # N.B. `map_or_ntuple` uses `ntuple(f, Val(length(xs)))` for tuples: with a
+    # plain `Int` length, `ntuple` over a heterogeneous tuple is type-unstable
+    # and boxes every element, while `Val` (which const-folds for a concrete
+    # tuple type) unrolls and keeps each element's type.
+    fargs = spec.fargs
+    return map_or_ntuple(i->eager_process_elem_submission_to_local(fargs[i]), fargs)
 end
 
 # Memoizes `Base.promote_op` return-type inference for eager task metadata.
@@ -378,9 +449,17 @@ end
 function eager_metadata(fargs)
     f = value(fargs[1])
     f = f isa StreamingFunction ? f.f : f
-    arg_types = ntuple(i->chunktype(value(fargs[i+1])), length(fargs)-1)
+    arg_types = arg_chunktypes(fargs)
     return cached_return_type(f, arg_types)
 end
+# N.B. As in `eager_process_args_submission_to_local`, a `Val` length is used for
+# tuple `fargs` (typed specs) so that `ntuple` unrolls over the heterogeneous
+# tuple instead of boxing each element; `Vector` `fargs` (untyped specs) are
+# dynamically-sized and keep the plain `Int` length.
+@inline arg_chunktypes(fargs::Tuple) =
+    ntuple(i->chunktype(value(fargs[i+1])), Val(length(fargs)-1))
+arg_chunktypes(fargs::Vector) =
+    ntuple(i->chunktype(value(fargs[i+1])), length(fargs)-1)
 
 function eager_spawn(spec::DTaskSpec)
     # Generate new unlaunched DTask
@@ -411,16 +490,27 @@ function eager_launch!(pair::DTaskPair)
         spec.fargs
     end
 
-    # Propagate DTask return_type into options so the created Thunk has chunktype for downstream inference
+    # N.B. `spec.options.return_type` was already set to
+    # `task.metadata.return_type` by `eager_spawn` (under the very same
+    # `isconcretetype` guard, and `task.metadata` is the same object), so the
+    # copy+assignment that used to live here was a no-op that allocated a fresh
+    # `Options` per task. `spec.options` is likewise what the non-concrete branch
+    # passed through unmodified, so submitting it directly is unchanged behavior.
     options = spec.options
-    if isconcretetype(task.metadata.return_type)
-        options = copy(options)
-        options.return_type = task.metadata.return_type
-    end
+
     # Submit the task
-    #=FIXME:REALLOC=#
-    thunk_id = eager_submit!(PayloadOne(task.uid, task.future,
-                                        fargs, options, true))
+    # N.B. `PayloadOne` is only read by `eager_submit_internal!`, which runs to
+    # completion before `eager_submit!` returns (whether inline, via `exec!`, or
+    # via `remotecall_fetch`), so it can be borrowed from the reusable cache
+    # rather than freshly allocated (mirroring `payload_extract`).
+    thunk_id = @take_or_alloc! PAYLOAD_ONE_CACHE[] PayloadOne p1 begin
+        p1.uid = task.uid
+        p1.future = task.future
+        p1.fargs = fargs
+        p1.options = options
+        p1.reschedule = true
+        eager_submit!(p1)
+    end
     task.thunk_ref = thunk_id.ref
 end
 # FIXME: Don't convert Tuple to Vector{Argument}

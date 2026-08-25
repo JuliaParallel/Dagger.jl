@@ -70,8 +70,38 @@ function Dagger.unsafe_free!(x::oneArray)
     return
 end
 
-Dagger.memory_spaces(proc::oneArrayDeviceProc) = Set([IntelVRAMMemorySpace(proc.owner, proc.device_id)])
-Dagger.processors(space::IntelVRAMMemorySpace) = Set([oneArrayDeviceProc(space.owner, space.device_id)])
+# N.B. The returned `Set`s are cached and shared (mirroring the CPU caches in
+# `src/memory-spaces.jl`); callers must not mutate them. No invalidation
+# needed: a worker's device topology is fixed for the process lifetime.
+const MEMORY_SPACES_CACHE = Dagger.LockedObject(Dict{oneArrayDeviceProc,Set{IntelVRAMMemorySpace}}())
+function Dagger.memory_spaces(proc::oneArrayDeviceProc)
+    Dagger.@safe_lock1 MEMORY_SPACES_CACHE cache begin
+        value = get(cache, proc, nothing)
+        if value === nothing
+            value = Set([IntelVRAMMemorySpace(proc.owner, proc.device_id)])
+            cache[proc] = value
+        end
+        return value
+    end
+end
+const SPACE_PROCESSORS_CACHE = Dagger.LockedObject(Dict{IntelVRAMMemorySpace,Set{oneArrayDeviceProc}}())
+function Dagger.processors(space::IntelVRAMMemorySpace)
+    Dagger.@safe_lock1 SPACE_PROCESSORS_CACHE cache begin
+        value = get(cache, space, nothing)
+        if value === nothing
+            value = Set([oneArrayDeviceProc(space.owner, space.device_id)])
+            cache[space] = value
+        end
+        return value
+    end
+end
+
+# A Chunk already resident on this exact GPU unwraps via a local `poolget`
+# with no GPU API calls, so its scheduler move may run inline (like a local
+# CPU move). Everything else — host values, CPU or other-device Chunks —
+# stays async so uploads/transfers can overlap.
+Dagger.argument_move_may_inline(to_proc::oneArrayDeviceProc, @nospecialize(value)) =
+    value isa Dagger.Chunk && Dagger.processor(value) == to_proc
 
 function to_device(proc::oneArrayDeviceProc)
     @assert Dagger.root_worker_id(proc) == myid()

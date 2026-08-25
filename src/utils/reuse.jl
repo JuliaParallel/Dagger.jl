@@ -1,22 +1,56 @@
-struct ReuseCleanup
-    done::Base.RefValue{Bool}
-    f::Function
+mutable struct ReuseCleanup
+    done::Bool
+    const f::Function
 end
-const REUSE_SCOPE_DEFERRED = ScopedValue{Union{Vector{ReuseCleanup},Nothing}}(nothing)
+
+# Per-task stack of cleanup frames. A task-local stack (rather than a
+# ScopedValue) avoids allocating a Scope + HAMT + fresh Vector per
+# `@reuse_scope` entry: frame vectors are pooled and reused. Cleanups are
+# always registered lexically within the scope's own body (never from a
+# spawned child task), so task-local storage is sufficient.
+mutable struct ReuseScopeStack
+    depth::Int
+    frames::Vector{Vector{ReuseCleanup}}
+end
+const REUSE_SCOPE_STACK = TaskLocalValue{ReuseScopeStack}(()->ReuseScopeStack(0, Vector{ReuseCleanup}[]))
+
+@inline function reuse_scope_push!(stack::ReuseScopeStack)
+    depth = stack.depth + 1
+    stack.depth = depth
+    if depth > length(stack.frames)
+        push!(stack.frames, ReuseCleanup[])
+    end
+    return @inbounds stack.frames[depth]
+end
+function reuse_scope_pop!(stack::ReuseScopeStack, frame::Vector{ReuseCleanup})
+    @assert stack.depth > 0 && stack.frames[stack.depth] === frame
+    stack.depth -= 1
+    try
+        for cleanup in frame
+            cleanup.done || cleanup()
+        end
+    finally
+        empty!(frame)
+    end
+    return
+end
+@inline function reuse_current_frame()
+    stack = REUSE_SCOPE_STACK[]
+    @assert stack.depth > 0 "@reuse_defer_cleanup used outside of a @reuse_scope function"
+    return @inbounds stack.frames[stack.depth]
+end
+
 macro reuse_scope(ex)
     @assert @capture(ex, function f_(args__) body_ end)
+    @gensym reuse_stack reuse_frame
     esc(quote
         function $f($(args...))
-            @with $REUSE_SCOPE_DEFERRED=>Vector{$ReuseCleanup}() begin
-                try
-                    $body
-                finally
-                    deferred = $REUSE_SCOPE_DEFERRED[]
-                    @assert deferred !== nothing
-                    for cleanup in deferred
-                        cleanup.done[] || cleanup()
-                    end
-                end
+            $reuse_stack = $REUSE_SCOPE_STACK[]
+            $reuse_frame = $reuse_scope_push!($reuse_stack)
+            try
+                $body
+            finally
+                $reuse_scope_pop!($reuse_stack, $reuse_frame)
             end
         end
     end)
@@ -24,14 +58,14 @@ end
 macro reuse_defer_cleanup(ex)
     @gensym cleanup
     quote
-        let $cleanup = $ReuseCleanup(Base.RefValue(false), ()->$(esc(ex)))
-            push!($REUSE_SCOPE_DEFERRED[], $cleanup)
+        let $cleanup = $ReuseCleanup(false, ()->$(esc(ex)))
+            push!($reuse_current_frame(), $cleanup)
             $cleanup
         end
     end
 end
 function (cleanup::ReuseCleanup)()
-    cleanup.done[] = true
+    cleanup.done = true
     cleanup.f()
 end
 
@@ -528,19 +562,22 @@ function Base.empty!(dict::ReusableDict{K,V}) where {K,V}
     return dict
 end
 
+# N.B. Emptied on take (cheap when already empty), so users need no cleanup
+# registration for correctness — explicit `empty!` at the end of use remains
+# good hygiene to release references promptly.
 macro reusable_vector(name, T, null, N)
     vec_name = Symbol("__$(name)_TLV_ReusableVector")
     if !hasproperty(__module__, vec_name)
         __module__.eval(:(#=const=# $vec_name = $TaskLocalValue{$Vector{$T}}(()->$Vector{$T}())))
     end
-    return :($(esc(vec_name))[])
+    return :(empty!($(esc(vec_name))[]))
 end
 macro reusable_dict(name, K, V, null_key, null_value, N)
     dict_name = Symbol("__$(name)_TLV_ReusableDict")
     if !hasproperty(__module__, dict_name)
         __module__.eval(:(#=const=# $dict_name = $TaskLocalValue{$Dict{$K,$V}}(()->$Dict{$K,$V}())))
     end
-    return :($(esc(dict_name))[])
+    return :(empty!($(esc(dict_name))[]))
 end
 
 mutable struct ReusableTaskCache
@@ -557,7 +594,11 @@ mutable struct ReusableTaskCache
         for idx in 1:N
             chans[idx] = Channel{Any}(1)
             chan, r = chans[idx], ready[idx]
-            tasks[idx] = @task reusable_task_loop(chan, r)
+            # N.B. These tasks are created on whichever call first touches this
+            # (task-local) cache and then serve every later payload, so they
+            # must not inherit that call's dynamic scope (see
+            # `clear_task_scope!`).
+            tasks[idx] = clear_task_scope!(@task reusable_task_loop(chan, r))
         end
         cache = new(tasks, chans, ready, t->nothing, N, false)
         finalizer(cache) do cache
@@ -602,20 +643,33 @@ function reusable_task_loop(chan::Channel{Any}, ready::Threads.Atomic{Bool})
         Threads.atomic_xchg!(ready, true)
     end
 end
-function (cache::ReusableTaskCache)(f, name::String)
+# `register` (if non-nothing) is called with the Task BEFORE the payload is
+# dispatched onto it. Callers that record the Task in bookkeeping the payload
+# itself consults on completion (e.g. `istate.tasks`) need this
+# happens-before: with tiny payloads on other threads, dispatch-then-record
+# loses the race and the payload's completion path spins/sleeps waiting for
+# the record to appear.
+function (cache::ReusableTaskCache)(f, name::String, register=nothing)
     idx = findfirst(getindex, cache.ready)
     if idx !== nothing
         @assert Threads.atomic_xchg!(cache.ready[idx], false)
+        t = cache.tasks[idx]
+        register === nothing || register(t)
         put!(cache.chans[idx], f)
-        Sch.errormonitor_tracked_set!(name, cache.tasks[idx])
-        return cache.tasks[idx]
+        # N.B. No errormonitor_tracked_set! here: pooled tasks are registered
+        # once at init, and renaming the tracked entry per dispatch was an
+        # O(n) locked scan on the hot path for a debugging-only list
+        return t
     else
         t = @task try
             @invokelatest f()
         catch err
-            @error "[$r] Error in non-reusable task" exception=(err, catch_backtrace())
+            @error "[$name] Error in non-reusable task" exception=(err, catch_backtrace())
         end
         cache.setup_f(t)
+        # Matches the pooled path: payloads run with no ambient dynamic scope
+        clear_task_scope!(t)
+        register === nothing || register(t)
         schedule(t)
         Sch.errormonitor_tracked(name, t)
         return t
@@ -623,13 +677,13 @@ function (cache::ReusableTaskCache)(f, name::String)
     return
 end
 
-macro reusable_tasks(name, N, setup_ex, task_name, task_ex)
+macro reusable_tasks(name, N, setup_ex, task_name, task_ex, register_ex=nothing)
     cache_name = Symbol("__$(name)_TLV_ReusableTaskCache")
     if !hasproperty(__module__, cache_name)
         __module__.eval(:(#=const=# $cache_name = $TaskLocalValue{$ReusableTaskCache}(()->$ReusableTaskCache($N))))
     end
     return esc(quote
         $reusable_task_cache_init!($setup_ex, $cache_name[])
-        $cache_name[]($task_ex, $task_name)
+        $cache_name[]($task_ex, $task_name, $register_ex)
     end)
 end

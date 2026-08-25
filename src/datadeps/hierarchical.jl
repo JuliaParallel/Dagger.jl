@@ -219,18 +219,18 @@ whole-chunk copy from the true owner (with a syncdep on the producing task). A
 no-op for private chunks or when we already hold the authoritative version.
 """
 function _sync_incoming_ownership!(state::DataDepsState, registry::SharedChunkRegistry,
-                                   our_space::MemorySpace, task_arg_ws, write_num::Int)
-    map_or_ntuple(task_arg_ws) do idx
-        arg_ws = task_arg_ws[idx]
-        (arg_ws.may_alias && arg_ws.inplace_move) || return
+                                   our_space::MemorySpace, task_arg_ws::Vector{TaskArgInfo}, write_num::Int)
+    deps_vec = state.scratch_deps
+    for arg_ws in task_arg_ws
+        (arg_ws.may_alias && arg_ws.inplace_move) || continue
         chunk = arg_ws.arg
         entry = get(registry.entries, chunk, nothing)
-        entry === nothing && return
+        entry === nothing && continue
 
         owner_space, owner_slot, owner_task = @lock registry.lock begin
             (entry.owner_space, entry.owner_slot, entry.owner_task)
         end
-        owner_space == our_space && return # we already hold the authoritative copy
+        owner_space == our_space && continue # we already hold the authoritative copy
 
         # Register the owner's physical slot so slot/aliasing lookups in this
         # partition reuse it (rather than generating a fresh, stale copy).
@@ -240,8 +240,8 @@ function _sync_incoming_ownership!(state::DataDepsState, registry::SharedChunkRe
             state.remote_arg_to_original[owner_slot] = chunk
         end
 
-        map_or_ntuple(arg_ws.deps) do dep_idx
-            dep = arg_ws.deps[dep_idx]
+        for di in arg_deps_range(arg_ws)
+            dep = deps_vec[di]
             arg_w = dep.arg_w
             # Point ownership at the owner space and clear any locally-merged
             # history, so `compute_remainder_for_arg!` takes the `FullCopy`
@@ -254,9 +254,7 @@ function _sync_incoming_ownership!(state::DataDepsState, registry::SharedChunkRe
                 # producer, so we never copy the owner slot before it is written.
                 state.ainfos_owner[src_ainfo] = owner_task => (write_num - 1)
             end
-            return
         end
-        return
     end
     return
 end
@@ -271,20 +269,15 @@ pull from here. Ordering (and thus visibility) is guaranteed by the DAG's
 chunks.
 """
 function _commit_ownership!(state::DataDepsState, registry::SharedChunkRegistry,
-                            our_space::MemorySpace, task::DTask, task_arg_ws)
-    map_or_ntuple(task_arg_ws) do idx
-        arg_ws = task_arg_ws[idx]
-        (arg_ws.may_alias && arg_ws.inplace_move) || return
+                            our_space::MemorySpace, task::DTask, task_arg_ws::Vector{TaskArgInfo})
+    deps_vec = state.scratch_deps
+    for arg_ws in task_arg_ws
+        (arg_ws.may_alias && arg_ws.inplace_move) || continue
         chunk = arg_ws.arg
         entry = get(registry.entries, chunk, nothing)
-        entry === nothing && return
+        entry === nothing && continue
 
-        wrote = false
-        map_or_ntuple(arg_ws.deps) do dep_idx
-            arg_ws.deps[dep_idx].writedep && (wrote = true)
-            return
-        end
-        wrote || return
+        any(di->deps_vec[di].writedep, arg_deps_range(arg_ws)) || continue
 
         dest_args = get(state.remote_args, our_space, nothing)
         slot = dest_args === nothing ? nothing : get(dest_args, chunk, nothing)
@@ -294,7 +287,6 @@ function _commit_ownership!(state::DataDepsState, registry::SharedChunkRegistry,
             entry.owner_task = task
             entry.owner_state = state
         end
-        return
     end
     return
 end
@@ -732,12 +724,22 @@ const HIER_TASKS_PER_PARTITION = 16
 
 How many partitions to split `ntasks` into when all processors share an owner.
 
+Currently always 1 (plan flat): with the flat planner's per-task cost now in
+the tens of microseconds, measurements on 8 threads show partitioned planning
+losing to flat at every tested single-owner scale — 576 tasks: 26 ms flat vs
+84 ms partitioned; 4096 tasks: 187 ms flat vs 384 ms partitioned — because the
+partition machinery (aliasing prescan, DAG build, per-partition states,
+cross-partition syncdeps) costs more than the planning it parallelizes.
+Multi-owner regions are unaffected (they partition by data ownership, not by
+this throughput heuristic). Revisit if per-partition overheads shrink or a
+scale is found where serial planning dominates.
+
 Capped at half of `nprocs` because partition planning tasks and the processor
 runners execute on the same threads: one partition per processor leaves nothing
 to run the work being planned, and measures slower than not partitioning at all.
 """
 single_owner_partition_count(ntasks::Int, nprocs::Int) =
-    clamp(ntasks ÷ HIER_TASKS_PER_PARTITION, 1, max(1, nprocs ÷ 2))
+    1
 
 """
     partition_dag(dag, task_metas, all_procs) -> (vertex_to_partition, n_partitions, partition_procs)
@@ -1202,7 +1204,7 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
     end
     if uniform_execution(accel)
         for proc in all_procs
-            check_uniform(proc)
+            @check_uniform(proc)
         end
     end
 

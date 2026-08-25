@@ -32,7 +32,16 @@ end
 
 function errormonitor_reaper_loop()
     while true
-        sleep(ERRORMONITOR_REAPER_INTERVAL[])
+        try
+            sleep(ERRORMONITOR_REAPER_INTERVAL[])
+        catch err
+            # The timer is closed out from under us when the process tears
+            # down. That's a normal exit for this loop, not a failure — but
+            # `errormonitor` would print it as an unhandled task error after
+            # the testsuite has already reported success.
+            err isa EOFError && break
+            rethrow()
+        end
         stood_down = lock(ERRORMONITOR_TRACKED) do tracked
             filter!(o -> !istaskdone(last(o)), tracked)
             if isempty(tracked)
@@ -135,7 +144,11 @@ function fill_registered_futures!(state, thunk, failed)
     node = head
     while node !== nothing
         put!(node.future, result; error=failed)
-        node = @atomic node.next
+        # The walk owns the chain exclusively after the seal (double-seal
+        # returns nothing), so the drained node can be recycled
+        next = @atomic node.next
+        Dagger.recycle_future_node!(node)
+        node = next
     end
 end
 
@@ -163,6 +176,11 @@ function schedule_dependents!(state, thunk, failed, ready_out::Vector{Thunk})
     node = head
     while node !== nothing
         dep = node.thunk::Thunk
+        # The walk owns the chain exclusively after the seal; take next and
+        # recycle the drained node before processing the dependent
+        next_node = @atomic node.next
+        Dagger.recycle_dep_node!(node)
+        node = next_node
         if !failed
             # Push our result into `dep`'s input slots now, while it is still
             # alive, so deferred scheduling of `dep` (Fix A) does not race with
@@ -199,7 +217,6 @@ function schedule_dependents!(state, thunk, failed, ready_out::Vector{Thunk})
                 push!(ready_out, dep)
             end
         end
-        node = @atomic node.next
     end
     @dagdebug thunk :finish "Marked $ctr dependents as $(failed ? "failed" : "ready")"
 end
@@ -247,8 +264,11 @@ function reschedule_syncdeps!(state, thunk, ready_out::Vector{Thunk}, seen=nothi
                         pushed = deps_push!(input, cur)
                         if !pushed
                             # input finished between our check and the push;
-                            # undo the +1 (the seal-swap already happened).
+                            # undo the +1 (the seal-swap already happened) and
+                            # resolve the slots ourselves, exactly as for an
+                            # input that was already finished on entry.
                             @atomic cur.pending_deps -= 1
+                            resolve_finished_input!(state, cur, input)
                         end
 
                         # DFS into input only if we haven't visited it yet and
@@ -257,8 +277,28 @@ function reschedule_syncdeps!(state, thunk, ready_out::Vector{Thunk}, seen=nothi
                                 !(@atomic input.running) && !(@atomic input.valid)
                             push!(to_visit, input)
                         end
+                    else
+                        # A finished (non-errored) input contributes no pending
+                        # dep -- and gets no dependents entry either, so
+                        # `input`'s own `schedule_dependents!` has been and gone
+                        # and will never push its result into `cur`'s input
+                        # slots. Resolve them here instead, while `input` is
+                        # still alive and holding its result.
+                        #
+                        # This is not an optimization: from here on `cur`
+                        # references `input` only *weakly*, and a finished dep
+                        # is deliberately never marked `sch_accessible` (see
+                        # `eager_submit_internal!`), so dropping the user's
+                        # `DTask` lets `unref_thunk!` delete and recycle the
+                        # Thunk. The recycled object is handed back out with a
+                        # fresh id, `unwrap_weak` starts returning `nothing`,
+                        # and the next `collect_task_inputs!` for `cur` trips
+                        # the `unwrap_weak_checked` assertion -- inside a
+                        # completion handler, on a pooled task whose error
+                        # handler only logs, so the dependent is never
+                        # scheduled and the scheduler hangs.
+                        resolve_finished_input!(state, cur, input)
                     end
-                    # Finished (non-errored) input contributes no pending dep.
                 end
             end
 
@@ -349,7 +389,15 @@ function print_sch_status(io::IO, state, thunk; offset=0, limit=5, max_inputs=3)
         print(io, "($(status_string(thunk))) ")
     end
     println(io, "$(thunk.id): $(thunk.f)")
-    for (idx, input) in enumerate(thunk.options.syncdeps)
+    # Load the syncdeps set exactly once: datadeps detaches and recycles the
+    # pooled set (resetting the field to `nothing`) concurrently with this
+    # debug printer, so a re-read between the check and the loop could see
+    # `nothing`. Entries are `ThunkSyncdep`s — unwrap the `WeakThunk` form and
+    # skip planner-form (`ThunkID`) entries.
+    syncdeps = thunk.options.syncdeps
+    syncdeps === nothing && return
+    for (idx, syncdep) in enumerate(syncdeps)
+        input = syncdep.thunk
         if input isa WeakThunk
             input = Dagger.unwrap_weak(input)
             if input === nothing
@@ -412,17 +460,30 @@ function report_catch_error(err, desc=nothing)
 end
 
 chunktype(x) = typeof(x)
-signature(state, task::Thunk) =
-    signature(task.inputs[1], @view task.inputs[2:end])
+function signature(state, task::Thunk)
+    # Memoized: only valid once inputs are resolved (signature() throws
+    # otherwise, so we never cache a premature result). A benign write race
+    # can only store equal values.
+    sig = task.sig
+    sig === nothing || return sig
+    sig = signature(task.inputs[1], @view task.inputs[2:end])
+    task.sig = sig
+    return sig
+end
 function signature(f, args)
     n_pos = count(Dagger.ispositional, args)
     any_kw = any(!Dagger.ispositional, args)
     kw_extra = any_kw ? 2 : 0
     sig = Vector{Any}(undef, 1+n_pos+kw_extra)
     sig[1+kw_extra] = chunktype(f)
-    #=FIXME:REALLOC_N=#
-    sig_kwarg_names = Symbol[]
-    sig_kwarg_types = []
+    # N.B. The kwarg accumulators are only allocated when there actually are
+    # kwargs (the common case has none), so the loop is split on `any_kw`.
+    local sig_kwarg_names, sig_kwarg_types
+    if any_kw
+        #=FIXME:REALLOC_N=#
+        sig_kwarg_names = Symbol[]
+        sig_kwarg_types = []
+    end
     for idx in 1:length(args)
         arg = args[idx]
         value = Dagger.value(arg)
@@ -588,7 +649,13 @@ function collect_task_inputs!(state, inputs)
     for idx in 1:length(inputs)
         input = unwrap_weak_checked(Dagger.value(inputs[idx]))
         if istask(input)
-            inputs[idx].value = wrap_weak(load_result(state, input))
+            # N.B. The resolved result is stored STRONGLY: the consumer is now
+            # the owner keeping it alive until its own teardown. (It was
+            # previously wrap_weak'd, which relied on `equiv_chunks` pinning
+            # every result — but that pin was immortal, leaking all results;
+            # with weak equiv_chunks values, a weak slot could expire between
+            # the producer's teardown and this task firing.)
+            inputs[idx].value = load_result(state, input)
         end
     end
     return
@@ -618,7 +685,8 @@ function resolve_finished_input!(state, dep::Thunk, up::Thunk)
         # would instead assert and crash the completion worker.
         input = unwrap_weak(Dagger.value(inputs[idx]))
         if input === up
-            inputs[idx].value = wrap_weak(load_result(state, up))
+            # Stored strongly — see collect_task_inputs! for rationale
+            inputs[idx].value = load_result(state, up)
         end
     end
     return
@@ -642,7 +710,6 @@ const EMPTY_TRANSFER_RATES = Dict{Processor,UInt64}()
 
     # Find all Chunks
     chunks = @reusable_vector :estimate_task_costs_chunks Union{Chunk,Nothing} nothing 32
-    chunks_cleanup = @reuse_defer_cleanup empty!(chunks)
     for input in task.inputs
         if Dagger.valuetype(input) <: Chunk
             push!(chunks, Dagger.value(input)::Chunk)
@@ -663,20 +730,21 @@ const EMPTY_TRANSFER_RATES = Dict{Processor,UInt64}()
     # TODO: For non-Chunk, model cost from scheduler to worker
     # TODO: Measure and model processor move overhead
     tx_costs = @reusable_dict :estimate_task_costs_tx_costs Processor Float64 OSProc() 0.0 8
-    tx_costs_cleanup = @reuse_defer_cleanup empty!(tx_costs)
     for proc in procs
         gproc = get_parent(proc)
         haskey(tx_costs, gproc) && continue
         chunks_filt = Iterators.filter(c->get_parent(processor(c)) != gproc, chunks)
         tx_costs[gproc] = impute_sum(datasize(chunk) for chunk in chunks_filt)
     end
-    chunks_cleanup()
+    empty!(chunks)
 
     # Estimate total cost for executing this task on each candidate processor.
     # The transfer-rate table is taken once rather than once per processor.
-    all_equal = true
-    lock(state.worker_transfer_rate) do wtr
+    # N.B. `all_equal` is returned from the locked block rather than assigned
+    # to a captured outer local, which would Core.Box it.
+    all_equal = lock(state.worker_transfer_rate) do wtr
         local first_cost = 0.0
+        local all_equal = true
         for (idx, proc) in enumerate(procs)
             gproc = get_parent(proc)
             pid = Dagger.root_worker_id(gproc)
@@ -694,17 +762,23 @@ const EMPTY_TRANSFER_RATES = Dict{Processor,UInt64}()
                 all_equal = false
             end
         end
+        return all_equal
     end
-    tx_costs_cleanup()
+    empty!(tx_costs)
 
     # Shuffle procs around, so equally-costly procs are equally considered
     np = length(procs)
-    @reusable :estimate_task_costs_P Vector{Int} 0 4 np P begin
-        resize!(P, np)
-        copyto!(P, 1:np)
-        randperm!(P)
-        for idx in 1:np
-            sorted_procs[idx] = procs[P[idx]]
+    if np == 1
+        # Nothing to shuffle
+        sorted_procs[1] = procs[1]
+    else
+        @reusable :estimate_task_costs_P Vector{Int} 0 4 np P begin
+            resize!(P, np)
+            copyto!(P, 1:np)
+            randperm!(P)
+            for idx in 1:np
+                sorted_procs[idx] = procs[P[idx]]
+            end
         end
     end
 

@@ -12,6 +12,20 @@ iscompatible_func(proc::ThreadProc, opts, f) = true
 iscompatible_arg(proc::ThreadProc, opts, x) = true
 function execute!(proc::ThreadProc, @nospecialize(f), @nospecialize(args...); @nospecialize(kwargs...))
     tls = get_tls()
+    if Threads.threadid() == proc.tid && Base.current_task().sticky
+        # Already pinned to this processor's thread (the normal case when the
+        # scheduler runs us on a pooled, pinned task): run inline instead of
+        # spawning and fetching a second Task. TLS is already ours.
+        if task_logging_enabled()
+            TimespanLogging.prof_task_put!(tls.sch_handle.thunk_id.id)
+        end
+        try
+            return @invokelatest f(args...; kwargs...)
+        catch err
+            err isa InterruptException && rethrow()
+            rethrow(CapturedException(err, catch_backtrace()))
+        end
+    end
     # FIXME: Use return type of the call to specialize container
     result = Ref{Any}()
     task = Task() do
