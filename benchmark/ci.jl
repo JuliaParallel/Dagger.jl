@@ -17,6 +17,10 @@
 #   Allocation counts are near-deterministic, but Dagger's steady state has
 #   some scheduling-dependent variance, so this is looser than the time gate
 #   while still catching any real allocation regression.
+# - BENCHMARK_NOISE_TOLERANCE: multiple of the reported timing spread that a
+#   change must clear before it is called a regression or an improvement
+#   (default "1.0"). See "Regression check" below; set to "0" to disable the
+#   significance gate and report purely on the thresholds.
 # - BENCHMARK_CI_THREADS: Julia threads for each benchmark run (default "4").
 # - BENCHMARK_OUTPUT_DIR: where JSON/plots/report are written
 #   (default "benchmark_results").
@@ -37,6 +41,7 @@ const BASE_REV = get(ENV, "BENCHMARK_BASE_REV", "master")
 const CUR_REV = "dirty"  # the working-tree checkout (this PR/commit)
 const THRESHOLD = parse(Float64, get(ENV, "BENCHMARK_REGRESSION_THRESHOLD", "0.10"))
 const ALLOC_THRESHOLD = parse(Float64, get(ENV, "BENCHMARK_ALLOC_REGRESSION_THRESHOLD", "0.25"))
+const NOISE_TOLERANCE = parse(Float64, get(ENV, "BENCHMARK_NOISE_TOLERANCE", "1.0"))
 const CI_THREADS = get(ENV, "BENCHMARK_CI_THREADS", "4")
 const OUTPUT_DIR = abspath(get(ENV, "BENCHMARK_OUTPUT_DIR", "benchmark_results"))
 
@@ -105,15 +110,45 @@ base = combined[BASE_REV]
 cur = combined[CUR_REV]
 
 # Each benchmark is gated on three metrics: median time, allocation count, and
-# allocated bytes. Entries are (name, metric label, current/base ratio).
+# allocated bytes. Entries are (metric label, results key, threshold).
 const METRICS = [
     ("time", "median", THRESHOLD),
     ("allocs", "allocs", ALLOC_THRESHOLD),
     ("memory", "memory", ALLOC_THRESHOLD),
 ]
 
+# A change is only called a regression or an improvement when it is both *large*
+# (past the metric's threshold) and *resolvable* (bigger than the run-to-run
+# noise). Without the second condition a benchmark whose timing wanders by more
+# than the threshold from run to run reports a regression or an improvement on
+# essentially every build, which is how the benchmark job ends up red for no
+# reason -- and, worse, trains everyone to ignore it.
+#
+# The noise model is the same one the results table prints, so the report can
+# never contradict itself: timings are summarized as `median ± (q75 - q25)`, and
+# a change counts only if those bands do not overlap. `BENCHMARK_NOISE_TOLERANCE`
+# scales the band (0 disables the gate).
+#
+# Only timings carry a spread: each BenchmarkTools trial records the allocation
+# count and byte count of a *single* post-warmup evaluation, so `allocs`/`memory`
+# have no distribution to speak of and stay gated on their threshold alone.
+"""
+    noise_halfwidth(stats, key) -> Float64 or nothing
+
+Half-width of the uncertainty band around `stats[key]`, or `nothing` when the
+metric was not sampled repeatedly and so carries no spread information.
+"""
+function noise_halfwidth(stats, key)
+    key == "median" || return nothing
+    q25 = get(stats, "25", nothing)
+    q75 = get(stats, "75", nothing)
+    (q25 === nothing || q75 === nothing) && return nothing
+    return NOISE_TOLERANCE * (q75 - q25)
+end
+
 regressions = Tuple{String,String,Float64}[]
 improvements = Tuple{String,String,Float64}[]
+within_noise = Tuple{String,String,Float64}[]
 for (name, stats) in cur
     name == "time_to_load" && continue  # too noisy to gate on
     haskey(base, name) || continue
@@ -122,15 +157,34 @@ for (name, stats) in cur
         cm = get(stats, key, nothing)
         (bm === nothing || cm === nothing || bm == 0) && continue
         ratio = cm / bm
-        if ratio > 1 + threshold
-            push!(regressions, (name, label, ratio))
+        direction = if ratio > 1 + threshold
+            :regression
         elseif ratio < 1 - threshold
+            :improvement
+        else
+            continue
+        end
+        base_hw = noise_halfwidth(base[name], key)
+        cur_hw = noise_halfwidth(stats, key)
+        significant = if base_hw === nothing || cur_hw === nothing
+            true  # no spread recorded: the threshold is all we have
+        elseif direction === :regression
+            cm - cur_hw > bm + base_hw
+        else
+            cm + cur_hw < bm - base_hw
+        end
+        if !significant
+            push!(within_noise, (name, label, ratio))
+        elseif direction === :regression
+            push!(regressions, (name, label, ratio))
+        else
             push!(improvements, (name, label, ratio))
         end
     end
 end
 sort!(regressions; by = last, rev = true)
 sort!(improvements; by = last)
+sort!(within_noise; by = last, rev = true)
 
 pct(r) = string(round((r - 1) * 100; digits = 1), "%")
 
@@ -158,10 +212,12 @@ open(joinpath(OUTPUT_DIR, "report.md"), "w") do io
     end
     if isempty(regressions)
         println(io, "No time regressions beyond ", pct(1 + THRESHOLD),
-                " or allocation regressions beyond ", pct(1 + ALLOC_THRESHOLD), " 🎉")
+                " or allocation regressions beyond ", pct(1 + ALLOC_THRESHOLD),
+                " (timing changes inside the reported ±spread don't count) 🎉")
     else
         println(io, "#### ⚠️ Regressions (time > ", pct(1 + THRESHOLD),
-                ", allocs/memory > ", pct(1 + ALLOC_THRESHOLD), ")")
+                " and outside the reported ±spread; allocs/memory > ",
+                pct(1 + ALLOC_THRESHOLD), ")")
         println(io)
         for (name, metric, r) in regressions
             println(io, "- `", name, "` (", metric, "): +", pct(r))
@@ -175,9 +231,31 @@ open(joinpath(OUTPUT_DIR, "report.md"), "w") do io
             println(io, "- `", name, "` (", metric, "): ", pct(r))
         end
     end
+    if !isempty(within_noise)
+        # Listed, but deliberately not counted as either outcome: these cleared
+        # their threshold while staying inside the run-to-run spread, so they
+        # are drift to keep an eye on, not results.
+        println(io)
+        println(io, "<details><summary>Within noise (",
+                length(within_noise), " metric(s) past threshold but inside the ",
+                "±spread; not counted)</summary>")
+        println(io)
+        for (name, metric, r) in within_noise
+            println(io, "- `", name, "` (", metric, "): ", pct(r))
+        end
+        println(io)
+        println(io, "</details>")
+    end
 end
 
 # --- Summary + exit status -------------------------------------------------
+
+if !isempty(within_noise)
+    println("\n$(length(within_noise)) metric(s) moved past their threshold but stayed within the measured spread (not counted):")
+    for (name, metric, r) in within_noise
+        println("  - $name ($metric): $(pct(r))")
+    end
+end
 
 if isempty(regressions)
     println("\nNo benchmarks regressed (time > $(round(THRESHOLD * 100))%, allocs/memory > $(round(ALLOC_THRESHOLD * 100))%).")
