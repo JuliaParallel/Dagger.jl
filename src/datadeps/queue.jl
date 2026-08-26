@@ -107,6 +107,15 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
     end
     poisoned === nothing || throw(poisoned)
 
+    # Bound how large a carried-over `state` may get before we insist on a
+    # drain. See `DATADEPS_STATE_LIMIT` (context.jl) for the measurements and
+    # for why this is a stopgap rather than the real fix. Deliberately here,
+    # at region entry, rather than next to `apply_inflight_backpressure!`
+    # inside `distribute_tasks!`: a drain re-enters
+    # `with_datadeps_planning_token`, which the planner already holds by that
+    # point.
+    apply_state_size_backpressure!(ddctx)
+
     hierarchical = something(hierarchical, DATADEPS_HIERARCHICAL[], true)::Bool
     # N.B. Neither `hierarchical=true` (the default) nor uniform (MPI/SPMD)
     # execution forces `sync=true` anymore. Uniform execution stopped forcing
