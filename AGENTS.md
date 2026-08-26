@@ -99,3 +99,36 @@ lesson.
    (compile-time explosion, tuple re-boxing), and don't erase types on the
    path where the compiler genuinely uses them (kernel invocation, argument
    moves). A function barrier at the boundary lets each side be what it is.
+
+12. **Never evaluate a scheduling change on a workload dominated by serial
+   submission.** Dagger's per-task submission cost is ~70-130us and the
+   `add_thunk` path is largely *serial*, so a fine-grained workload measures
+   submission overhead and nothing else — a scheduling or pipelining change
+   lands on the critical path and reads as a regression regardless of its
+   merit. Before trusting any number, check two things: processor occupancy
+   (the 3-D pencil FFT sat at **8.6%**, i.e. 12 threads idle 91% of the time),
+   and whether the `:add_thunk` timespan category has **interval-union ==
+   summed duration**. Union == sum means strictly serial — no two intervals
+   ever overlap — which is a stronger and more useful signal than lock
+   contention, since contention would still show overlap (timespans open
+   before locks are taken). This exact trap produced, and then reversed, a
+   "asynchronous regions are slower" conclusion.
+
+13. **A per-dimension block divisor is exponential in the split dimensions.**
+   `Blocks(N, cld(N,np), cld(N,np))` has `np^2` chunks, and a transpose
+   between two such arrays costs `np^3` copy tasks. Sizing `np` by the
+   processor count (correct only for a 1-D split) made one 3-D `fft()` submit
+   ~5000 tasks at 12 threads and cost **6.8x** — a penalty that *grew* with
+   the thread count, since the divisor tracked it. Wall time tracked task
+   count almost exactly, not FLOPs. Target ~`nprocs` chunks total: take the
+   `nsplit`-th root (`ext/AbstractFFTsExt.jl`'s `_split_divisor`). Whenever a
+   decomposition parameter is applied per-dimension, work out the total chunk
+   count before assuming it scales the way you meant.
+
+14. **Allocate scratch arrays with `undef` when they are provably overwritten.**
+   `zeros(Blocks(...), T, dims)` costs a full write pass plus one task per
+   chunk. For an intermediate that is fully covered by a later whole-array
+   `copyto!` there is nothing to zero — but "fully covered" must be checked,
+   not assumed: it holds when the destination's dims equal the source's
+   exactly, so no `cld`-rounded edge block is left partially written. Doing
+   this for the FFT's three pencil arrays cut RSS ~50% and wall time ~20%.
