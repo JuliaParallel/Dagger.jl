@@ -111,13 +111,33 @@ function dump_streaming_state()
                 println(io, "    ", name,
                         ": started=", istaskstarted(task),
                         " done=", istaskdone(task),
-                        " failed=", istaskfailed(task))
+                        " failed=", istaskfailed(task),
+                        " sticky=", task.sticky,
+                        " tid=", Threads.threadid(task),
+                        " pool=", Threads.threadpool(task),
+                        " queued=", task.queue !== nothing)
             end
         end
     catch err
         println(io, "  <drain-task dump failed: ", sprint(showerror, err), ">")
     end
+    println(io, "  threads: default=", Threads.threadpoolsize(:default),
+            " interactive=", Threads.threadpoolsize(:interactive),
+            " cpus=", Sys.CPU_THREADS)
     @warn String(take!(io))
+    # The state above says *which* tasks are wedged but not *where*. Several
+    # drain tasks are reported as never even started, which no amount of
+    # buffer/thunk state explains -- the question is what every OS thread is
+    # actually doing at that moment. This prints a backtrace for every live task
+    # on every thread (the same dump `SIGINFO` produces, but it also works on
+    # Windows, which is the only platform that reproduces this).
+    try
+        flush(stderr)
+        ccall(:jl_print_task_backtraces, Cvoid, (Cint,), 0)
+        flush(stderr)
+    catch err
+        @warn "task backtrace dump failed" exception=err
+    end
     return
 end
 
