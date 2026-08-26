@@ -657,6 +657,31 @@ function ultra_signature_time!(sched::UltraScheduler, spec::DTaskSpec)
 end
 
 function datadeps_schedule_task(sched::UltraScheduler, state::DataDepsState, all_procs, all_scope, task_scope, spec::DTaskSpec, task::DTask)
+    # Refuse rather than deadlock. Every input to the placement decision below
+    # was made rank-uniform on purpose -- `task_time` is flattened to the
+    # placeholder, `datadeps_tracked_args` returns nothing, every tie-break is
+    # positional over `all_procs` -- and yet a 2-rank measurement says the
+    # result is *not* uniform in practice:
+    #
+    #   4 isolated runs, 2 ranks, 8 tasks over 8 arrays, `check_uniformity!(true)`
+    #   RoundRobinScheduler: 4/4 correct
+    #   UltraScheduler:      3/4 `[rank 0][tag 1073741823] Hit hang on recv`,
+    #                        1/4 correct but hung at shutdown
+    #
+    # The divergent input has not been identified, so this cannot be presented
+    # as rank-uniform on the strength of a code reading -- the reading says it
+    # should be, and the machine says otherwise. Until someone finds it, a
+    # clear error beats an intermittent hang: a deadlock under SPMD gives no
+    # error, no wrong answer, and no backtrace pointing here.
+    #
+    # This costs nothing in practice. On the blocked-Cholesky benchmark this
+    # scheduler was rewritten against, it measured 422ms against
+    # `RoundRobinScheduler`'s 422ms -- within noise -- so there is no
+    # MPI workload that wants it badly enough to justify shipping a hang.
+    if uniform_execution()
+        throw(Sch.SchedulingException("UltraScheduler is not verified rank-uniform and intermittently deadlocks under uniform (SPMD/MPI) execution; use RoundRobinScheduler"))
+    end
+
     bias = DATADEPS_LOCALITY_BIAS[]
 
     # Region boundary: `all_procs` is rebuilt once per region, so a change of

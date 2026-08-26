@@ -23,12 +23,13 @@
 #
 # GPU coverage lives in test/mpi_cuda.jl (CUDA) and test/mpi_rocm.jl (ROCm).
 #
-# Known gaps (not tested): the non-default `DataDepsScheduler`s.
-# `NaiveScheduler` now raises under uniform execution rather than deadlocking
-# on divergent placement (`estimate_task_costs` ranks with per-rank
-# measurements and breaks ties with `randperm!`). `UltraScheduler` is
-# rank-uniform by construction -- it drops the one rank-local input
-# (`signature_time_cost`) under uniform execution -- but is untested here.
+# Known gaps (not tested here): the non-default `DataDepsScheduler`s. Both now
+# raise under uniform execution rather than deadlocking. `NaiveScheduler`
+# ranks with per-rank measurements and breaks ties with `randperm!`, so it
+# cannot agree across ranks. `UltraScheduler` was *built* to be rank-uniform
+# (flattened task times, no locality weights, positional tie-breaks) but
+# measured otherwise: 3 of 4 isolated 2-rank runs hung on recv. The divergent
+# input has not been found.
 #
 # Run: mpiexec -n 4 julia --project --threads=2 test/mpi.jl
 
