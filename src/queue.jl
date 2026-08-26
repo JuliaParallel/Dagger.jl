@@ -83,10 +83,24 @@ enqueue!(::DefaultTaskQueue, pair::DTaskPair) =
 enqueue!(::DefaultTaskQueue, pairs::Vector{DTaskPair}) =
     eager_launch!(pairs)
 
-enqueue!(pair::DTaskPair) =
-    enqueue!(get_options(:task_queue, DefaultTaskQueue()), pair)
-enqueue!(pairs::Vector{DTaskPair}) =
-    enqueue!(get_options(:task_queue, DefaultTaskQueue()), pairs)
+# N.B. These two are the single choke point every `Dagger.@spawn` passes
+# through, which is why the Datadeps interop check hangs off them rather than
+# off a queue type: a plain task submitted from a task that owns a
+# `DataDepsContext` needs checking no matter which queue happens to be
+# ambient. See `maybe_add_interop_deps!` (datadeps/interop.jl) -- it is two
+# loads and a return for any program with no live context.
+function enqueue!(pair::DTaskPair)
+    queue = get_options(:task_queue, DefaultTaskQueue())
+    maybe_add_interop_deps!(queue, pair.spec)
+    return enqueue!(queue, pair)
+end
+function enqueue!(pairs::Vector{DTaskPair})
+    queue = get_options(:task_queue, DefaultTaskQueue())
+    for pair in pairs
+        maybe_add_interop_deps!(queue, pair.spec)
+    end
+    return enqueue!(queue, pairs)
+end
 
 struct LazyTaskQueue <: AbstractTaskQueue
     tasks::Vector{DTaskPair}
