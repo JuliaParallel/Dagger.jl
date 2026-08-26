@@ -56,6 +56,10 @@ Wraps a task failure discovered by a `synchronize`-family call, annotated with
 the `spawn_datadeps` region that queued the failing task and (if still
 available) that region's resolved call-site backtrace.
 
+The backtrace is present only for regions queued with `sync=false`, which are
+the only ones this error can name: a synchronous region reports its own
+failures directly, unwrapped, without going through here.
+
 Only used by the explicit `Dagger.synchronize`/`synchronize_task!`/
 `synchronize_all!` API: the trailing, default-settings drain inside
 `spawn_datadeps` itself rethrows the original error unwrapped, so
@@ -314,6 +318,20 @@ function _targeted_wait_tasks(state::DataDepsState, targets::Set{ArgumentWrapper
     return out
 end
 
+"""
+    _state_is_pristine(state::DataDepsState) -> Bool
+
+Whether `state` is indistinguishable from a freshly constructed one, so that
+replacing it at the end of a drain would be pure allocation.
+
+Checks the two maps every tracked argument passes through: `raw_arg_to_chunk`
+gets an entry the first time any task touches an argument, and `ainfos_owner`
+one for each ainfo registered. A region that planned no tasks touches neither.
+Cheap enough (two `isempty`s) to pay on every drain.
+"""
+_state_is_pristine(state::DataDepsState) =
+    isempty(state.raw_arg_to_chunk) && isempty(state.ainfos_owner)
+
 const _VALID_GPU_SYNC = (:fence, :block, :none)
 
 """
@@ -540,7 +558,16 @@ function _do_synchronize!(ddctx::DataDepsContext;
         # Step 7: reset for the next epoch. Every task that could reference
         # the old `state`'s cache (copies, frees, the user's own tasks) has
         # now retired, so it's safe to start fresh.
-        if isdefined(ddctx, :state)
+        #
+        # N.B. Skipped when the existing state never tracked anything -- a
+        # state with no arguments and no ainfos is indistinguishable from a
+        # fresh one, so replacing it buys nothing and costs 108 allocations
+        # and 6.1 KB (a `DataDepsState` builds fifteen dictionaries and a
+        # `tochunk`'d object cache). That is the difference between an empty
+        # `spawn_datadeps` costing what it does on master and costing 3x
+        # that, which matters because `@stencil` emits one region per
+        # expression per iteration and most of them are small.
+        if isdefined(ddctx, :state) && !_state_is_pristine(ddctx.state)
             ddctx.state = DataDepsState()
         end
         empty!(ddctx.pending_free)

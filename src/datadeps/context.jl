@@ -138,7 +138,12 @@ mutable struct DataDepsContext
     # rebuild information the planner already recorded for free.
 
     # region id -> where `spawn_datadeps` was called, for error reporting.
-    # Captured unconditionally at region entry.
+    # Captured at region entry, but only under `sync=false`: a synchronous
+    # region rethrows its task's failure unwrapped from inside
+    # `spawn_datadeps`, with a live stack already naming the call site, so
+    # nothing ever reads the stored copy. `backtrace()` costs 34
+    # allocations and 9.1 KB, the largest single item in an empty
+    # synchronous region.
     #
     # N.B. These are *raw* instruction pointers, not resolved `StackFrame`s.
     # `stacktrace(backtrace())` costs ~119us against ~4.6us for the raw

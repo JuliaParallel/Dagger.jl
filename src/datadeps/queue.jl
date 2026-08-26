@@ -153,10 +153,23 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
     # (possibly running on a foreign task, via `synchronize_task!`/
     # `synchronize_all!`) reads and evicts `region_bt` entries under the same
     # lock, and `ContextQueue.enqueue!` reads `region_id` under it too.
-    bt = backtrace()
+    #
+    # N.B. Captured only under `sync=false`. `region_bt` exists to annotate
+    # `DataDepsRegionError`/`DataDepsPoisonedError`, both of which name a
+    # region whose call site is long gone -- and both of which are reachable
+    # only when regions outlive their `spawn_datadeps` call. A synchronous
+    # region rethrows its task's failure *unwrapped*, from inside
+    # `spawn_datadeps`, with a live stack already pointing at the call site, so
+    # the captured backtrace is never read. It is not free: `backtrace()`
+    # measures 34 allocations and 9.1 KB, which against an empty synchronous
+    # region's total is the single largest item, and `@stencil` emits one
+    # region per expression per iteration.
+    bt = sync ? nothing : backtrace()
     @lock ddctx.lock begin
         ddctx.region_id += 1
-        ddctx.region_bt[ddctx.region_id] = bt
+        if bt !== nothing
+            ddctx.region_bt[ddctx.region_id] = bt
+        end
     end
     ddctx.slots = SlotReuseRegion(Set{UInt}())
     return with(SLOT_REUSE_REGION => ddctx.slots) do
