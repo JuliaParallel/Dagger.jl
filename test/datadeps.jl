@@ -1002,6 +1002,67 @@ function Dagger.datadeps_schedule_task(::DummyErrorScheduler, state, all_procs, 
     throw(DummySchedulerError())
 end
 
+# Shared workload for the per-scheduler tests below. Kernels are `@everywhere`
+# because a scheduler is free to place any of them on any worker -- which is
+# the entire point of the exercise.
+@everywhere sched_fill_tile!(y, v) = (fill!(y, v); nothing)
+@everywhere sched_axpy_tile!(y, x, a) = (y .+= a .* x; nothing)
+@everywhere sched_scale_tile!(y, a) = (y .*= a; nothing)
+@everywhere sched_accum_tile!(acc, x) = (acc[1] += sum(x); nothing)
+@everywhere sched_where(_) = Dagger.task_processor()
+
+const SCHED_NT = 4      # tiles
+const SCHED_TILE = 32   # elements per tile
+
+sched_region_args() = ([zeros(SCHED_TILE) for _ in 1:SCHED_NT], zeros(1))
+
+"""
+    sched_region!(C, acc; spawn::Bool)
+
+One region's worth of work, or -- with `spawn=false` -- the plain sequential
+Julia that must produce the identical answer.
+
+Shaped to be hostile to a broken scheduler rather than merely non-trivial:
+
+- every `C[j]` is written by four separate tasks in sequence (`Out`, then
+  three `InOut`s), so a lost or reordered write-after-write shows up in the
+  result rather than being masked;
+- `acc` is `InOut` in every tile's last task, which serializes across tiles
+  and therefore forces the copy-back/copy-to path whenever consecutive tiles
+  land in different memory spaces;
+- the constants depend on both `j` and `k`, so a task placed correctly but
+  fed a stale replica of `C[j]` produces a wrong number rather than a
+  coincidentally-equal one.
+
+`spawn_datadeps` guarantees results equivalent to sequential execution in
+submission order, so `spawn=false` is a genuine oracle, not an approximation.
+"""
+function sched_region!(C, acc; spawn::Bool)
+    for j in 1:SCHED_NT
+        if spawn
+            Dagger.@spawn sched_fill_tile!(Out(C[j]), Float64(j))
+        else
+            sched_fill_tile!(C[j], Float64(j))
+        end
+        for k in 1:3
+            a = 1 / (j + k)
+            if spawn
+                Dagger.@spawn sched_axpy_tile!(InOut(C[j]), In(C[mod1(j + k, SCHED_NT)]), a)
+            else
+                sched_axpy_tile!(C[j], C[mod1(j + k, SCHED_NT)], a)
+            end
+        end
+        if spawn
+            Dagger.@spawn sched_scale_tile!(InOut(C[j]), 0.5)
+            Dagger.@spawn sched_accum_tile!(InOut(acc), In(C[j]))
+        else
+            sched_scale_tile!(C[j], 0.5)
+            sched_accum_tile!(acc, C[j])
+        end
+    end
+    return
+end
+
 @testset "Custom Schedulers" begin
     @testset "DummyErrorScheduler" begin
         # Test that our custom scheduler is actually called by Datadeps
@@ -1010,35 +1071,179 @@ end
         end
     end
 
-    @testset "RoundRobinScheduler" begin
-        # RoundRobinScheduler is the default and tested extensively above,
-        # but let's explicitly test passing it as an argument
-        A = rand(10)
-        result = Dagger.spawn_datadeps(; scheduler=Dagger.RoundRobinScheduler()) do
-            Dagger.@spawn sum(In(A))
-        end
-        @test fetch(result) ≈ sum(A)
-    end
-
-    @testset "NaiveScheduler" begin
-        # NaiveScheduler uses estimate_task_costs from the main scheduler
-        @test_skip begin
+    @testset "$sched_name" for (sched_name, make_sched) in
+            ("RoundRobinScheduler" => Dagger.RoundRobinScheduler,
+             "NaiveScheduler"      => Dagger.NaiveScheduler,
+             "UltraScheduler"      => Dagger.UltraScheduler)
+        @testset "Smoke" begin
             A = rand(10)
-            result = Dagger.spawn_datadeps(; scheduler=Dagger.NaiveScheduler()) do
+            result = Dagger.spawn_datadeps(; scheduler=make_sched()) do
                 Dagger.@spawn sum(In(A))
             end
-            fetch(result) ≈ sum(A)
+            @test fetch(result) ≈ sum(A)
+        end
+
+        # The real test. A single read-only `sum(In(A))` cannot distinguish a
+        # scheduler that works from one that returns an arbitrary processor:
+        # there is nothing to order and nothing to copy back, so *any*
+        # placement produces the right answer. `sched_region!` below is
+        # write-heavy and cross-tile-serialized, so it is only correct if the
+        # scheduler's placement, the resulting copies, and the dependency
+        # ordering all hold together.
+        @testset "Multi-task, mixed read/write" begin
+            for hierarchical in (true, false)
+                @testset "hierarchical=$hierarchical" begin
+                    C, acc = sched_region_args()
+                    C_ref, acc_ref = sched_region_args()
+                    sched_region!(C_ref, acc_ref; spawn=false)
+                    Dagger.spawn_datadeps(; scheduler=make_sched(), hierarchical) do
+                        sched_region!(C, acc; spawn=true)
+                    end
+                    @test C ≈ C_ref
+                    @test acc ≈ acc_ref
+                end
+            end
+        end
+
+        # A scheduler that always returned the same processor would still pass
+        # the correctness tests above, so assert placement actually spreads.
+        #
+        # `hierarchical=false` deliberately. Under the default hierarchical
+        # partitioner this measures the *partitioner*, not the scheduler:
+        # `partition_dag` assigns each task to the owner holding the most of
+        # its argument data before any scheduler runs, and these tiles are all
+        # freshly allocated on worker 1, so every task is (correctly, for a
+        # locality heuristic) partitioned onto worker 1 and every scheduler --
+        # including plain round robin -- returns one processor. Measured with
+        # 4 workers x 1 thread: all three schedulers place all 16 tasks on
+        # `ThreadProc(1, 1)` with `hierarchical=true`. See the report in the
+        # commit message for why that is the partitioner's call to make.
+        #
+        # Skipped when there is only one processor to spread *over*, which is
+        # a property of how the suite was invoked, not of the scheduler.
+        #
+        # What counts as "spread" depends on the invocation, and getting this
+        # wrong makes the test lie about `NaiveScheduler`. With more than one
+        # memory space present, the meaningful question is whether tasks reach
+        # more than one *space*: `NaiveScheduler` never sends one across (see
+        # below), but `estimate_task_costs` shuffles equally-costly processors
+        # with `randperm!`, so it does scatter over the threads of whichever
+        # single worker it picked -- which looks like spreading and isn't. With
+        # only one space, that shuffle is the only spreading available to
+        # anyone and processor identity is the right measure.
+        @testset "Uses more than one processor (flat path)" begin
+            all_procs = collect(Dagger.all_processors())
+            spaces = unique(only(Dagger.memory_spaces(p)) for p in all_procs)
+            multi_space = length(spaces) > 1
+            if length(all_procs) < 2
+                @test_skip "Needs >1 processor (more workers, or -t 2+)"
+            else
+                tiles = [rand(64) for _ in 1:16]
+                tasks = Dagger.spawn_datadeps(; scheduler=make_sched(), hierarchical=false) do
+                    map(t->Dagger.@spawn(sched_where(In(t))), tiles)
+                end
+                placed = fetch.(tasks)
+                spread = if multi_space
+                    length(unique(only(Dagger.memory_spaces(p)) for p in placed)) > 1
+                else
+                    length(unique(placed)) > 1
+                end
+                if make_sched === Dagger.NaiveScheduler && multi_space
+                    # Known and inherent, not a regression: `NaiveScheduler`
+                    # costs every task against the *live* scheduler's pressure,
+                    # which planning does not move -- only tasks that have
+                    # actually run do. With every tile resident on worker 1,
+                    # `estimate_task_costs` charges every other worker a
+                    # cross-worker transfer plus the fixed 1ms task-transfer
+                    # cost, for every task, so worker 1 wins all 16 times.
+                    # `@test_broken` rather than a skip so this flags if the
+                    # scheduler ever grows a memory of its own decisions.
+                    @test_broken spread
+                else
+                    @test spread
+                end
+            end
+        end
+
+        # Placement must respect a per-task scope, not just the region-wide
+        # one: `all_procs` is pre-filtered by the region scope, but a
+        # `scope=`/`compute_scope=` on an individual `@spawn` is handed to the
+        # scheduler as `task_scope`, and honoring it is the scheduler's job.
+        # Both `NaiveScheduler` and `UltraScheduler` used to ignore it
+        # entirely and hand back whatever their cost model ranked first, which
+        # `distribute_task!` then rejected with an `InvalidScope` -- a region
+        # failing on a constraint that was perfectly satisfiable.
+        #
+        # Pinned to the *last* processor rather than the first, and run on the
+        # flat path, so the answer can't be right by accident: the data all
+        # starts on worker 1, so "wherever the data is" and "whatever comes
+        # first in `all_procs`" are both the wrong answer here.
+        @testset "Respects a per-task scope" begin
+            if length(Dagger.all_processors()) < 2
+                @test_skip "Needs >1 processor (more workers, or -t 2+)"
+            else
+                pinned = last(sort!(collect(Dagger.all_processors()); by=repr))
+                tiles = [rand(64) for _ in 1:8]
+                tasks = Dagger.spawn_datadeps(; scheduler=make_sched(), hierarchical=false) do
+                    map(tiles) do t
+                        Dagger.@spawn scope=Dagger.ExactScope(pinned) sched_where(In(t))
+                    end
+                end
+                @test all(==(pinned), fetch.(tasks))
+            end
         end
     end
 
-    @testset "UltraScheduler" begin
-        # UltraScheduler is currently broken (references undefined exec_spaces)
-        @test_skip begin
-            A = rand(10)
-            result = Dagger.spawn_datadeps(; scheduler=Dagger.UltraScheduler()) do
-                Dagger.@spawn sum(In(A))
+    # `UltraScheduler` is the only one of the three that simulates the region
+    # it is planning, so it is the only one whose decisions are worth
+    # inspecting directly. These are white-box assertions about the model, run
+    # against the same synthetic setup `datadeps_locality.jl` uses.
+    @testset "UltraScheduler placement model" begin
+        if length(Dagger.all_processors()) < 2
+            @test_skip "Needs >1 processor (more workers, or -t 2+)"
+        else
+            all_procs = sort!(collect(Dagger.all_processors()); by=repr)
+            all_scope = Dagger.UnionScope(map(Dagger.ExactScope, all_procs))
+            state = Dagger.DataDepsState()
+            probe = Dagger.@spawn 1 + 1
+            fetch(probe)
+            spec = Dagger.DTaskSpec(Dagger.Argument[Dagger.Argument(1, sched_where),
+                                                     Dagger.Argument(2, In(rand(8)))],
+                                    Dagger.Options())
+
+            # Every task costs the same (nothing has been measured, so they
+            # all get the placeholder) and nothing is resident anywhere, so
+            # earliest-finish-time reduces to strict round robin over
+            # `all_procs` -- the same load-spreading round robin does, but
+            # arrived at by simulation rather than by rotation.
+            sched = Dagger.UltraScheduler()
+            n = length(all_procs)
+            placed = map(1:(2n)) do _
+                Dagger.datadeps_schedule_task(sched, state, all_procs, all_scope,
+                                              all_scope, spec, probe)
             end
-            fetch(result) ≈ sum(A)
+            @test placed == vcat(all_procs, all_procs)
+
+            # Placement is a pure function of the scheduler's state, so a
+            # fresh shard (what `similar` hands each hierarchical partition)
+            # must replay identically rather than continuing the first one.
+            sched2 = Base.similar(sched)
+            @test sched2 !== sched
+            replayed = map(1:n) do _
+                Dagger.datadeps_schedule_task(sched2, state, all_procs, all_scope,
+                                              all_scope, spec, probe)
+            end
+            @test replayed == all_procs
+
+            # Pinning every task to one processor must not silently spill onto
+            # another just because that one now looks less loaded.
+            pinned = all_procs[end]
+            sched3 = Dagger.UltraScheduler()
+            pinned_scope = Dagger.ExactScope(pinned)
+            @test all(1:(2n)) do _
+                Dagger.datadeps_schedule_task(sched3, state, all_procs, all_scope,
+                                              pinned_scope, spec, probe) === pinned
+            end
         end
     end
 end
