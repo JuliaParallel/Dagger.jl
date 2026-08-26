@@ -105,7 +105,24 @@ lesson.
    iteration; the resulting "entries added while we waited are picked up next
    round" semantics is well-defined, which the accidental version was not.
 
-12. **Keep type-stable and type-unstable paths at the right stability level.**
+12. **Never wait by spinning on `yield()`.** Julia permanently marks a task
+   `sticky` the moment it schedules any sticky task — an `@async`, which plenty
+   of library code (Distributed's transport included) does on your behalf.
+   `Base.enq_work` says so itself: *"XXX: Ideally we would be able to unset
+   this."* A sticky task re-enqueues itself into its **thread-local**
+   workqueue on `yield()`, and `trypoptask` drains that queue before it ever
+   consults the multiqueue where `Threads.@spawn`ed tasks live. So a sticky
+   task spinning on `yield()` stops its thread from picking up spawned work
+   *ever again*, and once every default thread is spinning that way, nothing
+   newly spawned can start at all — a permanent deadlock, not a slowdown.
+   Spin briefly if you want a cheap hand-off, then `sleep`: only a real
+   deschedule empties the thread's local queue. Two traps when testing this:
+   `enq_work` places default threads at `threadpoolsize(:interactive)+1`
+   onward, so pinning probes to tids `1:nthreads` leaves a default thread free
+   and hides the bug completely; and the starved task's own `istaskstarted`
+   flips the instant the spinners stop, so read it *before* releasing them.
+
+13. **Keep type-stable and type-unstable paths at the right stability level.**
    If both kinds of path exist for an operation (e.g. typed kernel execution
    vs. dynamically-typed planning), consider whether they need to be
    *separate* paths: don't force the dynamic path to specialize per signature
