@@ -173,14 +173,22 @@ still fills the machine, since transpose cost grows as its cube.
 _split_divisor(nprocs::Int, nsplit::Int) =
     max(1, ceil(Int, nprocs^(1/nsplit)))
 
+# N.B. The intermediate arrays below are `undef`, not `zeros`. Every one of them
+# is fully overwritten before it is ever read: `A` by `copyto!(A, input)`, and
+# each subsequent pencil by the whole-array `copyto!` transpose that feeds it
+# (`__fft!`/`__ifft!`). They all have `size(input)` exactly, so the copies cover
+# them completely -- there is no partially-covered edge block, whatever `cld`
+# does to the last chunk in each dimension. Zero-filling them costs a full
+# write pass over 2-3x the input, plus the tasks to do it, and buys nothing.
+
 ## 2D
 function _fft!(output::DMatrix{T}, input::DMatrix{T}, dims=(1, 2)) where T
     N = size(input, 1)
     # Each array here is split in exactly one dimension, so the divisor is the
     # processor count itself (`_split_divisor(nprocs, 1) == nprocs`).
     np = _split_divisor(length(Dagger.compatible_processors()), 1)
-    A = zeros(Blocks(N, cld(N, np)), T, size(input))
-    B = zeros(Blocks(cld(N, np), N), T, size(input))
+    A = DArray{T}(undef, Blocks(N, cld(N, np)), size(input))
+    B = DArray{T}(undef, Blocks(cld(N, np), N), size(input))
     Dagger.with(Dagger.DATADEPS_SYNC => _datadeps_sync_override()) do
         copyto!(A, input)
         __fft!(A, B, dims)
@@ -194,8 +202,8 @@ function _ifft!(output::DMatrix{T}, input::DMatrix{T}, dims=(1, 2)) where T
     # Each array here is split in exactly one dimension, so the divisor is the
     # processor count itself (`_split_divisor(nprocs, 1) == nprocs`).
     np = _split_divisor(length(Dagger.compatible_processors()), 1)
-    A = zeros(Blocks(N, cld(N, np)), T, size(input))
-    B = zeros(Blocks(cld(N, np), N), T, size(input))
+    A = DArray{T}(undef, Blocks(N, cld(N, np)), size(input))
+    B = DArray{T}(undef, Blocks(cld(N, np), N), size(input))
     Dagger.with(Dagger.DATADEPS_SYNC => _datadeps_sync_override()) do
         copyto!(A, input)
         __ifft!(A, B, dims)
@@ -215,9 +223,9 @@ function _fft!(output::DArray{T,3}, input::DArray{T,3}, dims=(1, 2, 3); decomp::
     if decomp isa Pencil
         # Each pencil array is split in two of its three dimensions.
         np = _split_divisor(nprocs, 2)
-        A = zeros(Blocks(N, cld(N, np), cld(N, np)), T, size(input))
-        B = zeros(Blocks(cld(N, np), N, cld(N, np)), T, size(input))
-        C = zeros(Blocks(cld(N, np), cld(N, np), N), T, size(input))
+        A = DArray{T}(undef, Blocks(N, cld(N, np), cld(N, np)), size(input))
+        B = DArray{T}(undef, Blocks(cld(N, np), N, cld(N, np)), size(input))
+        C = DArray{T}(undef, Blocks(cld(N, np), cld(N, np), N), size(input))
         Dagger.with(Dagger.DATADEPS_SYNC => _datadeps_sync_override()) do
             copyto!(A, input)
             __fft!(decomp, A, B, C, dims)
@@ -230,8 +238,8 @@ function _fft!(output::DArray{T,3}, input::DArray{T,3}, dims=(1, 2, 3); decomp::
         # so they need different divisors to land on a comparable chunk count.
         npa = _split_divisor(nprocs, 1)
         np = _split_divisor(nprocs, 2)
-        A = zeros(Blocks(N, N, cld(N, npa)), T, size(input))
-        B = zeros(Blocks(cld(N, np), cld(N, np), N), T, size(input))
+        A = DArray{T}(undef, Blocks(N, N, cld(N, npa)), size(input))
+        B = DArray{T}(undef, Blocks(cld(N, np), cld(N, np), N), size(input))
         Dagger.with(Dagger.DATADEPS_SYNC => _datadeps_sync_override()) do
             copyto!(A, input)
             __fft!(decomp, A, B, dims)
@@ -248,9 +256,9 @@ function _ifft!(output::DArray{T,3}, input::DArray{T,3}, dims=(1, 2, 3); decomp:
     nprocs = length(Dagger.compatible_processors())
     if decomp isa Pencil
         np = _split_divisor(nprocs, 2)
-        A = zeros(Blocks(cld(N, np), cld(N, np), N), T, size(input))
-        B = zeros(Blocks(cld(N, np), N, cld(N, np)), T, size(input))
-        C = zeros(Blocks(N, cld(N, np), cld(N, np)), T, size(input))
+        A = DArray{T}(undef, Blocks(cld(N, np), cld(N, np), N), size(input))
+        B = DArray{T}(undef, Blocks(cld(N, np), N, cld(N, np)), size(input))
+        C = DArray{T}(undef, Blocks(N, cld(N, np), cld(N, np)), size(input))
         Dagger.with(Dagger.DATADEPS_SYNC => _datadeps_sync_override()) do
             copyto!(A, input)
             __ifft!(decomp, A, B, C, dims)
@@ -261,8 +269,8 @@ function _ifft!(output::DArray{T,3}, input::DArray{T,3}, dims=(1, 2, 3); decomp:
     elseif decomp isa Slab
         npa = _split_divisor(nprocs, 1)
         np = _split_divisor(nprocs, 2)
-        A = zeros(Blocks(cld(N, np), cld(N, np), N), T, size(input))
-        B = zeros(Blocks(N, N, cld(N, npa)), T, size(input))
+        A = DArray{T}(undef, Blocks(cld(N, np), cld(N, np), N), size(input))
+        B = DArray{T}(undef, Blocks(N, N, cld(N, npa)), size(input))
         Dagger.with(Dagger.DATADEPS_SYNC => _datadeps_sync_override()) do
             copyto!(A, input)
             __ifft!(decomp, A, B, dims)
