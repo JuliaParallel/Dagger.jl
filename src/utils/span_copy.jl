@@ -94,6 +94,33 @@ function _device_u32(backend, data::Vector{UInt32})
 end
 
 """
+    _span_copy_proc(dst, src) -> Processor
+
+The processor whose backend lock (if any) guards a `multi_span_copy!` kernel
+launch.
+
+Normally that is the current task's own processor, but this function cannot
+just call `task_processor()`: the remainder gather/scatter path reaches here
+from inside a bare `remotecall_fetch` (see the gather closure in
+`remainders.jl`'s `move!`), which runs in a Distributed message handler, not
+in a `DTask`. There is no task TLS there at all, and `get_tls()` throws
+`TypeError: expected DTaskTLS, got Nothing` -- an error that has nothing to do
+with the copy and takes the whole region down with it.
+
+Falling back to a processor derived from the device array itself is not merely
+a way to avoid the throw; it is the more correct answer for that call site.
+The lock exists to serialize native calls against a *device*, and the device
+here is the one backing `dst`/`src` -- which is exactly what the fallback
+names, whereas the calling task's processor (when there is one) is only
+incidentally the same thing.
+"""
+function _span_copy_proc(dst, src)
+    in_task() && return task_processor()
+    dev_arr = is_device_array(dst) ? dst : src
+    return first(processors(memory_space(dev_arr)))
+end
+
+"""
     multi_span_copy!(dst, src, dst_ptrs, src_ptrs, lens)
 
 Copy `lens[i]` bytes from `src` at absolute pointer `src_ptrs[i]` into `dst` at
@@ -129,7 +156,7 @@ function multi_span_copy!(dst::AbstractArray{T}, src::AbstractArray{T},
     # kernel-launch lock (see e.g. OpenCLExt) to avoid deadlocking a blocking
     # recv that precedes this call against that lock; take the narrower
     # per-launch lock here instead.
-    gpu_kernel_lock(task_processor()) do
+    gpu_kernel_lock(_span_copy_proc(dst, src)) do
         kern(dst_vec, src_vec, dst_offs_d, src_offs_d, prefix_d; ndrange=total)
     end
     # This synchronize is required (independent of any following DtoH): the
