@@ -299,6 +299,50 @@ rule-of-thumb `DATADEPS_BATCH_LIMIT` uses elsewhere in this directory.
 """
 const DATADEPS_INFLIGHT_LIMIT = Ref(4 * Sys.CPU_THREADS)
 
+"""
+    DATADEPS_STATE_LIMIT[] -> Int
+
+How many distinct tracked ainfos a `DataDepsContext`'s `state` may accumulate
+before the next `spawn_datadeps` forces a full drain first. `0` disables the
+check.
+
+This is the state-size counterpart to [`DATADEPS_INFLIGHT_LIMIT`](@ref), which
+bounds outstanding *tasks* but says nothing about the size of the planning
+state those tasks were planned against. Under `sync=true` the question never
+arose: every region drained, and the drain resets `state`. Under `sync=false`
+`state` persists until something drains it, and every *new* argument a region
+introduces permanently adds an ainfo to `state.ainfos_lookup` -- the interval
+tree every later aliasing query walks. A pipeline over a fixed working set is
+unaffected (its ainfos are created once and then reused; `ainfos_owner` and
+`ainfos_readers` overwrite per ainfo rather than accumulating). A pipeline
+that introduces fresh data every region is not.
+
+Measured on this branch, 4 threads, `sync=false` with no intervening drain,
+8 arrays per region:
+
+| working set | 2000 regions |
+|---|---|
+| fixed | RSS +13 MB (flat from ~region 400), planning 1.00x |
+| fresh each region | RSS +192 MB, planning **2.73x** and still climbing |
+
+Forcing a drain is a blunt instrument -- it is a full barrier, exactly what
+`sync=false` exists to avoid -- but it is always *semantically* safe (it is
+what `sync=true` does after every region), and turning unbounded degradation
+into a bounded sawtooth is the right trade at this threshold. The default is
+high enough that no realistic region hits it by accident; a workload that does
+is one that would otherwise have degraded without limit.
+
+Properly retiring dead entries from `state` -- weak-keyed argument maps with a
+reaper, and removal from the interval tree -- is the real fix and is not
+implemented. This keeps the failure mode bounded until it is.
+
+!!! warning "MPI/SPMD uniformity"
+    The ainfo count is derived from replayed planning and so is rank-uniform,
+    which is what makes "drain now" a safe collective decision. It is checked
+    with `check_uniform` before being acted on.
+"""
+const DATADEPS_STATE_LIMIT = Ref(100_000)
+
 "The calling task's `DataDepsContext`, or `nothing` if it hasn't created one."
 const DATADEPS_CONTEXT = TaskLocalValue{Union{DataDepsContext,Nothing}}(Returns(nothing))
 

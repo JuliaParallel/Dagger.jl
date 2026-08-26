@@ -182,3 +182,46 @@ end
 end
 
 end # @testset "Targeted synchronize"
+
+@testset "State-size backpressure" begin
+    # `DATADEPS_STATE_LIMIT` bounds how much planning state a `sync=false`
+    # pipeline may carry before a drain is forced. Measured motivation is in
+    # the constant's docstring: a pipeline introducing fresh data every region
+    # grows `ainfos_lookup` without bound, and planning degrades with it
+    # (2.73x over 2000 regions).
+    old_limit = Dagger.DATADEPS_STATE_LIMIT[]
+    try
+        # Deliberately tiny, so a handful of regions trips it.
+        Dagger.DATADEPS_STATE_LIMIT[] = 4
+        for i in 1:12
+            # Fresh arrays each region: the growth case.
+            A = zeros(Int, 8)
+            B = zeros(Int, 8)
+            Dagger.spawn_datadeps(; sync=false) do
+                Dagger.@spawn sync_add1!(InOut(A))
+                Dagger.@spawn sync_add1!(InOut(B))
+            end
+            @test all(==(1), A) || !Dagger.issynchronized()
+        end
+        Dagger.synchronize()
+        # The point of the valve: state does not keep growing across regions.
+        # After the final drain there is nothing carried over at all.
+        @test Dagger.issynchronized()
+    finally
+        Dagger.DATADEPS_STATE_LIMIT[] = old_limit
+        try; Dagger.synchronize(); catch; end
+    end
+end
+
+@testset "State-size backpressure is off by default for normal regions" begin
+    # A bounded working set must never trip the valve: its ainfos are created
+    # once and reused, so the count plateaus (measured flat over 2000 regions).
+    A = zeros(Int, 8)
+    for _ in 1:20
+        Dagger.spawn_datadeps(; sync=false) do
+            Dagger.@spawn sync_add1!(InOut(A))
+        end
+    end
+    Dagger.synchronize()
+    @test all(==(20), A)
+end

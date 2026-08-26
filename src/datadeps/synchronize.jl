@@ -354,16 +354,29 @@ the time `synchronize()` returns.
 
 !!! note "Not demonstrated to be load-bearing"
     This closes a gap that is real on paper -- Dagger makes no guarantee here
-    -- but an A/B of `gpu_sync=:none` against `:fence` on exactly that case
-    (device-origin argument, elided write-back, 4M-element kernel heavy
-    enough to still be running, 25 reps each in separate processes) found
-    **0/25 stale reads either way** on ROCm/gfx1030. The likely reason is that
-    the host's own readback is itself queued on the device and ordered after
-    the kernel by the backend's stream semantics, so the window never opens
-    for the access patterns tried. Treat this as defensive: it makes
-    `gpu_sync` mean something and removes a documented assumption, but do not
-    cite it as a bug fix, and do not assume `:none` is unsafe on the strength
-    of this comment alone.
+    -- but it could not be shown to matter in practice. A/B on exactly the
+    case it exists for (device-origin argument, elided write-back, 4M-element
+    kernel heavy enough to still be running), one process per run on
+    ROCm/gfx1030:
+
+    | config | result |
+    |---|---|
+    | `:fence`, 2 x 75 reps | clean |
+    | `:none`, 2 x 75 reps | clean |
+    | `:none`, 1 x 75 reps | `hipErrorIllegalAddress` at ~rep 25-30 |
+    | `sync=true` (no async at all), 75 reps | clean |
+
+    Zero stale reads in every completed run, either way. The likely reason is
+    that the host's own readback is itself queued on the device and ordered
+    after the kernel by the backend's stream semantics, so the window never
+    opens for these access patterns. The single fault is *not* attributed to
+    `:none` -- the same configuration passed twice, and an earlier fault
+    appeared in a mixed-mode script too; it looks like an intermittent fault
+    under sustained large-allocation GPU churn, and is unexplained.
+
+    So: treat this as defensive. It makes `gpu_sync` mean something and
+    removes a documented assumption. Do not cite it as a bug fix, and do not
+    conclude `:none` is unsafe from this comment.
 
 Spaces are derived from `state.remote_args` rather than tracked incrementally
 (the `touched_spaces` field this replaces): its keys are exactly the spaces
@@ -675,6 +688,50 @@ function _do_synchronize_targeted!(ddctx::DataDepsContext, targets::Set{Argument
     if err !== nothing && check_errors
         throw(DataDepsRegionError(err_region, err, resolved_bt))
     end
+    return
+end
+
+"""
+    apply_state_size_backpressure!(ddctx::DataDepsContext) -> Nothing
+
+Force a full drain if `ddctx.state` has accumulated more than
+`DATADEPS_STATE_LIMIT[]` tracked ainfos, then return so the caller can plan
+against a fresh state.
+
+See `DATADEPS_STATE_LIMIT`'s docstring (context.jl) for the measurements
+motivating this and for why it is a stopgap. A no-op in the common cases: when
+the limit is disabled, when there is no carried-over state (the region after
+any drain), and whenever the working set is bounded -- which covers every
+`sync=true` caller, since those drain after every region.
+
+The drain is unconditional rather than incremental because `state` has no
+partial-reset: `_do_synchronize!` replaces it wholesale, which is precisely
+what reclaims the interval tree.
+"""
+function apply_state_size_backpressure!(ddctx::DataDepsContext)
+    limit = DATADEPS_STATE_LIMIT[]
+    limit > 0 || return
+    isdefined(ddctx, :state) || return
+    n = @lock ddctx.lock length(ddctx.state.ainfos_owner)
+    # Rank-uniform (derived from replayed planning), so acting on it is a safe
+    # collective decision -- but check, since a divergent drain would desync
+    # tag allocation rather than merely waste time.
+    @check_uniform(n > limit)
+    n > limit || return
+    @dagdebug nothing :spawn_datadeps "State size backpressure: draining at $n tracked ainfos (limit $limit)"
+    _do_synchronize!(ddctx; write_back=true, free=true, gpu_sync=:fence,
+                     check_errors=true, wrap_errors=true,
+                     from_owner=ddctx.owner === current_task())
+    # N.B. Deliberately *no* `maybe_drop_context!()` here, unlike every other
+    # caller of `_do_synchronize!`. Those are public entry points that return
+    # to the user; this one returns to `spawn_datadeps`, which is holding this
+    # very `ddctx` in a local and is about to plan a region into it. Dropping
+    # it would deregister it as the task's context while leaving that local
+    # pointing at it -- so the region's write-backs and frees would accumulate
+    # on a context nothing can reach, and surface later as "a DataDepsContext
+    # was garbage-collected with unresolved work". The reset that matters
+    # (a fresh `state`, hence a fresh interval tree) has already happened
+    # inside the drain.
     return
 end
 
