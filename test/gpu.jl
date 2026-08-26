@@ -822,3 +822,100 @@ end
         end
     end
 end
+
+# Asynchronous Datadeps regions (`sync=false`) on GPU processors, plus the
+# `synchronize` family's device-synchronization step.
+#
+# Written backend-agnostically -- the scope comes from `gpu_processor(kind)`
+# rather than each backend's own scope key -- so this runs against whichever
+# GPU is enabled rather than needing a near-identical copy per backend. The
+# per-backend blocks above cover backend-specific behavior; what's being
+# checked here is Dagger-side and identical everywhere.
+@testset "Datadeps async + synchronize ($kind)" for kind in (:CUDA, :ROC, :oneAPI, :Metal, :OpenCL)
+    if !Dagger.gpu_can_compute(kind)
+        @test_skip "No $kind devices available"
+        continue
+    end
+    P = Dagger.gpu_processor(kind)
+    # Local processors only, matching the `Dagger.scope(worker=1, ...)` the
+    # per-backend testsets above use. `all_processors()` spans every worker,
+    # and picking a remote GPU proc would be testing cross-worker device
+    # placement rather than the async machinery this testset is about.
+    gpu_procs = filter(collect(Dagger.all_processors())) do p
+        p isa P && Dagger.root_worker_id(p) == myid()
+    end
+    if isempty(gpu_procs)
+        @test_skip "No local $kind processors registered"
+        continue
+    end
+    gpu_scope = Dagger.ExactScope(first(gpu_procs))
+
+    @testset "Host-origin data, async region" begin
+        A = zeros(Float32, 64)
+        Dagger.with_options(;scope=gpu_scope) do
+            Dagger.spawn_datadeps(; sync=false) do
+                Dagger.@spawn addarray!(Dagger.InOut(A))
+            end
+        end
+        Dagger.synchronize()
+        @test all(==(1f0), A)
+    end
+
+    @testset "Targeted synchronize" begin
+        A = zeros(Float32, 64)
+        Dagger.with_options(;scope=gpu_scope) do
+            Dagger.spawn_datadeps(; sync=false) do
+                Dagger.@spawn addarray!(Dagger.InOut(A))
+            end
+        end
+        Dagger.synchronize(A)
+        @test all(==(1f0), A)
+        Dagger.synchronize()
+    end
+
+    @testset "Multi-region pipeline" begin
+        A = zeros(Float32, 64)
+        for _ in 1:3
+            Dagger.with_options(;scope=gpu_scope) do
+                Dagger.spawn_datadeps(; sync=false) do
+                    Dagger.@spawn addarray!(Dagger.InOut(A))
+                end
+            end
+        end
+        Dagger.synchronize()
+        @test all(==(3f0), A)
+    end
+
+    @testset "Device-origin DArray" begin
+        # Chunks allocated under the GPU scope live in device memory, so the
+        # final write-back is elided (the origin already holds the current
+        # replica) and nothing does a DtoH move on the way out. This is the
+        # case `_gpu_sync_spaces!` exists for.
+        DA = Dagger.with_options(;scope=gpu_scope) do
+            zeros(Blocks(4, 4), Float32, 8, 8)
+        end
+        Dagger.with_options(;scope=gpu_scope) do
+            Dagger.spawn_datadeps(; sync=false) do
+                for chunk in DA.chunks
+                    Dagger.@spawn addarray!(Dagger.InOut(chunk))
+                end
+            end
+        end
+        Dagger.synchronize()
+        @test all(==(1f0), collect(DA))
+    end
+
+    @testset "gpu_sync modes are accepted and correct" begin
+        for mode in (:fence, :block, :none)
+            A = zeros(Float32, 64)
+            Dagger.with_options(;scope=gpu_scope) do
+                Dagger.spawn_datadeps(; sync=false) do
+                    Dagger.@spawn addarray!(Dagger.InOut(A))
+                end
+            end
+            Dagger.synchronize(; gpu_sync=mode)
+            @test all(==(1f0), A)
+        end
+        @test_throws ArgumentError Dagger.synchronize(; gpu_sync=:bogus)
+    end
+end
