@@ -130,6 +130,74 @@ end
 
 If you need to synchronize or fetch results, these operations should be performed outside the `spawn_datadeps` block. The primary purpose of `spawn_datadeps` is to define a region where data dependencies for mutable operations are automatically managed.
 
+## Asynchronous Regions
+
+By default, `spawn_datadeps` is *synchronous*: it does not return until every
+task it launched has finished, every argument has been written back to where it
+came from, and every temporary copy has been freed. That makes each region a
+full barrier. Consecutive regions therefore cannot overlap, even when the second
+region's first tasks depend on only a small part of the first region's output.
+
+Passing `sync=false` makes the region *asynchronous*. `spawn_datadeps` returns as
+soon as it has finished planning; the tasks keep running, and the write-back and
+free steps are deferred. You then drain the pipeline explicitly with
+`Dagger.synchronize()`:
+
+```julia
+Dagger.spawn_datadeps(; sync=false) do
+    Dagger.@spawn stage1!(InOut(A))
+end
+
+Dagger.spawn_datadeps(; sync=false) do
+    Dagger.@spawn stage2!(InOut(A))
+end
+
+# Nothing above is guaranteed to have finished yet. This is the barrier:
+Dagger.synchronize()
+
+# `A` is now safe to read from plain Julia code.
+@show sum(A)
+```
+
+Dependencies between regions are still tracked and still enforced — `stage2!`
+will not start before `stage1!` finishes, exactly as with `sync=true`. What
+changes is that the *planning* of the second region overlaps with the
+*execution* of the first, and that data which stays inside Dagger's tracking is
+no longer copied back and forth at every region boundary.
+
+`Dagger.synchronize()` always operates on the calling task's own region history,
+so it can never accidentally wait on unrelated work elsewhere in the program. To
+reach beyond the calling task, use the explicitly-named
+[`Dagger.synchronize_task!`](@ref) or [`Dagger.synchronize_all!`](@ref).
+
+If a task launched by an asynchronous region fails, the failure is not raised at
+`spawn_datadeps` time (it had not happened yet) but at the next
+`Dagger.synchronize()` call, wrapped in a `DataDepsRegionError` naming the region
+that queued the failing task. Planning a further region on top of an unobserved
+failure raises `DataDepsPoisonedError` rather than silently building on a broken
+pipeline.
+
+!!! warning "`sync=false` requires everything downstream to stay inside Dagger"
+    An asynchronous region is only safe if every consumer of its data is either
+    another Datadeps region or comes after an explicit `Dagger.synchronize()`.
+    Plain, non-Dagger code that reads or writes the same arrays relies on the
+    region boundary being a barrier, and with `sync=false` it no longer is.
+
+    This is not a theoretical hazard. Enabling `sync=false` ambiently over
+    Dagger's own FFT test suite produced **silently wrong numerical results** in
+    4 of 48 cases: the 1-D `fft!` path does `copyto!(A, DA); fft!(A); copyto!(DA, A)`
+    with a plain, untracked `Array` in the middle, and the asynchronous region
+    raced that plain code against its own input. Wrong numbers, no error.
+
+    So: request `sync=false` per call, for regions whose consumers you control.
+    Never bind it as an ambient default (via the `DATADEPS_SYNC` scoped value)
+    over code you do not own.
+
+`Dagger.synchronize` also accepts specific values (`Dagger.synchronize(A, B)`) to
+document which data you need usable. Today this performs the same full drain as
+the bare form — always correct, just not maximally lazy — with genuinely
+narrowed, per-argument synchronization planned for a later release.
+
 ## Aliasing Support
 
 Datadeps is smart enough to detect when two arguments from different tasks

@@ -33,6 +33,9 @@ shard
 ## Data Dependencies Functions
 ```@docs
 spawn_datadeps
+Dagger.synchronize
+Dagger.synchronize_task!
+Dagger.synchronize_all!
 ```
 
 ## Scope Functions
