@@ -333,9 +333,18 @@ The `spawn_datadeps` function accepts an optional `scheduler` keyword argument t
 
 ### Built-in Schedulers
 
-- **`RoundRobinScheduler()`** (default): Assigns tasks to processors in round-robin order. This is a simple and effective scheduler for most use cases.
-- **`NaiveScheduler()`**: Uses the main Dagger scheduler's cost estimation to select processors. (Currently experimental)
-- **`UltraScheduler()`**: An advanced scheduler that tracks task completion times and tries to minimize overall execution time. (Currently experimental)
+- **`RoundRobinScheduler()`** (default): Assigns tasks to processors in round-robin order, optionally biased toward processors that already hold the task's data (see `DATADEPS_LOCALITY_BIAS`). Simple, cheap, and rank-uniform under MPI.
+- **`NaiveScheduler()`**: Costs each task with the main Dagger scheduler's `estimate_task_costs` and takes the cheapest processor. Each task is costed in isolation against the *live* scheduler's pressure, which planning does not move — so a region's own decisions are invisible to it, and it tends to place a whole region in the same spot. Not usable under MPI/SPMD (raises rather than deadlocking).
+- **`UltraScheduler()`**: Places each task where it is predicted to *finish* earliest, simulating the region as it plans it: earlier decisions push a processor's predicted idle time forward and so steer later ones. Understands data movement (via `DATADEPS_LOCALITY_BIAS`) and per-task scopes, and is rank-uniform under MPI (at the cost of ignoring measured per-rank runtimes there).
+
+!!! note "The hierarchical partitioner usually decides first"
+    With `hierarchical=true` (the default), `partition_dag` assigns each task
+    to the owner holding the most of its argument data *before* any
+    `DataDepsScheduler` runs, and then hands the scheduler only that owner's
+    processors. On a single-node, single-worker run that leaves the scheduler
+    choosing among threads of one memory space, where all three schedulers
+    behave near-identically. The choice of scheduler matters most on the flat
+    path (`hierarchical=false`) or across multiple owners.
 
 ### Using a Different Scheduler
 
