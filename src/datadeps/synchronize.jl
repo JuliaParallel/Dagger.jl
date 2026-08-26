@@ -317,6 +317,26 @@ end
 const _VALID_GPU_SYNC = (:fence, :block, :none)
 
 """
+    _validate_gpu_sync(gpu_sync::Symbol) -> Symbol
+
+Reject an invalid `gpu_sync` at the public API boundary.
+
+Called by every entry point *before* the no-context early return, deliberately:
+whether a caller's arguments are valid should not depend on whether this task
+happens to have a live `DataDepsContext` right now. Otherwise
+`synchronize(; gpu_sync=:bogus)` raises or silently succeeds depending on
+nothing more than how recently something drained -- the sort of
+state-dependent validation that lets a typo survive testing and surface much
+later. The drain implementations re-check; the cost is one `in` over a
+3-tuple.
+"""
+function _validate_gpu_sync(gpu_sync::Symbol)
+    gpu_sync in _VALID_GPU_SYNC ||
+        throw(ArgumentError("gpu_sync must be one of $_VALID_GPU_SYNC, got $(repr(gpu_sync))"))
+    return gpu_sync
+end
+
+"""
     _gpu_sync_spaces!(state::DataDepsState, gpu_sync::Symbol) -> Nothing
 
 Device-synchronize every memory space this context has placed data in, so that
@@ -407,8 +427,7 @@ place, since nobody has actually been told about the failure yet.
 function _do_synchronize!(ddctx::DataDepsContext;
                           write_back::Bool, free::Bool, gpu_sync::Symbol,
                           check_errors::Bool, wrap_errors::Bool, from_owner::Bool)
-    gpu_sync in _VALID_GPU_SYNC ||
-        throw(ArgumentError("gpu_sync must be one of $_VALID_GPU_SYNC, got $(repr(gpu_sync))"))
+    _validate_gpu_sync(gpu_sync)
     if !from_owner && gpu_sync === :fence
         gpu_sync = :block
     end
@@ -586,8 +605,7 @@ the context stays poisoned until something drains it fully.
 function _do_synchronize_targeted!(ddctx::DataDepsContext, targets::Set{ArgumentWrapper};
                                    write_back::Bool, gpu_sync::Symbol,
                                    check_errors::Bool, from_owner::Bool)
-    gpu_sync in _VALID_GPU_SYNC ||
-        throw(ArgumentError("gpu_sync must be one of $_VALID_GPU_SYNC, got $(repr(gpu_sync))"))
+    _validate_gpu_sync(gpu_sync)
     if !from_owner && gpu_sync === :fence
         gpu_sync = :block
     end
@@ -724,6 +742,7 @@ object), so `synchronize(DA)` does the right thing.
 """
 function synchronize(args...; write_back::Bool=true, free::Bool=true,
                      gpu_sync::Symbol=:fence, check_errors::Bool=true)
+    _validate_gpu_sync(gpu_sync)
     ddctx = DATADEPS_CONTEXT[]
     ddctx === nothing && return nothing
     targets = _resolve_sync_targets(ddctx, args)
@@ -761,6 +780,7 @@ later phase adds real per-space fencing.)
 """
 function synchronize_task!(t::Task, args...; write_back::Bool=true, free::Bool=true,
                            gpu_sync::Symbol=:fence, check_errors::Bool=true)
+    _validate_gpu_sync(gpu_sync)
     if t === current_task()
         return synchronize(args...; write_back, free, gpu_sync, check_errors)
     end
@@ -803,6 +823,7 @@ narrower calls if you want a narrow drain.
 """
 function synchronize_all!(args...; write_back::Bool=true, free::Bool=true,
                           gpu_sync::Symbol=:fence, check_errors::Bool=true)
+    _validate_gpu_sync(gpu_sync)
     targets = lock(DATADEPS_CONTEXT_REGISTRY) do reg
         collect(values(reg))
     end

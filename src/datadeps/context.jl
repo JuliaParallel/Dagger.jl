@@ -129,8 +129,13 @@ mutable struct DataDepsContext
     # `maybe_drop_context!`/`issynchronized()` to answer "is there anything
     # left to flush", and cleared wholesale once a free flush completes.
     pending_free::IdDict{Any,Nothing}
-    touched_spaces::Set{MemorySpace}        # unused before Phase 8
-    entry_fences::Dict{MemorySpace,Any}     # unused before Phase 8
+    # N.B. There is deliberately no `touched_spaces` field. The GPU
+    # synchronization step (`_gpu_sync_spaces!`, synchronize.jl) derives the
+    # spaces it must synchronize from `state.remote_args` instead: that is
+    # already exactly the set of spaces slots have been generated in, so
+    # tracking it a second time here would mean a per-task `push!` under
+    # `ctx.lock` (parallel hierarchical partitions plan concurrently) to
+    # rebuild information the planner already recorded for free.
 
     # region id -> where `spawn_datadeps` was called, for error reporting.
     # Captured unconditionally at region entry.
@@ -184,8 +189,6 @@ mutable struct DataDepsContext
         ctx.task_region = IdDict{DTask,Int}()
         ctx.pending_writeback = Set{ArgumentWrapper}()
         ctx.pending_free = IdDict{Any,Nothing}()
-        ctx.touched_spaces = Set{MemorySpace}()
-        ctx.entry_fences = Dict{MemorySpace,Any}()
         ctx.region_bt = Dict{Int,Vector{Union{Ptr{Nothing},Base.InterpreterIP}}}()
         ctx.inflight_limit = DATADEPS_INFLIGHT_LIMIT[]
         ctx.err = nothing
