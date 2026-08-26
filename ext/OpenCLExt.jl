@@ -215,15 +215,12 @@ function Dagger.move(from_proc::CPUProc, to_proc::CLArrayDeviceProc, x::Chunk)
     from_w = Dagger.root_worker_id(from_proc)
     to_w = Dagger.root_worker_id(to_proc)
     @assert myid() == to_w
-    cpu_data = remotecall_fetch(unwrap, from_w, x)
-    with_context(to_proc) do
-        if cpu_data isa DenseArray && isbitstype(eltype(cpu_data))
-            Dagger.pin_buffer!(:OpenCL, cpu_data)
-        end
-        arr = adapt(CLArray, cpu_data)
-        cl.finish(cl.queue())
-        return arr
-    end
+    data = remotecall_fetch(unwrap, from_w, x)
+    # N.B. Re-dispatch on the unwrapped value; see the matching comment in
+    # `ext/ROCExt.jl`. A Chunk declared on a `CPUProc` can hold a `CLArray`
+    # (a device array passed into a Datadeps region), and pinning device
+    # memory as though it were host memory fails.
+    return Dagger.move(from_proc, to_proc, data)
 end
 function Dagger.move(from_proc::CPUProc, to_proc::CLArrayDeviceProc, x::CLArray)
     queue = x.data[].queue

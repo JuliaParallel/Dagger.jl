@@ -251,15 +251,18 @@ function Dagger.move(from_proc::CPUProc, to_proc::ROCArrayDeviceProc, x::Chunk)
     from_w = Dagger.root_worker_id(from_proc)
     to_w = Dagger.root_worker_id(to_proc)
     @assert myid() == to_w
-    cpu_data = remotecall_fetch(unwrap, from_w, x)
-    with_context(to_proc) do
-        if cpu_data isa DenseArray && isbitstype(eltype(cpu_data))
-            Dagger.pin_buffer!(:ROC, cpu_data)
-        end
-        arr = adapt(ROCArray, cpu_data)
-        AMDGPU.synchronize()
-        return arr
-    end
+    data = remotecall_fetch(unwrap, from_w, x)
+    # N.B. Re-dispatch on the *unwrapped value*, rather than assuming this
+    # Chunk holds host memory. Which `move` method is selected is decided by
+    # the Chunk's declared processor, and a Chunk declared on a `CPUProc` can
+    # still hold a `ROCArray` -- that is exactly what happens when a user
+    # passes a device array into a Datadeps region, since the tracking Chunk
+    # is created on the CPU side. Treating that as host memory reached
+    # `pin_buffer!` and failed outright with "Cannot register pointer with
+    # memory type `hipMemoryTypeDevice`", which made device-resident arrays
+    # unusable with Datadeps. `unwrap` never returns a `Chunk`, so this cannot
+    # recurse.
+    return Dagger.move(from_proc, to_proc, data)
 end
 function Dagger.move(from_proc::CPUProc, to_proc::ROCArrayDeviceProc, x::ROCArray)
     if AMDGPU.device(x) == to_device(to_proc)
