@@ -316,9 +316,62 @@ function datadeps_schedule_task(sched::RoundRobinScheduler, state::DataDepsState
     return our_proc
 end
 
+"""
+    NaiveScheduler()
+
+Places each task on whichever processor the *main* scheduler's cost model
+(`Sch.estimate_task_costs`) ranks cheapest, given the live scheduler's current
+per-processor pressure and the transfer cost of the task's chunk arguments.
+
+"Naive" is about the horizon, not the model: each task is costed in isolation,
+against the scheduler's state as it stands right now, with no memory of what
+this same region decided for the previous task. Placing a hundred tasks in a
+row therefore tends to place them all in the same "cheapest" spot, because
+nothing that happened during planning has moved the pressure numbers -- only
+tasks that have actually *run* do. Use [`UltraScheduler`](@ref) when the
+region's own decisions should feed back into the next one.
+
+!!! warning "Not usable under uniform (SPMD/MPI) execution"
+    `estimate_task_costs` ranks processors using per-rank measurements
+    (`signature_time_cost`, `worker_transfer_rate`, chunk `datasize`) and
+    breaks ties with `randperm!`. Under uniform execution every rank must
+    reach an *identical* placement decision or the emitted transfers -- and
+    hence the MPI tag sequence -- diverge, which deadlocks rather than
+    producing a wrong answer. Rather than hang, this raises.
+"""
 struct NaiveScheduler <: DataDepsScheduler end
 Base.similar(::NaiveScheduler) = NaiveScheduler()
 function datadeps_schedule_task(sched::NaiveScheduler, state::DataDepsState, all_procs, all_scope, task_scope, spec::DTaskSpec, task::DTask)
+    # Fail loudly instead of deadlocking; see the warning in the docstring.
+    if uniform_execution()
+        throw(Sch.SchedulingException("NaiveScheduler is not rank-uniform and cannot be used under uniform (SPMD/MPI) execution; use RoundRobinScheduler or UltraScheduler"))
+    end
+
+    # Restrict to processors this task is actually allowed to run on *before*
+    # costing them. `estimate_task_costs` knows nothing about scopes, so
+    # without this the cheapest-ranked processor could be one `task_scope`
+    # excludes, and `distribute_task!` would then fail the region with an
+    # `InvalidScope` -- a scheduler-chosen placement violating a user-stated
+    # constraint, not a genuinely unsatisfiable one. Structured to avoid
+    # allocating a filtered copy in the common cases (no per-task scope, or a
+    # scope already equal to the region's).
+    procs_in_scope = if task_scope === all_scope
+        # `all_procs` is already limited to scope
+        all_procs
+    elseif task_scope === DefaultScope()
+        # See `RoundRobinScheduler` for why `DefaultScope()` reduces to
+        # `default_enabled` and needs no compatibility check.
+        all(default_enabled, all_procs) ? all_procs : filter(default_enabled, all_procs)
+    else
+        if isa(constrain(task_scope, all_scope), InvalidScope)
+            throw(Sch.SchedulingException("Scopes are not compatible: $(all_scope), $(task_scope)"))
+        end
+        filter(proc->proc_in_scope(proc, task_scope), all_procs)
+    end
+    if isempty(procs_in_scope)
+        throw(Sch.SchedulingException("Scopes are not compatible: $(all_scope), $(task_scope)"))
+    end
+
     # Prefer the chunk that reflects where an argument's data actually is over
     # `tochunk(value(arg))`, which is always the *origin* chunk. Under a
     # region barrier the origin was always correct (every argument starts each
@@ -328,12 +381,10 @@ function datadeps_schedule_task(sched::NaiveScheduler, state::DataDepsState, all
     # exactly the cross-space movement this project exists to remove.
     #
     # `bias == 0` skips this and reproduces the original `tochunk`-only
-    # behavior exactly, same rationale as `RoundRobinScheduler`. `check_uniform`
-    # guards against `bias` disagreeing across ranks (see the N.B. on
-    # `RoundRobinScheduler`); unlike there, `NaiveScheduler` has no per-region
-    # state to cache the check against, so it's paid every task -- cheap in
-    # practice, since it degrades to a hash comparison unless
-    # `CHECK_UNIFORMITY[]` is on.
+    # behavior exactly, same rationale as `RoundRobinScheduler`. No
+    # `check_uniform(bias)` guard here, unlike the other two schedulers: this
+    # one never runs under uniform execution at all (it raised above), so there
+    # are no other ranks for `bias` to disagree with.
     #
     # `signature`/`estimate_task_costs!` expect `Argument`-like elements (they
     # call `Dagger.value`/`Dagger.valuetype` on each one), not bare `Chunk`s --
@@ -344,13 +395,12 @@ function datadeps_schedule_task(sched::NaiveScheduler, state::DataDepsState, all
     # heterogeneous `Tuple` -- the `@view raw_args[2:end]` below requires an
     # `AbstractArray`, which a `Tuple` is not.
     bias = DATADEPS_LOCALITY_BIAS[]
-    check_uniform(bias)
     raw_args = Base.mapany(spec.fargs) do arg
         v = value(arg)
         chunk = bias > 0 ? something(datadeps_current_chunk(state, v), tochunk(v)) : tochunk(v)
         return Argument(ArgPosition(arg.pos), chunk)
     end
-    our_proc = remotecall_fetch(1, all_procs, raw_args) do all_procs, raw_args
+    our_proc = remotecall_fetch(1, procs_in_scope, raw_args) do all_procs, raw_args
         Sch.init_eager()
         sch_state = Sch.EAGER_STATE[]
 
@@ -409,112 +459,332 @@ function datadeps_current_chunk(state::DataDepsState, raw_value)
     return get(remote_for_space, arg_chunk, nothing)
 end
 
-struct UltraScheduler <: DataDepsScheduler
-    task_to_spec::Dict{DTask,DTaskSpec}
-    assignments::Dict{DTask,MemorySpace}
-    dependencies::Dict{DTask,Set{DTask}}
-    task_completions::Dict{DTask,UInt64}
-    space_completions::Dict{MemorySpace,UInt64}
-    capacities::Dict{MemorySpace,Int}
+# Nanoseconds of predicted delay per byte that `UltraScheduler` would have to
+# move into a candidate memory space. `Sch.DEFAULT_TRANSFER_RATE` is documented
+# (and populated, from `metadata.transfer_rate`) as bytes per *second*, so
+# converting to the nanoseconds `signature_time_cost` speaks costs a factor of
+# 1e9.
+#
+# That factor is the whole fix. The original `UltraScheduler` wrote
+# `missing_bytes / Sch.DEFAULT_TRANSFER_RATE`, leaving a *seconds* quantity
+# added to nanosecond task times: a 2 MB tile priced at 2 ns against a
+# 512-cube `gemm!`'s ~4.5 ms, i.e. locality with a weight of zero. (The same
+# 1e9 mismatch exists in `estimate_task_costs!` itself, where this constant
+# came from, and is why its magnitude has never visibly mattered there. Not
+# fixed here: that is the main scheduler's cost model, with its own callers.)
+#
+# 1 MB/s looks far too pessimistic for any real interconnect, and measurement
+# says to keep it anyway. Swept on a blocked Cholesky (N=4096, nb=512, 8x8
+# tiles, 4 single-thread Distributed workers pinned to cores 0-5,
+# `hierarchical=false`, bias 0.5, 11 interleaved reps, first dropped, median):
+#
+#     1 GB/s -> 1047 ms    100 MB/s -> 695 ms    10 MB/s -> 504 ms
+#     1 MB/s ->  420 ms    0.1 MB/s -> 428 ms
+#
+# with `RoundRobinScheduler` at the same bias measuring 421 ms. Monotone, far
+# outside the ~10 ms run-to-run noise, and flat-to-slightly-worse below 1 MB/s.
+# What is being priced is not wire bandwidth: it is Dagger's end-to-end cost of
+# making a tile available in another memory space -- Distributed serialization,
+# a MemPool `DRef` round trip, an extra Dagger task per copy, plus the
+# write-back a later reader on the original side then pays. Against that, a
+# nameplate GB/s figure under-discourages movement by roughly the observed
+# factor.
+const DATADEPS_TRANSFER_NS_PER_BYTE = 1e9 / Float64(Sch.DEFAULT_TRANSFER_RATE)
+
+# Placeholder runtime for a signature the main scheduler has never measured,
+# matching what `estimate_task_costs!` assumes for the same case.
+const DATADEPS_UNKNOWN_TASK_TIME = UInt64(1000^3)
+
+# Shared empty stand-in so `UltraScheduler`'s `bias == 0` / no-tracked-args
+# path allocates nothing at all per task.
+const EMPTY_SPACE_WEIGHTS = Dict{MemorySpace,Float64}()
+
+# `UltraScheduler.task_completions` is keyed by task uid and can only grow: a
+# region's tasks are never removed from it, and a scheduler handed via
+# `DATADEPS_SCHEDULER[]` outlives any one region. Past this many entries the
+# map is emptied wholesale. Losing a completion estimate only makes a later
+# task look *ready earlier* than it is, which is a heuristic degradation, not
+# a correctness problem -- and it is rank-uniform, since every rank inserts
+# the same number of entries in the same order.
+const DATADEPS_ULTRA_COMPLETION_CAP = 1 << 16
+
+"""
+    UltraScheduler()
+
+Places each task on the processor where it is predicted to *finish* earliest --
+the classic "earliest finish time" list-scheduling heuristic. A candidate
+processor's finish time is
+
+    max(when that processor is predicted to go idle,
+        when this task's syncdeps are predicted to complete)
+    + time to move whatever isn't resident in that memory space yet
+    + the task's own measured runtime
+
+Load-spreading is a *consequence* here rather than a rotation: handing a
+processor work pushes its predicted idle time into the future, so it stops
+attracting tasks until the others catch up. Unlike `NaiveScheduler`, which
+costs each task in isolation against the live scheduler's current pressure,
+`UltraScheduler` simulates the region it is planning -- the decision made for
+task 1 is visible when task 500 is placed. That is what lets it see a pile-up
+coming, and also why it is the only one of the three carrying per-region
+mutable state (hence the `Base.similar` specialization: hierarchical
+partitions must each get their own shard, see `hierarchical.jl`).
+
+Runtimes come from the main scheduler's `signature_time_cost` table, which is
+empty until a signature has actually executed once. Every task in a cold
+region therefore costs the same placeholder and placement degenerates to
+"balance the task counts, prefer whoever already holds the data" -- which is
+the best available answer at that point, not a failure mode.
+
+!!! note "What it cannot see"
+    Datadeps' own dependency analysis runs *after* placement (`distribute_task!`
+    computes syncdeps from `our_space`, which is this function's output), so
+    the only dependencies visible here are the ones the user's `@spawn`
+    already carried: explicit `syncdeps` and `DTask`-valued arguments. The
+    data dependencies Datadeps derives from `In`/`Out`/`InOut`, and the copy
+    tasks it inserts, are not yet known. Tasks related only through those look
+    mutually ready, so the critical-path term is a lower bound on the real one.
+
+!!! note "Under uniform (SPMD/MPI) execution"
+    Safe to use, but deliberately less informed: measured runtimes are
+    per-rank facts, so they are replaced by a single placeholder and the
+    policy degenerates to a deterministic least-loaded-processor choice. See
+    the N.B. on `task_time` below for why a rank-dependent cost here
+    deadlocks rather than merely misplacing a task.
+"""
+mutable struct UltraScheduler <: DataDepsScheduler
+    # Predicted time (ns, on a common clock renormalized per region so the
+    # earliest-free processor sits at 0) at which each processor goes idle.
+    # This is the scheduler's entire model of load.
+    proc_completions::Dict{Processor,UInt64}
+
+    # Predicted completion time of each already-placed task, keyed by
+    # `DTask.uid`.
+    #
+    # N.B. Keyed by *uid*, not by `DTask`. `spec.options.syncdeps` holds
+    # `ThunkSyncdep`s, which carry a `ThunkID` wrapping that uid rather than
+    # the `DTask` itself, so the original `Dict{DTask,UInt64}` could never be
+    # hit by a syncdep lookup: `deps_completed` was silently always zero (and
+    # then, separately, never read at all).
+    task_completions::Dict{Int,UInt64}
+
+    # Memory space each task was placed in. Not consulted by placement --
+    # `proc_completions` subsumes what the old `assignments`-rescan computed --
+    # but kept because it is the only externally observable record of what this
+    # scheduler decided, which is what the tests assert against.
+    assignments::Dict{Int,MemorySpace}
+
+    # Per-region memoization of `signature -> measured runtime`, so a region of
+    # N tasks over a handful of distinct signatures pays a handful of lookups
+    # into the eager scheduler's tables instead of N (each of which is a
+    # `remotecall_fetch` when planning off worker 1). Dropped whenever
+    # `region_procs` changes, so a long-lived scheduler picks up fresh
+    # measurements at the next region rather than pinning the first ones
+    # forever.
+    sig_time_cache::Dict{Signature,UInt64}
+
+    # Identity of the `all_procs` this scheduler last saw, used to detect a
+    # region boundary. Same trick (and same rationale) as
+    # `RoundRobinScheduler.locality_procs`: `distribute_tasks!` builds
+    # `all_procs` once per region and passes that same object for every task.
+    region_procs::Any
 
     function UltraScheduler()
-        return new(Dict{DTask,DTaskSpec}(),
-                    Dict{DTask,MemorySpace}(),
-                    Dict{DTask,Set{DTask}}(),
-                    Dict{DTask,UInt64}(),
-                    Dict{MemorySpace,UInt64}(),
-                    Dict{MemorySpace,Int}())
+        return new(Dict{Processor,UInt64}(),
+                   Dict{Int,UInt64}(),
+                   Dict{Int,MemorySpace}(),
+                   Dict{Signature,UInt64}(),
+                   nothing)
     end
 end
 Base.similar(::UltraScheduler) = UltraScheduler()
-function datadeps_schedule_task(sched::UltraScheduler, state::DataDepsState, all_procs, all_scope, task_scope, spec::DTaskSpec, task::DTask)
-    args = Base.mapany(spec.fargs) do arg
-        pos, data = arg
-        data, _ = unwrap_inout(data)
-        if data isa DTask
-            data = fetch(data; move_value=false, unwrap=false)
+
+"""
+    ultra_signature_time!(sched::UltraScheduler, spec::DTaskSpec) -> UInt64
+
+The main scheduler's measured runtime (ns) for `spec`'s call signature, or
+[`DATADEPS_UNKNOWN_TASK_TIME`](@ref) if it has never run one.
+
+Builds the signature from the *raw* argument values rather than
+`tochunk`-wrapping each one, as this used to. `Sch.signature` reduces every
+argument through `chunktype`, and `chunktype(c::Chunk) = c.chunktype` -- the
+type of what the chunk *holds* -- so a raw `Vector{Float64}` and a `Chunk`
+wrapping one produce the identical `Signature`, and hence hit the identical
+entry in `signature_time_cost` that the real (chunk-argument) execution
+populates. The wrapping was therefore pure cost: one `tochunk` per argument
+per task, each allocating a `DRef` in MemPool that nothing ever reads.
+
+The old code also passed `spec.fargs` -- which includes the function at
+position 1 -- as the *argument* list while separately passing the function,
+counting `f` twice in the signature and so never matching a real one.
+"""
+function ultra_signature_time!(sched::UltraScheduler, spec::DTaskSpec)
+    # `Base.mapany` (not `map`): a typed spec's `fargs` is a heterogeneous
+    # `Tuple`, and `Sch.signature`'s `@view args[...]`-free path still needs an
+    # indexable, `Vector`-typed collection to hand back below.
+    raw_args = Base.mapany(spec.fargs) do arg
+        v, _ = unwrap_inout(value(arg))
+        if v isa DTask
+            v = fetch(v; move_value=false, unwrap=false)
         end
-        return pos => tochunk(data)
+        return Argument(ArgPosition(arg.pos), v)
     end
-    f_chunk = tochunk(value(spec.fargs[1]))
-    task_time = remotecall_fetch(1, f_chunk, args) do f, args
+    sig = Sch.signature(raw_args[1], @view raw_args[2:end])
+    cached = get(sched.sig_time_cache, sig, nothing)
+    cached === nothing || return cached
+    # N.B. Reads `signature_time_cost` under *its own* lock rather than under
+    # `sch_state.lock`, which the original took. That field is documented
+    # (Sch.jl) as having its own lock precisely so reads are independent of
+    # the scheduler's; taking the big lock once per task put planning in
+    # direct contention with the running scheduler for no added consistency.
+    time = if myid() == 1
         Sch.init_eager()
         sch_state = Sch.EAGER_STATE[]
-        return @lock sch_state.lock begin
-            sig = Sch.signature(sch_state, f, args)
-            return lock(sch_state.signature_time_cost) do stc; get(stc, sig, 1000^3); end
+        lock(sch_state.signature_time_cost) do stc
+            get(stc, sig, DATADEPS_UNKNOWN_TASK_TIME)
         end
-    end
-
-    # FIXME: Copy deps are computed eagerly
-    deps = @something(spec.options.syncdeps, Set{ThunkSyncdep}())
-
-    # Find latest time-to-completion of all syncdeps
-    deps_completed = UInt64(0)
-    for dep in deps
-        haskey(sched.task_completions, dep) || continue # copy deps aren't recorded
-        deps_completed = max(deps_completed, sched.task_completions[dep])
-    end
-
-    # Find latest time-to-completion of each memory space
-    # FIXME: Figure out space completions based on optimal packing
-    # N.B. `exec_spaces` mirrors the computation `distribute_tasks!` does for
-    # itself (`queue.jl`) -- it isn't threaded through to the scheduler, so we
-    # rebuild it from `all_procs` here.
-    exec_spaces = unique(vcat(map(proc->collect(memory_spaces(proc)), all_procs)...))
-    spaces_completed = Dict{MemorySpace,UInt64}()
-    for space in exec_spaces
-        completed = UInt64(0)
-        for (task, other_space) in sched.assignments
-            space == other_space || continue
-            completed = max(completed, sched.task_completions[task])
-        end
-        spaces_completed[space] = completed
-    end
-
-    # Choose the earliest-available memory space and processor
-    # N.B. `our_space`/`our_proc` must be pre-declared `local` here: a `while`
-    # loop opens its own scope, so a name first assigned *inside* the loop
-    # (as both are, via the `findmin` destructure and `rand` below) is
-    # otherwise invisible once the loop breaks -- this bit pre-existing code
-    # that used `our_space`/`our_proc` below without ever having escaped the
-    # loop.
-    local our_space_completed, our_space, our_proc
-    while true
-        our_space_completed, our_space = findmin(spaces_completed)
-        our_space_procs = filter(proc->proc in all_procs, processors(our_space))
-        if isempty(our_space_procs)
-            delete!(spaces_completed, our_space)
-            continue
-        end
-        our_proc = rand(our_space_procs)
-        break
-    end
-
-    # Bytes not already resident at `our_space` have to move there before the
-    # task can run. `Sch.DEFAULT_TRANSFER_RATE` is the same bytes/time-unit
-    # assumption `estimate_task_costs!` uses for cross-worker chunk transfers
-    # elsewhere in the scheduler, reused here instead of inventing a second
-    # bandwidth constant. `bias == 0` keeps `move_time` at zero, matching the
-    # pre-locality behavior (see DATADEPS_LOCALITY_BIAS). `check_uniform`
-    # guards `bias` itself against cross-rank disagreement (see the N.B. on
-    # `RoundRobinScheduler`): `move_time` feeds `task_completions`, which later
-    # tasks' `findmin(spaces_completed)` reads, so a rank-local `bias` would
-    # desync *future* placement decisions, not just this one.
-    bias = DATADEPS_LOCALITY_BIAS[]
-    check_uniform(bias)
-    move_time = if bias > 0
-        tracked = datadeps_tracked_args(state, spec)
-        missing_bytes = isempty(tracked) ? 0.0 :
-            sum(our_space in state.arg_current[arg_w] ? 0.0 : w for (arg_w, w) in tracked)
-        UInt64(ceil(bias * missing_bytes / Sch.DEFAULT_TRANSFER_RATE))
     else
-        UInt64(0)
+        remotecall_fetch(1, sig) do sig
+            Sch.init_eager()
+            sch_state = Sch.EAGER_STATE[]
+            lock(sch_state.signature_time_cost) do stc
+                get(stc, sig, DATADEPS_UNKNOWN_TASK_TIME)
+            end
+        end::UInt64
+    end
+    sched.sig_time_cache[sig] = time
+    return time
+end
+
+function datadeps_schedule_task(sched::UltraScheduler, state::DataDepsState, all_procs, all_scope, task_scope, spec::DTaskSpec, task::DTask)
+    bias = DATADEPS_LOCALITY_BIAS[]
+
+    # Region boundary: `all_procs` is rebuilt once per region, so a change of
+    # identity is the cheapest available "a new region started" signal.
+    if sched.region_procs !== all_procs
+        sched.region_procs = all_procs
+        empty!(sched.sig_time_cache)
+        # `bias` is a process-global `Ref` that every rank must agree on --
+        # a rank-local override changes the *decision*, not just a
+        # measurement, and diverging placement under uniform execution
+        # deadlocks rather than misbehaving visibly. Checked here, once per
+        # region, rather than per task: `check_uniform` is a collective when
+        # `CHECK_UNIFORMITY[]` is on. Same reasoning as `RoundRobinScheduler`.
+        @check_uniform(bias)
+        # Renormalize the clock so the earliest-free processor sits at 0.
+        # Without this, `proc_completions` accumulates across every region a
+        # long-lived scheduler ever plans: the absolute values are meaningless
+        # (only differences drive placement), they drift further from reality
+        # every region (under the default `sync=true` every processor really
+        # *is* idle at a region boundary), and they grow without bound.
+        # Subtracting the minimum preserves relative load while pinning the
+        # scale, and is rank-uniform because every rank holds the same values.
+        if !isempty(sched.proc_completions)
+            base = minimum(values(sched.proc_completions))
+            if base > 0
+                # `collect(keys(...))` rather than iterating the `Dict`
+                # directly: assigning to an existing key doesn't rehash today,
+                # but "mutate while iterating" is not a contract Julia's `Dict`
+                # offers, and this runs once per region, not per task.
+                for proc in collect(keys(sched.proc_completions))
+                    sched.proc_completions[proc] -= base
+                end
+            end
+        end
+        if length(sched.task_completions) > DATADEPS_ULTRA_COMPLETION_CAP
+            empty!(sched.task_completions)
+            empty!(sched.assignments)
+        end
     end
 
-    sched.task_to_spec[task] = spec
-    sched.assignments[task] = our_space
-    sched.task_completions[task] = our_space_completed + move_time + task_time
+    # N.B. Under uniform (SPMD/MPI) execution every task is costed at the
+    # placeholder instead of its measured runtime. `signature_time_cost` is
+    # filled from each rank's *own* completed tasks, so it is the one input
+    # here that genuinely differs per rank -- `datadeps_tracked_args` already
+    # returns nothing under uniform execution, and every remaining tie-break
+    # below is positional. A rank-dependent `task_time` would place tasks
+    # differently on different ranks, which desyncs the tag sequence and
+    # deadlocks. Flattening it leaves a deterministic least-loaded-processor
+    # policy: less informed than the measured version, but rank-uniform, which
+    # is the difference between "suboptimal" and "hangs".
+    task_time = uniform_execution() ? DATADEPS_UNKNOWN_TASK_TIME :
+                                      ultra_signature_time!(sched, spec)
+
+    # Earliest this task could start, given what it already depends on. See the
+    # "What it cannot see" note above for why this is a lower bound.
+    # N.B. `max` over a `Set` is order-independent, so this stays rank-uniform
+    # despite `Set` iteration order not being.
+    ready = UInt64(0)
+    deps = spec.options.syncdeps
+    if deps !== nothing
+        for dep in deps
+            id = dep.id
+            id === nothing && continue
+            t = get(sched.task_completions, id.id, nothing)
+            t === nothing && continue
+            ready = max(ready, t)
+        end
+    end
+
+    # Bytes that would *not* have to move, per candidate space, plus the total
+    # so "would have to move" is a subtraction rather than a second scan.
+    # `bias == 0` skips this entirely (a hard bypass, not a zero-weighted
+    # term), which is what makes bias 0 a true no-op A/B control;
+    # `datadeps_tracked_args` additionally returns nothing at all under uniform
+    # execution, because its weights come from `datasize`, which is not
+    # rank-uniform by design.
+    resident = EMPTY_SPACE_WEIGHTS
+    total_bytes = 0.0
+    if bias > 0
+        tracked = datadeps_tracked_args(state, spec)
+        if !isempty(tracked)
+            resident = Dict{MemorySpace,Float64}()
+            for (arg_w, w) in tracked
+                total_bytes += w
+                for space in state.arg_current[arg_w]
+                    resident[space] = get(resident, space, 0.0) + w
+                end
+            end
+        end
+    end
+
+    # Pick the earliest-finishing scope-compatible processor. Scanned in
+    # `all_procs` order with a strict `<`, so ties go to the earliest candidate
+    # in that (rank-uniform, `select_processors_uniform!`-ordered) list rather
+    # than to whatever a `Dict`/`Set` happened to yield first -- the original
+    # used `findmin` over a `Dict` and then `rand` among the winning space's
+    # processors, both of which pick differently on different ranks and so
+    # desync tags under MPI.
+    our_proc = nothing
+    our_space = nothing
+    best_finish = typemax(UInt64)
+    # Nanoseconds per byte that has to move, with `bias` folded in; the same
+    # for every candidate, so hoisted out of the scan.
+    ns_per_byte = bias * DATADEPS_TRANSFER_NS_PER_BYTE
+    for proc in all_procs
+        proc_in_scope(proc, task_scope) || continue
+        space = only(memory_spaces(proc))
+        move_time = if total_bytes > 0
+            missing_bytes = max(0.0, total_bytes - get(resident, space, 0.0))
+            round(UInt64, missing_bytes * ns_per_byte)
+        else
+            UInt64(0)
+        end
+        start = max(get(sched.proc_completions, proc, UInt64(0)), ready)
+        finish = start + move_time + task_time
+        if finish < best_finish
+            best_finish = finish
+            our_proc = proc
+            our_space = space
+        end
+    end
+    if our_proc === nothing
+        throw(Sch.SchedulingException("Scopes are not compatible: $(all_scope), $(task_scope)"))
+    end
+
+    sched.proc_completions[our_proc] = best_finish
+    sched.task_completions[task.uid] = best_finish
+    sched.assignments[task.uid] = our_space
 
     return our_proc
 end
