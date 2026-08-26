@@ -23,6 +23,34 @@ using Dagger: In, Out, InOut, Blocks
 const SYNC_GATE = Ref{Base.Event}()
 const SYNC_RAN = Threads.Atomic{Int}(0)
 
+# Every gated region below is pinned to worker 1. `SYNC_GATE`/`SYNC_RAN` are
+# ordinary globals in *this process*, so a gated task scheduled onto a worker
+# would wait on an Event nobody can ever notify -- the whole suite then hangs
+# rather than failing. This passed under `-p 3` by luck for a while (the gated
+# task happened to land locally); adding a testset shifted the task counts and
+# it stopped being lucky. Pinning is the fix rather than `@everywhere`: the
+# point of the gate is that *this* task decides when the region may finish.
+const LOCAL_SCOPE = Dagger.scope(worker=1)
+
+# A processor that is *not* the one a gated task occupies.
+#
+# Two tests below deliberately `fetch` a plain task while the gated region task
+# is still blocked, to observe whether that plain task was made to wait. That
+# only means anything if a free processor exists: under `-p 3` each worker has
+# a single thread, the gated task holds worker 1's, and a plain task over data
+# that also lives on worker 1 gets placed there by locality -- queued behind a
+# task that cannot finish until after the `fetch`. Self-inflicted deadlock, and
+# it hangs the whole suite rather than failing. Under `-t 4` there were spare
+# threads, so it passed and hid the problem.
+const OTHER_PROC = let
+    all_procs = collect(Dagger.all_processors())
+    gated = first(filter(p -> Dagger.root_worker_id(p) == myid(), all_procs))
+    others = filter(!=(gated), all_procs)
+    isempty(others) ? nothing : first(others)
+end
+const GATED_SCOPE = Dagger.ExactScope(first(filter(p -> Dagger.root_worker_id(p) == myid(),
+                                                   collect(Dagger.all_processors()))))
+
 # Defined at top level (not a closure) so it survives serialization to a
 # worker, and reads the gate through a `Ref` so the same function body works
 # across the several regions below.
@@ -53,8 +81,10 @@ end
     Dagger.spawn_datadeps(; sync=false) do
         Dagger.@spawn sync_add1!(InOut(A))
     end
-    Dagger.spawn_datadeps(; sync=false) do
-        Dagger.@spawn sync_gated_add!(InOut(B))
+    Dagger.with_options(;scope=GATED_SCOPE) do
+        Dagger.spawn_datadeps(; sync=false) do
+            Dagger.@spawn sync_gated_add!(InOut(B))
+        end
     end
 
     # Narrow to `A`. `B`'s task is blocked on a gate this task has not
@@ -240,8 +270,10 @@ end
     @testset "interop on (default)" begin
         SYNC_GATE[] = Base.Event()
         A = zeros(Int, 8)
-        Dagger.spawn_datadeps(; sync=false) do
-            Dagger.@spawn sync_gated_add!(InOut(A))
+        Dagger.with_options(;scope=GATED_SCOPE) do
+            Dagger.spawn_datadeps(; sync=false) do
+                Dagger.@spawn sync_gated_add!(InOut(A))
+            end
         end
         t = Dagger.@spawn sum(A)
         notify(SYNC_GATE[])
@@ -252,22 +284,30 @@ end
     @testset "interop off reproduces the hazard" begin
         # The control. If this ever starts passing, the test above has stopped
         # proving anything and the gate is no longer doing its job.
-        old = Dagger.DATADEPS_INTEROP[]
-        try
-            Dagger.DATADEPS_INTEROP[] = false
-            SYNC_GATE[] = Base.Event()
-            A = zeros(Int, 8)
-            Dagger.spawn_datadeps(; sync=false) do
-                Dagger.@spawn sync_gated_add!(InOut(A))
+        if OTHER_PROC === nothing
+            @test_skip "needs a second processor to observe a blocked one"
+        else
+            old = Dagger.DATADEPS_INTEROP[]
+            try
+                Dagger.DATADEPS_INTEROP[] = false
+                SYNC_GATE[] = Base.Event()
+                A = zeros(Int, 8)
+                Dagger.with_options(;scope=GATED_SCOPE) do
+                    Dagger.spawn_datadeps(; sync=false) do
+                        Dagger.@spawn sync_gated_add!(InOut(A))
+                    end
+                end
+                t = Dagger.with_options(;scope=Dagger.ExactScope(OTHER_PROC)) do
+                    Dagger.@spawn sum(A)
+                end
+                got = fetch(t)
+                notify(SYNC_GATE[])
+                Dagger.synchronize()
+                @test got == 0
+            finally
+                Dagger.DATADEPS_INTEROP[] = old
+                try; Dagger.synchronize(); catch; end
             end
-            t = Dagger.@spawn sum(A)
-            got = fetch(t)
-            notify(SYNC_GATE[])
-            Dagger.synchronize()
-            @test got == 0
-        finally
-            Dagger.DATADEPS_INTEROP[] = old
-            try; Dagger.synchronize(); catch; end
         end
     end
 
@@ -275,16 +315,27 @@ end
         # A plain task over data no region ever touched must not acquire
         # syncdeps on unrelated in-flight work, or every `@spawn` after any
         # region becomes serialized behind it.
-        SYNC_GATE[] = Base.Event()
-        A = zeros(Int, 8)
-        C = fill(3, 8)
-        Dagger.spawn_datadeps(; sync=false) do
-            Dagger.@spawn sync_gated_add!(InOut(A))
+        if OTHER_PROC === nothing
+            @test_skip "needs a second processor to observe a blocked one"
+        else
+            SYNC_GATE[] = Base.Event()
+            A = zeros(Int, 8)
+            C = fill(3, 8)
+            Dagger.with_options(;scope=GATED_SCOPE) do
+                Dagger.spawn_datadeps(; sync=false) do
+                    Dagger.@spawn sync_gated_add!(InOut(A))
+                end
+            end
+            # Pinned off the gated processor (see `OTHER_PROC`), so the only
+            # way this can fail to complete is interop having wrongly made it
+            # wait on the gated task.
+            t = Dagger.with_options(;scope=Dagger.ExactScope(OTHER_PROC)) do
+                Dagger.@spawn sum(C)
+            end
+            @test fetch(t) == 24
+            notify(SYNC_GATE[])
+            Dagger.synchronize()
         end
-        t = Dagger.@spawn sum(C)   # `C` is untracked: must not wait for `A`
-        @test fetch(t) == 24       # would hang/deadlock if it waited on the gate
-        notify(SYNC_GATE[])
-        Dagger.synchronize()
     end
 
     @testset "tasks inside a region are not intercepted" begin
