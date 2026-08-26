@@ -50,6 +50,77 @@ end
 # pays for compilation, which can blow past 10s on a slow/loaded CI runner even
 # though the work itself completes in well under a second. Give finishing tests
 # plenty of headroom so cold-compile latency isn't misreported as a hang.
+# Report why a streaming test hung, while the evidence still exists.
+#
+# The two questions worth separating are "did the task never get scheduled?"
+# and "did it start and then block?", which `running`/`running_on` answer
+# directly, and "is some drain task dead or missing?", which the errormonitor
+# registry answers by name (`streaming input:`/`streaming output:` entries are
+# registered per stream edge). Everything is wrapped defensively: a diagnostic
+# that throws must never turn a reported failure into an unreported one.
+function dump_streaming_state()
+    io = IOBuffer()
+    println(io, "streaming hang diagnostics")
+    try
+        state = Dagger.Sch.EAGER_STATE[]
+        if state === nothing
+            println(io, "  scheduler: <no eager state>")
+        else
+            println(io, "  scheduler: running_count=", state.running_count[])
+            # NEVER block on the scheduler lock here. The case this runs in is
+            # "something is wedged", and if what's wedged is holding this lock,
+            # waiting for it converts a reported failure into a silent hang.
+            # Take it opportunistically and say so if we couldn't.
+            got_lock = false
+            for _ in 1:50
+                got_lock = trylock(state.lock)
+                got_lock && break
+                sleep(0.1)
+            end
+            if !got_lock
+                println(io, "  live thunks: <scheduler lock held for >5s -- ",
+                            "it is probably the wedged party>")
+            else
+                try
+                    println(io, "  live thunks: ", length(state.strong_thunks))
+                    for th in state.strong_thunks
+                        running = @atomic th.running
+                        finished = @atomic th.finished
+                        errored = @atomic th.errored
+                        pending = @atomic th.pending_deps
+                        println(io, "    thunk ", th.id,
+                                ": running=", running,
+                                " finished=", finished,
+                                " errored=", errored,
+                                " pending_deps=", pending,
+                                " on=", something(th.running_on, "<unscheduled>"))
+                    end
+                finally
+                    unlock(state.lock)
+                end
+            end
+        end
+    catch err
+        println(io, "  <scheduler dump failed: ", sprint(showerror, err), ">")
+    end
+    try
+        lock(Dagger.Sch.ERRORMONITOR_TRACKED) do tracked
+            streamers = filter(p->startswith(first(p), "streaming "), tracked)
+            println(io, "  streaming drain tasks: ", length(streamers))
+            for (name, task) in streamers
+                println(io, "    ", name,
+                        ": started=", istaskstarted(task),
+                        " done=", istaskdone(task),
+                        " failed=", istaskfailed(task))
+            end
+        end
+    catch err
+        println(io, "  <drain-task dump failed: ", sprint(showerror, err), ">")
+    end
+    @warn String(take!(io))
+    return
+end
+
 function test_finishes(f, message::String; ignore_timeout=false, timeout=(ignore_timeout ? 10 : 120), max_evals=10)
     t = @eval Threads.@spawn begin
         tset = nothing
@@ -74,6 +145,12 @@ function test_finishes(f, message::String; ignore_timeout=false, timeout=(ignore
     if timed_out
         if !ignore_timeout
             @warn "Testing task timed out: $message"
+            # Dump the scheduler and drain-task state *before* the cancellation
+            # below tears it down. A streaming hang otherwise leaves nothing to
+            # go on: the exception objects printed by the failing `fetch`es are
+            # rendered after teardown has already emptied the stores, so they
+            # describe the corpse rather than the crime.
+            dump_streaming_state()
         end
         # Cancel in a loop rather than once. The budget can expire while the
         # testing task is still *inside* its first `Dagger.@spawn`: on a cold,
