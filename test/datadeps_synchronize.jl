@@ -225,3 +225,79 @@ end
     Dagger.synchronize()
     @test all(==(20), A)
 end
+
+@testset "Interop: plain @spawn sees tracked data" begin
+    # The documented `sync=false` hazard: a region returns before its work has
+    # run or been written back, and a plain `Dagger.@spawn` downstream knows
+    # nothing about it. `maybe_add_interop_deps!` closes this for plain *Dagger
+    # tasks* (it cannot do anything about plain Julia code).
+    #
+    # Deterministic by construction rather than by luck: the region's task is
+    # gated, so at the moment the plain task is submitted the region has
+    # definitely not finished. A plain task with no syncdeps runs immediately
+    # and reads zeros; one that was given syncdeps cannot start until the
+    # write-back lands.
+    @testset "interop on (default)" begin
+        SYNC_GATE[] = Base.Event()
+        A = zeros(Int, 8)
+        Dagger.spawn_datadeps(; sync=false) do
+            Dagger.@spawn sync_gated_add!(InOut(A))
+        end
+        t = Dagger.@spawn sum(A)
+        notify(SYNC_GATE[])
+        @test fetch(t) == 8
+        Dagger.synchronize()
+    end
+
+    @testset "interop off reproduces the hazard" begin
+        # The control. If this ever starts passing, the test above has stopped
+        # proving anything and the gate is no longer doing its job.
+        old = Dagger.DATADEPS_INTEROP[]
+        try
+            Dagger.DATADEPS_INTEROP[] = false
+            SYNC_GATE[] = Base.Event()
+            A = zeros(Int, 8)
+            Dagger.spawn_datadeps(; sync=false) do
+                Dagger.@spawn sync_gated_add!(InOut(A))
+            end
+            t = Dagger.@spawn sum(A)
+            got = fetch(t)
+            notify(SYNC_GATE[])
+            Dagger.synchronize()
+            @test got == 0
+        finally
+            Dagger.DATADEPS_INTEROP[] = old
+            try; Dagger.synchronize(); catch; end
+        end
+    end
+
+    @testset "untracked arguments are left alone" begin
+        # A plain task over data no region ever touched must not acquire
+        # syncdeps on unrelated in-flight work, or every `@spawn` after any
+        # region becomes serialized behind it.
+        SYNC_GATE[] = Base.Event()
+        A = zeros(Int, 8)
+        C = fill(3, 8)
+        Dagger.spawn_datadeps(; sync=false) do
+            Dagger.@spawn sync_gated_add!(InOut(A))
+        end
+        t = Dagger.@spawn sum(C)   # `C` is untracked: must not wait for `A`
+        @test fetch(t) == 24       # would hang/deadlock if it waited on the gate
+        notify(SYNC_GATE[])
+        Dagger.synchronize()
+    end
+
+    @testset "tasks inside a region are not intercepted" begin
+        # Datadeps derives the full dependency structure itself; interop must
+        # stay out of the way, or a copy task could end up waiting on a task
+        # that is waiting on it.
+        A = zeros(Int, 8)
+        B = zeros(Int, 8)
+        Dagger.spawn_datadeps() do
+            Dagger.@spawn sync_add1!(InOut(A))
+            Dagger.@spawn sync_add1!(InOut(B))
+        end
+        @test all(==(1), A)
+        @test all(==(1), B)
+    end
+end
