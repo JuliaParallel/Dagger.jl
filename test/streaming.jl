@@ -269,6 +269,58 @@ end
         @test taken == collect(1:10)
         @test isempty(rb)
     end
+
+    @testset "a blocked take! does not starve spawned tasks" begin
+        # Julia permanently marks a task `sticky` once it schedules any sticky
+        # task (`Base.enq_work`: "XXX: Ideally we would be able to unset this"),
+        # which the streaming transport does. A sticky task re-enqueues itself
+        # into its *thread-local* workqueue on `yield()`, and `trypoptask`
+        # drains that queue before it ever reaches the multiqueue holding
+        # `Threads.@spawn`ed tasks. So a sticky task blocked in `take!` must
+        # not spin on `yield()` forever: with one on every default thread,
+        # nothing spawned can ever start, and the drain tasks a stream spawns
+        # to move its values never run at all.
+        #
+        # Note the pool layout -- `enq_work` places default threads at
+        # `threadpoolsize(:interactive)+1 : end`, so pinning to tids `1:nd`
+        # would leave a default thread free and hide the starvation entirely.
+        ni = Threads.threadpoolsize(:interactive)
+        nd = Threads.threadpoolsize(:default)
+        if nd < 2
+            @test_skip "needs at least 2 default threads"
+        else
+            rb = Dagger.ProcessRingBuffer{Int}(1)  # empty: every take! blocks
+            blocked = Task[]
+            for tid in (ni+1):(ni+nd)
+                t = Task() do
+                    Dagger.set_tls!((; processor = Dagger.ThreadProc(1, Threads.threadid()),
+                                       sch_uid = UInt(0),
+                                       sch_handle = nothing,
+                                       task_spec = nothing,
+                                       cancel_token = Dagger.CancelToken(),
+                                       logging_enabled = false,
+                                       acceleration = Dagger.DistributedAcceleration()))
+                    try
+                        take!(rb)
+                    catch err
+                        err isa InvalidStateException || rethrow()
+                    end
+                end
+                t.sticky = true  # exactly what `enq_work` does to a spawned task
+                ccall(:jl_set_task_tid, Cint, (Any, Cint), t, tid-1)
+                schedule(t)
+                push!(blocked, t)
+            end
+            try
+                sleep(1.0)  # let every pinned task reach the wait loop
+                spawned = Threads.@spawn nothing
+                @test timedwait(()->istaskstarted(spawned), 20.0) == :ok
+            finally
+                close(rb)
+                foreach(wait, blocked)
+            end
+        end
+    end
 end
 
 # A buffer that announces when `StreamStore.put!` has parked on it. Reaching
