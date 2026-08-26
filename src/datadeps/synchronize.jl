@@ -96,12 +96,21 @@ evaluated here, against `ddctx.state` as it now stands -- not as it stood when
 the write was recorded -- which is what lets an intervening region elide a
 write-back that turned out to be unnecessary.
 """
-function flush_pending_writeback!(ddctx::DataDepsContext)
+function flush_pending_writeback!(ddctx::DataDepsContext;
+                                  targets::Union{Set{ArgumentWrapper},Nothing}=nothing)
     isempty(ddctx.pending_writeback) && return
     state = ddctx.state
     write_num = ddctx.write_num
-    @check_uniform(length(ddctx.pending_writeback))
-    for arg_w in sort(collect(ddctx.pending_writeback); by=arg_w->arg_w.hash)
+    # `targets === nothing` is the full flush; otherwise only the intersection
+    # is emitted and the rest stays pending for a later call. Intersecting here
+    # (rather than at the call site) keeps the `arg_w.hash` sort -- the thing
+    # that makes emission order rank-uniform -- as the single ordering
+    # authority for both modes.
+    pending = targets === nothing ? ddctx.pending_writeback :
+                                    intersect(ddctx.pending_writeback, targets)
+    isempty(pending) && return
+    @check_uniform(length(pending))
+    for arg_w in sort(collect(pending); by=arg_w->arg_w.hash)
         @check_uniform(arg_w)
         arg = arg_w.arg
         origin_space = state.arg_origin[arg]
@@ -132,7 +141,11 @@ function flush_pending_writeback!(ddctx::DataDepsContext)
         end
     end
     ddctx.write_num = write_num + 1
-    empty!(ddctx.pending_writeback)
+    if targets === nothing
+        empty!(ddctx.pending_writeback)
+    else
+        setdiff!(ddctx.pending_writeback, pending)
+    end
     return
 end
 
@@ -188,7 +201,185 @@ function flush_pending_frees!(ddctx::DataDepsContext)
     return
 end
 
+### Targeted synchronization: resolving `synchronize(args...)` to tracked data ###
+
+"""
+    _resolve_sync_targets(ddctx::DataDepsContext, args::Tuple) -> Union{Nothing,Set{ArgumentWrapper}}
+
+Expand `args` into the set of tracked `ArgumentWrapper`s naming exactly the data
+the caller asked to have usable, or `nothing` if that cannot be established --
+in which case the caller must fall back to a full drain.
+
+**`nothing` means "cannot narrow", never "nothing to do".** That distinction is
+the whole safety argument here. An argument Datadeps has no record of might be
+untracked (a plain local the region never saw, for which a narrow flush really
+would be a legitimate no-op) or it might be tracked under a key this function
+failed to derive -- and the two are indistinguishable from here. Treating the
+ambiguous case as "nothing to wait for" would turn a resolution bug into a
+silently unsynchronized read, which is precisely the failure mode that made the
+`args` form a documented full-drain stub instead of shipping as a narrow flush.
+Falling back means narrowing is *only ever* an optimization: it can fail to
+speed things up, but it cannot fail to synchronize.
+
+Resolution mirrors what `datadeps_tracked_args` (scheduling.jl) does during
+planning, because it must land on the same keys planning used:
+
+- A `DArray` is never itself tracked -- Datadeps tracks its individual
+  `.chunks` -- so it expands to those. This is the case the plan called out as
+  the more dangerous half of the stub: `synchronize(DA)` looking up the
+  `DArray` object finds nothing at all.
+- A `DTask` resolves through `fetch(t; raw=true)`, exactly as
+  `populate_task_info!` did when it recorded the argument.
+- Anything else is used as-is and looked up in `state.raw_arg_to_chunk`.
+
+The `arg_chunk`-to-`ArgumentWrapper` step then takes *every* wrapper over that
+chunk, across all `dep_mod`s, rather than trying to guess which sub-region the
+caller meant: `synchronize(A)` means all of `A`.
+"""
+function _resolve_sync_targets(ddctx::DataDepsContext, args::Tuple)
+    isempty(args) && return nothing
+    isdefined(ddctx, :state) || return nothing
+    state = ddctx.state
+    # Resolved backing chunks, keyed by identity (matching `raw_arg_to_chunk`).
+    chunks = IdDict{Any,Nothing}()
+    for arg in args
+        _collect_sync_chunks!(chunks, state, arg) || return nothing
+    end
+    isempty(chunks) && return nothing
+    # One pass over `arg_owner` rather than a scan per argument: a DArray
+    # expands to one chunk per tile, and the quadratic version showed up
+    # immediately on anything tiled finely enough to be worth pipelining.
+    targets = Set{ArgumentWrapper}()
+    for arg_w in keys(state.arg_owner)
+        haskey(chunks, arg_w.arg) && push!(targets, arg_w)
+    end
+    isempty(targets) && return nothing
+    # Under uniform execution, *which* targets we resolved decides which
+    # write-back copies get emitted -- a collective. A rank that resolved a
+    # different set (or fell back to a full drain while others narrowed)
+    # desynchronizes tags rather than just doing different amounts of work, so
+    # make the disagreement raise here instead of deadlocking later. Hashed
+    # over a sorted order, since `targets` is a `Set` and its iteration order
+    # is not itself meaningful.
+    @check_uniform(length(targets))
+    @check_uniform(sort!(map(arg_w->arg_w.hash, collect(targets))))
+    return targets
+end
+
+"Resolve one `synchronize` argument into `chunks`; `false` if it can't be resolved."
+function _collect_sync_chunks!(chunks::IdDict{Any,Nothing}, state::DataDepsState, arg)
+    if arg isa DArray
+        # An empty DArray resolves vacuously; anything else must resolve every
+        # tile, since a partially-resolved array is not a narrowing we can
+        # honor (the unresolved tiles would go unsynchronized).
+        for chunk in arg.chunks
+            _collect_sync_chunks!(chunks, state, chunk) || return false
+        end
+        return true
+    end
+    leaf = arg isa DTask ? fetch(arg; raw=true) : arg
+    arg_chunk = get(state.raw_arg_to_chunk, leaf, nothing)
+    arg_chunk === nothing && return false
+    chunks[arg_chunk] = nothing
+    return true
+end
+
+"""
+    _targeted_wait_tasks(state::DataDepsState, targets) -> IdDict{DTask,Nothing}
+
+The tasks that must finish before `targets` are usable from plain code: every
+writer and reader of every ainfo overlapping any replica of any target.
+
+Waiting on the *last* writer of an ainfo transitively covers every earlier
+one -- Dagger's scheduler will not start a task before its syncdeps finish, and
+each writer took the previous writer as a syncdep -- so this set does not need
+to be transitively closed by hand.
+
+Iterating `state.remote_arg_w[arg_w]` walks every memory space the argument has
+a replica in, not just its origin. A task running against an off-origin replica
+is exactly the one a region-barrier-free pipeline leaves in flight, and it is
+the one worth catching.
+"""
+function _targeted_wait_tasks(state::DataDepsState, targets::Set{ArgumentWrapper})
+    out = IdDict{DTask,Nothing}()
+    for arg_w in targets
+        spaces = get(state.remote_arg_w, arg_w, nothing)
+        spaces === nothing && continue
+        for (_space, remote_arg_w) in spaces
+            ainfo = get(state.ainfo_cache, remote_arg_w, nothing)
+            ainfo === nothing && continue
+            gather_overlap_tasks!(state, ainfo, out)
+        end
+    end
+    return out
+end
+
 const _VALID_GPU_SYNC = (:fence, :block, :none)
+
+"""
+    _gpu_sync_spaces!(state::DataDepsState, gpu_sync::Symbol) -> Nothing
+
+Device-synchronize every memory space this context has placed data in, so that
+kernels still queued when their Dagger task returned have actually run by the
+time `synchronize` does.
+
+Why it exists: a GPU `Dagger.execute!` does not synchronize its stream -- see
+the "Synchronization must be done when accessing result or args" N.B. in
+`ext/ROCExt.jl`/`ext/OpenCLExt.jl` -- it relies on the DtoH `move` to do it.
+That covers the common case, where the write-back copy *is* a DtoH move. It
+does not cover an argument whose *origin* is already device memory: the
+write-back is then correctly elided (the origin already holds the current
+replica), no `move` runs, and nothing in Dagger has synchronized anything by
+the time `synchronize()` returns.
+
+!!! note "Not demonstrated to be load-bearing"
+    This closes a gap that is real on paper -- Dagger makes no guarantee here
+    -- but an A/B of `gpu_sync=:none` against `:fence` on exactly that case
+    (device-origin argument, elided write-back, 4M-element kernel heavy
+    enough to still be running, 25 reps each in separate processes) found
+    **0/25 stale reads either way** on ROCm/gfx1030. The likely reason is that
+    the host's own readback is itself queued on the device and ordered after
+    the kernel by the backend's stream semantics, so the window never opens
+    for the access patterns tried. Treat this as defensive: it makes
+    `gpu_sync` mean something and removes a documented assumption, but do not
+    cite it as a bug fix, and do not assume `:none` is unsafe on the strength
+    of this comment alone.
+
+Spaces are derived from `state.remote_args` rather than tracked incrementally
+(the `touched_spaces` field this replaces): its keys are exactly the spaces
+slots have been generated in, `generate_slot!` records an entry even for the
+same-space pass-through case, and deriving costs nothing on the planning hot
+path -- where a per-task `push!` would have needed `ddctx.lock` to be safe
+against parallel hierarchical partitions.
+
+`gpu_synchronize(::Processor)` has a `nothing` fallback, so CPU spaces cost a
+no-op call and need no filtering here.
+
+`:fence` and `:block` currently do the same thing. Dagger's GPU layer exposes
+only a blocking device synchronize; a true fence (record an event, make later
+work depend on it, don't block the host) has no hook to hang off yet. The
+parameter keeps them distinct because the *contracts* differ, so a real fence
+can land under `:fence` without a breaking change -- and because `:none` is a
+meaningful, and now genuinely unsafe, opt-out.
+"""
+function _gpu_sync_spaces!(state::DataDepsState, gpu_sync::Symbol)
+    gpu_sync === :none && return
+    for space in keys(state.remote_args)
+        for proc in processors(space)
+            if root_worker_id(proc) == myid()
+                gpu_synchronize(proc)
+            else
+                # A value that crossed a serialization boundary was already
+                # synchronized by the `move` that sent it (same reasoning as
+                # `sync_with_context` in the GPU extensions), but a task that
+                # ran remotely and left its result in remote device memory was
+                # not -- so ask the owning worker to do it.
+                remotecall_wait(gpu_synchronize, root_worker_id(proc), proc)
+            end
+        end
+    end
+    return
+end
 
 """
     _do_synchronize!(ddctx; write_back, free, gpu_sync, check_errors, wrap_errors, from_owner) -> Nothing
@@ -305,11 +496,14 @@ function _do_synchronize!(ddctx::DataDepsContext;
         empty!(ddctx.retiring_slots)
         cleanup_tasks_accel!(current_acceleration(), drained_tasks)
 
-        # Step 6: GPU fence over `ddctx.touched_spaces`. Validated above;
-        # otherwise a no-op stub until a later phase adds real per-space
-        # events. Correctness never depends on it being anything more than
-        # that today, since every task above was already waited on
-        # synchronously.
+        # Step 6: device-synchronize every space this context placed data in.
+        # Must come after step 4 (waiting on the tasks) -- there is no point
+        # synchronizing a stream before the task that queues onto it has even
+        # been submitted -- and before step 7 resets `state`, which is where
+        # the space list comes from.
+        if isdefined(ddctx, :state)
+            _gpu_sync_spaces!(ddctx.state, gpu_sync)
+        end
 
         # Step 7: reset for the next epoch. Every task that could reference
         # the old `state`'s cache (copies, frees, the user's own tasks) has
@@ -357,6 +551,116 @@ function _do_synchronize!(ddctx::DataDepsContext;
 end
 
 """
+    _do_synchronize_targeted!(ddctx, targets; write_back, gpu_sync, check_errors, from_owner) -> Nothing
+
+Partial drain: make exactly `targets` usable from plain code, leaving every
+other in-flight task running and the context alive for further regions.
+
+Steps, and what is deliberately *not* here compared to `_do_synchronize!`:
+
+1. Emit deferred write-back copies, but only for targets
+   (`flush_pending_writeback!(...; targets)`). The rest stay pending.
+2. Wait on the target's dependency closure (`_targeted_wait_tasks`) plus the
+   copies just emitted in step 1, and remove exactly those from `inflight`.
+3. **No frees.** Whether a Datadeps-allocated buffer is dead depends on every
+   region's reads and writes, not just the targeted one, so a narrow free is
+   not a narrowing of the full free loop -- it is a different, harder question.
+   Frees stay pending for the next full drain. This costs memory, not
+   correctness, and it is the reason `free` is not a parameter here.
+4. **No state reset, no slot release, no `region_bt` eviction.** All three are
+   justified in `_do_synchronize!` by "every task that could reference this has
+   retired", which is exactly what a partial drain does not establish.
+
+`cleanup_tasks_accel!` *is* called, on the subset actually drained: the
+argument for it in `_do_synchronize!` (step 5) is already per-task -- a tid's
+sub-counter is only touched during that task's own planning and execution, so
+fetching the task is what makes it reclaimable -- and does not depend on the
+drain being total.
+
+A discovered failure is recorded and reported exactly as in the full drain, but
+poison is *not* cleared even when reported: other regions on this context are
+still in flight and may yet fail, and a partial drain has not established that
+the pipeline is healthy enough to keep planning on. The caller gets the error;
+the context stays poisoned until something drains it fully.
+"""
+function _do_synchronize_targeted!(ddctx::DataDepsContext, targets::Set{ArgumentWrapper};
+                                   write_back::Bool, gpu_sync::Symbol,
+                                   check_errors::Bool, from_owner::Bool)
+    gpu_sync in _VALID_GPU_SYNC ||
+        throw(ArgumentError("gpu_sync must be one of $_VALID_GPU_SYNC, got $(repr(gpu_sync))"))
+    if !from_owner && gpu_sync === :fence
+        gpu_sync = :block
+    end
+
+    err = nothing
+    err_region = 0
+    resolved_bt = nothing
+    @lock ddctx.lock begin
+        state = ddctx.state
+        # The closure is computed *before* the write-back copies are emitted:
+        # those copies are themselves synced against the tasks below, so
+        # including them here would be redundant, and they are picked up by
+        # the `n_before` slice instead.
+        wait_tasks = _targeted_wait_tasks(state, targets)
+
+        n_before = length(ddctx.inflight)
+        if write_back
+            upper_queue = get_options(:task_queue, DefaultTaskQueue())
+            flush_queue = ContextQueue(upper_queue, ddctx)
+            with_options(; task_queue=flush_queue) do
+                with_datadeps_planning_token() do
+                    flush_pending_writeback!(ddctx; targets)
+                end
+            end
+        end
+        # Everything appended to `inflight` by the flush above is a write-back
+        # copy for a target, so it belongs to the wait set by construction.
+        for idx in (n_before+1):length(ddctx.inflight)
+            wait_tasks[ddctx.inflight[idx]] = nothing
+        end
+
+        drained = DTask[]
+        remaining = DTask[]
+        for task in ddctx.inflight
+            if haskey(wait_tasks, task)
+                try
+                    fetch(task; move_value=false, unwrap=false)
+                catch task_err
+                    if ddctx.err === nothing
+                        ddctx.err = task_err
+                        ddctx.err_region = get(ddctx.task_region, task, ddctx.region_id)
+                    end
+                end
+                delete!(ddctx.task_region, task)
+                push!(drained, task)
+            else
+                push!(remaining, task)
+            end
+        end
+        copy!(ddctx.inflight, remaining)
+        cleanup_tasks_accel!(current_acceleration(), drained)
+
+        # Device-synchronize, same as `_do_synchronize!`'s step 6 and for the
+        # same reason. Deliberately *not* narrowed to the targets' own spaces:
+        # `gpu_synchronize` is a whole-device operation, so there is nothing
+        # finer to ask for, and skipping a space would only be sound if we
+        # could prove no target has a replica there.
+        _gpu_sync_spaces!(state, gpu_sync)
+
+        err = ddctx.err
+        err_region = ddctx.err_region
+        if err !== nothing && check_errors
+            resolved_bt = _resolve_region_bt(ddctx, err_region)
+        end
+    end
+
+    if err !== nothing && check_errors
+        throw(DataDepsRegionError(err_region, err, resolved_bt))
+    end
+    return
+end
+
+"""
     Dagger.synchronize(; write_back=true, free=true, gpu_sync=:fence, check_errors=true)
     Dagger.synchronize(args...; kwargs...)
 
@@ -386,31 +690,53 @@ implicit.
   `_do_synchronize!`'s docstring for exactly when this clears the context's
   poisoned state.
 
-`Dagger.synchronize(A, B, ...)` accepts specific tracked values as a forward-
-compatible restriction on scope -- documenting caller intent ("I need `A` and
-`B` usable now") -- but performs the *same* full drain of the calling task's
-context as the bare form in this phase: `A`/`B` are validated as tracked-or-
-ignorable, not yet used to skip waiting on unrelated tasks. That is always
-correct (a full drain is a safe superset of a partial one), just not maximally
-lazy; genuine per-argument partial synchronization needs the interop-boundary
-aliasing machinery from a later phase and is not implemented here.
+`Dagger.synchronize(A, B, ...)` restricts the drain to the named values: it
+emits the deferred write-back for `A`/`B` only, waits only on the tasks that
+have read or written them (across every memory space they have a replica in),
+and leaves every other in-flight task running and the context alive for
+further regions. This is what makes a pipeline usable -- you can take one
+array's results without collapsing the pipeline behind it.
+
+Three things the targeted form deliberately does *not* do, none of which
+affect correctness:
+
+- It never frees. Whether a Datadeps-allocated buffer is dead depends on every
+  region's accesses, not just the named one, so frees stay pending for the
+  next full drain. `free` is accepted for signature compatibility and ignored.
+- It does not reset the context, so later regions keep their carried-over
+  state and no data is re-copied.
+- It does not clear a poisoned context. You get the error; a full
+  `Dagger.synchronize()` is still required to clear it.
+
+If any argument cannot be resolved to data this context tracks, the call falls
+back to a full drain rather than guessing. Narrowing is therefore only ever an
+optimization -- it can fail to be lazy, never fail to synchronize. A `DArray`
+resolves to its individual chunks (Datadeps tracks those, not the `DArray`
+object), so `synchronize(DA)` does the right thing.
+
+!!! warning "MPI/SPMD uniformity"
+    Under uniform (SPMD/MPI) execution, every rank must call `synchronize` with
+    arguments naming the *same* data in the same order: which write-back copies
+    get emitted is a collective decision, and a rank that narrows differently
+    desynchronizes tags rather than merely doing less work. The resolved target
+    count and each target are passed through `check_uniform`, so a mismatch
+    raises rather than hangs when `Dagger.check_uniformity!(true)` is active.
 """
 function synchronize(args...; write_back::Bool=true, free::Bool=true,
                      gpu_sync::Symbol=:fence, check_errors::Bool=true)
     ddctx = DATADEPS_CONTEXT[]
     ddctx === nothing && return nothing
-    _validate_synchronize_args(ddctx, args)
-    _do_synchronize!(ddctx; write_back, free, gpu_sync, check_errors,
-                     wrap_errors=true, from_owner=true)
+    targets = _resolve_sync_targets(ddctx, args)
+    if targets === nothing
+        _do_synchronize!(ddctx; write_back, free, gpu_sync, check_errors,
+                         wrap_errors=true, from_owner=true)
+    else
+        _do_synchronize_targeted!(ddctx, targets; write_back, gpu_sync,
+                                  check_errors, from_owner=true)
+    end
     maybe_drop_context!()
     return nothing
 end
-
-# Accepts anything; a value this task never tracked is simply not something
-# there's anything to do for. See `synchronize`'s docstring for the current
-# (full-drain) scope of the `args` form.
-_validate_synchronize_args(::DataDepsContext, ::Tuple{}) = nothing
-_validate_synchronize_args(::DataDepsContext, ::Tuple) = nothing
 
 """
     synchronize_task!(t::Task)
@@ -442,9 +768,14 @@ function synchronize_task!(t::Task, args...; write_back::Bool=true, free::Bool=t
         get(reg, t, nothing)
     end
     ddctx === nothing && return nothing
-    _validate_synchronize_args(ddctx, args)
-    _do_synchronize!(ddctx; write_back, free, gpu_sync, check_errors,
-                     wrap_errors=true, from_owner=false)
+    targets = _resolve_sync_targets(ddctx, args)
+    if targets === nothing
+        _do_synchronize!(ddctx; write_back, free, gpu_sync, check_errors,
+                         wrap_errors=true, from_owner=false)
+    else
+        _do_synchronize_targeted!(ddctx, targets; write_back, gpu_sync,
+                                  check_errors, from_owner=false)
+    end
     return nothing
 end
 
@@ -462,6 +793,13 @@ are collected and, if `check_errors=true` (the default) and any occurred,
 raised together as a `CompositeException` (or the single error directly, if
 only one context failed) once every context has been given the chance to
 drain.
+
+Unlike [`synchronize`](@ref)/[`synchronize_task!`](@ref), `args` do **not**
+narrow anything here. Draining every context completely is this function's
+entire contract, and there is no useful reading of "drain everything, but only
+partly" -- values naming data in one context would say nothing about the
+others. They are accepted for signature symmetry and ignored; reach for the
+narrower calls if you want a narrow drain.
 """
 function synchronize_all!(args...; write_back::Bool=true, free::Bool=true,
                           gpu_sync::Symbol=:fence, check_errors::Bool=true)
@@ -472,7 +810,6 @@ function synchronize_all!(args...; write_back::Bool=true, free::Bool=true,
     for ddctx in targets
         from_owner = ddctx.owner === current_task()
         try
-            _validate_synchronize_args(ddctx, args)
             # Pass `check_errors` straight through: a context that isn't
             # asked to report stays poisoned (consistent with bare
             # `synchronize`), and simply never lands in `errors` below.

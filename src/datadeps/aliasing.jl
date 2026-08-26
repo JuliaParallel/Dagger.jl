@@ -1068,6 +1068,42 @@ function gather_overlap_syncdeps!(state::DataDepsState, ainfo::AliasingWrapper, 
     end
 end
 
+"""
+    gather_overlap_tasks!(state::DataDepsState, ainfo::AliasingWrapper, out::IdDict{DTask,Nothing})
+
+Every task that has written or read memory overlapping `ainfo`, collected as
+the `DTask` objects themselves rather than as `ThunkSyncdep`s.
+
+Same traversal as [`gather_overlap_syncdeps!`](@ref) -- and deliberately
+alongside it, so a change to how overlap is determined can't update one and
+miss the other -- but for a different consumer: `synchronize(args...)`
+(synchronize.jl) needs to *identify* in-flight tasks by identity in order to
+wait on exactly those, whereas `gather_overlap_syncdeps!` is building a
+dependency set to hand to the scheduler. `ThunkSyncdep`'s equality runs over a
+`ThunkID` (uid plus a possibly-undefined `thunk_ref`), which is the wrong key
+for "is this the same task object": an `IdDict` on the `DTask` is exact.
+
+Unlike `gather_overlap_syncdeps!` there is no `write_num` exclusion. That
+parameter exists to keep a task from depending on itself (its own writes carry
+the write_num being planned); here there is no task being planned, and every
+recorded writer and reader is a genuine candidate to wait on.
+
+Collecting *readers* as well as the writer is load-bearing, not conservatism:
+after `synchronize(A)` returns, plain code may write `A`, and a still-running
+reader of any replica of `A` would race that write.
+"""
+function gather_overlap_tasks!(state::DataDepsState, ainfo::AliasingWrapper, out::IdDict{DTask,Nothing})
+    ainfo.inner isa NoAliasing && return
+    for other_ainfo in intersect_ad_hoc(state.ainfos_lookup, ainfo)
+        owner = get(state.ainfos_owner, other_ainfo, nothing)
+        owner === nothing || (out[owner[1]] = nothing)
+        for (reader_task, _) in get(state.ainfos_readers, other_ainfo, ())
+            out[reader_task] = nothing
+        end
+    end
+    return
+end
+
 # Debug-only invariant: freeing a buffer must never produce an empty syncdep
 # set while the state still records a writer or readers overlapping it. Gated
 # behind this `Ref` (following the same pattern as `CHECK_UNIFORMITY`,

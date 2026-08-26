@@ -28,6 +28,7 @@ tests = [
     ("Datadeps", "datadeps.jl"),
     ("Datadeps - Locality Scheduling", "datadeps_locality.jl"),
     ("Datadeps - Hierarchical Async", "datadeps_hierarchical_async.jl"),
+    ("Datadeps - Targeted Synchronize", "datadeps_synchronize.jl"),
     ("Streaming", "streaming.jl"),
     ("Domain Utilities", "domain.jl"),
     ("Array - Allocation", "array/allocation.jl"),
