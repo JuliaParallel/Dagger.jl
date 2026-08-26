@@ -29,7 +29,22 @@ function Base.put!(store::StreamStore{T,B}, value) where {T,B}
             throw(InvalidStateException("Stream is closed", :closed))
         end
         @dagdebug thunk_id :stream "adding $value ($(length(store.output_streams)) outputs)"
-        for output_uid in keys(store.output_streams)
+        # Snapshot the output uids before iterating. The `wait` below drops
+        # `store.lock`, and `add_waiters!`/`remove_waiters!` mutate
+        # `output_streams` under that same lock. Julia's `Dict` iteration does
+        # not detect concurrent insertion: an insert that rehashes mid-iteration
+        # silently revisits some entries and skips others, so a value would be
+        # delivered twice to one output or never to another, with no error --
+        # and revisiting an output we already filled parks us on a full buffer
+        # that nobody will drain, hanging the producer for good.
+        # A waiter added while we wait therefore starts at the *next* value,
+        # which is both well-defined and what the old code did by accident
+        # whenever the Dict happened not to rehash.
+        output_uids = @reusable_vector :stream_store_put!_output_uids UInt UInt(0) 32
+        append!(output_uids, keys(store.output_streams))
+        for output_uid in output_uids
+            # An earlier output's wait may have outlived this one.
+            haskey(store.output_streams, output_uid) || continue
             if !haskey(store.output_buffers, output_uid)
                 initialize_output_stream!(store, output_uid)
             end
@@ -59,59 +74,11 @@ function Base.put!(store::StreamStore{T,B}, value) where {T,B}
     end
 end
 
-function Base.take!(store::StreamStore, id::UInt)
-    thunk_id = STREAM_THUNK_ID[]
-    @lock store.lock begin
-        if !haskey(store.output_buffers, id)
-            @assert haskey(store.output_streams, id)
-            error("Must first check isempty(store, id) before taking from a stream")
-        end
-        buffer = store.output_buffers[id]
-        while isempty(buffer) && isopen(store, id)
-            @dagdebug thunk_id :stream "no elements, not taking"
-            wait(store.lock)
-            task_may_cancel!()
-        end
-        @dagdebug thunk_id :stream "wait finished"
-        if !isopen(store, id)
-            @dagdebug thunk_id :stream "closed!"
-            throw(InvalidStateException("Stream is closed", :closed))
-        end
-        unlock(store.lock)
-        value = try
-            take!(buffer)
-        finally
-            lock(store.lock)
-        end
-        @dagdebug thunk_id :stream "value accepted"
-        notify(store.lock)
-        return value
-    end
-end
-
 """
 Returns whether the store is actively open. Only check this when deciding if
 new values can be pushed.
 """
 Base.isopen(store::StreamStore) = store.open
-
-"""
-Returns whether the store is actively open, or if closing, still has remaining
-messages for `id`. Only check this when deciding if existing values can be
-taken.
-"""
-function Base.isopen(store::StreamStore, id::UInt)
-    @lock store.lock begin
-        if !haskey(store.output_buffers, id)
-            @assert haskey(store.output_streams, id)
-            return store.open
-        end
-        if !isempty(store.output_buffers[id])
-            return true
-        end
-        return store.open
-    end
-end
 
 function Base.close(store::StreamStore)
     @lock store.lock begin
@@ -258,12 +225,6 @@ function initialize_output_stream!(our_store::StreamStore{T,B}, output_uid::UInt
 end
 
 Base.put!(stream::Stream, value) = put!(stream.store, value)
-
-function Base.isopen(stream::Stream, id::UInt)::Bool
-    return MemPool.access_ref(stream.store_ref.handle, id) do store, id
-        return isopen(store::StreamStore, id)
-    end
-end
 
 function Base.close(stream::Stream)
     MemPool.access_ref(stream.store_ref.handle) do store

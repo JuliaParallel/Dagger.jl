@@ -50,6 +50,97 @@ end
 # pays for compilation, which can blow past 10s on a slow/loaded CI runner even
 # though the work itself completes in well under a second. Give finishing tests
 # plenty of headroom so cold-compile latency isn't misreported as a hang.
+# Report why a streaming test hung, while the evidence still exists.
+#
+# The two questions worth separating are "did the task never get scheduled?"
+# and "did it start and then block?", which `running`/`running_on` answer
+# directly, and "is some drain task dead or missing?", which the errormonitor
+# registry answers by name (`streaming input:`/`streaming output:` entries are
+# registered per stream edge). Everything is wrapped defensively: a diagnostic
+# that throws must never turn a reported failure into an unreported one.
+function dump_streaming_state()
+    io = IOBuffer()
+    println(io, "streaming hang diagnostics")
+    try
+        state = Dagger.Sch.EAGER_STATE[]
+        if state === nothing
+            println(io, "  scheduler: <no eager state>")
+        else
+            println(io, "  scheduler: running_count=", state.running_count[])
+            # NEVER block on the scheduler lock here. The case this runs in is
+            # "something is wedged", and if what's wedged is holding this lock,
+            # waiting for it converts a reported failure into a silent hang.
+            # Take it opportunistically and say so if we couldn't.
+            got_lock = false
+            for _ in 1:50
+                got_lock = trylock(state.lock)
+                got_lock && break
+                sleep(0.1)
+            end
+            if !got_lock
+                println(io, "  live thunks: <scheduler lock held for >5s -- ",
+                            "it is probably the wedged party>")
+            else
+                try
+                    println(io, "  live thunks: ", length(state.strong_thunks))
+                    for th in state.strong_thunks
+                        running = @atomic th.running
+                        finished = @atomic th.finished
+                        errored = @atomic th.errored
+                        pending = @atomic th.pending_deps
+                        println(io, "    thunk ", th.id,
+                                ": running=", running,
+                                " finished=", finished,
+                                " errored=", errored,
+                                " pending_deps=", pending,
+                                " on=", something(th.running_on, "<unscheduled>"))
+                    end
+                finally
+                    unlock(state.lock)
+                end
+            end
+        end
+    catch err
+        println(io, "  <scheduler dump failed: ", sprint(showerror, err), ">")
+    end
+    try
+        lock(Dagger.Sch.ERRORMONITOR_TRACKED) do tracked
+            streamers = filter(p->startswith(first(p), "streaming "), tracked)
+            println(io, "  streaming drain tasks: ", length(streamers))
+            for (name, task) in streamers
+                println(io, "    ", name,
+                        ": started=", istaskstarted(task),
+                        " done=", istaskdone(task),
+                        " failed=", istaskfailed(task),
+                        " sticky=", task.sticky,
+                        " tid=", Threads.threadid(task),
+                        " pool=", Threads.threadpool(task),
+                        " queued=", task.queue !== nothing)
+            end
+        end
+    catch err
+        println(io, "  <drain-task dump failed: ", sprint(showerror, err), ">")
+    end
+    println(io, "  threads: default=", Threads.threadpoolsize(:default),
+            " interactive=", Threads.threadpoolsize(:interactive),
+            " cpus=", Sys.CPU_THREADS)
+    @warn String(take!(io))
+    # The state above says *which* tasks are wedged but not *where*. Several
+    # drain tasks are reported as never even started, which no amount of
+    # buffer/thunk state explains -- the question is what every OS thread is
+    # actually doing at that moment. This prints a backtrace for every live task
+    # on every thread (the same dump `SIGINFO` produces, but it also works on
+    # Windows, which is the only platform that reproduces this).
+    try
+        flush(stderr)
+        ccall(:jl_print_task_backtraces, Cvoid, (Cint,), 0)
+        flush(stderr)
+    catch err
+        @warn "task backtrace dump failed" exception=err
+    end
+    return
+end
+
 function test_finishes(f, message::String; ignore_timeout=false, timeout=(ignore_timeout ? 10 : 120), max_evals=10)
     t = @eval Threads.@spawn begin
         tset = nothing
@@ -74,6 +165,12 @@ function test_finishes(f, message::String; ignore_timeout=false, timeout=(ignore
     if timed_out
         if !ignore_timeout
             @warn "Testing task timed out: $message"
+            # Dump the scheduler and drain-task state *before* the cancellation
+            # below tears it down. A streaming hang otherwise leaves nothing to
+            # go on: the exception objects printed by the failing `fetch`es are
+            # rendered after teardown has already emptied the stores, so they
+            # describe the corpse rather than the crime.
+            dump_streaming_state()
         end
         # Cancel in a loop rather than once. The budget can expire while the
         # testing task is still *inside* its first `Dagger.@spawn`: on a cold,
@@ -171,6 +268,146 @@ end
         end)
         @test taken == collect(1:10)
         @test isempty(rb)
+    end
+
+    @testset "a blocked take! does not starve spawned tasks" begin
+        # Julia permanently marks a task `sticky` once it schedules any sticky
+        # task (`Base.enq_work`: "XXX: Ideally we would be able to unset this"),
+        # which the streaming transport does. A sticky task re-enqueues itself
+        # into its *thread-local* workqueue on `yield()`, and `trypoptask`
+        # drains that queue before it ever reaches the multiqueue holding
+        # `Threads.@spawn`ed tasks. So a sticky task blocked in `take!` must
+        # not spin on `yield()` forever: with one on every default thread,
+        # nothing spawned can ever start, and the drain tasks a stream spawns
+        # to move its values never run at all.
+        #
+        # Note the pool layout -- `enq_work` places default threads at
+        # `threadpoolsize(:interactive)+1 : end`, so pinning to tids `1:nd`
+        # would leave a default thread free and hide the starvation entirely.
+        ni = Threads.threadpoolsize(:interactive)
+        nd = Threads.threadpoolsize(:default)
+        if nd < 2
+            @test_skip "needs at least 2 default threads"
+        else
+            rb = Dagger.ProcessRingBuffer{Int}(1)  # empty: every take! blocks
+            blocked = Task[]
+            for tid in (ni+1):(ni+nd)
+                t = Task() do
+                    Dagger.set_tls!((; processor = Dagger.ThreadProc(1, Threads.threadid()),
+                                       sch_uid = UInt(0),
+                                       sch_handle = nothing,
+                                       task_spec = nothing,
+                                       cancel_token = Dagger.CancelToken(),
+                                       logging_enabled = false,
+                                       acceleration = Dagger.DistributedAcceleration()))
+                    try
+                        take!(rb)
+                    catch err
+                        err isa InvalidStateException || rethrow()
+                    end
+                end
+                t.sticky = true  # exactly what `enq_work` does to a spawned task
+                ccall(:jl_set_task_tid, Cint, (Any, Cint), t, tid-1)
+                schedule(t)
+                push!(blocked, t)
+            end
+            try
+                sleep(1.0)  # let every pinned task reach the wait loop
+                spawned = Threads.@spawn nothing
+                @test timedwait(()->istaskstarted(spawned), 20.0) == :ok
+            finally
+                close(rb)
+                foreach(wait, blocked)
+            end
+        end
+    end
+end
+
+# A buffer that announces when `StreamStore.put!` has parked on it. Reaching
+# the wait loop proves `put!` has already snapshotted its output list, which is
+# the moment the test needs to mutate that list.
+mutable struct ParkSignalBuffer{T}
+    inner::Dagger.ProcessRingBuffer{T}
+    parked::Threads.Atomic{Bool}
+    ParkSignalBuffer{T}(len::Int) where T =
+        new{T}(Dagger.ProcessRingBuffer{T}(len), Threads.Atomic{Bool}(false))
+end
+function Dagger.isfull(b::ParkSignalBuffer)
+    full = Dagger.isfull(b.inner)
+    full && (b.parked[] = true)
+    return full
+end
+Base.isempty(b::ParkSignalBuffer) = isempty(b.inner)
+Base.length(b::ParkSignalBuffer) = length(b.inner)
+Base.isopen(b::ParkSignalBuffer) = isopen(b.inner)
+Base.close(b::ParkSignalBuffer) = close(b.inner)
+Base.put!(b::ParkSignalBuffer, x) = put!(b.inner, x)
+Base.take!(b::ParkSignalBuffer) = take!(b.inner)
+
+@testset "StreamStore.put! snapshots its outputs" begin
+    # `put!` blocks on a full output buffer, dropping `store.lock` while it
+    # waits, and waiters can be added under that lock meanwhile. Iterating the
+    # live `output_streams` Dict across that gap is unsafe: Julia's Dict
+    # iteration does not detect a concurrent insert, so a rehash silently
+    # revisits some entries and skips others. Wire the outputs up by hand so
+    # `initialize_output_stream!` (which spawns real drain tasks) stays out of
+    # it, and drive the mutation directly the way `add_waiters!` would.
+    store = Dagger.StreamStore{Int,ParkSignalBuffer{Int}}(UInt(1), 1, 1)
+    original_uids = UInt[10, 11]
+    for uid in original_uids
+        store.output_streams[uid] = nothing
+        # Capacity 1 and pre-filled below, so `put!` must wait on both.
+        store.output_buffers[uid] = ParkSignalBuffer{Int}(1)
+        push!(store.waiters, Int(uid))
+    end
+    fetch(in_fake_task() do
+        for uid in original_uids
+            put!(store.output_buffers[uid], -1)
+        end
+    end)
+
+    putter = in_fake_task() do
+        put!(store, 42)
+    end
+
+    # Once any buffer reports a park, `put!` holds a snapshot and is on its way
+    # into `wait`. Taking the lock here cannot succeed until it gets there, so
+    # the insertions below are guaranteed to land mid-iteration. 100 of them is
+    # far more than enough to force the Dict to rehash.
+    parked = ()->any(uid->store.output_buffers[uid].parked[], original_uids)
+    @test timedwait(parked, 30) == :ok
+    added_uids = UInt[]
+    @lock store.lock begin
+        for uid in UInt(100):UInt(199)
+            store.output_streams[uid] = nothing
+            store.output_buffers[uid] = ParkSignalBuffer{Int}(4)
+            push!(store.waiters, Int(uid))
+            push!(added_uids, uid)
+        end
+    end
+
+    # Drain the pre-filled values so `put!` can make progress. Notify on every
+    # poll rather than once: `put!` waits on each output in turn, so it needs
+    # waking more than once, and a notify sent before it parks is simply lost.
+    drained = fetch(in_fake_task() do
+        [take!(store.output_buffers[uid]) for uid in original_uids]
+    end)
+    @test drained == [-1, -1]
+    @test timedwait(60) do
+        @lock store.lock notify(store.lock)
+        istaskdone(putter)
+    end == :ok
+
+    if istaskdone(putter)
+        @test !istaskfailed(putter)
+        # Every output present when `put!` started gets the value exactly once.
+        @test all(uid->length(store.output_buffers[uid]) == 1, original_uids)
+        got = fetch(in_fake_task() do
+            [take!(store.output_buffers[uid]) for uid in original_uids]
+        end)
+        @test got == [42, 42]
+        # Outputs added mid-`put!` start at the *next* value, deterministically.
+        @test all(uid->isempty(store.output_buffers[uid]), added_uids)
     end
 end
 

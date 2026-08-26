@@ -92,7 +92,37 @@ lesson.
    Test such a structure by driving it from two real threads with a
    deliberately tiny capacity and checking the *sequence*, not the counts.
 
-11. **Keep type-stable and type-unstable paths at the right stability level.**
+11. **Never iterate a shared collection across a point where you drop the
+   lock.** Blocking calls in this codebase release and reacquire their lock
+   (`wait(store.lock)`, `@lock`-guarded condition waits), and anything else may
+   mutate the collection in that gap. Julia will not warn you: `Dict` iteration
+   has no modification check, so an insert that triggers a rehash mid-iteration
+   silently *revisits* some entries and *skips* others — measured, not
+   theoretical. The revisit is the dangerous half, because re-processing an
+   entry you already handled can block you on a resource you just consumed and
+   hang the loop forever. Snapshot the keys into a `@reusable_vector` before
+   the loop (steady-state allocation-free) and re-check membership per
+   iteration; the resulting "entries added while we waited are picked up next
+   round" semantics is well-defined, which the accidental version was not.
+
+12. **Never wait by spinning on `yield()`.** Julia permanently marks a task
+   `sticky` the moment it schedules any sticky task — an `@async`, which plenty
+   of library code (Distributed's transport included) does on your behalf.
+   `Base.enq_work` says so itself: *"XXX: Ideally we would be able to unset
+   this."* A sticky task re-enqueues itself into its **thread-local**
+   workqueue on `yield()`, and `trypoptask` drains that queue before it ever
+   consults the multiqueue where `Threads.@spawn`ed tasks live. So a sticky
+   task spinning on `yield()` stops its thread from picking up spawned work
+   *ever again*, and once every default thread is spinning that way, nothing
+   newly spawned can start at all — a permanent deadlock, not a slowdown.
+   Spin briefly if you want a cheap hand-off, then `sleep`: only a real
+   deschedule empties the thread's local queue. Two traps when testing this:
+   `enq_work` places default threads at `threadpoolsize(:interactive)+1`
+   onward, so pinning probes to tids `1:nthreads` leaves a default thread free
+   and hides the bug completely; and the starved task's own `istaskstarted`
+   flips the instant the spinners stop, so read it *before* releasing them.
+
+13. **Keep type-stable and type-unstable paths at the right stability level.**
    If both kinds of path exist for an operation (e.g. typed kernel execution
    vs. dynamically-typed planning), consider whether they need to be
    *separate* paths: don't force the dynamic path to specialize per signature

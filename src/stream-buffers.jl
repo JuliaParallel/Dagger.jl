@@ -18,9 +18,49 @@ Base.isopen(rb::ProcessRingBuffer) = @atomic rb.open
 function Base.close(rb::ProcessRingBuffer)
     @atomic rb.open = false
 end
-function Base.put!(rb::ProcessRingBuffer{T}, x) where T
-    while isfull(rb)
+"""
+Number of `yield()`s a blocked `put!`/`take!` spends before it parks, and how
+long it parks for. The spin keeps the common hand-off cheap (the peer is
+usually one yield away); the park is what makes progress *guaranteed*.
+"""
+const RINGBUFFER_SPINS = 100
+const RINGBUFFER_PARK_SECONDS = 0.001
+
+"""
+    ringbuffer_wait!(spins::Int) -> Int
+
+Wait for the peer to free a slot or supply a value, without monopolising the
+thread. Returns the updated spin count.
+
+A bare `yield()` loop is *not* safe here. Julia permanently marks a task
+`sticky` the moment it schedules any sticky task — an `@async`, which the
+streaming transport does — and says so itself in `Base.enq_work`: "XXX: Ideally
+we would be able to unset this". A sticky task that yields re-enqueues itself
+into its *thread-local* workqueue, and `trypoptask` drains that queue before it
+ever consults the multiqueue where `Threads.@spawn`ed tasks live. So a sticky
+task spinning on `yield()` stops its thread from ever picking up a spawned task
+— and once every default thread is spinning that way, the drain tasks a stream
+spawns to actually move its values never start at all. That is a permanent
+deadlock, not a slowdown: observed as a hard hang of the fan-out topologies on
+4-thread CI, with the drain tasks reporting `started=false` after two minutes.
+
+`sleep` genuinely deschedules the task, so the thread's local queue empties and
+the spawned tasks get to run. Cancellation stays poll-based (each iteration
+still re-checks `isopen` and `task_may_cancel!`), just at park granularity.
+"""
+@inline function ringbuffer_wait!(spins::Int)
+    if spins < RINGBUFFER_SPINS
         yield()
+    else
+        sleep(RINGBUFFER_PARK_SECONDS)
+    end
+    return spins + 1
+end
+
+function Base.put!(rb::ProcessRingBuffer{T}, x) where T
+    spins = 0
+    while isfull(rb)
+        spins = ringbuffer_wait!(spins)
         if !isopen(rb)
             throw(InvalidStateException("ProcessRingBuffer is closed", :closed))
         end
@@ -35,8 +75,9 @@ function Base.put!(rb::ProcessRingBuffer{T}, x) where T
     @atomic rb.count += 1
 end
 function Base.take!(rb::ProcessRingBuffer)
+    spins = 0
     while isempty(rb)
-        yield()
+        spins = ringbuffer_wait!(spins)
         if !isopen(rb) && isempty(rb)
             throw(InvalidStateException("ProcessRingBuffer is closed", :closed))
         end
