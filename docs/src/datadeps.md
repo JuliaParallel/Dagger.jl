@@ -193,10 +193,44 @@ pipeline.
     Never bind it as an ambient default (via the `DATADEPS_SYNC` scoped value)
     over code you do not own.
 
-`Dagger.synchronize` also accepts specific values (`Dagger.synchronize(A, B)`) to
-document which data you need usable. Today this performs the same full drain as
-the bare form — always correct, just not maximally lazy — with genuinely
-narrowed, per-argument synchronization planned for a later release.
+### Synchronizing only what you need
+
+`Dagger.synchronize(A, B)` narrows the drain to the named values: it writes back
+only `A` and `B`, waits only on the tasks that have read or written them, and
+leaves everything else in the pipeline running. This is what lets you consume
+one result without collapsing the pipeline behind it:
+
+```julia
+Dagger.spawn_datadeps(; sync=false) do
+    Dagger.@spawn compute_fast!(InOut(A))
+end
+Dagger.spawn_datadeps(; sync=false) do
+    Dagger.@spawn compute_slow!(InOut(B))
+end
+
+Dagger.synchronize(A)   # returns as soon as A is ready; B keeps running
+report(A)
+
+Dagger.synchronize()    # now wait for B as well
+```
+
+A `DArray` resolves to its individual chunks, so `Dagger.synchronize(DA)` works
+as you would expect.
+
+If an argument names something Dagger isn't tracking, the call falls back to a
+full drain rather than guessing — narrowing can fail to be lazy, but it cannot
+fail to synchronize. Two further properties worth knowing: a targeted call never
+frees buffers (whether a buffer is dead depends on regions you didn't name), and
+it does not clear a poisoned context, so a failure still requires a full
+`Dagger.synchronize()` before you can plan again.
+
+`Dagger.synchronize_all!` accepts arguments for signature symmetry but ignores
+them; draining every context completely is its whole purpose.
+
+!!! warning "MPI/SPMD uniformity"
+    Under MPI, every rank must call `synchronize` naming the same data: which
+    write-back copies get emitted is a collective decision, so a rank that
+    narrows differently desynchronizes rather than merely doing less work.
 
 ## Aliasing Support
 
