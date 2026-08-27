@@ -129,3 +129,16 @@ lesson.
    (compile-time explosion, tuple re-boxing), and don't erase types on the
    path where the compiler genuinely uses them (kernel invocation, argument
    moves). A function barrier at the boundary lets each side be what it is.
+
+14. **`test/allocations.jl` measures scheduling overhead only while every
+   task really is pinned.** Its bounds assume the pinned scope holds for the
+   whole suite, but `allocate_array` tasks (the ones building each
+   `let`-block DArray) take no `Chunk` inputs, so they carry *zero*
+   data-transfer cost — nothing anchors them to a worker, and the scheduler
+   spreads them the moment it can see per-processor load. The measured call,
+   still pinned to worker 1, then pays to pull those chunks back, and a
+   scheduler change shows up as a 5x allocation "regression" that is really
+   cross-worker data movement. Build the fixtures inside the same
+   `with_options(scope=...)` as the measurement. More generally: when this
+   suite jumps on a scheduler change, first ask whether placement changed
+   before hunting for a stray closure or box.
