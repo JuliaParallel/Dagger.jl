@@ -396,8 +396,12 @@ end
         # Ensure that this worker has been used at least once
         fetch(Dagger.@spawn scope=Dagger.ExactScope(tproc2_1) 1+1)
 
-        #pres1_1 = state.worker_time_pressure[1][tproc1_1]
-        #pres2_1 = state.worker_time_pressure[first(workers())][tproc2_1]
+        get_pressure(pid, proc) = lock(state.worker_time_pressure) do wtp
+            counter_ref = get(get(wtp, pid, Dict{Dagger.Processor,Threads.Atomic{UInt64}}()), proc, nothing)
+            return counter_ref === nothing ? UInt64(0) : counter_ref[]
+        end
+        pres1_1 = get_pressure(1, tproc1_1)
+        pres2_1 = get_pressure(first(workers()), tproc2_1)
         tx_rate = lock(state.worker_transfer_rate) do wtr
             get(get(wtr, first(workers()), Dict{Dagger.Processor,UInt64}()), tproc2_1, Dagger.Sch.DEFAULT_TRANSFER_RATE)
         end
@@ -436,9 +440,9 @@ end
 
             @test haskey(costs, tproc1_1)
             @test haskey(costs, tproc2_1)
-            @test costs[tproc1_1] ≈ #=pres1_1 +=# sig_unknown_cost # All chunks are local, and this signature is unknown
+            @test costs[tproc1_1] ≈ pres1_1 + sig_unknown_cost # All chunks are local, and this signature is unknown
             if nprocs() > 1
-                @test costs[tproc2_1] ≈ (tx_size/tx_rate) + tx_xfer_cost + #=pres2_1 +=# sig_unknown_cost # All chunks are remote, and this signature is unknown
+                @test costs[tproc2_1] ≈ (tx_size/tx_rate) + tx_xfer_cost + pres2_1 + sig_unknown_cost # All chunks are remote, and this signature is unknown
             end
         end
 

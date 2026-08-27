@@ -738,6 +738,22 @@ const EMPTY_TRANSFER_RATES = Dict{Processor,UInt64}()
     end
     empty!(chunks)
 
+    # Estimate each candidate processor's currently-reserved compute pressure
+    # (from tasks already scheduled to it but not yet finished), so that busy
+    # processors are considered costlier than idle ones.
+    est_time_util += lock(state.worker_time_pressure) do wtp
+        local pressure_sum = UInt64(0)
+        for proc in procs
+            pid = Dagger.root_worker_id(get_parent(proc))
+            proc_map = get(wtp, pid, nothing)
+            proc_map === nothing && continue
+            counter_ref = get(proc_map, proc, nothing)
+            counter_ref === nothing && continue
+            pressure_sum += counter_ref[]
+        end
+        return pressure_sum
+    end
+
     # Estimate total cost for executing this task on each candidate processor.
     # The transfer-rate table is taken once rather than once per processor.
     # N.B. `all_equal` is returned from the locked block rather than assigned
