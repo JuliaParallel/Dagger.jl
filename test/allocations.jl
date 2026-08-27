@@ -115,7 +115,16 @@ function print_alloc_report()
     println()
 end
 
+# N.B. The whole body runs under `ALLOC_TEST_SCOPE`, not just the measured
+# calls inside `test_allocs`: the `let`-block DArrays below are built by
+# `allocate_array` tasks, which take no `Chunk` inputs and so carry no
+# data-transfer cost to anchor them. Unpinned, the scheduler spreads them
+# across every worker (correctly -- that is what a distributed array is), and
+# the pinned measurement then pays to pull those chunks back, which makes the
+# counts depend on the worker topology the testsuite happens to run under --
+# exactly what the pinning above exists to prevent.
 @testset "Steady-state allocations" begin
+Dagger.with_options(; scope=ALLOC_TEST_SCOPE) do
     N, B = 128, 32
     T = Float64
 
@@ -196,6 +205,7 @@ end
     end
 
     print_alloc_report()
+end
 end
 
 # Everything above ran inside `Dagger.with_options(scope=ALLOC_TEST_SCOPE)`,
