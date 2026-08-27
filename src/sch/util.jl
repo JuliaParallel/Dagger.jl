@@ -776,8 +776,15 @@ const EMPTY_TRANSFER_RATES = Dict{Processor,UInt64}()
             # TODO: Actually estimate/benchmark this
             task_xfer_cost = pid != myid() ? 1_000_000 : 0 # 1ms
 
+            # N.B. `tx_rate` is in bytes per *second* (see the `transfer_rate`
+            # metadata `do_task` reports, which divides by a nanosecond
+            # duration scaled by 10^9), so `bytes/tx_rate` comes out in
+            # seconds while every other term here is in nanoseconds. Scale it
+            # up, or transfer cost is discounted by a factor of a billion and
+            # data locality never affects the choice of processor.
             tx_rate = get(get(wtr, pid, EMPTY_TRANSFER_RATES), proc, DEFAULT_TRANSFER_RATE)
-            cost = est_time_util + pressures[idx] + (tx_costs[gproc]/tx_rate) + task_xfer_cost
+            tx_cost = (tx_costs[gproc]/tx_rate) * 1e9
+            cost = est_time_util + pressures[idx] + tx_cost + task_xfer_cost
             costs[proc] = cost
             if idx == 1
                 first_cost = cost

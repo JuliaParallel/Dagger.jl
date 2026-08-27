@@ -442,7 +442,7 @@ end
             @test haskey(costs, tproc2_1)
             @test costs[tproc1_1] ≈ pres1_1 + sig_unknown_cost # All chunks are local, and this signature is unknown
             if nprocs() > 1
-                @test costs[tproc2_1] ≈ (tx_size/tx_rate) + tx_xfer_cost + pres2_1 + sig_unknown_cost # All chunks are remote, and this signature is unknown
+                @test costs[tproc2_1] ≈ (tx_size/tx_rate)*1e9 + tx_xfer_cost + pres2_1 + sig_unknown_cost # All chunks are remote, and this signature is unknown
             end
         end
 
@@ -491,7 +491,7 @@ end
             _, costs = Dagger.Sch.estimate_task_costs(state, procs, t)
 
             if nprocs() > 1
-                @test costs[tproc2_1] ≈ sig_unknown_cost + (tx_size / 500_000) + tx_xfer_cost
+                @test costs[tproc2_1] ≈ sig_unknown_cost + (tx_size / 500_000)*1e9 + tx_xfer_cost
             end
             @test costs[tproc1_1] ≈ sig_unknown_cost
 
