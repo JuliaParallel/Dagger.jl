@@ -446,6 +446,36 @@ end
             end
         end
 
+        @testset "Per-Processor Pressure" begin
+            # Compute pressure is per-processor: an idle processor must be
+            # preferred over a busy one, even when reaching it costs a
+            # cross-worker transfer. Folding pressure into a single sum added
+            # to every candidate would make these costs indistinguishable.
+            base1 = get_pressure(1, tproc1_1)
+            base2 = get_pressure(first(workers()), tproc2_1)
+            counter_ref = lock(state.worker_time_pressure) do wtp
+                proc_map = get!(()->Dict{Dagger.Processor,Threads.Atomic{UInt64}}(), wtp, 1)
+                return get!(()->Threads.Atomic{UInt64}(UInt64(0)), proc_map, tproc1_1)
+            end
+            # Reserve/release symmetrically, so real bookkeeping is untouched
+            added = UInt64(10_000_000_000)
+            Threads.atomic_add!(counter_ref, added)
+            try
+                t = delayed(mynothing)(1, 2)
+                Dagger.Sch.collect_task_inputs!(state, t)
+                sorted_procs, costs = Dagger.Sch.estimate_task_costs(state, procs, t)
+
+                @test costs[tproc1_1] ≈ base1 + added + sig_unknown_cost
+                if nprocs() > 1
+                    @test costs[tproc2_1] ≈ tx_xfer_cost + base2 + sig_unknown_cost
+                    @test costs[tproc2_1] < costs[tproc1_1]
+                    @test sorted_procs[1] == tproc2_1
+                end
+            finally
+                Threads.atomic_sub!(counter_ref, added)
+            end
+        end
+
         @testset "Per-Processor Transfer Rate" begin
             wid = first(workers())
 

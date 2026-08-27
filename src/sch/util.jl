@@ -738,20 +738,27 @@ const EMPTY_TRANSFER_RATES = Dict{Processor,UInt64}()
     end
     empty!(chunks)
 
-    # Estimate each candidate processor's currently-reserved compute pressure
-    # (from tasks already scheduled to it but not yet finished), so that busy
+    # Look up each candidate processor's currently-reserved compute pressure
+    # (tasks already scheduled to it but not yet finished), so that busy
     # processors are considered costlier than idle ones.
-    est_time_util += lock(state.worker_time_pressure) do wtp
-        local pressure_sum = UInt64(0)
-        for proc in procs
+    # N.B. This is inherently *per-processor*: folding it into a single sum
+    # added to every candidate is a constant offset that cancels out of the
+    # comparison, leaving the scheduler blind to which processors are idle.
+    # Gathered in its own pass so `worker_time_pressure` is locked once, and
+    # not nested inside the `worker_transfer_rate` hold below.
+    pressures = @reusable_vector :estimate_task_costs_pressures UInt64 UInt64(0) 32
+    resize!(pressures, length(procs))
+    lock(state.worker_time_pressure) do wtp
+        for (idx, proc) in enumerate(procs)
             pid = Dagger.root_worker_id(get_parent(proc))
             proc_map = get(wtp, pid, nothing)
-            proc_map === nothing && continue
+            if proc_map === nothing
+                pressures[idx] = UInt64(0)
+                continue
+            end
             counter_ref = get(proc_map, proc, nothing)
-            counter_ref === nothing && continue
-            pressure_sum += counter_ref[]
+            pressures[idx] = counter_ref === nothing ? UInt64(0) : counter_ref[]
         end
-        return pressure_sum
     end
 
     # Estimate total cost for executing this task on each candidate processor.
@@ -770,7 +777,7 @@ const EMPTY_TRANSFER_RATES = Dict{Processor,UInt64}()
             task_xfer_cost = pid != myid() ? 1_000_000 : 0 # 1ms
 
             tx_rate = get(get(wtr, pid, EMPTY_TRANSFER_RATES), proc, DEFAULT_TRANSFER_RATE)
-            cost = est_time_util + (tx_costs[gproc]/tx_rate) + task_xfer_cost
+            cost = est_time_util + pressures[idx] + (tx_costs[gproc]/tx_rate) + task_xfer_cost
             costs[proc] = cost
             if idx == 1
                 first_cost = cost
@@ -781,6 +788,7 @@ const EMPTY_TRANSFER_RATES = Dict{Processor,UInt64}()
         return all_equal
     end
     empty!(tx_costs)
+    empty!(pressures)
 
     # Shuffle procs around, so equally-costly procs are equally considered
     np = length(procs)
