@@ -142,3 +142,17 @@ lesson.
    `with_options(scope=...)` as the measurement. More generally: when this
    suite jumps on a scheduler change, first ask whether placement changed
    before hunting for a stray closure or box.
+
+15. **A per-candidate term folded into a shared scalar is a no-op, and the
+   tests won't tell you.** `estimate_task_costs!` compares candidate
+   processors, so only terms that *differ per candidate* can change its
+   decision. Accumulating one — e.g. summing every candidate's compute
+   pressure and adding that total to `est_time_util` — leaves a constant
+   offset that cancels out of both the comparison and the `sort!`, so the
+   scheduler's ordering is bit-for-bit unchanged while the code reads as
+   though the term is now considered. `test/scheduler.jl`'s cost assertions
+   run against an *idle* scheduler where every pressure is zero, which makes
+   summed and per-processor forms indistinguishable; a test that pins the
+   term to one candidate and asserts the *other* one wins is what catches it.
+   The behavioral check is cheaper still: 40 sleeping tasks over 4 workers
+   land `[1 => 40]` when the term is dead and `10/10/10/10` when it is live.
