@@ -94,6 +94,22 @@ function _device_u32(backend, data::Vector{UInt32})
 end
 
 """
+    kernel_lock_processor(x) -> Processor
+
+The processor whose backend lock guards a native GPU call operating on `x`.
+
+Usually that is the processor running the current `DTask`. But this is also
+reached from outside any `DTask`: `move!(::RemainderAliasing, ...)` hands the
+source-side gather to the owning worker with `remotecall_fetch`, and that
+closure runs in a Distributed message-handler task, which carries no Dagger
+TLS -- so `task_processor()` there fails its `::DTaskTLS` assertion rather
+than returning a processor. Fall back to a processor of the array's own
+memory space, which is the one owning the lock we need anyway.
+"""
+kernel_lock_processor(x) =
+    in_task() ? task_processor() : first(processors(memory_space(x)))
+
+"""
     multi_span_copy!(dst, src, dst_ptrs, src_ptrs, lens)
 
 Copy `lens[i]` bytes from `src` at absolute pointer `src_ptrs[i]` into `dst` at
@@ -119,7 +135,8 @@ function multi_span_copy!(dst::AbstractArray{T}, src::AbstractArray{T},
         return
     end
 
-    backend = KernelAbstractions.get_backend(is_device_array(dst) ? dst : src)
+    dev_arr = is_device_array(dst) ? dst : src
+    backend = KernelAbstractions.get_backend(dev_arr)
     dst_offs_d = _device_u32(backend, dst_offs)
     src_offs_d = _device_u32(backend, src_offs)
     prefix_d = _device_u32(backend, prefix)
@@ -129,7 +146,7 @@ function multi_span_copy!(dst::AbstractArray{T}, src::AbstractArray{T},
     # kernel-launch lock (see e.g. OpenCLExt) to avoid deadlocking a blocking
     # recv that precedes this call against that lock; take the narrower
     # per-launch lock here instead.
-    gpu_kernel_lock(task_processor()) do
+    gpu_kernel_lock(kernel_lock_processor(dev_arr)) do
         kern(dst_vec, src_vec, dst_offs_d, src_offs_d, prefix_d; ndrange=total)
     end
     # This synchronize is required (independent of any following DtoH): the

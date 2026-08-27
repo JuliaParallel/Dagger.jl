@@ -58,4 +58,28 @@
             @test Set(Dagger.processors(w2_mem)) == filter(proc->proc isa Dagger.ThreadProc, Dagger.get_processors(OSProc(2)))
         end
     end
+
+    @testset "Kernel Lock Processor" begin
+        # `multi_span_copy!` needs a processor to pick the backend's
+        # kernel-launch lock, but it also runs outside any DTask: the
+        # source-side gather in `move!(::RemainderAliasing, ...)` is handed to
+        # the owning worker via `remotecall_fetch`, whose closure executes in a
+        # Distributed message-handler task with no Dagger TLS. Deriving the
+        # processor from the value's memory space must work there.
+        x = zeros(4)
+        outside = fetch(Threads.@spawn begin
+            @assert !Dagger.in_task()
+            Dagger.kernel_lock_processor(x)
+        end)
+        @test outside in Dagger.processors(Dagger.memory_space(x))
+        # `gpu_kernel_lock` must accept it and still run the body
+        @test Dagger.gpu_kernel_lock(()->:ran, outside) === :ran
+        # Inside a DTask the current processor still wins. Both reads have to
+        # come from the *same* task: two `@spawn`s can be scheduled onto two
+        # different `ThreadProc`s, and would then disagree for reasons that
+        # have nothing to do with what is being checked here.
+        @everywhere kernel_lock_proc_is_task_proc(x) =
+            Dagger.kernel_lock_processor(x) === Dagger.task_processor()
+        @test fetch(Dagger.@spawn kernel_lock_proc_is_task_proc(1.0))
+    end
 end
