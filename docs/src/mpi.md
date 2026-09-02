@@ -353,9 +353,22 @@ per backend for advanced setups.
 array on **every** rank (each rank ends up with an identical copy). This is
 convenient for reductions or for writing results out from rank 0.
 
-`fetch` on a chunk or `DTask` resolves data locally: the owning rank returns its
-payload, while non-owning ranks return their placeholder metadata. Guard
-rank-specific output (printing, file writes) with `if MPI.Comm_rank(comm) == 0`.
+`fetch` on a `DTask` is **collective**: every rank has to call it, and every rank
+receives the value, which is broadcast from the rank that owns it. That makes it
+the right tool for small results every rank needs (a scalar, a vector of
+eigenvalues), and the wrong one for data that should stay where it was computed.
+
+For the latter, pass `local_only=true`. Each rank then reads what it holds and
+gets `nothing` for what it does not, without any communication -- so unlike a
+plain `fetch`, the ranks may ask for different things:
+
+```julia
+t = Dagger.@spawn scope=Dagger.scope(mpi_rank=1) expensive(args...)
+result = fetch(t; local_only=true)   # the value on rank 1, `nothing` elsewhere
+```
+
+Guard rank-specific output (printing, file writes) with
+`if MPI.Comm_rank(comm) == 0`.
 
 ## Testing MPI code
 

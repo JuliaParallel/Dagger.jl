@@ -649,6 +649,28 @@ end
     @test collect(DA) == A .+ 1
 end
 
+@testset "local_only fetch" begin
+    # `fetch` is collective here, so a rank cannot read just its own results with it.
+    # `local_only` can: each rank gets what it holds and `nothing` for the rest, without
+    # communicating -- so the ranks are free to disagree on what they ask for.
+    tasks = [Dagger.@spawn scope=rank_scope(mod(i, nranks)) fill(i, 4) for i = 1:2*nranks]
+    local_results = [fetch(t; local_only=true) for t in tasks]
+    for (i, result) in enumerate(local_results)
+        if mod(i, nranks) == rank
+            @test result == fill(i, 4)
+        else
+            @test result === nothing
+        end
+    end
+    @test count(!isnothing, local_results) == 2
+
+    # Chunks answer the same way, and a value that never went through Dagger is local
+    # to whoever holds it.
+    chunk = Dagger.tochunk(ones(3), proc_for_rank(0), space_for_rank(0))
+    @test fetch(chunk; local_only=true) == (rank == 0 ? ones(3) : nothing)
+    @test Dagger.fetch_local([1, 2, 3]) == [1, 2, 3]
+end
+
 @testset "Untyped task results" begin
     # Non-concrete inferred return types rely on the owner's result-status
     # broadcast carrying the actual result type to all ranks

@@ -61,7 +61,9 @@ collect(ctx::Context, ref::DRef; options=nothing) =
     move(OSProc(ref.owner), OSProc(), ref)
 collect(ctx::Context, ref::FileRef; options=nothing) =
     poolget(ref) # FIXME: Do move call
-function Base.fetch(chunk::Chunk{T}; unwrap::Bool=false, uniform::Bool=uniform_execution(), kwargs...) where T
+function Base.fetch(chunk::Chunk{T}; unwrap::Bool=false, uniform::Bool=uniform_execution(),
+                   local_only::Bool=false, kwargs...) where T
+    local_only && return fetch_local(chunk)
     # N.B. Do not assert `::T`: the chunktype is not always the restored value
     # type. File-backed chunks (`tochunk(FileRef(path); device=...)`) carry
     # chunktype `FileRef` but restore to the file's deserialized contents.
@@ -73,6 +75,21 @@ function Base.fetch(chunk::Chunk{T}; unwrap::Bool=false, uniform::Bool=uniform_e
 end
 fetch_handle(ref::DRef; uniform::Bool) = poolget(ref)
 fetch_handle(ref::FileRef; uniform::Bool) = poolget(ref)
+
+"""
+    fetch_local(x)
+
+The payload of `x` as it sits in the calling process's memory, or `nothing` when another
+process owns it. Unlike [`fetch`](@ref) this never communicates, which is what makes it
+callable on only some of the processes: under a uniform-execution acceleration (MPI) a
+`fetch` is collective and every rank has to join in, whereas `fetch_local` lets each rank
+read what it happens to hold and ignore the rest. Use it for data that is meant to stay
+where it was computed.
+"""
+fetch_local(x) = x
+fetch_local(chunk::Chunk) = fetch_local(chunk.handle)
+fetch_local(ref::DRef) = root_worker_id(ref) == myid() ? poolget(ref) : nothing
+fetch_local(ref::FileRef) = poolget(ref)
 unwrappable(x::Chunk) = true
 unwrappable(x::DRef) = true
 unwrappable(x::FileRef) = true

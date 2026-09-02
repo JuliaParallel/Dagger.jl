@@ -1473,6 +1473,11 @@ function MemPool.poolget(ref::MPIRef; uniform::Bool=uniform_execution())
 end
 fetch_handle(ref::MPIRef; uniform::Bool=uniform_execution()) = poolget(ref; uniform)
 
+# A rank can always read what it owns without talking to anyone; for what it does not own
+# there is nothing to read, and saying so is the point -- see `Dagger.fetch_local`.
+Dagger.fetch_local(ref::MPIRef) =
+    ref.rank == MPI.Comm_rank(ref.comm) ? poolget(ref; uniform=false) : nothing
+
 function move!(dep_mod, to_space::MPIMemorySpace, from_space::MPIMemorySpace, to::Chunk, from::Chunk)
     @assert to.handle isa MPIRef && from.handle isa MPIRef "MPIRef expected"
     @assert to.handle.comm == from.handle.comm "MPIRef comm mismatch"
