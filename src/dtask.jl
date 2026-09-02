@@ -31,7 +31,8 @@ end
 # N.B. `uniform` is accepted (callers pass it) but unused; its default must not
 # be `uniform_execution()`, which costs a task-local lookup + dynamic dispatch
 # per fetch.
-function Base.fetch(t::ThunkFuture; proc=nothing, raw=false, move_value=!raw, unwrap=!raw, uniform=false)
+function Base.fetch(t::ThunkFuture; proc=nothing, raw=false, move_value=!raw, unwrap=!raw,
+                   uniform=false, local_only=false)
     # N.B. `thunk_yield(f)` is exactly `f()` outside of a Dagger task, so skip it
     # (and the closure it would heap-allocate) when not running in one.
     error, value = if Dagger.in_task()
@@ -44,7 +45,10 @@ function Base.fetch(t::ThunkFuture; proc=nothing, raw=false, move_value=!raw, un
     if error
         throw(value)
     end
-    if !move_value
+    if local_only
+        # The result as it sits on this process, without the communication `move` would do
+        return fetch_local(value)
+    elseif !move_value
         return value
     else
         return move(@something(proc, OSProc()), value)
@@ -91,11 +95,12 @@ function Base.wait(t::DTask)
     wait(t.future)
     return
 end
-function Base.fetch(t::DTask; raw=false, move_value=!raw, unwrap=!raw, uniform=false)
+function Base.fetch(t::DTask; raw=false, move_value=!raw, unwrap=!raw, uniform=false,
+                   local_only=false)
     if !istaskstarted(t)
         throw(ConcurrencyViolationError("Cannot `fetch` an unlaunched `DTask`"))
     end
-    return fetch(t.future; move_value, unwrap, uniform)
+    return fetch(t.future; move_value, unwrap, uniform, local_only)
 end
 function waitany(tasks::Vector{DTask})
     if isempty(tasks)
