@@ -72,8 +72,7 @@ end
     if !Dagger.gpu_can_compute(:CUDA)
         @warn "No CUDA devices available, skipping tests"
     else
-        cuproc = Base.get_extension(Dagger, :CUDAExt).CuArrayDeviceProc
-        @test Dagger.gpu_processor(:CUDA) === cuproc
+        @test Dagger.gpu_processor(:CUDA) === Dagger.CuArrayDeviceProc
         ndevices = length(collect(CUDA.devices()))
         gpu_configs = Any[1]
         if ndevices > 1
@@ -255,8 +254,7 @@ end
     if !Dagger.gpu_can_compute(:ROC)
         @warn "No ROCm devices available, skipping tests"
     else
-        rocproc = Base.get_extension(Dagger, :ROCExt).ROCArrayDeviceProc
-        @test Dagger.gpu_processor(:ROC) === rocproc
+        @test Dagger.gpu_processor(:ROC) === Dagger.ROCArrayDeviceProc
         ndevices = length(AMDGPU.devices())
         gpu_configs = Any[1]
         if ndevices > 1
@@ -440,8 +438,7 @@ end
     if !Dagger.gpu_can_compute(:oneAPI)
         @warn "No oneAPI devices available, skipping tests"
     else
-        oneproc = Base.get_extension(Dagger, :IntelExt).oneArrayDeviceProc
-        @test Dagger.gpu_processor(:oneAPI) === oneproc
+        @test Dagger.gpu_processor(:oneAPI) === Dagger.oneArrayDeviceProc
         ndevices = length(oneAPI.devices())
         gpu_configs = Any[1]
         if ndevices > 1
@@ -625,8 +622,7 @@ end
     if !Dagger.gpu_can_compute(:Metal)
         @warn "No Metal devices available, skipping tests"
     else
-        mtlproc = Base.get_extension(Dagger, :MetalExt).MtlArrayDeviceProc
-        @test Dagger.gpu_processor(:Metal) === mtlproc
+        @test Dagger.gpu_processor(:Metal) === Dagger.MtlArrayDeviceProc
         b = generate_thunks()
         c = Dagger.with_options(;scope=Dagger.scope(metal_gpu=1)) do
             @test fetch(Dagger.@spawn isongpu(b))
@@ -784,8 +780,7 @@ end
     if !Dagger.gpu_can_compute(:OpenCL)
         @warn "No OpenCL devices available, skipping tests"
     else
-        clproc = Base.get_extension(Dagger, :OpenCLExt).CLArrayDeviceProc
-        @test Dagger.gpu_processor(:OpenCL) === clproc
+        @test Dagger.gpu_processor(:OpenCL) === Dagger.CLArrayDeviceProc
         ndevices = length(cl.devices(cl.default_platform()))
         gpu_configs = Any[1]
         if ndevices > 1

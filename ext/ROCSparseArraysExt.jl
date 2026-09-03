@@ -4,6 +4,7 @@ module ROCSparseArraysExt
 # SparseArrays are available (see Project.toml combo extension).
 
 import Dagger
+import Dagger: ROCArrayDeviceProc
 import AMDGPU
 import SparseArrays
 import SparseArrays: SparseMatrixCSC, SparseVector
@@ -12,11 +13,6 @@ import AMDGPU: ROCArray
 import AMDGPU.rocSPARSE: ROCSparseMatrixCSC, ROCSparseMatrixCSR, ROCSparseVector
 
 const CPUProc = Union{Dagger.OSProc,Dagger.ThreadProc}
-
-# ROCExt is triggered by AMDGPU and provides the processor + context helpers.
-const ROCExt = Base.get_extension(Dagger, :ROCExt)::Module
-using .ROCExt: ROCArrayDeviceProc
-_with_context(f, proc) = ROCExt.with_context(f, proc)
 
 #----- Memory / aliasing -------------------------------------------------------
 
@@ -93,29 +89,29 @@ end
 #----- Move (preserve sparsity; wrap in DSparseArray) --------------------------
 
 function Dagger.move(from_proc::CPUProc, to_proc::ROCArrayDeviceProc, x::SparseMatrixCSC)
-    _with_context(to_proc) do
+    Dagger.with_context(to_proc) do
         return Dagger.DSparseArray(ROCSparseMatrixCSC(x))
     end
 end
 function Dagger.move(from_proc::CPUProc, to_proc::ROCArrayDeviceProc, x::SparseVector)
-    _with_context(to_proc) do
+    Dagger.with_context(to_proc) do
         return Dagger.DSparseArray(ROCSparseVector(x))
     end
 end
 function Dagger.move(from_proc::CPUProc, to_proc::ROCArrayDeviceProc, x::Dagger.DSparseArray)
-    _with_context(to_proc) do
+    Dagger.with_context(to_proc) do
         return _to_roc_dsparse(x)
     end
 end
 function Dagger.move(from_proc::ROCArrayDeviceProc, to_proc::CPUProc, x::Dagger.DSparseArray)
-    _with_context(from_proc) do
+    Dagger.with_context(from_proc) do
         AMDGPU.synchronize()
         return _to_host_dsparse(x)
     end
 end
 function Dagger.move(from_proc::ROCArrayDeviceProc, to_proc::CPUProc,
                      x::Union{ROCSparseMatrixCSC,ROCSparseMatrixCSR,ROCSparseVector})
-    _with_context(from_proc) do
+    Dagger.with_context(from_proc) do
         AMDGPU.synchronize()
         return Dagger.DSparseArray(_to_host_sparse(x))
     end
@@ -124,11 +120,11 @@ function Dagger.move(from_proc::ROCArrayDeviceProc, to_proc::ROCArrayDeviceProc,
     # Same device: identity (like dense ROCArray). A copy here would discard
     # in-place SpGEMM writes under Datadeps/Sch argument moves.
     if from_proc == to_proc
-        _with_context(AMDGPU.synchronize, from_proc)
+        Dagger.with_context(AMDGPU.synchronize, from_proc)
         return x
     end
     # Distinct devices: stage through host (no peer-copy helper yet).
-    _with_context(to_proc) do
+    Dagger.with_context(to_proc) do
         return _to_roc_dsparse(_to_host_dsparse(x))
     end
 end

@@ -3,7 +3,7 @@ module IntelExt
 export oneArrayDeviceProc
 
 import Dagger, MemPool
-import Dagger: CPURAMMemorySpace, Chunk, unwrap
+import Dagger: CPURAMMemorySpace, Chunk, unwrap, oneArrayDeviceProc
 import MemPool: DRef, poolget
 import Distributed: myid, remotecall_fetch
 import LinearAlgebra
@@ -20,18 +20,8 @@ import oneAPI: ZeDevice, ZeDriver, ZeContext, oneArray, oneAPIBackend
 import oneAPI: driver, driver!, device, device!, context, context!
 #import oneAPI: CUBLAS, CUSOLVER
 
-using UUIDs
-
-"Represents a single Intel GPU device."
-struct oneArrayDeviceProc <: Dagger.Processor
-    owner::Int
-    device_id::Int
-end
-Dagger.get_parent(proc::oneArrayDeviceProc) = Dagger.OSProc(proc.owner)
-Dagger.root_worker_id(proc::oneArrayDeviceProc) = proc.owner
-Base.show(io::IO, proc::oneArrayDeviceProc) =
-    print(io, "oneArrayDeviceProc(worker $(proc.owner), device $(proc.device_id))")
-Dagger.short_name(proc::oneArrayDeviceProc) = "W: $(proc.owner), oneAPI: $(proc.device_id)"
+# oneArrayDeviceProc is defined in Dagger so IntelSparseArraysExt can dispatch
+# on it without reaching into this extension (load order is unspecified).
 Dagger.@gpuproc(oneArrayDeviceProc, oneArray)
 
 "Represents the memory space of a single Intel GPU's VRAM."
@@ -123,6 +113,7 @@ function with_context!(space::IntelVRAMMemorySpace)
 end
 Dagger.with_context!(proc::oneArrayDeviceProc) = with_context!(proc)
 Dagger.with_context!(space::IntelVRAMMemorySpace) = with_context!(space)
+Dagger.with_context(f, x::Union{oneArrayDeviceProc,IntelVRAMMemorySpace}) = with_context(f, x)
 function with_context(f, x)
     old_drv = driver()
     old_dev = device()

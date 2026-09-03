@@ -16,7 +16,7 @@ const OpenCLExt = Base.get_extension(Dagger, :OpenCLExt)
 
 run_mpi_gpu_suite((;
     name = "OpenCL",
-    DeviceProc = OpenCLExt.CLArrayDeviceProc,
+    DeviceProc = Dagger.CLArrayDeviceProc,
     gpu_key = :cl_device,
     elt = Float32,
     stencil = true,

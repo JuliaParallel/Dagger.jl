@@ -4,6 +4,7 @@ module CUDASparseArraysExt
 # SparseArrays are available (see Project.toml combo extension).
 
 import Dagger
+import Dagger: CuArrayDeviceProc
 import CUDA
 import SparseArrays
 import SparseArrays: SparseMatrixCSC, SparseVector
@@ -12,10 +13,6 @@ import CUDA: CuArray
 import CUDA.CUSPARSE: CuSparseMatrixCSC, CuSparseMatrixCSR, CuSparseVector
 
 const CPUProc = Union{Dagger.OSProc,Dagger.ThreadProc}
-
-const CUDAExt = Base.get_extension(Dagger, :CUDAExt)::Module
-using .CUDAExt: CuArrayDeviceProc
-_with_context(f, proc) = CUDAExt.with_context(f, proc)
 
 #----- Memory / aliasing -------------------------------------------------------
 
@@ -93,39 +90,39 @@ _apply_trans(X, t::Char) =
 #----- Move --------------------------------------------------------------------
 
 function Dagger.move(from_proc::CPUProc, to_proc::CuArrayDeviceProc, x::SparseMatrixCSC)
-    _with_context(to_proc) do
+    Dagger.with_context(to_proc) do
         return Dagger.DSparseArray(CuSparseMatrixCSC(x))
     end
 end
 function Dagger.move(from_proc::CPUProc, to_proc::CuArrayDeviceProc, x::SparseVector)
-    _with_context(to_proc) do
+    Dagger.with_context(to_proc) do
         return Dagger.DSparseArray(CuSparseVector(x))
     end
 end
 function Dagger.move(from_proc::CPUProc, to_proc::CuArrayDeviceProc, x::Dagger.DSparseArray)
-    _with_context(to_proc) do
+    Dagger.with_context(to_proc) do
         return _to_cu_dsparse(x)
     end
 end
 function Dagger.move(from_proc::CuArrayDeviceProc, to_proc::CPUProc, x::Dagger.DSparseArray)
-    _with_context(from_proc) do
+    Dagger.with_context(from_proc) do
         CUDA.synchronize()
         return _to_host_dsparse(x)
     end
 end
 function Dagger.move(from_proc::CuArrayDeviceProc, to_proc::CPUProc,
                      x::Union{CuSparseMatrixCSC,CuSparseMatrixCSR,CuSparseVector})
-    _with_context(from_proc) do
+    Dagger.with_context(from_proc) do
         CUDA.synchronize()
         return Dagger.DSparseArray(_to_host_sparse(x))
     end
 end
 function Dagger.move(from_proc::CuArrayDeviceProc, to_proc::CuArrayDeviceProc, x::Dagger.DSparseArray)
     if from_proc == to_proc
-        _with_context(CUDA.synchronize, from_proc)
+        Dagger.with_context(CUDA.synchronize, from_proc)
         return x
     end
-    _with_context(to_proc) do
+    Dagger.with_context(to_proc) do
         return _to_cu_dsparse(_to_host_dsparse(x))
     end
 end

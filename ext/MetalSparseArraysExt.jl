@@ -4,6 +4,7 @@ module MetalSparseArraysExt
 # library). SpGEMM/SpMV fall back to host SparseArrays.
 
 import Dagger
+import Dagger: MtlArrayDeviceProc
 import Metal
 import Adapt
 import SparseArrays
@@ -12,10 +13,6 @@ import LinearAlgebra
 import Metal: MtlArray
 
 const CPUProc = Union{Dagger.OSProc,Dagger.ThreadProc}
-
-const MetalExt = Base.get_extension(Dagger, :MetalExt)::Module
-using .MetalExt: MtlArrayDeviceProc
-_with_context(f, proc) = MetalExt.with_context(f, proc)
 
 Adapt.adapt_structure(::Type{<:MtlArray}, S::SparseMatrixCSC) =
     Dagger.device_sparse_from_host(MtlArray, S)
@@ -30,7 +27,7 @@ Dagger.allocate_sparse_rand(::MtlArrayDeviceProc, ::Type{T}, dims::Dims{1}, spar
     SparseArrays.sprand(T, dims..., sparsity)
 
 function Dagger.move(from_proc::CPUProc, to_proc::MtlArrayDeviceProc, x::SparseMatrixCSC)
-    _with_context(to_proc) do
+    Dagger.with_context(to_proc) do
         return Dagger.DSparseArray(Dagger.device_sparse_from_host(MtlArray, x))
     end
 end
@@ -38,14 +35,14 @@ function Dagger.move(from_proc::CPUProc, to_proc::MtlArrayDeviceProc, x::SparseV
     return Dagger.DSparseArray(copy(x))
 end
 function Dagger.move(from_proc::CPUProc, to_proc::MtlArrayDeviceProc, x::Dagger.DSparseArray)
-    _with_context(to_proc) do
+    Dagger.with_context(to_proc) do
         mat = x.mat
         S = mat isa SparseMatrixCSC ? mat : SparseMatrixCSC(mat)
         return Dagger.DSparseArray(Dagger.device_sparse_from_host(MtlArray, S))
     end
 end
 function Dagger.move(from_proc::MtlArrayDeviceProc, to_proc::CPUProc, x::Dagger.DSparseArray)
-    _with_context(from_proc) do
+    Dagger.with_context(from_proc) do
         Metal.synchronize()
         mat = x.mat
         if mat isa Dagger.DeviceSparseMatrixCSC
@@ -59,7 +56,7 @@ function Dagger.move(from_proc::MtlArrayDeviceProc, to_proc::MtlArrayDeviceProc,
     if from_proc == to_proc
         return x
     end
-    _with_context(to_proc) do
+    Dagger.with_context(to_proc) do
         S = x.mat isa Dagger.DeviceSparseMatrixCSC ? SparseMatrixCSC(x.mat) : SparseMatrixCSC(x.mat)
         return Dagger.DSparseArray(Dagger.device_sparse_from_host(MtlArray, S))
     end
