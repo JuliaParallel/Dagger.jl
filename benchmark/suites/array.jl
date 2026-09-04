@@ -17,37 +17,38 @@ function array_suite(ctx; method, accels)
     for N in scales
         # Elementwise ops hold at most the input plus a same-size result.
         fits_budget(dense_bytes(N; nmats=2, T=T)) || continue
-        b = square_block(N)
-        sub = BenchmarkGroup()
+        for b in blocks_for(N)
+            sub = BenchmarkGroup()
 
-        sub["alloc (rand)"] = @benchmarkable(wait(rand(Blocks($b, $b), $T, $N, $N)),
-            teardown = (@everywhere GC.gc()))
+            sub["alloc (rand)"] = @benchmarkable(wait(rand(Blocks($b, $b), $T, $N, $N)),
+                teardown = (@everywhere GC.gc()))
 
-        sub["broadcast (X .+ 1)"] = @benchmarkable(wait(X .+ 1),
-            setup = (X = rand(Blocks($b, $b), $T, $N, $N); wait(X)),
-            teardown = (X = nothing; @everywhere GC.gc()))
+            sub["broadcast (X .+ 1)"] = @benchmarkable(wait(X .+ 1),
+                setup = (X = rand(Blocks($b, $b), $T, $N, $N); wait(X)),
+                teardown = (X = nothing; @everywhere GC.gc()))
 
-        sub["add (X + X)"] = @benchmarkable(wait(X + X),
-            setup = (X = rand(Blocks($b, $b), $T, $N, $N); wait(X)),
-            teardown = (X = nothing; @everywhere GC.gc()))
+            sub["add (X + X)"] = @benchmarkable(wait(X + X),
+                setup = (X = rand(Blocks($b, $b), $T, $N, $N); wait(X)),
+                teardown = (X = nothing; @everywhere GC.gc()))
 
-        sub["map (sin.(X))"] = @benchmarkable(wait(sin.(X)),
-            setup = (X = rand(Blocks($b, $b), $T, $N, $N); wait(X)),
-            teardown = (X = nothing; @everywhere GC.gc()))
+            sub["map (sin.(X))"] = @benchmarkable(wait(sin.(X)),
+                setup = (X = rand(Blocks($b, $b), $T, $N, $N); wait(X)),
+                teardown = (X = nothing; @everywhere GC.gc()))
 
-        sub["transpose (permutedims)"] = @benchmarkable(wait(permutedims(X)),
-            setup = (X = rand(Blocks($b, $b), $T, $N, $N); wait(X)),
-            teardown = (X = nothing; @everywhere GC.gc()))
+            sub["transpose (permutedims)"] = @benchmarkable(wait(permutedims(X)),
+                setup = (X = rand(Blocks($b, $b), $T, $N, $N); wait(X)),
+                teardown = (X = nothing; @everywhere GC.gc()))
 
-        sub["reduce (sum)"] = @benchmarkable(sum(X),
-            setup = (X = rand(Blocks($b, $b), $T, $N, $N); wait(X)),
-            teardown = (X = nothing; @everywhere GC.gc()))
+            sub["reduce (sum)"] = @benchmarkable(sum(X),
+                setup = (X = rand(Blocks($b, $b), $T, $N, $N); wait(X)),
+                teardown = (X = nothing; @everywhere GC.gc()))
 
-        sub["norm"] = @benchmarkable(norm(X),
-            setup = (X = rand(Blocks($b, $b), $T, $N, $N); wait(X)),
-            teardown = (X = nothing; @everywhere GC.gc()))
+            sub["norm"] = @benchmarkable(norm(X),
+                setup = (X = rand(Blocks($b, $b), $T, $N, $N); wait(X)),
+                teardown = (X = nothing; @everywhere GC.gc()))
 
-        suite["N=$N (block $b)"] = sub
+            suite["N=$N (block $b)"] = sub
+        end
     end
 
     suite
