@@ -470,7 +470,9 @@ function Dagger.ipc_copyto!(dest::oneAPI.oneStridedArray{T,N}, info::ZeIpcInfo{T
     with_context!(Dagger.memory_space(dest))
     ctx = oneAPI.context()
     dev = oneAPI.device()
-    ptr_ref = Ref{Ptr{Cvoid}}()
+    # The generated wrapper types the out-param as `Ptr{PtrOrZePtr{Cvoid}}`; a
+    # `Ref{Ptr{Cvoid}}` fails `unsafe_convert` against that (oneAPI 2.x).
+    ptr_ref = Ref{oneL0.PtrOrZePtr{Cvoid}}()
     oneL0.zeMemOpenIpcHandle(ctx, dev, info.handle, UInt32(0), ptr_ref)
     try
         src_ptr = reinterpret(oneL0.ZePtr{T}, ptr_ref[])

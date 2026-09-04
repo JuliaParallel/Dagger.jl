@@ -271,3 +271,17 @@ lesson.
    `DArray(undef)` (GPU processors still override `AllocateUndef`), sparse
    stays sparse zeros. `similar(chunk)` is only right when you actually need
    the source value.
+
+25. **Vendor GPU sparse tiles do not speak SparseArrays' names, and CSC×CSC is
+   not a given.** `CuSparseMatrixCSC` / `ROCSparseMatrixCSC` store values in
+   `nzVal` (and `colPtr`/`rowVal`); a kernel that reaches `.nzval` works on
+   host CSC and `DeviceSparseMatrixCSC` and then dies on CUDA. Use `hasfield`
+   or `nonzeros`, not a hardcoded field. Separately, `A * B` of two rocSPARSE
+   CSC tiles falls into LinearAlgebra's generic matmul (scalar indexing) unless
+   that AMDGPU version wraps CSR SpGEMM — tile `matmatmul!` must gather to
+   host CSC, as `DeviceSparseMatrixCSC` already does, rather than hoping `*`
+   stays on-device. oneAPI's `zeMemOpenIpcHandle` out-param is
+   `Ptr{PtrOrZePtr{Cvoid}}`, not `Ptr{Ptr{Cvoid}}`. And once a GPU processor
+   type (and its `show`) lives in core so combo extensions can dispatch on it,
+   the backend extension must not redefine `show` — precompilation forbids the
+   overwrite.

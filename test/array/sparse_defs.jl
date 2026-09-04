@@ -157,12 +157,15 @@ end
 # Bare sparse containers handed straight to a Datadeps task: read-only access is
 # adopted into a `DSparseArray`, write access is rejected. See
 # `adopt_sparse_arg!`.
-# N.B. These reach through to `.mat.nzval` rather than using `sum`/broadcast on
-# the wrapper: generic `AbstractArray` fallbacks index element-wise, which is
-# scalar indexing once the tile has been moved to a device.
-@everywhere sparse_defs_nzsum(X) = sum(X.mat.nzval)
+# N.B. These reach the storage vector rather than using `sum`/broadcast on the
+# wrapper: generic `AbstractArray` fallbacks index element-wise, which is
+# scalar indexing once the tile has been moved to a device. CUSPARSE/rocSPARSE
+# name that vector `nzVal`; SparseArrays and `DeviceSparseMatrixCSC` use `nzval`.
+@everywhere sparse_defs_nzvals(A) =
+    hasfield(typeof(A), :nzval) ? getfield(A, :nzval) : getfield(A, :nzVal)
+@everywhere sparse_defs_nzsum(X) = sum(sparse_defs_nzvals(X.mat))
 @everywhere sparse_defs_type(X) = string(typeof(X))
-@everywhere sparse_defs_scale!(X, a) = (X.mat.nzval .*= a; nothing)
+@everywhere sparse_defs_scale!(X, a) = (sparse_defs_nzvals(X.mat) .*= a; nothing)
 
 #
 # `writeback_visible` must be false on the MPI ranks that do not own the origin:

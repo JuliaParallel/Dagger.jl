@@ -75,17 +75,6 @@ _to_csc(A::ROCSparseMatrixCSC) = A
 _to_csc(A::ROCSparseMatrixCSR) = ROCSparseMatrixCSC(A)
 _to_csc(A) = ROCSparseMatrixCSC(A)
 
-# Materialize transpose/adjoint as CSC so SpGEMM stays on rocSPARSE / host CSC
-# paths; `A * transpose(B)` would otherwise fall into scalar-indexing generic mul.
-function _op_csc(X, t::Char)
-    Xc = _to_csc(X)
-    t == 'N' && return Xc
-    Sh = SparseMatrixCSC(Xc)
-    t == 'T' && return ROCSparseMatrixCSC(SparseArrays.sparse(transpose(Sh)))
-    t == 'C' && return ROCSparseMatrixCSC(SparseArrays.sparse(adjoint(Sh)))
-    throw(ArgumentError("Invalid trans char: $t"))
-end
-
 #----- Move (preserve sparsity; wrap in DSparseArray) --------------------------
 
 function Dagger.move(from_proc::CPUProc, to_proc::ROCArrayDeviceProc, x::SparseMatrixCSC)
@@ -131,6 +120,10 @@ end
 
 #----- Tile kernels ------------------------------------------------------------
 
+# rocSPARSE SpGEMM is CSR-only and only wrapped on newer AMDGPU. `A * B` of two
+# `ROCSparseMatrixCSC` tiles otherwise falls into LinearAlgebra's generic mul
+# (scalar indexing). Gather to host CSC — the same path `DeviceSparseMatrixCSC`
+# already uses — rather than hoping `*` stays on-device.
 function Dagger.matmatmul!(
     C::Dagger.DSparseMatrix,
     transA::Char, transB::Char,
@@ -138,15 +131,17 @@ function Dagger.matmatmul!(
     B::Union{ROCSparseMatrixCSC,ROCSparseMatrixCSR},
     alpha, beta
 )
-    AB = _to_csc(_op_csc(A, transA) * _op_csc(B, transB))
-    prod = _to_csc(isone(alpha) ? AB : alpha * AB)
+    Ah = SparseMatrixCSC(_to_csc(A))
+    Bh = SparseMatrixCSC(_to_csc(B))
+    AB = _apply_trans(Ah, transA) * _apply_trans(Bh, transB)
+    prod = isone(alpha) ? AB : alpha * AB
     if iszero(beta)
-        C.mat = prod
-    elseif isone(beta)
-        C.mat = _to_csc(prod + _to_csc(C.mat))
+        result = prod
     else
-        C.mat = _to_csc(prod + beta * _to_csc(C.mat))
+        Ch = SparseMatrixCSC(_to_csc(C.mat))
+        result = isone(beta) ? prod + Ch : prod + beta * Ch
     end
+    C.mat = ROCSparseMatrixCSC(SparseMatrixCSC(result))
     return C
 end
 

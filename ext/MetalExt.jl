@@ -461,9 +461,8 @@ function Dagger.inner_stencil_proc!(::MtlArrayDeviceProc, f, output, read_vars)
     return
 end
 
-function Base.show(io::IO, proc::MtlArrayDeviceProc)
-    print(io, "MtlArrayDeviceProc(worker $(proc.owner), device $(something(_get_metal_device(proc)).name))")
-end
+# `Base.show(::MtlArrayDeviceProc)` lives in `src/gpu.jl` with the type. Do not
+# overwrite it here: method overwriting is forbidden during precompilation.
 
 Dagger.gpu_processor(::Val{:Metal}) = MtlArrayDeviceProc
 Dagger.gpu_can_compute(::Val{:Metal}) = Metal.functional()
