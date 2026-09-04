@@ -3,7 +3,7 @@ module OpenCLExt
 export CLArrayDeviceProc
 
 import Dagger, MemPool
-import Dagger: CPURAMMemorySpace, Chunk, unwrap
+import Dagger: CPURAMMemorySpace, Chunk, unwrap, CLArrayDeviceProc
 import MemPool: DRef, poolget
 import Distributed: myid, remotecall_fetch
 import LinearAlgebra
@@ -19,18 +19,8 @@ end
 import OpenCL: CLArray, OpenCLBackend, cl
 import .cl: Device, Context, CmdQueue
 
-using UUIDs
-
-"Represents a single OpenCL device."
-struct CLArrayDeviceProc <: Dagger.Processor
-    owner::Int
-    device::Int
-end
-Dagger.get_parent(proc::CLArrayDeviceProc) = Dagger.OSProc(proc.owner)
-Dagger.root_worker_id(proc::CLArrayDeviceProc) = proc.owner
-Base.show(io::IO, proc::CLArrayDeviceProc) =
-    print(io, "CLArrayDeviceProc(worker $(proc.owner), device $(proc.device))")
-Dagger.short_name(proc::CLArrayDeviceProc) = "W: $(proc.owner), CL: $(proc.device)"
+# CLArrayDeviceProc is defined in Dagger so OpenCLSparseArraysExt can dispatch
+# on it without reaching into this extension (load order is unspecified).
 Dagger.@gpuproc(CLArrayDeviceProc, CLArray)
 
 "Represents the memory space of a single OpenCL device's RAM."
@@ -39,9 +29,18 @@ struct CLMemorySpace <: Dagger.MemorySpace
     device::Int
 end
 Dagger.root_worker_id(space::CLMemorySpace) = space.owner
+# N.B. Keyed on the *device*, not on the command queue that `Managed` currently
+# records. That field is OpenCL.jl's ownership tracking, not provenance: any
+# access from a task whose `cl.queue()` differs synchronizes and then re-stamps
+# the buffer with that task's queue. `cl.queue()` is task-local and created
+# lazily, so a task that never ran `with_context!` re-stamps the buffer with a
+# queue Dagger never registered -- after which a queue-keyed lookup finds no
+# space at all and `CLMemorySpace(myid(), nothing)` fails to even construct.
+# The device is what actually owns the memory, and it does not change.
 function Dagger.memory_space(x::CLArray)
-    queue = x.data[].queue
-    idx = findfirst(==(queue), QUEUES)
+    dev = x.data[].queue.device
+    idx = findfirst(==(dev), DEVICES)
+    idx === nothing && throw(ArgumentError("CLArray on an OpenCL device unknown to Dagger: $dev"))
     return CLMemorySpace(myid(), idx)
 end
 function Dagger.aliasing(x::CLArray{T}) where T
@@ -125,6 +124,7 @@ function with_context!(space::CLMemorySpace)
 end
 Dagger.with_context!(proc::CLArrayDeviceProc) = with_context!(proc)
 Dagger.with_context!(space::CLMemorySpace) = with_context!(space)
+Dagger.with_context(f, x::Union{CLArrayDeviceProc,CLMemorySpace}) = with_context(f, x)
 function with_context(f, x)
     old_ctx = cl.context()
     old_queue = cl.queue()

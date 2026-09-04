@@ -1,3 +1,5 @@
+export CuArrayDeviceProc, ROCArrayDeviceProc, oneArrayDeviceProc, MtlArrayDeviceProc, CLArrayDeviceProc
+
 const CPUProc = Union{OSProc, ThreadProc}
 
 """
@@ -45,6 +47,88 @@ macro gpuproc(PROC, T)
         Dagger.iscompatible_arg(proc::ThreadProc, opts, x::$T) = false
     end
 end
+
+# GPU processor types live in Dagger so a GPU extension and its GPU×SparseArrays
+# companion can share them. Extension load order is unspecified, so the sparse
+# side must not `get_extension` the dense side (lesson 17). Fields are only
+# owner + device id — no CUDA.jl / AMDGPU.jl / … types — so the structs can be
+# defined without those packages. Backend handles, contexts, and streams stay
+# in the GPU extensions.
+
+"""
+    CuArrayDeviceProc <: Processor
+
+A CUDA GPU, identified by owning worker and device handle.
+"""
+struct CuArrayDeviceProc <: Processor
+    owner::Int
+    device::Int
+end
+get_parent(proc::CuArrayDeviceProc) = OSProc(proc.owner)
+root_worker_id(proc::CuArrayDeviceProc) = proc.owner
+Base.show(io::IO, proc::CuArrayDeviceProc) =
+    print(io, "CuArrayDeviceProc(worker $(proc.owner), device $(proc.device))")
+short_name(proc::CuArrayDeviceProc) = "W: $(proc.owner), CUDA: $(proc.device)"
+
+"""
+    ROCArrayDeviceProc <: Processor
+
+A ROCm GPU, identified by owning worker and device id.
+"""
+struct ROCArrayDeviceProc <: Processor
+    owner::Int
+    device_id::Int
+end
+get_parent(proc::ROCArrayDeviceProc) = OSProc(proc.owner)
+root_worker_id(proc::ROCArrayDeviceProc) = proc.owner
+Base.show(io::IO, proc::ROCArrayDeviceProc) =
+    print(io, "ROCArrayDeviceProc(worker $(proc.owner), device $(proc.device_id))")
+short_name(proc::ROCArrayDeviceProc) = "W: $(proc.owner), ROCm: $(proc.device_id)"
+
+"""
+    oneArrayDeviceProc <: Processor
+
+An Intel GPU, identified by owning worker and device id.
+"""
+struct oneArrayDeviceProc <: Processor
+    owner::Int
+    device_id::Int
+end
+get_parent(proc::oneArrayDeviceProc) = OSProc(proc.owner)
+root_worker_id(proc::oneArrayDeviceProc) = proc.owner
+Base.show(io::IO, proc::oneArrayDeviceProc) =
+    print(io, "oneArrayDeviceProc(worker $(proc.owner), device $(proc.device_id))")
+short_name(proc::oneArrayDeviceProc) = "W: $(proc.owner), oneAPI: $(proc.device_id)"
+
+"""
+    MtlArrayDeviceProc <: Processor
+
+A Metal GPU, identified by owning worker and device id.
+"""
+struct MtlArrayDeviceProc <: Processor
+    owner::Int
+    device_id::UInt64
+end
+get_parent(proc::MtlArrayDeviceProc) = OSProc(proc.owner)
+root_worker_id(proc::MtlArrayDeviceProc) = proc.owner
+Base.show(io::IO, proc::MtlArrayDeviceProc) =
+    print(io, "MtlArrayDeviceProc(worker $(proc.owner), device $(proc.device_id))")
+short_name(proc::MtlArrayDeviceProc) = "W: $(proc.owner), Metal: $(proc.device_id)"
+
+"""
+    CLArrayDeviceProc <: Processor
+
+An OpenCL device, identified by owning worker and device index.
+"""
+struct CLArrayDeviceProc <: Processor
+    owner::Int
+    device::Int
+end
+get_parent(proc::CLArrayDeviceProc) = OSProc(proc.owner)
+root_worker_id(proc::CLArrayDeviceProc) = proc.owner
+Base.show(io::IO, proc::CLArrayDeviceProc) =
+    print(io, "CLArrayDeviceProc(worker $(proc.owner), device $(proc.device))")
+short_name(proc::CLArrayDeviceProc) = "W: $(proc.owner), CL: $(proc.device)"
 
 """
     gpu_processor(kind::Symbol)
@@ -118,6 +202,22 @@ gpu_synchronize(::Val{:CPU}) = nothing
 
 with_context!(proc::Processor) = nothing
 with_context!(space::MemorySpace) = nothing
+
+"""
+    with_context(f, x)
+
+Run `f()` with the GPU context associated with processor or memory space `x`
+bound. GPU extensions override this for their types so that the previous
+context is restored afterwards. The default binds via `with_context!` (a
+no-op unless a backend has specialized it) and does not restore.
+
+Combo extensions (e.g. CUDA×SparseArrays) must call this Dagger generic
+rather than reaching into the corresponding GPU extension.
+"""
+function with_context(f, x)
+    with_context!(x)
+    return f()
+end
 
 # Backend kind for an array or memory space (`:CPU`, `:CUDA`, `:ROC`, …).
 # GPU extensions override for their array / VRAM space types.
@@ -196,6 +296,12 @@ end
 # handle (MPI P2P vs Distributed remotecall) is acceleration-specific.
 # DAGGER_IPC=0 disables the path.
 ipc_eligible(from_inner::MemorySpace, to_inner::MemorySpace) = false
+# Space-only `ipc_eligible` is not enough: a GPU-scoped task (collect's MPI cat
+# tree densifies every tile to `Array`) can return a host `Array` whose chunk
+# is still stamped VRAM. `ipc_export` exists only for device arrays, so the
+# payload type must be a GPU array too. SPMD-uniform — derived from chunktype.
+ipc_type_eligible(::Type{T}) where T =
+    T <: GPUArraysCore.AbstractGPUArray && isbitstype(eltype(T))
 # Transfers smaller than this stay on the staged path (handle exchange and
 # ack latency dominate below the crossover, ~128KiB on PCIe-attached GPUs)
 const IPC_MIN_BYTES = Ref{Int}(128 * 1024)

@@ -231,7 +231,38 @@ end
 
 # Named so the spawned function is rank-uniform under MPI (anonymous
 # closures get non-uniform ArgumentWrapper hashes).
-_collect_cat(concat, dims::Int, xs...) = concat(xs...; dims)
+#
+# Sparse tiles are densified before the `cat` (`_collect_cat_tile` is overloaded
+# for `DSparseArray` in array/sparse.jl). Generic `cat` fills its output element
+# by element, which is scalar indexing -- illegal on a device sparse tile, and
+# these gather tasks do run on the device when the caller is under a GPU compute
+# scope. `collect` densifies its result anyway (`_collect_dense`), so this only
+# moves that step earlier.
+#
+# For the same reason every operand is brought to the host, not just the sparse
+# ones. Densifying on the host makes the tree *mixed*: the level's host result
+# is a task result, so the next level's task -- on a device processor -- has
+# Datadeps move it back to the device, while its sibling operand arrives as a
+# fresh host densification. `cat` then takes its output type from the first
+# operand and fills it element by element from the other, so a host/device pair
+# is exactly the scalar-indexing error the densification was meant to avoid,
+# just one level up. It only appears with enough tiles to need a second cat
+# level. The host round trip this costs is bounded by `collect`'s own transfer
+# (which moves every tile to the host regardless).
+_collect_cat_tile(x) = x
+_collect_cat_tile(x::AbstractArray) =
+    value_memory_space(x) isa CPURAMMemorySpace ? x : Adapt.adapt(Array, x)
+_collect_cat(concat, dims::Int, xs...) = concat(map(_collect_cat_tile, xs)...; dims)
+
+# Finalize a gathered DArray to a dense `Array{T,N}`. Sparse tile cats may yield
+# a `DSparseArray` / `SparseMatrixCSC`, and `Base.collect` does not densify those.
+# A fully-reduced single chunk is a bare scalar (e.g. `sum` over one partition);
+# wrap it as a 1×1×… `Array{T,N}` rather than `Array{T,N}(scalar)`, which has
+# no such constructor.
+_collect_dense(::Type{T}, ::Val{N}, x::Array{T,N}) where {T,N} = x
+_collect_dense(::Type{T}, ::Val{N}, x::AbstractArray) where {T,N} = Array{T,N}(x)
+_collect_dense(::Type{T}, ::Val{N}, x) where {T,N} =
+    fill(convert(T, x), ntuple(_ -> 1, Val(N)))
 
 function Base.collect(d::DArray{T,N}; tree=true, copyto=false) where {T,N}
     a = fetch(d)
@@ -261,13 +292,21 @@ function Base.collect(d::DArray{T,N}; tree=true, copyto=false) where {T,N}
         result = Dagger.spawn_datadeps() do
             treereduce_nd(spawn_catfuncs, a.chunks)
         end
-        return collect(fetch(result))
+        return _collect_dense(T, Val(N), fetch(result))
     end
     # Distributed: fetch chunks directly and concat in-process. This avoids
     # routing chunk data through datadeps aliasing, which requires an
     # aliasing-resolvable (e.g. isbits) element type.
+    #
+    # Sparse tiles (`DSparseArray`) are unwrapped to host storage before `cat`:
+    # GPU sparse types (CuSparse/ROCSparse/DeviceSparseMatrixCSC) disallow the
+    # scalar indexing that generic `cat` would use.
     dimcatfuncs = [(x...) -> concat(x..., dims=i) for i in 1:N]
-    return collect(treereduce_nd(dimcatfuncs, asyncmap(fetch, a.chunks)))
+    tiles = asyncmap(a.chunks) do c
+        x = fetch(c)
+        x isa DSparseArray ? _sparse_collect(x.mat) : x
+    end
+    return _collect_dense(T, Val(N), treereduce_nd(dimcatfuncs, tiles))
 end
 Array{T,N}(A::DArray{S,N}) where {T,N,S} = convert(Array{T,N}, collect(A))
 
@@ -407,8 +446,16 @@ aliasing(x::DArray) =
 memory_space(x::DArray) =
     throw(ConcurrencyViolationError("DArray memory spaces may be mixed and unstable"))
 
-Base.similar(D::DArray{T,N} where T, ::Type{S}, dims::Dims{N}) where {S,N} =
-    DArray{S,N}(undef, D.partitioning, dims)
+function Base.similar(D::DArray{T,N} where T, ::Type{S}, dims::Dims{N}) where {S,N}
+    # Allocate independently of `D`'s tiles. Tying result allocation to the
+    # source chunks (`similar(chunk, ...)`) looks like a convenient way to
+    # preserve tile backend, but it is a false data-dependency: every `A * A`
+    # then fetches `A` into the allocation tasks, and those tasks have no
+    # concrete `return_type`. That is a 2× hit on the small dense GEMM bench.
+    # `allocate_tiled` keeps sparse tiles sparse (and `DArray(undef)` still
+    # goes through `AllocateUndef`, which GPU processors override).
+    return allocate_tiled(darray_tiletype(D), S, D.partitioning, dims)
+end
 Base.similar(D::DArray{T,N1} where T, ::Type{S}, dims::Dims{N2}) where {S,N1,N2} =
     DArray{S,N2}(undef, auto_blocks(dims), dims)
 
@@ -478,31 +525,21 @@ end
 """
     Base.fetch(c::DArray)
 
-If a `DArray` tree has a `Thunk` in it, make the whole thing a big thunk.
+If a `DArray` tree has a `DTask` in it, `fetch` each one (as a `Chunk`,
+without moving its data) and return a new `DArray` with all partitions
+resolved to `Chunk`s.
 """
 function Base.fetch(c::DArray{T}) where T
-    if any(istask, chunks(c))
-        if uniform_execution()
-            # SPMD (MPI): every rank holds every task locally, and chunk
-            # records are rank-local views (placeholders for non-owned data).
-            # Resolve them locally instead of assembling on one rank and
-            # broadcasting (which would clobber the local records with the
-            # assembling rank's placeholders).
-            thunks = chunks(c)
-            new_chunks = Any[istask(t) ? fetch(t; raw=true) : t for t in thunks]
-            return DArray(T, domain(c), domainchunks(c),
-                          reshape(new_chunks, size(thunks)),
-                          c.partitioning, c.concat)
-        end
-        thunks = chunks(c)
-        sz = size(thunks)
+    thunks = chunks(c)
+    if any(istask, thunks)
         dmn = domain(c)
         dmnchunks = domainchunks(c)
-        return fetch(Dagger.spawn(Options(meta=true), thunks...) do results...
-            t = eltype(fetch(results[1]))
-            DArray(t, dmn, dmnchunks, reshape(Any[results...], sz),
-                   c.partitioning, c.concat)
-        end)
+        new_chunks = similar(thunks, Any)
+        for idx in eachindex(thunks)
+            part = thunks[idx]
+            new_chunks[idx] = istask(part) ? fetch(part; raw=true) : part
+        end
+        return DArray(T, dmn, dmnchunks, new_chunks, c.partitioning, c.concat)
     else
         return c
     end
@@ -568,16 +605,7 @@ function stage(ctx::Context, d::Distribute)
         cs = emit_chunk_tasks!(d.domainchunks, d.procgrid, T,
             (scope, I, i) -> begin
             c = d.domainchunks[I]
-            # `copy`, not `identity`: under uniform execution (MPI/SPMD) this
-            # spawn runs inside a datadeps region (see `emit_chunk_tasks!`),
-            # which moves `d.data[c]` to `scope`'s space as a tracked argument
-            # and frees that moved copy once the region ends. `identity` would
-            # return that exact object as the chunk's permanent value, so it
-            # gets freed out from under the DArray the moment the region
-            # finishes (surfacing as e.g. AMDGPU's "Attempt to use a freed
-            # reference" the next time the chunk is read). `copy` returns a
-            # distinct object that isn't subject to that cleanup.
-            Dagger.@spawn compute_scope=scope copy(d.data[c])
+            Dagger.@spawn compute_scope=scope maybe_wrap_tile(d.data[c])
         end)
     end
     return DArray(eltype(d.data),
@@ -650,6 +678,19 @@ DArray{T}(::UndefInitializer, dist::Blocks{N}, dims::Vararg{Int,N}; assignment::
 DArray{T}(::UndefInitializer, dims::NTuple{N,Int}; assignment::AssignmentType{N} = :arbitrary) where {T,N}  =
     DArray{T,N}(undef, auto_blocks(dims), dims; assignment)
 DArray{T}(::UndefInitializer, dims::Vararg{Int,N}; assignment::AssignmentType{N} = :arbitrary) where {T,N} =
+    DArray{T,N}(undef, auto_blocks((dims...,)), (dims...,); assignment)
+
+# Generic array code often allocates as `typeof(x)(undef, dims)` (e.g. Krylov's
+# `S = ktypeof(b)` workspaces). A `DArray`'s type parameters record only *that*
+# it is `Blocks`-partitioned, not the block size, so there is nothing to recover
+# from `S` and these fall back to `auto_blocks` -- the same choice the
+# element-type-only constructors above make. The result may therefore be
+# partitioned differently from the array `S` was taken from; that is correct but
+# costs a repartition on each op that mixes them, so prefer `similar` where the
+# prototype is in hand.
+DArray{T,N,B,F,C,D}(::UndefInitializer, dims::NTuple{N,Int}; assignment::AssignmentType{N} = :arbitrary) where {T,N,B<:Blocks{N},F,C,D} =
+    DArray{T,N}(undef, auto_blocks(dims), dims; assignment)
+DArray{T,N,B,F,C,D}(::UndefInitializer, dims::Vararg{Int,N}; assignment::AssignmentType{N} = :arbitrary) where {T,N,B<:Blocks{N},F,C,D} =
     DArray{T,N}(undef, auto_blocks((dims...,)), (dims...,); assignment)
 
 function DArray(A::WrappedDArray{T}; assignment::AssignmentType = :arbitrary) where T

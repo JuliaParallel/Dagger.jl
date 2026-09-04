@@ -16,6 +16,9 @@
 #   - collect/fetch under uniform execution
 #   - result-type broadcast for untyped task results
 #   - Cholesky / LU DArray smokes
+#   - sparse DArray smokes (SpGEMM/SpMV, Krylov solvers, bare sparse Datadeps
+#     arguments), which travel as whole objects over the MPISparseExt
+#     raw-bytes transport rather than as memory spans
 #   - @stencil DArray smoke (full boundary-condition suite, shared with
 #     test/array/stencil.jl via test/array/stencil_defs.jl), exercising
 #     halo exchange (including the stencil_source_chunks pre-sweep snapshot
@@ -28,7 +31,7 @@
 #
 # Run: mpiexec -n 4 julia --project --threads=2 test/mpi.jl
 
-using Dagger, MPI, LinearAlgebra, Random, Test
+using Dagger, MPI, LinearAlgebra, Random, SparseArrays, Krylov, Test
 using Dagger: In, Out, InOut, Deps
 
 using Distributed
@@ -39,6 +42,7 @@ const MPIExt = Base.get_extension(Dagger, :MPIExt)
 
 include(joinpath(@__DIR__, "util.jl"))
 include(joinpath(@__DIR__, "array", "stencil_defs.jl"))
+include(joinpath(@__DIR__, "array", "sparse_defs.jl"))
 
 Dagger.accelerate!(:mpi)
 Dagger.check_uniformity!(true)
@@ -725,6 +729,24 @@ end
     # snapshot used by self-referencing Wrap stencils (@stencil A[idx] =
     # f(@neighbors(A[idx]))).
     test_stencil()
+end
+
+@testset "Sparse" begin
+    # Sparse tiles are moved as whole objects (`aliases_as_whole`), which under
+    # MPI means the raw-bytes transport in `MPISparseExt` rather than a span
+    # copy. Chunks are round-robin across ranks, so SpGEMM/SpMV and the Krylov
+    # solvers here all cross rank boundaries.
+    @testset "DArray" begin
+        test_sparse_darray(; T=Float64)
+    end
+    @testset "Solvers" begin
+        test_sparse_solvers(; T=Float64)
+    end
+    @testset "Bare arguments" begin
+        # A bare container is replicated per-rank, and Datadeps writes back into
+        # rank 0's copy only (as elsewhere in this file).
+        test_sparse_bare_args(; writeback_visible = rank == 0)
+    end
 end
 
 end # @testset "MPI"

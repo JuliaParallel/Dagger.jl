@@ -156,3 +156,141 @@ lesson.
    term to one candidate and asserts the *other* one wins is what catches it.
    The behavioral check is cheaper still: 40 sleeping tasks over 4 workers
    land `[1 => 40]` when the term is dead and `10/10/10/10` when it is live.
+
+16. **Only the acceleration x backend cross product exercises the data-movement
+   paths, and one of the axes alone will pass while they are broken.** Two
+   independent bugs in whole-object (`aliases_as_whole`) sparse tiles survived a
+   green single-process-GPU suite *and* a green MPI-CPU suite, and both fell out
+   the first time MPI x GPU ran. First: a host-to-device `move!` of a whole
+   object only happens when tiles are *built* on the host and then placed on a
+   device, which no single-axis configuration does. And such a hook must be
+   defined at the `dep_mod` (5-argument) arity, because every GPU extension
+   claims `move!(::TheirVRAMSpace, ::OtherSpace, ::AbstractArray{T,N},
+   ::AbstractArray{T,N})` for the 4-argument form — a container method with
+   unconstrained spaces is genuinely ambiguous with all of them (more specific
+   in the value arguments, less specific in the space arguments), so it would
+   need a tie-breaker per backend per space pair; nothing outside core defines
+   the 5-argument form for arrays, and that is what every Datadeps copy path
+   calls anyway. Second: `collect`'s gather tasks run wherever the caller's
+   compute scope puts them, so under a GPU scope the `cat` tree runs *on the
+   device* — and generic `cat` fills its output element by element, which is
+   scalar indexing. Keep shared test bodies in a `test/array/*_defs.jl` file
+   (as `stencil_defs.jl` and `sparse_defs.jl` do) and call them from all four
+   entry points; `test/mpi_opencl.jl` makes the fourth cell cheap to run
+   locally.
+
+17. **Extensions of the same package must not reach into each other.** Load
+   order between two extensions of one package is unspecified, so
+   `Base.get_extension(Dagger, :MPIExt)` from another extension is a coin flip.
+   When `AExt` and `A×BExt` both need to extend the same generic, declare that
+   generic in core Dagger and let each extension add methods to it (see
+   `inplace_mpi_parts` in `src/memory-spaces.jl`, the
+   `mpi_device_direct`/`mpi_remap_space` hooks in `src/gpu.jl`, and the GPU
+   processor types / `with_context` in `src/gpu.jl`). GPU×SparseArrays
+   extensions import `CuArrayDeviceProc` (etc.) from Dagger and call
+   `Dagger.with_context` — never `Base.get_extension(Dagger, :CUDAExt)`. The tempting
+   shortcut — adding `B` to `AExt`'s trigger list — is worse than it looks: it
+   makes `AExt` refuse to load at all until `B` is loaded, so MPI acceleration
+   would have silently required SparseArrays.
+
+18. **The scheduler needs DataStructures 0.19.** `Sch.jl` does
+   `popfirst!(::PriorityQueue)`. That method exists only in DataStructures
+   0.19; 0.18 resolves, loads, and then the scheduler throws on the first
+   pop. Compat is `0.19` only — do not re-add `0.18` to satisfy a downstream
+   pin. If a demo package pins 0.18, bump *that* package's compat (as the
+   Jutul clone patch does), not Dagger's.
+
+19. **Per-tile AMG can report `stats.solved` while `‖Ax−b‖` is O(1)–O(100).**
+   `AMGPreconditioner` is block-diagonal: one V-cycle per diagonal tile,
+   applied as Krylov `M` (`ldiv=false`). Left-preconditioned GMRES/BiCGStab
+   then converge in the *preconditioned* residual. With many tiles that
+   V-cycle is a weak additive-Schwarz operator, so Krylov stops while the
+   true residual is huge (seen on Chan, VoronoiFVM penalty rows, and Jutul
+   heat). BlockJacobi (exact tile LU) on the same layout is fine. Global AMG
+   is `Blocks(n, n)` (one tile). Do not treat `stats.solved` as `Ax≈b` for
+   block AMG; check the un-preconditioned residual. CG will also reject AMG
+   as non-SPD — use GMRES.
+
+21. **Reassigning a local to a value of a different type deoptimizes the
+   *whole* body, not the assignment.** `arg = adopt_sparse_arg!(state, arg,
+   deps)` in `_populate_one_arg!` looks like a cheap normalization, but
+   inference must pick one type for `arg` over the entire method, so it
+   widens to the join and every later use — `type_may_alias(typeof(arg))`,
+   `supports_inplace_move`, the `ArgumentWrapper` construction,
+   `get_or_make_arg_chunk!` — becomes a dynamic dispatch on a boxed value.
+   The cost lands on the *common* path (the branch that never fires) and is
+   invisible in a diff of the branch that does. Argument-processing code is
+   per-argument per-task, so this is the worst possible place for it. Pass
+   the new value forward into a function barrier instead of assigning it
+   back; the callee then specializes per concrete type and the conditional
+   is confined to choosing which call to make. `get_or_make_arg_chunk!`
+   already exists for exactly this reason — extend the pattern rather than
+   reintroducing the reassignment next to it.
+
+22. **A re-tiling fallback needs the tile *backend*, and needs to outlive the
+   call.** Making non-square-tiled operands work instead of erroring is two
+   traps in one. First, allocate the destination through a tile-type-dispatched
+   allocator (`allocate_tiled`): `DArray{T}(undef, part, dims)` gives dense
+   tiles, so "repartition this sparse operator" silently becomes "densify this
+   sparse operator" — an out-of-memory multiplier that a correctness test
+   passes. A `DArray`'s type parameters do not record its tile type, so read it
+   off a chunk (`chunktype(first(A.chunks))`). Second, `maybe_copy_buffered`
+   frees its buffers when its body returns, which is only right when nothing
+   escapes; a block preconditioner builds per-tile operators *from* the re-tiled
+   tiles in tasks it never awaits, so it needs an ordinary array
+   (`repartition`) whose lifetime is its own. And note that a *device* sparse
+   tile supports neither end of a sub-range copy — reading it is scalar
+   indexing, writing it would insert nonzeros into a CSC in place — so
+   `copyto_view!` has to stage the whole thing on the host and re-upload
+   through `move`, which is the one hook every GPU sparse extension already
+   defines.
+
+23. **A memory space must be keyed on the device, never on a handle that
+   records current *ownership*.** `OpenCLExt.memory_space(::CLArray)` looked the
+   buffer's `Managed.queue` up in Dagger's registered `QUEUES`. That field is
+   OpenCL.jl's ownership tracking, not provenance: `convert(::CLPtr, ::Managed)`
+   synchronizes and then re-stamps it with `cl.queue()` whenever the accessing
+   task's queue differs, and `cl.queue()` is task-local *and lazily created*, so
+   the first touch from a task that never ran `with_context!` re-stamps the
+   buffer with a queue Dagger has never seen. The lookup then yields `nothing`
+   and `CLMemorySpace(myid(), nothing)` does not even construct — a
+   `MethodError` deep inside `aliasing`, arbitrarily far from the access that
+   moved the ownership, on an array that was allocated perfectly correctly.
+   Nothing about the memory changed; only a mutable bookkeeping field did. Key
+   on `queue.device` (matched against `DEVICES`) instead. Suspect this shape
+   whenever a space lookup fails for a value that a `Chunk` already carries a
+   valid space for: the chunk recorded the space once, the value is being asked
+   to re-derive it, and only the second one goes through the mutable field.
+
+24. **`similar(::DArray)` must not fetch the source tiles.** Spawning
+   `similar(chunk, T, sz)` per result tile looks like the way to preserve
+   sparse/GPU backends, but it is a false data-dependency: `A * A` then moves
+   every tile of `A` into the allocation tasks (and those tasks have no
+   concrete `return_type`). At the small sizes the dense GEMM bench uses, that
+   is a measured ~2×. Use `allocate_tiled` instead — dense stays
+   `DArray(undef)` (GPU processors still override `AllocateUndef`), sparse
+   stays sparse zeros. `similar(chunk)` is only right when you actually need
+   the source value.
+
+25. **Vendor GPU sparse tiles do not speak SparseArrays' names, and CSC×CSC is
+   not a given.** `CuSparseMatrixCSC` / `ROCSparseMatrixCSC` store values in
+   `nzVal` (and `colPtr`/`rowVal`); a kernel that reaches `.nzval` works on
+   host CSC and `DeviceSparseMatrixCSC` and then dies on CUDA. Use `hasfield`
+   or `nonzeros`, not a hardcoded field. Separately, `A * B` of two rocSPARSE
+   CSC tiles falls into LinearAlgebra's generic matmul (scalar indexing) unless
+   that AMDGPU version wraps CSR SpGEMM — tile `matmatmul!` must gather to
+   host CSC, as `DeviceSparseMatrixCSC` already does, rather than hoping `*`
+   stays on-device. oneAPI's `zeMemOpenIpcHandle` out-param is
+   `Ptr{PtrOrZePtr{Cvoid}}`, not `Ptr{Ptr{Cvoid}}`. And once a GPU processor
+   type (and its `show`) lives in core so combo extensions can dispatch on it,
+   the backend extension must not redefine `show` — precompilation forbids the
+   overwrite.
+
+26. **A VRAM-stamped host `Array` is not a device buffer.** Collect's MPI cat
+   tree densifies every tile to `Array` (device `cat` is scalar indexing),
+   and those gather tasks run on the GPU compute scope. `execute!` used to
+   label the result with the *processor's* space, so a host `Matrix` sat in
+   a `ROCVRAM`/`CUDAVRAM` chunk. The next hop then took same-node device IPC
+   and died in `ipc_export(::Matrix)`. Stamp the result from
+   `value_memory_space`, and do not select IPC unless the chunktype is a
+   GPU array (`ipc_type_eligible`). Space-only `ipc_eligible` is not enough.

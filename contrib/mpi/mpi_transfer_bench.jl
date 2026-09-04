@@ -99,8 +99,7 @@ function bench_macro_cpu()
 end
 
 function bench_macro_gpu()
-    CUDAExt = Base.get_extension(Dagger, :CUDAExt)
-    CuProc = CUDAExt.CuArrayDeviceProc
+    CuProc = Dagger.CuArrayDeviceProc
     procs = sort(collect(Dagger.get_processors(Dagger.MPIClusterProc(comm)));
                  by=p->(p.rank, Dagger.short_name(p)))
     gpu_scope = Dagger.UnionScope([Dagger.ExactScope(p) for p in procs if p.innerProc isa CuProc]...)

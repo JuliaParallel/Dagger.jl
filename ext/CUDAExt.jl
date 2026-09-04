@@ -3,7 +3,7 @@ module CUDAExt
 export CuArrayDeviceProc
 
 import Dagger, MemPool
-import Dagger: CPURAMMemorySpace, Chunk, unwrap
+import Dagger: CPURAMMemorySpace, Chunk, unwrap, CuArrayDeviceProc
 import MemPool: DRef, poolget
 import Distributed: myid, remotecall_fetch
 import LinearAlgebra
@@ -20,33 +20,19 @@ import CUDA: CuDevice, CuContext, CuStream, CuArray, CUDABackend
 import CUDA: devices, attribute, context, context!, stream, stream!
 import CUDA: CUBLAS, CUSOLVER
 
-using UUIDs
-
-"Represents a single CUDA GPU device."
-struct CuArrayDeviceProc <: Dagger.Processor
-    owner::Int
-    device::Int
-    device_uuid::UUID
-end
-Dagger.get_parent(proc::CuArrayDeviceProc) = Dagger.OSProc(proc.owner)
-Dagger.root_worker_id(proc::CuArrayDeviceProc) = proc.owner
-Base.show(io::IO, proc::CuArrayDeviceProc) =
-    print(io, "CuArrayDeviceProc(worker $(proc.owner), device $(proc.device), uuid $(proc.device_uuid))")
-Dagger.short_name(proc::CuArrayDeviceProc) = "W: $(proc.owner), CUDA: $(proc.device)"
+# CuArrayDeviceProc is defined in Dagger so CUDASparseArraysExt can dispatch
+# on it without reaching into this extension (load order is unspecified).
 Dagger.@gpuproc(CuArrayDeviceProc, CuArray)
 
 "Represents the memory space of a single CUDA GPU's VRAM."
 struct CUDAVRAMMemorySpace <: Dagger.MemorySpace
     owner::Int
     device::Int
-    device_uuid::UUID
 end
 Dagger.root_worker_id(space::CUDAVRAMMemorySpace) = space.owner
 function Dagger.memory_space(x::CuArray)
     dev = CUDA.device(x)
-    device_id = dev.handle
-    device_uuid = CUDA.uuid(dev)
-    return CUDAVRAMMemorySpace(myid(), device_id, device_uuid)
+    return CUDAVRAMMemorySpace(myid(), dev.handle)
 end
 function Dagger.aliasing(x::CuArray{T}) where T
     space = Dagger.memory_space(x)
@@ -69,7 +55,7 @@ function Dagger.memory_spaces(proc::CuArrayDeviceProc)
     Dagger.@safe_lock1 MEMORY_SPACES_CACHE cache begin
         value = get(cache, proc, nothing)
         if value === nothing
-            value = Set([CUDAVRAMMemorySpace(proc.owner, proc.device, proc.device_uuid)])
+            value = Set([CUDAVRAMMemorySpace(proc.owner, proc.device)])
             cache[proc] = value
         end
         return value
@@ -80,7 +66,7 @@ function Dagger.processors(space::CUDAVRAMMemorySpace)
     Dagger.@safe_lock1 SPACE_PROCESSORS_CACHE cache begin
         value = get(cache, space, nothing)
         if value === nothing
-            value = Set([CuArrayDeviceProc(space.owner, space.device, space.device_uuid)])
+            value = Set([CuArrayDeviceProc(space.owner, space.device)])
             cache[space] = value
         end
         return value
@@ -119,6 +105,7 @@ function with_context!(space::CUDAVRAMMemorySpace)
 end
 Dagger.with_context!(proc::CuArrayDeviceProc) = with_context!(proc)
 Dagger.with_context!(space::CUDAVRAMMemorySpace) = with_context!(space)
+Dagger.with_context(f, x::Union{CuArrayDeviceProc,CUDAVRAMMemorySpace}) = with_context(f, x)
 function with_context(f, x)
     old_ctx = context()
     old_stream = stream()
@@ -265,7 +252,7 @@ function Dagger.move(from_proc::CuArrayDeviceProc, to_proc::CuArrayDeviceProc, x
             CUDA.synchronize()
             return to_arr
         end
-    elseif Dagger.same_node(Dagger.current_acceleration(), from_proc.owner, to_proc.owner) && from_proc.device_uuid == to_proc.device_uuid
+    elseif Dagger.same_node(Dagger.current_acceleration(), from_proc.owner, to_proc.owner) && from_proc.device == to_proc.device
         # Same node, we can use IPC
         ipc_handle, eT, shape = remotecall_fetch(from_proc.owner, x) do x
             arr = unwrap(x)
@@ -284,7 +271,7 @@ function Dagger.move(from_proc::CuArrayDeviceProc, to_proc::CuArrayDeviceProc, x
         finalizer(arr) do arr
             CUDA.cuIpcCloseMemHandle(pointer(arr))
         end
-        if from_proc.device_uuid != to_proc.device_uuid
+        if from_proc.device != to_proc.device
             return CUDA.device!(to_proc.device) do
                 to_arr = similar(arr)
                 copyto!(to_arr, arr)
@@ -436,7 +423,7 @@ function Dagger.gpu_synchronize(proc::CuArrayDeviceProc)
 end
 function Dagger.gpu_synchronize(::Val{:CUDA})
     for dev in CUDA.devices()
-        _sync_with_context(CuArrayDeviceProc(myid(), dev.handle, CUDA.uuid(dev)))
+        _sync_with_context(CuArrayDeviceProc(myid(), dev.handle))
     end
 end
 
@@ -451,7 +438,7 @@ Dagger.scope_key_precedence(::Val{:cuda_gpus}) = 3
 # stamped with that rank so same-device addresses on different ranks never
 # falsely alias (every rank has myid() == 1 under SPMD)
 Dagger.mpi_remap_space(space::CUDAVRAMMemorySpace, owner::Int) =
-    CUDAVRAMMemorySpace(owner, space.device, space.device_uuid)
+    CUDAVRAMMemorySpace(owner, space.device)
 # Acceleration-free memory space of a raw value, for chunk record labeling
 Dagger.value_memory_space(x::CuArray) = Dagger.memory_space(x)
 
@@ -555,7 +542,7 @@ function __init__()
         for dev in CUDA.devices()
             @debug "Registering CUDA GPU processor with Dagger: $dev"
             Dagger.add_processor_callback!("cuarray_device_$(dev.handle)") do
-                proc = CuArrayDeviceProc(myid(), dev.handle, CUDA.uuid(dev))
+                proc = CuArrayDeviceProc(myid(), dev.handle)
                 DEVICES[dev.handle] = dev
                 ctx = context(dev)
                 CONTEXTS[dev.handle] = ctx

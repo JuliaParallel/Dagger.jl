@@ -16,11 +16,12 @@ const CUDAExt = Base.get_extension(Dagger, :CUDAExt)
 
 run_mpi_gpu_suite((;
     name = "CUDA",
-    DeviceProc = CUDAExt.CuArrayDeviceProc,
+    DeviceProc = Dagger.CuArrayDeviceProc,
     gpu_key = :cuda_gpu,
     elt = Float64,
     subarray_depmod = true,
     matmul = true,
     cholesky = true,
     stencil = true,
+    sparse = true,
 ))

@@ -21,6 +21,9 @@
 #   stencil_skip_highdim :: Bool  skip the 3D/4D stencil cases (mirrors the
 #                                  single-process ROCm/Metal skip in
 #                                  test/array/stencil.jl)
+#   sparse            :: Bool     run the sparse DArray smokes (shared with the
+#                                  CPU and single-process GPU suites via
+#                                  test/array/sparse_defs.jl)
 #   remap             :: NamedTuple or absent — MPI remap / memory-kind hooks:
 #       make_space    :: Function () -> a VRAM memory space (device 1)
 #       device_field  :: Symbol   field naming the device index (:device/:device_id)
@@ -28,13 +31,14 @@
 #       test_ipc      :: Bool     also assert !ipc_eligible(space, space)
 #       extra         :: Function or absent — extra backend-specific checks
 
-using Dagger, MPI, LinearAlgebra, Random, Test
+using Dagger, MPI, LinearAlgebra, Random, SparseArrays, Krylov, Test
 using Dagger: In, Out, InOut, Deps
 
 const MPIExt = Base.get_extension(Dagger, :MPIExt)
 
 include(joinpath(@__DIR__, "util.jl"))
 include(joinpath(@__DIR__, "array", "stencil_defs.jl"))
+include(joinpath(@__DIR__, "array", "sparse_defs.jl"))
 
 # Broadcast-only mutation helpers (scalar indexing is illegal on GPU arrays)
 add1!(X) = (X .+= 1; nothing)
@@ -290,6 +294,32 @@ if get(cfg, :stencil, false)
         # for self-referencing Wrap stencils) on the GPU.
         Dagger.with_options(;scope=all_gpu_scope()) do
             test_stencil(; skip_highdim=get(cfg, :stencil_skip_highdim, false))
+        end
+    end
+end
+
+if get(cfg, :sparse, false)
+    @testset "GPU sparse (DArray)" begin
+        # Same bodies as the CPU and single-process GPU suites. Allocation
+        # happens inside the GPU scope, so tiles are device-resident and spread
+        # across every rank -- SpGEMM/SpMV and the Krylov solvers therefore move
+        # sparse containers rank-to-rank as whole objects (MPISparseExt's
+        # raw-bytes transport), host-staged through the device.
+        # Tiles must be device-resident, and only the value shows it: a hook
+        # that a wrapper processor hides from its backend (`MPIProcessor` around
+        # the device proc) builds a host tile while the chunk still reports the
+        # device space, and the host operand then reaches a device kernel. Each
+        # rank can only inspect the tiles it owns.
+        check_tile = chunk -> begin
+            handle = chunk.handle
+            handle.rank == rank || return true
+            v = Dagger.MemPool.poolget(handle; uniform=false)
+            return v isa Dagger.DSparseArray && Dagger._sparse_off_host(v.mat)
+        end
+        Dagger.with_options(;scope=all_gpu_scope()) do
+            test_sparse_darray(; T=elt, check_tile)
+            test_sparse_solvers(; T=elt, check_tile)
+            test_sparse_bare_args(; T=elt, writeback_visible = rank == 0)
         end
     end
 end

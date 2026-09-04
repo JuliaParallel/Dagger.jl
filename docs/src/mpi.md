@@ -326,11 +326,10 @@ by hand:
 
 ```julia
 MPIExt = Base.get_extension(Dagger, :MPIExt)
-CUDAExt = Base.get_extension(Dagger, :CUDAExt)
 
 mpi_procs() = collect(Dagger.get_processors(MPIExt.MPIClusterProc(MPI.COMM_WORLD)))
 gpu_proc(r) = first(p for p in mpi_procs()
-                    if p.rank == r && p.innerProc isa CUDAExt.CuArrayDeviceProc)
+                    if p.rank == r && p.innerProc isa Dagger.CuArrayDeviceProc)
 gpu_scope(r) = Dagger.ExactScope(gpu_proc(r))
 ```
 

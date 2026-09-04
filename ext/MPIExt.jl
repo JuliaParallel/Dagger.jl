@@ -8,15 +8,17 @@ import Dagger: @dagdebug, @opcounter
 # extends with new methods (for MPI-specific types) or calls directly.
 import Dagger:
     AbstractAliasing, accelerate!, accel_matches_proc, accel_kind, aliased_object!,
-    AliasedObjectCache, AliasedObjectCacheStore, aliasing, bind_moved_argument,
+    AliasedObjectCache, AliasedObjectCacheStore, aliasing, aliasing_unwrapped,
+    bind_moved_argument,
     chunktype, ChunkView, check_uniform, check_uniformity!, CHECK_UNIFORMITY,
     cleanup_tasks_accel!, constrain, CPURAMMemorySpace,
     current_acceleration, CyclicProcGrid, datasize, default_enabled,
     default_memory_space, default_processor, default_procgrid,
     finalize_acceleration!, execute!, fetch_handle, fire_order_key, get_parent,
     get_processors, gpu_kernel_backend, gpu_memory_kind,
-    initialize_acceleration!, InvalidScope, ipc_copyto!, ipc_eligible,
-    ipc_export, ipc_materialize, IPC_MIN_BYTES, ipc_release!, is_local,
+    initialize_acceleration!, inplace_mpi_alloc, inplace_mpi_build,
+    inplace_mpi_parts, InvalidScope, ipc_copyto!, ipc_eligible,
+    ipc_export, ipc_materialize, IPC_MIN_BYTES, ipc_release!, ipc_type_eligible, is_local,
     istask, LockedObject, memory_space, memory_spaces, MemorySpan,
     memory_spans, move, move!, move_rewrap, move_rewrap_build, DATADEPS_THUNK_ID,
     mpi_device_direct, mpi_device_sync, mpi_library_gpu_aware, mpi_remap_space,
@@ -45,8 +47,6 @@ else
 end
 
 import TaskLocalValues: TaskLocalValue
-
-import SparseArrays: SparseMatrixCSC
 
 import Random
 import Serialization
@@ -733,51 +733,26 @@ const RECV_WAITING = LockedObject(Dict{Tuple{MPI.Comm, Int, Int}, Base.Event}())
 
 # Envelope for the out-of-place raw-bytes MPI path: serialize a small
 # descriptor, then send contiguous bitstype buffers. Types register via
-# inplace_mpi_parts / inplace_mpi_alloc / inplace_mpi_build (same style as
-# move_rewrap_parts / move_rewrap_build).
+# Dagger's inplace_mpi_parts / inplace_mpi_alloc / inplace_mpi_build (same style
+# as move_rewrap_parts / move_rewrap_build). Those generics are declared in core
+# Dagger so container-specific methods can live in the extension owning the
+# container (e.g. `SparseMatrixCSC` in MPISparseExt).
 struct InplaceInfo
     type::DataType
     header  # Any MPI-serializable reconstruction metadata
 end
 
-# Extensibility defaults: unsupported → full Julia serialize
-inplace_mpi_parts(x) = nothing
-# -> (parts::Tuple, header) where each part is a DenseArray with bitstype eltype
-inplace_mpi_alloc(::Type{T}, header) where T =
-    error("inplace_mpi_alloc not defined for $T")
-inplace_mpi_build(::Type{T}, parts, header) where T =
-    error("inplace_mpi_build not defined for $T")
-
 # DenseArray: single contiguous buffer + shape header
-function inplace_mpi_parts(A::DenseArray)
+function Dagger.inplace_mpi_parts(A::DenseArray)
     isbitstype(eltype(A)) || return nothing
     return ((A,), size(A))
 end
-function inplace_mpi_alloc(::Type{T}, shape::Tuple) where {T<:DenseArray}
+function Dagger.inplace_mpi_alloc(::Type{T}, shape::Tuple) where {T<:DenseArray}
     # Always materialize on the host: the sender host-stages device arrays,
     # and callers convert to the destination space's native storage
     return (Array{eltype(T)}(undef, shape),)
 end
-inplace_mpi_build(::Type{<:DenseArray}, (A,), ::Tuple) = A
-
-# SparseMatrixCSC: three vectors + (m, n, lengths) header; preserve Ti
-function inplace_mpi_parts(S::SparseMatrixCSC)
-    isbitstype(eltype(S)) || return nothing
-    return ((S.colptr, S.rowval, S.nzval),
-            (S.m, S.n, length(S.colptr), length(S.rowval), length(S.nzval)))
-end
-function inplace_mpi_alloc(::Type{T}, header::Tuple) where {T<:SparseMatrixCSC}
-    Tv, Ti = eltype(T), T.parameters[2]
-    _, _, ncolptr, nrowval, nnzval = header
-    return (Vector{Ti}(undef, ncolptr),
-            Vector{Ti}(undef, nrowval),
-            Vector{Tv}(undef, nnzval))
-end
-function inplace_mpi_build(::Type{T}, (colptr, rowval, nzval), header::Tuple) where {T<:SparseMatrixCSC}
-    m, n, _, _, _ = header
-    Tv, Ti = eltype(T), T.parameters[2]
-    return SparseMatrixCSC{Tv,Ti}(m, n, colptr, rowval, nzval)
-end
+Dagger.inplace_mpi_build(::Type{<:DenseArray}, (A,), ::Tuple) = A
 
 function supports_inplace_mpi(value)
     if value isa DenseArray && isbitstype(eltype(value))
@@ -1367,7 +1342,8 @@ function move!(dep_mod, to_space::MPIMemorySpace, from_space::MPIMemorySpace, to
             # competitive; each side checks its own (equal-sized) buffer
             local_nbytes = local_rank == from_space.rank ? from.handle.size :
                            local_rank == to_space.rank   ? to.handle.size : 0
-            if ipc_eligible(from_space.innerSpace, to_space.innerSpace) &&
+            if ipc_type_eligible(chunktype(from)) &&
+               ipc_eligible(from_space.innerSpace, to_space.innerSpace) &&
                local_nbytes >= IPC_MIN_BYTES[] &&
                same_node(current_acceleration(), from_space.rank, to_space.rank)
                 # Same-node device-to-device: ship only an IPC handle
@@ -1712,7 +1688,7 @@ function mpi_endpoint_transfer(accel::MPIAcceleration, from_proc, to_proc, from_
         end
     end
     tag = to_tag()
-    if T <: DenseArray && isbitstype(eltype(T)) &&
+    if ipc_type_eligible(T) &&
        ipc_eligible(from_space.innerSpace, to_space.innerSpace) &&
        same_node(accel, from_space.rank, to_space.rank)
         # Same-node device-to-device slot creation: ship only an IPC handle
@@ -1835,7 +1811,9 @@ function aliasing(accel::MPIAcceleration, x::ChunkView, dep_mod)
     if handle.rank == rank
         ainfo = _with_default_acceleration() do
             v = view(unwrap(x.chunk), x.slices...)
-            aliasing(v, dep_mod)
+            # Resolve whole-object containers (e.g. `DSparseArray`) where `v`
+            # lives; see `aliasing_unwrapped`.
+            aliasing_unwrapped(v, dep_mod)
         end
         ainfo = mpi_remap_ainfo(ainfo, handle.rank)
         @opcounter :aliasing_bcast_send_yield
@@ -1943,6 +1921,19 @@ Dagger.allocate_array_func(proc::MPIProcessor, f) = Dagger.allocate_array_func(p
 # otherwise never fire under MPI.
 Dagger.gpu_kernel_lock(f, proc::MPIProcessor) = Dagger.gpu_kernel_lock(f, proc.innerProc)
 
+# And again for the sparse tile allocators, which each GPU × SparseArrays
+# extension overrides on its raw device proc. Falling through to the host
+# default here is worse than a slow path: the tile is built as a host CSC, but
+# the chunk is still recorded on the device, so nothing ever moves it and the
+# host operand reaches a device `mul!` — which fails on scalar indexing of the
+# device vector. Only a re-tiling allocation (`repartition`, `spzeros`) takes
+# this path, so it stayed hidden while every sparse tile came from `distribute`
+# (whose `move` does dispatch on the unwrapped proc).
+Dagger.allocate_sparse_zeros(proc::MPIProcessor, ::Type{T}, dims::Dims) where T =
+    Dagger.allocate_sparse_zeros(proc.innerProc, T, dims)
+Dagger.allocate_sparse_rand(proc::MPIProcessor, ::Type{T}, dims::Dims, sparsity::AbstractFloat) where T =
+    Dagger.allocate_sparse_rand(proc.innerProc, T, dims, sparsity)
+
 # Owner-local payload that preserves the Chunk's SPMD-uniform chunktype after
 # Sch unwraps a Chunk to a device value (e.g. Matrix chunktype + CuArray value).
 # Without this, promote_op/chunktype diverge across ranks (CuArray vs Matrix).
@@ -1973,6 +1964,12 @@ function mpi_wire_exception(err)
         return ErrorException(sprint(showerror, err))
     end
 end
+
+# Result chunk space follows the *value*, not the processor. A GPU-scoped
+# task that returns a host `Array` (collect's cat tree) must not be stamped
+# VRAM — that label would send the next hop through device IPC.
+mpi_result_space(result, proc::MPIProcessor) =
+    MPIMemorySpace(value_memory_space(result), proc.comm, proc.rank)
 
 # Decide how much result metadata execute! must broadcast.
 # - need_type_bcast: return type/space unknown → full (:ok,T,space)/(:error,ex)
@@ -2041,7 +2038,7 @@ function execute!(proc::MPIProcessor, f, args...; kwargs...)
     if !plan.need_type_bcast && plan.nothrow
         if islocal
             result = execute!(proc.innerProc, f, raw_args...; kwargs...)
-            space = memory_space(result, proc)::MPIMemorySpace
+            space = mpi_result_space(result, proc)
             return tochunk(result, proc, space; type=plan.inferred)
         else
             space = memory_space(nothing, proc)::MPIMemorySpace
@@ -2062,7 +2059,7 @@ function execute!(proc::MPIProcessor, f, args...; kwargs...)
             end
             @opcounter :execute_bcast_send_yield
             bcast_meta_yield(proc.comm, proc.rank, tag, :ok)
-            space = memory_space(result, proc)::MPIMemorySpace
+            space = mpi_result_space(result, proc)
             return tochunk(result, proc, space; type=plan.inferred)
         else
             msg = bcast_meta_yield(proc.comm, proc.rank, tag)
@@ -2084,7 +2081,7 @@ function execute!(proc::MPIProcessor, f, args...; kwargs...)
             rethrow()
         end
         T = typeof(result)
-        space = memory_space(result, proc)::MPIMemorySpace
+        space = mpi_result_space(result, proc)
         @opcounter :execute_bcast_send_yield
         bcast_meta_yield(proc.comm, proc.rank, tag, (:ok, T, space.innerSpace))
         return tochunk(result, proc, space; type=T)

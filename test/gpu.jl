@@ -1,11 +1,18 @@
 using Random
 using LinearAlgebra
+using SparseArrays
+using Krylov
 
 @everywhere begin
     using Distributed, Dagger
     import Dagger: Kernel
     using KernelAbstractions
 end
+
+# Sparse test bodies are shared with the CPU and MPI suites; see the file
+# header for the acceleration/backend matrix they cover.
+include(joinpath(@__DIR__, "array", "sparse_defs.jl"))
+
 @everywhere begin
     function isongpu(X)
         return !(X isa Array)
@@ -65,8 +72,7 @@ end
     if !Dagger.gpu_can_compute(:CUDA)
         @warn "No CUDA devices available, skipping tests"
     else
-        cuproc = Base.get_extension(Dagger, :CUDAExt).CuArrayDeviceProc
-        @test Dagger.gpu_processor(:CUDA) === cuproc
+        @test Dagger.gpu_processor(:CUDA) === Dagger.CuArrayDeviceProc
         ndevices = length(collect(CUDA.devices()))
         gpu_configs = Any[1]
         if ndevices > 1
@@ -227,6 +233,20 @@ end
             end
             @test collect(Db) ≈ b_ref rtol=1e-5
         end
+
+        @testset "Sparse DArray (GPU $gpu)" for gpu in single_gpu_configs
+            scope = Dagger.scope(worker=1, cuda_gpu=gpu)
+            CUDAExt = Base.get_extension(Dagger, :CUDAExt)
+            check_tile = chunk -> begin
+                v = Dagger.MemPool.poolget(chunk.handle)
+                return v isa Dagger.DSparseArray &&
+                       v.mat isa CUDA.CUSPARSE.CuSparseMatrixCSC &&
+                       chunk.space isa CUDAExt.CUDAVRAMMemorySpace
+            end
+            test_sparse_darray(; scope, check_tile)
+            test_sparse_solvers(; scope, check_tile)
+            test_sparse_bare_args(; scope, T=Float32)
+        end
     end
 end
 
@@ -234,8 +254,7 @@ end
     if !Dagger.gpu_can_compute(:ROC)
         @warn "No ROCm devices available, skipping tests"
     else
-        rocproc = Base.get_extension(Dagger, :ROCExt).ROCArrayDeviceProc
-        @test Dagger.gpu_processor(:ROC) === rocproc
+        @test Dagger.gpu_processor(:ROC) === Dagger.ROCArrayDeviceProc
         ndevices = length(AMDGPU.devices())
         gpu_configs = Any[1]
         if ndevices > 1
@@ -398,6 +417,20 @@ end
             end
             @test collect(Db) ≈ b_ref rtol=1e-5
         end
+
+        @testset "Sparse DArray (GPU $gpu)" for gpu in single_gpu_configs
+            scope = Dagger.scope(worker=1, rocm_gpu=gpu)
+            ROCExt = Base.get_extension(Dagger, :ROCExt)
+            check_tile = chunk -> begin
+                v = Dagger.MemPool.poolget(chunk.handle)
+                return v isa Dagger.DSparseArray &&
+                       v.mat isa AMDGPU.rocSPARSE.ROCSparseMatrixCSC &&
+                       chunk.space isa ROCExt.ROCVRAMMemorySpace
+            end
+            test_sparse_darray(; scope, check_tile)
+            test_sparse_solvers(; scope, check_tile)
+            test_sparse_bare_args(; scope, T=Float32)
+        end
     end
 end
 
@@ -405,8 +438,7 @@ end
     if !Dagger.gpu_can_compute(:oneAPI)
         @warn "No oneAPI devices available, skipping tests"
     else
-        oneproc = Base.get_extension(Dagger, :IntelExt).oneArrayDeviceProc
-        @test Dagger.gpu_processor(:oneAPI) === oneproc
+        @test Dagger.gpu_processor(:oneAPI) === Dagger.oneArrayDeviceProc
         ndevices = length(oneAPI.devices())
         gpu_configs = Any[1]
         if ndevices > 1
@@ -569,6 +601,20 @@ end
             end
             @test collect(Db) ≈ b_ref rtol=1e-5
         end
+
+        @testset "Sparse DArray (GPU $gpu)" for gpu in single_gpu_configs
+            scope = Dagger.scope(worker=1, intel_gpu=gpu)
+            IntelExt = Base.get_extension(Dagger, :IntelExt)
+            check_tile = chunk -> begin
+                v = Dagger.MemPool.poolget(chunk.handle)
+                return v isa Dagger.DSparseArray &&
+                       v.mat isa Dagger.DeviceSparseMatrixCSC &&
+                       chunk.space isa IntelExt.IntelVRAMMemorySpace
+            end
+            test_sparse_darray(; scope, check_tile)
+            test_sparse_solvers(; scope, check_tile)
+            test_sparse_bare_args(; scope, T=Float32)
+        end
     end
 end
 
@@ -576,8 +622,7 @@ end
     if !Dagger.gpu_can_compute(:Metal)
         @warn "No Metal devices available, skipping tests"
     else
-        mtlproc = Base.get_extension(Dagger, :MetalExt).MtlArrayDeviceProc
-        @test Dagger.gpu_processor(:Metal) === mtlproc
+        @test Dagger.gpu_processor(:Metal) === Dagger.MtlArrayDeviceProc
         b = generate_thunks()
         c = Dagger.with_options(;scope=Dagger.scope(metal_gpu=1)) do
             @test fetch(Dagger.@spawn isongpu(b))
@@ -714,6 +759,20 @@ end
             @test_broken array[2, 1] == 4.0f0
             @test_broken array[2, 2] == 5.0f0
         end
+
+        @testset "Sparse DArray" begin
+            scope = Dagger.scope(worker=1, metal_gpu=1)
+            MetalExt = Base.get_extension(Dagger, :MetalExt)
+            check_tile = chunk -> begin
+                v = Dagger.MemPool.poolget(chunk.handle)
+                return v isa Dagger.DSparseArray &&
+                       v.mat isa Dagger.DeviceSparseMatrixCSC &&
+                       chunk.space isa MetalExt.MetalVRAMMemorySpace
+            end
+            test_sparse_darray(; scope, check_tile)
+            test_sparse_solvers(; scope, check_tile)
+            test_sparse_bare_args(; scope, T=Float32)
+        end
     end
 end
 
@@ -721,8 +780,7 @@ end
     if !Dagger.gpu_can_compute(:OpenCL)
         @warn "No OpenCL devices available, skipping tests"
     else
-        clproc = Base.get_extension(Dagger, :OpenCLExt).CLArrayDeviceProc
-        @test Dagger.gpu_processor(:OpenCL) === clproc
+        @test Dagger.gpu_processor(:OpenCL) === Dagger.CLArrayDeviceProc
         ndevices = length(cl.devices(cl.default_platform()))
         gpu_configs = Any[1]
         if ndevices > 1
@@ -819,6 +877,20 @@ end
                 end
             end
             @test A ≈ ref .+ 1
+        end
+
+        @testset "Sparse DArray (GPU $gpu)" for gpu in single_gpu_configs
+            scope = Dagger.scope(worker=1, cl_device=gpu)
+            OpenCLExt = Base.get_extension(Dagger, :OpenCLExt)
+            check_tile = chunk -> begin
+                v = Dagger.MemPool.poolget(chunk.handle)
+                return v isa Dagger.DSparseArray &&
+                       v.mat isa Dagger.DeviceSparseMatrixCSC &&
+                       chunk.space isa OpenCLExt.CLMemorySpace
+            end
+            test_sparse_darray(; scope, check_tile)
+            test_sparse_solvers(; scope, check_tile)
+            test_sparse_bare_args(; scope, T=Float32)
         end
     end
 end

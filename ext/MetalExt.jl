@@ -3,7 +3,7 @@ module MetalExt
 export MtlArrayDeviceProc
 
 import Dagger, MemPool
-import Dagger: CPURAMMemorySpace, Chunk, unwrap
+import Dagger: CPURAMMemorySpace, Chunk, unwrap, MtlArrayDeviceProc
 import MemPool: DRef, poolget
 import Distributed: myid, remotecall_fetch
 import LinearAlgebra
@@ -27,14 +27,8 @@ else
 end
 const MtlStream = Metal.MTL.MTLCommandQueue
 
-struct MtlArrayDeviceProc <: Dagger.Processor
-    owner::Int
-    device_id::UInt64
-end
-
-Dagger.get_parent(proc::MtlArrayDeviceProc) = Dagger.OSProc(proc.owner)
-Dagger.root_worker_id(proc::MtlArrayDeviceProc) = proc.owner
-Dagger.short_name(proc::MtlArrayDeviceProc) = "W: $(proc.owner), Metal: $(proc.device_id)"
+# MtlArrayDeviceProc is defined in Dagger so MetalSparseArraysExt can dispatch
+# on it without reaching into this extension (load order is unspecified).
 Dagger.@gpuproc(MtlArrayDeviceProc, MtlArray)
 
 "Represents the memory space of a single Metal GPU's VRAM."
@@ -137,6 +131,7 @@ function with_context!(space::MetalVRAMMemorySpace)
 end
 Dagger.with_context!(proc::MtlArrayDeviceProc) = with_context!(proc)
 Dagger.with_context!(space::MetalVRAMMemorySpace) = with_context!(space)
+Dagger.with_context(f, x::Union{MtlArrayDeviceProc,MetalVRAMMemorySpace}) = with_context(f, x)
 function with_context(f, x)
     old_dev = Metal.device()
     with_context!(x)
@@ -466,9 +461,8 @@ function Dagger.inner_stencil_proc!(::MtlArrayDeviceProc, f, output, read_vars)
     return
 end
 
-function Base.show(io::IO, proc::MtlArrayDeviceProc)
-    print(io, "MtlArrayDeviceProc(worker $(proc.owner), device $(something(_get_metal_device(proc)).name))")
-end
+# `Base.show(::MtlArrayDeviceProc)` lives in `src/gpu.jl` with the type. Do not
+# overwrite it here: method overwriting is forbidden during precompilation.
 
 Dagger.gpu_processor(::Val{:Metal}) = MtlArrayDeviceProc
 Dagger.gpu_can_compute(::Val{:Metal}) = Metal.functional()

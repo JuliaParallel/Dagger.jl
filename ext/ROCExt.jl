@@ -3,7 +3,7 @@ module ROCExt
 export ROCArrayDeviceProc
 
 import Dagger, MemPool
-import Dagger: CPURAMMemorySpace, Chunk, unwrap
+import Dagger: CPURAMMemorySpace, Chunk, unwrap, ROCArrayDeviceProc
 import MemPool: DRef, poolget
 import Distributed: myid, remotecall_fetch
 import LinearAlgebra
@@ -20,15 +20,8 @@ import AMDGPU: HIPDevice, HIPContext, HIPStream, ROCArray, ROCBackend
 import AMDGPU: devices, context, context!, stream, stream!
 import AMDGPU: rocBLAS, rocSOLVER
 
-struct ROCArrayDeviceProc <: Dagger.Processor
-    owner::Int
-    device_id::Int
-end
-Dagger.get_parent(proc::ROCArrayDeviceProc) = Dagger.OSProc(proc.owner)
-Dagger.root_worker_id(proc::ROCArrayDeviceProc) = proc.owner
-Base.show(io::IO, proc::ROCArrayDeviceProc) =
-    print(io, "ROCArrayDeviceProc(worker $(proc.owner), device $(proc.device_id))")
-Dagger.short_name(proc::ROCArrayDeviceProc) = "W: $(proc.owner), ROCm: $(proc.device_id)"
+# ROCArrayDeviceProc is defined in Dagger so ROCSparseArraysExt can dispatch
+# on it without reaching into this extension (load order is unspecified).
 Dagger.@gpuproc(ROCArrayDeviceProc, ROCArray)
 
 "Represents the memory space of a single ROCm GPU's VRAM."
@@ -135,6 +128,7 @@ function with_context!(space::ROCVRAMMemorySpace)
 end
 Dagger.with_context!(proc::ROCArrayDeviceProc) = with_context!(proc)
 Dagger.with_context!(space::ROCVRAMMemorySpace) = with_context!(space)
+Dagger.with_context(f, x::Union{ROCArrayDeviceProc,ROCVRAMMemorySpace}) = with_context(f, x)
 
 """
     task_stream_slot()

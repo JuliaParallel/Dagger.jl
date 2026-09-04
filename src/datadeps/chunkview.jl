@@ -69,7 +69,10 @@ function aliasing(accel::Acceleration, x::ChunkView{N}, dep_mod) where N
     return remotecall_fetch(root_worker_id(x.chunk.processor), x.chunk, x.slices) do x, slices
         x = unwrap(x)
         v = view(x, slices...)
-        return aliasing(accel, v, dep_mod)
+        # A view of a whole-object container (e.g. `DSparseArray`) must alias the
+        # entire container; `aliasing_unwrapped` resolves that (otherwise it just
+        # aliases the view), and crucially does so here where `v` lives.
+        return aliasing_unwrapped(v)
     end
 end
 aliasing(x::ChunkView) = aliasing(current_acceleration(), x, identity)

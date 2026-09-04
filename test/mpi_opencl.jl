@@ -16,10 +16,11 @@ const OpenCLExt = Base.get_extension(Dagger, :OpenCLExt)
 
 run_mpi_gpu_suite((;
     name = "OpenCL",
-    DeviceProc = OpenCLExt.CLArrayDeviceProc,
+    DeviceProc = Dagger.CLArrayDeviceProc,
     gpu_key = :cl_device,
     elt = Float32,
     stencil = true,
+    sparse = true,
     remap = (;
         make_space = () -> OpenCLExt.CLMemorySpace(1, 1),
         device_field = :device,
