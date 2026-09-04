@@ -899,6 +899,31 @@ end
 end
 
 """
+    stencil_storage(x)
+
+The array a stencil task should actually sweep, given the tile `x` that Datadeps
+handed it.
+
+Most tiles are their own storage and this is the identity. The exception is a
+container that hides its storage behind an untyped field, as
+[`DSparseArray`](@ref) must: its `mat` cannot be given a type parameter, because
+`DSparseArray{T,N}` has to stay a *single concrete* `chunktype` shared by every
+backend (host CSC, `CuSparseMatrixCSC`, Finch, ...) for `return_type` propagation
+and MPI cross-rank type uniformity to work (see `array/alloc.jl`). The cost of
+that is an untyped load per element access, which a stencil pays `(2w+1)^N` times
+per output element.
+
+Unwrapping here restores the type. Every consumer below is reached through a
+function barrier, so the one dynamic dispatch per chunk buys a fully specialized
+sweep, and slicing halos out of the bare storage hits the backend's own
+(sparse-aware) methods instead of a generic elementwise fallback.
+
+Unwrapping is only valid because a sweep *mutates* elements and never replaces
+the storage object, so writes remain visible through the wrapper.
+"""
+@inline stencil_storage(x) = x
+
+"""
     build_fused_halo(neigh_dist, boundary, region_metadata, center, neighbor_chunks...)
 
 Wraps `center` (used in place, not copied) plus halo regions taken from
@@ -910,8 +935,18 @@ function build_fused_halo(neigh_dist, boundary, region_metadata,
                           center::AbstractArray{T,N}, neighbor_chunks::Vararg{Any,NH}) where {T,N,NH}
     validate_neigh_dist(neigh_dist, size(center))
     halo_width = ntuple(i -> get_neigh_dist(neigh_dist, i), Val(N))
-    halos = _build_fused_halos(halo_build_style(boundary), neigh_dist, boundary,
-                               region_metadata, neighbor_chunks)
+    return _build_fused_halo(halo_build_style(boundary), neigh_dist, boundary, region_metadata,
+                             halo_width, stencil_storage(center),
+                             map(stencil_storage, neighbor_chunks))
+end
+
+# Function barrier for `stencil_storage` (see its docstring): for tiles that
+# unwrap, the call below dispatches dynamically once per chunk and everything it
+# reaches specializes on the real storage type. For tiles that don't,
+# `stencil_storage` is the identity and this is statically resolved as before.
+function _build_fused_halo(style, neigh_dist, boundary, region_metadata, halo_width,
+                           center, neighbor_chunks)
+    halos = _build_fused_halos(style, neigh_dist, boundary, region_metadata, neighbor_chunks)
     return HaloArray(center, halos, halo_width; own_center=false)
 end
 
@@ -941,7 +976,9 @@ end
 
 function inner_stencil!(f, output, read_vars)
     processor = task_processor()
-    inner_stencil_proc!(processor, f, output, read_vars)
+    # See `stencil_storage`: unwrapping here is what makes `inner_stencil_proc!`
+    # a function barrier for wrapper tiles, and is the identity for every other.
+    inner_stencil_proc!(processor, f, stencil_storage(output), map(stencil_storage, read_vars))
     # HaloArray lifetime is now managed by the DArray finalizer registered in
     # get_halo_inner_cache; do not unsafe_free! here to avoid use-after-free on cache hits.
 end

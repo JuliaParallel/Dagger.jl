@@ -89,6 +89,11 @@ function Base.pointer(::DSparseArray)
         so that `Dagger.aliasing_root` can resolve it to the DSparseArray."))
 end
 
+# Hand `@stencil` the bare sparse storage to sweep. See `stencil_storage` in
+# array/stencil.jl for why the wrapper cannot simply be given a storage type
+# parameter, and why unwrapping is safe for a sweep's element writes.
+stencil_storage(M::DSparseArray) = M.mat
+
 # Forward indexing to the inner array. Ranges/colons are supported so that
 # views (used by copy-buffering between mismatched partitionings) work.
 Base.getindex(M::DSparseArray, I...) = getindex(M.mat, I...)
