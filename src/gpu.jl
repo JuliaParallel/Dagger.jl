@@ -296,6 +296,12 @@ end
 # handle (MPI P2P vs Distributed remotecall) is acceleration-specific.
 # DAGGER_IPC=0 disables the path.
 ipc_eligible(from_inner::MemorySpace, to_inner::MemorySpace) = false
+# Space-only `ipc_eligible` is not enough: a GPU-scoped task (collect's MPI cat
+# tree densifies every tile to `Array`) can return a host `Array` whose chunk
+# is still stamped VRAM. `ipc_export` exists only for device arrays, so the
+# payload type must be a GPU array too. SPMD-uniform — derived from chunktype.
+ipc_type_eligible(::Type{T}) where T =
+    T <: GPUArraysCore.AbstractGPUArray && isbitstype(eltype(T))
 # Transfers smaller than this stay on the staged path (handle exchange and
 # ack latency dominate below the crossover, ~128KiB on PCIe-attached GPUs)
 const IPC_MIN_BYTES = Ref{Int}(128 * 1024)

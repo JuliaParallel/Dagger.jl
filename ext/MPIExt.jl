@@ -18,7 +18,7 @@ import Dagger:
     get_processors, gpu_kernel_backend, gpu_memory_kind,
     initialize_acceleration!, inplace_mpi_alloc, inplace_mpi_build,
     inplace_mpi_parts, InvalidScope, ipc_copyto!, ipc_eligible,
-    ipc_export, ipc_materialize, IPC_MIN_BYTES, ipc_release!, is_local,
+    ipc_export, ipc_materialize, IPC_MIN_BYTES, ipc_release!, ipc_type_eligible, is_local,
     istask, LockedObject, memory_space, memory_spaces, MemorySpan,
     memory_spans, move, move!, move_rewrap, move_rewrap_build, DATADEPS_THUNK_ID,
     mpi_device_direct, mpi_device_sync, mpi_library_gpu_aware, mpi_remap_space,
@@ -1342,7 +1342,8 @@ function move!(dep_mod, to_space::MPIMemorySpace, from_space::MPIMemorySpace, to
             # competitive; each side checks its own (equal-sized) buffer
             local_nbytes = local_rank == from_space.rank ? from.handle.size :
                            local_rank == to_space.rank   ? to.handle.size : 0
-            if ipc_eligible(from_space.innerSpace, to_space.innerSpace) &&
+            if ipc_type_eligible(chunktype(from)) &&
+               ipc_eligible(from_space.innerSpace, to_space.innerSpace) &&
                local_nbytes >= IPC_MIN_BYTES[] &&
                same_node(current_acceleration(), from_space.rank, to_space.rank)
                 # Same-node device-to-device: ship only an IPC handle
@@ -1687,7 +1688,7 @@ function mpi_endpoint_transfer(accel::MPIAcceleration, from_proc, to_proc, from_
         end
     end
     tag = to_tag()
-    if T <: DenseArray && isbitstype(eltype(T)) &&
+    if ipc_type_eligible(T) &&
        ipc_eligible(from_space.innerSpace, to_space.innerSpace) &&
        same_node(accel, from_space.rank, to_space.rank)
         # Same-node device-to-device slot creation: ship only an IPC handle
@@ -1964,6 +1965,12 @@ function mpi_wire_exception(err)
     end
 end
 
+# Result chunk space follows the *value*, not the processor. A GPU-scoped
+# task that returns a host `Array` (collect's cat tree) must not be stamped
+# VRAM — that label would send the next hop through device IPC.
+mpi_result_space(result, proc::MPIProcessor) =
+    MPIMemorySpace(value_memory_space(result), proc.comm, proc.rank)
+
 # Decide how much result metadata execute! must broadcast.
 # - need_type_bcast: return type/space unknown → full (:ok,T,space)/(:error,ex)
 # - !need_type_bcast && nothrow: concrete + proven non-throwing → zero MPI
@@ -2031,7 +2038,7 @@ function execute!(proc::MPIProcessor, f, args...; kwargs...)
     if !plan.need_type_bcast && plan.nothrow
         if islocal
             result = execute!(proc.innerProc, f, raw_args...; kwargs...)
-            space = memory_space(result, proc)::MPIMemorySpace
+            space = mpi_result_space(result, proc)
             return tochunk(result, proc, space; type=plan.inferred)
         else
             space = memory_space(nothing, proc)::MPIMemorySpace
@@ -2052,7 +2059,7 @@ function execute!(proc::MPIProcessor, f, args...; kwargs...)
             end
             @opcounter :execute_bcast_send_yield
             bcast_meta_yield(proc.comm, proc.rank, tag, :ok)
-            space = memory_space(result, proc)::MPIMemorySpace
+            space = mpi_result_space(result, proc)
             return tochunk(result, proc, space; type=plan.inferred)
         else
             msg = bcast_meta_yield(proc.comm, proc.rank, tag)
@@ -2074,7 +2081,7 @@ function execute!(proc::MPIProcessor, f, args...; kwargs...)
             rethrow()
         end
         T = typeof(result)
-        space = memory_space(result, proc)::MPIMemorySpace
+        space = mpi_result_space(result, proc)
         @opcounter :execute_bcast_send_yield
         bcast_meta_yield(proc.comm, proc.rank, tag, (:ok, T, space.innerSpace))
         return tochunk(result, proc, space; type=T)

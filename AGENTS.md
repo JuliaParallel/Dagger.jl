@@ -285,3 +285,12 @@ lesson.
    type (and its `show`) lives in core so combo extensions can dispatch on it,
    the backend extension must not redefine `show` — precompilation forbids the
    overwrite.
+
+26. **A VRAM-stamped host `Array` is not a device buffer.** Collect's MPI cat
+   tree densifies every tile to `Array` (device `cat` is scalar indexing),
+   and those gather tasks run on the GPU compute scope. `execute!` used to
+   label the result with the *processor's* space, so a host `Matrix` sat in
+   a `ROCVRAM`/`CUDAVRAM` chunk. The next hop then took same-node device IPC
+   and died in `ipc_export(::Matrix)`. Stamp the result from
+   `value_memory_space`, and do not select IPC unless the chunktype is a
+   GPU array (`ipc_type_eligible`). Space-only `ipc_eligible` is not enough.
