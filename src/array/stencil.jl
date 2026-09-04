@@ -33,6 +33,57 @@ get_neigh_dist(neigh_dist::Tuple, i::Int) = neigh_dist[i]
 get_boundary(boundary, i::Int) = boundary
 get_boundary(boundary::Tuple, i::Int) = boundary[i]
 
+"""
+    stencil_dense_halo_proto(arr) -> AbstractArray or nothing
+
+An array to model *dense* halo regions on, for storage that a kernel can read
+but cannot slice -- device-resident sparse tiles, whose `view`/range-indexing
+falls back to elementwise host access, and which have no elementwise `setindex!`
+at all.
+
+Returning `nothing` (the default) keeps halo regions in the center's own format,
+which is what every dense tile and every host sparse tile wants.
+
+Densifying is the right trade for a device sparse tile because a halo region is
+thin: `O(w * perimeter)` against the `O(prod(size))` center. The center -- where
+the memory saving actually lives -- stays sparse and is read through
+[`DeviceSparseMatrixCSC`](@ref)'s device-side `getindex`.
+"""
+stencil_dense_halo_proto(@nospecialize(arr)) = nothing
+
+"""
+    stencil_region_similar(arr, region_size)
+
+Allocate a halo region of `region_size` to be filled from `arr`.
+"""
+@inline function stencil_region_similar(arr, region_size::Dims)
+    proto = stencil_dense_halo_proto(arr)
+    proto === nothing && return similar(arr, region_size)
+    return similar(proto, eltype(arr), region_size)
+end
+
+@kernel function _densify_region_kernel!(out, arr, offset)
+    idx = @index(Global, Cartesian)
+    I = Tuple(idx + offset)
+    @inbounds out[idx] = arr[I...]
+end
+
+"""
+    stencil_region_slice(arr, start_idx, stop_idx)
+
+Materialize `arr[start_idx:stop_idx]` as a halo region. Storage that cannot be
+sliced (see [`stencil_dense_halo_proto`](@ref)) is gathered into a dense region
+by a kernel instead, which keeps the whole operation on the device.
+"""
+@inline function stencil_region_slice(arr, start_idx::CartesianIndex, stop_idx::CartesianIndex)
+    proto = stencil_dense_halo_proto(arr)
+    proto === nothing && return copy(@view arr[start_idx:stop_idx])
+    region_size = size(start_idx:stop_idx)
+    out = similar(proto, eltype(arr), region_size)
+    Kernel(_densify_region_kernel!)(out, arr, start_idx - oneunit(start_idx); ndrange=region_size)
+    return out
+end
+
 # Load a halo region from a neighboring chunk
 # region_code: N-tuple where each element is -1 (low), 0 (full extent), or +1 (high)
 # For dimensions with code 0, we take the full extent of the array
@@ -54,7 +105,7 @@ function load_neighbor_region(arr, region_code::NTuple{N,Int}, neigh_dist) where
             lastindex(arr, i)
         end
     end)
-    return move(task_processor(), copy(@view arr[start_idx:stop_idx]))
+    return move(task_processor(), stencil_region_slice(arr, start_idx, stop_idx))
 end
 
 is_past_boundary(size, idx) = any(ntuple(i -> idx[i] < 1 || idx[i] > size[i], length(size)))
@@ -160,7 +211,7 @@ function load_boundary_region(pad::Pad, arr, region_code::NTuple{N,Int}, neigh_d
     region_size = ntuple(N) do i
         region_code[i] == 0 ? size(arr, i) : get_neigh_dist(neigh_dist, i)
     end
-    result = similar(arr, region_size...)
+    result = stencil_region_similar(arr, region_size)
     fill!(result, pad.padval)
     return move(task_processor(), result)
 end
@@ -222,7 +273,7 @@ function load_boundary_region(::Clamp, arr, region_code::NTuple{N,Int}, neigh_di
         region_code[i] == 0 ? size(arr, i) : get_neigh_dist(neigh_dist, i)
     end
 
-    result = similar(arr, region_size)
+    result = stencil_region_similar(arr, region_size)
 
     Kernel(load_boundary_region_kernel)(Clamp(), result, arr, region_code, neigh_dist, boundary_dims; ndrange=length(result))
 
@@ -321,7 +372,7 @@ function load_boundary_region(::LinearExtrapolate, arr::AbstractArray{T}, region
         region_code[i] == 0 ? size(arr, i) : get_neigh_dist(neigh_dist, i)
     end
 
-    result = similar(arr, region_size)
+    result = stencil_region_similar(arr, region_size)
 
     # Find the first boundary dimension that needs extrapolation
     extrap_dim = 0
@@ -428,7 +479,7 @@ function load_boundary_region(::Reflect{Symm}, arr, region_code::NTuple{N,Int}, 
         end
     end)
 
-    region = move(task_processor(), copy(@view arr[start_idx:stop_idx]))
+    region = move(task_processor(), stencil_region_slice(arr, start_idx, stop_idx))
 
     # Reverse only along dimensions that are actually being reflected
     # (both non-zero in region_code AND past boundary)
@@ -622,7 +673,7 @@ function load_boundary_region(boundary::Tuple, arr, region_code::NTuple{N,Int}, 
         region_code[i] == 0 ? size(arr, i) : get_neigh_dist(neigh_dist, i)
     end
 
-    result = similar(arr, region_size)
+    result = stencil_region_similar(arr, region_size)
 
     Kernel(load_boundary_region_kernel)(boundary, result, arr, region_code, neigh_dist, boundary_dims; ndrange=length(result))
 
@@ -946,9 +997,17 @@ end
 # `stencil_storage` is the identity and this is statically resolved as before.
 function _build_fused_halo(style, neigh_dist, boundary, region_metadata, halo_width,
                            center, neighbor_chunks)
-    halos = _build_fused_halos(style, neigh_dist, boundary, region_metadata, neighbor_chunks)
+    halos = _build_fused_halos(_effective_halo_style(style, center), neigh_dist, boundary,
+                               region_metadata, neighbor_chunks)
     return HaloArray(center, halos, halo_width; own_center=false)
 end
+
+# `ViewHalos` takes each halo region as a `view` of a neighboring chunk. Storage
+# that has to materialize its regions (see `stencil_dense_halo_proto`) cannot
+# offer that, so it is downgraded to `CopyHalos`. Constant-folds away for every
+# storage that uses the default hook.
+@inline _effective_halo_style(style, center) =
+    stencil_dense_halo_proto(center) === nothing ? style : CopyHalos()
 
 """
     stencil_source_chunks(read_chunks, write_chunks) -> chunks
@@ -1023,10 +1082,42 @@ function inner_stencil!(style, f, output, read_vars)
     # get_halo_inner_cache; do not unsafe_free! here to avoid use-after-free on cache hits.
 end
 
+"""
+    stencil_kernel_writable(storage) -> Bool
+
+Whether a sweep may write `storage` elementwise where it runs.
+
+False for device-resident sparse tiles: storing a value that is not already
+present changes the sparsity structure, which a kernel cannot do. Note that this
+is about *writes* only -- such storage is perfectly readable by a kernel (see
+[`stencil_kernel_view`](@ref)), so a stencil that reads sparse operands and
+writes a dense output needs none of this.
+"""
+stencil_kernel_writable(@nospecialize(storage)) = true
+
+"""
+    stencil_host_sweep!(style, f, output, read_vars)
+
+Run a sweep for an output the executing processor cannot write elementwise, by
+staging it through host storage: gather, sweep on the CPU, upload the result.
+
+Slow -- a host round trip per tile per sweep -- but correct, and it is the same
+fallback the rest of Dagger's device sparse support uses (see `matmatmul!` for
+`DeviceSparseMatrixCSC`, and `_copyto_view_hosted!`). Backends that can produce a
+sparse tile on the device would override this.
+"""
+function stencil_host_sweep! end
+
 @inline function _inner_stencil!(::DenseSweep, processor, f, output, read_vars)
     # See `stencil_storage`: unwrapping here is what makes `inner_stencil_proc!`
     # a function barrier for wrapper tiles, and is the identity for every other.
-    inner_stencil_proc!(processor, f, stencil_storage(output), map(stencil_storage, read_vars))
+    storage = stencil_storage(output)
+    vars = map(stencil_storage, read_vars)
+    if stencil_kernel_writable(storage)
+        inner_stencil_proc!(processor, f, storage, vars)
+    else
+        stencil_host_sweep!(DenseSweep(), f, output, vars)
+    end
     return
 end
 
@@ -1034,7 +1125,10 @@ end
     # N.B. `output` is passed still wrapped: a sparse sweep *replaces* the tile's
     # storage rather than mutating its elements, which is precisely what the
     # wrapper exists to hide from Datadeps.
-    if !try_sparse_stencil_sweep!(processor, f, output, map(stencil_storage, read_vars))
+    vars = map(stencil_storage, read_vars)
+    if !stencil_kernel_writable(stencil_storage(output))
+        stencil_host_sweep!(SparseSweep(), f, output, vars)
+    elseif !try_sparse_stencil_sweep!(processor, f, output, vars)
         _inner_stencil!(DenseSweep(), processor, f, output, read_vars)
     end
     return

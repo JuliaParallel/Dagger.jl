@@ -53,6 +53,17 @@ Dagger._sparse_collect(A::CuSparseMatrixCSR) = SparseMatrixCSC(CuSparseMatrixCSC
 Dagger._sparse_collect(A::CuSparseVector) = SparseVector(A)
 Dagger._sparse_copy(A::Union{CuSparseMatrixCSC,CuSparseMatrixCSR,CuSparseVector}) = copy(A)
 
+#----- Kernel-side access ------------------------------------------------------
+
+# CUDA adapts `CuSparseMatrixCSC` to a `CuSparseDeviceMatrixCSC` that carries no
+# scalar `getindex`, so a stencil kernel cannot read it, and overriding CUDA's own
+# adaptor here would be piracy. Re-view the tile instead, before it becomes a
+# kernel argument: same device buffers, no copy, wrapped in Dagger's
+# `DeviceSparseMatrixCSC`, which has both a device-side `getindex` and an adaptor.
+# Mirrors `ROCSparseArraysExt`.
+Dagger.stencil_kernel_view(A::CuSparseMatrixCSC) =
+    Dagger.DeviceSparseMatrixCSC(size(A, 1), size(A, 2), A.colPtr, A.rowVal, A.nzVal)
+
 #----- Host ↔ device helpers ---------------------------------------------------
 
 _to_cu_sparse(x::SparseMatrixCSC) = CuSparseMatrixCSC(x)

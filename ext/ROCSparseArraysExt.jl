@@ -54,6 +54,18 @@ Dagger._sparse_collect(A::ROCSparseMatrixCSR) = SparseMatrixCSC(ROCSparseMatrixC
 Dagger._sparse_collect(A::ROCSparseVector) = SparseVector(A)
 Dagger._sparse_copy(A::Union{ROCSparseMatrixCSC,ROCSparseMatrixCSR,ROCSparseVector}) = copy(A)
 
+#----- Kernel-side access ------------------------------------------------------
+
+# AMDGPU adapts `ROCSparseMatrixCSC` to `GPUArrays.GPUSparseDeviceMatrixCSC`,
+# which carries no scalar `getindex` -- so a stencil kernel cannot read it, and
+# overriding that adaptor here would be method piracy on AMDGPU's own definition.
+# Re-view the tile instead, *before* it becomes a kernel argument: same device
+# buffers, no copy, wrapped in Dagger's `DeviceSparseMatrixCSC`, which has both a
+# device-side `getindex` and an adaptor. That also means the stencil hooks below
+# only ever have to know about `DeviceSparseMatrixCSC`.
+Dagger.stencil_kernel_view(A::ROCSparseMatrixCSC) =
+    Dagger.DeviceSparseMatrixCSC(size(A, 1), size(A, 2), A.colPtr, A.rowVal, A.nzVal)
+
 #----- Host ↔ device helpers ---------------------------------------------------
 
 _to_roc_sparse(x::SparseMatrixCSC) = ROCSparseMatrixCSC(x)

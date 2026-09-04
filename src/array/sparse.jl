@@ -92,7 +92,21 @@ end
 # Hand `@stencil` the bare sparse storage to sweep. See `stencil_storage` in
 # array/stencil.jl for why the wrapper cannot simply be given a storage type
 # parameter, and why unwrapping is safe for a sweep's element writes.
-stencil_storage(M::DSparseArray) = M.mat
+stencil_storage(M::DSparseArray) = stencil_kernel_view(M.mat)
+
+"""
+    stencil_kernel_view(storage)
+
+A tile's storage as a stencil should read it.
+
+The identity for anything already readable where the sweep runs. A backend whose
+sparse type has no device-side `getindex` -- rocSPARSE, whose adaptor yields a
+`GPUArrays.GPUSparseDeviceMatrixCSC` -- re-views it here, without copying, as a
+[`DeviceSparseMatrixCSC`](@ref), which has one. Doing it at this point rather
+than through `Adapt` keeps Dagger out of the backends' own adaptor definitions,
+and means the stencil hooks only have to know about one device sparse type.
+"""
+@inline stencil_kernel_view(x) = x
 
 # Forward indexing to the inner array. Ranges/colons are supported so that
 # views (used by copy-buffering between mismatched partitionings) work.
@@ -311,16 +325,72 @@ end
 Base.size(A::DeviceSparseMatrixCSC) = (A.m, A.n)
 Base.eltype(::DeviceSparseMatrixCSC{Tv}) where Tv = Tv
 Base.IndexStyle(::Type{<:DeviceSparseMatrixCSC}) = IndexCartesian()
-function Base.getindex(A::DeviceSparseMatrixCSC{Tv}, i::Integer, j::Integer) where Tv
+# N.B. This runs *inside GPU kernels* once the storage vectors have been adapted
+# (see `Adapt.adapt_structure` below), so it must stay allocation-free and free
+# of dynamic dispatch. `rowval` is sorted within each column -- the CSC invariant,
+# preserved by `device_sparse_from_host` -- so the lookup is a binary search
+# rather than a scan of the column; a stencil pays it `(2w+1)^N` times per output
+# element, which is where the difference shows up.
+@inline function Base.getindex(A::DeviceSparseMatrixCSC{Tv}, i::Integer, j::Integer) where Tv
     @boundscheck checkbounds(A, i, j)
-    # Scalar device indexing; acceptable for rare host-side inspection.
-    col_start = Int(A.colptr[j])
-    col_end = Int(A.colptr[j + 1]) - 1
-    for p in col_start:col_end
-        Int(A.rowval[p]) == i && return A.nzval[p]
+    lo = Int(@inbounds A.colptr[j])
+    hi = Int(@inbounds A.colptr[j + 1]) - 1
+    @inbounds while lo <= hi
+        mid = (lo + hi) >>> 1
+        r = Int(A.rowval[mid])
+        if r < i
+            lo = mid + 1
+        elseif r > i
+            hi = mid - 1
+        else
+            return A.nzval[mid]
+        end
     end
     return zero(Tv)
 end
+
+# Adapting the storage vectors yields a `DeviceSparseMatrixCSC` of device-side
+# arrays, which is isbits and so can be passed to a kernel and read with the
+# `getindex` above. This is what lets `@stencil` take sparse operands on the GPU.
+Adapt.adapt_structure(to, A::DeviceSparseMatrixCSC) =
+    DeviceSparseMatrixCSC(A.m, A.n,
+                          Adapt.adapt(to, A.colptr),
+                          Adapt.adapt(to, A.rowval),
+                          Adapt.adapt(to, A.nzval))
+
+# Halo regions off a device sparse tile are materialized dense; see the hook's
+# docstring in array/stencil.jl.
+stencil_dense_halo_proto(A::DeviceSparseMatrixCSC) = A.nzval
+
+# Inserting a nonzero is a structural change, so no kernel can write one of
+# these; a sweep whose output is device sparse stages through the host.
+stencil_kernel_writable(::DeviceSparseMatrixCSC) = false
+
+# Host-staged sweep for a device-resident sparse output (see the docstring in
+# array/stencil.jl). Gather the output tile and every operand to host storage,
+# sweep there, and upload the result through the same `move` every Datadeps
+# transfer uses -- which is what keeps this backend-agnostic.
+function stencil_host_sweep!(style, f, output::DSparseArray, read_vars)
+    to_space = value_memory_space(output.mat)
+    host_out = DSparseArray(_sparse_collect(output.mat))
+    host_vars = map(_stencil_to_host, read_vars)
+    _inner_stencil!(style, ThreadProc(myid(), 1), f, host_out, host_vars)
+    output.mat = if to_space isa CPURAMMemorySpace
+        host_out.mat
+    else
+        move(OSProc(), first(processors(to_space)), host_out).mat
+    end
+    return
+end
+
+# Host stand-in for one stencil operand. A `HaloArray` is rebuilt around gathered
+# parts; its halos are already dense (see `stencil_dense_halo_proto`), so only the
+# center is a sparse gather.
+_stencil_to_host(A::HaloArray) =
+    HaloArray(_stencil_to_host(A.center), map(_stencil_to_host, A.halos), A.halo_width;
+              own_center=A.own_center)
+_stencil_to_host(A::DSparseArray) = DSparseArray(_stencil_to_host(A.mat))
+_stencil_to_host(A) = wraps_as_sparse_tile(A) ? _sparse_collect(A) : Adapt.adapt(Array, A)
 # Memory space follows the nonzero values buffer.
 value_memory_space(A::DeviceSparseMatrixCSC) = value_memory_space(A.nzval)
 memory_space(A::DeviceSparseMatrixCSC) = value_memory_space(A)
