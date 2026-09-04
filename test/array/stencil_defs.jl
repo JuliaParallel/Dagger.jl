@@ -3,6 +3,10 @@
 # MPI(+GPU) suites in test/mpi.jl / test/mpi_gpu_suite.jl.
 
 @everywhere import Dagger: @stencil, Wrap, Pad, Reflect, AntiReflect, Clamp, LinearExtrapolate
+# For `test_stencil_sparse` below; workers allocate the sparse tiles, so they
+# need `SparseArrays` loaded for `Dagger`'s SparseArrays extension to be active.
+@everywhere using SparseArrays
+using Random
 
 function test_stencil(; skip_highdim::Bool=false)
     @testset "Simple assignment" begin
@@ -625,4 +629,193 @@ function test_stencil(; skip_highdim::Bool=false)
         end
     end
     =#
+end
+
+#############################################################################
+# Sparse tiles
+#############################################################################
+
+# `@stencil` on sparse `DArray`s (host `SparseMatrixCSC` / `SparseVector` tiles).
+#
+# Nothing in the stencil machinery is sparse-aware: this works because a
+# `DSparseArray` tile forwards `size`/`getindex`/`setindex!`/`similar`/`view` to
+# its storage, and `stencil_storage` unwraps it so each sweep specializes on that
+# storage. The suite is therefore mostly a *differential* test -- every result is
+# compared against the same stencil over a dense `DArray` built from the same
+# matrix, which is the property that would break if any of those forwards were
+# lost.
+#
+# N.B. CPU only. GPU sparse tiles have no device-side `setindex!` (inserting a
+# nonzero is a structural change), so they cannot be swept by a kernel at all;
+# `test/array/stencil.jl` calls this from the CPU testset only.
+function test_stencil_sparse()
+    # Every array is built from a seeded RNG so the dense reference and the
+    # sparse operand are the same matrix.
+    mkpair(part, dims, density) = begin
+        Random.seed!(1234)
+        S = SparseArrays.sprand(Float64, dims..., density)
+        (distribute(S, part), distribute(Array(S), part))
+    end
+
+    # Storage actually reachable under the `DSparseArray` wrapper, per tile.
+    tile_storage(D) = unique(map(c -> typeof(fetch(c).mat), Dagger.chunks(D)))
+    stored_nnz(D) = sum(c -> SparseArrays.nnz(fetch(c).mat), Dagger.chunks(D))
+
+    @testset "Tiles stay sparse" begin
+        part = Blocks(4, 4)
+        A, _ = mkpair(part, (8, 8), 0.3)
+        @test tile_storage(A) == [SparseArrays.SparseMatrixCSC{Float64,Int}]
+
+        B = SparseArrays.spzeros(part, Float64, 8, 8)
+        @stencil B[idx] = sum(@neighbors(A[idx], 1, Wrap()))
+        # The sweep must write through the wrapper into CSC storage, not
+        # replace the tile with a dense array.
+        @test tile_storage(B) == [SparseArrays.SparseMatrixCSC{Float64,Int}]
+        # A 3x3 stencil dilates the support, so the result is denser than the
+        # input but must still not be structurally full for this density.
+        @test stored_nnz(B) > stored_nnz(A)
+        @test stored_nnz(B) < 8 * 8
+    end
+
+    @testset "$(nameof(typeof(boundary))) boundary matches dense" for boundary in
+            (Wrap(), Pad(0.0), Pad(1.5), Clamp(), Reflect(true), Reflect(false),
+             AntiReflect(true), LinearExtrapolate())
+        part = Blocks(4, 4)
+        A, Ad = mkpair(part, (8, 8), 0.3)
+
+        S = SparseArrays.spzeros(part, Float64, 8, 8)
+        @stencil S[idx] = sum(@neighbors(A[idx], 1, boundary))
+        D = zeros(part, Float64, 8, 8)
+        @stencil D[idx] = sum(@neighbors(Ad[idx], 1, boundary))
+
+        @test collect(S) ≈ collect(D)
+    end
+
+    @testset "Mixed boundary conditions" begin
+        part = Blocks(4, 4)
+        A, Ad = mkpair(part, (8, 8), 0.3)
+        boundary = (Wrap(), Pad(0.0))
+
+        S = SparseArrays.spzeros(part, Float64, 8, 8)
+        @stencil S[idx] = sum(@neighbors(A[idx], 1, boundary))
+        D = zeros(part, Float64, 8, 8)
+        @stencil D[idx] = sum(@neighbors(Ad[idx], 1, boundary))
+
+        @test collect(S) ≈ collect(D)
+    end
+
+    @testset "Tuple neighborhood distance" begin
+        part = Blocks(4, 4)
+        A, Ad = mkpair(part, (8, 8), 0.3)
+
+        S = SparseArrays.spzeros(part, Float64, 8, 8)
+        @stencil S[idx] = sum(@neighbors(A[idx], (1, 2), Wrap()))
+        D = zeros(part, Float64, 8, 8)
+        @stencil D[idx] = sum(@neighbors(Ad[idx], (1, 2), Wrap()))
+
+        @test collect(S) ≈ collect(D)
+    end
+
+    @testset "Elementwise (no neighborhood)" begin
+        part = Blocks(4, 4)
+        A, Ad = mkpair(part, (8, 8), 0.3)
+
+        S = SparseArrays.spzeros(part, Float64, 8, 8)
+        @stencil S[idx] = A[idx] + 1
+        @test collect(S) ≈ collect(Ad) .+ 1
+        # Adding a constant fills the tile in structurally; the result must
+        # still be correct, and still be sparse *storage*.
+        @test tile_storage(S) == [SparseArrays.SparseMatrixCSC{Float64,Int}]
+    end
+
+    @testset "Write back into the array being read" begin
+        # Exercises `stencil_source_chunks`, which snapshots the read chunks
+        # before any is overwritten -- `copy` of a sparse tile, not a dense one.
+        part = Blocks(4, 4)
+        A, Ad = mkpair(part, (8, 8), 0.3)
+
+        @stencil A[idx] = sum(@neighbors(A[idx], 1, Wrap()))
+        @stencil Ad[idx] = sum(@neighbors(Ad[idx], 1, Wrap()))
+
+        @test collect(A) ≈ collect(Ad)
+        @test tile_storage(A) == [SparseArrays.SparseMatrixCSC{Float64,Int}]
+    end
+
+    @testset "Multiple expressions" begin
+        part = Blocks(4, 4)
+        A, Ad = mkpair(part, (8, 8), 0.3)
+        S = SparseArrays.spzeros(part, Float64, 8, 8)
+        D = zeros(part, Float64, 8, 8)
+
+        @stencil begin
+            S[idx] = sum(@neighbors(A[idx], 1, Wrap()))
+            S[idx] = S[idx] * 2
+        end
+        @stencil begin
+            D[idx] = sum(@neighbors(Ad[idx], 1, Wrap()))
+            D[idx] = D[idx] * 2
+        end
+
+        @test collect(S) ≈ collect(D)
+    end
+
+    @testset "Allocation syntax" begin
+        part = Blocks(4, 4)
+        A, Ad = mkpair(part, (8, 8), 0.3)
+
+        S = @stencil sum(@neighbors(A[idx], 1, Wrap()))
+        D = @stencil sum(@neighbors(Ad[idx], 1, Wrap()))
+
+        @test S isa DArray
+        # `similar` on a sparse DArray must carry the tile's backend forward,
+        # otherwise the allocated result would be dense.
+        @test tile_storage(S) == [SparseArrays.SparseMatrixCSC{Float64,Int}]
+        @test collect(S) ≈ collect(D)
+    end
+
+    @testset "Mixed sparse and dense operands" begin
+        part = Blocks(4, 4)
+        A, Ad = mkpair(part, (8, 8), 0.3)
+
+        # Sparse in, dense out.
+        D = zeros(part, Float64, 8, 8)
+        @stencil D[idx] = sum(@neighbors(A[idx], 1, Wrap()))
+        Dref = zeros(part, Float64, 8, 8)
+        @stencil Dref[idx] = sum(@neighbors(Ad[idx], 1, Wrap()))
+        @test collect(D) ≈ collect(Dref)
+
+        # Sparse and dense read in the same expression.
+        S = SparseArrays.spzeros(part, Float64, 8, 8)
+        @stencil S[idx] = sum(@neighbors(A[idx], 1, Wrap())) + Ad[idx]
+        @test collect(S) ≈ collect(Dref) .+ collect(Ad)
+    end
+
+    @testset "1D sparse vector" begin
+        part = Blocks(8)
+        Random.seed!(1234)
+        v = SparseArrays.sprand(Float64, 16, 0.3)
+        A = distribute(v, part)
+        Ad = distribute(Array(v), part)
+
+        S = SparseArrays.spzeros(part, Float64, 16)
+        @stencil S[idx] = sum(@neighbors(A[idx], 1, Wrap()))
+        D = zeros(part, Float64, 16)
+        @stencil D[idx] = sum(@neighbors(Ad[idx], 1, Wrap()))
+
+        @test collect(S) ≈ collect(D)
+    end
+
+    @testset "Uneven partitioning" begin
+        # Blocks that do not divide the array evenly, so tiles differ in size.
+        part = Blocks(3, 3)
+        A, Ad = mkpair(part, (8, 8), 0.3)
+
+        S = SparseArrays.spzeros(part, Float64, 8, 8)
+        @stencil S[idx] = sum(@neighbors(A[idx], 1, Wrap()))
+        D = zeros(part, Float64, 8, 8)
+        @stencil D[idx] = sum(@neighbors(Ad[idx], 1, Wrap()))
+
+        @test collect(S) ≈ collect(D)
+    end
+
 end

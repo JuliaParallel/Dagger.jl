@@ -4,6 +4,12 @@ include(joinpath(@__DIR__, "stencil_defs.jl"))
     test_stencil()
 end
 
+# N.B. CPU only: GPU sparse tiles have no device-side `setindex!`, so a kernel
+# cannot sweep them. See the comment on `test_stencil_sparse`.
+@testset "CPU (sparse)" begin
+    test_stencil_sparse()
+end
+
 @testset "GPU" begin
     for (kind, scope) in GPU_SCOPES
         # FIXME
