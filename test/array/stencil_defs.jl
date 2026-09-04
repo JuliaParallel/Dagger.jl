@@ -818,4 +818,175 @@ function test_stencil_sparse()
         @test collect(S) ≈ collect(D)
     end
 
+    #########################################################################
+    # `sparse=true`: the dilated-support sweep
+    #########################################################################
+
+    # `sparse=true` restricts the sweep to indices where the result can be
+    # nonzero. For a zero-preserving kernel that must be *indistinguishable*
+    # from the default sweep -- not merely close, but the same stored pattern
+    # and the same values -- which is what these compare. Anything the
+    # candidate set wrongly excludes shows up as a missing stored entry.
+    same_tiles(X, Y) = all(zip(Dagger.chunks(X), Dagger.chunks(Y))) do (cx, cy)
+        x, y = fetch(cx).mat, fetch(cy).mat
+        x.colptr == y.colptr && x.rowval == y.rowval && x.nzval == y.nzval
+    end
+
+    @testset "Option parsing" begin
+        @test Dagger.parse_stencil_options(()) === Dagger.DenseSweep()
+        @test Dagger.parse_stencil_options((:(sparse = false),)) === Dagger.DenseSweep()
+        @test Dagger.parse_stencil_options((:(sparse = true),)) === Dagger.SparseSweep()
+        # Not a literal Bool, so the sweep style could not be decided at expansion.
+        @test_throws ArgumentError Dagger.parse_stencil_options((:(sparse = 1),))
+        @test_throws ArgumentError Dagger.parse_stencil_options((:(bogus = true),))
+        @test_throws ArgumentError Dagger.parse_stencil_options((:(notanoption),))
+    end
+
+    @testset "sparse=true matches the dense sweep: $(nameof(typeof(boundary)))" for boundary in
+            (Wrap(), Pad(0.0), Clamp(), Reflect(true), Reflect(false),
+             AntiReflect(true), LinearExtrapolate())
+        # N.B. `Pad(v)` with `v != 0` is deliberately absent: it is not
+        # zero-preserving, so `sparse=true` is documented to be wrong for it.
+        part = Blocks(4, 4)
+        A, _ = mkpair(part, (8, 8), 0.3)
+
+        S = SparseArrays.spzeros(part, Float64, 8, 8)
+        @stencil sparse=true S[idx] = sum(@neighbors(A[idx], 1, boundary))
+        R = SparseArrays.spzeros(part, Float64, 8, 8)
+        @stencil R[idx] = sum(@neighbors(A[idx], 1, boundary))
+
+        @test same_tiles(S, R)
+    end
+
+    @testset "sparse=true, larger tiles" begin
+        # 8x8 tiles are almost entirely boundary shell; this size actually
+        # exercises the interior of the dilated pattern.
+        part = Blocks(32, 32)
+        A, _ = mkpair(part, (64, 64), 0.02)
+
+        S = SparseArrays.spzeros(part, Float64, 64, 64)
+        @stencil sparse=true S[idx] = sum(@neighbors(A[idx], 1, Pad(0.0)))
+        R = SparseArrays.spzeros(part, Float64, 64, 64)
+        @stencil R[idx] = sum(@neighbors(A[idx], 1, Pad(0.0)))
+
+        @test same_tiles(S, R)
+        # The point of the exercise: the result is dilated but still sparse.
+        @test stored_nnz(S) < 64 * 64
+    end
+
+    @testset "sparse=true, neighborhood distance 2" begin
+        part = Blocks(32, 32)
+        A, _ = mkpair(part, (64, 64), 0.02)
+
+        S = SparseArrays.spzeros(part, Float64, 64, 64)
+        @stencil sparse=true S[idx] = sum(@neighbors(A[idx], 2, Wrap()))
+        R = SparseArrays.spzeros(part, Float64, 64, 64)
+        @stencil R[idx] = sum(@neighbors(A[idx], 2, Wrap()))
+
+        @test same_tiles(S, R)
+    end
+
+    @testset "sparse=true, tuple neighborhood distance" begin
+        # Anisotropic dilation: rows by 1, columns by 2.
+        part = Blocks(32, 32)
+        A, _ = mkpair(part, (64, 64), 0.02)
+
+        S = SparseArrays.spzeros(part, Float64, 64, 64)
+        @stencil sparse=true S[idx] = sum(@neighbors(A[idx], (1, 2), Wrap()))
+        R = SparseArrays.spzeros(part, Float64, 64, 64)
+        @stencil R[idx] = sum(@neighbors(A[idx], (1, 2), Wrap()))
+
+        @test same_tiles(S, R)
+    end
+
+    @testset "sparse=true, multiple sparse operands" begin
+        part = Blocks(4, 4)
+        A, _ = mkpair(part, (8, 8), 0.3)
+        Random.seed!(4321)
+        B = distribute(SparseArrays.sprand(Float64, 8, 8, 0.2), part)
+
+        S = SparseArrays.spzeros(part, Float64, 8, 8)
+        @stencil sparse=true S[idx] = sum(@neighbors(A[idx], 1, Pad(0.0))) + B[idx]
+        R = SparseArrays.spzeros(part, Float64, 8, 8)
+        @stencil R[idx] = sum(@neighbors(A[idx], 1, Pad(0.0))) + B[idx]
+
+        @test same_tiles(S, R)
+    end
+
+    @testset "sparse=true, output-only follow-up expression" begin
+        # The second expression reads nothing but the output, so its candidate
+        # set is the output's own pattern rather than a dilated one.
+        part = Blocks(4, 4)
+        A, _ = mkpair(part, (8, 8), 0.3)
+
+        S = SparseArrays.spzeros(part, Float64, 8, 8)
+        @stencil sparse=true begin
+            S[idx] = sum(@neighbors(A[idx], 1, Pad(0.0)))
+            S[idx] = S[idx] * 2
+        end
+        R = SparseArrays.spzeros(part, Float64, 8, 8)
+        @stencil begin
+            R[idx] = sum(@neighbors(A[idx], 1, Pad(0.0)))
+            R[idx] = R[idx] * 2
+        end
+
+        @test same_tiles(S, R)
+    end
+
+    @testset "sparse=true, write back into the array being read" begin
+        part = Blocks(4, 4)
+        A, _ = mkpair(part, (8, 8), 0.3)
+        R, _ = mkpair(part, (8, 8), 0.3)
+
+        @stencil sparse=true A[idx] = sum(@neighbors(A[idx], 1, Wrap()))
+        @stencil R[idx] = sum(@neighbors(R[idx], 1, Wrap()))
+
+        @test same_tiles(A, R)
+    end
+
+    @testset "sparse=true, 1D sparse vector" begin
+        part = Blocks(8)
+        Random.seed!(1234)
+        v = SparseArrays.sprand(Float64, 16, 0.3)
+        A = distribute(v, part)
+
+        S = SparseArrays.spzeros(part, Float64, 16)
+        @stencil sparse=true S[idx] = sum(@neighbors(A[idx], 1, Wrap()))
+        R = SparseArrays.spzeros(part, Float64, 16)
+        @stencil R[idx] = sum(@neighbors(A[idx], 1, Wrap()))
+
+        @test collect(S) == collect(R)
+    end
+
+    @testset "sparse=true, uneven partitioning" begin
+        part = Blocks(3, 3)
+        A, _ = mkpair(part, (8, 8), 0.3)
+
+        S = SparseArrays.spzeros(part, Float64, 8, 8)
+        @stencil sparse=true S[idx] = sum(@neighbors(A[idx], 1, Wrap()))
+        R = SparseArrays.spzeros(part, Float64, 8, 8)
+        @stencil R[idx] = sum(@neighbors(A[idx], 1, Wrap()))
+
+        @test same_tiles(S, R)
+    end
+
+    @testset "sparse=true falls back where it does not apply" begin
+        part = Blocks(4, 4)
+        A, Ad = mkpair(part, (8, 8), 0.3)
+
+        # Dense output: no sparse-aware sweep, so the dense one runs.
+        D = zeros(part, Float64, 8, 8)
+        @stencil sparse=true D[idx] = sum(@neighbors(Ad[idx], 1, Wrap()))
+        Dref = zeros(part, Float64, 8, 8)
+        @stencil Dref[idx] = sum(@neighbors(Ad[idx], 1, Wrap()))
+        @test collect(D) == collect(Dref)
+
+        # A dense operand can be nonzero anywhere, so there is no pattern to
+        # dilate even though the output is sparse.
+        S = SparseArrays.spzeros(part, Float64, 8, 8)
+        @stencil sparse=true S[idx] = sum(@neighbors(A[idx], 1, Pad(0.0))) + Ad[idx]
+        R = SparseArrays.spzeros(part, Float64, 8, 8)
+        @stencil R[idx] = sum(@neighbors(A[idx], 1, Pad(0.0))) + Ad[idx]
+        @test same_tiles(S, R)
+    end
 end

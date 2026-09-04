@@ -974,13 +974,70 @@ end
 @inline load_neighborhood(arr::HaloInterior{T,N}, idx) where {T,N} =
     StencilNeighborhood(arr.parent, idx, arr.halo_width)
 
+#############################################################################
+# Sweep styles
+#############################################################################
+
+"""
+    DenseSweep()
+
+Evaluate the stencil at every index of the output tile. The default, and the only
+style that is correct for an arbitrary kernel.
+"""
+struct DenseSweep end
+
+"""
+    SparseSweep()
+
+Evaluate the stencil only where its result can be nonzero, and build the output
+tile from those values in one shot. Selected by `@stencil sparse=true`.
+
+This is sound only for a *zero-preserving* kernel -- one that maps an all-zero
+neighborhood to zero -- which is why it must be asked for rather than inferred
+(`B[idx] = A[idx] + 1` and `Pad(1)` are both counterexamples, and a kernel sees
+`idx`, so probing it at one point proves nothing about the others).
+
+Falls back to [`DenseSweep`](@ref) whenever the candidate set cannot be
+established: an output whose storage has no sparse-aware sweep, a read variable
+that is dense (its stored entries are everywhere, so every index is a candidate),
+or operands that are not conformable with the output tile.
+"""
+struct SparseSweep end
+
+"""
+    try_sparse_stencil_sweep!(processor, f, output, read_vars) -> Bool
+
+Run a [`SparseSweep`](@ref) if this output's storage has one, returning whether it
+did. Sparse backends implement this (see `ext/SparseArraysExt.jl`); the fallback
+declines, and the caller runs a `DenseSweep` instead.
+"""
+try_sparse_stencil_sweep!(processor, f, output, read_vars) = false
+
 function inner_stencil!(f, output, read_vars)
+    return inner_stencil!(DenseSweep(), f, output, read_vars)
+end
+function inner_stencil!(style, f, output, read_vars)
     processor = task_processor()
+    _inner_stencil!(style, processor, f, output, read_vars)
+    # HaloArray lifetime is now managed by the DArray finalizer registered in
+    # get_halo_inner_cache; do not unsafe_free! here to avoid use-after-free on cache hits.
+end
+
+@inline function _inner_stencil!(::DenseSweep, processor, f, output, read_vars)
     # See `stencil_storage`: unwrapping here is what makes `inner_stencil_proc!`
     # a function barrier for wrapper tiles, and is the identity for every other.
     inner_stencil_proc!(processor, f, stencil_storage(output), map(stencil_storage, read_vars))
-    # HaloArray lifetime is now managed by the DArray finalizer registered in
-    # get_halo_inner_cache; do not unsafe_free! here to avoid use-after-free on cache hits.
+    return
+end
+
+@inline function _inner_stencil!(::SparseSweep, processor, f, output, read_vars)
+    # N.B. `output` is passed still wrapped: a sparse sweep *replaces* the tile's
+    # storage rather than mutating its elements, which is precisely what the
+    # wrapper exists to hide from Datadeps.
+    if !try_sparse_stencil_sweep!(processor, f, output, map(stencil_storage, read_vars))
+        _inner_stencil!(DenseSweep(), processor, f, output, read_vars)
+    end
+    return
 end
 
 # Non-KA (for CPUs)
@@ -1178,8 +1235,63 @@ may still occur, so long as they respect the sequential nature of `@stencil`
 (just like with other operations in `spawn_datadeps`). Due to this behavior,
 expressions like `A[idx] = sum(@neighbors(A[idx], 1, Wrap()))` are not valid,
 as that would currently cause race conditions and lead to undefined behavior.
+
+# Options
+
+`@stencil` accepts leading `key=value` options, before the body:
+
+```julia
+@stencil sparse=true B[idx] = sum(@neighbors(A[idx], 1, Wrap()))
+```
+
+- `sparse::Bool=false`: sweep only the indices where the result can be nonzero,
+  instead of every index of each tile, and build each output tile from those
+  values in one shot. For sparse `DArray`s this replaces a dense sweep and
+  `nnz` scalar insertions with work proportional to the stored entries.
+
+  This asserts that the kernel is **zero-preserving**: that it maps an all-zero
+  neighborhood to zero. `B[idx] = A[idx] + 1` is not, nor is any kernel using
+  `Pad(v)` with `v != 0`; using `sparse=true` for those silently drops the
+  nonzero background. It cannot be checked, which is why it is opt-in.
+
+  The candidate set is the nonzero pattern of the operands *dilated* by the
+  neighborhood distance, so it is only a win while that dilated pattern stays
+  much smaller than the tile: roughly density < `(2*neigh_dist+1)^-ndims`, about
+  11% for a 3x3 2D stencil. Note that a stencil dilates its own output, so an
+  iterated stencil fills in and crosses that threshold after a few sweeps.
+
+  The option is a no-op wherever the sparse sweep does not apply -- dense
+  arrays, a dense read variable, or a backend with no sparse-aware sweep -- and
+  those cases transparently run the dense sweep instead.
 """
-macro stencil(orig_ex)
+# Parse the leading `key=value` options of `@stencil`. Unambiguous against the
+# body: a stencil expression always writes to an *indexed* location, so a bare
+# `Symbol` on the left of `=` can only be an option.
+function parse_stencil_options(opts)
+    sweep_style = DenseSweep()
+    for opt in opts
+        if !Meta.isexpr(opt, :(=)) || !(opt.args[1] isa Symbol)
+            throw(ArgumentError("`@stencil` options must be `key=value`, got: $opt"))
+        end
+        key, value = opt.args[1], opt.args[2]
+        if key === :sparse
+            if !(value isa Bool)
+                throw(ArgumentError("`@stencil` option `sparse` must be the literal `true` or `false`, got: $value"))
+            end
+            sweep_style = value ? SparseSweep() : DenseSweep()
+        else
+            throw(ArgumentError("Unknown `@stencil` option: $key"))
+        end
+    end
+    return sweep_style
+end
+
+macro stencil(args...)
+    if isempty(args)
+        throw(ArgumentError("`@stencil` requires an expression"))
+    end
+    sweep_style = parse_stencil_options(args[1:end-1])
+    orig_ex = args[end]
     if !Meta.isexpr(orig_ex, :block)
         orig_ex = Expr(:block, orig_ex)
     end
@@ -1382,7 +1494,7 @@ macro stencil(orig_ex)
         end
         shadow_body = quote
             $inner_vars = (;$([Expr(:kw, v, v) for v in actual_read_vars]...))
-            $inner_stencil!($new_inner_f, $inner_write_var, $inner_vars)
+            $inner_stencil!($sweep_style, $new_inner_f, $inner_write_var, $inner_vars)
         end
         shadow_fn = Expr(:->, Expr(:tuple, shadow_params...), shadow_body)
         inner_fn_body = quote
