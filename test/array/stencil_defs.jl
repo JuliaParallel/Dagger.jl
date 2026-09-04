@@ -631,6 +631,92 @@ function test_stencil(; skip_highdim::Bool=false)
     =#
 end
 
+# `@stencil` on sparse `DArray`s whose tiles are device-resident.
+#
+# Two paths, and this checks both against the same stencil over a dense CPU
+# `DArray`:
+#
+#   - sparse operands, dense output: runs entirely on the device. The operand is
+#     read through `DeviceSparseMatrixCSC`'s device-side `getindex`, and the halo
+#     regions -- thin next to the center -- are materialized dense so the kernel
+#     can index them.
+#   - sparse output: no kernel can insert a nonzero into a device CSC, so the
+#     sweep stages through host storage and the result is uploaded again. The
+#     tile must still come back device-resident, which is the last check here.
+#
+# `scope` selects the backend; the caller has already entered it.
+function test_stencil_sparse_gpu()
+    n, blk = 16, 8
+    part = Blocks(blk, blk)
+    mkmat() = (Random.seed!(1234); SparseArrays.sprand(Float64, n, n, 0.25))
+
+    # Reference: the same stencils over dense CPU tiles.
+    dense_ref(boundary) = begin
+        Ad = distribute(Array(mkmat()), part)
+        D = zeros(part, Float64, n, n)
+        @stencil D[idx] = sum(@neighbors(Ad[idx], 1, boundary))
+        collect(D)
+    end
+
+    @testset "sparse operands, dense output: $(nameof(typeof(boundary)))" for boundary in
+            (Wrap(), Pad(0.0), Pad(1.5), Clamp(), Reflect(true), AntiReflect(true),
+             LinearExtrapolate())
+        A = distribute(mkmat(), part)
+        D = zeros(part, Float64, n, n)
+        @stencil D[idx] = sum(@neighbors(A[idx], 1, boundary))
+        @test collect(D) ≈ dense_ref(boundary)
+    end
+
+    @testset "sparse operands, dense output: distance 2" begin
+        A = distribute(mkmat(), part)
+        D = zeros(part, Float64, n, n)
+        @stencil D[idx] = sum(@neighbors(A[idx], 2, Wrap()))
+
+        Ad = distribute(Array(mkmat()), part)
+        R = zeros(part, Float64, n, n)
+        @stencil R[idx] = sum(@neighbors(Ad[idx], 2, Wrap()))
+        @test collect(D) ≈ collect(R)
+    end
+
+    @testset "sparse output stages through the host" begin
+        A = distribute(mkmat(), part)
+        C = SparseArrays.spzeros(part, Float64, n, n)
+        @stencil C[idx] = sum(@neighbors(A[idx], 1, Pad(0.0)))
+        @test collect(C) ≈ dense_ref(Pad(0.0))
+
+        # ... and with the dilated sweep, which the host staging also has to honor.
+        C2 = SparseArrays.spzeros(part, Float64, n, n)
+        @stencil sparse=true C2[idx] = sum(@neighbors(A[idx], 1, Pad(0.0)))
+        @test collect(C2) ≈ dense_ref(Pad(0.0))
+    end
+
+    @testset "sparse output stays device-resident" begin
+        # A host-staged sweep that forgot to upload its result would leave the
+        # tile on the host, and the next sweep would silently run on the CPU.
+        tile_spaces(D) = unique(map(Dagger.chunks(D)) do c
+            fetch(Dagger.@spawn (x -> Dagger.value_memory_space(x.mat))(c))
+        end)
+
+        A = distribute(mkmat(), part)
+        C = SparseArrays.spzeros(part, Float64, n, n)
+        want = tile_spaces(C)
+        @stencil C[idx] = sum(@neighbors(A[idx], 1, Pad(0.0)))
+        @test tile_spaces(C) == want
+
+        # Chain a second sweep off the first one's output.
+        @stencil C[idx] = sum(@neighbors(C[idx], 1, Pad(0.0)))
+        @test tile_spaces(C) == want
+
+        Aref = distribute(mkmat(), part)
+        R = SparseArrays.spzeros(part, Float64, n, n)
+        Dagger.with_options(scope=Dagger.scope(worker=1, thread=1)) do
+            @stencil R[idx] = sum(@neighbors(Aref[idx], 1, Pad(0.0)))
+            @stencil R[idx] = sum(@neighbors(R[idx], 1, Pad(0.0)))
+        end
+        @test collect(C) ≈ collect(R)
+    end
+end
+
 #############################################################################
 # Sparse tiles
 #############################################################################

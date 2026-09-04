@@ -19,6 +19,9 @@ end
                 # The Metal backend breaks on the 3D/4D stencil tests and
                 # causes subsequent tests to fail, so skip them there.
                 test_stencil(; skip_highdim=(kind == :Metal || kind == :ROCm))
+                @testset "sparse" begin
+                    test_stencil_sparse_gpu()
+                end
             end
         end
     end
