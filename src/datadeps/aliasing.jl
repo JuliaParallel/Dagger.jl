@@ -302,6 +302,14 @@ struct AliasedObjectCacheStore
     derived::Dict{AbstractAliasing,AbstractAliasing}
     stored::Dict{MemorySpace,Set{AbstractAliasing}}
     values::Dict{MemorySpace,Dict{AbstractAliasing,Chunk}}
+    # The aliasing of each buffer in `values`, *in the space that holds it*.
+    # `set_stored!` computes this anyway (it registers the buffer in `derived`),
+    # so retaining it is free -- and it is the only rank-uniform description of
+    # a buffer's own extent available after planning, since recomputing it means
+    # calling `aliasing`, a collective under SPMD. See `gather_free_syncdeps!`.
+    # Only Datadeps-allocated copies get an entry; the user's originals (added
+    # by `set_key_stored!`) do not, as they are never freed.
+    value_ainfos::Dict{MemorySpace,Dict{AbstractAliasing,AbstractAliasing}}
     # The `(space, key)` pairs identifying the user's original data, as opposed
     # to Datadeps-allocated copies. A `key` ainfo is recorded here at the space
     # where it is first registered (its source space, see `set_key_stored!`),
@@ -315,6 +323,7 @@ AliasedObjectCacheStore(accel::Acceleration) =
                             Dict{AbstractAliasing,AbstractAliasing}(),
                             Dict{MemorySpace,Set{AbstractAliasing}}(),
                             Dict{MemorySpace,Dict{AbstractAliasing,Chunk}}(),
+                            Dict{MemorySpace,Dict{AbstractAliasing,AbstractAliasing}}(),
                             Set{Tuple{MemorySpace,AbstractAliasing}}())
 
 """
@@ -354,7 +363,28 @@ function set_stored!(cache::AliasedObjectCacheStore, dest_space::MemorySpace, va
     push!(get!(Set{AbstractAliasing}, cache.stored, dest_space), key)
     values_dict = get!(Dict{AbstractAliasing,Chunk}, cache.values, dest_space)
     values_dict[key] = value
+    # Keep `value_ainfo` around: this is the one point where the buffer's own
+    # aliasing is computed on every rank, and the free loop needs it later.
+    ainfos_dict = get!(Dict{AbstractAliasing,AbstractAliasing}, cache.value_ainfos, dest_space)
+    ainfos_dict[key] = value_ainfo
     return
+end
+
+"""
+    stored_value_ainfo(cache, space, key) -> Union{AbstractAliasing,Nothing}
+
+The aliasing of the buffer `cache.values[space][key]` *in `space`*, as recorded
+by `set_stored!` when the buffer was allocated. `nothing` for the user's
+original data, which never gets one (and is never freed).
+
+This is deliberately a lookup rather than a fresh `aliasing` call: under uniform
+(SPMD) execution `aliasing` is a collective, so the buffer's extent cannot be
+recomputed once planning is over.
+"""
+function stored_value_ainfo(cache::AliasedObjectCacheStore, space::MemorySpace, key::AbstractAliasing)
+    ainfos = get(cache.value_ainfos, space, nothing)
+    ainfos === nothing && return nothing
+    return get(ainfos, key, nothing)
 end
 function set_key_stored!(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::AbstractAliasing, value::Chunk)
     @check_uniform(value)
@@ -935,56 +965,35 @@ function _get_read_deps!(state::DataDepsState, dest_space::MemorySpace, ainfo::A
     end
 end
 """
-    gather_free_syncdeps!(state, space, key_ainfo, remote_arg, write_num, chunk_to_ainfos, syncdeps)
+    gather_overlap_syncdeps!(state, ainfo, write_num, syncdeps)
 
-Collect into `syncdeps` every task that must complete before the backing buffer
-`remote_arg` (a Datadeps-allocated copy in `space`) can be freed.
+Register `ainfo` into `state.ainfos_lookup` and add to `syncdeps` the owner and
+readers of every *other* tracked ainfo overlapping it. Used by
+`gather_free_syncdeps!` for buffers that are not themselves a directly-tracked
+task dependency, so their overlaps are not already precomputed in
+`state.ainfos_overlaps`.
 
-If `remote_arg` is itself a tracked slot (the common case -- whole-object
-arguments), its ainfos are in `chunk_to_ainfos` and we reuse their precomputed
-overlap sets. Otherwise the buffer only underlies wrapper arguments (e.g. it is
-the parent array shared by several `view`s, whose tracked slots are the views
-rather than this buffer); in that case we compute the buffer's own aliasing and
-sync with every tracked ainfo that overlaps its memory. Under uniform (SPMD)
-execution that computation is unavailable, and we fall back to the rank-uniform
-cache key ainfo `key_ainfo`.
+We reuse the lookup's interval-tree overlap search (which prunes most
+`will_alias` comparisons via bounding spans) rather than scanning every tracked
+ainfo. `intersect` requires its query ainfo to be registered, so we `push!` it
+in first; this is safe because the free loop is the final step of
+`distribute_tasks!`, after which the lookup is no longer consulted for
+scheduling. The search is space-filtered for free: every span carries its space,
+so only ainfos in `ainfo`'s own space can be returned.
+
+Safe to call with an `ainfo` that has a content-equal (same `.hash`) entry
+already registered elsewhere in the lookup: `AliasingWrapper` equality (and
+`Dict` lookups keyed by it) are by content hash, not object identity, so a
+redundant push here costs only a duplicate interval-tree entry, never a missed
+or double-counted syncdep -- `syncdeps` is a `Set`, and the `other_ainfo ===
+ainfo` self-skip below excludes only the literal instance just pushed (which,
+being brand new, was never itself recorded as anyone's owner or reader).
 """
-function gather_free_syncdeps!(state::DataDepsState, space::MemorySpace, key_ainfo, remote_arg, write_num::Int, chunk_to_ainfos, syncdeps)
-    ainfos = get(chunk_to_ainfos, remote_arg, nothing)
-    if ainfos !== nothing
-        for ainfo in ainfos
-            get_write_deps!(state, space, ainfo, write_num, syncdeps)
-        end
-        return
-    end
-
-    # Under uniform (SPMD) execution we cannot compute the buffer's aliasing here:
-    # `aliasing` is collective (the owner computes and broadcasts), and only the
-    # owning rank holds the data, so having it alone reach the call below would
-    # broadcast into a collective no other rank enters -- consuming a tag on one
-    # rank (desyncing every subsequent `to_tag`) and then deadlocking. Fall back
-    # to the rank-uniform cache key ainfo, which is metadata available identically
-    # on every rank. The cache stores raw ainfos, so wrap it to match the
-    # `AliasingWrapper` keys used by the overlap tracking.
-    if uniform_execution()
-        wrapped = key_ainfo isa AliasingWrapper ? key_ainfo : AliasingWrapper(key_ainfo)
-        haskey(state.ainfos_overlaps, wrapped) &&
-            get_write_deps!(state, space, wrapped, write_num, syncdeps)
-        return
-    end
-
-    # Buffer underlies wrapper arguments: find all tracked ainfos overlapping
-    # it. We reuse the lookup's interval-tree overlap search (which prunes most
-    # `will_alias` comparisons via bounding spans) rather than scanning every
-    # tracked ainfo. `intersect` requires its query ainfo to be registered, so
-    # we `push!` the buffer's aliasing in first; this is safe because the free
-    # loop is the final step of `distribute_tasks!`, after which the lookup is
-    # no longer consulted for scheduling.
-    buf_ainfo = AliasingWrapper(aliasing(remote_arg))
-    buf_ainfo.inner isa NoAliasing && return
-    ainfo_idx = push!(state.ainfos_lookup, buf_ainfo)
-    for other_ainfo in intersect(state.ainfos_lookup, buf_ainfo; ainfo_idx)
-        other_ainfo === buf_ainfo && continue
+function gather_overlap_syncdeps!(state::DataDepsState, ainfo::AliasingWrapper, write_num::Int, syncdeps)
+    ainfo.inner isa NoAliasing && return
+    ainfo_idx = push!(state.ainfos_lookup, ainfo)
+    for other_ainfo in intersect(state.ainfos_lookup, ainfo; ainfo_idx)
+        other_ainfo === ainfo && continue
         owner = get(state.ainfos_owner, other_ainfo, nothing)
         if owner !== nothing
             owner_task, owner_write_num = owner
@@ -994,6 +1003,90 @@ function gather_free_syncdeps!(state::DataDepsState, space::MemorySpace, key_ain
             reader_write_num != write_num && push!(syncdeps, ThunkSyncdep(reader_task))
         end
     end
+end
+
+# Debug-only invariant: freeing a buffer must never produce an empty syncdep
+# set while the state still records a writer or readers overlapping it. Gated
+# behind this `Ref` (following the same pattern as `CHECK_UNIFORMITY`,
+# acceleration.jl:75) so it costs nothing -- not even a function call, since
+# `assert_free_syncdeps!` itself is only ever invoked from within
+# `gather_free_syncdeps!`, which is already off the hot path -- in normal
+# operation. Flip it on in tests that want this checked.
+#
+# Deliberately re-derives the answer independently of `gather_free_syncdeps!`
+# / `gather_overlap_syncdeps!` (a linear scan over every tracked ainfo plus
+# `will_alias`, instead of the interval-tree search they use) so that a bug in
+# the fast path can't also hide from the assertion meant to catch it.
+const DATADEPS_ASSERT_FREE_SYNCDEPS = Ref(false)
+function assert_free_syncdeps!(state::DataDepsState, ainfo::AliasingWrapper, write_num::Int, syncdeps)
+    DATADEPS_ASSERT_FREE_SYNCDEPS[] || return
+    ainfo.inner isa NoAliasing && return
+    for (other_ainfo, owner) in state.ainfos_owner
+        owner === nothing && continue
+        owner_task, owner_write_num = owner
+        owner_write_num == write_num && continue
+        will_alias(ainfo, other_ainfo) || continue
+        @assert ThunkSyncdep(owner_task) in syncdeps "gather_free_syncdeps! omitted a live writer $owner_task ($other_ainfo) for buffer overlapping $ainfo"
+    end
+    for (other_ainfo, readers) in state.ainfos_readers
+        for (reader_task, reader_write_num) in readers
+            reader_write_num == write_num && continue
+            will_alias(ainfo, other_ainfo) || continue
+            @assert ThunkSyncdep(reader_task) in syncdeps "gather_free_syncdeps! omitted a live reader $reader_task ($other_ainfo) for buffer overlapping $ainfo"
+        end
+    end
+end
+
+"""
+    gather_free_syncdeps!(state, space, buf_ainfo, remote_arg, write_num, chunk_to_ainfos, syncdeps)
+
+Collect into `syncdeps` every task that must complete before the backing buffer
+`remote_arg` (a Datadeps-allocated copy in `space`) can be freed. `buf_ainfo` is
+the buffer's own aliasing *in `space`*, from `stored_value_ainfo`.
+
+If `remote_arg` is itself a tracked slot (the common case -- whole-object
+arguments), its ainfos are in `chunk_to_ainfos` and we reuse their precomputed
+overlap sets. Otherwise the buffer only underlies wrapper arguments (e.g. it is
+the parent array shared by several `view`s, whose tracked slots are the views
+rather than this buffer), and the tasks to wait on are exactly those touching
+memory *inside* the buffer -- i.e. the tracked ainfos in `space` that overlap
+`buf_ainfo`.
+
+N.B. The buffer's aliasing has to be supplied rather than computed here. The
+object cache's `key` ainfo describes the original object in its *source* space,
+and every span carries its space, so a key ainfo can never overlap a
+destination-space ainfo -- keying this lookup on it yields an empty syncdep set
+and an `unsafe_free!` that races the tasks still reading the buffer. Nor can we
+recompute it: `aliasing` is a collective under uniform (SPMD) execution (the
+owner computes and broadcasts), and only the owning rank holds the data, so
+reaching it from here would broadcast into a collective no other rank enters --
+consuming a tag on one rank (desyncing every subsequent `to_tag`) and then
+deadlocking. `set_stored!` already computed this ainfo, on every rank, when it
+allocated the buffer; we simply use what it recorded.
+"""
+function gather_free_syncdeps!(state::DataDepsState, space::MemorySpace, buf_ainfo, remote_arg, write_num::Int, chunk_to_ainfos, syncdeps)
+    ainfos = get(chunk_to_ainfos, remote_arg, nothing)
+    if ainfos !== nothing
+        for ainfo in ainfos
+            get_write_deps!(state, space, ainfo, write_num, syncdeps)
+            assert_free_syncdeps!(state, ainfo, write_num, syncdeps)
+        end
+        return
+    end
+
+    # Every freeable buffer was allocated by `set_stored!`, which records its
+    # aliasing; only the user's originals (never freed) lack one. Returning
+    # quietly here would emit an `unsafe_free!` with an empty syncdep set -- the
+    # exact use-after-free this function exists to prevent -- so treat a missing
+    # entry as the bookkeeping bug it is.
+    buf_ainfo === nothing &&
+        error("No recorded aliasing for Datadeps buffer in $space; cannot determine free syncdeps")
+
+    # Buffer underlies wrapper arguments: sync with the owner and readers of
+    # every tracked ainfo overlapping it.
+    wrapped = buf_ainfo isa AliasingWrapper ? buf_ainfo : AliasingWrapper(buf_ainfo)
+    gather_overlap_syncdeps!(state, wrapped, write_num, syncdeps)
+    assert_free_syncdeps!(state, wrapped, write_num, syncdeps)
     return
 end
 function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::MemorySpace, ainfo::AbstractAliasing, task, write_num; copy_src::Union{MemorySpace,Nothing}=nothing)
