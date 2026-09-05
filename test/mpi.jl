@@ -69,6 +69,7 @@ inc!(X) = (X .+= 1; nothing)
 add1!(X) = (X .+= 1; nothing)
 scale2!(X) = (X .*= 2; nothing)
 sum_into!(r, X) = (r[] = Int(sum(X)); nothing)
+sum_into_f!(r, X) = (r[] = Float64(sum(X)); nothing)
 function upper_double!(X)
     for j in axes(X, 2), i in 1:j
         X[i, j] *= 2
@@ -433,6 +434,44 @@ end
     # Collective uniform fetches: identical on every rank
     @test fetch(c) ≈ ref_blk
     @test fetch(cv_top) ≈ ref_blk[1:2, :]
+end
+
+@testset "Partial slot currency" begin
+    # The load-bearing invariant behind uninitialized slots: a task may read
+    # spans that were never written in its own space, and those must be copied
+    # in rather than read out of the untransferred backing buffer.
+    #
+    # Make *part* of a chunk current on a non-owner rank by writing through a
+    # view there, then read the whole parent on that same rank. Rows 3:8 have
+    # never travelled to it, so the remainder copy is the only thing standing
+    # between this test and garbage.
+    Random.seed!(11)
+    A = rand(8, 8)
+
+    # N.B. Snapshot the expectation *before* the region. `A` is a non-Chunk
+    # argument, so rank 0 owns it and Datadeps writes the result back into it in
+    # place; deriving `ref` afterwards would fold the update into the baseline
+    # and then add it a second time. It would also disagree across ranks, since
+    # only rank 0's copy of `A` is written back.
+    ref = copy(A); ref[1:2, :] .+= 1
+
+    c = Dagger.tochunk(A)  # rank-0 owned
+    cv = view(c, 1:2, 1:8)
+    r = Ref(0.0)
+
+    exec_rank = min(1, nranks-1)
+    Dagger.spawn_datadeps() do
+        Dagger.@spawn scope=rank_scope(exec_rank) add1!(InOut(cv))
+        Dagger.@spawn scope=rank_scope(exec_rank) sum_into_f!(InOut(r), In(c))
+    end
+
+    # Uniform on every rank: the view's write is visible to the whole-parent
+    # read, and the remainder (rows 3:8) is pulled from the owner
+    @test fetch(c) ≈ ref
+    if rank == 0
+        @test A ≈ ref                # written back into the user's array
+        @test r[] ≈ sum(ref)         # `r` is likewise rank-0 owned
+    end
 end
 
 @testset "DTask arguments" begin

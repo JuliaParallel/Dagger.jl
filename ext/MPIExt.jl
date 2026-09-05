@@ -631,9 +631,6 @@ end
 
 # An MPIRef's data is only inspectable on the rank that owns it; other ranks
 # must not attempt to `unwrap`/`aliasing` it during (rank-uniform) planning.
-Dagger.aliasing_available(x::Chunk{<:Any,<:MPIRef}) =
-    x.handle.rank == MPI.Comm_rank(x.handle.comm)
-
 to_tag(ref::MPIRef) = to_tag(ref.id)
 
 move(from_proc::Processor, to_proc::Processor, x::MPIRef) =
@@ -1978,13 +1975,17 @@ mpi_result_space(result, proc::MPIProcessor) =
 #
 # Device processors (CUDA/ROCm/…) adapt values (e.g. Matrix→CuArray), so
 # promote_op on chunktypes is not a safe SPMD stamp; keep full broadcast there.
+#
+# N.B. Both inference queries go through Dagger's memos: this runs per task on
+# every rank, and an uncached compiler invocation per dispatch costs far more than
+# the task bodies it is deciding about.
 function mpi_execute_bcast_plan(f, args, proc::MPIProcessor)
+    arg_types = map(chunktype, args)
     if !(proc.innerProc isa ThreadProc)
-        inferred = Base.promote_op(f, map(chunktype, args)...)
+        inferred = Dagger.cached_return_type(f, arg_types)
         return (; need_type_bcast=true, nothrow=false, inferred)
     end
-    arg_types = map(chunktype, args)
-    inferred = Base.promote_op(f, arg_types...)
+    inferred = Dagger.cached_return_type(f, arg_types)
     # `Nothing` is a concrete type and is deliberately NOT forced onto the
     # broadcast path: a `nothing` return (the common in-place / mutating task)
     # is fully known on every rank (all ranks stamp `Chunk{Nothing}` and
@@ -1996,8 +1997,7 @@ function mpi_execute_bcast_plan(f, args, proc::MPIProcessor)
     if need_type_bcast
         return (; need_type_bcast=true, nothrow=false, inferred)
     end
-    effects = Base.infer_effects(f, Tuple{arg_types...})
-    nothrow = Core.Compiler.is_nothrow(effects)
+    nothrow = Dagger.cached_nothrow(f, arg_types)
     return (; need_type_bcast=false, nothrow, inferred)
 end
 
