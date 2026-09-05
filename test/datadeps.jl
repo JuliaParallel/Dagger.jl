@@ -182,6 +182,33 @@ function test_move_rewrap_aliasing(obj, dest_space)
     Dagger.subtract_spans!(tree, [Dagger.ManyMemorySpan{N}((Dagger.LocalMemorySpan(ss), Dagger.LocalMemorySpan(ds))) for (ss, ds) in zip(src_spans, dst_spans)])
 
     @test isempty(tree)
+
+    # Every Datadeps-allocated buffer must carry its destination-space aliasing.
+    # `gather_free_syncdeps!` needs it to find the tasks still using a buffer
+    # that is not itself a tracked slot (the parent of a `view`, say), and it
+    # cannot recompute it: `aliasing` is a collective under SPMD execution. A
+    # buffer that lost this entry would be freed with an empty syncdep set,
+    # racing its readers.
+    store = Dagger.unwrap(dummy_backing)
+    dest_buffers = get(store.values, dest_space, nothing)
+    @test dest_buffers !== nothing
+    if dest_buffers !== nothing
+        for (key, buf) in dest_buffers
+            Dagger.is_original(store, dest_space, key) && continue
+            buf_ainfo = Dagger.stored_value_ainfo(store, dest_space, key)
+            @test buf_ainfo !== nothing
+            buf_ainfo === nothing && continue
+            # It must describe the buffer itself, not the source object it was
+            # copied from -- that is the distinction the free path turns on.
+            recorded = Dagger.memory_spans(buf_ainfo)
+            actual = Dagger.memory_spans(Dagger.aliasing(buf, identity))
+            @test length(recorded) == length(actual)
+            for (r, a) in zip(recorded, actual)
+                @test Dagger.span_start(r) == Dagger.span_start(a)
+                @test Dagger.span_len(r) == Dagger.span_len(a)
+            end
+        end
+    end
 end
 @testset "Aliased Object Copying" begin
     nw = nprocs()
@@ -1099,6 +1126,110 @@ end
                 Dagger.@spawn sum(In(A))
             end
             fetch(result) ≈ sum(A)
+        end
+    end
+end
+
+# Regression tests for the free-syncdeps hole: `gather_free_syncdeps!`
+# (src/datadeps/aliasing.jl) must never hand back an empty syncdep set while
+# some task could still be reading or writing the buffer about to be freed.
+# Previously, the region barrier at the end of `spawn_datadeps` hid this --
+# every task had already retired by the time the free loop ran -- but that
+# cover disappears once frees can be deferred, so it needs to be correct on
+# its own merits.
+@testset "gather_free_syncdeps!" begin
+    @testset "overlap search finds a live writer" begin
+        # A buffer that is not itself a tracked slot (the shared parent behind
+        # a view, say) is not in `chunk_to_ainfos`, and its object-cache *key*
+        # ainfo describes the source object in the source space, so it can
+        # never overlap a destination-space ainfo. Driving the lookup from the
+        # buffer's own recorded aliasing must find the overlapping writer.
+        state = Dagger.DataDepsState()
+
+        # A directly-tracked ainfo (as if some task took `In`/`Out` of a view
+        # over part of `A`) with a live writer recorded against it.
+        A = zeros(8)
+        view_ainfo = Dagger.AliasingWrapper(Dagger.aliasing(view(A, 1:4)))
+        push!(state.ainfos_lookup, view_ainfo)
+        state.ainfos_readers[view_ainfo] = Pair{Dagger.DTask,Int}[]
+        writer_task = Dagger.@spawn 1 + 1
+        fetch(writer_task)
+        state.ainfos_owner[view_ainfo] = writer_task => 1
+
+        # The buffer being freed represents *all* of `A` (as the shared parent
+        # backing a view would), so it overlaps `view_ainfo` but is not
+        # content-identical to it -- `state.ainfos_overlaps` has no entry for
+        # it, matching the case that was silently mishandled.
+        buf_ainfo = Dagger.AliasingWrapper(Dagger.aliasing(A))
+        @test !haskey(state.ainfos_overlaps, buf_ainfo)
+
+        remote_arg = Dagger.tochunk(A)
+        space = Dagger.memory_space(remote_arg)
+        chunk_to_ainfos = IdDict{Any,Vector{Dagger.AliasingWrapper}}()
+        syncdeps = Set{Dagger.ThunkSyncdep}()
+        Dagger.gather_free_syncdeps!(state, space, buf_ainfo, remote_arg, 2,
+                                     chunk_to_ainfos, syncdeps)
+
+        @test !isempty(syncdeps)
+        @test Dagger.ThunkSyncdep(writer_task) in syncdeps
+    end
+
+    @testset "a buffer with no recorded aliasing is an error, not a silent free" begin
+        # Losing the recorded aliasing must not degrade to an empty syncdep
+        # set: that is exactly the use-after-free this path exists to prevent.
+        state = Dagger.DataDepsState()
+        remote_arg = Dagger.tochunk(zeros(4))
+        space = Dagger.memory_space(remote_arg)
+        chunk_to_ainfos = IdDict{Any,Vector{Dagger.AliasingWrapper}}()
+        @test_throws ErrorException Dagger.gather_free_syncdeps!(
+            state, space, nothing, remote_arg, 2, chunk_to_ainfos,
+            Set{Dagger.ThunkSyncdep}())
+    end
+
+    @testset "buffer underlying shared views" begin
+        # End-to-end version of the same hole: two views into disjoint slices
+        # of one parent array, each written by a task on the same remote
+        # worker. The parent array is moved there exactly once (`move_rewrap`
+        # dedups children of both views onto the same object-cache entry), and
+        # that shared parent buffer is never itself a direct task argument --
+        # it only "underlies" the two view arguments -- so its free syncdeps
+        # must be computed via the aliasing-overlap search, not a direct
+        # `chunk_to_ainfos` hit. Confirm every `unsafe_free!` task the region
+        # emits has a non-empty syncdep set.
+        if nprocs() >= 2
+            w = workers()[1]
+            A = rand(4, 4)
+            v1 = view(A, 1:2, :)
+            v2 = view(A, 3:4, :)
+            old_assert = Dagger.DATADEPS_ASSERT_FREE_SYNCDEPS[]
+            Dagger.DATADEPS_ASSERT_FREE_SYNCDEPS[] = true
+            logs = try
+                with_logs() do
+                    Dagger.spawn_datadeps() do
+                        Dagger.@spawn scope=Dagger.scope(worker=w) mut_V!(Out(v1))
+                        Dagger.@spawn scope=Dagger.scope(worker=w) mut_V!(Out(v2))
+                    end
+                end
+            finally
+                Dagger.DATADEPS_ASSERT_FREE_SYNCDEPS[] = old_assert
+            end
+            @test all(==(1), A)
+
+            free_tids = Int[]
+            for wl in keys(logs)
+                _logs = logs[wl]
+                for idx in 1:length(_logs[:core])
+                    core_log = _logs[:core][idx]
+                    if core_log.category == :add_thunk && core_log.kind == :start &&
+                       _logs[:taskfuncnames][idx] == "unsafe_free!"
+                        push!(free_tids, _logs[:id][idx].thunk_id::Int)
+                    end
+                end
+            end
+            @test !isempty(free_tids)
+            for tid in free_tids
+                @test !isempty(taskdeps_for_task(logs, tid))
+            end
         end
     end
 end
