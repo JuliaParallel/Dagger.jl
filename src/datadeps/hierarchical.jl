@@ -1488,13 +1488,14 @@ function _hierarchical_copy_from_and_free!(partition_states::Vector{DataDepsStat
         write_num = typemax(Int) - 1
 
         # Map each tracked slot chunk to its ainfos, exactly as flat
-        # `distribute_tasks!` does. A slot's object-cache *key* ainfo is computed
-        # from the source object, so it is frequently absent from `ainfo_arg`
-        # (which is keyed by destination-space ainfos). Keying the syncdep lookup
-        # on the key ainfo alone therefore yields an empty syncdep set, and the
-        # resulting `unsafe_free!` races the very tasks still reading that slot
-        # -- freeing e.g. the copy-in buffer for an `In(::DTask)` argument out
-        # from under its consumer.
+        # `distribute_tasks!` does. A buffer that is not itself a tracked slot
+        # is not covered by this map, and its object-cache *key* ainfo cannot
+        # stand in for it (that ainfo describes the source object, in the source
+        # space); `gather_free_syncdeps!` handles those from the buffer's own
+        # recorded destination-space aliasing instead. Getting this wrong yields
+        # an empty syncdep set, and an `unsafe_free!` that races the very tasks
+        # still reading that slot -- freeing e.g. the copy-in buffer for an
+        # `In(::DTask)` argument out from under its consumer.
         chunk_to_ainfos = IdDict{Any,Vector{AliasingWrapper}}()
         for (ainfo, remote_arg_ws) in state.ainfo_arg
             for remote_arg_w in remote_arg_ws
@@ -1513,7 +1514,8 @@ function _hierarchical_copy_from_and_free!(partition_states::Vector{DataDepsStat
                 haskey(freed, remote_arg) && continue
                 freed[remote_arg] = nothing
                 free_syncdeps = Set{ThunkSyncdep}()
-                gather_free_syncdeps!(state, remote_space, ainfo, remote_arg,
+                buf_ainfo = stored_value_ainfo(obj_cache, remote_space, ainfo)
+                gather_free_syncdeps!(state, remote_space, buf_ainfo, remote_arg,
                                       write_num, chunk_to_ainfos, free_syncdeps)
                 if registry !== nothing
                     orig = get(state.remote_arg_to_original, remote_arg, nothing)

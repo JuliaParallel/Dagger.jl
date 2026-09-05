@@ -231,7 +231,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             haskey(freed, remote_arg) && continue
             freed[remote_arg] = nothing
             free_syncdeps = Set{ThunkSyncdep}()
-            gather_free_syncdeps!(state, remote_space, ainfo, remote_arg, write_num, chunk_to_ainfos, free_syncdeps)
+            buf_ainfo = stored_value_ainfo(obj_cache, remote_space, ainfo)
+            gather_free_syncdeps!(state, remote_space, buf_ainfo, remote_arg, write_num, chunk_to_ainfos, free_syncdeps)
             # `tag` keeps the free task rank-uniform under MPI/uniform execution.
             Dagger.@spawn scope=free_scope syncdeps=free_syncdeps tag=datadeps_task_tag() Dagger.unsafe_free!(remote_arg)
         end
