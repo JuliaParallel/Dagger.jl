@@ -810,6 +810,11 @@ function partition_dag(dag::SimpleDiGraph, task_metas::Vector{HierarchicalTaskMe
     if multi_owner
         owner_to_partition = Dict(o => i for (i, o) in enumerate(owners))
         default_scope = DefaultScope()
+        # Hoisted out of the per-vertex loop and refilled: these are scratch,
+        # dead across iterations, and allocating them per task put two arrays
+        # per task on the planning path.
+        write_affinity = zeros(Int, n_owners)
+        read_affinity = zeros(Int, n_owners)
         for v in 1:n
             meta = task_metas[v]
             task_scope = @something(meta.pair.spec.options.compute_scope, meta.pair.spec.options.scope, default_scope)
@@ -851,8 +856,8 @@ function partition_dag(dag::SimpleDiGraph, task_metas::Vector{HierarchicalTaskMe
             # N.B. Argument *counts*, not byte counts: `datasize` of a chunk is
             # only known on its owning rank (see `datasize(::MPIRef)`), and this
             # decision must come out identical on every rank under SPMD.
-            write_affinity = zeros(Int, n_owners)
-            read_affinity = zeros(Int, n_owners)
+            fill!(write_affinity, 0)
+            fill!(read_affinity, 0)
             for dep in meta.deps
                 arg_space = memory_space(dep.arg_w.arg)
                 arg_oid = partition_affinity_id(arg_space)
