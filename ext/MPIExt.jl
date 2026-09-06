@@ -2180,11 +2180,14 @@ mpi_result_space(result, proc::MPIProcessor) =
 # the task bodies it is deciding about.
 function mpi_execute_bcast_plan(f, args, proc::MPIProcessor)
     arg_types = map(chunktype, args)
+    # One key for both memo lookups: building it splats `arg_types` into a
+    # `Type` and allocates, and this runs per task on every rank.
+    key = Dagger.call_signature_key(f, arg_types)
     if !(proc.innerProc isa ThreadProc)
-        inferred = Dagger.cached_return_type(f, arg_types)
+        inferred = Dagger.cached_return_type(key, f, arg_types)
         return (; need_type_bcast=true, nothrow=false, inferred)
     end
-    inferred = Dagger.cached_return_type(f, arg_types)
+    inferred = Dagger.cached_return_type(key, f, arg_types)
     # `Nothing` is a concrete type and is deliberately NOT forced onto the
     # broadcast path: a `nothing` return (the common in-place / mutating task)
     # is fully known on every rank (all ranks stamp `Chunk{Nothing}` and
@@ -2196,7 +2199,7 @@ function mpi_execute_bcast_plan(f, args, proc::MPIProcessor)
     if need_type_bcast
         return (; need_type_bcast=true, nothrow=false, inferred)
     end
-    nothrow = Dagger.cached_nothrow(f, arg_types)
+    nothrow = Dagger.cached_nothrow(key, f, arg_types)
     return (; need_type_bcast=false, nothrow, inferred)
 end
 
