@@ -140,7 +140,33 @@ end
 # space-keyed currency tracking (`arg_current` / `arg_owner` / per-space slots),
 # which is what actually breaks. It also keys on the argument object, so a
 # `ChunkView` and the `Chunk` it views are tracked separately and their sharing
-# is missed. Anyone reviving this must fix both before flipping the gate.
+# is missed.
+#
+# A third area needs re-checking, in the free loop rather than in planning.
+# `_hierarchical_copy_from_and_free!` walks one partition's object cache at a
+# time and derives each buffer's free syncdeps from *that* partition's
+# `ainfos_owner` / `ainfos_readers` / `ainfos_lookup`. That is exact today only
+# because a buffer is reachable solely from the partition whose cache allocated
+# it: every partition builds its own slots through its own
+# `AliasedObjectCacheStore`, and the one mechanism that hands a slot across a
+# partition boundary is `_sync_incoming_ownership!` below, which never runs.
+# Re-enable it and a consumer partition's boundary copy-to reads `owner_slot`, a
+# buffer living in the *producer's* cache and absent from the consumer's, so
+# per-partition tracking alone cannot see that reader. (The `freed` dedup does
+# not help: the buffer is in exactly one cache, so there is nothing to
+# deduplicate.)
+#
+# The free loop already anticipates this by also syncing on `entry.owner_task`,
+# the chunk's final global writer, which transitively covers every reader that
+# is an ancestor of it -- each cross-partition hand-off makes the consumer's
+# copy-to wait on the producer, and the next writer waits on that copy. What
+# that argument does not obviously reach is a consumer partition that only
+# *reads* the chunk and never commits ownership: its boundary copy-to is not an
+# ancestor of the final writer, so nothing orders it against the free. Confirm
+# that case (or extend the syncdeps to every partition the registry entry
+# names) before flipping the gate.
+#
+# Anyone reviving this must settle all three before flipping the gate.
 #
 # Each partition schedules with its own `DataDepsState`, so `arg_owner` /
 # `arg_history` / physical slots are per-partition. When a backing chunk is
@@ -1481,6 +1507,13 @@ function _hierarchical_copy_from_and_free!(partition_states::Vector{DataDepsStat
     # several ainfos, or recorded in more than one partition's object cache, must
     # be freed exactly once. A double `unsafe_free!` is harmless on CPU (refcount
     # decrement) but releases device memory twice on GPU backends.
+    #
+    # N.B. The per-partition syncdep derivation below is exact only while a
+    # buffer is reachable from the single partition whose cache allocated it,
+    # which holds because `_sync_incoming_ownership!` (the only cross-partition
+    # slot hand-off) is currently dead code. See the constraint recorded with
+    # `SharedChunkRegistry` above before re-enabling parallel planning across
+    # memory spaces.
     freed = IdDict{Any,Nothing}()
     for pid in 1:n_partitions
         state = partition_states[pid]
