@@ -108,7 +108,7 @@ function _jacobi_smooth!(u::DVector, A::DMatrix, dinv::DVector, b::DVector,
     ωT = eltype(u)(ω)
     part = u.partitioning
     for _ in 1:nsweeps
-        mul!(r, A, u)
+        LinearAlgebra.mul!(r, A, u)
         maybe_copy_buffered(u => part, dinv => part, r => part, b => part) do u, dinv, r, b
             uc, dc, rc, bc = u.chunks, dinv.chunks, r.chunks, b.chunks
             Dagger.spawn_datadeps() do
@@ -123,7 +123,7 @@ function _jacobi_smooth!(u::DVector, A::DMatrix, dinv::DVector, b::DVector,
 end
 
 function _amg_restrict_residual!(res::DVector, A::DMatrix, u::DVector, b::DVector)
-    mul!(res, A, u)
+    LinearAlgebra.mul!(res, A, u)
     part = res.partitioning
     maybe_copy_buffered(res => part, b => part) do res, b
         rc, bc = res.chunks, b.chunks
@@ -144,11 +144,11 @@ function _vcycle!(u::DVector, M::GlobalAMG, b::DVector, ℓ::Int)
     L = M.levels[ℓ]
     _jacobi_smooth!(u, L.A, L.dinv, b, L.res, M.relax, M.presweeps)
     _amg_restrict_residual!(L.res, L.A, u, b)
-    mul!(L.coarse_b, L.P', L.res)
+    LinearAlgebra.mul!(L.coarse_b, L.P', L.res)
     fill!(L.coarse_x, zero(eltype(L.coarse_x)))
     _vcycle!(L.coarse_x, M, L.coarse_b, ℓ + 1)
-    mul!(L.res, L.P, L.coarse_x)
-    axpy!(one(eltype(u)), L.res, u)
+    LinearAlgebra.mul!(L.res, L.P, L.coarse_x)
+    LinearAlgebra.axpy!(one(eltype(u)), L.res, u)
     _jacobi_smooth!(u, L.A, L.dinv, b, L.res, M.relax, M.postsweeps)
     return u
 end
