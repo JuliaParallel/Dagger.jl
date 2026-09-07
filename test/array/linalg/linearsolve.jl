@@ -122,14 +122,14 @@ end
     DA = distribute(Adense, Blocks(k, k))
     Db = distribute(b, Blocks(k))
 
-    cache = init(LinearProblem(DA, Db), KrylovJL_CG();
+    cache = LinearSolve.init(LinearProblem(DA, Db), KrylovJL_CG();
         abstol = 1e-12, reltol = 1e-10)
-    sol1 = solve!(cache)
+    sol1 = LinearSolve.solve!(cache)
     @test collect(sol1.u) ≈ Adense \ b rtol = 1e-6
 
     b2 = rand(n)
     cache.b = distribute(b2, Blocks(k))
-    sol2 = solve!(cache)
+    sol2 = LinearSolve.solve!(cache)
     @test collect(sol2.u) ≈ Adense \ b2 rtol = 1e-6
 
     P = Dagger.JacobiPreconditioner(DA)
@@ -138,13 +138,13 @@ end
     @test collect(sol_p.u) ≈ Adense \ b rtol = 1e-6
 end
 
-# Matrix-free: the solvers never form `A`, they only need `mul!` over DVectors.
-struct DiagOp{V}
-    d::V
+# Matrix-free: `LinearProblem` only accepts `AbstractMatrix` / SciML operators
+# as `A` (anything else is treated as an ODE-style `f`). Subtype `AbstractMatrix`
+# so SciML stores the operator, then implement only `mul!` — no entries.
+struct DiagOp{T} <: AbstractMatrix{T}
+    d::Dagger.DVector{T}
 end
 Base.size(A::DiagOp) = (length(A.d), length(A.d))
-Base.size(A::DiagOp, i::Integer) = i <= 2 ? length(A.d) : 1
-Base.eltype(A::DiagOp) = eltype(A.d)
 function LinearAlgebra.mul!(y::Dagger.DVector, A::DiagOp, x::Dagger.DVector)
     y .= A.d .* x
     return y

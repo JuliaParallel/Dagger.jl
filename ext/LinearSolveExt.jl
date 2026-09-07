@@ -234,8 +234,20 @@ mutable struct DaggerDirectCache
     F::Any
 end
 
+# Split per algorithm: a Union here is ambiguous with LinearSolve's
+# `init_cacheval(::PureUMFPACKFactorization, ::AbstractArray, …)` (more specific
+# on `alg`, less specific on `A`).
 function LinearSolve.init_cacheval(
-        ::Union{PureKLUFactorization, PureUMFPACKFactorization},
+        ::PureKLUFactorization,
+        A::DMatrix, b, u, Pl, Pr,
+        maxiters::Int, abstol, reltol,
+        verbose::Union{LinearVerbosity, Bool}, assumptions::OperatorAssumptions
+    )
+    return DaggerDirectCache(nothing)
+end
+
+function LinearSolve.init_cacheval(
+        ::PureUMFPACKFactorization,
         A::DMatrix, b, u, Pl, Pr,
         maxiters::Int, abstol, reltol,
         verbose::Union{LinearVerbosity, Bool}, assumptions::OperatorAssumptions
