@@ -99,7 +99,7 @@
 #   request/response protocol -- see `run_all_mpi` vs `run_all_external`).
 #   Defaults to "0" (disabled; plain subprocess, worker.jl).
 # - BENCHMARK_SECONDS: Time budget (seconds) per benchmark. Defaults to "30".
-# - BENCHMARK_SAMPLES: Max samples per benchmark. Defaults to "5".
+# - BENCHMARK_SAMPLES: Max samples per benchmark. Defaults to "7".
 # - BENCHMARK_PROC_TIMEOUT: Wall-clock seconds to wait for a single benchmark
 #   before assuming the worker is wedged, killing it, and treating it like an
 #   OOM (skip this and larger scales, restart). Defaults to "3600".
