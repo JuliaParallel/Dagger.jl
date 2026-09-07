@@ -34,9 +34,24 @@ function true_relres(A, x, b)
     return LinearAlgebra.norm2(r) / LinearAlgebra.norm2(b)
 end
 
-function solve_gmres(DA, Db, M; itmax=200, rtol=1e-8)
-    x, stats = Krylov.gmres(DA, Db; M=M, atol=1e-12, rtol=rtol, itmax=itmax, memory=50)
+function solve_gmres(DA, Db, M; itmax=400, rtol=1e-10)
+    # Stop on a tight *preconditioned* residual so the un-preconditioned
+    # `‖Ax−b‖` we assert below actually lands under 1e-6. `memory=50` plus
+    # `rtol=1e-8` was enough for `stats.solved` and not enough for that.
+    n = length(Db)
+    x, stats = Krylov.gmres(DA, Db; M=M, atol=1e-14, rtol=rtol, itmax=itmax,
+                            memory=min(n, 80))
     return x, stats, true_relres(DA, x, Db)
+end
+
+function jacobi_only_relres(A, b, relax, nsweeps)
+    dinv = 1.0 ./ diag(A)
+    u = zeros(length(b))
+    ω = Float64(relax)
+    for _ in 1:nsweeps
+        u .+= ω .* dinv .* (b .- A * u)
+    end
+    return LinearAlgebra.norm2(A * u - b) / LinearAlgebra.norm2(b)
 end
 
 @testset "Global AMG" begin
@@ -69,12 +84,17 @@ end
             @test A2 ≈ P1' * A1 * P1 rtol = 1e-8 atol = 1e-9
         end
 
-        # One V-cycle from 0 is a real (if cheap) approximation of A⁻¹, not a
-        # no-op and not a per-tile-only smoother.
+        # One V-cycle from 0 must beat the same number of damped-Jacobi
+        # sweeps. That is the coarse-grid contribution; a threshold on the
+        # residual alone can pass for Jacobi-only and fail for a slightly
+        # different `rand` draw.
         y = similar(Db)
         mul!(y, M, Db)
         @test all(isfinite, collect(y))
-        @test true_relres(DA, y, Db) < 0.85
+        vrel = true_relres(DA, y, Db)
+        jrel = jacobi_only_relres(A, b, M.relax, M.presweeps + M.postsweeps)
+        @test vrel < 0.95 * jrel
+        @test vrel < 0.5
 
         x, stats, rel = solve_gmres(DA, Db, M)
         # Lesson 19: the quantity that matters is ‖Ax−b‖, not stats.solved.
@@ -144,7 +164,7 @@ end
         DA = distribute(A, Blocks(k, k))
         Db = distribute(rand(n), Blocks(k))
         M = Dagger.SmoothedAggregationPreconditioner(DA; max_levels=3, max_coarse=16)
-        x, stats = Krylov.cg(DA, Db; M=M, atol=1e-12, rtol=1e-8, itmax=200)
+        x, stats = Krylov.cg(DA, Db; M=M, atol=1e-14, rtol=1e-10, itmax=400)
         rel = true_relres(DA, x, Db)
         if stats.solved
             @test rel < 1e-6
