@@ -386,7 +386,10 @@ end
 
         # Overlap 1 must reduce iterations on a slightly harder operator
         # (standard 1-D Laplacian, weaker diagonal, many small subdomains).
-        nh, kh = 128, 4
+        # Use GMRES: RAS restriction is nonsymmetric, so CG can take *more*
+        # iterations with overlap (AGENTS.md lesson 27). n=64 / tiles of 8
+        # is still a 15=15 GMRES tie; tiles of 3 on n=48 is 31→17.
+        nh, kh = 48, 3
         Ahard = SparseArrays.spdiagm(
             -1 => fill(-1.0, nh - 1),
              0 => fill(2.0, nh),
@@ -398,8 +401,8 @@ end
         Dbh = distribute(bhard, Blocks(kh))
         P0h = Dagger.AdditiveSchwarzPreconditioner(DAh; overlap = 0)
         P1h = Dagger.AdditiveSchwarzPreconditioner(DAh; overlap = 1)
-        x0h, s0h = Dagger.cg(DAh, Dbh; M = P0h, atol = 1e-12, rtol = 1e-10, itmax = 500)
-        x1h, s1h = Dagger.cg(DAh, Dbh; M = P1h, atol = 1e-12, rtol = 1e-10, itmax = 500)
+        x0h, s0h = Dagger.gmres(DAh, Dbh; M = P0h, atol = 1e-12, rtol = 1e-10, itmax = 500)
+        x1h, s1h = Dagger.gmres(DAh, Dbh; M = P1h, atol = 1e-12, rtol = 1e-10, itmax = 500)
         @test s0h.solved && s1h.solved
         @test collect(x0h) ≈ xrefh rtol = 1e-6
         @test collect(x1h) ≈ xrefh rtol = 1e-6
