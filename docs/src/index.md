@@ -381,6 +381,9 @@ DA = distribute(sprand(1000, 1000, 0.01), Blocks(250, 250))
 # Or allocate sparse DArrays directly
 Z = spzeros(Blocks(250, 250), Float64, 1000, 1000)
 R = sprand(Blocks(250, 250), Float64, (1000, 1000), 0.01)
+
+# Or assemble from COO without a global host CSC
+A = sparse(I, J, V, 1000, 1000, Blocks(250, 250))  # I, J, V are index/value vectors
 ```
 
 ### Multiply sparse arrays

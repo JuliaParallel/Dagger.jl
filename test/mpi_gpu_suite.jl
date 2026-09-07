@@ -320,6 +320,7 @@ if get(cfg, :sparse, false)
             test_sparse_darray(; T=elt, check_tile)
             test_sparse_solvers(; T=elt, check_tile)
             test_sparse_bare_args(; T=elt, writeback_visible = rank == 0)
+            test_sparse_assembly(; T=elt, check_tile)
         end
     end
 end

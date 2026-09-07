@@ -294,3 +294,13 @@ lesson.
    and died in `ipc_export(::Matrix)`. Stamp the result from
    `value_memory_space`, and do not select IPC unless the chunktype is a
    GPU array (`ipc_type_eligible`). Space-only `ipc_eligible` is not enough.
+
+27. **Sparse assembly routes by (row, col) tile, and must spawn a rank-uniform
+   extract set.** `sparse(I, J, V, m, n, Blocks(...))` / `sparse!` bucket
+   global COO onto `DomainBlocks.cumlength` and send overlap to the owning
+   tile — do not assemble on the producer or via `A[i,j] += v`. Allocate the
+   destination with `spzeros(Blocks, T, m, n)` so GPU scopes keep a sparse
+   tile backend; combine on host CSC and `_store_assembled_tile` (`move` to
+   `task_processor()`). Under MPI, spawn one extract per (COO chunk, dest
+   tile) even when the bucket is empty: a data-dependent skip changes the
+   task graph per rank. Never build a global `SparseMatrixCSC` on the caller.

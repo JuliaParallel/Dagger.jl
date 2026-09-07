@@ -5,6 +5,7 @@ import SparseArrays: SparseMatrixCSC, SparseVector
 import LinearAlgebra
 import Dagger
 import Dagger: Blocks, AutoBlocks, BlocksOrAuto, AssignmentType, DSparseArray, DSparseMatrix
+import Dagger: DArray, DMatrix, In, InOut, SparseCOOBucket
 
 # Keep tiles sparse through `collect`/`cat`; the outer `collect` densifies.
 Dagger._sparse_collect(M::SparseMatrixCSC) = copy(M)
@@ -235,5 +236,191 @@ end
 function Dagger.transpose_tile(B::Dagger.DeviceSparseMatrixCSC, uplo::Char)
     return _to_device_sparse(B, Dagger.transpose_tile(SparseMatrixCSC(B), uplo))
 end
+
+#==============================================================================
+  Incremental / one-shot sparse assembly (`sparse` / `sparse!` + `Blocks`)
+==============================================================================#
+
+# Restamp a host CSC as the executing processor's sparse tile. CPU `move` is
+# identity; GPU extensions upload to CuSparse / ROCSparse / DeviceSparseMatrixCSC.
+function Dagger._store_assembled_tile(S::SparseMatrixCSC)
+    return Dagger.move(Dagger.OSProc(), Dagger.task_processor(), Dagger.DSparseArray(S))
+end
+
+function _buckets_to_csc(::Type{T}, tm::Integer, tn::Integer, combine, buckets) where T
+    n = 0
+    for b in buckets
+        n += length(b.V)
+    end
+    I = Vector{Int}(undef, n)
+    J = Vector{Int}(undef, n)
+    V = Vector{T}(undef, n)
+    p = 0
+    for b in buckets
+        len = length(b.V)
+        len == 0 && continue
+        copyto!(I, p + 1, b.I, 1, len)
+        copyto!(J, p + 1, b.J, 1, len)
+        copyto!(V, p + 1, b.V, 1, len)
+        p += len
+    end
+    return SparseArrays.sparse(resize!(I, p), resize!(J, p), resize!(V, p), tm, tn, combine)
+end
+
+function _combine_host_csc(A::SparseMatrixCSC, S::SparseMatrixCSC, combine)
+    nnz(A) == 0 && return S
+    nnz(S) == 0 && return A
+    if combine === +
+        return A + S
+    end
+    I1, J1, V1 = SparseArrays.findnz(A)
+    I2, J2, V2 = SparseArrays.findnz(S)
+    return SparseArrays.sparse(vcat(I1, I2), vcat(J1, J2), vcat(V1, V2),
+                               size(A, 1), size(A, 2), combine)
+end
+
+# Named kernel: mutate a `DSparseArray` tile by SparseArrays-combining the
+# incoming local-index buckets. Whole-tile replace of `dest.mat` keeps Datadeps
+# aliasing on the wrapper. Device tiles gather to host CSC, combine, re-upload.
+function Dagger._assemble_coo_into_tile(dest, combine, buckets...)
+    dest isa Dagger.DSparseArray || throw(ArgumentError(
+        "sparse! destination tiles must be sparse; allocate with \
+         spzeros(Blocks(...), T, m, n)"))
+    tm, tn = size(dest)
+    T = eltype(dest)
+    S = _buckets_to_csc(T, tm, tn, combine, buckets)
+    host = dest.mat isa SparseMatrixCSC ? dest.mat : Dagger._sparse_collect(dest.mat)
+    combined = _combine_host_csc(host, S, combine)
+    dest.mat = Dagger._store_assembled_tile(combined).mat
+    return dest
+end
+
+function _coo_eltype_checked(V)
+    T = eltype(V)
+    T === Any && throw(ArgumentError(
+        "V must have a concrete eltype; pass T via spzeros(Blocks, T, m, n) and sparse!"))
+    return T
+end
+
+function _sparse_add_local_coo!(A::DArray{T,2}, I, J, V, combine) where T
+    m, n = size(A)
+    row_cum = A.subdomains.cumlength[1]
+    col_cum = A.subdomains.cumlength[2]
+    buckets = Dagger._bucket_coo_chunk(I, J, V, row_cum, col_cum, m, n)
+    ntr, ntc = size(A.chunks)
+    Dagger.spawn_datadeps() do
+        for tj in 1:ntc, ti in 1:ntr
+            dest = A.chunks[ti, tj]
+            Dagger.@spawn return_type=DSparseArray{T,2} Dagger._assemble_coo_into_tile(
+                InOut(dest), combine, buckets[ti, tj])
+        end
+    end
+    return A
+end
+
+function _sparse_add_darray_coo!(A::DArray{T,2}, I::DArray, J::DArray, V::DArray, combine) where T
+    size(I.chunks) == size(J.chunks) == size(V.chunks) ||
+        throw(ArgumentError("I, J, V must have the same chunk layout"))
+    m, n = size(A)
+    row_cum = copy(A.subdomains.cumlength[1])
+    col_cum = copy(A.subdomains.cumlength[2])
+    Ichunks, Jchunks, Vchunks = I.chunks, J.chunks, V.chunks
+    ncoo = length(Ichunks)
+    ntr, ntc = size(A.chunks)
+    Tv = eltype(V)
+    Dagger.spawn_datadeps() do
+        bucket_tasks = Vector{Dagger.DTask}(undef, ncoo)
+        for c in 1:ncoo
+            bucket_tasks[c] = Dagger.@spawn return_type=Matrix{SparseCOOBucket{Tv}} Dagger._bucket_coo_chunk(
+                In(Ichunks[c]), In(Jchunks[c]), In(Vchunks[c]),
+                row_cum, col_cum, m, n)
+        end
+        for tj in 1:ntc, ti in 1:ntr
+            extracts = Vector{Dagger.DTask}(undef, ncoo)
+            for c in 1:ncoo
+                extracts[c] = Dagger.@spawn return_type=SparseCOOBucket{Tv} Dagger._extract_coo_bucket(
+                    In(bucket_tasks[c]), ti, tj)
+            end
+            dest = A.chunks[ti, tj]
+            in_extracts = ntuple(c -> In(extracts[c]), ncoo)
+            Dagger.spawn(Dagger._assemble_coo_into_tile,
+                         Dagger.Options(; return_type=DSparseArray{T,2}),
+                         InOut(dest), combine, in_extracts...)
+        end
+    end
+    return A
+end
+
+"""
+    sparse!(A::DArray, I, J, V, combine=+)
+
+Add COO triplets `(I[k], J[k], V[k])` into the sparse tiled `DArray` `A`
+(typically from `spzeros(Blocks(...), T, m, n)`). Duplicate `(i,j)` entries are
+combined with `combine`, matching `SparseArrays.sparse`. `I`, `J`, `V` may be
+local vectors or `DArray`s of the same chunk layout; overlap rows are sent to
+the owning tile rather than assembled on the producer.
+"""
+function SparseArrays.sparse!(A::DArray{T,2}, I::AbstractVector, J::AbstractVector,
+                              V::AbstractVector, combine::Function=+) where T
+    A.partitioning isa Blocks{2} || throw(ArgumentError(
+        "sparse! requires a Blocks-partitioned DMatrix"))
+    length(I) == length(J) == length(V) ||
+        throw(ArgumentError("I, J, V must have the same length"))
+    if I isa DArray && J isa DArray && V isa DArray
+        return _sparse_add_darray_coo!(A, I, J, V, combine)
+    elseif I isa DArray || J isa DArray || V isa DArray
+        throw(ArgumentError("I, J, V must all be DArrays or all be local vectors"))
+    else
+        return _sparse_add_local_coo!(A, I, J, V, combine)
+    end
+end
+
+"""
+    sparse(I, J, V, m, n, [combine=+,] part::Blocks; assignment=:arbitrary)
+    sparse(part::Blocks, I, J, V, m, n, [combine=+]; assignment=:arbitrary)
+
+Assemble a sparse `DMatrix` from COO triplets without building a global
+`SparseMatrixCSC` on one process. `part` is the output tiling; `I`, `J`, `V`
+may be local vectors or `DArray`s. Duplicates use `combine` (`+` by default),
+matching `SparseArrays.sparse`. Existing `sparse(I, J, V)` / `distribute`
+behavior is unchanged.
+"""
+function SparseArrays.sparse(I::AbstractVector, J::AbstractVector, V::AbstractVector,
+                             m::Integer, n::Integer, combine::Function, part::Blocks{2};
+                             assignment::AssignmentType=:arbitrary)
+    A = SparseArrays.spzeros(part, _coo_eltype_checked(V), Int(m), Int(n); assignment)
+    return SparseArrays.sparse!(A, I, J, V, combine)
+end
+SparseArrays.sparse(I::AbstractVector, J::AbstractVector, V::AbstractVector,
+                    m::Integer, n::Integer, part::Blocks{2}; assignment::AssignmentType=:arbitrary) =
+    SparseArrays.sparse(I, J, V, m, n, +, part; assignment)
+SparseArrays.sparse(I::AbstractVector, J::AbstractVector, V::AbstractVector,
+                    m::Integer, n::Integer, combine::Function, ::AutoBlocks; assignment::AssignmentType=:arbitrary) =
+    SparseArrays.sparse(I, J, V, m, n, combine, Dagger.auto_blocks((Int(m), Int(n))); assignment)
+SparseArrays.sparse(I::AbstractVector, J::AbstractVector, V::AbstractVector,
+                    m::Integer, n::Integer, ::AutoBlocks; assignment::AssignmentType=:arbitrary) =
+    SparseArrays.sparse(I, J, V, m, n, +, AutoBlocks(); assignment)
+
+function _coo_extent(I::AbstractVector)
+    isempty(I) && return 0
+    return Int(maximum(I))
+end
+
+SparseArrays.sparse(I::AbstractVector, J::AbstractVector, V::AbstractVector,
+                    part::Blocks{2}; assignment::AssignmentType=:arbitrary) =
+    SparseArrays.sparse(I, J, V, _coo_extent(I), _coo_extent(J), +, part; assignment)
+SparseArrays.sparse(I::AbstractVector, J::AbstractVector, V::AbstractVector,
+                    combine::Function, part::Blocks{2}; assignment::AssignmentType=:arbitrary) =
+    SparseArrays.sparse(I, J, V, _coo_extent(I), _coo_extent(J), combine, part; assignment)
+
+SparseArrays.sparse(part::Blocks{2}, I::AbstractVector, J::AbstractVector, V::AbstractVector,
+                    m::Integer, n::Integer; assignment::AssignmentType=:arbitrary) =
+    SparseArrays.sparse(I, J, V, m, n, +, part; assignment)
+SparseArrays.sparse(part::Blocks{2}, I::AbstractVector, J::AbstractVector, V::AbstractVector,
+                    m::Integer, n::Integer, combine::Function; assignment::AssignmentType=:arbitrary) =
+    SparseArrays.sparse(I, J, V, m, n, combine, part; assignment)
+SparseArrays.sparse(part::AutoBlocks, I::AbstractVector, J::AbstractVector, V::AbstractVector,
+                    m::Integer, n::Integer; assignment::AssignmentType=:arbitrary) =
+    SparseArrays.sparse(I, J, V, m, n, part; assignment)
 
 end # module SparseArraysExt

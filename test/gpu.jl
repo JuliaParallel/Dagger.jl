@@ -246,6 +246,7 @@ end
             test_sparse_darray(; scope, check_tile)
             test_sparse_solvers(; scope, check_tile)
             test_sparse_bare_args(; scope, T=Float32)
+            test_sparse_assembly(; scope, check_tile, T=Float32)
         end
     end
 end
@@ -430,6 +431,7 @@ end
             test_sparse_darray(; scope, check_tile)
             test_sparse_solvers(; scope, check_tile)
             test_sparse_bare_args(; scope, T=Float32)
+            test_sparse_assembly(; scope, check_tile, T=Float32)
         end
     end
 end
@@ -614,6 +616,7 @@ end
             test_sparse_darray(; scope, check_tile)
             test_sparse_solvers(; scope, check_tile)
             test_sparse_bare_args(; scope, T=Float32)
+            test_sparse_assembly(; scope, check_tile, T=Float32)
         end
     end
 end
@@ -772,6 +775,7 @@ end
             test_sparse_darray(; scope, check_tile)
             test_sparse_solvers(; scope, check_tile)
             test_sparse_bare_args(; scope, T=Float32)
+            test_sparse_assembly(; scope, check_tile, T=Float32)
         end
     end
 end
@@ -891,6 +895,7 @@ end
             test_sparse_darray(; scope, check_tile)
             test_sparse_solvers(; scope, check_tile)
             test_sparse_bare_args(; scope, T=Float32)
+            test_sparse_assembly(; scope, check_tile, T=Float32)
         end
     end
 end
