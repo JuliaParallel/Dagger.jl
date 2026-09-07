@@ -171,7 +171,8 @@ The built-in preconditioners, from cheapest to strongest:
 | [`Dagger.JacobiPreconditioner`](@ref)      | (core)            | scale by `1 ./ diag(A)`                    |
 | [`Dagger.BlockJacobiPreconditioner`](@ref) | (core)            | exact `lu` solve per diagonal tile         |
 | [`Dagger.BlockILUPreconditioner`](@ref)    | `IncompleteLU`    | incomplete-LU (drop tol `τ`) per tile      |
-| [`Dagger.AMGPreconditioner`](@ref)         | `AlgebraicMultigrid` | AMG V-cycle per tile                    |
+| [`Dagger.AMGPreconditioner`](@ref)         | `AlgebraicMultigrid` | AMG V-cycle **per diagonal tile** (additive Schwarz) |
+| [`Dagger.GlobalAMG`](@ref)                 | `AlgebraicMultigrid` | true coarse grid over the whole `DMatrix` |
 
 ```julia
 using AlgebraicMultigrid, IncompleteLU
@@ -179,7 +180,14 @@ using AlgebraicMultigrid, IncompleteLU
 x, _ = Krylov.cg(DA, b; M = Dagger.BlockJacobiPreconditioner(DA))
 x, _ = Krylov.cg(DA, b; M = Dagger.BlockILUPreconditioner(DA; τ = 0.01))
 x, _ = Krylov.gmres(DA, b; M = Dagger.AMGPreconditioner(DA; method = :ruge_stuben))
+x, _ = Krylov.gmres(DA, b; M = Dagger.SmoothedAggregationPreconditioner(DA))
 ```
+
+!!! warning "`stats.solved` is not `Ax ≈ b` for per-tile AMG"
+    `AMGPreconditioner` is block-diagonal. Left-preconditioned Krylov can
+    report `stats.solved` while `‖Ax−b‖` is still O(1)–O(100). Always check
+    the un-preconditioned residual. [`GlobalAMG`](@ref) is the preconditioner
+    that coarsens across tiles; use that when you need a real coarse grid.
 
 ### Bringing your own preconditioner
 
@@ -244,11 +252,34 @@ some convergence for parallelism. If `A` does not have square tiles, it is
 re-tiled to square ones of size `min(mb, nb)` at construction, so the block
 structure follows the *finer* of the two block sizes.
 
+### Global AMG (across tiles)
+
+[`Dagger.GlobalAMG`](@ref) is a different object. It builds one hierarchy over
+the whole operator: aggregates (or a Ruge–Stüben splitting) see the full
+graph, each coarse operator is the distributed Galerkin product
+`Ac = P' * A * P`, and `mul!(y, M, x)` is a V-cycle. That is what PDE codes
+mean by AMG; `AMGPreconditioner` with many tiles is not.
+
+```julia
+using AlgebraicMultigrid, Krylov
+
+M = Dagger.SmoothedAggregationPreconditioner(DA)   # or RugeStubenPreconditioner(DA)
+# also: M = aspreconditioner(smoothed_aggregation(DA))
+x, stats = Krylov.gmres(DA, b; M)
+r = similar(b); mul!(r, DA, x); axpy!(-1, b, r)
+@assert norm(r) / norm(b) < 1e-8   # do not stop at stats.solved
+```
+
+This is a first cut (unsmoothed or Jacobi-smoothed aggregation, 1–2 coarse
+levels, damped-Jacobi sweeps, gathered LU on the coarsest grid). Setup still
+gathers the current level to build `P`; RAP and the V-cycle do not.
+
 ### Choosing a preconditioner
 
-- **SPD elliptic (Poisson-like) problems:** `AMGPreconditioner` gives near
-  mesh-independent convergence and is usually the best choice; `cg` as the
-  solver.
+- **SPD elliptic (Poisson-like) problems:** [`GlobalAMG`](@ref) /
+  [`SmoothedAggregationPreconditioner`](@ref) is the real coarse-grid choice.
+  `AMGPreconditioner` is per-tile Schwarz and can look solved while `‖Ax−b‖`
+  is huge. Prefer `gmres` if `cg` rejects the V-cycle as non-SPD.
 - **General sparse systems:** `BlockILUPreconditioner` is a solid, cheap-setup
   general-purpose option; pair with `gmres` or `bicgstab`.
 - **Quick baseline / very well-conditioned systems:** `JacobiPreconditioner` (or
@@ -322,6 +353,9 @@ Dagger.BlockPreconditioner
 Dagger.BlockJacobiPreconditioner
 Dagger.BlockILUPreconditioner
 Dagger.AMGPreconditioner
+Dagger.GlobalAMG
+Dagger.SmoothedAggregationPreconditioner
+Dagger.RugeStubenPreconditioner
 Dagger.BlockKLUPreconditioner
 Dagger.BlockUMFPACKPreconditioner
 Dagger.klu

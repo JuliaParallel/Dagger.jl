@@ -206,10 +206,12 @@ lesson.
    then converge in the *preconditioned* residual. With many tiles that
    V-cycle is a weak additive-Schwarz operator, so Krylov stops while the
    true residual is huge (seen on Chan, VoronoiFVM penalty rows, and Jutul
-   heat). BlockJacobi (exact tile LU) on the same layout is fine. Global AMG
-   is `Blocks(n, n)` (one tile). Do not treat `stats.solved` as `Ax≈b` for
-   block AMG; check the un-preconditioned residual. CG will also reject AMG
-   as non-SPD — use GMRES.
+   heat). BlockJacobi (exact tile LU) on the same layout is fine. Do not treat
+   `stats.solved` as `Ax≈b` for block AMG; check the un-preconditioned
+   residual. CG will also reject AMG as non-SPD — use GMRES. A true coarse
+   grid is [`GlobalAMG`](@ref) / [`SmoothedAggregationPreconditioner`](@ref)
+   (distributed RAP + V-cycle). `Blocks(n, n)` on `AMGPreconditioner` is only
+   "global" because there is one tile; that is not a substitute.
 
 21. **Reassigning a local to a value of a different type deoptimizes the
    *whole* body, not the assignment.** `arg = adopt_sparse_arg!(state, arg,
