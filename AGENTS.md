@@ -294,3 +294,16 @@ lesson.
    and died in `ipc_export(::Matrix)`. Stamp the result from
    `value_memory_space`, and do not select IPC unless the chunktype is a
    GPU array (`ipc_type_eligible`). Space-only `ipc_eligible` is not enough.
+
+27. **LinearSolve's `DefaultLinearSolver` is the wrong default for a `DArray`.**
+   `needs_concrete_A(::DefaultLinearSolver) = true`, and its `init_cacheval`
+   materializes every polyalgorithm slot (LU, QR, KLU, …). Returning
+   `DefaultLinearSolver(KrylovJL_GMRES)` for a `DMatrix` or a matrix-free
+   operator therefore tries to LU-init a distributed / abstract operator —
+   the generic `defaultalg` fallback looks like it chose Krylov, but the
+   wrapper is what ODE/NonlinearSolve actually init. `defaultalg` must
+   return `KrylovJL_GMRES()` / `PureKLUFactorization()` /
+   `PureUMFPACKFactorization()` directly. Do not invent a `Dagger.xyz`
+   solver type; hook LinearSolve's existing algorithms. And do not reach
+   into `KrylovExt` from `LinearSolveExt` (lesson 17): build Krylov
+   workspaces with `KrylovConstructor` yourself.
