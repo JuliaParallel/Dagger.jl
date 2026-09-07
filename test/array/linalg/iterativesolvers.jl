@@ -30,6 +30,28 @@ function advection_diffusion_1d(T, n)
     )
 end
 
+# Serial restricted-ASM apply (PETSc PC_ASM_RESTRICT): solve each halo-expanded
+# diagonal block and write back only the interior. Used as the reference for
+# `AdditiveSchwarzPreconditioner`.
+function ras_mul!(y, A, x, blocksize, overlap)
+    n = length(x)
+    fill!(y, 0)
+    for s in 1:blocksize:n
+        interior = s:min(s + blocksize - 1, n)
+        Ω = max(1, first(interior) - overlap):min(n, last(interior) + overlap)
+        yΩ = A[Ω, Ω] \ view(x, Ω)
+        y[interior] = yΩ[(first(interior) - first(Ω) + 1):(last(interior) - first(Ω) + 1)]
+    end
+    return y
+end
+
+function true_relres(DA, x, b)
+    r = similar(x)
+    mul!(r, DA, x)
+    r .-= b
+    return LinearAlgebra.norm(collect(r)) / LinearAlgebra.norm(collect(b))
+end
+
 # Per-tile factories for the `Dagger.BlockPreconditioner` tests below. They run
 # wherever the tile lives, so they (and `InvDiagOp`) must exist on every worker.
 #
@@ -283,6 +305,123 @@ end
                                        atol = 1e-12, rtol = 1e-10, itmax = 500)
         @test s_ragged.solved
         @test collect(x_ragged) ≈ xref rtol = 1e-6
+    end
+
+    # Restricted additive Schwarz (PETSc PC_ASM_RESTRICT). Overlap 0 is block
+    # Jacobi; overlap ≥ 1 gathers neighbor rows, solves the halo-expanded
+    # diagonal block, and writes back only the interior. Check the true
+    # residual (AGENTS.md lesson 19 / 27), not only `stats.solved`.
+    @testset "overlapping additive Schwarz" begin
+        Asp = laplacian_1d(Float64, n)
+        Adense = Matrix(Asp)
+        b = rand(n)
+        xref = Adense \ b
+        yref0 = ras_mul!(similar(b), Adense, b, k, 0)
+        yref1 = ras_mul!(similar(b), Adense, b, k, 1)
+
+        @testset "build + apply ($(backend))" for backend in (:dense, :sparse)
+            DA = backend === :dense ? distribute(Adense, A_part) : distribute(Asp, A_part)
+            Db = distribute(b, Db_part)
+
+            @test_throws ArgumentError Dagger.AdditiveSchwarzPreconditioner(DA; overlap = -1)
+
+            P0 = Dagger.AdditiveSchwarzPreconditioner(DA; overlap = 0)
+            P1 = Dagger.AdditiveSchwarzPreconditioner(DA; overlap = 1)
+            @test P0 isa Dagger.AbstractDaggerPreconditioner
+            @test P0.overlap == 0
+            @test P1.overlap == 1
+
+            PBJ = Dagger.BlockJacobiPreconditioner(DA)
+            y0 = similar(Db); mul!(y0, P0, Db)
+            yBJ = similar(Db); mul!(yBJ, PBJ, Db)
+            y1 = similar(Db); mul!(y1, P1, Db)
+            @test collect(y0) ≈ yref0
+            @test collect(y0) ≈ collect(yBJ)
+            @test collect(y1) ≈ yref1
+
+            # Default overlap is PETSc's 1.
+            Pdef = Dagger.AdditiveSchwarzPreconditioner(DA)
+            @test Pdef.overlap == 1
+            ydef = similar(Db); mul!(ydef, Pdef, Db)
+            @test collect(ydef) ≈ yref1
+
+            x0, s0 = Dagger.gmres(DA, Db; M = P0, atol = 1e-12, rtol = 1e-10, itmax = 500)
+            xBJ, sBJ = Dagger.gmres(DA, Db; M = PBJ, atol = 1e-12, rtol = 1e-10, itmax = 500)
+            x1, s1 = Dagger.gmres(DA, Db; M = P1, atol = 1e-12, rtol = 1e-10, itmax = 500)
+            @test s0.solved && sBJ.solved && s1.solved
+            @test collect(x0) ≈ xref rtol = 1e-6
+            @test collect(x1) ≈ xref rtol = 1e-6
+            @test true_relres(DA, x0, Db) < 1e-8
+            @test true_relres(DA, x1, Db) < 1e-8
+            @test abs(s0.niter - sBJ.niter) <= 1
+            @test s1.niter <= s0.niter
+        end
+
+        # Overlap that spans more than one neighboring tile.
+        yref20 = ras_mul!(similar(b), Adense, b, k, 20)
+        DA = distribute(Asp, A_part)
+        Db = distribute(b, Db_part)
+        P20 = Dagger.AdditiveSchwarzPreconditioner(DA; overlap = 20)
+        y20 = similar(Db); mul!(y20, P20, Db)
+        @test collect(y20) ≈ yref20
+
+        # A single tile makes ASM an exact solve regardless of overlap.
+        DA1 = distribute(Adense, Blocks(n, n))
+        Db1 = distribute(b, Blocks(n))
+        P1t = Dagger.AdditiveSchwarzPreconditioner(DA1; overlap = 1)
+        x1t, s1t = Dagger.cg(DA1, Db1; M = P1t, atol = 1e-12, rtol = 1e-10, itmax = 500)
+        @test s1t.solved
+        @test s1t.niter <= 2
+        @test collect(x1t) ≈ xref rtol = 1e-8
+        @test true_relres(DA1, x1t, Db1) < 1e-10
+
+        # Non-square tiles re-tile to the finer square blocks.
+        yref_fine = ras_mul!(similar(b), Adense, b, k ÷ 2, 1)
+        DA_ragged = distribute(Adense, Blocks(k, k ÷ 2))
+        P_ragged = Dagger.AdditiveSchwarzPreconditioner(DA_ragged; overlap = 1)
+        Db_ragged = distribute(b, Blocks(k ÷ 2))
+        y_ragged = similar(Db_ragged)
+        mul!(y_ragged, P_ragged, Db_ragged)
+        @test collect(y_ragged) ≈ yref_fine
+
+        # Overlap 1 must reduce iterations on a slightly harder operator
+        # (standard 1-D Laplacian, weaker diagonal, more subdomains).
+        nh, kh = 64, 8
+        Ahard = SparseArrays.spdiagm(
+            -1 => fill(-1.0, nh - 1),
+             0 => fill(2.0, nh),
+             1 => fill(-1.0, nh - 1),
+        )
+        bhard = rand(nh)
+        xrefh = Matrix(Ahard) \ bhard
+        DAh = distribute(Ahard, Blocks(kh, kh))
+        Dbh = distribute(bhard, Blocks(kh))
+        P0h = Dagger.AdditiveSchwarzPreconditioner(DAh; overlap = 0)
+        P1h = Dagger.AdditiveSchwarzPreconditioner(DAh; overlap = 1)
+        x0h, s0h = Dagger.gmres(DAh, Dbh; M = P0h, atol = 1e-12, rtol = 1e-10, itmax = 500)
+        x1h, s1h = Dagger.gmres(DAh, Dbh; M = P1h, atol = 1e-12, rtol = 1e-10, itmax = 500)
+        @test s0h.solved && s1h.solved
+        @test collect(x0h) ≈ xrefh rtol = 1e-6
+        @test collect(x1h) ≈ xrefh rtol = 1e-6
+        @test true_relres(DAh, x0h, Dbh) < 1e-8
+        @test true_relres(DAh, x1h, Dbh) < 1e-8
+        @test s1h.niter < s0h.niter
+
+        # Nonsymmetric advection-diffusion: overlap 1 is not worse than overlap 0.
+        Aadv = advection_diffusion_1d(Float64, n)
+        badv = rand(n)
+        xrefa = Matrix(Aadv) \ badv
+        DAa = distribute(Aadv, A_part)
+        Dba = distribute(badv, Db_part)
+        P0a = Dagger.AdditiveSchwarzPreconditioner(DAa; overlap = 0)
+        P1a = Dagger.AdditiveSchwarzPreconditioner(DAa; overlap = 1)
+        x0a, s0a = Dagger.gmres(DAa, Dba; M = P0a, atol = 1e-12, rtol = 1e-10, itmax = 500)
+        x1a, s1a = Dagger.gmres(DAa, Dba; M = P1a, atol = 1e-12, rtol = 1e-10, itmax = 500)
+        @test s0a.solved && s1a.solved
+        @test collect(x0a) ≈ xrefa rtol = 1e-6
+        @test collect(x1a) ≈ xrefa rtol = 1e-6
+        @test true_relres(DAa, x1a, Dba) < 1e-8
+        @test s1a.niter <= s0a.niter
     end
 end
 
